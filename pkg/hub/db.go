@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite" // pure-Go SQLite, no CGO required
@@ -441,7 +442,7 @@ func migrate(db *sql.DB) error {
 		run_id                  TEXT NOT NULL REFERENCES task_runs(id) ON DELETE CASCADE,
 		initial_attempt_id      TEXT NOT NULL DEFAULT '',
 		current_attempt_id      TEXT NOT NULL DEFAULT '',
-		status                  TEXT NOT NULL CHECK(status IN ('running','clean_success','warning_success','failed')),
+		status                  TEXT NOT NULL CHECK(status IN ('running','clean','human_in_the_loop','warning','failed')),
 		phase                   TEXT NOT NULL CHECK(phase IN ('claimed','queued','provisioning','agent_running','pr_opened','waiting_for_merge','terminal')),
 		attempt_count           INTEGER NOT NULL DEFAULT 0 CHECK(attempt_count >= 0),
 		owner_type              TEXT NOT NULL DEFAULT '',
@@ -641,12 +642,18 @@ func migrate(db *sql.DB) error {
 	if err != nil {
 		return err
 	}
+	if err := rebuildTaskRunSummariesStatusV3(db); err != nil {
+		return err
+	}
 	// Backfill rows that predate the usage_day column so cost corrections land
 	// on the day the run's usage was last applied, not on the correction's day.
 	if _, err := db.Exec(`UPDATE task_run_usage SET usage_day = strftime('%Y-%m-%d', updated_at/1000, 'unixepoch') WHERE usage_day = '' AND updated_at > 0`); err != nil {
 		return fmt.Errorf("backfill task_run_usage.usage_day: %w", err)
 	}
 	if err := backfillTaskRunAnalyticsStatusV2(db); err != nil {
+		return err
+	}
+	if err := backfillTaskRunAnalyticsStatusV3(db); err != nil {
 		return err
 	}
 	for _, p := range []struct {
@@ -667,6 +674,47 @@ func migrate(db *sql.DB) error {
 		}
 	}
 	return nil
+}
+
+func rebuildTaskRunSummariesStatusV3(db *sql.DB) error {
+	var schema string
+	if err := db.QueryRow(`SELECT sql FROM sqlite_master WHERE type='table' AND name='task_run_summaries'`).Scan(&schema); err != nil {
+		return fmt.Errorf("read task run summaries schema: %w", err)
+	}
+	if !strings.Contains(schema, "clean_success") {
+		return nil
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`CREATE TABLE task_run_summaries_new (
+		id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, run_id TEXT NOT NULL REFERENCES task_runs(id) ON DELETE CASCADE,
+		initial_attempt_id TEXT NOT NULL DEFAULT '', current_attempt_id TEXT NOT NULL DEFAULT '',
+		status TEXT NOT NULL CHECK(status IN ('running','clean','human_in_the_loop','warning','failed')),
+		phase TEXT NOT NULL CHECK(phase IN ('claimed','queued','provisioning','agent_running','pr_opened','waiting_for_merge','terminal')),
+		attempt_count INTEGER NOT NULL DEFAULT 0 CHECK(attempt_count >= 0), owner_type TEXT NOT NULL DEFAULT '', workspace_name TEXT NOT NULL DEFAULT '', workflow_name TEXT NOT NULL DEFAULT '', factory_name TEXT NOT NULL DEFAULT '', owner_id TEXT NOT NULL DEFAULT '', owner_display_name TEXT NOT NULL DEFAULT '', run_kind TEXT NOT NULL DEFAULT 'pr_task' CHECK(run_kind IN ('code_task','pr_task')), integration TEXT NOT NULL DEFAULT '', integration_workspace TEXT NOT NULL DEFAULT '', issue_id TEXT NOT NULL DEFAULT '', issue_title TEXT NOT NULL DEFAULT '', issue_created_at INTEGER NOT NULL DEFAULT 0, claw_id TEXT NOT NULL DEFAULT '', model TEXT NOT NULL DEFAULT '', input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0, total_tokens INTEGER NOT NULL DEFAULT 0, estimated_cost_usd REAL NOT NULL DEFAULT 0, usage_updated_at INTEGER NOT NULL DEFAULT 0, llm_key TEXT NOT NULL DEFAULT '', repo TEXT NOT NULL DEFAULT '', primary_pr_url TEXT NOT NULL DEFAULT '', pr_count INTEGER NOT NULL DEFAULT 0 CHECK(pr_count >= 0), open_pr_count INTEGER NOT NULL DEFAULT 0 CHECK(open_pr_count >= 0), merged_pr_count INTEGER NOT NULL DEFAULT 0 CHECK(merged_pr_count >= 0), closed_pr_count INTEGER NOT NULL DEFAULT 0 CHECK(closed_pr_count >= 0), warning_types TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(warning_types) AND json_type(warning_types) = 'array'), failure_type TEXT NOT NULL DEFAULT '' CHECK(failure_type IN ('','creation_failed','provision_failed','bootstrap_failed','agent_stopped','manual_stop_before_delivery','done_without_pr','no_pr','pr_closed_unmerged','timeout','provider_lost','permission_or_auth_failed','unknown')), human_interaction_count INTEGER NOT NULL DEFAULT 0 CHECK(human_interaction_count >= 0), started_at INTEGER NOT NULL, queued_at INTEGER NOT NULL DEFAULT 0, provision_started_at INTEGER NOT NULL DEFAULT 0, agent_started_at INTEGER NOT NULL DEFAULT 0, pr_opened_at INTEGER NOT NULL DEFAULT 0, merged_at INTEGER NOT NULL DEFAULT 0, finished_at INTEGER NOT NULL DEFAULT 0, timeout_at INTEGER NOT NULL DEFAULT 0, last_event_at INTEGER NOT NULL, materialized_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, analytics_enabled INTEGER NOT NULL DEFAULT 1 CHECK(analytics_enabled IN (0,1)), requires_pr INTEGER NOT NULL DEFAULT 1 CHECK(requires_pr IN (0,1)), excluded_reason TEXT NOT NULL DEFAULT '', UNIQUE(run_id), UNIQUE(tenant_id, run_id)
+	)`); err != nil {
+		return fmt.Errorf("create task run summaries v3: %w", err)
+	}
+	if _, err := tx.Exec(`INSERT INTO task_run_summaries_new SELECT id, tenant_id, run_id, initial_attempt_id, current_attempt_id, CASE status WHEN 'clean_success' THEN 'clean' WHEN 'warning_success' THEN 'warning' ELSE status END, phase, attempt_count, owner_type, workspace_name, workflow_name, factory_name, owner_id, owner_display_name, run_kind, integration, integration_workspace, issue_id, issue_title, issue_created_at, claw_id, model, input_tokens, output_tokens, total_tokens, estimated_cost_usd, usage_updated_at, llm_key, repo, primary_pr_url, pr_count, open_pr_count, merged_pr_count, closed_pr_count, warning_types, failure_type, human_interaction_count, started_at, queued_at, provision_started_at, agent_started_at, pr_opened_at, merged_at, finished_at, timeout_at, last_event_at, materialized_at, updated_at, analytics_enabled, requires_pr, excluded_reason FROM task_run_summaries`); err != nil {
+		return fmt.Errorf("copy task run summaries v3: %w", err)
+	}
+	if _, err := tx.Exec(`DROP TABLE task_run_summaries; ALTER TABLE task_run_summaries_new RENAME TO task_run_summaries;
+		CREATE INDEX idx_task_run_summaries_status ON task_run_summaries(tenant_id, status, started_at DESC);
+		CREATE INDEX idx_task_run_summaries_owner_started ON task_run_summaries(workspace_name, owner_type, owner_display_name, started_at DESC);
+		CREATE INDEX idx_task_run_summaries_run ON task_run_summaries(run_id);
+		CREATE INDEX idx_task_run_summaries_started_run ON task_run_summaries(tenant_id, started_at DESC, run_id DESC);
+		CREATE INDEX idx_task_run_summaries_workspace ON task_run_summaries(tenant_id, workspace_name, started_at DESC);
+		CREATE INDEX idx_task_run_summaries_workflow ON task_run_summaries(tenant_id, workspace_name, workflow_name, started_at DESC);
+		CREATE INDEX idx_task_run_summaries_factory ON task_run_summaries(tenant_id, factory_name, started_at DESC);
+		CREATE INDEX idx_task_run_summaries_model ON task_run_summaries(tenant_id, model, started_at DESC);
+		CREATE INDEX idx_task_run_summaries_repo ON task_run_summaries(tenant_id, repo, started_at DESC);
+		CREATE INDEX idx_task_run_summaries_timeout ON task_run_summaries(tenant_id, timeout_at)`); err != nil {
+		return fmt.Errorf("replace task run summaries v3: %w", err)
+	}
+	return tx.Commit()
 }
 
 // backfillTaskRunAnalyticsStatusV2 re-materializes existing summaries once so
@@ -718,6 +766,45 @@ func backfillTaskRunAnalyticsStatusV2(db *sql.DB) error {
 		return fmt.Errorf("mark task run analytics status backfill: %w", err)
 	}
 	return nil
+}
+
+func backfillTaskRunAnalyticsStatusV3(db *sql.DB) error {
+	const migration = "task_run_analytics_status_v3"
+	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS hub_migrations (name TEXT PRIMARY KEY, applied_at INTEGER NOT NULL)`); err != nil {
+		return fmt.Errorf("create hub migrations: %w", err)
+	}
+	var applied int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM hub_migrations WHERE name=?`, migration).Scan(&applied); err != nil {
+		return fmt.Errorf("check task run analytics status backfill: %w", err)
+	}
+	if applied > 0 {
+		return nil
+	}
+	rows, err := db.Query(`SELECT id FROM task_runs ORDER BY created_at, id`)
+	if err != nil {
+		return fmt.Errorf("list task runs for status backfill: %w", err)
+	}
+	var runIDs []string
+	for rows.Next() {
+		var runID string
+		if err := rows.Scan(&runID); err != nil {
+			rows.Close()
+			return err
+		}
+		runIDs = append(runIDs, runID)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+	for _, runID := range runIDs {
+		if err := backfillTaskRunStatus(db, runID); err != nil {
+			log.Printf("[task-run-analytics] status v3 backfill skipped run %s: %v", runID, err)
+		}
+	}
+	_, err = db.Exec(`INSERT INTO hub_migrations(name, applied_at) VALUES(?, ?) ON CONFLICT(name) DO NOTHING`, migration, now().UnixMilli())
+	return err
 }
 
 // backfillTaskRunStatus re-materializes a single run in its own transaction.

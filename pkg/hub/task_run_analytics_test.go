@@ -178,11 +178,11 @@ func TestTaskRunMaterializationClassifiesCleanSuccess(t *testing.T) {
 		Detail:    map[string]any{"repo": "elastic/claw", "prNumber": 11},
 	})
 
-	assertTaskRunSummary(t, db, runID, taskRunStatusCleanSuccess, taskRunPhaseTerminal, "", "[]", 0, 1, 0, 1, 0)
+	assertTaskRunSummary(t, db, runID, taskRunStatusClean, taskRunPhaseTerminal, "", "[]", 0, 1, 0, 1, 0)
 	assertTaskRunAttempt(t, db, runID, "succeeded", "")
 }
 
-func TestTaskRunMaterializationClassifiesWarningSuccess(t *testing.T) {
+func TestTaskRunMaterializationClassifiesHumanInTheLoop(t *testing.T) {
 	s, db := newTaskRunAnalyticsTestServer(t, "claw-warning")
 	runID, attemptID := startTaskRunForTest(t, s, "claw-warning", "warning")
 
@@ -210,7 +210,17 @@ func TestTaskRunMaterializationClassifiesWarningSuccess(t *testing.T) {
 		Detail:    map[string]any{"repo": "elastic/claw", "prNumber": 12},
 	})
 
-	assertTaskRunSummary(t, db, runID, taskRunStatusWarningSuccess, taskRunPhaseTerminal, "", `["human_pr_comment"]`, 1, 1, 0, 1, 0)
+	assertTaskRunSummary(t, db, runID, taskRunStatusHumanInTheLoop, taskRunPhaseTerminal, "", `["human_pr_comment"]`, 1, 1, 0, 1, 0)
+}
+
+func TestTaskRunMaterializationClassifiesDashboardInteractionAsWarning(t *testing.T) {
+	s, db := newTaskRunAnalyticsTestServer(t, "claw-dashboard-warning")
+	runID, attemptID := startTaskRunForTest(t, s, "claw-dashboard-warning", "dashboard-warning")
+	associatePRForTest(t, s, runID, "elastic/claw", 121, taskRunPRStateOpen)
+	recordTaskRunEventForTest(t, s, TaskRunEvent{TenantID: "test-tenant-id", RunID: runID, AttemptID: attemptID, EventKey: "dashboard-warning:message", EventType: taskRunEventHumanDashboardMessage, ActorType: taskRunActorHuman, Source: taskRunSourceDashboard, WarningType: taskRunWarningHumanDashboardMessage})
+	recordTaskRunEventForTest(t, s, TaskRunEvent{TenantID: "test-tenant-id", RunID: runID, AttemptID: attemptID, EventKey: "dashboard-warning:comment", EventType: taskRunEventHumanPRComment, ActorType: taskRunActorHuman, Source: taskRunSourceGitHub, WarningType: taskRunWarningHumanPRComment})
+	recordTaskRunEventForTest(t, s, TaskRunEvent{TenantID: "test-tenant-id", RunID: runID, AttemptID: attemptID, EventKey: "dashboard-warning:merged", EventType: taskRunEventPRMerged, ActorType: taskRunActorSystem, Source: taskRunSourceGitHub, Detail: map[string]any{"repo": "elastic/claw", "prNumber": 121}})
+	assertTaskRunSummary(t, db, runID, taskRunStatusWarning, taskRunPhaseTerminal, "", `["human_dashboard_message","human_pr_comment"]`, 2, 1, 0, 1, 0)
 }
 
 func TestTaskRunMaterializationKeepsNonHumanWarningsClean(t *testing.T) {
@@ -219,7 +229,7 @@ func TestTaskRunMaterializationKeepsNonHumanWarningsClean(t *testing.T) {
 	associatePRForTest(t, s, runID, "elastic/claw", 13, taskRunPRStateOpen)
 	recordTaskRunEventForTest(t, s, TaskRunEvent{TenantID: "test-tenant-id", RunID: runID, AttemptID: attemptID, EventKey: "non-human-warning:replaced", EventType: "pr_replaced", ActorType: taskRunActorSystem, Source: taskRunSourceHub, WarningType: taskRunWarningPRReplaced})
 	recordTaskRunEventForTest(t, s, TaskRunEvent{TenantID: "test-tenant-id", RunID: runID, AttemptID: attemptID, EventKey: "non-human-warning:merged", EventType: taskRunEventPRMerged, ActorType: taskRunActorSystem, Source: taskRunSourceGitHub, Detail: map[string]any{"repo": "elastic/claw", "prNumber": 13}})
-	assertTaskRunSummary(t, db, runID, taskRunStatusCleanSuccess, taskRunPhaseTerminal, "", `["pr_replaced"]`, 0, 1, 0, 1, 0)
+	assertTaskRunSummary(t, db, runID, taskRunStatusClean, taskRunPhaseTerminal, "", `["pr_replaced"]`, 0, 1, 0, 1, 0)
 }
 
 func TestTaskRunHumanManualCodePushCountsAsHumanInteraction(t *testing.T) {
@@ -228,15 +238,15 @@ func TestTaskRunHumanManualCodePushCountsAsHumanInteraction(t *testing.T) {
 	associatePRForTest(t, s, runID, "elastic/claw", 15, taskRunPRStateOpen)
 	recordTaskRunEventForTest(t, s, TaskRunEvent{TenantID: "test-tenant-id", RunID: runID, AttemptID: attemptID, EventKey: "human-push:sha", EventType: taskRunWarningHumanManualCodePush, ActorType: taskRunActorHuman, Source: taskRunSourceGitHub, WarningType: taskRunWarningHumanManualCodePush})
 	recordTaskRunEventForTest(t, s, TaskRunEvent{TenantID: "test-tenant-id", RunID: runID, AttemptID: attemptID, EventKey: "human-push:merged", EventType: taskRunEventPRMerged, ActorType: taskRunActorSystem, Source: taskRunSourceGitHub, Detail: map[string]any{"repo": "elastic/claw", "prNumber": 15}})
-	assertTaskRunSummary(t, db, runID, taskRunStatusWarningSuccess, taskRunPhaseTerminal, "", `["human_manual_code_push"]`, 1, 1, 0, 1, 0)
+	assertTaskRunSummary(t, db, runID, taskRunStatusHumanInTheLoop, taskRunPhaseTerminal, "", `["human_manual_code_push"]`, 1, 1, 0, 1, 0)
 }
 
 func TestTaskRunMaterializationNonPRCompletionUsesHumanInteractions(t *testing.T) {
 	for _, tc := range []struct {
 		name, eventType, warning, want string
 	}{
-		{"clean", taskRunEventTaskCompleted, "", taskRunStatusCleanSuccess},
-		{"human", taskRunEventHumanPRComment, taskRunWarningHumanPRComment, taskRunStatusWarningSuccess},
+		{"clean", taskRunEventTaskCompleted, "", taskRunStatusClean},
+		{"human", taskRunEventHumanPRComment, taskRunWarningHumanPRComment, taskRunStatusHumanInTheLoop},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s, db := newTaskRunAnalyticsTestServer(t, "claw-non-pr-"+tc.name)
@@ -265,13 +275,13 @@ func TestTaskRunAnalyticsStatusBackfillReclassifiesClosedUnmerged(t *testing.T) 
 	if _, err := db.Exec(`UPDATE task_run_summaries SET status='failed', failure_type='pr_closed_unmerged', warning_types='[]' WHERE run_id=?`, runID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(`DELETE FROM hub_migrations WHERE name='task_run_analytics_status_v2'`); err != nil {
+	if _, err := db.Exec(`DELETE FROM hub_migrations WHERE name='task_run_analytics_status_v3'`); err != nil {
 		t.Fatal(err)
 	}
-	if err := backfillTaskRunAnalyticsStatusV2(db); err != nil {
+	if err := backfillTaskRunAnalyticsStatusV3(db); err != nil {
 		t.Fatalf("backfill: %v", err)
 	}
-	assertTaskRunSummary(t, db, runID, taskRunStatusWarningSuccess, taskRunPhaseTerminal, "", `["pr_closed_unmerged"]`, 0, 1, 0, 0, 1)
+	assertTaskRunSummary(t, db, runID, taskRunStatusClean, taskRunPhaseTerminal, "", `["pr_closed_unmerged"]`, 0, 1, 0, 0, 1)
 }
 
 func TestTaskRunClosedUnmergedTakesPrecedenceOverTimeout(t *testing.T) {
@@ -279,7 +289,7 @@ func TestTaskRunClosedUnmergedTakesPrecedenceOverTimeout(t *testing.T) {
 	runID, attemptID := startTaskRunForTest(t, s, "claw-closed-timeout", "closed-timeout")
 	associatePRForTest(t, s, runID, "elastic/claw", 16, taskRunPRStateClosed)
 	recordTaskRunEventForTest(t, s, TaskRunEvent{TenantID: "test-tenant-id", RunID: runID, AttemptID: attemptID, EventKey: "closed-timeout:timeout", EventType: "timeout", ActorType: taskRunActorSystem, Source: taskRunSourceHub, FailureType: taskRunFailureTimeout})
-	assertTaskRunSummary(t, db, runID, taskRunStatusWarningSuccess, taskRunPhaseTerminal, "", `["pr_closed_unmerged"]`, 0, 1, 0, 0, 1)
+	assertTaskRunSummary(t, db, runID, taskRunStatusClean, taskRunPhaseTerminal, "", `["pr_closed_unmerged"]`, 0, 1, 0, 0, 1)
 }
 
 func TestTaskRunClassificationFailsDoneWithoutPR(t *testing.T) {
@@ -330,7 +340,7 @@ func TestTaskRunMaterializationClassifiesReplacedPRAsWarningSuccess(t *testing.T
 		Detail:    map[string]any{"repo": "elastic/claw", "prNumber": 22},
 	})
 
-	assertTaskRunSummary(t, db, runID, taskRunStatusCleanSuccess, taskRunPhaseTerminal, "", `["pr_replaced"]`, 0, 2, 0, 1, 1)
+	assertTaskRunSummary(t, db, runID, taskRunStatusClean, taskRunPhaseTerminal, "", `["pr_replaced"]`, 0, 2, 0, 1, 1)
 }
 
 func TestTaskRunIdempotencyDoesNotDuplicateEventRows(t *testing.T) {
@@ -377,7 +387,7 @@ func TestTaskRunMaterializationLateWarningReclassifiesCleanSuccess(t *testing.T)
 		Source:    taskRunSourceGitHub,
 		Detail:    map[string]any{"repo": "elastic/claw", "prNumber": 31},
 	})
-	assertTaskRunSummary(t, db, runID, taskRunStatusCleanSuccess, taskRunPhaseTerminal, "", "[]", 0, 1, 0, 1, 0)
+	assertTaskRunSummary(t, db, runID, taskRunStatusClean, taskRunPhaseTerminal, "", "[]", 0, 1, 0, 1, 0)
 
 	recordTaskRunEventForTest(t, s, TaskRunEvent{
 		TenantID:        "test-tenant-id",
@@ -392,7 +402,7 @@ func TestTaskRunMaterializationLateWarningReclassifiesCleanSuccess(t *testing.T)
 		OccurredAt:      time.Now().UTC().Add(-time.Second),
 	})
 
-	assertTaskRunSummary(t, db, runID, taskRunStatusWarningSuccess, taskRunPhaseTerminal, "", `["human_pr_comment"]`, 1, 1, 0, 1, 0)
+	assertTaskRunSummary(t, db, runID, taskRunStatusHumanInTheLoop, taskRunPhaseTerminal, "", `["human_pr_comment"]`, 1, 1, 0, 1, 0)
 }
 
 func TestTaskRunMaterializationLateMergeOverridesPrePRFailure(t *testing.T) {
@@ -423,7 +433,7 @@ func TestTaskRunMaterializationLateMergeOverridesPrePRFailure(t *testing.T) {
 		Detail:    map[string]any{"repo": "elastic/claw", "prNumber": 41},
 	})
 
-	assertTaskRunSummary(t, db, runID, taskRunStatusCleanSuccess, taskRunPhaseTerminal, "", "[]", 0, 1, 0, 1, 0)
+	assertTaskRunSummary(t, db, runID, taskRunStatusClean, taskRunPhaseTerminal, "", "[]", 0, 1, 0, 1, 0)
 	assertTaskRunAttempt(t, db, runID, "succeeded", "")
 }
 
@@ -524,7 +534,7 @@ func TestTaskRunPRLifecycleDoesNotRegressMergedPRToOpen(t *testing.T) {
 	})
 	associatePRForTest(t, s, runID, "elastic/claw", 61, taskRunPRStateOpen)
 
-	assertTaskRunSummary(t, db, runID, taskRunStatusCleanSuccess, taskRunPhaseTerminal, "", "[]", 0, 1, 0, 1, 0)
+	assertTaskRunSummary(t, db, runID, taskRunStatusClean, taskRunPhaseTerminal, "", "[]", 0, 1, 0, 1, 0)
 }
 
 func TestTaskRunPRLifecycleDoesNotRegressClosedPRToOpen(t *testing.T) {
@@ -543,7 +553,7 @@ func TestTaskRunPRLifecycleDoesNotRegressClosedPRToOpen(t *testing.T) {
 	})
 	associatePRForTest(t, s, runID, "elastic/claw", 62, taskRunPRStateOpen)
 
-	assertTaskRunSummary(t, db, runID, taskRunStatusWarningSuccess, taskRunPhaseTerminal, "", `["pr_closed_unmerged"]`, 0, 1, 0, 0, 1)
+	assertTaskRunSummary(t, db, runID, taskRunStatusClean, taskRunPhaseTerminal, "", `["pr_closed_unmerged"]`, 0, 1, 0, 0, 1)
 }
 
 func TestTaskRunDetailSanitizationRedactsNestedText(t *testing.T) {
@@ -1089,7 +1099,7 @@ func TestTaskRunPRMergeAndCloseInstrumentationMaterializesStatus(t *testing.T) {
 
 	assertTaskRunEventExists(t, db, runID, taskRunEventPRMerged, taskRunInteractionTerminal)
 	assertTaskRunPR(t, db, runID, "elastic/claw", 72, taskRunPRStateClosed, true)
-	assertTaskRunSummary(t, db, runID, taskRunStatusCleanSuccess, taskRunPhaseTerminal, "", "[]", 0, 1, 0, 1, 0)
+	assertTaskRunSummary(t, db, runID, taskRunStatusClean, taskRunPhaseTerminal, "", "[]", 0, 1, 0, 1, 0)
 
 	s2, db2 := newTaskRunAnalyticsTestServer(t, "claw-pr-closed")
 	closedRunID, _ := startTaskRunForTest(t, s2, "claw-pr-closed", "pr-closed")
@@ -1099,7 +1109,7 @@ func TestTaskRunPRMergeAndCloseInstrumentationMaterializesStatus(t *testing.T) {
 
 	assertTaskRunEventExists(t, db2, closedRunID, taskRunEventPRClosedUnmerged, taskRunInteractionTerminal)
 	assertTaskRunPR(t, db2, closedRunID, "elastic/claw", 73, taskRunPRStateClosed, false)
-	assertTaskRunSummary(t, db2, closedRunID, taskRunStatusWarningSuccess, taskRunPhaseTerminal, "", `["pr_closed_unmerged"]`, 0, 1, 0, 0, 1)
+	assertTaskRunSummary(t, db2, closedRunID, taskRunStatusClean, taskRunPhaseTerminal, "", `["pr_closed_unmerged"]`, 0, 1, 0, 0, 1)
 }
 
 func TestTaskRunPRClosedFailureSurvivesOperationalStop(t *testing.T) {
@@ -1110,7 +1120,7 @@ func TestTaskRunPRClosedFailureSurvivesOperationalStop(t *testing.T) {
 	s.trackPRClosed("factory-pr-closed-stop", "ISSUE-pr-closed-stop", "claw-pr-closed-stop", "elastic/claw", 74)
 	s.stopAgentWithReason("claw-pr-closed-stop", "PR closed without merge", false)
 
-	assertTaskRunSummary(t, db, runID, taskRunStatusWarningSuccess, taskRunPhaseTerminal, "", `["pr_closed_unmerged"]`, 0, 1, 0, 0, 1)
+	assertTaskRunSummary(t, db, runID, taskRunStatusClean, taskRunPhaseTerminal, "", `["pr_closed_unmerged"]`, 0, 1, 0, 0, 1)
 }
 
 func TestTaskRunStopAgentWithReasonInstrumentationRecordsTerminalFailure(t *testing.T) {
@@ -1319,7 +1329,7 @@ func TestTaskRunDoneWithoutPRAllowsNonPRRuns(t *testing.T) {
 		t.Fatalf("expected no done_without_pr failure event for non-pr run, got %d", failures)
 	}
 	assertTaskRunEventExists(t, db, runID, taskRunEventTaskCompleted, taskRunInteractionTerminal)
-	assertTaskRunSummary(t, db, runID, taskRunStatusCleanSuccess, taskRunPhaseTerminal, "", "[]", 0, 0, 0, 0, 0)
+	assertTaskRunSummary(t, db, runID, taskRunStatusClean, taskRunPhaseTerminal, "", "[]", 0, 0, 0, 0, 0)
 
 	var status string
 	if err := db.QueryRow(`SELECT status FROM claws WHERE id=?`, "claw-done-non-pr").Scan(&status); err != nil {

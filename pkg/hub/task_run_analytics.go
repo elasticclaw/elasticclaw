@@ -19,8 +19,9 @@ const (
 	taskRunKindPRTask   = "pr_task"
 
 	taskRunStatusRunning        = "running"
-	taskRunStatusCleanSuccess   = "clean_success"
-	taskRunStatusWarningSuccess = "warning_success"
+	taskRunStatusClean          = "clean"
+	taskRunStatusHumanInTheLoop = "human_in_the_loop"
+	taskRunStatusWarning        = "warning"
 	taskRunStatusFailed         = "failed"
 
 	taskRunPhaseClaimed         = "claimed"
@@ -882,6 +883,8 @@ func materializeTaskRunTx(tx *sql.Tx, runID string) error {
 
 	warnings := map[string]bool{}
 	humanInteractions := 0
+	dashboardInteractions := 0
+	externalInteractions := 0
 	for _, event := range events {
 		if warning := normalizeTaskRunWarningType(event.warningType); warning != "" {
 			warnings[warning] = true
@@ -889,6 +892,12 @@ func materializeTaskRunTx(tx *sql.Tx, runID string) error {
 		if warning := warningTypeForEvent(event); warning != "" && isHumanTaskRunEvent(event) {
 			humanInteractions++
 			warnings[warning] = true
+			switch taskRunWarningChannel(warning) {
+			case "dashboard":
+				dashboardInteractions++
+			case "external":
+				externalInteractions++
+			}
 		}
 	}
 
@@ -910,7 +919,7 @@ func materializeTaskRunTx(tx *sql.Tx, runID string) error {
 	completedAt := taskCompletedAt(events)
 	prePRFailure, prePRFailureAt := prePRFailure(events)
 	status, phase, failureType, extraWarning, finishedAt := computeTaskRunStatus(
-		meta, counts, humanInteractions, phaseTimes, definitiveFailure, definitiveFailureAt, completedAt, prePRFailure, prePRFailureAt,
+		meta, counts, dashboardInteractions, externalInteractions, phaseTimes, definitiveFailure, definitiveFailureAt, completedAt, prePRFailure, prePRFailureAt,
 	)
 	if extraWarning != "" {
 		warnings[extraWarning] = true
@@ -1038,10 +1047,24 @@ func isHumanTaskRunEvent(event taskRunEventProjection) bool {
 	return false
 }
 
+// taskRunWarningChannel identifies where a human interaction originated.
+func taskRunWarningChannel(warningType string) string {
+	switch warningType {
+	case taskRunWarningHumanDashboardMessage, taskRunWarningHumanManualStopResume, taskRunWarningHumanSettingsChange:
+		return "dashboard"
+	case taskRunWarningHumanPRComment, taskRunWarningHumanReviewComment, taskRunWarningHumanRequestedChanges,
+		taskRunWarningHumanManualCodePush, taskRunWarningHumanTrackerUpdate, taskRunWarningUnknownHuman:
+		return "external"
+	default:
+		return ""
+	}
+}
+
 func computeTaskRunStatus(
 	meta taskRunMeta,
 	counts prCountSummary,
-	humanInteractions int,
+	dashboardInteractions int,
+	externalInteractions int,
 	phaseTimes taskRunPhaseTimeSummary,
 	definitiveFailure string,
 	definitiveFailureAt int64,
@@ -1049,33 +1072,28 @@ func computeTaskRunStatus(
 	prePRFailure string,
 	prePRFailureAt int64,
 ) (status, phase, failureType, extraWarning string, finishedAt int64) {
+	successStatus := func() string {
+		if dashboardInteractions > 0 {
+			return taskRunStatusWarning
+		}
+		if externalInteractions > 0 {
+			return taskRunStatusHumanInTheLoop
+		}
+		return taskRunStatusClean
+	}
 	status, phase = taskRunStatusRunning, initialTaskRunPhase(meta, phaseTimes)
 	if meta.analyticsEnabled == 0 {
 		// Excluded runs are not part of PR-scoped analytics; failed/unknown is a sentinel summary state.
 		return taskRunStatusFailed, taskRunPhaseTerminal, taskRunFailureUnknown, "", meta.updatedAt
 	} else if meta.requiresPR == 0 && taskCompletedAt != 0 {
-		if humanInteractions > 0 {
-			status = taskRunStatusWarningSuccess
-		} else {
-			status = taskRunStatusCleanSuccess
-		}
-		phase = taskRunPhaseTerminal
-		finishedAt = taskCompletedAt
-	} else if counts.merged > 0 && counts.open == 0 {
-		if humanInteractions > 0 {
-			status = taskRunStatusWarningSuccess
-		} else {
-			status = taskRunStatusCleanSuccess
-		}
-		phase = taskRunPhaseTerminal
-		finishedAt = counts.latestTerminalAt
-	} else if counts.merged > 0 && counts.open > 0 {
-		status, phase = taskRunStatusRunning, taskRunPhaseWaitingForMerge
+		return successStatus(), taskRunPhaseTerminal, "", "", taskCompletedAt
 	} else if counts.open > 0 {
 		status, phase = taskRunStatusRunning, taskRunPhaseWaitingForMerge
+	} else if counts.merged > 0 {
+		return successStatus(), taskRunPhaseTerminal, "", "", counts.latestTerminalAt
 	} else if counts.total > 0 {
 		extraWarning = taskRunWarningPRClosedUnmerged
-		status, phase, finishedAt = taskRunStatusWarningSuccess, taskRunPhaseTerminal, counts.latestTerminalAt
+		return successStatus(), taskRunPhaseTerminal, "", extraWarning, counts.latestTerminalAt
 	} else if definitiveFailure != "" {
 		status, phase, failureType, finishedAt = taskRunStatusFailed, taskRunPhaseTerminal, definitiveFailure, definitiveFailureAt
 	} else if prePRFailure != "" {
