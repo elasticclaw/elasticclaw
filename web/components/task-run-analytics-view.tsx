@@ -1,6 +1,7 @@
 "use client"
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react"
+import { createPortal } from "react-dom"
 import { usePathname, useRouter, useSearchParams } from "next/navigation"
 import { AlertCircle, ArrowDown, ArrowUp, CheckCircle2, CircleDot, ExternalLink, GitPullRequest, Minus, RefreshCw, Search, XCircle } from "lucide-react"
 import { Bar, BarChart, XAxis } from "recharts"
@@ -597,9 +598,13 @@ export function FilterSelect({ label, value, values, onChange }: { label: string
 }
 
 export function RunDetailPanel({ run, details, loading, error, onClose }: { run: TaskRunSummary | null; details: DetailState | null; loading: boolean; error: string | null; onClose: () => void }) {
-  if (!run) return null
-  return (
-    <aside className="fixed inset-y-0 right-0 z-40 flex w-full max-w-[380px] shrink-0 flex-col border-l border-border bg-card shadow-xl xl:static xl:shadow-none">
+  const [mounted, setMounted] = useState(false)
+
+  useEffect(() => setMounted(true), [])
+
+  if (!run || !mounted) return null
+  return createPortal(
+    <aside className="fixed inset-y-0 right-0 z-[60] flex w-full max-w-[380px] shrink-0 flex-col border-l border-border bg-card shadow-xl xl:static xl:shadow-none">
       <div className="flex items-start justify-between gap-3 border-b border-border p-4">
         <div className="min-w-0">
           <div className="truncate text-sm font-semibold">{run.ownerDisplayName || run.runId}</div>
@@ -690,7 +695,8 @@ export function RunDetailPanel({ run, details, loading, error, onClose }: { run:
           </div>
         </section>
       </div>
-    </aside>
+    </aside>,
+    document.body,
   )
 }
 
