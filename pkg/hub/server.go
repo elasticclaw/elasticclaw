@@ -3253,7 +3253,7 @@ docker --version`); err != nil {
 		}
 	}
 
-// Stage flake files *early* (before gateway, onboard, etc.) when present.
+	// Stage flake files *early* (before gateway, onboard, etc.) when present.
 	// This ensures the workspace flake is on disk for:
 	// - nix develop / flake-run wrapper creation in bridge bootstrap
 	// - the final gateway to run inside the devShell
@@ -5564,7 +5564,7 @@ func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.Pr
 		return
 	}
 
-var filesJSON, templateName string
+	var filesJSON, templateName string
 	if err := s.db.QueryRow(
 		`SELECT COALESCE(template_files,'{}'), COALESCE(template,'') FROM claws WHERE id=?`,
 		clawID,
