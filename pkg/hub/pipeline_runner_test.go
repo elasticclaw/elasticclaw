@@ -1604,7 +1604,10 @@ func TestBuildWorkspaceRunCommand(t *testing.T) {
 	if err != nil {
 		t.Fatalf("insert no-flake: %v", err)
 	}
-	got := s.buildWorkspaceRunCommand(clawNoFlake, "depot --version")
+	got, err := s.buildWorkspaceRunCommand(clawNoFlake, "depot --version")
+	if err != nil {
+		t.Fatalf("no-flake: %v", err)
+	}
 	if !strings.Contains(got, `cd "$HOME/.openclaw/workspace" && depot --version`) || strings.Contains(got, "flake-run") {
 		t.Fatalf("no-flake command = %q, want plain cd form", got)
 	}
@@ -1615,11 +1618,32 @@ func TestBuildWorkspaceRunCommand(t *testing.T) {
 	if err != nil {
 		t.Fatalf("insert with-flake: %v", err)
 	}
-	got = s.buildWorkspaceRunCommand(clawWithFlake, "depot ci --foo bar")
+	got, err = s.buildWorkspaceRunCommand(clawWithFlake, "depot ci --foo bar")
+	if err != nil {
+		t.Fatalf("with-flake: %v", err)
+	}
 	if !strings.Contains(got, "flake-run") || !strings.Contains(got, "depot ci --foo bar") {
 		t.Fatalf("with-flake command = %q, want flake-run wrapper", got)
 	}
 	if !strings.Contains(got, `cd "$HOME/.openclaw/workspace"`) {
 		t.Fatalf("with-flake command must preserve workspace cd: %q", got)
+	}
+
+	// Fail-closed on bad metadata (per Greptile P1 for #526).
+	// Unknown claw should error (no silent "no flake" fallback).
+	_, err = s.buildWorkspaceRunCommand("nonexistent-claw", "echo hi")
+	if err == nil {
+		t.Fatal("expected error for unknown claw")
+	}
+
+	// Bad JSON in template_files should error (not default to plain command).
+	const clawBadJSON = "claw-bad-json"
+	_, err = db.Exec(`INSERT INTO claws(id, tenant_id, name, template, status, template_files, created_at) VALUES(?,?,?,?,?,?,datetime('now'))`, clawBadJSON, "test-tenant-id", "bad-json", "base", "connected", "not-valid-json{]")
+	if err != nil {
+		t.Fatalf("insert bad-json: %v", err)
+	}
+	_, err = s.buildWorkspaceRunCommand(clawBadJSON, "echo hi")
+	if err == nil {
+		t.Fatal("expected error for bad template_files JSON")
 	}
 }

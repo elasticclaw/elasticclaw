@@ -406,7 +406,10 @@ func (s *Server) executePipelineCommand(clawID, command string, timeout time.Dur
 		return nil, fmt.Errorf("agent has no provider instance yet")
 	}
 
-	workspaceCommand := s.buildWorkspaceRunCommand(clawID, command)
+	workspaceCommand, err := s.buildWorkspaceRunCommand(clawID, command)
+	if err != nil {
+		return nil, fmt.Errorf("build workspace run command: %w", err)
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), timeout+30*time.Second)
 	defer cancel()
@@ -2291,17 +2294,26 @@ func loadWorkflowPipelineContext(workspaceName, workflowName string) (*types.Wor
 // executed on the remote claw for a workflow run action.
 // When the claw has a workspace flake, it wraps via flake-run so the command
 // runs inside devShells.default while preserving cwd and original command semantics.
-func (s *Server) buildWorkspaceRunCommand(clawID, command string) string {
+//
+// It fails closed: if the DB query fails or template_files cannot be parsed,
+// an error is returned instead of silently falling back to a plain command.
+// This ensures that declared devShell tools are never silently dropped for
+// flake workspaces (per #526 contract).
+func (s *Server) buildWorkspaceRunCommand(clawID, command string) (string, error) {
 	var tmplFilesJSON string
-	_ = s.db.QueryRow(`SELECT COALESCE(template_files,'{}') FROM claws WHERE id=?`, clawID).Scan(&tmplFilesJSON)
+	if err := s.db.QueryRow(`SELECT COALESCE(template_files,'{}') FROM claws WHERE id=?`, clawID).Scan(&tmplFilesJSON); err != nil {
+		return "", fmt.Errorf("load template_files for claw %s: %w", clawID, err)
+	}
 	var tmplFiles map[string]string
-	_ = json.Unmarshal([]byte(tmplFilesJSON), &tmplFiles)
+	if err := json.Unmarshal([]byte(tmplFilesJSON), &tmplFiles); err != nil {
+		return "", fmt.Errorf("parse template_files for claw %s: %w", clawID, err)
+	}
 	hasWorkspaceFlake := tmplFiles["flake.nix"] != ""
 
 	if hasWorkspaceFlake {
 		inner := `cd "$HOME/.openclaw/workspace" && ` + command
 		quoted := shellQuote(inner)
-		return `~/.elasticclaw/flake-run bash -lc ` + quoted
+		return `~/.elasticclaw/flake-run bash -lc ` + quoted, nil
 	}
-	return `cd "$HOME/.openclaw/workspace" && ` + command
+	return `cd "$HOME/.openclaw/workspace" && ` + command, nil
 }
