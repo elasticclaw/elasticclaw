@@ -58,6 +58,17 @@ type taskRunAnalyticsDailyCostTotals struct {
 	totalTokens int64
 }
 
+func clampTaskRunAnalyticsUsageDay(day string, start, end time.Time) string {
+	startKey, endKey := start.Format("2006-01-02"), end.Format("2006-01-02")
+	if day < startKey {
+		return startKey
+	}
+	if day > endKey {
+		return endKey
+	}
+	return day
+}
+
 func (s *Server) handleTaskRunAnalyticsCosts(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		jsonError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -216,12 +227,12 @@ func (s *Server) readTaskRunAnalyticsDailyCostTotals(f taskRunAnalyticsFilters, 
 	if taskRunAnalyticsCostsUseRunFilters(f) {
 		where, summaryArgs := taskRunAnalyticsSummaryWhere(f)
 		usageWhere, usageArgs := taskRunAnalyticsUsageModelWhere(f)
-		query = `SELECT u.usage_day, COALESCE(SUM(u.committed_cost_usd),0), COALESCE(SUM(u.committed_total_tokens),0) FROM task_run_usage u JOIN (SELECT run_id FROM task_run_summaries ` + where + `) s ON s.run_id=u.run_id WHERE u.tenant_id=? AND u.usage_day>=? AND u.usage_day<=?`
+		query = `SELECT u.usage_day, COALESCE(SUM(u.committed_cost_usd),0), COALESCE(SUM(u.committed_total_tokens),0) FROM task_run_usage u JOIN (SELECT run_id FROM task_run_summaries ` + where + ` AND started_at>=? AND started_at<=?) s ON s.run_id=u.run_id WHERE u.tenant_id=?`
 		if len(usageWhere) > 0 {
 			query += ` AND ` + strings.Join(usageWhere, " AND ")
 		}
 		query += ` GROUP BY u.usage_day`
-		args = append(summaryArgs, f.TenantID, start.Format("2006-01-02"), end.Format("2006-01-02"))
+		args = append(summaryArgs, start.UnixMilli(), end.AddDate(0, 0, 1).Add(-time.Millisecond).UnixMilli(), f.TenantID)
 		args = append(args, usageArgs...)
 	} else {
 		where, a := taskRunAnalyticsUsageDimensionsWhere(f, "usage_daily")
@@ -241,7 +252,15 @@ func (s *Server) readTaskRunAnalyticsDailyCostTotals(f taskRunAnalyticsFilters, 
 		if err = rows.Scan(&day, &totals.costUsd, &totals.totalTokens); err != nil {
 			return nil, err
 		}
-		byDay[day] = totals
+		if taskRunAnalyticsCostsUseRunFilters(f) {
+			day = clampTaskRunAnalyticsUsageDay(day, start, end)
+			current := byDay[day]
+			current.costUsd += totals.costUsd
+			current.totalTokens += totals.totalTokens
+			byDay[day] = current
+		} else {
+			byDay[day] = totals
+		}
 	}
 	if err = rows.Err(); err != nil {
 		return nil, err
@@ -256,17 +275,17 @@ func (s *Server) addTaskRunAnalyticsDailyRunCounts(f taskRunAnalyticsFilters, st
 		var summaryArgs []any
 		var summaryWhere string
 		summaryWhere, summaryArgs = taskRunAnalyticsSummaryWhere(f)
-		where = []string{"u.tenant_id=?", "u.usage_day>=?", "u.usage_day<=?", "s.run_id=u.run_id"}
+		where = []string{"u.tenant_id=?", "s.run_id=u.run_id"}
 		usageWhere, usageArgs := taskRunAnalyticsUsageModelWhere(f)
-		where = append(where[:3], usageWhere...)
-		args = append(summaryArgs, f.TenantID, start.Format("2006-01-02"), end.Format("2006-01-02"))
+		where = append(where, usageWhere...)
+		args = append(summaryArgs, start.UnixMilli(), end.AddDate(0, 0, 1).Add(-time.Millisecond).UnixMilli(), f.TenantID)
 		args = append(args, usageArgs...)
-		rows, err := s.db.Query(`SELECT u.usage_day, COUNT(DISTINCT u.run_id) FROM task_run_usage u JOIN (SELECT run_id FROM task_run_summaries `+summaryWhere+`) s ON s.run_id=u.run_id WHERE `+strings.Join(where, " AND ")+` GROUP BY u.usage_day`, args...)
+		rows, err := s.db.Query(`SELECT u.usage_day, u.run_id FROM task_run_usage u JOIN (SELECT run_id FROM task_run_summaries `+summaryWhere+` AND started_at>=? AND started_at<=?) s ON s.run_id=u.run_id WHERE `+strings.Join(where, " AND ")+` GROUP BY u.usage_day, u.run_id`, args...)
 		if err != nil {
 			return err
 		}
 		defer rows.Close()
-		return assignTaskRunAnalyticsDailyRunCounts(rows, series)
+		return assignTaskRunAnalyticsFoldedDailyRunCounts(rows, series, start, end)
 	}
 	where = append(where, "u.usage_day>=?", "u.usage_day<=?")
 	args = append(args, start.Format("2006-01-02"), end.Format("2006-01-02"))
@@ -276,6 +295,32 @@ func (s *Server) addTaskRunAnalyticsDailyRunCounts(f taskRunAnalyticsFilters, st
 	}
 	defer rows.Close()
 	return assignTaskRunAnalyticsDailyRunCounts(rows, series)
+}
+
+func assignTaskRunAnalyticsFoldedDailyRunCounts(rows interface {
+	Next() bool
+	Scan(...any) error
+	Err() error
+}, series []taskRunAnalyticsDailyCost, start, end time.Time) error {
+	runsByDay := map[string]map[string]struct{}{}
+	for rows.Next() {
+		var day, runID string
+		if err := rows.Scan(&day, &runID); err != nil {
+			return err
+		}
+		day = clampTaskRunAnalyticsUsageDay(day, start, end)
+		if runsByDay[day] == nil {
+			runsByDay[day] = map[string]struct{}{}
+		}
+		runsByDay[day][runID] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for i := range series {
+		series[i].RunCount = len(runsByDay[series[i].Date])
+	}
+	return nil
 }
 
 func assignTaskRunAnalyticsDailyRunCounts(rows interface {
@@ -307,12 +352,12 @@ func (s *Server) readTaskRunAnalyticsCostSeriesByModel(f taskRunAnalyticsFilters
 	if taskRunAnalyticsCostsUseRunFilters(f) {
 		where, summaryArgs := taskRunAnalyticsSummaryWhere(f)
 		usageWhere, usageArgs := taskRunAnalyticsUsageModelWhere(f)
-		query = `SELECT u.model, u.usage_day, COALESCE(SUM(u.committed_cost_usd),0), COALESCE(SUM(u.committed_total_tokens),0) FROM task_run_usage u JOIN (SELECT run_id FROM task_run_summaries ` + where + `) s ON s.run_id=u.run_id WHERE u.tenant_id=? AND u.usage_day>=? AND u.usage_day<=?`
+		query = `SELECT u.model, u.usage_day, COALESCE(SUM(u.committed_cost_usd),0), COALESCE(SUM(u.committed_total_tokens),0) FROM task_run_usage u JOIN (SELECT run_id FROM task_run_summaries ` + where + ` AND started_at>=? AND started_at<=?) s ON s.run_id=u.run_id WHERE u.tenant_id=?`
 		if len(usageWhere) > 0 {
 			query += ` AND ` + strings.Join(usageWhere, " AND ")
 		}
 		query += ` GROUP BY u.model,u.usage_day`
-		args = append(summaryArgs, f.TenantID, start.Format("2006-01-02"), end.Format("2006-01-02"))
+		args = append(summaryArgs, start.UnixMilli(), end.AddDate(0, 0, 1).Add(-time.Millisecond).UnixMilli(), f.TenantID)
 		args = append(args, usageArgs...)
 	} else {
 		where, a := taskRunAnalyticsUsageDimensionsWhere(f, "usage_daily")
@@ -340,7 +385,15 @@ func (s *Server) readTaskRunAnalyticsCostSeriesByModel(f taskRunAnalyticsFilters
 		if data[m] == nil {
 			data[m] = map[string]v{}
 		}
-		data[m][d] = x
+		if taskRunAnalyticsCostsUseRunFilters(f) {
+			d = clampTaskRunAnalyticsUsageDay(d, start, end)
+			current := data[m][d]
+			current.c += x.c
+			current.t += x.t
+			data[m][d] = current
+		} else {
+			data[m][d] = x
+		}
 		totals[m] += x.c
 	}
 	if err = rows.Err(); err != nil {

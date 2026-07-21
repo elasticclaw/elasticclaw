@@ -127,6 +127,64 @@ func TestTaskRunAnalyticsCostsRunFiltersUseUsageByRun(t *testing.T) {
 	}
 }
 
+func TestTaskRunAnalyticsCostsUseRunFiltersDetectsEligibilityFilters(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		f    taskRunAnalyticsFilters
+		want bool
+	}{
+		{name: "no filters", want: false},
+		{name: "requires PR", f: taskRunAnalyticsFilters{RequiresPR: boolPtr(true)}, want: true},
+		{name: "analytics enabled", f: taskRunAnalyticsFilters{AnalyticsEnabled: boolPtr(true)}, want: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := taskRunAnalyticsCostsUseRunFilters(test.f); got != test.want {
+				t.Fatalf("taskRunAnalyticsCostsUseRunFilters(%#v) = %v, want %v", test.f, got, test.want)
+			}
+		})
+	}
+}
+
+func TestTaskRunAnalyticsCostsIncludesCrossDayUsage(t *testing.T) {
+	s, db := newTaskRunAnalyticsAPITestServer(t)
+	now := time.Date(2026, time.July, 15, 12, 0, 0, 0, time.UTC)
+	filters := taskRunAnalyticsFilters{TenantID: "test-tenant-id", Status: []string{taskRunStatusFailed}}
+	insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{RunID: "cross-day", AttemptID: "cross-day-attempt", ClawID: "cross-day-claw", TenantID: "test-tenant-id", Status: taskRunStatusFailed, OwnerType: taskRunOwnerFactory, Factory: "factory", Model: "gpt-5", StartedAt: now.Add(-time.Hour).UnixMilli()})
+	seedTaskRunAnalyticsRunUsage(t, db, "cross-day", now.AddDate(0, 0, 1), 12, 120)
+
+	response, err := s.readTaskRunAnalyticsCosts(filters, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	last := response.DailySeries[len(response.DailySeries)-1]
+	if response.Today.CostUsd != 12 || response.Today.TotalTokens != 120 || last.CostUsd != 12 || last.TotalTokens != 120 || last.RunCount != 1 || response.Week.CostUsd != 12 || response.Month.CostUsd != 12 {
+		t.Fatalf("cross-day usage was not folded into today: %#v", response)
+	}
+
+	byModel, err := s.readTaskRunAnalyticsCostsWithOptions(filters, now, 30, "model")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(byModel.SeriesByModel) != 1 {
+		t.Fatalf("series by model = %#v", byModel.SeriesByModel)
+	}
+	modelLast := byModel.SeriesByModel[0].DailySeries[len(byModel.SeriesByModel[0].DailySeries)-1]
+	if byModel.SeriesByModel[0].Model != "gpt-5" || modelLast.CostUsd != 12 || modelLast.TotalTokens != 120 {
+		t.Fatalf("cross-day model usage was not folded into today: %#v", byModel.SeriesByModel)
+	}
+
+	priorEnd := now.AddDate(0, 0, -31).Truncate(24 * time.Hour)
+	insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{RunID: "prior-cross-day", AttemptID: "prior-cross-day-attempt", ClawID: "prior-cross-day-claw", TenantID: "test-tenant-id", Status: taskRunStatusFailed, OwnerType: taskRunOwnerFactory, Factory: "factory", Model: "gpt-5", StartedAt: priorEnd.UnixMilli()})
+	seedTaskRunAnalyticsRunUsage(t, db, "prior-cross-day", priorEnd.AddDate(0, 0, 1), 7, 70)
+	response, err = s.readTaskRunAnalyticsCosts(filters, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.Prior.PeriodCostUsd != 7 {
+		t.Fatalf("prior cross-day usage was dropped: %#v", response.Prior)
+	}
+}
+
 func TestTaskRunAnalyticsCostsToOnlyRangeAndInvalidRange(t *testing.T) {
 	s, db := newTaskRunAnalyticsAPITestServer(t)
 	now := time.Date(2026, time.July, 15, 12, 0, 0, 0, time.UTC)

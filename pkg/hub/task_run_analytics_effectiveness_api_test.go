@@ -31,6 +31,21 @@ func TestTaskRunAnalyticsCostDriversRunFilterConsistentSparkline(t *testing.T) {
 		}
 	})
 
+	t.Run("run filters fold next-day usage into window end", func(t *testing.T) {
+		s, db := newTaskRunAnalyticsAPITestServer(t)
+		day := time.Date(2026, time.July, 15, 0, 0, 0, 0, time.UTC)
+		insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{RunID: "cross-day", AttemptID: "cross-day-attempt", ClawID: "cross-day-claw", TenantID: "test-tenant-id", Status: taskRunStatusFailed, OwnerType: taskRunOwnerFactory, Factory: "factory-a", Repo: "acme/included", Model: "gpt-5", StartedAt: day.UnixMilli(), EstimatedCostUsd: 12})
+		seedTaskRunAnalyticsRunUsage(t, db, "cross-day", day.AddDate(0, 0, 1), 12, 120)
+
+		out, err := s.readTaskRunAnalyticsCostDrivers(taskRunAnalyticsFilters{TenantID: "test-tenant-id", Repo: []string{"acme/included"}, FromStartedAt: day.UnixMilli(), ToStartedAt: day.UnixMilli()}, "factory")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(out) != 1 || len(out[0].DailyCost) != 1 || out[0].DailyCost[0].CostUsd != 12 {
+			t.Fatalf("cross-day sparkline usage was not folded: %#v", out)
+		}
+	})
+
 	t.Run("no run filters use usage daily", func(t *testing.T) {
 		s, db := newTaskRunAnalyticsAPITestServer(t)
 		day := time.Date(2026, time.July, 15, 0, 0, 0, 0, time.UTC)

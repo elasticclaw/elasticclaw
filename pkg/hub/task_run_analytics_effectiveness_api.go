@@ -229,12 +229,12 @@ func (s *Server) readTaskRunAnalyticsCostDrivers(f taskRunAnalyticsFilters, grou
 	}
 	if taskRunAnalyticsCostsUseRunFilters(f) {
 		usageWhere, usageArgs := taskRunAnalyticsUsageModelWhere(f)
-		q := `SELECT s.` + col + `, u.usage_day, COALESCE(SUM(u.committed_cost_usd),0) FROM task_run_usage u JOIN (SELECT run_id, ` + col + ` FROM task_run_summaries ` + w + `) s ON s.run_id=u.run_id WHERE u.tenant_id=? AND u.usage_day>=? AND u.usage_day<=?`
+		q := `SELECT s.` + col + `, u.usage_day, COALESCE(SUM(u.committed_cost_usd),0) FROM task_run_usage u JOIN (SELECT run_id, ` + col + ` FROM task_run_summaries ` + w + `) s ON s.run_id=u.run_id WHERE u.tenant_id=?`
 		if len(usageWhere) > 0 {
 			q += ` AND ` + strings.Join(usageWhere, " AND ")
 		}
 		q += ` GROUP BY s.` + col + `, u.usage_day`
-		rs, e := s.db.Query(q, append(append(a, f.TenantID, start.Format("2006-01-02"), end.Format("2006-01-02")), usageArgs...)...)
+		rs, e := s.db.Query(q, append(append(a, f.TenantID), usageArgs...)...)
 		if e != nil {
 			return nil, e
 		}
@@ -249,7 +249,8 @@ func (s *Server) readTaskRunAnalyticsCostDrivers(f taskRunAnalyticsFilters, grou
 			if values[name] == nil {
 				values[name] = map[string]float64{}
 			}
-			values[name][day] = cost
+			day = clampTaskRunAnalyticsUsageDay(day, start, end)
+			values[name][day] += cost
 		}
 		if e = rs.Err(); e != nil {
 			rs.Close()
