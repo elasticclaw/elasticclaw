@@ -19,6 +19,7 @@ func baseParams() BootstrapParams {
 		ClawID:          "test-claw-id-1234",
 		ClawName:        "test-claw",
 		ClawToken:       "test-token",
+		ModelAuthToken:  "test-model-auth-token",
 		TemplateName:    "adversarylabs",
 		HubURL:          "https://hub.example.com",
 		DefaultModel:    "anthropic/claude-sonnet-4-6",
@@ -69,7 +70,7 @@ func TestBootstrapScript_ContainsBridgeURL(t *testing.T) {
 
 func TestDaytonaBridgeCommands_AreAsyncAndIdempotent(t *testing.T) {
 	prep := daytonaPrepareBridgeCommand()
-	cmd := daytonaAsyncBridgeCommand("https://hub.example.com", "claw-123", "token-123", "NEXT-156", "adversarylabs")
+	cmd := daytonaAsyncBridgeCommand("https://hub.example.com", "claw-123", "token-123", "model-auth-123", "NEXT-156", "adversarylabs")
 	running := daytonaBridgeRunningCommand()
 
 	assertContains(t, prep, "pgrep -x claw-bridge", "detects already running bridge from previous start behavior")
@@ -88,6 +89,7 @@ func TestDaytonaBridgeCommands_AreAsyncAndIdempotent(t *testing.T) {
 	assertContains(t, cmd, "kill \"$child\"", "supervisor forwards termination to its bridge child")
 	assertContains(t, cmd, "restart budget exhausted after 3 attempts", "caps rapid restart flapping")
 	assertContains(t, cmd, `ELASTICCLAW_CLAW_ID='claw-123'`, "passes claw id to bridge")
+	assertContains(t, cmd, `ELASTICCLAW_MODEL_AUTH_TOKEN='model-auth-123'`, "passes per-claw model auth proof")
 	assertContains(t, cmd, `ELASTICCLAW_TEMPLATE='adversarylabs'`, "passes workspace identity to bridge")
 	assertNotContains(t, cmd, "nohup /tmp/claw-bridge", "does not execute bridge directly from tmp")
 	assertNotContains(t, cmd, "setsid", "does not rely on shell detach when Daytona async sessions are available")
@@ -100,7 +102,7 @@ func TestDaytonaBridgeCommands_AreAsyncAndIdempotent(t *testing.T) {
 func TestDaytonaAsyncBridgeCommandShellQuotesClawName(t *testing.T) {
 	clawName := `$(touch /tmp/elasticclaw-pwned)' "quoted"`
 	templateName := `$(touch /tmp/elasticclaw-template-pwned)' "quoted"`
-	cmd := daytonaAsyncBridgeCommand("https://hub.example.com", "claw-123", "token-123", clawName, templateName)
+	cmd := daytonaAsyncBridgeCommand("https://hub.example.com", "claw-123", "token-123", "model-auth-123", clawName, templateName)
 
 	assertContains(t, cmd, "ELASTICCLAW_CLAW_NAME="+shellQuote(clawName), "shell-quotes command-substitution payload")
 	assertNotContains(t, cmd, `ELASTICCLAW_CLAW_NAME="$(touch`, "must not place claw name in shell double quotes")
@@ -174,6 +176,7 @@ func TestBootstrapScript_BridgeEnvVars(t *testing.T) {
 	assertContains(t, script, `ELASTICCLAW_HUB_URL='https://hub.example.com'`, "hub URL env var")
 	assertContains(t, script, `ELASTICCLAW_CLAW_ID='test-claw-id-1234'`, "claw ID env var")
 	assertContains(t, script, `ELASTICCLAW_CLAW_TOKEN='test-token'`, "claw token env var")
+	assertContains(t, script, `ELASTICCLAW_MODEL_AUTH_TOKEN='test-model-auth-token'`, "per-claw model auth proof")
 	assertContains(t, script, `ELASTICCLAW_CLAW_NAME='test-claw'`, "claw name env var")
 	assertContains(t, script, `ELASTICCLAW_TEMPLATE='adversarylabs'`, "workspace identity env var")
 	assertContains(t, script, `ELASTICCLAW_GATEWAY_PASSWORD='test-gw-password'`, "gateway password env var")

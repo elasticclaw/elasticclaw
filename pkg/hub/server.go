@@ -3,7 +3,9 @@ package hub
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
@@ -89,7 +91,8 @@ type Server struct {
 	modelAuthJobsMu           sync.Mutex
 	modelAuthJobs             map[string]*modelAuthLoginJob
 	modelAuthRefreshMu        sync.Mutex
-	grokTokenEndpoint         string // test seam; defaults to the xAI OAuth token endpoint
+	modelAuthPending          map[string]string // rotated auth state awaiting durable config persistence
+	grokTokenEndpoint         string            // test seam; defaults to the xAI OAuth token endpoint
 	pollWarningMu             sync.Mutex
 	pollWarnings              map[string]struct{}
 
@@ -111,6 +114,23 @@ type Server struct {
 	reaperFirstSeen     map[string]time.Time
 	nowFunc             func() time.Time
 	terminateVMOverride func(provider, id string) error // test seam for terminal cleanup
+}
+
+func (s *Server) modelAuthTokenForClaw(clawID string) string {
+	s.mu.RLock()
+	secret := strings.TrimSpace(s.hubCfg.Token)
+	s.mu.RUnlock()
+	if secret == "" || clawID == "" {
+		return ""
+	}
+	mac := hmac.New(sha256.New, []byte(secret))
+	_, _ = mac.Write([]byte("elasticclaw:model-auth:" + clawID))
+	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+}
+
+func (s *Server) validModelAuthToken(clawID, token string) bool {
+	want := s.modelAuthTokenForClaw(clawID)
+	return want != "" && hmac.Equal([]byte(want), []byte(strings.TrimSpace(token)))
 }
 
 type clawConn struct {
@@ -370,7 +390,6 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/settings/github/test", s.withWebAdminAuth(s.handleGitHubAppTest))
 	mux.HandleFunc("/api/settings/model-auth/login", s.withWebAdminAuth(s.handleModelAuthLogin))
 	mux.HandleFunc("/api/settings/model-auth/login/{id}", s.withWebAdminAuth(s.handleModelAuthLoginStatus))
-	mux.HandleFunc("/api/internal/model-auth/credential", s.withClawAuth(s.handleManagedModelAuthCredential))
 
 	// Template store
 	mux.HandleFunc("/api/templates", s.withWebAuth(s.handleTemplates))
@@ -512,23 +531,6 @@ func (s *Server) withAuth(next http.HandlerFunc) http.HandlerFunc {
 		}
 		r = r.WithContext(ctx)
 		next(w, r)
-	}
-}
-
-func (s *Server) withClawAuth(next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		token := strings.TrimSpace(r.Header.Get("X-Claw-Token"))
-		if token == "" {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
-			return
-		}
-		tenantID, err := s.tenantByClawToken(token)
-		if err != nil {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
-			return
-		}
-		ctx := context.WithValue(r.Context(), ctxTenantKey{}, tenantID)
-		next(w, r.WithContext(ctx))
 	}
 }
 
@@ -1157,7 +1159,8 @@ func (s *Server) handleCreateClaw(w http.ResponseWriter, r *http.Request, tenant
 	for k, v := range req.Env {
 		env[k] = v
 	}
-	// Workspace identity is hub-managed and must not be overridden by request env.
+	env["ELASTICCLAW_MODEL_AUTH_TOKEN"] = s.modelAuthTokenForClaw(clawID)
+	// Sensitive identity is hub-managed and must not be overridden by request env.
 	env["ELASTICCLAW_TEMPLATE"] = req.TemplateName
 	for envName, secretRef := range req.SecretRefs {
 		if val, ok := hubSecrets[secretRef]; ok {
@@ -2205,8 +2208,20 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("[bridge] ✓ connected: %s (%s) gateway_ready=%v", rp.Name, clawID[:8], cc.gatewayReady)
 
-	// Ack
-	_ = wsjson.Write(ctx, conn, types.WSMessage{Type: "registered", Payload: map[string]string{"claw_id": clawID}})
+	// Bind managed model credentials to this authenticated WebSocket instead of
+	// accepting a caller-supplied claw ID on a tenant-token HTTP endpoint.
+	ackPayload := map[string]any{"claw_id": clawID}
+	modelAuthAuthorized := s.validModelAuthToken(clawID, rp.ModelAuthToken)
+	if modelAuthAuthorized {
+		credential, credentialErr := s.managedGrokCredential(context.WithValue(ctx, ctxTenantKey{}, tenantID), clawID)
+		if credentialErr == nil {
+			ackPayload["model_auth_credential"] = credential
+		} else if !errors.Is(credentialErr, errManagedGrokNotConfigured) {
+			logModelAuthRefreshError(clawID, credentialErr)
+			ackPayload["model_auth_error"] = "managed model authentication is unavailable"
+		}
+	}
+	_ = wsjson.Write(ctx, conn, types.WSMessage{Type: "registered", Payload: ackPayload})
 
 	// Broadcast initial status to user sessions
 	s.broadcastToUsers(tenantID, types.WSMessage{Type: "claw_status", Payload: map[string]string{"claw_id": clawID, "status": currentStatus}})
@@ -2655,6 +2670,20 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 						}
 					}
 				}
+			} else if msg.Type == "model_auth_sync" {
+				if !modelAuthAuthorized {
+					continue
+				}
+				go func() {
+					credential, err := s.managedGrokCredential(context.WithValue(ctx, ctxTenantKey{}, tenantID), clawID)
+					if err != nil {
+						if !errors.Is(err, errManagedGrokNotConfigured) {
+							logModelAuthRefreshError(clawID, err)
+						}
+						return
+					}
+					_ = wsjson.Write(ctx, conn, types.WSMessage{Type: "model_auth_credential", Payload: credential})
+				}()
 			} else if msg.Type == "http_proxy_req" {
 				// Proxy an HTTP request from the bridge to the hub's internal API.
 				// This allows tools in the sandbox to reach hub APIs without a public URL.
@@ -2686,7 +2715,6 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 					for k, v := range req.Header {
 						httpReq.Header.Set(k, v)
 					}
-					httpReq.Header.Set("X-ElasticClaw-Claw-ID", clawID)
 					// Inject claw-token auth for internal endpoints used by the bridge.
 					s.mu.RLock()
 					clawToken := s.hubCfg.ClawToken
@@ -3654,7 +3682,7 @@ gh auth status`
 	if err := s.db.QueryRow(`SELECT COALESCE(template,'') FROM claws WHERE id=?`, clawID).Scan(&templateName); err != nil {
 		return fmt.Errorf("load claw template: %w", err)
 	}
-	if err := s.startDaytonaBridge(ctx, instanceID, p, s.clawHubURL(), clawID, clawToken, clawName, templateName); err != nil {
+	if err := s.startDaytonaBridge(ctx, instanceID, p, s.clawHubURL(), clawID, clawToken, s.modelAuthTokenForClaw(clawID), clawName, templateName); err != nil {
 		return err
 	}
 
@@ -3692,7 +3720,7 @@ func recordE2EProviderID(label, envName, id string) {
 	}
 }
 
-func (s *Server) startDaytonaBridge(ctx context.Context, instanceID string, p *daytona.Provider, hubURL, clawID, clawToken, clawName, templateName string) error {
+func (s *Server) startDaytonaBridge(ctx context.Context, instanceID string, p *daytona.Provider, hubURL, clawID, clawToken, modelAuthToken, clawName, templateName string) error {
 	prepCmd := daytonaPrepareBridgeCommand()
 	result, err := p.ExecWithTimeout(ctx, instanceID, []string{prepCmd}, 15*time.Second)
 	if err != nil {
@@ -3710,7 +3738,7 @@ func (s *Server) startDaytonaBridge(ctx context.Context, instanceID string, p *d
 	if err := p.EnsureSession(ctx, instanceID, sessionID); err != nil {
 		return fmt.Errorf("start claw-bridge session: %w", err)
 	}
-	cmdID, err := p.ExecSessionAsync(ctx, instanceID, sessionID, daytonaAsyncBridgeCommand(hubURL, clawID, clawToken, clawName, templateName))
+	cmdID, err := p.ExecSessionAsync(ctx, instanceID, sessionID, daytonaAsyncBridgeCommand(hubURL, clawID, clawToken, modelAuthToken, clawName, templateName))
 	if err != nil {
 		return fmt.Errorf("start claw-bridge async: %w", err)
 	}
@@ -3886,7 +3914,7 @@ test -x /usr/local/bin/claw-bridge || { echo "claw-bridge installed at /usr/loca
 rm -f "$PIDFILE"`
 }
 
-func daytonaAsyncBridgeCommand(hubURL, clawID, clawToken, clawName, templateName string) string {
+func daytonaAsyncBridgeCommand(hubURL, clawID, clawToken, modelAuthToken, clawName, templateName string) string {
 	return fmt.Sprintf(`export HOME=/home/daytona
 mkdir -p /home/daytona/.openclaw/workspace /home/daytona/.openclaw/run
 cd /home/daytona/.openclaw/workspace
@@ -3901,7 +3929,7 @@ if pgrep -x claw-bridge >/dev/null 2>&1; then
   exit 0
 fi
 rm -f "$PIDFILE"
-ELASTICCLAW_HUB_URL=%s ELASTICCLAW_CLAW_ID=%s ELASTICCLAW_CLAW_TOKEN=%s ELASTICCLAW_CLAW_NAME=%s ELASTICCLAW_TEMPLATE=%s \
+ELASTICCLAW_HUB_URL=%s ELASTICCLAW_CLAW_ID=%s ELASTICCLAW_CLAW_TOKEN=%s ELASTICCLAW_MODEL_AUTH_TOKEN=%s ELASTICCLAW_CLAW_NAME=%s ELASTICCLAW_TEMPLATE=%s \
 sh -c '
 PIDFILE="$1"
 LOG="$2"
@@ -3943,6 +3971,7 @@ done
 		shellQuote(hubURL),
 		shellQuote(clawID),
 		shellQuote(clawToken),
+		shellQuote(modelAuthToken),
 		shellQuote(clawName),
 		shellQuote(templateName),
 	)
@@ -4445,6 +4474,7 @@ func (s *Server) bootstrapExedev(ctx context.Context, clawID, vmName string, p *
 		ClawID:          clawID,
 		ClawName:        clawName,
 		ClawToken:       clawToken,
+		ModelAuthToken:  s.modelAuthTokenForClaw(clawID),
 		TemplateName:    templateName,
 		HubURL:          s.clawHubURL(),
 		DefaultModel:    defaultModel,
@@ -4556,6 +4586,7 @@ func (s *Server) provisionDocker(ctx context.Context, clawID string, req types.C
 		"ELASTICCLAW_HUB_URL":            dockerClawHubURL(hubCfg),
 		"ELASTICCLAW_CLAW_ID":            clawID,
 		"ELASTICCLAW_CLAW_TOKEN":         clawToken,
+		"ELASTICCLAW_MODEL_AUTH_TOKEN":   s.modelAuthTokenForClaw(clawID),
 		"ELASTICCLAW_CLAW_NAME":          clawName,
 		"ELASTICCLAW_TEMPLATE":           templateName,
 		"ELASTICCLAW_GITHUB_REPOS":       githubReposJSON,
@@ -4794,6 +4825,7 @@ func (s *Server) provisionLambdaMicroVMs(ctx context.Context, clawID string, req
 		"ELASTICCLAW_HUB_URL":            s.clawHubURL(),
 		"ELASTICCLAW_CLAW_ID":            clawID,
 		"ELASTICCLAW_CLAW_TOKEN":         clawToken,
+		"ELASTICCLAW_MODEL_AUTH_TOKEN":   s.modelAuthTokenForClaw(clawID),
 		"ELASTICCLAW_CLAW_NAME":          clawName,
 		"ELASTICCLAW_TEMPLATE":           templateName,
 		"ELASTICCLAW_GITHUB_REPOS":       githubReposJSON,
@@ -5600,6 +5632,7 @@ func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.Pr
 		ClawID:          clawID,
 		ClawName:        clawName,
 		ClawToken:       clawToken,
+		ModelAuthToken:  s.modelAuthTokenForClaw(clawID),
 		TemplateName:    templateName,
 		HubURL:          s.clawHubURL(),
 		DefaultModel:    defaultModel,

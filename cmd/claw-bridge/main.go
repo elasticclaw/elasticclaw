@@ -41,6 +41,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -2632,44 +2633,7 @@ type managedModelAuthCredential struct {
 
 const managedGrokAuthSyncInterval = 5 * time.Minute
 
-func syncManagedGrokOAuthCredential() error {
-	if strings.TrimSpace(os.Getenv("ELASTICCLAW_MODEL_AUTH_PROVIDER")) != "grok" {
-		return nil
-	}
-	hubURL := strings.TrimRight(strings.TrimSpace(os.Getenv("ELASTICCLAW_HUB_URL")), "/")
-	clawID := strings.TrimSpace(os.Getenv("ELASTICCLAW_CLAW_ID"))
-	clawToken := strings.TrimSpace(os.Getenv("ELASTICCLAW_CLAW_TOKEN"))
-	if hubURL == "" || clawID == "" || clawToken == "" {
-		return fmt.Errorf("managed Grok auth requires hub URL, claw ID, and claw token")
-	}
-	if strings.HasPrefix(hubURL, "ws://") {
-		hubURL = "http://" + strings.TrimPrefix(hubURL, "ws://")
-	} else if strings.HasPrefix(hubURL, "wss://") {
-		hubURL = "https://" + strings.TrimPrefix(hubURL, "wss://")
-	}
-	req, err := http.NewRequest(http.MethodPost, hubURL+"/api/internal/model-auth/credential", nil)
-	if err != nil {
-		return err
-	}
-	req.Header.Set("X-Claw-Token", clawToken)
-	req.Header.Set("X-ElasticClaw-Claw-ID", clawID)
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return fmt.Errorf("request managed Grok credential: %w", err)
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if err != nil {
-		return fmt.Errorf("read managed Grok credential: %w", err)
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("managed Grok credential returned status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
-	}
-	var credential managedModelAuthCredential
-	if err := json.Unmarshal(body, &credential); err != nil {
-		return fmt.Errorf("parse managed Grok credential: %w", err)
-	}
+func applyManagedGrokOAuthCredential(credential managedModelAuthCredential) error {
 	if credential.Provider != "xai" || credential.Access == "" || credential.Expires <= 0 {
 		return fmt.Errorf("managed Grok credential response is incomplete")
 	}
@@ -2747,18 +2711,14 @@ func writeManagedGrokCredentialToCLI(home string, credential managedModelAuthCre
 	if err := json.Unmarshal(data, &document); err != nil {
 		return err
 	}
-	for _, raw := range document {
-		entry, ok := raw.(map[string]any)
-		if !ok {
-			continue
-		}
-		if refresh, _ := entry["refresh_token"].(string); refresh == "" {
-			continue
-		}
-		entry["key"] = credential.Access
-		entry["refresh_token"] = "elasticclaw-managed"
-		entry["expires_at"] = time.UnixMilli(credential.Expires).UTC().Format(time.RFC3339Nano)
+	const canonicalCredential = "https://auth.x.ai::b1a00492-073a-47ea-816f-4c329264a828"
+	entry, ok := document[canonicalCredential].(map[string]any)
+	if !ok {
+		return fmt.Errorf("Grok auth file has no canonical xAI OAuth credential")
 	}
+	entry["key"] = credential.Access
+	entry["refresh_token"] = "elasticclaw-managed"
+	entry["expires_at"] = time.UnixMilli(credential.Expires).UTC().Format(time.RFC3339Nano)
 	updated, err := json.MarshalIndent(document, "", "  ")
 	if err != nil {
 		return err
@@ -2769,28 +2729,6 @@ func writeManagedGrokCredentialToCLI(home string, credential managedModelAuthCre
 		return err
 	}
 	return os.Rename(tempPath, authPath)
-}
-
-func runManagedGrokAuthSync(ctx context.Context) {
-	if strings.TrimSpace(os.Getenv("ELASTICCLAW_MODEL_AUTH_PROVIDER")) != "grok" {
-		return
-	}
-	syncOnce := func() {
-		if err := syncManagedGrokOAuthCredential(); err != nil {
-			log.Printf("[model-auth] Grok credential sync failed: %v", err)
-		}
-	}
-	syncOnce()
-	ticker := time.NewTicker(managedGrokAuthSyncInterval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			syncOnce()
-		}
-	}
 }
 
 var openClawWorkspaceManagedFiles = map[string]bool{
@@ -3484,10 +3422,6 @@ func runBootstrap() error {
 	if err := syncOpenClawOAuthAuth(); err != nil {
 		return err
 	}
-	if err := syncManagedGrokOAuthCredential(); err != nil {
-		log.Printf("[bootstrap] managed Grok auth sync warning: %v (will retry in bridge loop)", err)
-	}
-
 	if err := syncStagedWorkspaceToOpenClawWorkspace(); err != nil {
 		return fmt.Errorf("syncStagedWorkspaceToOpenClawWorkspace: %w", err)
 	}
@@ -3730,6 +3664,7 @@ func main() {
 	hubURL := mustEnv("ELASTICCLAW_HUB_URL")
 	clawID := mustEnv("ELASTICCLAW_CLAW_ID")
 	token := mustEnv("ELASTICCLAW_CLAW_TOKEN")
+	modelAuthToken := strings.TrimSpace(os.Getenv("ELASTICCLAW_MODEL_AUTH_TOKEN"))
 	gatewayAddr := envOr("ELASTICCLAW_GATEWAY", "localhost:18789")
 	clawName := envOr("ELASTICCLAW_CLAW_NAME", clawID)
 	templateName := envOr("ELASTICCLAW_TEMPLATE", "")
@@ -3776,7 +3711,6 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	go runManagedGrokAuthSync(ctx)
 
 	// Establish the persistent gateway session before entering the hub loop.
 	// Retry until we succeed (gateway may not be ready yet).
@@ -3813,7 +3747,7 @@ func main() {
 	go runStatusChannel(ctx, wsURL, clawID, clawName, templateName, token)
 
 	for {
-		if err := runHubLoop(ctx, wsURL, clawID, clawName, templateName, token, gwClient, gwSession, proxy, queue, deduper); err != nil {
+		if err := runHubLoop(ctx, wsURL, clawID, clawName, templateName, token, modelAuthToken, gwClient, gwSession, proxy, queue, deduper); err != nil {
 			if ctx.Err() != nil {
 				log.Printf("shutting down")
 				return
@@ -3942,7 +3876,7 @@ func runStatusChannel(ctx context.Context, wsURL, clawID, clawName, templateName
 	}
 }
 
-func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, token string, gwClient *gatewayClient, gwSession *gatewaySession, proxy *httpProxy, queue *msgQueue, deduper *messageDeduper) error {
+func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, token, modelAuthToken string, gwClient *gatewayClient, gwSession *gatewaySession, proxy *httpProxy, queue *msgQueue, deduper *messageDeduper) error {
 	conn, _, err := websocket.Dial(ctx, wsURL, &websocket.DialOptions{
 		HTTPHeader: http.Header{
 			"User-Agent":                 {"claw-bridge/1.0"},
@@ -3964,11 +3898,12 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 	reg := hubMsg{
 		Type: "register",
 		Payload: mustJSON(map[string]interface{}{
-			"claw_id":       clawID,
-			"name":          clawName,
-			"template":      templateName,
-			"token":         token,
-			"gateway_ready": gwSession.IsReady(),
+			"claw_id":          clawID,
+			"name":             clawName,
+			"template":         templateName,
+			"token":            token,
+			"model_auth_token": modelAuthToken,
+			"gateway_ready":    gwSession.IsReady(),
 		}),
 	}
 	if err := writeHub(reg); err != nil {
@@ -3982,6 +3917,24 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 	}
 	if ack.Type != "registered" {
 		return fmt.Errorf("expected registered, got %s", ack.Type)
+	}
+	var registered struct {
+		ModelAuthCredential *managedModelAuthCredential `json:"model_auth_credential"`
+		ModelAuthError      string                      `json:"model_auth_error"`
+	}
+	if len(ack.Payload) > 0 && string(ack.Payload) != "null" {
+		if err := json.Unmarshal(ack.Payload, &registered); err != nil {
+			return fmt.Errorf("parse registered payload: %w", err)
+		}
+	}
+	var lastModelAuthSync atomic.Int64
+	if registered.ModelAuthCredential != nil {
+		if err := applyManagedGrokOAuthCredential(*registered.ModelAuthCredential); err != nil {
+			return fmt.Errorf("apply registered model credential: %w", err)
+		}
+		lastModelAuthSync.Store(time.Now().UnixNano())
+	} else if registered.ModelAuthError != "" {
+		log.Printf("[model-auth] %s", registered.ModelAuthError)
 	}
 	log.Printf("registered with hub as %s", clawID)
 
@@ -4044,6 +3997,13 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 		connCancel()
 		conn.CloseNow()
 	}, func() {
+		lastSyncUnixNano := lastModelAuthSync.Load()
+		if strings.TrimSpace(os.Getenv("ELASTICCLAW_MODEL_AUTH_PROVIDER")) == "grok" &&
+			(lastSyncUnixNano == 0 || time.Since(time.Unix(0, lastSyncUnixNano)) >= managedGrokAuthSyncInterval) {
+			if err := writeHub(hubMsg{Type: "model_auth_sync"}); err == nil {
+				lastModelAuthSync.Store(time.Now().UnixNano())
+			}
+		}
 		go gwSession.refreshContextUsage(connCtx)
 		health := !gatewayProcessExited() && checkGateway(gwClient.addr)
 		cu := gwSession.ContextUsage()
@@ -4139,6 +4099,16 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 					queue.pushReply(reply)
 				}
 			}(msg.Payload)
+
+		case "model_auth_credential":
+			var credential managedModelAuthCredential
+			if err := json.Unmarshal(msg.Payload, &credential); err != nil {
+				log.Printf("[model-auth] invalid managed credential: %v", err)
+			} else if err := applyManagedGrokOAuthCredential(credential); err != nil {
+				log.Printf("[model-auth] apply managed credential: %v", err)
+			} else {
+				lastModelAuthSync.Store(time.Now().UnixNano())
+			}
 
 		case "http_proxy_res":
 			var res httpProxyRes

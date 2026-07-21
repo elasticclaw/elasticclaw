@@ -11,10 +11,11 @@ import (
 // It is intentionally a pure value type — no DB, no server, no side effects.
 type BootstrapParams struct {
 	// Claw identity
-	ClawID       string
-	ClawName     string
-	ClawToken    string
-	TemplateName string
+	ClawID         string
+	ClawName       string
+	ClawToken      string
+	ModelAuthToken string
+	TemplateName   string
 
 	// Hub connectivity
 	HubURL string
@@ -435,6 +436,7 @@ set -euo pipefail
 export ELASTICCLAW_HUB_URL=%s
 export ELASTICCLAW_CLAW_ID=%s
 export ELASTICCLAW_CLAW_TOKEN=%s
+export ELASTICCLAW_MODEL_AUTH_TOKEN=%s
 export ELASTICCLAW_CLAW_NAME=%s
 export ELASTICCLAW_TEMPLATE=%s
 export ELASTICCLAW_GATEWAY_PASSWORD=%s
@@ -505,6 +507,7 @@ echo "ElasticClaw connector installed"
   printf 'export ELASTICCLAW_HUB_URL=%%q\n' "$ELASTICCLAW_HUB_URL"
   printf 'export ELASTICCLAW_CLAW_ID=%%q\n' "$ELASTICCLAW_CLAW_ID"
   printf 'export ELASTICCLAW_CLAW_TOKEN=%%q\n' "$ELASTICCLAW_CLAW_TOKEN"
+  printf 'export ELASTICCLAW_MODEL_AUTH_TOKEN=%%q\n' "$ELASTICCLAW_MODEL_AUTH_TOKEN"
   printf 'export ELASTICCLAW_CLAW_NAME=%%q\n' "$ELASTICCLAW_CLAW_NAME"
   printf 'export ELASTICCLAW_TEMPLATE=%%q\n' "$ELASTICCLAW_TEMPLATE"
   printf 'export ELASTICCLAW_GATEWAY_PASSWORD=%%q\n' "$ELASTICCLAW_GATEWAY_PASSWORD"
@@ -573,7 +576,7 @@ done
 echo "ERROR: timed out waiting for claw-bridge bootstrap to complete"
 exit 1
 `,
-		shellQuote(p.HubURL), shellQuote(p.ClawID), shellQuote(p.ClawToken), shellQuote(p.ClawName), shellQuote(p.TemplateName), shellQuote(p.GatewayPassword),
+		shellQuote(p.HubURL), shellQuote(p.ClawID), shellQuote(p.ClawToken), shellQuote(p.ModelAuthToken), shellQuote(p.ClawName), shellQuote(p.TemplateName), shellQuote(p.GatewayPassword),
 		shellQuote(p.DefaultModel), shellQuote(p.LLMProvider), shellQuote(nixFlag), shellQuote(dockerFlag),
 		p.LLMKeyEnv, p.ModelAuthEnv, linearEnvLine, apiKeyAuthSyncLine, oauthAuthSyncLine, shellQuote(p.OnboardFlags), providerConfigLine,
 		shellQuote(p.BridgeURL),

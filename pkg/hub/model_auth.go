@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -209,24 +210,7 @@ type managedModelAuthCredential struct {
 
 const managedGrokRefreshSkew = 30 * time.Minute
 
-func (s *Server) handleManagedModelAuthCredential(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	clawID := strings.TrimSpace(r.Header.Get("X-ElasticClaw-Claw-ID"))
-	if clawID == "" {
-		http.Error(w, "missing claw identity", http.StatusBadRequest)
-		return
-	}
-	credential, err := s.managedGrokCredential(r.Context(), clawID)
-	if err != nil {
-		logModelAuthRefreshError(clawID, err)
-		http.Error(w, "managed model authentication is unavailable", http.StatusBadGateway)
-		return
-	}
-	jsonOK(w, credential)
-}
+var errManagedGrokNotConfigured = errors.New("managed Grok authentication is not configured")
 
 func logModelAuthRefreshError(clawID string, err error) {
 	shortID := clawID
@@ -247,26 +231,36 @@ func (s *Server) managedGrokCredential(ctx context.Context, clawID string) (*man
 
 	// xAI refresh tokens rotate on every use. Serialize the complete read,
 	// refresh, and persistence sequence so concurrent claws never reuse one.
+	// A hub owns its SQLite database, config file, and listener as one process;
+	// sharing those paths between multiple hub processes is unsupported.
 	s.modelAuthRefreshMu.Lock()
 	defer s.modelAuthRefreshMu.Unlock()
 
 	s.mu.RLock()
 	activeKey := resolveActiveKey(s.hubCfg.LLMKeys, selectedKeyName)
 	var profile types.ModelAuthProfileConfig
+	var pendingAuthState string
 	if activeKey != nil && activeKey.Provider == "grok" && activeKey.AuthProfile != "" {
 		for _, candidate := range s.hubCfg.ModelAuthProfiles {
 			if candidate != nil && candidate.Name == activeKey.AuthProfile && candidate.Provider == "grok" {
 				profile = *candidate
+				pendingAuthState = s.modelAuthPending[candidate.Name]
 				break
 			}
 		}
 	}
 	s.mu.RUnlock()
 	if activeKey == nil || activeKey.Provider != "grok" || activeKey.AuthProfile == "" {
-		return nil, fmt.Errorf("claw does not use a managed Grok auth profile")
+		return nil, errManagedGrokNotConfigured
 	}
 	if profile.Name == "" || profile.AuthState == "" {
 		return nil, fmt.Errorf("Grok auth profile %q has no stored credential", activeKey.AuthProfile)
+	}
+	if pendingAuthState != "" {
+		profile.AuthState = pendingAuthState
+		if err := s.saveModelAuthProfile("grok", profile.Name, profile.Mode, pendingAuthState); err != nil {
+			log.Printf("[model-auth] retry persistence for Grok profile %q: %v", profile.Name, err)
+		}
 	}
 
 	bundle, authFile, authDocument, authEntry, expiresAt, err := decodeManagedGrokAuth(profile.AuthState)
@@ -314,7 +308,11 @@ func (s *Server) managedGrokCredential(ctx context.Context, clawID string) (*man
 			return nil, err
 		}
 		if err := s.saveModelAuthProfile("grok", profile.Name, profile.Mode, updatedState); err != nil {
-			return nil, fmt.Errorf("persist refreshed Grok OAuth: %w", err)
+			// The old refresh token has already been consumed. Retain the rotated
+			// state in memory and keep serving its access token while later claw
+			// syncs retry durable persistence.
+			s.rememberPendingModelAuthProfile("grok", profile.Name, profile.Mode, updatedState)
+			log.Printf("[model-auth] persist refreshed Grok OAuth profile %q: %v (retained in memory for retry)", profile.Name, err)
 		}
 		accessToken = token.AccessToken
 	}
@@ -359,15 +357,7 @@ func decodeManagedGrokAuth(authState string) (cliAuthBundle, string, map[string]
 		entry = candidate
 	}
 	if entry == nil {
-		for _, candidate := range document {
-			if value, ok := candidate.(map[string]any); ok && stringFromMap(value, "key") != "" {
-				entry = value
-				break
-			}
-		}
-	}
-	if entry == nil {
-		return bundle, "", nil, nil, time.Time{}, fmt.Errorf("Grok auth file has no OAuth credential")
+		return bundle, "", nil, nil, time.Time{}, fmt.Errorf("Grok auth file has no canonical xAI OAuth credential")
 	}
 	expiresAt, err := time.Parse(time.RFC3339Nano, stringFromMap(entry, "expires_at"))
 	if err != nil {
@@ -954,7 +944,40 @@ func (s *Server) saveModelAuthProfile(provider, name, mode, authState string) er
 		return err
 	}
 	s.hubCfg = &updatedCfg
+	delete(s.modelAuthPending, name)
 	return nil
+}
+
+func (s *Server) rememberPendingModelAuthProfile(provider, name, mode, authState string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	updatedCfg := *s.hubCfg
+	profiles := make([]*types.ModelAuthProfileConfig, len(updatedCfg.ModelAuthProfiles))
+	var found *types.ModelAuthProfileConfig
+	for i, profile := range updatedCfg.ModelAuthProfiles {
+		if profile == nil {
+			continue
+		}
+		copy := *profile
+		profiles[i] = &copy
+		if copy.Name == name {
+			found = &copy
+		}
+	}
+	if found == nil {
+		found = &types.ModelAuthProfileConfig{Name: name}
+		profiles = append(profiles, found)
+	}
+	found.Provider = provider
+	found.Mode = mode
+	found.AuthState = authState
+	found.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+	updatedCfg.ModelAuthProfiles = profiles
+	s.hubCfg = &updatedCfg
+	if s.modelAuthPending == nil {
+		s.modelAuthPending = map[string]string{}
+	}
+	s.modelAuthPending[name] = authState
 }
 
 func buildModelAuthEnv(cfg *types.HubConfig, selectedKeyName string) string {

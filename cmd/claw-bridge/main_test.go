@@ -89,7 +89,16 @@ func TestWriteManagedGrokCredentialToCLI(t *testing.T) {
 		t.Fatal(err)
 	}
 	authPath := filepath.Join(authDir, "auth.json")
-	if err := os.WriteFile(authPath, []byte(`{"profile":{"key":"access","refresh_token":"rotating-secret","metadata":"keep"}}`), 0600); err != nil {
+	const canonical = "https://auth.x.ai::b1a00492-073a-47ea-816f-4c329264a828"
+	document := map[string]any{
+		canonical:   map[string]any{"key": "access", "refresh_token": "rotating-secret", "metadata": "keep"},
+		"unrelated": map[string]any{"key": "other-access", "refresh_token": "other-refresh"},
+	}
+	initial, err := json.Marshal(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(authPath, initial, 0600); err != nil {
 		t.Fatal(err)
 	}
 	credential := managedModelAuthCredential{Provider: "xai", Access: "current-access", Expires: 1893553445000}
@@ -102,6 +111,28 @@ func TestWriteManagedGrokCredentialToCLI(t *testing.T) {
 	}
 	if strings.Contains(string(data), "rotating-secret") || !strings.Contains(string(data), "elasticclaw-managed") || !strings.Contains(string(data), "current-access") || !strings.Contains(string(data), "2030-01-02T03:04:05Z") || !strings.Contains(string(data), `"metadata": "keep"`) {
 		t.Fatalf("unexpected managed Grok auth: %s", data)
+	}
+	var got map[string]map[string]any
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got["unrelated"]["key"] != "other-access" || got["unrelated"]["refresh_token"] != "other-refresh" {
+		t.Fatalf("unrelated Grok credential was changed: %#v", got["unrelated"])
+	}
+}
+
+func TestWriteManagedGrokCredentialToCLIRequiresCanonicalEntry(t *testing.T) {
+	home := t.TempDir()
+	authDir := filepath.Join(home, ".grok")
+	if err := os.MkdirAll(authDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(authDir, "auth.json"), []byte(`{"unrelated":{"refresh_token":"keep"}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	err := writeManagedGrokCredentialToCLI(home, managedModelAuthCredential{Provider: "xai", Access: "access", Expires: 1893553445000})
+	if err == nil || !strings.Contains(err.Error(), "canonical xAI") {
+		t.Fatalf("error = %v, want missing canonical credential", err)
 	}
 }
 
@@ -1252,7 +1283,7 @@ func TestRunHubLoopDoesNotLeakKeepaliveGoroutinesAcrossReconnects(t *testing.T) 
 	before := stableGoroutineCount(t)
 	const cycles = 5
 	for range cycles {
-		err := runHubLoop(ctx, wsURL, "claw-test", "test-claw", "test-template", "tok", gwClient, gwSession, proxy, queue, newMessageDeduper())
+		err := runHubLoop(ctx, wsURL, "claw-test", "test-claw", "test-template", "tok", "", gwClient, gwSession, proxy, queue, newMessageDeduper())
 		if err == nil {
 			t.Fatal("runHubLoop returned nil error, want read error after hub-side close")
 		}

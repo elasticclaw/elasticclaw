@@ -111,20 +111,99 @@ func TestManagedGrokCredentialSerializesRefreshAndPersistsRotation(t *testing.T)
 	}
 }
 
-func TestManagedModelAuthCredentialRequiresClawAuth(t *testing.T) {
+func TestManagedModelAuthCredentialHasNoHTTPRoute(t *testing.T) {
 	s, _ := NewTestServerWithConfig(t, &types.HubConfig{ClawToken: "claw-token"}, "", "", "")
 	req := httptest.NewRequest(http.MethodPost, "/api/internal/model-auth/credential", nil)
 	rec := httptest.NewRecorder()
 	s.Handler().ServeHTTP(rec, req)
-	if rec.Code != http.StatusUnauthorized {
-		t.Fatalf("status = %d, want %d", rec.Code, http.StatusUnauthorized)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusNotFound)
 	}
-	req = httptest.NewRequest(http.MethodPost, "/api/internal/model-auth/credential", nil)
-	req.Header.Set("X-Claw-Token", "claw-token")
-	rec = httptest.NewRecorder()
-	s.Handler().ServeHTTP(rec, req)
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("authenticated status = %d, want %d for missing claw identity", rec.Code, http.StatusBadRequest)
+}
+
+func TestModelAuthTokenIsBoundToClawIdentity(t *testing.T) {
+	s, _ := NewTestServerWithConfig(t, &types.HubConfig{Token: "private-hub-token"}, "", "", "")
+	token := s.modelAuthTokenForClaw("claw-a")
+	if token == "" || !s.validModelAuthToken("claw-a", token) {
+		t.Fatal("derived token did not authenticate its claw")
+	}
+	if s.validModelAuthToken("claw-b", token) {
+		t.Fatal("one claw's model auth token authenticated another claw")
+	}
+}
+
+func TestDecodeManagedGrokAuthRequiresCanonicalCredential(t *testing.T) {
+	authData, err := json.Marshal(map[string]any{
+		"unrelated-a": map[string]any{"refresh_token": "one", "expires_at": time.Now().UTC().Format(time.RFC3339Nano)},
+		"unrelated-b": map[string]any{"refresh_token": "two", "expires_at": time.Now().UTC().Format(time.RFC3339Nano)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bundleData, err := json.Marshal(cliAuthBundle{Files: map[string]string{
+		".grok/auth.json": base64.StdEncoding.EncodeToString(authData),
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, _, _, _, err = decodeManagedGrokAuth(base64.StdEncoding.EncodeToString(bundleData))
+	if err == nil || !strings.Contains(err.Error(), "canonical xAI") {
+		t.Fatalf("error = %v, want missing canonical credential", err)
+	}
+}
+
+func TestManagedGrokCredentialRetainsRotationWhenConfigSaveFails(t *testing.T) {
+	failingPath := t.TempDir()
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", failingPath)
+	profileName := "grok-oauth"
+	cfg := &types.HubConfig{
+		LLMKeys: types.LLMKeysList{
+			{Name: "grok", Provider: "grok", AuthProfile: profileName, Default: true},
+		},
+		ModelAuthProfiles: []*types.ModelAuthProfileConfig{
+			{Name: profileName, Provider: "grok", Mode: "device", AuthState: testGrokAuthState(t, "old-access", "refresh-1", time.Now().Add(-time.Minute))},
+		},
+	}
+	s, db := NewTestServerWithConfig(t, cfg, "", "", "")
+	if _, err := db.Exec(`INSERT INTO claws(id,tenant_id,name,llm_key,status,created_at) VALUES(?,?,?,?,?,datetime('now'))`,
+		"claw-grok", "test-tenant-id", "grok claw", "grok", "connected"); err != nil {
+		t.Fatal(err)
+	}
+
+	var refreshes int
+	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		refreshes++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"access_token":"new-access","refresh_token":"refresh-2","expires_in":3600}`))
+	}))
+	defer tokenServer.Close()
+	s.grokTokenEndpoint = tokenServer.URL
+	ctx := context.WithValue(context.Background(), ctxTenantKey{}, "test-tenant-id")
+
+	credential, err := s.managedGrokCredential(ctx, "claw-grok")
+	if err != nil {
+		t.Fatalf("managed credential after save failure: %v", err)
+	}
+	if credential.Access != "new-access" || refreshes != 1 || s.modelAuthPending[profileName] == "" {
+		t.Fatalf("credential=%#v refreshes=%d pending=%t", credential, refreshes, s.modelAuthPending[profileName] != "")
+	}
+
+	validPath := filepath.Join(t.TempDir(), "hub.yaml")
+	if err := os.Setenv("ELASTICCLAW_HUB_CONFIG", validPath); err != nil {
+		t.Fatal(err)
+	}
+	credential, err = s.managedGrokCredential(ctx, "claw-grok")
+	if err != nil {
+		t.Fatalf("managed credential after persistence recovery: %v", err)
+	}
+	if credential.Access != "new-access" || refreshes != 1 {
+		t.Fatalf("credential=%#v refreshes=%d, want retained credential without another refresh", credential, refreshes)
+	}
+	if s.modelAuthPending[profileName] != "" {
+		t.Fatal("pending rotated credential was not cleared after persistence recovered")
+	}
+	if _, err := os.Stat(validPath); err != nil {
+		t.Fatalf("persisted config: %v", err)
 	}
 }
 
