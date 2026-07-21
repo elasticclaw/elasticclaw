@@ -7,7 +7,9 @@ import (
 	"strings"
 	"testing"
 
-	daytonaerrors "github.com/daytonaio/daytona/libs/sdk-go/pkg/errors"
+	"github.com/daytona/clients/sdk-go/pkg/daytona"
+	daytonaerrors "github.com/daytona/clients/sdk-go/pkg/errors"
+	providertypes "github.com/elasticclaw/elasticclaw/pkg/types"
 )
 
 func TestBuildOpenClawEnvFileIncludesWorkflowSecrets(t *testing.T) {
@@ -87,5 +89,38 @@ func TestIsTransientExecError(t *testing.T) {
 				t.Fatalf("IsTransientExecError(%v) = %v, want %v", tt.err, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestInstanceStatus(t *testing.T) {
+	tests := []struct {
+		name  string
+		state daytona.SandboxState
+		want  providertypes.InstanceStatus
+	}{
+		{name: "started", state: daytona.SandboxStateStarted, want: providertypes.StatusRunning},
+		{name: "stopped", state: daytona.SandboxStateStopped, want: providertypes.StatusStopped},
+		{name: "paused", state: daytona.SandboxStatePaused, want: providertypes.StatusStopped},
+		{name: "archived", state: daytona.SandboxStateArchived, want: providertypes.StatusStopped},
+		{name: "error", state: daytona.SandboxStateError, want: providertypes.StatusError},
+		{name: "building", state: daytona.SandboxStatePendingBuild, want: providertypes.StatusStarting},
+		{name: "build failed", state: daytona.SandboxStateBuildFailed, want: providertypes.StatusError},
+		{name: "unknown", state: daytona.SandboxStateUnknown, want: providertypes.StatusUnknown},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := instanceStatus(tt.state); got != tt.want {
+				t.Fatalf("instanceStatus(%q) = %q, want %q", tt.state, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestIsDaytonaNotFound(t *testing.T) {
+	if !isDaytonaNotFound(fmt.Errorf("get sandbox: %w", daytonaerrors.NewDaytonaNotFoundError("missing", nil))) {
+		t.Fatal("wrapped DaytonaNotFoundError should be recognized")
+	}
+	if isDaytonaNotFound(daytonaerrors.NewDaytonaError("not found in unrelated message", http.StatusBadRequest, nil)) {
+		t.Fatal("non-404 Daytona error should not be recognized as not found")
 	}
 }
