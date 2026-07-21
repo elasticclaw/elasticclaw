@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react"
 import { usePathname, useRouter, useSearchParams } from "next/navigation"
+import { Info } from "lucide-react"
 import {
   Bar,
   BarChart,
@@ -210,7 +211,7 @@ export function AnalyticsCommandCenter({ workspaceScope }: { workspaceScope?: st
           ),
           fetchAnalyticsEffectiveness(effectiveFilters, { signal: controller.signal }),
           fetchGeneralStats(effectiveFilters, { signal: controller.signal }),
-          fetchAnalyticsCostDrivers(effectiveFilters, "factory", { signal: controller.signal }),
+          fetchAnalyticsCostDrivers(effectiveFilters, "workflow", { signal: controller.signal }),
           fetchTaskRuns(runFilters, { signal: controller.signal }),
           options ? Promise.resolve(options) : fetchTaskRunFilterOptions({ signal: controller.signal }),
         ])
@@ -314,6 +315,7 @@ export function AnalyticsCommandCenter({ workspaceScope }: { workspaceScope?: st
           <KpiGroup title="Effectiveness">
             <Kpi
               label="Runs"
+              title="Task runs started in the selected period."
               value={summary?.totalRuns}
               good
               change={calculateDelta(summary?.totalRuns, summary?.prior?.totalRuns)}
@@ -321,11 +323,12 @@ export function AnalyticsCommandCenter({ workspaceScope }: { workspaceScope?: st
             />
             <Kpi
               label="Success rate"
+              title="Of the runs that finished, the share that delivered their work (pull request merged or closed) — with or without human help."
               value={formatPercent(effect?.successRate)}
               good
               onClick={() => setFilters({ status: undefined })}
             />
-            <Kpi label="Merge rate" value={formatPercent(effect?.mergeRate)} good />
+            <Kpi label="Merge rate" title="Of the runs that opened a pull request, the share whose pull request was merged." value={formatPercent(effect?.mergeRate)} good />
             <Kpi
               label="Avg ticket to PR"
               title="Average time from the ticket being created to the PR being opened (ready for review)."
@@ -340,9 +343,10 @@ export function AnalyticsCommandCenter({ workspaceScope }: { workspaceScope?: st
             />
           </KpiGroup>
           <KpiGroup title="Cost" columns="sm:grid-cols-2">
-            <Kpi label="Total cost" value={usdWhole.format(totalCost)} change={costDelta} cost />
+            <Kpi label="Total cost" title="Total AI spend of the runs in the selected period." value={usdWhole.format(totalCost)} change={costDelta} cost />
             <Kpi
               label="Cost per run"
+              title="Total cost divided by the number of runs."
               value={usd.format(summary?.totalRuns ? totalCost / summary.totalRuns : 0)}
               cost
             />
@@ -350,10 +354,10 @@ export function AnalyticsCommandCenter({ workspaceScope }: { workspaceScope?: st
         </div>
 
         <div className="grid gap-5 lg:grid-cols-2">
-          <ChartCard title="Run outcomes over time">
+          <ChartCard title="Run outcomes over time" info="Each bar is a day. Clean = delivered with no human help; Human in the loop = a human helped via the pull request; Warning = a human had to step in from the dashboard; Failed = nothing was delivered.">
             <OutcomesChart effect={effect} />
           </ChartCard>
-          <ChartCard title="Delivery funnel">
+          <ChartCard title="Delivery funnel" info="How many runs made it through each stage, from starting to a merged pull request. Percentages show the conversion from the previous stage.">
             <DeliveryFunnel effect={effect} />
           </ChartCard>
         </div>
@@ -375,10 +379,10 @@ export function AnalyticsCommandCenter({ workspaceScope }: { workspaceScope?: st
         />
 
         <div className="grid gap-5 lg:grid-cols-2">
-          <ChartCard title="Daily cost by model">
+          <ChartCard title="Daily cost by model" info="How much was spent per day, split by AI model.">
             <DailyCostChart costs={costs} modelData={modelData} />
           </ChartCard>
-          <ChartCard title="Cost per merged PR">
+          <ChartCard title="Cost per merged PR" info="Weekly average of what one merged pull request cost. The reference line is the period average.">
             <CostPerMergedPrChart effect={effect} />
           </ChartCard>
         </div>
@@ -465,19 +469,19 @@ function useHeatmap(costs?: CostOverview) {
 }
 
 function Heatmap({ heatmap, maxCost, onSelectDay }: { heatmap: ReturnType<typeof useHeatmap>; maxCost: number; onSelectDay: (day: string) => void }) {
-  return <section className="rounded-lg border bg-card p-4"><h2 className="mb-4 text-sm font-semibold">Cost by day</h2><div className="grid grid-cols-[24px_1fr] gap-2"><div className="pt-5 text-[10px] text-muted-foreground"><div className="grid grid-rows-7"><span /><span>Mon</span><span /><span>Wed</span><span /><span>Fri</span><span /></div></div><div><div className="relative mb-1 h-4 text-[10px] text-muted-foreground">{heatmap.monthLabels.map(({ week, label }) => <span key={`${week}-${label}`} className="absolute" style={{ left: `${(week / 52) * 100}%` }}>{label}</span>)}</div><div className="grid grid-flow-col grid-cols-[repeat(52,minmax(0,1fr))] grid-rows-7 gap-1">{heatmap.days.map(({ iso, point }) => { const level = point?.costUsd ? Math.min(5, Math.ceil((point.costUsd / maxCost) * 5)) : 0; return <button key={iso} title={`${iso}: ${usd.format(point?.costUsd ?? 0)} · ${point?.runCount ?? 0} runs`} onClick={() => onSelectDay(iso)} className="aspect-square rounded-sm border border-black/5" style={{ background: level ? `var(--heatmap-${level})` : "var(--muted)" }} /> })}</div></div></div><div className="mt-3 flex justify-end gap-1 text-xs text-muted-foreground">Less {Array.from({ length: 5 }, (_, index) => <i key={index} className="size-3 rounded-sm" style={{ background: `var(--heatmap-${index + 1})` }} />)} More</div></section>
+  return <section className="rounded-lg border bg-card p-4"><div className="mb-4 flex items-center gap-1"><h2 className="text-sm font-semibold">Cost by day</h2><span title="Each square is a day; darker means more spend. Click a day to focus the whole page on it."><Info className="size-3.5 text-muted-foreground" /></span></div><div className="grid grid-cols-[24px_1fr] gap-2"><div className="pt-5 text-[10px] text-muted-foreground"><div className="grid grid-rows-7"><span /><span>Mon</span><span /><span>Wed</span><span /><span>Fri</span><span /></div></div><div><div className="relative mb-1 h-4 text-[10px] text-muted-foreground">{heatmap.monthLabels.map(({ week, label }) => <span key={`${week}-${label}`} className="absolute" style={{ left: `${(week / 52) * 100}%` }}>{label}</span>)}</div><div className="grid grid-flow-col grid-cols-[repeat(52,minmax(0,1fr))] grid-rows-7 gap-1">{heatmap.days.map(({ iso, point }) => { const level = point?.costUsd ? Math.min(5, Math.ceil((point.costUsd / maxCost) * 5)) : 0; return <button key={iso} title={`${iso}: ${usd.format(point?.costUsd ?? 0)} · ${point?.runCount ?? 0} runs`} onClick={() => onSelectDay(iso)} className="aspect-square rounded-sm border border-black/5" style={{ background: level ? `var(--heatmap-${level})` : "var(--muted)" }} /> })}</div></div></div><div className="mt-3 flex justify-end gap-1 text-xs text-muted-foreground">Less {Array.from({ length: 5 }, (_, index) => <i key={index} className="size-3 rounded-sm" style={{ background: `var(--heatmap-${index + 1})` }} />)} More</div></section>
 }
 
 function useModelData(costs?: CostOverview) { return useMemo(() => { const models = (costs?.seriesByModel ?? []).slice(0, 4); return (costs?.dailySeries ?? []).map((day, index) => ({ date: day.date, Other: Math.max(0, day.costUsd - models.reduce((sum, model) => sum + (model.dailySeries[index]?.costUsd ?? 0), 0)), ...Object.fromEntries(models.map((model) => [model.model, model.dailySeries[index]?.costUsd ?? 0])) })) }, [costs]) }
-function DailyCostChart({ costs, modelData }: { costs?: CostOverview; modelData: Record<string, string | number>[] }) { const labels = [...(costs?.seriesByModel ?? []).slice(0, 4).map((item) => item.model), "Other"]; return <ChartContainer config={chartConfig} className="h-64 w-full"><BarChart data={modelData}><CartesianGrid vertical={false} /><XAxis dataKey="date" tickFormatter={formatDate} /><YAxis /><ChartTooltip content={<ChartTooltipContent />} /><Legend />{labels.map((label, index) => <Bar key={label} dataKey={label} stackId="cost" fill={`var(--chart-${index + 1})`} />)}</BarChart></ChartContainer> }
+function DailyCostChart({ costs, modelData }: { costs?: CostOverview; modelData: Record<string, string | number>[] }) { const labels = [...(costs?.seriesByModel ?? []).slice(0, 4).map((item) => item.model), "Other"]; return <ChartContainer config={chartConfig} className="h-64 w-full"><BarChart data={modelData}><CartesianGrid vertical={false} /><XAxis dataKey="date" tickFormatter={formatDate} /><YAxis /><ChartTooltip content={<ChartTooltipContent />} /><Legend />{labels.map((label, index) => <Bar key={label} dataKey={label} name={label} stackId="cost" fill={`var(--chart-${index + 1})`} />)}</BarChart></ChartContainer> }
 function OutcomesChart({ effect }: { effect?: AnalyticsEffectiveness }) { return <ChartContainer config={chartConfig} className="h-64 w-full"><BarChart data={effect?.outcomesByDay}><CartesianGrid vertical={false} /><XAxis dataKey="date" tickFormatter={formatDate} /><YAxis allowDecimals={false} /><ChartTooltip content={<ChartTooltipContent />} /><Legend /><Bar dataKey="clean" name="Clean" stackId="outcome" fill="var(--color-clean)" /><Bar dataKey="humanInTheLoop" name="Human in the loop" stackId="outcome" fill="var(--color-humanInTheLoop)" /><Bar dataKey="warning" name="Warning" stackId="outcome" fill="var(--color-warning)" /><Bar dataKey="failed" name="Failed" stackId="outcome" fill="var(--color-failed)" /></BarChart></ChartContainer> }
 function DeliveryFunnel({ effect }: { effect?: AnalyticsEffectiveness }) { const stages = Object.entries(effect?.funnel ?? {}); return <div className="space-y-3 pt-3">{stages.map(([name, value], index) => { const previous = index ? Number(stages[index - 1][1]) : 0; return <div key={name}><div className="mb-1 flex justify-between text-sm"><span>{name.replace(/([A-Z])/g, " $1")}</span><span className="tabular-nums">{value} {index ? `(${formatPercent(previous ? Number(value) / previous : undefined)})` : ""}</span></div><div className="h-5 rounded bg-muted"><div className="h-full rounded bg-chart-1" style={{ width: `${(Number(value) / (effect?.funnel.started || 1)) * 100}%` }} /></div></div> })}</div> }
-function CostPerMergedPrChart({ effect }: { effect?: AnalyticsEffectiveness }) { return <ChartContainer config={chartConfig} className="h-64 w-full"><LineChart data={effect?.costPerMergedPr.weekly}><CartesianGrid vertical={false} /><XAxis dataKey="weekStart" tickFormatter={formatDate} /><YAxis /><ChartTooltip content={<ChartTooltipContent />} /><ReferenceLine y={effect?.costPerMergedPr.average} stroke="var(--muted-foreground)" /><Line type="monotone" dataKey="costPerMergedPr" stroke="var(--color-costPerMergedPr)" dot={false} /></LineChart></ChartContainer> }
+function CostPerMergedPrChart({ effect }: { effect?: AnalyticsEffectiveness }) { return <ChartContainer config={chartConfig} className="h-64 w-full"><LineChart data={effect?.costPerMergedPr.weekly}><CartesianGrid vertical={false} /><XAxis dataKey="weekStart" tickFormatter={formatDate} /><YAxis /><ChartTooltip content={<ChartTooltipContent />} /><ReferenceLine y={effect?.costPerMergedPr.average} stroke="var(--muted-foreground)" /><Line type="monotone" dataKey="costPerMergedPr" name="Cost per merged PR" stroke="var(--color-costPerMergedPr)" dot={false} /></LineChart></ChartContainer> }
 function CostDrivers({ drivers }: { drivers: AnalyticsCostDriver[] }) {
-  return <section className="rounded-lg border bg-card p-4"><div className="mb-3 flex items-center justify-between gap-3"><div><h2 className="text-sm font-semibold">Top cost drivers</h2><p className="text-xs text-muted-foreground">By factory</p></div></div><Table><TableHeader><TableRow><TableHead>Name</TableHead><TableHead className="text-right">Runs</TableHead><TableHead className="text-right">Success</TableHead><TableHead className="text-right">Cost</TableHead><TableHead className="text-right">Cost / merged PR</TableHead></TableRow></TableHeader><TableBody>{drivers.slice(0, 10).map((driver) => <TableRow key={driver.name}><TableCell className="font-medium">{driver.name}</TableCell><TableCell className="text-right tabular-nums">{driver.runs}</TableCell><TableCell className="text-right tabular-nums">{formatPercent(driver.successRate)}</TableCell><TableCell className="text-right tabular-nums">{usd.format(driver.costUsd)}</TableCell><TableCell className="text-right tabular-nums">{usd.format(driver.costPerMergedPr)}</TableCell></TableRow>)}</TableBody></Table></section>
+  return <section className="rounded-lg border bg-card p-4"><div className="mb-3 flex items-center justify-between gap-3"><div><div className="flex items-center gap-1"><h2 className="text-sm font-semibold">Top cost drivers</h2><span title="Where the money goes: total spend and efficiency per workflow in the selected period."><Info className="size-3.5 text-muted-foreground" /></span></div><p className="text-xs text-muted-foreground">By workflow</p></div></div><Table><TableHeader><TableRow><TableHead>Workflow</TableHead><TableHead className="text-right">Runs</TableHead><TableHead className="text-right">Success</TableHead><TableHead className="text-right">Cost</TableHead><TableHead className="text-right">Cost / merged PR</TableHead></TableRow></TableHeader><TableBody>{drivers.slice(0, 10).map((driver) => <TableRow key={driver.name}><TableCell className="font-medium">{driver.name}</TableCell><TableCell className="text-right tabular-nums">{driver.runs}</TableCell><TableCell className="text-right tabular-nums">{formatPercent(driver.successRate)}</TableCell><TableCell className="text-right tabular-nums">{usd.format(driver.costUsd)}</TableCell><TableCell className="text-right tabular-nums">{usd.format(driver.costPerMergedPr)}</TableCell></TableRow>)}</TableBody></Table></section>
 }
 function RunsTable({ runs, page, canGoPrevious, canGoNext, onSelect, onPrevious, onNext }: { runs: TaskRunSummary[]; page: number; canGoPrevious: boolean; canGoNext: boolean; onSelect: (runId: string) => void; onPrevious: () => void; onNext: () => void }) { return <section className="rounded-lg border bg-card p-4"><h2 className="mb-3 text-sm font-semibold">Runs</h2><Table><TableHeader><TableRow>{["Status", "Ticket", "Model", "Factory/Workflow", "Cost", "Duration", "Start date"].map((label) => <TableHead key={label} className={label === "Status" ? "" : "text-right"}>{label}</TableHead>)}</TableRow></TableHeader><TableBody>{runs.map((run) => <TableRow key={run.runId} className="cursor-pointer" onClick={() => onSelect(run.runId)}><TableCell><StatusBadge status={run.status} /></TableCell><TableCell className="text-right">{run.issueId || "—"}</TableCell><TableCell className="text-right">{run.model || "—"}</TableCell><TableCell className="text-right">{run.factoryName || run.workflowName || "—"}</TableCell><TableCell className="text-right tabular-nums">{usd.format(run.estimatedCostUsd || 0)}</TableCell><TableCell className="text-right tabular-nums">{formatDuration(run.finishedAt - run.startedAt)}</TableCell><TableCell className="text-right tabular-nums">{run.startedAt ? new Date(run.startedAt).toLocaleDateString() : "—"}</TableCell></TableRow>)}</TableBody></Table><div className="mt-3 flex items-center justify-center gap-3"><Button variant="outline" size="sm" disabled={!canGoPrevious} onClick={onPrevious}>Previous</Button><span className="text-sm text-muted-foreground">Page {page}</span><Button variant="outline" size="sm" disabled={!canGoNext} onClick={onNext}>Next</Button></div></section> }
 function calculateDelta(current?: number | null, prior?: number | null) { return current == null || prior == null || prior === 0 ? undefined : (current - prior) / prior }
 function KpiGroup({ title, columns = "sm:grid-cols-5", children }: { title: string; columns?: string; children: ReactNode }) { return <div><p className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">{title}</p><div className={`grid grid-cols-2 gap-2 ${columns}`}>{children}</div></div> }
 function Kpi({ label, value, change, good, cost, onClick, title }: { label: string; value?: string | number; change?: number; good?: boolean; cost?: boolean; onClick?: () => void; title?: string }) { const bad = cost ? (change ?? 0) > 0 : good ? (change ?? 0) < 0 : (change ?? 0) > 0; return <button type="button" title={title} disabled={!onClick} onClick={onClick} className="min-w-0 rounded-lg border bg-card p-3 text-left enabled:hover:bg-accent"><p className="min-h-8 text-xs text-muted-foreground">{label}</p><p className="mt-2 text-xl font-semibold tracking-tight">{value ?? "—"}</p>{change != null && <p className={`text-xs font-medium ${bad ? "text-red-600 dark:text-red-400" : "text-emerald-600 dark:text-emerald-400"}`}>{change > 0 ? "+" : ""}{(change * 100).toFixed(1)}% <span className="font-normal text-muted-foreground">vs prior</span></p>}</button> }
-function ChartCard({ title, children }: { title: string; children: ReactNode }) { return <section className="rounded-lg border bg-card p-4"><h2 className="text-sm font-semibold">{title}</h2>{children}</section> }
+function ChartCard({ title, info, children }: { title: string; info?: string; children: ReactNode }) { return <section className="rounded-lg border bg-card p-4"><div className="flex items-center gap-1"><h2 className="text-sm font-semibold">{title}</h2>{info && <span title={info}><Info className="size-3.5 text-muted-foreground" /></span>}</div>{children}</section> }
