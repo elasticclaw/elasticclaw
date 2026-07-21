@@ -2184,9 +2184,17 @@ func setupFlakeEnvironmentSync(nixDone <-chan error) error {
 	os.Setenv("NIX_REMOTE", "daemon")
 	_ = runShell(". /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh 2>/dev/null || true")
 
-	for i := 0; i < 15; i++ {
-		if err := runShell("nix --version >/dev/null 2>&1"); err == nil {
+	// Probe the *daemon* (not just the client). `nix --version` can succeed
+	// with NIX_REMOTE=daemon even if the daemon is not listening.
+	// Use `nix store ping` which actually contacts the store/daemon.
+	// Fail closed if it never becomes ready (per workspace flake contract).
+	for i := 0; i < 30; i++ {
+		if err := runShell("nix store ping >/dev/null 2>&1"); err == nil {
+			log.Printf("[bootstrap] nix daemon responded to ping after %ds", i)
 			break
+		}
+		if i == 29 {
+			return fmt.Errorf("nix daemon did not become ready (nix store ping never succeeded; check /tmp/nix-install.log and daemon logs)")
 		}
 		time.Sleep(1 * time.Second)
 	}
