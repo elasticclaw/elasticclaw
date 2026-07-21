@@ -16,10 +16,11 @@ type taskRunAnalyticsEffectivenessResponse struct {
 	SuccessRate     float64                       `json:"successRate"`
 }
 type taskRunAnalyticsOutcomesDay struct {
-	Date    string `json:"date"`
-	Clean   int    `json:"clean"`
-	Warning int    `json:"warning"`
-	Failed  int    `json:"failed"`
+	Date           string `json:"date"`
+	Clean          int    `json:"clean"`
+	HumanInTheLoop int    `json:"humanInTheLoop"`
+	Warning        int    `json:"warning"`
+	Failed         int    `json:"failed"`
 }
 type taskRunAnalyticsFunnel struct {
 	Started       int `json:"started"`
@@ -79,16 +80,18 @@ func (s *Server) readTaskRunAnalyticsEffectiveness(f taskRunAnalyticsFilters) (t
 			byDay[d] = x
 		}
 		switch status {
-		case "clean_success":
+		case taskRunStatusClean:
 			x.Clean = n
-		case "warning_success":
+		case taskRunStatusHumanInTheLoop:
+			x.HumanInTheLoop = n
+		case taskRunStatusWarning:
 			x.Warning = n
-		case "failed":
+		case taskRunStatusFailed:
 			x.Failed = n
 		}
-		if status != "running" {
+		if status != taskRunStatusRunning {
 			finished += n
-			if status == "clean_success" || status == "warning_success" {
+			if status == taskRunStatusClean || status == taskRunStatusHumanInTheLoop || status == taskRunStatusWarning {
 				success += n
 			}
 		}
@@ -187,7 +190,7 @@ func (s *Server) readTaskRunAnalyticsCostDrivers(f taskRunAnalyticsFilters, grou
 		col = "workflow_name"
 	}
 	w, a := taskRunAnalyticsSummaryWhere(f)
-	q := fmt.Sprintf(`SELECT %s, COUNT(*), COALESCE(SUM(estimated_cost_usd),0), COALESCE(SUM(merged_pr_count),0), COALESCE(SUM(CASE WHEN status IN ('clean_success','warning_success') THEN 1 ELSE 0 END),0), COALESCE(SUM(CASE WHEN status!='running' THEN 1 ELSE 0 END),0) FROM task_run_summaries %s GROUP BY %s ORDER BY 3 DESC`, col, w, col)
+	q := fmt.Sprintf(`SELECT %s, COUNT(*), COALESCE(SUM(estimated_cost_usd),0), COALESCE(SUM(merged_pr_count),0), COALESCE(SUM(CASE WHEN status IN ('clean','human_in_the_loop','warning') THEN 1 ELSE 0 END),0), COALESCE(SUM(CASE WHEN status!='running' THEN 1 ELSE 0 END),0) FROM task_run_summaries %s GROUP BY %s ORDER BY 3 DESC`, col, w, col)
 	rows, err := s.db.Query(q, a...)
 	if err != nil {
 		return nil, err
