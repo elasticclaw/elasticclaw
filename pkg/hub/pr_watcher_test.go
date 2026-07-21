@@ -107,6 +107,67 @@ func TestReconcileDeadClawPRsClosesRunsWithRepoTokenAndZeroOpenedAt(t *testing.T
 	}
 }
 
+func TestReconcileDeadClawPRsClosesUnmergedPRSetsSuccessStatus(t *testing.T) {
+	oldTransport := http.DefaultTransport
+	http.DefaultTransport = githubAppTokenTransport{base: oldTransport}
+	t.Cleanup(func() { http.DefaultTransport = oldTransport })
+
+	gh := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer repo-token" {
+			t.Fatalf("authorization = %q, want repo token", r.Header.Get("Authorization"))
+		}
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"state": "closed", "merged": false, "closed_at": "2026-01-01T00:00:00Z"})
+	}))
+	defer gh.Close()
+
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{GitHubApps: []*types.GitHubAppConfig{{AppID: 1, PrivateKeyPEM: testGitHubAppPEM(t)}}}, gh.URL, "", "")
+	if _, err := db.Exec(`INSERT INTO claws(id, tenant_id, name, template, status, created_at) VALUES(?,?,?,?,?,?)`, "dead-unmerged", "test-tenant-id", "dead-unmerged", "elasticclaw", "running", now()); err != nil {
+		t.Fatal(err)
+	}
+	runID, _ := startTaskRunForTest(t, s, "dead-unmerged", "unmerged")
+	associatePRForTest(t, s, runID, "owner/repo", 3, taskRunPRStateOpen)
+
+	s.reconcileDeadClawPRs()
+	assertTaskRunSummary(t, db, runID, taskRunStatusClean, taskRunPhaseTerminal, "", `["pr_closed_unmerged"]`, 0, 1, 0, 0, 1)
+	var closedAt int64
+	if err := db.QueryRow(`SELECT closed_at FROM task_run_prs WHERE run_id=? AND repo=? AND pr_number=?`, runID, "owner/repo", 3).Scan(&closedAt); err != nil {
+		t.Fatal(err)
+	}
+	if closedAt == 0 {
+		t.Fatal("expected closed_at to be populated")
+	}
+}
+
+func TestReconcileDeadClawPRsSkipsAgeCappedRows(t *testing.T) {
+	oldTransport := http.DefaultTransport
+	http.DefaultTransport = githubAppTokenTransport{base: oldTransport}
+	t.Cleanup(func() { http.DefaultTransport = oldTransport })
+
+	var requests atomic.Int64
+	gh := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"state": "closed", "merged": false, "closed_at": "2026-01-01T00:00:00Z"})
+	}))
+	defer gh.Close()
+
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{GitHubApps: []*types.GitHubAppConfig{{AppID: 1, PrivateKeyPEM: testGitHubAppPEM(t)}}}, gh.URL, "", "")
+	if _, err := db.Exec(`INSERT INTO claws(id, tenant_id, name, template, status, created_at) VALUES(?,?,?,?,?,?)`, "dead-old", "test-tenant-id", "dead-old", "elasticclaw", "running", now()); err != nil {
+		t.Fatal(err)
+	}
+	runID, _ := startTaskRunForTest(t, s, "dead-old", "old")
+	associatePRForTest(t, s, runID, "owner/repo", 4, taskRunPRStateOpen)
+	if _, err := db.Exec(`UPDATE task_run_prs SET opened_at=? WHERE run_id=?`, epochMillis(now().Add(-100*24*time.Hour)), runID); err != nil {
+		t.Fatal(err)
+	}
+
+	s.reconcileDeadClawPRs()
+	if got := requests.Load(); got != 0 {
+		t.Fatalf("GitHub requests = %d, want 0", got)
+	}
+	assertTaskRunPR(t, db, runID, "owner/repo", 4, taskRunPRStateOpen, false)
+	assertTaskRunSummary(t, db, runID, taskRunStatusRunning, taskRunPhaseWaitingForMerge, "", "[]", 0, 1, 1, 0, 0)
+}
+
 func insertWatcherTestPR(t *testing.T, db *sql.DB, clawID, prID string) {
 	t.Helper()
 	if _, err := db.Exec(`INSERT INTO claws(id,tenant_id,name,template,status,created_at) VALUES(?,?,?,?,?,?)`, clawID, "test-tenant-id", clawID, "elasticclaw", "connected", now()); err != nil {

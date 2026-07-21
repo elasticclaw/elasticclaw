@@ -223,6 +223,27 @@ func TestTaskRunMaterializationClassifiesDashboardInteractionAsWarning(t *testin
 	assertTaskRunSummary(t, db, runID, taskRunStatusWarning, taskRunPhaseTerminal, "", `["human_dashboard_message","human_pr_comment"]`, 2, 1, 0, 1, 0)
 }
 
+func TestTaskRunMaterializationClosedUnmergedWithPRCommentIsHumanInTheLoop(t *testing.T) {
+	s, db := newTaskRunAnalyticsTestServer(t, "claw-closed-pr-comment")
+	runID, attemptID := startTaskRunForTest(t, s, "claw-closed-pr-comment", "closed-pr-comment")
+	associatePRForTest(t, s, runID, "elastic/claw", 122, taskRunPRStateOpen)
+	recordTaskRunEventForTest(t, s, TaskRunEvent{TenantID: "test-tenant-id", RunID: runID, AttemptID: attemptID, EventKey: "closed-pr-comment:comment", EventType: taskRunEventHumanPRComment, ActorType: taskRunActorHuman, Source: taskRunSourceGitHub, WarningType: taskRunWarningHumanPRComment, Detail: map[string]any{"repo": "elastic/claw", "prNumber": 122}})
+	recordTaskRunEventForTest(t, s, TaskRunEvent{TenantID: "test-tenant-id", RunID: runID, AttemptID: attemptID, EventKey: "closed-pr-comment:closed", EventType: taskRunEventPRClosedUnmerged, ActorType: taskRunActorSystem, Source: taskRunSourceGitHub, Detail: map[string]any{"repo": "elastic/claw", "prNumber": 122}})
+
+	assertTaskRunSummary(t, db, runID, taskRunStatusHumanInTheLoop, taskRunPhaseTerminal, "", `["human_pr_comment","pr_closed_unmerged"]`, 1, 1, 0, 0, 1)
+}
+
+func TestTaskRunMaterializationClosedUnmergedWithDashboardMessageIsWarning(t *testing.T) {
+	s, db := newTaskRunAnalyticsTestServer(t, "claw-closed-dashboard")
+	runID, attemptID := startTaskRunForTest(t, s, "claw-closed-dashboard", "closed-dashboard")
+	associatePRForTest(t, s, runID, "elastic/claw", 123, taskRunPRStateOpen)
+	recordTaskRunEventForTest(t, s, TaskRunEvent{TenantID: "test-tenant-id", RunID: runID, AttemptID: attemptID, EventKey: "closed-dashboard:message", EventType: taskRunEventHumanDashboardMessage, ActorType: taskRunActorHuman, Source: taskRunSourceDashboard, WarningType: taskRunWarningHumanDashboardMessage})
+	recordTaskRunEventForTest(t, s, TaskRunEvent{TenantID: "test-tenant-id", RunID: runID, AttemptID: attemptID, EventKey: "closed-dashboard:comment", EventType: taskRunEventHumanPRComment, ActorType: taskRunActorHuman, Source: taskRunSourceGitHub, WarningType: taskRunWarningHumanPRComment, Detail: map[string]any{"repo": "elastic/claw", "prNumber": 123}})
+	recordTaskRunEventForTest(t, s, TaskRunEvent{TenantID: "test-tenant-id", RunID: runID, AttemptID: attemptID, EventKey: "closed-dashboard:closed", EventType: taskRunEventPRClosedUnmerged, ActorType: taskRunActorSystem, Source: taskRunSourceGitHub, Detail: map[string]any{"repo": "elastic/claw", "prNumber": 123}})
+
+	assertTaskRunSummary(t, db, runID, taskRunStatusWarning, taskRunPhaseTerminal, "", `["human_dashboard_message","human_pr_comment","pr_closed_unmerged"]`, 2, 1, 0, 0, 1)
+}
+
 func TestTaskRunMaterializationKeepsNonHumanWarningsClean(t *testing.T) {
 	s, db := newTaskRunAnalyticsTestServer(t, "claw-non-human-warning")
 	runID, attemptID := startTaskRunForTest(t, s, "claw-non-human-warning", "non-human-warning")
