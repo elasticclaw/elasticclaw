@@ -3261,6 +3261,11 @@ docker --version`); err != nil {
 	// Full template files (for agent context) are still (re)written later.
 	// Flake presence already forced nixEnabled=1 at creation time.
 	s.setBootstrapStatus(clawID, "Preparing workspace")
+	// Ensure the staged workspace dir exists so early flake writes (and bridge detection)
+	// are reliable even if the provider snapshot did not create ~/workspace.
+	if err := exec("mkdir staged workspace", 10*time.Second, "export HOME=/home/daytona; mkdir -p /home/daytona/workspace"); err != nil {
+		log.Printf("[daytona] warning: mkdir ~/workspace: %v", err)
+	}
 	var earlyFilesJSON string
 	if err := s.db.QueryRow(`SELECT COALESCE(template_files,'{}') FROM claws WHERE id=?`, clawID).Scan(&earlyFilesJSON); err != nil {
 		return fmt.Errorf("load template_files for early flake staging %s: %w", clawID, err)
