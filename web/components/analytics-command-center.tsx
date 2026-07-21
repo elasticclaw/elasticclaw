@@ -105,7 +105,7 @@ function isoDayRange(day: string) {
   }
 }
 
-export function AnalyticsCommandCenter() {
+export function AnalyticsCommandCenter({ workspaceScope }: { workspaceScope?: string } = {}) {
   const router = useRouter()
   const pathname = usePathname()
   const params = useSearchParams()
@@ -122,8 +122,12 @@ export function AnalyticsCommandCenter() {
       if (value) (nextFilters as Record<string, string>)[filterKey] = value
     }
 
+    if (workspaceScope && !params.get("workspace")) {
+      nextFilters.workspace = workspaceScope
+    }
+
     return nextFilters
-  }, [params, paramsKey])
+  }, [params, paramsKey, workspaceScope])
   const [summary, setSummary] = useState<TaskRunAnalyticsSummary>()
   const [costs, setCosts] = useState<CostOverview>()
   const [yearCosts, setYearCosts] = useState<CostOverview>()

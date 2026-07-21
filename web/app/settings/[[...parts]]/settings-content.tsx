@@ -1,7 +1,7 @@
 "use client"
 
 import { useParams, usePathname, useRouter } from "next/navigation"
-import React, { useEffect, useState, useCallback, useRef } from "react"
+import React, { Suspense, useEffect, useState, useCallback, useRef } from "react"
 import { getHubUrl } from "@/lib/hub-url"
 import { getAuthToken } from "@/lib/auth-storage"
 import { Cpu, Key, Github, ChevronLeft, Shield, Zap, Copy, Check, LayoutTemplate, Trash2, Lock, Sparkles, Send, RotateCcw, Eye, EyeOff, ExternalLink, AlertTriangle, X, CheckCircle2, Webhook, Stethoscope, ArrowRight, Wrench, GitBranch, ChevronDown, BarChart3 } from "lucide-react"
@@ -14,18 +14,10 @@ import Link from "next/link"
 import { VALID_SECTIONS, type Section } from "./sections"
 import { fetchWorkspaces, updateWorkflowControls, type RepositoryAccess, type Workspace, type Workflow } from "@/lib/api"
 import { useBranding } from "@/hooks/use-branding"
+import { AnalyticsCommandCenter } from "@/components/analytics-command-center"
 
 function isValidSection(s: string): s is Section {
   return VALID_SECTIONS.includes(s as Section)
-}
-
-function AnalyticsRedirect({ workspace }: { workspace?: string }) {
-  const router = useRouter()
-  useEffect(() => {
-    const query = workspace ? `?workspace=${encodeURIComponent(workspace)}` : ""
-    router.replace(`/analytics${query}`)
-  }, [router, workspace])
-  return <div className="flex-1 p-6 text-sm text-muted-foreground">Opening analytics…</div>
 }
 
 const WORKSPACE_SECTIONS = new Set<Section>([
@@ -488,7 +480,11 @@ export default function SettingsSectionPage() {
           {section === "workflows" && (
             <WorkflowsSection selectedWorkspace={selectedWorkspace} />
           )}
-          {section === "workspace-analytics" && <AnalyticsRedirect workspace={selectedWorkspace} />}
+          {section === "workspace-analytics" && (
+            <Suspense fallback={null}>
+              <AnalyticsCommandCenter workspaceScope={selectedWorkspace || undefined} />
+            </Suspense>
+          )}
           {section === "secrets" && (
             <SecretsSection settings={settings} workspace={selectedWorkspace} />
           )}
