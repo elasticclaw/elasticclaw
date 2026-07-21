@@ -8,6 +8,13 @@ import (
 	"time"
 )
 
+func TestReplicatedFinalWorkspaceDirUsesLiveWorkspace(t *testing.T) {
+	t.Parallel()
+	if got, want := replicatedFinalWorkspaceDir("/home/elasticclaw"), "/home/elasticclaw/.openclaw/workspace"; got != want {
+		t.Fatalf("replicated final workspace dir = %q, want %q", got, want)
+	}
+}
+
 func TestRetryReplicatedBootstrapStepSucceedsAfterTransientFailures(t *testing.T) {
 	attempts := 0
 	var slept []time.Duration

@@ -11,10 +11,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/daytonaio/daytona/libs/sdk-go/pkg/daytona"
-	daytonaerrors "github.com/daytonaio/daytona/libs/sdk-go/pkg/errors"
-	daytonaopts "github.com/daytonaio/daytona/libs/sdk-go/pkg/options"
-	daytonatypes "github.com/daytonaio/daytona/libs/sdk-go/pkg/types"
+	"github.com/daytona/clients/sdk-go/pkg/daytona"
+	daytonaerrors "github.com/daytona/clients/sdk-go/pkg/errors"
+	daytonaopts "github.com/daytona/clients/sdk-go/pkg/options"
+	daytonatypes "github.com/daytona/clients/sdk-go/pkg/types"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 )
 
@@ -165,26 +165,41 @@ func shellQuote(s string) string {
 
 // Status checks current sandbox state
 func (p *Provider) Status(ctx context.Context, instanceID string) (types.InstanceStatus, error) {
-	sandbox, err := p.client.FindOne(ctx, &instanceID, nil)
+	sandbox, err := p.client.Get(ctx, instanceID)
 	if err != nil {
-		if strings.Contains(err.Error(), "not found") {
+		if isDaytonaNotFound(err) {
 			return types.StatusNotFound, nil
 		}
 		return types.StatusUnknown, err
 	}
 
-	switch sandbox.State {
-	case "started", "running":
-		return types.StatusRunning, nil
-	case "stopped":
-		return types.StatusStopped, nil
-	case "error":
-		return types.StatusError, nil
-	case "pending", "starting":
-		return types.StatusStarting, nil
+	return instanceStatus(sandbox.State), nil
+}
+
+func instanceStatus(state daytona.SandboxState) types.InstanceStatus {
+	switch state {
+	case daytona.SandboxStateStarted:
+		return types.StatusRunning
+	case daytona.SandboxStateStopped, daytona.SandboxStatePaused, daytona.SandboxStateArchived:
+		return types.StatusStopped
+	case daytona.SandboxStateError, daytona.SandboxStateBuildFailed:
+		return types.StatusError
+	case daytona.SandboxStateCreating,
+		daytona.SandboxStateRestoring,
+		daytona.SandboxStateStarting,
+		daytona.SandboxStatePendingBuild,
+		daytona.SandboxStateBuildingSnapshot,
+		daytona.SandboxStatePullingSnapshot,
+		daytona.SandboxStateResuming:
+		return types.StatusStarting
 	default:
-		return types.StatusUnknown, nil
+		return types.StatusUnknown
 	}
+}
+
+func isDaytonaNotFound(err error) bool {
+	var notFoundErr *daytonaerrors.DaytonaNotFoundError
+	return errors.As(err, &notFoundErr)
 }
 
 // Exec runs a command inside the sandbox
@@ -195,7 +210,7 @@ func (p *Provider) Exec(ctx context.Context, instanceID string, cmdArgs []string
 // ExecWithTimeout runs a command with an explicit timeout. Use for long-running
 // operations like package installs that exceed the default 60s SDK HTTP timeout.
 func (p *Provider) ExecWithTimeout(ctx context.Context, instanceID string, cmdArgs []string, timeout time.Duration) (*types.ExecResult, error) {
-	sandbox, err := p.client.FindOne(ctx, &instanceID, nil)
+	sandbox, err := p.client.Get(ctx, instanceID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to find sandbox: %w", err)
 	}
@@ -249,7 +264,7 @@ func IsTransientExecError(err error) bool {
 }
 
 func (p *Provider) EnsureSession(ctx context.Context, instanceID, sessionID string) error {
-	sandbox, err := p.client.FindOne(ctx, &instanceID, nil)
+	sandbox, err := p.client.Get(ctx, instanceID)
 	if err != nil {
 		return fmt.Errorf("failed to find sandbox: %w", err)
 	}
@@ -263,7 +278,7 @@ func (p *Provider) EnsureSession(ctx context.Context, instanceID, sessionID stri
 }
 
 func (p *Provider) ExecSessionAsync(ctx context.Context, instanceID, sessionID, command string) (string, error) {
-	sandbox, err := p.client.FindOne(ctx, &instanceID, nil)
+	sandbox, err := p.client.Get(ctx, instanceID)
 	if err != nil {
 		return "", fmt.Errorf("failed to find sandbox: %w", err)
 	}
@@ -290,7 +305,7 @@ func (p *Provider) Connect(ctx context.Context, instanceID string) (*types.Conne
 
 // Stop pauses the sandbox
 func (p *Provider) Stop(ctx context.Context, instanceID string) error {
-	sandbox, err := p.client.FindOne(ctx, &instanceID, nil)
+	sandbox, err := p.client.Get(ctx, instanceID)
 	if err != nil {
 		return fmt.Errorf("failed to find sandbox: %w", err)
 	}
@@ -300,7 +315,7 @@ func (p *Provider) Stop(ctx context.Context, instanceID string) error {
 
 // Start resumes a stopped sandbox
 func (p *Provider) Start(ctx context.Context, instanceID string) error {
-	sandbox, err := p.client.FindOne(ctx, &instanceID, nil)
+	sandbox, err := p.client.Get(ctx, instanceID)
 	if err != nil {
 		return fmt.Errorf("failed to find sandbox: %w", err)
 	}
@@ -310,9 +325,9 @@ func (p *Provider) Start(ctx context.Context, instanceID string) error {
 
 // Destroy deletes the sandbox
 func (p *Provider) Destroy(ctx context.Context, instanceID string, keepState bool) error {
-	sandbox, err := p.client.FindOne(ctx, &instanceID, nil)
+	sandbox, err := p.client.Get(ctx, instanceID)
 	if err != nil {
-		if strings.Contains(err.Error(), "not found") {
+		if isDaytonaNotFound(err) {
 			return nil // Already gone
 		}
 		return fmt.Errorf("failed to find sandbox: %w", err)
@@ -323,29 +338,19 @@ func (p *Provider) Destroy(ctx context.Context, instanceID string, keepState boo
 
 // List returns all sandboxes
 func (p *Provider) List(ctx context.Context) ([]*types.Instance, error) {
-	result, err := p.client.List(ctx, nil, nil, nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to list sandboxes: %w", err)
-	}
-
 	var instances []*types.Instance
-	for _, sandbox := range result.Items {
-		status := types.StatusUnknown
-		switch sandbox.State {
-		case "started", "running":
-			status = types.StatusRunning
-		case "stopped":
-			status = types.StatusStopped
-		case "error":
-			status = types.StatusError
-		}
-
+	iterator := p.client.List(ctx, nil)
+	for iterator.Next() {
+		sandbox := iterator.Value()
 		instances = append(instances, &types.Instance{
 			Name:     sandbox.Name,
 			ID:       sandbox.ID,
 			Provider: "daytona",
-			Status:   status,
+			Status:   instanceStatus(sandbox.State),
 		})
+	}
+	if err := iterator.Err(); err != nil {
+		return nil, fmt.Errorf("failed to list sandboxes: %w", err)
 	}
 
 	return instances, nil
@@ -353,7 +358,7 @@ func (p *Provider) List(ctx context.Context) ([]*types.Instance, error) {
 
 // ConfigureOpenClaw configures OpenClaw with necessary API keys and settings
 func (p *Provider) ConfigureOpenClaw(ctx context.Context, instanceID string, env map[string]string) error {
-	sandbox, err := p.client.FindOne(ctx, &instanceID, nil)
+	sandbox, err := p.client.Get(ctx, instanceID)
 	if err != nil {
 		return fmt.Errorf("failed to find sandbox: %w", err)
 	}
@@ -395,7 +400,7 @@ func (p *Provider) ConfigureOpenClaw(ctx context.Context, instanceID string, env
 // Note: this is a standalone helper; the main bootstrap path in
 // bootstrapDaytona (pkg/hub/server.go) handles full two-phase startup.
 func (p *Provider) StartOpenClaw(ctx context.Context, instanceID string, workdir string) error {
-	sandbox, err := p.client.FindOne(ctx, &instanceID, nil)
+	sandbox, err := p.client.Get(ctx, instanceID)
 	if err != nil {
 		return fmt.Errorf("failed to find sandbox: %w", err)
 	}

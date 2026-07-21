@@ -1018,7 +1018,7 @@ func isGitHubE2EHookURL(hookURL string) bool {
 }
 
 func isStaleE2EHook(hookURL string, createdAt, now time.Time, olderThan time.Duration) bool {
-	return isGitHubE2EHookURL(hookURL) && now.Sub(createdAt) > olderThan
+	return isGitHubE2EHookURL(hookURL) && !createdAt.IsZero() && now.Sub(createdAt) > olderThan
 }
 
 func TestIsStaleE2EHook(t *testing.T) {
@@ -1035,6 +1035,7 @@ func TestIsStaleE2EHook(t *testing.T) {
 		{"fresh matching URL", matchingURL, now.Add(-time.Hour), false},
 		{"stale matching URL", matchingURL, now.Add(-3 * time.Hour), true},
 		{"stale non-matching URL", "https://example.test/other", now.Add(-3 * time.Hour), false},
+		{"matching URL with zero creation time", matchingURL, time.Time{}, false},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := isStaleE2EHook(tt.url, tt.createdAt, now, 2*time.Hour); got != tt.want {

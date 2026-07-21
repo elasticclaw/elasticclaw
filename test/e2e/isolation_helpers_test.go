@@ -2,7 +2,10 @@
 
 package e2e
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestE2EProviderPrefixIsRunScoped(t *testing.T) {
 	got := e2eProviderPrefix(daytonaPrefix, "run-123")
@@ -29,6 +32,26 @@ func TestGitHubE2EHookURLMatchesOnlyWorkspace(t *testing.T) {
 	}
 	if !isGitHubE2EHookURL(other) {
 		t.Fatalf("broad sweep matcher should still recognize E2E hook")
+	}
+}
+
+func TestStaleE2EHookRequiresOldElasticClawHook(t *testing.T) {
+	now := time.Date(2026, 7, 21, 12, 0, 0, 0, time.UTC)
+	oldE2E := "https://old.ngrok-free.app/api/workspaces/e2e-old/webhooks/github-issues"
+	recentE2E := "https://current.ngrok-free.app/api/workspaces/e2e-current/webhooks/github-issues"
+	unrelated := "https://example.com/hooks/build"
+
+	if !isStaleE2EHook(oldE2E, now.Add(-routineStaleE2EHookTTL-time.Minute), now, routineStaleE2EHookTTL) {
+		t.Fatal("old ElasticClaw E2E hook was not stale")
+	}
+	if isStaleE2EHook(recentE2E, now.Add(-routineStaleE2EHookTTL+time.Minute), now, routineStaleE2EHookTTL) {
+		t.Fatal("active-age ElasticClaw E2E hook was treated as stale")
+	}
+	if isStaleE2EHook(unrelated, now.Add(-24*time.Hour), now, routineStaleE2EHookTTL) {
+		t.Fatal("unrelated old hook was treated as an ElasticClaw E2E hook")
+	}
+	if isStaleE2EHook(oldE2E, time.Time{}, now, routineStaleE2EHookTTL) {
+		t.Fatal("hook without a creation time was treated as stale")
 	}
 }
 

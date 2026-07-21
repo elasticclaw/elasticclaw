@@ -1595,3 +1595,55 @@ stages:
 		t.Fatalf("stage = %q, want create_pr (skipped should be normalised to pass for auto-transition)", stage)
 	}
 }
+
+func TestBuildWorkspaceRunCommand(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
+
+	const clawNoFlake = "claw-no-flake"
+	_, err := db.Exec(`INSERT INTO claws(id, tenant_id, name, template, status, template_files, created_at) VALUES(?,?,?,?,?,?,datetime('now'))`, clawNoFlake, "test-tenant-id", "no-flake", "base", "connected", "{}")
+	if err != nil {
+		t.Fatalf("insert no-flake: %v", err)
+	}
+	got, err := s.buildWorkspaceRunCommand(clawNoFlake, "depot --version")
+	if err != nil {
+		t.Fatalf("no-flake: %v", err)
+	}
+	if !strings.Contains(got, `cd "$HOME/.openclaw/workspace" && depot --version`) || strings.Contains(got, "flake-run") {
+		t.Fatalf("no-flake command = %q, want plain cd form", got)
+	}
+
+	const clawWithFlake = "claw-with-flake"
+	filesWithFlake := `{"flake.nix": "{ }", "flake.lock": "{}" }`
+	_, err = db.Exec(`INSERT INTO claws(id, tenant_id, name, template, status, template_files, created_at) VALUES(?,?,?,?,?,?,datetime('now'))`, clawWithFlake, "test-tenant-id", "with-flake", "base", "connected", filesWithFlake)
+	if err != nil {
+		t.Fatalf("insert with-flake: %v", err)
+	}
+	got, err = s.buildWorkspaceRunCommand(clawWithFlake, "depot ci --foo bar")
+	if err != nil {
+		t.Fatalf("with-flake: %v", err)
+	}
+	if !strings.Contains(got, "flake-run") || !strings.Contains(got, "depot ci --foo bar") {
+		t.Fatalf("with-flake command = %q, want flake-run wrapper", got)
+	}
+	if !strings.Contains(got, `cd "$HOME/.openclaw/workspace"`) {
+		t.Fatalf("with-flake command must preserve workspace cd: %q", got)
+	}
+
+	// Fail-closed on bad metadata (per Greptile P1 for #526).
+	// Unknown claw should error (no silent "no flake" fallback).
+	_, err = s.buildWorkspaceRunCommand("nonexistent-claw", "echo hi")
+	if err == nil {
+		t.Fatal("expected error for unknown claw")
+	}
+
+	// Bad JSON in template_files should error (not default to plain command).
+	const clawBadJSON = "claw-bad-json"
+	_, err = db.Exec(`INSERT INTO claws(id, tenant_id, name, template, status, template_files, created_at) VALUES(?,?,?,?,?,?,datetime('now'))`, clawBadJSON, "test-tenant-id", "bad-json", "base", "connected", "not-valid-json{]")
+	if err != nil {
+		t.Fatalf("insert bad-json: %v", err)
+	}
+	_, err = s.buildWorkspaceRunCommand(clawBadJSON, "echo hi")
+	if err == nil {
+		t.Fatal("expected error for bad template_files JSON")
+	}
+}

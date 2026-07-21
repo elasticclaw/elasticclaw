@@ -23,6 +23,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
@@ -40,6 +41,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -47,6 +49,7 @@ import (
 	"nhooyr.io/websocket/wsjson"
 
 	"github.com/elasticclaw/elasticclaw/pkg/cliversion"
+	_ "modernc.org/sqlite"
 )
 
 var (
@@ -2077,6 +2080,14 @@ curl --proto '=https' --tlsv1.2 -sSf -L https://install.determinate.systems/nix 
 			log.Printf("[bootstrap] Nix install failed: %v", err)
 		} else {
 			log.Printf("[bootstrap] Nix install complete")
+			// Start the daemon immediately in the bg goroutine so that when
+			// receivers (setupFlake or finishNix) get the nixDone signal, the
+			// daemon is already running. This guarantees devShell pre-eval
+			// has the daemon ready.
+			// Redirect stdout/stderr *before* & so the daemon does not inherit
+			// the pipes from runShell (which waits for pipes to close).
+			_ = runShell("sudo /nix/var/nix/profiles/default/bin/nix-daemon >/dev/null 2>&1 &")
+			time.Sleep(1 * time.Second)
 		}
 		ch <- err
 		ch <- err // Send twice so both receivers can read
@@ -2173,6 +2184,26 @@ func setupFlakeEnvironmentSync(nixDone <-chan error) error {
 		return fmt.Errorf("nix command not available after install: %w", err)
 	}
 
+	// Daemon was started by the nixInstallBg goroutine as soon as install completed.
+	// Just set env + source + wait for nix to be usable before pre-eval.
+	os.Setenv("NIX_REMOTE", "daemon")
+	_ = runShell(". /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh 2>/dev/null || true")
+
+	// Probe the *daemon* (not just the client). `nix --version` can succeed
+	// with NIX_REMOTE=daemon even if the daemon is not listening.
+	// Use `nix store ping` which actually contacts the store/daemon.
+	// Fail closed if it never becomes ready (per workspace flake contract).
+	for i := 0; i < 30; i++ {
+		if err := runShell("nix store ping >/dev/null 2>&1"); err == nil {
+			log.Printf("[bootstrap] nix daemon responded to ping after %ds", i)
+			break
+		}
+		if i == 29 {
+			return fmt.Errorf("nix daemon did not become ready (nix store ping never succeeded; check /tmp/nix-install.log and daemon logs)")
+		}
+		time.Sleep(1 * time.Second)
+	}
+
 	// Also check for flake.lock
 	flakeLockPath := filepath.Join(workspaceDir, "flake.lock")
 	hasFlakeLock := false
@@ -2204,19 +2235,12 @@ func setupFlakeEnvironmentSync(nixDone <-chan error) error {
 		}
 	}
 
-	log.Printf("[bootstrap] installing packages from flake in %s...", flakeDir)
-	script := fmt.Sprintf(`
-set -euo pipefail
-export PATH="/nix/var/nix/profiles/default/bin:$PATH"
-. /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh 2>/dev/null || true
-cd %q
-nix profile install . --accept-flake-config 2>&1 || echo "Flake profile install may have partial failures, continuing..."
-`, flakeDir)
-	if err := runShell(script); err != nil {
-		log.Printf("[bootstrap] flake profile install warning: %v", err)
-	}
-
+	// Create the provider-neutral flake-run wrapper that enters devShells.default.
+	// Workspace flakes supply claw-wide tools (e.g. depot). This is the
+	// contract used by both the agent gateway and deterministic run steps.
+	// We deliberately do not use "nix profile install ." (wrong for dev-shell-only flakes).
 	wrapperScript := fmt.Sprintf(`#!/bin/bash
+set -euo pipefail
 export PATH="/nix/var/nix/profiles/default/bin:$PATH"
 . /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh 2>/dev/null || true
 cd %q
@@ -2227,7 +2251,14 @@ exec nix develop --accept-flake-config -c "$@"
 		return fmt.Errorf("failed to write flake wrapper: %w", err)
 	}
 
-	log.Printf("[bootstrap] flake environment ready at %s", flakeDir)
+	// Pre-evaluate the devShell with an inexpensive command. This builds the
+	// environment from the pinned flake.lock and fails fast on bad flakes.
+	log.Printf("[bootstrap] pre-evaluating workspace devShell via flake-run...")
+	if err := runShell(`~/.elasticclaw/flake-run true`); err != nil {
+		return fmt.Errorf("workspace flake devShell evaluation failed (try 'nix develop --accept-flake-config' locally to debug): %w", err)
+	}
+
+	log.Printf("[bootstrap] flake environment ready at %s (devShell pre-evaluated)", flakeDir)
 	return nil
 }
 
@@ -2238,25 +2269,18 @@ func startGatewayWithFlake(useFlake bool) (*exec.Cmd, error) {
 		return startGateway()
 	}
 
-	log.Printf("[bootstrap] starting OpenClaw gateway inside nix develop...")
+	log.Printf("[bootstrap] starting OpenClaw gateway inside nix develop via flake-run...")
 
 	// Set env vars that suppress respawn / bonjour.
 	os.Setenv("OPENCLAW_NO_RESPAWN", "1")
 	os.Setenv("OPENCLAW_DISABLE_BONJOUR", "1")
 
 	home, _ := os.UserHomeDir()
-	flakeDir := filepath.Join(home, ".elasticclaw", "flake")
 	logFile := filepath.Join(home, "openclaw-gateway.log")
 
-	// Build the nix develop command that runs openclaw gateway
-	// Properly escape the flakeDir to prevent shell injection
-	script := fmt.Sprintf(`
-set -euo pipefail
-export PATH="/nix/var/nix/profiles/default/bin:$PATH"
-. /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh 2>/dev/null || true
-cd %q
-exec nix develop --accept-flake-config -c openclaw gateway run
-`, flakeDir)
+	// Use the wrapper (created and pre-evaluated during setupFlakeEnvironmentSync).
+	// This is consistent with how workflow run commands and other tools are invoked.
+	script := `~/.elasticclaw/flake-run openclaw gateway run`
 
 	cmd := exec.Command("bash", "-c", script)
 	cmd.Env = os.Environ()
@@ -2514,7 +2538,7 @@ func migrateGrokOAuthToOpenClaw(home string) error {
 		"type":          "oauth",
 		"provider":      "xai",
 		"access":        selected.Key,
-		"refresh":       selected.RefreshToken,
+		"refresh":       "elasticclaw-managed",
 		"expires":       expires,
 		"issuer":        issuer,
 		"tokenEndpoint": issuer + "/oauth2/token",
@@ -2620,6 +2644,112 @@ func syncOpenClawOAuthAuth() error {
 		return fmt.Errorf("sync OpenClaw OAuth auth: %w", err)
 	}
 	return nil
+}
+
+type managedModelAuthCredential struct {
+	Provider string `json:"provider"`
+	Access   string `json:"access"`
+	Expires  int64  `json:"expires"`
+}
+
+const managedGrokAuthSyncInterval = 5 * time.Minute
+
+func applyManagedGrokOAuthCredential(credential managedModelAuthCredential) error {
+	if credential.Provider != "xai" || credential.Access == "" || credential.Expires <= 0 {
+		return fmt.Errorf("managed Grok credential response is incomplete")
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("home dir: %w", err)
+	}
+	if err := writeManagedGrokCredentialToOpenClaw(home, credential); err != nil {
+		return err
+	}
+	if err := writeManagedGrokCredentialToCLI(home, credential); err != nil {
+		return fmt.Errorf("update local Grok credential: %w", err)
+	}
+	return nil
+}
+
+func writeManagedGrokCredentialToOpenClaw(home string, credential managedModelAuthCredential) error {
+	dbPath := filepath.Join(home, ".openclaw", "agents", "main", "agent", "openclaw-agent.sqlite")
+	db, err := sql.Open("sqlite", dbPath+"?_txlock=immediate&_pragma=busy_timeout(5000)")
+	if err != nil {
+		return fmt.Errorf("open OpenClaw auth database: %w", err)
+	}
+	defer db.Close()
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin OpenClaw auth update: %w", err)
+	}
+	defer tx.Rollback()
+	var storeJSON string
+	if err := tx.QueryRow(`SELECT store_json FROM auth_profile_store WHERE store_key='primary'`).Scan(&storeJSON); err != nil {
+		return fmt.Errorf("read OpenClaw auth store: %w", err)
+	}
+	var store map[string]any
+	if err := json.Unmarshal([]byte(storeJSON), &store); err != nil {
+		return fmt.Errorf("parse OpenClaw auth store: %w", err)
+	}
+	profiles, _ := store["profiles"].(map[string]any)
+	if profiles == nil {
+		profiles = map[string]any{}
+		store["profiles"] = profiles
+	}
+	profile, _ := profiles["xai:default"].(map[string]any)
+	if profile == nil {
+		profile = map[string]any{}
+	}
+	profile["type"] = "oauth"
+	profile["provider"] = "xai"
+	profile["access"] = credential.Access
+	profile["refresh"] = "elasticclaw-managed"
+	profile["expires"] = credential.Expires
+	profiles["xai:default"] = profile
+	updated, err := json.Marshal(store)
+	if err != nil {
+		return fmt.Errorf("encode OpenClaw auth store: %w", err)
+	}
+	if _, err := tx.Exec(`UPDATE auth_profile_store SET store_json=?, updated_at=? WHERE store_key='primary'`, string(updated), time.Now().UnixMilli()); err != nil {
+		return fmt.Errorf("write OpenClaw auth store: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit OpenClaw auth update: %w", err)
+	}
+	return nil
+}
+
+func writeManagedGrokCredentialToCLI(home string, credential managedModelAuthCredential) error {
+	authPath := filepath.Join(home, ".grok", "auth.json")
+	data, err := os.ReadFile(authPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	var document map[string]any
+	if err := json.Unmarshal(data, &document); err != nil {
+		return err
+	}
+	const canonicalCredential = "https://auth.x.ai::b1a00492-073a-47ea-816f-4c329264a828"
+	entry, ok := document[canonicalCredential].(map[string]any)
+	if !ok {
+		return fmt.Errorf("Grok auth file has no canonical xAI OAuth credential")
+	}
+	entry["key"] = credential.Access
+	entry["refresh_token"] = "elasticclaw-managed"
+	entry["expires_at"] = time.UnixMilli(credential.Expires).UTC().Format(time.RFC3339Nano)
+	updated, err := json.MarshalIndent(document, "", "  ")
+	if err != nil {
+		return err
+	}
+	updated = append(updated, '\n')
+	tempPath := authPath + ".tmp"
+	if err := os.WriteFile(tempPath, updated, 0600); err != nil {
+		return err
+	}
+	return os.Rename(tempPath, authPath)
 }
 
 var openClawWorkspaceManagedFiles = map[string]bool{
@@ -3211,7 +3341,8 @@ func finishNix(nixDone <-chan error) {
 	}
 	if err := runShell("pgrep -x nix-daemon"); err != nil {
 		// Not running — start it
-		_ = runShell("sudo /nix/var/nix/profiles/default/bin/nix-daemon &")
+		// Redirect before & so it does not keep runShell pipes open.
+		_ = runShell("sudo /nix/var/nix/profiles/default/bin/nix-daemon >/dev/null 2>&1 &")
 		time.Sleep(2 * time.Second)
 		os.Setenv("NIX_REMOTE", "daemon")
 	}
@@ -3277,6 +3408,11 @@ func runBootstrap() error {
 		nixDone = nixInstallBg()
 	}
 
+	// Start finishNix goroutine early. It waits on nixDone and starts the daemon +
+	// sets NIX_REMOTE. This ensures the daemon is available before any
+	// pre-eval of devShells (flake-run) or gateway start inside nix develop.
+	go finishNix(nixDone)
+
 	// Step 2b: Start Docker install in background (if requested)
 	var dockerDone <-chan error
 	if os.Getenv("ELASTICCLAW_DOCKER") == "true" {
@@ -3313,7 +3449,6 @@ func runBootstrap() error {
 	if err := syncOpenClawOAuthAuth(); err != nil {
 		return err
 	}
-
 	if err := syncStagedWorkspaceToOpenClawWorkspace(); err != nil {
 		return fmt.Errorf("syncStagedWorkspaceToOpenClawWorkspace: %w", err)
 	}
@@ -3330,11 +3465,11 @@ func runBootstrap() error {
 	}
 
 	// Step 5: Set up flake environment BEFORE starting gateway if flake.nix exists
-	// This ensures the gateway runs inside the flake environment
+	// This ensures the gateway runs inside the flake environment.
+	// Fail closed: a bad declared flake must not produce a claw without the declared tools.
 	if hasFlake {
 		if err := setupFlakeEnvironmentSync(nixDone); err != nil {
-			log.Printf("[bootstrap] flake setup warning: %v (continuing without flake)", err)
-			hasFlake = false // Fall back to non-flake mode
+			return fmt.Errorf("setup workspace flake: %w", err)
 		}
 	}
 
@@ -3374,8 +3509,8 @@ func runBootstrap() error {
 		return fmt.Errorf("waitForDeviceJSON: %w", err)
 	}
 
-	// Step 10: After bridge connects, finish Nix and Docker in background
-	go finishNix(nixDone)
+	// Step 10: finish Docker (Nix finisher was started early so daemon is ready
+	// for any flake pre-eval / nix develop before gateway).
 	go finishDocker(dockerDone)
 
 	if notifyFile := os.Getenv("ELASTICCLAW_BOOTSTRAP_NOTIFY_FILE"); notifyFile != "" {
@@ -3556,6 +3691,7 @@ func main() {
 	hubURL := mustEnv("ELASTICCLAW_HUB_URL")
 	clawID := mustEnv("ELASTICCLAW_CLAW_ID")
 	token := mustEnv("ELASTICCLAW_CLAW_TOKEN")
+	modelAuthToken := strings.TrimSpace(os.Getenv("ELASTICCLAW_MODEL_AUTH_TOKEN"))
 	gatewayAddr := envOr("ELASTICCLAW_GATEWAY", "localhost:18789")
 	clawName := envOr("ELASTICCLAW_CLAW_NAME", clawID)
 	templateName := envOr("ELASTICCLAW_TEMPLATE", "")
@@ -3638,7 +3774,7 @@ func main() {
 	go runStatusChannel(ctx, wsURL, clawID, clawName, templateName, token)
 
 	for {
-		if err := runHubLoop(ctx, wsURL, clawID, clawName, templateName, token, gwClient, gwSession, proxy, queue, deduper); err != nil {
+		if err := runHubLoop(ctx, wsURL, clawID, clawName, templateName, token, modelAuthToken, gwClient, gwSession, proxy, queue, deduper); err != nil {
 			if ctx.Err() != nil {
 				log.Printf("shutting down")
 				return
@@ -3767,7 +3903,7 @@ func runStatusChannel(ctx context.Context, wsURL, clawID, clawName, templateName
 	}
 }
 
-func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, token string, gwClient *gatewayClient, gwSession *gatewaySession, proxy *httpProxy, queue *msgQueue, deduper *messageDeduper) error {
+func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, token, modelAuthToken string, gwClient *gatewayClient, gwSession *gatewaySession, proxy *httpProxy, queue *msgQueue, deduper *messageDeduper) error {
 	conn, _, err := websocket.Dial(ctx, wsURL, &websocket.DialOptions{
 		HTTPHeader: http.Header{
 			"User-Agent":                 {"claw-bridge/1.0"},
@@ -3789,11 +3925,12 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 	reg := hubMsg{
 		Type: "register",
 		Payload: mustJSON(map[string]interface{}{
-			"claw_id":       clawID,
-			"name":          clawName,
-			"template":      templateName,
-			"token":         token,
-			"gateway_ready": gwSession.IsReady(),
+			"claw_id":          clawID,
+			"name":             clawName,
+			"template":         templateName,
+			"token":            token,
+			"model_auth_token": modelAuthToken,
+			"gateway_ready":    gwSession.IsReady(),
 		}),
 	}
 	if err := writeHub(reg); err != nil {
@@ -3807,6 +3944,24 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 	}
 	if ack.Type != "registered" {
 		return fmt.Errorf("expected registered, got %s", ack.Type)
+	}
+	var registered struct {
+		ModelAuthCredential *managedModelAuthCredential `json:"model_auth_credential"`
+		ModelAuthError      string                      `json:"model_auth_error"`
+	}
+	if len(ack.Payload) > 0 && string(ack.Payload) != "null" {
+		if err := json.Unmarshal(ack.Payload, &registered); err != nil {
+			return fmt.Errorf("parse registered payload: %w", err)
+		}
+	}
+	var lastModelAuthSync atomic.Int64
+	if registered.ModelAuthCredential != nil {
+		if err := applyManagedGrokOAuthCredential(*registered.ModelAuthCredential); err != nil {
+			return fmt.Errorf("apply registered model credential: %w", err)
+		}
+		lastModelAuthSync.Store(time.Now().UnixNano())
+	} else if registered.ModelAuthError != "" {
+		log.Printf("[model-auth] %s", registered.ModelAuthError)
 	}
 	log.Printf("registered with hub as %s", clawID)
 
@@ -3869,6 +4024,13 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 		connCancel()
 		conn.CloseNow()
 	}, func() {
+		lastSyncUnixNano := lastModelAuthSync.Load()
+		if strings.TrimSpace(os.Getenv("ELASTICCLAW_MODEL_AUTH_PROVIDER")) == "grok" &&
+			(lastSyncUnixNano == 0 || time.Since(time.Unix(0, lastSyncUnixNano)) >= managedGrokAuthSyncInterval) {
+			if err := writeHub(hubMsg{Type: "model_auth_sync"}); err == nil {
+				lastModelAuthSync.Store(time.Now().UnixNano())
+			}
+		}
 		go gwSession.refreshContextUsage(connCtx)
 		health := !gatewayProcessExited() && checkGateway(gwClient.addr)
 		cu := gwSession.ContextUsage()
@@ -3964,6 +4126,16 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 					queue.pushReply(reply)
 				}
 			}(msg.Payload)
+
+		case "model_auth_credential":
+			var credential managedModelAuthCredential
+			if err := json.Unmarshal(msg.Payload, &credential); err != nil {
+				log.Printf("[model-auth] invalid managed credential: %v", err)
+			} else if err := applyManagedGrokOAuthCredential(credential); err != nil {
+				log.Printf("[model-auth] apply managed credential: %v", err)
+			} else {
+				lastModelAuthSync.Store(time.Now().UnixNano())
+			}
 
 		case "http_proxy_res":
 			var res httpProxyRes
