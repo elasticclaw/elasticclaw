@@ -4472,9 +4472,13 @@ func (s *Server) bootstrapExedev(ctx context.Context, clawID, vmName string, p *
 		return fmt.Errorf("load claw config: %w", err)
 	}
 	var githubRepos []types.GitHubRepoAccess
-	_ = json.Unmarshal([]byte(githubReposJSON), &githubRepos)
+	if err := json.Unmarshal([]byte(githubReposJSON), &githubRepos); err != nil {
+		return fmt.Errorf("parse github_repos for exedev bootstrap: %w", err)
+	}
 	var templateFiles map[string]string
-	_ = json.Unmarshal([]byte(templateFilesJSON), &templateFiles)
+	if err := json.Unmarshal([]byte(templateFilesJSON), &templateFiles); err != nil {
+		return fmt.Errorf("parse template_files for exedev bootstrap: %w", err)
+	}
 	templateFiles = workspaceTemplateFiles(templateFiles)
 
 	s.mu.RLock()
