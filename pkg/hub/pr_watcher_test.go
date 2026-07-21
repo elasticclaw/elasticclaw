@@ -1,7 +1,14 @@
 package hub
 
 import (
+	"bytes"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
 	"database/sql"
+	"encoding/json"
+	"encoding/pem"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -13,6 +20,92 @@ import (
 	"github.com/elasticclaw/elasticclaw/pkg/hub/pipeline"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 )
+
+// githubAppTokenTransport supplies GitHub App installation tokens without
+// reaching api.github.com. It deliberately rejects unscoped token requests so
+// reconciliation tests prove that the repo-scoped lookup is used.
+type githubAppTokenTransport struct{ base http.RoundTripper }
+
+func (t githubAppTokenTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	if r.URL.Host != "api.github.com" {
+		return t.base.RoundTrip(r)
+	}
+	var body []byte
+	if r.Body != nil {
+		body, _ = io.ReadAll(r.Body)
+	}
+	if r.Method == http.MethodGet && r.URL.Path == "/app/installations" {
+		return githubAppTokenResponse(http.StatusOK, `[{"id":1,"account":{"login":"owner"}}]`), nil
+	}
+	if r.Method == http.MethodPost && r.URL.Path == "/app/installations/1/access_tokens" {
+		if bytes.Contains(body, []byte(`"repositories"`)) {
+			return githubAppTokenResponse(http.StatusCreated, `{"token":"repo-token","expires_at":"2030-01-01T00:00:00Z"}`), nil
+		}
+		return githubAppTokenResponse(http.StatusForbidden, `{"message":"unscoped token unavailable"}`), nil
+	}
+	return githubAppTokenResponse(http.StatusNotFound, `{"message":"not found"}`), nil
+}
+
+func githubAppTokenResponse(status int, body string) *http.Response {
+	return &http.Response{StatusCode: status, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header)}
+}
+
+func testGitHubAppPEM(t *testing.T) string {
+	t.Helper()
+	key, err := rsa.GenerateKey(rand.Reader, 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)}))
+}
+
+func TestReconcileDeadClawPRsClosesRunsWithRepoTokenAndZeroOpenedAt(t *testing.T) {
+	oldTransport := http.DefaultTransport
+	http.DefaultTransport = githubAppTokenTransport{base: oldTransport}
+	t.Cleanup(func() { http.DefaultTransport = oldTransport })
+
+	gh := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer repo-token" {
+			t.Fatalf("authorization = %q, want repo token", r.Header.Get("Authorization"))
+		}
+		if strings.HasSuffix(r.URL.Path, "/pulls/1") {
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"state": "closed", "merged": true, "merged_at": "2026-01-01T00:00:00Z"})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"state": "closed", "merged": false, "closed_at": "2026-01-01T00:00:00Z"})
+	}))
+	defer gh.Close()
+
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{GitHubApps: []*types.GitHubAppConfig{{AppID: 1, PrivateKeyPEM: testGitHubAppPEM(t)}}}, gh.URL, "", "")
+	for _, tc := range []struct {
+		claw, key string
+		number    int
+	}{{"dead-merged", "merged", 1}, {"dead-closed", "closed", 2}} {
+		if _, err := db.Exec(`
+			INSERT INTO claws(id, tenant_id, name, template, status, created_at)
+			VALUES(?,?,?,?,?,?)`, tc.claw, "test-tenant-id", tc.claw, "elasticclaw", "running", now()); err != nil {
+			t.Fatal(err)
+		}
+		runID, _ := startTaskRunForTest(t, s, tc.claw, tc.key)
+		associatePRForTest(t, s, runID, "owner/repo", tc.number, taskRunPRStateOpen)
+		if tc.number == 1 {
+			if _, err := db.Exec(`UPDATE task_run_prs SET opened_at=0 WHERE run_id=?`, runID); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+
+	s.reconcileDeadClawPRs()
+	for _, tc := range []struct{ key, want string }{{"merged", taskRunStatusClean}, {"closed", taskRunStatusClean}} {
+		var status string
+		if err := db.QueryRow(`SELECT status FROM task_run_summaries WHERE factory_name=?`, "factory-"+tc.key).Scan(&status); err != nil {
+			t.Fatal(err)
+		}
+		if status != tc.want {
+			t.Fatalf("%s status=%q, want %q", tc.key, status, tc.want)
+		}
+	}
+}
 
 func insertWatcherTestPR(t *testing.T, db *sql.DB, clawID, prID string) {
 	t.Helper()

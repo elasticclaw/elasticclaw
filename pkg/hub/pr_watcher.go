@@ -205,7 +205,7 @@ func (s *Server) reconcileDeadClawPRs() {
 		WHERE trp.state = 'open'
 		  AND trs.status = 'running'
 		  AND trs.analytics_enabled = 1
-		  AND trp.opened_at > ?
+		  AND (trp.opened_at = 0 OR trp.opened_at > ?)
 		  AND NOT EXISTS (
 			SELECT 1 FROM claw_prs cp JOIN claws cl ON cl.id = cp.claw_id
 			WHERE cp.repo = trp.repo AND cp.pr_number = trp.pr_number
@@ -234,14 +234,15 @@ func (s *Server) reconcileDeadClawPRs() {
 	if len(prs) == 0 {
 		return
 	}
-	token := s.resolveGitHubToken()
-	if token == "" {
-		return
-	}
+	globalToken := s.resolveGitHubToken()
 	for _, p := range prs {
 		repoToken := s.resolveGitHubTokenForRepo(p.repo)
 		if repoToken == "" {
-			repoToken = token
+			repoToken = globalToken
+		}
+		if repoToken == "" {
+			log.Printf("[pr-reconciler] no token available for %s, skipping run %s", p.repo, p.runID)
+			continue
 		}
 		ghBase := s.githubBaseURL
 		if ghBase == "" {

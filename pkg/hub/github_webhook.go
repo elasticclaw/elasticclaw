@@ -190,18 +190,6 @@ func (s *Server) processGitHubPREvent(payload githubPRPayload) {
 
 	repoFullName := payload.Repository.FullName
 	log.Printf("[github-webhook] processing PR event: repo=%q action=%q — checking %d factories", repoFullName, payload.Action, len(factories))
-	if payload.Action == "closed" {
-		if runID, ok := s.findOpenTaskRunPR(repoFullName, payload.Number); ok {
-			atValue := payload.PullRequest.ClosedAt
-			if payload.PullRequest.Merged {
-				atValue = payload.PullRequest.MergedAt
-			}
-			if err := s.associateTaskRunPR(TaskRunPR{RunID: runID, Repo: repoFullName, PRNumber: payload.Number, URL: payload.PullRequest.HTMLURL, State: taskRunPRStateClosed, Merged: payload.PullRequest.Merged, OccurredAt: parseRFC3339Timestamp(atValue)}); err != nil {
-				log.Printf("[github-webhook] failed to record closed PR outcome for run %s, %s#%d: %v", runID, repoFullName, payload.Number, err)
-			}
-			return
-		}
-	}
 
 	for _, factory := range factories {
 		if factory.Integration != "github" {
@@ -338,7 +326,7 @@ func (s *Server) processGitHubPREvent(payload githubPRPayload) {
 // task runs after the claw has been deleted, errored, or gone offline.
 func (s *Server) findOpenTaskRunPR(repo string, prNumber int) (runID string, ok bool) {
 	err := s.db.QueryRow(
-		`SELECT run_id FROM task_run_prs WHERE repo = ? AND pr_number = ? AND state = 'open' LIMIT 1`,
+		`SELECT run_id FROM task_run_prs WHERE repo = ? AND pr_number = ? AND state = 'open' ORDER BY opened_at DESC LIMIT 1`,
 		repo, prNumber,
 	).Scan(&runID)
 	if err != nil {
