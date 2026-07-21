@@ -2204,19 +2204,12 @@ func setupFlakeEnvironmentSync(nixDone <-chan error) error {
 		}
 	}
 
-	log.Printf("[bootstrap] installing packages from flake in %s...", flakeDir)
-	script := fmt.Sprintf(`
-set -euo pipefail
-export PATH="/nix/var/nix/profiles/default/bin:$PATH"
-. /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh 2>/dev/null || true
-cd %q
-nix profile install . --accept-flake-config 2>&1 || echo "Flake profile install may have partial failures, continuing..."
-`, flakeDir)
-	if err := runShell(script); err != nil {
-		log.Printf("[bootstrap] flake profile install warning: %v", err)
-	}
-
+	// Create the provider-neutral flake-run wrapper that enters devShells.default.
+	// Workspace flakes supply claw-wide tools (e.g. depot). This is the
+	// contract used by both the agent gateway and deterministic run steps.
+	// We deliberately do not use "nix profile install ." (wrong for dev-shell-only flakes).
 	wrapperScript := fmt.Sprintf(`#!/bin/bash
+set -euo pipefail
 export PATH="/nix/var/nix/profiles/default/bin:$PATH"
 . /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh 2>/dev/null || true
 cd %q
@@ -2227,7 +2220,14 @@ exec nix develop --accept-flake-config -c "$@"
 		return fmt.Errorf("failed to write flake wrapper: %w", err)
 	}
 
-	log.Printf("[bootstrap] flake environment ready at %s", flakeDir)
+	// Pre-evaluate the devShell with an inexpensive command. This builds the
+	// environment from the pinned flake.lock and fails fast on bad flakes.
+	log.Printf("[bootstrap] pre-evaluating workspace devShell via flake-run...")
+	if err := runShell(`~/.elasticclaw/flake-run true`); err != nil {
+		return fmt.Errorf("workspace flake devShell evaluation failed (try 'nix develop --accept-flake-config' locally to debug): %w", err)
+	}
+
+	log.Printf("[bootstrap] flake environment ready at %s (devShell pre-evaluated)", flakeDir)
 	return nil
 }
 
@@ -2238,25 +2238,18 @@ func startGatewayWithFlake(useFlake bool) (*exec.Cmd, error) {
 		return startGateway()
 	}
 
-	log.Printf("[bootstrap] starting OpenClaw gateway inside nix develop...")
+	log.Printf("[bootstrap] starting OpenClaw gateway inside nix develop via flake-run...")
 
 	// Set env vars that suppress respawn / bonjour.
 	os.Setenv("OPENCLAW_NO_RESPAWN", "1")
 	os.Setenv("OPENCLAW_DISABLE_BONJOUR", "1")
 
 	home, _ := os.UserHomeDir()
-	flakeDir := filepath.Join(home, ".elasticclaw", "flake")
 	logFile := filepath.Join(home, "openclaw-gateway.log")
 
-	// Build the nix develop command that runs openclaw gateway
-	// Properly escape the flakeDir to prevent shell injection
-	script := fmt.Sprintf(`
-set -euo pipefail
-export PATH="/nix/var/nix/profiles/default/bin:$PATH"
-. /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh 2>/dev/null || true
-cd %q
-exec nix develop --accept-flake-config -c openclaw gateway run
-`, flakeDir)
+	// Use the wrapper (created and pre-evaluated during setupFlakeEnvironmentSync).
+	// This is consistent with how workflow run commands and other tools are invoked.
+	script := `~/.elasticclaw/flake-run openclaw gateway run`
 
 	cmd := exec.Command("bash", "-c", script)
 	cmd.Env = os.Environ()
@@ -3330,11 +3323,11 @@ func runBootstrap() error {
 	}
 
 	// Step 5: Set up flake environment BEFORE starting gateway if flake.nix exists
-	// This ensures the gateway runs inside the flake environment
+	// This ensures the gateway runs inside the flake environment.
+	// Fail closed: a bad declared flake must not produce a claw without the declared tools.
 	if hasFlake {
 		if err := setupFlakeEnvironmentSync(nixDone); err != nil {
-			log.Printf("[bootstrap] flake setup warning: %v (continuing without flake)", err)
-			hasFlake = false // Fall back to non-flake mode
+			return fmt.Errorf("setup workspace flake: %w", err)
 		}
 	}
 

@@ -406,7 +406,8 @@ func (s *Server) executePipelineCommand(clawID, command string, timeout time.Dur
 		return nil, fmt.Errorf("agent has no provider instance yet")
 	}
 
-	workspaceCommand := `cd "$HOME/.openclaw/workspace" && ` + command
+	workspaceCommand := s.buildWorkspaceRunCommand(clawID, command)
+
 	ctx, cancel := context.WithTimeout(context.Background(), timeout+30*time.Second)
 	defer cancel()
 
@@ -2284,4 +2285,23 @@ func loadWorkflowPipelineContext(workspaceName, workflowName string) (*types.Wor
 		return workspace, workflow, true
 	}
 	return nil, nil, false
+}
+
+// buildWorkspaceRunCommand returns the shell command string that should be
+// executed on the remote claw for a workflow run action.
+// When the claw has a workspace flake, it wraps via flake-run so the command
+// runs inside devShells.default while preserving cwd and original command semantics.
+func (s *Server) buildWorkspaceRunCommand(clawID, command string) string {
+	var tmplFilesJSON string
+	_ = s.db.QueryRow(`SELECT COALESCE(template_files,'{}') FROM claws WHERE id=?`, clawID).Scan(&tmplFilesJSON)
+	var tmplFiles map[string]string
+	_ = json.Unmarshal([]byte(tmplFilesJSON), &tmplFiles)
+	hasWorkspaceFlake := tmplFiles["flake.nix"] != ""
+
+	if hasWorkspaceFlake {
+		inner := `cd "$HOME/.openclaw/workspace" && ` + command
+		quoted := shellQuote(inner)
+		return `~/.elasticclaw/flake-run bash -lc ` + quoted
+	}
+	return `cd "$HOME/.openclaw/workspace" && ` + command
 }

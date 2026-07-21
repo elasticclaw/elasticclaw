@@ -1595,3 +1595,31 @@ stages:
 		t.Fatalf("stage = %q, want create_pr (skipped should be normalised to pass for auto-transition)", stage)
 	}
 }
+
+func TestBuildWorkspaceRunCommand(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
+
+	const clawNoFlake = "claw-no-flake"
+	_, err := db.Exec(`INSERT INTO claws(id, tenant_id, name, template, status, template_files, created_at) VALUES(?,?,?,?,?,?,datetime('now'))`, clawNoFlake, "t", "no-flake", "base", "connected", "{}")
+	if err != nil {
+		t.Fatalf("insert no-flake: %v", err)
+	}
+	got := s.buildWorkspaceRunCommand(clawNoFlake, "depot --version")
+	if !strings.Contains(got, `cd "$HOME/.openclaw/workspace" && depot --version`) || strings.Contains(got, "flake-run") {
+		t.Fatalf("no-flake command = %q, want plain cd form", got)
+	}
+
+	const clawWithFlake = "claw-with-flake"
+	filesWithFlake := `{"flake.nix": "{ }", "flake.lock": "{}" }`
+	_, err = db.Exec(`INSERT INTO claws(id, tenant_id, name, template, status, template_files, created_at) VALUES(?,?,?,?,?,?,datetime('now'))`, clawWithFlake, "t", "with-flake", "base", "connected", filesWithFlake)
+	if err != nil {
+		t.Fatalf("insert with-flake: %v", err)
+	}
+	got = s.buildWorkspaceRunCommand(clawWithFlake, "depot ci --foo bar")
+	if !strings.Contains(got, "flake-run") || !strings.Contains(got, "depot ci --foo bar") {
+		t.Fatalf("with-flake command = %q, want flake-run wrapper", got)
+	}
+	if !strings.Contains(got, `cd "$HOME/.openclaw/workspace"`) {
+		t.Fatalf("with-flake command must preserve workspace cd: %q", got)
+	}
+}

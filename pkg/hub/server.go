@@ -1151,6 +1151,15 @@ func (s *Server) handleCreateClaw(w http.ResponseWriter, r *http.Request, tenant
 	req.Files = injectFigmaAPIDocs(req.Files, env)
 	filesJSON, _ := json.Marshal(req.Files)
 
+	// Auto-enable Nix for workspaces that include a flake.nix.
+	// This makes the workspace flake the contract for tools without requiring
+	// an explicit "nix: true" in elasticclaw-config.yaml (while still
+	// honoring explicit nix: true for non-flake Nix usage).
+	if _, hasFlake := req.Files["flake.nix"]; hasFlake {
+		req.Nix = true
+		log.Printf("[create] claw %s: auto-enabled nix because flake.nix present", req.Name)
+	}
+
 	// Store GitHub repos config from template if present
 	var githubReposJSON string = "[]"
 	if req.GitHub != nil && len(req.GitHub.Repos) > 0 {
@@ -3240,6 +3249,42 @@ sudo apt-get install -y --fix-broken docker-ce docker-ce-cli containerd.io docke
 sudo usermod -aG docker daytona 2>/dev/null || true && \
 docker --version`); err != nil {
 			log.Printf("[daytona] warning: docker install failed: %v", err)
+		}
+	}
+
+	// Stage flake files *early* (before gateway, onboard, etc.) when present.
+	// This ensures the workspace flake is on disk for:
+	// - nix develop / flake-run wrapper creation in bridge bootstrap
+	// - the final gateway to run inside the devShell
+	// - deterministic workflow commands
+	// Full template files (for agent context) are still (re)written later.
+	// Flake presence already forced nixEnabled=1 at creation time.
+	s.setBootstrapStatus(clawID, "Preparing workspace")
+	var earlyFilesJSON string
+	_ = s.db.QueryRow(`SELECT COALESCE(template_files,'{}') FROM claws WHERE id=?`, clawID).Scan(&earlyFilesJSON)
+	var earlyTemplateFiles map[string]string
+	if err := json.Unmarshal([]byte(earlyFilesJSON), &earlyTemplateFiles); err == nil && len(earlyTemplateFiles) > 0 {
+		if flakeFiles := templateFlakeFiles(earlyTemplateFiles); len(flakeFiles) > 0 {
+			for name, content := range flakeFiles {
+				name := name
+				content := content
+				safeName, err := cleanWorkspaceFilePath(name)
+				if err != nil {
+					log.Printf("[daytona] warning: skipping invalid flake path %q: %v", name, err)
+					continue
+				}
+				targetPath := "/home/daytona/.openclaw/workspace/" + safeName
+				targetDir := path.Dir(targetPath)
+				writeCmd := fmt.Sprintf(
+					`export HOME=/home/daytona; mkdir -p %s && cat > %s << 'ELASTICCLAW_EOF'
+%s
+ELASTICCLAW_EOF`,
+					shellQuote(targetDir), shellQuote(targetPath), content)
+				if err := exec("write "+name+" (early flake)", 15*time.Second, writeCmd); err != nil {
+					log.Printf("[daytona] warning: early write %s: %v", name, err)
+				}
+			}
+			log.Printf("[daytona] early flake files staged for claw %s", clawID)
 		}
 	}
 
