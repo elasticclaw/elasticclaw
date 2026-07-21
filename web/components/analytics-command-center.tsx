@@ -349,6 +349,25 @@ export function AnalyticsCommandCenter({ workspaceScope }: { workspaceScope?: st
           </KpiGroup>
         </div>
 
+        <div className="grid gap-5 lg:grid-cols-2">
+          <ChartCard title="Run outcomes over time">
+            <OutcomesChart effect={effect} />
+          </ChartCard>
+          <ChartCard title="Delivery funnel">
+            <DeliveryFunnel effect={effect} />
+          </ChartCard>
+        </div>
+
+        <RunsTable
+          runs={runs}
+          page={cursorStack.length}
+          canGoPrevious={cursorStack.length > 1}
+          canGoNext={Boolean(nextCursor)}
+          onSelect={setSelectedRunId}
+          onPrevious={handlePreviousPage}
+          onNext={handleNextPage}
+        />
+
         <Heatmap
           heatmap={heatmap}
           maxCost={maxHeatCost}
@@ -359,27 +378,12 @@ export function AnalyticsCommandCenter({ workspaceScope }: { workspaceScope?: st
           <ChartCard title="Daily cost by model">
             <DailyCostChart costs={costs} modelData={modelData} />
           </ChartCard>
-          <ChartCard title="Run outcomes over time">
-            <OutcomesChart effect={effect} />
-          </ChartCard>
-          <ChartCard title="Delivery funnel">
-            <DeliveryFunnel effect={effect} />
-          </ChartCard>
           <ChartCard title="Cost per merged PR">
             <CostPerMergedPrChart effect={effect} />
           </ChartCard>
         </div>
 
         <CostDrivers drivers={drivers} />
-        <RunsTable
-          runs={runs}
-          page={cursorStack.length}
-          canGoPrevious={cursorStack.length > 1}
-          canGoNext={Boolean(nextCursor)}
-          onSelect={setSelectedRunId}
-          onPrevious={handlePreviousPage}
-          onNext={handleNextPage}
-        />
       </div>
       <RunDetailPanel
         run={selectedRun}
