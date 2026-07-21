@@ -15,7 +15,7 @@ type LLMKeyConfig struct {
 	Provider     string `yaml:"provider"      json:"provider"`                // e.g. "anthropic", "fireworks", "moonshot"
 	APIKey       string `yaml:"api_key"       json:"-"`                       // the actual key (never exposed in API)
 	Default      bool   `yaml:"default"       json:"default"`                 // use when no llm_key specified
-	DefaultModel string `yaml:"default_model" json:"default_model,omitempty"` // preferred model for this key, e.g. "fireworks/accounts/fireworks/models/kimi-k2p7"
+	DefaultModel string `yaml:"default_model" json:"default_model,omitempty"` // preferred model for this key, e.g. "fireworks/accounts/fireworks/models/kimi-k2p7-code"
 	AuthProfile  string `yaml:"auth_profile,omitempty" json:"auth_profile,omitempty"`
 }
 

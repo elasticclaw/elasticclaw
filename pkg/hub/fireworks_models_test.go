@@ -43,7 +43,7 @@ func TestFetchFireworksModelOptionsFiltersAndSortsLatestKimi(t *testing.T) {
 			resp["nextPageToken"] = "next"
 		case "next":
 			resp["models"] = []model{
-				{Name: "accounts/fireworks/models/kimi-k2p7", DisplayName: "Kimi K2.7", Public: true, ContextLength: 131072, SupportsServerless: true, ConversationConfig: map[string]any{"template": "{{ .Prompt }}"}},
+				{Name: "accounts/fireworks/models/kimi-k2p7-code", DisplayName: "Kimi K2.7 Code", Public: true, ContextLength: 131072, SupportsServerless: true, ConversationConfig: map[string]any{"template": "{{ .Prompt }}"}},
 				{Name: "accounts/fireworks/models/batch-only", DisplayName: "Batch Only", Public: true, ContextLength: 131072, SupportsServerless: false, ConversationConfig: map[string]any{"template": "{{ .Prompt }}"}},
 			}
 		default:
@@ -129,8 +129,8 @@ func TestGetSettingsIncludesDynamicFireworksModelOptions(t *testing.T) {
 		if err := json.NewEncoder(w).Encode(map[string]any{
 			"models": []map[string]any{
 				{
-					"name":               "accounts/fireworks/models/kimi-k2p7",
-					"displayName":        "Kimi K2.7",
+					"name":               "accounts/fireworks/models/kimi-k2p7-code",
+					"displayName":        "Kimi K2.7 Code",
 					"public":             true,
 					"contextLength":      131072,
 					"supportsServerless": true,
@@ -186,7 +186,7 @@ func TestHumanizeFireworksModelNameOnlyReplacesVersionSeparator(t *testing.T) {
 		"fireworks/accounts/fireworks/models/deepseek-v4-pro": "Deepseek V4 Pro",
 		"fireworks/accounts/fireworks/models/qwen3p6-plus":    "Qwen3.6 Plus",
 		"fireworks/accounts/fireworks/models/gpt-oss-120b":    "Gpt Oss 120b",
-		"fireworks/accounts/fireworks/models/kimi-k2p7":       "Kimi K2.7",
+		"fireworks/accounts/fireworks/models/kimi-k2p7-code": "Kimi K2.7 Code",
 	}
 	for id, want := range tests {
 		if got := humanizeFireworksModelName(id); got != want {

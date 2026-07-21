@@ -13,7 +13,7 @@ import (
 	"time"
 )
 
-const defaultFireworksModel = "fireworks/accounts/fireworks/models/kimi-k2p7"
+const defaultFireworksModel = "fireworks/accounts/fireworks/models/kimi-k2p7-code"
 
 type LLMModelOption struct {
 	ID   string `json:"id"`
@@ -21,7 +21,7 @@ type LLMModelOption struct {
 }
 
 var fallbackFireworksModelOptions = []LLMModelOption{
-	{ID: defaultFireworksModel, Name: "Kimi K2.7"},
+	{ID: defaultFireworksModel, Name: "Kimi K2.7 Code"},
 	{ID: "fireworks/accounts/fireworks/models/glm-5p2", Name: "GLM 5.2"},
 	{ID: "fireworks/accounts/fireworks/models/deepseek-v4-pro", Name: "DeepSeek V4 Pro"},
 	{ID: "fireworks/accounts/fireworks/models/deepseek-v4-flash", Name: "DeepSeek V4 Flash"},
