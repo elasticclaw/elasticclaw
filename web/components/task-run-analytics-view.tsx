@@ -604,7 +604,7 @@ export function RunDetailPanel({ run, details, loading, error, onClose }: { run:
 
   if (!run || !mounted) return null
   return createPortal(
-    <aside className="fixed inset-y-0 right-0 z-[60] flex w-full max-w-[380px] shrink-0 flex-col border-l border-border bg-card shadow-xl xl:static xl:shadow-none">
+    <aside className="fixed inset-y-0 right-0 z-[60] flex w-full max-w-[380px] flex-col border-l border-border bg-card shadow-xl">
       <div className="flex items-start justify-between gap-3 border-b border-border p-4">
         <div className="min-w-0">
           <div className="truncate text-sm font-semibold">{run.ownerDisplayName || run.runId}</div>
