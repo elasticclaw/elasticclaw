@@ -2174,18 +2174,25 @@ func setupFlakeEnvironmentSync(nixDone <-chan error) error {
 	}
 
 	// finishNix goroutine was launched early; ensure nix-daemon has started and
-	// NIX_REMOTE is set before we pre-eval the devShell (or start gateway inside
-	// nix develop). This prevents the "devShell before daemon" race that could
-	// cause pre-eval to fail on fresh installs.
+	// NIX_REMOTE is set *before* any devShell pre-eval or gateway inside nix develop.
+	// On multi-user installs the installer may finish but daemon not yet ready.
 	log.Printf("[bootstrap] ensuring nix-daemon is ready before devShell pre-eval...")
-	for i := 0; i < 30; i++ {
-		if err := runShell("pgrep -x nix-daemon >/dev/null 2>&1"); err == nil {
+	if err := runShell("pgrep -x nix-daemon >/dev/null 2>&1"); err != nil {
+		_ = runShell("sudo /nix/var/nix/profiles/default/bin/nix-daemon &")
+		time.Sleep(2 * time.Second)
+	}
+	os.Setenv("NIX_REMOTE", "daemon")
+	_ = runShell(". /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh 2>/dev/null || true")
+
+	// Extra wait: make sure a nix command succeeds with the daemon before we
+	// pre-evaluate the devShell (flake-run true). Prevents fail-closed on
+	// timing races in multi-user installs.
+	for i := 0; i < 15; i++ {
+		if err := runShell("nix --version >/dev/null 2>&1"); err == nil {
 			break
 		}
 		time.Sleep(1 * time.Second)
 	}
-	os.Setenv("NIX_REMOTE", "daemon")
-	_ = runShell(". /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh 2>/dev/null || true")
 
 	// Also check for flake.lock
 	flakeLockPath := filepath.Join(workspaceDir, "flake.lock")

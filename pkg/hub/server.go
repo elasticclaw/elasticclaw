@@ -3475,6 +3475,12 @@ cp "$BIN" /tmp/claw-bridge.download && chmod +x /tmp/claw-bridge.download && mv 
 		for name, content := range templateFiles {
 			name := name
 			content := content
+			// Skip flake files here: they were staged early (with collision-resistant
+			// delimiter) specifically for the devShell contract. Rewriting them with
+			// a fixed delimiter would re-introduce the heredoc injection risk.
+			if name == "flake.nix" || name == "flake.lock" {
+				continue
+			}
 			safeName, err := cleanWorkspaceFilePath(name)
 			if err != nil {
 				log.Printf("[daytona] warning: skipping invalid template file path %q: %v", name, err)
@@ -3482,11 +3488,19 @@ cp "$BIN" /tmp/claw-bridge.download && chmod +x /tmp/claw-bridge.download && mv 
 			}
 			targetPath := "/home/daytona/.openclaw/workspace/" + safeName
 			targetDir := path.Dir(targetPath)
+			// Use collision-resistant delimiter (same strategy as early flake staging)
+			// to protect against content containing a fixed token.
+			raw := make([]byte, 8)
+			if _, err := rand.Read(raw); err != nil {
+				log.Printf("[daytona] warning: rand for write delim %s: %v", name, err)
+				continue
+			}
+			delim := "ELASTICCLAW_FILE_" + hex.EncodeToString(raw)
 			writeCmd := fmt.Sprintf(
-				`export HOME=/home/daytona; mkdir -p %s && cat > %s << 'ELASTICCLAW_EOF'
+				`export HOME=/home/daytona; mkdir -p %s && cat > %s << '%s'
 %s
-ELASTICCLAW_EOF`,
-				shellQuote(targetDir), shellQuote(targetPath), content)
+%s`,
+				shellQuote(targetDir), shellQuote(targetPath), delim, content, delim)
 			if err := exec("write "+name, 15*time.Second, writeCmd); err != nil {
 				log.Printf("[daytona] warning: failed to write %s: %v", name, err)
 			}
