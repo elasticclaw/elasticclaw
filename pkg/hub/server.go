@@ -3930,7 +3930,7 @@ tail -n 120 "$LOG" 2>/dev/null || true`, shellQuote("openclaw@"+version))
 func daytonaPrepareBridgeCommand() string {
 	return `set -e
 export HOME=/home/daytona
-mkdir -p /home/daytona/.openclaw/workspace /home/daytona/.openclaw/run
+mkdir -p /home/daytona/.openclaw/workspace /home/daytona/.openclaw/run /home/daytona/workspace
 cd /home/daytona/.openclaw/workspace
 PIDFILE=/home/daytona/.openclaw/run/claw-bridge.pid
 if [ -s "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
@@ -3952,7 +3952,7 @@ rm -f "$PIDFILE"`
 
 func daytonaAsyncBridgeCommand(hubURL, clawID, clawToken, clawName, templateName string) string {
 	return fmt.Sprintf(`export HOME=/home/daytona
-mkdir -p /home/daytona/.openclaw/workspace /home/daytona/.openclaw/run
+mkdir -p /home/daytona/.openclaw/workspace /home/daytona/.openclaw/run /home/daytona/workspace
 cd /home/daytona/.openclaw/workspace
 PIDFILE=/home/daytona/.openclaw/run/claw-bridge.pid
 LOG=/home/daytona/claw-bridge.log
