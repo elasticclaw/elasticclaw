@@ -38,6 +38,7 @@ func newWorkflowHarnessServerWithProvider(t *testing.T, fixtureName, provider st
 		"noop":     {Type: "noop"},
 		"failing":  {Type: "failing"},
 		"testexec": {Type: "testexec"},
+		"docker":   {Type: "docker"},
 	}
 
 	cfg := &types.HubConfig{

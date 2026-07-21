@@ -83,6 +83,23 @@ func TestDockerWorkflowE2E(t *testing.T) {
 	}
 	agentID = trigger.ClawID
 	waitForAgentStatus(ctx, t, hub, agentID, "connected")
+
+	// Verify that the Docker provider executed the deterministic run action,
+	// captured output, and the gate passed (per #530). The injected message
+	// references the captured {{ .Outputs.docker_smoke.status }}.
+	time.Sleep(3 * time.Second)
+	msgs := hub.listMessages(ctx, t, agentID)
+	foundRun := false
+	for _, m := range msgs {
+		if strings.Contains(m.Content, "Docker provider run action executed") || strings.Contains(m.Content, "status\":\"passed\"") {
+			foundRun = true
+			break
+		}
+	}
+	if !foundRun {
+		t.Logf("messages seen for docker claw %s: %+v", agentID, msgs)
+		t.Fatalf("docker run action + output capture + gate did not produce expected evidence (see #530)")
+	}
 }
 
 func TestHubListenAddrBindsDockerHubForContainerAccess(t *testing.T) {
@@ -507,8 +524,18 @@ stages:
     label: Working
     entry: true
     on_enter:
+      run:
+        command: echo '{"status":"passed"}'
+        output: docker_smoke
+        timeout: 30s
       inject: |
-        Start up and reply with a short confirmation that the Docker sandbox is connected.
+        Docker provider run action executed. Output captured: {{ .Outputs.docker_smoke.status }}
+      gate:
+        output: docker_smoke
+        pass:
+          path: status
+          values: [passed]
+        required: true
 `, workflowName))
 	return root
 }
