@@ -3279,7 +3279,11 @@ docker --version`); err != nil {
 					log.Printf("[daytona] warning: skipping invalid flake path %q: %v", name, err)
 					continue
 				}
-				targetPath := "/home/daytona/.openclaw/workspace/" + safeName
+				// Write to the *staged* workspace dir (~ /workspace) that the bridge's
+				// hasWorkspaceFlake() and setupFlakeEnvironmentSync() inspect.
+				// This ensures early flake staging is visible for devShell wrapper creation
+				// before bridge starts. (syncStaged... later copies it into ~/.openclaw/workspace)
+				targetPath := "/home/daytona/workspace/" + safeName
 				targetDir := path.Dir(targetPath)
 				// Use a unique heredoc delimiter per write to avoid injection if the
 				// user-controlled flake content happens to contain the delimiter.
