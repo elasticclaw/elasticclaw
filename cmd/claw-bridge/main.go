@@ -2080,6 +2080,14 @@ curl --proto '=https' --tlsv1.2 -sSf -L https://install.determinate.systems/nix 
 			log.Printf("[bootstrap] Nix install failed: %v", err)
 		} else {
 			log.Printf("[bootstrap] Nix install complete")
+			// Start the daemon immediately in the bg goroutine so that when
+			// receivers (setupFlake or finishNix) get the nixDone signal, the
+			// daemon is already running. This guarantees devShell pre-eval
+			// has the daemon ready.
+			// Redirect stdout/stderr *before* & so the daemon does not inherit
+			// the pipes from runShell (which waits for pipes to close).
+			_ = runShell("sudo /nix/var/nix/profiles/default/bin/nix-daemon >/dev/null 2>&1 &")
+			time.Sleep(1 * time.Second)
 		}
 		ch <- err
 		ch <- err // Send twice so both receivers can read
@@ -2176,6 +2184,26 @@ func setupFlakeEnvironmentSync(nixDone <-chan error) error {
 		return fmt.Errorf("nix command not available after install: %w", err)
 	}
 
+	// Daemon was started by the nixInstallBg goroutine as soon as install completed.
+	// Just set env + source + wait for nix to be usable before pre-eval.
+	os.Setenv("NIX_REMOTE", "daemon")
+	_ = runShell(". /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh 2>/dev/null || true")
+
+	// Probe the *daemon* (not just the client). `nix --version` can succeed
+	// with NIX_REMOTE=daemon even if the daemon is not listening.
+	// Use `nix store ping` which actually contacts the store/daemon.
+	// Fail closed if it never becomes ready (per workspace flake contract).
+	for i := 0; i < 30; i++ {
+		if err := runShell("nix store ping >/dev/null 2>&1"); err == nil {
+			log.Printf("[bootstrap] nix daemon responded to ping after %ds", i)
+			break
+		}
+		if i == 29 {
+			return fmt.Errorf("nix daemon did not become ready (nix store ping never succeeded; check /tmp/nix-install.log and daemon logs)")
+		}
+		time.Sleep(1 * time.Second)
+	}
+
 	// Also check for flake.lock
 	flakeLockPath := filepath.Join(workspaceDir, "flake.lock")
 	hasFlakeLock := false
@@ -2207,19 +2235,12 @@ func setupFlakeEnvironmentSync(nixDone <-chan error) error {
 		}
 	}
 
-	log.Printf("[bootstrap] installing packages from flake in %s...", flakeDir)
-	script := fmt.Sprintf(`
-set -euo pipefail
-export PATH="/nix/var/nix/profiles/default/bin:$PATH"
-. /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh 2>/dev/null || true
-cd %q
-nix profile install . --accept-flake-config 2>&1 || echo "Flake profile install may have partial failures, continuing..."
-`, flakeDir)
-	if err := runShell(script); err != nil {
-		log.Printf("[bootstrap] flake profile install warning: %v", err)
-	}
-
+	// Create the provider-neutral flake-run wrapper that enters devShells.default.
+	// Workspace flakes supply claw-wide tools (e.g. depot). This is the
+	// contract used by both the agent gateway and deterministic run steps.
+	// We deliberately do not use "nix profile install ." (wrong for dev-shell-only flakes).
 	wrapperScript := fmt.Sprintf(`#!/bin/bash
+set -euo pipefail
 export PATH="/nix/var/nix/profiles/default/bin:$PATH"
 . /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh 2>/dev/null || true
 cd %q
@@ -2230,7 +2251,14 @@ exec nix develop --accept-flake-config -c "$@"
 		return fmt.Errorf("failed to write flake wrapper: %w", err)
 	}
 
-	log.Printf("[bootstrap] flake environment ready at %s", flakeDir)
+	// Pre-evaluate the devShell with an inexpensive command. This builds the
+	// environment from the pinned flake.lock and fails fast on bad flakes.
+	log.Printf("[bootstrap] pre-evaluating workspace devShell via flake-run...")
+	if err := runShell(`~/.elasticclaw/flake-run true`); err != nil {
+		return fmt.Errorf("workspace flake devShell evaluation failed (try 'nix develop --accept-flake-config' locally to debug): %w", err)
+	}
+
+	log.Printf("[bootstrap] flake environment ready at %s (devShell pre-evaluated)", flakeDir)
 	return nil
 }
 
@@ -2241,25 +2269,18 @@ func startGatewayWithFlake(useFlake bool) (*exec.Cmd, error) {
 		return startGateway()
 	}
 
-	log.Printf("[bootstrap] starting OpenClaw gateway inside nix develop...")
+	log.Printf("[bootstrap] starting OpenClaw gateway inside nix develop via flake-run...")
 
 	// Set env vars that suppress respawn / bonjour.
 	os.Setenv("OPENCLAW_NO_RESPAWN", "1")
 	os.Setenv("OPENCLAW_DISABLE_BONJOUR", "1")
 
 	home, _ := os.UserHomeDir()
-	flakeDir := filepath.Join(home, ".elasticclaw", "flake")
 	logFile := filepath.Join(home, "openclaw-gateway.log")
 
-	// Build the nix develop command that runs openclaw gateway
-	// Properly escape the flakeDir to prevent shell injection
-	script := fmt.Sprintf(`
-set -euo pipefail
-export PATH="/nix/var/nix/profiles/default/bin:$PATH"
-. /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh 2>/dev/null || true
-cd %q
-exec nix develop --accept-flake-config -c openclaw gateway run
-`, flakeDir)
+	// Use the wrapper (created and pre-evaluated during setupFlakeEnvironmentSync).
+	// This is consistent with how workflow run commands and other tools are invoked.
+	script := `~/.elasticclaw/flake-run openclaw gateway run`
 
 	cmd := exec.Command("bash", "-c", script)
 	cmd.Env = os.Environ()
@@ -3320,7 +3341,8 @@ func finishNix(nixDone <-chan error) {
 	}
 	if err := runShell("pgrep -x nix-daemon"); err != nil {
 		// Not running — start it
-		_ = runShell("sudo /nix/var/nix/profiles/default/bin/nix-daemon &")
+		// Redirect before & so it does not keep runShell pipes open.
+		_ = runShell("sudo /nix/var/nix/profiles/default/bin/nix-daemon >/dev/null 2>&1 &")
 		time.Sleep(2 * time.Second)
 		os.Setenv("NIX_REMOTE", "daemon")
 	}
@@ -3386,6 +3408,11 @@ func runBootstrap() error {
 		nixDone = nixInstallBg()
 	}
 
+	// Start finishNix goroutine early. It waits on nixDone and starts the daemon +
+	// sets NIX_REMOTE. This ensures the daemon is available before any
+	// pre-eval of devShells (flake-run) or gateway start inside nix develop.
+	go finishNix(nixDone)
+
 	// Step 2b: Start Docker install in background (if requested)
 	var dockerDone <-chan error
 	if os.Getenv("ELASTICCLAW_DOCKER") == "true" {
@@ -3438,11 +3465,11 @@ func runBootstrap() error {
 	}
 
 	// Step 5: Set up flake environment BEFORE starting gateway if flake.nix exists
-	// This ensures the gateway runs inside the flake environment
+	// This ensures the gateway runs inside the flake environment.
+	// Fail closed: a bad declared flake must not produce a claw without the declared tools.
 	if hasFlake {
 		if err := setupFlakeEnvironmentSync(nixDone); err != nil {
-			log.Printf("[bootstrap] flake setup warning: %v (continuing without flake)", err)
-			hasFlake = false // Fall back to non-flake mode
+			return fmt.Errorf("setup workspace flake: %w", err)
 		}
 	}
 
@@ -3482,8 +3509,8 @@ func runBootstrap() error {
 		return fmt.Errorf("waitForDeviceJSON: %w", err)
 	}
 
-	// Step 10: After bridge connects, finish Nix and Docker in background
-	go finishNix(nixDone)
+	// Step 10: finish Docker (Nix finisher was started early so daemon is ready
+	// for any flake pre-eval / nix develop before gateway).
 	go finishDocker(dockerDone)
 
 	if notifyFile := os.Getenv("ELASTICCLAW_BOOTSTRAP_NOTIFY_FILE"); notifyFile != "" {

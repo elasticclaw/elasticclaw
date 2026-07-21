@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1173,6 +1174,15 @@ func (s *Server) handleCreateClaw(w http.ResponseWriter, r *http.Request, tenant
 	req.Env = env
 	req.Files = injectFigmaAPIDocs(req.Files, env)
 	filesJSON, _ := json.Marshal(req.Files)
+
+	// Auto-enable Nix for workspaces that include a flake.nix.
+	// This makes the workspace flake the contract for tools without requiring
+	// an explicit "nix: true" in elasticclaw-config.yaml (while still
+	// honoring explicit nix: true for non-flake Nix usage).
+	if _, hasFlake := req.Files["flake.nix"]; hasFlake {
+		req.Nix = true
+		log.Printf("[create] claw %s: auto-enabled nix because flake.nix present", req.Name)
+	}
 
 	// Store GitHub repos config from template if present
 	var githubReposJSON string = "[]"
@@ -3292,6 +3302,71 @@ docker --version`); err != nil {
 		}
 	}
 
+	// Stage flake files *early* (before gateway, onboard, etc.) when present.
+	// This ensures the workspace flake is on disk for:
+	// - nix develop / flake-run wrapper creation in bridge bootstrap
+	// - the final gateway to run inside the devShell
+	// - deterministic workflow commands
+	// Full template files (for agent context) are still (re)written later.
+	// Flake presence already forced nixEnabled=1 at creation time.
+	s.setBootstrapStatus(clawID, "Preparing workspace")
+	// Ensure the staged workspace dir exists so early flake writes (and bridge detection)
+	// are reliable even if the provider snapshot did not create ~/workspace.
+	if err := exec("mkdir staged workspace", 10*time.Second, "export HOME=/home/daytona; mkdir -p /home/daytona/workspace"); err != nil {
+		log.Printf("[daytona] warning: mkdir ~/workspace: %v", err)
+	}
+	var earlyFilesJSON string
+	if err := s.db.QueryRow(`SELECT COALESCE(template_files,'{}') FROM claws WHERE id=?`, clawID).Scan(&earlyFilesJSON); err != nil {
+		return fmt.Errorf("load template_files for early flake staging %s: %w", clawID, err)
+	}
+	var earlyTemplateFiles map[string]string
+	if err := json.Unmarshal([]byte(earlyFilesJSON), &earlyTemplateFiles); err != nil {
+		return fmt.Errorf("parse template_files for early flake staging %s: %w", clawID, err)
+	}
+	if len(earlyTemplateFiles) > 0 {
+		if flakeFiles := templateFlakeFiles(earlyTemplateFiles); len(flakeFiles) > 0 {
+			for name, content := range flakeFiles {
+				name := name
+				content := content
+				safeName, err := cleanWorkspaceFilePath(name)
+				if err != nil {
+					log.Printf("[daytona] warning: skipping invalid flake path %q: %v", name, err)
+					continue
+				}
+				// Write to the *staged* workspace dir (~ /workspace) that the bridge's
+				// hasWorkspaceFlake() and setupFlakeEnvironmentSync() inspect.
+				// This ensures early flake staging is visible for devShell wrapper creation
+				// before bridge starts. (syncStaged... later copies it into ~/.openclaw/workspace)
+				targetPath := "/home/daytona/workspace/" + safeName
+				targetDir := path.Dir(targetPath)
+				// Base64-encode the user-controlled flake content, then use heredoc *only* for the
+				// encoded payload with a random delimiter. This prevents the raw flake.nix/lock
+				// (which is workspace-controlled) from being interpreted as shell if a delimiter
+				// line appears inside it. Matches the safe pattern in remoteWriteFileCommand.
+				encoded := base64.StdEncoding.EncodeToString([]byte(content))
+				raw := make([]byte, 8)
+				if _, err := rand.Read(raw); err != nil {
+					// Extremely rare; timestamp fallback still gives unique delim for this write.
+					raw = []byte(fmt.Sprintf("%x", time.Now().UnixNano()))
+				}
+				delim := "ELASTICCLAW_B64_" + hex.EncodeToString(raw)
+				writeCmd := fmt.Sprintf(
+					`export HOME=/home/daytona; mkdir -p %s && base64 -d > %s << '%s'
+%s
+%s`,
+					shellQuote(targetDir), shellQuote(targetPath), delim, encoded, delim)
+				// Fail-closed: required by the workspace flake contract (#526).
+				// The bridge creates ~/.elasticclaw/flake-run from these files; workflow
+				// run commands also route through it. Continuing on failure would leave
+				// the claw without the declared devShell tools.
+				if err := exec("write "+name+" (early flake)", 15*time.Second, writeCmd); err != nil {
+					return fmt.Errorf("write %s (early flake): %w", name, err)
+				}
+			}
+			log.Printf("[daytona] early flake files staged for claw %s", clawID)
+		}
+	}
+
 	// Step 2: Onboard (configure OpenClaw) with the correct auth provider
 	s.setBootstrapStatus(clawID, "Configuring OpenClaw")
 	var llmKeyNameDaytona string
@@ -3464,25 +3539,47 @@ cp "$BIN" /tmp/claw-bridge.download && chmod +x /tmp/claw-bridge.download && mv 
 	// the bridge starts so BOOTSTRAP.md and friends are present for the first turn.
 	s.setBootstrapStatus(clawID, "Preparing workspace")
 	var filesJSON string
-	_ = s.db.QueryRow(`SELECT COALESCE(template_files,'{}') FROM claws WHERE id=?`, clawID).Scan(&filesJSON)
+	if err := s.db.QueryRow(`SELECT COALESCE(template_files,'{}') FROM claws WHERE id=?`, clawID).Scan(&filesJSON); err != nil {
+		return fmt.Errorf("load template_files for final write %s: %w", clawID, err)
+	}
 	var templateFiles map[string]string
-	if err := json.Unmarshal([]byte(filesJSON), &templateFiles); err == nil && len(templateFiles) > 0 {
+	if err := json.Unmarshal([]byte(filesJSON), &templateFiles); err != nil {
+		return fmt.Errorf("parse template_files for final write %s: %w", clawID, err)
+	}
+	if len(templateFiles) > 0 {
 		templateFiles = workspaceTemplateFiles(templateFiles)
 		for name, content := range templateFiles {
 			name := name
 			content := content
+			// Skip flake files here: they were staged early (with collision-resistant
+			// delimiter) specifically for the devShell contract. Rewriting them with
+			// a fixed delimiter would re-introduce the heredoc injection risk.
+			if name == "flake.nix" || name == "flake.lock" {
+				continue
+			}
 			safeName, err := cleanWorkspaceFilePath(name)
 			if err != nil {
 				log.Printf("[daytona] warning: skipping invalid template file path %q: %v", name, err)
 				continue
 			}
-			targetPath := "/home/daytona/.openclaw/workspace/" + safeName
+			// Write to the *staged* workspace dir (~/workspace) so that syncStagedWorkspaceToOpenClawWorkspace
+			// (run inside bridge) will copy the injected files (e.g. CONTEXT.md for GitHub Issues/Linear factories)
+			// into ~/.openclaw/workspace. Direct writes to ~/.openclaw/workspace get stripped by the managed-files removal in sync.
+			targetPath := "/home/daytona/workspace/" + safeName
 			targetDir := path.Dir(targetPath)
+			// Use collision-resistant delimiter (same strategy as early flake staging)
+			// to protect against content containing a fixed token.
+			raw := make([]byte, 8)
+			if _, err := rand.Read(raw); err != nil {
+				log.Printf("[daytona] warning: rand for write delim %s: %v", name, err)
+				continue
+			}
+			delim := "ELASTICCLAW_FILE_" + hex.EncodeToString(raw)
 			writeCmd := fmt.Sprintf(
-				`export HOME=/home/daytona; mkdir -p %s && cat > %s << 'ELASTICCLAW_EOF'
+				`export HOME=/home/daytona; mkdir -p %s && cat > %s << '%s'
 %s
-ELASTICCLAW_EOF`,
-				shellQuote(targetDir), shellQuote(targetPath), content)
+%s`,
+				shellQuote(targetDir), shellQuote(targetPath), delim, content, delim)
 			if err := exec("write "+name, 15*time.Second, writeCmd); err != nil {
 				log.Printf("[daytona] warning: failed to write %s: %v", name, err)
 			}
@@ -3894,7 +3991,7 @@ tail -n 120 "$LOG" 2>/dev/null || true`, shellQuote("openclaw@"+version))
 func daytonaPrepareBridgeCommand() string {
 	return `set -e
 export HOME=/home/daytona
-mkdir -p /home/daytona/.openclaw/workspace /home/daytona/.openclaw/run
+mkdir -p /home/daytona/.openclaw/workspace /home/daytona/.openclaw/run /home/daytona/workspace
 cd /home/daytona/.openclaw/workspace
 PIDFILE=/home/daytona/.openclaw/run/claw-bridge.pid
 if [ -s "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
@@ -3916,7 +4013,7 @@ rm -f "$PIDFILE"`
 
 func daytonaAsyncBridgeCommand(hubURL, clawID, clawToken, modelAuthToken, clawName, templateName string) string {
 	return fmt.Sprintf(`export HOME=/home/daytona
-mkdir -p /home/daytona/.openclaw/workspace /home/daytona/.openclaw/run
+mkdir -p /home/daytona/.openclaw/workspace /home/daytona/.openclaw/run /home/daytona/workspace
 cd /home/daytona/.openclaw/workspace
 PIDFILE=/home/daytona/.openclaw/run/claw-bridge.pid
 LOG=/home/daytona/claw-bridge.log
@@ -4071,6 +4168,10 @@ func replicatedBootstrapDelay(delays []time.Duration, idx int) time.Duration {
 		return delays[idx]
 	}
 	return delays[len(delays)-1]
+}
+
+func replicatedFinalWorkspaceDir(sshHome string) string {
+	return path.Join(sshHome, ".openclaw", "workspace")
 }
 
 func replicatedWorkspaceReadinessCommand(dir string, files map[string]string) string {
@@ -4441,9 +4542,13 @@ func (s *Server) bootstrapExedev(ctx context.Context, clawID, vmName string, p *
 		return fmt.Errorf("load claw config: %w", err)
 	}
 	var githubRepos []types.GitHubRepoAccess
-	_ = json.Unmarshal([]byte(githubReposJSON), &githubRepos)
+	if err := json.Unmarshal([]byte(githubReposJSON), &githubRepos); err != nil {
+		return fmt.Errorf("parse github_repos for exedev bootstrap: %w", err)
+	}
 	var templateFiles map[string]string
-	_ = json.Unmarshal([]byte(templateFilesJSON), &templateFiles)
+	if err := json.Unmarshal([]byte(templateFilesJSON), &templateFiles); err != nil {
+		return fmt.Errorf("parse template_files for exedev bootstrap: %w", err)
+	}
 	templateFiles = workspaceTemplateFiles(templateFiles)
 
 	s.mu.RLock()
@@ -5533,12 +5638,20 @@ func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.Pr
 	}
 
 	var filesJSON, templateName string
-	_ = s.db.QueryRow(
+	if err := s.db.QueryRow(
 		`SELECT COALESCE(template_files,'{}'), COALESCE(template,'') FROM claws WHERE id=?`,
 		clawID,
-	).Scan(&filesJSON, &templateName)
+	).Scan(&filesJSON, &templateName); err != nil {
+		log.Printf("[bootstrap] failed to load template_files for claw %s: %v", clawID[:8], err)
+		s.stopAgentWithReason(clawID, fmt.Sprintf("Bootstrap failed: could not read template metadata: %s", err), false)
+		return
+	}
 	var files map[string]string
-	_ = json.Unmarshal([]byte(filesJSON), &files)
+	if err := json.Unmarshal([]byte(filesJSON), &files); err != nil {
+		log.Printf("[bootstrap] failed to parse template_files for claw %s: %v", clawID[:8], err)
+		s.stopAgentWithReason(clawID, fmt.Sprintf("Bootstrap failed: invalid template metadata: %s", err), false)
+		return
+	}
 
 	// Load github repos config for this claw
 	var githubReposJSON string
@@ -5732,7 +5845,10 @@ Tokens are short-lived and refreshed automatically on each git/gh operation.
 			Attempts:   6,
 			Delays:     replicatedSSHDelays,
 			Run: func() error {
-				return s.sshWriteFiles(sshUser, sshHost, path.Join(sshHome, ".openclaw", "workspace"), files)
+				// The Replicated bootstrap script has already finished, including the
+				// bridge's one-time staged-workspace sync. Write final context files
+				// directly to the live workspace so they are immediately available.
+				return s.sshWriteFiles(sshUser, sshHost, replicatedFinalWorkspaceDir(sshHome), files)
 			},
 		}); err != nil {
 			s.stopAgentWithReason(clawID, fmt.Sprintf("Bootstrap failed: could not write workspace files: %s", err), false)
@@ -5744,7 +5860,7 @@ Tokens are short-lived and refreshed automatically on each git/gh operation.
 			Attempts:   3,
 			Delays:     []time.Duration{2 * time.Second, 5 * time.Second},
 			Run: func() error {
-				return s.sshRun(sshUser, sshHost, replicatedWorkspaceReadinessCommand(path.Join(sshHome, ".openclaw", "workspace"), files))
+				return s.sshRun(sshUser, sshHost, replicatedWorkspaceReadinessCommand(replicatedFinalWorkspaceDir(sshHome), files))
 			},
 		}); err != nil {
 			s.stopAgentWithReason(clawID, fmt.Sprintf("Bootstrap failed: workspace files incomplete: %s", err), false)
@@ -6458,10 +6574,20 @@ func remoteWriteFileCommand(dir, name, content string) string {
 	remotePath := strings.TrimRight(dir, "/") + "/" + name
 	remoteDir := path.Dir(remotePath)
 	encoded := base64.StdEncoding.EncodeToString([]byte(content))
-	return fmt.Sprintf("mkdir -p -- %s && base64 -d > %s << 'ELASTICCLAW_B64'\n%s\nELASTICCLAW_B64",
+
+	// Use collision-resistant random delimiter (same strategy as Daytona early/later writes)
+	// to prevent heredoc injection if the (base64) payload happens to contain the marker.
+	raw := make([]byte, 8)
+	if _, err := rand.Read(raw); err != nil {
+		// Extremely rare; use a timestamp-based unique fallback (still collision resistant for practical purposes).
+		raw = []byte(fmt.Sprintf("%x", time.Now().UnixNano()))
+	}
+	delim := "ELASTICCLAW_B64_" + hex.EncodeToString(raw)
+
+	return fmt.Sprintf("mkdir -p -- %s && base64 -d > %s << '%s'\n%s\n%s",
 		shellDoubleQuote(remoteDir),
 		shellDoubleQuote(remotePath),
-		encoded,
+		delim, encoded, delim,
 	)
 }
 
