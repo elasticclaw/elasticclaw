@@ -201,11 +201,16 @@ func (s *Server) reconcileDeadClawPRs() {
 	rows, err := s.db.Query(`
 		SELECT trp.run_id, trp.repo, trp.pr_number, trp.pr_url
 		FROM task_run_prs trp
-		JOIN task_runs tr ON tr.id = trp.run_id
-		LEFT JOIN claws cl ON cl.id = tr.claw_id
+		JOIN task_run_summaries trs ON trs.run_id = trp.run_id
 		WHERE trp.state = 'open'
-		  AND (cl.id IS NULL OR cl.status IN ('deleted','error','offline'))
-	`)
+		  AND trs.status = 'running'
+		  AND trs.analytics_enabled = 1
+		  AND trp.opened_at > ?
+		  AND NOT EXISTS (
+			SELECT 1 FROM claw_prs cp JOIN claws cl ON cl.id = cp.claw_id
+			WHERE cp.repo = trp.repo AND cp.pr_number = trp.pr_number
+			  AND cl.status NOT IN ('deleted','error','offline')
+		  )`, epochMillis(now().Add(-90*24*time.Hour)))
 	if err != nil {
 		if strings.Contains(err.Error(), "database is closed") {
 			return
@@ -238,7 +243,11 @@ func (s *Server) reconcileDeadClawPRs() {
 		if repoToken == "" {
 			repoToken = token
 		}
-		data, err := githubAPI(fmt.Sprintf("repos/%s/pulls/%d", p.repo, p.prNumber), repoToken)
+		ghBase := s.githubBaseURL
+		if ghBase == "" {
+			ghBase = "https://api.github.com"
+		}
+		data, err := githubAPIWithBase(ghBase, fmt.Sprintf("repos/%s/pulls/%d", p.repo, p.prNumber), repoToken)
 		if err != nil {
 			log.Printf("[pr-reconciler] fetch PR %s#%d failed: %v", p.repo, p.prNumber, err)
 			continue
@@ -248,11 +257,11 @@ func (s *Server) reconcileDeadClawPRs() {
 		if state != "closed" && !merged {
 			continue
 		}
-		mergedAtValue, _ := data["merged_at"].(string)
-		at := parseRFC3339Timestamp(mergedAtValue)
+		atValue, _ := data["merged_at"].(string)
 		if !merged {
-			at = time.Time{}
+			atValue, _ = data["closed_at"].(string)
 		}
+		at := parseRFC3339Timestamp(atValue)
 		if err := s.associateTaskRunPR(TaskRunPR{
 			RunID:      p.runID,
 			Repo:       p.repo,

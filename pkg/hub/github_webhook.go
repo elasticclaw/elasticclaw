@@ -33,6 +33,7 @@ type githubPRPayload struct {
 		Title     string `json:"title"`
 		CreatedAt string `json:"created_at"`
 		MergedAt  string `json:"merged_at"`
+		ClosedAt  string `json:"closed_at"`
 		Merged    bool   `json:"merged"`
 		User      struct {
 			Login string `json:"login"`
@@ -189,6 +190,18 @@ func (s *Server) processGitHubPREvent(payload githubPRPayload) {
 
 	repoFullName := payload.Repository.FullName
 	log.Printf("[github-webhook] processing PR event: repo=%q action=%q — checking %d factories", repoFullName, payload.Action, len(factories))
+	if payload.Action == "closed" {
+		if runID, ok := s.findOpenTaskRunPR(repoFullName, payload.Number); ok {
+			atValue := payload.PullRequest.ClosedAt
+			if payload.PullRequest.Merged {
+				atValue = payload.PullRequest.MergedAt
+			}
+			if err := s.associateTaskRunPR(TaskRunPR{RunID: runID, Repo: repoFullName, PRNumber: payload.Number, URL: payload.PullRequest.HTMLURL, State: taskRunPRStateClosed, Merged: payload.PullRequest.Merged, OccurredAt: parseRFC3339Timestamp(atValue)}); err != nil {
+				log.Printf("[github-webhook] failed to record closed PR outcome for run %s, %s#%d: %v", runID, repoFullName, payload.Number, err)
+			}
+			return
+		}
+	}
 
 	for _, factory := range factories {
 		if factory.Integration != "github" {
