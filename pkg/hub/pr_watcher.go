@@ -181,10 +181,92 @@ func (s *Server) startPRWatcher() {
 	go func() {
 		ticker := time.NewTicker(10 * time.Second)
 		defer ticker.Stop()
-		for range ticker.C {
-			s.pollAllPRs()
+		reconcileTicker := time.NewTicker(5 * time.Minute)
+		defer reconcileTicker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				s.pollAllPRs()
+			case <-reconcileTicker.C:
+				s.reconcileDeadClawPRs()
+			}
 		}
 	}()
+}
+
+// reconcileDeadClawPRs closes out task_run_prs rows left open because their
+// backing claw died before the PR's merge/close was observed. It only queries
+// and updates task-run state; it never touches claws or injects into agents.
+func (s *Server) reconcileDeadClawPRs() {
+	rows, err := s.db.Query(`
+		SELECT trp.run_id, trp.repo, trp.pr_number, trp.pr_url
+		FROM task_run_prs trp
+		JOIN task_runs tr ON tr.id = trp.run_id
+		LEFT JOIN claws cl ON cl.id = tr.claw_id
+		WHERE trp.state = 'open'
+		  AND (cl.id IS NULL OR cl.status IN ('deleted','error','offline'))
+	`)
+	if err != nil {
+		if strings.Contains(err.Error(), "database is closed") {
+			return
+		}
+		log.Printf("[pr-reconciler] query error: %v", err)
+		return
+	}
+	type openPR struct {
+		runID, repo, url string
+		prNumber         int
+	}
+	var prs []openPR
+	for rows.Next() {
+		var p openPR
+		if err := rows.Scan(&p.runID, &p.repo, &p.prNumber, &p.url); err != nil {
+			continue
+		}
+		prs = append(prs, p)
+	}
+	rows.Close()
+	if len(prs) == 0 {
+		return
+	}
+	token := s.resolveGitHubToken()
+	if token == "" {
+		return
+	}
+	for _, p := range prs {
+		repoToken := s.resolveGitHubTokenForRepo(p.repo)
+		if repoToken == "" {
+			repoToken = token
+		}
+		data, err := githubAPI(fmt.Sprintf("repos/%s/pulls/%d", p.repo, p.prNumber), repoToken)
+		if err != nil {
+			log.Printf("[pr-reconciler] fetch PR %s#%d failed: %v", p.repo, p.prNumber, err)
+			continue
+		}
+		state, _ := data["state"].(string)
+		merged, _ := data["merged"].(bool)
+		if state != "closed" && !merged {
+			continue
+		}
+		mergedAtValue, _ := data["merged_at"].(string)
+		at := parseRFC3339Timestamp(mergedAtValue)
+		if !merged {
+			at = time.Time{}
+		}
+		if err := s.associateTaskRunPR(TaskRunPR{
+			RunID:      p.runID,
+			Repo:       p.repo,
+			PRNumber:   p.prNumber,
+			URL:        p.url,
+			State:      taskRunPRStateClosed,
+			Merged:     merged,
+			OccurredAt: at,
+		}); err != nil {
+			log.Printf("[pr-reconciler] failed to reconcile run %s PR %s#%d: %v", p.runID, p.repo, p.prNumber, err)
+		} else {
+			log.Printf("[pr-reconciler] reconciled dead-claw PR %s#%d for run %s (merged=%v)", p.repo, p.prNumber, p.runID, merged)
+		}
+	}
 }
 
 type clawPR struct {
