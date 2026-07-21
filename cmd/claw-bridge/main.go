@@ -2077,6 +2077,12 @@ curl --proto '=https' --tlsv1.2 -sSf -L https://install.determinate.systems/nix 
 			log.Printf("[bootstrap] Nix install failed: %v", err)
 		} else {
 			log.Printf("[bootstrap] Nix install complete")
+			// Start the daemon immediately in the bg goroutine so that when
+			// receivers (setupFlake or finishNix) get the nixDone signal, the
+			// daemon is already running. This guarantees devShell pre-eval
+			// has the daemon ready.
+			_ = runShell("sudo /nix/var/nix/profiles/default/bin/nix-daemon & 2>/dev/null || true")
+			time.Sleep(1 * time.Second)
 		}
 		ch <- err
 		ch <- err // Send twice so both receivers can read
@@ -2173,20 +2179,11 @@ func setupFlakeEnvironmentSync(nixDone <-chan error) error {
 		return fmt.Errorf("nix command not available after install: %w", err)
 	}
 
-	// finishNix goroutine was launched early; ensure nix-daemon has started and
-	// NIX_REMOTE is set *before* any devShell pre-eval or gateway inside nix develop.
-	// On multi-user installs the installer may finish but daemon not yet ready.
-	log.Printf("[bootstrap] ensuring nix-daemon is ready before devShell pre-eval...")
-	if err := runShell("pgrep -x nix-daemon >/dev/null 2>&1"); err != nil {
-		_ = runShell("sudo /nix/var/nix/profiles/default/bin/nix-daemon &")
-		time.Sleep(2 * time.Second)
-	}
+	// Daemon was started by the nixInstallBg goroutine as soon as install completed.
+	// Just set env + source + wait for nix to be usable before pre-eval.
 	os.Setenv("NIX_REMOTE", "daemon")
 	_ = runShell(". /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh 2>/dev/null || true")
 
-	// Extra wait: make sure a nix command succeeds with the daemon before we
-	// pre-evaluate the devShell (flake-run true). Prevents fail-closed on
-	// timing races in multi-user installs.
 	for i := 0; i < 15; i++ {
 		if err := runShell("nix --version >/dev/null 2>&1"); err == nil {
 			break
