@@ -2081,7 +2081,9 @@ curl --proto '=https' --tlsv1.2 -sSf -L https://install.determinate.systems/nix 
 			// receivers (setupFlake or finishNix) get the nixDone signal, the
 			// daemon is already running. This guarantees devShell pre-eval
 			// has the daemon ready.
-			_ = runShell("sudo /nix/var/nix/profiles/default/bin/nix-daemon & 2>/dev/null || true")
+			// Redirect stdout/stderr *before* & so the daemon does not inherit
+			// the pipes from runShell (which waits for pipes to close).
+			_ = runShell("sudo /nix/var/nix/profiles/default/bin/nix-daemon >/dev/null 2>&1 &")
 			time.Sleep(1 * time.Second)
 		}
 		ch <- err
@@ -3230,7 +3232,8 @@ func finishNix(nixDone <-chan error) {
 	}
 	if err := runShell("pgrep -x nix-daemon"); err != nil {
 		// Not running — start it
-		_ = runShell("sudo /nix/var/nix/profiles/default/bin/nix-daemon &")
+		// Redirect before & so it does not keep runShell pipes open.
+		_ = runShell("sudo /nix/var/nix/profiles/default/bin/nix-daemon >/dev/null 2>&1 &")
 		time.Sleep(2 * time.Second)
 		os.Setenv("NIX_REMOTE", "daemon")
 	}
