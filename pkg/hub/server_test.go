@@ -2105,7 +2105,6 @@ func TestSendNextQueuedMessageKeepsPendingAfterWriteFailure(t *testing.T) {
 	s.mu.RLock()
 	cc := s.claws[clawID]
 	s.mu.RUnlock()
-	insertPendingMessage(t, db, clawID, "retry me", now())
 	// Sever the client side abruptly (no close handshake) so the server's
 	// next write to this connection fails, without touching cc.conn directly
 	// (which would race the server's own read/close goroutines).
@@ -2113,7 +2112,19 @@ func TestSendNextQueuedMessageKeepsPendingAfterWriteFailure(t *testing.T) {
 		t.Fatalf("close client websocket: %v", err)
 	}
 	waitForTestClawDisconnect(t, s, clawID)
-	// The closed peer makes the write fail; the row must remain eligible.
+	// Close the server side too: even after the claw is deregistered, a TCP
+	// write into the severed loopback socket can still succeed before the
+	// peer's RST is processed, which would count as a delivery. CloseNow is
+	// idempotent and concurrency safe, so racing the handler's own close is
+	// fine.
+	_ = cc.conn.CloseNow()
+	// Insert the pending row only after the disconnect is observed: the
+	// handler calls sendNextQueuedMessage right after acking registration,
+	// so an earlier insert could race that drain and be delivered over the
+	// still-live socket. The disconnect cleanup happens-after that call on
+	// the handler goroutine, so the drain can no longer see this row.
+	insertPendingMessage(t, db, clawID, "retry me", now())
+	// The closed connection makes the write fail; the row must remain eligible.
 	s.sendNextQueuedMessage(cc)
 	assertMessagesDelivered(t, db, clawID, 0)
 
