@@ -2173,6 +2173,20 @@ func setupFlakeEnvironmentSync(nixDone <-chan error) error {
 		return fmt.Errorf("nix command not available after install: %w", err)
 	}
 
+	// finishNix goroutine was launched early; ensure nix-daemon has started and
+	// NIX_REMOTE is set before we pre-eval the devShell (or start gateway inside
+	// nix develop). This prevents the "devShell before daemon" race that could
+	// cause pre-eval to fail on fresh installs.
+	log.Printf("[bootstrap] ensuring nix-daemon is ready before devShell pre-eval...")
+	for i := 0; i < 30; i++ {
+		if err := runShell("pgrep -x nix-daemon >/dev/null 2>&1"); err == nil {
+			break
+		}
+		time.Sleep(1 * time.Second)
+	}
+	os.Setenv("NIX_REMOTE", "daemon")
+	_ = runShell(". /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh 2>/dev/null || true")
+
 	// Also check for flake.lock
 	flakeLockPath := filepath.Join(workspaceDir, "flake.lock")
 	hasFlakeLock := false
@@ -3270,6 +3284,11 @@ func runBootstrap() error {
 		nixDone = nixInstallBg()
 	}
 
+	// Start finishNix goroutine early. It waits on nixDone and starts the daemon +
+	// sets NIX_REMOTE. This ensures the daemon is available before any
+	// pre-eval of devShells (flake-run) or gateway start inside nix develop.
+	go finishNix(nixDone)
+
 	// Step 2b: Start Docker install in background (if requested)
 	var dockerDone <-chan error
 	if os.Getenv("ELASTICCLAW_DOCKER") == "true" {
@@ -3367,8 +3386,8 @@ func runBootstrap() error {
 		return fmt.Errorf("waitForDeviceJSON: %w", err)
 	}
 
-	// Step 10: After bridge connects, finish Nix and Docker in background
-	go finishNix(nixDone)
+	// Step 10: finish Docker (Nix finisher was started early so daemon is ready
+	// for any flake pre-eval / nix develop before gateway).
 	go finishDocker(dockerDone)
 
 	if notifyFile := os.Getenv("ELASTICCLAW_BOOTSTRAP_NOTIFY_FILE"); notifyFile != "" {
