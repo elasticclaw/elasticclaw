@@ -250,7 +250,7 @@ func (s *Server) processGitHubPREvent(payload githubPRPayload) {
 				if _, runID, _, ok, err := s.taskRunContextForClaw(existingClawID); err == nil && ok {
 					at := parseRFC3339Timestamp(payload.PullRequest.MergedAt)
 					if !payload.PullRequest.Merged {
-						at = time.Time{}
+						at = parseRFC3339Timestamp(payload.PullRequest.ClosedAt)
 					}
 					_ = s.associateTaskRunPR(TaskRunPR{RunID: runID, Repo: repoFullName, PRNumber: payload.Number, URL: payload.PullRequest.HTMLURL, State: taskRunPRStateClosed, Merged: payload.PullRequest.Merged, OccurredAt: at})
 				}
@@ -297,7 +297,7 @@ func (s *Server) processGitHubPREvent(payload githubPRPayload) {
 			if runID, ok := s.findOpenTaskRunPR(repoFullName, payload.Number); ok {
 				at := parseRFC3339Timestamp(payload.PullRequest.MergedAt)
 				if !payload.PullRequest.Merged {
-					at = time.Time{}
+					at = parseRFC3339Timestamp(payload.PullRequest.ClosedAt)
 				}
 				if err := s.associateTaskRunPR(TaskRunPR{RunID: runID, Repo: repoFullName, PRNumber: payload.Number, URL: payload.PullRequest.HTMLURL, State: taskRunPRStateClosed, Merged: payload.PullRequest.Merged, OccurredAt: at}); err != nil {
 					log.Printf("[github-webhook] failed to record dead-claw PR outcome for run %s, %s#%d: %v", runID, repoFullName, payload.Number, err)

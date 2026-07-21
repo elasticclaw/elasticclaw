@@ -798,10 +798,15 @@ func backfillTaskRunAnalyticsStatusV3(db *sql.DB) error {
 		return err
 	}
 	rows.Close()
+	skipped := 0
 	for _, runID := range runIDs {
 		if err := backfillTaskRunStatus(db, runID); err != nil {
+			skipped++
 			log.Printf("[task-run-analytics] status v3 backfill skipped run %s: %v", runID, err)
 		}
+	}
+	if skipped > 0 {
+		log.Printf("[task-run-analytics] status v3 backfill skipped %d of %d run(s)", skipped, len(runIDs))
 	}
 	_, err = db.Exec(`INSERT INTO hub_migrations(name, applied_at) VALUES(?, ?) ON CONFLICT(name) DO NOTHING`, migration, now().UnixMilli())
 	return err
