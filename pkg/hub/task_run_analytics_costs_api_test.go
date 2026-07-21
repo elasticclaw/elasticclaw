@@ -18,7 +18,7 @@ func TestTaskRunAnalyticsCostsAggregatesFiltersAndTenantScope(t *testing.T) {
 	seedTaskRunAnalyticsUsage(t, db, "test-tenant-id", now, "other", "gpt-4", 100, 1000)
 	seedTaskRunAnalyticsUsage(t, db, "other-tenant-id", now, "eng", "gpt-5", 1000, 10000)
 
-	response, err := s.readTaskRunAnalyticsCosts(taskRunAnalyticsFilters{TenantID: "test-tenant-id", Workspace: []string{"eng"}, Model: []string{"gpt-5"}}, now)
+	response, err := s.readTaskRunAnalyticsCostsWithOptions(taskRunAnalyticsFilters{TenantID: "test-tenant-id", Workspace: []string{"eng"}, Model: []string{"gpt-5"}}, now, 30, "", "ledger")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -37,12 +37,12 @@ func TestTaskRunAnalyticsCostsDeltaAndProjection(t *testing.T) {
 	t.Run("null delta and no data projection", func(t *testing.T) {
 		s, db := newTaskRunAnalyticsAPITestServer(t)
 		now := time.Date(2026, time.July, 3, 0, 0, 0, 0, time.UTC)
-		response, err := s.readTaskRunAnalyticsCosts(taskRunAnalyticsFilters{TenantID: "test-tenant-id"}, now)
+		response, err := s.readTaskRunAnalyticsCostsWithOptions(taskRunAnalyticsFilters{TenantID: "test-tenant-id"}, now, 30, "", "ledger")
 		if err != nil || response.ProjectedMonth != nil {
 			t.Fatalf("response = %#v, err = %v", response, err)
 		}
 		seedTaskRunAnalyticsUsage(t, db, "test-tenant-id", now, "eng", "gpt-5", 2, 20)
-		response, err = s.readTaskRunAnalyticsCosts(taskRunAnalyticsFilters{TenantID: "test-tenant-id"}, now)
+		response, err = s.readTaskRunAnalyticsCostsWithOptions(taskRunAnalyticsFilters{TenantID: "test-tenant-id"}, now, 30, "", "ledger")
 		if err != nil || response.Today.DeltaPctVsYesterday != nil {
 			t.Fatalf("response = %#v, err = %v", response, err)
 		}
@@ -63,7 +63,7 @@ func TestTaskRunAnalyticsCostsDeltaAndProjection(t *testing.T) {
 			for i, cost := range test.costs {
 				seedTaskRunAnalyticsUsage(t, db, "test-tenant-id", test.now.AddDate(0, 0, -7+i), "eng", "gpt-5", cost, 1)
 			}
-			response, err := s.readTaskRunAnalyticsCosts(taskRunAnalyticsFilters{TenantID: "test-tenant-id"}, test.now)
+			response, err := s.readTaskRunAnalyticsCostsWithOptions(taskRunAnalyticsFilters{TenantID: "test-tenant-id"}, test.now, 30, "", "ledger")
 			if err != nil || response.ProjectedMonth == nil || response.ProjectedMonth.Confidence != test.want {
 				t.Fatalf("response = %#v, err = %v", response, err)
 			}
@@ -79,7 +79,7 @@ func TestTaskRunAnalyticsCostsProjectionTreatsTodayAsFullDay(t *testing.T) {
 	}
 	seedTaskRunAnalyticsUsage(t, db, "test-tenant-id", now, "eng", "gpt-5", 2, 1)
 
-	response, err := s.readTaskRunAnalyticsCosts(taskRunAnalyticsFilters{TenantID: "test-tenant-id"}, now)
+	response, err := s.readTaskRunAnalyticsCostsWithOptions(taskRunAnalyticsFilters{TenantID: "test-tenant-id"}, now, 30, "", "ledger")
 	if err != nil || response.ProjectedMonth == nil {
 		t.Fatalf("response = %#v, err = %v", response, err)
 	}
@@ -98,11 +98,39 @@ func TestTaskRunAnalyticsProjectionConfidenceUsesSampleStandardDeviation(t *test
 func TestTaskRunAnalyticsCostsHandler(t *testing.T) {
 	s, db := newTaskRunAnalyticsAPITestServer(t)
 	seedTaskRunAnalyticsUsage(t, db, "test-tenant-id", time.Now().UTC(), "eng", "gpt-5", 12.5, 123)
-	rr := requestTaskRunAnalyticsAPI(t, s, http.MethodGet, "/api/analytics/costs", "test-token")
+	rr := requestTaskRunAnalyticsAPI(t, s, http.MethodGet, "/api/analytics/costs?scope=ledger", "test-token")
 	var response taskRunAnalyticsCostsResponse
 	decodeTaskRunAnalyticsAPI(t, rr, &response)
 	if response.Today.CostUsd != 12.5 || response.Today.TotalTokens != 123 {
 		t.Fatalf("unexpected handler response: %#v", response.Today)
+	}
+}
+
+func TestTaskRunAnalyticsCostsDefaultScopeExcludesIneligibleRunsLedgerIncludesAll(t *testing.T) {
+	s, db := newTaskRunAnalyticsAPITestServer(t)
+	now := time.Date(2026, time.July, 15, 12, 0, 0, 0, time.UTC)
+	insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{RunID: "eligible", AttemptID: "eligible-attempt", ClawID: "eligible-claw", TenantID: "test-tenant-id", OwnerType: taskRunOwnerFactory, Factory: "factory", Model: "gpt-5", StartedAt: now.UnixMilli()})
+	insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{RunID: "ineligible", AttemptID: "ineligible-attempt", ClawID: "ineligible-claw", TenantID: "test-tenant-id", OwnerType: taskRunOwnerFactory, Factory: "factory", Model: "gpt-5", StartedAt: now.UnixMilli(), AnalyticsEnabled: boolPtr(false)})
+	seedTaskRunAnalyticsRunUsage(t, db, "eligible", now, 12, 120)
+	seedTaskRunAnalyticsRunUsage(t, db, "ineligible", now, 34, 340)
+	seedTaskRunAnalyticsUsage(t, db, "test-tenant-id", now, "eligible-ledger", "gpt-5", 12, 120)
+	seedTaskRunAnalyticsUsage(t, db, "test-tenant-id", now, "ineligible-ledger", "gpt-5", 34, 340)
+	seedTaskRunAnalyticsUsage(t, db, "test-tenant-id", now, "untracked-ledger", "gpt-5", 56, 560)
+
+	filters := taskRunAnalyticsFilters{TenantID: "test-tenant-id"}
+	response, err := s.readTaskRunAnalyticsCostsWithOptions(filters, now, 1, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.Today.CostUsd != 12 {
+		t.Fatalf("default scope cost = %v, want eligible run cost 12", response.Today.CostUsd)
+	}
+	response, err = s.readTaskRunAnalyticsCostsWithOptions(filters, now, 1, "", "ledger")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.Today.CostUsd != 102 {
+		t.Fatalf("ledger scope cost = %v, want full ledger cost 102", response.Today.CostUsd)
 	}
 }
 
@@ -161,7 +189,7 @@ func TestTaskRunAnalyticsCostsIncludesCrossDayUsage(t *testing.T) {
 		t.Fatalf("cross-day usage was not folded into today: %#v", response)
 	}
 
-	byModel, err := s.readTaskRunAnalyticsCostsWithOptions(filters, now, 30, "model")
+	byModel, err := s.readTaskRunAnalyticsCostsWithOptions(filters, now, 30, "model", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -190,18 +218,18 @@ func TestTaskRunAnalyticsCostsToOnlyRangeAndInvalidRange(t *testing.T) {
 	now := time.Date(2026, time.July, 15, 12, 0, 0, 0, time.UTC)
 	to := now.AddDate(0, 0, -10).Truncate(24 * time.Hour)
 	seedTaskRunAnalyticsUsage(t, db, "test-tenant-id", to.AddDate(0, 0, -2), "eng", "gpt-5", 7, 70)
-	response, err := s.readTaskRunAnalyticsCostsWithOptions(taskRunAnalyticsFilters{TenantID: "test-tenant-id", ToStartedAt: to.UnixMilli()}, now, 2, "")
+	response, err := s.readTaskRunAnalyticsCostsWithOptions(taskRunAnalyticsFilters{TenantID: "test-tenant-id", ToStartedAt: to.UnixMilli()}, now, 2, "", "ledger")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(response.DailySeries) != 3 || response.DailySeries[0].Date != "2026-07-03" || response.DailySeries[2].Date != "2026-07-05" || response.DailySeries[0].CostUsd != 7 {
 		t.Fatalf("to-only range was not anchored to to: %#v", response.DailySeries)
 	}
-	_, err = s.readTaskRunAnalyticsCostsWithOptions(taskRunAnalyticsFilters{TenantID: "test-tenant-id", FromStartedAt: now.UnixMilli(), ToStartedAt: now.AddDate(0, 0, -1).UnixMilli()}, now, 30, "")
+	_, err = s.readTaskRunAnalyticsCostsWithOptions(taskRunAnalyticsFilters{TenantID: "test-tenant-id", FromStartedAt: now.UnixMilli(), ToStartedAt: now.AddDate(0, 0, -1).UnixMilli()}, now, 30, "", "ledger")
 	if err != errTaskRunAnalyticsInvalidCostRange {
 		t.Fatalf("invalid range error = %v, want %v", err, errTaskRunAnalyticsInvalidCostRange)
 	}
-	rr := requestTaskRunAnalyticsAPI(t, s, http.MethodGet, "/api/analytics/costs?from="+now.Format(time.RFC3339)+"&to="+now.AddDate(0, 0, -1).Format(time.RFC3339), "test-token")
+	rr := requestTaskRunAnalyticsAPI(t, s, http.MethodGet, "/api/analytics/costs?from="+now.Format(time.RFC3339)+"&to="+now.AddDate(0, 0, -1).Format(time.RFC3339)+"&scope=ledger", "test-token")
 	if rr.Code != http.StatusBadRequest {
 		t.Fatalf("invalid range status = %d, body = %s", rr.Code, rr.Body.String())
 	}

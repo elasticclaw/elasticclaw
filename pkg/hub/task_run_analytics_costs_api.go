@@ -86,7 +86,12 @@ func (s *Server) handleTaskRunAnalyticsCosts(w http.ResponseWriter, r *http.Requ
 			return
 		}
 	}
-	response, err := s.readTaskRunAnalyticsCostsWithOptions(filters, time.Now().UTC(), days, r.URL.Query().Get("groupBy"))
+	scope := r.URL.Query().Get("scope")
+	if scope != "" && scope != "ledger" {
+		jsonError(w, http.StatusBadRequest, "scope must be ledger")
+		return
+	}
+	response, err := s.readTaskRunAnalyticsCostsWithOptions(filters, time.Now().UTC(), days, r.URL.Query().Get("groupBy"), scope)
 	if err != nil {
 		if err == errTaskRunAnalyticsInvalidCostRange {
 			jsonError(w, http.StatusBadRequest, err.Error())
@@ -99,10 +104,10 @@ func (s *Server) handleTaskRunAnalyticsCosts(w http.ResponseWriter, r *http.Requ
 }
 
 func (s *Server) readTaskRunAnalyticsCosts(filters taskRunAnalyticsFilters, now time.Time) (taskRunAnalyticsCostsResponse, error) {
-	return s.readTaskRunAnalyticsCostsWithOptions(filters, now, 30, "")
+	return s.readTaskRunAnalyticsCostsWithOptions(filters, now, 30, "", "")
 }
 
-func (s *Server) readTaskRunAnalyticsCostsWithOptions(filters taskRunAnalyticsFilters, now time.Time, days int, groupBy string) (taskRunAnalyticsCostsResponse, error) {
+func (s *Server) readTaskRunAnalyticsCostsWithOptions(filters taskRunAnalyticsFilters, now time.Time, days int, groupBy string, scope string) (taskRunAnalyticsCostsResponse, error) {
 	today := time.Date(now.UTC().Year(), now.UTC().Month(), now.UTC().Day(), 0, 0, 0, 0, time.UTC)
 	seriesEnd := today
 	if filters.ToStartedAt > 0 {
@@ -118,7 +123,7 @@ func (s *Server) readTaskRunAnalyticsCostsWithOptions(filters taskRunAnalyticsFi
 		return taskRunAnalyticsCostsResponse{}, errTaskRunAnalyticsInvalidCostRange
 	}
 	monthStart := time.Date(today.Year(), today.Month(), 1, 0, 0, 0, 0, time.UTC)
-	byDay, err := s.readTaskRunAnalyticsDailyCostTotals(filters, seriesStart, seriesEnd)
+	byDay, err := s.readTaskRunAnalyticsDailyCostTotals(filters, seriesStart, seriesEnd, scope)
 	if err != nil {
 		return taskRunAnalyticsCostsResponse{}, err
 	}
@@ -129,7 +134,7 @@ func (s *Server) readTaskRunAnalyticsCostsWithOptions(filters taskRunAnalyticsFi
 		totals := byDay[key]
 		response.DailySeries = append(response.DailySeries, taskRunAnalyticsDailyCost{Date: key, CostUsd: totals.costUsd, TotalTokens: totals.totalTokens})
 	}
-	if err := s.addTaskRunAnalyticsDailyRunCounts(filters, seriesStart, seriesEnd, response.DailySeries); err != nil {
+	if err := s.addTaskRunAnalyticsDailyRunCounts(filters, seriesStart, seriesEnd, response.DailySeries, scope); err != nil {
 		return response, err
 	}
 	todayTotals := byDay[today.Format("2006-01-02")]
@@ -171,7 +176,7 @@ func (s *Server) readTaskRunAnalyticsCostsWithOptions(filters taskRunAnalyticsFi
 	// lightweight prior object for all callers.
 	priorStart := seriesStart.AddDate(0, 0, -int(seriesEnd.Sub(seriesStart).Hours()/24)-1)
 	priorEnd := seriesStart.AddDate(0, 0, -1)
-	priorCost, err := s.readTaskRunAnalyticsUsageCost(filters, priorStart, priorEnd)
+	priorCost, err := s.readTaskRunAnalyticsUsageCost(filters, priorStart, priorEnd, scope)
 	if err != nil {
 		return response, err
 	}
@@ -180,7 +185,7 @@ func (s *Server) readTaskRunAnalyticsCostsWithOptions(filters taskRunAnalyticsFi
 		response.PriorPeriodCostUsd = &priorCost
 	}
 	if groupBy == "model" {
-		response.SeriesByModel, err = s.readTaskRunAnalyticsCostSeriesByModel(filters, seriesStart, seriesEnd)
+		response.SeriesByModel, err = s.readTaskRunAnalyticsCostSeriesByModel(filters, seriesStart, seriesEnd, scope)
 		if err != nil {
 			return response, err
 		}
@@ -188,8 +193,8 @@ func (s *Server) readTaskRunAnalyticsCostsWithOptions(filters taskRunAnalyticsFi
 	return response, nil
 }
 
-func (s *Server) readTaskRunAnalyticsUsageCost(f taskRunAnalyticsFilters, start, end time.Time) (float64, error) {
-	totals, err := s.readTaskRunAnalyticsDailyCostTotals(f, start, end)
+func (s *Server) readTaskRunAnalyticsUsageCost(f taskRunAnalyticsFilters, start, end time.Time, scope string) (float64, error) {
+	totals, err := s.readTaskRunAnalyticsDailyCostTotals(f, start, end, scope)
 	if err != nil {
 		return 0, err
 	}
@@ -221,10 +226,10 @@ func taskRunAnalyticsUsageModelWhere(f taskRunAnalyticsFilters) ([]string, []any
 	return w, a
 }
 
-func (s *Server) readTaskRunAnalyticsDailyCostTotals(f taskRunAnalyticsFilters, start, end time.Time) (map[string]taskRunAnalyticsDailyCostTotals, error) {
+func (s *Server) readTaskRunAnalyticsDailyCostTotals(f taskRunAnalyticsFilters, start, end time.Time, scope string) (map[string]taskRunAnalyticsDailyCostTotals, error) {
 	var query string
 	var args []any
-	if taskRunAnalyticsCostsUseRunFilters(f) {
+	if scope != "ledger" {
 		where, summaryArgs := taskRunAnalyticsSummaryWhere(f)
 		usageWhere, usageArgs := taskRunAnalyticsUsageModelWhere(f)
 		query = `SELECT u.usage_day, COALESCE(SUM(u.committed_cost_usd),0), COALESCE(SUM(u.committed_total_tokens),0) FROM task_run_usage u JOIN (SELECT run_id FROM task_run_summaries ` + where + ` AND started_at>=? AND started_at<=?) s ON s.run_id=u.run_id WHERE u.tenant_id=?`
@@ -235,6 +240,8 @@ func (s *Server) readTaskRunAnalyticsDailyCostTotals(f taskRunAnalyticsFilters, 
 		args = append(summaryArgs, start.UnixMilli(), end.AddDate(0, 0, 1).Add(-time.Millisecond).UnixMilli(), f.TenantID)
 		args = append(args, usageArgs...)
 	} else {
+		// Ledger scope intentionally reads usage_daily with dimension filters only;
+		// run-level filters do not apply to this whole-ledger view.
 		where, a := taskRunAnalyticsUsageDimensionsWhere(f, "usage_daily")
 		where = append(where, "day>=?", "day<=?")
 		args = append(a, start.Format("2006-01-02"), end.Format("2006-01-02"))
@@ -252,7 +259,7 @@ func (s *Server) readTaskRunAnalyticsDailyCostTotals(f taskRunAnalyticsFilters, 
 		if err = rows.Scan(&day, &totals.costUsd, &totals.totalTokens); err != nil {
 			return nil, err
 		}
-		if taskRunAnalyticsCostsUseRunFilters(f) {
+		if scope != "ledger" {
 			day = clampTaskRunAnalyticsUsageDay(day, start, end)
 			current := byDay[day]
 			current.costUsd += totals.costUsd
@@ -269,9 +276,9 @@ func (s *Server) readTaskRunAnalyticsDailyCostTotals(f taskRunAnalyticsFilters, 
 }
 
 // RunCount is the number of distinct runs with usage recorded on that day.
-func (s *Server) addTaskRunAnalyticsDailyRunCounts(f taskRunAnalyticsFilters, start, end time.Time, series []taskRunAnalyticsDailyCost) error {
+func (s *Server) addTaskRunAnalyticsDailyRunCounts(f taskRunAnalyticsFilters, start, end time.Time, series []taskRunAnalyticsDailyCost, scope string) error {
 	where, args := taskRunAnalyticsUsageDimensionsWhere(f, "s")
-	if taskRunAnalyticsCostsUseRunFilters(f) {
+	if scope != "ledger" {
 		var summaryArgs []any
 		var summaryWhere string
 		summaryWhere, summaryArgs = taskRunAnalyticsSummaryWhere(f)
@@ -346,10 +353,10 @@ func assignTaskRunAnalyticsDailyRunCounts(rows interface {
 	return nil
 }
 
-func (s *Server) readTaskRunAnalyticsCostSeriesByModel(f taskRunAnalyticsFilters, start, end time.Time) ([]taskRunAnalyticsModelCostSeries, error) {
+func (s *Server) readTaskRunAnalyticsCostSeriesByModel(f taskRunAnalyticsFilters, start, end time.Time, scope string) ([]taskRunAnalyticsModelCostSeries, error) {
 	var query string
 	var args []any
-	if taskRunAnalyticsCostsUseRunFilters(f) {
+	if scope != "ledger" {
 		where, summaryArgs := taskRunAnalyticsSummaryWhere(f)
 		usageWhere, usageArgs := taskRunAnalyticsUsageModelWhere(f)
 		query = `SELECT u.model, u.usage_day, COALESCE(SUM(u.committed_cost_usd),0), COALESCE(SUM(u.committed_total_tokens),0) FROM task_run_usage u JOIN (SELECT run_id FROM task_run_summaries ` + where + ` AND started_at>=? AND started_at<=?) s ON s.run_id=u.run_id WHERE u.tenant_id=?`
@@ -385,7 +392,7 @@ func (s *Server) readTaskRunAnalyticsCostSeriesByModel(f taskRunAnalyticsFilters
 		if data[m] == nil {
 			data[m] = map[string]v{}
 		}
-		if taskRunAnalyticsCostsUseRunFilters(f) {
+		if scope != "ledger" {
 			d = clampTaskRunAnalyticsUsageDay(d, start, end)
 			current := data[m][d]
 			current.c += x.c
