@@ -3509,7 +3509,10 @@ cp "$BIN" /tmp/claw-bridge.download && chmod +x /tmp/claw-bridge.download && mv 
 				log.Printf("[daytona] warning: skipping invalid template file path %q: %v", name, err)
 				continue
 			}
-			targetPath := "/home/daytona/.openclaw/workspace/" + safeName
+			// Write to the *staged* workspace dir (~/workspace) so that syncStagedWorkspaceToOpenClawWorkspace
+			// (run inside bridge) will copy the injected files (e.g. CONTEXT.md for GitHub Issues/Linear factories)
+			// into ~/.openclaw/workspace. Direct writes to ~/.openclaw/workspace get stripped by the managed-files removal in sync.
+			targetPath := "/home/daytona/workspace/" + safeName
 			targetDir := path.Dir(targetPath)
 			// Use collision-resistant delimiter (same strategy as early flake staging)
 			// to protect against content containing a fixed token.
