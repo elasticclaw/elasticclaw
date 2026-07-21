@@ -111,7 +111,7 @@ func TestTaskRunAnalyticsCostsRunFiltersUseUsageByRun(t *testing.T) {
 	now := time.Date(2026, time.July, 15, 12, 0, 0, 0, time.UTC)
 	startedAt := now.AddDate(0, 0, -1).UnixMilli()
 	insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{RunID: "included", AttemptID: "included-attempt", ClawID: "included-claw", TenantID: "test-tenant-id", Status: taskRunStatusFailed, OwnerType: taskRunOwnerFactory, Workspace: "eng", Factory: "factory", Repo: "acme/included", Model: "gpt-5", StartedAt: startedAt, FailureType: taskRunFailureTimeout})
-	insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{RunID: "excluded", AttemptID: "excluded-attempt", ClawID: "excluded-claw", TenantID: "test-tenant-id", Status: taskRunStatusCleanSuccess, OwnerType: taskRunOwnerFactory, Workspace: "eng", Factory: "factory", Repo: "acme/excluded", Model: "gpt-5", StartedAt: startedAt})
+	insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{RunID: "excluded", AttemptID: "excluded-attempt", ClawID: "excluded-claw", TenantID: "test-tenant-id", Status: taskRunStatusClean, OwnerType: taskRunOwnerFactory, Workspace: "eng", Factory: "factory", Repo: "acme/excluded", Model: "gpt-5", StartedAt: startedAt})
 	seedTaskRunAnalyticsRunUsage(t, db, "included", now, 12, 120)
 	seedTaskRunAnalyticsRunUsage(t, db, "excluded", now, 99, 990)
 

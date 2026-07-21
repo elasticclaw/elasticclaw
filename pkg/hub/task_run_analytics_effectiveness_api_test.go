@@ -10,7 +10,7 @@ func TestTaskRunAnalyticsCostDriversRunFilterConsistentSparkline(t *testing.T) {
 		s, db := newTaskRunAnalyticsAPITestServer(t)
 		day := time.Date(2026, time.July, 15, 0, 0, 0, 0, time.UTC)
 		insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{RunID: "included", AttemptID: "included-attempt", ClawID: "included-claw", TenantID: "test-tenant-id", Status: taskRunStatusFailed, OwnerType: taskRunOwnerFactory, Factory: "factory-a", Repo: "acme/included", Model: "gpt-5", StartedAt: day.UnixMilli(), EstimatedCostUsd: 12})
-		insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{RunID: "excluded", AttemptID: "excluded-attempt", ClawID: "excluded-claw", TenantID: "test-tenant-id", Status: taskRunStatusCleanSuccess, OwnerType: taskRunOwnerFactory, Factory: "factory-a", Repo: "acme/excluded", Model: "gpt-5", StartedAt: day.UnixMilli(), EstimatedCostUsd: 99})
+		insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{RunID: "excluded", AttemptID: "excluded-attempt", ClawID: "excluded-claw", TenantID: "test-tenant-id", Status: taskRunStatusClean, OwnerType: taskRunOwnerFactory, Factory: "factory-a", Repo: "acme/excluded", Model: "gpt-5", StartedAt: day.UnixMilli(), EstimatedCostUsd: 99})
 		seedTaskRunAnalyticsRunUsage(t, db, "included", day, 12, 120)
 		seedTaskRunAnalyticsRunUsage(t, db, "excluded", day, 99, 990)
 		seedTaskRunAnalyticsUsage(t, db, "test-tenant-id", day, "eng", "gpt-5", 111, 1110)

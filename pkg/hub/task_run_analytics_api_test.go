@@ -166,8 +166,8 @@ func TestTaskRunAnalyticsAPISummaryRunsFiltersAndPagination(t *testing.T) {
 
 func TestTaskRunAnalyticsEffectivenessCountsClosedUnmergedAsSuccessNotMerge(t *testing.T) {
 	s, db := newTaskRunAnalyticsAPITestServer(t)
-	insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{RunID: "closed", AttemptID: "a", ClawID: "c", TenantID: "test-tenant-id", Status: taskRunStatusWarningSuccess, Phase: taskRunPhaseTerminal, OwnerType: taskRunOwnerFactory, Factory: "f", StartedAt: 1760000000000, FinishedAt: 1760000001000, PRCount: 1, ClosedPRCount: 1, WarningTypes: []string{taskRunWarningPRClosedUnmerged}})
-	insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{RunID: "merged", AttemptID: "b", ClawID: "d", TenantID: "test-tenant-id", Status: taskRunStatusCleanSuccess, Phase: taskRunPhaseTerminal, OwnerType: taskRunOwnerFactory, Factory: "f", StartedAt: 1760000000001, FinishedAt: 1760000001001, PRCount: 1, MergedPRCount: 1})
+	insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{RunID: "closed", AttemptID: "a", ClawID: "c", TenantID: "test-tenant-id", Status: taskRunStatusWarning, Phase: taskRunPhaseTerminal, OwnerType: taskRunOwnerFactory, Factory: "f", StartedAt: 1760000000000, FinishedAt: 1760000001000, PRCount: 1, ClosedPRCount: 1, WarningTypes: []string{taskRunWarningPRClosedUnmerged}})
+	insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{RunID: "merged", AttemptID: "b", ClawID: "d", TenantID: "test-tenant-id", Status: taskRunStatusClean, Phase: taskRunPhaseTerminal, OwnerType: taskRunOwnerFactory, Factory: "f", StartedAt: 1760000000001, FinishedAt: 1760000001001, PRCount: 1, MergedPRCount: 1})
 	if _, err := db.Exec(`UPDATE task_run_summaries SET pr_opened_at=started_at WHERE run_id IN ('closed','merged')`); err != nil {
 		t.Fatal(err)
 	}
