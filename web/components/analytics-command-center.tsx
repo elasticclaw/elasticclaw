@@ -335,7 +335,7 @@ export function AnalyticsCommandCenter({ workspaceScope }: { workspaceScope?: st
         {error && <p className="text-sm text-destructive">{error}</p>}
 
         <div className="grid gap-5 xl:grid-cols-[5fr_2fr]">
-          <KpiGroup title="Effectiveness">
+          <KpiGroup title="Effectiveness" columns="sm:grid-cols-6">
             <Kpi
               label="Runs"
               title="Task runs started in the selected period."
@@ -345,13 +345,24 @@ export function AnalyticsCommandCenter({ workspaceScope }: { workspaceScope?: st
               onClick={() => setFilters({ status: undefined })}
             />
             <Kpi
-              label="Success rate"
+              label="Unique tickets"
+              title="Distinct tickets worked on in the selected period. A ticket may have several runs."
+              value={effect?.uniqueTickets}
+              good
+            />
+            <Kpi
+              label="Success rate (runs)"
               title="Of the runs that finished, the share that delivered their work (pull request merged or closed) — with or without human help."
               value={formatPercent(effect?.successRate)}
               good
               onClick={() => setFilters({ status: undefined })}
             />
-            <Kpi label="Merge rate" title="Of the runs that opened a pull request, the share whose pull request was merged." value={formatPercent(effect?.mergeRate)} good />
+            <Kpi
+              label="Success rate (unique tickets)"
+              title="Of the distinct tickets with at least one finished run, the share where at least one run delivered (clean, human in the loop, or warning)."
+              value={formatPercent(effect?.ticketSuccessRate)}
+              good
+            />
             <Kpi
               label="Avg ticket to PR"
               title="Average time from the ticket being created to the PR being opened (ready for review)."

@@ -188,6 +188,8 @@ export interface AnalyticsEffectiveness {
   costPerMergedPr: { weekly: { weekStart: string; costUsd: number; mergedPrs: number; costPerMergedPr: number }[]; average: number }
   mergeRate: number
   successRate: number
+  uniqueTickets: number
+  ticketSuccessRate: number
 }
 
 export interface AnalyticsCostDriver {
