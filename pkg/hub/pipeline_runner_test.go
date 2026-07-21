@@ -1600,7 +1600,7 @@ func TestBuildWorkspaceRunCommand(t *testing.T) {
 	s, db := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
 
 	const clawNoFlake = "claw-no-flake"
-	_, err := db.Exec(`INSERT INTO claws(id, tenant_id, name, template, status, template_files, created_at) VALUES(?,?,?,?,?,?,datetime('now'))`, clawNoFlake, "t", "no-flake", "base", "connected", "{}")
+	_, err := db.Exec(`INSERT INTO claws(id, tenant_id, name, template, status, template_files, created_at) VALUES(?,?,?,?,?,?,datetime('now'))`, clawNoFlake, "test-tenant-id", "no-flake", "base", "connected", "{}")
 	if err != nil {
 		t.Fatalf("insert no-flake: %v", err)
 	}
@@ -1611,7 +1611,7 @@ func TestBuildWorkspaceRunCommand(t *testing.T) {
 
 	const clawWithFlake = "claw-with-flake"
 	filesWithFlake := `{"flake.nix": "{ }", "flake.lock": "{}" }`
-	_, err = db.Exec(`INSERT INTO claws(id, tenant_id, name, template, status, template_files, created_at) VALUES(?,?,?,?,?,?,datetime('now'))`, clawWithFlake, "t", "with-flake", "base", "connected", filesWithFlake)
+	_, err = db.Exec(`INSERT INTO claws(id, tenant_id, name, template, status, template_files, created_at) VALUES(?,?,?,?,?,?,datetime('now'))`, clawWithFlake, "test-tenant-id", "with-flake", "base", "connected", filesWithFlake)
 	if err != nil {
 		t.Fatalf("insert with-flake: %v", err)
 	}

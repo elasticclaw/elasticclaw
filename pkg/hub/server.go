@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -3275,13 +3276,20 @@ docker --version`); err != nil {
 				}
 				targetPath := "/home/daytona/.openclaw/workspace/" + safeName
 				targetDir := path.Dir(targetPath)
+				// Use a unique heredoc delimiter per write to avoid injection if the
+				// user-controlled flake content happens to contain the delimiter.
+				raw := make([]byte, 8)
+				if _, err := rand.Read(raw); err != nil {
+					return fmt.Errorf("flake write rand: %w", err)
+				}
+				delim := "ELASTICCLAW_FLAKE_" + hex.EncodeToString(raw)
 				writeCmd := fmt.Sprintf(
-					`export HOME=/home/daytona; mkdir -p %s && cat > %s << 'ELASTICCLAW_EOF'
+					`export HOME=/home/daytona; mkdir -p %s && cat > %s << '%s'
 %s
-ELASTICCLAW_EOF`,
-					shellQuote(targetDir), shellQuote(targetPath), content)
+%s`,
+					shellQuote(targetDir), shellQuote(targetPath), delim, content, delim)
 				if err := exec("write "+name+" (early flake)", 15*time.Second, writeCmd); err != nil {
-					log.Printf("[daytona] warning: early write %s: %v", name, err)
+					return fmt.Errorf("write %s (early flake): %w", name, err)
 				}
 			}
 			log.Printf("[daytona] early flake files staged for claw %s", clawID)
