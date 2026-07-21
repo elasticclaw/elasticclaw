@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 )
@@ -182,5 +183,123 @@ func TestGitHubWebhookAndPollerDedupHumanPush(t *testing.T) {
 
 	if got := humanPushEventCount(t, db, runID); got != 1 {
 		t.Fatalf("expected 1 human_manual_code_push event across webhook and poller, got %d", got)
+	}
+}
+
+func closedPRPayload(merged bool) githubPRPayload {
+	payload := githubPRPayload{Action: "closed", Number: 21}
+	payload.Repository.FullName = "elastic/claw"
+	payload.PullRequest.HTMLURL = "https://github.com/elastic/claw/pull/21"
+	payload.PullRequest.Merged = merged
+	if merged {
+		payload.PullRequest.MergedAt = "2026-01-01T00:00:00Z"
+	}
+	payload.PullRequest.ClosedAt = "2026-01-01T00:00:00Z"
+	return payload
+}
+
+func TestGitHubWebhookClosedPRFallbackUpdatesDeadClawRunWithoutCreatingClaw(t *testing.T) {
+	factory := taskRunLifecycleFactoryConfig("pr-factory", "github")
+	factory.Repos = []string{"elastic/claw"}
+	factory.Trigger = &types.GitHubTrigger{On: "pull_request"}
+	s, db := newTaskRunLifecycleTestServer(t, []*types.FactoryConfig{factory})
+	if _, err := db.Exec(`
+		INSERT INTO claws(id, tenant_id, name, template, status, created_at)
+		VALUES(?,?,?,?,?,?)`, "deleted-claw", "test-tenant-id", "deleted-claw", "elasticclaw", "running", now()); err != nil {
+		t.Fatalf("insert claw: %v", err)
+	}
+	runID, _ := startTaskRunForTest(t, s, "deleted-claw", "dead-webhook")
+	associatePRForTest(t, s, runID, "elastic/claw", 21, taskRunPRStateOpen)
+	if _, err := db.Exec(`DELETE FROM claws WHERE id=?`, "deleted-claw"); err != nil {
+		t.Fatalf("delete claw: %v", err)
+	}
+
+	s.processGitHubPREvent(closedPRPayload(true))
+	assertTaskRunSummary(t, db, runID, taskRunStatusClean, taskRunPhaseTerminal, "", "[]", 0, 1, 0, 1, 0)
+	var claws int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM claws`).Scan(&claws); err != nil {
+		t.Fatal(err)
+	}
+	if claws != 0 {
+		t.Fatalf("created %d claws for closed dead-claw PR, want none", claws)
+	}
+}
+
+func TestGitHubWebhookClosedUnmergedPRRecordsPayloadClosedAt(t *testing.T) {
+	factory := taskRunLifecycleFactoryConfig("pr-factory", "github")
+	factory.Repos = []string{"elastic/claw"}
+	factory.Trigger = &types.GitHubTrigger{On: "pull_request"}
+	s, db := newTaskRunLifecycleTestServer(t, []*types.FactoryConfig{factory})
+	if _, err := db.Exec(`
+		INSERT INTO claws(id, tenant_id, name, template, status, created_at)
+		VALUES(?,?,?,?,?,?)`, "deleted-claw", "test-tenant-id", "deleted-claw", "elasticclaw", "running", now()); err != nil {
+		t.Fatalf("insert claw: %v", err)
+	}
+	runID, _ := startTaskRunForTest(t, s, "deleted-claw", "dead-webhook-unmerged")
+	associatePRForTest(t, s, runID, "elastic/claw", 21, taskRunPRStateOpen)
+	if _, err := db.Exec(`DELETE FROM claws WHERE id=?`, "deleted-claw"); err != nil {
+		t.Fatalf("delete claw: %v", err)
+	}
+
+	payload := closedPRPayload(false)
+	s.processGitHubPREvent(payload)
+	var closedAt int64
+	if err := db.QueryRow(`SELECT closed_at FROM task_run_prs WHERE run_id=? AND repo=? AND pr_number=?`, runID, "elastic/claw", 21).Scan(&closedAt); err != nil {
+		t.Fatal(err)
+	}
+	want := epochMillis(parseRFC3339Timestamp(payload.PullRequest.ClosedAt))
+	if closedAt != want {
+		t.Fatalf("closed_at=%d, want payload closed_at %d", closedAt, want)
+	}
+}
+
+func TestGitHubWebhookClosedPRUsesLiveClawRunInsteadOfStaleRow(t *testing.T) {
+	s, db, liveRunID, _ := newWebhookHumanPushTestRun(t, "", "claw-live-closed", "agent-sha")
+	if _, err := db.Exec(`
+		INSERT INTO claws(id, tenant_id, name, template, status, created_at)
+		VALUES(?,?,?,?,?,?)`, "claw-stale-closed", "test-tenant-id", "claw-stale-closed", "elasticclaw", "running", now()); err != nil {
+		t.Fatalf("insert claw: %v", err)
+	}
+	staleRunID, _ := startTaskRunForTest(t, s, "claw-stale-closed", "stale-closed")
+	associatePRForTest(t, s, staleRunID, "elastic/claw", 21, taskRunPRStateOpen)
+	// Make the stale row the one the removed unordered early intercept could
+	// select. The live claw path must still close only its own task run.
+	if _, err := db.Exec(`UPDATE task_run_prs SET opened_at=? WHERE run_id=?`, epochMillis(now().Add(time.Hour)), staleRunID); err != nil {
+		t.Fatal(err)
+	}
+
+	s.processGitHubPREvent(closedPRPayload(true))
+	assertTaskRunSummary(t, db, liveRunID, taskRunStatusClean, taskRunPhaseTerminal, "", "[]", 0, 1, 0, 1, 0)
+	var staleStatus string
+	if err := db.QueryRow(`SELECT status FROM task_run_summaries WHERE run_id=?`, staleRunID).Scan(&staleStatus); err != nil {
+		t.Fatal(err)
+	}
+	if staleStatus != taskRunStatusRunning {
+		t.Fatalf("stale run status=%q, want running", staleStatus)
+	}
+}
+
+func TestFindOpenTaskRunPRPrefersMostRecentlyOpenedRow(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{}, "", "", "")
+	for _, clawID := range []string{"claw-old-pr", "claw-new-pr"} {
+		if _, err := db.Exec(`
+			INSERT INTO claws(id, tenant_id, name, template, status, created_at)
+			VALUES(?,?,?,?,?,?)`, clawID, "test-tenant-id", clawID, "elasticclaw", "running", now()); err != nil {
+			t.Fatalf("insert claw: %v", err)
+		}
+	}
+	olderRunID, _ := startTaskRunForTest(t, s, "claw-old-pr", "old-pr")
+	newerRunID, _ := startTaskRunForTest(t, s, "claw-new-pr", "new-pr")
+	associatePRForTest(t, s, olderRunID, "elastic/claw", 21, taskRunPRStateOpen)
+	associatePRForTest(t, s, newerRunID, "elastic/claw", 21, taskRunPRStateOpen)
+	if _, err := db.Exec(`UPDATE task_run_prs SET opened_at=? WHERE run_id=?`, epochMillis(now().Add(-time.Hour)), olderRunID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE task_run_prs SET opened_at=? WHERE run_id=?`, epochMillis(now()), newerRunID); err != nil {
+		t.Fatal(err)
+	}
+	got, ok := s.findOpenTaskRunPR("elastic/claw", 21)
+	if !ok || got != newerRunID {
+		t.Fatalf("findOpenTaskRunPR = (%q, %v), want (%q, true)", got, ok, newerRunID)
 	}
 }

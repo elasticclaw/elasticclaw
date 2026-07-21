@@ -452,6 +452,16 @@ func (s *Server) executePipelineCommand(clawID, command string, timeout time.Dur
 			return nil, err
 		}
 		return &pipelineRunResult{ExitCode: result.ExitCode, Stdout: result.Stdout, Stderr: result.Stderr}, err
+	case "docker":
+		p, err := newDockerProvider(provCfg)
+		if err != nil {
+			return nil, fmt.Errorf("docker init: %w", err)
+		}
+		result, err := p.Exec(ctx, providerID, []string{"bash", "-lc", workspaceCommand})
+		if result == nil {
+			return nil, err
+		}
+		return &pipelineRunResult{ExitCode: result.ExitCode, Stdout: result.Stdout, Stderr: result.Stderr}, err
 	case "replicated":
 		if sshHost == "" || sshPort == 0 || sshUser == "" {
 			return nil, fmt.Errorf("replicated agent has no SSH connection details")

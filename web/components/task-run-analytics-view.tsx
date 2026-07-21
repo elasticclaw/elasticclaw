@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react"
 import { createPortal } from "react-dom"
 import { usePathname, useRouter, useSearchParams } from "next/navigation"
-import { AlertCircle, ArrowDown, ArrowUp, CheckCircle2, CircleDot, ExternalLink, GitPullRequest, Minus, RefreshCw, Search, XCircle } from "lucide-react"
+import { AlertCircle, ArrowDown, ArrowUp, CheckCircle2, CircleDot, ExternalLink, GitPullRequest, Minus, RefreshCw, Search, Users, XCircle } from "lucide-react"
 import { Bar, BarChart, XAxis } from "recharts"
 import {
   fetchCostOverview,
@@ -75,7 +75,7 @@ const allUrlFilterKeys = [
 
 type UrlFilterKey = (typeof allUrlFilterKeys)[number]
 type UrlStringFilterKey = (typeof urlFilterKeys)[number]
-type KpiFilter = "runs" | "clean" | "warning" | "failed" | "humanTouches" | "mergedPrs"
+type KpiFilter = "runs" | "clean" | "humanInTheLoop" | "warning" | "failed" | "humanTouches" | "mergedPrs"
 
 function analyticsFiltersFromParams(params: URLSearchParams, workspaceScope?: string): TaskRunAnalyticsFilters {
   const filters: TaskRunAnalyticsFilters = {
@@ -255,8 +255,9 @@ export function TaskRunAnalyticsView({ workspaceScope }: { workspaceScope?: stri
       humanTouched: undefined,
       mergedPrs: undefined,
     }
-    if (kpi === "clean") updates.status = "clean_success"
-    if (kpi === "warning") updates.status = "warning_success"
+    if (kpi === "clean") updates.status = "clean"
+    if (kpi === "humanInTheLoop") updates.status = "human_in_the_loop"
+    if (kpi === "warning") updates.status = "warning"
     if (kpi === "failed") updates.status = "failed"
     if (kpi === "humanTouches") updates.humanTouched = true
     if (kpi === "mergedPrs") updates.mergedPrs = true
@@ -282,8 +283,9 @@ export function TaskRunAnalyticsView({ workspaceScope }: { workspaceScope?: stri
   const activeKpi = useMemo<KpiFilter | null>(() => {
     if (filters.humanTouched === true) return "humanTouches"
     if (filters.mergedPrs === true) return "mergedPrs"
-    if (filters.status === "clean_success") return "clean"
-    if (filters.status === "warning_success") return "warning"
+    if (filters.status === "clean") return "clean"
+    if (filters.status === "human_in_the_loop") return "humanInTheLoop"
+    if (filters.status === "warning") return "warning"
     if (filters.status === "failed") return "failed"
     if (!filters.status && filters.humanTouched === undefined && filters.mergedPrs === undefined) return "runs"
     return null
@@ -386,11 +388,12 @@ export function TaskRunAnalyticsView({ workspaceScope }: { workspaceScope?: stri
               </div>
             </div>
           )}
-          <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-6">
+          <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-7">
             <Metric label="Runs" value={kpiSummary?.totalRuns ?? 0} active={activeKpi === "runs"} onClick={() => applyKpiFilter("runs")} />
-            <Metric label="Clean" title="Merged with no human interaction" value={kpiSummary?.byStatus.clean_success ?? 0} tone="success" active={activeKpi === "clean"} onClick={() => applyKpiFilter("clean")} />
-            <Metric label="Warning" title="Merged with human touch or PR closed without merge" value={kpiSummary?.byStatus.warning_success ?? 0} tone="warning" active={activeKpi === "warning"} onClick={() => applyKpiFilter("warning")} />
-            <Metric label="Failed" title="No PR was ever opened" value={kpiSummary?.byStatus.failed ?? 0} tone="danger" active={activeKpi === "failed"} onClick={() => applyKpiFilter("failed")} />
+            <Metric label="Clean" title="PR merged or closed with zero human interaction." value={kpiSummary?.byStatus.clean ?? 0} tone="success" active={activeKpi === "clean"} onClick={() => applyKpiFilter("clean")} />
+            <Metric label="Human in the loop" title="PR merged or closed; a human interacted via the PR (comment, review, or code push)." value={kpiSummary?.byStatus.human_in_the_loop ?? 0} active={activeKpi === "humanInTheLoop"} onClick={() => applyKpiFilter("humanInTheLoop")} />
+            <Metric label="Warning" title="PR merged or closed; a human interacted via the factory dashboard." value={kpiSummary?.byStatus.warning ?? 0} tone="warning" active={activeKpi === "warning"} onClick={() => applyKpiFilter("warning")} />
+            <Metric label="Failed" title="No PR was ever delivered or the run definitively failed before delivery." value={kpiSummary?.byStatus.failed ?? 0} tone="danger" active={activeKpi === "failed"} onClick={() => applyKpiFilter("failed")} />
             <Metric label="Human touches" value={kpiSummary?.humanInteractions ?? 0} active={activeKpi === "humanTouches"} onClick={() => applyKpiFilter("humanTouches")} />
             <Metric label="Merged PRs" value={kpiSummary?.prCounts.merged ?? 0} active={activeKpi === "mergedPrs"} onClick={() => applyKpiFilter("mergedPrs")} />
           </div>
@@ -729,15 +732,16 @@ function DetailItem({ label, value, title }: { label: string; value: ReactNode; 
 
 export function StatusBadge({ status }: { status: string }) {
   const statusIcons: Record<string, ReactNode> = {
-    clean_success: <CheckCircle2 className="size-3" />,
+    clean: <CheckCircle2 className="size-3" />,
+    human_in_the_loop: <Users className="size-3" />,
     failed: <XCircle className="size-3" />,
   }
   const icon = statusIcons[status] ?? <CircleDot className="size-3" />
   return (
     <Badge
-      title={status === "clean_success" ? "Merged with no human interaction" : status === "warning_success" ? "Merged with human touch or PR closed without merge" : status === "failed" ? "No PR was ever opened" : undefined}
+      title={status === "clean" ? "PR merged or closed with zero human interaction." : status === "human_in_the_loop" ? "PR merged or closed; a human interacted via the PR (comment, review, or code push)." : status === "warning" ? "PR merged or closed; a human interacted via the factory dashboard." : status === "failed" ? "No PR was ever delivered or the run definitively failed before delivery." : status === "running" ? "In progress; no failure has occurred." : undefined}
       variant={status === "failed" ? "destructive" : status === "running" ? "secondary" : "outline"}
-      className={cn(status === "clean_success" && "border-emerald-500/40 text-emerald-700 dark:text-emerald-300", status === "warning_success" && "border-amber-500/50 text-amber-700 dark:text-amber-300")}
+      className={cn(status === "clean" && "border-emerald-500/40 text-emerald-700 dark:text-emerald-300", status === "human_in_the_loop" && "border-blue-500/50 text-blue-700 dark:text-blue-300", status === "warning" && "border-amber-500/50 text-amber-700 dark:text-amber-300")}
     >
       {icon}
       {formatLabel(status)}

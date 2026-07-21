@@ -181,10 +181,102 @@ func (s *Server) startPRWatcher() {
 	go func() {
 		ticker := time.NewTicker(10 * time.Second)
 		defer ticker.Stop()
-		for range ticker.C {
-			s.pollAllPRs()
+		reconcileTicker := time.NewTicker(5 * time.Minute)
+		defer reconcileTicker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				s.pollAllPRs()
+			case <-reconcileTicker.C:
+				s.reconcileDeadClawPRs()
+			}
 		}
 	}()
+}
+
+// reconcileDeadClawPRs closes out task_run_prs rows left open because their
+// backing claw died before the PR's merge/close was observed. It only queries
+// and updates task-run state; it never touches claws or injects into agents.
+func (s *Server) reconcileDeadClawPRs() {
+	rows, err := s.db.Query(`
+		SELECT trp.run_id, trp.repo, trp.pr_number, trp.pr_url
+		FROM task_run_prs trp
+		JOIN task_run_summaries trs ON trs.run_id = trp.run_id
+		WHERE trp.state = 'open'
+		  AND trs.status = 'running'
+		  AND trs.analytics_enabled = 1
+		  AND (trp.opened_at = 0 OR trp.opened_at > ?)
+		  AND NOT EXISTS (
+			SELECT 1 FROM claw_prs cp JOIN claws cl ON cl.id = cp.claw_id
+			WHERE cp.repo = trp.repo AND cp.pr_number = trp.pr_number
+			  AND cl.status NOT IN ('deleted','error','offline')
+		  )`, epochMillis(now().Add(-90*24*time.Hour)))
+	if err != nil {
+		if strings.Contains(err.Error(), "database is closed") {
+			return
+		}
+		log.Printf("[pr-reconciler] query error: %v", err)
+		return
+	}
+	type openPR struct {
+		runID, repo, url string
+		prNumber         int
+	}
+	var prs []openPR
+	for rows.Next() {
+		var p openPR
+		if err := rows.Scan(&p.runID, &p.repo, &p.prNumber, &p.url); err != nil {
+			continue
+		}
+		prs = append(prs, p)
+	}
+	rows.Close()
+	if len(prs) == 0 {
+		return
+	}
+	globalToken := s.resolveGitHubToken()
+	for _, p := range prs {
+		repoToken := s.resolveGitHubTokenForRepo(p.repo)
+		if repoToken == "" {
+			repoToken = globalToken
+		}
+		if repoToken == "" {
+			log.Printf("[pr-reconciler] no token available for %s, skipping run %s", p.repo, p.runID)
+			continue
+		}
+		ghBase := s.githubBaseURL
+		if ghBase == "" {
+			ghBase = "https://api.github.com"
+		}
+		data, err := githubAPIWithBase(ghBase, fmt.Sprintf("repos/%s/pulls/%d", p.repo, p.prNumber), repoToken)
+		if err != nil {
+			log.Printf("[pr-reconciler] fetch PR %s#%d failed: %v", p.repo, p.prNumber, err)
+			continue
+		}
+		state, _ := data["state"].(string)
+		merged, _ := data["merged"].(bool)
+		if state != "closed" && !merged {
+			continue
+		}
+		atValue, _ := data["merged_at"].(string)
+		if !merged {
+			atValue, _ = data["closed_at"].(string)
+		}
+		at := parseRFC3339Timestamp(atValue)
+		if err := s.associateTaskRunPR(TaskRunPR{
+			RunID:      p.runID,
+			Repo:       p.repo,
+			PRNumber:   p.prNumber,
+			URL:        p.url,
+			State:      taskRunPRStateClosed,
+			Merged:     merged,
+			OccurredAt: at,
+		}); err != nil {
+			log.Printf("[pr-reconciler] failed to reconcile run %s PR %s#%d: %v", p.runID, p.repo, p.prNumber, err)
+		} else {
+			log.Printf("[pr-reconciler] reconciled dead-claw PR %s#%d for run %s (merged=%v)", p.repo, p.prNumber, p.runID, merged)
+		}
+	}
 }
 
 type clawPR struct {
