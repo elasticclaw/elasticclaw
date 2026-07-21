@@ -919,6 +919,7 @@ func (g githubClient) createHook(ctx context.Context, t *testing.T, url, secret 
 func (g githubClient) cleanupGitHubE2EResources(ctx context.Context, t *testing.T, workspaceName, runID, labelName string) {
 	t.Helper()
 	g.deleteE2EHooksForWorkspace(ctx, t, workspaceName)
+	g.deleteStaleE2EHooks(ctx, t, 2*time.Hour)
 	g.closeE2EIssuesForRun(ctx, t, runID, labelName)
 	_ = g.deleteLabel(ctx, labelName)
 	if shouldSweepStaleE2E() {
@@ -946,17 +947,36 @@ func (g githubClient) deleteE2EHooks(ctx context.Context, t *testing.T) {
 
 func (g githubClient) deleteE2EHooksMatching(ctx context.Context, t *testing.T, match func(string) bool) {
 	t.Helper()
+	g.deleteE2EHooksMatchingFull(ctx, t, func(url string, _ time.Time) bool {
+		return match(url)
+	}, true)
+}
+
+func (g githubClient) deleteStaleE2EHooks(ctx context.Context, t *testing.T, olderThan time.Duration) {
+	t.Helper()
+	now := time.Now()
+	g.deleteE2EHooksMatchingFull(ctx, t, func(url string, createdAt time.Time) bool {
+		return isStaleE2EHook(url, createdAt, now, olderThan)
+	}, false)
+}
+
+func (g githubClient) deleteE2EHooksMatchingFull(ctx context.Context, t *testing.T, match func(url string, createdAt time.Time) bool, failOnError bool) {
+	t.Helper()
 	var hooks []struct {
-		ID     int64 `json:"id"`
-		Config struct {
+		ID        int64     `json:"id"`
+		CreatedAt time.Time `json:"created_at"`
+		Config    struct {
 			URL string `json:"url"`
 		} `json:"config"`
 	}
 	g.api(ctx, t, http.MethodGet, "hooks", nil, &hooks)
 	for _, hook := range hooks {
-		if match(hook.Config.URL) {
+		if match(hook.Config.URL, hook.CreatedAt) {
 			if err := g.deleteHook(ctx, hook.ID); err != nil {
-				t.Fatalf("delete orphaned E2E hook %d: %v", hook.ID, err)
+				if failOnError {
+					t.Fatalf("delete orphaned E2E hook %d: %v", hook.ID, err)
+				}
+				t.Logf("delete stale E2E hook %d: %v", hook.ID, err)
 			}
 		}
 	}
@@ -968,6 +988,33 @@ func githubE2EHookURLMatchesWorkspace(hookURL, workspaceName string) bool {
 
 func isGitHubE2EHookURL(hookURL string) bool {
 	return strings.Contains(hookURL, "/api/workspaces/") && strings.HasSuffix(hookURL, "/webhooks/github-issues")
+}
+
+func isStaleE2EHook(hookURL string, createdAt, now time.Time, olderThan time.Duration) bool {
+	return isGitHubE2EHookURL(hookURL) && now.Sub(createdAt) > olderThan
+}
+
+func TestIsStaleE2EHook(t *testing.T) {
+	now := time.Date(2026, time.July, 20, 12, 0, 0, 0, time.UTC)
+	matchingURL := "https://example.test/api/workspaces/e2e-run/webhooks/github-issues"
+
+	for _, tt := range []struct {
+		name      string
+		url       string
+		createdAt time.Time
+		want      bool
+	}{
+		{"fresh non-matching URL", "https://example.test/other", now.Add(-3 * time.Hour), false},
+		{"fresh matching URL", matchingURL, now.Add(-time.Hour), false},
+		{"stale matching URL", matchingURL, now.Add(-3 * time.Hour), true},
+		{"stale non-matching URL", "https://example.test/other", now.Add(-3 * time.Hour), false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isStaleE2EHook(tt.url, tt.createdAt, now, 2*time.Hour); got != tt.want {
+				t.Errorf("isStaleE2EHook() = %v, want %v", got, tt.want)
+			}
+		})
+	}
 }
 
 func (g githubClient) deleteHook(ctx context.Context, hookID int64) error {
