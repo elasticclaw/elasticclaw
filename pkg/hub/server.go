@@ -3253,7 +3253,7 @@ docker --version`); err != nil {
 		}
 	}
 
-	// Stage flake files *early* (before gateway, onboard, etc.) when present.
+// Stage flake files *early* (before gateway, onboard, etc.) when present.
 	// This ensures the workspace flake is on disk for:
 	// - nix develop / flake-run wrapper creation in bridge bootstrap
 	// - the final gateway to run inside the devShell
@@ -3262,9 +3262,14 @@ docker --version`); err != nil {
 	// Flake presence already forced nixEnabled=1 at creation time.
 	s.setBootstrapStatus(clawID, "Preparing workspace")
 	var earlyFilesJSON string
-	_ = s.db.QueryRow(`SELECT COALESCE(template_files,'{}') FROM claws WHERE id=?`, clawID).Scan(&earlyFilesJSON)
+	if err := s.db.QueryRow(`SELECT COALESCE(template_files,'{}') FROM claws WHERE id=?`, clawID).Scan(&earlyFilesJSON); err != nil {
+		return fmt.Errorf("load template_files for early flake staging %s: %w", clawID, err)
+	}
 	var earlyTemplateFiles map[string]string
-	if err := json.Unmarshal([]byte(earlyFilesJSON), &earlyTemplateFiles); err == nil && len(earlyTemplateFiles) > 0 {
+	if err := json.Unmarshal([]byte(earlyFilesJSON), &earlyTemplateFiles); err != nil {
+		return fmt.Errorf("parse template_files for early flake staging %s: %w", clawID, err)
+	}
+	if len(earlyTemplateFiles) > 0 {
 		if flakeFiles := templateFlakeFiles(earlyTemplateFiles); len(flakeFiles) > 0 {
 			for name, content := range flakeFiles {
 				name := name
