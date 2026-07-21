@@ -3288,6 +3288,10 @@ docker --version`); err != nil {
 %s
 %s`,
 					shellQuote(targetDir), shellQuote(targetPath), delim, content, delim)
+				// Fail-closed: required by the workspace flake contract (#526).
+				// The bridge creates ~/.elasticclaw/flake-run from these files; workflow
+				// run commands also route through it. Continuing on failure would leave
+				// the claw without the declared devShell tools.
 				if err := exec("write "+name+" (early flake)", 15*time.Second, writeCmd); err != nil {
 					return fmt.Errorf("write %s (early flake): %w", name, err)
 				}
