@@ -5783,7 +5783,10 @@ Tokens are short-lived and refreshed automatically on each git/gh operation.
 			Attempts:   6,
 			Delays:     replicatedSSHDelays,
 			Run: func() error {
-				return s.sshWriteFiles(sshUser, sshHost, path.Join(sshHome, ".openclaw", "workspace"), files)
+				// Write to staged "workspace" dir. The bridge syncStagedWorkspaceToOpenClawWorkspace
+				// will copy into ~/.openclaw/workspace (and clobber direct writes to .openclaw path).
+				// Matches early flake staging and Daytona behavior for injected files (CONTEXT.md etc).
+				return s.sshWriteFiles(sshUser, sshHost, path.Join(sshHome, "workspace"), files)
 			},
 		}); err != nil {
 			s.stopAgentWithReason(clawID, fmt.Sprintf("Bootstrap failed: could not write workspace files: %s", err), false)
