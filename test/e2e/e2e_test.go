@@ -919,12 +919,39 @@ func (g githubClient) createHook(ctx context.Context, t *testing.T, url, secret 
 func (g githubClient) cleanupGitHubE2EResources(ctx context.Context, t *testing.T, workspaceName, runID, labelName string) {
 	t.Helper()
 	g.deleteE2EHooksForWorkspace(ctx, t, workspaceName)
+	g.deleteStaleGitHubE2EHooks(ctx, t, time.Now().UTC())
 	g.closeE2EIssuesForRun(ctx, t, runID, labelName)
 	_ = g.deleteLabel(ctx, labelName)
 	if shouldSweepStaleE2E() {
 		g.deleteE2EHooks(ctx, t)
 		g.cleanupE2EIssuesAndLabels(ctx, t)
 	}
+}
+
+const staleGitHubE2EHookAge = 45 * time.Minute
+
+func (g githubClient) deleteStaleGitHubE2EHooks(ctx context.Context, t *testing.T, now time.Time) {
+	t.Helper()
+	var hooks []struct {
+		ID        int64     `json:"id"`
+		CreatedAt time.Time `json:"created_at"`
+		Config    struct {
+			URL string `json:"url"`
+		} `json:"config"`
+	}
+	g.api(ctx, t, http.MethodGet, "hooks", nil, &hooks)
+	for _, hook := range hooks {
+		if !isStaleGitHubE2EHook(hook.Config.URL, hook.CreatedAt, now) {
+			continue
+		}
+		if err := g.deleteHook(ctx, hook.ID); err != nil {
+			t.Fatalf("delete stale E2E hook %d: %v", hook.ID, err)
+		}
+	}
+}
+
+func isStaleGitHubE2EHook(hookURL string, createdAt, now time.Time) bool {
+	return isGitHubE2EHookURL(hookURL) && !createdAt.IsZero() && createdAt.Before(now.Add(-staleGitHubE2EHookAge))
 }
 
 func shouldSweepStaleE2E() bool {
