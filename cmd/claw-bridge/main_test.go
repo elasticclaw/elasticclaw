@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
@@ -21,6 +22,119 @@ import (
 	"nhooyr.io/websocket"
 	"nhooyr.io/websocket/wsjson"
 )
+
+func TestWriteManagedGrokCredentialToOpenClaw(t *testing.T) {
+	home := t.TempDir()
+	agentDir := filepath.Join(home, ".openclaw", "agents", "main", "agent")
+	if err := os.MkdirAll(agentDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	dbPath := filepath.Join(agentDir, "openclaw-agent.sqlite")
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	existing := `{"version":1,"profiles":{"anthropic:default":{"type":"api_key","provider":"anthropic","key":"keep-me"},"xai:default":{"type":"oauth","provider":"xai","access":"old","refresh":"real-refresh","expires":1,"email":"dev@example.com"}}}`
+	if _, err := db.Exec(`CREATE TABLE auth_profile_store (store_key TEXT NOT NULL PRIMARY KEY, store_json TEXT NOT NULL, updated_at INTEGER NOT NULL)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO auth_profile_store(store_key,store_json,updated_at) VALUES('primary',?,1)`, existing); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	credential := managedModelAuthCredential{Provider: "xai", Access: "current-access", Expires: 1893553445000}
+	if err := writeManagedGrokCredentialToOpenClaw(home, credential); err != nil {
+		t.Fatal(err)
+	}
+	db, err = sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var storeJSON string
+	if err := db.QueryRow(`SELECT store_json FROM auth_profile_store WHERE store_key='primary'`).Scan(&storeJSON); err != nil {
+		t.Fatal(err)
+	}
+	var store struct {
+		Profiles map[string]struct {
+			Access  string `json:"access"`
+			Refresh string `json:"refresh"`
+			Expires int64  `json:"expires"`
+			Email   string `json:"email"`
+			Key     string `json:"key"`
+		} `json:"profiles"`
+	}
+	if err := json.Unmarshal([]byte(storeJSON), &store); err != nil {
+		t.Fatal(err)
+	}
+	xai := store.Profiles["xai:default"]
+	if xai.Access != "current-access" || xai.Refresh != "elasticclaw-managed" || xai.Expires != credential.Expires {
+		t.Fatalf("unexpected managed xAI profile: %#v", xai)
+	}
+	if xai.Email != "dev@example.com" {
+		t.Fatalf("existing xAI metadata was not preserved: %#v", xai)
+	}
+	if got := store.Profiles["anthropic:default"].Key; got != "keep-me" {
+		t.Fatalf("unrelated auth profile was not preserved: %q", got)
+	}
+}
+
+func TestWriteManagedGrokCredentialToCLI(t *testing.T) {
+	home := t.TempDir()
+	authDir := filepath.Join(home, ".grok")
+	if err := os.MkdirAll(authDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	authPath := filepath.Join(authDir, "auth.json")
+	const canonical = "https://auth.x.ai::b1a00492-073a-47ea-816f-4c329264a828"
+	document := map[string]any{
+		canonical:   map[string]any{"key": "access", "refresh_token": "rotating-secret", "metadata": "keep"},
+		"unrelated": map[string]any{"key": "other-access", "refresh_token": "other-refresh"},
+	}
+	initial, err := json.Marshal(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(authPath, initial, 0600); err != nil {
+		t.Fatal(err)
+	}
+	credential := managedModelAuthCredential{Provider: "xai", Access: "current-access", Expires: 1893553445000}
+	if err := writeManagedGrokCredentialToCLI(home, credential); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(authPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "rotating-secret") || !strings.Contains(string(data), "elasticclaw-managed") || !strings.Contains(string(data), "current-access") || !strings.Contains(string(data), "2030-01-02T03:04:05Z") || !strings.Contains(string(data), `"metadata": "keep"`) {
+		t.Fatalf("unexpected managed Grok auth: %s", data)
+	}
+	var got map[string]map[string]any
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got["unrelated"]["key"] != "other-access" || got["unrelated"]["refresh_token"] != "other-refresh" {
+		t.Fatalf("unrelated Grok credential was changed: %#v", got["unrelated"])
+	}
+}
+
+func TestWriteManagedGrokCredentialToCLIRequiresCanonicalEntry(t *testing.T) {
+	home := t.TempDir()
+	authDir := filepath.Join(home, ".grok")
+	if err := os.MkdirAll(authDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(authDir, "auth.json"), []byte(`{"unrelated":{"refresh_token":"keep"}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	err := writeManagedGrokCredentialToCLI(home, managedModelAuthCredential{Provider: "xai", Access: "access", Expires: 1893553445000})
+	if err == nil || !strings.Contains(err.Error(), "canonical xAI") {
+		t.Fatalf("error = %v, want missing canonical credential", err)
+	}
+}
 
 func resetGatewayProcessState(t *testing.T) {
 	t.Helper()
@@ -866,7 +980,7 @@ func TestRestoreCLIModelAuthMigratesGrokOAuthToOpenClaw(t *testing.T) {
 	if auth.Version != 1 || credential.Type != "oauth" || credential.Provider != "xai" {
 		t.Fatalf("unexpected OpenClaw auth profile: %#v", auth)
 	}
-	if credential.Access != "access-token" || credential.Refresh != "refresh-token" || credential.Expires != 1893553445000 {
+	if credential.Access != "access-token" || credential.Refresh != "elasticclaw-managed" || credential.Expires != 1893553445000 {
 		t.Fatalf("OAuth tokens were not migrated: %#v", credential)
 	}
 	if credential.Email != "dev@example.com" || credential.AccountID != "user-123" {
@@ -1169,7 +1283,7 @@ func TestRunHubLoopDoesNotLeakKeepaliveGoroutinesAcrossReconnects(t *testing.T) 
 	before := stableGoroutineCount(t)
 	const cycles = 5
 	for range cycles {
-		err := runHubLoop(ctx, wsURL, "claw-test", "test-claw", "test-template", "tok", gwClient, gwSession, proxy, queue, newMessageDeduper())
+		err := runHubLoop(ctx, wsURL, "claw-test", "test-claw", "test-template", "tok", "", gwClient, gwSession, proxy, queue, newMessageDeduper())
 		if err == nil {
 			t.Fatal("runHubLoop returned nil error, want read error after hub-side close")
 		}
