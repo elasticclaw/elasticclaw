@@ -3477,9 +3477,14 @@ cp "$BIN" /tmp/claw-bridge.download && chmod +x /tmp/claw-bridge.download && mv 
 	// the bridge starts so BOOTSTRAP.md and friends are present for the first turn.
 	s.setBootstrapStatus(clawID, "Preparing workspace")
 	var filesJSON string
-	_ = s.db.QueryRow(`SELECT COALESCE(template_files,'{}') FROM claws WHERE id=?`, clawID).Scan(&filesJSON)
+	if err := s.db.QueryRow(`SELECT COALESCE(template_files,'{}') FROM claws WHERE id=?`, clawID).Scan(&filesJSON); err != nil {
+		return fmt.Errorf("load template_files for final write %s: %w", clawID, err)
+	}
 	var templateFiles map[string]string
-	if err := json.Unmarshal([]byte(filesJSON), &templateFiles); err == nil && len(templateFiles) > 0 {
+	if err := json.Unmarshal([]byte(filesJSON), &templateFiles); err != nil {
+		return fmt.Errorf("parse template_files for final write %s: %w", clawID, err)
+	}
+	if len(templateFiles) > 0 {
 		templateFiles = workspaceTemplateFiles(templateFiles)
 		for name, content := range templateFiles {
 			name := name
@@ -5555,13 +5560,21 @@ func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.Pr
 		return
 	}
 
-	var filesJSON, templateName string
-	_ = s.db.QueryRow(
+var filesJSON, templateName string
+	if err := s.db.QueryRow(
 		`SELECT COALESCE(template_files,'{}'), COALESCE(template,'') FROM claws WHERE id=?`,
 		clawID,
-	).Scan(&filesJSON, &templateName)
+	).Scan(&filesJSON, &templateName); err != nil {
+		log.Printf("[bootstrap] failed to load template_files for claw %s: %v", clawID[:8], err)
+		s.stopAgentWithReason(clawID, fmt.Sprintf("Bootstrap failed: could not read template metadata: %s", err), false)
+		return
+	}
 	var files map[string]string
-	_ = json.Unmarshal([]byte(filesJSON), &files)
+	if err := json.Unmarshal([]byte(filesJSON), &files); err != nil {
+		log.Printf("[bootstrap] failed to parse template_files for claw %s: %v", clawID[:8], err)
+		s.stopAgentWithReason(clawID, fmt.Sprintf("Bootstrap failed: invalid template metadata: %s", err), false)
+		return
+	}
 
 	// Load github repos config for this claw
 	var githubReposJSON string
