@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"net/http"
 	"testing"
 	"time"
 )
@@ -60,4 +61,38 @@ func TestTaskRunAnalyticsCostDriversRunFilterConsistentSparkline(t *testing.T) {
 			t.Fatalf("unexpected cost drivers: %#v", out)
 		}
 	})
+}
+
+func TestTaskRunAnalyticsCostDriversToOnlyRangeAnchorsSparkline(t *testing.T) {
+	s, db := newTaskRunAnalyticsAPITestServer(t)
+	now := time.Now().UTC().Truncate(24 * time.Hour)
+	to := now.AddDate(0, 0, -60)
+	insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{RunID: "old-run", AttemptID: "old-attempt", ClawID: "old-claw", TenantID: "test-tenant-id", Status: taskRunStatusClean, OwnerType: taskRunOwnerFactory, Factory: "factory", Model: "gpt-5", StartedAt: to.UnixMilli(), EstimatedCostUsd: 12, MergedPRCount: 1})
+	seedTaskRunAnalyticsRunUsage(t, db, "old-run", to, 12, 120)
+	// Cost drivers retain their existing no-run-filter ledger sparkline behavior.
+	seedTaskRunAnalyticsUsage(t, db, "test-tenant-id", to, "eng", "gpt-5", 12, 120)
+
+	out, err := s.readTaskRunAnalyticsCostDrivers(taskRunAnalyticsFilters{TenantID: "test-tenant-id", ToStartedAt: to.UnixMilli()}, "factory")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out) != 1 || out[0].CostUsd != 12 || len(out[0].DailyCost) == 0 {
+		t.Fatalf("unexpected cost drivers: %#v", out)
+	}
+	var dailyCost float64
+	for _, day := range out[0].DailyCost {
+		dailyCost += day.CostUsd
+	}
+	if dailyCost != out[0].CostUsd {
+		t.Fatalf("sparkline cost = %v, total cost = %v", dailyCost, out[0].CostUsd)
+	}
+}
+
+func TestTaskRunAnalyticsCostDriversInvalidRange(t *testing.T) {
+	s, _ := newTaskRunAnalyticsAPITestServer(t)
+	now := time.Now().UTC().Truncate(24 * time.Hour)
+	rr := requestTaskRunAnalyticsAPI(t, s, http.MethodGet, "/api/analytics/cost-drivers?from="+now.Format(time.RFC3339)+"&to="+now.AddDate(0, 0, -1).Format(time.RFC3339), "test-token")
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("invalid range status = %d, body = %s", rr.Code, rr.Body.String())
+	}
 }

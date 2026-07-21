@@ -174,6 +174,10 @@ func (s *Server) handleTaskRunAnalyticsCostDrivers(w http.ResponseWriter, r *htt
 	}
 	out, err := s.readTaskRunAnalyticsCostDrivers(f, group)
 	if err != nil {
+		if err == errTaskRunAnalyticsInvalidCostRange {
+			jsonError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 		jsonError(w, 500, "db error")
 		return
 	}
@@ -184,6 +188,15 @@ func (s *Server) readTaskRunAnalyticsCostDrivers(f taskRunAnalyticsFilters, grou
 		end := time.Now().UTC().Truncate(24 * time.Hour)
 		f.FromStartedAt = end.AddDate(0, 0, -30).UnixMilli()
 		f.ToStartedAt = end.Add(24*time.Hour - time.Millisecond).UnixMilli()
+	} else if f.FromStartedAt == 0 && f.ToStartedAt > 0 {
+		// Only `to` was supplied. Anchor the missing lower bound on it (mirroring
+		// the costs endpoint's to-only anchoring) so totals and the sparkline use
+		// the same window.
+		toDay := time.UnixMilli(f.ToStartedAt).UTC().Truncate(24 * time.Hour)
+		f.FromStartedAt = toDay.AddDate(0, 0, -30).UnixMilli()
+	}
+	if f.FromStartedAt > 0 && f.ToStartedAt > 0 && f.ToStartedAt < f.FromStartedAt {
+		return nil, errTaskRunAnalyticsInvalidCostRange
 	}
 	col := "factory_name"
 	if group == "workflow" {
