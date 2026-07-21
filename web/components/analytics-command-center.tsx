@@ -61,6 +61,10 @@ import {
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 
 const commandCenterUrlFilterKeys = ["workspace", ...urlFilterKeys, "from", "to"] as const
+// Matches the heatmap's custom tooltip (bg-card/border/shadow-md) so every
+// explanatory tooltip in this file shares one look, in both themes.
+const tooltipContentClassName = "max-w-xs rounded-lg border bg-card text-foreground shadow-md"
+const tooltipArrowClassName = "bg-card fill-card"
 const chartConfig = {
   clean: { label: "Clean", color: "#0ca30c" },
   humanInTheLoop: { label: "Human in the loop", color: "#2a78d6" },
@@ -546,7 +550,9 @@ function Kpi({ label, value, change, good, cost, onClick, title }: { label: stri
           button
         )}
       </TooltipTrigger>
-      <TooltipContent className="max-w-xs">{title}</TooltipContent>
+      <TooltipContent className={tooltipContentClassName} arrowClassName={tooltipArrowClassName}>
+        {title}
+      </TooltipContent>
     </Tooltip>
   )
 }
@@ -558,7 +564,9 @@ function InfoTooltip({ text }: { text: string }) {
           <Info className="size-3.5" />
         </button>
       </TooltipTrigger>
-      <TooltipContent className="max-w-xs">{text}</TooltipContent>
+      <TooltipContent className={tooltipContentClassName} arrowClassName={tooltipArrowClassName}>
+        {text}
+      </TooltipContent>
     </Tooltip>
   )
 }
