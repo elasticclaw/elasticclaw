@@ -6480,8 +6480,8 @@ func remoteWriteFileCommand(dir, name, content string) string {
 	// to prevent heredoc injection if the (base64) payload happens to contain the marker.
 	raw := make([]byte, 8)
 	if _, err := rand.Read(raw); err != nil {
-		// Fallback to fixed (very low risk for base64 content); the caller will error on write failure anyway.
-		raw = []byte("fallback")
+		// Extremely rare; use a timestamp-based unique fallback (still collision resistant for practical purposes).
+		raw = []byte(fmt.Sprintf("%x", time.Now().UnixNano()))
 	}
 	delim := "ELASTICCLAW_B64_" + hex.EncodeToString(raw)
 
