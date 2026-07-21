@@ -4120,6 +4120,10 @@ func replicatedBootstrapDelay(delays []time.Duration, idx int) time.Duration {
 	return delays[len(delays)-1]
 }
 
+func replicatedFinalWorkspaceDir(sshHome string) string {
+	return path.Join(sshHome, ".openclaw", "workspace")
+}
+
 func replicatedWorkspaceReadinessCommand(dir string, files map[string]string) string {
 	if len(files) == 0 {
 		return "true"
@@ -5787,10 +5791,10 @@ Tokens are short-lived and refreshed automatically on each git/gh operation.
 			Attempts:   6,
 			Delays:     replicatedSSHDelays,
 			Run: func() error {
-				// Write to staged "workspace" dir. The bridge syncStagedWorkspaceToOpenClawWorkspace
-				// will copy into ~/.openclaw/workspace (and clobber direct writes to .openclaw path).
-				// Matches early flake staging and Daytona behavior for injected files (CONTEXT.md etc).
-				return s.sshWriteFiles(sshUser, sshHost, path.Join(sshHome, "workspace"), files)
+				// The Replicated bootstrap script has already finished, including the
+				// bridge's one-time staged-workspace sync. Write final context files
+				// directly to the live workspace so they are immediately available.
+				return s.sshWriteFiles(sshUser, sshHost, replicatedFinalWorkspaceDir(sshHome), files)
 			},
 		}); err != nil {
 			s.stopAgentWithReason(clawID, fmt.Sprintf("Bootstrap failed: could not write workspace files: %s", err), false)
@@ -5802,7 +5806,7 @@ Tokens are short-lived and refreshed automatically on each git/gh operation.
 			Attempts:   3,
 			Delays:     []time.Duration{2 * time.Second, 5 * time.Second},
 			Run: func() error {
-				return s.sshRun(sshUser, sshHost, replicatedWorkspaceReadinessCommand(path.Join(sshHome, ".openclaw", "workspace"), files))
+				return s.sshRun(sshUser, sshHost, replicatedWorkspaceReadinessCommand(replicatedFinalWorkspaceDir(sshHome), files))
 			},
 		}); err != nil {
 			s.stopAgentWithReason(clawID, fmt.Sprintf("Bootstrap failed: workspace files incomplete: %s", err), false)
