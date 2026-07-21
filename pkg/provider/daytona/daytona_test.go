@@ -99,8 +99,10 @@ func TestInstanceStatus(t *testing.T) {
 		want  providertypes.InstanceStatus
 	}{
 		{name: "started", state: daytona.SandboxStateStarted, want: providertypes.StatusRunning},
+		{name: "stopped", state: daytona.SandboxStateStopped, want: providertypes.StatusStopped},
 		{name: "paused", state: daytona.SandboxStatePaused, want: providertypes.StatusStopped},
 		{name: "archived", state: daytona.SandboxStateArchived, want: providertypes.StatusStopped},
+		{name: "error", state: daytona.SandboxStateError, want: providertypes.StatusError},
 		{name: "building", state: daytona.SandboxStatePendingBuild, want: providertypes.StatusStarting},
 		{name: "build failed", state: daytona.SandboxStateBuildFailed, want: providertypes.StatusError},
 		{name: "unknown", state: daytona.SandboxStateUnknown, want: providertypes.StatusUnknown},
