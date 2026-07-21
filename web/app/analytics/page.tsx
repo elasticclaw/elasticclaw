@@ -1,12 +1,10 @@
-"use client"
-
 import { Suspense } from "react"
-import { AnalyticsSidebarLayout } from "@/components/analytics-sidebar-layout"
+import { AnalyticsCommandCenter } from "@/components/analytics-command-center"
 
 export default function AnalyticsPage() {
   return (
     <Suspense fallback={null}>
-      <AnalyticsSidebarLayout />
+      <AnalyticsCommandCenter />
     </Suspense>
   )
 }
