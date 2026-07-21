@@ -213,6 +213,34 @@ func TestTaskRunAnalyticsCostsIncludesCrossDayUsage(t *testing.T) {
 	}
 }
 
+func TestTaskRunAnalyticsCostsExplicitRangeIncludesPriorPeriodRunUsage(t *testing.T) {
+	s, db := newTaskRunAnalyticsAPITestServer(t)
+	now := time.Date(2026, time.July, 15, 12, 0, 0, 0, time.UTC)
+	currentStart := now.AddDate(0, 0, -2).Truncate(24 * time.Hour)
+	currentEnd := now.Truncate(24 * time.Hour)
+	priorDay := currentStart.AddDate(0, 0, -2)
+
+	insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{RunID: "current-period", AttemptID: "current-period-attempt", ClawID: "current-period-claw", TenantID: "test-tenant-id", OwnerType: taskRunOwnerFactory, Factory: "factory", Model: "gpt-5", StartedAt: currentEnd.UnixMilli()})
+	seedTaskRunAnalyticsRunUsage(t, db, "current-period", currentEnd, 10, 100)
+	insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{RunID: "prior-period", AttemptID: "prior-period-attempt", ClawID: "prior-period-claw", TenantID: "test-tenant-id", OwnerType: taskRunOwnerFactory, Factory: "factory", Model: "gpt-5", StartedAt: priorDay.UnixMilli()})
+	seedTaskRunAnalyticsRunUsage(t, db, "prior-period", priorDay, 5, 50)
+
+	response, err := s.readTaskRunAnalyticsCostsWithOptions(taskRunAnalyticsFilters{
+		TenantID:      "test-tenant-id",
+		FromStartedAt: currentStart.UnixMilli(),
+		ToStartedAt:   currentEnd.UnixMilli(),
+	}, now, 30, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.Prior.PeriodCostUsd != 5 || response.PriorPeriodCostUsd == nil || *response.PriorPeriodCostUsd != 5 {
+		t.Fatalf("prior period cost = %#v, want 5", response)
+	}
+	if response.Today.CostUsd != 10 || response.Month.CostUsd != 10 {
+		t.Fatalf("current-period totals = %#v, want only cost 10", response)
+	}
+}
+
 func TestTaskRunAnalyticsCostsToOnlyRangeAndInvalidRange(t *testing.T) {
 	s, db := newTaskRunAnalyticsAPITestServer(t)
 	now := time.Date(2026, time.July, 15, 12, 0, 0, 0, time.UTC)

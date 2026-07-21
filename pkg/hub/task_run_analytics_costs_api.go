@@ -194,6 +194,11 @@ func (s *Server) readTaskRunAnalyticsCostsWithOptions(filters taskRunAnalyticsFi
 }
 
 func (s *Server) readTaskRunAnalyticsUsageCost(f taskRunAnalyticsFilters, start, end time.Time, scope string) (float64, error) {
+	// The explicit window is authoritative here. In particular, prior-period
+	// callers retain the current request's bounds in f, which must not be
+	// combined with this (different) window by taskRunAnalyticsSummaryWhere.
+	f.FromStartedAt = 0
+	f.ToStartedAt = 0
 	totals, err := s.readTaskRunAnalyticsDailyCostTotals(f, start, end, scope)
 	if err != nil {
 		return 0, err
