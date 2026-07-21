@@ -190,6 +190,12 @@ export interface AnalyticsEffectiveness {
   successRate: number
   uniqueTickets: number
   ticketSuccessRate: number
+  prior?: {
+    successRate: number
+    ticketSuccessRate: number
+    uniqueTickets: number
+    mergeRate: number
+  }
 }
 
 export interface AnalyticsCostDriver {

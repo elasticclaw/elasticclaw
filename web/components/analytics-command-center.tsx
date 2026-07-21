@@ -349,12 +349,14 @@ export function AnalyticsCommandCenter({ workspaceScope }: { workspaceScope?: st
               title="Distinct tickets worked on in the selected period. A ticket may have several runs."
               value={effect?.uniqueTickets}
               good
+              change={calculateDelta(effect?.uniqueTickets, effect?.prior?.uniqueTickets)}
             />
             <Kpi
               label="Success rate (runs)"
               title="Of the runs that finished, the share that delivered their work (pull request merged or closed) — with or without human help."
               value={formatPercent(effect?.successRate)}
               good
+              change={calculateDelta(effect?.successRate, effect?.prior?.successRate)}
               onClick={() => setFilters({ status: undefined })}
             />
             <Kpi
@@ -362,6 +364,7 @@ export function AnalyticsCommandCenter({ workspaceScope }: { workspaceScope?: st
               title="Of the distinct tickets with at least one finished run, the share where at least one run delivered (clean, human in the loop, or warning)."
               value={formatPercent(effect?.ticketSuccessRate)}
               good
+              change={calculateDelta(effect?.ticketSuccessRate, effect?.prior?.ticketSuccessRate)}
             />
             <Kpi
               label="Avg ticket to PR"
