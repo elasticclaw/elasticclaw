@@ -1,14 +1,132 @@
 package hub
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/elasticclaw/elasticclaw/pkg/types"
 )
+
+func testGrokAuthState(t *testing.T, access, refresh string, expires time.Time) string {
+	t.Helper()
+	authData, err := json.Marshal(map[string]any{
+		grokAuthIssuer + "::" + grokAuthClientID: map[string]any{
+			"key":           access,
+			"refresh_token": refresh,
+			"expires_at":    expires.UTC().Format(time.RFC3339Nano),
+			"preserved":     "metadata",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bundleData, err := json.Marshal(cliAuthBundle{Files: map[string]string{
+		".grok/auth.json": base64.StdEncoding.EncodeToString(authData),
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return base64.StdEncoding.EncodeToString(bundleData)
+}
+
+func TestManagedGrokCredentialSerializesRefreshAndPersistsRotation(t *testing.T) {
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", filepath.Join(t.TempDir(), "hub.yaml"))
+	profileName := "grok-oauth"
+	cfg := &types.HubConfig{
+		ClawToken: "claw-token",
+		LLMKeys: types.LLMKeysList{
+			{Name: "grok", Provider: "grok", AuthProfile: profileName, Default: true},
+		},
+		ModelAuthProfiles: []*types.ModelAuthProfileConfig{
+			{Name: profileName, Provider: "grok", Mode: "device", AuthState: testGrokAuthState(t, "old-access", "refresh-1", time.Now().Add(-time.Minute))},
+		},
+	}
+	s, db := NewTestServerWithConfig(t, cfg, "", "", "")
+	if _, err := db.Exec(`INSERT INTO claws(id,tenant_id,name,llm_key,status,created_at) VALUES(?,?,?,?,?,datetime('now'))`,
+		"claw-grok", "test-tenant-id", "grok claw", "grok", "connected"); err != nil {
+		t.Fatal(err)
+	}
+
+	var mu sync.Mutex
+	var refreshes []string
+	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			t.Errorf("parse refresh form: %v", err)
+		}
+		mu.Lock()
+		refreshes = append(refreshes, r.Form.Get("refresh_token"))
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"access_token":"new-access","refresh_token":"refresh-2","expires_in":3600}`))
+	}))
+	defer tokenServer.Close()
+	s.grokTokenEndpoint = tokenServer.URL
+
+	ctx := context.WithValue(context.Background(), ctxTenantKey{}, "test-tenant-id")
+	results := make(chan *managedModelAuthCredential, 2)
+	errs := make(chan error, 2)
+	start := make(chan struct{})
+	for range 2 {
+		go func() {
+			<-start
+			credential, err := s.managedGrokCredential(ctx, "claw-grok")
+			results <- credential
+			errs <- err
+		}()
+	}
+	close(start)
+	for range 2 {
+		if err := <-errs; err != nil {
+			t.Fatalf("managed credential: %v", err)
+		}
+		credential := <-results
+		if credential.Access != "new-access" || credential.Provider != "xai" || credential.Expires <= time.Now().UnixMilli() {
+			t.Fatalf("unexpected credential: %#v", credential)
+		}
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(refreshes) != 1 || refreshes[0] != "refresh-1" {
+		t.Fatalf("refresh calls = %#v, want one call with the original token", refreshes)
+	}
+
+	_, _, _, entry, _, err := decodeManagedGrokAuth(s.hubCfg.ModelAuthProfiles[0].AuthState)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := stringFromMap(entry, "refresh_token"); got != "refresh-2" {
+		t.Fatalf("persisted refresh token = %q, want refresh-2", got)
+	}
+	if got := stringFromMap(entry, "preserved"); got != "metadata" {
+		t.Fatalf("unrelated Grok auth metadata was lost: %q", got)
+	}
+}
+
+func TestManagedModelAuthCredentialRequiresClawAuth(t *testing.T) {
+	s, _ := NewTestServerWithConfig(t, &types.HubConfig{ClawToken: "claw-token"}, "", "", "")
+	req := httptest.NewRequest(http.MethodPost, "/api/internal/model-auth/credential", nil)
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusUnauthorized)
+	}
+	req = httptest.NewRequest(http.MethodPost, "/api/internal/model-auth/credential", nil)
+	req.Header.Set("X-Claw-Token", "claw-token")
+	rec = httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("authenticated status = %d, want %d for missing claw identity", rec.Code, http.StatusBadRequest)
+	}
+}
 
 func TestCaptureModelAuthOutputStripsANSIFromURL(t *testing.T) {
 	s := &Server{}

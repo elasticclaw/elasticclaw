@@ -23,6 +23,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
@@ -47,6 +48,7 @@ import (
 	"nhooyr.io/websocket/wsjson"
 
 	"github.com/elasticclaw/elasticclaw/pkg/cliversion"
+	_ "modernc.org/sqlite"
 )
 
 var (
@@ -2514,7 +2516,7 @@ func migrateGrokOAuthToOpenClaw(home string) error {
 		"type":          "oauth",
 		"provider":      "xai",
 		"access":        selected.Key,
-		"refresh":       selected.RefreshToken,
+		"refresh":       "elasticclaw-managed",
 		"expires":       expires,
 		"issuer":        issuer,
 		"tokenEndpoint": issuer + "/oauth2/token",
@@ -2620,6 +2622,175 @@ func syncOpenClawOAuthAuth() error {
 		return fmt.Errorf("sync OpenClaw OAuth auth: %w", err)
 	}
 	return nil
+}
+
+type managedModelAuthCredential struct {
+	Provider string `json:"provider"`
+	Access   string `json:"access"`
+	Expires  int64  `json:"expires"`
+}
+
+const managedGrokAuthSyncInterval = 5 * time.Minute
+
+func syncManagedGrokOAuthCredential() error {
+	if strings.TrimSpace(os.Getenv("ELASTICCLAW_MODEL_AUTH_PROVIDER")) != "grok" {
+		return nil
+	}
+	hubURL := strings.TrimRight(strings.TrimSpace(os.Getenv("ELASTICCLAW_HUB_URL")), "/")
+	clawID := strings.TrimSpace(os.Getenv("ELASTICCLAW_CLAW_ID"))
+	clawToken := strings.TrimSpace(os.Getenv("ELASTICCLAW_CLAW_TOKEN"))
+	if hubURL == "" || clawID == "" || clawToken == "" {
+		return fmt.Errorf("managed Grok auth requires hub URL, claw ID, and claw token")
+	}
+	if strings.HasPrefix(hubURL, "ws://") {
+		hubURL = "http://" + strings.TrimPrefix(hubURL, "ws://")
+	} else if strings.HasPrefix(hubURL, "wss://") {
+		hubURL = "https://" + strings.TrimPrefix(hubURL, "wss://")
+	}
+	req, err := http.NewRequest(http.MethodPost, hubURL+"/api/internal/model-auth/credential", nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("X-Claw-Token", clawToken)
+	req.Header.Set("X-ElasticClaw-Claw-ID", clawID)
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("request managed Grok credential: %w", err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return fmt.Errorf("read managed Grok credential: %w", err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("managed Grok credential returned status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	var credential managedModelAuthCredential
+	if err := json.Unmarshal(body, &credential); err != nil {
+		return fmt.Errorf("parse managed Grok credential: %w", err)
+	}
+	if credential.Provider != "xai" || credential.Access == "" || credential.Expires <= 0 {
+		return fmt.Errorf("managed Grok credential response is incomplete")
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("home dir: %w", err)
+	}
+	if err := writeManagedGrokCredentialToOpenClaw(home, credential); err != nil {
+		return err
+	}
+	if err := writeManagedGrokCredentialToCLI(home, credential); err != nil {
+		return fmt.Errorf("update local Grok credential: %w", err)
+	}
+	return nil
+}
+
+func writeManagedGrokCredentialToOpenClaw(home string, credential managedModelAuthCredential) error {
+	dbPath := filepath.Join(home, ".openclaw", "agents", "main", "agent", "openclaw-agent.sqlite")
+	db, err := sql.Open("sqlite", dbPath+"?_txlock=immediate&_pragma=busy_timeout(5000)")
+	if err != nil {
+		return fmt.Errorf("open OpenClaw auth database: %w", err)
+	}
+	defer db.Close()
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin OpenClaw auth update: %w", err)
+	}
+	defer tx.Rollback()
+	var storeJSON string
+	if err := tx.QueryRow(`SELECT store_json FROM auth_profile_store WHERE store_key='primary'`).Scan(&storeJSON); err != nil {
+		return fmt.Errorf("read OpenClaw auth store: %w", err)
+	}
+	var store map[string]any
+	if err := json.Unmarshal([]byte(storeJSON), &store); err != nil {
+		return fmt.Errorf("parse OpenClaw auth store: %w", err)
+	}
+	profiles, _ := store["profiles"].(map[string]any)
+	if profiles == nil {
+		profiles = map[string]any{}
+		store["profiles"] = profiles
+	}
+	profile, _ := profiles["xai:default"].(map[string]any)
+	if profile == nil {
+		profile = map[string]any{}
+	}
+	profile["type"] = "oauth"
+	profile["provider"] = "xai"
+	profile["access"] = credential.Access
+	profile["refresh"] = "elasticclaw-managed"
+	profile["expires"] = credential.Expires
+	profiles["xai:default"] = profile
+	updated, err := json.Marshal(store)
+	if err != nil {
+		return fmt.Errorf("encode OpenClaw auth store: %w", err)
+	}
+	if _, err := tx.Exec(`UPDATE auth_profile_store SET store_json=?, updated_at=? WHERE store_key='primary'`, string(updated), time.Now().UnixMilli()); err != nil {
+		return fmt.Errorf("write OpenClaw auth store: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit OpenClaw auth update: %w", err)
+	}
+	return nil
+}
+
+func writeManagedGrokCredentialToCLI(home string, credential managedModelAuthCredential) error {
+	authPath := filepath.Join(home, ".grok", "auth.json")
+	data, err := os.ReadFile(authPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	var document map[string]any
+	if err := json.Unmarshal(data, &document); err != nil {
+		return err
+	}
+	for _, raw := range document {
+		entry, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		if refresh, _ := entry["refresh_token"].(string); refresh == "" {
+			continue
+		}
+		entry["key"] = credential.Access
+		entry["refresh_token"] = "elasticclaw-managed"
+		entry["expires_at"] = time.UnixMilli(credential.Expires).UTC().Format(time.RFC3339Nano)
+	}
+	updated, err := json.MarshalIndent(document, "", "  ")
+	if err != nil {
+		return err
+	}
+	updated = append(updated, '\n')
+	tempPath := authPath + ".tmp"
+	if err := os.WriteFile(tempPath, updated, 0600); err != nil {
+		return err
+	}
+	return os.Rename(tempPath, authPath)
+}
+
+func runManagedGrokAuthSync(ctx context.Context) {
+	if strings.TrimSpace(os.Getenv("ELASTICCLAW_MODEL_AUTH_PROVIDER")) != "grok" {
+		return
+	}
+	syncOnce := func() {
+		if err := syncManagedGrokOAuthCredential(); err != nil {
+			log.Printf("[model-auth] Grok credential sync failed: %v", err)
+		}
+	}
+	syncOnce()
+	ticker := time.NewTicker(managedGrokAuthSyncInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			syncOnce()
+		}
+	}
 }
 
 var openClawWorkspaceManagedFiles = map[string]bool{
@@ -3313,6 +3484,9 @@ func runBootstrap() error {
 	if err := syncOpenClawOAuthAuth(); err != nil {
 		return err
 	}
+	if err := syncManagedGrokOAuthCredential(); err != nil {
+		log.Printf("[bootstrap] managed Grok auth sync warning: %v (will retry in bridge loop)", err)
+	}
 
 	if err := syncStagedWorkspaceToOpenClawWorkspace(); err != nil {
 		return fmt.Errorf("syncStagedWorkspaceToOpenClawWorkspace: %w", err)
@@ -3602,6 +3776,7 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	go runManagedGrokAuthSync(ctx)
 
 	// Establish the persistent gateway session before entering the hub loop.
 	// Retry until we succeed (gateway may not be ready yet).

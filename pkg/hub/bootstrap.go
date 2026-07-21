@@ -313,7 +313,9 @@ store.profiles['xai:default'] = {
   type: 'oauth',
   provider: 'xai',
   access: source.key,
-  refresh: source.refresh_token,
+  // The hub owns xAI's rotating refresh token. Giving the same token to
+  // multiple claws lets the first local refresh revoke every other copy.
+  refresh: 'elasticclaw-managed',
   expires: parsedExpires,
 };
 

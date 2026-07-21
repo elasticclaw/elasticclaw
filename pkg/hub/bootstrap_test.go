@@ -577,7 +577,7 @@ db.close();
 		t.Fatalf("parse SQLite auth store: %v\n%s", err, out)
 	}
 	xai := store.Profiles["xai:default"]
-	if xai.Type != "oauth" || xai.Provider != "xai" || xai.Access != "access-token" || xai.Refresh != "refresh-token" || xai.Expires != 1893553445000 {
+	if xai.Type != "oauth" || xai.Provider != "xai" || xai.Access != "access-token" || xai.Refresh != "elasticclaw-managed" || xai.Expires != 1893553445000 {
 		t.Fatalf("unexpected migrated xAI auth: %#v", xai)
 	}
 	if got := store.Profiles["anthropic:default"].Key; got != "keep-me" {

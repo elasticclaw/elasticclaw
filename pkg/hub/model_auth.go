@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"os"
@@ -198,6 +199,195 @@ type oauthTokenResponse struct {
 	ExpiresIn    int64  `json:"expires_in"`
 	Error        string `json:"error"`
 	Description  string `json:"error_description"`
+}
+
+type managedModelAuthCredential struct {
+	Provider string `json:"provider"`
+	Access   string `json:"access"`
+	Expires  int64  `json:"expires"`
+}
+
+const managedGrokRefreshSkew = 30 * time.Minute
+
+func (s *Server) handleManagedModelAuthCredential(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	clawID := strings.TrimSpace(r.Header.Get("X-ElasticClaw-Claw-ID"))
+	if clawID == "" {
+		http.Error(w, "missing claw identity", http.StatusBadRequest)
+		return
+	}
+	credential, err := s.managedGrokCredential(r.Context(), clawID)
+	if err != nil {
+		logModelAuthRefreshError(clawID, err)
+		http.Error(w, "managed model authentication is unavailable", http.StatusBadGateway)
+		return
+	}
+	jsonOK(w, credential)
+}
+
+func logModelAuthRefreshError(clawID string, err error) {
+	shortID := clawID
+	if len(shortID) > 8 {
+		shortID = shortID[:8]
+	}
+	log.Printf("[model-auth] managed Grok credential for claw %s: %v", shortID, err)
+}
+
+func (s *Server) managedGrokCredential(ctx context.Context, clawID string) (*managedModelAuthCredential, error) {
+	var selectedKeyName, tenantID string
+	if err := s.db.QueryRowContext(ctx, `SELECT COALESCE(llm_key,''), tenant_id FROM claws WHERE id=?`, clawID).Scan(&selectedKeyName, &tenantID); err != nil {
+		return nil, fmt.Errorf("resolve claw LLM key: %w", err)
+	}
+	if authenticatedTenant, _ := ctx.Value(ctxTenantKey{}).(string); authenticatedTenant != "" && tenantID != authenticatedTenant {
+		return nil, fmt.Errorf("claw does not belong to authenticated tenant")
+	}
+
+	// xAI refresh tokens rotate on every use. Serialize the complete read,
+	// refresh, and persistence sequence so concurrent claws never reuse one.
+	s.modelAuthRefreshMu.Lock()
+	defer s.modelAuthRefreshMu.Unlock()
+
+	s.mu.RLock()
+	activeKey := resolveActiveKey(s.hubCfg.LLMKeys, selectedKeyName)
+	var profile types.ModelAuthProfileConfig
+	if activeKey != nil && activeKey.Provider == "grok" && activeKey.AuthProfile != "" {
+		for _, candidate := range s.hubCfg.ModelAuthProfiles {
+			if candidate != nil && candidate.Name == activeKey.AuthProfile && candidate.Provider == "grok" {
+				profile = *candidate
+				break
+			}
+		}
+	}
+	s.mu.RUnlock()
+	if activeKey == nil || activeKey.Provider != "grok" || activeKey.AuthProfile == "" {
+		return nil, fmt.Errorf("claw does not use a managed Grok auth profile")
+	}
+	if profile.Name == "" || profile.AuthState == "" {
+		return nil, fmt.Errorf("Grok auth profile %q has no stored credential", activeKey.AuthProfile)
+	}
+
+	bundle, authFile, authDocument, authEntry, expiresAt, err := decodeManagedGrokAuth(profile.AuthState)
+	if err != nil {
+		return nil, err
+	}
+	accessToken := stringFromMap(authEntry, "key")
+	if accessToken == "" {
+		return nil, fmt.Errorf("stored Grok credential has no access token")
+	}
+
+	if !expiresAt.After(time.Now().Add(managedGrokRefreshSkew)) {
+		refreshToken := stringFromMap(authEntry, "refresh_token")
+		if refreshToken == "" {
+			return nil, fmt.Errorf("stored Grok credential has no refresh token")
+		}
+		endpoint := strings.TrimSpace(s.grokTokenEndpoint)
+		if endpoint == "" {
+			endpoint = grokAuthIssuer + "/oauth2/token"
+		}
+		form := url.Values{}
+		form.Set("grant_type", "refresh_token")
+		form.Set("client_id", grokAuthClientID)
+		form.Set("refresh_token", refreshToken)
+		var token oauthTokenResponse
+		if err := postForm(ctx, http.DefaultClient, endpoint, form, &token); err != nil {
+			return nil, fmt.Errorf("refresh Grok OAuth: %w", err)
+		}
+		if token.AccessToken == "" {
+			return nil, fmt.Errorf("Grok refresh response missing access token")
+		}
+		if token.RefreshToken == "" {
+			token.RefreshToken = refreshToken
+		}
+		expiresIn := token.ExpiresIn
+		if expiresIn <= 0 {
+			expiresIn = int64((6 * time.Hour) / time.Second)
+		}
+		expiresAt = time.Now().UTC().Add(time.Duration(expiresIn) * time.Second)
+		authEntry["key"] = token.AccessToken
+		authEntry["refresh_token"] = token.RefreshToken
+		authEntry["expires_at"] = expiresAt.Format(time.RFC3339Nano)
+		updatedState, err := encodeManagedGrokAuth(bundle, authFile, authDocument)
+		if err != nil {
+			return nil, err
+		}
+		if err := s.saveModelAuthProfile("grok", profile.Name, profile.Mode, updatedState); err != nil {
+			return nil, fmt.Errorf("persist refreshed Grok OAuth: %w", err)
+		}
+		accessToken = token.AccessToken
+	}
+
+	return &managedModelAuthCredential{
+		Provider: "xai",
+		Access:   accessToken,
+		Expires:  expiresAt.UnixMilli(),
+	}, nil
+}
+
+func decodeManagedGrokAuth(authState string) (cliAuthBundle, string, map[string]any, map[string]any, time.Time, error) {
+	var bundle cliAuthBundle
+	bundleData, err := base64.StdEncoding.DecodeString(authState)
+	if err != nil {
+		return bundle, "", nil, nil, time.Time{}, fmt.Errorf("decode Grok auth bundle: %w", err)
+	}
+	if err := json.Unmarshal(bundleData, &bundle); err != nil {
+		return bundle, "", nil, nil, time.Time{}, fmt.Errorf("parse Grok auth bundle: %w", err)
+	}
+	var authFile string
+	for name := range bundle.Files {
+		if filepath.ToSlash(name) == ".grok/auth.json" {
+			authFile = name
+			break
+		}
+	}
+	if authFile == "" {
+		return bundle, "", nil, nil, time.Time{}, fmt.Errorf("Grok auth bundle has no .grok/auth.json")
+	}
+	authData, err := base64.StdEncoding.DecodeString(bundle.Files[authFile])
+	if err != nil {
+		return bundle, "", nil, nil, time.Time{}, fmt.Errorf("decode Grok auth file: %w", err)
+	}
+	var document map[string]any
+	if err := json.Unmarshal(authData, &document); err != nil {
+		return bundle, "", nil, nil, time.Time{}, fmt.Errorf("parse Grok auth file: %w", err)
+	}
+	var entry map[string]any
+	preferredKey := grokAuthIssuer + "::" + grokAuthClientID
+	if candidate, ok := document[preferredKey].(map[string]any); ok {
+		entry = candidate
+	}
+	if entry == nil {
+		for _, candidate := range document {
+			if value, ok := candidate.(map[string]any); ok && stringFromMap(value, "key") != "" {
+				entry = value
+				break
+			}
+		}
+	}
+	if entry == nil {
+		return bundle, "", nil, nil, time.Time{}, fmt.Errorf("Grok auth file has no OAuth credential")
+	}
+	expiresAt, err := time.Parse(time.RFC3339Nano, stringFromMap(entry, "expires_at"))
+	if err != nil {
+		return bundle, "", nil, nil, time.Time{}, fmt.Errorf("parse Grok credential expiry: %w", err)
+	}
+	return bundle, authFile, document, entry, expiresAt, nil
+}
+
+func encodeManagedGrokAuth(bundle cliAuthBundle, authFile string, document map[string]any) (string, error) {
+	authData, err := json.MarshalIndent(document, "", "  ")
+	if err != nil {
+		return "", fmt.Errorf("encode Grok auth file: %w", err)
+	}
+	authData = append(authData, '\n')
+	bundle.Files[authFile] = base64.StdEncoding.EncodeToString(authData)
+	bundleData, err := json.Marshal(bundle)
+	if err != nil {
+		return "", fmt.Errorf("encode Grok auth bundle: %w", err)
+	}
+	return base64.StdEncoding.EncodeToString(bundleData), nil
 }
 
 func (s *Server) runCodexDeviceLogin(ctx context.Context, job *modelAuthLoginJob, authDir string) error {

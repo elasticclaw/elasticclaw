@@ -88,6 +88,8 @@ type Server struct {
 	fireworksModelsCacheUntil time.Time
 	modelAuthJobsMu           sync.Mutex
 	modelAuthJobs             map[string]*modelAuthLoginJob
+	modelAuthRefreshMu        sync.Mutex
+	grokTokenEndpoint         string // test seam; defaults to the xAI OAuth token endpoint
 	pollWarningMu             sync.Mutex
 	pollWarnings              map[string]struct{}
 
@@ -368,6 +370,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/settings/github/test", s.withWebAdminAuth(s.handleGitHubAppTest))
 	mux.HandleFunc("/api/settings/model-auth/login", s.withWebAdminAuth(s.handleModelAuthLogin))
 	mux.HandleFunc("/api/settings/model-auth/login/{id}", s.withWebAdminAuth(s.handleModelAuthLoginStatus))
+	mux.HandleFunc("/api/internal/model-auth/credential", s.withClawAuth(s.handleManagedModelAuthCredential))
 
 	// Template store
 	mux.HandleFunc("/api/templates", s.withWebAuth(s.handleTemplates))
@@ -509,6 +512,23 @@ func (s *Server) withAuth(next http.HandlerFunc) http.HandlerFunc {
 		}
 		r = r.WithContext(ctx)
 		next(w, r)
+	}
+}
+
+func (s *Server) withClawAuth(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		token := strings.TrimSpace(r.Header.Get("X-Claw-Token"))
+		if token == "" {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		tenantID, err := s.tenantByClawToken(token)
+		if err != nil {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		ctx := context.WithValue(r.Context(), ctxTenantKey{}, tenantID)
+		next(w, r.WithContext(ctx))
 	}
 }
 
@@ -2666,7 +2686,8 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 					for k, v := range req.Header {
 						httpReq.Header.Set(k, v)
 					}
-					// Inject claw_token auth so withAuth middleware passes
+					httpReq.Header.Set("X-ElasticClaw-Claw-ID", clawID)
+					// Inject claw-token auth for internal endpoints used by the bridge.
 					s.mu.RLock()
 					clawToken := s.hubCfg.ClawToken
 					s.mu.RUnlock()
