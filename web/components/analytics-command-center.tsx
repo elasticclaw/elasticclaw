@@ -114,7 +114,7 @@ export function AnalyticsCommandCenter({ workspaceScope }: { workspaceScope?: st
     const nextFilters: TaskRunAnalyticsFilters = {
       analyticsEnabled: true,
       requiresPr: true,
-      limit: 25,
+      limit: 10,
     }
 
     for (const filterKey of commandCenterUrlFilterKeys) {
