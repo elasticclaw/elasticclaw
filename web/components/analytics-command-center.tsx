@@ -531,9 +531,12 @@ function Kpi({ label, value, change, good, cost, onClick, title }: { label: stri
       type="button"
       disabled={disabled}
       onClick={onClick}
-      className="flex h-full w-full min-w-0 flex-col rounded-lg border bg-card p-3 text-left enabled:hover:bg-accent"
+      className="flex h-full w-full min-w-0 flex-col rounded-lg border bg-card p-3 text-left"
     >
-      <p className="min-h-8 text-xs text-muted-foreground">{label}</p>
+      <p className="flex min-h-8 items-center gap-1 text-xs text-muted-foreground">
+        {label}
+        {title && <Info aria-hidden className="size-3.5 shrink-0 text-muted-foreground" />}
+      </p>
       <p className="mt-2 text-xl font-semibold tracking-tight">{value ?? "—"}</p>
       {/* Always render the delta row, even when there's no change, so every
           tile reserves the same space and labels/values align across the grid. */}
