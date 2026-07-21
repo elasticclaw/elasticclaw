@@ -71,6 +71,11 @@ const usd = new Intl.NumberFormat(undefined, {
   currency: "USD",
   maximumFractionDigits: 2,
 })
+const usdWhole = new Intl.NumberFormat(undefined, {
+  style: "currency",
+  currency: "USD",
+  maximumFractionDigits: 0,
+})
 
 function formatDate(value: string) {
   return new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric" }).format(
@@ -115,15 +120,6 @@ export function AnalyticsCommandCenter() {
     for (const filterKey of commandCenterUrlFilterKeys) {
       const value = params.get(filterKey)
       if (value) (nextFilters as Record<string, string>)[filterKey] = value
-    }
-
-    // Default to the last 30 days so every widget reads the same period.
-    if (!nextFilters.from && !nextFilters.to) {
-      const to = new Date()
-      const from = new Date(to)
-      from.setDate(to.getDate() - 30)
-      nextFilters.from = from.toISOString()
-      nextFilters.to = to.toISOString()
     }
 
     return nextFilters
@@ -171,7 +167,18 @@ export function AnalyticsCommandCenter() {
       const requestId = ++loadRequestId.current
       try {
         setError(undefined)
-        const runFilters = { ...filters, cursor }
+        // Default to the last 30 days so every widget reads the same period.
+        // Computed here (not in render) — reading the clock during render
+        // suspends the prerender under Next's cacheComponents semantics.
+        const effectiveFilters = { ...filters }
+        if (!effectiveFilters.from && !effectiveFilters.to) {
+          const to = new Date()
+          const from = new Date(to)
+          from.setDate(to.getDate() - 30)
+          effectiveFilters.from = from.toISOString()
+          effectiveFilters.to = to.toISOString()
+        }
+        const runFilters = { ...effectiveFilters, cursor }
         const [
           summaryData,
           costsData,
@@ -182,19 +189,21 @@ export function AnalyticsCommandCenter() {
           runsData,
           optionsData,
         ] = await Promise.all([
-          fetchTaskRunAnalyticsSummary(filters, { signal: controller.signal }),
-          fetchAnalyticsCosts(filters, 30, "model", { signal: controller.signal }),
+          fetchTaskRunAnalyticsSummary(effectiveFilters, { signal: controller.signal }),
+          fetchAnalyticsCosts(effectiveFilters, 30, "model", { signal: controller.signal }),
           // The year heatmap always shows the trailing year, regardless of the
-          // selected period; every other widget follows the period in `filters`.
+          // selected period. It also drops the run-level flags so the backend
+          // serves the full usage ledger (usage_daily) instead of restricting
+          // cost to days that still have task runs.
           fetchAnalyticsCosts(
-            { ...filters, from: undefined, to: undefined },
+            { ...effectiveFilters, from: undefined, to: undefined, analyticsEnabled: undefined, requiresPr: undefined },
             366,
             undefined,
             { signal: controller.signal }
           ),
-          fetchAnalyticsEffectiveness(filters, { signal: controller.signal }),
-          fetchGeneralStats(filters, { signal: controller.signal }),
-          fetchAnalyticsCostDrivers(filters, "factory", { signal: controller.signal }),
+          fetchAnalyticsEffectiveness(effectiveFilters, { signal: controller.signal }),
+          fetchGeneralStats(effectiveFilters, { signal: controller.signal }),
+          fetchAnalyticsCostDrivers(effectiveFilters, "factory", { signal: controller.signal }),
           fetchTaskRuns(runFilters, { signal: controller.signal }),
           options ? Promise.resolve(options) : fetchTaskRunFilterOptions({ signal: controller.signal }),
         ])
@@ -285,6 +294,7 @@ export function AnalyticsCommandCenter() {
             <Kpi
               label="Runs"
               value={summary?.totalRuns}
+              good
               change={calculateDelta(summary?.totalRuns, summary?.prior?.totalRuns)}
               onClick={() => setFilters({ status: undefined })}
             />
@@ -307,7 +317,7 @@ export function AnalyticsCommandCenter() {
             />
           </KpiGroup>
           <KpiGroup title="Cost">
-            <Kpi label="Total cost" value={usd.format(totalCost)} change={costDelta} cost />
+            <Kpi label="Total cost" value={usdWhole.format(totalCost)} change={costDelta} cost />
             <Kpi
               label="Cost per run"
               value={usd.format(summary?.totalRuns ? totalCost / summary.totalRuns : 0)}
@@ -394,13 +404,14 @@ function FilterBar({
         ))}
       </div>
       {selectFilters.map(([label, key, values]) => (
-        <FilterSelect
-          key={key}
-          label={label}
-          value={filters[key]}
-          values={values}
-          onChange={(value) => onChange({ [key]: value })}
-        />
+        <div key={key} className="w-48">
+          <FilterSelect
+            label={label}
+            value={filters[key]}
+            values={values}
+            onChange={(value) => onChange({ [key]: value })}
+          />
+        </div>
       ))}
     </div>
   )
@@ -408,8 +419,14 @@ function FilterBar({
 
 function useHeatmap(costs?: CostOverview) {
   return useMemo(() => {
-    const costsByDate = new Map((costs?.dailySeries ?? []).map((point) => [point.date, point]))
-    const end = new Date(); end.setHours(0, 0, 0, 0)
+    const series = costs?.dailySeries ?? []
+    // Anchor the grid on the data's last day rather than the wall clock —
+    // reading the clock during render suspends the prerender under Next's
+    // cacheComponents semantics (and the series' last day IS "today" as far
+    // as the backend is concerned).
+    if (series.length === 0) return { days: [], monthLabels: [] }
+    const costsByDate = new Map(series.map((point) => [point.date, point]))
+    const end = new Date(`${series[series.length - 1].date}T00:00:00`)
     const start = new Date(end); start.setDate(start.getDate() - 363 - ((start.getDay() + 6) % 7))
     const days = Array.from({ length: 364 }, (_, index) => { const date = new Date(start); date.setDate(date.getDate() + index); const iso = isoDate(date); return { iso, point: costsByDate.get(iso), week: Math.floor(index / 7), day: index % 7 } })
     const monthLabels = days.filter((day, index) => index === 0 || day.iso.slice(5, 7) !== days[index - 1].iso.slice(5, 7)).map((day) => ({ week: day.week, label: new Intl.DateTimeFormat(undefined, { month: "short" }).format(new Date(`${day.iso}T00:00:00`)) }))
