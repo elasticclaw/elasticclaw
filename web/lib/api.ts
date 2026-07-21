@@ -404,11 +404,12 @@ export async function fetchCostOverview(filters?: TaskRunAnalyticsFilters): Prom
   return apiFetch<CostOverview>(`/api/analytics/costs${taskRunAnalyticsQuery(filters)}`)
 }
 
-export async function fetchAnalyticsCosts(filters?: TaskRunAnalyticsFilters, days = 30, groupBy?: "model", options?: AnalyticsRequestOptions): Promise<CostOverview> {
+export async function fetchAnalyticsCosts(filters?: TaskRunAnalyticsFilters, days = 30, groupBy?: "model", scope?: "ledger", options?: AnalyticsRequestOptions): Promise<CostOverview> {
   const query = taskRunAnalyticsQuery(filters)
   const params = new URLSearchParams(query.slice(1))
   params.set("days", String(days))
   if (groupBy) params.set("groupBy", groupBy)
+  if (scope) params.set("scope", scope)
   return apiFetch<CostOverview>(`/api/analytics/costs?${params}`, options)
 }
 

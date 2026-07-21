@@ -195,15 +195,17 @@ export function AnalyticsCommandCenter({ workspaceScope }: { workspaceScope?: st
           optionsData,
         ] = await Promise.all([
           fetchTaskRunAnalyticsSummary(effectiveFilters, { signal: controller.signal }),
-          fetchAnalyticsCosts(effectiveFilters, 30, "model", { signal: controller.signal }),
+          fetchAnalyticsCosts(effectiveFilters, 30, "model", undefined, { signal: controller.signal }),
           // The year heatmap always shows the trailing year, regardless of the
           // selected period. It also drops the run-level flags so the backend
           // serves the full usage ledger (usage_daily) instead of restricting
-          // cost to days that still have task runs.
+          // cost to days that still have task runs. scope=ledger makes that
+          // whole-ledger behavior explicit.
           fetchAnalyticsCosts(
             { ...effectiveFilters, from: undefined, to: undefined, analyticsEnabled: undefined, requiresPr: undefined },
             366,
             undefined,
+            "ledger",
             { signal: controller.signal }
           ),
           fetchAnalyticsEffectiveness(effectiveFilters, { signal: controller.signal }),
