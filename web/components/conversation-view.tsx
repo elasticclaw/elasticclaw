@@ -350,6 +350,8 @@ function ClawBoardCard({
     const scrollToLatest = () => {
       if (cardFollowingLatest.current) el.scrollTop = el.scrollHeight
     }
+    // Rich activity rows can finish sizing across several layout/paint passes,
+    // so retry briefly to land on the true bottom once their height settles.
     const timers = [0, 50, 150].map((delay) => window.setTimeout(scrollToLatest, delay))
     return () => timers.forEach(window.clearTimeout)
   }, [messages])
