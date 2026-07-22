@@ -1174,6 +1174,7 @@ func (s *Server) handleCreateClaw(w http.ResponseWriter, r *http.Request, tenant
 	req.Env = env
 	req.Files = injectFigmaAPIDocs(req.Files, env)
 	filesJSON, _ := json.Marshal(req.Files)
+	envJSON, _ := json.Marshal(req.Env)
 
 	// Auto-enable Nix for workspaces that include a flake.nix.
 	// This makes the workspace flake the contract for tools without requiring
@@ -1241,8 +1242,8 @@ func (s *Server) handleCreateClaw(w http.ResponseWriter, r *http.Request, tenant
 	color := resolveColor(req.Color, req.Name)
 
 	_, err := s.db.Exec(
-		`INSERT INTO claws(id, tenant_id, name, template, provider, default_model, template_files, github_repos, linear_workspace, nix, docker, tags, color, llm_key, status, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		clawID, tenantID, req.Name, req.TemplateName, req.Provider, req.DefaultModel, string(filesJSON),
+		`INSERT INTO claws(id, tenant_id, name, template, provider, default_model, template_files, env, github_repos, linear_workspace, nix, docker, tags, color, llm_key, status, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		clawID, tenantID, req.Name, req.TemplateName, req.Provider, req.DefaultModel, string(filesJSON), string(envJSON),
 		githubReposJSON, linearWorkspace, nixEnabled, dockerEnabled, string(tagsJSON), color, req.LLMKey, "provisioning", now(),
 	)
 	if err != nil {
@@ -4534,10 +4535,10 @@ func (s *Server) bootstrapExedev(ctx context.Context, clawID, vmName string, p *
 	s.setBootstrapStatus(clawID, "Preparing ElasticClaw connector")
 
 	// Load claw configuration from DB in a single atomic query
-	var clawName, templateName, githubReposJSON, linearWorkspace, templateDefaultModel, llmKeyName, templateFilesJSON string
+	var clawName, templateName, githubReposJSON, linearWorkspace, templateDefaultModel, llmKeyName, templateFilesJSON, envJSON string
 	var nixEnabled, dockerEnabled int
-	if err := s.db.QueryRow(`SELECT COALESCE(name,''), COALESCE(template,''), COALESCE(github_repos,'[]'), COALESCE(linear_workspace,''), COALESCE(default_model,''), nix, docker, COALESCE(llm_key,''), COALESCE(template_files,'{}') FROM claws WHERE id=?`, clawID).Scan(
-		&clawName, &templateName, &githubReposJSON, &linearWorkspace, &templateDefaultModel, &nixEnabled, &dockerEnabled, &llmKeyName, &templateFilesJSON,
+	if err := s.db.QueryRow(`SELECT COALESCE(name,''), COALESCE(template,''), COALESCE(github_repos,'[]'), COALESCE(linear_workspace,''), COALESCE(default_model,''), nix, docker, COALESCE(llm_key,''), COALESCE(template_files,'{}'), COALESCE(env,'{}') FROM claws WHERE id=?`, clawID).Scan(
+		&clawName, &templateName, &githubReposJSON, &linearWorkspace, &templateDefaultModel, &nixEnabled, &dockerEnabled, &llmKeyName, &templateFilesJSON, &envJSON,
 	); err != nil {
 		return fmt.Errorf("load claw config: %w", err)
 	}
@@ -4548,6 +4549,11 @@ func (s *Server) bootstrapExedev(ctx context.Context, clawID, vmName string, p *
 	var templateFiles map[string]string
 	if err := json.Unmarshal([]byte(templateFilesJSON), &templateFiles); err != nil {
 		return fmt.Errorf("parse template_files for exedev bootstrap: %w", err)
+	}
+	var customEnv map[string]string
+	if err := json.Unmarshal([]byte(envJSON), &customEnv); err != nil {
+		log.Printf("[exedev] failed to parse env for claw %s: %v", clawID[:8], err)
+		customEnv = nil
 	}
 	templateFiles = workspaceTemplateFiles(templateFiles)
 
@@ -4598,6 +4604,7 @@ func (s *Server) bootstrapExedev(ctx context.Context, clawID, vmName string, p *
 		LinearEnv:       buildLinearEnv(linearToken),
 		ProviderConfig:  buildOpenClawProviderConfig(hubCfg.LLMKeys, llmKeyName),
 		OnboardFlags:    buildOnboardFlags(hubCfg.LLMKeys, llmKeyName, defaultModel),
+		Env:             customEnv,
 	})
 
 	if flakeFiles := templateFlakeFiles(templateFiles); len(flakeFiles) > 0 {
@@ -5637,11 +5644,11 @@ func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.Pr
 		return
 	}
 
-	var filesJSON, templateName string
+	var filesJSON, envJSON, templateName string
 	if err := s.db.QueryRow(
-		`SELECT COALESCE(template_files,'{}'), COALESCE(template,'') FROM claws WHERE id=?`,
+		`SELECT COALESCE(template_files,'{}'), COALESCE(env,'{}'), COALESCE(template,'') FROM claws WHERE id=?`,
 		clawID,
-	).Scan(&filesJSON, &templateName); err != nil {
+	).Scan(&filesJSON, &envJSON, &templateName); err != nil {
 		log.Printf("[bootstrap] failed to load template_files for claw %s: %v", clawID[:8], err)
 		s.stopAgentWithReason(clawID, fmt.Sprintf("Bootstrap failed: could not read template metadata: %s", err), false)
 		return
@@ -5651,6 +5658,11 @@ func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.Pr
 		log.Printf("[bootstrap] failed to parse template_files for claw %s: %v", clawID[:8], err)
 		s.stopAgentWithReason(clawID, fmt.Sprintf("Bootstrap failed: invalid template metadata: %s", err), false)
 		return
+	}
+	var customEnv map[string]string
+	if err := json.Unmarshal([]byte(envJSON), &customEnv); err != nil {
+		log.Printf("[bootstrap] failed to parse env for claw %s: %v", clawID[:8], err)
+		customEnv = nil
 	}
 
 	// Load github repos config for this claw
@@ -5764,6 +5776,7 @@ func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.Pr
 		LinearEnv:       buildLinearEnv(linearToken),
 		ProviderConfig:  buildOpenClawProviderConfig(hubCfg.LLMKeys, llmKeyName),
 		OnboardFlags:    buildOnboardFlags(hubCfg.LLMKeys, llmKeyName, defaultModel),
+		Env:             customEnv,
 	})
 	// Inject GitHub tools context into TOOLS.md if GitHub is configured
 	s.mu.RLock()

@@ -40,13 +40,14 @@ type BootstrapParams struct {
 	GitHubRepos []types.GitHubRepoAccess
 
 	// Env injection
-	LLMKeyEnv      string // pre-built export lines
-	ModelAuthEnv   string // pre-built export lines for CLI-backed model auth state
-	APIKeyAuthSync string // shell script that persists API-key auth into OpenClaw's auth store
-	OAuthAuthSync  string // shell script that persists restored OAuth auth into OpenClaw's auth store
-	LinearEnv      string // pre-built export line
-	ProviderConfig string // python snippet to patch OpenClaw config
-	OnboardFlags   string // --auth-choice ... flags for openclaw onboard
+	LLMKeyEnv      string            // pre-built export lines
+	ModelAuthEnv   string            // pre-built export lines for CLI-backed model auth state
+	APIKeyAuthSync string            // shell script that persists API-key auth into OpenClaw's auth store
+	OAuthAuthSync  string            // shell script that persists restored OAuth auth into OpenClaw's auth store
+	LinearEnv      string            // pre-built export line
+	ProviderConfig string            // python snippet to patch OpenClaw config
+	OnboardFlags   string            // --auth-choice ... flags for openclaw onboard
+	Env            map[string]string // custom env vars from workflow/factory secret_refs and template env
 }
 
 // resolveActiveKey selects the active key by selected name, then default, then first.
@@ -429,9 +430,24 @@ func GenerateReplicatedBootstrapScript(p BootstrapParams) string {
 		linearEnvLine = "# Linear not configured"
 	}
 
+	customEnvExports := "# No custom env vars"
+	customEnvPersist := ""
+	if len(p.Env) > 0 {
+		var lines []string
+		var persistLines []string
+		for k, v := range p.Env {
+			lines = append(lines, fmt.Sprintf("export %s=%s", k, shellQuote(v)))
+			persistLines = append(persistLines, fmt.Sprintf("  printf 'export %s=%%q\\n' \"$%s\"", k, k))
+		}
+		customEnvExports = strings.Join(lines, "\n")
+		customEnvPersist = strings.Join(persistLines, "\n")
+	}
+
 	return fmt.Sprintf(`#!/bin/bash
 set -euo pipefail
 
+# ── Custom env vars (workflow/factory secret_refs, template env) ───────────────
+%s
 # ── Identity + credentials ────────────────────────────────────────────────────
 export ELASTICCLAW_HUB_URL=%s
 export ELASTICCLAW_CLAW_ID=%s
@@ -504,6 +520,7 @@ echo "ElasticClaw connector installed"
 # then transitions directly into the normal bridge connect loop.
 # Persist env vars so bridge can be restarted later.
 {
+%s
   printf 'export ELASTICCLAW_HUB_URL=%%q\n' "$ELASTICCLAW_HUB_URL"
   printf 'export ELASTICCLAW_CLAW_ID=%%q\n' "$ELASTICCLAW_CLAW_ID"
   printf 'export ELASTICCLAW_CLAW_TOKEN=%%q\n' "$ELASTICCLAW_CLAW_TOKEN"
@@ -576,10 +593,12 @@ done
 echo "ERROR: timed out waiting for claw-bridge bootstrap to complete"
 exit 1
 `,
+		customEnvExports,
 		shellQuote(p.HubURL), shellQuote(p.ClawID), shellQuote(p.ClawToken), shellQuote(p.ModelAuthToken), shellQuote(p.ClawName), shellQuote(p.TemplateName), shellQuote(p.GatewayPassword),
 		shellQuote(p.DefaultModel), shellQuote(p.LLMProvider), shellQuote(nixFlag), shellQuote(dockerFlag),
 		p.LLMKeyEnv, p.ModelAuthEnv, linearEnvLine, apiKeyAuthSyncLine, oauthAuthSyncLine, shellQuote(p.OnboardFlags), providerConfigLine,
 		shellQuote(p.BridgeURL),
+		customEnvPersist,
 	)
 }
 

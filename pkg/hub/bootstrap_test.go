@@ -331,6 +331,16 @@ bash -c 'printf "%s\n" "$ELASTICCLAW_CLAW_NAME" "$ELASTICCLAW_GATEWAY_PASSWORD"'
 	}
 }
 
+func TestBootstrapScript_CustomEnvInjectedAndPersisted(t *testing.T) {
+	p := baseParams()
+	p.Env = map[string]string{"DEPOT_TOKEN": "secret-value", "CUSTOM_VAR": "hello world"}
+	script := GenerateReplicatedBootstrapScript(p)
+	assertContains(t, script, "export DEPOT_TOKEN='secret-value'", "custom env var exported")
+	assertContains(t, script, "export CUSTOM_VAR='hello world'", "custom env var exported")
+	assertContains(t, script, "printf 'export DEPOT_TOKEN=%q\\n' \"$DEPOT_TOKEN\"", "custom env var persisted")
+	assertContains(t, script, "printf 'export CUSTOM_VAR=%q\\n' \"$CUSTOM_VAR\"", "custom env var persisted")
+}
+
 func TestBootstrapScript_SetEEnabled(t *testing.T) {
 	script := GenerateReplicatedBootstrapScript(baseParams())
 	assertContains(t, script, "set -euo pipefail", "script uses set -euo pipefail")
