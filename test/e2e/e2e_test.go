@@ -724,7 +724,10 @@ func waitForOneAgent(ctx context.Context, t *testing.T, hub *hubProcess, name st
 
 func waitForAgentStatus(ctx context.Context, t *testing.T, hub *hubProcess, agentID, want string) {
 	t.Helper()
-	deadline := time.Now().Add(12 * time.Minute)
+	// Replicated VMs can spend more than 12 minutes provisioning and installing
+	// the runtime under load. Keep this below the test's 30-minute outer timeout
+	// so a connected agent still has time to produce its response.
+	deadline := time.Now().Add(15 * time.Minute)
 	for time.Now().Before(deadline) {
 		var agent types.Claw
 		hub.api(ctx, t, http.MethodGet, "/api/claws/"+agentID, nil, &agent)

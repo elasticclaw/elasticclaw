@@ -2,6 +2,9 @@ package hub
 
 import (
 	"fmt"
+	"log"
+	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/elasticclaw/elasticclaw/pkg/types"
@@ -40,14 +43,43 @@ type BootstrapParams struct {
 	GitHubRepos []types.GitHubRepoAccess
 
 	// Env injection
-	LLMKeyEnv      string // pre-built export lines
-	ModelAuthEnv   string // pre-built export lines for CLI-backed model auth state
-	APIKeyAuthSync string // shell script that persists API-key auth into OpenClaw's auth store
-	OAuthAuthSync  string // shell script that persists restored OAuth auth into OpenClaw's auth store
-	LinearEnv      string // pre-built export line
-	ProviderConfig string // python snippet to patch OpenClaw config
-	OnboardFlags   string // --auth-choice ... flags for openclaw onboard
+	LLMKeyEnv      string            // pre-built export lines
+	ModelAuthEnv   string            // pre-built export lines for CLI-backed model auth state
+	APIKeyAuthSync string            // shell script that persists API-key auth into OpenClaw's auth store
+	OAuthAuthSync  string            // shell script that persists restored OAuth auth into OpenClaw's auth store
+	LinearEnv      string            // pre-built export line
+	ProviderConfig string            // python snippet to patch OpenClaw config
+	OnboardFlags   string            // --auth-choice ... flags for openclaw onboard
+	Env            map[string]string // custom env vars from workflow/factory secret_refs and template env
 }
+
+// bootstrapManagedEnvKeys lists values that the bootstrap script derives from
+// dedicated parameters. Custom env must not override or duplicate them.
+var bootstrapManagedEnvKeys = map[string]bool{
+	"ELASTICCLAW_HUB_URL":            true,
+	"ELASTICCLAW_CLAW_ID":            true,
+	"ELASTICCLAW_CLAW_TOKEN":         true,
+	"ELASTICCLAW_MODEL_AUTH_TOKEN":   true,
+	"ELASTICCLAW_CLAW_NAME":          true,
+	"ELASTICCLAW_TEMPLATE":           true,
+	"ELASTICCLAW_GITHUB_REPOS":       true,
+	"ELASTICCLAW_BOOTSTRAP":          true,
+	"ELASTICCLAW_WAIT_FOR_WORKSPACE": true,
+	"ELASTICCLAW_GATEWAY_PASSWORD":   true,
+	"OPENCLAW_GATEWAY_PASSWORD":      true,
+	"OPENCLAW_DEFAULT_MODEL":         true,
+	"ELASTICCLAW_LLM_PROVIDER":       true,
+	"ELASTICCLAW_NIX":                true,
+	"ELASTICCLAW_DOCKER":             true,
+	"ELASTICCLAW_PROVIDER_CONFIG":    true,
+	"ELASTICCLAW_API_KEY_AUTH_SYNC":  true,
+	"ELASTICCLAW_OAUTH_AUTH_SYNC":    true,
+	"ELASTICCLAW_ONBOARD_FLAGS":      true,
+	"LINEAR_API_KEY":                 true,
+}
+
+// shellVarNameRegex matches valid POSIX shell variable names.
+var shellVarNameRegex = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 // resolveActiveKey selects the active key by selected name, then default, then first.
 func resolveActiveKey(keys []*types.LLMKeyConfig, selectedKeyName string) *types.LLMKeyConfig {
@@ -429,9 +461,39 @@ func GenerateReplicatedBootstrapScript(p BootstrapParams) string {
 		linearEnvLine = "# Linear not configured"
 	}
 
+	customEnvExports := "# No custom env vars"
+	customEnvPersist := ""
+	if len(p.Env) > 0 {
+		var lines []string
+		var persistLines []string
+		keys := make([]string, 0, len(p.Env))
+		for k := range p.Env {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			v := p.Env[k]
+			if bootstrapManagedEnvKeys[k] {
+				continue
+			}
+			if !shellVarNameRegex.MatchString(k) {
+				log.Printf("[bootstrap] WARNING: skipping invalid env var name %q", k)
+				continue
+			}
+			lines = append(lines, fmt.Sprintf("export %s=%s", k, shellQuote(v)))
+			persistLines = append(persistLines, fmt.Sprintf("  printf 'export %s=%%q\\n' \"$%s\"", k, k))
+		}
+		if len(lines) > 0 {
+			customEnvExports = strings.Join(lines, "\n")
+			customEnvPersist = strings.Join(persistLines, "\n")
+		}
+	}
+
 	return fmt.Sprintf(`#!/bin/bash
 set -euo pipefail
 
+# ── Custom env vars (workflow/factory secret_refs, template env) ───────────────
+%s
 # ── Identity + credentials ────────────────────────────────────────────────────
 export ELASTICCLAW_HUB_URL=%s
 export ELASTICCLAW_CLAW_ID=%s
@@ -504,6 +566,7 @@ echo "ElasticClaw connector installed"
 # then transitions directly into the normal bridge connect loop.
 # Persist env vars so bridge can be restarted later.
 {
+%s
   printf 'export ELASTICCLAW_HUB_URL=%%q\n' "$ELASTICCLAW_HUB_URL"
   printf 'export ELASTICCLAW_CLAW_ID=%%q\n' "$ELASTICCLAW_CLAW_ID"
   printf 'export ELASTICCLAW_CLAW_TOKEN=%%q\n' "$ELASTICCLAW_CLAW_TOKEN"
@@ -576,10 +639,12 @@ done
 echo "ERROR: timed out waiting for claw-bridge bootstrap to complete"
 exit 1
 `,
+		customEnvExports,
 		shellQuote(p.HubURL), shellQuote(p.ClawID), shellQuote(p.ClawToken), shellQuote(p.ModelAuthToken), shellQuote(p.ClawName), shellQuote(p.TemplateName), shellQuote(p.GatewayPassword),
 		shellQuote(p.DefaultModel), shellQuote(p.LLMProvider), shellQuote(nixFlag), shellQuote(dockerFlag),
 		p.LLMKeyEnv, p.ModelAuthEnv, linearEnvLine, apiKeyAuthSyncLine, oauthAuthSyncLine, shellQuote(p.OnboardFlags), providerConfigLine,
 		shellQuote(p.BridgeURL),
+		customEnvPersist,
 	)
 }
 

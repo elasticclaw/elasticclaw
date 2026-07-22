@@ -331,6 +331,55 @@ bash -c 'printf "%s\n" "$ELASTICCLAW_CLAW_NAME" "$ELASTICCLAW_GATEWAY_PASSWORD"'
 	}
 }
 
+func TestBootstrapScript_CustomEnvInjectedAndPersisted(t *testing.T) {
+	p := baseParams()
+	p.Env = map[string]string{
+		"DEPOT_TOKEN":      "secret-value",
+		"CUSTOM_VAR":       "hello world",
+		"JIRA_API_KEY":     "jira-secret",
+		"SHORTCUT_API_KEY": "shortcut-secret",
+	}
+	script := GenerateReplicatedBootstrapScript(p)
+	assertContains(t, script, "export DEPOT_TOKEN='secret-value'", "custom env var exported")
+	assertContains(t, script, "export CUSTOM_VAR='hello world'", "custom env var exported")
+	assertContains(t, script, "export JIRA_API_KEY='jira-secret'", "Jira integration env exported")
+	assertContains(t, script, "export SHORTCUT_API_KEY='shortcut-secret'", "Shortcut integration env exported")
+	assertContains(t, script, "printf 'export DEPOT_TOKEN=%q\\n' \"$DEPOT_TOKEN\"", "custom env var persisted")
+	assertContains(t, script, "printf 'export CUSTOM_VAR=%q\\n' \"$CUSTOM_VAR\"", "custom env var persisted")
+}
+
+func TestBootstrapScript_SkipsBootstrapManagedCustomEnv(t *testing.T) {
+	p := baseParams()
+	p.Env = map[string]string{
+		"ELASTICCLAW_HUB_URL":    "https://wrong.example.com",
+		"ELASTICCLAW_CLAW_TOKEN": "wrong-token",
+		"CUSTOM_VAR":             "value",
+	}
+	script := GenerateReplicatedBootstrapScript(p)
+	assertNotContains(t, script, "https://wrong.example.com", "custom env must not override hub URL")
+	assertNotContains(t, script, "wrong-token", "custom env must not override claw token")
+	assertContains(t, script, "export CUSTOM_VAR='value'", "custom env var exported")
+}
+
+func TestBootstrapScript_SkipsInvalidEnvVarNames(t *testing.T) {
+	p := baseParams()
+	p.Env = map[string]string{"DEPOT_TOKEN": "secret", "FOO;rm -rf /": "bad"}
+	script := GenerateReplicatedBootstrapScript(p)
+	assertContains(t, script, "export DEPOT_TOKEN='secret'", "valid env var exported")
+	assertNotContains(t, script, "FOO;rm", "invalid env var name should not appear in script")
+}
+
+func TestBootstrapScript_CustomEnvOrderIsDeterministic(t *testing.T) {
+	p := baseParams()
+	p.Env = map[string]string{"Z_VAR": "last", "A_VAR": "first"}
+	script := GenerateReplicatedBootstrapScript(p)
+	a := strings.Index(script, "export A_VAR='first'")
+	z := strings.Index(script, "export Z_VAR='last'")
+	if a == -1 || z == -1 || a >= z {
+		t.Fatalf("custom env exports are not sorted: A_VAR index %d, Z_VAR index %d", a, z)
+	}
+}
+
 func TestBootstrapScript_SetEEnabled(t *testing.T) {
 	script := GenerateReplicatedBootstrapScript(baseParams())
 	assertContains(t, script, "set -euo pipefail", "script uses set -euo pipefail")
