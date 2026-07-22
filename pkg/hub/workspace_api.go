@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -327,7 +328,7 @@ func (s *Server) triggerWorkflowConfig(w http.ResponseWriter, r *http.Request, w
 	}
 
 	if workflow.Integration == "github-issues" || (workflow.Trigger != nil && workflow.Trigger.GitHubIssues != nil) {
-		clawID, created, err := s.createClawForManualGitHubIssueWorkflow(workspace, workflow, validatedInputs)
+		clawID, created, err := s.createClawForManualGitHubIssueWorkflow(r.Context(), workspace, workflow, validatedInputs)
 		if err != nil {
 			if isFactoryTriggerAlreadyClaimed(err) {
 				jsonError(w, http.StatusConflict, "workflow trigger already in progress for this GitHub issue")
@@ -347,7 +348,7 @@ func (s *Server) triggerWorkflowConfig(w http.ResponseWriter, r *http.Request, w
 		return
 	}
 
-	clawID, _, err := s.createClawFromWorkflow(workspace, workflow, validatedInputs, "manual workflow trigger")
+	clawID, _, err := s.createClawFromWorkflowContext(r.Context(), workspace, workflow, validatedInputs, "manual workflow trigger")
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, "failed to create claw: "+err.Error())
 		return
@@ -358,7 +359,7 @@ func (s *Server) triggerWorkflowConfig(w http.ResponseWriter, r *http.Request, w
 	})
 }
 
-func (s *Server) createClawForManualGitHubIssueWorkflow(workspace *types.WorkspaceConfig, workflow *types.WorkflowConfig, inputs map[string]string) (string, bool, error) {
+func (s *Server) createClawForManualGitHubIssueWorkflow(ctx context.Context, workspace *types.WorkspaceConfig, workflow *types.WorkflowConfig, inputs map[string]string) (string, bool, error) {
 	rawIssueNumber := strings.TrimSpace(inputs["issue_number"])
 	if rawIssueNumber == "" {
 		return "", false, fmt.Errorf(`missing required input "issue_number"`)
@@ -401,7 +402,7 @@ func (s *Server) createClawForManualGitHubIssueWorkflow(workspace *types.Workspa
 	}
 
 	payload := buildGitHubIssuesPollPayloadForAction(issue, repo, "manual")
-	return s.createClawForGitHubIssueWorkflow(workspace, workflow, payload, "manual workflow trigger")
+	return s.createClawForGitHubIssueWorkflowContext(ctx, workspace, workflow, payload, "manual workflow trigger")
 }
 
 func (s *Server) queryGitHubIssue(repo, token, base string, issueNumber int) (githubIssuesPollItem, error) {

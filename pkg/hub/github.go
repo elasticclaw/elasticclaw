@@ -34,10 +34,24 @@ type githubTokenResponse struct {
 	ExpiresAt time.Time `json:"expires_at"`
 }
 
+// githubRepository is the subset of repository metadata needed when expanding
+// workspace repository patterns.
+type githubRepository struct {
+	Name     string `json:"name"`
+	FullName string `json:"full_name"`
+}
+
+type githubInstallationRepositoriesResponse struct {
+	TotalCount   int                `json:"total_count"`
+	Repositories []githubRepository `json:"repositories"`
+}
+
 // GitHubTokenProvider generates installation tokens for a GitHub App.
 type GitHubTokenProvider struct {
 	cfg        *types.GitHubAppConfig
 	privateKey *rsa.PrivateKey
+	apiBaseURL string
+	httpClient *http.Client
 }
 
 // NewGitHubTokenProvider creates a provider from hub config.
@@ -46,7 +60,16 @@ func NewGitHubTokenProvider(cfg *types.GitHubAppConfig) (*GitHubTokenProvider, e
 	if err != nil {
 		return nil, fmt.Errorf("github app private key: %w", err)
 	}
-	return &GitHubTokenProvider{cfg: cfg, privateKey: key}, nil
+	return &GitHubTokenProvider{
+		cfg:        cfg,
+		privateKey: key,
+		apiBaseURL: "https://api.github.com",
+		httpClient: http.DefaultClient,
+	}, nil
+}
+
+func (p *GitHubTokenProvider) apiURL(path string) string {
+	return strings.TrimRight(p.apiBaseURL, "/") + path
 }
 
 func parseRSAPrivateKey(pemStr string) (*rsa.PrivateKey, error) {
@@ -122,12 +145,12 @@ func (p *GitHubTokenProvider) ListInstallations(ctx context.Context) ([]githubIn
 		return nil, fmt.Errorf("sign app jwt: %w", err)
 	}
 
-	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "https://api.github.com/app/installations?per_page=100", nil)
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, p.apiURL("/app/installations?per_page=100"), nil)
 	req.Header.Set("Authorization", "Bearer "+appJWT)
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := p.httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("github list installations: %w", err)
 	}
@@ -142,6 +165,51 @@ func (p *GitHubTokenProvider) ListInstallations(ctx context.Context) ([]githubIn
 		return nil, fmt.Errorf("decode installations: %w", err)
 	}
 	return installations, nil
+}
+
+// ListInstallationRepositories returns every repository visible to one GitHub
+// App installation. GitHub requires an installation token for this endpoint,
+// so the provider first mints an unscoped token and then follows pagination.
+func (p *GitHubTokenProvider) ListInstallationRepositories(ctx context.Context, installationID int64) ([]githubRepository, error) {
+	token, _, err := p.InstallationToken(ctx, installationID, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create installation token: %w", err)
+	}
+
+	const perPage = 100
+	var repositories []githubRepository
+	for page := 1; ; page++ {
+		url := p.apiURL(fmt.Sprintf("/installation/repositories?per_page=%d&page=%d", perPage, page))
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+		if err != nil {
+			return nil, fmt.Errorf("build repository list request: %w", err)
+		}
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Accept", "application/vnd.github+json")
+		req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+
+		resp, err := p.httpClient.Do(req)
+		if err != nil {
+			return nil, fmt.Errorf("github list installation repositories: %w", err)
+		}
+		if resp.StatusCode != http.StatusOK {
+			var errBody map[string]interface{}
+			_ = json.NewDecoder(resp.Body).Decode(&errBody)
+			resp.Body.Close()
+			return nil, fmt.Errorf("github list installation repositories: status %d: %v", resp.StatusCode, errBody["message"])
+		}
+		var result githubInstallationRepositoriesResponse
+		decodeErr := json.NewDecoder(resp.Body).Decode(&result)
+		resp.Body.Close()
+		if decodeErr != nil {
+			return nil, fmt.Errorf("decode installation repositories: %w", decodeErr)
+		}
+
+		repositories = append(repositories, result.Repositories...)
+		if len(result.Repositories) < perPage || (result.TotalCount > 0 && len(repositories) >= result.TotalCount) {
+			return repositories, nil
+		}
+	}
 }
 
 // RepoAccess is a repo + permission level used when minting tokens.
@@ -206,7 +274,7 @@ func (p *GitHubTokenProvider) InstallationToken(ctx context.Context, installatio
 		bodyStr = string(b)
 	}
 
-	url := fmt.Sprintf("https://api.github.com/app/installations/%d/access_tokens", installationID)
+	url := p.apiURL(fmt.Sprintf("/app/installations/%d/access_tokens", installationID))
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, strings.NewReader(bodyStr))
 	if err != nil {
 		return "", time.Time{}, err
@@ -218,7 +286,7 @@ func (p *GitHubTokenProvider) InstallationToken(ctx context.Context, installatio
 		req.Header.Set("Content-Type", "application/json")
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := p.httpClient.Do(req)
 	if err != nil {
 		return "", time.Time{}, fmt.Errorf("github api: %w", err)
 	}
@@ -246,7 +314,7 @@ func (p *GitHubTokenProvider) CheckAppPermissions(ctx context.Context) (map[stri
 		return nil, fmt.Errorf("sign app jwt: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://api.github.com/app", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, p.apiURL("/app"), nil)
 	if err != nil {
 		return nil, fmt.Errorf("build request: %w", err)
 	}
@@ -254,7 +322,7 @@ func (p *GitHubTokenProvider) CheckAppPermissions(ctx context.Context) (map[stri
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := p.httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("github get app: %w", err)
 	}
