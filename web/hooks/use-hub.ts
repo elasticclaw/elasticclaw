@@ -16,6 +16,7 @@ import {
 import { mapApiClaw, mapApiMessage, mapApiStatus, computeUptime } from "@/lib/mappers"
 import { isTerminalAssistantMessage } from "@/lib/messages"
 import { useTypewriter, type TypewriterState } from "@/hooks/use-typewriter"
+import { toast } from "sonner"
 
 export interface HubState {
   claws: Claw[]
@@ -29,10 +30,11 @@ export interface HubState {
   hubError: string | null
   send: (clawId: string, content: string) => Promise<void>
   createClaw: (req: { name: string; template: string }) => Promise<void>
-  killClaw: (clawId: string) => Promise<void>
+  killClaw: (clawId: string) => Promise<boolean>
   loadMessages: (clawId: string) => Promise<void>
   setPinned: (clawId: string, pinned: boolean) => void
   setUnreadCount: (clawId: string, count: number) => void
+  setTags: (clawId: string, tags: string[]) => void
   refreshClaws: () => Promise<void>
   reorderClaws: (ids: string[]) => void
 }
@@ -93,7 +95,7 @@ function loadSavedOrder(): string[] {
 function saveOrder(ids: string[]) {
   try {
     localStorage.setItem(ORDER_KEY, JSON.stringify(ids))
-  } catch {}
+  } catch { toast.error("Failed to save preference") }
 }
 
 export function useHub(selectedClawId: string | null): HubState {
@@ -110,7 +112,7 @@ export function useHub(selectedClawId: string | null): HubState {
     split: splitTypewriter,
     clear: clearTypewriter,
   } = useTypewriter()
-  const [configured, setConfigured] = useState(false)
+  const [configured] = useState(() => isConfigured())
   const [loading, setLoading] = useState(true) // true until first claws fetch completes
   const [hubError, setHubError] = useState<string | null>(null)
   const segmentedStreamRef = useRef<Record<string, boolean>>({})
@@ -179,14 +181,15 @@ export function useHub(selectedClawId: string | null): HubState {
       if (saved) pinnedRef.current = JSON.parse(saved)
     } catch {}
     orderRef.current = loadSavedOrder()
-    loadCachedMessages()
+    const cacheTimer = window.setTimeout(loadCachedMessages, 0)
+    return () => window.clearTimeout(cacheTimer)
   }, [loadCachedMessages])
 
   const savePinned = useCallback((pinned: Record<string, boolean>) => {
     pinnedRef.current = pinned
     try {
       localStorage.setItem("elasticclaw_pinned", JSON.stringify(pinned))
-    } catch {}
+    } catch { toast.error("Failed to save preference") }
   }, [])
 
   const setPinned = useCallback((clawId: string, pinned: boolean) => {
@@ -306,6 +309,8 @@ export function useHub(selectedClawId: string | null): HubState {
     }
   }, [persistMessages])
 
+  const connectWebSocketRef = useRef<() => boolean | undefined>(() => undefined)
+
   const connectWebSocket = useCallback(() => {
     if (!shouldReconnectRef.current) return
     if (wsRef.current) {
@@ -320,7 +325,7 @@ export function useHub(selectedClawId: string | null): HubState {
       ws = new WebSocket(wsUrl)
     } catch (err) {
       console.error(`WS create failed for ${safeWsUrl}:`, err)
-      return
+      return false
     }
     wsRef.current = ws
 
@@ -342,7 +347,7 @@ export function useHub(selectedClawId: string | null): HubState {
         )
       }
       if (reconnectTimerRef.current) window.clearTimeout(reconnectTimerRef.current)
-      reconnectTimerRef.current = window.setTimeout(connectWebSocket, delayMs)
+      reconnectTimerRef.current = window.setTimeout(() => connectWebSocketRef.current(), delayMs)
     }
 
     ws.onerror = () => {
@@ -516,15 +521,18 @@ export function useHub(selectedClawId: string | null): HubState {
     }
   }, [clearTypewriter, finalizeTypewriter, nextClientMessageId, persistMessages, pushChunk, refreshClaws, splitTypewriter])
 
+  useEffect(() => {
+    connectWebSocketRef.current = connectWebSocket
+  }, [connectWebSocket])
+
   // Initialize
   useEffect(() => {
     const cfg = isConfigured()
-    setConfigured(cfg)
     if (!cfg) return
 
     // Initial fetch + eager-load all message histories
-    refreshClaws().then(() => {})
-    refreshDependencies().then(() => {})
+    queueMicrotask(() => void refreshClaws())
+    queueMicrotask(() => void refreshDependencies())
 
     // Poll claws frequently; dependency status is slower-moving and separately cached by the hub.
     pollIntervalRef.current = setInterval(refreshClaws, 10_000)
@@ -584,6 +592,7 @@ export function useHub(selectedClawId: string | null): HubState {
       // WS events will handle the response (chunk/message)
     } catch (err) {
       console.error("Failed to send message:", err)
+      toast.error("Failed to send message")
       setClaws((prev) =>
         prev.map((c) => (c.id === clawId ? { ...c, isStreaming: false } : c))
       )
@@ -601,7 +610,13 @@ export function useHub(selectedClawId: string | null): HubState {
   }, [])
 
   const killClaw = useCallback(async (clawId: string) => {
-    await apiKillClaw(clawId)
+    try {
+      await apiKillClaw(clawId)
+    } catch (err) {
+      console.error("Failed to kill agent:", err)
+      toast.error("Failed to kill agent")
+      return false
+    }
     setClaws((prev) => prev.filter((c) => c.id !== clawId))
     setMessages((prev) => {
       const next = { ...prev }
@@ -610,7 +625,12 @@ export function useHub(selectedClawId: string | null): HubState {
       return next
     })
 
+    return true
   }, [persistMessages])
+
+  const setTags = useCallback((clawId: string, tags: string[]) => {
+    setClaws((prev) => prev.map((claw) => claw.id === clawId ? { ...claw, tags } : claw))
+  }, [])
 
   const downtimeDependencies = dependencies.filter((dependency) => dependency.status === "downtime")
 
@@ -630,6 +650,7 @@ export function useHub(selectedClawId: string | null): HubState {
     loadMessages,
     setPinned,
     setUnreadCount,
+    setTags,
     refreshClaws,
     reorderClaws,
   }

@@ -1,14 +1,16 @@
 "use client"
 
 import { useState, useMemo, useEffect, useCallback, useRef } from "react"
-import { Sidebar } from "@/components/sidebar"
-import { ConversationView } from "@/components/conversation-view"
+import { HeaderBar } from "@/components/header-bar"
+import { AgentList } from "@/components/agent-list"
+import { DetailPane } from "@/components/detail-pane"
 import { SetupScreen } from "@/components/setup-screen"
 import { ManualTriggerModal } from "@/components/manual-trigger-modal"
 import { useHub } from "@/hooks/use-hub"
 import type { Message } from "@/lib/types"
 import { isConfigured, type Workflow } from "@/lib/api"
 import { requestAuthToken } from "@/lib/auth-storage"
+import { useIsMobile } from "@/hooks/use-mobile"
 
 export default function Home() {
   const [selectedClawId, setSelectedClawId] = useState<string | null>(() => {
@@ -17,13 +19,13 @@ export default function Home() {
   })
   const [searchQuery, setSearchQuery] = useState("")
   const [activeTagFilters, setActiveTagFilters] = useState<string[]>([])
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [configuredState, setConfiguredState] = useState<boolean | null>(() => {
     if (typeof window === "undefined") return null
     return isConfigured()
   })
   const [isAdmin, setIsAdmin] = useState(false)
   const [selectedWorkflow, setSelectedWorkflow] = useState<Workflow | null>(null)
+  const isMobile = useIsMobile()
 
   // Fetch admin status
   useEffect(() => {
@@ -162,17 +164,6 @@ export default function Home() {
     [hub]
   )
 
-  // When in board view (no claw selected), all cards are visible — clear unread
-  // for any claw that has messages showing on screen.
-  useEffect(() => {
-    if (selectedClawId) return
-    const withUnread = claws.filter((c) => c.unreadCount > 0)
-    if (withUnread.length === 0) return
-    for (const c of withUnread) {
-      hub.setUnreadCount(c.id, 0)
-    }
-  }, [selectedClawId, claws, hub])
-
   const handleTogglePin = useCallback(
     (id: string) => {
       const claw = claws.find((c) => c.id === id)
@@ -201,30 +192,13 @@ export default function Home() {
     [selectedClawId, hub]
   )
 
-  const handleSendMessageToClaw = useCallback(
-    (clawId: string, content: string) => {
-      hub.send(clawId, content)
-    },
-    [hub]
-  )
-
-  const handleKill = useCallback(() => {
+  const handleKill = useCallback(async () => {
     if (!selectedClawId) return
-    hub.killClaw(selectedClawId)
+    const killed = await hub.killClaw(selectedClawId)
+    if (!killed) return
     setSelectedClawId(null)
     localStorage.removeItem('elasticclaw_selected_claw')
   }, [selectedClawId, hub])
-
-  const handleKillClaw = useCallback(
-    (clawId: string) => {
-      hub.killClaw(clawId)
-      if (selectedClawId === clawId) {
-        setSelectedClawId(null)
-        localStorage.removeItem('elasticclaw_selected_claw')
-      }
-    },
-    [selectedClawId, hub]
-  )
 
   // Show loading state until we know if configured
   if (configuredState === null) {
@@ -237,12 +211,15 @@ export default function Home() {
   }
 
   return (
-    <div className="flex h-screen bg-background">
-      <Sidebar
+    <div className="flex h-screen flex-col bg-background">
+      <HeaderBar agentCount={claws.length} runningCount={claws.filter(c => c.status === "connected").length} hubConnected={hub.connected} downtimeDependencies={downtimeDependencies} isAdmin={isAdmin} onSelectWorkflow={setSelectedWorkflow} />
+      <div className="flex min-h-0 flex-1">
+      {(!isMobile || !selectedClawId) && <AgentList
         claws={filteredClaws}
         pinnedClaws={filteredPinnedClaws}
         allClawIds={claws.map((c) => c.id)}
         selectedClawId={selectedClawId}
+        allMessages={mergedMessages}
         onSelectClaw={handleSelectClaw}
         onTogglePin={handleTogglePin}
         searchQuery={searchQuery}
@@ -252,29 +229,20 @@ export default function Home() {
         onAddTagFilter={handleAddTagFilter}
         onRemoveTagFilter={handleRemoveTagFilter}
         onClearTagFilters={handleClearTagFilters}
-        isCollapsed={sidebarCollapsed}
-        onToggleCollapse={() => setSidebarCollapsed(!sidebarCollapsed)}
         onReorderClaws={reorderClaws}
-        isAdmin={isAdmin}
-        onSelectWorkflow={setSelectedWorkflow}
-      />
-      <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
-        <ConversationView
+        className={isMobile ? "w-full" : undefined}
+      />}
+      {(!isMobile || selectedClawId) && <DetailPane
           claw={selectedClaw}
-          allClaws={claws}
-          downtimeDependencies={downtimeDependencies}
           messages={selectedClaw ? mergedMessages[selectedClaw.id] || [] : []}
-          allMessages={mergedMessages}
           onSendMessage={handleSendMessage}
-          onSendMessageToClaw={handleSendMessageToClaw}
           onKill={handleKill}
-          onKillClaw={handleKillClaw}
-          onSelectClaw={handleSelectClaw}
-          onDeselectClaw={() => { setSelectedClawId(null); localStorage.removeItem('elasticclaw_selected_claw') }}
-          onReorderClaws={reorderClaws}
-          loading={loading}
           hubError={hubError}
-        />
+          isMobile={isMobile}
+          onBack={() => { setSelectedClawId(null); localStorage.removeItem('elasticclaw_selected_claw') }}
+          onTogglePin={() => selectedClawId && handleTogglePin(selectedClawId)}
+          onTagsChange={hub.setTags}
+        />}
       </div>
       <ManualTriggerModal
         open={!!selectedWorkflow}
