@@ -831,7 +831,6 @@ func (s *Server) createClawForGitHubIssue(factory *types.FactoryConfig, payload 
 	// Insert claw record
 	clawID := uuid.New().String()
 	filesJSON, _ := json.Marshal(templateFiles)
-	envJSON, _ := json.Marshal(envForStorage(env))
 	now := now()
 
 	initialStatus := "provisioning"
@@ -840,9 +839,9 @@ func (s *Server) createClawForGitHubIssue(factory *types.FactoryConfig, payload 
 	}
 
 	_, err = s.db.Exec(`
-		INSERT INTO claws(id, tenant_id, name, template, provider, default_model, template_files, env, github_repos, linear_workspace, nix, docker, tags, color, llm_key, linear_issue_id, github_issue_id, shortcut_story_id, status, created_at, factory_name, concurrency_group)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		clawID, tenantID, clawName, factory.Template, provider, defaultModel, string(filesJSON), string(envJSON),
+		INSERT INTO claws(id, tenant_id, name, template, provider, default_model, template_files, github_repos, linear_workspace, nix, docker, tags, color, llm_key, linear_issue_id, github_issue_id, shortcut_story_id, status, created_at, factory_name, concurrency_group)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		clawID, tenantID, clawName, factory.Template, provider, defaultModel, string(filesJSON),
 		string(githubReposJSON), linearWorkspace, nixEnabled, dockerEnabled, string(tagsJSON), clawColor, llmKey, "", issueID, "", initialStatus, now, factory.Name, groupName,
 	)
 

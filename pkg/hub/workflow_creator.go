@@ -236,12 +236,11 @@ func (s *Server) createClawFromWorkflowWithOptions(workspace *types.WorkspaceCon
 	}
 
 	filesJSON, _ := json.Marshal(templateFiles)
-	envJSON, _ := json.Marshal(envForStorage(env))
 	now := time.Now().UTC()
 	_, err = s.db.Exec(`
-		INSERT INTO claws(id, tenant_id, name, template, provider, default_model, template_files, env, github_repos, linear_workspace, nix, docker, tags, color, llm_key, status, created_at, factory_name, concurrency_group, workflow_volumes)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		clawID, tenantID, clawName, workspace.Name, provider, defaultModel, string(filesJSON), string(envJSON),
+		INSERT INTO claws(id, tenant_id, name, template, provider, default_model, template_files, github_repos, linear_workspace, nix, docker, tags, color, llm_key, status, created_at, factory_name, concurrency_group, workflow_volumes)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		clawID, tenantID, clawName, workspace.Name, provider, defaultModel, string(filesJSON),
 		string(repositoriesJSON), linearWorkspace, nixEnabled, dockerEnabled, string(tagsJSON), workflow.Color, llmKey,
 		initialStatus, now, "", groupName, string(workflowVolumesJSON),
 	)

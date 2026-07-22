@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/elasticclaw/elasticclaw/pkg/types"
@@ -52,10 +53,9 @@ type BootstrapParams struct {
 	Env            map[string]string // custom env vars from workflow/factory secret_refs and template env
 }
 
-// envKeysInjectedByBootstrap lists env vars that the bootstrap script sets
-// explicitly from other BootstrapParams fields. They should not be stored in
-// claws.env because they are re-derived at bootstrap time.
-var envKeysInjectedByBootstrap = map[string]bool{
+// bootstrapManagedEnvKeys lists values that the bootstrap script derives from
+// dedicated parameters. Custom env must not override or duplicate them.
+var bootstrapManagedEnvKeys = map[string]bool{
 	"ELASTICCLAW_HUB_URL":            true,
 	"ELASTICCLAW_CLAW_ID":            true,
 	"ELASTICCLAW_CLAW_TOKEN":         true,
@@ -76,34 +76,10 @@ var envKeysInjectedByBootstrap = map[string]bool{
 	"ELASTICCLAW_OAUTH_AUTH_SYNC":    true,
 	"ELASTICCLAW_ONBOARD_FLAGS":      true,
 	"LINEAR_API_KEY":                 true,
-	"JIRA_API_KEY":                   true,
-	"JIRA_BASE_URL":                  true,
-	"JIRA_USERNAME":                  true,
-	"SHORTCUT_API_KEY":               true,
-	"GITHUB_ISSUES_API_KEY":          true,
 }
 
 // shellVarNameRegex matches valid POSIX shell variable names.
 var shellVarNameRegex = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
-
-// envForStorage returns the subset of env that should be persisted in the
-// claws table. It strips keys that the bootstrap script injects from other
-// sources and skips malformed shell variable names so the stored column only
-// contains safe, user-supplied values.
-func envForStorage(env map[string]string) map[string]string {
-	filtered := make(map[string]string)
-	for k, v := range env {
-		if envKeysInjectedByBootstrap[k] {
-			continue
-		}
-		if !shellVarNameRegex.MatchString(k) {
-			log.Printf("[bootstrap] WARNING: skipping invalid env var name %q", k)
-			continue
-		}
-		filtered[k] = v
-	}
-	return filtered
-}
 
 // resolveActiveKey selects the active key by selected name, then default, then first.
 func resolveActiveKey(keys []*types.LLMKeyConfig, selectedKeyName string) *types.LLMKeyConfig {
@@ -490,7 +466,16 @@ func GenerateReplicatedBootstrapScript(p BootstrapParams) string {
 	if len(p.Env) > 0 {
 		var lines []string
 		var persistLines []string
-		for k, v := range p.Env {
+		keys := make([]string, 0, len(p.Env))
+		for k := range p.Env {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			v := p.Env[k]
+			if bootstrapManagedEnvKeys[k] {
+				continue
+			}
 			if !shellVarNameRegex.MatchString(k) {
 				log.Printf("[bootstrap] WARNING: skipping invalid env var name %q", k)
 				continue

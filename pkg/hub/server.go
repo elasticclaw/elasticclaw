@@ -74,6 +74,9 @@ type Server struct {
 	checkpointMu      sync.Mutex
 	checkpointWaiters map[string]chan error // checkpoint_id -> waiter
 
+	replicatedBootstrapEnvMu sync.Mutex
+	replicatedBootstrapEnv   map[string]map[string]string // temporary handoff while a Replicated VM becomes reachable
+
 	// githubBaseURL overrides the GitHub API base for testing (default: https://api.github.com)
 	githubBaseURL string
 	// linearBaseURL overrides the Linear API base for testing (default: https://api.linear.app)
@@ -1174,7 +1177,6 @@ func (s *Server) handleCreateClaw(w http.ResponseWriter, r *http.Request, tenant
 	req.Env = env
 	req.Files = injectFigmaAPIDocs(req.Files, env)
 	filesJSON, _ := json.Marshal(req.Files)
-	envJSON, _ := json.Marshal(envForStorage(req.Env))
 
 	// Auto-enable Nix for workspaces that include a flake.nix.
 	// This makes the workspace flake the contract for tools without requiring
@@ -1242,8 +1244,8 @@ func (s *Server) handleCreateClaw(w http.ResponseWriter, r *http.Request, tenant
 	color := resolveColor(req.Color, req.Name)
 
 	_, err := s.db.Exec(
-		`INSERT INTO claws(id, tenant_id, name, template, provider, default_model, template_files, env, github_repos, linear_workspace, nix, docker, tags, color, llm_key, status, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		clawID, tenantID, req.Name, req.TemplateName, req.Provider, req.DefaultModel, string(filesJSON), string(envJSON),
+		`INSERT INTO claws(id, tenant_id, name, template, provider, default_model, template_files, github_repos, linear_workspace, nix, docker, tags, color, llm_key, status, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		clawID, tenantID, req.Name, req.TemplateName, req.Provider, req.DefaultModel, string(filesJSON),
 		githubReposJSON, linearWorkspace, nixEnabled, dockerEnabled, string(tagsJSON), color, req.LLMKey, "provisioning", now(),
 	)
 	if err != nil {
@@ -4500,7 +4502,7 @@ func (s *Server) provisionExedev(ctx context.Context, clawID string, req types.C
 
 	// Bootstrap asynchronously
 	go func() {
-		if err := s.bootstrapExedev(context.Background(), clawID, instance.ID, p, files); err != nil {
+		if err := s.bootstrapExedev(context.Background(), clawID, instance.ID, p, files, env); err != nil {
 			log.Printf("exedev bootstrap failed for claw %s: %v", clawID, err)
 			s.stopAgentWithReason(clawID, fmt.Sprintf("Exedev bootstrap failed: %s", sanitizeBootstrapError(err)), false)
 		}
@@ -4509,7 +4511,7 @@ func (s *Server) provisionExedev(ctx context.Context, clawID string, req types.C
 	return nil
 }
 
-func (s *Server) bootstrapExedev(ctx context.Context, clawID, vmName string, p *exedevProvider.Provider, files map[string][]byte) error {
+func (s *Server) bootstrapExedev(ctx context.Context, clawID, vmName string, p *exedevProvider.Provider, files map[string][]byte, env map[string]string) error {
 	log.Printf("[exedev] bootstrapping claw %s (vm %s)", clawID, vmName)
 	s.setBootstrapStatus(clawID, "Waiting for sandbox SSH")
 
@@ -4535,10 +4537,10 @@ func (s *Server) bootstrapExedev(ctx context.Context, clawID, vmName string, p *
 	s.setBootstrapStatus(clawID, "Preparing ElasticClaw connector")
 
 	// Load claw configuration from DB in a single atomic query
-	var clawName, templateName, githubReposJSON, linearWorkspace, templateDefaultModel, llmKeyName, templateFilesJSON, envJSON string
+	var clawName, templateName, githubReposJSON, linearWorkspace, templateDefaultModel, llmKeyName, templateFilesJSON string
 	var nixEnabled, dockerEnabled int
-	if err := s.db.QueryRow(`SELECT COALESCE(name,''), COALESCE(template,''), COALESCE(github_repos,'[]'), COALESCE(linear_workspace,''), COALESCE(default_model,''), nix, docker, COALESCE(llm_key,''), COALESCE(template_files,'{}'), COALESCE(env,'{}') FROM claws WHERE id=?`, clawID).Scan(
-		&clawName, &templateName, &githubReposJSON, &linearWorkspace, &templateDefaultModel, &nixEnabled, &dockerEnabled, &llmKeyName, &templateFilesJSON, &envJSON,
+	if err := s.db.QueryRow(`SELECT COALESCE(name,''), COALESCE(template,''), COALESCE(github_repos,'[]'), COALESCE(linear_workspace,''), COALESCE(default_model,''), nix, docker, COALESCE(llm_key,''), COALESCE(template_files,'{}') FROM claws WHERE id=?`, clawID).Scan(
+		&clawName, &templateName, &githubReposJSON, &linearWorkspace, &templateDefaultModel, &nixEnabled, &dockerEnabled, &llmKeyName, &templateFilesJSON,
 	); err != nil {
 		return fmt.Errorf("load claw config: %w", err)
 	}
@@ -4549,11 +4551,6 @@ func (s *Server) bootstrapExedev(ctx context.Context, clawID, vmName string, p *
 	var templateFiles map[string]string
 	if err := json.Unmarshal([]byte(templateFilesJSON), &templateFiles); err != nil {
 		return fmt.Errorf("parse template_files for exedev bootstrap: %w", err)
-	}
-	var customEnv map[string]string
-	if err := json.Unmarshal([]byte(envJSON), &customEnv); err != nil {
-		log.Printf("[exedev] failed to parse env for claw %s: %v", clawID[:8], err)
-		customEnv = nil
 	}
 	templateFiles = workspaceTemplateFiles(templateFiles)
 
@@ -4604,7 +4601,7 @@ func (s *Server) bootstrapExedev(ctx context.Context, clawID, vmName string, p *
 		LinearEnv:       buildLinearEnv(linearToken),
 		ProviderConfig:  buildOpenClawProviderConfig(hubCfg.LLMKeys, llmKeyName),
 		OnboardFlags:    buildOnboardFlags(hubCfg.LLMKeys, llmKeyName, defaultModel),
-		Env:             customEnv,
+		Env:             env,
 	})
 
 	if flakeFiles := templateFlakeFiles(templateFiles); len(flakeFiles) > 0 {
@@ -5020,6 +5017,7 @@ func (s *Server) provisionReplicated(ctx context.Context, clawID string, req typ
 		return fmt.Errorf("replicated provision: %w", err)
 	}
 	recordE2EReplicatedVMID(vmID)
+	s.rememberReplicatedBootstrapEnv(clawID, env)
 	// Store vm_id in the claw record — keep status='provisioning' so the poller can detect
 	// the provisioning→running transition and trigger bootstrap. Skip if already deleted.
 	_, _ = s.db.Exec(
@@ -5029,6 +5027,7 @@ func (s *Server) provisionReplicated(ctx context.Context, clawID string, req typ
 	var currentStatus string
 	_ = s.db.QueryRow(`SELECT status FROM claws WHERE id=?`, clawID).Scan(&currentStatus)
 	if currentStatus == "deleted" {
+		s.forgetReplicatedBootstrapEnv(clawID)
 		log.Printf("[provision] claw %s deleted mid-provision, destroying VM %s", clawID[:8], vmID)
 		_ = p.DeleteVM(ctx, vmID)
 		return fmt.Errorf("claw deleted mid-provision")
@@ -5057,6 +5056,27 @@ func (s *Server) provisionReplicated(ctx context.Context, clawID string, req typ
 	log.Printf("  SSH:           ssh %s", replicatedpkg.VMHostname(vmID))
 	log.Printf("  Status:        provisioning (waiting for VM to start)")
 	return nil
+}
+
+func (s *Server) rememberReplicatedBootstrapEnv(clawID string, env map[string]string) {
+	s.replicatedBootstrapEnvMu.Lock()
+	defer s.replicatedBootstrapEnvMu.Unlock()
+	if s.replicatedBootstrapEnv == nil {
+		s.replicatedBootstrapEnv = make(map[string]map[string]string)
+	}
+	s.replicatedBootstrapEnv[clawID] = cloneStringMap(env)
+}
+
+func (s *Server) loadReplicatedBootstrapEnv(clawID string) map[string]string {
+	s.replicatedBootstrapEnvMu.Lock()
+	defer s.replicatedBootstrapEnvMu.Unlock()
+	return cloneStringMap(s.replicatedBootstrapEnv[clawID])
+}
+
+func (s *Server) forgetReplicatedBootstrapEnv(clawID string) {
+	s.replicatedBootstrapEnvMu.Lock()
+	defer s.replicatedBootstrapEnvMu.Unlock()
+	delete(s.replicatedBootstrapEnv, clawID)
 }
 
 // ─── Provider status polling ──────────────────────────────────────────────────
@@ -5397,7 +5417,8 @@ func (s *Server) syncReplicatedVMs() {
 			// First time we see running — trigger bootstrap
 			if c.status == "provisioning" {
 				log.Printf("Claw %s (%s): VM running, bootstrapping...", c.name, c.id[:8])
-				go s.bootstrapReplicated(c.id, c.name, c.providerID, replicatedCfg)
+				env := s.loadReplicatedBootstrapEnv(c.id)
+				go s.bootstrapReplicated(c.id, c.name, c.providerID, replicatedCfg, env)
 			}
 		case "terminated", "error":
 			log.Printf("Replicated VM %s for claw %s (%s) terminated", c.providerID, c.name, c.id)
@@ -5630,7 +5651,8 @@ func (s *Server) clawHasMessages(clawID string) bool {
 
 // bootstrapReplicated SSHes into a newly-running Replicated VM, pulls the
 // claw-bridge binary from GitHub Releases, and starts it with hub connection env vars.
-func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.ProviderConfig) {
+func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.ProviderConfig, env map[string]string) {
+	defer s.forgetReplicatedBootstrapEnv(clawID)
 	s.setBootstrapStatus(clawID, "Preparing ElasticClaw workspace")
 	// Bail immediately if claw was deleted while VM was spinning up
 	var checkStatus string
@@ -5644,11 +5666,11 @@ func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.Pr
 		return
 	}
 
-	var filesJSON, envJSON, templateName string
+	var filesJSON, templateName string
 	if err := s.db.QueryRow(
-		`SELECT COALESCE(template_files,'{}'), COALESCE(env,'{}'), COALESCE(template,'') FROM claws WHERE id=?`,
+		`SELECT COALESCE(template_files,'{}'), COALESCE(template,'') FROM claws WHERE id=?`,
 		clawID,
-	).Scan(&filesJSON, &envJSON, &templateName); err != nil {
+	).Scan(&filesJSON, &templateName); err != nil {
 		log.Printf("[bootstrap] failed to load template_files for claw %s: %v", clawID[:8], err)
 		s.stopAgentWithReason(clawID, fmt.Sprintf("Bootstrap failed: could not read template metadata: %s", err), false)
 		return
@@ -5659,12 +5681,6 @@ func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.Pr
 		s.stopAgentWithReason(clawID, fmt.Sprintf("Bootstrap failed: invalid template metadata: %s", err), false)
 		return
 	}
-	var customEnv map[string]string
-	if err := json.Unmarshal([]byte(envJSON), &customEnv); err != nil {
-		log.Printf("[bootstrap] failed to parse env for claw %s: %v", clawID[:8], err)
-		customEnv = nil
-	}
-
 	// Load github repos config for this claw
 	var githubReposJSON string
 	_ = s.db.QueryRow(`SELECT COALESCE(github_repos,'[]') FROM claws WHERE id=?`, clawID).Scan(&githubReposJSON)
@@ -5776,7 +5792,7 @@ func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.Pr
 		LinearEnv:       buildLinearEnv(linearToken),
 		ProviderConfig:  buildOpenClawProviderConfig(hubCfg.LLMKeys, llmKeyName),
 		OnboardFlags:    buildOnboardFlags(hubCfg.LLMKeys, llmKeyName, defaultModel),
-		Env:             customEnv,
+		Env:             env,
 	})
 	// Inject GitHub tools context into TOOLS.md if GitHub is configured
 	s.mu.RLock()

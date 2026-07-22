@@ -87,6 +87,7 @@ func (s *Server) finishClawTerminalTx(clawID, clawStatus, diagnostic, runStatus,
 			}
 		}
 		if err == nil {
+			s.forgetReplicatedBootstrapEnv(clawID)
 			return true, nil
 		}
 		last = err
