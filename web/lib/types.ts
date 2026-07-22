@@ -184,7 +184,7 @@ export interface GeneralStats {
 
 export interface AnalyticsEffectiveness {
   outcomesByDay: { date: string; clean: number; humanInTheLoop: number; warning: number; failed: number }[]
-  funnel: { started: number; agentFinished: number; prOpened: number; prMerged: number }
+  funnel: { agentStarted: number; prOpened: number; prFinished: number }
   costPerMergedPr: { weekly: { weekStart: string; costUsd: number; mergedPrs: number; costPerMergedPr: number }[]; average: number }
   mergeRate: number
   successRate: number
