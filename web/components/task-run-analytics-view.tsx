@@ -603,7 +603,7 @@ export function FilterSelect({ label, value, values, onChange }: { label: string
 export function RunDetailPanel({ run, details, loading, error, onClose }: { run: TaskRunSummary | null; details: DetailState | null; loading: boolean; error: string | null; onClose: () => void }) {
   const [mounted, setMounted] = useState(false)
 
-  useEffect(() => setMounted(true), [])
+  useEffect(() => { queueMicrotask(() => setMounted(true)) }, [])
 
   if (!run || !mounted) return null
   return createPortal(

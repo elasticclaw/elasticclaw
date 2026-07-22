@@ -144,7 +144,7 @@ export function AnalyticsCommandCenter({ workspaceScope }: { workspaceScope?: st
     }
 
     return nextFilters
-  }, [params, paramsKey, workspaceScope])
+  }, [params, workspaceScope])
   const [summary, setSummary] = useState<TaskRunAnalyticsSummary>()
   const [costs, setCosts] = useState<CostOverview>()
   const [yearCosts, setYearCosts] = useState<CostOverview>()
@@ -170,20 +170,9 @@ export function AnalyticsCommandCenter({ workspaceScope }: { workspaceScope?: st
     cursorStackRef.current = cursorStack
   }, [cursorStack])
 
-  // Cache the last-known run object per selectedRunId so a silent poll that
-  // drops the selected run off the current page (e.g. a new run pushes it
-  // past the page size) doesn't unmount the open drawer out from under the
-  // user. The cache is only trusted while selectedRunId hasn't changed.
-  const selectedRunCache = useRef<{ runId: string; run: TaskRunSummary } | null>(null)
   const selectedRun = useMemo(() => {
     if (!selectedRunId) return null
-    const found = runs.find((run) => run.runId === selectedRunId) ?? null
-    if (found) {
-      selectedRunCache.current = { runId: selectedRunId, run: found }
-      return found
-    }
-    if (selectedRunCache.current?.runId === selectedRunId) return selectedRunCache.current.run
-    return null
+    return runs.find((run) => run.runId === selectedRunId) ?? null
   }, [runs, selectedRunId])
 
   const setFilters = useCallback(
@@ -291,7 +280,7 @@ export function AnalyticsCommandCenter({ workspaceScope }: { workspaceScope?: st
   )
 
   useEffect(() => {
-    setCursorStack([undefined])
+    queueMicrotask(() => setCursorStack([undefined]))
     queueMicrotask(() => void load())
     return () => {
       loadAbortController.current?.abort()

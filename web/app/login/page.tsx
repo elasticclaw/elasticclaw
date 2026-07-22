@@ -54,7 +54,7 @@ function LoginForm() {
     // Validate state to prevent CSRF
     const storedState = getOAuthState()
     if (!storedState || state !== storedState) {
-      setError("OAuth state mismatch — please try again")
+      queueMicrotask(() => setError("OAuth state mismatch — please try again"))
       return
     }
     removeOAuthState()

@@ -4,6 +4,7 @@ import { useState, useRef, useEffect } from "react"
 import { X, Plus } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { patchClaw } from "@/lib/api"
+import { toast } from "sonner"
 
 interface TagEditorProps {
   clawId: string
@@ -30,6 +31,7 @@ export function TagEditor({ clawId, tags, onTagsChange, className }: TagEditorPr
       onTagsChange(next)
     } catch (e) {
       console.error("Failed to remove tag", e)
+      toast.error("Failed to remove tag")
     } finally {
       setSaving(false)
     }
@@ -49,6 +51,7 @@ export function TagEditor({ clawId, tags, onTagsChange, className }: TagEditorPr
       onTagsChange(next)
     } catch (e) {
       console.error("Failed to add tag", e)
+      toast.error("Failed to add tag")
     } finally {
       setSaving(false)
       setInputValue("")

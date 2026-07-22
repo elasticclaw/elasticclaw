@@ -268,7 +268,7 @@ export default function SettingsSectionPage() {
     }
   }, [])
 
-  useEffect(() => { load() }, [load])
+  useEffect(() => { queueMicrotask(() => void load()) }, [load])
 
   useEffect(() => {
     const hubUrl = getHubUrl()
@@ -1673,7 +1673,7 @@ function GitHubSection({ settings, onSave, saving, workspace }: { settings: Sett
   }, [hubUrl, workspace, workspaceGitHubPath])
 
   useEffect(() => {
-    loadWorkspaceApps()
+    queueMicrotask(() => void loadWorkspaceApps())
   }, [loadWorkspaceApps])
 
   async function runTest() {
@@ -2084,7 +2084,7 @@ function GitHubSection({ settings, onSave, saving, workspace }: { settings: Sett
                   <h3 className="font-medium">Test Recommended</h3>
                 </div>
                 <p className="text-sm text-muted-foreground">
-                  You haven't tested this GitHub App yet. We recommend clicking <strong>Test Permissions</strong> first to verify it works.
+                  You haven&apos;t tested this GitHub App yet. We recommend clicking <strong>Test Permissions</strong> first to verify it works.
                 </p>
               </>
             ) : (
@@ -2417,7 +2417,7 @@ function IntegrationsSection({ settings, onSave, saving, selectedWorkspace, hubP
   }, [hubUrl, issueTrackersPath, selectedWorkspace])
 
   useEffect(() => {
-    loadTrackers()
+    queueMicrotask(() => void loadTrackers())
   }, [loadTrackers])
 
   useEffect(() => {
@@ -2861,7 +2861,7 @@ function IntegrationsSection({ settings, onSave, saving, selectedWorkspace, hubP
                         {copiedSetup === "jira-url" ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
                       </Button>
                     </div>
-                    <p className="text-xs text-muted-foreground mt-1">Use this URL from Jira Automation's Send web request action with the Issue data automation payload.</p>
+                    <p className="text-xs text-muted-foreground mt-1">Use this URL from Jira Automation&apos;s Send web request action with the Issue data automation payload.</p>
                   </div>
                 </>
               )}
@@ -3007,7 +3007,7 @@ function WorkspacesSection({ selectedWorkspace }: { selectedWorkspace: string })
     }
   }, [])
 
-  useEffect(() => { load() }, [load])
+  useEffect(() => { queueMicrotask(() => void load()) }, [load])
 
   const visibleWorkspaces = workspaces.filter((workspace) => workspace.name === selectedWorkspace)
 
@@ -3059,7 +3059,7 @@ function WorkflowsSection({ selectedWorkspace }: { selectedWorkspace: string }) 
     }
   }, [])
 
-  useEffect(() => { load() }, [load])
+  useEffect(() => { queueMicrotask(() => void load()) }, [load])
 
   const workflows = workspaces.flatMap((workspace) =>
     (workspace.workflows || []).map((workflow) => ({ ...workflow, workspaceName: workflow.workspaceName || workspace.name }))
@@ -3450,18 +3450,20 @@ function AIConfigSection() {
   const [backupPath, setBackupPath] = useState<string | null>(null)
   // Restore from sessionStorage after mount (client-only)
   useEffect(() => {
-    try {
-      const raw = sessionStorage.getItem(SS_CHAT_KEY)
-      if (raw) setMessages((JSON.parse(raw) as ChatMessage[]).map(normalizeStoredMessage))
-      const yaml = sessionStorage.getItem(SS_YAML_KEY)
-      if (yaml) {
-        setProposedYaml(yaml)
-        setPlaceholders(extractYamlPlaceholders(yaml))
-        setSecretValues({})
-      }
-      const backup = sessionStorage.getItem(SS_BACKUP_KEY)
-      if (backup) setBackupPath(backup)
-    } catch { /* ignore */ }
+    queueMicrotask(() => {
+      try {
+        const raw = sessionStorage.getItem(SS_CHAT_KEY)
+        if (raw) setMessages((JSON.parse(raw) as ChatMessage[]).map(normalizeStoredMessage))
+        const yaml = sessionStorage.getItem(SS_YAML_KEY)
+        if (yaml) {
+          setProposedYaml(yaml)
+          setPlaceholders(extractYamlPlaceholders(yaml))
+          setSecretValues({})
+        }
+        const backup = sessionStorage.getItem(SS_BACKUP_KEY)
+        if (backup) setBackupPath(backup)
+      } catch { /* ignore */ }
+    })
   }, [])
   const [applying, setApplying] = useState(false)
   const [reverting, setReverting] = useState(false)
@@ -4607,7 +4609,7 @@ function DoctorSection() {
     setLoading(false)
   }, [])
 
-  useEffect(() => { load() }, [load])
+  useEffect(() => { queueMicrotask(() => void load()) }, [load])
 
   const failedChecks = report?.checks?.filter((c: any) => !c.ok) || []
   const passedChecks = report?.checks?.filter((c: any) => c.ok) || []

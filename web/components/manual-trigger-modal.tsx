@@ -29,6 +29,7 @@ export function ManualTriggerModal({ open, onOpenChange, workflow }: ManualTrigg
 
   // Seed defaults when workflow changes
   useEffect(() => {
+    queueMicrotask(() => {
     if (!workflow?.inputs) {
       setInputValues({})
       return
@@ -45,6 +46,7 @@ export function ManualTriggerModal({ open, onOpenChange, workflow }: ManualTrigg
     }
     setInputValues(defaults)
     setTriggerError(null)
+    })
   }, [workflow])
 
   const handleTrigger = useCallback(async () => {

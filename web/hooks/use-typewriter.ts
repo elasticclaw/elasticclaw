@@ -36,6 +36,8 @@ export function useTypewriter() {
   const entries = useRef<Record<string, TypewriterEntry>>({})
   const rafRef = useRef<number | null>(null)
   const lastTickRef = useRef<number>(0)
+  const onDrainCallbacks = useRef<Record<string, () => void>>({})
+  const tickRef = useRef<(now: number) => void>(() => {})
   const [displayBuffers, setDisplayBuffers] = useState<Record<string, TypewriterState>>({})
 
   const tick = useCallback((now: number) => {
@@ -99,18 +101,22 @@ export function useTypewriter() {
       (e) => e.queue.length > 0 || (e.hadChunks && !e.done && e.pausedAt !== null)
     )
     if (anyActive || anyPending) {
-      rafRef.current = requestAnimationFrame(tick)
+      rafRef.current = requestAnimationFrame((nextNow) => tickRef.current(nextNow))
     } else {
       rafRef.current = null
     }
   }, [])
 
+  useEffect(() => {
+    tickRef.current = tick
+  }, [tick])
+
   const ensureRunning = useCallback(() => {
     if (!rafRef.current) {
       lastTickRef.current = 0
-      rafRef.current = requestAnimationFrame(tick)
+      rafRef.current = requestAnimationFrame((now) => tickRef.current(now))
     }
-  }, [tick])
+  }, [])
 
   const pushChunk = useCallback((clawId: string, chunk: string) => {
     if (!entries.current[clawId]) {
@@ -123,9 +129,6 @@ export function useTypewriter() {
     }
     ensureRunning()
   }, [ensureRunning])
-
-  // onDrain callbacks: fired once when entry fully drains after finalize()
-  const onDrainCallbacks = useRef<Record<string, () => void>>({})
 
   /** Call when the final complete message arrives from WS.
    *  onDrain is called once the typewriter has fully drained. */
