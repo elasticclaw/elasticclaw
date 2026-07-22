@@ -155,6 +155,13 @@ export function AnalyticsCommandCenter({ workspaceScope }: { workspaceScope?: st
   const [error, setError] = useState<string>()
   const loadAbortController = useRef<AbortController | null>(null)
   const loadRequestId = useRef(0)
+  // Track the current page cursor in a ref so the polling effect below can read the
+  // latest value on every tick without re-arming the interval when cursorStack changes.
+  const cursorStackRef = useRef(cursorStack)
+
+  useEffect(() => {
+    cursorStackRef.current = cursorStack
+  }, [cursorStack])
 
   const selectedRun = useMemo(
     () => runs.find((run) => run.runId === selectedRunId) ?? null,
@@ -175,13 +182,14 @@ export function AnalyticsCommandCenter({ workspaceScope }: { workspaceScope?: st
   )
 
   const load = useCallback(
-    async (cursor?: string, append = false) => {
+    async (cursor?: string, loadOptions: { append?: boolean; silent?: boolean } = {}) => {
+      const { append = false, silent = false } = loadOptions
       loadAbortController.current?.abort()
       const controller = new AbortController()
       loadAbortController.current = controller
       const requestId = ++loadRequestId.current
       try {
-        setError(undefined)
+        if (!silent) setError(undefined)
         // Default to the last 30 days so every widget reads the same period.
         // Computed here (not in render) — reading the clock during render
         // suspends the prerender under Next's cacheComponents semantics.
@@ -248,7 +256,7 @@ export function AnalyticsCommandCenter({ workspaceScope }: { workspaceScope?: st
         setRuns((currentRuns) => (append ? [...currentRuns, ...runsData.runs] : runsData.runs))
         setNextCursor(runsData.nextCursor)
         setOptions(optionsData)
-        if (!append) {
+        if (!append && !silent) {
           setSelectedRunId(null)
           setDetails(null)
           setDetailError(null)
@@ -256,7 +264,9 @@ export function AnalyticsCommandCenter({ workspaceScope }: { workspaceScope?: st
       } catch (loadError) {
         if (controller.signal.aborted || (loadError instanceof Error && loadError.name === "AbortError")) return
         if (requestId !== loadRequestId.current) return
-        setError(loadError instanceof Error ? loadError.message : "Unable to load analytics")
+        if (!silent) {
+          setError(loadError instanceof Error ? loadError.message : "Unable to load analytics")
+        }
       }
     },
     [filters, options]
@@ -269,6 +279,33 @@ export function AnalyticsCommandCenter({ workspaceScope }: { workspaceScope?: st
       loadAbortController.current?.abort()
     }
   }, [load])
+
+  const silentRefresh = useCallback(() => {
+    const currentCursor = cursorStackRef.current[cursorStackRef.current.length - 1]
+    void load(currentCursor, { append: false, silent: true })
+  }, [load])
+
+  useEffect(() => {
+    const tick = () => {
+      if (document.hidden) return
+      silentRefresh()
+    }
+    const intervalId = setInterval(tick, 60_000)
+
+    const handleVisibilityChange = () => {
+      if (!document.hidden) {
+        // Tab just became visible again — refresh immediately rather than waiting for the next tick.
+        silentRefresh()
+      }
+    }
+    document.addEventListener("visibilitychange", handleVisibilityChange)
+
+    return () => {
+      clearInterval(intervalId)
+      document.removeEventListener("visibilitychange", handleVisibilityChange)
+    }
+    // Re-arm when load changes for new filters/options; each tick reads the latest cursor from the ref.
+  }, [silentRefresh])
 
   const handleNextPage = useCallback(() => {
     if (!nextCursor) return
