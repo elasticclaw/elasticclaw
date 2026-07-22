@@ -28,6 +28,9 @@ func (s *Server) observeCompletedTurn(clawID, messageID, content string) bool {
 	if strings.Contains(content, "[DONE]") || strings.Contains(content, "[TERMINATE]") {
 		return false
 	}
+	s.noProgressMu.Lock()
+	defer s.noProgressMu.Unlock()
+
 	var stage string
 	var alreadyPaused bool
 	if err := s.db.QueryRow(`SELECT pipeline_stage, no_progress_paused != 0 FROM claws WHERE id=?`, clawID).Scan(&stage, &alreadyPaused); err != nil || stage == "" {
@@ -41,7 +44,11 @@ func (s *Server) observeCompletedTurn(clawID, messageID, content string) bool {
 	if response == "" {
 		return false
 	}
-	progress := s.turnProgressFingerprint(clawID, content)
+	progress, err := s.turnProgressFingerprint(clawID, content)
+	if err != nil {
+		log.Printf("[no-progress] fingerprint claw %s: %v", shortID(clawID), err)
+		return false
+	}
 
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -103,6 +110,9 @@ func (s *Server) observeCompletedTurn(clawID, messageID, content string) bool {
 }
 
 func (s *Server) resumeNoProgressAfterUserInput(clawID string) {
+	s.noProgressMu.Lock()
+	defer s.noProgressMu.Unlock()
+
 	res, err := s.db.Exec(`UPDATE claws SET no_progress_paused=0 WHERE id=? AND no_progress_paused!=0`, clawID)
 	if err != nil {
 		log.Printf("[no-progress] resume claw %s: %v", shortID(clawID), err)
@@ -184,48 +194,76 @@ func similarTurnOutcomes(a, b string) bool {
 	return union > 0 && float64(intersection)/float64(union) >= 0.8
 }
 
-func (s *Server) turnProgressFingerprint(clawID, response string) string {
+func (s *Server) turnProgressFingerprint(clawID, response string) (string, error) {
 	var parts []string
 	var stage, taskRunID string
-	_ = s.db.QueryRow(`SELECT pipeline_stage, task_run_id FROM claws WHERE id=?`, clawID).Scan(&stage, &taskRunID)
+	if err := s.db.QueryRow(`SELECT pipeline_stage, task_run_id FROM claws WHERE id=?`, clawID).Scan(&stage, &taskRunID); err != nil {
+		return "", fmt.Errorf("load claw state: %w", err)
+	}
 	parts = append(parts, "stage="+stage)
 
-	if rows, err := s.db.Query(`SELECT repo, pr_number, last_ci_sha, last_comment_id, last_comment_at, last_review_comment_id, last_review_id, pr_conditions_fired FROM claw_prs WHERE claw_id=? ORDER BY repo, pr_number`, clawID); err == nil {
-		defer rows.Close()
-		for rows.Next() {
-			var repo, ciSHA, commentAt string
-			var number, commentID, reviewCommentID, reviewID, conditions int
-			if rows.Scan(&repo, &number, &ciSHA, &commentID, &commentAt, &reviewCommentID, &reviewID, &conditions) == nil {
-				parts = append(parts, fmt.Sprintf("pr=%s#%d:%s:%d:%s:%d:%d:%d", repo, number, ciSHA, commentID, commentAt, reviewCommentID, reviewID, conditions))
-			}
-		}
+	rows, err := s.db.Query(`SELECT repo, pr_number, last_ci_sha, last_comment_id, last_comment_at, last_review_comment_id, last_review_id, pr_conditions_fired FROM claw_prs WHERE claw_id=? ORDER BY repo, pr_number`, clawID)
+	if err != nil {
+		return "", fmt.Errorf("query tracked pull requests: %w", err)
 	}
+	for rows.Next() {
+		var repo, ciSHA, commentAt string
+		var number, commentID, reviewCommentID, reviewID, conditions int
+		if err := rows.Scan(&repo, &number, &ciSHA, &commentID, &commentAt, &reviewCommentID, &reviewID, &conditions); err != nil {
+			rows.Close()
+			return "", fmt.Errorf("scan tracked pull request: %w", err)
+		}
+		parts = append(parts, fmt.Sprintf("pr=%s#%d:%s:%d:%s:%d:%d:%d", repo, number, ciSHA, commentID, commentAt, reviewCommentID, reviewID, conditions))
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return "", fmt.Errorf("iterate tracked pull requests: %w", err)
+	}
+	rows.Close()
+
 	if taskRunID != "" {
-		if rows, err := s.db.Query(`SELECT repo, pr_number, head_sha, last_agent_head_sha, state, merged FROM task_run_prs WHERE run_id=? ORDER BY repo, pr_number`, taskRunID); err == nil {
-			defer rows.Close()
-			for rows.Next() {
-				var repo, headSHA, agentSHA, state string
-				var number, merged int
-				if rows.Scan(&repo, &number, &headSHA, &agentSHA, &state, &merged) == nil {
-					parts = append(parts, fmt.Sprintf("task-pr=%s#%d:%s:%s:%s:%d", repo, number, headSHA, agentSHA, state, merged))
-				}
-			}
+		rows, err = s.db.Query(`SELECT repo, pr_number, head_sha, last_agent_head_sha, state, merged FROM task_run_prs WHERE run_id=? ORDER BY repo, pr_number`, taskRunID)
+		if err != nil {
+			return "", fmt.Errorf("query task pull requests: %w", err)
 		}
-	}
-	if rows, err := s.db.Query(`SELECT output_name, exit_code, stdout, stderr, parsed_json FROM pipeline_outputs WHERE claw_id=? ORDER BY output_name`, clawID); err == nil {
-		defer rows.Close()
 		for rows.Next() {
-			var name, stdout, stderr, parsed string
-			var exitCode int
-			if rows.Scan(&name, &exitCode, &stdout, &stderr, &parsed) == nil {
-				parts = append(parts, fmt.Sprintf("output=%s:%d:%s:%s:%s", name, exitCode, stdout, stderr, parsed))
+			var repo, headSHA, agentSHA, state string
+			var number, merged int
+			if err := rows.Scan(&repo, &number, &headSHA, &agentSHA, &state, &merged); err != nil {
+				rows.Close()
+				return "", fmt.Errorf("scan task pull request: %w", err)
 			}
+			parts = append(parts, fmt.Sprintf("task-pr=%s#%d:%s:%s:%s:%d", repo, number, headSHA, agentSHA, state, merged))
 		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return "", fmt.Errorf("iterate task pull requests: %w", err)
+		}
+		rows.Close()
 	}
+	rows, err = s.db.Query(`SELECT output_name, exit_code, stdout, stderr, parsed_json FROM pipeline_outputs WHERE claw_id=? ORDER BY output_name`, clawID)
+	if err != nil {
+		return "", fmt.Errorf("query pipeline outputs: %w", err)
+	}
+	for rows.Next() {
+		var name, stdout, stderr, parsed string
+		var exitCode int
+		if err := rows.Scan(&name, &exitCode, &stdout, &stderr, &parsed); err != nil {
+			rows.Close()
+			return "", fmt.Errorf("scan pipeline output: %w", err)
+		}
+		parts = append(parts, fmt.Sprintf("output=%s:%d:%s:%s:%s", name, exitCode, stdout, stderr, parsed))
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return "", fmt.Errorf("iterate pipeline outputs: %w", err)
+	}
+	rows.Close()
+
 	parts = append(parts, responseProgressMarkers(response)...)
 	sort.Strings(parts)
 	sum := sha256.Sum256([]byte(strings.Join(parts, "\x00")))
-	return hex.EncodeToString(sum[:])
+	return hex.EncodeToString(sum[:]), nil
 }
 
 func responseProgressMarkers(content string) []string {

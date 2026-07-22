@@ -96,6 +96,7 @@ type Server struct {
 	grokTokenEndpoint         string            // test seam; defaults to the xAI OAuth token endpoint
 	pollWarningMu             sync.Mutex
 	pollWarnings              map[string]struct{}
+	noProgressMu              sync.Mutex // serializes pause/resume state across the DB and active connection
 
 	// webhookDedup prevents duplicate Linear webhook deliveries from creating
 	// duplicate claws. Keyed by issue transition fingerprint; entries expire after 30s.

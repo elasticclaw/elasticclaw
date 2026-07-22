@@ -1,6 +1,8 @@
 package hub
 
 import (
+	"fmt"
+	"sync"
 	"testing"
 
 	"github.com/elasticclaw/elasticclaw/pkg/types"
@@ -88,6 +90,71 @@ func TestObserveCompletedTurnPausesOnlyUnchangedRepeatedOutcomes(t *testing.T) {
 	}
 	if paused || observations != 0 {
 		t.Fatalf("resume left paused=%v observations=%d", paused, observations)
+	}
+}
+
+func TestConcurrentResumeWinsOverNoProgressPause(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
+	const clawID = "claw-no-progress-race"
+	if _, err := db.Exec(`INSERT INTO claws(id, tenant_id, name, status, pipeline_stage, created_at) VALUES(?,?,?,?,?,datetime('now'))`, clawID, "test-tenant-id", "AMB-12", "connected", "ci_passed"); err != nil {
+		t.Fatal(err)
+	}
+	cc := &clawConn{id: clawID, tenantID: "test-tenant-id"}
+	s.claws[clawID] = cc
+
+	for i := 0; i < 25; i++ {
+		s.resumeNoProgressAfterUserInput(clawID)
+		if s.observeCompletedTurn(clawID, fmt.Sprintf("turn-%d-1", i), "[CI RETRY]") {
+			t.Fatal("first repeated outcome paused the claw")
+		}
+		if s.observeCompletedTurn(clawID, fmt.Sprintf("turn-%d-2", i), "[CI RETRY]") {
+			t.Fatal("second repeated outcome paused the claw")
+		}
+
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			<-start
+			s.observeCompletedTurn(clawID, fmt.Sprintf("turn-%d-3", i), "[CI RETRY]")
+		}()
+		go func() {
+			defer wg.Done()
+			<-start
+			s.resumeNoProgressAfterUserInput(clawID)
+		}()
+		close(start)
+		wg.Wait()
+
+		var persistedPaused bool
+		if err := db.QueryRow(`SELECT no_progress_paused != 0 FROM claws WHERE id=?`, clawID).Scan(&persistedPaused); err != nil {
+			t.Fatal(err)
+		}
+		cc.mu.RLock()
+		memoryPaused := cc.noProgressPaused
+		cc.mu.RUnlock()
+		if persistedPaused || memoryPaused {
+			t.Fatalf("iteration %d: concurrent resume left persisted=%v memory=%v", i, persistedPaused, memoryPaused)
+		}
+	}
+}
+
+func TestTurnProgressFingerprintRejectsPartialState(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
+	const clawID = "claw-partial-fingerprint"
+	if _, err := db.Exec(`INSERT INTO claws(id, tenant_id, name, status, pipeline_stage, created_at) VALUES(?,?,?,?,?,datetime('now'))`, clawID, "test-tenant-id", "AMB-12", "connected", "ci_passed"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`ALTER TABLE pipeline_outputs RENAME TO pipeline_outputs_valid`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE VIEW pipeline_outputs AS SELECT 'claw-partial-fingerprint' AS claw_id, NULL AS output_name, 0 AS exit_code, '' AS stdout, '' AS stderr, '' AS parsed_json`); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := s.turnProgressFingerprint(clawID, "still waiting"); err == nil {
+		t.Fatal("turnProgressFingerprint accepted a partial row after a scan error")
 	}
 }
 
