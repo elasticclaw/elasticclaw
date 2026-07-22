@@ -163,10 +163,21 @@ export function AnalyticsCommandCenter({ workspaceScope }: { workspaceScope?: st
     cursorStackRef.current = cursorStack
   }, [cursorStack])
 
-  const selectedRun = useMemo(
-    () => runs.find((run) => run.runId === selectedRunId) ?? null,
-    [runs, selectedRunId]
-  )
+  // Cache the last-known run object per selectedRunId so a silent poll that
+  // drops the selected run off the current page (e.g. a new run pushes it
+  // past the page size) doesn't unmount the open drawer out from under the
+  // user. The cache is only trusted while selectedRunId hasn't changed.
+  const selectedRunCache = useRef<{ runId: string; run: TaskRunSummary } | null>(null)
+  const selectedRun = useMemo(() => {
+    if (!selectedRunId) return null
+    const found = runs.find((run) => run.runId === selectedRunId) ?? null
+    if (found) {
+      selectedRunCache.current = { runId: selectedRunId, run: found }
+      return found
+    }
+    if (selectedRunCache.current?.runId === selectedRunId) return selectedRunCache.current.run
+    return null
+  }, [runs, selectedRunId])
 
   const setFilters = useCallback(
     (updates: Record<string, string | undefined>) => {
