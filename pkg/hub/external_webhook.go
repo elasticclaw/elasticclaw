@@ -611,7 +611,7 @@ func (s *Server) createClawForExternalEvent(factory *types.FactoryConfig, payloa
 	// Insert claw record
 	clawID := uuid.New().String()
 	filesJSON, _ := json.Marshal(templateFiles)
-	envJSON, _ := json.Marshal(env)
+	envJSON, _ := json.Marshal(envForStorage(env))
 	createdAt := now()
 
 	// Check concurrency limit

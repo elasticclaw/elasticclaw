@@ -739,7 +739,7 @@ func (s *Server) createClawForShortcutStory(factory *types.FactoryConfig, action
 
 	clawID := uuid.New().String()
 	filesJSON, _ := json.Marshal(templateFiles)
-	envJSON, _ := json.Marshal(env)
+	envJSON, _ := json.Marshal(envForStorage(env))
 	now := now()
 
 	initialStatus := "provisioning"

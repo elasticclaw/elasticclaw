@@ -949,7 +949,7 @@ func (s *Server) createClawForGitHubPR(factory *types.FactoryConfig, pr githubPR
 	// Insert claw record (linear_issue_id = "" for GitHub-sourced claws)
 	clawID := uuid.New().String()
 	filesJSON, _ := json.Marshal(templateFiles)
-	envJSON, _ := json.Marshal(env)
+	envJSON, _ := json.Marshal(envForStorage(env))
 	createdAt := now()
 
 	// Check concurrency limit — serialize with promoteMu to prevent TOCTOU

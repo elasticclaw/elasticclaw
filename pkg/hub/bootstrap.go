@@ -50,6 +50,51 @@ type BootstrapParams struct {
 	Env            map[string]string // custom env vars from workflow/factory secret_refs and template env
 }
 
+// envKeysInjectedByBootstrap lists env vars that the bootstrap script sets
+// explicitly from other BootstrapParams fields. They should not be stored in
+// claws.env because they are re-derived at bootstrap time.
+var envKeysInjectedByBootstrap = map[string]bool{
+	"ELASTICCLAW_HUB_URL":            true,
+	"ELASTICCLAW_CLAW_ID":            true,
+	"ELASTICCLAW_CLAW_TOKEN":         true,
+	"ELASTICCLAW_MODEL_AUTH_TOKEN":   true,
+	"ELASTICCLAW_CLAW_NAME":          true,
+	"ELASTICCLAW_TEMPLATE":           true,
+	"ELASTICCLAW_GITHUB_REPOS":       true,
+	"ELASTICCLAW_BOOTSTRAP":          true,
+	"ELASTICCLAW_WAIT_FOR_WORKSPACE": true,
+	"ELASTICCLAW_GATEWAY_PASSWORD":   true,
+	"OPENCLAW_GATEWAY_PASSWORD":      true,
+	"OPENCLAW_DEFAULT_MODEL":         true,
+	"ELASTICCLAW_LLM_PROVIDER":       true,
+	"ELASTICCLAW_NIX":                true,
+	"ELASTICCLAW_DOCKER":             true,
+	"ELASTICCLAW_PROVIDER_CONFIG":    true,
+	"ELASTICCLAW_API_KEY_AUTH_SYNC":  true,
+	"ELASTICCLAW_OAUTH_AUTH_SYNC":    true,
+	"ELASTICCLAW_ONBOARD_FLAGS":      true,
+	"LINEAR_API_KEY":                 true,
+	"JIRA_API_KEY":                   true,
+	"JIRA_BASE_URL":                  true,
+	"JIRA_USERNAME":                  true,
+	"SHORTCUT_API_KEY":               true,
+	"GITHUB_ISSUES_API_KEY":          true,
+}
+
+// envForStorage returns the subset of env that should be persisted in the
+// claws table. It strips keys that the bootstrap script injects from other
+// sources so the stored column only contains user-supplied values.
+func envForStorage(env map[string]string) map[string]string {
+	filtered := make(map[string]string)
+	for k, v := range env {
+		if envKeysInjectedByBootstrap[k] {
+			continue
+		}
+		filtered[k] = v
+	}
+	return filtered
+}
+
 // resolveActiveKey selects the active key by selected name, then default, then first.
 func resolveActiveKey(keys []*types.LLMKeyConfig, selectedKeyName string) *types.LLMKeyConfig {
 	for _, k := range keys {

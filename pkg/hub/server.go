@@ -1174,7 +1174,7 @@ func (s *Server) handleCreateClaw(w http.ResponseWriter, r *http.Request, tenant
 	req.Env = env
 	req.Files = injectFigmaAPIDocs(req.Files, env)
 	filesJSON, _ := json.Marshal(req.Files)
-	envJSON, _ := json.Marshal(req.Env)
+	envJSON, _ := json.Marshal(envForStorage(req.Env))
 
 	// Auto-enable Nix for workspaces that include a flake.nix.
 	// This makes the workspace flake the contract for tools without requiring

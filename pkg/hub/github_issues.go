@@ -831,7 +831,7 @@ func (s *Server) createClawForGitHubIssue(factory *types.FactoryConfig, payload 
 	// Insert claw record
 	clawID := uuid.New().String()
 	filesJSON, _ := json.Marshal(templateFiles)
-	envJSON, _ := json.Marshal(env)
+	envJSON, _ := json.Marshal(envForStorage(env))
 	now := now()
 
 	initialStatus := "provisioning"

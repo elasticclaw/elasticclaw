@@ -375,7 +375,7 @@ func (s *Server) provisionStoredClaw(clawID string) {
 		req.Snapshot = tmplCfg.Snapshot
 		req.TTL = tmplCfg.TTL
 	}
-	envJSON, _ := json.Marshal(env)
+	envJSON, _ := json.Marshal(envForStorage(env))
 	if _, err := s.db.Exec(`UPDATE claws SET env=? WHERE id=?`, string(envJSON), clawID); err != nil {
 		log.Printf("[restore] failed to store env for claw %s: %v", shortID(clawID), err)
 	}

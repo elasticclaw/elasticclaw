@@ -341,6 +341,25 @@ func TestBootstrapScript_CustomEnvInjectedAndPersisted(t *testing.T) {
 	assertContains(t, script, "printf 'export CUSTOM_VAR=%q\\n' \"$CUSTOM_VAR\"", "custom env var persisted")
 }
 
+func TestEnvForStorage_StripsBootstrapKeys(t *testing.T) {
+	stored := envForStorage(map[string]string{
+		"DEPOT_TOKEN":              "secret",
+		"CUSTOM_VAR":               "value",
+		"ELASTICCLAW_HUB_URL":      "https://hub.example.com",
+		"ELASTICCLAW_CLAW_TOKEN":   "token",
+		"OPENCLAW_GATEWAY_PASSWORD": "pw",
+		"LINEAR_API_KEY":           "linear",
+	})
+	if stored["DEPOT_TOKEN"] != "secret" || stored["CUSTOM_VAR"] != "value" {
+		t.Fatalf("user-supplied keys should be preserved, got %v", stored)
+	}
+	for _, k := range []string{"ELASTICCLAW_HUB_URL", "ELASTICCLAW_CLAW_TOKEN", "OPENCLAW_GATEWAY_PASSWORD", "LINEAR_API_KEY"} {
+		if _, ok := stored[k]; ok {
+			t.Fatalf("bootstrap key %q should be stripped, got %v", k, stored)
+		}
+	}
+}
+
 func TestBootstrapScript_SetEEnabled(t *testing.T) {
 	script := GenerateReplicatedBootstrapScript(baseParams())
 	assertContains(t, script, "set -euo pipefail", "script uses set -euo pipefail")
