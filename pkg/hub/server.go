@@ -5067,10 +5067,11 @@ func (s *Server) rememberReplicatedBootstrapEnv(clawID string, env map[string]st
 	s.replicatedBootstrapEnv[clawID] = cloneStringMap(env)
 }
 
-func (s *Server) loadReplicatedBootstrapEnv(clawID string) map[string]string {
+func (s *Server) loadReplicatedBootstrapEnv(clawID string) (map[string]string, bool) {
 	s.replicatedBootstrapEnvMu.Lock()
 	defer s.replicatedBootstrapEnvMu.Unlock()
-	return cloneStringMap(s.replicatedBootstrapEnv[clawID])
+	env, ok := s.replicatedBootstrapEnv[clawID]
+	return cloneStringMap(env), ok
 }
 
 func (s *Server) forgetReplicatedBootstrapEnv(clawID string) {
@@ -5417,7 +5418,16 @@ func (s *Server) syncReplicatedVMs() {
 			// First time we see running — trigger bootstrap
 			if c.status == "provisioning" {
 				log.Printf("Claw %s (%s): VM running, bootstrapping...", c.name, c.id[:8])
-				env := s.loadReplicatedBootstrapEnv(c.id)
+				env, ok := s.loadReplicatedBootstrapEnv(c.id)
+				if !ok {
+					// Resolved environment values intentionally are not persisted. If the
+					// hub restarted during provisioning, fail closed instead of silently
+					// starting an agent without its configured environment.
+					const reason = "Bootstrap failed: transient environment unavailable after hub restart; recreate the claw"
+					log.Printf("Claw %s (%s): %s", c.name, c.id[:8], reason)
+					go s.stopAgentWithReason(c.id, reason, false)
+					continue
+				}
 				go s.bootstrapReplicated(c.id, c.name, c.providerID, replicatedCfg, env)
 			}
 		case "terminated", "error":

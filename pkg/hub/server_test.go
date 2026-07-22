@@ -1879,12 +1879,19 @@ func TestProvisionReplicatedDefersEnvInjectionToBootstrap(t *testing.T) {
 	if providerID != "vm-test-1" {
 		t.Fatalf("provider_id = %q, want vm-test-1", providerID)
 	}
-	stagedEnv := s.loadReplicatedBootstrapEnv("claw-replicated-env")
+	stagedEnv, ok := s.loadReplicatedBootstrapEnv("claw-replicated-env")
+	if !ok {
+		t.Fatal("replicated bootstrap env was not staged")
+	}
 	if stagedEnv["DEPOT_TOKEN"] != "depot-secret" {
 		t.Fatalf("staged DEPOT_TOKEN = %q, want depot-secret", stagedEnv["DEPOT_TOKEN"])
 	}
 	stagedEnv["DEPOT_TOKEN"] = "mutated"
-	if got := s.loadReplicatedBootstrapEnv("claw-replicated-env")["DEPOT_TOKEN"]; got != "depot-secret" {
+	stagedEnv, ok = s.loadReplicatedBootstrapEnv("claw-replicated-env")
+	if !ok {
+		t.Fatal("replicated bootstrap env disappeared before bootstrap")
+	}
+	if got := stagedEnv["DEPOT_TOKEN"]; got != "depot-secret" {
 		t.Fatalf("staged env was not copied: DEPOT_TOKEN = %q", got)
 	}
 	var envColumns int
@@ -1895,8 +1902,8 @@ func TestProvisionReplicatedDefersEnvInjectionToBootstrap(t *testing.T) {
 		t.Fatal("resolved environment values must not add a claws.env persistence column")
 	}
 	s.forgetReplicatedBootstrapEnv("claw-replicated-env")
-	if got := s.loadReplicatedBootstrapEnv("claw-replicated-env"); got != nil {
-		t.Fatalf("forgotten staged env = %v, want nil", got)
+	if got, ok := s.loadReplicatedBootstrapEnv("claw-replicated-env"); ok || got != nil {
+		t.Fatalf("forgotten staged env = %v, found = %v; want nil, false", got, ok)
 	}
 }
 
