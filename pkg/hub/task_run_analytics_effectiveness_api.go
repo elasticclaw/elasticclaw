@@ -16,6 +16,9 @@ type taskRunAnalyticsEffectivenessResponse struct {
 	SuccessRate       float64                             `json:"successRate"`
 	UniqueTickets     int                                 `json:"uniqueTickets"`
 	TicketSuccessRate float64                             `json:"ticketSuccessRate"`
+	TicketsByDay      []taskRunAnalyticsTicketsDay        `json:"ticketsByDay"`
+	RunsPerTicket     []taskRunAnalyticsRunsPerTicket     `json:"runsPerTicket"`
+	TopTicketsByCost  []taskRunAnalyticsTopTicket         `json:"topTicketsByCost"`
 	Prior             *taskRunAnalyticsEffectivenessPrior `json:"prior,omitempty"`
 }
 type taskRunAnalyticsEffectivenessPrior struct {
@@ -47,6 +50,23 @@ type taskRunAnalyticsWeeklyCost struct {
 	MergedPrs       int     `json:"mergedPrs"`
 	CostPerMergedPr float64 `json:"costPerMergedPr"`
 }
+type taskRunAnalyticsTicketsDay struct {
+	Date       string `json:"date"`
+	Delivered  int    `json:"delivered"`
+	InProgress int    `json:"inProgress"`
+	Failed     int    `json:"failed"`
+}
+type taskRunAnalyticsRunsPerTicket struct {
+	Bucket  string `json:"bucket"`
+	Tickets int    `json:"tickets"`
+}
+type taskRunAnalyticsTopTicket struct {
+	IssueID    string  `json:"issueId"`
+	IssueTitle string  `json:"issueTitle"`
+	CostUsd    float64 `json:"costUsd"`
+	Runs       int     `json:"runs"`
+	Outcome    string  `json:"outcome"`
+}
 
 func (s *Server) handleTaskRunAnalyticsEffectiveness(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
@@ -63,7 +83,7 @@ func (s *Server) handleTaskRunAnalyticsEffectiveness(w http.ResponseWriter, r *h
 		jsonError(w, http.StatusInternalServerError, "db error")
 		return
 	}
-	prior, err := s.readTaskRunAnalyticsEffectiveness(taskRunAnalyticsPriorFilters(f, time.Now().UTC()))
+	prior, err := s.readTaskRunAnalyticsEffectivenessWithTicketAggregates(taskRunAnalyticsPriorFilters(f, time.Now().UTC()), false)
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, "db error")
 		return
@@ -77,6 +97,10 @@ func (s *Server) handleTaskRunAnalyticsEffectiveness(w http.ResponseWriter, r *h
 	jsonOK(w, out)
 }
 func (s *Server) readTaskRunAnalyticsEffectiveness(f taskRunAnalyticsFilters) (taskRunAnalyticsEffectivenessResponse, error) {
+	return s.readTaskRunAnalyticsEffectivenessWithTicketAggregates(f, true)
+}
+
+func (s *Server) readTaskRunAnalyticsEffectivenessWithTicketAggregates(f taskRunAnalyticsFilters, includeTicketAggregates bool) (taskRunAnalyticsEffectivenessResponse, error) {
 	w, a := taskRunAnalyticsSummaryWhere(f)
 	rows, err := s.db.Query(`SELECT DATE(started_at/1000,'unixepoch'), status, COUNT(*), COALESCE(SUM(estimated_cost_usd),0), COALESCE(SUM(merged_pr_count),0), COALESCE(SUM(CASE WHEN merged_pr_count>0 THEN 1 ELSE 0 END),0), COALESCE(SUM(CASE WHEN started_at>0 THEN 1 ELSE 0 END),0), COALESCE(SUM(CASE WHEN agent_started_at>0 THEN 1 ELSE 0 END),0), COALESCE(SUM(CASE WHEN pr_opened_at>0 THEN 1 ELSE 0 END),0) FROM task_run_summaries `+w+` GROUP BY 1,status`, a...)
 	if err != nil {
@@ -138,27 +162,123 @@ func (s *Server) readTaskRunAnalyticsEffectiveness(f taskRunAnalyticsFilters) (t
 	if err = s.db.QueryRow(`SELECT COUNT(DISTINCT issue_id) FROM task_run_summaries `+w+` AND issue_id != ''`, a...).Scan(&out.UniqueTickets); err != nil {
 		return out, err
 	}
-	ticketRows, err := s.db.Query(`SELECT issue_id, COALESCE(SUM(CASE WHEN status != 'running' THEN 1 ELSE 0 END),0), COALESCE(SUM(CASE WHEN status IN ('clean','human_in_the_loop','warning') THEN 1 ELSE 0 END),0) FROM task_run_summaries `+w+` AND issue_id != '' GROUP BY issue_id`, a...)
-	if err != nil {
-		return out, err
-	}
-	defer ticketRows.Close()
 	var finishedTickets, successfulTickets int
-	for ticketRows.Next() {
-		var issueID string
-		var ticketFinished, ticketSuccess int
-		if err = ticketRows.Scan(&issueID, &ticketFinished, &ticketSuccess); err != nil {
+	if !includeTicketAggregates {
+		ticketRows, err := s.db.Query(`SELECT issue_id, COALESCE(SUM(CASE WHEN status != 'running' THEN 1 ELSE 0 END),0), COALESCE(SUM(CASE WHEN status IN ('clean','human_in_the_loop','warning') THEN 1 ELSE 0 END),0) FROM task_run_summaries `+w+` AND issue_id != '' GROUP BY issue_id`, a...)
+		if err != nil {
 			return out, err
 		}
-		if ticketFinished > 0 {
-			finishedTickets++
-			if ticketSuccess > 0 {
-				successfulTickets++
+		defer ticketRows.Close()
+		for ticketRows.Next() {
+			var issueID string
+			var ticketFinished, ticketSuccess int
+			if err = ticketRows.Scan(&issueID, &ticketFinished, &ticketSuccess); err != nil {
+				return out, err
+			}
+			if ticketFinished > 0 {
+				finishedTickets++
+				if ticketSuccess > 0 {
+					successfulTickets++
+				}
 			}
 		}
-	}
-	if err = ticketRows.Err(); err != nil {
-		return out, err
+		if err = ticketRows.Err(); err != nil {
+			return out, err
+		}
+	} else {
+		ticketRows, err := s.db.Query(`SELECT issue_id, issue_title, status, started_at, estimated_cost_usd FROM task_run_summaries `+w+` AND issue_id != ''`, a...)
+		if err != nil {
+			return out, err
+		}
+		defer ticketRows.Close()
+		type ticketAggregate struct {
+			issueID, issueTitle                string
+			runs, finished, delivered, running int
+			cost                               float64
+			earliest, latest                   int64
+		}
+		tickets := map[string]*ticketAggregate{}
+		for ticketRows.Next() {
+			var issueID, issueTitle, status string
+			var startedAt int64
+			var cost float64
+			if err = ticketRows.Scan(&issueID, &issueTitle, &status, &startedAt, &cost); err != nil {
+				return out, err
+			}
+			t := tickets[issueID]
+			if t == nil {
+				t = &ticketAggregate{issueID: issueID, earliest: startedAt, latest: startedAt, issueTitle: issueTitle}
+				tickets[issueID] = t
+			} else if startedAt >= t.latest {
+				t.latest, t.issueTitle = startedAt, issueTitle
+			}
+			if startedAt < t.earliest {
+				t.earliest = startedAt
+			}
+			t.runs++
+			t.cost += cost
+			if status != taskRunStatusRunning {
+				t.finished++
+			}
+			if status == taskRunStatusClean || status == taskRunStatusHumanInTheLoop || status == taskRunStatusWarning {
+				t.delivered++
+			}
+			if status == taskRunStatusRunning {
+				t.running++
+			}
+		}
+		if err = ticketRows.Err(); err != nil {
+			return out, err
+		}
+		ticketsByDay := map[string]*taskRunAnalyticsTicketsDay{}
+		runBuckets := map[string]int{"1": 0, "2": 0, "3": 0, "4+": 0}
+		for _, t := range tickets {
+			if t.finished > 0 {
+				finishedTickets++
+				if t.delivered > 0 {
+					successfulTickets++
+				}
+			}
+			outcome := "failed"
+			if t.delivered > 0 {
+				outcome = "delivered"
+			} else if t.running > 0 {
+				outcome = "in_progress"
+			}
+			day := time.UnixMilli(t.earliest).UTC().Format("2006-01-02")
+			d := ticketsByDay[day]
+			if d == nil {
+				d = &taskRunAnalyticsTicketsDay{Date: day}
+				ticketsByDay[day] = d
+			}
+			switch outcome {
+			case "delivered":
+				d.Delivered++
+			case "in_progress":
+				d.InProgress++
+			default:
+				d.Failed++
+			}
+			bucket := "4+"
+			if t.runs < 4 {
+				bucket = fmt.Sprint(t.runs)
+			}
+			runBuckets[bucket]++
+			if t.cost > 0 {
+				out.TopTicketsByCost = append(out.TopTicketsByCost, taskRunAnalyticsTopTicket{IssueID: t.issueID, IssueTitle: t.issueTitle, CostUsd: t.cost, Runs: t.runs, Outcome: outcome})
+			}
+		}
+		for _, d := range ticketsByDay {
+			out.TicketsByDay = append(out.TicketsByDay, *d)
+		}
+		sort.Slice(out.TicketsByDay, func(i, j int) bool { return out.TicketsByDay[i].Date < out.TicketsByDay[j].Date })
+		for _, bucket := range []string{"1", "2", "3", "4+"} {
+			out.RunsPerTicket = append(out.RunsPerTicket, taskRunAnalyticsRunsPerTicket{Bucket: bucket, Tickets: runBuckets[bucket]})
+		}
+		sort.Slice(out.TopTicketsByCost, func(i, j int) bool { return out.TopTicketsByCost[i].CostUsd > out.TopTicketsByCost[j].CostUsd })
+		if len(out.TopTicketsByCost) > 10 {
+			out.TopTicketsByCost = out.TopTicketsByCost[:10]
+		}
 	}
 	for _, x := range byDay {
 		out.OutcomesByDay = append(out.OutcomesByDay, *x)

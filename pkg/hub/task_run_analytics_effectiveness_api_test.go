@@ -1,7 +1,9 @@
 package hub
 
 import (
+	"fmt"
 	"net/http"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -39,6 +41,62 @@ func TestTaskRunAnalyticsEffectivenessIncludesPriorWindow(t *testing.T) {
 	}
 	if response.Prior.SuccessRate != 2.0/3.0 || response.Prior.TicketSuccessRate != 2.0/3.0 || response.Prior.UniqueTickets != 3 {
 		t.Fatalf("prior effectiveness = %#v", response.Prior)
+	}
+}
+
+func TestTaskRunAnalyticsEffectivenessTicketAggregates(t *testing.T) {
+	s, db := newTaskRunAnalyticsAPITestServer(t)
+	day1 := time.Date(2026, time.July, 10, 0, 0, 0, 0, time.UTC)
+	insert := func(runID, issueID, title, status string, startedAt time.Time, cost float64) {
+		insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{
+			RunID: runID, AttemptID: runID + "-attempt", ClawID: runID + "-claw", TenantID: "test-tenant-id",
+			Status: status, Phase: taskRunPhaseTerminal, OwnerType: taskRunOwnerFactory, Factory: "factory",
+			StartedAt: startedAt.UnixMilli(), FinishedAt: startedAt.Add(time.Minute).UnixMilli(), EstimatedCostUsd: cost, IssueTitle: title,
+		})
+		if _, err := db.Exec(`UPDATE task_run_summaries SET issue_id=? WHERE run_id=?`, issueID, runID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Ticket A crosses days; its first run determines its day and its latest run determines its title.
+	insert("a-1", "A", "old A", taskRunStatusFailed, day1.Add(time.Hour), 5)
+	insert("a-2", "A", "latest A", taskRunStatusClean, day1.AddDate(0, 0, 1).Add(time.Hour), 10)
+	insert("b-1", "B", "B title", taskRunStatusRunning, day1.AddDate(0, 0, 1), 30)
+	for i, cost := range []float64{5, 5, 10} {
+		insert(fmt.Sprintf("c-%d", i+1), "C", "C title", taskRunStatusFailed, day1.AddDate(0, 0, 2).Add(time.Duration(i+1)*time.Hour), cost)
+	}
+	for i := 1; i <= 4; i++ {
+		insert(fmt.Sprintf("d-%d", i), "D", "D title", taskRunStatusWarning, day1.AddDate(0, 0, 3).Add(time.Duration(i)*time.Hour), 10)
+	}
+	insert("zero", "ZERO", "zero title", taskRunStatusFailed, day1.AddDate(0, 0, 4), 0)
+	insert("no-ticket", "", "ignored", taskRunStatusClean, day1.AddDate(0, 0, 5), 99)
+
+	out, err := s.readTaskRunAnalyticsEffectiveness(taskRunAnalyticsFilters{TenantID: "test-tenant-id", FromStartedAt: day1.UnixMilli(), ToStartedAt: day1.AddDate(0, 0, 6).UnixMilli()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out.TicketsByDay) != 5 || out.TicketsByDay[0] != (taskRunAnalyticsTicketsDay{Date: "2026-07-10", Delivered: 1}) || out.TicketsByDay[1] != (taskRunAnalyticsTicketsDay{Date: "2026-07-11", InProgress: 1}) || out.TicketsByDay[2] != (taskRunAnalyticsTicketsDay{Date: "2026-07-12", Failed: 1}) || out.TicketsByDay[3] != (taskRunAnalyticsTicketsDay{Date: "2026-07-13", Delivered: 1}) || out.TicketsByDay[4] != (taskRunAnalyticsTicketsDay{Date: "2026-07-14", Failed: 1}) {
+		t.Fatalf("tickets by day = %#v", out.TicketsByDay)
+	}
+	wantBuckets := []taskRunAnalyticsRunsPerTicket{{Bucket: "1", Tickets: 2}, {Bucket: "2", Tickets: 1}, {Bucket: "3", Tickets: 1}, {Bucket: "4+", Tickets: 1}}
+	if !reflect.DeepEqual(out.RunsPerTicket, wantBuckets) {
+		t.Fatalf("runs per ticket = %#v, want %#v", out.RunsPerTicket, wantBuckets)
+	}
+	wantTop := []taskRunAnalyticsTopTicket{
+		{IssueID: "D", IssueTitle: "D title", CostUsd: 40, Runs: 4, Outcome: "delivered"},
+		{IssueID: "B", IssueTitle: "B title", CostUsd: 30, Runs: 1, Outcome: "in_progress"},
+		{IssueID: "C", IssueTitle: "C title", CostUsd: 20, Runs: 3, Outcome: "failed"},
+		{IssueID: "A", IssueTitle: "latest A", CostUsd: 15, Runs: 2, Outcome: "delivered"},
+	}
+	if !reflect.DeepEqual(out.TopTicketsByCost, wantTop) {
+		t.Fatalf("top tickets = %#v, want %#v", out.TopTicketsByCost, wantTop)
+	}
+
+	empty, err := s.readTaskRunAnalyticsEffectiveness(taskRunAnalyticsFilters{TenantID: "test-tenant-id", Repo: []string{"no-match"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(empty.RunsPerTicket, []taskRunAnalyticsRunsPerTicket{{Bucket: "1"}, {Bucket: "2"}, {Bucket: "3"}, {Bucket: "4+"}}) {
+		t.Fatalf("zero-filled buckets = %#v", empty.RunsPerTicket)
 	}
 }
 
