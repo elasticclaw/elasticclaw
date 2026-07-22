@@ -154,6 +154,8 @@ type clawConn struct {
 	streamingStartedAt    time.Time       // when the current streaming turn started (zero if not streaming)
 	streamingTimeoutSent  bool            // true once the 12-min timeout message has been injected this turn
 	contextWarningSent    bool            // true once the context-nearly-full warning has been injected this turn
+	awaitingResponse      bool            // true as soon as a prompt is delivered, before the first chunk/activity
+	noProgressPaused      bool            // automatic delivery is paused after repeated turns with unchanged progress
 
 	deliveryInFlight bool // serializes DB-backed delivery writes
 
@@ -190,10 +192,11 @@ func gatewayReadyBool(v *bool) bool {
 }
 
 func (cc *clawConn) isBusyLocked() bool {
-	return !cc.streamingStartedAt.IsZero() || cc.streamingMsgID != ""
+	return cc.awaitingResponse || !cc.streamingStartedAt.IsZero() || cc.streamingMsgID != ""
 }
 
 func (cc *clawConn) finishTurnLocked() {
+	cc.awaitingResponse = false
 	cc.streamingMsgID = ""
 	cc.streamingBuf.Reset()
 	cc.streamingSplit = false
@@ -1660,6 +1663,7 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 			ID: uuid.New().String(), ClawID: clawID, TenantID: tenantID,
 			Role: "user", Content: body.Content, CreatedAt: now(),
 		}
+		s.resumeNoProgressAfterUserInput(clawID)
 		if _, err := s.db.Exec(
 			`INSERT INTO messages(id,claw_id,tenant_id,role,content,created_at,delivered_at) VALUES(?,?,?,?,?,?,NULL)`,
 			msg.ID, msg.ClawID, msg.TenantID, msg.Role, msg.Content, msg.CreatedAt,
@@ -2202,7 +2206,9 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cc := &clawConn{id: clawID, tenantID: tenantID, conn: conn, gatewayReady: gatewayReadyBool(rp.GatewayReady), tags: registrationTags, lastUserMessageAt: time.Now(), lastStatusAt: time.Now()}
+	var noProgressPaused bool
+	_ = s.db.QueryRow(`SELECT COALESCE(no_progress_paused, 0) != 0 FROM claws WHERE id=?`, clawID).Scan(&noProgressPaused)
+	cc := &clawConn{id: clawID, tenantID: tenantID, conn: conn, gatewayReady: gatewayReadyBool(rp.GatewayReady), tags: registrationTags, lastUserMessageAt: time.Now(), lastStatusAt: time.Now(), noProgressPaused: noProgressPaused}
 	s.mu.Lock()
 	if s.gatewayRestartCounts != nil {
 		cc.gatewayRestartCount = s.gatewayRestartCounts[clawID]
@@ -2564,7 +2570,10 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 					)
 					s.broadcastToUsers(tenantID, types.WSMessage{Type: "message", Payload: hm})
 				}
-				s.handleInitialPlanResponse(clawID, tenantID, hm.Content)
+				automaticContinuationPaused := s.observeCompletedTurn(clawID, hm.ID, hm.Content)
+				if !automaticContinuationPaused {
+					s.handleInitialPlanResponse(clawID, tenantID, hm.Content)
+				}
 				// Evaluate pipeline triggers. If a pipeline explicitly owns a
 				// [DONE] trigger, let it handle that signal instead of the
 				// legacy factory PR-URL completion path below.
@@ -2574,7 +2583,9 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 				if strings.Contains(hm.Content, "[DONE]") {
 					pipelineDoneCtx, pipelineDoneStage, pipelineHandledDone = s.pipelineStageForMessageContains(clawID, hm.Content)
 				}
-				if pipelineHandledDone {
+				if automaticContinuationPaused {
+					pipelineHandledDone = false
+				} else if pipelineHandledDone {
 					prURLs := extractDonePRURLs(hm.Content)
 					s.trackDoneSignal(pipelineDoneCtx.Name(), pipelineDoneCtx.IssueID, clawID, len(prURLs))
 					s.safeGo("pipeline done transition", func() { s.transitionPipelineStageWithContext(clawID, *pipelineDoneStage, pipelineDoneCtx) })
@@ -2607,7 +2618,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 				// Detect and store any PR URLs mentioned by the agent
 				go s.scanMessageForPRs(clawID, hm.Content)
 				// Detect tool error loops and inject a corrective message
-				if detectToolLoop(hm.Content) {
+				if !automaticContinuationPaused && detectToolLoop(hm.Content) {
 					s.mu.RLock()
 					loopCC := s.claws[clawID]
 					s.mu.RUnlock()
@@ -2618,7 +2629,9 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 				// Check for queued messages and send the next one.
 				// Use this goroutine's cc (the outer cc from line 1449).
 				// If the claw reconnected, a new handleClawWS goroutine handles the new cc.
-				s.sendNextQueuedMessage(cc)
+				if !automaticContinuationPaused {
+					s.sendNextQueuedMessage(cc)
+				}
 				s.drainPendingCheckpoint(clawID)
 			} else if msg.Type == "file_ack" {
 				raw, _ := json.Marshal(msg.Payload)
@@ -2906,6 +2919,7 @@ func (s *Server) handleUserWS(w http.ResponseWriter, r *http.Request) {
 			hm.TenantID = tenantID
 			hm.Role = "user"
 			hm.CreatedAt = now()
+			s.resumeNoProgressAfterUserInput(hm.ClawID)
 			_, _ = s.db.Exec(
 				`INSERT INTO messages(id,claw_id,tenant_id,role,content,created_at,delivered_at) VALUES(?,?,?,?,?,?,NULL)`,
 				hm.ID, hm.ClawID, hm.TenantID, hm.Role, hm.Content, hm.CreatedAt,
@@ -5469,6 +5483,17 @@ This first message must be a normal assistant message visible to the user. Tool 
 // For factory claws, it sends a task-specific prompt.
 // A marker is stored in DB so reconnects after hub restart don't re-introduce.
 func (s *Server) sendWakeMessage(cc *clawConn, clawID string) {
+	cc.mu.Lock()
+	if cc.isBusyLocked() || cc.noProgressPaused {
+		cc.mu.Unlock()
+		return
+	}
+	cc.awaitingResponse = true
+	cc.streamingStartedAt = time.Now()
+	cc.streamingTimeoutSent = false
+	cc.contextWarningSent = false
+	cc.mu.Unlock()
+
 	wakeContent := defaultWakeContent
 	if s.clawNeedsInitialPlan(clawID) {
 		wakeContent = initialPlanWakeContent
@@ -5487,7 +5512,11 @@ func (s *Server) sendWakeMessage(cc *clawConn, clawID string) {
 		wakeMsg.ID, wakeMsg.ClawID, wakeMsg.TenantID, wakeMsg.Role, wakeMsg.Content, wakeMsg.CreatedAt, wakeMsg.CreatedAt,
 	)
 	wakeMsg.Content = wakeContent
-	_ = wsjson.Write(context.Background(), cc.conn, types.WSMessage{Type: "message", Payload: wakeMsg})
+	if err := wsjson.Write(context.Background(), cc.conn, types.WSMessage{Type: "message", Payload: wakeMsg}); err != nil {
+		cc.mu.Lock()
+		cc.finishTurnLocked()
+		cc.mu.Unlock()
+	}
 
 	// Note: We don't call sendNextQueuedMessage here because sendWakeMessage is launched
 	// with 'go' (asynchronously). The normal end-of-turn path in handleClawWS read loop
@@ -5499,7 +5528,20 @@ func (s *Server) sendInitialPlanInstruction(cc *clawConn, clawID string) {
 	if cc == nil || !s.clawNeedsInitialPlan(clawID) || s.hasSystemMarker(clawID, initialPlanAcceptedMarker) {
 		return
 	}
+	cc.mu.Lock()
+	if cc.isBusyLocked() || cc.noProgressPaused {
+		cc.mu.Unlock()
+		return
+	}
+	cc.awaitingResponse = true
+	cc.streamingStartedAt = time.Now()
+	cc.streamingTimeoutSent = false
+	cc.contextWarningSent = false
+	cc.mu.Unlock()
 	if !s.insertSystemMarker(clawID, cc.tenantID, initialPlanRequiredMarker) {
+		cc.mu.Lock()
+		cc.finishTurnLocked()
+		cc.mu.Unlock()
 		return
 	}
 	msg := types.HubMessage{
@@ -5510,7 +5552,11 @@ func (s *Server) sendInitialPlanInstruction(cc *clawConn, clawID string) {
 		Content:   initialPlanWakeContent,
 		CreatedAt: now(),
 	}
-	_ = wsjson.Write(context.Background(), cc.conn, types.WSMessage{Type: "message", Payload: msg})
+	if err := wsjson.Write(context.Background(), cc.conn, types.WSMessage{Type: "message", Payload: msg}); err != nil {
+		cc.mu.Lock()
+		cc.finishTurnLocked()
+		cc.mu.Unlock()
+	}
 }
 
 func (s *Server) clawNeedsInitialPlan(clawID string) bool {
@@ -7080,28 +7126,17 @@ func detectToolLoop(content string) bool {
 // injectHubMessage sends a hub-role message to the claw over its WebSocket
 // connection and persists it to the DB so it appears in the message history.
 // Hub messages are visually distinct from user messages in the UI.
-func (s *Server) injectHubMessage(ctx context.Context, cc *clawConn, text string) {
-	msg := types.HubMessage{
-		ID:        uuid.New().String(),
-		ClawID:    cc.id,
-		TenantID:  cc.tenantID,
-		Role:      "hub",
-		Content:   text,
-		Format:    "pre",
-		CreatedAt: now(),
-	}
-	_, _ = s.db.Exec(
-		`INSERT INTO messages(id,claw_id,tenant_id,role,content,format,created_at,delivered_at) VALUES(?,?,?,?,?,?,?,?)`,
-		msg.ID, msg.ClawID, msg.TenantID, msg.Role, msg.Content, msg.Format, msg.CreatedAt, msg.CreatedAt,
-	)
-	_ = wsjson.Write(ctx, cc.conn, types.WSMessage{Type: "message", Payload: msg})
-	s.broadcastToUsers(cc.tenantID, types.WSMessage{Type: "message", Payload: msg})
+func (s *Server) injectHubMessage(_ context.Context, cc *clawConn, text string) {
+	// Route watchdog prompts through the same durable queue as every other
+	// input. Writing directly to the socket can start a second bridge turn in
+	// the gap before the first response emits a chunk or activity.
+	s.injectHubMessageByID(cc.id, text)
 }
 
 // sendNextQueuedMessage delivers the oldest pending message if the claw is idle.
 func (s *Server) sendNextQueuedMessage(cc *clawConn) {
 	cc.mu.Lock()
-	if cc.isBusyLocked() || cc.deliveryInFlight {
+	if cc.isBusyLocked() || cc.deliveryInFlight || cc.noProgressPaused {
 		cc.mu.Unlock()
 		return
 	}
@@ -7135,16 +7170,27 @@ func (s *Server) sendNextQueuedMessage(cc *clawConn) {
 	// allocates a fresh clawConn, so cc.conn cannot change under us; a write
 	// to a dead socket fails and leaves the row pending for the new connection.
 	cc.mu.Lock()
-	if cc.isBusyLocked() {
+	if cc.isBusyLocked() || cc.noProgressPaused {
 		cc.mu.Unlock()
 		return
 	}
+	// Reserve the turn before the WebSocket write. The bridge starts work as
+	// soon as it receives this frame, while chunks and activity can arrive
+	// later. Without this reservation, concurrent workflow injections can both
+	// observe an idle claw and start back-to-back model turns.
+	cc.awaitingResponse = true
+	cc.streamingStartedAt = time.Now()
+	cc.streamingTimeoutSent = false
+	cc.contextWarningSent = false
 	cc.mu.Unlock()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	err = wsjson.Write(ctx, conn, types.WSMessage{Type: "message", Payload: msg})
 	if err != nil {
+		cc.mu.Lock()
+		cc.finishTurnLocked()
+		cc.mu.Unlock()
 		log.Printf("[hub] failed to deliver pending message to %s: %v", shortID(clawID), err)
 		return
 	}

@@ -930,7 +930,7 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, ctx pipelineCon
 			// failure so the gate can still evaluate the captured JSON output.
 			if stage.Gate != nil && stage.OnEnter.Run.Output != "" && result != nil {
 				log.Printf("[pipeline] %s; continuing because stage has a gate configured", msg)
-				s.injectHubMessageByID(clawID, "[hub] Warning: "+msg)
+				s.publishHubNotice(clawID, "[hub] Warning: "+msg)
 			} else if stage.OnEnter.Run.ContinueOnError {
 				log.Printf("[pipeline] %s; continuing because continue_on_error=true", msg)
 				s.injectHubMessageByID(clawID, "[hub] Warning: "+msg)
@@ -1023,28 +1023,42 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, ctx pipelineCon
 	if stage.Gate != nil {
 		gateResult := s.evaluateGate(clawID, stage.ID, stage.Gate)
 		log.Printf("[pipeline] gate evaluated for claw %s stage %q: verdict=%s", clawID[:8], stage.ID, gateResult.Verdict)
-		// Inject gate result into claw chat
-		if gateResult.Verdict == "pass" {
-			s.injectHubMessageByID(clawID, fmt.Sprintf("[hub] Gate passed: %s", stage.Label))
-		} else if gateResult.Verdict == "skipped" && stage.Gate.TreatSkippedAsPass {
-			s.injectHubMessageByID(clawID, fmt.Sprintf("[hub] Gate skipped (treated as pass): %s", stage.Label))
-		} else if gateResult.Verdict == "error" {
-			msg := fmt.Sprintf("[hub] Gate error (no condition matched): %s", stage.Label)
-			s.injectHubMessageByID(clawID, msg)
-		} else {
-			msg := fmt.Sprintf("[hub] Gate failed: %s", stage.Label)
-			if gateResult.MatchedPath != "" {
-				msg += fmt.Sprintf("\n- path: %s\n- value: %s", gateResult.MatchedPath, gateResult.MatchedValue)
-			}
-			s.injectHubMessageByID(clawID, msg)
-		}
-		// Auto-transition to next stage if a gate_result trigger matches.
 		// Normalise "skipped" → "pass" when TreatSkippedAsPass is set so that
 		// gate_result: { verdict: pass } stages are correctly reached.
 		autoTransitionVerdict := gateResult.Verdict
 		if autoTransitionVerdict == "skipped" && stage.Gate.TreatSkippedAsPass {
 			autoTransitionVerdict = "pass"
 		}
+		gateResultHasRoute := false
+		if pl := parsePipelineForContext(ctx); pl != nil {
+			gateResultHasRoute = pl.StageForGateResult(stage.ID, autoTransitionVerdict) != nil
+		}
+		notifyGateResult := func(message string) {
+			if gateResultHasRoute {
+				// The destination stage owns the next model prompt. Keep mechanical
+				// gate bookkeeping visible in the dashboard without consuming an
+				// extra turn before that stage's on_enter instructions.
+				s.publishHubNotice(clawID, message)
+				return
+			}
+			s.injectHubMessageByID(clawID, message)
+		}
+		// Report the gate result in chat.
+		if gateResult.Verdict == "pass" {
+			notifyGateResult(fmt.Sprintf("[hub] Gate passed: %s", stage.Label))
+		} else if gateResult.Verdict == "skipped" && stage.Gate.TreatSkippedAsPass {
+			notifyGateResult(fmt.Sprintf("[hub] Gate skipped (treated as pass): %s", stage.Label))
+		} else if gateResult.Verdict == "error" {
+			msg := fmt.Sprintf("[hub] Gate error (no condition matched): %s", stage.Label)
+			notifyGateResult(msg)
+		} else {
+			msg := fmt.Sprintf("[hub] Gate failed: %s", stage.Label)
+			if gateResult.MatchedPath != "" {
+				msg += fmt.Sprintf("\n- path: %s\n- value: %s", gateResult.MatchedPath, gateResult.MatchedValue)
+			}
+			notifyGateResult(msg)
+		}
+		// Auto-transition to next stage if a gate_result trigger matches.
 		s.safeGo("pipeline gate auto-transition", func() {
 			s.autoTransitionAfterGate(clawID, stage.ID, autoTransitionVerdict, ctx, gateResult.Reason)
 		})
@@ -1052,7 +1066,11 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, ctx pipelineCon
 		if stage.Gate.Required && (gateResult.Verdict == "fail" || gateResult.Verdict == "error") {
 			msg := fmt.Sprintf("Required gate %q %s — blocking further pipeline actions", stage.ID, gateResult.Verdict)
 			log.Printf("[pipeline] %s", msg)
-			s.injectHubMessageByID(clawID, "[hub] Error: "+msg)
+			if gateResultHasRoute {
+				s.publishHubNotice(clawID, "[hub] Error: "+msg)
+			} else {
+				s.injectHubMessageByID(clawID, "[hub] Error: "+msg)
+			}
 			if pl := parsePipelineForContext(ctx); pl != nil && pl.StageForGateResult(stage.ID, gateResult.Verdict) != nil {
 				return false, &routedRequiredGateError{stageID: stage.ID, verdict: gateResult.Verdict}
 			}

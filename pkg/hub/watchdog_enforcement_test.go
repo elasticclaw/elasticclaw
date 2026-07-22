@@ -174,8 +174,8 @@ func TestWatchdogForceFinishesStaleTurnAndDeliversQueue(t *testing.T) {
 	}
 	cc.mu.RLock()
 	defer cc.mu.RUnlock()
-	if cc.isBusyLocked() || cc.forcedFinishCount != 1 {
-		t.Fatalf("turn not force-finished cleanly: busy=%v forced=%d", cc.isBusyLocked(), cc.forcedFinishCount)
+	if !cc.awaitingResponse || cc.streamingStartedAt.IsZero() || cc.streamingMsgID != "" || cc.forcedFinishCount != 1 {
+		t.Fatalf("stale turn not replaced cleanly: awaiting=%v streaming=%v message=%q forced=%d", cc.awaitingResponse, !cc.streamingStartedAt.IsZero(), cc.streamingMsgID, cc.forcedFinishCount)
 	}
 	var deliveredAt interface{}
 	if err := db.QueryRow(`SELECT delivered_at FROM messages WHERE id=?`, "queued-message").Scan(&deliveredAt); err != nil || deliveredAt == nil {

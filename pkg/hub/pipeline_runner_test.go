@@ -1596,6 +1596,67 @@ stages:
 	}
 }
 
+func TestRoutedGateResultDoesNotStartItsOwnAgentTurn(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
+	const clawID = "claw-routed-gate-notice"
+	if _, err := db.Exec(`INSERT INTO claws(id, tenant_id, name, template, status, pipeline_stage, created_at) VALUES(?,?,?,?,?,?,datetime('now'))`, clawID, "test-tenant-id", "AMB-12", "base", "connected", "depot_ci"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO pipeline_outputs(claw_id, stage_id, output_name, exit_code, stdout, stderr, parsed_json, created_at) VALUES(?,?,?,?,?,?,?,datetime('now'))`, clawID, "depot_ci", "depot_ci", 0, `{"status":"passed"}`, "", `{"status":"passed"}`); err != nil {
+		t.Fatal(err)
+	}
+	factory := &types.FactoryConfig{Name: "linear-todo", PipelineYAML: `
+stages:
+  - id: depot_ci
+    label: Monitor Depot CI
+    gate:
+      output: depot_ci
+      pass:
+        path: status
+        values: [passed]
+  - id: ci_passed
+    label: Review Pull Requests
+    triggers:
+      - gate_result:
+          stage: depot_ci
+          verdict: pass
+    on_enter:
+      inject: Inspect every review thread.
+`}
+	stage := pipeline.Stage{
+		ID:    "depot_ci",
+		Label: "Monitor Depot CI",
+		Gate: &pipeline.Gate{
+			Output: "depot_ci",
+			Pass:   pipeline.GateCondition{Path: "status", Values: []string{"passed"}},
+		},
+	}
+	if _, err := s.runOnEnter(clawID, stage, pipelineContext{Factory: factory}); err != nil {
+		t.Fatal(err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for s.getPipelineStage(clawID) != "ci_passed" && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := s.getPipelineStage(clawID); got != "ci_passed" {
+		t.Fatalf("pipeline stage = %q, want ci_passed", got)
+	}
+	var gateDelivered, stageDelivered interface{}
+	if err := db.QueryRow(`SELECT delivered_at FROM messages WHERE claw_id=? AND content='[hub] Gate passed: Monitor Depot CI'`, clawID).Scan(&gateDelivered); err != nil {
+		t.Fatal(err)
+	}
+	if gateDelivered == nil {
+		t.Fatal("routed gate bookkeeping was left pending for agent delivery")
+	}
+	if err := db.QueryRow(`SELECT delivered_at FROM messages WHERE claw_id=? AND content='Inspect every review thread.'`, clawID).Scan(&stageDelivered); err != nil {
+		t.Fatal(err)
+	}
+	if stageDelivered != nil {
+		t.Fatal("destination stage prompt should remain pending until the claw is connected")
+	}
+}
+
 func TestBuildWorkspaceRunCommand(t *testing.T) {
 	s, db := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
 

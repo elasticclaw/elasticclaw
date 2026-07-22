@@ -59,6 +59,7 @@ func migrate(db *sql.DB) error {
 	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN workflow_volumes TEXT NOT NULL DEFAULT '[]'`)
 	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN trigger_actor_json TEXT NOT NULL DEFAULT '{}'`)
 	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN stop_comment_pending INTEGER NOT NULL DEFAULT 0`)
+	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN no_progress_paused INTEGER NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE claw_prs ADD COLUMN last_comment_at TEXT NOT NULL DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE claw_prs ADD COLUMN pr_conditions_fired INTEGER NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE claw_prs ADD COLUMN permanent_failure_count INTEGER NOT NULL DEFAULT 0`)
@@ -114,6 +115,14 @@ func migrate(db *sql.DB) error {
 	)`)
 	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_claw_checkpoints_claw ON claw_checkpoints(claw_id, created_at)`)
 	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_claw_checkpoints_status ON claw_checkpoints(status, created_at)`)
+	_, _ = db.Exec(`CREATE TABLE IF NOT EXISTS claw_turn_observations (
+		id                   TEXT PRIMARY KEY,
+		claw_id              TEXT NOT NULL REFERENCES claws(id) ON DELETE CASCADE,
+		response             TEXT NOT NULL,
+		progress_fingerprint TEXT NOT NULL,
+		created_at           DATETIME NOT NULL
+	)`)
+	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_claw_turn_observations_claw ON claw_turn_observations(claw_id, created_at)`)
 
 	_, _ = db.Exec(`CREATE TABLE IF NOT EXISTS ssh_known_hosts (
 		host          TEXT PRIMARY KEY,
@@ -248,7 +257,8 @@ func migrate(db *sql.DB) error {
 		task_run_id TEXT NOT NULL DEFAULT '',
 		workflow_volumes TEXT NOT NULL DEFAULT '[]',
 		trigger_actor_json TEXT NOT NULL DEFAULT '{}',
-		stop_comment_pending INTEGER NOT NULL DEFAULT 0
+		stop_comment_pending INTEGER NOT NULL DEFAULT 0,
+		no_progress_paused INTEGER NOT NULL DEFAULT 0
 	);
 
 
@@ -263,6 +273,15 @@ func migrate(db *sql.DB) error {
 		created_at DATETIME NOT NULL,
 		delivered_at DATETIME
 	);
+
+	CREATE TABLE IF NOT EXISTS claw_turn_observations (
+		id                   TEXT PRIMARY KEY,
+		claw_id              TEXT NOT NULL REFERENCES claws(id) ON DELETE CASCADE,
+		response             TEXT NOT NULL,
+		progress_fingerprint TEXT NOT NULL,
+		created_at           DATETIME NOT NULL
+	);
+	CREATE INDEX IF NOT EXISTS idx_claw_turn_observations_claw ON claw_turn_observations(claw_id, created_at);
 
 	CREATE TABLE IF NOT EXISTS factory_triggers (
 		id             TEXT PRIMARY KEY,
