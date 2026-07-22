@@ -39,13 +39,14 @@ var allowedTaskRunAnalyticsJSONDistinctColumns = map[string]bool{
 }
 
 type taskRunAnalyticsSummaryResponse struct {
-	TotalRuns         int                    `json:"totalRuns"`
-	ByStatus          map[string]int         `json:"byStatus"`
-	WarningBreakdown  map[string]int         `json:"warningBreakdown"`
-	FailureBreakdown  map[string]int         `json:"failureBreakdown"`
-	HumanInteractions int                    `json:"humanInteractions"`
-	PRCounts          taskRunAnalyticsPRKPI  `json:"prCounts"`
-	AppliedFilters    map[string]interface{} `json:"appliedFilters,omitempty"`
+	TotalRuns         int                              `json:"totalRuns"`
+	ByStatus          map[string]int                   `json:"byStatus"`
+	WarningBreakdown  map[string]int                   `json:"warningBreakdown"`
+	FailureBreakdown  map[string]int                   `json:"failureBreakdown"`
+	HumanInteractions int                              `json:"humanInteractions"`
+	PRCounts          taskRunAnalyticsPRKPI            `json:"prCounts"`
+	AppliedFilters    map[string]interface{}           `json:"appliedFilters,omitempty"`
+	Prior             *taskRunAnalyticsSummaryResponse `json:"prior,omitempty"`
 }
 
 type taskRunAnalyticsPRKPI struct {
@@ -239,9 +240,10 @@ type taskRunGeneralStat struct {
 }
 
 type taskRunGeneralStatsResponse struct {
-	TicketToPr    taskRunGeneralStat `json:"ticketToPrMs"`
-	PROpenToMerge taskRunGeneralStat `json:"prOpenToMergeMs"`
-	AIImpl        taskRunGeneralStat `json:"aiImplMs"`
+	TicketToPr    taskRunGeneralStat           `json:"ticketToPrMs"`
+	PROpenToMerge taskRunGeneralStat           `json:"prOpenToMergeMs"`
+	AIImpl        taskRunGeneralStat           `json:"aiImplMs"`
+	Prior         *taskRunGeneralStatsResponse `json:"prior,omitempty"`
 }
 
 func (s *Server) handleTaskRunAnalyticsGeneralStats(w http.ResponseWriter, r *http.Request) {
@@ -259,6 +261,13 @@ func (s *Server) handleTaskRunAnalyticsGeneralStats(w http.ResponseWriter, r *ht
 		jsonError(w, http.StatusInternalServerError, "db error")
 		return
 	}
+	priorFilters := taskRunAnalyticsPriorFilters(filters, time.Now().UTC())
+	prior, err := s.readTaskRunAnalyticsGeneralStats(priorFilters)
+	if err != nil {
+		jsonError(w, http.StatusInternalServerError, "db error")
+		return
+	}
+	response.Prior = &prior
 	jsonOK(w, response)
 }
 
@@ -333,6 +342,12 @@ func (s *Server) handleTaskRunAnalyticsSummary(w http.ResponseWriter, r *http.Re
 		jsonError(w, http.StatusInternalServerError, "db error")
 		return
 	}
+	prior, err := s.readTaskRunAnalyticsSummaryForRequest(taskRunAnalyticsPriorFilters(filters, time.Now().UTC()), githubLoginFromContext(r.Context()))
+	if err != nil {
+		jsonError(w, http.StatusInternalServerError, "db error")
+		return
+	}
+	response.Prior = &prior
 	jsonOK(w, response)
 }
 
@@ -483,6 +498,23 @@ func parseTaskRunAnalyticsFilters(r *http.Request) (taskRunAnalyticsFilters, err
 		return filters, err
 	}
 	return filters, nil
+}
+
+// taskRunAnalyticsPriorFilters returns the immediately preceding, equal-length
+// started_at window.  Analytics historically has no default window, so use a
+// trailing 30-day current window solely to establish the default comparison.
+func taskRunAnalyticsPriorFilters(filters taskRunAnalyticsFilters, now time.Time) taskRunAnalyticsFilters {
+	const dayMS int64 = 24 * 60 * 60 * 1000
+	if filters.FromStartedAt > 0 && filters.ToStartedAt > 0 && filters.ToStartedAt >= filters.FromStartedAt {
+		length := filters.ToStartedAt - filters.FromStartedAt + 1
+		filters.ToStartedAt = filters.FromStartedAt - 1
+		filters.FromStartedAt -= length
+		return filters
+	}
+	end := now.UTC().UnixMilli()
+	filters.ToStartedAt = end - 30*dayMS
+	filters.FromStartedAt = filters.ToStartedAt - 30*dayMS + 1
+	return filters
 }
 
 func (s *Server) readTaskRunAnalyticsSummary(filters taskRunAnalyticsFilters) (taskRunAnalyticsSummaryResponse, error) {

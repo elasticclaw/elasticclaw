@@ -1,6 +1,8 @@
 import type {
   ApiClaw,
   ApiMessage,
+  AnalyticsCostDriver,
+  AnalyticsEffectiveness,
   CostOverview,
   CreateClawRequest,
   DependencyStatusResponse,
@@ -392,20 +394,40 @@ function taskRunAnalyticsQuery(filters?: TaskRunAnalyticsFilters): string {
   return query ? `?${query}` : ""
 }
 
-export async function fetchTaskRunAnalyticsSummary(filters?: TaskRunAnalyticsFilters): Promise<TaskRunAnalyticsSummary> {
-  return apiFetch<TaskRunAnalyticsSummary>(`/api/analytics/summary${taskRunAnalyticsQuery(filters)}`)
+type AnalyticsRequestOptions = Pick<RequestInit, "signal">
+
+export async function fetchTaskRunAnalyticsSummary(filters?: TaskRunAnalyticsFilters, options?: AnalyticsRequestOptions): Promise<TaskRunAnalyticsSummary> {
+  return apiFetch<TaskRunAnalyticsSummary>(`/api/analytics/summary${taskRunAnalyticsQuery(filters)}`, options)
 }
 
 export async function fetchCostOverview(filters?: TaskRunAnalyticsFilters): Promise<CostOverview> {
   return apiFetch<CostOverview>(`/api/analytics/costs${taskRunAnalyticsQuery(filters)}`)
 }
 
-export async function fetchGeneralStats(filters?: TaskRunAnalyticsFilters): Promise<GeneralStats> {
-  return apiFetch<GeneralStats>(`/api/analytics/general-stats${taskRunAnalyticsQuery(filters)}`)
+export async function fetchAnalyticsCosts(filters?: TaskRunAnalyticsFilters, days = 30, groupBy?: "model", scope?: "ledger", options?: AnalyticsRequestOptions): Promise<CostOverview> {
+  const query = taskRunAnalyticsQuery(filters)
+  const params = new URLSearchParams(query.slice(1))
+  params.set("days", String(days))
+  if (groupBy) params.set("groupBy", groupBy)
+  if (scope) params.set("scope", scope)
+  return apiFetch<CostOverview>(`/api/analytics/costs?${params}`, options)
 }
 
-export async function fetchTaskRuns(filters?: TaskRunAnalyticsFilters): Promise<TaskRunsResponse> {
-  return apiFetch<TaskRunsResponse>(`/api/analytics/runs${taskRunAnalyticsQuery(filters)}`)
+export async function fetchAnalyticsEffectiveness(filters?: TaskRunAnalyticsFilters, options?: AnalyticsRequestOptions): Promise<AnalyticsEffectiveness> {
+  return apiFetch<AnalyticsEffectiveness>(`/api/analytics/effectiveness${taskRunAnalyticsQuery(filters)}`, options)
+}
+
+export async function fetchAnalyticsCostDrivers(filters?: TaskRunAnalyticsFilters, groupBy: "factory" | "workflow" = "factory", options?: AnalyticsRequestOptions): Promise<AnalyticsCostDriver[]> {
+  const query = taskRunAnalyticsQuery(filters)
+  return apiFetch<AnalyticsCostDriver[]>(`/api/analytics/cost-drivers${query}${query ? "&" : "?"}groupBy=${groupBy}`, options)
+}
+
+export async function fetchGeneralStats(filters?: TaskRunAnalyticsFilters, options?: AnalyticsRequestOptions): Promise<GeneralStats> {
+  return apiFetch<GeneralStats>(`/api/analytics/general-stats${taskRunAnalyticsQuery(filters)}`, options)
+}
+
+export async function fetchTaskRuns(filters?: TaskRunAnalyticsFilters, options?: AnalyticsRequestOptions): Promise<TaskRunsResponse> {
+  return apiFetch<TaskRunsResponse>(`/api/analytics/runs${taskRunAnalyticsQuery(filters)}`, options)
 }
 
 export async function fetchTaskRun(runId: string): Promise<{ run: TaskRunSummary }> {
@@ -428,6 +450,6 @@ export async function fetchTaskRunOutputs(runId: string): Promise<{ outputs: Tas
   return apiFetch<{ outputs: TaskRunOutput[] }>(`/api/analytics/runs/${encodeURIComponent(runId)}/outputs`)
 }
 
-export async function fetchTaskRunFilterOptions(): Promise<TaskRunFilterOptions> {
-  return apiFetch<TaskRunFilterOptions>("/api/analytics/filter-options")
+export async function fetchTaskRunFilterOptions(options?: AnalyticsRequestOptions): Promise<TaskRunFilterOptions> {
+  return apiFetch<TaskRunFilterOptions>("/api/analytics/filter-options", options)
 }

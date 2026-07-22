@@ -1,6 +1,7 @@
 "use client"
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react"
+import { createPortal } from "react-dom"
 import { usePathname, useRouter, useSearchParams } from "next/navigation"
 import { AlertCircle, ArrowDown, ArrowUp, CheckCircle2, CircleDot, ExternalLink, GitPullRequest, Minus, RefreshCw, Search, Users, XCircle } from "lucide-react"
 import { Bar, BarChart, XAxis } from "recharts"
@@ -38,7 +39,7 @@ const costChartConfig = {
   costUsd: { label: "Cost", color: "var(--chart-1)" },
 } satisfies ChartConfig
 
-type DetailState = {
+export type DetailState = {
   attempts: TaskRunAttempt[]
   events: TaskRunEvent[]
   prs: TaskRunPR[]
@@ -52,7 +53,7 @@ const anyValue = "__any__"
 const DEFAULT_PAGE_LIMIT = 50
 const MAX_DISPLAYED_EVENTS = 12
 
-const urlFilterKeys = [
+export const urlFilterKeys = [
   "status",
   "factory",
   "workflow",
@@ -576,7 +577,7 @@ function ConfidenceBadge({ confidence }: { confidence: "high" | "medium" | "low"
   )
 }
 
-function FilterSelect({ label, value, values, onChange }: { label: string; value?: string; values?: string[]; onChange: (value?: string) => void }) {
+export function FilterSelect({ label, value, values, onChange }: { label: string; value?: string; values?: string[]; onChange: (value?: string) => void }) {
   const selectValues = value && !(values ?? []).includes(value)
     ? [value, ...(values ?? [])]
     : (values ?? [])
@@ -599,10 +600,16 @@ function FilterSelect({ label, value, values, onChange }: { label: string; value
   )
 }
 
-function RunDetailPanel({ run, details, loading, error, onClose }: { run: TaskRunSummary | null; details: DetailState | null; loading: boolean; error: string | null; onClose: () => void }) {
-  if (!run) return null
-  return (
-    <aside className="fixed inset-y-0 right-0 z-40 flex w-full max-w-[380px] shrink-0 flex-col border-l border-border bg-card shadow-xl xl:static xl:shadow-none">
+export function RunDetailPanel({ run, details, loading, error, onClose }: { run: TaskRunSummary | null; details: DetailState | null; loading: boolean; error: string | null; onClose: () => void }) {
+  const [mounted, setMounted] = useState(false)
+
+  useEffect(() => setMounted(true), [])
+
+  if (!run || !mounted) return null
+  return createPortal(
+    <>
+    <div className="fixed inset-0 z-[55] bg-black/50" onClick={onClose} aria-hidden="true" />
+    <aside className="fixed inset-y-0 right-0 z-[60] flex w-full max-w-[66vw] flex-col border-l border-border bg-card shadow-xl">
       <div className="flex items-start justify-between gap-3 border-b border-border p-4">
         <div className="min-w-0">
           <div className="truncate text-sm font-semibold">{run.ownerDisplayName || run.runId}</div>
@@ -694,6 +701,8 @@ function RunDetailPanel({ run, details, loading, error, onClose }: { run: TaskRu
         </section>
       </div>
     </aside>
+    </>,
+    document.body,
   )
 }
 
@@ -705,23 +714,23 @@ function TimingSection({ run }: { run: TaskRunSummary }) {
       <h3 className="mb-2 text-xs font-medium uppercase text-muted-foreground">Timing</h3>
       <div className="grid grid-cols-2 gap-2 text-sm">
         {phases.map((phase) => (
-          <DetailItem key={phase.label} label={phase.label} value={formatDurationMs(phase.ms)} />
+          <DetailItem key={phase.label} label={phase.label} value={formatDurationMs(phase.ms)} title={phase.title} />
         ))}
       </div>
     </section>
   )
 }
 
-function DetailItem({ label, value }: { label: string; value: ReactNode }) {
+function DetailItem({ label, value, title }: { label: string; value: ReactNode; title?: string }) {
   return (
-    <div className="rounded-md border border-border px-3 py-2">
+    <div title={title} className="rounded-md border border-border px-3 py-2">
       <div className="text-xs text-muted-foreground">{label}</div>
       <div className="mt-1 truncate">{value}</div>
     </div>
   )
 }
 
-function StatusBadge({ status }: { status: string }) {
+export function StatusBadge({ status }: { status: string }) {
   const statusIcons: Record<string, ReactNode> = {
     clean: <CheckCircle2 className="size-3" />,
     human_in_the_loop: <Users className="size-3" />,
@@ -812,13 +821,13 @@ function ownerSecondaryLine(run: TaskRunSummary) {
 }
 
 function runTimingPhases(run: TaskRunSummary) {
-  const phases: { label: string; ms: number }[] = []
-  const push = (label: string, ms: number | undefined) => {
-    if (ms !== undefined) phases.push({ label, ms })
+  const phases: { label: string; ms: number; title: string }[] = []
+  const push = (label: string, ms: number | undefined, title: string) => {
+    if (ms !== undefined) phases.push({ label, ms, title })
   }
-  push("Queued wait", durationBetween(run.queuedAt, run.agentStartedAt))
-  push("Implementation", durationBetween(run.agentStartedAt, run.prOpenedAt))
-  push("PR to merge", durationBetween(run.prOpenedAt, run.mergedAt))
+  push("Queued wait", durationBetween(run.queuedAt, run.agentStartedAt), "Time between the run being queued and the agent starting to work (covers provisioning and startup).")
+  push("Implementation", durationBetween(run.agentStartedAt, run.prOpenedAt), "Time from the agent starting to the PR being opened.")
+  push("PR to merge", durationBetween(run.prOpenedAt, run.mergedAt), "Time from the PR being opened to it being merged.")
   return phases
 }
 

@@ -32,6 +32,15 @@ const (
 	cmxPrefix      = "ec-e2e-cmx"
 	dockerPrefix   = "ec-e2e-docker"
 	maxRunIDLen    = 32
+
+	// routineStaleE2EHookTTL is longer than the e2e binary's 30-minute timeout.
+	// Hooks are created at test start, so this preserves a safety margin for
+	// legitimate concurrent runs while reclaiming hooks from crash-looping runs.
+	routineStaleE2EHookTTL = 35 * time.Minute
+	// emergencyStaleE2EHookTTL is an aggressive sweep used only after GitHub's
+	// hook limit is reached. It may remove a long-running sibling's hook, but
+	// that is preferable to a guaranteed failure when no hook can be created.
+	emergencyStaleE2EHookTTL = 10 * time.Minute
 )
 
 func TestDaytonaGitHubIssuesWorkflowE2E(t *testing.T) {
@@ -949,46 +958,38 @@ func (g githubClient) createHook(ctx context.Context, t *testing.T, url, secret 
 	var out struct {
 		ID int64 `json:"id"`
 	}
-	g.api(ctx, t, http.MethodPost, "hooks", body, &out)
+	for attempt := 0; attempt < 2; attempt++ {
+		statusCode, status, respBody, err := g.apiRequest(ctx, http.MethodPost, "hooks", body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if statusCode < 300 {
+			if err := json.Unmarshal(respBody, &out); err != nil {
+				t.Fatalf("decode github %s %s: %v\n%s", http.MethodPost, "hooks", err, string(respBody))
+			}
+			return out.ID
+		}
+		if attempt == 0 && statusCode == http.StatusUnprocessableEntity && strings.Contains(string(respBody), "cannot have more than 20 hooks") {
+			t.Logf("github %s %s returned %s: %s; running emergency stale-hook sweep before retry", http.MethodPost, "hooks", status, strings.TrimSpace(string(respBody)))
+			g.deleteStaleE2EHooks(ctx, t, emergencyStaleE2EHookTTL)
+			continue
+		}
+		t.Fatalf("github %s %s returned %s: %s", http.MethodPost, "hooks", status, strings.TrimSpace(string(respBody)))
+	}
+	t.Fatal("create github hook: exhausted retries")
 	return out.ID
 }
 
 func (g githubClient) cleanupGitHubE2EResources(ctx context.Context, t *testing.T, workspaceName, runID, labelName string) {
 	t.Helper()
 	g.deleteE2EHooksForWorkspace(ctx, t, workspaceName)
-	g.deleteStaleGitHubE2EHooks(ctx, t, time.Now().UTC())
+	g.deleteStaleE2EHooks(ctx, t, routineStaleE2EHookTTL)
 	g.closeE2EIssuesForRun(ctx, t, runID, labelName)
 	_ = g.deleteLabel(ctx, labelName)
 	if shouldSweepStaleE2E() {
 		g.deleteE2EHooks(ctx, t)
 		g.cleanupE2EIssuesAndLabels(ctx, t)
 	}
-}
-
-const staleGitHubE2EHookAge = 45 * time.Minute
-
-func (g githubClient) deleteStaleGitHubE2EHooks(ctx context.Context, t *testing.T, now time.Time) {
-	t.Helper()
-	var hooks []struct {
-		ID        int64     `json:"id"`
-		CreatedAt time.Time `json:"created_at"`
-		Config    struct {
-			URL string `json:"url"`
-		} `json:"config"`
-	}
-	g.api(ctx, t, http.MethodGet, "hooks", nil, &hooks)
-	for _, hook := range hooks {
-		if !isStaleGitHubE2EHook(hook.Config.URL, hook.CreatedAt, now) {
-			continue
-		}
-		if err := g.deleteHook(ctx, hook.ID); err != nil {
-			t.Fatalf("delete stale E2E hook %d: %v", hook.ID, err)
-		}
-	}
-}
-
-func isStaleGitHubE2EHook(hookURL string, createdAt, now time.Time) bool {
-	return isGitHubE2EHookURL(hookURL) && !createdAt.IsZero() && createdAt.Before(now.Add(-staleGitHubE2EHookAge))
 }
 
 func shouldSweepStaleE2E() bool {
@@ -1010,17 +1011,36 @@ func (g githubClient) deleteE2EHooks(ctx context.Context, t *testing.T) {
 
 func (g githubClient) deleteE2EHooksMatching(ctx context.Context, t *testing.T, match func(string) bool) {
 	t.Helper()
+	g.deleteE2EHooksMatchingFull(ctx, t, func(url string, _ time.Time) bool {
+		return match(url)
+	}, true)
+}
+
+func (g githubClient) deleteStaleE2EHooks(ctx context.Context, t *testing.T, olderThan time.Duration) {
+	t.Helper()
+	now := time.Now()
+	g.deleteE2EHooksMatchingFull(ctx, t, func(url string, createdAt time.Time) bool {
+		return isStaleE2EHook(url, createdAt, now, olderThan)
+	}, false)
+}
+
+func (g githubClient) deleteE2EHooksMatchingFull(ctx context.Context, t *testing.T, match func(url string, createdAt time.Time) bool, failOnError bool) {
+	t.Helper()
 	var hooks []struct {
-		ID     int64 `json:"id"`
-		Config struct {
+		ID        int64     `json:"id"`
+		CreatedAt time.Time `json:"created_at"`
+		Config    struct {
 			URL string `json:"url"`
 		} `json:"config"`
 	}
 	g.api(ctx, t, http.MethodGet, "hooks", nil, &hooks)
 	for _, hook := range hooks {
-		if match(hook.Config.URL) {
+		if match(hook.Config.URL, hook.CreatedAt) {
 			if err := g.deleteHook(ctx, hook.ID); err != nil {
-				t.Fatalf("delete orphaned E2E hook %d: %v", hook.ID, err)
+				if failOnError {
+					t.Fatalf("delete orphaned E2E hook %d: %v", hook.ID, err)
+				}
+				t.Logf("delete stale E2E hook %d: %v", hook.ID, err)
 			}
 		}
 	}
@@ -1032,6 +1052,34 @@ func githubE2EHookURLMatchesWorkspace(hookURL, workspaceName string) bool {
 
 func isGitHubE2EHookURL(hookURL string) bool {
 	return strings.Contains(hookURL, "/api/workspaces/") && strings.HasSuffix(hookURL, "/webhooks/github-issues")
+}
+
+func isStaleE2EHook(hookURL string, createdAt, now time.Time, olderThan time.Duration) bool {
+	return isGitHubE2EHookURL(hookURL) && !createdAt.IsZero() && now.Sub(createdAt) > olderThan
+}
+
+func TestIsStaleE2EHook(t *testing.T) {
+	now := time.Date(2026, time.July, 20, 12, 0, 0, 0, time.UTC)
+	matchingURL := "https://example.test/api/workspaces/e2e-run/webhooks/github-issues"
+
+	for _, tt := range []struct {
+		name      string
+		url       string
+		createdAt time.Time
+		want      bool
+	}{
+		{"fresh non-matching URL", "https://example.test/other", now.Add(-3 * time.Hour), false},
+		{"fresh matching URL", matchingURL, now.Add(-time.Hour), false},
+		{"stale matching URL", matchingURL, now.Add(-3 * time.Hour), true},
+		{"stale non-matching URL", "https://example.test/other", now.Add(-3 * time.Hour), false},
+		{"matching URL with zero creation time", matchingURL, time.Time{}, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isStaleE2EHook(tt.url, tt.createdAt, now, 2*time.Hour); got != tt.want {
+				t.Errorf("isStaleE2EHook() = %v, want %v", got, tt.want)
+			}
+		})
+	}
 }
 
 func (g githubClient) deleteHook(ctx context.Context, hookID int64) error {
@@ -1260,6 +1308,35 @@ func (g githubClient) api(ctx context.Context, t *testing.T, method, path string
 			t.Fatalf("decode github %s %s: %v\n%s", method, path, err, string(respBody))
 		}
 	}
+}
+
+// apiRequest makes a GitHub API request without treating a non-2xx response as fatal.
+func (g githubClient) apiRequest(ctx context.Context, method, path string, body interface{}) (statusCode int, status string, respBody []byte, err error) {
+	var reader io.Reader
+	if body != nil {
+		data, err := json.Marshal(body)
+		if err != nil {
+			return 0, "", nil, fmt.Errorf("marshal github %s %s: %v", method, path, err)
+		}
+		reader = bytes.NewReader(data)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, "https://api.github.com/repos/"+g.repo+"/"+path, reader)
+	if err != nil {
+		return 0, "", nil, fmt.Errorf("build github %s %s: %v", method, path, err)
+	}
+	req.Header.Set("Authorization", "Bearer "+g.token)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return 0, "", nil, fmt.Errorf("github %s %s: %v", method, path, err)
+	}
+	defer resp.Body.Close()
+	respBody, _ = io.ReadAll(resp.Body)
+	return resp.StatusCode, resp.Status, respBody, nil
 }
 
 func requiredEnv(t *testing.T, name string) string {

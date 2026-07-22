@@ -164,6 +164,79 @@ func TestTaskRunAnalyticsAPISummaryRunsFiltersAndPagination(t *testing.T) {
 	}
 }
 
+func TestTaskRunAnalyticsEffectivenessCountsClosedUnmergedAsSuccessNotMerge(t *testing.T) {
+	s, db := newTaskRunAnalyticsAPITestServer(t)
+	insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{RunID: "closed", AttemptID: "a", ClawID: "c", TenantID: "test-tenant-id", Status: taskRunStatusWarning, Phase: taskRunPhaseTerminal, OwnerType: taskRunOwnerFactory, Factory: "f", StartedAt: 1760000000000, FinishedAt: 1760000001000, PRCount: 1, ClosedPRCount: 1, WarningTypes: []string{taskRunWarningPRClosedUnmerged}})
+	insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{RunID: "merged", AttemptID: "b", ClawID: "d", TenantID: "test-tenant-id", Status: taskRunStatusClean, Phase: taskRunPhaseTerminal, OwnerType: taskRunOwnerFactory, Factory: "f", StartedAt: 1760000000001, FinishedAt: 1760000001001, PRCount: 1, MergedPRCount: 1})
+	if _, err := db.Exec(`UPDATE task_run_summaries SET pr_opened_at=started_at WHERE run_id IN ('closed','merged')`); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.readTaskRunAnalyticsEffectiveness(taskRunAnalyticsFilters{TenantID: "test-tenant-id"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.SuccessRate != 1 || got.MergeRate != .5 || got.Funnel.PRFinished != 2 {
+		t.Fatalf("effectiveness = %#v", got)
+	}
+}
+
+func TestTaskRunAnalyticsEffectivenessFunnelStages(t *testing.T) {
+	s, db := newTaskRunAnalyticsAPITestServer(t)
+	base := int64(1760000000000)
+	fixtures := []apiRunFixture{
+		{RunID: "funnel-closed", AttemptID: "a", ClawID: "c", TenantID: "test-tenant-id", Status: taskRunStatusWarning, Phase: taskRunPhaseTerminal, OwnerType: taskRunOwnerFactory, Factory: "f", StartedAt: base, FinishedAt: base + 1000, PRCount: 1, ClosedPRCount: 1},
+		{RunID: "funnel-open", AttemptID: "b", ClawID: "d", TenantID: "test-tenant-id", Status: taskRunStatusRunning, Phase: taskRunPhaseAgentRunning, OwnerType: taskRunOwnerFactory, Factory: "f", StartedAt: base + 2000, PRCount: 1, OpenPRCount: 1},
+		{RunID: "funnel-agent-only", AttemptID: "c", ClawID: "e", TenantID: "test-tenant-id", Status: taskRunStatusRunning, Phase: taskRunPhaseAgentRunning, OwnerType: taskRunOwnerFactory, Factory: "f", StartedAt: base + 4000},
+	}
+	for _, fixture := range fixtures {
+		insertTaskRunAnalyticsAPIRun(t, db, fixture)
+	}
+	if _, err := db.Exec(`UPDATE task_run_summaries SET agent_started_at=started_at WHERE run_id IN ('funnel-closed', 'funnel-open', 'funnel-agent-only')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE task_run_summaries SET pr_opened_at=started_at WHERE run_id IN ('funnel-closed', 'funnel-open')`); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.readTaskRunAnalyticsEffectiveness(taskRunAnalyticsFilters{TenantID: "test-tenant-id"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Funnel.AgentStarted != 3 || got.Funnel.PROpened != 2 || got.Funnel.PRFinished != 1 {
+		t.Fatalf("funnel = %#v", got.Funnel)
+	}
+}
+
+func TestTaskRunAnalyticsEffectivenessUniqueTicketsAndTicketSuccessRate(t *testing.T) {
+	s, db := newTaskRunAnalyticsAPITestServer(t)
+	base := int64(1760000000000)
+	fixtures := []apiRunFixture{
+		{RunID: "ticket-a-failed", AttemptID: "attempt-ticket-a-failed", ClawID: "claw-ticket-a-failed", TenantID: "test-tenant-id", Status: taskRunStatusFailed, Phase: taskRunPhaseTerminal, OwnerType: taskRunOwnerFactory, Factory: "f", StartedAt: base, FinishedAt: base + 1000},
+		{RunID: "ticket-a-clean", AttemptID: "attempt-ticket-a-clean", ClawID: "claw-ticket-a-clean", TenantID: "test-tenant-id", Status: taskRunStatusClean, Phase: taskRunPhaseTerminal, OwnerType: taskRunOwnerFactory, Factory: "f", StartedAt: base + 2000, FinishedAt: base + 3000},
+		{RunID: "ticket-b-failed", AttemptID: "attempt-ticket-b-failed", ClawID: "claw-ticket-b-failed", TenantID: "test-tenant-id", Status: taskRunStatusFailed, Phase: taskRunPhaseTerminal, OwnerType: taskRunOwnerFactory, Factory: "f", StartedAt: base + 4000, FinishedAt: base + 5000},
+		{RunID: "ticket-c-running", AttemptID: "attempt-ticket-c-running", ClawID: "claw-ticket-c-running", TenantID: "test-tenant-id", Status: taskRunStatusRunning, Phase: taskRunPhaseAgentRunning, OwnerType: taskRunOwnerFactory, Factory: "f", StartedAt: base + 6000},
+		{RunID: "no-ticket", AttemptID: "attempt-no-ticket", ClawID: "claw-no-ticket", TenantID: "test-tenant-id", Status: taskRunStatusClean, Phase: taskRunPhaseTerminal, OwnerType: taskRunOwnerFactory, Factory: "f", StartedAt: base + 8000, FinishedAt: base + 9000},
+	}
+	for _, fixture := range fixtures {
+		insertTaskRunAnalyticsAPIRun(t, db, fixture)
+	}
+	if _, err := db.Exec(`UPDATE task_run_summaries SET issue_id=? WHERE run_id=?`, "ISSUE-ticket-a", "ticket-a-failed"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE task_run_summaries SET issue_id=? WHERE run_id=?`, "ISSUE-ticket-a", "ticket-a-clean"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE task_run_summaries SET issue_id=? WHERE run_id=?`, "", "no-ticket"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.readTaskRunAnalyticsEffectiveness(taskRunAnalyticsFilters{TenantID: "test-tenant-id"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.UniqueTickets != 3 || got.TicketSuccessRate != .5 {
+		t.Fatalf("effectiveness = %#v", got)
+	}
+}
+
 func TestTaskRunAnalyticsAPIGeneralStats(t *testing.T) {
 	s, db := newTaskRunAnalyticsAPITestServer(t)
 	base := int64(1760000000000)
