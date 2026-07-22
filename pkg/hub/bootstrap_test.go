@@ -360,6 +360,27 @@ func TestEnvForStorage_StripsBootstrapKeys(t *testing.T) {
 	}
 }
 
+func TestEnvForStorage_SkipsInvalidShellNames(t *testing.T) {
+	stored := envForStorage(map[string]string{
+		"VALID_KEY":  "ok",
+		"FOO;rm -rf": "bad",
+		"BAD\nKEY":   "bad",
+		"":           "empty",
+		"123NUMBER":  "bad",
+	})
+	if len(stored) != 1 || stored["VALID_KEY"] != "ok" {
+		t.Fatalf("only valid keys should be stored, got %v", stored)
+	}
+}
+
+func TestBootstrapScript_SkipsInvalidEnvVarNames(t *testing.T) {
+	p := baseParams()
+	p.Env = map[string]string{"DEPOT_TOKEN": "secret", "FOO;rm -rf /": "bad"}
+	script := GenerateReplicatedBootstrapScript(p)
+	assertContains(t, script, "export DEPOT_TOKEN='secret'", "valid env var exported")
+	assertNotContains(t, script, "FOO;rm", "invalid env var name should not appear in script")
+}
+
 func TestBootstrapScript_SetEEnabled(t *testing.T) {
 	script := GenerateReplicatedBootstrapScript(baseParams())
 	assertContains(t, script, "set -euo pipefail", "script uses set -euo pipefail")

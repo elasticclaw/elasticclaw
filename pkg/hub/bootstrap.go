@@ -2,6 +2,8 @@ package hub
 
 import (
 	"fmt"
+	"log"
+	"regexp"
 	"strings"
 
 	"github.com/elasticclaw/elasticclaw/pkg/types"
@@ -81,13 +83,21 @@ var envKeysInjectedByBootstrap = map[string]bool{
 	"GITHUB_ISSUES_API_KEY":          true,
 }
 
+// shellVarNameRegex matches valid POSIX shell variable names.
+var shellVarNameRegex = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
 // envForStorage returns the subset of env that should be persisted in the
 // claws table. It strips keys that the bootstrap script injects from other
-// sources so the stored column only contains user-supplied values.
+// sources and skips malformed shell variable names so the stored column only
+// contains safe, user-supplied values.
 func envForStorage(env map[string]string) map[string]string {
 	filtered := make(map[string]string)
 	for k, v := range env {
 		if envKeysInjectedByBootstrap[k] {
+			continue
+		}
+		if !shellVarNameRegex.MatchString(k) {
+			log.Printf("[bootstrap] WARNING: skipping invalid env var name %q", k)
 			continue
 		}
 		filtered[k] = v
@@ -481,11 +491,17 @@ func GenerateReplicatedBootstrapScript(p BootstrapParams) string {
 		var lines []string
 		var persistLines []string
 		for k, v := range p.Env {
+			if !shellVarNameRegex.MatchString(k) {
+				log.Printf("[bootstrap] WARNING: skipping invalid env var name %q", k)
+				continue
+			}
 			lines = append(lines, fmt.Sprintf("export %s=%s", k, shellQuote(v)))
 			persistLines = append(persistLines, fmt.Sprintf("  printf 'export %s=%%q\\n' \"$%s\"", k, k))
 		}
-		customEnvExports = strings.Join(lines, "\n")
-		customEnvPersist = strings.Join(persistLines, "\n")
+		if len(lines) > 0 {
+			customEnvExports = strings.Join(lines, "\n")
+			customEnvPersist = strings.Join(persistLines, "\n")
+		}
 	}
 
 	return fmt.Sprintf(`#!/bin/bash
