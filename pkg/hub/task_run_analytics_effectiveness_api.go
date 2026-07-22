@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"net/http"
 	"sort"
-	"strings"
 	"time"
 )
 
@@ -409,13 +408,9 @@ func (s *Server) readTaskRunAnalyticsCostDrivers(f taskRunAnalyticsFilters, grou
 	// Cost drivers has no ledger mode: the sparkline always uses per-run
 	// attribution against the same eligibility-filtered run set as the row
 	// totals above, so totals and sparkline never disagree.
-	usageWhere, usageArgs := taskRunAnalyticsUsageModelWhere(f)
 	q = `SELECT s.` + col + `, u.usage_day, COALESCE(SUM(u.committed_cost_usd),0) FROM task_run_usage u JOIN (SELECT run_id, ` + col + ` FROM task_run_summaries ` + w + `) s ON s.run_id=u.run_id WHERE u.tenant_id=?`
-	if len(usageWhere) > 0 {
-		q += ` AND ` + strings.Join(usageWhere, " AND ")
-	}
 	q += ` GROUP BY s.` + col + `, u.usage_day`
-	rs, e := s.db.Query(q, append(append(a, f.TenantID), usageArgs...)...)
+	rs, e := s.db.Query(q, append(a, f.TenantID)...)
 	if e != nil {
 		return nil, e
 	}

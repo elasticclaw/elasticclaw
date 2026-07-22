@@ -224,26 +224,14 @@ func taskRunAnalyticsUsageDimensionsWhere(f taskRunAnalyticsFilters, table strin
 	return w, a
 }
 
-func taskRunAnalyticsUsageModelWhere(f taskRunAnalyticsFilters) ([]string, []any) {
-	w := []string{}
-	a := []any{}
-	addTaskRunAnalyticsInFilter(&w, &a, "u.model", f.Model)
-	return w, a
-}
-
 func (s *Server) readTaskRunAnalyticsDailyCostTotals(f taskRunAnalyticsFilters, start, end time.Time, scope string) (map[string]taskRunAnalyticsDailyCostTotals, error) {
 	var query string
 	var args []any
 	if scope != "ledger" {
 		where, summaryArgs := taskRunAnalyticsSummaryWhere(f)
-		usageWhere, usageArgs := taskRunAnalyticsUsageModelWhere(f)
 		query = `SELECT u.usage_day, COALESCE(SUM(u.committed_cost_usd),0), COALESCE(SUM(u.committed_total_tokens),0) FROM task_run_usage u JOIN (SELECT run_id FROM task_run_summaries ` + where + ` AND started_at>=? AND started_at<=?) s ON s.run_id=u.run_id WHERE u.tenant_id=?`
-		if len(usageWhere) > 0 {
-			query += ` AND ` + strings.Join(usageWhere, " AND ")
-		}
 		query += ` GROUP BY u.usage_day`
 		args = append(summaryArgs, start.UnixMilli(), end.AddDate(0, 0, 1).Add(-time.Millisecond).UnixMilli(), f.TenantID)
-		args = append(args, usageArgs...)
 	} else {
 		// Ledger scope intentionally reads usage_daily with dimension filters only;
 		// run-level filters do not apply to this whole-ledger view.
@@ -288,10 +276,7 @@ func (s *Server) addTaskRunAnalyticsDailyRunCounts(f taskRunAnalyticsFilters, st
 		var summaryWhere string
 		summaryWhere, summaryArgs = taskRunAnalyticsSummaryWhere(f)
 		where = []string{"u.tenant_id=?", "s.run_id=u.run_id"}
-		usageWhere, usageArgs := taskRunAnalyticsUsageModelWhere(f)
-		where = append(where, usageWhere...)
 		args = append(summaryArgs, start.UnixMilli(), end.AddDate(0, 0, 1).Add(-time.Millisecond).UnixMilli(), f.TenantID)
-		args = append(args, usageArgs...)
 		rows, err := s.db.Query(`SELECT u.usage_day, u.run_id FROM task_run_usage u JOIN (SELECT run_id FROM task_run_summaries `+summaryWhere+` AND started_at>=? AND started_at<=?) s ON s.run_id=u.run_id WHERE `+strings.Join(where, " AND ")+` GROUP BY u.usage_day, u.run_id`, args...)
 		if err != nil {
 			return err
@@ -363,14 +348,9 @@ func (s *Server) readTaskRunAnalyticsCostSeriesByModel(f taskRunAnalyticsFilters
 	var args []any
 	if scope != "ledger" {
 		where, summaryArgs := taskRunAnalyticsSummaryWhere(f)
-		usageWhere, usageArgs := taskRunAnalyticsUsageModelWhere(f)
 		query = `SELECT u.model, u.usage_day, COALESCE(SUM(u.committed_cost_usd),0), COALESCE(SUM(u.committed_total_tokens),0) FROM task_run_usage u JOIN (SELECT run_id FROM task_run_summaries ` + where + ` AND started_at>=? AND started_at<=?) s ON s.run_id=u.run_id WHERE u.tenant_id=?`
-		if len(usageWhere) > 0 {
-			query += ` AND ` + strings.Join(usageWhere, " AND ")
-		}
 		query += ` GROUP BY u.model,u.usage_day`
 		args = append(summaryArgs, start.UnixMilli(), end.AddDate(0, 0, 1).Add(-time.Millisecond).UnixMilli(), f.TenantID)
-		args = append(args, usageArgs...)
 	} else {
 		where, a := taskRunAnalyticsUsageDimensionsWhere(f, "usage_daily")
 		where = append(where, "day>=?", "day<=?")

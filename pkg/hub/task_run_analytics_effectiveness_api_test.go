@@ -101,6 +101,29 @@ func TestTaskRunAnalyticsEffectivenessTicketAggregates(t *testing.T) {
 }
 
 func TestTaskRunAnalyticsCostDriversRunFilterConsistentSparkline(t *testing.T) {
+	t.Run("model-filtered runs retain all usage models", func(t *testing.T) {
+		s, db := newTaskRunAnalyticsAPITestServer(t)
+		day := time.Date(2026, time.July, 15, 0, 0, 0, 0, time.UTC)
+		insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{RunID: "multi-model", AttemptID: "multi-model-attempt", ClawID: "multi-model-claw", TenantID: "test-tenant-id", OwnerType: taskRunOwnerFactory, Factory: "factory-a", Model: "claude-fable-5", StartedAt: day.UnixMilli(), EstimatedCostUsd: 12})
+		seedTaskRunAnalyticsRunUsageWithModel(t, db, "multi-model", "claude-session", "claude-fable-5", day, 7, 70)
+		seedTaskRunAnalyticsRunUsageWithModel(t, db, "multi-model", "gpt-session", "gpt-5.6", day, 5, 50)
+
+		out, err := s.readTaskRunAnalyticsCostDrivers(taskRunAnalyticsFilters{TenantID: "test-tenant-id", Model: []string{"claude-fable-5"}, FromStartedAt: day.UnixMilli(), ToStartedAt: day.UnixMilli()}, "factory")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(out) != 1 || out[0].CostUsd != 12 {
+			t.Fatalf("driver total = %#v, want 12", out)
+		}
+		var sparklineCost float64
+		for _, cost := range out[0].DailyCost {
+			sparklineCost += cost.CostUsd
+		}
+		if sparklineCost != 12 {
+			t.Fatalf("sparkline cost = %v, want 12", sparklineCost)
+		}
+	})
+
 	t.Run("run filters use per-run usage", func(t *testing.T) {
 		s, db := newTaskRunAnalyticsAPITestServer(t)
 		day := time.Date(2026, time.July, 15, 0, 0, 0, 0, time.UTC)

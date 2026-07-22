@@ -155,6 +155,31 @@ func TestTaskRunAnalyticsCostsRunFiltersUseUsageByRun(t *testing.T) {
 	}
 }
 
+func TestTaskRunAnalyticsCostsModelFilteredRunsRetainAllUsageModels(t *testing.T) {
+	s, db := newTaskRunAnalyticsAPITestServer(t)
+	now := time.Date(2026, time.July, 15, 12, 0, 0, 0, time.UTC)
+	insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{RunID: "multi-model", AttemptID: "multi-model-attempt", ClawID: "multi-model-claw", TenantID: "test-tenant-id", OwnerType: taskRunOwnerFactory, Factory: "factory", Model: "claude-fable-5", StartedAt: now.UnixMilli()})
+	seedTaskRunAnalyticsRunUsageWithModel(t, db, "multi-model", "claude-session", "claude-fable-5", now, 7, 70)
+	seedTaskRunAnalyticsRunUsageWithModel(t, db, "multi-model", "gpt-session", "gpt-5.6", now, 5, 50)
+
+	response, err := s.readTaskRunAnalyticsCostsWithOptions(taskRunAnalyticsFilters{TenantID: "test-tenant-id", Model: []string{"claude-fable-5"}, FromStartedAt: now.UnixMilli(), ToStartedAt: now.UnixMilli()}, now, 0, "model", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.Today.CostUsd != 12 || len(response.DailySeries) != 1 || response.DailySeries[0].CostUsd != 12 || response.DailySeries[0].RunCount != 1 {
+		t.Fatalf("model-filtered daily costs = %#v, want full cost 12", response)
+	}
+	modelCosts := map[string]float64{}
+	for _, series := range response.SeriesByModel {
+		for _, daily := range series.DailySeries {
+			modelCosts[series.Model] += daily.CostUsd
+		}
+	}
+	if modelCosts["claude-fable-5"] != 7 || modelCosts["gpt-5.6"] != 5 {
+		t.Fatalf("model series = %#v, want claude-fable-5=7 and gpt-5.6=5", modelCosts)
+	}
+}
+
 func TestTaskRunAnalyticsCostsUseRunFiltersDetectsEligibilityFilters(t *testing.T) {
 	for _, test := range []struct {
 		name string
@@ -293,8 +318,12 @@ func seedTaskRunAnalyticsUsage(t *testing.T, db *sql.DB, tenant string, day time
 }
 
 func seedTaskRunAnalyticsRunUsage(t *testing.T, db *sql.DB, runID string, day time.Time, cost float64, tokens int64) {
+	seedTaskRunAnalyticsRunUsageWithModel(t, db, runID, "session-"+runID, "gpt-5", day, cost, tokens)
+}
+
+func seedTaskRunAnalyticsRunUsageWithModel(t *testing.T, db *sql.DB, runID, sessionKey, model string, day time.Time, cost float64, tokens int64) {
 	t.Helper()
-	_, err := db.Exec(`INSERT INTO task_run_usage(id, tenant_id, run_id, session_key, model, committed_total_tokens, committed_cost_usd, usage_day, first_seen_at, updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)`, "usage-"+runID, "test-tenant-id", runID, "session-"+runID, "gpt-5", tokens, cost, day.Format("2006-01-02"), day.UnixMilli(), day.UnixMilli())
+	_, err := db.Exec(`INSERT INTO task_run_usage(id, tenant_id, run_id, session_key, model, committed_total_tokens, committed_cost_usd, usage_day, first_seen_at, updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)`, "usage-"+runID+"-"+sessionKey, "test-tenant-id", runID, sessionKey, model, tokens, cost, day.Format("2006-01-02"), day.UnixMilli(), day.UnixMilli())
 	if err != nil {
 		t.Fatal(err)
 	}
