@@ -190,6 +190,9 @@ export interface AnalyticsEffectiveness {
   successRate: number
   uniqueTickets: number
   ticketSuccessRate: number
+  ticketsByDay: { date: string; delivered: number; inProgress: number; failed: number }[]
+  runsPerTicket: { bucket: string; tickets: number }[]
+  topTicketsByCost: { issueId: string; issueTitle: string; costUsd: number; runs: number; outcome: string }[]
   prior?: {
     successRate: number
     ticketSuccessRate: number

@@ -7,6 +7,7 @@ import {
   Bar,
   BarChart,
   CartesianGrid,
+  LabelList,
   Legend,
   Line,
   LineChart,
@@ -70,6 +71,9 @@ const chartConfig = {
   humanInTheLoop: { label: "Human in the loop", color: "#2a78d6" },
   warning: { label: "Warning", color: "#fab219" },
   failed: { label: "Failed", color: "#d03b3b" },
+  ticketDelivered: { label: "Delivered", color: "#0ca30c" },
+  ticketInProgress: { label: "In progress", color: "#64748b" },
+  ticketFailed: { label: "Failed", color: "#d03b3b" },
   costPerMergedPr: { label: "Cost / merged PR", color: "var(--chart-1)" },
 } satisfies ChartConfig
 const usd = new Intl.NumberFormat(undefined, {
@@ -409,6 +413,15 @@ export function AnalyticsCommandCenter({ workspaceScope }: { workspaceScope?: st
           </ChartCard>
         </div>
 
+        <div className="grid gap-5 lg:grid-cols-2">
+          <ChartCard title="Ticket throughput" info="Each bar is a day: how many distinct tickets had their first run that day, by how the ticket ended up. Delivered = at least one run delivered the work.">
+            <TicketThroughputChart effect={effect} />
+          </ChartCard>
+          <ChartCard title="Runs per ticket" info="How many runs each ticket needed. A long tail of 3+ means lots of retries on the same tickets.">
+            <RunsPerTicketChart effect={effect} />
+          </ChartCard>
+        </div>
+
         <RunsTable
           runs={runs}
           page={cursorStack.length}
@@ -440,8 +453,11 @@ export function AnalyticsCommandCenter({ workspaceScope }: { workspaceScope?: st
           <ChartCard title="Workflow cost comparison" info="Daily spend of the most expensive workflows in the selected period, compared side by side.">
             <WorkflowCostComparisonChart drivers={drivers} />
           </ChartCard>
-          <CostDrivers drivers={drivers} />
+          <ChartCard title="Most expensive tickets" info="Where the money concentrates: the costliest tickets in the selected period (cost counts only this period's runs).">
+            <TopTicketsByCostChart effect={effect} />
+          </ChartCard>
         </div>
+        <CostDrivers drivers={drivers} />
       </div>
       <RunDetailPanel
         run={selectedRun}
@@ -540,6 +556,10 @@ function DailyCostChart({ costs, modelData }: { costs?: CostOverview; modelData:
 function WorkflowCostComparisonChart({ drivers }: { drivers: AnalyticsCostDriver[] }) { const { data, topNames } = useWorkflowCostComparisonData(drivers); if (drivers.length === 0) return <p className="py-8 text-center text-sm text-muted-foreground">No cost data for this period.</p>; return <ChartContainer config={chartConfig} className="h-64 w-full"><LineChart data={data}><CartesianGrid vertical={false} /><XAxis dataKey="date" tickFormatter={formatDate} /><YAxis /><ChartTooltip content={<ChartTooltipContent />} /><Legend />{topNames.map((name, index) => <Line key={name} type="monotone" dataKey={name} name={name} stroke={`var(--chart-${index + 1})`} dot={false} strokeWidth={2} />)}{drivers.length > 5 && <Line type="monotone" dataKey="Other" name="Other" stroke="var(--muted-foreground)" dot={false} strokeWidth={2} />}</LineChart></ChartContainer> }
 function OutcomesChart({ effect }: { effect?: AnalyticsEffectiveness }) { return <ChartContainer config={chartConfig} className="h-64 w-full"><BarChart data={effect?.outcomesByDay}><CartesianGrid vertical={false} /><XAxis dataKey="date" tickFormatter={formatDate} /><YAxis allowDecimals={false} /><ChartTooltip content={<ChartTooltipContent />} /><Legend /><Bar dataKey="clean" name="Clean" stackId="outcome" fill="var(--color-clean)" /><Bar dataKey="humanInTheLoop" name="Human in the loop" stackId="outcome" fill="var(--color-humanInTheLoop)" /><Bar dataKey="warning" name="Warning" stackId="outcome" fill="var(--color-warning)" /><Bar dataKey="failed" name="Failed" stackId="outcome" fill="var(--color-failed)" /></BarChart></ChartContainer> }
 function DeliveryFunnel({ effect }: { effect?: AnalyticsEffectiveness }) { const stages = Object.entries(effect?.funnel ?? {}); return <div className="space-y-3 pt-3">{stages.map(([name, value], index) => { const previous = index ? Number(stages[index - 1][1]) : 0; return <div key={name}><div className="mb-1 flex justify-between text-sm"><span>{name.replace(/([A-Z])/g, " $1")}</span><span className="tabular-nums">{value} {index ? `(${formatPercent(previous ? Number(value) / previous : undefined)})` : ""}</span></div><div className="h-5 rounded bg-muted"><div className="h-full rounded bg-chart-1" style={{ width: `${(Number(value) / (effect?.funnel.started || 1)) * 100}%` }} /></div></div> })}</div> }
+function TicketThroughputChart({ effect }: { effect?: AnalyticsEffectiveness }) { if (!effect?.ticketsByDay?.length) return <p className="py-8 text-center text-sm text-muted-foreground">No ticket data for this period.</p>; return <ChartContainer config={chartConfig} className="h-64 w-full"><BarChart data={effect.ticketsByDay}><CartesianGrid vertical={false} /><XAxis dataKey="date" tickFormatter={formatDate} /><YAxis allowDecimals={false} /><ChartTooltip content={<ChartTooltipContent />} /><Legend /><Bar dataKey="delivered" name="Delivered" stackId="ticket" fill="var(--color-ticketDelivered)" /><Bar dataKey="inProgress" name="In progress" stackId="ticket" fill="var(--color-ticketInProgress)" /><Bar dataKey="failed" name="Failed" stackId="ticket" fill="var(--color-ticketFailed)" /></BarChart></ChartContainer> }
+function RunsPerTicketChart({ effect }: { effect?: AnalyticsEffectiveness }) { if (!effect?.runsPerTicket?.length) return <p className="py-8 text-center text-sm text-muted-foreground">No ticket data for this period.</p>; return <ChartContainer config={chartConfig} className="h-64 w-full"><BarChart data={effect.runsPerTicket} layout="vertical"><CartesianGrid horizontal={false} /><XAxis type="number" allowDecimals={false} /><YAxis type="category" dataKey="bucket" width={40} /><Bar dataKey="tickets" fill="var(--chart-1)" radius={4}><LabelList dataKey="tickets" position="right" /></Bar></BarChart></ChartContainer> }
+function TopTicketTooltip({ active, payload }: { active?: boolean; payload?: { payload?: AnalyticsEffectiveness["topTicketsByCost"][number] }[] }) { const ticket = payload?.[0]?.payload; if (!active || !ticket) return null; const outcome = ticket.outcome === "in_progress" ? "In progress" : ticket.outcome ? ticket.outcome.charAt(0).toUpperCase() + ticket.outcome.slice(1) : "—"; return <div className={`${tooltipContentClassName} px-3 py-2 text-xs`}><div className="font-medium">{ticket.issueTitle}</div><div className="text-muted-foreground">{usd.format(ticket.costUsd)} · {ticket.runs} runs · {outcome}</div></div> }
+function TopTicketsByCostChart({ effect }: { effect?: AnalyticsEffectiveness }) { if (!effect?.topTicketsByCost?.length) return <p className="py-8 text-center text-sm text-muted-foreground">No ticket data for this period.</p>; return <ChartContainer config={chartConfig} className="h-64 w-full"><BarChart data={effect.topTicketsByCost} layout="vertical"><CartesianGrid horizontal={false} /><XAxis type="number" tickFormatter={(value) => usd.format(value)} /><YAxis type="category" dataKey="issueId" width={90} tickFormatter={(id) => (id.length > 14 ? id.slice(0, 13) + "…" : id)} /><ChartTooltip content={<TopTicketTooltip />} /><Bar dataKey="costUsd" fill="var(--chart-1)" radius={4}><LabelList dataKey="costUsd" position="right" formatter={(value: number) => usd.format(value)} /></Bar></BarChart></ChartContainer> }
 function CostPerMergedPrChart({ effect }: { effect?: AnalyticsEffectiveness }) { return <ChartContainer config={chartConfig} className="h-64 w-full"><LineChart data={effect?.costPerMergedPr.weekly}><CartesianGrid vertical={false} /><XAxis dataKey="weekStart" tickFormatter={formatDate} /><YAxis /><ChartTooltip content={<ChartTooltipContent />} /><ReferenceLine y={effect?.costPerMergedPr.average} stroke="var(--muted-foreground)" /><Line type="monotone" dataKey="costPerMergedPr" name="Cost per merged PR" stroke="var(--color-costPerMergedPr)" dot={false} /></LineChart></ChartContainer> }
 function CostDrivers({ drivers }: { drivers: AnalyticsCostDriver[] }) {
   return <section className="rounded-lg border bg-card p-4"><div className="mb-3 flex items-center justify-between gap-3"><div><div className="flex items-center gap-1"><h2 className="text-sm font-semibold">Top cost drivers</h2><InfoTooltip text="Where the money goes: total spend and efficiency per workflow in the selected period." /></div><p className="text-xs text-muted-foreground">By workflow</p></div></div><Table><TableHeader><TableRow><TableHead>Workflow</TableHead><TableHead className="text-right">Runs</TableHead><TableHead className="text-right">Success</TableHead><TableHead className="text-right">Cost</TableHead><TableHead className="text-right">Cost / merged PR</TableHead></TableRow></TableHeader><TableBody>{drivers.slice(0, 10).map((driver) => <TableRow key={driver.name}><TableCell className="font-medium">{driver.name}</TableCell><TableCell className="text-right tabular-nums">{driver.runs}</TableCell><TableCell className="text-right tabular-nums">{formatPercent(driver.successRate)}</TableCell><TableCell className="text-right tabular-nums">{usd.format(driver.costUsd)}</TableCell><TableCell className="text-right tabular-nums">{usd.format(driver.costPerMergedPr)}</TableCell></TableRow>)}</TableBody></Table></section>
