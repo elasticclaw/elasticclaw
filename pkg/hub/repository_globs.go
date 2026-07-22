@@ -128,12 +128,18 @@ func (s *Server) expandWorkspaceRepositories(ctx context.Context, workspaceName 
 
 		installations, err := provider.ListInstallations(ctx)
 		if err != nil {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
 			failures = append(failures, fmt.Sprintf("app %d: %v", appConfig.AppID, err))
 			continue
 		}
 		for _, installation := range installations {
 			available, err := provider.ListInstallationRepositories(ctx, installation.ID)
 			if err != nil {
+				if ctx.Err() != nil {
+					return nil, ctx.Err()
+				}
 				failures = append(failures, fmt.Sprintf("app %d installation %d: %v", appConfig.AppID, installation.ID, err))
 				continue
 			}

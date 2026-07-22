@@ -506,6 +506,10 @@ func assignedToMatches(filter, assignee string) bool {
 }
 
 func (s *Server) createClawForGitHubIssueWorkflow(workspace *types.WorkspaceConfig, workflow *types.WorkflowConfig, payload githubIssuesWebhookPayload, reason string) (string, bool, error) {
+	return s.createClawForGitHubIssueWorkflowContext(context.Background(), workspace, workflow, payload, reason)
+}
+
+func (s *Server) createClawForGitHubIssueWorkflowContext(ctx context.Context, workspace *types.WorkspaceConfig, workflow *types.WorkflowConfig, payload githubIssuesWebhookPayload, reason string) (string, bool, error) {
 	issueID := fmt.Sprintf("%s/%d", payload.Repository.FullName, payload.Issue.Number)
 	issueCreatedAt := parseRFC3339Timestamp(payload.Issue.CreatedAt)
 	var existing string
@@ -549,6 +553,7 @@ func (s *Server) createClawForGitHubIssueWorkflow(workspace *types.WorkspaceConf
 	}
 
 	clawID, _, err := s.createClawFromWorkflowWithOptions(workspace, workflow, workflowCreateOptions{
+		ctx:                  ctx,
 		workspaceFiles:       templateFiles,
 		clawName:             clawName,
 		githubIssueID:        issueID,

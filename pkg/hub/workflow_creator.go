@@ -15,6 +15,7 @@ import (
 )
 
 type workflowCreateOptions struct {
+	ctx                  context.Context
 	inputs               map[string]string
 	workspaceFiles       map[string]string
 	clawName             string
@@ -43,7 +44,11 @@ func workspaceTemplateFiles(files map[string]string) map[string]string {
 }
 
 func (s *Server) createClawFromWorkflow(workspace *types.WorkspaceConfig, workflow *types.WorkflowConfig, inputs map[string]string, reason string) (string, bool, error) {
-	return s.createClawFromWorkflowWithOptions(workspace, workflow, workflowCreateOptions{inputs: inputs, reason: reason})
+	return s.createClawFromWorkflowContext(context.Background(), workspace, workflow, inputs, reason)
+}
+
+func (s *Server) createClawFromWorkflowContext(ctx context.Context, workspace *types.WorkspaceConfig, workflow *types.WorkflowConfig, inputs map[string]string, reason string) (string, bool, error) {
+	return s.createClawFromWorkflowWithOptions(workspace, workflow, workflowCreateOptions{ctx: ctx, inputs: inputs, reason: reason})
 }
 
 func (s *Server) createClawFromWorkflowWithOptions(workspace *types.WorkspaceConfig, workflow *types.WorkflowConfig, opts workflowCreateOptions) (string, bool, error) {
@@ -190,7 +195,11 @@ func (s *Server) createClawFromWorkflowWithOptions(workspace *types.WorkspaceCon
 		repositories = append([]types.GitHubRepoAccess(nil), workspace.Repositories...)
 	}
 	if hasRepositoryGlob(repositories) {
-		expandCtx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+		parentCtx := opts.ctx
+		if parentCtx == nil {
+			parentCtx = context.Background()
+		}
+		expandCtx, cancel := context.WithTimeout(parentCtx, 45*time.Second)
 		defer cancel()
 		repositories, err = s.expandWorkspaceRepositories(expandCtx, workspace.Name, repositories)
 		if err != nil {

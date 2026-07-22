@@ -7,6 +7,7 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -84,11 +85,6 @@ func TestHasRepositoryGlob(t *testing.T) {
 }
 
 func TestListInstallationRepositoriesPaginates(t *testing.T) {
-	privateKey, err := rsa.GenerateKey(rand.Reader, 1024)
-	if err != nil {
-		t.Fatalf("generate private key: %v", err)
-	}
-
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodPost && r.URL.Path == "/app/installations/42/access_tokens":
@@ -121,12 +117,7 @@ func TestListInstallationRepositoriesPaginates(t *testing.T) {
 	}))
 	defer server.Close()
 
-	provider := &GitHubTokenProvider{
-		cfg:        &types.GitHubAppConfig{AppID: 123},
-		privateKey: privateKey,
-		apiBaseURL: server.URL,
-		httpClient: server.Client(),
-	}
+	provider := newTestGitHubTokenProvider(t, server)
 	repositories, err := provider.ListInstallationRepositories(context.Background(), 42)
 	if err != nil {
 		t.Fatalf("ListInstallationRepositories: %v", err)
@@ -136,6 +127,42 @@ func TestListInstallationRepositoriesPaginates(t *testing.T) {
 	}
 	if repositories[100].FullName != "acme/repo-100" {
 		t.Fatalf("last repository = %q, want acme/repo-100", repositories[100].FullName)
+	}
+}
+
+func TestListInstallationRepositoriesIncludesGitHubErrorMessage(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/app/installations/42/access_tokens":
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"token":"installation-token","expires_at":"2030-01-01T00:00:00Z"}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/installation/repositories":
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte(`{"message":"Resource not accessible by integration"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	provider := newTestGitHubTokenProvider(t, server)
+	_, err := provider.ListInstallationRepositories(context.Background(), 42)
+	if err == nil || !strings.Contains(err.Error(), "status 403: Resource not accessible by integration") {
+		t.Fatalf("error = %v, want GitHub status and message", err)
+	}
+}
+
+func newTestGitHubTokenProvider(t *testing.T, server *httptest.Server) *GitHubTokenProvider {
+	t.Helper()
+	privateKey, err := rsa.GenerateKey(rand.Reader, 1024)
+	if err != nil {
+		t.Fatalf("generate private key: %v", err)
+	}
+	return &GitHubTokenProvider{
+		cfg:        &types.GitHubAppConfig{AppID: 123},
+		privateKey: privateKey,
+		apiBaseURL: server.URL,
+		httpClient: server.Client(),
 	}
 }
 
@@ -192,7 +219,7 @@ func TestWorkflowCreationStoresExpandedRepositories(t *testing.T) {
 	}
 	workflow := &types.WorkflowConfig{Name: "infra-update", Provider: "noop"}
 
-	clawID, _, err := s.createClawFromWorkflow(workspace, workflow, nil, "test")
+	clawID, _, err := s.createClawFromWorkflowContext(context.Background(), workspace, workflow, nil, "test")
 	if err != nil {
 		t.Fatalf("createClawFromWorkflow: %v", err)
 	}
@@ -207,5 +234,19 @@ func TestWorkflowCreationStoresExpandedRepositories(t *testing.T) {
 	want := []types.GitHubRepoAccess{{Repo: "acme/api-infra-prod", Permissions: "write"}}
 	if !reflect.DeepEqual(repositories, want) {
 		t.Fatalf("stored repositories = %#v, want %#v", repositories, want)
+	}
+
+	canceledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, _, err = s.createClawFromWorkflowContext(canceledCtx, workspace, workflow, nil, "canceled test")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled workflow creation error = %v, want context.Canceled", err)
+	}
+	var clawCount int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM claws`).Scan(&clawCount); err != nil {
+		t.Fatalf("count claws: %v", err)
+	}
+	if clawCount != 1 {
+		t.Fatalf("claw count after canceled expansion = %d, want 1", clawCount)
 	}
 }

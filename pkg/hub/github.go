@@ -192,12 +192,15 @@ func (p *GitHubTokenProvider) ListInstallationRepositories(ctx context.Context, 
 		if err != nil {
 			return nil, fmt.Errorf("github list installation repositories: %w", err)
 		}
+		if resp.StatusCode != http.StatusOK {
+			var errBody map[string]interface{}
+			_ = json.NewDecoder(resp.Body).Decode(&errBody)
+			resp.Body.Close()
+			return nil, fmt.Errorf("github list installation repositories: status %d: %v", resp.StatusCode, errBody["message"])
+		}
 		var result githubInstallationRepositoriesResponse
 		decodeErr := json.NewDecoder(resp.Body).Decode(&result)
 		resp.Body.Close()
-		if resp.StatusCode != http.StatusOK {
-			return nil, fmt.Errorf("github list installation repositories: status %d", resp.StatusCode)
-		}
 		if decodeErr != nil {
 			return nil, fmt.Errorf("decode installation repositories: %w", decodeErr)
 		}
