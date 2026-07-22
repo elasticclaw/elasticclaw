@@ -379,12 +379,22 @@ export function AnalyticsCommandCenter({ workspaceScope }: { workspaceScope?: st
               change={calculateDelta(stats?.prOpenToMergeMs.avgMs, stats?.prior?.prOpenToMergeMs.avgMs)}
             />
           </KpiGroup>
-          <KpiGroup title="Cost" columns="sm:grid-cols-2">
+          <KpiGroup title="Cost" columns="sm:grid-cols-3">
             <Kpi label="Total cost" title="Total AI spend of the runs in the selected period." value={usdWhole.format(totalCost)} change={costDelta} cost />
             <Kpi
               label="Cost per run"
               title="Total cost divided by the number of runs."
               value={usd.format(summary?.totalRuns ? totalCost / summary.totalRuns : 0)}
+              cost
+            />
+            <Kpi
+              label="Cost per ticket"
+              title="Total cost divided by the number of distinct tickets worked on in the period."
+              value={effect?.uniqueTickets ? usd.format(totalCost / effect.uniqueTickets) : "—"}
+              change={calculateDelta(
+                effect?.uniqueTickets ? totalCost / effect.uniqueTickets : undefined,
+                priorCost && effect?.prior?.uniqueTickets ? priorCost / effect.prior.uniqueTickets : undefined
+              )}
               cost
             />
           </KpiGroup>
