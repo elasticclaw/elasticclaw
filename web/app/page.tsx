@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useMemo, useEffect, useCallback, useRef } from "react"
+import { useState, useMemo, useEffect, useCallback, useRef, useSyncExternalStore } from "react"
 import { HeaderBar } from "@/components/header-bar"
 import { AgentList } from "@/components/agent-list"
 import { DetailPane } from "@/components/detail-pane"
@@ -12,6 +12,8 @@ import { isConfigured, type Workflow } from "@/lib/api"
 import { requestAuthToken } from "@/lib/auth-storage"
 import { useIsMobile } from "@/hooks/use-mobile"
 
+const noopSubscribe = () => () => {}
+
 export default function Home() {
   const [selectedClawId, setSelectedClawId] = useState<string | null>(() => {
     if (typeof window === 'undefined') return null
@@ -19,10 +21,11 @@ export default function Home() {
   })
   const [searchQuery, setSearchQuery] = useState("")
   const [activeTagFilters, setActiveTagFilters] = useState<string[]>([])
-  const [configuredState, setConfiguredState] = useState<boolean | null>(() => {
-    if (typeof window === "undefined") return null
-    return isConfigured()
-  })
+  // Hydration gate: the server snapshot keeps SSR and the hydration render on the
+  // loading placeholder, so storage-dependent UI only appears after hydration.
+  const hydrated = useSyncExternalStore(noopSubscribe, () => true, () => false)
+  const [setupDone, setSetupDone] = useState(false)
+  const configuredState: boolean | null = hydrated ? (setupDone || isConfigured()) : null
   const [isAdmin, setIsAdmin] = useState(false)
   const [selectedWorkflow, setSelectedWorkflow] = useState<Workflow | null>(null)
   const isMobile = useIsMobile()
@@ -207,7 +210,7 @@ export default function Home() {
 
   // Show setup screen if not configured
   if (!configuredState) {
-    return <SetupScreen onConnected={() => setConfiguredState(true)} />
+    return <SetupScreen onConnected={() => setSetupDone(true)} />
   }
 
   return (
