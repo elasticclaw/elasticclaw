@@ -388,7 +388,7 @@ export function AnalyticsCommandCenter({ workspaceScope }: { workspaceScope?: st
               cost
             />
             <Kpi
-              label="Cost per ticket"
+              label="Cost per unique ticket"
               title="Total cost divided by the number of distinct tickets worked on in the period."
               value={effect?.uniqueTickets ? usd.format(totalCost / effect.uniqueTickets) : "—"}
               change={calculateDelta(
@@ -565,7 +565,7 @@ function Kpi({ label, value, change, good, cost, onClick, title }: { label: stri
       {/* Always render the delta row, even when there's no change, so every
           tile reserves the same space and labels/values align across the grid. */}
       <p
-        className={`text-xs font-medium ${
+        className={`truncate text-xs font-medium ${
           change == null ? "invisible" : bad ? "text-red-600 dark:text-red-400" : "text-emerald-600 dark:text-emerald-400"
         }`}
       >
