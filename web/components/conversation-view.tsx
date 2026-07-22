@@ -62,6 +62,8 @@ interface ConversationViewProps {
   onReorderClaws: (ids: string[]) => void
 }
 
+const FOLLOW_LATEST_THRESHOLD_PX = 24
+
 function formatUptime(seconds: number): string {
   if (seconds === 0) return "—"
   if (seconds < 60) return `${seconds}s`
@@ -307,7 +309,8 @@ function ClawBoardCard({
   const hasUnread = claw.unreadCount > 0
   const isPending = claw.status === "provisioning" || claw.status === "error" || claw.status === "offline"
   const msgScrollRef = useRef<HTMLDivElement>(null)
-  const [showCardScrollBtn, setShowCardScrollBtn] = useState(false)
+  const cardFollowingLatest = useRef(true)
+  const [isCardFollowingLatest, setIsCardFollowingLatest] = useState(true)
   const [expandedActivityGroups, setExpandedActivityGroups] = useState<Record<string, boolean>>({})
   const conversationItems = useMemo(() => compactActivityRuns(messages), [messages])
   const latestActivity = useMemo(() => latestActivityMessage(messages), [messages])
@@ -341,14 +344,29 @@ function ClawBoardCard({
   }, [latestActivity])
 
   useEffect(() => {
+    if (!cardFollowingLatest.current) return
     const el = msgScrollRef.current
-    if (el) el.scrollTop = el.scrollHeight
+    if (!el) return
+    const scrollToLatest = () => {
+      if (cardFollowingLatest.current) el.scrollTop = el.scrollHeight
+    }
+    const timers = [0, 50, 150].map((delay) => window.setTimeout(scrollToLatest, delay))
+    return () => timers.forEach(window.clearTimeout)
   }, [messages])
 
   const handleCardScroll = useCallback(() => {
     const el = msgScrollRef.current
     if (!el) return
-    setShowCardScrollBtn(el.scrollHeight - el.scrollTop - el.clientHeight > 60)
+    const followingLatest = el.scrollHeight - el.scrollTop - el.clientHeight <= FOLLOW_LATEST_THRESHOLD_PX
+    cardFollowingLatest.current = followingLatest
+    setIsCardFollowingLatest(followingLatest)
+  }, [])
+
+  const scrollCardToLatest = useCallback(() => {
+    cardFollowingLatest.current = true
+    setIsCardFollowingLatest(true)
+    const el = msgScrollRef.current
+    if (el) el.scrollTop = el.scrollHeight
   }, [])
   
   const handleSubmit = (e: React.FormEvent) => {
@@ -361,6 +379,7 @@ function ClawBoardCard({
     onSendMessage(trimmed + footer)
     setInput("")
     clearAttachments()
+    scrollCardToLatest()
     if (cardTextareaRef.current) {
       cardTextareaRef.current.style.height = "auto"
       cardTextareaRef.current.style.overflowY = "hidden"
@@ -618,12 +637,18 @@ function ClawBoardCard({
               })
             )}
           </div>
-          {showCardScrollBtn && (
+          {!isCardFollowingLatest && (
             <button
-              onClick={() => { const el = msgScrollRef.current; if (el) el.scrollTop = el.scrollHeight }}
-              className="absolute bottom-1 left-1/2 -translate-x-1/2 z-10 size-6 rounded-full bg-secondary border border-border flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-accent transition-colors shadow-sm"
+              type="button"
+              onClick={(event) => {
+                event.stopPropagation()
+                scrollCardToLatest()
+              }}
+              className="absolute bottom-2 left-1/2 -translate-x-1/2 z-10 flex items-center gap-1 px-2.5 py-1 rounded-full bg-background/95 backdrop-blur-sm border border-border text-[10px] font-medium text-muted-foreground hover:text-foreground hover:bg-accent transition-colors shadow-md"
+              aria-label="Follow latest claw activity"
             >
-              <ChevronDown className="size-3.5" />
+              <ChevronDown className="size-3" />
+              <span>Latest</span>
             </button>
           )}
           </div>
