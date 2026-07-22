@@ -282,7 +282,7 @@ func (s *Server) processGitHubPREvent(payload githubPRPayload) {
 						msg = fmt.Sprintf("PR #%d was reopened.", payload.Number)
 					}
 					log.Printf("[factory:%s] github PR #%d action=%s — injecting into claw %s", factory.Name, payload.Number, payload.Action, existingClawID[:8])
-					s.injectHubMessageByID(existingClawID, msg)
+					s.injectExternalHubMessageByID(existingClawID, msg)
 				}
 			default:
 				log.Printf("[factory:%s] github PR #%d action=%s — claw exists, no action taken", factory.Name, payload.Number, payload.Action)
@@ -471,7 +471,7 @@ func (s *Server) processGitHubIssueComment(payload githubIssueCommentPayload) {
 	existingClawID := s.findClawForGitHubIssue(issueURL)
 	if existingClawID != "" {
 		log.Printf("[github-webhook] issue_comment on issue #%d — injecting into existing claw %s", payload.Issue.Number, existingClawID[:8])
-		s.injectHubMessageByID(existingClawID, commentMsg)
+		s.injectExternalHubMessageByID(existingClawID, commentMsg)
 		return
 	}
 
@@ -505,7 +505,7 @@ func (s *Server) processGitHubIssueCommentEvent(payload githubIssueCommentPayloa
 	if existingClawID != "" {
 		// Inject the comment into the existing claw
 		log.Printf("[github-webhook] issue_comment on PR #%d — injecting into existing claw %s", prNumber, existingClawID[:8])
-		s.injectHubMessageByID(existingClawID, commentMsg)
+		s.injectExternalHubMessageByID(existingClawID, commentMsg)
 		return
 	}
 

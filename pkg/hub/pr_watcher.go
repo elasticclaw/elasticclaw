@@ -581,7 +581,7 @@ func (s *Server) checkPRComments(pr clawPR, commentsData []interface{}, opts prC
 	}
 
 	log.Printf("[pr-watcher] forwarding %d new comment(s) to claw %s", len(newComments), pr.clawID[:8])
-	s.injectHubMessageByID(pr.clawID, strings.Join(newComments, "\n\n"))
+	s.injectExternalHubMessageByID(pr.clawID, strings.Join(newComments, "\n\n"))
 }
 
 // checkBugbotComments polls PR review comments for new bugbot entries.
@@ -788,7 +788,7 @@ func (s *Server) forwardHumanReviewComment(pr clawPR, id int64, login, body, htm
 		"comment_id": id,
 		"path":       path,
 	})
-	s.injectHubMessageByID(pr.clawID, formatHumanReviewCommentMessage(login, pr.prNumber, body, htmlURL, path, line))
+	s.injectExternalHubMessageByID(pr.clawID, formatHumanReviewCommentMessage(login, pr.prNumber, body, htmlURL, path, line))
 }
 
 func (s *Server) forwardHumanRequestedChangesReview(pr clawPR, id int64, login, body, htmlURL string) {
@@ -800,7 +800,7 @@ func (s *Server) forwardHumanRequestedChangesReview(pr clawPR, id int64, login, 
 		"pr_number": pr.prNumber,
 		"review_id": id,
 	})
-	s.injectHubMessageByID(pr.clawID, formatHumanRequestedChangesMessage(login, pr.prNumber, body, htmlURL))
+	s.injectExternalHubMessageByID(pr.clawID, formatHumanRequestedChangesMessage(login, pr.prNumber, body, htmlURL))
 }
 
 // detectHumanCodePush compares a tracked PR's head SHA against the last
@@ -1032,7 +1032,18 @@ func (s *Server) injectHubMessageByID(clawID, content string) {
 	s.injectMessage(clawID, content, "hub")
 }
 
+// injectExternalHubMessageByID delivers an external event that is rendered as
+// a hub message. Unlike workflow bookkeeping, new review or tracker activity
+// is material progress and resumes a no-progress pause.
+func (s *Server) injectExternalHubMessageByID(clawID, content string) {
+	s.resumeNoProgressAfterUserInput(clawID)
+	s.injectMessage(clawID, content, "hub")
+}
+
 func (s *Server) injectMessage(clawID, content, role string) {
+	if role == "user" {
+		s.resumeNoProgressAfterUserInput(clawID)
+	}
 	// Resolve tenant
 	var tenantID string
 	if err := s.db.QueryRow(`SELECT tenant_id FROM claws WHERE id=?`, clawID).Scan(&tenantID); err != nil {

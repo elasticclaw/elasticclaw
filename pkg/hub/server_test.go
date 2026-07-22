@@ -2064,6 +2064,33 @@ func TestReconnectDeliversQueuedMessagesInOrder(t *testing.T) {
 	waitForMessagesDelivered(t, db, clawID, 2)
 }
 
+func TestDeliveredPromptReservesTurnBeforeFirstActivity(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{ClawToken: "claw-token"}, "", "", "")
+	const clawID = "claw-reserved-turn"
+	insertPendingMessage(t, db, clawID, "first", now().Add(-time.Second))
+	insertPendingMessage(t, db, clawID, "second", now())
+
+	ts := httptest.NewServer(s.Handler())
+	t.Cleanup(ts.Close)
+	clawWS := connectTestClaw(t, ts, clawID)
+	t.Cleanup(func() { _ = clawWS.Close(websocket.StatusNormalClosure, "done") })
+	if got := readTestHubMessage(t, clawWS).Content; got != "first" {
+		t.Fatalf("first delivered content = %q, want first", got)
+	}
+
+	s.mu.RLock()
+	cc := s.claws[clawID]
+	s.mu.RUnlock()
+	s.sendNextQueuedMessage(cc)
+	assertMessagesDelivered(t, db, clawID, 1)
+	cc.mu.RLock()
+	reserved := cc.awaitingResponse
+	cc.mu.RUnlock()
+	if !reserved {
+		t.Fatal("delivered prompt did not reserve the turn")
+	}
+}
+
 func TestReconnectRedeliversMessageUnmarkedAfterSuccessfulWrite(t *testing.T) {
 	s, db := NewTestServerWithConfig(t, &types.HubConfig{ClawToken: "claw-token"}, "", "", "")
 	const clawID = "claw-redeliver-pending"
