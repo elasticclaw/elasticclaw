@@ -1836,6 +1836,17 @@ func (gs *gatewaySession) createFreshSession(ctx context.Context, reason string)
 	return nil
 }
 
+func (gs *gatewaySession) abortActiveSession(ctx context.Context) error {
+	key := gs.getSessionKey()
+	if key == "" {
+		return nil
+	}
+	if _, err := gs.sendReq(ctx, "sessions.abort", map[string]string{"key": key}); err != nil {
+		return fmt.Errorf("sessions.abort: %w", err)
+	}
+	return nil
+}
+
 func isRecoverableSessionSendError(err error) bool {
 	var sendErr *sessionSendRequestError
 	if !errors.As(err, &sendErr) {
@@ -1843,7 +1854,32 @@ func isRecoverableSessionSendError(err error) bool {
 	}
 	msg := strings.ToLower(sendErr.err.Error())
 	return strings.Contains(msg, "context overflow") ||
-		strings.Contains(msg, "prompt too large")
+		strings.Contains(msg, "prompt too large") ||
+		isProviderRequestFormatError(sendErr.err)
+}
+
+func isProviderRequestFormatError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "provider rejected the request schema or tool payload")
+}
+
+// isRecoverableSessionLifecycleError identifies failures that can leave an
+// accepted OpenClaw turn stuck in the persistent session. Unlike a rejected
+// sessions.send request, these turns must not be replayed because they may
+// already have performed tool side effects. Rotating the session lets the next
+// hub message continue the story without inheriting the poisoned transcript.
+func isRecoverableSessionLifecycleError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var sendErr *sessionSendRequestError
+	if errors.As(err, &sendErr) {
+		return false
+	}
+	return errors.Is(err, context.DeadlineExceeded) || isProviderRequestFormatError(err)
 }
 
 // SendMessage sends a user message to the persistent session, streams chunks
@@ -1891,6 +1927,21 @@ func (gs *gatewaySession) SendMessage(ctx context.Context, message string, onChu
 				log.Printf("[gateway] retrying message after another goroutine reconnected gateway")
 			}
 			continue
+		}
+		if isRecoverableSessionLifecycleError(err) {
+			abortCtx, abortCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			abortErr := gs.abortActiveSession(abortCtx)
+			abortCancel()
+			if abortErr != nil {
+				log.Printf("[session] failed to abort poisoned session before recovery: %v", abortErr)
+			}
+			recoveryCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			resetErr := gs.createFreshSession(recoveryCtx, err.Error())
+			cancel()
+			if resetErr != nil {
+				return reply, fmt.Errorf("%w; session recovery failed: %v", err, resetErr)
+			}
+			return reply, fmt.Errorf("%w; OpenClaw session reset so the next message can continue", err)
 		}
 		if !isRecoverableSessionSendError(err) {
 			return reply, err
