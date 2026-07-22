@@ -7,6 +7,43 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+func TestValidateRepositoryAccessPatterns(t *testing.T) {
+	tests := []struct {
+		selector string
+		valid    bool
+	}{
+		{selector: "owner/repo", valid: true},
+		{selector: "*", valid: true},
+		{selector: "*-infra-*", valid: true},
+		{selector: "owner/*", valid: true},
+		{selector: "owner/repo-?", valid: true},
+		{selector: "owner/[ab]pi", valid: true},
+		{selector: "repo", valid: false},
+		{selector: "owner/", valid: false},
+		{selector: "owner/[", valid: false},
+		{selector: "owner/repo/extra", valid: false},
+		{selector: "owner name/*", valid: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.selector, func(t *testing.T) {
+			workspace := &WorkspaceConfig{
+				Name: "test",
+				Repositories: []GitHubRepoAccess{{
+					Repo:        tt.selector,
+					Permissions: "read",
+				}},
+			}
+			err := workspace.Validate()
+			if tt.valid && err != nil {
+				t.Fatalf("Validate() error = %v", err)
+			}
+			if !tt.valid && err == nil {
+				t.Fatal("Validate() succeeded for invalid repository selector")
+			}
+		})
+	}
+}
+
 func TestFactoryConfigValidate(t *testing.T) {
 	tests := []struct {
 		name    string

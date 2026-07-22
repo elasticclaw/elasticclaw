@@ -182,7 +182,7 @@ func (w *WorkspaceConfig) Validate() error {
 	if w.Name == "" {
 		return fmt.Errorf("workspace name is required")
 	}
-	if err := validateRepositoryAccessList("repositories", w.Repositories); err != nil {
+	if err := validateRepositoryAccessList("repositories", w.Repositories, true); err != nil {
 		return fmt.Errorf("workspace %q: %w", w.Name, err)
 	}
 	for _, workflow := range w.Workflows {

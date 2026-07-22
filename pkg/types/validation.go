@@ -2,6 +2,7 @@ package types
 
 import (
 	"fmt"
+	"path"
 	"regexp"
 	"strings"
 	"time"
@@ -582,19 +583,50 @@ func validateExternalTrigger(factoryName string, trigger *ExternalTrigger) error
 	return nil
 }
 
-func validateRepositoryAccessList(field string, repos []GitHubRepoAccess) error {
+func validateRepositoryAccessList(field string, repos []GitHubRepoAccess, allowPatterns bool) error {
 	for i, repo := range repos {
 		if repo.Repo == "" {
 			return fmt.Errorf("%s[%d]: repo is required", field, i)
 		}
-		if !repoRegex.MatchString(repo.Repo) {
+		if !allowPatterns && !repoRegex.MatchString(repo.Repo) {
 			return fmt.Errorf("%s[%d]: invalid repo format %q (expected owner/repo)", field, i, repo.Repo)
+		}
+		if allowPatterns && !validRepositoryAccessSelector(repo.Repo) {
+			return fmt.Errorf("%s[%d]: invalid repo format or pattern %q (expected owner/repo or a glob such as *, *-infra-*, or owner/*)", field, i, repo.Repo)
 		}
 		if repo.Permissions != "" && repo.Permissions != "read" && repo.Permissions != "write" {
 			return fmt.Errorf("%s[%d]: invalid permissions %q (must be read or write)", field, i, repo.Permissions)
 		}
 	}
 	return nil
+}
+
+func validRepositoryAccessSelector(selector string) bool {
+	if selector == "" || strings.TrimSpace(selector) != selector || strings.Count(selector, "/") > 1 {
+		return false
+	}
+
+	hasGlob := strings.ContainsAny(selector, "*?[")
+	if !hasGlob {
+		return repoRegex.MatchString(selector)
+	}
+	if _, err := path.Match(selector, ""); err != nil {
+		return false
+	}
+
+	parts := strings.Split(selector, "/")
+	if len(parts) == 2 && (parts[0] == "" || parts[1] == "") {
+		return false
+	}
+	for _, r := range selector {
+		if r == '/' || r == '*' || r == '?' || r == '[' || r == ']' ||
+			r == '-' || r == '_' || r == '.' ||
+			(r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 // Validate validates a TemplateConfig and returns an error if invalid.
@@ -616,13 +648,13 @@ func (t *TemplateConfig) Validate() error {
 		return fmt.Errorf("invalid color %q", t.Color)
 	}
 
-	if err := validateRepositoryAccessList("repositories", t.Repositories); err != nil {
+	if err := validateRepositoryAccessList("repositories", t.Repositories, false); err != nil {
 		return err
 	}
 
 	// Validate GitHub repos if provided
 	if t.GitHub != nil {
-		if err := validateRepositoryAccessList("github.repos", t.GitHub.Repos); err != nil {
+		if err := validateRepositoryAccessList("github.repos", t.GitHub.Repos, false); err != nil {
 			return err
 		}
 	}

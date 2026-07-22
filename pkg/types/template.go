@@ -281,9 +281,10 @@ type GitHubAppConfig struct {
 	PrivateKeyPEM string `yaml:"private_key_pem"` // PEM-encoded RSA private key (paste directly in yaml)
 }
 
-// GitHubRepoAccess specifies a repo and the permissions needed.
+// GitHubRepoAccess specifies a repo and the permissions needed. Workspace
+// repository lists may also use glob patterns.
 type GitHubRepoAccess struct {
-	Repo        string `yaml:"repo"        json:"repo"`        // e.g. "owner/repo"
+	Repo        string `yaml:"repo"        json:"repo"`        // e.g. "owner/repo", "*-infra-*", or "owner/*"
 	Permissions string `yaml:"permissions" json:"permissions"` // "read" or "write" (default: "read")
 }
 
@@ -292,6 +293,8 @@ type GitHubRepoAccess struct {
 //	repositories:
 //	  - repo: owner/repo
 //	    permissions: write
+//	  - repo: "*-infra-*"
+//	    permissions: read
 //
 // and the earlier shorthand form:
 //

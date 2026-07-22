@@ -189,6 +189,14 @@ func (s *Server) createClawFromWorkflowWithOptions(workspace *types.WorkspaceCon
 	if len(workspace.Repositories) > 0 {
 		repositories = append([]types.GitHubRepoAccess(nil), workspace.Repositories...)
 	}
+	if hasRepositoryGlob(repositories) {
+		expandCtx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+		defer cancel()
+		repositories, err = s.expandWorkspaceRepositories(expandCtx, workspace.Name, repositories)
+		if err != nil {
+			return "", false, fmt.Errorf("expand workspace repositories: %w", err)
+		}
+	}
 	if tmplCfg != nil {
 		instanceType = tmplCfg.InstanceType
 		llmKey = tmplCfg.LLMKey

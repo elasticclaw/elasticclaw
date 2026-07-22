@@ -91,6 +91,12 @@ provider: replicated
 # repositories:
 #   - repo: owner/repo
 #     permissions: write
+#   # Patterns without an owner match repository names. Use "*" for all repos.
+#   - repo: "*-infra-*"
+#     permissions: read
+#   # Patterns with an owner match the full owner/repository name.
+#   - repo: "owner/*"
+#     permissions: read
 #
 # Optional workspace environment:
 # env:
