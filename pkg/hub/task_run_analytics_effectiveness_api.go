@@ -35,10 +35,9 @@ type taskRunAnalyticsOutcomesDay struct {
 	Failed         int    `json:"failed"`
 }
 type taskRunAnalyticsFunnel struct {
-	Started       int `json:"started"`
-	AgentFinished int `json:"agentFinished"`
-	PROpened      int `json:"prOpened"`
-	PRMerged      int `json:"prMerged"`
+	AgentStarted int `json:"agentStarted"`
+	PROpened     int `json:"prOpened"`
+	PRFinished   int `json:"prFinished"`
 }
 type taskRunAnalyticsCostPerMerged struct {
 	Weekly  []taskRunAnalyticsWeeklyCost `json:"weekly"`
@@ -102,7 +101,7 @@ func (s *Server) readTaskRunAnalyticsEffectiveness(f taskRunAnalyticsFilters) (t
 
 func (s *Server) readTaskRunAnalyticsEffectivenessWithTicketAggregates(f taskRunAnalyticsFilters, includeTicketAggregates bool) (taskRunAnalyticsEffectivenessResponse, error) {
 	w, a := taskRunAnalyticsSummaryWhere(f)
-	rows, err := s.db.Query(`SELECT DATE(started_at/1000,'unixepoch'), status, COUNT(*), COALESCE(SUM(estimated_cost_usd),0), COALESCE(SUM(merged_pr_count),0), COALESCE(SUM(CASE WHEN merged_pr_count>0 THEN 1 ELSE 0 END),0), COALESCE(SUM(CASE WHEN started_at>0 THEN 1 ELSE 0 END),0), COALESCE(SUM(CASE WHEN agent_started_at>0 THEN 1 ELSE 0 END),0), COALESCE(SUM(CASE WHEN pr_opened_at>0 THEN 1 ELSE 0 END),0) FROM task_run_summaries `+w+` GROUP BY 1,status`, a...)
+	rows, err := s.db.Query(`SELECT DATE(started_at/1000,'unixepoch'), status, COUNT(*), COALESCE(SUM(estimated_cost_usd),0), COALESCE(SUM(merged_pr_count),0), COALESCE(SUM(CASE WHEN merged_pr_count>0 THEN 1 ELSE 0 END),0), COALESCE(SUM(CASE WHEN agent_started_at>0 THEN 1 ELSE 0 END),0), COALESCE(SUM(CASE WHEN pr_opened_at>0 THEN 1 ELSE 0 END),0), COALESCE(SUM(CASE WHEN merged_pr_count>0 OR closed_pr_count>0 THEN 1 ELSE 0 END),0) FROM task_run_summaries `+w+` GROUP BY 1,status`, a...)
 	if err != nil {
 		return taskRunAnalyticsEffectivenessResponse{}, err
 	}
@@ -113,9 +112,9 @@ func (s *Server) readTaskRunAnalyticsEffectivenessWithTicketAggregates(f taskRun
 	var finished, success, opened, merged, mergedRuns int
 	for rows.Next() {
 		var d, status string
-		var n, mp, mpr, st, af, po int
+		var n, mp, mpr, as, po, pf int
 		var cost float64
-		if err = rows.Scan(&d, &status, &n, &cost, &mp, &mpr, &st, &af, &po); err != nil {
+		if err = rows.Scan(&d, &status, &n, &cost, &mp, &mpr, &as, &po, &pf); err != nil {
 			return out, err
 		}
 		x := byDay[d]
@@ -139,10 +138,9 @@ func (s *Server) readTaskRunAnalyticsEffectivenessWithTicketAggregates(f taskRun
 				success += n
 			}
 		}
-		out.Funnel.Started += st
-		out.Funnel.AgentFinished += af
+		out.Funnel.AgentStarted += as
 		out.Funnel.PROpened += po
-		out.Funnel.PRMerged += mpr
+		out.Funnel.PRFinished += pf
 		opened += po
 		merged += mp
 		mergedRuns += mpr

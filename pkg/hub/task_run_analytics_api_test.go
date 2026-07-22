@@ -175,8 +175,34 @@ func TestTaskRunAnalyticsEffectivenessCountsClosedUnmergedAsSuccessNotMerge(t *t
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.SuccessRate != 1 || got.MergeRate != .5 || got.Funnel.PRMerged != 1 {
+	if got.SuccessRate != 1 || got.MergeRate != .5 || got.Funnel.PRFinished != 2 {
 		t.Fatalf("effectiveness = %#v", got)
+	}
+}
+
+func TestTaskRunAnalyticsEffectivenessFunnelStages(t *testing.T) {
+	s, db := newTaskRunAnalyticsAPITestServer(t)
+	base := int64(1760000000000)
+	fixtures := []apiRunFixture{
+		{RunID: "funnel-closed", AttemptID: "a", ClawID: "c", TenantID: "test-tenant-id", Status: taskRunStatusWarning, Phase: taskRunPhaseTerminal, OwnerType: taskRunOwnerFactory, Factory: "f", StartedAt: base, FinishedAt: base + 1000, PRCount: 1, ClosedPRCount: 1},
+		{RunID: "funnel-open", AttemptID: "b", ClawID: "d", TenantID: "test-tenant-id", Status: taskRunStatusRunning, Phase: taskRunPhaseAgentRunning, OwnerType: taskRunOwnerFactory, Factory: "f", StartedAt: base + 2000, PRCount: 1, OpenPRCount: 1},
+		{RunID: "funnel-agent-only", AttemptID: "c", ClawID: "e", TenantID: "test-tenant-id", Status: taskRunStatusRunning, Phase: taskRunPhaseAgentRunning, OwnerType: taskRunOwnerFactory, Factory: "f", StartedAt: base + 4000},
+	}
+	for _, fixture := range fixtures {
+		insertTaskRunAnalyticsAPIRun(t, db, fixture)
+	}
+	if _, err := db.Exec(`UPDATE task_run_summaries SET agent_started_at=started_at WHERE run_id IN ('funnel-closed', 'funnel-open', 'funnel-agent-only')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE task_run_summaries SET pr_opened_at=started_at WHERE run_id IN ('funnel-closed', 'funnel-open')`); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.readTaskRunAnalyticsEffectiveness(taskRunAnalyticsFilters{TenantID: "test-tenant-id"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Funnel.AgentStarted != 3 || got.Funnel.PROpened != 2 || got.Funnel.PRFinished != 1 {
+		t.Fatalf("funnel = %#v", got.Funnel)
 	}
 }
 
