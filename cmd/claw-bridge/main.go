@@ -1847,6 +1847,11 @@ func (gs *gatewaySession) abortActiveSession(ctx context.Context) error {
 	return nil
 }
 
+// providerRequestFormatErrorFragment is emitted by OpenClaw when a provider
+// rejects the assembled request schema or tool payload. Session recovery
+// depends on this upstream compatibility string, so keep the coupling explicit.
+const providerRequestFormatErrorFragment = "provider rejected the request schema or tool payload"
+
 func isRecoverableSessionSendError(err error) bool {
 	var sendErr *sessionSendRequestError
 	if !errors.As(err, &sendErr) {
@@ -1863,7 +1868,7 @@ func isProviderRequestFormatError(err error) bool {
 		return false
 	}
 	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "provider rejected the request schema or tool payload")
+	return strings.Contains(msg, providerRequestFormatErrorFragment)
 }
 
 // isRecoverableSessionLifecycleError identifies failures that can leave an
