@@ -1054,6 +1054,44 @@ func TestTaskRunWorkflowCreationInstrumentationCreatesWorkflowOwnerRun(t *testin
 	assertTaskRunEventExists(t, db, runID, taskRunEventTaskStart, taskRunInteractionAllowedStart)
 }
 
+func TestTaskRunWorkflowCreationInstrumentationDefaultsToAnalyticsEnabled(t *testing.T) {
+	s, db := newTaskRunLifecycleTestServer(t, nil)
+	workspace := &types.WorkspaceConfig{Name: "eng", Files: map[string]string{"README.md": "test workspace"}}
+	// A workflow with no issue-tracker integration should still be included in
+	// analytics by default so its costs and outcomes are visible.
+	workflow := &types.WorkflowConfig{
+		Name:                "adhoc-workflow",
+		Provider:            "noop",
+		EnableManualTrigger: true,
+		Inputs:              []types.FactoryInput{{Name: "task", Type: "string"}},
+	}
+
+	clawID, pending, err := s.createClawFromWorkflow(workspace, workflow, map[string]string{"task": "Run report"}, "manual workflow trigger")
+	if err != nil {
+		t.Fatalf("create claw from workflow: %v", err)
+	}
+	if pending {
+		t.Fatal("expected workflow claw to start immediately")
+	}
+
+	runID := assertClawLinkedToTaskRun(t, db, clawID)
+	assertTaskRunRow(t, db, runID, taskRunOwnerWorkflow, "eng", "adhoc-workflow", "", taskRunKindCodeTask, "elasticclaw")
+	assertTaskRunCounts(t, db, runID, 1, 1)
+	assertTaskRunEventExists(t, db, runID, taskRunEventTaskStart, taskRunInteractionAllowedStart)
+
+	var analyticsEnabled, requiresPR int
+	var excludedReason string
+	if err := db.QueryRow(`
+		SELECT analytics_enabled, requires_pr, excluded_reason
+		  FROM task_runs
+		 WHERE id=?`, runID).Scan(&analyticsEnabled, &requiresPR, &excludedReason); err != nil {
+		t.Fatalf("read analytics contract: %v", err)
+	}
+	if analyticsEnabled != 1 || requiresPR != 1 || excludedReason != "" {
+		t.Fatalf("analytics contract mismatch: enabled=%d requires_pr=%d excluded=%q", analyticsEnabled, requiresPR, excludedReason)
+	}
+}
+
 func TestTaskRunCreationInstrumentationSurfacesStartAnalyticsFailure(t *testing.T) {
 	s, db := newTaskRunLifecycleTestServer(t, []*types.FactoryConfig{taskRunLifecycleFactoryConfig("manual-factory", "linear")})
 	if _, err := db.Exec(`DROP TABLE task_runs`); err != nil {

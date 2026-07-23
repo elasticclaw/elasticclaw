@@ -678,7 +678,11 @@ func taskRunAnalyticsContractForWorkflow(workflow *types.WorkflowConfig) (enable
 	if workflow != nil && workflow.AnalyticsEnabled != nil {
 		enabled = *workflow.AnalyticsEnabled
 	} else {
-		enabled = isTaskRunAnalyticsIntegration(workflowIntegration(workflow))
+		// Workflows are explicit user automations (manual, cron, or
+		// integration-triggered). Unlike factories, they are not tied to a
+		// specific issue-tracker integration, so default them into analytics so
+		// owners can see their costs and outcomes without needing to opt in.
+		enabled = true
 	}
 	if workflow != nil && workflow.RequiresPR != nil {
 		requiresPR = *workflow.RequiresPR
