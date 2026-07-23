@@ -859,14 +859,19 @@ func backfillTaskRunStatus(db *sql.DB, runID string) error {
 // (the closest lifecycle checkpoint we do have), falling back to the run's
 // started_at if provisioning was never recorded either. Runs are only touched
 // when there's unambiguous downstream evidence the agent actually ran: a PR
-// was opened or merged, there was a human interaction, or the run finished
-// with a failure type that can only be reached after the agent completed
-// work (done_without_pr / no_pr / pr_closed_unmerged). Deliberately NOT
-// included: failure_type='agent_stopped', the catch-all stopAgentTerminalWithReason
-// writes for every terminal stop — including retries exhausted while a claw
-// was still provisioning/bootstrapping and never connected at all. Treating
-// that as proof of an agent start would fabricate agent_started_at for runs
-// whose agent never ran.
+// was opened or merged, or the run finished with a failure type that can only
+// be reached after the agent completed work (done_without_pr / no_pr /
+// pr_closed_unmerged). Deliberately NOT treated as proof by themselves:
+//
+//   - failure_type='agent_stopped', the catch-all stopAgentTerminalWithReason
+//     writes for every terminal stop — including retries exhausted while a
+//     claw was still provisioning/bootstrapping and never connected at all.
+//   - human_interaction_count > 0 — a dashboard message or manual stop can be
+//     sent to a claw that's still provisioning; the interaction gets recorded
+//     regardless of whether the agent ever came up.
+//
+// Treating either as proof of an agent start would fabricate agent_started_at
+// for runs whose agent never ran.
 //
 // Because the inferred timestamp is a lower bound rather than the true agent
 // start time, any duration metric derived from it (e.g. agent-start-to-PR-open)
@@ -898,7 +903,6 @@ func backfillTaskRunAgentStartedAtV1(db *sql.DB) error {
 		   AND (
 		         pr_opened_at > 0
 		      OR merged_at > 0
-		      OR human_interaction_count > 0
 		      OR (finished_at > 0 AND failure_type IN ('done_without_pr', 'no_pr', 'pr_closed_unmerged'))
 		       )
 		 ORDER BY started_at, run_id`)

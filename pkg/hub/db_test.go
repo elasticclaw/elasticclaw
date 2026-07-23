@@ -110,6 +110,16 @@ func TestBackfillTaskRunAgentStartedAtV1(t *testing.T) {
 		FailureType: taskRunFailureAgentStopped, StartedAt: ts + 4000, FinishedAt: ts + 4500,
 	})
 
+	// Still provisioning, but a dashboard message was sent to it in the
+	// meantime: must stay untouched. Human interactions can reach a claw
+	// before it ever connects, so human_interaction_count alone isn't proof
+	// the agent started either.
+	insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{
+		RunID: "run-human-interaction-while-provisioning", AttemptID: "attempt-human-provisioning", ClawID: "claw-human-provisioning", TenantID: "test-tenant-id",
+		Status: taskRunStatusRunning, Phase: taskRunPhaseProvisioning, OwnerType: taskRunOwnerFactory,
+		StartedAt: ts + 5000, HumanInteractions: 1,
+	})
+
 	// NewTestServerWithConfig already ran the migration once on the empty
 	// database (marking the sentinel applied). Clear it so this test can
 	// exercise the migration against the fixtures seeded above.
@@ -134,6 +144,7 @@ func TestBackfillTaskRunAgentStartedAtV1(t *testing.T) {
 	assertAgentStartedAt("run-done-without-pr", ts+2000)
 	assertAgentStartedAt("run-still-provisioning", 0)
 	assertAgentStartedAt("run-agent-stopped-while-provisioning", 0)
+	assertAgentStartedAt("run-human-interaction-while-provisioning", 0)
 	assertTaskRunEventExists(t, db, "run-pr-opened", taskRunEventAgentStarted, taskRunInteractionNeutral)
 
 	// Re-running the migration must be a no-op (sentinel row already applied)
