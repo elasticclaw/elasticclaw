@@ -2382,6 +2382,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 									Payload: map[string]string{"claw_id": clawID, "status": "connected"},
 								})
 								log.Printf("[bridge] ✓ ready: %s (%s)", rp.Name, clawID[:8])
+								go s.recordClawAgentStarted(clawID)
 								shouldWake = true
 								wakeConn = cc
 								go s.requestBootstrapCheckpoint(clawID)
@@ -4296,6 +4297,7 @@ func (s *Server) promoteBootstrapReadyClaw(clawID string) bool {
 		Type:    "claw_status",
 		Payload: map[string]string{"claw_id": clawID, "status": "connected"},
 	})
+	go s.recordClawAgentStarted(clawID)
 	log.Printf("[bridge] ✓ ready after bootstrap: %s", clawID[:8])
 	go s.requestBootstrapCheckpoint(clawID)
 	s.startWorkflowAfterVolumes(context.Background(), cc, clawID)

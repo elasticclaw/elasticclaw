@@ -967,6 +967,52 @@ func TestTaskRunFactoryCreationInstrumentationCreatesRunAttemptEventAndLinksClaw
 	assertTaskRunEventExists(t, db, runID, taskRunEventTaskStart, taskRunInteractionAllowedStart)
 }
 
+func TestRecordClawAgentStartedSetsAgentStartedAtOnBootstrapReady(t *testing.T) {
+	s, db := newTaskRunLifecycleTestServer(t, []*types.FactoryConfig{taskRunLifecycleFactoryConfig("manual-factory", "linear")})
+
+	clawID, pending, err := s.createClawFromFactory(s.hubCfg.Factories[0], "", map[string]string{"task": "Fix login"}, nil, "manual trigger")
+	if err != nil {
+		t.Fatalf("create claw from factory: %v", err)
+	}
+	if pending {
+		t.Fatal("expected factory claw to start immediately")
+	}
+	runID := assertClawLinkedToTaskRun(t, db, clawID)
+
+	// ensureTaskRunForClaw only ever observes the claw at "provisioning"/"pending",
+	// so agent_started_at must still be unset immediately after creation — this is
+	// the bug: the funnel's "Agent started" stage was permanently stuck at zero.
+	var agentStartedAt int64
+	if err := db.QueryRow(`SELECT COALESCE(agent_started_at,0) FROM task_run_summaries WHERE run_id=?`, runID).Scan(&agentStartedAt); err != nil {
+		t.Fatalf("read agent_started_at before bootstrap: %v", err)
+	}
+	if agentStartedAt != 0 {
+		t.Fatalf("expected agent_started_at to be unset before the claw connects, got %d", agentStartedAt)
+	}
+
+	// Simulate the claw's sandbox actually becoming ready (the real "connected"
+	// transition fired from the heartbeat handler / promoteBootstrapReadyClaw).
+	s.recordClawAgentStarted(clawID)
+
+	if err := db.QueryRow(`SELECT COALESCE(agent_started_at,0) FROM task_run_summaries WHERE run_id=?`, runID).Scan(&agentStartedAt); err != nil {
+		t.Fatalf("read agent_started_at after bootstrap: %v", err)
+	}
+	if agentStartedAt == 0 {
+		t.Fatal("expected agent_started_at to be set once the claw connects")
+	}
+	assertTaskRunEventExists(t, db, runID, taskRunEventAgentStarted, taskRunInteractionNeutral)
+
+	// Calling it again (e.g. a second heartbeat) must stay idempotent.
+	s.recordClawAgentStarted(clawID)
+	var eventCount int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM task_run_events WHERE run_id=? AND event_type=?`, runID, taskRunEventAgentStarted).Scan(&eventCount); err != nil {
+		t.Fatalf("count agent_started events: %v", err)
+	}
+	if eventCount != 1 {
+		t.Fatalf("expected exactly one agent_started event after repeated calls, got %d", eventCount)
+	}
+}
+
 func TestTaskRunCreationInstrumentationHonorsAnalyticsContract(t *testing.T) {
 	s, db := newTaskRunLifecycleTestServer(t, []*types.FactoryConfig{{
 		Name:                "external-non-pr",

@@ -675,6 +675,9 @@ func migrate(db *sql.DB) error {
 	if err := backfillTaskRunAnalyticsStatusV3(db); err != nil {
 		return err
 	}
+	if err := backfillTaskRunAgentStartedAtV1(db); err != nil {
+		return err
+	}
 	for _, p := range []struct {
 		model                          string
 		in, out, cacheRead, cacheWrite float64
@@ -841,6 +844,149 @@ func backfillTaskRunStatus(db *sql.DB, runID string) error {
 	defer tx.Rollback()
 	if err := materializeTaskRunTx(tx, runID); err != nil {
 		return err
+	}
+	return tx.Commit()
+}
+
+// backfillTaskRunAgentStartedAtV1 fills in agent_started_at for runs created
+// before recordClawAgentStarted existed. Until that fix, the hub only ever
+// checked the claw's status at run-creation time (always "provisioning" or
+// "pending"), so agent_started_at was structurally never set — every run's
+// "Agent started" funnel stage read 0 regardless of what actually happened.
+//
+// This can only approximate the real timestamp: no event recorded exactly
+// when the agent came up, so it infers agent_started_at as provision_started_at
+// (the closest lifecycle checkpoint we do have), falling back to the run's
+// started_at if provisioning was never recorded either. Runs are only touched
+// when there's unambiguous downstream evidence the agent actually ran: a PR
+// was opened or merged, or the run finished with a failure type that can only
+// be reached after the agent completed work (done_without_pr / no_pr /
+// pr_closed_unmerged). Deliberately NOT treated as proof by themselves:
+//
+//   - failure_type='agent_stopped', the catch-all stopAgentTerminalWithReason
+//     writes for every terminal stop — including retries exhausted while a
+//     claw was still provisioning/bootstrapping and never connected at all.
+//   - human_interaction_count > 0 — a dashboard message or manual stop can be
+//     sent to a claw that's still provisioning; the interaction gets recorded
+//     regardless of whether the agent ever came up.
+//
+// Treating either as proof of an agent start would fabricate agent_started_at
+// for runs whose agent never ran.
+//
+// Because the inferred timestamp is a lower bound rather than the true agent
+// start time, any duration metric derived from it (e.g. agent-start-to-PR-open)
+// will read slightly high for backfilled runs. The funnel's "Agent started"
+// count itself is unaffected: it only checks agent_started_at > 0.
+//
+// The migration only marks itself applied once every candidate is
+// successfully backfilled; if any run is skipped (e.g. a transient DB error),
+// the sentinel is left unwritten so the next hub startup retries — rows
+// already backfilled simply stop matching the WHERE clause, so retries are
+// cheap and idempotent.
+func backfillTaskRunAgentStartedAtV1(db *sql.DB) error {
+	const migration = "task_run_agent_started_at_v1"
+	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS hub_migrations (name TEXT PRIMARY KEY, applied_at INTEGER NOT NULL)`); err != nil {
+		return fmt.Errorf("create hub migrations: %w", err)
+	}
+	var applied int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM hub_migrations WHERE name=?`, migration).Scan(&applied); err != nil {
+		return fmt.Errorf("check agent_started_at backfill: %w", err)
+	}
+	if applied > 0 {
+		return nil
+	}
+
+	rows, err := db.Query(`
+		SELECT run_id, started_at, provision_started_at
+		  FROM task_run_summaries
+		 WHERE agent_started_at = 0
+		   AND (
+		         pr_opened_at > 0
+		      OR merged_at > 0
+		      OR (finished_at > 0 AND failure_type IN ('done_without_pr', 'no_pr', 'pr_closed_unmerged'))
+		       )
+		 ORDER BY started_at, run_id`)
+	if err != nil {
+		return fmt.Errorf("list runs for agent_started_at backfill: %w", err)
+	}
+	type candidate struct {
+		runID      string
+		inferredAt int64
+	}
+	var candidates []candidate
+	for rows.Next() {
+		var runID string
+		var startedAt, provisionStartedAt int64
+		if err := rows.Scan(&runID, &startedAt, &provisionStartedAt); err != nil {
+			rows.Close()
+			return err
+		}
+		inferredAt := provisionStartedAt
+		if inferredAt == 0 {
+			inferredAt = startedAt
+		}
+		candidates = append(candidates, candidate{runID: runID, inferredAt: inferredAt})
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+
+	skipped := 0
+	for _, c := range candidates {
+		if err := backfillTaskRunAgentStartedAt(db, c.runID, c.inferredAt); err != nil {
+			skipped++
+			log.Printf("[task-run-analytics] agent_started_at backfill skipped run %s: %v", c.runID, err)
+		}
+	}
+	log.Printf("[task-run-analytics] agent_started_at backfill: %d of %d run(s) updated", len(candidates)-skipped, len(candidates))
+	if skipped > 0 {
+		// Leave the sentinel unwritten so the next hub startup retries the
+		// runs that failed — already-backfilled rows no longer match the
+		// WHERE clause above, so re-running is safe and only touches the
+		// remainder.
+		log.Printf("[task-run-analytics] agent_started_at backfill: %d run(s) skipped, will retry on next startup", skipped)
+		return nil
+	}
+
+	_, err = db.Exec(`INSERT INTO hub_migrations(name, applied_at) VALUES(?, ?) ON CONFLICT(name) DO NOTHING`, migration, now().UnixMilli())
+	return err
+}
+
+// backfillTaskRunAgentStartedAt records an inferred agent_started event for a
+// single run and re-materializes it, in its own transaction.
+func backfillTaskRunAgentStartedAt(db *sql.DB, runID string, inferredAtMillis int64) error {
+	if inferredAtMillis <= 0 {
+		return fmt.Errorf("no usable timestamp to infer agent_started_at from")
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var tenantID, attemptID string
+	if err := tx.QueryRow(`SELECT tenant_id, current_attempt_id FROM task_runs WHERE id=?`, runID).Scan(&tenantID, &attemptID); err != nil {
+		return fmt.Errorf("read task run: %w", err)
+	}
+	inferredAt := time.UnixMilli(inferredAtMillis).UTC()
+	if err := recordTaskRunEventTx(tx, TaskRunEvent{
+		TenantID:        tenantID,
+		RunID:           runID,
+		AttemptID:       attemptID,
+		EventKey:        taskRunEventAgentStarted + ":" + runID,
+		Source:          taskRunSourceHub,
+		EventType:       taskRunEventAgentStarted,
+		EventTime:       inferredAt,
+		ObservedAt:      now(),
+		ActorType:       taskRunActorSystem,
+		InteractionRole: taskRunInteractionNeutral,
+		Detail:          map[string]any{"backfilled": true, "reason": "agent_started_at_v1_migration"},
+	}); err != nil {
+		return fmt.Errorf("record agent_started event: %w", err)
+	}
+	if err := materializeTaskRunTx(tx, runID); err != nil {
+		return fmt.Errorf("materialize: %w", err)
 	}
 	return tx.Commit()
 }
