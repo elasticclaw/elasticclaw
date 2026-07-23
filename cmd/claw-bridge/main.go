@@ -2899,6 +2899,20 @@ func syncStagedWorkspaceToOpenClawWorkspace() error {
 		return err
 	}
 	log.Printf("[bootstrap] synced %d staged workspace files into %s", copied, activeDir)
+
+	// Nix flakes require flake.nix/flake.lock to be tracked by git when the
+	// workspace directory is a git repo. Ensure they are staged so subsequent
+	// nix develop / flake-run invocations can evaluate the flake.
+	if _, err := os.Stat(filepath.Join(activeDir, ".git")); err == nil {
+		for _, name := range []string{"flake.nix", "flake.lock"} {
+			p := filepath.Join(activeDir, name)
+			if _, err := os.Stat(p); err == nil {
+				if err := runShell(fmt.Sprintf("cd %q && git add %q", activeDir, name)); err != nil {
+					log.Printf("[bootstrap] warning: git add %s: %v", name, err)
+				}
+			}
+		}
+	}
 	return nil
 }
 

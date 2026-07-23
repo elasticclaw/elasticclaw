@@ -74,6 +74,92 @@ func TestCleanWorkspaceFilePath(t *testing.T) {
 	}
 }
 
+func TestWorkspaceFlakeStageCommand(t *testing.T) {
+	tests := []struct {
+		name        string
+		dir         string
+		files       map[string]string
+		wantNames   []string
+		wantCommand string
+	}{
+		{
+			name: "stages only flake files",
+			dir:  "/workspace",
+			files: map[string]string{
+				"flake.nix":  "{}",
+				"flake.lock": "{}",
+				"README.md":  "# readme",
+				"-evil":      "evil",
+			},
+			wantNames:   []string{"flake.lock", "flake.nix"},
+			wantCommand: "cd \"/workspace\" && if [ -d .git ]; then git add -- \"flake.lock\" \"flake.nix\"; fi",
+		},
+		{
+			name: "only flake.nix",
+			dir:  "/workspace",
+			files: map[string]string{
+				"flake.nix": "{}",
+				"README.md": "# readme",
+			},
+			wantNames:   []string{"flake.nix"},
+			wantCommand: "cd \"/workspace\" && if [ -d .git ]; then git add -- \"flake.nix\"; fi",
+		},
+		{
+			name: "no flake files",
+			dir:  "/workspace",
+			files: map[string]string{
+				"README.md": "# readme",
+				"-evil":     "evil",
+			},
+			wantNames:   nil,
+			wantCommand: "",
+		},
+		{
+			name:        "empty files",
+			dir:         "/workspace",
+			files:       map[string]string{},
+			wantNames:   nil,
+			wantCommand: "",
+		},
+		{
+			name: "ignores invalid paths",
+			dir:  "/workspace",
+			files: map[string]string{
+				"flake.nix": "{}",
+				"../secret": "secret",
+				"/etc/passwd": "pw",
+			},
+			wantNames:   []string{"flake.nix"},
+			wantCommand: "cd \"/workspace\" && if [ -d .git ]; then git add -- \"flake.nix\"; fi",
+		},
+		{
+			name: "quotes directory with spaces",
+			dir:  "/my workspace",
+			files: map[string]string{
+				"flake.lock": "{}",
+			},
+			wantNames:   []string{"flake.lock"},
+			wantCommand: "cd \"/my workspace\" && if [ -d .git ]; then git add -- \"flake.lock\"; fi",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotCmd, gotNames := workspaceFlakeStageCommand(tt.dir, tt.files)
+			if gotCmd != tt.wantCommand {
+				t.Fatalf("command = %q, want %q", gotCmd, tt.wantCommand)
+			}
+			if len(gotNames) != len(tt.wantNames) {
+				t.Fatalf("names = %v, want %v", gotNames, tt.wantNames)
+			}
+			for i := range gotNames {
+				if gotNames[i] != tt.wantNames[i] {
+					t.Fatalf("names[%d] = %q, want %q", i, gotNames[i], tt.wantNames[i])
+				}
+			}
+		})
+	}
+}
+
 func TestSSHHomeDir(t *testing.T) {
 	tests := []struct {
 		user    string

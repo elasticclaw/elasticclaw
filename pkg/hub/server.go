@@ -6657,7 +6657,50 @@ func (s *Server) sshWriteFiles(user, host, dir string, files map[string]string) 
 			return fmt.Errorf("write %s: %w\n%s", name, err, string(out))
 		}
 	}
+
+	// If the target directory is a git repo, stage the written files so Nix can
+	// evaluate a workspace flake (nix requires flake.nix/flake.lock to be tracked).
+	if gitCmd, names := workspaceFlakeStageCommand(dir, files); len(names) > 0 {
+		sess, err := client.NewSession()
+		if err != nil {
+			return fmt.Errorf("create git staging session: %w", err)
+		}
+		out, err := sess.CombinedOutput(gitCmd)
+		sess.Close()
+		if err != nil {
+			return fmt.Errorf("stage flake files %v: %w\n%s", names, err, string(out))
+		}
+	}
 	return nil
+}
+
+// workspaceFlakeStageCommand builds a git add command that stages only
+// flake.nix and flake.lock from the written workspace files map.
+// It returns the command and the list of file names that will be staged.
+// Returns an empty command and nil names when there are no flake files to stage.
+func workspaceFlakeStageCommand(dir string, files map[string]string) (string, []string) {
+	names := make([]string, 0, 2)
+	for name := range files {
+		safeName, err := cleanWorkspaceFilePath(name)
+		if err != nil {
+			continue
+		}
+		if safeName != "flake.nix" && safeName != "flake.lock" {
+			continue
+		}
+		names = append(names, safeName)
+	}
+	if len(names) == 0 {
+		return "", nil
+	}
+	sort.Strings(names)
+	quotedNames := make([]string, len(names))
+	for i, n := range names {
+		quotedNames[i] = shellDoubleQuote(n)
+	}
+	gitCmd := fmt.Sprintf("cd %s && if [ -d .git ]; then git add -- %s; fi",
+		shellDoubleQuote(dir), strings.Join(quotedNames, " "))
+	return gitCmd, names
 }
 
 func remoteWriteFileCommand(dir, name, content string) string {
