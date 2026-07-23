@@ -6660,9 +6660,13 @@ func (s *Server) sshWriteFiles(user, host, dir string, files map[string]string) 
 	// evaluate a workspace flake (nix requires flake.nix/flake.lock to be tracked).
 	if gitCmd, names := workspaceFlakeStageCommand(dir, files); len(names) > 0 {
 		sess, err := client.NewSession()
-		if err == nil {
-			_, _ = sess.CombinedOutput(gitCmd)
-			sess.Close()
+		if err != nil {
+			return fmt.Errorf("create git staging session: %w", err)
+		}
+		out, err := sess.CombinedOutput(gitCmd)
+		sess.Close()
+		if err != nil {
+			return fmt.Errorf("stage flake files %v: %w\n%s", names, err, string(out))
 		}
 	}
 	return nil
