@@ -361,12 +361,12 @@ def update_type(old, new):
         return "patch"
     return "unknown"
 
-def run_command(cwd, command, allowed_exit_codes=(0,), reported_cwd=None):
+def run_command(cwd, command, allowed_exit_codes=(0,)):
     global had_failure
     proc = subprocess.run(command, cwd=str(cwd), shell=True, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     result["commands"].append({
         "command": command,
-        "cwd": rel(reported_cwd if reported_cwd is not None else cwd),
+        "cwd": rel(cwd),
         "exit_code": proc.returncode,
         "stdout": proc.stdout[-4000:],
         "stderr": proc.stderr[-4000:],
@@ -374,29 +374,6 @@ def run_command(cwd, command, allowed_exit_codes=(0,), reported_cwd=None):
     if proc.returncode not in allowed_exit_codes:
         had_failure = True
     return proc
-
-def prefix_command(base, prefix, subcmd):
-    if prefix:
-        return f"{base} {prefix} {subcmd}"
-    return f"{base} {subcmd}"
-
-def find_repo_root(path):
-    path = pathlib.Path(path).resolve()
-    root = pathlib.Path(ROOT).resolve()
-    while True:
-        if (path / "flake.nix").exists():
-            return path
-        if path == root:
-            return None
-        parent = path.parent
-        if parent == path:
-            return None
-        path = parent
-
-def nix_wrap(command, flake_dir):
-    if flake_dir is None or not shutil.which("nix"):
-        return command
-    return f"nix develop --accept-flake-config {shlex.quote(str(flake_dir))} -c bash -lc {shlex.quote(command)}"
 
 def discover():
     manifests = []
@@ -477,26 +454,12 @@ before = file_snapshot(collect_files(manifests))
 for manifest in manifests:
     manifest_path = ROOT / manifest["path"]
     cwd = manifest_path.parent
-    repo_root = find_repo_root(cwd)
-    if repo_root is not None and repo_root != cwd:
-        # Run commands from the directory that contains flake.nix (which may be
-        # the workspace root or a parent repo directory). This keeps the nix
-        # dev shell's cwd in a directory with a flake and avoids nix treating a
-        # missing flake.nix in the manifest's subdirectory as a fatal error.
-        run_cwd = repo_root
-        rel_dir = cwd.relative_to(repo_root).as_posix()
-    else:
-        run_cwd = cwd
-        rel_dir = "."
-    use_root = rel_dir != "."
-
     if manifest["ecosystem"] == "go":
         if shutil.which("go") is None:
             result["commands"].append({"command": "go", "cwd": rel(cwd), "exit_code": 127, "stderr": "go executable not found"})
             had_failure = True
             continue
-        go_dir = f"-C {shlex.quote(rel_dir)}" if use_root else ""
-        listed = run_command(run_cwd, nix_wrap(prefix_command("go", go_dir, "list -m -u -json all"), repo_root), reported_cwd=cwd)
+        listed = run_command(cwd, "go list -m -u -json all")
         if listed.returncode == 0:
             try:
                 apply_updates = []
@@ -517,8 +480,8 @@ for manifest in manifests:
                     update_record("go", name, from_version, to_version, kind, True)
                     apply_updates.append(f"{name}@{to_version}")
                 if apply_updates:
-                    run_command(run_cwd, nix_wrap(prefix_command("go", go_dir, "get " + " ".join(shlex.quote(value) for value in apply_updates)), repo_root), reported_cwd=cwd)
-                    run_command(run_cwd, nix_wrap(prefix_command("go", go_dir, "mod tidy"), repo_root), reported_cwd=cwd)
+                    run_command(cwd, "go get " + " ".join(shlex.quote(value) for value in apply_updates))
+                    run_command(cwd, "go mod tidy")
             except Exception as exc:
                 result["commands"].append({"command": "parse go list output", "cwd": rel(cwd), "exit_code": 1, "stderr": str(exc)})
                 had_failure = True
@@ -527,8 +490,7 @@ for manifest in manifests:
             result["commands"].append({"command": "npm", "cwd": rel(cwd), "exit_code": 127, "stderr": "npm executable not found"})
             had_failure = True
             continue
-        npm_dir = f"--prefix {shlex.quote(rel_dir)}" if use_root else ""
-        outdated = run_command(run_cwd, nix_wrap(prefix_command("npm", npm_dir, "outdated --json"), repo_root), allowed_exit_codes=(0, 1), reported_cwd=cwd)
+        outdated = run_command(cwd, "npm outdated --json", allowed_exit_codes=(0, 1))
         if outdated.stdout.strip():
             try:
                 apply_updates = []
@@ -549,7 +511,7 @@ for manifest in manifests:
                     if latest and latest != wanted and update_type(current, latest) == "major" and not CONFIG.get("include_major"):
                         update_record("npm", name, current, latest, "major", False, group="major", skipped_reason="major updates disabled")
                 if apply_updates:
-                    run_command(run_cwd, nix_wrap(prefix_command("npm", npm_dir, "update --package-lock-only " + " ".join(shlex.quote(value) for value in apply_updates)), repo_root), reported_cwd=cwd)
+                    run_command(cwd, "npm update --package-lock-only " + " ".join(shlex.quote(value) for value in apply_updates))
             except Exception as exc:
                 result["commands"].append({"command": "parse npm outdated output", "cwd": rel(cwd), "exit_code": 1, "stderr": str(exc)})
                 had_failure = True
