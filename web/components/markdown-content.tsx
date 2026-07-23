@@ -28,7 +28,7 @@ export function MarkdownContent({ content, className }: MarkdownContentProps) {
           const isBlock = className?.startsWith("language-")
           if (isBlock) {
             return (
-              <code className="block bg-black/40 rounded px-3 py-2 text-xs font-mono whitespace-pre my-2">
+              <code className="block bg-black/40 rounded px-3 py-2 text-xs font-mono whitespace-pre overflow-x-auto my-2">
                 {children}
               </code>
             )
