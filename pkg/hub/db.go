@@ -858,15 +858,26 @@ func backfillTaskRunStatus(db *sql.DB, runID string) error {
 // when the agent came up, so it infers agent_started_at as provision_started_at
 // (the closest lifecycle checkpoint we do have), falling back to the run's
 // started_at if provisioning was never recorded either. Runs are only touched
-// when there's downstream evidence the agent actually ran — a PR was opened,
-// a PR merged, or the run finished with a failure type other than
-// provisioning/bootstrap/creation failure — so a run that never got past
-// provisioning is correctly left at agent_started_at=0.
+// when there's unambiguous downstream evidence the agent actually ran: a PR
+// was opened or merged, there was a human interaction, or the run finished
+// with a failure type that can only be reached after the agent completed
+// work (done_without_pr / no_pr / pr_closed_unmerged). Deliberately NOT
+// included: failure_type='agent_stopped', the catch-all stopAgentTerminalWithReason
+// writes for every terminal stop — including retries exhausted while a claw
+// was still provisioning/bootstrapping and never connected at all. Treating
+// that as proof of an agent start would fabricate agent_started_at for runs
+// whose agent never ran.
 //
 // Because the inferred timestamp is a lower bound rather than the true agent
 // start time, any duration metric derived from it (e.g. agent-start-to-PR-open)
 // will read slightly high for backfilled runs. The funnel's "Agent started"
 // count itself is unaffected: it only checks agent_started_at > 0.
+//
+// The migration only marks itself applied once every candidate is
+// successfully backfilled; if any run is skipped (e.g. a transient DB error),
+// the sentinel is left unwritten so the next hub startup retries — rows
+// already backfilled simply stop matching the WHERE clause, so retries are
+// cheap and idempotent.
 func backfillTaskRunAgentStartedAtV1(db *sql.DB) error {
 	const migration = "task_run_agent_started_at_v1"
 	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS hub_migrations (name TEXT PRIMARY KEY, applied_at INTEGER NOT NULL)`); err != nil {
@@ -887,7 +898,8 @@ func backfillTaskRunAgentStartedAtV1(db *sql.DB) error {
 		   AND (
 		         pr_opened_at > 0
 		      OR merged_at > 0
-		      OR (finished_at > 0 AND failure_type NOT IN ('provision_failed', 'bootstrap_failed', 'creation_failed'))
+		      OR human_interaction_count > 0
+		      OR (finished_at > 0 AND failure_type IN ('done_without_pr', 'no_pr', 'pr_closed_unmerged'))
 		       )
 		 ORDER BY started_at, run_id`)
 	if err != nil {
@@ -925,6 +937,14 @@ func backfillTaskRunAgentStartedAtV1(db *sql.DB) error {
 		}
 	}
 	log.Printf("[task-run-analytics] agent_started_at backfill: %d of %d run(s) updated", len(candidates)-skipped, len(candidates))
+	if skipped > 0 {
+		// Leave the sentinel unwritten so the next hub startup retries the
+		// runs that failed — already-backfilled rows no longer match the
+		// WHERE clause above, so re-running is safe and only touches the
+		// remainder.
+		log.Printf("[task-run-analytics] agent_started_at backfill: %d run(s) skipped, will retry on next startup", skipped)
+		return nil
+	}
 
 	_, err = db.Exec(`INSERT INTO hub_migrations(name, applied_at) VALUES(?, ?) ON CONFLICT(name) DO NOTHING`, migration, now().UnixMilli())
 	return err
