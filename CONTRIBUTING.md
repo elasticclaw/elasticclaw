@@ -97,6 +97,47 @@ rm -rf ~/.elasticclaw/hub.db
 # visit http://localhost:8080
 ```
 
+### Deploying a custom build to a test server
+
+To test a PR branch or local changes on a remote Linux amd64 server that already has ElasticClaw installed:
+
+1. Build a release binary with embedded web UI. The `Version` does not matter for the build, but a non-release version (e.g. `pr-541`) has no matching `claw-bridge` release on GitHub, so you must override `bridge_image` in the next step.
+
+```bash
+make build-web
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -tags embedweb \
+  -ldflags "-X github.com/elasticclaw/elasticclaw/cmd.Version=pr-XXX -X github.com/elasticclaw/elasticclaw/cmd.Commit=$(git rev-parse --short HEAD)" \
+  -o /tmp/elasticclaw-linux-amd64 .
+```
+
+2. Back up the existing server binary and deploy the new one. Replace `ssh://user@host:port` with your server.
+
+```bash
+ssh -p 22 user@host 'sudo cp /usr/local/bin/elasticclaw /usr/local/bin/elasticclaw.backup && sudo systemctl stop elasticclaw'
+scp -P 22 /tmp/elasticclaw-linux-amd64 user@host:/tmp/elasticclaw-new
+ssh -p 22 user@host 'sudo mv /tmp/elasticclaw-new /usr/local/bin/elasticclaw && sudo chmod +x /usr/local/bin/elasticclaw'
+```
+
+3. Pin `bridge_image` in `/root/.elasticclaw/hub.yaml` to an existing release so the bootstrapped claws can download a real `claw-bridge` binary. Use the latest release tag from GitHub, for example:
+
+```yaml
+bridge_image: https://github.com/elasticclaw/elasticclaw/releases/download/2026.7.21/claw-bridge-linux-amd64
+```
+
+4. Restart the service and verify:
+
+```bash
+ssh -p 22 user@host 'sudo systemctl restart elasticclaw && /usr/local/bin/elasticclaw version && sudo systemctl is-active elasticclaw'
+```
+
+If the server is accessed via a domain, also confirm the web UI is reachable with `curl -I https://your-domain.com/login`.
+
+To roll back:
+
+```bash
+ssh -p 22 user@host 'sudo mv /usr/local/bin/elasticclaw.backup /usr/local/bin/elasticclaw && sudo systemctl restart elasticclaw'
+```
+
 ### Testing
 
 ```bash
