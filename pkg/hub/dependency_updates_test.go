@@ -319,3 +319,212 @@ func writeExecutable(t *testing.T, root, name, content string) {
 		t.Fatal(err)
 	}
 }
+
+func TestDependencyUpdatesGeneratedCommandUsesWorkspaceRootForSubdirectories(t *testing.T) {
+	root := t.TempDir()
+	bin := filepath.Join(root, "bin")
+	if err := os.MkdirAll(bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeExecutable(t, bin, "go", `#!/usr/bin/env bash
+set -e
+if [[ "$1" == "-C" && "$2" == "web" && "$3 $4 $5 $6" == "list -m -u -json" && "$7" == "all" ]]; then
+  printf '%s\n' '{"Path":"example.com/web","Version":"v1.0.0","Update":{"Version":"v1.1.0"}}'
+  exit 0
+fi
+if [[ "$1" == "-C" && "$2" == "web" && "$3" == "get" && "$*" == *"example.com/web@v1.1.0"* ]]; then
+  echo changed >> web/go.sum
+  exit 0
+fi
+if [[ "$1" == "-C" && "$2" == "web" && "$3 $4" == "mod tidy" ]]; then
+  exit 0
+fi
+echo "unexpected go invocation: $*" >&2
+exit 1
+`)
+	writeExecutable(t, bin, "npm", `#!/usr/bin/env bash
+set -e
+if [[ "$1" == "--prefix" && "$2" == "web" && "$3 $4" == "outdated --json" ]]; then
+  printf '%s\n' '{"left-pad":{"current":"1.0.0","wanted":"1.1.0","latest":"2.0.0"}}'
+  exit 1
+fi
+if [[ "$1" == "--prefix" && "$2" == "web" && "$3 $4" == "update --package-lock-only" ]]; then
+  printf '%s\n' '{"lockfileVersion":3,"updated":true}' > web/package-lock.json
+  exit 0
+fi
+echo "unexpected npm invocation: $*" >&2
+exit 1
+`)
+	writeExecutable(t, bin, "nix", `#!/usr/bin/env bash
+set -e
+if [[ "$1" == "develop" && "$2" == "--accept-flake-config" ]]; then
+    flake_dir="$3"
+    shift 3
+    if [[ "$1" == "-c" && "$2" == "bash" && "$3" == "-lc" ]]; then
+        command="$4"
+        cd "$flake_dir" && PATH="$PATH" bash -c "$command"
+        exit $?
+    fi
+fi
+echo "unexpected nix invocation: $*" >&2
+exit 1
+`)
+	writeFile(t, root, "flake.nix", "{ description = \"test\"; }\n")
+	writeFile(t, root, "web/go.mod", "module example.com/web\n")
+	writeFile(t, root, "web/go.sum", "")
+	writeFile(t, root, "web/package.json", `{"name":"web","dependencies":{"left-pad":"^1.0.0"}}`)
+	writeFile(t, root, "web/package-lock.json", `{"lockfileVersion":3}`)
+
+	command, err := buildDependencyUpdatesCommand(pipeline.DependencyUpdatesAction{
+		Enabled: true,
+		Paths:   []string{"web"},
+	})
+	if err != nil {
+		t.Fatalf("build command: %v", err)
+	}
+	cmd := osexec.Command("bash", "-c", command)
+	cmd.Dir = root
+	cmd.Env = testEnvWithPath(bin)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("dependency update command failed: %v\n%s", err, out)
+	}
+
+	parsed, ok := parsePipelineOutputJSON(string(out))
+	if !ok {
+		t.Fatalf("command did not emit JSON:\n%s", out)
+	}
+	assertUpdateStatus(t, parsed, "go", "example.com/web", true, "")
+	assertUpdateStatus(t, parsed, "npm", "left-pad", true, "")
+	filesChanged, ok := parsed["files_changed"].([]interface{})
+	if !ok || len(filesChanged) == 0 {
+		t.Fatalf("files_changed = %#v, want at least one changed file", parsed["files_changed"])
+	}
+	commands, ok := parsed["commands"].([]interface{})
+	if !ok {
+		t.Fatalf("commands = %#v, want list", parsed["commands"])
+	}
+	for _, raw := range commands {
+		command, ok := raw.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if command["cwd"] != "web" {
+			continue
+		}
+		cmdStr, _ := command["command"].(string)
+		if strings.Contains(cmdStr, "go") && !strings.Contains(cmdStr, "-C web") {
+			t.Fatalf("go command for subdirectory missing -C: %q", cmdStr)
+		}
+		if strings.Contains(cmdStr, "npm") && !strings.Contains(cmdStr, "--prefix web") {
+			t.Fatalf("npm command for subdirectory missing --prefix: %q", cmdStr)
+		}
+	}
+}
+
+func TestDependencyUpdatesGeneratedCommandUsesRepoRootForSubdirectories(t *testing.T) {
+	root := t.TempDir()
+	bin := filepath.Join(root, "bin")
+	if err := os.MkdirAll(bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeExecutable(t, bin, "go", `#!/usr/bin/env bash
+set -e
+if [[ "$1" == "-C" && "$2" == "web" && "$3 $4 $5 $6" == "list -m -u -json" && "$7" == "all" ]]; then
+  printf '%s\n' '{"Path":"example.com/web","Version":"v1.0.0","Update":{"Version":"v1.1.0"}}'
+  exit 0
+fi
+if [[ "$1" == "-C" && "$2" == "web" && "$3" == "get" && "$*" == *"example.com/web@v1.1.0"* ]]; then
+  echo changed >> web/go.sum
+  exit 0
+fi
+if [[ "$1" == "-C" && "$2" == "web" && "$3 $4" == "mod tidy" ]]; then
+  exit 0
+fi
+echo "unexpected go invocation: $*" >&2
+exit 1
+`)
+	writeExecutable(t, bin, "npm", `#!/usr/bin/env bash
+set -e
+if [[ "$1" == "--prefix" && "$2" == "web" && "$3 $4" == "outdated --json" ]]; then
+  printf '%s\n' '{"left-pad":{"current":"1.0.0","wanted":"1.1.0","latest":"2.0.0"}}'
+  exit 1
+fi
+if [[ "$1" == "--prefix" && "$2" == "web" && "$3 $4" == "update --package-lock-only" ]]; then
+  printf '%s\n' '{"lockfileVersion":3,"updated":true}' > web/package-lock.json
+  exit 0
+fi
+echo "unexpected npm invocation: $*" >&2
+exit 1
+`)
+	writeExecutable(t, bin, "nix", `#!/usr/bin/env bash
+set -e
+if [[ "$1" == "develop" && "$2" == "--accept-flake-config" ]]; then
+    flake_dir="$3"
+    shift 3
+    if [[ "$1" == "-c" && "$2" == "bash" && "$3" == "-lc" ]]; then
+        command="$4"
+        cd "$flake_dir" && PATH="$PATH" bash -c "$command"
+        exit $?
+    fi
+fi
+echo "unexpected nix invocation: $*" >&2
+exit 1
+`)
+	writeFile(t, root, "vandoor/flake.nix", "{ description = \"test\"; }\n")
+	writeFile(t, root, "vandoor/web/go.mod", "module example.com/web\n")
+	writeFile(t, root, "vandoor/web/go.sum", "")
+	writeFile(t, root, "vandoor/web/package.json", `{"name":"web","dependencies":{"left-pad":"^1.0.0"}}`)
+	writeFile(t, root, "vandoor/web/package-lock.json", `{"lockfileVersion":3}`)
+
+	command, err := buildDependencyUpdatesCommand(pipeline.DependencyUpdatesAction{
+		Enabled: true,
+		Paths:   []string{"vandoor/web"},
+	})
+	if err != nil {
+		t.Fatalf("build command: %v", err)
+	}
+	cmd := osexec.Command("bash", "-c", command)
+	cmd.Dir = root
+	cmd.Env = testEnvWithPath(bin)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("dependency update command failed: %v\n%s", err, out)
+	}
+
+	parsed, ok := parsePipelineOutputJSON(string(out))
+	if !ok {
+		t.Fatalf("command did not emit JSON:\n%s", out)
+	}
+	assertUpdateStatus(t, parsed, "go", "example.com/web", true, "")
+	assertUpdateStatus(t, parsed, "npm", "left-pad", true, "")
+	filesChanged, ok := parsed["files_changed"].([]interface{})
+	if !ok || len(filesChanged) == 0 {
+		t.Fatalf("files_changed = %#v, want at least one changed file", parsed["files_changed"])
+	}
+	commands, ok := parsed["commands"].([]interface{})
+	if !ok {
+		t.Fatalf("commands = %#v, want list", parsed["commands"])
+	}
+	foundRepoRoot := false
+	for _, raw := range commands {
+		command, ok := raw.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if command["cwd"] != "vandoor/web" {
+			continue
+		}
+		cmdStr, _ := command["command"].(string)
+		if strings.Contains(cmdStr, "go") && !strings.Contains(cmdStr, "-C web") {
+			t.Fatalf("go command for subdirectory missing -C: %q", cmdStr)
+		}
+		if strings.Contains(cmdStr, "npm") && !strings.Contains(cmdStr, "--prefix web") {
+			t.Fatalf("npm command for subdirectory missing --prefix: %q", cmdStr)
+		}
+		foundRepoRoot = true
+	}
+	if !foundRepoRoot {
+		t.Fatalf("no commands recorded with cwd vandoor/web")
+	}
+}
