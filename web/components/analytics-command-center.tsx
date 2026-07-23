@@ -68,7 +68,7 @@ const tooltipContentClassName = "max-w-xs rounded-lg border bg-card text-foregro
 const tooltipArrowClassName = "bg-card fill-card"
 const chartConfig = {
   clean: { label: "Clean", color: "#0ca30c" },
-  humanInTheLoop: { label: "Human in the loop", color: "#2a78d6" },
+  humanInTheLoop: { label: "Human on the loop", color: "#2a78d6" },
   warning: { label: "Warning", color: "#fab219" },
   failed: { label: "Failed", color: "#d03b3b" },
   ticketDelivered: { label: "Delivered", color: "#0ca30c" },
@@ -420,7 +420,7 @@ export function AnalyticsCommandCenter({ workspaceScope }: { workspaceScope?: st
             />
             <Kpi
               label="Success rate (unique tickets)"
-              title="Of the distinct tickets with at least one finished run, the share where at least one run delivered (clean, human in the loop, or warning)."
+              title="Of the distinct tickets with at least one finished run, the share where at least one run delivered (clean, human on the loop, or warning)."
               value={formatPercent(effect?.ticketSuccessRate)}
               good
               change={calculateDelta(effect?.ticketSuccessRate, effect?.prior?.ticketSuccessRate)}
@@ -460,7 +460,7 @@ export function AnalyticsCommandCenter({ workspaceScope }: { workspaceScope?: st
         </div>
 
         <div className="grid gap-5 lg:grid-cols-2">
-          <ChartCard title="Run outcomes over time" info="Each bar is a day. Clean = delivered with no human help; Human in the loop = a human helped via the pull request; Warning = a human had to step in from the dashboard; Failed = nothing was delivered.">
+          <ChartCard title="Run outcomes over time" info="Each bar is a day. Clean = delivered with no human help; Human on the loop = a human helped via the pull request; Warning = a human had to step in from the dashboard; Failed = nothing was delivered.">
             <OutcomesChart effect={effect} />
           </ChartCard>
           <ChartCard title="Delivery funnel" info="How many runs made it from the agent starting, to opening a pull request, to that pull request being finished (merged or closed). Percentages show the conversion from the previous stage.">
@@ -609,7 +609,7 @@ function useModelData(costs?: CostOverview) { return useMemo(() => { const model
 function useWorkflowCostComparisonData(drivers: AnalyticsCostDriver[]) { return useMemo(() => { const topDrivers = [...drivers].sort((a, b) => b.costUsd - a.costUsd).slice(0, 5); const topNames = topDrivers.map((driver) => driver.name); const topNameSet = new Set(topNames); const dataByDate = new Map<string, Record<string, string | number>>(); for (const driver of drivers) for (const point of driver.dailyCost) { const row = dataByDate.get(point.date) ?? { date: point.date, Other: 0, ...Object.fromEntries(topNames.map((name) => [name, 0])) }; if (topNameSet.has(driver.name)) row[driver.name] = Number(row[driver.name]) + point.costUsd; else row.Other = Number(row.Other) + point.costUsd; dataByDate.set(point.date, row) } return { data: [...dataByDate.values()].sort((a, b) => String(a.date).localeCompare(String(b.date))), topNames } }, [drivers]) }
 function DailyCostChart({ costs, modelData }: { costs?: CostOverview; modelData: Record<string, string | number>[] }) { const labels = [...(costs?.seriesByModel ?? []).slice(0, 4).map((item) => item.model), "Other"]; return <ChartContainer config={chartConfig} className="h-64 w-full"><BarChart data={modelData}><CartesianGrid vertical={false} /><XAxis dataKey="date" tickFormatter={formatDate} /><YAxis /><ChartTooltip content={<ChartTooltipContent />} /><Legend formatter={legendTextFormatter} />{labels.map((label, index) => <Bar key={label} dataKey={label} name={label} stackId="cost" fill={`var(--chart-${index + 1})`} />)}</BarChart></ChartContainer> }
 function WorkflowCostComparisonChart({ drivers }: { drivers: AnalyticsCostDriver[] }) { const { data, topNames } = useWorkflowCostComparisonData(drivers); if (drivers.length === 0) return <p className="py-8 text-center text-sm text-muted-foreground">No cost data for this period.</p>; return <ChartContainer config={chartConfig} className="h-64 w-full"><LineChart data={data}><CartesianGrid vertical={false} /><XAxis dataKey="date" tickFormatter={formatDate} /><YAxis /><ChartTooltip content={<ChartTooltipContent />} /><Legend formatter={legendTextFormatter} />{topNames.map((name, index) => <Line key={name} type="monotone" dataKey={name} name={name} stroke={`var(--chart-${index + 1})`} dot={false} strokeWidth={2} />)}{drivers.length > 5 && <Line type="monotone" dataKey="Other" name="Other" stroke="var(--muted-foreground)" dot={false} strokeWidth={2} />}</LineChart></ChartContainer> }
-function OutcomesChart({ effect }: { effect?: AnalyticsEffectiveness }) { return <ChartContainer config={chartConfig} className="h-64 w-full"><BarChart data={effect?.outcomesByDay}><CartesianGrid vertical={false} /><XAxis dataKey="date" tickFormatter={formatDate} /><YAxis allowDecimals={false} /><ChartTooltip content={<ChartTooltipContent />} /><Legend formatter={legendTextFormatter} /><Bar dataKey="clean" name="Clean" stackId="outcome" fill="var(--color-clean)" /><Bar dataKey="humanInTheLoop" name="Human in the loop" stackId="outcome" fill="var(--color-humanInTheLoop)" /><Bar dataKey="warning" name="Warning" stackId="outcome" fill="var(--color-warning)" /><Bar dataKey="failed" name="Failed" stackId="outcome" fill="var(--color-failed)" /></BarChart></ChartContainer> }
+function OutcomesChart({ effect }: { effect?: AnalyticsEffectiveness }) { return <ChartContainer config={chartConfig} className="h-64 w-full"><BarChart data={effect?.outcomesByDay}><CartesianGrid vertical={false} /><XAxis dataKey="date" tickFormatter={formatDate} /><YAxis allowDecimals={false} /><ChartTooltip content={<ChartTooltipContent />} /><Legend formatter={legendTextFormatter} /><Bar dataKey="clean" name="Clean" stackId="outcome" fill="var(--color-clean)" /><Bar dataKey="humanInTheLoop" name="Human on the loop" stackId="outcome" fill="var(--color-humanInTheLoop)" /><Bar dataKey="warning" name="Warning" stackId="outcome" fill="var(--color-warning)" /><Bar dataKey="failed" name="Failed" stackId="outcome" fill="var(--color-failed)" /></BarChart></ChartContainer> }
 function DeliveryFunnel({ effect }: { effect?: AnalyticsEffectiveness }) {
   const stages = [
     ["agentStarted", "Agent started"],

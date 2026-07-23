@@ -391,7 +391,7 @@ export function TaskRunAnalyticsView({ workspaceScope }: { workspaceScope?: stri
           <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-7">
             <Metric label="Runs" value={kpiSummary?.totalRuns ?? 0} active={activeKpi === "runs"} onClick={() => applyKpiFilter("runs")} />
             <Metric label="Clean" title="PR merged or closed with zero human interaction." value={kpiSummary?.byStatus.clean ?? 0} tone="success" active={activeKpi === "clean"} onClick={() => applyKpiFilter("clean")} />
-            <Metric label="Human in the loop" title="PR merged or closed; a human interacted via the PR (comment, review, or code push)." value={kpiSummary?.byStatus.human_in_the_loop ?? 0} active={activeKpi === "humanInTheLoop"} onClick={() => applyKpiFilter("humanInTheLoop")} />
+            <Metric label="Human on the loop" title="PR merged or closed; a human interacted via the PR (comment, review, or code push)." value={kpiSummary?.byStatus.human_in_the_loop ?? 0} active={activeKpi === "humanInTheLoop"} onClick={() => applyKpiFilter("humanInTheLoop")} />
             <Metric label="Warning" title="PR merged or closed; a human interacted via the factory dashboard." value={kpiSummary?.byStatus.warning ?? 0} tone="warning" active={activeKpi === "warning"} onClick={() => applyKpiFilter("warning")} />
             <Metric label="Failed" title="No PR was ever delivered or the run definitively failed before delivery." value={kpiSummary?.byStatus.failed ?? 0} tone="danger" active={activeKpi === "failed"} onClick={() => applyKpiFilter("failed")} />
             <Metric label="Human touches" value={kpiSummary?.humanInteractions ?? 0} active={activeKpi === "humanTouches"} onClick={() => applyKpiFilter("humanTouches")} />
