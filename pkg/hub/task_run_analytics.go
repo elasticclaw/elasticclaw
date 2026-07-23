@@ -719,10 +719,58 @@ func taskRunPhaseEventForClawStatus(status string) string {
 		return taskRunEventRunQueued
 	case "provisioning", "starting", "creating":
 		return taskRunEventProvisionStarted
-	case "running", "online", "offline", "idle", "watching":
+	case "running", "connected", "online", "offline", "idle", "watching":
 		return taskRunEventAgentStarted
 	default:
 		return ""
+	}
+}
+
+// recordClawAgentStarted marks the agent-started phase for the claw's active
+// task run once its sandbox actually becomes ready (claws.status flips to
+// "connected"). ensureTaskRunForClaw only records phase events using the
+// claw's status at run-creation time, which is always "provisioning" or
+// "pending" — so without this, agent_started_at is never set for the normal
+// bootstrap flow. Safe to call repeatedly: the event key is deterministic
+// and recordTaskRunEventTx dedupes on (tenant_id, run_id, event_key).
+func (s *Server) recordClawAgentStarted(clawID string) {
+	if s == nil || s.db == nil || clawID == "" {
+		return
+	}
+	var tenantID, runID, attemptID string
+	err := s.db.QueryRow(`
+		SELECT t.tenant_id, t.id, t.current_attempt_id
+		  FROM claws c JOIN task_runs t ON t.id = c.task_run_id
+		 WHERE c.id = ?`, clawID).Scan(&tenantID, &runID, &attemptID)
+	if err != nil {
+		return
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return
+	}
+	defer tx.Rollback()
+	if err := recordTaskRunEventTx(tx, TaskRunEvent{
+		TenantID:        tenantID,
+		RunID:           runID,
+		AttemptID:       attemptID,
+		EventKey:        taskRunEventAgentStarted + ":" + runID,
+		Source:          taskRunSourceHub,
+		EventType:       taskRunEventAgentStarted,
+		EventTime:       now(),
+		ObservedAt:      now(),
+		ActorType:       taskRunActorSystem,
+		InteractionRole: taskRunInteractionNeutral,
+	}); err != nil {
+		log.Printf("[analytics] record agent_started for claw %s: %v", shortID(clawID), err)
+		return
+	}
+	if err := materializeTaskRunTx(tx, runID); err != nil {
+		log.Printf("[analytics] materialize after agent_started for claw %s: %v", shortID(clawID), err)
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		log.Printf("[analytics] commit agent_started for claw %s: %v", shortID(clawID), err)
 	}
 }
 
