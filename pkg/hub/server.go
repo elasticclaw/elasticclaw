@@ -6655,6 +6655,30 @@ func (s *Server) sshWriteFiles(user, host, dir string, files map[string]string) 
 			return fmt.Errorf("write %s: %w\n%s", name, err, string(out))
 		}
 	}
+
+	// If the target directory is a git repo, stage the written files so Nix can
+	// evaluate a workspace flake (nix requires flake.nix/flake.lock to be tracked).
+	if len(files) > 0 {
+		names := make([]string, 0, len(files))
+		for name := range files {
+			if safeName, err := cleanWorkspaceFilePath(name); err == nil {
+				names = append(names, safeName)
+			}
+		}
+		if len(names) > 0 {
+			quotedNames := make([]string, len(names))
+			for i, n := range names {
+				quotedNames[i] = shellDoubleQuote(n)
+			}
+			gitCmd := fmt.Sprintf("cd %s && if [ -d .git ]; then git add %s; fi",
+				shellDoubleQuote(dir), strings.Join(quotedNames, " "))
+			sess, err := client.NewSession()
+			if err == nil {
+				_, _ = sess.CombinedOutput(gitCmd)
+				sess.Close()
+			}
+		}
+	}
 	return nil
 }
 
