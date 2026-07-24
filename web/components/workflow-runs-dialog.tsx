@@ -1,6 +1,7 @@
 "use client"
 
 import { useEffect, useState, type ReactNode } from "react"
+import { useRouter } from "next/navigation"
 import { AlertCircle, BarChart3, Calendar, ExternalLink, History, Loader2 } from "lucide-react"
 import { ApiError, fetchCronWorkflowRuns, type Workflow } from "@/lib/api"
 import type { WorkflowRun } from "@/lib/types"
@@ -11,6 +12,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { cn } from "@/lib/utils"
 
 export function WorkflowRunsDialog({ workflow }: { workflow: Workflow }) {
+  const router = useRouter()
   const [open, setOpen] = useState(false)
   const [runs, setRuns] = useState<WorkflowRun[]>([])
   const [loading, setLoading] = useState(false)
@@ -59,7 +61,7 @@ export function WorkflowRunsDialog({ workflow }: { workflow: Workflow }) {
               <span className="font-medium">{workflow.workspaceName}</span>.
             </DialogDescription>
           </DialogHeader>
-          <div className="min-h-0 flex-1 px-6 pb-6">
+          <div className="min-h-0 flex-1 overflow-y-auto px-6 pb-6">
             {loading && <LoadingState label="Loading run history…" />}
             {!loading && error && <Notice destructive>{error}</Notice>}
             {!loading && !error && runs.length === 0 && (
@@ -91,8 +93,8 @@ export function WorkflowRunsDialog({ workflow }: { workflow: Workflow }) {
                         <TableCell className="text-xs text-muted-foreground">
                           {run.finished_at ? formatTimestamp(run.finished_at) : "—"}
                         </TableCell>
-                        <TableCell className="max-w-xs">
-                          <div className="text-xs text-muted-foreground break-words">
+                        <TableCell className="max-w-xs align-top">
+                          <div className="max-w-full overflow-hidden text-xs text-muted-foreground break-words leading-relaxed">
                             {run.result || "—"}
                           </div>
                         </TableCell>
@@ -106,15 +108,22 @@ export function WorkflowRunsDialog({ workflow }: { workflow: Workflow }) {
               </div>
             )}
           </div>
-          <div className="shrink-0 border-t px-6 py-3">
-            <a
-              href={`/settings/workspace-analytics?workspace=${encodeURIComponent(workflow.workspaceName)}&workflow=${encodeURIComponent(workflow.name)}`}
-              className="inline-flex items-center gap-1.5 text-xs text-primary hover:underline"
+          <div className="shrink-0 border-t bg-background px-6 py-3">
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-auto px-0 py-0 text-xs text-primary hover:text-primary hover:underline"
+              onClick={() => {
+                setOpen(false)
+                router.push(
+                  `/settings/workspace-analytics?workspace=${encodeURIComponent(workflow.workspaceName)}&workflow=${encodeURIComponent(workflow.name)}`
+                )
+              }}
             >
               <BarChart3 className="size-3.5" />
               Open full analytics for this workflow
               <ExternalLink className="size-3" />
-            </a>
+            </Button>
           </div>
         </DialogContent>
       </Dialog>
