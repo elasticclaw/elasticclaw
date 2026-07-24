@@ -2402,7 +2402,11 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 							}
 							turnOpenOrRecent := !cc.streamingStartedAt.IsZero() || cc.awaitingResponse ||
 								(!cc.lastTurnFinishedAt.IsZero() && time.Since(cc.lastTurnFinishedAt) < autoResumeRecentTurnWindow)
-							if turnOpenOrRecent && s.autoResumeRestartCounts[clawID] != hb.RestartCount {
+							// Existence-aware lookup: a bridge relaunch resets its counter
+							// to 0, which equals the zero value of an absent map entry — a
+							// plain read would skip the resume for that first relaunch.
+							lastResumedCount, resumeRecorded := s.autoResumeRestartCounts[clawID]
+							if turnOpenOrRecent && (!resumeRecorded || lastResumedCount != hb.RestartCount) {
 								s.autoResumeRestartCounts[clawID] = hb.RestartCount
 								shouldAutoResume = true
 							}

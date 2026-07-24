@@ -1050,7 +1050,12 @@ func (s *Server) injectMessage(clawID, content, role string) {
 		return
 	}
 	var pendingDupes int
-	_ = s.db.QueryRow(`SELECT COUNT(1) FROM messages WHERE claw_id=? AND role=? AND content=? AND delivered_at IS NULL`, clawID, role, content).Scan(&pendingDupes)
+	// Fail closed: injecting on a failed dedup check is the outcome this
+	// guard exists to prevent.
+	if err := s.db.QueryRow(`SELECT COUNT(1) FROM messages WHERE claw_id=? AND role=? AND content=? AND delivered_at IS NULL`, clawID, role, content).Scan(&pendingDupes); err != nil {
+		log.Printf("[pr-watcher] dedup check for claw %s failed: %v", shortID(clawID), err)
+		return
+	}
 	if pendingDupes > 0 {
 		log.Printf("[pr-watcher] skipping duplicate pending %s message for claw %s", role, shortID(clawID))
 		return

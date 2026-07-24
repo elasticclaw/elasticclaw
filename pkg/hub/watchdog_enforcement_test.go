@@ -333,6 +333,42 @@ func TestRestartMidTurnEnqueuesExactlyOneResume(t *testing.T) {
 	eventuallyWatchdog(t, func() bool { return count() == 2 }, "second restart resume")
 }
 
+// A bridge-process relaunch resets restart_count to 0 — equal to the zero
+// value of an absent autoResumeRestartCounts entry, which a plain map read
+// cannot distinguish from "never resumed".
+func TestRestartCountResetMidTurnEnqueuesResume(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{ClawToken: "claw-token"}, "", "", "")
+	const clawID = "watchdog-restart-reset"
+	conn := watchdogClaw(t, s, clawID)
+	cc := watchdogClawConn(t, s, clawID)
+	if _, err := db.Exec(`UPDATE claws SET status='connected', bootstrap_ok=1, issue_title='Fix watchdog', github_issue_id='owner/repo#42' WHERE id=?`, clawID); err != nil {
+		t.Fatal(err)
+	}
+	cc.mu.Lock()
+	cc.streamingStartedAt = time.Now()
+	cc.mu.Unlock()
+	beat := func(n int) {
+		if err := wsjson.Write(context.Background(), conn, types.WSMessage{Type: "heartbeat", Payload: map[string]any{"gateway_healthy": true, "restart_count": n}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	count := func() int {
+		var n int
+		_ = db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND role='hub' AND content LIKE ?`, clawID, restartResumePrefix+"%").Scan(&n)
+		return n
+	}
+	// Historical baseline from before the relaunch, then the relaunched
+	// bridge reports a reset counter mid-turn.
+	beat(5)
+	beat(0)
+	eventuallyWatchdog(t, func() bool { return count() == 1 }, "resume after restart_count reset")
+	beat(0)
+	beat(0)
+	if got := count(); got != 1 {
+		t.Fatalf("resume count after duplicate reset beats = %d, want 1", got)
+	}
+}
+
 func TestRestartWhileIdleDoesNotEnqueueResume(t *testing.T) {
 	s, db := NewTestServerWithConfig(t, &types.HubConfig{ClawToken: "claw-token"}, "", "", "")
 	const clawID = "watchdog-idle-restart"

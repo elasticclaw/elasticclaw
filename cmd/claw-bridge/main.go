@@ -1807,25 +1807,76 @@ func activeGatewaySession() *gatewaySession {
 	defer gatewayProcessState.RUnlock()
 	return gatewayProcessState.session
 }
-func (gs *gatewaySession) turnInFlight() bool {
-	gs.infMu.RLock()
-	defer gs.infMu.RUnlock()
-	return gs.inFlight != nil
-}
 func injectGatewayNudge(ctx context.Context, text string) {
 	gs := activeGatewaySession()
 	if gs == nil || !gs.IsReady() {
 		log.Printf("[status] dropping nudge: gateway session not ready")
 		return
 	}
-	if !gs.turnInFlight() {
+	reqCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	sent, err := gs.sendTurnScopedReq(reqCtx, "sessions.send", map[string]string{"key": gs.getSessionKey(), "message": text})
+	if !sent {
 		log.Printf("[status] dropping nudge: no turn in flight")
 		return
 	}
-	reqCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
-	defer cancel()
-	if _, err := gs.sendReq(reqCtx, "sessions.send", map[string]string{"key": gs.getSessionKey(), "message": text}); err != nil {
+	if err != nil {
 		log.Printf("[status] nudge injection failed: %v", err)
+	}
+}
+
+// sendTurnScopedReq dispatches a request only while a turn is in flight,
+// holding infMu across the check AND the WebSocket write so the readLoop
+// cannot mark the turn finished in between (closing the turnInFlight/send
+// TOCTOU). The response is awaited without the lock — the readLoop needs
+// infMu.Lock to clear inFlight, so holding it across the await would
+// deadlock. Returns sent=false when no turn was in flight at write time.
+func (gs *gatewaySession) sendTurnScopedReq(ctx context.Context, method string, params interface{}) (bool, error) {
+	paramsJSON, _ := json.Marshal(params)
+	reqID := randomID()
+	ch := make(chan gwFrame, 1)
+
+	gs.pendMu.Lock()
+	gs.pending[reqID] = ch
+	gs.pendMu.Unlock()
+	cleanup := func() {
+		gs.pendMu.Lock()
+		delete(gs.pending, reqID)
+		gs.pendMu.Unlock()
+	}
+
+	gs.infMu.RLock()
+	if gs.inFlight == nil {
+		gs.infMu.RUnlock()
+		cleanup()
+		return false, nil
+	}
+	conn := gs.currentConn()
+	// Short write deadline: the RLock stalls readLoop writers (turn-end
+	// bookkeeping) until the write returns, so don't hold it for the full
+	// request timeout against a wedged socket.
+	writeCtx, writeCancel := context.WithTimeout(ctx, 5*time.Second)
+	err := wsjson.Write(writeCtx, conn, gwFrame{Type: "req", ID: reqID, Method: method, Params: paramsJSON})
+	writeCancel()
+	gs.infMu.RUnlock()
+	if err != nil {
+		cleanup()
+		return true, fmt.Errorf("%s write: %w", method, err)
+	}
+
+	select {
+	case resp := <-ch:
+		if !resp.OK {
+			msg := "unknown"
+			if resp.Error != nil {
+				msg = resp.Error.Message
+			}
+			return true, fmt.Errorf("%s failed: %s", method, msg)
+		}
+		return true, nil
+	case <-ctx.Done():
+		cleanup()
+		return true, ctx.Err()
 	}
 }
 
