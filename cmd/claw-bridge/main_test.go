@@ -82,6 +82,64 @@ func TestWriteManagedGrokCredentialToOpenClaw(t *testing.T) {
 	}
 }
 
+func TestInjectGatewayNudgeSendsOnActiveSessionMidTurn(t *testing.T) {
+	received := make(chan gwFrame, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		defer conn.CloseNow()
+		var req gwFrame
+		if err := wsjson.Read(r.Context(), conn, &req); err != nil {
+			t.Error(err)
+			return
+		}
+		received <- req
+		_ = wsjson.Write(r.Context(), conn, gwFrame{Type: "res", ID: req.ID, OK: true})
+	}))
+	defer srv.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	conn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(srv.URL, "http"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.CloseNow()
+	gs := &gatewaySession{conn: conn, pending: make(map[string]chan gwFrame), sessionKey: "session-1", ready: true, inFlight: &inFlightState{done: make(chan agentResult, 1)}}
+	go gs.readLoop(ctx)
+	old := activeGatewaySession()
+	setActiveGatewaySession(gs)
+	t.Cleanup(func() { setActiveGatewaySession(old) })
+	injectGatewayNudge(ctx, "nudge text")
+	select {
+	case req := <-received:
+		if req.Method != "sessions.send" {
+			t.Fatalf("method=%q", req.Method)
+		}
+		var params map[string]string
+		if err := json.Unmarshal(req.Params, &params); err != nil {
+			t.Fatal(err)
+		}
+		if params["key"] != "session-1" || params["message"] != "nudge text" {
+			t.Fatalf("params=%v", params)
+		}
+	case <-ctx.Done():
+		t.Fatal("did not receive nudge request")
+	}
+}
+
+func TestInjectGatewayNudgeDroppedWhenNoTurnInFlight(t *testing.T) {
+	old := activeGatewaySession()
+	setActiveGatewaySession(nil)
+	t.Cleanup(func() { setActiveGatewaySession(old) })
+	injectGatewayNudge(context.Background(), "nudge text") // nil session must not panic
+	gs := &gatewaySession{ready: true, pending: make(map[string]chan gwFrame)}
+	setActiveGatewaySession(gs)
+	injectGatewayNudge(context.Background(), "nudge text") // no in-flight turn must not send
+}
+
 func TestWriteManagedGrokCredentialToCLI(t *testing.T) {
 	home := t.TempDir()
 	authDir := filepath.Join(home, ".grok")

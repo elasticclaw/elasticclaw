@@ -1802,6 +1802,33 @@ func setActiveGatewaySession(gs *gatewaySession) {
 	gatewayProcessState.Unlock()
 }
 
+func activeGatewaySession() *gatewaySession {
+	gatewayProcessState.RLock()
+	defer gatewayProcessState.RUnlock()
+	return gatewayProcessState.session
+}
+func (gs *gatewaySession) turnInFlight() bool {
+	gs.infMu.RLock()
+	defer gs.infMu.RUnlock()
+	return gs.inFlight != nil
+}
+func injectGatewayNudge(ctx context.Context, text string) {
+	gs := activeGatewaySession()
+	if gs == nil || !gs.IsReady() {
+		log.Printf("[status] dropping nudge: gateway session not ready")
+		return
+	}
+	if !gs.turnInFlight() {
+		log.Printf("[status] dropping nudge: no turn in flight")
+		return
+	}
+	reqCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	if _, err := gs.sendReq(reqCtx, "sessions.send", map[string]string{"key": gs.getSessionKey(), "message": text}); err != nil {
+		log.Printf("[status] nudge injection failed: %v", err)
+	}
+}
+
 func (gs *gatewaySession) setReady() {
 	gs.readyMu.Lock()
 	gs.ready = true
@@ -3961,6 +3988,14 @@ func runStatusChannel(ctx context.Context, wsURL, clawID, clawName, templateName
 			}
 			if msg.Type == "status_ping" {
 				_ = wsjson.Write(ctx, conn, hubMsg{Type: "status_pong"})
+			}
+			if msg.Type == "nudge" {
+				var p struct {
+					Content string `json:"content"`
+				}
+				if err := json.Unmarshal(msg.Payload, &p); err == nil && p.Content != "" {
+					go injectGatewayNudge(ctx, p.Content)
+				}
 			}
 		}
 		pingCancel() // stop the ping goroutine before closing the connection
