@@ -306,6 +306,8 @@ func TestRestartMidTurnEnqueuesExactlyOneResume(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	// First observation after hub boot is a baseline, not a restart.
+	beat(0)
 	beat(1)
 	beat(1)
 	beat(1)
@@ -327,6 +329,17 @@ func TestRestartWhileIdleDoesNotEnqueueResume(t *testing.T) {
 	if _, err := db.Exec(`UPDATE claws SET status='connected', bootstrap_ok=1 WHERE id=?`, clawID); err != nil {
 		t.Fatal(err)
 	}
+	// Baseline observation first: the initial restart_count after (re)boot is
+	// recorded, not treated as a restart.
+	if err := wsjson.Write(context.Background(), conn, types.WSMessage{Type: "heartbeat", Payload: map[string]any{"gateway_healthy": true, "restart_count": 0}}); err != nil {
+		t.Fatal(err)
+	}
+	eventuallyWatchdog(t, func() bool {
+		s.mu.RLock()
+		defer s.mu.RUnlock()
+		_, seen := s.gatewayRestartCounts[clawID]
+		return seen
+	}, "restart count baseline")
 	// watchdogClaw already seeded a delivered message to suppress the async
 	// post-registration wake-turn reservation. Also force the claw back to a
 	// deterministic idle state in case that reservation raced ahead of it.
@@ -342,6 +355,162 @@ func TestRestartWhileIdleDoesNotEnqueueResume(t *testing.T) {
 	var n int
 	if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND content LIKE ?`, clawID, restartResumePrefix+"%").Scan(&n); err != nil || n != 0 {
 		t.Fatalf("resume rows=%d err=%v", n, err)
+	}
+}
+
+func TestFirstHeartbeatAfterHubBootDoesNotAutoResume(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{ClawToken: "claw-token"}, "", "", "")
+	const clawID = "watchdog-hub-boot-baseline"
+	conn := watchdogClaw(t, s, clawID)
+	cc := watchdogClawConn(t, s, clawID)
+	if _, err := db.Exec(`UPDATE claws SET status='connected', bootstrap_ok=1 WHERE id=?`, clawID); err != nil {
+		t.Fatal(err)
+	}
+	cc.mu.Lock()
+	cc.streamingStartedAt = time.Now()
+	cc.mu.Unlock()
+	beat := func(n int) {
+		if err := wsjson.Write(context.Background(), conn, types.WSMessage{Type: "heartbeat", Payload: map[string]any{"gateway_healthy": true, "restart_count": n}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	count := func() int {
+		var n int
+		_ = db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND role='hub' AND content LIKE ?`, clawID, restartResumePrefix+"%").Scan(&n)
+		return n
+	}
+	// A fresh Server has an empty gatewayRestartCounts map — exactly the state
+	// after a hub restart. A historical nonzero restart_count on the first
+	// heartbeat must be recorded as a baseline, not treated as a restart.
+	beat(3)
+	eventuallyWatchdog(t, func() bool {
+		s.mu.RLock()
+		defer s.mu.RUnlock()
+		return s.gatewayRestartCounts[clawID] == 3
+	}, "baseline recorded")
+	if got := count(); got != 0 {
+		t.Fatalf("resume rows after baseline heartbeat=%d, want 0", got)
+	}
+	// A genuine restart after the baseline still triggers auto-resume.
+	beat(4)
+	eventuallyWatchdog(t, func() bool { return count() == 1 }, "resume after genuine restart")
+}
+
+func TestRestartDuringBootstrapDoesNotEnqueueResume(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{ClawToken: "claw-token"}, "", "", "")
+	const clawID = "watchdog-bootstrap-restart"
+	conn := watchdogClaw(t, s, clawID)
+	cc := watchdogClawConn(t, s, clawID)
+	if _, err := db.Exec(`UPDATE claws SET status='connected', bootstrap_ok=0 WHERE id=?`, clawID); err != nil {
+		t.Fatal(err)
+	}
+	cc.mu.Lock()
+	cc.streamingStartedAt = time.Now()
+	cc.mu.Unlock()
+	beat := func(n int) {
+		if err := wsjson.Write(context.Background(), conn, types.WSMessage{Type: "heartbeat", Payload: map[string]any{"gateway_healthy": true, "restart_count": n}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	beat(0)
+	beat(1)
+	time.Sleep(100 * time.Millisecond)
+	var n int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND content LIKE ?`, clawID, restartResumePrefix+"%").Scan(&n); err != nil || n != 0 {
+		t.Fatalf("resume rows=%d err=%v, want 0", n, err)
+	}
+}
+
+func TestStreamingNudgeGoesOverStatusChannel(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{ClawToken: "claw-token"}, "", "", "")
+	const clawID = "watchdog-nudge-status-channel"
+	_ = watchdogClaw(t, s, clawID)
+	cc := watchdogClawConn(t, s, clawID)
+
+	// Connect the status channel like the bridge does.
+	ts := httptest.NewServer(s.Handler())
+	t.Cleanup(ts.Close)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	t.Cleanup(cancel)
+	statusConn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(ts.URL, "http")+"/claw/ws", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = statusConn.Close(websocket.StatusNormalClosure, "done") })
+	if err := wsjson.Write(ctx, statusConn, types.WSMessage{Type: "register", Payload: types.RegisterPayload{
+		ClawID: clawID, Name: "watchdog claw", Template: "elasticclaw", Token: "claw-token", Channel: "status",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	var ack types.WSMessage
+	if err := wsjson.Read(ctx, statusConn, &ack); err != nil || ack.Type != "registered" {
+		t.Fatalf("status channel ack: type=%q err=%v", ack.Type, err)
+	}
+	eventuallyWatchdog(t, func() bool {
+		cc.mu.RLock()
+		defer cc.mu.RUnlock()
+		return cc.statusConn != nil
+	}, "status channel attach")
+
+	cc.mu.Lock()
+	cc.streamingStartedAt = time.Now()
+	cc.streamingMsgID = "stream"
+	cc.mu.Unlock()
+	s.sendStreamingNudge(cc, streamingTimeoutNudge)
+
+	// The nudge must arrive over the status channel, not the message queue.
+	var got types.WSMessage
+	if err := wsjson.Read(ctx, statusConn, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Type != "nudge" {
+		t.Fatalf("status channel message type=%q, want nudge", got.Type)
+	}
+	payload, _ := got.Payload.(map[string]interface{})
+	if payload["claw_id"] != clawID || payload["content"] != streamingTimeoutNudge {
+		t.Fatalf("nudge payload=%#v", payload)
+	}
+	// The UI row is recorded as already delivered — never queued for the agent.
+	var delivered, pending int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND content=? AND delivered_at IS NOT NULL`, clawID, streamingTimeoutNudge).Scan(&delivered); err != nil || delivered != 1 {
+		t.Fatalf("delivered rows=%d err=%v, want 1", delivered, err)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND content=? AND delivered_at IS NULL`, clawID, streamingTimeoutNudge).Scan(&pending); err != nil || pending != 0 {
+		t.Fatalf("pending rows=%d err=%v, want 0", pending, err)
+	}
+}
+
+func TestStreamingNudgeFallsBackToQueueWithoutStatusChannel(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{ClawToken: "claw-token"}, "", "", "")
+	const clawID = "watchdog-nudge-fallback"
+	_ = watchdogClaw(t, s, clawID)
+	cc := watchdogClawConn(t, s, clawID)
+	cc.mu.Lock()
+	cc.streamingStartedAt = time.Now()
+	cc.streamingMsgID = "stream"
+	cc.statusConn = nil
+	cc.mu.Unlock()
+	s.sendStreamingNudge(cc, streamingTimeoutNudge)
+	var pending int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND content=? AND delivered_at IS NULL`, clawID, streamingTimeoutNudge).Scan(&pending); err != nil || pending != 1 {
+		t.Fatalf("pending rows=%d err=%v, want 1", pending, err)
+	}
+}
+
+func TestStreamingNudgeDroppedWhenTurnAlreadyEnded(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{ClawToken: "claw-token"}, "", "", "")
+	const clawID = "watchdog-nudge-stale-drop"
+	_ = watchdogClaw(t, s, clawID)
+	cc := watchdogClawConn(t, s, clawID)
+	// The nudge goroutine may run after the turn it targeted already finished;
+	// it must be dropped entirely, not queued as the next turn's prompt.
+	cc.mu.Lock()
+	cc.finishTurnLocked()
+	cc.mu.Unlock()
+	s.sendStreamingNudge(cc, streamingTimeoutNudge)
+	var n int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND content=?`, clawID, streamingTimeoutNudge).Scan(&n); err != nil || n != 0 {
+		t.Fatalf("nudge rows=%d err=%v, want 0", n, err)
 	}
 }
 
@@ -377,5 +546,14 @@ func TestLongTurnInterleavedSegmentsNagsExactlyOnce(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 	if got := count(); got != 1 {
 		t.Fatalf("timeout nudge rows=%d, want 1", got)
+	}
+	// The flag must survive segment flushes: if the chunk handler re-armed it
+	// per segment (the original bug), interleaved chunks would reset it to
+	// false and the row-count check alone could still pass via dedup.
+	cc.mu.RLock()
+	timeoutSent := cc.streamingTimeoutSent
+	cc.mu.RUnlock()
+	if !timeoutSent {
+		t.Fatal("streamingTimeoutSent was re-armed by an interleaved segment; it must stay true for the whole turn")
 	}
 }

@@ -2226,6 +2226,14 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 
 	var noProgressPaused bool
 	_ = s.db.QueryRow(`SELECT COALESCE(no_progress_paused, 0) != 0 FROM claws WHERE id=?`, clawID).Scan(&noProgressPaused)
+	// A bridge-process restart tears down the main channel, so the old clawConn
+	// (and its lastTurnFinishedAt) is usually gone by the time the new bridge
+	// registers. Seed the post-restart resume window from the last claw
+	// response — a turn interrupted by the crash was flushed as an
+	// "[interrupted]" claw message at disconnect, so its created_at marks the
+	// turn end closely enough for autoResumeRecentTurnWindow.
+	var lastClawMsgAt time.Time
+	_ = s.db.QueryRow(`SELECT created_at FROM messages WHERE claw_id=? AND role='claw' ORDER BY created_at DESC LIMIT 1`, clawID).Scan(&lastClawMsgAt)
 	cc := &clawConn{id: clawID, tenantID: tenantID, conn: conn, gatewayReady: gatewayReadyBool(rp.GatewayReady), tags: registrationTags, lastUserMessageAt: time.Now(), lastStatusAt: time.Now(), noProgressPaused: noProgressPaused}
 	s.mu.Lock()
 	if s.gatewayRestartCounts != nil {
@@ -2235,7 +2243,11 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 		old.mu.RLock()
 		cc.statusConn = old.statusConn
 		cc.lastStatusAt = old.lastStatusAt
+		cc.lastTurnFinishedAt = old.lastTurnFinishedAt
 		old.mu.RUnlock()
+	}
+	if cc.lastTurnFinishedAt.IsZero() {
+		cc.lastTurnFinishedAt = lastClawMsgAt
 	}
 	s.claws[clawID] = cc
 	s.mu.Unlock()
@@ -2371,11 +2383,18 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 						if s.gatewayRestartCounts == nil {
 							s.gatewayRestartCounts = make(map[string]int)
 						}
-						lastRestartCount := s.gatewayRestartCounts[clawID]
-						// Any change signals a restart: an increase is an in-process
-						// gateway restart; a decrease means the bridge process itself
-						// was relaunched and its counter reset.
-						if hb.RestartCount != lastRestartCount {
+						lastRestartCount, restartCountSeen := s.gatewayRestartCounts[clawID]
+						// The map is in-memory only: the first heartbeat after a hub
+						// restart carries a historical restart_count, not a fresh
+						// restart. Record it as a baseline instead of treating it as
+						// a restart, or every busy claw would get a spurious
+						// "session was lost" resume after each hub deploy.
+						if !restartCountSeen {
+							s.gatewayRestartCounts[clawID] = hb.RestartCount
+						} else if hb.RestartCount != lastRestartCount {
+							// Any change signals a restart: an increase is an in-process
+							// gateway restart; a decrease means the bridge process itself
+							// was relaunched and its counter reset.
 							log.Printf("[heartbeat] %s (%s): agent process restarted (restart_count=%d)", rp.Name, clawID[:8], hb.RestartCount)
 							s.gatewayRestartCounts[clawID] = hb.RestartCount
 							if s.autoResumeRestartCounts == nil {
@@ -7317,7 +7336,16 @@ func (s *Server) enqueueRestartResume(clawID string, restartCount int) {
 func (s *Server) sendStreamingNudge(cc *clawConn, text string) {
 	cc.mu.RLock()
 	sc, clawID, tenantID := cc.statusConn, cc.id, cc.tenantID
+	turnOpen := cc.isBusyLocked()
 	cc.mu.RUnlock()
+	// The nudge targets the in-flight turn. This runs on a goroutine, so the
+	// turn may have ended (and deleteStaleWatchdogNags already run) before we
+	// get here — queueing now would deliver the stale nudge as the next
+	// turn's prompt. Drop it instead.
+	if !turnOpen {
+		log.Printf("[watchdog] dropping nudge for %s: turn already ended", shortID(clawID))
+		return
+	}
 	if sc == nil {
 		s.injectHubMessageByID(clawID, text)
 		return
@@ -7325,6 +7353,14 @@ func (s *Server) sendStreamingNudge(cc *clawConn, text string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := wsjson.Write(ctx, sc, types.WSMessage{Type: "nudge", Payload: mustJSONRaw(map[string]string{"claw_id": clawID, "content": text})}); err != nil {
+		// Up to 5s may have elapsed; re-check before falling back to the queue.
+		cc.mu.RLock()
+		turnOpen = cc.isBusyLocked()
+		cc.mu.RUnlock()
+		if !turnOpen {
+			log.Printf("[watchdog] dropping nudge for %s: turn ended during status-channel send", shortID(clawID))
+			return
+		}
 		log.Printf("[watchdog] nudge over status channel for %s failed, queueing: %v", shortID(clawID), err)
 		s.injectHubMessageByID(clawID, text)
 		return
