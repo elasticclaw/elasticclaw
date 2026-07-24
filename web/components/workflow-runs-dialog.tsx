@@ -93,8 +93,8 @@ export function WorkflowRunsDialog({ workflow }: { workflow: Workflow }) {
                         <TableCell className="text-xs text-muted-foreground">
                           {run.finished_at ? formatTimestamp(run.finished_at) : "—"}
                         </TableCell>
-                        <TableCell className="max-w-xs align-top">
-                          <div className="max-w-full overflow-hidden text-xs text-muted-foreground break-words leading-relaxed">
+                        <TableCell className="min-w-[20rem] max-w-lg align-top">
+                          <div className="max-w-full text-xs text-muted-foreground whitespace-pre-wrap break-words leading-relaxed">
                             {run.result || "—"}
                           </div>
                         </TableCell>
