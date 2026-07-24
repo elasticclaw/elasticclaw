@@ -34,6 +34,16 @@ func watchdogClaw(t *testing.T, s *Server, clawID string) *websocket.Conn {
 	if err := wsjson.Read(ctx, conn, &ack); err != nil || ack.Type != "registered" {
 		t.Fatalf("read registration ack: type=%q err=%v", ack.Type, err)
 	}
+	// Registration with gateway_ready races an async post-registration
+	// sendWakeMessage/sendInitialPlanInstruction turn reservation (real hub
+	// behavior, unrelated to most watchdog tests). It only fires when the
+	// claw has no messages yet (clawHasMessages), so seed an already-delivered
+	// row immediately to suppress it — delivered_at is set so it can never be
+	// drained as a pending message and interfere with queue-draining tests.
+	_, _ = s.db.Exec(
+		`INSERT INTO messages(id,claw_id,tenant_id,role,content,format,created_at,delivered_at) VALUES(?,?,?,?,?,?,?,?)`,
+		"seed-"+clawID, clawID, "test-tenant-id", "system", "seed", "pre", time.Now(), time.Now(),
+	)
 	return conn
 }
 
@@ -220,4 +230,152 @@ func TestWatchdogSilentDeathStopsClaw(t *testing.T) {
 		_ = db.QueryRow(`SELECT status FROM claws WHERE id=?`, clawID).Scan(&status)
 		return status == "error"
 	}, fmt.Sprintf("silent claw %s error", clawID))
+}
+
+func TestTurnFinishDeletesPendingWatchdogNags(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{ClawToken: "claw-token"}, "", "", "")
+	const clawID = "watchdog-delete-on-finish"
+	conn := watchdogClaw(t, s, clawID)
+	cc := watchdogClawConn(t, s, clawID)
+	cc.mu.Lock()
+	cc.streamingStartedAt = time.Now()
+	cc.streamingMsgID = "stream"
+	cc.mu.Unlock()
+	for _, row := range []struct{ id, role, content string }{{"nag", "hub", streamingTimeoutNudge}, {"user", "user", "next request"}} {
+		if _, err := db.Exec(`INSERT INTO messages(id,claw_id,tenant_id,role,content,created_at,delivered_at) VALUES(?,?,?,?,?,?,NULL)`, row.id, clawID, "test-tenant-id", row.role, row.content, time.Now()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := wsjson.Write(context.Background(), conn, types.WSMessage{Type: "message", Payload: types.HubMessage{Content: "done"}}); err != nil {
+		t.Fatal(err)
+	}
+	eventuallyWatchdog(t, func() bool {
+		var n int
+		_ = db.QueryRow(`SELECT COUNT(*) FROM messages WHERE id='nag'`).Scan(&n)
+		return n == 0
+	}, "stale nag deletion")
+	readCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	for {
+		var got types.WSMessage
+		if err := wsjson.Read(readCtx, conn, &got); err != nil {
+			t.Fatal(err)
+		}
+		if got.Type == "message" {
+			b, _ := got.Payload.(map[string]interface{})
+			if b["content"] != "next request" {
+				t.Fatalf("delivered content = %#v", b["content"])
+			}
+			break
+		}
+	}
+}
+
+func TestForcedFinishDeletesPendingWatchdogNags(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{ClawToken: "claw-token"}, "", "", "")
+	const clawID = "watchdog-delete-forced"
+	_ = watchdogClaw(t, s, clawID)
+	cc := watchdogClawConn(t, s, clawID)
+	cc.mu.Lock()
+	cc.streamingStartedAt = time.Now().Add(-defaultBusyTurnMax - time.Minute)
+	cc.mu.Unlock()
+	if _, err := db.Exec(`INSERT INTO messages(id,claw_id,tenant_id,role,content,created_at,delivered_at) VALUES(?,?,?,?,?,?,NULL)`, "nag", clawID, "test-tenant-id", "hub", streamingTimeoutNudge, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	s.checkClawStatus()
+	eventuallyWatchdog(t, func() bool {
+		var n int
+		_ = db.QueryRow(`SELECT COUNT(*) FROM messages WHERE id='nag'`).Scan(&n)
+		return n == 0
+	}, "forced finish nag deletion")
+}
+
+func TestRestartMidTurnEnqueuesExactlyOneResume(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{ClawToken: "claw-token"}, "", "", "")
+	const clawID = "watchdog-restart-resume"
+	conn := watchdogClaw(t, s, clawID)
+	cc := watchdogClawConn(t, s, clawID)
+	if _, err := db.Exec(`UPDATE claws SET status='connected', bootstrap_ok=1, issue_title='Fix watchdog', github_issue_id='owner/repo#42' WHERE id=?`, clawID); err != nil {
+		t.Fatal(err)
+	}
+	cc.mu.Lock()
+	cc.streamingStartedAt = time.Now()
+	cc.mu.Unlock()
+	beat := func(n int) {
+		if err := wsjson.Write(context.Background(), conn, types.WSMessage{Type: "heartbeat", Payload: map[string]any{"gateway_healthy": true, "restart_count": n}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	beat(1)
+	beat(1)
+	beat(1)
+	count := func() int {
+		var n int
+		_ = db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND role='hub' AND content LIKE ?`, clawID, restartResumePrefix+"%").Scan(&n)
+		return n
+	}
+	eventuallyWatchdog(t, func() bool { return count() == 1 }, "one restart resume")
+	beat(2)
+	eventuallyWatchdog(t, func() bool { return count() == 2 }, "second restart resume")
+}
+
+func TestRestartWhileIdleDoesNotEnqueueResume(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{ClawToken: "claw-token"}, "", "", "")
+	const clawID = "watchdog-idle-restart"
+	conn := watchdogClaw(t, s, clawID)
+	cc := watchdogClawConn(t, s, clawID)
+	if _, err := db.Exec(`UPDATE claws SET status='connected', bootstrap_ok=1 WHERE id=?`, clawID); err != nil {
+		t.Fatal(err)
+	}
+	// watchdogClaw already seeded a delivered message to suppress the async
+	// post-registration wake-turn reservation. Also force the claw back to a
+	// deterministic idle state in case that reservation raced ahead of it.
+	cc.mu.Lock()
+	cc.streamingStartedAt = time.Time{}
+	cc.awaitingResponse = false
+	cc.lastTurnFinishedAt = time.Time{}
+	cc.mu.Unlock()
+	if err := wsjson.Write(context.Background(), conn, types.WSMessage{Type: "heartbeat", Payload: map[string]any{"gateway_healthy": true, "restart_count": 1}}); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	var n int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND content LIKE ?`, clawID, restartResumePrefix+"%").Scan(&n); err != nil || n != 0 {
+		t.Fatalf("resume rows=%d err=%v", n, err)
+	}
+}
+
+func TestLongTurnInterleavedSegmentsNagsExactlyOnce(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{ClawToken: "claw-token"}, "", "", "")
+	const clawID = "watchdog-interleaved-segments"
+	conn := watchdogClaw(t, s, clawID)
+	cc := watchdogClawConn(t, s, clawID)
+	write := func(m types.WSMessage) {
+		if err := wsjson.Write(context.Background(), conn, m); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(types.WSMessage{Type: "chunk", Payload: map[string]string{"content": "first"}})
+	eventuallyWatchdog(t, func() bool { cc.mu.RLock(); defer cc.mu.RUnlock(); return !cc.streamingStartedAt.IsZero() }, "first chunk")
+	cc.mu.Lock()
+	cc.streamingStartedAt = time.Now().Add(-13 * time.Minute)
+	cc.mu.Unlock()
+	write(types.WSMessage{Type: "agent_activity", Payload: map[string]any{"kind": "tool", "phase": "started"}})
+	write(types.WSMessage{Type: "chunk", Payload: map[string]string{"content": "second"}})
+	write(types.WSMessage{Type: "heartbeat", Payload: map[string]any{"gateway_healthy": true}})
+	count := func() int {
+		var n int
+		_ = db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND content=?`, clawID, streamingTimeoutNudge).Scan(&n)
+		return n
+	}
+	eventuallyWatchdog(t, func() bool { return count() == 1 }, "one timeout nudge")
+	for i := 0; i < 2; i++ {
+		write(types.WSMessage{Type: "agent_activity", Payload: map[string]any{"kind": "tool", "phase": "started"}})
+		write(types.WSMessage{Type: "chunk", Payload: map[string]string{"content": "more"}})
+		write(types.WSMessage{Type: "heartbeat", Payload: map[string]any{"gateway_healthy": true}})
+	}
+	time.Sleep(100 * time.Millisecond)
+	if got := count(); got != 1 {
+		t.Fatalf("timeout nudge rows=%d, want 1", got)
+	}
 }
