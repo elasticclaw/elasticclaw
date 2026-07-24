@@ -13,6 +13,31 @@ import (
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 )
 
+func TestSanitizeWorkflowResultForTable(t *testing.T) {
+	tests := []struct {
+		name     string
+		result   string
+		maxRunes int
+		want     string
+	}{
+		{"empty", "", 80, "—"},
+		{"simple", "provisioning failed", 80, "provisioning failed"},
+		{"newlines", "line1\nline2\r\nline3", 80, "line1 line2 line3"},
+		{"tabs", "a\tb\tc", 80, "a b c"},
+		{"multispace", "a  b   c", 80, "a b c"},
+		{"multibyte truncate", "🚀" + strings.Repeat("a", 80), 80, "🚀" + strings.Repeat("a", 76) + "..."},
+		{"ascii truncate", strings.Repeat("a", 100), 80, strings.Repeat("a", 77) + "..."},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := sanitizeWorkflowResultForTable(tc.result, tc.maxRunes)
+			if got != tc.want {
+				t.Fatalf("sanitizeWorkflowResultForTable(%q, %d) = %q, want %q", tc.result, tc.maxRunes, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestExampleGitHubIssueWorkflowPublishesNestedTrigger(t *testing.T) {
 	path := filepath.Join("..", "examples", "workflows", "github-issue.yaml")
 

@@ -367,14 +367,7 @@ func runWorkflowRuns(workspace, name string, limit int) error {
 		if run.ClawID != "" {
 			clawID = shortID(run.ClawID)
 		}
-		resultText := run.Result
-		if resultText == "" {
-			resultText = "—"
-		}
-		// Truncate long result text so tabwriter stays readable.
-		if len(resultText) > 80 {
-			resultText = resultText[:77] + "..."
-		}
+		resultText := sanitizeWorkflowResultForTable(run.Result, 80)
 		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n",
 			run.Status,
 			run.TriggerType,
@@ -387,6 +380,26 @@ func runWorkflowRuns(workspace, name string, limit int) error {
 	w.Flush()
 	fmt.Printf("\nShowing %d run(s).\n", result.Count)
 	return nil
+}
+
+// sanitizeWorkflowResultForTable makes a workflow result safe for tabwriter output.
+// It strips control characters (tabs, newlines, carriage returns), collapses whitespace,
+// and truncates by rune length so multibyte characters are not sliced in half.
+func sanitizeWorkflowResultForTable(result string, maxRunes int) string {
+	if result == "" {
+		return "—"
+	}
+	replacer := strings.NewReplacer("\t", " ", "\n", " ", "\r", " ")
+	s := replacer.Replace(result)
+	for strings.Contains(s, "  ") {
+		s = strings.ReplaceAll(s, "  ", " ")
+	}
+	s = strings.TrimSpace(s)
+	runes := []rune(s)
+	if len(runes) > maxRunes {
+		return string(runes[:maxRunes-3]) + "..."
+	}
+	return s
 }
 
 func fetchWorkflowViews(workspace string) ([]workflowCLIView, error) {

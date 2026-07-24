@@ -44,7 +44,7 @@ export function WorkflowRunsDialog({ workflow }: { workflow: Workflow }) {
         })
     })
     return () => { cancelled = true }
-  }, [open, workflow])
+  }, [open, workflow.workspaceName, workflow.name])
 
   return (
     <>
