@@ -24,6 +24,18 @@ func watchdogClaw(t *testing.T, s *Server, clawID string) *websocket.Conn {
 		t.Fatalf("dial claw websocket: %v", err)
 	}
 	t.Cleanup(func() { _ = conn.Close(websocket.StatusNormalClosure, "done") })
+	// Registration with gateway_ready triggers an async post-registration
+	// sendWakeMessage/sendInitialPlanInstruction turn reservation (real hub
+	// behavior, unrelated to most watchdog tests). It only fires when the
+	// claw has no messages yet (clawHasMessages), so seed an already-delivered
+	// row BEFORE registering — inserting after the ack races the async check
+	// and lets the wake reserve the turn and write a stray message frame.
+	// delivered_at is set so the row can never be drained as a pending
+	// message and interfere with queue-draining tests.
+	_, _ = s.db.Exec(
+		`INSERT INTO messages(id,claw_id,tenant_id,role,content,format,created_at,delivered_at) VALUES(?,?,?,?,?,?,?,?)`,
+		"seed-"+clawID, clawID, "test-tenant-id", "system", "seed", "pre", time.Now(), time.Now(),
+	)
 	ready := true
 	if err := wsjson.Write(ctx, conn, types.WSMessage{Type: "register", Payload: types.RegisterPayload{
 		ClawID: clawID, Name: "watchdog claw", Template: "elasticclaw", Token: "claw-token", GatewayReady: &ready,
@@ -34,16 +46,6 @@ func watchdogClaw(t *testing.T, s *Server, clawID string) *websocket.Conn {
 	if err := wsjson.Read(ctx, conn, &ack); err != nil || ack.Type != "registered" {
 		t.Fatalf("read registration ack: type=%q err=%v", ack.Type, err)
 	}
-	// Registration with gateway_ready races an async post-registration
-	// sendWakeMessage/sendInitialPlanInstruction turn reservation (real hub
-	// behavior, unrelated to most watchdog tests). It only fires when the
-	// claw has no messages yet (clawHasMessages), so seed an already-delivered
-	// row immediately to suppress it — delivered_at is set so it can never be
-	// drained as a pending message and interfere with queue-draining tests.
-	_, _ = s.db.Exec(
-		`INSERT INTO messages(id,claw_id,tenant_id,role,content,format,created_at,delivered_at) VALUES(?,?,?,?,?,?,?,?)`,
-		"seed-"+clawID, clawID, "test-tenant-id", "system", "seed", "pre", time.Now(), time.Now(),
-	)
 	return conn
 }
 
