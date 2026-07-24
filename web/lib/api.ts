@@ -16,6 +16,7 @@ import type {
   TaskRunPR,
   TaskRunsResponse,
   TaskRunSummary,
+  WorkflowRunsResponse,
 } from "./types"
 import { getHubUrl, setHubUrl } from "./hub-url"
 import { getAuthToken, requestAuthToken, clearAuthTokens } from "./auth-storage"
@@ -360,6 +361,12 @@ export async function triggerWorkflow(workflow: Workflow, inputs?: Record<string
       method: "POST",
       body: JSON.stringify({ inputs: inputs || {} }),
     }
+  )
+}
+
+export async function fetchCronWorkflowRuns(workspaceName: string, workflowName: string, limit = 50): Promise<WorkflowRunsResponse> {
+  return apiFetch<WorkflowRunsResponse>(
+    `/api/workspaces/${encodeURIComponent(workspaceName)}/workflows/${encodeURIComponent(workflowName)}/cron/runs?limit=${limit}`
   )
 }
 

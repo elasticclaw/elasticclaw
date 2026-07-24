@@ -15,6 +15,7 @@ import { VALID_SECTIONS, type Section } from "./sections"
 import { fetchWorkspaces, updateWorkflowControls, type RepositoryAccess, type Workspace, type Workflow } from "@/lib/api"
 import { useBranding } from "@/hooks/use-branding"
 import { AnalyticsCommandCenter } from "@/components/analytics-command-center"
+import { WorkflowRunsDialog } from "@/components/workflow-runs-dialog"
 
 function isValidSection(s: string): s is Section {
   return VALID_SECTIONS.includes(s as Section)
@@ -3161,6 +3162,7 @@ function WorkflowSummaryRow({
             />
             <span>Manual trigger</span>
           </label>
+          <WorkflowRunsDialog workflow={workflow} />
           <span className={cn(
             "text-xs px-2 py-0.5 rounded",
             workflow.enabled ? "bg-muted text-muted-foreground" : "bg-amber-500/10 text-amber-500"

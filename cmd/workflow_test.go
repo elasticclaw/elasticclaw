@@ -2,11 +2,41 @@ package cmd
 
 import (
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/elasticclaw/elasticclaw/pkg/types"
 )
+
+func TestSanitizeWorkflowResultForTable(t *testing.T) {
+	tests := []struct {
+		name     string
+		result   string
+		maxRunes int
+		want     string
+	}{
+		{"empty", "", 80, "—"},
+		{"simple", "provisioning failed", 80, "provisioning failed"},
+		{"newlines", "line1\nline2\r\nline3", 80, "line1 line2 line3"},
+		{"tabs", "a\tb\tc", 80, "a b c"},
+		{"multispace", "a  b   c", 80, "a b c"},
+		{"multibyte truncate", "🚀" + strings.Repeat("a", 80), 80, "🚀" + strings.Repeat("a", 76) + "..."},
+		{"ascii truncate", strings.Repeat("a", 100), 80, strings.Repeat("a", 77) + "..."},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := sanitizeWorkflowResultForTable(tc.result, tc.maxRunes)
+			if got != tc.want {
+				t.Fatalf("sanitizeWorkflowResultForTable(%q, %d) = %q, want %q", tc.result, tc.maxRunes, got, tc.want)
+			}
+		})
+	}
+}
 
 func TestExampleGitHubIssueWorkflowPublishesNestedTrigger(t *testing.T) {
 	path := filepath.Join("..", "examples", "workflows", "github-issue.yaml")
@@ -84,5 +114,53 @@ stages:
 	}
 	if workflow.Trigger == nil || workflow.Trigger.Cron == nil {
 		t.Fatalf("cron trigger missing: %#v", workflow.Trigger)
+	}
+}
+
+func TestRunWorkflowRunsListsRunsAndShortAgentID(t *testing.T) {
+	started := time.Date(2026, 7, 24, 9, 0, 0, 0, time.UTC)
+	finished := started.Add(5 * time.Minute)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		expectedPath := "/api/workspaces/default/workflows/dependency-update/cron/runs"
+		if r.URL.Path != expectedPath {
+			http.NotFound(w, r)
+			return
+		}
+		if r.URL.Query().Get("limit") != "10" {
+			http.Error(w, "unexpected limit", http.StatusBadRequest)
+			return
+		}
+		runs := map[string]interface{}{
+			"runs": []types.WorkflowRun{{
+				ID:            "run-1",
+				WorkflowName:  "dependency-update",
+				WorkspaceName: "default",
+				TriggerType:   "cron",
+				Status:        "failed",
+				Result:        "provisioning timed out",
+				ClawID:        "claw-1234567890",
+				StartedAt:     &started,
+				FinishedAt:    &finished,
+				CreatedAt:     started,
+			}},
+			"count": 1,
+		}
+		_ = json.NewEncoder(w).Encode(runs)
+	}))
+	defer server.Close()
+
+	t.Setenv("ELASTICCLAW_HUB_URL", server.URL)
+	t.Setenv("ELASTICCLAW_CLAW_TOKEN", "test-token")
+
+	out, err := captureStdout(func() error {
+		return runWorkflowRuns("default", "dependency-update", 10)
+	})
+	if err != nil {
+		t.Fatalf("runWorkflowRuns returned error: %v", err)
+	}
+	for _, want := range []string{"failed", "cron", "claw-123", "provisioning timed out", "Showing 1 run"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("output missing %q:\n%s", want, out)
+		}
 	}
 }

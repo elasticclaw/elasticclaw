@@ -26,6 +26,7 @@ func WorkflowCmd() *cobra.Command {
 	cmd.AddCommand(workflowShowCmd())
 	cmd.AddCommand(workflowPushCmd())
 	cmd.AddCommand(workflowTriggerCmd())
+	cmd.AddCommand(workflowRunsCmd())
 	return cmd
 }
 
@@ -155,6 +156,23 @@ func workflowPushCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&workspace, "workspace", "", "workspace name [required]")
+	return cmd
+}
+
+func workflowRunsCmd() *cobra.Command {
+	var workspace string
+	var limit int
+	cmd := &cobra.Command{
+		Use:   "runs <name>",
+		Short: "Show recent runs for a workflow",
+		Long:  "List recent execution history for a workflow, including cron and manual triggers.",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runWorkflowRuns(workspace, args[0], limit)
+		},
+	}
+	cmd.Flags().StringVar(&workspace, "workspace", "default", "workspace name")
+	cmd.Flags().IntVar(&limit, "limit", 50, "maximum number of runs to show")
 	return cmd
 }
 
@@ -290,6 +308,98 @@ func runWorkflowTrigger(workspace, name string, inputs []string) error {
 
 	fmt.Printf("Triggered workflow %q in workspace %q -> agent %s (%s)\n", name, workspace, shortID(result.ClawID), result.Status)
 	return nil
+}
+
+func runWorkflowRuns(workspace, name string, limit int) error {
+	hubURL, clawToken, err := resolveHubConn()
+	if err != nil {
+		return err
+	}
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > 200 {
+		limit = 200
+	}
+
+	path := fmt.Sprintf("/api/workspaces/%s/workflows/%s/cron/runs?limit=%d", url.PathEscape(workspace), url.PathEscape(name), limit)
+	req, _ := http.NewRequest(http.MethodGet, hubURL+path, nil)
+	req.Header.Set("Authorization", "Bearer "+clawToken)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("fetch workflow runs failed: %w", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("hub returned %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+
+	var result struct {
+		Runs  []types.WorkflowRun `json:"runs"`
+		Count int                 `json:"count"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return fmt.Errorf("decode response: %w", err)
+	}
+
+	if jsonOut {
+		return json.NewEncoder(os.Stdout).Encode(result.Runs)
+	}
+	if len(result.Runs) == 0 {
+		fmt.Printf("No runs found for workflow %q in workspace %q.\n", name, workspace)
+		return nil
+	}
+
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(w, "STATUS\tTRIGGER\tSTARTED\tFINISHED\tRESULT\tAGENT")
+	for _, run := range result.Runs {
+		started := "—"
+		if run.StartedAt != nil && !run.StartedAt.IsZero() {
+			started = run.StartedAt.Format("2006-01-02 15:04:05")
+		}
+		finished := "—"
+		if run.FinishedAt != nil && !run.FinishedAt.IsZero() {
+			finished = run.FinishedAt.Format("2006-01-02 15:04:05")
+		}
+		clawID := "—"
+		if run.ClawID != "" {
+			clawID = shortID(run.ClawID)
+		}
+		resultText := sanitizeWorkflowResultForTable(run.Result, 80)
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n",
+			run.Status,
+			run.TriggerType,
+			started,
+			finished,
+			resultText,
+			clawID,
+		)
+	}
+	w.Flush()
+	fmt.Printf("\nShowing %d run(s).\n", result.Count)
+	return nil
+}
+
+// sanitizeWorkflowResultForTable makes a workflow result safe for tabwriter output.
+// It strips control characters (tabs, newlines, carriage returns), collapses whitespace,
+// and truncates by rune length so multibyte characters are not sliced in half.
+func sanitizeWorkflowResultForTable(result string, maxRunes int) string {
+	if result == "" {
+		return "—"
+	}
+	replacer := strings.NewReplacer("\t", " ", "\n", " ", "\r", " ")
+	s := replacer.Replace(result)
+	for strings.Contains(s, "  ") {
+		s = strings.ReplaceAll(s, "  ", " ")
+	}
+	s = strings.TrimSpace(s)
+	runes := []rune(s)
+	if len(runes) > maxRunes {
+		return string(runes[:maxRunes-3]) + "..."
+	}
+	return s
 }
 
 func fetchWorkflowViews(workspace string) ([]workflowCLIView, error) {
