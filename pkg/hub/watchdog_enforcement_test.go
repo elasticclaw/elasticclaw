@@ -30,12 +30,22 @@ func watchdogClaw(t *testing.T, s *Server, clawID string) *websocket.Conn {
 	// claw has no messages yet (clawHasMessages), so seed an already-delivered
 	// row BEFORE registering — inserting after the ack races the async check
 	// and lets the wake reserve the turn and write a stray message frame.
-	// delivered_at is set so the row can never be drained as a pending
+	// messages.claw_id has a foreign key on claws(id), so the claws row must
+	// exist first; registration upserts it, so pre-creating is safe.
+	// delivered_at is set so the seed can never be drained as a pending
 	// message and interfere with queue-draining tests.
-	_, _ = s.db.Exec(
+	if _, err := s.db.Exec(
+		`INSERT INTO claws(id,tenant_id,name,template,status,created_at) VALUES(?,?,?,?,?,?)`,
+		clawID, "test-tenant-id", "watchdog claw", "elasticclaw", "offline", time.Now(),
+	); err != nil {
+		t.Fatalf("pre-create claws row: %v", err)
+	}
+	if _, err := s.db.Exec(
 		`INSERT INTO messages(id,claw_id,tenant_id,role,content,format,created_at,delivered_at) VALUES(?,?,?,?,?,?,?,?)`,
 		"seed-"+clawID, clawID, "test-tenant-id", "system", "seed", "pre", time.Now(), time.Now(),
-	)
+	); err != nil {
+		t.Fatalf("seed wake-suppression message: %v", err)
+	}
 	ready := true
 	if err := wsjson.Write(ctx, conn, types.WSMessage{Type: "register", Payload: types.RegisterPayload{
 		ClawID: clawID, Name: "watchdog claw", Template: "elasticclaw", Token: "claw-token", GatewayReady: &ready,
