@@ -1,4 +1,4 @@
-.PHONY: build build-bridge build-bridge-linux test test-bootstrap test-container e2e e2e-github e2e-linear e2e-jira e2e-replicated-github e2e-replicated-linear e2e-replicated-jira e2e-docker e2e-run clean install lint tidy clawpatch-init clawpatch-review clawpatch-report clawpatch-show clawpatch-triage clawpatch-pr dev dev-up dev-up-d dev-down dev-reset dev-logs dev-restart dev-sh-hub dev-sh-web dev-agent-build dev-claw _dev-config-check
+.PHONY: build build-bridge build-bridge-linux test test-bootstrap test-container e2e e2e-github e2e-linear e2e-jira e2e-replicated-github e2e-replicated-linear e2e-replicated-jira e2e-docker e2e-run clean install lint tidy clawpatch-init clawpatch-review clawpatch-report clawpatch-show clawpatch-triage clawpatch-pr dev dev-up dev-up-d dev-down dev-reset dev-logs dev-restart dev-sh-hub dev-sh-web dev-agent-build dev-codex-agent-build dev-claw _dev-config-check
 
 
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
@@ -236,6 +236,10 @@ dev-sh-web:			## Open a shell in the running web container
 
 dev-agent-build:		## Build the local agent container image (elasticclaw/claw-agent:dev)
 	docker build -f docker/agent.Dockerfile -t elasticclaw/claw-agent:dev .
+
+dev-codex-agent-build:	## Build the pre-warmed Codex agent image
+	docker build -f docker/codex-agent.Dockerfile \
+	  -t elasticclaw/openclaw-codex-ready:2026.7.1-2 .
 
 dev-ollama-pull:		## Pull the local Ollama model (override with MODEL=model:tag)
 	$(COMPOSE) exec ollama ollama pull $(MODEL)

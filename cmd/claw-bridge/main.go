@@ -2489,6 +2489,13 @@ func installNPMCLI(packageName, version, binaryName string) error {
 	if strings.TrimSpace(version) == "" {
 		return fmt.Errorf("empty version for %s", packageName)
 	}
+	if out, err := exec.Command(binaryName, "--version").CombinedOutput(); err == nil {
+		installedVersion := strings.TrimSpace(string(out))
+		if strings.Contains(installedVersion, version) {
+			log.Printf("[bootstrap] %s already installed: %s", binaryName, installedVersion)
+			return nil
+		}
+	}
 	spec := packageName + "@" + version
 	log.Printf("[bootstrap] installing %s...", spec)
 	if err := installUserNPMPackage(spec); err != nil {

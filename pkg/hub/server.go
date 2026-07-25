@@ -4848,20 +4848,29 @@ func (s *Server) ensureDockerBridge(ctx context.Context, p interface {
 		return nil
 	}
 
-	bridgeURL := s.bridgeDownloadURL()
-	if bridgeURL == "" {
-		return fmt.Errorf("claw-bridge URL not configured: set bridge_image in hub.yaml or build a tagged release")
-	}
-	if !strings.HasPrefix(bridgeURL, "http://") && !strings.HasPrefix(bridgeURL, "https://") {
-		return fmt.Errorf("docker provider requires an HTTP(S) claw-bridge URL, got %q", bridgeURL)
-	}
-	bridgeBytes, err := downloadDockerBridgeBinary(ctx, bridgeURL)
-	if err != nil {
-		return err
-	}
 	bridgePath := path.Join(homeDir, ".elasticclaw", "bin", "claw-bridge")
-	if err := p.CopyIn(ctx, containerID, bridgePath, bridgeBytes); err != nil {
-		return fmt.Errorf("docker claw-bridge copy failed: %w", err)
+	installBundledBridge := fmt.Sprintf(
+		"set -e; bridge=$(command -v claw-bridge); mkdir -p %s; install -m 0755 \"$bridge\" %s",
+		shellQuote(path.Dir(bridgePath)),
+		shellQuote(bridgePath),
+	)
+	if _, err := p.Exec(ctx, containerID, []string{"sh", "-lc", installBundledBridge}); err == nil {
+		log.Printf("[docker] using bundled claw-bridge from container %s", containerID)
+	} else {
+		bridgeURL := s.bridgeDownloadURL()
+		if bridgeURL == "" {
+			return fmt.Errorf("claw-bridge URL not configured and agent image has no bundled bridge: set bridge_image in hub.yaml or build a tagged release")
+		}
+		if !strings.HasPrefix(bridgeURL, "http://") && !strings.HasPrefix(bridgeURL, "https://") {
+			return fmt.Errorf("docker provider requires an HTTP(S) claw-bridge URL, got %q", bridgeURL)
+		}
+		bridgeBytes, err := downloadDockerBridgeBinary(ctx, bridgeURL)
+		if err != nil {
+			return err
+		}
+		if err := p.CopyIn(ctx, containerID, bridgePath, bridgeBytes); err != nil {
+			return fmt.Errorf("docker claw-bridge copy failed: %w", err)
+		}
 	}
 	logPath := path.Join(homeDir, "claw-bridge.log")
 	startCmd := fmt.Sprintf(
