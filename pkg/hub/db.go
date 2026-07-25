@@ -60,6 +60,12 @@ func migrate(db *sql.DB) error {
 	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN trigger_actor_json TEXT NOT NULL DEFAULT '{}'`)
 	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN stop_comment_pending INTEGER NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN no_progress_paused INTEGER NOT NULL DEFAULT 0`)
+	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN preview_port INTEGER NOT NULL DEFAULT 0`)
+	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN preview_url TEXT NOT NULL DEFAULT ''`)
+	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN preview_label TEXT NOT NULL DEFAULT ''`)
+	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN preview_ready INTEGER NOT NULL DEFAULT 0`)
+	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN preview_ttl_seconds INTEGER NOT NULL DEFAULT 1800`)
+	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN preview_expires_at INTEGER NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE claw_prs ADD COLUMN last_comment_at TEXT NOT NULL DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE claw_prs ADD COLUMN pr_conditions_fired INTEGER NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE claw_prs ADD COLUMN permanent_failure_count INTEGER NOT NULL DEFAULT 0`)
@@ -258,7 +264,13 @@ func migrate(db *sql.DB) error {
 		workflow_volumes TEXT NOT NULL DEFAULT '[]',
 		trigger_actor_json TEXT NOT NULL DEFAULT '{}',
 		stop_comment_pending INTEGER NOT NULL DEFAULT 0,
-		no_progress_paused INTEGER NOT NULL DEFAULT 0
+		no_progress_paused INTEGER NOT NULL DEFAULT 0,
+		preview_port INTEGER NOT NULL DEFAULT 0,
+		preview_url TEXT NOT NULL DEFAULT '',
+		preview_label TEXT NOT NULL DEFAULT '',
+		preview_ready INTEGER NOT NULL DEFAULT 0,
+		preview_ttl_seconds INTEGER NOT NULL DEFAULT 1800,
+		preview_expires_at INTEGER NOT NULL DEFAULT 0
 	);
 
 

@@ -1,7 +1,7 @@
 "use client"
 
 import { useState, useRef, useEffect, useCallback, useMemo, memo } from "react"
-import { Send, Terminal, TerminalSquare, ChevronLeft, ChevronRight, ChevronDown, Loader2, LayoutGrid, Info, MessageSquare, Trash2, AlertCircle, Wrench, GripVertical, Settings2, Paperclip, File as FileIcon, X } from "lucide-react"
+import { Send, Terminal, TerminalSquare, ChevronLeft, ChevronRight, ChevronDown, Loader2, LayoutGrid, Info, MessageSquare, Trash2, AlertCircle, Wrench, GripVertical, Settings2, Paperclip, File as FileIcon, X, ExternalLink } from "lucide-react"
 import {
   DndContext,
   closestCenter,
@@ -73,6 +73,16 @@ function formatUptime(seconds: number): string {
   return mins > 0 ? `${hours}h ${mins}m` : `${hours}h`
 }
 
+function formatPreviewExpiry(expiresAt?: number): string | null {
+  if (!expiresAt) return null
+  const remainingMs = expiresAt - Date.now()
+  if (remainingMs <= 0) return "Expiring now"
+  const minutes = Math.max(1, Math.ceil(remainingMs / 60_000))
+  if (minutes < 60) return `Expires in ${minutes}m`
+  const hours = Math.ceil(minutes / 60)
+  return `Expires in ${hours}h`
+}
+
 function StatusBadge({ status }: { status: ClawStatus }) {
   return (
     <Badge
@@ -81,6 +91,7 @@ function StatusBadge({ status }: { status: ClawStatus }) {
         "text-xs font-medium",
         status === "connected" && "border-green-500/50 text-green-500",
         status === "idle" && "border-amber-500/50 text-amber-500",
+        status === "preview" && "border-cyan-500/50 text-cyan-400",
         status === "offline" && "border-red-500/50 text-red-500"
       )}
     >
@@ -99,6 +110,7 @@ function StatusDot({ status, isStreaming }: { status: ClawStatus; isStreaming: b
         "size-2 rounded-full shrink-0",
         status === "connected" && "bg-green-500",
         status === "idle" && "bg-amber-500",
+        status === "preview" && "bg-cyan-400",
         status === "offline" && "bg-muted-foreground"
       )}
     />
@@ -225,6 +237,50 @@ function ClawCardBack({ claw }: { claw: Claw }) {
           )}
         </div>
       </div>
+
+      {claw.previewUrl && claw.previewReady && (
+        <div>
+          <h3 className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-2">
+            Browser Preview
+          </h3>
+          <Button asChild size="sm" variant="outline">
+            <a href={claw.previewUrl} target="_blank" rel="noreferrer">
+              <ExternalLink className="size-3.5" />
+              {claw.previewLabel || "Open preview"}
+            </a>
+          </Button>
+          {claw.previewPort && (
+            <p className="mt-1.5 text-xs text-muted-foreground">
+              Sandbox port {claw.previewPort}
+            </p>
+          )}
+          {claw.status === "preview" && (
+            <p className="mt-1 text-xs text-cyan-400">
+              Agent stopped · {formatPreviewExpiry(claw.previewExpiresAt) || "preview retained"}
+            </p>
+          )}
+        </div>
+      )}
+
+      {claw.previewPort && !claw.previewReady && (
+        <div>
+          <h3 className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-2">
+            Browser Preview
+          </h3>
+          <p className="text-sm text-muted-foreground">
+            Waiting for the agent to open the pull request and verify port {claw.previewPort}.
+          </p>
+          <Button asChild size="sm" variant="outline" className="mt-2">
+            <a
+              href={`/preview-waiting?claw=${encodeURIComponent(claw.id)}`}
+              target="_blank"
+              rel="noreferrer"
+            >
+              Open when ready
+            </a>
+          </Button>
+        </div>
+      )}
 
       <div>
         <h3 className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-2">
@@ -487,6 +543,18 @@ function ClawBoardCard({
                 <span className="px-1.5 py-0.5 text-[10px] font-medium bg-blue-500 text-white rounded-full">
                   {claw.unreadCount > 99 ? "99+" : claw.unreadCount}
                 </span>
+              )}
+              {claw.previewUrl && claw.previewReady && (
+                <a
+                  href={claw.previewUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  onClick={(e) => e.stopPropagation()}
+                  className="p-1 rounded hover:bg-accent transition-colors"
+                  title={claw.previewLabel || "Open browser preview"}
+                >
+                  <ExternalLink className="size-3.5 text-emerald-400" />
+                </a>
               )}
               <button
                 onClick={handleFlip}
@@ -1299,7 +1367,11 @@ const MessageBubble = memo(function MessageBubble({
           message.format === "pre" && "whitespace-pre-wrap"
         )}>
           <Settings2 className="size-3 shrink-0 text-muted-foreground/50 mt-0.5" />
-          <span className="text-muted-foreground/80">{message.content}</span>
+          {message.format === "pre" ? (
+            <span className="text-muted-foreground/80">{message.content}</span>
+          ) : (
+            <MarkdownContent content={message.content} className="text-xs text-muted-foreground/80" />
+          )}
         </div>
       </div>
     )
@@ -1753,6 +1825,8 @@ export function ConversationView({
   if (!claw) {
     // Use the server-maintained order (respects user drag preference + falls back to API order)
     const sortedClaws = allClaws
+    const previewCount = allClaws.filter((item) => item.status === "preview").length
+    const activeCount = allClaws.length - previewCount
 
     return (
       <main className="flex-1 flex flex-col bg-background min-w-0 overflow-hidden">
@@ -1761,8 +1835,13 @@ export function ConversationView({
           <div className="flex items-center gap-3">
             <Terminal className="size-5 text-muted-foreground" />
             <h2 className="text-lg font-medium text-foreground">
-              {loading ? "Agents" : `${allClaws.length} Active Agents`}
+              {loading ? "Agents" : `${activeCount} Active Agent${activeCount === 1 ? "" : "s"}`}
             </h2>
+            {!loading && previewCount > 0 && (
+              <Badge variant="outline" className="border-cyan-500/40 text-cyan-400">
+                {previewCount} QA Preview{previewCount === 1 ? "" : "s"}
+              </Badge>
+            )}
           </div>
           <div className="flex min-w-0 flex-wrap items-center justify-end gap-x-4 gap-y-2 text-xs text-muted-foreground">
             <DependencyDowntimeBanner dependencies={downtimeDependencies} />
@@ -1773,6 +1852,10 @@ export function ConversationView({
             <div className="flex items-center gap-1.5">
               <span className="size-2 rounded-full bg-amber-500" />
               <span>Idle</span>
+            </div>
+            <div className="flex items-center gap-1.5">
+              <span className="size-2 rounded-full bg-cyan-400" />
+              <span>QA Preview</span>
             </div>
             <div className="flex items-center gap-1.5">
               <span className="size-2 rounded-full bg-red-500" />

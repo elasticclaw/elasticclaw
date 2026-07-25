@@ -829,6 +829,8 @@ type CreateClawRequest struct {
 	// ProviderName is set by the hub — the stable name used with the provider (ec-<shortid>).
 	// Never set by the CLI; Name is the display name.
 	ProviderName string `json:"provider_name,omitempty"`
+	// PreviewPort is set by workflow configuration for an ephemeral browser preview.
+	PreviewPort int `json:"preview_port,omitempty"`
 }
 
 // GetVersion returns the effective schema version for this hub config.

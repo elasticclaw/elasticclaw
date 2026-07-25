@@ -132,6 +132,10 @@ export async function fetchClaws(): Promise<ApiClaw[]> {
   return apiFetch<ApiClaw[]>("/api/claws")
 }
 
+export async function fetchClaw(id: string): Promise<ApiClaw> {
+  return apiFetch<ApiClaw>(`/api/claws/${encodeURIComponent(id)}`)
+}
+
 export async function fetchMessages(clawId: string, opts?: { before?: string; after?: string }): Promise<ApiMessage[]> {
   const params = new URLSearchParams()
   if (opts?.before) params.set('before', opts.before)
@@ -288,6 +292,12 @@ export interface WorkflowInput {
   max?: number
 }
 
+export interface WorkflowPreview {
+  port: number
+  label?: string
+  ttl?: string
+}
+
 export interface RepositoryAccess {
   repo: string
   permissions?: string
@@ -316,6 +326,7 @@ export interface Workflow {
   webhookSecretRef?: string
   pipelineYAML?: string
   enableManualTrigger?: boolean
+  preview?: WorkflowPreview
   secretRefs?: Record<string, string>
   inputs?: WorkflowInput[]
 }

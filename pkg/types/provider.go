@@ -33,6 +33,9 @@ type CreateRequest struct {
 
 	// State mount path
 	StateMount string
+
+	// PreviewPorts are application ports that should be exposed for browser QA.
+	PreviewPorts []int
 }
 
 // ScratchConfig for creating from a base distro

@@ -136,6 +136,10 @@ func (s *Server) resumeNoProgressAfterUserInput(clawID string) {
 // into another model prompt. It is used for bookkeeping and intervention
 // notices whose contents should not consume an agent turn.
 func (s *Server) publishHubNotice(clawID, content string) {
+	s.publishHubNoticeWithFormat(clawID, content, "pre")
+}
+
+func (s *Server) publishHubNoticeWithFormat(clawID, content, format string) {
 	var tenantID string
 	if err := s.db.QueryRow(`SELECT tenant_id FROM claws WHERE id=?`, clawID).Scan(&tenantID); err != nil {
 		return
@@ -143,7 +147,7 @@ func (s *Server) publishHubNotice(clawID, content string) {
 	createdAt := now()
 	msg := types.HubMessage{
 		ID: uuid.New().String(), ClawID: clawID, TenantID: tenantID,
-		Role: "hub", Content: content, Format: "pre", CreatedAt: createdAt,
+		Role: "hub", Content: content, Format: format, CreatedAt: createdAt,
 	}
 	if _, err := s.db.Exec(`INSERT INTO messages(id,claw_id,tenant_id,role,content,format,created_at,delivered_at) VALUES(?,?,?,?,?,?,?,?)`, msg.ID, clawID, tenantID, msg.Role, msg.Content, msg.Format, createdAt, createdAt); err != nil {
 		log.Printf("[hub] persist notice for claw %s: %v", shortID(clawID), err)

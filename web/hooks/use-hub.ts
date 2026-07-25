@@ -497,6 +497,9 @@ export function useHub(selectedClawId: string | null): HubState {
                       bootstrap_status: status === "connected" || status === "error" ? undefined : payload.bootstrap_status ?? c.bootstrap_status,
                       githubIssueId: payload.github_issue_id ?? c.githubIssueId,
                       githubIssueUrl: payload.github_issue_url ?? c.githubIssueUrl,
+                      previewUrl: payload.preview_url ?? c.previewUrl,
+                      previewReady: payload.preview_ready ?? c.previewReady,
+                      previewExpiresAt: payload.preview_expires_at ?? c.previewExpiresAt,
                     }
                   : c
               )

@@ -18,6 +18,11 @@ type Claw struct {
 	BootstrapDiagnostic string         `json:"bootstrap_diagnostic,omitempty"`
 	GitHubIssueID       string         `json:"github_issue_id,omitempty"`
 	GitHubIssueURL      string         `json:"github_issue_url,omitempty"`
+	PreviewPort         int            `json:"preview_port,omitempty"`
+	PreviewURL          string         `json:"preview_url,omitempty"`
+	PreviewLabel        string         `json:"preview_label,omitempty"`
+	PreviewReady        bool           `json:"preview_ready,omitempty"`
+	PreviewExpiresAt    int64          `json:"preview_expires_at,omitempty"`
 	Tags                []string       `json:"tags,omitempty"`
 	Color               string         `json:"color,omitempty"`
 	SSHHost             string         `json:"ssh_host,omitempty"`

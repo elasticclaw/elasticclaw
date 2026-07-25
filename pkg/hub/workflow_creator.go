@@ -72,6 +72,9 @@ func (s *Server) createClawFromWorkflowWithOptions(workspace *types.WorkspaceCon
 		inputsJSON, _ := json.Marshal(opts.inputs)
 		templateFiles["TRIGGER_INPUTS.json"] = string(inputsJSON)
 	}
+	if workflow.Preview != nil {
+		templateFiles["CONTEXT.md"] = appendWorkflowPreviewContext(templateFiles["CONTEXT.md"], workflow.Preview)
+	}
 
 	clawName := workflow.Name
 	if opts.clawName != "" {
@@ -102,6 +105,9 @@ func (s *Server) createClawFromWorkflowWithOptions(workspace *types.WorkspaceCon
 	}
 	if provider == "" {
 		return "", false, fmt.Errorf("no provider configured")
+	}
+	if workflow.Preview != nil && provider != "daytona" && provider != "docker" {
+		return "", false, fmt.Errorf("workflow %q: browser previews are not supported by provider %q; use daytona or docker", workflow.Name, provider)
 	}
 
 	s.mu.RLock()
@@ -255,11 +261,11 @@ func (s *Server) createClawFromWorkflowWithOptions(workspace *types.WorkspaceCon
 	filesJSON, _ := json.Marshal(templateFiles)
 	now := time.Now().UTC()
 	_, err = s.db.Exec(`
-		INSERT INTO claws(id, tenant_id, name, template, provider, default_model, template_files, github_repos, linear_workspace, nix, docker, tags, color, llm_key, status, created_at, factory_name, concurrency_group, workflow_volumes)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		INSERT INTO claws(id, tenant_id, name, template, provider, default_model, template_files, github_repos, linear_workspace, nix, docker, tags, color, llm_key, status, created_at, factory_name, concurrency_group, workflow_volumes, preview_port, preview_label, preview_ttl_seconds)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		clawID, tenantID, clawName, workspace.Name, provider, defaultModel, string(filesJSON),
 		string(repositoriesJSON), linearWorkspace, nixEnabled, dockerEnabled, string(tagsJSON), workflow.Color, llmKey,
-		initialStatus, now, "", groupName, string(workflowVolumesJSON),
+		initialStatus, now, "", groupName, string(workflowVolumesJSON), workflowPreviewPort(workflow), workflowPreviewLabel(workflow), workflowPreviewTTLSeconds(workflow),
 	)
 	s.promoteMu.Unlock()
 	if err != nil {
@@ -335,6 +341,7 @@ func (s *Server) createClawFromWorkflowWithOptions(workspace *types.WorkspaceCon
 		Env:          env,
 		InstanceType: instanceType,
 		ProviderName: "ec-" + clawID[:8],
+		PreviewPort:  workflowPreviewPort(workflow),
 	}
 	fileBytes := make(map[string][]byte, len(providerTemplateFiles))
 	for k, v := range providerTemplateFiles {
@@ -377,6 +384,59 @@ func (s *Server) createClawFromWorkflowWithOptions(workspace *types.WorkspaceCon
 	}()
 
 	return clawID, false, nil
+}
+
+func workflowPreviewPort(workflow *types.WorkflowConfig) int {
+	if workflow == nil || workflow.Preview == nil {
+		return 0
+	}
+	return workflow.Preview.Port
+}
+
+func workflowPreviewLabel(workflow *types.WorkflowConfig) string {
+	if workflow == nil || workflow.Preview == nil {
+		return ""
+	}
+	return strings.TrimSpace(workflow.Preview.Label)
+}
+
+func workflowPreviewTTLSeconds(workflow *types.WorkflowConfig) int64 {
+	const defaultPreviewTTL = 30 * time.Minute
+	if workflow == nil || workflow.Preview == nil || strings.TrimSpace(workflow.Preview.TTL) == "" {
+		return int64(defaultPreviewTTL / time.Second)
+	}
+	ttl, err := time.ParseDuration(strings.TrimSpace(workflow.Preview.TTL))
+	if err != nil {
+		return int64(defaultPreviewTTL / time.Second)
+	}
+	return int64(ttl / time.Second)
+}
+
+func appendWorkflowPreviewContext(existing string, preview *types.WorkflowPreview) string {
+	if preview == nil {
+		return existing
+	}
+	var b strings.Builder
+	if strings.TrimSpace(existing) != "" {
+		b.WriteString(strings.TrimRight(existing, "\n"))
+		b.WriteString("\n\n")
+	}
+	b.WriteString("## Browser Preview Required\n\n")
+	b.WriteString(fmt.Sprintf("After implementation and focused tests pass and the pull request is open, start the repository's application on port %d for browser QA before sending `[DONE]`.\n", preview.Port))
+	b.WriteString("Discover and use the repository's own documented start command and package manager; do not invent or replace its tooling.\n")
+	b.WriteString(fmt.Sprintf("Configure the application to bind to `0.0.0.0:%d`. Do not launch it directly as a background child of a tool call because tool subprocesses may be reaped.\n", preview.Port))
+	b.WriteString("Ask ElasticClaw to own the persistent process by POSTing JSON to the preview start endpoint. The JSON fields are `cwd` (the absolute repository directory) and `command` (the discovered foreground start command):\n")
+	b.WriteString("`curl -fsS -X POST -H 'Content-Type: application/json' --data @preview-start.json http://127.0.0.1:18790/api/claws/$ELASTICCLAW_CLAW_ID/preview/start`\n")
+	b.WriteString("Create `preview-start.json` only as a temporary untracked file and remove it immediately after the request. ElasticClaw will run the command outside the tool-call lifecycle.\n")
+	b.WriteString("Identify the browser route where a reviewer can directly observe the requested change by inspecting the repository's routing structure and your diff. Do not assume the route is `/`.\n")
+	b.WriteString(fmt.Sprintf("Verify that exact route locally at `http://127.0.0.1:%d`, including a visible marker from the change, before marking the preview ready.\n", preview.Port))
+	b.WriteString("After that verification succeeds, POST the same-origin route as JSON field `path` to the preview ready endpoint. The value must begin with `/` and may include a query string, but must not be a full URL:\n")
+	b.WriteString("`curl -fsS -X POST -H 'Content-Type: application/json' --data @preview-ready.json http://127.0.0.1:18790/api/claws/$ELASTICCLAW_CLAW_ID/preview/ready`\n")
+	b.WriteString("For example, `preview-ready.json` may contain `{\"path\":\"/setup\"}`. Create it only as a temporary untracked file and remove it immediately after the request.\n")
+	b.WriteString("After the ready request succeeds, ElasticClaw detaches and stops the AI agent while retaining only the credential-free preview until its TTL expires. Do not expect to continue agent work after marking the preview ready.\n")
+	b.WriteString("Use the `preview_url` returned by the ready request to finish with `Preview ready: [Open QA preview](PREVIEW_URL)` so the reviewer also receives a clickable link in chat.\n")
+	b.WriteString("Do not commit generated dependencies, logs, PID files, or preview-only configuration.\n")
+	return b.String()
 }
 
 func (s *Server) resolveWorkflowGroupLimit(workflow *types.WorkflowConfig) (string, int) {

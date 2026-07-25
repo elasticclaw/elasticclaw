@@ -190,6 +190,45 @@ func TestReaperRedrivesVMAndCommentAfterClosingRows(t *testing.T) {
 	}
 }
 
+func TestReaperExpiresDetachedPreview(t *testing.T) {
+	s, db := newReaperTestServer(t, &types.HubConfig{})
+	tm := time.Now().UTC()
+	s.nowFunc = func() time.Time { return tm }
+	if _, err := db.Exec(
+		`INSERT INTO claws(
+			id, tenant_id, name, provider, provider_id, status,
+			preview_ready, preview_expires_at, created_at
+		) VALUES(?,?,?,?,?,?,?,?,?)`,
+		"expired-preview", "tenant", "preview", "docker", "preview-vm", "preview",
+		1, tm.Add(-time.Second).UnixMilli(), tm,
+	); err != nil {
+		t.Fatal(err)
+	}
+	terminated := make(chan struct{}, 1)
+	s.terminateVMOverride = func(provider, id string) error {
+		if provider != "docker" || id != "preview-vm" {
+			t.Errorf("terminate target = %q %q", provider, id)
+		}
+		terminated <- struct{}{}
+		return nil
+	}
+
+	s.reapOnce()
+
+	var status string
+	if err := db.QueryRow(`SELECT status FROM claws WHERE id='expired-preview'`).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != "deleted" {
+		t.Fatalf("status = %q, want deleted", status)
+	}
+	select {
+	case <-terminated:
+	case <-time.After(time.Second):
+		t.Fatal("expired preview sandbox was not terminated")
+	}
+}
+
 func TestReaperRedrivesStopComment(t *testing.T) {
 	newServer := func(t *testing.T, status int, requests chan<- string) (*Server, *sql.DB) {
 		t.Helper()

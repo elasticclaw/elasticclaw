@@ -49,6 +49,9 @@ export function ManualTriggerModal({ open, onOpenChange, workflow }: ManualTrigg
 
   const handleTrigger = useCallback(async () => {
     if (!workflow) return
+    const previewTab = workflow.preview
+      ? window.open("/preview-waiting?state=starting", "_blank")
+      : null
     setTriggering(true)
     setTriggerError(null)
     try {
@@ -79,10 +82,14 @@ export function ManualTriggerModal({ open, onOpenChange, workflow }: ManualTrigg
           }
         }
       }
-      await triggerWorkflow(workflow, inputs)
+      const result = await triggerWorkflow(workflow, inputs)
+      if (previewTab && !previewTab.closed) {
+        previewTab.location.replace(`/preview-waiting?claw=${encodeURIComponent(result.claw_id)}`)
+      }
       setTriggering(false)
       onOpenChange(false)
     } catch (e) {
+      if (previewTab && !previewTab.closed) previewTab.close()
       setTriggering(false)
       // Keep modal open so user sees the backend validation error
       setTriggerError(e instanceof Error ? e.message : String(e))

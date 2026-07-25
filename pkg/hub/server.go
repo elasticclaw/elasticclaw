@@ -115,10 +115,13 @@ type Server struct {
 
 	// Reaper state is deliberately in-memory: its conservative timers reset on
 	// a hub restart rather than treating an uncertain outage as an agent failure.
-	reaperMu            sync.Mutex
-	reaperFirstSeen     map[string]time.Time
-	nowFunc             func() time.Time
-	terminateVMOverride func(provider, id string) error // test seam for terminal cleanup
+	reaperMu                      sync.Mutex
+	reaperFirstSeen               map[string]time.Time
+	nowFunc                       func() time.Time
+	terminateVMOverride           func(provider, id string) error // test seam for terminal cleanup
+	previewStartOverride          func(ctx context.Context, provider, providerID, cwd, command string) error
+	previewStopOverride           func(ctx context.Context, provider, providerID, clawID string) error
+	previewDetachScheduleOverride func(clawID string) // test seam for ready-handler scheduling
 }
 
 func (s *Server) modelAuthTokenForClaw(clawID string) string {
@@ -444,6 +447,8 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/mcp", s.withWebAdminAuth(s.handleMCPCrud))         // MCP server CRUD (GET list, PUT upsert, DELETE)
 	mux.HandleFunc("/api/claws", s.withAuth(s.handleClaws))
 	mux.HandleFunc("/api/claws/{id}", s.withAuth(s.handleClawDetail))
+	mux.HandleFunc("/api/claws/{id}/preview/ready", s.handleClawPreviewReady)
+	mux.HandleFunc("/api/claws/{id}/preview/start", s.handleClawPreviewStart)
 	mux.HandleFunc("/api/checkpoints/blob/", s.handleCheckpointBlobUpload)
 	mux.HandleFunc("/api/checkpoints/", s.handleCheckpointInternal)
 	mux.HandleFunc("/api/volumes/leases/{lease}/archive", s.handleVolumeArchive)
@@ -1050,6 +1055,371 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, map[string]string{"tenant_id": tenantID, "token": body.Token})
 }
 
+func (s *Server) handleClawPreviewReady(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !s.authenticateClawToken(w, r) {
+		return
+	}
+	clawID := strings.TrimSpace(r.PathValue("id"))
+	if clawID == "" || r.Header.Get("X-ElasticClaw-Claw-ID") != clawID {
+		http.Error(w, "claw identity mismatch", http.StatusForbidden)
+		return
+	}
+	var body struct {
+		Path string `json:"path"`
+	}
+	if r.Body != nil && r.ContentLength != 0 {
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, "invalid request", http.StatusBadRequest)
+			return
+		}
+	}
+
+	var tenantID, previewURL string
+	var previewPort int
+	err := s.db.QueryRow(
+		`SELECT tenant_id, preview_port, COALESCE(preview_url,'') FROM claws WHERE id=? AND status != 'deleted'`,
+		clawID,
+	).Scan(&tenantID, &previewPort, &previewURL)
+	if err == sql.ErrNoRows {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	if err != nil {
+		http.Error(w, "db error", http.StatusInternalServerError)
+		return
+	}
+	if previewPort == 0 || previewURL == "" {
+		http.Error(w, "preview is not configured", http.StatusConflict)
+		return
+	}
+	previewURL, err = previewURLForRoute(previewURL, body.Path)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if _, err := s.db.Exec(`UPDATE claws SET preview_url=?, preview_ready=1 WHERE id=?`, previewURL, clawID); err != nil {
+		http.Error(w, "db error", http.StatusInternalServerError)
+		return
+	}
+	s.broadcastToUsers(tenantID, types.WSMessage{
+		Type: "claw_preview",
+		Payload: map[string]interface{}{
+			"claw_id":       clawID,
+			"preview_port":  previewPort,
+			"preview_url":   previewURL,
+			"preview_ready": true,
+		},
+	})
+	s.publishHubNoticeWithFormat(
+		clawID,
+		fmt.Sprintf("Preview ready: [Open QA preview](%s)", previewURL),
+		"markdown",
+	)
+	jsonOK(w, map[string]interface{}{
+		"preview_url":   previewURL,
+		"preview_ready": true,
+	})
+	if s.previewDetachScheduleOverride != nil {
+		s.previewDetachScheduleOverride(clawID)
+	} else {
+		s.safeGo("detach preview agent", func() {
+			time.Sleep(5 * time.Second)
+			if err := s.detachPreviewAgent(context.Background(), clawID); err != nil {
+				log.Printf("[preview] detach failed for claw %s: %v", shortID(clawID), err)
+			}
+		})
+	}
+}
+
+func previewURLForRoute(baseURL, route string) (string, error) {
+	route = strings.TrimSpace(route)
+	if route == "" {
+		route = "/"
+	}
+	if !strings.HasPrefix(route, "/") || strings.HasPrefix(route, "//") {
+		return "", errors.New("preview path must be a same-origin route beginning with /")
+	}
+	ref, err := url.ParseRequestURI(route)
+	if err != nil || ref.IsAbs() || ref.Host != "" {
+		return "", errors.New("preview path must be a valid same-origin route")
+	}
+	base, err := url.Parse(baseURL)
+	if err != nil || base.Scheme == "" || base.Host == "" {
+		return "", errors.New("configured preview URL is invalid")
+	}
+	base.Path = ref.Path
+	base.RawPath = ref.RawPath
+	baseQuery := base.Query()
+	for key, values := range ref.Query() {
+		baseQuery.Del(key)
+		for _, value := range values {
+			baseQuery.Add(key, value)
+		}
+	}
+	base.RawQuery = baseQuery.Encode()
+	base.Fragment = ""
+	return base.String(), nil
+}
+
+func (s *Server) detachPreviewAgent(ctx context.Context, clawID string) error {
+	var tenantID, provider, providerID, previewURL string
+	var previewTTLSeconds int64
+	var previewReady bool
+	err := s.db.QueryRow(
+		`SELECT tenant_id, COALESCE(provider,''), COALESCE(provider_id,''), COALESCE(preview_url,''),
+		        COALESCE(preview_ttl_seconds,1800), preview_ready
+		   FROM claws WHERE id=? AND status NOT IN ('deleted','error')`,
+		clawID,
+	).Scan(&tenantID, &provider, &providerID, &previewURL, &previewTTLSeconds, &previewReady)
+	if err != nil {
+		return err
+	}
+	if !previewReady || previewURL == "" || providerID == "" {
+		return errors.New("preview is not ready to detach")
+	}
+	if previewTTLSeconds <= 0 {
+		previewTTLSeconds = int64((30 * time.Minute) / time.Second)
+	}
+	expiresAt := now().Add(time.Duration(previewTTLSeconds) * time.Second).UnixMilli()
+	res, err := s.db.Exec(
+		`UPDATE claws
+		    SET status='preview', preview_expires_at=?, bootstrap_status='', bootstrap_diagnostic=''
+		  WHERE id=? AND preview_ready=1 AND status NOT IN ('preview','deleted','error')`,
+		expiresAt, clawID,
+	)
+	if err != nil {
+		return err
+	}
+	if changed, _ := res.RowsAffected(); changed == 0 {
+		return nil
+	}
+
+	s.mu.Lock()
+	if cc, ok := s.claws[clawID]; ok {
+		cc.mu.Lock()
+		statusConn := cc.statusConn
+		cc.statusConn = nil
+		cc.mu.Unlock()
+		if statusConn != nil {
+			_ = statusConn.Close(websocket.StatusNormalClosure, "preview detached")
+		}
+		_ = cc.conn.Close(websocket.StatusNormalClosure, "preview detached")
+		delete(s.claws, clawID)
+	}
+	s.mu.Unlock()
+
+	if err := s.stopPreviewAgentProcesses(ctx, provider, providerID, clawID); err != nil {
+		reason := "failed to stop preview agent processes: " + err.Error()
+		_, _ = s.db.Exec(
+			`UPDATE claws SET status='error', preview_ready=0, preview_expires_at=0, bootstrap_diagnostic=? WHERE id=? AND status='preview'`,
+			reason, clawID,
+		)
+		s.broadcastToUsers(tenantID, types.WSMessage{
+			Type: "claw_status",
+			Payload: map[string]interface{}{
+				"claw_id": clawID,
+				"status":  "error",
+				"reason":  reason,
+			},
+		})
+		go s.terminateVMForClaw(clawID, provider, providerID)
+		return err
+	}
+	if s.cronScheduler != nil {
+		s.cronScheduler.releaseClawWorkflowSlot(clawID)
+	}
+	s.broadcastToUsers(tenantID, types.WSMessage{
+		Type: "claw_status",
+		Payload: map[string]interface{}{
+			"claw_id":            clawID,
+			"status":             "preview",
+			"preview_url":        previewURL,
+			"preview_ready":      true,
+			"preview_expires_at": expiresAt,
+		},
+	})
+	s.promotePendingClaws()
+	return nil
+}
+
+func (s *Server) stopPreviewAgentProcesses(ctx context.Context, provider, providerID, clawID string) error {
+	if s.previewStopOverride != nil {
+		return s.previewStopOverride(ctx, provider, providerID, clawID)
+	}
+	s.mu.RLock()
+	cfg, ok := s.hubCfg.Providers[provider]
+	s.mu.RUnlock()
+	if !ok {
+		return fmt.Errorf("provider %q is not configured", provider)
+	}
+	providerType := cfg.Type
+	if providerType == "" {
+		providerType = provider
+	}
+	// The preview process is launched by a provider exec and re-parented to the
+	// sandbox init process. Recursively stopping only the claw-bridge tree leaves
+	// that preview process alive while removing the model gateway and CLI.
+	stop := `set -eu
+children_of() { ps -eo pid=,ppid= | awk -v parent="$1" '$2 == parent { print $1 }'; }
+stop_tree() {
+  for child in $(children_of "$1"); do stop_tree "$child"; done
+  kill -TERM "$1" 2>/dev/null || true
+}
+for bridge in $(ps -eo pid=,comm= | awk '$2 == "claw-bridge" { print $1 }'); do stop_tree "$bridge"; done
+rm -rf "$HOME/.codex" "$HOME/.claude" "$HOME/.config/gh" 2>/dev/null || true`
+
+	var result *types.ExecResult
+	var err error
+	switch providerType {
+	case "docker":
+		p, createErr := newDockerProvider(cfg)
+		if createErr != nil {
+			return createErr
+		}
+		result, err = p.Exec(ctx, providerID, []string{"sh", "-lc", stop})
+	case "daytona":
+		p, createErr := newDaytonaProvider(cfg)
+		if createErr != nil {
+			return createErr
+		}
+		result, err = p.Exec(ctx, providerID, []string{"bash", "-lc", stop})
+	default:
+		return fmt.Errorf("provider %q does not support detached previews", providerType)
+	}
+	if err != nil {
+		return err
+	}
+	if result != nil && result.ExitCode != 0 {
+		return fmt.Errorf("preview detach exited %d: %s", result.ExitCode, strings.TrimSpace(result.Stderr))
+	}
+	return nil
+}
+
+func (s *Server) handleClawPreviewStart(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !s.authenticateClawToken(w, r) {
+		return
+	}
+	clawID := strings.TrimSpace(r.PathValue("id"))
+	if clawID == "" || r.Header.Get("X-ElasticClaw-Claw-ID") != clawID {
+		http.Error(w, "claw identity mismatch", http.StatusForbidden)
+		return
+	}
+
+	var body struct {
+		Cwd     string `json:"cwd"`
+		Command string `json:"command"`
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+	body.Cwd = strings.TrimSpace(body.Cwd)
+	body.Command = strings.TrimSpace(body.Command)
+	if !strings.HasPrefix(body.Cwd, "/") || body.Command == "" || len(body.Command) > 16<<10 {
+		http.Error(w, "cwd must be absolute and command must be non-empty", http.StatusBadRequest)
+		return
+	}
+
+	var providerName, providerID, previewURL string
+	var previewPort int
+	err := s.db.QueryRow(
+		`SELECT COALESCE(provider,''), COALESCE(provider_id,''), preview_port, COALESCE(preview_url,'')
+		 FROM claws WHERE id=? AND status != 'deleted'`,
+		clawID,
+	).Scan(&providerName, &providerID, &previewPort, &previewURL)
+	if err == sql.ErrNoRows {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	if err != nil {
+		http.Error(w, "db error", http.StatusInternalServerError)
+		return
+	}
+	if previewPort == 0 || previewURL == "" || providerName == "" || providerID == "" {
+		http.Error(w, "preview is not configured", http.StatusConflict)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+	if err := s.startPreviewProcess(ctx, clawID, providerName, providerID, body.Cwd, body.Command); err != nil {
+		log.Printf("[preview] start failed for claw %s: %v", shortID(clawID), err)
+		http.Error(w, "failed to start preview process", http.StatusBadGateway)
+		return
+	}
+	if _, err := s.db.Exec(`UPDATE claws SET preview_ready=0, preview_expires_at=0 WHERE id=?`, clawID); err != nil {
+		http.Error(w, "db error", http.StatusInternalServerError)
+		return
+	}
+	jsonOK(w, map[string]interface{}{
+		"preview_url":  previewURL,
+		"preview_port": previewPort,
+		"started":      true,
+	})
+}
+
+func (s *Server) startPreviewProcess(ctx context.Context, clawID, providerName, providerID, cwd, command string) error {
+	if s.previewStartOverride != nil {
+		return s.previewStartOverride(ctx, providerName, providerID, cwd, command)
+	}
+	s.mu.RLock()
+	cfg, ok := s.hubCfg.Providers[providerName]
+	s.mu.RUnlock()
+	if !ok {
+		return fmt.Errorf("provider %q is not configured", providerName)
+	}
+	providerType := cfg.Type
+	if providerType == "" {
+		providerType = providerName
+	}
+	stateDir := fmt.Sprintf("$HOME/.elasticclaw/preview/%s", shellQuote(clawID))
+	launch := fmt.Sprintf(
+		`set -e; dir=%s; mkdir -p "$dir"; if [ -s "$dir/pid" ] && kill -0 "$(cat "$dir/pid")" 2>/dev/null; then kill "$(cat "$dir/pid")" 2>/dev/null || true; fi; cd %s; nohup env -i HOME="$HOME" PATH="$PATH" USER="${USER:-node}" LANG="${LANG:-C.UTF-8}" CI=false sh -lc %s >"$dir/app.log" 2>&1 </dev/null & echo $! >"$dir/pid"`,
+		stateDir,
+		shellQuote(cwd),
+		shellQuote(command),
+	)
+
+	var result *types.ExecResult
+	var err error
+	switch providerType {
+	case "docker":
+		var p interface {
+			Exec(context.Context, string, []string) (*types.ExecResult, error)
+		}
+		p, err = newDockerProvider(cfg)
+		if err == nil {
+			result, err = p.Exec(ctx, providerID, []string{"sh", "-lc", launch})
+		}
+	case "daytona":
+		var p interface {
+			Exec(context.Context, string, []string) (*types.ExecResult, error)
+		}
+		p, err = newDaytonaProvider(cfg)
+		if err == nil {
+			result, err = p.Exec(ctx, providerID, []string{"bash", "-lc", launch})
+		}
+	default:
+		return fmt.Errorf("provider %q does not support previews", providerType)
+	}
+	if err != nil {
+		return err
+	}
+	if result != nil && result.ExitCode != 0 {
+		return fmt.Errorf("preview launcher exited %d: %s", result.ExitCode, strings.TrimSpace(result.Stderr))
+	}
+	return nil
+}
+
 func (s *Server) handleClaws(w http.ResponseWriter, r *http.Request) {
 	tenantID := tenantFromCtx(r)
 
@@ -1059,7 +1429,7 @@ func (s *Server) handleClaws(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rows, err := s.db.Query(
-		`SELECT id, name, template, COALESCE(provider,''), COALESCE(provider_id,''), status, last_seen, created_at, ssh_host, ssh_port, ssh_user, COALESCE(tags,'[]'), COALESCE(color,''), COALESCE(bootstrap_status,''), COALESCE(bootstrap_diagnostic,''), COALESCE(github_issue_id,'') FROM claws WHERE tenant_id = ? AND status != 'deleted' ORDER BY created_at DESC`,
+		`SELECT id, name, template, COALESCE(provider,''), COALESCE(provider_id,''), status, last_seen, created_at, ssh_host, ssh_port, ssh_user, COALESCE(tags,'[]'), COALESCE(color,''), COALESCE(bootstrap_status,''), COALESCE(bootstrap_diagnostic,''), COALESCE(github_issue_id,''), preview_port, COALESCE(preview_url,''), COALESCE(preview_label,''), preview_ready, COALESCE(preview_expires_at,0) FROM claws WHERE tenant_id = ? AND status != 'deleted' ORDER BY created_at DESC`,
 		tenantID,
 	)
 	if err != nil {
@@ -1083,7 +1453,7 @@ func (s *Server) handleClaws(w http.ResponseWriter, r *http.Request) {
 		var c types.Claw
 		var lastSeen sql.NullTime
 		var tagsJSON string
-		if err := rows.Scan(&c.ID, &c.Name, &c.Template, &c.Provider, &c.ProviderID, &c.Status, &lastSeen, &c.CreatedAt, &c.SSHHost, &c.SSHPort, &c.SSHUser, &tagsJSON, &c.Color, &c.BootstrapStatus, &c.BootstrapDiagnostic, &c.GitHubIssueID); err != nil {
+		if err := rows.Scan(&c.ID, &c.Name, &c.Template, &c.Provider, &c.ProviderID, &c.Status, &lastSeen, &c.CreatedAt, &c.SSHHost, &c.SSHPort, &c.SSHUser, &tagsJSON, &c.Color, &c.BootstrapStatus, &c.BootstrapDiagnostic, &c.GitHubIssueID, &c.PreviewPort, &c.PreviewURL, &c.PreviewLabel, &c.PreviewReady, &c.PreviewExpiresAt); err != nil {
 			continue
 		}
 		c.GitHubIssueURL = githubIssueURL(c.GitHubIssueID)
@@ -1095,7 +1465,7 @@ func (s *Server) handleClaws(w http.ResponseWriter, r *http.Request) {
 		s.mu.RLock()
 		cc, online := s.claws[c.ID]
 		s.mu.RUnlock()
-		if online {
+		if online && c.Status != "preview" {
 			// Claw is currently connected — show live status
 			if cc.gatewayReady {
 				c.Status = "connected"
@@ -1103,7 +1473,7 @@ func (s *Server) handleClaws(w http.ResponseWriter, r *http.Request) {
 				c.Status = "starting"
 			}
 			c.ContextUsage = cc.contextUsage
-		} else if c.Status != "provisioning" && c.Status != "starting" && c.Status != "error" && c.Status != "pending" {
+		} else if c.Status != "provisioning" && c.Status != "starting" && c.Status != "error" && c.Status != "pending" && c.Status != "preview" {
 			// Not currently connected and not in an active provisioning state —
 			// DB status is stale (e.g. 'connected' from before hub restart)
 			c.Status = "offline"
@@ -1569,9 +1939,9 @@ func (s *Server) handleClawDetail(w http.ResponseWriter, r *http.Request) {
 	var lastSeen sql.NullTime
 	var tagsJSON string
 	err := s.db.QueryRow(
-		`SELECT id, name, template, COALESCE(provider,''), COALESCE(provider_id,''), status, last_seen, created_at, ssh_host, ssh_port, ssh_user, COALESCE(tags,'[]'), COALESCE(color,''), COALESCE(bootstrap_status,''), COALESCE(bootstrap_diagnostic,''), COALESCE(github_issue_id,'') FROM claws WHERE id = ? AND tenant_id = ? AND status != 'deleted'`,
+		`SELECT id, name, template, COALESCE(provider,''), COALESCE(provider_id,''), status, last_seen, created_at, ssh_host, ssh_port, ssh_user, COALESCE(tags,'[]'), COALESCE(color,''), COALESCE(bootstrap_status,''), COALESCE(bootstrap_diagnostic,''), COALESCE(github_issue_id,''), preview_port, COALESCE(preview_url,''), COALESCE(preview_label,''), preview_ready, COALESCE(preview_expires_at,0) FROM claws WHERE id = ? AND tenant_id = ? AND status != 'deleted'`,
 		clawID, tenantID,
-	).Scan(&c.ID, &c.Name, &c.Template, &c.Provider, &c.ProviderID, &c.Status, &lastSeen, &c.CreatedAt, &c.SSHHost, &c.SSHPort, &c.SSHUser, &tagsJSON, &c.Color, &c.BootstrapStatus, &c.BootstrapDiagnostic, &c.GitHubIssueID)
+	).Scan(&c.ID, &c.Name, &c.Template, &c.Provider, &c.ProviderID, &c.Status, &lastSeen, &c.CreatedAt, &c.SSHHost, &c.SSHPort, &c.SSHUser, &tagsJSON, &c.Color, &c.BootstrapStatus, &c.BootstrapDiagnostic, &c.GitHubIssueID, &c.PreviewPort, &c.PreviewURL, &c.PreviewLabel, &c.PreviewReady, &c.PreviewExpiresAt)
 	_ = json.Unmarshal([]byte(tagsJSON), &c.Tags)
 	if err == sql.ErrNoRows {
 		http.Error(w, "not found", http.StatusNotFound)
@@ -1593,14 +1963,14 @@ func (s *Server) handleClawDetail(w http.ResponseWriter, r *http.Request) {
 	s.mu.RLock()
 	cc, online := s.claws[c.ID]
 	s.mu.RUnlock()
-	if online {
+	if online && c.Status != "preview" {
 		if cc.gatewayReady {
 			c.Status = "connected"
 		} else {
 			c.Status = "starting"
 		}
 		c.ContextUsage = cc.contextUsage
-	} else if c.Status != "provisioning" && c.Status != "error" {
+	} else if c.Status != "provisioning" && c.Status != "error" && c.Status != "preview" {
 		c.Status = "offline"
 	}
 	jsonOK(w, c)
@@ -2152,18 +2522,22 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 			`INSERT INTO claws(id,tenant_id,name,template,status,last_seen,created_at) VALUES(?,?,?,?,?,?,?)
 			 ON CONFLICT(id) DO UPDATE SET name=excluded.name,
 			 template=COALESCE(NULLIF(excluded.template,''), claws.template),
-			 status=CASE WHEN claws.status IN ('idle','deleted') THEN claws.status ELSE excluded.status END,
+			 status=CASE WHEN claws.status IN ('idle','preview','deleted') THEN claws.status ELSE excluded.status END,
 			 last_seen=excluded.last_seen
 			 RETURNING status`,
 			clawID, tenantID, rp.Name, rp.Template, desiredStatus, now(), now(),
 		).Scan(&currentStatus)
-		if currentStatus == "deleted" {
-			conn.Close(websocket.StatusPolicyViolation, "claw deleted")
+		if currentStatus == "deleted" || currentStatus == "preview" {
+			conn.Close(websocket.StatusPolicyViolation, "claw agent is no longer active")
 			return
 		}
 	} else {
 		// For status channel, just read current status from DB
 		_ = s.db.QueryRow(`SELECT status FROM claws WHERE id = ? AND tenant_id = ?`, clawID, tenantID).Scan(&currentStatus)
+		if currentStatus == "deleted" || currentStatus == "preview" {
+			conn.Close(websocket.StatusPolicyViolation, "claw agent is no longer active")
+			return
+		}
 	}
 
 	var registrationTagsJSON string
@@ -2302,7 +2676,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 		_ = s.db.QueryRow(`SELECT status FROM claws WHERE id=?`, clawID).Scan(&currentStatus)
 		// Don't overwrite terminal/watching states or a replacement already being
 		// provisioned. The disconnect may belong to the superseded instance.
-		if currentStatus != "completed" && currentStatus != "deleted" && currentStatus != "idle" && currentStatus != "error" && currentStatus != "provisioning" {
+		if currentStatus != "completed" && currentStatus != "deleted" && currentStatus != "idle" && currentStatus != "preview" && currentStatus != "error" && currentStatus != "provisioning" {
 			_, _ = s.db.Exec(`UPDATE claws SET status='offline', last_seen=? WHERE id=?`, now(), clawID)
 			s.broadcastToUsers(tenantID, types.WSMessage{Type: "claw_status", Payload: map[string]string{"claw_id": clawID, "status": "offline"}})
 		}
@@ -2750,6 +3124,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 					clawToken := s.hubCfg.ClawToken
 					s.mu.RUnlock()
 					httpReq.Header.Set("X-Claw-Token", clawToken)
+					httpReq.Header.Set("X-ElasticClaw-Claw-ID", clawID)
 					// Execute against internal mux
 					w := &proxyResponseWriter{header: make(http.Header)}
 					s.mux.ServeHTTP(w, httpReq)
@@ -3137,9 +3512,10 @@ func (s *Server) provisionDaytona(ctx context.Context, clawID string, req types.
 		FromImage:     snapshot,
 		TemplateFiles: files,
 		Env:           env,
+		PreviewPorts:  previewPorts(req.PreviewPort),
 	}
 	instance, err := createAndConfigureDaytonaSandbox(ctx, p, createReq, env, func(created *types.Instance) error {
-		if _, err := s.db.Exec(`UPDATE claws SET status='starting', provider='daytona', provider_id=? WHERE id=?`, created.ID, clawID); err != nil {
+		if _, err := s.db.Exec(`UPDATE claws SET status='starting', provider='daytona', provider_id=?, preview_url=? WHERE id=?`, created.ID, instancePreviewURL(created, req.PreviewPort), clawID); err != nil {
 			return err
 		}
 		log.Printf("daytona workspace created: %s (claw %s)", created.ID, clawID)
@@ -4757,8 +5133,9 @@ func (s *Server) provisionDocker(ctx context.Context, clawID string, req types.C
 	}
 
 	createReq := types.CreateRequest{
-		Name: req.ProviderName,
-		Env:  containerEnv,
+		Name:         req.ProviderName,
+		Env:          containerEnv,
+		PreviewPorts: previewPorts(req.PreviewPort),
 	}
 
 	instance, err := p.Create(ctx, createReq)
@@ -4766,7 +5143,7 @@ func (s *Server) provisionDocker(ctx context.Context, clawID string, req types.C
 		return fmt.Errorf("docker create: %w", err)
 	}
 	log.Printf("[docker] container started: %s (claw %s)", instance.ID, clawID)
-	_, _ = s.db.Exec(`UPDATE claws SET status='starting', provider='docker', provider_id=? WHERE id=?`, instance.ID, clawID)
+	_, _ = s.db.Exec(`UPDATE claws SET status='starting', provider='docker', provider_id=?, preview_url=? WHERE id=?`, instance.ID, instancePreviewURL(instance, req.PreviewPort), clawID)
 	homeDir, err := p.HomeDir(ctx, instance.ID)
 	if err != nil {
 		_ = p.Destroy(context.Background(), instance.ID, false)
@@ -7040,12 +7417,17 @@ func (s *Server) handleGitHubToken(w http.ResponseWriter, r *http.Request) {
 	var workspaceName string
 	var reposJSON string
 	var tagsJSON string
+	var clawStatus string
 	err := s.db.QueryRow(
-		`SELECT COALESCE(template,''), github_repos, COALESCE(tags,'[]') FROM claws WHERE id = ?`,
+		`SELECT COALESCE(template,''), github_repos, COALESCE(tags,'[]'), status FROM claws WHERE id = ?`,
 		clawID,
-	).Scan(&workspaceName, &reposJSON, &tagsJSON)
+	).Scan(&workspaceName, &reposJSON, &tagsJSON, &clawStatus)
 	if err != nil {
 		http.Error(w, "claw not found", http.StatusNotFound)
+		return
+	}
+	if clawStatus == "preview" || clawStatus == "deleted" || clawStatus == "error" {
+		http.Error(w, "agent credentials have been revoked", http.StatusGone)
 		return
 	}
 	workspaceName = clawWorkspaceName(workspaceName, tagsJSON)

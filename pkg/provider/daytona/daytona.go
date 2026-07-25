@@ -88,7 +88,7 @@ func (p *Provider) Info() types.ProviderInfo {
 	return types.ProviderInfo{
 		Name:         "daytona",
 		Type:         types.ProviderTypeEphemeral,
-		Capabilities: []string{"exec", "snapshot"},
+		Capabilities: []string{"exec", "snapshot", "preview"},
 	}
 }
 
@@ -138,15 +138,23 @@ func (p *Provider) Create(ctx context.Context, req types.CreateRequest) (*types.
 		}
 	}
 
+	providerMeta := map[string]string{"sandbox_id": sandbox.ID}
+	for _, port := range req.PreviewPorts {
+		preview, err := sandbox.GetSignedPreviewLink(ctx, port, 24*60*60)
+		if err != nil {
+			_ = sandbox.Delete(context.Background())
+			return nil, fmt.Errorf("failed to expose preview port %d: %w", port, err)
+		}
+		providerMeta[fmt.Sprintf("preview_url_%d", port)] = preview.URL
+	}
+
 	return &types.Instance{
-		Name:      req.Name,
-		ID:        sandbox.ID,
-		Provider:  "daytona",
-		Status:    types.StatusRunning,
-		CreatedAt: time.Now().UTC(),
-		ProviderMeta: map[string]string{
-			"sandbox_id": sandbox.ID,
-		},
+		Name:         req.Name,
+		ID:           sandbox.ID,
+		Provider:     "daytona",
+		Status:       types.StatusRunning,
+		CreatedAt:    time.Now().UTC(),
+		ProviderMeta: providerMeta,
 	}, nil
 }
 

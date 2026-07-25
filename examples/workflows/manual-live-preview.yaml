@@ -1,0 +1,37 @@
+schema_version: v1
+name: manual-live-preview
+enable_manual_trigger: true
+
+# The agent discovers the repository's own start command. ElasticClaw exposes
+# this port through Daytona or the local Docker provider after the PR is open.
+preview:
+  port: 3000
+  label: Open QA preview
+  ttl: 30m
+
+inputs:
+  - name: task
+    type: string
+    required: true
+    description: The implementation task for the agent.
+
+stages:
+  - id: working
+    label: Working
+    entry: true
+    on_enter:
+      inject: |
+        Complete the requested task using the repository's existing conventions.
+        Run focused tests and create a pull request.
+
+  - id: merged
+    label: Merged
+    triggers:
+      - pr_merged: {}
+    terminal: true
+
+  - id: closed_no_merge
+    label: Closed Without Merge
+    triggers:
+      - pr_closed: {}
+    terminal: true
