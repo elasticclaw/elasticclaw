@@ -9,7 +9,6 @@ import (
 	"testing"
 
 	"github.com/elasticclaw/elasticclaw/pkg/hub/pipeline"
-	"github.com/elasticclaw/elasticclaw/pkg/types"
 )
 
 func TestNormalizeDependencyUpdatesConfigDefaults(t *testing.T) {
@@ -74,39 +73,16 @@ func TestDiscoverDependencyUpdateManifestsRejectsEscapingPath(t *testing.T) {
 	}
 }
 
-func TestWrapDependencyUpdatesCommandUsesNixDevShellWhenEnabled(t *testing.T) {
-	command := "python3 - <<'PY'\nprint('dependency update')\nPY"
-
-	wrapped := wrapDependencyUpdatesCommand(command, true)
-
-	want := "nix develop --accept-flake-config -c bash -lc " + shellQuote(command)
-	if wrapped != want {
-		t.Fatalf("wrapped command = %q, want %q", wrapped, want)
-	}
-	if got := wrapDependencyUpdatesCommand(command, false); got != command {
-		t.Fatalf("non-nix command = %q, want original command", got)
-	}
-}
-
-func TestDependencyUpdatesCommandForClawWrapsNixEnabledAgents(t *testing.T) {
-	s, db := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
-	_, err := db.Exec(
-		`INSERT INTO claws(id, tenant_id, name, template, status, nix, created_at) VALUES(?,?,?,?,?,?,datetime('now'))`,
-		"nix-claw", "test-tenant-id", "nix claw", "workspace", "connected", 1,
-	)
-	if err != nil {
-		t.Fatalf("insert claw: %v", err)
-	}
-
-	command, err := s.dependencyUpdatesCommandForClaw("nix-claw", pipeline.DependencyUpdatesAction{Enabled: true})
+func TestDependencyUpdatesCommandReturnsPythonScriptDirectly(t *testing.T) {
+	command, err := buildDependencyUpdatesCommand(pipeline.DependencyUpdatesAction{Enabled: true})
 	if err != nil {
 		t.Fatalf("build command: %v", err)
 	}
-	if !strings.HasPrefix(command, "nix develop --accept-flake-config -c bash -lc ") {
-		t.Fatalf("command was not wrapped with nix develop:\n%s", command)
+	if strings.HasPrefix(command, "nix develop --accept-flake-config -c bash -lc ") {
+		t.Fatalf("dependency update command should not add its own nix develop wrapper; the workspace run wrapper handles nix:\n%s", command)
 	}
-	if !strings.Contains(command, "python3 - <<") {
-		t.Fatalf("wrapped command missing dependency update script:\n%s", command)
+	if !strings.HasPrefix(command, "python3 - <<") {
+		t.Fatalf("command missing dependency update script:\n%s", command)
 	}
 }
 
@@ -123,8 +99,8 @@ if [ "$*" = "list -m -u -json all" ]; then
   exit 0
 fi
 if [ "$1" = "get" ]; then
-  if [[ "$*" != *"example.com/root@v1.1.0"* ]]; then
-    echo "missing selected module in go get: $*" >&2
+  if [ "$2" != "example.com/root@v1.1.0" ]; then
+    echo "unexpected go get target: $2" >&2
     exit 1
   fi
   echo changed >> go.sum
@@ -182,6 +158,170 @@ exit 0
 	}
 }
 
+func TestDependencyUpdatesBatchesGoGet(t *testing.T) {
+	root := t.TempDir()
+	bin := filepath.Join(root, "bin")
+	if err := os.MkdirAll(bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeExecutable(t, bin, "go", `#!/usr/bin/env bash
+set -e
+if [ "$*" = "list -m -u -json all" ]; then
+  printf '%s\n' '{"Path":"example.com/root","Version":"v1.0.0","Update":{"Version":"v1.1.0"}}'
+  printf '%s\n' '{"Path":"example.com/other","Version":"v1.0.0","Update":{"Version":"v1.1.0"}}'
+  exit 0
+fi
+if [ "$1" = "get" ]; then
+  if [[ "$*" != *"example.com/root@v1.1.0"* || "$*" != *"example.com/other@v1.1.0"* ]]; then
+    echo "expected batched go get with both modules, got: $*" >&2
+    exit 1
+  fi
+  echo changed >> go.sum
+  exit 0
+fi
+if [ "$1 $2" = "mod tidy" ]; then
+  exit 0
+fi
+exit 0
+`)
+	writeExecutable(t, bin, "npm", `#!/usr/bin/env bash
+if [ "$1 $2" = "outdated --json" ]; then
+  printf '%s\n' '{}'
+  exit 1
+fi
+if [ "$1 $2" = "update --package-lock-only" ]; then
+  exit 0
+fi
+exit 0
+`)
+	writeFile(t, root, "go.mod", "module example.com/root\n")
+	writeFile(t, root, "go.sum", "")
+
+	command, err := buildDependencyUpdatesCommand(pipeline.DependencyUpdatesAction{Enabled: true})
+	if err != nil {
+		t.Fatalf("build command: %v", err)
+	}
+	cmd := osexec.Command("bash", "-c", command)
+	cmd.Dir = root
+	cmd.Env = testEnvWithPath(bin)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("dependency update command failed: %v\n%s", err, out)
+	}
+
+	parsed, ok := parsePipelineOutputJSON(string(out))
+	if !ok {
+		t.Fatalf("command did not emit JSON:\n%s", out)
+	}
+	commands, ok := parsed["commands"].([]interface{})
+	if !ok {
+		t.Fatalf("commands = %#v, want list", parsed["commands"])
+	}
+	var getAttempts int
+	for _, raw := range commands {
+		c, ok := raw.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		cmdStr, _ := c["command"].(string)
+		if strings.HasPrefix(cmdStr, "go get") {
+			getAttempts++
+		}
+	}
+	if getAttempts != 1 {
+		t.Fatalf("go get commands = %d, want 1 batched command", getAttempts)
+	}
+	assertUpdateStatus(t, parsed, "go", "example.com/root", true, "")
+	assertUpdateStatus(t, parsed, "go", "example.com/other", true, "")
+}
+
+func TestDependencyUpdatesRetriesGoGetFailure(t *testing.T) {
+	root := t.TempDir()
+	bin := filepath.Join(root, "bin")
+	if err := os.MkdirAll(bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeExecutable(t, bin, "go", `#!/usr/bin/env bash
+set -e
+ROOT=$(dirname "$0")/..
+COUNT_FILE="$ROOT/get-count"
+count=0
+if [ -f "$COUNT_FILE" ]; then
+  count=$(cat "$COUNT_FILE")
+fi
+if [ "$*" = "list -m -u -json all" ]; then
+  printf '%s\n' '{"Path":"example.com/root","Version":"v1.0.0","Update":{"Version":"v1.1.0"}}'
+  exit 0
+fi
+if [ "$1" = "get" ]; then
+  count=$((count + 1))
+  echo "$count" > "$COUNT_FILE"
+  if [ "$count" -eq 1 ]; then
+    echo "go: updating go.mod: existing contents have changed since last read" >&2
+    exit 1
+  fi
+  if [ "$2" != "example.com/root@v1.1.0" ]; then
+    echo "unexpected go get target: $2" >&2
+    exit 1
+  fi
+  echo changed >> go.sum
+  exit 0
+fi
+if [ "$1 $2" = "mod tidy" ]; then
+  exit 0
+fi
+exit 0
+`)
+	writeExecutable(t, bin, "npm", `#!/usr/bin/env bash
+if [ "$1 $2" = "outdated --json" ]; then
+  printf '%s\n' '{}'
+  exit 1
+fi
+if [ "$1 $2" = "update --package-lock-only" ]; then
+  exit 0
+fi
+exit 0
+`)
+	writeFile(t, root, "go.mod", "module example.com/root\n")
+	writeFile(t, root, "go.sum", "")
+
+	command, err := buildDependencyUpdatesCommand(pipeline.DependencyUpdatesAction{Enabled: true})
+	if err != nil {
+		t.Fatalf("build command: %v", err)
+	}
+	cmd := osexec.Command("bash", "-c", command)
+	cmd.Dir = root
+	cmd.Env = testEnvWithPath(bin)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("dependency update command failed: %v\n%s", err, out)
+	}
+
+	parsed, ok := parsePipelineOutputJSON(string(out))
+	if !ok {
+		t.Fatalf("command did not emit JSON:\n%s", out)
+	}
+	commands, ok := parsed["commands"].([]interface{})
+	if !ok {
+		t.Fatalf("commands = %#v, want list", parsed["commands"])
+	}
+	var getAttempts int
+	for _, raw := range commands {
+		c, ok := raw.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		cmdStr, _ := c["command"].(string)
+		if strings.HasPrefix(cmdStr, "go get") {
+			getAttempts++
+		}
+	}
+	if getAttempts != 2 {
+		t.Fatalf("go get attempts = %d, want 2 (initial failure + retry)", getAttempts)
+	}
+	assertUpdateStatus(t, parsed, "go", "example.com/root", true, "")
+}
+
 func TestDependencyUpdatesGeneratedCommandHonorsFiltersAndMajorPolicy(t *testing.T) {
 	root := t.TempDir()
 	bin := filepath.Join(root, "bin")
@@ -197,12 +337,12 @@ if [ "$*" = "list -m -u -json all" ]; then
   exit 0
 fi
 if [ "$1" = "get" ]; then
-  if [[ "$*" == *"ignored.com/risky"* || "$*" == *"example.com/major"* ]]; then
-    echo "go get included skipped dependency: $*" >&2
+  if [ "$2" = "ignored.com/risky@v1.1.0" ] || [ "$2" = "example.com/major@v1.0.0" ]; then
+    echo "go get included skipped dependency: $2" >&2
     exit 1
   fi
-  if [[ "$*" != *"example.com/root@v1.1.0"* ]]; then
-    echo "go get omitted selected dependency: $*" >&2
+  if [ "$2" != "example.com/root@v1.1.0" ]; then
+    echo "go get omitted or unexpected selected dependency: $2" >&2
     exit 1
   fi
   echo changed >> go.sum
@@ -317,5 +457,65 @@ func writeExecutable(t *testing.T, root, name, content string) {
 	path := filepath.Join(root, name)
 	if err := os.WriteFile(path, []byte(content), 0o755); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestFormatDependencyUpdateFailureExtractsFailedCommand(t *testing.T) {
+	stdout := `{"commands":[{"command":"go list -m -u -json all","cwd":"ec/e2e","exit_code":0,"stderr":""},{"command":"go get example.com/foo@v1.1.0","cwd":"ec/e2e","exit_code":1,"stderr":"go: example.com/foo@v1.1.0: not found"}],"updates":[]}`
+	result := &pipelineRunResult{ExitCode: 1, Stdout: stdout}
+	got := formatDependencyUpdateFailure(result)
+	want := "Dependency update step failed: go get example.com/foo@v1.1.0 (cwd=ec/e2e): go: example.com/foo@v1.1.0: not found"
+	if got != want {
+		t.Fatalf("formatDependencyUpdateFailure = %q, want %q", got, want)
+	}
+}
+
+func TestFormatDependencyUpdateFailureFallsBackToRawOutput(t *testing.T) {
+	result := &pipelineRunResult{ExitCode: 1, Stderr: "some shellHook banner\n" + strings.Repeat("x", 3000)}
+	got := formatDependencyUpdateFailure(result)
+	if !strings.HasPrefix(got, "Dependency update step failed: ") {
+		t.Fatalf("unexpected prefix: %q", got)
+	}
+	if len(got) > 2100 {
+		t.Fatalf("fallback message not truncated: length %d", len(got))
+	}
+}
+
+func TestFormatDependencyUpdateFailureHandlesMultiLineJSON(t *testing.T) {
+	stdout := "some shellHook banner\n" + `{
+  "commands": [
+    {
+      "command": "go get example.com/foo@v1.1.0",
+      "cwd": "ec/e2e",
+      "exit_code": 1,
+      "stderr": "go: example.com/foo@v1.1.0: not found"
+    }
+  ]
+}`
+	result := &pipelineRunResult{ExitCode: 1, Stdout: stdout}
+	got := formatDependencyUpdateFailure(result)
+	want := "Dependency update step failed: go get example.com/foo@v1.1.0 (cwd=ec/e2e): go: example.com/foo@v1.1.0: not found"
+	if got != want {
+		t.Fatalf("formatDependencyUpdateFailure = %q, want %q", got, want)
+	}
+}
+
+func TestFormatDependencyUpdateFailureSkipsAllowedExitCodes(t *testing.T) {
+	stdout := `{"commands":[{"command":"npm outdated --json","cwd":"ec/e2e","exit_code":1,"failed":false},{"command":"npm update --package-lock-only foo","cwd":"ec/e2e","exit_code":1,"stderr":"npm ERR! code E404","failed":true}],"updates":[]}`
+	result := &pipelineRunResult{ExitCode: 1, Stdout: stdout}
+	got := formatDependencyUpdateFailure(result)
+	want := "Dependency update step failed: npm update --package-lock-only foo (cwd=ec/e2e): npm ERR! code E404"
+	if got != want {
+		t.Fatalf("formatDependencyUpdateFailure = %q, want %q", got, want)
+	}
+}
+
+func TestFormatDependencyUpdateFailureSkipsRetriedAttempts(t *testing.T) {
+	stdout := `{"commands":[{"command":"go get example.com/foo@v1.1.0","cwd":"ec/e2e","exit_code":1,"stderr":"existing contents have changed since last read","failed":false},{"command":"go get example.com/foo@v1.1.0","cwd":"ec/e2e","exit_code":0,"failed":false},{"command":"go mod tidy","cwd":"ec/e2e","exit_code":1,"stderr":"go: errors","failed":true}],"updates":[]}`
+	result := &pipelineRunResult{ExitCode: 1, Stdout: stdout}
+	got := formatDependencyUpdateFailure(result)
+	want := "Dependency update step failed: go mod tidy (cwd=ec/e2e): go: errors"
+	if got != want {
+		t.Fatalf("formatDependencyUpdateFailure = %q, want %q", got, want)
 	}
 }
