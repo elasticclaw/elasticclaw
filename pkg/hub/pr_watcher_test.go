@@ -138,6 +138,39 @@ func TestReconcileDeadClawPRsClosesUnmergedPRSetsSuccessStatus(t *testing.T) {
 	}
 }
 
+func TestReconcileDeadClawPRsClosesMergedPRForTerminalNonPRRun(t *testing.T) {
+	oldTransport := http.DefaultTransport
+	http.DefaultTransport = githubAppTokenTransport{base: oldTransport}
+	t.Cleanup(func() { http.DefaultTransport = oldTransport })
+
+	gh := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer repo-token" {
+			t.Fatalf("authorization = %q, want repo token", r.Header.Get("Authorization"))
+		}
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"state": "closed", "merged": true, "merged_at": "2026-01-01T00:00:00Z"})
+	}))
+	defer gh.Close()
+
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{GitHubApps: []*types.GitHubAppConfig{{AppID: 1, PrivateKeyPEM: testGitHubAppPEM(t)}}}, gh.URL, "", "")
+	if _, err := db.Exec(`INSERT INTO claws(id, tenant_id, name, template, status, created_at) VALUES(?,?,?,?,?,?)`, "dead-terminal", "test-tenant-id", "dead-terminal", "elasticclaw", "running", now()); err != nil {
+		t.Fatal(err)
+	}
+	runID, attemptID := startTaskRunWithRequiresPRForTest(t, s, "dead-terminal", "terminal", false)
+	recordTaskRunEventForTest(t, s, TaskRunEvent{TenantID: "test-tenant-id", RunID: runID, AttemptID: attemptID, EventKey: "terminal:completed", EventType: taskRunEventTaskCompleted, ActorType: taskRunActorAgent, Source: taskRunSourceHub})
+	associatePRForTest(t, s, runID, "owner/repo", 5, taskRunPRStateOpen)
+	assertTaskRunSummary(t, db, runID, taskRunStatusClean, taskRunPhaseTerminal, "", "[]", 0, 1, 1, 0, 0)
+
+	s.reconcileDeadClawPRs()
+	assertTaskRunPR(t, db, runID, "owner/repo", 5, taskRunPRStateClosed, true)
+	var mergedAt int64
+	if err := db.QueryRow(`SELECT merged_at FROM task_run_summaries WHERE run_id=?`, runID).Scan(&mergedAt); err != nil {
+		t.Fatal(err)
+	}
+	if mergedAt == 0 {
+		t.Fatal("expected merged_at to be populated")
+	}
+}
+
 func TestReconcileDeadClawPRsSkipsAgeCappedRows(t *testing.T) {
 	oldTransport := http.DefaultTransport
 	http.DefaultTransport = githubAppTokenTransport{base: oldTransport}
