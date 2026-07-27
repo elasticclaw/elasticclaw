@@ -176,6 +176,10 @@ type TaskRunPR struct {
 	State         string
 	Merged        bool
 	MergedByLogin string
+	ReadyAt       int64
+	// AuthoritativeReadyAt distinguishes GitHub event timestamps from the
+	// poller's detection-time fallback.
+	AuthoritativeReadyAt bool
 	// AgentHeadSHA marks HeadSHA as written by the agent, rather than observed
 	// from a GitHub update made by somebody else.
 	AgentHeadSHA bool
@@ -414,6 +418,7 @@ func (s *Server) associateTaskRunPR(input TaskRunPR) error {
 		mergedAt = at
 		closedAt = at
 	}
+	readyAt := input.ReadyAt
 	agentHeadSHA := ""
 	if input.AgentHeadSHA {
 		agentHeadSHA = input.HeadSHA
@@ -421,8 +426,8 @@ func (s *Server) associateTaskRunPR(input TaskRunPR) error {
 	if _, err := tx.Exec(`
 		INSERT INTO task_run_prs(
 			id, tenant_id, run_id, repo, pr_number, pr_url, head_sha, head_branch, last_agent_head_sha, base_branch,
-			state, merged, opened_at, closed_at, merged_at, merged_by_login, created_at, updated_at
-		) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+			state, merged, opened_at, closed_at, merged_at, ready_at, merged_by_login, created_at, updated_at
+		) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(tenant_id, run_id, repo, pr_number) DO UPDATE SET
 			pr_url=excluded.pr_url,
 			head_sha=excluded.head_sha,
@@ -434,12 +439,13 @@ func (s *Server) associateTaskRunPR(input TaskRunPR) error {
 			opened_at=CASE WHEN excluded.opened_at != 0 AND (task_run_prs.opened_at = 0 OR ?) THEN excluded.opened_at ELSE task_run_prs.opened_at END,
 			closed_at=CASE WHEN excluded.closed_at != 0 THEN excluded.closed_at ELSE task_run_prs.closed_at END,
 			merged_at=CASE WHEN excluded.merged_at != 0 THEN excluded.merged_at ELSE task_run_prs.merged_at END,
+			ready_at=CASE WHEN excluded.ready_at != 0 AND (task_run_prs.ready_at = 0 OR ?) THEN excluded.ready_at ELSE task_run_prs.ready_at END,
 			merged_by_login=CASE WHEN excluded.merged_by_login != '' THEN excluded.merged_by_login ELSE task_run_prs.merged_by_login END,
 			updated_at=excluded.updated_at`,
 		uuid.New().String(), input.TenantID, input.RunID, input.Repo, input.PRNumber, input.URL,
 		input.HeadSHA, input.HeadBranch, agentHeadSHA, input.BaseBranch, input.State, boolInt(input.Merged),
-		openedAt, closedAt, mergedAt, input.MergedByLogin, at, at,
-		boolInt(authoritativeOpen),
+		openedAt, closedAt, mergedAt, readyAt, input.MergedByLogin, at, at,
+		boolInt(authoritativeOpen), boolInt(input.AuthoritativeReadyAt),
 	); err != nil {
 		return err
 	}
@@ -1007,9 +1013,9 @@ func materializeTaskRunTx(tx *sql.Tx, runID string) error {
 			model, llm_key, repo, primary_pr_url,
 			pr_count, open_pr_count, merged_pr_count, closed_pr_count, warning_types, failure_type,
 			human_interaction_count, started_at, queued_at, provision_started_at, agent_started_at,
-			pr_opened_at, merged_at, finished_at, timeout_at, last_event_at, materialized_at, updated_at,
+			pr_opened_at, ready_at, merged_at, finished_at, timeout_at, last_event_at, materialized_at, updated_at,
 			analytics_enabled, requires_pr, excluded_reason
-		) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+		) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(run_id) DO UPDATE SET
 			initial_attempt_id=excluded.initial_attempt_id,
 			current_attempt_id=excluded.current_attempt_id,
@@ -1044,6 +1050,7 @@ func materializeTaskRunTx(tx *sql.Tx, runID string) error {
 			provision_started_at=excluded.provision_started_at,
 			agent_started_at=excluded.agent_started_at,
 			pr_opened_at=excluded.pr_opened_at,
+			ready_at=excluded.ready_at,
 			merged_at=excluded.merged_at,
 			finished_at=excluded.finished_at,
 			timeout_at=excluded.timeout_at,
@@ -1058,7 +1065,7 @@ func materializeTaskRunTx(tx *sql.Tx, runID string) error {
 		meta.runKind, meta.integration, meta.integrationWorkspace, meta.issueID, meta.issueTitle, meta.issueCreatedAt, meta.clawID,
 		meta.model, meta.llmKey, counts.primaryRepo, primaryPRURL, counts.total, counts.open, counts.merged, counts.closed,
 		warningTypes, failureType, humanInteractions, meta.createdAt, phaseTimes.queuedAt, phaseTimes.provisionStartedAt,
-		phaseTimes.agentStartedAt, phaseTimes.prOpenedAt, counts.latestMergedAt, finishedAt, meta.timeoutAt,
+		phaseTimes.agentStartedAt, phaseTimes.prOpenedAt, counts.earliestReadyAt, counts.latestMergedAt, finishedAt, meta.timeoutAt,
 		lastEventAt, materializedAt, updatedAt, meta.analyticsEnabled, meta.requiresPR, meta.excludedReason,
 	)
 	if err != nil {
@@ -1236,11 +1243,12 @@ type taskRunPRProjection struct {
 	openedAt int64
 	closedAt int64
 	mergedAt int64
+	readyAt  int64
 }
 
 func readTaskRunPRsTx(tx *sql.Tx, runID string) ([]taskRunPRProjection, error) {
 	rows, err := tx.Query(`
-		SELECT repo, pr_url, state, merged, opened_at, closed_at, merged_at
+		SELECT repo, pr_url, state, merged, opened_at, closed_at, merged_at, ready_at
 		  FROM task_run_prs
 		 WHERE run_id=?
 		 ORDER BY opened_at, pr_number`, runID)
@@ -1252,7 +1260,7 @@ func readTaskRunPRsTx(tx *sql.Tx, runID string) ([]taskRunPRProjection, error) {
 	for rows.Next() {
 		var pr taskRunPRProjection
 		var merged int
-		if err := rows.Scan(&pr.repo, &pr.url, &pr.state, &merged, &pr.openedAt, &pr.closedAt, &pr.mergedAt); err != nil {
+		if err := rows.Scan(&pr.repo, &pr.url, &pr.state, &merged, &pr.openedAt, &pr.closedAt, &pr.mergedAt, &pr.readyAt); err != nil {
 			return nil, err
 		}
 		pr.merged = merged == 1
@@ -1297,12 +1305,16 @@ type prCountSummary struct {
 	closed           int
 	latestTerminalAt int64
 	latestMergedAt   int64
+	earliestReadyAt  int64
 	primaryRepo      string
 }
 
 func taskRunPRCounts(prs []taskRunPRProjection) prCountSummary {
 	var counts prCountSummary
 	for _, pr := range prs {
+		if pr.readyAt > 0 && (counts.earliestReadyAt == 0 || pr.readyAt < counts.earliestReadyAt) {
+			counts.earliestReadyAt = pr.readyAt
+		}
 		counts.total++
 		if counts.primaryRepo == "" && pr.repo != "" {
 			counts.primaryRepo = pr.repo

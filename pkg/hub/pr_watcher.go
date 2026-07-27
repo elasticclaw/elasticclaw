@@ -1334,10 +1334,25 @@ func (s *Server) checkPRMerged(pr clawPR, token string) bool {
 	}
 	state, _ := data["state"].(string)
 	merged, _ := data["merged"].(bool)
+	draft, _ := data["draft"].(bool)
 	mergedAtValue, _ := data["merged_at"].(string)
 	createdAtValue, _ := data["created_at"].(string)
 	mergedAt := parseRFC3339Timestamp(mergedAtValue)
 	createdAt := parseRFC3339Timestamp(createdAtValue)
+	// Detection time is only a sound approximation of ready_at while the PR is
+	// still open. On the poll that first observes a merged or closed PR, now()
+	// is already past the real merge time, which would push ready_at beyond
+	// merged_at and silently drop the run from the ready→merge average.
+	if !draft && state != "closed" && !merged {
+		if _, runID, _, ok, err := s.taskRunContextForClaw(pr.clawID); err == nil && ok {
+			var readyAt int64
+			if err := s.db.QueryRow(`SELECT ready_at FROM task_run_prs WHERE run_id=? AND repo=? AND pr_number=?`, runID, pr.repo, pr.prNumber).Scan(&readyAt); err == nil && readyAt == 0 {
+				if err := s.associateTaskRunPR(TaskRunPR{RunID: runID, Repo: pr.repo, PRNumber: pr.prNumber, URL: pr.prURL, State: taskRunPRStateOpen, ReadyAt: epochMillis(now())}); err != nil {
+					log.Printf("[pr-watcher] failed to detect ready_at for run %s: %v", runID, err)
+				}
+			}
+		}
+	}
 
 	log.Printf("[pr-watcher] checkPRMerged: claw=%s pr=%s state=%s merged=%v", pr.clawID[:8], pr.prURL, state, merged)
 
