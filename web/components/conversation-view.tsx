@@ -1786,7 +1786,7 @@ export function ConversationView({
           {sortedClaws.length === 0 && !loading ? (
             <div className="flex flex-col items-center justify-center h-full gap-6 px-8 text-center">
               <img
-                src={logoUrl || "/mascot.png"}
+                src={logoUrl || "/mascot.png?v=2"}
                 alt="mascot"
                 className="w-72 h-72 object-contain select-none pointer-events-none opacity-90"
                 draggable={false}

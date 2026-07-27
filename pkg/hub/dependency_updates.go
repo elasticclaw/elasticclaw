@@ -525,40 +525,50 @@ for manifest in manifests:
             had_failure = True
             continue
         listed = run_command(cwd, "go list -m -u -json all")
-        if listed.returncode == 0:
-            try:
-                apply_updates = []
-                for module in parse_go_modules(listed.stdout):
-                    update = module.get("Update") or {}
-                    name = module.get("Path", "")
-                    if not update:
-                        continue
-                    from_version = module.get("Version", "")
-                    to_version = update.get("Version", "")
-                    kind = update_type(from_version, to_version)
-                    if not allowed(name):
-                        update_record("go", name, from_version, to_version, kind, False, skipped_reason="filtered by allow/ignore")
-                        continue
-                    if kind == "major" and not CONFIG.get("include_major"):
-                        update_record("go", name, from_version, to_version, kind, False, skipped_reason="major updates disabled")
-                        continue
-                    update_record("go", name, from_version, to_version, kind, True)
-                    apply_updates.append(f"{name}@{to_version}")
-                # Apply Go updates in a single command. Go can occasionally hit an internal
-                # race where its cached view of go.mod diverges from disk before the final
-                # write, causing "existing contents have changed since last read". A single
-                # retry re-reads go.mod fresh and lets the update recover without failing
-                # the whole step.
-                if apply_updates:
-                    update_args = " ".join(shlex.quote(u) for u in apply_updates)
-                    run_command_with_retry(cwd, "go get " + update_args)
-                # Always tidy after applying updates so that failures still leave
-                # go.mod/go.sum in a consistent state.
-                if apply_updates:
-                    run_command(cwd, "go mod tidy")
-            except Exception as exc:
-                result["commands"].append({"command": "parse go list output", "cwd": rel(cwd), "exit_code": 1, "stderr": str(exc)})
-                had_failure = True
+        # Even if go list exits non-zero (e.g. because of invalid placeholder versions
+        # behind replace directives), stdout may still contain valid JSON for usable
+        # modules. Try to parse it and apply whatever we can.
+        try:
+            apply_updates = []
+            for module in parse_go_modules(listed.stdout):
+                name = module.get("Path", "")
+                # Skip the main module, modules pinned by replace directives, and
+                # transitive-only dependencies. Only direct dependencies can be safely
+                # updated by go get; replaced modules would conflict with the directive.
+                if module.get("Main") or module.get("Replace") or module.get("Indirect"):
+                    continue
+                update = module.get("Update") or {}
+                if not update:
+                    continue
+                from_version = module.get("Version", "")
+                to_version = update.get("Version", "")
+                # Skip placeholder/invalid versions that appear behind replace directives
+                # or in broken module graphs (e.g. v0.0.0).
+                if to_version.startswith("v0.0.0"):
+                    update_record("go", name, from_version, to_version, "unknown", False, skipped_reason="invalid/placeholder version")
+                    continue
+                kind = update_type(from_version, to_version)
+                if not allowed(name):
+                    update_record("go", name, from_version, to_version, kind, False, skipped_reason="filtered by allow/ignore")
+                    continue
+                if kind == "major" and not CONFIG.get("include_major"):
+                    update_record("go", name, from_version, to_version, kind, False, skipped_reason="major updates disabled")
+                    continue
+                update_record("go", name, from_version, to_version, kind, True)
+                apply_updates.append(f"{name}@{to_version}")
+            # Apply each Go update individually. Large batched commands can hit
+            # Go-internal go.mod races and version conflicts between unrelated
+            # modules. Smaller commands isolate failures and let successful updates
+            # remain applied; a single retry handles transient write-conflicts.
+            for update in apply_updates:
+                run_command_with_retry(cwd, "go get " + shlex.quote(update))
+            # Always tidy after applying updates so that partial failures still leave
+            # go.mod/go.sum in a consistent state.
+            if apply_updates:
+                run_command(cwd, "go mod tidy")
+        except Exception as exc:
+            result["commands"].append({"command": "parse go list output", "cwd": rel(cwd), "exit_code": 1, "stderr": str(exc)})
+            had_failure = True
     elif manifest["ecosystem"] == "npm":
         if shutil.which("npm") is None:
             result["commands"].append({"command": "npm", "cwd": rel(cwd), "exit_code": 127, "stderr": "npm executable not found"})

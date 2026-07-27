@@ -158,7 +158,7 @@ exit 0
 	}
 }
 
-func TestDependencyUpdatesBatchesGoGet(t *testing.T) {
+func TestDependencyUpdatesGoGetOneAtATime(t *testing.T) {
 	root := t.TempDir()
 	bin := filepath.Join(root, "bin")
 	if err := os.MkdirAll(bin, 0o755); err != nil {
@@ -166,18 +166,23 @@ func TestDependencyUpdatesBatchesGoGet(t *testing.T) {
 	}
 	writeExecutable(t, bin, "go", `#!/usr/bin/env bash
 set -e
+ROOT=$(dirname "$0")/..
 if [ "$*" = "list -m -u -json all" ]; then
   printf '%s\n' '{"Path":"example.com/root","Version":"v1.0.0","Update":{"Version":"v1.1.0"}}'
   printf '%s\n' '{"Path":"example.com/other","Version":"v1.0.0","Update":{"Version":"v1.1.0"}}'
   exit 0
 fi
 if [ "$1" = "get" ]; then
-  if [[ "$*" != *"example.com/root@v1.1.0"* || "$*" != *"example.com/other@v1.1.0"* ]]; then
-    echo "expected batched go get with both modules, got: $*" >&2
-    exit 1
-  fi
-  echo changed >> go.sum
-  exit 0
+  case "$2" in
+    example.com/root@v1.1.0|example.com/other@v1.1.0)
+      echo changed >> go.sum
+      exit 0
+      ;;
+    *)
+      echo "unexpected go get target: $2" >&2
+      exit 1
+      ;;
+  esac
 fi
 if [ "$1 $2" = "mod tidy" ]; then
   exit 0
@@ -228,11 +233,74 @@ exit 0
 			getAttempts++
 		}
 	}
-	if getAttempts != 1 {
-		t.Fatalf("go get commands = %d, want 1 batched command", getAttempts)
+	if getAttempts != 2 {
+		t.Fatalf("go get commands = %d, want 2 one-at-a-time commands", getAttempts)
 	}
 	assertUpdateStatus(t, parsed, "go", "example.com/root", true, "")
 	assertUpdateStatus(t, parsed, "go", "example.com/other", true, "")
+}
+
+func TestDependencyUpdatesSkipsReplacedIndirectAndInvalidVersions(t *testing.T) {
+	root := t.TempDir()
+	bin := filepath.Join(root, "bin")
+	if err := os.MkdirAll(bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeExecutable(t, bin, "go", `#!/usr/bin/env bash
+set -e
+if [ "$*" = "list -m -u -json all" ]; then
+  printf '%s\n' '{"Path":"example.com/root","Version":"v1.0.0","Update":{"Version":"v1.1.0"}}'
+  printf '%s\n' '{"Path":"example.com/replaced","Version":"v0.0.0","Update":{"Version":"v1.0.0"},"Replace":{"Path":"example.com/replaced","Version":"v0.0.0"}}'
+  printf '%s\n' '{"Path":"example.com/indirect","Version":"v1.0.0","Update":{"Version":"v1.1.0"},"Indirect":true}'
+  printf '%s\n' '{"Path":"example.com/invalid","Version":"v0.0.0","Update":{"Version":"v0.0.0"}}'
+  exit 0
+fi
+if [ "$1" = "get" ]; then
+  if [ "$2" != "example.com/root@v1.1.0" ]; then
+    echo "unexpected go get target: $2" >&2
+    exit 1
+  fi
+  echo changed >> go.sum
+  exit 0
+fi
+if [ "$1 $2" = "mod tidy" ]; then
+  exit 0
+fi
+exit 0
+`)
+	writeExecutable(t, bin, "npm", `#!/usr/bin/env bash
+if [ "$1 $2" = "outdated --json" ]; then
+  printf '%s\n' '{}'
+  exit 1
+fi
+if [ "$1 $2" = "update --package-lock-only" ]; then
+  exit 0
+fi
+exit 0
+`)
+	writeFile(t, root, "go.mod", "module example.com/root\n")
+	writeFile(t, root, "go.sum", "")
+
+	command, err := buildDependencyUpdatesCommand(pipeline.DependencyUpdatesAction{Enabled: true})
+	if err != nil {
+		t.Fatalf("build command: %v", err)
+	}
+	cmd := osexec.Command("bash", "-c", command)
+	cmd.Dir = root
+	cmd.Env = testEnvWithPath(bin)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("dependency update command failed: %v\n%s", err, out)
+	}
+
+	parsed, ok := parsePipelineOutputJSON(string(out))
+	if !ok {
+		t.Fatalf("command did not emit JSON:\n%s", out)
+	}
+	assertUpdateStatus(t, parsed, "go", "example.com/root", true, "")
+	assertUpdateStatus(t, parsed, "go", "example.com/invalid", false, "invalid/placeholder version")
+	// Replaced and indirect modules are silently skipped and should not appear
+	// in the update records at all, to avoid noisy reports for unpinned deps.
 }
 
 func TestDependencyUpdatesRetriesGoGetFailure(t *testing.T) {
