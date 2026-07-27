@@ -245,6 +245,8 @@ export interface TaskRunSummary {
   provisionStartedAt: number
   agentStartedAt: number
   prOpenedAt: number
+  readyAt: number
+  readyToMergeMs: number
   mergedAt: number
   finishedAt: number
   timeoutAt: number

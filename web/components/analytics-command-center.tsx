@@ -144,7 +144,7 @@ export function AnalyticsCommandCenter({ workspaceScope }: { workspaceScope?: st
     }
 
     return nextFilters
-  }, [params, paramsKey, workspaceScope])
+  }, [params, workspaceScope])
   const [summary, setSummary] = useState<TaskRunAnalyticsSummary>()
   const [costs, setCosts] = useState<CostOverview>()
   const [yearCosts, setYearCosts] = useState<CostOverview>()
@@ -174,17 +174,16 @@ export function AnalyticsCommandCenter({ workspaceScope }: { workspaceScope?: st
   // drops the selected run off the current page (e.g. a new run pushes it
   // past the page size) doesn't unmount the open drawer out from under the
   // user. The cache is only trusted while selectedRunId hasn't changed.
-  const selectedRunCache = useRef<{ runId: string; run: TaskRunSummary } | null>(null)
-  const selectedRun = useMemo(() => {
-    if (!selectedRunId) return null
-    const found = runs.find((run) => run.runId === selectedRunId) ?? null
-    if (found) {
-      selectedRunCache.current = { runId: selectedRunId, run: found }
-      return found
-    }
-    if (selectedRunCache.current?.runId === selectedRunId) return selectedRunCache.current.run
-    return null
-  }, [runs, selectedRunId])
+  // Held in state and adjusted during render (React's "adjusting state when
+  // props change" pattern) so no ref is read or written while rendering.
+  const [selectedRunCache, setSelectedRunCache] = useState<{ runId: string; run: TaskRunSummary } | null>(null)
+  const foundRun = selectedRunId ? runs.find((run) => run.runId === selectedRunId) ?? null : null
+  if (selectedRunId && foundRun && (selectedRunCache?.runId !== selectedRunId || selectedRunCache.run !== foundRun)) {
+    setSelectedRunCache({ runId: selectedRunId, run: foundRun })
+  }
+  const selectedRun = selectedRunId
+    ? foundRun ?? (selectedRunCache?.runId === selectedRunId ? selectedRunCache.run : null)
+    : null
 
   const setFilters = useCallback(
     (updates: Record<string, string | undefined>) => {
@@ -291,8 +290,10 @@ export function AnalyticsCommandCenter({ workspaceScope }: { workspaceScope?: st
   )
 
   useEffect(() => {
-    setCursorStack([undefined])
-    queueMicrotask(() => void load())
+    queueMicrotask(() => {
+      setCursorStack([undefined])
+      void load()
+    })
     return () => {
       loadAbortController.current?.abort()
     }
@@ -432,8 +433,8 @@ export function AnalyticsCommandCenter({ workspaceScope }: { workspaceScope?: st
               change={calculateDelta(stats?.ticketToPrMs.avgMs, stats?.prior?.ticketToPrMs.avgMs)}
             />
             <Kpi
-              label="Avg PR to merge"
-              title="Average time from the PR being opened to it being merged."
+              label="Avg ready→merge"
+              title="Average business-hours time (your timezone) from ready-for-review to merge."
               value={formatDuration(stats?.prOpenToMergeMs.avgMs)}
               change={calculateDelta(stats?.prOpenToMergeMs.avgMs, stats?.prior?.prOpenToMergeMs.avgMs)}
             />
