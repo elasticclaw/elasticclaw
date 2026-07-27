@@ -99,6 +99,10 @@ func cleanStringList(values []string) []string {
 	return result
 }
 
+// dependencyUpdatesConfigured reports whether the dependency update stage is
+// actually configured to do work. ContinueOnError is intentionally excluded:
+// the parser already sets Enabled when the dependency_updates block is present,
+// and ContinueOnError only controls whether the pipeline continues after a failure.
 func dependencyUpdatesConfigured(action pipeline.DependencyUpdatesAction) bool {
 	return action.Enabled ||
 		len(action.Ecosystems) > 0 ||
@@ -111,8 +115,7 @@ func dependencyUpdatesConfigured(action pipeline.DependencyUpdatesAction) bool {
 		len(action.Allow) > 0 ||
 		len(action.Ignore) > 0 ||
 		strings.TrimSpace(action.Output) != "" ||
-		strings.TrimSpace(action.Timeout) != "" ||
-		action.ContinueOnError
+		strings.TrimSpace(action.Timeout) != ""
 }
 
 func discoverDependencyUpdateManifests(root string, cfg dependencyUpdatesConfig) ([]dependencyUpdateManifest, error) {
@@ -241,7 +244,7 @@ func buildDependencyUpdatesCommand(action pipeline.DependencyUpdatesAction) (str
 }
 
 func (s *Server) executeDependencyUpdatesAction(clawID, stageID string, action pipeline.DependencyUpdatesAction) (*pipelineRunResult, error) {
-	command, err := s.dependencyUpdatesCommandForClaw(clawID, action)
+	command, err := buildDependencyUpdatesCommand(action)
 	if err != nil {
 		return nil, err
 	}
@@ -256,31 +259,83 @@ func (s *Server) executeDependencyUpdatesAction(clawID, stageID string, action p
 	return result, err
 }
 
-func (s *Server) dependencyUpdatesCommandForClaw(clawID string, action pipeline.DependencyUpdatesAction) (string, error) {
-	command, err := buildDependencyUpdatesCommand(action)
-	if err != nil {
-		return "", err
+// formatDependencyUpdateFailure extracts a concise, actionable failure reason
+// from the dependency update command output. The dependency update script emits
+// JSON; when it fails, surfacing the specific command(s) that failed is far more
+// useful than a raw blob of stdout/stderr that may be dominated by nix shellHook
+// banners or toolchain download noise.
+func formatDependencyUpdateFailure(result *pipelineRunResult) string {
+	if result == nil {
+		return "Dependency update step failed"
 	}
-	useNix, err := s.clawUsesNix(clawID)
-	if err != nil {
-		return "", err
+	combined := strings.TrimSpace(result.Stdout + "\n" + result.Stderr)
+	if combined == "" {
+		return "Dependency update step failed (no output)"
 	}
-	return wrapDependencyUpdatesCommand(command, useNix), nil
+
+	var output struct {
+		Commands []struct {
+			Command  string `json:"command"`
+			Cwd      string `json:"cwd"`
+			ExitCode int    `json:"exit_code"`
+			Stderr   string `json:"stderr"`
+			Stdout   string `json:"stdout"`
+			Failed   *bool  `json:"failed,omitempty"`
+		} `json:"commands"`
+	}
+	// The script may print non-JSON (e.g. shellHook banners) before the JSON.
+	// Try to parse the last JSON object in the output, which is the result document.
+	// The object is not guaranteed to be on a single line, so scan by matching
+	// braces rather than splitting on newlines.
+	if doc := lastJSONObject(combined); doc != nil {
+		_ = json.Unmarshal(doc, &output)
+	}
+
+	var parts []string
+	for _, cmd := range output.Commands {
+		isFailed := cmd.ExitCode != 0
+		if cmd.Failed != nil {
+			isFailed = *cmd.Failed
+		}
+		if !isFailed {
+			continue
+		}
+		detail := cmd.Stderr
+		if detail == "" {
+			detail = cmd.Stdout
+		}
+		detail = strings.TrimSpace(detail)
+		if detail == "" {
+			detail = "exit code " + fmt.Sprintf("%d", cmd.ExitCode)
+		} else if len(detail) > 500 {
+			detail = detail[:500] + "..."
+		}
+		parts = append(parts, fmt.Sprintf("%s (cwd=%s): %s", cmd.Command, cmd.Cwd, detail))
+	}
+	if len(parts) > 0 {
+		return "Dependency update step failed: " + strings.Join(parts, "; ")
+	}
+	// Fallback to raw output if we couldn't parse a structured reason.
+	if len(combined) > 2000 {
+		return "Dependency update step failed: " + combined[:2000] + "..."
+	}
+	return "Dependency update step failed: " + combined
 }
 
-func (s *Server) clawUsesNix(clawID string) (bool, error) {
-	var nixEnabled int
-	if err := s.db.QueryRow(`SELECT nix FROM claws WHERE id=?`, clawID).Scan(&nixEnabled); err != nil {
-		return false, fmt.Errorf("load agent nix setting: %w", err)
+// lastJSONObject returns the last valid JSON object in s, or nil if none is found.
+// It is used to extract the dependency update result document from output that may
+// contain non-JSON banners or log lines before or after the JSON.
+func lastJSONObject(s string) []byte {
+	for close := strings.LastIndex(s, "}"); close >= 0; close = strings.LastIndex(s[:close], "}") {
+		for open := strings.LastIndex(s[:close], "{"); open >= 0; open = strings.LastIndex(s[:open], "{") {
+			candidate := s[open : close+1]
+			var v any
+			if json.Unmarshal([]byte(candidate), &v) == nil {
+				return []byte(candidate)
+			}
+		}
 	}
-	return nixEnabled != 0, nil
-}
-
-func wrapDependencyUpdatesCommand(command string, useNix bool) string {
-	if !useNix {
-		return command
-	}
-	return "nix develop --accept-flake-config -c bash -lc " + shellQuote(command)
+	return nil
 }
 
 const dependencyUpdatesPythonScript = `import base64
@@ -361,18 +416,27 @@ def update_type(old, new):
         return "patch"
     return "unknown"
 
-def run_command(cwd, command, allowed_exit_codes=(0,)):
+def run_command(cwd, command, allowed_exit_codes=(0,), record_failure=True):
     global had_failure
     proc = subprocess.run(command, cwd=str(cwd), shell=True, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    failed = proc.returncode not in allowed_exit_codes and record_failure
+    if failed:
+        had_failure = True
     result["commands"].append({
         "command": command,
         "cwd": rel(cwd),
         "exit_code": proc.returncode,
-        "stdout": proc.stdout[-4000:],
-        "stderr": proc.stderr[-4000:],
+        "stdout": proc.stdout[-8000:],
+        "stderr": proc.stderr[-8000:],
+        "failed": failed,
     })
-    if proc.returncode not in allowed_exit_codes:
-        had_failure = True
+    return proc
+
+def run_command_with_retry(cwd, command, allowed_exit_codes=(0,), max_attempts=2):
+    for attempt in range(1, max_attempts + 1):
+        proc = run_command(cwd, command, allowed_exit_codes, record_failure=(attempt == max_attempts))
+        if proc.returncode in allowed_exit_codes:
+            return proc
     return proc
 
 def discover():
@@ -454,37 +518,57 @@ before = file_snapshot(collect_files(manifests))
 for manifest in manifests:
     manifest_path = ROOT / manifest["path"]
     cwd = manifest_path.parent
+
     if manifest["ecosystem"] == "go":
         if shutil.which("go") is None:
             result["commands"].append({"command": "go", "cwd": rel(cwd), "exit_code": 127, "stderr": "go executable not found"})
             had_failure = True
             continue
         listed = run_command(cwd, "go list -m -u -json all")
-        if listed.returncode == 0:
-            try:
-                apply_updates = []
-                for module in parse_go_modules(listed.stdout):
-                    update = module.get("Update") or {}
-                    name = module.get("Path", "")
-                    if not update:
-                        continue
-                    from_version = module.get("Version", "")
-                    to_version = update.get("Version", "")
-                    kind = update_type(from_version, to_version)
-                    if not allowed(name):
-                        update_record("go", name, from_version, to_version, kind, False, skipped_reason="filtered by allow/ignore")
-                        continue
-                    if kind == "major" and not CONFIG.get("include_major"):
-                        update_record("go", name, from_version, to_version, kind, False, skipped_reason="major updates disabled")
-                        continue
-                    update_record("go", name, from_version, to_version, kind, True)
-                    apply_updates.append(f"{name}@{to_version}")
-                if apply_updates:
-                    run_command(cwd, "go get " + " ".join(shlex.quote(value) for value in apply_updates))
-                    run_command(cwd, "go mod tidy")
-            except Exception as exc:
-                result["commands"].append({"command": "parse go list output", "cwd": rel(cwd), "exit_code": 1, "stderr": str(exc)})
-                had_failure = True
+        # Even if go list exits non-zero (e.g. because of invalid placeholder versions
+        # behind replace directives), stdout may still contain valid JSON for usable
+        # modules. Try to parse it and apply whatever we can.
+        try:
+            apply_updates = []
+            for module in parse_go_modules(listed.stdout):
+                name = module.get("Path", "")
+                # Skip the main module, modules pinned by replace directives, and
+                # transitive-only dependencies. Only direct dependencies can be safely
+                # updated by go get; replaced modules would conflict with the directive.
+                if module.get("Main") or module.get("Replace") or module.get("Indirect"):
+                    continue
+                update = module.get("Update") or {}
+                if not update:
+                    continue
+                from_version = module.get("Version", "")
+                to_version = update.get("Version", "")
+                # Skip placeholder/invalid versions that appear behind replace directives
+                # or in broken module graphs (e.g. v0.0.0).
+                if to_version.startswith("v0.0.0"):
+                    update_record("go", name, from_version, to_version, "unknown", False, skipped_reason="invalid/placeholder version")
+                    continue
+                kind = update_type(from_version, to_version)
+                if not allowed(name):
+                    update_record("go", name, from_version, to_version, kind, False, skipped_reason="filtered by allow/ignore")
+                    continue
+                if kind == "major" and not CONFIG.get("include_major"):
+                    update_record("go", name, from_version, to_version, kind, False, skipped_reason="major updates disabled")
+                    continue
+                update_record("go", name, from_version, to_version, kind, True)
+                apply_updates.append(f"{name}@{to_version}")
+            # Apply each Go update individually. Large batched commands can hit
+            # Go-internal go.mod races and version conflicts between unrelated
+            # modules. Smaller commands isolate failures and let successful updates
+            # remain applied; a single retry handles transient write-conflicts.
+            for update in apply_updates:
+                run_command_with_retry(cwd, "go get " + shlex.quote(update))
+            # Always tidy after applying updates so that partial failures still leave
+            # go.mod/go.sum in a consistent state.
+            if apply_updates:
+                run_command(cwd, "go mod tidy")
+        except Exception as exc:
+            result["commands"].append({"command": "parse go list output", "cwd": rel(cwd), "exit_code": 1, "stderr": str(exc)})
+            had_failure = True
     elif manifest["ecosystem"] == "npm":
         if shutil.which("npm") is None:
             result["commands"].append({"command": "npm", "cwd": rel(cwd), "exit_code": 127, "stderr": "npm executable not found"})
