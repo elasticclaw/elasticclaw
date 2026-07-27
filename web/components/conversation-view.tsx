@@ -39,6 +39,7 @@ import { BootstrapProgress } from "@/components/bootstrap-progress"
 import { ClawTitle } from "@/components/claw-title"
 import { isTerminalAssistantMessage } from "@/lib/messages"
 import { DependencyDowntimeBanner } from "@/components/dependency-downtime-banner"
+import type { TypewriterState } from "@/hooks/use-typewriter"
 
 const XTerminal = dynamic(
   () => import("@/components/terminal").then((m) => m.XTerminal),
@@ -53,6 +54,7 @@ interface ConversationViewProps {
   downtimeDependencies: DependencyStatus[]
   messages: Message[]
   allMessages: Record<string, Message[]>
+  streamingBuffers: Record<string, TypewriterState>
   onSendMessage: (content: string) => void
   onSendMessageToClaw: (clawId: string, content: string) => void
   onKill: () => void
@@ -63,6 +65,115 @@ interface ConversationViewProps {
 }
 
 const FOLLOW_LATEST_THRESHOLD_PX = 24
+const BOARD_CARD_MESSAGE_WINDOW = 50
+const EMPTY_MESSAGES: Message[] = []
+const noopClawAction = (_clawId: string) => {}
+const noopClawMessageAction = (_clawId: string, _content: string) => {}
+
+let activityNow = Date.now()
+// Browser timer handle (window.setInterval returns a number, not a Node Timeout)
+let activityTimer: number | null = null
+const activityListeners = new Set<() => void>()
+
+function useActivityNow(active: boolean): number {
+  const [now, setNow] = useState(activityNow)
+  useEffect(() => {
+    if (!active) return
+    const listener = () => setNow(activityNow)
+    activityListeners.add(listener)
+    if (!activityTimer) {
+      activityTimer = window.setInterval(() => {
+        activityNow = Date.now()
+        activityListeners.forEach((notify) => notify())
+      }, 1_000)
+    }
+    listener()
+    return () => {
+      activityListeners.delete(listener)
+      if (activityListeners.size === 0 && activityTimer) {
+        window.clearInterval(activityTimer)
+        activityTimer = null
+      }
+    }
+  }, [active])
+  return now
+}
+
+// Renders the live typewriter buffer for one claw. Kept as its own component so the
+// rAF tick only re-renders this subtree instead of the whole card/chat message list.
+// The partial text is plain text; the finalized WS message re-renders it as markdown.
+// Styling mirrors the card message row ("card") and MessageBubble ("chat") so the
+// hand-off to the finalized message is invisible.
+function StreamingMessage({
+  state,
+  variant,
+  clawName,
+  clawColor,
+}: {
+  state: TypewriterState
+  variant: "card" | "chat"
+  clawName: string
+  clawColor?: string
+}) {
+  // Streaming messages have no server timestamp yet; freeze the start time so the
+  // header does not change while the typewriter drains.
+  const [startedAt] = useState(() => new Date())
+
+  if (!state.hadChunks) {
+    return variant === "card" ? (
+      <div className="flex gap-1 py-2 pl-2">
+        <span className="size-1.5 rounded-full bg-muted-foreground/50 animate-bounce [animation-delay:0ms]" />
+        <span className="size-1.5 rounded-full bg-muted-foreground/50 animate-bounce [animation-delay:150ms]" />
+        <span className="size-1.5 rounded-full bg-muted-foreground/50 animate-bounce [animation-delay:300ms]" />
+      </div>
+    ) : (
+      <div className="flex justify-start">
+        <div className="bg-secondary rounded-lg px-4 py-3">
+          <div className="flex items-center gap-1.5">
+            <span className="size-1.5 rounded-full bg-muted-foreground/60 animate-bounce [animation-delay:0ms]" />
+            <span className="size-1.5 rounded-full bg-muted-foreground/60 animate-bounce [animation-delay:150ms]" />
+            <span className="size-1.5 rounded-full bg-muted-foreground/60 animate-bounce [animation-delay:300ms]" />
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  if (!state.text) return null
+
+  if (variant === "card") {
+    return (
+      <div className="text-xs p-2 rounded bg-secondary mr-4">
+        <div className="flex items-center gap-1 mb-0.5">
+          <span className="font-medium text-foreground/70">{clawName}</span>
+          <span className="text-muted-foreground" suppressHydrationWarning>
+            {formatTimestamp(startedAt)}
+          </span>
+        </div>
+        <p className="text-xs whitespace-pre-wrap text-foreground">{state.text}</p>
+      </div>
+    )
+  }
+
+  return (
+    <div className="flex w-full justify-start">
+      <div
+        className={cn(
+          "w-[70%] min-w-0 rounded-lg px-4 py-3",
+          (clawColor && COLOR_CLASSES[clawColor]?.bubble) || "bg-secondary"
+        )}
+      >
+        <div className="flex items-center gap-2 mb-1">
+          <span className="text-xs font-medium text-foreground">{clawName}</span>
+          <span className="text-xs text-muted-foreground" suppressHydrationWarning>
+            {formatTimestamp(startedAt)}
+          </span>
+        </div>
+        <p className="text-sm whitespace-pre-wrap text-foreground">{state.text}</p>
+      </div>
+    </div>
+  )
+}
 
 function formatUptime(seconds: number): string {
   if (seconds === 0) return "—"
@@ -285,9 +396,10 @@ function ClawCardBack({ claw }: { claw: Claw }) {
   )
 }
 
-function ClawBoardCard({ 
+const ClawBoardCard = memo(function ClawBoardCard({
   claw, 
   messages,
+  streamingBuffer,
   onClick,
   onSendMessage,
   onKill,
@@ -295,9 +407,10 @@ function ClawBoardCard({
 }: { 
   claw: Claw
   messages: Message[]
-  onClick: () => void
-  onSendMessage: (content: string) => void
-  onKill: () => void
+  streamingBuffer?: TypewriterState
+  onClick: (clawId: string) => void
+  onSendMessage: (clawId: string, content: string) => void
+  onKill: (clawId: string) => void
   dragHandleProps?: React.HTMLAttributes<HTMLElement>
 }) {
   const [input, setInput] = useState("")
@@ -312,9 +425,11 @@ function ClawBoardCard({
   const cardFollowingLatest = useRef(true)
   const [isCardFollowingLatest, setIsCardFollowingLatest] = useState(true)
   const [expandedActivityGroups, setExpandedActivityGroups] = useState<Record<string, boolean>>({})
-  const conversationItems = useMemo(() => compactActivityRuns(messages), [messages])
-  const latestActivity = useMemo(() => latestActivityMessage(messages), [messages])
-  const [activityNow, setActivityNow] = useState(() => Date.now())
+  const visibleMessages = useMemo(() => messages.slice(-BOARD_CARD_MESSAGE_WINDOW), [messages])
+  const conversationItems = useMemo(() => compactActivityRuns(visibleMessages), [visibleMessages])
+  const latestActivity = useMemo(() => latestActivityMessage(visibleMessages), [visibleMessages])
+  const activityNow = useActivityNow(Boolean(latestActivity))
+  const isStreaming = claw.isStreaming || Boolean(streamingBuffer?.hadChunks && streamingBuffer.text)
 
   const {
     attachments,
@@ -337,13 +452,6 @@ function ClawBoardCard({
   }, [])
 
   useEffect(() => {
-    if (!latestActivity) return
-    setActivityNow(Date.now())
-    const timer = window.setInterval(() => setActivityNow(Date.now()), 1_000)
-    return () => window.clearInterval(timer)
-  }, [latestActivity])
-
-  useEffect(() => {
     if (!cardFollowingLatest.current) return
     const el = msgScrollRef.current
     if (!el) return
@@ -355,6 +463,14 @@ function ClawBoardCard({
     const timers = [0, 50, 150].map((delay) => window.setTimeout(scrollToLatest, delay))
     return () => timers.forEach(window.clearTimeout)
   }, [messages])
+
+  // The streaming text lives outside `messages`, so follow it separately. It grows on
+  // every typewriter frame and needs no staged retries — its height is already settled.
+  useEffect(() => {
+    if (!cardFollowingLatest.current) return
+    const el = msgScrollRef.current
+    if (el) el.scrollTop = el.scrollHeight
+  }, [streamingBuffer?.text])
 
   const handleCardScroll = useCallback(() => {
     const el = msgScrollRef.current
@@ -378,7 +494,7 @@ function ClawBoardCard({
     const footer = buildAttachmentsFooter(attachments)
     const trimmed = input.trim()
     if (!trimmed && !footer) return
-    onSendMessage(trimmed + footer)
+    onSendMessage(claw.id, trimmed + footer)
     setInput("")
     clearAttachments()
     scrollCardToLatest()
@@ -426,7 +542,7 @@ function ClawBoardCard({
               <div className="text-xs font-medium text-foreground">Drop files</div>
             </div>
           )}
-          {claw.isStreaming && (
+          {isStreaming && (
             <div className="absolute left-0 top-0 bottom-0 w-1 bg-green-500 rounded-l-lg z-10" />
           )}
           {claw.status === "provisioning" && (
@@ -453,7 +569,7 @@ function ClawBoardCard({
               >
                 <GripVertical className="size-3.5" />
               </span>
-              <StatusDot status={claw.status} isStreaming={claw.isStreaming} />
+              <StatusDot status={claw.status} isStreaming={isStreaming} />
               {claw.githubIssueUrl ? (
                 <>
                   <ClawTitle
@@ -464,7 +580,7 @@ function ClawBoardCard({
                   />
                   {!isPending && (
                     <button
-                      onClick={onClick}
+                      onClick={() => onClick(claw.id)}
                       className="p-1 rounded hover:bg-accent transition-colors"
                       title="Open conversation"
                     >
@@ -474,7 +590,7 @@ function ClawBoardCard({
                 </>
               ) : (
                 <button
-                  onClick={isPending ? undefined : onClick}
+                  onClick={isPending ? undefined : () => onClick(claw.id)}
                   className={cn(
                     "min-w-0 font-mono text-sm font-medium text-foreground flex-1 text-left",
                     !isPending && "hover:underline"
@@ -552,7 +668,7 @@ function ClawBoardCard({
                   )
                 }
                 const { message } = item
-                const isLatestVisibleActivity = message.role === "activity" && isLatestActivityMessage(messages, message)
+                const isLatestVisibleActivity = message.role === "activity" && latestActivity?.id === message.id
                 if (message.content === "__THINKING__") {
                   return (
                     <div key={message.id} className="flex gap-1 py-2 pl-2">
@@ -637,6 +753,9 @@ function ClawBoardCard({
                   </div>
                 )
               })
+            )}
+            {streamingBuffer && (
+              <StreamingMessage state={streamingBuffer} variant="card" clawName={claw.name} />
             )}
           </div>
           {!isCardFollowingLatest && (
@@ -788,7 +907,7 @@ function ClawBoardCard({
               variant="outline" 
               size="sm" 
               className="w-full"
-              onClick={onClick}
+              onClick={() => onClick(claw.id)}
             >
               Open Full View
             </Button>
@@ -810,7 +929,7 @@ function ClawBoardCard({
         </div>
       </div>
     </div>
-    <KillConfirmDialog clawName={claw.name} open={confirmKill} onConfirm={() => { setConfirmKill(false); onKill() }} onCancel={() => setConfirmKill(false)} />
+    <KillConfirmDialog clawName={claw.name} open={confirmKill} onConfirm={() => { setConfirmKill(false); onKill(claw.id) }} onCancel={() => setConfirmKill(false)} />
     {/* Terminal dialog — outside perspective container to avoid stacking context clipping */}
     {claw.ssh_host && (
       <Dialog open={showTerminal} onOpenChange={setShowTerminal}>
@@ -830,21 +949,23 @@ function ClawBoardCard({
     )}
     </>
   )
-}
+})
 
 /** Sortable wrapper for ClawBoardCard */
-function SortableClawBoardCard({
+const SortableClawBoardCard = memo(function SortableClawBoardCard({
   claw,
   messages,
+  streamingBuffer,
   onClick,
   onSendMessage,
   onKill,
 }: {
   claw: Claw
   messages: Message[]
-  onClick: () => void
-  onSendMessage: (content: string) => void
-  onKill: () => void
+  streamingBuffer?: TypewriterState
+  onClick: (clawId: string) => void
+  onSendMessage: (clawId: string, content: string) => void
+  onKill: (clawId: string) => void
 }) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } =
     useSortable({ id: claw.id })
@@ -861,6 +982,7 @@ function SortableClawBoardCard({
       <ClawBoardCard
         claw={claw}
         messages={messages}
+        streamingBuffer={streamingBuffer}
         onClick={onClick}
         onSendMessage={onSendMessage}
         onKill={onKill}
@@ -868,7 +990,7 @@ function SortableClawBoardCard({
       />
     </div>
   )
-}
+})
 
 function formatTimestamp(date: Date): string {
   return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
@@ -955,10 +1077,6 @@ function latestActivityMessage(messages: Message[]): Message | null {
     return message
   }
   return null
-}
-
-function isLatestActivityMessage(messages: Message[], candidate: Message): boolean {
-  return latestActivityMessage(messages)?.id === candidate.id
 }
 
 function formatActivityAge(timestamp: Date, now: number): string {
@@ -1364,12 +1482,14 @@ const MessageBubble = memo(function MessageBubble({
 function ClawChatView({
   claw,
   messages: liveMessages,
+  streamingBuffer,
   onSendMessage,
   onKill,
   onDeselectClaw,
 }: {
   claw: Claw
   messages: Message[]
+  streamingBuffer?: TypewriterState
   onSendMessage: (content: string) => void
   onKill: () => void
   onDeselectClaw: () => void
@@ -1438,6 +1558,14 @@ function ClawChatView({
     const timers = [0, 50, 150, 400, 800].map((d) => setTimeout(run, d))
     return () => timers.forEach(clearTimeout)
   }, [messages])
+
+  // The streaming text lives outside `messages`, so follow it separately. It grows on
+  // every typewriter frame and needs no staged retries — its height is already settled.
+  useEffect(() => {
+    if (!pinnedToBottom.current) return
+    const el = scrollRef.current
+    if (el) el.scrollTop = el.scrollHeight
+  }, [streamingBuffer?.text, scrollRef])
 
   const isSlashCommand = (value: string, command: string) =>
     value === command || value.startsWith(`${command} `)
@@ -1548,6 +1676,14 @@ function ClawChatView({
                 <MessageBubble key={item.message.id} message={item.message} clawId={claw.id} clawName={claw.name} clawColor={claw.color} />
               )
             ))
+          )}
+          {streamingBuffer && (
+            <StreamingMessage
+              state={streamingBuffer}
+              variant="chat"
+              clawName={claw.name}
+              clawColor={claw.color}
+            />
           )}
           <div ref={bottomRef} className="h-4" />
         </div>
@@ -1682,6 +1818,7 @@ export function ConversationView({
   hubError = null,
   messages,
   allMessages,
+  streamingBuffers,
   onSendMessage,
   onSendMessageToClaw,
   onKill,
@@ -1693,6 +1830,9 @@ export function ConversationView({
   const boardRef = useRef<HTMLDivElement>(null)
   const [activeDragClaw, setActiveDragClaw] = useState<Claw | null>(null)
   const { logoUrl } = useBranding()
+  const handleCardClick = useCallback((clawId: string) => onSelectClaw(clawId), [onSelectClaw])
+  const handleCardSendMessage = useCallback((clawId: string, content: string) => onSendMessageToClaw(clawId, content), [onSendMessageToClaw])
+  const handleCardKill = useCallback((clawId: string) => onKillClaw(clawId), [onKillClaw])
 
   const sensors = useSensors(
     useSensor(PointerSensor, {
@@ -1832,10 +1972,11 @@ export function ConversationView({
                   <SortableClawBoardCard
                     key={c.id}
                     claw={c}
-                    messages={(allMessages && allMessages[c.id]) || []}
-                    onClick={() => onSelectClaw(c.id)}
-                    onSendMessage={(content) => onSendMessageToClaw(c.id, content)}
-                    onKill={() => onKillClaw(c.id)}
+                    messages={allMessages[c.id] ?? EMPTY_MESSAGES}
+                    streamingBuffer={streamingBuffers[c.id]}
+                    onClick={handleCardClick}
+                    onSendMessage={handleCardSendMessage}
+                    onKill={handleCardKill}
                   />
                 ))}
               </div>
@@ -1847,10 +1988,11 @@ export function ConversationView({
                 <div className="opacity-90 shadow-2xl h-full" style={{ width: 320 }}>
                   <ClawBoardCard
                     claw={activeDragClaw}
-                    messages={(allMessages && allMessages[activeDragClaw.id]) || []}
-                    onClick={() => {}}
-                    onSendMessage={() => {}}
-                    onKill={() => {}}
+                    messages={allMessages[activeDragClaw.id] ?? EMPTY_MESSAGES}
+                    streamingBuffer={streamingBuffers[activeDragClaw.id]}
+                    onClick={noopClawAction}
+                    onSendMessage={noopClawMessageAction}
+                    onKill={noopClawAction}
                   />
                 </div>
               ) : null}
@@ -1877,6 +2019,7 @@ export function ConversationView({
       key={claw.id}
       claw={claw}
       messages={messages}
+      streamingBuffer={streamingBuffers[claw.id]}
       onSendMessage={onSendMessage}
       onKill={onKill}
       onDeselectClaw={onDeselectClaw}
