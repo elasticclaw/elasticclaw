@@ -99,9 +99,32 @@ function useActivityNow(active: boolean): number {
   return now
 }
 
+// The typewriter reveals text every animation frame, but re-parsing markdown that
+// often is what made the board expensive. Sample the buffer instead: the reveal
+// still looks continuous at 8Hz, and the parse rate stays bounded.
+const STREAM_MARKDOWN_INTERVAL_MS = 125
+
+function useThrottledText(text: string): string {
+  const [sampled, setSampled] = useState(text)
+  const latest = useRef(text)
+
+  useEffect(() => {
+    latest.current = text
+  }, [text])
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      setSampled((prev) => (prev === latest.current ? prev : latest.current))
+    }, STREAM_MARKDOWN_INTERVAL_MS)
+    return () => window.clearInterval(timer)
+  }, [])
+
+  // Never lag behind a shrinking buffer (split/clear resets it to "").
+  return text.length < sampled.length ? text : sampled
+}
+
 // Renders the live typewriter buffer for one claw. Kept as its own component so the
 // rAF tick only re-renders this subtree instead of the whole card/chat message list.
-// The partial text is plain text; the finalized WS message re-renders it as markdown.
 // Styling mirrors the card message row ("card") and MessageBubble ("chat") so the
 // hand-off to the finalized message is invisible.
 function StreamingMessage({
@@ -118,6 +141,7 @@ function StreamingMessage({
   // Streaming messages have no server timestamp yet; freeze the start time so the
   // header does not change while the typewriter drains.
   const [startedAt] = useState(() => new Date())
+  const text = useThrottledText(state.text)
 
   if (!state.hadChunks) {
     return variant === "card" ? (
@@ -150,7 +174,7 @@ function StreamingMessage({
             {formatTimestamp(startedAt)}
           </span>
         </div>
-        <p className="text-xs whitespace-pre-wrap text-foreground">{state.text}</p>
+        <MarkdownContent content={text} className="text-xs text-foreground" />
       </div>
     )
   }
@@ -169,7 +193,7 @@ function StreamingMessage({
             {formatTimestamp(startedAt)}
           </span>
         </div>
-        <p className="text-sm whitespace-pre-wrap text-foreground">{state.text}</p>
+        <MarkdownContent content={text} className="text-sm text-foreground" />
       </div>
     </div>
   )
