@@ -737,6 +737,10 @@ func newTaskRunAnalyticsTestServer(t *testing.T, clawID string) (*Server, *sql.D
 }
 
 func startTaskRunForTest(t *testing.T, s *Server, clawID, keyPrefix string) (string, string) {
+	return startTaskRunWithRequiresPRForTest(t, s, clawID, keyPrefix, true)
+}
+
+func startTaskRunWithRequiresPRForTest(t *testing.T, s *Server, clawID, keyPrefix string, requiresPR bool) (string, string) {
 	t.Helper()
 	runID, attemptID, err := s.ensureTaskRunForClaw(clawID, TaskRunStart{
 		TenantID:         "test-tenant-id",
@@ -751,7 +755,7 @@ func startTaskRunForTest(t *testing.T, s *Server, clawID, keyPrefix string) (str
 		Source:           taskRunSourceFactory,
 		IssueID:          "ISSUE-" + keyPrefix,
 		AnalyticsEnabled: true,
-		RequiresPR:       true,
+		RequiresPR:       requiresPR,
 		EventKey:         keyPrefix + ":task-start",
 		Tags:             []string{"test:" + keyPrefix},
 	})
