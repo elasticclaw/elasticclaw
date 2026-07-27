@@ -39,6 +39,21 @@ export interface HubState {
 
 const ORDER_KEY = "elasticclaw_claw_order"
 
+function clawsEqual(a: Claw, b: Claw): boolean {
+  const aKeys = Object.keys(a) as Array<keyof Claw>
+  const bKeys = Object.keys(b)
+  if (aKeys.length !== bKeys.length) return false
+  return aKeys.every((key) => {
+    if (!bKeys.includes(key)) return false
+    const aValue = a[key]
+    const bValue = b[key]
+    if (Array.isArray(aValue) && Array.isArray(bValue)) {
+      return aValue.length === bValue.length && aValue.every((value, index) => value === bValue[index])
+    }
+    return aValue === bValue
+  })
+}
+
 function describeWsUrl(rawUrl: string): string {
   try {
     const url = new URL(rawUrl)
@@ -102,6 +117,8 @@ export function useHub(selectedClawId: string | null): HubState {
   const orderRef = useRef<string[]>([])
   const [messages, setMessages] = useState<Record<string, Message[]>>({})
   const messagesRef = useRef<Record<string, Message[]>>({})
+  const persistTimerRef = useRef<number | null>(null)
+  const pendingPersistRef = useRef<Record<string, Message[]> | null>(null)
   const [connected, setConnected] = useState(false)
   const {
     displayBuffers: streamingBuffers,
@@ -142,7 +159,7 @@ export function useHub(selectedClawId: string | null): HubState {
     } catch {}
   }, [])
 
-  const persistMessages = useCallback((msgs: Record<string, Message[]>) => {
+  const writePersistedMessages = useCallback((msgs: Record<string, Message[]>) => {
     try {
       const toSave: Record<string, unknown[]> = {}
       for (const [clawId, clawMsgs] of Object.entries(msgs)) {
@@ -155,6 +172,31 @@ export function useHub(selectedClawId: string | null): HubState {
       localStorage.setItem(MESSAGES_KEY, JSON.stringify(toSave))
     } catch {}
   }, [])
+  const persistMessages = useCallback((msgs: Record<string, Message[]>) => {
+    pendingPersistRef.current = msgs
+    if (persistTimerRef.current) window.clearTimeout(persistTimerRef.current)
+    persistTimerRef.current = window.setTimeout(() => {
+      persistTimerRef.current = null
+      const pending = pendingPersistRef.current
+      pendingPersistRef.current = null
+      if (pending) writePersistedMessages(pending)
+    }, 1_000)
+  }, [writePersistedMessages])
+
+  useEffect(() => {
+    const flushPersistedMessages = () => {
+      if (persistTimerRef.current) window.clearTimeout(persistTimerRef.current)
+      persistTimerRef.current = null
+      const pending = pendingPersistRef.current
+      pendingPersistRef.current = null
+      if (pending) writePersistedMessages(pending)
+    }
+    window.addEventListener("pagehide", flushPersistedMessages)
+    return () => {
+      window.removeEventListener("pagehide", flushPersistedMessages)
+      flushPersistedMessages()
+    }
+  }, [writePersistedMessages])
   const wsRef = useRef<WebSocket | null>(null)
   const reconnectTimerRef = useRef<number | null>(null)
   const reconnectAttemptRef = useRef(0)
@@ -221,21 +263,25 @@ export function useHub(selectedClawId: string | null): HubState {
       const prevMap = new Map(prev.map((c) => [c.id, c]))
       const mapped: Claw[] = apiClaws.map((ac) => {
         const existing = prevMap.get(ac.id)
-        return mapApiClaw(ac, {
+        const next = mapApiClaw(ac, {
           unreadCount: existing?.unreadCount ?? 0,
           isStreaming: existing?.isStreaming ?? false,
           pinned: pinnedRef.current[ac.id] ?? false,
           tags: existing?.tags,
           uptime: computeUptime(ac),
         })
+        return existing && clawsEqual(existing, next) ? existing : next
       })
       // Re-apply saved order
       const order = orderRef.current
-      if (order.length === 0) return mapped
+      if (order.length === 0) {
+        return mapped.length === prev.length && mapped.every((claw, index) => claw === prev[index]) ? prev : mapped
+      }
       const map = new Map(mapped.map((c) => [c.id, c]))
       const ordered = order.map((id) => map.get(id)).filter((c): c is Claw => !!c)
       const unordered = mapped.filter((c) => !order.includes(c.id))
-      return [...ordered, ...unordered]
+      const result = [...ordered, ...unordered]
+      return result.length === prev.length && result.every((claw, index) => claw === prev[index]) ? prev : result
     })
   }, [])
 

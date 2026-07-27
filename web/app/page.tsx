@@ -6,7 +6,6 @@ import { ConversationView } from "@/components/conversation-view"
 import { SetupScreen } from "@/components/setup-screen"
 import { ManualTriggerModal } from "@/components/manual-trigger-modal"
 import { useHub } from "@/hooks/use-hub"
-import type { Message } from "@/lib/types"
 import { isConfigured, type Workflow } from "@/lib/api"
 import { requestAuthToken } from "@/lib/auth-storage"
 
@@ -50,52 +49,22 @@ export default function Home() {
 
   const hub = useHub(selectedClawId)
 
-  const { claws: rawClaws, downtimeDependencies, messages, streamingBuffers, loading, hubError, reorderClaws } = hub
+  const {
+    claws: rawClaws,
+    downtimeDependencies,
+    messages,
+    streamingBuffers,
+    loading,
+    hubError,
+    reorderClaws,
+    loadMessages,
+    setUnreadCount,
+    setPinned,
+    send,
+    killClaw,
+  } = hub
 
-  // Derive isStreaming from the live typewriter buffers so it stays true
-  // while the typewriter is still draining (even after final WS message arrives)
-  const claws = useMemo(() =>
-    rawClaws.map((c) => ({
-      ...c,
-      // Show spinner while buffer exists (typewriter draining) OR while hub says streaming.
-      // But if hub already set isStreaming=false (onDrain fired), respect that even if
-      // the display buffer hasn't flushed yet.
-      isStreaming: c.isStreaming || Boolean(streamingBuffers[c.id]?.hadChunks && streamingBuffers[c.id]?.text),
-    })),
-    [rawClaws, streamingBuffers]
-  )
-
-  // Build merged messages:
-  // - no chunks yet → append a "thinking" placeholder
-  // - chunks flowing → append the partial typewriter text
-  // - done → nothing (final message already in messages)
-  const mergedMessages = useMemo((): Record<string, Message[]> => {
-    const result: Record<string, Message[]> = { ...messages }
-    for (const [clawId, state] of Object.entries(streamingBuffers)) {
-      const existing = result[clawId] || []
-      if (!state.hadChunks) {
-        // Thinking indicator
-        result[clawId] = [...existing, {
-          id: `thinking-${clawId}`,
-          role: "claw" as const,
-          content: "__THINKING__",
-          timestamp: new Date(),
-        }]
-      } else {
-        const msgs: Message[] = [...existing]
-        if (state.text) {
-          msgs.push({
-            id: `streaming-${clawId}`,
-            role: "claw" as const,
-            content: state.text,
-            timestamp: new Date(),
-          })
-        }
-        result[clawId] = msgs
-      }
-    }
-    return result
-  }, [messages, streamingBuffers])
+  const claws = rawClaws
 
   // Collect all unique tags from all claws
   const allTags = useMemo(() => {
@@ -147,19 +116,19 @@ export default function Home() {
     if (boardLoadedRef.current || claws.length === 0) return
     boardLoadedRef.current = true
     for (const c of claws) {
-      hub.loadMessages(c.id)
+      loadMessages(c.id)
     }
-  }, [claws, hub]) // re-runs when claws first populate
+  }, [claws, loadMessages]) // re-runs when claws first populate
 
   // Mark messages as read when selecting a claw + lazy load history
   const handleSelectClaw = useCallback(
     (id: string) => {
       setSelectedClawId(id)
       localStorage.setItem('elasticclaw_selected_claw', id)
-      hub.setUnreadCount(id, 0)
-      hub.loadMessages(id)
+      setUnreadCount(id, 0)
+      loadMessages(id)
     },
-    [hub]
+    [loadMessages, setUnreadCount]
   )
 
   // When in board view (no claw selected), all cards are visible — clear unread
@@ -169,16 +138,16 @@ export default function Home() {
     const withUnread = claws.filter((c) => c.unreadCount > 0)
     if (withUnread.length === 0) return
     for (const c of withUnread) {
-      hub.setUnreadCount(c.id, 0)
+      setUnreadCount(c.id, 0)
     }
-  }, [selectedClawId, claws, hub])
+  }, [selectedClawId, claws, setUnreadCount])
 
   const handleTogglePin = useCallback(
     (id: string) => {
       const claw = claws.find((c) => c.id === id)
-      if (claw) hub.setPinned(id, !claw.pinned)
+      if (claw) setPinned(id, !claw.pinned)
     },
-    [claws, hub]
+    [claws, setPinned]
   )
 
   const handleAddTagFilter = useCallback((tag: string) => {
@@ -196,34 +165,34 @@ export default function Home() {
   const handleSendMessage = useCallback(
     (content: string) => {
       if (!selectedClawId) return
-      hub.send(selectedClawId, content)
+      send(selectedClawId, content)
     },
-    [selectedClawId, hub]
+    [selectedClawId, send]
   )
 
   const handleSendMessageToClaw = useCallback(
     (clawId: string, content: string) => {
-      hub.send(clawId, content)
+      send(clawId, content)
     },
-    [hub]
+    [send]
   )
 
   const handleKill = useCallback(() => {
     if (!selectedClawId) return
-    hub.killClaw(selectedClawId)
+    killClaw(selectedClawId)
     setSelectedClawId(null)
     localStorage.removeItem('elasticclaw_selected_claw')
-  }, [selectedClawId, hub])
+  }, [selectedClawId, killClaw])
 
   const handleKillClaw = useCallback(
     (clawId: string) => {
-      hub.killClaw(clawId)
+      killClaw(clawId)
       if (selectedClawId === clawId) {
         setSelectedClawId(null)
         localStorage.removeItem('elasticclaw_selected_claw')
       }
     },
-    [selectedClawId, hub]
+    [selectedClawId, killClaw]
   )
 
   // Show loading state until we know if configured
@@ -263,8 +232,9 @@ export default function Home() {
           claw={selectedClaw}
           allClaws={claws}
           downtimeDependencies={downtimeDependencies}
-          messages={selectedClaw ? mergedMessages[selectedClaw.id] || [] : []}
-          allMessages={mergedMessages}
+          messages={selectedClaw ? messages[selectedClaw.id] || [] : []}
+          allMessages={messages}
+          streamingBuffers={streamingBuffers}
           onSendMessage={handleSendMessage}
           onSendMessageToClaw={handleSendMessageToClaw}
           onKill={handleKill}
