@@ -236,6 +236,7 @@ stages:
       dependency_updates:
         ecosystems: [go, npm]
         paths: ["."]
+        exclude_paths: [dagger]
         grouping: all
         include_major: false
         output: deps
@@ -257,6 +258,9 @@ stages:
 	}
 	if !action.ContinueOnError {
 		t.Fatal("expected continue_on_error")
+	}
+	if strings.Join(action.ExcludePaths, ",") != "dagger" {
+		t.Fatalf("exclude_paths = %v, want [dagger]", action.ExcludePaths)
 	}
 }
 

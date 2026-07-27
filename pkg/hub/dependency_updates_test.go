@@ -73,6 +73,38 @@ func TestDiscoverDependencyUpdateManifestsRejectsEscapingPath(t *testing.T) {
 	}
 }
 
+func TestDiscoverDependencyUpdateManifestsExcludesPaths(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "go.mod", "module example.com/root\n")
+	writeFile(t, root, "go.sum", "")
+	writeFile(t, root, "dagger/go.mod", "module example.com/dagger\n")
+	writeFile(t, root, "dagger/go.sum", "")
+	writeFile(t, root, "web/package.json", `{"name":"web"}`)
+	writeFile(t, root, "web/package-lock.json", `{"lockfileVersion":3}`)
+	writeFile(t, root, "legacy/package.json", `{"name":"legacy"}`)
+	writeFile(t, root, "legacy/package-lock.json", `{"lockfileVersion":3}`)
+
+	manifests, err := discoverDependencyUpdateManifests(root, dependencyUpdatesConfig{
+		Ecosystems:   []string{"go", "npm"},
+		Paths:        []string{"."},
+		ExcludePaths: []string{"dagger", "legacy/package.json"},
+	})
+	if err != nil {
+		t.Fatalf("discover manifests: %v", err)
+	}
+	got := make([]string, 0, len(manifests))
+	for _, manifest := range manifests {
+		got = append(got, manifest.Ecosystem+":"+manifest.Path+":"+strings.Join(manifest.Lockfiles, ","))
+	}
+	want := []string{
+		"go:go.mod:go.sum",
+		"npm:web/package.json:web/package-lock.json",
+	}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("manifests:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+}
+
 func TestDependencyUpdatesCommandReturnsPythonScriptDirectly(t *testing.T) {
 	command, err := buildDependencyUpdatesCommand(pipeline.DependencyUpdatesAction{Enabled: true})
 	if err != nil {
@@ -469,6 +501,92 @@ exit 0
 	assertUpdateStatus(t, parsed, "go", "example.com/major", false, "major updates disabled")
 	assertUpdateStatus(t, parsed, "npm", "risky-lib", false, "filtered by allow/ignore")
 	assertUpdateStatus(t, parsed, "npm", "major-lib", false, "major updates disabled")
+}
+
+func TestDependencyUpdatesGeneratedCommandHonorsExcludePaths(t *testing.T) {
+	root := t.TempDir()
+	bin := filepath.Join(root, "bin")
+	if err := os.MkdirAll(bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeExecutable(t, bin, "go", `#!/usr/bin/env bash
+set -e
+if [ "$*" = "list -m -u -json all" ]; then
+  printf '%s\n' '{"Path":"example.com/root","Version":"v1.0.0","Update":{"Version":"v1.1.0"}}'
+  exit 0
+fi
+if [ "$1" = "get" ]; then
+  if [ "$2" = "example.com/dagger@v1.1.0" ]; then
+    echo "go get included excluded dependency: $2" >&2
+    exit 1
+  fi
+  if [ "$2" = "example.com/root@v1.1.0" ]; then
+    echo changed >> go.sum
+    exit 0
+  fi
+  echo "unexpected go get target: $2" >&2
+  exit 1
+fi
+if [ "$1 $2" = "mod tidy" ]; then
+  exit 0
+fi
+exit 0
+`)
+	writeExecutable(t, bin, "npm", `#!/usr/bin/env bash
+if [ "$1 $2" = "outdated --json" ]; then
+  printf '%s\n' '{}'
+  exit 1
+fi
+if [ "$1 $2" = "update --package-lock-only" ]; then
+  exit 0
+fi
+exit 0
+`)
+	writeFile(t, root, "go.mod", "module example.com/root\n")
+	writeFile(t, root, "go.sum", "")
+	writeFile(t, root, "dagger/go.mod", "module example.com/dagger\n")
+	writeFile(t, root, "dagger/go.sum", "")
+
+	command, err := buildDependencyUpdatesCommand(pipeline.DependencyUpdatesAction{
+		Enabled:      true,
+		Ecosystems:   []string{"go"},
+		ExcludePaths: []string{"dagger"},
+	})
+	if err != nil {
+		t.Fatalf("build command: %v", err)
+	}
+	cmd := osexec.Command("bash", "-c", command)
+	cmd.Dir = root
+	cmd.Env = testEnvWithPath(bin)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("dependency update command failed: %v\n%s", err, out)
+	}
+
+	parsed, ok := parsePipelineOutputJSON(string(out))
+	if !ok {
+		t.Fatalf("command did not emit JSON:\n%s", out)
+	}
+	manifests, ok := parsed["manifests"].([]interface{})
+	if !ok || len(manifests) != 1 {
+		t.Fatalf("manifests = %#v, want exactly one go.mod", parsed["manifests"])
+	}
+	commands, ok := parsed["commands"].([]interface{})
+	if !ok {
+		t.Fatalf("commands = %#v, want list", parsed["commands"])
+	}
+	for _, raw := range commands {
+		c, ok := raw.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		cmdStr, _ := c["command"].(string)
+		cwd, _ := c["cwd"].(string)
+		if strings.Contains(cmdStr, "dagger") || cwd == "dagger" {
+			t.Fatalf("command touched excluded dagger path: %s (cwd=%s)", cmdStr, cwd)
+		}
+	}
+	assertUpdateStatus(t, parsed, "go", "example.com/root", true, "")
 }
 
 func assertUpdateStatus(t *testing.T, parsed map[string]interface{}, ecosystem, name string, applied bool, skippedReason string) {

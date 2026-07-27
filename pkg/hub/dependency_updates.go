@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -21,6 +22,7 @@ const (
 type dependencyUpdatesConfig struct {
 	Ecosystems       []string `json:"ecosystems"`
 	Paths            []string `json:"paths"`
+	ExcludePaths     []string `json:"exclude_paths"`
 	Grouping         string   `json:"grouping"`
 	IncludeMajor     bool     `json:"include_major"`
 	SeparateMajor    bool     `json:"separate_major"`
@@ -40,6 +42,7 @@ func normalizeDependencyUpdatesConfig(action pipeline.DependencyUpdatesAction) d
 	cfg := dependencyUpdatesConfig{
 		Ecosystems:       cleanStringList(action.Ecosystems),
 		Paths:            cleanStringList(action.Paths),
+		ExcludePaths:     cleanStringList(action.ExcludePaths),
 		Grouping:         strings.TrimSpace(action.Grouping),
 		IncludeMajor:     action.IncludeMajor,
 		SeparateMajor:    boolDefault(action.SeparateMajor, true),
@@ -107,6 +110,7 @@ func dependencyUpdatesConfigured(action pipeline.DependencyUpdatesAction) bool {
 	return action.Enabled ||
 		len(action.Ecosystems) > 0 ||
 		len(action.Paths) > 0 ||
+		len(action.ExcludePaths) > 0 ||
 		strings.TrimSpace(action.Grouping) != "" ||
 		action.IncludeMajor ||
 		action.SeparateMajor != nil ||
@@ -116,6 +120,24 @@ func dependencyUpdatesConfigured(action pipeline.DependencyUpdatesAction) bool {
 		len(action.Ignore) > 0 ||
 		strings.TrimSpace(action.Output) != "" ||
 		strings.TrimSpace(action.Timeout) != ""
+}
+
+func isExcludedPath(relPath string, patterns []string) bool {
+	for _, p := range patterns {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		if matched, _ := path.Match(p, relPath); matched {
+			return true
+		}
+		if !strings.ContainsAny(p, "*?") {
+			if relPath == p || strings.HasPrefix(relPath, p+"/") {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func discoverDependencyUpdateManifests(root string, cfg dependencyUpdatesConfig) ([]dependencyUpdateManifest, error) {
@@ -146,22 +168,28 @@ func discoverDependencyUpdateManifests(root string, cfg dependencyUpdatesConfig)
 			if err != nil {
 				return err
 			}
-			if d.IsDir() && shouldSkipDependencyUpdateDir(d.Name()) {
-				if path == base {
-					return nil
-				}
-				return filepath.SkipDir
-			}
-			if d.IsDir() {
-				return nil
-			}
-			name := d.Name()
-			dir := filepath.Dir(path)
 			relPath, err := filepath.Rel(root, path)
 			if err != nil {
 				return err
 			}
 			relPath = filepath.ToSlash(relPath)
+			if d.IsDir() {
+				if shouldSkipDependencyUpdateDir(d.Name()) {
+					if path == base {
+						return nil
+					}
+					return filepath.SkipDir
+				}
+				if isExcludedPath(relPath, cfg.ExcludePaths) {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			if isExcludedPath(relPath, cfg.ExcludePaths) {
+				return nil
+			}
+			name := d.Name()
+			dir := filepath.Dir(path)
 			switch {
 			case ecosystems["go"] && name == "go.mod":
 				lock := filepath.Join(dir, "go.sum")
@@ -377,6 +405,20 @@ def rel(path):
 def should_skip(path):
     return any(part in SKIP_DIRS for part in path.parts)
 
+def is_excluded_path(path):
+    rel = str(path)
+    patterns = CONFIG.get("exclude_paths") or []
+    for p in patterns:
+        p = str(p).strip()
+        if not p:
+            continue
+        if fnmatch.fnmatch(rel, p):
+            return True
+        if "*" not in p and "?" not in p:
+            if rel == p or rel.startswith(p + "/"):
+                return True
+    return False
+
 def allowed(name):
     allow = CONFIG.get("allow") or ["*"]
     ignore = CONFIG.get("ignore") or []
@@ -452,23 +494,33 @@ def discover():
             continue
         if base.is_file():
             base = base.parent
+        if is_excluded_path(rel(base)):
+            continue
         for current, dirs, files in os.walk(base):
             current_path = pathlib.Path(current)
-            dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
+            rel_current = rel(current_path)
+            if is_excluded_path(rel_current):
+                dirs[:] = []
+                continue
+            dirs[:] = [d for d in dirs if d not in SKIP_DIRS and not is_excluded_path(rel_current + "/" + d)]
             if should_skip(current_path.relative_to(ROOT)):
                 continue
             file_set = set(files)
             if "go" in ECOSYSTEMS and "go.mod" in file_set:
-                locks = []
-                if "go.sum" in file_set:
-                    locks.append(rel(current_path / "go.sum"))
-                manifests.append({"ecosystem": "go", "path": rel(current_path / "go.mod"), "lockfiles": locks})
+                mod_path = rel(current_path / "go.mod")
+                if not is_excluded_path(mod_path):
+                    locks = []
+                    if "go.sum" in file_set:
+                        locks.append(rel(current_path / "go.sum"))
+                    manifests.append({"ecosystem": "go", "path": mod_path, "lockfiles": locks})
             if "npm" in ECOSYSTEMS and "package.json" in file_set:
-                locks = []
-                for lock in ("package-lock.json", "npm-shrinkwrap.json"):
-                    if lock in file_set:
-                        locks.append(rel(current_path / lock))
-                manifests.append({"ecosystem": "npm", "path": rel(current_path / "package.json"), "lockfiles": locks})
+                pkg_path = rel(current_path / "package.json")
+                if not is_excluded_path(pkg_path):
+                    locks = []
+                    for lock in ("package-lock.json", "npm-shrinkwrap.json"):
+                        if lock in file_set:
+                            locks.append(rel(current_path / lock))
+                    manifests.append({"ecosystem": "npm", "path": pkg_path, "lockfiles": locks})
     manifests.sort(key=lambda item: (item["ecosystem"], item["path"]))
     return manifests
 
