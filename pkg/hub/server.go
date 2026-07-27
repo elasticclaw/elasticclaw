@@ -60,7 +60,9 @@ type Server struct {
 	users map[string]*userConn // tenant_id -> []conn (broadcast)
 	// gatewayRestartCounts retains the heartbeat counter across WebSocket reconnects.
 	gatewayRestartCounts map[string]int
-	lastTokenFailureLog  time.Time
+	// autoResumeRestartCounts records restart counts already handled per claw. Guarded by s.mu.
+	autoResumeRestartCounts map[string]int
+	lastTokenFailureLog     time.Time
 	// one-time oauth_code -> signed GitHub session token
 
 	dependencyStatus *dependencyStatusService
@@ -160,6 +162,7 @@ type clawConn struct {
 	contextWarningSent    bool            // true once the context-nearly-full warning has been injected this turn
 	awaitingResponse      bool            // true as soon as a prompt is delivered, before the first chunk/activity
 	noProgressPaused      bool            // automatic delivery is paused after repeated turns with unchanged progress
+	lastTurnFinishedAt    time.Time       // when the last streaming turn ended (for post-restart resume window)
 
 	deliveryInFlight bool // serializes DB-backed delivery writes
 
@@ -180,6 +183,13 @@ const (
 	defaultGatewayUnhealthyMax = 12
 	defaultBusyTurnMax         = 45 * time.Minute
 	defaultSilentDeathMax      = 10 * time.Minute
+)
+
+const (
+	streamingTimeoutNudge  = "[hub] Your current response has been running for over 12 minutes. Please wrap up and send your response."
+	contextNearlyFullNudge = "[hub] Context window is nearly full. Summarize your progress briefly and send [DONE] with any PR URL, or ask the user what to do next."
+	// autoResumeRecentTurnWindow includes races between a crash and turn completion.
+	autoResumeRecentTurnWindow = 5 * time.Minute
 )
 
 // initialStatus returns the claw status string to use on bridge registration.
@@ -207,6 +217,7 @@ func (cc *clawConn) finishTurnLocked() {
 	cc.streamingStartedAt = time.Time{}
 	cc.streamingTimeoutSent = false
 	cc.contextWarningSent = false
+	cc.lastTurnFinishedAt = time.Now()
 }
 
 func (s *Server) flushStreamingSegment(clawID, tenantID string, cc *clawConn) error {
@@ -262,21 +273,22 @@ func NewServer(addr, dbPath, identityDir string, hubCfg *types.HubConfig) (*Serv
 	}
 	log.Printf("Hub SSH public key:\n%s", id.PublicKey)
 	srv := &Server{
-		db:                   db,
-		addr:                 addr,
-		hubCfg:               hubCfg,
-		identity:             id,
-		artifacts:            artifacts,
-		claws:                make(map[string]*clawConn),
-		users:                make(map[string]*userConn),
-		gatewayRestartCounts: make(map[string]int),
-		dependencyStatus:     newDependencyStatusService(hubCfg),
-		fileAckWaiters:       make(map[string]chan types.FileAck),
-		fileReadWaiters:      make(map[string]chan types.FileReadResp),
-		checkpointWaiters:    make(map[string]chan error),
-		webhookDedup:         make(map[string]time.Time),
-		reaperFirstSeen:      make(map[string]time.Time),
-		nowFunc:              now,
+		db:                      db,
+		addr:                    addr,
+		hubCfg:                  hubCfg,
+		identity:                id,
+		artifacts:               artifacts,
+		claws:                   make(map[string]*clawConn),
+		users:                   make(map[string]*userConn),
+		gatewayRestartCounts:    make(map[string]int),
+		autoResumeRestartCounts: make(map[string]int),
+		dependencyStatus:        newDependencyStatusService(hubCfg),
+		fileAckWaiters:          make(map[string]chan types.FileAck),
+		fileReadWaiters:         make(map[string]chan types.FileReadResp),
+		checkpointWaiters:       make(map[string]chan error),
+		webhookDedup:            make(map[string]time.Time),
+		reaperFirstSeen:         make(map[string]time.Time),
+		nowFunc:                 now,
 	}
 	if srv.livenessEnabled() {
 		srv.reconcileOnBoot()
@@ -2214,6 +2226,14 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 
 	var noProgressPaused bool
 	_ = s.db.QueryRow(`SELECT COALESCE(no_progress_paused, 0) != 0 FROM claws WHERE id=?`, clawID).Scan(&noProgressPaused)
+	// A bridge-process restart tears down the main channel, so the old clawConn
+	// (and its lastTurnFinishedAt) is usually gone by the time the new bridge
+	// registers. Seed the post-restart resume window from the last claw
+	// response — a turn interrupted by the crash was flushed as an
+	// "[interrupted]" claw message at disconnect, so its created_at marks the
+	// turn end closely enough for autoResumeRecentTurnWindow.
+	var lastClawMsgAt time.Time
+	_ = s.db.QueryRow(`SELECT created_at FROM messages WHERE claw_id=? AND role='claw' ORDER BY created_at DESC LIMIT 1`, clawID).Scan(&lastClawMsgAt)
 	cc := &clawConn{id: clawID, tenantID: tenantID, conn: conn, gatewayReady: gatewayReadyBool(rp.GatewayReady), tags: registrationTags, lastUserMessageAt: time.Now(), lastStatusAt: time.Now(), noProgressPaused: noProgressPaused}
 	s.mu.Lock()
 	if s.gatewayRestartCounts != nil {
@@ -2223,7 +2243,11 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 		old.mu.RLock()
 		cc.statusConn = old.statusConn
 		cc.lastStatusAt = old.lastStatusAt
+		cc.lastTurnFinishedAt = old.lastTurnFinishedAt
 		old.mu.RUnlock()
+	}
+	if cc.lastTurnFinishedAt.IsZero() {
+		cc.lastTurnFinishedAt = lastClawMsgAt
 	}
 	s.claws[clawID] = cc
 	s.mu.Unlock()
@@ -2348,6 +2372,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 					var shouldWake bool
 					var shouldWarnContext bool
 					var shouldEscalateGateway bool
+					var shouldAutoResume bool
 					var prevUsage int
 					s.mu.Lock()
 					if cc, ok := s.claws[clawID]; ok {
@@ -2358,13 +2383,33 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 						if s.gatewayRestartCounts == nil {
 							s.gatewayRestartCounts = make(map[string]int)
 						}
-						lastRestartCount := s.gatewayRestartCounts[clawID]
-						// Any change signals a restart: an increase is an in-process
-						// gateway restart; a decrease means the bridge process itself
-						// was relaunched and its counter reset.
-						if hb.RestartCount != lastRestartCount {
+						lastRestartCount, restartCountSeen := s.gatewayRestartCounts[clawID]
+						// The map is in-memory only: the first heartbeat after a hub
+						// restart carries a historical restart_count, not a fresh
+						// restart. Record it as a baseline instead of treating it as
+						// a restart, or every busy claw would get a spurious
+						// "session was lost" resume after each hub deploy.
+						if !restartCountSeen {
+							s.gatewayRestartCounts[clawID] = hb.RestartCount
+						} else if hb.RestartCount != lastRestartCount {
+							// Any change signals a restart: an increase is an in-process
+							// gateway restart; a decrease means the bridge process itself
+							// was relaunched and its counter reset.
 							log.Printf("[heartbeat] %s (%s): agent process restarted (restart_count=%d)", rp.Name, clawID[:8], hb.RestartCount)
 							s.gatewayRestartCounts[clawID] = hb.RestartCount
+							if s.autoResumeRestartCounts == nil {
+								s.autoResumeRestartCounts = make(map[string]int)
+							}
+							turnOpenOrRecent := !cc.streamingStartedAt.IsZero() || cc.awaitingResponse ||
+								(!cc.lastTurnFinishedAt.IsZero() && time.Since(cc.lastTurnFinishedAt) < autoResumeRecentTurnWindow)
+							// Existence-aware lookup: a bridge relaunch resets its counter
+							// to 0, which equals the zero value of an absent map entry — a
+							// plain read would skip the resume for that first relaunch.
+							lastResumedCount, resumeRecorded := s.autoResumeRestartCounts[clawID]
+							if turnOpenOrRecent && (!resumeRecorded || lastResumedCount != hb.RestartCount) {
+								s.autoResumeRestartCounts[clawID] = hb.RestartCount
+								shouldAutoResume = true
+							}
 						}
 						cc.gatewayRestartCount = s.gatewayRestartCounts[clawID]
 						// Promote from 'starting' to 'connected' once gateway is ready.
@@ -2422,6 +2467,9 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 					}
 					s.mu.Unlock()
 					s.heartbeatWorkflowVolumeLeases(clawID)
+					if shouldAutoResume {
+						go s.enqueueRestartResume(clawID, hb.RestartCount)
+					}
 					if shouldEscalateGateway {
 						// Re-read the claw state before escalating: idle/completed claws
 						// remain connected intentionally, and bootstrapping claws are
@@ -2433,7 +2481,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 						warnCC := s.claws[clawID]
 						s.mu.RUnlock()
 						if warnCC != nil {
-							go s.injectHubMessage(ctx, warnCC, "[hub] Context window is nearly full. Summarize your progress briefly and send [DONE] with any PR URL, or ask the user what to do next.")
+							go s.sendStreamingNudge(warnCC, contextNearlyFullNudge)
 						}
 					}
 					if shouldWake {
@@ -2450,7 +2498,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 							time.Since(cc.streamingStartedAt) > 12*time.Minute {
 							cc.streamingTimeoutSent = true
 							cc.mu.Unlock()
-							go s.injectHubMessage(ctx, cc, "[hub] Your current response has been running for over 12 minutes. Please wrap up and send your response.")
+							go s.sendStreamingNudge(cc, streamingTimeoutNudge)
 						} else {
 							cc.mu.Unlock()
 						}
@@ -2506,8 +2554,6 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 						cc.mu.Lock()
 						if cc.streamingMsgID == "" {
 							cc.streamingMsgID = uuid.New().String()
-							cc.streamingTimeoutSent = false
-							cc.contextWarningSent = false
 						}
 						if cc.streamingStartedAt.IsZero() {
 							cc.streamingStartedAt = time.Now()
@@ -2553,6 +2599,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 				cc.finishTurnLocked()
 				cc.forcedFinishCount = 0
 				cc.mu.Unlock()
+				s.deleteStaleWatchdogNags(clawID)
 				// Drop empty messages — never store or broadcast
 				if strings.TrimSpace(hm.Content) == "" {
 					// Clear typing indicator first — always clear even if no queued messages
@@ -5256,6 +5303,7 @@ func (s *Server) checkClawStatus() {
 		if !streamingStartedAt.IsZero() && now.Sub(streamingStartedAt) > cfg.busyTurnMax {
 			var content, messageID string
 			var escalate bool
+			finished := false
 			cc.mu.Lock()
 			if !cc.streamingStartedAt.IsZero() && now.Sub(cc.streamingStartedAt) > cfg.busyTurnMax {
 				if cc.streamingBuf.Len() > 0 {
@@ -5266,10 +5314,14 @@ func (s *Server) checkClawStatus() {
 					}
 				}
 				cc.finishTurnLocked()
+				finished = true
 				cc.forcedFinishCount++
 				escalate = cc.forcedFinishCount >= 2
 			}
 			cc.mu.Unlock()
+			if finished {
+				s.deleteStaleWatchdogNags(id)
+			}
 			if content != "" {
 				_, _ = s.db.Exec(`INSERT INTO messages(id,claw_id,tenant_id,role,content,created_at,delivered_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET content=excluded.content, delivered_at=excluded.delivered_at`, messageID, id, tenantID, "claw", content, now, now)
 				s.broadcastToUsers(tenantID, types.WSMessage{Type: "message", Payload: types.HubMessage{ID: messageID, ClawID: id, TenantID: tenantID, Role: "claw", Content: content, CreatedAt: now}})
@@ -7218,6 +7270,108 @@ func (s *Server) injectHubMessage(_ context.Context, cc *clawConn, text string) 
 	// input. Writing directly to the socket can start a second bridge turn in
 	// the gap before the first response emits a chunk or activity.
 	s.injectHubMessageByID(cc.id, text)
+}
+
+// deleteStaleWatchdogNags removes nudges that targeted the just-ended turn.
+func (s *Server) deleteStaleWatchdogNags(clawID string) {
+	res, err := s.db.Exec(`DELETE FROM messages WHERE claw_id=? AND role='hub' AND delivered_at IS NULL AND content IN (?,?)`, clawID, streamingTimeoutNudge, contextNearlyFullNudge)
+	if err != nil {
+		log.Printf("[watchdog] delete stale nags for %s: %v", shortID(clawID), err)
+		return
+	}
+	if n, _ := res.RowsAffected(); n > 0 {
+		log.Printf("[watchdog] dropped %d stale watchdog nag(s) for %s at turn end", n, shortID(clawID))
+	}
+}
+
+const restartResumePrefix = "[hub] Agent process restart detected."
+
+func (s *Server) enqueueRestartResume(clawID string, restartCount int) {
+	var status, issueTitle, linearID, githubID, shortcutID, jiraID string
+	var bootstrapOK int
+	err := s.db.QueryRow(`SELECT status, COALESCE(bootstrap_ok,0), COALESCE(issue_title,''), COALESCE(linear_issue_id,''), COALESCE(github_issue_id,''), COALESCE(shortcut_story_id,''), COALESCE(jira_issue_id,'') FROM claws WHERE id=?`, clawID).Scan(&status, &bootstrapOK, &issueTitle, &linearID, &githubID, &shortcutID, &jiraID)
+	if err != nil {
+		return
+	}
+	if status != "connected" || bootstrapOK == 0 {
+		log.Printf("[watchdog] skipping auto-resume for %s: status=%s bootstrap_ok=%d", shortID(clawID), status, bootstrapOK)
+		return
+	}
+	var issueRef string
+	switch {
+	case linearID != "":
+		issueRef = "Linear issue " + linearID
+	case githubID != "":
+		issueRef = "GitHub issue " + githubID
+	case shortcutID != "":
+		issueRef = "Shortcut story " + shortcutID
+	case jiraID != "":
+		issueRef = "Jira issue " + jiraID
+	}
+	var b strings.Builder
+	b.WriteString(restartResumePrefix)
+	b.WriteString(" Your previous session was lost, so you have no memory of the earlier conversation. The workspace on disk is intact, including your repositories under ~/workspace.")
+	if issueTitle != "" || issueRef != "" {
+		b.WriteString("\n\nAssigned task: ")
+		if issueTitle != "" {
+			b.WriteString(issueTitle)
+		}
+		if issueRef != "" {
+			if issueTitle != "" {
+				b.WriteString(" (")
+				b.WriteString(issueRef)
+				b.WriteString(")")
+			} else {
+				b.WriteString(issueRef)
+			}
+		}
+		b.WriteString(".")
+	}
+	b.WriteString("\n\nBefore anything else, recover your state from the workspace: run git status and git log --oneline -15, check which branch you are on and whether there are uncommitted changes or an open PR for it. Then resume the task from where the workspace shows it stopped. Do not start over and do not discard existing work.")
+	// Append a zero-width marker carrying the restart_count so that two resume
+	// prompts for two different restarts are never treated as the identical
+	// pending message by injectMessage's dedup (change 2) — each restart is a
+	// distinct incident even when the rest of the wording is unchanged.
+	b.WriteString(fmt.Sprintf("\n\n<!-- restart:%d -->", restartCount))
+	log.Printf("[watchdog] enqueueing post-restart resume for %s", shortID(clawID))
+	s.injectHubMessageByID(clawID, b.String())
+}
+
+func (s *Server) sendStreamingNudge(cc *clawConn, text string) {
+	cc.mu.RLock()
+	sc, clawID, tenantID := cc.statusConn, cc.id, cc.tenantID
+	turnOpen := cc.isBusyLocked()
+	cc.mu.RUnlock()
+	// The nudge targets the in-flight turn. This runs on a goroutine, so the
+	// turn may have ended (and deleteStaleWatchdogNags already run) before we
+	// get here — queueing now would deliver the stale nudge as the next
+	// turn's prompt. Drop it instead.
+	if !turnOpen {
+		log.Printf("[watchdog] dropping nudge for %s: turn already ended", shortID(clawID))
+		return
+	}
+	if sc == nil {
+		s.injectHubMessageByID(clawID, text)
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := wsjson.Write(ctx, sc, types.WSMessage{Type: "nudge", Payload: mustJSONRaw(map[string]string{"claw_id": clawID, "content": text})}); err != nil {
+		// Up to 5s may have elapsed; re-check before falling back to the queue.
+		cc.mu.RLock()
+		turnOpen = cc.isBusyLocked()
+		cc.mu.RUnlock()
+		if !turnOpen {
+			log.Printf("[watchdog] dropping nudge for %s: turn ended during status-channel send", shortID(clawID))
+			return
+		}
+		log.Printf("[watchdog] nudge over status channel for %s failed, queueing: %v", shortID(clawID), err)
+		s.injectHubMessageByID(clawID, text)
+		return
+	}
+	msg := types.HubMessage{ID: uuid.New().String(), ClawID: clawID, TenantID: tenantID, Role: "hub", Content: text, Format: "pre", CreatedAt: now()}
+	_, _ = s.db.Exec(`INSERT INTO messages(id,claw_id,tenant_id,role,content,format,created_at,delivered_at) VALUES(?,?,?,?,?,?,?,?)`, msg.ID, msg.ClawID, msg.TenantID, msg.Role, msg.Content, msg.Format, msg.CreatedAt, msg.CreatedAt)
+	s.broadcastToUsers(tenantID, types.WSMessage{Type: "message", Payload: msg})
 }
 
 // sendNextQueuedMessage delivers the oldest pending message if the claw is idle.

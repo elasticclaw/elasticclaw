@@ -1047,6 +1047,19 @@ func (s *Server) injectMessage(clawID, content, role string) {
 	// Resolve tenant
 	var tenantID string
 	if err := s.db.QueryRow(`SELECT tenant_id FROM claws WHERE id=?`, clawID).Scan(&tenantID); err != nil {
+		log.Printf("[pr-watcher] dropping %s message for claw %s: tenant lookup failed: %v", role, shortID(clawID), err)
+		return
+	}
+	var pendingDupes int
+	// Fail open on a dedup-check error: dropping the injection can strand
+	// the agent (a lost watchdog nudge or restart-resume prompt), while
+	// injecting blind at worst duplicates one pending message.
+	if err := s.db.QueryRow(`SELECT COUNT(1) FROM messages WHERE claw_id=? AND role=? AND content=? AND delivered_at IS NULL`, clawID, role, content).Scan(&pendingDupes); err != nil {
+		log.Printf("[pr-watcher] dedup check for claw %s failed, injecting anyway: %v", shortID(clawID), err)
+		pendingDupes = 0
+	}
+	if pendingDupes > 0 {
+		log.Printf("[pr-watcher] skipping duplicate pending %s message for claw %s", role, shortID(clawID))
 		return
 	}
 

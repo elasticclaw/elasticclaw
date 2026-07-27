@@ -413,3 +413,29 @@ func TestStorePRMentionConcurrentDuplicate(t *testing.T) {
 		t.Fatalf("claw_prs rows = %d, want 1", count)
 	}
 }
+
+func TestInjectMessageSkipsIdenticalPendingRow(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{ClawToken: "claw-token"}, "", "", "")
+	const clawID = "inject-message-dedupe"
+	if _, err := db.Exec(`INSERT INTO claws(id,tenant_id,name,template,status,created_at) VALUES(?,?,?,?,?,?)`, clawID, "test-tenant-id", clawID, "elasticclaw", "connected", now()); err != nil {
+		t.Fatal(err)
+	}
+	cc := &clawConn{id: clawID, tenantID: "test-tenant-id", awaitingResponse: true}
+	s.mu.Lock()
+	s.claws[clawID] = cc
+	s.mu.Unlock()
+	s.injectHubMessageByID(clawID, "same text")
+	s.injectHubMessageByID(clawID, "same text")
+	s.injectHubMessageByID(clawID, "different text")
+	var pending int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND delivered_at IS NULL`, clawID).Scan(&pending); err != nil || pending != 2 {
+		t.Fatalf("pending rows=%d err=%v, want 2", pending, err)
+	}
+	if _, err := db.Exec(`UPDATE messages SET delivered_at=? WHERE claw_id=? AND content='same text'`, now(), clawID); err != nil {
+		t.Fatal(err)
+	}
+	s.injectHubMessageByID(clawID, "same text")
+	if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND content='same text'`, clawID).Scan(&pending); err != nil || pending != 2 {
+		t.Fatalf("same text rows=%d err=%v, want 2", pending, err)
+	}
+}
