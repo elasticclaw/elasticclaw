@@ -338,9 +338,17 @@ function ClawBoardCard({
 
   useEffect(() => {
     if (!latestActivity) return
-    setActivityNow(Date.now())
+    // Refresh the clock right away (in a microtask rather than synchronously
+    // in the effect body) and then once per second while activity is shown.
+    let cancelled = false
+    queueMicrotask(() => {
+      if (!cancelled) setActivityNow(Date.now())
+    })
     const timer = window.setInterval(() => setActivityNow(Date.now()), 1_000)
-    return () => window.clearInterval(timer)
+    return () => {
+      cancelled = true
+      window.clearInterval(timer)
+    }
   }, [latestActivity])
 
   useEffect(() => {
@@ -1409,7 +1417,7 @@ function ClawChatView({
     const el = scrollRef.current
     if (!el) return true
     return el.scrollHeight - el.scrollTop - el.clientHeight < 60
-  }, [])
+  }, [scrollRef])
 
   const scrollToBottom = useCallback(() => {
     const el = scrollRef.current
@@ -1417,7 +1425,7 @@ function ClawChatView({
     el.scrollTop = el.scrollHeight
     pinnedToBottom.current = true
     setShowScrollBtn(false)
-  }, [])
+  }, [scrollRef])
 
   const handleScroll = useCallback(() => {
     const el = scrollRef.current
@@ -1426,7 +1434,7 @@ function ClawChatView({
     pinnedToBottom.current = atBottom
     setShowScrollBtn(!atBottom)
     onWindowScroll()
-  }, [onWindowScroll])
+  }, [onWindowScroll, scrollRef])
 
   // Only auto-scroll when pinned to bottom
   useEffect(() => {
@@ -1437,7 +1445,7 @@ function ClawChatView({
     }
     const timers = [0, 50, 150, 400, 800].map((d) => setTimeout(run, d))
     return () => timers.forEach(clearTimeout)
-  }, [messages])
+  }, [messages, scrollRef])
 
   const isSlashCommand = (value: string, command: string) =>
     value === command || value.startsWith(`${command} `)

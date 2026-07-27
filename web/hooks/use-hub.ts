@@ -39,6 +39,26 @@ export interface HubState {
 
 const ORDER_KEY = "elasticclaw_claw_order"
 
+// ── localStorage message cache ──────────────────────────────────────────────
+const MESSAGES_KEY = "elasticclaw_messages"
+const MAX_CACHED_PER_CLAW = 200
+
+function readCachedMessages(): Record<string, Message[]> {
+  if (typeof window === "undefined") return {}
+  try {
+    const raw = localStorage.getItem(MESSAGES_KEY)
+    if (!raw) return {}
+    const parsed: Record<string, Array<{ id: string; role: string; content: string; timestamp: string }>> = JSON.parse(raw)
+    const hydrated: Record<string, Message[]> = {}
+    for (const [clawId, msgs] of Object.entries(parsed)) {
+      hydrated[clawId] = msgs.map((m) => ({ ...m, role: m.role as Message["role"], timestamp: new Date(m.timestamp) }))
+    }
+    return hydrated
+  } catch {
+    return {}
+  }
+}
+
 function describeWsUrl(rawUrl: string): string {
   try {
     const url = new URL(rawUrl)
@@ -100,7 +120,7 @@ export function useHub(selectedClawId: string | null): HubState {
   const [claws, setClaws] = useState<Claw[]>([])
   const [dependencies, setDependencies] = useState<DependencyStatus[]>([])
   const orderRef = useRef<string[]>([])
-  const [messages, setMessages] = useState<Record<string, Message[]>>({})
+  const [messages, setMessages] = useState<Record<string, Message[]>>(readCachedMessages)
   const messagesRef = useRef<Record<string, Message[]>>({})
   const [connected, setConnected] = useState(false)
   const {
@@ -110,7 +130,8 @@ export function useHub(selectedClawId: string | null): HubState {
     split: splitTypewriter,
     clear: clearTypewriter,
   } = useTypewriter()
-  const [configured, setConfigured] = useState(false)
+  // isConfigured() is pure (server-side auth: always true), safe to read at init
+  const [configured] = useState(() => isConfigured())
   const [loading, setLoading] = useState(true) // true until first claws fetch completes
   const [hubError, setHubError] = useState<string | null>(null)
   const segmentedStreamRef = useRef<Record<string, boolean>>({})
@@ -124,23 +145,6 @@ export function useHub(selectedClawId: string | null): HubState {
 
   // Track pinned state from localStorage
   const pinnedRef = useRef<Record<string, boolean>>({})
-
-  // ── localStorage message cache ──────────────────────────────────────────────
-  const MESSAGES_KEY = "elasticclaw_messages"
-  const MAX_CACHED_PER_CLAW = 200
-
-  const loadCachedMessages = useCallback(() => {
-    try {
-      const raw = localStorage.getItem(MESSAGES_KEY)
-      if (!raw) return
-      const parsed: Record<string, Array<{ id: string; role: string; content: string; timestamp: string }>> = JSON.parse(raw)
-      const hydrated: Record<string, Message[]> = {}
-      for (const [clawId, msgs] of Object.entries(parsed)) {
-        hydrated[clawId] = msgs.map((m) => ({ ...m, role: m.role as Message["role"], timestamp: new Date(m.timestamp) }))
-      }
-      setMessages(hydrated)
-    } catch {}
-  }, [])
 
   const persistMessages = useCallback((msgs: Record<string, Message[]>) => {
     try {
@@ -172,15 +176,15 @@ export function useHub(selectedClawId: string | null): HubState {
     messagesRef.current = messages
   }, [messages])
 
-  // Load pinned state + message cache + order from localStorage on mount
+  // Load pinned state + order from localStorage on mount
+  // (the message cache is read lazily in the useState initializer above)
   useEffect(() => {
     try {
       const saved = localStorage.getItem("elasticclaw_pinned")
       if (saved) pinnedRef.current = JSON.parse(saved)
     } catch {}
     orderRef.current = loadSavedOrder()
-    loadCachedMessages()
-  }, [loadCachedMessages])
+  }, [])
 
   const savePinned = useCallback((pinned: Record<string, boolean>) => {
     pinnedRef.current = pinned
@@ -306,7 +310,7 @@ export function useHub(selectedClawId: string | null): HubState {
     }
   }, [persistMessages])
 
-  const connectWebSocket = useCallback(() => {
+  const connectWebSocket = useCallback(function connect() {
     if (!shouldReconnectRef.current) return
     if (wsRef.current) {
       wsRef.current.onclose = null
@@ -342,7 +346,7 @@ export function useHub(selectedClawId: string | null): HubState {
         )
       }
       if (reconnectTimerRef.current) window.clearTimeout(reconnectTimerRef.current)
-      reconnectTimerRef.current = window.setTimeout(connectWebSocket, delayMs)
+      reconnectTimerRef.current = window.setTimeout(connect, delayMs)
     }
 
     ws.onerror = () => {
@@ -518,9 +522,7 @@ export function useHub(selectedClawId: string | null): HubState {
 
   // Initialize
   useEffect(() => {
-    const cfg = isConfigured()
-    setConfigured(cfg)
-    if (!cfg) return
+    if (!isConfigured()) return
 
     // Initial fetch + eager-load all message histories
     refreshClaws().then(() => {})
@@ -545,7 +547,8 @@ export function useHub(selectedClawId: string | null): HubState {
         wsRef.current.close()
       }
     }
-  }, []) // run once on mount
+    // All deps are stable useCallbacks, so this still runs once on mount
+  }, [connectWebSocket, refreshClaws, refreshDependencies])
 
   const send = useCallback(async (clawId: string, content: string) => {
     if (!clawId || !content.trim()) return
