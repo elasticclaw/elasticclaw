@@ -41,8 +41,10 @@ const ORDER_KEY = "elasticclaw_claw_order"
 
 function clawsEqual(a: Claw, b: Claw): boolean {
   const aKeys = Object.keys(a) as Array<keyof Claw>
-  if (aKeys.length !== Object.keys(b).length) return false
+  const bKeys = Object.keys(b)
+  if (aKeys.length !== bKeys.length) return false
   return aKeys.every((key) => {
+    if (!bKeys.includes(key)) return false
     const aValue = a[key]
     const bValue = b[key]
     if (Array.isArray(aValue) && Array.isArray(bValue)) {

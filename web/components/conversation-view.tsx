@@ -673,7 +673,7 @@ const ClawBoardCard = memo(function ClawBoardCard({
           {/* Messages area */}
           <div className="flex-1 relative min-h-0 overflow-hidden">
           <div ref={msgScrollRef} onScroll={handleCardScroll} className="h-full overflow-y-auto scrollbar-hide p-3 space-y-2">
-            {messages.length === 0 ? (
+            {messages.length === 0 && !streamingBuffer ? (
               <p className="text-xs text-muted-foreground text-center py-4">
                 No messages yet
               </p>
@@ -1684,7 +1684,7 @@ function ClawChatView({
               <div className="h-px w-full bg-border" />
             </div>
           )}
-          {messages.length === 0 ? (
+          {messages.length === 0 && !streamingBuffer ? (
             <p className="text-center text-muted-foreground py-12">No messages yet. Start the conversation below.</p>
           ) : (
             conversationItems.map((item) => (
