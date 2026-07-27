@@ -1,0 +1,221 @@
+package hub
+
+import (
+	"strings"
+	"testing"
+
+	"github.com/elasticclaw/elasticclaw/pkg/types"
+)
+
+const testWorkspaceV2YAML = `
+schema_version: 2
+name: engineering
+
+repositories:
+  primary:
+    provider: github
+    repository: org/repo
+    source_control: sc
+
+credentials:
+  github_app:
+    secret: GITHUB_APP_PRIVATE_KEY
+
+source_control:
+  connections:
+    sc:
+      provider: github
+      credentials: github_app
+
+ci:
+  connections:
+    gha:
+      provider: github_actions
+      source_control: sc
+      credentials: github_app
+      capability_restrictions:
+        trigger_run: false
+  pipelines:
+    github-pr:
+      connection: gha
+      repository: primary
+      workflow: ci.yml
+`
+
+const testWorkflowV2YAML = `
+schema_version: 2
+name: delivery
+initial_state: implementing
+states:
+  implementing: {}
+  awaiting_ci: {}
+  completed:
+    terminal: true
+transitions:
+  open:
+    from: implementing
+    on: pull_request.verified_open
+    to: awaiting_ci
+  done:
+    from: awaiting_ci
+    on: pull_request.merged
+    to: completed
+events:
+  ci.run.completed:
+    clauses:
+      - from: awaiting_ci
+        when:
+          conclusion:
+            equals: failure
+        assert:
+          work.needs_fix: true
+`
+
+func TestSaveExternalWorkspaceRejectsInvalidV2(t *testing.T) {
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
+
+	invalid := `
+schema_version: 2
+name: broken
+ci:
+  connections:
+    c1:
+      provider: github_actions
+      credentials: missing
+`
+	err := saveExternalWorkspace(&types.WorkspaceConfig{
+		Name:  "broken",
+		Files: map[string]string{"elasticclaw-config.yaml": invalid},
+	})
+	if err == nil {
+		t.Fatal("expected saveExternalWorkspace to refuse invalid v2")
+	}
+	if !strings.Contains(err.Error(), "invalid workspace v2") && !strings.Contains(err.Error(), "unknown credential") {
+		t.Fatalf("error = %v, want invalid workspace v2 / credential", err)
+	}
+}
+
+func TestSaveExternalWorkspaceAcceptsValidV2(t *testing.T) {
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
+
+	err := saveExternalWorkspace(&types.WorkspaceConfig{
+		Name:  "engineering",
+		Files: map[string]string{"elasticclaw-config.yaml": testWorkspaceV2YAML},
+	})
+	if err != nil {
+		t.Fatalf("save valid v2 workspace: %v", err)
+	}
+}
+
+func TestSaveExternalWorkspaceStillAcceptsV1(t *testing.T) {
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
+
+	err := saveExternalWorkspace(&types.WorkspaceConfig{
+		Name: "engineering",
+		Files: map[string]string{
+			"elasticclaw-config.yaml": "schema_version: v1\nname: engineering\nprovider: noop\n",
+		},
+	})
+	if err != nil {
+		t.Fatalf("save v1 workspace: %v", err)
+	}
+}
+
+func TestSaveExternalWorkflowsRejectsInvalidV2Pair(t *testing.T) {
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
+
+	if err := saveExternalWorkspace(&types.WorkspaceConfig{
+		Name:  "engineering",
+		Files: map[string]string{"elasticclaw-config.yaml": testWorkspaceV2YAML},
+	}); err != nil {
+		t.Fatalf("seed workspace: %v", err)
+	}
+
+	// Overlapping event clauses + protected namespace would also fail; use unknown pipeline effect.
+	badWorkflow := `
+schema_version: 2
+name: bad
+initial_state: s
+states:
+  s:
+    on_enter:
+      effects:
+        - ci.trigger:
+            pipeline: missing-pipeline
+  done:
+    terminal: true
+`
+	err := saveExternalWorkflows("engineering", []*types.WorkflowConfig{{
+		Name:      "bad",
+		RawConfig: badWorkflow,
+	}})
+	if err == nil {
+		t.Fatal("expected refuse invalid v2 pair")
+	}
+	if !strings.Contains(err.Error(), "unknown pipeline") && !strings.Contains(err.Error(), "invalid workflow v2") {
+		t.Fatalf("error = %v, want unknown pipeline / invalid workflow v2", err)
+	}
+}
+
+func TestSaveExternalWorkflowsAcceptsValidV2Pair(t *testing.T) {
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
+
+	if err := saveExternalWorkspace(&types.WorkspaceConfig{
+		Name:  "engineering",
+		Files: map[string]string{"elasticclaw-config.yaml": testWorkspaceV2YAML},
+	}); err != nil {
+		t.Fatalf("seed workspace: %v", err)
+	}
+
+	err := saveExternalWorkflows("engineering", []*types.WorkflowConfig{{
+		Name:      "delivery",
+		RawConfig: testWorkflowV2YAML,
+	}})
+	if err != nil {
+		t.Fatalf("save valid v2 workflow pair: %v", err)
+	}
+}
+
+func TestSaveExternalWorkflowsStillAcceptsV1(t *testing.T) {
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
+
+	if err := saveExternalWorkspace(&types.WorkspaceConfig{
+		Name: "engineering",
+		Files: map[string]string{
+			"elasticclaw-config.yaml": "schema_version: v1\nname: engineering\nprovider: noop\n",
+		},
+	}); err != nil {
+		t.Fatalf("seed v1 workspace: %v", err)
+	}
+
+	v1Workflow := `
+schema_version: v1
+name: bugfix
+trigger:
+  github_issues:
+    event: issue_labeled
+    repositories:
+      - org/repo
+    labels:
+      - todo
+stages:
+  - id: working
+    entry: true
+    on_enter:
+      inject: start
+`
+	wf := &types.WorkflowConfig{Name: "bugfix", RawConfig: v1Workflow}
+	if err := types.NormalizeWorkflowConfig(wf); err != nil {
+		// Normalize on unmarshaled struct — parse raw first for integration realism.
+		_ = err
+	}
+	// Simulate API path: unmarshal raw into struct then normalize/validate.
+	// Store path only needs RawConfig for v1 write-through.
+	err := saveExternalWorkflows("engineering", []*types.WorkflowConfig{{
+		Name:      "bugfix",
+		RawConfig: v1Workflow,
+	}})
+	if err != nil {
+		t.Fatalf("save v1 workflow: %v", err)
+	}
+}

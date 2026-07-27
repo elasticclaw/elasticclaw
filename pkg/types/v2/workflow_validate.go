@@ -1,0 +1,509 @@
+package v2
+
+import (
+	"fmt"
+	"strings"
+
+	"gopkg.in/yaml.v3"
+)
+
+// Protected fact namespaces that workflow-authored assert/set cannot write.
+var protectedNamespaces = []string{
+	"ci.",
+	"pull_request.",
+	"review.",
+	"effects.",
+	"workflow.",
+	"operator.",
+}
+
+// Writable namespaces for workflow-authored facts.
+var writableNamespaces = []string{
+	"work.",
+	"custom.",
+}
+
+var knownWorkflowKeys = map[string]bool{
+	"schema_version": true,
+	"name":           true,
+	"initial_state":  true,
+	"states":         true,
+	"transitions":    true,
+	"commands":       true,
+	"ci":             true,
+	"review":         true,
+	"events":         true,
+}
+
+// ParseWorkflow unmarshals workflow v2 YAML. It does not validate.
+func ParseWorkflow(data []byte) (*Workflow, error) {
+	version, err := DetectSchemaVersion(data)
+	if err != nil {
+		return nil, err
+	}
+	if !IsV2(version) {
+		return nil, fmt.Errorf("workflow schema_version %q is not v2 (want 2 or v2)", version)
+	}
+
+	var raw map[string]interface{}
+	if err := yaml.Unmarshal(data, &raw); err != nil {
+		return nil, fmt.Errorf("parse workflow yaml: %w", err)
+	}
+	for key := range raw {
+		if !knownWorkflowKeys[key] {
+			return nil, fmt.Errorf("workflow: unknown field %q", key)
+		}
+	}
+
+	var wf Workflow
+	if err := yaml.Unmarshal(data, &wf); err != nil {
+		return nil, fmt.Errorf("parse workflow: %w", err)
+	}
+	wf.Raw = raw
+	return &wf, nil
+}
+
+// ValidateWorkflow structurally validates a workflow v2 document (without
+// workspace pairing). Pair validation is ValidateWorkflowAgainstWorkspace.
+func ValidateWorkflow(wf *Workflow) (*ResolvedWorkflow, error) {
+	if wf == nil {
+		return nil, fmt.Errorf("workflow is nil")
+	}
+	if !IsV2(SchemaVersionString(wf.SchemaVersion)) {
+		return nil, fmt.Errorf("workflow schema_version %q is not v2", SchemaVersionString(wf.SchemaVersion))
+	}
+	if strings.TrimSpace(wf.Name) == "" {
+		return nil, fmt.Errorf("workflow name is required")
+	}
+	if strings.TrimSpace(wf.InitialState) == "" {
+		return nil, fmt.Errorf("workflow %q: initial_state is required", wf.Name)
+	}
+	if len(wf.States) == 0 {
+		return nil, fmt.Errorf("workflow %q: states is required", wf.Name)
+	}
+	if _, ok := wf.States[wf.InitialState]; !ok {
+		return nil, fmt.Errorf("workflow %q: initial_state %q is not defined in states", wf.Name, wf.InitialState)
+	}
+
+	for name, st := range wf.States {
+		if err := validateResourceName("states", name); err != nil {
+			return nil, fmt.Errorf("workflow %q: %w", wf.Name, err)
+		}
+		if st.OnEnter != nil {
+			if err := validateFactWrites(fmt.Sprintf("states.%s.on_enter", name), st.OnEnter.Assert, st.OnEnter.Set); err != nil {
+				return nil, fmt.Errorf("workflow %q: %w", wf.Name, err)
+			}
+			if err := validateEffectsShape(fmt.Sprintf("states.%s.on_enter.effects", name), st.OnEnter.Effects); err != nil {
+				return nil, fmt.Errorf("workflow %q: %w", wf.Name, err)
+			}
+		}
+	}
+
+	// Transitions form legal graph edges.
+	for name, tr := range wf.Transitions {
+		if err := validateResourceName("transitions", name); err != nil {
+			return nil, fmt.Errorf("workflow %q: %w", wf.Name, err)
+		}
+		fromStates, err := FromStates(tr.From)
+		if err != nil {
+			return nil, fmt.Errorf("workflow %q: transitions.%s.from: %w", wf.Name, name, err)
+		}
+		for _, fs := range fromStates {
+			st, ok := wf.States[fs]
+			if !ok {
+				return nil, fmt.Errorf("workflow %q: transitions.%s.from %q: unknown state", wf.Name, name, fs)
+			}
+			if st.Terminal {
+				return nil, fmt.Errorf("workflow %q: transitions.%s.from %q: terminal states cannot have outgoing transitions", wf.Name, name, fs)
+			}
+		}
+		if strings.TrimSpace(tr.To) == "" {
+			return nil, fmt.Errorf("workflow %q: transitions.%s.to is required", wf.Name, name)
+		}
+		if _, ok := wf.States[tr.To]; !ok {
+			return nil, fmt.Errorf("workflow %q: transitions.%s.to %q: unknown state", wf.Name, name, tr.To)
+		}
+		if err := ValidatePredicateTree(fmt.Sprintf("transitions.%s.when", name), tr.When); err != nil {
+			return nil, fmt.Errorf("workflow %q: %w", wf.Name, err)
+		}
+		if err := validateFactWrites(fmt.Sprintf("transitions.%s", name), tr.Assert, tr.Set); err != nil {
+			return nil, fmt.Errorf("workflow %q: %w", wf.Name, err)
+		}
+		if err := validateEffectsShape(fmt.Sprintf("transitions.%s.effects", name), tr.Effects); err != nil {
+			return nil, fmt.Errorf("workflow %q: %w", wf.Name, err)
+		}
+	}
+
+	// Outgoing transition uniqueness: for same from+on, when clauses must not overlap.
+	if err := validateTransitionOverlaps(wf); err != nil {
+		return nil, fmt.Errorf("workflow %q: %w", wf.Name, err)
+	}
+
+	// Commands are also legal graph edges.
+	for name, cmd := range wf.Commands {
+		if err := validateResourceName("commands", name); err != nil {
+			return nil, fmt.Errorf("workflow %q: %w", wf.Name, err)
+		}
+		fromStates, err := FromStates(cmd.From)
+		if err != nil {
+			return nil, fmt.Errorf("workflow %q: commands.%s.from: %w", wf.Name, name, err)
+		}
+		for _, fs := range fromStates {
+			if _, ok := wf.States[fs]; !ok {
+				return nil, fmt.Errorf("workflow %q: commands.%s.from %q: unknown state", wf.Name, name, fs)
+			}
+			// Commands may leave non-terminal states; terminal→anything is odd but
+			// cancel-from-terminal is not needed. Still allow from terminal? RFC
+			// says legal graph includes command edges; forbid terminal from for consistency.
+			if wf.States[fs].Terminal {
+				return nil, fmt.Errorf("workflow %q: commands.%s.from %q: terminal states cannot have outgoing transitions", wf.Name, name, fs)
+			}
+		}
+		if strings.TrimSpace(cmd.To) == "" {
+			return nil, fmt.Errorf("workflow %q: commands.%s.to is required", wf.Name, name)
+		}
+		if _, ok := wf.States[cmd.To]; !ok {
+			return nil, fmt.Errorf("workflow %q: commands.%s.to %q: unknown state", wf.Name, name, cmd.To)
+		}
+	}
+
+	// Event clauses.
+	for eventName, def := range wf.Events {
+		for i, clause := range def.Clauses {
+			path := fmt.Sprintf("events.%s.clauses[%d]", eventName, i)
+			// Conservative: require from (open design question in RFC).
+			fromStates, err := FromStates(clause.From)
+			if err != nil {
+				return nil, fmt.Errorf("workflow %q: %s.from: %w (from is required)", wf.Name, path, err)
+			}
+			for _, fs := range fromStates {
+				if _, ok := wf.States[fs]; !ok {
+					return nil, fmt.Errorf("workflow %q: %s.from %q: unknown state", wf.Name, path, fs)
+				}
+			}
+			if err := ValidatePredicateTree(path+".when", clause.When); err != nil {
+				return nil, fmt.Errorf("workflow %q: %w", wf.Name, err)
+			}
+			if err := validateFactWrites(path, clause.Assert, clause.Set); err != nil {
+				return nil, fmt.Errorf("workflow %q: %w", wf.Name, err)
+			}
+			if err := validateEffectsShape(path+".effects", clause.Effects); err != nil {
+				return nil, fmt.Errorf("workflow %q: %w", wf.Name, err)
+			}
+		}
+		if err := validateEventClauseOverlaps(wf.Name, eventName, def.Clauses); err != nil {
+			return nil, err
+		}
+	}
+
+	// Policy structure: minimal name checks; resource refs checked in pair validation.
+	if wf.CI != nil {
+		for name := range wf.CI.Policies {
+			if err := validateResourceName("ci.policies", name); err != nil {
+				return nil, fmt.Errorf("workflow %q: %w", wf.Name, err)
+			}
+		}
+	}
+	if wf.Review != nil {
+		for name := range wf.Review.Policies {
+			if err := validateResourceName("review.policies", name); err != nil {
+				return nil, fmt.Errorf("workflow %q: %w", wf.Name, err)
+			}
+		}
+	}
+
+	rev, err := RevisionOf(wf)
+	if err != nil {
+		return nil, err
+	}
+	return &ResolvedWorkflow{Workflow: wf, Revision: rev}, nil
+}
+
+// ValidateWorkflowAgainstWorkspace pair-validates a workflow against a resolved workspace.
+func ValidateWorkflowAgainstWorkspace(wf *Workflow, rws *ResolvedWorkspace) (*ResolvedWorkflow, error) {
+	resolved, err := ValidateWorkflow(wf)
+	if err != nil {
+		return nil, err
+	}
+	if rws == nil || rws.Workspace == nil {
+		return nil, fmt.Errorf("workflow %q: workspace is required for pair validation", wf.Name)
+	}
+	ws := rws.Workspace
+
+	// CI policies must reference known pipelines.
+	if wf.CI != nil {
+		for name, policy := range wf.CI.Policies {
+			if err := walkPolicyRefs(fmt.Sprintf("ci.policies.%s", name), policy, ws, "pipeline"); err != nil {
+				return nil, fmt.Errorf("workflow %q: %w", wf.Name, err)
+			}
+		}
+	}
+	// Review policies must reference known review connections.
+	if wf.Review != nil {
+		for name, policy := range wf.Review.Policies {
+			if err := walkPolicyRefs(fmt.Sprintf("review.policies.%s", name), policy, ws, "connection"); err != nil {
+				return nil, fmt.Errorf("workflow %q: %w", wf.Name, err)
+			}
+		}
+	}
+
+	// Effects on transitions, clauses, on_enter: pipeline/connection + capability.
+	checkEffects := func(path string, effects []map[string]interface{}) error {
+		return validateEffectsAgainstWorkspace(path, effects, rws)
+	}
+	for name, tr := range wf.Transitions {
+		if err := checkEffects(fmt.Sprintf("transitions.%s.effects", name), tr.Effects); err != nil {
+			return nil, fmt.Errorf("workflow %q: %w", wf.Name, err)
+		}
+	}
+	for sname, st := range wf.States {
+		if st.OnEnter != nil {
+			if err := checkEffects(fmt.Sprintf("states.%s.on_enter.effects", sname), st.OnEnter.Effects); err != nil {
+				return nil, fmt.Errorf("workflow %q: %w", wf.Name, err)
+			}
+		}
+	}
+	for eventName, def := range wf.Events {
+		for i, clause := range def.Clauses {
+			path := fmt.Sprintf("events.%s.clauses[%d].effects", eventName, i)
+			if err := checkEffects(path, clause.Effects); err != nil {
+				return nil, fmt.Errorf("workflow %q: %w", wf.Name, err)
+			}
+		}
+	}
+
+	return resolved, nil
+}
+
+// ParseAndValidateWorkflow is the shipped entry point for workflow-only validation.
+func ParseAndValidateWorkflow(data []byte) (*ResolvedWorkflow, error) {
+	wf, err := ParseWorkflow(data)
+	if err != nil {
+		return nil, err
+	}
+	return ValidateWorkflow(wf)
+}
+
+// ParseAndValidateWorkflowPair validates workflow YAML against workspace YAML.
+func ParseAndValidateWorkflowPair(workflowData, workspaceData []byte) (*ResolvedWorkflow, *ResolvedWorkspace, error) {
+	rws, err := ParseAndValidateWorkspace(workspaceData)
+	if err != nil {
+		return nil, nil, fmt.Errorf("workspace: %w", err)
+	}
+	wf, err := ParseWorkflow(workflowData)
+	if err != nil {
+		return nil, rws, err
+	}
+	rwf, err := ValidateWorkflowAgainstWorkspace(wf, rws)
+	if err != nil {
+		return nil, rws, err
+	}
+	return rwf, rws, nil
+}
+
+func validateFactWrites(path string, assert, set map[string]interface{}) error {
+	for _, facts := range []map[string]interface{}{assert, set} {
+		if facts == nil {
+			continue
+		}
+		for key := range facts {
+			if err := checkFactKeyWritable(path, key); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func checkFactKeyWritable(path, key string) error {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return fmt.Errorf("%s: empty fact key", path)
+	}
+	for _, p := range protectedNamespaces {
+		if key == strings.TrimSuffix(p, ".") || strings.HasPrefix(key, p) {
+			return fmt.Errorf("%s: cannot write protected namespace %q (workflow may only write work.* or custom.*)", path, key)
+		}
+	}
+	writable := false
+	for _, p := range writableNamespaces {
+		if key == strings.TrimSuffix(p, ".") || strings.HasPrefix(key, p) {
+			writable = true
+			break
+		}
+	}
+	if !writable {
+		// Bare keys without namespace are not allowed for assert/set in v2.
+		return fmt.Errorf("%s: fact key %q must be under work.* or custom.*", path, key)
+	}
+	return nil
+}
+
+func validateEffectsShape(path string, effects []map[string]interface{}) error {
+	for i, eff := range effects {
+		if len(eff) == 0 {
+			return fmt.Errorf("%s[%d]: empty effect", path, i)
+		}
+		// Each effect is a single-key map: { "ci.trigger": { ... } }
+		if len(eff) != 1 {
+			return fmt.Errorf("%s[%d]: effect must have exactly one operation key", path, i)
+		}
+	}
+	return nil
+}
+
+func validateEffectsAgainstWorkspace(path string, effects []map[string]interface{}, rws *ResolvedWorkspace) error {
+	ws := rws.Workspace
+	for i, eff := range effects {
+		for op, raw := range eff {
+			epath := fmt.Sprintf("%s[%d].%s", path, i, op)
+			cfg, _ := raw.(map[string]interface{})
+			switch op {
+			case EffectCITrigger, EffectCIRetry, EffectCICancel:
+				pipelineName, _ := cfg["pipeline"].(string)
+				if strings.TrimSpace(pipelineName) == "" {
+					return fmt.Errorf("%s: pipeline is required", epath)
+				}
+				pipe, ok := ws.CIPipeline(pipelineName)
+				if !ok {
+					return fmt.Errorf("%s: unknown pipeline %q", epath, pipelineName)
+				}
+				capNeeded, ok := CapabilityForEffect(op)
+				if !ok {
+					continue
+				}
+				caps := rws.ResolvedCICaps[pipe.Connection]
+				if caps == nil || !caps[capNeeded] {
+					return fmt.Errorf("%s: effect %q is unsupported by pipeline %q (connection %q lacks capability %s)",
+						epath, op, pipelineName, pipe.Connection, capNeeded)
+				}
+			case "issue.comment":
+				conn, _ := cfg["connection"].(string)
+				if strings.TrimSpace(conn) == "" {
+					return fmt.Errorf("%s: connection is required", epath)
+				}
+				if !ws.HasIssueTrackerConnection(conn) {
+					return fmt.Errorf("%s: unknown issue_tracker connection %q", epath, conn)
+				}
+			case "agent.task":
+				// agent tasks do not require workspace pipeline refs
+			default:
+				// Unknown effect ops: reject at pair validation so they fail closed.
+				return fmt.Errorf("%s: unsupported effect operation %q", epath, op)
+			}
+		}
+	}
+	return nil
+}
+
+func walkPolicyRefs(path string, node interface{}, ws *Workspace, mode string) error {
+	switch n := node.(type) {
+	case map[string]interface{}:
+		if pipe, ok := n["pipeline"].(string); ok && mode == "pipeline" {
+			if !ws.HasCIPipeline(pipe) {
+				return fmt.Errorf("%s: unknown pipeline %q", path, pipe)
+			}
+		}
+		if conn, ok := n["connection"].(string); ok && mode == "connection" {
+			if !ws.HasReviewSystemConnection(conn) && !ws.HasSourceControlConnection(conn) {
+				return fmt.Errorf("%s: unknown review/source_control connection %q", path, conn)
+			}
+		}
+		for k, v := range n {
+			if err := walkPolicyRefs(path+"."+k, v, ws, mode); err != nil {
+				return err
+			}
+		}
+	case []interface{}:
+		for i, item := range n {
+			if err := walkPolicyRefs(fmt.Sprintf("%s[%d]", path, i), item, ws, mode); err != nil {
+				return err
+			}
+		}
+	case Policy:
+		return walkPolicyRefs(path, map[string]interface{}(n), ws, mode)
+	}
+	return nil
+}
+
+func validateTransitionOverlaps(wf *Workflow) error {
+	// Group transitions by from-state + on event.
+	type key struct {
+		from string
+		on   string
+	}
+	type item struct {
+		name string
+		when map[string]interface{}
+	}
+	groups := map[key][]item{}
+	for name, tr := range wf.Transitions {
+		fromStates, err := FromStates(tr.From)
+		if err != nil {
+			return err
+		}
+		on := strings.TrimSpace(tr.On)
+		for _, fs := range fromStates {
+			k := key{from: fs, on: on}
+			groups[k] = append(groups[k], item{name: name, when: tr.When})
+		}
+	}
+	for k, items := range groups {
+		if len(items) < 2 {
+			continue
+		}
+		// Same from+on with empty on is still ambiguous if both match.
+		for i := 0; i < len(items); i++ {
+			for j := i + 1; j < len(items); j++ {
+				overlap, witness := ClausesOverlap(items[i].when, items[j].when)
+				if overlap {
+					ctx := fmt.Sprintf("transitions from state %q on %q", k.from, k.on)
+					if k.on == "" {
+						ctx = fmt.Sprintf("transitions from state %q", k.from)
+					}
+					return fmt.Errorf("%s", FormatOverlapError(ctx, k.from,
+						[]string{"transitions." + items[i].name, "transitions." + items[j].name},
+						witness))
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func validateEventClauseOverlaps(workflowName, eventName string, clauses []EventClause) error {
+	// Group by from state.
+	type item struct {
+		index int
+		when  map[string]interface{}
+	}
+	byState := map[string][]item{}
+	for i, clause := range clauses {
+		fromStates, err := FromStates(clause.From)
+		if err != nil {
+			return err
+		}
+		for _, fs := range fromStates {
+			byState[fs] = append(byState[fs], item{index: i, when: clause.When})
+		}
+	}
+	for state, items := range byState {
+		if len(items) < 2 {
+			continue
+		}
+		for i := 0; i < len(items); i++ {
+			for j := i + 1; j < len(items); j++ {
+				overlap, witness := ClausesOverlap(items[i].when, items[j].when)
+				if overlap {
+					ctx := fmt.Sprintf("event %q", eventName)
+					paths := []string{
+						fmt.Sprintf("events.%s.clauses[%d]", eventName, items[i].index),
+						fmt.Sprintf("events.%s.clauses[%d]", eventName, items[j].index),
+					}
+					return fmt.Errorf("workflow %q: %s", workflowName, FormatOverlapError(ctx, state, paths, witness))
+				}
+			}
+		}
+	}
+	return nil
+}

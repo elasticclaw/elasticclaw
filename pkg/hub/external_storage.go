@@ -448,15 +448,6 @@ func saveExternalWorkspace(workspace *types.WorkspaceConfig) error {
 		return err
 	}
 
-	dir := filepath.Join(workspacesDir(), workspace.Name)
-	workflowDir := filepath.Join(dir, "workflows")
-	if err := os.MkdirAll(workflowDir, 0750); err != nil {
-		return fmt.Errorf("mkdir %s: %w", workflowDir, err)
-	}
-	if err := removeWorkspaceAuthoredFiles(dir); err != nil {
-		return err
-	}
-
 	data := []byte(workspace.Files["elasticclaw-config.yaml"])
 	if len(strings.TrimSpace(string(data))) == 0 {
 		var err error
@@ -464,6 +455,21 @@ func saveExternalWorkspace(workspace *types.WorkspaceConfig) error {
 		if err != nil {
 			return fmt.Errorf("marshal elasticclaw-config.yaml: %w", err)
 		}
+	}
+	// Refuse invalid v2 workspace documents at the store boundary (RFC #544 inv. 28).
+	// V1 documents continue through the existing WorkspaceConfig.Validate path above.
+	// Validate before mutating the on-disk tree so a rejection cannot wipe existing files.
+	if err := validateWorkspaceDocumentAtStore(data); err != nil {
+		return err
+	}
+
+	dir := filepath.Join(workspacesDir(), workspace.Name)
+	workflowDir := filepath.Join(dir, "workflows")
+	if err := os.MkdirAll(workflowDir, 0750); err != nil {
+		return fmt.Errorf("mkdir %s: %w", workflowDir, err)
+	}
+	if err := removeWorkspaceAuthoredFiles(dir); err != nil {
+		return err
 	}
 	if err := os.WriteFile(filepath.Join(dir, "elasticclaw-config.yaml"), data, 0640); err != nil {
 		return fmt.Errorf("write elasticclaw-config.yaml: %w", err)
@@ -504,12 +510,20 @@ func saveExternalWorkflows(workspaceName string, workflows []*types.WorkflowConf
 	if err := validateName(workspaceName); err != nil {
 		return err
 	}
-	if _, err := loadExternalWorkspaceConfig(workspaceName); err != nil {
-		// Preserve workspace-not-found for HTTP 404 mapping; wrap other load failures.
-		if isWorkspaceNotFound(err) {
-			return err
+	// Prefer raw YAML for store-time validation. V2 workspace documents use map-shaped
+	// repositories/connections that cannot be unmarshaled into the v1 WorkspaceConfig type.
+	workspaceYAML, err := readExternalWorkspaceYAML(workspaceName)
+	if err != nil {
+		// Fall back to the legacy typed load only to preserve the established
+		// workspace-not-found error and HTTP 404 mapping. Other load failures keep
+		// their existing context rather than being reported as v2 validation errors.
+		if _, loadErr := loadExternalWorkspaceConfig(workspaceName); loadErr != nil {
+			if isWorkspaceNotFound(loadErr) {
+				return loadErr
+			}
+			return fmt.Errorf("load workspace %q: %w", workspaceName, loadErr)
 		}
-		return fmt.Errorf("load workspace %q: %w", workspaceName, err)
+		return err
 	}
 	workflowDir := filepath.Join(workspacesDir(), workspaceName, "workflows")
 	if err := os.MkdirAll(workflowDir, 0750); err != nil {
@@ -533,6 +547,11 @@ func saveExternalWorkflows(workspaceName string, workflows []*types.WorkflowConf
 			if err != nil {
 				return fmt.Errorf("marshal workflow %q: %w", workflow.Name, err)
 			}
+		}
+		// Refuse invalid v2 workflow documents (and invalid v2 workspace pairs).
+		// V1 workflows keep the Normalize+Validate path at the API boundary.
+		if err := validateWorkflowDocumentAtStore(data, workspaceYAML); err != nil {
+			return fmt.Errorf("workflow %q: %w", workflow.Name, err)
 		}
 		if err := os.WriteFile(targetPath, data, 0640); err != nil {
 			return fmt.Errorf("write workflow %q: %w", workflow.Name, err)
