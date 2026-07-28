@@ -1962,7 +1962,19 @@ func isRecoverableSessionLifecycleError(err error) bool {
 	if errors.As(err, &sendErr) {
 		return false
 	}
-	return errors.Is(err, context.DeadlineExceeded) || isProviderRequestFormatError(err)
+	return errors.Is(err, context.DeadlineExceeded) || isProviderRequestFormatError(err) || isSessionFileLockConflictError(err)
+}
+
+// isSessionFileLockConflictError detects OpenClaw's "session file changed while
+// embedded prompt lock was released" error. That error indicates the on-disk
+// session transcript was modified unexpectedly, leaving the persistent session
+// in an inconsistent state. Rotating to a fresh session is the only recovery.
+func isSessionFileLockConflictError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "session file changed") && strings.Contains(msg, "embedded prompt lock")
 }
 
 // SendMessage sends a user message to the persistent session, streams chunks

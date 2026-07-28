@@ -183,7 +183,7 @@ func checkpointExclude(path string, d os.DirEntry) bool {
 		return true
 	}
 	switch name {
-	case "node_modules", ".cache", "tmp", "dist", "build", ".next", "auth-profiles.json":
+	case "node_modules", ".cache", "tmp", "dist", "build", ".next", "auth-profiles.json", "openclaw-agent.sqlite", "sessions":
 		return true
 	}
 	if strings.HasSuffix(name, ".log") && !strings.Contains(path, "workspace") {
