@@ -3401,10 +3401,14 @@ docker --version`); err != nil {
 					log.Printf("[daytona] warning: skipping invalid flake path %q: %v", name, err)
 					continue
 				}
-				// Write to the *staged* workspace dir (~ /workspace) that the bridge's
-				// hasWorkspaceFlake() and setupFlakeEnvironmentSync() inspect.
-				// This ensures early flake staging is visible for devShell wrapper creation
-				// before bridge starts. (syncStaged... later copies it into ~/.openclaw/workspace)
+				// Write to the *staged* workspace dir (~/workspace) where flake
+				// tooling looks for the devShell definition.
+				// NOTE: on Daytona the bridge runs WITHOUT ELASTICCLAW_BOOTSTRAP (see
+				// daytonaAsyncBridgeCommand), so runBootstrap -- and therefore
+				// hasWorkspaceFlake(), setupFlakeEnvironmentSync() and
+				// syncStagedWorkspaceToOpenClawWorkspace() -- never runs here. Nothing
+				// copies this staged file into ~/.openclaw/workspace; flake setup for
+				// Daytona is hub-driven. Do not assume bridge-side consumption.
 				targetPath := "/home/daytona/workspace/" + safeName
 				targetDir := path.Dir(targetPath)
 				// Base64-encode the user-controlled flake content, then use heredoc *only* for the
@@ -3614,11 +3618,11 @@ cp "$BIN" /tmp/claw-bridge.download && chmod +x /tmp/claw-bridge.download && mv 
 	if err := json.Unmarshal([]byte(filesJSON), &templateFiles); err != nil {
 		return fmt.Errorf("parse template_files for final write %s: %w", clawID, err)
 	}
+	writtenWorkspaceFiles := map[string]string{}
 	if len(templateFiles) > 0 {
 		templateFiles = workspaceTemplateFiles(templateFiles)
-		for name, content := range templateFiles {
-			name := name
-			content := content
+		for _, name := range sortedWorkspaceFileNames(templateFiles) {
+			content := templateFiles[name]
 			// Skip flake files here: they were staged early (with collision-resistant
 			// delimiter) specifically for the devShell contract. Rewriting them with
 			// a fixed delimiter would re-introduce the heredoc injection risk.
@@ -3627,20 +3631,22 @@ cp "$BIN" /tmp/claw-bridge.download && chmod +x /tmp/claw-bridge.download && mv 
 			}
 			safeName, err := cleanWorkspaceFilePath(name)
 			if err != nil {
-				log.Printf("[daytona] warning: skipping invalid template file path %q: %v", name, err)
-				continue
+				// Fail closed: a workspace missing files it declares (e.g. scripts/
+				// referenced by workflow commands) fails every stage at runtime.
+				return fmt.Errorf("invalid workspace file path %q: %w", name, err)
 			}
-			// Write to the *staged* workspace dir (~/workspace) so that syncStagedWorkspaceToOpenClawWorkspace
-			// (run inside bridge) will copy the injected files (e.g. CONTEXT.md for GitHub Issues/Linear factories)
-			// into ~/.openclaw/workspace. Direct writes to ~/.openclaw/workspace get stripped by the managed-files removal in sync.
-			targetPath := "/home/daytona/workspace/" + safeName
+			// Write straight into the LIVE workspace. The Daytona bridge is started
+			// WITHOUT ELASTICCLAW_BOOTSTRAP (see daytonaAsyncBridgeCommand), so
+			// runBootstrap -- and with it syncStagedWorkspaceToOpenClawWorkspace --
+			// never runs on this provider: nothing would ever copy staged files over.
+			// Mirrors Replicated, which also writes final files after bootstrap.
+			targetPath := daytonaLiveWorkspaceDir + "/" + safeName
 			targetDir := path.Dir(targetPath)
 			// Use collision-resistant delimiter (same strategy as early flake staging)
 			// to protect against content containing a fixed token.
 			raw := make([]byte, 8)
 			if _, err := rand.Read(raw); err != nil {
-				log.Printf("[daytona] warning: rand for write delim %s: %v", name, err)
-				continue
+				return fmt.Errorf("random delimiter for workspace file %s: %w", name, err)
 			}
 			delim := "ELASTICCLAW_FILE_" + hex.EncodeToString(raw)
 			writeCmd := fmt.Sprintf(
@@ -3648,11 +3654,15 @@ cp "$BIN" /tmp/claw-bridge.download && chmod +x /tmp/claw-bridge.download && mv 
 %s
 %s`,
 				shellQuote(targetDir), shellQuote(targetPath), delim, content, delim)
-			if err := exec("write "+name, 15*time.Second, writeCmd); err != nil {
-				log.Printf("[daytona] warning: failed to write %s: %v", name, err)
+			if daytonaExecutableWorkspaceFile(safeName) {
+				writeCmd += fmt.Sprintf("\nchmod +x %s", shellQuote(targetPath))
 			}
+			if err := exec("write "+name, 15*time.Second, writeCmd); err != nil {
+				return fmt.Errorf("write workspace file %s: %w", name, err)
+			}
+			writtenWorkspaceFiles[safeName] = content
 		}
-		log.Printf("[daytona] template files written for claw %s", clawID)
+		log.Printf("[daytona] %d workspace files written for claw %s", len(writtenWorkspaceFiles), clawID)
 	}
 
 	// Step 5: GitHub credential helper (if GitHub Apps configured)
@@ -3809,6 +3819,26 @@ gh auth status`
 
 	if err := s.restoreCheckpointToDaytona(ctx, clawID, instanceID, p); err != nil {
 		return fmt.Errorf("restore checkpoint: %w", err)
+	}
+
+	// Workspace file gate: every file the workspace declares (including nested
+	// scripts/**) must exist before the agent's first turn, otherwise workflow
+	// commands fail with "can't open file" on every stage.
+	if len(writtenWorkspaceFiles) > 0 {
+		s.setBootstrapStatus(clawID, "Verifying workspace files")
+		filesScript := daytonaWorkspaceFilesReadinessCommand(daytonaLiveWorkspaceDir, writtenWorkspaceFiles)
+		filesResult, filesErr := p.ExecWithTimeout(ctx, instanceID, []string{"bash", "-c", filesScript}, 30*time.Second)
+		if filesErr != nil {
+			diag := fmt.Sprintf("Workspace files verification failed: %v", filesErr)
+			s.setBootstrapStatusWithDiagnostic(clawID, "Workspace incomplete", diag)
+			return fmt.Errorf("workspace files readiness: %w", filesErr)
+		}
+		if filesResult.ExitCode != 0 {
+			diag := fmt.Sprintf("Workspace files incomplete. %s", sanitizeBootstrapOutput(filesResult.Stdout))
+			s.setBootstrapStatusWithDiagnostic(clawID, "Workspace incomplete", diag)
+			return fmt.Errorf("workspace files incomplete (exit %d): %s", filesResult.ExitCode, sanitizeBootstrapOutput(filesResult.Stdout))
+		}
+		log.Printf("[daytona] workspace files verified for claw %s", clawID)
 	}
 
 	// Final workspace readiness gate: verify every configured repository is
@@ -4054,6 +4084,45 @@ if pgrep -af %s >/dev/null 2>&1; then
 fi
 echo "openclaw-install-status=missing"
 tail -n 120 "$LOG" 2>/dev/null || true`, shellQuote("openclaw@"+version))
+}
+
+// daytonaLiveWorkspaceDir is the workspace the OpenClaw agent actually runs in.
+const daytonaLiveWorkspaceDir = "/home/daytona/.openclaw/workspace"
+
+func sortedWorkspaceFileNames(files map[string]string) []string {
+	names := make([]string, 0, len(files))
+	for name := range files {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// daytonaExecutableWorkspaceFile reports whether a workspace file should be
+// written with the executable bit (scripts are frequently invoked directly).
+func daytonaExecutableWorkspaceFile(name string) bool {
+	ext := strings.ToLower(path.Ext(name))
+	return ext == ".sh" || ext == ".py"
+}
+
+// daytonaWorkspaceFilesReadinessCommand verifies every workspace file landed in
+// the live workspace, including nested paths such as scripts/review-loop/x.md.
+func daytonaWorkspaceFilesReadinessCommand(dir string, files map[string]string) string {
+	if len(files) == 0 {
+		return "true"
+	}
+	var b strings.Builder
+	b.WriteString("set -e\n")
+	for _, name := range sortedWorkspaceFileNames(files) {
+		remotePath := strings.TrimRight(dir, "/") + "/" + name
+		b.WriteString("test -f ")
+		b.WriteString(shellQuote(remotePath))
+		b.WriteString(" || { echo ")
+		b.WriteString(shellQuote("missing workspace file: " + name))
+		b.WriteString("; exit 1; }\n")
+	}
+	b.WriteString("echo 'workspace files verified'\n")
+	return b.String()
 }
 
 func daytonaPrepareBridgeCommand() string {
