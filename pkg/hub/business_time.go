@@ -147,6 +147,13 @@ func parseBusinessHours(value string) (int, int, error) {
 	if err != nil {
 		return 0, 0, err
 	}
+	// Reject reversed or empty windows here rather than letting them through.
+	// DurationMs treats end <= start as "no window configured" and falls back
+	// to wall-clock, so accepting them would silently disable the adjustment
+	// with no log line for the operator to find.
+	if end <= start {
+		return 0, 0, fmt.Errorf("end %q must be after start %q", parts[1], parts[0])
+	}
 	return start, end, nil
 }
 

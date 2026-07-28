@@ -33,6 +33,9 @@ export function ManualTriggerModal({ open, onOpenChange, workflow }: ManualTrigg
   // of a setState-in-effect, so no stale-values render is committed.
   if (workflow !== seededWorkflow) {
     setSeededWorkflow(workflow)
+    // Clear on every workflow change, not just the has-inputs branch —
+    // otherwise an error from the previous workflow survives the switch.
+    setTriggerError(null)
     if (!workflow?.inputs) {
       setInputValues({})
     } else {
@@ -47,7 +50,6 @@ export function ManualTriggerModal({ open, onOpenChange, workflow }: ManualTrigg
         }
       }
       setInputValues(defaults)
-      setTriggerError(null)
     }
   }
 

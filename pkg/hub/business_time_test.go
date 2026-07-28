@@ -109,3 +109,35 @@ func TestBusinessHoursDurationMsDST(t *testing.T) {
 		})
 	}
 }
+
+func TestBusinessHoursFromEnvRejectsReversedWindow(t *testing.T) {
+	// A reversed or empty window must not reach DurationMs: it reads
+	// end <= start as "unconfigured" and silently returns wall-clock, which
+	// looks identical to the feature being off.
+	for _, invalid := range []string{"18:00-09:00", "09:00-09:00"} {
+		t.Run(invalid, func(t *testing.T) {
+			if _, _, err := parseBusinessHours(invalid); err == nil {
+				t.Fatalf("parseBusinessHours(%q) = nil error, want rejection", invalid)
+			}
+
+			t.Setenv("HUB_BUSINESS_HOURS", invalid)
+			business := BusinessHoursFromEnv("America/Sao_Paulo")
+			if business.StartMin != 9*60 || business.EndMin != 18*60 {
+				t.Fatalf("window = %d-%d, want the 9:00-18:00 default", business.StartMin, business.EndMin)
+			}
+
+			loc, err := time.LoadLocation("America/Sao_Paulo")
+			if err != nil {
+				t.Fatalf("LoadLocation: %v", err)
+			}
+			// Wednesday 08:00 -> 12:00 is 3 business hours under the default
+			// window; a silent wall-clock fallback would report 4.
+			from := time.Date(2026, time.July, 1, 8, 0, 0, 0, loc)
+			to := time.Date(2026, time.July, 1, 12, 0, 0, 0, loc)
+			want := int64(3 * time.Hour / time.Millisecond)
+			if got := business.DurationMs(from.UnixMilli(), to.UnixMilli()); got != want {
+				t.Fatalf("DurationMs() = %d, want %d", got, want)
+			}
+		})
+	}
+}
