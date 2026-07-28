@@ -526,9 +526,16 @@ func (s *Server) checkCIStatus(pr clawPR, token string) {
 			allCompleted = false
 		}
 
-		if conclusion == "failure" || conclusion == "timed_out" {
+		// Anything terminal that is not green blocks: cancelled, action_required,
+		// stale and startup_failure are "completed" too, and announcing them as
+		// "all checks passed" would be an affirmative false claim.
+		if conclusion != "" && !isGreenCheckConclusion(conclusion) {
 			detailsURL, _ := run["details_url"].(string)
-			failures = append(failures, fmt.Sprintf("**%s** — [view logs](%s)", name, detailsURL))
+			label := name
+			if conclusion != "failure" && conclusion != "timed_out" {
+				label = fmt.Sprintf("%s (%s)", name, conclusion)
+			}
+			failures = append(failures, fmt.Sprintf("**%s** — [view logs](%s)", label, detailsURL))
 		}
 	}
 
@@ -582,6 +589,18 @@ const (
 	ciConclusionSuccess = "success"
 	ciConclusionFailure = "failure"
 )
+
+// isGreenCheckConclusion reports whether a completed check run counts as green.
+// GitHub's non-green terminal conclusions (failure, timed_out, cancelled,
+// action_required, stale, startup_failure) and any conclusion we do not know
+// are treated as blocking, so an unknown value can never be reported as green.
+func isGreenCheckConclusion(conclusion string) bool {
+	switch conclusion {
+	case "success", "neutral", "skipped":
+		return true
+	}
+	return false
+}
 
 func shortSHA(sha string) string {
 	if len(sha) > 7 {

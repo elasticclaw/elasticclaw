@@ -638,6 +638,57 @@ func TestCheckCIStatusFailureMessageUnchangedAndRerunCanTurnGreen(t *testing.T) 
 	}
 }
 
+// A completed-but-not-green conclusion (cancelled, action_required, stale,
+// startup_failure, or anything unknown) must never be announced as green: the
+// claw would emit its stage signal token on a PR that is not actually passing.
+func TestCheckCIStatusNonGreenTerminalConclusionsAreNotGreen(t *testing.T) {
+	for _, conclusion := range []string{"cancelled", "action_required", "stale", "startup_failure", "some_future_value"} {
+		t.Run(conclusion, func(t *testing.T) {
+			clawID := "claw-ci-" + conclusion
+			const headSHA = "abcdef1234567890"
+			s, db, pr := ciStatusFixture(t, clawID, headSHA,
+				`[{"name":"verify","status":"completed","conclusion":"success"},
+				  {"name":"deploy","status":"completed","conclusion":"`+conclusion+`","details_url":"https://ci/2"}]`)
+
+			s.checkCIStatus(pr, "token")
+
+			msgs := ciMessages(t, db, clawID)
+			if len(msgs) != 1 {
+				t.Fatalf("messages = %v, want exactly 1", msgs)
+			}
+			if strings.Contains(msgs[0], "All CI checks passed") {
+				t.Fatalf("%q reported as green: %q", conclusion, msgs[0])
+			}
+			if !strings.Contains(msgs[0], "**deploy ("+conclusion+")**") {
+				t.Fatalf("message does not name the non-green check: %q", msgs[0])
+			}
+			if _, got := ciWatermark(t, db, pr.id); got != ciConclusionFailure {
+				t.Fatalf("watermark conclusion = %q, want failure", got)
+			}
+		})
+	}
+}
+
+// neutral and skipped are green: a skipped optional job must not block the PR.
+func TestCheckCIStatusNeutralAndSkippedAreGreen(t *testing.T) {
+	const clawID = "claw-ci-neutral"
+	const headSHA = "fedcba0987654321"
+	s, db, pr := ciStatusFixture(t, clawID, headSHA,
+		`[{"name":"verify","status":"completed","conclusion":"success"},
+		  {"name":"optional","status":"completed","conclusion":"skipped"},
+		  {"name":"advisory","status":"completed","conclusion":"neutral"}]`)
+
+	s.checkCIStatus(pr, "token")
+
+	msgs := ciMessages(t, db, clawID)
+	if len(msgs) != 1 || !strings.Contains(msgs[0], "All CI checks passed") {
+		t.Fatalf("messages = %v, want one green notification", msgs)
+	}
+	if _, got := ciWatermark(t, db, pr.id); got != ciConclusionSuccess {
+		t.Fatalf("watermark conclusion = %q, want success", got)
+	}
+}
+
 func TestInjectMessageSkipsIdenticalPendingRow(t *testing.T) {
 	s, db := NewTestServerWithConfig(t, &types.HubConfig{ClawToken: "claw-token"}, "", "", "")
 	const clawID = "inject-message-dedupe"
