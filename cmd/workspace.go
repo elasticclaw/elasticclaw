@@ -13,6 +13,7 @@ import (
 
 	"github.com/elasticclaw/elasticclaw/pkg/config"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
+	v2 "github.com/elasticclaw/elasticclaw/pkg/types/v2"
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
 )
@@ -61,9 +62,16 @@ func workspaceCreateCmd() *cobra.Command {
 	return cmd
 }
 
+// localWorkspaceDirs are candidate repo-local roots for workspace definitions.
+// factory-workspaces is preferred; .elasticclaw/workspaces remains supported.
+var localWorkspaceDirs = []string{
+	"factory-workspaces",
+	filepath.Join(".elasticclaw", "workspaces"),
+}
+
 func runWorkspaceCreate(name string) error {
 	name = strings.ToLower(strings.ReplaceAll(name, " ", "-"))
-	dir := filepath.Join(".elasticclaw", "workspaces", name)
+	dir := filepath.Join(localWorkspaceDirs[0], name)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return fmt.Errorf("create workspace directory: %w", err)
 	}
@@ -170,9 +178,10 @@ func workspacePushCmd() *cobra.Command {
 		Short: "Push workspace definitions to the hub",
 		Long: `Push workspace definitions to the hub.
 
-By default, searches .elasticclaw/workspaces/ and pushes all valid workspaces.
+By default, searches factory-workspaces/ (preferred) and .elasticclaw/workspaces/
+and pushes all valid workspaces.
 Pass a name to push only the matching workspace.
-Use --path to push a workspace from a specific directory instead of the default location.`,
+Use --path to push a workspace from a specific directory instead of the default locations.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			name := ""
 			if len(args) > 0 {
@@ -181,7 +190,7 @@ Use --path to push a workspace from a specific directory instead of the default 
 			return runWorkspacePush(name, path)
 		},
 	}
-	cmd.Flags().StringVar(&path, "path", "", "path to a specific workspace directory to push (instead of .elasticclaw/workspaces/)")
+	cmd.Flags().StringVar(&path, "path", "", "path to a specific workspace directory to push (instead of factory-workspaces/)")
 	return cmd
 }
 
@@ -229,8 +238,8 @@ func runWorkspacePush(filterName string, path string) error {
 
 // collectWorkspacesForPush resolves the workspace directories to push.
 // If path is set, it pushes only that directory. Otherwise it scans
-// .elasticclaw/workspaces/*. The filterName optionally restricts results
-// to a single workspace name.
+// factory-workspaces/* then .elasticclaw/workspaces/*. The filterName
+// optionally restricts results to a single workspace name.
 func collectWorkspacesForPush(filterName string, path string) ([]*types.WorkspaceConfig, error) {
 	var workspaces []*types.WorkspaceConfig
 
@@ -255,12 +264,20 @@ func collectWorkspacesForPush(filterName string, path string) ([]*types.Workspac
 		return []*types.WorkspaceConfig{workspace}, nil
 	}
 
-	pattern := filepath.Join(".elasticclaw", "workspaces", "*")
-	matches, err := filepath.Glob(pattern)
-	if err != nil || len(matches) == 0 {
-		return nil, fmt.Errorf("no workspaces found under .elasticclaw/workspaces/")
+	var matches []string
+	for _, root := range localWorkspaceDirs {
+		pattern := filepath.Join(root, "*")
+		found, err := filepath.Glob(pattern)
+		if err != nil {
+			continue
+		}
+		matches = append(matches, found...)
+	}
+	if len(matches) == 0 {
+		return nil, fmt.Errorf("no workspaces found under factory-workspaces/ or .elasticclaw/workspaces/")
 	}
 
+	seen := map[string]struct{}{}
 	for _, match := range matches {
 		if info, err := os.Stat(match); err != nil || !info.IsDir() {
 			continue
@@ -272,9 +289,15 @@ func collectWorkspacesForPush(filterName string, path string) ([]*types.Workspac
 		if filterName != "" && !strings.EqualFold(workspace.Name, filterName) {
 			continue
 		}
+		// Prefer earlier roots (factory-workspaces) when the same name appears twice.
+		key := strings.ToLower(workspace.Name)
+		if _, dup := seen[key]; dup {
+			continue
+		}
 		if err := workspace.Validate(); err != nil {
 			return nil, fmt.Errorf("validation failed for %s: %w", match, err)
 		}
+		seen[key] = struct{}{}
 		workspaces = append(workspaces, workspace)
 	}
 	return workspaces, nil
@@ -326,6 +349,42 @@ func readWorkspaceDir(dir string) (*types.WorkspaceConfig, error) {
 		}
 		configPath = legacyPath
 	}
+
+	files, err := config.ReadTemplateFiles(dir)
+	if err != nil {
+		files = map[string]string{}
+	}
+	if files == nil {
+		files = map[string]string{}
+	}
+	// Always push the authored config bytes under the canonical name so the hub
+	// store path can validate v1/v2 without re-deriving from typed fields.
+	files["elasticclaw-config.yaml"] = string(data)
+
+	version, err := v2.DetectSchemaVersion(data)
+	if err != nil {
+		return nil, fmt.Errorf("parse %s: %w", configPath, err)
+	}
+
+	// V2 documents use map-shaped repositories/connections that cannot unmarshal
+	// into the v1 WorkspaceConfig type. Carry the raw YAML in Files and validate
+	// with the v2 schema; the hub save path validates and stores that YAML.
+	if v2.IsV2(version) {
+		resolved, err := v2.ParseAndValidateWorkspace(data)
+		if err != nil {
+			return nil, fmt.Errorf("validate workspace v2 %s: %w", configPath, err)
+		}
+		name := resolved.Workspace.Name
+		if name == "" {
+			name = filepath.Base(dir)
+		}
+		return &types.WorkspaceConfig{
+			SchemaVersion: "2",
+			Name:          name,
+			Files:         files,
+		}, nil
+	}
+
 	var workspace types.WorkspaceConfig
 	if err := yaml.Unmarshal(data, &workspace); err != nil {
 		return nil, fmt.Errorf("parse %s: %w", configPath, err)
@@ -333,9 +392,7 @@ func readWorkspaceDir(dir string) (*types.WorkspaceConfig, error) {
 	if workspace.Name == "" {
 		workspace.Name = filepath.Base(dir)
 	}
-	if files, err := config.ReadTemplateFiles(dir); err == nil {
-		workspace.Files = files
-	}
+	workspace.Files = files
 	return &workspace, nil
 }
 
