@@ -65,6 +65,7 @@ func migrate(db *sql.DB) error {
 	_, _ = db.Exec(`ALTER TABLE claw_prs ADD COLUMN permanent_failure_count INTEGER NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE claw_prs ADD COLUMN last_review_comment_id INTEGER NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE claw_prs ADD COLUMN last_review_id INTEGER NOT NULL DEFAULT 0`)
+	_, _ = db.Exec(`ALTER TABLE claw_prs ADD COLUMN last_ci_conclusion TEXT NOT NULL DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE messages ADD COLUMN format TEXT NOT NULL DEFAULT ''`)
 	if _, err := db.Exec(`ALTER TABLE messages ADD COLUMN delivered_at DATETIME`); err == nil {
 		// A failed backfill must abort startup: the column now exists, so a
@@ -539,6 +540,7 @@ func migrate(db *sql.DB) error {
 		pr_number   INTEGER NOT NULL,
 		pr_url      TEXT NOT NULL,
 		last_ci_sha TEXT NOT NULL DEFAULT '',   -- last SHA we checked CI on
+		last_ci_conclusion TEXT NOT NULL DEFAULT '', -- terminal CI verdict already delivered for last_ci_sha: '' | 'success' | 'failure'
 		last_comment_id INTEGER NOT NULL DEFAULT 0, -- last bugbot/pipeline comment ID seen
 		last_comment_at TEXT NOT NULL DEFAULT '', -- timestamp of last seen comment
 		last_review_comment_id INTEGER NOT NULL DEFAULT 0, -- last PR review comment ID seen

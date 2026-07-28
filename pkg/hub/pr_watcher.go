@@ -287,6 +287,7 @@ type clawPR struct {
 	prNumber            int
 	prURL               string
 	lastCISHA           string
+	lastCIConclusion    string
 	lastCommentID       int64
 	lastCommentAt       string
 	lastReviewCommentID int64
@@ -297,7 +298,7 @@ type clawPR struct {
 
 func (s *Server) pollAllPRs() {
 	rows, err := s.db.Query(`
-		SELECT cp.id, cp.claw_id, cp.repo, cp.pr_number, cp.pr_url, cp.last_ci_sha, cp.last_comment_id,
+		SELECT cp.id, cp.claw_id, cp.repo, cp.pr_number, cp.pr_url, cp.last_ci_sha, cp.last_ci_conclusion, cp.last_comment_id,
 		       cp.last_comment_at, cp.last_review_comment_id, cp.last_review_id, cp.pr_conditions_fired, cp.created_at,
 		       cl.status
 		FROM claw_prs cp
@@ -322,7 +323,7 @@ func (s *Server) pollAllPRs() {
 		var r row
 		var prConditionsFiredInt int
 		if err := rows.Scan(&r.pr.id, &r.pr.clawID, &r.pr.repo, &r.pr.prNumber, &r.pr.prURL,
-			&r.pr.lastCISHA, &r.pr.lastCommentID, &r.pr.lastCommentAt, &r.pr.lastReviewCommentID, &r.pr.lastReviewID, &prConditionsFiredInt, &r.pr.createdAt,
+			&r.pr.lastCISHA, &r.pr.lastCIConclusion, &r.pr.lastCommentID, &r.pr.lastCommentAt, &r.pr.lastReviewCommentID, &r.pr.lastReviewID, &prConditionsFiredInt, &r.pr.createdAt,
 			&r.clawStatus); err != nil {
 			continue
 		}
@@ -367,8 +368,8 @@ func (s *Server) pollAllPRs() {
 			terminatedClaws[r.pr.clawID] = true
 			continue // claw is being terminated, skip other checks
 		}
-		// Always check CI failures
-		s.checkCIFailures(r.pr, token)
+		// Always check CI status (failures and, just as importantly, green)
+		s.checkCIStatus(r.pr, token)
 
 		repoToken := s.resolveGitHubTokenForRepo(r.pr.repo)
 		if repoToken == "" {
@@ -475,10 +476,20 @@ func (s *Server) resolveGitHubToken() string {
 	return s.resolveGitHubTokenWithRepos(nil)
 }
 
-// checkCIFailures polls PR check runs and injects a message on new failures.
-func (s *Server) checkCIFailures(pr clawPR, token string) {
+// checkCIStatus polls PR check runs and injects a message when CI reaches a
+// terminal verdict for the head SHA — failure *or* success.
+//
+// The success branch exists because a green CI run is otherwise not an event:
+// an agent that pushed a fix and ended its turn waiting on CI would never be
+// woken, and the run deadlocks with both sides waiting on each other.
+func (s *Server) checkCIStatus(pr clawPR, token string) {
+	ghBase := s.githubBaseURL
+	if ghBase == "" {
+		ghBase = "https://api.github.com"
+	}
+
 	// Get PR head SHA
-	prData, err := githubAPI(fmt.Sprintf("repos/%s/pulls/%d", pr.repo, pr.prNumber), token)
+	prData, err := githubAPIWithBase(ghBase, fmt.Sprintf("repos/%s/pulls/%d", pr.repo, pr.prNumber), token)
 	if err != nil {
 		return
 	}
@@ -487,12 +498,17 @@ func (s *Server) checkCIFailures(pr clawPR, token string) {
 		return
 	}
 	headSHA, ok := headObj["sha"].(string)
-	if !ok || headSHA == "" || headSHA == pr.lastCISHA {
-		return // no new commits
+	if !ok || headSHA == "" {
+		return
+	}
+	// Already delivered a terminal verdict for this SHA. A failure verdict stays
+	// re-checkable so a re-run of the same commit can still report green.
+	if headSHA == pr.lastCISHA && pr.lastCIConclusion == ciConclusionSuccess {
+		return
 	}
 
 	// Get check runs for head SHA
-	checksData, err := githubAPI(fmt.Sprintf("repos/%s/commits/%s/check-runs", pr.repo, headSHA), token)
+	checksData, err := githubAPIWithBase(ghBase, fmt.Sprintf("repos/%s/commits/%s/check-runs", pr.repo, headSHA), token)
 	if err != nil {
 		return
 	}
@@ -516,19 +532,62 @@ func (s *Server) checkCIFailures(pr clawPR, token string) {
 		}
 	}
 
-	// Only update SHA if all checks have completed or if we found failures
-	if len(failures) > 0 || allCompleted {
-		_, _ = s.db.Exec(`UPDATE claw_prs SET last_ci_sha=? WHERE id=?`, headSHA, pr.id)
+	// No check runs at all: CI has not reported yet. Reporting "0 checks passed"
+	// would be a spurious wake-up, and advancing the watermark would hide the
+	// real verdict when it lands.
+	if len(checkRuns) == 0 {
+		return
 	}
-
-	if len(failures) == 0 {
+	// CI still running: nothing terminal to report, and the watermark must not
+	// advance or the eventual verdict becomes unobservable.
+	if len(failures) == 0 && !allCompleted {
 		return
 	}
 
-	msg := fmt.Sprintf("CI failed on PR #%d ([%s](%s)):\n\n%s\n\nPlease fix these failures on the same branch.",
-		pr.prNumber, pr.repo, pr.prURL, strings.Join(failures, "\n"))
+	conclusion := ciConclusionSuccess
+	if len(failures) > 0 {
+		conclusion = ciConclusionFailure
+	}
 
-	s.injectUserMessage(pr.clawID, msg)
+	// Conditional UPDATE = claim, same idiom as claimPipelineStageTransition.
+	// Exactly one poll (and exactly one hub process) observes a given
+	// (sha, conclusion) pair, so the injection below cannot double-fire.
+	res, err := s.db.Exec(
+		`UPDATE claw_prs SET last_ci_sha=?, last_ci_conclusion=? WHERE id=? AND NOT (last_ci_sha=? AND last_ci_conclusion=?)`,
+		headSHA, conclusion, pr.id, headSHA, conclusion)
+	if err != nil {
+		log.Printf("[pr-watcher] failed to claim CI status for %s: %v", pr.prURL, err)
+		return
+	}
+	if claimed, err := res.RowsAffected(); err != nil || claimed == 0 {
+		return
+	}
+
+	if conclusion == ciConclusionFailure {
+		msg := fmt.Sprintf("CI failed on PR #%d ([%s](%s)):\n\n%s\n\nPlease fix these failures on the same branch.",
+			pr.prNumber, pr.repo, pr.prURL, strings.Join(failures, "\n"))
+		s.injectUserMessage(pr.clawID, msg)
+		return
+	}
+
+	log.Printf("[pr-watcher] CI passed on %s@%s — notifying claw %s", pr.prURL, shortSHA(headSHA), shortID(pr.clawID))
+	s.injectExternalHubMessageByID(pr.clawID, fmt.Sprintf(
+		"[hub] All CI checks passed on PR #%d ([%s](%s)) at commit `%s` (%d check(s)).\n\n"+
+			"If your workflow is waiting on CI, this is the signal to proceed: emit the stage's signal token, or explain what is still blocking you.",
+		pr.prNumber, pr.repo, pr.prURL, shortSHA(headSHA), len(checkRuns)))
+}
+
+// Terminal CI verdicts recorded in claw_prs.last_ci_conclusion.
+const (
+	ciConclusionSuccess = "success"
+	ciConclusionFailure = "failure"
+)
+
+func shortSHA(sha string) string {
+	if len(sha) > 7 {
+		return sha[:7]
+	}
+	return sha
 }
 
 type prCommentOptions struct {
