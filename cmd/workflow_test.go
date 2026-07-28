@@ -117,6 +117,61 @@ stages:
 	}
 }
 
+func TestRunWorkflowLogsFetchesRunAndActivityMessages(t *testing.T) {
+	started := time.Date(2026, 7, 24, 9, 0, 0, 0, time.UTC)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/workspaces/default/workflows/dependency-update/cron/runs/run-1":
+			_ = json.NewEncoder(w).Encode(types.WorkflowRun{
+				ID:            "run-1",
+				WorkflowName:  "dependency-update",
+				WorkspaceName: "default",
+				TriggerType:   "cron",
+				Status:        "failed",
+				Result:        "provisioning timed out",
+				ClawID:        "claw-1234567890",
+				StartedAt:     &started,
+				CreatedAt:     started,
+			})
+		case "/api/messages/claw-1234567890/activity":
+			_ = json.NewEncoder(w).Encode([]types.HubMessage{
+				{
+					ID:        "msg-1",
+					ClawID:    "claw-1234567890",
+					Role:      "activity",
+					Format:    `activity:{"kind":"tool","tool":"bash","command":"ls -la"}`,
+					CreatedAt: started,
+				},
+				{
+					ID:        "msg-2",
+					ClawID:    "claw-1234567890",
+					Role:      "activity",
+					Format:    `activity:{"kind":"tool","tool":"bash","error":"command failed","detail":"exit status 1"}`,
+					CreatedAt: started.Add(time.Second),
+				},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	t.Setenv("ELASTICCLAW_HUB_URL", server.URL)
+	t.Setenv("ELASTICCLAW_CLAW_TOKEN", "test-token")
+
+	out, err := captureStdout(func() error {
+		return runWorkflowLogs("default", "dependency-update", "run-1")
+	})
+	if err != nil {
+		t.Fatalf("runWorkflowLogs returned error: %v", err)
+	}
+	for _, want := range []string{"Agent logs for run run-1", "claw-123", "failed", "[bash]", "cmd: ls -la", "error: command failed"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("output missing %q:\n%s", want, out)
+		}
+	}
+}
+
 func TestRunWorkflowRunsListsRunsAndShortAgentID(t *testing.T) {
 	started := time.Date(2026, 7, 24, 9, 0, 0, 0, time.UTC)
 	finished := started.Add(5 * time.Minute)
@@ -158,7 +213,7 @@ func TestRunWorkflowRunsListsRunsAndShortAgentID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("runWorkflowRuns returned error: %v", err)
 	}
-	for _, want := range []string{"failed", "cron", "claw-123", "provisioning timed out", "Showing 1 run"} {
+	for _, want := range []string{"RUN ID", "run-1", "failed", "cron", "claw-123", "provisioning timed out", "Showing 1 run"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("output missing %q:\n%s", want, out)
 		}

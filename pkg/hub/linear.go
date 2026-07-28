@@ -1623,7 +1623,7 @@ func (s *Server) completeNoPRDoneClaw(clawID, tenantID, issueID string) {
 		if providerID != "" {
 			s.terminateVMForClaw(clawID, provider, providerID)
 		}
-		_, _ = s.db.Exec(`DELETE FROM messages WHERE claw_id=?`, clawID)
+		// Keep messages (including agent activity logs) for post-mortem diagnosis.
 		_, _ = s.db.Exec(`DELETE FROM claw_prs WHERE claw_id=?`, clawID)
 		s.promotePendingClaws()
 	}()
@@ -1632,7 +1632,7 @@ func (s *Server) completeNoPRDoneClaw(clawID, tenantID, issueID string) {
 // handleClawTerminateSignal is called when a claw sends a message containing [TERMINATE].
 // It immediately terminates the claw, allowing the claw to manage its own lifecycle.
 // Unlike [DONE] which moves issues and keeps the claw in idle mode, [TERMINATE] immediately
-// deletes the claw and its associated VM.
+// soft-deletes the claw and terminates its associated VM while preserving run logs.
 func (s *Server) handleClawTerminateSignal(clawID, rawMessage string) {
 	// Get the tenant ID and issue ID for this claw
 	var issueID, tenantID, factoryName string
@@ -1705,10 +1705,11 @@ func (s *Server) handleClawTerminateSignal(clawID, rawMessage string) {
 	}
 	s.mu.Unlock()
 
-	// Delete messages first (FK constraint)
-	_, _ = s.db.Exec(`DELETE FROM messages WHERE claw_id = ?`, clawID)
+	// Soft-delete the claw and keep messages (including agent activity logs)
+	// for post-mortem diagnosis. claw_prs is still removed because it is tied to
+	// the issue lifecycle rather than the run log.
 	_, _ = s.db.Exec(`DELETE FROM claw_prs WHERE claw_id = ?`, clawID)
-	_, _ = s.db.Exec(`DELETE FROM claws WHERE id = ?`, clawID)
+	_, _ = s.db.Exec(`UPDATE claws SET status='deleted' WHERE id = ?`, clawID)
 
 	// Notify dashboards so the card disappears immediately
 	s.broadcastToUsers(tenantID, types.WSMessage{
