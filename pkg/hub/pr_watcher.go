@@ -354,6 +354,49 @@ type clawPR struct {
 	createdAt           string
 }
 
+// loadClawPRsByNumber hydrates every tracked-PR row for a (repo, number) pair
+// that belongs to a live claw — the same set pollAllPRs would visit, restricted
+// to one PR. More than one claw can track the same PR, and each row carries its
+// own CI watermark, so all of them have to be evaluated.
+//
+// checkCIStatus claims its verdict with a conditional UPDATE keyed on
+// claw_prs.id and skips work using the stored watermark, so the value-literal
+// clawPR built by the review-comment webhook handlers (which leaves id empty)
+// is not sufficient here — the rows have to come from the database.
+func (s *Server) loadClawPRsByNumber(repo string, prNumber int) []clawPR {
+	rows, err := s.db.Query(`
+		SELECT cp.id, cp.claw_id, cp.repo, cp.pr_number, cp.pr_url, cp.last_ci_sha, cp.last_ci_conclusion, cp.last_comment_id,
+		       cp.last_comment_at, cp.last_review_comment_id, cp.last_review_id, cp.pr_conditions_fired, cp.created_at
+		FROM claw_prs cp
+		JOIN claws cl ON cl.id = cp.claw_id
+		WHERE cp.repo = ? AND cp.pr_number = ? AND cl.status NOT IN ('deleted','error','offline')
+		ORDER BY cp.created_at DESC
+	`, repo, prNumber)
+	if err != nil {
+		log.Printf("[pr-watcher] failed to load tracked PR %s#%d: %v", repo, prNumber, err)
+		return nil
+	}
+	defer rows.Close()
+
+	var prs []clawPR
+	for rows.Next() {
+		var pr clawPR
+		var prConditionsFiredInt int
+		if err := rows.Scan(&pr.id, &pr.clawID, &pr.repo, &pr.prNumber, &pr.prURL,
+			&pr.lastCISHA, &pr.lastCIConclusion, &pr.lastCommentID, &pr.lastCommentAt,
+			&pr.lastReviewCommentID, &pr.lastReviewID, &prConditionsFiredInt, &pr.createdAt); err != nil {
+			log.Printf("[pr-watcher] failed to scan tracked PR %s#%d: %v", repo, prNumber, err)
+			return prs
+		}
+		pr.prConditionsFired = prConditionsFiredInt == 1
+		prs = append(prs, pr)
+	}
+	if err := rows.Err(); err != nil {
+		log.Printf("[pr-watcher] failed to iterate tracked PRs %s#%d: %v", repo, prNumber, err)
+	}
+	return prs
+}
+
 func (s *Server) pollAllPRs() {
 	rows, err := s.db.Query(`
 		SELECT cp.id, cp.claw_id, cp.repo, cp.pr_number, cp.pr_url, cp.last_ci_sha, cp.last_ci_conclusion, cp.last_comment_id,

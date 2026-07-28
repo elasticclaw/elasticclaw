@@ -139,6 +139,17 @@ func (s *Server) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 				payload.Action, payload.Repository.FullName, payload.Issue.Number, payload.Comment.User.Login)
 			s.safeGo("github issue comment webhook", func() { s.processGitHubIssueComment(payload) })
 		}
+	case "check_run", "check_suite":
+		var payload githubCheckPayload
+		if err := json.Unmarshal(body, &payload); err != nil {
+			log.Printf("[github-webhook] failed to parse %s payload: %v", event, err)
+			http.Error(w, "invalid payload", http.StatusBadRequest)
+			return
+		}
+		headSHA, prNumbers, conclusion := payload.checkEventSummary(event)
+		log.Printf("[github-webhook] %s action=%q repo=%q sha=%q conclusion=%q prs=%d",
+			event, payload.Action, payload.Repository.FullName, headSHA, conclusion, len(prNumbers))
+		s.safeGo("github check webhook", func() { s.processGitHubCheckEvent(event, payload) })
 	case "ping":
 		log.Printf("[github-webhook] ping received — webhook configured correctly")
 	default:
@@ -415,6 +426,103 @@ type githubPRReviewPayload struct {
 	Repository struct {
 		FullName string `json:"full_name"`
 	} `json:"repository"`
+}
+
+// githubCheckPayload holds the fields we need from check_run and check_suite
+// webhook events. One struct serves both: the handler reads the sub-object that
+// matches the event name.
+type githubCheckPayload struct {
+	Action   string `json:"action"` // "completed", "created", "rerequested", "requested"
+	CheckRun struct {
+		Name         string `json:"name"`
+		Status       string `json:"status"`
+		Conclusion   string `json:"conclusion"`
+		HeadSHA      string `json:"head_sha"`
+		PullRequests []struct {
+			Number int `json:"number"`
+		} `json:"pull_requests"`
+	} `json:"check_run"`
+	CheckSuite struct {
+		Status       string `json:"status"`
+		Conclusion   string `json:"conclusion"`
+		HeadSHA      string `json:"head_sha"`
+		PullRequests []struct {
+			Number int `json:"number"`
+		} `json:"pull_requests"`
+	} `json:"check_suite"`
+	Repository struct {
+		FullName string `json:"full_name"`
+	} `json:"repository"`
+}
+
+// checkEventSummary extracts the head SHA, PR numbers and conclusion for the
+// sub-object matching the event name.
+func (p githubCheckPayload) checkEventSummary(event string) (headSHA string, prNumbers []int, conclusion string) {
+	if event == "check_suite" {
+		headSHA, conclusion = p.CheckSuite.HeadSHA, p.CheckSuite.Conclusion
+		for _, pr := range p.CheckSuite.PullRequests {
+			prNumbers = append(prNumbers, pr.Number)
+		}
+		return headSHA, prNumbers, conclusion
+	}
+	headSHA, conclusion = p.CheckRun.HeadSHA, p.CheckRun.Conclusion
+	for _, pr := range p.CheckRun.PullRequests {
+		prNumbers = append(prNumbers, pr.Number)
+	}
+	return headSHA, prNumbers, conclusion
+}
+
+// processGitHubCheckEvent turns a completed check_run/check_suite delivery into
+// an immediate CI re-evaluation for the tracked PR, so a claw waiting on CI is
+// woken in seconds instead of on the next poller tick (30s–5min).
+//
+// The event is only a *trigger*: the verdict itself always comes from
+// checkCIStatus, which re-reads the full check-run set for the head SHA. A
+// single green check_run says nothing about the sibling checks still running,
+// and the payload conclusion must never be used to announce green.
+//
+// Because both paths end in the same conditional UPDATE on claw_prs.id, the
+// webhook and the poller cannot double-notify the same (sha, conclusion): the
+// loser sees RowsAffected()==0 and returns silently. The poller therefore stays
+// as the fallback for missed or unsubscribed deliveries.
+func (s *Server) processGitHubCheckEvent(event string, payload githubCheckPayload) {
+	// Only terminal events can change the verdict; created/rerequested/requested
+	// would spend two GitHub API calls on a guaranteed no-op.
+	if payload.Action != "completed" {
+		return
+	}
+
+	headSHA, prNumbers, _ := payload.checkEventSummary(event)
+	repo := payload.Repository.FullName
+	// GitHub omits pull_requests when the head repository differs from the
+	// check's repository (notably fork PRs). Nothing to resolve then — the
+	// poller remains the fallback for those PRs.
+	if headSHA == "" || len(prNumbers) == 0 {
+		log.Printf("[github-webhook] %s completed repo=%q sha=%q — no pull_requests in payload, leaving it to the poller", event, repo, headSHA)
+		return
+	}
+
+	for _, number := range prNumbers {
+		// A PR can be tracked by more than one live claw; the poller evaluates
+		// every row, so the webhook must too or the extra claws would only ever
+		// be woken by the (possibly paused) poller.
+		prs := s.loadClawPRsByNumber(repo, number)
+		if len(prs) == 0 {
+			log.Printf("[github-webhook] %s completed on %s#%d — not an agent-tracked PR, ignored", event, repo, number)
+			continue
+		}
+		for _, pr := range prs {
+			token := s.resolveGitHubTokenForRepo(pr.repo)
+			if token == "" {
+				token = s.resolveGitHubToken()
+			}
+			if token == "" {
+				log.Printf("[github-webhook] CRITICAL: GitHub token resolution failed; cannot check CI for %s#%d", repo, number)
+				continue
+			}
+			s.checkCIStatus(pr, token)
+		}
+	}
 }
 
 func (s *Server) processGitHubPRReviewCommentEvent(payload githubPRReviewCommentPayload) {
