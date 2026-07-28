@@ -183,7 +183,11 @@ func checkpointExclude(path string, d os.DirEntry) bool {
 		return true
 	}
 	switch name {
-	case "node_modules", ".cache", "tmp", "dist", "build", ".next", "auth-profiles.json":
+	case "node_modules", ".cache", "tmp", "dist", "build", ".next", "auth-profiles.json", "openclaw-agent.sqlite":
+		return true
+	}
+	// Only exclude the agent sessions directory, not arbitrary "sessions" folders in the workspace.
+	if name == "sessions" && strings.Contains(filepath.ToSlash(path), ".openclaw/agents/") {
 		return true
 	}
 	if strings.HasSuffix(name, ".log") && !strings.Contains(path, "workspace") {

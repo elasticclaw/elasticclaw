@@ -5,10 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -176,17 +176,75 @@ func (s *Server) scanMessageForPRs(clawID, content string) {
 	}
 }
 
+const (
+	// prWatcherBaseInterval is the fastest the poller ever runs. Comments,
+	// reviews and merges are already delivered by webhooks, so a tighter loop
+	// buys latency nobody consumes while it burns installation quota.
+	prWatcherBaseInterval = 30 * time.Second
+	// prWatcherMaxInterval caps the backoff so a big factory still reconciles.
+	prWatcherMaxInterval = 5 * time.Minute
+	// prWatcherCallsPerPR is the worst-case cost of one PR per poll: merge check
+	// (1) + CI failures (pull + check-runs = 2) + issue comments (1) + review
+	// comments (1) + reviews (1) + pr_conditions (pull + check-runs + reviews =
+	// 3). ETag 304s make the billed number lower in steady state.
+	prWatcherCallsPerPR = 9
+	// prWatcherHourlyBudget is the watcher's share of the 5,000/hour GitHub App
+	// installation quota. The rest is left for webhooks, pipelines and agents.
+	prWatcherHourlyBudget = 2000
+)
+
+// prWatcherInterval scales the poll interval with the number of tracked PRs so
+// the watcher's hourly cost stays inside prWatcherHourlyBudget. The guarantee
+// holds until the interval hits prWatcherMaxInterval (around 18 tracked PRs);
+// past that the cost grows linearly again and the backstop is the rate-limit
+// reserve in githubClient, which degrades polling to merge-only rather than
+// letting the watcher exhaust the installation quota.
+func prWatcherInterval(trackedPRs int) time.Duration {
+	if trackedPRs <= 0 {
+		return prWatcherBaseInterval
+	}
+	callsPerPoll := float64(trackedPRs * prWatcherCallsPerPR)
+	seconds := callsPerPoll * 3600 / float64(prWatcherHourlyBudget)
+	interval := time.Duration(seconds * float64(time.Second))
+	if interval < prWatcherBaseInterval {
+		return prWatcherBaseInterval
+	}
+	if interval > prWatcherMaxInterval {
+		return prWatcherMaxInterval
+	}
+	return interval
+}
+
+// nextPollDelay is the wait before the next poll: the quota reset when GitHub
+// has cut us off, otherwise the PR-count-scaled interval.
+func (s *Server) nextPollDelay() time.Duration {
+	if until, blocked := defaultGitHubClient.blockedUntilTime(); blocked {
+		wait := time.Until(until) + time.Second
+		if wait > prWatcherMaxInterval {
+			wait = prWatcherMaxInterval
+		}
+		if wait > 0 {
+			return wait
+		}
+	}
+	s.mu.RLock()
+	tracked := s.trackedPRCount
+	s.mu.RUnlock()
+	return prWatcherInterval(tracked)
+}
+
 // startPRWatcher launches the background poller.
 func (s *Server) startPRWatcher() {
 	go func() {
-		ticker := time.NewTicker(10 * time.Second)
-		defer ticker.Stop()
+		timer := time.NewTimer(prWatcherBaseInterval)
+		defer timer.Stop()
 		reconcileTicker := time.NewTicker(5 * time.Minute)
 		defer reconcileTicker.Stop()
 		for {
 			select {
-			case <-ticker.C:
+			case <-timer.C:
 				s.pollAllPRs()
+				timer.Reset(s.nextPollDelay())
 			case <-reconcileTicker.C:
 				s.reconcileDeadClawPRs()
 			}
@@ -332,6 +390,31 @@ func (s *Server) pollAllPRs() {
 	}
 	rows.Close()
 
+	s.mu.Lock()
+	s.trackedPRCount = len(prs)
+	s.mu.Unlock()
+
+	// GitHub already told us the quota is gone: retrying now only adds error
+	// lines to the log and delays the recovery for everyone else.
+	if until, blocked := defaultGitHubClient.blockedUntilTime(); blocked {
+		s.mu.Lock()
+		shouldLog := time.Since(s.lastRateLimitSkipLog) >= time.Minute
+		if shouldLog {
+			s.lastRateLimitSkipLog = time.Now()
+		}
+		s.mu.Unlock()
+		if shouldLog && len(prs) > 0 {
+			log.Printf("[pr-watcher] GitHub rate limit exhausted; skipping poll of %d PR(s) until %s",
+				len(prs), until.UTC().Format(time.RFC3339))
+		}
+		return
+	}
+
+	// Below the reserve the watcher drops everything except merge detection, so
+	// interactive and agent-initiated calls keep their headroom.
+	lowPriorityOK := defaultGitHubClient.allowLowPriority()
+	s.logGitHubBudget(lowPriorityOK)
+
 	token := s.resolveGitHubToken()
 	if token == "" {
 		if len(prs) > 0 {
@@ -367,6 +450,14 @@ func (s *Server) pollAllPRs() {
 		if s.checkPRMerged(r.pr, token) {
 			terminatedClaws[r.pr.clawID] = true
 			continue // claw is being terminated, skip other checks
+		}
+		if !lowPriorityOK {
+			// Merge detection above is the only call worth the remaining budget.
+			// NOTE: this also suppresses the green-CI wake-up below, so a claw
+			// waiting on CI stays idle until the budget recovers. The webhook
+			// path is the fix for that; polling alone cannot be both cheap and
+			// prompt.
+			continue
 		}
 		// Always check CI status (failures and, just as importantly, green)
 		s.checkCIStatus(r.pr, token)
@@ -429,6 +520,28 @@ func (s *Server) pollAllPRs() {
 	}
 }
 
+// logGitHubBudget periodically records the remaining installation quota so a
+// depletion is visible before it turns into a wall of 403s.
+func (s *Server) logGitHubBudget(lowPriorityOK bool) {
+	limit, remaining, reset, ok := defaultGitHubClient.budget()
+	if !ok {
+		return
+	}
+	interval := 5 * time.Minute
+	if !lowPriorityOK {
+		interval = time.Minute
+	}
+	s.mu.Lock()
+	if time.Since(s.lastQuotaLog) < interval {
+		s.mu.Unlock()
+		return
+	}
+	s.lastQuotaLog = time.Now()
+	s.mu.Unlock()
+	log.Printf("[pr-watcher] github quota: remaining=%d/%d reset=%s reserve=%d lowPriority=%v",
+		remaining, limit, reset.UTC().Format(time.RFC3339), githubRateLimitReserve, lowPriorityOK)
+}
+
 // firePRConditions consumes the one-shot trigger only after its transition
 // claims the stage. A failed claim remains eligible for the next poll.
 func (s *Server) firePRConditions(pr clawPR, stage pipeline.Stage, ctx pipelineContext) {
@@ -449,20 +562,54 @@ func (s *Server) resolveGitHubTokenWithRepos(repoAccess []RepoAccess) string {
 	if len(cfg.GitHubApps) == 0 {
 		return ""
 	}
+	// Installation tokens live an hour. Minting one per call cost two extra
+	// GitHub App requests on every poll of every PR, which was its own
+	// rate-limit exhaustion path.
+	cacheKey := githubTokenCacheKey(repoAccess)
+	s.ghTokenMu.Lock()
+	defer s.ghTokenMu.Unlock()
+	if cached, ok := s.ghTokenCache[cacheKey]; ok && time.Now().Before(cached.expiresAt) {
+		return cached.token
+	}
 	for _, appCfg := range cfg.GitHubApps {
 		provider, err := NewGitHubTokenProvider(appCfg)
 		if err != nil {
 			log.Printf("[pr-watcher] CRITICAL: GitHub token provider setup failed: %v", err)
 			continue
 		}
-		token, _, err := provider.InstallationToken(context.Background(), 0, repoAccess)
+		token, expiresAt, err := provider.InstallationToken(context.Background(), 0, repoAccess)
 		if err != nil {
 			log.Printf("[pr-watcher] CRITICAL: GitHub token provider failed: %v", err)
 			continue
 		}
+		if s.ghTokenCache == nil {
+			s.ghTokenCache = map[string]cachedGitHubToken{}
+		}
+		// Renew a few minutes early so no in-flight call uses an expiring token.
+		if expiry := expiresAt.Add(-5 * time.Minute); expiry.After(time.Now()) {
+			s.ghTokenCache[cacheKey] = cachedGitHubToken{token: token, expiresAt: expiry}
+		}
 		return token
 	}
 	return ""
+}
+
+// cachedGitHubToken is an installation token held until shortly before expiry.
+type cachedGitHubToken struct {
+	token     string
+	expiresAt time.Time
+}
+
+func githubTokenCacheKey(repoAccess []RepoAccess) string {
+	if len(repoAccess) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(repoAccess))
+	for _, r := range repoAccess {
+		parts = append(parts, r.Repo+":"+r.Permissions)
+	}
+	sort.Strings(parts)
+	return strings.Join(parts, ",")
 }
 
 // resolveGitHubTokenForRepo returns a GitHub App installation token scoped to the given repo.
@@ -1252,21 +1399,15 @@ func githubAPI(path, token string) (map[string]interface{}, error) {
 
 // githubAPIWithBase is like githubAPI but against a custom base URL (for testing).
 func githubAPIWithBase(baseURL, path, token string) (map[string]interface{}, error) {
-	req, _ := http.NewRequest("GET", baseURL+"/"+path, nil)
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := defaultGitHubClient.get(baseURL+"/"+path, token)
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode >= 400 {
-		return nil, &githubAPIError{StatusCode: resp.StatusCode, Body: string(body), RateLimited: resp.Header.Get("X-RateLimit-Remaining") == "0"}
+		return nil, &githubAPIError{StatusCode: resp.StatusCode, Body: string(resp.Body), RateLimited: resp.rateLimited()}
 	}
 	var result map[string]interface{}
-	if err := json.Unmarshal(body, &result); err != nil {
+	if err := json.Unmarshal(resp.Body, &result); err != nil {
 		return nil, fmt.Errorf("github API parse error: %w", err)
 	}
 	return result, nil
@@ -1759,33 +1900,21 @@ func githubAPIListWithBase(baseURL, path, token string) ([]interface{}, error) {
 	if strings.Contains(path, "?") {
 		separator = "&"
 	}
-	req, err := http.NewRequest("GET", baseURL+"/"+path+separator+"per_page=100", nil)
+	resp, err := defaultGitHubClient.get(baseURL+"/"+path+separator+"per_page=100", token)
 	if err != nil {
 		return nil, err
-	}
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("github API response read error: %w", err)
 	}
 	if resp.StatusCode >= 400 {
 		// GitHub returns 404 for auth failures to avoid leaking repo existence.
 		// Surface a clearer error when the token is likely the problem.
-		msg := string(body)
+		msg := string(resp.Body)
 		if resp.StatusCode == http.StatusNotFound && strings.Contains(msg, "Not Found") {
-			return nil, &githubAPIError{StatusCode: resp.StatusCode, Body: fmt.Sprintf("404 for %s/%s (token may be invalid or repo may not exist): %s", baseURL, path, msg), RateLimited: resp.Header.Get("X-RateLimit-Remaining") == "0"}
+			return nil, &githubAPIError{StatusCode: resp.StatusCode, Body: fmt.Sprintf("404 for %s/%s (token may be invalid or repo may not exist): %s", baseURL, path, msg), RateLimited: resp.rateLimited()}
 		}
-		return nil, &githubAPIError{StatusCode: resp.StatusCode, Body: msg, RateLimited: resp.Header.Get("X-RateLimit-Remaining") == "0"}
+		return nil, &githubAPIError{StatusCode: resp.StatusCode, Body: msg, RateLimited: resp.rateLimited()}
 	}
 	var result []interface{}
-	if err := json.Unmarshal(body, &result); err != nil {
+	if err := json.Unmarshal(resp.Body, &result); err != nil {
 		return nil, fmt.Errorf("github API list parse error: %w", err)
 	}
 	return result, nil

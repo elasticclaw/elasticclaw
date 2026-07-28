@@ -3,6 +3,7 @@ package hub
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -143,10 +144,21 @@ func saveExternalTemplate(name string, files map[string]string) error {
 		return fmt.Errorf("mkdir %s: %w", dir, err)
 	}
 	for fname, content := range files {
-		if strings.Contains(fname, "..") || strings.ContainsAny(fname, `/\`) {
-			continue // skip paths with directory traversal
+		// Nested files (memory/**, scripts/**) must survive a template push, so
+		// only reject paths that would escape the template dir.
+		// Note the asymmetry with bootstrapDaytona, which hard-fails on an invalid
+		// path: here a bad key is a client input we can safely drop at push time,
+		// while at bootstrap the same key means the claw would start with a file
+		// its workflows expect missing.
+		safeName, err := cleanWorkspaceFilePath(fname)
+		if err != nil {
+			log.Printf("[templates] skipping invalid template file path %q for %s: %v", fname, name, err)
+			continue
 		}
-		path := filepath.Join(dir, fname)
+		path := filepath.Join(dir, filepath.FromSlash(safeName))
+		if err := os.MkdirAll(filepath.Dir(path), 0750); err != nil {
+			return fmt.Errorf("mkdir for template file %s: %w", safeName, err)
+		}
 		if err := os.WriteFile(path, []byte(content), 0640); err != nil {
 			return fmt.Errorf("write %s: %w", path, err)
 		}

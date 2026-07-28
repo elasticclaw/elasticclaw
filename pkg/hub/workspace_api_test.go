@@ -710,3 +710,58 @@ func TestWorkspaceWorkflowTriggerCreatesGitHubIssueWorkflowFromIssueNumber(t *te
 		t.Fatalf("duplicate response = %#v, want same claw id with existing status", duplicateResp)
 	}
 }
+
+func TestWorkspaceWorkflowTriggerRecordsManualRun(t *testing.T) {
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
+	t.Setenv("ELASTICCLAW_NOOP_PROVIDER", "1")
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{
+		Token:     "test-token",
+		ClawToken: "test-claw-token",
+		Providers: map[string]types.ProviderConfig{
+			"noop": {Type: "noop"},
+		},
+	}, "", "", "")
+	SaveWorkspaceForTest(t,
+		&types.WorkspaceConfig{
+			SchemaVersion: "v1",
+			Name:          "engineering",
+			Files: map[string]string{
+				"elasticclaw-config.yaml": "schema_version: v1\nname: engineering\nprovider: noop\n",
+			},
+		},
+		[]*types.WorkflowConfig{{
+			SchemaVersion:       "v1",
+			Name:                "manual-only",
+			EnableManualTrigger: true,
+		}},
+	)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/workspaces/engineering/workflows/manual-only/trigger", strings.NewReader(`{"inputs":{}}`))
+	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body = %s", rr.Code, http.StatusOK, rr.Body.String())
+	}
+	var resp map[string]string
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	clawID := resp["claw_id"]
+	if clawID == "" {
+		t.Fatalf("missing claw_id in response")
+	}
+
+	var triggerType, status string
+	if err := db.QueryRow(`SELECT trigger_type, status FROM workflow_runs WHERE claw_id=?`, clawID).Scan(&triggerType, &status); err != nil {
+		t.Fatalf("load workflow run: %v", err)
+	}
+	if triggerType != "manual" {
+		t.Fatalf("trigger_type = %q, want manual", triggerType)
+	}
+	if status != "running" {
+		t.Fatalf("status = %q, want running", status)
+	}
+}

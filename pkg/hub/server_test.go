@@ -710,6 +710,61 @@ func TestDeleteClawSoftDeletesAndHidesFromAPI(t *testing.T) {
 	}
 }
 
+func TestDeleteClawKeepsMessages(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, nil, "", "", "")
+	_, err := db.Exec(
+		`INSERT INTO claws(id, tenant_id, name, tags, created_at, status) VALUES(?,?,?,?,datetime('now'),?)`,
+		"claw-1", "test-tenant-id", "claw 1", `[]`, "connected",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec(
+		`INSERT INTO messages(id, claw_id, tenant_id, role, content, created_at) VALUES(?,?,?,?,?,datetime('now'))`,
+		"msg-1", "claw-1", "test-tenant-id", "agent_activity", "activity 1",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec(
+		`INSERT INTO messages(id, claw_id, tenant_id, role, content, created_at) VALUES(?,?,?,?,?,datetime('now'))`,
+		"msg-2", "claw-1", "test-tenant-id", "claw", "assistant message",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/claws/claw-1", nil)
+	req = req.WithContext(context.WithValue(req.Context(), ctxTenantKey{}, "test-tenant-id"))
+	req.SetPathValue("id", "claw-1")
+	rec := httptest.NewRecorder()
+
+	s.handleClawDetail(rec, req)
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("expected status %d, got %d", http.StatusNoContent, rec.Code)
+	}
+
+	var status string
+	if err := db.QueryRow(`SELECT status FROM claws WHERE id=?`, "claw-1").Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != "deleted" {
+		t.Fatalf("expected claw status deleted, got %q", status)
+	}
+
+	// Wait for async cleanup goroutine.
+	time.Sleep(200 * time.Millisecond)
+
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=?`, "claw-1").Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 2 {
+		t.Fatalf("expected 2 messages to be preserved, got %d", count)
+	}
+}
+
 func TestClawAPIReturnsGitHubIssueLink(t *testing.T) {
 	s, db := NewTestServerWithConfig(t, nil, "", "", "")
 	_, err := db.Exec(
