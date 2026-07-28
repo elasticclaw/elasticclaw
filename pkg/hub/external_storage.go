@@ -3,6 +3,7 @@ package hub
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -145,8 +146,13 @@ func saveExternalTemplate(name string, files map[string]string) error {
 	for fname, content := range files {
 		// Nested files (memory/**, scripts/**) must survive a template push, so
 		// only reject paths that would escape the template dir.
+		// Note the asymmetry with bootstrapDaytona, which hard-fails on an invalid
+		// path: here a bad key is a client input we can safely drop at push time,
+		// while at bootstrap the same key means the claw would start with a file
+		// its workflows expect missing.
 		safeName, err := cleanWorkspaceFilePath(fname)
 		if err != nil {
+			log.Printf("[templates] skipping invalid template file path %q for %s: %v", fname, name, err)
 			continue
 		}
 		path := filepath.Join(dir, filepath.FromSlash(safeName))

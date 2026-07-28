@@ -8,8 +8,24 @@ import (
 	"github.com/elasticclaw/elasticclaw/pkg/config"
 )
 
+// The write loop and the readiness gate both go through daytonaWorkspaceFilePath,
+// so pinning it here is what stops a regression back to the staged
+// /home/daytona/workspace dir that nothing syncs on Daytona.
+func TestDaytonaWorkspaceFilePathTargetsLiveWorkspace(t *testing.T) {
+	cases := map[string]string{
+		"AGENTS.md":                             "/home/daytona/.openclaw/workspace/AGENTS.md",
+		"scripts/detect_android_changes.py":     "/home/daytona/.openclaw/workspace/scripts/detect_android_changes.py",
+		"scripts/review-loop/reviewers/arch.md": "/home/daytona/.openclaw/workspace/scripts/review-loop/reviewers/arch.md",
+	}
+	for name, want := range cases {
+		if got := daytonaWorkspaceFilePath(name); got != want {
+			t.Errorf("daytonaWorkspaceFilePath(%q) = %q, want %q", name, got, want)
+		}
+	}
+}
+
 func TestDaytonaWorkspaceFilesReadinessCommandChecksNestedPaths(t *testing.T) {
-	cmd := daytonaWorkspaceFilesReadinessCommand(daytonaLiveWorkspaceDir, map[string]string{
+	cmd := daytonaWorkspaceFilesReadinessCommand(map[string]string{
 		"AGENTS.md":                             "a",
 		"scripts/detect_android_changes.py":     "b",
 		"scripts/review-loop/reviewers/arch.md": "c",
@@ -27,7 +43,7 @@ func TestDaytonaWorkspaceFilesReadinessCommandChecksNestedPaths(t *testing.T) {
 	if strings.Contains(cmd, "/home/daytona/workspace/") {
 		t.Errorf("readiness command must verify the live workspace, not the staged one:\n%s", cmd)
 	}
-	if got := daytonaWorkspaceFilesReadinessCommand(daytonaLiveWorkspaceDir, nil); got != "true" {
+	if got := daytonaWorkspaceFilesReadinessCommand(nil); got != "true" {
 		t.Errorf("empty file set = %q, want \"true\"", got)
 	}
 }

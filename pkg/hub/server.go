@@ -3640,7 +3640,7 @@ cp "$BIN" /tmp/claw-bridge.download && chmod +x /tmp/claw-bridge.download && mv 
 			// runBootstrap -- and with it syncStagedWorkspaceToOpenClawWorkspace --
 			// never runs on this provider: nothing would ever copy staged files over.
 			// Mirrors Replicated, which also writes final files after bootstrap.
-			targetPath := daytonaLiveWorkspaceDir + "/" + safeName
+			targetPath := daytonaWorkspaceFilePath(safeName)
 			targetDir := path.Dir(targetPath)
 			// Use collision-resistant delimiter (same strategy as early flake staging)
 			// to protect against content containing a fixed token.
@@ -3826,7 +3826,7 @@ gh auth status`
 	// commands fail with "can't open file" on every stage.
 	if len(writtenWorkspaceFiles) > 0 {
 		s.setBootstrapStatus(clawID, "Verifying workspace files")
-		filesScript := daytonaWorkspaceFilesReadinessCommand(daytonaLiveWorkspaceDir, writtenWorkspaceFiles)
+		filesScript := daytonaWorkspaceFilesReadinessCommand(writtenWorkspaceFiles)
 		filesResult, filesErr := p.ExecWithTimeout(ctx, instanceID, []string{"bash", "-c", filesScript}, 30*time.Second)
 		if filesErr != nil {
 			diag := fmt.Sprintf("Workspace files verification failed: %v", filesErr)
@@ -4105,18 +4105,25 @@ func daytonaExecutableWorkspaceFile(name string) bool {
 	return ext == ".sh" || ext == ".py"
 }
 
+// daytonaWorkspaceFilePath returns the sandbox path a workspace file must be
+// written to. The write loop and the readiness gate share it so they can never
+// disagree about the target, and a regression back to the staged
+// /home/daytona/workspace dir is caught by unit tests instead of at runtime.
+func daytonaWorkspaceFilePath(name string) string {
+	return daytonaLiveWorkspaceDir + "/" + strings.TrimPrefix(name, "/")
+}
+
 // daytonaWorkspaceFilesReadinessCommand verifies every workspace file landed in
 // the live workspace, including nested paths such as scripts/review-loop/x.md.
-func daytonaWorkspaceFilesReadinessCommand(dir string, files map[string]string) string {
+func daytonaWorkspaceFilesReadinessCommand(files map[string]string) string {
 	if len(files) == 0 {
 		return "true"
 	}
 	var b strings.Builder
 	b.WriteString("set -e\n")
 	for _, name := range sortedWorkspaceFileNames(files) {
-		remotePath := strings.TrimRight(dir, "/") + "/" + name
 		b.WriteString("test -f ")
-		b.WriteString(shellQuote(remotePath))
+		b.WriteString(shellQuote(daytonaWorkspaceFilePath(name)))
 		b.WriteString(" || { echo ")
 		b.WriteString(shellQuote("missing workspace file: " + name))
 		b.WriteString("; exit 1; }\n")
