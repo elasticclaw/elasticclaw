@@ -197,13 +197,14 @@ func (s *Server) startPRWatcher() {
 // reconcileDeadClawPRs closes out task_run_prs rows left open because their
 // backing claw died before the PR's merge/close was observed. It only queries
 // and updates task-run state; it never touches claws or injects into agents.
+// Terminal runs that do not require a PR can still have an open PR whose merge
+// must be recorded, so this intentionally does not filter by run status.
 func (s *Server) reconcileDeadClawPRs() {
 	rows, err := s.db.Query(`
 		SELECT trp.run_id, trp.repo, trp.pr_number, trp.pr_url
 		FROM task_run_prs trp
 		JOIN task_run_summaries trs ON trs.run_id = trp.run_id
 		WHERE trp.state = 'open'
-		  AND trs.status = 'running'
 		  AND trs.analytics_enabled = 1
 		  AND (trp.opened_at = 0 OR trp.opened_at > ?)
 		  AND NOT EXISTS (

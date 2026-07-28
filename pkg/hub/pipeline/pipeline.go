@@ -217,6 +217,7 @@ type DependencyUpdatesAction struct {
 	Enabled          bool     `yaml:"-" json:"-"`
 	Ecosystems       []string `yaml:"ecosystems,omitempty"`
 	Paths            []string `yaml:"paths,omitempty"`
+	ExcludePaths     []string `yaml:"exclude_paths,omitempty"`
 	Grouping         string   `yaml:"grouping,omitempty"`
 	IncludeMajor     bool     `yaml:"include_major,omitempty"`
 	SeparateMajor    *bool    `yaml:"separate_major,omitempty"`
