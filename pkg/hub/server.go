@@ -63,6 +63,18 @@ type Server struct {
 	// autoResumeRestartCounts records restart counts already handled per claw. Guarded by s.mu.
 	autoResumeRestartCounts map[string]int
 	lastTokenFailureLog     time.Time
+	// trackedPRCount is the PR count observed by the last poll; it drives the
+	// PR watcher's adaptive interval. Guarded by s.mu.
+	trackedPRCount int
+	// lastQuotaLog throttles the GitHub rate-limit budget log line. Guarded by s.mu.
+	lastQuotaLog time.Time
+	// lastRateLimitSkipLog throttles the "poll skipped, quota exhausted" log. Guarded by s.mu.
+	lastRateLimitSkipLog time.Time
+
+	// ghTokenCache holds GitHub App installation tokens until shortly before
+	// they expire, keyed by requested repo access.
+	ghTokenMu    sync.Mutex
+	ghTokenCache map[string]cachedGitHubToken
 	// one-time oauth_code -> signed GitHub session token
 
 	dependencyStatus *dependencyStatusService
