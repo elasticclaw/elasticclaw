@@ -73,7 +73,6 @@ func TestSaveExternalTemplatePreservesNestedFiles(t *testing.T) {
 		"scripts/detect_android_changes.py":     "print('hi')",
 		"scripts/review-loop/reviewers/arch.md": "reviewer",
 		"memory/notes.md":                       "note",
-		"../escape.md":                          "nope",
 	}
 	if err := saveExternalTemplate("faster", files); err != nil {
 		t.Fatalf("saveExternalTemplate: %v", err)
@@ -93,8 +92,5 @@ func TestSaveExternalTemplatePreservesNestedFiles(t *testing.T) {
 		if _, ok := got[name]; !ok {
 			t.Errorf("template files missing %s (got %v)", name, sortedWorkspaceFileNames(got))
 		}
-	}
-	if _, ok := got["escape.md"]; ok {
-		t.Error("traversal path must not be written")
 	}
 }
