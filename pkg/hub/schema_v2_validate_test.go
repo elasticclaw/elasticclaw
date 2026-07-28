@@ -176,6 +176,79 @@ func TestSaveExternalWorkflowsAcceptsValidV2Pair(t *testing.T) {
 	}
 }
 
+func TestLoadExternalWorkspacesIncludesV2(t *testing.T) {
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
+
+	const yamlDoc = `
+schema_version: 2
+name: amazecrm-dev
+repositories:
+  primary:
+    provider: github
+    repository: amazecrm/amazecrm
+    source_control: sc
+credentials:
+  github_app:
+    secret: github_app
+source_control:
+  connections:
+    sc:
+      provider: github
+      credentials: github_app
+`
+	if err := saveExternalWorkspace(&types.WorkspaceConfig{
+		Name:  "amazecrm-dev",
+		Files: map[string]string{"elasticclaw-config.yaml": yamlDoc, "AGENTS.md": "# a\n"},
+	}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	// The bug: load used to fail with "repositories: expected a list" and skip the dir.
+	list, err := loadExternalWorkspaces()
+	if err != nil {
+		t.Fatalf("loadExternalWorkspaces: %v", err)
+	}
+	var found *types.WorkspaceConfig
+	for _, ws := range list {
+		if ws != nil && ws.Name == "amazecrm-dev" {
+			found = ws
+			break
+		}
+	}
+	if found == nil {
+		t.Fatalf("v2 workspace not listed; got %d workspaces", len(list))
+	}
+	if found.SchemaVersion != "2" {
+		t.Fatalf("schema = %q", found.SchemaVersion)
+	}
+	if found.Files["elasticclaw-config.yaml"] == "" {
+		t.Fatal("expected raw config in Files for settings UI")
+	}
+	if len(found.Repositories) != 1 || found.Repositories[0].Repo != "amazecrm/amazecrm" {
+		t.Fatalf("projected repos = %#v", found.Repositories)
+	}
+
+	// workspaceViews (settings API source) must include it with config text.
+	// Use a minimal Server method via package-level helper path.
+	views := (&Server{}).workspaceViews()
+	var view *WorkspaceView
+	for i := range views {
+		if views[i].Name == "amazecrm-dev" {
+			view = &views[i]
+			break
+		}
+	}
+	if view == nil {
+		t.Fatal("workspaceViews missing amazecrm-dev")
+	}
+	if !strings.Contains(view.Config, "schema_version: 2") {
+		t.Fatalf("view.Config missing v2 yaml:\n%s", view.Config)
+	}
+	if len(view.Access.Repositories) != 1 {
+		t.Fatalf("access repos = %#v", view.Access.Repositories)
+	}
+}
+
 func TestSaveExternalWorkflowsStillAcceptsV1(t *testing.T) {
 	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
 

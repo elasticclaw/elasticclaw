@@ -11,6 +11,7 @@ import (
 
 	"github.com/elasticclaw/elasticclaw/pkg/config"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
+	v2 "github.com/elasticclaw/elasticclaw/pkg/types/v2"
 	"gopkg.in/yaml.v3"
 )
 
@@ -326,18 +327,20 @@ func loadExternalWorkspace(name string) (*types.WorkspaceConfig, error) {
 		if err != nil {
 			return nil, fmt.Errorf("read workflow %s: %w", e.Name(), err)
 		}
-		var workflow types.WorkflowConfig
-		if err := yaml.Unmarshal(data, &workflow); err != nil {
-			return nil, fmt.Errorf("parse workflow %s: %w", e.Name(), err)
+		workflow, err := loadExternalWorkflowDocument(e.Name(), data)
+		if err != nil {
+			return nil, err
 		}
-		workflow.RawConfig = string(data)
-		if workflow.Name == "" {
-			workflow.Name = strings.TrimSuffix(e.Name(), ".yaml")
+		workspace.Workflows = append(workspace.Workflows, workflow)
+	}
+	// Ensure raw config is present for settings UI even if ReadTemplateFiles missed it.
+	if workspace.Files == nil {
+		workspace.Files = map[string]string{}
+	}
+	if _, ok := workspace.Files["elasticclaw-config.yaml"]; !ok {
+		if raw, err := readExternalWorkspaceYAML(name); err == nil {
+			workspace.Files["elasticclaw-config.yaml"] = string(raw)
 		}
-		if err := types.NormalizeWorkflowConfig(&workflow); err != nil {
-			return nil, fmt.Errorf("normalize workflow %s: %w", e.Name(), err)
-		}
-		workspace.Workflows = append(workspace.Workflows, &workflow)
 	}
 	return &workspace, nil
 }
@@ -358,6 +361,51 @@ func (e *errWorkspaceNotFound) Error() string {
 func isWorkspaceNotFound(err error) bool {
 	var target *errWorkspaceNotFound
 	return errors.As(err, &target)
+}
+
+// loadExternalWorkflowDocument loads a v1 or v2 workflow file for hub APIs.
+// V2 documents keep RawConfig as the source of truth and skip v1 normalize semantics.
+func loadExternalWorkflowDocument(fileName string, data []byte) (*types.WorkflowConfig, error) {
+	version, err := v2.DetectSchemaVersion(data)
+	if err != nil {
+		return nil, fmt.Errorf("parse workflow %s: %w", fileName, err)
+	}
+	if v2.IsV2(version) {
+		// Prefer name from validated v2 doc; do not force v1 stage/trigger normalize.
+		name := strings.TrimSuffix(fileName, ".yaml")
+		if resolved, err := v2.ParseAndValidateWorkflow(data); err == nil && resolved.Workflow.Name != "" {
+			name = resolved.Workflow.Name
+		} else {
+			var probe struct {
+				Name string `yaml:"name"`
+			}
+			_ = yaml.Unmarshal(data, &probe)
+			if strings.TrimSpace(probe.Name) != "" {
+				name = probe.Name
+			}
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "[hub] workflow %q v2 validation warning: %v\n", fileName, err)
+			}
+		}
+		return &types.WorkflowConfig{
+			SchemaVersion: "2",
+			Name:          name,
+			RawConfig:     string(data),
+		}, nil
+	}
+
+	var workflow types.WorkflowConfig
+	if err := yaml.Unmarshal(data, &workflow); err != nil {
+		return nil, fmt.Errorf("parse workflow %s: %w", fileName, err)
+	}
+	workflow.RawConfig = string(data)
+	if workflow.Name == "" {
+		workflow.Name = strings.TrimSuffix(fileName, ".yaml")
+	}
+	if err := types.NormalizeWorkflowConfig(&workflow); err != nil {
+		return nil, fmt.Errorf("normalize workflow %s: %w", fileName, err)
+	}
+	return &workflow, nil
 }
 
 func loadExternalWorkspaceConfig(name string) (types.WorkspaceConfig, error) {
@@ -392,11 +440,100 @@ func loadExternalWorkspaceConfig(name string) (types.WorkspaceConfig, error) {
 		}
 		configPath = legacyPath
 	}
+
+	version, err := v2.DetectSchemaVersion(data)
+	if err != nil {
+		return types.WorkspaceConfig{}, fmt.Errorf("parse %s: %w", filepath.Base(configPath), err)
+	}
+
+	// V2 configs use map-shaped repositories/connections that cannot unmarshal into
+	// the v1 WorkspaceConfig type. Load a shell config + projected access fields so
+	// list/settings APIs include the workspace instead of silently skipping it.
+	if v2.IsV2(version) {
+		return loadExternalWorkspaceConfigV2(name, data, configPath)
+	}
+
 	var workspace types.WorkspaceConfig
 	if err := yaml.Unmarshal(data, &workspace); err != nil {
 		return types.WorkspaceConfig{}, fmt.Errorf("parse workspace %q %s: %w", name, filepath.Base(configPath), err)
 	}
 	return workspace, nil
+}
+
+// loadExternalWorkspaceConfigV2 builds a WorkspaceConfig shell for hub APIs from
+// authored v2 YAML without requiring the v1 repositories list shape.
+func loadExternalWorkspaceConfigV2(name string, data []byte, configPath string) (types.WorkspaceConfig, error) {
+	var probe struct {
+		Name string `yaml:"name"`
+	}
+	if err := yaml.Unmarshal(data, &probe); err != nil {
+		return types.WorkspaceConfig{}, fmt.Errorf("parse %s: %w", filepath.Base(configPath), err)
+	}
+	ws := types.WorkspaceConfig{
+		SchemaVersion: "2",
+		Name:          strings.TrimSpace(probe.Name),
+	}
+	if ws.Name == "" {
+		ws.Name = name
+	}
+
+	resolved, err := v2.ParseAndValidateWorkspace(data)
+	if err != nil {
+		// Still return a listable shell so settings UI can surface the workspace
+		// name; full config is available via Files after ReadTemplateFiles.
+		fmt.Fprintf(os.Stderr, "[hub] workspace %q v2 validation warning: %v\n", name, err)
+		return ws, nil
+	}
+	if resolved.Workspace.Name != "" {
+		ws.Name = resolved.Workspace.Name
+	}
+	ws.Repositories = projectV2RepositoriesForAccess(resolved.Workspace)
+	ws.Secrets = projectV2CredentialSecrets(resolved.Workspace)
+	return ws, nil
+}
+
+// projectV2RepositoriesForAccess maps named v2 repositories into the legacy
+// access list used by WorkspaceView / settings UI.
+func projectV2RepositoriesForAccess(ws *v2.Workspace) types.RepositoryAccessList {
+	if ws == nil || len(ws.Repositories) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(ws.Repositories))
+	for name := range ws.Repositories {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	out := make(types.RepositoryAccessList, 0, len(names))
+	for _, name := range names {
+		repo := ws.Repositories[name]
+		out = append(out, types.GitHubRepoAccess{
+			Repo:        strings.TrimSpace(repo.Repository),
+			Permissions: "read", // v2 does not model per-repo permissions on the resource
+		})
+	}
+	return out
+}
+
+// projectV2CredentialSecrets exposes hub secret *names* referenced by v2 credentials.
+func projectV2CredentialSecrets(ws *v2.Workspace) []string {
+	if ws == nil || len(ws.Credentials) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(ws.Credentials))
+	seen := map[string]struct{}{}
+	for _, cred := range ws.Credentials {
+		secret := strings.TrimSpace(cred.Secret)
+		if secret == "" {
+			continue
+		}
+		if _, ok := seen[secret]; ok {
+			continue
+		}
+		seen[secret] = struct{}{}
+		names = append(names, secret)
+	}
+	sort.Strings(names)
+	return names
 }
 
 func loadExternalWorkflowsByIntegration(integration string) ([]*types.WorkspaceConfig, error) {
