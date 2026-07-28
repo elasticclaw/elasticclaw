@@ -4,6 +4,7 @@ import { useEffect, useState, type ReactNode } from "react"
 import { useRouter } from "next/navigation"
 import { AlertCircle, BarChart3, Calendar, ExternalLink, History, Loader2 } from "lucide-react"
 import { ApiError, fetchCronWorkflowRuns, type Workflow } from "@/lib/api"
+import { WorkflowRunLogsDialog } from "@/components/workflow-run-logs-dialog"
 import type { WorkflowRun } from "@/lib/types"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -78,6 +79,7 @@ export function WorkflowRunsDialog({ workflow }: { workflow: Workflow }) {
                       <TableHead>Finished</TableHead>
                       <TableHead>Result</TableHead>
                       <TableHead>Agent</TableHead>
+                      <TableHead className="w-28">Logs</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
@@ -100,6 +102,9 @@ export function WorkflowRunsDialog({ workflow }: { workflow: Workflow }) {
                         </TableCell>
                         <TableCell className="text-xs font-mono text-muted-foreground">
                           {run.claw_id ? shortId(run.claw_id) : "—"}
+                        </TableCell>
+                        <TableCell>
+                          <WorkflowRunLogsDialog run={run} />
                         </TableCell>
                       </TableRow>
                     ))}

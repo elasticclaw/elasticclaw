@@ -448,6 +448,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/workspaces/{workspace}/workflows/{workflow}/trigger", s.withAuth(s.handleWorkspaceWorkflowTrigger))
 	mux.HandleFunc("/api/workspaces/{workspace}/workflows/{workflow}/cron/trigger", s.withAuth(s.handleCronWorkflowTrigger)) // POST manual trigger
 	mux.HandleFunc("/api/workspaces/{workspace}/workflows/{workflow}/cron/runs", s.withAuth(s.handleCronWorkflowRuns))       // GET run history
+	mux.HandleFunc("/api/workspaces/{workspace}/workflows/{workflow}/cron/runs/{runId}", s.withAuth(s.handleCronWorkflowRun)) // GET single run
 	mux.HandleFunc("/api/workspaces/{workspace}/workflows/{workflow}/cron/next", s.withAuth(s.handleCronWorkflowNextRun))    // GET next scheduled run
 	mux.HandleFunc("/api/workspaces/{workspace}/secrets", s.withAdminForMethods(s.handleWorkspaceSecretsCRUD, http.MethodPut, http.MethodPost, http.MethodDelete))
 	mux.HandleFunc("/api/workspaces/{workspace}/github-apps", s.withAdminForMethods(s.handleWorkspaceGitHubAppsCRUD, http.MethodPut, http.MethodPost, http.MethodDelete))
@@ -1568,7 +1569,7 @@ func (s *Server) handleClawDetail(w http.ResponseWriter, r *http.Request) {
 			if providerID != "" {
 				s.terminateVM(provider, providerID)
 			}
-			_, _ = s.db.Exec(`DELETE FROM messages WHERE claw_id = ?`, clawID)
+			// Keep messages (including agent activity logs) for post-mortem diagnosis.
 			_, _ = s.db.Exec(`DELETE FROM claw_prs WHERE claw_id = ?`, clawID)
 		}()
 		// Promote any pending claws now that a slot is free
