@@ -1553,7 +1553,7 @@ function ClawChatView({
     const el = scrollRef.current
     if (!el) return true
     return el.scrollHeight - el.scrollTop - el.clientHeight < 60
-  }, [])
+  }, [scrollRef])
 
   const scrollToBottom = useCallback(() => {
     const el = scrollRef.current
@@ -1561,7 +1561,7 @@ function ClawChatView({
     el.scrollTop = el.scrollHeight
     pinnedToBottom.current = true
     setShowScrollBtn(false)
-  }, [])
+  }, [scrollRef])
 
   const handleScroll = useCallback(() => {
     const el = scrollRef.current
@@ -1570,7 +1570,7 @@ function ClawChatView({
     pinnedToBottom.current = atBottom
     setShowScrollBtn(!atBottom)
     onWindowScroll()
-  }, [onWindowScroll])
+  }, [onWindowScroll, scrollRef])
 
   // Only auto-scroll when pinned to bottom
   useEffect(() => {
@@ -1581,7 +1581,7 @@ function ClawChatView({
     }
     const timers = [0, 50, 150, 400, 800].map((d) => setTimeout(run, d))
     return () => timers.forEach(clearTimeout)
-  }, [messages])
+  }, [messages, scrollRef])
 
   // The streaming text lives outside `messages`, so follow it separately. It grows on
   // every typewriter frame and needs no staged retries — its height is already settled.
