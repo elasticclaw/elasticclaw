@@ -1705,9 +1705,12 @@ func (s *Server) handleClawTerminateSignal(clawID, rawMessage string) {
 	}
 	s.mu.Unlock()
 
-	// Soft-delete the claw and keep messages (including agent activity logs)
-	// for post-mortem diagnosis. claw_prs is still removed because it is tied to
-	// the issue lifecycle rather than the run log.
+	// Finalize any workflow run tied to this claw and release its slot, then
+	// soft-delete the claw while keeping messages for post-mortem diagnosis.
+	// claw_prs is still removed because it is tied to the issue lifecycle.
+	if s.cronScheduler != nil {
+		s.cronScheduler.finishRunByClawID(clawID, "failed", "agent self-terminated")
+	}
 	_, _ = s.db.Exec(`DELETE FROM claw_prs WHERE claw_id = ?`, clawID)
 	_, _ = s.db.Exec(`UPDATE claws SET status='deleted' WHERE id = ?`, clawID)
 
