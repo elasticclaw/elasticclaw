@@ -1938,7 +1938,8 @@ func isRecoverableSessionSendError(err error) bool {
 	msg := strings.ToLower(sendErr.err.Error())
 	return strings.Contains(msg, "context overflow") ||
 		strings.Contains(msg, "prompt too large") ||
-		isProviderRequestFormatError(sendErr.err)
+		isProviderRequestFormatError(sendErr.err) ||
+		isSessionFileLockConflictError(sendErr.err)
 }
 
 func isProviderRequestFormatError(err error) bool {

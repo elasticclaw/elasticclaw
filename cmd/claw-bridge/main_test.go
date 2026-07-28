@@ -1369,6 +1369,7 @@ func TestIsRecoverableSessionSendError(t *testing.T) {
 		{name: "send request context overflow", err: &sessionSendRequestError{err: errString("context overflow detected")}, want: true},
 		{name: "send request prompt too large", err: &sessionSendRequestError{err: errString("Context overflow: prompt too large for the model")}, want: true},
 		{name: "send request provider format rejection", err: &sessionSendRequestError{err: errString("LLM request failed: " + providerRequestFormatErrorFragment + ".")}, want: true},
+		{name: "send request session file lock conflict", err: &sessionSendRequestError{err: errString("error: session file changed while embedded prompt lock was released: /home/elasticclaw/.openclaw/agents/main/sessions/4fb88b9b-8233-4f78-819f-516fbe605e32.jsonl")}, want: true},
 		{name: "send failure", err: errString("sessions.send failed: tool crashed"), want: false},
 	}
 	for _, tt := range tests {
@@ -1650,6 +1651,162 @@ func TestGatewaySessionResetsAfterSessionFileLockConflict(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), sessionErr) || !strings.Contains(err.Error(), "session reset") {
 		t.Fatalf("SendMessage error = %q, want session error and recovery notice", err)
+	}
+	if got := gs.getSessionKey(); got != "session-2" {
+		t.Fatalf("session key = %q, want session-2", got)
+	}
+	if got := loadBridgeSession(); got != "session-2" {
+		t.Fatalf("persisted session key = %q, want session-2", got)
+	}
+}
+
+func TestGatewaySessionRetriesAfterSessionFileLockSendError(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	const sessionErr = "error: session file changed while embedded prompt lock was released: /home/elasticclaw/.openclaw/agents/main/sessions/4fb88b9b-8233-4f78-819f-516fbe605e32.jsonl"
+	testDone := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			t.Errorf("accept websocket: %v", err)
+			return
+		}
+		defer conn.CloseNow()
+
+		readRequest := func(wantMethod string) (gwFrame, bool) {
+			var req gwFrame
+			if err := wsjson.Read(r.Context(), conn, &req); err != nil {
+				t.Errorf("read %s request: %v", wantMethod, err)
+				return gwFrame{}, false
+			}
+			if req.Method != wantMethod {
+				t.Errorf("request method = %q, want %q", req.Method, wantMethod)
+				return gwFrame{}, false
+			}
+			return req, true
+		}
+
+		// First send fails with the lock-conflict error.
+		sendReq, ok := readRequest("sessions.send")
+		if !ok {
+			return
+		}
+		var sendParams map[string]string
+		if err := json.Unmarshal(sendReq.Params, &sendParams); err != nil {
+			t.Errorf("decode first sessions.send params: %v", err)
+			return
+		}
+		if sendParams["key"] != "session-1" {
+			t.Errorf("first sessions.send key = %q, want session-1", sendParams["key"])
+			return
+		}
+		if err := wsjson.Write(r.Context(), conn, gwFrame{
+			Type: "res",
+			ID:   sendReq.ID,
+			OK:   false,
+			Error: &gwError{
+				Code:    "session_file_lock_conflict",
+				Message: sessionErr,
+			},
+		}); err != nil {
+			t.Errorf("reject first sessions.send: %v", err)
+			return
+		}
+
+		// Bridge should create and subscribe to a fresh session.
+		createReq, ok := readRequest("sessions.create")
+		if !ok {
+			return
+		}
+		if err := wsjson.Write(r.Context(), conn, gwFrame{
+			Type:    "res",
+			ID:      createReq.ID,
+			OK:      true,
+			Payload: mustJSON(map[string]string{"key": "session-2"}),
+		}); err != nil {
+			t.Errorf("create replacement session: %v", err)
+			return
+		}
+
+		subscribeReq, ok := readRequest("sessions.subscribe")
+		if !ok {
+			return
+		}
+		if err := wsjson.Write(r.Context(), conn, gwFrame{Type: "res", ID: subscribeReq.ID, OK: true}); err != nil {
+			t.Errorf("subscribe replacement session: %v", err)
+			return
+		}
+
+		// Retry in the fresh session should succeed.
+		retrySendReq, ok := readRequest("sessions.send")
+		if !ok {
+			return
+		}
+		var retrySendParams map[string]string
+		if err := json.Unmarshal(retrySendReq.Params, &retrySendParams); err != nil {
+			t.Errorf("decode retry sessions.send params: %v", err)
+			return
+		}
+		if retrySendParams["key"] != "session-2" {
+			t.Errorf("retry sessions.send key = %q, want session-2", retrySendParams["key"])
+			return
+		}
+		if err := wsjson.Write(r.Context(), conn, gwFrame{Type: "res", ID: retrySendReq.ID, OK: true}); err != nil {
+			t.Errorf("accept retry sessions.send: %v", err)
+			return
+		}
+		if err := wsjson.Write(r.Context(), conn, gwFrame{
+			Type:  "event",
+			Event: "agent",
+			Payload: mustJSON(map[string]interface{}{
+				"stream":     "assistant",
+				"sessionKey": "session-2",
+				"data":       map[string]string{"delta": "hello"},
+			}),
+		}); err != nil {
+			t.Errorf("write assistant event: %v", err)
+			return
+		}
+		if err := wsjson.Write(r.Context(), conn, gwFrame{
+			Type:  "event",
+			Event: "agent",
+			Payload: mustJSON(map[string]interface{}{
+				"stream":     "lifecycle",
+				"sessionKey": "session-2",
+				"data":       map[string]string{"phase": "end"},
+			}),
+		}); err != nil {
+			t.Errorf("write lifecycle end: %v", err)
+			return
+		}
+
+		<-testDone
+	}))
+	defer srv.Close()
+	defer close(testDone)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http")
+	conn, _, err := websocket.Dial(ctx, wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial websocket: %v", err)
+	}
+	defer conn.CloseNow()
+
+	gs := &gatewaySession{
+		sessionKey: "session-1",
+		conn:       conn,
+		pending:    make(map[string]chan gwFrame),
+	}
+	go gs.readLoop(ctx)
+
+	reply, err := gs.SendMessage(ctx, "continue the task", nil, nil)
+	if err != nil {
+		t.Fatalf("SendMessage returned error: %v", err)
+	}
+	if reply != "hello" {
+		t.Fatalf("SendMessage reply = %q, want hello", reply)
 	}
 	if got := gs.getSessionKey(); got != "session-2" {
 		t.Fatalf("session key = %q, want session-2", got)
