@@ -28,6 +28,7 @@ func WorkflowCmd() *cobra.Command {
 	cmd.AddCommand(workflowTriggerCmd())
 	cmd.AddCommand(workflowRunsCmd())
 	cmd.AddCommand(workflowLogsCmd())
+	cmd.AddCommand(workflowConvertCmd())
 	return cmd
 }
 

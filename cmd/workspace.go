@@ -27,6 +27,7 @@ func WorkspaceCmd() *cobra.Command {
 	cmd.AddCommand(workspaceListCmd())
 	cmd.AddCommand(workspaceShowCmd())
 	cmd.AddCommand(workspaceRmCmd())
+	cmd.AddCommand(workspaceConvertCmd())
 	return cmd
 }
 
