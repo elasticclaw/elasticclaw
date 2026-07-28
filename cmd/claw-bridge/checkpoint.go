@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -125,6 +126,14 @@ func collectCheckpointFiles() ([]checkpointLocalFile, error) {
 		{filepath.Join(home, ".openclaw", "agents"), ".openclaw/agents"},
 	}
 	var out []checkpointLocalFile
+	skipped := 0
+	firstSkipped := ""
+	noteSkipped := func(path string) {
+		skipped++
+		if firstSkipped == "" {
+			firstSkipped = path
+		}
+	}
 	for _, root := range roots {
 		info, err := os.Lstat(root.base)
 		if os.IsNotExist(err) {
@@ -135,6 +144,10 @@ func collectCheckpointFiles() ([]checkpointLocalFile, error) {
 		}
 		if !info.IsDir() {
 			f, err := checkpointFile(root.base, root.label, info)
+			if errors.Is(err, errNotRegularFile) {
+				noteSkipped(root.base)
+				continue
+			}
 			if err != nil {
 				return nil, err
 			}
@@ -164,6 +177,10 @@ func collectCheckpointFiles() ([]checkpointLocalFile, error) {
 			}
 			rel = filepath.ToSlash(filepath.Join(root.label, rel))
 			f, err := checkpointFile(path, rel, info)
+			if errors.Is(err, errNotRegularFile) {
+				noteSkipped(path)
+				return nil
+			}
 			if err != nil {
 				return err
 			}
@@ -173,6 +190,9 @@ func collectCheckpointFiles() ([]checkpointLocalFile, error) {
 		if err != nil {
 			return nil, err
 		}
+	}
+	if skipped > 0 {
+		log.Printf("[checkpoint] skipped %d non-regular file(s) (symlink/socket/fifo/device), first: %s", skipped, firstSkipped)
 	}
 	return out, nil
 }
@@ -196,9 +216,13 @@ func checkpointExclude(path string, d os.DirEntry) bool {
 	return false
 }
 
+// errNotRegularFile marks entries a checkpoint cannot capture (symlinks, sockets,
+// fifos, devices). Callers skip them instead of aborting the whole snapshot.
+var errNotRegularFile = errors.New("not a regular file")
+
 func checkpointFile(abs, rel string, info os.FileInfo) (checkpointLocalFile, error) {
 	if !info.Mode().IsRegular() {
-		return checkpointLocalFile{}, fmt.Errorf("not a regular file: %s", abs)
+		return checkpointLocalFile{}, fmt.Errorf("%w: %s", errNotRegularFile, abs)
 	}
 	f, err := os.Open(abs)
 	if err != nil {
