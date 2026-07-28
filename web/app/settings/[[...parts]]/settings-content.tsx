@@ -15,6 +15,7 @@ import { VALID_SECTIONS, type Section } from "./sections"
 import { fetchWorkspaces, updateWorkflowControls, type RepositoryAccess, type Workspace, type Workflow } from "@/lib/api"
 import { useBranding } from "@/hooks/use-branding"
 import { AnalyticsCommandCenter } from "@/components/analytics-command-center"
+import { WorkflowRunsDialog } from "@/components/workflow-runs-dialog"
 
 function isValidSection(s: string): s is Section {
   return VALID_SECTIONS.includes(s as Section)
@@ -260,13 +261,12 @@ export default function SettingsSectionPage() {
   const selectedWorkspaceLabel = selectedWorkspace || "No workspaces"
   const selectedWorkspaceInitial = selectedWorkspace ? selectedWorkspace.trim()[0].toUpperCase() : "-"
 
-  const load = useCallback(async () => {
-    try {
-      setSettings(await fetchSettings())
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load")
-    }
-  }, [])
+  const load = useCallback(
+    () => fetchSettings()
+      .then((data) => setSettings(data))
+      .catch((e) => setError(e instanceof Error ? e.message : "Failed to load")),
+    [],
+  )
 
   useEffect(() => { load() }, [load])
 
@@ -1642,8 +1642,13 @@ function GitHubSection({ settings, onSave, saving, workspace }: { settings: Sett
   const [testing, setTesting] = useState(false)
   const [testError, setTestError] = useState("")
   const [workspaceApps, setWorkspaceApps] = useState<WorkspaceGitHubAppView[]>([])
-  const [workspaceLoading, setWorkspaceLoading] = useState(true)
+  const [workspaceReloading, setWorkspaceReloading] = useState(true)
+  // Which workspace the loaded apps belong to. While it differs from the current
+  // workspace the list is (re)loading — derived instead of set inside the effect.
+  const [loadedWorkspace, setLoadedWorkspace] = useState("")
+  const workspaceLoading = workspaceReloading || (workspace !== "" && loadedWorkspace !== workspace)
   const [workspaceError, setWorkspaceError] = useState("")
+  const visibleWorkspaceError = (workspace === "" || loadedWorkspace === workspace) ? workspaceError : ""
   const hubUrl = getHubUrl()
   const token = () => getAuthToken() || ""
 
@@ -1656,20 +1661,34 @@ function GitHubSection({ settings, onSave, saving, workspace }: { settings: Sett
   const closeModal = () => { setShowModal(false); resetModal() }
 
   const workspaceGitHubPath = workspace ? `/api/workspaces/${encodeURIComponent(workspace)}/github-apps` : ""
-  const loadWorkspaceApps = useCallback(async () => {
-    if (!workspace) return
-    setWorkspaceLoading(true)
-    setWorkspaceError("")
-    try {
-      const res = await fetch(`${hubUrl}${workspaceGitHubPath}`, { headers: { Authorization: `Bearer ${token()}` } })
-      if (!res.ok) throw new Error(await res.text())
-      const data = await res.json()
-      setWorkspaceApps(data.githubApps || [])
-    } catch (e) {
-      setWorkspaceError(e instanceof Error ? e.message : "Failed to load GitHub Apps")
-    } finally {
-      setWorkspaceLoading(false)
-    }
+  // Switching workspaces fires a new load without aborting the old one. Since
+  // workspaceLoading is derived from loadedWorkspace, a late response for the
+  // previous workspace would otherwise set loadedWorkspace backwards and pin
+  // the panel in its loading state forever.
+  const workspaceAppsRequest = useRef(0)
+  const loadWorkspaceApps = useCallback(() => {
+    if (!workspace) return Promise.resolve()
+    const requestID = ++workspaceAppsRequest.current
+    const stale = () => requestID !== workspaceAppsRequest.current
+    return fetch(`${hubUrl}${workspaceGitHubPath}`, { headers: { Authorization: `Bearer ${token()}` } })
+      .then(async (res) => {
+        if (!res.ok) throw new Error(await res.text())
+        return res.json()
+      })
+      .then((data) => {
+        if (stale()) return
+        setWorkspaceApps(data.githubApps || [])
+        setWorkspaceError("")
+      })
+      .catch((e) => {
+        if (stale()) return
+        setWorkspaceError(e instanceof Error ? e.message : "Failed to load GitHub Apps")
+      })
+      .finally(() => {
+        if (stale()) return
+        setWorkspaceReloading(false)
+        setLoadedWorkspace(workspace)
+      })
   }, [hubUrl, workspace, workspaceGitHubPath])
 
   useEffect(() => {
@@ -1723,6 +1742,7 @@ function GitHubSection({ settings, onSave, saving, workspace }: { settings: Sett
         return
       }
       closeModal()
+      setWorkspaceReloading(true)
       await loadWorkspaceApps()
       return
     }
@@ -1743,6 +1763,7 @@ function GitHubSection({ settings, onSave, saving, workspace }: { settings: Sett
       setWorkspaceError(await res.text())
       return
     }
+    setWorkspaceReloading(true)
     await loadWorkspaceApps()
   }
 
@@ -1766,7 +1787,7 @@ function GitHubSection({ settings, onSave, saving, workspace }: { settings: Sett
         </p>
       </div>
 
-      {workspaceError && <p className="mb-4 text-sm text-destructive">{workspaceError}</p>}
+      {visibleWorkspaceError && <p className="mb-4 text-sm text-destructive">{visibleWorkspaceError}</p>}
 
       {workspace ? (
         <div className="mb-6 space-y-2">
@@ -2084,7 +2105,7 @@ function GitHubSection({ settings, onSave, saving, workspace }: { settings: Sett
                   <h3 className="font-medium">Test Recommended</h3>
                 </div>
                 <p className="text-sm text-muted-foreground">
-                  You haven't tested this GitHub App yet. We recommend clicking <strong>Test Permissions</strong> first to verify it works.
+                  You haven&apos;t tested this GitHub App yet. We recommend clicking <strong>Test Permissions</strong> first to verify it works.
                 </p>
               </>
             ) : (
@@ -2388,8 +2409,13 @@ function IntegrationsSection({ settings, onSave, saving, selectedWorkspace, hubP
   const { appName } = useBranding()
   const [workspaceTrackers, setWorkspaceTrackers] = useState<TrackerItem[]>([])
   const [githubOwnerHint, setGithubOwnerHint] = useState("")
-  const [loading, setLoading] = useState(true)
+  const [reloading, setReloading] = useState(true)
+  // Which workspace the loaded trackers belong to. While it differs from the
+  // selected workspace the list is (re)loading — derived instead of set inside the effect.
+  const [loadedWorkspace, setLoadedWorkspace] = useState("")
+  const loading = reloading || (selectedWorkspace !== "" && loadedWorkspace !== selectedWorkspace)
   const [error, setError] = useState("")
+  const visibleError = (selectedWorkspace === "" || loadedWorkspace === selectedWorkspace) ? error : ""
   const hubUrl = getHubUrl()
   const authToken = () => getAuthToken() || ""
   const issueTrackersPath = selectedWorkspace ? `/api/workspaces/${encodeURIComponent(selectedWorkspace)}/issue-trackers` : ""
@@ -2400,20 +2426,33 @@ function IntegrationsSection({ settings, onSave, saving, selectedWorkspace, hubP
 
   const allTrackers: TrackerItem[] = workspaceTrackers
 
-  const loadTrackers = useCallback(async () => {
-    if (!selectedWorkspace) return
-    setLoading(true)
-    setError("")
-    try {
-      const res = await fetch(`${hubUrl}${issueTrackersPath}`, { headers: { Authorization: `Bearer ${authToken()}` } })
-      if (!res.ok) throw new Error(await res.text())
-      const data = await res.json()
-      setWorkspaceTrackers(data.issueTrackers || [])
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load issue trackers")
-    } finally {
-      setLoading(false)
-    }
+  // See the matching guard in GitHubSection: `loading` is derived from
+  // loadedWorkspace, so a late response for a superseded workspace must not
+  // write state or the panel stays stuck on the loading skeleton.
+  const trackersRequest = useRef(0)
+  const loadTrackers = useCallback(() => {
+    if (!selectedWorkspace) return Promise.resolve()
+    const requestID = ++trackersRequest.current
+    const stale = () => requestID !== trackersRequest.current
+    return fetch(`${hubUrl}${issueTrackersPath}`, { headers: { Authorization: `Bearer ${authToken()}` } })
+      .then(async (res) => {
+        if (!res.ok) throw new Error(await res.text())
+        return res.json()
+      })
+      .then((data) => {
+        if (stale()) return
+        setWorkspaceTrackers(data.issueTrackers || [])
+        setError("")
+      })
+      .catch((e) => {
+        if (stale()) return
+        setError(e instanceof Error ? e.message : "Failed to load issue trackers")
+      })
+      .finally(() => {
+        if (stale()) return
+        setReloading(false)
+        setLoadedWorkspace(selectedWorkspace)
+      })
   }, [hubUrl, issueTrackersPath, selectedWorkspace])
 
   useEffect(() => {
@@ -2516,6 +2555,7 @@ function IntegrationsSection({ settings, onSave, saving, selectedWorkspace, hubP
     }
     setShowModal(false)
     resetModal()
+    setReloading(true)
     await loadTrackers()
   }
 
@@ -2534,6 +2574,7 @@ function IntegrationsSection({ settings, onSave, saving, selectedWorkspace, hubP
     }
     setShowModal(false)
     resetModal()
+    setReloading(true)
     await loadTrackers()
   }
 
@@ -2624,7 +2665,7 @@ function IntegrationsSection({ settings, onSave, saving, selectedWorkspace, hubP
         </div>
       </div>
 
-      {error && <p className="text-sm text-destructive">{error}</p>}
+      {visibleError && <p className="text-sm text-destructive">{visibleError}</p>}
 
       {/* Configured trackers list */}
       {loading ? (
@@ -2861,7 +2902,7 @@ function IntegrationsSection({ settings, onSave, saving, selectedWorkspace, hubP
                         {copiedSetup === "jira-url" ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
                       </Button>
                     </div>
-                    <p className="text-xs text-muted-foreground mt-1">Use this URL from Jira Automation's Send web request action with the Issue data automation payload.</p>
+                    <p className="text-xs text-muted-foreground mt-1">Use this URL from Jira Automation&apos;s Send web request action with the Issue data automation payload.</p>
                   </div>
                 </>
               )}
@@ -2995,17 +3036,15 @@ function WorkspacesSection({ selectedWorkspace }: { selectedWorkspace: string })
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState("")
 
-  const load = useCallback(async () => {
-    setLoading(true)
-    setError("")
-    try {
-      setWorkspaces(await fetchWorkspaces())
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load workspaces")
-    } finally {
-      setLoading(false)
-    }
-  }, [])
+  // Only called from the mount effect, where loading/error already hold their
+  // initial values — so no state needs to be set before the fetch resolves.
+  const load = useCallback(
+    () => fetchWorkspaces()
+      .then((data) => setWorkspaces(data))
+      .catch((e) => setError(e instanceof Error ? e.message : "Failed to load workspaces"))
+      .finally(() => setLoading(false)),
+    [],
+  )
 
   useEffect(() => { load() }, [load])
 
@@ -3047,17 +3086,15 @@ function WorkflowsSection({ selectedWorkspace }: { selectedWorkspace: string }) 
   const [error, setError] = useState("")
   const [savingWorkflow, setSavingWorkflow] = useState("")
 
-  const load = useCallback(async () => {
-    setLoading(true)
-    setError("")
-    try {
-      setWorkspaces(await fetchWorkspaces())
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load workflows")
-    } finally {
-      setLoading(false)
-    }
-  }, [])
+  // Only called from the mount effect, where loading/error already hold their
+  // initial values — so no state needs to be set before the fetch resolves.
+  const load = useCallback(
+    () => fetchWorkspaces()
+      .then((data) => setWorkspaces(data))
+      .catch((e) => setError(e instanceof Error ? e.message : "Failed to load workflows"))
+      .finally(() => setLoading(false)),
+    [],
+  )
 
   useEffect(() => { load() }, [load])
 
@@ -3161,6 +3198,7 @@ function WorkflowSummaryRow({
             />
             <span>Manual trigger</span>
           </label>
+          <WorkflowRunsDialog workflow={workflow} />
           <span className={cn(
             "text-xs px-2 py-0.5 rounded",
             workflow.enabled ? "bg-muted text-muted-foreground" : "bg-amber-500/10 text-amber-500"
@@ -3448,20 +3486,33 @@ function AIConfigSection() {
   const [placeholders, setPlaceholders] = useState<string[]>([])
   const [secretValues, setSecretValues] = useState<Record<string, string>>({})
   const [backupPath, setBackupPath] = useState<string | null>(null)
-  // Restore from sessionStorage after mount (client-only)
+  // Restore from sessionStorage after mount (client-only).
+  // The values must be READ synchronously here: the persist effects below run in
+  // the same commit and overwrite storage with the initial (empty) state.
+  // Applying them to React state is deferred to a microtask so no setState runs
+  // synchronously inside the effect body. Intentionally not cancelled on cleanup:
+  // under StrictMode's double effect run, only the first run can still see the
+  // stored values, so its deferred restore must be allowed to apply.
   useEffect(() => {
+    let raw: string | null = null
+    let yaml: string | null = null
+    let backup: string | null = null
     try {
-      const raw = sessionStorage.getItem(SS_CHAT_KEY)
-      if (raw) setMessages((JSON.parse(raw) as ChatMessage[]).map(normalizeStoredMessage))
-      const yaml = sessionStorage.getItem(SS_YAML_KEY)
-      if (yaml) {
-        setProposedYaml(yaml)
-        setPlaceholders(extractYamlPlaceholders(yaml))
-        setSecretValues({})
-      }
-      const backup = sessionStorage.getItem(SS_BACKUP_KEY)
-      if (backup) setBackupPath(backup)
+      raw = sessionStorage.getItem(SS_CHAT_KEY)
+      yaml = sessionStorage.getItem(SS_YAML_KEY)
+      backup = sessionStorage.getItem(SS_BACKUP_KEY)
     } catch { /* ignore */ }
+    Promise.resolve().then(() => {
+      try {
+        if (raw) setMessages((JSON.parse(raw) as ChatMessage[]).map(normalizeStoredMessage))
+        if (yaml) {
+          setProposedYaml(yaml)
+          setPlaceholders(extractYamlPlaceholders(yaml))
+          setSecretValues({})
+        }
+        if (backup) setBackupPath(backup)
+      } catch { /* ignore */ }
+    })
   }, [])
   const [applying, setApplying] = useState(false)
   const [reverting, setReverting] = useState(false)
@@ -4590,21 +4641,26 @@ function DoctorSection() {
   const [error, setError] = useState<string | null>(null)
   const [showPassed, setShowPassed] = useState(false)
 
-  const load = useCallback(async (refresh = false) => {
-    setLoading(true)
-    setError(null)
-    try {
-      const hubUrl = getHubUrl()
-      const token = getAuthToken() || ""
-      const res = await fetch(`${hubUrl}/api/doctor${refresh ? "?refresh=true" : ""}`, {
-        headers: { Authorization: `Bearer ${token}` },
+  // Only called from the mount effect, where error is already null — so no
+  // state needs to be set before the fetch resolves.
+  const load = useCallback((refresh = false) => {
+    const hubUrl = getHubUrl()
+    const token = getAuthToken() || ""
+    return fetch(`${hubUrl}/api/doctor${refresh ? "?refresh=true" : ""}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    })
+      .then(async (res) => {
+        if (!res.ok) throw new Error(await res.text())
+        return res.json()
       })
-      if (!res.ok) throw new Error(await res.text())
-      setReport(await res.json())
-    } catch (e: any) {
-      setError(e.message || "Failed to load diagnostics")
-    }
-    setLoading(false)
+      .then((data) => {
+        setReport(data)
+        setError(null)
+      })
+      .catch((e: any) => {
+        setError(e.message || "Failed to load diagnostics")
+      })
+      .finally(() => setLoading(false))
   }, [])
 
   useEffect(() => { load() }, [load])

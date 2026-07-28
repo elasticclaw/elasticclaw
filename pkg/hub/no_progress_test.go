@@ -158,6 +158,35 @@ func TestTurnProgressFingerprintRejectsPartialState(t *testing.T) {
 	}
 }
 
+// A CI verdict flipping on an unchanged head SHA is real external progress and
+// must not be mistaken for a repeated turn by the no-progress detector.
+func TestTurnProgressFingerprintTracksCIConclusion(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
+	const clawID = "claw-ci-fingerprint"
+	if _, err := db.Exec(`INSERT INTO claws(id, tenant_id, name, status, pipeline_stage, created_at) VALUES(?,?,?,?,?,datetime('now'))`, clawID, "test-tenant-id", "AMB-13", "connected", "review_loop"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO claw_prs(id, claw_id, repo, pr_number, pr_url, last_ci_sha, last_ci_conclusion, created_at) VALUES(?,?,?,?,?,?,?,datetime('now'))`,
+		"pr-fp", clawID, "o/r", 1, "https://github.com/o/r/pull/1", "abc1234", "failure"); err != nil {
+		t.Fatal(err)
+	}
+
+	before, err := s.turnProgressFingerprint(clawID, "waiting on CI")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE claw_prs SET last_ci_conclusion='success' WHERE id='pr-fp'`); err != nil {
+		t.Fatal(err)
+	}
+	after, err := s.turnProgressFingerprint(clawID, "waiting on CI")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before == after {
+		t.Fatal("CI conclusion flip did not change the progress fingerprint")
+	}
+}
+
 func TestResponseProgressMarkersTrackNewCommitsAndPRs(t *testing.T) {
 	first := responseProgressMarkers("Pushed 1a2b3c4 to https://github.com/elasticclaw/elasticclaw/pull/100")
 	second := responseProgressMarkers("Pushed 9d8e7f6 to https://github.com/elasticclaw/elasticclaw/pull/100")

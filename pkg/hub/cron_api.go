@@ -82,6 +82,37 @@ func (s *Server) handleCronWorkflowRuns(w http.ResponseWriter, r *http.Request) 
 	})
 }
 
+// handleCronWorkflowRun handles GET /api/workspaces/{workspace}/workflows/{workflow}/cron/runs/{runId}
+// Returns a single workflow run by ID.
+func (s *Server) handleCronWorkflowRun(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	workspace := r.PathValue("workspace")
+	workflow := r.PathValue("workflow")
+	runID := r.PathValue("runId")
+
+	if s.cronScheduler == nil {
+		http.Error(w, "Cron scheduler not available", http.StatusServiceUnavailable)
+		return
+	}
+
+	run, err := s.cronScheduler.getRunByID(workspace, workflow, runID)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to get run: %v", err), http.StatusInternalServerError)
+		return
+	}
+	if run == nil {
+		http.Error(w, "Run not found", http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(run)
+}
+
 // handleCronWorkflowNextRun handles GET /api/workspaces/{workspace}/workflows/{workflow}/cron/next
 // Returns the next scheduled run time for a cron workflow.
 func (s *Server) handleCronWorkflowNextRun(w http.ResponseWriter, r *http.Request) {

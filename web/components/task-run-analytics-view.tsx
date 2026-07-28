@@ -1,6 +1,6 @@
 "use client"
 
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react"
 import { createPortal } from "react-dom"
 import { usePathname, useRouter, useSearchParams } from "next/navigation"
 import { AlertCircle, ArrowDown, ArrowUp, CheckCircle2, CircleDot, ExternalLink, GitPullRequest, Minus, RefreshCw, Search, Users, XCircle } from "lucide-react"
@@ -50,6 +50,8 @@ type Cancellation = {
 }
 
 const anyValue = "__any__"
+// Stable no-op subscribe for useSyncExternalStore-based environment checks.
+const emptySubscribe = () => () => {}
 const DEFAULT_PAGE_LIMIT = 50
 const MAX_DISPLAYED_EVENTS = 12
 
@@ -383,7 +385,7 @@ export function TaskRunAnalyticsView({ workspaceScope }: { workspaceScope?: stri
                       : undefined
                   }
                 />
-                <CostCard label="Avg PR to merged" value={formatDurationMs(generalStats.prOpenToMergeMs.avgMs)} />
+                <CostCard label="Avg ready→merge" title="Business hours from ready-for-review to merge, in your local timezone." value={formatDurationMs(generalStats.prOpenToMergeMs.avgMs)} />
                 <CostCard label="Avg AI implementation time" value={formatDurationMs(generalStats.aiImplMs.avgMs)} />
               </div>
             </div>
@@ -529,9 +531,9 @@ function Metric({ label, title, value, tone, active, onClick }: { label: string;
   )
 }
 
-function CostCard({ label, value, sub }: { label: string; value: ReactNode; sub?: ReactNode }) {
+function CostCard({ label, value, sub, title }: { label: string; value: ReactNode; sub?: ReactNode; title?: string }) {
   return (
-    <div className="rounded-md border border-border bg-card px-3 py-2">
+    <div className="rounded-md border border-border bg-card px-3 py-2" title={title}>
       <div className="text-xs text-muted-foreground">{label}</div>
       <div className="mt-1 flex items-baseline gap-2 text-xl font-semibold">{value}</div>
       {sub && <div className="mt-1 text-xs text-muted-foreground">{sub}</div>}
@@ -601,9 +603,14 @@ export function FilterSelect({ label, value, values, onChange }: { label: string
 }
 
 export function RunDetailPanel({ run, details, loading, error, onClose }: { run: TaskRunSummary | null; details: DetailState | null; loading: boolean; error: string | null; onClose: () => void }) {
-  const [mounted, setMounted] = useState(false)
-
-  useEffect(() => setMounted(true), [])
+  // The portal target (document.body) only exists on the client, so render
+  // nothing during SSR/hydration. useSyncExternalStore is the recommended way
+  // to read client-only environment state without a setState-in-effect flip.
+  const mounted = useSyncExternalStore(
+    emptySubscribe,
+    () => true,
+    () => false
+  )
 
   if (!run || !mounted) return null
   return createPortal(
@@ -827,7 +834,9 @@ function runTimingPhases(run: TaskRunSummary) {
   }
   push("Queued wait", durationBetween(run.queuedAt, run.agentStartedAt), "Time between the run being queued and the agent starting to work (covers provisioning and startup).")
   push("Implementation", durationBetween(run.agentStartedAt, run.prOpenedAt), "Time from the agent starting to the PR being opened.")
-  push("PR to merge", durationBetween(run.prOpenedAt, run.mergedAt), "Time from the PR being opened to it being merged.")
+  // 0 is a real value here (a merge entirely outside business hours), so the
+  // row is driven by the run having merged rather than by the duration.
+  push("Ready to merge", run.mergedAt > 0 ? (run.readyToMergeMs ?? 0) : undefined, "Business-hours time in your timezone from ready-for-review to merge.")
   return phases
 }
 

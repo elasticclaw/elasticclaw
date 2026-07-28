@@ -949,19 +949,26 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, ctx pipelineCon
 		log.Printf("[pipeline] running dependency updates for claw %s stage %q output %q", clawID[:8], stage.ID, outputName)
 		result, err := s.executeDependencyUpdatesAction(clawID, stage.ID, stage.OnEnter.DependencyUpdates)
 		if err != nil || (result != nil && result.ExitCode != 0) {
-			msg := "Dependency update step failed"
-			if result != nil {
-				details := strings.TrimSpace(result.Stdout + "\n" + result.Stderr)
-				if details != "" {
-					msg += ": " + truncateString(details, 2000)
-				}
-			} else if err != nil {
+			msg := formatDependencyUpdateFailure(result)
+			if err != nil && !strings.Contains(msg, err.Error()) {
 				msg += ": " + err.Error()
 			}
-			log.Printf("[pipeline] %s", msg)
-			s.injectHubMessageByID(clawID, "[hub] Error: "+msg)
-			if !stage.OnEnter.DependencyUpdates.ContinueOnError {
-				return false, fmt.Errorf("dependency update step failed: %s", msg)
+			// Log the full output so operators can debug even when the chat message is truncated.
+			if result != nil {
+				if result.Stdout != "" {
+					log.Printf("[pipeline] dependency update stdout for claw %s:\n%s", clawID[:8], result.Stdout)
+				}
+				if result.Stderr != "" {
+					log.Printf("[pipeline] dependency update stderr for claw %s:\n%s", clawID[:8], result.Stderr)
+				}
+			}
+			if stage.OnEnter.DependencyUpdates.ContinueOnError {
+				log.Printf("[pipeline] %s; continuing because continue_on_error=true", msg)
+				s.injectHubMessageByID(clawID, "[hub] Warning: "+msg)
+			} else {
+				log.Printf("[pipeline] %s", msg)
+				s.injectHubMessageByID(clawID, "[hub] Error: "+msg)
+				return false, errors.New(msg)
 			}
 		}
 	}

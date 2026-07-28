@@ -297,21 +297,33 @@ func (cs *cronScheduler) runWorkflow(sw *scheduledWorkflow) (workflowRunStartSta
 	return workflowRunStarted, nil
 }
 
-// recordRun inserts a workflow run record.
+// recordRun inserts a workflow run record for a scheduled workflow.
 func (cs *cronScheduler) recordRun(runID string, sw *scheduledWorkflow, status, clawID, context string) {
-	now := time.Now().UTC()
+	cs.srv.recordWorkflowRun(runID, "", sw.workspace.Name, sw.workflow.Name, "cron", status, clawID, context, time.Time{})
+}
 
-	var tenantID string
-	_ = cs.srv.db.QueryRow(`SELECT id FROM tenants LIMIT 1`).Scan(&tenantID)
-
-	_, err := cs.srv.db.Exec(
+// recordWorkflowRun inserts a workflow run record. If runID is empty, a new
+// UUID is generated. If tenantID is empty, the first tenant is used. It is used
+// by both scheduled cron runs and manual workflow triggers.
+func (s *Server) recordWorkflowRun(runID, tenantID, workspaceName, workflowName, triggerType, status, clawID, context string, startedAt time.Time) string {
+	if runID == "" {
+		runID = uuid.New().String()
+	}
+	if tenantID == "" {
+		_ = s.db.QueryRow(`SELECT id FROM tenants LIMIT 1`).Scan(&tenantID)
+	}
+	if startedAt.IsZero() {
+		startedAt = time.Now().UTC()
+	}
+	_, err := s.db.Exec(
 		`INSERT INTO workflow_runs (id, tenant_id, workflow_name, workspace_name, trigger_type, status, claw_id, run_context, started_at, created_at)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		runID, tenantID, sw.workflow.Name, sw.workspace.Name, "cron", status, clawID, context, now, now,
+		runID, tenantID, workflowName, workspaceName, triggerType, status, clawID, context, startedAt, time.Now().UTC(),
 	)
 	if err != nil {
-		log.Printf("[cron] failed to record run for %s: %v", sw.key, err)
+		log.Printf("[workflow-runs] failed to record run for %s/%s: %v", workspaceName, workflowName, err)
 	}
+	return runID
 }
 
 // updateRun updates an existing workflow run with claw ID and status.
@@ -527,6 +539,39 @@ func (cs *cronScheduler) getRunHistory(workspaceName, workflowName string, limit
 		runs = append(runs, r)
 	}
 	return runs, rows.Err()
+}
+
+// getRunByID returns a single workflow run by ID, or nil if not found.
+func (cs *cronScheduler) getRunByID(workspaceName, workflowName, runID string) (*types.WorkflowRun, error) {
+	var tenantID string
+	_ = cs.srv.db.QueryRow(`SELECT id FROM tenants LIMIT 1`).Scan(&tenantID)
+
+	var r types.WorkflowRun
+	var finishedAt sql.NullTime
+	var runContextJSON string
+	err := cs.srv.db.QueryRow(
+		`SELECT id, tenant_id, workflow_name, workspace_name, trigger_type, status, result, claw_id, run_context, started_at, finished_at, created_at
+		 FROM workflow_runs
+		 WHERE tenant_id = ? AND workspace_name = ? AND workflow_name = ? AND id = ?`,
+		tenantID, workspaceName, workflowName, runID,
+	).Scan(
+		&r.ID, &r.TenantID, &r.WorkflowName, &r.WorkspaceName, &r.TriggerType,
+		&r.Status, &r.Result, &r.ClawID, &runContextJSON,
+		&r.StartedAt, &finishedAt, &r.CreatedAt,
+	)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if finishedAt.Valid {
+		r.FinishedAt = &finishedAt.Time
+	}
+	if runContextJSON != "" && runContextJSON != "{}" {
+		_ = json.Unmarshal([]byte(runContextJSON), &r.RunContext)
+	}
+	return &r, nil
 }
 
 // loadAllWorkspaces loads all workspace configurations.

@@ -1802,6 +1802,84 @@ func setActiveGatewaySession(gs *gatewaySession) {
 	gatewayProcessState.Unlock()
 }
 
+func activeGatewaySession() *gatewaySession {
+	gatewayProcessState.RLock()
+	defer gatewayProcessState.RUnlock()
+	return gatewayProcessState.session
+}
+func injectGatewayNudge(ctx context.Context, text string) {
+	gs := activeGatewaySession()
+	if gs == nil || !gs.IsReady() {
+		log.Printf("[status] dropping nudge: gateway session not ready")
+		return
+	}
+	reqCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	sent, err := gs.sendTurnScopedReq(reqCtx, "sessions.send", map[string]string{"key": gs.getSessionKey(), "message": text})
+	if !sent {
+		log.Printf("[status] dropping nudge: no turn in flight")
+		return
+	}
+	if err != nil {
+		log.Printf("[status] nudge injection failed: %v", err)
+	}
+}
+
+// sendTurnScopedReq dispatches a request only while a turn is in flight,
+// holding infMu across the check AND the WebSocket write so the readLoop
+// cannot mark the turn finished in between (closing the turnInFlight/send
+// TOCTOU). The response is awaited without the lock — the readLoop needs
+// infMu.Lock to clear inFlight, so holding it across the await would
+// deadlock. Returns sent=false when no turn was in flight at write time.
+func (gs *gatewaySession) sendTurnScopedReq(ctx context.Context, method string, params interface{}) (bool, error) {
+	paramsJSON, _ := json.Marshal(params)
+	reqID := randomID()
+	ch := make(chan gwFrame, 1)
+
+	gs.pendMu.Lock()
+	gs.pending[reqID] = ch
+	gs.pendMu.Unlock()
+	cleanup := func() {
+		gs.pendMu.Lock()
+		delete(gs.pending, reqID)
+		gs.pendMu.Unlock()
+	}
+
+	gs.infMu.RLock()
+	if gs.inFlight == nil {
+		gs.infMu.RUnlock()
+		cleanup()
+		return false, nil
+	}
+	conn := gs.currentConn()
+	// Short write deadline: the RLock stalls readLoop writers (turn-end
+	// bookkeeping) until the write returns, so don't hold it for the full
+	// request timeout against a wedged socket.
+	writeCtx, writeCancel := context.WithTimeout(ctx, 5*time.Second)
+	err := wsjson.Write(writeCtx, conn, gwFrame{Type: "req", ID: reqID, Method: method, Params: paramsJSON})
+	writeCancel()
+	gs.infMu.RUnlock()
+	if err != nil {
+		cleanup()
+		return true, fmt.Errorf("%s write: %w", method, err)
+	}
+
+	select {
+	case resp := <-ch:
+		if !resp.OK {
+			msg := "unknown"
+			if resp.Error != nil {
+				msg = resp.Error.Message
+			}
+			return true, fmt.Errorf("%s failed: %s", method, msg)
+		}
+		return true, nil
+	case <-ctx.Done():
+		cleanup()
+		return true, ctx.Err()
+	}
+}
+
 func (gs *gatewaySession) setReady() {
 	gs.readyMu.Lock()
 	gs.ready = true
@@ -1884,7 +1962,19 @@ func isRecoverableSessionLifecycleError(err error) bool {
 	if errors.As(err, &sendErr) {
 		return false
 	}
-	return errors.Is(err, context.DeadlineExceeded) || isProviderRequestFormatError(err)
+	return errors.Is(err, context.DeadlineExceeded) || isProviderRequestFormatError(err) || isSessionFileLockConflictError(err)
+}
+
+// isSessionFileLockConflictError detects OpenClaw's "session file changed while
+// embedded prompt lock was released" error. That error indicates the on-disk
+// session transcript was modified unexpectedly, leaving the persistent session
+// in an inconsistent state. Rotating to a fresh session is the only recovery.
+func isSessionFileLockConflictError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "session file changed") && strings.Contains(msg, "embedded prompt lock")
 }
 
 // SendMessage sends a user message to the persistent session, streams chunks
@@ -3968,6 +4058,14 @@ func runStatusChannel(ctx context.Context, wsURL, clawID, clawName, templateName
 			}
 			if msg.Type == "status_ping" {
 				_ = wsjson.Write(ctx, conn, hubMsg{Type: "status_pong"})
+			}
+			if msg.Type == "nudge" {
+				var p struct {
+					Content string `json:"content"`
+				}
+				if err := json.Unmarshal(msg.Payload, &p); err == nil && p.Content != "" {
+					go injectGatewayNudge(ctx, p.Content)
+				}
 			}
 		}
 		pingCancel() // stop the ping goroutine before closing the connection

@@ -10,8 +10,10 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/elasticclaw/elasticclaw/pkg/types"
+	"github.com/google/uuid"
 )
 
 // WorkspaceView is the API view of a persisted workspace.
@@ -337,6 +339,19 @@ func (s *Server) triggerWorkflowConfig(w http.ResponseWriter, r *http.Request, w
 			jsonError(w, http.StatusInternalServerError, "failed to create claw: "+err.Error())
 			return
 		}
+		if created {
+			now := time.Now().UTC()
+			runID := uuid.New().String()
+			contextData := map[string]interface{}{
+				"run_id":         runID,
+				"trigger_type":   "manual",
+				"workflow_name":  workflow.Name,
+				"workspace_name": workspace.Name,
+				"issue_number":   validatedInputs["issue_number"],
+			}
+			contextJSON, _ := json.Marshal(contextData)
+			s.recordWorkflowRun(runID, "", workspace.Name, workflow.Name, "manual", "running", clawID, string(contextJSON), now)
+		}
 		status := "existing"
 		if created {
 			status = "created"
@@ -353,6 +368,17 @@ func (s *Server) triggerWorkflowConfig(w http.ResponseWriter, r *http.Request, w
 		jsonError(w, http.StatusInternalServerError, "failed to create claw: "+err.Error())
 		return
 	}
+	now := time.Now().UTC()
+	runID := uuid.New().String()
+	contextData := map[string]interface{}{
+		"run_id":         runID,
+		"trigger_type":   "manual",
+		"workflow_name":  workflow.Name,
+		"workspace_name": workspace.Name,
+		"inputs":         validatedInputs,
+	}
+	contextJSON, _ := json.Marshal(contextData)
+	s.recordWorkflowRun(runID, "", workspace.Name, workflow.Name, "manual", "running", clawID, string(contextJSON), now)
 	jsonOK(w, map[string]string{
 		"claw_id": clawID,
 		"status":  "created",

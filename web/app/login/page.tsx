@@ -51,44 +51,50 @@ function LoginForm() {
     const state = searchParams.get("state")
     if (!code || !state) return
 
-    // Validate state to prevent CSRF
-    const storedState = getOAuthState()
-    if (!storedState || state !== storedState) {
-      setError("OAuth state mismatch — please try again")
-      return
-    }
-    removeOAuthState()
-    const storedNext = safeNextPath(getOAuthNext())
-    removeOAuthNext()
-    const callbackNext = nextParam || storedNext || "/"
-
-    const redirectUri = window.location.origin + "/login"
-    const hubUrl = getHubUrl()
-    const exchangeUrl = hubUrl ? `${hubUrl}/api/auth/github/exchange` : "/api/auth/github/exchange"
-
     let cancelled = false
-    fetch(exchangeUrl, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ code, redirect_uri: redirectUri }),
+    // Run the callback handling asynchronously so state updates never happen
+    // synchronously inside the effect body.
+    Promise.resolve().then(() => {
+      if (cancelled) return
+
+      // Validate state to prevent CSRF
+      const storedState = getOAuthState()
+      if (!storedState || state !== storedState) {
+        setError("OAuth state mismatch — please try again")
+        return
+      }
+      removeOAuthState()
+      const storedNext = safeNextPath(getOAuthNext())
+      removeOAuthNext()
+      const callbackNext = nextParam || storedNext || "/"
+
+      const redirectUri = window.location.origin + "/login"
+      const hubUrl = getHubUrl()
+      const exchangeUrl = hubUrl ? `${hubUrl}/api/auth/github/exchange` : "/api/auth/github/exchange"
+
+      return fetch(exchangeUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ code, redirect_uri: redirectUri }),
+      })
+        .then(async (res) => {
+          if (!res.ok) throw new Error(await res.text())
+          return res.json()
+        })
+        .then((data) => {
+          if (cancelled) return
+          if (data.github_token) {
+            clearConfig()
+            setGitHubToken(data.github_token)
+            router.replace(callbackNext)
+          } else {
+            throw new Error("missing token")
+          }
+        })
+        .catch((err) => {
+          if (!cancelled) setError("GitHub sign-in failed: " + (err?.message || "unknown error"))
+        })
     })
-      .then(async (res) => {
-        if (!res.ok) throw new Error(await res.text())
-        return res.json()
-      })
-      .then((data) => {
-        if (cancelled) return
-        if (data.github_token) {
-          clearConfig()
-          setGitHubToken(data.github_token)
-          router.replace(callbackNext)
-        } else {
-          throw new Error("missing token")
-        }
-      })
-      .catch((err) => {
-        if (!cancelled) setError("GitHub sign-in failed: " + (err?.message || "unknown error"))
-      })
 
     return () => { cancelled = true }
   }, [searchParams, nextParam, router])

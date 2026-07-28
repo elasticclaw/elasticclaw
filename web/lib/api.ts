@@ -16,6 +16,7 @@ import type {
   TaskRunPR,
   TaskRunsResponse,
   TaskRunSummary,
+  WorkflowRunsResponse,
 } from "./types"
 import { getHubUrl, setHubUrl } from "./hub-url"
 import { getAuthToken, requestAuthToken, clearAuthTokens } from "./auth-storage"
@@ -363,6 +364,12 @@ export async function triggerWorkflow(workflow: Workflow, inputs?: Record<string
   )
 }
 
+export async function fetchCronWorkflowRuns(workspaceName: string, workflowName: string, limit = 50): Promise<WorkflowRunsResponse> {
+  return apiFetch<WorkflowRunsResponse>(
+    `/api/workspaces/${encodeURIComponent(workspaceName)}/workflows/${encodeURIComponent(workflowName)}/cron/runs?limit=${limit}`
+  )
+}
+
 function taskRunAnalyticsQuery(filters?: TaskRunAnalyticsFilters): string {
   const params = new URLSearchParams()
   if (!filters) return ""
@@ -394,6 +401,21 @@ function taskRunAnalyticsQuery(filters?: TaskRunAnalyticsFilters): string {
   return query ? `?${query}` : ""
 }
 
+function viewerTimezoneQuery(): string {
+  try {
+    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone
+    return tz ? `tz=${encodeURIComponent(tz)}` : ""
+  } catch {
+    return ""
+  }
+}
+
+function appendViewerTimezone(query: string): string {
+  const tz = viewerTimezoneQuery()
+  if (!tz) return query
+  return `${query}${query ? "&" : "?"}${tz}`
+}
+
 type AnalyticsRequestOptions = Pick<RequestInit, "signal">
 
 export async function fetchTaskRunAnalyticsSummary(filters?: TaskRunAnalyticsFilters, options?: AnalyticsRequestOptions): Promise<TaskRunAnalyticsSummary> {
@@ -423,15 +445,15 @@ export async function fetchAnalyticsCostDrivers(filters?: TaskRunAnalyticsFilter
 }
 
 export async function fetchGeneralStats(filters?: TaskRunAnalyticsFilters, options?: AnalyticsRequestOptions): Promise<GeneralStats> {
-  return apiFetch<GeneralStats>(`/api/analytics/general-stats${taskRunAnalyticsQuery(filters)}`, options)
+  return apiFetch<GeneralStats>(`/api/analytics/general-stats${appendViewerTimezone(taskRunAnalyticsQuery(filters))}`, options)
 }
 
 export async function fetchTaskRuns(filters?: TaskRunAnalyticsFilters, options?: AnalyticsRequestOptions): Promise<TaskRunsResponse> {
-  return apiFetch<TaskRunsResponse>(`/api/analytics/runs${taskRunAnalyticsQuery(filters)}`, options)
+  return apiFetch<TaskRunsResponse>(`/api/analytics/runs${appendViewerTimezone(taskRunAnalyticsQuery(filters))}`, options)
 }
 
 export async function fetchTaskRun(runId: string): Promise<{ run: TaskRunSummary }> {
-  return apiFetch<{ run: TaskRunSummary }>(`/api/analytics/runs/${encodeURIComponent(runId)}`)
+  return apiFetch<{ run: TaskRunSummary }>(`/api/analytics/runs/${encodeURIComponent(runId)}${appendViewerTimezone("")}`)
 }
 
 export async function fetchTaskRunAttempts(runId: string): Promise<{ attempts: TaskRunAttempt[] }> {

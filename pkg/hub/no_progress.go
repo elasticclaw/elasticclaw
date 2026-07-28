@@ -202,18 +202,18 @@ func (s *Server) turnProgressFingerprint(clawID, response string) (string, error
 	}
 	parts = append(parts, "stage="+stage)
 
-	rows, err := s.db.Query(`SELECT repo, pr_number, last_ci_sha, last_comment_id, last_comment_at, last_review_comment_id, last_review_id, pr_conditions_fired FROM claw_prs WHERE claw_id=? ORDER BY repo, pr_number`, clawID)
+	rows, err := s.db.Query(`SELECT repo, pr_number, last_ci_sha, last_ci_conclusion, last_comment_id, last_comment_at, last_review_comment_id, last_review_id, pr_conditions_fired FROM claw_prs WHERE claw_id=? ORDER BY repo, pr_number`, clawID)
 	if err != nil {
 		return "", fmt.Errorf("query tracked pull requests: %w", err)
 	}
 	for rows.Next() {
-		var repo, ciSHA, commentAt string
+		var repo, ciSHA, ciConclusion, commentAt string
 		var number, commentID, reviewCommentID, reviewID, conditions int
-		if err := rows.Scan(&repo, &number, &ciSHA, &commentID, &commentAt, &reviewCommentID, &reviewID, &conditions); err != nil {
+		if err := rows.Scan(&repo, &number, &ciSHA, &ciConclusion, &commentID, &commentAt, &reviewCommentID, &reviewID, &conditions); err != nil {
 			rows.Close()
 			return "", fmt.Errorf("scan tracked pull request: %w", err)
 		}
-		parts = append(parts, fmt.Sprintf("pr=%s#%d:%s:%d:%s:%d:%d:%d", repo, number, ciSHA, commentID, commentAt, reviewCommentID, reviewID, conditions))
+		parts = append(parts, fmt.Sprintf("pr=%s#%d:%s:%s:%d:%s:%d:%d:%d", repo, number, ciSHA, ciConclusion, commentID, commentAt, reviewCommentID, reviewID, conditions))
 	}
 	if err := rows.Err(); err != nil {
 		rows.Close()

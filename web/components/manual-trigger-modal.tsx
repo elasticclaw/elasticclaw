@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useEffect, useCallback } from "react"
+import { useState, useCallback } from "react"
 import { useRouter } from "next/navigation"
 import { Zap, Play, AlertCircle } from "lucide-react"
 import { Button } from "@/components/ui/button"
@@ -25,27 +25,33 @@ export function ManualTriggerModal({ open, onOpenChange, workflow }: ManualTrigg
   const [inputValues, setInputValues] = useState<Record<string, string>>({})
   const [triggering, setTriggering] = useState(false)
   const [triggerError, setTriggerError] = useState<string | null>(null)
+  const [seededWorkflow, setSeededWorkflow] = useState<Workflow | null | undefined>(undefined)
   const router = useRouter()
 
-  // Seed defaults when workflow changes
-  useEffect(() => {
+  // Seed defaults when workflow changes. Done during render with a guarded
+  // comparison (React's "adjusting state when props change" pattern) instead
+  // of a setState-in-effect, so no stale-values render is committed.
+  if (workflow !== seededWorkflow) {
+    setSeededWorkflow(workflow)
+    // Clear on every workflow change, not just the has-inputs branch —
+    // otherwise an error from the previous workflow survives the switch.
+    setTriggerError(null)
     if (!workflow?.inputs) {
       setInputValues({})
-      return
-    }
-    const defaults: Record<string, string> = {}
-    for (const input of workflow.inputs) {
-      if (input.default) {
-        defaults[input.name] = input.default
-      } else if (input.type === "bool") {
-        defaults[input.name] = "false"
-      } else if (input.type === "enum" && input.options && input.options.length > 0) {
-        defaults[input.name] = input.options[0]
+    } else {
+      const defaults: Record<string, string> = {}
+      for (const input of workflow.inputs) {
+        if (input.default) {
+          defaults[input.name] = input.default
+        } else if (input.type === "bool") {
+          defaults[input.name] = "false"
+        } else if (input.type === "enum" && input.options && input.options.length > 0) {
+          defaults[input.name] = input.options[0]
+        }
       }
+      setInputValues(defaults)
     }
-    setInputValues(defaults)
-    setTriggerError(null)
-  }, [workflow])
+  }
 
   const handleTrigger = useCallback(async () => {
     if (!workflow) return
