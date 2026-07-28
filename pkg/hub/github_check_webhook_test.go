@@ -304,3 +304,31 @@ func TestCheckWebhookInvalidSignatureRejected(t *testing.T) {
 		t.Fatalf("messages = %v, want none", msgs)
 	}
 }
+
+// T10: two live claws tracking the same PR are both woken by one delivery.
+// Each claw_prs row carries its own CI watermark, so taking only the newest row
+// would leave the other claw idle until the (possibly paused) poller caught up.
+func TestCheckWebhookWakesEveryClawTrackingThePR(t *testing.T) {
+	const clawID = "claw-check-webhook-multi-a"
+	const otherClawID = "claw-check-webhook-multi-b"
+	const headSHA = "77aa77aa77aa77aa77aa77aa77aa77aa77aa77aa"
+	s, db, _, _ := checkWebhookFixture(t, clawID, headSHA, allGreenCheckRuns)
+
+	if _, err := db.Exec(`INSERT INTO claws(id,tenant_id,name,template,provider,status,created_at) VALUES(?,?,?,?,?,?,?)`,
+		otherClawID, "test-tenant-id", otherClawID, "elasticclaw", "noop", "connected", now()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO claw_prs(id,claw_id,repo,pr_number,pr_url,created_at) VALUES(?,?,?,?,?,?)`,
+		"pr-"+otherClawID, otherClawID, "owner/repo", 42, "https://github.com/owner/repo/pull/42", now()); err != nil {
+		t.Fatal(err)
+	}
+
+	postSignedGitHubWebhook(t, s, "check_run", checkWebhookBody("check_run", "completed", headSHA, 42))
+
+	for _, id := range []string{clawID, otherClawID} {
+		waitForMessageContains(t, db, id, "hub", []string{"All CI checks passed on PR #42"})
+		if got := greenMessageCount(t, db, id); got != 1 {
+			t.Fatalf("green messages for %s = %d, want 1", id, got)
+		}
+	}
+}

@@ -503,20 +503,25 @@ func (s *Server) processGitHubCheckEvent(event string, payload githubCheckPayloa
 	}
 
 	for _, number := range prNumbers {
-		pr, ok := s.loadClawPRByNumber(repo, number)
-		if !ok {
+		// A PR can be tracked by more than one live claw; the poller evaluates
+		// every row, so the webhook must too or the extra claws would only ever
+		// be woken by the (possibly paused) poller.
+		prs := s.loadClawPRsByNumber(repo, number)
+		if len(prs) == 0 {
 			log.Printf("[github-webhook] %s completed on %s#%d — not an agent-tracked PR, ignored", event, repo, number)
 			continue
 		}
-		token := s.resolveGitHubTokenForRepo(pr.repo)
-		if token == "" {
-			token = s.resolveGitHubToken()
+		for _, pr := range prs {
+			token := s.resolveGitHubTokenForRepo(pr.repo)
+			if token == "" {
+				token = s.resolveGitHubToken()
+			}
+			if token == "" {
+				log.Printf("[github-webhook] CRITICAL: GitHub token resolution failed; cannot check CI for %s#%d", repo, number)
+				continue
+			}
+			s.checkCIStatus(pr, token)
 		}
-		if token == "" {
-			log.Printf("[github-webhook] CRITICAL: GitHub token resolution failed; cannot check CI for %s#%d", repo, number)
-			return
-		}
-		s.checkCIStatus(pr, token)
 	}
 }
 
