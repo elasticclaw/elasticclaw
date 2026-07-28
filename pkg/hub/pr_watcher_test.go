@@ -447,6 +447,248 @@ func TestStorePRMentionConcurrentDuplicate(t *testing.T) {
 	}
 }
 
+// ciStatusFixture wires a server against a stub GitHub that reports a fixed
+// head SHA and a fixed set of check runs for it.
+func ciStatusFixture(t *testing.T, clawID, headSHA, checkRunsJSON string) (*Server, *sql.DB, clawPR) {
+	t.Helper()
+	gh := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/check-runs") {
+			_, _ = w.Write([]byte(`{"check_runs":` + checkRunsJSON + `}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"head":{"sha":"` + headSHA + `"},"state":"open"}`))
+	}))
+	t.Cleanup(gh.Close)
+
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{ClawToken: "claw-token"}, gh.URL, "", "")
+	if _, err := db.Exec(`INSERT INTO claws(id,tenant_id,name,template,status,created_at) VALUES(?,?,?,?,?,?)`,
+		clawID, "test-tenant-id", clawID, "elasticclaw", "connected", now()); err != nil {
+		t.Fatal(err)
+	}
+	pr := clawPR{id: "pr-" + clawID, clawID: clawID, repo: "owner/repo", prNumber: 42, prURL: "https://github.com/owner/repo/pull/42"}
+	if _, err := db.Exec(`INSERT INTO claw_prs(id,claw_id,repo,pr_number,pr_url,created_at) VALUES(?,?,?,?,?,?)`,
+		pr.id, pr.clawID, pr.repo, pr.prNumber, pr.prURL, now()); err != nil {
+		t.Fatal(err)
+	}
+	return s, db, pr
+}
+
+func ciMessages(t *testing.T, db *sql.DB, clawID string) []string {
+	t.Helper()
+	rows, err := db.Query(`SELECT content FROM messages WHERE claw_id=? ORDER BY created_at, rowid`, clawID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var c string
+		if err := rows.Scan(&c); err != nil {
+			t.Fatal(err)
+		}
+		out = append(out, c)
+	}
+	return out
+}
+
+func ciWatermark(t *testing.T, db *sql.DB, prID string) (string, string) {
+	t.Helper()
+	var sha, conclusion string
+	if err := db.QueryRow(`SELECT last_ci_sha, last_ci_conclusion FROM claw_prs WHERE id=?`, prID).Scan(&sha, &conclusion); err != nil {
+		t.Fatal(err)
+	}
+	return sha, conclusion
+}
+
+// TestCheckCIStatusGreenWakesIdleClawOnce is the regression test for the CI-green
+// deadlock: an agent that pushed a fix and ended its turn waiting on CI got no
+// event at all, because only failures were reported.
+func TestCheckCIStatusGreenWakesIdleClawOnce(t *testing.T) {
+	const clawID = "claw-ci-green"
+	const headSHA = "04cc3f49aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	allGreen := `[{"name":"verify","status":"completed","conclusion":"success"},
+	              {"name":"gitleaks","status":"completed","conclusion":"success"}]`
+	s, db, pr := ciStatusFixture(t, clawID, headSHA, allGreen)
+
+	s.checkCIStatus(pr, "token")
+
+	msgs := ciMessages(t, db, clawID)
+	if len(msgs) != 1 {
+		t.Fatalf("messages = %d (%v), want 1", len(msgs), msgs)
+	}
+	if !strings.Contains(msgs[0], "All CI checks passed on PR #42") || !strings.Contains(msgs[0], "04cc3f4") {
+		t.Fatalf("unexpected CI-green message: %q", msgs[0])
+	}
+	var role string
+	if err := db.QueryRow(`SELECT role FROM messages WHERE claw_id=?`, clawID).Scan(&role); err != nil {
+		t.Fatal(err)
+	}
+	if role != "hub" {
+		t.Fatalf("role = %q, want hub (same channel as review-comment wake-ups)", role)
+	}
+	sha, conclusion := ciWatermark(t, db, pr.id)
+	if sha != headSHA || conclusion != ciConclusionSuccess {
+		t.Fatalf("watermark = (%q,%q), want (%q,success)", sha, conclusion, headSHA)
+	}
+
+	// Re-poll with the watermark the previous poll wrote: no second wake-up.
+	pr.lastCISHA, pr.lastCIConclusion = sha, conclusion
+	s.checkCIStatus(pr, "token")
+	if msgs := ciMessages(t, db, clawID); len(msgs) != 1 {
+		t.Fatalf("re-poll injected again: messages = %d (%v), want 1", len(msgs), msgs)
+	}
+}
+
+// A stale in-memory clawPR (e.g. two overlapping polls) must not re-notify:
+// the conditional UPDATE is the authority, not the cached watermark.
+func TestCheckCIStatusGreenClaimBlocksConcurrentRepoll(t *testing.T) {
+	const clawID = "claw-ci-green-claim"
+	s, db, pr := ciStatusFixture(t, clawID, "abcdef0123456789", `[{"name":"verify","status":"completed","conclusion":"success"}]`)
+
+	s.checkCIStatus(pr, "token")
+	s.checkCIStatus(pr, "token") // same stale pr value, watermark already claimed
+
+	if msgs := ciMessages(t, db, clawID); len(msgs) != 1 {
+		t.Fatalf("messages = %d (%v), want 1", len(msgs), msgs)
+	}
+}
+
+func TestCheckCIStatusGreenDoesNotInterruptBusyClaw(t *testing.T) {
+	const clawID = "claw-ci-green-busy"
+	s, db, pr := ciStatusFixture(t, clawID, "beefbeefbeefbeef", `[{"name":"verify","status":"completed","conclusion":"success"}]`)
+	cc := &clawConn{id: clawID, tenantID: "test-tenant-id", awaitingResponse: true}
+	s.mu.Lock()
+	s.claws[clawID] = cc
+	s.mu.Unlock()
+
+	s.checkCIStatus(pr, "token")
+
+	var pending int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND delivered_at IS NULL`, clawID).Scan(&pending); err != nil {
+		t.Fatal(err)
+	}
+	if pending != 1 {
+		t.Fatalf("pending messages = %d, want 1 (queued, not delivered mid-turn)", pending)
+	}
+	cc.mu.Lock()
+	defer cc.mu.Unlock()
+	if !cc.awaitingResponse || !cc.streamingStartedAt.IsZero() {
+		t.Fatal("CI-green injection started a turn on a busy claw")
+	}
+}
+
+func TestCheckCIStatusRunningNeitherNotifiesNorAdvances(t *testing.T) {
+	const clawID = "claw-ci-running"
+	s, db, pr := ciStatusFixture(t, clawID, "0011223344556677",
+		`[{"name":"verify","status":"in_progress","conclusion":null}]`)
+
+	s.checkCIStatus(pr, "token")
+
+	if msgs := ciMessages(t, db, clawID); len(msgs) != 0 {
+		t.Fatalf("messages = %v, want none while CI is running", msgs)
+	}
+	if sha, conclusion := ciWatermark(t, db, pr.id); sha != "" || conclusion != "" {
+		t.Fatalf("watermark = (%q,%q), want empty while CI is running", sha, conclusion)
+	}
+}
+
+func TestCheckCIStatusNoCheckRunsIsNotGreen(t *testing.T) {
+	const clawID = "claw-ci-none"
+	s, db, pr := ciStatusFixture(t, clawID, "7766554433221100", `[]`)
+
+	s.checkCIStatus(pr, "token")
+
+	if msgs := ciMessages(t, db, clawID); len(msgs) != 0 {
+		t.Fatalf("messages = %v, want none when CI has not reported", msgs)
+	}
+	if sha, _ := ciWatermark(t, db, pr.id); sha != "" {
+		t.Fatalf("watermark = %q, want empty when CI has not reported", sha)
+	}
+}
+
+func TestCheckCIStatusFailureMessageUnchangedAndRerunCanTurnGreen(t *testing.T) {
+	const clawID = "claw-ci-flip"
+	const headSHA = "1234567890abcdef"
+	s, db, pr := ciStatusFixture(t, clawID, headSHA,
+		`[{"name":"verify","status":"completed","conclusion":"failure","details_url":"https://ci/1"}]`)
+
+	s.checkCIStatus(pr, "token")
+
+	msgs := ciMessages(t, db, clawID)
+	want := "CI failed on PR #42 ([owner/repo](https://github.com/owner/repo/pull/42)):\n\n" +
+		"**verify** — [view logs](https://ci/1)\n\nPlease fix these failures on the same branch."
+	if len(msgs) != 1 || msgs[0] != want {
+		t.Fatalf("failure message = %v, want %q", msgs, want)
+	}
+	sha, conclusion := ciWatermark(t, db, pr.id)
+	if sha != headSHA || conclusion != ciConclusionFailure {
+		t.Fatalf("watermark = (%q,%q), want (%q,failure)", sha, conclusion, headSHA)
+	}
+
+	// A re-run of the *same* SHA that turns green must still wake the agent.
+	green, _, prGreen := ciStatusFixture(t, clawID+"-2", headSHA, `[{"name":"verify","status":"completed","conclusion":"success"}]`)
+	if _, err := green.db.Exec(`UPDATE claw_prs SET last_ci_sha=?, last_ci_conclusion=? WHERE id=?`, headSHA, ciConclusionFailure, prGreen.id); err != nil {
+		t.Fatal(err)
+	}
+	prGreen.lastCISHA, prGreen.lastCIConclusion = headSHA, ciConclusionFailure
+	green.checkCIStatus(prGreen, "token")
+	greenMsgs := ciMessages(t, green.db, prGreen.clawID)
+	if len(greenMsgs) != 1 || !strings.Contains(greenMsgs[0], "All CI checks passed") {
+		t.Fatalf("failure->success on same SHA did not notify: %v", greenMsgs)
+	}
+}
+
+// A completed-but-not-green conclusion (cancelled, action_required, stale,
+// startup_failure, or anything unknown) must never be announced as green: the
+// claw would emit its stage signal token on a PR that is not actually passing.
+func TestCheckCIStatusNonGreenTerminalConclusionsAreNotGreen(t *testing.T) {
+	for _, conclusion := range []string{"cancelled", "action_required", "stale", "startup_failure", "some_future_value"} {
+		t.Run(conclusion, func(t *testing.T) {
+			clawID := "claw-ci-" + conclusion
+			const headSHA = "abcdef1234567890"
+			s, db, pr := ciStatusFixture(t, clawID, headSHA,
+				`[{"name":"verify","status":"completed","conclusion":"success"},
+				  {"name":"deploy","status":"completed","conclusion":"`+conclusion+`","details_url":"https://ci/2"}]`)
+
+			s.checkCIStatus(pr, "token")
+
+			msgs := ciMessages(t, db, clawID)
+			if len(msgs) != 1 {
+				t.Fatalf("messages = %v, want exactly 1", msgs)
+			}
+			if strings.Contains(msgs[0], "All CI checks passed") {
+				t.Fatalf("%q reported as green: %q", conclusion, msgs[0])
+			}
+			if !strings.Contains(msgs[0], "**deploy ("+conclusion+")**") {
+				t.Fatalf("message does not name the non-green check: %q", msgs[0])
+			}
+			if _, got := ciWatermark(t, db, pr.id); got != ciConclusionFailure {
+				t.Fatalf("watermark conclusion = %q, want failure", got)
+			}
+		})
+	}
+}
+
+// neutral and skipped are green: a skipped optional job must not block the PR.
+func TestCheckCIStatusNeutralAndSkippedAreGreen(t *testing.T) {
+	const clawID = "claw-ci-neutral"
+	const headSHA = "fedcba0987654321"
+	s, db, pr := ciStatusFixture(t, clawID, headSHA,
+		`[{"name":"verify","status":"completed","conclusion":"success"},
+		  {"name":"optional","status":"completed","conclusion":"skipped"},
+		  {"name":"advisory","status":"completed","conclusion":"neutral"}]`)
+
+	s.checkCIStatus(pr, "token")
+
+	msgs := ciMessages(t, db, clawID)
+	if len(msgs) != 1 || !strings.Contains(msgs[0], "All CI checks passed") {
+		t.Fatalf("messages = %v, want one green notification", msgs)
+	}
+	if _, got := ciWatermark(t, db, pr.id); got != ciConclusionSuccess {
+		t.Fatalf("watermark conclusion = %q, want success", got)
+	}
+}
+
 func TestInjectMessageSkipsIdenticalPendingRow(t *testing.T) {
 	s, db := NewTestServerWithConfig(t, &types.HubConfig{ClawToken: "claw-token"}, "", "", "")
 	const clawID = "inject-message-dedupe"
