@@ -12,6 +12,7 @@ func TestCollectCheckpointFilesExcludesSessionsAndAuthProfiles(t *testing.T) {
 
 	files := map[string]string{
 		".openclaw/workspace/src/main.go":          "package main",
+		".openclaw/workspace/sessions/data.json":   "[]",
 		".openclaw/openclaw.json":                  "{}",
 		".openclaw/agents/main/agent/openclaw-agent.sqlite": "sqlite",
 		".openclaw/agents/main/agent/auth-profiles.json":    "auth",
@@ -39,6 +40,9 @@ func TestCollectCheckpointFilesExcludesSessionsAndAuthProfiles(t *testing.T) {
 
 	if !byPath["workspace/src/main.go"] {
 		t.Errorf("expected workspace file to be checkpointed, got paths: %v", byPath)
+	}
+	if !byPath["workspace/sessions/data.json"] {
+		t.Errorf("expected workspace sessions folder to be checkpointed, got paths: %v", byPath)
 	}
 	if !byPath[".openclaw/openclaw.json"] {
 		t.Errorf("expected openclaw.json to be checkpointed, got paths: %v", byPath)
