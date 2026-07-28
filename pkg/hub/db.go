@@ -21,9 +21,55 @@ func openDB(path string) (*sql.DB, error) {
 	return db, nil
 }
 
+// addColumn applies an additive `ALTER TABLE ... ADD COLUMN` migration.
+//
+// SQLite has no `IF NOT EXISTS` for ADD COLUMN, so the two benign outcomes are
+// absorbed here: the column already exists (the common case on every restart
+// after the first), and the table does not exist yet (fresh databases create it
+// with the column already in the CREATE TABLE below). Everything else is
+// wrapped and returned, so a migration that genuinely failed aborts startup
+// instead of leaving a missing column to break queries at runtime.
+//
+// The existence check is done up front against pragma_table_info rather than by
+// parsing the driver error: modernc.org/sqlite reports both "duplicate column
+// name" and "no such table" as the same generic SQLITE_ERROR code (1), so the
+// message text is the only discriminator and must not be the sole line of
+// defense. The message match remains as a fallback for the racy case where the
+// column appears between the check and the ALTER.
+func addColumn(db *sql.DB, table, column, columnDef string) error {
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info(?) WHERE name = ?`, table, column).Scan(&count); err != nil {
+		return fmt.Errorf("inspect column %s.%s: %w", table, column, err)
+	}
+	if count > 0 {
+		return nil
+	}
+	if _, err := db.Exec(fmt.Sprintf(`ALTER TABLE %q ADD COLUMN %q %s`, table, column, columnDef)); err != nil {
+		if isBenignAddColumnErr(err) {
+			return nil
+		}
+		return fmt.Errorf("add column %s.%s: %w", table, column, err)
+	}
+	return nil
+}
+
+// isBenignAddColumnErr reports whether an ADD COLUMN failure means the column
+// is already present or the table does not exist yet.
+func isBenignAddColumnErr(err error) bool {
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "duplicate column name") || strings.Contains(msg, "no such table")
+}
+
 func migrate(db *sql.DB) error {
 	// Add columns that may be missing from older databases.
 	// SQLite doesn't support IF NOT EXISTS on ALTER TABLE, so ignore errors.
+	//
+	// addColumn above is the intended idiom for new columns. The 61 legacy
+	// `_, _ = db.Exec(...)` lines below are deliberately left as-is: migrate()
+	// runs on the hub startup path against a live production database, and
+	// flipping all of them to a fatal-on-unexpected-error helper in one go risks
+	// the hub refusing to start over a legacy column. Converting them is a
+	// separate, dedicated follow-up.
 	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN provider TEXT NOT NULL DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN provider_id TEXT NOT NULL DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN default_model TEXT NOT NULL DEFAULT ''`)
@@ -65,7 +111,9 @@ func migrate(db *sql.DB) error {
 	_, _ = db.Exec(`ALTER TABLE claw_prs ADD COLUMN permanent_failure_count INTEGER NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE claw_prs ADD COLUMN last_review_comment_id INTEGER NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE claw_prs ADD COLUMN last_review_id INTEGER NOT NULL DEFAULT 0`)
-	_, _ = db.Exec(`ALTER TABLE claw_prs ADD COLUMN last_ci_conclusion TEXT NOT NULL DEFAULT ''`)
+	if err := addColumn(db, "claw_prs", "last_ci_conclusion", `TEXT NOT NULL DEFAULT ''`); err != nil {
+		return err
+	}
 	_, _ = db.Exec(`ALTER TABLE messages ADD COLUMN format TEXT NOT NULL DEFAULT ''`)
 	if _, err := db.Exec(`ALTER TABLE messages ADD COLUMN delivered_at DATETIME`); err == nil {
 		// A failed backfill must abort startup: the column now exists, so a
