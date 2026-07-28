@@ -2,6 +2,7 @@ package hub
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -294,6 +295,36 @@ type clawPR struct {
 	lastReviewID        int64
 	prConditionsFired   bool
 	createdAt           string
+}
+
+// loadClawPRByNumber hydrates the tracked-PR row for a (repo, number) pair.
+//
+// checkCIStatus claims its verdict with a conditional UPDATE keyed on
+// claw_prs.id and skips work using the stored watermark, so the value-literal
+// clawPR built by the review-comment webhook handlers (which leaves id empty)
+// is not sufficient here — the row has to come from the database.
+func (s *Server) loadClawPRByNumber(repo string, prNumber int) (clawPR, bool) {
+	var pr clawPR
+	var prConditionsFiredInt int
+	err := s.db.QueryRow(`
+		SELECT cp.id, cp.claw_id, cp.repo, cp.pr_number, cp.pr_url, cp.last_ci_sha, cp.last_ci_conclusion, cp.last_comment_id,
+		       cp.last_comment_at, cp.last_review_comment_id, cp.last_review_id, cp.pr_conditions_fired, cp.created_at
+		FROM claw_prs cp
+		JOIN claws cl ON cl.id = cp.claw_id
+		WHERE cp.repo = ? AND cp.pr_number = ? AND cl.status NOT IN ('deleted','error','offline')
+		ORDER BY cp.created_at DESC
+		LIMIT 1
+	`, repo, prNumber).Scan(&pr.id, &pr.clawID, &pr.repo, &pr.prNumber, &pr.prURL,
+		&pr.lastCISHA, &pr.lastCIConclusion, &pr.lastCommentID, &pr.lastCommentAt,
+		&pr.lastReviewCommentID, &pr.lastReviewID, &prConditionsFiredInt, &pr.createdAt)
+	if err != nil {
+		if !errors.Is(err, sql.ErrNoRows) {
+			log.Printf("[pr-watcher] failed to load tracked PR %s#%d: %v", repo, prNumber, err)
+		}
+		return clawPR{}, false
+	}
+	pr.prConditionsFired = prConditionsFiredInt == 1
+	return pr, true
 }
 
 func (s *Server) pollAllPRs() {
