@@ -25,6 +25,12 @@ const githubETagCacheMax = 2048
 // a usable reset hint.
 const githubRateLimitFallbackWait = time.Minute
 
+// githubRateLimitMaxWait clamps how long a single response may pause every
+// GitHub call in the hub. Legitimate values never exceed the hourly window, so
+// a malformed or hostile Retry-After/X-RateLimit-Reset cannot blind the hub
+// until the process restarts.
+const githubRateLimitMaxWait = time.Hour
+
 func githubEnvInt(key string, def int) int {
 	if v, err := strconv.Atoi(strings.TrimSpace(os.Getenv(key))); err == nil && v >= 0 {
 		return v
@@ -123,6 +129,11 @@ func (c *githubClient) doGet(url, token string, conditional bool) (*githubRespon
 		if cached, ok := c.cachedBody(url); ok {
 			return &githubResponse{StatusCode: http.StatusOK, Body: cached, Header: resp.Header, NotModified: true}, nil
 		}
+		if !conditional {
+			// We sent no validator, so a 304 is a protocol violation and there is
+			// nothing to replay. Surface it instead of retrying forever.
+			return nil, &githubAPIError{StatusCode: resp.StatusCode, Body: "github returned 304 without a conditional request"}
+		}
 		// The entry was evicted after the validator was sent; ask again unconditionally.
 		c.forget(url)
 		return c.doGet(url, token, false)
@@ -159,11 +170,15 @@ func (c *githubClient) observe(status int, h http.Header, body []byte) {
 	if !githubIsRateLimited(status, h, body) {
 		return
 	}
-	until := time.Now().Add(githubRateLimitFallbackWait)
+	now := time.Now()
+	until := now.Add(githubRateLimitFallbackWait)
 	if retry, ok := githubHeaderInt(h, "Retry-After"); ok && retry > 0 {
-		until = time.Now().Add(time.Duration(retry) * time.Second)
-	} else if !reset.IsZero() && reset.After(time.Now()) {
+		until = now.Add(time.Duration(retry) * time.Second)
+	} else if !reset.IsZero() && reset.After(now) {
 		until = reset
+	}
+	if max := now.Add(githubRateLimitMaxWait); until.After(max) {
+		until = max
 	}
 	if until.After(c.blockedUntil) {
 		c.blockedUntil = until
@@ -219,11 +234,23 @@ func (c *githubClient) allowLowPriority() bool {
 	if !c.haveLimit {
 		return true
 	}
-	if c.remaining >= githubRateLimitReserve {
+	if c.remaining >= c.effectiveReserveLocked() {
 		return true
 	}
 	// Budget is inside the reserve: stay out until the window resets.
 	return !c.reset.IsZero() && !time.Now().Before(c.reset)
+}
+
+// effectiveReserveLocked keeps the reserve proportional to the observed limit.
+// A token whose hourly limit is at or below githubRateLimitReserve (a classic
+// PAT scoped down, or an unauthenticated 60/hour budget) would otherwise sit
+// permanently inside the reserve and degrade the watcher to merge-only forever.
+func (c *githubClient) effectiveReserveLocked() int {
+	reserve := githubRateLimitReserve
+	if c.limit > 0 && reserve > c.limit/2 {
+		reserve = c.limit / 2
+	}
+	return reserve
 }
 
 // budget reports the last observed quota state for logging.

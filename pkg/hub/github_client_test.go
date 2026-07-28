@@ -129,6 +129,45 @@ func TestGitHubRetryAfterBlocksSubsequentCalls(t *testing.T) {
 	}
 }
 
+func TestGitHubRateLimitBlockIsClamped(t *testing.T) {
+	resetGitHubClientForTest(t)
+
+	gh := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// A hostile or malformed hint that would otherwise blind the hub for years.
+		w.Header().Set("Retry-After", "99999999")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"message":"rate limit"}`))
+	}))
+	defer gh.Close()
+
+	if _, err := githubAPIWithBase(gh.URL, "repos/o/r/pulls/1", "tok"); err == nil {
+		t.Fatal("expected error")
+	}
+	until, blocked := defaultGitHubClient.blockedUntilTime()
+	if !blocked {
+		t.Fatal("client not blocked")
+	}
+	if wait := time.Until(until); wait > githubRateLimitMaxWait+time.Minute {
+		t.Fatalf("blocked for %s, want clamped to %s", wait, githubRateLimitMaxWait)
+	}
+}
+
+func TestGitHubReserveScalesWithSmallLimits(t *testing.T) {
+	resetGitHubClientForTest(t)
+
+	h := http.Header{}
+	h.Set("X-RateLimit-Limit", "60")
+	h.Set("X-RateLimit-Remaining", "40")
+	h.Set("X-RateLimit-Reset", strconv.FormatInt(time.Now().Add(30*time.Minute).Unix(), 10))
+	defaultGitHubClient.observe(http.StatusOK, h, nil)
+
+	// 40 remaining is below the 500 default reserve but well above half of a
+	// 60/hour limit, so background polling must stay enabled.
+	if !defaultGitHubClient.allowLowPriority() {
+		t.Fatal("low-priority polling disabled by a reserve larger than the limit")
+	}
+}
+
 func TestGitHubClientUsesETagSoUnchangedPollsAreFree(t *testing.T) {
 	resetGitHubClientForTest(t)
 

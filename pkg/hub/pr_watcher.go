@@ -183,18 +183,22 @@ const (
 	prWatcherBaseInterval = 30 * time.Second
 	// prWatcherMaxInterval caps the backoff so a big factory still reconciles.
 	prWatcherMaxInterval = 5 * time.Minute
-	// prWatcherCallsPerPR is the observed steady-state cost of one PR per poll
-	// (pull, check-runs, issue comments, review comments, reviews, plus the
-	// pipeline-driven extras).
-	prWatcherCallsPerPR = 7
+	// prWatcherCallsPerPR is the worst-case cost of one PR per poll: merge check
+	// (1) + CI failures (pull + check-runs = 2) + issue comments (1) + review
+	// comments (1) + reviews (1) + pr_conditions (pull + check-runs + reviews =
+	// 3). ETag 304s make the billed number lower in steady state.
+	prWatcherCallsPerPR = 9
 	// prWatcherHourlyBudget is the watcher's share of the 5,000/hour GitHub App
 	// installation quota. The rest is left for webhooks, pipelines and agents.
 	prWatcherHourlyBudget = 2000
 )
 
 // prWatcherInterval scales the poll interval with the number of tracked PRs so
-// the watcher's hourly cost stays inside prWatcherHourlyBudget no matter how
-// many claws are live.
+// the watcher's hourly cost stays inside prWatcherHourlyBudget. The guarantee
+// holds until the interval hits prWatcherMaxInterval (around 18 tracked PRs);
+// past that the cost grows linearly again and the backstop is the rate-limit
+// reserve in githubClient, which degrades polling to merge-only rather than
+// letting the watcher exhaust the installation quota.
 func prWatcherInterval(trackedPRs int) time.Duration {
 	if trackedPRs <= 0 {
 		return prWatcherBaseInterval
