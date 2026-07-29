@@ -2385,12 +2385,15 @@ func setupFlakeEnvironmentSync(nixDone <-chan error) error {
 	// Workspace flakes supply claw-wide tools (e.g. depot). This is the
 	// contract used by both the agent gateway and deterministic run steps.
 	// We deliberately do not use "nix profile install ." (wrong for dev-shell-only flakes).
+	// After nix develop builds the flake's PATH, we append common host binary dirs
+	// so bootstrap-installed tools (e.g. gh) and host tools (e.g. Homebrew) are
+	// available as fallbacks, while flake packages remain preferred.
 	wrapperScript := fmt.Sprintf(`#!/bin/bash
 set -euo pipefail
 export PATH="/nix/var/nix/profiles/default/bin:$PATH"
 . /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh 2>/dev/null || true
 cd %q
-exec nix develop --accept-flake-config -c "$@"
+exec nix develop --accept-flake-config -c bash -c 'export PATH="$PATH:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin"; exec "$@"' bash "$@"
 `, flakeDir)
 	wrapperPath := filepath.Join(home, ".elasticclaw", "flake-run")
 	if err := os.WriteFile(wrapperPath, []byte(wrapperScript), 0755); err != nil {
