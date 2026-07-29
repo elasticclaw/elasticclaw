@@ -80,18 +80,7 @@ func (s *Server) slackNotificationsConfig() (*types.SlackNotificationsConfig, st
 // enabledSlackEventTypes maps the config toggles onto concrete event types.
 // All categories default to enabled when the toggles block is absent.
 func enabledSlackEventTypes(cfg *types.SlackNotificationsConfig) map[string]bool {
-	agentStarted, prOpened, failures := true, true, true
-	if cfg != nil && cfg.Events != nil {
-		if cfg.Events.AgentStarted != nil {
-			agentStarted = *cfg.Events.AgentStarted
-		}
-		if cfg.Events.PROpened != nil {
-			prOpened = *cfg.Events.PROpened
-		}
-		if cfg.Events.Failures != nil {
-			failures = *cfg.Events.Failures
-		}
-	}
+	agentStarted, prOpened, failures := slackClawKindsEnabled(cfg)
 	enabled := map[string]bool{}
 	if agentStarted {
 		enabled[taskRunEventAgentStarted] = true
@@ -186,10 +175,11 @@ type slackRunContext struct {
 func (s *Server) slackNotifierTick() {
 	cfg, token := s.slackNotificationsConfig()
 	if cfg == nil || !cfg.Enabled {
-		// Keep the cursor at the end of the stream while Slack is off, so
+		// Keep the cursors at the end of their streams while Slack is off, so
 		// re-enabling behaves like a fresh enable instead of flushing the
 		// backlog accumulated during the disabled window.
 		s.parkSlackWatermark()
+		s.parkSlackClawState()
 		return
 	}
 	if err := types.ValidateSlackNotificationsConfig(cfg); err != nil {
@@ -203,6 +193,18 @@ func (s *Server) slackNotifierTick() {
 	s.clearPollWarning("slack-config")
 	s.clearPollWarning("slack-token")
 
+	client := s.newSlackClient(token)
+	// Two independent event sources share the client, dedupe table and thread
+	// table: task-run events for claws that belong to a task run, and the claw
+	// pass for ad-hoc claws (task_run_id=''). See slack_claw_notifier.go for
+	// the exclusivity rule that prevents double notifications.
+	s.slackTaskRunPass(client, cfg)
+	s.slackClawPass(client, cfg)
+}
+
+// slackTaskRunPass scans task_run_events behind the rowid watermark and
+// delivers the enabled event types.
+func (s *Server) slackTaskRunPass(client *slackClient, cfg *types.SlackNotificationsConfig) {
 	watermark, found, err := s.slackStateInt64(slackStateWatermarkKey)
 	if err != nil {
 		// A read failure must not be mistaken for a first run: resetting the
@@ -238,7 +240,6 @@ func (s *Server) slackNotifierTick() {
 		return
 	}
 
-	client := s.newSlackClient(token)
 	maxHandled := watermark
 	for _, ev := range events {
 		if err := s.sendSlackEvent(client, cfg, ev); err != nil {
@@ -293,17 +294,26 @@ func (s *Server) slackMaxEventRowID() (int64, error) {
 	return maxRow, err
 }
 
-// sendSlackEvent renders one event, posts it (threaded per run when
+// sendSlackEvent renders one task-run event, posts it (threaded per run when
 // configured) and records the delivery.
 func (s *Server) sendSlackEvent(client *slackClient, cfg *types.SlackNotificationsConfig, ev slackEventRow) error {
 	runCtx := s.slackRunContextFor(ev.RunID)
+	return s.postSlackEvent(client, cfg, ev, runCtx, ev.RunID, ev.ID, ev.TenantID)
+}
+
+// postSlackEvent renders one event, posts it (threaded per threadKey when
+// configured) and records the delivery under deliveryKey. Task-run events use
+// (run_id, event id); claw-pass events use namespaced synthetic keys
+// ("claw:<id>", "claw:<id>:<kind>") so the two sources share the thread and
+// dedupe tables without ever colliding.
+func (s *Server) postSlackEvent(client *slackClient, cfg *types.SlackNotificationsConfig, ev slackEventRow, runCtx slackRunContext, threadKey, deliveryKey, tenantID string) error {
 	blocks, fallback := buildSlackMessage(ev, runCtx)
 
 	threadTS := ""
 	haveRoot := false
 	if slackThreadByRun(cfg) {
 		var rootChannel, rootTS string
-		err := s.db.QueryRow(`SELECT channel, thread_ts FROM slack_run_threads WHERE run_id=?`, ev.RunID).Scan(&rootChannel, &rootTS)
+		err := s.db.QueryRow(`SELECT channel, thread_ts FROM slack_run_threads WHERE run_id=?`, threadKey).Scan(&rootChannel, &rootTS)
 		if err == nil && rootChannel == cfg.Channel {
 			threadTS = rootTS
 			haveRoot = true
@@ -316,19 +326,19 @@ func (s *Server) sendSlackEvent(client *slackClient, cfg *types.SlackNotificatio
 	if err != nil {
 		return err
 	}
-	// The first message for a run becomes the thread root — whatever event it
-	// is (e.g. pr_opened when agent_started is disabled).
+	// The first message for a thread key becomes the thread root — whatever
+	// event it is (e.g. pr_opened when agent_started is disabled).
 	if slackThreadByRun(cfg) && !haveRoot && ts != "" {
 		_, dbErr := s.db.Exec(`
 			INSERT INTO slack_run_threads(run_id, tenant_id, channel, thread_ts, created_at)
 			VALUES(?,?,?,?,?)
 			ON CONFLICT(run_id) DO UPDATE SET channel=excluded.channel, thread_ts=excluded.thread_ts`,
-			ev.RunID, ev.TenantID, cfg.Channel, ts, epochMillis(now()))
+			threadKey, tenantID, cfg.Channel, ts, epochMillis(now()))
 		if dbErr != nil {
-			log.Printf("[slack] record thread root for run %s: %v", ev.RunID, dbErr)
+			log.Printf("[slack] record thread root for %s: %v", threadKey, dbErr)
 		}
 	}
-	s.recordSlackDelivery(ev.ID, ev.RunID, ts, slackDeliveryStatusSent)
+	s.recordSlackDelivery(deliveryKey, threadKey, ts, slackDeliveryStatusSent)
 	return nil
 }
 
@@ -654,6 +664,7 @@ func (s *Server) handleSlackNotificationTest(w http.ResponseWriter, r *http.Requ
 	var body struct {
 		EventType string `json:"event_type"`
 		RunID     string `json:"run_id"`
+		ClawID    string `json:"claw_id"`
 		DryRun    bool   `json:"dry_run"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -684,9 +695,15 @@ func (s *Server) handleSlackNotificationTest(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
+	if body.RunID != "" && body.ClawID != "" {
+		jsonError(w, http.StatusBadRequest, "run_id and claw_id are mutually exclusive")
+		return
+	}
+
 	ev := slackEventRow{EventType: body.EventType}
 	var runCtx slackRunContext
-	if body.RunID != "" {
+	switch {
+	case body.RunID != "":
 		runCtx = s.slackRunContextFor(body.RunID)
 		if runCtx.IssueID == "" && runCtx.IssueTitle == "" && runCtx.Repo == "" && runCtx.ClawID == "" {
 			jsonError(w, http.StatusNotFound, "run "+strconv.Quote(body.RunID)+" not found in task_run_summaries")
@@ -695,7 +712,39 @@ func (s *Server) handleSlackNotificationTest(w http.ResponseWriter, r *http.Requ
 		if body.EventType == taskRunEventPROpened {
 			ev.TargetURL = runCtx.PrimaryPRURL
 		}
-	} else {
+	case body.ClawID != "":
+		// Claw-sourced variant: render from real claws-table context, the same
+		// context the claw pass uses for ad-hoc claws.
+		claw, ok, err := s.slackClawByID(body.ClawID)
+		if err != nil {
+			jsonError(w, http.StatusInternalServerError, "load claw: "+err.Error())
+			return
+		}
+		if !ok {
+			jsonError(w, http.StatusNotFound, "claw "+strconv.Quote(body.ClawID)+" not found")
+			return
+		}
+		runCtx = slackClawRunContext(claw)
+		switch body.EventType {
+		case taskRunEventPROpened:
+			var repo, prURL string
+			var prNumber int
+			err := s.db.QueryRow(`SELECT repo, pr_number, pr_url FROM claw_prs WHERE claw_id=? ORDER BY rowid DESC LIMIT 1`,
+				body.ClawID).Scan(&repo, &prNumber, &prURL)
+			if err == nil {
+				ev.TargetURL = prURL
+				ev.TargetLabel = fmt.Sprintf("%s#%d", repo, prNumber)
+				runCtx.Repo = repo
+			}
+		case taskRunEventAgentStarted:
+			// no target — renders without a link, like real claw starts
+		default:
+			ev.FailureType = body.EventType
+			if claw.BootstrapDiagnostic != "" {
+				ev.Detail = map[string]any{"reason": claw.BootstrapDiagnostic}
+			}
+		}
+	default:
 		runCtx, ev = sampleSlackContext(body.EventType)
 	}
 
