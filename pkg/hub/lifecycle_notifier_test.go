@@ -10,30 +10,66 @@ import (
 	"testing"
 	"time"
 
+	"github.com/elasticclaw/elasticclaw/pkg/hub/notify"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 )
 
-const slackTestChannel = "C0TEST1234"
+const (
+	slackTestChannel  = "C0TEST1234"
+	testNotifierName  = "test-notifier"
+	testNotifierToken = "slack_bot_token"
+)
 
-func newSlackNotifierTestServer(t *testing.T, slackURL string, mutate func(*types.SlackNotificationsConfig)) (*Server, *sql.DB) {
+// newSlackNotifierTestServer builds a hub whose lifecycle notifier posts to the
+// given httptest Slack server. The provider is reached the same way production
+// reaches it — a named hub notifier plus lifecycle.via — with api_base and
+// pacing injected through notifierSettingOverrides, the only test seam.
+func newSlackNotifierTestServer(t *testing.T, slackURL string, mutate func(*types.LifecycleNotificationsConfig)) (*Server, *sql.DB) {
 	t.Helper()
-	slackCfg := &types.SlackNotificationsConfig{
-		Enabled:     true,
-		BotTokenRef: "slack_bot_token",
-		Channel:     slackTestChannel,
-	}
+	lc := &types.LifecycleNotificationsConfig{Via: testNotifierName}
 	if mutate != nil {
-		mutate(slackCfg)
+		mutate(lc)
 	}
 	cfg := &types.HubConfig{
-		Token:         "test-token",
-		Secrets:       map[string]string{"slack_bot_token": "xoxb-test-token"},
-		Notifications: &types.NotificationsConfig{Slack: slackCfg},
+		Token:   "test-token",
+		Secrets: map[string]string{testNotifierToken: "xoxb-test-token"},
+		Notifications: &types.NotificationsConfig{
+			Notifiers: map[string]types.NotifierConfig{
+				testNotifierName: {Type: "slack", Settings: map[string]any{
+					"token_secret": testNotifierToken,
+					"channel":      slackTestChannel,
+				}},
+			},
+			Lifecycle: lc,
+		},
 	}
 	s, db := NewTestServerWithConfig(t, cfg, "", "", "")
-	s.slackBaseURL = slackURL
-	s.slackSendInterval = time.Nanosecond
+	s.notifierSettingOverrides = map[string]any{
+		"api_base":          slackURL,
+		"min_send_interval": time.Nanosecond.String(),
+	}
 	return s, db
+}
+
+// testLifecycleDelivery builds the delivery bundle exactly as
+// lifecycleNotifierTick does, so tests that drive a single pass or a single
+// send exercise the real notifier instance (and therefore the real pacing and
+// destination bookkeeping) instead of a hand-rolled client.
+func testLifecycleDelivery(t *testing.T, s *Server) lifecycleDelivery {
+	t.Helper()
+	cfg := s.notificationsConfig()
+	if cfg == nil || cfg.Lifecycle == nil {
+		t.Fatal("test server has no lifecycle notifications config")
+	}
+	nc, ok := cfg.Notifiers[cfg.Lifecycle.Via]
+	if !ok {
+		t.Fatalf("lifecycle.via %q does not name a configured notifier", cfg.Lifecycle.Via)
+	}
+	notifier, err := s.notifierFor(cfg.Lifecycle.Via, nc, s.hubSecretResolver())
+	if err != nil {
+		t.Fatalf("build notifier: %v", err)
+	}
+	return lifecycleDelivery{notifier: notifier, lc: cfg.Lifecycle, destination: notifierDestination(nc)}
 }
 
 func insertSlackTestEvent(t *testing.T, db *sql.DB, id, runID, eventType string, observedAt int64, targetURL, failureType, detail string) {
@@ -60,12 +96,12 @@ func insertSlackTestEvent(t *testing.T, db *sql.DB, id, runID, eventType string,
 // inserted from now on" for a test DB with no prior notifiable events.
 func setSlackWatermark(t *testing.T, s *Server, rowid int64) {
 	t.Helper()
-	s.setSlackStateInt64(slackStateWatermarkKey, rowid)
+	s.setNotifierStateInt64(lifecycleStateWatermarkKey, rowid)
 }
 
 func slackWatermark(t *testing.T, s *Server) (int64, bool) {
 	t.Helper()
-	wm, found, err := s.slackStateInt64(slackStateWatermarkKey)
+	wm, found, err := s.notifierStateInt64(lifecycleStateWatermarkKey)
 	if err != nil {
 		t.Fatalf("read watermark: %v", err)
 	}
@@ -98,11 +134,11 @@ func TestSlackNotifierDedupesOnCursorRescan(t *testing.T) {
 	insertSlackTestEvent(t, db, "ev-started", "run-1", taskRunEventAgentStarted, base+10, "", "", "")
 	setSlackWatermark(t, s, 0)
 
-	s.slackNotifierTick()
+	s.lifecycleNotifierTick()
 	if fake.count() != 1 {
 		t.Fatalf("first tick sent %d messages, want 1", fake.count())
 	}
-	if status, ok := slackDeliveryStatus(t, db, "ev-started"); !ok || status != slackDeliveryStatusSent {
+	if status, ok := slackDeliveryStatus(t, db, "ev-started"); !ok || status != notificationDeliveryStatusSent {
 		t.Fatalf("delivery status = %q, %v", status, ok)
 	}
 	if wm, found := slackWatermark(t, s); !found || wm <= 0 {
@@ -113,7 +149,7 @@ func TestSlackNotifierDedupesOnCursorRescan(t *testing.T) {
 	// send and watermark advance); the delivery record must prevent a
 	// duplicate send.
 	setSlackWatermark(t, s, 0)
-	s.slackNotifierTick()
+	s.lifecycleNotifierTick()
 	if fake.count() != 1 {
 		t.Fatalf("re-scan caused a duplicate send: %d messages", fake.count())
 	}
@@ -144,7 +180,7 @@ func TestSlackNotifierThreadsEventsByRun(t *testing.T) {
 		"https://github.com/acme/app/pull/7", "", `{"repo":"acme/app","prNumber":7,"url":"https://github.com/acme/app/pull/7"}`)
 	setSlackWatermark(t, s, 0)
 
-	s.slackNotifierTick()
+	s.lifecycleNotifierTick()
 	if fake.count() != 2 {
 		t.Fatalf("sent %d messages, want 2", fake.count())
 	}
@@ -170,8 +206,8 @@ func TestSlackNotifierThreadsEventsByRun(t *testing.T) {
 
 func TestSlackNotifierDisabledEventToggle(t *testing.T) {
 	fake := newFakeSlackServer(t)
-	s, db := newSlackNotifierTestServer(t, fake.server.URL, func(cfg *types.SlackNotificationsConfig) {
-		cfg.Events = &types.SlackEventToggles{AgentStarted: boolPtr(false)}
+	s, db := newSlackNotifierTestServer(t, fake.server.URL, func(cfg *types.LifecycleNotificationsConfig) {
+		cfg.Events = &types.LifecycleEventToggles{AgentStarted: boolPtr(false)}
 	})
 
 	base := int64(1760000000000)
@@ -184,7 +220,7 @@ func TestSlackNotifierDisabledEventToggle(t *testing.T) {
 		"https://github.com/acme/app/pull/7", "", "")
 	setSlackWatermark(t, s, 0)
 
-	s.slackNotifierTick()
+	s.lifecycleNotifierTick()
 	if fake.count() != 1 {
 		t.Fatalf("sent %d messages, want only pr_opened", fake.count())
 	}
@@ -218,7 +254,7 @@ func TestSlackNotifierFirstRunDoesNotReplayHistory(t *testing.T) {
 	insertSlackTestEvent(t, db, "ev-old", "run-old", taskRunEventAgentStarted, nowMs-1800_000, "", "", "")
 
 	// First tick initializes the cursor at the end of the stream and sends nothing.
-	s.slackNotifierTick()
+	s.lifecycleNotifierTick()
 	if fake.count() != 0 {
 		t.Fatalf("first run replayed history: %d messages", fake.count())
 	}
@@ -227,7 +263,7 @@ func TestSlackNotifierFirstRunDoesNotReplayHistory(t *testing.T) {
 	}
 
 	// A second tick must not pick up the pre-existing event either.
-	s.slackNotifierTick()
+	s.lifecycleNotifierTick()
 	if fake.count() != 0 {
 		t.Fatalf("second tick replayed pre-existing rows: %d messages", fake.count())
 	}
@@ -235,7 +271,7 @@ func TestSlackNotifierFirstRunDoesNotReplayHistory(t *testing.T) {
 	// A genuinely new event is delivered.
 	insertSlackTestEvent(t, db, "ev-new", "run-old", taskRunEventPROpened, nowMs+60_000,
 		"https://github.com/acme/app/pull/9", "", "")
-	s.slackNotifierTick()
+	s.lifecycleNotifierTick()
 	if fake.count() != 1 {
 		t.Fatalf("new event after enable was not sent: %d messages", fake.count())
 	}
@@ -257,16 +293,16 @@ func TestSlackNotifierPermanentFailureNotRetried(t *testing.T) {
 	insertSlackTestEvent(t, db, "ev-started", "run-1", taskRunEventAgentStarted, base+10, "", "", "")
 	setSlackWatermark(t, s, 0)
 
-	s.slackNotifierTick()
+	s.lifecycleNotifierTick()
 	if fake.count() != 1 {
 		t.Fatalf("sent %d requests, want 1", fake.count())
 	}
-	if status, ok := slackDeliveryStatus(t, db, "ev-started"); !ok || status != slackDeliveryStatusFailed {
+	if status, ok := slackDeliveryStatus(t, db, "ev-started"); !ok || status != notificationDeliveryStatusFailed {
 		t.Fatalf("delivery status = %q, %v; want failed", status, ok)
 	}
 
 	// Permanent failures must not be retried on subsequent ticks.
-	s.slackNotifierTick()
+	s.lifecycleNotifierTick()
 	if fake.count() != 1 {
 		t.Fatalf("permanent failure was retried: %d requests", fake.count())
 	}
@@ -292,7 +328,7 @@ func TestSlackNotifierTransientFailureRetriedNextTick(t *testing.T) {
 	insertSlackTestEvent(t, db, "ev-started", "run-1", taskRunEventAgentStarted, base+10, "", "", "")
 	setSlackWatermark(t, s, 0)
 
-	s.slackNotifierTick()
+	s.lifecycleNotifierTick()
 	if _, delivered := slackDeliveryStatus(t, db, "ev-started"); delivered {
 		t.Fatal("transient failure must not record a delivery")
 	}
@@ -301,16 +337,16 @@ func TestSlackNotifierTransientFailureRetriedNextTick(t *testing.T) {
 	}
 
 	fail = false
-	s.slackNotifierTick()
-	if status, ok := slackDeliveryStatus(t, db, "ev-started"); !ok || status != slackDeliveryStatusSent {
+	s.lifecycleNotifierTick()
+	if status, ok := slackDeliveryStatus(t, db, "ev-started"); !ok || status != notificationDeliveryStatusSent {
 		t.Fatalf("retry did not deliver: status = %q, %v", status, ok)
 	}
 }
 
 func TestSlackNotifierNoopWhenDisabled(t *testing.T) {
 	fake := newFakeSlackServer(t)
-	s, db := newSlackNotifierTestServer(t, fake.server.URL, func(cfg *types.SlackNotificationsConfig) {
-		cfg.Enabled = false
+	s, db := newSlackNotifierTestServer(t, fake.server.URL, func(cfg *types.LifecycleNotificationsConfig) {
+		cfg.Enabled = boolPtr(false)
 	})
 
 	base := int64(1760000000000)
@@ -320,7 +356,7 @@ func TestSlackNotifierNoopWhenDisabled(t *testing.T) {
 	})
 	insertSlackTestEvent(t, db, "ev-started", "run-1", taskRunEventAgentStarted, base+10, "", "", "")
 
-	s.slackNotifierTick()
+	s.lifecycleNotifierTick()
 	if fake.count() != 0 {
 		t.Fatalf("disabled notifier sent %d messages", fake.count())
 	}
@@ -332,7 +368,7 @@ func TestSlackNotifierNoopWhenDisabled(t *testing.T) {
 func setSlackEnabled(t *testing.T, s *Server, enabled bool) {
 	t.Helper()
 	s.mu.Lock()
-	s.hubCfg.Notifications.Slack.Enabled = enabled
+	s.hubCfg.Notifications.Lifecycle.Enabled = &enabled
 	s.mu.Unlock()
 }
 
@@ -349,24 +385,24 @@ func TestSlackNotifierBurstLargerThanBatchDoesNotWedge(t *testing.T) {
 		RunID: "run-1", AttemptID: "attempt-run-1", ClawID: "claw-1", TenantID: "test-tenant-id", OwnerType: taskRunOwnerFactory,
 		Factory: "bugfix", Repo: "acme/app", StartedAt: base - 1000,
 	})
-	total := slackBatchSize + 50
+	total := lifecycleBatchSize + 50
 	for i := 0; i < total; i++ {
 		insertSlackTestEvent(t, db, fmt.Sprintf("ev-%03d", i), "run-1", taskRunEventAgentStarted, base+int64(i), "", "", "")
 	}
 	setSlackWatermark(t, s, 0)
 
-	s.slackNotifierTick()
-	if fake.count() != slackBatchSize {
-		t.Fatalf("first tick sent %d messages, want %d", fake.count(), slackBatchSize)
+	s.lifecycleNotifierTick()
+	if fake.count() != lifecycleBatchSize {
+		t.Fatalf("first tick sent %d messages, want %d", fake.count(), lifecycleBatchSize)
 	}
-	s.slackNotifierTick()
+	s.lifecycleNotifierTick()
 	if fake.count() != total {
 		t.Fatalf("second tick left the cursor wedged: %d messages sent, want %d", fake.count(), total)
 	}
 
 	// Events created after the burst must still be delivered.
 	insertSlackTestEvent(t, db, "ev-later", "run-1", taskRunEventAgentStarted, base+3600_000, "", "", "")
-	s.slackNotifierTick()
+	s.lifecycleNotifierTick()
 	if fake.count() != total+1 {
 		t.Fatalf("event after the burst was not delivered: %d messages", fake.count())
 	}
@@ -386,16 +422,16 @@ func TestSlackNotifierDeliversBackdatedObservedAt(t *testing.T) {
 		Factory: "bugfix", Repo: "acme/app", StartedAt: nowMs - 1000,
 	})
 	// First tick initializes the cursor at the end of the stream.
-	s.slackNotifierTick()
+	s.lifecycleNotifierTick()
 
 	// A pr_opened recorded now but carrying the PR's real (3h old) creation time.
 	insertSlackTestEvent(t, db, "ev-backdated", "run-1", taskRunEventPROpened, nowMs-3*3600_000,
 		"https://github.com/acme/app/pull/7", "", "")
-	s.slackNotifierTick()
+	s.lifecycleNotifierTick()
 	if fake.count() != 1 {
 		t.Fatalf("backdated event was not delivered: %d messages", fake.count())
 	}
-	if status, ok := slackDeliveryStatus(t, db, "ev-backdated"); !ok || status != slackDeliveryStatusSent {
+	if status, ok := slackDeliveryStatus(t, db, "ev-backdated"); !ok || status != notificationDeliveryStatusSent {
 		t.Fatalf("delivery status = %q, %v", status, ok)
 	}
 }
@@ -426,8 +462,8 @@ func TestSlackNotifierConfigErrorPausesAndResumes(t *testing.T) {
 	}
 	setSlackWatermark(t, s, 0)
 
-	s.slackNotifierTick()
-	s.slackNotifierTick()
+	s.lifecycleNotifierTick()
+	s.lifecycleNotifierTick()
 	for i := 0; i < 3; i++ {
 		if _, delivered := slackDeliveryStatus(t, db, fmt.Sprintf("ev-%d", i)); delivered {
 			t.Fatalf("config-level failure burned event ev-%d as delivered", i)
@@ -439,9 +475,9 @@ func TestSlackNotifierConfigErrorPausesAndResumes(t *testing.T) {
 
 	// Operator fixes the token: everything is delivered.
 	broken = false
-	s.slackNotifierTick()
+	s.lifecycleNotifierTick()
 	for i := 0; i < 3; i++ {
-		if status, ok := slackDeliveryStatus(t, db, fmt.Sprintf("ev-%d", i)); !ok || status != slackDeliveryStatusSent {
+		if status, ok := slackDeliveryStatus(t, db, fmt.Sprintf("ev-%d", i)); !ok || status != notificationDeliveryStatusSent {
 			t.Fatalf("event ev-%d not delivered after the config was fixed: %q, %v", i, status, ok)
 		}
 	}
@@ -460,16 +496,16 @@ func TestSlackNotifierUnreadableStateDoesNotResetCursor(t *testing.T) {
 		Factory: "bugfix", StartedAt: base - 1000,
 	})
 	insertSlackTestEvent(t, db, "ev-started", "run-1", taskRunEventAgentStarted, base+10, "", "", "")
-	if _, err := db.Exec(`INSERT INTO slack_notifier_state(key, value) VALUES(?, 'not-a-number')`, slackStateWatermarkKey); err != nil {
+	if _, err := db.Exec(`INSERT INTO slack_notifier_state(key, value) VALUES(?, 'not-a-number')`, lifecycleStateWatermarkKey); err != nil {
 		t.Fatalf("corrupt state: %v", err)
 	}
 
-	s.slackNotifierTick()
+	s.lifecycleNotifierTick()
 	if fake.count() != 0 {
 		t.Fatalf("tick with unreadable state sent %d messages", fake.count())
 	}
 	var raw string
-	if err := db.QueryRow(`SELECT value FROM slack_notifier_state WHERE key=?`, slackStateWatermarkKey).Scan(&raw); err != nil {
+	if err := db.QueryRow(`SELECT value FROM slack_notifier_state WHERE key=?`, lifecycleStateWatermarkKey).Scan(&raw); err != nil {
 		t.Fatalf("read state: %v", err)
 	}
 	if raw != "not-a-number" {
@@ -478,7 +514,7 @@ func TestSlackNotifierUnreadableStateDoesNotResetCursor(t *testing.T) {
 
 	// Once the state is readable again, the backlog is still there.
 	setSlackWatermark(t, s, 0)
-	s.slackNotifierTick()
+	s.lifecycleNotifierTick()
 	if fake.count() != 1 {
 		t.Fatalf("backlog lost after state recovery: %d messages", fake.count())
 	}
@@ -497,25 +533,25 @@ func TestSlackNotifierParksCursorWhileDisabled(t *testing.T) {
 		Factory: "bugfix", StartedAt: base - 1000,
 	})
 	// First tick initializes the cursor.
-	s.slackNotifierTick()
+	s.lifecycleNotifierTick()
 
 	// Operator mutes Slack; events accumulate while it is off.
 	setSlackEnabled(t, s, false)
 	for i := 0; i < 3; i++ {
 		insertSlackTestEvent(t, db, fmt.Sprintf("ev-muted-%d", i), "run-1", taskRunEventAgentStarted, base+int64(i), "", "", "")
-		s.slackNotifierTick()
+		s.lifecycleNotifierTick()
 	}
 
 	// Re-enabling must not dump the muted window's backlog.
 	setSlackEnabled(t, s, true)
-	s.slackNotifierTick()
+	s.lifecycleNotifierTick()
 	if fake.count() != 0 {
 		t.Fatalf("re-enable flushed %d stale messages from the disabled window", fake.count())
 	}
 
 	// New events after re-enable are delivered normally.
 	insertSlackTestEvent(t, db, "ev-after", "run-1", taskRunEventAgentStarted, base+100, "", "", "")
-	s.slackNotifierTick()
+	s.lifecycleNotifierTick()
 	if fake.count() != 1 {
 		t.Fatalf("event after re-enable was not delivered: %d messages", fake.count())
 	}
@@ -524,26 +560,54 @@ func TestSlackNotifierParksCursorWhileDisabled(t *testing.T) {
 // Regression: failure reasons can be up to 6000 chars (failureSummaryInputLimit)
 // but a Slack section text object caps at 3000 — an oversized block fails the
 // whole message with invalid_blocks and the alert is dropped.
+// The clamp itself lives in the provider (see TestSlackClampsLongBody in
+// pkg/hub/notify); this asserts the end-to-end path, i.e. that a real oversized
+// failure reason travels through buildLifecycleMessage into a payload Slack
+// will actually accept.
 func TestSlackFailureMessageClampsLongReason(t *testing.T) {
-	ev := slackEventRow{
+	fake := newFakeSlackServer(t)
+	s, _ := newSlackNotifierTestServer(t, fake.server.URL, nil)
+	d := testLifecycleDelivery(t, s)
+
+	msg := buildLifecycleMessage(lifecycleEventRow{
 		EventType:   taskRunFailureBootstrapFailed,
 		FailureType: taskRunFailureBootstrapFailed,
 		Detail:      map[string]any{"reason": strings.Repeat("x", 6000)},
+	}, lifecycleRunContext{IssueID: "ISSUE-1", IssueTitle: "Broken build"})
+
+	renderer, ok := d.notifier.(notify.PayloadRenderer)
+	if !ok {
+		t.Fatal("notifier does not implement PayloadRenderer")
 	}
-	msg := buildSlackMessage(ev, slackRunContext{IssueID: "ISSUE-1", IssueTitle: "Broken build"})
-	for i, b := range msg.blocks {
-		block, ok := b.(map[string]any)
-		if !ok {
-			t.Fatalf("block %d has unexpected shape %T", i, b)
-		}
+	payload, err := renderer.RenderPayload(msg)
+	if err != nil {
+		t.Fatalf("RenderPayload() error = %v", err)
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+	var decoded struct {
+		Attachments []struct {
+			Blocks []map[string]any `json:"blocks"`
+		} `json:"attachments"`
+	}
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatalf("decode payload: %v", err)
+	}
+	if len(decoded.Attachments) != 1 {
+		t.Fatalf("payload carries %d attachments, want 1", len(decoded.Attachments))
+	}
+	const slackMaxBlockTextLength = 3000
+	for i, block := range decoded.Attachments[0].Blocks {
 		if text, ok := block["text"].(map[string]any); ok {
-			if got := text["text"].(string); len([]rune(got)) > slackMaxBlockTextLength {
+			if got, _ := text["text"].(string); len([]rune(got)) > slackMaxBlockTextLength {
 				t.Fatalf("block %d text is %d runes, exceeds Slack's %d limit", i, len([]rune(got)), slackMaxBlockTextLength)
 			}
 		}
 		if elements, ok := block["elements"].([]any); ok {
 			for j, el := range elements {
-				elText := el.(map[string]any)["text"].(string)
+				elText, _ := el.(map[string]any)["text"].(string)
 				if len([]rune(elText)) > slackMaxBlockTextLength {
 					t.Fatalf("block %d element %d is %d runes, exceeds Slack's %d limit", i, j, len([]rune(elText)), slackMaxBlockTextLength)
 				}
@@ -559,17 +623,25 @@ func TestSlackFailureMessageClampsLongReason(t *testing.T) {
 // headline) and a non-empty notification fallback.
 func TestSlackEventTypesRenderDistinctly(t *testing.T) {
 	palette := map[string]bool{
-		slackColorStarted: true,
-		slackColorSuccess: true,
-		slackColorFailure: true,
-		slackColorWarning: true,
+		notify.SlackColorInfo:    true,
+		notify.SlackColorSuccess: true,
+		notify.SlackColorError:   true,
+		notify.SlackColorWarning: true,
 	}
+	fake := newFakeSlackServer(t)
+	s, _ := newSlackNotifierTestServer(t, fake.server.URL, nil)
+	renderer, ok := testLifecycleDelivery(t, s).notifier.(notify.PayloadRenderer)
+	if !ok {
+		t.Fatal("notifier does not implement PayloadRenderer")
+	}
+
 	seen := map[string]string{} // (emoji, title) -> event type
 	seenEmoji := map[string]string{}
-	for eventType := range slackSupportedEventTypes() {
-		runCtx, ev := sampleSlackContext(eventType)
-		msg := buildSlackMessage(ev, runCtx)
-		style := slackEventStyleFor(ev)
+	for eventType := range lifecycleSupportedEventTypes() {
+		runCtx, ev := sampleLifecycleContext(eventType)
+		msg := buildLifecycleMessage(ev, runCtx)
+		style := lifecycleEventStyleFor(ev)
+		blocks, color, fallback := renderSlackParts(t, renderer, msg)
 
 		// Identity: no two event types may share the same (emoji, title) pair,
 		// and each keeps its own emoji so messages read distinctly at a glance.
@@ -589,19 +661,15 @@ func TestSlackEventTypesRenderDistinctly(t *testing.T) {
 		}
 
 		// Colour stripe from the small palette.
-		if msg.color != style.color || !palette[msg.color] {
-			t.Errorf("%s color = %q, want one of the palette colours", eventType, msg.color)
+		if !palette[color] {
+			t.Errorf("%s color = %q, want one of the palette colours", eventType, color)
 		}
 
 		// Headline block leads with "<emoji> *<title>*".
-		if len(msg.blocks) == 0 {
+		if len(blocks) == 0 {
 			t.Fatalf("%s rendered no blocks", eventType)
 		}
-		head, ok := msg.blocks[0].(map[string]any)
-		if !ok {
-			t.Fatalf("%s first block has shape %T", eventType, msg.blocks[0])
-		}
-		headText, _ := head["text"].(map[string]any)["text"].(string)
+		headText, _ := blocks[0]["text"].(map[string]any)["text"].(string)
 		if !strings.HasPrefix(headText, style.emoji+" *"+style.title+"*") {
 			t.Errorf("%s headline = %q, want it to start with %q", eventType, headText, style.emoji+" *"+style.title+"*")
 		}
@@ -609,11 +677,11 @@ func TestSlackEventTypesRenderDistinctly(t *testing.T) {
 		// Notification fallback leads with the discriminator — emoji then
 		// title — so a truncated lock-screen line still identifies the event,
 		// and never carries the raw snake_case type.
-		if !strings.HasPrefix(msg.fallback, style.emoji+" "+style.title) {
-			t.Errorf("%s fallback = %q, want it to start with %q", eventType, msg.fallback, style.emoji+" "+style.title)
+		if !strings.HasPrefix(fallback, style.emoji+" "+style.title) {
+			t.Errorf("%s fallback = %q, want it to start with %q", eventType, fallback, style.emoji+" "+style.title)
 		}
-		if strings.Contains(msg.fallback, "("+eventType+")") {
-			t.Errorf("%s fallback = %q carries the raw type in machine form", eventType, msg.fallback)
+		if strings.Contains(fallback, "("+eventType+")") {
+			t.Errorf("%s fallback = %q carries the raw type in machine form", eventType, fallback)
 		}
 	}
 }
@@ -713,13 +781,15 @@ func TestSlackTestEndpointRealSendLeavesNoState(t *testing.T) {
 		t.Fatalf("status = %d, body = %s", rr.Code, rr.Body.String())
 	}
 	var resp struct {
-		OK bool   `json:"ok"`
-		TS string `json:"ts"`
+		OK bool `json:"ok"`
+		// message_id, not ts: the response is provider-neutral now, since the
+		// handle a provider returns is not necessarily a Slack timestamp.
+		MessageID string `json:"message_id"`
 	}
 	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if !resp.OK || resp.TS == "" {
+	if !resp.OK || resp.MessageID == "" {
 		t.Fatalf("unexpected response: %s", rr.Body.String())
 	}
 	if fake.count() != 1 {
@@ -754,4 +824,34 @@ func TestSlackTestEndpointSurfacesSlackError(t *testing.T) {
 	if strings.Contains(rr.Body.String(), "xoxb-") {
 		t.Fatalf("response leaked the bot token: %s", rr.Body.String())
 	}
+}
+
+// renderSlackParts renders a semantic Message through the Slack provider and
+// pulls out the attachment's blocks, colour and fallback — the three things the
+// design contract is expressed in.
+func renderSlackParts(t *testing.T, renderer notify.PayloadRenderer, msg notify.Message) ([]map[string]any, string, string) {
+	t.Helper()
+	payload, err := renderer.RenderPayload(msg)
+	if err != nil {
+		t.Fatalf("RenderPayload() error = %v", err)
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+	var decoded struct {
+		Attachments []struct {
+			Fallback string           `json:"fallback"`
+			Color    string           `json:"color"`
+			Blocks   []map[string]any `json:"blocks"`
+		} `json:"attachments"`
+	}
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatalf("decode payload: %v", err)
+	}
+	if len(decoded.Attachments) != 1 {
+		t.Fatalf("payload carries %d attachments, want 1", len(decoded.Attachments))
+	}
+	a := decoded.Attachments[0]
+	return a.Blocks, a.Color, a.Fallback
 }

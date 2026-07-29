@@ -35,6 +35,7 @@ import (
 
 	"github.com/elasticclaw/elasticclaw/pkg/cliversion"
 	"github.com/elasticclaw/elasticclaw/pkg/hub/artifact"
+	"github.com/elasticclaw/elasticclaw/pkg/hub/notify"
 	"github.com/elasticclaw/elasticclaw/pkg/hub/pipeline"
 	daytona "github.com/elasticclaw/elasticclaw/pkg/provider/daytona"
 	exedevProvider "github.com/elasticclaw/elasticclaw/pkg/provider/exedev"
@@ -134,12 +135,17 @@ type Server struct {
 	nowFunc             func() time.Time
 	terminateVMOverride func(provider, id string) error // test seam for terminal cleanup
 
-	// slackBaseURL overrides the Slack API base for testing (default: https://slack.com/api)
-	slackBaseURL string
-	// slackLimiter paces chat.postMessage across the notifier and the test endpoint.
-	slackLimiter slackSendLimiter
-	// slackSendInterval overrides the 1s message pacing for tests (0 = default).
-	slackSendInterval time.Duration
+	// The constructed notifier is cached so provider-internal state — notably
+	// the Slack send limiter, which paces chat.postMessage per channel — is
+	// shared by the lifecycle poller and the manual test endpoint instead of
+	// being rebuilt (and reset) on every use.
+	notifierCacheMu  sync.Mutex
+	notifierCache    notify.Notifier
+	notifierCacheKey string
+	// notifierSettingOverrides are merged into every notifier's settings at
+	// construction. Tests use it to point a provider at an httptest server
+	// (api_base) and to collapse send pacing (min_send_interval).
+	notifierSettingOverrides map[string]any
 }
 
 func (s *Server) modelAuthTokenForClaw(clawID string) string {
@@ -330,7 +336,7 @@ func NewServer(addr, dbPath, identityDir string, hubCfg *types.HubConfig) (*Serv
 		log.Printf("[cron] failed to start scheduler: %v", err)
 	}
 	srv.startIntegrationPoller()
-	srv.startSlackNotifier()
+	srv.startLifecycleNotifier()
 
 	return srv, nil
 }
@@ -430,7 +436,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/settings/github/test", s.withWebAdminAuth(s.handleGitHubAppTest))
 	mux.HandleFunc("/api/settings/model-auth/login", s.withWebAdminAuth(s.handleModelAuthLogin))
 	mux.HandleFunc("/api/settings/model-auth/login/{id}", s.withWebAdminAuth(s.handleModelAuthLoginStatus))
-	mux.HandleFunc("/api/notifications/slack/test", s.withWebAdminAuth(s.handleSlackNotificationTest))
+	mux.HandleFunc("/api/notifications/slack/test", s.withWebAdminAuth(s.handleNotificationTest))
 
 	// Template store
 	mux.HandleFunc("/api/templates", s.withWebAuth(s.handleTemplates))
@@ -467,10 +473,10 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/workspaces/{name}/workflows", s.withAdminForMethods(s.handleWorkspaceWorkflowsList, http.MethodPost))
 	mux.HandleFunc("/api/workspaces/{workspace}/workflows/{workflow}", s.withAdminForMethods(s.handleWorkspaceWorkflowDetail, http.MethodPatch))
 	mux.HandleFunc("/api/workspaces/{workspace}/workflows/{workflow}/trigger", s.withAuth(s.handleWorkspaceWorkflowTrigger))
-	mux.HandleFunc("/api/workspaces/{workspace}/workflows/{workflow}/cron/trigger", s.withAuth(s.handleCronWorkflowTrigger)) // POST manual trigger
-	mux.HandleFunc("/api/workspaces/{workspace}/workflows/{workflow}/cron/runs", s.withAuth(s.handleCronWorkflowRuns))       // GET run history
+	mux.HandleFunc("/api/workspaces/{workspace}/workflows/{workflow}/cron/trigger", s.withAuth(s.handleCronWorkflowTrigger))  // POST manual trigger
+	mux.HandleFunc("/api/workspaces/{workspace}/workflows/{workflow}/cron/runs", s.withAuth(s.handleCronWorkflowRuns))        // GET run history
 	mux.HandleFunc("/api/workspaces/{workspace}/workflows/{workflow}/cron/runs/{runId}", s.withAuth(s.handleCronWorkflowRun)) // GET single run
-	mux.HandleFunc("/api/workspaces/{workspace}/workflows/{workflow}/cron/next", s.withAuth(s.handleCronWorkflowNextRun))    // GET next scheduled run
+	mux.HandleFunc("/api/workspaces/{workspace}/workflows/{workflow}/cron/next", s.withAuth(s.handleCronWorkflowNextRun))     // GET next scheduled run
 	mux.HandleFunc("/api/workspaces/{workspace}/secrets", s.withAdminForMethods(s.handleWorkspaceSecretsCRUD, http.MethodPut, http.MethodPost, http.MethodDelete))
 	mux.HandleFunc("/api/workspaces/{workspace}/github-apps", s.withAdminForMethods(s.handleWorkspaceGitHubAppsCRUD, http.MethodPut, http.MethodPost, http.MethodDelete))
 	mux.HandleFunc("/api/workspaces/{workspace}/issue-trackers", s.withAdminForMethods(s.handleWorkspaceIssueTrackersCRUD, http.MethodPut, http.MethodPost, http.MethodDelete))

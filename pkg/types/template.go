@@ -550,34 +550,47 @@ type HubConfig struct {
 	// infrastructure failures.
 	Liveness *LivenessConfig `yaml:"liveness,omitempty" json:"liveness,omitempty"`
 
-	// Notifications holds outbound notification configs (Slack; future: others).
+	// Notifications holds outbound notification configuration: named
+	// transports (notifiers) and the hub features that send through them.
 	Notifications *NotificationsConfig `yaml:"notifications,omitempty" json:"notifications,omitempty"`
 }
 
-// NotificationsConfig holds outbound notification channel configs.
+// NotificationsConfig holds outbound notification configuration.
 type NotificationsConfig struct {
-	Slack *SlackNotificationsConfig `yaml:"slack,omitempty" json:"slack,omitempty"`
+	// Notifiers are named outbound transports (Slack today; email, Teams,
+	// ... later), keyed by the name features reference in "via".
+	Notifiers map[string]NotifierConfig `yaml:"notifiers,omitempty" json:"notifiers,omitempty"`
+	// Lifecycle configures agent lifecycle notifications (agent started,
+	// PR opened, failures).
+	Lifecycle *LifecycleNotificationsConfig `yaml:"lifecycle,omitempty" json:"lifecycle,omitempty"`
 }
 
-// SlackNotificationsConfig configures outbound Slack messages for task run
-// lifecycle events (agent started, PR opened, failures).
-type SlackNotificationsConfig struct {
-	Enabled bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
-	// BotTokenRef is a key into HubConfig.Secrets holding the Slack bot token (xoxb-...).
-	BotTokenRef string `yaml:"bot_token_ref" json:"botTokenRef"`
-	// Channel is the Slack channel ID to post to, e.g. C0123ABCD (not the "#name").
-	Channel string `yaml:"channel" json:"channel"`
-	// ThreadByRun groups all messages for a run into one thread. Default true.
+// LifecycleNotificationsConfig configures outbound notifications for agent
+// lifecycle events, sent through a named hub-level notifier.
+type LifecycleNotificationsConfig struct {
+	// Enabled defaults to true when the lifecycle block is present; set it
+	// to false to mute lifecycle notifications without deleting the config.
+	Enabled *bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	// Via names the notifier (under notifications.notifiers) to send through.
+	Via string `yaml:"via" json:"via"`
+	// ThreadByRun groups all messages for a run into one thread on providers
+	// that support threading. Default true.
 	ThreadByRun *bool `yaml:"thread_by_run,omitempty" json:"threadByRun,omitempty"`
 	// PollInterval is how often the notifier scans for new events. Default "5s".
 	PollInterval string `yaml:"poll_interval,omitempty" json:"pollInterval,omitempty"`
 	// Events toggles individual event categories. All default true when absent.
-	Events *SlackEventToggles `yaml:"events,omitempty" json:"events,omitempty"`
+	Events *LifecycleEventToggles `yaml:"events,omitempty" json:"events,omitempty"`
 }
 
-// SlackEventToggles enables/disables individual Slack notification categories.
-// All default true when the block is absent.
-type SlackEventToggles struct {
+// IsEnabled reports whether lifecycle notifications are on: the block must
+// be present and Enabled must be absent (the default) or true.
+func (c *LifecycleNotificationsConfig) IsEnabled() bool {
+	return c != nil && (c.Enabled == nil || *c.Enabled)
+}
+
+// LifecycleEventToggles enables/disables individual lifecycle notification
+// categories. All default true when the block is absent.
+type LifecycleEventToggles struct {
 	AgentStarted *bool `yaml:"agent_started,omitempty" json:"agentStarted,omitempty"`
 	PROpened     *bool `yaml:"pr_opened,omitempty" json:"prOpened,omitempty"`
 	Failures     *bool `yaml:"failures,omitempty" json:"failures,omitempty"`

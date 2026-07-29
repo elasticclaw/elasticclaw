@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"path"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -753,41 +754,62 @@ func ValidateProviderConfig(name string, cfg *ProviderConfig) error {
 	return nil
 }
 
-// slackChannelIDRegex matches Slack conversation IDs: public channels (C...),
-// private groups (G...) and DMs (D...).
-var slackChannelIDRegex = regexp.MustCompile(`^[CGD][A-Za-z0-9]+$`)
-
-// ValidateSlackNotificationsConfig validates a SlackNotificationsConfig.
+// ValidateNotificationsConfig validates the structural invariants of a
+// NotificationsConfig: notifier entries are named and typed, and the
+// lifecycle block references a defined notifier. Provider-level checks
+// (supported type, secret resolution, provider settings) happen in the hub,
+// which owns the provider registry and the secrets.
 // A nil config is valid (feature absent).
-func ValidateSlackNotificationsConfig(cfg *SlackNotificationsConfig) error {
+func ValidateNotificationsConfig(cfg *NotificationsConfig) error {
 	if cfg == nil {
 		return nil
 	}
-	if cfg.PollInterval != "" {
-		d, err := time.ParseDuration(cfg.PollInterval)
+	for name, notifier := range cfg.Notifiers {
+		if strings.TrimSpace(name) == "" {
+			return fmt.Errorf("notifications.notifiers: notifier name is required")
+		}
+		if strings.TrimSpace(notifier.Type) == "" {
+			return fmt.Errorf("notifications.notifiers.%s: type is required", name)
+		}
+	}
+	lc := cfg.Lifecycle
+	if lc == nil {
+		return nil
+	}
+	// The poll interval is validated even when lifecycle is disabled, so a
+	// typo is caught before the operator flips the feature on.
+	if lc.PollInterval != "" {
+		d, err := time.ParseDuration(lc.PollInterval)
 		if err != nil {
-			return fmt.Errorf("notifications.slack: invalid poll_interval %q: %w", cfg.PollInterval, err)
+			return fmt.Errorf("notifications.lifecycle: invalid poll_interval %q: %w", lc.PollInterval, err)
 		}
 		if d < time.Second {
-			return fmt.Errorf("notifications.slack: poll_interval must be at least 1s, got %q", cfg.PollInterval)
+			return fmt.Errorf("notifications.lifecycle: poll_interval must be at least 1s, got %q", lc.PollInterval)
 		}
 	}
-	channel := strings.TrimSpace(cfg.Channel)
-	if strings.HasPrefix(channel, "#") {
-		return fmt.Errorf("notifications.slack: channel %q is a channel name; use the channel ID instead (e.g. C0123ABCD) — names break when the channel is renamed", channel)
+	if !lc.IsEnabled() {
+		return nil
 	}
-	if channel != "" && !slackChannelIDRegex.MatchString(channel) {
-		return fmt.Errorf("notifications.slack: channel %q does not look like a Slack channel ID (expected C/G/D followed by alphanumerics, e.g. C0123ABCD)", channel)
+	via := strings.TrimSpace(lc.Via)
+	if via == "" {
+		return fmt.Errorf("notifications.lifecycle: via is required when enabled (the name of a notifier under notifications.notifiers)")
 	}
-	if cfg.Enabled {
-		if strings.TrimSpace(cfg.BotTokenRef) == "" {
-			return fmt.Errorf("notifications.slack: bot_token_ref is required when enabled (a key into hub secrets)")
-		}
-		if channel == "" {
-			return fmt.Errorf("notifications.slack: channel is required when enabled")
-		}
+	if _, ok := cfg.Notifiers[via]; !ok {
+		return fmt.Errorf("notifications.lifecycle: via %q does not name a configured notifier (defined: %s)", via, notifierNames(cfg.Notifiers))
 	}
 	return nil
+}
+
+func notifierNames(notifiers map[string]NotifierConfig) string {
+	if len(notifiers) == 0 {
+		return "none"
+	}
+	names := make([]string, 0, len(notifiers))
+	for name := range notifiers {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return strings.Join(names, ", ")
 }
 
 // ValidateHubConfig performs basic validation on HubConfig
@@ -818,10 +840,8 @@ func (h *HubConfig) Validate() error {
 	}
 
 	// Validate notifications
-	if h.Notifications != nil {
-		if err := ValidateSlackNotificationsConfig(h.Notifications.Slack); err != nil {
-			return err
-		}
+	if err := ValidateNotificationsConfig(h.Notifications); err != nil {
+		return err
 	}
 
 	return nil

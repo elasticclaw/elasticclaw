@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/elasticclaw/elasticclaw/pkg/hub/notify"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 )
 
@@ -36,16 +37,16 @@ func insertSlackTestClawPR(t *testing.T, db *sql.DB, id, clawID, repo string, pr
 	}
 }
 
-// setSlackClawBaseline positions the claw pass as "enabled with empty
+// setLifecycleClawBaseline positions the claw pass as "enabled with empty
 // history", mirroring what setSlackWatermark does for the task-run pass.
-func setSlackClawBaseline(t *testing.T, s *Server) {
+func setLifecycleClawBaseline(t *testing.T, s *Server) {
 	t.Helper()
-	s.setSlackStateInt64(slackStateClawBaselineKey, 1)
-	s.setSlackStateInt64(slackStateClawPRWatermarkKey, 0)
+	s.setNotifierStateInt64(lifecycleStateClawBaselineKey, 1)
+	s.setNotifierStateInt64(lifecycleStateClawPRWatermarkKey, 0)
 }
 
 // oldEnough is safely past the ad-hoc grace period.
-const oldEnough = slackClawAdhocGrace + 8*time.Minute
+const oldEnough = lifecycleClawAdhocGrace + 8*time.Minute
 
 // insertSlackTestWorkflowRun inserts a workflow run for a claw, as the
 // pipeline-terminal and factory-trigger paths leave behind.
@@ -60,16 +61,16 @@ func insertSlackTestWorkflowRun(t *testing.T, db *sql.DB, id, clawID, status str
 	}
 }
 
-func TestSlackClawNotifierAdhocLifecycleThreadsUnderOneRoot(t *testing.T) {
+func TestLifecycleClawNotifierAdhocLifecycleThreadsUnderOneRoot(t *testing.T) {
 	fake := newFakeSlackServer(t)
 	s, db := newSlackNotifierTestServer(t, fake.server.URL, nil)
 	setSlackWatermark(t, s, 0)
-	setSlackClawBaseline(t, s)
+	setLifecycleClawBaseline(t, s)
 
 	insertSlackTestClaw(t, db, "claw-adhoc", "connected", 1, "", oldEnough)
 
 	// agent started
-	s.slackNotifierTick()
+	s.lifecycleNotifierTick()
 	if fake.count() != 1 {
 		t.Fatalf("agent_started not sent for ad-hoc claw: %d messages", fake.count())
 	}
@@ -80,13 +81,13 @@ func TestSlackClawNotifierAdhocLifecycleThreadsUnderOneRoot(t *testing.T) {
 	if !strings.Contains(root.Fallback, "Agent started") || !strings.Contains(root.Fallback, "name-claw-adhoc") {
 		t.Fatalf("agent_started fallback = %q", root.Fallback)
 	}
-	if root.Color != slackColorStarted {
-		t.Fatalf("agent_started color = %q, want %q", root.Color, slackColorStarted)
+	if root.Color != notify.SlackColorInfo {
+		t.Fatalf("agent_started color = %q, want %q", root.Color, notify.SlackColorInfo)
 	}
 
 	// PR opened
 	insertSlackTestClawPR(t, db, "pr-1", "claw-adhoc", "acme/app", 7, "https://github.com/acme/app/pull/7")
-	s.slackNotifierTick()
+	s.lifecycleNotifierTick()
 	if fake.count() != 2 {
 		t.Fatalf("pr_opened not sent for ad-hoc claw: %d messages", fake.count())
 	}
@@ -94,15 +95,15 @@ func TestSlackClawNotifierAdhocLifecycleThreadsUnderOneRoot(t *testing.T) {
 	if !strings.Contains(prMsg.Fallback, "PR opened") || !strings.Contains(prMsg.Fallback, "acme/app#7") {
 		t.Fatalf("pr_opened fallback = %q", prMsg.Fallback)
 	}
-	if prMsg.Color != slackColorSuccess {
-		t.Fatalf("pr_opened color = %q, want %q", prMsg.Color, slackColorSuccess)
+	if prMsg.Color != notify.SlackColorSuccess {
+		t.Fatalf("pr_opened color = %q, want %q", prMsg.Color, notify.SlackColorSuccess)
 	}
 
 	// failure
 	if _, err := db.Exec(`UPDATE claws SET status='error', bootstrap_diagnostic='agent crashed hard' WHERE id='claw-adhoc'`); err != nil {
 		t.Fatalf("set claw error: %v", err)
 	}
-	s.slackNotifierTick()
+	s.lifecycleNotifierTick()
 	if fake.count() != 3 {
 		t.Fatalf("failure not sent for ad-hoc claw: %d messages", fake.count())
 	}
@@ -110,8 +111,8 @@ func TestSlackClawNotifierAdhocLifecycleThreadsUnderOneRoot(t *testing.T) {
 	if !strings.Contains(failMsg.Fallback, "Agent died") {
 		t.Fatalf("failure fallback = %q", failMsg.Fallback)
 	}
-	if failMsg.Color != slackColorFailure {
-		t.Fatalf("failure color = %q, want %q", failMsg.Color, slackColorFailure)
+	if failMsg.Color != notify.SlackColorError {
+		t.Fatalf("failure color = %q, want %q", failMsg.Color, notify.SlackColorError)
 	}
 	var reasonSeen bool
 	for _, b := range failMsg.Blocks {
@@ -127,7 +128,7 @@ func TestSlackClawNotifierAdhocLifecycleThreadsUnderOneRoot(t *testing.T) {
 
 	// All three thread under the same claw root.
 	var threadTS string
-	if err := db.QueryRow(`SELECT thread_ts FROM slack_run_threads WHERE run_id=?`, slackClawThreadKey("claw-adhoc")).Scan(&threadTS); err != nil {
+	if err := db.QueryRow(`SELECT thread_ts FROM slack_run_threads WHERE run_id=?`, lifecycleClawThreadKey("claw-adhoc")).Scan(&threadTS); err != nil {
 		t.Fatalf("claw thread root row: %v", err)
 	}
 	if prMsg.ThreadTS != threadTS || failMsg.ThreadTS != threadTS {
@@ -136,39 +137,39 @@ func TestSlackClawNotifierAdhocLifecycleThreadsUnderOneRoot(t *testing.T) {
 
 	// Deliveries recorded under the namespaced synthetic keys.
 	for _, key := range []string{
-		slackClawStartedKey("claw-adhoc"),
-		slackClawPRKey("claw-adhoc", "https://github.com/acme/app/pull/7"),
-		slackClawFailureKey("claw-adhoc"),
+		lifecycleClawStartedKey("claw-adhoc"),
+		lifecycleClawPRKey("claw-adhoc", "https://github.com/acme/app/pull/7"),
+		lifecycleClawFailureKey("claw-adhoc"),
 	} {
-		if status, ok := slackDeliveryStatus(t, db, key); !ok || status != slackDeliveryStatusSent {
+		if status, ok := slackDeliveryStatus(t, db, key); !ok || status != notificationDeliveryStatusSent {
 			t.Fatalf("delivery %s = %q, %v", key, status, ok)
 		}
 	}
 }
 
-func TestSlackClawNotifierIgnoresTaskRunClaws(t *testing.T) {
+func TestLifecycleClawNotifierIgnoresTaskRunClaws(t *testing.T) {
 	fake := newFakeSlackServer(t)
 	s, db := newSlackNotifierTestServer(t, fake.server.URL, nil)
 	setSlackWatermark(t, s, 0)
-	setSlackClawBaseline(t, s)
+	setLifecycleClawBaseline(t, s)
 
 	// A claw owned by a task run must never produce claw-path messages, even
 	// in notifiable states and with a claw_prs row.
 	insertSlackTestClaw(t, db, "claw-run", "connected", 1, "run-1", oldEnough)
 	insertSlackTestClawPR(t, db, "pr-1", "claw-run", "acme/app", 7, "https://github.com/acme/app/pull/7")
-	s.slackNotifierTick()
+	s.lifecycleNotifierTick()
 	if fake.count() != 0 {
 		t.Fatalf("claw path sent %d messages for a task-run claw", fake.count())
 	}
 	if _, err := db.Exec(`UPDATE claws SET status='error', bootstrap_diagnostic='boom' WHERE id='claw-run'`); err != nil {
 		t.Fatalf("set claw error: %v", err)
 	}
-	s.slackNotifierTick()
+	s.lifecycleNotifierTick()
 	if fake.count() != 0 {
 		t.Fatalf("claw path sent %d messages for a failed task-run claw", fake.count())
 	}
 	var n int
-	if err := db.QueryRow(`SELECT COUNT(1) FROM slack_notification_deliveries WHERE event_id LIKE 'claw:%' AND status != ?`, slackDeliveryStatusSkipped).Scan(&n); err != nil || n != 0 {
+	if err := db.QueryRow(`SELECT COUNT(1) FROM slack_notification_deliveries WHERE event_id LIKE 'claw:%' AND status != ?`, notificationDeliveryStatusSkipped).Scan(&n); err != nil || n != 0 {
 		t.Fatalf("claw path recorded %d deliveries for a task-run claw (err %v)", n, err)
 	}
 }
@@ -178,15 +179,15 @@ func TestSlackClawNotifierIgnoresTaskRunClaws(t *testing.T) {
 // inserted. The grace period must keep the claw pass away until ownership is
 // settled, so the agent produces exactly one notification (from the task-run
 // path), not two.
-func TestSlackClawNotifierGraceAvoidsDoubleSendOnLateTaskRunAttach(t *testing.T) {
+func TestLifecycleClawNotifierGraceAvoidsDoubleSendOnLateTaskRunAttach(t *testing.T) {
 	fake := newFakeSlackServer(t)
 	s, db := newSlackNotifierTestServer(t, fake.server.URL, nil)
 	setSlackWatermark(t, s, 0)
-	setSlackClawBaseline(t, s)
+	setLifecycleClawBaseline(t, s)
 
 	// Freshly created claw: task_run_id not populated yet, already connected.
 	insertSlackTestClaw(t, db, "claw-fresh", "connected", 1, "", 0)
-	s.slackNotifierTick()
+	s.lifecycleNotifierTick()
 	if fake.count() != 0 {
 		t.Fatalf("claw pass notified a claw younger than the grace period: %d messages", fake.count())
 	}
@@ -200,7 +201,7 @@ func TestSlackClawNotifierGraceAvoidsDoubleSendOnLateTaskRunAttach(t *testing.T)
 		Factory: "bugfix", Repo: "acme/app", StartedAt: epochMillis(now()) - 1000, IssueTitle: "Fix login bug",
 	})
 	insertSlackTestEvent(t, db, "ev-started", "run-1", taskRunEventAgentStarted, epochMillis(now()), "", "", "")
-	s.slackNotifierTick()
+	s.lifecycleNotifierTick()
 	if fake.count() != 1 {
 		t.Fatalf("want exactly one notification total for the racing claw, got %d", fake.count())
 	}
@@ -213,13 +214,13 @@ func TestSlackClawNotifierGraceAvoidsDoubleSendOnLateTaskRunAttach(t *testing.T)
 // Defense-in-depth for the same race: even when a claw was already selected as
 // an ad-hoc candidate, the pre-send re-check must cede it to the task-run path
 // once task_run_id is populated.
-func TestSlackClawNotifierPreSendRecheckCedesToTaskRunPath(t *testing.T) {
+func TestLifecycleClawNotifierPreSendRecheckCedesToTaskRunPath(t *testing.T) {
 	fake := newFakeSlackServer(t)
 	s, db := newSlackNotifierTestServer(t, fake.server.URL, nil)
-	setSlackClawBaseline(t, s)
+	setLifecycleClawBaseline(t, s)
 
 	insertSlackTestClaw(t, db, "claw-x", "connected", 1, "", oldEnough)
-	claws, err := s.selectSlackClawStateCandidates(slackClawKindStarted)
+	claws, err := s.selectLifecycleClawStateCandidates(lifecycleClawKindStarted)
 	if err != nil || len(claws) != 1 {
 		t.Fatalf("candidates = %d, err %v; want 1 candidate", len(claws), err)
 	}
@@ -229,10 +230,9 @@ func TestSlackClawNotifierPreSendRecheckCedesToTaskRunPath(t *testing.T) {
 		t.Fatalf("attach task run: %v", err)
 	}
 
-	cfg, token := s.slackNotificationsConfig()
-	client := s.newSlackClient(token)
-	ev, deliveryKey := slackClawStateEvent(slackClawKindStarted, claws[0])
-	if !s.deliverSlackClawEvent(client, cfg, claws[0], ev, slackClawRunContext(claws[0]), deliveryKey) {
+	d := testLifecycleDelivery(t, s)
+	ev, deliveryKey := lifecycleClawStateEvent(lifecycleClawKindStarted, claws[0])
+	if !s.deliverLifecycleClawEvent(d, claws[0], ev, lifecycleClawRunContext(claws[0]), deliveryKey) {
 		t.Fatal("ceding to the task-run path must count as handled")
 	}
 	if fake.count() != 0 {
@@ -243,7 +243,7 @@ func TestSlackClawNotifierPreSendRecheckCedesToTaskRunPath(t *testing.T) {
 	}
 }
 
-func TestSlackClawNotifierFirstEnableDoesNotReplay(t *testing.T) {
+func TestLifecycleClawNotifierFirstEnableDoesNotReplay(t *testing.T) {
 	fake := newFakeSlackServer(t)
 	s, db := newSlackNotifierTestServer(t, fake.server.URL, nil)
 
@@ -253,8 +253,8 @@ func TestSlackClawNotifierFirstEnableDoesNotReplay(t *testing.T) {
 	insertSlackTestClaw(t, db, "claw-dead", "error", 0, "", oldEnough)
 
 	// First tick initializes both cursors; nothing is replayed then or later.
-	s.slackNotifierTick()
-	s.slackNotifierTick()
+	s.lifecycleNotifierTick()
+	s.lifecycleNotifierTick()
 	if fake.count() != 0 {
 		t.Fatalf("first enable replayed pre-existing claw history: %d messages", fake.count())
 	}
@@ -262,48 +262,48 @@ func TestSlackClawNotifierFirstEnableDoesNotReplay(t *testing.T) {
 	// Genuinely new activity after enabling is delivered.
 	insertSlackTestClaw(t, db, "claw-new", "connected", 1, "", oldEnough)
 	insertSlackTestClawPR(t, db, "pr-new", "claw-new", "acme/app", 9, "https://github.com/acme/app/pull/9")
-	s.slackNotifierTick()
+	s.lifecycleNotifierTick()
 	if fake.count() != 2 {
 		t.Fatalf("new claw activity after enable was not delivered: %d messages", fake.count())
 	}
 }
 
-func TestSlackClawNotifierDedupesRescans(t *testing.T) {
+func TestLifecycleClawNotifierDedupesRescans(t *testing.T) {
 	fake := newFakeSlackServer(t)
 	s, db := newSlackNotifierTestServer(t, fake.server.URL, nil)
 	setSlackWatermark(t, s, 0)
-	setSlackClawBaseline(t, s)
+	setLifecycleClawBaseline(t, s)
 
 	insertSlackTestClaw(t, db, "claw-adhoc", "connected", 1, "", oldEnough)
 	insertSlackTestClawPR(t, db, "pr-1", "claw-adhoc", "acme/app", 7, "https://github.com/acme/app/pull/7")
 
-	s.slackNotifierTick()
+	s.lifecycleNotifierTick()
 	if fake.count() != 2 {
 		t.Fatalf("first tick sent %d messages, want agent_started + pr_opened", fake.count())
 	}
 	// Same state scanned again, plus a PR-watermark rewind (as after a crash
 	// between send and advance): the delivery rows must prevent duplicates.
-	s.setSlackStateInt64(slackStateClawPRWatermarkKey, 0)
-	s.slackNotifierTick()
+	s.setNotifierStateInt64(lifecycleStateClawPRWatermarkKey, 0)
+	s.lifecycleNotifierTick()
 	if fake.count() != 2 {
 		t.Fatalf("re-scan duplicated claw events: %d messages", fake.count())
 	}
 }
 
-func TestSlackClawNotifierRespectsTogglesAndParksThem(t *testing.T) {
+func TestLifecycleClawNotifierRespectsTogglesAndParksThem(t *testing.T) {
 	fake := newFakeSlackServer(t)
-	s, db := newSlackNotifierTestServer(t, fake.server.URL, func(cfg *types.SlackNotificationsConfig) {
-		cfg.Events = &types.SlackEventToggles{
+	s, db := newSlackNotifierTestServer(t, fake.server.URL, func(cfg *types.LifecycleNotificationsConfig) {
+		cfg.Events = &types.LifecycleEventToggles{
 			AgentStarted: boolPtr(false),
 			PROpened:     boolPtr(false),
 		}
 	})
 	setSlackWatermark(t, s, 0)
-	setSlackClawBaseline(t, s)
+	setLifecycleClawBaseline(t, s)
 
 	insertSlackTestClaw(t, db, "claw-adhoc", "connected", 1, "", oldEnough)
 	insertSlackTestClawPR(t, db, "pr-1", "claw-adhoc", "acme/app", 7, "https://github.com/acme/app/pull/7")
-	s.slackNotifierTick()
+	s.lifecycleNotifierTick()
 	if fake.count() != 0 {
 		t.Fatalf("disabled toggles still sent %d claw messages", fake.count())
 	}
@@ -311,9 +311,9 @@ func TestSlackClawNotifierRespectsTogglesAndParksThem(t *testing.T) {
 	// Re-enabling must not flush the muted window: the connected claw and its
 	// PR were parked while the toggles were off.
 	s.mu.Lock()
-	s.hubCfg.Notifications.Slack.Events = nil
+	s.hubCfg.Notifications.Lifecycle.Events = nil
 	s.mu.Unlock()
-	s.slackNotifierTick()
+	s.lifecycleNotifierTick()
 	if fake.count() != 0 {
 		t.Fatalf("re-enabling toggles flushed %d parked claw events", fake.count())
 	}
@@ -322,22 +322,22 @@ func TestSlackClawNotifierRespectsTogglesAndParksThem(t *testing.T) {
 	if _, err := db.Exec(`UPDATE claws SET status='error', bootstrap_diagnostic='boom' WHERE id='claw-adhoc'`); err != nil {
 		t.Fatalf("set claw error: %v", err)
 	}
-	s.slackNotifierTick()
+	s.lifecycleNotifierTick()
 	if fake.count() != 1 {
 		t.Fatalf("failure after re-enable was not delivered: %d messages", fake.count())
 	}
 }
 
-func TestSlackClawNotifierFailureToggleOff(t *testing.T) {
+func TestLifecycleClawNotifierFailureToggleOff(t *testing.T) {
 	fake := newFakeSlackServer(t)
-	s, db := newSlackNotifierTestServer(t, fake.server.URL, func(cfg *types.SlackNotificationsConfig) {
-		cfg.Events = &types.SlackEventToggles{Failures: boolPtr(false)}
+	s, db := newSlackNotifierTestServer(t, fake.server.URL, func(cfg *types.LifecycleNotificationsConfig) {
+		cfg.Events = &types.LifecycleEventToggles{Failures: boolPtr(false)}
 	})
 	setSlackWatermark(t, s, 0)
-	setSlackClawBaseline(t, s)
+	setLifecycleClawBaseline(t, s)
 
 	insertSlackTestClaw(t, db, "claw-dead", "error", 0, "", oldEnough)
-	s.slackNotifierTick()
+	s.lifecycleNotifierTick()
 	if fake.count() != 0 {
 		t.Fatalf("failures toggle off, but claw path sent %d messages", fake.count())
 	}
@@ -345,11 +345,11 @@ func TestSlackClawNotifierFailureToggleOff(t *testing.T) {
 
 // A task-run thread and a claw thread must not interfere: each gets its own
 // root and its own replies.
-func TestSlackClawAndTaskRunThreadsAreIndependent(t *testing.T) {
+func TestLifecycleClawAndTaskRunThreadsAreIndependent(t *testing.T) {
 	fake := newFakeSlackServer(t)
 	s, db := newSlackNotifierTestServer(t, fake.server.URL, nil)
 	setSlackWatermark(t, s, 0)
-	setSlackClawBaseline(t, s)
+	setLifecycleClawBaseline(t, s)
 
 	base := epochMillis(now())
 	insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{
@@ -364,7 +364,7 @@ func TestSlackClawAndTaskRunThreadsAreIndependent(t *testing.T) {
 	insertSlackTestClaw(t, db, "claw-adhoc", "connected", 1, "", oldEnough)
 	insertSlackTestClawPR(t, db, "pr-adhoc", "claw-adhoc", "acme/tools", 3, "https://github.com/acme/tools/pull/3")
 
-	s.slackNotifierTick()
+	s.lifecycleNotifierTick()
 	if fake.count() != 4 {
 		t.Fatalf("sent %d messages, want 2 task-run + 2 claw", fake.count())
 	}
@@ -373,7 +373,7 @@ func TestSlackClawAndTaskRunThreadsAreIndependent(t *testing.T) {
 	if err := db.QueryRow(`SELECT thread_ts FROM slack_run_threads WHERE run_id='run-1'`).Scan(&runRoot); err != nil {
 		t.Fatalf("run thread root: %v", err)
 	}
-	if err := db.QueryRow(`SELECT thread_ts FROM slack_run_threads WHERE run_id=?`, slackClawThreadKey("claw-adhoc")).Scan(&clawRoot); err != nil {
+	if err := db.QueryRow(`SELECT thread_ts FROM slack_run_threads WHERE run_id=?`, lifecycleClawThreadKey("claw-adhoc")).Scan(&clawRoot); err != nil {
 		t.Fatalf("claw thread root: %v", err)
 	}
 	if runRoot == clawRoot {
@@ -402,11 +402,11 @@ func TestSlackClawAndTaskRunThreadsAreIndependent(t *testing.T) {
 // markBootstrapReady; docker/local/noop claws are upserted straight to
 // 'connected' by bridge registration with bootstrap_ok still 0 — exactly the
 // `make dev-claw` shape this feature was built for.
-func TestSlackClawNotifierStartedFiresForNonVMProvidersWithoutBootstrapOK(t *testing.T) {
+func TestLifecycleClawNotifierStartedFiresForNonVMProvidersWithoutBootstrapOK(t *testing.T) {
 	fake := newFakeSlackServer(t)
 	s, db := newSlackNotifierTestServer(t, fake.server.URL, nil)
 	setSlackWatermark(t, s, 0)
-	setSlackClawBaseline(t, s)
+	setLifecycleClawBaseline(t, s)
 
 	// make dev-claw: provider 'docker', connected via registration, bootstrap_ok=0.
 	insertSlackTestClaw(t, db, "claw-docker", "connected", 0, "", oldEnough)
@@ -419,17 +419,17 @@ func TestSlackClawNotifierStartedFiresForNonVMProvidersWithoutBootstrapOK(t *tes
 		t.Fatalf("set provider: %v", err)
 	}
 
-	s.slackNotifierTick()
+	s.lifecycleNotifierTick()
 	if fake.count() != 1 {
 		t.Fatalf("want exactly the docker claw's agent_started, got %d messages", fake.count())
 	}
 	if !strings.Contains(fake.request(0).Fallback, "name-claw-docker") {
 		t.Fatalf("agent_started sent for the wrong claw: %q", fake.request(0).Fallback)
 	}
-	if status, ok := slackDeliveryStatus(t, db, slackClawStartedKey("claw-docker")); !ok || status != slackDeliveryStatusSent {
+	if status, ok := slackDeliveryStatus(t, db, lifecycleClawStartedKey("claw-docker")); !ok || status != notificationDeliveryStatusSent {
 		t.Fatalf("docker claw delivery = %q, %v", status, ok)
 	}
-	if _, ok := slackDeliveryStatus(t, db, slackClawStartedKey("claw-vm")); ok {
+	if _, ok := slackDeliveryStatus(t, db, lifecycleClawStartedKey("claw-vm")); ok {
 		t.Fatal("VM claw with bootstrap_ok=0 must stay gated")
 	}
 
@@ -437,7 +437,7 @@ func TestSlackClawNotifierStartedFiresForNonVMProvidersWithoutBootstrapOK(t *tes
 	if _, err := db.Exec(`UPDATE claws SET bootstrap_ok=1 WHERE id='claw-vm'`); err != nil {
 		t.Fatalf("set bootstrap_ok: %v", err)
 	}
-	s.slackNotifierTick()
+	s.lifecycleNotifierTick()
 	if fake.count() != 2 {
 		t.Fatalf("bootstrapped VM claw did not notify: %d messages", fake.count())
 	}
@@ -447,16 +447,16 @@ func TestSlackClawNotifierStartedFiresForNonVMProvidersWithoutBootstrapOK(t *tes
 // defends against, not swallow short-lived states. An ad-hoc claw that errors
 // shortly after creation (and is soft-deleted by the operator soon after) must
 // still produce its failure notification.
-func TestSlackClawNotifierShortLivedFailureStillNotifies(t *testing.T) {
+func TestLifecycleClawNotifierShortLivedFailureStillNotifies(t *testing.T) {
 	fake := newFakeSlackServer(t)
 	s, db := newSlackNotifierTestServer(t, fake.server.URL, nil)
 	setSlackWatermark(t, s, 0)
-	setSlackClawBaseline(t, s)
+	setLifecycleClawBaseline(t, s)
 
 	// Failed 30s after creation — inside the old 2-minute grace that used to
 	// drop this event, past the current one.
 	insertSlackTestClaw(t, db, "claw-shortlived", "error", 0, "", 30*time.Second)
-	s.slackNotifierTick()
+	s.lifecycleNotifierTick()
 	if fake.count() != 1 {
 		t.Fatalf("short-lived failure not notified: %d messages", fake.count())
 	}
@@ -466,7 +466,7 @@ func TestSlackClawNotifierShortLivedFailureStillNotifies(t *testing.T) {
 	if _, err := db.Exec(`UPDATE claws SET status='deleted' WHERE id='claw-shortlived'`); err != nil {
 		t.Fatalf("delete claw: %v", err)
 	}
-	s.slackNotifierTick()
+	s.lifecycleNotifierTick()
 	if fake.count() != 1 {
 		t.Fatalf("failure resent after delete: %d messages", fake.count())
 	}
@@ -477,11 +477,11 @@ func TestSlackClawNotifierShortLivedFailureStillNotifies(t *testing.T) {
 // status 'deleted' with the workflow run 'failed' — and never pass through
 // status='error'. The claw pass must notify on that shape while keeping the
 // success paths (also 'deleted', run 'completed') silent.
-func TestSlackClawNotifierFailureOnDeletedClawWithFailedWorkflowRun(t *testing.T) {
+func TestLifecycleClawNotifierFailureOnDeletedClawWithFailedWorkflowRun(t *testing.T) {
 	fake := newFakeSlackServer(t)
 	s, db := newSlackNotifierTestServer(t, fake.server.URL, nil)
 	setSlackWatermark(t, s, 0)
-	setSlackClawBaseline(t, s)
+	setLifecycleClawBaseline(t, s)
 
 	base := time.Now().UTC()
 	// Pipeline terminal failure: deleted + latest run failed -> notify.
@@ -498,18 +498,18 @@ func TestSlackClawNotifierFailureOnDeletedClawWithFailedWorkflowRun(t *testing.T
 	insertSlackTestWorkflowRun(t, db, "wr-old-failed", "claw-retried", "failed", base.Add(-time.Hour))
 	insertSlackTestWorkflowRun(t, db, "wr-new-done", "claw-retried", "completed", base)
 
-	s.slackNotifierTick()
+	s.lifecycleNotifierTick()
 	if fake.count() != 1 {
 		t.Fatalf("want exactly the pipeline failure, got %d messages", fake.count())
 	}
 	if !strings.Contains(fake.request(0).Fallback, "name-claw-pipeline") {
 		t.Fatalf("failure sent for the wrong claw: %q", fake.request(0).Fallback)
 	}
-	if status, ok := slackDeliveryStatus(t, db, slackClawFailureKey("claw-pipeline")); !ok || status != slackDeliveryStatusSent {
+	if status, ok := slackDeliveryStatus(t, db, lifecycleClawFailureKey("claw-pipeline")); !ok || status != notificationDeliveryStatusSent {
 		t.Fatalf("pipeline failure delivery = %q, %v", status, ok)
 	}
 	// Rescan does not duplicate.
-	s.slackNotifierTick()
+	s.lifecycleNotifierTick()
 	if fake.count() != 1 {
 		t.Fatalf("deleted+failed shape resent: %d messages", fake.count())
 	}
