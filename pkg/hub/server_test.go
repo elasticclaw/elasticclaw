@@ -2258,6 +2258,44 @@ func TestDeliveredPromptReservesTurnBeforeFirstActivity(t *testing.T) {
 	}
 }
 
+func TestSendNextQueuedMessageWaitsInterTurnCooldown(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{ClawToken: "claw-token"}, "", "", "")
+	const clawID = "claw-inter-turn-cooldown"
+	insertPendingMessage(t, db, clawID, "first", now().Add(-time.Second))
+	insertPendingMessage(t, db, clawID, "second", now())
+
+	ts := httptest.NewServer(s.Handler())
+	t.Cleanup(ts.Close)
+	clawWS := connectTestClaw(t, ts, clawID)
+	t.Cleanup(func() { _ = clawWS.Close(websocket.StatusNormalClosure, "done") })
+	if got := readTestHubMessage(t, clawWS).Content; got != "first" {
+		t.Fatalf("first delivered content = %q, want first", got)
+	}
+
+	// Speed up the cooldown so the test remains fast, but still measurable.
+	oldCooldown := interTurnCooldown
+	interTurnCooldown = 50 * time.Millisecond
+	t.Cleanup(func() { interTurnCooldown = oldCooldown })
+
+	s.mu.RLock()
+	cc := s.claws[clawID]
+	s.mu.RUnlock()
+	cc.mu.Lock()
+	cc.finishTurnLocked()
+	cc.mu.Unlock()
+
+	start := time.Now()
+	s.sendNextQueuedMessage(cc)
+	elapsed := time.Since(start)
+
+	if got := readTestHubMessage(t, clawWS).Content; got != "second" {
+		t.Fatalf("second delivered content = %q, want second", got)
+	}
+	if elapsed < interTurnCooldown {
+		t.Fatalf("sendNextQueuedMessage returned too fast: %s, want at least %s", elapsed, interTurnCooldown)
+	}
+}
+
 func TestReconnectRedeliversMessageUnmarkedAfterSuccessfulWrite(t *testing.T) {
 	s, db := NewTestServerWithConfig(t, &types.HubConfig{ClawToken: "claw-token"}, "", "", "")
 	const clawID = "claw-redeliver-pending"
