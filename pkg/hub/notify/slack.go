@@ -228,8 +228,14 @@ func (s *slackNotifier) RenderPayload(msg Message) (map[string]any, error) {
 	}
 
 	if !msg.Semantic() {
-		// Plain tier: Text only (the pipeline notify action path).
-		payload["text"] = msg.Text
+		// Plain tier: Text only (the pipeline notify action path). Text is
+		// plain text, never raw mrkdwn: it is template-rendered from untrusted
+		// data (issue titles, command stdout), so the mrkdwn control
+		// characters are escaped like every other rendering path — otherwise a
+		// crafted issue title could smuggle a <!channel> broadcast or a
+		// spoofed <url|label> link into the channel. Formatting that survives
+		// escaping (*bold*, _italic_) still renders.
+		payload["text"] = slackEscape(msg.Text)
 		return payload, nil
 	}
 
@@ -247,7 +253,7 @@ func (s *slackNotifier) RenderPayload(msg Message) (map[string]any, error) {
 		// Degenerate semantic message with nothing renderable (e.g. only a
 		// Severity set): fall back to the plain tier rather than posting an
 		// attachment Slack will reject as empty.
-		payload["text"] = msg.Text
+		payload["text"] = slackEscape(msg.Text)
 		return payload, nil
 	}
 	attachment := map[string]any{

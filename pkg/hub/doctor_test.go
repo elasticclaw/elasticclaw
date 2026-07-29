@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -98,5 +99,140 @@ func TestCheckNotificationsSurfacesMisconfiguration(t *testing.T) {
 	}
 	if c, ok := byTitle[`Notifier "healthy" is configured`]; !ok || !c.OK {
 		t.Fatalf("healthy notifier not reported OK: %#v", byTitle)
+	}
+}
+
+// Pipeline notify actions must be validated against the hub-level notifiers
+// the runner resolves them from, under the runtime's secret scope: a blank or
+// unknown "via" and a notifier that fails to construct (unsupported type,
+// unresolvable secret) must all surface as critical; construction verdicts
+// dedupe per (notifier, secret scope); and a secret that exists only
+// workspace-scoped must count as resolved, because runtime resolution for
+// workflow claws prefers workspace secrets over hub secrets.
+func TestCheckNotifyActionsSurfacesMisconfiguration(t *testing.T) {
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
+
+	notifyStage := func(id string, notify map[string]interface{}) types.WorkflowStage {
+		return types.WorkflowStage{ID: id, OnEnter: map[string]interface{}{"notify": notify}}
+	}
+	SaveWorkspaceForTest(t, &types.WorkspaceConfig{Name: "doctor-ws"}, []*types.WorkflowConfig{{
+		Name: "release",
+		Stages: []types.WorkflowStage{
+			notifyStage("no-via", map[string]interface{}{"text": "hello"}),
+			notifyStage("unknown-via", map[string]interface{}{"via": "ghost", "text": "hello"}),
+			notifyStage("bad-type", map[string]interface{}{"via": "pigeons", "text": "hello"}),
+			notifyStage("bad-secret", map[string]interface{}{"via": "rotated", "text": "hello"}),
+			notifyStage("bad-secret-again", map[string]interface{}{"via": "rotated", "text": "hello"}),
+			notifyStage("workspace-secret", map[string]interface{}{"via": "scoped", "text": "hello"}),
+		},
+	}})
+	if err := saveWorkspaceSecret("doctor-ws", "ws-only-token", "xoxb-ws"); err != nil {
+		t.Fatalf("save workspace secret: %v", err)
+	}
+
+	cfg := &types.HubConfig{
+		Secrets: map[string]string{"slack_tok": "xoxb-1"},
+		Notifications: &types.NotificationsConfig{
+			Notifiers: map[string]types.NotifierConfig{
+				"pigeons": {Type: "carrier-pigeon", Settings: map[string]any{}},
+				"rotated": {Type: "slack", Settings: map[string]any{"token_secret": "gone", "channel": "C0123ABCD"}},
+				"scoped":  {Type: "slack", Settings: map[string]any{"token_secret": "ws-only-token", "channel": "C0123ABCD"}},
+			},
+		},
+	}
+	s := &Server{hubCfg: cfg}
+	checks := s.checkNotifyActions(cfg)
+	byTitle := map[string]DoctorCheck{}
+	for _, c := range checks {
+		byTitle[c.Title] = c
+	}
+	// Four failures: "rotated" is used by two stages but produces one row per
+	// (notifier, scope), and the workspace-scoped "scoped" resolves cleanly.
+	if len(checks) != 4 || len(byTitle) != 4 {
+		t.Fatalf("got %d checks (%d distinct titles), want 4: %#v", len(checks), len(byTitle), checks)
+	}
+	if c, ok := byTitle[`Workflow "release" stage "no-via" notify action has no "via"`]; !ok || c.OK || c.Severity != "critical" {
+		t.Fatalf("blank via not surfaced as critical: %#v", byTitle)
+	}
+	if c, ok := byTitle[`Workflow "release" stage "unknown-via" references missing notifier "ghost"`]; !ok || c.OK || c.Severity != "critical" {
+		t.Fatalf("unknown notifier not surfaced as critical: %#v", byTitle)
+	}
+	if c, ok := byTitle[`Workflow "release" stage "bad-type" notifier "pigeons" is misconfigured`]; !ok || c.OK || c.Severity != "critical" || !strings.Contains(c.Error, "unknown notifier type") {
+		t.Fatalf("unsupported type not surfaced as critical: %#v", byTitle)
+	}
+	if c, ok := byTitle[`Workflow "release" stage "bad-secret" notifier "rotated" is misconfigured`]; !ok || c.OK || c.Severity != "critical" || !strings.Contains(c.Error, "not found") {
+		t.Fatalf("unresolvable secret not surfaced as critical: %#v", byTitle)
+	}
+}
+
+// The check must cover every surface that reaches executeNotifyAction at
+// runtime: factory pipelines (pipeline_yaml on the factory config) and
+// workflows that author pipeline_yaml directly instead of stages. Factory
+// notify actions must resolve hub secrets only — FactoryConfig.Workspace is a
+// tracker slug, not an ElasticClaw workspace — so a secret that exists only
+// in a same-named workspace still fails the factory's check.
+func TestCheckNotifyActionsCoversFactoriesAndRawPipelineYAML(t *testing.T) {
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
+
+	const pipelineYAML = "stages:\n  - id: announce\n    on_enter:\n      notify:\n        via: %s\n        text: hi\n"
+	SaveWorkspaceForTest(t, &types.WorkspaceConfig{Name: "raw-ws"}, []*types.WorkflowConfig{{
+		Name:         "rawflow",
+		PipelineYAML: fmt.Sprintf(pipelineYAML, "ghost"),
+	}})
+	if err := saveWorkspaceSecret("raw-ws", "ws-only-token", "xoxb-ws"); err != nil {
+		t.Fatalf("save workspace secret: %v", err)
+	}
+	cfg := &types.HubConfig{
+		Factories: []*types.FactoryConfig{{
+			Name:         "rel-factory",
+			Workspace:    "raw-ws", // tracker slug colliding with the workspace name
+			PipelineYAML: fmt.Sprintf(pipelineYAML, "eng"),
+		}},
+		Notifications: &types.NotificationsConfig{
+			Notifiers: map[string]types.NotifierConfig{
+				"eng": {Type: "slack", Settings: map[string]any{"token_secret": "ws-only-token", "channel": "C0123ABCD"}},
+			},
+		},
+	}
+	s := &Server{hubCfg: cfg}
+	checks := s.checkNotifyActions(cfg)
+	byTitle := map[string]DoctorCheck{}
+	for _, c := range checks {
+		byTitle[c.Title] = c
+	}
+	if len(checks) != 2 {
+		t.Fatalf("got %d checks, want 2: %#v", len(checks), checks)
+	}
+	if c, ok := byTitle[`Workflow "rawflow" stage "announce" references missing notifier "ghost"`]; !ok || c.OK || c.Severity != "critical" {
+		t.Fatalf("directly authored pipeline_yaml not covered: %#v", byTitle)
+	}
+	if c, ok := byTitle[`Factory "rel-factory" stage "announce" notifier "eng" is misconfigured`]; !ok || c.OK || c.Severity != "critical" || !strings.Contains(c.Error, "not found") {
+		t.Fatalf("factory pipeline not covered, or resolved with workspace secrets: %#v", byTitle)
+	}
+}
+
+// A hub whose every pipeline notify action is valid gets a single passing
+// summary check.
+func TestCheckNotifyActionsAllValid(t *testing.T) {
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
+	SaveWorkspaceForTest(t, &types.WorkspaceConfig{Name: "doctor-ws"}, []*types.WorkflowConfig{{
+		Name: "release",
+		Stages: []types.WorkflowStage{{
+			ID:      "announce",
+			OnEnter: map[string]interface{}{"notify": map[string]interface{}{"via": "eng", "text": "hi"}},
+		}},
+	}})
+	cfg := &types.HubConfig{
+		Secrets: map[string]string{"slack_tok": "xoxb-1"},
+		Notifications: &types.NotificationsConfig{
+			Notifiers: map[string]types.NotifierConfig{
+				"eng": {Type: "slack", Settings: map[string]any{"token_secret": "slack_tok", "channel": "C0123ABCD"}},
+			},
+		},
+	}
+	s := &Server{hubCfg: cfg}
+	checks := s.checkNotifyActions(cfg)
+	if len(checks) != 1 || !checks[0].OK || checks[0].Title != "Pipeline notify actions configured" {
+		t.Fatalf("got %#v, want one passing summary check", checks)
 	}
 }

@@ -191,6 +191,25 @@ func TestSlackSendTextOnlyMessage(t *testing.T) {
 	}
 }
 
+// Regression: the plain tier used to post msg.Text as raw mrkdwn, so
+// untrusted data templated into a pipeline notify action (an issue title, a
+// command's stdout) could broadcast <!channel> to the whole channel or spoof
+// an arbitrarily-labelled <url|label> link. Every rendering tier escapes.
+func TestSlackPlainTierEscapesMrkdwnInjection(t *testing.T) {
+	fake := newFakeSlack(t)
+	n := newTestSlack(t, fake.server.URL, nil)
+
+	if _, err := n.Send(context.Background(), Message{
+		Text: "Merged #7: <!channel> <https://evil.example|Approve> & *bold*",
+	}); err != nil {
+		t.Fatalf("Send() error = %v", err)
+	}
+	want := "Merged #7: &lt;!channel&gt; &lt;https://evil.example|Approve&gt; &amp; *bold*"
+	if got := fake.request(0).Text; got != want {
+		t.Fatalf("plain tier text = %q, want escaped %q", got, want)
+	}
+}
+
 // Target overrides the notifier's default destination.
 func TestSlackSendTargetOverridesChannel(t *testing.T) {
 	fake := newFakeSlack(t)
