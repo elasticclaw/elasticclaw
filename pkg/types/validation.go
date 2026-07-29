@@ -753,6 +753,43 @@ func ValidateProviderConfig(name string, cfg *ProviderConfig) error {
 	return nil
 }
 
+// slackChannelIDRegex matches Slack conversation IDs: public channels (C...),
+// private groups (G...) and DMs (D...).
+var slackChannelIDRegex = regexp.MustCompile(`^[CGD][A-Za-z0-9]+$`)
+
+// ValidateSlackNotificationsConfig validates a SlackNotificationsConfig.
+// A nil config is valid (feature absent).
+func ValidateSlackNotificationsConfig(cfg *SlackNotificationsConfig) error {
+	if cfg == nil {
+		return nil
+	}
+	if cfg.PollInterval != "" {
+		d, err := time.ParseDuration(cfg.PollInterval)
+		if err != nil {
+			return fmt.Errorf("notifications.slack: invalid poll_interval %q: %w", cfg.PollInterval, err)
+		}
+		if d < time.Second {
+			return fmt.Errorf("notifications.slack: poll_interval must be at least 1s, got %q", cfg.PollInterval)
+		}
+	}
+	channel := strings.TrimSpace(cfg.Channel)
+	if strings.HasPrefix(channel, "#") {
+		return fmt.Errorf("notifications.slack: channel %q is a channel name; use the channel ID instead (e.g. C0123ABCD) — names break when the channel is renamed", channel)
+	}
+	if channel != "" && !slackChannelIDRegex.MatchString(channel) {
+		return fmt.Errorf("notifications.slack: channel %q does not look like a Slack channel ID (expected C/G/D followed by alphanumerics, e.g. C0123ABCD)", channel)
+	}
+	if cfg.Enabled {
+		if strings.TrimSpace(cfg.BotTokenRef) == "" {
+			return fmt.Errorf("notifications.slack: bot_token_ref is required when enabled (a key into hub secrets)")
+		}
+		if channel == "" {
+			return fmt.Errorf("notifications.slack: channel is required when enabled")
+		}
+	}
+	return nil
+}
+
 // ValidateHubConfig performs basic validation on HubConfig
 func (h *HubConfig) Validate() error {
 	if h == nil {
@@ -776,6 +813,13 @@ func (h *HubConfig) Validate() error {
 	// Validate providers
 	for name, provider := range h.Providers {
 		if err := ValidateProviderConfig(name, &provider); err != nil {
+			return err
+		}
+	}
+
+	// Validate notifications
+	if h.Notifications != nil {
+		if err := ValidateSlackNotificationsConfig(h.Notifications.Slack); err != nil {
 			return err
 		}
 	}

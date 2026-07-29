@@ -133,6 +133,13 @@ type Server struct {
 	reaperFirstSeen     map[string]time.Time
 	nowFunc             func() time.Time
 	terminateVMOverride func(provider, id string) error // test seam for terminal cleanup
+
+	// slackBaseURL overrides the Slack API base for testing (default: https://slack.com/api)
+	slackBaseURL string
+	// slackLimiter paces chat.postMessage across the notifier and the test endpoint.
+	slackLimiter slackSendLimiter
+	// slackSendInterval overrides the 1s message pacing for tests (0 = default).
+	slackSendInterval time.Duration
 }
 
 func (s *Server) modelAuthTokenForClaw(clawID string) string {
@@ -323,6 +330,7 @@ func NewServer(addr, dbPath, identityDir string, hubCfg *types.HubConfig) (*Serv
 		log.Printf("[cron] failed to start scheduler: %v", err)
 	}
 	srv.startIntegrationPoller()
+	srv.startSlackNotifier()
 
 	return srv, nil
 }
@@ -422,6 +430,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/settings/github/test", s.withWebAdminAuth(s.handleGitHubAppTest))
 	mux.HandleFunc("/api/settings/model-auth/login", s.withWebAdminAuth(s.handleModelAuthLogin))
 	mux.HandleFunc("/api/settings/model-auth/login/{id}", s.withWebAdminAuth(s.handleModelAuthLoginStatus))
+	mux.HandleFunc("/api/notifications/slack/test", s.withWebAdminAuth(s.handleSlackNotificationTest))
 
 	// Template store
 	mux.HandleFunc("/api/templates", s.withWebAuth(s.handleTemplates))

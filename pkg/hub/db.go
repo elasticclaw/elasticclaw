@@ -711,6 +711,34 @@ func migrate(db *sql.DB) error {
 	CREATE INDEX IF NOT EXISTS idx_workflow_runs_workflow ON workflow_runs(tenant_id, workflow_name, workspace_name, created_at);
 	CREATE INDEX IF NOT EXISTS idx_workflow_runs_status ON workflow_runs(tenant_id, status, created_at);
 	CREATE INDEX IF NOT EXISTS idx_workflow_runs_claw ON workflow_runs(claw_id);
+
+	-- Slack outbound notifications: one thread root per run so lifecycle
+	-- messages land in a single Slack thread.
+	CREATE TABLE IF NOT EXISTS slack_run_threads (
+		run_id     TEXT PRIMARY KEY,
+		tenant_id  TEXT NOT NULL,
+		channel    TEXT NOT NULL,
+		thread_ts  TEXT NOT NULL,
+		created_at INTEGER NOT NULL
+	);
+
+	-- Per-event delivery record. This is the dedupe that makes the notifier's
+	-- rowid cursor safe to re-scan after a crash between send and advance.
+	CREATE TABLE IF NOT EXISTS slack_notification_deliveries (
+		event_id     TEXT PRIMARY KEY,
+		run_id       TEXT NOT NULL,
+		delivered_at INTEGER NOT NULL,
+		message_ts   TEXT NOT NULL DEFAULT '',
+		status       TEXT NOT NULL DEFAULT 'sent'
+	);
+	CREATE INDEX IF NOT EXISTS idx_slack_deliveries_time
+		ON slack_notification_deliveries(delivered_at);
+
+	-- Key/value state for the Slack notifier (the rowid watermark).
+	CREATE TABLE IF NOT EXISTS slack_notifier_state (
+		key   TEXT PRIMARY KEY,
+		value TEXT NOT NULL
+	);
 	`)
 	if err != nil {
 		return err
