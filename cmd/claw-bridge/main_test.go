@@ -1406,6 +1406,26 @@ func TestIsRecoverableSessionLifecycleError(t *testing.T) {
 	}
 }
 
+func TestIsSessionRotatedError(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "nil", err: nil, want: false},
+		{name: "session reset", err: errString("session file changed while embedded prompt lock was released; OpenClaw session reset so the next message can continue"), want: true},
+		{name: "other error", err: errString("some other error"), want: false},
+		{name: "send error", err: &sessionSendRequestError{err: errString("session file changed while embedded prompt lock was released")}, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isSessionRotatedError(tt.err); got != tt.want {
+				t.Fatalf("isSessionRotatedError(%v) = %v, want %v", tt.err, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestGatewaySessionResetsAfterProviderFormatLifecycleError(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 
