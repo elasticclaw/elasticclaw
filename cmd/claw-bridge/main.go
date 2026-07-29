@@ -4151,11 +4151,13 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 			if bytes.Equal(payload, lastPayload) {
 				return
 			}
-			lastPayload = payload
-			_ = writeHub(hubMsg{
+			if err := writeHub(hubMsg{
 				Type:    "agent_activity",
 				Payload: payload,
-			})
+			}); err != nil {
+				return
+			}
+			lastPayload = payload
 		}
 	}()
 
