@@ -29,6 +29,12 @@ type fakeSlackRequest struct {
 	Channel  string
 	Text     string
 	ThreadTS string
+	// Fallback, Color and Blocks come from the message's single
+	// colour-striped attachment (the only place blocks are sent). For
+	// attachment-only messages the fallback — not top-level text — is what
+	// drives push notifications and accessibility.
+	Fallback string
+	Color    string
 	Blocks   []map[string]any
 }
 
@@ -42,22 +48,39 @@ func newFakeSlackServer(t *testing.T) *fakeSlackServer {
 			return
 		}
 		var body struct {
-			Channel  string           `json:"channel"`
-			Text     string           `json:"text"`
-			ThreadTS string           `json:"thread_ts"`
-			Blocks   []map[string]any `json:"blocks"`
+			Channel     string `json:"channel"`
+			Text        string `json:"text"`
+			ThreadTS    string `json:"thread_ts"`
+			Attachments []struct {
+				Fallback string           `json:"fallback"`
+				Color    string           `json:"color"`
+				Blocks   []map[string]any `json:"blocks"`
+			} `json:"attachments"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			t.Errorf("decode Slack request: %v", err)
 		}
-		f.mu.Lock()
-		f.requests = append(f.requests, fakeSlackRequest{
+		req := fakeSlackRequest{
 			Auth:     r.Header.Get("Authorization"),
 			Channel:  body.Channel,
 			Text:     body.Text,
 			ThreadTS: body.ThreadTS,
-			Blocks:   body.Blocks,
-		})
+		}
+		if len(body.Attachments) > 1 {
+			t.Errorf("message carries %d attachments, want at most 1", len(body.Attachments))
+		}
+		if len(body.Attachments) == 1 {
+			req.Fallback = body.Attachments[0].Fallback
+			req.Color = body.Attachments[0].Color
+			req.Blocks = body.Attachments[0].Blocks
+		}
+		if len(body.Attachments) > 0 && body.Text != "" {
+			// With an attachment present, top-level text renders as a visible
+			// body line above it — the headline would appear twice.
+			t.Errorf("attachment message carries top-level text %q, want empty", body.Text)
+		}
+		f.mu.Lock()
+		f.requests = append(f.requests, req)
 		n := len(f.requests)
 		respond := f.respond
 		f.mu.Unlock()
@@ -101,8 +124,12 @@ func TestSlackClientPostMessageSuccess(t *testing.T) {
 	fake := newFakeSlackServer(t)
 	client := newTestSlackClient(fake.server.URL)
 
-	blocks := []any{map[string]any{"type": "section"}}
-	ts, err := client.postMessage(context.Background(), "C123", "", blocks, "fallback text")
+	msg := slackMessage{
+		fallback: "fallback text",
+		color:    "#2EB67D",
+		blocks:   []any{map[string]any{"type": "section"}},
+	}
+	ts, err := client.postMessage(context.Background(), "C123", "", msg)
 	if err != nil {
 		t.Fatalf("postMessage() error = %v", err)
 	}
@@ -113,8 +140,14 @@ func TestSlackClientPostMessageSuccess(t *testing.T) {
 	if req.Auth != "Bearer xoxb-test-token" {
 		t.Fatalf("Authorization header = %q", req.Auth)
 	}
-	if req.Channel != "C123" || req.Text != "fallback text" || len(req.Blocks) != 1 {
+	if req.Channel != "C123" || req.Fallback != "fallback text" || len(req.Blocks) != 1 {
 		t.Fatalf("unexpected request payload: %#v", req)
+	}
+	if req.Text != "" {
+		t.Fatalf("top-level text = %q, want empty so the attachment is not preceded by a duplicate body line", req.Text)
+	}
+	if req.Color != "#2EB67D" {
+		t.Fatalf("attachment color = %q, want the stripe colour passed in", req.Color)
 	}
 	if req.ThreadTS != "" {
 		t.Fatalf("thread_ts should be absent, got %q", req.ThreadTS)
@@ -129,7 +162,7 @@ func TestSlackClientOKFalseReturnsTypedError(t *testing.T) {
 	})
 	client := newTestSlackClient(fake.server.URL)
 
-	_, err := client.postMessage(context.Background(), "C123", "", nil, "fallback")
+	_, err := client.postMessage(context.Background(), "C123", "", slackMessage{fallback: "fallback"})
 	if err == nil {
 		t.Fatal("postMessage() succeeded, want error")
 	}
@@ -154,7 +187,7 @@ func TestSlackClientRetriesOn429(t *testing.T) {
 	})
 	client := newTestSlackClient(fake.server.URL)
 
-	ts, err := client.postMessage(context.Background(), "C123", "", nil, "fallback")
+	ts, err := client.postMessage(context.Background(), "C123", "", slackMessage{fallback: "fallback"})
 	if err != nil {
 		t.Fatalf("postMessage() error = %v", err)
 	}
@@ -174,7 +207,7 @@ func TestSlackClient429GivesUpAfterMaxAttempts(t *testing.T) {
 	})
 	client := newTestSlackClient(fake.server.URL)
 
-	_, err := client.postMessage(context.Background(), "C123", "", nil, "fallback")
+	_, err := client.postMessage(context.Background(), "C123", "", slackMessage{fallback: "fallback"})
 	if err == nil || !strings.Contains(err.Error(), "rate limited") {
 		t.Fatalf("error = %v, want rate limited", err)
 	}
@@ -233,7 +266,7 @@ func TestSlackClientCancelledContextAbortsBeforeQueueWait(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	start := time.Now()
-	_, err := client.postMessage(ctx, "C123", "", nil, "fallback")
+	_, err := client.postMessage(ctx, "C123", "", slackMessage{fallback: "fallback"})
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("error = %v, want context.Canceled", err)
 	}

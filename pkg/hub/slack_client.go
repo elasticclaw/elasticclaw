@@ -98,6 +98,48 @@ func (l *slackSendLimiter) wait(ctx context.Context, minInterval time.Duration) 
 	return nil
 }
 
+// slackMessage is one fully rendered notification: Block Kit blocks wrapped in
+// a single colour-striped attachment, plus the plain-text fallback Slack uses
+// for push notifications and accessibility.
+type slackMessage struct {
+	// fallback is the required plain-text notification text.
+	fallback string
+	// color is the attachment stripe (hex, e.g. "#2EB67D"); empty omits it.
+	color string
+	// blocks are the Block Kit blocks rendered inside the attachment.
+	blocks []any
+}
+
+// payload builds the exact chat.postMessage body. It is the single source of
+// truth for the wire shape: the poster and the dry_run test endpoint both use
+// it, so a dry run always returns precisely what a real send would post.
+func (m slackMessage) payload(channel, threadTS string) map[string]any {
+	p := map[string]any{"channel": channel}
+	if len(m.blocks) > 0 {
+		// Blocks live inside a single attachment (not top-level) so the
+		// message carries the coloured left border. For an attachment-only
+		// message the top-level "text" is NOT a hidden fallback — Slack
+		// renders it as a visible line above the attachment, duplicating the
+		// headline — so the notification/accessibility summary goes in the
+		// attachment's "fallback" field instead, which Slack uses for push
+		// notifications when no top-level text is present.
+		attachment := map[string]any{
+			"fallback": m.fallback,
+			"blocks":   m.blocks,
+		}
+		if m.color != "" {
+			attachment["color"] = m.color
+		}
+		p["attachments"] = []any{attachment}
+	} else {
+		p["text"] = m.fallback
+	}
+	if threadTS != "" {
+		p["thread_ts"] = threadTS
+	}
+	return p
+}
+
 // slackClient is a minimal chat.postMessage client over net/http.
 type slackClient struct {
 	token      string
@@ -117,23 +159,12 @@ func (c *slackClient) apiBase() string {
 	return defaultSlackBaseURL
 }
 
-// postMessage posts a Block Kit message to a channel (optionally into a
-// thread) and returns the message ts. fallback is the required plain-text
-// notification fallback. Slack signals logical errors as HTTP 200 with
-// ok:false, which surfaces as *slackAPIError. HTTP 429 is retried honoring
-// Retry-After, up to slackMaxAttempts total attempts.
-func (c *slackClient) postMessage(ctx context.Context, channel, threadTS string, blocks []any, fallback string) (string, error) {
-	payload := map[string]any{
-		"channel": channel,
-		"text":    fallback,
-	}
-	if len(blocks) > 0 {
-		payload["blocks"] = blocks
-	}
-	if threadTS != "" {
-		payload["thread_ts"] = threadTS
-	}
-	body, err := json.Marshal(payload)
+// postMessage posts a rendered message to a channel (optionally into a
+// thread) and returns the message ts. Slack signals logical errors as HTTP 200
+// with ok:false, which surfaces as *slackAPIError. HTTP 429 is retried
+// honoring Retry-After, up to slackMaxAttempts total attempts.
+func (c *slackClient) postMessage(ctx context.Context, channel, threadTS string, msg slackMessage) (string, error) {
+	body, err := json.Marshal(msg.payload(channel, threadTS))
 	if err != nil {
 		return "", fmt.Errorf("marshal slack message: %w", err)
 	}

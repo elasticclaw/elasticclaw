@@ -77,8 +77,11 @@ func TestSlackClawNotifierAdhocLifecycleThreadsUnderOneRoot(t *testing.T) {
 	if root.ThreadTS != "" {
 		t.Fatalf("first claw message should be the thread root, got thread_ts %q", root.ThreadTS)
 	}
-	if !strings.Contains(root.Text, "Agent started") || !strings.Contains(root.Text, "name-claw-adhoc") {
-		t.Fatalf("agent_started fallback = %q", root.Text)
+	if !strings.Contains(root.Fallback, "Agent started") || !strings.Contains(root.Fallback, "name-claw-adhoc") {
+		t.Fatalf("agent_started fallback = %q", root.Fallback)
+	}
+	if root.Color != slackColorStarted {
+		t.Fatalf("agent_started color = %q, want %q", root.Color, slackColorStarted)
 	}
 
 	// PR opened
@@ -88,8 +91,11 @@ func TestSlackClawNotifierAdhocLifecycleThreadsUnderOneRoot(t *testing.T) {
 		t.Fatalf("pr_opened not sent for ad-hoc claw: %d messages", fake.count())
 	}
 	prMsg := fake.request(1)
-	if !strings.Contains(prMsg.Text, "PR opened") || !strings.Contains(prMsg.Text, "acme/app#7") {
-		t.Fatalf("pr_opened fallback = %q", prMsg.Text)
+	if !strings.Contains(prMsg.Fallback, "PR opened") || !strings.Contains(prMsg.Fallback, "acme/app#7") {
+		t.Fatalf("pr_opened fallback = %q", prMsg.Fallback)
+	}
+	if prMsg.Color != slackColorSuccess {
+		t.Fatalf("pr_opened color = %q, want %q", prMsg.Color, slackColorSuccess)
 	}
 
 	// failure
@@ -101,8 +107,11 @@ func TestSlackClawNotifierAdhocLifecycleThreadsUnderOneRoot(t *testing.T) {
 		t.Fatalf("failure not sent for ad-hoc claw: %d messages", fake.count())
 	}
 	failMsg := fake.request(2)
-	if !strings.Contains(failMsg.Text, "failed") {
-		t.Fatalf("failure fallback = %q", failMsg.Text)
+	if !strings.Contains(failMsg.Fallback, "Agent died") {
+		t.Fatalf("failure fallback = %q", failMsg.Fallback)
+	}
+	if failMsg.Color != slackColorFailure {
+		t.Fatalf("failure color = %q, want %q", failMsg.Color, slackColorFailure)
 	}
 	var reasonSeen bool
 	for _, b := range failMsg.Blocks {
@@ -376,11 +385,11 @@ func TestSlackClawAndTaskRunThreadsAreIndependent(t *testing.T) {
 			continue // a root
 		}
 		switch {
-		case strings.Contains(req.Text, "acme/app#7"):
+		case strings.Contains(req.Fallback, "acme/app#7"):
 			if req.ThreadTS != runRoot {
 				t.Fatalf("task-run reply threaded under %q, want run root %q", req.ThreadTS, runRoot)
 			}
-		case strings.Contains(req.Text, "acme/tools#3"):
+		case strings.Contains(req.Fallback, "acme/tools#3"):
 			if req.ThreadTS != clawRoot {
 				t.Fatalf("claw reply threaded under %q, want claw root %q", req.ThreadTS, clawRoot)
 			}
@@ -414,8 +423,8 @@ func TestSlackClawNotifierStartedFiresForNonVMProvidersWithoutBootstrapOK(t *tes
 	if fake.count() != 1 {
 		t.Fatalf("want exactly the docker claw's agent_started, got %d messages", fake.count())
 	}
-	if !strings.Contains(fake.request(0).Text, "name-claw-docker") {
-		t.Fatalf("agent_started sent for the wrong claw: %q", fake.request(0).Text)
+	if !strings.Contains(fake.request(0).Fallback, "name-claw-docker") {
+		t.Fatalf("agent_started sent for the wrong claw: %q", fake.request(0).Fallback)
 	}
 	if status, ok := slackDeliveryStatus(t, db, slackClawStartedKey("claw-docker")); !ok || status != slackDeliveryStatusSent {
 		t.Fatalf("docker claw delivery = %q, %v", status, ok)
@@ -493,8 +502,8 @@ func TestSlackClawNotifierFailureOnDeletedClawWithFailedWorkflowRun(t *testing.T
 	if fake.count() != 1 {
 		t.Fatalf("want exactly the pipeline failure, got %d messages", fake.count())
 	}
-	if !strings.Contains(fake.request(0).Text, "name-claw-pipeline") {
-		t.Fatalf("failure sent for the wrong claw: %q", fake.request(0).Text)
+	if !strings.Contains(fake.request(0).Fallback, "name-claw-pipeline") {
+		t.Fatalf("failure sent for the wrong claw: %q", fake.request(0).Fallback)
 	}
 	if status, ok := slackDeliveryStatus(t, db, slackClawFailureKey("claw-pipeline")); !ok || status != slackDeliveryStatusSent {
 		t.Fatalf("pipeline failure delivery = %q, %v", status, ok)
@@ -522,13 +531,16 @@ func TestSlackTestEndpointClawIDDryRun(t *testing.T) {
 	var resp struct {
 		DryRun  bool `json:"dry_run"`
 		Payload struct {
-			Text string `json:"text"`
+			Attachments []struct {
+				Fallback string `json:"fallback"`
+			} `json:"attachments"`
 		} `json:"payload"`
 	}
 	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if !resp.DryRun || !strings.Contains(resp.Payload.Text, "acme/app#7") {
+	if !resp.DryRun || len(resp.Payload.Attachments) != 1 ||
+		!strings.Contains(resp.Payload.Attachments[0].Fallback, "acme/app#7") {
 		t.Fatalf("unexpected dry-run response: %s", rr.Body.String())
 	}
 	if fake.count() != 0 {
@@ -563,8 +575,8 @@ func TestSlackTestEndpointClawIDRealSendLeavesNoState(t *testing.T) {
 	if req := fake.request(0); req.ThreadTS != "" {
 		t.Fatal("test sends must post top-level, never into a claw thread")
 	}
-	if !strings.Contains(fake.request(0).Text, "name-claw-adhoc") {
-		t.Fatalf("test send does not carry the claw context: %q", fake.request(0).Text)
+	if !strings.Contains(fake.request(0).Fallback, "name-claw-adhoc") {
+		t.Fatalf("test send does not carry the claw context: %q", fake.request(0).Fallback)
 	}
 	var n int
 	if err := db.QueryRow(`SELECT COUNT(1) FROM slack_notification_deliveries`).Scan(&n); err != nil || n != 0 {

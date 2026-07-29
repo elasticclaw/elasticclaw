@@ -122,8 +122,8 @@ func TestSlackNotifierDedupesOnCursorRescan(t *testing.T) {
 	if req.Channel != slackTestChannel {
 		t.Fatalf("channel = %q", req.Channel)
 	}
-	if !strings.Contains(req.Text, "Agent started") || !strings.Contains(req.Text, "Fix login bug") {
-		t.Fatalf("fallback text = %q", req.Text)
+	if !strings.Contains(req.Fallback, "Agent started") || !strings.Contains(req.Fallback, "Fix login bug") {
+		t.Fatalf("fallback text = %q", req.Fallback)
 	}
 	if len(req.Blocks) == 0 {
 		t.Fatal("message has no blocks")
@@ -163,8 +163,8 @@ func TestSlackNotifierThreadsEventsByRun(t *testing.T) {
 	if reply.ThreadTS != threadTS {
 		t.Fatalf("reply thread_ts %q != stored root %q", reply.ThreadTS, threadTS)
 	}
-	if !strings.Contains(reply.Text, "PR opened") || !strings.Contains(reply.Text, "acme/app#7") {
-		t.Fatalf("pr_opened fallback = %q", reply.Text)
+	if !strings.Contains(reply.Fallback, "PR opened") || !strings.Contains(reply.Fallback, "acme/app#7") {
+		t.Fatalf("pr_opened fallback = %q", reply.Fallback)
 	}
 }
 
@@ -189,8 +189,8 @@ func TestSlackNotifierDisabledEventToggle(t *testing.T) {
 		t.Fatalf("sent %d messages, want only pr_opened", fake.count())
 	}
 	req := fake.request(0)
-	if !strings.Contains(req.Text, "PR opened") {
-		t.Fatalf("unexpected message: %q", req.Text)
+	if !strings.Contains(req.Fallback, "PR opened") {
+		t.Fatalf("unexpected message: %q", req.Fallback)
 	}
 	if req.ThreadTS != "" {
 		t.Fatal("pr_opened without a prior root should post top-level")
@@ -530,8 +530,8 @@ func TestSlackFailureMessageClampsLongReason(t *testing.T) {
 		FailureType: taskRunFailureBootstrapFailed,
 		Detail:      map[string]any{"reason": strings.Repeat("x", 6000)},
 	}
-	blocks, _ := buildSlackMessage(ev, slackRunContext{IssueID: "ISSUE-1", IssueTitle: "Broken build"})
-	for i, b := range blocks {
+	msg := buildSlackMessage(ev, slackRunContext{IssueID: "ISSUE-1", IssueTitle: "Broken build"})
+	for i, b := range msg.blocks {
 		block, ok := b.(map[string]any)
 		if !ok {
 			t.Fatalf("block %d has unexpected shape %T", i, b)
@@ -548,6 +548,72 @@ func TestSlackFailureMessageClampsLongReason(t *testing.T) {
 					t.Fatalf("block %d element %d is %d runes, exceeds Slack's %d limit", i, j, len([]rune(elText)), slackMaxBlockTextLength)
 				}
 			}
+		}
+	}
+}
+
+// The bug this design fixes: nine failure types all rendered as the identical
+// ":warning: Run failed" shape and were indistinguishable in the channel.
+// Every supported event type must render with its own (emoji, title) identity,
+// a stripe colour from the palette, a human title (no raw snake_case in the
+// headline) and a non-empty notification fallback.
+func TestSlackEventTypesRenderDistinctly(t *testing.T) {
+	palette := map[string]bool{
+		slackColorStarted: true,
+		slackColorSuccess: true,
+		slackColorFailure: true,
+		slackColorWarning: true,
+	}
+	seen := map[string]string{} // (emoji, title) -> event type
+	seenEmoji := map[string]string{}
+	for eventType := range slackSupportedEventTypes() {
+		runCtx, ev := sampleSlackContext(eventType)
+		msg := buildSlackMessage(ev, runCtx)
+		style := slackEventStyleFor(ev)
+
+		// Identity: no two event types may share the same (emoji, title) pair,
+		// and each keeps its own emoji so messages read distinctly at a glance.
+		pair := style.emoji + " " + style.title
+		if prev, dup := seen[pair]; dup {
+			t.Errorf("%s and %s render the same (emoji, title) pair %q", prev, eventType, pair)
+		}
+		seen[pair] = eventType
+		if prev, dup := seenEmoji[style.emoji]; dup {
+			t.Errorf("%s and %s share the emoji %s", prev, eventType, style.emoji)
+		}
+		seenEmoji[style.emoji] = eventType
+
+		// Human title: never a raw snake_case identifier in the headline.
+		if strings.Contains(style.title, "_") || style.title == eventType {
+			t.Errorf("%s title %q is not human-readable", eventType, style.title)
+		}
+
+		// Colour stripe from the small palette.
+		if msg.color != style.color || !palette[msg.color] {
+			t.Errorf("%s color = %q, want one of the palette colours", eventType, msg.color)
+		}
+
+		// Headline block leads with "<emoji> *<title>*".
+		if len(msg.blocks) == 0 {
+			t.Fatalf("%s rendered no blocks", eventType)
+		}
+		head, ok := msg.blocks[0].(map[string]any)
+		if !ok {
+			t.Fatalf("%s first block has shape %T", eventType, msg.blocks[0])
+		}
+		headText, _ := head["text"].(map[string]any)["text"].(string)
+		if !strings.HasPrefix(headText, style.emoji+" *"+style.title+"*") {
+			t.Errorf("%s headline = %q, want it to start with %q", eventType, headText, style.emoji+" *"+style.title+"*")
+		}
+
+		// Notification fallback leads with the discriminator — emoji then
+		// title — so a truncated lock-screen line still identifies the event,
+		// and never carries the raw snake_case type.
+		if !strings.HasPrefix(msg.fallback, style.emoji+" "+style.title) {
+			t.Errorf("%s fallback = %q, want it to start with %q", eventType, msg.fallback, style.emoji+" "+style.title)
+		}
+		if strings.Contains(msg.fallback, "("+eventType+")") {
+			t.Errorf("%s fallback = %q carries the raw type in machine form", eventType, msg.fallback)
 		}
 	}
 }
@@ -574,19 +640,39 @@ func TestSlackTestEndpointDryRunReturnsPayloadWithoutCallingSlack(t *testing.T) 
 	var resp struct {
 		DryRun  bool `json:"dry_run"`
 		Payload struct {
-			Channel string           `json:"channel"`
-			Text    string           `json:"text"`
-			Blocks  []map[string]any `json:"blocks"`
+			Channel     string `json:"channel"`
+			Text        string `json:"text"`
+			Attachments []struct {
+				Fallback string           `json:"fallback"`
+				Color    string           `json:"color"`
+				Blocks   []map[string]any `json:"blocks"`
+			} `json:"attachments"`
 		} `json:"payload"`
 	}
 	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if !resp.DryRun || resp.Payload.Channel != slackTestChannel || len(resp.Payload.Blocks) == 0 {
+	if !resp.DryRun || resp.Payload.Channel != slackTestChannel {
 		t.Fatalf("unexpected dry-run response: %s", rr.Body.String())
 	}
-	if !strings.Contains(resp.Payload.Text, "SAMPLE-123") {
-		t.Fatalf("synthetic sample should be clearly marked, got %q", resp.Payload.Text)
+	// The dry-run payload must be the real wire shape: blocks inside a single
+	// colour-striped attachment carrying the notification fallback, and NO
+	// top-level text — with an attachment present it would render as a
+	// visible duplicate of the headline, not as a hidden fallback.
+	if len(resp.Payload.Attachments) != 1 {
+		t.Fatalf("dry-run payload has %d attachments, want 1: %s", len(resp.Payload.Attachments), rr.Body.String())
+	}
+	if resp.Payload.Attachments[0].Color == "" || len(resp.Payload.Attachments[0].Blocks) == 0 {
+		t.Fatalf("dry-run attachment missing color or blocks: %s", rr.Body.String())
+	}
+	if resp.Payload.Text != "" {
+		t.Fatalf("dry-run payload has top-level text %q, want the notification summary in the attachment fallback only", resp.Payload.Text)
+	}
+	if resp.Payload.Attachments[0].Fallback == "" {
+		t.Fatal("dry-run attachment has no plain-text fallback")
+	}
+	if !strings.Contains(resp.Payload.Attachments[0].Fallback, "SAMPLE-123") {
+		t.Fatalf("synthetic sample should be clearly marked, got %q", resp.Payload.Attachments[0].Fallback)
 	}
 	if fake.count() != 0 {
 		t.Fatalf("dry_run hit Slack %d times", fake.count())

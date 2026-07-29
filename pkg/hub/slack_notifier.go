@@ -307,7 +307,7 @@ func (s *Server) sendSlackEvent(client *slackClient, cfg *types.SlackNotificatio
 // ("claw:<id>", "claw:<id>:<kind>") so the two sources share the thread and
 // dedupe tables without ever colliding.
 func (s *Server) postSlackEvent(client *slackClient, cfg *types.SlackNotificationsConfig, ev slackEventRow, runCtx slackRunContext, threadKey, deliveryKey, tenantID string) error {
-	blocks, fallback := buildSlackMessage(ev, runCtx)
+	msg := buildSlackMessage(ev, runCtx)
 
 	threadTS := ""
 	haveRoot := false
@@ -322,7 +322,7 @@ func (s *Server) postSlackEvent(client *slackClient, cfg *types.SlackNotificatio
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	ts, err := client.postMessage(ctx, cfg.Channel, threadTS, blocks, fallback)
+	ts, err := client.postMessage(ctx, cfg.Channel, threadTS, msg)
 	if err != nil {
 		return err
 	}
@@ -534,9 +534,143 @@ func detailString(detail map[string]any, keys ...string) string {
 	return ""
 }
 
-// buildSlackMessage renders one event as Block Kit blocks plus the required
-// plain-text notification fallback. It must never include tokens or secrets.
-func buildSlackMessage(ev slackEventRow, runCtx slackRunContext) ([]any, string) {
+// ── Per-event look ──
+//
+// Every event type gets its own (emoji, title, colour) so a channel full of
+// notifications is scannable at a glance. The palette is deliberately tiny —
+// four colours, so the channel reads as a system, not a rainbow:
+//
+//	blue   work started
+//	green  a PR exists
+//	red    hard failures (someone must look)
+//	amber  soft/ambiguous outcomes (ended, but maybe fine)
+const (
+	slackColorStarted = "#36C5F0" // blue
+	slackColorSuccess = "#2EB67D" // green
+	slackColorFailure = "#E01E5A" // red
+	slackColorWarning = "#ECB22E" // amber
+)
+
+// slackEventStyle drives one event type's rendering: the headline is always
+// "<emoji> *<title>*" and the attachment stripe uses the colour.
+type slackEventStyle struct {
+	emoji string // Slack emoji shortcode, e.g. ":rocket:"
+	title string // human headline — never a raw snake_case identifier
+	color string // attachment stripe
+}
+
+// slackEventStyles maps every supported event/failure type to its look.
+//
+// Titles hold one grammatical subject — the agent — so the set reads as one
+// system, and every failure headline says in plain words what went wrong to
+// a reader who has never seen this codebase ("Couldn't get a machine", not
+// "provision_failed"). "Agent died" deliberately does not rhyme with "Agent
+// started": the two highest-volume events must not differ by two letters.
+//
+// Emoji are chosen to stay recognisable at Slack's 16px inline size on both
+// themes: saturated single-shape glyphs, no two alike in shape and colour,
+// and nothing near-black or near-white (those vanish on one of the two
+// themes — :stop_button: was invisible on dark mode). The raw snake_case
+// type still appears as dim metadata in failure messages.
+var slackEventStyles = map[string]slackEventStyle{
+	taskRunEventAgentStarted:       {":rocket:", "Agent started", slackColorStarted},
+	taskRunEventPROpened:           {":tada:", "PR opened", slackColorSuccess},
+	taskRunEventAgentStopped:       {":skull:", "Agent died", slackColorFailure},
+	"creation_failed":              {":no_entry_sign:", "Couldn't create the agent", slackColorFailure},
+	taskRunFailureProvisionFailed:  {":construction:", "Couldn't get a machine", slackColorFailure},
+	taskRunFailureBootstrapFailed:  {":boom:", "Agent crashed during startup", slackColorFailure},
+	taskRunFailurePermissionOrAuth: {":lock:", "Agent was denied access", slackColorFailure},
+	taskRunFailureProviderLost:     {":satellite_antenna:", "Lost contact with the provider", slackColorFailure},
+	taskRunFailureTimeout:          {":hourglass_flowing_sand:", "Agent ran out of time", slackColorWarning},
+	taskRunEventDoneWithoutPR:      {":mailbox_with_no_mail:", "Agent finished without a PR", slackColorWarning},
+	"unknown_failure":              {":question:", "Agent failed", slackColorFailure},
+}
+
+// slackEventStyleFor resolves the style for an event. Failure events key on
+// the failure type (the event type for synthetic rows); anything unmapped
+// still gets a readable humanized headline, never a raw snake_case string.
+func slackEventStyleFor(ev slackEventRow) slackEventStyle {
+	key := ev.EventType
+	if key != taskRunEventAgentStarted && key != taskRunEventPROpened {
+		key = firstNonEmpty(ev.FailureType, ev.EventType)
+	}
+	if key == taskRunFailureUnknown {
+		key = "unknown_failure"
+	}
+	if style, ok := slackEventStyles[key]; ok {
+		return style
+	}
+	return slackEventStyle{":question:", slackHumanizeType(key), slackColorFailure}
+}
+
+// slackHumanizeType turns an unmapped snake_case type into a headline-ready
+// label ("manual_stop_before_delivery" → "Manual stop before delivery").
+func slackHumanizeType(t string) string {
+	words := strings.ReplaceAll(t, "_", " ")
+	if words == "" {
+		return "Agent failed"
+	}
+	r := []rune(words)
+	return strings.ToUpper(string(r[0])) + string(r[1:])
+}
+
+// slackBlockquote renders text as a mrkdwn blockquote (every line prefixed),
+// used for failure reasons so error text reads as quoted output rather than
+// competing with the headline.
+func slackBlockquote(s string) string {
+	lines := strings.Split(slackEscape(s), "\n")
+	for i, line := range lines {
+		lines[i] = "> " + line
+	}
+	return strings.Join(lines, "\n")
+}
+
+// slackHeadline renders the standard first line: "<emoji> *<title>*".
+func slackHeadline(style slackEventStyle) string {
+	return style.emoji + " *" + style.title + "*"
+}
+
+// slackFallbackText builds the plain-text notification line — on a phone lock
+// screen it is 100% of what the user sees. The emoji leads (shortcodes render
+// in Slack push notifications) so the discriminator survives truncation, and
+// every message shape keeps the same slot order:
+//
+//	<emoji> <title> — <where> · <what> · <why>
+//
+// with empty parts dropped, so a slot never silently changes meaning between
+// shapes. iOS truncates at roughly two lines, so callers must front-load what
+// matters and keep parts short.
+func slackFallbackText(style slackEventStyle, parts ...string) string {
+	out := style.emoji + " " + style.title
+	var kept []string
+	for _, p := range parts {
+		if p != "" {
+			kept = append(kept, p)
+		}
+	}
+	if len(kept) > 0 {
+		out += " — " + strings.Join(kept, " · ")
+	}
+	return out
+}
+
+// slackFallbackReason compresses a failure reason onto one short line for the
+// notification text: the reason is the part that tells the reader whether to
+// get out of bed, but diagnostics can be 6000 chars of multi-line output.
+func slackFallbackReason(reason string) string {
+	const maxRunes = 140
+	reason = strings.Join(strings.Fields(reason), " ")
+	if runeLen(reason) > maxRunes {
+		return truncateRunes(reason, maxRunes-1) + "…"
+	}
+	return reason
+}
+
+// buildSlackMessage renders one event as a colour-striped Block Kit message
+// plus the required plain-text notification fallback. Layout is shared by all
+// event types — headline, then subject, then dim metadata — so the channel
+// reads consistently. It must never include tokens or secrets.
+func buildSlackMessage(ev slackEventRow, runCtx slackRunContext) slackMessage {
 	switch ev.EventType {
 	case taskRunEventAgentStarted:
 		return buildSlackAgentStarted(ev, runCtx)
@@ -547,16 +681,17 @@ func buildSlackMessage(ev slackEventRow, runCtx slackRunContext) ([]any, string)
 	}
 }
 
-func buildSlackAgentStarted(ev slackEventRow, runCtx slackRunContext) ([]any, string) {
+func buildSlackAgentStarted(ev slackEventRow, runCtx slackRunContext) slackMessage {
+	style := slackEventStyleFor(ev)
 	subject := slackIssueRef(runCtx)
 	if subject == "" {
 		subject = "task"
 	}
-	headline := ":hammer_and_wrench: *Agent started* — "
+	body := slackHeadline(style) + "\n"
 	if ev.TargetURL != "" {
-		headline += slackLink(ev.TargetURL, subject)
+		body += slackLink(ev.TargetURL, subject)
 	} else {
-		headline += slackEscape(subject)
+		body += slackEscape(subject)
 	}
 	var meta []string
 	if runCtx.Repo != "" {
@@ -571,18 +706,16 @@ func buildSlackAgentStarted(ev slackEventRow, runCtx slackRunContext) ([]any, st
 	if runCtx.ClawID != "" {
 		meta = append(meta, "claw `"+slackEscape(shortID(runCtx.ClawID))+"`")
 	}
-	blocks := []any{slackSectionBlock(headline)}
+	blocks := []any{slackSectionBlock(body)}
 	if len(meta) > 0 {
 		blocks = append(blocks, slackContextBlock([]string{strings.Join(meta, " · ")}))
 	}
-	fallback := "Agent started: " + subject
-	if runCtx.Repo != "" {
-		fallback += " (" + runCtx.Repo + ")"
-	}
-	return blocks, fallback
+	fallback := slackFallbackText(style, runCtx.Repo, subject)
+	return slackMessage{fallback: fallback, color: style.color, blocks: blocks}
 }
 
-func buildSlackPROpened(ev slackEventRow, runCtx slackRunContext) ([]any, string) {
+func buildSlackPROpened(ev slackEventRow, runCtx slackRunContext) slackMessage {
+	style := slackEventStyleFor(ev)
 	prURL := firstNonEmpty(ev.TargetURL, runCtx.PrimaryPRURL)
 	prLabel := ev.TargetLabel
 	if prLabel == "" {
@@ -597,9 +730,9 @@ func buildSlackPROpened(ev slackEventRow, runCtx slackRunContext) ([]any, string
 	if prLabel == "" {
 		prLabel = firstNonEmpty(prURL, "pull request")
 	}
-	headline := ":tada: *PR opened* — " + slackLink(prURL, prLabel)
+	body := slackHeadline(style) + "\n" + slackLink(prURL, prLabel)
 	if subject := slackIssueRef(runCtx); subject != "" {
-		headline += "\n" + slackEscape(subject)
+		body += "\n" + slackEscape(subject)
 	}
 	var meta []string
 	if owner := slackOwnerLabel(runCtx); owner != "" {
@@ -608,28 +741,32 @@ func buildSlackPROpened(ev slackEventRow, runCtx slackRunContext) ([]any, string
 	if runCtx.ClawID != "" {
 		meta = append(meta, "claw `"+slackEscape(shortID(runCtx.ClawID))+"`")
 	}
-	blocks := []any{slackSectionBlock(headline)}
+	blocks := []any{slackSectionBlock(body)}
 	if len(meta) > 0 {
 		blocks = append(blocks, slackContextBlock([]string{strings.Join(meta, " · ")}))
 	}
-	fallback := "PR opened: " + prLabel
-	if prURL != "" {
-		fallback += " " + prURL
-	}
-	return blocks, fallback
+	// The PR label (repo#number) fills the "where" slot: it already names the
+	// repo, so a separate repo part would only repeat it.
+	fallback := slackFallbackText(style, prLabel, slackIssueRef(runCtx))
+	return slackMessage{fallback: fallback, color: style.color, blocks: blocks}
 }
 
-func buildSlackFailure(ev slackEventRow, runCtx slackRunContext) ([]any, string) {
+func buildSlackFailure(ev slackEventRow, runCtx slackRunContext) slackMessage {
+	style := slackEventStyleFor(ev)
 	failureType := firstNonEmpty(ev.FailureType, ev.EventType)
 	reason := detailString(ev.Detail, "reason", "error")
-	headline := ":warning: *Run failed* — `" + slackEscape(failureType) + "`"
+	body := slackHeadline(style)
 	if subject := slackIssueRef(runCtx); subject != "" {
-		headline += "\n" + slackEscape(subject)
+		body += "\n" + slackEscape(subject)
 	}
+	blocks := []any{slackSectionBlock(body)}
+	// The reason gets its own section so long diagnostics never truncate the
+	// headline or subject, and each block clamps independently.
 	if reason != "" {
-		headline += "\n_" + slackEscape(reason) + "_"
+		blocks = append(blocks, slackSectionBlock(slackBlockquote(reason)))
 	}
-	var meta []string
+	// The raw type stays available as dim metadata for operators who grep.
+	meta := []string{"`" + slackEscape(failureType) + "`"}
 	if runCtx.Repo != "" {
 		meta = append(meta, "repo `"+slackEscape(runCtx.Repo)+"`")
 	}
@@ -639,15 +776,16 @@ func buildSlackFailure(ev slackEventRow, runCtx slackRunContext) ([]any, string)
 	if runCtx.ClawID != "" {
 		meta = append(meta, "claw `"+slackEscape(shortID(runCtx.ClawID))+"`")
 	}
-	blocks := []any{slackSectionBlock(headline)}
-	if len(meta) > 0 {
-		blocks = append(blocks, slackContextBlock([]string{strings.Join(meta, " · ")}))
-	}
-	fallback := "Run failed (" + failureType + ")"
-	if subject := slackIssueRef(runCtx); subject != "" {
-		fallback += ": " + subject
-	}
-	return blocks, fallback
+	blocks = append(blocks, slackContextBlock([]string{strings.Join(meta, " · ")}))
+	// Failure notifications keep the issue reference short (id when there is
+	// one) so the reason — the part that says how bad it is — fits before
+	// the lock screen truncates. The raw failure type is deliberately absent
+	// here: it duplicates the human title in machine form.
+	fallback := slackFallbackText(style,
+		runCtx.Repo,
+		firstNonEmpty(runCtx.IssueID, runCtx.IssueTitle),
+		slackFallbackReason(reason))
+	return slackMessage{fallback: fallback, color: style.color, blocks: blocks}
 }
 
 // ── Manual trigger endpoint ───────────────────────────────────────────────────
@@ -748,12 +886,10 @@ func (s *Server) handleSlackNotificationTest(w http.ResponseWriter, r *http.Requ
 		runCtx, ev = sampleSlackContext(body.EventType)
 	}
 
-	blocks, fallback := buildSlackMessage(ev, runCtx)
-	payload := map[string]any{
-		"channel": cfg.Channel,
-		"text":    fallback,
-		"blocks":  blocks,
-	}
+	msg := buildSlackMessage(ev, runCtx)
+	// The payload comes from the same builder postMessage uses, so dry_run
+	// returns exactly what a real send would post (attachment wrapper included).
+	payload := msg.payload(cfg.Channel, "")
 	if body.DryRun {
 		jsonOK(w, map[string]any{"dry_run": true, "payload": payload})
 		return
@@ -762,7 +898,7 @@ func (s *Server) handleSlackNotificationTest(w http.ResponseWriter, r *http.Requ
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
 	// Always post top-level: a test send must not create or reuse a run thread.
-	ts, err := s.newSlackClient(token).postMessage(ctx, cfg.Channel, "", blocks, fallback)
+	ts, err := s.newSlackClient(token).postMessage(ctx, cfg.Channel, "", msg)
 	if err != nil {
 		// Surface the Slack error verbatim so scope/channel problems are
 		// debuggable. Errors never contain the token.
