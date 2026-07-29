@@ -135,17 +135,34 @@ type Server struct {
 	nowFunc             func() time.Time
 	terminateVMOverride func(provider, id string) error // test seam for terminal cleanup
 
-	// The constructed notifier is cached so provider-internal state — notably
-	// the Slack send limiter, which paces chat.postMessage per channel — is
-	// shared by the lifecycle poller and the manual test endpoint instead of
-	// being rebuilt (and reset) on every use.
-	notifierCacheMu  sync.Mutex
-	notifierCache    notify.Notifier
-	notifierCacheKey string
+	// Constructed notifiers are cached per notifier name so instances are
+	// genuinely reused across features (the lifecycle poller, the manual test
+	// endpoint, future pipeline notify actions) instead of being rebuilt on
+	// every use. The map is bounded by the number of configured notifier
+	// names; each entry's key covers the config and a secret digest, so an
+	// edit or token rotation rebuilds that notifier on next use. Send pacing
+	// deliberately does NOT depend on this cache — the Slack provider keys
+	// its limiter on the destination channel process-wide — so a cache miss
+	// can never reset pacing.
+	notifierCacheMu sync.Mutex
+	notifierCache   map[string]cachedNotifier
 	// notifierSettingOverrides are merged into every notifier's settings at
 	// construction. Tests use it to point a provider at an httptest server
 	// (api_base) and to collapse send pacing (min_send_interval).
 	notifierSettingOverrides map[string]any
+
+	// lifecycleTransientFailures counts consecutive transient send failures
+	// per delivery key so one permanently-undeliverable message cannot block
+	// the lifecycle notifier forever (see handleLifecycleSendError). Only
+	// touched from the lifecycle tick goroutine — ticks never overlap.
+	lifecycleTransientFailures map[string]int
+}
+
+// cachedNotifier is one constructed notifier plus the config/secret digest it
+// was built from.
+type cachedNotifier struct {
+	key      string
+	notifier notify.Notifier
 }
 
 func (s *Server) modelAuthTokenForClaw(clawID string) string {

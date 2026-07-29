@@ -6,11 +6,13 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/elasticclaw/elasticclaw/pkg/config"
+	"github.com/elasticclaw/elasticclaw/pkg/hub/notify"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 )
 
@@ -121,6 +123,9 @@ func (s *Server) runDoctorChecks(ctx context.Context) DoctorResponse {
 
 	// --- Auth ---
 	checks = append(checks, s.checkAuth(hubCfg)...)
+
+	// --- Notifications ---
+	checks = append(checks, s.checkNotifications(hubCfg)...)
 
 	// --- Hub Settings ---
 	checks = append(checks, s.checkHubSettings(hubCfg)...)
@@ -1202,6 +1207,77 @@ func (s *Server) checkAuth(cfg *types.HubConfig) []DoctorCheck {
 }
 
 // ==================== HUB SETTINGS CHECKS ====================
+
+// ==================== NOTIFICATION CHECKS ====================
+
+// checkNotifications validates the notifications config the way delivery
+// would: structural invariants first, then each named notifier is actually
+// constructed through the provider registry, which validates the type, the
+// provider settings and resolves the token secret. Without this the only
+// signal for a broken notifier is a single log line from the poller.
+func (s *Server) checkNotifications(cfg *types.HubConfig) []DoctorCheck {
+	nCfg := cfg.Notifications
+	if nCfg == nil {
+		// Feature absent — nothing to report.
+		return nil
+	}
+	var checks []DoctorCheck
+	if err := types.ValidateNotificationsConfig(nCfg); err != nil {
+		checks = append(checks, DoctorCheck{
+			Category:    "notifications",
+			Severity:    "critical",
+			Title:       "Notifications config invalid",
+			Description: "No notifications will be delivered until this is fixed in hub.yaml.",
+			OK:          false,
+			Error:       err.Error(),
+		})
+		return checks
+	}
+
+	secrets := func(name string) (string, bool) {
+		v, ok := cfg.Secrets[name]
+		return v, ok
+	}
+	names := make([]string, 0, len(nCfg.Notifiers))
+	for name := range nCfg.Notifiers {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		nc := nCfg.Notifiers[name]
+		if !notify.Supported(nc.Type) {
+			checks = append(checks, DoctorCheck{
+				Category:    "notifications",
+				Severity:    "critical",
+				Title:       fmt.Sprintf("Notifier %q has unsupported type %q", name, nc.Type),
+				Description: "Messages routed through this notifier will never be delivered.",
+				OK:          false,
+			})
+			continue
+		}
+		// Constructing the notifier runs the provider's own config checks and
+		// resolves its secrets — exactly what a real send does first.
+		if _, err := notify.New(nc.Type, s.notifierSettings(nc), secrets); err != nil {
+			checks = append(checks, DoctorCheck{
+				Category:    "notifications",
+				Severity:    "critical",
+				Title:       fmt.Sprintf("Notifier %q is misconfigured", name),
+				Description: "Messages routed through this notifier will never be delivered.",
+				OK:          false,
+				Error:       err.Error(),
+			})
+			continue
+		}
+		checks = append(checks, DoctorCheck{
+			Category:    "notifications",
+			Severity:    "info",
+			Title:       fmt.Sprintf("Notifier %q is configured", name),
+			Description: fmt.Sprintf("Type %s constructed successfully with its secrets resolved.", nc.Type),
+			OK:          true,
+		})
+	}
+	return checks
+}
 
 func (s *Server) checkHubSettings(cfg *types.HubConfig) []DoctorCheck {
 	var checks []DoctorCheck

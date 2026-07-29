@@ -108,25 +108,29 @@ func (s *Server) hubSecretResolver() notify.SecretResolver {
 }
 
 // notifierFor builds (or reuses) the Notifier for the named notifier config.
-// The instance is cached across ticks so provider-internal pacing state (the
-// Slack send limiter) is shared by the lifecycle poller and the manual test
-// endpoint; the cache key covers the config and a digest of the resolved
-// secrets, so editing the config or rotating a token rebuilds the notifier
-// on the next use.
+// Instances are cached per notifier name across ticks so every feature using
+// the same named notifier shares one instance; each entry's key covers the
+// config and a digest of the resolved secrets, so editing the config or
+// rotating a token rebuilds that notifier on the next use. Reuse is an
+// efficiency, never a correctness requirement: providers must keep pacing
+// state outside the instance (the Slack limiter is keyed process-wide by
+// channel), so a rebuild can never reset it.
 func (s *Server) notifierFor(name string, nc types.NotifierConfig, secrets notify.SecretResolver) (notify.Notifier, error) {
 	settings := s.notifierSettings(nc)
 	key := notifierCacheKey(name, types.NotifierConfig{Type: nc.Type, Settings: settings}, secrets)
 	s.notifierCacheMu.Lock()
 	defer s.notifierCacheMu.Unlock()
-	if s.notifierCache != nil && s.notifierCacheKey == key {
-		return s.notifierCache, nil
+	if c, ok := s.notifierCache[name]; ok && c.key == key {
+		return c.notifier, nil
 	}
 	n, err := notify.New(nc.Type, settings, secrets)
 	if err != nil {
 		return nil, err
 	}
-	s.notifierCache = n
-	s.notifierCacheKey = key
+	if s.notifierCache == nil {
+		s.notifierCache = make(map[string]cachedNotifier)
+	}
+	s.notifierCache[name] = cachedNotifier{key: key, notifier: n}
 	return n, nil
 }
 
@@ -159,13 +163,19 @@ func notifierCacheKey(name string, nc types.NotifierConfig, secrets notify.Secre
 	return key
 }
 
-// notifierDestination is the notifier's default destination setting, used
-// only as thread-root bookkeeping: a thread root recorded for one
-// destination must not be reused after the operator points the notifier at
-// another. Providers without a channel setting return "" and always match.
-func notifierDestination(nc types.NotifierConfig) string {
-	dest, _ := nc.Settings["channel"].(string)
-	return dest
+// notifierDestination is the provider-reported destination of a constructed
+// notifier, used only as thread-root bookkeeping: a thread root recorded for
+// one destination must not be reused after the operator points the notifier
+// at another. Asking the instance (rather than reading a provider-specific
+// settings key) keeps the hub ignorant of provider config shapes and reflects
+// exactly what the notifier was built with, overrides included. A provider
+// that cannot name its destination yields "", which callers treat as unknown
+// — threading is skipped entirely — never as a match-everything wildcard.
+func notifierDestination(n notify.Notifier) string {
+	if d, ok := n.(notify.DestinationReporter); ok {
+		return d.Destination()
+	}
+	return ""
 }
 
 // enabledLifecycleEventTypes maps the config toggles onto concrete event
@@ -287,7 +297,7 @@ func (s *Server) lifecycleNotifierTick() {
 	s.clearPollWarning("notify-config")
 	s.clearPollWarning("notify-notifier")
 
-	d := lifecycleDelivery{notifier: notifier, lc: lc, destination: notifierDestination(nc)}
+	d := lifecycleDelivery{notifier: notifier, lc: lc, destination: notifierDestination(notifier)}
 	// Two independent event sources share the notifier, dedupe table and
 	// thread table: task-run events for claws that belong to a task run, and
 	// the claw pass for ad-hoc claws (task_run_id=''). See
@@ -354,11 +364,23 @@ func (s *Server) lifecycleTaskRunPass(d lifecycleDelivery) {
 	}
 }
 
+// lifecycleMaxTransientFailures bounds consecutive transient failures for
+// one delivery key. Unclassified errors default to transient, so a
+// permanently-undeliverable message that a provider failed to classify would
+// otherwise be re-sent every tick forever, blocking every notification behind
+// it. At the default 5s poll interval the cap allows ~5 minutes of retries —
+// enough to ride out real outages of that order, after which the one message
+// is recorded failed and delivery moves on (a longer outage burns at most one
+// event per cap window, never the backlog).
+const lifecycleMaxTransientFailures = 60
+
 // handleLifecycleSendError applies the shared send-failure policy: config
 // errors pause everything (log-once), permanent errors are recorded as
 // failed under deliveryKey (and count as handled), transient errors stop the
-// pass for this tick. Returns handled=true when the caller may move past the
-// event; stop is informational for symmetry.
+// pass for this tick — until the same delivery key has failed
+// lifecycleMaxTransientFailures times in a row, at which point it is recorded
+// failed so it cannot wedge the cursor forever. Returns handled=true when the
+// caller may move past the event; stop is informational for symmetry.
 func (s *Server) handleLifecycleSendError(err error, what, deliveryKey, runKey string) (handled, stop bool) {
 	switch notify.Classify(err) {
 	case notify.ErrorConfig:
@@ -373,6 +395,16 @@ func (s *Server) handleLifecycleSendError(err error, what, deliveryKey, runKey s
 		s.recordNotificationDelivery(deliveryKey, runKey, "", notificationDeliveryStatusFailed)
 		return true, false
 	default:
+		if s.lifecycleTransientFailures == nil {
+			s.lifecycleTransientFailures = make(map[string]int)
+		}
+		s.lifecycleTransientFailures[deliveryKey]++
+		if count := s.lifecycleTransientFailures[deliveryKey]; count >= lifecycleMaxTransientFailures {
+			delete(s.lifecycleTransientFailures, deliveryKey)
+			log.Printf("[notify] giving up on %s after %d consecutive transient failures: %v", what, count, err)
+			s.recordNotificationDelivery(deliveryKey, runKey, "", notificationDeliveryStatusFailed)
+			return true, false
+		}
 		// Transient: leave the event (and the cursor) for the next tick.
 		log.Printf("[notify] transient failure for %s, will retry: %v", what, err)
 		return false, true
@@ -418,25 +450,24 @@ func (s *Server) sendLifecycleEvent(d lifecycleDelivery, ev lifecycleEventRow) e
 // keys ("claw:<id>", "claw:<id>:<kind>") so the two sources share the thread
 // and dedupe tables without ever colliding.
 //
-// Threading is provider-specific and the Notifier interface has no thread
-// concept: the thread root travels in Options["thread_ts"], which providers
-// without threading ignore, and the handle Send returns records the root. A
-// provider that returns no handle simply never threads.
+// Threading rides in Message.Thread — the opaque handle a provider returned
+// from an earlier Send — so the hub never names any provider's wire field
+// (Slack maps it onto thread_ts; providers without threading ignore it).
+// Roots are only recorded and reused when the notifier reports a destination:
+// an unknown destination ("") must not match anything, or a repointed
+// notifier would reply into threads that do not exist at the new destination.
 func (s *Server) postLifecycleEvent(d lifecycleDelivery, ev lifecycleEventRow, runCtx lifecycleRunContext, threadKey, deliveryKey, tenantID string) error {
 	msg := buildLifecycleMessage(ev, runCtx)
 
-	threadTS := ""
+	threading := lifecycleThreadByRun(d.lc) && d.destination != ""
 	haveRoot := false
-	if lifecycleThreadByRun(d.lc) {
+	if threading {
 		var rootDest, rootTS string
 		err := s.db.QueryRow(`SELECT channel, thread_ts FROM slack_run_threads WHERE run_id=?`, threadKey).Scan(&rootDest, &rootTS)
 		if err == nil && rootDest == d.destination {
-			threadTS = rootTS
+			msg.Thread = rootTS
 			haveRoot = true
 		}
-	}
-	if threadTS != "" {
-		msg.Options = map[string]any{"thread_ts": threadTS}
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -447,7 +478,7 @@ func (s *Server) postLifecycleEvent(d lifecycleDelivery, ev lifecycleEventRow, r
 	}
 	// The first message for a thread key becomes the thread root — whatever
 	// event it is (e.g. pr_opened when agent_started is disabled).
-	if lifecycleThreadByRun(d.lc) && !haveRoot && handle != "" {
+	if threading && !haveRoot && handle != "" {
 		_, dbErr := s.db.Exec(`
 			INSERT INTO slack_run_threads(run_id, tenant_id, channel, thread_ts, created_at)
 			VALUES(?,?,?,?,?)
@@ -458,6 +489,8 @@ func (s *Server) postLifecycleEvent(d lifecycleDelivery, ev lifecycleEventRow, r
 		}
 	}
 	s.recordNotificationDelivery(deliveryKey, threadKey, handle, notificationDeliveryStatusSent)
+	// A success ends any transient-failure streak for this delivery.
+	delete(s.lifecycleTransientFailures, deliveryKey)
 	return nil
 }
 
@@ -903,14 +936,16 @@ func (s *Server) handleNotificationTest(w http.ResponseWriter, r *http.Request) 
 		// may be iterating on formatting before wiring credentials), so
 		// unresolvable secrets fall back to a placeholder. The payload never
 		// contains the secret, so the preview is unaffected. The throwaway
-		// notifier instance is deliberately not cached.
+		// notifier instance is deliberately not cached, but it is built from
+		// s.notifierSettings(nc) — the exact settings a real send uses — so
+		// the preview can never diverge from what a real send would post.
 		dryResolver := func(name string) (string, bool) {
 			if v, ok := secrets(name); ok && v != "" {
 				return v, true
 			}
 			return "dry-run-placeholder", true
 		}
-		n, err := notify.New(nc.Type, nc.Settings, dryResolver)
+		n, err := notify.New(nc.Type, s.notifierSettings(nc), dryResolver)
 		if err != nil {
 			jsonError(w, http.StatusBadRequest, "notifier "+strconv.Quote(via)+" invalid: "+err.Error())
 			return

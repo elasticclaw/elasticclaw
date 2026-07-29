@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -69,7 +70,7 @@ func testLifecycleDelivery(t *testing.T, s *Server) lifecycleDelivery {
 	if err != nil {
 		t.Fatalf("build notifier: %v", err)
 	}
-	return lifecycleDelivery{notifier: notifier, lc: cfg.Lifecycle, destination: notifierDestination(nc)}
+	return lifecycleDelivery{notifier: notifier, lc: cfg.Lifecycle, destination: notifierDestination(notifier)}
 }
 
 func insertSlackTestEvent(t *testing.T, db *sql.DB, id, runID, eventType string, observedAt int64, targetURL, failureType, detail string) {
@@ -854,4 +855,202 @@ func renderSlackParts(t *testing.T, renderer notify.PayloadRenderer, msg notify.
 	}
 	a := decoded.Attachments[0]
 	return a.Blocks, a.Color, a.Fallback
+}
+
+// Regression: the notifier cache must hold one instance per notifier name.
+// The old single-slot cache thrashed as soon as two features alternated
+// between two named notifiers — every call rebuilt the instance, and any
+// instance-local provider state was reset on each rebuild.
+func TestNotifierCacheHoldsOneInstancePerName(t *testing.T) {
+	fake := newFakeSlackServer(t)
+	cfg := &types.HubConfig{
+		Token:   "test-token",
+		Secrets: map[string]string{testNotifierToken: "xoxb-test-token"},
+		Notifications: &types.NotificationsConfig{
+			Notifiers: map[string]types.NotifierConfig{
+				"notifier-a": {Type: "slack", Settings: map[string]any{
+					"token_secret": testNotifierToken, "channel": "C0000AAAA",
+				}},
+				"notifier-b": {Type: "slack", Settings: map[string]any{
+					"token_secret": testNotifierToken, "channel": "C0000BBBB",
+				}},
+			},
+			Lifecycle: &types.LifecycleNotificationsConfig{Via: "notifier-a"},
+		},
+	}
+	s, _ := NewTestServerWithConfig(t, cfg, "", "", "")
+	s.notifierSettingOverrides = map[string]any{
+		"api_base":          fake.server.URL,
+		"min_send_interval": time.Nanosecond.String(),
+	}
+
+	secrets := s.hubSecretResolver()
+	get := func(name string) notify.Notifier {
+		t.Helper()
+		nc := s.notificationsConfig().Notifiers[name]
+		n, err := s.notifierFor(name, nc, secrets)
+		if err != nil {
+			t.Fatalf("notifierFor(%s): %v", name, err)
+		}
+		return n
+	}
+
+	a1, b1 := get("notifier-a"), get("notifier-b")
+	a2, b2 := get("notifier-a"), get("notifier-b")
+	if a1 != a2 {
+		t.Fatal("alternating between two notifiers rebuilt notifier-a instead of reusing the cached instance")
+	}
+	if b1 != b2 {
+		t.Fatal("alternating between two notifiers rebuilt notifier-b instead of reusing the cached instance")
+	}
+	if a1 == b1 {
+		t.Fatal("distinct notifier names returned the same instance")
+	}
+}
+
+// Regression: the dry-run preview and the real send must be built from the
+// SAME settings. Before the fix the dry-run notifier was constructed from the
+// raw config settings while the real send used the merged (override-applied)
+// settings, so the preview could report a different destination than the one
+// actually posted to.
+func TestSlackTestEndpointDryRunMatchesRealSend(t *testing.T) {
+	fake := newFakeSlackServer(t)
+	s, _ := newSlackNotifierTestServer(t, fake.server.URL, nil)
+	// Divergence probe: an override changes the effective channel away from
+	// the configured one. Both paths must see it.
+	s.notifierSettingOverrides["channel"] = "C9OVERRIDE"
+
+	dry := postSlackTest(t, s, `{"event_type":"agent_started","dry_run":true}`)
+	if dry.Code != http.StatusOK {
+		t.Fatalf("dry run status = %d, body = %s", dry.Code, dry.Body.String())
+	}
+	var dryResp struct {
+		Payload json.RawMessage `json:"payload"`
+	}
+	if err := json.Unmarshal(dry.Body.Bytes(), &dryResp); err != nil {
+		t.Fatalf("decode dry-run response: %v", err)
+	}
+	var dryPayload struct {
+		Channel string `json:"channel"`
+	}
+	if err := json.Unmarshal(dryResp.Payload, &dryPayload); err != nil {
+		t.Fatalf("decode dry-run payload: %v", err)
+	}
+	if dryPayload.Channel != "C9OVERRIDE" {
+		t.Fatalf("dry-run payload channel = %q, want the effective channel C9OVERRIDE", dryPayload.Channel)
+	}
+
+	real := postSlackTest(t, s, `{"event_type":"agent_started"}`)
+	if real.Code != http.StatusOK {
+		t.Fatalf("real send status = %d, body = %s", real.Code, real.Body.String())
+	}
+	var realResp struct {
+		Payload json.RawMessage `json:"payload"`
+	}
+	if err := json.Unmarshal(real.Body.Bytes(), &realResp); err != nil {
+		t.Fatalf("decode real-send response: %v", err)
+	}
+	if string(dryResp.Payload) != string(realResp.Payload) {
+		t.Fatalf("dry-run payload differs from the real send payload:\n dry:  %s\n real: %s", dryResp.Payload, realResp.Payload)
+	}
+	if fake.count() != 1 {
+		t.Fatalf("expected exactly one Slack call, got %d", fake.count())
+	}
+	if got := fake.request(0).Channel; got != "C9OVERRIDE" {
+		t.Fatalf("real send posted to %q, want C9OVERRIDE", got)
+	}
+}
+
+// Regression: a message that keeps failing with an unclassified (therefore
+// transient) error must not wedge the cursor forever — after the cap it is
+// recorded failed and everything behind it flows again.
+func TestSlackNotifierTransientFailureCapUnwedgesCursor(t *testing.T) {
+	fake := newFakeSlackServer(t)
+	broken := true
+	fake.setRespond(func(n int, w http.ResponseWriter) {
+		if broken {
+			http.Error(w, "upstream hiccup", http.StatusInternalServerError)
+			return
+		}
+		fmt.Fprintf(w, `{"ok":true,"ts":"4000.%06d"}`, n)
+	})
+	s, db := newSlackNotifierTestServer(t, fake.server.URL, nil)
+
+	base := int64(1760000000000)
+	insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{
+		RunID: "run-1", AttemptID: "attempt-run-1", ClawID: "claw-1", TenantID: "test-tenant-id", OwnerType: taskRunOwnerFactory,
+		Factory: "bugfix", StartedAt: base - 1000,
+	})
+	insertSlackTestEvent(t, db, "ev-poison", "run-1", taskRunEventAgentStarted, base+10, "", "", "")
+	insertSlackTestEvent(t, db, "ev-behind", "run-1", taskRunEventAgentStarted, base+20, "", "", "")
+	setSlackWatermark(t, s, 0)
+
+	for i := 0; i < lifecycleMaxTransientFailures-1; i++ {
+		s.lifecycleNotifierTick()
+	}
+	if _, delivered := slackDeliveryStatus(t, db, "ev-poison"); delivered {
+		t.Fatal("event was recorded before the transient-failure cap was reached")
+	}
+
+	// The cap-th consecutive failure records the event failed and unblocks
+	// the queue behind it.
+	s.lifecycleNotifierTick()
+	if status, ok := slackDeliveryStatus(t, db, "ev-poison"); !ok || status != notificationDeliveryStatusFailed {
+		t.Fatalf("poisoned delivery status = %q, %v; want failed after %d consecutive transient failures", status, ok, lifecycleMaxTransientFailures)
+	}
+
+	broken = false
+	s.lifecycleNotifierTick()
+	if status, ok := slackDeliveryStatus(t, db, "ev-behind"); !ok || status != notificationDeliveryStatusSent {
+		t.Fatalf("event behind the poisoned one was not delivered: status = %q, %v", status, ok)
+	}
+}
+
+// stubNotifier is a minimal provider without DestinationReporter: it returns
+// handles (so it LOOKS threadable to the old handle-based inference) but
+// cannot name its destination.
+type stubNotifier struct{ sends int }
+
+func (s *stubNotifier) Send(ctx context.Context, msg notify.Message) (string, error) {
+	s.sends++
+	if msg.Thread != "" {
+		return "", fmt.Errorf("stub provider does not thread, got thread %q", msg.Thread)
+	}
+	return fmt.Sprintf("handle-%d", s.sends), nil
+}
+
+// Regression: an unknown destination ("" — the provider does not implement
+// DestinationReporter) must disable thread bookkeeping entirely, not act as a
+// match-everything wildcard. Before the fix the root row was recorded with
+// channel=” and every later event matched it, replying into threads that may
+// not exist wherever the notifier now points.
+func TestLifecycleUnknownDestinationDisablesThreading(t *testing.T) {
+	fake := newFakeSlackServer(t)
+	s, db := newSlackNotifierTestServer(t, fake.server.URL, nil)
+
+	stub := &stubNotifier{}
+	if got := notifierDestination(stub); got != "" {
+		t.Fatalf("notifierDestination(stub) = %q, want empty", got)
+	}
+	d := lifecycleDelivery{notifier: stub, lc: s.notificationsConfig().Lifecycle, destination: notifierDestination(stub)}
+
+	base := int64(1760000000000)
+	insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{
+		RunID: "run-1", AttemptID: "attempt-run-1", ClawID: "claw-1", TenantID: "test-tenant-id", OwnerType: taskRunOwnerFactory,
+		Factory: "bugfix", StartedAt: base - 1000,
+	})
+	ev := lifecycleEventRow{ID: "ev-1", RunID: "run-1", EventType: taskRunEventAgentStarted}
+	if err := s.postLifecycleEvent(d, ev, s.lifecycleRunContextFor("run-1"), "run-1", "ev-1", "test-tenant-id"); err != nil {
+		t.Fatalf("first post: %v", err)
+	}
+	// The second event must post top-level (the stub errors on any Thread) and
+	// no root row may be recorded for the unknown destination.
+	ev2 := lifecycleEventRow{ID: "ev-2", RunID: "run-1", EventType: taskRunEventPROpened}
+	if err := s.postLifecycleEvent(d, ev2, s.lifecycleRunContextFor("run-1"), "run-1", "ev-2", "test-tenant-id"); err != nil {
+		t.Fatalf("second post: %v", err)
+	}
+	var n int
+	if err := db.QueryRow(`SELECT COUNT(1) FROM slack_run_threads`).Scan(&n); err != nil || n != 0 {
+		t.Fatalf("unknown destination recorded %d thread roots (err %v), want 0", n, err)
+	}
 }

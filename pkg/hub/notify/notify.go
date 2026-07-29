@@ -46,27 +46,39 @@ type Link struct {
 
 // Message is the provider-agnostic notification payload.
 //
-// It has two tiers. The plain tier (Text, Subject, Target, Options) is the
-// lowest common denominator: when Title is empty, providers send Text as a
-// plain message — this is what template-rendered pipeline notify actions
-// supply. The semantic tier (Title and friends) describes the notification's
-// meaning — headline, severity, subject, detail, metadata — so each provider
-// renders it natively (Slack: Block Kit with a colour stripe; an email or
-// Teams provider could build its own layout) instead of receiving
-// pre-flattened text.
+// It has two tiers. The plain tier is a Message that sets nothing beyond
+// Text, Target, Thread and Options: providers send Text as a plain message —
+// this is what a template-rendered pipeline notify action supplies when it
+// renders only a body. Setting any semantic field (Title, Subject, Emoji,
+// Severity, Body, Fields, Link, Summary) opts the message into rich
+// rendering: those fields describe the notification's meaning — headline,
+// severity, subject, detail, metadata — so each provider renders every one of
+// them natively (Slack: Block Kit with a colour stripe; an email or Teams
+// provider could build its own layout) instead of receiving pre-flattened
+// text. Providers must never silently drop a populated semantic field; when
+// Title is empty, Text takes its place as the message's leading line.
 type Message struct {
-	// Text is the plain-text body. When Title is empty it is the whole
-	// message; when Title is set providers may ignore it.
+	// Text is the plain-text body. When no semantic field is set it is the
+	// whole message; when Title is set providers may ignore it; when other
+	// semantic fields are set but Title is empty it renders as the leading
+	// line of the rich layout.
 	Text string
+	// Target overrides the notifier's default destination (channel, address).
+	Target string
+	// Thread is the opaque handle (as returned by an earlier Send) of the
+	// message this one is a reply to. Providers that support threading map it
+	// onto their native mechanism (Slack: thread_ts); providers without
+	// threading ignore it and post top-level.
+	Thread string
+	// Options is a provider-specific passthrough for anything the fields
+	// above do not model. Providers ignore keys they do not understand, and
+	// Options can never override the core payload fields a provider computes
+	// itself.
+	Options map[string]any
+
 	// Subject names what the message is about ("ENG-42 — Fix login bug").
 	// Providers with a native subject line (email) can use it there.
 	Subject string
-	// Target overrides the notifier's default destination (channel, address).
-	Target string
-	// Options is a provider-specific passthrough (e.g. Slack thread_ts).
-	// Providers ignore keys they do not understand, and Options can never
-	// override the core payload fields a provider computes itself.
-	Options map[string]any
 
 	// Title is the human headline ("Agent crashed during startup"). Setting
 	// it opts the message into rich rendering.
@@ -89,17 +101,33 @@ type Message struct {
 	Summary []string
 }
 
+// Semantic reports whether any semantic-tier field is set, i.e. whether the
+// message opted into rich rendering. Providers use it to pick the rendering
+// tier so a populated semantic field is never silently dropped.
+func (m Message) Semantic() bool {
+	return m.Title != "" || m.Subject != "" || m.Emoji != "" || m.Severity != "" ||
+		m.Body != "" || len(m.Fields) > 0 || m.Link != (Link{}) || len(m.Summary) > 0
+}
+
 // Notifier sends messages to one configured destination.
 //
 // Send returns an opaque provider-specific handle for the delivered message
 // (Slack: the message ts), or "" for providers without message handles. The
-// handle exists so a caller can relate follow-up messages to an earlier one
-// through provider Options (e.g. Slack threading via Options["thread_ts"]);
-// the interface itself carries no thread concept because most transports
-// (email, webhooks) have none. A provider without threading returns "" and
-// ignores unknown Options, degrading gracefully.
+// handle exists so a caller can relate a follow-up message to an earlier one
+// by placing the earlier handle in Message.Thread; a provider without
+// threading returns "" and ignores Thread, degrading gracefully.
 type Notifier interface {
 	Send(ctx context.Context, msg Message) (handle string, err error)
+}
+
+// DestinationReporter is implemented by providers that can name their
+// configured default destination (Slack: the channel ID). Callers use it only
+// as opaque bookkeeping — e.g. thread roots recorded for one destination must
+// stop matching after the operator repoints the notifier elsewhere. Callers
+// must treat a provider without this interface (or an empty string) as an
+// unknown destination, never as a match-everything wildcard.
+type DestinationReporter interface {
+	Destination() string
 }
 
 // PayloadRenderer is implemented by providers that can render the exact wire
@@ -133,8 +161,12 @@ const (
 	ErrorConfig
 )
 
-// classifiedError is implemented by provider errors that know their class.
-type classifiedError interface {
+// ClassifiedError is implemented by provider errors that know their class.
+// Providers should classify every failure they can recognize — either by
+// implementing this interface on their own error types or by wrapping with
+// ConfigError/PermanentError/TransientError — because unclassified errors
+// default to transient and callers will retry them indefinitely.
+type ClassifiedError interface {
 	NotifyErrorClass() ErrorClass
 }
 
@@ -142,11 +174,49 @@ type classifiedError interface {
 // classification are treated as transient, the safe default: they are
 // retried instead of being dropped.
 func Classify(err error) ErrorClass {
-	var ce classifiedError
+	var ce ClassifiedError
 	if errors.As(err, &ce) {
 		return ce.NotifyErrorClass()
 	}
 	return ErrorTransient
+}
+
+// classedError attaches an ErrorClass to an arbitrary error.
+type classedError struct {
+	err   error
+	class ErrorClass
+}
+
+func (e *classedError) Error() string                { return e.err.Error() }
+func (e *classedError) Unwrap() error                { return e.err }
+func (e *classedError) NotifyErrorClass() ErrorClass { return e.class }
+
+// ConfigError marks err as a notifier-configuration failure: every message
+// fails alike until the operator fixes the config, so callers pause delivery.
+func ConfigError(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &classedError{err: err, class: ErrorConfig}
+}
+
+// PermanentError marks err as specific to this message and unrecoverable by
+// retry (malformed or oversized payload): callers record it and move on.
+func PermanentError(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &classedError{err: err, class: ErrorPermanent}
+}
+
+// TransientError marks err as retryable (network blip, rate limit, 5xx).
+// Unclassified errors already default to transient; the wrapper exists so a
+// provider can be explicit about it.
+func TransientError(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &classedError{err: err, class: ErrorTransient}
 }
 
 // provider bundles a constructor with the metadata the doctor needs to

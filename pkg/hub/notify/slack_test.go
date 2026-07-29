@@ -204,20 +204,85 @@ func TestSlackSendTargetOverridesChannel(t *testing.T) {
 	}
 }
 
-// Threading rides through Options; a provider without threads can ignore it.
-func TestSlackSendThreadsViaOptions(t *testing.T) {
+// Threading rides through Message.Thread — the opaque handle returned by an
+// earlier Send — so callers never have to know a provider's wire key. A
+// provider without threads can ignore the field.
+func TestSlackSendThreadsViaThreadHandle(t *testing.T) {
 	fake := newFakeSlack(t)
 	n := newTestSlack(t, fake.server.URL, nil)
 
 	_, err := n.Send(context.Background(), Message{
-		Text:    "reply",
-		Options: map[string]any{"thread_ts": "1717.42"},
+		Text:   "reply",
+		Thread: "1717.42",
 	})
 	if err != nil {
 		t.Fatalf("Send() error = %v", err)
 	}
 	if got := fake.request(0).ThreadTS; got != "1717.42" {
 		t.Fatalf("thread_ts = %q, want 1717.42", got)
+	}
+}
+
+// Regression: the thread handle must not consume or clobber caller Options —
+// before the fix the hub replaced Options wholesale to smuggle thread_ts in,
+// so a threaded message silently lost every provider option it carried.
+func TestSlackThreadHandleCoexistsWithOptions(t *testing.T) {
+	fake := newFakeSlack(t)
+	n := newTestSlack(t, fake.server.URL, nil)
+	renderer := n.(PayloadRenderer)
+
+	payload, err := renderer.RenderPayload(Message{
+		Text:    "reply",
+		Thread:  "1717.42",
+		Options: map[string]any{"unfurl_links": false, "thread_ts": "9999.99"},
+	})
+	if err != nil {
+		t.Fatalf("RenderPayload() error = %v", err)
+	}
+	if got := payload["thread_ts"]; got != "1717.42" {
+		t.Fatalf("thread_ts = %v, want the Thread handle to win over the Options passthrough", got)
+	}
+	if got, ok := payload["unfurl_links"].(bool); !ok || got {
+		t.Fatalf("unfurl_links = %v, want the caller option preserved alongside threading", payload["unfurl_links"])
+	}
+}
+
+// Regression: pacing must survive notifier reconstruction and be shared by
+// every instance posting to the same channel. Before the fix the limiter was
+// a field of the instance, so a rebuilt (or second) notifier started from a
+// zero limiter and its first send never waited.
+func TestSlackPacingSharedAcrossInstances(t *testing.T) {
+	fake := newFakeSlack(t)
+	const interval = 150 * time.Millisecond
+	n1 := newTestSlack(t, fake.server.URL, map[string]any{"min_send_interval": interval.String()})
+	n2 := newTestSlack(t, fake.server.URL, map[string]any{"min_send_interval": interval.String()})
+
+	start := time.Now()
+	if _, err := n1.Send(context.Background(), Message{Text: "first"}); err != nil {
+		t.Fatalf("first Send() error = %v", err)
+	}
+	if _, err := n2.Send(context.Background(), Message{Text: "second"}); err != nil {
+		t.Fatalf("second Send() error = %v", err)
+	}
+	if elapsed := time.Since(start); elapsed < interval {
+		t.Fatalf("two sends to the same channel through separate instances completed in %v, want >= %v (per-channel pacing lost)", elapsed, interval)
+	}
+	if fake.count() != 2 {
+		t.Fatalf("sent %d requests, want 2", fake.count())
+	}
+}
+
+// The provider names its configured destination so callers can key their
+// bookkeeping (thread roots) on it without reading provider settings.
+func TestSlackReportsDestination(t *testing.T) {
+	fake := newFakeSlack(t)
+	n := newTestSlack(t, fake.server.URL, nil)
+	d, ok := n.(DestinationReporter)
+	if !ok {
+		t.Fatal("slack notifier must implement DestinationReporter")
+	}
+	if got := d.Destination(); got != "C123" {
+		t.Fatalf("Destination() = %q, want C123", got)
 	}
 }
 
@@ -310,6 +375,80 @@ func TestSlackErrorClassification(t *testing.T) {
 		if got := Classify(err); got != ErrorTransient {
 			t.Errorf("Classify(%v) = %v, want ErrorTransient", err, got)
 		}
+	}
+}
+
+// The classification contract is exported so a new provider can classify its
+// errors without reimplementing the interface: the wrapper constructors carry
+// the class through error chains.
+func TestExportedErrorClassification(t *testing.T) {
+	base := errors.New("boom")
+	if got := Classify(ConfigError(base)); got != ErrorConfig {
+		t.Errorf("Classify(ConfigError) = %v, want ErrorConfig", got)
+	}
+	if got := Classify(PermanentError(base)); got != ErrorPermanent {
+		t.Errorf("Classify(PermanentError) = %v, want ErrorPermanent", got)
+	}
+	if got := Classify(TransientError(base)); got != ErrorTransient {
+		t.Errorf("Classify(TransientError) = %v, want ErrorTransient", got)
+	}
+	// The class survives wrapping, and the original error stays reachable.
+	wrapped := fmt.Errorf("send failed: %w", PermanentError(base))
+	if got := Classify(wrapped); got != ErrorPermanent {
+		t.Errorf("Classify(wrapped PermanentError) = %v, want ErrorPermanent", got)
+	}
+	if !errors.Is(wrapped, base) {
+		t.Error("wrapped classified error lost its cause")
+	}
+	if ConfigError(nil) != nil || PermanentError(nil) != nil || TransientError(nil) != nil {
+		t.Error("classification wrappers must pass nil through")
+	}
+}
+
+// Regression: a Title-less message that still sets semantic fields (severity,
+// link, body, metadata — the pipeline notify action's natural shape) must
+// render richly, not silently collapse to bare channel+text dropping every
+// other field.
+func TestSlackTextOnlyWithSemanticFieldsRendersRich(t *testing.T) {
+	fake := newFakeSlack(t)
+	n := newTestSlack(t, fake.server.URL, nil)
+
+	if _, err := n.Send(context.Background(), Message{
+		Text:     "pipeline stage 'deploy' failed",
+		Severity: SeverityError,
+		Emoji:    ":boom:",
+		Body:     "exit status 1",
+		Fields:   []Field{{Label: "repo", Value: "acme/app", Code: true}},
+		Link:     Link{URL: "https://ci.example/1", Label: "run #1"},
+	}); err != nil {
+		t.Fatalf("Send() error = %v", err)
+	}
+	req := fake.request(0)
+	if req.Text != "" {
+		t.Fatalf("top-level text = %q, want the message rendered as an attachment", req.Text)
+	}
+	if req.Color != SlackColorError {
+		t.Fatalf("color = %q, want the error stripe %q", req.Color, SlackColorError)
+	}
+	if len(req.Blocks) < 3 {
+		t.Fatalf("got %d blocks, want text+body+fields sections", len(req.Blocks))
+	}
+	rendered, _ := json.Marshal(req.Blocks)
+	for _, want := range []string{"pipeline stage 'deploy' failed", "exit status 1", "acme/app", "https://ci.example/1"} {
+		if !strings.Contains(string(rendered), want) {
+			t.Errorf("rendered blocks dropped %q: %s", want, rendered)
+		}
+	}
+	if !strings.Contains(req.Fallback, "pipeline stage 'deploy' failed") {
+		t.Errorf("fallback %q does not lead with the message text", req.Fallback)
+	}
+
+	// A genuinely plain message (nothing but Text) still takes the plain tier.
+	if _, err := n.Send(context.Background(), Message{Text: "deploy finished"}); err != nil {
+		t.Fatalf("plain Send() error = %v", err)
+	}
+	if req := fake.request(1); req.Text != "deploy finished" || len(req.Blocks) != 0 {
+		t.Fatalf("plain message rendered unexpectedly: %+v", req)
 	}
 }
 

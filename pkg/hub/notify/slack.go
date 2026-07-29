@@ -93,6 +93,34 @@ type slackSendLimiter struct {
 	lastSend time.Time
 }
 
+// slackLimiters holds one send limiter per destination (api_base + channel),
+// process-wide. Slack's chat.postMessage limit is per channel, so pacing must
+// be keyed on the channel actually posted to — not on the notifier instance:
+// instances are rebuilt on config edits and token rotations, two named
+// notifiers can point at the same channel, and independent features (the
+// lifecycle poller, the manual test endpoint, a future pipeline notify
+// action) may each construct their own instance. The map is bounded by the
+// number of distinct destinations the process ever posts to; entries are a
+// few dozen bytes and are deliberately never evicted, so pacing state
+// survives reconstruction. Keying includes api_base so tests pointing at
+// separate fake servers never pace each other.
+var (
+	slackLimitersMu sync.Mutex
+	slackLimiters   = map[string]*slackSendLimiter{}
+)
+
+func slackLimiterFor(apiBase, channel string) *slackSendLimiter {
+	key := apiBase + "\x00" + channel
+	slackLimitersMu.Lock()
+	defer slackLimitersMu.Unlock()
+	l, ok := slackLimiters[key]
+	if !ok {
+		l = &slackSendLimiter{}
+		slackLimiters[key] = l
+	}
+	return l
+}
+
 // wait blocks until at least minInterval has passed since the previous send,
 // then claims the send slot. Sends are serialized by the mutex. A cancelled
 // or expired context aborts the wait immediately (releasing the mutex) so
@@ -119,16 +147,14 @@ func (l *slackSendLimiter) wait(ctx context.Context, minInterval time.Duration) 
 	return nil
 }
 
-// slackNotifier posts to one Slack channel via chat.postMessage.
+// slackNotifier posts to one Slack channel via chat.postMessage. Send pacing
+// lives in the process-wide per-channel slackLimiters registry, not in the
+// instance, so rebuilding a notifier never resets it.
 type slackNotifier struct {
-	token   string
-	channel string
-	apiBase string
-	client  *http.Client
-	// limiter paces sends for everyone sharing this notifier instance; the
-	// hub caches the constructed notifier so the lifecycle poller and the
-	// manual test endpoint cannot jointly exceed Slack's per-channel pace.
-	limiter         slackSendLimiter
+	token           string
+	channel         string
+	apiBase         string
+	client          *http.Client
 	minSendInterval time.Duration
 }
 
@@ -169,15 +195,24 @@ func newSlack(cfg map[string]any, secrets SecretResolver) (Notifier, error) {
 	}, nil
 }
 
+// Destination names the configured channel for the caller's bookkeeping
+// (see notify.DestinationReporter).
+func (s *slackNotifier) Destination() string { return s.channel }
+
+// destinationFor resolves the channel a message will post to.
+func (s *slackNotifier) destinationFor(msg Message) string {
+	if msg.Target != "" {
+		return msg.Target
+	}
+	return s.channel
+}
+
 // RenderPayload builds the exact chat.postMessage body for a Message. It is
 // the single source of truth for the wire shape: Send and the dry-run test
 // endpoint both use it, so a dry run always returns precisely what a real
 // send would post.
 func (s *slackNotifier) RenderPayload(msg Message) (map[string]any, error) {
-	channel := msg.Target
-	if channel == "" {
-		channel = s.channel
-	}
+	channel := s.destinationFor(msg)
 	if channel == "" {
 		return nil, &slackConfigError{"slack notifier has no channel configured and the message sets no target"}
 	}
@@ -188,8 +223,11 @@ func (s *slackNotifier) RenderPayload(msg Message) (map[string]any, error) {
 		payload[k] = v
 	}
 	payload["channel"] = channel
+	if msg.Thread != "" {
+		payload["thread_ts"] = msg.Thread
+	}
 
-	if msg.Title == "" {
+	if !msg.Semantic() {
 		// Plain tier: Text only (the pipeline notify action path).
 		payload["text"] = msg.Text
 		return payload, nil
@@ -204,9 +242,17 @@ func (s *slackNotifier) RenderPayload(msg Message) (map[string]any, error) {
 	// "fallback" field instead, which Slack uses for push notifications when
 	// no top-level text is present.
 	delete(payload, "text")
+	blocks := slackRenderBlocks(msg)
+	if len(blocks) == 0 {
+		// Degenerate semantic message with nothing renderable (e.g. only a
+		// Severity set): fall back to the plain tier rather than posting an
+		// attachment Slack will reject as empty.
+		payload["text"] = msg.Text
+		return payload, nil
+	}
 	attachment := map[string]any{
 		"fallback": slackFallbackText(msg),
-		"blocks":   slackRenderBlocks(msg),
+		"blocks":   blocks,
 	}
 	if color, ok := slackSeverityColors[msg.Severity]; ok {
 		attachment["color"] = color
@@ -230,8 +276,12 @@ func (s *slackNotifier) Send(ctx context.Context, msg Message) (string, error) {
 		return "", fmt.Errorf("marshal slack message: %w", err)
 	}
 
+	// Pacing is keyed on the channel actually posted to: Slack rate-limits
+	// chat.postMessage per channel, and the limiter registry is process-wide
+	// so every instance targeting the same channel shares one pace.
+	limiter := slackLimiterFor(s.apiBase, s.destinationFor(msg))
 	for attempt := 1; ; attempt++ {
-		if err := s.limiter.wait(ctx, s.minSendInterval); err != nil {
+		if err := limiter.wait(ctx, s.minSendInterval); err != nil {
 			return "", err
 		}
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.apiBase+"/chat.postMessage", bytes.NewReader(body))
@@ -295,13 +345,25 @@ func slackRetryAfter(header string, attempt int) time.Duration {
 // slackRenderBlocks lays out the semantic fields as Block Kit blocks. The
 // layout is shared by every message — headline, then subject/link, then the
 // long body as a blockquote, then dim metadata — so a channel of
-// notifications reads consistently.
+// notifications reads consistently. A message without a Title (a plain-text
+// body that still set severity, a link or fields) leads with its Text
+// unbolded, so no populated field is ever dropped.
 func slackRenderBlocks(msg Message) []any {
-	headline := "*" + msg.Title + "*"
-	if msg.Emoji != "" {
-		headline = msg.Emoji + " " + headline
+	var lines []string
+	switch {
+	case msg.Title != "":
+		headline := "*" + msg.Title + "*"
+		if msg.Emoji != "" {
+			headline = msg.Emoji + " " + headline
+		}
+		lines = append(lines, headline)
+	case msg.Text != "":
+		line := slackEscape(msg.Text)
+		if msg.Emoji != "" {
+			line = msg.Emoji + " " + line
+		}
+		lines = append(lines, line)
 	}
-	lines := []string{headline}
 
 	subjectConsumed := false
 	switch {
@@ -324,7 +386,10 @@ func slackRenderBlocks(msg Message) []any {
 		lines = append(lines, slackEscape(msg.Subject))
 	}
 
-	blocks := []any{slackSectionBlock(strings.Join(lines, "\n"))}
+	var blocks []any
+	if len(lines) > 0 {
+		blocks = append(blocks, slackSectionBlock(strings.Join(lines, "\n")))
+	}
 	// The body gets its own section so long diagnostics never truncate the
 	// headline or subject, and each block clamps independently.
 	if msg.Body != "" {
@@ -369,6 +434,11 @@ func slackRenderFields(fields []Field) string {
 // Message.Summary and keep parts short.
 func slackFallbackText(msg Message) string {
 	out := msg.Title
+	if out == "" {
+		// Title-less rich messages (plain text plus semantic decorations)
+		// lead with their text, mirroring the block layout.
+		out = msg.Text
+	}
 	if msg.Emoji != "" {
 		out = msg.Emoji + " " + out
 	}
