@@ -941,6 +941,15 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, ctx pipelineCon
 			}
 		} else {
 			log.Printf("[pipeline] workflow command completed for claw %s stage %q", clawID[:8], stage.ID)
+			if result != nil {
+				if result.Stdout != "" {
+					log.Printf("[pipeline] workflow command stdout for claw %s:\n%s", clawID[:8], result.Stdout)
+				}
+				if result.Stderr != "" {
+					log.Printf("[pipeline] workflow command stderr for claw %s:\n%s", clawID[:8], result.Stderr)
+				}
+				s.injectHubMessageByID(clawID, fmt.Sprintf("[hub] Workflow command completed for stage %q (exit %d)", stage.ID, result.ExitCode))
+			}
 		}
 	}
 
@@ -969,6 +978,17 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, ctx pipelineCon
 				log.Printf("[pipeline] %s", msg)
 				s.injectHubMessageByID(clawID, "[hub] Error: "+msg)
 				return false, errors.New(msg)
+			}
+		} else {
+			log.Printf("[pipeline] dependency updates completed for claw %s stage %q", clawID[:8], stage.ID)
+			if result != nil {
+				if result.Stdout != "" {
+					log.Printf("[pipeline] dependency update stdout for claw %s:\n%s", clawID[:8], result.Stdout)
+				}
+				if result.Stderr != "" {
+					log.Printf("[pipeline] dependency update stderr for claw %s:\n%s", clawID[:8], result.Stderr)
+				}
+				s.injectHubMessageByID(clawID, "[hub] "+formatDependencyUpdateSummary(result))
 			}
 		}
 	}
