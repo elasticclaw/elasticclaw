@@ -291,7 +291,12 @@ type NotifyAction struct {
 	// providers escape their own markup control characters, because Text
 	// interpolates untrusted data (issue titles, command output).
 	Text string `yaml:"text"`
-	// Subject is used by providers that have one (e.g. email); templated.
+	// Subject names what the message is about; templated. It is a semantic
+	// field: providers with a native subject line (email) use it there, and
+	// every other provider renders it inside its rich layout rather than
+	// dropping it — on Slack, setting Subject upgrades the message from a
+	// plain text line to the Block Kit attachment layout, with the subject on
+	// its own line under the text. Omit it to keep the plain rendering.
 	Subject string `yaml:"subject,omitempty"`
 	// Target overrides the notifier's default destination (channel, address);
 	// templated.

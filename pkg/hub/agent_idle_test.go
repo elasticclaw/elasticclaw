@@ -43,15 +43,22 @@ func setClawPipelineStage(t *testing.T, db *sql.DB, clawID, stage string) {
 	}
 }
 
+// stampAgentIdleBaseline pins the agent_idle baseline at an explicit moment
+// and drops the in-memory cache so the next detection tick reads it.
+func stampAgentIdleBaseline(t *testing.T, s *Server, at time.Time) {
+	t.Helper()
+	s.setNotifierStateInt64(agentIdleBaselineKey, at.UnixMilli())
+	s.agentIdleBaselineMu.Lock()
+	s.agentIdleBaselineAt = time.Time{}
+	s.agentIdleBaselineMu.Unlock()
+}
+
 // backdateAgentIdleBaseline moves the agent_idle baseline a day into the past,
 // simulating a hub where the feature has been enabled for a long time — so
 // stretches provoked by the test count as post-enable and actually notify.
 func backdateAgentIdleBaseline(t *testing.T, s *Server) {
 	t.Helper()
-	s.setNotifierStateInt64(agentIdleBaselineKey, time.Now().Add(-24*time.Hour).UnixMilli())
-	s.agentIdleBaselineMu.Lock()
-	s.agentIdleBaselineAt = time.Time{}
-	s.agentIdleBaselineMu.Unlock()
+	stampAgentIdleBaseline(t, s, time.Now().Add(-24*time.Hour))
 }
 
 // seedIdleTestBaseline marks everything that exists right now (including the
@@ -150,6 +157,128 @@ func TestAgentIdleAdhocNotifiesOncePerStretchAndRearms(t *testing.T) {
 	s.lifecycleClawPass(d)
 	if fake.count() != 2 {
 		t.Fatalf("second idle stretch sent %d total messages, want 2", fake.count())
+	}
+}
+
+// Regression: a claw that never ran a turn used to anchor its stretch on
+// connectedAt, which is re-stamped on every bridge reconnect and hub restart —
+// so after any reconnect the same unchanged stall looked like a brand-new
+// stretch and re-alerted ~idle_after later; a flaky bridge on a
+// permanently-stalled claw produced duplicate alerts forever. A never-turn
+// claw now anchors on claws.created_at, which never moves, so the durable
+// latch recognizes the stall across reconnects (and the latch is cleared the
+// moment a turn runs, re-arming genuinely new stretches).
+func TestAgentIdleNeverTurnClawDoesNotReAlertOnReconnect(t *testing.T) {
+	fake := newFakeSlackServer(t)
+	s, db := newSlackNotifierTestServer(t, fake.server.URL, nil)
+	const clawID = "idle-noturn"
+	// Created an hour ago: created_at must predate every connection, as it
+	// does in production (a claw exists before its bridge first registers).
+	insertSlackTestClaw(t, db, clawID, "connected", 0, "", time.Hour)
+	setClawPipelineStage(t, db, clawID, "implement")
+	seedIdleTestBaseline(t, s)
+	backdateAgentIdleBaseline(t, s)
+	setSlackWatermark(t, s, 0)
+	d := testLifecycleDelivery(t, s)
+
+	// Never ran a turn: the anchor falls back to connectedAt.
+	cc := &clawConn{id: clawID, tenantID: "test-tenant-id",
+		connectedAt: time.Now().Add(-10 * time.Minute)}
+	s.checkAgentIdle(time.Now(), clawID, cc)
+	firstLatch := clawIdleSince(t, db, clawID)
+	if firstLatch == 0 {
+		t.Fatal("never-turn claw past threshold did not latch")
+	}
+	s.lifecycleClawPass(d)
+	if fake.count() != 1 {
+		t.Fatalf("sent %d messages, want 1", fake.count())
+	}
+
+	// Bridge reconnects (or the hub restarts): the fresh clawConn gets a new
+	// connectedAt far past the persisted latch, still no turn ever. Once the
+	// post-reconnect stretch passes the threshold, the same stall must NOT
+	// re-latch or re-alert.
+	reconnected := &clawConn{id: clawID, tenantID: "test-tenant-id",
+		connectedAt: time.Now().Add(-6 * time.Minute)}
+	s.checkAgentIdle(time.Now(), clawID, reconnected)
+	if got := clawIdleSince(t, db, clawID); got != firstLatch {
+		t.Fatalf("reconnect re-latched the same never-turn stall: %d -> %d", firstLatch, got)
+	}
+	s.lifecycleClawPass(d)
+	if fake.count() != 1 {
+		t.Fatalf("reconnect re-alerted the same never-turn stall: %d messages", fake.count())
+	}
+	if reconnected.idleNotifiedAt.IsZero() {
+		t.Fatal("reconnect path did not restore the in-memory fast path")
+	}
+
+	// Once a turn actually runs, the latch clears and a genuinely new stretch
+	// alerts again.
+	reconnected.mu.Lock()
+	reconnected.awaitingResponse = true
+	reconnected.mu.Unlock()
+	s.checkAgentIdle(time.Now(), clawID, reconnected)
+	if got := clawIdleSince(t, db, clawID); got != 0 {
+		t.Fatalf("busy claw kept idle latch %d", got)
+	}
+	reconnected.mu.Lock()
+	reconnected.finishTurnLocked()
+	reconnected.lastTurnFinishedAt = time.Now().Add(-6 * time.Minute)
+	reconnected.mu.Unlock()
+	s.checkAgentIdle(time.Now(), clawID, reconnected)
+	if got := clawIdleSince(t, db, clawID); got == 0 || got == firstLatch {
+		t.Fatalf("post-turn stretch latch = %d (first %d), want a fresh latch", got, firstLatch)
+	}
+	s.lifecycleClawPass(d)
+	if fake.count() != 2 {
+		t.Fatalf("new stretch after a real turn sent %d total messages, want 2", fake.count())
+	}
+}
+
+// The stable-anchor trade, asserted deliberately: a never-turn stall that
+// began before the notification baseline is parked once and stays parked
+// across bridge reconnects. connectedAt moves on every registration, but the
+// claw's actual situation — created, connected, never prompted — has not
+// changed, so a reconnect must not promote the parked pre-baseline stall into
+// a fresh alertable stretch (the "first enable never replays history" rule
+// applied consistently). Before the created_at anchor, a reconnect made the
+// same stall look new and either re-alerted it or re-parked it forever.
+func TestAgentIdlePreBaselineNeverTurnStallStaysParkedAcrossReconnect(t *testing.T) {
+	fake := newFakeSlackServer(t)
+	s, db := newSlackNotifierTestServer(t, fake.server.URL, nil)
+	const clawID = "idle-prebaseline-noturn"
+	insertSlackTestClaw(t, db, clawID, "connected", 0, "", 3*time.Hour)
+	setClawPipelineStage(t, db, clawID, "implement")
+	seedIdleTestBaseline(t, s)
+	// The feature was enabled 30 minutes ago; the claw has been connected and
+	// never prompted since well before that.
+	stampAgentIdleBaseline(t, s, time.Now().Add(-30*time.Minute))
+	setSlackWatermark(t, s, 0)
+	d := testLifecycleDelivery(t, s)
+
+	cc := &clawConn{id: clawID, tenantID: "test-tenant-id",
+		connectedAt: time.Now().Add(-2 * time.Hour)}
+	s.checkAgentIdle(time.Now(), clawID, cc)
+	firstLatch := clawIdleSince(t, db, clawID)
+	if firstLatch == 0 {
+		t.Fatal("pre-baseline never-turn stall was not parked")
+	}
+	s.lifecycleClawPass(d)
+	if fake.count() != 0 {
+		t.Fatalf("pre-baseline stall was announced: %d messages", fake.count())
+	}
+
+	// Bridge reconnects: connectedAt is re-stamped after the baseline, but the
+	// claw is the same never-prompted stall that predates it — still silent.
+	reconnected := &clawConn{id: clawID, tenantID: "test-tenant-id",
+		connectedAt: time.Now().Add(-10 * time.Minute)}
+	s.checkAgentIdle(time.Now(), clawID, reconnected)
+	if got := clawIdleSince(t, db, clawID); got != firstLatch {
+		t.Fatalf("reconnect re-latched a parked pre-baseline stall: %d -> %d", firstLatch, got)
+	}
+	s.lifecycleClawPass(d)
+	if fake.count() != 0 {
+		t.Fatalf("reconnect replayed a parked pre-baseline stall: %d messages", fake.count())
 	}
 }
 

@@ -163,6 +163,13 @@ type Server struct {
 	// externally (see recordNotificationDelivery). Only touched from the
 	// lifecycle tick goroutine — ticks never overlap.
 	lifecyclePendingDeliveries map[string]pendingNotificationDelivery
+
+	// lifecycleNotifierStop/Done plumb graceful shutdown for the lifecycle
+	// notifier loop: run() stops the loop and waits for the in-flight tick
+	// BEFORE closing the database, so a completed external send can still land
+	// its delivery row (see stopLifecycleNotifier).
+	lifecycleNotifierStop chan struct{}
+	lifecycleNotifierDone chan struct{}
 }
 
 // cachedNotifier is one constructed notifier plus the config/secret digest it
@@ -460,6 +467,11 @@ func (s *Server) run(ctx context.Context, opts ...RunOptions) error {
 		// ListenAndServe returns as soon as Shutdown starts. Wait for it to
 		// finish draining active requests before closing their database.
 		<-shutdownDone
+		// Stop the lifecycle notifier before the DB closes: a tick in flight
+		// could otherwise complete an external Slack send and then fail the
+		// delivery-row insert against the closed DB, re-sending the event
+		// after restart (the in-memory retry stash dies with the process).
+		s.stopLifecycleNotifier(10 * time.Second)
 		if closeErr := s.db.Close(); closeErr != nil {
 			return fmt.Errorf("close database: %w", closeErr)
 		}
@@ -490,7 +502,11 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/settings/github/test", s.withWebAdminAuth(s.handleGitHubAppTest))
 	mux.HandleFunc("/api/settings/model-auth/login", s.withWebAdminAuth(s.handleModelAuthLogin))
 	mux.HandleFunc("/api/settings/model-auth/login/{id}", s.withWebAdminAuth(s.handleModelAuthLoginStatus))
-	mux.HandleFunc("/api/notifications/slack/test", s.withWebAdminAuth(s.handleNotificationTest))
+	// Provider-agnostic on purpose (the handler resolves lifecycle.via and
+	// renders through the PayloadRenderer interface), so the route must not
+	// bake in "slack": a second provider would inherit a misleading URL or
+	// force a breaking rename.
+	mux.HandleFunc("/api/notifications/test", s.withWebAdminAuth(s.handleNotificationTest))
 
 	// Template store
 	mux.HandleFunc("/api/templates", s.withWebAuth(s.handleTemplates))

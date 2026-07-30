@@ -244,6 +244,257 @@ func TestSlackNotifierDisabledEventToggle(t *testing.T) {
 	}
 }
 
+// The no-replay invariant for the task-run pass (referenced by
+// TestSlackNotifierDisabledEventToggle): an event parked as "skipped" while
+// its category was muted stays muted after the category is re-enabled and the
+// notifier keeps ticking — without the skipLifecycleMutedEvents parking, the
+// watermark would still sit before the muted event and the re-enable would
+// flush it into the channel.
+func TestSlackNotifierMutedCategoryNotReplayedOnReenable(t *testing.T) {
+	fake := newFakeSlackServer(t)
+	s, db := newSlackNotifierTestServer(t, fake.server.URL, func(cfg *types.LifecycleNotificationsConfig) {
+		cfg.Events = &types.LifecycleEventToggles{AgentStarted: boolPtr(false)}
+	})
+
+	base := int64(1760000000000)
+	insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{
+		RunID: "run-1", AttemptID: "attempt-run-1", ClawID: "claw-1", TenantID: "test-tenant-id", OwnerType: taskRunOwnerFactory,
+		Factory: "bugfix", Repo: "acme/app", StartedAt: base - 1000,
+	})
+	insertSlackTestEvent(t, db, "ev-muted", "run-1", taskRunEventAgentStarted, base+10, "", "", "")
+	setSlackWatermark(t, s, 0)
+
+	s.lifecycleNotifierTick()
+	if fake.count() != 0 {
+		t.Fatalf("muted category sent %d messages", fake.count())
+	}
+	if status, ok := slackDeliveryStatus(t, db, "ev-muted"); !ok || status != notificationDeliveryStatusSkipped {
+		t.Fatalf("muted event delivery = %q, %v; want parked as skipped", status, ok)
+	}
+
+	// Re-enable the category and tick again: the parked event must stay muted.
+	s.mu.Lock()
+	s.hubCfg.Notifications.Lifecycle.Events.AgentStarted = boolPtr(true)
+	s.mu.Unlock()
+	s.lifecycleNotifierTick()
+	if fake.count() != 0 {
+		t.Fatalf("re-enabling the category replayed the muted event: %d messages", fake.count())
+	}
+
+	// A genuinely new event of the re-enabled category is delivered.
+	insertSlackTestEvent(t, db, "ev-new", "run-1", taskRunEventAgentStarted, base+20, "", "", "")
+	s.lifecycleNotifierTick()
+	if fake.count() != 1 {
+		t.Fatalf("new event after re-enable sent %d messages, want 1", fake.count())
+	}
+}
+
+// Regression: ValidateNotificationsConfig resolves lifecycle.via after
+// strings.TrimSpace, so a hub.yaml with via: "test-notifier " passes
+// validation — the runtime lookups must trim the same way, or they resolve a
+// zero NotifierConfig and notifications silently stop while everything
+// reports green.
+func TestSlackNotifierTrimsLifecycleVia(t *testing.T) {
+	fake := newFakeSlackServer(t)
+	s, db := newSlackNotifierTestServer(t, fake.server.URL, func(cfg *types.LifecycleNotificationsConfig) {
+		cfg.Via = testNotifierName + " "
+	})
+
+	base := int64(1760000000000)
+	insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{
+		RunID: "run-1", AttemptID: "attempt-run-1", ClawID: "claw-1", TenantID: "test-tenant-id", OwnerType: taskRunOwnerFactory,
+		Factory: "bugfix", Repo: "acme/app", StartedAt: base - 1000,
+	})
+	insertSlackTestEvent(t, db, "ev-started", "run-1", taskRunEventAgentStarted, base+10, "", "", "")
+	setSlackWatermark(t, s, 0)
+
+	s.lifecycleNotifierTick()
+	if fake.count() != 1 {
+		t.Fatalf("padded via delivered %d messages, want 1 (lookup did not trim)", fake.count())
+	}
+
+	// The manual test endpoint is the other runtime consumer of via.
+	rr := postSlackTest(t, s, `{"event_type":"agent_started"}`)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("test endpoint with padded via: status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+}
+
+// Regression coverage for the pending-delivery stash — the only guard against
+// duplicate external sends when the delivery-row INSERT fails. A claw-pass
+// event is used because it has no rowid cursor: the delivery row is its ONLY
+// dedupe, so a forgotten failed write meant a duplicate Slack message every
+// tick until the DB accepted the insert.
+func TestSlackNotifierPendingDeliveryStashPreventsDuplicateSends(t *testing.T) {
+	fake := newFakeSlackServer(t)
+	s, db := newSlackNotifierTestServer(t, fake.server.URL, nil)
+	setLifecycleClawBaseline(t, s)
+	setSlackWatermark(t, s, 0)
+	insertSlackTestClaw(t, db, "claw-adhoc", "connected", 1, "", oldEnough)
+
+	// Make ONLY the delivery-row insert fail, exactly like a locked/failing
+	// DB at the moment of the write; selects and every other table keep
+	// working so the tick still scans, sends and bookkeeps normally.
+	if _, err := db.Exec(`CREATE TRIGGER fail_delivery_insert BEFORE INSERT ON slack_notification_deliveries
+		BEGIN SELECT RAISE(ABORT, 'simulated write failure'); END`); err != nil {
+		t.Fatalf("create failing trigger: %v", err)
+	}
+
+	s.lifecycleNotifierTick()
+	if fake.count() != 1 {
+		t.Fatalf("first tick sent %d messages, want 1", fake.count())
+	}
+	if _, ok := slackDeliveryStatus(t, db, lifecycleClawStartedKey("claw-adhoc")); ok {
+		t.Fatal("delivery row landed despite the failing trigger; the test is not exercising the stash")
+	}
+
+	// (a) While the write keeps failing, the stash must prevent a re-send even
+	// though the SQL anti-join still selects the claw.
+	s.lifecycleNotifierTick()
+	if fake.count() != 1 {
+		t.Fatalf("failed delivery write caused a duplicate external send: %d messages", fake.count())
+	}
+
+	// (b) Once the DB accepts writes again, the stash drains into a real row
+	// and nothing is re-sent.
+	if _, err := db.Exec(`DROP TRIGGER fail_delivery_insert`); err != nil {
+		t.Fatalf("drop failing trigger: %v", err)
+	}
+	s.lifecycleNotifierTick()
+	if fake.count() != 1 {
+		t.Fatalf("stash drain re-sent the message: %d messages", fake.count())
+	}
+	if status, ok := slackDeliveryStatus(t, db, lifecycleClawStartedKey("claw-adhoc")); !ok || status != notificationDeliveryStatusSent {
+		t.Fatalf("drained delivery = %q, %v; want sent", status, ok)
+	}
+	if len(s.lifecyclePendingDeliveries) != 0 {
+		t.Fatalf("stash not drained: %d entries left", len(s.lifecyclePendingDeliveries))
+	}
+}
+
+// Regression: an unreadable transient-failure streak (a corrupted value; in
+// production also SQLITE_BUSY) must retry WITHOUT counting — a refactor that
+// fell through to count++ would re-arm the cap on every failed read, so the
+// poisoned event would never be burned and the cursor would stay wedged, the
+// exact crashloop the persisted streak exists to prevent.
+func TestSlackNotifierUnreadableStreakStateRetriesWithoutBurning(t *testing.T) {
+	fake := newFakeSlackServer(t)
+	fake.setRespond(func(n int, w http.ResponseWriter) {
+		http.Error(w, "upstream hiccup", http.StatusInternalServerError)
+	})
+	s, db := newSlackNotifierTestServer(t, fake.server.URL, nil)
+
+	base := int64(1760000000000)
+	insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{
+		RunID: "run-1", AttemptID: "attempt-run-1", ClawID: "claw-1", TenantID: "test-tenant-id", OwnerType: taskRunOwnerFactory,
+		Factory: "bugfix", StartedAt: base - 1000,
+	})
+	insertSlackTestEvent(t, db, "ev-poison", "run-1", taskRunEventAgentStarted, base+10, "", "", "")
+	setSlackWatermark(t, s, 0)
+	streakKey := lifecycleTransientFailureStateKey("ev-poison")
+	if _, err := db.Exec(`INSERT INTO slack_notifier_state(key, value) VALUES(?, 'not-a-number')`, streakKey); err != nil {
+		t.Fatalf("corrupt streak state: %v", err)
+	}
+
+	// Even past the cap's worth of ticks, the event must be neither burned as
+	// failed nor have its streak overwritten while the state is unreadable.
+	for i := 0; i < lifecycleMaxTransientFailures+5; i++ {
+		s.lifecycleNotifierTick()
+	}
+	if status, ok := slackDeliveryStatus(t, db, "ev-poison"); ok {
+		t.Fatalf("unreadable streak state burned the event as %q", status)
+	}
+	var raw string
+	if err := db.QueryRow(`SELECT value FROM slack_notifier_state WHERE key=?`, streakKey).Scan(&raw); err != nil {
+		t.Fatalf("read streak state: %v", err)
+	}
+	if raw != "not-a-number" {
+		t.Fatalf("unreadable streak state was overwritten with %q", raw)
+	}
+	if wm, _ := slackWatermark(t, s); wm != 0 {
+		t.Fatalf("watermark advanced past the event: %d", wm)
+	}
+
+	// Once the state is readable again the event is delivered normally.
+	if _, err := db.Exec(`DELETE FROM slack_notifier_state WHERE key=?`, streakKey); err != nil {
+		t.Fatalf("clear streak state: %v", err)
+	}
+	fake.setRespond(nil)
+	s.lifecycleNotifierTick()
+	if status, ok := slackDeliveryStatus(t, db, "ev-poison"); !ok || status != notificationDeliveryStatusSent {
+		t.Fatalf("recovered event delivery = %q, %v; want sent", status, ok)
+	}
+}
+
+// Regression: a transport-level Send failure (connection refused — no HTTP
+// status at all, unlike the 5xx path) must classify transient: the event is
+// left for the next tick, not burned, and delivers once the endpoint is back.
+func TestSlackNotifierTransportFailureRetriedNextTick(t *testing.T) {
+	fake := newFakeSlackServer(t)
+	deadURL := fake.server.URL
+	fake.server.Close() // connection refused from here on
+	s, db := newSlackNotifierTestServer(t, deadURL, nil)
+
+	base := int64(1760000000000)
+	insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{
+		RunID: "run-1", AttemptID: "attempt-run-1", ClawID: "claw-1", TenantID: "test-tenant-id", OwnerType: taskRunOwnerFactory,
+		Factory: "bugfix", StartedAt: base - 1000,
+	})
+	insertSlackTestEvent(t, db, "ev-started", "run-1", taskRunEventAgentStarted, base+10, "", "", "")
+	setSlackWatermark(t, s, 0)
+
+	s.lifecycleNotifierTick()
+	if _, delivered := slackDeliveryStatus(t, db, "ev-started"); delivered {
+		t.Fatal("transport failure must not record a delivery (neither sent nor failed)")
+	}
+	if wm, _ := slackWatermark(t, s); wm != 0 {
+		t.Fatalf("watermark advanced past a transport-failed event: %d", wm)
+	}
+
+	// Endpoint comes back (a fresh fake; the settings override rebuilds the
+	// notifier because the cache key digests the settings): delivered.
+	fake2 := newFakeSlackServer(t)
+	s.notifierSettingOverrides["api_base"] = fake2.server.URL
+	s.lifecycleNotifierTick()
+	if status, ok := slackDeliveryStatus(t, db, "ev-started"); !ok || status != notificationDeliveryStatusSent {
+		t.Fatalf("retry after transport recovery did not deliver: %q, %v", status, ok)
+	}
+	if fake2.count() != 1 {
+		t.Fatalf("recovered endpoint received %d messages, want 1", fake2.count())
+	}
+}
+
+// The lifecycle notifier loop must stop when told to (graceful shutdown stops
+// it before closing the DB — see Server.run): after stopLifecycleNotifier
+// returns, no further tick may fire, so no send can straddle the DB close.
+func TestLifecycleNotifierLoopStopsOnShutdown(t *testing.T) {
+	fake := newFakeSlackServer(t)
+	s, db := newSlackNotifierTestServer(t, fake.server.URL, func(cfg *types.LifecycleNotificationsConfig) {
+		cfg.PollInterval = "1s"
+	})
+	s.startLifecycleNotifier()
+	s.stopLifecycleNotifier(5 * time.Second)
+	select {
+	case <-s.lifecycleNotifierDone:
+	default:
+		t.Fatal("stopLifecycleNotifier returned before the loop exited")
+	}
+
+	// An event landing after the stop is never picked up by the (stopped)
+	// background loop, even well past the poll interval.
+	base := int64(1760000000000)
+	insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{
+		RunID: "run-1", AttemptID: "attempt-run-1", ClawID: "claw-1", TenantID: "test-tenant-id", OwnerType: taskRunOwnerFactory,
+		Factory: "bugfix", StartedAt: base - 1000,
+	})
+	insertSlackTestEvent(t, db, "ev-started", "run-1", taskRunEventAgentStarted, base+10, "", "", "")
+	setSlackWatermark(t, s, 0)
+	time.Sleep(1500 * time.Millisecond)
+	if fake.count() != 0 {
+		t.Fatalf("stopped notifier loop still sent %d messages", fake.count())
+	}
+}
+
 func TestSlackNotifierFirstRunDoesNotReplayHistory(t *testing.T) {
 	fake := newFakeSlackServer(t)
 	s, db := newSlackNotifierTestServer(t, fake.server.URL, nil)
@@ -693,7 +944,7 @@ func TestSlackEventTypesRenderDistinctly(t *testing.T) {
 
 func postSlackTest(t *testing.T, s *Server, body string) *httptest.ResponseRecorder {
 	t.Helper()
-	req := httptest.NewRequest(http.MethodPost, "/api/notifications/slack/test", strings.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/api/notifications/test", strings.NewReader(body))
 	req.Header.Set("Authorization", "Bearer test-token")
 	rr := httptest.NewRecorder()
 	s.Handler().ServeHTTP(rr, req)

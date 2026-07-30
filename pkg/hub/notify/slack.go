@@ -206,8 +206,8 @@ func (s *slackNotifier) Destination() string { return s.channel }
 
 // destinationFor resolves the channel a message will post to.
 func (s *slackNotifier) destinationFor(msg Message) string {
-	if msg.Target != "" {
-		return msg.Target
+	if target := strings.TrimSpace(msg.Target); target != "" {
+		return target
 	}
 	return s.channel
 }
@@ -220,6 +220,17 @@ func (s *slackNotifier) RenderPayload(msg Message) (map[string]any, error) {
 	channel := s.destinationFor(msg)
 	if channel == "" {
 		return nil, &slackConfigError{"slack notifier has no channel configured and the message sets no target"}
+	}
+	// A per-message Target gets the same channel-ID validation newSlack applies
+	// to the configured channel. The only producer of a non-empty Target is the
+	// pipeline notify action, where it is template-rendered from untrusted
+	// sources (issue titles, {{.Inputs.*}} from the manual-trigger endpoint) —
+	// without this check, whoever controls tracker content could redirect a
+	// workflow's notifications to an arbitrary channel. Classified permanent,
+	// not config: the bad value is specific to this message and retrying can
+	// never fix it, while the notifier itself stays healthy.
+	if msg.Target != "" && !slackChannelIDRegex.MatchString(channel) {
+		return nil, PermanentError(fmt.Errorf("slack message target %q does not look like a Slack channel ID (expected C/G/D followed by alphanumerics, e.g. C0123ABCD)", channel))
 	}
 
 	// Provider passthrough first; the core fields computed below always win.
@@ -482,12 +493,17 @@ func slackRenderFields(fields []Field) string {
 // with empty parts dropped, so a slot never silently changes meaning. iOS
 // truncates at roughly two lines, so callers must front-load what matters in
 // Message.Summary and keep parts short.
+// Title, Text and Summary carry tracker-influenced text (issue titles,
+// failure reasons), so they are escaped like every other rendering path: the
+// fallback must not be the one field a crafted issue title can smuggle a
+// <!channel> broadcast through — especially since the semantic tier deletes
+// the top-level text and the fallback is what remains.
 func slackFallbackText(msg Message) string {
-	out := msg.Title
+	out := slackEscape(msg.Title)
 	if out == "" {
 		// Title-less rich messages (plain text plus semantic decorations)
 		// lead with their text, mirroring the block layout.
-		out = msg.Text
+		out = slackEscape(msg.Text)
 	}
 	if msg.Emoji != "" {
 		out = msg.Emoji + " " + out
@@ -495,7 +511,7 @@ func slackFallbackText(msg Message) string {
 	var kept []string
 	for _, p := range msg.Summary {
 		if p != "" {
-			kept = append(kept, p)
+			kept = append(kept, slackEscape(p))
 		}
 	}
 	if len(kept) > 0 {
@@ -576,9 +592,13 @@ func truncateRunes(s string, limit int) string {
 	return string(runes[:limit])
 }
 
+// truncateForLog truncates by runes, not bytes: the input is an arbitrary
+// HTTP error body that rides into errors surfaced on the test endpoint and
+// injected into claw conversations, and a cut mid-rune would leak invalid
+// UTF-8 there.
 func truncateForLog(s string, n int) string {
-	if len(s) <= n {
+	if utf8.RuneCountInString(s) <= n {
 		return s
 	}
-	return s[:n] + "…"
+	return truncateRunes(s, n) + "…"
 }

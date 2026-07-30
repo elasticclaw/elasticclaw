@@ -5,6 +5,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/elasticclaw/elasticclaw/pkg/hub/notify"
 	"github.com/elasticclaw/elasticclaw/pkg/hub/pipeline"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 )
@@ -96,9 +97,22 @@ func validateNotifyVias(notifiers map[string]types.NotifierConfig, label, pipeli
 				"stage %q has a notify action without a \"via\" (the name of a notifier under notifications.notifiers)", ref.StageID))
 			continue
 		}
-		if _, ok := notifiers[ref.Via]; !ok {
+		nc, ok := notifiers[ref.Via]
+		if !ok {
 			problems = append(problems, fmt.Sprintf(
 				"stage %q references notifier %q, which is not configured under notifications.notifiers in hub.yaml", ref.StageID, ref.Via))
+			continue
+		}
+		// The referenced notifier must also be of a registered provider type:
+		// ValidateNotificationsConfig only requires a non-blank type, so
+		// without this check `notifiers.eng: {type: teams}` plus `via: eng`
+		// saves with a 200 and the failure only surfaces at runtime as a
+		// per-send warning — defeating the author-time rejection this
+		// validation exists for. Provider settings and secrets still stay the
+		// doctor's job (they rot independently of the saved artifact).
+		if !notify.Supported(nc.Type) {
+			problems = append(problems, fmt.Sprintf(
+				"stage %q references notifier %q, whose type %q is not a supported notifier type", ref.StageID, ref.Via, nc.Type))
 		}
 	}
 	if len(problems) == 0 {

@@ -11,6 +11,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 // fakeSlack captures chat.postMessage requests and lets tests script responses
@@ -220,6 +221,147 @@ func TestSlackSendTargetOverridesChannel(t *testing.T) {
 	}
 	if got := fake.request(0).Channel; got != "C999" {
 		t.Fatalf("channel = %q, want the message target C999", got)
+	}
+}
+
+// Regression: the per-message Target must get the same channel-ID validation
+// newSlack applies to the configured channel. Target is template-rendered from
+// untrusted sources (issue titles, manual-trigger inputs) in the pipeline
+// notify action — before the fix destinationFor returned it verbatim, letting
+// whoever controls tracker content redirect a notification to an arbitrary
+// channel (or smuggle any string into payload["channel"]).
+func TestSlackRejectsInvalidTargetOverride(t *testing.T) {
+	fake := newFakeSlack(t)
+	n := newTestSlack(t, fake.server.URL, nil)
+
+	for _, target := range []string{
+		"#general",            // channel name, not an ID
+		"evil injected title", // arbitrary tracker text
+		"C123\",\"other",      // JSON-shaped smuggling attempt
+		"@here",               // broadcast handle
+		"U0USER123",           // a user ID is not a conversation ID
+	} {
+		_, err := n.Send(context.Background(), Message{Text: "hi", Target: target})
+		if err == nil {
+			t.Fatalf("Send() with target %q succeeded, want channel-ID validation error", target)
+		}
+		if got := Classify(err); got != ErrorPermanent {
+			t.Errorf("Classify(target %q error) = %v, want ErrorPermanent (message-specific, never succeeds on retry)", target, got)
+		}
+	}
+	if fake.count() != 0 {
+		t.Fatalf("invalid targets reached Slack: %d requests", fake.count())
+	}
+
+	// Valid channel IDs (and whitespace-padded ones from templates) still work.
+	if _, err := n.Send(context.Background(), Message{Text: "hi", Target: " D0DM12345 "}); err != nil {
+		t.Fatalf("Send() with valid padded target error = %v", err)
+	}
+	if got := fake.request(0).Channel; got != "D0DM12345" {
+		t.Fatalf("channel = %q, want the trimmed target D0DM12345", got)
+	}
+}
+
+// Regression: the attachment fallback was the one render path that skipped
+// slackEscape, concatenating tracker-influenced Title/Text/Summary raw — the
+// exact hole the escaping exists to close (a crafted issue title smuggling a
+// <!channel> broadcast), and the semantic tier deletes the top-level text so
+// the fallback is what remains.
+// Every tracker-influenced field slackFallbackText renders is escaped, and
+// each one is guarded by its own case so un-escaping any single field turns
+// exactly that case red. The "text" case is the reachable shape today: the
+// pipeline notify action sets Text and Subject and never Title, so its
+// fallback leads with the template-rendered (tracker-controlled) Text.
+func TestSlackFallbackEscapesMrkdwn(t *testing.T) {
+	const hostile = "<!channel> fix login & <https://evil.example|approve>"
+	const escaped = "&lt;!channel&gt; fix login &amp; &lt;https://evil.example|approve&gt;"
+	cases := []struct {
+		name string
+		msg  Message
+	}{
+		{name: "title", msg: Message{
+			Title: hostile, Emoji: ":skull:", Severity: SeverityError,
+		}},
+		{name: "text-without-title", msg: Message{
+			Text: hostile, Subject: "ENG-42",
+		}},
+		{name: "summary", msg: Message{
+			Title: "Agent died", Emoji: ":skull:", Severity: SeverityError,
+			Summary: []string{"acme/app", hostile},
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := newFakeSlack(t)
+			n := newTestSlack(t, fake.server.URL, nil)
+			if _, err := n.Send(context.Background(), tc.msg); err != nil {
+				t.Fatalf("Send() error = %v", err)
+			}
+			fallback := fake.request(0).Fallback
+			for _, forbidden := range []string{"<!channel>", "<https://evil.example|approve>"} {
+				if strings.Contains(fallback, forbidden) {
+					t.Fatalf("fallback carries unescaped mrkdwn %q: %q", forbidden, fallback)
+				}
+			}
+			if !strings.Contains(fallback, escaped) {
+				t.Fatalf("fallback lost the escaped text: %q", fallback)
+			}
+		})
+	}
+}
+
+// Regression: truncateForLog sliced by byte while the rest of the file
+// truncates by runes; a multibyte HTTP error body cut mid-rune leaked invalid
+// UTF-8 into errors surfaced on the test endpoint and claw conversations.
+func TestSlackHTTPErrorBodyTruncatesOnRuneBoundary(t *testing.T) {
+	fake := newFakeSlack(t)
+	fake.setRespond(func(n int, w http.ResponseWriter) {
+		w.WriteHeader(http.StatusBadGateway)
+		// The leading ASCII byte shifts every following 2-byte rune off an
+		// even byte offset, so a byte-indexed cut always lands mid-rune.
+		fmt.Fprint(w, "x"+strings.Repeat("é", 400))
+	})
+	n := newTestSlack(t, fake.server.URL, nil)
+
+	_, err := n.Send(context.Background(), Message{Text: "hi"})
+	if err == nil {
+		t.Fatal("Send() succeeded, want HTTP error")
+	}
+	if !utf8.ValidString(err.Error()) {
+		t.Fatalf("error text is not valid UTF-8: %q", err.Error())
+	}
+	if !strings.Contains(err.Error(), "…") {
+		t.Fatalf("long body was not truncated: %q", err.Error())
+	}
+}
+
+// Guards the Subject↔Semantic() decision: Subject is a semantic field, so
+// setting it on an otherwise plain message opts into rich rendering and the
+// subject is actually rendered — never silently dropped. A future email
+// provider uses Subject as its primary field; excluding it from Semantic()
+// would make Slack drop it and the same message would carry different
+// information per provider. The visual shift this causes for the Slack notify
+// action is documented on pipeline.NotifyAction.Subject.
+func TestSlackSubjectOptsIntoRichRenderingWithoutDroppingText(t *testing.T) {
+	fake := newFakeSlack(t)
+	n := newTestSlack(t, fake.server.URL, nil)
+
+	msg := Message{Text: "stage deploy entered", Subject: "ENG-42 — Fix login bug"}
+	if !msg.Semantic() {
+		t.Fatal("Message with a Subject must report Semantic()")
+	}
+	if _, err := n.Send(context.Background(), msg); err != nil {
+		t.Fatalf("Send() error = %v", err)
+	}
+	req := fake.request(0)
+	if len(req.Blocks) == 0 {
+		t.Fatal("subject-bearing message did not render rich blocks")
+	}
+	rendered, _ := json.Marshal(req.Blocks)
+	for _, want := range []string{"stage deploy entered", "ENG-42"} {
+		if !strings.Contains(string(rendered), want) {
+			t.Fatalf("rich rendering dropped %q: %s", want, rendered)
+		}
 	}
 }
 
@@ -554,9 +696,6 @@ func TestExportedErrorClassification(t *testing.T) {
 	if got := Classify(PermanentError(base)); got != ErrorPermanent {
 		t.Errorf("Classify(PermanentError) = %v, want ErrorPermanent", got)
 	}
-	if got := Classify(TransientError(base)); got != ErrorTransient {
-		t.Errorf("Classify(TransientError) = %v, want ErrorTransient", got)
-	}
 	// The class survives wrapping, and the original error stays reachable.
 	wrapped := fmt.Errorf("send failed: %w", PermanentError(base))
 	if got := Classify(wrapped); got != ErrorPermanent {
@@ -565,7 +704,7 @@ func TestExportedErrorClassification(t *testing.T) {
 	if !errors.Is(wrapped, base) {
 		t.Error("wrapped classified error lost its cause")
 	}
-	if ConfigError(nil) != nil || PermanentError(nil) != nil || TransientError(nil) != nil {
+	if ConfigError(nil) != nil || PermanentError(nil) != nil {
 		t.Error("classification wrappers must pass nil through")
 	}
 }

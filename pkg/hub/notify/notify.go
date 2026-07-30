@@ -77,7 +77,10 @@ type Message struct {
 	Options map[string]any
 
 	// Subject names what the message is about ("ENG-42 — Fix login bug").
-	// Providers with a native subject line (email) can use it there.
+	// Providers with a native subject line (email) can use it there; like
+	// every semantic field, setting it opts the message into rich rendering,
+	// and providers without a subject slot render it as part of that layout
+	// (Slack: its own line) rather than dropping it.
 	Subject string
 
 	// Title is the human headline ("Agent crashed during startup"). Setting
@@ -164,8 +167,10 @@ const (
 // ClassifiedError is implemented by provider errors that know their class.
 // Providers should classify every failure they can recognize — either by
 // implementing this interface on their own error types or by wrapping with
-// ConfigError/PermanentError/TransientError — because unclassified errors
-// default to transient and callers will retry them indefinitely.
+// ConfigError/PermanentError — because unclassified errors default to
+// transient and callers will retry them indefinitely. There is deliberately
+// no TransientError wrapper: transient is already the default for any
+// unclassified error, so the wrapper would have nothing to add.
 type ClassifiedError interface {
 	NotifyErrorClass() ErrorClass
 }
@@ -201,22 +206,13 @@ func ConfigError(err error) error {
 }
 
 // PermanentError marks err as specific to this message and unrecoverable by
-// retry (malformed or oversized payload): callers record it and move on.
+// retry (malformed or oversized payload, an invalid per-message target):
+// callers record it and move on.
 func PermanentError(err error) error {
 	if err == nil {
 		return nil
 	}
 	return &classedError{err: err, class: ErrorPermanent}
-}
-
-// TransientError marks err as retryable (network blip, rate limit, 5xx).
-// Unclassified errors already default to transient; the wrapper exists so a
-// provider can be explicit about it.
-func TransientError(err error) error {
-	if err == nil {
-		return nil
-	}
-	return &classedError{err: err, class: ErrorTransient}
 }
 
 // provider bundles a constructor with the metadata the doctor needs to

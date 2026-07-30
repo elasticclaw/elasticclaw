@@ -98,6 +98,33 @@ func TestWorkflowPushRejectsUnknownNotifyViaNamingStageAndNotifiers(t *testing.T
 	}
 }
 
+// A via that resolves to a notifier of an unregistered provider type must be
+// rejected at save time too: ValidateNotificationsConfig only requires a
+// non-blank type, so without the notify.Supported check here,
+// `notifiers.eng: {type: teams}` plus `via: eng` saved with a 200 and the
+// failure only surfaced at runtime as a per-send warning — defeating the
+// author-time rejection this branch exists for.
+func TestWorkflowPushRejectsNotifyViaWithUnsupportedType(t *testing.T) {
+	notifications := notifyValidateTestNotifiers()
+	notifications.Notifiers["eng"] = types.NotifierConfig{Type: "teams", Settings: map[string]any{}}
+	s := newNotifyValidateTestServer(t, notifications)
+	rr := pushWorkflowsForTest(t, s, []*types.WorkflowConfig{{
+		Name:                "release",
+		Integration:         "github",
+		EnableManualTrigger: true,
+		Stages: []types.WorkflowStage{
+			notifyWorkflowStage("announce", map[string]interface{}{"via": "eng", "text": "hi"}),
+		},
+	}})
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body = %s", rr.Code, rr.Body.String())
+	}
+	body := rr.Body.String()
+	if !strings.Contains(body, `stage "announce"`) || !strings.Contains(body, `"teams"`) {
+		t.Fatalf("error does not name the stage and the unsupported type: %s", body)
+	}
+}
+
 // Every offending notify action must be reported in the one rejection, not
 // just the first, so the author fixes them all in a single round trip.
 func TestWorkflowPushReportsAllBadNotifyActions(t *testing.T) {

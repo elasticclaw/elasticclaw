@@ -257,11 +257,22 @@ func (s *Server) initLifecycleNotifierBaseline() {
 
 // startLifecycleNotifier launches the background loop that turns lifecycle
 // events into notifications. The goroutine idles cheaply while notifications
-// are disabled and picks the config up again on the next tick.
+// are disabled and picks the config up again on the next tick. It stops when
+// stopLifecycleNotifier is called (graceful shutdown, before the DB closes).
 func (s *Server) startLifecycleNotifier() {
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	s.lifecycleNotifierStop, s.lifecycleNotifierDone = stop, done
 	s.safeGo("lifecycle notifier", func() {
+		defer close(done)
 		for {
-			time.Sleep(s.lifecyclePollInterval())
+			timer := time.NewTimer(s.lifecyclePollInterval())
+			select {
+			case <-stop:
+				timer.Stop()
+				return
+			case <-timer.C:
+			}
 			// Run the tick inline (not via safeGo) so ticks never overlap:
 			// the read-then-insert delivery dedupe is not safe under
 			// concurrent ticks. A panic is contained to this iteration.
@@ -275,6 +286,27 @@ func (s *Server) startLifecycleNotifier() {
 			}()
 		}
 	})
+}
+
+// stopLifecycleNotifier stops the poll loop and waits (bounded) for an
+// in-flight tick to finish. Server.run calls it after the HTTP drain and
+// BEFORE closing the database: a tick in flight at shutdown can complete an
+// external Send and then fail the delivery-row insert against a closed DB —
+// the in-memory retry stash dies with the process and the event would re-send
+// after restart. Waiting lets the tick land its bookkeeping first; the timeout
+// keeps a pathologically slow tick from wedging shutdown, accepting the
+// (pre-existing) duplicate-send window in that case.
+func (s *Server) stopLifecycleNotifier(timeout time.Duration) {
+	if s.lifecycleNotifierStop == nil {
+		return
+	}
+	close(s.lifecycleNotifierStop)
+	s.lifecycleNotifierStop = nil
+	select {
+	case <-s.lifecycleNotifierDone:
+	case <-time.After(timeout):
+		log.Printf("[notify] lifecycle notifier tick still running after %v; shutting down anyway", timeout)
+	}
 }
 
 type lifecycleEventRow struct {
@@ -333,12 +365,17 @@ func (s *Server) lifecycleNotifierTick() {
 		return
 	}
 	lc := cfg.Lifecycle
-	nc := cfg.Notifiers[lc.Via] // exists: validated above
-	notifier, err := s.notifierFor(lc.Via, nc, s.hubSecretResolver())
+	// Trimmed to match ValidateNotificationsConfig, which resolves the via
+	// after strings.TrimSpace: a hub.yaml with via: "eng-agents " passes
+	// validation, so looking it up raw here would yield a zero NotifierConfig
+	// and silently stop notifications while everything reports green.
+	via := strings.TrimSpace(lc.Via)
+	nc := cfg.Notifiers[via] // exists: validated above
+	notifier, err := s.notifierFor(via, nc, s.hubSecretResolver())
 	if err != nil {
 		// Unknown provider type, unresolvable secret, bad provider settings:
 		// pause (leaving all cursors) until the operator fixes the config.
-		s.logPollWarningOnce("notify-notifier", "[notify] notifier %q unavailable — notifications paused: %v", lc.Via, err)
+		s.logPollWarningOnce("notify-notifier", "[notify] notifier %q unavailable — notifications paused: %v", via, err)
 		return
 	}
 	s.clearPollWarning("notify-config")
@@ -662,6 +699,18 @@ func (s *Server) lifecycleDeliveryPending(eventID string) bool {
 // flushPendingNotificationDeliveries retries delivery rows whose insert
 // failed after a successful send. Runs at the top of every tick so the stash
 // drains as soon as the DB accepts writes again.
+//
+// Known window: the stash only closes the dedupe gap within one process
+// lifetime. A crash between a successful Send and the insert (or flush)
+// landing loses the stash, and for claw-pass events — whose delivery row is
+// their only dedupe — the SQL anti-join re-selects the claw on the next boot
+// and the message is sent again. That is inherent to at-least-once delivery
+// without a provider-side idempotency key (chat.postMessage has none); a
+// distributed transaction is deliberately out of scope. The window is kept
+// small: the insert runs immediately after Send, and graceful shutdown stops
+// the loop and drains in-flight ticks before the DB closes
+// (stopLifecycleNotifier), leaving only a hard crash in the microseconds
+// between Send and insert exposed.
 func (s *Server) flushPendingNotificationDeliveries() {
 	for eventID, p := range s.lifecyclePendingDeliveries {
 		if err := s.execNotificationDelivery(eventID, p.runID, p.messageHandle, p.status); err != nil {
@@ -1083,7 +1132,8 @@ func (s *Server) handleNotificationTest(w http.ResponseWriter, r *http.Request) 
 		jsonError(w, http.StatusBadRequest, "notifications config invalid: "+err.Error())
 		return
 	}
-	via := cfg.Lifecycle.Via
+	// Trimmed to match ValidateNotificationsConfig (see lifecycleNotifierTick).
+	via := strings.TrimSpace(cfg.Lifecycle.Via)
 	nc := cfg.Notifiers[via] // exists: validated above
 
 	if body.RunID != "" && body.ClawID != "" {

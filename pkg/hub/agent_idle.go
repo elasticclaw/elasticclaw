@@ -131,24 +131,24 @@ func (s *Server) checkAgentIdle(nowAt time.Time, clawID string, cc *clawConn) {
 		s.clearAgentIdleLatch(clawID, cc)
 		return
 	}
-	// anchor identifies the stretch: the end of the last real turn, or — for
-	// a claw that never ran one — the moment this connection registered. A
-	// claw that came up connected and was never prompted at all (workflow
-	// start failed, pipeline entry stage never injected, trigger dropped the
-	// issue) is the most common real stall, so "no turn ever" must alert too.
-	anchor := lastTurn
-	if anchor.IsZero() {
-		anchor = connectedAt
-	}
-	if anchor.IsZero() {
-		return // no usable clock at all (registration always stamps connectedAt)
-	}
+	// The stretch starts at the end of the last real turn, or — for a claw
+	// that never ran one — the moment this connection registered. A claw that
+	// came up connected and was never prompted at all (workflow start failed,
+	// pipeline entry stage never injected, trigger dropped the issue) is the
+	// most common real stall, so "no turn ever" must alert too.
+	//
 	// The stretch cannot extend into time the claw was not connected:
 	// lastTurnFinishedAt is re-seeded from message history on registration
 	// with no time bound, so without this floor a bridge that was offline
 	// overnight — or a claw restored from a checkpoint — would be alerted on
 	// its first tick for idleness that predates the connection.
-	stretchStartAt := anchor
+	stretchStartAt := lastTurn
+	if stretchStartAt.IsZero() {
+		stretchStartAt = connectedAt
+	}
+	if stretchStartAt.IsZero() {
+		return // no usable clock at all (registration always stamps connectedAt)
+	}
 	if stretchStartAt.Before(connectedAt) {
 		stretchStartAt = connectedAt
 	}
@@ -162,8 +162,8 @@ func (s *Server) checkAgentIdle(nowAt time.Time, clawID string, cc *clawConn) {
 
 	stretchStart := stretchStartAt.UnixMilli()
 	var status, taskRunID, pipelineStage string
-	var idleSince int64
-	err := s.db.QueryRow(`SELECT status, COALESCE(task_run_id,''), COALESCE(pipeline_stage,''), idle_since FROM claws WHERE id=?`, clawID).Scan(&status, &taskRunID, &pipelineStage, &idleSince)
+	var idleSince, createdAtSec int64
+	err := s.db.QueryRow(`SELECT status, COALESCE(task_run_id,''), COALESCE(pipeline_stage,''), idle_since, CAST(strftime('%s', created_at) AS INTEGER) FROM claws WHERE id=?`, clawID).Scan(&status, &taskRunID, &pipelineStage, &idleSince, &createdAtSec)
 	if err != nil {
 		if err != sql.ErrNoRows {
 			log.Printf("[agent-idle] read claw %s: %v", shortID(clawID), err)
@@ -175,8 +175,24 @@ func (s *Server) checkAgentIdle(nowAt time.Time, clawID string, cc *clawConn) {
 	// carries the stretch's identity across restarts: a reconnect moves
 	// connectedAt but re-seeds lastTurnFinishedAt to (roughly) its old value,
 	// and a latched stretch must stay silent through hub restarts.
+	//
+	// A claw that has never run a turn anchors on claws.created_at instead:
+	// connectedAt is re-stamped on every registration, so it cannot name a
+	// stretch across bridge reconnects or hub restarts — and a claw that has
+	// never finished a turn has by definition been stalled continuously since
+	// it was created, so a reconnect does not start a new stall. The stable
+	// anchor keeps the ordinary comparison working (created_at never moves,
+	// so it always predates a live latch); the latch clears the moment a turn
+	// runs (clearAgentIdleLatch), re-arming the alert for real new stretches.
+	// Accepted consequence: a never-turn stall that began before the
+	// notification baseline is parked once and stays parked across reconnects
+	// — the "first enable never replays history" rule applied consistently.
+	anchor := lastTurn
+	if anchor.IsZero() {
+		anchor = time.Unix(createdAtSec, 0)
+	}
 	slackMs := agentIdleStretchSlack.Milliseconds()
-	if idleSince != 0 && (anchor.UnixMilli() <= idleSince+slackMs || stretchStart <= idleSince+slackMs) {
+	if idleSince != 0 && anchor.UnixMilli() <= idleSince+slackMs {
 		cc.mu.Lock()
 		cc.idleNotifiedAt = nowAt
 		cc.mu.Unlock()
