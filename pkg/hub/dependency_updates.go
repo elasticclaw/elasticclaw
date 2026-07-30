@@ -576,18 +576,22 @@ for manifest in manifests:
             result["commands"].append({"command": "go", "cwd": rel(cwd), "exit_code": 127, "stderr": "go executable not found"})
             had_failure = True
             continue
-        listed = run_command(cwd, "go list -m -u -json all")
-        # Even if go list exits non-zero (e.g. because of invalid placeholder versions
-        # behind replace directives), stdout may still contain valid JSON for usable
-        # modules. Try to parse it and apply whatever we can.
+        listed = run_command(cwd, "go list -e -m -u -json all")
+        # Use -e so go list keeps going when a module behind a replace directive or an
+        # unreplaceable placeholder version cannot be resolved. Modules with errors are
+        # emitted as JSON objects with an Error field; we skip them below. Even if go
+        # list exits non-zero, stdout may still contain valid JSON for usable modules,
+        # so we try to parse it and apply whatever we can.
         try:
             apply_updates = []
             for module in parse_go_modules(listed.stdout):
                 name = module.get("Path", "")
-                # Skip the main module, modules pinned by replace directives, and
-                # transitive-only dependencies. Only direct dependencies can be safely
-                # updated by go get; replaced modules would conflict with the directive.
-                if module.get("Main") or module.get("Replace") or module.get("Indirect"):
+                # Skip the main module, modules pinned by replace directives, modules
+                # that carry a resolution error, and transitive-only dependencies. Only
+                # direct dependencies can be safely updated by go get; replaced modules
+                # would conflict with the directive and error-carrying modules cannot be
+                # trusted to provide a valid update target.
+                if module.get("Main") or module.get("Replace") or module.get("Error") or module.get("Indirect"):
                     continue
                 update = module.get("Update") or {}
                 if not update:
