@@ -259,29 +259,53 @@ func (cs *cronScheduler) runWorkflow(sw *scheduledWorkflow) (workflowRunStartSta
 	// Record run start
 	cs.recordRun(runID, sw, "running", "", string(contextJSON))
 
-	// Build inputs (empty for cron, but could be extended)
-	inputs := make(map[string]string)
+	// Scheduled workflows cannot prompt an operator for inputs, so resolve
+	// declared defaults and fail the run if a required input has no default.
+	rawInputs := make(map[string]interface{})
+	for _, input := range sw.workflow.Inputs {
+		if input.Default != "" {
+			rawInputs[input.Name] = input.Default
+		}
+	}
+	inputs, err := validateFactoryInputs(sw.workflow.Inputs, rawInputs)
+	if err != nil {
+		result := fmt.Sprintf("invalid scheduled inputs: %v", err)
+		log.Printf("[cron] failed to resolve inputs for %s: %v", key, err)
+		cs.failRun(runID, result)
+		cs.releaseWorkflowSlot(key)
+		return workflowRunFailed, err
+	}
+
+	timeoutAt := time.Time{}
+	if sw.trigger.Timeout != "" {
+		timeout, err := time.ParseDuration(sw.trigger.Timeout)
+		if err != nil {
+			result := fmt.Sprintf("invalid timeout: %v", err)
+			log.Printf("[cron] failed to resolve timeout for %s: %v", key, err)
+			cs.failRun(runID, result)
+			cs.releaseWorkflowSlot(key)
+			return workflowRunFailed, err
+		}
+		timeoutAt = now.Add(timeout)
+	}
 
 	// Create claw
 	clawID, _, err := cs.srv.createClawFromWorkflowWithOptions(
 		sw.workspace,
 		sw.workflow,
 		workflowCreateOptions{
-			inputs:   inputs,
-			reason:   fmt.Sprintf("cron run %s at %s", runID, now.Format(time.RFC3339)),
-			clawName: fmt.Sprintf("%s-%s", sw.workflow.Name, now.Format("20060102-150405")),
+			inputs:      inputs,
+			triggerKind: "routine",
+			reason:      fmt.Sprintf("cron run %s at %s", runID, now.Format(time.RFC3339)),
+			clawName:    fmt.Sprintf("%s-%s", sw.workflow.Name, now.Format("20060102-150405")),
+			timeoutAt:   timeoutAt,
 		},
 	)
 	if err != nil {
 		log.Printf("[cron] failed to create claw for %s: %v", key, err)
 		cs.failRun(runID, fmt.Sprintf("failed to create claw: %v", err))
 		// No claw was created, so decrement the running counter immediately
-		cs.runningMu.Lock()
-		cs.running[key]--
-		if cs.running[key] < 0 {
-			cs.running[key] = 0
-		}
-		cs.runningMu.Unlock()
+		cs.releaseWorkflowSlot(key)
 		return workflowRunFailed, err
 	}
 
@@ -295,6 +319,15 @@ func (cs *cronScheduler) runWorkflow(sw *scheduledWorkflow) (workflowRunStartSta
 
 	log.Printf("[cron] started run %s for %s (claw %s)", runID, key, clawID)
 	return workflowRunStarted, nil
+}
+
+func (cs *cronScheduler) releaseWorkflowSlot(key string) {
+	cs.runningMu.Lock()
+	cs.running[key]--
+	if cs.running[key] < 0 {
+		cs.running[key] = 0
+	}
+	cs.runningMu.Unlock()
 }
 
 // recordRun inserts a workflow run record for a scheduled workflow.
@@ -394,12 +427,7 @@ func (cs *cronScheduler) releaseClawWorkflowSlot(clawID string) {
 	cs.clawWorkflowMu.Unlock()
 
 	if ok {
-		cs.runningMu.Lock()
-		cs.running[key]--
-		if cs.running[key] < 0 {
-			cs.running[key] = 0
-		}
-		cs.runningMu.Unlock()
+		cs.releaseWorkflowSlot(key)
 	}
 }
 

@@ -80,6 +80,8 @@ export function mapApiStatus(status: ApiClaw["status"]): ClawStatus {
       return "connected"
     case "idle":
       return "idle"
+    case "completed":
+      return "completed"
     case "provisioning":
     case "starting":
       return "provisioning"

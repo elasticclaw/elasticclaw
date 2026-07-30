@@ -2,10 +2,28 @@ package hub
 
 import (
 	"database/sql"
+	"encoding/json"
 	"log"
 	"strings"
 	"time"
 )
+
+func (s *Server) successfulClawTerminalStatus(clawID string) string {
+	var tagsJSON string
+	if err := s.db.QueryRow(`SELECT COALESCE(tags, '[]') FROM claws WHERE id=?`, clawID).Scan(&tagsJSON); err != nil {
+		return "deleted"
+	}
+	var tags []string
+	if json.Unmarshal([]byte(tagsJSON), &tags) != nil {
+		return "deleted"
+	}
+	for _, tag := range tags {
+		if tag == "routine" {
+			return "completed"
+		}
+	}
+	return "deleted"
+}
 
 func (s *Server) execStatusLogged(opCtx, query string, args ...any) (sql.Result, error) {
 	res, err := s.db.Exec(query, args...)
@@ -50,19 +68,19 @@ func (s *Server) finishClawTerminalTx(clawID, clawStatus, diagnostic, runStatus,
 			var res sql.Result
 			switch clawStatus {
 			case "deleted":
-				res, err = tx.Exec(`UPDATE claws SET status=?, bootstrap_status='' WHERE id=? AND status NOT IN ('deleted','error')`, clawStatus, clawID)
+				res, err = tx.Exec(`UPDATE claws SET status=?, bootstrap_status='' WHERE id=? AND status NOT IN ('completed','deleted','error')`, clawStatus, clawID)
 			case "idle":
-				res, err = tx.Exec(`UPDATE claws SET status=? WHERE id=? AND status NOT IN ('deleted','error')`, clawStatus, clawID)
+				res, err = tx.Exec(`UPDATE claws SET status=? WHERE id=? AND status NOT IN ('completed','deleted','error')`, clawStatus, clawID)
 			default:
 				pending := 0
 				if opts.setStopCommentPending {
 					pending = 1
 				}
-				res, err = tx.Exec(`UPDATE claws SET status=?, bootstrap_status='', bootstrap_diagnostic=?, stop_comment_pending=? WHERE id=? AND status NOT IN ('deleted','error')`, clawStatus, diagnostic, pending, clawID)
+				res, err = tx.Exec(`UPDATE claws SET status=?, bootstrap_status='', bootstrap_diagnostic=?, stop_comment_pending=? WHERE id=? AND status NOT IN ('completed','deleted','error')`, clawStatus, diagnostic, pending, clawID)
 				// Some test/legacy schemas predate the marker migration. The
 				// migration runs in production; retain terminal atomicity there too.
 				if err != nil && strings.Contains(strings.ToLower(err.Error()), "no such column: stop_comment_pending") {
-					res, err = tx.Exec(`UPDATE claws SET status=?, bootstrap_status='', bootstrap_diagnostic=? WHERE id=? AND status NOT IN ('deleted','error')`, clawStatus, diagnostic, clawID)
+					res, err = tx.Exec(`UPDATE claws SET status=?, bootstrap_status='', bootstrap_diagnostic=? WHERE id=? AND status NOT IN ('completed','deleted','error')`, clawStatus, diagnostic, clawID)
 				}
 			}
 			if err == nil {

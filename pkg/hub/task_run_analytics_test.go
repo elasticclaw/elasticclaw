@@ -1505,7 +1505,7 @@ func TestTaskRunDoneWithoutPRAllowsNonPRRuns(t *testing.T) {
 		t.Fatalf("read claw status: %v", err)
 	}
 	if status != "deleted" {
-		t.Fatalf("expected non-pr claw to be deleted after completion, got %q", status)
+		t.Fatalf("expected non-routine claw to be deleted after completion, got %q", status)
 	}
 	var injected int
 	if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND role='user' AND content LIKE '%received with no PR URLs%'`, "claw-done-non-pr").Scan(&injected); err != nil {

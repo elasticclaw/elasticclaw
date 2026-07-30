@@ -319,6 +319,11 @@ export interface Workflow {
   enableManualTrigger?: boolean
   secretRefs?: Record<string, string>
   inputs?: WorkflowInput[]
+  task?: string
+  schedule?: string
+  timezone?: string
+  overlapPolicy?: "skip" | "queue" | "parallel" | string
+  timeout?: string
 }
 
 export interface Workspace {
@@ -343,7 +348,15 @@ export async function fetchWorkflow(workspaceName: string, workflowName: string)
 
 export async function updateWorkflowControls(
   workflow: Workflow,
-  patch: { enabled?: boolean; enableManualTrigger?: boolean }
+  patch: {
+    enabled?: boolean
+    enableManualTrigger?: boolean
+    task?: string
+    schedule?: string
+    timezone?: string
+    overlapPolicy?: string
+    timeout?: string
+  }
 ): Promise<Workflow> {
   return apiFetch<Workflow>(
     `/api/workspaces/${encodeURIComponent(workflow.workspaceName)}/workflows/${encodeURIComponent(workflow.name)}`,
@@ -351,6 +364,124 @@ export async function updateWorkflowControls(
       method: "PATCH",
       body: JSON.stringify(patch),
     }
+  )
+}
+
+export interface CreateRoutineInput {
+  name: string
+  task: string
+  schedule: string
+  timezone?: string
+  overlapPolicy?: "skip" | "parallel"
+  timeout?: string
+}
+
+export interface RoutinePreflightCheck {
+  id: string
+  category: string
+  status: "pass" | "warning" | "error"
+  title: string
+  description: string
+  fixAction?: {
+    type: string
+    target: string
+    label: string
+  }
+}
+
+export interface RoutinePreflight {
+  ready: boolean
+  status: "ready" | "needs_setup"
+  checks: RoutinePreflightCheck[]
+}
+
+function routineWorkflowInput(routine: CreateRoutineInput) {
+  return {
+    schemaVersion: "v1",
+    name: routine.name,
+    enabled: false,
+    trigger: {
+      cron: {
+        schedule: routine.schedule,
+        timezone: routine.timezone || "UTC",
+        overlap_policy: routine.overlapPolicy || "skip",
+        timeout: routine.timeout || undefined,
+      },
+    },
+    stages: [
+      {
+        id: "working",
+        label: "Working",
+        entry: true,
+        onEnter: {
+          inject: `${routine.task.trim()}\n\nWhen the routine is complete, say [DONE].`,
+        },
+      },
+      {
+        id: "completed",
+        label: "Completed",
+        terminal: true,
+        triggers: [{ message_contains: "[DONE]" }],
+      },
+    ],
+  }
+}
+
+export async function draftRoutineWithAI(
+  workspaceName: string,
+  description: string,
+  timezone: string
+): Promise<CreateRoutineInput> {
+  return apiFetch<CreateRoutineInput>(
+    `/api/workspaces/${encodeURIComponent(workspaceName)}/routines/draft`,
+    {
+      method: "POST",
+      body: JSON.stringify({ description, timezone }),
+    }
+  )
+}
+
+export async function preflightRoutineDraft(workspaceName: string, routine: CreateRoutineInput): Promise<RoutinePreflight> {
+  return apiFetch<RoutinePreflight>(
+    `/api/workspaces/${encodeURIComponent(workspaceName)}/routines/preflight`,
+    {
+      method: "POST",
+      body: JSON.stringify({ workflow: routineWorkflowInput(routine) }),
+    }
+  )
+}
+
+export async function fetchRoutinePreflight(workspaceName: string, workflowName: string): Promise<RoutinePreflight> {
+  return apiFetch<RoutinePreflight>(
+    `/api/workspaces/${encodeURIComponent(workspaceName)}/workflows/${encodeURIComponent(workflowName)}/preflight`
+  )
+}
+
+export async function createRoutine(workspaceName: string, routine: CreateRoutineInput): Promise<Workflow> {
+  const response = await apiFetch<{ workflows: Workflow[] }>(
+    `/api/workspaces/${encodeURIComponent(workspaceName)}/workflows`,
+    {
+      method: "POST",
+      body: JSON.stringify({
+        workflows: [routineWorkflowInput(routine)],
+      }),
+    }
+  )
+  const created = response.workflows?.find((workflow) => workflow.name === routine.name)
+  if (!created) throw new Error("The Hub did not return the created routine")
+  return created
+}
+
+export async function triggerRoutine(workspaceName: string, workflowName: string): Promise<{ status: string; workflow: string }> {
+  return apiFetch<{ status: string; workflow: string }>(
+    `/api/workspaces/${encodeURIComponent(workspaceName)}/workflows/${encodeURIComponent(workflowName)}/cron/trigger`,
+    { method: "POST" }
+  )
+}
+
+export async function fetchRoutineNextRun(workspaceName: string, workflowName: string): Promise<{ workflow: string; next_run: string }> {
+  return apiFetch<{ workflow: string; next_run: string }>(
+    `/api/workspaces/${encodeURIComponent(workspaceName)}/workflows/${encodeURIComponent(workflowName)}/cron/next`
   )
 }
 

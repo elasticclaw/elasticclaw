@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -246,6 +247,124 @@ func TestCronWorkflowTriggerValidation(t *testing.T) {
 				t.Errorf("WorkflowConfig.Validate() unexpected error: %v", err)
 			}
 		})
+	}
+}
+
+func TestCronRunUsesInputDefaultsAndEnforcesTimeout(t *testing.T) {
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
+	t.Setenv("ELASTICCLAW_NOOP_PROVIDER", "1")
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{
+		Token:     "test-token",
+		ClawToken: "test-claw-token",
+		Providers: map[string]types.ProviderConfig{"noop": {Type: "noop"}},
+	}, "", "", "")
+	cs := newCronScheduler(s)
+	startedAt := time.Now().UTC()
+	sw := &scheduledWorkflow{
+		key: "engineering/dependency-health",
+		workspace: &types.WorkspaceConfig{
+			Name: "engineering",
+			Files: map[string]string{
+				"elasticclaw-config.yaml": "schema_version: v1\nname: engineering\nprovider: noop\n",
+			},
+		},
+		workflow: &types.WorkflowConfig{
+			Name:     "dependency-health",
+			Provider: "noop",
+			Inputs: []types.FactoryInput{{
+				Name:     "repository",
+				Type:     "string",
+				Required: true,
+				Default:  "elasticclaw/elasticclaw",
+			}},
+		},
+		trigger: &types.CronWorkflowTrigger{
+			Schedule: "0 9 * * *",
+			Timeout:  "2h",
+		},
+	}
+
+	status, err := cs.runWorkflow(sw)
+	if err != nil {
+		t.Fatalf("run workflow: %v", err)
+	}
+	if status != workflowRunStarted {
+		t.Fatalf("status = %q, want %q", status, workflowRunStarted)
+	}
+
+	var clawID, templateFiles, tagsJSON string
+	if err := db.QueryRow(`SELECT id, template_files, tags FROM claws WHERE name LIKE 'dependency-health-%'`).Scan(&clawID, &templateFiles, &tagsJSON); err != nil {
+		t.Fatalf("read created claw: %v", err)
+	}
+	var tags []string
+	if err := json.Unmarshal([]byte(tagsJSON), &tags); err != nil {
+		t.Fatalf("decode claw tags: %v", err)
+	}
+	if len(tags) == 0 || tags[0] != "routine" {
+		t.Fatalf("claw tags = %#v, want routine origin first", tags)
+	}
+	for _, tag := range tags {
+		if tag == "manual-trigger" {
+			t.Fatalf("scheduled claw tags = %#v, must not include manual-trigger", tags)
+		}
+	}
+	var files map[string]string
+	if err := json.Unmarshal([]byte(templateFiles), &files); err != nil {
+		t.Fatalf("decode template files: %v", err)
+	}
+	var triggerInputs map[string]string
+	if err := json.Unmarshal([]byte(files["TRIGGER_INPUTS.json"]), &triggerInputs); err != nil {
+		t.Fatalf("decode scheduled trigger inputs: %v", err)
+	}
+	if triggerInputs["repository"] != "elasticclaw/elasticclaw" {
+		t.Fatalf("scheduled input default = %q, want elasticclaw/elasticclaw", triggerInputs["repository"])
+	}
+
+	var timeoutAt int64
+	if err := db.QueryRow(`SELECT timeout_at FROM task_runs WHERE claw_id=?`, clawID).Scan(&timeoutAt); err != nil {
+		t.Fatalf("read task timeout: %v", err)
+	}
+	wantTimeout := startedAt.Add(2 * time.Hour).UnixMilli()
+	if timeoutAt < wantTimeout-5_000 || timeoutAt > wantTimeout+5_000 {
+		t.Fatalf("timeout_at = %d, want approximately %d", timeoutAt, wantTimeout)
+	}
+}
+
+func TestCronRunRejectsRequiredInputWithoutDefault(t *testing.T) {
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
+	cs := newCronScheduler(s)
+	sw := &scheduledWorkflow{
+		key:       "engineering/report",
+		workspace: &types.WorkspaceConfig{Name: "engineering"},
+		workflow: &types.WorkflowConfig{
+			Name: "report",
+			Inputs: []types.FactoryInput{{
+				Name:     "project",
+				Type:     "string",
+				Required: true,
+			}},
+		},
+		trigger: &types.CronWorkflowTrigger{Schedule: "0 9 * * *"},
+	}
+
+	status, err := cs.runWorkflow(sw)
+	if err == nil {
+		t.Fatal("expected required scheduled input error")
+	}
+	if status != workflowRunFailed {
+		t.Fatalf("status = %q, want %q", status, workflowRunFailed)
+	}
+	if cs.running[sw.key] != 0 {
+		t.Fatalf("running slot count = %d, want 0", cs.running[sw.key])
+	}
+
+	var runStatus, result string
+	if err := db.QueryRow(`SELECT status, result FROM workflow_runs WHERE workspace_name=? AND workflow_name=?`, "engineering", "report").Scan(&runStatus, &result); err != nil {
+		t.Fatalf("read failed workflow run: %v", err)
+	}
+	if runStatus != "failed" || !strings.Contains(result, `missing required input "project"`) {
+		t.Fatalf("run status/result = %q/%q", runStatus, result)
 	}
 }
 

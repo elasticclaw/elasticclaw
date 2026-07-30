@@ -39,7 +39,7 @@ func (s *Server) checkRuntimeState(ctx context.Context) []DoctorCheck {
 		current.Add(-2*cfg.offlineGrace), current.Add(-2*cfg.provisioningMaxAge))
 	appendTimestampCheck("Orphaned workflow runs", runtimeBootReconciliationHint, `
 		SELECT COUNT(*), MIN(CAST(strftime('%s', COALESCE(started_at, created_at)) AS INTEGER)) FROM workflow_runs
-		WHERE status='running' AND (claw_id='' OR NOT EXISTS (SELECT 1 FROM claws c WHERE c.id=workflow_runs.claw_id) OR EXISTS (SELECT 1 FROM claws c WHERE c.id=workflow_runs.claw_id AND c.status IN ('error','deleted')))`)
+		WHERE status='running' AND (claw_id='' OR NOT EXISTS (SELECT 1 FROM claws c WHERE c.id=workflow_runs.claw_id) OR EXISTS (SELECT 1 FROM claws c WHERE c.id=workflow_runs.claw_id AND c.status IN ('completed','error','deleted')))`)
 	appendTimestampCheck("Unassigned claimed factory triggers", runtimeReaperHint+runtimeAgeMarginHint, `
 		SELECT COUNT(*), MIN(CAST(strftime('%s', created_at) AS INTEGER)) FROM factory_triggers
 		WHERE status='claimed' AND claw_id='' AND created_at < ?`, current.Add(-2*cfg.claimTTL))

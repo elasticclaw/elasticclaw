@@ -7,7 +7,7 @@ import type { Claw, ClawStatus } from "@/lib/types"
 import { COLOR_CLASSES, CLAW_COLORS } from "@/lib/mappers"
 import { TagEditor } from "@/components/tag-editor"
 import { patchClaw } from "@/lib/api"
-import { Loader2, Pin, AlertCircle, Pencil } from "lucide-react"
+import { Loader2, Pin, AlertCircle, Pencil, CircleCheck } from "lucide-react"
 import { BootstrapProgress } from "@/components/bootstrap-progress"
 import { ClawTitle } from "@/components/claw-title"
 
@@ -29,6 +29,9 @@ function StatusIndicator({ status, isStreaming }: { status: ClawStatus; isStream
   }
   if (status === "error") {
     return <AlertCircle className="size-3.5 text-red-500 shrink-0" />
+  }
+  if (status === "completed") {
+    return <CircleCheck className="size-3.5 text-violet-400 shrink-0" />
   }
   return (
     <span
@@ -117,7 +120,7 @@ export function ClawCard({ claw, isSelected, onClick, onTogglePin, onTagsChange,
     }
   }
   const hasUnread = claw.unreadCount > 0
-  const isPending = claw.status === "provisioning" || claw.status === "error"
+  const isPending = claw.status === "provisioning" || claw.status === "completed" || claw.status === "error"
   const railClass = claw.isStreaming
     ? "border-l-green-500"
     : claw.status === "provisioning"

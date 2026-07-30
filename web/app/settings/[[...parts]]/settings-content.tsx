@@ -4,7 +4,7 @@ import { useParams, usePathname, useRouter } from "next/navigation"
 import React, { Suspense, useEffect, useState, useCallback, useRef } from "react"
 import { getHubUrl } from "@/lib/hub-url"
 import { getAuthToken } from "@/lib/auth-storage"
-import { Cpu, Key, Github, ChevronLeft, Shield, Zap, Copy, Check, LayoutTemplate, Trash2, Lock, Sparkles, Send, RotateCcw, Eye, EyeOff, ExternalLink, AlertTriangle, X, CheckCircle2, Webhook, Stethoscope, ArrowRight, Wrench, GitBranch, ChevronDown, BarChart3 } from "lucide-react"
+import { Cpu, Key, Github, ChevronLeft, Shield, Zap, Copy, Check, LayoutTemplate, Trash2, Lock, Sparkles, Send, RotateCcw, Eye, EyeOff, ExternalLink, AlertTriangle, X, CheckCircle2, Webhook, Stethoscope, ArrowRight, Wrench, GitBranch, ChevronDown, BarChart3, CalendarClock } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Switch } from "@/components/ui/switch"
@@ -16,6 +16,7 @@ import { fetchWorkspaces, updateWorkflowControls, type RepositoryAccess, type Wo
 import { useBranding } from "@/hooks/use-branding"
 import { AnalyticsCommandCenter } from "@/components/analytics-command-center"
 import { WorkflowRunsDialog } from "@/components/workflow-runs-dialog"
+import { RoutinesSection } from "@/components/routines-section"
 
 function isValidSection(s: string): s is Section {
   return VALID_SECTIONS.includes(s as Section)
@@ -24,6 +25,7 @@ function isValidSection(s: string): s is Section {
 const WORKSPACE_SECTIONS = new Set<Section>([
   "workspaces",
   "workflows",
+  "routines",
   "workspace-analytics",
   "github",
   "issue-trackers",
@@ -344,6 +346,7 @@ export default function SettingsSectionPage() {
       items: [
         { id: "workspaces", label: "Overview", icon: LayoutTemplate },
         { id: "workflows", label: "Workflows", icon: GitBranch },
+        { id: "routines", label: "Routines", icon: CalendarClock },
         { id: "workspace-analytics", label: "Analytics", icon: BarChart3 },
         { id: "github", label: "GitHub Apps", icon: Github },
         { id: "issue-trackers", label: "Issue Trackers", icon: Zap },
@@ -479,6 +482,9 @@ export default function SettingsSectionPage() {
           )}
           {section === "workflows" && (
             <WorkflowsSection selectedWorkspace={selectedWorkspace} />
+          )}
+          {section === "routines" && (
+            <RoutinesSection selectedWorkspace={selectedWorkspace} />
           )}
           {section === "workspace-analytics" && (
             <Suspense fallback={null}>

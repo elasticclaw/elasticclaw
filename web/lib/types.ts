@@ -1,4 +1,4 @@
-export type ClawStatus = "connected" | "idle" | "offline" | "provisioning" | "error"
+export type ClawStatus = "connected" | "idle" | "offline" | "provisioning" | "completed" | "error"
 
 export interface Claw {
   id: string
@@ -64,7 +64,7 @@ export interface ApiClaw {
   id: string
   name: string
   template: string
-  status: "connected" | "offline" | "provisioning" | "starting" | "error" | "idle"
+  status: "connected" | "offline" | "provisioning" | "starting" | "completed" | "error" | "idle"
   last_seen: string
   created_at: string
   tenant_id: string

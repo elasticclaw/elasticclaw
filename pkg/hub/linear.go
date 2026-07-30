@@ -1589,7 +1589,8 @@ func (s *Server) completeNoPRDoneClaw(clawID, tenantID, issueID string) {
 	if err := s.db.QueryRow(`SELECT COALESCE(provider,''), COALESCE(provider_id,'') FROM claws WHERE id=? AND tenant_id=?`, clawID, tenantID).Scan(&provider, &providerID); err != nil {
 		return
 	}
-	applied, err := s.finishClawTerminalTx(clawID, "deleted", "", "completed", "success", terminalTxOpts{})
+	clawStatus := s.successfulClawTerminalStatus(clawID)
+	applied, err := s.finishClawTerminalTx(clawID, clawStatus, "", "completed", "success", terminalTxOpts{})
 	if err != nil || !applied {
 		return
 	}
@@ -1610,7 +1611,7 @@ func (s *Server) completeNoPRDoneClaw(clawID, tenantID, issueID string) {
 	}
 	s.broadcastToUsers(tenantID, types.WSMessage{
 		Type:    "claw_status",
-		Payload: map[string]string{"claw_id": clawID, "status": "deleted"},
+		Payload: map[string]string{"claw_id": clawID, "status": clawStatus},
 	})
 	s.mu.Lock()
 	if cc, ok := s.claws[clawID]; ok {

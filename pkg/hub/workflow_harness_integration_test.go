@@ -381,7 +381,7 @@ func TestWorkflowHarness_TerminalStage(t *testing.T) {
 	// Wait for terminal inject
 	bridge.WaitForMessage(t, "Workflow complete", 5*time.Second)
 
-	// Verify claw is deleted (terminal stage)
+	// Verify the claw is deleted (terminal stage).
 	// Give the async goroutine time to update the DB
 	time.Sleep(200 * time.Millisecond)
 	ts.WaitForClawStatus(t, clawID, "deleted", 5*time.Second)

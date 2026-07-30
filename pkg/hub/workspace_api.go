@@ -56,6 +56,11 @@ type WorkflowView struct {
 	Volumes              []types.WorkflowVolume `json:"volumes,omitempty"`
 	Inputs               []types.FactoryInput   `json:"inputs,omitempty"`
 	RawConfig            string                 `json:"rawConfig,omitempty"`
+	Task                 string                 `json:"task,omitempty"`
+	Schedule             string                 `json:"schedule,omitempty"`
+	Timezone             string                 `json:"timezone,omitempty"`
+	OverlapPolicy        string                 `json:"overlapPolicy,omitempty"`
+	Timeout              string                 `json:"timeout,omitempty"`
 }
 
 func (s *Server) handleWorkspacesList(w http.ResponseWriter, _ *http.Request) {
@@ -230,9 +235,14 @@ func (s *Server) handleWorkspaceWorkflowDetail(w http.ResponseWriter, r *http.Re
 }
 
 type WorkflowPatchRequest struct {
-	Enabled                  *bool `json:"enabled"`
-	EnableManualTrigger      *bool `json:"enableManualTrigger"`
-	EnableManualTriggerSnake *bool `json:"enable_manual_trigger"`
+	Enabled                  *bool   `json:"enabled"`
+	EnableManualTrigger      *bool   `json:"enableManualTrigger"`
+	EnableManualTriggerSnake *bool   `json:"enable_manual_trigger"`
+	Task                     *string `json:"task"`
+	Schedule                 *string `json:"schedule"`
+	Timezone                 *string `json:"timezone"`
+	OverlapPolicy            *string `json:"overlapPolicy"`
+	Timeout                  *string `json:"timeout"`
 }
 
 func (s *Server) handleWorkspaceWorkflowPatch(w http.ResponseWriter, r *http.Request) {
@@ -247,7 +257,8 @@ func (s *Server) handleWorkspaceWorkflowPatch(w http.ResponseWriter, r *http.Req
 		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	if req.Enabled == nil && req.EnableManualTrigger == nil && req.EnableManualTriggerSnake == nil {
+	hasCronPatch := req.Schedule != nil || req.Timezone != nil || req.OverlapPolicy != nil || req.Timeout != nil
+	if req.Enabled == nil && req.EnableManualTrigger == nil && req.EnableManualTriggerSnake == nil && req.Task == nil && !hasCronPatch {
 		http.Error(w, "no workflow fields provided", http.StatusBadRequest)
 		return
 	}
@@ -266,6 +277,19 @@ func (s *Server) handleWorkspaceWorkflowPatch(w http.ResponseWriter, r *http.Req
 		return
 	}
 	if req.Enabled != nil {
+		if *req.Enabled && (workflow.Enabled == nil || !*workflow.Enabled) {
+			preflight := s.preflightRoutine(workspace, workflow)
+			if !preflight.Ready {
+				var blockers []string
+				for _, check := range preflight.Checks {
+					if check.Status == "error" {
+						blockers = append(blockers, check.Title)
+					}
+				}
+				http.Error(w, "routine is not ready: "+strings.Join(blockers, "; "), http.StatusConflict)
+				return
+			}
+		}
 		workflow.Enabled = req.Enabled
 	}
 	if req.EnableManualTrigger != nil {
@@ -273,6 +297,53 @@ func (s *Server) handleWorkspaceWorkflowPatch(w http.ResponseWriter, r *http.Req
 	}
 	if req.EnableManualTriggerSnake != nil {
 		workflow.EnableManualTrigger = *req.EnableManualTriggerSnake
+	}
+	if hasCronPatch {
+		if workflow.Trigger == nil || workflow.Trigger.Cron == nil {
+			http.Error(w, "schedule fields can only be updated for cron-triggered workflows", http.StatusBadRequest)
+			return
+		}
+		if req.Schedule != nil {
+			workflow.Trigger.Cron.Schedule = strings.TrimSpace(*req.Schedule)
+		}
+		if req.Timezone != nil {
+			workflow.Trigger.Cron.Timezone = strings.TrimSpace(*req.Timezone)
+		}
+		if req.OverlapPolicy != nil {
+			workflow.Trigger.Cron.OverlapPolicy = strings.TrimSpace(*req.OverlapPolicy)
+		}
+		if req.Timeout != nil {
+			workflow.Trigger.Cron.Timeout = strings.TrimSpace(*req.Timeout)
+		}
+	}
+	if req.Task != nil {
+		task := strings.TrimSpace(*req.Task)
+		if task == "" {
+			http.Error(w, "routine task cannot be empty", http.StatusBadRequest)
+			return
+		}
+		stageIndex := -1
+		for i := range workflow.Stages {
+			if workflow.Stages[i].Entry {
+				stageIndex = i
+				break
+			}
+		}
+		if stageIndex < 0 && len(workflow.Stages) > 0 {
+			stageIndex = 0
+		}
+		if stageIndex < 0 {
+			http.Error(w, "routine has no stage to receive the task", http.StatusBadRequest)
+			return
+		}
+		if workflow.Stages[stageIndex].OnEnter == nil {
+			workflow.Stages[stageIndex].OnEnter = map[string]interface{}{}
+		}
+		workflow.Stages[stageIndex].OnEnter["inject"] = routineTaskInject(task)
+	}
+	if err := workflow.Validate(); err != nil {
+		http.Error(w, "invalid workflow update: "+err.Error(), http.StatusBadRequest)
+		return
 	}
 	workflow.RawConfig = ""
 	if err := saveExternalWorkflows(workspace.Name, []*types.WorkflowConfig{workflow}); err != nil {
@@ -511,7 +582,7 @@ func workflowToView(workspaceName string, workflow *types.WorkflowConfig) Workfl
 	if workflow.Integration == "linear" || (workflow.Trigger != nil && workflow.Trigger.Linear != nil) {
 		projects = append([]string(nil), linearWorkflowProjects(workflow)...)
 	}
-	return WorkflowView{
+	view := WorkflowView{
 		Name:                 workflow.Name,
 		WorkspaceName:        workspaceName,
 		Source:               "workflow",
@@ -528,6 +599,37 @@ func workflowToView(workspaceName string, workflow *types.WorkflowConfig) Workfl
 		Volumes:              append([]types.WorkflowVolume(nil), workflow.Volumes...),
 		Inputs:               append([]types.FactoryInput(nil), workflow.Inputs...),
 	}
+	if workflow.Trigger != nil && workflow.Trigger.Cron != nil {
+		view.Task = routineTaskFromWorkflow(workflow)
+		view.Schedule = workflow.Trigger.Cron.Schedule
+		view.Timezone = workflow.Trigger.Cron.Timezone
+		view.OverlapPolicy = workflow.Trigger.Cron.OverlapPolicy
+		view.Timeout = workflow.Trigger.Cron.Timeout
+	}
+	return view
+}
+
+const routineTaskDoneInstruction = "When the routine is complete, say [DONE]."
+
+func routineTaskInject(task string) string {
+	return strings.TrimSpace(task) + "\n\n" + routineTaskDoneInstruction
+}
+
+func routineTaskFromWorkflow(workflow *types.WorkflowConfig) string {
+	for _, stage := range workflow.Stages {
+		if !stage.Entry || stage.OnEnter == nil {
+			continue
+		}
+		if inject, ok := stage.OnEnter["inject"].(string); ok {
+			return strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(inject), routineTaskDoneInstruction))
+		}
+	}
+	if len(workflow.Stages) > 0 && workflow.Stages[0].OnEnter != nil {
+		if inject, ok := workflow.Stages[0].OnEnter["inject"].(string); ok {
+			return strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(inject), routineTaskDoneInstruction))
+		}
+	}
+	return ""
 }
 
 func (s *Server) resolveWorkflowConfig(workspaceName, workflowName string) (*types.WorkspaceConfig, *types.WorkflowConfig, bool, error) {

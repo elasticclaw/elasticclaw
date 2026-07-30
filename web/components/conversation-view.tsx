@@ -1,7 +1,7 @@
 "use client"
 
 import { useState, useRef, useEffect, useCallback, useMemo, memo } from "react"
-import { Send, Terminal, TerminalSquare, ChevronLeft, ChevronRight, ChevronDown, Loader2, LayoutGrid, Info, MessageSquare, Trash2, AlertCircle, Wrench, GripVertical, Settings2, Paperclip, File as FileIcon, X } from "lucide-react"
+import { Send, Terminal, TerminalSquare, ChevronLeft, ChevronRight, ChevronDown, Loader2, LayoutGrid, Info, MessageSquare, Trash2, AlertCircle, CheckCircle2, Wrench, GripVertical, Settings2, Paperclip, File as FileIcon, X } from "lucide-react"
 import {
   DndContext,
   closestCenter,
@@ -38,6 +38,7 @@ import { useBranding } from "@/hooks/use-branding"
 import { BootstrapProgress } from "@/components/bootstrap-progress"
 import { ClawTitle } from "@/components/claw-title"
 import { isTerminalAssistantMessage } from "@/lib/messages"
+import { tagBadgeClass } from "@/lib/tag-styles"
 import { DependencyDowntimeBanner } from "@/components/dependency-downtime-banner"
 import type { TypewriterState } from "@/hooks/use-typewriter"
 
@@ -216,6 +217,7 @@ function StatusBadge({ status }: { status: ClawStatus }) {
         "text-xs font-medium",
         status === "connected" && "border-green-500/50 text-green-500",
         status === "idle" && "border-amber-500/50 text-amber-500",
+        status === "completed" && "border-violet-500/50 text-violet-400",
         status === "offline" && "border-red-500/50 text-red-500"
       )}
     >
@@ -228,6 +230,7 @@ function StatusDot({ status, isStreaming }: { status: ClawStatus; isStreaming: b
   if (isStreaming) return <Loader2 className="size-3.5 text-green-500 animate-spin" />
   if (status === "provisioning") return <Loader2 className="size-3.5 text-blue-400 animate-spin" />
   if (status === "error") return <AlertCircle className="size-3.5 text-red-500" />
+  if (status === "completed") return <CheckCircle2 className="size-3.5 text-violet-400" />
   return (
     <span
       className={cn(
@@ -391,7 +394,10 @@ function ClawCardBack({ claw }: { claw: Claw }) {
             {claw.tags.map((tag) => (
               <span
                 key={tag}
-                className="inline-flex items-center px-2 py-1 text-xs font-medium bg-secondary text-muted-foreground rounded"
+                className={cn(
+                  "inline-flex items-center px-2 py-1 text-xs font-medium rounded",
+                  tagBadgeClass(tag)
+                )}
               >
                 {tag}
               </span>
@@ -444,7 +450,7 @@ const ClawBoardCard = memo(function ClawBoardCard({
   const [showTerminal, setShowTerminal] = useState(false)
   const [confirmKill, setConfirmKill] = useState(false)
   const hasUnread = claw.unreadCount > 0
-  const isPending = claw.status === "provisioning" || claw.status === "error" || claw.status === "offline"
+  const isPending = claw.status === "provisioning" || claw.status === "completed" || claw.status === "error" || claw.status === "offline"
   const msgScrollRef = useRef<HTMLDivElement>(null)
   const cardFollowingLatest = useRef(true)
   const [isCardFollowingLatest, setIsCardFollowingLatest] = useState(true)
@@ -656,7 +662,10 @@ const ClawBoardCard = memo(function ClawBoardCard({
                 {claw.tags.slice(0, 3).map((tag) => (
                   <span
                     key={tag}
-                    className="inline-flex items-center px-1.5 py-0.5 text-[10px] font-medium bg-secondary text-muted-foreground rounded"
+                    className={cn(
+                      "inline-flex items-center px-1.5 py-0.5 text-[10px] font-medium rounded",
+                      tagBadgeClass(tag)
+                    )}
                   >
                     {tag}
                   </span>
@@ -864,7 +873,7 @@ const ClawBoardCard = memo(function ClawBoardCard({
                   }
                 }}
                 onPaste={onPaste}
-                placeholder={isPending ? (claw.status === "error" ? "Provisioning failed" : claw.status === "offline" ? "Agent offline" : "Starting up...") : "Send message..."}
+                placeholder={isPending ? (claw.status === "completed" ? "Run completed" : claw.status === "error" ? "Provisioning failed" : claw.status === "offline" ? "Agent offline" : "Starting up...") : "Send message..."}
                 className="flex-1 resize-none overflow-hidden rounded-md border border-input bg-background px-2 py-1.5 text-xs ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 min-h-[32px]"
                 disabled={isPending}
                 ref={cardTextareaRef}
@@ -1596,7 +1605,8 @@ function ClawChatView({
 
   const stillUploading = attachments.some((a) => a.status === "uploading")
   const hasErrored = attachments.some((a) => a.status === "error")
-  const canSubmit = !stillUploading && !hasErrored && (input.trim().length > 0 || attachments.some((a) => a.status === "ready"))
+  const isReadOnly = claw.status === "completed"
+  const canSubmit = !isReadOnly && !stillUploading && !hasErrored && (input.trim().length > 0 || attachments.some((a) => a.status === "ready"))
 
   const toggleActivityGroup = useCallback((id: string) => {
     setExpandedActivityGroups((prev) => ({ ...prev, [id]: !prev[id] }))
@@ -1765,6 +1775,7 @@ function ClawChatView({
               type="button"
               size="icon"
               variant="ghost"
+              disabled={isReadOnly}
               onClick={() => fileInputRef.current?.click()}
               className="shrink-0"
               title="Attach files"
@@ -1795,7 +1806,8 @@ function ClawChatView({
               }}
               onPaste={onPaste}
               ref={panelTextareaRef}
-              placeholder="Message agent, /stop, or attach files"
+              disabled={isReadOnly}
+              placeholder={isReadOnly ? "Run completed — history is read-only" : "Message agent, /stop, or attach files"}
               rows={1}
               className="flex-1 resize-none overflow-hidden rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 min-h-[40px]"
             />
@@ -1925,7 +1937,9 @@ export function ConversationView({
           <div className="flex items-center gap-3">
             <Terminal className="size-5 text-muted-foreground" />
             <h2 className="text-lg font-medium text-foreground">
-              {loading ? "Agents" : `${allClaws.length} Active Agents`}
+              {loading
+                ? "Agents"
+                : `${allClaws.filter((item) => item.status !== "completed").length} Active Agents · ${allClaws.filter((item) => item.status === "completed").length} Completed`}
             </h2>
           </div>
           <div className="flex min-w-0 flex-wrap items-center justify-end gap-x-4 gap-y-2 text-xs text-muted-foreground">
@@ -1941,6 +1955,10 @@ export function ConversationView({
             <div className="flex items-center gap-1.5">
               <span className="size-2 rounded-full bg-red-500" />
               <span>Offline</span>
+            </div>
+            <div className="flex items-center gap-1.5">
+              <span className="size-2 rounded-full bg-violet-400" />
+              <span>Completed</span>
             </div>
           </div>
         </header>

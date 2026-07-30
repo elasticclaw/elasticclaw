@@ -458,10 +458,13 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/workspaces/{name}/workflows", s.withAdminForMethods(s.handleWorkspaceWorkflowsList, http.MethodPost))
 	mux.HandleFunc("/api/workspaces/{workspace}/workflows/{workflow}", s.withAdminForMethods(s.handleWorkspaceWorkflowDetail, http.MethodPatch))
 	mux.HandleFunc("/api/workspaces/{workspace}/workflows/{workflow}/trigger", s.withAuth(s.handleWorkspaceWorkflowTrigger))
-	mux.HandleFunc("/api/workspaces/{workspace}/workflows/{workflow}/cron/trigger", s.withAuth(s.handleCronWorkflowTrigger)) // POST manual trigger
-	mux.HandleFunc("/api/workspaces/{workspace}/workflows/{workflow}/cron/runs", s.withAuth(s.handleCronWorkflowRuns))       // GET run history
+	mux.HandleFunc("/api/workspaces/{workspace}/workflows/{workflow}/cron/trigger", s.withAuth(s.handleCronWorkflowTrigger))  // POST manual trigger
+	mux.HandleFunc("/api/workspaces/{workspace}/workflows/{workflow}/cron/runs", s.withAuth(s.handleCronWorkflowRuns))        // GET run history
 	mux.HandleFunc("/api/workspaces/{workspace}/workflows/{workflow}/cron/runs/{runId}", s.withAuth(s.handleCronWorkflowRun)) // GET single run
-	mux.HandleFunc("/api/workspaces/{workspace}/workflows/{workflow}/cron/next", s.withAuth(s.handleCronWorkflowNextRun))    // GET next scheduled run
+	mux.HandleFunc("/api/workspaces/{workspace}/workflows/{workflow}/cron/next", s.withAuth(s.handleCronWorkflowNextRun))     // GET next scheduled run
+	mux.HandleFunc("/api/workspaces/{workspace}/routines/draft", s.withWebAdminAuth(s.handleRoutineDraft))
+	mux.HandleFunc("/api/workspaces/{workspace}/routines/preflight", s.withWebAdminAuth(s.handleRoutinePreflight))
+	mux.HandleFunc("/api/workspaces/{workspace}/workflows/{workflow}/preflight", s.withWebAdminAuth(s.handleSavedRoutinePreflight))
 	mux.HandleFunc("/api/workspaces/{workspace}/secrets", s.withAdminForMethods(s.handleWorkspaceSecretsCRUD, http.MethodPut, http.MethodPost, http.MethodDelete))
 	mux.HandleFunc("/api/workspaces/{workspace}/github-apps", s.withAdminForMethods(s.handleWorkspaceGitHubAppsCRUD, http.MethodPut, http.MethodPost, http.MethodDelete))
 	mux.HandleFunc("/api/workspaces/{workspace}/issue-trackers", s.withAdminForMethods(s.handleWorkspaceIssueTrackersCRUD, http.MethodPut, http.MethodPost, http.MethodDelete))
@@ -1128,7 +1131,7 @@ func (s *Server) handleClaws(w http.ResponseWriter, r *http.Request) {
 				c.Status = "starting"
 			}
 			c.ContextUsage = cc.contextUsage
-		} else if c.Status != "provisioning" && c.Status != "starting" && c.Status != "error" && c.Status != "pending" {
+		} else if c.Status != "provisioning" && c.Status != "starting" && c.Status != "error" && c.Status != "pending" && c.Status != "completed" {
 			// Not currently connected and not in an active provisioning state —
 			// DB status is stale (e.g. 'connected' from before hub restart)
 			c.Status = "offline"
@@ -2177,7 +2180,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 			`INSERT INTO claws(id,tenant_id,name,template,status,last_seen,created_at) VALUES(?,?,?,?,?,?,?)
 			 ON CONFLICT(id) DO UPDATE SET name=excluded.name,
 			 template=COALESCE(NULLIF(excluded.template,''), claws.template),
-			 status=CASE WHEN claws.status IN ('idle','deleted') THEN claws.status ELSE excluded.status END,
+			 status=CASE WHEN claws.status IN ('completed','idle','deleted') THEN claws.status ELSE excluded.status END,
 			 last_seen=excluded.last_seen
 			 RETURNING status`,
 			clawID, tenantID, rp.Name, rp.Template, desiredStatus, now(), now(),

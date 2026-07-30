@@ -4,6 +4,7 @@ import { useState, useRef, useEffect } from "react"
 import { X, Plus } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { patchClaw } from "@/lib/api"
+import { tagBadgeClass } from "@/lib/tag-styles"
 
 interface TagEditorProps {
   clawId: string
@@ -74,7 +75,10 @@ export function TagEditor({ clawId, tags, onTagsChange, className }: TagEditorPr
         <span
           key={tag}
           title={tag}
-          className="inline-flex items-center gap-0.5 px-1.5 py-0.5 text-[10px] font-medium bg-secondary text-muted-foreground rounded group/tag max-w-[120px]"
+          className={cn(
+            "inline-flex items-center gap-0.5 px-1.5 py-0.5 text-[10px] font-medium rounded group/tag max-w-[120px]",
+            tagBadgeClass(tag)
+          )}
         >
           <span className="truncate">{tag}</span>
           <button

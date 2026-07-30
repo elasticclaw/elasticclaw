@@ -380,7 +380,7 @@ func TestHandleClawDoneSignal_IssueLessWorkflowCompletesWithoutPR(t *testing.T) 
 	s, db := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
 	s.cronScheduler = newCronScheduler(s)
 	const clawID = "claw-issue-less-done"
-	_, err := db.Exec(`INSERT INTO claws(id, tenant_id, name, template, status, created_at) VALUES(?,?,?,?,?,datetime('now'))`, clawID, "test-tenant-id", "workflow claw", "base", "connected")
+	_, err := db.Exec(`INSERT INTO claws(id, tenant_id, name, template, status, tags, created_at) VALUES(?,?,?,?,?,?,datetime('now'))`, clawID, "test-tenant-id", "workflow claw", "base", "connected", `["routine"]`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -396,8 +396,8 @@ func TestHandleClawDoneSignal_IssueLessWorkflowCompletesWithoutPR(t *testing.T) 
 	if err := db.QueryRow(`SELECT status FROM workflow_runs WHERE id=?`, "run-issue-less-done").Scan(&runStatus); err != nil {
 		t.Fatal(err)
 	}
-	if clawStatus != "deleted" || runStatus != "completed" {
-		t.Fatalf("statuses = claw %q, run %q; want deleted, completed", clawStatus, runStatus)
+	if clawStatus != "completed" || runStatus != "completed" {
+		t.Fatalf("statuses = claw %q, run %q; want completed, completed", clawStatus, runStatus)
 	}
 }
 
