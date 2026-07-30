@@ -13,7 +13,6 @@ import (
 
 	"github.com/elasticclaw/elasticclaw/pkg/config"
 	"github.com/elasticclaw/elasticclaw/pkg/hub/notify"
-	"github.com/elasticclaw/elasticclaw/pkg/hub/pipeline"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 )
 
@@ -1367,23 +1366,22 @@ func (s *Server) checkNotifyActions(cfg *types.HubConfig) []DoctorCheck {
 	// routes through the same notifier under the same scope shares the row.
 	constructed := map[string]bool{}
 	for _, src := range sources {
-		p, err := pipeline.Parse([]byte(src.yaml))
-		if err != nil {
-			// An unparseable pipeline is a different failure (the runner logs
-			// it); it carries no notify actions to validate.
-			continue
-		}
 		scopeDesc := "hub secrets"
 		if src.workspace != "" {
 			scopeDesc = fmt.Sprintf("workspace %q secrets over hub secrets", src.workspace)
 		}
-		for _, stage := range p.Stages {
-			if !stage.OnEnter.Notify.Enabled {
-				continue
-			}
+		// notifyActionRefs is the same walk the author-time save check
+		// (validateNotifyVias, on workflow and factory saves) runs, so the
+		// two judge identical refs;
+		// an unparseable pipeline is a different failure (the runner logs it)
+		// and carries no notify actions to validate. The doctor alone goes on
+		// to construct each referenced notifier with real secret resolution —
+		// that half must stay on-demand, because settings and secrets rot
+		// after a workflow is saved.
+		for _, ref := range notifyActionRefs(src.yaml) {
 			notifyActions++
-			where := fmt.Sprintf("%s %q stage %q", src.kind, src.name, stage.ID)
-			via := strings.TrimSpace(stage.OnEnter.Notify.Via)
+			where := fmt.Sprintf("%s %q stage %q", src.kind, src.name, ref.StageID)
+			via := ref.Via
 			if via == "" {
 				fail(fmt.Sprintf("%s notify action has no \"via\"", where),
 					fmt.Sprintf("%s has a notify action without a \"via\" notifier name; it can never send and only warns in the claw conversation at runtime.", where), "")
