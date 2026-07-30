@@ -51,10 +51,6 @@ const (
 	// or claw_prs rows — the same rule the task-run watermark follows.
 	lifecycleStateClawBaselineKey = "claw_baseline_done"
 
-	// lifecycleStateClawPRWatermarkKey stores the claw_prs rowid the claw pass has
-	// processed up to (insertion-ordered, like the task-run event watermark).
-	lifecycleStateClawPRWatermarkKey = "claw_prs_watermark_rowid"
-
 	// lifecycleClawAdhocGrace is how old a claw must be before the claw pass will
 	// classify it as ad-hoc. See the race note above. Every ensureTaskRunForClaw
 	// caller attaches the run in the same request that inserts the claw row, so
@@ -177,7 +173,7 @@ func (s *Server) lifecycleClawPass(d lifecycleDelivery) {
 		s.skipCurrentLifecycleClawState(lifecycleClawKindFailure)
 	}
 	if !prOn {
-		s.parkLifecycleClawPRWatermark()
+		s.skipCurrentLifecycleClawPRs()
 	}
 
 	if startedOn && !s.sendLifecycleClawStateEvents(d, lifecycleClawKindStarted) {
@@ -199,12 +195,7 @@ func (s *Server) seedLifecycleClawBaseline() error {
 	if err := s.skipCurrentLifecycleClawState(lifecycleClawKindFailure); err != nil {
 		return err
 	}
-	var maxRow int64
-	if err := s.db.QueryRow(`SELECT COALESCE(MAX(rowid), 0) FROM claw_prs`).Scan(&maxRow); err != nil {
-		return err
-	}
-	s.setNotifierStateInt64(lifecycleStateClawPRWatermarkKey, maxRow)
-	return nil
+	return s.skipCurrentLifecycleClawPRs()
 }
 
 // parkLifecycleClawState is the claw-pass analog of parkSlackWatermark: while
@@ -218,7 +209,7 @@ func (s *Server) parkLifecycleClawState() {
 	}
 	_ = s.skipCurrentLifecycleClawState(lifecycleClawKindStarted)
 	_ = s.skipCurrentLifecycleClawState(lifecycleClawKindFailure)
-	s.parkLifecycleClawPRWatermark()
+	_ = s.skipCurrentLifecycleClawPRs()
 }
 
 // skipCurrentLifecycleClawState seeds "skipped" delivery rows for every ad-hoc
@@ -240,48 +231,68 @@ func (s *Server) skipCurrentLifecycleClawState(kind string) error {
 	return err
 }
 
-func (s *Server) parkLifecycleClawPRWatermark() {
-	var maxRow int64
-	if err := s.db.QueryRow(`SELECT COALESCE(MAX(rowid), 0) FROM claw_prs`).Scan(&maxRow); err != nil {
-		log.Printf("[notify] park claw PR watermark: %v", err)
-		return
-	}
-	wm, found, err := s.notifierStateInt64(lifecycleStateClawPRWatermarkKey)
+// skipCurrentLifecycleClawPRs seeds "skipped" delivery rows for every claw_prs
+// row that exists right now, suppressing notifications for PRs that predate
+// the baseline or arrived while pr_opened was muted. The PR pass deliberately
+// has NO rowid watermark: claw_prs rows are routinely deleted (PR closed
+// without merge, terminal pipeline stages, claw teardown) and the table has no
+// AUTOINCREMENT, so SQLite reuses freed rowids — a max-rowid cursor would
+// permanently skip whichever PR next reused a rowid at or below it. The
+// delivery rows keyed by (claw, pr_url) are the only dedupe. Idempotent
+// (ON CONFLICT DO NOTHING), so delivered PRs keep their "sent" rows.
+func (s *Server) skipCurrentLifecycleClawPRs() error {
+	// The WHERE clause is load-bearing: without it SQLite parses ON CONFLICT
+	// as the start of a join clause and rejects the statement.
+	_, err := s.db.Exec(`
+		INSERT INTO slack_notification_deliveries(event_id, run_id, delivered_at, message_ts, status)
+		SELECT 'claw:' || p.claw_id || ':pr:' || p.pr_url, 'claw:' || p.claw_id, ?, '', ?
+		  FROM claw_prs p
+		 WHERE true
+		ON CONFLICT(event_id) DO NOTHING`,
+		epochMillis(now()), notificationDeliveryStatusSkipped)
 	if err != nil {
-		log.Printf("[notify] park claw PR watermark: %v", err)
-		return
+		log.Printf("[notify] seed skipped claw PR deliveries: %v", err)
 	}
-	if !found || maxRow > wm {
-		s.setNotifierStateInt64(lifecycleStateClawPRWatermarkKey, maxRow)
-	}
+	return err
 }
 
 // lifecycleClawStateCondition returns the SQL state condition and the delivery-key
 // suffix for a claw-pass state kind.
 func lifecycleClawStateCondition(kind string) (cond, keySuffix string) {
+	// Two terminal failure shapes exist in the hub:
+	//   - status='error' (stopAgentWithReason → finishClawTerminalTx), and
+	//   - status='deleted' with the claw's latest workflow run 'failed' —
+	//     the pipeline-terminal and factory-trigger failure paths call
+	//     finishClawTerminalTx(claw, "deleted", "", "failed", ...).
+	// The workflow-run verdict keys the second shape because success paths
+	// also end at status='deleted' (with runs 'completed'/'canceled'), so
+	// the claw status alone cannot distinguish failure from success there.
+	// A missing workflow run yields NULL, which never equals 'failed'.
+	const failureCond = `(c.status = 'error' OR (c.status = 'deleted' AND (
+		SELECT w.status FROM workflow_runs w
+		 WHERE w.claw_id = c.id
+		 ORDER BY w.created_at DESC, w.rowid DESC LIMIT 1
+	) = 'failed'))`
 	if kind == lifecycleClawKindFailure {
-		// Two terminal failure shapes exist in the hub:
-		//   - status='error' (stopAgentWithReason → finishClawTerminalTx), and
-		//   - status='deleted' with the claw's latest workflow run 'failed' —
-		//     the pipeline-terminal and factory-trigger failure paths call
-		//     finishClawTerminalTx(claw, "deleted", "", "failed", ...).
-		// The workflow-run verdict keys the second shape because success paths
-		// also end at status='deleted' (with runs 'completed'/'canceled'), so
-		// the claw status alone cannot distinguish failure from success there.
-		// A missing workflow run yields NULL, which never equals 'failed'.
-		return `(c.status = 'error' OR (c.status = 'deleted' AND (
-			SELECT w.status FROM workflow_runs w
-			 WHERE w.claw_id = c.id
-			 ORDER BY w.created_at DESC, w.rowid DESC LIMIT 1
-		) = 'failed'))`, ":failure"
+		return failureCond, ":failure"
 	}
 	// Mirror allowWakeBeforeBootstrap: only the VM providers gate readiness on
 	// bootstrap_ok — docker/local/noop claws are upserted straight to
 	// 'connected' by bridge registration with bootstrap_ok still 0, and
 	// requiring bootstrap_ok=1 for them would mean ad-hoc claws (the very case
 	// this pass exists for) never produce an agent_started notification.
-	return `(c.status = 'connected' AND (c.bootstrap_ok = 1
-		OR c.provider NOT IN ('daytona', 'replicated', 'exedev')))`, ":agent_started"
+	const bootstrapGate = `(c.bootstrap_ok = 1
+		OR c.provider NOT IN ('daytona', 'replicated', 'exedev'))`
+	// The state pass samples CURRENT state, so a claw whose whole connected
+	// life fits inside the ad-hoc grace would never match "connected" once it
+	// becomes eligible — its agent_started would be lost and only the failure
+	// would fire. The second branch recovers it: a claw that reached a
+	// terminal failure but demonstrably came up (last_seen is written by
+	// bridge registration only, and the bootstrap gate still applies) did
+	// start, so both notifications are delivered — started first, threading
+	// the failure under it, in the same tick.
+	return `((c.status = 'connected' OR (c.last_seen IS NOT NULL AND ` + failureCond + `))
+		AND ` + bootstrapGate + `)`, ":agent_started"
 }
 
 // selectLifecycleClawStateCandidates returns ad-hoc claws currently in the kind's
@@ -389,33 +400,23 @@ type lifecycleClawPRRow struct {
 	Claw          lifecycleClawRow
 }
 
-// lifecycleClawPRPass scans claw_prs behind the rowid watermark for PRs opened by
-// ad-hoc claws.
+// lifecycleClawPRPass scans claw_prs for undelivered PRs opened by ad-hoc
+// claws. There is intentionally no rowid cursor (claw_prs rowids are reused
+// after deletes — see skipCurrentLifecycleClawPRs); the delivery-row anti-join
+// alone decides what is new, so every handled row must end up with a delivery
+// record or it would be re-selected forever and consume the LIMIT.
 func (s *Server) lifecycleClawPRPass(d lifecycleDelivery) {
-	watermark, found, err := s.notifierStateInt64(lifecycleStateClawPRWatermarkKey)
-	if err != nil {
-		log.Printf("[notify] read claw PR watermark: %v", err)
-		return
-	}
-	if !found {
-		// Defensive: the baseline normally initializes this. Initialize at the
-		// end of the stream rather than replaying history.
-		s.parkLifecycleClawPRWatermark()
-		return
-	}
-
 	rows, err := s.db.Query(`
 		SELECT p.rowid, p.repo, p.pr_number, p.pr_url, c.task_run_id,
 		       CAST(strftime('%s', c.created_at) AS INTEGER),
 		       `+lifecycleClawSelectColumns+`
 		  FROM claw_prs p JOIN claws c ON c.id = p.claw_id
-		 WHERE p.rowid > ?
-		   AND NOT EXISTS (
+		 WHERE NOT EXISTS (
 			SELECT 1 FROM slack_notification_deliveries d
 			 WHERE d.event_id = 'claw:' || p.claw_id || ':pr:' || p.pr_url
 		   )
 		 ORDER BY p.rowid
-		 LIMIT `+strconv.Itoa(lifecycleBatchSize), watermark)
+		 LIMIT `+strconv.Itoa(lifecycleBatchSize))
 	if err != nil {
 		log.Printf("[notify] select claw PR candidates: %v", err)
 		return
@@ -442,19 +443,21 @@ func (s *Server) lifecycleClawPRPass(d lifecycleDelivery) {
 	}
 
 	cutoff := now().Add(-lifecycleClawAdhocGrace).Unix()
-	maxHandled := watermark
 	for _, pr := range prs {
 		if pr.TaskRunID != "" {
-			// Owned by the task-run pass; move past it.
-			maxHandled = pr.RowID
+			// Owned by the task-run pass. Record a skipped row under this
+			// pass's key so the anti-join stops re-selecting it (there is no
+			// cursor to move past it); the task-run pass dedupes under its
+			// own event ids, so the keys never collide.
+			s.recordNotificationDelivery(lifecycleClawPRKey(pr.Claw.ID, pr.PRURL),
+				lifecycleClawThreadKey(pr.Claw.ID), "", notificationDeliveryStatusSkipped)
 			continue
 		}
 		if pr.ClawCreatedAt > cutoff {
 			// The claw is too young to classify as ad-hoc (its task_run_id may
-			// still be on the way). Defer this row — and everything after it,
-			// so the watermark cannot advance past a PR that may still need a
-			// notification.
-			break
+			// still be on the way). Leave the row undelivered; it is
+			// re-selected once the grace expires.
+			continue
 		}
 		ev := lifecycleEventRow{
 			EventType:   taskRunEventPROpened,
@@ -466,10 +469,6 @@ func (s *Server) lifecycleClawPRPass(d lifecycleDelivery) {
 		if !s.deliverLifecycleClawEvent(d, pr.Claw, ev, runCtx, lifecycleClawPRKey(pr.Claw.ID, pr.PRURL)) {
 			break
 		}
-		maxHandled = pr.RowID
-	}
-	if maxHandled > watermark {
-		s.setNotifierStateInt64(lifecycleStateClawPRWatermarkKey, maxHandled)
 	}
 }
 

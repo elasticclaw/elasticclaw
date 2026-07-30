@@ -42,7 +42,6 @@ func insertSlackTestClawPR(t *testing.T, db *sql.DB, id, clawID, repo string, pr
 func setLifecycleClawBaseline(t *testing.T, s *Server) {
 	t.Helper()
 	s.setNotifierStateInt64(lifecycleStateClawBaselineKey, 1)
-	s.setNotifierStateInt64(lifecycleStateClawPRWatermarkKey, 0)
 }
 
 // oldEnough is safely past the ad-hoc grace period.
@@ -281,9 +280,8 @@ func TestLifecycleClawNotifierDedupesRescans(t *testing.T) {
 	if fake.count() != 2 {
 		t.Fatalf("first tick sent %d messages, want agent_started + pr_opened", fake.count())
 	}
-	// Same state scanned again, plus a PR-watermark rewind (as after a crash
-	// between send and advance): the delivery rows must prevent duplicates.
-	s.setNotifierStateInt64(lifecycleStateClawPRWatermarkKey, 0)
+	// The same state (and the same claw_prs rows — the PR pass has no cursor)
+	// is scanned again: the delivery rows must prevent duplicates.
 	s.lifecycleNotifierTick()
 	if fake.count() != 2 {
 		t.Fatalf("re-scan duplicated claw events: %d messages", fake.count())

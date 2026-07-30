@@ -27,6 +27,11 @@ const (
 	// invalid_blocks/msg_too_long, so every block clamps its text: failure
 	// reasons in Message.Body can be thousands of characters.
 	slackMaxBlockTextLength = 3000
+	// slackMaxRetryAfter clamps the Retry-After header honored on 429s. The
+	// header is attacker/proxy-controlled input: an unclamped value (e.g.
+	// 86400) would pin the send until its context expired instead of failing
+	// fast and letting the caller's retry policy take over.
+	slackMaxRetryAfter = 30 * time.Second
 )
 
 // Severity → attachment stripe colour. The palette is deliberately tiny —
@@ -317,7 +322,22 @@ func (s *slackNotifier) Send(ctx context.Context, msg Message) (string, error) {
 			continue
 		}
 		if resp.StatusCode >= 400 {
-			return "", fmt.Errorf("slack HTTP %d: %s", resp.StatusCode, truncateForLog(string(respBody), 300))
+			// The body is redacted before it can reach any error: callers log
+			// these errors, return them over HTTP and inject them into claw
+			// conversations, and a proxy or intermediary behind api_base may
+			// echo the Authorization header back in an error body — the bot
+			// token must never ride an error out of this package.
+			err := fmt.Errorf("slack HTTP %d: %s", resp.StatusCode, truncateForLog(s.redactSecrets(string(respBody)), 300))
+			if resp.StatusCode < 500 {
+				// A raw 4xx (as opposed to Slack's HTTP-200 ok:false
+				// convention) means the endpoint or an intermediary rejected
+				// the request outright — revoked app, misconfigured proxy,
+				// wrong api_base. Every message fails alike, so classify as
+				// config: the poller pauses loudly instead of retrying the
+				// same event forever.
+				return "", ConfigError(err)
+			}
+			return "", err
 		}
 
 		var result struct {
@@ -335,15 +355,35 @@ func (s *slackNotifier) Send(ctx context.Context, msg Message) (string, error) {
 	}
 }
 
-// slackRetryAfter parses a Retry-After header (seconds); when absent or
-// malformed it falls back to a small exponential backoff.
+// slackRetryAfter parses a Retry-After header (seconds), clamped to
+// slackMaxRetryAfter; when absent or malformed it falls back to a small
+// exponential backoff.
 func slackRetryAfter(header string, attempt int) time.Duration {
 	if header != "" {
 		if secs, err := strconv.Atoi(header); err == nil && secs >= 0 {
-			return time.Duration(secs) * time.Second
+			d := time.Duration(secs) * time.Second
+			if d > slackMaxRetryAfter {
+				return slackMaxRetryAfter
+			}
+			return d
 		}
 	}
 	return time.Duration(attempt) * time.Second
+}
+
+// slackTokenRegex matches Slack token shapes (xoxb-, xoxp-, xapp-, ...) so
+// error text derived from a response body can be scrubbed even when the echoed
+// token is not byte-identical to the configured one (whitespace, a rotated
+// value, a different credential leaked by a proxy).
+var slackTokenRegex = regexp.MustCompile(`\bx(?:ox|app)[a-z0-9]?-[A-Za-z0-9-]+`)
+
+// redactSecrets scrubs the notifier's own resolved token and anything
+// token-shaped from text that originated in a provider response body.
+func (s *slackNotifier) redactSecrets(text string) string {
+	if s.token != "" {
+		text = strings.ReplaceAll(text, s.token, "[redacted]")
+	}
+	return slackTokenRegex.ReplaceAllString(text, "[redacted]")
 }
 
 // ── Semantic rendering ────────────────────────────────────────────────────────
@@ -358,7 +398,11 @@ func slackRenderBlocks(msg Message) []any {
 	var lines []string
 	switch {
 	case msg.Title != "":
-		headline := "*" + msg.Title + "*"
+		// Every Title today comes from the hub's constant style tables, but
+		// it is escaped like the other text fields anyway so no future caller
+		// can smuggle mrkdwn (a <!channel> broadcast, a spoofed link) through
+		// the headline.
+		headline := "*" + slackEscape(msg.Title) + "*"
 		if msg.Emoji != "" {
 			headline = msg.Emoji + " " + headline
 		}
@@ -470,6 +514,14 @@ func slackEscape(s string) string {
 	return s
 }
 
+// slackLinkURLReplacer percent-encodes the characters that would terminate or
+// corrupt a <url|label> construct. Percent-encoding (not entity escaping)
+// keeps the URL a working link. Today every Link.URL reaches this function
+// from a trusted source (regex-extracted PR URLs, signed GitHub webhooks),
+// but the link syntax must stay unbreakable regardless of what future callers
+// feed it.
+var slackLinkURLReplacer = strings.NewReplacer("<", "%3C", ">", "%3E", "|", "%7C")
+
 func slackMrkdwnLink(url, label string) string {
 	if url == "" {
 		return slackEscape(label)
@@ -477,7 +529,7 @@ func slackMrkdwnLink(url, label string) string {
 	if label == "" {
 		label = url
 	}
-	return "<" + url + "|" + slackEscape(label) + ">"
+	return "<" + slackLinkURLReplacer.Replace(url) + "|" + slackEscape(label) + ">"
 }
 
 // slackBlockquote renders text as a mrkdwn blockquote (every line prefixed),

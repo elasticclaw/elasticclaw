@@ -12,7 +12,18 @@ import (
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 )
 
-const notifyActionTimeout = 30 * time.Second
+// notifyActionTimeout bounds one pipeline notification send end-to-end,
+// INCLUDING the time spent queued behind the provider's per-destination
+// pacing. It is a leak guard, not a delivery deadline: the Slack limiter
+// admits roughly one send per second per channel, so a burst of N stage
+// transitions notifying the same channel legitimately keeps the last
+// goroutine queued for ~N seconds. The budget must therefore dwarf any
+// plausible burst — a 30s value silently dropped every send past ~the 30th,
+// defeating the exact burst scenario the async send exists for. The network
+// attempt itself is separately bounded by the provider (HTTP client timeout,
+// capped and clamped retries), so the generous budget does not extend how
+// long a single send can hang.
+const notifyActionTimeout = 10 * time.Minute
 
 // executeNotifyAction sends a pipeline stage notification through a hub-level
 // named notifier (notifications.notifiers in hub.yaml). Notification failures

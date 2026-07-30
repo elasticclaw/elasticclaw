@@ -151,11 +151,12 @@ type Server struct {
 	// (api_base) and to collapse send pacing (min_send_interval).
 	notifierSettingOverrides map[string]any
 
-	// lifecycleTransientFailures counts consecutive transient send failures
-	// per delivery key so one permanently-undeliverable message cannot block
-	// the lifecycle notifier forever (see handleLifecycleSendError). Only
-	// touched from the lifecycle tick goroutine — ticks never overlap.
-	lifecycleTransientFailures map[string]int
+	// lifecyclePendingDeliveries holds notification deliveries whose
+	// post-send bookkeeping write failed; they are retried each tick and,
+	// while stashed, count as delivered so the message is never re-sent
+	// externally (see recordNotificationDelivery). Only touched from the
+	// lifecycle tick goroutine — ticks never overlap.
+	lifecyclePendingDeliveries map[string]pendingNotificationDelivery
 }
 
 // cachedNotifier is one constructed notifier plus the config/secret digest it
@@ -345,6 +346,14 @@ func NewServer(addr, dbPath, identityDir string, hubCfg *types.HubConfig) (*Serv
 	if srv.livenessEnabled() {
 		go srv.runReaper()
 	}
+
+	// The notification baseline must exist BEFORE any event producer starts:
+	// the notifier's first tick fires one poll interval from now, and if it
+	// were the one to establish the baseline, everything the producers below
+	// emitted in that window would be stamped as pre-existing history and
+	// silently dropped.
+	srv.initLifecycleNotifierBaseline()
+
 	srv.startPRWatcher()
 
 	// Start cron scheduler for workflow triggers

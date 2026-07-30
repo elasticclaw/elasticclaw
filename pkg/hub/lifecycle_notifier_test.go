@@ -237,8 +237,10 @@ func TestSlackNotifierDisabledEventToggle(t *testing.T) {
 	if err := db.QueryRow(`SELECT thread_ts FROM slack_run_threads WHERE run_id='run-1'`).Scan(&threadTS); err != nil {
 		t.Fatalf("thread root row: %v", err)
 	}
-	if _, delivered := slackDeliveryStatus(t, db, "ev-started"); delivered {
-		t.Fatal("disabled agent_started event should not have a delivery row")
+	// The muted event is parked as skipped so a later re-enable can never
+	// replay it (see TestSlackNotifierMutedCategoryNotReplayedOnReenable).
+	if status, ok := slackDeliveryStatus(t, db, "ev-started"); !ok || status != notificationDeliveryStatusSkipped {
+		t.Fatalf("disabled agent_started delivery = %q, %v; want parked as skipped", status, ok)
 	}
 }
 

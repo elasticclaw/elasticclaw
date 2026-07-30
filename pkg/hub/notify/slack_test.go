@@ -367,6 +367,152 @@ func TestSlack429GivesUpAfterMaxAttempts(t *testing.T) {
 	}
 }
 
+// Regression: a raw HTTP error body used to be embedded verbatim in the Send
+// error. Callers log these errors, return them to HTTP clients (the test
+// endpoint) and inject them into claw conversations — and a proxy or
+// intermediary behind api_base may echo the Authorization header back in an
+// error body, so the bot token escaped the transport. Anything token-shaped
+// must be scrubbed before the body can reach an error.
+func TestSlackHTTPErrorRedactsTokenFromBody(t *testing.T) {
+	fake := newFakeSlack(t)
+	fake.setRespond(func(n int, w http.ResponseWriter) {
+		w.WriteHeader(http.StatusBadRequest)
+		// A misbehaving proxy echoing the request's Authorization header.
+		fmt.Fprint(w, `{"message":"rejected header Authorization: Bearer xoxb-test-token (xoxp-other-credential also seen)"}`)
+	})
+	n := newTestSlack(t, fake.server.URL, nil)
+
+	_, err := n.Send(context.Background(), Message{Text: "hi"})
+	if err == nil {
+		t.Fatal("Send() succeeded, want error")
+	}
+	if strings.Contains(err.Error(), "xoxb-test-token") || strings.Contains(err.Error(), "xoxp-other-credential") {
+		t.Fatalf("error leaked a token: %v", err)
+	}
+	if !strings.Contains(err.Error(), "slack HTTP 400") || !strings.Contains(err.Error(), "[redacted]") {
+		t.Fatalf("error lost its diagnostic value: %v", err)
+	}
+}
+
+// Regression: a raw non-429 4xx (a revoked app, a misconfigured egress proxy —
+// real Slack signals logical failures as HTTP 200 ok:false) used to classify
+// as transient, so the poller retried the same event forever instead of
+// pausing until the operator fixed the configuration. 5xx stays transient.
+func TestSlackHTTP4xxClassifiedAsConfigError(t *testing.T) {
+	fake := newFakeSlack(t)
+	status := http.StatusUnauthorized
+	fake.setRespond(func(n int, w http.ResponseWriter) {
+		w.WriteHeader(status)
+		fmt.Fprint(w, "denied")
+	})
+	n := newTestSlack(t, fake.server.URL, nil)
+
+	_, err := n.Send(context.Background(), Message{Text: "hi"})
+	if err == nil {
+		t.Fatal("Send() succeeded, want error")
+	}
+	if got := Classify(err); got != ErrorConfig {
+		t.Fatalf("Classify(HTTP 401 error) = %v, want ErrorConfig", got)
+	}
+
+	status = http.StatusInternalServerError
+	_, err = n.Send(context.Background(), Message{Text: "hi"})
+	if err == nil {
+		t.Fatal("Send() succeeded, want error")
+	}
+	if got := Classify(err); got != ErrorTransient {
+		t.Fatalf("Classify(HTTP 500 error) = %v, want ErrorTransient", got)
+	}
+}
+
+// Regression: Retry-After is attacker/proxy-controlled input and was honored
+// unclamped — an 86400 header pinned the send until its context expired.
+func TestSlackRetryAfterClamped(t *testing.T) {
+	if got := slackRetryAfter("86400", 1); got != slackMaxRetryAfter {
+		t.Fatalf("slackRetryAfter(86400) = %v, want clamped to %v", got, slackMaxRetryAfter)
+	}
+	if got := slackRetryAfter("2", 1); got != 2*time.Second {
+		t.Fatalf("slackRetryAfter(2) = %v, want 2s", got)
+	}
+	if got := slackRetryAfter("", 3); got != 3*time.Second {
+		t.Fatalf("slackRetryAfter(absent) = %v, want the 3s backoff", got)
+	}
+	if got := slackRetryAfter("-5", 2); got != 2*time.Second {
+		t.Fatalf("slackRetryAfter(negative) = %v, want the 2s backoff", got)
+	}
+}
+
+// Titles are hub constants today, but the headline must escape like every
+// other text field so no future caller can smuggle mrkdwn through it.
+func TestSlackTitleEscaped(t *testing.T) {
+	fake := newFakeSlack(t)
+	n := newTestSlack(t, fake.server.URL, nil)
+	renderer := n.(PayloadRenderer)
+
+	payload, err := renderer.RenderPayload(Message{Title: "Agent <!channel> & done", Emoji: ":boom:"})
+	if err != nil {
+		t.Fatalf("RenderPayload() error = %v", err)
+	}
+	// Assert on the payload structure, not on json.Marshal output: Go's encoder
+	// HTML-escapes "&" to &, which would make a string comparison against
+	// the escaped mrkdwn fail even when the escaping is correct.
+	blocks, _, _ := slackPartsForTest(t, payload)
+	if len(blocks) == 0 {
+		t.Fatal("no blocks rendered")
+	}
+	headline, _ := blocks[0]["text"].(map[string]any)["text"].(string)
+	if strings.Contains(headline, "<!channel>") {
+		t.Fatalf("title rendered unescaped mrkdwn: %q", headline)
+	}
+	if want := ":boom: *Agent &lt;!channel&gt; &amp; done*"; headline != want {
+		t.Fatalf("headline = %q, want %q", headline, want)
+	}
+}
+
+// slackPartsForTest pulls the single attachment's blocks, colour and fallback
+// out of a rendered payload.
+func slackPartsForTest(t *testing.T, payload map[string]any) ([]map[string]any, string, string) {
+	t.Helper()
+	attachments, ok := payload["attachments"].([]any)
+	if !ok || len(attachments) != 1 {
+		t.Fatalf("payload does not carry exactly one attachment: %#v", payload["attachments"])
+	}
+	a, ok := attachments[0].(map[string]any)
+	if !ok {
+		t.Fatalf("attachment has shape %T", attachments[0])
+	}
+	rawBlocks, _ := a["blocks"].([]any)
+	blocks := make([]map[string]any, 0, len(rawBlocks))
+	for _, b := range rawBlocks {
+		if m, ok := b.(map[string]any); ok {
+			blocks = append(blocks, m)
+		}
+	}
+	color, _ := a["color"].(string)
+	fallback, _ := a["fallback"].(string)
+	return blocks, color, fallback
+}
+
+// A URL carrying the link-delimiter characters must not be able to terminate
+// the <url|label> construct and inject mrkdwn (e.g. a <!channel> broadcast).
+func TestSlackMrkdwnLinkEscapesDelimiters(t *testing.T) {
+	got := slackMrkdwnLink("https://e.example/a|x><!channel><https://evil.example", "repo#7")
+	if strings.Contains(got, "<!channel>") {
+		t.Fatalf("URL broke out of the link construct: %q", got)
+	}
+	if want := "<https://e.example/a%7Cx%3E%3C!channel%3E%3Chttps://evil.example|repo#7>"; got != want {
+		t.Fatalf("slackMrkdwnLink() = %q, want %q", got, want)
+	}
+	// Existing behaviour preserved: empty URL renders the escaped label,
+	// empty label falls back to the URL.
+	if got := slackMrkdwnLink("", "a & b"); got != "a &amp; b" {
+		t.Fatalf("empty-URL link = %q", got)
+	}
+	if got := slackMrkdwnLink("https://e.example", ""); got != "<https://e.example|https://e.example>" {
+		t.Fatalf("empty-label link = %q", got)
+	}
+}
+
 // The classification drives the caller's retry policy: config errors pause
 // delivery entirely, permanent errors burn the single event, transient errors
 // are retried. Misclassifying a config error as permanent would silently drop

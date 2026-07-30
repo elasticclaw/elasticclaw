@@ -97,6 +97,10 @@ func (s *Server) notificationsConfig() *types.NotificationsConfig {
 }
 
 // hubSecretResolver resolves notifier secrets against the hub secrets map.
+// Capturing the map (not the Server) is safe: hubCfg is never nil (NewServer
+// coerces nil configs) and the secrets API is copy-on-write — every mutation
+// builds a fresh map and swaps the hubCfg pointer under s.mu, so the captured
+// map is an immutable snapshot.
 func (s *Server) hubSecretResolver() notify.SecretResolver {
 	s.mu.RLock()
 	secrets := s.hubCfg.Secrets
@@ -211,6 +215,35 @@ func (s *Server) lifecyclePollInterval() time.Duration {
 	return lifecycleDefaultPollInterval
 }
 
+// initLifecycleNotifierBaseline establishes the "everything before now is
+// history" boundary synchronously. NewServer calls it BEFORE starting any
+// event producer (PR watcher, cron scheduler, integration poller): the poll
+// loop's first tick would otherwise set the baseline one poll interval after
+// the producers began, silently dropping whatever they produced in that
+// window. Only the first-ever enabled boot writes anything — afterwards the
+// persisted cursors are authoritative — and the first-tick branches in the
+// passes remain as a backstop for runtime enables.
+func (s *Server) initLifecycleNotifierBaseline() {
+	cfg := s.notificationsConfig()
+	if cfg == nil || !cfg.Lifecycle.IsEnabled() {
+		return
+	}
+	if _, found, err := s.notifierStateInt64(lifecycleStateWatermarkKey); err == nil && !found {
+		if maxRow, err := s.lifecycleMaxEventRowID(); err == nil {
+			s.setNotifierStateInt64(lifecycleStateWatermarkKey, maxRow)
+		} else {
+			log.Printf("[notify] init watermark baseline: %v", err)
+		}
+	}
+	if _, found, err := s.notifierStateInt64(lifecycleStateClawBaselineKey); err == nil && !found {
+		if err := s.seedLifecycleClawBaseline(); err == nil {
+			s.setNotifierStateInt64(lifecycleStateClawBaselineKey, 1)
+		} else {
+			log.Printf("[notify] init claw baseline: %v", err)
+		}
+	}
+}
+
 // startLifecycleNotifier launches the background loop that turns lifecycle
 // events into notifications. The goroutine idles cheaply while notifications
 // are disabled and picks the config up again on the next tick.
@@ -272,6 +305,9 @@ type lifecycleDelivery struct {
 }
 
 func (s *Server) lifecycleNotifierTick() {
+	// Drain delivery rows whose post-send write failed before anything can
+	// re-select (and re-send) those events.
+	s.flushPendingNotificationDeliveries()
 	cfg := s.notificationsConfig()
 	if cfg == nil || !cfg.Lifecycle.IsEnabled() {
 		// Keep the cursors at the end of their streams while notifications
@@ -336,6 +372,14 @@ func (s *Server) lifecycleTaskRunPass(d lifecycleDelivery) {
 		s.parkLifecycleWatermark()
 		return
 	}
+	// Park the muted categories too: the shared watermark only advances when
+	// an enabled event is handled, so without this, muted-type events above
+	// the cursor would be replayed the moment their toggle is re-enabled — or
+	// silently dropped if a later enabled event happened to advance the
+	// watermark past them first. Seeding "skipped" delivery rows (the claw
+	// pass's parking mechanism) makes the outcome deterministic: whatever
+	// happened while a category was muted stays muted.
+	s.skipLifecycleMutedEvents(watermark, enabled)
 	events, err := s.selectLifecycleCandidateEvents(watermark, enabled)
 	if err != nil {
 		log.Printf("[notify] select candidate events: %v", err)
@@ -395,19 +439,69 @@ func (s *Server) handleLifecycleSendError(err error, what, deliveryKey, runKey s
 		s.recordNotificationDelivery(deliveryKey, runKey, "", notificationDeliveryStatusFailed)
 		return true, false
 	default:
-		if s.lifecycleTransientFailures == nil {
-			s.lifecycleTransientFailures = make(map[string]int)
+		// The streak is persisted (not an in-memory counter) because the cap
+		// exists precisely for crashloop/deploy conditions: a hub restarting
+		// more often than the cap window would reset an in-memory counter on
+		// every boot, so the poisoned event would never be burned and the
+		// cursor would stay wedged for as long as the restarts continued.
+		stateKey := lifecycleTransientFailureStateKey(deliveryKey)
+		count, _, stateErr := s.notifierStateInt64(stateKey)
+		if stateErr != nil {
+			// Unreadable streak state: retry without counting rather than
+			// risk resetting (or double-counting) the streak.
+			log.Printf("[notify] read transient-failure streak for %s: %v", what, stateErr)
+			return false, true
 		}
-		s.lifecycleTransientFailures[deliveryKey]++
-		if count := s.lifecycleTransientFailures[deliveryKey]; count >= lifecycleMaxTransientFailures {
-			delete(s.lifecycleTransientFailures, deliveryKey)
+		count++
+		if count >= lifecycleMaxTransientFailures {
+			s.clearNotifierState(stateKey)
 			log.Printf("[notify] giving up on %s after %d consecutive transient failures: %v", what, count, err)
 			s.recordNotificationDelivery(deliveryKey, runKey, "", notificationDeliveryStatusFailed)
 			return true, false
 		}
+		s.setNotifierStateInt64(stateKey, count)
 		// Transient: leave the event (and the cursor) for the next tick.
 		log.Printf("[notify] transient failure for %s, will retry: %v", what, err)
 		return false, true
+	}
+}
+
+// lifecycleTransientFailureStateKey keys one delivery key's consecutive
+// transient-failure streak in slack_notifier_state. Rows exist only while a
+// streak is live: they are cleared on success or when the cap burns the event.
+func lifecycleTransientFailureStateKey(deliveryKey string) string {
+	return "transient_failures:" + deliveryKey
+}
+
+// skipLifecycleMutedEvents seeds "skipped" delivery rows for events of the
+// currently muted categories sitting past the cursor, so a later re-enable
+// behaves like a fresh enable instead of flushing the muted window. Idempotent
+// (ON CONFLICT DO NOTHING): events that were genuinely delivered keep their
+// "sent" rows.
+func (s *Server) skipLifecycleMutedEvents(afterRowID int64, enabled map[string]bool) {
+	var muted []string
+	for t := range lifecycleSupportedEventTypes() {
+		if !enabled[t] {
+			muted = append(muted, t)
+		}
+	}
+	if len(muted) == 0 {
+		return
+	}
+	sort.Strings(muted)
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(muted)), ",")
+	args := make([]any, 0, len(muted)+2)
+	args = append(args, epochMillis(now()), notificationDeliveryStatusSkipped, afterRowID)
+	for _, t := range muted {
+		args = append(args, t)
+	}
+	if _, err := s.db.Exec(`
+		INSERT INTO slack_notification_deliveries(event_id, run_id, delivered_at, message_ts, status)
+		SELECT e.id, e.run_id, ?, '', ?
+		  FROM task_run_events e
+		 WHERE e.rowid > ? AND e.event_type IN (`+placeholders+`)
+		ON CONFLICT(event_id) DO NOTHING`, args...); err != nil {
+		log.Printf("[notify] seed skipped muted-event deliveries: %v", err)
 	}
 }
 
@@ -457,6 +551,12 @@ func (s *Server) sendLifecycleEvent(d lifecycleDelivery, ev lifecycleEventRow) e
 // an unknown destination ("") must not match anything, or a repointed
 // notifier would reply into threads that do not exist at the new destination.
 func (s *Server) postLifecycleEvent(d lifecycleDelivery, ev lifecycleEventRow, runCtx lifecycleRunContext, threadKey, deliveryKey, tenantID string) error {
+	if s.lifecycleDeliveryPending(deliveryKey) {
+		// Already sent; only the delivery-row write is outstanding (see
+		// recordNotificationDelivery). Sending again would duplicate the
+		// external message.
+		return nil
+	}
 	msg := buildLifecycleMessage(ev, runCtx)
 
 	threading := lifecycleThreadByRun(d.lc) && d.destination != ""
@@ -464,9 +564,23 @@ func (s *Server) postLifecycleEvent(d lifecycleDelivery, ev lifecycleEventRow, r
 	if threading {
 		var rootDest, rootTS string
 		err := s.db.QueryRow(`SELECT channel, thread_ts FROM slack_run_threads WHERE run_id=?`, threadKey).Scan(&rootDest, &rootTS)
-		if err == nil && rootDest == d.destination {
+		switch {
+		case err == nil && rootDest == d.destination:
 			msg.Thread = rootTS
 			haveRoot = true
+		case err == nil:
+			// Root recorded for another destination: the notifier was
+			// repointed. Post top-level and let the upsert below move the
+			// root to the new destination.
+		case err == sql.ErrNoRows:
+			// First message for this thread key.
+		default:
+			// A transient read failure (a locked DB) must not be mistaken for
+			// "no root": posting top-level AND upserting would replace the
+			// run's existing root, permanently splitting the run across two
+			// threads. Post top-level but leave the root bookkeeping alone.
+			log.Printf("[notify] read thread root for %s: %v", threadKey, err)
+			threading = false
 		}
 	}
 
@@ -490,16 +604,60 @@ func (s *Server) postLifecycleEvent(d lifecycleDelivery, ev lifecycleEventRow, r
 	}
 	s.recordNotificationDelivery(deliveryKey, threadKey, handle, notificationDeliveryStatusSent)
 	// A success ends any transient-failure streak for this delivery.
-	delete(s.lifecycleTransientFailures, deliveryKey)
+	s.clearNotifierState(lifecycleTransientFailureStateKey(deliveryKey))
 	return nil
 }
 
+// pendingNotificationDelivery is a delivery whose post-send bookkeeping write
+// failed; it is retried by flushPendingNotificationDeliveries.
+type pendingNotificationDelivery struct {
+	runID         string
+	messageHandle string
+	status        string
+}
+
+// recordNotificationDelivery persists one delivery row. A failed write is
+// stashed in memory and retried on later ticks; while stashed, the delivery
+// key still counts as handled (see lifecycleDeliveryPending) so the message
+// cannot be re-sent externally. This matters most for claw-state events,
+// which have no rowid cursor: the delivery row is their only dedupe, so
+// logging and forgetting a failed write meant a duplicate send every tick
+// until the DB accepted the insert.
 func (s *Server) recordNotificationDelivery(eventID, runID, messageHandle, status string) {
-	if _, err := s.db.Exec(`
+	if err := s.execNotificationDelivery(eventID, runID, messageHandle, status); err != nil {
+		log.Printf("[notify] record delivery for event %s (will retry): %v", eventID, err)
+		if s.lifecyclePendingDeliveries == nil {
+			s.lifecyclePendingDeliveries = make(map[string]pendingNotificationDelivery)
+		}
+		s.lifecyclePendingDeliveries[eventID] = pendingNotificationDelivery{runID: runID, messageHandle: messageHandle, status: status}
+	}
+}
+
+func (s *Server) execNotificationDelivery(eventID, runID, messageHandle, status string) error {
+	_, err := s.db.Exec(`
 		INSERT INTO slack_notification_deliveries(event_id, run_id, delivered_at, message_ts, status)
 		VALUES(?,?,?,?,?) ON CONFLICT(event_id) DO NOTHING`,
-		eventID, runID, epochMillis(now()), messageHandle, status); err != nil {
-		log.Printf("[notify] record delivery for event %s: %v", eventID, err)
+		eventID, runID, epochMillis(now()), messageHandle, status)
+	return err
+}
+
+// lifecycleDeliveryPending reports whether the event was sent but its
+// delivery row is still awaiting persistence.
+func (s *Server) lifecycleDeliveryPending(eventID string) bool {
+	_, ok := s.lifecyclePendingDeliveries[eventID]
+	return ok
+}
+
+// flushPendingNotificationDeliveries retries delivery rows whose insert
+// failed after a successful send. Runs at the top of every tick so the stash
+// drains as soon as the DB accepts writes again.
+func (s *Server) flushPendingNotificationDeliveries() {
+	for eventID, p := range s.lifecyclePendingDeliveries {
+		if err := s.execNotificationDelivery(eventID, p.runID, p.messageHandle, p.status); err != nil {
+			log.Printf("[notify] retry delivery record for event %s: %v", eventID, err)
+			return // DB still unhappy; keep the stash for the next tick
+		}
+		delete(s.lifecyclePendingDeliveries, eventID)
 	}
 }
 
@@ -596,6 +754,12 @@ func (s *Server) setNotifierStateInt64(key string, value int64) {
 		ON CONFLICT(key) DO UPDATE SET value=excluded.value`,
 		key, strconv.FormatInt(value, 10)); err != nil {
 		log.Printf("[notify] persist state %s: %v", key, err)
+	}
+}
+
+func (s *Server) clearNotifierState(key string) {
+	if _, err := s.db.Exec(`DELETE FROM slack_notifier_state WHERE key=?`, key); err != nil {
+		log.Printf("[notify] clear state %s: %v", key, err)
 	}
 }
 
@@ -974,8 +1138,10 @@ func (s *Server) handleNotificationTest(w http.ResponseWriter, r *http.Request) 
 	// Always post top-level: a test send must not create or reuse a thread.
 	handle, err := n.Send(ctx, msg)
 	if err != nil {
-		// Surface the provider error verbatim so scope/channel problems are
-		// debuggable. Errors never contain the token.
+		// Surface the provider error so scope/channel problems are
+		// debuggable. Providers redact anything derived from a response body
+		// (see the Slack notifier's redactSecrets) before it reaches an
+		// error, so this can never leak the token.
 		jsonError(w, http.StatusBadGateway, "notification send failed: "+err.Error())
 		return
 	}
