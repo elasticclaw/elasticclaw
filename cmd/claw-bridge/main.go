@@ -1938,7 +1938,8 @@ func isRecoverableSessionSendError(err error) bool {
 	msg := strings.ToLower(sendErr.err.Error())
 	return strings.Contains(msg, "context overflow") ||
 		strings.Contains(msg, "prompt too large") ||
-		isProviderRequestFormatError(sendErr.err)
+		isProviderRequestFormatError(sendErr.err) ||
+		isSessionFileLockConflictError(sendErr.err)
 }
 
 func isProviderRequestFormatError(err error) bool {
@@ -1975,6 +1976,19 @@ func isSessionFileLockConflictError(err error) bool {
 	}
 	msg := strings.ToLower(err.Error())
 	return strings.Contains(msg, "session file changed") && strings.Contains(msg, "embedded prompt lock")
+}
+
+// isSessionRotatedError reports whether SendMessage recovered from a session
+// lock conflict by rotating to a fresh session. In that case the original turn
+// cannot be completed, but the next hub message can continue. The bridge should
+// not deliver the error text as a normal claw response (which would confuse the
+// workflow pipeline), but it should still close the turn so the hub drains the
+// next queued message.
+func isSessionRotatedError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(err.Error(), "OpenClaw session reset so the next message can continue")
 }
 
 // SendMessage sends a user message to the persistent session, streams chunks
@@ -2385,12 +2399,15 @@ func setupFlakeEnvironmentSync(nixDone <-chan error) error {
 	// Workspace flakes supply claw-wide tools (e.g. depot). This is the
 	// contract used by both the agent gateway and deterministic run steps.
 	// We deliberately do not use "nix profile install ." (wrong for dev-shell-only flakes).
+	// After nix develop builds the flake's PATH, we append common host binary dirs
+	// so bootstrap-installed tools (e.g. gh) and host tools (e.g. Homebrew) are
+	// available as fallbacks, while flake packages remain preferred.
 	wrapperScript := fmt.Sprintf(`#!/bin/bash
 set -euo pipefail
 export PATH="/nix/var/nix/profiles/default/bin:$PATH"
 . /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh 2>/dev/null || true
 cd %q
-exec nix develop --accept-flake-config -c "$@"
+exec nix develop --accept-flake-config -c bash -c 'export PATH="$PATH:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin"; exec "$@"' bash "$@"
 `, flakeDir)
 	wrapperPath := filepath.Join(home, ".elasticclaw", "flake-run")
 	if err := os.WriteFile(wrapperPath, []byte(wrapperScript), 0755); err != nil {
@@ -4162,7 +4179,12 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 				writeActivity(activity)
 			})
 			if agentErr != nil {
-				reply = fmt.Sprintf("⚠️ error: %v", agentErr)
+				if isSessionRotatedError(agentErr) {
+					writeActivity(agentActivity{Kind: "session_rotated", Message: fmt.Sprintf("OpenClaw session rotated to recover from lock conflict; waiting for next message (%v)", agentErr)})
+					reply = ""
+				} else {
+					reply = fmt.Sprintf("⚠️ error: %v", agentErr)
+				}
 			}
 			if writeErr := deliver("claw", reply); writeErr != nil {
 				// Hub connection dropped — queue the completed reply, not the input,
@@ -4282,7 +4304,12 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 				})
 				if agentErr != nil {
 					log.Printf("[bridge] ✗ agent error: %v", agentErr)
-					reply = fmt.Sprintf("⚠️ claw-bridge error: %v", agentErr)
+					if isSessionRotatedError(agentErr) {
+						writeActivity(agentActivity{Kind: "session_rotated", Message: fmt.Sprintf("OpenClaw session rotated to recover from lock conflict; waiting for next message (%v)", agentErr)})
+						reply = ""
+					} else {
+						reply = fmt.Sprintf("⚠️ claw-bridge error: %v", agentErr)
+					}
 				} else {
 					log.Printf("[bridge] ← openclaw: %q", reply[:min(len(reply), 120)])
 				}
