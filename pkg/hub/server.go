@@ -465,10 +465,10 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/workspaces/{name}/workflows", s.withAdminForMethods(s.handleWorkspaceWorkflowsList, http.MethodPost))
 	mux.HandleFunc("/api/workspaces/{workspace}/workflows/{workflow}", s.withAdminForMethods(s.handleWorkspaceWorkflowDetail, http.MethodPatch))
 	mux.HandleFunc("/api/workspaces/{workspace}/workflows/{workflow}/trigger", s.withAuth(s.handleWorkspaceWorkflowTrigger))
-	mux.HandleFunc("/api/workspaces/{workspace}/workflows/{workflow}/cron/trigger", s.withAuth(s.handleCronWorkflowTrigger)) // POST manual trigger
-	mux.HandleFunc("/api/workspaces/{workspace}/workflows/{workflow}/cron/runs", s.withAuth(s.handleCronWorkflowRuns))       // GET run history
+	mux.HandleFunc("/api/workspaces/{workspace}/workflows/{workflow}/cron/trigger", s.withAuth(s.handleCronWorkflowTrigger))  // POST manual trigger
+	mux.HandleFunc("/api/workspaces/{workspace}/workflows/{workflow}/cron/runs", s.withAuth(s.handleCronWorkflowRuns))        // GET run history
 	mux.HandleFunc("/api/workspaces/{workspace}/workflows/{workflow}/cron/runs/{runId}", s.withAuth(s.handleCronWorkflowRun)) // GET single run
-	mux.HandleFunc("/api/workspaces/{workspace}/workflows/{workflow}/cron/next", s.withAuth(s.handleCronWorkflowNextRun))    // GET next scheduled run
+	mux.HandleFunc("/api/workspaces/{workspace}/workflows/{workflow}/cron/next", s.withAuth(s.handleCronWorkflowNextRun))     // GET next scheduled run
 	mux.HandleFunc("/api/workspaces/{workspace}/secrets", s.withAdminForMethods(s.handleWorkspaceSecretsCRUD, http.MethodPut, http.MethodPost, http.MethodDelete))
 	mux.HandleFunc("/api/workspaces/{workspace}/github-apps", s.withAdminForMethods(s.handleWorkspaceGitHubAppsCRUD, http.MethodPut, http.MethodPost, http.MethodDelete))
 	mux.HandleFunc("/api/workspaces/{workspace}/issue-trackers", s.withAdminForMethods(s.handleWorkspaceIssueTrackersCRUD, http.MethodPut, http.MethodPost, http.MethodDelete))
@@ -2767,6 +2767,8 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 						}
 					}
 				}
+			} else if msg.Type == "session_rotated" {
+				go s.enqueueSessionRotatedResume(clawID)
 			} else if msg.Type == "model_auth_sync" {
 				if !modelAuthAuthorized {
 					continue
@@ -7380,9 +7382,20 @@ func (s *Server) deleteStaleWatchdogNags(clawID string) {
 	}
 }
 
-const restartResumePrefix = "[hub] Agent process restart detected."
+const (
+	restartResumePrefix        = "[hub] Agent process restart detected."
+	sessionRotatedResumePrefix = "[hub] OpenClaw session reset detected."
+)
 
 func (s *Server) enqueueRestartResume(clawID string, restartCount int) {
+	s.enqueueSessionLostResume(clawID, restartResumePrefix, fmt.Sprintf("restart:%d", restartCount))
+}
+
+func (s *Server) enqueueSessionRotatedResume(clawID string) {
+	s.enqueueSessionLostResume(clawID, sessionRotatedResumePrefix, fmt.Sprintf("session_rotated:%s", uuid.NewString()))
+}
+
+func (s *Server) enqueueSessionLostResume(clawID, prefix, marker string) {
 	var status, issueTitle, linearID, githubID, shortcutID, jiraID string
 	var bootstrapOK int
 	err := s.db.QueryRow(`SELECT status, COALESCE(bootstrap_ok,0), COALESCE(issue_title,''), COALESCE(linear_issue_id,''), COALESCE(github_issue_id,''), COALESCE(shortcut_story_id,''), COALESCE(jira_issue_id,'') FROM claws WHERE id=?`, clawID).Scan(&status, &bootstrapOK, &issueTitle, &linearID, &githubID, &shortcutID, &jiraID)
@@ -7405,7 +7418,7 @@ func (s *Server) enqueueRestartResume(clawID string, restartCount int) {
 		issueRef = "Jira issue " + jiraID
 	}
 	var b strings.Builder
-	b.WriteString(restartResumePrefix)
+	b.WriteString(prefix)
 	b.WriteString(" Your previous session was lost, so you have no memory of the earlier conversation. The workspace on disk is intact, including your repositories under ~/workspace.")
 	if issueTitle != "" || issueRef != "" {
 		b.WriteString("\n\nAssigned task: ")
@@ -7424,12 +7437,12 @@ func (s *Server) enqueueRestartResume(clawID string, restartCount int) {
 		b.WriteString(".")
 	}
 	b.WriteString("\n\nBefore anything else, recover your state from the workspace: run git status and git log --oneline -15, check which branch you are on and whether there are uncommitted changes or an open PR for it. Then resume the task from where the workspace shows it stopped. Do not start over and do not discard existing work.")
-	// Append a zero-width marker carrying the restart_count so that two resume
-	// prompts for two different restarts are never treated as the identical
-	// pending message by injectMessage's dedup (change 2) — each restart is a
-	// distinct incident even when the rest of the wording is unchanged.
-	b.WriteString(fmt.Sprintf("\n\n<!-- restart:%d -->", restartCount))
-	log.Printf("[watchdog] enqueueing post-restart resume for %s", shortID(clawID))
+	// Append a zero-width marker so that two resume prompts for two different
+	// incidents are never treated as the identical pending message by
+	// injectMessage's dedup — each restart/session rotation is a distinct
+	// incident even when the rest of the wording is unchanged.
+	b.WriteString(fmt.Sprintf("\n\n<!-- %s -->", marker))
+	log.Printf("[watchdog] enqueueing %s resume for %s", marker, shortID(clawID))
 	s.injectHubMessageByID(clawID, b.String())
 }
 

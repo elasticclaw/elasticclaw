@@ -4182,6 +4182,8 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 				if isSessionRotatedError(agentErr) {
 					writeActivity(agentActivity{Kind: "session_rotated", Message: fmt.Sprintf("OpenClaw session rotated to recover from lock conflict; waiting for next message (%v)", agentErr)})
 					reply = ""
+					// Notify the hub so it can inject a resume prompt with context.
+					_ = writeHub(hubMsg{Type: "session_rotated"})
 				} else {
 					reply = fmt.Sprintf("⚠️ error: %v", agentErr)
 				}
@@ -4307,6 +4309,8 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 					if isSessionRotatedError(agentErr) {
 						writeActivity(agentActivity{Kind: "session_rotated", Message: fmt.Sprintf("OpenClaw session rotated to recover from lock conflict; waiting for next message (%v)", agentErr)})
 						reply = ""
+						// Notify the hub so it can inject a resume prompt with context.
+						_ = writeHub(hubMsg{Type: "session_rotated"})
 					} else {
 						reply = fmt.Sprintf("⚠️ claw-bridge error: %v", agentErr)
 					}

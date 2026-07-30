@@ -469,6 +469,43 @@ func TestRestartDuringBootstrapDoesNotEnqueueResume(t *testing.T) {
 	}
 }
 
+func TestSessionRotatedEnqueuesResume(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{ClawToken: "claw-token"}, "", "", "")
+	const clawID = "watchdog-session-rotated"
+	conn := watchdogClaw(t, s, clawID)
+	_ = watchdogClawConn(t, s, clawID)
+	if _, err := db.Exec(`UPDATE claws SET status='connected', bootstrap_ok=1, issue_title='Fix session', github_issue_id='owner/repo#42' WHERE id=?`, clawID); err != nil {
+		t.Fatal(err)
+	}
+	if err := wsjson.Write(context.Background(), conn, types.WSMessage{Type: "session_rotated"}); err != nil {
+		t.Fatalf("write session_rotated: %v", err)
+	}
+	count := func() int {
+		var n int
+		_ = db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND role='hub' AND content LIKE ?`, clawID, sessionRotatedResumePrefix+"%").Scan(&n)
+		return n
+	}
+	eventuallyWatchdog(t, func() bool { return count() == 1 }, "session rotated resume")
+}
+
+func TestSessionRotatedNotConnectedDoesNotEnqueueResume(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{ClawToken: "claw-token"}, "", "", "")
+	const clawID = "watchdog-session-rotated-not-connected"
+	conn := watchdogClaw(t, s, clawID)
+	_ = watchdogClawConn(t, s, clawID)
+	if _, err := db.Exec(`UPDATE claws SET status='starting', bootstrap_ok=1, issue_title='Fix session', github_issue_id='owner/repo#42' WHERE id=?`, clawID); err != nil {
+		t.Fatal(err)
+	}
+	if err := wsjson.Write(context.Background(), conn, types.WSMessage{Type: "session_rotated"}); err != nil {
+		t.Fatalf("write session_rotated: %v", err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	var n int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND content LIKE ?`, clawID, sessionRotatedResumePrefix+"%").Scan(&n); err != nil || n != 0 {
+		t.Fatalf("resume rows=%d err=%v, want 0", n, err)
+	}
+}
+
 func TestStreamingNudgeGoesOverStatusChannel(t *testing.T) {
 	s, db := NewTestServerWithConfig(t, &types.HubConfig{ClawToken: "claw-token"}, "", "", "")
 	const clawID = "watchdog-nudge-status-channel"
