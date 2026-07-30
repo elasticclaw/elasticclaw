@@ -79,6 +79,15 @@ func lifecycleClawPRKey(clawID, prURL string) string {
 	return "claw:" + clawID + ":pr:" + prURL
 }
 
+// lifecycleClawIdleKey keys one idle stretch of one ad-hoc claw. The latch
+// value (claws.idle_since, the stretch's start in millis) is part of the key
+// so a claw that goes idle, works, and goes idle again gets a fresh key — and
+// therefore a fresh notification — per stretch, while re-scans of the same
+// stretch dedupe on the delivery row.
+func lifecycleClawIdleKey(clawID string, idleSince int64) string {
+	return "claw:" + clawID + ":idle:" + strconv.FormatInt(idleSince, 10)
+}
+
 // lifecycleClawThreadKey namespaces the claw id for the slack_run_threads run_id
 // column so claw threads can never collide with task run ids.
 func lifecycleClawThreadKey(clawID string) string { return "claw:" + clawID }
@@ -129,8 +138,8 @@ func lifecycleClawRunContext(claw lifecycleClawRow) lifecycleRunContext {
 // lifecycleClawKindsEnabled maps the existing config toggles onto the claw-pass
 // kinds. The claw pass intentionally shares the task-run toggles: an operator
 // muting pr_opened mutes it for both sources.
-func lifecycleClawKindsEnabled(cfg *types.LifecycleNotificationsConfig) (agentStarted, prOpened, failures bool) {
-	agentStarted, prOpened, failures = true, true, true
+func lifecycleClawKindsEnabled(cfg *types.LifecycleNotificationsConfig) (agentStarted, prOpened, failures, agentIdle bool) {
+	agentStarted, prOpened, failures, agentIdle = true, true, true, true
 	if cfg != nil && cfg.Events != nil {
 		if cfg.Events.AgentStarted != nil {
 			agentStarted = *cfg.Events.AgentStarted
@@ -140,6 +149,9 @@ func lifecycleClawKindsEnabled(cfg *types.LifecycleNotificationsConfig) (agentSt
 		}
 		if cfg.Events.Failures != nil {
 			failures = *cfg.Events.Failures
+		}
+		if cfg.Events.AgentIdle != nil {
+			agentIdle = *cfg.Events.AgentIdle
 		}
 	}
 	return
@@ -163,7 +175,7 @@ func (s *Server) lifecycleClawPass(d lifecycleDelivery) {
 		return
 	}
 
-	startedOn, prOn, failuresOn := lifecycleClawKindsEnabled(d.lc)
+	startedOn, prOn, failuresOn, idleOn := lifecycleClawKindsEnabled(d.lc)
 	// Park disabled kinds so re-enabling a toggle behaves like a fresh enable
 	// instead of flushing every transition from the muted window.
 	if !startedOn {
@@ -171,6 +183,9 @@ func (s *Server) lifecycleClawPass(d lifecycleDelivery) {
 	}
 	if !failuresOn {
 		s.skipCurrentLifecycleClawState(lifecycleClawKindFailure)
+	}
+	if !idleOn {
+		s.skipCurrentLifecycleClawIdle()
 	}
 	if !prOn {
 		s.skipCurrentLifecycleClawPRs()
@@ -180,6 +195,9 @@ func (s *Server) lifecycleClawPass(d lifecycleDelivery) {
 		return
 	}
 	if failuresOn && !s.sendLifecycleClawStateEvents(d, lifecycleClawKindFailure) {
+		return
+	}
+	if idleOn && !s.sendLifecycleClawIdleEvents(d) {
 		return
 	}
 	if prOn {
@@ -193,6 +211,9 @@ func (s *Server) seedLifecycleClawBaseline() error {
 		return err
 	}
 	if err := s.skipCurrentLifecycleClawState(lifecycleClawKindFailure); err != nil {
+		return err
+	}
+	if err := s.skipCurrentLifecycleClawIdle(); err != nil {
 		return err
 	}
 	return s.skipCurrentLifecycleClawPRs()
@@ -209,6 +230,7 @@ func (s *Server) parkLifecycleClawState() {
 	}
 	_ = s.skipCurrentLifecycleClawState(lifecycleClawKindStarted)
 	_ = s.skipCurrentLifecycleClawState(lifecycleClawKindFailure)
+	_ = s.skipCurrentLifecycleClawIdle()
 	_ = s.skipCurrentLifecycleClawPRs()
 }
 
@@ -254,6 +276,89 @@ func (s *Server) skipCurrentLifecycleClawPRs() error {
 		log.Printf("[notify] seed skipped claw PR deliveries: %v", err)
 	}
 	return err
+}
+
+// skipCurrentLifecycleClawIdle seeds "skipped" delivery rows for every ad-hoc
+// claw currently latched idle (claws.idle_since set by the status watchdog),
+// so muting agent_idle — or the whole feature — parks the stretch instead of
+// replaying it on re-enable. Idempotent per (claw, idle_since) key.
+func (s *Server) skipCurrentLifecycleClawIdle() error {
+	_, err := s.db.Exec(`
+		INSERT INTO slack_notification_deliveries(event_id, run_id, delivered_at, message_ts, status)
+		SELECT 'claw:' || c.id || ':idle:' || c.idle_since, 'claw:' || c.id, ?, '', ?
+		  FROM claws c
+		 WHERE c.task_run_id = '' AND c.idle_since > 0
+		ON CONFLICT(event_id) DO NOTHING`,
+		epochMillis(now()), notificationDeliveryStatusSkipped)
+	if err != nil {
+		log.Printf("[notify] seed skipped claw idle deliveries: %v", err)
+	}
+	return err
+}
+
+// selectLifecycleClawIdleCandidates returns ad-hoc claws whose idle latch has
+// no delivery row yet. The exclusion conditions mirror agentIdleEligible for
+// the ad-hoc kind — status 'connected', no tracked PR, still driven by a
+// pipeline stage or a live workflow run — so a claw that opened a PR, died,
+// or lost its automatic driver between latch and delivery is not alerted on
+// stale grounds.
+func (s *Server) selectLifecycleClawIdleCandidates() ([]lifecycleClawRow, []int64, error) {
+	cutoff := now().Add(-lifecycleClawAdhocGrace).Unix()
+	rows, err := s.db.Query(`
+		SELECT `+lifecycleClawSelectColumns+`, c.idle_since
+		  FROM claws c
+		 WHERE c.task_run_id = '' AND c.idle_since > 0 AND c.status = 'connected'
+		   AND NOT EXISTS (SELECT 1 FROM claw_prs p WHERE p.claw_id = c.id)
+		   AND (c.pipeline_stage != '' OR EXISTS (
+			SELECT 1 FROM workflow_runs w WHERE w.claw_id = c.id AND w.status IN ('pending','running')
+		   ))
+		   AND CAST(strftime('%s', c.created_at) AS INTEGER) <= ?
+		   AND NOT EXISTS (
+			SELECT 1 FROM slack_notification_deliveries d
+			 WHERE d.event_id = 'claw:' || c.id || ':idle:' || c.idle_since
+		   )
+		 ORDER BY c.created_at
+		 LIMIT `+strconv.Itoa(lifecycleBatchSize), cutoff)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer rows.Close()
+
+	var claws []lifecycleClawRow
+	var idleSinces []int64
+	for rows.Next() {
+		var claw lifecycleClawRow
+		var idleSince int64
+		scan := func(dest ...any) error { return rows.Scan(append(dest, &idleSince)...) }
+		if err := scanLifecycleClawRow(scan, &claw); err != nil {
+			return nil, nil, err
+		}
+		claws = append(claws, claw)
+		idleSinces = append(idleSinces, idleSince)
+	}
+	return claws, idleSinces, rows.Err()
+}
+
+// sendLifecycleClawIdleEvents delivers the idle kind for ad-hoc claws. Returns
+// false when the claw pass must stop for this tick.
+func (s *Server) sendLifecycleClawIdleEvents(d lifecycleDelivery) bool {
+	claws, idleSinces, err := s.selectLifecycleClawIdleCandidates()
+	if err != nil {
+		log.Printf("[notify] select claw idle candidates: %v", err)
+		return false
+	}
+	for i, claw := range claws {
+		idleSince := idleSinces[i]
+		detail := map[string]any{"idleSince": idleSince}
+		if minutes := int(now().Sub(time.UnixMilli(idleSince)).Minutes()); minutes > 0 {
+			detail["idleMinutes"] = minutes
+		}
+		ev := lifecycleEventRow{EventType: taskRunEventAgentIdle, Detail: detail}
+		if !s.deliverLifecycleClawEvent(d, claw, ev, lifecycleClawRunContext(claw), lifecycleClawIdleKey(claw.ID, idleSince)) {
+			return false
+		}
+	}
+	return true
 }
 
 // lifecycleClawStateCondition returns the SQL state condition and the delivery-key
@@ -409,14 +514,14 @@ func (s *Server) lifecycleClawPRPass(d lifecycleDelivery) {
 	rows, err := s.db.Query(`
 		SELECT p.rowid, p.repo, p.pr_number, p.pr_url, c.task_run_id,
 		       CAST(strftime('%s', c.created_at) AS INTEGER),
-		       `+lifecycleClawSelectColumns+`
+		       ` + lifecycleClawSelectColumns + `
 		  FROM claw_prs p JOIN claws c ON c.id = p.claw_id
 		 WHERE NOT EXISTS (
 			SELECT 1 FROM slack_notification_deliveries d
 			 WHERE d.event_id = 'claw:' || p.claw_id || ':pr:' || p.pr_url
 		   )
 		 ORDER BY p.rowid
-		 LIMIT `+strconv.Itoa(lifecycleBatchSize))
+		 LIMIT ` + strconv.Itoa(lifecycleBatchSize))
 	if err != nil {
 		log.Printf("[notify] select claw PR candidates: %v", err)
 		return

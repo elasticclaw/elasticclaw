@@ -578,6 +578,11 @@ type LifecycleNotificationsConfig struct {
 	ThreadByRun *bool `yaml:"thread_by_run,omitempty" json:"threadByRun,omitempty"`
 	// PollInterval is how often the notifier scans for new events. Default "5s".
 	PollInterval string `yaml:"poll_interval,omitempty" json:"pollInterval,omitempty"`
+	// IdleAfter is how long an agent must sit idle (connected, no turn
+	// running, none finished recently) before an agent_idle notification
+	// fires. Default "5m", minimum "1m". Detection rides the 2-minute status
+	// watchdog tick, so the alert lands between IdleAfter and IdleAfter+2m.
+	IdleAfter string `yaml:"idle_after,omitempty" json:"idleAfter,omitempty"`
 	// Events toggles individual event categories. All default true when absent.
 	Events *LifecycleEventToggles `yaml:"events,omitempty" json:"events,omitempty"`
 }
@@ -594,6 +599,7 @@ type LifecycleEventToggles struct {
 	AgentStarted *bool `yaml:"agent_started,omitempty" json:"agentStarted,omitempty"`
 	PROpened     *bool `yaml:"pr_opened,omitempty" json:"prOpened,omitempty"`
 	Failures     *bool `yaml:"failures,omitempty" json:"failures,omitempty"`
+	AgentIdle    *bool `yaml:"agent_idle,omitempty" json:"agentIdle,omitempty"`
 }
 
 // LivenessConfig controls boot reconciliation and the periodic safety-net reaper.

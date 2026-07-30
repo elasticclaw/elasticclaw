@@ -65,6 +65,7 @@ func lifecycleSupportedEventTypes() map[string]bool {
 	supported := map[string]bool{
 		taskRunEventAgentStarted: true,
 		taskRunEventPROpened:     true,
+		taskRunEventAgentIdle:    true,
 	}
 	for t := range lifecycleFailureEventTypes {
 		supported[t] = true
@@ -185,13 +186,16 @@ func notifierDestination(n notify.Notifier) string {
 // enabledLifecycleEventTypes maps the config toggles onto concrete event
 // types. All categories default to enabled when the toggles block is absent.
 func enabledLifecycleEventTypes(lc *types.LifecycleNotificationsConfig) map[string]bool {
-	agentStarted, prOpened, failures := lifecycleClawKindsEnabled(lc)
+	agentStarted, prOpened, failures, agentIdle := lifecycleClawKindsEnabled(lc)
 	enabled := map[string]bool{}
 	if agentStarted {
 		enabled[taskRunEventAgentStarted] = true
 	}
 	if prOpened {
 		enabled[taskRunEventPROpened] = true
+	}
+	if agentIdle {
+		enabled[taskRunEventAgentIdle] = true
 	}
 	if failures {
 		for t := range lifecycleFailureEventTypes {
@@ -241,6 +245,13 @@ func (s *Server) initLifecycleNotifierBaseline() {
 		} else {
 			log.Printf("[notify] init claw baseline: %v", err)
 		}
+	}
+	// Stamp the agent_idle baseline at boot on the first enabled run so idle
+	// stretches that predate the feature (or this deploy) are parked, not
+	// announced. Runtime enables are covered by the lazy stamp in
+	// agentIdleBaseline.
+	if _, found, err := s.notifierStateInt64(agentIdleBaselineKey); err == nil && !found {
+		s.setNotifierStateInt64(agentIdleBaselineKey, epochMillis(now()))
 	}
 }
 
@@ -842,6 +853,7 @@ var lifecycleEventStyles = map[string]lifecycleEventStyle{
 	taskRunFailurePermissionOrAuth: {":lock:", "Agent was denied access", notify.SeverityError},
 	taskRunFailureProviderLost:     {":satellite_antenna:", "Lost contact with the provider", notify.SeverityError},
 	taskRunFailureTimeout:          {":hourglass_flowing_sand:", "Agent ran out of time", notify.SeverityWarning},
+	taskRunEventAgentIdle:          {":zzz:", "Agent stalled", notify.SeverityWarning},
 	taskRunEventDoneWithoutPR:      {":mailbox_with_no_mail:", "Agent finished without a PR", notify.SeverityWarning},
 	"unknown_failure":              {":question:", "Agent failed", notify.SeverityError},
 }
@@ -851,7 +863,7 @@ var lifecycleEventStyles = map[string]lifecycleEventStyle{
 // still gets a readable humanized headline, never a raw snake_case string.
 func lifecycleEventStyleFor(ev lifecycleEventRow) lifecycleEventStyle {
 	key := ev.EventType
-	if key != taskRunEventAgentStarted && key != taskRunEventPROpened {
+	if key != taskRunEventAgentStarted && key != taskRunEventPROpened && key != taskRunEventAgentIdle {
 		key = firstNonEmpty(ev.FailureType, ev.EventType)
 	}
 	if key == taskRunFailureUnknown {
@@ -898,6 +910,8 @@ func buildLifecycleMessage(ev lifecycleEventRow, runCtx lifecycleRunContext) not
 		return buildAgentStartedMessage(ev, runCtx)
 	case taskRunEventPROpened:
 		return buildPROpenedMessage(ev, runCtx)
+	case taskRunEventAgentIdle:
+		return buildAgentIdleMessage(ev, runCtx)
 	default:
 		return buildFailureMessage(ev, runCtx)
 	}
@@ -966,6 +980,39 @@ func buildPROpenedMessage(ev lifecycleEventRow, runCtx lifecycleRunContext) noti
 		Link:     notify.Link{URL: prURL, Label: prLabel},
 		Fields:   lifecycleMetaFields(runCtx, false, false),
 		Summary:  []string{prLabel, lifecycleIssueRef(runCtx)},
+	}
+}
+
+// buildAgentIdleMessage renders the soft "agent stopped making progress"
+// alert: how long the agent has been idle and what it was working on. It is a
+// warning, not a failure — the agent is alive, just not moving.
+func buildAgentIdleMessage(ev lifecycleEventRow, runCtx lifecycleRunContext) notify.Message {
+	style := lifecycleEventStyleFor(ev)
+	subject := lifecycleIssueRef(runCtx)
+	if subject == "" {
+		subject = "task"
+	}
+	idleLabel := agentIdleDurationLabel(ev.Detail)
+	body := "No agent activity"
+	if idleLabel != "" {
+		body += " for " + idleLabel
+	}
+	body += ": the agent is connected but has not run a turn."
+	if paused, ok := ev.Detail["noProgressPaused"].(bool); ok && paused {
+		body += " Automatic continuation is paused after repeated turns without progress — it is waiting for a message."
+	}
+	summaryIdle := "idle"
+	if idleLabel != "" {
+		summaryIdle = "idle for " + idleLabel
+	}
+	return notify.Message{
+		Title:    style.title,
+		Emoji:    style.emoji,
+		Severity: style.severity,
+		Subject:  subject,
+		Body:     body,
+		Fields:   lifecycleMetaFields(runCtx, true, false),
+		Summary:  []string{runCtx.Repo, subject, summaryIdle},
 	}
 }
 
@@ -1082,6 +1129,18 @@ func (s *Server) handleNotificationTest(w http.ResponseWriter, r *http.Request) 
 			}
 		case taskRunEventAgentStarted:
 			// no target — renders without a link, like real claw starts
+		case taskRunEventAgentIdle:
+			// Render from the claw's real idle latch when it has one; a claw
+			// that is not currently latched gets the synthetic sample value.
+			var idleSince int64
+			_ = s.db.QueryRow(`SELECT idle_since FROM claws WHERE id=?`, body.ClawID).Scan(&idleSince)
+			minutes := 9
+			if idleSince > 0 {
+				if m := int(now().Sub(time.UnixMilli(idleSince)).Minutes()); m > 0 {
+					minutes = m
+				}
+			}
+			ev.Detail = map[string]any{"idleSince": idleSince, "idleMinutes": minutes}
 		default:
 			ev.FailureType = body.EventType
 			if claw.BootstrapDiagnostic != "" {
@@ -1175,6 +1234,8 @@ func sampleLifecycleContext(eventType string) (lifecycleRunContext, lifecycleEve
 		ev.TargetLabel = "example/repo#123"
 	case taskRunEventAgentStarted:
 		// no target — renders without a link, like most real starts
+	case taskRunEventAgentIdle:
+		ev.Detail = map[string]any{"idleMinutes": 9}
 	default:
 		ev.FailureType = eventType
 		ev.Detail = map[string]any{"reason": "synthetic sample failure (test send)"}

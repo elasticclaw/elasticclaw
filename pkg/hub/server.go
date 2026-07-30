@@ -89,6 +89,12 @@ type Server struct {
 	checkpointMu      sync.Mutex
 	checkpointWaiters map[string]chan error // checkpoint_id -> waiter
 
+	// agentIdleBaselineAt caches the persisted agent_idle baseline (see
+	// agentIdleBaseline in agent_idle.go); zero = not loaded or feature off.
+	agentIdleBaselineMu      sync.Mutex
+	agentIdleBaselineAt      time.Time
+	agentIdleBaselineCleared bool
+
 	replicatedBootstrapEnvMu sync.Mutex
 	replicatedBootstrapEnv   map[string]map[string]string // temporary handoff while a Replicated VM becomes reachable
 
@@ -206,6 +212,8 @@ type clawConn struct {
 	awaitingResponse      bool            // true as soon as a prompt is delivered, before the first chunk/activity
 	noProgressPaused      bool            // automatic delivery is paused after repeated turns with unchanged progress
 	lastTurnFinishedAt    time.Time       // when the last streaming turn ended (for post-restart resume window)
+	connectedAt           time.Time       // when this connection registered; immutable after registration
+	idleNotifiedAt        time.Time       // when the agent_idle notification fired for the current idle stretch (zero = armed)
 
 	deliveryInFlight bool // serializes DB-backed delivery writes
 
@@ -252,7 +260,28 @@ func (cc *clawConn) isBusyLocked() bool {
 	return cc.awaitingResponse || !cc.streamingStartedAt.IsZero() || cc.streamingMsgID != ""
 }
 
+// finishTurnLocked ends a turn that actually ran (or was force-finished):
+// the in-flight state clears and the idle clock restarts now.
 func (cc *clawConn) finishTurnLocked() {
+	cc.resetTurnStateLocked()
+	cc.lastTurnFinishedAt = time.Now()
+	// A finished turn starts a new idle stretch: re-arm the idle alert so a
+	// claw that goes idle, works, then goes idle again notifies twice.
+	cc.idleNotifiedAt = time.Time{}
+}
+
+// abortTurnLocked releases a turn reservation whose delivery never reached
+// the bridge (socket write failed, marker insert failed). No turn ran, so the
+// idle clock deliberately does NOT restart: stamping lastTurnFinishedAt here
+// would let a claw whose deliveries keep failing rewind its idle clock on
+// every watchdog tick and never cross the agent_idle threshold — the exact
+// stuck state that alert exists for. It would also fake a "recent turn" for
+// the auto-resume window.
+func (cc *clawConn) abortTurnLocked() {
+	cc.resetTurnStateLocked()
+}
+
+func (cc *clawConn) resetTurnStateLocked() {
 	cc.awaitingResponse = false
 	cc.streamingMsgID = ""
 	cc.streamingBuf.Reset()
@@ -260,7 +289,6 @@ func (cc *clawConn) finishTurnLocked() {
 	cc.streamingStartedAt = time.Time{}
 	cc.streamingTimeoutSent = false
 	cc.contextWarningSent = false
-	cc.lastTurnFinishedAt = time.Now()
 }
 
 func (s *Server) flushStreamingSegment(clawID, tenantID string, cc *clawConn) error {
@@ -1752,6 +1780,7 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 			cc.mu.Lock()
 			cc.lastUserMessageAt = time.Now()
 			cc.unresponsiveWarnedAt = time.Time{}
+			cc.idleNotifiedAt = time.Time{}
 			busy := cc.isBusyLocked()
 			cc.mu.Unlock()
 			if !busy {
@@ -2288,7 +2317,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 	// turn end closely enough for autoResumeRecentTurnWindow.
 	var lastClawMsgAt time.Time
 	_ = s.db.QueryRow(`SELECT created_at FROM messages WHERE claw_id=? AND role='claw' ORDER BY created_at DESC LIMIT 1`, clawID).Scan(&lastClawMsgAt)
-	cc := &clawConn{id: clawID, tenantID: tenantID, conn: conn, gatewayReady: gatewayReadyBool(rp.GatewayReady), tags: registrationTags, lastUserMessageAt: time.Now(), lastStatusAt: time.Now(), noProgressPaused: noProgressPaused}
+	cc := &clawConn{id: clawID, tenantID: tenantID, conn: conn, gatewayReady: gatewayReadyBool(rp.GatewayReady), tags: registrationTags, lastUserMessageAt: time.Now(), lastStatusAt: time.Now(), connectedAt: time.Now(), noProgressPaused: noProgressPaused}
 	s.mu.Lock()
 	if s.gatewayRestartCounts != nil {
 		cc.gatewayRestartCount = s.gatewayRestartCounts[clawID]
@@ -3040,6 +3069,7 @@ func (s *Server) handleUserWS(w http.ResponseWriter, r *http.Request) {
 				cc.mu.Lock()
 				cc.lastUserMessageAt = time.Now()
 				cc.unresponsiveWarnedAt = time.Time{}
+				cc.idleNotifiedAt = time.Time{}
 				busy := cc.isBusyLocked()
 				cc.mu.Unlock()
 				if !busy {
@@ -5470,6 +5500,15 @@ func (s *Server) checkClawStatus() {
 			s.sendNextQueuedMessage(cc)
 		}
 
+		// Agent-idle detection runs after the queued drain (a successful
+		// delivery just above marks the claw busy, which correctly suppresses
+		// the alert; a FAILED delivery aborts the reservation without
+		// touching the idle clock, so a wedged socket still alerts) and
+		// before the recent-user-message skip below, which is about status
+		// broadcasts, not idleness. Riding this 2-minute tick means a
+		// threshold of T fires between T and T+2m — deliberately not tightened.
+		s.checkAgentIdle(now, id, cc)
+
 		// If user sent a message in the last 2 minutes, skip status broadcast
 		if now.Sub(lastUserMessageAt) < 2*time.Minute {
 			continue
@@ -5739,7 +5778,7 @@ func (s *Server) sendWakeMessage(cc *clawConn, clawID string) {
 	wakeMsg.Content = wakeContent
 	if err := wsjson.Write(context.Background(), cc.conn, types.WSMessage{Type: "message", Payload: wakeMsg}); err != nil {
 		cc.mu.Lock()
-		cc.finishTurnLocked()
+		cc.abortTurnLocked()
 		cc.mu.Unlock()
 	}
 
@@ -5765,7 +5804,7 @@ func (s *Server) sendInitialPlanInstruction(cc *clawConn, clawID string) {
 	cc.mu.Unlock()
 	if !s.insertSystemMarker(clawID, cc.tenantID, initialPlanRequiredMarker) {
 		cc.mu.Lock()
-		cc.finishTurnLocked()
+		cc.abortTurnLocked()
 		cc.mu.Unlock()
 		return
 	}
@@ -5779,7 +5818,7 @@ func (s *Server) sendInitialPlanInstruction(cc *clawConn, clawID string) {
 	}
 	if err := wsjson.Write(context.Background(), cc.conn, types.WSMessage{Type: "message", Payload: msg}); err != nil {
 		cc.mu.Lock()
-		cc.finishTurnLocked()
+		cc.abortTurnLocked()
 		cc.mu.Unlock()
 	}
 }
@@ -7560,7 +7599,7 @@ func (s *Server) sendNextQueuedMessage(cc *clawConn) {
 	err = wsjson.Write(ctx, conn, types.WSMessage{Type: "message", Payload: msg})
 	if err != nil {
 		cc.mu.Lock()
-		cc.finishTurnLocked()
+		cc.abortTurnLocked()
 		cc.mu.Unlock()
 		log.Printf("[hub] failed to deliver pending message to %s: %v", shortID(clawID), err)
 		return
@@ -7572,6 +7611,7 @@ func (s *Server) sendNextQueuedMessage(cc *clawConn) {
 	cc.mu.Lock()
 	cc.lastUserMessageAt = time.Now()
 	cc.unresponsiveWarnedAt = time.Time{}
+	cc.idleNotifiedAt = time.Time{}
 	cc.mu.Unlock()
 
 	// Signal to UI that agent is working

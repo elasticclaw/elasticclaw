@@ -787,6 +787,19 @@ func ValidateNotificationsConfig(cfg *NotificationsConfig) error {
 			return fmt.Errorf("notifications.lifecycle: poll_interval must be at least 1s, got %q", lc.PollInterval)
 		}
 	}
+	// idle_after gets the same always-on validation: a typo must be caught
+	// before the operator flips the feature on. The 1m floor keeps the idle
+	// alert meaningful — the detector ticks every 2 minutes, so sub-minute
+	// thresholds cannot be honoured and would only promise noise.
+	if lc.IdleAfter != "" {
+		d, err := time.ParseDuration(lc.IdleAfter)
+		if err != nil {
+			return fmt.Errorf("notifications.lifecycle: invalid idle_after %q: %w", lc.IdleAfter, err)
+		}
+		if d < time.Minute {
+			return fmt.Errorf("notifications.lifecycle: idle_after must be at least 1m, got %q", lc.IdleAfter)
+		}
+	}
 	if !lc.IsEnabled() {
 		return nil
 	}

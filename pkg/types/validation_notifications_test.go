@@ -105,6 +105,40 @@ func TestValidateNotificationsConfig(t *testing.T) {
 			wantErr: true,
 			errMsg:  "invalid poll_interval",
 		},
+		{
+			name: "valid idle_after",
+			cfg: &NotificationsConfig{
+				Notifiers: slack(),
+				Lifecycle: &LifecycleNotificationsConfig{Via: "eng-agents", IdleAfter: "10m"},
+			},
+		},
+		{
+			name: "unparseable idle_after",
+			cfg: &NotificationsConfig{
+				Notifiers: slack(),
+				Lifecycle: &LifecycleNotificationsConfig{Via: "eng-agents", IdleAfter: "whenever"},
+			},
+			wantErr: true,
+			errMsg:  "invalid idle_after",
+		},
+		{
+			name: "idle_after below 1m",
+			cfg: &NotificationsConfig{
+				Notifiers: slack(),
+				Lifecycle: &LifecycleNotificationsConfig{Via: "eng-agents", IdleAfter: "30s"},
+			},
+			wantErr: true,
+			errMsg:  "at least 1m",
+		},
+		{
+			name: "idle_after validated even when disabled",
+			cfg: &NotificationsConfig{
+				Notifiers: slack(),
+				Lifecycle: &LifecycleNotificationsConfig{Enabled: boolPtr(false), IdleAfter: "nah"},
+			},
+			wantErr: true,
+			errMsg:  "invalid idle_after",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
