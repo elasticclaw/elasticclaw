@@ -465,10 +465,10 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/workspaces/{name}/workflows", s.withAdminForMethods(s.handleWorkspaceWorkflowsList, http.MethodPost))
 	mux.HandleFunc("/api/workspaces/{workspace}/workflows/{workflow}", s.withAdminForMethods(s.handleWorkspaceWorkflowDetail, http.MethodPatch))
 	mux.HandleFunc("/api/workspaces/{workspace}/workflows/{workflow}/trigger", s.withAuth(s.handleWorkspaceWorkflowTrigger))
-	mux.HandleFunc("/api/workspaces/{workspace}/workflows/{workflow}/cron/trigger", s.withAuth(s.handleCronWorkflowTrigger)) // POST manual trigger
-	mux.HandleFunc("/api/workspaces/{workspace}/workflows/{workflow}/cron/runs", s.withAuth(s.handleCronWorkflowRuns))       // GET run history
+	mux.HandleFunc("/api/workspaces/{workspace}/workflows/{workflow}/cron/trigger", s.withAuth(s.handleCronWorkflowTrigger))  // POST manual trigger
+	mux.HandleFunc("/api/workspaces/{workspace}/workflows/{workflow}/cron/runs", s.withAuth(s.handleCronWorkflowRuns))        // GET run history
 	mux.HandleFunc("/api/workspaces/{workspace}/workflows/{workflow}/cron/runs/{runId}", s.withAuth(s.handleCronWorkflowRun)) // GET single run
-	mux.HandleFunc("/api/workspaces/{workspace}/workflows/{workflow}/cron/next", s.withAuth(s.handleCronWorkflowNextRun))    // GET next scheduled run
+	mux.HandleFunc("/api/workspaces/{workspace}/workflows/{workflow}/cron/next", s.withAuth(s.handleCronWorkflowNextRun))     // GET next scheduled run
 	mux.HandleFunc("/api/workspaces/{workspace}/secrets", s.withAdminForMethods(s.handleWorkspaceSecretsCRUD, http.MethodPut, http.MethodPost, http.MethodDelete))
 	mux.HandleFunc("/api/workspaces/{workspace}/github-apps", s.withAdminForMethods(s.handleWorkspaceGitHubAppsCRUD, http.MethodPut, http.MethodPost, http.MethodDelete))
 	mux.HandleFunc("/api/workspaces/{workspace}/issue-trackers", s.withAdminForMethods(s.handleWorkspaceIssueTrackersCRUD, http.MethodPut, http.MethodPost, http.MethodDelete))
@@ -2544,10 +2544,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 					content := activityContent(activity)
 					if content != "" && !isUnhelpfulActivityContent(activity, content) {
 						format := "activity:" + string(payload)
-						_, _ = s.db.Exec(
-							`INSERT INTO messages(id,claw_id,tenant_id,role,content,format,created_at,delivered_at) VALUES(?,?,?,?,?,?,?,?)`,
-							uuid.New().String(), clawID, tenantID, "activity", content, format, createdAt, createdAt,
-						)
+						s.storeAgentActivity(clawID, tenantID, content, format, activity, createdAt)
 					}
 					s.broadcastToUsers(tenantID, types.WSMessage{
 						Type:    "agent_activity",
@@ -4586,6 +4583,29 @@ func isUnhelpfulActivityContent(activity map[string]interface{}, content string)
 		return true
 	}
 	return strings.HasPrefix(content, "No streamed output")
+}
+
+// storeAgentActivity persists an activity message. Generic reasoning activity
+// (kind == "activity") is upserted into a single row per claw so the model's
+// streaming internal monologue does not flood the messages table. Tool,
+// diagnostic, error, and lifecycle activity messages are inserted as distinct
+// rows because they are useful audit events.
+func (s *Server) storeAgentActivity(clawID, tenantID, content, format string, activity map[string]interface{}, createdAt time.Time) {
+	kind, _ := activity["kind"].(string)
+	if strings.ToLower(strings.TrimSpace(kind)) == "activity" {
+		// Use a deterministic ID so repeated reasoning updates collapse to one row.
+		msgID := "activity-stream:" + clawID
+		_, _ = s.db.Exec(
+			`INSERT INTO messages(id,claw_id,tenant_id,role,content,format,created_at,delivered_at) VALUES(?,?,?,?,?,?,?,?)
+			 ON CONFLICT(id) DO UPDATE SET content=excluded.content, format=excluded.format, created_at=excluded.created_at, delivered_at=excluded.delivered_at`,
+			msgID, clawID, tenantID, "activity", content, format, createdAt, createdAt,
+		)
+		return
+	}
+	_, _ = s.db.Exec(
+		`INSERT INTO messages(id,claw_id,tenant_id,role,content,format,created_at,delivered_at) VALUES(?,?,?,?,?,?,?,?)`,
+		uuid.New().String(), clawID, tenantID, "activity", content, format, createdAt, createdAt,
+	)
 }
 
 func daytonaBootstrapStatusForStep(label string) string {
