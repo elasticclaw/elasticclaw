@@ -1078,6 +1078,49 @@ func TestRunOnEnterJudgeContinueOnError(t *testing.T) {
 	}
 }
 
+func TestRunOnEnterRunCommandLogsAndInjectsOnSuccess(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{
+		Token:     "test-token",
+		ClawToken: "test-claw-token",
+		Providers: map[string]types.ProviderConfig{
+			"noop": {Type: "noop"},
+		},
+	}, "", "", "")
+
+	const clawID = "claw-run-success"
+	_, err := db.Exec(
+		`INSERT INTO claws(id, tenant_id, name, template, status, provider, provider_id, created_at) VALUES(?,?,?,?,?,?,?,datetime('now'))`,
+		clawID, "test-tenant-id", "test-claw", "elasticclaw", "connected", "noop", "noop-id",
+	)
+	if err != nil {
+		t.Fatalf("insert claw: %v", err)
+	}
+
+	stage := pipeline.Stage{
+		ID:    "build",
+		Label: "Build",
+		OnEnter: pipeline.OnEnter{
+			Run: pipeline.RunAction{
+				Command: "echo hello",
+			},
+			Inject: "Continue after build",
+		},
+	}
+
+	_, err = s.runOnEnter(clawID, stage, pipelineContext{})
+	if err != nil {
+		t.Fatalf("expected runOnEnter to succeed, got error: %v", err)
+	}
+
+	var messageCount int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=?`, clawID).Scan(&messageCount); err != nil {
+		t.Fatalf("count messages: %v", err)
+	}
+	if messageCount != 2 {
+		t.Fatalf("expected 2 messages (run completion + inject), got %d", messageCount)
+	}
+}
+
 func TestRunOnEnterDependencyUpdatesStopsOnError(t *testing.T) {
 	s, db := NewTestServerWithConfig(t, &types.HubConfig{
 		Token:     "test-token",
@@ -1164,6 +1207,49 @@ func TestRunOnEnterDependencyUpdatesContinueOnError(t *testing.T) {
 	// Should have 2 messages: deps warning + inject message (because continue_on_error=true).
 	if messageCount != 2 {
 		t.Fatalf("expected 2 messages (deps warning + inject), got %d", messageCount)
+	}
+}
+
+func TestRunOnEnterDependencyUpdatesLogsAndInjectsOnSuccess(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{
+		Token:     "test-token",
+		ClawToken: "test-claw-token",
+		Providers: map[string]types.ProviderConfig{
+			"noop": {Type: "noop"},
+		},
+	}, "", "", "")
+
+	const clawID = "claw-deps-success"
+	_, err := db.Exec(
+		`INSERT INTO claws(id, tenant_id, name, template, status, provider, provider_id, created_at) VALUES(?,?,?,?,?,?,?,datetime('now'))`,
+		clawID, "test-tenant-id", "test-claw", "elasticclaw", "connected", "noop", "noop-id",
+	)
+	if err != nil {
+		t.Fatalf("insert claw: %v", err)
+	}
+
+	stage := pipeline.Stage{
+		ID:    "deps",
+		Label: "Dependency Updates",
+		OnEnter: pipeline.OnEnter{
+			DependencyUpdates: pipeline.DependencyUpdatesAction{
+				Enabled: true,
+			},
+			Inject: "Continue after deps",
+		},
+	}
+
+	_, err = s.runOnEnter(clawID, stage, pipelineContext{})
+	if err != nil {
+		t.Fatalf("expected runOnEnter to succeed, got error: %v", err)
+	}
+
+	var messageCount int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=?`, clawID).Scan(&messageCount); err != nil {
+		t.Fatalf("count messages: %v", err)
+	}
+	if messageCount != 2 {
+		t.Fatalf("expected 2 messages (deps summary + inject), got %d", messageCount)
 	}
 }
 
