@@ -366,6 +366,22 @@ func (s *Server) resolveJiraTrackerForPipeline(ctx pipelineContext) (workspaceIs
 	return workspaceIssueTracker{}, false
 }
 
+// preferJiraForPipelineIssue reports whether KEY-style issue IDs (e.g. KAN-1)
+// should be resolved via Jira rather than Linear for pipeline templates.
+func (s *Server) preferJiraForPipelineIssue(ctx pipelineContext) bool {
+	switch strings.ToLower(strings.TrimSpace(ctx.Integration())) {
+	case "jira":
+		return true
+	case "linear", "shortcut", "github", "github-issues", "cron":
+		return false
+	default:
+		// No explicit integration: prefer Jira only when a Jira tracker is
+		// configured and Linear is not, so Linear factories keep working.
+		_, jiraOK := s.resolveJiraTrackerForPipeline(ctx)
+		return jiraOK && s.resolveLinearTokenForPipeline(ctx) == ""
+	}
+}
+
 const defaultPipelineRunTimeout = 10 * time.Minute
 
 type pipelineRunResult struct {
@@ -808,6 +824,15 @@ func (s *Server) loadIssueTextForJudge(clawID string, ctx pipelineContext) strin
 		}
 		return "GitHub issue: " + issueID
 	}
+	if s.preferJiraForPipelineIssue(ctx) {
+		if tracker, ok := s.resolveJiraTrackerForPipeline(ctx); ok {
+			details, err := s.fetchJiraIssueDetails(tracker, issueID)
+			if err == nil && details != nil {
+				return fmt.Sprintf("**%s: %s**\n%s\n\n%s", details.Identifier, details.Title, details.URL, details.Description)
+			}
+		}
+		return "Jira issue: " + issueID
+	}
 	// Linear issue
 	linearToken := s.resolveLinearTokenForPipeline(ctx)
 	if linearToken != "" {
@@ -1089,26 +1114,51 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, ctx pipelineCon
 		injectMsg := stage.OnEnter.Inject
 		manualInputs := s.loadManualTriggerInputs(clawID)
 
-		// Render {{.Issue.Identifier}}, {{.Issue.Title}}, {{.Issue.URL}} if this is a Linear claw
-		// GitHub Issues IDs are owner/repo/number format (contain "/"), Shortcut IDs start with "sc-"
+		// Render {{.Issue.Identifier}}, {{.Issue.Title}}, {{.Issue.URL}} for tracker issues.
+		// GitHub Issues IDs are owner/repo/number format (contain "/"), Shortcut IDs start with "sc-".
+		// KEY-style IDs (e.g. KAN-1) are Jira when the workflow/factory integration is jira,
+		// otherwise Linear.
 		if issueID != "" && !strings.HasPrefix(issueID, "sc-") && !strings.Contains(issueID, "/") {
 			log.Printf("[pipeline] attempting to render template for claw %s issue %s", clawID[:8], issueID)
-			linearToken := s.resolveLinearTokenForPipeline(ctx)
-			if linearToken == "" {
-				s.warnPipelineRender(clawID, "%s: no Linear issue tracker token configured; rendering inject with fallback issue context", ctx.Name())
-				injectMsg = renderInjectWithData(clawID, injectMsg, s.injectTemplateData(clawID, map[string]interface{}{
-					"Issue": &linearIssueDetails{Identifier: issueID},
-				}))
-				goto injectMessage
-			}
-			details, err := s.fetchLinearIssueDetails(linearToken, issueID)
-			if err != nil {
-				s.warnPipelineRender(clawID, "%s: failed to fetch Linear issue details for %s: %v", ctx.Name(), issueID, err)
-				details = &linearIssueDetails{Identifier: issueID}
-			}
-			if details == nil {
-				s.warnPipelineRender(clawID, "%s: Linear issue %s returned no details", ctx.Name(), issueID)
-				details = &linearIssueDetails{Identifier: issueID}
+			var details *linearIssueDetails
+			if s.preferJiraForPipelineIssue(ctx) {
+				tracker, ok := s.resolveJiraTrackerForPipeline(ctx)
+				if !ok {
+					s.warnPipelineRender(clawID, "%s: no Jira tracker configured; rendering inject with fallback issue context", ctx.Name())
+					injectMsg = renderInjectWithData(clawID, injectMsg, s.injectTemplateData(clawID, map[string]interface{}{
+						"Issue": &linearIssueDetails{Identifier: issueID},
+					}))
+					goto injectMessage
+				}
+				fetched, err := s.fetchJiraIssueDetails(tracker, issueID)
+				if err != nil {
+					s.warnPipelineRender(clawID, "%s: failed to fetch Jira issue details for %s: %v", ctx.Name(), issueID, err)
+					details = &linearIssueDetails{Identifier: issueID}
+				} else if fetched == nil {
+					s.warnPipelineRender(clawID, "%s: Jira issue %s returned no details", ctx.Name(), issueID)
+					details = &linearIssueDetails{Identifier: issueID}
+				} else {
+					details = fetched
+				}
+			} else {
+				linearToken := s.resolveLinearTokenForPipeline(ctx)
+				if linearToken == "" {
+					s.warnPipelineRender(clawID, "%s: no Linear issue tracker token configured; rendering inject with fallback issue context", ctx.Name())
+					injectMsg = renderInjectWithData(clawID, injectMsg, s.injectTemplateData(clawID, map[string]interface{}{
+						"Issue": &linearIssueDetails{Identifier: issueID},
+					}))
+					goto injectMessage
+				}
+				fetched, err := s.fetchLinearIssueDetails(linearToken, issueID)
+				if err != nil {
+					s.warnPipelineRender(clawID, "%s: failed to fetch Linear issue details for %s: %v", ctx.Name(), issueID, err)
+					details = &linearIssueDetails{Identifier: issueID}
+				} else if fetched == nil {
+					s.warnPipelineRender(clawID, "%s: Linear issue %s returned no details", ctx.Name(), issueID)
+					details = &linearIssueDetails{Identifier: issueID}
+				} else {
+					details = fetched
+				}
 			}
 			tmpl, err := template.New("inject").Parse(injectMsg)
 			if err != nil {
@@ -1278,11 +1328,20 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, ctx pipelineCon
 		if strings.Contains(resolvedIssueID, "{{.Issue.") {
 			var details *linearIssueDetails
 			if issueID != "" && !strings.HasPrefix(issueID, "sc-") && !strings.Contains(issueID, "/") {
-				linearToken := s.resolveLinearTokenForPipeline(ctx)
-				if linearToken != "" {
-					d, err := s.fetchLinearIssueDetails(linearToken, issueID)
-					if err == nil && d != nil {
-						details = d
+				if s.preferJiraForPipelineIssue(ctx) {
+					if tracker, ok := s.resolveJiraTrackerForPipeline(ctx); ok {
+						d, err := s.fetchJiraIssueDetails(tracker, issueID)
+						if err == nil && d != nil {
+							details = d
+						}
+					}
+				} else {
+					linearToken := s.resolveLinearTokenForPipeline(ctx)
+					if linearToken != "" {
+						d, err := s.fetchLinearIssueDetails(linearToken, issueID)
+						if err == nil && d != nil {
+							details = d
+						}
 					}
 				}
 			} else if strings.Contains(issueID, "/") {
@@ -1348,6 +1407,9 @@ issueResolved:
 	default:
 		isShortcut = strings.HasPrefix(resolvedIssueID, "sc-")
 		isGitHub = strings.Contains(resolvedIssueID, "/")
+		if !isShortcut && !isGitHub {
+			isJira = s.preferJiraForPipelineIssue(ctx)
+		}
 	}
 
 	if isJira {

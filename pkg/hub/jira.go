@@ -710,6 +710,25 @@ func (s *Server) fetchJiraIssue(tracker workspaceIssueTracker, key string) (jira
 	return issue, nil
 }
 
+// fetchJiraIssueDetails looks up a Jira issue by key (e.g. "KAN-2547") and
+// returns the fields needed for pipeline template rendering ({{.Issue.*}}).
+func (s *Server) fetchJiraIssueDetails(tracker workspaceIssueTracker, key string) (*linearIssueDetails, error) {
+	issue, err := s.fetchJiraIssue(tracker, key)
+	if err != nil {
+		return nil, err
+	}
+	browseURL := ""
+	if base := s.jiraBaseForTracker(tracker); base != "" && issue.Key != "" {
+		browseURL = base + "/browse/" + issue.Key
+	}
+	return &linearIssueDetails{
+		Identifier:  issue.Key,
+		Title:       issue.Fields.Summary,
+		URL:         browseURL,
+		Description: jiraDescriptionText(issue.Fields.Description),
+	}, nil
+}
+
 func (s *Server) queryJiraIssues(tracker workspaceIssueTracker, since time.Time, projects []string) ([]jiraPollIssue, error) {
 	base := s.jiraBaseForTracker(tracker)
 	if base == "" {

@@ -206,13 +206,24 @@ func (s *Server) notifyIssueTemplateData(clawID string, pipelineCtx pipelineCont
 	}
 
 	details := &linearIssueDetails{Identifier: issueID}
-	if !strings.HasPrefix(issueID, "sc-") {
-		if token := s.resolveLinearTokenForPipeline(pipelineCtx); token != "" {
-			if fetched, err := s.fetchLinearIssueDetails(token, issueID); err == nil && fetched != nil {
+	if strings.HasPrefix(issueID, "sc-") {
+		return details
+	}
+	if s.preferJiraForPipelineIssue(pipelineCtx) {
+		if tracker, ok := s.resolveJiraTrackerForPipeline(pipelineCtx); ok {
+			if fetched, err := s.fetchJiraIssueDetails(tracker, issueID); err == nil && fetched != nil {
 				return fetched
 			} else if err != nil {
 				log.Printf("[pipeline] notify issue template lookup failed for claw %s: %v", clawID, err)
 			}
+		}
+		return details
+	}
+	if token := s.resolveLinearTokenForPipeline(pipelineCtx); token != "" {
+		if fetched, err := s.fetchLinearIssueDetails(token, issueID); err == nil && fetched != nil {
+			return fetched
+		} else if err != nil {
+			log.Printf("[pipeline] notify issue template lookup failed for claw %s: %v", clawID, err)
 		}
 	}
 	return details
