@@ -1369,7 +1369,7 @@ func TestIsRecoverableSessionSendError(t *testing.T) {
 		{name: "send request context overflow", err: &sessionSendRequestError{err: errString("context overflow detected")}, want: true},
 		{name: "send request prompt too large", err: &sessionSendRequestError{err: errString("Context overflow: prompt too large for the model")}, want: true},
 		{name: "send request provider format rejection", err: &sessionSendRequestError{err: errString("LLM request failed: " + providerRequestFormatErrorFragment + ".")}, want: true},
-		{name: "send request session file lock conflict", err: &sessionSendRequestError{err: errString("error: session file changed while embedded prompt lock was released: /home/elasticclaw/.openclaw/agents/main/sessions/4fb88b9b-8233-4f78-819f-516fbe605e32.jsonl")}, want: true},
+		{name: "send request session file lock conflict handled by same-session retry", err: &sessionSendRequestError{err: errString("error: session file changed while embedded prompt lock was released: /home/elasticclaw/.openclaw/agents/main/sessions/4fb88b9b-8233-4f78-819f-516fbe605e32.jsonl")}, want: false},
 		{name: "send failure", err: errString("sessions.send failed: tool crashed"), want: false},
 	}
 	for _, tt := range tests {

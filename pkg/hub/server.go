@@ -7384,7 +7384,21 @@ func (s *Server) enqueueRestartResume(clawID string, restartCount int) {
 	s.enqueueSessionLostResume(clawID, restartResumePrefix, fmt.Sprintf("restart:%d", restartCount))
 }
 
+// sessionRotatedResumeThrottle bounds the rotation → resume → rotation loop:
+// if lock conflicts persist across fresh sessions (e.g. another process keeps
+// touching the session files), each rotation would otherwise enqueue another
+// resume prompt indefinitely — rotation turns complete with an empty reply,
+// so the no-progress watchdog never observes them.
+const sessionRotatedResumeThrottle = 10 * time.Minute
+
 func (s *Server) enqueueSessionRotatedResume(clawID string) {
+	var recent int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND role='hub' AND content LIKE ? AND created_at > ?`,
+		clawID, sessionRotatedResumePrefix+"%", now().Add(-sessionRotatedResumeThrottle)).Scan(&recent)
+	if err == nil && recent > 0 {
+		log.Printf("[watchdog] skipping session-rotated resume for %s: already resumed within %s", shortID(clawID), sessionRotatedResumeThrottle)
+		return
+	}
 	s.enqueueSessionLostResume(clawID, sessionRotatedResumePrefix, fmt.Sprintf("session_rotated:%s", uuid.NewString()))
 }
 

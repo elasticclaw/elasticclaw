@@ -1935,11 +1935,12 @@ func isRecoverableSessionSendError(err error) bool {
 	if !errors.As(err, &sendErr) {
 		return false
 	}
+	// Note: session file lock conflicts are deliberately absent here — they
+	// are handled earlier in SendMessage with same-session retries.
 	msg := strings.ToLower(sendErr.err.Error())
 	return strings.Contains(msg, "context overflow") ||
 		strings.Contains(msg, "prompt too large") ||
-		isProviderRequestFormatError(sendErr.err) ||
-		isSessionFileLockConflictError(sendErr.err)
+		isProviderRequestFormatError(sendErr.err)
 }
 
 func isProviderRequestFormatError(err error) bool {
