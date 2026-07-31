@@ -589,6 +589,106 @@ exit 0
 	assertUpdateStatus(t, parsed, "go", "example.com/root", true, "")
 }
 
+func TestDependencyUpdatesRecoversStalePluginModules(t *testing.T) {
+	root := t.TempDir()
+	bin := filepath.Join(root, "bin")
+	if err := os.MkdirAll(bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeExecutable(t, bin, "go", `#!/usr/bin/env bash
+set -e
+ROOT=$(cd "$(dirname "$0")/.." && pwd)
+CWD=$(pwd)
+STATE_FILE="$ROOT/.go-state-$(echo "$CWD" | tr '/' '_')"
+if [ "$*" = "list -m -u -json all" ]; then
+  if [ "$(basename "$CWD")" = "plugin" ]; then
+    if [ ! -f "$STATE_FILE" ]; then
+      echo "go: updates to go.mod needed; to update it:" >&2
+      echo "\tgo mod tidy" >&2
+      touch "$STATE_FILE"
+      exit 1
+    fi
+    printf '%s\n' '{"Path":"plugin.com/dep","Version":"v1.0.0","Update":{"Version":"v1.1.0"}}'
+    exit 0
+  fi
+  printf '%s\n' '{"Path":"example.com/root","Version":"v1.0.0","Update":{"Version":"v1.1.0"}}'
+  exit 0
+fi
+if [ "$1" = "get" ]; then
+  case "$2" in
+    example.com/root@v1.1.0|plugin.com/dep@v1.1.0)
+      echo changed >> go.sum
+      exit 0
+      ;;
+    *)
+      echo "unexpected go get target: $2" >&2
+      exit 1
+      ;;
+  esac
+fi
+if [ "$1 $2" = "mod tidy" ]; then
+  exit 0
+fi
+exit 0
+`)
+	writeExecutable(t, bin, "npm", `#!/usr/bin/env bash
+if [ "$1 $2" = "outdated --json" ]; then
+  printf '%s\n' '{}'
+  exit 1
+fi
+if [ "$1 $2" = "update --package-lock-only" ]; then
+  exit 0
+fi
+exit 0
+`)
+	writeFile(t, root, "go.mod", "module example.com/root\n")
+	writeFile(t, root, "go.sum", "")
+	writeFile(t, root, "plugin/go.mod", "module example.com/plugin\n")
+	writeFile(t, root, "plugin/go.sum", "")
+
+	command, err := buildDependencyUpdatesCommand(pipeline.DependencyUpdatesAction{
+		Enabled:    true,
+		Ecosystems: []string{"go"},
+	})
+	if err != nil {
+		t.Fatalf("build command: %v", err)
+	}
+	cmd := osexec.Command("bash", "-c", command)
+	cmd.Dir = root
+	cmd.Env = testEnvWithPath(bin)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("dependency update command failed: %v\n%s", err, out)
+	}
+
+	parsed, ok := parsePipelineOutputJSON(string(out))
+	if !ok {
+		t.Fatalf("command did not emit JSON:\n%s", out)
+	}
+	assertUpdateStatus(t, parsed, "go", "example.com/root", true, "")
+	assertUpdateStatus(t, parsed, "go", "plugin.com/dep", true, "")
+
+	commands, ok := parsed["commands"].([]interface{})
+	if !ok {
+		t.Fatalf("commands = %#v, want list", parsed["commands"])
+	}
+	var tidyAttempts int
+	for _, raw := range commands {
+		c, ok := raw.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		cmdStr, _ := c["command"].(string)
+		cwd, _ := c["cwd"].(string)
+		if cmdStr == "go mod tidy" && cwd == "plugin" {
+			tidyAttempts++
+		}
+	}
+	if tidyAttempts < 1 {
+		t.Fatalf("go mod tidy in plugin = %d, want at least 1", tidyAttempts)
+	}
+}
+
 func assertUpdateStatus(t *testing.T, parsed map[string]interface{}, ecosystem, name string, applied bool, skippedReason string) {
 	t.Helper()
 	updates, ok := parsed["updates"].([]interface{})

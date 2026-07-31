@@ -576,7 +576,15 @@ for manifest in manifests:
             result["commands"].append({"command": "go", "cwd": rel(cwd), "exit_code": 127, "stderr": "go executable not found"})
             had_failure = True
             continue
+        failure_before = had_failure
         listed = run_command(cwd, "go list -m -u -json all")
+        # If an earlier module update left this module's go.mod stale, go list will
+        # refuse to run until it is tidied. That is a recoverable failure.
+        if listed.returncode != 0 and "updates to go.mod needed" in listed.stderr:
+            if not failure_before:
+                had_failure = False
+            run_command(cwd, "go mod tidy", record_failure=False)
+            listed = run_command(cwd, "go list -m -u -json all")
         # Even if go list exits non-zero (e.g. because of invalid placeholder versions
         # behind replace directives), stdout may still contain valid JSON for usable
         # modules. Try to parse it and apply whatever we can.
