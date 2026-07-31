@@ -6,11 +6,13 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/elasticclaw/elasticclaw/pkg/config"
+	"github.com/elasticclaw/elasticclaw/pkg/hub/notify"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 )
 
@@ -121,6 +123,10 @@ func (s *Server) runDoctorChecks(ctx context.Context) DoctorResponse {
 
 	// --- Auth ---
 	checks = append(checks, s.checkAuth(hubCfg)...)
+
+	// --- Notifications ---
+	checks = append(checks, s.checkNotifications(hubCfg)...)
+	checks = append(checks, s.checkNotifyActions(hubCfg)...)
 
 	// --- Hub Settings ---
 	checks = append(checks, s.checkHubSettings(hubCfg)...)
@@ -1202,6 +1208,215 @@ func (s *Server) checkAuth(cfg *types.HubConfig) []DoctorCheck {
 }
 
 // ==================== HUB SETTINGS CHECKS ====================
+
+// ==================== NOTIFICATION CHECKS ====================
+
+// checkNotifications validates the notifications config the way delivery
+// would: structural invariants first, then each named notifier is actually
+// constructed through the provider registry, which validates the type, the
+// provider settings and resolves the token secret. Without this the only
+// signal for a broken notifier is a single log line from the poller.
+func (s *Server) checkNotifications(cfg *types.HubConfig) []DoctorCheck {
+	nCfg := cfg.Notifications
+	if nCfg == nil {
+		// Feature absent — nothing to report.
+		return nil
+	}
+	var checks []DoctorCheck
+	if err := types.ValidateNotificationsConfig(nCfg); err != nil {
+		checks = append(checks, DoctorCheck{
+			Category:    "notifications",
+			Severity:    "critical",
+			Title:       "Notifications config invalid",
+			Description: "No notifications will be delivered until this is fixed in hub.yaml.",
+			OK:          false,
+			Error:       err.Error(),
+		})
+		return checks
+	}
+
+	secrets := func(name string) (string, bool) {
+		v, ok := cfg.Secrets[name]
+		return v, ok
+	}
+	names := make([]string, 0, len(nCfg.Notifiers))
+	for name := range nCfg.Notifiers {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		nc := nCfg.Notifiers[name]
+		if !notify.Supported(nc.Type) {
+			checks = append(checks, DoctorCheck{
+				Category:    "notifications",
+				Severity:    "critical",
+				Title:       fmt.Sprintf("Notifier %q has unsupported type %q", name, nc.Type),
+				Description: "Messages routed through this notifier will never be delivered.",
+				OK:          false,
+			})
+			continue
+		}
+		// Constructing the notifier runs the provider's own config checks and
+		// resolves its secrets — exactly what a real send does first.
+		if _, err := notify.New(nc.Type, s.notifierSettings(nc), secrets); err != nil {
+			checks = append(checks, DoctorCheck{
+				Category:    "notifications",
+				Severity:    "critical",
+				Title:       fmt.Sprintf("Notifier %q is misconfigured", name),
+				Description: "Sends resolving hub secrets through this notifier (lifecycle notifications, factory notify actions) will never be delivered. Workflow notify actions, which may override secrets workspace-scoped, are checked separately.",
+				OK:          false,
+				Error:       err.Error(),
+			})
+			continue
+		}
+		checks = append(checks, DoctorCheck{
+			Category:    "notifications",
+			Severity:    "info",
+			Title:       fmt.Sprintf("Notifier %q is configured", name),
+			Description: fmt.Sprintf("Type %s constructed successfully with its hub secrets resolved.", nc.Type),
+			OK:          true,
+		})
+	}
+	return checks
+}
+
+// checkNotifyActions validates every pipeline notify action the way the
+// runtime resolves it. It walks the same artifact the pipeline runner parses
+// — each workflow's effective pipeline YAML (which covers both stages: and a
+// directly authored pipeline_yaml:) plus every factory's pipeline_yaml — so
+// no notify surface reaches executeNotifyAction unvalidated. "via" must name
+// a configured hub notifier, and that notifier must construct through the
+// provider registry (notify.New validates the type, the provider settings and
+// the secrets) under the same secret scope a real send would use: workflow
+// claws prefer workspace-scoped secrets over hub secrets, factory claws
+// resolve hub secrets only (notifyWorkspaceName). Construction verdicts are
+// deduped per (notifier, secret scope), and every title names the
+// workflow/factory stage so none can collide with checkNotifications', which
+// reports the hub-scoped (lifecycle) resolution of the same notifiers.
+func (s *Server) checkNotifyActions(cfg *types.HubConfig) []DoctorCheck {
+	type notifySource struct {
+		kind      string // "Workflow" or "Factory"
+		name      string
+		yaml      string
+		workspace string // secret scope; empty resolves hub secrets only
+	}
+	var sources []notifySource
+	if workspaces, err := loadExternalWorkspaces(); err == nil {
+		for _, workspace := range workspaces {
+			if workspace == nil {
+				continue
+			}
+			for _, workflow := range workspace.Workflows {
+				if workflow == nil || strings.TrimSpace(workflow.PipelineYAML) == "" {
+					continue
+				}
+				sources = append(sources, notifySource{"Workflow", workflow.Name, workflow.PipelineYAML, workspace.Name})
+			}
+		}
+	}
+	for _, factory := range s.resolveFactories() {
+		if factory == nil || strings.TrimSpace(factory.PipelineYAML) == "" {
+			continue
+		}
+		sources = append(sources, notifySource{"Factory", factory.Name, factory.PipelineYAML, ""})
+	}
+
+	var notifiers map[string]types.NotifierConfig
+	if cfg.Notifications != nil {
+		notifiers = cfg.Notifications.Notifiers
+	}
+
+	hubResolver := func(name string) (string, bool) {
+		v, ok := cfg.Secrets[name]
+		return v, ok
+	}
+	workspaceSecretsCache := map[string]map[string]string{}
+	resolverFor := func(workspace string) notify.SecretResolver {
+		if workspace == "" {
+			return hubResolver
+		}
+		secrets, ok := workspaceSecretsCache[workspace]
+		if !ok {
+			secrets, _ = loadWorkspaceSecrets(workspace)
+			workspaceSecretsCache[workspace] = secrets
+		}
+		return func(name string) (string, bool) {
+			if v, ok := secrets[name]; ok {
+				return v, true
+			}
+			return hubResolver(name)
+		}
+	}
+
+	var checks []DoctorCheck
+	notifyActions := 0
+	allValid := true
+	fail := func(title, description, errText string) {
+		allValid = false
+		checks = append(checks, DoctorCheck{
+			Category:    "notifications",
+			Severity:    "critical",
+			Title:       title,
+			Description: description,
+			OK:          false,
+			Error:       errText,
+		})
+	}
+	// One construction verdict per (notifier, secret scope): every stage that
+	// routes through the same notifier under the same scope shares the row.
+	constructed := map[string]bool{}
+	for _, src := range sources {
+		scopeDesc := "hub secrets"
+		if src.workspace != "" {
+			scopeDesc = fmt.Sprintf("workspace %q secrets over hub secrets", src.workspace)
+		}
+		// notifyActionRefs is the same walk the author-time save check
+		// (validateNotifyVias, on workflow and factory saves) runs, so the
+		// two judge identical refs;
+		// an unparseable pipeline is a different failure (the runner logs it)
+		// and carries no notify actions to validate. The doctor alone goes on
+		// to construct each referenced notifier with real secret resolution —
+		// that half must stay on-demand, because settings and secrets rot
+		// after a workflow is saved.
+		for _, ref := range notifyActionRefs(src.yaml) {
+			notifyActions++
+			where := fmt.Sprintf("%s %q stage %q", src.kind, src.name, ref.StageID)
+			via := ref.Via
+			if via == "" {
+				fail(fmt.Sprintf("%s notify action has no \"via\"", where),
+					fmt.Sprintf("%s has a notify action without a \"via\" notifier name; it can never send and only warns in the claw conversation at runtime.", where), "")
+				continue
+			}
+			nc, ok := notifiers[via]
+			if !ok {
+				fail(fmt.Sprintf("%s references missing notifier %q", where, via),
+					fmt.Sprintf("%s references notifier %q, which is not configured under notifications.notifiers in hub.yaml.", where, via), "")
+				continue
+			}
+			scopeKey := via + "\x00" + src.workspace
+			if constructed[scopeKey] {
+				continue
+			}
+			constructed[scopeKey] = true
+			if _, err := notify.New(nc.Type, s.notifierSettings(nc), resolverFor(src.workspace)); err != nil {
+				fail(fmt.Sprintf("%s notifier %q is misconfigured", where, via),
+					fmt.Sprintf("Notify actions through %q will never be delivered: it fails to construct resolving %s.", via, scopeDesc),
+					err.Error())
+			}
+		}
+	}
+
+	if notifyActions > 0 && allValid {
+		checks = append(checks, DoctorCheck{
+			Category:    "notifications",
+			Severity:    "info",
+			Title:       "Pipeline notify actions configured",
+			Description: fmt.Sprintf("%d notify action(s) reference valid notifiers whose secrets resolve in their runtime scope.", notifyActions),
+			OK:          true,
+		})
+	}
+	return checks
+}
 
 func (s *Server) checkHubSettings(cfg *types.HubConfig) []DoctorCheck {
 	var checks []DoctorCheck

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"path"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -753,6 +754,77 @@ func ValidateProviderConfig(name string, cfg *ProviderConfig) error {
 	return nil
 }
 
+// ValidateNotificationsConfig validates the structural invariants of a
+// NotificationsConfig: notifier entries are named and typed, and the
+// lifecycle block references a defined notifier. Provider-level checks
+// (supported type, secret resolution, provider settings) happen in the hub,
+// which owns the provider registry and the secrets.
+// A nil config is valid (feature absent).
+func ValidateNotificationsConfig(cfg *NotificationsConfig) error {
+	if cfg == nil {
+		return nil
+	}
+	for name, notifier := range cfg.Notifiers {
+		if strings.TrimSpace(name) == "" {
+			return fmt.Errorf("notifications.notifiers: notifier name is required")
+		}
+		if strings.TrimSpace(notifier.Type) == "" {
+			return fmt.Errorf("notifications.notifiers.%s: type is required", name)
+		}
+	}
+	lc := cfg.Lifecycle
+	if lc == nil {
+		return nil
+	}
+	// The poll interval is validated even when lifecycle is disabled, so a
+	// typo is caught before the operator flips the feature on.
+	if lc.PollInterval != "" {
+		d, err := time.ParseDuration(lc.PollInterval)
+		if err != nil {
+			return fmt.Errorf("notifications.lifecycle: invalid poll_interval %q: %w", lc.PollInterval, err)
+		}
+		if d < time.Second {
+			return fmt.Errorf("notifications.lifecycle: poll_interval must be at least 1s, got %q", lc.PollInterval)
+		}
+	}
+	// idle_after gets the same always-on validation: a typo must be caught
+	// before the operator flips the feature on. The 1m floor keeps the idle
+	// alert meaningful — the detector ticks every 2 minutes, so sub-minute
+	// thresholds cannot be honoured and would only promise noise.
+	if lc.IdleAfter != "" {
+		d, err := time.ParseDuration(lc.IdleAfter)
+		if err != nil {
+			return fmt.Errorf("notifications.lifecycle: invalid idle_after %q: %w", lc.IdleAfter, err)
+		}
+		if d < time.Minute {
+			return fmt.Errorf("notifications.lifecycle: idle_after must be at least 1m, got %q", lc.IdleAfter)
+		}
+	}
+	if !lc.IsEnabled() {
+		return nil
+	}
+	via := strings.TrimSpace(lc.Via)
+	if via == "" {
+		return fmt.Errorf("notifications.lifecycle: via is required when enabled (the name of a notifier under notifications.notifiers)")
+	}
+	if _, ok := cfg.Notifiers[via]; !ok {
+		return fmt.Errorf("notifications.lifecycle: via %q does not name a configured notifier (defined: %s)", via, notifierNames(cfg.Notifiers))
+	}
+	return nil
+}
+
+func notifierNames(notifiers map[string]NotifierConfig) string {
+	if len(notifiers) == 0 {
+		return "none"
+	}
+	names := make([]string, 0, len(notifiers))
+	for name := range notifiers {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return strings.Join(names, ", ")
+}
+
 // ValidateHubConfig performs basic validation on HubConfig
 func (h *HubConfig) Validate() error {
 	if h == nil {
@@ -778,6 +850,11 @@ func (h *HubConfig) Validate() error {
 		if err := ValidateProviderConfig(name, &provider); err != nil {
 			return err
 		}
+	}
+
+	// Validate notifications
+	if err := ValidateNotificationsConfig(h.Notifications); err != nil {
+		return err
 	}
 
 	return nil

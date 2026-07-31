@@ -270,6 +270,41 @@ type JudgeAction struct {
 	Timeout string `yaml:"timeout,omitempty"`
 }
 
+// NotifyAction sends a message through a hub-configured notifier
+// (notifications.notifiers in hub.yaml: Slack today; email, Google Chat,
+// Teams later). Via names the notifier; Text, Subject and Target support the
+// same template variables as inject ({{.Issue.*}}, {{.Inputs.*}},
+// {{.Outputs.*}}).
+//
+// A notify block with a missing or blank Via is deliberately NOT a parse
+// error. Notifications are advisory by contract, and every caller treats a
+// Parse failure as "this claw has no pipeline" — stage transitions, gates and
+// PR handling would all silently stop — so one notification typo must never
+// take the pipeline down. The action stays Enabled with an empty Via: the
+// runner warns loudly in the claw conversation on every attempted send, and
+// the doctor's notify-action check flags it before it ever runs.
+type NotifyAction struct {
+	Enabled bool `yaml:"-" json:"-"`
+	// Via is the name of the hub notifier to send through.
+	Via string `yaml:"via"`
+	// Text is the message body (templated). It is rendered as plain text:
+	// providers escape their own markup control characters, because Text
+	// interpolates untrusted data (issue titles, command output).
+	Text string `yaml:"text"`
+	// Subject names what the message is about; templated. It is a semantic
+	// field: providers with a native subject line (email) use it there, and
+	// every other provider renders it inside its rich layout rather than
+	// dropping it — on Slack, setting Subject upgrades the message from a
+	// plain text line to the Block Kit attachment layout, with the subject on
+	// its own line under the text. Omit it to keep the plain rendering.
+	Subject string `yaml:"subject,omitempty"`
+	// Target overrides the notifier's default destination (channel, address);
+	// templated.
+	Target string `yaml:"target,omitempty"`
+	// Options is a provider-specific passthrough (e.g. Slack thread_ts).
+	Options map[string]any `yaml:"options,omitempty"`
+}
+
 // OnEnter holds the actions to run when entering a stage.
 type OnEnter struct {
 	// Run executes a command in the agent workspace.
@@ -290,6 +325,8 @@ type OnEnter struct {
 	AddLabels []string `yaml:"add_labels,omitempty"`
 	// RemoveLabels removes the specified labels from the associated GitHub issue.
 	RemoveLabels []string `yaml:"remove_labels,omitempty"`
+	// Notify sends a message through a hub-configured notifier.
+	Notify NotifyAction `yaml:"notify,omitempty"`
 }
 
 // UnmarshalYAML implements yaml.Unmarshaler for OnEnter so that move_issue can
@@ -306,6 +343,7 @@ func (oe *OnEnter) UnmarshalYAML(value *yaml.Node) error {
 		CloseIssue           bool        `yaml:"close_issue,omitempty"`
 		AddLabels            []string    `yaml:"add_labels,omitempty"`
 		RemoveLabels         []string    `yaml:"remove_labels,omitempty"`
+		NotifyRaw            yaml.Node   `yaml:"notify"`
 	}
 	var raw rawOnEnter
 	if err := value.Decode(&raw); err != nil {
@@ -327,6 +365,15 @@ func (oe *OnEnter) UnmarshalYAML(value *yaml.Node) error {
 		}
 		dua.Enabled = true
 		oe.DependencyUpdates = dua
+	}
+
+	if raw.NotifyRaw.Kind != 0 {
+		var na NotifyAction
+		if err := raw.NotifyRaw.Decode(&na); err != nil {
+			return err
+		}
+		na.Enabled = true
+		oe.Notify = na
 	}
 
 	if raw.MoveIssueRaw.Kind == 0 {
