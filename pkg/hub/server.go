@@ -204,13 +204,6 @@ const (
 	autoResumeRecentTurnWindow = 5 * time.Minute
 )
 
-// interTurnCooldown gives the OpenClaw gateway a short window to finish
-// releasing the prompt lock and writing the final session state before the
-// next message is admitted. This mitigates the upstream "session file changed
-// while embedded prompt lock was released" race when a second message reaches
-// the session during the previous turn's cleanup window.
-var interTurnCooldown = 100 * time.Millisecond
-
 // initialStatus returns the claw status string to use on bridge registration.
 // A nil pointer means the field was absent (old bridge) — treat as ready for backward compat.
 func initialStatus(gatewayReady *bool) string {
@@ -7490,23 +7483,11 @@ func (s *Server) sendNextQueuedMessage(cc *clawConn) {
 		cc.mu.Unlock()
 		return
 	}
-	// If the previous turn finished very recently, pause briefly before
-	// admitting the next message. This avoids the OpenClaw prompt-lock release
-	// race where a second message sent too soon after a turn ends corrupts the
-	// session file. See openclaw/openclaw#113194.
-	if !cc.lastTurnFinishedAt.IsZero() {
-		if elapsed := time.Since(cc.lastTurnFinishedAt); elapsed < interTurnCooldown {
-			cc.mu.Unlock()
-			time.Sleep(interTurnCooldown - elapsed)
-			cc.mu.Lock()
-			// Re-check the guard after waking up; the claw may have become busy
-			// or another delivery may have started while we slept.
-			if cc.isBusyLocked() || cc.deliveryInFlight || cc.noProgressPaused {
-				cc.mu.Unlock()
-				return
-			}
-		}
-	}
+	// No inter-turn cooldown here: if the next message reaches OpenClaw while
+	// the previous turn is still releasing its prompt lock, the bridge retries
+	// the rejected sessions.send on the same session with backoff (see
+	// sessionLockConflictRetryDelays in cmd/claw-bridge), which preserves the
+	// transcript instead of forcing a session rotation.
 	// Claim the in-flight guard before querying so a concurrent caller cannot
 	// read the same pending row and re-deliver it after we mark it delivered.
 	cc.deliveryInFlight = true
