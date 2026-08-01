@@ -3,7 +3,7 @@ name: manual-live-preview
 enable_manual_trigger: true
 
 # The agent discovers the repository's own start command. ElasticClaw exposes
-# this port through Daytona or the local Docker provider after the PR is open.
+# this port through the local Docker provider after the PR is open.
 preview:
   port: 3000
   label: Open QA preview

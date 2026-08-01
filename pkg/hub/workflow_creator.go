@@ -106,8 +106,8 @@ func (s *Server) createClawFromWorkflowWithOptions(workspace *types.WorkspaceCon
 	if provider == "" {
 		return "", false, fmt.Errorf("no provider configured")
 	}
-	if workflow.Preview != nil && provider != "daytona" && provider != "docker" {
-		return "", false, fmt.Errorf("workflow %q: browser previews are not supported by provider %q; use daytona or docker", workflow.Name, provider)
+	if workflow.Preview != nil && provider != "docker" {
+		return "", false, fmt.Errorf("workflow %q: browser previews are only supported by the docker provider, got %q", workflow.Name, provider)
 	}
 
 	s.mu.RLock()

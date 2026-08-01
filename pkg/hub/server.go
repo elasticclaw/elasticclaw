@@ -1398,12 +1398,6 @@ rm -rf "$HOME/.codex" "$HOME/.claude" "$HOME/.config/gh" 2>/dev/null || true`
 			return createErr
 		}
 		result, err = p.Exec(ctx, providerID, []string{"sh", "-lc", stop})
-	case "daytona":
-		p, createErr := newDaytonaProvider(cfg)
-		if createErr != nil {
-			return createErr
-		}
-		result, err = p.Exec(ctx, providerID, []string{"bash", "-lc", stop})
 	default:
 		return fmt.Errorf("provider %q does not support detached previews", providerType)
 	}
@@ -1516,14 +1510,6 @@ func (s *Server) startPreviewProcess(ctx context.Context, clawID, providerName, 
 		p, err = newDockerProvider(cfg)
 		if err == nil {
 			result, err = p.Exec(ctx, providerID, []string{"sh", "-lc", launch})
-		}
-	case "daytona":
-		var p interface {
-			Exec(context.Context, string, []string) (*types.ExecResult, error)
-		}
-		p, err = newDaytonaProvider(cfg)
-		if err == nil {
-			result, err = p.Exec(ctx, providerID, []string{"bash", "-lc", launch})
 		}
 	default:
 		return fmt.Errorf("provider %q does not support previews", providerType)
@@ -3666,10 +3652,9 @@ func (s *Server) provisionDaytona(ctx context.Context, clawID string, req types.
 		FromImage:     snapshot,
 		TemplateFiles: files,
 		Env:           env,
-		PreviewPorts:  previewPorts(req.PreviewPort),
 	}
 	instance, err := createAndConfigureDaytonaSandbox(ctx, p, createReq, env, func(created *types.Instance) error {
-		if _, err := s.db.Exec(`UPDATE claws SET status='starting', provider='daytona', provider_id=?, preview_url=? WHERE id=?`, created.ID, instancePreviewURL(created, req.PreviewPort), clawID); err != nil {
+		if _, err := s.db.Exec(`UPDATE claws SET status='starting', provider='daytona', provider_id=? WHERE id=?`, created.ID, clawID); err != nil {
 			return err
 		}
 		log.Printf("daytona workspace created: %s (claw %s)", created.ID, clawID)

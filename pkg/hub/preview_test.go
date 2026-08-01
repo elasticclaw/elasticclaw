@@ -5,11 +5,42 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 )
+
+func TestPreviewWorkflowRejectsNonDockerProvider(t *testing.T) {
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
+	t.Setenv("ELASTICCLAW_NOOP_PROVIDER", "1")
+	s, _ := NewTestServerWithConfig(t, &types.HubConfig{
+		Token:     "test-token",
+		ClawToken: "test-claw-token",
+		Providers: map[string]types.ProviderConfig{
+			"noop": {Type: "noop"},
+		},
+	}, "", "", "")
+
+	workspace := &types.WorkspaceConfig{
+		SchemaVersion: "v1",
+		Name:          "preview-workspace",
+		Files: map[string]string{
+			"elasticclaw-config.yaml": "schema_version: v1\nname: preview-workspace\nprovider: noop\n",
+		},
+	}
+	workflow := &types.WorkflowConfig{
+		Name:     "preview-workflow",
+		Provider: "noop",
+		Preview:  &types.WorkflowPreview{Port: 3000},
+	}
+
+	_, _, err := s.createClawFromWorkflowWithOptions(workspace, workflow, workflowCreateOptions{reason: "test"})
+	if err == nil || !strings.Contains(err.Error(), "only supported by the docker provider") {
+		t.Fatalf("create preview workflow error = %v, want Docker-only provider error", err)
+	}
+}
 
 func TestHandleClawPreviewReadyRequiresMatchingBridgeIdentity(t *testing.T) {
 	s, db := NewTestServerWithConfig(t, &types.HubConfig{

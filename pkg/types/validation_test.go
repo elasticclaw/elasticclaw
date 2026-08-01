@@ -54,7 +54,7 @@ func TestWorkflowConfigValidatePreviewPort(t *testing.T) {
 		{name: "zero", port: 0, wantErr: "between 1 and 65535"},
 		{name: "too large", port: 65536, wantErr: "between 1 and 65535"},
 		{name: "gateway reserved", port: 18789, wantErr: "reserved"},
-		{name: "daytona terminal reserved", port: 22222, wantErr: "reserved"},
+		{name: "sandbox infrastructure port reserved", port: 22222, wantErr: "reserved"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
