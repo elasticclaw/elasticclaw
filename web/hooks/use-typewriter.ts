@@ -38,7 +38,10 @@ export function useTypewriter() {
   const lastTickRef = useRef<number>(0)
   const [displayBuffers, setDisplayBuffers] = useState<Record<string, TypewriterState>>({})
 
-  const tick = useCallback((now: number) => {
+  // onDrain callbacks: fired once when entry fully drains after finalize()
+  const onDrainCallbacks = useRef<Record<string, () => void>>({})
+
+  const tick = useCallback(function tick(now: number) {
     const dt = lastTickRef.current ? now - lastTickRef.current : 16
     lastTickRef.current = now
 
@@ -123,9 +126,6 @@ export function useTypewriter() {
     }
     ensureRunning()
   }, [ensureRunning])
-
-  // onDrain callbacks: fired once when entry fully drains after finalize()
-  const onDrainCallbacks = useRef<Record<string, () => void>>({})
 
   /** Call when the final complete message arrives from WS.
    *  onDrain is called once the typewriter has fully drained. */

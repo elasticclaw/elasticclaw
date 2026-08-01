@@ -10,8 +10,10 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/elasticclaw/elasticclaw/pkg/types"
+	"github.com/google/uuid"
 )
 
 // WorkspaceView is the API view of a persisted workspace.
@@ -91,6 +93,26 @@ func (s *Server) handleWorkspacesPush(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(req.Workspaces) == 0 {
 		http.Error(w, "no workspaces provided", http.StatusBadRequest)
+		return
+	}
+
+	// Author-time notify validation runs over every nested workflow BEFORE any
+	// workspace is written, so a bad "via" fails the whole push as a 400
+	// instead of a partial save. (Nil workspaces/workflows fall through to the
+	// save loop below, which already reports them.)
+	var invalid []string
+	for _, workspace := range req.Workspaces {
+		if workspace == nil {
+			continue
+		}
+		for _, workflow := range workspace.Workflows {
+			if err := s.validateWorkflowNotifyVias(workflow); err != nil {
+				invalid = append(invalid, fmt.Sprintf("workspace %q: %v", workspace.Name, err))
+			}
+		}
+	}
+	if len(invalid) > 0 {
+		http.Error(w, "invalid workspace: "+strings.Join(invalid, "; "), http.StatusBadRequest)
 		return
 	}
 
@@ -179,6 +201,10 @@ func (s *Server) handleWorkspaceWorkflowsPush(w http.ResponseWriter, r *http.Req
 			return
 		}
 		if err := workflow.Validate(); err != nil {
+			http.Error(w, "invalid workflow: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		if err := s.validateWorkflowNotifyVias(workflow); err != nil {
 			http.Error(w, "invalid workflow: "+err.Error(), http.StatusBadRequest)
 			return
 		}
@@ -274,6 +300,11 @@ func (s *Server) handleWorkspaceWorkflowPatch(w http.ResponseWriter, r *http.Req
 		workflow.EnableManualTrigger = *req.EnableManualTriggerSnake
 	}
 	workflow.RawConfig = ""
+	// Deliberately no validateWorkflowNotifyVias here: a patch only toggles
+	// flags on an already-persisted pipeline without changing its content, and
+	// disabling a workflow stranded by a later hub.yaml notifier delete/rename
+	// must keep working — the doctor's checkNotifyActions owns flagging that
+	// drift.
 	if err := saveExternalWorkflows(workspace.Name, []*types.WorkflowConfig{workflow}); err != nil {
 		http.Error(w, "save workflow: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -338,6 +369,19 @@ func (s *Server) triggerWorkflowConfig(w http.ResponseWriter, r *http.Request, w
 			jsonError(w, http.StatusInternalServerError, "failed to create claw: "+err.Error())
 			return
 		}
+		if created {
+			now := time.Now().UTC()
+			runID := uuid.New().String()
+			contextData := map[string]interface{}{
+				"run_id":         runID,
+				"trigger_type":   "manual",
+				"workflow_name":  workflow.Name,
+				"workspace_name": workspace.Name,
+				"issue_number":   validatedInputs["issue_number"],
+			}
+			contextJSON, _ := json.Marshal(contextData)
+			s.recordWorkflowRun(runID, "", workspace.Name, workflow.Name, "manual", "running", clawID, string(contextJSON), now)
+		}
 		status := "existing"
 		if created {
 			status = "created"
@@ -354,6 +398,17 @@ func (s *Server) triggerWorkflowConfig(w http.ResponseWriter, r *http.Request, w
 		jsonError(w, http.StatusInternalServerError, "failed to create claw: "+err.Error())
 		return
 	}
+	now := time.Now().UTC()
+	runID := uuid.New().String()
+	contextData := map[string]interface{}{
+		"run_id":         runID,
+		"trigger_type":   "manual",
+		"workflow_name":  workflow.Name,
+		"workspace_name": workspace.Name,
+		"inputs":         validatedInputs,
+	}
+	contextJSON, _ := json.Marshal(contextData)
+	s.recordWorkflowRun(runID, "", workspace.Name, workflow.Name, "manual", "running", clawID, string(contextJSON), now)
 	jsonOK(w, map[string]string{
 		"claw_id": clawID,
 		"status":  "created",

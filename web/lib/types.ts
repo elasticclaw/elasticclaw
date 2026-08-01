@@ -255,6 +255,8 @@ export interface TaskRunSummary {
   provisionStartedAt: number
   agentStartedAt: number
   prOpenedAt: number
+  readyAt: number
+  readyToMergeMs: number
   mergedAt: number
   finishedAt: number
   timeoutAt: number
@@ -379,4 +381,24 @@ export interface DependencyStatusResponse {
   dependencies: DependencyStatus[]
   downtimeCount: number
   checkedAt: string
+}
+
+export interface WorkflowRun {
+  id: string
+  tenant_id?: string
+  workflow_name: string
+  workspace_name: string
+  trigger_type: string
+  status: string
+  result?: string
+  claw_id?: string
+  run_context?: Record<string, unknown>
+  started_at?: string
+  finished_at?: string
+  created_at: string
+}
+
+export interface WorkflowRunsResponse {
+  runs: WorkflowRun[]
+  count: number
 }

@@ -66,7 +66,7 @@ func TestTaskRunSchemaCreatesIssue350TablesColumnsConstraintsAndIndexes(t *testi
 	})
 	assertColumns(t, db, "task_run_prs", []string{
 		"id", "tenant_id", "run_id", "repo", "pr_number", "pr_url", "head_sha", "head_branch",
-		"last_agent_head_sha", "base_branch", "state", "merged", "opened_at", "closed_at", "merged_at",
+		"last_agent_head_sha", "base_branch", "state", "merged", "opened_at", "closed_at", "merged_at", "ready_at",
 		"merged_by_login", "created_at", "updated_at",
 	})
 	assertColumns(t, db, "task_run_summaries", []string{
@@ -75,7 +75,7 @@ func TestTaskRunSchemaCreatesIssue350TablesColumnsConstraintsAndIndexes(t *testi
 		"run_kind", "integration", "integration_workspace", "issue_id", "issue_created_at", "claw_id",
 		"model", "llm_key", "repo", "primary_pr_url", "pr_count", "open_pr_count", "merged_pr_count",
 		"closed_pr_count", "warning_types", "failure_type", "human_interaction_count",
-		"started_at", "queued_at", "provision_started_at", "agent_started_at", "pr_opened_at",
+		"started_at", "queued_at", "provision_started_at", "agent_started_at", "pr_opened_at", "ready_at",
 		"merged_at", "finished_at", "timeout_at", "last_event_at", "materialized_at", "updated_at",
 		"analytics_enabled", "requires_pr", "excluded_reason",
 	})
@@ -645,6 +645,66 @@ func TestTaskRunSummaryPrefersAuthoritativePROpenedAt(t *testing.T) {
 	}
 }
 
+func TestTaskRunReadyAtPrecedenceAndEarliestSummary(t *testing.T) {
+	s, db := newTaskRunAnalyticsTestServer(t, "claw-ready-at")
+	runID, _ := startTaskRunForTest(t, s, "claw-ready-at", "ready-at")
+	first := int64(1760000001000)
+	second := first + 1000
+	authoritative := first - 1000
+	if err := s.associateTaskRunPR(TaskRunPR{RunID: runID, Repo: "elastic/claw", PRNumber: 1, State: taskRunPRStateOpen, ReadyAt: first}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.associateTaskRunPR(TaskRunPR{RunID: runID, Repo: "elastic/claw", PRNumber: 1, State: taskRunPRStateOpen, ReadyAt: second}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.associateTaskRunPR(TaskRunPR{RunID: runID, Repo: "elastic/claw", PRNumber: 1, State: taskRunPRStateOpen, ReadyAt: authoritative, AuthoritativeReadyAt: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.associateTaskRunPR(TaskRunPR{RunID: runID, Repo: "elastic/claw", PRNumber: 2, State: taskRunPRStateOpen, ReadyAt: authoritative + 500, AuthoritativeReadyAt: true}); err != nil {
+		t.Fatal(err)
+	}
+	var prReady, summaryReady int64
+	if err := db.QueryRow(`SELECT ready_at FROM task_run_prs WHERE run_id=? AND pr_number=1`, runID).Scan(&prReady); err != nil {
+		t.Fatal(err)
+	}
+	if prReady != authoritative {
+		t.Fatalf("ready_at=%d want authoritative %d", prReady, authoritative)
+	}
+	if err := db.QueryRow(`SELECT ready_at FROM task_run_summaries WHERE run_id=?`, runID).Scan(&summaryReady); err != nil {
+		t.Fatal(err)
+	}
+	if summaryReady != authoritative {
+		t.Fatalf("summary ready_at=%d want earliest %d", summaryReady, authoritative)
+	}
+}
+
+func TestBackfillTaskRunReadyAtV1(t *testing.T) {
+	db, err := openDB(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`DELETE FROM hub_migrations WHERE name='task_run_ready_at_v1'`); err != nil {
+		t.Fatal(err)
+	}
+	insertValidRun(t, db, "ready-backfill", 1)
+	if _, err := db.Exec(`INSERT INTO task_run_prs(id, tenant_id, run_id, repo, pr_number, opened_at, created_at, updated_at) VALUES('ready-pr','tenant','ready-backfill','elastic/claw',1,123,1,1)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO task_run_summaries(id, tenant_id, run_id, status, phase, warning_types, started_at, pr_opened_at, last_event_at, materialized_at, updated_at) VALUES('ready-summary','tenant','ready-backfill','running','claimed','[]',1,123,1,1,1)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := backfillTaskRunReadyAtV1(db); err != nil {
+		t.Fatal(err)
+	}
+	var prReady, summaryReady int64
+	_ = db.QueryRow(`SELECT ready_at FROM task_run_prs WHERE id='ready-pr'`).Scan(&prReady)
+	_ = db.QueryRow(`SELECT ready_at FROM task_run_summaries WHERE id='ready-summary'`).Scan(&summaryReady)
+	if prReady != 123 || summaryReady != 123 {
+		t.Fatalf("backfill ready_at pr=%d summary=%d want 123", prReady, summaryReady)
+	}
+}
+
 func TestRecordTaskRunIssueCreatedAtBackfillsRunAndSummary(t *testing.T) {
 	s, db := newTaskRunAnalyticsTestServer(t, "claw-issue-created")
 	runID, _ := startTaskRunForTest(t, s, "claw-issue-created", "issue-created")
@@ -737,6 +797,10 @@ func newTaskRunAnalyticsTestServer(t *testing.T, clawID string) (*Server, *sql.D
 }
 
 func startTaskRunForTest(t *testing.T, s *Server, clawID, keyPrefix string) (string, string) {
+	return startTaskRunWithRequiresPRForTest(t, s, clawID, keyPrefix, true)
+}
+
+func startTaskRunWithRequiresPRForTest(t *testing.T, s *Server, clawID, keyPrefix string, requiresPR bool) (string, string) {
 	t.Helper()
 	runID, attemptID, err := s.ensureTaskRunForClaw(clawID, TaskRunStart{
 		TenantID:         "test-tenant-id",
@@ -751,7 +815,7 @@ func startTaskRunForTest(t *testing.T, s *Server, clawID, keyPrefix string) (str
 		Source:           taskRunSourceFactory,
 		IssueID:          "ISSUE-" + keyPrefix,
 		AnalyticsEnabled: true,
-		RequiresPR:       true,
+		RequiresPR:       requiresPR,
 		EventKey:         keyPrefix + ":task-start",
 		Tags:             []string{"test:" + keyPrefix},
 	})

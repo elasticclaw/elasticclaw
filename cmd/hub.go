@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -71,6 +72,13 @@ func runHub(cmd *cobra.Command, args []string) error {
 	hubCfg, err := config.LoadHubConfig()
 	if err != nil {
 		return fmt.Errorf("failed to load hub config: %w", err)
+	}
+	// Validate loudly rather than refusing to start: configs written before
+	// validation existed may carry defects in features the operator does not
+	// use, and bricking the hub over those would be worse than a warning. The
+	// doctor endpoint reports the same problems as red rows.
+	if err := hubCfg.Validate(); err != nil {
+		log.Printf("WARNING: hub config is invalid — the affected feature stays disabled until it is fixed: %v", err)
 	}
 
 	// Apply LLM keys from env — backward compat: if ANTHROPIC_API_KEY set and no anthropic key configured, add it

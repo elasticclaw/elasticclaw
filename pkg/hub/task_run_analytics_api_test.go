@@ -324,6 +324,84 @@ func TestTaskRunAnalyticsAPIGeneralStatsIssueCreatedAtAtRunCreation(t *testing.T
 	}
 }
 
+func TestTaskRunAnalyticsAPIGeneralStatsBusinessHoursTimezone(t *testing.T) {
+	s, db := newTaskRunAnalyticsAPITestServer(t)
+	loc, err := time.LoadLocation("America/Sao_Paulo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ready := time.Date(2026, time.January, 2, 17, 0, 0, 0, loc).UnixMilli()  // Friday
+	merged := time.Date(2026, time.January, 5, 10, 0, 0, 0, loc).UnixMilli() // Monday
+	insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{RunID: "business-hours", AttemptID: "business-hours-a", ClawID: "business-hours-c", TenantID: "test-tenant-id", OwnerType: taskRunOwnerFactory, StartedAt: ready - 1000, PRCount: 1})
+	if _, err := db.Exec(`UPDATE task_run_summaries SET issue_created_at=?, pr_opened_at=?, ready_at=?, merged_at=? WHERE run_id='business-hours'`, ready-2000, ready, ready, merged); err != nil {
+		t.Fatal(err)
+	}
+	withTZ := requestTaskRunAnalyticsAPI(t, s, http.MethodGet, "/api/analytics/general-stats?tz=America/Sao_Paulo", "test-token")
+	var adjusted taskRunGeneralStatsResponse
+	decodeTaskRunAnalyticsAPI(t, withTZ, &adjusted)
+	const businessMs = int64(2 * time.Hour / time.Millisecond) // Fri 17:00-18:00 plus Mon 09:00-10:00.
+	if adjusted.PROpenToMerge.AvgMs == nil || *adjusted.PROpenToMerge.AvgMs != businessMs {
+		t.Fatalf("business-hours merge stats: %#v", adjusted.PROpenToMerge)
+	}
+	withoutTZ := requestTaskRunAnalyticsAPI(t, s, http.MethodGet, "/api/analytics/general-stats", "test-token")
+	var wallClock taskRunGeneralStatsResponse
+	decodeTaskRunAnalyticsAPI(t, withoutTZ, &wallClock)
+	wantWallClock := merged - ready
+	if wallClock.PROpenToMerge.AvgMs == nil || *wallClock.PROpenToMerge.AvgMs != wantWallClock || wantWallClock <= businessMs {
+		t.Fatalf("wall-clock merge stats: %#v, want %d", wallClock.PROpenToMerge, wantWallClock)
+	}
+}
+
+func TestTaskRunAnalyticsAPIGeneralStatsInvalidTimezoneFallsBackToWallClock(t *testing.T) {
+	s, db := newTaskRunAnalyticsAPITestServer(t)
+	base := int64(1760000000000)
+	insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{RunID: "invalid-tz", AttemptID: "invalid-tz-a", ClawID: "invalid-tz-c", TenantID: "test-tenant-id", OwnerType: taskRunOwnerFactory, StartedAt: base, PRCount: 1})
+	if _, err := db.Exec(`UPDATE task_run_summaries SET pr_opened_at=?, merged_at=? WHERE run_id='invalid-tz'`, base+1000, base+9000); err != nil {
+		t.Fatal(err)
+	}
+	plain := requestTaskRunAnalyticsAPI(t, s, http.MethodGet, "/api/analytics/general-stats", "test-token")
+	invalid := requestTaskRunAnalyticsAPI(t, s, http.MethodGet, "/api/analytics/general-stats?tz=Not/A/Real/Zone", "test-token")
+	if invalid.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", invalid.Code, invalid.Body.String())
+	}
+	var gotPlain, gotInvalid taskRunGeneralStatsResponse
+	decodeTaskRunAnalyticsAPI(t, plain, &gotPlain)
+	decodeTaskRunAnalyticsAPI(t, invalid, &gotInvalid)
+	if gotPlain.PROpenToMerge.AvgMs == nil || gotInvalid.PROpenToMerge.AvgMs == nil || *gotPlain.PROpenToMerge.AvgMs != *gotInvalid.PROpenToMerge.AvgMs {
+		t.Fatalf("plain=%#v invalid=%#v", gotPlain.PROpenToMerge, gotInvalid.PROpenToMerge)
+	}
+}
+
+func TestTaskRunAnalyticsAPIGeneralStatsReadyAtFallbackToPROpenedAt(t *testing.T) {
+	s, db := newTaskRunAnalyticsAPITestServer(t)
+	base := int64(1760000000000)
+	insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{RunID: "ready-fallback", AttemptID: "ready-fallback-a", ClawID: "ready-fallback-c", TenantID: "test-tenant-id", OwnerType: taskRunOwnerFactory, StartedAt: base, PRCount: 1})
+	if _, err := db.Exec(`UPDATE task_run_summaries SET issue_created_at=?, pr_opened_at=?, ready_at=0, merged_at=? WHERE run_id='ready-fallback'`, base-2000, base+3000, base+9000); err != nil {
+		t.Fatal(err)
+	}
+	rr := requestTaskRunAnalyticsAPI(t, s, http.MethodGet, "/api/analytics/general-stats", "test-token")
+	var response taskRunGeneralStatsResponse
+	decodeTaskRunAnalyticsAPI(t, rr, &response)
+	if response.TicketToPr.AvgMs == nil || *response.TicketToPr.AvgMs != 5000 || response.PROpenToMerge.AvgMs == nil || *response.PROpenToMerge.AvgMs != 6000 {
+		t.Fatalf("stats=%#v", response)
+	}
+}
+
+func TestTaskRunAnalyticsAPIGeneralStatsReadyAtKeepsPhasesContiguous(t *testing.T) {
+	s, db := newTaskRunAnalyticsAPITestServer(t)
+	base := int64(1760000000000)
+	insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{RunID: "ready-contiguous", AttemptID: "ready-contiguous-a", ClawID: "ready-contiguous-c", TenantID: "test-tenant-id", OwnerType: taskRunOwnerFactory, StartedAt: base, PRCount: 1})
+	if _, err := db.Exec(`UPDATE task_run_summaries SET issue_created_at=?, pr_opened_at=?, ready_at=?, merged_at=? WHERE run_id='ready-contiguous'`, base, base+2000, base+5000, base+11000); err != nil {
+		t.Fatal(err)
+	}
+	rr := requestTaskRunAnalyticsAPI(t, s, http.MethodGet, "/api/analytics/general-stats", "test-token")
+	var response taskRunGeneralStatsResponse
+	decodeTaskRunAnalyticsAPI(t, rr, &response)
+	if response.TicketToPr.AvgMs == nil || response.PROpenToMerge.AvgMs == nil || *response.TicketToPr.AvgMs+*response.PROpenToMerge.AvgMs != 11000 {
+		t.Fatalf("stats=%#v", response)
+	}
+}
+
 func TestTaskRunAnalyticsAPIRunDetailsAttemptsEventsAndPRs(t *testing.T) {
 	s, db := newTaskRunAnalyticsAPITestServer(t)
 	ts := int64(1760000000000)
@@ -745,6 +823,7 @@ type apiRunFixture struct {
 	FailureType       string
 	StartedAt         int64
 	IssueCreatedAt    int64
+	ReadyAt           int64
 	MergedAt          int64
 	FinishedAt        int64
 	HumanInteractions int
@@ -837,17 +916,17 @@ func insertTaskRunAnalyticsAPIRun(t *testing.T, db *sql.DB, fixture apiRunFixtur
 			owner_type, workspace_name, workflow_name, factory_name, owner_display_name, run_kind,
 			integration, issue_id, issue_created_at, claw_id, model, repo, primary_pr_url, pr_count, open_pr_count,
 			merged_pr_count, closed_pr_count, warning_types, failure_type, human_interaction_count,
-			started_at, merged_at, finished_at, last_event_at, materialized_at, updated_at,
+			started_at, ready_at, merged_at, finished_at, last_event_at, materialized_at, updated_at,
 		analytics_enabled, requires_pr, excluded_reason, input_tokens, output_tokens, total_tokens,
 			estimated_cost_usd, usage_updated_at, issue_title
-		) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		"summary-"+fixture.RunID, fixture.TenantID, fixture.RunID, fixture.AttemptID, fixture.AttemptID,
 		fixture.Status, fixture.Phase, 1, fixture.OwnerType, fixture.Workspace, fixture.Workflow, fixture.Factory,
 		firstNonEmpty(fixture.Workflow, fixture.Factory), taskRunKindPRTask, fixture.Integration,
 		"ISSUE-"+fixture.RunID, fixture.IssueCreatedAt, fixture.ClawID, fixture.Model, fixture.Repo,
 		"https://github.com/"+fixture.Repo+"/pull/1", fixture.PRCount, fixture.OpenPRCount,
 		fixture.MergedPRCount, fixture.ClosedPRCount, warningsJSON, fixture.FailureType,
-		fixture.HumanInteractions, fixture.StartedAt, fixture.MergedAt, fixture.FinishedAt,
+		fixture.HumanInteractions, fixture.StartedAt, fixture.ReadyAt, fixture.MergedAt, fixture.FinishedAt,
 		fixture.StartedAt, fixture.StartedAt, fixture.StartedAt, boolInt(analyticsEnabled), boolInt(requiresPR), fixture.ExcludedReason,
 		fixture.InputTokens, fixture.OutputTokens, fixture.TotalTokens, fixture.EstimatedCostUsd, fixture.UsageUpdatedAt, fixture.IssueTitle,
 	)
@@ -888,13 +967,13 @@ func insertTaskRunAnalyticsAPIRun(t *testing.T, db *sql.DB, fixture apiRunFixtur
 		_, err = db.Exec(`
 			INSERT INTO task_run_prs(
 				id, tenant_id, run_id, repo, pr_number, pr_url, head_sha, head_branch,
-				last_agent_head_sha, base_branch, state, merged, opened_at, closed_at, merged_at,
+				last_agent_head_sha, base_branch, state, merged, opened_at, closed_at, merged_at, ready_at,
 				merged_by_login, created_at, updated_at
-			) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 			"pr-"+fixture.RunID, fixture.TenantID, fixture.RunID, fixture.Repo, 1,
 			"https://github.com/"+fixture.Repo+"/pull/1", "head-"+fixture.RunID, "feature/"+fixture.RunID,
 			"head-"+fixture.RunID, "main", prStateForFixture(fixture), boolInt(fixture.MergedPRCount > 0),
-			fixture.StartedAt+200, fixture.FinishedAt, fixture.MergedAt, "maintainer", fixture.StartedAt, fixture.StartedAt,
+			fixture.StartedAt+200, fixture.FinishedAt, fixture.MergedAt, fixture.ReadyAt, "maintainer", fixture.StartedAt, fixture.StartedAt,
 		)
 		if err != nil {
 			t.Fatalf("insert task run pr %s: %v", fixture.RunID, err)

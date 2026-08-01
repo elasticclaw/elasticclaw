@@ -65,6 +65,13 @@ stages:
         - done
       remove_labels:
         - "in review"
+      # Sends through a hub-level named notifier. Configure it in hub.yaml:
+      # notifications:
+      #   notifiers:
+      #     eng-releases: { type: slack, token_secret: slack_bot_token, channel: C0123ABCD }
+      notify:
+        via: eng-releases
+        text: "✅ Merged {{.Issue.Identifier}}: {{.Issue.Title}} ({{.Issue.URL}})"
     triggers:
       - pr_merged: {}
     terminal: true

@@ -1078,6 +1078,95 @@ func TestRunOnEnterJudgeContinueOnError(t *testing.T) {
 	}
 }
 
+func TestRunOnEnterDependencyUpdatesStopsOnError(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{
+		Token:     "test-token",
+		ClawToken: "test-claw-token",
+		Providers: map[string]types.ProviderConfig{
+			"failing": {Type: "failing"},
+		},
+	}, "", "", "")
+
+	const clawID = "claw-deps-stop"
+	_, err := db.Exec(
+		`INSERT INTO claws(id, tenant_id, name, template, status, provider, provider_id, created_at) VALUES(?,?,?,?,?,?,?,datetime('now'))`,
+		clawID, "test-tenant-id", "test-claw", "elasticclaw", "connected", "failing", "failing-id",
+	)
+	if err != nil {
+		t.Fatalf("insert claw: %v", err)
+	}
+
+	stage := pipeline.Stage{
+		ID:    "deps",
+		Label: "Dependency Updates",
+		OnEnter: pipeline.OnEnter{
+			DependencyUpdates: pipeline.DependencyUpdatesAction{
+				Enabled: true,
+			},
+			Inject: "Continue after deps",
+		},
+	}
+
+	_, err = s.runOnEnter(clawID, stage, pipelineContext{})
+	if err == nil {
+		t.Fatal("expected runOnEnter to return error when dependency updates fail and continue_on_error=false")
+	}
+
+	var messageCount int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=?`, clawID).Scan(&messageCount); err != nil {
+		t.Fatalf("count messages: %v", err)
+	}
+	// Should have 1 error message; inject message should NOT appear because the stage aborted.
+	if messageCount != 1 {
+		t.Fatalf("expected 1 message (deps error), got %d", messageCount)
+	}
+}
+
+func TestRunOnEnterDependencyUpdatesContinueOnError(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{
+		Token:     "test-token",
+		ClawToken: "test-claw-token",
+		Providers: map[string]types.ProviderConfig{
+			"failing": {Type: "failing"},
+		},
+	}, "", "", "")
+
+	const clawID = "claw-deps-continue"
+	_, err := db.Exec(
+		`INSERT INTO claws(id, tenant_id, name, template, status, provider, provider_id, created_at) VALUES(?,?,?,?,?,?,?,datetime('now'))`,
+		clawID, "test-tenant-id", "test-claw", "elasticclaw", "connected", "failing", "failing-id",
+	)
+	if err != nil {
+		t.Fatalf("insert claw: %v", err)
+	}
+
+	stage := pipeline.Stage{
+		ID:    "deps",
+		Label: "Dependency Updates",
+		OnEnter: pipeline.OnEnter{
+			DependencyUpdates: pipeline.DependencyUpdatesAction{
+				Enabled:         true,
+				ContinueOnError: true,
+			},
+			Inject: "Continue after deps",
+		},
+	}
+
+	_, err = s.runOnEnter(clawID, stage, pipelineContext{})
+	if err != nil {
+		t.Fatalf("expected runOnEnter to continue when continue_on_error=true, got error: %v", err)
+	}
+
+	var messageCount int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=?`, clawID).Scan(&messageCount); err != nil {
+		t.Fatalf("count messages: %v", err)
+	}
+	// Should have 2 messages: deps warning + inject message (because continue_on_error=true).
+	if messageCount != 2 {
+		t.Fatalf("expected 2 messages (deps warning + inject), got %d", messageCount)
+	}
+}
+
 func TestAutoTransitionAfterJudge(t *testing.T) {
 	s, db := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
 

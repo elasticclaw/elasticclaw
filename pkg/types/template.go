@@ -549,6 +549,57 @@ type HubConfig struct {
 	// Liveness configures recovery of claws and runs stranded by hub or
 	// infrastructure failures.
 	Liveness *LivenessConfig `yaml:"liveness,omitempty" json:"liveness,omitempty"`
+
+	// Notifications holds outbound notification configuration: named
+	// transports (notifiers) and the hub features that send through them.
+	Notifications *NotificationsConfig `yaml:"notifications,omitempty" json:"notifications,omitempty"`
+}
+
+// NotificationsConfig holds outbound notification configuration.
+type NotificationsConfig struct {
+	// Notifiers are named outbound transports (Slack today; email, Teams,
+	// ... later), keyed by the name features reference in "via".
+	Notifiers map[string]NotifierConfig `yaml:"notifiers,omitempty" json:"notifiers,omitempty"`
+	// Lifecycle configures agent lifecycle notifications (agent started,
+	// PR opened, failures).
+	Lifecycle *LifecycleNotificationsConfig `yaml:"lifecycle,omitempty" json:"lifecycle,omitempty"`
+}
+
+// LifecycleNotificationsConfig configures outbound notifications for agent
+// lifecycle events, sent through a named hub-level notifier.
+type LifecycleNotificationsConfig struct {
+	// Enabled defaults to true when the lifecycle block is present; set it
+	// to false to mute lifecycle notifications without deleting the config.
+	Enabled *bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	// Via names the notifier (under notifications.notifiers) to send through.
+	Via string `yaml:"via" json:"via"`
+	// ThreadByRun groups all messages for a run into one thread on providers
+	// that support threading. Default true.
+	ThreadByRun *bool `yaml:"thread_by_run,omitempty" json:"threadByRun,omitempty"`
+	// PollInterval is how often the notifier scans for new events. Default "5s".
+	PollInterval string `yaml:"poll_interval,omitempty" json:"pollInterval,omitempty"`
+	// IdleAfter is how long an agent must sit idle (connected, no turn
+	// running, none finished recently) before an agent_idle notification
+	// fires. Default "5m", minimum "1m". Detection rides the 2-minute status
+	// watchdog tick, so the alert lands between IdleAfter and IdleAfter+2m.
+	IdleAfter string `yaml:"idle_after,omitempty" json:"idleAfter,omitempty"`
+	// Events toggles individual event categories. All default true when absent.
+	Events *LifecycleEventToggles `yaml:"events,omitempty" json:"events,omitempty"`
+}
+
+// IsEnabled reports whether lifecycle notifications are on: the block must
+// be present and Enabled must be absent (the default) or true.
+func (c *LifecycleNotificationsConfig) IsEnabled() bool {
+	return c != nil && (c.Enabled == nil || *c.Enabled)
+}
+
+// LifecycleEventToggles enables/disables individual lifecycle notification
+// categories. All default true when the block is absent.
+type LifecycleEventToggles struct {
+	AgentStarted *bool `yaml:"agent_started,omitempty" json:"agentStarted,omitempty"`
+	PROpened     *bool `yaml:"pr_opened,omitempty" json:"prOpened,omitempty"`
+	Failures     *bool `yaml:"failures,omitempty" json:"failures,omitempty"`
+	AgentIdle    *bool `yaml:"agent_idle,omitempty" json:"agentIdle,omitempty"`
 }
 
 // LivenessConfig controls boot reconciliation and the periodic safety-net reaper.

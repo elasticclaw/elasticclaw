@@ -111,13 +111,19 @@ func (s *Server) handleFactoriesPush(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Validate all factories before saving
+	// Validate all factories before saving, so a bad one fails the whole
+	// batch as a 400 instead of a partial save. Notify "via" references get
+	// the same author-time check as workflow saves (see validateNotifyVias).
 	for _, f := range req.Factories {
 		if f == nil {
 			http.Error(w, "factory cannot be nil", http.StatusBadRequest)
 			return
 		}
 		if err := f.Validate(); err != nil {
+			http.Error(w, "validation error: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		if err := s.validateFactoryNotifyVias(f); err != nil {
 			http.Error(w, "validation error: "+err.Error(), http.StatusBadRequest)
 			return
 		}

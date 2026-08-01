@@ -21,9 +21,55 @@ func openDB(path string) (*sql.DB, error) {
 	return db, nil
 }
 
+// addColumn applies an additive `ALTER TABLE ... ADD COLUMN` migration.
+//
+// SQLite has no `IF NOT EXISTS` for ADD COLUMN, so the two benign outcomes are
+// absorbed here: the column already exists (the common case on every restart
+// after the first), and the table does not exist yet (fresh databases create it
+// with the column already in the CREATE TABLE below). Everything else is
+// wrapped and returned, so a migration that genuinely failed aborts startup
+// instead of leaving a missing column to break queries at runtime.
+//
+// The existence check is done up front against pragma_table_info rather than by
+// parsing the driver error: modernc.org/sqlite reports both "duplicate column
+// name" and "no such table" as the same generic SQLITE_ERROR code (1), so the
+// message text is the only discriminator and must not be the sole line of
+// defense. The message match remains as a fallback for the racy case where the
+// column appears between the check and the ALTER.
+func addColumn(db *sql.DB, table, column, columnDef string) error {
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info(?) WHERE name = ?`, table, column).Scan(&count); err != nil {
+		return fmt.Errorf("inspect column %s.%s: %w", table, column, err)
+	}
+	if count > 0 {
+		return nil
+	}
+	if _, err := db.Exec(fmt.Sprintf(`ALTER TABLE %q ADD COLUMN %q %s`, table, column, columnDef)); err != nil {
+		if isBenignAddColumnErr(err) {
+			return nil
+		}
+		return fmt.Errorf("add column %s.%s: %w", table, column, err)
+	}
+	return nil
+}
+
+// isBenignAddColumnErr reports whether an ADD COLUMN failure means the column
+// is already present or the table does not exist yet.
+func isBenignAddColumnErr(err error) bool {
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "duplicate column name") || strings.Contains(msg, "no such table")
+}
+
 func migrate(db *sql.DB) error {
 	// Add columns that may be missing from older databases.
 	// SQLite doesn't support IF NOT EXISTS on ALTER TABLE, so ignore errors.
+	//
+	// addColumn above is the intended idiom for new columns. The 61 legacy
+	// `_, _ = db.Exec(...)` lines below are deliberately left as-is: migrate()
+	// runs on the hub startup path against a live production database, and
+	// flipping all of them to a fatal-on-unexpected-error helper in one go risks
+	// the hub refusing to start over a legacy column. Converting them is a
+	// separate, dedicated follow-up.
 	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN provider TEXT NOT NULL DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN provider_id TEXT NOT NULL DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN default_model TEXT NOT NULL DEFAULT ''`)
@@ -66,11 +112,23 @@ func migrate(db *sql.DB) error {
 	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN preview_ready INTEGER NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN preview_ttl_seconds INTEGER NOT NULL DEFAULT 1800`)
 	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN preview_expires_at INTEGER NOT NULL DEFAULT 0`)
+	// idle_since (epoch millis, 0 = not latched) is the durable once-per-idle-
+	// stretch latch for agent_idle notifications: the status watchdog sets it
+	// when it fires the notification for a stretch, and the claw-pass notifier
+	// reads it for ad-hoc claws (which have no task_run_events). Kept in the
+	// claws table because idleness otherwise lives only in clawConn memory and
+	// would not survive a hub restart.
+	if err := addColumn(db, "claws", "idle_since", `INTEGER NOT NULL DEFAULT 0`); err != nil {
+		return err
+	}
 	_, _ = db.Exec(`ALTER TABLE claw_prs ADD COLUMN last_comment_at TEXT NOT NULL DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE claw_prs ADD COLUMN pr_conditions_fired INTEGER NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE claw_prs ADD COLUMN permanent_failure_count INTEGER NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE claw_prs ADD COLUMN last_review_comment_id INTEGER NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE claw_prs ADD COLUMN last_review_id INTEGER NOT NULL DEFAULT 0`)
+	if err := addColumn(db, "claw_prs", "last_ci_conclusion", `TEXT NOT NULL DEFAULT ''`); err != nil {
+		return err
+	}
 	_, _ = db.Exec(`ALTER TABLE messages ADD COLUMN format TEXT NOT NULL DEFAULT ''`)
 	if _, err := db.Exec(`ALTER TABLE messages ADD COLUMN delivered_at DATETIME`); err == nil {
 		// A failed backfill must abort startup: the column now exists, so a
@@ -97,6 +155,8 @@ func migrate(db *sql.DB) error {
 	_, _ = db.Exec(`ALTER TABLE task_run_usage ADD COLUMN committed_cost_usd REAL NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE task_run_usage ADD COLUMN usage_day TEXT NOT NULL DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE task_run_prs ADD COLUMN last_agent_head_sha TEXT NOT NULL DEFAULT ''`)
+	_, _ = db.Exec(`ALTER TABLE task_run_prs ADD COLUMN ready_at INTEGER NOT NULL DEFAULT 0`)
+	_, _ = db.Exec(`ALTER TABLE task_run_summaries ADD COLUMN ready_at INTEGER NOT NULL DEFAULT 0`)
 
 	_, _ = db.Exec(`CREATE TABLE IF NOT EXISTS claw_checkpoints (
 		id                    TEXT PRIMARY KEY,
@@ -270,7 +330,8 @@ func migrate(db *sql.DB) error {
 		preview_label TEXT NOT NULL DEFAULT '',
 		preview_ready INTEGER NOT NULL DEFAULT 0,
 		preview_ttl_seconds INTEGER NOT NULL DEFAULT 1800,
-		preview_expires_at INTEGER NOT NULL DEFAULT 0
+		preview_expires_at INTEGER NOT NULL DEFAULT 0,
+		idle_since INTEGER NOT NULL DEFAULT 0
 	);
 
 
@@ -409,7 +470,7 @@ func migrate(db *sql.DB) error {
 			'task_start','task_completed','run_claimed','run_queued','provision_started','claw_created','agent_started',
 			'creation_failed','provision_failed','bootstrap_failed','model_selected','agent_stopped',
 			'manual_stop_before_delivery','provider_lost','done_without_pr','permission_or_auth_failed',
-			'timeout','unknown_failure','pr_associated','pr_opened','pr_closed_unmerged','pr_merged',
+			'timeout','unknown_failure','agent_idle','pr_associated','pr_opened','pr_closed_unmerged','pr_merged',
 			'approval_only_pr_review','human_requested_changes','human_review_comment','human_pr_comment',
 			'human_manual_code_push','human_tracker_update','human_dashboard_message',
 			'human_manual_stop_or_resume','human_settings_or_status_change',
@@ -457,6 +518,7 @@ func migrate(db *sql.DB) error {
 		opened_at       INTEGER NOT NULL DEFAULT 0,
 		closed_at       INTEGER NOT NULL DEFAULT 0,
 		merged_at       INTEGER NOT NULL DEFAULT 0,
+		ready_at        INTEGER NOT NULL DEFAULT 0,
 		merged_by_login TEXT NOT NULL DEFAULT '',
 		created_at      INTEGER NOT NULL,
 		updated_at      INTEGER NOT NULL,
@@ -510,6 +572,7 @@ func migrate(db *sql.DB) error {
 		provision_started_at    INTEGER NOT NULL DEFAULT 0,
 		agent_started_at        INTEGER NOT NULL DEFAULT 0,
 		pr_opened_at            INTEGER NOT NULL DEFAULT 0,
+		ready_at                INTEGER NOT NULL DEFAULT 0,
 		merged_at               INTEGER NOT NULL DEFAULT 0,
 		finished_at             INTEGER NOT NULL DEFAULT 0,
 		timeout_at              INTEGER NOT NULL DEFAULT 0,
@@ -547,6 +610,7 @@ func migrate(db *sql.DB) error {
 		pr_number   INTEGER NOT NULL,
 		pr_url      TEXT NOT NULL,
 		last_ci_sha TEXT NOT NULL DEFAULT '',   -- last SHA we checked CI on
+		last_ci_conclusion TEXT NOT NULL DEFAULT '', -- terminal CI verdict already delivered for last_ci_sha: '' | 'success' | 'failure'
 		last_comment_id INTEGER NOT NULL DEFAULT 0, -- last bugbot/pipeline comment ID seen
 		last_comment_at TEXT NOT NULL DEFAULT '', -- timestamp of last seen comment
 		last_review_comment_id INTEGER NOT NULL DEFAULT 0, -- last PR review comment ID seen
@@ -669,11 +733,42 @@ func migrate(db *sql.DB) error {
 	CREATE INDEX IF NOT EXISTS idx_workflow_runs_workflow ON workflow_runs(tenant_id, workflow_name, workspace_name, created_at);
 	CREATE INDEX IF NOT EXISTS idx_workflow_runs_status ON workflow_runs(tenant_id, status, created_at);
 	CREATE INDEX IF NOT EXISTS idx_workflow_runs_claw ON workflow_runs(claw_id);
+
+	-- Slack outbound notifications: one thread root per run so lifecycle
+	-- messages land in a single Slack thread.
+	CREATE TABLE IF NOT EXISTS slack_run_threads (
+		run_id     TEXT PRIMARY KEY,
+		tenant_id  TEXT NOT NULL,
+		channel    TEXT NOT NULL,
+		thread_ts  TEXT NOT NULL,
+		created_at INTEGER NOT NULL
+	);
+
+	-- Per-event delivery record. This is the dedupe that makes the notifier's
+	-- rowid cursor safe to re-scan after a crash between send and advance.
+	CREATE TABLE IF NOT EXISTS slack_notification_deliveries (
+		event_id     TEXT PRIMARY KEY,
+		run_id       TEXT NOT NULL,
+		delivered_at INTEGER NOT NULL,
+		message_ts   TEXT NOT NULL DEFAULT '',
+		status       TEXT NOT NULL DEFAULT 'sent'
+	);
+	CREATE INDEX IF NOT EXISTS idx_slack_deliveries_time
+		ON slack_notification_deliveries(delivered_at);
+
+	-- Key/value state for the Slack notifier (the rowid watermark).
+	CREATE TABLE IF NOT EXISTS slack_notifier_state (
+		key   TEXT PRIMARY KEY,
+		value TEXT NOT NULL
+	);
 	`)
 	if err != nil {
 		return err
 	}
 	if err := rebuildTaskRunSummariesStatusV3(db); err != nil {
+		return err
+	}
+	if err := rebuildTaskRunEventsAgentIdleV1(db); err != nil {
 		return err
 	}
 	// Backfill rows that predate the usage_day column so cost corrections land
@@ -688,6 +783,9 @@ func migrate(db *sql.DB) error {
 		return err
 	}
 	if err := backfillTaskRunAgentStartedAtV1(db); err != nil {
+		return err
+	}
+	if err := backfillTaskRunReadyAtV1(db); err != nil {
 		return err
 	}
 	for _, p := range []struct {
@@ -729,11 +827,11 @@ func rebuildTaskRunSummariesStatusV3(db *sql.DB) error {
 		initial_attempt_id TEXT NOT NULL DEFAULT '', current_attempt_id TEXT NOT NULL DEFAULT '',
 		status TEXT NOT NULL CHECK(status IN ('running','clean','human_in_the_loop','warning','failed')),
 		phase TEXT NOT NULL CHECK(phase IN ('claimed','queued','provisioning','agent_running','pr_opened','waiting_for_merge','terminal')),
-		attempt_count INTEGER NOT NULL DEFAULT 0 CHECK(attempt_count >= 0), owner_type TEXT NOT NULL DEFAULT '', workspace_name TEXT NOT NULL DEFAULT '', workflow_name TEXT NOT NULL DEFAULT '', factory_name TEXT NOT NULL DEFAULT '', owner_id TEXT NOT NULL DEFAULT '', owner_display_name TEXT NOT NULL DEFAULT '', run_kind TEXT NOT NULL DEFAULT 'pr_task' CHECK(run_kind IN ('code_task','pr_task')), integration TEXT NOT NULL DEFAULT '', integration_workspace TEXT NOT NULL DEFAULT '', issue_id TEXT NOT NULL DEFAULT '', issue_title TEXT NOT NULL DEFAULT '', issue_created_at INTEGER NOT NULL DEFAULT 0, claw_id TEXT NOT NULL DEFAULT '', model TEXT NOT NULL DEFAULT '', input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0, total_tokens INTEGER NOT NULL DEFAULT 0, estimated_cost_usd REAL NOT NULL DEFAULT 0, usage_updated_at INTEGER NOT NULL DEFAULT 0, llm_key TEXT NOT NULL DEFAULT '', repo TEXT NOT NULL DEFAULT '', primary_pr_url TEXT NOT NULL DEFAULT '', pr_count INTEGER NOT NULL DEFAULT 0 CHECK(pr_count >= 0), open_pr_count INTEGER NOT NULL DEFAULT 0 CHECK(open_pr_count >= 0), merged_pr_count INTEGER NOT NULL DEFAULT 0 CHECK(merged_pr_count >= 0), closed_pr_count INTEGER NOT NULL DEFAULT 0 CHECK(closed_pr_count >= 0), warning_types TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(warning_types) AND json_type(warning_types) = 'array'), failure_type TEXT NOT NULL DEFAULT '' CHECK(failure_type IN ('','creation_failed','provision_failed','bootstrap_failed','agent_stopped','manual_stop_before_delivery','done_without_pr','no_pr','pr_closed_unmerged','timeout','provider_lost','permission_or_auth_failed','unknown')), human_interaction_count INTEGER NOT NULL DEFAULT 0 CHECK(human_interaction_count >= 0), started_at INTEGER NOT NULL, queued_at INTEGER NOT NULL DEFAULT 0, provision_started_at INTEGER NOT NULL DEFAULT 0, agent_started_at INTEGER NOT NULL DEFAULT 0, pr_opened_at INTEGER NOT NULL DEFAULT 0, merged_at INTEGER NOT NULL DEFAULT 0, finished_at INTEGER NOT NULL DEFAULT 0, timeout_at INTEGER NOT NULL DEFAULT 0, last_event_at INTEGER NOT NULL, materialized_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, analytics_enabled INTEGER NOT NULL DEFAULT 1 CHECK(analytics_enabled IN (0,1)), requires_pr INTEGER NOT NULL DEFAULT 1 CHECK(requires_pr IN (0,1)), excluded_reason TEXT NOT NULL DEFAULT '', UNIQUE(run_id), UNIQUE(tenant_id, run_id)
+		attempt_count INTEGER NOT NULL DEFAULT 0 CHECK(attempt_count >= 0), owner_type TEXT NOT NULL DEFAULT '', workspace_name TEXT NOT NULL DEFAULT '', workflow_name TEXT NOT NULL DEFAULT '', factory_name TEXT NOT NULL DEFAULT '', owner_id TEXT NOT NULL DEFAULT '', owner_display_name TEXT NOT NULL DEFAULT '', run_kind TEXT NOT NULL DEFAULT 'pr_task' CHECK(run_kind IN ('code_task','pr_task')), integration TEXT NOT NULL DEFAULT '', integration_workspace TEXT NOT NULL DEFAULT '', issue_id TEXT NOT NULL DEFAULT '', issue_title TEXT NOT NULL DEFAULT '', issue_created_at INTEGER NOT NULL DEFAULT 0, claw_id TEXT NOT NULL DEFAULT '', model TEXT NOT NULL DEFAULT '', input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0, total_tokens INTEGER NOT NULL DEFAULT 0, estimated_cost_usd REAL NOT NULL DEFAULT 0, usage_updated_at INTEGER NOT NULL DEFAULT 0, llm_key TEXT NOT NULL DEFAULT '', repo TEXT NOT NULL DEFAULT '', primary_pr_url TEXT NOT NULL DEFAULT '', pr_count INTEGER NOT NULL DEFAULT 0 CHECK(pr_count >= 0), open_pr_count INTEGER NOT NULL DEFAULT 0 CHECK(open_pr_count >= 0), merged_pr_count INTEGER NOT NULL DEFAULT 0 CHECK(merged_pr_count >= 0), closed_pr_count INTEGER NOT NULL DEFAULT 0 CHECK(closed_pr_count >= 0), warning_types TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(warning_types) AND json_type(warning_types) = 'array'), failure_type TEXT NOT NULL DEFAULT '' CHECK(failure_type IN ('','creation_failed','provision_failed','bootstrap_failed','agent_stopped','manual_stop_before_delivery','done_without_pr','no_pr','pr_closed_unmerged','timeout','provider_lost','permission_or_auth_failed','unknown')), human_interaction_count INTEGER NOT NULL DEFAULT 0 CHECK(human_interaction_count >= 0), started_at INTEGER NOT NULL, queued_at INTEGER NOT NULL DEFAULT 0, provision_started_at INTEGER NOT NULL DEFAULT 0, agent_started_at INTEGER NOT NULL DEFAULT 0, pr_opened_at INTEGER NOT NULL DEFAULT 0, ready_at INTEGER NOT NULL DEFAULT 0, merged_at INTEGER NOT NULL DEFAULT 0, finished_at INTEGER NOT NULL DEFAULT 0, timeout_at INTEGER NOT NULL DEFAULT 0, last_event_at INTEGER NOT NULL, materialized_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, analytics_enabled INTEGER NOT NULL DEFAULT 1 CHECK(analytics_enabled IN (0,1)), requires_pr INTEGER NOT NULL DEFAULT 1 CHECK(requires_pr IN (0,1)), excluded_reason TEXT NOT NULL DEFAULT '', UNIQUE(run_id), UNIQUE(tenant_id, run_id)
 	)`); err != nil {
 		return fmt.Errorf("create task run summaries v3: %w", err)
 	}
-	if _, err := tx.Exec(`INSERT INTO task_run_summaries_new SELECT id, tenant_id, run_id, initial_attempt_id, current_attempt_id, CASE status WHEN 'clean_success' THEN 'clean' WHEN 'warning_success' THEN 'warning' ELSE status END, phase, attempt_count, owner_type, workspace_name, workflow_name, factory_name, owner_id, owner_display_name, run_kind, integration, integration_workspace, issue_id, issue_title, issue_created_at, claw_id, model, input_tokens, output_tokens, total_tokens, estimated_cost_usd, usage_updated_at, llm_key, repo, primary_pr_url, pr_count, open_pr_count, merged_pr_count, closed_pr_count, warning_types, failure_type, human_interaction_count, started_at, queued_at, provision_started_at, agent_started_at, pr_opened_at, merged_at, finished_at, timeout_at, last_event_at, materialized_at, updated_at, analytics_enabled, requires_pr, excluded_reason FROM task_run_summaries`); err != nil {
+	if _, err := tx.Exec(`INSERT INTO task_run_summaries_new SELECT id, tenant_id, run_id, initial_attempt_id, current_attempt_id, CASE status WHEN 'clean_success' THEN 'clean' WHEN 'warning_success' THEN 'warning' ELSE status END, phase, attempt_count, owner_type, workspace_name, workflow_name, factory_name, owner_id, owner_display_name, run_kind, integration, integration_workspace, issue_id, issue_title, issue_created_at, claw_id, model, input_tokens, output_tokens, total_tokens, estimated_cost_usd, usage_updated_at, llm_key, repo, primary_pr_url, pr_count, open_pr_count, merged_pr_count, closed_pr_count, warning_types, failure_type, human_interaction_count, started_at, queued_at, provision_started_at, agent_started_at, pr_opened_at, ready_at, merged_at, finished_at, timeout_at, last_event_at, materialized_at, updated_at, analytics_enabled, requires_pr, excluded_reason FROM task_run_summaries`); err != nil {
 		return fmt.Errorf("copy task run summaries v3: %w", err)
 	}
 	if _, err := tx.Exec(`DROP TABLE task_run_summaries; ALTER TABLE task_run_summaries_new RENAME TO task_run_summaries;
@@ -748,6 +846,97 @@ func rebuildTaskRunSummariesStatusV3(db *sql.DB) error {
 		CREATE INDEX idx_task_run_summaries_repo ON task_run_summaries(tenant_id, repo, started_at DESC);
 		CREATE INDEX idx_task_run_summaries_timeout ON task_run_summaries(tenant_id, timeout_at)`); err != nil {
 		return fmt.Errorf("replace task run summaries v3: %w", err)
+	}
+	return tx.Commit()
+}
+
+// rebuildTaskRunEventsAgentIdleV1 widens the task_run_events.event_type CHECK
+// to allow 'agent_idle'. SQLite cannot alter a CHECK in place, so databases
+// created before the type existed get the rebuild-and-copy treatment (the
+// same pattern as rebuildTaskRunSummariesStatusV3): create the table with the
+// current schema, copy every row, swap, and recreate the indexes. Fresh
+// databases are created with 'agent_idle' already in the CHECK and skip this
+// entirely via the schema probe.
+func rebuildTaskRunEventsAgentIdleV1(db *sql.DB) error {
+	var schema string
+	if err := db.QueryRow(`SELECT sql FROM sqlite_master WHERE type='table' AND name='task_run_events'`).Scan(&schema); err != nil {
+		if err == sql.ErrNoRows {
+			return nil // no table yet; the CREATE below builds it with the new CHECK
+		}
+		return fmt.Errorf("read task run events schema: %w", err)
+	}
+	if strings.Contains(schema, "'agent_idle'") {
+		return nil
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`CREATE TABLE task_run_events_new (
+		id                 TEXT PRIMARY KEY,
+		tenant_id          TEXT NOT NULL,
+		run_id             TEXT NOT NULL REFERENCES task_runs(id) ON DELETE CASCADE,
+		attempt_id         TEXT NOT NULL DEFAULT '',
+		event_key          TEXT NOT NULL,
+		source             TEXT NOT NULL DEFAULT 'hub' CHECK(source IN ('github','linear','shortcut','elasticclaw','hub','provider','agent','unknown')),
+		source_event_id    TEXT NOT NULL DEFAULT '',
+		source_delivery_id TEXT NOT NULL DEFAULT '',
+		event_type         TEXT NOT NULL CHECK(event_type IN (
+			'task_start','task_completed','run_claimed','run_queued','provision_started','claw_created','agent_started',
+			'creation_failed','provision_failed','bootstrap_failed','model_selected','agent_stopped',
+			'manual_stop_before_delivery','provider_lost','done_without_pr','permission_or_auth_failed',
+			'timeout','unknown_failure','agent_idle','pr_associated','pr_opened','pr_closed_unmerged','pr_merged',
+			'approval_only_pr_review','human_requested_changes','human_review_comment','human_pr_comment',
+			'human_manual_code_push','human_tracker_update','human_dashboard_message',
+			'human_manual_stop_or_resume','human_settings_or_status_change',
+			'unknown_human_interaction','pr_replaced','correction','retraction'
+		)),
+		event_time         INTEGER NOT NULL,
+		observed_at        INTEGER NOT NULL,
+		actor_type         TEXT NOT NULL DEFAULT 'unknown' CHECK(actor_type IN ('agent','human','bot','system','unknown')),
+		actor_source       TEXT NOT NULL DEFAULT '',
+		actor_id           TEXT NOT NULL DEFAULT '',
+		actor_login        TEXT NOT NULL DEFAULT '',
+		actor_display_name TEXT NOT NULL DEFAULT '',
+		actor_classification_reason TEXT NOT NULL DEFAULT '',
+		interaction_role   TEXT NOT NULL DEFAULT '' CHECK(interaction_role IN ('','allowed_start','allowed_approval','allowed_merge','warning','neutral','terminal')),
+		target_type        TEXT NOT NULL DEFAULT '',
+		target_id          TEXT NOT NULL DEFAULT '',
+		target_url         TEXT NOT NULL DEFAULT '',
+		target_label       TEXT NOT NULL DEFAULT '',
+		warning_type       TEXT NOT NULL DEFAULT '',
+		failure_type       TEXT NOT NULL DEFAULT '' CHECK(failure_type IN ('','creation_failed','provision_failed','bootstrap_failed','agent_stopped','manual_stop_before_delivery','done_without_pr','no_pr','pr_closed_unmerged','timeout','provider_lost','permission_or_auth_failed','unknown')),
+		detail             TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(detail) AND json_type(detail) = 'object'),
+		created_at         INTEGER NOT NULL
+	)`); err != nil {
+		return fmt.Errorf("create task run events agent_idle v1: %w", err)
+	}
+	// The copy carries rowid across explicitly: the lifecycle notifier's
+	// watermark is a rowid cursor over this table, and a plain INSERT..SELECT
+	// would renumber the rows (id is a TEXT primary key, so rowid is implicit)
+	// — the cursor would then skip or replay events after the rebuild.
+	if _, err := tx.Exec(`INSERT INTO task_run_events_new(rowid,
+		id, tenant_id, run_id, attempt_id, event_key, source, source_event_id, source_delivery_id,
+		event_type, event_time, observed_at, actor_type, actor_source, actor_id, actor_login,
+		actor_display_name, actor_classification_reason, interaction_role, target_type, target_id,
+		target_url, target_label, warning_type, failure_type, detail, created_at)
+		SELECT rowid,
+		id, tenant_id, run_id, attempt_id, event_key, source, source_event_id, source_delivery_id,
+		event_type, event_time, observed_at, actor_type, actor_source, actor_id, actor_login,
+		actor_display_name, actor_classification_reason, interaction_role, target_type, target_id,
+		target_url, target_label, warning_type, failure_type, detail, created_at
+		FROM task_run_events`); err != nil {
+		return fmt.Errorf("copy task run events agent_idle v1: %w", err)
+	}
+	if _, err := tx.Exec(`DROP TABLE task_run_events; ALTER TABLE task_run_events_new RENAME TO task_run_events;
+		CREATE UNIQUE INDEX idx_task_run_events_tenant_key ON task_run_events(tenant_id, run_id, event_key);
+		CREATE INDEX idx_task_run_events_run_time ON task_run_events(run_id, event_time, id);
+		CREATE INDEX idx_task_run_events_type_time ON task_run_events(event_type, event_time);
+		CREATE INDEX idx_task_run_events_tenant_run_time ON task_run_events(tenant_id, run_id, event_time, observed_at, event_key);
+		CREATE INDEX idx_task_run_events_source_event ON task_run_events(tenant_id, source, source_event_id);
+		CREATE INDEX idx_task_run_events_observed ON task_run_events(tenant_id, observed_at)`); err != nil {
+		return fmt.Errorf("replace task run events agent_idle v1: %w", err)
 	}
 	return tx.Commit()
 }
@@ -964,6 +1153,38 @@ func backfillTaskRunAgentStartedAtV1(db *sql.DB) error {
 
 	_, err = db.Exec(`INSERT INTO hub_migrations(name, applied_at) VALUES(?, ?) ON CONFLICT(name) DO NOTHING`, migration, now().UnixMilli())
 	return err
+}
+
+// backfillTaskRunReadyAtV1 approximates historical PR readiness as creation.
+// Draft transitions were not captured before ready_at existed, so this is the
+// best recoverable value without querying GitHub's timeline API.
+func backfillTaskRunReadyAtV1(db *sql.DB) error {
+	const migration = "task_run_ready_at_v1"
+	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS hub_migrations (name TEXT PRIMARY KEY, applied_at INTEGER NOT NULL)`); err != nil {
+		return fmt.Errorf("create hub migrations: %w", err)
+	}
+	var applied int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM hub_migrations WHERE name=?`, migration).Scan(&applied); err != nil {
+		return fmt.Errorf("check ready_at backfill: %w", err)
+	}
+	if applied > 0 {
+		return nil
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`UPDATE task_run_prs SET ready_at=opened_at WHERE ready_at=0 AND opened_at != 0`); err != nil {
+		return fmt.Errorf("backfill task_run_prs.ready_at: %w", err)
+	}
+	if _, err := tx.Exec(`UPDATE task_run_summaries SET ready_at=pr_opened_at WHERE ready_at=0 AND pr_opened_at != 0`); err != nil {
+		return fmt.Errorf("backfill task_run_summaries.ready_at: %w", err)
+	}
+	if _, err := tx.Exec(`INSERT INTO hub_migrations(name, applied_at) VALUES(?, ?)`, migration, now().UnixMilli()); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // backfillTaskRunAgentStartedAt records an inferred agent_started event for a

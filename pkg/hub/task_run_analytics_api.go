@@ -128,6 +128,8 @@ type taskRunAnalyticsRunView struct {
 	ProvisionStartedAt    int64    `json:"provisionStartedAt"`
 	AgentStartedAt        int64    `json:"agentStartedAt"`
 	PROpenedAt            int64    `json:"prOpenedAt"`
+	ReadyAt               int64    `json:"readyAt"`
+	ReadyToMergeMs        int64    `json:"readyToMergeMs"`
 	MergedAt              int64    `json:"mergedAt"`
 	FinishedAt            int64    `json:"finishedAt"`
 	TimeoutAt             int64    `json:"timeoutAt"`
@@ -256,13 +258,14 @@ func (s *Server) handleTaskRunAnalyticsGeneralStats(w http.ResponseWriter, r *ht
 		jsonError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	response, err := s.readTaskRunAnalyticsGeneralStats(filters)
+	bh := BusinessHoursFromEnv(r.URL.Query().Get("tz"))
+	response, err := s.readTaskRunAnalyticsGeneralStats(filters, bh)
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, "db error")
 		return
 	}
 	priorFilters := taskRunAnalyticsPriorFilters(filters, time.Now().UTC())
-	prior, err := s.readTaskRunAnalyticsGeneralStats(priorFilters)
+	prior, err := s.readTaskRunAnalyticsGeneralStats(priorFilters, bh)
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, "db error")
 		return
@@ -271,9 +274,9 @@ func (s *Server) handleTaskRunAnalyticsGeneralStats(w http.ResponseWriter, r *ht
 	jsonOK(w, response)
 }
 
-func (s *Server) readTaskRunAnalyticsGeneralStats(filters taskRunAnalyticsFilters) (taskRunGeneralStatsResponse, error) {
+func (s *Server) readTaskRunAnalyticsGeneralStats(filters taskRunAnalyticsFilters, bh BusinessHours) (taskRunGeneralStatsResponse, error) {
 	where, args := taskRunAnalyticsSummaryWhere(filters)
-	rows, err := s.db.Query(`SELECT issue_created_at, started_at, agent_started_at, pr_opened_at, merged_at FROM task_run_summaries `+where, args...)
+	rows, err := s.db.Query(`SELECT issue_created_at, started_at, agent_started_at, pr_opened_at, ready_at, merged_at FROM task_run_summaries `+where, args...)
 	if err != nil {
 		return taskRunGeneralStatsResponse{}, err
 	}
@@ -281,30 +284,40 @@ func (s *Server) readTaskRunAnalyticsGeneralStats(filters taskRunAnalyticsFilter
 	var ticketSum, prSum, aiSum int64
 	var ticketN, ticketAuthN, prN, aiN int
 	for rows.Next() {
-		var issue, started, agent, opened, merged int64
-		if err := rows.Scan(&issue, &started, &agent, &opened, &merged); err != nil {
+		var issue, started, agent, opened, ready, merged int64
+		if err := rows.Scan(&issue, &started, &agent, &opened, &ready, &merged); err != nil {
 			return taskRunGeneralStatsResponse{}, err
 		}
 		// Negative deltas are skipped: for GitHub-triggered claws the PR
 		// pre-dates the run, so opened-started/opened-agent are meaningless.
-		if opened > 0 && started > 0 {
+		if started > 0 {
 			base := issue
 			fallback := base == 0
 			if fallback {
 				base = started
 			}
-			if opened >= base {
-				ticketSum += opened - base
+			end := ready
+			if end == 0 {
+				end = opened
+			}
+			if end > 0 && end >= base {
+				ticketSum += bh.DurationMs(base, end)
 				ticketN++
 				if !fallback {
 					ticketAuthN++
 				}
 			}
 		}
-		if opened > 0 && merged > 0 && merged >= opened {
-			prSum += merged - opened
+		prStart := ready
+		if prStart == 0 {
+			prStart = opened
+		}
+		if prStart > 0 && merged > 0 && merged >= prStart {
+			prSum += bh.DurationMs(prStart, merged)
 			prN++
 		}
+		// Agent runtime is machine time: it does not observe business hours, so
+		// this stays a wall-clock delta even when tz is supplied.
 		if agent > 0 && opened > 0 && opened >= agent {
 			aiSum += opened - agent
 			aiN++
@@ -376,7 +389,21 @@ func (s *Server) handleTaskRunAnalyticsRuns(w http.ResponseWriter, r *http.Reque
 		jsonError(w, http.StatusInternalServerError, "db error")
 		return
 	}
+	bh := BusinessHoursFromEnv(r.URL.Query().Get("tz"))
+	for i := range runs {
+		runs[i].ReadyToMergeMs = taskRunReadyToMergeMs(runs[i], bh)
+	}
 	jsonOK(w, taskRunAnalyticsRunsResponse{Runs: runs, NextCursor: nextCursor, Limit: limit})
+}
+
+// taskRunReadyToMergeMs is the business-hours span from the PR becoming ready
+// for review (falling back to when it was opened) to it being merged.
+func taskRunReadyToMergeMs(run taskRunAnalyticsRunView, bh BusinessHours) int64 {
+	ready := run.ReadyAt
+	if ready == 0 {
+		ready = run.PROpenedAt
+	}
+	return bh.DurationMs(ready, run.MergedAt)
 }
 
 func (s *Server) handleTaskRunAnalyticsRunSubresource(w http.ResponseWriter, r *http.Request) {
@@ -408,6 +435,7 @@ func (s *Server) handleTaskRunAnalyticsRunSubresource(w http.ResponseWriter, r *
 		return
 	}
 	if len(parts) == 1 {
+		run.ReadyToMergeMs = taskRunReadyToMergeMs(run, BusinessHoursFromEnv(r.URL.Query().Get("tz")))
 		jsonOK(w, taskRunAnalyticsRunDetailResponse{Run: run})
 		return
 	}
@@ -1216,7 +1244,7 @@ func taskRunAnalyticsRunColumns() string {
 		run_kind, integration, integration_workspace, issue_id, claw_id, model, llm_key, repo,
 		primary_pr_url, pr_count, open_pr_count, merged_pr_count, closed_pr_count, warning_types,
 		failure_type, human_interaction_count, started_at, queued_at, provision_started_at,
-		agent_started_at, pr_opened_at, merged_at, finished_at, timeout_at, last_event_at,
+		agent_started_at, pr_opened_at, ready_at, merged_at, finished_at, timeout_at, last_event_at,
 		materialized_at, updated_at, analytics_enabled, requires_pr, excluded_reason,
 		input_tokens, output_tokens, total_tokens, estimated_cost_usd, usage_updated_at, issue_title`
 }
@@ -1235,7 +1263,7 @@ func scanTaskRunAnalyticsRuns(rows *sql.Rows) ([]taskRunAnalyticsRunView, error)
 			&run.RunKind, &run.Integration, &run.IntegrationWorkspace, &run.IssueID, &run.ClawID, &run.Model, &run.LLMKey,
 			&run.Repo, &run.PrimaryPRURL, &run.PRCount, &run.OpenPRCount, &run.MergedPRCount, &run.ClosedPRCount,
 			&warningsJSON, &run.FailureType, &run.HumanInteractionCount, &run.StartedAt, &run.QueuedAt,
-			&run.ProvisionStartedAt, &run.AgentStartedAt, &run.PROpenedAt, &run.MergedAt, &run.FinishedAt,
+			&run.ProvisionStartedAt, &run.AgentStartedAt, &run.PROpenedAt, &run.ReadyAt, &run.MergedAt, &run.FinishedAt,
 			&run.TimeoutAt, &run.LastEventAt, &run.MaterializedAt, &run.UpdatedAt, &analyticsEnabled, &requiresPR,
 			&run.ExcludedReason, &inputTokens, &outputTokens, &totalTokens, &estimatedCostUSD, &usageUpdatedAt, &run.IssueTitle,
 		); err != nil {

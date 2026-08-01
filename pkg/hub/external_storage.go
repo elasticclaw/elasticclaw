@@ -133,6 +133,27 @@ func saveExternalTemplate(name string, files map[string]string) error {
 	if err := validateName(name); err != nil {
 		return err
 	}
+	// Validate every key before touching the filesystem. The save below wipes the
+	// existing template directory, so a bad key cannot be skipped: dropping it
+	// after the wipe would destroy the previously stored template and persist a
+	// silently truncated one while still reporting success. Nested files
+	// (memory/**, scripts/**) must survive a push, so cleanWorkspaceFilePath
+	// keeps them and rejects only unusable keys: paths that escape the template
+	// dir, and empty or otherwise invalid names.
+	safeNames := make(map[string]string, len(files))
+	fnames := make([]string, 0, len(files))
+	for fname := range files {
+		fnames = append(fnames, fname)
+	}
+	sort.Strings(fnames)
+	for _, fname := range fnames {
+		safeName, err := cleanWorkspaceFilePath(fname)
+		if err != nil {
+			return fmt.Errorf("invalid template file path %q for %s: %w", fname, name, err)
+		}
+		safeNames[fname] = safeName
+	}
+
 	dir := filepath.Join(templatesDir(), name)
 	// Remove and recreate the directory so stale files from previous pushes
 	// are not re-read by ReadTemplateFiles (which walks the memory/ subtree).
@@ -143,10 +164,11 @@ func saveExternalTemplate(name string, files map[string]string) error {
 		return fmt.Errorf("mkdir %s: %w", dir, err)
 	}
 	for fname, content := range files {
-		if strings.Contains(fname, "..") || strings.ContainsAny(fname, `/\`) {
-			continue // skip paths with directory traversal
+		safeName := safeNames[fname]
+		path := filepath.Join(dir, filepath.FromSlash(safeName))
+		if err := os.MkdirAll(filepath.Dir(path), 0750); err != nil {
+			return fmt.Errorf("mkdir for template file %s: %w", safeName, err)
 		}
-		path := filepath.Join(dir, fname)
 		if err := os.WriteFile(path, []byte(content), 0640); err != nil {
 			return fmt.Errorf("write %s: %w", path, err)
 		}

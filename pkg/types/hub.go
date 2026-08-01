@@ -48,6 +48,7 @@ type HubMessage struct {
 //   - "file_ack"      claw → hub     FileAck
 //   - "file_read"     hub → claw     {request_id, path}
 //   - "file_read_resp" claw → hub    FileReadResp
+//   - "nudge"         hub → claw     {claw_id, content} — mid-turn watchdog nudge
 type WSMessage struct {
 	Type    string      `json:"type"`
 	Payload interface{} `json:"payload,omitempty"`

@@ -5,10 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -176,17 +176,75 @@ func (s *Server) scanMessageForPRs(clawID, content string) {
 	}
 }
 
+const (
+	// prWatcherBaseInterval is the fastest the poller ever runs. Comments,
+	// reviews and merges are already delivered by webhooks, so a tighter loop
+	// buys latency nobody consumes while it burns installation quota.
+	prWatcherBaseInterval = 30 * time.Second
+	// prWatcherMaxInterval caps the backoff so a big factory still reconciles.
+	prWatcherMaxInterval = 5 * time.Minute
+	// prWatcherCallsPerPR is the worst-case cost of one PR per poll: merge check
+	// (1) + CI failures (pull + check-runs = 2) + issue comments (1) + review
+	// comments (1) + reviews (1) + pr_conditions (pull + check-runs + reviews =
+	// 3). ETag 304s make the billed number lower in steady state.
+	prWatcherCallsPerPR = 9
+	// prWatcherHourlyBudget is the watcher's share of the 5,000/hour GitHub App
+	// installation quota. The rest is left for webhooks, pipelines and agents.
+	prWatcherHourlyBudget = 2000
+)
+
+// prWatcherInterval scales the poll interval with the number of tracked PRs so
+// the watcher's hourly cost stays inside prWatcherHourlyBudget. The guarantee
+// holds until the interval hits prWatcherMaxInterval (around 18 tracked PRs);
+// past that the cost grows linearly again and the backstop is the rate-limit
+// reserve in githubClient, which degrades polling to merge-only rather than
+// letting the watcher exhaust the installation quota.
+func prWatcherInterval(trackedPRs int) time.Duration {
+	if trackedPRs <= 0 {
+		return prWatcherBaseInterval
+	}
+	callsPerPoll := float64(trackedPRs * prWatcherCallsPerPR)
+	seconds := callsPerPoll * 3600 / float64(prWatcherHourlyBudget)
+	interval := time.Duration(seconds * float64(time.Second))
+	if interval < prWatcherBaseInterval {
+		return prWatcherBaseInterval
+	}
+	if interval > prWatcherMaxInterval {
+		return prWatcherMaxInterval
+	}
+	return interval
+}
+
+// nextPollDelay is the wait before the next poll: the quota reset when GitHub
+// has cut us off, otherwise the PR-count-scaled interval.
+func (s *Server) nextPollDelay() time.Duration {
+	if until, blocked := defaultGitHubClient.blockedUntilTime(); blocked {
+		wait := time.Until(until) + time.Second
+		if wait > prWatcherMaxInterval {
+			wait = prWatcherMaxInterval
+		}
+		if wait > 0 {
+			return wait
+		}
+	}
+	s.mu.RLock()
+	tracked := s.trackedPRCount
+	s.mu.RUnlock()
+	return prWatcherInterval(tracked)
+}
+
 // startPRWatcher launches the background poller.
 func (s *Server) startPRWatcher() {
 	go func() {
-		ticker := time.NewTicker(10 * time.Second)
-		defer ticker.Stop()
+		timer := time.NewTimer(prWatcherBaseInterval)
+		defer timer.Stop()
 		reconcileTicker := time.NewTicker(5 * time.Minute)
 		defer reconcileTicker.Stop()
 		for {
 			select {
-			case <-ticker.C:
+			case <-timer.C:
 				s.pollAllPRs()
+				timer.Reset(s.nextPollDelay())
 			case <-reconcileTicker.C:
 				s.reconcileDeadClawPRs()
 			}
@@ -197,13 +255,14 @@ func (s *Server) startPRWatcher() {
 // reconcileDeadClawPRs closes out task_run_prs rows left open because their
 // backing claw died before the PR's merge/close was observed. It only queries
 // and updates task-run state; it never touches claws or injects into agents.
+// Terminal runs that do not require a PR can still have an open PR whose merge
+// must be recorded, so this intentionally does not filter by run status.
 func (s *Server) reconcileDeadClawPRs() {
 	rows, err := s.db.Query(`
 		SELECT trp.run_id, trp.repo, trp.pr_number, trp.pr_url
 		FROM task_run_prs trp
 		JOIN task_run_summaries trs ON trs.run_id = trp.run_id
 		WHERE trp.state = 'open'
-		  AND trs.status = 'running'
 		  AND trs.analytics_enabled = 1
 		  AND (trp.opened_at = 0 OR trp.opened_at > ?)
 		  AND NOT EXISTS (
@@ -286,6 +345,7 @@ type clawPR struct {
 	prNumber            int
 	prURL               string
 	lastCISHA           string
+	lastCIConclusion    string
 	lastCommentID       int64
 	lastCommentAt       string
 	lastReviewCommentID int64
@@ -294,9 +354,52 @@ type clawPR struct {
 	createdAt           string
 }
 
+// loadClawPRsByNumber hydrates every tracked-PR row for a (repo, number) pair
+// that belongs to a live claw — the same set pollAllPRs would visit, restricted
+// to one PR. More than one claw can track the same PR, and each row carries its
+// own CI watermark, so all of them have to be evaluated.
+//
+// checkCIStatus claims its verdict with a conditional UPDATE keyed on
+// claw_prs.id and skips work using the stored watermark, so the value-literal
+// clawPR built by the review-comment webhook handlers (which leaves id empty)
+// is not sufficient here — the rows have to come from the database.
+func (s *Server) loadClawPRsByNumber(repo string, prNumber int) []clawPR {
+	rows, err := s.db.Query(`
+		SELECT cp.id, cp.claw_id, cp.repo, cp.pr_number, cp.pr_url, cp.last_ci_sha, cp.last_ci_conclusion, cp.last_comment_id,
+		       cp.last_comment_at, cp.last_review_comment_id, cp.last_review_id, cp.pr_conditions_fired, cp.created_at
+		FROM claw_prs cp
+		JOIN claws cl ON cl.id = cp.claw_id
+		WHERE cp.repo = ? AND cp.pr_number = ? AND cl.status NOT IN ('deleted','error','offline')
+		ORDER BY cp.created_at DESC
+	`, repo, prNumber)
+	if err != nil {
+		log.Printf("[pr-watcher] failed to load tracked PR %s#%d: %v", repo, prNumber, err)
+		return nil
+	}
+	defer rows.Close()
+
+	var prs []clawPR
+	for rows.Next() {
+		var pr clawPR
+		var prConditionsFiredInt int
+		if err := rows.Scan(&pr.id, &pr.clawID, &pr.repo, &pr.prNumber, &pr.prURL,
+			&pr.lastCISHA, &pr.lastCIConclusion, &pr.lastCommentID, &pr.lastCommentAt,
+			&pr.lastReviewCommentID, &pr.lastReviewID, &prConditionsFiredInt, &pr.createdAt); err != nil {
+			log.Printf("[pr-watcher] failed to scan tracked PR %s#%d: %v", repo, prNumber, err)
+			return prs
+		}
+		pr.prConditionsFired = prConditionsFiredInt == 1
+		prs = append(prs, pr)
+	}
+	if err := rows.Err(); err != nil {
+		log.Printf("[pr-watcher] failed to iterate tracked PRs %s#%d: %v", repo, prNumber, err)
+	}
+	return prs
+}
+
 func (s *Server) pollAllPRs() {
 	rows, err := s.db.Query(`
-		SELECT cp.id, cp.claw_id, cp.repo, cp.pr_number, cp.pr_url, cp.last_ci_sha, cp.last_comment_id,
+		SELECT cp.id, cp.claw_id, cp.repo, cp.pr_number, cp.pr_url, cp.last_ci_sha, cp.last_ci_conclusion, cp.last_comment_id,
 		       cp.last_comment_at, cp.last_review_comment_id, cp.last_review_id, cp.pr_conditions_fired, cp.created_at,
 		       cl.status
 		FROM claw_prs cp
@@ -321,7 +424,7 @@ func (s *Server) pollAllPRs() {
 		var r row
 		var prConditionsFiredInt int
 		if err := rows.Scan(&r.pr.id, &r.pr.clawID, &r.pr.repo, &r.pr.prNumber, &r.pr.prURL,
-			&r.pr.lastCISHA, &r.pr.lastCommentID, &r.pr.lastCommentAt, &r.pr.lastReviewCommentID, &r.pr.lastReviewID, &prConditionsFiredInt, &r.pr.createdAt,
+			&r.pr.lastCISHA, &r.pr.lastCIConclusion, &r.pr.lastCommentID, &r.pr.lastCommentAt, &r.pr.lastReviewCommentID, &r.pr.lastReviewID, &prConditionsFiredInt, &r.pr.createdAt,
 			&r.clawStatus); err != nil {
 			continue
 		}
@@ -329,6 +432,31 @@ func (s *Server) pollAllPRs() {
 		prs = append(prs, r)
 	}
 	rows.Close()
+
+	s.mu.Lock()
+	s.trackedPRCount = len(prs)
+	s.mu.Unlock()
+
+	// GitHub already told us the quota is gone: retrying now only adds error
+	// lines to the log and delays the recovery for everyone else.
+	if until, blocked := defaultGitHubClient.blockedUntilTime(); blocked {
+		s.mu.Lock()
+		shouldLog := time.Since(s.lastRateLimitSkipLog) >= time.Minute
+		if shouldLog {
+			s.lastRateLimitSkipLog = time.Now()
+		}
+		s.mu.Unlock()
+		if shouldLog && len(prs) > 0 {
+			log.Printf("[pr-watcher] GitHub rate limit exhausted; skipping poll of %d PR(s) until %s",
+				len(prs), until.UTC().Format(time.RFC3339))
+		}
+		return
+	}
+
+	// Below the reserve the watcher drops everything except merge detection, so
+	// interactive and agent-initiated calls keep their headroom.
+	lowPriorityOK := defaultGitHubClient.allowLowPriority()
+	s.logGitHubBudget(lowPriorityOK)
 
 	token := s.resolveGitHubToken()
 	if token == "" {
@@ -366,8 +494,16 @@ func (s *Server) pollAllPRs() {
 			terminatedClaws[r.pr.clawID] = true
 			continue // claw is being terminated, skip other checks
 		}
-		// Always check CI failures
-		s.checkCIFailures(r.pr, token)
+		if !lowPriorityOK {
+			// Merge detection above is the only call worth the remaining budget.
+			// NOTE: this also suppresses the green-CI wake-up below, so a claw
+			// waiting on CI stays idle until the budget recovers. The webhook
+			// path is the fix for that; polling alone cannot be both cheap and
+			// prompt.
+			continue
+		}
+		// Always check CI status (failures and, just as importantly, green)
+		s.checkCIStatus(r.pr, token)
 
 		repoToken := s.resolveGitHubTokenForRepo(r.pr.repo)
 		if repoToken == "" {
@@ -427,6 +563,28 @@ func (s *Server) pollAllPRs() {
 	}
 }
 
+// logGitHubBudget periodically records the remaining installation quota so a
+// depletion is visible before it turns into a wall of 403s.
+func (s *Server) logGitHubBudget(lowPriorityOK bool) {
+	limit, remaining, reset, ok := defaultGitHubClient.budget()
+	if !ok {
+		return
+	}
+	interval := 5 * time.Minute
+	if !lowPriorityOK {
+		interval = time.Minute
+	}
+	s.mu.Lock()
+	if time.Since(s.lastQuotaLog) < interval {
+		s.mu.Unlock()
+		return
+	}
+	s.lastQuotaLog = time.Now()
+	s.mu.Unlock()
+	log.Printf("[pr-watcher] github quota: remaining=%d/%d reset=%s reserve=%d lowPriority=%v",
+		remaining, limit, reset.UTC().Format(time.RFC3339), githubRateLimitReserve, lowPriorityOK)
+}
+
 // firePRConditions consumes the one-shot trigger only after its transition
 // claims the stage. A failed claim remains eligible for the next poll.
 func (s *Server) firePRConditions(pr clawPR, stage pipeline.Stage, ctx pipelineContext) {
@@ -447,20 +605,54 @@ func (s *Server) resolveGitHubTokenWithRepos(repoAccess []RepoAccess) string {
 	if len(cfg.GitHubApps) == 0 {
 		return ""
 	}
+	// Installation tokens live an hour. Minting one per call cost two extra
+	// GitHub App requests on every poll of every PR, which was its own
+	// rate-limit exhaustion path.
+	cacheKey := githubTokenCacheKey(repoAccess)
+	s.ghTokenMu.Lock()
+	defer s.ghTokenMu.Unlock()
+	if cached, ok := s.ghTokenCache[cacheKey]; ok && time.Now().Before(cached.expiresAt) {
+		return cached.token
+	}
 	for _, appCfg := range cfg.GitHubApps {
 		provider, err := NewGitHubTokenProvider(appCfg)
 		if err != nil {
 			log.Printf("[pr-watcher] CRITICAL: GitHub token provider setup failed: %v", err)
 			continue
 		}
-		token, _, err := provider.InstallationToken(context.Background(), 0, repoAccess)
+		token, expiresAt, err := provider.InstallationToken(context.Background(), 0, repoAccess)
 		if err != nil {
 			log.Printf("[pr-watcher] CRITICAL: GitHub token provider failed: %v", err)
 			continue
 		}
+		if s.ghTokenCache == nil {
+			s.ghTokenCache = map[string]cachedGitHubToken{}
+		}
+		// Renew a few minutes early so no in-flight call uses an expiring token.
+		if expiry := expiresAt.Add(-5 * time.Minute); expiry.After(time.Now()) {
+			s.ghTokenCache[cacheKey] = cachedGitHubToken{token: token, expiresAt: expiry}
+		}
 		return token
 	}
 	return ""
+}
+
+// cachedGitHubToken is an installation token held until shortly before expiry.
+type cachedGitHubToken struct {
+	token     string
+	expiresAt time.Time
+}
+
+func githubTokenCacheKey(repoAccess []RepoAccess) string {
+	if len(repoAccess) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(repoAccess))
+	for _, r := range repoAccess {
+		parts = append(parts, r.Repo+":"+r.Permissions)
+	}
+	sort.Strings(parts)
+	return strings.Join(parts, ",")
 }
 
 // resolveGitHubTokenForRepo returns a GitHub App installation token scoped to the given repo.
@@ -474,10 +666,20 @@ func (s *Server) resolveGitHubToken() string {
 	return s.resolveGitHubTokenWithRepos(nil)
 }
 
-// checkCIFailures polls PR check runs and injects a message on new failures.
-func (s *Server) checkCIFailures(pr clawPR, token string) {
+// checkCIStatus polls PR check runs and injects a message when CI reaches a
+// terminal verdict for the head SHA — failure *or* success.
+//
+// The success branch exists because a green CI run is otherwise not an event:
+// an agent that pushed a fix and ended its turn waiting on CI would never be
+// woken, and the run deadlocks with both sides waiting on each other.
+func (s *Server) checkCIStatus(pr clawPR, token string) {
+	ghBase := s.githubBaseURL
+	if ghBase == "" {
+		ghBase = "https://api.github.com"
+	}
+
 	// Get PR head SHA
-	prData, err := githubAPI(fmt.Sprintf("repos/%s/pulls/%d", pr.repo, pr.prNumber), token)
+	prData, err := githubAPIWithBase(ghBase, fmt.Sprintf("repos/%s/pulls/%d", pr.repo, pr.prNumber), token)
 	if err != nil {
 		return
 	}
@@ -486,12 +688,17 @@ func (s *Server) checkCIFailures(pr clawPR, token string) {
 		return
 	}
 	headSHA, ok := headObj["sha"].(string)
-	if !ok || headSHA == "" || headSHA == pr.lastCISHA {
-		return // no new commits
+	if !ok || headSHA == "" {
+		return
+	}
+	// Already delivered a terminal verdict for this SHA. A failure verdict stays
+	// re-checkable so a re-run of the same commit can still report green.
+	if headSHA == pr.lastCISHA && pr.lastCIConclusion == ciConclusionSuccess {
+		return
 	}
 
 	// Get check runs for head SHA
-	checksData, err := githubAPI(fmt.Sprintf("repos/%s/commits/%s/check-runs", pr.repo, headSHA), token)
+	checksData, err := githubAPIWithBase(ghBase, fmt.Sprintf("repos/%s/commits/%s/check-runs", pr.repo, headSHA), token)
 	if err != nil {
 		return
 	}
@@ -509,25 +716,87 @@ func (s *Server) checkCIFailures(pr clawPR, token string) {
 			allCompleted = false
 		}
 
-		if conclusion == "failure" || conclusion == "timed_out" {
+		// Anything terminal that is not green blocks: cancelled, action_required,
+		// stale and startup_failure are "completed" too, and announcing them as
+		// "all checks passed" would be an affirmative false claim.
+		if conclusion != "" && !isGreenCheckConclusion(conclusion) {
 			detailsURL, _ := run["details_url"].(string)
-			failures = append(failures, fmt.Sprintf("**%s** — [view logs](%s)", name, detailsURL))
+			label := name
+			if conclusion != "failure" && conclusion != "timed_out" {
+				label = fmt.Sprintf("%s (%s)", name, conclusion)
+			}
+			failures = append(failures, fmt.Sprintf("**%s** — [view logs](%s)", label, detailsURL))
 		}
 	}
 
-	// Only update SHA if all checks have completed or if we found failures
-	if len(failures) > 0 || allCompleted {
-		_, _ = s.db.Exec(`UPDATE claw_prs SET last_ci_sha=? WHERE id=?`, headSHA, pr.id)
+	// No check runs at all: CI has not reported yet. Reporting "0 checks passed"
+	// would be a spurious wake-up, and advancing the watermark would hide the
+	// real verdict when it lands.
+	if len(checkRuns) == 0 {
+		return
 	}
-
-	if len(failures) == 0 {
+	// CI still running: nothing terminal to report, and the watermark must not
+	// advance or the eventual verdict becomes unobservable.
+	if len(failures) == 0 && !allCompleted {
 		return
 	}
 
-	msg := fmt.Sprintf("CI failed on PR #%d ([%s](%s)):\n\n%s\n\nPlease fix these failures on the same branch.",
-		pr.prNumber, pr.repo, pr.prURL, strings.Join(failures, "\n"))
+	conclusion := ciConclusionSuccess
+	if len(failures) > 0 {
+		conclusion = ciConclusionFailure
+	}
 
-	s.injectUserMessage(pr.clawID, msg)
+	// Conditional UPDATE = claim, same idiom as claimPipelineStageTransition.
+	// Exactly one poll (and exactly one hub process) observes a given
+	// (sha, conclusion) pair, so the injection below cannot double-fire.
+	res, err := s.db.Exec(
+		`UPDATE claw_prs SET last_ci_sha=?, last_ci_conclusion=? WHERE id=? AND NOT (last_ci_sha=? AND last_ci_conclusion=?)`,
+		headSHA, conclusion, pr.id, headSHA, conclusion)
+	if err != nil {
+		log.Printf("[pr-watcher] failed to claim CI status for %s: %v", pr.prURL, err)
+		return
+	}
+	if claimed, err := res.RowsAffected(); err != nil || claimed == 0 {
+		return
+	}
+
+	if conclusion == ciConclusionFailure {
+		msg := fmt.Sprintf("CI failed on PR #%d ([%s](%s)):\n\n%s\n\nPlease fix these failures on the same branch.",
+			pr.prNumber, pr.repo, pr.prURL, strings.Join(failures, "\n"))
+		s.injectUserMessage(pr.clawID, msg)
+		return
+	}
+
+	log.Printf("[pr-watcher] CI passed on %s@%s — notifying claw %s", pr.prURL, shortSHA(headSHA), shortID(pr.clawID))
+	s.injectExternalHubMessageByID(pr.clawID, fmt.Sprintf(
+		"[hub] All CI checks passed on PR #%d ([%s](%s)) at commit `%s` (%d check(s)).\n\n"+
+			"If your workflow is waiting on CI, this is the signal to proceed: emit the stage's signal token, or explain what is still blocking you.",
+		pr.prNumber, pr.repo, pr.prURL, shortSHA(headSHA), len(checkRuns)))
+}
+
+// Terminal CI verdicts recorded in claw_prs.last_ci_conclusion.
+const (
+	ciConclusionSuccess = "success"
+	ciConclusionFailure = "failure"
+)
+
+// isGreenCheckConclusion reports whether a completed check run counts as green.
+// GitHub's non-green terminal conclusions (failure, timed_out, cancelled,
+// action_required, stale, startup_failure) and any conclusion we do not know
+// are treated as blocking, so an unknown value can never be reported as green.
+func isGreenCheckConclusion(conclusion string) bool {
+	switch conclusion {
+	case "success", "neutral", "skipped":
+		return true
+	}
+	return false
+}
+
+func shortSHA(sha string) string {
+	if len(sha) > 7 {
+		return sha[:7]
+	}
+	return sha
 }
 
 type prCommentOptions struct {
@@ -1047,6 +1316,19 @@ func (s *Server) injectMessage(clawID, content, role string) {
 	// Resolve tenant
 	var tenantID string
 	if err := s.db.QueryRow(`SELECT tenant_id FROM claws WHERE id=?`, clawID).Scan(&tenantID); err != nil {
+		log.Printf("[pr-watcher] dropping %s message for claw %s: tenant lookup failed: %v", role, shortID(clawID), err)
+		return
+	}
+	var pendingDupes int
+	// Fail open on a dedup-check error: dropping the injection can strand
+	// the agent (a lost watchdog nudge or restart-resume prompt), while
+	// injecting blind at worst duplicates one pending message.
+	if err := s.db.QueryRow(`SELECT COUNT(1) FROM messages WHERE claw_id=? AND role=? AND content=? AND delivered_at IS NULL`, clawID, role, content).Scan(&pendingDupes); err != nil {
+		log.Printf("[pr-watcher] dedup check for claw %s failed, injecting anyway: %v", shortID(clawID), err)
+		pendingDupes = 0
+	}
+	if pendingDupes > 0 {
+		log.Printf("[pr-watcher] skipping duplicate pending %s message for claw %s", role, shortID(clawID))
 		return
 	}
 
@@ -1160,21 +1442,15 @@ func githubAPI(path, token string) (map[string]interface{}, error) {
 
 // githubAPIWithBase is like githubAPI but against a custom base URL (for testing).
 func githubAPIWithBase(baseURL, path, token string) (map[string]interface{}, error) {
-	req, _ := http.NewRequest("GET", baseURL+"/"+path, nil)
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := defaultGitHubClient.get(baseURL+"/"+path, token)
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode >= 400 {
-		return nil, &githubAPIError{StatusCode: resp.StatusCode, Body: string(body), RateLimited: resp.Header.Get("X-RateLimit-Remaining") == "0"}
+		return nil, &githubAPIError{StatusCode: resp.StatusCode, Body: string(resp.Body), RateLimited: resp.rateLimited()}
 	}
 	var result map[string]interface{}
-	if err := json.Unmarshal(body, &result); err != nil {
+	if err := json.Unmarshal(resp.Body, &result); err != nil {
 		return nil, fmt.Errorf("github API parse error: %w", err)
 	}
 	return result, nil
@@ -1321,10 +1597,25 @@ func (s *Server) checkPRMerged(pr clawPR, token string) bool {
 	}
 	state, _ := data["state"].(string)
 	merged, _ := data["merged"].(bool)
+	draft, _ := data["draft"].(bool)
 	mergedAtValue, _ := data["merged_at"].(string)
 	createdAtValue, _ := data["created_at"].(string)
 	mergedAt := parseRFC3339Timestamp(mergedAtValue)
 	createdAt := parseRFC3339Timestamp(createdAtValue)
+	// Detection time is only a sound approximation of ready_at while the PR is
+	// still open. On the poll that first observes a merged or closed PR, now()
+	// is already past the real merge time, which would push ready_at beyond
+	// merged_at and silently drop the run from the ready→merge average.
+	if !draft && state != "closed" && !merged {
+		if _, runID, _, ok, err := s.taskRunContextForClaw(pr.clawID); err == nil && ok {
+			var readyAt int64
+			if err := s.db.QueryRow(`SELECT ready_at FROM task_run_prs WHERE run_id=? AND repo=? AND pr_number=?`, runID, pr.repo, pr.prNumber).Scan(&readyAt); err == nil && readyAt == 0 {
+				if err := s.associateTaskRunPR(TaskRunPR{RunID: runID, Repo: pr.repo, PRNumber: pr.prNumber, URL: pr.prURL, State: taskRunPRStateOpen, ReadyAt: epochMillis(now())}); err != nil {
+					log.Printf("[pr-watcher] failed to detect ready_at for run %s: %v", runID, err)
+				}
+			}
+		}
+	}
 
 	log.Printf("[pr-watcher] checkPRMerged: claw=%s pr=%s state=%s merged=%v", pr.clawID[:8], pr.prURL, state, merged)
 
@@ -1652,33 +1943,21 @@ func githubAPIListWithBase(baseURL, path, token string) ([]interface{}, error) {
 	if strings.Contains(path, "?") {
 		separator = "&"
 	}
-	req, err := http.NewRequest("GET", baseURL+"/"+path+separator+"per_page=100", nil)
+	resp, err := defaultGitHubClient.get(baseURL+"/"+path+separator+"per_page=100", token)
 	if err != nil {
 		return nil, err
-	}
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("github API response read error: %w", err)
 	}
 	if resp.StatusCode >= 400 {
 		// GitHub returns 404 for auth failures to avoid leaking repo existence.
 		// Surface a clearer error when the token is likely the problem.
-		msg := string(body)
+		msg := string(resp.Body)
 		if resp.StatusCode == http.StatusNotFound && strings.Contains(msg, "Not Found") {
-			return nil, &githubAPIError{StatusCode: resp.StatusCode, Body: fmt.Sprintf("404 for %s/%s (token may be invalid or repo may not exist): %s", baseURL, path, msg), RateLimited: resp.Header.Get("X-RateLimit-Remaining") == "0"}
+			return nil, &githubAPIError{StatusCode: resp.StatusCode, Body: fmt.Sprintf("404 for %s/%s (token may be invalid or repo may not exist): %s", baseURL, path, msg), RateLimited: resp.rateLimited()}
 		}
-		return nil, &githubAPIError{StatusCode: resp.StatusCode, Body: msg, RateLimited: resp.Header.Get("X-RateLimit-Remaining") == "0"}
+		return nil, &githubAPIError{StatusCode: resp.StatusCode, Body: msg, RateLimited: resp.rateLimited()}
 	}
 	var result []interface{}
-	if err := json.Unmarshal(body, &result); err != nil {
+	if err := json.Unmarshal(resp.Body, &result); err != nil {
 		return nil, fmt.Errorf("github API list parse error: %w", err)
 	}
 	return result, nil

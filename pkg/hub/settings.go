@@ -1312,6 +1312,20 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 				http.Error(w, "validation error: "+err.Error(), http.StatusBadRequest)
 				return
 			}
+			// Author-time notify check on the merged factory about to be
+			// persisted. validateNotifyVias is called directly with the
+			// notifier set instead of via s.validateFactoryNotifyVias: this
+			// handler holds s.mu exclusively, and the helper re-enters the
+			// lock through s.notificationsConfig(). Notifications cannot be
+			// modified by a SettingsPatch, so updatedCfg carries the live set.
+			var notifiers map[string]types.NotifierConfig
+			if updatedCfg.Notifications != nil {
+				notifiers = updatedCfg.Notifications.Notifiers
+			}
+			if err := validateNotifyVias(notifiers, fmt.Sprintf("factory %q", disk.Name), disk.PipelineYAML); err != nil {
+				http.Error(w, "validation error: "+err.Error(), http.StatusBadRequest)
+				return
+			}
 			if err := saveExternalFactory(disk); err != nil {
 				http.Error(w, "failed to save factory "+fp.Name+": "+err.Error(), http.StatusInternalServerError)
 				return

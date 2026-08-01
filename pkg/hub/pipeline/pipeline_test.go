@@ -236,6 +236,7 @@ stages:
       dependency_updates:
         ecosystems: [go, npm]
         paths: ["."]
+        exclude_paths: [dagger]
         grouping: all
         include_major: false
         output: deps
@@ -257,6 +258,9 @@ stages:
 	}
 	if !action.ContinueOnError {
 		t.Fatal("expected continue_on_error")
+	}
+	if strings.Join(action.ExcludePaths, ",") != "dagger" {
+		t.Fatalf("exclude_paths = %v, want [dagger]", action.ExcludePaths)
 	}
 }
 
@@ -721,5 +725,95 @@ func TestGetJSONPath(t *testing.T) {
 	}
 	if v := pipeline.GetJSONPath(m, "details.missing"); v != nil {
 		t.Fatalf("details.missing = %v, want nil", v)
+	}
+}
+
+func TestParseNotifyAction(t *testing.T) {
+	p, err := pipeline.Parse([]byte(`
+stages:
+  - id: announce
+    on_enter:
+      notify:
+        via: eng-agents
+        text: "PR merged: {{.Issue.URL}}"
+        subject: "{{.Issue.Identifier}} merged"
+        target: "{{.Outputs.build.channel}}"
+        options:
+          unfurl_links: false
+`))
+	if err != nil {
+		t.Fatalf("Parse error: %v", err)
+	}
+	action := p.Stages[0].OnEnter.Notify
+	if !action.Enabled {
+		t.Fatal("notify block should be marked enabled when present")
+	}
+	if action.Via != "eng-agents" {
+		t.Fatalf("via = %q, want eng-agents", action.Via)
+	}
+	if action.Text != "PR merged: {{.Issue.URL}}" {
+		t.Fatalf("text = %q", action.Text)
+	}
+	if action.Subject != "{{.Issue.Identifier}} merged" {
+		t.Fatalf("subject = %q", action.Subject)
+	}
+	if action.Target != "{{.Outputs.build.channel}}" {
+		t.Fatalf("target = %q", action.Target)
+	}
+	if v, ok := action.Options["unfurl_links"].(bool); !ok || v {
+		t.Fatalf("options.unfurl_links = %#v, want false", action.Options["unfurl_links"])
+	}
+}
+
+func TestParseNotifyActionAbsent(t *testing.T) {
+	p, err := pipeline.Parse([]byte(`
+stages:
+  - id: working
+    on_enter:
+      inject: hello
+`))
+	if err != nil {
+		t.Fatalf("Parse error: %v", err)
+	}
+	if p.Stages[0].OnEnter.Notify.Enabled {
+		t.Fatal("absent notify block must not be enabled")
+	}
+}
+
+// A notify block without a usable "via" must NOT be a parse error: every
+// caller treats a Parse failure as "no pipeline", so a fatal error here would
+// silently disable stage transitions, gates and PR handling for the whole
+// workflow over a notification typo. The action stays enabled with a blank
+// Via so the runner can warn loudly on every attempted send (and the doctor
+// flags it before it runs).
+func TestParseNotifyActionMissingViaIsNotFatal(t *testing.T) {
+	for name, src := range map[string]string{
+		"missing": `
+stages:
+  - id: announce
+    on_enter:
+      notify:
+        text: hello
+`,
+		"blank": `
+stages:
+  - id: announce
+    on_enter:
+      notify:
+        via: "   "
+        text: hello
+`,
+	} {
+		p, err := pipeline.Parse([]byte(src))
+		if err != nil {
+			t.Fatalf("%s via: Parse error = %v, want the pipeline to survive a notify typo", name, err)
+		}
+		action := p.Stages[0].OnEnter.Notify
+		if !action.Enabled {
+			t.Fatalf("%s via: notify action was dropped, want it enabled so the runtime warns", name)
+		}
+		if strings.TrimSpace(action.Via) != "" {
+			t.Fatalf("%s via: Via = %q, want empty/blank preserved", name, action.Via)
+		}
 	}
 }

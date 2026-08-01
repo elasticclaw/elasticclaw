@@ -1,6 +1,9 @@
 package hub
 
 import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -243,6 +246,73 @@ func TestCronWorkflowTriggerValidation(t *testing.T) {
 				t.Errorf("WorkflowConfig.Validate() unexpected error: %v", err)
 			}
 		})
+	}
+}
+
+func TestCronWorkflowRunAPI(t *testing.T) {
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
+	s.cronScheduler = newCronScheduler(s)
+
+	now := time.Now().UTC()
+	if _, err := db.Exec(`INSERT INTO workflow_runs(id,tenant_id,workflow_name,workspace_name,trigger_type,status,claw_id,run_context,started_at,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)`,
+		"run-1", "test-tenant-id", "wf", "ws", "cron", "running", "claw-1", "{}", now, now); err != nil {
+		t.Fatalf("insert run: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/workspaces/ws/workflows/wf/cron/runs/run-1", nil)
+	req.Header.Set("Authorization", "Bearer test-token")
+	rr := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+	var run types.WorkflowRun
+	if err := json.Unmarshal(rr.Body.Bytes(), &run); err != nil {
+		t.Fatalf("decode run: %v", err)
+	}
+	if run.ID != "run-1" || run.ClawID != "claw-1" {
+		t.Fatalf("unexpected run: %#v", run)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/workspaces/ws/workflows/wf/cron/runs/missing", nil)
+	req.Header.Set("Authorization", "Bearer test-token")
+	rr = httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("missing status = %d, want %d", rr.Code, http.StatusNotFound)
+	}
+}
+
+func TestCronSchedulerGetRunByID(t *testing.T) {
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
+	s.cronScheduler = newCronScheduler(s)
+
+	now := time.Now().UTC()
+	if _, err := db.Exec(`INSERT INTO workflow_runs(id,tenant_id,workflow_name,workspace_name,trigger_type,status,claw_id,run_context,started_at,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)`,
+		"run-1", "test-tenant-id", "wf", "ws", "cron", "running", "claw-1", "{}", now, now); err != nil {
+		t.Fatalf("insert run: %v", err)
+	}
+
+	run, err := s.cronScheduler.getRunByID("ws", "wf", "run-1")
+	if err != nil {
+		t.Fatalf("getRunByID: %v", err)
+	}
+	if run == nil {
+		t.Fatalf("expected run, got nil")
+	}
+	if run.ID != "run-1" || run.WorkspaceName != "ws" || run.WorkflowName != "wf" || run.ClawID != "claw-1" {
+		t.Fatalf("unexpected run: %#v", run)
+	}
+
+	missing, err := s.cronScheduler.getRunByID("ws", "wf", "missing")
+	if err != nil {
+		t.Fatalf("getRunByID missing: %v", err)
+	}
+	if missing != nil {
+		t.Fatalf("expected nil for missing run, got %#v", missing)
 	}
 }
 

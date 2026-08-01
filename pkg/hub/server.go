@@ -35,6 +35,7 @@ import (
 
 	"github.com/elasticclaw/elasticclaw/pkg/cliversion"
 	"github.com/elasticclaw/elasticclaw/pkg/hub/artifact"
+	"github.com/elasticclaw/elasticclaw/pkg/hub/notify"
 	"github.com/elasticclaw/elasticclaw/pkg/hub/pipeline"
 	daytona "github.com/elasticclaw/elasticclaw/pkg/provider/daytona"
 	exedevProvider "github.com/elasticclaw/elasticclaw/pkg/provider/exedev"
@@ -60,7 +61,21 @@ type Server struct {
 	users map[string]*userConn // tenant_id -> []conn (broadcast)
 	// gatewayRestartCounts retains the heartbeat counter across WebSocket reconnects.
 	gatewayRestartCounts map[string]int
-	lastTokenFailureLog  time.Time
+	// autoResumeRestartCounts records restart counts already handled per claw. Guarded by s.mu.
+	autoResumeRestartCounts map[string]int
+	lastTokenFailureLog     time.Time
+	// trackedPRCount is the PR count observed by the last poll; it drives the
+	// PR watcher's adaptive interval. Guarded by s.mu.
+	trackedPRCount int
+	// lastQuotaLog throttles the GitHub rate-limit budget log line. Guarded by s.mu.
+	lastQuotaLog time.Time
+	// lastRateLimitSkipLog throttles the "poll skipped, quota exhausted" log. Guarded by s.mu.
+	lastRateLimitSkipLog time.Time
+
+	// ghTokenCache holds GitHub App installation tokens until shortly before
+	// they expire, keyed by requested repo access.
+	ghTokenMu    sync.Mutex
+	ghTokenCache map[string]cachedGitHubToken
 	// one-time oauth_code -> signed GitHub session token
 
 	dependencyStatus *dependencyStatusService
@@ -73,6 +88,12 @@ type Server struct {
 
 	checkpointMu      sync.Mutex
 	checkpointWaiters map[string]chan error // checkpoint_id -> waiter
+
+	// agentIdleBaselineAt caches the persisted agent_idle baseline (see
+	// agentIdleBaseline in agent_idle.go); zero = not loaded or feature off.
+	agentIdleBaselineMu      sync.Mutex
+	agentIdleBaselineAt      time.Time
+	agentIdleBaselineCleared bool
 
 	replicatedBootstrapEnvMu sync.Mutex
 	replicatedBootstrapEnv   map[string]map[string]string // temporary handoff while a Replicated VM becomes reachable
@@ -122,6 +143,43 @@ type Server struct {
 	previewStartOverride          func(ctx context.Context, provider, providerID, cwd, command string) error
 	previewStopOverride           func(ctx context.Context, provider, providerID, clawID string) error
 	previewDetachScheduleOverride func(clawID string) // test seam for ready-handler scheduling
+
+	// Constructed notifiers are cached per notifier name so instances are
+	// genuinely reused across features (the lifecycle poller, the manual test
+	// endpoint, future pipeline notify actions) instead of being rebuilt on
+	// every use. The map is bounded by the number of configured notifier
+	// names; each entry's key covers the config and a secret digest, so an
+	// edit or token rotation rebuilds that notifier on next use. Send pacing
+	// deliberately does NOT depend on this cache — the Slack provider keys
+	// its limiter on the destination channel process-wide — so a cache miss
+	// can never reset pacing.
+	notifierCacheMu sync.Mutex
+	notifierCache   map[string]cachedNotifier
+	// notifierSettingOverrides are merged into every notifier's settings at
+	// construction. Tests use it to point a provider at an httptest server
+	// (api_base) and to collapse send pacing (min_send_interval).
+	notifierSettingOverrides map[string]any
+
+	// lifecyclePendingDeliveries holds notification deliveries whose
+	// post-send bookkeeping write failed; they are retried each tick and,
+	// while stashed, count as delivered so the message is never re-sent
+	// externally (see recordNotificationDelivery). Only touched from the
+	// lifecycle tick goroutine — ticks never overlap.
+	lifecyclePendingDeliveries map[string]pendingNotificationDelivery
+
+	// lifecycleNotifierStop/Done plumb graceful shutdown for the lifecycle
+	// notifier loop: run() stops the loop and waits for the in-flight tick
+	// BEFORE closing the database, so a completed external send can still land
+	// its delivery row (see stopLifecycleNotifier).
+	lifecycleNotifierStop chan struct{}
+	lifecycleNotifierDone chan struct{}
+}
+
+// cachedNotifier is one constructed notifier plus the config/secret digest it
+// was built from.
+type cachedNotifier struct {
+	key      string
+	notifier notify.Notifier
 }
 
 func (s *Server) modelAuthTokenForClaw(clawID string) string {
@@ -163,6 +221,9 @@ type clawConn struct {
 	contextWarningSent    bool            // true once the context-nearly-full warning has been injected this turn
 	awaitingResponse      bool            // true as soon as a prompt is delivered, before the first chunk/activity
 	noProgressPaused      bool            // automatic delivery is paused after repeated turns with unchanged progress
+	lastTurnFinishedAt    time.Time       // when the last streaming turn ended (for post-restart resume window)
+	connectedAt           time.Time       // when this connection registered; immutable after registration
+	idleNotifiedAt        time.Time       // when the agent_idle notification fired for the current idle stretch (zero = armed)
 
 	deliveryInFlight bool // serializes DB-backed delivery writes
 
@@ -185,6 +246,20 @@ const (
 	defaultSilentDeathMax      = 10 * time.Minute
 )
 
+const (
+	streamingTimeoutNudge  = "[hub] Your current response has been running for over 12 minutes. Please wrap up and send your response."
+	contextNearlyFullNudge = "[hub] Context window is nearly full. Summarize your progress briefly and send [DONE] with any PR URL, or ask the user what to do next."
+	// autoResumeRecentTurnWindow includes races between a crash and turn completion.
+	autoResumeRecentTurnWindow = 5 * time.Minute
+)
+
+// interTurnCooldown gives the OpenClaw gateway a short window to finish
+// releasing the prompt lock and writing the final session state before the
+// next message is admitted. This mitigates the upstream "session file changed
+// while embedded prompt lock was released" race when a second message reaches
+// the session during the previous turn's cleanup window.
+var interTurnCooldown = 100 * time.Millisecond
+
 // initialStatus returns the claw status string to use on bridge registration.
 // A nil pointer means the field was absent (old bridge) — treat as ready for backward compat.
 func initialStatus(gatewayReady *bool) string {
@@ -202,7 +277,28 @@ func (cc *clawConn) isBusyLocked() bool {
 	return cc.awaitingResponse || !cc.streamingStartedAt.IsZero() || cc.streamingMsgID != ""
 }
 
+// finishTurnLocked ends a turn that actually ran (or was force-finished):
+// the in-flight state clears and the idle clock restarts now.
 func (cc *clawConn) finishTurnLocked() {
+	cc.resetTurnStateLocked()
+	cc.lastTurnFinishedAt = time.Now()
+	// A finished turn starts a new idle stretch: re-arm the idle alert so a
+	// claw that goes idle, works, then goes idle again notifies twice.
+	cc.idleNotifiedAt = time.Time{}
+}
+
+// abortTurnLocked releases a turn reservation whose delivery never reached
+// the bridge (socket write failed, marker insert failed). No turn ran, so the
+// idle clock deliberately does NOT restart: stamping lastTurnFinishedAt here
+// would let a claw whose deliveries keep failing rewind its idle clock on
+// every watchdog tick and never cross the agent_idle threshold — the exact
+// stuck state that alert exists for. It would also fake a "recent turn" for
+// the auto-resume window.
+func (cc *clawConn) abortTurnLocked() {
+	cc.resetTurnStateLocked()
+}
+
+func (cc *clawConn) resetTurnStateLocked() {
 	cc.awaitingResponse = false
 	cc.streamingMsgID = ""
 	cc.streamingBuf.Reset()
@@ -265,21 +361,22 @@ func NewServer(addr, dbPath, identityDir string, hubCfg *types.HubConfig) (*Serv
 	}
 	log.Printf("Hub SSH public key:\n%s", id.PublicKey)
 	srv := &Server{
-		db:                   db,
-		addr:                 addr,
-		hubCfg:               hubCfg,
-		identity:             id,
-		artifacts:            artifacts,
-		claws:                make(map[string]*clawConn),
-		users:                make(map[string]*userConn),
-		gatewayRestartCounts: make(map[string]int),
-		dependencyStatus:     newDependencyStatusService(hubCfg),
-		fileAckWaiters:       make(map[string]chan types.FileAck),
-		fileReadWaiters:      make(map[string]chan types.FileReadResp),
-		checkpointWaiters:    make(map[string]chan error),
-		webhookDedup:         make(map[string]time.Time),
-		reaperFirstSeen:      make(map[string]time.Time),
-		nowFunc:              now,
+		db:                      db,
+		addr:                    addr,
+		hubCfg:                  hubCfg,
+		identity:                id,
+		artifacts:               artifacts,
+		claws:                   make(map[string]*clawConn),
+		users:                   make(map[string]*userConn),
+		gatewayRestartCounts:    make(map[string]int),
+		autoResumeRestartCounts: make(map[string]int),
+		dependencyStatus:        newDependencyStatusService(hubCfg),
+		fileAckWaiters:          make(map[string]chan types.FileAck),
+		fileReadWaiters:         make(map[string]chan types.FileReadResp),
+		checkpointWaiters:       make(map[string]chan error),
+		webhookDedup:            make(map[string]time.Time),
+		reaperFirstSeen:         make(map[string]time.Time),
+		nowFunc:                 now,
 	}
 	if srv.livenessEnabled() {
 		srv.reconcileOnBoot()
@@ -294,6 +391,14 @@ func NewServer(addr, dbPath, identityDir string, hubCfg *types.HubConfig) (*Serv
 	if srv.livenessEnabled() {
 		go srv.runReaper()
 	}
+
+	// The notification baseline must exist BEFORE any event producer starts:
+	// the notifier's first tick fires one poll interval from now, and if it
+	// were the one to establish the baseline, everything the producers below
+	// emitted in that window would be stamped as pre-existing history and
+	// silently dropped.
+	srv.initLifecycleNotifierBaseline()
+
 	srv.startPRWatcher()
 
 	// Start cron scheduler for workflow triggers
@@ -302,6 +407,7 @@ func NewServer(addr, dbPath, identityDir string, hubCfg *types.HubConfig) (*Serv
 		log.Printf("[cron] failed to start scheduler: %v", err)
 	}
 	srv.startIntegrationPoller()
+	srv.startLifecycleNotifier()
 
 	return srv, nil
 }
@@ -371,6 +477,11 @@ func (s *Server) run(ctx context.Context, opts ...RunOptions) error {
 		// ListenAndServe returns as soon as Shutdown starts. Wait for it to
 		// finish draining active requests before closing their database.
 		<-shutdownDone
+		// Stop the lifecycle notifier before the DB closes: a tick in flight
+		// could otherwise complete an external Slack send and then fail the
+		// delivery-row insert against the closed DB, re-sending the event
+		// after restart (the in-memory retry stash dies with the process).
+		s.stopLifecycleNotifier(10 * time.Second)
 		if closeErr := s.db.Close(); closeErr != nil {
 			return fmt.Errorf("close database: %w", closeErr)
 		}
@@ -401,6 +512,11 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/settings/github/test", s.withWebAdminAuth(s.handleGitHubAppTest))
 	mux.HandleFunc("/api/settings/model-auth/login", s.withWebAdminAuth(s.handleModelAuthLogin))
 	mux.HandleFunc("/api/settings/model-auth/login/{id}", s.withWebAdminAuth(s.handleModelAuthLoginStatus))
+	// Provider-agnostic on purpose (the handler resolves lifecycle.via and
+	// renders through the PayloadRenderer interface), so the route must not
+	// bake in "slack": a second provider would inherit a misleading URL or
+	// force a breaking rename.
+	mux.HandleFunc("/api/notifications/test", s.withWebAdminAuth(s.handleNotificationTest))
 
 	// Template store
 	mux.HandleFunc("/api/templates", s.withWebAuth(s.handleTemplates))
@@ -437,9 +553,10 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/workspaces/{name}/workflows", s.withAdminForMethods(s.handleWorkspaceWorkflowsList, http.MethodPost))
 	mux.HandleFunc("/api/workspaces/{workspace}/workflows/{workflow}", s.withAdminForMethods(s.handleWorkspaceWorkflowDetail, http.MethodPatch))
 	mux.HandleFunc("/api/workspaces/{workspace}/workflows/{workflow}/trigger", s.withAuth(s.handleWorkspaceWorkflowTrigger))
-	mux.HandleFunc("/api/workspaces/{workspace}/workflows/{workflow}/cron/trigger", s.withAuth(s.handleCronWorkflowTrigger)) // POST manual trigger
-	mux.HandleFunc("/api/workspaces/{workspace}/workflows/{workflow}/cron/runs", s.withAuth(s.handleCronWorkflowRuns))       // GET run history
-	mux.HandleFunc("/api/workspaces/{workspace}/workflows/{workflow}/cron/next", s.withAuth(s.handleCronWorkflowNextRun))    // GET next scheduled run
+	mux.HandleFunc("/api/workspaces/{workspace}/workflows/{workflow}/cron/trigger", s.withAuth(s.handleCronWorkflowTrigger))  // POST manual trigger
+	mux.HandleFunc("/api/workspaces/{workspace}/workflows/{workflow}/cron/runs", s.withAuth(s.handleCronWorkflowRuns))        // GET run history
+	mux.HandleFunc("/api/workspaces/{workspace}/workflows/{workflow}/cron/runs/{runId}", s.withAuth(s.handleCronWorkflowRun)) // GET single run
+	mux.HandleFunc("/api/workspaces/{workspace}/workflows/{workflow}/cron/next", s.withAuth(s.handleCronWorkflowNextRun))     // GET next scheduled run
 	mux.HandleFunc("/api/workspaces/{workspace}/secrets", s.withAdminForMethods(s.handleWorkspaceSecretsCRUD, http.MethodPut, http.MethodPost, http.MethodDelete))
 	mux.HandleFunc("/api/workspaces/{workspace}/github-apps", s.withAdminForMethods(s.handleWorkspaceGitHubAppsCRUD, http.MethodPut, http.MethodPost, http.MethodDelete))
 	mux.HandleFunc("/api/workspaces/{workspace}/issue-trackers", s.withAdminForMethods(s.handleWorkspaceIssueTrackersCRUD, http.MethodPut, http.MethodPost, http.MethodDelete))
@@ -1926,7 +2043,7 @@ func (s *Server) handleClawDetail(w http.ResponseWriter, r *http.Request) {
 			if providerID != "" {
 				s.terminateVM(provider, providerID)
 			}
-			_, _ = s.db.Exec(`DELETE FROM messages WHERE claw_id = ?`, clawID)
+			// Keep messages (including agent activity logs) for post-mortem diagnosis.
 			_, _ = s.db.Exec(`DELETE FROM claw_prs WHERE claw_id = ?`, clawID)
 		}()
 		// Promote any pending claws now that a slot is free
@@ -2056,6 +2173,7 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 			cc.mu.Lock()
 			cc.lastUserMessageAt = time.Now()
 			cc.unresponsiveWarnedAt = time.Time{}
+			cc.idleNotifiedAt = time.Time{}
 			busy := cc.isBusyLocked()
 			cc.mu.Unlock()
 			if !busy {
@@ -2588,7 +2706,15 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 
 	var noProgressPaused bool
 	_ = s.db.QueryRow(`SELECT COALESCE(no_progress_paused, 0) != 0 FROM claws WHERE id=?`, clawID).Scan(&noProgressPaused)
-	cc := &clawConn{id: clawID, tenantID: tenantID, conn: conn, gatewayReady: gatewayReadyBool(rp.GatewayReady), tags: registrationTags, lastUserMessageAt: time.Now(), lastStatusAt: time.Now(), noProgressPaused: noProgressPaused}
+	// A bridge-process restart tears down the main channel, so the old clawConn
+	// (and its lastTurnFinishedAt) is usually gone by the time the new bridge
+	// registers. Seed the post-restart resume window from the last claw
+	// response — a turn interrupted by the crash was flushed as an
+	// "[interrupted]" claw message at disconnect, so its created_at marks the
+	// turn end closely enough for autoResumeRecentTurnWindow.
+	var lastClawMsgAt time.Time
+	_ = s.db.QueryRow(`SELECT created_at FROM messages WHERE claw_id=? AND role='claw' ORDER BY created_at DESC LIMIT 1`, clawID).Scan(&lastClawMsgAt)
+	cc := &clawConn{id: clawID, tenantID: tenantID, conn: conn, gatewayReady: gatewayReadyBool(rp.GatewayReady), tags: registrationTags, lastUserMessageAt: time.Now(), lastStatusAt: time.Now(), connectedAt: time.Now(), noProgressPaused: noProgressPaused}
 	s.mu.Lock()
 	if s.gatewayRestartCounts != nil {
 		cc.gatewayRestartCount = s.gatewayRestartCounts[clawID]
@@ -2597,7 +2723,11 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 		old.mu.RLock()
 		cc.statusConn = old.statusConn
 		cc.lastStatusAt = old.lastStatusAt
+		cc.lastTurnFinishedAt = old.lastTurnFinishedAt
 		old.mu.RUnlock()
+	}
+	if cc.lastTurnFinishedAt.IsZero() {
+		cc.lastTurnFinishedAt = lastClawMsgAt
 	}
 	s.claws[clawID] = cc
 	s.mu.Unlock()
@@ -2722,6 +2852,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 					var shouldWake bool
 					var shouldWarnContext bool
 					var shouldEscalateGateway bool
+					var shouldAutoResume bool
 					var prevUsage int
 					s.mu.Lock()
 					if cc, ok := s.claws[clawID]; ok {
@@ -2732,13 +2863,33 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 						if s.gatewayRestartCounts == nil {
 							s.gatewayRestartCounts = make(map[string]int)
 						}
-						lastRestartCount := s.gatewayRestartCounts[clawID]
-						// Any change signals a restart: an increase is an in-process
-						// gateway restart; a decrease means the bridge process itself
-						// was relaunched and its counter reset.
-						if hb.RestartCount != lastRestartCount {
+						lastRestartCount, restartCountSeen := s.gatewayRestartCounts[clawID]
+						// The map is in-memory only: the first heartbeat after a hub
+						// restart carries a historical restart_count, not a fresh
+						// restart. Record it as a baseline instead of treating it as
+						// a restart, or every busy claw would get a spurious
+						// "session was lost" resume after each hub deploy.
+						if !restartCountSeen {
+							s.gatewayRestartCounts[clawID] = hb.RestartCount
+						} else if hb.RestartCount != lastRestartCount {
+							// Any change signals a restart: an increase is an in-process
+							// gateway restart; a decrease means the bridge process itself
+							// was relaunched and its counter reset.
 							log.Printf("[heartbeat] %s (%s): agent process restarted (restart_count=%d)", rp.Name, clawID[:8], hb.RestartCount)
 							s.gatewayRestartCounts[clawID] = hb.RestartCount
+							if s.autoResumeRestartCounts == nil {
+								s.autoResumeRestartCounts = make(map[string]int)
+							}
+							turnOpenOrRecent := !cc.streamingStartedAt.IsZero() || cc.awaitingResponse ||
+								(!cc.lastTurnFinishedAt.IsZero() && time.Since(cc.lastTurnFinishedAt) < autoResumeRecentTurnWindow)
+							// Existence-aware lookup: a bridge relaunch resets its counter
+							// to 0, which equals the zero value of an absent map entry — a
+							// plain read would skip the resume for that first relaunch.
+							lastResumedCount, resumeRecorded := s.autoResumeRestartCounts[clawID]
+							if turnOpenOrRecent && (!resumeRecorded || lastResumedCount != hb.RestartCount) {
+								s.autoResumeRestartCounts[clawID] = hb.RestartCount
+								shouldAutoResume = true
+							}
 						}
 						cc.gatewayRestartCount = s.gatewayRestartCounts[clawID]
 						// Promote from 'starting' to 'connected' once gateway is ready.
@@ -2796,6 +2947,9 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 					}
 					s.mu.Unlock()
 					s.heartbeatWorkflowVolumeLeases(clawID)
+					if shouldAutoResume {
+						go s.enqueueRestartResume(clawID, hb.RestartCount)
+					}
 					if shouldEscalateGateway {
 						// Re-read the claw state before escalating: idle/completed claws
 						// remain connected intentionally, and bootstrapping claws are
@@ -2807,7 +2961,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 						warnCC := s.claws[clawID]
 						s.mu.RUnlock()
 						if warnCC != nil {
-							go s.injectHubMessage(ctx, warnCC, "[hub] Context window is nearly full. Summarize your progress briefly and send [DONE] with any PR URL, or ask the user what to do next.")
+							go s.sendStreamingNudge(warnCC, contextNearlyFullNudge)
 						}
 					}
 					if shouldWake {
@@ -2824,7 +2978,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 							time.Since(cc.streamingStartedAt) > 12*time.Minute {
 							cc.streamingTimeoutSent = true
 							cc.mu.Unlock()
-							go s.injectHubMessage(ctx, cc, "[hub] Your current response has been running for over 12 minutes. Please wrap up and send your response.")
+							go s.sendStreamingNudge(cc, streamingTimeoutNudge)
 						} else {
 							cc.mu.Unlock()
 						}
@@ -2880,8 +3034,6 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 						cc.mu.Lock()
 						if cc.streamingMsgID == "" {
 							cc.streamingMsgID = uuid.New().String()
-							cc.streamingTimeoutSent = false
-							cc.contextWarningSent = false
 						}
 						if cc.streamingStartedAt.IsZero() {
 							cc.streamingStartedAt = time.Now()
@@ -2927,6 +3079,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 				cc.finishTurnLocked()
 				cc.forcedFinishCount = 0
 				cc.mu.Unlock()
+				s.deleteStaleWatchdogNags(clawID)
 				// Drop empty messages — never store or broadcast
 				if strings.TrimSpace(hm.Content) == "" {
 					// Clear typing indicator first — always clear even if no queued messages
@@ -3314,6 +3467,7 @@ func (s *Server) handleUserWS(w http.ResponseWriter, r *http.Request) {
 				cc.mu.Lock()
 				cc.lastUserMessageAt = time.Now()
 				cc.unresponsiveWarnedAt = time.Time{}
+				cc.idleNotifiedAt = time.Time{}
 				busy := cc.isBusyLocked()
 				cc.mu.Unlock()
 				if !busy {
@@ -3730,10 +3884,14 @@ docker --version`); err != nil {
 					log.Printf("[daytona] warning: skipping invalid flake path %q: %v", name, err)
 					continue
 				}
-				// Write to the *staged* workspace dir (~ /workspace) that the bridge's
-				// hasWorkspaceFlake() and setupFlakeEnvironmentSync() inspect.
-				// This ensures early flake staging is visible for devShell wrapper creation
-				// before bridge starts. (syncStaged... later copies it into ~/.openclaw/workspace)
+				// Write to the *staged* workspace dir (~/workspace) where flake
+				// tooling looks for the devShell definition.
+				// NOTE: on Daytona the bridge runs WITHOUT ELASTICCLAW_BOOTSTRAP (see
+				// daytonaAsyncBridgeCommand), so runBootstrap -- and therefore
+				// hasWorkspaceFlake(), setupFlakeEnvironmentSync() and
+				// syncStagedWorkspaceToOpenClawWorkspace() -- never runs here. Nothing
+				// copies this staged file into ~/.openclaw/workspace; flake setup for
+				// Daytona is hub-driven. Do not assume bridge-side consumption.
 				targetPath := "/home/daytona/workspace/" + safeName
 				targetDir := path.Dir(targetPath)
 				// Base64-encode the user-controlled flake content, then use heredoc *only* for the
@@ -3943,11 +4101,11 @@ cp "$BIN" /tmp/claw-bridge.download && chmod +x /tmp/claw-bridge.download && mv 
 	if err := json.Unmarshal([]byte(filesJSON), &templateFiles); err != nil {
 		return fmt.Errorf("parse template_files for final write %s: %w", clawID, err)
 	}
+	writtenWorkspaceFiles := map[string]string{}
 	if len(templateFiles) > 0 {
 		templateFiles = workspaceTemplateFiles(templateFiles)
-		for name, content := range templateFiles {
-			name := name
-			content := content
+		for _, name := range sortedWorkspaceFileNames(templateFiles) {
+			content := templateFiles[name]
 			// Skip flake files here: they were staged early (with collision-resistant
 			// delimiter) specifically for the devShell contract. Rewriting them with
 			// a fixed delimiter would re-introduce the heredoc injection risk.
@@ -3956,20 +4114,22 @@ cp "$BIN" /tmp/claw-bridge.download && chmod +x /tmp/claw-bridge.download && mv 
 			}
 			safeName, err := cleanWorkspaceFilePath(name)
 			if err != nil {
-				log.Printf("[daytona] warning: skipping invalid template file path %q: %v", name, err)
-				continue
+				// Fail closed: a workspace missing files it declares (e.g. scripts/
+				// referenced by workflow commands) fails every stage at runtime.
+				return fmt.Errorf("invalid workspace file path %q: %w", name, err)
 			}
-			// Write to the *staged* workspace dir (~/workspace) so that syncStagedWorkspaceToOpenClawWorkspace
-			// (run inside bridge) will copy the injected files (e.g. CONTEXT.md for GitHub Issues/Linear factories)
-			// into ~/.openclaw/workspace. Direct writes to ~/.openclaw/workspace get stripped by the managed-files removal in sync.
-			targetPath := "/home/daytona/workspace/" + safeName
+			// Write straight into the LIVE workspace. The Daytona bridge is started
+			// WITHOUT ELASTICCLAW_BOOTSTRAP (see daytonaAsyncBridgeCommand), so
+			// runBootstrap -- and with it syncStagedWorkspaceToOpenClawWorkspace --
+			// never runs on this provider: nothing would ever copy staged files over.
+			// Mirrors Replicated, which also writes final files after bootstrap.
+			targetPath := daytonaWorkspaceFilePath(safeName)
 			targetDir := path.Dir(targetPath)
 			// Use collision-resistant delimiter (same strategy as early flake staging)
 			// to protect against content containing a fixed token.
 			raw := make([]byte, 8)
 			if _, err := rand.Read(raw); err != nil {
-				log.Printf("[daytona] warning: rand for write delim %s: %v", name, err)
-				continue
+				return fmt.Errorf("random delimiter for workspace file %s: %w", name, err)
 			}
 			delim := "ELASTICCLAW_FILE_" + hex.EncodeToString(raw)
 			writeCmd := fmt.Sprintf(
@@ -3977,11 +4137,15 @@ cp "$BIN" /tmp/claw-bridge.download && chmod +x /tmp/claw-bridge.download && mv 
 %s
 %s`,
 				shellQuote(targetDir), shellQuote(targetPath), delim, content, delim)
-			if err := exec("write "+name, 15*time.Second, writeCmd); err != nil {
-				log.Printf("[daytona] warning: failed to write %s: %v", name, err)
+			if daytonaExecutableWorkspaceFile(safeName) {
+				writeCmd += fmt.Sprintf("\nchmod +x %s", shellQuote(targetPath))
 			}
+			if err := exec("write "+name, 15*time.Second, writeCmd); err != nil {
+				return fmt.Errorf("write workspace file %s: %w", name, err)
+			}
+			writtenWorkspaceFiles[safeName] = content
 		}
-		log.Printf("[daytona] template files written for claw %s", clawID)
+		log.Printf("[daytona] %d workspace files written for claw %s", len(writtenWorkspaceFiles), clawID)
 	}
 
 	// Step 5: GitHub credential helper (if GitHub Apps configured)
@@ -4138,6 +4302,26 @@ gh auth status`
 
 	if err := s.restoreCheckpointToDaytona(ctx, clawID, instanceID, p); err != nil {
 		return fmt.Errorf("restore checkpoint: %w", err)
+	}
+
+	// Workspace file gate: every file the workspace declares (including nested
+	// scripts/**) must exist before the agent's first turn, otherwise workflow
+	// commands fail with "can't open file" on every stage.
+	if len(writtenWorkspaceFiles) > 0 {
+		s.setBootstrapStatus(clawID, "Verifying workspace files")
+		filesScript := daytonaWorkspaceFilesReadinessCommand(writtenWorkspaceFiles)
+		filesResult, filesErr := p.ExecWithTimeout(ctx, instanceID, []string{"bash", "-c", filesScript}, 30*time.Second)
+		if filesErr != nil {
+			diag := fmt.Sprintf("Workspace files verification failed: %v", filesErr)
+			s.setBootstrapStatusWithDiagnostic(clawID, "Workspace incomplete", diag)
+			return fmt.Errorf("workspace files readiness: %w", filesErr)
+		}
+		if filesResult.ExitCode != 0 {
+			diag := fmt.Sprintf("Workspace files incomplete. %s", sanitizeBootstrapOutput(filesResult.Stdout))
+			s.setBootstrapStatusWithDiagnostic(clawID, "Workspace incomplete", diag)
+			return fmt.Errorf("workspace files incomplete (exit %d): %s", filesResult.ExitCode, sanitizeBootstrapOutput(filesResult.Stdout))
+		}
+		log.Printf("[daytona] workspace files verified for claw %s", clawID)
 	}
 
 	// Final workspace readiness gate: verify every configured repository is
@@ -4383,6 +4567,52 @@ if pgrep -af %s >/dev/null 2>&1; then
 fi
 echo "openclaw-install-status=missing"
 tail -n 120 "$LOG" 2>/dev/null || true`, shellQuote("openclaw@"+version))
+}
+
+// daytonaLiveWorkspaceDir is the workspace the OpenClaw agent actually runs in.
+const daytonaLiveWorkspaceDir = "/home/daytona/.openclaw/workspace"
+
+func sortedWorkspaceFileNames(files map[string]string) []string {
+	names := make([]string, 0, len(files))
+	for name := range files {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// daytonaExecutableWorkspaceFile reports whether a workspace file should be
+// written with the executable bit (scripts are frequently invoked directly).
+func daytonaExecutableWorkspaceFile(name string) bool {
+	ext := strings.ToLower(path.Ext(name))
+	return ext == ".sh" || ext == ".py"
+}
+
+// daytonaWorkspaceFilePath returns the sandbox path a workspace file must be
+// written to. The write loop and the readiness gate share it so they can never
+// disagree about the target, and a regression back to the staged
+// /home/daytona/workspace dir is caught by unit tests instead of at runtime.
+func daytonaWorkspaceFilePath(name string) string {
+	return daytonaLiveWorkspaceDir + "/" + strings.TrimPrefix(name, "/")
+}
+
+// daytonaWorkspaceFilesReadinessCommand verifies every workspace file landed in
+// the live workspace, including nested paths such as scripts/review-loop/x.md.
+func daytonaWorkspaceFilesReadinessCommand(files map[string]string) string {
+	if len(files) == 0 {
+		return "true"
+	}
+	var b strings.Builder
+	b.WriteString("set -e\n")
+	for _, name := range sortedWorkspaceFileNames(files) {
+		b.WriteString("test -f ")
+		b.WriteString(shellQuote(daytonaWorkspaceFilePath(name)))
+		b.WriteString(" || { echo ")
+		b.WriteString(shellQuote("missing workspace file: " + name))
+		b.WriteString("; exit 1; }\n")
+	}
+	b.WriteString("echo 'workspace files verified'\n")
+	return b.String()
 }
 
 func daytonaPrepareBridgeCommand() string {
@@ -5633,6 +5863,7 @@ func (s *Server) checkClawStatus() {
 		if !streamingStartedAt.IsZero() && now.Sub(streamingStartedAt) > cfg.busyTurnMax {
 			var content, messageID string
 			var escalate bool
+			finished := false
 			cc.mu.Lock()
 			if !cc.streamingStartedAt.IsZero() && now.Sub(cc.streamingStartedAt) > cfg.busyTurnMax {
 				if cc.streamingBuf.Len() > 0 {
@@ -5643,10 +5874,14 @@ func (s *Server) checkClawStatus() {
 					}
 				}
 				cc.finishTurnLocked()
+				finished = true
 				cc.forcedFinishCount++
 				escalate = cc.forcedFinishCount >= 2
 			}
 			cc.mu.Unlock()
+			if finished {
+				s.deleteStaleWatchdogNags(id)
+			}
 			if content != "" {
 				_, _ = s.db.Exec(`INSERT INTO messages(id,claw_id,tenant_id,role,content,created_at,delivered_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET content=excluded.content, delivered_at=excluded.delivered_at`, messageID, id, tenantID, "claw", content, now, now)
 				s.broadcastToUsers(tenantID, types.WSMessage{Type: "message", Payload: types.HubMessage{ID: messageID, ClawID: id, TenantID: tenantID, Role: "claw", Content: content, CreatedAt: now}})
@@ -5664,6 +5899,15 @@ func (s *Server) checkClawStatus() {
 		if idle {
 			s.sendNextQueuedMessage(cc)
 		}
+
+		// Agent-idle detection runs after the queued drain (a successful
+		// delivery just above marks the claw busy, which correctly suppresses
+		// the alert; a FAILED delivery aborts the reservation without
+		// touching the idle clock, so a wedged socket still alerts) and
+		// before the recent-user-message skip below, which is about status
+		// broadcasts, not idleness. Riding this 2-minute tick means a
+		// threshold of T fires between T and T+2m — deliberately not tightened.
+		s.checkAgentIdle(now, id, cc)
 
 		// If user sent a message in the last 2 minutes, skip status broadcast
 		if now.Sub(lastUserMessageAt) < 2*time.Minute {
@@ -5934,7 +6178,7 @@ func (s *Server) sendWakeMessage(cc *clawConn, clawID string) {
 	wakeMsg.Content = wakeContent
 	if err := wsjson.Write(context.Background(), cc.conn, types.WSMessage{Type: "message", Payload: wakeMsg}); err != nil {
 		cc.mu.Lock()
-		cc.finishTurnLocked()
+		cc.abortTurnLocked()
 		cc.mu.Unlock()
 	}
 
@@ -5960,7 +6204,7 @@ func (s *Server) sendInitialPlanInstruction(cc *clawConn, clawID string) {
 	cc.mu.Unlock()
 	if !s.insertSystemMarker(clawID, cc.tenantID, initialPlanRequiredMarker) {
 		cc.mu.Lock()
-		cc.finishTurnLocked()
+		cc.abortTurnLocked()
 		cc.mu.Unlock()
 		return
 	}
@@ -5974,7 +6218,7 @@ func (s *Server) sendInitialPlanInstruction(cc *clawConn, clawID string) {
 	}
 	if err := wsjson.Write(context.Background(), cc.conn, types.WSMessage{Type: "message", Payload: msg}); err != nil {
 		cc.mu.Lock()
-		cc.finishTurnLocked()
+		cc.abortTurnLocked()
 		cc.mu.Unlock()
 	}
 }
@@ -7602,12 +7846,131 @@ func (s *Server) injectHubMessage(_ context.Context, cc *clawConn, text string) 
 	s.injectHubMessageByID(cc.id, text)
 }
 
+// deleteStaleWatchdogNags removes nudges that targeted the just-ended turn.
+func (s *Server) deleteStaleWatchdogNags(clawID string) {
+	res, err := s.db.Exec(`DELETE FROM messages WHERE claw_id=? AND role='hub' AND delivered_at IS NULL AND content IN (?,?)`, clawID, streamingTimeoutNudge, contextNearlyFullNudge)
+	if err != nil {
+		log.Printf("[watchdog] delete stale nags for %s: %v", shortID(clawID), err)
+		return
+	}
+	if n, _ := res.RowsAffected(); n > 0 {
+		log.Printf("[watchdog] dropped %d stale watchdog nag(s) for %s at turn end", n, shortID(clawID))
+	}
+}
+
+const restartResumePrefix = "[hub] Agent process restart detected."
+
+func (s *Server) enqueueRestartResume(clawID string, restartCount int) {
+	var status, issueTitle, linearID, githubID, shortcutID, jiraID string
+	var bootstrapOK int
+	err := s.db.QueryRow(`SELECT status, COALESCE(bootstrap_ok,0), COALESCE(issue_title,''), COALESCE(linear_issue_id,''), COALESCE(github_issue_id,''), COALESCE(shortcut_story_id,''), COALESCE(jira_issue_id,'') FROM claws WHERE id=?`, clawID).Scan(&status, &bootstrapOK, &issueTitle, &linearID, &githubID, &shortcutID, &jiraID)
+	if err != nil {
+		return
+	}
+	if status != "connected" || bootstrapOK == 0 {
+		log.Printf("[watchdog] skipping auto-resume for %s: status=%s bootstrap_ok=%d", shortID(clawID), status, bootstrapOK)
+		return
+	}
+	var issueRef string
+	switch {
+	case linearID != "":
+		issueRef = "Linear issue " + linearID
+	case githubID != "":
+		issueRef = "GitHub issue " + githubID
+	case shortcutID != "":
+		issueRef = "Shortcut story " + shortcutID
+	case jiraID != "":
+		issueRef = "Jira issue " + jiraID
+	}
+	var b strings.Builder
+	b.WriteString(restartResumePrefix)
+	b.WriteString(" Your previous session was lost, so you have no memory of the earlier conversation. The workspace on disk is intact, including your repositories under ~/workspace.")
+	if issueTitle != "" || issueRef != "" {
+		b.WriteString("\n\nAssigned task: ")
+		if issueTitle != "" {
+			b.WriteString(issueTitle)
+		}
+		if issueRef != "" {
+			if issueTitle != "" {
+				b.WriteString(" (")
+				b.WriteString(issueRef)
+				b.WriteString(")")
+			} else {
+				b.WriteString(issueRef)
+			}
+		}
+		b.WriteString(".")
+	}
+	b.WriteString("\n\nBefore anything else, recover your state from the workspace: run git status and git log --oneline -15, check which branch you are on and whether there are uncommitted changes or an open PR for it. Then resume the task from where the workspace shows it stopped. Do not start over and do not discard existing work.")
+	// Append a zero-width marker carrying the restart_count so that two resume
+	// prompts for two different restarts are never treated as the identical
+	// pending message by injectMessage's dedup (change 2) — each restart is a
+	// distinct incident even when the rest of the wording is unchanged.
+	b.WriteString(fmt.Sprintf("\n\n<!-- restart:%d -->", restartCount))
+	log.Printf("[watchdog] enqueueing post-restart resume for %s", shortID(clawID))
+	s.injectHubMessageByID(clawID, b.String())
+}
+
+func (s *Server) sendStreamingNudge(cc *clawConn, text string) {
+	cc.mu.RLock()
+	sc, clawID, tenantID := cc.statusConn, cc.id, cc.tenantID
+	turnOpen := cc.isBusyLocked()
+	cc.mu.RUnlock()
+	// The nudge targets the in-flight turn. This runs on a goroutine, so the
+	// turn may have ended (and deleteStaleWatchdogNags already run) before we
+	// get here — queueing now would deliver the stale nudge as the next
+	// turn's prompt. Drop it instead.
+	if !turnOpen {
+		log.Printf("[watchdog] dropping nudge for %s: turn already ended", shortID(clawID))
+		return
+	}
+	if sc == nil {
+		s.injectHubMessageByID(clawID, text)
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := wsjson.Write(ctx, sc, types.WSMessage{Type: "nudge", Payload: mustJSONRaw(map[string]string{"claw_id": clawID, "content": text})}); err != nil {
+		// Up to 5s may have elapsed; re-check before falling back to the queue.
+		cc.mu.RLock()
+		turnOpen = cc.isBusyLocked()
+		cc.mu.RUnlock()
+		if !turnOpen {
+			log.Printf("[watchdog] dropping nudge for %s: turn ended during status-channel send", shortID(clawID))
+			return
+		}
+		log.Printf("[watchdog] nudge over status channel for %s failed, queueing: %v", shortID(clawID), err)
+		s.injectHubMessageByID(clawID, text)
+		return
+	}
+	msg := types.HubMessage{ID: uuid.New().String(), ClawID: clawID, TenantID: tenantID, Role: "hub", Content: text, Format: "pre", CreatedAt: now()}
+	_, _ = s.db.Exec(`INSERT INTO messages(id,claw_id,tenant_id,role,content,format,created_at,delivered_at) VALUES(?,?,?,?,?,?,?,?)`, msg.ID, msg.ClawID, msg.TenantID, msg.Role, msg.Content, msg.Format, msg.CreatedAt, msg.CreatedAt)
+	s.broadcastToUsers(tenantID, types.WSMessage{Type: "message", Payload: msg})
+}
+
 // sendNextQueuedMessage delivers the oldest pending message if the claw is idle.
 func (s *Server) sendNextQueuedMessage(cc *clawConn) {
 	cc.mu.Lock()
 	if cc.isBusyLocked() || cc.deliveryInFlight || cc.noProgressPaused {
 		cc.mu.Unlock()
 		return
+	}
+	// If the previous turn finished very recently, pause briefly before
+	// admitting the next message. This avoids the OpenClaw prompt-lock release
+	// race where a second message sent too soon after a turn ends corrupts the
+	// session file. See openclaw/openclaw#113194.
+	if !cc.lastTurnFinishedAt.IsZero() {
+		if elapsed := time.Since(cc.lastTurnFinishedAt); elapsed < interTurnCooldown {
+			cc.mu.Unlock()
+			time.Sleep(interTurnCooldown - elapsed)
+			cc.mu.Lock()
+			// Re-check the guard after waking up; the claw may have become busy
+			// or another delivery may have started while we slept.
+			if cc.isBusyLocked() || cc.deliveryInFlight || cc.noProgressPaused {
+				cc.mu.Unlock()
+				return
+			}
+		}
 	}
 	// Claim the in-flight guard before querying so a concurrent caller cannot
 	// read the same pending row and re-deliver it after we mark it delivered.
@@ -7658,7 +8021,7 @@ func (s *Server) sendNextQueuedMessage(cc *clawConn) {
 	err = wsjson.Write(ctx, conn, types.WSMessage{Type: "message", Payload: msg})
 	if err != nil {
 		cc.mu.Lock()
-		cc.finishTurnLocked()
+		cc.abortTurnLocked()
 		cc.mu.Unlock()
 		log.Printf("[hub] failed to deliver pending message to %s: %v", shortID(clawID), err)
 		return
@@ -7670,6 +8033,7 @@ func (s *Server) sendNextQueuedMessage(cc *clawConn) {
 	cc.mu.Lock()
 	cc.lastUserMessageAt = time.Now()
 	cc.unresponsiveWarnedAt = time.Time{}
+	cc.idleNotifiedAt = time.Time{}
 	cc.mu.Unlock()
 
 	// Signal to UI that agent is working
