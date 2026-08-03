@@ -350,6 +350,60 @@ func formatDependencyUpdateFailure(result *pipelineRunResult) string {
 	return "Dependency update step failed: " + combined
 }
 
+// formatDependencyUpdateSummary returns a concise, human-readable summary of a
+// successful dependency update run based on the JSON result document emitted by
+// the dependency update script. It is surfaced in the web UI so users can see
+// what the step did without reading the full structured output.
+func formatDependencyUpdateSummary(result *pipelineRunResult) string {
+	if result == nil {
+		return "Dependency updates completed"
+	}
+	combined := strings.TrimSpace(result.Stdout)
+	if combined == "" {
+		return "Dependency updates completed"
+	}
+
+	var output struct {
+		Ecosystems []string `json:"ecosystems"`
+		Manifests  []struct {
+			Ecosystem string `json:"ecosystem"`
+			Path      string `json:"path"`
+		} `json:"manifests"`
+		Updates []struct {
+			Applied bool `json:"applied"`
+		} `json:"updates"`
+		FilesChanged []string `json:"files_changed"`
+	}
+	if doc := lastJSONObject(combined); doc != nil {
+		_ = json.Unmarshal(doc, &output)
+	}
+
+	applied := 0
+	skipped := 0
+	for _, update := range output.Updates {
+		if update.Applied {
+			applied++
+		} else {
+			skipped++
+		}
+	}
+
+	parts := []string{"Dependency updates completed"}
+	if len(output.Ecosystems) > 0 {
+		parts = append(parts, fmt.Sprintf("%d ecosystem(s)", len(output.Ecosystems)))
+	}
+	if len(output.Manifests) > 0 {
+		parts = append(parts, fmt.Sprintf("%d manifest(s)", len(output.Manifests)))
+	}
+	if applied > 0 || skipped > 0 {
+		parts = append(parts, fmt.Sprintf("%d applied, %d skipped", applied, skipped))
+	}
+	if len(output.FilesChanged) > 0 {
+		parts = append(parts, fmt.Sprintf("%d file(s) changed", len(output.FilesChanged)))
+	}
+	return strings.Join(parts, ": ")
+}
+
 // lastJSONObject returns the last valid JSON object in s, or nil if none is found.
 // It is used to extract the dependency update result document from output that may
 // contain non-JSON banners or log lines before or after the JSON.
@@ -398,6 +452,7 @@ def enabled_ecosystems():
 
 ECOSYSTEMS = enabled_ecosystems()
 result["ecosystems"] = sorted(ECOSYSTEMS)
+print(f"Starting dependency updates for ecosystem(s): {', '.join(result['ecosystems'])}", file=sys.stderr)
 
 def rel(path):
     return path.relative_to(ROOT).as_posix()
@@ -437,6 +492,10 @@ def update_record(ecosystem, name, from_version, to_version, kind, applied, grou
     if skipped_reason:
         record["skipped_reason"] = skipped_reason
     result["updates"].append(record)
+    if applied:
+        print(f"Applying {ecosystem} update: {name} {from_version} -> {to_version}", file=sys.stderr)
+    else:
+        print(f"Skipping {ecosystem} update: {name} ({skipped_reason})", file=sys.stderr)
 
 def version_parts(version):
     version = str(version or "").strip().lstrip("v")
@@ -565,9 +624,11 @@ def collect_files(manifests):
 
 manifests = discover()
 result["manifests"] = manifests
+print(f"Discovered {len(manifests)} manifest(s)", file=sys.stderr)
 before = file_snapshot(collect_files(manifests))
 
 for manifest in manifests:
+    print(f"Processing {manifest['ecosystem']} manifest {manifest['path']}", file=sys.stderr)
     manifest_path = ROOT / manifest["path"]
     cwd = manifest_path.parent
 
@@ -653,6 +714,7 @@ for manifest in manifests:
                 had_failure = True
 
 result["files_changed"] = changed_files(before)
+print(f"Dependency update complete: {len(result['updates'])} update(s), {len(result['files_changed'])} file(s) changed", file=sys.stderr)
 print(json.dumps(result, sort_keys=True))
 sys.exit(1 if had_failure else 0)
 `

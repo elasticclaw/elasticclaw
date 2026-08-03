@@ -6,7 +6,6 @@ import { mapApiMessage } from "@/lib/mappers"
 import type { Message } from "@/lib/types"
 
 const PAGE_SIZE = 50    // messages per page
-const MAX_WINDOW = 50   // max messages kept in DOM
 const ROLE_ORDER: Record<Message["role"], number> = {
   user: 0,
   hub: 1,
@@ -92,11 +91,7 @@ export function useWindowedMessages({ clawId, liveMessages }: UseWindowedMessage
       setHasOlder(hasOlderConversationPage(older, PAGE_SIZE))
       oldestTimestamp.current = oldestConversationCursor(older)
 
-      setHistoricalMsgs((prev) => {
-        const combined = [...older, ...prev]
-        // Cap window — drop from bottom if too large
-        return combined.length > MAX_WINDOW ? combined.slice(0, MAX_WINDOW) : combined
-      })
+      setHistoricalMsgs((prev) => [...older, ...prev])
 
       // Restore scroll position so prepend doesn't jump
       requestAnimationFrame(() => {
@@ -134,7 +129,7 @@ export function useWindowedMessages({ clawId, liveMessages }: UseWindowedMessage
       all.push(m)
     }
     all.sort(compareMessages)
-    return all.length > MAX_WINDOW ? all.slice(all.length - MAX_WINDOW) : all
+    return all
   })()
 
   return { messages, hasOlder, loadingOlder, loadOlder, scrollRef, onScroll }

@@ -1060,6 +1060,22 @@ func TestSanitizeActivityTextRedactsRepeatedSecretPrefixes(t *testing.T) {
 	}
 }
 
+func TestSanitizeActivityTextTruncatesAtReasonableLength(t *testing.T) {
+	input := strings.Repeat("a", 5000)
+	got := sanitizeActivityText(input)
+	if len(got) > 2005 {
+		t.Fatalf("sanitizeActivityText produced %d chars, want <= 2005: %q", len(got), got)
+	}
+	if !strings.HasSuffix(got, "...") {
+		t.Fatalf("sanitizeActivityText should suffix with ...: %q", got)
+	}
+	// Content under the limit should be preserved unchanged.
+	short := strings.Repeat("b", 1500)
+	if got := sanitizeActivityText(short); got != short {
+		t.Fatalf("sanitizeActivityText truncated short input: %q", got)
+	}
+}
+
 func TestPromoteInsufficientGatewayPairingPromotesReadOnlyDevice(t *testing.T) {
 	home := t.TempDir()
 	devicesDir := filepath.Join(home, ".openclaw", "devices")

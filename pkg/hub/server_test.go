@@ -125,8 +125,8 @@ func TestWorkspaceFlakeStageCommand(t *testing.T) {
 			name: "ignores invalid paths",
 			dir:  "/workspace",
 			files: map[string]string{
-				"flake.nix": "{}",
-				"../secret": "secret",
+				"flake.nix":   "{}",
+				"../secret":   "secret",
 				"/etc/passwd": "pw",
 			},
 			wantNames:   []string{"flake.nix"},
@@ -2501,5 +2501,55 @@ func TestMergeDockerContainerEnvPreservesWorkflowSecrets(t *testing.T) {
 	}
 	if got["ELASTICCLAW_CLAW_ID"] != "claw-123" {
 		t.Fatalf("ELASTICCLAW_CLAW_ID = %q, want managed claw ID", got["ELASTICCLAW_CLAW_ID"])
+	}
+}
+
+func TestAgentActivityGenericReasoningUpsertsButToolEventsInsert(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{ClawToken: "claw-token"}, "", "", "")
+	const clawID = "activity-storage-test"
+	conn := watchdogClaw(t, s, clawID)
+	_ = watchdogClawConn(t, s, clawID)
+
+	write := func(m types.WSMessage) {
+		if err := wsjson.Write(context.Background(), conn, m); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Send a burst of generic reasoning activity frames.
+	for i := 0; i < 5; i++ {
+		write(types.WSMessage{Type: "agent_activity", Payload: map[string]any{
+			"kind":    "activity",
+			"message": fmt.Sprintf("The user wants%s", strings.Repeat(".", i+1)),
+		}})
+	}
+	// Send two distinct tool events.
+	write(types.WSMessage{Type: "agent_activity", Payload: map[string]any{
+		"kind": "tool", "tool": "bash", "phase": "running", "command": "git status",
+	}})
+	write(types.WSMessage{Type: "agent_activity", Payload: map[string]any{
+		"kind": "tool", "tool": "bash", "phase": "completed", "command": "git status",
+	}})
+
+	eventuallyWatchdog(t, func() bool {
+		var n int
+		_ = db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND role='activity'`, clawID).Scan(&n)
+		return n >= 3
+	}, "activity rows persisted")
+
+	var total int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND role='activity'`, clawID).Scan(&total); err != nil {
+		t.Fatalf("count activity rows: %v", err)
+	}
+	if total != 3 {
+		t.Fatalf("activity rows = %d, want 3 (1 upserted reasoning + 2 tool events)", total)
+	}
+
+	var latestReasoning string
+	if err := db.QueryRow(`SELECT content FROM messages WHERE claw_id=? AND id=?`, clawID, "activity-stream:"+clawID).Scan(&latestReasoning); err != nil {
+		t.Fatalf("read upserted reasoning row: %v", err)
+	}
+	if !strings.Contains(latestReasoning, "The user wants") {
+		t.Fatalf("upserted reasoning content unexpected: %q", latestReasoning)
 	}
 }

@@ -705,3 +705,21 @@ func TestFormatDependencyUpdateFailureSkipsRetriedAttempts(t *testing.T) {
 		t.Fatalf("formatDependencyUpdateFailure = %q, want %q", got, want)
 	}
 }
+
+func TestFormatDependencyUpdateSummary(t *testing.T) {
+	stdout := `{"ecosystems":["go","npm"],"manifests":[{"ecosystem":"go","path":"go.mod"},{"ecosystem":"npm","path":"web/package.json"}],"updates":[{"applied":true,"name":"example.com/foo"},{"applied":true,"name":"left-pad"},{"applied":false,"name":"example.com/bar"}],"files_changed":["go.mod","go.sum","web/package-lock.json"]}`
+	result := &pipelineRunResult{ExitCode: 0, Stdout: stdout}
+	got := formatDependencyUpdateSummary(result)
+	want := "Dependency updates completed: 2 ecosystem(s): 2 manifest(s): 2 applied, 1 skipped: 3 file(s) changed"
+	if got != want {
+		t.Fatalf("formatDependencyUpdateSummary = %q, want %q", got, want)
+	}
+
+	if got := formatDependencyUpdateSummary(nil); got != "Dependency updates completed" {
+		t.Fatalf("nil result summary = %q, want %q", got, "Dependency updates completed")
+	}
+
+	if got := formatDependencyUpdateSummary(&pipelineRunResult{ExitCode: 0, Stdout: "not-json"}); got != "Dependency updates completed" {
+		t.Fatalf("non-JSON result summary = %q, want %q", got, "Dependency updates completed")
+	}
+}

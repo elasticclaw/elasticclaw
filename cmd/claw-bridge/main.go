@@ -20,6 +20,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -929,8 +930,9 @@ func sanitizeActivityText(value string) string {
 	for _, r := range replacers {
 		value = redactActivityPrefix(value, r.prefix, r.value)
 	}
-	if len(value) > 240 {
-		value = value[:237] + "..."
+	const maxActivityTextLen = 2000
+	if len(value) > maxActivityTextLen {
+		value = value[:maxActivityTextLen-3] + "..."
 	}
 	return value
 }
@@ -4150,12 +4152,28 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 	}
 	log.Printf("registered with hub as %s", clawID)
 
-	writeActivity := func(activity agentActivity) {
-		_ = writeHub(hubMsg{
-			Type:    "agent_activity",
-			Payload: mustJSON(cleanAgentActivity(activity)),
-		})
-	}
+	writeActivity := func() func(agentActivity) {
+		var (
+			lastPayload []byte
+			mu          sync.Mutex
+		)
+		return func(activity agentActivity) {
+			cleaned := cleanAgentActivity(activity)
+			payload := mustJSON(cleaned)
+			mu.Lock()
+			defer mu.Unlock()
+			if bytes.Equal(payload, lastPayload) {
+				return
+			}
+			if err := writeHub(hubMsg{
+				Type:    "agent_activity",
+				Payload: payload,
+			}); err != nil {
+				return
+			}
+			lastPayload = payload
+		}
+	}()
 
 	// Replay any queued entries that accumulated while we were disconnected.
 	// Completed replies/notices are delivered directly; only unprocessed inputs
