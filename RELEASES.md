@@ -4,13 +4,18 @@ This document defines how ElasticClaw is released, versioned, and supported. It 
 
 ## Versioning
 
-ElasticClaw follows [Semantic Versioning](https://semver.org/) (SemVer):
+ElasticClaw uses [Calendar Versioning](https://calver.org/) (CalVer) for release tags:
 
-- **MAJOR** (`X.0.0`): Incompatible changes that require user action when upgrading.
-- **MINOR** (`0.X.0`): New features, improvements, and non-breaking additions.
-- **PATCH** (`0.0.X`): Bug fixes, security fixes, and other backward-compatible corrections.
+- Tags are written as `YYYY.M.D`, where:
+  - `YYYY` is the four-digit year,
+  - `M` is the month without leading zeros,
+  - `D` is the day without leading zeros.
+- Same-day hotfixes use an additional `.MICRO` component: `YYYY.M.D.MICRO`.
+- Prerelease versions append a hyphen and label: `YYYY.M.D-<label>`.
 
-A version is written as `MAJOR.MINOR.PATCH`, for example `1.4.2`.
+Examples: `2026.7.7`, `2026.7.7.1`, `2026.7.7-rc1`.
+
+The version is embedded in release binaries and used by the install script and update checks.
 
 ## Release coordinator
 
@@ -28,9 +33,9 @@ Until the maintainer team grows, the Project Lead may act as the default release
 
 Releases are driven by content, not by a strict calendar:
 
-- **Patch releases** are made as needed for bug fixes and security fixes.
-- **Minor releases** are made roughly every 2–4 weeks, or when a meaningful set of features is ready.
-- **Major releases** are planned and announced in advance. They are used for breaking changes that cannot be avoided.
+- **Regular releases** are tagged with the current date (`YYYY.M.D`) when a meaningful set of changes is ready.
+- **Same-day hotfixes** add a `.MICRO` component (`YYYY.M.D.MICRO`) for urgent fixes to the same day's release.
+- **Prerelease versions** (`YYYY.M.D-<label>`) are used for testing or early access.
 
 There is no guarantee of a fixed schedule. The release coordinator decides when the quality bar is met.
 
@@ -38,9 +43,9 @@ There is no guarantee of a fixed schedule. The release coordinator decides when 
 
 Because users self-host ElasticClaw and manage their own upgrades, backward compatibility is important.
 
-- **Patch releases** must be backward compatible with the same minor version.
-- **Minor releases** should be backward compatible with the previous minor version. New features should be opt-in when possible.
-- **Major releases** may contain breaking changes. Breaking changes are documented in release notes with migration guidance.
+- **Hotfix releases** (`YYYY.M.D.MICRO`) on the same day are backward compatible with the base release (`YYYY.M.D`).
+- **Regular releases** should be backward compatible with the previous regular release. New features should be opt-in when possible.
+- **Breaking changes** are documented in release notes with migration guidance.
 
 Stability boundaries include, but are not limited to:
 
@@ -50,7 +55,7 @@ Stability boundaries include, but are not limited to:
 - Command-line interface behavior and flags.
 - Documented upgrade paths between releases.
 
-If a change unintentionally breaks compatibility, it is treated as a bug and fixed in a patch release.
+If a change unintentionally breaks compatibility, it is treated as a bug and fixed in a hotfix release.
 
 ## Supported versions
 
@@ -58,30 +63,30 @@ Because ElasticClaw is self-hosted and moving quickly, we encourage users to run
 
 | Version | Support status |
 |---------|----------------|
-| Latest release | Fully supported: bug fixes, security fixes, and patches |
-| Previous minor release | Security fixes and critical bug fixes for up to 6 months, or until the next major release, whichever is shorter |
+| Latest release | Fully supported: bug fixes, security fixes, and hotfixes |
+| Previous regular release | Security fixes and critical bug fixes for up to 6 months, or until the next breaking release, whichever is shorter |
 | Older releases | No longer supported |
 
-The release coordinator decides whether a fix is critical enough to backport to the previous minor release.
+The release coordinator decides whether a fix is critical enough to backport to the previous regular release.
 
 ## Release process
 
-1. **Prepare**: A maintainer proposes a release by reviewing merged changes and identifying the version bump.
-2. **Branch or tag**: Patch releases are typically tagged from the release branch or main. Minor and major releases may use a release branch when multiple stabilization commits are needed.
+1. **Prepare**: A maintainer proposes a release by reviewing merged changes and identifying the version tag.
+2. **Branch or tag**: Hotfixes are typically tagged from the release branch or main. Regular releases may use a release branch when multiple stabilization commits are needed.
 3. **Verify**: Run the full test suite, including container and integration tests. Ensure builds and release artifacts are produced successfully.
 4. **Release notes**: Write release notes summarizing changes, fixes, deprecations, and any breaking changes or migration steps.
-5. **Tag and publish**: Create a signed Git tag, publish binaries and images, and update any release metadata.
+5. **Tag and publish**: Create a signed Git tag using the CalVer format, publish binaries and images, and update any release metadata.
 6. **Announce**: Post the release in the project’s communication channels.
 
 ## Deprecation policy
 
-- Deprecations are announced in release notes at least one minor version before the feature is removed or changed incompatibly.
-- Deprecated features are removed only in a major release, unless the feature is experimental and explicitly marked as unstable.
+- Deprecations are announced in release notes at least one regular release before the feature is removed or changed incompatibly.
+- Deprecated features are removed only in a breaking release, unless the feature is experimental and explicitly marked as unstable.
 - Migration guidance is provided when a feature is deprecated and when it is removed.
 
 ## Security releases
 
-Security fixes are released as patch versions. See [SECURITY.md](SECURITY.md) for the vulnerability reporting process and coordinated disclosure policy.
+Security fixes are released as hotfix versions on the current CalVer date. See [SECURITY.md](SECURITY.md) for the vulnerability reporting process and coordinated disclosure policy.
 
 ## Changes to this policy
 
