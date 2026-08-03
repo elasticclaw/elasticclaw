@@ -1,5 +1,5 @@
 import SettingsSectionPage from "./settings-content"
-import { VALID_SECTIONS } from "./sections"
+import { LEGACY_ANALYTICS_SECTION, VALID_SECTIONS } from "./sections"
 
 /**
  * Static export path generation for the settings route.
@@ -22,11 +22,18 @@ import { VALID_SECTIONS } from "./sections"
  * unmatched routes, allowing the SPA to handle the path client-side).
  */
 export function generateStaticParams() {
+  // LEGACY_ANALYTICS_SECTION is pre-rendered as a redirect-only stub: the hub
+  // maps hard loads of /settings/{ws}/workspace-analytics to these files
+  // (settingsStaticSection in pkg/hub/server.go), and without them the SPA
+  // fallback would serve the root shell and the redirect to /analytics in
+  // settings-content.tsx could never run for bookmarks and shared links.
   return [
     { parts: [] },
     ...VALID_SECTIONS.map((section) => ({ parts: [section] })),
+    { parts: [LEGACY_ANALYTICS_SECTION] },
     { parts: ["_workspace"] },
     ...VALID_SECTIONS.map((section) => ({ parts: ["_workspace", section] })),
+    { parts: ["_workspace", LEGACY_ANALYTICS_SECTION] },
   ]
 }
 

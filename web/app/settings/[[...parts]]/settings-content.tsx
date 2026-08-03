@@ -1,20 +1,20 @@
 "use client"
 
 import { useParams, usePathname, useRouter } from "next/navigation"
-import React, { Suspense, useEffect, useState, useCallback, useRef } from "react"
+import React, { useEffect, useState, useCallback, useRef } from "react"
 import { getHubUrl } from "@/lib/hub-url"
 import { getAuthToken } from "@/lib/auth-storage"
-import { Cpu, Key, Github, ChevronLeft, Shield, Zap, Copy, Check, LayoutTemplate, Trash2, Lock, Sparkles, Send, RotateCcw, Eye, EyeOff, ExternalLink, AlertTriangle, X, CheckCircle2, Webhook, Stethoscope, ArrowRight, Wrench, GitBranch, ChevronDown, BarChart3 } from "lucide-react"
+import { Cpu, Key, Github, ChevronLeft, Shield, Zap, Copy, Check, LayoutTemplate, Trash2, Lock, Sparkles, Send, RotateCcw, Eye, EyeOff, ExternalLink, AlertCircle, AlertTriangle, X, CheckCircle2, Webhook, Stethoscope, ArrowRight, Wrench, GitBranch, ChevronDown } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Switch } from "@/components/ui/switch"
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog"
 import { cn } from "@/lib/utils"
 import Link from "next/link"
-import { VALID_SECTIONS, type Section } from "./sections"
+import { LEGACY_ANALYTICS_SECTION, VALID_SECTIONS, type Section } from "./sections"
 import { fetchWorkspaces, updateWorkflowControls, type RepositoryAccess, type Workspace, type Workflow } from "@/lib/api"
 import { useBranding } from "@/hooks/use-branding"
-import { AnalyticsCommandCenter } from "@/components/analytics-command-center"
+import { useCapabilities } from "@/hooks/use-capabilities"
 import { WorkflowRunsDialog } from "@/components/workflow-runs-dialog"
 
 function isValidSection(s: string): s is Section {
@@ -24,7 +24,6 @@ function isValidSection(s: string): s is Section {
 const WORKSPACE_SECTIONS = new Set<Section>([
   "workspaces",
   "workflows",
-  "workspace-analytics",
   "github",
   "issue-trackers",
   "secrets",
@@ -219,6 +218,7 @@ export default function SettingsSectionPage() {
   const params = useParams()
   const pathname = usePathname()
   const router = useRouter()
+  const { isAdmin, loading: authLoading, error: authError, retry: retryAuth } = useCapabilities()
   const paramParts = Array.isArray(params.parts) ? params.parts : []
   const pathnameParts = pathname
     .split("/")
@@ -229,7 +229,11 @@ export default function SettingsSectionPage() {
   const secondPart = parts[1] ?? ""
   const firstPartIsSection = isValidSection(firstPart)
   const firstPartIsPlaceholder = firstPart === WORKSPACE_PLACEHOLDER
-  const hasRouteWorkspace = firstPart !== "" && !firstPartIsSection && !firstPartIsPlaceholder
+  // The legacy analytics section must never be mistaken for a workspace name,
+  // or /settings/workspace-analytics would render an unrelated workspace's
+  // overview instead of redirecting to /analytics.
+  const firstPartIsLegacyAnalytics = firstPart === LEGACY_ANALYTICS_SECTION
+  const hasRouteWorkspace = firstPart !== "" && !firstPartIsSection && !firstPartIsPlaceholder && !firstPartIsLegacyAnalytics
   const rawSection = (hasRouteWorkspace || firstPartIsPlaceholder) ? (secondPart || "workspaces") : (firstPart || "workspaces")
   const section: Section = isValidSection(rawSection) ? rawSection : "workspaces"
   const rawWorkspace = hasRouteWorkspace ? firstPart : ""
@@ -245,10 +249,20 @@ export default function SettingsSectionPage() {
       router.replace("/settings/workspaces")
       return
     }
+    // "workspace-analytics" was promoted to the top-level /analytics route.
+    // Redirect old links there, preserving the full query string and mapping
+    // the workspace path segment into ?workspace= without clobbering an
+    // existing workspace param.
+    if (rawSection === LEGACY_ANALYTICS_SECTION) {
+      const query = new URLSearchParams(window.location.search)
+      if (routeWorkspace && !query.get("workspace")) query.set("workspace", routeWorkspace)
+      router.replace(`/analytics${query.size ? `?${query}` : ""}`)
+      return
+    }
     if (!isValidSection(rawSection)) {
       router.replace("/settings/workspaces")
     }
-  }, [parts.length, rawSection, router])
+  }, [parts.length, rawSection, routeWorkspace, router])
 
   const [settings, setSettings] = useState<SettingsData | null>(null)
   const [saving, setSaving] = useState(false)
@@ -298,6 +312,9 @@ export default function SettingsSectionPage() {
   // When the "_workspace" placeholder is used (static-export sentinel) or no
   // workspace is present in the URL, redirect to the actual first workspace.
   useEffect(() => {
+    // Legacy analytics URLs are handled by the /analytics redirect above;
+    // never race it with a workspace-selection redirect.
+    if (rawSection === LEGACY_ANALYTICS_SECTION) return
     if (workspaces.length === 0 || !WORKSPACE_SECTIONS.has(section)) return
     const workspace = routeWorkspace && workspaces.some((item) => item.name === routeWorkspace)
       ? routeWorkspace
@@ -306,9 +323,11 @@ export default function SettingsSectionPage() {
     const target = section === "workspaces" ? workspaceBase : `${workspaceBase}/${section}`
     const needsRedirect = (!routeWorkspace && selectedWorkspace) || routeHasOverviewSlug || firstPartIsPlaceholder
     if (needsRedirect) {
-      router.replace(target)
+      // Preserve the query string so links carrying filters (e.g. ?workflow=)
+      // survive the workspace redirect.
+      router.replace(`${target}${window.location.search}`)
     }
-  }, [firstPartIsPlaceholder, routeHasOverviewSlug, routeWorkspace, router, section, selectedWorkspace, workspaces])
+  }, [firstPartIsPlaceholder, rawSection, routeHasOverviewSlug, routeWorkspace, router, section, selectedWorkspace, workspaces])
 
   async function save(patch: object): Promise<boolean> {
     setSaving(true)
@@ -344,7 +363,6 @@ export default function SettingsSectionPage() {
       items: [
         { id: "workspaces", label: "Overview", icon: LayoutTemplate },
         { id: "workflows", label: "Workflows", icon: GitBranch },
-        { id: "workspace-analytics", label: "Analytics", icon: BarChart3 },
         { id: "github", label: "GitHub Apps", icon: Github },
         { id: "issue-trackers", label: "Issue Trackers", icon: Zap },
         { id: "secrets", label: "Secrets", icon: Lock },
@@ -369,9 +387,6 @@ export default function SettingsSectionPage() {
     },
   ]
   const settingsHref = (id: Section) => {
-    if (id === "workspace-analytics") {
-      return selectedWorkspace ? `/analytics?workspace=${encodeURIComponent(selectedWorkspace)}` : "/analytics"
-    }
     if (WORKSPACE_SECTIONS.has(id) && selectedWorkspace) {
       const workspaceBase = `/settings/${encodeURIComponent(selectedWorkspace)}`
       return id === "workspaces" ? workspaceBase : `${workspaceBase}/${id}`
@@ -383,6 +398,41 @@ export default function SettingsSectionPage() {
     const targetSection = WORKSPACE_SECTIONS.has(section) ? section : "workspaces"
     const workspaceBase = `/settings/${encodeURIComponent(workspace)}`
     router.push(targetSection === "workspaces" ? workspaceBase : `${workspaceBase}/${targetSection}`)
+  }
+
+  // Settings are admin-only. Hold rendering until the session resolves so
+  // non-admins never see a flash of the settings chrome.
+  if (authLoading) {
+    return <div className="h-screen bg-background" aria-busy="true" />
+  }
+  // A failed /api/auth/me is not a "not an admin" answer: offer a retry
+  // instead of the no-access screen so a transient blip never locks an
+  // admin out of settings.
+  if (authError) {
+    return (
+      <div className="h-screen bg-background flex flex-col items-center justify-center gap-4 p-6 text-center">
+        <AlertCircle className="size-8 text-muted-foreground" />
+        <p className="text-sm text-muted-foreground">
+          Could not verify your session. Check your connection and try again.
+        </p>
+        <Button variant="outline" size="sm" onClick={retryAuth}>
+          Retry
+        </Button>
+      </div>
+    )
+  }
+  if (!isAdmin) {
+    return (
+      <div className="h-screen bg-background flex flex-col items-center justify-center gap-4 p-6 text-center">
+        <Lock className="size-8 text-muted-foreground" />
+        <p className="text-sm text-muted-foreground">
+          You do not have access to settings.
+        </p>
+        <Button asChild variant="outline" size="sm">
+          <Link href="/">Back to agents</Link>
+        </Button>
+      </div>
+    )
   }
 
   return (
@@ -455,7 +505,7 @@ export default function SettingsSectionPage() {
         </aside>
 
         {/* Content */}
-        <main className={(section === "ai-config" || section === "troubleshoot" || section === "workspace-analytics") ? "flex-1 min-h-0 flex flex-col overflow-hidden" : "flex-1 overflow-y-auto p-8 max-w-2xl"}>
+        <main className={(section === "ai-config" || section === "troubleshoot") ? "flex-1 min-h-0 flex flex-col overflow-hidden" : "flex-1 overflow-y-auto p-8 max-w-2xl"}>
           {error && <p className="mb-4 text-sm text-red-500">{error}</p>}
           {success && <p className="mb-4 text-sm text-green-500">{success}</p>}
 
@@ -479,11 +529,6 @@ export default function SettingsSectionPage() {
           )}
           {section === "workflows" && (
             <WorkflowsSection selectedWorkspace={selectedWorkspace} />
-          )}
-          {section === "workspace-analytics" && (
-            <Suspense fallback={null}>
-              <AnalyticsCommandCenter workspaceScope={selectedWorkspace || undefined} />
-            </Suspense>
           )}
           {section === "secrets" && (
             <SecretsSection settings={settings} workspace={selectedWorkspace} />
