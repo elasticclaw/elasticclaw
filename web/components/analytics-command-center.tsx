@@ -21,11 +21,9 @@ import {
   fetchAnalyticsEffectiveness,
   fetchGeneralStats,
   fetchTaskRunAnalyticsSummary,
-  fetchTaskRunAttempts,
-  fetchTaskRunEvents,
   fetchTaskRunFilterOptions,
-  fetchTaskRunPRs,
   fetchTaskRuns,
+  isForbidden,
 } from "@/lib/api"
 import type {
   AnalyticsCostDriver,
@@ -41,10 +39,12 @@ import {
   FilterSelect,
   RunDetailPanel,
   StatusBadge,
-  type DetailState,
   urlFilterKeys,
+  useRunDetails,
 } from "@/components/task-run-analytics-view"
+import { useCapabilities } from "@/hooks/use-capabilities"
 import { Button } from "@/components/ui/button"
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import {
   ChartContainer,
   ChartTooltip,
@@ -127,6 +127,9 @@ export function AnalyticsCommandCenter({ workspaceScope }: { workspaceScope?: st
   const pathname = usePathname()
   const params = useSearchParams()
   const paramsKey = params.toString()
+  // Cost data is capability-gated: without costs:read no cost request is
+  // issued at all — the Cost tab is replaced by a short policy notice.
+  const { canViewCosts, loading: capabilitiesLoading, error: capabilitiesError } = useCapabilities()
   const filters = useMemo(() => {
     const nextFilters: TaskRunAnalyticsFilters = {
       analyticsEnabled: true,
@@ -139,12 +142,17 @@ export function AnalyticsCommandCenter({ workspaceScope }: { workspaceScope?: st
       if (value) (nextFilters as Record<string, string>)[filterKey] = value
     }
 
+    // The model filter is costs:read-gated server-side (403): drop a
+    // hand-typed ?model= for non-capable sessions instead of failing every
+    // request. Requests only start once capabilities have resolved.
+    if (!canViewCosts) delete nextFilters.model
+
     if (workspaceScope && !params.get("workspace")) {
       nextFilters.workspace = workspaceScope
     }
 
     return nextFilters
-  }, [params, workspaceScope])
+  }, [canViewCosts, params, workspaceScope])
   const [summary, setSummary] = useState<TaskRunAnalyticsSummary>()
   const [costs, setCosts] = useState<CostOverview>()
   const [yearCosts, setYearCosts] = useState<CostOverview>()
@@ -156,9 +164,7 @@ export function AnalyticsCommandCenter({ workspaceScope }: { workspaceScope?: st
   const [nextCursor, setNextCursor] = useState<string>()
   const [cursorStack, setCursorStack] = useState<(string | undefined)[]>([undefined])
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null)
-  const [details, setDetails] = useState<DetailState | null>(null)
-  const [detailLoading, setDetailLoading] = useState(false)
-  const [detailError, setDetailError] = useState<string | null>(null)
+  const { details, loading: detailLoading, error: detailError } = useRunDetails(selectedRunId)
   const [error, setError] = useState<string>()
   const loadAbortController = useRef<AbortController | null>(null)
   const loadRequestId = useRef(0)
@@ -237,6 +243,13 @@ export function AnalyticsCommandCenter({ workspaceScope }: { workspaceScope?: st
         const yearCostFilters = hasYearRunLevelFilter
           ? yearFilters
           : { ...yearFilters, analyticsEnabled: undefined, requiresPr: undefined }
+        // A 403 from a cost endpoint is an expected policy state (capability
+        // revoked mid-session), never a load error: swallow it and render the
+        // dashboard without cost data.
+        const forbiddenToUndefined = (costError: unknown) => {
+          if (isForbidden(costError)) return undefined
+          throw costError
+        }
         const [
           summaryData,
           costsData,
@@ -248,17 +261,25 @@ export function AnalyticsCommandCenter({ workspaceScope }: { workspaceScope?: st
           optionsData,
         ] = await Promise.all([
           fetchTaskRunAnalyticsSummary(effectiveFilters, { signal: controller.signal }),
-          fetchAnalyticsCosts(effectiveFilters, 30, "model", undefined, { signal: controller.signal }),
-          fetchAnalyticsCosts(
-            yearCostFilters,
-            366,
-            undefined,
-            hasYearRunLevelFilter ? undefined : "ledger",
-            { signal: controller.signal }
-          ),
+          canViewCosts
+            ? fetchAnalyticsCosts(effectiveFilters, 30, "model", undefined, { signal: controller.signal }).catch(forbiddenToUndefined)
+            : Promise.resolve(undefined),
+          canViewCosts
+            ? fetchAnalyticsCosts(
+                yearCostFilters,
+                366,
+                undefined,
+                hasYearRunLevelFilter ? undefined : "ledger",
+                { signal: controller.signal }
+              ).catch(forbiddenToUndefined)
+            : Promise.resolve(undefined),
           fetchAnalyticsEffectiveness(effectiveFilters, { signal: controller.signal }),
           fetchGeneralStats(effectiveFilters, { signal: controller.signal }),
-          fetchAnalyticsCostDrivers(effectiveFilters, "workflow", { signal: controller.signal }),
+          canViewCosts
+            ? fetchAnalyticsCostDrivers(effectiveFilters, "workflow", { signal: controller.signal }).catch(
+                (costError) => (isForbidden(costError) ? [] : Promise.reject(costError))
+              )
+            : Promise.resolve([]),
           fetchTaskRuns(runFilters, { signal: controller.signal }),
           options ? Promise.resolve(options) : fetchTaskRunFilterOptions({ signal: controller.signal }),
         ])
@@ -275,8 +296,6 @@ export function AnalyticsCommandCenter({ workspaceScope }: { workspaceScope?: st
         setOptions(optionsData)
         if (!append && !silent) {
           setSelectedRunId(null)
-          setDetails(null)
-          setDetailError(null)
         }
       } catch (loadError) {
         if (controller.signal.aborted || (loadError instanceof Error && loadError.name === "AbortError")) return
@@ -286,10 +305,13 @@ export function AnalyticsCommandCenter({ workspaceScope }: { workspaceScope?: st
         }
       }
     },
-    [filters, options]
+    [canViewCosts, filters, options]
   )
 
   useEffect(() => {
+    // Wait for /api/auth/me so the first load already knows whether cost
+    // requests may be issued; the effect re-runs once capabilities resolve.
+    if (capabilitiesLoading) return
     queueMicrotask(() => {
       setCursorStack([undefined])
       void load()
@@ -297,7 +319,7 @@ export function AnalyticsCommandCenter({ workspaceScope }: { workspaceScope?: st
     return () => {
       loadAbortController.current?.abort()
     }
-  }, [load])
+  }, [capabilitiesLoading, load])
 
   const silentRefresh = useCallback(() => {
     const currentCursor = cursorStackRef.current[cursorStackRef.current.length - 1]
@@ -339,40 +361,6 @@ export function AnalyticsCommandCenter({ workspaceScope }: { workspaceScope?: st
     void load(nextStack[nextStack.length - 1])
   }, [cursorStack, load])
 
-  useEffect(() => {
-    if (!selectedRunId) return
-
-    let cancelled = false
-    queueMicrotask(() => {
-      if (cancelled) return
-      setDetailLoading(true)
-      setDetailError(null)
-      setDetails(null)
-      Promise.all([
-        fetchTaskRunAttempts(selectedRunId),
-        fetchTaskRunEvents(selectedRunId),
-        fetchTaskRunPRs(selectedRunId),
-      ])
-        .then(([attempts, events, prs]) => {
-          if (!cancelled) setDetails({ attempts: attempts.attempts, events: events.events, prs: prs.prs })
-        })
-        .catch((detailLoadError) => {
-          if (!cancelled) {
-            setDetailError(
-              detailLoadError instanceof Error ? detailLoadError.message : "Unable to load run details"
-            )
-          }
-        })
-        .finally(() => {
-          if (!cancelled) setDetailLoading(false)
-        })
-    })
-
-    return () => {
-      cancelled = true
-    }
-  }, [selectedRunId])
-
   const totalCost = costs?.dailySeries.reduce((sum, point) => sum + point.costUsd, 0) ?? 0
   const priorCost = costs?.priorPeriodCostUsd ?? costs?.prior?.periodCostUsd
   const costDelta = calculateDelta(totalCost, priorCost)
@@ -391,11 +379,26 @@ export function AnalyticsCommandCenter({ workspaceScope }: { workspaceScope?: st
         <header>
           <h1 className="text-2xl font-semibold tracking-tight">Analytics</h1>
         </header>
-        <FilterBar filters={filters} options={options} onChange={setFilters} />
+        <FilterBar filters={filters} options={options} onChange={setFilters} canViewCosts={canViewCosts} />
         {error && <p className="text-sm text-destructive">{error}</p>}
 
-        <div className="grid gap-5 xl:grid-cols-[6fr_3fr]">
-          <KpiGroup title="Effectiveness" columns="sm:grid-cols-6">
+        <Tabs defaultValue="delivery" className="gap-5">
+          <div className="flex flex-wrap items-center gap-3">
+            <TabsList>
+              <TabsTrigger value="delivery">Delivery</TabsTrigger>
+              {canViewCosts && <TabsTrigger value="cost">Cost</TabsTrigger>}
+            </TabsList>
+            {/* Only a successful /api/auth/me denying costs:read shows the
+                policy notice — a failed capability fetch is not a deny. */}
+            {!canViewCosts && !capabilitiesLoading && !capabilitiesError && (
+              <p className="text-sm text-muted-foreground">
+                Cost analytics requires the <code className="font-mono text-xs">costs:read</code> permission.
+              </p>
+            )}
+          </div>
+
+          <TabsContent value="delivery" className="space-y-5">
+          <KpiGroup title="Effectiveness" columns="sm:grid-cols-3 xl:grid-cols-6">
             <Kpi
               label="Runs"
               title="Task runs started in the selected period."
@@ -439,81 +442,89 @@ export function AnalyticsCommandCenter({ workspaceScope }: { workspaceScope?: st
               change={calculateDelta(stats?.prOpenToMergeMs.avgMs, stats?.prior?.prOpenToMergeMs.avgMs)}
             />
           </KpiGroup>
-          <KpiGroup title="Cost" columns="sm:grid-cols-3">
-            <Kpi label="Total cost" title="Total AI spend of the runs in the selected period." value={usdWhole.format(totalCost)} change={costDelta} cost />
-            <Kpi
-              label="Cost per run"
-              title="Total cost divided by the number of runs."
-              value={usd.format(summary?.totalRuns ? totalCost / summary.totalRuns : 0)}
-              cost
+
+          <div className="grid gap-5 lg:grid-cols-2">
+            <ChartCard title="Run outcomes over time" info="Each bar is a day. Clean = delivered with no human help; Human on the loop = a human helped via the pull request; Warning = a human had to step in from the dashboard; Failed = nothing was delivered.">
+              <OutcomesChart effect={effect} />
+            </ChartCard>
+            <ChartCard title="Delivery funnel" info="How many runs made it from the agent starting, to opening a pull request, to that pull request being finished (merged or closed). Percentages show the conversion from the previous stage.">
+              <DeliveryFunnel effect={effect} />
+            </ChartCard>
+          </div>
+
+          <div className="grid gap-5 lg:grid-cols-2">
+            <ChartCard title="Ticket throughput" info="Each bar is a day: how many distinct tickets had their first run that day, by how the ticket ended up. Delivered = at least one run delivered the work.">
+              <TicketThroughputChart effect={effect} />
+            </ChartCard>
+            <ChartCard title="Runs per ticket" info="How many runs each ticket needed. A long tail of 3+ means lots of retries on the same tickets.">
+              <RunsPerTicketChart effect={effect} />
+            </ChartCard>
+          </div>
+
+          <RunsTable
+            runs={runs}
+            showCost={canViewCosts}
+            page={cursorStack.length}
+            canGoPrevious={cursorStack.length > 1}
+            canGoNext={Boolean(nextCursor)}
+            onSelect={setSelectedRunId}
+            onPrevious={handlePreviousPage}
+            onNext={handleNextPage}
+          />
+          </TabsContent>
+
+          {canViewCosts && (
+            <TabsContent value="cost" className="space-y-5">
+            <KpiGroup title="Cost" columns="sm:grid-cols-3">
+              <Kpi label="Total cost" title="Total AI spend of the runs in the selected period." value={usdWhole.format(totalCost)} change={costDelta} cost />
+              <Kpi
+                label="Cost per run"
+                title="Total cost divided by the number of runs."
+                value={usd.format(summary?.totalRuns ? totalCost / summary.totalRuns : 0)}
+                cost
+              />
+              <Kpi
+                label="Cost per unique ticket"
+                title="Total cost divided by the number of distinct tickets worked on in the period."
+                value={effect?.uniqueTickets ? usd.format(totalCost / effect.uniqueTickets) : "—"}
+                change={calculateDelta(
+                  effect?.uniqueTickets ? totalCost / effect.uniqueTickets : undefined,
+                  priorCost && effect?.prior?.uniqueTickets ? priorCost / effect.prior.uniqueTickets : undefined
+                )}
+                cost
+              />
+            </KpiGroup>
+
+            <div className="grid gap-5 lg:grid-cols-2">
+              <ChartCard title="Daily cost by model" info="How much was spent per day, split by AI model.">
+                <DailyCostChart costs={costs} modelData={modelData} />
+              </ChartCard>
+              <ChartCard title="Cost per merged PR" info="Weekly average of what one merged pull request cost. The reference line is the period average.">
+                <CostPerMergedPrChart effect={effect} />
+              </ChartCard>
+            </div>
+
+            <div className="grid gap-5 lg:grid-cols-2">
+              <ChartCard title="Workflow cost comparison" info="Daily spend of the most expensive workflows in the selected period, compared side by side.">
+                <WorkflowCostComparisonChart drivers={drivers} />
+              </ChartCard>
+              <ChartCard title="Most expensive tickets" info="Where the money concentrates: the costliest tickets in the selected period (cost counts only this period's runs).">
+                <TopTicketsByCostChart effect={effect} />
+              </ChartCard>
+            </div>
+
+            <Heatmap
+              heatmap={heatmap}
+              maxCost={maxHeatCost}
+              selectedDay={selectedDay}
+              onSelectDay={(day) => setFilters(day === selectedDay ? { from: undefined, to: undefined } : isoDayRange(day))}
+              onClearSelectedDay={() => setFilters({ from: undefined, to: undefined })}
             />
-            <Kpi
-              label="Cost per unique ticket"
-              title="Total cost divided by the number of distinct tickets worked on in the period."
-              value={effect?.uniqueTickets ? usd.format(totalCost / effect.uniqueTickets) : "—"}
-              change={calculateDelta(
-                effect?.uniqueTickets ? totalCost / effect.uniqueTickets : undefined,
-                priorCost && effect?.prior?.uniqueTickets ? priorCost / effect.prior.uniqueTickets : undefined
-              )}
-              cost
-            />
-          </KpiGroup>
-        </div>
 
-        <div className="grid gap-5 lg:grid-cols-2">
-          <ChartCard title="Run outcomes over time" info="Each bar is a day. Clean = delivered with no human help; Human on the loop = a human helped via the pull request; Warning = a human had to step in from the dashboard; Failed = nothing was delivered.">
-            <OutcomesChart effect={effect} />
-          </ChartCard>
-          <ChartCard title="Delivery funnel" info="How many runs made it from the agent starting, to opening a pull request, to that pull request being finished (merged or closed). Percentages show the conversion from the previous stage.">
-            <DeliveryFunnel effect={effect} />
-          </ChartCard>
-        </div>
-
-        <div className="grid gap-5 lg:grid-cols-2">
-          <ChartCard title="Ticket throughput" info="Each bar is a day: how many distinct tickets had their first run that day, by how the ticket ended up. Delivered = at least one run delivered the work.">
-            <TicketThroughputChart effect={effect} />
-          </ChartCard>
-          <ChartCard title="Runs per ticket" info="How many runs each ticket needed. A long tail of 3+ means lots of retries on the same tickets.">
-            <RunsPerTicketChart effect={effect} />
-          </ChartCard>
-        </div>
-
-        <RunsTable
-          runs={runs}
-          page={cursorStack.length}
-          canGoPrevious={cursorStack.length > 1}
-          canGoNext={Boolean(nextCursor)}
-          onSelect={setSelectedRunId}
-          onPrevious={handlePreviousPage}
-          onNext={handleNextPage}
-        />
-
-        <Heatmap
-          heatmap={heatmap}
-          maxCost={maxHeatCost}
-          selectedDay={selectedDay}
-          onSelectDay={(day) => setFilters(day === selectedDay ? { from: undefined, to: undefined } : isoDayRange(day))}
-          onClearSelectedDay={() => setFilters({ from: undefined, to: undefined })}
-        />
-
-        <div className="grid gap-5 lg:grid-cols-2">
-          <ChartCard title="Daily cost by model" info="How much was spent per day, split by AI model.">
-            <DailyCostChart costs={costs} modelData={modelData} />
-          </ChartCard>
-          <ChartCard title="Cost per merged PR" info="Weekly average of what one merged pull request cost. The reference line is the period average.">
-            <CostPerMergedPrChart effect={effect} />
-          </ChartCard>
-        </div>
-
-        <div className="grid gap-5 lg:grid-cols-2">
-          <ChartCard title="Workflow cost comparison" info="Daily spend of the most expensive workflows in the selected period, compared side by side.">
-            <WorkflowCostComparisonChart drivers={drivers} />
-          </ChartCard>
-          <ChartCard title="Most expensive tickets" info="Where the money concentrates: the costliest tickets in the selected period (cost counts only this period's runs).">
-            <TopTicketsByCostChart effect={effect} />
-          </ChartCard>
-        </div>
-        <CostDrivers drivers={drivers} />
+            <CostDrivers drivers={drivers} />
+            </TabsContent>
+          )}
+        </Tabs>
       </div>
       <RunDetailPanel
         run={selectedRun}
@@ -530,16 +541,20 @@ function FilterBar({
   filters,
   options,
   onChange,
+  canViewCosts,
 }: {
   filters: TaskRunAnalyticsFilters
   options?: TaskRunFilterOptions
   onChange: (updates: Record<string, string | undefined>) => void
+  canViewCosts: boolean
 }) {
   const selectFilters = [
     ["Factory", "factory", options?.factories],
     ["Workflow", "workflow", options?.workflows],
     ["Repo", "repo", options?.repos],
-    ["Model", "model", options?.models],
+    // Model attribution is costs:read-gated: the server redacts it from run
+    // payloads and rejects the filter, so the picker must not render either.
+    ...(canViewCosts ? ([["Model", "model", options?.models]] as const) : []),
   ] as const
 
   return (
@@ -554,8 +569,14 @@ function FilterBar({
             onClick={() => {
               const to = new Date()
               const from = new Date()
-              if (days) from.setDate(to.getDate() - Number(days))
-              else from.setDate(1)
+              if (days) {
+                from.setDate(to.getDate() - Number(days))
+              } else {
+                // MTD starts at local midnight on the 1st, not the current
+                // time-of-day, so the first hours of the month are included.
+                from.setDate(1)
+                from.setHours(0, 0, 0, 0)
+              }
               onChange({ from: from.toISOString(), to: to.toISOString() })
             }}
           >
@@ -633,7 +654,13 @@ function CostDrivers({ drivers }: { drivers: AnalyticsCostDriver[] }) {
   return <section className="rounded-lg border bg-card p-4"><div className="mb-3 flex items-center justify-between gap-3"><div><div className="flex items-center gap-1"><h2 className="text-sm font-semibold">Top cost drivers</h2><InfoTooltip text="Where the money goes: total spend and efficiency per workflow in the selected period." /></div><p className="text-xs text-muted-foreground">By workflow</p></div></div><Table><TableHeader><TableRow><TableHead>Workflow</TableHead><TableHead className="text-right">Runs</TableHead><TableHead className="text-right">Success</TableHead><TableHead className="text-right">Cost</TableHead><TableHead className="text-right">Cost / merged PR</TableHead></TableRow></TableHeader><TableBody>{drivers.slice(0, 10).map((driver) => <TableRow key={driver.name}><TableCell className="font-medium">{driver.name}</TableCell><TableCell className="text-right tabular-nums">{driver.runs}</TableCell><TableCell className="text-right tabular-nums">{formatPercent(driver.successRate)}</TableCell><TableCell className="text-right tabular-nums">{usd.format(driver.costUsd)}</TableCell><TableCell className="text-right tabular-nums">{usd.format(driver.costPerMergedPr)}</TableCell></TableRow>)}</TableBody></Table></section>
 }
 const runsTableRightAlignedHeaders = new Set(["Cost", "Duration", "Start date"])
-function RunsTable({ runs, page, canGoPrevious, canGoNext, onSelect, onPrevious, onNext }: { runs: TaskRunSummary[]; page: number; canGoPrevious: boolean; canGoNext: boolean; onSelect: (runId: string) => void; onPrevious: () => void; onNext: () => void }) { return <section className="rounded-lg border bg-card p-4"><h2 className="mb-3 text-sm font-semibold">Runs</h2><Table><TableHeader><TableRow>{["Status", "Ticket", "Model", "Factory/Workflow", "Cost", "Duration", "Start date"].map((label) => <TableHead key={label} className={runsTableRightAlignedHeaders.has(label) ? "text-right" : ""}>{label}</TableHead>)}</TableRow></TableHeader><TableBody>{runs.map((run) => <TableRow key={run.runId} className="cursor-pointer" onClick={() => onSelect(run.runId)}><TableCell><StatusBadge status={run.status} /></TableCell><TableCell>{run.issueId || "—"}</TableCell><TableCell>{run.model || "—"}</TableCell><TableCell>{run.factoryName || run.workflowName || "—"}</TableCell><TableCell className="text-right tabular-nums">{usd.format(run.estimatedCostUsd || 0)}</TableCell><TableCell className="text-right tabular-nums">{formatDuration(run.finishedAt ? run.finishedAt - run.startedAt : undefined)}</TableCell><TableCell className="text-right tabular-nums">{run.startedAt ? new Date(run.startedAt).toLocaleDateString() : "—"}</TableCell></TableRow>)}</TableBody></Table><div className="mt-3 flex items-center justify-center gap-3"><Button variant="outline" size="sm" disabled={!canGoPrevious} onClick={onPrevious}>Previous</Button><span className="text-sm text-muted-foreground">Page {page}</span><Button variant="outline" size="sm" disabled={!canGoNext} onClick={onNext}>Next</Button></div></section> }
+function RunsTable({ runs, showCost, page, canGoPrevious, canGoNext, onSelect, onPrevious, onNext }: { runs: TaskRunSummary[]; showCost: boolean; page: number; canGoPrevious: boolean; canGoNext: boolean; onSelect: (runId: string) => void; onPrevious: () => void; onNext: () => void }) {
+  // Model and Cost columns exist only for sessions with costs:read; the
+  // backend omits those fields for everyone else, so the columns disappear
+  // rather than rendering "—"/"$0.00" artifacts.
+  const headers = ["Status", "Ticket", ...(showCost ? ["Model"] : []), "Factory/Workflow", ...(showCost ? ["Cost"] : []), "Duration", "Start date"]
+  return <section className="rounded-lg border bg-card p-4"><h2 className="mb-3 text-sm font-semibold">Runs</h2><Table><TableHeader><TableRow>{headers.map((label) => <TableHead key={label} className={runsTableRightAlignedHeaders.has(label) ? "text-right" : ""}>{label}</TableHead>)}</TableRow></TableHeader><TableBody>{runs.map((run) => <TableRow key={run.runId} className="cursor-pointer" onClick={() => onSelect(run.runId)}><TableCell><StatusBadge status={run.status} /></TableCell><TableCell>{run.issueId || "—"}</TableCell>{showCost && <TableCell>{run.model || "—"}</TableCell>}<TableCell>{run.factoryName || run.workflowName || "—"}</TableCell>{showCost && <TableCell className="text-right tabular-nums">{run.estimatedCostUsd != null ? usd.format(run.estimatedCostUsd) : "—"}</TableCell>}<TableCell className="text-right tabular-nums">{formatDuration(run.finishedAt ? run.finishedAt - run.startedAt : undefined)}</TableCell><TableCell className="text-right tabular-nums">{run.startedAt ? new Date(run.startedAt).toLocaleDateString() : "—"}</TableCell></TableRow>)}</TableBody></Table><div className="mt-3 flex items-center justify-center gap-3"><Button variant="outline" size="sm" disabled={!canGoPrevious} onClick={onPrevious}>Previous</Button><span className="text-sm text-muted-foreground">Page {page}</span><Button variant="outline" size="sm" disabled={!canGoNext} onClick={onNext}>Next</Button></div></section>
+}
 function calculateDelta(current?: number | null, prior?: number | null) { return current == null || prior == null || prior === 0 ? undefined : (current - prior) / prior }
 function KpiGroup({ title, columns = "sm:grid-cols-5", children }: { title: string; columns?: string; children: ReactNode }) { return <div><p className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">{title}</p><div className={`grid grid-cols-2 gap-2 ${columns}`}>{children}</div></div> }
 function Kpi({ label, value, change, good, cost, onClick, title }: { label: string; value?: string | number; change?: number; good?: boolean; cost?: boolean; onClick?: () => void; title?: string }) {
