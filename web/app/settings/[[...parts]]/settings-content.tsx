@@ -403,14 +403,14 @@ export default function SettingsSectionPage() {
   // Settings are admin-only. Hold rendering until the session resolves so
   // non-admins never see a flash of the settings chrome.
   if (authLoading) {
-    return <div className="h-screen bg-background" aria-busy="true" />
+    return <div className="h-full bg-background" aria-busy="true" />
   }
   // A failed /api/auth/me is not a "not an admin" answer: offer a retry
   // instead of the no-access screen so a transient blip never locks an
   // admin out of settings.
   if (authError) {
     return (
-      <div className="h-screen bg-background flex flex-col items-center justify-center gap-4 p-6 text-center">
+      <div className="h-full bg-background flex flex-col items-center justify-center gap-4 p-6 text-center">
         <AlertCircle className="size-8 text-muted-foreground" />
         <p className="text-sm text-muted-foreground">
           Could not verify your session. Check your connection and try again.
@@ -423,7 +423,7 @@ export default function SettingsSectionPage() {
   }
   if (!isAdmin) {
     return (
-      <div className="h-screen bg-background flex flex-col items-center justify-center gap-4 p-6 text-center">
+      <div className="h-full bg-background flex flex-col items-center justify-center gap-4 p-6 text-center">
         <Lock className="size-8 text-muted-foreground" />
         <p className="text-sm text-muted-foreground">
           You do not have access to settings.
@@ -436,7 +436,7 @@ export default function SettingsSectionPage() {
   }
 
   return (
-    <div className="h-screen bg-background flex flex-col overflow-hidden">
+    <div className="h-full bg-background flex flex-col overflow-hidden">
       {/* Header */}
       <header className="border-b border-border px-6 py-4 flex items-center gap-4">
         <Button variant="ghost" size="icon" onClick={() => window.location.href = "/"}>
