@@ -6,7 +6,7 @@ This document describes how the ElasticClaw project is governed. It is intention
 
 ElasticClaw is an open-source platform for self-hosted workflow automation around coding agents. It is licensed under the Apache License 2.0.
 
-ElasticClaw was started by Replicated, which currently provides the majority of development resources. As the contributor base and funding model evolve, this governance document will be updated to reflect a broader, more independent project structure.
+ElasticClaw was started by Replicated. Today, it is an independent open-source project with contributors from multiple organizations.
 
 ## Roles
 
@@ -56,7 +56,7 @@ Significant changes require approval from at least two maintainers. These includ
 - New dependencies or major dependency upgrades.
 - Breaking changes or deprecations.
 - Changes to security, governance, or the code of conduct.
-- Changes to the [release or support policy](RELEASES.md).
+- Changes to the [release and support policy](RELEASES.md).
 
 ### Disputes
 
@@ -97,32 +97,34 @@ Smaller changes can include the same context in the PR description instead of a 
 
 ## Context and problem statement
 
-What is the decision we need to make?
+What is the decision we need to make? What constraints and goals are relevant?
 
 ## Decision
 
-What we decided to do.
+What we decided to do. Be specific.
 
 ## Consequences
 
-What becomes easier or harder because of this decision.
+What becomes easier, harder, or riskier because of this decision.
 
 ## Alternatives considered
 
 What else we considered and why we did not choose it.
+
+## Related ADRs
+
+Link to any related or superseded ADRs, if applicable.
 ```
 
 ## Conflict of interest
 
 Maintainers and contributors must declare conflicts of interest when participating in decisions where they, their employer, or a related party may benefit financially or commercially. They must abstain from voting on those decisions.
 
-Replicated currently provides the majority of development resources for ElasticClaw. Replicated employees who participate as maintainers act in the interest of the project and its users, not solely in Replicated’s commercial interest.
+Replicated employees who participate as maintainers act in the interest of the project and its users, not solely in Replicated’s commercial interest.
 
 ## Sponsorship and neutrality
 
-At this stage, ElasticClaw is a Replicated open-source project. Replicated provides the majority of development resources. As the project matures, governance will be updated to reflect a broader contributor base and more independent oversight.
-
-The project remains open to contributions from any individual or organization, regardless of commercial relationship to Replicated or ElasticClaw.
+ElasticClaw is an independent open-source project. It is open to contributions from any individual or organization, regardless of commercial relationship to Replicated or ElasticClaw.
 
 ## Code of conduct
 

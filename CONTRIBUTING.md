@@ -12,7 +12,7 @@ Thank you for contributing to ElasticClaw. This document covers the development 
 
 ## DCO sign-off
 
-By contributing to ElasticClaw, you agree that your contributions are licensed under the [Apache License 2.0](LICENSE). We use the [Developer Certificate of Origin (DCO)](https://developercertificate.org/) to confirm that you have the right to submit your contribution.
+By contributing to ElasticClaw, you certify that you have the right to submit your work under the [Apache License 2.0](LICENSE). We use the [Developer Certificate of Origin (DCO)](https://developercertificate.org/) to confirm this.
 
 Please sign your commits with `git commit -s`, which adds a `Signed-off-by:` line to your commit message. For example:
 
@@ -26,11 +26,7 @@ Pull requests without a proper DCO sign-off may be asked to amend the commit bef
 
 ### Automated commits
 
-Some pull requests are opened by project-owned automation (for example, the ElasticClaw bot or GitHub App). These commits should include their own DCO sign-off identifying the automation. For example:
-
-```
-Signed-off-by: ElasticClaw Bot <bot@elasticclaw.ai>
-```
+Some pull requests are opened by project-owned automation (for example, the ElasticClaw bot or GitHub App). These commits are made under the project's authority and are exempt from the human DCO sign-off requirement.
 
 Human contributors are still required to sign their own commits.
 
