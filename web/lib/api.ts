@@ -88,6 +88,14 @@ export class ApiError extends Error {
   }
 }
 
+// isForbidden reports whether err is an ApiError with HTTP 403. A 403 is a
+// capability/authorization failure, NOT a session error: only 401 triggers
+// handleSessionExpired below, so 403 responses reach callers as ApiError and
+// can be branched on with this guard.
+export function isForbidden(err: unknown): boolean {
+  return err instanceof ApiError && err.status === 403
+}
+
 async function apiFetch<T>(path: string, options?: RequestInit): Promise<T> {
   const token = await resolveToken()
   const hubBase = getHubUrl()
@@ -127,6 +135,29 @@ function handleSessionExpired<T>(): Promise<T> {
     return new Promise(() => {})
   }
   return Promise.reject(new Error("session expired"))
+}
+
+export interface AuthMe {
+  login: string
+  name: string
+  avatar_url: string
+  auth_method: string
+  // Kept for backward compatibility; prefer capability checks.
+  is_admin: boolean
+  capabilities?: Record<string, boolean>
+}
+
+export type Capability = "costs:read"
+
+// hasCapability returns true only when the capability is explicitly granted.
+// While /api/auth/me is still resolving (me is null/undefined) or the key is
+// missing, it returns false — the default is "no cost visibility".
+export function hasCapability(me: AuthMe | null | undefined, cap: Capability): boolean {
+  return me?.capabilities?.[cap] === true
+}
+
+export async function fetchAuthMe(): Promise<AuthMe> {
+  return apiFetch<AuthMe>("/api/auth/me")
 }
 
 export async function fetchClaws(): Promise<ApiClaw[]> {
