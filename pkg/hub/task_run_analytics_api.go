@@ -88,7 +88,7 @@ type taskRunAnalyticsFilterOptionsResponse struct {
 	Factories    []string `json:"factories"`
 	Integrations []string `json:"integrations"`
 	Repos        []string `json:"repos"`
-	Models       []string `json:"models"`
+	Models       []string `json:"models,omitempty"`
 	Statuses     []string `json:"statuses"`
 	WarningTypes []string `json:"warningTypes"`
 	FailureTypes []string `json:"failureTypes"`
@@ -112,7 +112,7 @@ type taskRunAnalyticsRunView struct {
 	IntegrationWorkspace  string   `json:"integrationWorkspace"`
 	IssueID               string   `json:"issueId"`
 	ClawID                string   `json:"clawId"`
-	Model                 string   `json:"model"`
+	Model                 string   `json:"model,omitempty"`
 	LLMKey                string   `json:"llmKey"`
 	Repo                  string   `json:"repo"`
 	PrimaryPRURL          string   `json:"primaryPrUrl"`
@@ -253,9 +253,8 @@ func (s *Server) handleTaskRunAnalyticsGeneralStats(w http.ResponseWriter, r *ht
 		jsonError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	filters, err := parseTaskRunAnalyticsFilters(r)
-	if err != nil {
-		jsonError(w, http.StatusBadRequest, err.Error())
+	filters, ok := s.parseTaskRunAnalyticsFiltersForRequest(w, r)
+	if !ok {
 		return
 	}
 	bh := BusinessHoursFromEnv(r.URL.Query().Get("tz"))
@@ -345,9 +344,8 @@ func (s *Server) handleTaskRunAnalyticsSummary(w http.ResponseWriter, r *http.Re
 		jsonError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	filters, err := parseTaskRunAnalyticsFilters(r)
-	if err != nil {
-		jsonError(w, http.StatusBadRequest, err.Error())
+	filters, ok := s.parseTaskRunAnalyticsFiltersForRequest(w, r)
+	if !ok {
 		return
 	}
 	response, err := s.readTaskRunAnalyticsSummaryForRequest(filters, githubLoginFromContext(r.Context()))
@@ -373,9 +371,8 @@ func (s *Server) handleTaskRunAnalyticsRuns(w http.ResponseWriter, r *http.Reque
 		s.handleTaskRunAnalyticsRunSubresource(w, r)
 		return
 	}
-	filters, err := parseTaskRunAnalyticsFilters(r)
-	if err != nil {
-		jsonError(w, http.StatusBadRequest, err.Error())
+	filters, ok := s.parseTaskRunAnalyticsFiltersForRequest(w, r)
+	if !ok {
 		return
 	}
 	limit := taskRunAnalyticsLimit(r.URL.Query().Get("limit"))
@@ -390,10 +387,25 @@ func (s *Server) handleTaskRunAnalyticsRuns(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	bh := BusinessHoursFromEnv(r.URL.Query().Get("tz"))
+	canViewCosts := s.requestCanViewCosts(r)
 	for i := range runs {
 		runs[i].ReadyToMergeMs = taskRunReadyToMergeMs(runs[i], bh)
+		if !canViewCosts {
+			redactTaskRunAnalyticsRunCosts(&runs[i])
+		}
 	}
 	jsonOK(w, taskRunAnalyticsRunsResponse{Runs: runs, NextCursor: nextCursor, Limit: limit})
+}
+
+// redactTaskRunAnalyticsRunCosts strips cost, token, and model data from a run
+// view for callers lacking the costs:read capability. Fields are omitted from
+// the JSON entirely (omitempty + nil/zero), never sent as zeros.
+func redactTaskRunAnalyticsRunCosts(run *taskRunAnalyticsRunView) {
+	run.InputTokens = nil
+	run.OutputTokens = nil
+	run.TotalTokens = nil
+	run.EstimatedCostUsd = nil
+	run.Model = ""
 }
 
 // taskRunReadyToMergeMs is the business-hours span from the PR becoming ready
@@ -436,6 +448,9 @@ func (s *Server) handleTaskRunAnalyticsRunSubresource(w http.ResponseWriter, r *
 	}
 	if len(parts) == 1 {
 		run.ReadyToMergeMs = taskRunReadyToMergeMs(run, BusinessHoursFromEnv(r.URL.Query().Get("tz")))
+		if !s.requestCanViewCosts(r) {
+			redactTaskRunAnalyticsRunCosts(&run)
+		}
 		jsonOK(w, taskRunAnalyticsRunDetailResponse{Run: run})
 		return
 	}
@@ -487,7 +502,30 @@ func (s *Server) handleTaskRunAnalyticsFilterOptions(w http.ResponseWriter, r *h
 		jsonError(w, http.StatusInternalServerError, "db error")
 		return
 	}
+	if !s.requestCanViewCosts(r) {
+		// Model attribution is redacted from run payloads for callers lacking
+		// costs:read; the model inventory must not leak through this endpoint.
+		response.Models = nil
+	}
 	jsonOK(w, response)
+}
+
+// parseTaskRunAnalyticsFiltersForRequest parses the shared analytics filters
+// and rejects the model filter for callers lacking costs:read: model
+// attribution is redacted from their responses, so honoring the filter would
+// let them rebuild the redacted run→model mapping by probing one model at a
+// time. On failure it writes the error response and returns ok=false.
+func (s *Server) parseTaskRunAnalyticsFiltersForRequest(w http.ResponseWriter, r *http.Request) (taskRunAnalyticsFilters, bool) {
+	filters, err := parseTaskRunAnalyticsFilters(r)
+	if err != nil {
+		jsonError(w, http.StatusBadRequest, err.Error())
+		return taskRunAnalyticsFilters{}, false
+	}
+	if len(filters.Model) > 0 && !s.requestCanViewCosts(r) {
+		jsonError(w, http.StatusForbidden, "costs:read permission required to filter by model")
+		return taskRunAnalyticsFilters{}, false
+	}
+	return filters, true
 }
 
 func parseTaskRunAnalyticsFilters(r *http.Request) (taskRunAnalyticsFilters, error) {

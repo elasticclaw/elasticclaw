@@ -861,6 +861,40 @@ func isAccessAdmin(cfg *types.AccessConfig, login string) bool {
 	return false
 }
 
+// canViewCosts resolves the costs:read capability for a caller.
+// Hub-token and password sessions (login == "") are already full admin today,
+// so collapsing them to "capable" is intentional for Phase 1; Phase 2 replaces
+// this resolver with a real role model.
+func canViewCosts(cfg *types.AccessConfig, login string) bool {
+	if login == "" {
+		return true
+	}
+	if isAccessAdmin(cfg, login) {
+		return true
+	}
+	if cfg == nil {
+		return false
+	}
+	for _, viewer := range cfg.CostViewers {
+		if strings.EqualFold(viewer, login) {
+			return true
+		}
+	}
+	return false
+}
+
+// requestCanViewCosts answers costs:read for the current request, reading the
+// access config under the server lock so handlers don't repeat the dance.
+func (s *Server) requestCanViewCosts(r *http.Request) bool {
+	s.mu.RLock()
+	var accessCfg *types.AccessConfig
+	if s.hubCfg.Auth != nil {
+		accessCfg = s.hubCfg.Auth.Access
+	}
+	s.mu.RUnlock()
+	return canViewCosts(accessCfg, githubLoginFromContext(r.Context()))
+}
+
 func (s *Server) withWebAdminAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
@@ -948,15 +982,20 @@ func (s *Server) handleWebMe(w http.ResponseWriter, r *http.Request) {
 		}
 		s.mu.RUnlock()
 		jsonOK(w, map[string]interface{}{
-			"login":       payload.Login,
-			"name":        payload.Name,
-			"avatar_url":  payload.AvatarURL,
-			"auth_method": "github",
-			"is_admin":    isAccessAdmin(accessCfg, payload.Login),
+			"login":        payload.Login,
+			"name":         payload.Name,
+			"avatar_url":   payload.AvatarURL,
+			"auth_method":  "github",
+			"is_admin":     isAccessAdmin(accessCfg, payload.Login),
+			"capabilities": map[string]bool{"costs:read": canViewCosts(accessCfg, payload.Login)},
 		})
 		return
 	}
-	jsonOK(w, map[string]interface{}{"auth_method": "password", "is_admin": true})
+	jsonOK(w, map[string]interface{}{
+		"auth_method":  "password",
+		"is_admin":     true,
+		"capabilities": map[string]bool{"costs:read": true},
+	})
 }
 
 // handleAuthConfig returns public auth config (no auth required).

@@ -71,9 +71,8 @@ func (s *Server) handleTaskRunAnalyticsEffectiveness(w http.ResponseWriter, r *h
 		jsonError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	f, err := parseTaskRunAnalyticsFilters(r)
-	if err != nil {
-		jsonError(w, http.StatusBadRequest, err.Error())
+	f, ok := s.parseTaskRunAnalyticsFiltersForRequest(w, r)
+	if !ok {
 		return
 	}
 	out, err := s.readTaskRunAnalyticsEffectiveness(f)
@@ -91,6 +90,16 @@ func (s *Server) handleTaskRunAnalyticsEffectiveness(w http.ResponseWriter, r *h
 		TicketSuccessRate: prior.TicketSuccessRate,
 		UniqueTickets:     prior.UniqueTickets,
 		MergeRate:         prior.MergeRate,
+	}
+	if !s.requestCanViewCosts(r) {
+		// Shadow the cost fields with nil omitempty pointers so the keys are
+		// absent (not zeroed) for callers lacking costs:read.
+		jsonOK(w, struct {
+			taskRunAnalyticsEffectivenessResponse
+			CostPerMergedPr  *struct{} `json:"costPerMergedPr,omitempty"`
+			TopTicketsByCost *struct{} `json:"topTicketsByCost,omitempty"`
+		}{taskRunAnalyticsEffectivenessResponse: out})
+		return
 	}
 	jsonOK(w, out)
 }
@@ -320,6 +329,10 @@ type taskRunAnalyticsCostDriver struct {
 }
 
 func (s *Server) handleTaskRunAnalyticsCostDrivers(w http.ResponseWriter, r *http.Request) {
+	if !s.requestCanViewCosts(r) {
+		jsonError(w, http.StatusForbidden, "costs:read permission required")
+		return
+	}
 	if r.Method != http.MethodGet {
 		jsonError(w, 405, "method not allowed")
 		return

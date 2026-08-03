@@ -438,8 +438,10 @@ type GitHubOAuthConfig struct {
 }
 
 // AccessConfig holds tag-based RBAC rules for the hub web UI.
+// CostViewers is optional; when absent, cost data is visible to admins only.
 type AccessConfig struct {
 	Admins               []string `yaml:"admins,omitempty"`                 // GitHub logins — bypass all tag checks
+	CostViewers          []string `yaml:"cost_viewers,omitempty"`           // GitHub logins granted costs:read without full admin
 	ViewRequiresTags     []string `yaml:"view_requires_tags,omitempty"`     // any matching tag grants view
 	InteractRequiresTags []string `yaml:"interact_requires_tags,omitempty"` // any matching tag grants interact
 }

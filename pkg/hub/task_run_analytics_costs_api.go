@@ -70,6 +70,10 @@ func clampTaskRunAnalyticsUsageDay(day string, start, end time.Time) string {
 }
 
 func (s *Server) handleTaskRunAnalyticsCosts(w http.ResponseWriter, r *http.Request) {
+	if !s.requestCanViewCosts(r) {
+		jsonError(w, http.StatusForbidden, "costs:read permission required")
+		return
+	}
 	if r.Method != http.MethodGet {
 		jsonError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return

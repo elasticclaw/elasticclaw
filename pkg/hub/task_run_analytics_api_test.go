@@ -690,7 +690,8 @@ func TestTaskRunAnalyticsAPIAccessControlAggregates(t *testing.T) {
 	assertStringSliceEqual(t, options.Factories, []string{"bob-factory"})
 	assertStringSliceEqual(t, options.Integrations, []string{"github"})
 	assertStringSliceEqual(t, options.Repos, []string{"bob/repo"})
-	assertStringSliceEqual(t, options.Models, []string{"bob-model"})
+	// bob lacks costs:read, so the model inventory is redacted entirely.
+	assertStringSliceEqual(t, options.Models, []string{})
 	assertStringSliceEqual(t, options.Statuses, []string{taskRunStatusHumanInTheLoop})
 	assertStringSliceEqual(t, options.WarningTypes, []string{taskRunWarningHumanPRComment})
 	assertStringSliceEqual(t, options.FailureTypes, []string{})
@@ -708,6 +709,7 @@ func TestTaskRunAnalyticsAPIAccessControlAggregates(t *testing.T) {
 	var plainOptions taskRunAnalyticsFilterOptionsResponse
 	decodeTaskRunAnalyticsAPI(t, plainOptionsRR, &plainOptions)
 	assertStringSliceEqual(t, plainOptions.Workspaces, []string{"alice-space", "bob-space"})
+	assertStringSliceEqual(t, plainOptions.Models, []string{"alice-model", "bob-model"})
 
 	if _, err := db.Exec(`DELETE FROM claws WHERE id=?`, "claw-bob"); err != nil {
 		t.Fatalf("delete claw: %v", err)
