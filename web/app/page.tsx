@@ -1,7 +1,7 @@
 "use client"
 
 import { useState, useMemo, useEffect, useCallback, useRef, useSyncExternalStore } from "react"
-import { AppHeader } from "@/components/app-header"
+import { NavRail } from "@/components/nav-rail"
 import { Sidebar } from "@/components/sidebar"
 import { ConversationView } from "@/components/conversation-view"
 import { SetupScreen } from "@/components/setup-screen"
@@ -186,11 +186,11 @@ export default function Home() {
 
   // Show loading state until we know if configured
   if (configuredState === null) {
-    // Mirror the real render's shell (same outer div and AppHeader) so the
-    // server and client markup match and the header does not pop in.
+    // Mirror the real render's shell (same outer div and NavRail) so the
+    // server and client markup match and the rail does not pop in.
     return (
-      <div className="flex h-screen flex-col bg-background">
-        <AppHeader />
+      <div className="flex h-screen bg-background">
+        <NavRail />
         <div className="flex flex-1 min-h-0" />
       </div>
     )
@@ -202,9 +202,9 @@ export default function Home() {
   }
 
   return (
-    <div className="flex h-screen flex-col bg-background">
-      <AppHeader />
-      <div className="flex flex-1 min-h-0">
+    <div className="flex h-screen bg-background">
+      <NavRail />
+      <div className="flex flex-1 min-w-0 min-h-0">
         <Sidebar
           claws={filteredClaws}
           pinnedClaws={filteredPinnedClaws}

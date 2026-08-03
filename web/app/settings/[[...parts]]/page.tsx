@@ -1,5 +1,5 @@
 import { Suspense } from "react"
-import { AppHeader } from "@/components/app-header"
+import { NavRail } from "@/components/nav-rail"
 import SettingsSectionPage from "./settings-content"
 import { LEGACY_ANALYTICS_SECTION, VALID_SECTIONS } from "./sections"
 
@@ -40,16 +40,16 @@ export function generateStaticParams() {
 }
 
 export default function Page() {
-  // AppHeader sits outside the Suspense boundary so the app-level navigation
+  // NavRail sits outside the Suspense boundary so the app-level navigation
   // is present in every state of this route — including the auth-loading,
   // no-access, and session-error screens — and a non-admin landing here can
   // always navigate back to Agents or Analytics.
   // SettingsSectionPage reads usePathname/useParams, which can suspend under
   // static export; without this boundary the whole route would suspend.
   return (
-    <div className="flex h-screen flex-col bg-background">
-      <AppHeader />
-      <div className="min-h-0 flex-1">
+    <div className="flex h-screen bg-background">
+      <NavRail />
+      <div className="min-h-0 min-w-0 flex-1">
         <Suspense fallback={null}>
           <SettingsSectionPage />
         </Suspense>

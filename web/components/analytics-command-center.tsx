@@ -378,24 +378,20 @@ export function AnalyticsCommandCenter({ workspaceScope }: { workspaceScope?: st
       <div className="mx-auto max-w-[1400px] space-y-5 p-5 lg:p-6">
         <header>
           <h1 className="text-2xl font-semibold tracking-tight">Analytics</h1>
+          {summary && (
+            <p className="mt-0.5 text-sm text-muted-foreground">
+              {summary.totalRuns} {summary.totalRuns === 1 ? "run" : "runs"} in the selected period
+            </p>
+          )}
         </header>
         <FilterBar filters={filters} options={options} onChange={setFilters} canViewCosts={canViewCosts} />
         {error && <p className="text-sm text-destructive">{error}</p>}
 
         <Tabs defaultValue="delivery" className="gap-5">
-          <div className="flex flex-wrap items-center gap-3">
-            <TabsList>
-              <TabsTrigger value="delivery">Delivery</TabsTrigger>
-              {canViewCosts && <TabsTrigger value="cost">Cost</TabsTrigger>}
-            </TabsList>
-            {/* Only a successful /api/auth/me denying costs:read shows the
-                policy notice — a failed capability fetch is not a deny. */}
-            {!canViewCosts && !capabilitiesLoading && !capabilitiesError && (
-              <p className="text-sm text-muted-foreground">
-                Cost analytics requires the <code className="font-mono text-xs">costs:read</code> permission.
-              </p>
-            )}
-          </div>
+          <TabsList>
+            <TabsTrigger value="delivery">Delivery</TabsTrigger>
+            {canViewCosts && <TabsTrigger value="cost">Cost</TabsTrigger>}
+          </TabsList>
 
           <TabsContent value="delivery" className="space-y-5">
           <KpiGroup title="Effectiveness" columns="sm:grid-cols-3 xl:grid-cols-6">
@@ -471,6 +467,21 @@ export function AnalyticsCommandCenter({ workspaceScope }: { workspaceScope?: st
             onPrevious={handlePreviousPage}
             onNext={handleNextPage}
           />
+
+          {/* Only a successful /api/auth/me denying costs:read shows the
+              policy section — a failed capability fetch is not a deny. */}
+          {!canViewCosts && !capabilitiesLoading && !capabilitiesError && (
+            <div>
+              <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Cost</p>
+              <section className="rounded-lg border bg-card p-4">
+                <p className="text-sm font-medium">Cost analytics is not available for this account</p>
+                <p className="mt-1 text-sm text-muted-foreground">
+                  Requires the <code className="font-mono text-xs">costs:read</code> permission. The Cost tab,
+                  cost columns and usage figures are removed server-side.
+                </p>
+              </section>
+            </div>
+          )}
           </TabsContent>
 
           {canViewCosts && (
@@ -639,11 +650,22 @@ function DeliveryFunnel({ effect }: { effect?: AnalyticsEffectiveness }) {
     ["prFinished", "PR finished"],
   ] as const
 
+  // Annotate the largest stage-to-stage drop so the funnel says where runs
+  // are lost, not just how many. Rendered only when a drop actually exists.
+  const noPr = (effect?.funnel.agentStarted ?? 0) - (effect?.funnel.prOpened ?? 0)
+  const unfinishedPr = (effect?.funnel.prOpened ?? 0) - (effect?.funnel.prFinished ?? 0)
+  const biggestDrop =
+    Math.max(noPr, unfinishedPr) > 0
+      ? noPr >= unfinishedPr
+        ? `Biggest drop: agents that finish without opening a PR (${noPr} ${noPr === 1 ? "run" : "runs"}).`
+        : `Biggest drop: PRs opened but not finished (${unfinishedPr} ${unfinishedPr === 1 ? "run" : "runs"}).`
+      : null
+
   return <div className="space-y-3 pt-3">{stages.map(([name, label], index) => {
     const value = effect?.funnel[name] ?? 0
     const previous = index ? effect?.funnel[stages[index - 1][0]] ?? 0 : 0
     return <div key={name}><div className="mb-1 flex justify-between text-sm"><span>{label}</span><span className="tabular-nums">{value} {index ? `(${formatPercent(previous ? value / previous : undefined)})` : ""}</span></div><div className="h-5 rounded bg-muted"><div className="h-full rounded bg-chart-1" style={{ width: `${Math.min(100, (value / (effect?.funnel.agentStarted || 1)) * 100)}%` }} /></div></div>
-  })}</div>
+  })}{biggestDrop && <p className="text-xs text-muted-foreground">{biggestDrop}</p>}</div>
 }
 function TicketThroughputChart({ effect }: { effect?: AnalyticsEffectiveness }) { if (!effect?.ticketsByDay?.length) return <p className="py-8 text-center text-sm text-muted-foreground">No ticket data for this period.</p>; return <ChartContainer config={chartConfig} className="h-64 w-full"><BarChart data={effect.ticketsByDay}><CartesianGrid vertical={false} /><XAxis dataKey="date" tickFormatter={formatDate} /><YAxis allowDecimals={false} /><ChartTooltip content={<ChartTooltipContent />} /><Legend formatter={legendTextFormatter} /><Bar dataKey="delivered" name="Delivered" stackId="ticket" fill="var(--color-ticketDelivered)" /><Bar dataKey="inProgress" name="In progress" stackId="ticket" fill="var(--color-ticketInProgress)" /><Bar dataKey="failed" name="Failed" stackId="ticket" fill="var(--color-ticketFailed)" /></BarChart></ChartContainer> }
 function RunsPerTicketChart({ effect }: { effect?: AnalyticsEffectiveness }) { if (!effect?.runsPerTicket?.length) return <p className="py-8 text-center text-sm text-muted-foreground">No ticket data for this period.</p>; return <ChartContainer config={chartConfig} className="h-64 w-full"><BarChart data={effect.runsPerTicket} layout="vertical" margin={{ right: 36 }}><CartesianGrid horizontal={false} /><XAxis type="number" allowDecimals={false} /><YAxis type="category" dataKey="bucket" width={40} /><Bar dataKey="tickets" fill="var(--chart-1)" radius={4}><LabelList dataKey="tickets" position="right" /></Bar></BarChart></ChartContainer> }

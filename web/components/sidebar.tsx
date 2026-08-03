@@ -1,7 +1,6 @@
 "use client"
 
 import { Search, Pin, X, ChevronDown, PanelLeftClose, PanelLeft, Loader2, AlertCircle, Plus } from "lucide-react"
-import { useBranding } from "@/hooks/use-branding"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { ScrollArea } from "@/components/ui/scroll-area"
@@ -110,7 +109,6 @@ export function Sidebar({
   onSelectWorkflow,
 }: SidebarProps) {
   const tagKeys = allTags
-  const { appName } = useBranding()
   const [activeDragClaw, setActiveDragClaw] = useState<Claw | null>(null)
   const [manualWorkflows, setManualWorkflows] = useState<Workflow[]>([])
   const [showWorkflowPicker, setShowWorkflowPicker] = useState(false)
@@ -288,9 +286,12 @@ export function Sidebar({
   } else {
     sidebar = (
       <aside className="w-[260px] h-full flex flex-col border-r border-border bg-card">
+      {/* The brand now lives in the app-level NavRail; this panel titles
+          itself "Agents" so rail + panel read as chrome + content, not as
+          two competing sidebars. */}
       <div className="flex items-center justify-between p-4 border-b border-border">
-        <h1 className="text-lg font-semibold tracking-tight text-foreground">
-          {appName}
+        <h1 className="text-sm font-semibold tracking-tight text-foreground">
+          Agents
         </h1>
         <div className="flex items-center gap-1">
           {manualWorkflows.length > 0 && (
