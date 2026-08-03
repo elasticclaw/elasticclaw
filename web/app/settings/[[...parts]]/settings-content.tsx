@@ -239,6 +239,9 @@ export default function SettingsSectionPage() {
   const rawWorkspace = hasRouteWorkspace ? firstPart : ""
   const routeWorkspace = rawWorkspace ? decodeURIComponent(rawWorkspace) : ""
   const routeHasOverviewSlug = hasRouteWorkspace && secondPart === "workspaces"
+  // Bare /settings renders the section index instead of redirecting into the
+  // first workspace's overview; every other URL shape keeps its behaviour.
+  const isIndex = parts.length === 0
 
   // Redirect unsupported paths to a safe fallback:
   //   - Invalid section names → /settings/workspaces
@@ -315,6 +318,9 @@ export default function SettingsSectionPage() {
     // Legacy analytics URLs are handled by the /analytics redirect above;
     // never race it with a workspace-selection redirect.
     if (rawSection === LEGACY_ANALYTICS_SECTION) return
+    // The bare /settings URL is the index screen; it must not bounce into the
+    // first workspace's overview.
+    if (isIndex) return
     if (workspaces.length === 0 || !WORKSPACE_SECTIONS.has(section)) return
     const workspace = routeWorkspace && workspaces.some((item) => item.name === routeWorkspace)
       ? routeWorkspace
@@ -327,7 +333,7 @@ export default function SettingsSectionPage() {
       // survive the workspace redirect.
       router.replace(`${target}${window.location.search}`)
     }
-  }, [firstPartIsPlaceholder, rawSection, routeHasOverviewSlug, routeWorkspace, router, section, selectedWorkspace, workspaces])
+  }, [firstPartIsPlaceholder, isIndex, rawSection, routeHasOverviewSlug, routeWorkspace, router, section, selectedWorkspace, workspaces])
 
   async function save(patch: object): Promise<boolean> {
     setSaving(true)
@@ -357,32 +363,34 @@ export default function SettingsSectionPage() {
     }
   }
 
-  const navGroups: { label: string; items: { id: Section; label: string; icon: React.ElementType }[] }[] = [
+  // Descriptions state what each section is for — never a live status this
+  // screen has not fetched.
+  const navGroups: { label: string; items: { id: Section; label: string; description: string; icon: React.ElementType }[] }[] = [
     {
       label: "Workspace",
       items: [
-        { id: "workspaces", label: "Overview", icon: LayoutTemplate },
-        { id: "workflows", label: "Workflows", icon: GitBranch },
-        { id: "github", label: "GitHub Apps", icon: Github },
-        { id: "issue-trackers", label: "Issue Trackers", icon: Zap },
-        { id: "secrets", label: "Secrets", icon: Lock },
-        { id: "mcp-servers", label: "MCP Servers", icon: Zap },
+        { id: "workspaces", label: "Overview", icon: LayoutTemplate, description: "The workspace configuration pushed to the hub, as elasticclaw-config.yaml" },
+        { id: "workflows", label: "Workflows", icon: GitBranch, description: "Enable or pause the workspace's workflows and inspect their runs" },
+        { id: "github", label: "GitHub Apps", icon: Github, description: "GitHub Apps the hub uses to act on this workspace's repositories" },
+        { id: "issue-trackers", label: "Issue Trackers", icon: Zap, description: "Connect Linear, Shortcut, Jira or GitHub Issues to drive agents" },
+        { id: "secrets", label: "Secrets", icon: Lock, description: "Write-only named secrets exposed to this workspace's runs" },
+        { id: "mcp-servers", label: "MCP Servers", icon: Zap, description: "Model Context Protocol servers that add tools to your agents" },
       ],
     },
     {
       label: "System",
       items: [
-        { id: "runtimes", label: "Sandboxes", icon: Cpu },
-        { id: "models", label: "Models", icon: Key },
-        { id: "authentication", label: "Authentication", icon: Shield },
-        { id: "ai-config", label: "Configure with AI", icon: Sparkles },
+        { id: "runtimes", label: "Sandboxes", icon: Cpu, description: "VM providers used to spawn agent sandboxes" },
+        { id: "models", label: "Models", icon: Key, description: "Provider API keys, default models and CLI login profiles" },
+        { id: "authentication", label: "Authentication", icon: Shield, description: "UI password, GitHub OAuth and admin access rules" },
+        { id: "ai-config", label: "Configure with AI", icon: Sparkles, description: "Describe a change in plain English and review the proposed hub.yaml" },
       ],
     },
     {
       label: "Diagnostics",
       items: [
-        { id: "doctor", label: "Doctor", icon: Stethoscope },
-        { id: "troubleshoot", label: "Troubleshoot", icon: Wrench },
+        { id: "doctor", label: "Doctor", icon: Stethoscope, description: "Automated health checks across the hub configuration" },
+        { id: "troubleshoot", label: "Troubleshoot", icon: Wrench, description: "Describe a problem and get a diagnosis from hub state" },
       ],
     },
   ]
@@ -435,77 +443,100 @@ export default function SettingsSectionPage() {
     )
   }
 
-  return (
-    <div className="h-full bg-background flex flex-col overflow-hidden">
-      {/* Header */}
-      <header className="border-b border-border px-6 py-4 flex items-center gap-4">
-        <Button variant="ghost" size="icon" onClick={() => window.location.href = "/"}>
-          <ChevronLeft className="size-4" />
-        </Button>
-        <h1 className="text-lg font-semibold">Configure</h1>
-        {version && <span className="ml-auto text-xs text-muted-foreground font-mono">{version}</span>}
-      </header>
+  // The workspace picker lives in the page header: on the index next to the
+  // title, on workspace-scoped sections next to the back affordance.
+  const workspacePicker = (
+    <div className="relative w-52">
+      <div className="pointer-events-none absolute left-3 top-1/2 z-10 flex size-5 -translate-y-1/2 items-center justify-center rounded bg-blue-600 text-[11px] font-semibold text-white shadow-sm">
+        {selectedWorkspaceInitial}
+      </div>
+      <select
+        aria-label="Workspace"
+        value={selectedWorkspace}
+        onChange={(event) => selectWorkspace(event.target.value)}
+        disabled={workspaces.length === 0}
+        className="h-9 w-full appearance-none rounded-lg border border-border bg-transparent pl-10 pr-10 text-sm font-semibold outline-none transition-colors hover:bg-secondary focus:bg-secondary"
+      >
+        {workspaces.length === 0 ? (
+          <option value="">{selectedWorkspaceLabel}</option>
+        ) : (
+          workspaces.map((workspace) => (
+            <option key={workspace.name} value={workspace.name}>{workspace.name}</option>
+          ))
+        )}
+      </select>
+      <ChevronDown className="pointer-events-none absolute right-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
+    </div>
+  )
 
-      <div className="flex flex-1 min-h-0 overflow-hidden">
-        {/* Left nav */}
-        <aside className="w-56 border-r border-border p-4 flex flex-col overflow-y-auto">
-          <div className="relative mb-1">
-            <div className="pointer-events-none absolute left-3 top-1/2 z-10 flex size-5 -translate-y-1/2 items-center justify-center rounded bg-blue-600 text-[11px] font-semibold text-white shadow-sm">
-              {selectedWorkspaceInitial}
+  if (isIndex) {
+    return (
+      <div className="h-full overflow-y-auto bg-background">
+        <div className="mx-auto max-w-3xl px-8 py-8">
+          <header className="flex flex-wrap items-start justify-between gap-4">
+            <div>
+              <h1 className="text-lg font-semibold">Settings</h1>
+              <p className="mt-0.5 text-sm text-muted-foreground">
+                Workspace configuration · {selectedWorkspaceLabel}
+              </p>
             </div>
-            <select
-              aria-label="Workspace"
-              value={selectedWorkspace}
-              onChange={(event) => selectWorkspace(event.target.value)}
-              disabled={workspaces.length === 0}
-              className="h-10 w-full appearance-none rounded-lg border border-transparent bg-transparent pl-10 pr-10 text-sm font-semibold outline-none transition-colors hover:bg-secondary focus:bg-secondary"
-            >
-              {workspaces.length === 0 ? (
-                <option value="">{selectedWorkspaceLabel}</option>
-              ) : (
-                workspaces.map((workspace) => (
-                  <option key={workspace.name} value={workspace.name}>{workspace.name}</option>
-                ))
-              )}
-            </select>
-            <ChevronDown className="pointer-events-none absolute right-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
-          </div>
-          <div className="space-y-1 flex-1">
-            {navGroups.map((group, groupIdx) => (
-              <div key={group.label}>
-                {groupIdx > 0 && <div className="h-5" />}
-                {groupIdx > 0 && (
-                  <p className="px-3 pb-1 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground/70">
-                    {group.label}
-                  </p>
-                )}
-                {group.items.map(({ id, label, icon: Icon }) => (
+            {workspacePicker}
+          </header>
+          <p className="mt-4 text-sm text-muted-foreground">
+            Workspace sections apply to the selected workspace; System and Diagnostics apply to the whole hub.
+          </p>
+          {navGroups.map((group) => (
+            <section key={group.label} className="mt-6">
+              <p className="px-1 pb-1.5 text-[10px] font-semibold uppercase tracking-widest text-muted-foreground/70">
+                {group.label}
+              </p>
+              <div className="divide-y divide-border overflow-hidden rounded-lg border border-border">
+                {group.items.map(({ id, label, description, icon: Icon }) => (
                   <Link
                     key={id}
                     href={settingsHref(id)}
-                    className={cn(
-                      "w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition-colors text-left",
-                      section === id
-                        ? "bg-primary/10 text-primary font-medium"
-                        : "text-muted-foreground hover:bg-secondary hover:text-foreground"
-                    )}
+                    className="group flex items-center gap-3 px-4 py-3 transition-colors hover:bg-secondary/50"
                   >
-                    <Icon className="size-4 flex-shrink-0" />
-                    {label}
+                    <Icon className="size-4 shrink-0 text-muted-foreground" />
+                    <div className="min-w-0 flex-1">
+                      <p className="text-sm font-medium">{label}</p>
+                      <p className="truncate text-xs text-muted-foreground">{description}</p>
+                    </div>
+                    <span className="flex shrink-0 items-center gap-1 rounded-md border border-border px-2 py-1 text-xs text-muted-foreground transition-colors group-hover:bg-secondary group-hover:text-foreground">
+                      Open <ArrowRight className="size-3" />
+                    </span>
                   </Link>
                 ))}
               </div>
-            ))}
-          </div>
+            </section>
+          ))}
           {version && (
-            <p className="text-xs text-muted-foreground/50 px-3 pt-4 font-mono">
-              v{version}
-            </p>
+            <p className="mt-8 font-mono text-xs text-muted-foreground/50">v{version}</p>
           )}
-        </aside>
+        </div>
+      </div>
+    )
+  }
 
-        {/* Content */}
-        <main className={(section === "ai-config" || section === "troubleshoot") ? "flex-1 min-h-0 flex flex-col overflow-hidden" : "flex-1 overflow-y-auto p-8 max-w-2xl"}>
+  const sectionLabel = navGroups.flatMap((group) => group.items).find((item) => item.id === section)?.label ?? "Settings"
+
+  return (
+    <div className="h-full bg-background flex flex-col overflow-hidden">
+      {/* Section page header: back to the settings index + section title */}
+      <header className="flex items-center gap-2 border-b border-border px-6 py-3">
+        <Link
+          href="/settings"
+          className="flex items-center gap-1 rounded-md px-2 py-1 text-sm text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
+        >
+          <ChevronLeft className="size-4" />
+          Settings
+        </Link>
+        <span className="text-muted-foreground/40">/</span>
+        <h1 className="text-sm font-semibold">{sectionLabel}</h1>
+        {WORKSPACE_SECTIONS.has(section) && <div className="ml-auto">{workspacePicker}</div>}
+      </header>
+
+      <main className={(section === "ai-config" || section === "troubleshoot") ? "flex-1 min-h-0 flex flex-col overflow-hidden" : "flex-1 overflow-y-auto p-8 max-w-2xl"}>
           {error && <p className="mb-4 text-sm text-red-500">{error}</p>}
           {success && <p className="mb-4 text-sm text-green-500">{success}</p>}
 
@@ -545,8 +576,7 @@ export default function SettingsSectionPage() {
           {section === "troubleshoot" && (
             <TroubleshootSection />
           )}
-        </main>
-      </div>
+      </main>
     </div>
   )
 }
