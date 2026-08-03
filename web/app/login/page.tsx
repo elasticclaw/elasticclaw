@@ -3,7 +3,7 @@
 import { useState, useEffect, Suspense } from "react"
 import { useRouter, useSearchParams } from "next/navigation"
 import { getHubUrl } from "@/lib/hub-url"
-import { clearConfig } from "@/lib/api"
+import { clearConfig, fetchAuthMe } from "@/lib/api"
 import { setGitHubToken, setHubToken, getOAuthState, setOAuthState, removeOAuthState, getOAuthNext, setOAuthNext, removeOAuthNext } from "@/lib/auth-storage"
 import { useBranding } from "@/hooks/use-branding"
 
@@ -16,6 +16,18 @@ function safeNextPath(next: string | null): string | null {
   if (!next) return null
   if (!next.startsWith("/") || next.startsWith("//")) return null
   return next
+}
+
+// Default landing after sign-in: admins go to /analytics, everyone else to /.
+// An explicit ?next= destination always wins over the role-based default.
+async function resolveLanding(next: string): Promise<string> {
+  if (next !== "/") return next
+  try {
+    const me = await fetchAuthMe()
+    return me.is_admin ? "/analytics" : "/"
+  } catch {
+    return "/"
+  }
 }
 
 function randomState(): string {
@@ -86,7 +98,9 @@ function LoginForm() {
           if (data.github_token) {
             clearConfig()
             setGitHubToken(data.github_token)
-            router.replace(callbackNext)
+            return resolveLanding(callbackNext).then((landing) => {
+              if (!cancelled) router.replace(landing)
+            })
           } else {
             throw new Error("missing token")
           }
@@ -133,7 +147,7 @@ function LoginForm() {
             }
           }
         } catch { /* ignore */ }
-        router.push(next)
+        router.push(await resolveLanding(next))
         router.refresh()
       } else {
         setError("Invalid password")

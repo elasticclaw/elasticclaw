@@ -1,11 +1,14 @@
 "use client"
 
 import { Search, Pin, X, ChevronDown, PanelLeftClose, PanelLeft, Loader2, AlertCircle, LogOut, Settings, Plus } from "lucide-react"
+import Link from "next/link"
+import { usePathname } from "next/navigation"
 import { useBranding } from "@/hooks/use-branding"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { ClawCard } from "@/components/claw-card"
+import { PRIMARY_NAV, isPrimaryNavActive } from "@/components/primary-nav"
 import { clearConfig, fetchWorkspaces, type Workflow } from "@/lib/api"
 import { getAuthToken } from "@/lib/auth-storage"
 import {
@@ -109,11 +112,15 @@ export function Sidebar({
   onClearTagFilters,
   isCollapsed,
   onToggleCollapse,
-  isAdmin = true,
+  // Default to false so the admin-only Settings gear never flashes for
+  // non-admins before /api/auth/me resolves.
+  isAdmin = false,
   onSelectWorkflow,
 }: SidebarProps) {
   const tagKeys = allTags
   const { appName } = useBranding()
+  const pathname = usePathname()
+  const isNavActive = (href: string) => isPrimaryNavActive(pathname, href)
   const [activeDragClaw, setActiveDragClaw] = useState<Claw | null>(null)
   const [manualWorkflows, setManualWorkflows] = useState<Workflow[]>([])
   const [showWorkflowPicker, setShowWorkflowPicker] = useState(false)
@@ -247,6 +254,21 @@ export function Sidebar({
             </Button>
           )}
         </div>
+        <nav className="p-2 border-b border-border flex flex-col items-center gap-1">
+          {PRIMARY_NAV.map(({ href, label, icon: Icon }) => (
+            <Link
+              key={href}
+              href={href}
+              title={label}
+              className={cn(
+                "size-8 rounded-md flex items-center justify-center transition-colors hover:bg-accent",
+                isNavActive(href) ? "bg-accent text-foreground" : "text-muted-foreground"
+              )}
+            >
+              <Icon className="size-4" />
+            </Link>
+          ))}
+        </nav>
         <div className="flex flex-col items-center gap-1 py-2 overflow-y-auto flex-1">
           {allClaws.map((claw) => {
             const isSelected = claw.id === selectedClawId
@@ -319,6 +341,24 @@ export function Sidebar({
           </Button>
         </div>
       </div>
+
+      <nav className="p-2 border-b border-border space-y-0.5">
+        {PRIMARY_NAV.map(({ href, label, icon: Icon }) => (
+          <Link
+            key={href}
+            href={href}
+            className={cn(
+              "flex items-center gap-2 px-2 py-1.5 rounded-md text-sm transition-colors",
+              isNavActive(href)
+                ? "bg-accent text-foreground font-medium"
+                : "text-muted-foreground hover:bg-accent hover:text-foreground"
+            )}
+          >
+            <Icon className="size-4 flex-shrink-0" />
+            {label}
+          </Link>
+        ))}
+      </nav>
 
       <div className="p-3 border-b border-border space-y-2">
         <div className="relative">
