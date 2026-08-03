@@ -30,6 +30,7 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { ChartContainer, ChartTooltip, ChartTooltipContent, type ChartConfig } from "@/components/ui/chart"
 import { RunLogsDialog } from "@/components/run-logs-dialog"
+import { useCapabilities } from "@/hooks/use-capabilities"
 import { Input } from "@/components/ui/input"
 import { Select, SelectContent, SelectItem, SelectTrigger } from "@/components/ui/select"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
@@ -47,6 +48,51 @@ export type DetailState = {
 
 type Cancellation = {
   cancelled: boolean
+}
+
+// useRunDetails loads attempts/events/PRs for the selected run. Shared by
+// TaskRunAnalyticsView, AnalyticsCommandCenter, and the /runs page so the
+// detail-loading logic lives in exactly one place.
+export function useRunDetails(runId: string | null) {
+  const [details, setDetails] = useState<DetailState | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    if (!runId) {
+      queueMicrotask(() => {
+        if (cancelled) return
+        setDetails(null)
+        setError(null)
+        setLoading(false)
+      })
+      return () => { cancelled = true }
+    }
+    queueMicrotask(() => {
+      if (cancelled) return
+      setLoading(true)
+      setError(null)
+      setDetails(null)
+      Promise.all([
+        fetchTaskRunAttempts(runId),
+        fetchTaskRunEvents(runId),
+        fetchTaskRunPRs(runId),
+      ])
+        .then(([attempts, events, prs]) => {
+          if (!cancelled) setDetails({ attempts: attempts.attempts, events: events.events, prs: prs.prs })
+        })
+        .catch((err) => {
+          if (!cancelled) setError(err instanceof Error ? err.message : "Unable to load run details")
+        })
+        .finally(() => {
+          if (!cancelled) setLoading(false)
+        })
+    })
+    return () => { cancelled = true }
+  }, [runId])
+
+  return { details, loading, error }
 }
 
 const anyValue = "__any__"
@@ -125,11 +171,9 @@ export function TaskRunAnalyticsView({ workspaceScope }: { workspaceScope?: stri
   const [options, setOptions] = useState<TaskRunFilterOptions | null>(null)
   const [nextCursor, setNextCursor] = useState<string | undefined>()
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null)
-  const [details, setDetails] = useState<DetailState | null>(null)
   const [loading, setLoading] = useState(true)
-  const [detailLoading, setDetailLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [detailError, setDetailError] = useState<string | null>(null)
+  const { details, loading: detailLoading, error: detailError } = useRunDetails(selectedRunId)
   const optionsRef = useRef<TaskRunFilterOptions | null>(null)
   const loadCancellationRef = useRef<Cancellation | null>(null)
 
@@ -172,8 +216,6 @@ export function TaskRunAnalyticsView({ workspaceScope }: { workspaceScope?: stri
         setOptions(optionsData)
       }
       setSelectedRunId(null)
-      setDetails(null)
-      setDetailError(null)
     } catch (err) {
       if (cancellation?.cancelled) return
       setError(err instanceof Error ? err.message : "Unable to load analytics")
@@ -192,35 +234,6 @@ export function TaskRunAnalyticsView({ workspaceScope }: { workspaceScope?: stri
     })
     return () => { cancellation.cancelled = true }
   }, [load])
-
-  useEffect(() => {
-    if (!selectedRunId) {
-      return
-    }
-    let cancelled = false
-    queueMicrotask(() => {
-      if (cancelled) return
-      setDetailLoading(true)
-      setDetailError(null)
-      setDetails(null)
-      Promise.all([
-        fetchTaskRunAttempts(selectedRunId),
-        fetchTaskRunEvents(selectedRunId),
-        fetchTaskRunPRs(selectedRunId),
-      ])
-        .then(([attempts, events, prs]) => {
-          if (cancelled) return
-          setDetails({ attempts: attempts.attempts, events: events.events, prs: prs.prs })
-        })
-        .catch((err) => {
-          if (!cancelled) setDetailError(err instanceof Error ? err.message : "Unable to load run details")
-        })
-        .finally(() => {
-          if (!cancelled) setDetailLoading(false)
-        })
-    })
-    return () => { cancelled = true }
-  }, [selectedRunId])
 
   const replaceFilterParams = useCallback((updates: Partial<Record<UrlFilterKey, string | boolean | undefined>>) => {
     const params = new URLSearchParams(searchParamsKey)
@@ -603,6 +616,9 @@ export function FilterSelect({ label, value, values, onChange }: { label: string
 }
 
 export function RunDetailPanel({ run, details, loading, error, onClose }: { run: TaskRunSummary | null; details: DetailState | null; loading: boolean; error: string | null; onClose: () => void }) {
+  // The Usage block (tokens, estimated cost, model) is capability-gated here,
+  // in the one shared panel, so /runs and /analytics inherit the same gating.
+  const { canViewCosts } = useCapabilities()
   // The portal target (document.body) only exists on the client, so render
   // nothing during SSR/hydration. useSyncExternalStore is the recommended way
   // to read client-only environment state without a setState-in-effect flip.
@@ -644,7 +660,7 @@ export function RunDetailPanel({ run, details, loading, error, onClose }: { run:
           <DetailItem label="Failure" value={run.failureType ? formatLabel(run.failureType) : "None"} />
           <DetailItem label="Human" value={String(run.humanInteractionCount)} />
         </section>
-        {hasUsageData(run) && (
+        {canViewCosts && hasUsageData(run) && (
           <section>
             <h3 className="mb-2 text-xs font-medium uppercase text-muted-foreground">Usage</h3>
             <div className="grid grid-cols-2 gap-2 text-sm">
@@ -767,7 +783,7 @@ function formatFilterList(labels: string[]) {
   return filterListFormatter.format(labels)
 }
 
-function formatLabel(value: string) {
+export function formatLabel(value: string) {
   return value.replace(/_/g, " ").replace(/\b\w/g, (match) => match.toUpperCase())
 }
 
@@ -778,7 +794,7 @@ const usdFormatter = new Intl.NumberFormat(undefined, {
   maximumFractionDigits: 2,
 })
 
-function formatUSD(value: number | null | undefined) {
+export function formatUSD(value: number | null | undefined) {
   if (value === null || value === undefined || Number.isNaN(value)) return "—"
   return usdFormatter.format(value)
 }
@@ -788,12 +804,12 @@ const compactTokenFormatter = new Intl.NumberFormat(undefined, {
   maximumFractionDigits: 1,
 })
 
-function formatCompactTokens(value: number | null | undefined) {
+export function formatCompactTokens(value: number | null | undefined) {
   if (value === null || value === undefined || Number.isNaN(value)) return "—"
   return compactTokenFormatter.format(value)
 }
 
-function formatDurationMs(ms: number | null | undefined) {
+export function formatDurationMs(ms: number | null | undefined) {
   if (ms === null || ms === undefined || Number.isNaN(ms)) return "—"
   const totalSeconds = Math.max(0, Math.round(ms / 1000))
   if (totalSeconds < 60) return `${totalSeconds}s`
@@ -818,7 +834,7 @@ function durationBetween(start: number | null | undefined, end: number | null | 
   return ms >= 0 ? ms : undefined
 }
 
-function runDurationMs(run: TaskRunSummary) {
+export function runDurationMs(run: TaskRunSummary) {
   return durationBetween(run.startedAt, run.finishedAt)
 }
 
@@ -848,7 +864,7 @@ function formatChartDate(value: string) {
   return new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric" }).format(new Date(year, month - 1, day))
 }
 
-function formatTime(value: number | null | undefined) {
+export function formatTime(value: number | null | undefined) {
   // The analytics API uses 0 as the absent timestamp sentinel for phase fields.
   if (value === null || value === undefined || value === 0) return "None"
   return new Intl.DateTimeFormat(undefined, {
