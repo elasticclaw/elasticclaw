@@ -2,7 +2,7 @@
 
 import Link from "next/link"
 import { usePathname } from "next/navigation"
-import { BarChart3, Bot, LogOut, Settings } from "lucide-react"
+import { BarChart3, Bot, LogOut, Settings, User } from "lucide-react"
 import { useBranding } from "@/hooks/use-branding"
 import { useCapabilities } from "@/hooks/use-capabilities"
 import { clearConfig } from "@/lib/api"
@@ -98,7 +98,16 @@ export function NavRail() {
   // admins land on /analytics, everyone else on /. Rendered only once
   // /api/auth/me has resolved so the badge never jumps between items.
   const homeHref = me ? (isAdmin ? "/analytics" : "/") : null
-  const displayName = me?.name || me?.login || ""
+
+  // Password sessions carry no GitHub identity: /api/auth/me returns only
+  // auth_method, is_admin and capabilities. Falling back to login/name would
+  // render an empty name and a bare "@" for the local password flow, which is
+  // the only way to sign in when GitHub OAuth is not configured.
+  const hasGitHubIdentity = Boolean(me?.login)
+  const displayName = hasGitHubIdentity ? me?.name || me?.login || "" : "Signed in"
+  const identitySubtitle = hasGitHubIdentity
+    ? `@${me?.login}${isAdmin ? " · Admin" : ""}`
+    : `Password session${isAdmin ? " · Admin" : ""}`
 
   return (
     <aside className="flex h-full w-52 shrink-0 flex-col border-r border-border bg-background">
@@ -141,7 +150,7 @@ export function NavRail() {
       <div className="border-t border-border p-3">
         {me && (
           <div className="flex items-center gap-2.5 px-1 pb-2">
-            {me.avatar_url ? (
+            {hasGitHubIdentity && me.avatar_url ? (
               /* Static export cannot use the Next image optimizer; avatars
                  come from an arbitrary hub-configured host. */
               // eslint-disable-next-line @next/next/no-img-element
@@ -152,15 +161,12 @@ export function NavRail() {
               />
             ) : (
               <div className="flex size-8 shrink-0 items-center justify-center rounded-full bg-accent text-xs font-medium text-foreground">
-                {initialsOf(displayName)}
+                {hasGitHubIdentity ? initialsOf(displayName) : <User className="size-4" />}
               </div>
             )}
             <div className="min-w-0">
               <p className="truncate text-sm font-medium">{displayName}</p>
-              <p className="truncate text-xs text-muted-foreground">
-                @{me.login}
-                {isAdmin && " · Admin"}
-              </p>
+              <p className="truncate text-xs text-muted-foreground">{identitySubtitle}</p>
             </div>
           </div>
         )}
