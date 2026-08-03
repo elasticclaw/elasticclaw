@@ -100,6 +100,26 @@ func (s *Server) handleWorkspacesPush(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Author-time notify validation runs over every nested workflow BEFORE any
+	// workspace is written, so a bad "via" fails the whole push as a 400
+	// instead of a partial save. (Nil workspaces/workflows fall through to the
+	// save loop below, which already reports them.)
+	var invalid []string
+	for _, workspace := range req.Workspaces {
+		if workspace == nil {
+			continue
+		}
+		for _, workflow := range workspace.Workflows {
+			if err := s.validateWorkflowNotifyVias(workflow); err != nil {
+				invalid = append(invalid, fmt.Sprintf("workspace %q: %v", workspace.Name, err))
+			}
+		}
+	}
+	if len(invalid) > 0 {
+		http.Error(w, "invalid workspace: "+strings.Join(invalid, "; "), http.StatusBadRequest)
+		return
+	}
+
 	var saveErrs []string
 	for _, workspace := range req.Workspaces {
 		if workspace == nil {
@@ -185,6 +205,10 @@ func (s *Server) handleWorkspaceWorkflowsPush(w http.ResponseWriter, r *http.Req
 			return
 		}
 		if err := workflow.Validate(); err != nil {
+			http.Error(w, "invalid workflow: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		if err := s.validateWorkflowNotifyVias(workflow); err != nil {
 			http.Error(w, "invalid workflow: "+err.Error(), http.StatusBadRequest)
 			return
 		}
@@ -346,6 +370,11 @@ func (s *Server) handleWorkspaceWorkflowPatch(w http.ResponseWriter, r *http.Req
 		return
 	}
 	workflow.RawConfig = ""
+	// Deliberately no validateWorkflowNotifyVias here: a patch only toggles
+	// flags on an already-persisted pipeline without changing its content, and
+	// disabling a workflow stranded by a later hub.yaml notifier delete/rename
+	// must keep working — the doctor's checkNotifyActions owns flagging that
+	// drift.
 	if err := saveExternalWorkflows(workspace.Name, []*types.WorkflowConfig{workflow}); err != nil {
 		http.Error(w, "save workflow: "+err.Error(), http.StatusInternalServerError)
 		return

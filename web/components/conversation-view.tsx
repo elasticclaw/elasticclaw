@@ -1085,10 +1085,6 @@ function isHiddenActivity(message: Message): boolean {
   return message.activity?.kind === "still_working" || message.content.startsWith("No streamed output")
 }
 
-function isStaleModelWait(message: Message, latestActivity: Message | null): boolean {
-  return message.activity?.kind === "model_started" && latestActivity?.id !== message.id
-}
-
 function hasEarlierTerminalAssistant(messages: Message[], index: number): boolean {
   for (let i = index - 1; i >= 0; i -= 1) {
     if (isTerminalAssistantMessage(messages[i])) return true
@@ -1129,24 +1125,16 @@ type ConversationItem =
 function compactActivityRuns(messages: Message[]): ConversationItem[] {
   const items: ConversationItem[] = []
   let run: Message[] = []
-  const latestActivity = latestActivityMessage(messages)
 
   const flush = () => {
-    const visible = run.filter((message) => !isHiddenActivity(message) && !isStaleModelWait(message, latestActivity))
+    const visible = run.filter((message) => !isHiddenActivity(message))
     run = []
     if (visible.length === 0) return
-    if (visible.length === 1) {
-      items.push({ type: "message", message: visible[0] })
-      return
-    }
-    const collapsed = visible.slice(0, -1)
-    const latest = visible[visible.length - 1]
     items.push({
       type: "activity-summary",
-      id: `activity-summary-${collapsed[0].id}-${collapsed[collapsed.length - 1].id}`,
-      messages: collapsed,
+      id: `activity-summary-${visible[0].id}-${visible[visible.length - 1].id}`,
+      messages: visible,
     })
-    items.push({ type: "message", message: latest })
   }
 
   for (const message of messages) {

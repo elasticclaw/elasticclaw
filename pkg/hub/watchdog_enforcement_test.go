@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/elasticclaw/elasticclaw/pkg/types"
+	"github.com/google/uuid"
 	"nhooyr.io/websocket"
 	"nhooyr.io/websocket/wsjson"
 )
@@ -465,6 +466,92 @@ func TestRestartDuringBootstrapDoesNotEnqueueResume(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 	var n int
 	if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND content LIKE ?`, clawID, restartResumePrefix+"%").Scan(&n); err != nil || n != 0 {
+		t.Fatalf("resume rows=%d err=%v, want 0", n, err)
+	}
+}
+
+func TestSessionRotatedEnqueuesResume(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{ClawToken: "claw-token"}, "", "", "")
+	const clawID = "watchdog-session-rotated"
+	conn := watchdogClaw(t, s, clawID)
+	_ = watchdogClawConn(t, s, clawID)
+	if _, err := db.Exec(`UPDATE claws SET status='connected', bootstrap_ok=1, issue_title='Fix session', github_issue_id='owner/repo#42' WHERE id=?`, clawID); err != nil {
+		t.Fatal(err)
+	}
+	if err := wsjson.Write(context.Background(), conn, types.WSMessage{Type: "session_rotated"}); err != nil {
+		t.Fatalf("write session_rotated: %v", err)
+	}
+	count := func() int {
+		var n int
+		_ = db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND role='hub' AND content LIKE ?`, clawID, sessionRotatedResumePrefix+"%").Scan(&n)
+		return n
+	}
+	eventuallyWatchdog(t, func() bool { return count() == 1 }, "session rotated resume")
+}
+
+func TestSessionRotatedResumeThrottled(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{ClawToken: "claw-token"}, "", "", "")
+	const clawID = "watchdog-session-rotated-throttled"
+	conn := watchdogClaw(t, s, clawID)
+	_ = watchdogClawConn(t, s, clawID)
+	if _, err := db.Exec(`UPDATE claws SET status='connected', bootstrap_ok=1, issue_title='Fix session' WHERE id=?`, clawID); err != nil {
+		t.Fatal(err)
+	}
+	// A resume prompt already went out moments ago — a second rotation inside
+	// the throttle window must not enqueue another one.
+	if _, err := db.Exec(`INSERT INTO messages(id,claw_id,tenant_id,role,content,created_at) VALUES(?,?,?,?,?,?)`,
+		uuid.NewString(), clawID, "test-tenant-id", "hub", sessionRotatedResumePrefix+" earlier resume", now().Add(-time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if err := wsjson.Write(context.Background(), conn, types.WSMessage{Type: "session_rotated"}); err != nil {
+		t.Fatalf("write session_rotated: %v", err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	var n int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND role='hub' AND content LIKE ?`, clawID, sessionRotatedResumePrefix+"%").Scan(&n); err != nil || n != 1 {
+		t.Fatalf("resume rows=%d err=%v, want 1 (throttled)", n, err)
+	}
+}
+
+func TestSessionRotatedResumeThrottleWindowExpires(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{ClawToken: "claw-token"}, "", "", "")
+	const clawID = "watchdog-session-rotated-throttle-expired"
+	conn := watchdogClaw(t, s, clawID)
+	_ = watchdogClawConn(t, s, clawID)
+	if _, err := db.Exec(`UPDATE claws SET status='connected', bootstrap_ok=1, issue_title='Fix session' WHERE id=?`, clawID); err != nil {
+		t.Fatal(err)
+	}
+	// The previous resume is older than the throttle window, so a new
+	// rotation must enqueue a fresh resume prompt.
+	if _, err := db.Exec(`INSERT INTO messages(id,claw_id,tenant_id,role,content,created_at) VALUES(?,?,?,?,?,?)`,
+		uuid.NewString(), clawID, "test-tenant-id", "hub", sessionRotatedResumePrefix+" earlier resume", now().Add(-sessionRotatedResumeThrottle-time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if err := wsjson.Write(context.Background(), conn, types.WSMessage{Type: "session_rotated"}); err != nil {
+		t.Fatalf("write session_rotated: %v", err)
+	}
+	count := func() int {
+		var n int
+		_ = db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND role='hub' AND content LIKE ?`, clawID, sessionRotatedResumePrefix+"%").Scan(&n)
+		return n
+	}
+	eventuallyWatchdog(t, func() bool { return count() == 2 }, "session rotated resume after throttle window")
+}
+
+func TestSessionRotatedNotConnectedDoesNotEnqueueResume(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{ClawToken: "claw-token"}, "", "", "")
+	const clawID = "watchdog-session-rotated-not-connected"
+	conn := watchdogClaw(t, s, clawID)
+	_ = watchdogClawConn(t, s, clawID)
+	if _, err := db.Exec(`UPDATE claws SET status='starting', bootstrap_ok=1, issue_title='Fix session', github_issue_id='owner/repo#42' WHERE id=?`, clawID); err != nil {
+		t.Fatal(err)
+	}
+	if err := wsjson.Write(context.Background(), conn, types.WSMessage{Type: "session_rotated"}); err != nil {
+		t.Fatalf("write session_rotated: %v", err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	var n int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND content LIKE ?`, clawID, sessionRotatedResumePrefix+"%").Scan(&n); err != nil || n != 0 {
 		t.Fatalf("resume rows=%d err=%v, want 0", n, err)
 	}
 }

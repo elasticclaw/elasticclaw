@@ -2344,6 +2344,42 @@ func TestDeliveredPromptReservesTurnBeforeFirstActivity(t *testing.T) {
 	}
 }
 
+func TestSendNextQueuedMessageDeliversImmediatelyAfterTurnEnd(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{ClawToken: "claw-token"}, "", "", "")
+	const clawID = "claw-inter-turn-no-cooldown"
+	insertPendingMessage(t, db, clawID, "first", now().Add(-time.Second))
+	insertPendingMessage(t, db, clawID, "second", now())
+
+	ts := httptest.NewServer(s.Handler())
+	t.Cleanup(ts.Close)
+	clawWS := connectTestClaw(t, ts, clawID)
+	t.Cleanup(func() { _ = clawWS.Close(websocket.StatusNormalClosure, "done") })
+	if got := readTestHubMessage(t, clawWS).Content; got != "first" {
+		t.Fatalf("first delivered content = %q, want first", got)
+	}
+
+	s.mu.RLock()
+	cc := s.claws[clawID]
+	s.mu.RUnlock()
+	cc.mu.Lock()
+	cc.finishTurnLocked()
+	cc.mu.Unlock()
+
+	// The hub no longer pauses between turns: lock-conflict recovery lives in
+	// the bridge (same-session sessions.send retry with backoff), so the next
+	// queued message must be admitted without delay.
+	start := time.Now()
+	s.sendNextQueuedMessage(cc)
+	elapsed := time.Since(start)
+
+	if got := readTestHubMessage(t, clawWS).Content; got != "second" {
+		t.Fatalf("second delivered content = %q, want second", got)
+	}
+	if elapsed > 500*time.Millisecond {
+		t.Fatalf("sendNextQueuedMessage took too long: %s, want prompt delivery", elapsed)
+	}
+}
+
 func TestReconnectRedeliversMessageUnmarkedAfterSuccessfulWrite(t *testing.T) {
 	s, db := NewTestServerWithConfig(t, &types.HubConfig{ClawToken: "claw-token"}, "", "", "")
 	const clawID = "claw-redeliver-pending"
@@ -2549,5 +2585,55 @@ func TestMergeDockerContainerEnvPreservesWorkflowSecrets(t *testing.T) {
 	}
 	if got["ELASTICCLAW_CLAW_ID"] != "claw-123" {
 		t.Fatalf("ELASTICCLAW_CLAW_ID = %q, want managed claw ID", got["ELASTICCLAW_CLAW_ID"])
+	}
+}
+
+func TestAgentActivityGenericReasoningUpsertsButToolEventsInsert(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{ClawToken: "claw-token"}, "", "", "")
+	const clawID = "activity-storage-test"
+	conn := watchdogClaw(t, s, clawID)
+	_ = watchdogClawConn(t, s, clawID)
+
+	write := func(m types.WSMessage) {
+		if err := wsjson.Write(context.Background(), conn, m); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Send a burst of generic reasoning activity frames.
+	for i := 0; i < 5; i++ {
+		write(types.WSMessage{Type: "agent_activity", Payload: map[string]any{
+			"kind":    "activity",
+			"message": fmt.Sprintf("The user wants%s", strings.Repeat(".", i+1)),
+		}})
+	}
+	// Send two distinct tool events.
+	write(types.WSMessage{Type: "agent_activity", Payload: map[string]any{
+		"kind": "tool", "tool": "bash", "phase": "running", "command": "git status",
+	}})
+	write(types.WSMessage{Type: "agent_activity", Payload: map[string]any{
+		"kind": "tool", "tool": "bash", "phase": "completed", "command": "git status",
+	}})
+
+	eventuallyWatchdog(t, func() bool {
+		var n int
+		_ = db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND role='activity'`, clawID).Scan(&n)
+		return n >= 3
+	}, "activity rows persisted")
+
+	var total int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND role='activity'`, clawID).Scan(&total); err != nil {
+		t.Fatalf("count activity rows: %v", err)
+	}
+	if total != 3 {
+		t.Fatalf("activity rows = %d, want 3 (1 upserted reasoning + 2 tool events)", total)
+	}
+
+	var latestReasoning string
+	if err := db.QueryRow(`SELECT content FROM messages WHERE claw_id=? AND id=?`, clawID, "activity-stream:"+clawID).Scan(&latestReasoning); err != nil {
+		t.Fatalf("read upserted reasoning row: %v", err)
+	}
+	if !strings.Contains(latestReasoning, "The user wants") {
+		t.Fatalf("upserted reasoning content unexpected: %q", latestReasoning)
 	}
 }

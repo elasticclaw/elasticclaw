@@ -35,6 +35,7 @@ import (
 
 	"github.com/elasticclaw/elasticclaw/pkg/cliversion"
 	"github.com/elasticclaw/elasticclaw/pkg/hub/artifact"
+	"github.com/elasticclaw/elasticclaw/pkg/hub/notify"
 	"github.com/elasticclaw/elasticclaw/pkg/hub/pipeline"
 	daytona "github.com/elasticclaw/elasticclaw/pkg/provider/daytona"
 	exedevProvider "github.com/elasticclaw/elasticclaw/pkg/provider/exedev"
@@ -88,6 +89,12 @@ type Server struct {
 	checkpointMu      sync.Mutex
 	checkpointWaiters map[string]chan error // checkpoint_id -> waiter
 
+	// agentIdleBaselineAt caches the persisted agent_idle baseline (see
+	// agentIdleBaseline in agent_idle.go); zero = not loaded or feature off.
+	agentIdleBaselineMu      sync.Mutex
+	agentIdleBaselineAt      time.Time
+	agentIdleBaselineCleared bool
+
 	replicatedBootstrapEnvMu sync.Mutex
 	replicatedBootstrapEnv   map[string]map[string]string // temporary handoff while a Replicated VM becomes reachable
 
@@ -133,6 +140,43 @@ type Server struct {
 	reaperFirstSeen     map[string]time.Time
 	nowFunc             func() time.Time
 	terminateVMOverride func(provider, id string) error // test seam for terminal cleanup
+
+	// Constructed notifiers are cached per notifier name so instances are
+	// genuinely reused across features (the lifecycle poller, the manual test
+	// endpoint, future pipeline notify actions) instead of being rebuilt on
+	// every use. The map is bounded by the number of configured notifier
+	// names; each entry's key covers the config and a secret digest, so an
+	// edit or token rotation rebuilds that notifier on next use. Send pacing
+	// deliberately does NOT depend on this cache — the Slack provider keys
+	// its limiter on the destination channel process-wide — so a cache miss
+	// can never reset pacing.
+	notifierCacheMu sync.Mutex
+	notifierCache   map[string]cachedNotifier
+	// notifierSettingOverrides are merged into every notifier's settings at
+	// construction. Tests use it to point a provider at an httptest server
+	// (api_base) and to collapse send pacing (min_send_interval).
+	notifierSettingOverrides map[string]any
+
+	// lifecyclePendingDeliveries holds notification deliveries whose
+	// post-send bookkeeping write failed; they are retried each tick and,
+	// while stashed, count as delivered so the message is never re-sent
+	// externally (see recordNotificationDelivery). Only touched from the
+	// lifecycle tick goroutine — ticks never overlap.
+	lifecyclePendingDeliveries map[string]pendingNotificationDelivery
+
+	// lifecycleNotifierStop/Done plumb graceful shutdown for the lifecycle
+	// notifier loop: run() stops the loop and waits for the in-flight tick
+	// BEFORE closing the database, so a completed external send can still land
+	// its delivery row (see stopLifecycleNotifier).
+	lifecycleNotifierStop chan struct{}
+	lifecycleNotifierDone chan struct{}
+}
+
+// cachedNotifier is one constructed notifier plus the config/secret digest it
+// was built from.
+type cachedNotifier struct {
+	key      string
+	notifier notify.Notifier
 }
 
 func (s *Server) modelAuthTokenForClaw(clawID string) string {
@@ -175,6 +219,8 @@ type clawConn struct {
 	awaitingResponse      bool            // true as soon as a prompt is delivered, before the first chunk/activity
 	noProgressPaused      bool            // automatic delivery is paused after repeated turns with unchanged progress
 	lastTurnFinishedAt    time.Time       // when the last streaming turn ended (for post-restart resume window)
+	connectedAt           time.Time       // when this connection registered; immutable after registration
+	idleNotifiedAt        time.Time       // when the agent_idle notification fired for the current idle stretch (zero = armed)
 
 	deliveryInFlight bool // serializes DB-backed delivery writes
 
@@ -221,7 +267,28 @@ func (cc *clawConn) isBusyLocked() bool {
 	return cc.awaitingResponse || !cc.streamingStartedAt.IsZero() || cc.streamingMsgID != ""
 }
 
+// finishTurnLocked ends a turn that actually ran (or was force-finished):
+// the in-flight state clears and the idle clock restarts now.
 func (cc *clawConn) finishTurnLocked() {
+	cc.resetTurnStateLocked()
+	cc.lastTurnFinishedAt = time.Now()
+	// A finished turn starts a new idle stretch: re-arm the idle alert so a
+	// claw that goes idle, works, then goes idle again notifies twice.
+	cc.idleNotifiedAt = time.Time{}
+}
+
+// abortTurnLocked releases a turn reservation whose delivery never reached
+// the bridge (socket write failed, marker insert failed). No turn ran, so the
+// idle clock deliberately does NOT restart: stamping lastTurnFinishedAt here
+// would let a claw whose deliveries keep failing rewind its idle clock on
+// every watchdog tick and never cross the agent_idle threshold — the exact
+// stuck state that alert exists for. It would also fake a "recent turn" for
+// the auto-resume window.
+func (cc *clawConn) abortTurnLocked() {
+	cc.resetTurnStateLocked()
+}
+
+func (cc *clawConn) resetTurnStateLocked() {
 	cc.awaitingResponse = false
 	cc.streamingMsgID = ""
 	cc.streamingBuf.Reset()
@@ -229,7 +296,6 @@ func (cc *clawConn) finishTurnLocked() {
 	cc.streamingStartedAt = time.Time{}
 	cc.streamingTimeoutSent = false
 	cc.contextWarningSent = false
-	cc.lastTurnFinishedAt = time.Now()
 }
 
 func (s *Server) flushStreamingSegment(clawID, tenantID string, cc *clawConn) error {
@@ -315,6 +381,14 @@ func NewServer(addr, dbPath, identityDir string, hubCfg *types.HubConfig) (*Serv
 	if srv.livenessEnabled() {
 		go srv.runReaper()
 	}
+
+	// The notification baseline must exist BEFORE any event producer starts:
+	// the notifier's first tick fires one poll interval from now, and if it
+	// were the one to establish the baseline, everything the producers below
+	// emitted in that window would be stamped as pre-existing history and
+	// silently dropped.
+	srv.initLifecycleNotifierBaseline()
+
 	srv.startPRWatcher()
 
 	// Start cron scheduler for workflow triggers
@@ -323,6 +397,7 @@ func NewServer(addr, dbPath, identityDir string, hubCfg *types.HubConfig) (*Serv
 		log.Printf("[cron] failed to start scheduler: %v", err)
 	}
 	srv.startIntegrationPoller()
+	srv.startLifecycleNotifier()
 
 	return srv, nil
 }
@@ -392,6 +467,11 @@ func (s *Server) run(ctx context.Context, opts ...RunOptions) error {
 		// ListenAndServe returns as soon as Shutdown starts. Wait for it to
 		// finish draining active requests before closing their database.
 		<-shutdownDone
+		// Stop the lifecycle notifier before the DB closes: a tick in flight
+		// could otherwise complete an external Slack send and then fail the
+		// delivery-row insert against the closed DB, re-sending the event
+		// after restart (the in-memory retry stash dies with the process).
+		s.stopLifecycleNotifier(10 * time.Second)
 		if closeErr := s.db.Close(); closeErr != nil {
 			return fmt.Errorf("close database: %w", closeErr)
 		}
@@ -422,6 +502,11 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/settings/github/test", s.withWebAdminAuth(s.handleGitHubAppTest))
 	mux.HandleFunc("/api/settings/model-auth/login", s.withWebAdminAuth(s.handleModelAuthLogin))
 	mux.HandleFunc("/api/settings/model-auth/login/{id}", s.withWebAdminAuth(s.handleModelAuthLoginStatus))
+	// Provider-agnostic on purpose (the handler resolves lifecycle.via and
+	// renders through the PayloadRenderer interface), so the route must not
+	// bake in "slack": a second provider would inherit a misleading URL or
+	// force a breaking rename.
+	mux.HandleFunc("/api/notifications/test", s.withWebAdminAuth(s.handleNotificationTest))
 
 	// Template store
 	mux.HandleFunc("/api/templates", s.withWebAuth(s.handleTemplates))
@@ -1714,6 +1799,7 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 			cc.mu.Lock()
 			cc.lastUserMessageAt = time.Now()
 			cc.unresponsiveWarnedAt = time.Time{}
+			cc.idleNotifiedAt = time.Time{}
 			busy := cc.isBusyLocked()
 			cc.mu.Unlock()
 			if !busy {
@@ -2250,7 +2336,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 	// turn end closely enough for autoResumeRecentTurnWindow.
 	var lastClawMsgAt time.Time
 	_ = s.db.QueryRow(`SELECT created_at FROM messages WHERE claw_id=? AND role='claw' ORDER BY created_at DESC LIMIT 1`, clawID).Scan(&lastClawMsgAt)
-	cc := &clawConn{id: clawID, tenantID: tenantID, conn: conn, gatewayReady: gatewayReadyBool(rp.GatewayReady), tags: registrationTags, lastUserMessageAt: time.Now(), lastStatusAt: time.Now(), noProgressPaused: noProgressPaused}
+	cc := &clawConn{id: clawID, tenantID: tenantID, conn: conn, gatewayReady: gatewayReadyBool(rp.GatewayReady), tags: registrationTags, lastUserMessageAt: time.Now(), lastStatusAt: time.Now(), connectedAt: time.Now(), noProgressPaused: noProgressPaused}
 	s.mu.Lock()
 	if s.gatewayRestartCounts != nil {
 		cc.gatewayRestartCount = s.gatewayRestartCounts[clawID]
@@ -2540,10 +2626,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 					content := activityContent(activity)
 					if content != "" && !isUnhelpfulActivityContent(activity, content) {
 						format := "activity:" + string(payload)
-						_, _ = s.db.Exec(
-							`INSERT INTO messages(id,claw_id,tenant_id,role,content,format,created_at,delivered_at) VALUES(?,?,?,?,?,?,?,?)`,
-							uuid.New().String(), clawID, tenantID, "activity", content, format, createdAt, createdAt,
-						)
+						s.storeAgentActivity(clawID, tenantID, content, format, activity, createdAt)
 					}
 					s.broadcastToUsers(tenantID, types.WSMessage{
 						Type:    "agent_activity",
@@ -2763,6 +2846,8 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 						}
 					}
 				}
+			} else if msg.Type == "session_rotated" {
+				go s.enqueueSessionRotatedResume(clawID)
 			} else if msg.Type == "model_auth_sync" {
 				if !modelAuthAuthorized {
 					continue
@@ -3002,6 +3087,7 @@ func (s *Server) handleUserWS(w http.ResponseWriter, r *http.Request) {
 				cc.mu.Lock()
 				cc.lastUserMessageAt = time.Now()
 				cc.unresponsiveWarnedAt = time.Time{}
+				cc.idleNotifiedAt = time.Time{}
 				busy := cc.isBusyLocked()
 				cc.mu.Unlock()
 				if !busy {
@@ -4584,6 +4670,29 @@ func isUnhelpfulActivityContent(activity map[string]interface{}, content string)
 	return strings.HasPrefix(content, "No streamed output")
 }
 
+// storeAgentActivity persists an activity message. Generic reasoning activity
+// (kind == "activity") is upserted into a single row per claw so the model's
+// streaming internal monologue does not flood the messages table. Tool,
+// diagnostic, error, and lifecycle activity messages are inserted as distinct
+// rows because they are useful audit events.
+func (s *Server) storeAgentActivity(clawID, tenantID, content, format string, activity map[string]interface{}, createdAt time.Time) {
+	kind, _ := activity["kind"].(string)
+	if strings.ToLower(strings.TrimSpace(kind)) == "activity" {
+		// Use a deterministic ID so repeated reasoning updates collapse to one row.
+		msgID := "activity-stream:" + clawID
+		_, _ = s.db.Exec(
+			`INSERT INTO messages(id,claw_id,tenant_id,role,content,format,created_at,delivered_at) VALUES(?,?,?,?,?,?,?,?)
+			 ON CONFLICT(id) DO UPDATE SET content=excluded.content, format=excluded.format, created_at=excluded.created_at, delivered_at=excluded.delivered_at`,
+			msgID, clawID, tenantID, "activity", content, format, createdAt, createdAt,
+		)
+		return
+	}
+	_, _ = s.db.Exec(
+		`INSERT INTO messages(id,claw_id,tenant_id,role,content,format,created_at,delivered_at) VALUES(?,?,?,?,?,?,?,?)`,
+		uuid.New().String(), clawID, tenantID, "activity", content, format, createdAt, createdAt,
+	)
+}
+
 func daytonaBootstrapStatusForStep(label string) string {
 	switch label {
 	case "uninstall old openclaw", "install openclaw", "verify openclaw":
@@ -5432,6 +5541,15 @@ func (s *Server) checkClawStatus() {
 			s.sendNextQueuedMessage(cc)
 		}
 
+		// Agent-idle detection runs after the queued drain (a successful
+		// delivery just above marks the claw busy, which correctly suppresses
+		// the alert; a FAILED delivery aborts the reservation without
+		// touching the idle clock, so a wedged socket still alerts) and
+		// before the recent-user-message skip below, which is about status
+		// broadcasts, not idleness. Riding this 2-minute tick means a
+		// threshold of T fires between T and T+2m — deliberately not tightened.
+		s.checkAgentIdle(now, id, cc)
+
 		// If user sent a message in the last 2 minutes, skip status broadcast
 		if now.Sub(lastUserMessageAt) < 2*time.Minute {
 			continue
@@ -5701,7 +5819,7 @@ func (s *Server) sendWakeMessage(cc *clawConn, clawID string) {
 	wakeMsg.Content = wakeContent
 	if err := wsjson.Write(context.Background(), cc.conn, types.WSMessage{Type: "message", Payload: wakeMsg}); err != nil {
 		cc.mu.Lock()
-		cc.finishTurnLocked()
+		cc.abortTurnLocked()
 		cc.mu.Unlock()
 	}
 
@@ -5727,7 +5845,7 @@ func (s *Server) sendInitialPlanInstruction(cc *clawConn, clawID string) {
 	cc.mu.Unlock()
 	if !s.insertSystemMarker(clawID, cc.tenantID, initialPlanRequiredMarker) {
 		cc.mu.Lock()
-		cc.finishTurnLocked()
+		cc.abortTurnLocked()
 		cc.mu.Unlock()
 		return
 	}
@@ -5741,7 +5859,7 @@ func (s *Server) sendInitialPlanInstruction(cc *clawConn, clawID string) {
 	}
 	if err := wsjson.Write(context.Background(), cc.conn, types.WSMessage{Type: "message", Payload: msg}); err != nil {
 		cc.mu.Lock()
-		cc.finishTurnLocked()
+		cc.abortTurnLocked()
 		cc.mu.Unlock()
 	}
 }
@@ -7376,9 +7494,34 @@ func (s *Server) deleteStaleWatchdogNags(clawID string) {
 	}
 }
 
-const restartResumePrefix = "[hub] Agent process restart detected."
+const (
+	restartResumePrefix        = "[hub] Agent process restart detected."
+	sessionRotatedResumePrefix = "[hub] OpenClaw session reset detected."
+)
 
 func (s *Server) enqueueRestartResume(clawID string, restartCount int) {
+	s.enqueueSessionLostResume(clawID, restartResumePrefix, fmt.Sprintf("restart:%d", restartCount))
+}
+
+// sessionRotatedResumeThrottle bounds the rotation → resume → rotation loop:
+// if lock conflicts persist across fresh sessions (e.g. another process keeps
+// touching the session files), each rotation would otherwise enqueue another
+// resume prompt indefinitely — rotation turns complete with an empty reply,
+// so the no-progress watchdog never observes them.
+const sessionRotatedResumeThrottle = 10 * time.Minute
+
+func (s *Server) enqueueSessionRotatedResume(clawID string) {
+	var recent int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND role='hub' AND content LIKE ? AND created_at > ?`,
+		clawID, sessionRotatedResumePrefix+"%", now().Add(-sessionRotatedResumeThrottle)).Scan(&recent)
+	if err == nil && recent > 0 {
+		log.Printf("[watchdog] skipping session-rotated resume for %s: already resumed within %s", shortID(clawID), sessionRotatedResumeThrottle)
+		return
+	}
+	s.enqueueSessionLostResume(clawID, sessionRotatedResumePrefix, fmt.Sprintf("session_rotated:%s", uuid.NewString()))
+}
+
+func (s *Server) enqueueSessionLostResume(clawID, prefix, marker string) {
 	var status, issueTitle, linearID, githubID, shortcutID, jiraID string
 	var bootstrapOK int
 	err := s.db.QueryRow(`SELECT status, COALESCE(bootstrap_ok,0), COALESCE(issue_title,''), COALESCE(linear_issue_id,''), COALESCE(github_issue_id,''), COALESCE(shortcut_story_id,''), COALESCE(jira_issue_id,'') FROM claws WHERE id=?`, clawID).Scan(&status, &bootstrapOK, &issueTitle, &linearID, &githubID, &shortcutID, &jiraID)
@@ -7401,7 +7544,7 @@ func (s *Server) enqueueRestartResume(clawID string, restartCount int) {
 		issueRef = "Jira issue " + jiraID
 	}
 	var b strings.Builder
-	b.WriteString(restartResumePrefix)
+	b.WriteString(prefix)
 	b.WriteString(" Your previous session was lost, so you have no memory of the earlier conversation. The workspace on disk is intact, including your repositories under ~/workspace.")
 	if issueTitle != "" || issueRef != "" {
 		b.WriteString("\n\nAssigned task: ")
@@ -7420,12 +7563,12 @@ func (s *Server) enqueueRestartResume(clawID string, restartCount int) {
 		b.WriteString(".")
 	}
 	b.WriteString("\n\nBefore anything else, recover your state from the workspace: run git status and git log --oneline -15, check which branch you are on and whether there are uncommitted changes or an open PR for it. Then resume the task from where the workspace shows it stopped. Do not start over and do not discard existing work.")
-	// Append a zero-width marker carrying the restart_count so that two resume
-	// prompts for two different restarts are never treated as the identical
-	// pending message by injectMessage's dedup (change 2) — each restart is a
-	// distinct incident even when the rest of the wording is unchanged.
-	b.WriteString(fmt.Sprintf("\n\n<!-- restart:%d -->", restartCount))
-	log.Printf("[watchdog] enqueueing post-restart resume for %s", shortID(clawID))
+	// Append a zero-width marker so that two resume prompts for two different
+	// incidents are never treated as the identical pending message by
+	// injectMessage's dedup — each restart/session rotation is a distinct
+	// incident even when the rest of the wording is unchanged.
+	b.WriteString(fmt.Sprintf("\n\n<!-- %s -->", marker))
+	log.Printf("[watchdog] enqueueing %s resume for %s", marker, shortID(clawID))
 	s.injectHubMessageByID(clawID, b.String())
 }
 
@@ -7473,6 +7616,11 @@ func (s *Server) sendNextQueuedMessage(cc *clawConn) {
 		cc.mu.Unlock()
 		return
 	}
+	// No inter-turn cooldown here: if the next message reaches OpenClaw while
+	// the previous turn is still releasing its prompt lock, the bridge retries
+	// the rejected sessions.send on the same session with backoff (see
+	// sessionLockConflictRetryDelays in cmd/claw-bridge), which preserves the
+	// transcript instead of forcing a session rotation.
 	// Claim the in-flight guard before querying so a concurrent caller cannot
 	// read the same pending row and re-deliver it after we mark it delivered.
 	cc.deliveryInFlight = true
@@ -7522,7 +7670,7 @@ func (s *Server) sendNextQueuedMessage(cc *clawConn) {
 	err = wsjson.Write(ctx, conn, types.WSMessage{Type: "message", Payload: msg})
 	if err != nil {
 		cc.mu.Lock()
-		cc.finishTurnLocked()
+		cc.abortTurnLocked()
 		cc.mu.Unlock()
 		log.Printf("[hub] failed to deliver pending message to %s: %v", shortID(clawID), err)
 		return
@@ -7534,6 +7682,7 @@ func (s *Server) sendNextQueuedMessage(cc *clawConn) {
 	cc.mu.Lock()
 	cc.lastUserMessageAt = time.Now()
 	cc.unresponsiveWarnedAt = time.Time{}
+	cc.idleNotifiedAt = time.Time{}
 	cc.mu.Unlock()
 
 	// Signal to UI that agent is working
