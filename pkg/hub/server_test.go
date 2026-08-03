@@ -2258,9 +2258,9 @@ func TestDeliveredPromptReservesTurnBeforeFirstActivity(t *testing.T) {
 	}
 }
 
-func TestSendNextQueuedMessageWaitsInterTurnCooldown(t *testing.T) {
+func TestSendNextQueuedMessageDeliversImmediatelyAfterTurnEnd(t *testing.T) {
 	s, db := NewTestServerWithConfig(t, &types.HubConfig{ClawToken: "claw-token"}, "", "", "")
-	const clawID = "claw-inter-turn-cooldown"
+	const clawID = "claw-inter-turn-no-cooldown"
 	insertPendingMessage(t, db, clawID, "first", now().Add(-time.Second))
 	insertPendingMessage(t, db, clawID, "second", now())
 
@@ -2272,11 +2272,6 @@ func TestSendNextQueuedMessageWaitsInterTurnCooldown(t *testing.T) {
 		t.Fatalf("first delivered content = %q, want first", got)
 	}
 
-	// Speed up the cooldown so the test remains fast, but still measurable.
-	oldCooldown := interTurnCooldown
-	interTurnCooldown = 50 * time.Millisecond
-	t.Cleanup(func() { interTurnCooldown = oldCooldown })
-
 	s.mu.RLock()
 	cc := s.claws[clawID]
 	s.mu.RUnlock()
@@ -2284,6 +2279,9 @@ func TestSendNextQueuedMessageWaitsInterTurnCooldown(t *testing.T) {
 	cc.finishTurnLocked()
 	cc.mu.Unlock()
 
+	// The hub no longer pauses between turns: lock-conflict recovery lives in
+	// the bridge (same-session sessions.send retry with backoff), so the next
+	// queued message must be admitted without delay.
 	start := time.Now()
 	s.sendNextQueuedMessage(cc)
 	elapsed := time.Since(start)
@@ -2291,8 +2289,8 @@ func TestSendNextQueuedMessageWaitsInterTurnCooldown(t *testing.T) {
 	if got := readTestHubMessage(t, clawWS).Content; got != "second" {
 		t.Fatalf("second delivered content = %q, want second", got)
 	}
-	if elapsed < interTurnCooldown {
-		t.Fatalf("sendNextQueuedMessage returned too fast: %s, want at least %s", elapsed, interTurnCooldown)
+	if elapsed > 500*time.Millisecond {
+		t.Fatalf("sendNextQueuedMessage took too long: %s, want prompt delivery", elapsed)
 	}
 }
 

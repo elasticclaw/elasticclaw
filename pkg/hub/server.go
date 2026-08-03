@@ -250,13 +250,6 @@ const (
 	autoResumeRecentTurnWindow = 5 * time.Minute
 )
 
-// interTurnCooldown gives the OpenClaw gateway a short window to finish
-// releasing the prompt lock and writing the final session state before the
-// next message is admitted. This mitigates the upstream "session file changed
-// while embedded prompt lock was released" race when a second message reaches
-// the session during the previous turn's cleanup window.
-var interTurnCooldown = 100 * time.Millisecond
-
 // initialStatus returns the claw status string to use on bridge registration.
 // A nil pointer means the field was absent (old bridge) — treat as ready for backward compat.
 func initialStatus(gatewayReady *bool) string {
@@ -2850,6 +2843,8 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 						}
 					}
 				}
+			} else if msg.Type == "session_rotated" {
+				go s.enqueueSessionRotatedResume(clawID)
 			} else if msg.Type == "model_auth_sync" {
 				if !modelAuthAuthorized {
 					continue
@@ -7496,9 +7491,34 @@ func (s *Server) deleteStaleWatchdogNags(clawID string) {
 	}
 }
 
-const restartResumePrefix = "[hub] Agent process restart detected."
+const (
+	restartResumePrefix        = "[hub] Agent process restart detected."
+	sessionRotatedResumePrefix = "[hub] OpenClaw session reset detected."
+)
 
 func (s *Server) enqueueRestartResume(clawID string, restartCount int) {
+	s.enqueueSessionLostResume(clawID, restartResumePrefix, fmt.Sprintf("restart:%d", restartCount))
+}
+
+// sessionRotatedResumeThrottle bounds the rotation → resume → rotation loop:
+// if lock conflicts persist across fresh sessions (e.g. another process keeps
+// touching the session files), each rotation would otherwise enqueue another
+// resume prompt indefinitely — rotation turns complete with an empty reply,
+// so the no-progress watchdog never observes them.
+const sessionRotatedResumeThrottle = 10 * time.Minute
+
+func (s *Server) enqueueSessionRotatedResume(clawID string) {
+	var recent int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND role='hub' AND content LIKE ? AND created_at > ?`,
+		clawID, sessionRotatedResumePrefix+"%", now().Add(-sessionRotatedResumeThrottle)).Scan(&recent)
+	if err == nil && recent > 0 {
+		log.Printf("[watchdog] skipping session-rotated resume for %s: already resumed within %s", shortID(clawID), sessionRotatedResumeThrottle)
+		return
+	}
+	s.enqueueSessionLostResume(clawID, sessionRotatedResumePrefix, fmt.Sprintf("session_rotated:%s", uuid.NewString()))
+}
+
+func (s *Server) enqueueSessionLostResume(clawID, prefix, marker string) {
 	var status, issueTitle, linearID, githubID, shortcutID, jiraID string
 	var bootstrapOK int
 	err := s.db.QueryRow(`SELECT status, COALESCE(bootstrap_ok,0), COALESCE(issue_title,''), COALESCE(linear_issue_id,''), COALESCE(github_issue_id,''), COALESCE(shortcut_story_id,''), COALESCE(jira_issue_id,'') FROM claws WHERE id=?`, clawID).Scan(&status, &bootstrapOK, &issueTitle, &linearID, &githubID, &shortcutID, &jiraID)
@@ -7521,7 +7541,7 @@ func (s *Server) enqueueRestartResume(clawID string, restartCount int) {
 		issueRef = "Jira issue " + jiraID
 	}
 	var b strings.Builder
-	b.WriteString(restartResumePrefix)
+	b.WriteString(prefix)
 	b.WriteString(" Your previous session was lost, so you have no memory of the earlier conversation. The workspace on disk is intact, including your repositories under ~/workspace.")
 	if issueTitle != "" || issueRef != "" {
 		b.WriteString("\n\nAssigned task: ")
@@ -7540,12 +7560,12 @@ func (s *Server) enqueueRestartResume(clawID string, restartCount int) {
 		b.WriteString(".")
 	}
 	b.WriteString("\n\nBefore anything else, recover your state from the workspace: run git status and git log --oneline -15, check which branch you are on and whether there are uncommitted changes or an open PR for it. Then resume the task from where the workspace shows it stopped. Do not start over and do not discard existing work.")
-	// Append a zero-width marker carrying the restart_count so that two resume
-	// prompts for two different restarts are never treated as the identical
-	// pending message by injectMessage's dedup (change 2) — each restart is a
-	// distinct incident even when the rest of the wording is unchanged.
-	b.WriteString(fmt.Sprintf("\n\n<!-- restart:%d -->", restartCount))
-	log.Printf("[watchdog] enqueueing post-restart resume for %s", shortID(clawID))
+	// Append a zero-width marker so that two resume prompts for two different
+	// incidents are never treated as the identical pending message by
+	// injectMessage's dedup — each restart/session rotation is a distinct
+	// incident even when the rest of the wording is unchanged.
+	b.WriteString(fmt.Sprintf("\n\n<!-- %s -->", marker))
+	log.Printf("[watchdog] enqueueing %s resume for %s", marker, shortID(clawID))
 	s.injectHubMessageByID(clawID, b.String())
 }
 
@@ -7593,23 +7613,11 @@ func (s *Server) sendNextQueuedMessage(cc *clawConn) {
 		cc.mu.Unlock()
 		return
 	}
-	// If the previous turn finished very recently, pause briefly before
-	// admitting the next message. This avoids the OpenClaw prompt-lock release
-	// race where a second message sent too soon after a turn ends corrupts the
-	// session file. See openclaw/openclaw#113194.
-	if !cc.lastTurnFinishedAt.IsZero() {
-		if elapsed := time.Since(cc.lastTurnFinishedAt); elapsed < interTurnCooldown {
-			cc.mu.Unlock()
-			time.Sleep(interTurnCooldown - elapsed)
-			cc.mu.Lock()
-			// Re-check the guard after waking up; the claw may have become busy
-			// or another delivery may have started while we slept.
-			if cc.isBusyLocked() || cc.deliveryInFlight || cc.noProgressPaused {
-				cc.mu.Unlock()
-				return
-			}
-		}
-	}
+	// No inter-turn cooldown here: if the next message reaches OpenClaw while
+	// the previous turn is still releasing its prompt lock, the bridge retries
+	// the rejected sessions.send on the same session with backoff (see
+	// sessionLockConflictRetryDelays in cmd/claw-bridge), which preserves the
+	// transcript instead of forcing a session rotation.
 	// Claim the in-flight guard before querying so a concurrent caller cannot
 	// read the same pending row and re-deliver it after we mark it delivered.
 	cc.deliveryInFlight = true
