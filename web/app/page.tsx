@@ -1,13 +1,17 @@
 "use client"
 
-import { useState, useMemo, useEffect, useCallback, useRef } from "react"
+import { useState, useMemo, useEffect, useCallback, useRef, useSyncExternalStore } from "react"
+import { AppHeader } from "@/components/app-header"
 import { Sidebar } from "@/components/sidebar"
 import { ConversationView } from "@/components/conversation-view"
 import { SetupScreen } from "@/components/setup-screen"
 import { ManualTriggerModal } from "@/components/manual-trigger-modal"
 import { useHub } from "@/hooks/use-hub"
 import { isConfigured, type Workflow } from "@/lib/api"
-import { requestAuthToken } from "@/lib/auth-storage"
+
+// Stable no-op subscription for useSyncExternalStore: the configured flag
+// only changes via SetupScreen (handled by configuredOverride below).
+const subscribeNever = () => () => {}
 
 export default function Home() {
   const [selectedClawId, setSelectedClawId] = useState<string | null>(() => {
@@ -17,35 +21,20 @@ export default function Home() {
   const [searchQuery, setSearchQuery] = useState("")
   const [activeTagFilters, setActiveTagFilters] = useState<string[]>([])
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
-  const [configuredState, setConfiguredState] = useState<boolean | null>(() => {
-    if (typeof window === "undefined") return null
-    return isConfigured()
-  })
-  const [isAdmin, setIsAdmin] = useState(false)
+  // isConfigured() reads localStorage, so it must not run during SSR or the
+  // hydration render (the server rendered the placeholder branch and a lazy
+  // initializer here caused a hydration mismatch). useSyncExternalStore gives
+  // a hydration-safe read: the server snapshot is null and the real value
+  // resolves right after hydration. setConfiguredOverride lets SetupScreen
+  // flip to configured without a reload.
+  const storedConfigured = useSyncExternalStore<boolean | null>(
+    subscribeNever,
+    isConfigured,
+    () => null
+  )
+  const [configuredOverride, setConfiguredOverride] = useState<boolean | null>(null)
+  const configuredState = configuredOverride ?? storedConfigured
   const [selectedWorkflow, setSelectedWorkflow] = useState<Workflow | null>(null)
-
-  // Fetch admin status
-  useEffect(() => {
-    let cancelled = false
-    async function loadAdminStatus() {
-      const token = await requestAuthToken()
-      if (cancelled) return
-      if (!token) {
-        setIsAdmin(false)
-        return
-      }
-      const { getHubUrl } = await import("@/lib/hub-url")
-      if (cancelled) return
-      const hubUrl = getHubUrl()
-      const url = hubUrl ? `${hubUrl}/api/auth/me` : "/api/auth/me"
-      fetch(url, { headers: { Authorization: `Bearer ${token}` } })
-        .then(r => r.ok ? r.json() : null)
-        .then(data => { if (!cancelled) setIsAdmin(data?.is_admin === true) })
-        .catch(() => { if (!cancelled) setIsAdmin(false) })
-    }
-    loadAdminStatus()
-    return () => { cancelled = true }
-  }, [])
 
   const hub = useHub(selectedClawId)
 
@@ -197,54 +186,63 @@ export default function Home() {
 
   // Show loading state until we know if configured
   if (configuredState === null) {
-    return <div className="flex h-screen bg-background items-center justify-center" />
+    // Mirror the real render's shell (same outer div and AppHeader) so the
+    // server and client markup match and the header does not pop in.
+    return (
+      <div className="flex h-screen flex-col bg-background">
+        <AppHeader />
+        <div className="flex flex-1 min-h-0" />
+      </div>
+    )
   }
 
   // Show setup screen if not configured
   if (!configuredState) {
-    return <SetupScreen onConnected={() => setConfiguredState(true)} />
+    return <SetupScreen onConnected={() => setConfiguredOverride(true)} />
   }
 
   return (
-    <div className="flex h-screen bg-background">
-      <Sidebar
-        claws={filteredClaws}
-        pinnedClaws={filteredPinnedClaws}
-        allClawIds={claws.map((c) => c.id)}
-        selectedClawId={selectedClawId}
-        onSelectClaw={handleSelectClaw}
-        onTogglePin={handleTogglePin}
-        searchQuery={searchQuery}
-        onSearchChange={setSearchQuery}
-        allTags={allTags}
-        activeTagFilters={activeTagFilters}
-        onAddTagFilter={handleAddTagFilter}
-        onRemoveTagFilter={handleRemoveTagFilter}
-        onClearTagFilters={handleClearTagFilters}
-        isCollapsed={sidebarCollapsed}
-        onToggleCollapse={() => setSidebarCollapsed(!sidebarCollapsed)}
-        onReorderClaws={reorderClaws}
-        isAdmin={isAdmin}
-        onSelectWorkflow={setSelectedWorkflow}
-      />
-      <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
-        <ConversationView
-          claw={selectedClaw}
-          allClaws={claws}
-          downtimeDependencies={downtimeDependencies}
-          messages={selectedClaw ? messages[selectedClaw.id] || [] : []}
-          allMessages={messages}
-          streamingBuffers={streamingBuffers}
-          onSendMessage={handleSendMessage}
-          onSendMessageToClaw={handleSendMessageToClaw}
-          onKill={handleKill}
-          onKillClaw={handleKillClaw}
+    <div className="flex h-screen flex-col bg-background">
+      <AppHeader />
+      <div className="flex flex-1 min-h-0">
+        <Sidebar
+          claws={filteredClaws}
+          pinnedClaws={filteredPinnedClaws}
+          allClawIds={claws.map((c) => c.id)}
+          selectedClawId={selectedClawId}
           onSelectClaw={handleSelectClaw}
-          onDeselectClaw={() => { setSelectedClawId(null); localStorage.removeItem('elasticclaw_selected_claw') }}
+          onTogglePin={handleTogglePin}
+          searchQuery={searchQuery}
+          onSearchChange={setSearchQuery}
+          allTags={allTags}
+          activeTagFilters={activeTagFilters}
+          onAddTagFilter={handleAddTagFilter}
+          onRemoveTagFilter={handleRemoveTagFilter}
+          onClearTagFilters={handleClearTagFilters}
+          isCollapsed={sidebarCollapsed}
+          onToggleCollapse={() => setSidebarCollapsed(!sidebarCollapsed)}
           onReorderClaws={reorderClaws}
-          loading={loading}
-          hubError={hubError}
+          onSelectWorkflow={setSelectedWorkflow}
         />
+        <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
+          <ConversationView
+            claw={selectedClaw}
+            allClaws={claws}
+            downtimeDependencies={downtimeDependencies}
+            messages={selectedClaw ? messages[selectedClaw.id] || [] : []}
+            allMessages={messages}
+            streamingBuffers={streamingBuffers}
+            onSendMessage={handleSendMessage}
+            onSendMessageToClaw={handleSendMessageToClaw}
+            onKill={handleKill}
+            onKillClaw={handleKillClaw}
+            onSelectClaw={handleSelectClaw}
+            onDeselectClaw={() => { setSelectedClawId(null); localStorage.removeItem('elasticclaw_selected_claw') }}
+            onReorderClaws={reorderClaws}
+            loading={loading}
+            hubError={hubError}
+          />
+        </div>
       </div>
       <ManualTriggerModal
         open={!!selectedWorkflow}

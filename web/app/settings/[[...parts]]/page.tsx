@@ -1,3 +1,4 @@
+import { Suspense } from "react"
 import SettingsSectionPage from "./settings-content"
 import { LEGACY_ANALYTICS_SECTION, VALID_SECTIONS } from "./sections"
 
@@ -38,5 +39,11 @@ export function generateStaticParams() {
 }
 
 export default function Page() {
-  return <SettingsSectionPage />
+  // SettingsSectionPage reads usePathname/useParams, which can suspend under
+  // static export; without this boundary the whole route would suspend.
+  return (
+    <Suspense fallback={null}>
+      <SettingsSectionPage />
+    </Suspense>
+  )
 }

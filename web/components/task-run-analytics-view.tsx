@@ -51,8 +51,8 @@ type Cancellation = {
 }
 
 // useRunDetails loads attempts/events/PRs for the selected run. Shared by
-// TaskRunAnalyticsView, AnalyticsCommandCenter, and the /runs page so the
-// detail-loading logic lives in exactly one place.
+// TaskRunAnalyticsView and AnalyticsCommandCenter so the detail-loading logic
+// lives in exactly one place.
 export function useRunDetails(runId: string | null) {
   const [details, setDetails] = useState<DetailState | null>(null)
   const [loading, setLoading] = useState(false)
@@ -617,7 +617,7 @@ export function FilterSelect({ label, value, values, onChange }: { label: string
 
 export function RunDetailPanel({ run, details, loading, error, onClose }: { run: TaskRunSummary | null; details: DetailState | null; loading: boolean; error: string | null; onClose: () => void }) {
   // The Usage block (tokens, estimated cost, model) is capability-gated here,
-  // in the one shared panel, so /runs and /analytics inherit the same gating.
+  // in the one shared panel, so every consumer inherits the same gating.
   const { canViewCosts } = useCapabilities()
   // The portal target (document.body) only exists on the client, so render
   // nothing during SSR/hydration. useSyncExternalStore is the recommended way
@@ -783,7 +783,7 @@ function formatFilterList(labels: string[]) {
   return filterListFormatter.format(labels)
 }
 
-export function formatLabel(value: string) {
+function formatLabel(value: string) {
   return value.replace(/_/g, " ").replace(/\b\w/g, (match) => match.toUpperCase())
 }
 
@@ -794,7 +794,7 @@ const usdFormatter = new Intl.NumberFormat(undefined, {
   maximumFractionDigits: 2,
 })
 
-export function formatUSD(value: number | null | undefined) {
+function formatUSD(value: number | null | undefined) {
   if (value === null || value === undefined || Number.isNaN(value)) return "—"
   return usdFormatter.format(value)
 }
@@ -804,12 +804,12 @@ const compactTokenFormatter = new Intl.NumberFormat(undefined, {
   maximumFractionDigits: 1,
 })
 
-export function formatCompactTokens(value: number | null | undefined) {
+function formatCompactTokens(value: number | null | undefined) {
   if (value === null || value === undefined || Number.isNaN(value)) return "—"
   return compactTokenFormatter.format(value)
 }
 
-export function formatDurationMs(ms: number | null | undefined) {
+function formatDurationMs(ms: number | null | undefined) {
   if (ms === null || ms === undefined || Number.isNaN(ms)) return "—"
   const totalSeconds = Math.max(0, Math.round(ms / 1000))
   if (totalSeconds < 60) return `${totalSeconds}s`
@@ -834,7 +834,7 @@ function durationBetween(start: number | null | undefined, end: number | null | 
   return ms >= 0 ? ms : undefined
 }
 
-export function runDurationMs(run: TaskRunSummary) {
+function runDurationMs(run: TaskRunSummary) {
   return durationBetween(run.startedAt, run.finishedAt)
 }
 
@@ -864,7 +864,7 @@ function formatChartDate(value: string) {
   return new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric" }).format(new Date(year, month - 1, day))
 }
 
-export function formatTime(value: number | null | undefined) {
+function formatTime(value: number | null | undefined) {
   // The analytics API uses 0 as the absent timestamp sentinel for phase fields.
   if (value === null || value === undefined || value === 0) return "None"
   return new Intl.DateTimeFormat(undefined, {

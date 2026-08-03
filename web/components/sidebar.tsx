@@ -1,14 +1,11 @@
 "use client"
 
-import { Search, Pin, X, ChevronDown, PanelLeftClose, PanelLeft, Loader2, AlertCircle, LogOut, Settings, Plus } from "lucide-react"
-import Link from "next/link"
-import { usePathname } from "next/navigation"
+import { Search, Pin, X, ChevronDown, PanelLeftClose, PanelLeft, Loader2, AlertCircle, LogOut, Plus } from "lucide-react"
 import { useBranding } from "@/hooks/use-branding"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { ClawCard } from "@/components/claw-card"
-import { PRIMARY_NAV, isPrimaryNavActive } from "@/components/primary-nav"
 import { clearConfig, fetchWorkspaces, type Workflow } from "@/lib/api"
 import { getAuthToken } from "@/lib/auth-storage"
 import {
@@ -57,7 +54,6 @@ interface SidebarProps {
   onClearTagFilters: () => void
   isCollapsed: boolean
   onToggleCollapse: () => void
-  isAdmin?: boolean
   onSelectWorkflow?: (workflow: Workflow | null) => void
 }
 
@@ -112,15 +108,10 @@ export function Sidebar({
   onClearTagFilters,
   isCollapsed,
   onToggleCollapse,
-  // Default to false so the admin-only Settings gear never flashes for
-  // non-admins before /api/auth/me resolves.
-  isAdmin = false,
   onSelectWorkflow,
 }: SidebarProps) {
   const tagKeys = allTags
   const { appName } = useBranding()
-  const pathname = usePathname()
-  const isNavActive = (href: string) => isPrimaryNavActive(pathname, href)
   const [activeDragClaw, setActiveDragClaw] = useState<Claw | null>(null)
   const [manualWorkflows, setManualWorkflows] = useState<Workflow[]>([])
   const [showWorkflowPicker, setShowWorkflowPicker] = useState(false)
@@ -230,7 +221,7 @@ export function Sidebar({
 
   if (isCollapsed) {
     sidebar = (
-      <aside className="w-12 h-screen flex flex-col border-r border-border bg-card">
+      <aside className="w-12 h-full flex flex-col border-r border-border bg-card">
         <div className="p-2 border-b border-border flex flex-col items-center gap-1">
           <Button
             variant="ghost"
@@ -254,21 +245,6 @@ export function Sidebar({
             </Button>
           )}
         </div>
-        <nav className="p-2 border-b border-border flex flex-col items-center gap-1">
-          {PRIMARY_NAV.map(({ href, label, icon: Icon }) => (
-            <Link
-              key={href}
-              href={href}
-              title={label}
-              className={cn(
-                "size-8 rounded-md flex items-center justify-center transition-colors hover:bg-accent",
-                isNavActive(href) ? "bg-accent text-foreground" : "text-muted-foreground"
-              )}
-            >
-              <Icon className="size-4" />
-            </Link>
-          ))}
-        </nav>
         <div className="flex flex-col items-center gap-1 py-2 overflow-y-auto flex-1">
           {allClaws.map((claw) => {
             const isSelected = claw.id === selectedClawId
@@ -312,7 +288,7 @@ export function Sidebar({
     )
   } else {
     sidebar = (
-      <aside className="w-[260px] h-screen flex flex-col border-r border-border bg-card">
+      <aside className="w-[260px] h-full flex flex-col border-r border-border bg-card">
       <div className="flex items-center justify-between p-4 border-b border-border">
         <h1 className="text-lg font-semibold tracking-tight text-foreground">
           {appName}
@@ -341,24 +317,6 @@ export function Sidebar({
           </Button>
         </div>
       </div>
-
-      <nav className="p-2 border-b border-border space-y-0.5">
-        {PRIMARY_NAV.map(({ href, label, icon: Icon }) => (
-          <Link
-            key={href}
-            href={href}
-            className={cn(
-              "flex items-center gap-2 px-2 py-1.5 rounded-md text-sm transition-colors",
-              isNavActive(href)
-                ? "bg-accent text-foreground font-medium"
-                : "text-muted-foreground hover:bg-accent hover:text-foreground"
-            )}
-          >
-            <Icon className="size-4 flex-shrink-0" />
-            {label}
-          </Link>
-        ))}
-      </nav>
 
       <div className="p-3 border-b border-border space-y-2">
         <div className="relative">
@@ -513,7 +471,7 @@ export function Sidebar({
         </DragOverlay>
       </DndContext>
 
-      {/* Logout + Settings */}
+      {/* Logout */}
       <div className="p-2 border-t border-border">
         <div className="flex items-center gap-1">
           <Button
@@ -535,17 +493,6 @@ export function Sidebar({
             <LogOut className="size-4" />
             Sign out
           </Button>
-          {isAdmin && (
-            <Button
-              variant="ghost"
-              size="icon"
-              className="size-8 text-muted-foreground hover:text-foreground flex-shrink-0"
-              onClick={() => { window.location.href = "/settings" }}
-              title="Settings"
-            >
-              <Settings className="size-4" />
-            </Button>
-          )}
         </div>
       </div>
     </aside>
