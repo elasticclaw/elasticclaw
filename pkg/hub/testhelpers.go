@@ -150,6 +150,19 @@ func (s *Server) PollIntegrationsForTest() {
 	s.pollTick()
 }
 
+// SetDeliverySettledHookForTest registers fn to run after every queued-message
+// delivery attempt releases its in-flight guard. Tests that drive
+// sendNextQueuedMessage themselves need this to sequence against the
+// registration drain: the drain's frame is on the wire before the drain call
+// returns, so a delivery started on the strength of having read that frame
+// would hit the in-flight guard and silently deliver nothing.
+// fn must not block; it runs on the delivering goroutine.
+func (s *Server) SetDeliverySettledHookForTest(fn func(clawID string)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.deliverySettled = fn
+}
+
 // ClearWebhookDedupForTest empties the in-memory webhook dedup cache so tests can
 // exercise the durable factory_triggers claim rather than the short-lived 5s window.
 func (s *Server) ClearWebhookDedupForTest() {

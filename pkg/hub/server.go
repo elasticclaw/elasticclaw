@@ -98,6 +98,13 @@ type Server struct {
 	replicatedBootstrapEnvMu sync.Mutex
 	replicatedBootstrapEnv   map[string]map[string]string // temporary handoff while a Replicated VM becomes reachable
 
+	// deliverySettled, when non-nil, fires after a sendNextQueuedMessage call
+	// that claimed the in-flight guard has released it again. The frame reaches
+	// the bridge before that call returns, so receiving a message is not enough
+	// to know the hub is ready to admit the next one; tests use this seam to
+	// sequence against the registration drain. Guarded by s.mu, nil in production.
+	deliverySettled func(clawID string)
+
 	// githubBaseURL overrides the GitHub API base for testing (default: https://api.github.com)
 	githubBaseURL string
 	// linearBaseURL overrides the Linear API base for testing (default: https://api.linear.app)
@@ -7601,6 +7608,12 @@ func (s *Server) sendNextQueuedMessage(cc *clawConn) {
 		cc.mu.Lock()
 		cc.deliveryInFlight = false
 		cc.mu.Unlock()
+		s.mu.RLock()
+		settled := s.deliverySettled
+		s.mu.RUnlock()
+		if settled != nil {
+			settled(clawID)
+		}
 	}()
 
 	var msg types.HubMessage

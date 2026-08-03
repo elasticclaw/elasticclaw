@@ -2264,12 +2264,33 @@ func TestSendNextQueuedMessageWaitsInterTurnCooldown(t *testing.T) {
 	insertPendingMessage(t, db, clawID, "first", now().Add(-time.Second))
 	insertPendingMessage(t, db, clawID, "second", now())
 
+	// Registration drains the queue on the handler goroutine, and that call only
+	// releases cc.deliveryInFlight after its frame is already on the wire.
+	// Reading "first" therefore does not mean the hub is idle again: driving
+	// sendNextQueuedMessage before the drain settles hits the in-flight guard,
+	// which returns without delivering "second". Wait for the drain to settle.
+	drained := make(chan struct{}, 1)
+	s.SetDeliverySettledHookForTest(func(id string) {
+		if id != clawID {
+			return
+		}
+		select {
+		case drained <- struct{}{}:
+		default:
+		}
+	})
+
 	ts := httptest.NewServer(s.Handler())
 	t.Cleanup(ts.Close)
 	clawWS := connectTestClaw(t, ts, clawID)
 	t.Cleanup(func() { _ = clawWS.Close(websocket.StatusNormalClosure, "done") })
 	if got := readTestHubMessage(t, clawWS).Content; got != "first" {
 		t.Fatalf("first delivered content = %q, want first", got)
+	}
+	select {
+	case <-drained:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for the registration drain to settle")
 	}
 
 	// Speed up the cooldown so the test remains fast, but still measurable.
