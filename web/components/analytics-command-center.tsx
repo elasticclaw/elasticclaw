@@ -258,7 +258,6 @@ export function AnalyticsCommandCenter({ workspaceScope }: { workspaceScope?: st
           statsData,
           driversData,
           runsData,
-          optionsData,
         ] = await Promise.all([
           fetchTaskRunAnalyticsSummary(effectiveFilters, { signal: controller.signal }),
           canViewCosts
@@ -281,7 +280,6 @@ export function AnalyticsCommandCenter({ workspaceScope }: { workspaceScope?: st
               )
             : Promise.resolve([]),
           fetchTaskRuns(runFilters, { signal: controller.signal }),
-          options ? Promise.resolve(options) : fetchTaskRunFilterOptions({ signal: controller.signal }),
         ])
         if (controller.signal.aborted || requestId !== loadRequestId.current) return
 
@@ -293,7 +291,6 @@ export function AnalyticsCommandCenter({ workspaceScope }: { workspaceScope?: st
         setDrivers(driversData)
         setRuns((currentRuns) => (append ? [...currentRuns, ...runsData.runs] : runsData.runs))
         setNextCursor(runsData.nextCursor)
-        setOptions(optionsData)
         if (!append && !silent) {
           setSelectedRunId(null)
         }
@@ -305,8 +302,25 @@ export function AnalyticsCommandCenter({ workspaceScope }: { workspaceScope?: st
         }
       }
     },
-    [canViewCosts, filters, options]
+    [canViewCosts, filters]
   )
+
+  // The filter dropdown contents are static for the session, so they are
+  // fetched once here rather than inside load(). Keeping them out of load's
+  // dependencies is what stops the initial load from running twice: load()
+  // used to set this state, which changed load's own identity and re-fired
+  // the effect below, issuing a second full round of requests one
+  // round-trip after the first.
+  useEffect(() => {
+    const controller = new AbortController()
+    fetchTaskRunFilterOptions({ signal: controller.signal })
+      .then(setOptions)
+      .catch(() => {
+        // A missing filter list only empties the dropdowns; the page itself
+        // stays usable, and load() surfaces real data errors.
+      })
+    return () => controller.abort()
+  }, [])
 
   useEffect(() => {
     // Wait for /api/auth/me so the first load already knows whether cost
