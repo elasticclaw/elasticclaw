@@ -372,6 +372,14 @@ export function AnalyticsCommandCenter({ workspaceScope }: { workspaceScope?: st
     return range.from === filters.from && range.to === filters.to ? day : undefined
   })()
   const modelData = useModelData(costs)
+  // Ratio of runs to distinct tickets; undefined (rendered as "—") when the
+  // period has no tickets so we never divide by zero.
+  const runsPerTicket =
+    summary?.totalRuns != null && effect?.uniqueTickets ? summary.totalRuns / effect.uniqueTickets : undefined
+  const priorRunsPerTicket =
+    summary?.prior?.totalRuns != null && effect?.prior?.uniqueTickets
+      ? summary.prior.totalRuns / effect.prior.uniqueTickets
+      : undefined
 
   return (
     <main className="h-full overflow-auto bg-background">
@@ -384,17 +392,19 @@ export function AnalyticsCommandCenter({ workspaceScope }: { workspaceScope?: st
             </p>
           )}
         </header>
-        <FilterBar filters={filters} options={options} onChange={setFilters} canViewCosts={canViewCosts} />
-        {error && <p className="text-sm text-destructive">{error}</p>}
-
+        {/* The tab switch sits directly under the header, before the filter
+            row, so the page reads mode-first like the mockup. */}
         <Tabs defaultValue="delivery" className="gap-5">
           <TabsList>
             <TabsTrigger value="delivery">Delivery</TabsTrigger>
             {canViewCosts && <TabsTrigger value="cost">Cost</TabsTrigger>}
           </TabsList>
 
+          <FilterBar filters={filters} options={options} onChange={setFilters} canViewCosts={canViewCosts} />
+          {error && <p className="text-sm text-destructive">{error}</p>}
+
           <TabsContent value="delivery" className="space-y-5">
-          <KpiGroup title="Effectiveness" columns="sm:grid-cols-3 xl:grid-cols-6">
+          <KpiGroup title="Effectiveness" columns="sm:grid-cols-2 xl:grid-cols-4">
             <Kpi
               label="Runs"
               title="Task runs started in the selected period."
@@ -415,7 +425,8 @@ export function AnalyticsCommandCenter({ workspaceScope }: { workspaceScope?: st
               title="Of the runs that finished, the share that delivered their work (pull request merged or closed) — with or without human help."
               value={formatPercent(effect?.successRate)}
               good
-              change={calculateDelta(effect?.successRate, effect?.prior?.successRate)}
+              change={calculatePointsDelta(effect?.successRate, effect?.prior?.successRate)}
+              pts
               onClick={() => setFilters({ status: undefined })}
             />
             <Kpi
@@ -423,7 +434,8 @@ export function AnalyticsCommandCenter({ workspaceScope }: { workspaceScope?: st
               title="Of the distinct tickets with at least one finished run, the share where at least one run delivered (clean, human on the loop, or warning)."
               value={formatPercent(effect?.ticketSuccessRate)}
               good
-              change={calculateDelta(effect?.ticketSuccessRate, effect?.prior?.ticketSuccessRate)}
+              change={calculatePointsDelta(effect?.ticketSuccessRate, effect?.prior?.ticketSuccessRate)}
+              pts
             />
             <Kpi
               label="Avg ticket to PR"
@@ -437,24 +449,41 @@ export function AnalyticsCommandCenter({ workspaceScope }: { workspaceScope?: st
               value={formatDuration(stats?.prOpenToMergeMs.avgMs)}
               change={calculateDelta(stats?.prOpenToMergeMs.avgMs, stats?.prior?.prOpenToMergeMs.avgMs)}
             />
+            <Kpi
+              label="Runs per ticket"
+              title="Average number of runs each ticket needed in the selected period. A rising number means more retries on the same tickets."
+              value={runsPerTicket?.toFixed(2)}
+              change={calculateDelta(runsPerTicket, priorRunsPerTicket)}
+            />
+            <Kpi
+              label="Human interventions"
+              title="Times a human had to step in on a run in the selected period, via the dashboard or the pull request."
+              value={summary?.humanInteractions}
+              change={calculateDelta(summary?.humanInteractions, summary?.prior?.humanInteractions)}
+            />
           </KpiGroup>
 
-          <div className="grid gap-5 lg:grid-cols-2">
-            <ChartCard title="Run outcomes over time" info="Each bar is a day. Clean = delivered with no human help; Human on the loop = a human helped via the pull request; Warning = a human had to step in from the dashboard; Failed = nothing was delivered.">
-              <OutcomesChart effect={effect} />
-            </ChartCard>
-            <ChartCard title="Delivery funnel" info="How many runs made it from the agent starting, to opening a pull request, to that pull request being finished (merged or closed). Percentages show the conversion from the previous stage.">
-              <DeliveryFunnel effect={effect} />
-            </ChartCard>
-          </div>
+          <div>
+            <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Outcomes</p>
+            <div className="space-y-5">
+              <div className="grid gap-5 lg:grid-cols-2">
+                <ChartCard title="Run outcomes over time" info="Each bar is a day. Clean = delivered with no human help; Human on the loop = a human helped via the pull request; Warning = a human had to step in from the dashboard; Failed = nothing was delivered.">
+                  <OutcomesChart effect={effect} />
+                </ChartCard>
+                <ChartCard title="Delivery funnel" info="How many runs made it from the agent starting, to opening a pull request, to that pull request being finished (merged or closed). Percentages show the conversion from the previous stage.">
+                  <DeliveryFunnel effect={effect} />
+                </ChartCard>
+              </div>
 
-          <div className="grid gap-5 lg:grid-cols-2">
-            <ChartCard title="Ticket throughput" info="Each bar is a day: how many distinct tickets had their first run that day, by how the ticket ended up. Delivered = at least one run delivered the work.">
-              <TicketThroughputChart effect={effect} />
-            </ChartCard>
-            <ChartCard title="Runs per ticket" info="How many runs each ticket needed. A long tail of 3+ means lots of retries on the same tickets.">
-              <RunsPerTicketChart effect={effect} />
-            </ChartCard>
+              <div className="grid gap-5 lg:grid-cols-2">
+                <ChartCard title="Ticket throughput" info="Each bar is a day: how many distinct tickets had their first run that day, by how the ticket ended up. Delivered = at least one run delivered the work.">
+                  <TicketThroughputChart effect={effect} />
+                </ChartCard>
+                <ChartCard title="Runs per ticket" info="How many runs each ticket needed. A long tail of 3+ means lots of retries on the same tickets.">
+                  <RunsPerTicketChart effect={effect} />
+                </ChartCard>
+              </div>
+            </div>
           </div>
 
           <RunsTable
@@ -635,7 +664,7 @@ function Heatmap({ heatmap, maxCost, selectedDay, onSelectDay, onClearSelectedDa
   }
   const selectedDayLabel = selectedDay && new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", year: "numeric" }).format(new Date(`${selectedDay}T00:00:00`))
 
-  return <section ref={containerRef} className="relative rounded-lg border bg-card p-4"><div className="mb-4 flex items-center gap-1"><h2 className="text-sm font-semibold">Cost by day</h2><InfoTooltip text="Each square is a day; darker means more spend. Click a day to focus the whole page on it." />{selectedDayLabel && <span className="ml-2 inline-flex items-center gap-1 rounded-full bg-muted px-2 py-0.5 text-xs text-muted-foreground">{selectedDayLabel}<button type="button" aria-label={`Clear ${selectedDayLabel} filter`} onClick={onClearSelectedDay} className="rounded-full px-0.5 text-foreground hover:bg-accent">×</button></span>}</div><div className="flex gap-2"><div className="flex w-6 flex-col text-center text-[10px] text-muted-foreground"><div className="mb-1 h-4" aria-hidden="true" /><div className="grid flex-1 grid-rows-7 gap-1">{["M", "T", "W", "T", "F", "S", "S"].map((day, index) => <span key={`${day}-${index}`} className="flex items-center justify-center">{day}</span>)}</div></div><div className="min-w-0 flex-1"><div className="relative mb-1 h-4 text-[10px] text-muted-foreground">{heatmap.monthLabels.map(({ week, label }) => <span key={`${week}-${label}`} className="absolute" style={{ left: `${(week / 52) * 100}%` }}>{label}</span>)}</div><div className="grid grid-flow-col grid-cols-[repeat(52,minmax(0,1fr))] grid-rows-7 gap-1">{heatmap.days.map(({ iso, point }) => { const level = point?.costUsd ? Math.min(5, Math.ceil((point.costUsd / maxCost) * 5)) : 0; const selected = iso === selectedDay; return <button key={iso} onClick={() => onSelectDay(iso)} onMouseEnter={(event) => showTooltip(iso, point, event.clientX, event.clientY)} onMouseMove={(event) => showTooltip(iso, point, event.clientX, event.clientY)} onMouseLeave={() => setTooltip(null)} onFocus={(event) => { const rect = event.currentTarget.getBoundingClientRect(); showTooltip(iso, point, rect.left + rect.width / 2, rect.top + rect.height / 2) }} onBlur={() => setTooltip(null)} className={`aspect-square cursor-pointer rounded-sm border border-black/5 transition-shadow hover:ring-2 hover:ring-ring hover:ring-offset-1 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1 ${selected ? "ring-2 ring-primary ring-offset-1" : ""}`} style={{ background: level ? `var(--heatmap-${level})` : "var(--muted)" }} /> })}</div></div></div>{tooltip && <div role="tooltip" className="pointer-events-none absolute z-10 rounded-lg border bg-card px-2 py-1.5 text-xs text-foreground shadow-md" style={{ left: tooltip.x, top: tooltip.y }}><div>{new Intl.DateTimeFormat(undefined, { weekday: "short", month: "short", day: "numeric", year: "numeric" }).format(new Date(`${tooltip.iso}T00:00:00`))}</div><div className="text-muted-foreground">{usdWhole.format(tooltip.point?.costUsd ?? 0)} · {tooltip.point?.runCount ?? 0} runs</div></div>}<div className="mt-3 flex justify-end gap-1 text-xs text-muted-foreground">Less {Array.from({ length: 5 }, (_, index) => <i key={index} className="size-3 rounded-sm" style={{ background: `var(--heatmap-${index + 1})` }} />)} More</div></section>
+  return <div><div className="mb-2 flex items-center gap-1"><p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Cost by day</p><InfoTooltip text="Each square is a day; darker means more spend. Click a day to focus the whole page on it." />{selectedDayLabel && <span className="ml-2 inline-flex items-center gap-1 rounded-full bg-muted px-2 py-0.5 text-xs text-muted-foreground">{selectedDayLabel}<button type="button" aria-label={`Clear ${selectedDayLabel} filter`} onClick={onClearSelectedDay} className="rounded-full px-0.5 text-foreground hover:bg-accent">×</button></span>}</div><section ref={containerRef} className="relative rounded-lg border bg-card p-4"><div className="flex gap-2"><div className="flex w-6 flex-col text-center text-[10px] text-muted-foreground"><div className="mb-1 h-4" aria-hidden="true" /><div className="grid flex-1 grid-rows-7 gap-1">{["M", "T", "W", "T", "F", "S", "S"].map((day, index) => <span key={`${day}-${index}`} className="flex items-center justify-center">{day}</span>)}</div></div><div className="min-w-0 flex-1"><div className="relative mb-1 h-4 text-[10px] text-muted-foreground">{heatmap.monthLabels.map(({ week, label }) => <span key={`${week}-${label}`} className="absolute" style={{ left: `${(week / 52) * 100}%` }}>{label}</span>)}</div><div className="grid grid-flow-col grid-cols-[repeat(52,minmax(0,1fr))] grid-rows-7 gap-1">{heatmap.days.map(({ iso, point }) => { const level = point?.costUsd ? Math.min(5, Math.ceil((point.costUsd / maxCost) * 5)) : 0; const selected = iso === selectedDay; return <button key={iso} onClick={() => onSelectDay(iso)} onMouseEnter={(event) => showTooltip(iso, point, event.clientX, event.clientY)} onMouseMove={(event) => showTooltip(iso, point, event.clientX, event.clientY)} onMouseLeave={() => setTooltip(null)} onFocus={(event) => { const rect = event.currentTarget.getBoundingClientRect(); showTooltip(iso, point, rect.left + rect.width / 2, rect.top + rect.height / 2) }} onBlur={() => setTooltip(null)} className={`aspect-square cursor-pointer rounded-sm border border-black/5 transition-shadow hover:ring-2 hover:ring-ring hover:ring-offset-1 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1 ${selected ? "ring-2 ring-primary ring-offset-1" : ""}`} style={{ background: level ? `var(--heatmap-${level})` : "var(--muted)" }} /> })}</div></div></div>{tooltip && <div role="tooltip" className="pointer-events-none absolute z-10 rounded-lg border bg-card px-2 py-1.5 text-xs text-foreground shadow-md" style={{ left: tooltip.x, top: tooltip.y }}><div>{new Intl.DateTimeFormat(undefined, { weekday: "short", month: "short", day: "numeric", year: "numeric" }).format(new Date(`${tooltip.iso}T00:00:00`))}</div><div className="text-muted-foreground">{usdWhole.format(tooltip.point?.costUsd ?? 0)} · {tooltip.point?.runCount ?? 0} runs</div></div>}<div className="mt-3 flex justify-end gap-1 text-xs text-muted-foreground">Less {Array.from({ length: 5 }, (_, index) => <i key={index} className="size-3 rounded-sm" style={{ background: `var(--heatmap-${index + 1})` }} />)} More</div></section></div>
 }
 
 function useModelData(costs?: CostOverview) { return useMemo(() => { const models = (costs?.seriesByModel ?? []).slice(0, 4); return (costs?.dailySeries ?? []).map((day, index) => ({ date: day.date, Other: Math.max(0, day.costUsd - models.reduce((sum, model) => sum + (model.dailySeries[index]?.costUsd ?? 0), 0)), ...Object.fromEntries(models.map((model) => [model.model, model.dailySeries[index]?.costUsd ?? 0])) })) }, [costs]) }
@@ -673,7 +702,7 @@ function TopTicketTooltip({ active, payload }: { active?: boolean; payload?: { p
 function TopTicketsByCostChart({ effect }: { effect?: AnalyticsEffectiveness }) { if (!effect?.topTicketsByCost?.length) return <p className="py-8 text-center text-sm text-muted-foreground">No ticket data for this period.</p>; return <ChartContainer config={chartConfig} className="h-64 w-full"><BarChart data={effect.topTicketsByCost} layout="vertical" margin={{ right: 36 }}><CartesianGrid horizontal={false} /><XAxis type="number" tickFormatter={(value) => usdWhole.format(value)} /><YAxis type="category" dataKey="issueId" width={90} interval={0} tickFormatter={(id) => (id.length > 14 ? id.slice(0, 13) + "…" : id)} /><ChartTooltip content={<TopTicketTooltip />} /><Bar dataKey="costUsd" fill="var(--chart-1)" radius={4}><LabelList dataKey="costUsd" position="right" formatter={(value: number) => usd.format(value)} /></Bar></BarChart></ChartContainer> }
 function CostPerMergedPrChart({ effect }: { effect?: AnalyticsEffectiveness }) { return <ChartContainer config={chartConfig} className="h-64 w-full"><LineChart data={effect?.costPerMergedPr.weekly}><CartesianGrid vertical={false} /><XAxis dataKey="weekStart" tickFormatter={formatDate} /><YAxis /><ChartTooltip content={<ChartTooltipContent />} /><ReferenceLine y={effect?.costPerMergedPr.average} stroke="var(--muted-foreground)" /><Line type="monotone" dataKey="costPerMergedPr" name="Cost per merged PR" stroke="var(--color-costPerMergedPr)" dot={false} /></LineChart></ChartContainer> }
 function CostDrivers({ drivers }: { drivers: AnalyticsCostDriver[] }) {
-  return <section className="rounded-lg border bg-card p-4"><div className="mb-3 flex items-center justify-between gap-3"><div><div className="flex items-center gap-1"><h2 className="text-sm font-semibold">Top cost drivers</h2><InfoTooltip text="Where the money goes: total spend and efficiency per workflow in the selected period." /></div><p className="text-xs text-muted-foreground">By workflow</p></div></div><Table><TableHeader><TableRow><TableHead>Workflow</TableHead><TableHead className="text-right">Runs</TableHead><TableHead className="text-right">Success</TableHead><TableHead className="text-right">Cost</TableHead><TableHead className="text-right">Cost / merged PR</TableHead></TableRow></TableHeader><TableBody>{drivers.slice(0, 10).map((driver) => <TableRow key={driver.name}><TableCell className="font-medium">{driver.name}</TableCell><TableCell className="text-right tabular-nums">{driver.runs}</TableCell><TableCell className="text-right tabular-nums">{formatPercent(driver.successRate)}</TableCell><TableCell className="text-right tabular-nums">{usd.format(driver.costUsd)}</TableCell><TableCell className="text-right tabular-nums">{usd.format(driver.costPerMergedPr)}</TableCell></TableRow>)}</TableBody></Table></section>
+  return <div><div className="mb-2 flex items-center gap-1"><p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Top cost drivers</p><InfoTooltip text="Where the money goes: total spend and efficiency per workflow in the selected period." /></div><section className="rounded-lg border bg-card p-4"><p className="mb-3 text-xs text-muted-foreground">By workflow</p><Table><TableHeader><TableRow><TableHead>Workflow</TableHead><TableHead className="text-right">Runs</TableHead><TableHead className="text-right">Success</TableHead><TableHead className="text-right">Cost</TableHead><TableHead className="text-right">Cost / merged PR</TableHead></TableRow></TableHeader><TableBody>{drivers.slice(0, 10).map((driver) => <TableRow key={driver.name}><TableCell className="font-medium">{driver.name}</TableCell><TableCell className="text-right tabular-nums">{driver.runs}</TableCell><TableCell className="text-right tabular-nums">{formatPercent(driver.successRate)}</TableCell><TableCell className="text-right tabular-nums">{usd.format(driver.costUsd)}</TableCell><TableCell className="text-right tabular-nums">{usd.format(driver.costPerMergedPr)}</TableCell></TableRow>)}</TableBody></Table></section></div>
 }
 const runsTableRightAlignedHeaders = new Set(["Cost", "Duration", "Start date"])
 function RunsTable({ runs, showCost, page, canGoPrevious, canGoNext, onSelect, onPrevious, onNext }: { runs: TaskRunSummary[]; showCost: boolean; page: number; canGoPrevious: boolean; canGoNext: boolean; onSelect: (runId: string) => void; onPrevious: () => void; onNext: () => void }) {
@@ -684,8 +713,12 @@ function RunsTable({ runs, showCost, page, canGoPrevious, canGoNext, onSelect, o
   return <section className="rounded-lg border bg-card p-4"><h2 className="mb-3 text-sm font-semibold">Runs</h2><Table><TableHeader><TableRow>{headers.map((label) => <TableHead key={label} className={runsTableRightAlignedHeaders.has(label) ? "text-right" : ""}>{label}</TableHead>)}</TableRow></TableHeader><TableBody>{runs.map((run) => <TableRow key={run.runId} className="cursor-pointer" onClick={() => onSelect(run.runId)}><TableCell><StatusBadge status={run.status} /></TableCell><TableCell>{run.issueId || "—"}</TableCell>{showCost && <TableCell>{run.model || "—"}</TableCell>}<TableCell>{run.factoryName || run.workflowName || "—"}</TableCell>{showCost && <TableCell className="text-right tabular-nums">{run.estimatedCostUsd != null ? usd.format(run.estimatedCostUsd) : "—"}</TableCell>}<TableCell className="text-right tabular-nums">{formatDuration(run.finishedAt ? run.finishedAt - run.startedAt : undefined)}</TableCell><TableCell className="text-right tabular-nums">{run.startedAt ? new Date(run.startedAt).toLocaleDateString() : "—"}</TableCell></TableRow>)}</TableBody></Table><div className="mt-3 flex items-center justify-center gap-3"><Button variant="outline" size="sm" disabled={!canGoPrevious} onClick={onPrevious}>Previous</Button><span className="text-sm text-muted-foreground">Page {page}</span><Button variant="outline" size="sm" disabled={!canGoNext} onClick={onNext}>Next</Button></div></section>
 }
 function calculateDelta(current?: number | null, prior?: number | null) { return current == null || prior == null || prior === 0 ? undefined : (current - prior) / prior }
+// For KPIs that are themselves percentages the change is expressed in
+// percentage points (fraction difference, rendered as "+4 pts"), not as a
+// percent of a percent.
+function calculatePointsDelta(current?: number | null, prior?: number | null) { return current == null || prior == null ? undefined : current - prior }
 function KpiGroup({ title, columns = "sm:grid-cols-5", children }: { title: string; columns?: string; children: ReactNode }) { return <div><p className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">{title}</p><div className={`grid grid-cols-2 gap-2 ${columns}`}>{children}</div></div> }
-function Kpi({ label, value, change, good, cost, onClick, title }: { label: string; value?: string | number; change?: number; good?: boolean; cost?: boolean; onClick?: () => void; title?: string }) {
+function Kpi({ label, value, change, pts, good, cost, onClick, title }: { label: string; value?: string | number; change?: number; pts?: boolean; good?: boolean; cost?: boolean; onClick?: () => void; title?: string }) {
   const bad = cost ? (change ?? 0) > 0 : good ? (change ?? 0) < 0 : (change ?? 0) > 0
   const disabled = !onClick
   const button = (
@@ -711,7 +744,10 @@ function Kpi({ label, value, change, good, cost, onClick, title }: { label: stri
         {change != null ? (
           <>
             {change > 0 ? "+" : ""}
-            {(change * 100).toFixed(1)}% <span className="font-normal text-muted-foreground">vs prior</span>
+            {/* pts KPIs receive a percentage-point difference (a fraction),
+                everything else a relative change. Number() trims trailing zeros. */}
+            {pts ? `${Number((change * 100).toFixed(1))} pts` : `${(change * 100).toFixed(1)}%`}{" "}
+            <span className="font-normal text-muted-foreground">vs previous period</span>
           </>
         ) : (
           " "
