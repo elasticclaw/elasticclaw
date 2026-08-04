@@ -9,6 +9,7 @@ The E2E paths run against real services:
 Depot CI -> ngrok -> ElasticClaw Server -> GitHub Issues -> Daytona -> OpenClaw -> Fireworks Kimi
 Depot CI -> ngrok -> ElasticClaw Server -> Linear -> Daytona -> OpenClaw -> Fireworks Kimi
 Depot CI -> ngrok -> ElasticClaw Server -> Jira Cloud -> Daytona -> OpenClaw -> Fireworks Kimi
+Depot CI -> ngrok -> ElasticClaw Server -> GitHub Issues -> exe.dev -> OpenClaw -> Fireworks Kimi
 ```
 
 Each test creates a workspace and workflow with the ElasticClaw CLI, configures
@@ -50,6 +51,7 @@ make e2e-jira
 make e2e-replicated-github
 make e2e-replicated-linear
 make e2e-replicated-jira
+make e2e-exedev-github
 ```
 
 The make targets build `bin/elasticclaw` and `bin/claw-bridge-linux-amd64`,
@@ -64,10 +66,15 @@ refuses the shared `elasticclaw.ngrok.app` domain, then kills the ngrok agent it
 started, deletes the temporary reserved domain, and removes the temporary ngrok
 config when the test exits. The test deletes any Daytona sandboxes whose names
 start with `ec-e2e-` before and after the run. It also records any Daytona
-sandbox IDs and Replicated CMX VM IDs created during the run, and the make
-cleanup path runs explicit finalizers for those IDs even when the main test
-fails. Use dedicated Daytona and Replicated API credentials for E2E.
-It assumes the required secrets below are already exported in your shell.
+sandbox IDs, Replicated CMX VM IDs, and exe.dev VM IDs created during the run,
+and the make cleanup path runs explicit finalizers for those IDs even when the
+main test fails. Use dedicated Daytona, Replicated, and exe.dev credentials for
+E2E. It assumes the required secrets below are already exported in your shell.
+
+The exe.dev suite also SSHs into the claw VM after agent connect and asserts
+that template files landed under `~/.openclaw/workspace` (not a literal
+`$HOME/~/workspace` path). That is the regression check for
+`WorkspaceVanishedError` on first agent turn.
 
 ## Depot CI Environment
 
@@ -88,7 +95,14 @@ REPLICATED_API_TOKEN
 FIREWORKS_API_KEY
 NGROK_AUTHTOKEN
 NGROK_API_KEY
+ELASTICCLAW_E2E_EXEDEV_SSH_KEY
 ```
+
+`ELASTICCLAW_E2E_EXEDEV_SSH_KEY` is the PEM body of an SSH private key whose
+public half is registered on the ElasticClaw exe.dev account (control plane
+`ssh exe.dev whoami` / `ssh-key`). Depot materializes it for `TestExedev*`.
+Locally you can omit it and rely on your default SSH agent/config, or set
+`ELASTICCLAW_E2E_EXEDEV_SSH_KEY_PATH` to an existing key file.
 
 Optional secrets:
 
@@ -102,6 +116,7 @@ ELASTICCLAW_E2E_JIRA_MANUAL_WEBHOOK=true
 ELASTICCLAW_E2E_REPLICATED_API_URL=https://api.replicated.com/vendor/v3
 ELASTICCLAW_E2E_REPLICATED_INSTANCE_TYPE=r1.small
 ELASTICCLAW_E2E_REPLICATED_TTL=1h
+ELASTICCLAW_E2E_EXEDEV_SSH_KEY_PATH=~/.ssh/id_ed25519
 ```
 
 The GitHub token needs access to the fixture repo with:
@@ -144,7 +159,7 @@ github-issues: webhook, polling recovery, duplicate prevention
 linear: webhook, polling recovery, duplicate prevention
 shortcut: webhook, polling recovery, duplicate prevention
 jira: Jira Cloud REST mutation, webhook processing, polling duplicate prevention
-exedev: provisioning reaches agent connected
+exedev: GitHub Issues + agent connected + live ~/.openclaw/workspace layout
 daytona: provisioning reaches agent connected and repositories clone
 replicated: provisioning reaches agent connected and repositories clone
 models: Fireworks Kimi, plus additional production models

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	daytonaProvider "github.com/elasticclaw/elasticclaw/pkg/provider/daytona"
+	exedevProvider "github.com/elasticclaw/elasticclaw/pkg/provider/exedev"
 	replicatedProvider "github.com/elasticclaw/elasticclaw/pkg/provider/replicated"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 )
@@ -117,6 +118,55 @@ func TestCleanupRecordedReplicatedVMs(t *testing.T) {
 		}
 		if time.Now().After(deadline) {
 			t.Fatalf("timed out waiting for recorded Replicated VMs to terminate: %s", strings.Join(remaining, ", "))
+		}
+		time.Sleep(5 * time.Second)
+	}
+}
+
+func TestCleanupRecordedExedevVMs(t *testing.T) {
+	path := strings.TrimSpace(os.Getenv("ELASTICCLAW_E2E_EXEDEV_VM_ID_FILE"))
+	if path == "" {
+		t.Skip("ELASTICCLAW_E2E_EXEDEV_VM_ID_FILE is not set")
+	}
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return
+	}
+	if err != nil {
+		t.Fatalf("read recorded exe.dev VM ids: %v", err)
+	}
+	ids := uniqueNonEmptyLines(string(data))
+	if len(ids) == 0 {
+		return
+	}
+
+	provider, err := exedevProvider.New(exedevProvider.Config{
+		SSHKeyPath: strings.TrimSpace(os.Getenv("ELASTICCLAW_E2E_EXEDEV_SSH_KEY_PATH")),
+	})
+	if err != nil {
+		t.Fatalf("create exe.dev provider for recorded cleanup: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	deadline := time.Now().Add(4 * time.Minute)
+	for {
+		remaining := make([]string, 0, len(ids))
+		for _, id := range ids {
+			if err := provider.Destroy(ctx, id, false); err != nil {
+				if isBenignExedevDeleteError(err) {
+					continue
+				}
+				if time.Now().After(deadline) {
+					t.Fatalf("delete recorded exe.dev VM %s: %v", id, err)
+				}
+				remaining = append(remaining, id)
+			}
+		}
+		if len(remaining) == 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for recorded exe.dev VMs to terminate: %s", strings.Join(remaining, ", "))
 		}
 		time.Sleep(5 * time.Second)
 	}

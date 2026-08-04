@@ -4025,6 +4025,10 @@ func recordE2EReplicatedVMID(vmID string) {
 	recordE2EProviderID("Replicated VM", "ELASTICCLAW_E2E_REPLICATED_VM_ID_FILE", vmID)
 }
 
+func recordE2EExedevVMID(vmID string) {
+	recordE2EProviderID("exe.dev VM", "ELASTICCLAW_E2E_EXEDEV_VM_ID_FILE", vmID)
+}
+
 func recordE2EProviderID(label, envName, id string) {
 	path := strings.TrimSpace(os.Getenv(envName))
 	if path == "" || strings.TrimSpace(id) == "" {
@@ -4465,6 +4469,13 @@ func exedevRemoteHome(ctx context.Context, p *exedevProvider.Provider, vmName st
 	return home, nil
 }
 
+// exedevWorkspaceDirs returns the absolute staged and live workspace directories
+// for an exe.dev claw given remote HOME. Staged is used for pre-bootstrap flake
+// files; live is the OpenClaw agent workspace written after bridge bootstrap.
+func exedevWorkspaceDirs(remoteHome string) (staged, live string) {
+	return path.Join(remoteHome, "workspace"), replicatedFinalWorkspaceDir(remoteHome)
+}
+
 func replicatedWorkspaceReadinessCommand(dir string, files map[string]string) string {
 	if len(files) == 0 {
 		return "true"
@@ -4810,6 +4821,7 @@ func (s *Server) provisionExedev(ctx context.Context, clawID string, req types.C
 		return fmt.Errorf("exedev create: %w", err)
 	}
 	log.Printf("exedev VM created: %s (claw %s)", instance.ID, clawID)
+	recordE2EExedevVMID(instance.ID)
 	_, _ = s.db.Exec(`UPDATE claws SET status='starting', provider='exedev', provider_id=? WHERE id=?`, instance.ID, clawID)
 
 	// Bootstrap asynchronously
@@ -4923,8 +4935,7 @@ func (s *Server) bootstrapExedev(ctx context.Context, clawID, vmName string, p *
 	if err != nil {
 		return err
 	}
-	stagedWorkspace := path.Join(remoteHome, "workspace")
-	liveWorkspace := replicatedFinalWorkspaceDir(remoteHome)
+	stagedWorkspace, liveWorkspace := exedevWorkspaceDirs(remoteHome)
 
 	if flakeFiles := templateFlakeFiles(templateFiles); len(flakeFiles) > 0 {
 		if _, err := p.Exec(ctx, vmName, []string{"mkdir", "-p", "--", stagedWorkspace}); err != nil {

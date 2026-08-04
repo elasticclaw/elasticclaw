@@ -19,6 +19,21 @@ func TestReplicatedFinalWorkspaceDirUsesLiveWorkspace(t *testing.T) {
 	}
 }
 
+func TestExedevWorkspaceDirsUsesAbsoluteStagedAndLivePaths(t *testing.T) {
+	t.Parallel()
+	staged, live := exedevWorkspaceDirs("/home/exedev")
+	if staged != "/home/exedev/workspace" {
+		t.Fatalf("staged = %q, want /home/exedev/workspace", staged)
+	}
+	if live != "/home/exedev/.openclaw/workspace" {
+		t.Fatalf("live = %q, want /home/exedev/.openclaw/workspace", live)
+	}
+	// Regression: never stage under a literal "~" directory.
+	if strings.Contains(staged, "/~/") || strings.Contains(live, "/~/") {
+		t.Fatalf("workspace dirs must not contain literal tilde segments: staged=%q live=%q", staged, live)
+	}
+}
+
 func TestRetryReplicatedBootstrapStepSucceedsAfterTransientFailures(t *testing.T) {
 	attempts := 0
 	var slept []time.Duration
