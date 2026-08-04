@@ -15,6 +15,7 @@ import { LEGACY_ANALYTICS_SECTION, SETTINGS_NAV_GROUPS, WORKSPACE_SECTIONS, isVa
 import { fetchWorkspaces, updateWorkflowControls, type RepositoryAccess, type Workspace, type Workflow } from "@/lib/api"
 import { useBranding } from "@/hooks/use-branding"
 import { useCapabilities } from "@/hooks/use-capabilities"
+import { getStoredWorkspace } from "@/lib/workspace-preference"
 import { WorkflowRunsDialog } from "@/components/workflow-runs-dialog"
 
 interface LLMKeyView {
@@ -284,7 +285,13 @@ export default function SettingsSectionPage() {
         setSelectedWorkspace((current) => {
           if (data.length === 0) return ""
           if (routeWorkspace && data.some((workspace) => workspace.name === routeWorkspace)) return routeWorkspace
-          return data.some((workspace) => workspace.name === current) ? current : data[0].name
+          if (data.some((workspace) => workspace.name === current)) return current
+          // No workspace in the URL or state yet: honour the selection made
+          // elsewhere in the app (nav rail picker) before defaulting to the
+          // first workspace, so the choice survives entering settings.
+          const stored = getStoredWorkspace()
+          if (stored && data.some((workspace) => workspace.name === stored)) return stored
+          return data[0].name
         })
       })
       .catch(() => {

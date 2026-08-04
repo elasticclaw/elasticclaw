@@ -1,8 +1,8 @@
 "use client"
 
-import { Fragment, useEffect, useState } from "react"
+import { Fragment, Suspense, useEffect, useState } from "react"
 import Link from "next/link"
-import { usePathname, useRouter } from "next/navigation"
+import { usePathname, useRouter, useSearchParams } from "next/navigation"
 import { BarChart3, Bot, ChevronDown, LogOut, User } from "lucide-react"
 import {
   LEGACY_ANALYTICS_SECTION,
@@ -16,6 +16,7 @@ import { useCapabilities } from "@/hooks/use-capabilities"
 import { clearConfig, fetchWorkspaces, type Workspace } from "@/lib/api"
 import { getAuthToken } from "@/lib/auth-storage"
 import { cn } from "@/lib/utils"
+import { getStoredWorkspace, setStoredWorkspace } from "@/lib/workspace-preference"
 
 // Primary routes shown in the WORK group of the rail.
 const PRIMARY_NAV = [
@@ -104,19 +105,29 @@ function initialsOf(name: string) {
   return (first + last).toUpperCase()
 }
 
-// NavRail is the single piece of app-level chrome: a full-height left rail
-// mounted on every primary screen (/, /analytics, /settings). It carries the
-// brand, the primary navigation, the admin-only settings section groups and
-// the user identity block with sign-out. Everything admin-gated defaults to hidden
-// until /api/auth/me resolves, so nothing flashes for non-admins.
-export function NavRail() {
+// WorkspacePicker is the rail's admin-only workspace selector, shown on every
+// primary screen. It renders nothing until /api/auth/me resolves as admin
+// (no flash for non-admins) and reads the current URL via useSearchParams, so
+// NavRail mounts it under a Suspense boundary (required under static export).
+//
+// The displayed workspace resolves in this order:
+//   1. the workspace in the URL — settings path segment or the analytics
+//      `workspace` query param — when it names a known workspace;
+//   2. the persisted selection (localStorage, elasticclaw_selected_workspace);
+//   3. the first available workspace.
+// Changing it always persists the choice, then re-scopes the current screen
+// where that means something: on /settings it navigates to the same section
+// under the chosen workspace, on /analytics it sets the `workspace` query
+// param (preserving every other filter). The agents board has no workspace
+// filter, so on / the change is only recorded.
+function WorkspacePicker() {
   const pathname = usePathname()
   const router = useRouter()
-  const { appName } = useBranding()
-  const { me, isAdmin } = useCapabilities()
+  const searchParams = useSearchParams()
+  const { isAdmin } = useCapabilities()
 
-  // Workspace list for the rail's picker. Fetched once per mount, admin-only,
-  // and failures are swallowed: the picker degrades to the disabled
+  // Workspace list for the picker. Fetched once per mount, admin-only, and
+  // failures are swallowed: the picker degrades to the disabled
   // "No workspaces" state rather than surfacing an error in app chrome.
   const [workspaces, setWorkspaces] = useState<Workspace[]>([])
   useEffect(() => {
@@ -132,6 +143,88 @@ export function NavRail() {
     }
   }, [isAdmin])
 
+  // Mirror of the persisted selection so a change on screens that don't
+  // navigate (the agents board) still updates the control. Lazy-read is safe:
+  // the picker renders nothing until isAdmin resolves client-side, so the
+  // initializer never affects server-rendered markup.
+  const [storedWorkspace, setStoredWorkspaceState] = useState(getStoredWorkspace)
+
+  const onSettings = pathname.startsWith("/settings")
+  const onAnalytics = pathname.startsWith("/analytics")
+  const urlWorkspace = onSettings
+    ? routeWorkspaceOf(pathname)
+    : onAnalytics
+      ? searchParams.get("workspace") ?? ""
+      : ""
+  const known = (name: string) => (name && workspaces.some((workspace) => workspace.name === name) ? name : "")
+  const pickerWorkspace = known(urlWorkspace) || known(storedWorkspace) || (workspaces[0]?.name ?? "")
+  const pickerInitial = pickerWorkspace ? pickerWorkspace.trim()[0].toUpperCase() : "-"
+
+  const activeSection = activeSettingsSection(pathname)
+
+  const selectWorkspace = (workspace: string) => {
+    setStoredWorkspace(workspace)
+    setStoredWorkspaceState(workspace)
+    if (onSettings) {
+      // Same behaviour as before: push the settings URL and let the
+      // normalisation effect in settings-content.tsx resolve the rest.
+      const base = `/settings/${encodeURIComponent(workspace)}`
+      const scoped = activeSection && activeSection !== "workspaces" && WORKSPACE_SECTIONS.has(activeSection)
+      router.push(scoped ? `${base}/${activeSection}` : base)
+    } else if (onAnalytics) {
+      // Re-scope the dashboard: set the workspace query param and keep every
+      // other filter intact. AnalyticsCommandCenter reads it from the URL.
+      const nextParams = new URLSearchParams(searchParams.toString())
+      nextParams.set("workspace", workspace)
+      router.push(`${pathname}?${nextParams.toString()}`)
+    }
+    // On the agents board there is nothing to re-scope; the selection is only
+    // recorded so it carries over to analytics and settings.
+  }
+
+  if (!isAdmin) return null
+
+  return (
+    <div className="relative mx-2 mt-2">
+      <div
+        className={cn(
+          "pointer-events-none absolute left-2.5 top-1/2 z-10 flex size-5 -translate-y-1/2 items-center justify-center rounded text-[11px] font-semibold",
+          pickerWorkspace ? "bg-blue-600 text-white shadow-sm" : "bg-accent text-muted-foreground"
+        )}
+      >
+        {pickerInitial}
+      </div>
+      <select
+        aria-label="Workspace"
+        value={pickerWorkspace}
+        onChange={(event) => selectWorkspace(event.target.value)}
+        disabled={workspaces.length === 0}
+        className="h-9 w-full appearance-none truncate rounded-lg border border-border bg-transparent pl-9 pr-8 text-sm font-semibold outline-none transition-colors hover:bg-secondary focus:bg-secondary disabled:text-muted-foreground disabled:hover:bg-transparent"
+      >
+        {workspaces.length === 0 ? (
+          <option value="">No workspaces</option>
+        ) : (
+          workspaces.map((workspace) => (
+            <option key={workspace.name} value={workspace.name}>{workspace.name}</option>
+          ))
+        )}
+      </select>
+      <ChevronDown className="pointer-events-none absolute right-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
+    </div>
+  )
+}
+
+// NavRail is the single piece of app-level chrome: a full-height left rail
+// mounted on every primary screen (/, /analytics, /settings). It carries the
+// brand, the admin-only workspace picker, the primary navigation, the
+// admin-only settings section groups and the user identity block with
+// sign-out. Everything admin-gated defaults to hidden until /api/auth/me
+// resolves, so nothing flashes for non-admins.
+export function NavRail() {
+  const pathname = usePathname()
+  const { appName } = useBranding()
+  const { me, isAdmin } = useCapabilities()
+
   // The HOME badge mirrors the login landing rule (app/login/page.tsx):
   // admins land on /analytics, everyone else on /. Rendered only once
   // /api/auth/me has resolved so the badge never jumps between items.
@@ -141,26 +234,6 @@ export function NavRail() {
   // active highlight for both /settings/{section} and
   // /settings/{workspace}/{section}.
   const activeSection = activeSettingsSection(pathname)
-
-  // The rail owns no workspace state: the URL is the source of truth. The
-  // picker displays the workspace from the URL when present (falling back to
-  // the first available, which is what settings-content.tsx resolves to), and
-  // changing it only navigates — the normalisation effect in
-  // settings-content.tsx handles resolution and redirects from there. It
-  // renders only on /settings, where the WORKSPACE group it scopes is in use;
-  // on / and /analytics it would be inert.
-  const onSettings = pathname.startsWith("/settings")
-  const routeWorkspace = routeWorkspaceOf(pathname)
-  const pickerWorkspace = routeWorkspace && workspaces.some((workspace) => workspace.name === routeWorkspace)
-    ? routeWorkspace
-    : workspaces[0]?.name ?? ""
-  const pickerInitial = pickerWorkspace ? pickerWorkspace.trim()[0].toUpperCase() : "-"
-
-  const selectWorkspace = (workspace: string) => {
-    const base = `/settings/${encodeURIComponent(workspace)}`
-    const scoped = activeSection && activeSection !== "workspaces" && WORKSPACE_SECTIONS.has(activeSection)
-    router.push(scoped ? `${base}/${activeSection}` : base)
-  }
 
   // Password sessions carry no GitHub identity: /api/auth/me returns only
   // auth_method, is_admin and capabilities. Falling back to login/name would
@@ -181,6 +254,16 @@ export function NavRail() {
         <span className="truncate text-sm font-semibold tracking-tight">{appName}</span>
       </div>
 
+      {/* Workspace picker: pinned between the brand header and the nav so it
+          sits at the same spot on every screen and outside any nav group —
+          it scopes the app, not whichever group happens to render beneath it.
+          Suspense is required because the picker reads useSearchParams (CSR
+          bailout under static export); the fallback is empty like the
+          picker's own pre-auth state. */}
+      <Suspense fallback={null}>
+        <WorkspacePicker />
+      </Suspense>
+
       <nav className="min-h-0 flex-1 overflow-y-auto px-2 pb-4">
         <GroupLabel>Work</GroupLabel>
         <div className="space-y-0.5">
@@ -200,39 +283,6 @@ export function NavRail() {
             item links to /settings/{section}; settings-content.tsx normalises
             workspace-scoped sections to /settings/{workspace}/{section}, and
             activeSettingsSection resolves the highlight for both URL shapes. */}
-        {/* Workspace picker: sits directly above the WORKSPACE group caption
-            because that group is exactly what it scopes. Admin-only (like the
-            groups below, hidden until /api/auth/me resolves) and settings-only.
-            With zero workspaces it renders disabled as "No workspaces" — a
-            deliberate empty state, not an error. */}
-        {isAdmin && onSettings && (
-          <div className="relative mt-4">
-            <div
-              className={cn(
-                "pointer-events-none absolute left-2.5 top-1/2 z-10 flex size-5 -translate-y-1/2 items-center justify-center rounded text-[11px] font-semibold",
-                pickerWorkspace ? "bg-blue-600 text-white shadow-sm" : "bg-accent text-muted-foreground"
-              )}
-            >
-              {pickerInitial}
-            </div>
-            <select
-              aria-label="Workspace"
-              value={pickerWorkspace}
-              onChange={(event) => selectWorkspace(event.target.value)}
-              disabled={workspaces.length === 0}
-              className="h-9 w-full appearance-none truncate rounded-lg border border-border bg-transparent pl-9 pr-8 text-sm font-semibold outline-none transition-colors hover:bg-secondary focus:bg-secondary disabled:text-muted-foreground disabled:hover:bg-transparent"
-            >
-              {workspaces.length === 0 ? (
-                <option value="">No workspaces</option>
-              ) : (
-                workspaces.map((workspace) => (
-                  <option key={workspace.name} value={workspace.name}>{workspace.name}</option>
-                ))
-              )}
-            </select>
-            <ChevronDown className="pointer-events-none absolute right-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
-          </div>
-        )}
         {isAdmin &&
           SETTINGS_NAV_GROUPS.map((group) => (
             <Fragment key={group.label}>
