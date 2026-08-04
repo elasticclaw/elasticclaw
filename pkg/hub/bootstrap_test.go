@@ -1423,7 +1423,13 @@ func TestGitHubCredentialHelper_RequiresAndVerifiesGitRegistration(t *testing.T)
 	assertContains(t, script, "git config --global credential.helper /usr/local/bin/elasticclaw-git-credentials", "git helper registration")
 	assertContains(t, script, "git config --global --get-all credential.helper | grep -Fx /usr/local/bin/elasticclaw-git-credentials >/dev/null", "git helper verification")
 	assertContains(t, script, "git config --show-origin --global --get-all credential.helper", "git helper origin log")
+	assertContains(t, script, "url.https://github.com/.insteadOf", "force HTTPS for github.com remotes")
+	assertContains(t, script, "git@github.com:", "rewrite SSH scp-style remotes")
+	assertContains(t, script, "ssh://git@github.com/", "rewrite SSH URL remotes")
+	assertContains(t, script, "did not return a GitHub token after retries", "token mint smoke")
+	assertContains(t, script, "rewrote origin to HTTPS", "post-clone SSH remote rewrite")
 	assertNotContains(t, script, "sudo apt-get install -y git 2>/dev/null || true", "git install must not be silently optional")
+	assertNotContains(t, script, githubCredentialHelperSkipPrefix, "configured helper must not be a skip marker")
 
 	gitConfigIdx := strings.Index(script, "git config --global credential.helper /usr/local/bin/elasticclaw-git-credentials")
 	ghInstallIdx := strings.Index(script, "Installing gh CLI")
@@ -1433,6 +1439,33 @@ func TestGitHubCredentialHelper_RequiresAndVerifiesGitRegistration(t *testing.T)
 	if gitConfigIdx > ghInstallIdx {
 		t.Fatalf("mandatory git credential helper registration must happen before optional gh install")
 	}
+}
+
+func TestShouldInstallGitHubCredentialHelper(t *testing.T) {
+	t.Parallel()
+	if shouldInstallGitHubCredentialHelper(&types.HubConfig{}, nil, nil) {
+		t.Fatal("empty config should not install helper")
+	}
+	if !shouldInstallGitHubCredentialHelper(&types.HubConfig{
+		GitHubApps: []*types.GitHubAppConfig{{AppID: 1}},
+	}, nil, nil) {
+		t.Fatal("hub GitHub apps should install helper")
+	}
+	if !shouldInstallGitHubCredentialHelper(&types.HubConfig{}, nil, []types.GitHubRepoAccess{{Repo: "o/r"}}) {
+		t.Fatal("configured repos should install helper even without hub apps")
+	}
+}
+
+func TestBuildGitHubCredentialHelperInstallsWithoutHubAppsWhenCallerRequests(t *testing.T) {
+	// Workspace-scoped apps / github_repos previously never installed a helper
+	// because buildGitHubCredentialHelper gated only on hub-level GitHubApps.
+	cfg := &types.HubConfig{ClawToken: "test-claw-token"}
+	script := buildGitHubCredentialHelper(cfg, "https://hub.example.com", "claw-123", []types.GitHubRepoAccess{{Repo: "o/r"}})
+	if strings.HasPrefix(script, githubCredentialHelperSkipPrefix) {
+		t.Fatalf("expected install script without hub apps when claw token present, got skip:\n%s", script)
+	}
+	assertContains(t, script, "/usr/local/bin/elasticclaw-git-credentials", "helper binary path")
+	assertContains(t, script, "https://hub.example.com/api/github/token/claw-123", "token URL")
 }
 
 // ── Container integration test ────────────────────────────────────────────────
