@@ -2990,7 +2990,17 @@ func syncStagedWorkspaceToOpenClawWorkspace() error {
 	if err := os.MkdirAll(activeDir, 0700); err != nil {
 		return fmt.Errorf("create OpenClaw workspace: %w", err)
 	}
+	// Only clear managed files that the staged tree actually replaces. Removing
+	// every managed name when staged is empty (e.g. hub wrote to the wrong path)
+	// leaves an attested OpenClaw workspace without AGENTS.md/SOUL.md and
+	// triggers WorkspaceVanishedError on the first agent turn.
 	for name := range openClawWorkspaceManagedFiles {
+		if _, err := os.Stat(filepath.Join(stagedDir, name)); err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return fmt.Errorf("stat staged workspace file %s: %w", name, err)
+		}
 		if err := os.RemoveAll(filepath.Join(activeDir, name)); err != nil {
 			return fmt.Errorf("remove stale OpenClaw workspace file %s: %w", name, err)
 		}

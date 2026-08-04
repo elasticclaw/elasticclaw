@@ -524,17 +524,57 @@ func TestSyncStagedWorkspaceToOpenClawWorkspace(t *testing.T) {
 	assertFile("elasticclaw-config.yaml", "schema_version: v1\nname: lexipol\nprovider: docker\n")
 	assertFile("AGENTS.md", "You are the Lexipol factory agent.\n")
 	assertFile(filepath.Join("scripts", "bootstrap.sh"), "#!/bin/sh\n")
-	if _, err := os.Stat(filepath.Join(activeDir, "BOOTSTRAP.md")); !os.IsNotExist(err) {
-		t.Fatalf("BOOTSTRAP.md should be removed, got err=%v", err)
-	}
-	if _, err := os.Stat(filepath.Join(activeDir, "MEMORY.md")); !os.IsNotExist(err) {
-		t.Fatalf("MEMORY.md should be removed, got err=%v", err)
-	}
+	// Managed files absent from staged must not be wiped — otherwise an empty
+	// staged dir (wrong hub path) leaves an attested OpenClaw workspace bare.
+	assertFile("BOOTSTRAP.md", "Who am I? Who are you?\n")
+	assertFile("MEMORY.md", "blank slate\n")
 	if _, err := os.Stat(filepath.Join(activeDir, ".elasticclaw-workspace-ready")); !os.IsNotExist(err) {
 		t.Fatalf("ready marker should not be copied, got err=%v", err)
 	}
 	if _, err := os.Stat(filepath.Join(activeDir, "passwd-link")); !os.IsNotExist(err) {
 		t.Fatalf("symlink should not be copied, got err=%v", err)
+	}
+}
+
+func TestSyncStagedWorkspaceReplacesOnlyPresentManagedFiles(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	stagedDir := filepath.Join(home, "workspace")
+	activeDir := filepath.Join(home, ".openclaw", "workspace")
+	if err := os.MkdirAll(stagedDir, 0700); err != nil {
+		t.Fatalf("mkdir staged: %v", err)
+	}
+	if err := os.MkdirAll(activeDir, 0700); err != nil {
+		t.Fatalf("mkdir active: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(stagedDir, "AGENTS.md"), []byte("from staged\n"), 0600); err != nil {
+		t.Fatalf("write staged AGENTS.md: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(activeDir, "AGENTS.md"), []byte("from openclaw\n"), 0600); err != nil {
+		t.Fatalf("write active AGENTS.md: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(activeDir, "SOUL.md"), []byte("keep me\n"), 0600); err != nil {
+		t.Fatalf("write active SOUL.md: %v", err)
+	}
+
+	if err := syncStagedWorkspaceToOpenClawWorkspace(); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+
+	gotAgents, err := os.ReadFile(filepath.Join(activeDir, "AGENTS.md"))
+	if err != nil {
+		t.Fatalf("read AGENTS.md: %v", err)
+	}
+	if string(gotAgents) != "from staged\n" {
+		t.Fatalf("AGENTS.md = %q, want staged content", string(gotAgents))
+	}
+	gotSoul, err := os.ReadFile(filepath.Join(activeDir, "SOUL.md"))
+	if err != nil {
+		t.Fatalf("read SOUL.md: %v", err)
+	}
+	if string(gotSoul) != "keep me\n" {
+		t.Fatalf("SOUL.md = %q, want preserved openclaw content", string(gotSoul))
 	}
 }
 

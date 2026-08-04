@@ -13,6 +13,10 @@ func TestReplicatedFinalWorkspaceDirUsesLiveWorkspace(t *testing.T) {
 	if got, want := replicatedFinalWorkspaceDir("/home/elasticclaw"), "/home/elasticclaw/.openclaw/workspace"; got != want {
 		t.Fatalf("replicated final workspace dir = %q, want %q", got, want)
 	}
+	// exedev post-bootstrap writes use the same live workspace layout.
+	if got, want := replicatedFinalWorkspaceDir("/home/exedev"), "/home/exedev/.openclaw/workspace"; got != want {
+		t.Fatalf("exedev live workspace dir = %q, want %q", got, want)
+	}
 }
 
 func TestRetryReplicatedBootstrapStepSucceedsAfterTransientFailures(t *testing.T) {
