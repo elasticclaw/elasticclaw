@@ -60,7 +60,14 @@ func (p *Provider) sshArgs() []string {
 	if p.cfg.SSHKeyPath != "" {
 		args = append(args, "-i", p.cfg.SSHKeyPath)
 	}
-	args = append(args, "-o", "StrictHostKeyChecking=no", "exe.dev")
+	// BatchMode + ConnectTimeout: never hang on password prompts (e.g. CI cleanup
+	// without a key, or a key not registered on the account).
+	args = append(args,
+		"-o", "BatchMode=yes",
+		"-o", "ConnectTimeout=15",
+		"-o", "StrictHostKeyChecking=no",
+		"exe.dev",
+	)
 	return args
 }
 
@@ -71,7 +78,12 @@ func (p *Provider) sshVMArgs(host string) []string {
 	if p.cfg.SSHKeyPath != "" {
 		args = append(args, "-i", p.cfg.SSHKeyPath)
 	}
-	args = append(args, "-o", "StrictHostKeyChecking=no", host)
+	args = append(args,
+		"-o", "BatchMode=yes",
+		"-o", "ConnectTimeout=15",
+		"-o", "StrictHostKeyChecking=no",
+		host,
+	)
 	return args
 }
 

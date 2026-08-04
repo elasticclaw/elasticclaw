@@ -140,8 +140,15 @@ func TestCleanupRecordedExedevVMs(t *testing.T) {
 		return
 	}
 
+	// Same materialization as the main suite: PEM secret or explicit path.
+	// Without this, post-run cleanup used default SSH (no key on CI runners)
+	// and could hang on password prompts or fail destroy.
+	keyPath := materializeExedevSSHKeyPath(t)
+	if keyPath == "" {
+		t.Fatalf("recorded %d exe.dev VM id(s) but no ELASTICCLAW_E2E_EXEDEV_SSH_KEY(_PATH) for cleanup", len(ids))
+	}
 	provider, err := exedevProvider.New(exedevProvider.Config{
-		SSHKeyPath: strings.TrimSpace(os.Getenv("ELASTICCLAW_E2E_EXEDEV_SSH_KEY_PATH")),
+		SSHKeyPath: keyPath,
 	})
 	if err != nil {
 		t.Fatalf("create exe.dev provider for recorded cleanup: %v", err)
@@ -155,6 +162,9 @@ func TestCleanupRecordedExedevVMs(t *testing.T) {
 			if err := provider.Destroy(ctx, id, false); err != nil {
 				if isBenignExedevDeleteError(err) {
 					continue
+				}
+				if isFatalExedevDeleteError(err) {
+					t.Fatalf("delete recorded exe.dev VM %s: %v", id, err)
 				}
 				if time.Now().After(deadline) {
 					t.Fatalf("delete recorded exe.dev VM %s: %v", id, err)

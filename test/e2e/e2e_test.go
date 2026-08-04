@@ -331,15 +331,11 @@ func newE2EEnv(t *testing.T, runID, sandboxProvider string) e2eEnv {
 	return env
 }
 
-// resolveExedevSSHKeyPath returns an SSH private key path registered with exe.dev.
-// Prefer ELASTICCLAW_E2E_EXEDEV_SSH_KEY_PATH; otherwise materialize
-// ELASTICCLAW_E2E_EXEDEV_SSH_KEY (PEM body) into a temp file.
-//
-// When neither is set, the suite skips (counts as pass) so the Depot matrix
-// stays green until the org secret is provisioned. Local developers can set a
-// path or rely on CI secrets; bare agent-only auth is intentionally not used
-// in CI because runners have no registered exe.dev key.
-func resolveExedevSSHKeyPath(t *testing.T) string {
+// materializeExedevSSHKeyPath returns a filesystem path for the E2E exe.dev
+// private key. Prefer ELASTICCLAW_E2E_EXEDEV_SSH_KEY_PATH; otherwise write
+// ELASTICCLAW_E2E_EXEDEV_SSH_KEY (PEM body) to a temp file. Empty when neither
+// is set. Used by both the main suite and the post-run recorded-VM cleanup.
+func materializeExedevSSHKeyPath(t *testing.T) string {
 	t.Helper()
 	if path := strings.TrimSpace(os.Getenv("ELASTICCLAW_E2E_EXEDEV_SSH_KEY_PATH")); path != "" {
 		if _, err := os.Stat(path); err != nil {
@@ -360,6 +356,18 @@ func resolveExedevSSHKeyPath(t *testing.T) string {
 		}
 		return path
 	}
+	return ""
+}
+
+// resolveExedevSSHKeyPath returns an SSH private key path registered with exe.dev.
+// When neither path nor PEM is set, the suite skips in CI so the matrix stays
+// green until the org secret is provisioned. Local non-CI runs may use the
+// default SSH agent/config (empty path).
+func resolveExedevSSHKeyPath(t *testing.T) string {
+	t.Helper()
+	if path := materializeExedevSSHKeyPath(t); path != "" {
+		return path
+	}
 	if strings.EqualFold(strings.TrimSpace(os.Getenv("CI")), "true") ||
 		strings.TrimSpace(os.Getenv("GITHUB_ACTIONS")) != "" ||
 		strings.TrimSpace(os.Getenv("DEPOT_PROJECT_ID")) != "" {
@@ -367,7 +375,6 @@ func resolveExedevSSHKeyPath(t *testing.T) string {
 			"(PEM of an SSH key registered on the ElasticClaw exe.dev account) " +
 			"or ELASTICCLAW_E2E_EXEDEV_SSH_KEY_PATH")
 	}
-	// Local non-CI: allow default SSH agent/config (~/.ssh).
 	return ""
 }
 
@@ -918,6 +925,13 @@ func isBenignExedevDeleteError(err error) bool {
 		strings.Contains(msg, "no such") ||
 		strings.Contains(msg, "404") ||
 		strings.Contains(msg, "already")
+}
+
+func isFatalExedevDeleteError(err error) bool {
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "permission denied") ||
+		strings.Contains(msg, "publickey") ||
+		strings.Contains(msg, "ssh keys are required")
 }
 
 // assertExedevLiveWorkspace SSHs into the claw VM and verifies template files
