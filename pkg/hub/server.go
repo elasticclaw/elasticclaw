@@ -3785,15 +3785,44 @@ cp "$BIN" /tmp/claw-bridge.download && chmod +x /tmp/claw-bridge.download && mv 
 		// Use the hub directly during bootstrap. The bridge is intentionally not
 		// started yet so startup cannot race ahead of template file writes and
 		// bootstrap_ok gating.
+		// Base token URL. The credential helper appends &repo=owner/name when git
+		// supplies a path so large workspaces mint single-repo tokens (GitHub caps
+		// scoped tokens at 50 names and install-wide tokens over-grant).
 		tokenURL := fmt.Sprintf("%s/api/github/token/%s?claw_token=%s", s.clawHubURL(), clawID, clawToken)
 
 		// Step 5a: write the credential helper binary
+		// NOTE: %% escapes are for fmt.Sprintf — the written shell script must
+		// still contain single % for bash parameter expansion (${p%.git}, etc.).
 		credHelperScript := fmt.Sprintf(`export HOME=/home/daytona
 sudo tee /usr/local/bin/elasticclaw-git-credentials > /dev/null << 'CREDEOF'
 #!/bin/bash
+# Parse git credential protocol fields (path enables single-repo token minting).
+repo_query=""
+while IFS= read -r line; do
+  [ -z "$line" ] && break
+  case "$line" in
+    path=*)
+      p="${line#path=}"
+      p="${p#/}"
+      p="${p%%.git}"
+      # Accept owner/repo or nested path ending in owner/repo
+      case "$p" in
+        */*)
+          owner="${p%%%%/*}"
+          rest="${p#*/}"
+          name="${rest%%%%/*}"
+          if [ -n "$owner" ] && [ -n "$name" ] && [ "$owner" != "$p" ]; then
+            repo_query="&repo=$(printf '%%s' "$owner/$name" | python3 -c 'import sys,urllib.parse; print(urllib.parse.quote(sys.stdin.read().strip(), safe=""))')"
+          fi
+          ;;
+      esac
+      ;;
+  esac
+done
 # Retry up to 10 times — hub token endpoint may not be ready immediately
+base_url=%q
 for i in $(seq 1 10); do
-  response=$(curl -sf --max-time 35 %q)
+  response=$(curl -sf --max-time 35 "${base_url}${repo_query}")
   if [ $? -eq 0 ] && [ -n "$response" ]; then break; fi
   sleep 3
 done
@@ -6761,7 +6790,30 @@ echo "Configuring GitHub credential helper for user=$(whoami) home=$HOME"
 sudo tee /usr/local/bin/elasticclaw-git-credentials > /dev/null << 'CREDEOF'
 #!/bin/bash
 # Git credential helper — fetches a fresh GitHub App installation token from the hub.
-response=$(curl -sf %q)
+# When git supplies path=owner/repo.git, request a single-repo scoped token.
+repo_query=""
+while IFS= read -r line; do
+  [ -z "$line" ] && break
+  case "$line" in
+    path=*)
+      p="${line#path=}"
+      p="${p#/}"
+      p="${p%%.git}"
+      case "$p" in
+        */*)
+          owner="${p%%%%/*}"
+          rest="${p#*/}"
+          name="${rest%%%%/*}"
+          if [ -n "$owner" ] && [ -n "$name" ] && [ "$owner" != "$p" ]; then
+            repo_query="&repo=$(printf '%%s' "$owner/$name" | python3 -c 'import sys,urllib.parse; print(urllib.parse.quote(sys.stdin.read().strip(), safe=""))')"
+          fi
+          ;;
+      esac
+      ;;
+  esac
+done
+base_url=%q
+response=$(curl -sf "${base_url}${repo_query}")
 if [ $? -ne 0 ] || [ -z "$response" ]; then
   exit 1
 fi
@@ -7396,6 +7448,31 @@ func (s *Server) handleGitHubToken(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
+	}
+
+	// Optional single-repo scope from the git credential helper (path=owner/repo.git).
+	// Keeps tokens least-privilege for large workspaces and stays under GitHub's
+	// 50-name scoped-token limit without ever broadening to the full installation.
+	if want := strings.TrimSpace(r.URL.Query().Get("repo")); want != "" {
+		want = strings.TrimPrefix(want, "/")
+		want = strings.TrimSuffix(want, ".git")
+		scoped := make([]RepoAccess, 0, 1)
+		for _, repo := range repos {
+			if strings.EqualFold(repo.Repo, want) {
+				scoped = append(scoped, repo)
+				break
+			}
+		}
+		if len(scoped) == 0 {
+			http.Error(w, "requested repo is not configured on this claw", http.StatusForbidden)
+			return
+		}
+		repos = scoped
+	} else if len(repos) > maxScopedInstallationRepos {
+		// gh/profile refresh without a path cannot safely request >50 repos at once.
+		// Callers that need access (git clone) should pass ?repo=owner/name.
+		http.Error(w, fmt.Sprintf("claw has %d repositories; request a single-repo token with ?repo=owner/name (GitHub scoped-token limit is %d)", len(repos), maxScopedInstallationRepos), http.StatusBadRequest)
+		return
 	}
 
 	// Try each configured GitHub App in order; use the first that finds an installation
