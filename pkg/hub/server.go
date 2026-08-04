@@ -7451,8 +7451,8 @@ func (s *Server) handleGitHubToken(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Optional single-repo scope from the git credential helper (path=owner/repo.git).
-	// Keeps tokens least-privilege for large workspaces and stays under GitHub's
-	// 50-name scoped-token limit without ever broadening to the full installation.
+	// Preferred for large workspaces: each clone mints a least-privilege token
+	// for one allowlisted repo (scales past GitHub's 50-name list limit).
 	if want := strings.TrimSpace(r.URL.Query().Get("repo")); want != "" {
 		want = strings.TrimPrefix(want, "/")
 		want = strings.TrimSuffix(want, ".git")
@@ -7469,10 +7469,11 @@ func (s *Server) handleGitHubToken(w http.ResponseWriter, r *http.Request) {
 		}
 		repos = scoped
 	} else if len(repos) > maxScopedInstallationRepos {
-		// gh/profile refresh without a path cannot safely request >50 repos at once.
-		// Callers that need access (git clone) should pass ?repo=owner/name.
-		http.Error(w, fmt.Sprintf("claw has %d repositories; request a single-repo token with ?repo=owner/name (GitHub scoped-token limit is %d)", len(repos), maxScopedInstallationRepos), http.StatusBadRequest)
-		return
+		// Multi-repo mint without ?repo=: GitHub cannot name-scope >50 repos.
+		// InstallationToken will request permission levels without a repositories
+		// array. Git clone still prefers ?repo= (credential helper). Log so
+		// operators know the install is the access boundary for unscoped mints.
+		log.Printf("[github] claw %s multi-repo token for %d repos exceeds GitHub name-scope limit %d; minting permission-restricted installation token (git clones should use ?repo=)", clawID[:8], len(repos), maxScopedInstallationRepos)
 	}
 
 	// Try each configured GitHub App in order; use the first that finds an installation

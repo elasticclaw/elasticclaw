@@ -105,20 +105,47 @@ func TestGitHubBootstrapCloneTimeoutScalesWithRepoCount(t *testing.T) {
 	}
 }
 
-func TestInstallationTokenRejectsOverGitHubScopedCap(t *testing.T) {
-	// Must fail closed rather than mint an installation-wide token that would
-	// grant repos outside the claw's configured allowlist (Greptile P1).
+func TestInstallationTokenOmitsNameListAboveGitHubCap(t *testing.T) {
+	// GitHub rejects repositories arrays longer than 50. We still mint a
+	// permission-restricted installation token so 50+ workspaces work; git
+	// clones should use ?repo= for least privilege.
+	var sawBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/app/installations"):
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`[{"id":99,"account":{"login":"org"}}]`))
+		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/access_tokens"):
+			body, _ := io.ReadAll(r.Body)
+			sawBody = string(body)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"token":"tok","expires_at":"2099-01-01T00:00:00Z"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
 	provider, err := NewGitHubTokenProvider(&types.GitHubAppConfig{AppID: 1, PrivateKeyPEM: testGitHubAppPEM(t)})
 	if err != nil {
 		t.Fatal(err)
 	}
+	provider.apiBaseURL = srv.URL
+	provider.httpClient = srv.Client()
+
 	repos := make([]RepoAccess, maxScopedInstallationRepos+1)
 	for i := range repos {
 		repos[i] = RepoAccess{Repo: fmt.Sprintf("org/r%d", i), Permissions: "write"}
 	}
-	_, _, err = provider.InstallationToken(context.Background(), 99, repos)
-	if err == nil || !strings.Contains(err.Error(), "GitHub limit") {
-		t.Fatalf("error = %v, want GitHub limit error", err)
+	if _, _, err := provider.InstallationToken(context.Background(), 99, repos); err != nil {
+		t.Fatalf("InstallationToken: %v", err)
+	}
+	if strings.Contains(sawBody, `"repositories"`) {
+		t.Fatalf("expected no repositories name list for %d repos, body=%s", len(repos), sawBody)
+	}
+	if !strings.Contains(sawBody, `"contents":"write"`) {
+		t.Fatalf("expected write permissions, body=%s", sawBody)
 	}
 }
 
