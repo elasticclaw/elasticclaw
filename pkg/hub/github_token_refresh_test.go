@@ -70,7 +70,8 @@ func TestDaytonaGitHubAccessSmokeScriptIsConstantTimeInRepoCount(t *testing.T) {
 	}
 	script := buildDaytonaGitHubAccessSmokeScript(many)
 
-	assertContains(t, script, "gh api user", "smoke uses one authenticated API call")
+	assertContains(t, script, "gh api rate_limit", "smoke uses installation-token-safe API call")
+	assertNotContains(t, script, "gh api user", "installation tokens cannot call /user")
 	assertContains(t, script, "gh repo view", "smoke samples a configured repo")
 	assertContains(t, script, "org/repo-0", "smoke samples only the first configured repo")
 	// Must not O(N) view every workspace repo (that timed out large workspaces).

@@ -6578,12 +6578,16 @@ fi`
 // buildDaytonaGitHubAccessSmokeScript checks that the credential helper can mint
 // a token and that GitHub accepts it. It views at most one configured repository
 // so large workspaces stay O(1) at bootstrap; full access is proven by clone.
+//
+// IMPORTANT: GH_TOKEN is a GitHub App *installation* token, not a user token.
+// Endpoints like `gh api user` return 403 "Resource not accessible by
+// integration" and must not be used here.
 func buildDaytonaGitHubAccessSmokeScript(repos []types.GitHubRepoAccess) string {
 	var b strings.Builder
 	b.WriteString("export HOME=/home/daytona; set +x; . /etc/profile.d/elasticclaw-github.sh; ")
 	b.WriteString(`[ -n "${GH_TOKEN:-}" ] || { echo "[daytona] github access smoke: empty GH_TOKEN"; exit 1; }; `)
-	// Cheap authenticated API call that does not scale with workspace size.
-	b.WriteString(`gh api user >/dev/null || { echo "[daytona] github access smoke: gh api user failed"; exit 1; }; `)
+	// Installation-token-safe authenticated call (works without a repo list).
+	b.WriteString(`gh api rate_limit >/dev/null || { echo "[daytona] github access smoke: gh api rate_limit failed"; exit 1; }; `)
 	if len(repos) > 0 && strings.TrimSpace(repos[0].Repo) != "" {
 		// Single sample proves installation scope for at least one configured repo.
 		fmt.Fprintf(&b, "gh repo view %s >/dev/null || { echo %s; exit 1; }; ",
