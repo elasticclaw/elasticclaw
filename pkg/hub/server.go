@@ -4861,10 +4861,10 @@ func (s *Server) bootstrapExedev(ctx context.Context, clawID, vmName string, p *
 	s.setBootstrapStatus(clawID, "Preparing ElasticClaw connector")
 
 	// Load claw configuration from DB in a single atomic query
-	var clawName, templateName, githubReposJSON, linearWorkspace, templateDefaultModel, llmKeyName, templateFilesJSON string
+	var clawName, templateName, githubReposJSON, linearWorkspace, templateDefaultModel, llmKeyName, templateFilesJSON, tagsJSON string
 	var nixEnabled, dockerEnabled int
-	if err := s.db.QueryRow(`SELECT COALESCE(name,''), COALESCE(template,''), COALESCE(github_repos,'[]'), COALESCE(linear_workspace,''), COALESCE(default_model,''), nix, docker, COALESCE(llm_key,''), COALESCE(template_files,'{}') FROM claws WHERE id=?`, clawID).Scan(
-		&clawName, &templateName, &githubReposJSON, &linearWorkspace, &templateDefaultModel, &nixEnabled, &dockerEnabled, &llmKeyName, &templateFilesJSON,
+	if err := s.db.QueryRow(`SELECT COALESCE(name,''), COALESCE(template,''), COALESCE(github_repos,'[]'), COALESCE(linear_workspace,''), COALESCE(default_model,''), nix, docker, COALESCE(llm_key,''), COALESCE(template_files,'{}'), COALESCE(tags,'[]') FROM claws WHERE id=?`, clawID).Scan(
+		&clawName, &templateName, &githubReposJSON, &linearWorkspace, &templateDefaultModel, &nixEnabled, &dockerEnabled, &llmKeyName, &templateFilesJSON, &tagsJSON,
 	); err != nil {
 		return fmt.Errorf("load claw config: %w", err)
 	}
@@ -4990,11 +4990,11 @@ func (s *Server) bootstrapExedev(ctx context.Context, clawID, vmName string, p *
 	if err := s.restoreCheckpointToExedev(ctx, clawID, vmName, p); err != nil {
 		return fmt.Errorf("restore checkpoint: %w", err)
 	}
-	// Install GitHub credentials whenever hub apps, workspace apps, or
-	// github_repos are configured. Skipping when only hub-level apps were
-	// checked left exe.dev claws without a helper (agents claimed "no credentials").
-	wsCandidates := []string{templateName}
-	if shouldInstallGitHubCredentialHelper(hubCfg, wsCandidates, githubRepos) {
+	// Same workspace resolution as handleGitHubToken so workspace-scoped apps
+	// are found (template column holds workspace.Name for workflows; tags hold
+	// workspace: for fallback). Hub-only app check previously skipped these.
+	workspaceName := clawWorkspaceName(templateName, tagsJSON)
+	if shouldInstallGitHubCredentialHelper(hubCfg, workspaceName) {
 		s.setBootstrapStatus(clawID, "Preparing repository access")
 		credHelper := buildGitHubCredentialHelper(hubCfg, s.clawHubURL(), clawID, githubRepos)
 		if strings.HasPrefix(credHelper, githubCredentialHelperSkipPrefix) {
@@ -5003,9 +5003,9 @@ func (s *Server) bootstrapExedev(ctx context.Context, clawID, vmName string, p *
 		if err := p.SetupScript(ctx, vmName, credHelper); err != nil {
 			return fmt.Errorf("configure GitHub credentials and repo instructions: %w", err)
 		}
-		log.Printf("[exedev] GitHub credential helper and repo instruction discovery completed for claw %.8s (%d repo(s))", clawID, len(githubRepos))
+		log.Printf("[exedev] GitHub credential helper and repo instruction discovery completed for claw %.8s workspace=%q repos=%d", clawID, workspaceName, len(githubRepos))
 	} else {
-		log.Printf("[exedev] skipping GitHub credential helper for claw %.8s (no GitHub apps or repos)", clawID)
+		log.Printf("[exedev] skipping GitHub credential helper for claw %.8s (no hub or workspace GitHub apps; workspace=%q repos=%d)", clawID, workspaceName, len(githubRepos))
 	}
 	s.markBootstrapReady(clawID)
 
@@ -6323,8 +6323,11 @@ Tokens are short-lived and refreshed automatically on each git/gh operation.
 
 	// Run GitHub credential helper setup (needs bridge connected for hub proxy,
 	// but the hub token URL is publicly accessible so it works directly).
-	// Match Daytona/exedev: install when hub apps, workspace apps, or repos exist.
-	if shouldInstallGitHubCredentialHelper(hubCfg, []string{clawName, templateName}, githubRepos) {
+	// Match Daytona/exedev: install when hub or workspace-scoped GitHub apps exist.
+	var tagsJSON string
+	_ = s.db.QueryRow(`SELECT COALESCE(tags,'[]') FROM claws WHERE id=?`, clawID).Scan(&tagsJSON)
+	workspaceName := clawWorkspaceName(templateName, tagsJSON)
+	if shouldInstallGitHubCredentialHelper(hubCfg, workspaceName) {
 		credHelper := buildGitHubCredentialHelper(hubCfg, s.clawHubURL(), clawID, githubRepos)
 		if strings.HasPrefix(credHelper, githubCredentialHelperSkipPrefix) {
 			s.stopAgentWithReason(clawID, fmt.Sprintf("Bootstrap failed: could not configure GitHub credentials: %s", strings.TrimPrefix(credHelper, "# ")), false)
@@ -6342,7 +6345,7 @@ Tokens are short-lived and refreshed automatically on each git/gh operation.
 			s.stopAgentWithReason(clawID, fmt.Sprintf("Bootstrap failed: could not configure GitHub credentials: %s", err), false)
 			return
 		}
-		log.Printf("[bootstrap] GitHub credential helper installed for claw %s", clawName)
+		log.Printf("[bootstrap] GitHub credential helper installed for claw %s workspace=%q", clawName, workspaceName)
 	}
 	s.markBootstrapReady(clawID)
 
@@ -6846,28 +6849,26 @@ func buildBestEffortRepoInstructionDiscoveryScript(workspaceDir string, repos []
 // install the helper. Callers must not treat this as a successful install.
 const githubCredentialHelperSkipPrefix = "# GitHub credential helper skipped"
 
-// shouldInstallGitHubCredentialHelper reports whether a claw sandbox needs the
-// git/gh credential helper. Hub-level apps alone used to gate install, which
-// skipped workspaces that only had workspace-scoped GitHub Apps (or only
-// github_repos) — leaving agents with no helper and SSH remotes that cannot
-// authenticate. Install whenever any GitHub auth surface is present.
-func shouldInstallGitHubCredentialHelper(cfg *types.HubConfig, workspaceNames []string, repos []types.GitHubRepoAccess) bool {
+// shouldInstallGitHubCredentialHelper reports whether a claw sandbox can mint
+// GitHub App installation tokens (so the credential helper is useful).
+//
+// Install when hub-level apps exist OR the claw's resolved workspace has
+// workspace-scoped apps. Do not install for github_repos alone — the token
+// endpoint cannot mint without an app, and a mandatory smoke would fail bootstrap.
+//
+// workspaceName must be the ElasticClaw workspace directory name (same as
+// handleGitHubToken: clawWorkspaceName(template, tags)), not the claw display
+// name or factory template alias when those differ.
+func shouldInstallGitHubCredentialHelper(cfg *types.HubConfig, workspaceName string) bool {
 	if cfg != nil && len(cfg.GitHubApps) > 0 {
 		return true
 	}
-	if len(repos) > 0 {
-		return true
+	ws := strings.TrimSpace(workspaceName)
+	if ws == "" {
+		return false
 	}
-	for _, ws := range workspaceNames {
-		ws = strings.TrimSpace(ws)
-		if ws == "" {
-			continue
-		}
-		if apps, err := loadWorkspaceGitHubAppConfigs(ws); err == nil && len(apps) > 0 {
-			return true
-		}
-	}
-	return false
+	apps, err := loadWorkspaceGitHubAppConfigs(ws)
+	return err == nil && len(apps) > 0
 }
 
 // buildGitHubCredentialHelper returns a shell script that installs the git

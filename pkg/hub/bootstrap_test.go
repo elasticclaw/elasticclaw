@@ -1443,29 +1443,49 @@ func TestGitHubCredentialHelper_RequiresAndVerifiesGitRegistration(t *testing.T)
 
 func TestShouldInstallGitHubCredentialHelper(t *testing.T) {
 	t.Parallel()
-	if shouldInstallGitHubCredentialHelper(&types.HubConfig{}, nil, nil) {
+	if shouldInstallGitHubCredentialHelper(&types.HubConfig{}, "") {
 		t.Fatal("empty config should not install helper")
 	}
 	if !shouldInstallGitHubCredentialHelper(&types.HubConfig{
 		GitHubApps: []*types.GitHubAppConfig{{AppID: 1}},
-	}, nil, nil) {
+	}, "") {
 		t.Fatal("hub GitHub apps should install helper")
 	}
-	if !shouldInstallGitHubCredentialHelper(&types.HubConfig{}, nil, []types.GitHubRepoAccess{{Repo: "o/r"}}) {
-		t.Fatal("configured repos should install helper even without hub apps")
+	// Unknown workspace name with no apps on disk (repos alone also cannot mint).
+	if shouldInstallGitHubCredentialHelper(&types.HubConfig{}, "nonexistent-workspace-xyz") {
+		t.Fatal("missing workspace apps should not install helper")
 	}
 }
 
-func TestBuildGitHubCredentialHelperInstallsWithoutHubAppsWhenCallerRequests(t *testing.T) {
-	// Workspace-scoped apps / github_repos previously never installed a helper
-	// because buildGitHubCredentialHelper gated only on hub-level GitHubApps.
+func TestBuildGitHubCredentialHelperBuildsWhenClawTokenPresent(t *testing.T) {
+	// Install script is produced whenever the caller decides to install;
+	// hub-level GitHubApps are not required to *build* the script (workspace
+	// apps are enough for shouldInstall). Missing claw token still skips.
 	cfg := &types.HubConfig{ClawToken: "test-claw-token"}
 	script := buildGitHubCredentialHelper(cfg, "https://hub.example.com", "claw-123", []types.GitHubRepoAccess{{Repo: "o/r"}})
 	if strings.HasPrefix(script, githubCredentialHelperSkipPrefix) {
-		t.Fatalf("expected install script without hub apps when claw token present, got skip:\n%s", script)
+		t.Fatalf("expected install script when claw token present, got skip:\n%s", script)
 	}
 	assertContains(t, script, "/usr/local/bin/elasticclaw-git-credentials", "helper binary path")
 	assertContains(t, script, "https://hub.example.com/api/github/token/claw-123", "token URL")
+
+	skip := buildGitHubCredentialHelper(&types.HubConfig{}, "https://hub.example.com", "claw-123", nil)
+	if !strings.HasPrefix(skip, githubCredentialHelperSkipPrefix) {
+		t.Fatalf("expected skip without claw token, got:\n%s", skip)
+	}
+}
+
+func TestClawWorkspaceNamePrefersTemplateThenWorkflowTag(t *testing.T) {
+	t.Parallel()
+	if got := clawWorkspaceName("adversaries", `[]`); got != "adversaries" {
+		t.Fatalf("template preferred: got %q", got)
+	}
+	if got := clawWorkspaceName("", `["workspace:eng","workflow:issue"]`); got != "eng" {
+		t.Fatalf("workflow tag fallback: got %q", got)
+	}
+	if got := clawWorkspaceName("", `["factory:foo"]`); got != "" {
+		t.Fatalf("no workspace tag: got %q", got)
+	}
 }
 
 // ── Container integration test ────────────────────────────────────────────────
