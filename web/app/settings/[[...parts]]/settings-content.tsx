@@ -1184,6 +1184,7 @@ const PROVIDER_MODELS: Record<string, LLMModelOption[]> = {
   ],
   grok: [
     { id: "grok/grok-build-0.1", name: "Grok Build" },
+    { id: "grok/grok-4.5",       name: "Grok 4.5" },
     { id: "grok/grok-4.3",       name: "Grok 4.3" },
     { id: "__custom",            name: "Custom Grok model" },
   ],

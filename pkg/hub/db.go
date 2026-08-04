@@ -785,6 +785,8 @@ func migrate(db *sql.DB) error {
 		{"gpt-5", 1.25, 10, .125, 0}, {"gpt-5-mini", .25, 2, .025, 0}, {"gpt-5-nano", .05, .40, .005, 0},
 		{"gpt-5.1", 1.25, 10, .125, 0}, {"gpt-5.6", 1.25, 10, .125, 0},
 		{"kimi-k2p7-code", 0.95, 4, .19, 0},
+		{"grok/grok-build-0.1", 1, 2, .2, .2},
+		{"grok/grok-4.5", 2, 6, .3, .3},
 	} {
 		// Upsert so price corrections in the static seed reach existing
 		// databases; rows from other sources are left untouched.
