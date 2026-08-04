@@ -1,8 +1,10 @@
 "use client"
 
+import { Fragment } from "react"
 import Link from "next/link"
 import { usePathname } from "next/navigation"
-import { BarChart3, Bot, LogOut, Settings, User } from "lucide-react"
+import { BarChart3, Bot, LogOut, User } from "lucide-react"
+import { SETTINGS_NAV_GROUPS, activeSettingsSection } from "@/app/settings/[[...parts]]/sections"
 import { useBranding } from "@/hooks/use-branding"
 import { useCapabilities } from "@/hooks/use-capabilities"
 import { clearConfig } from "@/lib/api"
@@ -86,8 +88,8 @@ function initialsOf(name: string) {
 
 // NavRail is the single piece of app-level chrome: a full-height left rail
 // mounted on every primary screen (/, /analytics, /settings). It carries the
-// brand, the primary navigation, the admin-only CONFIGURE group and the user
-// identity block with sign-out. Everything admin-gated defaults to hidden
+// brand, the primary navigation, the admin-only settings section groups and
+// the user identity block with sign-out. Everything admin-gated defaults to hidden
 // until /api/auth/me resolves, so nothing flashes for non-admins.
 export function NavRail() {
   const pathname = usePathname()
@@ -98,6 +100,11 @@ export function NavRail() {
   // admins land on /analytics, everyone else on /. Rendered only once
   // /api/auth/me has resolved so the badge never jumps between items.
   const homeHref = me ? (isAdmin ? "/analytics" : "/") : null
+
+  // Which settings section (if any) the current URL belongs to; drives the
+  // active highlight for both /settings/{section} and
+  // /settings/{workspace}/{section}.
+  const activeSection = activeSettingsSection(pathname)
 
   // Password sessions carry no GitHub identity: /api/auth/me returns only
   // auth_method, is_admin and capabilities. Falling back to login/name would
@@ -118,7 +125,7 @@ export function NavRail() {
         <span className="truncate text-sm font-semibold tracking-tight">{appName}</span>
       </div>
 
-      <nav className="min-h-0 flex-1 overflow-y-auto px-2">
+      <nav className="min-h-0 flex-1 overflow-y-auto px-2 pb-4">
         <GroupLabel>Work</GroupLabel>
         <div className="space-y-0.5">
           {PRIMARY_NAV.map(({ href, label, icon }) => (
@@ -132,19 +139,28 @@ export function NavRail() {
             />
           ))}
         </div>
-        {isAdmin && (
-          <>
-            <GroupLabel>Configure</GroupLabel>
-            <div className="space-y-0.5">
-              <NavItem
-                href="/settings"
-                label="Settings"
-                icon={Settings}
-                active={isNavActive(pathname, "/settings")}
-              />
-            </div>
-          </>
-        )}
+        {/* Settings sections rendered directly in the rail, admin-only, from
+            the shared catalogue in app/settings/[[...parts]]/sections.ts. Each
+            item links to /settings/{section}; settings-content.tsx normalises
+            workspace-scoped sections to /settings/{workspace}/{section}, and
+            activeSettingsSection resolves the highlight for both URL shapes. */}
+        {isAdmin &&
+          SETTINGS_NAV_GROUPS.map((group) => (
+            <Fragment key={group.label}>
+              <GroupLabel>{group.label}</GroupLabel>
+              <div className="space-y-0.5">
+                {group.items.map(({ id, label, icon }) => (
+                  <NavItem
+                    key={id}
+                    href={`/settings/${id}`}
+                    label={label}
+                    icon={icon}
+                    active={activeSection === id}
+                  />
+                ))}
+              </div>
+            </Fragment>
+          ))}
       </nav>
 
       <div className="border-t border-border p-3">
