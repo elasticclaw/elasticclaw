@@ -101,8 +101,12 @@ ELASTICCLAW_E2E_EXEDEV_SSH_KEY
 `ELASTICCLAW_E2E_EXEDEV_SSH_KEY` is the PEM body of an SSH private key whose
 public half is registered on the ElasticClaw exe.dev account (control plane
 `ssh exe.dev whoami` / `ssh-key`). Depot materializes it for `TestExedev*`.
-Locally you can omit it and rely on your default SSH agent/config, or set
-`ELASTICCLAW_E2E_EXEDEV_SSH_KEY_PATH` to an existing key file.
+If the secret is unset in CI, the exe.dev suite **skips** (pass) so the matrix
+stays green until the org secret is provisioned; once set, the test fails hard
+on bad keys via an early `ssh exe.dev whoami` probe.
+
+Locally you can set `ELASTICCLAW_E2E_EXEDEV_SSH_KEY_PATH` to an existing key
+file, or omit both and use your default SSH agent/config.
 
 Optional secrets:
 
