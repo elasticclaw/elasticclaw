@@ -1,8 +1,14 @@
 package hub
 
 import (
+	"context"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 )
@@ -55,6 +61,104 @@ func TestDaytonaGitHubCloneScriptUsesCleanHTTPSRemote(t *testing.T) {
 	assertNotContains(t, script, "x-access-token", "clone must not embed token username in remote URL")
 	assertNotContains(t, script, "${GH_TOKEN}", "clone must not embed GH_TOKEN in remote URL")
 	assertNotContains(t, script, "sed \"s/${GH_TOKEN}", "clone output redaction should not depend on token in URL")
+}
+
+func TestDaytonaGitHubAccessSmokeScriptIsConstantTimeInRepoCount(t *testing.T) {
+	many := make([]types.GitHubRepoAccess, 40)
+	for i := range many {
+		many[i] = types.GitHubRepoAccess{Repo: fmt.Sprintf("org/repo-%d", i), Permissions: "write"}
+	}
+	script := buildDaytonaGitHubAccessSmokeScript(many)
+
+	assertContains(t, script, "gh api user", "smoke uses one authenticated API call")
+	assertContains(t, script, "gh repo view", "smoke samples a configured repo")
+	assertContains(t, script, "org/repo-0", "smoke samples only the first configured repo")
+	// Must not O(N) view every workspace repo (that timed out large workspaces).
+	if strings.Count(script, "gh repo view") != 1 {
+		t.Fatalf("gh repo view count = %d, want 1\n%s", strings.Count(script, "gh repo view"), script)
+	}
+	for i := 1; i < len(many); i++ {
+		if strings.Contains(script, fmt.Sprintf("org/repo-%d", i)) {
+			t.Fatalf("smoke script must not reference repo-%d", i)
+		}
+	}
+}
+
+func TestGitHubBootstrapCloneTimeoutScalesWithRepoCount(t *testing.T) {
+	if got := githubBootstrapCloneTimeout(0); got != 2*time.Minute {
+		t.Fatalf("timeout(0)=%s, want 2m", got)
+	}
+	if got := githubBootstrapCloneTimeout(1); got != 2*time.Minute {
+		t.Fatalf("timeout(1)=%s, want floor 2m", got)
+	}
+	if got := githubBootstrapCloneTimeout(32); got != 32*45*time.Second {
+		t.Fatalf("timeout(32)=%s, want 24m", got)
+	}
+	if got := githubBootstrapCloneTimeout(1000); got != 30*time.Minute {
+		t.Fatalf("timeout(1000)=%s, want cap 30m", got)
+	}
+	if got := githubBootstrapCloneVerifyTimeout(5); got != 20*time.Second {
+		t.Fatalf("verify timeout(5)=%s, want floor 20s", got)
+	}
+	if got := githubBootstrapCloneVerifyTimeout(90); got != 90*time.Second {
+		t.Fatalf("verify timeout(90)=%s, want 90s", got)
+	}
+}
+
+func TestInstallationTokenOmitsRepoListWhenOverGitHubCap(t *testing.T) {
+	var sawBody string
+	var mintCalls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/app/installations"):
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`[{"id":99,"account":{"login":"org"}}]`))
+		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/access_tokens"):
+			mintCalls++
+			body, _ := io.ReadAll(r.Body)
+			sawBody = string(body)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"token":"tok","expires_at":"2099-01-01T00:00:00Z"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	provider, err := NewGitHubTokenProvider(&types.GitHubAppConfig{AppID: 1, PrivateKeyPEM: testGitHubAppPEM(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider.apiBaseURL = srv.URL
+	provider.httpClient = srv.Client()
+
+	repos := make([]RepoAccess, maxScopedInstallationRepos+1)
+	for i := range repos {
+		repos[i] = RepoAccess{Repo: fmt.Sprintf("org/r%d", i), Permissions: "write"}
+	}
+	if _, _, err := provider.InstallationToken(context.Background(), 0, repos); err != nil {
+		t.Fatalf("InstallationToken: %v", err)
+	}
+	if mintCalls != 1 {
+		t.Fatalf("mint calls = %d, want 1", mintCalls)
+	}
+	if strings.Contains(sawBody, `"repositories"`) {
+		t.Fatalf("expected no repositories field for %d repos, body=%s", len(repos), sawBody)
+	}
+	if !strings.Contains(sawBody, `"contents":"write"`) {
+		t.Fatalf("expected write permissions, body=%s", sawBody)
+	}
+
+	// Under the cap, repositories are still listed.
+	sawBody = ""
+	small := []RepoAccess{{Repo: "org/a", Permissions: "read"}, {Repo: "org/b", Permissions: "write"}}
+	if _, _, err := provider.InstallationToken(context.Background(), 99, small); err != nil {
+		t.Fatalf("small InstallationToken: %v", err)
+	}
+	if !strings.Contains(sawBody, `"repositories"`) || !strings.Contains(sawBody, `"a"`) {
+		t.Fatalf("expected scoped repositories body, got %s", sawBody)
+	}
 }
 
 func TestReplicatedCredentialHelperInstallsDynamicGhTokenProfileAndWrapper(t *testing.T) {
