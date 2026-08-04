@@ -3785,15 +3785,44 @@ cp "$BIN" /tmp/claw-bridge.download && chmod +x /tmp/claw-bridge.download && mv 
 		// Use the hub directly during bootstrap. The bridge is intentionally not
 		// started yet so startup cannot race ahead of template file writes and
 		// bootstrap_ok gating.
+		// Base token URL. The credential helper appends &repo=owner/name when git
+		// supplies a path so large workspaces mint single-repo tokens (GitHub caps
+		// scoped tokens at 50 names and install-wide tokens over-grant).
 		tokenURL := fmt.Sprintf("%s/api/github/token/%s?claw_token=%s", s.clawHubURL(), clawID, clawToken)
 
 		// Step 5a: write the credential helper binary
+		// NOTE: %% escapes are for fmt.Sprintf — the written shell script must
+		// still contain single % for bash parameter expansion (${p%.git}, etc.).
 		credHelperScript := fmt.Sprintf(`export HOME=/home/daytona
 sudo tee /usr/local/bin/elasticclaw-git-credentials > /dev/null << 'CREDEOF'
 #!/bin/bash
+# Parse git credential protocol fields (path enables single-repo token minting).
+repo_query=""
+while IFS= read -r line; do
+  [ -z "$line" ] && break
+  case "$line" in
+    path=*)
+      p="${line#path=}"
+      p="${p#/}"
+      p="${p%%.git}"
+      # Accept owner/repo or nested path ending in owner/repo
+      case "$p" in
+        */*)
+          owner="${p%%%%/*}"
+          rest="${p#*/}"
+          name="${rest%%%%/*}"
+          if [ -n "$owner" ] && [ -n "$name" ] && [ "$owner" != "$p" ]; then
+            repo_query="&repo=$(printf '%%s' "$owner/$name" | python3 -c 'import sys,urllib.parse; print(urllib.parse.quote(sys.stdin.read().strip(), safe=""))')"
+          fi
+          ;;
+      esac
+      ;;
+  esac
+done
 # Retry up to 10 times — hub token endpoint may not be ready immediately
+base_url=%q
 for i in $(seq 1 10); do
-  response=$(curl -sf --max-time 35 %q)
+  response=$(curl -sf --max-time 35 "${base_url}${repo_query}")
   if [ $? -eq 0 ] && [ -n "$response" ]; then break; fi
   sleep 3
 done
@@ -3860,18 +3889,19 @@ gh auth status`
 			if ghStatusResult.ExitCode != 0 {
 				return fmt.Errorf("verify gh auth failed (exit %d): %s", ghStatusResult.ExitCode, sanitizeBootstrapOutput(ghStatusResult.Stdout))
 			}
+			// Smoke-check repo access once. Do not call `gh repo view` for every
+			// workspace repo: with tens of repos that O(N) sequence exceeds the
+			// sandbox exec timeout and cancels in-flight hub token mints, which
+			// was misreported as "GitHub App cannot access".
 			if len(repositories) > 0 {
-				verifyReposScript := "export HOME=/home/daytona; set +x; . /etc/profile.d/elasticclaw-github.sh; "
-				for _, repo := range repositories {
-					verifyReposScript += fmt.Sprintf("gh repo view %s >/dev/null || exit 1; ", shellQuote(repo.Repo))
-				}
-				log.Printf("[daytona] verify configured repositories (no retries)...")
-				verifyReposResult, verifyReposErr := p.ExecWithTimeout(ctx, instanceID, []string{"bash", "-c", verifyReposScript}, 30*time.Second)
+				verifyReposScript := buildDaytonaGitHubAccessSmokeScript(repositories)
+				log.Printf("[daytona] verify github access (smoke, %d configured repos)...", len(repositories))
+				verifyReposResult, verifyReposErr := p.ExecWithTimeout(ctx, instanceID, []string{"bash", "-c", verifyReposScript}, 45*time.Second)
 				if verifyReposErr != nil {
-					return fmt.Errorf("verify configured repositories: %w", verifyReposErr)
+					return fmt.Errorf("verify github access: %w", verifyReposErr)
 				}
 				if verifyReposResult.ExitCode != 0 {
-					return fmt.Errorf("verify configured repositories failed (exit %d): %s", verifyReposResult.ExitCode, sanitizeBootstrapOutput(verifyReposResult.Stdout))
+					return fmt.Errorf("verify github access failed (exit %d): %s", verifyReposResult.ExitCode, sanitizeBootstrapOutput(verifyReposResult.Stdout))
 				}
 			}
 			log.Printf("[daytona] verify gh auth done")
@@ -3883,7 +3913,9 @@ gh auth status`
 			}
 
 			cloneScript := buildDaytonaGitHubCloneScript(repositories)
-			cloneResult, cloneErr := p.ExecWithTimeout(ctx, instanceID, []string{"bash", "-c", cloneScript}, 2*time.Minute)
+			cloneTimeout := githubBootstrapCloneTimeout(len(repositories))
+			log.Printf("[daytona] clone timeout %s for %d repos", cloneTimeout, len(repositories))
+			cloneResult, cloneErr := p.ExecWithTimeout(ctx, instanceID, []string{"bash", "-c", cloneScript}, cloneTimeout)
 			if cloneErr != nil {
 				return fmt.Errorf("clone repos: %w", cloneErr)
 			}
@@ -3897,7 +3929,8 @@ gh auth status`
 				for _, repo := range repositories {
 					verifyCloneScript += daytonaRepoReadinessSnippet(repo.Repo)
 				}
-				verifyResult, verifyErr := p.ExecWithTimeout(ctx, instanceID, []string{"bash", "-c", verifyCloneScript}, 20*time.Second)
+				verifyCloneTimeout := githubBootstrapCloneVerifyTimeout(len(repositories))
+				verifyResult, verifyErr := p.ExecWithTimeout(ctx, instanceID, []string{"bash", "-c", verifyCloneScript}, verifyCloneTimeout)
 				if verifyErr != nil {
 					return fmt.Errorf("verify cloned repos: %w", verifyErr)
 				}
@@ -6542,9 +6575,67 @@ GHEOF
 fi`
 }
 
+// buildDaytonaGitHubAccessSmokeScript checks that the credential helper can mint
+// a token and that GitHub accepts it. It views at most one configured repository
+// so large workspaces stay O(1) at bootstrap; full access is proven by clone.
+//
+// IMPORTANT: GH_TOKEN is a GitHub App *installation* token, not a user token.
+// Endpoints like `gh api user` return 403 "Resource not accessible by
+// integration" and must not be used here.
+func buildDaytonaGitHubAccessSmokeScript(repos []types.GitHubRepoAccess) string {
+	var b strings.Builder
+	b.WriteString("export HOME=/home/daytona; set +x; . /etc/profile.d/elasticclaw-github.sh; ")
+	b.WriteString(`[ -n "${GH_TOKEN:-}" ] || { echo "[daytona] github access smoke: empty GH_TOKEN"; exit 1; }; `)
+	// Installation-token-safe authenticated call (works without a repo list).
+	b.WriteString(`gh api rate_limit >/dev/null || { echo "[daytona] github access smoke: gh api rate_limit failed"; exit 1; }; `)
+	if len(repos) > 0 && strings.TrimSpace(repos[0].Repo) != "" {
+		// Single sample proves installation scope for at least one configured repo.
+		fmt.Fprintf(&b, "gh repo view %s >/dev/null || { echo %s; exit 1; }; ",
+			shellQuote(repos[0].Repo),
+			shellQuote("[daytona] github access smoke: cannot view "+repos[0].Repo),
+		)
+	}
+	b.WriteString(`echo "[daytona] github access smoke OK"; `)
+	return b.String()
+}
+
+// githubBootstrapCloneTimeout scales clone time with repository count.
+// Floor 2m; ~45s per repo; cap 30m so huge workspaces still complete.
+func githubBootstrapCloneTimeout(repoCount int) time.Duration {
+	if repoCount <= 0 {
+		return 2 * time.Minute
+	}
+	d := time.Duration(repoCount) * 45 * time.Second
+	if d < 2*time.Minute {
+		return 2 * time.Minute
+	}
+	if d > 30*time.Minute {
+		return 30 * time.Minute
+	}
+	return d
+}
+
+// githubBootstrapCloneVerifyTimeout scales local .git existence checks.
+func githubBootstrapCloneVerifyTimeout(repoCount int) time.Duration {
+	if repoCount <= 0 {
+		return 20 * time.Second
+	}
+	d := time.Duration(repoCount) * time.Second
+	if d < 20*time.Second {
+		return 20 * time.Second
+	}
+	if d > 5*time.Minute {
+		return 5 * time.Minute
+	}
+	return d
+}
+
 func buildDaytonaGitHubCloneScript(repos []types.GitHubRepoAccess) string {
 	var b strings.Builder
 	b.WriteString("export HOME=/home/daytona; export GIT_TERMINAL_PROMPT=0; set +x; cd ~/.openclaw/workspace; git config --global --get credential.helper >/dev/null || exit 1; set -o pipefail; ")
+	// Resolve GH_TOKEN once so N clones do not each re-enter the credential helper
+	// before git uses it (helper still refreshes if git asks again).
+	b.WriteString(`. /etc/profile.d/elasticclaw-github.sh 2>/dev/null || true; `)
 	for _, repo := range repos {
 		repoName := repoDirectoryName(repo.Repo)
 		cloneURL := "https://github.com/" + repo.Repo + ".git"
@@ -6703,7 +6794,30 @@ echo "Configuring GitHub credential helper for user=$(whoami) home=$HOME"
 sudo tee /usr/local/bin/elasticclaw-git-credentials > /dev/null << 'CREDEOF'
 #!/bin/bash
 # Git credential helper — fetches a fresh GitHub App installation token from the hub.
-response=$(curl -sf %q)
+# When git supplies path=owner/repo.git, request a single-repo scoped token.
+repo_query=""
+while IFS= read -r line; do
+  [ -z "$line" ] && break
+  case "$line" in
+    path=*)
+      p="${line#path=}"
+      p="${p#/}"
+      p="${p%%.git}"
+      case "$p" in
+        */*)
+          owner="${p%%%%/*}"
+          rest="${p#*/}"
+          name="${rest%%%%/*}"
+          if [ -n "$owner" ] && [ -n "$name" ] && [ "$owner" != "$p" ]; then
+            repo_query="&repo=$(printf '%%s' "$owner/$name" | python3 -c 'import sys,urllib.parse; print(urllib.parse.quote(sys.stdin.read().strip(), safe=""))')"
+          fi
+          ;;
+      esac
+      ;;
+  esac
+done
+base_url=%q
+response=$(curl -sf "${base_url}${repo_query}")
 if [ $? -ne 0 ] || [ -z "$response" ]; then
   exit 1
 fi
@@ -7340,6 +7454,32 @@ func (s *Server) handleGitHubToken(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Optional single-repo scope from the git credential helper (path=owner/repo.git).
+	// Preferred for large workspaces: each clone mints a least-privilege token
+	// for one allowlisted repo (scales past GitHub's 50-name list limit).
+	if want := strings.TrimSpace(r.URL.Query().Get("repo")); want != "" {
+		want = strings.TrimPrefix(want, "/")
+		want = strings.TrimSuffix(want, ".git")
+		scoped := make([]RepoAccess, 0, 1)
+		for _, repo := range repos {
+			if strings.EqualFold(repo.Repo, want) {
+				scoped = append(scoped, repo)
+				break
+			}
+		}
+		if len(scoped) == 0 {
+			http.Error(w, "requested repo is not configured on this claw", http.StatusForbidden)
+			return
+		}
+		repos = scoped
+	} else if len(repos) > maxScopedInstallationRepos {
+		// Multi-repo mint without ?repo=: GitHub cannot name-scope >50 repos.
+		// InstallationToken will request permission levels without a repositories
+		// array. Git clone still prefers ?repo= (credential helper). Log so
+		// operators know the install is the access boundary for unscoped mints.
+		log.Printf("[github] claw %s multi-repo token for %d repos exceeds GitHub name-scope limit %d; minting permission-restricted installation token (git clones should use ?repo=)", clawID[:8], len(repos), maxScopedInstallationRepos)
+	}
+
 	// Try each configured GitHub App in order; use the first that finds an installation
 	s.mu.RLock()
 	githubApps := append([]*types.GitHubAppConfig(nil), s.hubCfg.GitHubApps...)
@@ -7365,15 +7505,45 @@ func (s *Server) handleGitHubToken(w http.ResponseWriter, r *http.Request) {
 			provider: provider,
 		})
 	}
+	// Cache installation tokens the same way as the PR watcher: claw credential
+	// helpers call this endpoint per git/gh invocation during bootstrap/clone.
+	// Without caching, large workspaces mint tens of identical tokens and can
+	// cancel mid-flight when the sandbox command times out.
+	cacheKey := "claw:" + clawID + ":" + githubTokenCacheKey(repos)
+	s.ghTokenMu.Lock()
+	if cached, ok := s.ghTokenCache[cacheKey]; ok && time.Now().Before(cached.expiresAt) {
+		token := cached.token
+		expiresAt := cached.expiresAt
+		s.ghTokenMu.Unlock()
+		jsonOK(w, map[string]interface{}{
+			"token":      token,
+			"expires_at": expiresAt,
+		})
+		return
+	}
+	s.ghTokenMu.Unlock()
+
+	var lastErr error
 	for _, candidate := range providers {
 		provider := candidate.provider
 		token, expiresAt, err := provider.InstallationToken(r.Context(), 0, repos)
 		if err != nil {
+			lastErr = err
 			// Debug-level only — expected when multiple apps configured and only one matches
 			log.Printf("[github] app[%d] app_id=%d: no match for repos (trying next): %v", candidate.index, candidate.appID, err)
 			continue
 		}
-		log.Printf("github token issued via app_id=%d for claw %s", candidate.appID, clawID[:8])
+		s.ghTokenMu.Lock()
+		if s.ghTokenCache == nil {
+			s.ghTokenCache = map[string]cachedGitHubToken{}
+		}
+		// Renew a few minutes early so no in-flight call uses an expiring token.
+		cacheExpiry := expiresAt.Add(-5 * time.Minute)
+		if cacheExpiry.After(time.Now()) {
+			s.ghTokenCache[cacheKey] = cachedGitHubToken{token: token, expiresAt: cacheExpiry}
+		}
+		s.ghTokenMu.Unlock()
+		log.Printf("github token issued via app_id=%d for claw %s (%d repos)", candidate.appID, clawID[:8], len(repos))
 		jsonOK(w, map[string]interface{}{
 			"token":      token,
 			"expires_at": expiresAt,
@@ -7381,7 +7551,20 @@ func (s *Server) handleGitHubToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	inaccessible := diagnoseGitHubRepoAccess(r.Context(), providers, repos)
+	// Request canceled/timeouts are not "cannot access" — bootstrap was still
+	// minting successfully and the client walked away (e.g. sandbox exec timeout).
+	if r.Context().Err() != nil || errors.Is(lastErr, context.Canceled) || errors.Is(lastErr, context.DeadlineExceeded) ||
+		(lastErr != nil && (strings.Contains(lastErr.Error(), "context canceled") || strings.Contains(lastErr.Error(), "context deadline"))) {
+		log.Printf("github token request canceled for claw %s (%d repos): %v", clawID[:8], len(repos), lastErr)
+		http.Error(w, "github token request canceled or timed out", http.StatusServiceUnavailable)
+		return
+	}
+
+	// Use a detached short timeout so diagnosis is not starved by a canceled
+	// request context (common when many repos cause client timeouts).
+	diagCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 20*time.Second)
+	defer cancel()
+	inaccessible := diagnoseGitHubRepoAccess(diagCtx, providers, repos)
 	if len(inaccessible) > 0 {
 		msg := inaccessibleGitHubReposMessage(inaccessible)
 		log.Printf("no github app found with installation for repos %v (claw %s): %s", repos, clawID[:8], msg)

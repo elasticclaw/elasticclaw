@@ -218,8 +218,27 @@ type RepoAccess struct {
 	Permissions string // "read" or "write"
 }
 
+// maxScopedInstallationRepos is GitHub's documented limit for the
+// `repositories` array on POST /app/installations/{id}/access_tokens.
+// Larger claw allowlists still work: we mint a permission-restricted
+// installation token (no name list) and git clones prefer single-repo
+// tokens via handleGitHubToken ?repo=owner/name.
+const maxScopedInstallationRepos = 50
+
 // InstallationToken mints a fresh installation access token scoped to the given repos.
 // installationID is looked up automatically if not provided (0).
+//
+// When repos is empty, GitHub grants the installation's default access to all
+// repositories the installation can see.
+//
+// When 1 ≤ len(repos) ≤ maxScopedInstallationRepos, the token is restricted to
+// that explicit name allowlist.
+//
+// When len(repos) > maxScopedInstallationRepos, GitHub cannot accept a longer
+// name list. We still mint a token with the requested permission levels but
+// omit the repositories field (installation-visible repos only). Callers that
+// need least-privilege for individual clones should pass a single-element
+// repos slice (credential helper ?repo=).
 func (p *GitHubTokenProvider) InstallationToken(ctx context.Context, installationID int64, repos []RepoAccess) (string, time.Time, error) {
 	// Auto-discover installation ID if not set
 	if installationID == 0 {
@@ -239,30 +258,22 @@ func (p *GitHubTokenProvider) InstallationToken(ctx context.Context, installatio
 		return "", time.Time{}, fmt.Errorf("sign app jwt: %w", err)
 	}
 
-	// Build request body scoped to repos with correct permissions.
+	// Build request body with correct permissions.
 	// GitHub token permissions: contents=read means read-only, contents=write means read+write.
 	var bodyStr string
 	if len(repos) > 0 {
-		repoNames := make([]string, 0, len(repos))
-		// Track the highest permission needed across all repos
 		needsWrite := false
 		for _, r := range repos {
-			parts := strings.SplitN(r.Repo, "/", 2)
-			name := r.Repo
-			if len(parts) == 2 {
-				name = parts[1]
-			}
-			repoNames = append(repoNames, name)
 			if r.Permissions == "write" {
 				needsWrite = true
+				break
 			}
 		}
 		contentsPermission := "read"
 		if needsWrite {
 			contentsPermission = "write"
 		}
-		b, _ := json.Marshal(map[string]interface{}{
-			"repositories": repoNames,
+		body := map[string]interface{}{
 			"permissions": map[string]string{
 				"contents":      contentsPermission,
 				"pull_requests": contentsPermission,
@@ -270,7 +281,21 @@ func (p *GitHubTokenProvider) InstallationToken(ctx context.Context, installatio
 				"checks":        "read", // needed for gh pr checks / CI status
 				"statuses":      "read", // needed for commit status checks
 			},
-		})
+		}
+		if len(repos) <= maxScopedInstallationRepos {
+			repoNames := make([]string, 0, len(repos))
+			for _, r := range repos {
+				parts := strings.SplitN(r.Repo, "/", 2)
+				name := r.Repo
+				if len(parts) == 2 {
+					name = parts[1]
+				}
+				repoNames = append(repoNames, name)
+			}
+			body["repositories"] = repoNames
+		}
+		// else: omit repositories — required for 50+ allowlists; git path uses ?repo=
+		b, _ := json.Marshal(body)
 		bodyStr = string(b)
 	}
 
