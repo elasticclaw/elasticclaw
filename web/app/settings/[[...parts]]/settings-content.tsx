@@ -4,7 +4,7 @@ import { useParams, usePathname, useRouter } from "next/navigation"
 import React, { useEffect, useState, useCallback, useRef } from "react"
 import { getHubUrl } from "@/lib/hub-url"
 import { getAuthToken } from "@/lib/auth-storage"
-import { Cpu, Key, Github, ChevronLeft, Shield, Zap, Copy, Check, Trash2, Lock, Sparkles, Send, RotateCcw, Eye, EyeOff, ExternalLink, AlertCircle, AlertTriangle, X, CheckCircle2, Webhook, ArrowRight, ChevronDown } from "lucide-react"
+import { Cpu, Key, Github, ChevronLeft, Shield, Zap, Copy, Check, Trash2, Lock, Sparkles, Send, RotateCcw, Eye, EyeOff, ExternalLink, AlertCircle, AlertTriangle, X, CheckCircle2, Webhook, ArrowRight } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Switch } from "@/components/ui/switch"
@@ -258,8 +258,6 @@ export default function SettingsSectionPage() {
   const [hubPublicUrl, setHubPublicUrl] = useState("")
   const [workspaces, setWorkspaces] = useState<Workspace[]>([])
   const [selectedWorkspace, setSelectedWorkspace] = useState("")
-  const selectedWorkspaceLabel = selectedWorkspace || "No workspaces"
-  const selectedWorkspaceInitial = selectedWorkspace ? selectedWorkspace.trim()[0].toUpperCase() : "-"
 
   const load = useCallback(
     () => fetchSettings()
@@ -343,13 +341,6 @@ export default function SettingsSectionPage() {
     }
   }
 
-  const selectWorkspace = (workspace: string) => {
-    setSelectedWorkspace(workspace)
-    const targetSection = WORKSPACE_SECTIONS.has(section) ? section : "workspaces"
-    const workspaceBase = `/settings/${encodeURIComponent(workspace)}`
-    router.push(targetSection === "workspaces" ? workspaceBase : `${workspaceBase}/${targetSection}`)
-  }
-
   // Settings are admin-only. Hold rendering until the session resolves so
   // non-admins never see a flash of the settings chrome.
   if (authLoading) {
@@ -385,41 +376,15 @@ export default function SettingsSectionPage() {
     )
   }
 
-  // The workspace picker lives in the page header of workspace-scoped
-  // sections, next to the section title.
-  const workspacePicker = (
-    <div className="relative w-52">
-      <div className="pointer-events-none absolute left-3 top-1/2 z-10 flex size-5 -translate-y-1/2 items-center justify-center rounded bg-blue-600 text-[11px] font-semibold text-white shadow-sm">
-        {selectedWorkspaceInitial}
-      </div>
-      <select
-        aria-label="Workspace"
-        value={selectedWorkspace}
-        onChange={(event) => selectWorkspace(event.target.value)}
-        disabled={workspaces.length === 0}
-        className="h-9 w-full appearance-none rounded-lg border border-border bg-transparent pl-10 pr-10 text-sm font-semibold outline-none transition-colors hover:bg-secondary focus:bg-secondary"
-      >
-        {workspaces.length === 0 ? (
-          <option value="">{selectedWorkspaceLabel}</option>
-        ) : (
-          workspaces.map((workspace) => (
-            <option key={workspace.name} value={workspace.name}>{workspace.name}</option>
-          ))
-        )}
-      </select>
-      <ChevronDown className="pointer-events-none absolute right-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
-    </div>
-  )
-
   const sectionLabel = SETTINGS_NAV_GROUPS.flatMap((group) => group.items).find((item) => item.id === section)?.label ?? "Settings"
 
   return (
     <div className="h-full bg-background flex flex-col overflow-hidden">
-      {/* Section page header: the rail is the navigation, so this carries only
-          the section title (plus the workspace picker when scoped). */}
-      <header className="flex items-center gap-2 border-b border-border px-6 py-3">
+      {/* Section page header: the rail carries the navigation and the
+          workspace picker, so this is just the section title. min-height keeps
+          the bar the same height it had with the picker in it. */}
+      <header className="flex min-h-[3.8125rem] items-center border-b border-border px-6 py-3">
         <h1 className="text-sm font-semibold">{sectionLabel}</h1>
-        {WORKSPACE_SECTIONS.has(section) && <div className="ml-auto">{workspacePicker}</div>}
       </header>
 
       <main className={(section === "ai-config" || section === "troubleshoot") ? "flex-1 min-h-0 flex flex-col overflow-hidden" : "flex-1 overflow-y-auto p-8 max-w-2xl"}>

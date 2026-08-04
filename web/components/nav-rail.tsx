@@ -1,13 +1,19 @@
 "use client"
 
-import { Fragment } from "react"
+import { Fragment, useEffect, useState } from "react"
 import Link from "next/link"
-import { usePathname } from "next/navigation"
-import { BarChart3, Bot, LogOut, User } from "lucide-react"
-import { SETTINGS_NAV_GROUPS, activeSettingsSection } from "@/app/settings/[[...parts]]/sections"
+import { usePathname, useRouter } from "next/navigation"
+import { BarChart3, Bot, ChevronDown, LogOut, User } from "lucide-react"
+import {
+  LEGACY_ANALYTICS_SECTION,
+  SETTINGS_NAV_GROUPS,
+  WORKSPACE_SECTIONS,
+  activeSettingsSection,
+  isValidSection,
+} from "@/app/settings/[[...parts]]/sections"
 import { useBranding } from "@/hooks/use-branding"
 import { useCapabilities } from "@/hooks/use-capabilities"
-import { clearConfig } from "@/lib/api"
+import { clearConfig, fetchWorkspaces, type Workspace } from "@/lib/api"
 import { getAuthToken } from "@/lib/auth-storage"
 import { cn } from "@/lib/utils"
 
@@ -78,6 +84,18 @@ function NavItem({
   )
 }
 
+// Workspace segment of a settings URL, mirroring the parsing in
+// settings-content.tsx: /settings/{workspace}[/{section}]. Section names, the
+// "_workspace" static-export sentinel and the legacy analytics slug are never
+// workspace names. Returns "" when the URL carries no workspace.
+function routeWorkspaceOf(pathname: string): string {
+  const parts = pathname.split("/").filter(Boolean)
+  if (parts[0] !== "settings") return ""
+  const first = parts[1] ?? ""
+  if (!first || isValidSection(first) || first === "_workspace" || first === LEGACY_ANALYTICS_SECTION) return ""
+  return decodeURIComponent(first)
+}
+
 function initialsOf(name: string) {
   const parts = name.trim().split(/\s+/).filter(Boolean)
   if (parts.length === 0) return "?"
@@ -93,8 +111,26 @@ function initialsOf(name: string) {
 // until /api/auth/me resolves, so nothing flashes for non-admins.
 export function NavRail() {
   const pathname = usePathname()
+  const router = useRouter()
   const { appName } = useBranding()
   const { me, isAdmin } = useCapabilities()
+
+  // Workspace list for the rail's picker. Fetched once per mount, admin-only,
+  // and failures are swallowed: the picker degrades to the disabled
+  // "No workspaces" state rather than surfacing an error in app chrome.
+  const [workspaces, setWorkspaces] = useState<Workspace[]>([])
+  useEffect(() => {
+    if (!isAdmin) return
+    let cancelled = false
+    fetchWorkspaces()
+      .then((data) => {
+        if (!cancelled) setWorkspaces(data)
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  }, [isAdmin])
 
   // The HOME badge mirrors the login landing rule (app/login/page.tsx):
   // admins land on /analytics, everyone else on /. Rendered only once
@@ -105,6 +141,26 @@ export function NavRail() {
   // active highlight for both /settings/{section} and
   // /settings/{workspace}/{section}.
   const activeSection = activeSettingsSection(pathname)
+
+  // The rail owns no workspace state: the URL is the source of truth. The
+  // picker displays the workspace from the URL when present (falling back to
+  // the first available, which is what settings-content.tsx resolves to), and
+  // changing it only navigates — the normalisation effect in
+  // settings-content.tsx handles resolution and redirects from there. It
+  // renders only on /settings, where the WORKSPACE group it scopes is in use;
+  // on / and /analytics it would be inert.
+  const onSettings = pathname.startsWith("/settings")
+  const routeWorkspace = routeWorkspaceOf(pathname)
+  const pickerWorkspace = routeWorkspace && workspaces.some((workspace) => workspace.name === routeWorkspace)
+    ? routeWorkspace
+    : workspaces[0]?.name ?? ""
+  const pickerInitial = pickerWorkspace ? pickerWorkspace.trim()[0].toUpperCase() : "-"
+
+  const selectWorkspace = (workspace: string) => {
+    const base = `/settings/${encodeURIComponent(workspace)}`
+    const scoped = activeSection && activeSection !== "workspaces" && WORKSPACE_SECTIONS.has(activeSection)
+    router.push(scoped ? `${base}/${activeSection}` : base)
+  }
 
   // Password sessions carry no GitHub identity: /api/auth/me returns only
   // auth_method, is_admin and capabilities. Falling back to login/name would
@@ -117,7 +173,7 @@ export function NavRail() {
     : `Password session${isAdmin ? " · Admin" : ""}`
 
   return (
-    <aside className="flex h-full w-52 shrink-0 flex-col border-r border-border bg-background">
+    <aside className="flex h-full w-[250px] shrink-0 flex-col border-r border-border bg-background">
       <div className="flex items-center gap-2 px-4 pb-2 pt-4">
         <div className="flex size-6 shrink-0 items-center justify-center rounded-md bg-primary text-xs font-bold text-primary-foreground">
           {(appName[0] ?? "E").toUpperCase()}
@@ -144,6 +200,39 @@ export function NavRail() {
             item links to /settings/{section}; settings-content.tsx normalises
             workspace-scoped sections to /settings/{workspace}/{section}, and
             activeSettingsSection resolves the highlight for both URL shapes. */}
+        {/* Workspace picker: sits directly above the WORKSPACE group caption
+            because that group is exactly what it scopes. Admin-only (like the
+            groups below, hidden until /api/auth/me resolves) and settings-only.
+            With zero workspaces it renders disabled as "No workspaces" — a
+            deliberate empty state, not an error. */}
+        {isAdmin && onSettings && (
+          <div className="relative mt-4">
+            <div
+              className={cn(
+                "pointer-events-none absolute left-2.5 top-1/2 z-10 flex size-5 -translate-y-1/2 items-center justify-center rounded text-[11px] font-semibold",
+                pickerWorkspace ? "bg-blue-600 text-white shadow-sm" : "bg-accent text-muted-foreground"
+              )}
+            >
+              {pickerInitial}
+            </div>
+            <select
+              aria-label="Workspace"
+              value={pickerWorkspace}
+              onChange={(event) => selectWorkspace(event.target.value)}
+              disabled={workspaces.length === 0}
+              className="h-9 w-full appearance-none truncate rounded-lg border border-border bg-transparent pl-9 pr-8 text-sm font-semibold outline-none transition-colors hover:bg-secondary focus:bg-secondary disabled:text-muted-foreground disabled:hover:bg-transparent"
+            >
+              {workspaces.length === 0 ? (
+                <option value="">No workspaces</option>
+              ) : (
+                workspaces.map((workspace) => (
+                  <option key={workspace.name} value={workspace.name}>{workspace.name}</option>
+                ))
+              )}
+            </select>
+            <ChevronDown className="pointer-events-none absolute right-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
+          </div>
+        )}
         {isAdmin &&
           SETTINGS_NAV_GROUPS.map((group) => (
             <Fragment key={group.label}>
