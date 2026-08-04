@@ -4025,6 +4025,10 @@ func recordE2EReplicatedVMID(vmID string) {
 	recordE2EProviderID("Replicated VM", "ELASTICCLAW_E2E_REPLICATED_VM_ID_FILE", vmID)
 }
 
+func recordE2EExedevVMID(vmID string) {
+	recordE2EProviderID("exe.dev VM", "ELASTICCLAW_E2E_EXEDEV_VM_ID_FILE", vmID)
+}
+
 func recordE2EProviderID(label, envName, id string) {
 	path := strings.TrimSpace(os.Getenv(envName))
 	if path == "" || strings.TrimSpace(id) == "" {
@@ -4450,6 +4454,28 @@ func replicatedFinalWorkspaceDir(sshHome string) string {
 	return path.Join(sshHome, ".openclaw", "workspace")
 }
 
+// exedevRemoteHome returns the remote $HOME for an exe.dev VM.
+// Used to build absolute workspace paths so WriteFile never receives a "~/..."
+// path that would be shell-quoted into a literal "~" directory.
+func exedevRemoteHome(ctx context.Context, p *exedevProvider.Provider, vmName string) (string, error) {
+	res, err := p.Exec(ctx, vmName, []string{"printenv", "HOME"})
+	if err != nil {
+		return "", fmt.Errorf("resolve exedev HOME: %w", err)
+	}
+	home := strings.TrimSpace(res.Stdout)
+	if home == "" || !strings.HasPrefix(home, "/") {
+		return "", fmt.Errorf("resolve exedev HOME: invalid value %q", home)
+	}
+	return home, nil
+}
+
+// exedevWorkspaceDirs returns the absolute staged and live workspace directories
+// for an exe.dev claw given remote HOME. Staged is used for pre-bootstrap flake
+// files; live is the OpenClaw agent workspace written after bridge bootstrap.
+func exedevWorkspaceDirs(remoteHome string) (staged, live string) {
+	return path.Join(remoteHome, "workspace"), replicatedFinalWorkspaceDir(remoteHome)
+}
+
 func replicatedWorkspaceReadinessCommand(dir string, files map[string]string) string {
 	if len(files) == 0 {
 		return "true"
@@ -4795,6 +4821,7 @@ func (s *Server) provisionExedev(ctx context.Context, clawID string, req types.C
 		return fmt.Errorf("exedev create: %w", err)
 	}
 	log.Printf("exedev VM created: %s (claw %s)", instance.ID, clawID)
+	recordE2EExedevVMID(instance.ID)
 	_, _ = s.db.Exec(`UPDATE claws SET status='starting', provider='exedev', provider_id=? WHERE id=?`, instance.ID, clawID)
 
 	// Bootstrap asynchronously
@@ -4901,13 +4928,26 @@ func (s *Server) bootstrapExedev(ctx context.Context, clawID, vmName string, p *
 		Env:             env,
 	})
 
+	// Resolve absolute remote paths once. exedev WriteFile shell-quotes destinations, so
+	// a literal "~/workspace/..." path creates $HOME/~/workspace (tilde not expanded)
+	// and the bridge's staged→live sync then copies zero files into .openclaw/workspace.
+	remoteHome, err := exedevRemoteHome(ctx, p, vmName)
+	if err != nil {
+		return err
+	}
+	stagedWorkspace, liveWorkspace := exedevWorkspaceDirs(remoteHome)
+
 	if flakeFiles := templateFlakeFiles(templateFiles); len(flakeFiles) > 0 {
-		if _, err := p.Exec(ctx, vmName, []string{"mkdir", "-p", "~/workspace"}); err != nil {
+		if _, err := p.Exec(ctx, vmName, []string{"mkdir", "-p", "--", stagedWorkspace}); err != nil {
 			return fmt.Errorf("create flake staging dir: %w", err)
 		}
-		for path, content := range flakeFiles {
-			if err := p.WriteFile(ctx, vmName, "~/workspace/"+path, []byte(content)); err != nil {
-				return fmt.Errorf("stage %s before bootstrap: %w", path, err)
+		for rel, content := range flakeFiles {
+			safeName, err := cleanWorkspaceFilePath(rel)
+			if err != nil {
+				return fmt.Errorf("invalid flake path %q: %w", rel, err)
+			}
+			if err := p.WriteFile(ctx, vmName, path.Join(stagedWorkspace, safeName), []byte(content)); err != nil {
+				return fmt.Errorf("stage %s before bootstrap: %w", safeName, err)
 			}
 		}
 	}
@@ -4919,20 +4959,33 @@ func (s *Server) bootstrapExedev(ctx context.Context, clawID, vmName string, p *
 	log.Printf("[exedev] bootstrap script completed on %s", vmName)
 	s.setBootstrapStatus(clawID, "Writing workspace files")
 
-	// Write template files after bootstrap so openclaw onboard doesn't overwrite them
-	workdir := "~/workspace"
-	if _, err := p.Exec(ctx, vmName, []string{"mkdir", "-p", workdir}); err != nil {
-		return fmt.Errorf("create workdir: %w", err)
+	// The bridge's one-time staged-workspace sync has already finished. Write final
+	// context files directly to the live OpenClaw workspace (mirrors Replicated) so
+	// they are immediately available and do not sit only under ~/workspace.
+	if _, err := p.Exec(ctx, vmName, []string{"mkdir", "-p", "--", liveWorkspace}); err != nil {
+		return fmt.Errorf("create live workspace: %w", err)
 	}
 	var writeErrs []string
-	for path, content := range files {
-		fullPath := workdir + "/" + path
-		if err := p.WriteFile(ctx, vmName, fullPath, content); err != nil {
-			writeErrs = append(writeErrs, fmt.Sprintf("%s: %v", path, err))
+	written := make(map[string]string, len(files))
+	for rel, content := range files {
+		safeName, err := cleanWorkspaceFilePath(rel)
+		if err != nil {
+			writeErrs = append(writeErrs, fmt.Sprintf("%s: %v", rel, err))
+			continue
 		}
+		if err := p.WriteFile(ctx, vmName, path.Join(liveWorkspace, safeName), content); err != nil {
+			writeErrs = append(writeErrs, fmt.Sprintf("%s: %v", safeName, err))
+			continue
+		}
+		written[safeName] = string(content)
 	}
 	if len(writeErrs) > 0 {
 		return fmt.Errorf("template file staging failed: %s", strings.Join(writeErrs, "; "))
+	}
+	if len(written) > 0 {
+		if err := p.SetupScript(ctx, vmName, replicatedWorkspaceReadinessCommand(liveWorkspace, written)); err != nil {
+			return fmt.Errorf("workspace files incomplete: %s", sanitizeBootstrapError(err))
+		}
 	}
 	if err := s.restoreCheckpointToExedev(ctx, clawID, vmName, p); err != nil {
 		return fmt.Errorf("restore checkpoint: %w", err)

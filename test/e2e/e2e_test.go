@@ -19,6 +19,7 @@ import (
 
 	daytonaProvider "github.com/elasticclaw/elasticclaw/pkg/provider/daytona"
 	dockerProvider "github.com/elasticclaw/elasticclaw/pkg/provider/docker"
+	exedevProvider "github.com/elasticclaw/elasticclaw/pkg/provider/exedev"
 	replicatedProvider "github.com/elasticclaw/elasticclaw/pkg/provider/replicated"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 )
@@ -31,6 +32,7 @@ const (
 	daytonaPrefix  = "ec-e2e"
 	cmxPrefix      = "ec-e2e-cmx"
 	dockerPrefix   = "ec-e2e-docker"
+	exedevPrefix   = "ec-e2e-exedev"
 	maxRunIDLen    = 32
 
 	// routineStaleE2EHookTTL is longer than the e2e binary's 30-minute timeout.
@@ -49,6 +51,10 @@ func TestDaytonaGitHubIssuesWorkflowE2E(t *testing.T) {
 
 func TestReplicatedGitHubIssuesWorkflowE2E(t *testing.T) {
 	runGitHubIssuesWorkflowE2E(t, "replicated")
+}
+
+func TestExedevGitHubIssuesWorkflowE2E(t *testing.T) {
+	runGitHubIssuesWorkflowE2E(t, "exedev")
 }
 
 func TestDockerWorkflowE2E(t *testing.T) {
@@ -227,6 +233,11 @@ func runGitHubIssuesWorkflowE2E(t *testing.T, sandboxProvider string) {
 	waitForAgentStatus(ctx, t, hub, agentID, "connected")
 	waitForAgentReply(ctx, t, hub, agentID)
 	assertNoPullRequestCreated(ctx, t, gh, issueNumber)
+	if env.SandboxProvider == "exedev" {
+		_, providerID := hub.agentProvider(ctx, t, agentID)
+		assertExedevLiveWorkspace(ctx, t, env, providerID)
+		assertNoWorkspaceVanishedError(ctx, t, hub, agentID)
+	}
 }
 
 type e2eEnv struct {
@@ -254,6 +265,7 @@ type e2eEnv struct {
 	ReplicatedType      string
 	ReplicatedTTL       string
 	DockerImage         string
+	ExedevSSHKeyPath    string
 	FireworksAPIKey     string
 	BridgeBinary        string
 	BridgeToken         string
@@ -307,10 +319,83 @@ func newE2EEnv(t *testing.T, runID, sandboxProvider string) e2eEnv {
 	case "docker":
 		env.DockerImage = os.Getenv("ELASTICCLAW_E2E_DOCKER_IMAGE")
 		env.ProviderPrefix = e2eProviderPrefix(dockerPrefix, runID)
+	case "exedev":
+		env.ExedevSSHKeyPath = resolveExedevSSHKeyPath(t)
+		env.ProviderPrefix = e2eProviderPrefix(exedevPrefix, runID)
+		// Prove control-plane auth works before we create issues / provision claws.
+		// Otherwise failures look like flaky agent errors after a long wait.
+		probeExedevControlPlane(t, env.ExedevSSHKeyPath)
 	default:
 		t.Fatalf("unsupported E2E sandbox provider %q", sandboxProvider)
 	}
 	return env
+}
+
+// materializeExedevSSHKeyPath returns a filesystem path for the E2E exe.dev
+// private key. Prefer ELASTICCLAW_E2E_EXEDEV_SSH_KEY_PATH; otherwise write
+// ELASTICCLAW_E2E_EXEDEV_SSH_KEY (PEM body) to a temp file. Empty when neither
+// is set. Used by both the main suite and the post-run recorded-VM cleanup.
+func materializeExedevSSHKeyPath(t *testing.T) string {
+	t.Helper()
+	if path := strings.TrimSpace(os.Getenv("ELASTICCLAW_E2E_EXEDEV_SSH_KEY_PATH")); path != "" {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("ELASTICCLAW_E2E_EXEDEV_SSH_KEY_PATH %q: %v", path, err)
+		}
+		return path
+	}
+	if pem := strings.TrimSpace(os.Getenv("ELASTICCLAW_E2E_EXEDEV_SSH_KEY")); pem != "" {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "exedev-e2e-key")
+		// PEM secrets from CI often have escaped newlines.
+		pem = strings.ReplaceAll(pem, `\n`, "\n")
+		if !strings.HasSuffix(pem, "\n") {
+			pem += "\n"
+		}
+		if err := os.WriteFile(path, []byte(pem), 0600); err != nil {
+			t.Fatalf("write ELASTICCLAW_E2E_EXEDEV_SSH_KEY: %v", err)
+		}
+		return path
+	}
+	return ""
+}
+
+// resolveExedevSSHKeyPath returns an SSH private key path registered with exe.dev.
+// When neither path nor PEM is set, the suite skips in CI so the matrix stays
+// green until the org secret is provisioned. Local non-CI runs may use the
+// default SSH agent/config (empty path).
+func resolveExedevSSHKeyPath(t *testing.T) string {
+	t.Helper()
+	if path := materializeExedevSSHKeyPath(t); path != "" {
+		return path
+	}
+	if strings.EqualFold(strings.TrimSpace(os.Getenv("CI")), "true") ||
+		strings.TrimSpace(os.Getenv("GITHUB_ACTIONS")) != "" ||
+		strings.TrimSpace(os.Getenv("DEPOT_PROJECT_ID")) != "" {
+		t.Skip("exe.dev E2E requires Depot secret ELASTICCLAW_E2E_EXEDEV_SSH_KEY " +
+			"(PEM of an SSH key registered on the ElasticClaw exe.dev account) " +
+			"or ELASTICCLAW_E2E_EXEDEV_SSH_KEY_PATH")
+	}
+	return ""
+}
+
+// probeExedevControlPlane runs `ssh exe.dev whoami` with the resolved key so
+// missing/invalid credentials fail before provisioning.
+func probeExedevControlPlane(t *testing.T, keyPath string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	args := []string{"-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new", "-o", "ConnectTimeout=15"}
+	if keyPath != "" {
+		args = append(args, "-i", keyPath)
+	}
+	args = append(args, "exe.dev", "whoami")
+	cmd := exec.CommandContext(ctx, "ssh", args...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("exe.dev control-plane auth failed (ssh exe.dev whoami): %v\n%s\n"+
+			"Register the E2E public key on the ElasticClaw exe.dev account and set "+
+			"ELASTICCLAW_E2E_EXEDEV_SSH_KEY (or _PATH).", err, string(out))
+	}
 }
 
 func e2eProviderPrefix(base, runID string) string {
@@ -355,6 +440,13 @@ func startHub(ctx context.Context, t *testing.T, env e2eEnv) *hubProcess {
 `
 		if env.DockerImage != "" {
 			providerConfig += fmt.Sprintf("    image: %q\n", env.DockerImage)
+		}
+	case "exedev":
+		providerConfig = `  exedev:
+    type: exedev
+`
+		if env.ExedevSSHKeyPath != "" {
+			providerConfig += fmt.Sprintf("    ssh_key_path: %q\n", env.ExedevSSHKeyPath)
 		}
 	}
 
@@ -776,6 +868,9 @@ func cleanupProvider(ctx context.Context, t *testing.T, env e2eEnv) {
 		return
 	case "docker":
 		return
+	case "exedev":
+		// exe.dev VMs are destroyed via recorded IDs / agent provider_id cleanup.
+		return
 	default:
 		t.Fatalf("unsupported E2E sandbox provider %q", env.SandboxProvider)
 	}
@@ -790,10 +885,96 @@ func destroyProviderInstanceByID(ctx context.Context, t *testing.T, env e2eEnv, 
 		destroyReplicatedVMByID(ctx, t, env, providerID)
 	case "docker":
 		destroyDockerContainerByID(ctx, t, providerID)
+	case "exedev":
+		destroyExedevVMByID(ctx, t, env, providerID)
 	case "":
 		return
 	default:
 		t.Logf("no E2E cleanup handler for provider %q instance %q", provider, providerID)
+	}
+}
+
+func destroyExedevVMByID(ctx context.Context, t *testing.T, env e2eEnv, vmID string) {
+	t.Helper()
+	provider, err := exedevProvider.New(exedevProvider.Config{SSHKeyPath: env.ExedevSSHKeyPath})
+	if err != nil {
+		t.Fatalf("create exe.dev provider for E2E VM cleanup: %v", err)
+	}
+	deadline := time.Now().Add(3 * time.Minute)
+	for {
+		if err := provider.Destroy(ctx, vmID, false); err != nil {
+			if isBenignExedevDeleteError(err) {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("delete exe.dev E2E VM %s: %v", vmID, err)
+			}
+		} else {
+			return
+		}
+		if time.Now().After(deadline) {
+			return
+		}
+		time.Sleep(5 * time.Second)
+	}
+}
+
+func isBenignExedevDeleteError(err error) bool {
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "not found") ||
+		strings.Contains(msg, "no such") ||
+		strings.Contains(msg, "404") ||
+		strings.Contains(msg, "already")
+}
+
+func isFatalExedevDeleteError(err error) bool {
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "permission denied") ||
+		strings.Contains(msg, "publickey") ||
+		strings.Contains(msg, "ssh keys are required")
+}
+
+// assertExedevLiveWorkspace SSHs into the claw VM and verifies template files
+// landed in ~/.openclaw/workspace — not a literal $HOME/~/workspace path.
+// This is the regression check for WorkspaceVanishedError on first agent turn.
+func assertExedevLiveWorkspace(ctx context.Context, t *testing.T, env e2eEnv, vmID string) {
+	t.Helper()
+	if strings.TrimSpace(vmID) == "" {
+		t.Fatal("exedev workspace assertion requires a non-empty provider_id (VM name)")
+	}
+	provider, err := exedevProvider.New(exedevProvider.Config{SSHKeyPath: env.ExedevSSHKeyPath})
+	if err != nil {
+		t.Fatalf("create exe.dev provider for workspace assertion: %v", err)
+	}
+	// SetupScript pipes the script over SSH stdin so $HOME expands on the VM
+	// and spaces/newlines are preserved. The literal $HOME/~/workspace check
+	// is intentional: tilde only expands at the start of a shell word, so that
+	// path is the bug-shaped directory we must not populate.
+	script := `set -euo pipefail
+live="$HOME/.openclaw/workspace"
+literal="$HOME/~/workspace"
+test -d "$live" || { echo "missing live workspace dir: $live"; ls -la "$HOME/.openclaw" 2>/dev/null || true; exit 1; }
+test -f "$live/AGENTS.md" || { echo "missing $live/AGENTS.md"; ls -la "$live" 2>/dev/null || true; exit 1; }
+test -f "$live/CONTEXT.md" || { echo "missing $live/CONTEXT.md"; ls -la "$live" 2>/dev/null || true; exit 1; }
+if [ -f "$literal/AGENTS.md" ]; then
+  echo "template content found under literal tilde path $literal (should be live $live)"
+  ls -la "$literal" 2>/dev/null || true
+  exit 1
+fi
+echo "exedev_live_workspace_ok"
+`
+	if err := provider.SetupScript(ctx, vmID, script); err != nil {
+		t.Fatalf("exedev live workspace assertion failed on %s: %v", vmID, err)
+	}
+}
+
+func assertNoWorkspaceVanishedError(ctx context.Context, t *testing.T, hub *hubProcess, agentID string) {
+	t.Helper()
+	msgs := hub.listMessages(ctx, t, agentID)
+	for _, m := range msgs {
+		if strings.Contains(m.Content, "WorkspaceVanishedError") || strings.Contains(m.Content, "workspace appears to have disappeared") {
+			t.Fatalf("agent %s reported workspace vanish: %s", agentID, m.Content)
+		}
 	}
 }
 

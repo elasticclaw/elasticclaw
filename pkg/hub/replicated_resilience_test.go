@@ -13,6 +13,25 @@ func TestReplicatedFinalWorkspaceDirUsesLiveWorkspace(t *testing.T) {
 	if got, want := replicatedFinalWorkspaceDir("/home/elasticclaw"), "/home/elasticclaw/.openclaw/workspace"; got != want {
 		t.Fatalf("replicated final workspace dir = %q, want %q", got, want)
 	}
+	// exedev post-bootstrap writes use the same live workspace layout.
+	if got, want := replicatedFinalWorkspaceDir("/home/exedev"), "/home/exedev/.openclaw/workspace"; got != want {
+		t.Fatalf("exedev live workspace dir = %q, want %q", got, want)
+	}
+}
+
+func TestExedevWorkspaceDirsUsesAbsoluteStagedAndLivePaths(t *testing.T) {
+	t.Parallel()
+	staged, live := exedevWorkspaceDirs("/home/exedev")
+	if staged != "/home/exedev/workspace" {
+		t.Fatalf("staged = %q, want /home/exedev/workspace", staged)
+	}
+	if live != "/home/exedev/.openclaw/workspace" {
+		t.Fatalf("live = %q, want /home/exedev/.openclaw/workspace", live)
+	}
+	// Regression: never stage under a literal "~" directory.
+	if strings.Contains(staged, "/~/") || strings.Contains(live, "/~/") {
+		t.Fatalf("workspace dirs must not contain literal tilde segments: staged=%q live=%q", staged, live)
+	}
 }
 
 func TestRetryReplicatedBootstrapStepSucceedsAfterTransientFailures(t *testing.T) {

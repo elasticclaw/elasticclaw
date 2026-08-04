@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"strings"
 	"time"
@@ -59,7 +60,14 @@ func (p *Provider) sshArgs() []string {
 	if p.cfg.SSHKeyPath != "" {
 		args = append(args, "-i", p.cfg.SSHKeyPath)
 	}
-	args = append(args, "-o", "StrictHostKeyChecking=no", "exe.dev")
+	// BatchMode + ConnectTimeout: never hang on password prompts (e.g. CI cleanup
+	// without a key, or a key not registered on the account).
+	args = append(args,
+		"-o", "BatchMode=yes",
+		"-o", "ConnectTimeout=15",
+		"-o", "StrictHostKeyChecking=no",
+		"exe.dev",
+	)
 	return args
 }
 
@@ -70,7 +78,12 @@ func (p *Provider) sshVMArgs(host string) []string {
 	if p.cfg.SSHKeyPath != "" {
 		args = append(args, "-i", p.cfg.SSHKeyPath)
 	}
-	args = append(args, "-o", "StrictHostKeyChecking=no", host)
+	args = append(args,
+		"-o", "BatchMode=yes",
+		"-o", "ConnectTimeout=15",
+		"-o", "StrictHostKeyChecking=no",
+		host,
+	)
 	return args
 }
 
@@ -336,30 +349,59 @@ func shellQuote(args []string) string {
 	return b.String()
 }
 
+// expandRemotePath resolves a leading "~/" (or bare "~") against the remote HOME.
+// WriteFile shell-quotes paths for safety, so an unexpanded "~/workspace/..." would
+// create a literal directory named "~" under the SSH cwd (usually $HOME) instead of
+// expanding to the user's home. Absolute paths and non-tilde relative paths pass through.
+func (p *Provider) expandRemotePath(ctx context.Context, instanceID, remotePath string) (string, error) {
+	if remotePath != "~" && !strings.HasPrefix(remotePath, "~/") {
+		return remotePath, nil
+	}
+	res, err := p.Exec(ctx, instanceID, []string{"printenv", "HOME"})
+	if err != nil {
+		return "", fmt.Errorf("resolve remote HOME for path %q: %w", remotePath, err)
+	}
+	home := strings.TrimSpace(res.Stdout)
+	if home == "" || !strings.HasPrefix(home, "/") {
+		return "", fmt.Errorf("resolve remote HOME for path %q: invalid HOME %q", remotePath, home)
+	}
+	if remotePath == "~" {
+		return home, nil
+	}
+	// Keep the slash after ~ so Join-style concatenation is path.Clean-safe.
+	return path.Clean(home + remotePath[1:]), nil
+}
+
 // WriteFile writes content to a file inside the VM via SSH + cat.
 // Pipes raw bytes through stdin to avoid shell escaping issues with binary data.
-func (p *Provider) WriteFile(ctx context.Context, instanceID string, path string, content []byte) error {
+func (p *Provider) WriteFile(ctx context.Context, instanceID string, remotePath string, content []byte) error {
 	host := p.vmHost(instanceID)
 	if host == "" {
 		return fmt.Errorf("exedev writefile: cannot determine host for %s", instanceID)
 	}
 
+	expanded, err := p.expandRemotePath(ctx, instanceID, remotePath)
+	if err != nil {
+		return fmt.Errorf("exedev writefile: %w", err)
+	}
+	remotePath = expanded
+
 	args := p.sshVMArgs(host)
 
 	// Ensure parent directory exists
-	mkdirArgs := append(args, shellQuote([]string{"mkdir", "-p", "--", filepath.Dir(path)}))
+	mkdirArgs := append(args, shellQuote([]string{"mkdir", "-p", "--", filepath.Dir(remotePath)}))
 	mkdirCmd := exec.CommandContext(ctx, "ssh", mkdirArgs...)
 	if out, err := mkdirCmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("exedev writefile mkdir %s: %w (out: %s)", path, err, string(out))
+		return fmt.Errorf("exedev writefile mkdir %s: %w (out: %s)", remotePath, err, string(out))
 	}
 
 	// Pipe raw content via stdin to cat on the remote — no escaping needed
-	catArgs := append(args, "cat > "+shellQuote([]string{path}))
+	catArgs := append(args, "cat > "+shellQuote([]string{remotePath}))
 	cmd := exec.CommandContext(ctx, "ssh", catArgs...)
 	cmd.Stdin = bytes.NewReader(content)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("exedev writefile %s: %w (out: %s)", path, err, string(out))
+		return fmt.Errorf("exedev writefile %s: %w (out: %s)", remotePath, err, string(out))
 	}
 	return nil
 }

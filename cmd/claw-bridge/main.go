@@ -2974,6 +2974,40 @@ var openClawWorkspaceManagedFiles = map[string]bool{
 	"TRIGGER_INPUTS.json":     true,
 }
 
+// stagedWorkspaceHasCopyableContent reports whether stagedAbs contains any
+// non-symlink regular file other than the readiness marker. Empty staged trees
+// (wrong hub path, or nothing staged yet) must not wipe the live managed set.
+func stagedWorkspaceHasCopyableContent(stagedAbs string) (bool, error) {
+	has := false
+	err := filepath.Walk(stagedAbs, func(src string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		rel, err := filepath.Rel(stagedAbs, src)
+		if err != nil {
+			return err
+		}
+		if rel == "." || rel == ".elasticclaw-workspace-ready" {
+			return nil
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			if info.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if info.IsDir() {
+			return nil
+		}
+		has = true
+		return filepath.SkipAll
+	})
+	if err != nil {
+		return false, err
+	}
+	return has, nil
+}
+
 func syncStagedWorkspaceToOpenClawWorkspace() error {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -2990,11 +3024,6 @@ func syncStagedWorkspaceToOpenClawWorkspace() error {
 	if err := os.MkdirAll(activeDir, 0700); err != nil {
 		return fmt.Errorf("create OpenClaw workspace: %w", err)
 	}
-	for name := range openClawWorkspaceManagedFiles {
-		if err := os.RemoveAll(filepath.Join(activeDir, name)); err != nil {
-			return fmt.Errorf("remove stale OpenClaw workspace file %s: %w", name, err)
-		}
-	}
 	stagedAbs, err := filepath.Abs(stagedDir)
 	if err != nil {
 		return fmt.Errorf("abs staged workspace: %w", err)
@@ -3002,6 +3031,24 @@ func syncStagedWorkspaceToOpenClawWorkspace() error {
 	activeAbs, err := filepath.Abs(activeDir)
 	if err != nil {
 		return fmt.Errorf("abs OpenClaw workspace: %w", err)
+	}
+	// Partial staged content still replaces the full managed-file set (so default
+	// BOOTSTRAP.md/MEMORY.md do not linger beside template AGENTS.md). Only skip
+	// that wipe when staged is empty — e.g. hub wrote to a literal $HOME/~/workspace
+	// and left $HOME/workspace bare — which would otherwise trigger
+	// WorkspaceVanishedError after removing attested OpenClaw bootstrap files.
+	hasStagedContent, err := stagedWorkspaceHasCopyableContent(stagedAbs)
+	if err != nil {
+		return fmt.Errorf("scan staged workspace: %w", err)
+	}
+	if hasStagedContent {
+		for name := range openClawWorkspaceManagedFiles {
+			if err := os.RemoveAll(filepath.Join(activeDir, name)); err != nil {
+				return fmt.Errorf("remove stale OpenClaw workspace file %s: %w", name, err)
+			}
+		}
+	} else {
+		log.Printf("[bootstrap] staged workspace has no copyable files; preserving live managed OpenClaw workspace files")
 	}
 	copied := 0
 	err = filepath.Walk(stagedAbs, func(src string, info os.FileInfo, walkErr error) error {
