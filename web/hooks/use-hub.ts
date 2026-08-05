@@ -342,18 +342,29 @@ export function useHub(selectedClawId: string | null): HubState {
         const inflight = existing.filter((m) => m.id.startsWith('opt-') &&
           !msgs.some((r) => r.content === m.content && r.role === m.role))
         // Keep in-flight tool activity + stream fragments so selecting a claw
-        // mid-turn does not blank the UI. Drop live-segments once the durable
-        // final reply is already present in the timeline (refresh parity).
-        const liveTransient = existing.filter((m) => {
-          if (!isTransientMessage(m)) return false
-          if (!m.id.startsWith("live-segment-") && !m.id.startsWith("live-")) return true
-          const segTime = m.timestamp.getTime()
-          const durableFinalPresent = msgs.some(
+        // mid-turn does not blank the UI. Drop live text fragments only when the
+        // timeline already has a durable assistant/hub reply strictly newer than
+        // the latest fragment (the completed final). A nearby *previous* turn's
+        // message must not count — that used to drop in-flight text incorrectly.
+        let latestLiveTextAt = 0
+        for (const m of existing) {
+          if (!m.id.startsWith("live-segment-") && !m.id.startsWith("live-")) continue
+          const t = m.timestamp.getTime()
+          if (t > latestLiveTextAt) latestLiveTextAt = t
+        }
+        const durableFinalAfterLiveText =
+          latestLiveTextAt > 0 &&
+          msgs.some(
             (api) =>
               (api.role === "claw" || api.role === "hub") &&
-              api.timestamp.getTime() >= segTime - 2_000
+              api.timestamp.getTime() > latestLiveTextAt
           )
-          return !durableFinalPresent
+        const liveTransient = existing.filter((m) => {
+          if (!isTransientMessage(m)) return false
+          if (m.id.startsWith("live-segment-") || m.id.startsWith("live-")) {
+            return !durableFinalAfterLiveText
+          }
+          return true
         })
         const merged = pruneOldestLiveActivities(
           [...msgs, ...cachedOnly, ...inflight, ...liveTransient],
