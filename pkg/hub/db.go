@@ -776,6 +776,9 @@ func migrate(db *sql.DB) error {
 	if err := backfillTaskRunReadyAtV1(db); err != nil {
 		return err
 	}
+	if err := migrateCompletedRoutineHistoryV1(db); err != nil {
+		return err
+	}
 	for _, p := range []struct {
 		model                          string
 		in, out, cacheRead, cacheWrite float64
@@ -797,6 +800,47 @@ func migrate(db *sql.DB) error {
 		}
 	}
 	return nil
+}
+
+// migrateCompletedRoutineHistoryV1 restores successful routine runs that older
+// versions marked deleted when terminating their sandbox. Their messages were
+// preserved, so changing only the claw status makes that history visible.
+// The routine tag keeps intentional user deletions and unrelated terminal
+// workflows hidden.
+func migrateCompletedRoutineHistoryV1(db *sql.DB) error {
+	const migration = "completed_routine_history_v1"
+	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS hub_migrations (name TEXT PRIMARY KEY, applied_at INTEGER NOT NULL)`); err != nil {
+		return fmt.Errorf("create hub migrations: %w", err)
+	}
+	var applied int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM hub_migrations WHERE name=?`, migration).Scan(&applied); err != nil {
+		return fmt.Errorf("check completed routine history migration: %w", err)
+	}
+	if applied > 0 {
+		return nil
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`
+		UPDATE claws
+		   SET status='completed'
+		 WHERE status='deleted'
+		   AND tags LIKE '%"routine"%'
+		   AND EXISTS (
+		       SELECT 1
+		         FROM workflow_runs
+		        WHERE workflow_runs.claw_id=claws.id
+		          AND workflow_runs.status='completed'
+		   )`); err != nil {
+		return fmt.Errorf("restore completed routine history: %w", err)
+	}
+	if _, err := tx.Exec(`INSERT INTO hub_migrations(name, applied_at) VALUES(?, ?)`, migration, now().UnixMilli()); err != nil {
+		return fmt.Errorf("record completed routine history migration: %w", err)
+	}
+	return tx.Commit()
 }
 
 func rebuildTaskRunSummariesStatusV3(db *sql.DB) error {

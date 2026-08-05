@@ -1,0 +1,25 @@
+schema_version: v1
+name: dependency-health
+
+trigger:
+  cron:
+    schedule: "0 9 * * 1-5"
+    timezone: America/Argentina/Buenos_Aires
+    overlap_policy: skip
+    timeout: 2h
+
+stages:
+  - id: working
+    label: Working
+    entry: true
+    on_enter:
+      inject: |
+        Inspect dependency health in the configured repositories.
+        Apply safe updates, run the relevant tests, and open a pull request
+        when changes are required. When the routine is complete, say [DONE].
+
+  - id: completed
+    label: Completed
+    terminal: true
+    triggers:
+      - message_contains: "[DONE]"

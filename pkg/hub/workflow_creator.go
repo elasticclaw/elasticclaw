@@ -17,6 +17,7 @@ import (
 type workflowCreateOptions struct {
 	ctx                  context.Context
 	inputs               map[string]string
+	triggerKind          string
 	workspaceFiles       map[string]string
 	clawName             string
 	githubIssueID        string
@@ -28,6 +29,7 @@ type workflowCreateOptions struct {
 	issueCreatedAt       time.Time
 	reason               string
 	triggerActor         *triggerActor
+	timeoutAt            time.Time
 }
 
 const hubInternalTemplateFilePrefix = "__hub__/"
@@ -228,7 +230,9 @@ func (s *Server) createClawFromWorkflowWithOptions(workspace *types.WorkspaceCon
 
 	tags := mergeTags(workspace.Name, workflow.Tags, nil)
 	tags = append(tags, "workspace:"+workspace.Name, "workflow:"+workflow.Name)
-	if opts.inputs != nil {
+	if opts.triggerKind == "routine" {
+		tags = append([]string{"routine"}, tags...)
+	} else if opts.inputs != nil {
 		tags = append(tags, "manual-trigger")
 	}
 	tagsJSON, _ := json.Marshal(tags)
@@ -304,6 +308,7 @@ func (s *Server) createClawFromWorkflowWithOptions(workspace *types.WorkspaceCon
 		AnalyticsEnabled: analyticsEnabled,
 		RequiresPR:       requiresPR,
 		ExcludedReason:   excludedReason,
+		TimeoutAt:        opts.timeoutAt,
 		StartedAt:        now,
 		EventKey:         "task_start:claw:" + clawID,
 	}); err != nil {

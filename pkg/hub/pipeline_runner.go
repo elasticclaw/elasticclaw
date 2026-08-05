@@ -1582,7 +1582,11 @@ func (s *Server) transitionResolvedPipelineStageWithContext(clawID string, stage
 		s.syncWorkflowVolumes(clawID)
 
 		status, result := pipelineTerminalWorkflowRunResult(stage, stageActionsSucceeded)
-		applied, err := s.finishClawTerminalTx(clawID, "deleted", "", status, result, terminalTxOpts{})
+		clawStatus := s.successfulClawTerminalStatus(clawID)
+		if status == "failed" {
+			clawStatus = "error"
+		}
+		applied, err := s.finishClawTerminalTx(clawID, clawStatus, result, status, result, terminalTxOpts{})
 		if err != nil || !applied {
 			return transitioned, injectDelivered
 		}
@@ -1598,7 +1602,7 @@ func (s *Server) transitionResolvedPipelineStageWithContext(clawID string, stage
 
 		s.broadcastToUsers(tenantID, types.WSMessage{
 			Type:    "claw_status",
-			Payload: map[string]string{"claw_id": clawID, "status": "deleted"},
+			Payload: map[string]string{"claw_id": clawID, "status": clawStatus},
 		})
 
 		if providerID != "" {
@@ -2270,10 +2274,10 @@ func (s *Server) findPipelineContextForClaw(clawID string) (pipelineContext, boo
 func (s *Server) findPipelineContextForIssue(issueID string) (pipelineContext, bool) {
 	var clawID string
 	queries := []string{
-		`SELECT id FROM claws WHERE linear_issue_id=? AND status NOT IN ('error','deleted') ORDER BY created_at DESC LIMIT 1`,
-		`SELECT id FROM claws WHERE github_issue_id=? AND status NOT IN ('error','deleted') ORDER BY created_at DESC LIMIT 1`,
-		`SELECT id FROM claws WHERE shortcut_story_id=? AND status NOT IN ('error','deleted') ORDER BY created_at DESC LIMIT 1`,
-		`SELECT id FROM claws WHERE jira_issue_id=? AND status NOT IN ('error','deleted') ORDER BY created_at DESC LIMIT 1`,
+		`SELECT id FROM claws WHERE linear_issue_id=? AND status NOT IN ('completed','error','deleted') ORDER BY created_at DESC LIMIT 1`,
+		`SELECT id FROM claws WHERE github_issue_id=? AND status NOT IN ('completed','error','deleted') ORDER BY created_at DESC LIMIT 1`,
+		`SELECT id FROM claws WHERE shortcut_story_id=? AND status NOT IN ('completed','error','deleted') ORDER BY created_at DESC LIMIT 1`,
+		`SELECT id FROM claws WHERE jira_issue_id=? AND status NOT IN ('completed','error','deleted') ORDER BY created_at DESC LIMIT 1`,
 	}
 	for _, query := range queries {
 		if err := s.db.QueryRow(query, issueID).Scan(&clawID); err == nil && clawID != "" {

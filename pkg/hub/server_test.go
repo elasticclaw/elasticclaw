@@ -765,6 +765,92 @@ func TestDeleteClawKeepsMessages(t *testing.T) {
 	}
 }
 
+func TestCompletedClawRemainsVisibleWithMessages(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, nil, "", "", "")
+	_, err := db.Exec(
+		`INSERT INTO claws(id, tenant_id, name, tags, created_at, status) VALUES(?,?,?,?,datetime('now'),?)`,
+		"claw-completed", "test-tenant-id", "completed routine", `["routine"]`, "completed",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec(
+		`INSERT INTO messages(id, claw_id, tenant_id, role, content, created_at) VALUES(?,?,?,?,?,datetime('now'))`,
+		"msg-completed", "claw-completed", "test-tenant-id", "claw", "routine report",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	listReq := httptest.NewRequest(http.MethodGet, "/api/claws", nil)
+	listReq = listReq.WithContext(context.WithValue(listReq.Context(), ctxTenantKey{}, "test-tenant-id"))
+	listRec := httptest.NewRecorder()
+	s.handleClaws(listRec, listReq)
+	if listRec.Code != http.StatusOK {
+		t.Fatalf("expected list status %d, got %d", http.StatusOK, listRec.Code)
+	}
+	var claws []types.Claw
+	if err := json.NewDecoder(listRec.Body).Decode(&claws); err != nil {
+		t.Fatal(err)
+	}
+	if len(claws) != 1 || claws[0].Status != "completed" {
+		t.Fatalf("expected completed claw in list, got %#v", claws)
+	}
+
+	var messageCount int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=?`, "claw-completed").Scan(&messageCount); err != nil {
+		t.Fatal(err)
+	}
+	if messageCount != 1 {
+		t.Fatalf("expected completed claw messages to remain available, got %d", messageCount)
+	}
+}
+
+func TestMigrateCompletedRoutineHistoryRestoresOnlySuccessfulRoutines(t *testing.T) {
+	_, db := NewTestServerWithConfig(t, nil, "", "", "")
+	if _, err := db.Exec(`DELETE FROM hub_migrations WHERE name='completed_routine_history_v1'`); err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range []struct {
+		id, tags, runStatus string
+	}{
+		{"successful-routine", `["routine"]`, "completed"},
+		{"failed-routine", `["routine"]`, "failed"},
+		{"manual-deletion", `[]`, "completed"},
+	} {
+		if _, err := db.Exec(
+			`INSERT INTO claws(id, tenant_id, name, tags, created_at, status) VALUES(?,?,?,?,datetime('now'),'deleted')`,
+			row.id, "test-tenant-id", row.id, row.tags,
+		); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(
+			`INSERT INTO workflow_runs(id, tenant_id, workflow_name, workspace_name, status, claw_id, created_at) VALUES(?,?,?,?,?,?,datetime('now'))`,
+			"run-"+row.id, "test-tenant-id", "routine", "workspace", row.runStatus, row.id,
+		); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := migrateCompletedRoutineHistoryV1(db); err != nil {
+		t.Fatal(err)
+	}
+
+	var restoredStatus, failedStatus, deletedStatus string
+	if err := db.QueryRow(`SELECT status FROM claws WHERE id='successful-routine'`).Scan(&restoredStatus); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT status FROM claws WHERE id='failed-routine'`).Scan(&failedStatus); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT status FROM claws WHERE id='manual-deletion'`).Scan(&deletedStatus); err != nil {
+		t.Fatal(err)
+	}
+	if restoredStatus != "completed" || failedStatus != "deleted" || deletedStatus != "deleted" {
+		t.Fatalf("statuses = successful:%q failed:%q manual:%q", restoredStatus, failedStatus, deletedStatus)
+	}
+}
+
 func TestClawAPIReturnsGitHubIssueLink(t *testing.T) {
 	s, db := NewTestServerWithConfig(t, nil, "", "", "")
 	_, err := db.Exec(

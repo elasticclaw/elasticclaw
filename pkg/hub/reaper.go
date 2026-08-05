@@ -115,7 +115,7 @@ func (s *Server) reconcileOnBoot() {
 		s.stopAgentWithReason(c.id, "hub restarted during provisioning", false)
 	}
 	n := s.reaperNow()
-	if res, err := s.db.Exec(`UPDATE workflow_runs SET status='failed', result='orphaned by hub restart', finished_at=? WHERE status='running' AND (claw_id='' OR NOT EXISTS (SELECT 1 FROM claws c WHERE c.id=workflow_runs.claw_id) OR EXISTS (SELECT 1 FROM claws c WHERE c.id=workflow_runs.claw_id AND c.status IN ('error','deleted')))`, n); err != nil {
+	if res, err := s.db.Exec(`UPDATE workflow_runs SET status='failed', result='orphaned by hub restart', finished_at=? WHERE status='running' AND (claw_id='' OR NOT EXISTS (SELECT 1 FROM claws c WHERE c.id=workflow_runs.claw_id) OR EXISTS (SELECT 1 FROM claws c WHERE c.id=workflow_runs.claw_id AND c.status IN ('completed','error','deleted')))`, n); err != nil {
 		log.Printf("[reaper] boot workflow repair: %v", err)
 	} else if count, _ := res.RowsAffected(); count > 0 {
 		log.Printf("[reaper] boot failed %d orphaned workflow runs", count)
@@ -212,7 +212,7 @@ func (s *Server) reapOnce() {
 		}
 	}
 	type vm struct{ id, provider, providerID string }
-	vmRows, err := s.db.Query(`SELECT id, COALESCE(provider,''), provider_id FROM claws WHERE status IN ('error','deleted') AND provider_id != ''`)
+	vmRows, err := s.db.Query(`SELECT id, COALESCE(provider,''), provider_id FROM claws WHERE status IN ('completed','error','deleted') AND provider_id != ''`)
 	if err == nil {
 		var vms []vm
 		for vmRows.Next() {
@@ -262,7 +262,7 @@ func (s *Server) reapOnce() {
 	// A terminal pipeline stage is claimed before its terminal transaction is
 	// committed. If that transaction exhausts its short retry budget, recover it
 	// here rather than leaving the claimed stage and workflow run running forever.
-	terminalRows, err := s.db.Query(`SELECT c.id, c.pipeline_stage FROM claws c WHERE c.status NOT IN ('error','deleted') AND c.pipeline_stage != '' AND EXISTS (SELECT 1 FROM workflow_runs wr WHERE wr.claw_id=c.id AND wr.status='running')`)
+	terminalRows, err := s.db.Query(`SELECT c.id, c.pipeline_stage FROM claws c WHERE c.status NOT IN ('completed','error','deleted') AND c.pipeline_stage != '' AND EXISTS (SELECT 1 FROM workflow_runs wr WHERE wr.claw_id=c.id AND wr.status='running')`)
 	if err == nil {
 		type terminalCandidate struct{ id, stageID string }
 		var candidates []terminalCandidate

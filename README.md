@@ -119,6 +119,15 @@ Create and inspect agents, manage workspaces and workflows, configure providers,
 
 Use webhooks and the ElasticClaw Server API to connect private queues, release events, internal systems, or scheduled work.
 
+### Scheduled routines
+
+Cron-triggered workflows are shown as **Routines** in the dashboard. The Hub
+owns the schedule, starts an isolated agent for each run, and records the run
+history. Configure a cron expression, IANA timezone, overlap policy, and
+optional timeout under `trigger.cron`.
+
+See the [scheduled routine example](examples/workflows/scheduled-routine.yaml).
+
 ## Architecture
 
 ElasticClaw has four main moving parts:
