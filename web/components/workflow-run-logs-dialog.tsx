@@ -3,6 +3,7 @@
 import { useState } from "react"
 import { FileTerminal } from "lucide-react"
 import { ClawActivityLog } from "@/components/claw-activity-log"
+import { WorkflowName } from "@/components/workflow-name"
 import { Button } from "@/components/ui/button"
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
@@ -30,7 +31,7 @@ export function WorkflowRunLogsDialog({ run }: { run: WorkflowRun }) {
           <DialogHeader className="shrink-0 border-b px-6 py-5 pr-12">
             <DialogTitle>Agent logs</DialogTitle>
             <DialogDescription>
-              Agent activity for run {shortId(run.id)} of {run.workflow_name} in {run.workspace_name}.
+              Agent activity for run {shortId(run.id)} of <WorkflowName name={run.workflow_name} /> in {run.workspace_name}.
             </DialogDescription>
           </DialogHeader>
           <div className="min-h-0 flex-1 px-6 pb-6">
