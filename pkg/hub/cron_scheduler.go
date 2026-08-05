@@ -178,6 +178,25 @@ func (cs *cronScheduler) reload() error {
 	return cs.reloadWorkflows()
 }
 
+// removeWorkflow stops the schedule for a single workflow without reloading the
+// full scheduler. This is used during deletion so the job is removed even if a
+// subsequent reload fails to load all workspaces.
+func (cs *cronScheduler) removeWorkflow(workspaceName, workflowName string) {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+
+	if cs.cron == nil {
+		return
+	}
+	key := workspaceName + "/" + workflowName
+	if entryID, ok := cs.entries[key]; ok {
+		cs.cron.Remove(entryID)
+		delete(cs.entries, key)
+		delete(cs.workflows, key)
+		log.Printf("[cron] removed schedule for %s", key)
+	}
+}
+
 // parseCronSchedule parses a cron schedule with timezone support.
 // It delegates expression parsing to types.ParseCronSchedule so that the
 // scheduler and save-time validation always accept the same expressions.

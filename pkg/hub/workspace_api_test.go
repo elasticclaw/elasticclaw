@@ -280,6 +280,89 @@ func TestWorkflowDeleteRemovesWorkflow(t *testing.T) {
 	}
 }
 
+func TestWorkflowDeleteWithWhitespaceName(t *testing.T) {
+	configDir := t.TempDir()
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", configDir+"/hub.yaml")
+	s, _ := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
+
+	body := `{"workspaces":[{"name":"engineering","repositories":[]}]}`
+	req := httptest.NewRequest(http.MethodPost, "/api/workspaces", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("workspace push status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+
+	body = `{"workflows":[{"name":" bugfix ","integration":"github","enable_manual_trigger":true}]}`
+	req = httptest.NewRequest(http.MethodPost, "/api/workspaces/engineering/workflows", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Content-Type", "application/json")
+	rr = httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("workflow push status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodDelete, "/api/workspaces/engineering/workflows/%20bugfix%20", nil)
+	req.Header.Set("Authorization", "Bearer test-token")
+	rr = httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("workflow delete status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+
+	workflowPath := filepath.Join(configDir, "workspaces", "engineering", "workflows", " bugfix .yaml")
+	if _, err := os.Stat(workflowPath); !os.IsNotExist(err) {
+		t.Fatalf("workflow file with whitespace still exists after delete: %s", workflowPath)
+	}
+}
+
+func TestWorkflowDeleteRemovesCronSchedule(t *testing.T) {
+	configDir := t.TempDir()
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", configDir+"/hub.yaml")
+	s, _ := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
+	s.cronScheduler = newCronScheduler(s)
+	s.cronScheduler.cron = cron.New(cron.WithSeconds())
+
+	body := `{"workspaces":[{"name":"engineering"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/api/workspaces", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("workspace push status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+
+	body = `{"workflows":[{"schemaVersion":"v1","name":"dependency-update-go","trigger":{"cron":{"schedule":"*/1 * * * *","timezone":"America/Chicago","overlap_policy":"skip","timeout":"2h"}},"stages":[{"id":"working","entry":true}]}]}`
+	req = httptest.NewRequest(http.MethodPost, "/api/workspaces/engineering/workflows", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Content-Type", "application/json")
+	rr = httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("workflow push status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+
+	if _, ok := s.cronScheduler.entries["engineering/dependency-update-go"]; !ok {
+		t.Fatalf("cron workflow was not registered: %#v", s.cronScheduler.entries)
+	}
+
+	req = httptest.NewRequest(http.MethodDelete, "/api/workspaces/engineering/workflows/dependency-update-go", nil)
+	req.Header.Set("Authorization", "Bearer test-token")
+	rr = httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("workflow delete status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+
+	if _, ok := s.cronScheduler.entries["engineering/dependency-update-go"]; ok {
+		t.Fatalf("cron entry for deleted workflow still exists: %#v", s.cronScheduler.entries)
+	}
+}
+
 func TestWorkflowPushAcceptsNestedGitHubIssuesTrigger(t *testing.T) {
 	configDir := t.TempDir()
 	t.Setenv("ELASTICCLAW_HUB_CONFIG", configDir+"/hub.yaml")

@@ -366,8 +366,8 @@ func (s *Server) handleWorkspaceWorkflowPatch(w http.ResponseWriter, r *http.Req
 }
 
 func (s *Server) handleWorkspaceWorkflowDelete(w http.ResponseWriter, r *http.Request) {
-	workspaceName := strings.TrimSpace(r.PathValue("workspace"))
-	workflowName := strings.TrimSpace(r.PathValue("workflow"))
+	workspaceName := r.PathValue("workspace")
+	workflowName := r.PathValue("workflow")
 	if workspaceName == "" || workflowName == "" {
 		http.Error(w, "workspace and workflow names required", http.StatusBadRequest)
 		return
@@ -381,6 +381,7 @@ func (s *Server) handleWorkspaceWorkflowDelete(w http.ResponseWriter, r *http.Re
 		return
 	}
 	if s.cronScheduler != nil {
+		s.cronScheduler.removeWorkflow(workspaceName, workflowName)
 		if err := s.cronScheduler.reload(); err != nil {
 			log.Printf("[cron] failed to reload workflows after workflow delete for workspace %s workflow %s: %v", workspaceName, workflowName, err)
 		}
