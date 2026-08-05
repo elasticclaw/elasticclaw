@@ -5,7 +5,8 @@ import { fetchMessageTimeline } from "@/lib/api"
 import { mapApiMessage } from "@/lib/mappers"
 import type { Message } from "@/lib/types"
 
-const PAGE_SIZE = 50    // messages per page
+// Timeline page size — durable turns + activity_summary rows (not live tool floods).
+const PAGE_SIZE = 100
 const ROLE_ORDER: Record<Message["role"], number> = {
   user: 0,
   hub: 1,
@@ -16,6 +17,7 @@ const ROLE_ORDER: Record<Message["role"], number> = {
 }
 
 function conversationMessages(messages: Message[]): Message[] {
+  // Cursor pagination is keyed off real conversation rows, not activity chrome.
   return messages.filter((message) => message.role !== "activity" && message.role !== "activity_summary")
 }
 

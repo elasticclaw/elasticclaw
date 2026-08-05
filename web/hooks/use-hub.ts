@@ -14,7 +14,11 @@ import {
   isConfigured,
 } from "@/lib/api"
 import { mapApiClaw, mapApiMessage, mapApiStatus, computeUptime } from "@/lib/mappers"
-import { isTerminalAssistantMessage } from "@/lib/messages"
+import {
+  isTerminalAssistantMessage,
+  isTransientMessage,
+  pruneOldestLiveActivities,
+} from "@/lib/messages"
 import { useTypewriter, type TypewriterState } from "@/hooks/use-typewriter"
 
 export interface HubState {
@@ -42,6 +46,8 @@ const ORDER_KEY = "elasticclaw_claw_order"
 // ── localStorage message cache ──────────────────────────────────────────────
 const MESSAGES_KEY = "elasticclaw_messages"
 const MAX_CACHED_PER_CLAW = 200
+/** Cap live tool/activity rows in memory so floods don't bloat the client. */
+const MAX_LIVE_ACTIVITIES_PER_CLAW = 200
 
 function readCachedMessages(): Record<string, Message[]> {
   if (typeof window === "undefined") return {}
@@ -84,10 +90,6 @@ function describeWsUrl(rawUrl: string): string {
   } catch {
     return rawUrl.replace(/token=[^&]+/, "token=[redacted]")
   }
-}
-
-function isTransientMessage(message: Message): boolean {
-  return message.id.startsWith("activity-") || message.id.startsWith("live-") || message.id.startsWith("thinking-")
 }
 
 function formatActivityContent(activity: AgentActivity): string {
@@ -330,14 +332,31 @@ export function useHub(selectedClawId: string | null): HubState {
       setMessages((prev) => {
         const existing = prev[clawId] || []
         // Merge API result with cached state:
-        // 1. Keep non-optimistic existing messages not in API result (preserves cache beyond API limit)
+        // 1. Keep non-optimistic existing durable messages not in API result (cache beyond API limit)
         // 2. Re-append any in-flight opt- messages so send() can still swap them with real UUIDs
+        // 3. Preserve live activity / stream segments so opening a claw mid-turn does not
+        //    wipe the in-progress transcript (stream and refresh stay content-aligned)
         const existingNonOpt = existing.filter((m) => !m.id.startsWith('opt-') && !isTransientMessage(m))
         const apiIds = new Set(msgs.map((m) => m.id))
         const cachedOnly = existingNonOpt.filter((m) => !apiIds.has(m.id))
         const inflight = existing.filter((m) => m.id.startsWith('opt-') &&
           !msgs.some((r) => r.content === m.content && r.role === m.role))
-        const merged = [...msgs, ...cachedOnly, ...inflight]
+        // Keep in-flight tool activity so selecting a claw mid-turn does not blank
+        // the UI. Live text fragments are only valid while a segmented stream is
+        // open (segmentedStreamRef); once the durable final lands the ref is
+        // cleared and fragments must go so we never double-render beside the
+        // timeline reply. Avoid timestamp heuristics — equal ms and nearby
+        // previous-turn replies both mis-classify "is this the current final?".
+        const streamInProgress = Boolean(segmentedStreamRef.current[clawId])
+        const liveTransient = existing.filter((m) => {
+          if (!isTransientMessage(m)) return false
+          if (m.id.startsWith("live-")) return streamInProgress
+          return true
+        })
+        const merged = pruneOldestLiveActivities(
+          [...msgs, ...cachedOnly, ...inflight, ...liveTransient],
+          MAX_LIVE_ACTIVITIES_PER_CLAW
+        )
         merged.sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime())
         const next = { ...prev, [clawId]: merged }
         persistMessages(next)
@@ -459,7 +478,8 @@ export function useHub(selectedClawId: string | null): HubState {
               activity,
               timestamp: createdAt,
             })
-            const next = { ...prev, [clawId]: nextMessages }
+            const pruned = pruneOldestLiveActivities(nextMessages, MAX_LIVE_ACTIVITIES_PER_CLAW)
+            const next = { ...prev, [clawId]: pruned }
             persistMessages(next)
             return next
           })
@@ -473,9 +493,10 @@ export function useHub(selectedClawId: string | null): HubState {
           const msg = mapApiMessage(payload)
           const clawId = payload.claw_id
           if (segmentedStreamRef.current[clawId]) {
-            const tail = clearTypewriter(clawId)
+            // Drop any remaining typewriter tail — the durable final message is
+            // the canonical full reply (same content a refresh would load).
+            clearTypewriter(clawId)
             delete segmentedStreamRef.current[clawId]
-            const tailId = tail.trim() ? nextClientMessageId("live-segment", clawId) : null
             // Called once typewriter is fully drained — safe to add final message
             setClaws((prev) =>
               prev.map((c) =>
@@ -492,19 +513,17 @@ export function useHub(selectedClawId: string | null): HubState {
               )
             )
             setMessages((prev) => {
-              const nextMessages = withoutModelWaitActivities(prev[clawId] || [])
-              const hasLiveSegment = nextMessages.some((m) => m.id.startsWith(`live-segment-${clawId}-`))
-              if (tailId) {
-                nextMessages.push({
-                  id: tailId,
-                  role: "claw",
-                  content: tail,
-                  timestamp: msg.timestamp,
-                })
-              } else if (!hasLiveSegment && msg.content.trim()) {
+              // Replace live text fragments with the durable server message so
+              // end-of-stream matches timeline/refresh. Keep live activity rows
+              // for the current turn (refresh shows activity_summary instead).
+              const nextMessages = withoutModelWaitActivities(prev[clawId] || []).filter(
+                (m) => !m.id.startsWith(`live-segment-${clawId}-`)
+              )
+              if (!nextMessages.some((m) => m.id === msg.id)) {
                 nextMessages.push(msg)
               }
-              const next = { ...prev, [clawId]: nextMessages }
+              const pruned = pruneOldestLiveActivities(nextMessages, MAX_LIVE_ACTIVITIES_PER_CLAW)
+              const next = { ...prev, [clawId]: pruned }
               persistMessages(next)
               return next
             })
