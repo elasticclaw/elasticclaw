@@ -270,6 +270,10 @@ func (s *Server) handleWorkspaceWorkflowDetail(w http.ResponseWriter, r *http.Re
 		s.handleWorkspaceWorkflowPatch(w, r)
 		return
 	}
+	if r.Method == http.MethodDelete {
+		s.handleWorkspaceWorkflowDelete(w, r)
+		return
+	}
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -359,6 +363,29 @@ func (s *Server) handleWorkspaceWorkflowPatch(w http.ResponseWriter, r *http.Req
 		}
 	}
 	jsonOK(w, workflowToView(workspace.Name, workflow))
+}
+
+func (s *Server) handleWorkspaceWorkflowDelete(w http.ResponseWriter, r *http.Request) {
+	workspaceName := strings.TrimSpace(r.PathValue("workspace"))
+	workflowName := strings.TrimSpace(r.PathValue("workflow"))
+	if workspaceName == "" || workflowName == "" {
+		http.Error(w, "workspace and workflow names required", http.StatusBadRequest)
+		return
+	}
+	if err := deleteExternalWorkflow(workspaceName, workflowName); err != nil {
+		if err.Error() == "workflow not found" {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		http.Error(w, "delete workflow: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if s.cronScheduler != nil {
+		if err := s.cronScheduler.reload(); err != nil {
+			log.Printf("[cron] failed to reload workflows after workflow delete for workspace %s workflow %s: %v", workspaceName, workflowName, err)
+		}
+	}
+	jsonOK(w, map[string]string{"deleted": workflowName})
 }
 
 func (s *Server) handleWorkspaceWorkflowTrigger(w http.ResponseWriter, r *http.Request) {

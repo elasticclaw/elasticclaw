@@ -2078,6 +2078,7 @@ func TestConfigMutationRoutesRequireWebAdminForGitHubSessions(t *testing.T) {
 		{name: "workspace delete", method: http.MethodDelete, path: "/api/workspaces?name=demo"},
 		{name: "workflow push", method: http.MethodPost, path: "/api/workspaces/demo/workflows", body: `{"workflows":[]}`},
 		{name: "workflow patch", method: http.MethodPatch, path: "/api/workspaces/demo/workflows/build", body: `{"enabled":true}`},
+		{name: "workflow delete", method: http.MethodDelete, path: "/api/workspaces/demo/workflows/build"},
 		{name: "workspace secret upsert", method: http.MethodPut, path: "/api/workspaces/demo/secrets", body: `{"name":"TOKEN","value":"secret"}`},
 		{name: "workspace secret delete", method: http.MethodDelete, path: "/api/workspaces/demo/secrets?name=TOKEN"},
 		{name: "workspace github app upsert", method: http.MethodPost, path: "/api/workspaces/demo/github-apps", body: `{"name":"app","appId":1}`},

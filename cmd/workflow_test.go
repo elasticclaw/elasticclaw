@@ -279,6 +279,46 @@ func mustJSON(t *testing.T, v interface{}) string {
 	return string(b)
 }
 
+func TestRunWorkflowRmDeletesWorkflow(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if r.URL.Path == "/api/workspaces/default/workflows/bugfix" {
+			_ = json.NewEncoder(w).Encode(map[string]string{"deleted": "bugfix"})
+			return
+		}
+		if r.URL.Path == "/api/workspaces/default/workflows/missing" {
+			http.Error(w, "workflow not found", http.StatusNotFound)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	t.Setenv("ELASTICCLAW_HUB_URL", server.URL)
+	t.Setenv("ELASTICCLAW_CLAW_TOKEN", "test-token")
+
+	out, err := captureStdout(func() error {
+		return runWorkflowRm("default", "bugfix")
+	})
+	if err != nil {
+		t.Fatalf("runWorkflowRm returned error: %v", err)
+	}
+	if !strings.Contains(out, "Removed workflow \"bugfix\" from workspace \"default\"") {
+		t.Fatalf("output missing removal confirmation:\n%s", out)
+	}
+
+	err = runWorkflowRm("default", "missing")
+	if err == nil {
+		t.Fatalf("expected error for missing workflow, got nil")
+	}
+	if !strings.Contains(err.Error(), "not found") {
+		t.Fatalf("expected not found error, got %v", err)
+	}
+}
+
 func TestRunWorkflowRunsListsRunsAndShortAgentID(t *testing.T) {
 	started := time.Date(2026, 7, 24, 9, 0, 0, 0, time.UTC)
 	finished := started.Add(5 * time.Minute)
