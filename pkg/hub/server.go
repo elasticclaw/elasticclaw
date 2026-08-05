@@ -4861,10 +4861,10 @@ func (s *Server) bootstrapExedev(ctx context.Context, clawID, vmName string, p *
 	s.setBootstrapStatus(clawID, "Preparing ElasticClaw connector")
 
 	// Load claw configuration from DB in a single atomic query
-	var clawName, templateName, githubReposJSON, linearWorkspace, templateDefaultModel, llmKeyName, templateFilesJSON string
+	var clawName, templateName, githubReposJSON, linearWorkspace, templateDefaultModel, llmKeyName, templateFilesJSON, tagsJSON string
 	var nixEnabled, dockerEnabled int
-	if err := s.db.QueryRow(`SELECT COALESCE(name,''), COALESCE(template,''), COALESCE(github_repos,'[]'), COALESCE(linear_workspace,''), COALESCE(default_model,''), nix, docker, COALESCE(llm_key,''), COALESCE(template_files,'{}') FROM claws WHERE id=?`, clawID).Scan(
-		&clawName, &templateName, &githubReposJSON, &linearWorkspace, &templateDefaultModel, &nixEnabled, &dockerEnabled, &llmKeyName, &templateFilesJSON,
+	if err := s.db.QueryRow(`SELECT COALESCE(name,''), COALESCE(template,''), COALESCE(github_repos,'[]'), COALESCE(linear_workspace,''), COALESCE(default_model,''), nix, docker, COALESCE(llm_key,''), COALESCE(template_files,'{}'), COALESCE(tags,'[]') FROM claws WHERE id=?`, clawID).Scan(
+		&clawName, &templateName, &githubReposJSON, &linearWorkspace, &templateDefaultModel, &nixEnabled, &dockerEnabled, &llmKeyName, &templateFilesJSON, &tagsJSON,
 	); err != nil {
 		return fmt.Errorf("load claw config: %w", err)
 	}
@@ -4990,11 +4990,22 @@ func (s *Server) bootstrapExedev(ctx context.Context, clawID, vmName string, p *
 	if err := s.restoreCheckpointToExedev(ctx, clawID, vmName, p); err != nil {
 		return fmt.Errorf("restore checkpoint: %w", err)
 	}
-	if credHelper := buildGitHubCredentialHelper(hubCfg, s.clawHubURL(), clawID, githubRepos); credHelper != "# GitHub App not configured — skipping credential helper" {
+	// Same workspace resolution as handleGitHubToken so workspace-scoped apps
+	// are found (template column holds workspace.Name for workflows; tags hold
+	// workspace: for fallback). Hub-only app check previously skipped these.
+	workspaceName := clawWorkspaceName(templateName, tagsJSON)
+	if shouldInstallGitHubCredentialHelper(hubCfg, workspaceName) {
+		s.setBootstrapStatus(clawID, "Preparing repository access")
+		credHelper := buildGitHubCredentialHelper(hubCfg, s.clawHubURL(), clawID, githubRepos)
+		if strings.HasPrefix(credHelper, githubCredentialHelperSkipPrefix) {
+			return fmt.Errorf("configure GitHub credentials: %s", strings.TrimPrefix(credHelper, "# "))
+		}
 		if err := p.SetupScript(ctx, vmName, credHelper); err != nil {
 			return fmt.Errorf("configure GitHub credentials and repo instructions: %w", err)
 		}
-		log.Printf("[exedev] GitHub credential helper and repo instruction discovery completed for claw %.8s", clawID)
+		log.Printf("[exedev] GitHub credential helper and repo instruction discovery completed for claw %.8s workspace=%q repos=%d", clawID, workspaceName, len(githubRepos))
+	} else {
+		log.Printf("[exedev] skipping GitHub credential helper for claw %.8s (no hub or workspace GitHub apps; workspace=%q repos=%d)", clawID, workspaceName, len(githubRepos))
 	}
 	s.markBootstrapReady(clawID)
 
@@ -6312,7 +6323,16 @@ Tokens are short-lived and refreshed automatically on each git/gh operation.
 
 	// Run GitHub credential helper setup (needs bridge connected for hub proxy,
 	// but the hub token URL is publicly accessible so it works directly).
-	if credHelper := buildGitHubCredentialHelper(hubCfg, s.clawHubURL(), clawID, githubRepos); credHelper != "# GitHub App not configured — skipping credential helper" {
+	// Match Daytona/exedev: install when hub or workspace-scoped GitHub apps exist.
+	var tagsJSON string
+	_ = s.db.QueryRow(`SELECT COALESCE(tags,'[]') FROM claws WHERE id=?`, clawID).Scan(&tagsJSON)
+	workspaceName := clawWorkspaceName(templateName, tagsJSON)
+	if shouldInstallGitHubCredentialHelper(hubCfg, workspaceName) {
+		credHelper := buildGitHubCredentialHelper(hubCfg, s.clawHubURL(), clawID, githubRepos)
+		if strings.HasPrefix(credHelper, githubCredentialHelperSkipPrefix) {
+			s.stopAgentWithReason(clawID, fmt.Sprintf("Bootstrap failed: could not configure GitHub credentials: %s", strings.TrimPrefix(credHelper, "# ")), false)
+			return
+		}
 		if err := retryReplicatedBootstrapStep(s, clawID, replicatedBootstrapRetryOptions{
 			Label:      "Configuring GitHub credentials",
 			RetryLabel: "Retrying GitHub credential setup",
@@ -6325,7 +6345,7 @@ Tokens are short-lived and refreshed automatically on each git/gh operation.
 			s.stopAgentWithReason(clawID, fmt.Sprintf("Bootstrap failed: could not configure GitHub credentials: %s", err), false)
 			return
 		}
-		log.Printf("[bootstrap] GitHub credential helper installed for claw %s", clawName)
+		log.Printf("[bootstrap] GitHub credential helper installed for claw %s workspace=%q", clawName, workspaceName)
 	}
 	s.markBootstrapReady(clawID)
 
@@ -6572,8 +6592,9 @@ func buildGitHubTokenProfileScript() string {
 	return `# ElasticClaw GitHub App token refresh for gh.
 # This intentionally resolves through the credential helper instead of storing
 # the short-lived installation token generated during bootstrap.
+# Feed the git credential protocol so the helper always mints a token.
 if [ -x /usr/local/bin/elasticclaw-git-credentials ]; then
-  token="$(/usr/local/bin/elasticclaw-git-credentials 2>/dev/null | sed -n 's/^password=//p' | head -n1)"
+  token="$(printf 'protocol=https\nhost=github.com\n\n' | /usr/local/bin/elasticclaw-git-credentials get 2>/dev/null | sed -n 's/^password=//p' | head -n1)"
   if [ -n "$token" ]; then
     export GH_TOKEN="$token"
   else
@@ -6612,7 +6633,7 @@ func buildGitHubCLIWrapperInstallScript() string {
 set +x
 REAL_GH="__ELASTICCLAW_REAL_GH__"
 if [ -x /usr/local/bin/elasticclaw-git-credentials ]; then
-  token="$(/usr/local/bin/elasticclaw-git-credentials 2>/dev/null | sed -n 's/^password=//p' | head -n1)"
+  token="$(printf 'protocol=https\nhost=github.com\n\n' | /usr/local/bin/elasticclaw-git-credentials get 2>/dev/null | sed -n 's/^password=//p' | head -n1)"
   if [ -n "$token" ]; then
     export GH_TOKEN="$token"
   fi
@@ -6824,11 +6845,41 @@ func buildBestEffortRepoInstructionDiscoveryScript(workspaceDir string, repos []
 `, discoveryScript)
 }
 
-// buildGitHubCredentialHelper returns shell script lines that install a git
-// credential helper on the VM if GitHub App is configured on the hub.
+// githubCredentialHelperSkipPrefix marks scripts that intentionally do not
+// install the helper. Callers must not treat this as a successful install.
+const githubCredentialHelperSkipPrefix = "# GitHub credential helper skipped"
+
+// shouldInstallGitHubCredentialHelper reports whether a claw sandbox can mint
+// GitHub App installation tokens (so the credential helper is useful).
+//
+// Install when hub-level apps exist OR the claw's resolved workspace has
+// workspace-scoped apps. Do not install for github_repos alone — the token
+// endpoint cannot mint without an app, and a mandatory smoke would fail bootstrap.
+//
+// workspaceName must be the ElasticClaw workspace directory name (same as
+// handleGitHubToken: clawWorkspaceName(template, tags)), not the claw display
+// name or factory template alias when those differ.
+func shouldInstallGitHubCredentialHelper(cfg *types.HubConfig, workspaceName string) bool {
+	if cfg != nil && len(cfg.GitHubApps) > 0 {
+		return true
+	}
+	ws := strings.TrimSpace(workspaceName)
+	if ws == "" {
+		return false
+	}
+	apps, err := loadWorkspaceGitHubAppConfigs(ws)
+	return err == nil && len(apps) > 0
+}
+
+// buildGitHubCredentialHelper returns a shell script that installs the git
+// credential helper, forces HTTPS remotes for github.com, configures gh to
+// refresh tokens via the helper, and clones configured repos.
+//
+// Call only when shouldInstallGitHubCredentialHelper is true. Returns a
+// skip-marker comment when hub URL / claw credentials are incomplete.
 func buildGitHubCredentialHelper(cfg *types.HubConfig, hubURL, clawID string, repos []types.GitHubRepoAccess) string {
-	if len(cfg.GitHubApps) == 0 {
-		return "# GitHub App not configured — skipping credential helper"
+	if cfg == nil || strings.TrimSpace(cfg.ClawToken) == "" || strings.TrimSpace(hubURL) == "" || strings.TrimSpace(clawID) == "" {
+		return githubCredentialHelperSkipPrefix + " — missing hub URL, claw ID, or claw token"
 	}
 	clawToken := cfg.ClawToken
 	tokenURL := fmt.Sprintf("%s/api/github/token/%s?claw_token=%s", hubURL, clawID, clawToken)
@@ -6870,7 +6921,7 @@ while IFS= read -r line; do
   esac
 done
 base_url=%q
-response=$(curl -sf "${base_url}${repo_query}")
+response=$(curl -sf --max-time 35 "${base_url}${repo_query}")
 if [ $? -ne 0 ] || [ -z "$response" ]; then
   exit 1
 fi
@@ -6881,6 +6932,7 @@ echo "username=x-access-token"
 echo "password=$token"
 CREDEOF
 sudo chmod +x /usr/local/bin/elasticclaw-git-credentials
+test -x /usr/local/bin/elasticclaw-git-credentials
 
 # Install git + gh CLI
 if ! command -v git &>/dev/null; then
@@ -6893,6 +6945,13 @@ fi
 git config --global credential.helper /usr/local/bin/elasticclaw-git-credentials
 git config --global --get-all credential.helper | grep -Fx /usr/local/bin/elasticclaw-git-credentials >/dev/null
 git config --show-origin --global --get-all credential.helper
+
+# Force HTTPS for github.com so agents cannot fall back to SSH (no deploy keys).
+# git@github.com: and ssh://git@github.com/ never invoke credential.helper.
+git config --global --unset-all url.https://github.com/.insteadof 2>/dev/null || true
+git config --global --add url.https://github.com/.insteadOf 'git@github.com:'
+git config --global --add url.https://github.com/.insteadOf 'ssh://git@github.com/'
+git config --global --get-regexp 'url\.https://github\.com/\.insteadof' >/dev/null
 
 # Install gh CLI if possible. gh is useful, but git credential registration above is mandatory.
 if ! command -v gh &>/dev/null; then
@@ -6916,6 +6975,23 @@ if command -v gh &>/dev/null; then
 %s
   ) || echo "GitHub gh token refresh setup failed, continuing"
 fi
+
+# Smoke: helper binary + git registration must be in place. Token mint is
+# retried — the hub endpoint may lag briefly after the claw row is created.
+smoke_ok=0
+for i in $(seq 1 10); do
+  if printf 'protocol=https\nhost=github.com\n\n' | /usr/local/bin/elasticclaw-git-credentials get 2>/dev/null \
+    | grep -E '^password=.' >/dev/null; then
+    smoke_ok=1
+    break
+  fi
+  sleep 2
+done
+if [ "$smoke_ok" != "1" ]; then
+  echo "ERROR: credential helper installed but did not return a GitHub token after retries" >&2
+  exit 1
+fi
+
 echo "GitHub credential helper installed"
 
 # Clone repos — non-fatal: token may not be available until bridge connects
@@ -6927,6 +7003,19 @@ FAILED=0
 %s
 exit $FAILED
 ) || echo "Warning: repo clone failed — agent can retry after bridge connects"
+# Ensure any github.com remotes under the workspace use HTTPS (agent-proof).
+if command -v git &>/dev/null && [ -d "$HOME/.openclaw/workspace" ]; then
+  find "$HOME/.openclaw/workspace" -name .git -type d 2>/dev/null | while read -r gitdir; do
+    repo="$(dirname "$gitdir")"
+    url="$(git -C "$repo" remote get-url origin 2>/dev/null || true)"
+    case "$url" in
+      git@github.com:*|ssh://git@github.com/*)
+        https_url="$(printf '%%s' "$url" | sed -e 's|^git@github.com:|https://github.com/|' -e 's|^ssh://git@github.com/|https://github.com/|')"
+        git -C "$repo" remote set-url origin "$https_url" && echo "rewrote origin to HTTPS for $repo"
+        ;;
+    esac
+  done
+fi
 %s`, tokenURL, buildGitHubTokenProfileInstallScript(), buildGitHubCLIWrapperInstallScript(), buildGitHubCloneScript(repos), buildBestEffortRepoInstructionDiscoveryScript("$HOME/.openclaw/workspace", repos))
 }
 

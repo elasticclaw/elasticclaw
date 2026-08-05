@@ -17,6 +17,8 @@ func TestGitHubTokenProfileScriptUsesCredentialHelperWithoutStaticToken(t *testi
 	script := buildGitHubTokenProfileScript()
 
 	assertContains(t, script, "/usr/local/bin/elasticclaw-git-credentials", "profile fetches token from credential helper")
+	assertContains(t, script, "elasticclaw-git-credentials get", "profile feeds git credential get protocol")
+	assertContains(t, script, "protocol=https", "profile uses https credential protocol")
 	assertContains(t, script, "sed -n 's/^password=//p'", "profile extracts only password field")
 	assertContains(t, script, "export GH_TOKEN", "profile exports GH_TOKEN for gh")
 	assertNotContains(t, script, "export GH_TOKEN=%s", "profile must not format in a static token")
@@ -29,6 +31,7 @@ func TestGitHubCLIWrapperRefreshesTokenForEachInvocation(t *testing.T) {
 
 	assertContains(t, script, "sudo tee /usr/local/bin/gh", "wrapper shadows gh on PATH")
 	assertContains(t, script, "/usr/local/bin/elasticclaw-git-credentials", "wrapper fetches token from credential helper")
+	assertContains(t, script, "elasticclaw-git-credentials get", "wrapper feeds git credential get protocol")
 	assertContains(t, script, "export GH_TOKEN=\"$token\"", "wrapper exports fresh token")
 	assertContains(t, script, "exec \"$REAL_GH\" \"$@\"", "wrapper delegates to real gh")
 	assertNotContains(t, script, "gh auth login", "wrapper must not persist a short-lived token in hosts.yml")
