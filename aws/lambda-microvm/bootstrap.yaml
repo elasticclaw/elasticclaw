@@ -1,0 +1,124 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Shared AWS infrastructure for the ElasticClaw Lambda MicroVM provider
+
+Parameters:
+  ArtifactBucketName:
+    Type: String
+    Description: Globally unique S3 bucket used for versioned MicroVM image artifacts
+  ImageName:
+    Type: String
+    Default: elasticclaw-agent
+    AllowedPattern: "^[a-zA-Z0-9-_]+$"
+    MaxLength: 64
+
+Resources:
+  ArtifactBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Ref ArtifactBucketName
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+      Tags:
+        - Key: elasticclaw
+          Value: lambda-microvms
+
+  ArtifactBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref ArtifactBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: "*"
+            Action: s3:*
+            Resource:
+              - !GetAtt ArtifactBucket.Arn
+              - !Sub "${ArtifactBucket.Arn}/*"
+            Condition:
+              Bool:
+                aws:SecureTransport: false
+
+  MicroVMBuildRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Description: Lambda-assumed role for building ElasticClaw MicroVM images
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+              - sts:TagSession
+      Policies:
+        - PolicyName: MicroVMImageBuild
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: ReadArtifact
+                Effect: Allow
+                Action: s3:GetObject
+                Resource: !Sub "${ArtifactBucket.Arn}/artifacts/*"
+              - Sid: WriteBuildLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:*"
+      Tags:
+        - Key: elasticclaw
+          Value: lambda-microvms
+
+  HubRuntimePolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      Description: Least-privilege runtime access for an ElasticClaw Hub using one MicroVM image
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: OperateElasticClawMicroVMs
+            Effect: Allow
+            Action:
+              - lambda:RunMicrovm
+              - lambda:GetMicrovm
+              - lambda:SuspendMicrovm
+              - lambda:ResumeMicrovm
+              - lambda:TerminateMicrovm
+              - lambda:CreateMicrovmAuthToken
+              - lambda:GetMicrovmImage
+            Resource: !Sub "arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:microvm-image:${ImageName}"
+          - Sid: ListMicroVMResources
+            Effect: Allow
+            Action:
+              - lambda:ListMicrovms
+              - lambda:ListMicrovmImages
+            Resource: "*"
+          - Sid: UseAWSManagedNetworkConnectors
+            Effect: Allow
+            Action: lambda:PassNetworkConnector
+            Resource: "*"
+
+Outputs:
+  ArtifactBucketName:
+    Value: !Ref ArtifactBucket
+  BuildRoleArn:
+    Value: !GetAtt MicroVMBuildRole.Arn
+  HubRuntimePolicyArn:
+    Value: !Ref HubRuntimePolicy
+  ImageArn:
+    Value: !Sub "arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:microvm-image:${ImageName}"

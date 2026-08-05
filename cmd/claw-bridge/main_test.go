@@ -503,6 +503,11 @@ func TestSyncStagedWorkspaceToOpenClawWorkspace(t *testing.T) {
 	write(filepath.Join(stagedDir, ".elasticclaw-workspace-ready"), "ready\n")
 	write(filepath.Join(activeDir, "BOOTSTRAP.md"), "Who am I? Who are you?\n")
 	write(filepath.Join(activeDir, "MEMORY.md"), "blank slate\n")
+	attestationPath := filepath.Join(home, ".openclaw", "workspace-attestations", "workspace.attested")
+	if err := os.MkdirAll(filepath.Dir(attestationPath), 0700); err != nil {
+		t.Fatalf("mkdir attestations: %v", err)
+	}
+	write(attestationPath, "stale\n")
 	if err := os.Symlink("/etc/passwd", filepath.Join(stagedDir, "passwd-link")); err != nil {
 		t.Fatalf("create symlink: %v", err)
 	}
@@ -537,6 +542,9 @@ func TestSyncStagedWorkspaceToOpenClawWorkspace(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(activeDir, "passwd-link")); !os.IsNotExist(err) {
 		t.Fatalf("symlink should not be copied, got err=%v", err)
+	}
+	if _, err := os.Stat(attestationPath); !os.IsNotExist(err) {
+		t.Fatalf("stale workspace attestation should be removed, got err=%v", err)
 	}
 }
 

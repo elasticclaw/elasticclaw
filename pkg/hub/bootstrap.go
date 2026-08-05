@@ -383,11 +383,10 @@ process.stdin.on("end", () => {
 '`
 }
 
-// buildOpenClawCodexOAuthAuthSyncShell verifies that OpenClaw discovers the
-// restored Codex CLI credential as its canonical OpenAI auth profile. The
-// current OpenClaw runtime reads openai:default from ~/.codex/auth.json, so this
-// deliberately uses the supported CLI path instead of writing the SQLite store
-// directly.
+// buildOpenClawCodexOAuthAuthSyncShell imports the restored Codex CLI credential
+// through OpenClaw's Codex migration provider. OpenClaw assigns an
+// account-scoped profile ID during this import, so callers must not assume the
+// legacy openai:default profile name.
 func buildOpenClawCodexOAuthAuthSyncShell() string {
 	return `set -euo pipefail
 node <<'NODE'
@@ -402,6 +401,13 @@ if (!tokens || typeof tokens.access_token !== 'string' || !tokens.access_token |
   throw new Error('restored Codex OAuth credential is missing access or refresh token');
 }
 NODE
+openclaw migrate apply codex \
+  --from "$HOME/.codex" \
+  --include-secrets \
+  --yes \
+  --no-backup \
+  --force \
+  --json >/dev/null
 openclaw models auth list --provider openai --json | node -e '
 let input = "";
 process.stdin.setEncoding("utf8");
@@ -409,13 +415,13 @@ process.stdin.on("data", (chunk) => { input += chunk; });
 process.stdin.on("end", () => {
   const result = JSON.parse(input);
   if (!Array.isArray(result.profiles) || !result.profiles.some((profile) =>
-    profile.id === "openai:default" && profile.type === "oauth"
+    typeof profile.id === "string" && profile.id.startsWith("openai:") &&
+    profile.type === "oauth" && (!profile.provider || profile.provider === "openai")
   )) {
-    throw new Error("OpenClaw did not discover the restored Codex OAuth profile");
+    throw new Error("OpenClaw did not import the restored Codex OAuth profile");
   }
 });
-'
-openclaw config set 'auth.profiles["openai:default"]' '{"provider":"openai","mode":"oauth"}' --strict-json >/dev/null`
+'`
 }
 
 // GenerateReplicatedBootstrapScript returns a minimal bash script that downloads

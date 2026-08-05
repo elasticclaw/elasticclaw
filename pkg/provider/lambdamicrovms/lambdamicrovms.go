@@ -85,11 +85,25 @@ func New(cfg Config) (*Provider, error) {
 	if cfg.BridgePort == 0 {
 		cfg.BridgePort = DefaultBridgePort
 	}
+	if cfg.BridgePort < 1 || cfg.BridgePort > 65535 {
+		return nil, fmt.Errorf("lambda microvms bridge_port must be between 1 and 65535")
+	}
 	if cfg.TokenExpirationMinutes == 0 {
 		cfg.TokenExpirationMinutes = DefaultTokenExpirationMinutes
 	}
+	if cfg.TokenExpirationMinutes < 1 || cfg.TokenExpirationMinutes > 60 {
+		return nil, fmt.Errorf("lambda microvms auth_token_expiration_minutes must be between 1 and 60")
+	}
 	if cfg.MaximumDurationSeconds == 0 {
 		cfg.MaximumDurationSeconds = DefaultMaximumDurationSeconds
+	}
+	if cfg.MaximumDurationSeconds < 1 || cfg.MaximumDurationSeconds > DefaultMaximumDurationSeconds {
+		return nil, fmt.Errorf("lambda microvms maximum_duration_seconds must be between 1 and %d", DefaultMaximumDurationSeconds)
+	}
+	if cfg.IdleMaxDurationSeconds > 0 || cfg.SuspendedDurationSeconds > 0 || cfg.AutoResume != nil {
+		if cfg.IdleMaxDurationSeconds < 60 || cfg.AutoResume == nil {
+			return nil, fmt.Errorf("lambda microvms idle policy requires idle_max_duration_seconds >= 60 and auto_resume")
+		}
 	}
 	return &Provider{cfg: cfg, http: &http.Client{Timeout: 60 * time.Second}}, nil
 }
@@ -103,11 +117,15 @@ func (p *Provider) Info() types.ProviderInfo {
 }
 
 func (p *Provider) Create(ctx context.Context, req types.CreateRequest) (*types.Instance, error) {
-	payload, err := buildRunHookPayload(req)
+	initializationPayload, err := buildInitializationPayload(req)
 	if err != nil {
 		return nil, err
 	}
-	payloadArg, cleanup, err := writeRunHookPayloadFile(payload)
+	runPayload, err := json.Marshal(runHookPayload{Version: 1, Name: req.Name})
+	if err != nil {
+		return nil, fmt.Errorf("marshal run hook payload: %w", err)
+	}
+	payloadArg, cleanup, err := writeRunHookPayloadFile(string(runPayload))
 	if err != nil {
 		return nil, err
 	}
@@ -126,6 +144,10 @@ func (p *Provider) Create(ctx context.Context, req types.CreateRequest) (*types.
 	}
 	if resp.MicroVMID == "" {
 		return nil, fmt.Errorf("run microvm response missing microvmId")
+	}
+	if err := p.initialize(ctx, resp.MicroVMID, resp.Endpoint, initializationPayload); err != nil {
+		_, _ = p.aws(context.Background(), "lambda-microvms", "terminate-microvm", "--microvm-identifier", resp.MicroVMID)
+		return nil, fmt.Errorf("initialize microvm: %w", err)
 	}
 	return &types.Instance{
 		Name:      req.Name,
@@ -169,10 +191,15 @@ func (p *Provider) Connect(ctx context.Context, instanceID string) (*types.Conne
 		return nil, err
 	}
 	return &types.ConnectInfo{
-		Web: "https://" + vm.Endpoint,
+		Web: endpointURL(vm.Endpoint, "/"),
 		Shell: &types.ShellConnect{
 			Command: "aws",
-			Args:    append(p.awsBaseArgs(), "lambda-microvms", "create-microvm-auth-token", "--microvm-identifier", instanceID),
+			Args: append(p.awsBaseArgs(),
+				"lambda-microvms", "create-microvm-auth-token",
+				"--microvm-identifier", instanceID,
+				"--expiration-in-minutes", strconv.Itoa(p.cfg.TokenExpirationMinutes),
+				"--allowed-ports", fmt.Sprintf(`[{"port":%d}]`, p.cfg.BridgePort),
+			),
 		},
 	}, nil
 }
@@ -200,14 +227,18 @@ func (p *Provider) List(ctx context.Context) ([]*types.Instance, error) {
 	if err != nil {
 		return nil, err
 	}
+	return parseListMicroVMs(out)
+}
+
+func parseListMicroVMs(data []byte) ([]*types.Instance, error) {
 	var resp struct {
-		MicroVMs []getMicroVMResponse `json:"microvms"`
+		Items []getMicroVMResponse `json:"items"`
 	}
-	if err := json.Unmarshal(out, &resp); err != nil {
+	if err := json.Unmarshal(data, &resp); err != nil {
 		return nil, fmt.Errorf("parse list microvms response: %w", err)
 	}
-	instances := make([]*types.Instance, 0, len(resp.MicroVMs))
-	for _, vm := range resp.MicroVMs {
+	instances := make([]*types.Instance, 0, len(resp.Items))
+	for _, vm := range resp.Items {
 		instances = append(instances, &types.Instance{
 			ID:       vm.MicroVMID,
 			Name:     vm.MicroVMID,
@@ -221,7 +252,7 @@ func (p *Provider) List(ctx context.Context) ([]*types.Instance, error) {
 	return instances, nil
 }
 
-func buildRunHookPayload(req types.CreateRequest) (string, error) {
+func buildInitializationPayload(req types.CreateRequest) (string, error) {
 	files := make(map[string]string, len(req.TemplateFiles))
 	for path, content := range req.TemplateFiles {
 		files[path] = base64.StdEncoding.EncodeToString(content)
@@ -237,8 +268,8 @@ func buildRunHookPayload(req types.CreateRequest) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if len(data) > 16*1024 {
-		return "", fmt.Errorf("lambda microvms run hook payload exceeds 16KiB")
+	if len(data) > 16*1024*1024 {
+		return "", fmt.Errorf("lambda microvms initialization payload exceeds 16MiB")
 	}
 	return string(data), nil
 }
@@ -287,15 +318,10 @@ func (p *Provider) runMicroVMArgs(runHookPayloadArg string) ([]string, error) {
 		args = append(args, p.cfg.EgressNetworkConnectors...)
 	}
 	if p.cfg.IdleMaxDurationSeconds > 0 || p.cfg.SuspendedDurationSeconds > 0 || p.cfg.AutoResume != nil {
-		idle := map[string]interface{}{}
-		if p.cfg.IdleMaxDurationSeconds > 0 {
-			idle["maxIdleDurationSeconds"] = p.cfg.IdleMaxDurationSeconds
-		}
-		if p.cfg.SuspendedDurationSeconds > 0 {
-			idle["suspendedDurationSeconds"] = p.cfg.SuspendedDurationSeconds
-		}
-		if p.cfg.AutoResume != nil {
-			idle["autoResumeEnabled"] = *p.cfg.AutoResume
+		idle := map[string]interface{}{
+			"maxIdleDurationSeconds":   p.cfg.IdleMaxDurationSeconds,
+			"suspendedDurationSeconds": p.cfg.SuspendedDurationSeconds,
+			"autoResumeEnabled":        *p.cfg.AutoResume,
 		}
 		data, err := json.Marshal(idle)
 		if err != nil {
@@ -352,6 +378,37 @@ func (p *Provider) bridgeJSON(ctx context.Context, instanceID, method, path stri
 	if err != nil {
 		return err
 	}
+	return p.bridgeJSONAtEndpoint(ctx, instanceID, vm.Endpoint, method, path, body, out)
+}
+
+func (p *Provider) initialize(ctx context.Context, instanceID, endpoint, payload string) error {
+	initCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+	var lastErr error
+	for {
+		if strings.TrimSpace(endpoint) == "" {
+			vm, getErr := p.get(initCtx, instanceID)
+			if getErr != nil {
+				lastErr = getErr
+			} else {
+				endpoint = vm.Endpoint
+			}
+		}
+		if strings.TrimSpace(endpoint) != "" {
+			lastErr = p.bridgeJSONAtEndpoint(initCtx, instanceID, endpoint, http.MethodPost, "/elasticclaw/v1/init", json.RawMessage(payload), nil)
+			if lastErr == nil {
+				return nil
+			}
+		}
+		select {
+		case <-initCtx.Done():
+			return fmt.Errorf("bridge did not become ready: %w", lastErr)
+		case <-time.After(2 * time.Second):
+		}
+	}
+}
+
+func (p *Provider) bridgeJSONAtEndpoint(ctx context.Context, instanceID, endpoint, method, path string, body interface{}, out interface{}) error {
 	token, err := p.authToken(ctx, instanceID)
 	if err != nil {
 		return err
@@ -362,7 +419,7 @@ func (p *Provider) bridgeJSON(ctx context.Context, instanceID, method, path stri
 			return err
 		}
 	}
-	req, err := http.NewRequestWithContext(ctx, method, "https://"+vm.Endpoint+path, &buf)
+	req, err := http.NewRequestWithContext(ctx, method, endpointURL(endpoint, path), &buf)
 	if err != nil {
 		return err
 	}
@@ -390,6 +447,14 @@ func (p *Provider) bridgeJSON(ctx context.Context, instanceID, method, path stri
 		}
 	}
 	return nil
+}
+
+func endpointURL(endpoint, requestPath string) string {
+	base := strings.TrimRight(strings.TrimSpace(endpoint), "/")
+	if !strings.HasPrefix(base, "https://") && !strings.HasPrefix(base, "http://") {
+		base = "https://" + base
+	}
+	return base + "/" + strings.TrimLeft(requestPath, "/")
 }
 
 func (p *Provider) aws(ctx context.Context, args ...string) ([]byte, error) {
