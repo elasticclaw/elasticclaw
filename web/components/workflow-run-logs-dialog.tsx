@@ -4,6 +4,7 @@ import { useMemo, useState } from "react"
 import { FileTerminal } from "lucide-react"
 import { ClawActivityLog } from "@/components/claw-activity-log"
 import { fetchActivityMessages, fetchV2WorkflowAttemptLogs } from "@/lib/api"
+import { WorkflowName } from "@/components/workflow-name"
 import { Button } from "@/components/ui/button"
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
@@ -55,7 +56,7 @@ export function WorkflowRunLogsDialog({ target }: { target: WorkflowRunLogTarget
           <DialogHeader className="shrink-0 border-b px-6 py-5 pr-12">
             <DialogTitle>Agent logs</DialogTitle>
             <DialogDescription>
-              Agent activity for run {shortId(runId)} of {workflowName} in {workspaceName}.
+              Agent activity for run {shortId(runId)} of <WorkflowName name={workflowName} /> in {workspaceName}.
             </DialogDescription>
           </DialogHeader>
           <div className="min-h-0 flex-1 px-6 pb-6">
