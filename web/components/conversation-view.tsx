@@ -37,7 +37,7 @@ import dynamic from "next/dynamic"
 import { useBranding } from "@/hooks/use-branding"
 import { BootstrapProgress } from "@/components/bootstrap-progress"
 import { ClawTitle } from "@/components/claw-title"
-import { isTerminalAssistantMessage } from "@/lib/messages"
+import { isTerminalAssistantMessage, windowMessagesByDurableCount } from "@/lib/messages"
 import { DependencyDowntimeBanner } from "@/components/dependency-downtime-banner"
 import type { TypewriterState } from "@/hooks/use-typewriter"
 
@@ -65,7 +65,8 @@ interface ConversationViewProps {
 }
 
 const FOLLOW_LATEST_THRESHOLD_PX = 24
-const BOARD_CARD_MESSAGE_WINDOW = 50
+/** Last N durable conversation turns on board cards (activities do not count). */
+const BOARD_CARD_DURABLE_MESSAGE_WINDOW = 50
 const EMPTY_MESSAGES: Message[] = []
 const noopClawAction = (_clawId: string) => {}
 const noopClawMessageAction = (_clawId: string, _content: string) => {}
@@ -449,7 +450,12 @@ const ClawBoardCard = memo(function ClawBoardCard({
   const cardFollowingLatest = useRef(true)
   const [isCardFollowingLatest, setIsCardFollowingLatest] = useState(true)
   const [expandedActivityGroups, setExpandedActivityGroups] = useState<Record<string, boolean>>({})
-  const visibleMessages = useMemo(() => messages.slice(-BOARD_CARD_MESSAGE_WINDOW), [messages])
+  // Window by durable turns only — a tool-activity flood must not age out
+  // earlier user/claw messages from the card (refresh would still show them).
+  const visibleMessages = useMemo(
+    () => windowMessagesByDurableCount(messages, BOARD_CARD_DURABLE_MESSAGE_WINDOW),
+    [messages]
+  )
   const conversationItems = useMemo(() => compactActivityRuns(visibleMessages), [visibleMessages])
   const latestActivity = useMemo(() => latestActivityMessage(visibleMessages), [visibleMessages])
   const activityNow = useActivityNow(Boolean(latestActivity))
