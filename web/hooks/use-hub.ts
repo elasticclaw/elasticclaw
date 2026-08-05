@@ -341,29 +341,16 @@ export function useHub(selectedClawId: string | null): HubState {
         const cachedOnly = existingNonOpt.filter((m) => !apiIds.has(m.id))
         const inflight = existing.filter((m) => m.id.startsWith('opt-') &&
           !msgs.some((r) => r.content === m.content && r.role === m.role))
-        // Keep in-flight tool activity + stream fragments so selecting a claw
-        // mid-turn does not blank the UI. Drop live text fragments only when the
-        // timeline already has a durable assistant/hub reply strictly newer than
-        // the latest fragment (the completed final). A nearby *previous* turn's
-        // message must not count — that used to drop in-flight text incorrectly.
-        let latestLiveTextAt = 0
-        for (const m of existing) {
-          if (!m.id.startsWith("live-segment-") && !m.id.startsWith("live-")) continue
-          const t = m.timestamp.getTime()
-          if (t > latestLiveTextAt) latestLiveTextAt = t
-        }
-        const durableFinalAfterLiveText =
-          latestLiveTextAt > 0 &&
-          msgs.some(
-            (api) =>
-              (api.role === "claw" || api.role === "hub") &&
-              api.timestamp.getTime() > latestLiveTextAt
-          )
+        // Keep in-flight tool activity so selecting a claw mid-turn does not blank
+        // the UI. Live text fragments are only valid while a segmented stream is
+        // open (segmentedStreamRef); once the durable final lands the ref is
+        // cleared and fragments must go so we never double-render beside the
+        // timeline reply. Avoid timestamp heuristics — equal ms and nearby
+        // previous-turn replies both mis-classify "is this the current final?".
+        const streamInProgress = Boolean(segmentedStreamRef.current[clawId])
         const liveTransient = existing.filter((m) => {
           if (!isTransientMessage(m)) return false
-          if (m.id.startsWith("live-segment-") || m.id.startsWith("live-")) {
-            return !durableFinalAfterLiveText
-          }
+          if (m.id.startsWith("live-")) return streamInProgress
           return true
         })
         const merged = pruneOldestLiveActivities(
