@@ -15,6 +15,7 @@ import (
 
 	"github.com/elasticclaw/elasticclaw/pkg/cliversion"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
+	"github.com/google/uuid"
 	"nhooyr.io/websocket"
 	"nhooyr.io/websocket/wsjson"
 )
@@ -2260,7 +2261,8 @@ func TestDeliveredPromptReservesTurnBeforeFirstActivity(t *testing.T) {
 
 func TestSendNextQueuedMessageDeliversImmediatelyAfterTurnEnd(t *testing.T) {
 	s, db := NewTestServerWithConfig(t, &types.HubConfig{ClawToken: "claw-token"}, "", "", "")
-	const clawID = "claw-inter-turn-no-cooldown"
+	// Unique ID avoids any residual async cleanup noise from other tests in the package.
+	clawID := "claw-inter-turn-" + uuid.NewString()[:8]
 	insertPendingMessage(t, db, clawID, "first", now().Add(-time.Second))
 	insertPendingMessage(t, db, clawID, "second", now())
 
@@ -2271,12 +2273,22 @@ func TestSendNextQueuedMessageDeliversImmediatelyAfterTurnEnd(t *testing.T) {
 	if got := readTestHubMessage(t, clawWS).Content; got != "first" {
 		t.Fatalf("first delivered content = %q, want first", got)
 	}
+	// Ensure the first delivery's delivered_at mark landed before we finish the
+	// turn and admit the next pending row (otherwise sendNext can re-pick first).
+	waitForMessagesDelivered(t, db, clawID, 1)
 
 	s.mu.RLock()
 	cc := s.claws[clawID]
 	s.mu.RUnlock()
+	if cc == nil {
+		t.Fatal("claw not registered after connect")
+	}
 	cc.mu.Lock()
 	cc.finishTurnLocked()
+	if cc.isBusyLocked() {
+		cc.mu.Unlock()
+		t.Fatal("claw still busy after finishTurnLocked")
+	}
 	cc.mu.Unlock()
 
 	// The hub no longer pauses between turns: lock-conflict recovery lives in
@@ -2286,6 +2298,7 @@ func TestSendNextQueuedMessageDeliversImmediatelyAfterTurnEnd(t *testing.T) {
 	s.sendNextQueuedMessage(cc)
 	elapsed := time.Since(start)
 
+	waitForMessagesDelivered(t, db, clawID, 2)
 	if got := readTestHubMessage(t, clawWS).Content; got != "second" {
 		t.Fatalf("second delivered content = %q, want second", got)
 	}
