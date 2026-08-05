@@ -14,6 +14,7 @@ import Link from "next/link"
 import { VALID_SECTIONS, type Section } from "./sections"
 import { fetchWorkspaces, updateWorkflowControls, type RepositoryAccess, type Workspace, type Workflow } from "@/lib/api"
 import { useBranding } from "@/hooks/use-branding"
+import { WorkflowName } from "@/components/workflow-name"
 import { WorkflowRunsDialog } from "@/components/workflow-runs-dialog"
 
 function isValidSection(s: string): s is Section {
@@ -3163,15 +3164,17 @@ function WorkflowSummaryRow({
   return (
     <div className="px-4 py-3">
       <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
-        <div className="min-w-0">
-          <p className="text-sm font-medium truncate">{workflow.name}</p>
+        <div className="min-w-0 md:min-w-[35ch]">
+          <p className="text-sm font-medium">
+            <WorkflowName name={workflow.name} />
+          </p>
           <p className="text-xs text-muted-foreground truncate">
             {workflow.workspaceName} · {workflow.integration || "manual"}
             {workflow.triggerStatus ? ` · ${workflow.triggerStatus}` : ""}
             {workflow.projects?.length ? ` · projects: ${workflow.projects.join(", ")}` : ""}
           </p>
         </div>
-        <div className="flex flex-wrap items-center gap-x-4 gap-y-2 shrink-0">
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
           <label className="flex items-center gap-2 text-xs text-muted-foreground">
             <Switch
               checked={workflow.enabled}
