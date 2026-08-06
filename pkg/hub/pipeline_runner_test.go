@@ -12,6 +12,7 @@ import (
 
 	"github.com/elasticclaw/elasticclaw/pkg/hub/pipeline"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
+	"gopkg.in/yaml.v3"
 )
 
 func TestTransitionPipelineStageSkipsDuplicateCurrentStage(t *testing.T) {
@@ -345,15 +346,76 @@ func TestPipelineEntryInjectIncludesInitialPlanInstruction(t *testing.T) {
 		t.Fatalf("stage transition returned false")
 	}
 
-	var content string
-	if err := db.QueryRow(`SELECT content FROM messages WHERE claw_id=? AND role='hub'`, clawID).Scan(&content); err != nil {
-		t.Fatalf("select injected message: %v", err)
+	rows, err := db.Query(`SELECT content FROM messages WHERE claw_id=? AND role='hub' ORDER BY created_at`, clawID)
+	if err != nil {
+		t.Fatalf("select hub messages: %v", err)
 	}
-	if !strings.Contains(content, initialPlanWakeContent) || !strings.Contains(content, "Task context:\nRead the GitHub issue and start work.") {
-		t.Fatalf("pipeline inject did not include initial plan and task context:\n%s", content)
+	defer rows.Close()
+	var all []string
+	foundPlan := false
+	foundStageBanner := false
+	for rows.Next() {
+		var content string
+		if err := rows.Scan(&content); err != nil {
+			t.Fatal(err)
+		}
+		all = append(all, content)
+		if strings.Contains(content, initialPlanWakeContent) && strings.Contains(content, "Task context:\nRead the GitHub issue and start work.") {
+			foundPlan = true
+		}
+		if strings.Contains(content, "[hub] ▶ Stage:") {
+			foundStageBanner = true
+		}
+	}
+	if !foundPlan {
+		t.Fatalf("pipeline inject did not include initial plan and task context:\n%s", strings.Join(all, "\n---\n"))
+	}
+	if !foundStageBanner {
+		t.Fatalf("expected stage progress banner in transcript:\n%s", strings.Join(all, "\n---\n"))
 	}
 	if !s.hasSystemMarker(clawID, initialPlanRequiredMarker) {
 		t.Fatalf("initial plan required marker was not inserted")
+	}
+}
+
+func TestNormalizedWorkflowPlanGateSkipsFreeformPlan(t *testing.T) {
+	// Regression: WorkflowStage used to drop plan_gate when re-marshaling into
+	// PipelineYAML, so HasPlanGate was false and freeform plan still fired.
+	raw := []byte(`
+schema_version: v1
+name: amazecrm-linear
+stages:
+  - id: plan
+    entry: true
+    on_enter:
+      inject: write plan
+  - id: plan_validate
+    plan_gate: true
+    triggers:
+      - message_contains: "[PLAN_READY]"
+    on_enter:
+      run:
+        command: echo ok
+        output: plan
+    gate:
+      output: plan
+      pass:
+        path: status
+        values: [ok]
+`)
+	var workflow types.WorkflowConfig
+	if err := yaml.Unmarshal(raw, &workflow); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if err := types.NormalizeWorkflowConfig(&workflow); err != nil {
+		t.Fatalf("normalize: %v", err)
+	}
+	pl, err := pipeline.Parse([]byte(workflow.PipelineYAML))
+	if err != nil {
+		t.Fatalf("parse pipeline: %v", err)
+	}
+	if !pl.HasPlanGate() {
+		t.Fatalf("expected HasPlanGate after normalize; pipeline yaml:\n%s", workflow.PipelineYAML)
 	}
 }
 
