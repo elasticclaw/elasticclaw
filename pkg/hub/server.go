@@ -1862,31 +1862,39 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 
 	var rows *sql.Rows
 	var err error
+	hideSQL := hiddenSystemMessagesSQL()
+	hideArgs := hiddenSystemMessagesArgs()
 	if before != "" {
 		// Fetch older messages — return in ASC order after fetching DESC
+		args := append([]interface{}{clawID, tenantID, before}, hideArgs...)
+		args = append(args, limit)
 		rows, err = s.db.Query(
 			`SELECT id, claw_id, tenant_id, role, content, COALESCE(format,''), created_at FROM messages
 			 WHERE claw_id = ? AND tenant_id = ? AND created_at < ?
-			 AND NOT (role = 'system' AND content IN (?, ?, ?, ?, ?, ?))
+			 `+hideSQL+`
 			 ORDER BY created_at DESC LIMIT ?`,
-			clawID, tenantID, before, wakeMessageMarker, defaultWakeContent, initialPlanWakeContent, initialPlanRequiredMarker, initialPlanAcceptedMarker, initialPlanCorrectionSentMarker, limit,
+			args...,
 		)
 	} else if after != "" {
+		args := append([]interface{}{clawID, tenantID, after}, hideArgs...)
+		args = append(args, limit)
 		rows, err = s.db.Query(
 			`SELECT id, claw_id, tenant_id, role, content, COALESCE(format,''), created_at FROM messages
 			 WHERE claw_id = ? AND tenant_id = ? AND created_at > ?
-			 AND NOT (role = 'system' AND content IN (?, ?, ?, ?, ?, ?))
+			 `+hideSQL+`
 			 ORDER BY created_at ASC LIMIT ?`,
-			clawID, tenantID, after, wakeMessageMarker, defaultWakeContent, initialPlanWakeContent, initialPlanRequiredMarker, initialPlanAcceptedMarker, initialPlanCorrectionSentMarker, limit,
+			args...,
 		)
 	} else {
 		// Default: last N messages
+		args := append([]interface{}{clawID, tenantID}, hideArgs...)
+		args = append(args, limit)
 		rows, err = s.db.Query(
 			`SELECT id, claw_id, tenant_id, role, content, COALESCE(format,''), created_at FROM messages
 			 WHERE claw_id = ? AND tenant_id = ?
-			 AND NOT (role = 'system' AND content IN (?, ?, ?, ?, ?, ?))
+			 `+hideSQL+`
 			 ORDER BY created_at DESC LIMIT ?`,
-			clawID, tenantID, wakeMessageMarker, defaultWakeContent, initialPlanWakeContent, initialPlanRequiredMarker, initialPlanAcceptedMarker, initialPlanCorrectionSentMarker, limit,
+			args...,
 		)
 	}
 	if err != nil {
@@ -1928,11 +1936,17 @@ func hiddenSystemMessagesArgs() []interface{} {
 		initialPlanRequiredMarker,
 		initialPlanAcceptedMarker,
 		initialPlanCorrectionSentMarker,
+		// planGateAcceptedMarker is per-stage: __PLAN_GATE_ACCEPTED__:<stageID>
+		planGateAcceptedMarkerPrefix + "%",
 	}
 }
 
 func hiddenSystemMessagesSQL() string {
-	return `AND NOT (role = 'system' AND content IN (?, ?, ?, ?, ?, ?))`
+	// Exact markers (wake / freeform plan) plus per-stage plan_gate accepted markers.
+	return `AND NOT (role = 'system' AND (
+		content IN (?, ?, ?, ?, ?, ?)
+		OR content LIKE ?
+	))`
 }
 
 func (s *Server) handleMessageTimeline(w http.ResponseWriter, r *http.Request, tenantID, clawID string) {
@@ -5984,7 +5998,10 @@ const (
 	initialPlanRequiredMarker       = "__INITIAL_PLAN_REQUIRED__"
 	initialPlanAcceptedMarker       = "__INITIAL_PLAN_ACCEPTED__"
 	initialPlanCorrectionSentMarker = "__INITIAL_PLAN_CORRECTION_SENT__"
-	defaultWakeContent              = "Introduce yourself briefly and let the user know you're ready to help."
+	// planGateAcceptedMarkerPrefix is the shared prefix for per-stage markers
+	// written on plan_gate pass. Hidden from chat/timeline/transcript APIs.
+	planGateAcceptedMarkerPrefix = "__PLAN_GATE_ACCEPTED__:"
+	defaultWakeContent           = "Introduce yourself briefly and let the user know you're ready to help."
 	initialPlanWakeContent          = `Initial plan required before implementation.
 
 Before editing files, running builds, or doing broad tool exploration, send one visible assistant message that contains:
@@ -6105,7 +6122,7 @@ func formatPlanGateSummary(output map[string]interface{}) string {
 // planGateAcceptedMarker is per-stage so a second plan_gate later in the
 // workflow still evaluates its own output instead of inheriting a global pass.
 func planGateAcceptedMarker(stageID string) string {
-	return "__PLAN_GATE_ACCEPTED__:" + stageID
+	return planGateAcceptedMarkerPrefix + stageID
 }
 
 // sendWakeMessage sends a silent system message to wake the agent.

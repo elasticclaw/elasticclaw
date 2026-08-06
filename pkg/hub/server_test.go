@@ -954,6 +954,8 @@ func TestHandleMessagesFiltersWakeMarkers(t *testing.T) {
 		{ID: "plan-required-1", ClawID: "claw-1", TenantID: "test-tenant-id", Role: "system", Content: initialPlanRequiredMarker, CreatedAt: now()},
 		{ID: "plan-accepted-1", ClawID: "claw-1", TenantID: "test-tenant-id", Role: "system", Content: initialPlanAcceptedMarker, CreatedAt: now()},
 		{ID: "plan-correction-1", ClawID: "claw-1", TenantID: "test-tenant-id", Role: "system", Content: initialPlanCorrectionSentMarker, CreatedAt: now()},
+		// Per-stage plan_gate marker must not leak into the chat UI/transcript.
+		{ID: "plan-gate-1", ClawID: "claw-1", TenantID: "test-tenant-id", Role: "system", Content: planGateAcceptedMarker("plan_validate"), CreatedAt: now()},
 		{ID: "user-1", ClawID: "claw-1", TenantID: "test-tenant-id", Role: "user", Content: "hello", CreatedAt: now()},
 	} {
 		_, err := db.Exec(

@@ -107,7 +107,10 @@ stages:
           verdict: pass
     on_enter:
       inject: |
-        Plan accepted (status {{ .Outputs.plan.status }}).
+        ## Starting implementation for {{.Issue.Identifier}}
+
+        Plan accepted (status {{ .Outputs.plan.status }}) — coding begins now.
+        Do not wait for another proceed message. Do not emit [PLAN_READY] again.
         Implement the issue. Narrate progress. When the PR is ready, say [DONE] with the PR URL.
 
   - id: fix_plan
