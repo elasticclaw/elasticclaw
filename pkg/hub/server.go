@@ -5951,6 +5951,8 @@ When the PR is ready, say [DONE] with the PR URL(s).`
 
 // formatPlanGateSummary builds a human-readable plan dump from gate output JSON
 // so the transcript shows the plan even when the agent only said [PLAN_READY].
+// Multiline values are indented so continuation lines stay under their field
+// and are not mistaken for new bullets or fields.
 func formatPlanGateSummary(output map[string]interface{}) string {
 	if output == nil {
 		return ""
@@ -5958,6 +5960,29 @@ func formatPlanGateSummary(output map[string]interface{}) string {
 	var b strings.Builder
 	b.WriteString("[hub] Approved plan summary:\n")
 	wrote := false
+	writeLabeled := func(label, value string) {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return
+		}
+		lines := strings.Split(value, "\n")
+		b.WriteString("- ")
+		b.WriteString(label)
+		b.WriteString(": ")
+		if len(lines) == 1 {
+			b.WriteString(lines[0])
+			b.WriteByte('\n')
+		} else {
+			// First line after the label; further lines indented under the field.
+			b.WriteByte('\n')
+			for _, line := range lines {
+				b.WriteString("    ")
+				b.WriteString(strings.TrimRight(line, "\r"))
+				b.WriteByte('\n')
+			}
+		}
+		wrote = true
+	}
 	writeField := func(label, key string) {
 		v, ok := output[key]
 		if !ok || v == nil {
@@ -5965,15 +5990,7 @@ func formatPlanGateSummary(output map[string]interface{}) string {
 		}
 		switch t := v.(type) {
 		case string:
-			if strings.TrimSpace(t) == "" {
-				return
-			}
-			b.WriteString("- ")
-			b.WriteString(label)
-			b.WriteString(": ")
-			b.WriteString(strings.TrimSpace(t))
-			b.WriteByte('\n')
-			wrote = true
+			writeLabeled(label, t)
 		case []interface{}:
 			if len(t) == 0 {
 				return
@@ -5982,9 +5999,19 @@ func formatPlanGateSummary(output map[string]interface{}) string {
 			b.WriteString(label)
 			b.WriteString(":\n")
 			for _, item := range t {
+				itemLines := strings.Split(strings.TrimSpace(fmt.Sprint(item)), "\n")
 				b.WriteString("  • ")
-				b.WriteString(strings.TrimSpace(fmt.Sprint(item)))
+				if len(itemLines) == 0 {
+					b.WriteByte('\n')
+					continue
+				}
+				b.WriteString(itemLines[0])
 				b.WriteByte('\n')
+				for _, cont := range itemLines[1:] {
+					b.WriteString("    ")
+					b.WriteString(strings.TrimRight(cont, "\r"))
+					b.WriteByte('\n')
+				}
 			}
 			wrote = true
 		default:
@@ -5992,12 +6019,7 @@ func formatPlanGateSummary(output map[string]interface{}) string {
 			if s == "" || s == "[]" || s == "map[]" {
 				return
 			}
-			b.WriteString("- ")
-			b.WriteString(label)
-			b.WriteString(": ")
-			b.WriteString(s)
-			b.WriteByte('\n')
-			wrote = true
+			writeLabeled(label, s)
 		}
 	}
 	writeField("understanding", "understanding")

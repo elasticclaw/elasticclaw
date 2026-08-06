@@ -598,6 +598,18 @@ func TestFormatPlanGateSummary(t *testing.T) {
 	if formatPlanGateSummary(map[string]interface{}{"status": "ok"}) != "" {
 		t.Fatal("expected empty summary when no plan fields")
 	}
+
+	// Multiline field values must stay indented under their label.
+	multi := formatPlanGateSummary(map[string]interface{}{
+		"understanding": "Line one\nLine two\n- not a field",
+		"steps":         []interface{}{"step A\ncontinued A", "step B"},
+	})
+	if !strings.Contains(multi, "- understanding: \n    Line one\n    Line two\n    - not a field") {
+		t.Fatalf("multiline understanding not indented:\n%s", multi)
+	}
+	if !strings.Contains(multi, "  • step A\n    continued A\n  • step B") {
+		t.Fatalf("multiline step item not indented:\n%s", multi)
+	}
 }
 
 func TestPlanGatePassWithRouteDoesNotInjectProceedTurn(t *testing.T) {

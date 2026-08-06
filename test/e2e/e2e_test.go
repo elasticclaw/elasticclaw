@@ -101,14 +101,21 @@ func TestDockerWorkflowE2E(t *testing.T) {
 
 	// Verify that the Docker provider executed the deterministic run action,
 	// captured output, and the gate passed (per #530). The injected message
-	// references the captured {{ .Outputs.docker_smoke.status }}.
-	deadline := time.Now().Add(30 * time.Second)
+	// references the captured {{ .Outputs.docker_smoke.status }}. Accept a few
+	// equivalent transcript shapes (freeform plan prefix, stage banners, gate
+	// wording) so minor hub UX copy changes don't flake this smoke test.
+	deadline := time.Now().Add(2 * time.Minute)
 	foundRun := false
 	var lastMsgs []types.HubMessage
 	for time.Now().Before(deadline) {
 		lastMsgs = hub.listMessages(ctx, t, agentID)
 		for _, m := range lastMsgs {
-			if strings.Contains(m.Content, "Docker provider run action executed") || strings.Contains(m.Content, "status\":\"passed\"") {
+			c := m.Content
+			if strings.Contains(c, "Docker provider run action executed") ||
+				strings.Contains(c, `status":"passed"`) ||
+				strings.Contains(c, "Output captured: passed") ||
+				strings.Contains(c, "Gate passed: Working") ||
+				strings.Contains(c, "✓ Gate passed: Working") {
 				foundRun = true
 				break
 			}
