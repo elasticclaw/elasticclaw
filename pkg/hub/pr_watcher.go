@@ -72,11 +72,12 @@ func extractPRs(content string) []struct {
 
 // storePRMention persists a detected PR reference for a claw (idempotent by URL).
 // Also tracks analytics for the first detection of a PR open.
-func (s *Server) storePRMention(clawID, repo string, prNumber int, prURL string) error {
+// inserted is true only when this call created the claw_prs row.
+func (s *Server) storePRMention(clawID, repo string, prNumber int, prURL string) (inserted bool, err error) {
 	var existing string
 	_ = s.db.QueryRow(`SELECT id FROM claw_prs WHERE claw_id=? AND pr_url=?`, clawID, prURL).Scan(&existing)
 	if existing != "" {
-		return nil
+		return false, nil
 	}
 
 	// Track analytics: PR was opened (detected for the first time)
@@ -140,10 +141,10 @@ func (s *Server) storePRMention(clawID, repo string, prNumber int, prURL string)
 	)
 	if err != nil {
 		log.Printf("[pr-watcher] failed to persist PR %s#%d for claw %s: %v", repo, prNumber, clawID[:8], err)
-		return err
+		return false, err
 	}
 	if affected, err := res.RowsAffected(); err == nil && affected == 0 {
-		return nil // concurrent writer already registered this PR
+		return false, nil // concurrent writer already registered this PR
 	}
 	if _, runID, _, ok, err := s.taskRunContextForClaw(clawID); err != nil {
 		log.Printf("[task-run-analytics] failed to resolve task run for PR mention claw %s: %v", clawID, err)
@@ -164,13 +165,13 @@ func (s *Server) storePRMention(clawID, repo string, prNumber int, prURL string)
 		}
 	}
 	log.Printf("[pr-watcher] detected PR %s#%d for claw %s", repo, prNumber, clawID[:8])
-	return nil
+	return true, nil
 }
 
 // scanMessageForPRs extracts and stores any PR URLs found in a message.
 func (s *Server) scanMessageForPRs(clawID, content string) {
 	for _, pr := range extractPRs(content) {
-		if err := s.storePRMention(clawID, pr.repo, pr.number, pr.url); err != nil {
+		if _, err := s.storePRMention(clawID, pr.repo, pr.number, pr.url); err != nil {
 			log.Printf("[pr-watcher] failed to store PR mention: %v", err)
 		}
 	}

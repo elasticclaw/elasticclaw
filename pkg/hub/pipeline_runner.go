@@ -917,6 +917,11 @@ func (e *routedRequiredGateError) Error() string {
 // MoveIssue.IssueID (including template references like {{.Inputs.xxx}}).
 func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, ctx pipelineContext) (injectDelivered bool, err error) {
 	issueID := ctx.IssueID
+	// Captured for PR registration after any required gate has been evaluated.
+	// Scanning immediately after the run would arm claw_prs before a failing
+	// required gate could block the stage (and leave the watcher able to kill
+	// the claw on merge/close while the workflow is still blocked).
+	var runStdoutForPRScan string
 	if strings.TrimSpace(stage.OnEnter.Run.Command) != "" {
 		log.Printf("[pipeline] running workflow command for claw %s stage %q: %s", clawID[:8], stage.ID, stage.OnEnter.Run.Command)
 		result, err := s.executePipelineRunAction(clawID, stage.OnEnter.Run)
@@ -924,11 +929,8 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, ctx pipelineCon
 		if stage.OnEnter.Run.Output != "" && result != nil {
 			s.persistPipelineOutput(clawID, stage.ID, stage.OnEnter.Run.Output, result)
 		}
-		// Scripts like verify-github-pr-links emit PR URLs in JSON. Register them
-		// so the PR watcher can monitor merge/close even when the agent never
-		// pasted bare github.com/…/pull/N links into chat.
-		if result != nil && strings.TrimSpace(result.Stdout) != "" {
-			s.scanMessageForPRs(clawID, result.Stdout)
+		if result != nil {
+			runStdoutForPRScan = result.Stdout
 		}
 		if err != nil || (result != nil && result.ExitCode != 0) {
 			msg := formatPipelineRunFailure(stage.OnEnter.Run, result, err)
@@ -1109,6 +1111,13 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, ctx pipelineCon
 			}
 			return false, fmt.Errorf("required gate %q %s", stage.ID, gateResult.Verdict)
 		}
+	}
+
+	// Scripts like verify-github-pr-links emit PR URLs in JSON. Register them
+	// only after a required gate (if any) has allowed the stage to continue, so
+	// a failed gate cannot leave the PR watcher armed on a blocked claw.
+	if strings.TrimSpace(runStdoutForPRScan) != "" {
+		s.scanMessageForPRs(clawID, runStdoutForPRScan)
 	}
 
 	if stage.OnEnter.Inject != "" {

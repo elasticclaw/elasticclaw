@@ -1567,18 +1567,15 @@ func (s *Server) completeIssueLessDoneClaw(clawID, tenantID string, prURLs []str
 		s.injectUserMessage(clawID, "[factory] `[DONE]` blocked: a required tool gate has failed. Please fix the issues and retry.")
 		return
 	}
-	for _, pr := range extractPRs(strings.Join(prURLs, " ")) {
-		if err := s.storePRMention(clawID, pr.repo, pr.number, pr.url); err != nil {
-			// A failed INSERT leaves the PR untracked, so the watcher would never
-			// detect its merge/close and the claw would stall in 'idle' forever.
-			// Nudge the claw to resend [DONE] instead of idling it.
-			log.Printf("[factory] failed to register PR %s: %v", pr.url, err)
-			// Resend with ALL original URLs: earlier PRs in the list are already
-			// stored (idempotent), and the retried [DONE] must carry the full set
-			// so pipeline transitions and analytics see the complete PR list.
-			s.injectUserMessage(clawID, fmt.Sprintf("[factory] Failed to register PR %s: internal error. Please resend: [DONE] %s", pr.url, strings.Join(prURLs, " ")))
-			return
-		}
+	if errURL := s.registerDonePRURLs(clawID, prURLs); errURL != "" {
+		// A failed INSERT leaves the PR untracked (and any partial inserts
+		// from this call are rolled back), so the watcher would never
+		// detect its merge/close and the claw would stall in 'idle' forever.
+		// Nudge the claw to resend [DONE] instead of idling it.
+		// Resend with ALL original URLs so the retried [DONE] carries the
+		// full set for pipeline transitions and analytics.
+		s.injectUserMessage(clawID, fmt.Sprintf("[factory] Failed to register PR %s: internal error. Please resend: [DONE] %s", errURL, strings.Join(prURLs, " ")))
+		return
 	}
 	if len(prURLs) == 0 {
 		s.completeNoPRDoneClaw(clawID, tenantID, "")
@@ -1787,14 +1784,33 @@ func extractDonePRURLs(message string) []string {
 
 // registerDonePRURLs persists every PR URL into claw_prs (idempotent).
 // Returns the first URL that failed to store, or "" on full success.
+//
+// Registration is all-or-nothing for URLs newly introduced by this call: if a
+// later store fails, rows inserted earlier in the same call are rolled back so
+// the PR watcher is not left partially armed while the stage transition aborts.
 func (s *Server) registerDonePRURLs(clawID string, prURLs []string) string {
 	if len(prURLs) == 0 {
 		return ""
 	}
-	for _, pr := range extractPRs(strings.Join(prURLs, " ")) {
-		if err := s.storePRMention(clawID, pr.repo, pr.number, pr.url); err != nil {
+	prs := extractPRs(strings.Join(prURLs, " "))
+	if len(prs) == 0 {
+		return ""
+	}
+
+	var newlyInserted []string
+	for _, pr := range prs {
+		inserted, err := s.storePRMention(clawID, pr.repo, pr.number, pr.url)
+		if err != nil {
 			log.Printf("[factory] failed to register PR %s for claw %s: %v", pr.url, shortID(clawID), err)
+			for _, url := range newlyInserted {
+				if _, delErr := s.db.Exec(`DELETE FROM claw_prs WHERE claw_id=? AND pr_url=?`, clawID, url); delErr != nil {
+					log.Printf("[factory] failed to roll back PR %s for claw %s after partial register: %v", url, shortID(clawID), delErr)
+				}
+			}
 			return pr.url
+		}
+		if inserted {
+			newlyInserted = append(newlyInserted, pr.url)
 		}
 	}
 	return ""
