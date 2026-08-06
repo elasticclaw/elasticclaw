@@ -151,6 +151,9 @@ func TestInstallationTokenOmitsNameListAboveGitHubCap(t *testing.T) {
 	if !strings.Contains(sawBody, `"contents":"write"`) {
 		t.Fatalf("expected write permissions, body=%s", sawBody)
 	}
+	if !strings.Contains(sawBody, `"workflows":"write"`) {
+		t.Fatalf("expected workflows write permission for write-scoped tokens, body=%s", sawBody)
+	}
 }
 
 func TestInstallationTokenScopesRepositoryAllowlist(t *testing.T) {
@@ -188,6 +191,9 @@ func TestInstallationTokenScopesRepositoryAllowlist(t *testing.T) {
 	}
 	if !strings.Contains(sawBody, `"contents":"write"`) {
 		t.Fatalf("expected write permissions, body=%s", sawBody)
+	}
+	if !strings.Contains(sawBody, `"workflows":"write"`) {
+		t.Fatalf("expected workflows write permission for write-scoped tokens, body=%s", sawBody)
 	}
 }
 

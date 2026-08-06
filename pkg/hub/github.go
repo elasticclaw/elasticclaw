@@ -259,7 +259,9 @@ func (p *GitHubTokenProvider) InstallationToken(ctx context.Context, installatio
 	}
 
 	// Build request body with correct permissions.
-	// GitHub token permissions: contents=read means read-only, contents=write means read+write.
+	// Installation tokens only receive the permissions listed here (capped by the
+	// App's granted permissions). contents=write alone is not enough to create or
+	// update files under .github/workflows/ — GitHub requires the workflows scope.
 	var bodyStr string
 	if len(repos) > 0 {
 		needsWrite := false
@@ -273,14 +275,20 @@ func (p *GitHubTokenProvider) InstallationToken(ctx context.Context, installatio
 		if needsWrite {
 			contentsPermission = "write"
 		}
+		perms := map[string]string{
+			"contents":      contentsPermission,
+			"pull_requests": contentsPermission,
+			"metadata":      "read",
+			"checks":        "read", // needed for gh pr checks / CI status
+			"statuses":      "read", // needed for commit status checks
+		}
+		// Match contents: agents that can push code must also be able to open PRs
+		// that touch workflow files when the App has workflows permission.
+		if needsWrite {
+			perms["workflows"] = "write"
+		}
 		body := map[string]interface{}{
-			"permissions": map[string]string{
-				"contents":      contentsPermission,
-				"pull_requests": contentsPermission,
-				"metadata":      "read",
-				"checks":        "read", // needed for gh pr checks / CI status
-				"statuses":      "read", // needed for commit status checks
-			},
+			"permissions": perms,
 		}
 		if len(repos) <= maxScopedInstallationRepos {
 			repoNames := make([]string, 0, len(repos))
