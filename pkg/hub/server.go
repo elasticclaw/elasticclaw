@@ -235,6 +235,7 @@ type clawConn struct {
 	lastUserMessageAt     time.Time       // when the user last sent a message (for idle detection)
 	lastStatusBroadcastAt time.Time       // when we last broadcast status to user
 	unresponsiveWarnedAt  time.Time       // when the silent-death warning was first broadcast
+	lastProgressProbeAt   time.Time       // when we last sent a silent mid-turn progress probe
 }
 
 const (
@@ -246,6 +247,14 @@ const (
 const (
 	streamingTimeoutNudge  = "[hub] Your current response has been running for over 12 minutes. Please wrap up and send your response."
 	contextNearlyFullNudge = "[hub] Context window is nearly full. Summarize your progress briefly and send [DONE] with any PR URL, or ask the user what to do next."
+	// progressProbeContent is injected mid-turn over the status channel only
+	// (never persisted to chat). It asks the agent to post a visible update
+	// so tool-only runs still feel proactive to humans watching the UI.
+	progressProbeContent = "Humans are watching this chat. Before more tool work, post a short plain assistant message (1–3 sentences) covering what you just did and what you will do next. Tool activity alone is not enough."
+	// progressProbeInterval is the minimum gap between silent progress probes.
+	progressProbeInterval = time.Minute
+	// progressProbeMinTurnAge waits for the turn to get going before the first probe.
+	progressProbeMinTurnAge = 45 * time.Second
 	// autoResumeRecentTurnWindow includes races between a crash and turn completion.
 	autoResumeRecentTurnWindow = 5 * time.Minute
 )
@@ -296,6 +305,7 @@ func (cc *clawConn) resetTurnStateLocked() {
 	cc.streamingStartedAt = time.Time{}
 	cc.streamingTimeoutSent = false
 	cc.contextWarningSent = false
+	cc.lastProgressProbeAt = time.Time{}
 }
 
 func (s *Server) flushStreamingSegment(clawID, tenantID string, cc *clawConn) error {
@@ -395,6 +405,7 @@ func NewServer(addr, dbPath, identityDir string, hubCfg *types.HubConfig) (*Serv
 	go srv.keepAliveDaytonaSandboxes()
 	go srv.pruneAnalytics()
 	go srv.statusWatchdog()
+	go srv.progressProbeWatchdog()
 	go srv.checkpointScheduler()
 	if srv.livenessEnabled() {
 		go srv.runReaper()
@@ -5611,6 +5622,63 @@ func (s *Server) statusWatchdog() {
 	}
 }
 
+// progressProbeWatchdog periodically asks busy agents (over the status channel
+// only) to post a visible chat update. Probes never appear in the transcript.
+func (s *Server) progressProbeWatchdog() {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+	for range ticker.C {
+		s.probeBusyClawsForProgress()
+	}
+}
+
+// probeBusyClawsForProgress sends silent mid-turn status-channel nudges so
+// tool-heavy agents still produce human-readable chat updates.
+func (s *Server) probeBusyClawsForProgress() {
+	now := time.Now()
+	s.mu.RLock()
+	ids := make([]string, 0, len(s.claws))
+	for id := range s.claws {
+		ids = append(ids, id)
+	}
+	s.mu.RUnlock()
+	for _, id := range ids {
+		s.mu.RLock()
+		cc, ok := s.claws[id]
+		s.mu.RUnlock()
+		if !ok || cc == nil {
+			continue
+		}
+		s.maybeSendProgressProbe(cc, now)
+	}
+}
+
+// maybeSendProgressProbe rate-limits and dispatches one silent progress probe
+// for a claw that has been mid-turn long enough.
+func (s *Server) maybeSendProgressProbe(cc *clawConn, now time.Time) {
+	cc.mu.Lock()
+	if !cc.isBusyLocked() || cc.statusConn == nil {
+		cc.mu.Unlock()
+		return
+	}
+	turnStart := cc.streamingStartedAt
+	if turnStart.IsZero() {
+		// Prompt delivered but first chunk not yet seen — still a live turn.
+		turnStart = cc.lastUserMessageAt
+	}
+	if turnStart.IsZero() || now.Sub(turnStart) < progressProbeMinTurnAge {
+		cc.mu.Unlock()
+		return
+	}
+	if !cc.lastProgressProbeAt.IsZero() && now.Sub(cc.lastProgressProbeAt) < progressProbeInterval {
+		cc.mu.Unlock()
+		return
+	}
+	cc.lastProgressProbeAt = now
+	cc.mu.Unlock()
+	s.sendSilentStatusNudge(cc, progressProbeContent)
+}
+
 // checkClawStatus queries active claws, sends status requests via the status channel,
 // and detects claws that have gone silent (no status response, no user message recently).
 func (s *Server) checkClawStatus() {
@@ -5952,10 +6020,11 @@ When the PR is ready, say [DONE] with the PR URL(s).`
 // formatPlanGateSummary builds a human-readable plan dump from gate output JSON
 // so the transcript shows the plan even when the agent only said [PLAN_READY].
 // Multiline values are indented so continuation lines stay under their field
-// and are not mistaken for new bullets or fields.
+// and are not mistaken for new bullets or fields. When the validator only
+// returned status (legacy), still emit a short approved notice so chat is not silent.
 func formatPlanGateSummary(output map[string]interface{}) string {
 	if output == nil {
-		return ""
+		return "[hub] Plan approved (schema gate)."
 	}
 	var b strings.Builder
 	b.WriteString("[hub] Approved plan summary:\n")
@@ -6027,7 +6096,8 @@ func formatPlanGateSummary(output map[string]interface{}) string {
 	writeField("steps", "steps")
 	writeField("verification", "verification")
 	if !wrote {
-		return ""
+		// Validator only returned status (or empty fields). Still surface a notice.
+		return "[hub] Plan approved (schema gate)."
 	}
 	return strings.TrimRight(b.String(), "\n")
 }
@@ -8137,6 +8207,35 @@ func (s *Server) sendStreamingNudge(cc *clawConn, text string) {
 	msg := types.HubMessage{ID: uuid.New().String(), ClawID: clawID, TenantID: tenantID, Role: "hub", Content: text, Format: "pre", CreatedAt: now()}
 	_, _ = s.db.Exec(`INSERT INTO messages(id,claw_id,tenant_id,role,content,format,created_at,delivered_at) VALUES(?,?,?,?,?,?,?,?)`, msg.ID, msg.ClawID, msg.TenantID, msg.Role, msg.Content, msg.Format, msg.CreatedAt, msg.CreatedAt)
 	s.broadcastToUsers(tenantID, types.WSMessage{Type: "message", Payload: msg})
+}
+
+// sendSilentStatusNudge injects text into the in-flight agent turn over the
+// status channel only. Unlike sendStreamingNudge it never persists or
+// broadcasts a chat row — probes stay invisible in the transcript.
+// It never falls back to the main message queue (that would surface the probe).
+func (s *Server) sendSilentStatusNudge(cc *clawConn, text string) {
+	if cc == nil || strings.TrimSpace(text) == "" {
+		return
+	}
+	cc.mu.RLock()
+	sc, clawID := cc.statusConn, cc.id
+	turnOpen := cc.isBusyLocked()
+	cc.mu.RUnlock()
+	if !turnOpen {
+		log.Printf("[progress-probe] drop for %s: turn already ended", shortID(clawID))
+		return
+	}
+	if sc == nil {
+		log.Printf("[progress-probe] drop for %s: no status channel", shortID(clawID))
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := wsjson.Write(ctx, sc, types.WSMessage{Type: "nudge", Payload: mustJSONRaw(map[string]string{"claw_id": clawID, "content": text})}); err != nil {
+		log.Printf("[progress-probe] status send failed for %s: %v", shortID(clawID), err)
+		return
+	}
+	log.Printf("[progress-probe] silent nudge sent to %s", shortID(clawID))
 }
 
 // sendNextQueuedMessage delivers the oldest pending message if the claw is idle.

@@ -595,10 +595,11 @@ func TestFormatPlanGateSummary(t *testing.T) {
 			t.Fatalf("summary missing %q:\n%s", want, got)
 		}
 	}
-	if formatPlanGateSummary(map[string]interface{}{"status": "ok"}) != "" {
-		t.Fatal("expected empty summary when no plan fields")
+	// Status-only validator output still produces a short approved notice.
+	statusOnly := formatPlanGateSummary(map[string]interface{}{"status": "ok"})
+	if !strings.Contains(statusOnly, "Plan approved") {
+		t.Fatalf("status-only output should still notice approval, got %q", statusOnly)
 	}
-
 	// Multiline field values must stay indented under their label.
 	multi := formatPlanGateSummary(map[string]interface{}{
 		"understanding": "Line one\nLine two\n- not a field",
