@@ -1677,6 +1677,28 @@ func TestIsValidInitialPlanRequiresUnderstandingPlanAreaAndVerification(t *testi
 	if isValidInitialPlan(invalid) {
 		t.Fatalf("invalid initial plan was accepted")
 	}
+	// Real agent plan from AMA-109: no "issue"/"task"/"understand" keywords, but
+	// clearly a complete plan — must not be rejected (that freezes the claw).
+	ticketStyle := `AMA-109 will add pull-request CI for linting and TypeScript type-checking in the amazecrm/amazecrm repository. I'll confirm the full requirements from Linear before changing anything.
+
+Likely code areas:
+.github/workflows/ for the new GitHub Actions workflow
+package.json only if a dedicated type-check script is required and missing
+Existing pnpm/Node configuration to ensure CI matches the project
+Rough implementation plan:
+Read AMA-109 and repository instructions.
+Inspect existing workflows and package scripts.
+Create a focused feature branch.
+Add minimal PR-triggered lint and type-check jobs with pnpm caching and frozen-lockfile installation.
+Run the equivalent checks locally.
+Review, commit, push, open a PR, and inspect its checks.
+Verification will cover workflow syntax and triggers, dependency caching/setup, pnpm lint, standalone TypeScript checking, and the opened PR's CI result. I'll wait for the hub's proceed message before using tools or editing files.`
+	if !isValidInitialPlan(ticketStyle) {
+		t.Fatalf("ticket-style initial plan was rejected")
+	}
+	if !isSubstantialInitialPlan(ticketStyle) {
+		t.Fatalf("ticket-style plan should pass soft substantial gate")
+	}
 }
 
 func TestHandleInitialPlanResponseMarksAcceptedOrCorrection(t *testing.T) {
@@ -1712,6 +1734,38 @@ func TestHandleInitialPlanResponseMarksAcceptedOrCorrection(t *testing.T) {
 	}
 	if s.hasSystemMarker("claw-valid-plan", initialPlanCorrectionSentMarker) {
 		t.Fatalf("valid initial plan marked correction sent")
+	}
+}
+
+func TestHandleInitialPlanResponseSoftAcceptsAfterCorrection(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, nil, "", "", "")
+	_, err := db.Exec(
+		`INSERT INTO claws(id, tenant_id, name, tags, created_at) VALUES(?,?,?,?,datetime('now'))`,
+		"claw-soft-plan", "test-tenant-id", "claw soft plan", `[]`,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.insertSystemMarker("claw-soft-plan", "test-tenant-id", initialPlanRequiredMarker)
+	s.insertSystemMarker("claw-soft-plan", "test-tenant-id", initialPlanCorrectionSentMarker)
+
+	// Substantial plan with plan+verification but intentionally avoids some
+	// strict understanding keywords; after a correction this must proceed.
+	soft := strings.Repeat("Rough plan: add the lint workflow, wire pnpm cache, and run typecheck. ", 8) +
+		"Verification: run lint and typecheck in CI and confirm the PR checks go green."
+	s.handleInitialPlanResponse("claw-soft-plan", "test-tenant-id", soft)
+	if !s.hasSystemMarker("claw-soft-plan", initialPlanAcceptedMarker) {
+		t.Fatalf("substantial plan after correction was not soft-accepted")
+	}
+	var proceedCount int
+	if err := db.QueryRow(
+		`SELECT COUNT(*) FROM messages WHERE claw_id=? AND role='hub' AND content=?`,
+		"claw-soft-plan", initialPlanProceedContent,
+	).Scan(&proceedCount); err != nil {
+		t.Fatal(err)
+	}
+	if proceedCount != 1 {
+		t.Fatalf("expected proceed message after soft accept, got %d", proceedCount)
 	}
 }
 

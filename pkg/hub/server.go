@@ -6041,15 +6041,30 @@ func (s *Server) handleInitialPlanResponse(clawID, tenantID, content string) {
 	if !s.hasSystemMarker(clawID, initialPlanRequiredMarker) || s.hasSystemMarker(clawID, initialPlanAcceptedMarker) {
 		return
 	}
-	if isValidInitialPlan(content) {
+	// Strict keyword match, or a substantial second attempt after we already
+	// asked for a correction. Without the soft path, a real plan that misses
+	// one keyword (e.g. "issue") leaves the agent waiting forever for proceed.
+	correctionSent := s.hasSystemMarker(clawID, initialPlanCorrectionSentMarker)
+	if isValidInitialPlan(content) || (correctionSent && isSubstantialInitialPlan(content)) {
 		_ = s.insertSystemMarker(clawID, tenantID, initialPlanAcceptedMarker)
 		s.injectHubMessageByID(clawID, initialPlanProceedContent)
 		return
 	}
-	if !s.hasSystemMarker(clawID, initialPlanCorrectionSentMarker) {
+	if !correctionSent {
 		_ = s.insertSystemMarker(clawID, tenantID, initialPlanCorrectionSentMarker)
 		s.injectHubMessageByID(clawID, initialPlanCorrectionContent)
+		return
 	}
+	// Correction already sent and this turn still failed both gates. Re-nudge
+	// only when the agent produced a real attempt (not a short ack), so it is
+	// not frozen waiting for a proceed that never arrives.
+	trimmed := strings.TrimSpace(content)
+	if len(trimmed) < 120 {
+		return
+	}
+	log.Printf("[hub] initial plan still incomplete for claw %s (len=%d words=%d); re-sending correction",
+		shortID(clawID), len(trimmed), len(strings.Fields(trimmed)))
+	s.injectHubMessageByID(clawID, initialPlanCorrectionContent)
 }
 
 func (s *Server) handleInitialPlanActivity(clawID, tenantID string, activity map[string]interface{}) {
@@ -6072,24 +6087,32 @@ func isValidInitialPlan(content string) bool {
 		return false
 	}
 	lower := strings.ToLower(content)
-	hasUnderstanding := strings.Contains(lower, "understand") ||
-		strings.Contains(lower, "issue") ||
-		strings.Contains(lower, "task") ||
-		strings.Contains(lower, "problem")
-	hasPlan := strings.Contains(lower, "plan") ||
-		strings.Contains(lower, "step") ||
-		strings.Contains(lower, "approach")
-	hasVerification := strings.Contains(lower, "test") ||
-		strings.Contains(lower, "verify") ||
-		strings.Contains(lower, "check") ||
-		strings.Contains(lower, "build")
-	hasCodeArea := strings.Contains(lower, "file") ||
-		strings.Contains(lower, "code") ||
-		strings.Contains(lower, "package") ||
-		strings.Contains(lower, "component") ||
-		strings.Contains(lower, "backend") ||
-		strings.Contains(lower, "frontend")
+	hasUnderstanding := containsAny(lower, []string{
+		"understand", "issue", "task", "problem", "requirement", "requirements",
+		"will add", "will implement", "need to", "goal", "ticket",
+	})
+	hasPlan := containsAny(lower, []string{"plan", "step", "approach", "implement", "implementation"})
+	hasVerification := containsAny(lower, []string{"test", "verify", "verification", "check", "build", "ci"})
+	hasCodeArea := containsAny(lower, []string{
+		"file", "code", "package", "component", "backend", "frontend",
+		"workflow", "repo", "repository", "directory", "config", "script",
+		".github", "package.json",
+	})
 	return hasUnderstanding && hasPlan && hasVerification && hasCodeArea
+}
+
+// isSubstantialInitialPlan is a softer gate used after we already sent a
+// correction. Agents often write a real plan without the exact keyword set
+// (e.g. naming a ticket id instead of "issue"); accepting those unblocks work.
+func isSubstantialInitialPlan(content string) bool {
+	content = strings.TrimSpace(content)
+	if len(content) < 200 || len(strings.Fields(content)) < 40 {
+		return false
+	}
+	lower := strings.ToLower(content)
+	hasPlan := containsAny(lower, []string{"plan", "step", "approach", "implement", "implementation"})
+	hasVerification := containsAny(lower, []string{"test", "verify", "verification", "check", "build", "ci"})
+	return hasPlan && hasVerification
 }
 
 // clawHasMessages returns true if the claw already has message history.
