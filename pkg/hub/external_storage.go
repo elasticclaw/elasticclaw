@@ -2,6 +2,7 @@ package hub
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -416,21 +417,54 @@ func loadExternalWorkspace(name string) (*types.WorkspaceConfig, error) {
 	return &workspace, nil
 }
 
+// errWorkspaceNotFound is returned when a workspace name does not exist on the hub.
+// Callers should map this to HTTP 404 rather than 500.
+type errWorkspaceNotFound struct {
+	Name string
+}
+
+func (e *errWorkspaceNotFound) Error() string {
+	return fmt.Sprintf(
+		"workspace %q not found on the hub; push it first with `elasticclaw workspace push --path <dir> %s`, then retry with `--workspace %s`",
+		e.Name, e.Name, e.Name,
+	)
+}
+
+func isWorkspaceNotFound(err error) bool {
+	var target *errWorkspaceNotFound
+	return errors.As(err, &target)
+}
+
 func loadExternalWorkspaceConfig(name string) (types.WorkspaceConfig, error) {
 	dir := filepath.Join(workspacesDir(), name)
+	if st, err := os.Stat(dir); err != nil {
+		if os.IsNotExist(err) {
+			return types.WorkspaceConfig{}, &errWorkspaceNotFound{Name: name}
+		}
+		return types.WorkspaceConfig{}, fmt.Errorf("stat workspace %q: %w", name, err)
+	} else if !st.IsDir() {
+		return types.WorkspaceConfig{}, fmt.Errorf("workspace %q path exists but is not a directory", name)
+	}
+
 	configPath := filepath.Join(dir, "elasticclaw-config.yaml")
 	data, err := os.ReadFile(configPath)
 	if err != nil {
 		legacyPath := filepath.Join(dir, "workspace.yaml")
 		data, err = os.ReadFile(legacyPath)
 		if err != nil {
-			return types.WorkspaceConfig{}, fmt.Errorf("read elasticclaw-config.yaml: %w", err)
+			if os.IsNotExist(err) {
+				return types.WorkspaceConfig{}, fmt.Errorf(
+					"workspace %q exists but is missing elasticclaw-config.yaml (looked for elasticclaw-config.yaml and workspace.yaml)",
+					name,
+				)
+			}
+			return types.WorkspaceConfig{}, fmt.Errorf("read workspace %q config: %w", name, err)
 		}
 		configPath = legacyPath
 	}
 	var workspace types.WorkspaceConfig
 	if err := yaml.Unmarshal(data, &workspace); err != nil {
-		return types.WorkspaceConfig{}, fmt.Errorf("parse %s: %w", filepath.Base(configPath), err)
+		return types.WorkspaceConfig{}, fmt.Errorf("parse workspace %q %s: %w", name, filepath.Base(configPath), err)
 	}
 	return workspace, nil
 }
@@ -541,7 +575,11 @@ func saveExternalWorkflows(workspaceName string, workflows []*types.WorkflowConf
 		return err
 	}
 	if _, err := loadExternalWorkspaceConfig(workspaceName); err != nil {
-		return err
+		// Preserve workspace-not-found for HTTP 404 mapping; wrap other load failures.
+		if isWorkspaceNotFound(err) {
+			return err
+		}
+		return fmt.Errorf("load workspace %q: %w", workspaceName, err)
 	}
 	workflowDir := filepath.Join(workspacesDir(), workspaceName, "workflows")
 	if err := os.MkdirAll(workflowDir, 0750); err != nil {

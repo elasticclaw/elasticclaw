@@ -209,6 +209,11 @@ func (s *Server) handleWorkspaceWorkflowsPush(w http.ResponseWriter, r *http.Req
 		}
 	}
 	if err := saveExternalWorkflows(name, req.Workflows); err != nil {
+		if isWorkspaceNotFound(err) {
+			// Missing workspace is a client mistake (wrong --workspace name), not a server fault.
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
 		http.Error(w, "save workflows: "+err.Error(), http.StatusInternalServerError)
 		return
 	}

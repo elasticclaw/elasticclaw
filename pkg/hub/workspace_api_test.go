@@ -39,6 +39,47 @@ func TestWorkspacesEndpointReturnsPersistedWorkspacesOnly(t *testing.T) {
 	}
 }
 
+func TestWorkflowPushMissingWorkspaceReturnsClearNotFound(t *testing.T) {
+	configDir := t.TempDir()
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", configDir+"/hub.yaml")
+	s, _ := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
+
+	// Push a workspace under a different name so the hub has something, but not "amazecrm".
+	body := `{"workspaces":[{"name":"amazecrm-dev","repositories":["elasticclaw/elasticclaw"]}]}`
+	req := httptest.NewRequest(http.MethodPost, "/api/workspaces", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("workspace push status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+
+	body = `{"workflows":[{"name":"linear","integration":"linear","enable_manual_trigger":true}]}`
+	req = httptest.NewRequest(http.MethodPost, "/api/workspaces/amazecrm/workflows", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Content-Type", "application/json")
+	rr = httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("workflow push status = %d, want 404, body = %s", rr.Code, rr.Body.String())
+	}
+	got := rr.Body.String()
+	if !strings.Contains(got, `workspace "amazecrm" not found`) {
+		t.Fatalf("body = %q, want clear workspace not found message", got)
+	}
+	if strings.Contains(got, "elasticclaw-config.yaml") || strings.Contains(got, "workspace.yaml") {
+		t.Fatalf("body = %q, should not leak internal config file paths", got)
+	}
+	if strings.Contains(got, "save workflows:") {
+		t.Fatalf("body = %q, should not wrap not-found as save workflows 500", got)
+	}
+	if !strings.Contains(got, "workspace push") || !strings.Contains(got, "--workspace amazecrm") {
+		t.Fatalf("body = %q, want actionable push hint with the same workspace name", got)
+	}
+}
+
 func TestWorkflowPushPersistsWorkspaceWorkflows(t *testing.T) {
 	configDir := t.TempDir()
 	t.Setenv("ELASTICCLAW_HUB_CONFIG", configDir+"/hub.yaml")
