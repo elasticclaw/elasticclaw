@@ -5928,7 +5928,24 @@ Before editing files, running builds, or doing broad tool exploration, send one 
 This first message must be a normal assistant message visible to the user. Tool calls, activity rows, and update_plan do not count. After that visible plan, wait for the hub's proceed message, then start implementation and continue sending visible progress updates.`
 	initialPlanProceedContent    = `[hub] Initial plan received. Proceed with implementation. Keep sending visible progress updates before and after substantial work; tool calls and activity rows do not count as user communication.`
 	initialPlanCorrectionContent = `[hub] Initial plan is required before implementation. Pause tool work and send a visible assistant message with your understanding of the issue, likely code area, rough plan, and verification approach.`
+	// planGateProceedContent is injected when a workflow plan_gate passes.
+	// It must be unambiguous: agents previously waited for freeform "proceed"
+	// or re-emitted [PLAN_READY] after the gate already passed.
+	planGateProceedContent = `[hub] Plan gate passed — you are cleared to implement now.
+Do not wait for another proceed message.
+Do not emit [PLAN_READY] again.
+Keep sending short visible progress updates as you work.
+When the PR is ready, say [DONE] with the PR URL(s).`
+	planGateAlreadyAcceptedContent = `[hub] Plan was already approved earlier in this run.
+Continue implementation — do not emit [PLAN_READY] again.
+When the PR is ready, say [DONE] with the PR URL(s).`
 )
+
+// planGateAcceptedMarker is per-stage so a second plan_gate later in the
+// workflow still evaluates its own output instead of inheriting a global pass.
+func planGateAcceptedMarker(stageID string) string {
+	return "__PLAN_GATE_ACCEPTED__:" + stageID
+}
 
 // sendWakeMessage sends a silent system message to wake the agent.
 // For factory claws, it sends a task-specific prompt.

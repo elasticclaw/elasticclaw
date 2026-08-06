@@ -1056,6 +1056,27 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, ctx pipelineCon
 
 	// Evaluate gate if configured
 	if stage.Gate != nil {
+		// Re-entering *this* plan_gate stage after it already passed must not
+		// re-run validation forever. Scoped per stageID so a later plan_gate
+		// in the same workflow still evaluates its own output (Greptile).
+		if stage.PlanGate && s.hasSystemMarker(clawID, planGateAcceptedMarker(stage.ID)) {
+			alreadyRouted := false
+			if pl := parsePipelineForContext(ctx); pl != nil {
+				alreadyRouted = pl.StageForGateResult(stage.ID, "pass") != nil
+			}
+			// Destination stage inject owns the next agent turn when routed.
+			if alreadyRouted {
+				s.publishHubNotice(clawID, planGateAlreadyAcceptedContent)
+			} else {
+				s.injectHubMessageByID(clawID, planGateAlreadyAcceptedContent)
+			}
+			s.safeGo("pipeline plan-gate already accepted", func() {
+				s.autoTransitionAfterGate(clawID, stage.ID, "pass", ctx)
+			})
+			// injectDelivered only when we queued a model turn (no route).
+			return !alreadyRouted, nil
+		}
+
 		gateResult := s.evaluateGate(clawID, stage.ID, stage.Gate)
 		log.Printf("[pipeline] gate evaluated for claw %s stage %q: verdict=%s", clawID[:8], stage.ID, gateResult.Verdict)
 		// Normalise "skipped" → "pass" when TreatSkippedAsPass is set so that
@@ -1069,35 +1090,57 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, ctx pipelineCon
 			gateResultHasRoute = pl.StageForGateResult(stage.ID, autoTransitionVerdict) != nil
 		}
 		notifyGateResult := func(message string) {
+			// Always surface gate outcomes in the transcript for human observers.
+			// When a gate_result route will inject the next stage prompt, use a
+			// notice (no extra model turn); otherwise inject so the agent sees it.
 			if gateResultHasRoute {
-				// The destination stage owns the next model prompt. Keep mechanical
-				// gate bookkeeping visible in the dashboard without consuming an
-				// extra turn before that stage's on_enter instructions.
 				s.publishHubNotice(clawID, message)
 				return
 			}
 			s.injectHubMessageByID(clawID, message)
 		}
-		// Report the gate result in chat.
+		// Report the gate result in chat with friendlier plan-gate wording.
+		stageLabel := strings.TrimSpace(stage.Label)
+		if stageLabel == "" {
+			stageLabel = stage.ID
+		}
 		if gateResult.Verdict == "pass" {
-			notifyGateResult(fmt.Sprintf("[hub] Gate passed: %s", stage.Label))
+			if stage.PlanGate {
+				notifyGateResult(fmt.Sprintf("[hub] ✓ Plan approved (%s). Moving to implementation.", stageLabel))
+			} else {
+				notifyGateResult(fmt.Sprintf("[hub] ✓ Gate passed: %s", stageLabel))
+			}
 		} else if gateResult.Verdict == "skipped" && stage.Gate.TreatSkippedAsPass {
-			notifyGateResult(fmt.Sprintf("[hub] Gate skipped (treated as pass): %s", stage.Label))
+			notifyGateResult(fmt.Sprintf("[hub] Gate skipped (treated as pass): %s", stageLabel))
 		} else if gateResult.Verdict == "error" {
-			msg := fmt.Sprintf("[hub] Gate error (no condition matched): %s", stage.Label)
+			msg := fmt.Sprintf("[hub] Gate error (no condition matched): %s", stageLabel)
 			notifyGateResult(msg)
 		} else {
-			msg := fmt.Sprintf("[hub] Gate failed: %s", stage.Label)
+			msg := fmt.Sprintf("[hub] ✗ Gate failed: %s", stageLabel)
 			if gateResult.MatchedPath != "" {
 				msg += fmt.Sprintf("\n- path: %s\n- value: %s", gateResult.MatchedPath, gateResult.MatchedValue)
+			}
+			if gateResult.Reason != "" {
+				msg += "\n- reason: " + gateResult.Reason
 			}
 			notifyGateResult(msg)
 		}
 		// Deterministic plan gates mark plan accepted so freeform never re-fires
 		// if something races; freeform is already skipped when HasPlanGate().
+		// Per-stage marker powers re-entry short-circuit without skipping later
+		// plan_gate stages in the same workflow.
 		if stage.PlanGate && autoTransitionVerdict == "pass" {
 			if tenantID := s.tenantIDForClaw(clawID); tenantID != "" {
 				_ = s.insertSystemMarker(clawID, tenantID, initialPlanAcceptedMarker)
+				_ = s.insertSystemMarker(clawID, tenantID, planGateAcceptedMarker(stage.ID))
+			}
+			// When a gate_result route will inject the destination stage prompt,
+			// do not also inject proceed — that queues a duplicate agent turn
+			// before the implement instructions arrive (Greptile).
+			if gateResultHasRoute {
+				s.publishHubNotice(clawID, planGateProceedContent)
+			} else {
+				s.injectHubMessageByID(clawID, planGateProceedContent)
 			}
 		}
 		// Auto-transition to next stage if a gate_result trigger matches.
@@ -1566,6 +1609,13 @@ func (s *Server) transitionResolvedPipelineStageWithContext(clawID string, stage
 	// (like output_matches) don't re-fire on subsequent messages.
 	s.recordPipelineStageVisit(clawID, stage.ID)
 	log.Printf("[pipeline] claw %s → stage %q (%s)", clawID[:8], stage.ID, stage.Label)
+	// User-visible stage progress in the transcript (dashboard only — does not
+	// queue a model turn). Makes workflow progress less of a black box.
+	stageLabel := strings.TrimSpace(stage.Label)
+	if stageLabel == "" {
+		stageLabel = stage.ID
+	}
+	s.publishHubNotice(clawID, fmt.Sprintf("[hub] ▶ Stage: %s", stageLabel))
 	injectDelivered, onEnterErr := s.runOnEnter(clawID, stage, ctx)
 	stageActionsSucceeded := onEnterErr == nil
 	var routedGateErr *routedRequiredGateError

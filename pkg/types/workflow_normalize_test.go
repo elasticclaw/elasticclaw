@@ -416,6 +416,72 @@ stages:
 	}
 }
 
+func TestWorkflowNormalizePreservesPlanGate(t *testing.T) {
+	data := []byte(`
+schema_version: v1
+name: plan-gate-story
+trigger:
+  linear:
+    event: status_changed
+    workspace: amazecrm
+    states:
+      - Todo
+stages:
+  - id: plan
+    entry: true
+    on_enter:
+      inject: write plan.json
+  - id: plan_validate
+    plan_gate: true
+    triggers:
+      - message_contains: "[PLAN_READY]"
+    on_enter:
+      run:
+        command: echo ok
+        output: plan
+    gate:
+      output: plan
+      pass:
+        path: status
+        values: [ok]
+      required: true
+`)
+	var workflow WorkflowConfig
+	if err := yaml.Unmarshal(data, &workflow); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(workflow.Stages) < 2 || !workflow.Stages[1].PlanGate {
+		t.Fatalf("expected plan_gate parsed on authored stage, stages=%+v", workflow.Stages)
+	}
+	if err := NormalizeWorkflowConfig(&workflow); err != nil {
+		t.Fatalf("normalize: %v", err)
+	}
+	if !strings.Contains(workflow.PipelineYAML, "plan_gate: true") {
+		t.Fatalf("pipeline yaml lost plan_gate after normalize:\n%s", workflow.PipelineYAML)
+	}
+	// Round-trip through pipeline parse would live in hub; ensure re-unmarshal keeps it.
+	var again WorkflowConfig
+	if err := yaml.Unmarshal([]byte(workflow.PipelineYAML), &again); err != nil {
+		t.Fatalf("re-unmarshal pipeline yaml: %v", err)
+	}
+	// PipelineYAML is only stages wrapper — parse as stages blob
+	var stagesOnly struct {
+		Stages []WorkflowStage `yaml:"stages"`
+	}
+	if err := yaml.Unmarshal([]byte(workflow.PipelineYAML), &stagesOnly); err != nil {
+		t.Fatalf("unmarshal stages: %v", err)
+	}
+	found := false
+	for _, st := range stagesOnly.Stages {
+		if st.ID == "plan_validate" && st.PlanGate {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("plan_gate not preserved on plan_validate after normalize re-marshal: %+v", stagesOnly.Stages)
+	}
+}
+
 func TestWorkflowV1ShortcutTriggerValidates(t *testing.T) {
 	data := []byte(`
 schema_version: v1
