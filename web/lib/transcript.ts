@@ -1,4 +1,4 @@
-import type { Message } from "@/lib/types"
+import type { AgentActivity, Message } from "@/lib/types"
 
 export type TranscriptClawMeta = {
   id: string
@@ -28,8 +28,10 @@ export function transcriptRoleLabel(message: Message): string {
       if (a.phase) parts.push(a.phase)
       return `activity (${parts.filter(Boolean).join(": ")})`
     }
-    case "activity_summary":
-      return "activity_summary"
+    case "activity_summary": {
+      const n = message.activitySummary?.count
+      return typeof n === "number" ? `activity_summary (count=${n})` : "activity_summary"
+    }
     default:
       return String(message.role)
   }
@@ -39,6 +41,67 @@ function toISO(ts: Date | string): string {
   const d = ts instanceof Date ? ts : new Date(ts)
   if (Number.isNaN(d.getTime())) return String(ts)
   return d.toISOString()
+}
+
+function trimBody(text: string): string {
+  return text.replace(/\s+$/u, "")
+}
+
+/** Serialize structured AgentActivity fields for debug paste. */
+export function formatActivityTranscriptBody(activity: AgentActivity): string {
+  const lines: string[] = []
+  const push = (key: string, value: string | undefined) => {
+    const v = value?.trim()
+    if (v) lines.push(`${key}: ${v}`)
+  }
+  push("kind", activity.kind)
+  push("tool", activity.tool)
+  push("phase", activity.phase)
+  push("stream", activity.stream)
+  push("command", activity.command)
+  push("path", activity.path)
+  push("url", activity.url)
+  push("detail", activity.detail)
+  push("message", activity.message)
+  push("error", activity.error)
+  return lines.join("\n")
+}
+
+/**
+ * Body text for one transcript row. Prefer structured activity / summary
+ * fields so copied logs match what the UI shows (commands, paths, errors).
+ */
+export function formatTranscriptMessageBody(message: Message): string {
+  if (message.role === "activity" && message.activity) {
+    const structured = formatActivityTranscriptBody(message.activity)
+    const content = trimBody(message.content ?? "")
+    // Prefer structured fields; append content only when it adds new info.
+    if (structured) {
+      if (content && !structured.includes(content)) {
+        return `${structured}\ncontent: ${content}`
+      }
+      return structured
+    }
+    if (content) return content
+    return "(empty activity)"
+  }
+
+  if (message.role === "activity_summary") {
+    const summary = message.activitySummary
+    const lines: string[] = []
+    if (summary) {
+      lines.push(`count: ${summary.count}`)
+      if (summary.from) lines.push(`from: ${summary.from}`)
+      if (summary.to) lines.push(`to: ${summary.to}`)
+    }
+    const content = trimBody(message.content ?? "")
+    if (content) lines.push(content)
+    if (lines.length === 0) return "(empty activity summary)"
+    return lines.join("\n")
+  }
+
+  const body = trimBody(message.content ?? "")
+  return body || "(empty)"
 }
 
 /**
@@ -78,12 +141,7 @@ export function formatChatTranscript(opts: {
   for (const message of sorted) {
     const label = transcriptRoleLabel(message)
     lines.push(`[${toISO(message.timestamp)}] ${label}`)
-    const body = (message.content ?? "").replace(/\s+$/u, "")
-    if (body) {
-      lines.push(body)
-    } else {
-      lines.push("(empty)")
-    }
+    lines.push(formatTranscriptMessageBody(message))
     lines.push("")
   }
 
