@@ -27,6 +27,11 @@ type Stage struct {
 	// prior run action) and produces a pass/fail verdict that can drive
 	// automatic stage transitions via gate_result triggers.
 	Gate *Gate `yaml:"gate,omitempty"`
+	// PlanGate marks this stage's gate as the workflow's plan-approval gate.
+	// When any stage has plan_gate: true with a configured gate, the hub skips
+	// freeform initial-plan keyword approval for claws on this pipeline so
+	// plan acceptance is deterministic and not double-enforced.
+	PlanGate bool `yaml:"plan_gate,omitempty"`
 }
 
 // StageSkip defines a pre-enter stage skip rule. When the condition evaluates
@@ -514,6 +519,22 @@ func (p *Pipeline) EntryStage() *Stage {
 		}
 	}
 	return nil
+}
+
+// HasPlanGate reports whether this pipeline opts into deterministic plan
+// approval: at least one stage with plan_gate: true and a configured gate.
+// Ordinary validation gates do not count — freeform hub plan approval remains
+// the default for existing workflows.
+func (p *Pipeline) HasPlanGate() bool {
+	if p == nil {
+		return false
+	}
+	for i := range p.Stages {
+		if p.Stages[i].PlanGate && p.Stages[i].Gate != nil {
+			return true
+		}
+	}
+	return false
 }
 
 // StageByID returns the stage with the given ID, or nil if none exists.

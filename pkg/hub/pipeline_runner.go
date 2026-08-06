@@ -1093,6 +1093,13 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, ctx pipelineCon
 			}
 			notifyGateResult(msg)
 		}
+		// Deterministic plan gates mark plan accepted so freeform never re-fires
+		// if something races; freeform is already skipped when HasPlanGate().
+		if stage.PlanGate && autoTransitionVerdict == "pass" {
+			if tenantID := s.tenantIDForClaw(clawID); tenantID != "" {
+				_ = s.insertSystemMarker(clawID, tenantID, initialPlanAcceptedMarker)
+			}
+		}
 		// Auto-transition to next stage if a gate_result trigger matches.
 		s.safeGo("pipeline gate auto-transition", func() {
 			s.autoTransitionAfterGate(clawID, stage.ID, autoTransitionVerdict, ctx, gateResult.Reason)

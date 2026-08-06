@@ -5993,6 +5993,20 @@ func (s *Server) sendInitialPlanInstruction(cc *clawConn, clawID string) {
 }
 
 func (s *Server) clawNeedsInitialPlan(clawID string) bool {
+	if !s.clawEligibleForInitialPlan(clawID) {
+		return false
+	}
+	// Workflows that declare a deterministic plan_gate own plan approval.
+	// Skip freeform keyword checks so we do not double-approve or freeze.
+	if s.clawPipelineHasPlanGate(clawID) {
+		return false
+	}
+	return true
+}
+
+// clawEligibleForInitialPlan is true for issue-backed or factory/workflow claws
+// that historically received the freeform initial-plan wake.
+func (s *Server) clawEligibleForInitialPlan(clawID string) bool {
 	issueID, tags := s.clawIssueAndTags(clawID)
 	if issueID != "" {
 		return true
@@ -6003,6 +6017,17 @@ func (s *Server) clawNeedsInitialPlan(clawID string) bool {
 		}
 	}
 	return false
+}
+
+// clawPipelineHasPlanGate reports whether this claw's factory/workflow YAML
+// declares plan_gate: true on a stage that also has a gate block.
+func (s *Server) clawPipelineHasPlanGate(clawID string) bool {
+	ctx, ok := s.findPipelineContextForClaw(clawID)
+	if !ok {
+		return false
+	}
+	pl := parsePipelineForContext(ctx)
+	return pl != nil && pl.HasPlanGate()
 }
 
 func (s *Server) tenantIDForClaw(clawID string) string {

@@ -357,6 +357,189 @@ func TestPipelineEntryInjectIncludesInitialPlanInstruction(t *testing.T) {
 	}
 }
 
+func TestPipelineEntrySkipsFreeformPlanWhenPlanGatePresent(t *testing.T) {
+	// Deterministic plan_gate owns approval — freeform wake must not be prepended
+	// (would double-approve / freeze on keywords).
+	factory := &types.FactoryConfig{
+		Name: "plan-gate-factory",
+		PipelineYAML: `
+stages:
+  - id: plan
+    entry: true
+    on_enter:
+      inject: Write plan.json then say [PLAN_READY]
+  - id: plan_validate
+    plan_gate: true
+    triggers:
+      - message_contains: "[PLAN_READY]"
+    on_enter:
+      run:
+        command: "echo '{\"status\":\"ok\"}'"
+        output: plan
+    gate:
+      output: plan
+      pass:
+        path: status
+        values: [ok]
+      fail:
+        path: status
+        values: [incomplete]
+      required: true
+  - id: implement
+    triggers:
+      - gate_result:
+          stage: plan_validate
+          verdict: pass
+    on_enter:
+      inject: Proceed with implementation
+`,
+	}
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{
+		Token:     "test-token",
+		Factories: []*types.FactoryConfig{factory},
+	}, "", "", "")
+
+	const clawID = "claw-plan-gate-pipeline"
+	_, err := db.Exec(
+		`INSERT INTO claws(id, tenant_id, name, template, status, tags, linear_issue_id, pipeline_stage, created_at) VALUES(?,?,?,?,?,?,?,?,datetime('now'))`,
+		clawID, "test-tenant-id", "plan gate claw", "elasticclaw", "connected",
+		`["factory:plan-gate-factory"]`, "AMA-109", "",
+	)
+	if err != nil {
+		t.Fatalf("insert claw: %v", err)
+	}
+
+	if !s.clawEligibleForInitialPlan(clawID) {
+		t.Fatal("expected issue-backed claw to be plan-eligible")
+	}
+	if !s.clawPipelineHasPlanGate(clawID) {
+		t.Fatal("expected pipeline HasPlanGate via factory YAML")
+	}
+	if s.clawNeedsInitialPlan(clawID) {
+		t.Fatal("freeform initial plan must be skipped when plan_gate is present")
+	}
+
+	stage := pipeline.Stage{
+		ID:    "plan",
+		Label: "Plan",
+		OnEnter: pipeline.OnEnter{
+			Inject: "Write plan.json then say [PLAN_READY]",
+		},
+	}
+	if !s.transitionPipelineStageWithContext(clawID, stage, pipelineContext{Factory: factory, IssueID: "AMA-109"}) {
+		t.Fatalf("stage transition returned false")
+	}
+
+	rows, err := db.Query(`SELECT content FROM messages WHERE claw_id=? AND role='hub'`, clawID)
+	if err != nil {
+		t.Fatalf("select hub messages: %v", err)
+	}
+	defer rows.Close()
+	var all []string
+	foundInject := false
+	for rows.Next() {
+		var content string
+		if err := rows.Scan(&content); err != nil {
+			t.Fatal(err)
+		}
+		all = append(all, content)
+		if strings.Contains(content, initialPlanWakeContent) {
+			t.Fatalf("must not prepend freeform plan wake when plan_gate present:\n%s", content)
+		}
+		if strings.Contains(content, "Write plan.json then say [PLAN_READY]") {
+			foundInject = true
+		}
+	}
+	if !foundInject {
+		t.Fatalf("expected workflow inject among hub messages, got:\n%s", strings.Join(all, "\n---\n"))
+	}
+	if s.hasSystemMarker(clawID, initialPlanRequiredMarker) {
+		t.Fatal("must not insert freeform plan-required marker when plan_gate present")
+	}
+}
+
+func TestPlanGatePassMarksInitialPlanAccepted(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
+
+	const clawID = "claw-plan-gate-accept"
+	_, err := db.Exec(
+		`INSERT INTO claws(id, tenant_id, name, template, status, pipeline_stage, created_at) VALUES(?,?,?,?,?,?,datetime('now'))`,
+		clawID, "test-tenant-id", "test-claw", "base", "connected", "",
+	)
+	if err != nil {
+		t.Fatalf("insert claw: %v", err)
+	}
+	s.persistPipelineOutput(clawID, "plan_validate", "plan", &pipelineRunResult{
+		ExitCode: 0,
+		Stdout:   `{"status":"ok"}`,
+	})
+
+	stage := pipeline.Stage{
+		ID:       "plan_validate",
+		Label:    "Plan validation",
+		PlanGate: true,
+		Gate: &pipeline.Gate{
+			Output: "plan",
+			Pass:   pipeline.GateCondition{Path: "status", Values: []string{"ok"}},
+			Fail:   pipeline.GateCondition{Path: "status", Values: []string{"incomplete"}},
+		},
+	}
+	if _, err := s.runOnEnter(clawID, stage, pipelineContext{}); err != nil {
+		t.Fatalf("runOnEnter: %v", err)
+	}
+	if !s.hasSystemMarker(clawID, initialPlanAcceptedMarker) {
+		t.Fatal("plan_gate pass should mark initial plan accepted (no freeform re-fire)")
+	}
+}
+
+func TestOrdinaryGateDoesNotSkipFreeformPlan(t *testing.T) {
+	// Existing installs with validation gates (not plan_gate) keep freeform.
+	factory := &types.FactoryConfig{
+		Name: "validation-factory",
+		PipelineYAML: `
+stages:
+  - id: entry
+    entry: true
+    on_enter:
+      inject: Start work
+  - id: validation
+    triggers:
+      - message_contains: "[DONE]"
+    on_enter:
+      run:
+        command: "echo '{\"status\":\"clean\"}'"
+        output: validation
+    gate:
+      output: validation
+      pass:
+        path: status
+        values: [clean]
+      required: true
+`,
+	}
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{
+		Token:     "test-token",
+		Factories: []*types.FactoryConfig{factory},
+	}, "", "", "")
+
+	const clawID = "claw-validation-gate-only"
+	_, err := db.Exec(
+		`INSERT INTO claws(id, tenant_id, name, template, status, tags, linear_issue_id, pipeline_stage, created_at) VALUES(?,?,?,?,?,?,?,?,datetime('now'))`,
+		clawID, "test-tenant-id", "validation claw", "elasticclaw", "connected",
+		`["factory:validation-factory"]`, "AMA-110", "",
+	)
+	if err != nil {
+		t.Fatalf("insert claw: %v", err)
+	}
+
+	if s.clawPipelineHasPlanGate(clawID) {
+		t.Fatal("validation gate must not count as plan_gate")
+	}
+	if !s.clawNeedsInitialPlan(clawID) {
+		t.Fatal("freeform plan must remain for existing pipelines without plan_gate")
+	}
+}
+
 func TestPipelineInjectIncludesExactManualTriggerInputs(t *testing.T) {
 	s, db := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
 
