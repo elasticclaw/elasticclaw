@@ -72,11 +72,12 @@ func extractPRs(content string) []struct {
 
 // storePRMention persists a detected PR reference for a claw (idempotent by URL).
 // Also tracks analytics for the first detection of a PR open.
-func (s *Server) storePRMention(clawID, repo string, prNumber int, prURL string) error {
+// inserted is true only when this call created the claw_prs row.
+func (s *Server) storePRMention(clawID, repo string, prNumber int, prURL string) (inserted bool, err error) {
 	var existing string
 	_ = s.db.QueryRow(`SELECT id FROM claw_prs WHERE claw_id=? AND pr_url=?`, clawID, prURL).Scan(&existing)
 	if existing != "" {
-		return nil
+		return false, nil
 	}
 
 	// Track analytics: PR was opened (detected for the first time)
@@ -140,10 +141,10 @@ func (s *Server) storePRMention(clawID, repo string, prNumber int, prURL string)
 	)
 	if err != nil {
 		log.Printf("[pr-watcher] failed to persist PR %s#%d for claw %s: %v", repo, prNumber, clawID[:8], err)
-		return err
+		return false, err
 	}
 	if affected, err := res.RowsAffected(); err == nil && affected == 0 {
-		return nil // concurrent writer already registered this PR
+		return false, nil // concurrent writer already registered this PR
 	}
 	if _, runID, _, ok, err := s.taskRunContextForClaw(clawID); err != nil {
 		log.Printf("[task-run-analytics] failed to resolve task run for PR mention claw %s: %v", clawID, err)
@@ -164,16 +165,156 @@ func (s *Server) storePRMention(clawID, repo string, prNumber int, prURL string)
 		}
 	}
 	log.Printf("[pr-watcher] detected PR %s#%d for claw %s", repo, prNumber, clawID[:8])
-	return nil
+	return true, nil
 }
 
 // scanMessageForPRs extracts and stores any PR URLs found in a message.
 func (s *Server) scanMessageForPRs(clawID, content string) {
 	for _, pr := range extractPRs(content) {
-		if err := s.storePRMention(clawID, pr.repo, pr.number, pr.url); err != nil {
+		if _, err := s.storePRMention(clawID, pr.repo, pr.number, pr.url); err != nil {
 			log.Printf("[pr-watcher] failed to store PR mention: %v", err)
 		}
 	}
+}
+
+// prMentionCandidate is a PR URL pending claw_prs registration.
+type prMentionCandidate struct {
+	repo     string
+	number   int
+	url      string
+	comment  int64
+	review   int64
+	commentAt string
+	headSHA  string
+}
+
+// preparePRMention loads GitHub watermarks for a PR insert. alreadyTracked is
+// true when claw_prs already has this URL (no write needed).
+func (s *Server) preparePRMention(clawID, repo string, prNumber int, prURL string) (alreadyTracked bool, row prMentionCandidate, err error) {
+	var existing string
+	_ = s.db.QueryRow(`SELECT id FROM claw_prs WHERE claw_id=? AND pr_url=?`, clawID, prURL).Scan(&existing)
+	if existing != "" {
+		return true, prMentionCandidate{}, nil
+	}
+
+	row = prMentionCandidate{repo: repo, number: prNumber, url: prURL}
+	token := s.resolveGitHubToken()
+	if token == "" {
+		return false, row, nil
+	}
+	var lastCommentTime time.Time
+	commentsData, err := githubAPIList(fmt.Sprintf("repos/%s/issues/%d/comments", repo, prNumber), token)
+	if err == nil {
+		for _, c := range commentsData {
+			comment, _ := c.(map[string]interface{})
+			idF, _ := comment["id"].(float64)
+			id := int64(idF)
+			if id > row.comment {
+				row.comment = id
+			}
+			createdAt, _ := comment["created_at"].(string)
+			if createdAt == "" {
+				continue
+			}
+			createdAtTime, err := time.Parse(time.RFC3339, createdAt)
+			if err != nil {
+				continue
+			}
+			if row.commentAt == "" || createdAtTime.After(lastCommentTime) {
+				row.commentAt = createdAt
+				lastCommentTime = createdAtTime
+			}
+		}
+	}
+	prData, err := githubAPI(fmt.Sprintf("repos/%s/pulls/%d", repo, prNumber), token)
+	if err == nil {
+		if headObj, ok := prData["head"].(map[string]interface{}); ok {
+			row.headSHA, _ = headObj["sha"].(string)
+		}
+	}
+	reviewsData, err := githubAPIList(fmt.Sprintf("repos/%s/pulls/%d/reviews", repo, prNumber), token)
+	if err == nil {
+		row.review = maxPRReviewID(reviewsData, 0)
+	}
+	return false, row, nil
+}
+
+// insertClawPRsAtomic inserts zero or more new claw_prs rows in a single
+// transaction. Either every new row is committed, or none are — so callers
+// never leave the PR watcher partially armed when one URL fails.
+// Returns the URL that failed, or "" on full success.
+func (s *Server) insertClawPRsAtomic(clawID string, rows []prMentionCandidate) string {
+	if len(rows) == 0 {
+		return ""
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		log.Printf("[pr-watcher] begin claw_prs tx for claw %s: %v", shortID(clawID), err)
+		return rows[0].url
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	var inserted []prMentionCandidate
+	for _, row := range rows {
+		// Re-check inside the transaction so a concurrent writer is handled
+		// via INSERT OR IGNORE rather than a hard failure.
+		var existing string
+		_ = tx.QueryRow(`SELECT id FROM claw_prs WHERE claw_id=? AND pr_url=?`, clawID, row.url).Scan(&existing)
+		if existing != "" {
+			continue
+		}
+		prID := uuid.New().String()
+		res, err := tx.Exec(
+			`INSERT OR IGNORE INTO claw_prs(id,claw_id,repo,pr_number,pr_url,last_comment_id,last_comment_at,last_review_id,last_ci_sha,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)`,
+			prID, clawID, row.repo, row.number, row.url, row.comment, row.commentAt, row.review, row.headSHA, now(),
+		)
+		if err != nil {
+			log.Printf("[pr-watcher] failed to persist PR %s#%d for claw %s: %v", row.repo, row.number, shortID(clawID), err)
+			return row.url
+		}
+		if affected, err := res.RowsAffected(); err == nil && affected == 0 {
+			continue // concurrent insert won the race
+		}
+		inserted = append(inserted, row)
+	}
+	if err := tx.Commit(); err != nil {
+		log.Printf("[pr-watcher] commit claw_prs tx for claw %s: %v", shortID(clawID), err)
+		if len(inserted) > 0 {
+			return inserted[0].url
+		}
+		return rows[0].url
+	}
+	committed = true
+
+	// Side effects only after the rows are durably present.
+	factory, issueID := s.findFactoryForClaw(clawID)
+	for _, row := range inserted {
+		if factory != nil {
+			s.trackPROpened(factory.Name, issueID, clawID, row.repo, row.number)
+		}
+		if _, runID, _, ok, err := s.taskRunContextForClaw(clawID); err != nil {
+			log.Printf("[task-run-analytics] failed to resolve task run for PR mention claw %s: %v", clawID, err)
+		} else if ok {
+			if err := s.associateTaskRunPR(TaskRunPR{
+				RunID:        runID,
+				Repo:         row.repo,
+				PRNumber:     row.number,
+				URL:          row.url,
+				HeadSHA:      row.headSHA,
+				AgentHeadSHA: true,
+				State:        taskRunPRStateOpen,
+			}); err != nil {
+				log.Printf("[task-run-analytics] failed to associate PR %s#%d for claw %s: %v", row.repo, row.number, clawID, err)
+			}
+		}
+		log.Printf("[pr-watcher] detected PR %s#%d for claw %s", row.repo, row.number, shortID(clawID))
+	}
+	return ""
 }
 
 const (

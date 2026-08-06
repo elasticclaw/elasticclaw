@@ -2696,8 +2696,15 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 				cc.forcedFinishCount = 0
 				cc.mu.Unlock()
 				s.deleteStaleWatchdogNags(clawID)
+				// Prefer the streamed buffer for the turn body: the final message
+				// event sometimes arrives empty while persistContent holds the
+				// full streamed response (including [DONE] and PR URLs).
+				turnContent := persistContent
+				if strings.TrimSpace(turnContent) == "" {
+					turnContent = hm.Content
+				}
 				// Drop empty messages — never store or broadcast
-				if strings.TrimSpace(hm.Content) == "" {
+				if strings.TrimSpace(turnContent) == "" {
 					// Clear typing indicator first — always clear even if no queued messages
 					s.broadcastToUsers(tenantID, types.WSMessage{
 						Type: "agent_typing",
@@ -2712,17 +2719,18 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 					s.drainPendingCheckpoint(clawID)
 					continue
 				}
-				if !skipPersist && strings.TrimSpace(persistContent) != "" {
+				if !skipPersist {
+					hm.Content = turnContent
 					_, _ = s.db.Exec(
 						`INSERT INTO messages(id,claw_id,tenant_id,role,content,created_at,delivered_at) VALUES(?,?,?,?,?,?,?)
 						 ON CONFLICT(id) DO UPDATE SET content=excluded.content, delivered_at=excluded.delivered_at`,
-						hm.ID, hm.ClawID, hm.TenantID, hm.Role, persistContent, hm.CreatedAt, hm.CreatedAt,
+						hm.ID, hm.ClawID, hm.TenantID, hm.Role, turnContent, hm.CreatedAt, hm.CreatedAt,
 					)
 					s.broadcastToUsers(tenantID, types.WSMessage{Type: "message", Payload: hm})
 				}
-				automaticContinuationPaused := s.observeCompletedTurn(clawID, hm.ID, hm.Content)
+				automaticContinuationPaused := s.observeCompletedTurn(clawID, hm.ID, turnContent)
 				if !automaticContinuationPaused {
-					s.handleInitialPlanResponse(clawID, tenantID, hm.Content)
+					s.handleInitialPlanResponse(clawID, tenantID, turnContent)
 				}
 				// Evaluate pipeline triggers. If a pipeline explicitly owns a
 				// [DONE] trigger, let it handle that signal instead of the
@@ -2730,17 +2738,34 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 				pipelineHandledDone := false
 				var pipelineDoneCtx pipelineContext
 				var pipelineDoneStage *pipeline.Stage
-				if strings.Contains(hm.Content, "[DONE]") {
-					pipelineDoneCtx, pipelineDoneStage, pipelineHandledDone = s.pipelineStageForMessageContains(clawID, hm.Content)
+				if strings.Contains(turnContent, "[DONE]") {
+					pipelineDoneCtx, pipelineDoneStage, pipelineHandledDone = s.pipelineStageForMessageContains(clawID, turnContent)
 				}
 				if automaticContinuationPaused {
 					pipelineHandledDone = false
 				} else if pipelineHandledDone {
-					prURLs := extractDonePRURLs(hm.Content)
-					s.trackDoneSignal(pipelineDoneCtx.Name(), pipelineDoneCtx.IssueID, clawID, len(prURLs))
-					s.safeGo("pipeline done transition", func() { s.transitionPipelineStageWithContext(clawID, *pipelineDoneStage, pipelineDoneCtx) })
-				} else if !strings.Contains(hm.Content, "[DONE]") {
-					s.safeGo("pipeline message triggers", func() { s.checkPipelineMessageTriggers(clawID, hm.Content) })
+					// Same gates as handleClawDoneSignal: do not advance or arm
+					// PR monitoring while a required gate is failed. Keep
+					// pipelineHandledDone true so we do not also run the
+					// legacy done handler (which would double-nudge).
+					if s.hasFailedRequiredGate(clawID) {
+						s.injectUserMessage(clawID, "[factory] `[DONE]` blocked: a required tool gate has failed. Please fix the issues and retry.")
+					} else {
+						prURLs := extractDonePRURLs(turnContent)
+						// Register before the stage transition so pr_merged/pr_closed
+						// monitoring is armed even if the agent only listed URLs next
+						// to [DONE] and never elsewhere in chat.
+						if errURL := s.registerDonePRURLs(clawID, prURLs); errURL != "" {
+							s.injectUserMessage(clawID, fmt.Sprintf("[factory] Failed to register PR %s: internal error. Please resend: [DONE] %s", errURL, strings.Join(prURLs, " ")))
+						} else {
+							s.trackDoneSignal(pipelineDoneCtx.Name(), pipelineDoneCtx.IssueID, clawID, len(prURLs))
+							s.safeGo("pipeline done transition", func() {
+								s.transitionPipelineStageWithContext(clawID, *pipelineDoneStage, pipelineDoneCtx)
+							})
+						}
+					}
+				} else if !strings.Contains(turnContent, "[DONE]") {
+					s.safeGo("pipeline message triggers", func() { s.checkPipelineMessageTriggers(clawID, turnContent) })
 				}
 				// Clear typing indicator now that response is complete
 				s.broadcastToUsers(tenantID, types.WSMessage{
@@ -2751,22 +2776,31 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 					},
 				})
 				// Check for [DONE] signal from a factory-created claw
-				if strings.Contains(hm.Content, "[DONE]") {
+				if strings.Contains(turnContent, "[DONE]") {
 					s.safeGo("done checkpoint", func() {
 						if _, err := s.requestCheckpoint(context.Background(), clawID, "done", "hub", false, checkpointRequestTimeout); err != nil {
 							log.Printf("[checkpoint] done request for %s failed: %v", shortID(clawID), err)
 						}
 					})
 					if !pipelineHandledDone {
-						s.safeGo("done signal", func() { s.handleClawDoneSignal(clawID, hm.Content) })
+						s.safeGo("done signal", func() { s.handleClawDoneSignal(clawID, turnContent) })
 					}
 				}
 				// Check for [TERMINATE] signal - allows claw to manage its own lifecycle
-				if strings.Contains(hm.Content, "[TERMINATE]") {
-					go s.handleClawTerminateSignal(clawID, hm.Content)
+				if strings.Contains(turnContent, "[TERMINATE]") {
+					go s.handleClawTerminateSignal(clawID, turnContent)
 				}
-				// Detect and store any PR URLs mentioned by the agent
-				go s.scanMessageForPRs(clawID, hm.Content)
+				// Detect and store PR URLs mentioned mid-work. [DONE] turns are
+				// intentionally excluded: registerDonePRURLs (pipeline path or
+				// handleClawDoneSignal) owns that registration so multi-URL sets
+				// stay atomic. A fallback scan here would call storePRMention
+				// per-URL and could partially arm the watcher after an aborted
+				// atomic register or a gate-blocked [DONE].
+				if strings.Contains(turnContent, "[DONE]") {
+					log.Printf("[pr-watcher] skipping PR scan for claw %s: [DONE] registration is handled explicitly", shortID(clawID))
+				} else {
+					go s.scanMessageForPRs(clawID, turnContent)
+				}
 				// Detect tool error loops and inject a corrective message
 				if !automaticContinuationPaused && detectToolLoop(hm.Content) {
 					s.mu.RLock()
