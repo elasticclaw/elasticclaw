@@ -552,6 +552,49 @@ func TestPlanGatePassMarksInitialPlanAccepted(t *testing.T) {
 	if !s.hasSystemMarker(clawID, initialPlanAcceptedMarker) {
 		t.Fatal("plan_gate pass should mark initial plan accepted (no freeform re-fire)")
 	}
+	if !s.hasSystemMarker(clawID, planGateAcceptedMarker(stage.ID)) {
+		t.Fatal("plan_gate pass should mark per-stage accepted marker")
+	}
+}
+
+func TestSecondPlanGateStillEvaluatesAfterFirstPass(t *testing.T) {
+	// Global freeform-accept must not short-circuit a later plan_gate stage.
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
+	const clawID = "claw-second-plan-gate"
+	_, err := db.Exec(
+		`INSERT INTO claws(id, tenant_id, name, template, status, pipeline_stage, created_at) VALUES(?,?,?,?,?,?,datetime('now'))`,
+		clawID, "test-tenant-id", "test-claw", "base", "connected", "",
+	)
+	if err != nil {
+		t.Fatalf("insert claw: %v", err)
+	}
+	// First plan gate already accepted.
+	s.insertSystemMarker(clawID, "test-tenant-id", initialPlanAcceptedMarker)
+	s.insertSystemMarker(clawID, "test-tenant-id", planGateAcceptedMarker("plan_validate"))
+
+	// Second plan gate should still evaluate its output (fail path).
+	s.persistPipelineOutput(clawID, "plan_review", "plan_review", &pipelineRunResult{
+		ExitCode: 0,
+		Stdout:   `{"status":"incomplete","reason":"needs more detail"}`,
+	})
+	stage := pipeline.Stage{
+		ID:       "plan_review",
+		Label:    "Plan review",
+		PlanGate: true,
+		Gate: &pipeline.Gate{
+			Output:   "plan_review",
+			Pass:     pipeline.GateCondition{Path: "status", Values: []string{"ok"}},
+			Fail:     pipeline.GateCondition{Path: "status", Values: []string{"incomplete"}},
+			Required: true,
+		},
+	}
+	_, err = s.runOnEnter(clawID, stage, pipelineContext{})
+	if err == nil {
+		t.Fatal("expected required gate failure for second plan_gate, got nil")
+	}
+	if s.hasSystemMarker(clawID, planGateAcceptedMarker("plan_review")) {
+		t.Fatal("second plan_gate must not be marked accepted when it fails")
+	}
 }
 
 func TestOrdinaryGateDoesNotSkipFreeformPlan(t *testing.T) {
@@ -627,17 +670,28 @@ func TestPipelineInjectIncludesExactManualTriggerInputs(t *testing.T) {
 		t.Fatalf("stage transition returned false")
 	}
 
-	var content string
-	if err := db.QueryRow(`SELECT content FROM messages WHERE claw_id=? AND role='hub'`, clawID).Scan(&content); err != nil {
-		t.Fatalf("select injected message: %v", err)
+	rows, err := db.Query(`SELECT content FROM messages WHERE claw_id=? AND role='hub' ORDER BY created_at`, clawID)
+	if err != nil {
+		t.Fatalf("select hub messages: %v", err)
 	}
+	defer rows.Close()
+	var all []string
+	for rows.Next() {
+		var content string
+		if err := rows.Scan(&content); err != nil {
+			t.Fatal(err)
+		}
+		all = append(all, content)
+	}
+	joined := strings.Join(all, "\n")
 	for _, want := range []string{
 		"Manual trigger inputs (use these exact values):",
 		`"jira_ticket": "AWB-2420"`,
 		"Use the single manual input `jira_ticket` as the Jira issue to investigate.",
+		"[hub] ▶ Stage: Working",
 	} {
-		if !strings.Contains(content, want) {
-			t.Fatalf("pipeline inject missing %q:\n%s", want, content)
+		if !strings.Contains(joined, want) {
+			t.Fatalf("pipeline inject missing %q:\n%s", want, joined)
 		}
 	}
 }
@@ -964,12 +1018,20 @@ func TestTransitionPipelineStageConcurrentCallsRunOnEnterOnce(t *testing.T) {
 		t.Fatalf("concurrent stage transitions returned true %d times, want 1", transitionCount)
 	}
 
+	// Stage banner notice + on_enter inject (exactly once despite concurrent callers).
 	var messageCount int
 	if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=?`, clawID).Scan(&messageCount); err != nil {
 		t.Fatalf("count messages: %v", err)
 	}
-	if messageCount != 1 {
-		t.Fatalf("concurrent stage transitions injected %d messages, want 1", messageCount)
+	if messageCount != 2 {
+		t.Fatalf("concurrent stage transitions wrote %d messages, want 2 (stage banner + inject)", messageCount)
+	}
+	var injectCount int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND content=?`, clawID, stage.OnEnter.Inject).Scan(&injectCount); err != nil {
+		t.Fatalf("count inject: %v", err)
+	}
+	if injectCount != 1 {
+		t.Fatalf("on_enter inject count = %d, want 1", injectCount)
 	}
 	if got := s.getPipelineStage(clawID); got != "pr_opened" {
 		t.Fatalf("pipeline stage = %q, want pr_opened", got)
@@ -2063,7 +2125,7 @@ stages:
 		t.Fatalf("pipeline stage = %q, want ci_passed", got)
 	}
 	var gateDelivered, stageDelivered interface{}
-	if err := db.QueryRow(`SELECT delivered_at FROM messages WHERE claw_id=? AND content='[hub] Gate passed: Monitor Depot CI'`, clawID).Scan(&gateDelivered); err != nil {
+	if err := db.QueryRow(`SELECT delivered_at FROM messages WHERE claw_id=? AND content='[hub] ✓ Gate passed: Monitor Depot CI'`, clawID).Scan(&gateDelivered); err != nil {
 		t.Fatal(err)
 	}
 	if gateDelivered == nil {

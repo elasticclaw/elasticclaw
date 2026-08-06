@@ -1056,9 +1056,10 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, ctx pipelineCon
 
 	// Evaluate gate if configured
 	if stage.Gate != nil {
-		// Re-emitting [PLAN_READY] after a successful plan gate must not loop
-		// the agent through validation forever — short-circuit with a clear nudge.
-		if stage.PlanGate && s.hasSystemMarker(clawID, initialPlanAcceptedMarker) {
+		// Re-entering *this* plan_gate stage after it already passed must not
+		// re-run validation forever. Scoped per stageID so a later plan_gate
+		// in the same workflow still evaluates its own output (Greptile).
+		if stage.PlanGate && s.hasSystemMarker(clawID, planGateAcceptedMarker(stage.ID)) {
 			s.injectHubMessageByID(clawID, planGateAlreadyAcceptedContent)
 			s.safeGo("pipeline plan-gate already accepted", func() {
 				s.autoTransitionAfterGate(clawID, stage.ID, "pass", ctx)
@@ -1116,9 +1117,12 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, ctx pipelineCon
 		}
 		// Deterministic plan gates mark plan accepted so freeform never re-fires
 		// if something races; freeform is already skipped when HasPlanGate().
+		// Per-stage marker powers re-entry short-circuit without skipping later
+		// plan_gate stages in the same workflow.
 		if stage.PlanGate && autoTransitionVerdict == "pass" {
 			if tenantID := s.tenantIDForClaw(clawID); tenantID != "" {
 				_ = s.insertSystemMarker(clawID, tenantID, initialPlanAcceptedMarker)
+				_ = s.insertSystemMarker(clawID, tenantID, planGateAcceptedMarker(stage.ID))
 			}
 			// Explicit agent-facing proceed so the model does not keep waiting
 			// for freeform "hub proceed" language or re-emit [PLAN_READY].

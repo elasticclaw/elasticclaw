@@ -5941,6 +5941,12 @@ Continue implementation — do not emit [PLAN_READY] again.
 When the PR is ready, say [DONE] with the PR URL(s).`
 )
 
+// planGateAcceptedMarker is per-stage so a second plan_gate later in the
+// workflow still evaluates its own output instead of inheriting a global pass.
+func planGateAcceptedMarker(stageID string) string {
+	return "__PLAN_GATE_ACCEPTED__:" + stageID
+}
+
 // sendWakeMessage sends a silent system message to wake the agent.
 // For factory claws, it sends a task-specific prompt.
 // A marker is stored in DB so reconnects after hub restart don't re-introduce.
