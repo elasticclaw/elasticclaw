@@ -15,6 +15,7 @@ import {
 } from "@/lib/api"
 import { mapApiClaw, mapApiMessage, mapApiStatus, computeUptime } from "@/lib/mappers"
 import {
+  isLiveSegmentCoveredByDurable,
   isTerminalAssistantMessage,
   isTransientMessage,
   pruneOldestLiveActivities,
@@ -345,13 +346,13 @@ export function useHub(selectedClawId: string | null): HubState {
         // not yet returned. Live segments must survive tool boundaries and
         // timeline reloads — otherwise the transcript blanks until a full
         // page refresh reloads durable rows from the server.
+        // Drop a live segment only when a nearby durable API row is its flush
+        // (role+content+time), not when any older turn reused the same prose.
+        const claimedDurableIds = new Set<string>()
         const liveTransient = existing.filter((m) => {
           if (!isTransientMessage(m)) return false
           if (m.id.startsWith("live-")) {
-            // Drop only when a durable API row already carries the same text.
-            return !msgs.some(
-              (api) => api.role === m.role && api.content === m.content
-            )
+            return !isLiveSegmentCoveredByDurable(m, msgs, claimedDurableIds)
           }
           return true
         })

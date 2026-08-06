@@ -3,6 +3,7 @@
 import { useState, useRef, useCallback, useEffect } from "react"
 import { fetchMessageTimeline } from "@/lib/api"
 import { mapApiMessage } from "@/lib/mappers"
+import { isLiveSegmentCoveredByDurable } from "@/lib/messages"
 import type { Message } from "@/lib/types"
 
 // Timeline page size — durable turns + activity_summary rows (not live tool floods).
@@ -124,17 +125,15 @@ export function useWindowedMessages({ clawId, liveMessages }: UseWindowedMessage
     for (const m of historicalMsgs) {
       if (!seen.has(m.id)) { seen.add(m.id); all.push(m) }
     }
+    // Claim durable ids so repeated assistant text across turns does not
+    // hide a new live segment that happens to match older prose.
+    const claimedDurableIds = new Set<string>()
     for (const m of liveMessages) {
       if (seen.has(m.id)) continue
       if (all.some((existing) => isDuplicateLiveActivity(existing, m))) continue
-      // Prefer durable API rows over client live-segment clones of the same text
-      // so tool-interrupted turns do not double-render after the hub flushes a segment.
-      if (
-        m.id.startsWith("live-") &&
-        all.some((existing) => existing.role === m.role && existing.content === m.content)
-      ) {
-        continue
-      }
+      // Drop live only when a nearby durable row is this segment's flush —
+      // not every historical message with identical content.
+      if (isLiveSegmentCoveredByDurable(m, all, claimedDurableIds)) continue
       seen.add(m.id)
       all.push(m)
     }
