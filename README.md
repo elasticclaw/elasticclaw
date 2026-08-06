@@ -105,6 +105,10 @@ trigger:
 
 See the [Linear issue workflow example](examples/workflows/linear-issue.yaml).
 
+For deterministic plan approval (schema gate instead of freeform chat), see
+[linear-issue-plan-gate.yaml](examples/workflows/linear-issue-plan-gate.yaml)
+and the docs on [plan approval](https://elasticclaw.ai/docs/workflows#plan-approval).
+
 ## Three ways to start work
 
 **From an issue tracker**
@@ -136,6 +140,7 @@ ElasticClaw Server owns policy. Providers own compute. OpenClaw owns the coding 
 - [Installation](https://elasticclaw.ai/docs/installation)
 - [Workspaces](https://elasticclaw.ai/docs/workspaces)
 - [Workflows](https://elasticclaw.ai/docs/workflows)
+- [Plan approval (`plan_gate`)](https://elasticclaw.ai/docs/workflows#plan-approval)
 - [Providers](https://elasticclaw.ai/docs/providers)
 - [GitHub integration](https://elasticclaw.ai/docs/github-integration)
 - [Linear integration](https://elasticclaw.ai/docs/linear-integration)

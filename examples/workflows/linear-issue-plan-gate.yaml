@@ -1,0 +1,139 @@
+# Deterministic plan approval via plan_gate (schema check, not freeform chat).
+#
+# Requires ElasticClaw Server with plan_gate support (see hub PR #597).
+# Docs: https://elasticclaw.ai/docs/workflows#plan-approval
+#
+# When plan_gate: true is present on a stage that also has gate:, freeform
+# hub plan approval is skipped for this workflow so plans are not double-approved.
+schema_version: v1
+name: linear-issue-plan-gate
+
+trigger:
+  linear:
+    event: status_changed
+    team: ADV
+    projects:
+      - Adversary Labs
+    states:
+      - Todo
+
+concurrency_group: example-linear-issue-plan-gate
+
+stages:
+  - id: plan
+    label: Plan
+    entry: true
+    on_enter:
+      move_issue: In Progress
+      inject: |
+        Issue: {{.Issue.Identifier}} - {{.Issue.Title}}
+        URL: {{.Issue.URL}}
+
+        Before implementing, write .elasticclaw/plan.json with keys:
+          understanding  (string)
+          area           (string)
+          steps          (array of strings)
+          verification   (string)
+
+        Then say exactly: [PLAN_READY]
+        Do not edit product code until the next stage injects proceed.
+
+  - id: plan_validate
+    label: Validate plan
+    # Opt into deterministic plan approval (disables freeform hub plan gate).
+    plan_gate: true
+    triggers:
+      - message_contains: "[PLAN_READY]"
+    on_enter:
+      run:
+        # Schema-only validator — prints JSON for the gate. No NLP.
+        command: |
+          python3 - <<'PY'
+          import json, pathlib, sys
+          path = pathlib.Path(".elasticclaw/plan.json")
+          try:
+              data = json.loads(path.read_text())
+          except Exception as exc:
+              print(json.dumps({"status": "incomplete", "reason": f"unreadable plan.json: {exc}"}))
+              sys.exit(0)
+          if not isinstance(data, dict):
+              print(json.dumps({"status": "incomplete", "reason": "plan.json must contain a JSON object"}))
+              sys.exit(0)
+          # Require non-empty strings (not just truthy values like true/1).
+          string_fields = ("understanding", "area", "verification")
+          invalid = [
+              k for k in string_fields
+              if not isinstance(data.get(k), str) or not data[k].strip()
+          ]
+          steps = data.get("steps")
+          if invalid:
+              print(json.dumps({"status": "incomplete", "reason": f"invalid {invalid}"}))
+          elif not isinstance(steps, list) or not steps or any(
+              not isinstance(step, str) or not step.strip() for step in steps
+          ):
+              print(json.dumps({
+                  "status": "incomplete",
+                  "reason": "steps must be a non-empty list of strings",
+              }))
+          else:
+              print(json.dumps({"status": "ok"}))
+          PY
+        output: plan
+        timeout: 2m
+    gate:
+      output: plan
+      pass:
+        path: status
+        values:
+          - ok
+      fail:
+        path: status
+        values:
+          - incomplete
+      required: true
+
+  - id: implement
+    label: Implement
+    triggers:
+      - gate_result:
+          stage: plan_validate
+          verdict: pass
+    on_enter:
+      inject: |
+        Plan accepted (status {{ .Outputs.plan.status }}).
+        Implement the issue. Narrate progress. When the PR is ready, say [DONE] with the PR URL.
+
+  - id: fix_plan
+    label: Fix plan
+    triggers:
+      - gate_result:
+          stage: plan_validate
+          verdict: fail
+    on_enter:
+      inject: |
+        Plan incomplete: {{ .Outputs.plan.reason }}
+        Update .elasticclaw/plan.json, then say [PLAN_READY] again.
+
+  - id: pr_opened
+    label: PR opened
+    triggers:
+      - message_contains: "[DONE]"
+    on_enter:
+      inject: |
+        PR created. Watch CI and review comments.
+
+  - id: merged
+    label: Merged
+    triggers:
+      - pr_merged: {}
+    on_enter:
+      move_issue: Done
+    terminal: true
+
+  - id: closed_no_merge
+    label: Closed without merge
+    triggers:
+      - pr_closed: {}
+    on_enter:
+      move_issue: Canceled
+    terminal: true
