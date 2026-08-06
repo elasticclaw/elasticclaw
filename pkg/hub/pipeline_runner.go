@@ -1135,14 +1135,18 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, ctx pipelineCon
 				_ = s.insertSystemMarker(clawID, tenantID, planGateAcceptedMarker(stage.ID))
 			}
 			// Surface the approved plan in chat even when the agent only said
-			// [PLAN_READY] — validators should echo understanding/area/steps.
+			// [PLAN_READY]. Prefer gate JSON fields; fall back to a short notice
+			// when the validator only printed {"status":"ok"}.
+			var summary string
 			if stage.Gate != nil && stage.Gate.Output != "" {
 				if outs := s.loadPipelineOutputs(clawID); outs != nil {
-					if summary := formatPlanGateSummary(outs[stage.Gate.Output]); summary != "" {
-						s.publishHubNotice(clawID, summary)
-					}
+					summary = formatPlanGateSummary(outs[stage.Gate.Output])
 				}
 			}
+			if summary == "" {
+				summary = formatPlanGateSummary(nil)
+			}
+			s.publishHubNotice(clawID, summary)
 			// When a gate_result route will inject the destination stage prompt,
 			// do not also inject proceed — that queues a duplicate agent turn
 			// before the implement instructions arrive (Greptile).

@@ -76,7 +76,14 @@ stages:
                   "reason": "steps must be a non-empty list of strings",
               }))
           else:
-              print(json.dumps({"status": "ok"}))
+              # Echo plan fields so the hub can publish an approved-plan summary.
+              print(json.dumps({
+                  "status": "ok",
+                  "understanding": data["understanding"].strip(),
+                  "area": data["area"].strip(),
+                  "steps": [s.strip() for s in steps],
+                  "verification": data["verification"].strip(),
+              }))
           PY
         output: plan
         timeout: 2m
