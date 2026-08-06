@@ -1,27 +1,47 @@
 package hub
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 )
 
-func TestSaveExternalFactoryRejectsInvalidExcludeLabels(t *testing.T) {
+func TestSaveExternalFactoryIsRetired(t *testing.T) {
 	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
 
 	err := saveExternalFactory(&types.FactoryConfig{
-		Name:          "invalid-label-filter",
+		Name:          "retired-factory",
 		Integration:   "linear",
 		TriggerStatus: "Ready",
 		Template:      "elasticclaw",
-		ExcludeLabels: []string{" "},
 	})
 	if err == nil {
-		t.Fatal("saveExternalFactory succeeded, want validation error")
+		t.Fatal("saveExternalFactory succeeded, want retired error")
 	}
-	if !strings.Contains(err.Error(), "exclude_labels[0] cannot be blank") {
-		t.Fatalf("error = %v, want exclude_labels validation", err)
+	if !strings.Contains(err.Error(), "factories are retired") {
+		t.Fatalf("error = %v, want factories are retired", err)
+	}
+}
+
+func TestLoadExternalFactoriesIgnoresDisk(t *testing.T) {
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
+	// Even if a leftover factories/ tree exists, load must return empty.
+	dir := filepath.Join(legacyFactoriesDir(), "ghost")
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "factory.yaml"), []byte("name: ghost\nintegration: linear\ntrigger_status: Todo\ntemplate: elasticclaw\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	factories, err := loadExternalFactories()
+	if err != nil {
+		t.Fatalf("loadExternalFactories: %v", err)
+	}
+	if len(factories) != 0 {
+		t.Fatalf("loadExternalFactories returned %d factories, want 0", len(factories))
 	}
 }
 
