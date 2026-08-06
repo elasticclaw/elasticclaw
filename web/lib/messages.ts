@@ -15,8 +15,6 @@ export function isTransientMessage(message: Message): boolean {
 
 /** How long after a live segment a durable flush may still count as its twin. */
 export const LIVE_SEGMENT_DURABLE_MATCH_MS = 60_000
-/** Allow durable timestamps slightly before live (client/server clock skew). */
-export const LIVE_SEGMENT_CLOCK_SKEW_MS = 5_000
 
 function messageTimeMs(message: Message): number {
   return message.timestamp instanceof Date
@@ -30,20 +28,18 @@ function messageTimeMs(message: Message): number {
  *
  * A durable row covers a live segment only when:
  * - same role + content
- * - durable time is in [live − skew, live + match window] so an *earlier*
- *   durable with the same prose (even within 60s) cannot hide a new stream
+ * - durable time is in [live, live + match window] — never *before* live, so
+ *   a preceding durable with the same prose cannot hide a new segment
  * - each durable id is claimed at most once when `claimedDurableIds` is set
  */
 export function isLiveSegmentCoveredByDurable(
   live: Message,
   durableCandidates: Message[],
   claimedDurableIds?: Set<string>,
-  maxDeltaMs: number = LIVE_SEGMENT_DURABLE_MATCH_MS,
-  clockSkewMs: number = LIVE_SEGMENT_CLOCK_SKEW_MS
+  maxDeltaMs: number = LIVE_SEGMENT_DURABLE_MATCH_MS
 ): boolean {
   if (!live.id.startsWith("live-") || !live.content.trim()) return false
   const liveTime = messageTimeMs(live)
-  const earliest = liveTime - clockSkewMs
   const latest = liveTime + maxDeltaMs
   let bestId: string | null = null
   let bestDelta = Infinity
@@ -53,9 +49,10 @@ export function isLiveSegmentCoveredByDurable(
     if (claimedDurableIds?.has(durable.id)) continue
     if (durable.role !== live.role || durable.content !== live.content) continue
     const durableTime = messageTimeMs(durable)
-    // Earlier durable with the same text is a previous turn — not this flush.
-    if (durableTime < earliest || durableTime > latest) continue
-    const delta = Math.abs(durableTime - liveTime)
+    // Strictly no earlier durable: preceding same-text rows are prior turns.
+    // Equal timestamps OK (same flush event / rounded ms).
+    if (durableTime < liveTime || durableTime > latest) continue
+    const delta = durableTime - liveTime
     if (delta < bestDelta) {
       bestDelta = delta
       bestId = durable.id
