@@ -1785,9 +1785,10 @@ func extractDonePRURLs(message string) []string {
 // registerDonePRURLs persists every PR URL into claw_prs (idempotent).
 // Returns the first URL that failed to store, or "" on full success.
 //
-// Registration is all-or-nothing for URLs newly introduced by this call: if a
-// later store fails, rows inserted earlier in the same call are rolled back so
-// the PR watcher is not left partially armed while the stage transition aborts.
+// Multi-URL registration is atomic: either every new claw_prs row is
+// committed, or none are. Compensating DELETEs are intentionally avoided —
+// a failed cleanup after a partial write could still leave the watcher armed
+// on a blocked [DONE] path.
 func (s *Server) registerDonePRURLs(clawID string, prURLs []string) string {
 	if len(prURLs) == 0 {
 		return ""
@@ -1797,21 +1798,30 @@ func (s *Server) registerDonePRURLs(clawID string, prURLs []string) string {
 		return ""
 	}
 
-	var newlyInserted []string
+	// Single URL: reuse the normal path (no multi-row partial-write risk).
+	if len(prs) == 1 {
+		if _, err := s.storePRMention(clawID, prs[0].repo, prs[0].number, prs[0].url); err != nil {
+			log.Printf("[factory] failed to register PR %s for claw %s: %v", prs[0].url, shortID(clawID), err)
+			return prs[0].url
+		}
+		return ""
+	}
+
+	var toInsert []prMentionCandidate
 	for _, pr := range prs {
-		inserted, err := s.storePRMention(clawID, pr.repo, pr.number, pr.url)
+		already, row, err := s.preparePRMention(clawID, pr.repo, pr.number, pr.url)
 		if err != nil {
-			log.Printf("[factory] failed to register PR %s for claw %s: %v", pr.url, shortID(clawID), err)
-			for _, url := range newlyInserted {
-				if _, delErr := s.db.Exec(`DELETE FROM claw_prs WHERE claw_id=? AND pr_url=?`, clawID, url); delErr != nil {
-					log.Printf("[factory] failed to roll back PR %s for claw %s after partial register: %v", url, shortID(clawID), delErr)
-				}
-			}
+			log.Printf("[factory] failed to prepare PR %s for claw %s: %v", pr.url, shortID(clawID), err)
 			return pr.url
 		}
-		if inserted {
-			newlyInserted = append(newlyInserted, pr.url)
+		if already {
+			continue
 		}
+		toInsert = append(toInsert, row)
+	}
+	if failURL := s.insertClawPRsAtomic(clawID, toInsert); failURL != "" {
+		log.Printf("[factory] failed to register PR set for claw %s (first failure %s)", shortID(clawID), failURL)
+		return failURL
 	}
 	return ""
 }

@@ -317,6 +317,33 @@ stages:
 	}
 }
 
+func TestRegisterDonePRURLsAtomicMulti(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
+	const clawID = "claw-register-atomic"
+	_, err := db.Exec(
+		`INSERT INTO claws(id, tenant_id, name, template, status, created_at) VALUES(?,?,?,?,?,datetime('now'))`,
+		clawID, "test-tenant-id", "claw", "elasticclaw", "connected",
+	)
+	if err != nil {
+		t.Fatalf("insert claw: %v", err)
+	}
+
+	failURL := s.registerDonePRURLs(clawID, []string{
+		"https://github.com/org/repo/pull/1",
+		"https://github.com/org/other/pull/2",
+	})
+	if failURL != "" {
+		t.Fatalf("registerDonePRURLs failed on %q", failURL)
+	}
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM claw_prs WHERE claw_id=?`, clawID).Scan(&count); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if count != 2 {
+		t.Fatalf("claw_prs count = %d, want 2", count)
+	}
+}
+
 func TestHandleClawDoneSignal_PipelineDoneStillRegistersPRURLs(t *testing.T) {
 	s, db := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
 	s.hubCfg.Factories = []*types.FactoryConfig{
