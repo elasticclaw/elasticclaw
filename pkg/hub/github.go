@@ -21,6 +21,9 @@ type githubInstallation struct {
 	Account struct {
 		Login string `json:"login"`
 	} `json:"account"`
+	// Permissions are the scopes granted to this installation (may lag the
+	// App's configured permissions until the owner accepts an update).
+	Permissions map[string]string `json:"permissions"`
 }
 
 // githubAppMeta is the response from GET /app (authenticated as the App).
@@ -259,7 +262,12 @@ func (p *GitHubTokenProvider) InstallationToken(ctx context.Context, installatio
 	}
 
 	// Build request body with correct permissions.
-	// GitHub token permissions: contents=read means read-only, contents=write means read+write.
+	// Installation tokens only receive the permissions listed here (capped by
+	// what this installation was granted). Requesting a scope the installation
+	// lacks makes POST /access_tokens fail — so optional scopes like workflows
+	// are included only after GET /app/installations/{id} confirms write/admin.
+	// contents=write alone is not enough to create or update files under
+	// .github/workflows/; GitHub requires the workflows scope when available.
 	var bodyStr string
 	if len(repos) > 0 {
 		needsWrite := false
@@ -273,14 +281,18 @@ func (p *GitHubTokenProvider) InstallationToken(ctx context.Context, installatio
 		if needsWrite {
 			contentsPermission = "write"
 		}
+		perms := map[string]string{
+			"contents":      contentsPermission,
+			"pull_requests": contentsPermission,
+			"metadata":      "read",
+			"checks":        "read", // needed for gh pr checks / CI status
+			"statuses":      "read", // needed for commit status checks
+		}
+		if needsWrite && p.installationHasWorkflowsWrite(ctx, installationID) {
+			perms["workflows"] = "write"
+		}
 		body := map[string]interface{}{
-			"permissions": map[string]string{
-				"contents":      contentsPermission,
-				"pull_requests": contentsPermission,
-				"metadata":      "read",
-				"checks":        "read", // needed for gh pr checks / CI status
-				"statuses":      "read", // needed for commit status checks
-			},
+			"permissions": perms,
 		}
 		if len(repos) <= maxScopedInstallationRepos {
 			repoNames := make([]string, 0, len(repos))
@@ -364,4 +376,56 @@ func (p *GitHubTokenProvider) CheckAppPermissions(ctx context.Context) (map[stri
 		return nil, fmt.Errorf("decode app meta: %w", err)
 	}
 	return meta.Permissions, nil
+}
+
+// installationHasWorkflowsWrite reports whether this installation was granted
+// workflows write (or admin). App-level config is not enough: an org may still
+// be on an older permission set until they accept the App update. On lookup
+// failure, returns false so we omit the scope and still mint a working token.
+func (p *GitHubTokenProvider) installationHasWorkflowsWrite(ctx context.Context, installationID int64) bool {
+	if installationID == 0 {
+		return false
+	}
+	perms, err := p.installationPermissions(ctx, installationID)
+	if err != nil || perms == nil {
+		return false
+	}
+	level := strings.ToLower(strings.TrimSpace(perms["workflows"]))
+	return level == "write" || level == "admin"
+}
+
+// installationPermissions returns the scopes granted to a specific installation
+// via GET /app/installations/{id}.
+func (p *GitHubTokenProvider) installationPermissions(ctx context.Context, installationID int64) (map[string]string, error) {
+	appJWT, err := p.appJWT()
+	if err != nil {
+		return nil, fmt.Errorf("sign app jwt: %w", err)
+	}
+
+	url := p.apiURL(fmt.Sprintf("/app/installations/%d", installationID))
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("build request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+appJWT)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+
+	resp, err := p.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("github get installation: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		var errBody map[string]interface{}
+		json.NewDecoder(resp.Body).Decode(&errBody)
+		return nil, fmt.Errorf("github get installation %d: %v", resp.StatusCode, errBody["message"])
+	}
+
+	var inst githubInstallation
+	if err := json.NewDecoder(resp.Body).Decode(&inst); err != nil {
+		return nil, fmt.Errorf("decode installation: %w", err)
+	}
+	return inst.Permissions, nil
 }
