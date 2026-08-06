@@ -2790,12 +2790,14 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 				if strings.Contains(turnContent, "[TERMINATE]") {
 					go s.handleClawTerminateSignal(clawID, turnContent)
 				}
-				// Detect and store any PR URLs mentioned by the agent. Skip when
-				// this turn is a blocked [DONE]: hasFailedRequiredGate already
-				// refused explicit registration, and scanning here would still
-				// arm claw_prs so merge/close could terminate a blocked claw.
-				if strings.Contains(turnContent, "[DONE]") && s.hasFailedRequiredGate(clawID) {
-					log.Printf("[pr-watcher] skipping PR scan for claw %s: [DONE] blocked by failed required gate", shortID(clawID))
+				// Detect and store PR URLs mentioned mid-work. [DONE] turns are
+				// intentionally excluded: registerDonePRURLs (pipeline path or
+				// handleClawDoneSignal) owns that registration so multi-URL sets
+				// stay atomic. A fallback scan here would call storePRMention
+				// per-URL and could partially arm the watcher after an aborted
+				// atomic register or a gate-blocked [DONE].
+				if strings.Contains(turnContent, "[DONE]") {
+					log.Printf("[pr-watcher] skipping PR scan for claw %s: [DONE] registration is handled explicitly", shortID(clawID))
 				} else {
 					go s.scanMessageForPRs(clawID, turnContent)
 				}
