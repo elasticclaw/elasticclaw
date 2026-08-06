@@ -533,7 +533,7 @@ func TestPlanGatePassMarksInitialPlanAccepted(t *testing.T) {
 	}
 	s.persistPipelineOutput(clawID, "plan_validate", "plan", &pipelineRunResult{
 		ExitCode: 0,
-		Stdout:   `{"status":"ok"}`,
+		Stdout:   `{"status":"ok","understanding":"Add CI lint","area":".github/workflows","steps":["add workflow","verify"],"verification":"open PR and check CI"}`,
 	})
 
 	stage := pipeline.Stage{
@@ -562,6 +562,53 @@ func TestPlanGatePassMarksInitialPlanAccepted(t *testing.T) {
 	}
 	if proceedCount != 1 {
 		t.Fatalf("proceed inject count = %d, want 1 when unrouted", proceedCount)
+	}
+	// Plan summary should appear in the transcript for human observers.
+	var summaryCount int
+	if err := db.QueryRow(
+		`SELECT COUNT(*) FROM messages WHERE claw_id=? AND content LIKE ?`,
+		clawID, "%Approved plan summary:%Add CI lint%",
+	).Scan(&summaryCount); err != nil {
+		t.Fatal(err)
+	}
+	if summaryCount != 1 {
+		t.Fatalf("expected plan summary notice, got %d", summaryCount)
+	}
+}
+
+func TestFormatPlanGateSummary(t *testing.T) {
+	got := formatPlanGateSummary(map[string]interface{}{
+		"status":        "ok",
+		"understanding": "Add lint CI",
+		"area":          ".github/workflows",
+		"steps":         []interface{}{"write workflow", "open PR"},
+		"verification":  "CI green",
+	})
+	for _, want := range []string{
+		"Approved plan summary",
+		"understanding: Add lint CI",
+		"area: .github/workflows",
+		"write workflow",
+		"verification: CI green",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("summary missing %q:\n%s", want, got)
+		}
+	}
+	if formatPlanGateSummary(map[string]interface{}{"status": "ok"}) != "" {
+		t.Fatal("expected empty summary when no plan fields")
+	}
+
+	// Multiline field values must stay indented under their label.
+	multi := formatPlanGateSummary(map[string]interface{}{
+		"understanding": "Line one\nLine two\n- not a field",
+		"steps":         []interface{}{"step A\ncontinued A", "step B"},
+	})
+	if !strings.Contains(multi, "- understanding: \n    Line one\n    Line two\n    - not a field") {
+		t.Fatalf("multiline understanding not indented:\n%s", multi)
+	}
+	if !strings.Contains(multi, "  • step A\n    continued A\n  • step B") {
+		t.Fatalf("multiline step item not indented:\n%s", multi)
 	}
 }
 
