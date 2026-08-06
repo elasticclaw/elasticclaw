@@ -2744,13 +2744,26 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 				if automaticContinuationPaused {
 					pipelineHandledDone = false
 				} else if pipelineHandledDone {
-					prURLs := extractDonePRURLs(turnContent)
-					// Register before the stage transition so pr_merged/pr_closed
-					// monitoring is armed even if the agent only listed URLs next
-					// to [DONE] and never elsewhere in chat.
-					s.registerDonePRURLs(clawID, prURLs)
-					s.trackDoneSignal(pipelineDoneCtx.Name(), pipelineDoneCtx.IssueID, clawID, len(prURLs))
-					s.safeGo("pipeline done transition", func() { s.transitionPipelineStageWithContext(clawID, *pipelineDoneStage, pipelineDoneCtx) })
+					// Same gates as handleClawDoneSignal: do not advance or arm
+					// PR monitoring while a required gate is failed. Keep
+					// pipelineHandledDone true so we do not also run the
+					// legacy done handler (which would double-nudge).
+					if s.hasFailedRequiredGate(clawID) {
+						s.injectUserMessage(clawID, "[factory] `[DONE]` blocked: a required tool gate has failed. Please fix the issues and retry.")
+					} else {
+						prURLs := extractDonePRURLs(turnContent)
+						// Register before the stage transition so pr_merged/pr_closed
+						// monitoring is armed even if the agent only listed URLs next
+						// to [DONE] and never elsewhere in chat.
+						if errURL := s.registerDonePRURLs(clawID, prURLs); errURL != "" {
+							s.injectUserMessage(clawID, fmt.Sprintf("[factory] Failed to register PR %s: internal error. Please resend: [DONE] %s", errURL, strings.Join(prURLs, " ")))
+						} else {
+							s.trackDoneSignal(pipelineDoneCtx.Name(), pipelineDoneCtx.IssueID, clawID, len(prURLs))
+							s.safeGo("pipeline done transition", func() {
+								s.transitionPipelineStageWithContext(clawID, *pipelineDoneStage, pipelineDoneCtx)
+							})
+						}
+					}
 				} else if !strings.Contains(turnContent, "[DONE]") {
 					s.safeGo("pipeline message triggers", func() { s.checkPipelineMessageTriggers(clawID, turnContent) })
 				}

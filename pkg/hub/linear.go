@@ -1324,10 +1324,22 @@ func (s *Server) handleClawDoneSignal(clawID, rawMessage string) {
 	prURLs := extractDonePRURLs(rawMessage)
 
 	if pipelineCtx, stage, ok := s.pipelineStageForMessageContains(clawID, rawMessage); ok {
+		// Match the legacy [DONE] path: a failed required gate must block both
+		// stage advance and PR registration so a blocked workflow cannot later
+		// terminate on merge/close of an improperly registered PR.
+		if s.hasFailedRequiredGate(clawID) {
+			msg := "[factory] `[DONE]` blocked: a required tool gate has failed. Please fix the issues and retry."
+			log.Printf("[factory] claw %s pipeline [DONE] blocked by failed required gate", shortID(clawID))
+			s.injectUserMessage(clawID, msg)
+			return
+		}
 		// Pipeline stages that match [DONE] return before the legacy store path
 		// below. Register PRs here so merge/close monitoring and review injects
 		// still arm; without this, claws can live forever after a PR merges.
-		s.registerDonePRURLs(clawID, prURLs)
+		if errURL := s.registerDonePRURLs(clawID, prURLs); errURL != "" {
+			s.injectUserMessage(clawID, fmt.Sprintf("[factory] Failed to register PR %s: internal error. Please resend: [DONE] %s", errURL, strings.Join(prURLs, " ")))
+			return
+		}
 		if issueID != "" {
 			s.trackDoneSignal(pipelineCtx.Name(), issueID, clawID, len(prURLs))
 		}
