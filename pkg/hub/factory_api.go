@@ -2,9 +2,7 @@ package hub
 
 import (
 	"encoding/json"
-	"fmt"
 	"net/http"
-	"strings"
 
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 )
@@ -74,25 +72,10 @@ func factoryToPushView(f *types.FactoryConfig) FactoryPushView {
 }
 
 func (s *Server) handleFactoriesList(w http.ResponseWriter, r *http.Request) {
-	nameFilter := strings.TrimSpace(r.URL.Query().Get("name"))
-
-	factories, err := loadExternalFactories()
-	if err != nil {
-		http.Error(w, "fs error: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	views := make([]FactoryPushView, 0, len(factories))
-	for _, f := range factories {
-		if f == nil {
-			continue
-		}
-		if nameFilter != "" && !strings.EqualFold(f.Name, nameFilter) {
-			continue
-		}
-		views = append(views, factoryToPushView(f))
-	}
-	jsonOK(w, views)
+	// On-disk factories/ is retired. Always return an empty list so the UI
+	// does not surface ghost automations that no longer run.
+	_ = r
+	jsonOK(w, []FactoryPushView{})
 }
 
 // FactoryPushRequest is the payload for POST /api/factories.
@@ -101,77 +84,14 @@ type FactoryPushRequest struct {
 }
 
 func (s *Server) handleFactoriesPush(w http.ResponseWriter, r *http.Request) {
+	// Drain body so clients don't hang, then reject.
 	var req FactoryPushRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
-		return
-	}
-	if len(req.Factories) == 0 {
-		http.Error(w, "no factories provided", http.StatusBadRequest)
-		return
-	}
-
-	// Validate all factories before saving, so a bad one fails the whole
-	// batch as a 400 instead of a partial save. Notify "via" references get
-	// the same author-time check as workflow saves (see validateNotifyVias).
-	for _, f := range req.Factories {
-		if f == nil {
-			http.Error(w, "factory cannot be nil", http.StatusBadRequest)
-			return
-		}
-		if err := f.Validate(); err != nil {
-			http.Error(w, "validation error: "+err.Error(), http.StatusBadRequest)
-			return
-		}
-		if err := s.validateFactoryNotifyVias(f); err != nil {
-			http.Error(w, "validation error: "+err.Error(), http.StatusBadRequest)
-			return
-		}
-	}
-
-	// Preserve webhook secrets from external storage before overwriting.
-	for _, incoming := range req.Factories {
-		if incoming == nil || incoming.Name == "" {
-			continue
-		}
-		if disk, err := loadExternalFactory(incoming.Name); err == nil {
-			if incoming.WebhookSecret == "" && incoming.WebhookSecretRef == "" && disk.WebhookSecret != "" {
-				incoming.WebhookSecret = disk.WebhookSecret
-			}
-		}
-	}
-
-	// Write each factory to external storage — attempt all writes before
-	// returning so that a failure mid-batch doesn't leave a partial update.
-	var saveErrs []string
-	for _, f := range req.Factories {
-		if f == nil || f.Name == "" {
-			saveErrs = append(saveErrs, "factory name required")
-			continue
-		}
-		if err := saveExternalFactory(f); err != nil {
-			saveErrs = append(saveErrs, fmt.Sprintf("save factory %q: %v", f.Name, err))
-		}
-	}
-	if len(saveErrs) > 0 {
-		http.Error(w, strings.Join(saveErrs, "; "), http.StatusInternalServerError)
-		return
-	}
-
-	// Keep hubCfg.Factories empty — external storage is the only source of truth.
-	// This prevents stale in-memory configs from shadowing disk state.
-
-	views := make([]FactoryPushView, 0, len(req.Factories))
-	for _, f := range req.Factories {
-		views = append(views, factoryToPushView(f))
-	}
-	jsonOK(w, map[string]interface{}{
-		"pushed":    len(req.Factories),
-		"factories": views,
-	})
+	_ = json.NewDecoder(r.Body).Decode(&req)
+	http.Error(w, errFactoriesRetired.Error(), http.StatusGone)
 }
 
 func (s *Server) handleFactoryDelete(w http.ResponseWriter, _ *http.Request, name string) {
+	// Best-effort remove leftover factories/<name> on disk.
 	if err := deleteExternalFactory(name); err != nil {
 		http.Error(w, "delete error: "+err.Error(), http.StatusInternalServerError)
 		return
