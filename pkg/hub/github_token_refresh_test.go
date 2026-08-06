@@ -109,19 +109,23 @@ func TestGitHubBootstrapCloneTimeoutScalesWithRepoCount(t *testing.T) {
 	}
 }
 
-func TestInstallationTokenOmitsNameListAboveGitHubCap(t *testing.T) {
-	// GitHub rejects repositories arrays longer than 50. We still mint a
-	// permission-restricted installation token so 50+ workspaces work; git
-	// clones should use ?repo= for least privilege.
-	var sawBody string
+// githubInstallationTokenTestServer mocks token mint + installation permission lookup.
+// installPermissionsJSON is the permissions object returned by GET /app/installations/{id}.
+func githubInstallationTokenTestServer(t *testing.T, installPermissionsJSON string, onAccessToken func(body string)) *httptest.Server {
+	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/app/installations"):
+		case r.Method == http.MethodGet && r.URL.Path == "/app/installations/99":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"id":99,"account":{"login":"org"},"permissions":` + installPermissionsJSON + `}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/app/installations":
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`[{"id":99,"account":{"login":"org"}}]`))
 		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/access_tokens"):
 			body, _ := io.ReadAll(r.Body)
-			sawBody = string(body)
+			if onAccessToken != nil {
+				onAccessToken(string(body))
+			}
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusCreated)
 			_, _ = w.Write([]byte(`{"token":"tok","expires_at":"2099-01-01T00:00:00Z"}`))
@@ -130,6 +134,17 @@ func TestInstallationTokenOmitsNameListAboveGitHubCap(t *testing.T) {
 		}
 	}))
 	t.Cleanup(srv.Close)
+	return srv
+}
+
+func TestInstallationTokenOmitsNameListAboveGitHubCap(t *testing.T) {
+	// GitHub rejects repositories arrays longer than 50. We still mint a
+	// permission-restricted installation token so 50+ workspaces work; git
+	// clones should use ?repo= for least privilege.
+	var sawBody string
+	srv := githubInstallationTokenTestServer(t, `{"contents":"write","workflows":"write"}`, func(body string) {
+		sawBody = body
+	})
 
 	provider, err := NewGitHubTokenProvider(&types.GitHubAppConfig{AppID: 1, PrivateKeyPEM: testGitHubAppPEM(t)})
 	if err != nil {
@@ -152,28 +167,15 @@ func TestInstallationTokenOmitsNameListAboveGitHubCap(t *testing.T) {
 		t.Fatalf("expected write permissions, body=%s", sawBody)
 	}
 	if !strings.Contains(sawBody, `"workflows":"write"`) {
-		t.Fatalf("expected workflows write permission for write-scoped tokens, body=%s", sawBody)
+		t.Fatalf("expected workflows write when installation grants it, body=%s", sawBody)
 	}
 }
 
 func TestInstallationTokenScopesRepositoryAllowlist(t *testing.T) {
 	var sawBody string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/app/installations"):
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`[{"id":99,"account":{"login":"org"}}]`))
-		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/access_tokens"):
-			body, _ := io.ReadAll(r.Body)
-			sawBody = string(body)
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusCreated)
-			_, _ = w.Write([]byte(`{"token":"tok","expires_at":"2099-01-01T00:00:00Z"}`))
-		default:
-			http.NotFound(w, r)
-		}
-	}))
-	t.Cleanup(srv.Close)
+	srv := githubInstallationTokenTestServer(t, `{"contents":"write","workflows":"write"}`, func(body string) {
+		sawBody = body
+	})
 
 	provider, err := NewGitHubTokenProvider(&types.GitHubAppConfig{AppID: 1, PrivateKeyPEM: testGitHubAppPEM(t)})
 	if err != nil {
@@ -193,7 +195,65 @@ func TestInstallationTokenScopesRepositoryAllowlist(t *testing.T) {
 		t.Fatalf("expected write permissions, body=%s", sawBody)
 	}
 	if !strings.Contains(sawBody, `"workflows":"write"`) {
-		t.Fatalf("expected workflows write permission for write-scoped tokens, body=%s", sawBody)
+		t.Fatalf("expected workflows write when installation grants it, body=%s", sawBody)
+	}
+}
+
+func TestInstallationTokenOmitsWorkflowsWhenInstallLacksPermission(t *testing.T) {
+	var sawBody string
+	// Installation has contents write but no workflows — requesting workflows would fail mint.
+	srv := githubInstallationTokenTestServer(t, `{"contents":"write","pull_requests":"write"}`, func(body string) {
+		sawBody = body
+	})
+
+	provider, err := NewGitHubTokenProvider(&types.GitHubAppConfig{AppID: 1, PrivateKeyPEM: testGitHubAppPEM(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider.apiBaseURL = srv.URL
+	provider.httpClient = srv.Client()
+
+	if _, _, err := provider.InstallationToken(context.Background(), 99, []RepoAccess{{Repo: "org/a", Permissions: "write"}}); err != nil {
+		t.Fatalf("InstallationToken: %v", err)
+	}
+	if !strings.Contains(sawBody, `"contents":"write"`) {
+		t.Fatalf("expected write permissions, body=%s", sawBody)
+	}
+	if strings.Contains(sawBody, `"workflows"`) {
+		t.Fatalf("must not request workflows when installation lacks it, body=%s", sawBody)
+	}
+}
+
+func TestInstallationTokenOmitsWorkflowsWhenInstallLookupFails(t *testing.T) {
+	var sawBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/app/installations/99":
+			http.Error(w, `{"message":"boom"}`, http.StatusInternalServerError)
+		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/access_tokens"):
+			body, _ := io.ReadAll(r.Body)
+			sawBody = string(body)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"token":"tok","expires_at":"2099-01-01T00:00:00Z"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	provider, err := NewGitHubTokenProvider(&types.GitHubAppConfig{AppID: 1, PrivateKeyPEM: testGitHubAppPEM(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider.apiBaseURL = srv.URL
+	provider.httpClient = srv.Client()
+
+	if _, _, err := provider.InstallationToken(context.Background(), 99, []RepoAccess{{Repo: "org/a", Permissions: "write"}}); err != nil {
+		t.Fatalf("InstallationToken: %v", err)
+	}
+	if strings.Contains(sawBody, `"workflows"`) {
+		t.Fatalf("must omit workflows when installation permission lookup fails, body=%s", sawBody)
 	}
 }
 
