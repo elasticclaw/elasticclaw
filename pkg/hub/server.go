@@ -1838,26 +1838,26 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		rows, err = s.db.Query(
 			`SELECT id, claw_id, tenant_id, role, content, COALESCE(format,''), created_at FROM messages
 			 WHERE claw_id = ? AND tenant_id = ? AND created_at < ?
-			 AND NOT (role = 'system' AND content IN (?, ?, ?, ?, ?, ?))
+			 AND NOT (role = 'system' AND content IN (?, ?, ?, ?, ?, ?, ?))
 			 ORDER BY created_at DESC LIMIT ?`,
-			clawID, tenantID, before, wakeMessageMarker, defaultWakeContent, initialPlanWakeContent, initialPlanRequiredMarker, initialPlanAcceptedMarker, initialPlanCorrectionSentMarker, limit,
+			clawID, tenantID, before, wakeMessageMarker, defaultWakeContent, initialPlanWakeContent, initialPlanRequiredMarker, initialPlanAcceptedMarker, initialPlanCorrectionSentMarker, initialPlanSoftAcceptEligibleMarker, limit,
 		)
 	} else if after != "" {
 		rows, err = s.db.Query(
 			`SELECT id, claw_id, tenant_id, role, content, COALESCE(format,''), created_at FROM messages
 			 WHERE claw_id = ? AND tenant_id = ? AND created_at > ?
-			 AND NOT (role = 'system' AND content IN (?, ?, ?, ?, ?, ?))
+			 AND NOT (role = 'system' AND content IN (?, ?, ?, ?, ?, ?, ?))
 			 ORDER BY created_at ASC LIMIT ?`,
-			clawID, tenantID, after, wakeMessageMarker, defaultWakeContent, initialPlanWakeContent, initialPlanRequiredMarker, initialPlanAcceptedMarker, initialPlanCorrectionSentMarker, limit,
+			clawID, tenantID, after, wakeMessageMarker, defaultWakeContent, initialPlanWakeContent, initialPlanRequiredMarker, initialPlanAcceptedMarker, initialPlanCorrectionSentMarker, initialPlanSoftAcceptEligibleMarker, limit,
 		)
 	} else {
 		// Default: last N messages
 		rows, err = s.db.Query(
 			`SELECT id, claw_id, tenant_id, role, content, COALESCE(format,''), created_at FROM messages
 			 WHERE claw_id = ? AND tenant_id = ?
-			 AND NOT (role = 'system' AND content IN (?, ?, ?, ?, ?, ?))
+			 AND NOT (role = 'system' AND content IN (?, ?, ?, ?, ?, ?, ?))
 			 ORDER BY created_at DESC LIMIT ?`,
-			clawID, tenantID, wakeMessageMarker, defaultWakeContent, initialPlanWakeContent, initialPlanRequiredMarker, initialPlanAcceptedMarker, initialPlanCorrectionSentMarker, limit,
+			clawID, tenantID, wakeMessageMarker, defaultWakeContent, initialPlanWakeContent, initialPlanRequiredMarker, initialPlanAcceptedMarker, initialPlanCorrectionSentMarker, initialPlanSoftAcceptEligibleMarker, limit,
 		)
 	}
 	if err != nil {
@@ -1899,11 +1899,12 @@ func hiddenSystemMessagesArgs() []interface{} {
 		initialPlanRequiredMarker,
 		initialPlanAcceptedMarker,
 		initialPlanCorrectionSentMarker,
+		initialPlanSoftAcceptEligibleMarker,
 	}
 }
 
 func hiddenSystemMessagesSQL() string {
-	return `AND NOT (role = 'system' AND content IN (?, ?, ?, ?, ?, ?))`
+	return `AND NOT (role = 'system' AND content IN (?, ?, ?, ?, ?, ?, ?))`
 }
 
 func (s *Server) handleMessageTimeline(w http.ResponseWriter, r *http.Request, tenantID, clawID string) {
@@ -5898,6 +5899,10 @@ const (
 	initialPlanRequiredMarker       = "__INITIAL_PLAN_REQUIRED__"
 	initialPlanAcceptedMarker       = "__INITIAL_PLAN_ACCEPTED__"
 	initialPlanCorrectionSentMarker = "__INITIAL_PLAN_CORRECTION_SENT__"
+	// Soft-accept is allowed only after a freeform plan *message* was rejected,
+	// not after a tool-before-plan correction (that would authorize work from
+	// a long status update that is not a plan).
+	initialPlanSoftAcceptEligibleMarker = "__INITIAL_PLAN_SOFT_ACCEPT_ELIGIBLE__"
 	defaultWakeContent              = "Introduce yourself briefly and let the user know you're ready to help."
 	initialPlanWakeContent          = `Initial plan required before implementation.
 
@@ -6066,16 +6071,22 @@ func (s *Server) handleInitialPlanResponse(clawID, tenantID, content string) {
 	if !s.hasSystemMarker(clawID, initialPlanRequiredMarker) || s.hasSystemMarker(clawID, initialPlanAcceptedMarker) {
 		return
 	}
-	// Strict keyword match, or a substantial second attempt after we already
-	// asked for a correction. Without the soft path, a real plan that misses
-	// one keyword (e.g. "issue") leaves the agent waiting forever for proceed.
-	correctionSent := s.hasSystemMarker(clawID, initialPlanCorrectionSentMarker)
-	if isValidInitialPlan(content) || (correctionSent && isSubstantialInitialPlan(content)) {
+	// Strict keyword match, or a substantial second attempt after a prior
+	// freeform plan *message* was rejected (soft-accept eligible). Tool-before-
+	// plan corrections alone must not arm soft-accept.
+	softEligible := s.hasSystemMarker(clawID, initialPlanSoftAcceptEligibleMarker)
+	if isValidInitialPlan(content) || (softEligible && isSubstantialInitialPlan(content)) {
 		_ = s.insertSystemMarker(clawID, tenantID, initialPlanAcceptedMarker)
 		s.injectHubMessageByID(clawID, initialPlanProceedContent)
 		return
 	}
-	if !correctionSent {
+	trimmed := strings.TrimSpace(content)
+	// A real plan-shaped attempt (not a short ack) makes the next turn
+	// soft-eligible if still missing a keyword category.
+	if len(trimmed) >= 120 {
+		_ = s.insertSystemMarker(clawID, tenantID, initialPlanSoftAcceptEligibleMarker)
+	}
+	if !s.hasSystemMarker(clawID, initialPlanCorrectionSentMarker) {
 		_ = s.insertSystemMarker(clawID, tenantID, initialPlanCorrectionSentMarker)
 		s.injectHubMessageByID(clawID, initialPlanCorrectionContent)
 		return
@@ -6083,7 +6094,6 @@ func (s *Server) handleInitialPlanResponse(clawID, tenantID, content string) {
 	// Correction already sent and this turn still failed both gates. Re-nudge
 	// only when the agent produced a real attempt (not a short ack), so it is
 	// not frozen waiting for a proceed that never arrives.
-	trimmed := strings.TrimSpace(content)
 	if len(trimmed) < 120 {
 		return
 	}
@@ -6102,6 +6112,7 @@ func (s *Server) handleInitialPlanActivity(clawID, tenantID string, activity map
 	if kind != "tool" {
 		return
 	}
+	// Nudge only — do not mark soft-accept eligible (that requires a plan message).
 	_ = s.insertSystemMarker(clawID, tenantID, initialPlanCorrectionSentMarker)
 	s.injectHubMessageByID(clawID, initialPlanCorrectionContent)
 }
@@ -6112,13 +6123,13 @@ func isValidInitialPlan(content string) bool {
 		return false
 	}
 	lower := strings.ToLower(content)
-	hasUnderstanding := containsAny(lower, []string{
+	hasUnderstanding := containsPlanTokens(lower, []string{
 		"understand", "issue", "task", "problem", "requirement", "requirements",
 		"will add", "will implement", "need to", "goal", "ticket",
 	})
-	hasPlan := containsAny(lower, []string{"plan", "step", "approach", "implement", "implementation"})
-	hasVerification := containsAny(lower, []string{"test", "verify", "verification", "check", "build", "ci"})
-	hasCodeArea := containsAny(lower, []string{
+	hasPlan := containsPlanTokens(lower, []string{"plan", "step", "approach", "implement", "implementation"})
+	hasVerification := containsPlanTokens(lower, []string{"test", "verify", "verification", "check", "build", "ci"})
+	hasCodeArea := containsPlanTokens(lower, []string{
 		"file", "code", "package", "component", "backend", "frontend",
 		"workflow", "repo", "repository", "directory", "config", "script",
 		".github", "package.json",
@@ -6126,18 +6137,69 @@ func isValidInitialPlan(content string) bool {
 	return hasUnderstanding && hasPlan && hasVerification && hasCodeArea
 }
 
-// isSubstantialInitialPlan is a softer gate used after we already sent a
-// correction. Agents often write a real plan without the exact keyword set
-// (e.g. naming a ticket id instead of "issue"); accepting those unblocks work.
+// isSubstantialInitialPlan is a softer gate used after a freeform plan message
+// was already rejected. Agents often write a real plan without the exact
+// keyword set (e.g. naming a ticket id instead of "issue"); accepting those
+// unblocks work. Not armed by tool-before-plan corrections alone.
 func isSubstantialInitialPlan(content string) bool {
 	content = strings.TrimSpace(content)
 	if len(content) < 200 || len(strings.Fields(content)) < 40 {
 		return false
 	}
 	lower := strings.ToLower(content)
-	hasPlan := containsAny(lower, []string{"plan", "step", "approach", "implement", "implementation"})
-	hasVerification := containsAny(lower, []string{"test", "verify", "verification", "check", "build", "ci"})
+	hasPlan := containsPlanTokens(lower, []string{"plan", "step", "approach", "implement", "implementation"})
+	hasVerification := containsPlanTokens(lower, []string{"test", "verify", "verification", "check", "build", "ci"})
 	return hasPlan && hasVerification
+}
+
+// containsPlanTokens reports whether s contains any needle. Multi-word needles
+// use substring match; single short tokens (e.g. "ci") require word boundaries
+// so "decision"/"special"/"specific" do not count as verification.
+func containsPlanTokens(s string, needles []string) bool {
+	for _, needle := range needles {
+		n := strings.ToLower(strings.TrimSpace(needle))
+		if n == "" {
+			continue
+		}
+		if strings.Contains(n, " ") || strings.Contains(n, ".") {
+			if strings.Contains(s, n) {
+				return true
+			}
+			continue
+		}
+		if len(n) <= 3 {
+			if hasPlanWord(s, n) {
+				return true
+			}
+			continue
+		}
+		if strings.Contains(s, n) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasPlanWord(s, word string) bool {
+	for start := 0; start <= len(s); {
+		i := strings.Index(s[start:], word)
+		if i < 0 {
+			return false
+		}
+		i += start
+		leftOK := i == 0 || !isPlanWordChar(s[i-1])
+		right := i + len(word)
+		rightOK := right >= len(s) || !isPlanWordChar(s[right])
+		if leftOK && rightOK {
+			return true
+		}
+		start = i + 1
+	}
+	return false
+}
+
+func isPlanWordChar(b byte) bool {
+	return (b >= 'a' && b <= 'z') || (b >= '0' && b <= '9')
 }
 
 // clawHasMessages returns true if the claw already has message history.

@@ -1748,6 +1748,8 @@ func TestHandleInitialPlanResponseSoftAcceptsAfterCorrection(t *testing.T) {
 	}
 	s.insertSystemMarker("claw-soft-plan", "test-tenant-id", initialPlanRequiredMarker)
 	s.insertSystemMarker("claw-soft-plan", "test-tenant-id", initialPlanCorrectionSentMarker)
+	// Soft path requires a prior rejected plan *message*, not tool activity alone.
+	s.insertSystemMarker("claw-soft-plan", "test-tenant-id", initialPlanSoftAcceptEligibleMarker)
 
 	// Substantial plan with plan+verification but intentionally avoids some
 	// strict understanding keywords; after a correction this must proceed.
@@ -1766,6 +1768,60 @@ func TestHandleInitialPlanResponseSoftAcceptsAfterCorrection(t *testing.T) {
 	}
 	if proceedCount != 1 {
 		t.Fatalf("expected proceed message after soft accept, got %d", proceedCount)
+	}
+}
+
+func TestHandleInitialPlanActivityDoesNotArmSoftAccept(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, nil, "", "", "")
+	_, err := db.Exec(
+		`INSERT INTO claws(id, tenant_id, name, tags, created_at) VALUES(?,?,?,?,datetime('now'))`,
+		"claw-tool-soft", "test-tenant-id", "claw tool soft", `[]`,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.insertSystemMarker("claw-tool-soft", "test-tenant-id", initialPlanRequiredMarker)
+	s.handleInitialPlanActivity("claw-tool-soft", "test-tenant-id", map[string]interface{}{"kind": "tool", "tool": "exec"})
+	if !s.hasSystemMarker("claw-tool-soft", initialPlanCorrectionSentMarker) {
+		t.Fatalf("tool activity before initial plan did not mark correction sent")
+	}
+	if s.hasSystemMarker("claw-tool-soft", initialPlanSoftAcceptEligibleMarker) {
+		t.Fatal("tool activity must not arm soft-accept eligibility")
+	}
+	// Long status with plan/verify keywords must still fail until a plan message attempt.
+	status := strings.Repeat("Rough plan: add the lint workflow, wire pnpm cache, and run typecheck. ", 8) +
+		"Verification: run lint and typecheck in CI and confirm the PR checks go green."
+	s.handleInitialPlanResponse("claw-tool-soft", "test-tenant-id", status)
+	if s.hasSystemMarker("claw-tool-soft", initialPlanAcceptedMarker) {
+		t.Fatal("must not soft-accept after tool-only correction without prior plan attempt")
+	}
+	if !s.hasSystemMarker("claw-tool-soft", initialPlanSoftAcceptEligibleMarker) {
+		t.Fatal("first long plan-shaped message should arm soft-accept for the next turn")
+	}
+}
+
+func TestIsValidInitialPlanRejectsIncidentalCISubstring(t *testing.T) {
+	// "decision"/"special"/"specific" must not satisfy verification via "ci".
+	// Understanding + plan + code area present; avoid real verify/test/check/build tokens.
+	body := strings.Repeat("I understand the issue in this special decision for a specific component approach. ", 6) +
+		"The plan is to step through the package carefully and ship the change."
+	if containsPlanTokens(strings.ToLower(body), []string{"ci"}) {
+		t.Fatalf("incidental ci substrings should not match word-boundary ci token")
+	}
+	if isValidInitialPlan(body) {
+		t.Fatalf("plan must not pass verification on incidental ci substrings:\n%s", body)
+	}
+	// Explicit CI token as a word should still count (with other categories).
+	withCI := `I understand the issue is missing PR CI. The likely code area is the package and workflow files. My plan is to implement lint and typecheck steps. Verification: run CI and check the PR goes green after the build.`
+	// Pad to meet word/length floors if needed
+	for len(strings.Fields(withCI)) < 35 {
+		withCI += " Additional detail about the approach and package scripts."
+	}
+	if !containsPlanTokens(strings.ToLower(withCI), []string{"ci"}) {
+		t.Fatalf("standalone CI word should match word-boundary ci token")
+	}
+	if !isValidInitialPlan(withCI) {
+		t.Fatalf("plan with standalone CI word should pass verification category")
 	}
 }
 
