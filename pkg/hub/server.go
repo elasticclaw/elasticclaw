@@ -6019,7 +6019,8 @@ When the PR is ready, say [DONE] with the PR URL(s).`
 
 // formatPlanGateSummary builds a human-readable plan dump from gate output JSON
 // so the transcript shows the plan even when the agent only said [PLAN_READY].
-// Multiline values are indented under their field. When the validator only
+// Multiline values are indented so continuation lines stay under their field
+// and are not mistaken for new bullets or fields. When the validator only
 // returned status (legacy), still emit a short approved notice so chat is not silent.
 func formatPlanGateSummary(output map[string]interface{}) string {
 	if output == nil {
@@ -6041,6 +6042,7 @@ func formatPlanGateSummary(output map[string]interface{}) string {
 			b.WriteString(lines[0])
 			b.WriteByte('\n')
 		} else {
+			// First line after the label; further lines indented under the field.
 			b.WriteByte('\n')
 			for _, line := range lines {
 				b.WriteString("    ")
