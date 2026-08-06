@@ -5932,14 +5932,83 @@ This first message must be a normal assistant message visible to the user. Tool 
 	// It must be unambiguous: agents previously waited for freeform "proceed"
 	// or re-emitted [PLAN_READY] after the gate already passed.
 	planGateProceedContent = `[hub] Plan gate passed — you are cleared to implement now.
+
 Do not wait for another proceed message.
 Do not emit [PLAN_READY] again.
-Keep sending short visible progress updates as you work.
+
+VISIBLE CHAT (required — tool activity alone is not enough for humans watching):
+- Before your first code change, send one short message: what you're doing first.
+- After each meaningful milestone (deps, files changed, checks, PR), send a 1–3 sentence update.
+- When a command fails, say what failed and what you'll try next.
+- Prefer plain assistant messages over silent tool spam.
+
 When the PR is ready, say [DONE] with the PR URL(s).`
 	planGateAlreadyAcceptedContent = `[hub] Plan was already approved earlier in this run.
 Continue implementation — do not emit [PLAN_READY] again.
+Keep posting short visible progress updates (tool rows alone are not enough).
 When the PR is ready, say [DONE] with the PR URL(s).`
 )
+
+// formatPlanGateSummary builds a human-readable plan dump from gate output JSON
+// so the transcript shows the plan even when the agent only said [PLAN_READY].
+func formatPlanGateSummary(output map[string]interface{}) string {
+	if output == nil {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("[hub] Approved plan summary:\n")
+	wrote := false
+	writeField := func(label, key string) {
+		v, ok := output[key]
+		if !ok || v == nil {
+			return
+		}
+		switch t := v.(type) {
+		case string:
+			if strings.TrimSpace(t) == "" {
+				return
+			}
+			b.WriteString("- ")
+			b.WriteString(label)
+			b.WriteString(": ")
+			b.WriteString(strings.TrimSpace(t))
+			b.WriteByte('\n')
+			wrote = true
+		case []interface{}:
+			if len(t) == 0 {
+				return
+			}
+			b.WriteString("- ")
+			b.WriteString(label)
+			b.WriteString(":\n")
+			for _, item := range t {
+				b.WriteString("  • ")
+				b.WriteString(strings.TrimSpace(fmt.Sprint(item)))
+				b.WriteByte('\n')
+			}
+			wrote = true
+		default:
+			s := strings.TrimSpace(fmt.Sprint(v))
+			if s == "" || s == "[]" || s == "map[]" {
+				return
+			}
+			b.WriteString("- ")
+			b.WriteString(label)
+			b.WriteString(": ")
+			b.WriteString(s)
+			b.WriteByte('\n')
+			wrote = true
+		}
+	}
+	writeField("understanding", "understanding")
+	writeField("area", "area")
+	writeField("steps", "steps")
+	writeField("verification", "verification")
+	if !wrote {
+		return ""
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
 
 // planGateAcceptedMarker is per-stage so a second plan_gate later in the
 // workflow still evaluates its own output instead of inheriting a global pass.
