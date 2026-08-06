@@ -924,6 +924,12 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, ctx pipelineCon
 		if stage.OnEnter.Run.Output != "" && result != nil {
 			s.persistPipelineOutput(clawID, stage.ID, stage.OnEnter.Run.Output, result)
 		}
+		// Scripts like verify-github-pr-links emit PR URLs in JSON. Register them
+		// so the PR watcher can monitor merge/close even when the agent never
+		// pasted bare github.com/…/pull/N links into chat.
+		if result != nil && strings.TrimSpace(result.Stdout) != "" {
+			s.scanMessageForPRs(clawID, result.Stdout)
+		}
 		if err != nil || (result != nil && result.ExitCode != 0) {
 			msg := formatPipelineRunFailure(stage.OnEnter.Run, result, err)
 			// If this stage has a gate, treat nonzero exit as a normal validation
