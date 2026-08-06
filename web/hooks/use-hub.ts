@@ -341,16 +341,18 @@ export function useHub(selectedClawId: string | null): HubState {
         const cachedOnly = existingNonOpt.filter((m) => !apiIds.has(m.id))
         const inflight = existing.filter((m) => m.id.startsWith('opt-') &&
           !msgs.some((r) => r.content === m.content && r.role === m.role))
-        // Keep in-flight tool activity so selecting a claw mid-turn does not blank
-        // the UI. Live text fragments are only valid while a segmented stream is
-        // open (segmentedStreamRef); once the durable final lands the ref is
-        // cleared and fragments must go so we never double-render beside the
-        // timeline reply. Avoid timestamp heuristics — equal ms and nearby
-        // previous-turn replies both mis-classify "is this the current final?".
-        const streamInProgress = Boolean(segmentedStreamRef.current[clawId])
+        // Keep in-flight tool activity and live text segments that the API has
+        // not yet returned. Live segments must survive tool boundaries and
+        // timeline reloads — otherwise the transcript blanks until a full
+        // page refresh reloads durable rows from the server.
         const liveTransient = existing.filter((m) => {
           if (!isTransientMessage(m)) return false
-          if (m.id.startsWith("live-")) return streamInProgress
+          if (m.id.startsWith("live-")) {
+            // Drop only when a durable API row already carries the same text.
+            return !msgs.some(
+              (api) => api.role === m.role && api.content === m.content
+            )
+          }
           return true
         })
         const merged = pruneOldestLiveActivities(
@@ -492,12 +494,7 @@ export function useHub(selectedClawId: string | null): HubState {
           // Final message — hold until typewriter drains, then commit
           const msg = mapApiMessage(payload)
           const clawId = payload.claw_id
-          if (segmentedStreamRef.current[clawId]) {
-            // Drop any remaining typewriter tail — the durable final message is
-            // the canonical full reply (same content a refresh would load).
-            clearTypewriter(clawId)
-            delete segmentedStreamRef.current[clawId]
-            // Called once typewriter is fully drained — safe to add final message
+          const commitFinalMessage = () => {
             setClaws((prev) =>
               prev.map((c) =>
                 c.id === clawId
@@ -513,43 +510,54 @@ export function useHub(selectedClawId: string | null): HubState {
               )
             )
             setMessages((prev) => {
-              // Replace live text fragments with the durable server message so
-              // end-of-stream matches timeline/refresh. Keep live activity rows
-              // for the current turn (refresh shows activity_summary instead).
-              const nextMessages = withoutModelWaitActivities(prev[clawId] || []).filter(
-                (m) => !m.id.startsWith(`live-segment-${clawId}-`)
-              )
+              // Keep prior live-segment rows on tool-interrupted turns. The final
+              // message is often only the post-tool tail; wiping live-segments
+              // blanked the transcript until a full page refresh.
+              const nextMessages = withoutModelWaitActivities(prev[clawId] || [])
               if (!nextMessages.some((m) => m.id === msg.id)) {
-                nextMessages.push(msg)
+                const lastLiveIdx = (() => {
+                  for (let i = nextMessages.length - 1; i >= 0; i -= 1) {
+                    if (
+                      nextMessages[i].id.startsWith("live-") &&
+                      nextMessages[i].role === msg.role
+                    ) {
+                      return i
+                    }
+                  }
+                  return -1
+                })()
+                if (
+                  lastLiveIdx >= 0 &&
+                  nextMessages[lastLiveIdx].content === msg.content
+                ) {
+                  // Promote live row to durable id to avoid double-render.
+                  nextMessages[lastLiveIdx] = {
+                    ...nextMessages[lastLiveIdx],
+                    id: msg.id,
+                    timestamp: msg.timestamp,
+                  }
+                } else {
+                  nextMessages.push(msg)
+                }
               }
-              const pruned = pruneOldestLiveActivities(nextMessages, MAX_LIVE_ACTIVITIES_PER_CLAW)
+              const pruned = pruneOldestLiveActivities(
+                nextMessages,
+                MAX_LIVE_ACTIVITIES_PER_CLAW
+              )
               const next = { ...prev, [clawId]: pruned }
               persistMessages(next)
               return next
             })
+          }
+
+          if (segmentedStreamRef.current[clawId]) {
+            // Segments already committed as live-*/hub messages; drop typewriter tail.
+            clearTypewriter(clawId)
+            delete segmentedStreamRef.current[clawId]
+            commitFinalMessage()
           } else {
-            finalizeTypewriter(clawId, () => {
-              // Called once typewriter is fully drained — safe to add final message
-              setClaws((prev) =>
-                prev.map((c) =>
-                  c.id === clawId
-                    ? {
-                        ...c,
-                        isStreaming: false,
-                        unreadCount:
-                          selectedClawIdRef.current !== clawId && msg.role === "claw"
-                            ? c.unreadCount + 1
-                            : c.unreadCount,
-                      }
-                    : c
-                )
-              )
-              setMessages((prev) => {
-                const next = { ...prev, [clawId]: [...withoutModelWaitActivities(prev[clawId] || []), msg] }
-                persistMessages(next)
-                return next
-              })
-            })
+            // Uninterrupted turn: let the typewriter finish revealing, then commit.
+            finalizeTypewriter(clawId, commitFinalMessage)
           }
         } else if (type === "claw_status") {
           const { claw_id, status } = payload

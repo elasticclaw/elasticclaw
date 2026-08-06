@@ -314,12 +314,30 @@ func (s *Server) flushStreamingSegment(clawID, tenantID string, cc *clawConn) er
 	cc.streamingSplit = true
 	cc.mu.Unlock()
 
+	createdAt := now()
 	_, err := s.db.Exec(
 		`INSERT INTO messages(id,claw_id,tenant_id,role,content,created_at,delivered_at) VALUES(?,?,?,?,?,?,?)
 		 ON CONFLICT(id) DO UPDATE SET content=excluded.content, delivered_at=excluded.delivered_at`,
-		msgID, clawID, tenantID, "claw", content, now(), now(),
+		msgID, clawID, tenantID, "claw", content, createdAt, createdAt,
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	// Broadcast the flushed segment so the UI keeps prior turn text when a tool
+	// call interrupts streaming. Without this, only the client typewriter
+	// snapshot holds the text — and the final message handler used to wipe it.
+	s.broadcastToUsers(tenantID, types.WSMessage{
+		Type: "message",
+		Payload: types.HubMessage{
+			ID:        msgID,
+			ClawID:    clawID,
+			TenantID:  tenantID,
+			Role:      "claw",
+			Content:   content,
+			CreatedAt: createdAt,
+		},
+	})
+	return nil
 }
 
 type userConn struct {

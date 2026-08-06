@@ -127,6 +127,14 @@ export function useWindowedMessages({ clawId, liveMessages }: UseWindowedMessage
     for (const m of liveMessages) {
       if (seen.has(m.id)) continue
       if (all.some((existing) => isDuplicateLiveActivity(existing, m))) continue
+      // Prefer durable API rows over client live-segment clones of the same text
+      // so tool-interrupted turns do not double-render after the hub flushes a segment.
+      if (
+        m.id.startsWith("live-") &&
+        all.some((existing) => existing.role === m.role && existing.content === m.content)
+      ) {
+        continue
+      }
       seen.add(m.id)
       all.push(m)
     }
