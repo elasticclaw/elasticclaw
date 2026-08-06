@@ -449,6 +449,11 @@ func loadExternalWorkspaceConfig(name string) (types.WorkspaceConfig, error) {
 	configPath := filepath.Join(dir, "elasticclaw-config.yaml")
 	data, err := os.ReadFile(configPath)
 	if err != nil {
+		// Only fall back to legacy workspace.yaml when the canonical file is
+		// actually missing. Permissions / other I/O errors must surface as-is.
+		if !os.IsNotExist(err) {
+			return types.WorkspaceConfig{}, fmt.Errorf("read workspace %q config: %w", name, err)
+		}
 		legacyPath := filepath.Join(dir, "workspace.yaml")
 		data, err = os.ReadFile(legacyPath)
 		if err != nil {

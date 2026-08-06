@@ -39,6 +39,35 @@ func TestWorkspacesEndpointReturnsPersistedWorkspacesOnly(t *testing.T) {
 	}
 }
 
+func TestResolveWorkflowConfigMissingWorkspaceIsNotFound(t *testing.T) {
+	configDir := t.TempDir()
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", configDir+"/hub.yaml")
+	s, _ := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
+
+	// Create a different workspace so the hub is not empty.
+	body := `{"workspaces":[{"name":"amazecrm-dev","repositories":["elasticclaw/elasticclaw"]}]}`
+	req := httptest.NewRequest(http.MethodPost, "/api/workspaces", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("workspace push status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+
+	// Detail / patch / trigger all go through resolveWorkflowConfig.
+	req = httptest.NewRequest(http.MethodGet, "/api/workspaces/amazecrm/workflows/linear", nil)
+	req.Header.Set("Authorization", "Bearer test-token")
+	rr = httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("workflow detail status = %d, want 404, body = %s", rr.Code, rr.Body.String())
+	}
+	if strings.Contains(rr.Body.String(), "failed to load workflow") {
+		t.Fatalf("body = %q, missing workspace must not surface as 500 load failure", rr.Body.String())
+	}
+}
+
 func TestWorkflowPushMissingWorkspaceReturnsClearNotFound(t *testing.T) {
 	configDir := t.TempDir()
 	t.Setenv("ELASTICCLAW_HUB_CONFIG", configDir+"/hub.yaml")
