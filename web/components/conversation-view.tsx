@@ -2,6 +2,7 @@
 
 import { useState, useRef, useEffect, useCallback, useMemo, memo } from "react"
 import { Send, Terminal, TerminalSquare, ChevronLeft, ChevronRight, ChevronDown, Loader2, LayoutGrid, Info, MessageSquare, Trash2, AlertCircle, Wrench, GripVertical, Settings2, Paperclip, File as FileIcon, X } from "lucide-react"
+import { CopyTranscriptButton } from "@/components/copy-transcript-button"
 import {
   DndContext,
   closestCenter,
@@ -634,6 +635,13 @@ const ClawBoardCard = memo(function ClawBoardCard({
                   {claw.unreadCount > 99 ? "99+" : claw.unreadCount}
                 </span>
               )}
+              <CopyTranscriptButton
+                claw={claw}
+                messages={messages}
+                streamingText={streamingBuffer?.text}
+                size="icon"
+                stopPropagation
+              />
               <button
                 onClick={handleFlip}
                 className="p-1 rounded hover:bg-accent transition-colors"
@@ -1654,6 +1662,12 @@ function ClawChatView({
             <span className="text-sm text-muted-foreground font-mono">{formatUptime(claw.uptime)}</span>
           </div>
           <div className="flex items-center gap-2">
+            <CopyTranscriptButton
+              claw={claw}
+              messages={messages}
+              streamingText={streamingBuffer?.text}
+              size="sm"
+            />
             {claw.ssh_host && (
               <Button variant="outline" size="sm" onClick={() => setTerminalOpen(true)}>
                 <TerminalSquare className="size-3.5 mr-1.5" />
