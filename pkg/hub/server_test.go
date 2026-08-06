@@ -1471,6 +1471,7 @@ func TestSplitStreamingTurnDoesNotBroadcastGhostFinalMessage(t *testing.T) {
 
 	seenIdle := false
 	seenGhostMessage := false
+	seenSegmentMessage := false
 	readUntil := time.Now().Add(2 * time.Second)
 	for time.Now().Before(readUntil) && !seenIdle {
 		readCtx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
@@ -1484,8 +1485,13 @@ func TestSplitStreamingTurnDoesNotBroadcastGhostFinalMessage(t *testing.T) {
 		case "message":
 			payload, _ := json.Marshal(msg.Payload)
 			var hm types.HubMessage
-			if err := json.Unmarshal(payload, &hm); err == nil && hm.Content == finalContent {
-				seenGhostMessage = true
+			if err := json.Unmarshal(payload, &hm); err == nil {
+				if hm.Content == finalContent {
+					seenGhostMessage = true
+				}
+				if hm.Content == "Assistant segment 1" {
+					seenSegmentMessage = true
+				}
 			}
 		case "agent_typing":
 			payload, _ := json.Marshal(msg.Payload)
@@ -1503,6 +1509,9 @@ func TestSplitStreamingTurnDoesNotBroadcastGhostFinalMessage(t *testing.T) {
 	}
 	if seenGhostMessage {
 		t.Fatal("observed unpersisted final full-response message over user websocket")
+	}
+	if !seenSegmentMessage {
+		t.Fatal("did not observe flushed segment broadcast over user websocket")
 	}
 
 	var finalRows int
