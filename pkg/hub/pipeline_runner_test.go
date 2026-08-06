@@ -555,6 +555,101 @@ func TestPlanGatePassMarksInitialPlanAccepted(t *testing.T) {
 	if !s.hasSystemMarker(clawID, planGateAcceptedMarker(stage.ID)) {
 		t.Fatal("plan_gate pass should mark per-stage accepted marker")
 	}
+	// No gate_result route in this test — proceed should be injected for the agent.
+	var proceedCount int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND content=?`, clawID, planGateProceedContent).Scan(&proceedCount); err != nil {
+		t.Fatal(err)
+	}
+	if proceedCount != 1 {
+		t.Fatalf("proceed inject count = %d, want 1 when unrouted", proceedCount)
+	}
+}
+
+func TestPlanGatePassWithRouteDoesNotInjectProceedTurn(t *testing.T) {
+	// When gate_result routes to an implement inject, do not also inject
+	// planGateProceedContent (that would queue a duplicate agent turn).
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
+	const clawID = "claw-plan-gate-routed"
+	_, err := db.Exec(
+		`INSERT INTO claws(id, tenant_id, name, template, status, pipeline_stage, created_at) VALUES(?,?,?,?,?,?,datetime('now'))`,
+		clawID, "test-tenant-id", "test-claw", "base", "connected", "",
+	)
+	if err != nil {
+		t.Fatalf("insert claw: %v", err)
+	}
+	s.persistPipelineOutput(clawID, "plan_validate", "plan", &pipelineRunResult{
+		ExitCode: 0,
+		Stdout:   `{"status":"ok"}`,
+	})
+	factory := &types.FactoryConfig{Name: "plan-routed", PipelineYAML: `
+stages:
+  - id: plan_validate
+    plan_gate: true
+    gate:
+      output: plan
+      pass:
+        path: status
+        values: [ok]
+  - id: implement
+    triggers:
+      - gate_result:
+          stage: plan_validate
+          verdict: pass
+    on_enter:
+      inject: Implement the issue now.
+`}
+	stage := pipeline.Stage{
+		ID:       "plan_validate",
+		Label:    "Validate plan",
+		PlanGate: true,
+		Gate: &pipeline.Gate{
+			Output: "plan",
+			Pass:   pipeline.GateCondition{Path: "status", Values: []string{"ok"}},
+		},
+	}
+	if _, err := s.runOnEnter(clawID, stage, pipelineContext{Factory: factory}); err != nil {
+		t.Fatalf("runOnEnter: %v", err)
+	}
+	// Proceed text may appear as a delivered notice, not a pending agent inject.
+	var pendingProceed int
+	if err := db.QueryRow(
+		`SELECT COUNT(*) FROM messages WHERE claw_id=? AND content=? AND delivered_at IS NULL`,
+		clawID, planGateProceedContent,
+	).Scan(&pendingProceed); err != nil {
+		t.Fatal(err)
+	}
+	if pendingProceed != 0 {
+		t.Fatalf("routed plan_gate must not queue pending proceed inject, got %d", pendingProceed)
+	}
+	// Notice should be persisted (delivered immediately for dashboard).
+	var noticeCount int
+	if err := db.QueryRow(
+		`SELECT COUNT(*) FROM messages WHERE claw_id=? AND content=? AND delivered_at IS NOT NULL`,
+		clawID, planGateProceedContent,
+	).Scan(&noticeCount); err != nil {
+		t.Fatal(err)
+	}
+	if noticeCount != 1 {
+		t.Fatalf("expected delivered proceed notice, got %d", noticeCount)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for s.getPipelineStage(clawID) != "implement" && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := s.getPipelineStage(clawID); got != "implement" {
+		t.Fatalf("pipeline stage = %q, want implement", got)
+	}
+	var pendingImplement int
+	if err := db.QueryRow(
+		`SELECT COUNT(*) FROM messages WHERE claw_id=? AND content=? AND delivered_at IS NULL`,
+		clawID, "Implement the issue now.",
+	).Scan(&pendingImplement); err != nil {
+		t.Fatal(err)
+	}
+	if pendingImplement != 1 {
+		t.Fatalf("destination inject pending count = %d, want 1", pendingImplement)
+	}
 }
 
 func TestSecondPlanGateStillEvaluatesAfterFirstPass(t *testing.T) {

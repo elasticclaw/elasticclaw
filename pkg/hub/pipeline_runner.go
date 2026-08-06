@@ -1060,11 +1060,21 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, ctx pipelineCon
 		// re-run validation forever. Scoped per stageID so a later plan_gate
 		// in the same workflow still evaluates its own output (Greptile).
 		if stage.PlanGate && s.hasSystemMarker(clawID, planGateAcceptedMarker(stage.ID)) {
-			s.injectHubMessageByID(clawID, planGateAlreadyAcceptedContent)
+			alreadyRouted := false
+			if pl := parsePipelineForContext(ctx); pl != nil {
+				alreadyRouted = pl.StageForGateResult(stage.ID, "pass") != nil
+			}
+			// Destination stage inject owns the next agent turn when routed.
+			if alreadyRouted {
+				s.publishHubNotice(clawID, planGateAlreadyAcceptedContent)
+			} else {
+				s.injectHubMessageByID(clawID, planGateAlreadyAcceptedContent)
+			}
 			s.safeGo("pipeline plan-gate already accepted", func() {
 				s.autoTransitionAfterGate(clawID, stage.ID, "pass", ctx)
 			})
-			return true, nil
+			// injectDelivered only when we queued a model turn (no route).
+			return !alreadyRouted, nil
 		}
 
 		gateResult := s.evaluateGate(clawID, stage.ID, stage.Gate)
@@ -1124,9 +1134,14 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, ctx pipelineCon
 				_ = s.insertSystemMarker(clawID, tenantID, initialPlanAcceptedMarker)
 				_ = s.insertSystemMarker(clawID, tenantID, planGateAcceptedMarker(stage.ID))
 			}
-			// Explicit agent-facing proceed so the model does not keep waiting
-			// for freeform "hub proceed" language or re-emit [PLAN_READY].
-			s.injectHubMessageByID(clawID, planGateProceedContent)
+			// When a gate_result route will inject the destination stage prompt,
+			// do not also inject proceed — that queues a duplicate agent turn
+			// before the implement instructions arrive (Greptile).
+			if gateResultHasRoute {
+				s.publishHubNotice(clawID, planGateProceedContent)
+			} else {
+				s.injectHubMessageByID(clawID, planGateProceedContent)
+			}
 		}
 		// Auto-transition to next stage if a gate_result trigger matches.
 		s.safeGo("pipeline gate auto-transition", func() {
