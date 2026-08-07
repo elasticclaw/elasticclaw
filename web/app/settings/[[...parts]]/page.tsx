@@ -8,9 +8,14 @@ import { LEGACY_ANALYTICS_SECTION, VALID_SECTIONS } from "./sections"
  *
  * Supported URL shapes at runtime (handled client-side in SettingsSectionPage):
  *   /settings                           → root, defaults to workspaces section
- *   /settings/{section}                 → system section (runtimes, models, github, etc.)
- *   /settings/{workspace}/{section}     → workspace-scoped section (workspaces, workflows, github, etc.)
- *   /settings/{workspace}               → workspace overview (redirects to /{workspace}/workspaces)
+ *   /settings/{section}                 → any section; workspace-scoped ones resolve
+ *                                         the workspace from the rail picker's
+ *                                         persisted selection
+ *   /settings/{workspace}/{section}     → deep link into a section scoped to that
+ *                                         workspace (inbound only — the app never
+ *                                         generates this shape, so in-app navigation
+ *                                         stays within the pre-rendered routes)
+ *   /settings/{workspace}               → deep link to that workspace's overview
  *
  * Because workspace names are dynamic (loaded from API), we cannot pre-generate
  * all /settings/{workspace}/{section} combinations at build time. Instead, we:

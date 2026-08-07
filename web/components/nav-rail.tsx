@@ -7,7 +7,6 @@ import { BarChart3, Bot, ChevronDown, LogOut, User } from "lucide-react"
 import {
   LEGACY_ANALYTICS_SECTION,
   SETTINGS_NAV_GROUPS,
-  WORKSPACE_SECTIONS,
   activeSettingsSection,
   isValidSection,
 } from "@/app/settings/[[...parts]]/sections"
@@ -116,10 +115,12 @@ function initialsOf(name: string) {
 //   2. the persisted selection (localStorage, elasticclaw_selected_workspace);
 //   3. the first available workspace.
 // Changing it always persists the choice, then re-scopes the current screen
-// where that means something: on /settings it navigates to the same section
-// under the chosen workspace, on /analytics it sets the `workspace` query
-// param (preserving every other filter). The agents board has no workspace
-// filter, so on / the change is only recorded.
+// where that means something: on /settings the settings screen follows the
+// persisted selection (workspace URLs are only parsed for deep links, never
+// generated — pushing /settings/{workspace}/{section} would leave the static
+// export's route manifest and force a full page load), on /analytics it sets
+// the `workspace` query param (preserving every other filter). The agents
+// board has no workspace filter, so on / the change is only recorded.
 function WorkspacePicker() {
   const pathname = usePathname()
   const router = useRouter()
@@ -166,11 +167,14 @@ function WorkspacePicker() {
     setStoredWorkspace(workspace)
     setStoredWorkspaceState(workspace)
     if (onSettings) {
-      // Same behaviour as before: push the settings URL and let the
-      // normalisation effect in settings-content.tsx resolve the rest.
-      const base = `/settings/${encodeURIComponent(workspace)}`
-      const scoped = activeSection && activeSection !== "workspaces" && WORKSPACE_SECTIONS.has(activeSection)
-      router.push(scoped ? `${base}/${activeSection}` : base)
+      // The settings screen re-scopes from the persisted selection (see
+      // onStoredWorkspaceChange), so no navigation is needed — except when the
+      // URL still carries a workspace segment from a deep link: it would
+      // override the new selection, so drop it by moving to the pre-rendered
+      // /settings/{section} shape (a client-side navigation).
+      if (routeWorkspaceOf(pathname)) {
+        router.push(`/settings/${activeSection ?? "workspaces"}`)
+      }
     } else if (onAnalytics) {
       // Re-scope the dashboard: set the workspace query param and keep every
       // other filter intact. AnalyticsCommandCenter reads it from the URL.
@@ -280,9 +284,10 @@ export function NavRail() {
         </div>
         {/* Settings sections rendered directly in the rail, admin-only, from
             the shared catalogue in app/settings/[[...parts]]/sections.ts. Each
-            item links to /settings/{section}; settings-content.tsx normalises
-            workspace-scoped sections to /settings/{workspace}/{section}, and
-            activeSettingsSection resolves the highlight for both URL shapes. */}
+            item links to /settings/{section} — a pre-rendered route, so the
+            navigation stays client-side; workspace-scoped sections resolve
+            their workspace from the picker above. activeSettingsSection also
+            highlights the /settings/{workspace}/{section} deep-link shape. */}
         {isAdmin &&
           SETTINGS_NAV_GROUPS.map((group) => (
             <Fragment key={group.label}>

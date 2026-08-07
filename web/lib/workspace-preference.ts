@@ -4,6 +4,11 @@
 // screens that carry no workspace in the URL.
 const SELECTED_WORKSPACE_KEY = "elasticclaw_selected_workspace"
 
+// Settings URLs no longer carry the workspace during in-app navigation, so a
+// picker change cannot rely on a route change to reach the settings screen.
+// setStoredWorkspace announces the new selection on this event instead.
+const WORKSPACE_CHANGE_EVENT = "elasticclaw:workspace-change"
+
 export function getStoredWorkspace(): string {
   if (typeof window === "undefined") return ""
   try {
@@ -20,4 +25,13 @@ export function setStoredWorkspace(name: string) {
     // Storage can be unavailable (private mode, quota); the picker still
     // works for the current screen, the choice just won't persist.
   }
+  window.dispatchEvent(new CustomEvent<string>(WORKSPACE_CHANGE_EVENT, { detail: name }))
+}
+
+// Subscribes to selection changes made through setStoredWorkspace in this
+// tab. Returns the unsubscribe function.
+export function onStoredWorkspaceChange(handler: (name: string) => void): () => void {
+  const listener = (event: Event) => handler((event as CustomEvent<string>).detail)
+  window.addEventListener(WORKSPACE_CHANGE_EVENT, listener)
+  return () => window.removeEventListener(WORKSPACE_CHANGE_EVENT, listener)
 }

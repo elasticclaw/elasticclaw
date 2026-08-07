@@ -11,11 +11,11 @@ import { Switch } from "@/components/ui/switch"
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog"
 import { cn } from "@/lib/utils"
 import Link from "next/link"
-import { LEGACY_ANALYTICS_SECTION, SETTINGS_NAV_GROUPS, WORKSPACE_SECTIONS, isValidSection, type Section } from "./sections"
+import { LEGACY_ANALYTICS_SECTION, SETTINGS_NAV_GROUPS, isValidSection, type Section } from "./sections"
 import { fetchWorkspaces, updateWorkflowControls, type RepositoryAccess, type Workspace, type Workflow } from "@/lib/api"
 import { useBranding } from "@/hooks/use-branding"
 import { useCapabilities } from "@/hooks/use-capabilities"
-import { getStoredWorkspace } from "@/lib/workspace-preference"
+import { getStoredWorkspace, onStoredWorkspaceChange } from "@/lib/workspace-preference"
 import { WorkflowRunsDialog } from "@/components/workflow-runs-dialog"
 
 interface LLMKeyView {
@@ -226,12 +226,10 @@ export default function SettingsSectionPage() {
   const section: Section = isValidSection(rawSection) ? rawSection : "workspaces"
   const rawWorkspace = hasRouteWorkspace ? firstPart : ""
   const routeWorkspace = rawWorkspace ? decodeURIComponent(rawWorkspace) : ""
-  const routeHasOverviewSlug = hasRouteWorkspace && secondPart === "workspaces"
 
   // Redirect unsupported paths to a safe fallback:
   //   - Invalid section names → /settings/workspaces
   //   - More than 2 path parts → /settings/workspaces
-  //   - Placeholder without workspace loaded yet → handled by workspace selection effect
   useEffect(() => {
     if (parts.length > 2) {
       router.replace("/settings/workspaces")
@@ -300,25 +298,16 @@ export default function SettingsSectionPage() {
       })
   }, [routeWorkspace])
 
-  // When the "_workspace" placeholder is used (static-export sentinel) or no
-  // workspace is present in the URL, redirect to the actual first workspace.
-  useEffect(() => {
-    // Legacy analytics URLs are handled by the /analytics redirect above;
-    // never race it with a workspace-selection redirect.
-    if (rawSection === LEGACY_ANALYTICS_SECTION) return
-    if (workspaces.length === 0 || !WORKSPACE_SECTIONS.has(section)) return
-    const workspace = routeWorkspace && workspaces.some((item) => item.name === routeWorkspace)
-      ? routeWorkspace
-      : selectedWorkspace || workspaces[0].name
-    const workspaceBase = `/settings/${encodeURIComponent(workspace)}`
-    const target = section === "workspaces" ? workspaceBase : `${workspaceBase}/${section}`
-    const needsRedirect = (!routeWorkspace && selectedWorkspace) || routeHasOverviewSlug || firstPartIsPlaceholder
-    if (needsRedirect) {
-      // Preserve the query string so links carrying filters (e.g. ?workflow=)
-      // survive the workspace redirect.
-      router.replace(`${target}${window.location.search}`)
-    }
-  }, [firstPartIsPlaceholder, rawSection, routeHasOverviewSlug, routeWorkspace, router, section, selectedWorkspace, workspaces])
+  // The nav rail's workspace picker persists the selection instead of pushing
+  // a workspace-carrying URL (which would fall outside the static export's
+  // route manifest and force a full page load). Follow those changes here so
+  // workspace-scoped sections re-scope without a route change.
+  useEffect(
+    () => onStoredWorkspaceChange((name) => {
+      setSelectedWorkspace((current) => (workspaces.some((workspace) => workspace.name === name) ? name : current))
+    }),
+    [workspaces],
+  )
 
   async function save(patch: object): Promise<boolean> {
     setSaving(true)

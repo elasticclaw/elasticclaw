@@ -28,18 +28,6 @@ export function isValidSection(s: string): s is Section {
   return VALID_SECTIONS.includes(s as Section)
 }
 
-// Sections scoped to a workspace: their canonical URL shape is
-// /settings/{workspace}/{section} (the normalisation effect in
-// settings-content.tsx rewrites /settings/{section} into it).
-export const WORKSPACE_SECTIONS = new Set<Section>([
-  "workspaces",
-  "workflows",
-  "github",
-  "issue-trackers",
-  "secrets",
-  "mcp-servers",
-])
-
 // Single source of truth for the settings section catalogue: the app rail
 // (components/nav-rail.tsx) and the settings screen both render from this
 // list, so labels, icons and grouping cannot drift between them.
@@ -81,10 +69,11 @@ export const SETTINGS_NAV_GROUPS: { label: string; items: SettingsNavItem[] }[] 
 
 // Resolves which settings section a pathname belongs to, mirroring the URL
 // parsing in settings-content.tsx so the rail highlights the right item for
-// both shapes: /settings/{section} and /settings/{workspace}/{section}
-// (including the "_workspace" static-export sentinel and the bare /settings
-// default). Returns null outside /settings and for legacy analytics URLs,
-// which redirect to /analytics.
+// both shapes: /settings/{section} — the only shape the app generates — and
+// /settings/{workspace}/{section}, which deep links and bookmarks may still
+// carry (including the "_workspace" static-export sentinel and the bare
+// /settings default). Returns null outside /settings and for legacy analytics
+// URLs, which redirect to /analytics.
 export function activeSettingsSection(pathname: string): Section | null {
   const parts = pathname.split("/").filter(Boolean)
   if (parts[0] !== "settings") return null
