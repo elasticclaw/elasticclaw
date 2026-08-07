@@ -1124,19 +1124,42 @@ func settingsWorkspaceStaticPath(requestPath string) (string, bool) {
 		return "", false
 	}
 	parts := strings.Split(p, "/")
-	if len(parts) < 2 || len(parts) > 3 || parts[0] != "settings" {
+	if len(parts) < 2 || len(parts) > 4 || parts[0] != "settings" {
 		return "", false
 	}
 	if parts[1] == "" || settingsStaticSection(parts[1]) || strings.HasPrefix(parts[1], "_") {
 		return "", false
 	}
+	// RSC payload files (e.g. __next._tree.txt) requested by the Next.js client
+	// router during soft navigation. Map them to the _workspace stub so client
+	// navigation to a concrete workspace path doesn't fall through to the SPA
+	// fallback (which returns HTML and forces a hard reload).
+	last := parts[len(parts)-1]
+	if settingsStaticPayloadFile(last) {
+		switch len(parts) {
+		case 3: // settings/{workspace}/__next.<x>.txt
+			return "settings/_workspace/" + last, true
+		case 4: // settings/{workspace}/{section}/__next.<x>.txt
+			if !settingsStaticSection(parts[2]) {
+				return "", false
+			}
+			return "settings/_workspace/" + parts[2] + "/" + last, true
+		}
+		return "", false
+	}
 	if len(parts) == 2 {
 		return "settings/_workspace/index.html", true
 	}
-	if !settingsStaticSection(parts[2]) {
+	if len(parts) != 3 || !settingsStaticSection(parts[2]) {
 		return "", false
 	}
 	return "settings/_workspace/" + parts[2] + "/index.html", true
+}
+
+// settingsStaticPayloadFile reports whether name looks like a Next.js static
+// export RSC payload file (e.g. __next._tree.txt, __next._full.txt).
+func settingsStaticPayloadFile(name string) bool {
+	return strings.HasPrefix(name, "__next.") && strings.HasSuffix(name, ".txt")
 }
 
 func settingsStaticSection(section string) bool {
