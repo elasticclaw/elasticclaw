@@ -77,6 +77,33 @@ type ControlReceipt struct {
 	Reason       string             `json:"reason,omitempty"`
 }
 
+const (
+	ControlFrameRegister   = "register"
+	ControlFrameRegistered = "registered"
+	ControlFrameEnvelope   = "envelope"
+	ControlFrameReceipt    = "receipt"
+)
+
+// ControlRegistration authenticates the bridge's dedicated workflow channel.
+// It is intentionally separate from the conversation WebSocket registration.
+type ControlRegistration struct {
+	Token     string             `json:"token"`
+	ClawID    string             `json:"claw_id"`
+	RunID     string             `json:"run_id"`
+	AttemptID string             `json:"attempt_id"`
+	Bridge    BridgeRegistration `json:"bridge"`
+}
+
+// ControlFrame is the only wire frame accepted on /claw/control/ws.
+type ControlFrame struct {
+	Type         string               `json:"type"`
+	Registration *ControlRegistration `json:"registration,omitempty"`
+	Snapshot     *WorkflowSnapshot    `json:"snapshot,omitempty"`
+	Envelope     *ControlEnvelope     `json:"envelope,omitempty"`
+	Receipt      *ControlReceipt      `json:"receipt,omitempty"`
+	Error        string               `json:"error,omitempty"`
+}
+
 // WorkflowEvent is the durable input record consumed by the v2 engine. Its
 // payload is typed by Kind; freeform conversation messages have no producer in
 // this event model.
