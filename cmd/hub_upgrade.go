@@ -76,9 +76,14 @@ func runHubUpgrade(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	// Check current version on server
+	// Check current version on server. Prefer PATH then the install default;
+	// sudo when needed (matches the post-upgrade version probe).
 	fmt.Println("Checking remote version...")
-	remoteVerOut, err := sshRunClient(client, "elasticclaw version 2>/dev/null || echo 'unknown'")
+	remoteVersionCmd := `elasticclaw version 2>/dev/null || /usr/local/bin/elasticclaw version 2>/dev/null || true`
+	if useSudo {
+		remoteVersionCmd = `sudo elasticclaw version 2>/dev/null || sudo /usr/local/bin/elasticclaw version 2>/dev/null || elasticclaw version 2>/dev/null || /usr/local/bin/elasticclaw version 2>/dev/null || true`
+	}
+	remoteVerOut, err := sshRunClient(client, remoteVersionCmd)
 	if err != nil {
 		return fmt.Errorf("failed to check remote version: %w", err)
 	}
@@ -184,15 +189,32 @@ func inferSSHFromProfile(profileName string) (string, string) {
 	return fmt.Sprintf("ssh://root@%s", host), hubProfile.SSHKey
 }
 
-// parseVersionFromOutput extracts the version tag from "elasticclaw vX.Y.Z ..." output.
+// parseVersionFromOutput extracts the version tag from elasticclaw version output.
+// Accepts CalVer with or without a leading "v", e.g.:
+//
+//	elasticclaw 2026.8.8-beta.2 (commit: abc, built: ...)
+//	elasticclaw v0.1.0 (commit: abc, built: ...)
 func parseVersionFromOutput(s string) string {
-	// Handle "Using config file: ..." prefix lines
 	for _, line := range strings.Split(s, "\n") {
 		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "elasticclaw v") {
+		if line == "" || strings.HasPrefix(line, "Using config file:") {
+			continue
+		}
+		// Plain: "elasticclaw <version> ..."
+		if strings.HasPrefix(line, "elasticclaw ") {
 			fields := strings.Fields(line)
 			if len(fields) >= 2 {
-				return fields[1]
+				return strings.TrimPrefix(fields[1], "v")
+			}
+		}
+		// JSON: {"version":"...","commit":"...","buildDate":"..."}
+		if strings.HasPrefix(line, "{") && strings.Contains(line, `"version"`) {
+			const key = `"version":"`
+			if i := strings.Index(line, key); i >= 0 {
+				rest := line[i+len(key):]
+				if j := strings.IndexByte(rest, '"'); j > 0 {
+					return strings.TrimPrefix(rest[:j], "v")
+				}
 			}
 		}
 	}
