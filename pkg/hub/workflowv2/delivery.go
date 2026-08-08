@@ -118,94 +118,83 @@ func (s *Store) SubmitDelivery(ctx context.Context, runID, attemptID string, man
 	}
 
 	now := s.now().UTC()
-	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
-	if err != nil {
-		return nil, err
-	}
-	defer tx.Rollback()
-	if err := tx.QueryRowContext(ctx, `SELECT 1 FROM workflow_v2_attempts a JOIN workflow_v2_runs r ON r.id=a.run_id
-		WHERE r.id=? AND r.current_attempt_id=? AND a.id=? AND a.status='active'`, runID, attemptID, attemptID).Scan(&activeAttempt); err != nil {
-		return nil, fmt.Errorf("delivery attempt was superseded during verification")
-	}
-	for i := range verified {
-		pr := &verified[i]
-		var existingID, existingHead string
-		err := tx.QueryRowContext(ctx, `SELECT id,current_head_sha FROM workflow_v2_delivery_prs
-			WHERE run_id=? AND repository=? AND pr_number=?`, runID, pr.Repository, pr.Number).Scan(&existingID, &existingHead)
-		if err != nil && err != sql.ErrNoRows {
-			return nil, err
-		}
-		if existingID == "" {
-			pr.ID = uuid.NewString()
-		} else {
-			pr.ID = existingID
-		}
-		provenanceJSON, err := marshalObject(pr.Provenance)
-		if err != nil {
-			return nil, err
-		}
-		_, err = tx.ExecContext(ctx, `INSERT INTO workflow_v2_delivery_prs(
-			id,run_id,url,repository_name,repository,pr_number,source_branch,base_branch,current_head_sha,state,
-			active,supersedes_id,provenance_json,verified_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,1,?,?,?,?)
-			ON CONFLICT(run_id,repository,pr_number) DO UPDATE SET url=excluded.url,repository_name=excluded.repository_name,
-			source_branch=excluded.source_branch,base_branch=excluded.base_branch,current_head_sha=excluded.current_head_sha,
-			state=excluded.state,active=1,supersedes_id=excluded.supersedes_id,provenance_json=excluded.provenance_json,
-			verified_at=excluded.verified_at,updated_at=excluded.updated_at`,
-			pr.ID, runID, pr.URL, pr.RepositoryName, pr.Repository, pr.Number, pr.SourceBranch, pr.BaseBranch,
-			pr.HeadSHA, pr.State, pr.Supersedes, provenanceJSON, pr.VerifiedAt.UnixMilli(), now.UnixMilli())
-		if err != nil {
-			return nil, err
-		}
-		if existingHead != pr.HeadSHA {
-			var generation int
-			if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(generation),0)+1 FROM workflow_v2_delivery_heads WHERE pr_id=?`,
-				pr.ID).Scan(&generation); err != nil {
-				return nil, err
+	eventResult, err := s.applyEventWithMutation(ctx, runID, EventInput{
+		ID: uuid.NewString(), Kind: "delivery.verified", AttemptID: attemptID, Producer: ProducerSourceControl,
+		Provenance: typesv2.EvidenceProvenance{Producer: string(ProducerSourceControl), ObservedAt: now},
+	}, func(ctx context.Context, tx *sql.Tx, input *EventInput) error {
+		for i := range verified {
+			pr := &verified[i]
+			var existingID, existingHead string
+			err := tx.QueryRowContext(ctx, `SELECT id,current_head_sha FROM workflow_v2_delivery_prs
+				WHERE run_id=? AND repository=? AND pr_number=?`, runID, pr.Repository, pr.Number).Scan(&existingID, &existingHead)
+			if err != nil && err != sql.ErrNoRows {
+				return err
 			}
-			if _, err := tx.ExecContext(ctx, `INSERT INTO workflow_v2_delivery_heads(id,pr_id,head_sha,generation,observed_at)
-				VALUES(?,?,?,?,?)`, uuid.NewString(), pr.ID, pr.HeadSHA, generation, now.UnixMilli()); err != nil {
-				return nil, err
+			if existingID == "" {
+				pr.ID = uuid.NewString()
+			} else {
+				pr.ID = existingID
 			}
-			if existingHead != "" {
-				if _, err := tx.ExecContext(ctx, `UPDATE workflow_v2_evidence SET superseded_at=?
-					WHERE run_id=? AND pr_id=? AND superseded_at=0`, now.UnixMilli(), runID, pr.ID); err != nil {
-					return nil, err
+			provenanceJSON, err := marshalObject(pr.Provenance)
+			if err != nil {
+				return err
+			}
+			_, err = tx.ExecContext(ctx, `INSERT INTO workflow_v2_delivery_prs(
+				id,run_id,url,repository_name,repository,pr_number,source_branch,base_branch,current_head_sha,state,
+				active,supersedes_id,provenance_json,verified_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,1,?,?,?,?)
+				ON CONFLICT(run_id,repository,pr_number) DO UPDATE SET url=excluded.url,repository_name=excluded.repository_name,
+				source_branch=excluded.source_branch,base_branch=excluded.base_branch,current_head_sha=excluded.current_head_sha,
+				state=excluded.state,active=1,supersedes_id=excluded.supersedes_id,provenance_json=excluded.provenance_json,
+				verified_at=excluded.verified_at,updated_at=excluded.updated_at`,
+				pr.ID, runID, pr.URL, pr.RepositoryName, pr.Repository, pr.Number, pr.SourceBranch, pr.BaseBranch,
+				pr.HeadSHA, pr.State, pr.Supersedes, provenanceJSON, pr.VerifiedAt.UnixMilli(), now.UnixMilli())
+			if err != nil {
+				return err
+			}
+			if existingHead != pr.HeadSHA {
+				var generation int
+				if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(generation),0)+1 FROM workflow_v2_delivery_heads WHERE pr_id=?`,
+					pr.ID).Scan(&generation); err != nil {
+					return err
+				}
+				if _, err := tx.ExecContext(ctx, `INSERT INTO workflow_v2_delivery_heads(id,pr_id,head_sha,generation,observed_at)
+					VALUES(?,?,?,?,?)`, uuid.NewString(), pr.ID, pr.HeadSHA, generation, now.UnixMilli()); err != nil {
+					return err
+				}
+				if existingHead != "" {
+					if _, err := tx.ExecContext(ctx, `UPDATE workflow_v2_evidence SET superseded_at=?
+						WHERE run_id=? AND pr_id=? AND superseded_at=0`, now.UnixMilli(), runID, pr.ID); err != nil {
+						return err
+					}
+				}
+			}
+			if pr.Supersedes != "" {
+				identity := pr.Repository + "#" + fmt.Sprint(pr.Number)
+				trusted, ok := trustedSupersedes[identity]
+				if !ok || trusted.ID != pr.Supersedes {
+					return fmt.Errorf("superseded pull request was not trusted by the verifier")
+				}
+				result, err := tx.ExecContext(ctx, `UPDATE workflow_v2_delivery_prs SET active=0,updated_at=?
+					WHERE run_id=? AND active=1 AND id!=? AND id=? AND current_head_sha=? AND state=?`,
+					now.UnixMilli(), runID, pr.ID, trusted.ID, trusted.HeadSHA, trusted.State)
+				if err != nil {
+					return err
+				}
+				if changed, err := result.RowsAffected(); err != nil || changed != 1 {
+					return fmt.Errorf("superseded pull request %q is not an active delivery", pr.Supersedes)
 				}
 			}
 		}
-		if pr.Supersedes != "" {
-			identity := pr.Repository + "#" + fmt.Sprint(pr.Number)
-			trusted, ok := trustedSupersedes[identity]
-			if !ok || trusted.ID != pr.Supersedes {
-				return nil, fmt.Errorf("superseded pull request was not trusted by the verifier")
-			}
-			result, err := tx.ExecContext(ctx, `UPDATE workflow_v2_delivery_prs SET active=0,updated_at=?
-				WHERE run_id=? AND active=1 AND id!=? AND id=? AND current_head_sha=? AND state=?`,
-				now.UnixMilli(), runID, pr.ID, trusted.ID, trusted.HeadSHA, trusted.State)
-			if err != nil {
-				return nil, err
-			}
-			if changed, err := result.RowsAffected(); err != nil || changed != 1 {
-				return nil, fmt.Errorf("superseded pull request %q is not an active delivery", pr.Supersedes)
-			}
+		summary, err := deliveryFactsFrom(ctx, tx, runID)
+		if err != nil {
+			return err
 		}
-	}
-	if err := tx.Commit(); err != nil {
-		return nil, err
-	}
-
-	summary, err := s.deliveryFacts(ctx, runID)
-	if err != nil {
-		return nil, err
-	}
-	eventResult, err := s.ApplyEvent(ctx, runID, EventInput{
-		ID: uuid.NewString(), Kind: "delivery.verified", AttemptID: attemptID, Producer: ProducerSourceControl,
-		Payload: map[string]interface{}{"delivery": summary},
-		Facts: map[string]interface{}{
+		input.Payload = map[string]interface{}{"delivery": summary}
+		input.Facts = map[string]interface{}{
 			"delivery.count": summary["count"], "delivery.open": summary["open"],
 			"delivery.merged": summary["merged"], "delivery.all_merged": summary["all_merged"],
-		},
-		Provenance: typesv2.EvidenceProvenance{Producer: string(ProducerSourceControl), ObservedAt: now},
+		}
+		return nil
 	})
 	if err != nil {
 		return nil, err
@@ -217,7 +206,7 @@ func (s *Store) SubmitDelivery(ctx context.Context, runID, attemptID string, man
 	if err != nil {
 		return nil, err
 	}
-	if err := s.publishEvidencePolicyEvents(ctx, runID, attemptID, "", policyResult, now); err != nil {
+	if err := s.publishEvidencePolicyEvents(ctx, runID, "", "", policyResult, now); err != nil {
 		return nil, err
 	}
 	sort.Slice(verified, func(i, j int) bool {
@@ -254,9 +243,13 @@ func validateVerifiedPullRequest(workspace *typesv2.Workspace, claim typesv2.Pul
 	return nil
 }
 
-func (s *Store) deliveryFacts(ctx context.Context, runID string) (map[string]interface{}, error) {
+type rowQueryer interface {
+	QueryRowContext(context.Context, string, ...interface{}) *sql.Row
+}
+
+func deliveryFactsFrom(ctx context.Context, queryer rowQueryer, runID string) (map[string]interface{}, error) {
 	var count, open, merged int
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*),
+	if err := queryer.QueryRowContext(ctx, `SELECT COUNT(*),
 		COALESCE(SUM(CASE WHEN state='open' THEN 1 ELSE 0 END),0),
 		COALESCE(SUM(CASE WHEN state='merged' THEN 1 ELSE 0 END),0)
 		FROM workflow_v2_delivery_prs WHERE run_id=? AND active=1`, runID).Scan(&count, &open, &merged); err != nil {

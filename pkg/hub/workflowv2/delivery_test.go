@@ -109,6 +109,41 @@ func TestSubmitDeliveryRejectsAnyRepositoryOutsidePinnedWorkspaceAtomically(t *t
 	}
 }
 
+func TestSubmitDeliveryRollsBackWhenWorkflowEventFails(t *testing.T) {
+	db := openRuntimeDB(t)
+	store := workflowv2.NewStore(db)
+	attempt := createDeliveryRun(t, store, "run-delivery-event-atomic")
+	if _, err := db.Exec(`CREATE TRIGGER reject_delivery_event BEFORE INSERT ON workflow_v2_events
+		WHEN NEW.kind='delivery.verified' BEGIN SELECT RAISE(ABORT, 'simulated event failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+	apiURL := "https://github.example/org/api/pull/10"
+	_, err := store.SubmitDelivery(context.Background(), "run-delivery-event-atomic", attempt.ID,
+		typesv2.DeliveryManifest{PullRequests: []typesv2.PullRequestClaim{{URL: apiURL}}},
+		deliveryVerifier(map[string]string{apiURL: "api-head"}))
+	if err == nil {
+		t.Fatal("simulated workflow event failure did not fail delivery")
+	}
+	var deliveries, heads int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM workflow_v2_delivery_prs WHERE run_id='run-delivery-event-atomic'`).Scan(&deliveries); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM workflow_v2_delivery_heads`).Scan(&heads); err != nil {
+		t.Fatal(err)
+	}
+	if deliveries != 0 || heads != 0 {
+		t.Fatalf("delivery/head rows persisted after event failure: %d/%d", deliveries, heads)
+	}
+	var eventCount int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM workflow_v2_events WHERE run_id='run-delivery-event-atomic' AND kind='delivery.verified'`).Scan(
+		&eventCount); err != nil {
+		t.Fatal(err)
+	}
+	if eventCount != 0 {
+		t.Fatalf("delivery events persisted = %d", eventCount)
+	}
+}
+
 func TestDeliveryHeadChangeSupersedesHeadBoundEvidence(t *testing.T) {
 	db := openRuntimeDB(t)
 	store := workflowv2.NewStore(db)
@@ -209,7 +244,7 @@ func TestAttemptRevokedDuringVerificationCannotWriteDelivery(t *testing.T) {
 	})
 	_, err := store.SubmitDelivery(context.Background(), "run-revoked-delivery", attempt.ID,
 		typesv2.DeliveryManifest{PullRequests: []typesv2.PullRequestClaim{{URL: prURL}}}, verifier)
-	if err == nil || !strings.Contains(err.Error(), "superseded during verification") {
+	if err == nil || !strings.Contains(err.Error(), "no longer active") {
 		t.Fatalf("error = %v", err)
 	}
 	var count int

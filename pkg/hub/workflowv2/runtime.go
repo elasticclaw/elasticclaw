@@ -78,7 +78,10 @@ type EventInput struct {
 	Provenance           typesv2.EvidenceProvenance
 	Payload              map[string]interface{}
 	Facts                map[string]interface{}
+	mutation             eventMutation
 }
+
+type eventMutation func(context.Context, *sql.Tx, *EventInput) error
 
 type EventResult struct {
 	EventID     string                     `json:"event_id"`
@@ -242,6 +245,11 @@ func (s *Store) ApplyEvent(ctx context.Context, runID string, input EventInput) 
 	}
 	if err := authorizeBoundTask(ctx, tx, stored, input); err != nil {
 		return EventResult{}, err
+	}
+	if input.mutation != nil {
+		if err := input.mutation(ctx, tx, &input); err != nil {
+			return EventResult{}, err
+		}
 	}
 
 	workflow, err := typesv2.ParseAndValidateWorkflow([]byte(workflowYAML))
@@ -427,6 +435,12 @@ func (s *Store) ApplyEvent(ctx context.Context, runID string, input EventInput) 
 			FromState: stored.State, ToState: transitionDef.To, FromVersion: stored.StateVersion,
 			ToVersion: toVersion, CreatedAt: now},
 	}, nil
+}
+
+func (s *Store) applyEventWithMutation(ctx context.Context, runID string, input EventInput,
+	mutation eventMutation) (EventResult, error) {
+	input.mutation = mutation
+	return s.ApplyEvent(ctx, runID, input)
 }
 
 func (s *Store) rejectAndSuspend(ctx context.Context, tx *sql.Tx, run Run, input EventInput, reason string, now time.Time) (EventResult, error) {
