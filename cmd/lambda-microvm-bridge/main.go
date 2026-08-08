@@ -27,6 +27,7 @@ const (
 	defaultBridgeBin = "/usr/local/bin/claw-bridge"
 	defaultWorkspace = "/home/claw/workspace"
 	maxRequestBytes  = 16 << 20
+	bridgeStartGrace = 2 * time.Second
 )
 
 type server struct {
@@ -37,6 +38,7 @@ type server struct {
 	bridge       *exec.Cmd
 	started      bool
 	bridgeExited bool
+	startGrace   time.Duration
 	runtimeEnv   []string
 	microVMID    string
 }
@@ -194,15 +196,52 @@ func (s *server) startBridge(payload runPayload) error {
 		return fmt.Errorf("start claw-bridge: %w", err)
 	}
 	s.bridge = cmd
-	s.started = true
+	s.bridgeExited = false
+	exited := make(chan error, 1)
 	go func() {
-		if err := cmd.Wait(); err != nil {
+		err := cmd.Wait()
+		exited <- err
+		if err != nil {
 			log.Printf("claw-bridge exited: %v", err)
 		}
 		s.mu.Lock()
-		s.bridgeExited = true
+		if s.bridge == cmd {
+			s.started = false
+			s.bridgeExited = true
+		}
 		s.mu.Unlock()
 	}()
+	grace := s.startGrace
+	if grace <= 0 {
+		grace = bridgeStartGrace
+	}
+	timer := time.NewTimer(grace)
+	defer timer.Stop()
+	select {
+	case err := <-exited:
+		s.bridge = nil
+		s.started = false
+		s.bridgeExited = true
+		if err != nil {
+			return fmt.Errorf("claw-bridge exited during startup: %w", err)
+		}
+		return errors.New("claw-bridge exited during startup")
+	case <-timer.C:
+		// Prefer an exit that raced with the timer over reporting a dead bridge
+		// as initialized successfully.
+		select {
+		case err := <-exited:
+			s.bridge = nil
+			s.started = false
+			s.bridgeExited = true
+			if err != nil {
+				return fmt.Errorf("claw-bridge exited during startup: %w", err)
+			}
+			return errors.New("claw-bridge exited during startup")
+		default:
+		}
+	}
+	s.started = true
 	return nil
 }
 
@@ -365,9 +404,8 @@ func (s *server) health(w http.ResponseWriter, _ *http.Request) {
 	status := "ready"
 	if s.started {
 		status = "running"
-		if s.bridgeExited {
-			status = "bridge-exited"
-		}
+	} else if s.bridgeExited {
+		status = "bridge-exited"
 	}
 	writeJSON(w, map[string]string{"status": status})
 }

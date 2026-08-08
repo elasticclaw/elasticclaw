@@ -17,11 +17,11 @@ func TestRunHookStagesFilesAndStartsBridgeWithRuntimeEnv(t *testing.T) {
 	temp := t.TempDir()
 	bridge := filepath.Join(temp, "fake-claw-bridge")
 	started := filepath.Join(temp, "started")
-	script := "#!/bin/sh\nprintf '%s|%s|%s' \"$1\" \"$ELASTICCLAW_CLAW_ID\" \"$ELASTICCLAW_MICROVM_ID\" > \"$STARTED_FILE\"\n"
+	script := "#!/bin/sh\ntrap 'exit 0' TERM INT\nprintf '%s|%s|%s' \"$1\" \"$ELASTICCLAW_CLAW_ID\" \"$ELASTICCLAW_MICROVM_ID\" > \"$STARTED_FILE\"\nwhile :; do sleep 1; done\n"
 	if err := os.WriteFile(bridge, []byte(script), 0755); err != nil {
 		t.Fatal(err)
 	}
-	s := &server{bridgeBinary: bridge, workspaceDir: filepath.Join(temp, "workspace")}
+	s := &server{bridgeBinary: bridge, workspaceDir: filepath.Join(temp, "workspace"), startGrace: 50 * time.Millisecond}
 	payload, err := json.Marshal(runPayload{
 		Version: 1,
 		Env: map[string]string{
@@ -78,6 +78,54 @@ func TestRunHookStagesFilesAndStartsBridgeWithRuntimeEnv(t *testing.T) {
 			t.Fatalf("bridge invocation = %q, error = %v, want %q", contents, readErr, "--bootstrap|claw-123|mvm-123")
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestInitializeRejectsDeadBridgeAndAllowsRetry(t *testing.T) {
+	temp := t.TempDir()
+	bridge := filepath.Join(temp, "fake-claw-bridge")
+	attempts := filepath.Join(temp, "attempts")
+	script := "#!/bin/sh\nprintf 'attempt\\n' >> \"$ATTEMPTS_FILE\"\nexit 42\n"
+	if err := os.WriteFile(bridge, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+	s := &server{
+		bridgeBinary: bridge,
+		workspaceDir: filepath.Join(temp, "workspace"),
+		startGrace:   500 * time.Millisecond,
+	}
+	payload, err := json.Marshal(runPayload{
+		Version: 1,
+		Env: map[string]string{
+			"ATTEMPTS_FILE": attempts,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for attempt := 1; attempt <= 2; attempt++ {
+		request := httptest.NewRequest(http.MethodPost, "/elasticclaw/v1/init", bytes.NewReader(payload))
+		response := httptest.NewRecorder()
+		s.routes().ServeHTTP(response, request)
+		if response.Code != http.StatusInternalServerError {
+			t.Fatalf("attempt %d status = %d, body = %s", attempt, response.Code, response.Body.String())
+		}
+	}
+
+	contents, err := os.ReadFile(attempts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Count(string(contents), "attempt\n"); got != 2 {
+		t.Fatalf("bridge starts = %d, want 2", got)
+	}
+
+	s.mu.Lock()
+	started, exited := s.started, s.bridgeExited
+	s.mu.Unlock()
+	if started || !exited {
+		t.Fatalf("bridge state after failed retry = started %v, exited %v", started, exited)
 	}
 }
 
