@@ -1328,6 +1328,22 @@ func (s *Server) handleClawDoneSignal(clawID, rawMessage string) {
 	prURLs := extractDonePRURLs(rawMessage)
 
 	if pipelineCtx, stage, ok := s.pipelineStageForMessageContains(clawID, rawMessage); ok {
+		// Match the legacy [DONE] path: a failed required gate must block both
+		// stage advance and PR registration so a blocked workflow cannot later
+		// terminate on merge/close of an improperly registered PR.
+		if s.hasFailedRequiredGate(clawID) {
+			msg := "[factory] `[DONE]` blocked: a required tool gate has failed. Please fix the issues and retry."
+			log.Printf("[factory] claw %s pipeline [DONE] blocked by failed required gate", shortID(clawID))
+			s.injectUserMessage(clawID, msg)
+			return
+		}
+		// Pipeline stages that match [DONE] return before the legacy store path
+		// below. Register PRs here so merge/close monitoring and review injects
+		// still arm; without this, claws can live forever after a PR merges.
+		if errURL := s.registerDonePRURLs(clawID, prURLs); errURL != "" {
+			s.injectUserMessage(clawID, fmt.Sprintf("[factory] Failed to register PR %s: internal error. Please resend: [DONE] %s", errURL, strings.Join(prURLs, " ")))
+			return
+		}
 		if issueID != "" {
 			s.trackDoneSignal(pipelineCtx.Name(), issueID, clawID, len(prURLs))
 		}
@@ -1388,15 +1404,12 @@ func (s *Server) handleClawDoneSignal(clawID, rawMessage string) {
 	}
 
 	// Store all validated PRs (idempotent).
-	for _, pr := range extractPRs(strings.Join(prURLs, " ")) {
-		if err := s.storePRMention(clawID, pr.repo, pr.number, pr.url); err != nil {
-			log.Printf("[factory] failed to register PR %s: %v", pr.url, err)
-			// Resend with ALL original URLs: earlier PRs in the list are already
-			// stored (idempotent), and the retried [DONE] must carry the full set
-			// so pipeline transitions and analytics see the complete PR list.
-			s.injectUserMessage(clawID, fmt.Sprintf("[factory] Failed to register PR %s: internal error. Please resend: [DONE] %s", pr.url, strings.Join(prURLs, " ")))
-			return
-		}
+	if errURL := s.registerDonePRURLs(clawID, prURLs); errURL != "" {
+		// Resend with ALL original URLs: earlier PRs in the list are already
+		// stored (idempotent), and the retried [DONE] must carry the full set
+		// so pipeline transitions and analytics see the complete PR list.
+		s.injectUserMessage(clawID, fmt.Sprintf("[factory] Failed to register PR %s: internal error. Please resend: [DONE] %s", errURL, strings.Join(prURLs, " ")))
+		return
 	}
 
 	pipelineHandledDone := false
@@ -1558,18 +1571,15 @@ func (s *Server) completeIssueLessDoneClaw(clawID, tenantID string, prURLs []str
 		s.injectUserMessage(clawID, "[factory] `[DONE]` blocked: a required tool gate has failed. Please fix the issues and retry.")
 		return
 	}
-	for _, pr := range extractPRs(strings.Join(prURLs, " ")) {
-		if err := s.storePRMention(clawID, pr.repo, pr.number, pr.url); err != nil {
-			// A failed INSERT leaves the PR untracked, so the watcher would never
-			// detect its merge/close and the claw would stall in 'idle' forever.
-			// Nudge the claw to resend [DONE] instead of idling it.
-			log.Printf("[factory] failed to register PR %s: %v", pr.url, err)
-			// Resend with ALL original URLs: earlier PRs in the list are already
-			// stored (idempotent), and the retried [DONE] must carry the full set
-			// so pipeline transitions and analytics see the complete PR list.
-			s.injectUserMessage(clawID, fmt.Sprintf("[factory] Failed to register PR %s: internal error. Please resend: [DONE] %s", pr.url, strings.Join(prURLs, " ")))
-			return
-		}
+	if errURL := s.registerDonePRURLs(clawID, prURLs); errURL != "" {
+		// A failed INSERT leaves the PR untracked (and any partial inserts
+		// from this call are rolled back), so the watcher would never
+		// detect its merge/close and the claw would stall in 'idle' forever.
+		// Nudge the claw to resend [DONE] instead of idling it.
+		// Resend with ALL original URLs so the retried [DONE] carries the
+		// full set for pipeline transitions and analytics.
+		s.injectUserMessage(clawID, fmt.Sprintf("[factory] Failed to register PR %s: internal error. Please resend: [DONE] %s", errURL, strings.Join(prURLs, " ")))
+		return
 	}
 	if len(prURLs) == 0 {
 		s.completeNoPRDoneClaw(clawID, tenantID, "")
@@ -1741,19 +1751,83 @@ func (s *Server) handleClawTerminateSignal(clawID, rawMessage string) {
 }
 
 // extractDonePRURLs parses PR URLs from a [DONE] message.
-// It finds the [DONE] token and returns all github.com PR URLs that follow it on the same line.
+// It finds the [DONE] token and returns github.com PR URLs that follow it on the
+// same line, plus any PR URLs on subsequent lines of the same message. Agents
+// commonly emit:
+//
+//	[DONE]
+//	https://github.com/org/repo/pull/1
+//
+// and those URLs must still register for merge/close monitoring.
 func extractDonePRURLs(message string) []string {
-	for _, line := range strings.Split(message, "\n") {
-		if idx := strings.Index(line, "[DONE]"); idx >= 0 {
-			rest := line[idx+len("[DONE]"):]
-			var urls []string
-			for _, pr := range extractPRs(rest) {
+	lines := strings.Split(message, "\n")
+	for i, line := range lines {
+		idx := strings.Index(line, "[DONE]")
+		if idx < 0 {
+			continue
+		}
+		var urls []string
+		seen := map[string]bool{}
+		add := func(content string) {
+			for _, pr := range extractPRs(content) {
+				if seen[pr.url] {
+					continue
+				}
+				seen[pr.url] = true
 				urls = append(urls, pr.url)
 			}
-			return urls
 		}
+		add(line[idx+len("[DONE]"):])
+		for _, later := range lines[i+1:] {
+			add(later)
+		}
+		return urls
 	}
 	return nil
+}
+
+// registerDonePRURLs persists every PR URL into claw_prs (idempotent).
+// Returns the first URL that failed to store, or "" on full success.
+//
+// Multi-URL registration is atomic: either every new claw_prs row is
+// committed, or none are. Compensating DELETEs are intentionally avoided —
+// a failed cleanup after a partial write could still leave the watcher armed
+// on a blocked [DONE] path.
+func (s *Server) registerDonePRURLs(clawID string, prURLs []string) string {
+	if len(prURLs) == 0 {
+		return ""
+	}
+	prs := extractPRs(strings.Join(prURLs, " "))
+	if len(prs) == 0 {
+		return ""
+	}
+
+	// Single URL: reuse the normal path (no multi-row partial-write risk).
+	if len(prs) == 1 {
+		if _, err := s.storePRMention(clawID, prs[0].repo, prs[0].number, prs[0].url); err != nil {
+			log.Printf("[factory] failed to register PR %s for claw %s: %v", prs[0].url, shortID(clawID), err)
+			return prs[0].url
+		}
+		return ""
+	}
+
+	var toInsert []prMentionCandidate
+	for _, pr := range prs {
+		already, row, err := s.preparePRMention(clawID, pr.repo, pr.number, pr.url)
+		if err != nil {
+			log.Printf("[factory] failed to prepare PR %s for claw %s: %v", pr.url, shortID(clawID), err)
+			return pr.url
+		}
+		if already {
+			continue
+		}
+		toInsert = append(toInsert, row)
+	}
+	if failURL := s.insertClawPRsAtomic(clawID, toInsert); failURL != "" {
+		log.Printf("[factory] failed to register PR set for claw %s (first failure %s)", shortID(clawID), failURL)
+		return failURL
+	}
+	return ""
 }
 
 // validateDonePRs checks that every PR URL in the [DONE] signal refers to an open PR.

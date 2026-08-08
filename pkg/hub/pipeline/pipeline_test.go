@@ -513,6 +513,63 @@ stages:
 	}
 }
 
+func TestHasPlanGateRequiresPlanGateFlagAndGate(t *testing.T) {
+	// Ordinary validation gate must NOT opt out of freeform plan approval.
+	validationOnly, err := pipeline.Parse([]byte(`
+stages:
+  - id: validation
+    gate:
+      output: validation
+      pass:
+        path: status
+        values: [clean]
+`))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if validationOnly.HasPlanGate() {
+		t.Fatal("validation gate without plan_gate should not count as plan gate")
+	}
+
+	// plan_gate without gate block is incomplete.
+	flagOnly, err := pipeline.Parse([]byte(`
+stages:
+  - id: plan
+    plan_gate: true
+`))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if flagOnly.HasPlanGate() {
+		t.Fatal("plan_gate without gate block should not count")
+	}
+
+	// Full deterministic plan gate.
+	plan, err := pipeline.Parse([]byte(`
+stages:
+  - id: plan_validate
+    plan_gate: true
+    gate:
+      output: plan
+      pass:
+        path: status
+        values: [ok]
+      fail:
+        path: status
+        values: [incomplete]
+      required: true
+`))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if !plan.HasPlanGate() {
+		t.Fatal("expected HasPlanGate true for plan_gate + gate")
+	}
+	if !plan.Stages[0].PlanGate {
+		t.Fatal("expected PlanGate flag parsed")
+	}
+}
+
 func TestParseGateAction(t *testing.T) {
 	p, err := pipeline.Parse([]byte(`
 stages:

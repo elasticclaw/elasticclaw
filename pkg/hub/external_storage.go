@@ -2,6 +2,7 @@ package hub
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -42,11 +43,6 @@ func hubConfigDir() string {
 	return filepath.Join(home, ".elasticclaw")
 }
 
-// factoriesDir returns the path to the external factories directory.
-func factoriesDir() string {
-	return filepath.Join(hubConfigDir(), "factories")
-}
-
 // templatesDir returns the path to the external templates directory.
 func templatesDir() string {
 	return filepath.Join(hubConfigDir(), "templates")
@@ -57,16 +53,27 @@ func workspacesDir() string {
 	return filepath.Join(hubConfigDir(), "workspaces")
 }
 
-// EnsureExternalDirs creates the factories/ and templates/ directories
+// legacyFactoriesDir is the retired on-disk factories/ tree. It is no longer
+// created or loaded; deleteExternalFactory may still remove leftover entries
+// so operators can clean a pre-migration hub.
+func legacyFactoriesDir() string {
+	return filepath.Join(hubConfigDir(), "factories")
+}
+
+// EnsureExternalDirs creates the templates/ and workspaces/ directories
 // alongside hub.yaml if they don't exist.
 func EnsureExternalDirs() error {
-	for _, dir := range []string{factoriesDir(), templatesDir(), workspacesDir()} {
+	for _, dir := range []string{templatesDir(), workspacesDir()} {
 		if err := os.MkdirAll(dir, 0750); err != nil {
 			return fmt.Errorf("mkdir %s: %w", dir, err)
 		}
 	}
 	return nil
 }
+
+// errFactoriesRetired is returned by factory save/load paths that used to
+// target ~/.elasticclaw/factories. Automations must use workspace workflows.
+var errFactoriesRetired = fmt.Errorf("factories are retired; use workspace workflows (elasticclaw workflow push --workspace <name>) instead of the factories/ directory")
 
 // ── Templates ────────────────────────────────────────────────────────────────
 
@@ -203,99 +210,44 @@ func listExternalTemplates() ([]string, error) {
 	return names, nil
 }
 
-// ── Factories ────────────────────────────────────────────────────────────────
+// ── Factories (retired on-disk storage) ──────────────────────────────────────
+//
+// Automations live under workspaces/*/workflows/. The factories/ directory is
+// no longer loaded or written. resolveFactories only returns in-memory
+// hubCfg.Factories (used by unit tests); production hubs keep that empty.
 
-// loadExternalFactories scans the factories directory and returns all
-// FactoryConfigs with PipelineYAML loaded from disk.
+// loadExternalFactories used to scan factories/. It always returns an empty
+// list so leftover on-disk factories cannot dual-fire with workflows.
 func loadExternalFactories() ([]*types.FactoryConfig, error) {
-	dir := factoriesDir()
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("read factories dir: %w", err)
-	}
-
-	var factories []*types.FactoryConfig
-	for _, e := range entries {
-		if !e.IsDir() || strings.HasPrefix(e.Name(), ".") {
-			continue
-		}
-		f, err := loadExternalFactory(e.Name())
-		if err != nil {
-			// Log but don't fail — one bad factory shouldn't break the rest
-			fmt.Fprintf(os.Stderr, "[hub] skip factory %q: %v\n", e.Name(), err)
-			continue
-		}
-		factories = append(factories, f)
-	}
-	return factories, nil
+	return nil, nil
 }
 
-// resolveFactories returns the merged view of in-memory and external-storage
-// factories. External takes precedence. Used by polling and webhook handlers
-// so they always see the latest factories regardless of whether they were
-// loaded from hub.yaml or pushed via CLI/API.
+// resolveFactories returns in-memory factories only (tests). Production hubs
+// do not load factories from disk or hub.yaml after migration cleanup.
 func (s *Server) resolveFactories() []*types.FactoryConfig {
-	external, err := loadExternalFactories()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "[hub] loadExternalFactories: %v\n", err)
-	}
-
 	s.mu.RLock()
 	mem := s.hubCfg.Factories
 	s.mu.RUnlock()
 
-	merged := make(map[string]*types.FactoryConfig, len(mem)+len(external))
+	result := make([]*types.FactoryConfig, 0, len(mem))
 	for _, f := range mem {
 		if f == nil {
 			continue
 		}
-		merged[f.Name] = f
-	}
-	for _, f := range external {
-		if f == nil {
-			continue
-		}
-		merged[f.Name] = f
-	}
-
-	result := make([]*types.FactoryConfig, 0, len(merged))
-	for _, f := range merged {
 		result = append(result, f)
 	}
 	return result
 }
 
-// loadExternalFactory reads a single factory from disk.
+// loadExternalFactory always fails: on-disk factories are retired.
 func loadExternalFactory(name string) (*types.FactoryConfig, error) {
 	if err := validateName(name); err != nil {
 		return nil, err
 	}
-	dir := filepath.Join(factoriesDir(), name)
-
-	factoryPath := filepath.Join(dir, "factory.yaml")
-	data, err := os.ReadFile(factoryPath)
-	if err != nil {
-		return nil, fmt.Errorf("read factory.yaml: %w", err)
-	}
-
-	var f types.FactoryConfig
-	if err := yaml.Unmarshal(data, &f); err != nil {
-		return nil, fmt.Errorf("parse factory.yaml: %w", err)
-	}
-
-	// Load pipeline.yaml alongside if present
-	pipelinePath := filepath.Join(dir, "pipeline.yaml")
-	if pdata, err := os.ReadFile(pipelinePath); err == nil {
-		f.PipelineYAML = string(pdata)
-	}
-
-	return &f, nil
+	return nil, errFactoriesRetired
 }
 
-// saveExternalFactory writes a factory to the external directory.
+// saveExternalFactory rejects writes: use workspace workflows instead.
 func saveExternalFactory(f *types.FactoryConfig) error {
 	if f == nil || f.Name == "" {
 		return fmt.Errorf("factory name required")
@@ -303,46 +255,20 @@ func saveExternalFactory(f *types.FactoryConfig) error {
 	if err := f.Validate(); err != nil {
 		return err
 	}
-	if err := validateName(f.Name); err != nil {
-		return err
-	}
-
-	dir := filepath.Join(factoriesDir(), f.Name)
-	if err := os.MkdirAll(dir, 0750); err != nil {
-		return fmt.Errorf("mkdir %s: %w", dir, err)
-	}
-
-	// Write factory.yaml (without PipelineYAML — that goes in pipeline.yaml)
-	factoryCopy := *f
-	factoryCopy.PipelineYAML = ""
-	fdata, err := yaml.Marshal(&factoryCopy)
-	if err != nil {
-		return fmt.Errorf("marshal factory.yaml: %w", err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "factory.yaml"), fdata, 0640); err != nil {
-		return fmt.Errorf("write factory.yaml: %w", err)
-	}
-
-	// Write or remove pipeline.yaml based on whether PipelineYAML is set
-	pipelinePath := filepath.Join(dir, "pipeline.yaml")
-	if f.PipelineYAML != "" {
-		if err := os.WriteFile(pipelinePath, []byte(f.PipelineYAML), 0640); err != nil {
-			return fmt.Errorf("write pipeline.yaml: %w", err)
-		}
-	} else {
-		_ = os.Remove(pipelinePath)
-	}
-
-	return nil
+	return errFactoriesRetired
 }
 
-// deleteExternalFactory removes a factory directory.
+// deleteExternalFactory removes a leftover factories/<name> directory if
+// present (best-effort cleanup). Missing dirs are not an error.
 func deleteExternalFactory(name string) error {
 	if err := validateName(name); err != nil {
 		return err
 	}
-	dir := filepath.Join(factoriesDir(), name)
-	return os.RemoveAll(dir)
+	dir := filepath.Join(legacyFactoriesDir(), name)
+	if err := os.RemoveAll(dir); err != nil {
+		return err
+	}
+	return nil
 }
 
 // ── Workspaces ───────────────────────────────────────────────────────────────
@@ -416,21 +342,59 @@ func loadExternalWorkspace(name string) (*types.WorkspaceConfig, error) {
 	return &workspace, nil
 }
 
+// errWorkspaceNotFound is returned when a workspace name does not exist on the hub.
+// Callers should map this to HTTP 404 rather than 500.
+type errWorkspaceNotFound struct {
+	Name string
+}
+
+func (e *errWorkspaceNotFound) Error() string {
+	return fmt.Sprintf(
+		"workspace %q not found on the hub; push it first with `elasticclaw workspace push --path <dir> %s`, then retry with `--workspace %s`",
+		e.Name, e.Name, e.Name,
+	)
+}
+
+func isWorkspaceNotFound(err error) bool {
+	var target *errWorkspaceNotFound
+	return errors.As(err, &target)
+}
+
 func loadExternalWorkspaceConfig(name string) (types.WorkspaceConfig, error) {
 	dir := filepath.Join(workspacesDir(), name)
+	if st, err := os.Stat(dir); err != nil {
+		if os.IsNotExist(err) {
+			return types.WorkspaceConfig{}, &errWorkspaceNotFound{Name: name}
+		}
+		return types.WorkspaceConfig{}, fmt.Errorf("stat workspace %q: %w", name, err)
+	} else if !st.IsDir() {
+		return types.WorkspaceConfig{}, fmt.Errorf("workspace %q path exists but is not a directory", name)
+	}
+
 	configPath := filepath.Join(dir, "elasticclaw-config.yaml")
 	data, err := os.ReadFile(configPath)
 	if err != nil {
+		// Only fall back to legacy workspace.yaml when the canonical file is
+		// actually missing. Permissions / other I/O errors must surface as-is.
+		if !os.IsNotExist(err) {
+			return types.WorkspaceConfig{}, fmt.Errorf("read workspace %q config: %w", name, err)
+		}
 		legacyPath := filepath.Join(dir, "workspace.yaml")
 		data, err = os.ReadFile(legacyPath)
 		if err != nil {
-			return types.WorkspaceConfig{}, fmt.Errorf("read elasticclaw-config.yaml: %w", err)
+			if os.IsNotExist(err) {
+				return types.WorkspaceConfig{}, fmt.Errorf(
+					"workspace %q exists but is missing elasticclaw-config.yaml (looked for elasticclaw-config.yaml and workspace.yaml)",
+					name,
+				)
+			}
+			return types.WorkspaceConfig{}, fmt.Errorf("read workspace %q config: %w", name, err)
 		}
 		configPath = legacyPath
 	}
 	var workspace types.WorkspaceConfig
 	if err := yaml.Unmarshal(data, &workspace); err != nil {
-		return types.WorkspaceConfig{}, fmt.Errorf("parse %s: %w", filepath.Base(configPath), err)
+		return types.WorkspaceConfig{}, fmt.Errorf("parse workspace %q %s: %w", name, filepath.Base(configPath), err)
 	}
 	return workspace, nil
 }
@@ -541,7 +505,11 @@ func saveExternalWorkflows(workspaceName string, workflows []*types.WorkflowConf
 		return err
 	}
 	if _, err := loadExternalWorkspaceConfig(workspaceName); err != nil {
-		return err
+		// Preserve workspace-not-found for HTTP 404 mapping; wrap other load failures.
+		if isWorkspaceNotFound(err) {
+			return err
+		}
+		return fmt.Errorf("load workspace %q: %w", workspaceName, err)
 	}
 	workflowDir := filepath.Join(workspacesDir(), workspaceName, "workflows")
 	if err := os.MkdirAll(workflowDir, 0750); err != nil {
@@ -742,33 +710,25 @@ func (s *Server) MigrateLegacyTemplates() error {
 	return nil
 }
 
-// MigrateLegacyFactories migrates factories from hub.yaml to the external
-// factories/ directory, then strips them from hub.yaml. Returns the list of
-// migrated factory names.
+// MigrateLegacyFactories strips factories from hub.yaml. On-disk factories/
+// is no longer populated or loaded; automations must use workspace workflows.
+// Returns names that were present in hub.yaml before clearing (for logging).
 func MigrateLegacyFactories(cfg *types.HubConfig) ([]string, error) {
-	var migrated []string
+	var removed []string
 	for _, f := range cfg.Factories {
-		if f == nil {
+		if f == nil || f.Name == "" {
 			continue
 		}
-		if err := saveExternalFactory(f); err != nil {
-			fmt.Fprintf(os.Stderr, "[hub] migrate factory %q: %v\n", f.Name, err)
-			continue
-		}
-		migrated = append(migrated, f.Name)
+		removed = append(removed, f.Name)
 	}
 
-	// Strip factories from hub.yaml so they are never loaded from legacy location again.
-	// This runs even if len(migrated)==0 (all factories already on disk) to prevent
-	// split-brain where hub.yaml and external storage both claim ownership.
 	cfg.Factories = nil
 	if err := config.SaveHubConfig(cfg); err != nil {
-		return migrated, fmt.Errorf("strip factories from hub.yaml: %w", err)
+		return removed, fmt.Errorf("strip factories from hub.yaml: %w", err)
 	}
-	if len(migrated) > 0 {
-		fmt.Println("[hub] stripped migrated factories from hub.yaml")
-	} else {
-		fmt.Println("[hub] no inline factories to migrate — cleared factories from hub.yaml")
+	if len(removed) > 0 {
+		fmt.Printf("[hub] removed %d factory config(s) from hub.yaml (factories/ is retired; use workspace workflows): %s\n",
+			len(removed), strings.Join(removed, ", "))
 	}
-	return migrated, nil
+	return removed, nil
 }

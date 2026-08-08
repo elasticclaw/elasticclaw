@@ -475,10 +475,84 @@ func runWorkflowLogs(workspace, name, runID string) error {
 	}
 
 	fmt.Printf("Agent logs for run %s (agent %s, status %s):\n\n", runID, shortID(run.ClawID), run.Status)
-	for _, msg := range messages {
-		printActivityMessage(msg)
-	}
+	printCollapsedActivityMessages(messages)
 	return nil
+}
+
+// printCollapsedActivityMessages prints activity messages, collapsing bursts of
+// identical or prefix-extended reasoning messages so repeated model activity
+// does not drown out tool events and errors.
+func printCollapsedActivityMessages(messages []types.HubMessage) {
+	var pending *types.HubMessage
+	var pendingActivity *agentActivity
+	pendingCount := 0
+
+	flush := func() {
+		if pending == nil {
+			return
+		}
+		printActivityMessage(*pending, pendingCount-1)
+		pending = nil
+		pendingActivity = nil
+		pendingCount = 0
+	}
+
+	for i := range messages {
+		msg := &messages[i]
+		activity, ok := parseAgentActivity(*msg)
+		if !ok {
+			flush()
+			printActivityMessage(*msg, 0)
+			continue
+		}
+		if pending == nil {
+			pending = msg
+			pendingActivity = &activity
+			pendingCount = 1
+			continue
+		}
+		if canCollapseActivity(*pendingActivity, activity) {
+			if len(activity.Message) > len(pendingActivity.Message) {
+				pending = msg
+				pendingActivity = &activity
+			}
+			pendingCount++
+			continue
+		}
+		flush()
+		pending = msg
+		pendingActivity = &activity
+		pendingCount = 1
+	}
+	flush()
+}
+
+func parseAgentActivity(msg types.HubMessage) (agentActivity, bool) {
+	if !strings.HasPrefix(msg.Format, "activity:") {
+		return agentActivity{}, false
+	}
+	var activity agentActivity
+	if err := json.Unmarshal([]byte(strings.TrimPrefix(msg.Format, "activity:")), &activity); err != nil {
+		return agentActivity{}, false
+	}
+	return activity, true
+}
+
+// canCollapseActivity returns true when two activities are the same kind of
+// event and one message is a prefix of the other. This catches the common case
+// where a model streams its reasoning as a series of ever-longer messages.
+func canCollapseActivity(a, b agentActivity) bool {
+	return a.Kind == b.Kind &&
+		a.Tool == b.Tool &&
+		a.Phase == b.Phase &&
+		a.Command == b.Command &&
+		a.Path == b.Path &&
+		a.URL == b.URL &&
+		a.Error == b.Error &&
+		a.Detail == b.Detail &&
+		(a.Message == b.Message ||
+			strings.HasPrefix(a.Message, b.Message) ||
+			strings.HasPrefix(b.Message, a.Message))
 }
 
 type agentActivity struct {
@@ -493,7 +567,7 @@ type agentActivity struct {
 	Error   string `json:"error"`
 }
 
-func printActivityMessage(msg types.HubMessage) {
+func printActivityMessage(msg types.HubMessage, collapsedSimilar int) {
 	ts := msg.CreatedAt.Format("2006-01-02 15:04:05")
 	if !strings.HasPrefix(msg.Format, "activity:") {
 		fmt.Printf("%s  %s\n", ts, msg.Content)
@@ -533,6 +607,9 @@ func printActivityMessage(msg types.HubMessage) {
 	}
 	if activity.Error != "" {
 		parts = append(parts, fmt.Sprintf("error: %s", activity.Error))
+	}
+	if collapsedSimilar > 0 {
+		parts = append(parts, fmt.Sprintf("(+ %d similar)", collapsedSimilar))
 	}
 	if len(parts) == 0 {
 		fmt.Println(" " + msg.Content)

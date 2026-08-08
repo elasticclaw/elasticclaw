@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/elasticclaw/elasticclaw/pkg/types"
+	"github.com/google/uuid"
 	"nhooyr.io/websocket"
 	"nhooyr.io/websocket/wsjson"
 )
@@ -466,6 +467,176 @@ func TestRestartDuringBootstrapDoesNotEnqueueResume(t *testing.T) {
 	var n int
 	if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND content LIKE ?`, clawID, restartResumePrefix+"%").Scan(&n); err != nil || n != 0 {
 		t.Fatalf("resume rows=%d err=%v, want 0", n, err)
+	}
+}
+
+func TestSessionRotatedEnqueuesResume(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{ClawToken: "claw-token"}, "", "", "")
+	const clawID = "watchdog-session-rotated"
+	conn := watchdogClaw(t, s, clawID)
+	_ = watchdogClawConn(t, s, clawID)
+	if _, err := db.Exec(`UPDATE claws SET status='connected', bootstrap_ok=1, issue_title='Fix session', github_issue_id='owner/repo#42' WHERE id=?`, clawID); err != nil {
+		t.Fatal(err)
+	}
+	if err := wsjson.Write(context.Background(), conn, types.WSMessage{Type: "session_rotated"}); err != nil {
+		t.Fatalf("write session_rotated: %v", err)
+	}
+	count := func() int {
+		var n int
+		_ = db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND role='hub' AND content LIKE ?`, clawID, sessionRotatedResumePrefix+"%").Scan(&n)
+		return n
+	}
+	eventuallyWatchdog(t, func() bool { return count() == 1 }, "session rotated resume")
+}
+
+func TestSessionRotatedResumeThrottled(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{ClawToken: "claw-token"}, "", "", "")
+	const clawID = "watchdog-session-rotated-throttled"
+	conn := watchdogClaw(t, s, clawID)
+	_ = watchdogClawConn(t, s, clawID)
+	if _, err := db.Exec(`UPDATE claws SET status='connected', bootstrap_ok=1, issue_title='Fix session' WHERE id=?`, clawID); err != nil {
+		t.Fatal(err)
+	}
+	// A resume prompt already went out moments ago — a second rotation inside
+	// the throttle window must not enqueue another one.
+	if _, err := db.Exec(`INSERT INTO messages(id,claw_id,tenant_id,role,content,created_at) VALUES(?,?,?,?,?,?)`,
+		uuid.NewString(), clawID, "test-tenant-id", "hub", sessionRotatedResumePrefix+" earlier resume", now().Add(-time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if err := wsjson.Write(context.Background(), conn, types.WSMessage{Type: "session_rotated"}); err != nil {
+		t.Fatalf("write session_rotated: %v", err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	var n int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND role='hub' AND content LIKE ?`, clawID, sessionRotatedResumePrefix+"%").Scan(&n); err != nil || n != 1 {
+		t.Fatalf("resume rows=%d err=%v, want 1 (throttled)", n, err)
+	}
+}
+
+func TestSessionRotatedResumeThrottleWindowExpires(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{ClawToken: "claw-token"}, "", "", "")
+	const clawID = "watchdog-session-rotated-throttle-expired"
+	conn := watchdogClaw(t, s, clawID)
+	_ = watchdogClawConn(t, s, clawID)
+	if _, err := db.Exec(`UPDATE claws SET status='connected', bootstrap_ok=1, issue_title='Fix session' WHERE id=?`, clawID); err != nil {
+		t.Fatal(err)
+	}
+	// The previous resume is older than the throttle window, so a new
+	// rotation must enqueue a fresh resume prompt.
+	if _, err := db.Exec(`INSERT INTO messages(id,claw_id,tenant_id,role,content,created_at) VALUES(?,?,?,?,?,?)`,
+		uuid.NewString(), clawID, "test-tenant-id", "hub", sessionRotatedResumePrefix+" earlier resume", now().Add(-sessionRotatedResumeThrottle-time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if err := wsjson.Write(context.Background(), conn, types.WSMessage{Type: "session_rotated"}); err != nil {
+		t.Fatalf("write session_rotated: %v", err)
+	}
+	count := func() int {
+		var n int
+		_ = db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND role='hub' AND content LIKE ?`, clawID, sessionRotatedResumePrefix+"%").Scan(&n)
+		return n
+	}
+	eventuallyWatchdog(t, func() bool { return count() == 2 }, "session rotated resume after throttle window")
+}
+
+func TestSessionRotatedNotConnectedDoesNotEnqueueResume(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{ClawToken: "claw-token"}, "", "", "")
+	const clawID = "watchdog-session-rotated-not-connected"
+	conn := watchdogClaw(t, s, clawID)
+	_ = watchdogClawConn(t, s, clawID)
+	if _, err := db.Exec(`UPDATE claws SET status='starting', bootstrap_ok=1, issue_title='Fix session', github_issue_id='owner/repo#42' WHERE id=?`, clawID); err != nil {
+		t.Fatal(err)
+	}
+	if err := wsjson.Write(context.Background(), conn, types.WSMessage{Type: "session_rotated"}); err != nil {
+		t.Fatalf("write session_rotated: %v", err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	var n int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND content LIKE ?`, clawID, sessionRotatedResumePrefix+"%").Scan(&n); err != nil || n != 0 {
+		t.Fatalf("resume rows=%d err=%v, want 0", n, err)
+	}
+}
+
+func TestSilentProgressProbeGoesOverStatusChannelWithoutTranscript(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{ClawToken: "claw-token"}, "", "", "")
+	const clawID = "progress-probe-silent"
+	_ = watchdogClaw(t, s, clawID)
+	cc := watchdogClawConn(t, s, clawID)
+
+	ts := httptest.NewServer(s.Handler())
+	t.Cleanup(ts.Close)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	t.Cleanup(cancel)
+	statusConn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(ts.URL, "http")+"/claw/ws", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = statusConn.Close(websocket.StatusNormalClosure, "done") })
+	if err := wsjson.Write(ctx, statusConn, types.WSMessage{Type: "register", Payload: types.RegisterPayload{
+		ClawID: clawID, Name: "probe claw", Template: "elasticclaw", Token: "claw-token", Channel: "status",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	var ack types.WSMessage
+	if err := wsjson.Read(ctx, statusConn, &ack); err != nil || ack.Type != "registered" {
+		t.Fatalf("status channel ack: type=%q err=%v", ack.Type, err)
+	}
+	eventuallyWatchdog(t, func() bool {
+		cc.mu.RLock()
+		defer cc.mu.RUnlock()
+		return cc.statusConn != nil
+	}, "status channel attach")
+
+	// Turn already long enough for a probe.
+	cc.mu.Lock()
+	cc.streamingStartedAt = time.Now().Add(-2 * time.Minute)
+	cc.streamingMsgID = "stream"
+	cc.lastProgressProbeAt = time.Time{}
+	cc.mu.Unlock()
+
+	s.maybeSendProgressProbe(cc, time.Now())
+
+	var got types.WSMessage
+	if err := wsjson.Read(ctx, statusConn, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Type != "nudge" {
+		t.Fatalf("status channel message type=%q, want nudge", got.Type)
+	}
+	payload, _ := got.Payload.(map[string]interface{})
+	if payload["content"] != progressProbeContent {
+		t.Fatalf("nudge content=%#v, want progress probe", payload["content"])
+	}
+	// Must never appear in the chat transcript (no message rows).
+	var n int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND content=?`, clawID, progressProbeContent).Scan(&n); err != nil || n != 0 {
+		t.Fatalf("transcript rows=%d err=%v, want 0 (silent probe)", n, err)
+	}
+	// Rate-limited: immediate second call must not send another nudge.
+	s.maybeSendProgressProbe(cc, time.Now())
+	// Non-blocking check: no second message within a short window.
+	readCtx, readCancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer readCancel()
+	var second types.WSMessage
+	if err := wsjson.Read(readCtx, statusConn, &second); err == nil {
+		t.Fatalf("unexpected second nudge: %#v", second)
+	}
+}
+
+func TestSilentProgressProbeSkippedWithoutStatusChannel(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{ClawToken: "claw-token"}, "", "", "")
+	const clawID = "progress-probe-no-status"
+	_ = watchdogClaw(t, s, clawID)
+	cc := watchdogClawConn(t, s, clawID)
+	cc.mu.Lock()
+	cc.streamingStartedAt = time.Now().Add(-2 * time.Minute)
+	cc.streamingMsgID = "stream"
+	cc.statusConn = nil
+	cc.mu.Unlock()
+	s.maybeSendProgressProbe(cc, time.Now())
+	// Must not fall back to chat queue.
+	var n int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND content=?`, clawID, progressProbeContent).Scan(&n); err != nil || n != 0 {
+		t.Fatalf("chat rows=%d err=%v, want 0 (no fallback)", n, err)
 	}
 }
 

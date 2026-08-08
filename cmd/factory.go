@@ -8,13 +8,11 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"text/tabwriter"
 
 	"github.com/elasticclaw/elasticclaw/pkg/config"
-	"github.com/elasticclaw/elasticclaw/pkg/types"
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
 )
@@ -36,7 +34,7 @@ func FactoryCmd() *cobra.Command {
 func init() {
 	cmd := FactoryCmd()
 	cmd.Hidden = true
-	cmd.Deprecated = "factories are deprecated; use workflows instead"
+	cmd.Deprecated = "factories are retired; use workspace workflows (elasticclaw workflow push --workspace <name>)"
 	rootCmd.AddCommand(cmd)
 }
 
@@ -71,129 +69,7 @@ func factoryCreateCmd() *cobra.Command {
 }
 
 func runFactoryCreate(name, integration, workspace, triggerStatus, doneStatus, tmpl string) error {
-	name = strings.ToLower(strings.ReplaceAll(name, " ", "-"))
-	if workspace == "" {
-		workspace = name
-	}
-
-	var factoryYAML, pipelineYAML string
-
-	if integration == "github" {
-		// GitHub issue factory — uses repos and trigger instead of workspace/trigger_status
-		factoryYAML = fmt.Sprintf(`name: %s
-integration: github-issues
-workspace: %s
-trigger_status: "agent-ready"  # label name or issue state ("open")
-# labels: [bug]                # ALL labels must be present (AND)
-# assigned_to: "@username"      # or !@username, any, none
-# allowed_labelers:             # restrict who can trigger by labeling
-#   - marc-campbell
-#   - root-bot
-webhook_secret_ref: %s_webhook_secret
-
-template: %s
-`, name, workspace, name, tmpl)
-
-		pipelineYAML = fmt.Sprintf(`# Pipeline for %s (GitHub Issues)
-stages:
-  - id: working
-    label: "Working"
-    entry: true
-    on_enter:
-      inject: |
-        Read the GitHub issue in CONTEXT.md and start working.
-        Create a branch, implement the fix, and open a PR.
-        Narrate your progress. Send [DONE] when the PR is ready.
-
-  - id: pr_opened
-    label: "PR Opened"
-    triggers:
-      - message_contains: "[DONE]"
-    on_enter:
-      inject: |
-        PR created. Watch for CI results and review comments.
-
-  - id: done
-    label: "Done"
-    triggers:
-      - message_contains: "[DONE]"
-    on_enter:
-      close_issue: true
-      inject: |
-        Issue resolved. Closing the GitHub issue.
-    terminal: true
-`, name)
-	} else {
-		// Linear/Shortcut factory
-		factoryYAML = fmt.Sprintf(`name: %s
-integration: %s
-workspace: %s
-trigger_status: %q
-# labels: [bug, agent-ready]
-# assigned_to: "@username"  # or !@username, any, none
-webhook_secret_ref: %s_webhook_secret
-
-template: %s
-`, name, integration, workspace, triggerStatus, name, tmpl)
-
-		pipelineYAML = fmt.Sprintf(`# Pipeline for %s
-# Stages define the lifecycle of a factory-created agent.
-# ElasticClaw Server is the state machine — it injects instructions into the agent at each stage.
-
-stages:
-  - id: working
-    label: "Working"
-    entry: true
-    on_enter:
-      inject: |
-        Read your BOOTSTRAP.md and start working on the issue.
-        Narrate your progress as you go. Keep me updated.
-
-  - id: pr_opened
-    label: "PR Opened"
-    triggers:
-      - message_contains: "[DONE]"
-    on_enter:
-      move_issue: %q
-      inject: |
-        PR created. Watch for CI results and review comments.
-
-  - id: merged
-    label: "Merged"
-    triggers:
-      - pr_merged:
-    terminal: true
-
-  - id: closed_no_merge
-    label: "Closed Without Merge"
-    triggers:
-      - pr_closed:
-    on_enter:
-      inject: |
-        PR was closed without merging. Decide: reopen, new PR, or ask the user.
-`, name, doneStatus)
-	}
-
-	dir := filepath.Join(".elasticclaw", "factories", name)
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return fmt.Errorf("failed to create directory: %w", err)
-	}
-
-	if err := os.WriteFile(filepath.Join(dir, "factory.yaml"), []byte(factoryYAML), 0644); err != nil {
-		return fmt.Errorf("failed to write factory.yaml: %w", err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "pipeline.yaml"), []byte(pipelineYAML), 0644); err != nil {
-		return fmt.Errorf("failed to write pipeline.yaml: %w", err)
-	}
-
-	fmt.Printf("\nCreated %s/\n", dir)
-	fmt.Printf("  factory.yaml\n")
-	fmt.Printf("  pipeline.yaml\n\n")
-	fmt.Printf("Next steps:\n")
-	fmt.Printf("  1. Edit %s/factory.yaml to review settings\n", dir)
-	fmt.Printf("  2. Add your webhook secret to the hub: elasticclaw hub settings\n")
-	fmt.Printf("  3. Push to hub: elasticclaw factory push\n")
-	return nil
+	return fmt.Errorf("factories are retired; use workspace workflows instead:\n  elasticclaw workspace push --path <workspace-dir> <name>\n  elasticclaw workflow push --workspace <name> <workflow.yaml>")
 }
 
 // ── factory push ──────────────────────────────────────────────────────────────
@@ -214,81 +90,8 @@ func factoryPushCmd() *cobra.Command {
 }
 
 func runFactoryPush(filterName string) error {
-	hubURL, clawToken, err := resolveHubConn()
-	if err != nil {
-		return err
-	}
-
-	// Find all factory.yaml files
-	pattern := filepath.Join(".elasticclaw", "factories", "*", "factory.yaml")
-	matches, err := filepath.Glob(pattern)
-	if err != nil || len(matches) == 0 {
-		return fmt.Errorf("no factories found under .elasticclaw/factories/")
-	}
-
-	var factories []*types.FactoryConfig
-	for _, match := range matches {
-		data, err := os.ReadFile(match)
-		if err != nil {
-			return fmt.Errorf("read %s: %w", match, err)
-		}
-		var f types.FactoryConfig
-		if err := yaml.Unmarshal(data, &f); err != nil {
-			return fmt.Errorf("parse %s: %w", match, err)
-		}
-		if filterName != "" && !strings.EqualFold(f.Name, filterName) {
-			continue
-		}
-
-		// Read pipeline.yaml alongside if present
-		pipelinePath := filepath.Join(filepath.Dir(match), "pipeline.yaml")
-		if pdata, err := os.ReadFile(pipelinePath); err == nil {
-			f.PipelineYAML = string(pdata)
-		}
-
-		// Validate factory configuration before pushing
-		if err := f.Validate(); err != nil {
-			return fmt.Errorf("validation failed for %s: %w", match, err)
-		}
-
-		factories = append(factories, &f)
-	}
-
-	if len(factories) == 0 {
-		return fmt.Errorf("no factories matched")
-	}
-
-	body, _ := json.Marshal(map[string]interface{}{"factories": factories})
-	req, _ := http.NewRequest(http.MethodPost, hubURL+"/api/factories", bytes.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+clawToken)
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("push failed: %w", err)
-	}
-	defer resp.Body.Close()
-	respBody, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("hub returned %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
-	}
-
-	var result struct {
-		Pushed    int `json:"pushed"`
-		Factories []struct {
-			Name string `json:"name"`
-		} `json:"factories"`
-	}
-	_ = json.Unmarshal(respBody, &result)
-
-	fmt.Printf("Pushed %d factory/factories to hub:\n", result.Pushed)
-	for _, f := range result.Factories {
-		fmt.Printf("  ✓ %s\n", f.Name)
-	}
-	return nil
+	return fmt.Errorf("factories are retired; use workspace workflows instead:\n  elasticclaw workflow push --workspace <name> <workflow.yaml>")
 }
-
-// ── factory list ──────────────────────────────────────────────────────────────
 
 func factoryListCmd() *cobra.Command {
 	return &cobra.Command{

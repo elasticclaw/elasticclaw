@@ -190,6 +190,77 @@ func TestRunWorkflowLogsFetchesRunAndActivityMessages(t *testing.T) {
 	}
 }
 
+func TestPrintCollapsedActivityMessages(t *testing.T) {
+	started := time.Date(2026, 7, 24, 9, 0, 0, 0, time.UTC)
+	mk := func(kind, message string) types.HubMessage {
+		return types.HubMessage{
+			Format:    "activity:" + mustJSON(t, agentActivity{Kind: kind, Message: message}),
+			CreatedAt: started,
+		}
+	}
+	mkTool := func(phase, command string) types.HubMessage {
+		return types.HubMessage{
+			Format:    "activity:" + mustJSON(t, agentActivity{Kind: "tool", Tool: "bash", Phase: phase, Command: command}),
+			CreatedAt: started,
+		}
+	}
+	mkPlain := func(content string) types.HubMessage {
+		return types.HubMessage{Content: content, CreatedAt: started}
+	}
+
+	messages := []types.HubMessage{
+		mk("activity", "The"),
+		mk("activity", "The user wants"),
+		mk("activity", "The user wants to run updates"),
+		mkTool("running", "git status"),
+		mkTool("running", "git status"),
+		mkTool("completed", "git status"),
+		mkPlain("plain hub message"),
+		mk("activity", "Now thinking about tests"),
+		mk("activity", "Now thinking about tests and validation"),
+	}
+
+	out, err := captureStdout(func() error {
+		printCollapsedActivityMessages(messages)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("captureStdout failed: %v", err)
+	}
+
+	// The three prefix-extended reasoning messages should collapse to one.
+	if !strings.Contains(out, "The user wants to run updates") {
+		t.Fatalf("output missing final collapsed reasoning message:\n%s", out)
+	}
+	if !strings.Contains(out, "(+ 2 similar)") {
+		t.Fatalf("output missing collapse count for first reasoning burst:\n%s", out)
+	}
+	// The duplicate running tool messages should be collapsed.
+	if strings.Count(out, "[bash]") != 2 {
+		t.Fatalf("want 2 bash lines (running + completed), got %d:\n%s", strings.Count(out, "[bash]"), out)
+	}
+	if !strings.Contains(out, "(+ 1 similar)") {
+		t.Fatalf("output missing collapse count for duplicate tool start:\n%s", out)
+	}
+	// Non-activity content should appear as-is.
+	if !strings.Contains(out, "plain hub message") {
+		t.Fatalf("output missing plain message:\n%s", out)
+	}
+	// The final reasoning burst should be present.
+	if !strings.Contains(out, "Now thinking about tests and validation") {
+		t.Fatalf("output missing final reasoning message:\n%s", out)
+	}
+}
+
+func mustJSON(t *testing.T, v interface{}) string {
+	t.Helper()
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	return string(b)
+}
+
 func TestRunWorkflowRunsListsRunsAndShortAgentID(t *testing.T) {
 	started := time.Date(2026, 7, 24, 9, 0, 0, 0, time.UTC)
 	finished := started.Add(5 * time.Minute)

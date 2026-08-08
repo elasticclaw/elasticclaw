@@ -524,17 +524,100 @@ func TestSyncStagedWorkspaceToOpenClawWorkspace(t *testing.T) {
 	assertFile("elasticclaw-config.yaml", "schema_version: v1\nname: lexipol\nprovider: docker\n")
 	assertFile("AGENTS.md", "You are the Lexipol factory agent.\n")
 	assertFile(filepath.Join("scripts", "bootstrap.sh"), "#!/bin/sh\n")
+	// Partial staged content replaces the full managed set so OpenClaw defaults
+	// (BOOTSTRAP.md/MEMORY.md) do not linger beside template instructions.
 	if _, err := os.Stat(filepath.Join(activeDir, "BOOTSTRAP.md")); !os.IsNotExist(err) {
-		t.Fatalf("BOOTSTRAP.md should be removed, got err=%v", err)
+		t.Fatalf("BOOTSTRAP.md should be removed on partial staged sync, got err=%v", err)
 	}
 	if _, err := os.Stat(filepath.Join(activeDir, "MEMORY.md")); !os.IsNotExist(err) {
-		t.Fatalf("MEMORY.md should be removed, got err=%v", err)
+		t.Fatalf("MEMORY.md should be removed on partial staged sync, got err=%v", err)
 	}
 	if _, err := os.Stat(filepath.Join(activeDir, ".elasticclaw-workspace-ready")); !os.IsNotExist(err) {
 		t.Fatalf("ready marker should not be copied, got err=%v", err)
 	}
 	if _, err := os.Stat(filepath.Join(activeDir, "passwd-link")); !os.IsNotExist(err) {
 		t.Fatalf("symlink should not be copied, got err=%v", err)
+	}
+}
+
+func TestSyncStagedWorkspacePartialSyncClearsManagedSet(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	stagedDir := filepath.Join(home, "workspace")
+	activeDir := filepath.Join(home, ".openclaw", "workspace")
+	if err := os.MkdirAll(stagedDir, 0700); err != nil {
+		t.Fatalf("mkdir staged: %v", err)
+	}
+	if err := os.MkdirAll(activeDir, 0700); err != nil {
+		t.Fatalf("mkdir active: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(stagedDir, "AGENTS.md"), []byte("from staged\n"), 0600); err != nil {
+		t.Fatalf("write staged AGENTS.md: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(activeDir, "AGENTS.md"), []byte("from openclaw\n"), 0600); err != nil {
+		t.Fatalf("write active AGENTS.md: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(activeDir, "SOUL.md"), []byte("stale openclaw default\n"), 0600); err != nil {
+		t.Fatalf("write active SOUL.md: %v", err)
+	}
+
+	if err := syncStagedWorkspaceToOpenClawWorkspace(); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+
+	gotAgents, err := os.ReadFile(filepath.Join(activeDir, "AGENTS.md"))
+	if err != nil {
+		t.Fatalf("read AGENTS.md: %v", err)
+	}
+	if string(gotAgents) != "from staged\n" {
+		t.Fatalf("AGENTS.md = %q, want staged content", string(gotAgents))
+	}
+	if _, err := os.Stat(filepath.Join(activeDir, "SOUL.md")); !os.IsNotExist(err) {
+		t.Fatalf("SOUL.md should be cleared when staged has content but omits it, got err=%v", err)
+	}
+}
+
+func TestSyncStagedWorkspaceEmptyStagedPreservesManagedFiles(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	stagedDir := filepath.Join(home, "workspace")
+	activeDir := filepath.Join(home, ".openclaw", "workspace")
+	if err := os.MkdirAll(stagedDir, 0700); err != nil {
+		t.Fatalf("mkdir staged: %v", err)
+	}
+	if err := os.MkdirAll(activeDir, 0700); err != nil {
+		t.Fatalf("mkdir active: %v", err)
+	}
+	// Ready marker alone does not count as staged content (and is never copied).
+	if err := os.WriteFile(filepath.Join(stagedDir, ".elasticclaw-workspace-ready"), []byte("ready\n"), 0600); err != nil {
+		t.Fatalf("write ready marker: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(activeDir, "AGENTS.md"), []byte("keep openclaw agents\n"), 0600); err != nil {
+		t.Fatalf("write active AGENTS.md: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(activeDir, "SOUL.md"), []byte("keep openclaw soul\n"), 0600); err != nil {
+		t.Fatalf("write active SOUL.md: %v", err)
+	}
+
+	if err := syncStagedWorkspaceToOpenClawWorkspace(); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+
+	gotAgents, err := os.ReadFile(filepath.Join(activeDir, "AGENTS.md"))
+	if err != nil {
+		t.Fatalf("read AGENTS.md: %v", err)
+	}
+	if string(gotAgents) != "keep openclaw agents\n" {
+		t.Fatalf("AGENTS.md = %q, want preserved when staged empty", string(gotAgents))
+	}
+	gotSoul, err := os.ReadFile(filepath.Join(activeDir, "SOUL.md"))
+	if err != nil {
+		t.Fatalf("read SOUL.md: %v", err)
+	}
+	if string(gotSoul) != "keep openclaw soul\n" {
+		t.Fatalf("SOUL.md = %q, want preserved when staged empty", string(gotSoul))
 	}
 }
 
@@ -1060,6 +1143,22 @@ func TestSanitizeActivityTextRedactsRepeatedSecretPrefixes(t *testing.T) {
 	}
 }
 
+func TestSanitizeActivityTextTruncatesAtReasonableLength(t *testing.T) {
+	input := strings.Repeat("a", 5000)
+	got := sanitizeActivityText(input)
+	if len(got) > 2005 {
+		t.Fatalf("sanitizeActivityText produced %d chars, want <= 2005: %q", len(got), got)
+	}
+	if !strings.HasSuffix(got, "...") {
+		t.Fatalf("sanitizeActivityText should suffix with ...: %q", got)
+	}
+	// Content under the limit should be preserved unchanged.
+	short := strings.Repeat("b", 1500)
+	if got := sanitizeActivityText(short); got != short {
+		t.Fatalf("sanitizeActivityText truncated short input: %q", got)
+	}
+}
+
 func TestPromoteInsufficientGatewayPairingPromotesReadOnlyDevice(t *testing.T) {
 	home := t.TempDir()
 	devicesDir := filepath.Join(home, ".openclaw", "devices")
@@ -1369,7 +1468,7 @@ func TestIsRecoverableSessionSendError(t *testing.T) {
 		{name: "send request context overflow", err: &sessionSendRequestError{err: errString("context overflow detected")}, want: true},
 		{name: "send request prompt too large", err: &sessionSendRequestError{err: errString("Context overflow: prompt too large for the model")}, want: true},
 		{name: "send request provider format rejection", err: &sessionSendRequestError{err: errString("LLM request failed: " + providerRequestFormatErrorFragment + ".")}, want: true},
-		{name: "send request session file lock conflict", err: &sessionSendRequestError{err: errString("error: session file changed while embedded prompt lock was released: /home/elasticclaw/.openclaw/agents/main/sessions/4fb88b9b-8233-4f78-819f-516fbe605e32.jsonl")}, want: true},
+		{name: "send request session file lock conflict handled by same-session retry", err: &sessionSendRequestError{err: errString("error: session file changed while embedded prompt lock was released: /home/elasticclaw/.openclaw/agents/main/sessions/4fb88b9b-8233-4f78-819f-516fbe605e32.jsonl")}, want: false},
 		{name: "send failure", err: errString("sessions.send failed: tool crashed"), want: false},
 	}
 	for _, tt := range tests {
@@ -1680,8 +1779,12 @@ func TestGatewaySessionResetsAfterSessionFileLockConflict(t *testing.T) {
 	}
 }
 
-func TestGatewaySessionRetriesAfterSessionFileLockSendError(t *testing.T) {
+func TestGatewaySessionRetriesSameSessionAfterLockConflictSendError(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
+
+	oldDelays := sessionLockConflictRetryDelays
+	sessionLockConflictRetryDelays = []time.Duration{time.Millisecond, time.Millisecond}
+	t.Cleanup(func() { sessionLockConflictRetryDelays = oldDelays })
 
 	const sessionErr = "error: session file changed while embedded prompt lock was released: /home/elasticclaw/.openclaw/agents/main/sessions/4fb88b9b-8233-4f78-819f-516fbe605e32.jsonl"
 	testDone := make(chan struct{})
@@ -1706,18 +1809,9 @@ func TestGatewaySessionRetriesAfterSessionFileLockSendError(t *testing.T) {
 			return req, true
 		}
 
-		// First send fails with the lock-conflict error.
+		// First send is rejected with the lock-conflict error.
 		sendReq, ok := readRequest("sessions.send")
 		if !ok {
-			return
-		}
-		var sendParams map[string]string
-		if err := json.Unmarshal(sendReq.Params, &sendParams); err != nil {
-			t.Errorf("decode first sessions.send params: %v", err)
-			return
-		}
-		if sendParams["key"] != "session-1" {
-			t.Errorf("first sessions.send key = %q, want session-1", sendParams["key"])
 			return
 		}
 		if err := wsjson.Write(r.Context(), conn, gwFrame{
@@ -1733,31 +1827,7 @@ func TestGatewaySessionRetriesAfterSessionFileLockSendError(t *testing.T) {
 			return
 		}
 
-		// Bridge should create and subscribe to a fresh session.
-		createReq, ok := readRequest("sessions.create")
-		if !ok {
-			return
-		}
-		if err := wsjson.Write(r.Context(), conn, gwFrame{
-			Type:    "res",
-			ID:      createReq.ID,
-			OK:      true,
-			Payload: mustJSON(map[string]string{"key": "session-2"}),
-		}); err != nil {
-			t.Errorf("create replacement session: %v", err)
-			return
-		}
-
-		subscribeReq, ok := readRequest("sessions.subscribe")
-		if !ok {
-			return
-		}
-		if err := wsjson.Write(r.Context(), conn, gwFrame{Type: "res", ID: subscribeReq.ID, OK: true}); err != nil {
-			t.Errorf("subscribe replacement session: %v", err)
-			return
-		}
-
-		// Retry in the fresh session should succeed.
+		// The retry must go to the SAME session — no rotation, no transcript loss.
 		retrySendReq, ok := readRequest("sessions.send")
 		if !ok {
 			return
@@ -1767,8 +1837,8 @@ func TestGatewaySessionRetriesAfterSessionFileLockSendError(t *testing.T) {
 			t.Errorf("decode retry sessions.send params: %v", err)
 			return
 		}
-		if retrySendParams["key"] != "session-2" {
-			t.Errorf("retry sessions.send key = %q, want session-2", retrySendParams["key"])
+		if retrySendParams["key"] != "session-1" {
+			t.Errorf("retry sessions.send key = %q, want same session session-1", retrySendParams["key"])
 			return
 		}
 		if err := wsjson.Write(r.Context(), conn, gwFrame{Type: "res", ID: retrySendReq.ID, OK: true}); err != nil {
@@ -1780,7 +1850,7 @@ func TestGatewaySessionRetriesAfterSessionFileLockSendError(t *testing.T) {
 			Event: "agent",
 			Payload: mustJSON(map[string]interface{}{
 				"stream":     "assistant",
-				"sessionKey": "session-2",
+				"sessionKey": "session-1",
 				"data":       map[string]string{"delta": "hello"},
 			}),
 		}); err != nil {
@@ -1792,7 +1862,7 @@ func TestGatewaySessionRetriesAfterSessionFileLockSendError(t *testing.T) {
 			Event: "agent",
 			Payload: mustJSON(map[string]interface{}{
 				"stream":     "lifecycle",
-				"sessionKey": "session-2",
+				"sessionKey": "session-1",
 				"data":       map[string]string{"phase": "end"},
 			}),
 		}); err != nil {
@@ -1827,6 +1897,128 @@ func TestGatewaySessionRetriesAfterSessionFileLockSendError(t *testing.T) {
 	}
 	if reply != "hello" {
 		t.Fatalf("SendMessage reply = %q, want hello", reply)
+	}
+	if got := gs.getSessionKey(); got != "session-1" {
+		t.Fatalf("session key = %q, want unchanged session-1", got)
+	}
+	if got := loadBridgeSession(); got != "" {
+		t.Fatalf("persisted session key = %q, want empty (no rotation)", got)
+	}
+}
+
+func TestGatewaySessionRotatesAfterLockConflictRetriesExhausted(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	oldDelays := sessionLockConflictRetryDelays
+	sessionLockConflictRetryDelays = []time.Duration{time.Millisecond, time.Millisecond}
+	t.Cleanup(func() { sessionLockConflictRetryDelays = oldDelays })
+
+	const sessionErr = "error: session file changed while embedded prompt lock was released: /home/elasticclaw/.openclaw/agents/main/sessions/4fb88b9b-8233-4f78-819f-516fbe605e32.jsonl"
+	testDone := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			t.Errorf("accept websocket: %v", err)
+			return
+		}
+		defer conn.CloseNow()
+
+		readRequest := func(wantMethod string) (gwFrame, bool) {
+			var req gwFrame
+			if err := wsjson.Read(r.Context(), conn, &req); err != nil {
+				t.Errorf("read %s request: %v", wantMethod, err)
+				return gwFrame{}, false
+			}
+			if req.Method != wantMethod {
+				t.Errorf("request method = %q, want %q", req.Method, wantMethod)
+				return gwFrame{}, false
+			}
+			return req, true
+		}
+
+		// Every same-session attempt (initial + all retries) is rejected.
+		for i := 0; i <= len(sessionLockConflictRetryDelays); i++ {
+			sendReq, ok := readRequest("sessions.send")
+			if !ok {
+				return
+			}
+			var sendParams map[string]string
+			if err := json.Unmarshal(sendReq.Params, &sendParams); err != nil {
+				t.Errorf("decode sessions.send params: %v", err)
+				return
+			}
+			if sendParams["key"] != "session-1" {
+				t.Errorf("sessions.send attempt %d key = %q, want session-1", i+1, sendParams["key"])
+				return
+			}
+			if err := wsjson.Write(r.Context(), conn, gwFrame{
+				Type: "res",
+				ID:   sendReq.ID,
+				OK:   false,
+				Error: &gwError{
+					Code:    "session_file_lock_conflict",
+					Message: sessionErr,
+				},
+			}); err != nil {
+				t.Errorf("reject sessions.send attempt %d: %v", i+1, err)
+				return
+			}
+		}
+
+		// Retries exhausted: bridge rotates to a fresh session as a last resort.
+		createReq, ok := readRequest("sessions.create")
+		if !ok {
+			return
+		}
+		if err := wsjson.Write(r.Context(), conn, gwFrame{
+			Type:    "res",
+			ID:      createReq.ID,
+			OK:      true,
+			Payload: mustJSON(map[string]string{"key": "session-2"}),
+		}); err != nil {
+			t.Errorf("create replacement session: %v", err)
+			return
+		}
+
+		subscribeReq, ok := readRequest("sessions.subscribe")
+		if !ok {
+			return
+		}
+		if err := wsjson.Write(r.Context(), conn, gwFrame{Type: "res", ID: subscribeReq.ID, OK: true}); err != nil {
+			t.Errorf("subscribe replacement session: %v", err)
+			return
+		}
+
+		<-testDone
+	}))
+	defer srv.Close()
+	defer close(testDone)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http")
+	conn, _, err := websocket.Dial(ctx, wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial websocket: %v", err)
+	}
+	defer conn.CloseNow()
+
+	gs := &gatewaySession{
+		sessionKey: "session-1",
+		conn:       conn,
+		pending:    make(map[string]chan gwFrame),
+	}
+	go gs.readLoop(ctx)
+
+	_, err = gs.SendMessage(ctx, "continue the task", nil, nil)
+	if err == nil {
+		t.Fatal("SendMessage returned nil error")
+	}
+	if !strings.Contains(err.Error(), sessionErr) || !strings.Contains(err.Error(), "session reset") {
+		t.Fatalf("SendMessage error = %q, want session error and recovery notice", err)
+	}
+	if !isSessionRotatedError(err) {
+		t.Fatalf("SendMessage error must be recognized as session rotation, got: %v", err)
 	}
 	if got := gs.getSessionKey(); got != "session-2" {
 		t.Fatalf("session key = %q, want session-2", got)

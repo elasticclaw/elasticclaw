@@ -238,6 +238,7 @@ type clawConn struct {
 	lastUserMessageAt     time.Time       // when the user last sent a message (for idle detection)
 	lastStatusBroadcastAt time.Time       // when we last broadcast status to user
 	unresponsiveWarnedAt  time.Time       // when the silent-death warning was first broadcast
+	lastProgressProbeAt   time.Time       // when we last sent a silent mid-turn progress probe
 }
 
 const (
@@ -249,16 +250,17 @@ const (
 const (
 	streamingTimeoutNudge  = "[hub] Your current response has been running for over 12 minutes. Please wrap up and send your response."
 	contextNearlyFullNudge = "[hub] Context window is nearly full. Summarize your progress briefly and send [DONE] with any PR URL, or ask the user what to do next."
+	// progressProbeContent is injected mid-turn over the status channel only
+	// (never persisted to chat). It asks the agent to post a visible update
+	// so tool-only runs still feel proactive to humans watching the UI.
+	progressProbeContent = "Humans are watching this chat. Before more tool work, post a short plain assistant message (1–3 sentences) covering what you just did and what you will do next. Tool activity alone is not enough."
+	// progressProbeInterval is the minimum gap between silent progress probes.
+	progressProbeInterval = time.Minute
+	// progressProbeMinTurnAge waits for the turn to get going before the first probe.
+	progressProbeMinTurnAge = 45 * time.Second
 	// autoResumeRecentTurnWindow includes races between a crash and turn completion.
 	autoResumeRecentTurnWindow = 5 * time.Minute
 )
-
-// interTurnCooldown gives the OpenClaw gateway a short window to finish
-// releasing the prompt lock and writing the final session state before the
-// next message is admitted. This mitigates the upstream "session file changed
-// while embedded prompt lock was released" race when a second message reaches
-// the session during the previous turn's cleanup window.
-var interTurnCooldown = 100 * time.Millisecond
 
 // initialStatus returns the claw status string to use on bridge registration.
 // A nil pointer means the field was absent (old bridge) — treat as ready for backward compat.
@@ -306,6 +308,7 @@ func (cc *clawConn) resetTurnStateLocked() {
 	cc.streamingStartedAt = time.Time{}
 	cc.streamingTimeoutSent = false
 	cc.contextWarningSent = false
+	cc.lastProgressProbeAt = time.Time{}
 }
 
 func (s *Server) flushStreamingSegment(clawID, tenantID string, cc *clawConn) error {
@@ -324,12 +327,30 @@ func (s *Server) flushStreamingSegment(clawID, tenantID string, cc *clawConn) er
 	cc.streamingSplit = true
 	cc.mu.Unlock()
 
+	createdAt := now()
 	_, err := s.db.Exec(
 		`INSERT INTO messages(id,claw_id,tenant_id,role,content,created_at,delivered_at) VALUES(?,?,?,?,?,?,?)
 		 ON CONFLICT(id) DO UPDATE SET content=excluded.content, delivered_at=excluded.delivered_at`,
-		msgID, clawID, tenantID, "claw", content, now(), now(),
+		msgID, clawID, tenantID, "claw", content, createdAt, createdAt,
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	// Broadcast the flushed segment so the UI keeps prior turn text when a tool
+	// call interrupts streaming. Without this, only the client typewriter
+	// snapshot holds the text — and the final message handler used to wipe it.
+	s.broadcastToUsers(tenantID, types.WSMessage{
+		Type: "message",
+		Payload: types.HubMessage{
+			ID:        msgID,
+			ClawID:    clawID,
+			TenantID:  tenantID,
+			Role:      "claw",
+			Content:   content,
+			CreatedAt: createdAt,
+		},
+	})
+	return nil
 }
 
 type userConn struct {
@@ -387,6 +408,7 @@ func NewServer(addr, dbPath, identityDir string, hubCfg *types.HubConfig) (*Serv
 	go srv.keepAliveDaytonaSandboxes()
 	go srv.pruneAnalytics()
 	go srv.statusWatchdog()
+	go srv.progressProbeWatchdog()
 	go srv.checkpointScheduler()
 	if srv.livenessEnabled() {
 		go srv.runReaper()
@@ -2990,10 +3012,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 					content := activityContent(activity)
 					if content != "" && !isUnhelpfulActivityContent(activity, content) {
 						format := "activity:" + string(payload)
-						_, _ = s.db.Exec(
-							`INSERT INTO messages(id,claw_id,tenant_id,role,content,format,created_at,delivered_at) VALUES(?,?,?,?,?,?,?,?)`,
-							uuid.New().String(), clawID, tenantID, "activity", content, format, createdAt, createdAt,
-						)
+						s.storeAgentActivity(clawID, tenantID, content, format, activity, createdAt)
 					}
 					s.broadcastToUsers(tenantID, types.WSMessage{
 						Type:    "agent_activity",
@@ -3066,8 +3085,15 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 				cc.forcedFinishCount = 0
 				cc.mu.Unlock()
 				s.deleteStaleWatchdogNags(clawID)
+				// Prefer the streamed buffer for the turn body: the final message
+				// event sometimes arrives empty while persistContent holds the
+				// full streamed response (including [DONE] and PR URLs).
+				turnContent := persistContent
+				if strings.TrimSpace(turnContent) == "" {
+					turnContent = hm.Content
+				}
 				// Drop empty messages — never store or broadcast
-				if strings.TrimSpace(hm.Content) == "" {
+				if strings.TrimSpace(turnContent) == "" {
 					// Clear typing indicator first — always clear even if no queued messages
 					s.broadcastToUsers(tenantID, types.WSMessage{
 						Type: "agent_typing",
@@ -3082,17 +3108,18 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 					s.drainPendingCheckpoint(clawID)
 					continue
 				}
-				if !skipPersist && strings.TrimSpace(persistContent) != "" {
+				if !skipPersist {
+					hm.Content = turnContent
 					_, _ = s.db.Exec(
 						`INSERT INTO messages(id,claw_id,tenant_id,role,content,created_at,delivered_at) VALUES(?,?,?,?,?,?,?)
 						 ON CONFLICT(id) DO UPDATE SET content=excluded.content, delivered_at=excluded.delivered_at`,
-						hm.ID, hm.ClawID, hm.TenantID, hm.Role, persistContent, hm.CreatedAt, hm.CreatedAt,
+						hm.ID, hm.ClawID, hm.TenantID, hm.Role, turnContent, hm.CreatedAt, hm.CreatedAt,
 					)
 					s.broadcastToUsers(tenantID, types.WSMessage{Type: "message", Payload: hm})
 				}
-				automaticContinuationPaused := s.observeCompletedTurn(clawID, hm.ID, hm.Content)
+				automaticContinuationPaused := s.observeCompletedTurn(clawID, hm.ID, turnContent)
 				if !automaticContinuationPaused {
-					s.handleInitialPlanResponse(clawID, tenantID, hm.Content)
+					s.handleInitialPlanResponse(clawID, tenantID, turnContent)
 				}
 				// Evaluate pipeline triggers. If a pipeline explicitly owns a
 				// [DONE] trigger, let it handle that signal instead of the
@@ -3100,17 +3127,34 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 				pipelineHandledDone := false
 				var pipelineDoneCtx pipelineContext
 				var pipelineDoneStage *pipeline.Stage
-				if strings.Contains(hm.Content, "[DONE]") {
-					pipelineDoneCtx, pipelineDoneStage, pipelineHandledDone = s.pipelineStageForMessageContains(clawID, hm.Content)
+				if strings.Contains(turnContent, "[DONE]") {
+					pipelineDoneCtx, pipelineDoneStage, pipelineHandledDone = s.pipelineStageForMessageContains(clawID, turnContent)
 				}
 				if automaticContinuationPaused {
 					pipelineHandledDone = false
 				} else if pipelineHandledDone {
-					prURLs := extractDonePRURLs(hm.Content)
-					s.trackDoneSignal(pipelineDoneCtx.Name(), pipelineDoneCtx.IssueID, clawID, len(prURLs))
-					s.safeGo("pipeline done transition", func() { s.transitionPipelineStageWithContext(clawID, *pipelineDoneStage, pipelineDoneCtx) })
-				} else if !strings.Contains(hm.Content, "[DONE]") {
-					s.safeGo("pipeline message triggers", func() { s.checkPipelineMessageTriggers(clawID, hm.Content) })
+					// Same gates as handleClawDoneSignal: do not advance or arm
+					// PR monitoring while a required gate is failed. Keep
+					// pipelineHandledDone true so we do not also run the
+					// legacy done handler (which would double-nudge).
+					if s.hasFailedRequiredGate(clawID) {
+						s.injectUserMessage(clawID, "[factory] `[DONE]` blocked: a required tool gate has failed. Please fix the issues and retry.")
+					} else {
+						prURLs := extractDonePRURLs(turnContent)
+						// Register before the stage transition so pr_merged/pr_closed
+						// monitoring is armed even if the agent only listed URLs next
+						// to [DONE] and never elsewhere in chat.
+						if errURL := s.registerDonePRURLs(clawID, prURLs); errURL != "" {
+							s.injectUserMessage(clawID, fmt.Sprintf("[factory] Failed to register PR %s: internal error. Please resend: [DONE] %s", errURL, strings.Join(prURLs, " ")))
+						} else {
+							s.trackDoneSignal(pipelineDoneCtx.Name(), pipelineDoneCtx.IssueID, clawID, len(prURLs))
+							s.safeGo("pipeline done transition", func() {
+								s.transitionPipelineStageWithContext(clawID, *pipelineDoneStage, pipelineDoneCtx)
+							})
+						}
+					}
+				} else if !strings.Contains(turnContent, "[DONE]") {
+					s.safeGo("pipeline message triggers", func() { s.checkPipelineMessageTriggers(clawID, turnContent) })
 				}
 				// Clear typing indicator now that response is complete
 				s.broadcastToUsers(tenantID, types.WSMessage{
@@ -3121,22 +3165,31 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 					},
 				})
 				// Check for [DONE] signal from a factory-created claw
-				if strings.Contains(hm.Content, "[DONE]") {
+				if strings.Contains(turnContent, "[DONE]") {
 					s.safeGo("done checkpoint", func() {
 						if _, err := s.requestCheckpoint(context.Background(), clawID, "done", "hub", false, checkpointRequestTimeout); err != nil {
 							log.Printf("[checkpoint] done request for %s failed: %v", shortID(clawID), err)
 						}
 					})
 					if !pipelineHandledDone {
-						s.safeGo("done signal", func() { s.handleClawDoneSignal(clawID, hm.Content) })
+						s.safeGo("done signal", func() { s.handleClawDoneSignal(clawID, turnContent) })
 					}
 				}
 				// Check for [TERMINATE] signal - allows claw to manage its own lifecycle
-				if strings.Contains(hm.Content, "[TERMINATE]") {
-					go s.handleClawTerminateSignal(clawID, hm.Content)
+				if strings.Contains(turnContent, "[TERMINATE]") {
+					go s.handleClawTerminateSignal(clawID, turnContent)
 				}
-				// Detect and store any PR URLs mentioned by the agent
-				go s.scanMessageForPRs(clawID, hm.Content)
+				// Detect and store PR URLs mentioned mid-work. [DONE] turns are
+				// intentionally excluded: registerDonePRURLs (pipeline path or
+				// handleClawDoneSignal) owns that registration so multi-URL sets
+				// stay atomic. A fallback scan here would call storePRMention
+				// per-URL and could partially arm the watcher after an aborted
+				// atomic register or a gate-blocked [DONE].
+				if strings.Contains(turnContent, "[DONE]") {
+					log.Printf("[pr-watcher] skipping PR scan for claw %s: [DONE] registration is handled explicitly", shortID(clawID))
+				} else {
+					go s.scanMessageForPRs(clawID, turnContent)
+				}
 				// Detect tool error loops and inject a corrective message
 				if !automaticContinuationPaused && detectToolLoop(hm.Content) {
 					s.mu.RLock()
@@ -3213,6 +3266,8 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 						}
 					}
 				}
+			} else if msg.Type == "session_rotated" {
+				go s.enqueueSessionRotatedResume(clawID)
 			} else if msg.Type == "model_auth_sync" {
 				if !modelAuthAuthorized {
 					continue
@@ -4154,15 +4209,44 @@ cp "$BIN" /tmp/claw-bridge.download && chmod +x /tmp/claw-bridge.download && mv 
 		// Use the hub directly during bootstrap. The bridge is intentionally not
 		// started yet so startup cannot race ahead of template file writes and
 		// bootstrap_ok gating.
+		// Base token URL. The credential helper appends &repo=owner/name when git
+		// supplies a path so large workspaces mint single-repo tokens (GitHub caps
+		// scoped tokens at 50 names and install-wide tokens over-grant).
 		tokenURL := fmt.Sprintf("%s/api/github/token/%s?claw_token=%s", s.clawHubURL(), clawID, clawToken)
 
 		// Step 5a: write the credential helper binary
+		// NOTE: %% escapes are for fmt.Sprintf — the written shell script must
+		// still contain single % for bash parameter expansion (${p%.git}, etc.).
 		credHelperScript := fmt.Sprintf(`export HOME=/home/daytona
 sudo tee /usr/local/bin/elasticclaw-git-credentials > /dev/null << 'CREDEOF'
 #!/bin/bash
+# Parse git credential protocol fields (path enables single-repo token minting).
+repo_query=""
+while IFS= read -r line; do
+  [ -z "$line" ] && break
+  case "$line" in
+    path=*)
+      p="${line#path=}"
+      p="${p#/}"
+      p="${p%%.git}"
+      # Accept owner/repo or nested path ending in owner/repo
+      case "$p" in
+        */*)
+          owner="${p%%%%/*}"
+          rest="${p#*/}"
+          name="${rest%%%%/*}"
+          if [ -n "$owner" ] && [ -n "$name" ] && [ "$owner" != "$p" ]; then
+            repo_query="&repo=$(printf '%%s' "$owner/$name" | python3 -c 'import sys,urllib.parse; print(urllib.parse.quote(sys.stdin.read().strip(), safe=""))')"
+          fi
+          ;;
+      esac
+      ;;
+  esac
+done
 # Retry up to 10 times — hub token endpoint may not be ready immediately
+base_url=%q
 for i in $(seq 1 10); do
-  response=$(curl -sf --max-time 35 %q)
+  response=$(curl -sf --max-time 35 "${base_url}${repo_query}")
   if [ $? -eq 0 ] && [ -n "$response" ]; then break; fi
   sleep 3
 done
@@ -4229,18 +4313,19 @@ gh auth status`
 			if ghStatusResult.ExitCode != 0 {
 				return fmt.Errorf("verify gh auth failed (exit %d): %s", ghStatusResult.ExitCode, sanitizeBootstrapOutput(ghStatusResult.Stdout))
 			}
+			// Smoke-check repo access once. Do not call `gh repo view` for every
+			// workspace repo: with tens of repos that O(N) sequence exceeds the
+			// sandbox exec timeout and cancels in-flight hub token mints, which
+			// was misreported as "GitHub App cannot access".
 			if len(repositories) > 0 {
-				verifyReposScript := "export HOME=/home/daytona; set +x; . /etc/profile.d/elasticclaw-github.sh; "
-				for _, repo := range repositories {
-					verifyReposScript += fmt.Sprintf("gh repo view %s >/dev/null || exit 1; ", shellQuote(repo.Repo))
-				}
-				log.Printf("[daytona] verify configured repositories (no retries)...")
-				verifyReposResult, verifyReposErr := p.ExecWithTimeout(ctx, instanceID, []string{"bash", "-c", verifyReposScript}, 30*time.Second)
+				verifyReposScript := buildDaytonaGitHubAccessSmokeScript(repositories)
+				log.Printf("[daytona] verify github access (smoke, %d configured repos)...", len(repositories))
+				verifyReposResult, verifyReposErr := p.ExecWithTimeout(ctx, instanceID, []string{"bash", "-c", verifyReposScript}, 45*time.Second)
 				if verifyReposErr != nil {
-					return fmt.Errorf("verify configured repositories: %w", verifyReposErr)
+					return fmt.Errorf("verify github access: %w", verifyReposErr)
 				}
 				if verifyReposResult.ExitCode != 0 {
-					return fmt.Errorf("verify configured repositories failed (exit %d): %s", verifyReposResult.ExitCode, sanitizeBootstrapOutput(verifyReposResult.Stdout))
+					return fmt.Errorf("verify github access failed (exit %d): %s", verifyReposResult.ExitCode, sanitizeBootstrapOutput(verifyReposResult.Stdout))
 				}
 			}
 			log.Printf("[daytona] verify gh auth done")
@@ -4252,7 +4337,9 @@ gh auth status`
 			}
 
 			cloneScript := buildDaytonaGitHubCloneScript(repositories)
-			cloneResult, cloneErr := p.ExecWithTimeout(ctx, instanceID, []string{"bash", "-c", cloneScript}, 2*time.Minute)
+			cloneTimeout := githubBootstrapCloneTimeout(len(repositories))
+			log.Printf("[daytona] clone timeout %s for %d repos", cloneTimeout, len(repositories))
+			cloneResult, cloneErr := p.ExecWithTimeout(ctx, instanceID, []string{"bash", "-c", cloneScript}, cloneTimeout)
 			if cloneErr != nil {
 				return fmt.Errorf("clone repos: %w", cloneErr)
 			}
@@ -4266,7 +4353,8 @@ gh auth status`
 				for _, repo := range repositories {
 					verifyCloneScript += daytonaRepoReadinessSnippet(repo.Repo)
 				}
-				verifyResult, verifyErr := p.ExecWithTimeout(ctx, instanceID, []string{"bash", "-c", verifyCloneScript}, 20*time.Second)
+				verifyCloneTimeout := githubBootstrapCloneVerifyTimeout(len(repositories))
+				verifyResult, verifyErr := p.ExecWithTimeout(ctx, instanceID, []string{"bash", "-c", verifyCloneScript}, verifyCloneTimeout)
 				if verifyErr != nil {
 					return fmt.Errorf("verify cloned repos: %w", verifyErr)
 				}
@@ -4359,6 +4447,10 @@ func recordE2EDaytonaSandboxID(sandboxID string) {
 
 func recordE2EReplicatedVMID(vmID string) {
 	recordE2EProviderID("Replicated VM", "ELASTICCLAW_E2E_REPLICATED_VM_ID_FILE", vmID)
+}
+
+func recordE2EExedevVMID(vmID string) {
+	recordE2EProviderID("exe.dev VM", "ELASTICCLAW_E2E_EXEDEV_VM_ID_FILE", vmID)
 }
 
 func recordE2EProviderID(label, envName, id string) {
@@ -4786,6 +4878,28 @@ func replicatedFinalWorkspaceDir(sshHome string) string {
 	return path.Join(sshHome, ".openclaw", "workspace")
 }
 
+// exedevRemoteHome returns the remote $HOME for an exe.dev VM.
+// Used to build absolute workspace paths so WriteFile never receives a "~/..."
+// path that would be shell-quoted into a literal "~" directory.
+func exedevRemoteHome(ctx context.Context, p *exedevProvider.Provider, vmName string) (string, error) {
+	res, err := p.Exec(ctx, vmName, []string{"printenv", "HOME"})
+	if err != nil {
+		return "", fmt.Errorf("resolve exedev HOME: %w", err)
+	}
+	home := strings.TrimSpace(res.Stdout)
+	if home == "" || !strings.HasPrefix(home, "/") {
+		return "", fmt.Errorf("resolve exedev HOME: invalid value %q", home)
+	}
+	return home, nil
+}
+
+// exedevWorkspaceDirs returns the absolute staged and live workspace directories
+// for an exe.dev claw given remote HOME. Staged is used for pre-bootstrap flake
+// files; live is the OpenClaw agent workspace written after bridge bootstrap.
+func exedevWorkspaceDirs(remoteHome string) (staged, live string) {
+	return path.Join(remoteHome, "workspace"), replicatedFinalWorkspaceDir(remoteHome)
+}
+
 func replicatedWorkspaceReadinessCommand(dir string, files map[string]string) string {
 	if len(files) == 0 {
 		return "true"
@@ -5036,6 +5150,29 @@ func isUnhelpfulActivityContent(activity map[string]interface{}, content string)
 	return strings.HasPrefix(content, "No streamed output")
 }
 
+// storeAgentActivity persists an activity message. Generic reasoning activity
+// (kind == "activity") is upserted into a single row per claw so the model's
+// streaming internal monologue does not flood the messages table. Tool,
+// diagnostic, error, and lifecycle activity messages are inserted as distinct
+// rows because they are useful audit events.
+func (s *Server) storeAgentActivity(clawID, tenantID, content, format string, activity map[string]interface{}, createdAt time.Time) {
+	kind, _ := activity["kind"].(string)
+	if strings.ToLower(strings.TrimSpace(kind)) == "activity" {
+		// Use a deterministic ID so repeated reasoning updates collapse to one row.
+		msgID := "activity-stream:" + clawID
+		_, _ = s.db.Exec(
+			`INSERT INTO messages(id,claw_id,tenant_id,role,content,format,created_at,delivered_at) VALUES(?,?,?,?,?,?,?,?)
+			 ON CONFLICT(id) DO UPDATE SET content=excluded.content, format=excluded.format, created_at=excluded.created_at, delivered_at=excluded.delivered_at`,
+			msgID, clawID, tenantID, "activity", content, format, createdAt, createdAt,
+		)
+		return
+	}
+	_, _ = s.db.Exec(
+		`INSERT INTO messages(id,claw_id,tenant_id,role,content,format,created_at,delivered_at) VALUES(?,?,?,?,?,?,?,?)`,
+		uuid.New().String(), clawID, tenantID, "activity", content, format, createdAt, createdAt,
+	)
+}
+
 func daytonaBootstrapStatusForStep(label string) string {
 	switch label {
 	case "uninstall old openclaw", "install openclaw", "verify openclaw":
@@ -5108,6 +5245,7 @@ func (s *Server) provisionExedev(ctx context.Context, clawID string, req types.C
 		return fmt.Errorf("exedev create: %w", err)
 	}
 	log.Printf("exedev VM created: %s (claw %s)", instance.ID, clawID)
+	recordE2EExedevVMID(instance.ID)
 	_, _ = s.db.Exec(`UPDATE claws SET status='starting', provider='exedev', provider_id=? WHERE id=?`, instance.ID, clawID)
 
 	// Bootstrap asynchronously
@@ -5147,10 +5285,10 @@ func (s *Server) bootstrapExedev(ctx context.Context, clawID, vmName string, p *
 	s.setBootstrapStatus(clawID, "Preparing ElasticClaw connector")
 
 	// Load claw configuration from DB in a single atomic query
-	var clawName, templateName, githubReposJSON, linearWorkspace, templateDefaultModel, llmKeyName, templateFilesJSON string
+	var clawName, templateName, githubReposJSON, linearWorkspace, templateDefaultModel, llmKeyName, templateFilesJSON, tagsJSON string
 	var nixEnabled, dockerEnabled int
-	if err := s.db.QueryRow(`SELECT COALESCE(name,''), COALESCE(template,''), COALESCE(github_repos,'[]'), COALESCE(linear_workspace,''), COALESCE(default_model,''), nix, docker, COALESCE(llm_key,''), COALESCE(template_files,'{}') FROM claws WHERE id=?`, clawID).Scan(
-		&clawName, &templateName, &githubReposJSON, &linearWorkspace, &templateDefaultModel, &nixEnabled, &dockerEnabled, &llmKeyName, &templateFilesJSON,
+	if err := s.db.QueryRow(`SELECT COALESCE(name,''), COALESCE(template,''), COALESCE(github_repos,'[]'), COALESCE(linear_workspace,''), COALESCE(default_model,''), nix, docker, COALESCE(llm_key,''), COALESCE(template_files,'{}'), COALESCE(tags,'[]') FROM claws WHERE id=?`, clawID).Scan(
+		&clawName, &templateName, &githubReposJSON, &linearWorkspace, &templateDefaultModel, &nixEnabled, &dockerEnabled, &llmKeyName, &templateFilesJSON, &tagsJSON,
 	); err != nil {
 		return fmt.Errorf("load claw config: %w", err)
 	}
@@ -5214,13 +5352,26 @@ func (s *Server) bootstrapExedev(ctx context.Context, clawID, vmName string, p *
 		Env:             env,
 	})
 
+	// Resolve absolute remote paths once. exedev WriteFile shell-quotes destinations, so
+	// a literal "~/workspace/..." path creates $HOME/~/workspace (tilde not expanded)
+	// and the bridge's staged→live sync then copies zero files into .openclaw/workspace.
+	remoteHome, err := exedevRemoteHome(ctx, p, vmName)
+	if err != nil {
+		return err
+	}
+	stagedWorkspace, liveWorkspace := exedevWorkspaceDirs(remoteHome)
+
 	if flakeFiles := templateFlakeFiles(templateFiles); len(flakeFiles) > 0 {
-		if _, err := p.Exec(ctx, vmName, []string{"mkdir", "-p", "~/workspace"}); err != nil {
+		if _, err := p.Exec(ctx, vmName, []string{"mkdir", "-p", "--", stagedWorkspace}); err != nil {
 			return fmt.Errorf("create flake staging dir: %w", err)
 		}
-		for path, content := range flakeFiles {
-			if err := p.WriteFile(ctx, vmName, "~/workspace/"+path, []byte(content)); err != nil {
-				return fmt.Errorf("stage %s before bootstrap: %w", path, err)
+		for rel, content := range flakeFiles {
+			safeName, err := cleanWorkspaceFilePath(rel)
+			if err != nil {
+				return fmt.Errorf("invalid flake path %q: %w", rel, err)
+			}
+			if err := p.WriteFile(ctx, vmName, path.Join(stagedWorkspace, safeName), []byte(content)); err != nil {
+				return fmt.Errorf("stage %s before bootstrap: %w", safeName, err)
 			}
 		}
 	}
@@ -5232,29 +5383,53 @@ func (s *Server) bootstrapExedev(ctx context.Context, clawID, vmName string, p *
 	log.Printf("[exedev] bootstrap script completed on %s", vmName)
 	s.setBootstrapStatus(clawID, "Writing workspace files")
 
-	// Write template files after bootstrap so openclaw onboard doesn't overwrite them
-	workdir := "~/workspace"
-	if _, err := p.Exec(ctx, vmName, []string{"mkdir", "-p", workdir}); err != nil {
-		return fmt.Errorf("create workdir: %w", err)
+	// The bridge's one-time staged-workspace sync has already finished. Write final
+	// context files directly to the live OpenClaw workspace (mirrors Replicated) so
+	// they are immediately available and do not sit only under ~/workspace.
+	if _, err := p.Exec(ctx, vmName, []string{"mkdir", "-p", "--", liveWorkspace}); err != nil {
+		return fmt.Errorf("create live workspace: %w", err)
 	}
 	var writeErrs []string
-	for path, content := range files {
-		fullPath := workdir + "/" + path
-		if err := p.WriteFile(ctx, vmName, fullPath, content); err != nil {
-			writeErrs = append(writeErrs, fmt.Sprintf("%s: %v", path, err))
+	written := make(map[string]string, len(files))
+	for rel, content := range files {
+		safeName, err := cleanWorkspaceFilePath(rel)
+		if err != nil {
+			writeErrs = append(writeErrs, fmt.Sprintf("%s: %v", rel, err))
+			continue
 		}
+		if err := p.WriteFile(ctx, vmName, path.Join(liveWorkspace, safeName), content); err != nil {
+			writeErrs = append(writeErrs, fmt.Sprintf("%s: %v", safeName, err))
+			continue
+		}
+		written[safeName] = string(content)
 	}
 	if len(writeErrs) > 0 {
 		return fmt.Errorf("template file staging failed: %s", strings.Join(writeErrs, "; "))
 	}
+	if len(written) > 0 {
+		if err := p.SetupScript(ctx, vmName, replicatedWorkspaceReadinessCommand(liveWorkspace, written)); err != nil {
+			return fmt.Errorf("workspace files incomplete: %s", sanitizeBootstrapError(err))
+		}
+	}
 	if err := s.restoreCheckpointToExedev(ctx, clawID, vmName, p); err != nil {
 		return fmt.Errorf("restore checkpoint: %w", err)
 	}
-	if credHelper := buildGitHubCredentialHelper(hubCfg, s.clawHubURL(), clawID, githubRepos); credHelper != "# GitHub App not configured — skipping credential helper" {
+	// Same workspace resolution as handleGitHubToken so workspace-scoped apps
+	// are found (template column holds workspace.Name for workflows; tags hold
+	// workspace: for fallback). Hub-only app check previously skipped these.
+	workspaceName := clawWorkspaceName(templateName, tagsJSON)
+	if shouldInstallGitHubCredentialHelper(hubCfg, workspaceName) {
+		s.setBootstrapStatus(clawID, "Preparing repository access")
+		credHelper := buildGitHubCredentialHelper(hubCfg, s.clawHubURL(), clawID, githubRepos)
+		if strings.HasPrefix(credHelper, githubCredentialHelperSkipPrefix) {
+			return fmt.Errorf("configure GitHub credentials: %s", strings.TrimPrefix(credHelper, "# "))
+		}
 		if err := p.SetupScript(ctx, vmName, credHelper); err != nil {
 			return fmt.Errorf("configure GitHub credentials and repo instructions: %w", err)
 		}
-		log.Printf("[exedev] GitHub credential helper and repo instruction discovery completed for claw %.8s", clawID)
+		log.Printf("[exedev] GitHub credential helper and repo instruction discovery completed for claw %.8s workspace=%q repos=%d", clawID, workspaceName, len(githubRepos))
+	} else {
+		log.Printf("[exedev] skipping GitHub credential helper for claw %.8s (no hub or workspace GitHub apps; workspace=%q repos=%d)", clawID, workspaceName, len(githubRepos))
 	}
 	s.markBootstrapReady(clawID)
 
@@ -5809,6 +5984,63 @@ func (s *Server) statusWatchdog() {
 	}
 }
 
+// progressProbeWatchdog periodically asks busy agents (over the status channel
+// only) to post a visible chat update. Probes never appear in the transcript.
+func (s *Server) progressProbeWatchdog() {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+	for range ticker.C {
+		s.probeBusyClawsForProgress()
+	}
+}
+
+// probeBusyClawsForProgress sends silent mid-turn status-channel nudges so
+// tool-heavy agents still produce human-readable chat updates.
+func (s *Server) probeBusyClawsForProgress() {
+	now := time.Now()
+	s.mu.RLock()
+	ids := make([]string, 0, len(s.claws))
+	for id := range s.claws {
+		ids = append(ids, id)
+	}
+	s.mu.RUnlock()
+	for _, id := range ids {
+		s.mu.RLock()
+		cc, ok := s.claws[id]
+		s.mu.RUnlock()
+		if !ok || cc == nil {
+			continue
+		}
+		s.maybeSendProgressProbe(cc, now)
+	}
+}
+
+// maybeSendProgressProbe rate-limits and dispatches one silent progress probe
+// for a claw that has been mid-turn long enough.
+func (s *Server) maybeSendProgressProbe(cc *clawConn, now time.Time) {
+	cc.mu.Lock()
+	if !cc.isBusyLocked() || cc.statusConn == nil {
+		cc.mu.Unlock()
+		return
+	}
+	turnStart := cc.streamingStartedAt
+	if turnStart.IsZero() {
+		// Prompt delivered but first chunk not yet seen — still a live turn.
+		turnStart = cc.lastUserMessageAt
+	}
+	if turnStart.IsZero() || now.Sub(turnStart) < progressProbeMinTurnAge {
+		cc.mu.Unlock()
+		return
+	}
+	if !cc.lastProgressProbeAt.IsZero() && now.Sub(cc.lastProgressProbeAt) < progressProbeInterval {
+		cc.mu.Unlock()
+		return
+	}
+	cc.lastProgressProbeAt = now
+	cc.mu.Unlock()
+	s.sendSilentStatusNudge(cc, progressProbeContent)
+}
+
 // checkClawStatus queries active claws, sends status requests via the status channel,
 // and detects claws that have gone silent (no status response, no user message recently).
 func (s *Server) checkClawStatus() {
@@ -6126,7 +6358,117 @@ Before editing files, running builds, or doing broad tool exploration, send one 
 This first message must be a normal assistant message visible to the user. Tool calls, activity rows, and update_plan do not count. After that visible plan, wait for the hub's proceed message, then start implementation and continue sending visible progress updates.`
 	initialPlanProceedContent    = `[hub] Initial plan received. Proceed with implementation. Keep sending visible progress updates before and after substantial work; tool calls and activity rows do not count as user communication.`
 	initialPlanCorrectionContent = `[hub] Initial plan is required before implementation. Pause tool work and send a visible assistant message with your understanding of the issue, likely code area, rough plan, and verification approach.`
+	// planGateProceedContent is injected when a workflow plan_gate passes.
+	// It must be unambiguous: agents previously waited for freeform "proceed"
+	// or re-emitted [PLAN_READY] after the gate already passed.
+	planGateProceedContent = `[hub] Plan gate passed — you are cleared to implement now.
+
+Do not wait for another proceed message.
+Do not emit [PLAN_READY] again.
+
+VISIBLE CHAT (required — tool activity alone is not enough for humans watching):
+- Before your first code change, send one short message: what you're doing first.
+- After each meaningful milestone (deps, files changed, checks, PR), send a 1–3 sentence update.
+- When a command fails, say what failed and what you'll try next.
+- Prefer plain assistant messages over silent tool spam.
+
+When the PR is ready, say [DONE] with the PR URL(s).`
+	planGateAlreadyAcceptedContent = `[hub] Plan was already approved earlier in this run.
+Continue implementation — do not emit [PLAN_READY] again.
+Keep posting short visible progress updates (tool rows alone are not enough).
+When the PR is ready, say [DONE] with the PR URL(s).`
 )
+
+// formatPlanGateSummary builds a human-readable plan dump from gate output JSON
+// so the transcript shows the plan even when the agent only said [PLAN_READY].
+// Multiline values are indented so continuation lines stay under their field
+// and are not mistaken for new bullets or fields. When the validator only
+// returned status (legacy), still emit a short approved notice so chat is not silent.
+func formatPlanGateSummary(output map[string]interface{}) string {
+	if output == nil {
+		return "[hub] Plan approved (schema gate)."
+	}
+	var b strings.Builder
+	b.WriteString("[hub] Approved plan summary:\n")
+	wrote := false
+	writeLabeled := func(label, value string) {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return
+		}
+		lines := strings.Split(value, "\n")
+		b.WriteString("- ")
+		b.WriteString(label)
+		b.WriteString(": ")
+		if len(lines) == 1 {
+			b.WriteString(lines[0])
+			b.WriteByte('\n')
+		} else {
+			// First line after the label; further lines indented under the field.
+			b.WriteByte('\n')
+			for _, line := range lines {
+				b.WriteString("    ")
+				b.WriteString(strings.TrimRight(line, "\r"))
+				b.WriteByte('\n')
+			}
+		}
+		wrote = true
+	}
+	writeField := func(label, key string) {
+		v, ok := output[key]
+		if !ok || v == nil {
+			return
+		}
+		switch t := v.(type) {
+		case string:
+			writeLabeled(label, t)
+		case []interface{}:
+			if len(t) == 0 {
+				return
+			}
+			b.WriteString("- ")
+			b.WriteString(label)
+			b.WriteString(":\n")
+			for _, item := range t {
+				itemLines := strings.Split(strings.TrimSpace(fmt.Sprint(item)), "\n")
+				b.WriteString("  • ")
+				if len(itemLines) == 0 {
+					b.WriteByte('\n')
+					continue
+				}
+				b.WriteString(itemLines[0])
+				b.WriteByte('\n')
+				for _, cont := range itemLines[1:] {
+					b.WriteString("    ")
+					b.WriteString(strings.TrimRight(cont, "\r"))
+					b.WriteByte('\n')
+				}
+			}
+			wrote = true
+		default:
+			s := strings.TrimSpace(fmt.Sprint(v))
+			if s == "" || s == "[]" || s == "map[]" {
+				return
+			}
+			writeLabeled(label, s)
+		}
+	}
+	writeField("understanding", "understanding")
+	writeField("area", "area")
+	writeField("steps", "steps")
+	writeField("verification", "verification")
+	if !wrote {
+		// Validator only returned status (or empty fields). Still surface a notice.
+		return "[hub] Plan approved (schema gate)."
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+// planGateAcceptedMarker is per-stage so a second plan_gate later in the
+// workflow still evaluates its own output instead of inheriting a global pass.
+func planGateAcceptedMarker(stageID string) string {
+	return "__PLAN_GATE_ACCEPTED__:" + stageID
+}
 
 // sendWakeMessage sends a silent system message to wake the agent.
 // For factory claws, it sends a task-specific prompt.
@@ -6209,6 +6551,20 @@ func (s *Server) sendInitialPlanInstruction(cc *clawConn, clawID string) {
 }
 
 func (s *Server) clawNeedsInitialPlan(clawID string) bool {
+	if !s.clawEligibleForInitialPlan(clawID) {
+		return false
+	}
+	// Workflows that declare a deterministic plan_gate own plan approval.
+	// Skip freeform keyword checks so we do not double-approve or freeze.
+	if s.clawPipelineHasPlanGate(clawID) {
+		return false
+	}
+	return true
+}
+
+// clawEligibleForInitialPlan is true for issue-backed or factory/workflow claws
+// that historically received the freeform initial-plan wake.
+func (s *Server) clawEligibleForInitialPlan(clawID string) bool {
 	issueID, tags := s.clawIssueAndTags(clawID)
 	if issueID != "" {
 		return true
@@ -6219,6 +6575,17 @@ func (s *Server) clawNeedsInitialPlan(clawID string) bool {
 		}
 	}
 	return false
+}
+
+// clawPipelineHasPlanGate reports whether this claw's factory/workflow YAML
+// declares plan_gate: true on a stage that also has a gate block.
+func (s *Server) clawPipelineHasPlanGate(clawID string) bool {
+	ctx, ok := s.findPipelineContextForClaw(clawID)
+	if !ok {
+		return false
+	}
+	pl := parsePipelineForContext(ctx)
+	return pl != nil && pl.HasPlanGate()
 }
 
 func (s *Server) tenantIDForClaw(clawID string) string {
@@ -6257,15 +6624,30 @@ func (s *Server) handleInitialPlanResponse(clawID, tenantID, content string) {
 	if !s.hasSystemMarker(clawID, initialPlanRequiredMarker) || s.hasSystemMarker(clawID, initialPlanAcceptedMarker) {
 		return
 	}
-	if isValidInitialPlan(content) {
+	// Strict keyword match, or a substantial second attempt after we already
+	// asked for a correction. Without the soft path, a real plan that misses
+	// one keyword (e.g. "issue") leaves the agent waiting forever for proceed.
+	correctionSent := s.hasSystemMarker(clawID, initialPlanCorrectionSentMarker)
+	if isValidInitialPlan(content) || (correctionSent && isSubstantialInitialPlan(content)) {
 		_ = s.insertSystemMarker(clawID, tenantID, initialPlanAcceptedMarker)
 		s.injectHubMessageByID(clawID, initialPlanProceedContent)
 		return
 	}
-	if !s.hasSystemMarker(clawID, initialPlanCorrectionSentMarker) {
+	if !correctionSent {
 		_ = s.insertSystemMarker(clawID, tenantID, initialPlanCorrectionSentMarker)
 		s.injectHubMessageByID(clawID, initialPlanCorrectionContent)
+		return
 	}
+	// Correction already sent and this turn still failed both gates. Re-nudge
+	// only when the agent produced a real attempt (not a short ack), so it is
+	// not frozen waiting for a proceed that never arrives.
+	trimmed := strings.TrimSpace(content)
+	if len(trimmed) < 120 {
+		return
+	}
+	log.Printf("[hub] initial plan still incomplete for claw %s (len=%d words=%d); re-sending correction",
+		shortID(clawID), len(trimmed), len(strings.Fields(trimmed)))
+	s.injectHubMessageByID(clawID, initialPlanCorrectionContent)
 }
 
 func (s *Server) handleInitialPlanActivity(clawID, tenantID string, activity map[string]interface{}) {
@@ -6288,24 +6670,32 @@ func isValidInitialPlan(content string) bool {
 		return false
 	}
 	lower := strings.ToLower(content)
-	hasUnderstanding := strings.Contains(lower, "understand") ||
-		strings.Contains(lower, "issue") ||
-		strings.Contains(lower, "task") ||
-		strings.Contains(lower, "problem")
-	hasPlan := strings.Contains(lower, "plan") ||
-		strings.Contains(lower, "step") ||
-		strings.Contains(lower, "approach")
-	hasVerification := strings.Contains(lower, "test") ||
-		strings.Contains(lower, "verify") ||
-		strings.Contains(lower, "check") ||
-		strings.Contains(lower, "build")
-	hasCodeArea := strings.Contains(lower, "file") ||
-		strings.Contains(lower, "code") ||
-		strings.Contains(lower, "package") ||
-		strings.Contains(lower, "component") ||
-		strings.Contains(lower, "backend") ||
-		strings.Contains(lower, "frontend")
+	hasUnderstanding := containsAny(lower, []string{
+		"understand", "issue", "task", "problem", "requirement", "requirements",
+		"will add", "will implement", "need to", "goal", "ticket",
+	})
+	hasPlan := containsAny(lower, []string{"plan", "step", "approach", "implement", "implementation"})
+	hasVerification := containsAny(lower, []string{"test", "verify", "verification", "check", "build", "ci"})
+	hasCodeArea := containsAny(lower, []string{
+		"file", "code", "package", "component", "backend", "frontend",
+		"workflow", "repo", "repository", "directory", "config", "script",
+		".github", "package.json",
+	})
 	return hasUnderstanding && hasPlan && hasVerification && hasCodeArea
+}
+
+// isSubstantialInitialPlan is a softer gate used after we already sent a
+// correction. Agents often write a real plan without the exact keyword set
+// (e.g. naming a ticket id instead of "issue"); accepting those unblocks work.
+func isSubstantialInitialPlan(content string) bool {
+	content = strings.TrimSpace(content)
+	if len(content) < 200 || len(strings.Fields(content)) < 40 {
+		return false
+	}
+	lower := strings.ToLower(content)
+	hasPlan := containsAny(lower, []string{"plan", "step", "approach", "implement", "implementation"})
+	hasVerification := containsAny(lower, []string{"test", "verify", "verification", "check", "build", "ci"})
+	return hasPlan && hasVerification
 }
 
 // clawHasMessages returns true if the claw already has message history.
@@ -6573,7 +6963,16 @@ Tokens are short-lived and refreshed automatically on each git/gh operation.
 
 	// Run GitHub credential helper setup (needs bridge connected for hub proxy,
 	// but the hub token URL is publicly accessible so it works directly).
-	if credHelper := buildGitHubCredentialHelper(hubCfg, s.clawHubURL(), clawID, githubRepos); credHelper != "# GitHub App not configured — skipping credential helper" {
+	// Match Daytona/exedev: install when hub or workspace-scoped GitHub apps exist.
+	var tagsJSON string
+	_ = s.db.QueryRow(`SELECT COALESCE(tags,'[]') FROM claws WHERE id=?`, clawID).Scan(&tagsJSON)
+	workspaceName := clawWorkspaceName(templateName, tagsJSON)
+	if shouldInstallGitHubCredentialHelper(hubCfg, workspaceName) {
+		credHelper := buildGitHubCredentialHelper(hubCfg, s.clawHubURL(), clawID, githubRepos)
+		if strings.HasPrefix(credHelper, githubCredentialHelperSkipPrefix) {
+			s.stopAgentWithReason(clawID, fmt.Sprintf("Bootstrap failed: could not configure GitHub credentials: %s", strings.TrimPrefix(credHelper, "# ")), false)
+			return
+		}
 		if err := retryReplicatedBootstrapStep(s, clawID, replicatedBootstrapRetryOptions{
 			Label:      "Configuring GitHub credentials",
 			RetryLabel: "Retrying GitHub credential setup",
@@ -6586,7 +6985,7 @@ Tokens are short-lived and refreshed automatically on each git/gh operation.
 			s.stopAgentWithReason(clawID, fmt.Sprintf("Bootstrap failed: could not configure GitHub credentials: %s", err), false)
 			return
 		}
-		log.Printf("[bootstrap] GitHub credential helper installed for claw %s", clawName)
+		log.Printf("[bootstrap] GitHub credential helper installed for claw %s workspace=%q", clawName, workspaceName)
 	}
 	s.markBootstrapReady(clawID)
 
@@ -6833,8 +7232,9 @@ func buildGitHubTokenProfileScript() string {
 	return `# ElasticClaw GitHub App token refresh for gh.
 # This intentionally resolves through the credential helper instead of storing
 # the short-lived installation token generated during bootstrap.
+# Feed the git credential protocol so the helper always mints a token.
 if [ -x /usr/local/bin/elasticclaw-git-credentials ]; then
-  token="$(/usr/local/bin/elasticclaw-git-credentials 2>/dev/null | sed -n 's/^password=//p' | head -n1)"
+  token="$(printf 'protocol=https\nhost=github.com\n\n' | /usr/local/bin/elasticclaw-git-credentials get 2>/dev/null | sed -n 's/^password=//p' | head -n1)"
   if [ -n "$token" ]; then
     export GH_TOKEN="$token"
   else
@@ -6873,7 +7273,7 @@ func buildGitHubCLIWrapperInstallScript() string {
 set +x
 REAL_GH="__ELASTICCLAW_REAL_GH__"
 if [ -x /usr/local/bin/elasticclaw-git-credentials ]; then
-  token="$(/usr/local/bin/elasticclaw-git-credentials 2>/dev/null | sed -n 's/^password=//p' | head -n1)"
+  token="$(printf 'protocol=https\nhost=github.com\n\n' | /usr/local/bin/elasticclaw-git-credentials get 2>/dev/null | sed -n 's/^password=//p' | head -n1)"
   if [ -n "$token" ]; then
     export GH_TOKEN="$token"
   fi
@@ -6889,9 +7289,67 @@ GHEOF
 fi`
 }
 
+// buildDaytonaGitHubAccessSmokeScript checks that the credential helper can mint
+// a token and that GitHub accepts it. It views at most one configured repository
+// so large workspaces stay O(1) at bootstrap; full access is proven by clone.
+//
+// IMPORTANT: GH_TOKEN is a GitHub App *installation* token, not a user token.
+// Endpoints like `gh api user` return 403 "Resource not accessible by
+// integration" and must not be used here.
+func buildDaytonaGitHubAccessSmokeScript(repos []types.GitHubRepoAccess) string {
+	var b strings.Builder
+	b.WriteString("export HOME=/home/daytona; set +x; . /etc/profile.d/elasticclaw-github.sh; ")
+	b.WriteString(`[ -n "${GH_TOKEN:-}" ] || { echo "[daytona] github access smoke: empty GH_TOKEN"; exit 1; }; `)
+	// Installation-token-safe authenticated call (works without a repo list).
+	b.WriteString(`gh api rate_limit >/dev/null || { echo "[daytona] github access smoke: gh api rate_limit failed"; exit 1; }; `)
+	if len(repos) > 0 && strings.TrimSpace(repos[0].Repo) != "" {
+		// Single sample proves installation scope for at least one configured repo.
+		fmt.Fprintf(&b, "gh repo view %s >/dev/null || { echo %s; exit 1; }; ",
+			shellQuote(repos[0].Repo),
+			shellQuote("[daytona] github access smoke: cannot view "+repos[0].Repo),
+		)
+	}
+	b.WriteString(`echo "[daytona] github access smoke OK"; `)
+	return b.String()
+}
+
+// githubBootstrapCloneTimeout scales clone time with repository count.
+// Floor 2m; ~45s per repo; cap 30m so huge workspaces still complete.
+func githubBootstrapCloneTimeout(repoCount int) time.Duration {
+	if repoCount <= 0 {
+		return 2 * time.Minute
+	}
+	d := time.Duration(repoCount) * 45 * time.Second
+	if d < 2*time.Minute {
+		return 2 * time.Minute
+	}
+	if d > 30*time.Minute {
+		return 30 * time.Minute
+	}
+	return d
+}
+
+// githubBootstrapCloneVerifyTimeout scales local .git existence checks.
+func githubBootstrapCloneVerifyTimeout(repoCount int) time.Duration {
+	if repoCount <= 0 {
+		return 20 * time.Second
+	}
+	d := time.Duration(repoCount) * time.Second
+	if d < 20*time.Second {
+		return 20 * time.Second
+	}
+	if d > 5*time.Minute {
+		return 5 * time.Minute
+	}
+	return d
+}
+
 func buildDaytonaGitHubCloneScript(repos []types.GitHubRepoAccess) string {
 	var b strings.Builder
 	b.WriteString("export HOME=/home/daytona; export GIT_TERMINAL_PROMPT=0; set +x; cd ~/.openclaw/workspace; git config --global --get credential.helper >/dev/null || exit 1; set -o pipefail; ")
+	// Resolve GH_TOKEN once so N clones do not each re-enter the credential helper
+	// before git uses it (helper still refreshes if git asks again).
+	b.WriteString(`. /etc/profile.d/elasticclaw-github.sh 2>/dev/null || true; `)
 	for _, repo := range repos {
 		repoName := repoDirectoryName(repo.Repo)
 		cloneURL := "https://github.com/" + repo.Repo + ".git"
@@ -7027,11 +7485,41 @@ func buildBestEffortRepoInstructionDiscoveryScript(workspaceDir string, repos []
 `, discoveryScript)
 }
 
-// buildGitHubCredentialHelper returns shell script lines that install a git
-// credential helper on the VM if GitHub App is configured on the hub.
+// githubCredentialHelperSkipPrefix marks scripts that intentionally do not
+// install the helper. Callers must not treat this as a successful install.
+const githubCredentialHelperSkipPrefix = "# GitHub credential helper skipped"
+
+// shouldInstallGitHubCredentialHelper reports whether a claw sandbox can mint
+// GitHub App installation tokens (so the credential helper is useful).
+//
+// Install when hub-level apps exist OR the claw's resolved workspace has
+// workspace-scoped apps. Do not install for github_repos alone — the token
+// endpoint cannot mint without an app, and a mandatory smoke would fail bootstrap.
+//
+// workspaceName must be the ElasticClaw workspace directory name (same as
+// handleGitHubToken: clawWorkspaceName(template, tags)), not the claw display
+// name or factory template alias when those differ.
+func shouldInstallGitHubCredentialHelper(cfg *types.HubConfig, workspaceName string) bool {
+	if cfg != nil && len(cfg.GitHubApps) > 0 {
+		return true
+	}
+	ws := strings.TrimSpace(workspaceName)
+	if ws == "" {
+		return false
+	}
+	apps, err := loadWorkspaceGitHubAppConfigs(ws)
+	return err == nil && len(apps) > 0
+}
+
+// buildGitHubCredentialHelper returns a shell script that installs the git
+// credential helper, forces HTTPS remotes for github.com, configures gh to
+// refresh tokens via the helper, and clones configured repos.
+//
+// Call only when shouldInstallGitHubCredentialHelper is true. Returns a
+// skip-marker comment when hub URL / claw credentials are incomplete.
 func buildGitHubCredentialHelper(cfg *types.HubConfig, hubURL, clawID string, repos []types.GitHubRepoAccess) string {
-	if len(cfg.GitHubApps) == 0 {
-		return "# GitHub App not configured — skipping credential helper"
+	if cfg == nil || strings.TrimSpace(cfg.ClawToken) == "" || strings.TrimSpace(hubURL) == "" || strings.TrimSpace(clawID) == "" {
+		return githubCredentialHelperSkipPrefix + " — missing hub URL, claw ID, or claw token"
 	}
 	clawToken := cfg.ClawToken
 	tokenURL := fmt.Sprintf("%s/api/github/token/%s?claw_token=%s", hubURL, clawID, clawToken)
@@ -7050,7 +7538,30 @@ echo "Configuring GitHub credential helper for user=$(whoami) home=$HOME"
 sudo tee /usr/local/bin/elasticclaw-git-credentials > /dev/null << 'CREDEOF'
 #!/bin/bash
 # Git credential helper — fetches a fresh GitHub App installation token from the hub.
-response=$(curl -sf %q)
+# When git supplies path=owner/repo.git, request a single-repo scoped token.
+repo_query=""
+while IFS= read -r line; do
+  [ -z "$line" ] && break
+  case "$line" in
+    path=*)
+      p="${line#path=}"
+      p="${p#/}"
+      p="${p%%.git}"
+      case "$p" in
+        */*)
+          owner="${p%%%%/*}"
+          rest="${p#*/}"
+          name="${rest%%%%/*}"
+          if [ -n "$owner" ] && [ -n "$name" ] && [ "$owner" != "$p" ]; then
+            repo_query="&repo=$(printf '%%s' "$owner/$name" | python3 -c 'import sys,urllib.parse; print(urllib.parse.quote(sys.stdin.read().strip(), safe=""))')"
+          fi
+          ;;
+      esac
+      ;;
+  esac
+done
+base_url=%q
+response=$(curl -sf --max-time 35 "${base_url}${repo_query}")
 if [ $? -ne 0 ] || [ -z "$response" ]; then
   exit 1
 fi
@@ -7061,6 +7572,7 @@ echo "username=x-access-token"
 echo "password=$token"
 CREDEOF
 sudo chmod +x /usr/local/bin/elasticclaw-git-credentials
+test -x /usr/local/bin/elasticclaw-git-credentials
 
 # Install git + gh CLI
 if ! command -v git &>/dev/null; then
@@ -7073,6 +7585,13 @@ fi
 git config --global credential.helper /usr/local/bin/elasticclaw-git-credentials
 git config --global --get-all credential.helper | grep -Fx /usr/local/bin/elasticclaw-git-credentials >/dev/null
 git config --show-origin --global --get-all credential.helper
+
+# Force HTTPS for github.com so agents cannot fall back to SSH (no deploy keys).
+# git@github.com: and ssh://git@github.com/ never invoke credential.helper.
+git config --global --unset-all url.https://github.com/.insteadof 2>/dev/null || true
+git config --global --add url.https://github.com/.insteadOf 'git@github.com:'
+git config --global --add url.https://github.com/.insteadOf 'ssh://git@github.com/'
+git config --global --get-regexp 'url\.https://github\.com/\.insteadof' >/dev/null
 
 # Install gh CLI if possible. gh is useful, but git credential registration above is mandatory.
 if ! command -v gh &>/dev/null; then
@@ -7096,6 +7615,23 @@ if command -v gh &>/dev/null; then
 %s
   ) || echo "GitHub gh token refresh setup failed, continuing"
 fi
+
+# Smoke: helper binary + git registration must be in place. Token mint is
+# retried — the hub endpoint may lag briefly after the claw row is created.
+smoke_ok=0
+for i in $(seq 1 10); do
+  if printf 'protocol=https\nhost=github.com\n\n' | /usr/local/bin/elasticclaw-git-credentials get 2>/dev/null \
+    | grep -E '^password=.' >/dev/null; then
+    smoke_ok=1
+    break
+  fi
+  sleep 2
+done
+if [ "$smoke_ok" != "1" ]; then
+  echo "ERROR: credential helper installed but did not return a GitHub token after retries" >&2
+  exit 1
+fi
+
 echo "GitHub credential helper installed"
 
 # Clone repos — non-fatal: token may not be available until bridge connects
@@ -7107,6 +7643,19 @@ FAILED=0
 %s
 exit $FAILED
 ) || echo "Warning: repo clone failed — agent can retry after bridge connects"
+# Ensure any github.com remotes under the workspace use HTTPS (agent-proof).
+if command -v git &>/dev/null && [ -d "$HOME/.openclaw/workspace" ]; then
+  find "$HOME/.openclaw/workspace" -name .git -type d 2>/dev/null | while read -r gitdir; do
+    repo="$(dirname "$gitdir")"
+    url="$(git -C "$repo" remote get-url origin 2>/dev/null || true)"
+    case "$url" in
+      git@github.com:*|ssh://git@github.com/*)
+        https_url="$(printf '%%s' "$url" | sed -e 's|^git@github.com:|https://github.com/|' -e 's|^ssh://git@github.com/|https://github.com/|')"
+        git -C "$repo" remote set-url origin "$https_url" && echo "rewrote origin to HTTPS for $repo"
+        ;;
+    esac
+  done
+fi
 %s`, tokenURL, buildGitHubTokenProfileInstallScript(), buildGitHubCLIWrapperInstallScript(), buildGitHubCloneScript(repos), buildBestEffortRepoInstructionDiscoveryScript("$HOME/.openclaw/workspace", repos))
 }
 
@@ -7692,6 +8241,32 @@ func (s *Server) handleGitHubToken(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Optional single-repo scope from the git credential helper (path=owner/repo.git).
+	// Preferred for large workspaces: each clone mints a least-privilege token
+	// for one allowlisted repo (scales past GitHub's 50-name list limit).
+	if want := strings.TrimSpace(r.URL.Query().Get("repo")); want != "" {
+		want = strings.TrimPrefix(want, "/")
+		want = strings.TrimSuffix(want, ".git")
+		scoped := make([]RepoAccess, 0, 1)
+		for _, repo := range repos {
+			if strings.EqualFold(repo.Repo, want) {
+				scoped = append(scoped, repo)
+				break
+			}
+		}
+		if len(scoped) == 0 {
+			http.Error(w, "requested repo is not configured on this claw", http.StatusForbidden)
+			return
+		}
+		repos = scoped
+	} else if len(repos) > maxScopedInstallationRepos {
+		// Multi-repo mint without ?repo=: GitHub cannot name-scope >50 repos.
+		// InstallationToken will request permission levels without a repositories
+		// array. Git clone still prefers ?repo= (credential helper). Log so
+		// operators know the install is the access boundary for unscoped mints.
+		log.Printf("[github] claw %s multi-repo token for %d repos exceeds GitHub name-scope limit %d; minting permission-restricted installation token (git clones should use ?repo=)", clawID[:8], len(repos), maxScopedInstallationRepos)
+	}
+
 	// Try each configured GitHub App in order; use the first that finds an installation
 	s.mu.RLock()
 	githubApps := append([]*types.GitHubAppConfig(nil), s.hubCfg.GitHubApps...)
@@ -7717,15 +8292,45 @@ func (s *Server) handleGitHubToken(w http.ResponseWriter, r *http.Request) {
 			provider: provider,
 		})
 	}
+	// Cache installation tokens the same way as the PR watcher: claw credential
+	// helpers call this endpoint per git/gh invocation during bootstrap/clone.
+	// Without caching, large workspaces mint tens of identical tokens and can
+	// cancel mid-flight when the sandbox command times out.
+	cacheKey := "claw:" + clawID + ":" + githubTokenCacheKey(repos)
+	s.ghTokenMu.Lock()
+	if cached, ok := s.ghTokenCache[cacheKey]; ok && time.Now().Before(cached.expiresAt) {
+		token := cached.token
+		expiresAt := cached.expiresAt
+		s.ghTokenMu.Unlock()
+		jsonOK(w, map[string]interface{}{
+			"token":      token,
+			"expires_at": expiresAt,
+		})
+		return
+	}
+	s.ghTokenMu.Unlock()
+
+	var lastErr error
 	for _, candidate := range providers {
 		provider := candidate.provider
 		token, expiresAt, err := provider.InstallationToken(r.Context(), 0, repos)
 		if err != nil {
+			lastErr = err
 			// Debug-level only — expected when multiple apps configured and only one matches
 			log.Printf("[github] app[%d] app_id=%d: no match for repos (trying next): %v", candidate.index, candidate.appID, err)
 			continue
 		}
-		log.Printf("github token issued via app_id=%d for claw %s", candidate.appID, clawID[:8])
+		s.ghTokenMu.Lock()
+		if s.ghTokenCache == nil {
+			s.ghTokenCache = map[string]cachedGitHubToken{}
+		}
+		// Renew a few minutes early so no in-flight call uses an expiring token.
+		cacheExpiry := expiresAt.Add(-5 * time.Minute)
+		if cacheExpiry.After(time.Now()) {
+			s.ghTokenCache[cacheKey] = cachedGitHubToken{token: token, expiresAt: cacheExpiry}
+		}
+		s.ghTokenMu.Unlock()
+		log.Printf("github token issued via app_id=%d for claw %s (%d repos)", candidate.appID, clawID[:8], len(repos))
 		jsonOK(w, map[string]interface{}{
 			"token":      token,
 			"expires_at": expiresAt,
@@ -7733,7 +8338,20 @@ func (s *Server) handleGitHubToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	inaccessible := diagnoseGitHubRepoAccess(r.Context(), providers, repos)
+	// Request canceled/timeouts are not "cannot access" — bootstrap was still
+	// minting successfully and the client walked away (e.g. sandbox exec timeout).
+	if r.Context().Err() != nil || errors.Is(lastErr, context.Canceled) || errors.Is(lastErr, context.DeadlineExceeded) ||
+		(lastErr != nil && (strings.Contains(lastErr.Error(), "context canceled") || strings.Contains(lastErr.Error(), "context deadline"))) {
+		log.Printf("github token request canceled for claw %s (%d repos): %v", clawID[:8], len(repos), lastErr)
+		http.Error(w, "github token request canceled or timed out", http.StatusServiceUnavailable)
+		return
+	}
+
+	// Use a detached short timeout so diagnosis is not starved by a canceled
+	// request context (common when many repos cause client timeouts).
+	diagCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 20*time.Second)
+	defer cancel()
+	inaccessible := diagnoseGitHubRepoAccess(diagCtx, providers, repos)
 	if len(inaccessible) > 0 {
 		msg := inaccessibleGitHubReposMessage(inaccessible)
 		log.Printf("no github app found with installation for repos %v (claw %s): %s", repos, clawID[:8], msg)
@@ -7843,9 +8461,34 @@ func (s *Server) deleteStaleWatchdogNags(clawID string) {
 	}
 }
 
-const restartResumePrefix = "[hub] Agent process restart detected."
+const (
+	restartResumePrefix        = "[hub] Agent process restart detected."
+	sessionRotatedResumePrefix = "[hub] OpenClaw session reset detected."
+)
 
 func (s *Server) enqueueRestartResume(clawID string, restartCount int) {
+	s.enqueueSessionLostResume(clawID, restartResumePrefix, fmt.Sprintf("restart:%d", restartCount))
+}
+
+// sessionRotatedResumeThrottle bounds the rotation → resume → rotation loop:
+// if lock conflicts persist across fresh sessions (e.g. another process keeps
+// touching the session files), each rotation would otherwise enqueue another
+// resume prompt indefinitely — rotation turns complete with an empty reply,
+// so the no-progress watchdog never observes them.
+const sessionRotatedResumeThrottle = 10 * time.Minute
+
+func (s *Server) enqueueSessionRotatedResume(clawID string) {
+	var recent int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND role='hub' AND content LIKE ? AND created_at > ?`,
+		clawID, sessionRotatedResumePrefix+"%", now().Add(-sessionRotatedResumeThrottle)).Scan(&recent)
+	if err == nil && recent > 0 {
+		log.Printf("[watchdog] skipping session-rotated resume for %s: already resumed within %s", shortID(clawID), sessionRotatedResumeThrottle)
+		return
+	}
+	s.enqueueSessionLostResume(clawID, sessionRotatedResumePrefix, fmt.Sprintf("session_rotated:%s", uuid.NewString()))
+}
+
+func (s *Server) enqueueSessionLostResume(clawID, prefix, marker string) {
 	var status, issueTitle, linearID, githubID, shortcutID, jiraID string
 	var bootstrapOK int
 	err := s.db.QueryRow(`SELECT status, COALESCE(bootstrap_ok,0), COALESCE(issue_title,''), COALESCE(linear_issue_id,''), COALESCE(github_issue_id,''), COALESCE(shortcut_story_id,''), COALESCE(jira_issue_id,'') FROM claws WHERE id=?`, clawID).Scan(&status, &bootstrapOK, &issueTitle, &linearID, &githubID, &shortcutID, &jiraID)
@@ -7868,7 +8511,7 @@ func (s *Server) enqueueRestartResume(clawID string, restartCount int) {
 		issueRef = "Jira issue " + jiraID
 	}
 	var b strings.Builder
-	b.WriteString(restartResumePrefix)
+	b.WriteString(prefix)
 	b.WriteString(" Your previous session was lost, so you have no memory of the earlier conversation. The workspace on disk is intact, including your repositories under ~/workspace.")
 	if issueTitle != "" || issueRef != "" {
 		b.WriteString("\n\nAssigned task: ")
@@ -7887,12 +8530,12 @@ func (s *Server) enqueueRestartResume(clawID string, restartCount int) {
 		b.WriteString(".")
 	}
 	b.WriteString("\n\nBefore anything else, recover your state from the workspace: run git status and git log --oneline -15, check which branch you are on and whether there are uncommitted changes or an open PR for it. Then resume the task from where the workspace shows it stopped. Do not start over and do not discard existing work.")
-	// Append a zero-width marker carrying the restart_count so that two resume
-	// prompts for two different restarts are never treated as the identical
-	// pending message by injectMessage's dedup (change 2) — each restart is a
-	// distinct incident even when the rest of the wording is unchanged.
-	b.WriteString(fmt.Sprintf("\n\n<!-- restart:%d -->", restartCount))
-	log.Printf("[watchdog] enqueueing post-restart resume for %s", shortID(clawID))
+	// Append a zero-width marker so that two resume prompts for two different
+	// incidents are never treated as the identical pending message by
+	// injectMessage's dedup — each restart/session rotation is a distinct
+	// incident even when the rest of the wording is unchanged.
+	b.WriteString(fmt.Sprintf("\n\n<!-- %s -->", marker))
+	log.Printf("[watchdog] enqueueing %s resume for %s", marker, shortID(clawID))
 	s.injectHubMessageByID(clawID, b.String())
 }
 
@@ -7933,6 +8576,35 @@ func (s *Server) sendStreamingNudge(cc *clawConn, text string) {
 	s.broadcastToUsers(tenantID, types.WSMessage{Type: "message", Payload: msg})
 }
 
+// sendSilentStatusNudge injects text into the in-flight agent turn over the
+// status channel only. Unlike sendStreamingNudge it never persists or
+// broadcasts a chat row — probes stay invisible in the transcript.
+// It never falls back to the main message queue (that would surface the probe).
+func (s *Server) sendSilentStatusNudge(cc *clawConn, text string) {
+	if cc == nil || strings.TrimSpace(text) == "" {
+		return
+	}
+	cc.mu.RLock()
+	sc, clawID := cc.statusConn, cc.id
+	turnOpen := cc.isBusyLocked()
+	cc.mu.RUnlock()
+	if !turnOpen {
+		log.Printf("[progress-probe] drop for %s: turn already ended", shortID(clawID))
+		return
+	}
+	if sc == nil {
+		log.Printf("[progress-probe] drop for %s: no status channel", shortID(clawID))
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := wsjson.Write(ctx, sc, types.WSMessage{Type: "nudge", Payload: mustJSONRaw(map[string]string{"claw_id": clawID, "content": text})}); err != nil {
+		log.Printf("[progress-probe] status send failed for %s: %v", shortID(clawID), err)
+		return
+	}
+	log.Printf("[progress-probe] silent nudge sent to %s", shortID(clawID))
+}
+
 // sendNextQueuedMessage delivers the oldest pending message if the claw is idle.
 func (s *Server) sendNextQueuedMessage(cc *clawConn) {
 	cc.mu.Lock()
@@ -7940,23 +8612,11 @@ func (s *Server) sendNextQueuedMessage(cc *clawConn) {
 		cc.mu.Unlock()
 		return
 	}
-	// If the previous turn finished very recently, pause briefly before
-	// admitting the next message. This avoids the OpenClaw prompt-lock release
-	// race where a second message sent too soon after a turn ends corrupts the
-	// session file. See openclaw/openclaw#113194.
-	if !cc.lastTurnFinishedAt.IsZero() {
-		if elapsed := time.Since(cc.lastTurnFinishedAt); elapsed < interTurnCooldown {
-			cc.mu.Unlock()
-			time.Sleep(interTurnCooldown - elapsed)
-			cc.mu.Lock()
-			// Re-check the guard after waking up; the claw may have become busy
-			// or another delivery may have started while we slept.
-			if cc.isBusyLocked() || cc.deliveryInFlight || cc.noProgressPaused {
-				cc.mu.Unlock()
-				return
-			}
-		}
-	}
+	// No inter-turn cooldown here: if the next message reaches OpenClaw while
+	// the previous turn is still releasing its prompt lock, the bridge retries
+	// the rejected sessions.send on the same session with backoff (see
+	// sessionLockConflictRetryDelays in cmd/claw-bridge), which preserves the
+	// transcript instead of forcing a session rotation.
 	// Claim the in-flight guard before querying so a concurrent caller cannot
 	// read the same pending row and re-deliver it after we mark it delivered.
 	cc.deliveryInFlight = true

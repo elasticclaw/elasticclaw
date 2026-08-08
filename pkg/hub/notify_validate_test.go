@@ -264,44 +264,9 @@ func savedFactoryCount(t *testing.T, s *Server, name string) int {
 	return len(views)
 }
 
-// Factories are a notify surface of their own (the runtime executes their
-// pipeline_yaml notify actions and the doctor judges it as a first-class
-// source), so POST /api/factories must apply the same author-time via check
-// as workflow saves — and fail the whole batch before anything is written.
-func TestFactoriesPushRejectsBadNotifyViaBeforeSavingBatch(t *testing.T) {
-	s := newNotifyValidateTestServer(t, notifyValidateTestNotifiers())
-	body, err := json.Marshal(FactoryPushRequest{Factories: []*types.FactoryConfig{
-		notifyTestFactory("fine", "eng-agents"),
-		notifyTestFactory("probe", "ghost"),
-	}})
-	if err != nil {
-		t.Fatalf("marshal factories push: %v", err)
-	}
-	req := httptest.NewRequest(http.MethodPost, "/api/factories", bytes.NewReader(body))
-	req.Header.Set("Authorization", "Bearer test-token")
-	req.Header.Set("Content-Type", "application/json")
-	rr := httptest.NewRecorder()
-	s.Handler().ServeHTTP(rr, req)
-	if rr.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400; body = %s", rr.Code, rr.Body.String())
-	}
-	respBody := rr.Body.String()
-	if !strings.Contains(respBody, `factory "probe"`) || !strings.Contains(respBody, `stage "announce"`) || !strings.Contains(respBody, `"ghost"`) {
-		t.Fatalf("error does not locate the offending action: %s", respBody)
-	}
-	if !strings.Contains(respBody, "defined notifiers: eng-agents, ops") {
-		t.Fatalf("error does not list the defined notifiers: %s", respBody)
-	}
-	// The bad factory fails the whole batch: the valid sibling is not saved either.
-	if n := savedFactoryCount(t, s, "probe"); n != 0 {
-		t.Fatalf("rejected factory was saved anyway (%d found)", n)
-	}
-	if n := savedFactoryCount(t, s, "fine"); n != 0 {
-		t.Fatalf("batch with a bad factory saved the valid sibling (%d found)", n)
-	}
-}
-
-func TestFactoriesPushAcceptsValidNotifyVia(t *testing.T) {
+// POST /api/factories is retired with on-disk factories/. Push is rejected
+// with 410 Gone and must not write anything.
+func TestFactoriesPushIsRetired(t *testing.T) {
 	s := newNotifyValidateTestServer(t, notifyValidateTestNotifiers())
 	body, err := json.Marshal(FactoryPushRequest{Factories: []*types.FactoryConfig{
 		notifyTestFactory("probe", "eng-agents"),
@@ -314,58 +279,40 @@ func TestFactoriesPushAcceptsValidNotifyVia(t *testing.T) {
 	req.Header.Set("Content-Type", "application/json")
 	rr := httptest.NewRecorder()
 	s.Handler().ServeHTTP(rr, req)
-	if rr.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200; body = %s", rr.Code, rr.Body.String())
+	if rr.Code != http.StatusGone {
+		t.Fatalf("status = %d, want 410; body = %s", rr.Code, rr.Body.String())
 	}
-	if n := savedFactoryCount(t, s, "probe"); n != 1 {
-		t.Fatalf("valid factory not saved (%d found)", n)
+	if !strings.Contains(rr.Body.String(), "factories are retired") {
+		t.Fatalf("body = %q, want retired message", rr.Body.String())
+	}
+	if n := savedFactoryCount(t, s, "probe"); n != 0 {
+		t.Fatalf("retired factory push still saved %d factories", n)
 	}
 }
 
-// The web UI saves factories through PATCH /api/settings; the merged factory
-// about to be persisted must get the same author-time via check. This test
-// also guards the locking shape: patchSettings holds s.mu exclusively, so the
-// check there must not re-enter the lock (a regression deadlocks and times
-// the test out).
-func TestSettingsPatchRejectsFactoryBadNotifyVia(t *testing.T) {
+// Settings factory patches are rejected the same way.
+func TestSettingsPatchRejectsFactories(t *testing.T) {
 	s := newNotifyValidateTestServer(t, notifyValidateTestNotifiers())
-	patchFactories := func(via string) *httptest.ResponseRecorder {
-		body, err := json.Marshal(SettingsPatch{Factories: []FactoryPatch{{
-			Name:                "probe",
-			Integration:         "github",
-			Template:            "default",
-			EnableManualTrigger: true,
-			PipelineYAML:        strings.Replace(factoryPipelineYAMLTemplate, "%s", via, 1),
-		}}})
-		if err != nil {
-			t.Fatalf("marshal settings patch: %v", err)
-		}
-		req := httptest.NewRequest(http.MethodPatch, "/api/settings", bytes.NewReader(body))
-		req.Header.Set("Authorization", "Bearer test-token")
-		req.Header.Set("Content-Type", "application/json")
-		rr := httptest.NewRecorder()
-		s.Handler().ServeHTTP(rr, req)
-		return rr
+	body, err := json.Marshal(SettingsPatch{Factories: []FactoryPatch{{
+		Name:                "probe",
+		Integration:         "github",
+		Template:            "default",
+		EnableManualTrigger: true,
+		PipelineYAML:        strings.Replace(factoryPipelineYAMLTemplate, "%s", "ops", 1),
+	}}})
+	if err != nil {
+		t.Fatalf("marshal settings patch: %v", err)
 	}
-
-	rr := patchFactories("ghost")
-	if rr.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400; body = %s", rr.Code, rr.Body.String())
-	}
-	respBody := rr.Body.String()
-	if !strings.Contains(respBody, `factory "probe"`) || !strings.Contains(respBody, `stage "announce"`) || !strings.Contains(respBody, `"ghost"`) {
-		t.Fatalf("error does not locate the offending action: %s", respBody)
+	req := httptest.NewRequest(http.MethodPatch, "/api/settings", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusGone {
+		t.Fatalf("status = %d, want 410; body = %s", rr.Code, rr.Body.String())
 	}
 	if n := savedFactoryCount(t, s, "probe"); n != 0 {
-		t.Fatalf("rejected factory was saved anyway (%d found)", n)
-	}
-
-	rr = patchFactories("ops")
-	if rr.Code != http.StatusOK {
-		t.Fatalf("valid via: status = %d, want 200; body = %s", rr.Code, rr.Body.String())
-	}
-	if n := savedFactoryCount(t, s, "probe"); n != 1 {
-		t.Fatalf("valid factory not saved (%d found)", n)
+		t.Fatalf("settings factory patch still saved %d factories", n)
 	}
 }
 

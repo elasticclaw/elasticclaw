@@ -12,6 +12,7 @@ import (
 
 	"github.com/elasticclaw/elasticclaw/pkg/hub/pipeline"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
+	"gopkg.in/yaml.v3"
 )
 
 func TestTransitionPipelineStageSkipsDuplicateCurrentStage(t *testing.T) {
@@ -345,15 +346,445 @@ func TestPipelineEntryInjectIncludesInitialPlanInstruction(t *testing.T) {
 		t.Fatalf("stage transition returned false")
 	}
 
-	var content string
-	if err := db.QueryRow(`SELECT content FROM messages WHERE claw_id=? AND role='hub'`, clawID).Scan(&content); err != nil {
-		t.Fatalf("select injected message: %v", err)
+	rows, err := db.Query(`SELECT content FROM messages WHERE claw_id=? AND role='hub' ORDER BY created_at`, clawID)
+	if err != nil {
+		t.Fatalf("select hub messages: %v", err)
 	}
-	if !strings.Contains(content, initialPlanWakeContent) || !strings.Contains(content, "Task context:\nRead the GitHub issue and start work.") {
-		t.Fatalf("pipeline inject did not include initial plan and task context:\n%s", content)
+	defer rows.Close()
+	var all []string
+	foundPlan := false
+	foundStageBanner := false
+	for rows.Next() {
+		var content string
+		if err := rows.Scan(&content); err != nil {
+			t.Fatal(err)
+		}
+		all = append(all, content)
+		if strings.Contains(content, initialPlanWakeContent) && strings.Contains(content, "Task context:\nRead the GitHub issue and start work.") {
+			foundPlan = true
+		}
+		if strings.Contains(content, "[hub] ▶ Stage:") {
+			foundStageBanner = true
+		}
+	}
+	if !foundPlan {
+		t.Fatalf("pipeline inject did not include initial plan and task context:\n%s", strings.Join(all, "\n---\n"))
+	}
+	if !foundStageBanner {
+		t.Fatalf("expected stage progress banner in transcript:\n%s", strings.Join(all, "\n---\n"))
 	}
 	if !s.hasSystemMarker(clawID, initialPlanRequiredMarker) {
 		t.Fatalf("initial plan required marker was not inserted")
+	}
+}
+
+func TestNormalizedWorkflowPlanGateSkipsFreeformPlan(t *testing.T) {
+	// Regression: WorkflowStage used to drop plan_gate when re-marshaling into
+	// PipelineYAML, so HasPlanGate was false and freeform plan still fired.
+	raw := []byte(`
+schema_version: v1
+name: amazecrm-linear
+stages:
+  - id: plan
+    entry: true
+    on_enter:
+      inject: write plan
+  - id: plan_validate
+    plan_gate: true
+    triggers:
+      - message_contains: "[PLAN_READY]"
+    on_enter:
+      run:
+        command: echo ok
+        output: plan
+    gate:
+      output: plan
+      pass:
+        path: status
+        values: [ok]
+`)
+	var workflow types.WorkflowConfig
+	if err := yaml.Unmarshal(raw, &workflow); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if err := types.NormalizeWorkflowConfig(&workflow); err != nil {
+		t.Fatalf("normalize: %v", err)
+	}
+	pl, err := pipeline.Parse([]byte(workflow.PipelineYAML))
+	if err != nil {
+		t.Fatalf("parse pipeline: %v", err)
+	}
+	if !pl.HasPlanGate() {
+		t.Fatalf("expected HasPlanGate after normalize; pipeline yaml:\n%s", workflow.PipelineYAML)
+	}
+}
+
+func TestPipelineEntrySkipsFreeformPlanWhenPlanGatePresent(t *testing.T) {
+	// Deterministic plan_gate owns approval — freeform wake must not be prepended
+	// (would double-approve / freeze on keywords).
+	factory := &types.FactoryConfig{
+		Name: "plan-gate-factory",
+		PipelineYAML: `
+stages:
+  - id: plan
+    entry: true
+    on_enter:
+      inject: Write plan.json then say [PLAN_READY]
+  - id: plan_validate
+    plan_gate: true
+    triggers:
+      - message_contains: "[PLAN_READY]"
+    on_enter:
+      run:
+        command: "echo '{\"status\":\"ok\"}'"
+        output: plan
+    gate:
+      output: plan
+      pass:
+        path: status
+        values: [ok]
+      fail:
+        path: status
+        values: [incomplete]
+      required: true
+  - id: implement
+    triggers:
+      - gate_result:
+          stage: plan_validate
+          verdict: pass
+    on_enter:
+      inject: Proceed with implementation
+`,
+	}
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{
+		Token:     "test-token",
+		Factories: []*types.FactoryConfig{factory},
+	}, "", "", "")
+
+	const clawID = "claw-plan-gate-pipeline"
+	_, err := db.Exec(
+		`INSERT INTO claws(id, tenant_id, name, template, status, tags, linear_issue_id, pipeline_stage, created_at) VALUES(?,?,?,?,?,?,?,?,datetime('now'))`,
+		clawID, "test-tenant-id", "plan gate claw", "elasticclaw", "connected",
+		`["factory:plan-gate-factory"]`, "AMA-109", "",
+	)
+	if err != nil {
+		t.Fatalf("insert claw: %v", err)
+	}
+
+	if !s.clawEligibleForInitialPlan(clawID) {
+		t.Fatal("expected issue-backed claw to be plan-eligible")
+	}
+	if !s.clawPipelineHasPlanGate(clawID) {
+		t.Fatal("expected pipeline HasPlanGate via factory YAML")
+	}
+	if s.clawNeedsInitialPlan(clawID) {
+		t.Fatal("freeform initial plan must be skipped when plan_gate is present")
+	}
+
+	stage := pipeline.Stage{
+		ID:    "plan",
+		Label: "Plan",
+		OnEnter: pipeline.OnEnter{
+			Inject: "Write plan.json then say [PLAN_READY]",
+		},
+	}
+	if !s.transitionPipelineStageWithContext(clawID, stage, pipelineContext{Factory: factory, IssueID: "AMA-109"}) {
+		t.Fatalf("stage transition returned false")
+	}
+
+	rows, err := db.Query(`SELECT content FROM messages WHERE claw_id=? AND role='hub'`, clawID)
+	if err != nil {
+		t.Fatalf("select hub messages: %v", err)
+	}
+	defer rows.Close()
+	var all []string
+	foundInject := false
+	for rows.Next() {
+		var content string
+		if err := rows.Scan(&content); err != nil {
+			t.Fatal(err)
+		}
+		all = append(all, content)
+		if strings.Contains(content, initialPlanWakeContent) {
+			t.Fatalf("must not prepend freeform plan wake when plan_gate present:\n%s", content)
+		}
+		if strings.Contains(content, "Write plan.json then say [PLAN_READY]") {
+			foundInject = true
+		}
+	}
+	if !foundInject {
+		t.Fatalf("expected workflow inject among hub messages, got:\n%s", strings.Join(all, "\n---\n"))
+	}
+	if s.hasSystemMarker(clawID, initialPlanRequiredMarker) {
+		t.Fatal("must not insert freeform plan-required marker when plan_gate present")
+	}
+}
+
+func TestPlanGatePassMarksInitialPlanAccepted(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
+
+	const clawID = "claw-plan-gate-accept"
+	_, err := db.Exec(
+		`INSERT INTO claws(id, tenant_id, name, template, status, pipeline_stage, created_at) VALUES(?,?,?,?,?,?,datetime('now'))`,
+		clawID, "test-tenant-id", "test-claw", "base", "connected", "",
+	)
+	if err != nil {
+		t.Fatalf("insert claw: %v", err)
+	}
+	s.persistPipelineOutput(clawID, "plan_validate", "plan", &pipelineRunResult{
+		ExitCode: 0,
+		Stdout:   `{"status":"ok","understanding":"Add CI lint","area":".github/workflows","steps":["add workflow","verify"],"verification":"open PR and check CI"}`,
+	})
+
+	stage := pipeline.Stage{
+		ID:       "plan_validate",
+		Label:    "Plan validation",
+		PlanGate: true,
+		Gate: &pipeline.Gate{
+			Output: "plan",
+			Pass:   pipeline.GateCondition{Path: "status", Values: []string{"ok"}},
+			Fail:   pipeline.GateCondition{Path: "status", Values: []string{"incomplete"}},
+		},
+	}
+	if _, err := s.runOnEnter(clawID, stage, pipelineContext{}); err != nil {
+		t.Fatalf("runOnEnter: %v", err)
+	}
+	if !s.hasSystemMarker(clawID, initialPlanAcceptedMarker) {
+		t.Fatal("plan_gate pass should mark initial plan accepted (no freeform re-fire)")
+	}
+	if !s.hasSystemMarker(clawID, planGateAcceptedMarker(stage.ID)) {
+		t.Fatal("plan_gate pass should mark per-stage accepted marker")
+	}
+	// No gate_result route in this test — proceed should be injected for the agent.
+	var proceedCount int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND content=?`, clawID, planGateProceedContent).Scan(&proceedCount); err != nil {
+		t.Fatal(err)
+	}
+	if proceedCount != 1 {
+		t.Fatalf("proceed inject count = %d, want 1 when unrouted", proceedCount)
+	}
+	// Plan summary should appear in the transcript for human observers.
+	var summaryCount int
+	if err := db.QueryRow(
+		`SELECT COUNT(*) FROM messages WHERE claw_id=? AND content LIKE ?`,
+		clawID, "%Approved plan summary:%Add CI lint%",
+	).Scan(&summaryCount); err != nil {
+		t.Fatal(err)
+	}
+	if summaryCount != 1 {
+		t.Fatalf("expected plan summary notice, got %d", summaryCount)
+	}
+}
+
+func TestFormatPlanGateSummary(t *testing.T) {
+	got := formatPlanGateSummary(map[string]interface{}{
+		"status":        "ok",
+		"understanding": "Add lint CI",
+		"area":          ".github/workflows",
+		"steps":         []interface{}{"write workflow", "open PR"},
+		"verification":  "CI green",
+	})
+	for _, want := range []string{
+		"Approved plan summary",
+		"understanding: Add lint CI",
+		"area: .github/workflows",
+		"write workflow",
+		"verification: CI green",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("summary missing %q:\n%s", want, got)
+		}
+	}
+	// Status-only validator output still produces a short approved notice.
+	statusOnly := formatPlanGateSummary(map[string]interface{}{"status": "ok"})
+	if !strings.Contains(statusOnly, "Plan approved") {
+		t.Fatalf("status-only output should still notice approval, got %q", statusOnly)
+	}
+	// Multiline field values must stay indented under their label.
+	multi := formatPlanGateSummary(map[string]interface{}{
+		"understanding": "Line one\nLine two\n- not a field",
+		"steps":         []interface{}{"step A\ncontinued A", "step B"},
+	})
+	if !strings.Contains(multi, "- understanding: \n    Line one\n    Line two\n    - not a field") {
+		t.Fatalf("multiline understanding not indented:\n%s", multi)
+	}
+	if !strings.Contains(multi, "  • step A\n    continued A\n  • step B") {
+		t.Fatalf("multiline step item not indented:\n%s", multi)
+	}
+}
+
+func TestPlanGatePassWithRouteDoesNotInjectProceedTurn(t *testing.T) {
+	// When gate_result routes to an implement inject, do not also inject
+	// planGateProceedContent (that would queue a duplicate agent turn).
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
+	const clawID = "claw-plan-gate-routed"
+	_, err := db.Exec(
+		`INSERT INTO claws(id, tenant_id, name, template, status, pipeline_stage, created_at) VALUES(?,?,?,?,?,?,datetime('now'))`,
+		clawID, "test-tenant-id", "test-claw", "base", "connected", "",
+	)
+	if err != nil {
+		t.Fatalf("insert claw: %v", err)
+	}
+	s.persistPipelineOutput(clawID, "plan_validate", "plan", &pipelineRunResult{
+		ExitCode: 0,
+		Stdout:   `{"status":"ok"}`,
+	})
+	factory := &types.FactoryConfig{Name: "plan-routed", PipelineYAML: `
+stages:
+  - id: plan_validate
+    plan_gate: true
+    gate:
+      output: plan
+      pass:
+        path: status
+        values: [ok]
+  - id: implement
+    triggers:
+      - gate_result:
+          stage: plan_validate
+          verdict: pass
+    on_enter:
+      inject: Implement the issue now.
+`}
+	stage := pipeline.Stage{
+		ID:       "plan_validate",
+		Label:    "Validate plan",
+		PlanGate: true,
+		Gate: &pipeline.Gate{
+			Output: "plan",
+			Pass:   pipeline.GateCondition{Path: "status", Values: []string{"ok"}},
+		},
+	}
+	if _, err := s.runOnEnter(clawID, stage, pipelineContext{Factory: factory}); err != nil {
+		t.Fatalf("runOnEnter: %v", err)
+	}
+	// Proceed text may appear as a delivered notice, not a pending agent inject.
+	var pendingProceed int
+	if err := db.QueryRow(
+		`SELECT COUNT(*) FROM messages WHERE claw_id=? AND content=? AND delivered_at IS NULL`,
+		clawID, planGateProceedContent,
+	).Scan(&pendingProceed); err != nil {
+		t.Fatal(err)
+	}
+	if pendingProceed != 0 {
+		t.Fatalf("routed plan_gate must not queue pending proceed inject, got %d", pendingProceed)
+	}
+	// Notice should be persisted (delivered immediately for dashboard).
+	var noticeCount int
+	if err := db.QueryRow(
+		`SELECT COUNT(*) FROM messages WHERE claw_id=? AND content=? AND delivered_at IS NOT NULL`,
+		clawID, planGateProceedContent,
+	).Scan(&noticeCount); err != nil {
+		t.Fatal(err)
+	}
+	if noticeCount != 1 {
+		t.Fatalf("expected delivered proceed notice, got %d", noticeCount)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for s.getPipelineStage(clawID) != "implement" && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := s.getPipelineStage(clawID); got != "implement" {
+		t.Fatalf("pipeline stage = %q, want implement", got)
+	}
+	var pendingImplement int
+	if err := db.QueryRow(
+		`SELECT COUNT(*) FROM messages WHERE claw_id=? AND content=? AND delivered_at IS NULL`,
+		clawID, "Implement the issue now.",
+	).Scan(&pendingImplement); err != nil {
+		t.Fatal(err)
+	}
+	if pendingImplement != 1 {
+		t.Fatalf("destination inject pending count = %d, want 1", pendingImplement)
+	}
+}
+
+func TestSecondPlanGateStillEvaluatesAfterFirstPass(t *testing.T) {
+	// Global freeform-accept must not short-circuit a later plan_gate stage.
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
+	const clawID = "claw-second-plan-gate"
+	_, err := db.Exec(
+		`INSERT INTO claws(id, tenant_id, name, template, status, pipeline_stage, created_at) VALUES(?,?,?,?,?,?,datetime('now'))`,
+		clawID, "test-tenant-id", "test-claw", "base", "connected", "",
+	)
+	if err != nil {
+		t.Fatalf("insert claw: %v", err)
+	}
+	// First plan gate already accepted.
+	s.insertSystemMarker(clawID, "test-tenant-id", initialPlanAcceptedMarker)
+	s.insertSystemMarker(clawID, "test-tenant-id", planGateAcceptedMarker("plan_validate"))
+
+	// Second plan gate should still evaluate its output (fail path).
+	s.persistPipelineOutput(clawID, "plan_review", "plan_review", &pipelineRunResult{
+		ExitCode: 0,
+		Stdout:   `{"status":"incomplete","reason":"needs more detail"}`,
+	})
+	stage := pipeline.Stage{
+		ID:       "plan_review",
+		Label:    "Plan review",
+		PlanGate: true,
+		Gate: &pipeline.Gate{
+			Output:   "plan_review",
+			Pass:     pipeline.GateCondition{Path: "status", Values: []string{"ok"}},
+			Fail:     pipeline.GateCondition{Path: "status", Values: []string{"incomplete"}},
+			Required: true,
+		},
+	}
+	_, err = s.runOnEnter(clawID, stage, pipelineContext{})
+	if err == nil {
+		t.Fatal("expected required gate failure for second plan_gate, got nil")
+	}
+	if s.hasSystemMarker(clawID, planGateAcceptedMarker("plan_review")) {
+		t.Fatal("second plan_gate must not be marked accepted when it fails")
+	}
+}
+
+func TestOrdinaryGateDoesNotSkipFreeformPlan(t *testing.T) {
+	// Existing installs with validation gates (not plan_gate) keep freeform.
+	factory := &types.FactoryConfig{
+		Name: "validation-factory",
+		PipelineYAML: `
+stages:
+  - id: entry
+    entry: true
+    on_enter:
+      inject: Start work
+  - id: validation
+    triggers:
+      - message_contains: "[DONE]"
+    on_enter:
+      run:
+        command: "echo '{\"status\":\"clean\"}'"
+        output: validation
+    gate:
+      output: validation
+      pass:
+        path: status
+        values: [clean]
+      required: true
+`,
+	}
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{
+		Token:     "test-token",
+		Factories: []*types.FactoryConfig{factory},
+	}, "", "", "")
+
+	const clawID = "claw-validation-gate-only"
+	_, err := db.Exec(
+		`INSERT INTO claws(id, tenant_id, name, template, status, tags, linear_issue_id, pipeline_stage, created_at) VALUES(?,?,?,?,?,?,?,?,datetime('now'))`,
+		clawID, "test-tenant-id", "validation claw", "elasticclaw", "connected",
+		`["factory:validation-factory"]`, "AMA-110", "",
+	)
+	if err != nil {
+		t.Fatalf("insert claw: %v", err)
+	}
+
+	if s.clawPipelineHasPlanGate(clawID) {
+		t.Fatal("validation gate must not count as plan_gate")
+	}
+	if !s.clawNeedsInitialPlan(clawID) {
+		t.Fatal("freeform plan must remain for existing pipelines without plan_gate")
 	}
 }
 
@@ -382,17 +813,28 @@ func TestPipelineInjectIncludesExactManualTriggerInputs(t *testing.T) {
 		t.Fatalf("stage transition returned false")
 	}
 
-	var content string
-	if err := db.QueryRow(`SELECT content FROM messages WHERE claw_id=? AND role='hub'`, clawID).Scan(&content); err != nil {
-		t.Fatalf("select injected message: %v", err)
+	rows, err := db.Query(`SELECT content FROM messages WHERE claw_id=? AND role='hub' ORDER BY created_at`, clawID)
+	if err != nil {
+		t.Fatalf("select hub messages: %v", err)
 	}
+	defer rows.Close()
+	var all []string
+	for rows.Next() {
+		var content string
+		if err := rows.Scan(&content); err != nil {
+			t.Fatal(err)
+		}
+		all = append(all, content)
+	}
+	joined := strings.Join(all, "\n")
 	for _, want := range []string{
 		"Manual trigger inputs (use these exact values):",
 		`"jira_ticket": "AWB-2420"`,
 		"Use the single manual input `jira_ticket` as the Jira issue to investigate.",
+		"[hub] ▶ Stage: Working",
 	} {
-		if !strings.Contains(content, want) {
-			t.Fatalf("pipeline inject missing %q:\n%s", want, content)
+		if !strings.Contains(joined, want) {
+			t.Fatalf("pipeline inject missing %q:\n%s", want, joined)
 		}
 	}
 }
@@ -719,12 +1161,20 @@ func TestTransitionPipelineStageConcurrentCallsRunOnEnterOnce(t *testing.T) {
 		t.Fatalf("concurrent stage transitions returned true %d times, want 1", transitionCount)
 	}
 
+	// Stage banner notice + on_enter inject (exactly once despite concurrent callers).
 	var messageCount int
 	if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=?`, clawID).Scan(&messageCount); err != nil {
 		t.Fatalf("count messages: %v", err)
 	}
-	if messageCount != 1 {
-		t.Fatalf("concurrent stage transitions injected %d messages, want 1", messageCount)
+	if messageCount != 2 {
+		t.Fatalf("concurrent stage transitions wrote %d messages, want 2 (stage banner + inject)", messageCount)
+	}
+	var injectCount int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND content=?`, clawID, stage.OnEnter.Inject).Scan(&injectCount); err != nil {
+		t.Fatalf("count inject: %v", err)
+	}
+	if injectCount != 1 {
+		t.Fatalf("on_enter inject count = %d, want 1", injectCount)
 	}
 	if got := s.getPipelineStage(clawID); got != "pr_opened" {
 		t.Fatalf("pipeline stage = %q, want pr_opened", got)
@@ -1078,6 +1528,49 @@ func TestRunOnEnterJudgeContinueOnError(t *testing.T) {
 	}
 }
 
+func TestRunOnEnterRunCommandLogsAndInjectsOnSuccess(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{
+		Token:     "test-token",
+		ClawToken: "test-claw-token",
+		Providers: map[string]types.ProviderConfig{
+			"noop": {Type: "noop"},
+		},
+	}, "", "", "")
+
+	const clawID = "claw-run-success"
+	_, err := db.Exec(
+		`INSERT INTO claws(id, tenant_id, name, template, status, provider, provider_id, created_at) VALUES(?,?,?,?,?,?,?,datetime('now'))`,
+		clawID, "test-tenant-id", "test-claw", "elasticclaw", "connected", "noop", "noop-id",
+	)
+	if err != nil {
+		t.Fatalf("insert claw: %v", err)
+	}
+
+	stage := pipeline.Stage{
+		ID:    "build",
+		Label: "Build",
+		OnEnter: pipeline.OnEnter{
+			Run: pipeline.RunAction{
+				Command: "echo hello",
+			},
+			Inject: "Continue after build",
+		},
+	}
+
+	_, err = s.runOnEnter(clawID, stage, pipelineContext{})
+	if err != nil {
+		t.Fatalf("expected runOnEnter to succeed, got error: %v", err)
+	}
+
+	var messageCount int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=?`, clawID).Scan(&messageCount); err != nil {
+		t.Fatalf("count messages: %v", err)
+	}
+	if messageCount != 2 {
+		t.Fatalf("expected 2 messages (run completion + inject), got %d", messageCount)
+	}
+}
+
 func TestRunOnEnterDependencyUpdatesStopsOnError(t *testing.T) {
 	s, db := NewTestServerWithConfig(t, &types.HubConfig{
 		Token:     "test-token",
@@ -1164,6 +1657,49 @@ func TestRunOnEnterDependencyUpdatesContinueOnError(t *testing.T) {
 	// Should have 2 messages: deps warning + inject message (because continue_on_error=true).
 	if messageCount != 2 {
 		t.Fatalf("expected 2 messages (deps warning + inject), got %d", messageCount)
+	}
+}
+
+func TestRunOnEnterDependencyUpdatesLogsAndInjectsOnSuccess(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{
+		Token:     "test-token",
+		ClawToken: "test-claw-token",
+		Providers: map[string]types.ProviderConfig{
+			"noop": {Type: "noop"},
+		},
+	}, "", "", "")
+
+	const clawID = "claw-deps-success"
+	_, err := db.Exec(
+		`INSERT INTO claws(id, tenant_id, name, template, status, provider, provider_id, created_at) VALUES(?,?,?,?,?,?,?,datetime('now'))`,
+		clawID, "test-tenant-id", "test-claw", "elasticclaw", "connected", "noop", "noop-id",
+	)
+	if err != nil {
+		t.Fatalf("insert claw: %v", err)
+	}
+
+	stage := pipeline.Stage{
+		ID:    "deps",
+		Label: "Dependency Updates",
+		OnEnter: pipeline.OnEnter{
+			DependencyUpdates: pipeline.DependencyUpdatesAction{
+				Enabled: true,
+			},
+			Inject: "Continue after deps",
+		},
+	}
+
+	_, err = s.runOnEnter(clawID, stage, pipelineContext{})
+	if err != nil {
+		t.Fatalf("expected runOnEnter to succeed, got error: %v", err)
+	}
+
+	var messageCount int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=?`, clawID).Scan(&messageCount); err != nil {
+		t.Fatalf("count messages: %v", err)
+	}
+	if messageCount != 2 {
+		t.Fatalf("expected 2 messages (deps summary + inject), got %d", messageCount)
 	}
 }
 
@@ -1732,7 +2268,7 @@ stages:
 		t.Fatalf("pipeline stage = %q, want ci_passed", got)
 	}
 	var gateDelivered, stageDelivered interface{}
-	if err := db.QueryRow(`SELECT delivered_at FROM messages WHERE claw_id=? AND content='[hub] Gate passed: Monitor Depot CI'`, clawID).Scan(&gateDelivered); err != nil {
+	if err := db.QueryRow(`SELECT delivered_at FROM messages WHERE claw_id=? AND content='[hub] ✓ Gate passed: Monitor Depot CI'`, clawID).Scan(&gateDelivered); err != nil {
 		t.Fatal(err)
 	}
 	if gateDelivered == nil {

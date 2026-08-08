@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"sort"
 
 	"github.com/elasticclaw/elasticclaw/pkg/cliversion"
 	"github.com/elasticclaw/elasticclaw/pkg/config"
@@ -582,54 +581,8 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	// Factories — load only from external storage (single source of truth)
+	// Factories are retired; keep an empty slice for API compatibility.
 	view.Factories = []FactoryView{}
-	factories, err := loadExternalFactories()
-	if err != nil {
-		http.Error(w, "failed to load factories: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-	// Sort by name for stable ordering
-	factoryNames := make([]string, 0, len(factories))
-	for _, f := range factories {
-		if f != nil {
-			factoryNames = append(factoryNames, f.Name)
-		}
-	}
-	sort.Strings(factoryNames)
-	factoryMap := make(map[string]*types.FactoryConfig, len(factories))
-	for _, f := range factories {
-		if f != nil {
-			factoryMap[f.Name] = f
-		}
-	}
-	for _, name := range factoryNames {
-		f := factoryMap[name]
-		view.Factories = append(view.Factories, FactoryView{
-			Name:                f.Name,
-			Integration:         f.Integration,
-			Workspace:           f.Workspace,
-			Team:                f.Team,
-			TriggerStatus:       f.TriggerStatus,
-			DoneStatus:          f.DoneStatus,
-			TerminateOnLeave:    f.TerminateOnLeave,
-			Template:            f.Template,
-			NamePattern:         f.NamePattern,
-			WebhookSecretSet:    f.WebhookSecret != "" || f.WebhookSecretRef != "",
-			WebhookSecretRef:    f.WebhookSecretRef,
-			PipelineYAML:        f.PipelineYAML,
-			Tags:                f.Tags,
-			Color:               f.Color,
-			Labels:              f.Labels,
-			ExcludeLabels:       f.ExcludeLabels,
-			AssignedTo:          f.AssignedTo,
-			Enabled:             isFactoryEnabled(f),
-			ConcurrencyGroup:    f.ConcurrencyGroup,
-			EnableManualTrigger: f.EnableManualTrigger,
-			SecretRefs:          f.SecretRefs,
-			ExternalTrigger:     f.ExternalTrigger,
-		})
-	}
 	// Auth config — copy under lock before RUnlock
 	var authView *AuthView
 	if s.hubCfg.Auth != nil {
@@ -1208,139 +1161,14 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 		updatedCfg.ConcurrencyGroups = groups
 	}
 
-	// Factories (full replace) — write directly to external storage, never hubCfg.Factories
+	// Factories are retired. Settings must not write factories/ or hubCfg.Factories.
+	// Non-empty patches are rejected so the UI cannot reintroduce dual-fire automations.
+	if patch.Factories != nil && len(patch.Factories) > 0 {
+		http.Error(w, errFactoriesRetired.Error(), http.StatusGone)
+		return
+	}
 	if patch.Factories != nil {
-		for _, fp := range patch.Factories {
-			// Preserve existing webhook secret if not being replaced
-			webhookSecret := fp.WebhookSecret
-			if webhookSecret == "" {
-				matchName := fp.Name
-				if fp.OriginalName != "" {
-					matchName = fp.OriginalName
-				}
-				if old, err := loadExternalFactory(matchName); err == nil && old.WebhookSecret != "" {
-					webhookSecret = old.WebhookSecret
-				}
-			}
-
-			// For renames, start from the original factory on disk so no fields are lost.
-			baseName := fp.Name
-			if fp.OriginalName != "" && fp.OriginalName != fp.Name {
-				baseName = fp.OriginalName
-			}
-			var disk *types.FactoryConfig
-			if d, err := loadExternalFactory(baseName); err == nil {
-				disk = d
-				if fp.OriginalName != "" && fp.OriginalName != fp.Name {
-					disk.Name = fp.Name // apply the new name
-				}
-			} else {
-				disk = &types.FactoryConfig{Name: fp.Name}
-			}
-
-			if fp.Integration != "" {
-				disk.Integration = fp.Integration
-			}
-			if fp.Workspace != "" {
-				disk.Workspace = fp.Workspace
-			}
-			if fp.Team != "" {
-				disk.Team = fp.Team
-			}
-			if fp.TriggerStatus != "" {
-				disk.TriggerStatus = fp.TriggerStatus
-			}
-			if fp.DoneStatus != "" {
-				disk.DoneStatus = fp.DoneStatus
-			}
-			disk.TerminateOnLeave = fp.TerminateOnLeave
-			if fp.Template != "" {
-				disk.Template = fp.Template
-			}
-			if fp.NamePattern != "" {
-				disk.NamePattern = fp.NamePattern
-			}
-			if webhookSecret != "" {
-				disk.WebhookSecret = webhookSecret
-			}
-			if fp.WebhookSecretRef != "" {
-				disk.WebhookSecretRef = fp.WebhookSecretRef
-			}
-			if fp.PipelineYAML != "" {
-				disk.PipelineYAML = fp.PipelineYAML
-			}
-			if fp.Tags != nil {
-				disk.Tags = fp.Tags
-			}
-			if fp.Color != "" {
-				disk.Color = fp.Color
-			}
-			if fp.Labels != nil {
-				disk.Labels = fp.Labels
-			}
-			if fp.ExcludeLabels != nil {
-				disk.ExcludeLabels = fp.ExcludeLabels
-			}
-			if fp.AssignedTo != "" {
-				disk.AssignedTo = fp.AssignedTo
-			}
-			if fp.Enabled != nil {
-				disk.Enabled = fp.Enabled
-			}
-			if fp.ConcurrencyGroup != "" {
-				disk.ConcurrencyGroup = fp.ConcurrencyGroup
-			}
-			disk.EnableManualTrigger = fp.EnableManualTrigger
-			if fp.SecretRefs != nil {
-				disk.SecretRefs = fp.SecretRefs
-			}
-			if fp.Inputs != nil {
-				disk.Inputs = fp.Inputs
-			}
-			// Integration-specific fields
-			if fp.Repos != nil {
-				disk.Repos = fp.Repos
-			}
-			if fp.Trigger != nil {
-				disk.Trigger = fp.Trigger
-			}
-			if fp.ExternalTrigger != nil {
-				disk.ExternalTrigger = fp.ExternalTrigger
-			}
-
-			if err := disk.Validate(); err != nil {
-				http.Error(w, "validation error: "+err.Error(), http.StatusBadRequest)
-				return
-			}
-			// Author-time notify check on the merged factory about to be
-			// persisted. validateNotifyVias is called directly with the
-			// notifier set instead of via s.validateFactoryNotifyVias: this
-			// handler holds s.mu exclusively, and the helper re-enters the
-			// lock through s.notificationsConfig(). Notifications cannot be
-			// modified by a SettingsPatch, so updatedCfg carries the live set.
-			var notifiers map[string]types.NotifierConfig
-			if updatedCfg.Notifications != nil {
-				notifiers = updatedCfg.Notifications.Notifiers
-			}
-			if err := validateNotifyVias(notifiers, fmt.Sprintf("factory %q", disk.Name), disk.PipelineYAML); err != nil {
-				http.Error(w, "validation error: "+err.Error(), http.StatusBadRequest)
-				return
-			}
-			if err := saveExternalFactory(disk); err != nil {
-				http.Error(w, "failed to save factory "+fp.Name+": "+err.Error(), http.StatusInternalServerError)
-				return
-			}
-
-			// If this was a rename, delete the old factory directory so it doesn't
-			// appear as a phantom duplicate in listings.
-			if fp.OriginalName != "" && fp.OriginalName != fp.Name {
-				if err := deleteExternalFactory(fp.OriginalName); err != nil {
-					http.Error(w, "failed to delete old factory "+fp.OriginalName+": "+err.Error(), http.StatusInternalServerError)
-					return
-				}
-			}
-		}
-		updatedCfg.Factories = nil // never store factories in hubCfg
+		updatedCfg.Factories = nil
 	}
 
 	// Auth config

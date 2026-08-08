@@ -14,7 +14,12 @@ import {
   isConfigured,
 } from "@/lib/api"
 import { mapApiClaw, mapApiMessage, mapApiStatus, computeUptime } from "@/lib/mappers"
-import { isTerminalAssistantMessage } from "@/lib/messages"
+import {
+  isLiveSegmentCoveredByDurable,
+  isTerminalAssistantMessage,
+  isTransientMessage,
+  pruneOldestLiveActivities,
+} from "@/lib/messages"
 import { useTypewriter, type TypewriterState } from "@/hooks/use-typewriter"
 
 export interface HubState {
@@ -42,6 +47,8 @@ const ORDER_KEY = "elasticclaw_claw_order"
 // ── localStorage message cache ──────────────────────────────────────────────
 const MESSAGES_KEY = "elasticclaw_messages"
 const MAX_CACHED_PER_CLAW = 200
+/** Cap live tool/activity rows in memory so floods don't bloat the client. */
+const MAX_LIVE_ACTIVITIES_PER_CLAW = 200
 
 function readCachedMessages(): Record<string, Message[]> {
   if (typeof window === "undefined") return {}
@@ -84,10 +91,6 @@ function describeWsUrl(rawUrl: string): string {
   } catch {
     return rawUrl.replace(/token=[^&]+/, "token=[redacted]")
   }
-}
-
-function isTransientMessage(message: Message): boolean {
-  return message.id.startsWith("activity-") || message.id.startsWith("live-") || message.id.startsWith("thinking-")
 }
 
 function formatActivityContent(activity: AgentActivity): string {
@@ -330,14 +333,33 @@ export function useHub(selectedClawId: string | null): HubState {
       setMessages((prev) => {
         const existing = prev[clawId] || []
         // Merge API result with cached state:
-        // 1. Keep non-optimistic existing messages not in API result (preserves cache beyond API limit)
+        // 1. Keep non-optimistic existing durable messages not in API result (cache beyond API limit)
         // 2. Re-append any in-flight opt- messages so send() can still swap them with real UUIDs
+        // 3. Preserve live activity / stream segments so opening a claw mid-turn does not
+        //    wipe the in-progress transcript (stream and refresh stay content-aligned)
         const existingNonOpt = existing.filter((m) => !m.id.startsWith('opt-') && !isTransientMessage(m))
         const apiIds = new Set(msgs.map((m) => m.id))
         const cachedOnly = existingNonOpt.filter((m) => !apiIds.has(m.id))
         const inflight = existing.filter((m) => m.id.startsWith('opt-') &&
           !msgs.some((r) => r.content === m.content && r.role === m.role))
-        const merged = [...msgs, ...cachedOnly, ...inflight]
+        // Keep in-flight tool activity and live text segments that the API has
+        // not yet returned. Live segments must survive tool boundaries and
+        // timeline reloads — otherwise the transcript blanks until a full
+        // page refresh reloads durable rows from the server.
+        // Drop a live segment only when a nearby durable API row is its flush
+        // (role+content+time), not when any older turn reused the same prose.
+        const claimedDurableIds = new Set<string>()
+        const liveTransient = existing.filter((m) => {
+          if (!isTransientMessage(m)) return false
+          if (m.id.startsWith("live-")) {
+            return !isLiveSegmentCoveredByDurable(m, msgs, claimedDurableIds)
+          }
+          return true
+        })
+        const merged = pruneOldestLiveActivities(
+          [...msgs, ...cachedOnly, ...inflight, ...liveTransient],
+          MAX_LIVE_ACTIVITIES_PER_CLAW
+        )
         merged.sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime())
         const next = { ...prev, [clawId]: merged }
         persistMessages(next)
@@ -459,7 +481,8 @@ export function useHub(selectedClawId: string | null): HubState {
               activity,
               timestamp: createdAt,
             })
-            const next = { ...prev, [clawId]: nextMessages }
+            const pruned = pruneOldestLiveActivities(nextMessages, MAX_LIVE_ACTIVITIES_PER_CLAW)
+            const next = { ...prev, [clawId]: pruned }
             persistMessages(next)
             return next
           })
@@ -472,11 +495,7 @@ export function useHub(selectedClawId: string | null): HubState {
           // Final message — hold until typewriter drains, then commit
           const msg = mapApiMessage(payload)
           const clawId = payload.claw_id
-          if (segmentedStreamRef.current[clawId]) {
-            const tail = clearTypewriter(clawId)
-            delete segmentedStreamRef.current[clawId]
-            const tailId = tail.trim() ? nextClientMessageId("live-segment", clawId) : null
-            // Called once typewriter is fully drained — safe to add final message
+          const commitFinalMessage = () => {
             setClaws((prev) =>
               prev.map((c) =>
                 c.id === clawId
@@ -492,45 +511,54 @@ export function useHub(selectedClawId: string | null): HubState {
               )
             )
             setMessages((prev) => {
+              // Keep prior live-segment rows on tool-interrupted turns. The final
+              // message is often only the post-tool tail; wiping live-segments
+              // blanked the transcript until a full page refresh.
               const nextMessages = withoutModelWaitActivities(prev[clawId] || [])
-              const hasLiveSegment = nextMessages.some((m) => m.id.startsWith(`live-segment-${clawId}-`))
-              if (tailId) {
-                nextMessages.push({
-                  id: tailId,
-                  role: "claw",
-                  content: tail,
-                  timestamp: msg.timestamp,
-                })
-              } else if (!hasLiveSegment && msg.content.trim()) {
-                nextMessages.push(msg)
+              if (!nextMessages.some((m) => m.id === msg.id)) {
+                const lastLiveIdx = (() => {
+                  for (let i = nextMessages.length - 1; i >= 0; i -= 1) {
+                    if (
+                      nextMessages[i].id.startsWith("live-") &&
+                      nextMessages[i].role === msg.role
+                    ) {
+                      return i
+                    }
+                  }
+                  return -1
+                })()
+                if (
+                  lastLiveIdx >= 0 &&
+                  nextMessages[lastLiveIdx].content === msg.content
+                ) {
+                  // Promote live row to durable id to avoid double-render.
+                  nextMessages[lastLiveIdx] = {
+                    ...nextMessages[lastLiveIdx],
+                    id: msg.id,
+                    timestamp: msg.timestamp,
+                  }
+                } else {
+                  nextMessages.push(msg)
+                }
               }
-              const next = { ...prev, [clawId]: nextMessages }
+              const pruned = pruneOldestLiveActivities(
+                nextMessages,
+                MAX_LIVE_ACTIVITIES_PER_CLAW
+              )
+              const next = { ...prev, [clawId]: pruned }
               persistMessages(next)
               return next
             })
+          }
+
+          if (segmentedStreamRef.current[clawId]) {
+            // Segments already committed as live-*/hub messages; drop typewriter tail.
+            clearTypewriter(clawId)
+            delete segmentedStreamRef.current[clawId]
+            commitFinalMessage()
           } else {
-            finalizeTypewriter(clawId, () => {
-              // Called once typewriter is fully drained — safe to add final message
-              setClaws((prev) =>
-                prev.map((c) =>
-                  c.id === clawId
-                    ? {
-                        ...c,
-                        isStreaming: false,
-                        unreadCount:
-                          selectedClawIdRef.current !== clawId && msg.role === "claw"
-                            ? c.unreadCount + 1
-                            : c.unreadCount,
-                      }
-                    : c
-                )
-              )
-              setMessages((prev) => {
-                const next = { ...prev, [clawId]: [...withoutModelWaitActivities(prev[clawId] || []), msg] }
-                persistMessages(next)
-                return next
-              })
-            })
+            // Uninterrupted turn: let the typewriter finish revealing, then commit.
+            finalizeTypewriter(clawId, commitFinalMessage)
           }
         } else if (type === "claw_status") {
           const { claw_id, status } = payload

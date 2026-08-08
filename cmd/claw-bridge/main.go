@@ -20,6 +20,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -929,8 +930,9 @@ func sanitizeActivityText(value string) string {
 	for _, r := range replacers {
 		value = redactActivityPrefix(value, r.prefix, r.value)
 	}
-	if len(value) > 240 {
-		value = value[:237] + "..."
+	const maxActivityTextLen = 2000
+	if len(value) > maxActivityTextLen {
+		value = value[:maxActivityTextLen-3] + "..."
 	}
 	return value
 }
@@ -1935,11 +1937,12 @@ func isRecoverableSessionSendError(err error) bool {
 	if !errors.As(err, &sendErr) {
 		return false
 	}
+	// Note: session file lock conflicts are deliberately absent here — they
+	// are handled earlier in SendMessage with same-session retries.
 	msg := strings.ToLower(sendErr.err.Error())
 	return strings.Contains(msg, "context overflow") ||
 		strings.Contains(msg, "prompt too large") ||
-		isProviderRequestFormatError(sendErr.err) ||
-		isSessionFileLockConflictError(sendErr.err)
+		isProviderRequestFormatError(sendErr.err)
 }
 
 func isProviderRequestFormatError(err error) bool {
@@ -1978,6 +1981,16 @@ func isSessionFileLockConflictError(err error) bool {
 	return strings.Contains(msg, "session file changed") && strings.Contains(msg, "embedded prompt lock")
 }
 
+// sessionLockConflictRetryDelays backs off between same-session retries when
+// sessions.send is rejected with the "session file changed while embedded
+// prompt lock was released" error. A rejected send means the turn was never
+// accepted (no tool side effects), and the conflict is usually the previous
+// turn still flushing its session file after the lifecycle end event — the
+// window is routinely longer than any hub-side inter-turn pause on slow
+// sandbox disks. Retrying preserves the transcript that a session rotation
+// would discard. A variable so tests can shorten it.
+var sessionLockConflictRetryDelays = []time.Duration{500 * time.Millisecond, time.Second, 2 * time.Second, 4 * time.Second}
+
 // isSessionRotatedError reports whether SendMessage recovered from a session
 // lock conflict by rotating to a fresh session. In that case the original turn
 // cannot be completed, but the next hub message can continue. The bridge should
@@ -2000,6 +2013,7 @@ func (gs *gatewaySession) SendMessage(ctx context.Context, message string, onChu
 
 	delays := []time.Duration{2 * time.Second, 5 * time.Second}
 	gatewayRetried := false
+	lockConflictRetries := 0
 	for attempt := 0; ; attempt++ {
 		conn := gs.currentConn()
 		reply, err := gs.sendMessageOnce(ctx, message, onChunk, onActivity)
@@ -2037,6 +2051,24 @@ func (gs *gatewaySession) SendMessage(ctx context.Context, message string, onChu
 			}
 			continue
 		}
+		// A lock conflict rejected at the sessions.send request means the turn
+		// was never accepted, so replaying the same message on the same session
+		// is safe. The previous turn is likely still flushing its session file;
+		// back off and retry before considering rotation, which would discard
+		// the transcript. Mid-turn lifecycle lock conflicts are excluded above:
+		// those turns may already have side effects and must not be retried.
+		var sendReqErr *sessionSendRequestError
+		if errors.As(err, &sendReqErr) && isSessionFileLockConflictError(err) && lockConflictRetries < len(sessionLockConflictRetryDelays) {
+			delay := sessionLockConflictRetryDelays[lockConflictRetries]
+			lockConflictRetries++
+			log.Printf("[gateway] session file lock conflict on sessions.send (attempt %d/%d) — retrying same session in %s: %v", lockConflictRetries, len(sessionLockConflictRetryDelays), delay, err)
+			select {
+			case <-time.After(delay):
+			case <-ctx.Done():
+				return "", ctx.Err()
+			}
+			continue
+		}
 		if isRecoverableSessionLifecycleError(err) {
 			abortCtx, abortCancel := context.WithTimeout(context.Background(), 5*time.Second)
 			abortErr := gs.abortActiveSession(abortCtx)
@@ -2051,6 +2083,18 @@ func (gs *gatewaySession) SendMessage(ctx context.Context, message string, onChu
 				return reply, fmt.Errorf("%w; session recovery failed: %v", err, resetErr)
 			}
 			return reply, fmt.Errorf("%w; OpenClaw session reset so the next message can continue", err)
+		}
+		// Same-session retries exhausted: rotate as a last resort and surface
+		// the reset error instead of silently replaying, so the hub injects a
+		// resume prompt with task context into the fresh session.
+		if errors.As(err, &sendReqErr) && isSessionFileLockConflictError(err) {
+			recoveryCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			resetErr := gs.createFreshSession(recoveryCtx, err.Error())
+			cancel()
+			if resetErr != nil {
+				return "", fmt.Errorf("%w; session recovery failed: %v", err, resetErr)
+			}
+			return "", fmt.Errorf("%w; OpenClaw session reset so the next message can continue", err)
 		}
 		if !isRecoverableSessionSendError(err) {
 			return reply, err
@@ -2930,6 +2974,40 @@ var openClawWorkspaceManagedFiles = map[string]bool{
 	"TRIGGER_INPUTS.json":     true,
 }
 
+// stagedWorkspaceHasCopyableContent reports whether stagedAbs contains any
+// non-symlink regular file other than the readiness marker. Empty staged trees
+// (wrong hub path, or nothing staged yet) must not wipe the live managed set.
+func stagedWorkspaceHasCopyableContent(stagedAbs string) (bool, error) {
+	has := false
+	err := filepath.Walk(stagedAbs, func(src string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		rel, err := filepath.Rel(stagedAbs, src)
+		if err != nil {
+			return err
+		}
+		if rel == "." || rel == ".elasticclaw-workspace-ready" {
+			return nil
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			if info.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if info.IsDir() {
+			return nil
+		}
+		has = true
+		return filepath.SkipAll
+	})
+	if err != nil {
+		return false, err
+	}
+	return has, nil
+}
+
 func syncStagedWorkspaceToOpenClawWorkspace() error {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -2946,11 +3024,6 @@ func syncStagedWorkspaceToOpenClawWorkspace() error {
 	if err := os.MkdirAll(activeDir, 0700); err != nil {
 		return fmt.Errorf("create OpenClaw workspace: %w", err)
 	}
-	for name := range openClawWorkspaceManagedFiles {
-		if err := os.RemoveAll(filepath.Join(activeDir, name)); err != nil {
-			return fmt.Errorf("remove stale OpenClaw workspace file %s: %w", name, err)
-		}
-	}
 	stagedAbs, err := filepath.Abs(stagedDir)
 	if err != nil {
 		return fmt.Errorf("abs staged workspace: %w", err)
@@ -2958,6 +3031,24 @@ func syncStagedWorkspaceToOpenClawWorkspace() error {
 	activeAbs, err := filepath.Abs(activeDir)
 	if err != nil {
 		return fmt.Errorf("abs OpenClaw workspace: %w", err)
+	}
+	// Partial staged content still replaces the full managed-file set (so default
+	// BOOTSTRAP.md/MEMORY.md do not linger beside template AGENTS.md). Only skip
+	// that wipe when staged is empty — e.g. hub wrote to a literal $HOME/~/workspace
+	// and left $HOME/workspace bare — which would otherwise trigger
+	// WorkspaceVanishedError after removing attested OpenClaw bootstrap files.
+	hasStagedContent, err := stagedWorkspaceHasCopyableContent(stagedAbs)
+	if err != nil {
+		return fmt.Errorf("scan staged workspace: %w", err)
+	}
+	if hasStagedContent {
+		for name := range openClawWorkspaceManagedFiles {
+			if err := os.RemoveAll(filepath.Join(activeDir, name)); err != nil {
+				return fmt.Errorf("remove stale OpenClaw workspace file %s: %w", name, err)
+			}
+		}
+	} else {
+		log.Printf("[bootstrap] staged workspace has no copyable files; preserving live managed OpenClaw workspace files")
 	}
 	copied := 0
 	err = filepath.Walk(stagedAbs, func(src string, info os.FileInfo, walkErr error) error {
@@ -4150,12 +4241,28 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 	}
 	log.Printf("registered with hub as %s", clawID)
 
-	writeActivity := func(activity agentActivity) {
-		_ = writeHub(hubMsg{
-			Type:    "agent_activity",
-			Payload: mustJSON(cleanAgentActivity(activity)),
-		})
-	}
+	writeActivity := func() func(agentActivity) {
+		var (
+			lastPayload []byte
+			mu          sync.Mutex
+		)
+		return func(activity agentActivity) {
+			cleaned := cleanAgentActivity(activity)
+			payload := mustJSON(cleaned)
+			mu.Lock()
+			defer mu.Unlock()
+			if bytes.Equal(payload, lastPayload) {
+				return
+			}
+			if err := writeHub(hubMsg{
+				Type:    "agent_activity",
+				Payload: payload,
+			}); err != nil {
+				return
+			}
+			lastPayload = payload
+		}
+	}()
 
 	// Replay any queued entries that accumulated while we were disconnected.
 	// Completed replies/notices are delivered directly; only unprocessed inputs
@@ -4182,6 +4289,8 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 				if isSessionRotatedError(agentErr) {
 					writeActivity(agentActivity{Kind: "session_rotated", Message: fmt.Sprintf("OpenClaw session rotated to recover from lock conflict; waiting for next message (%v)", agentErr)})
 					reply = ""
+					// Notify the hub so it can inject a resume prompt with context.
+					_ = writeHub(hubMsg{Type: "session_rotated"})
 				} else {
 					reply = fmt.Sprintf("⚠️ error: %v", agentErr)
 				}
@@ -4307,6 +4416,8 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 					if isSessionRotatedError(agentErr) {
 						writeActivity(agentActivity{Kind: "session_rotated", Message: fmt.Sprintf("OpenClaw session rotated to recover from lock conflict; waiting for next message (%v)", agentErr)})
 						reply = ""
+						// Notify the hub so it can inject a resume prompt with context.
+						_ = writeHub(hubMsg{Type: "session_rotated"})
 					} else {
 						reply = fmt.Sprintf("⚠️ claw-bridge error: %v", agentErr)
 					}

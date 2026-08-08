@@ -183,6 +183,10 @@ type WorkflowStage struct {
 	SkipIf     map[string]interface{}   `yaml:"skip_if,omitempty" json:"skipIf,omitempty"`
 	SkipUnless map[string]interface{}   `yaml:"skip_unless,omitempty" json:"skipUnless,omitempty"`
 	Gate       map[string]interface{}   `yaml:"gate,omitempty" json:"gate,omitempty"`
+	// PlanGate marks this stage as deterministic plan approval. Must survive
+	// NormalizeWorkflowConfig re-marshal into PipelineYAML or freeform plan
+	// approval incorrectly stays on for workflows that set plan_gate: true.
+	PlanGate bool `yaml:"plan_gate,omitempty" json:"planGate,omitempty"`
 }
 
 func (w *WorkspaceConfig) Validate() error {

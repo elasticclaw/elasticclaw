@@ -15,6 +15,7 @@ import (
 
 	"github.com/elasticclaw/elasticclaw/pkg/cliversion"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
+	"github.com/google/uuid"
 	"nhooyr.io/websocket"
 	"nhooyr.io/websocket/wsjson"
 )
@@ -125,8 +126,8 @@ func TestWorkspaceFlakeStageCommand(t *testing.T) {
 			name: "ignores invalid paths",
 			dir:  "/workspace",
 			files: map[string]string{
-				"flake.nix": "{}",
-				"../secret": "secret",
+				"flake.nix":   "{}",
+				"../secret":   "secret",
 				"/etc/passwd": "pw",
 			},
 			wantNames:   []string{"flake.nix"},
@@ -1470,6 +1471,7 @@ func TestSplitStreamingTurnDoesNotBroadcastGhostFinalMessage(t *testing.T) {
 
 	seenIdle := false
 	seenGhostMessage := false
+	seenSegmentMessage := false
 	readUntil := time.Now().Add(2 * time.Second)
 	for time.Now().Before(readUntil) && !seenIdle {
 		readCtx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
@@ -1483,8 +1485,13 @@ func TestSplitStreamingTurnDoesNotBroadcastGhostFinalMessage(t *testing.T) {
 		case "message":
 			payload, _ := json.Marshal(msg.Payload)
 			var hm types.HubMessage
-			if err := json.Unmarshal(payload, &hm); err == nil && hm.Content == finalContent {
-				seenGhostMessage = true
+			if err := json.Unmarshal(payload, &hm); err == nil {
+				if hm.Content == finalContent {
+					seenGhostMessage = true
+				}
+				if hm.Content == "Assistant segment 1" {
+					seenSegmentMessage = true
+				}
 			}
 		case "agent_typing":
 			payload, _ := json.Marshal(msg.Payload)
@@ -1502,6 +1509,9 @@ func TestSplitStreamingTurnDoesNotBroadcastGhostFinalMessage(t *testing.T) {
 	}
 	if seenGhostMessage {
 		t.Fatal("observed unpersisted final full-response message over user websocket")
+	}
+	if !seenSegmentMessage {
+		t.Fatal("did not observe flushed segment broadcast over user websocket")
 	}
 
 	var finalRows int
@@ -1676,6 +1686,28 @@ func TestIsValidInitialPlanRequiresUnderstandingPlanAreaAndVerification(t *testi
 	if isValidInitialPlan(invalid) {
 		t.Fatalf("invalid initial plan was accepted")
 	}
+	// Real agent plan from AMA-109: no "issue"/"task"/"understand" keywords, but
+	// clearly a complete plan — must not be rejected (that freezes the claw).
+	ticketStyle := `AMA-109 will add pull-request CI for linting and TypeScript type-checking in the amazecrm/amazecrm repository. I'll confirm the full requirements from Linear before changing anything.
+
+Likely code areas:
+.github/workflows/ for the new GitHub Actions workflow
+package.json only if a dedicated type-check script is required and missing
+Existing pnpm/Node configuration to ensure CI matches the project
+Rough implementation plan:
+Read AMA-109 and repository instructions.
+Inspect existing workflows and package scripts.
+Create a focused feature branch.
+Add minimal PR-triggered lint and type-check jobs with pnpm caching and frozen-lockfile installation.
+Run the equivalent checks locally.
+Review, commit, push, open a PR, and inspect its checks.
+Verification will cover workflow syntax and triggers, dependency caching/setup, pnpm lint, standalone TypeScript checking, and the opened PR's CI result. I'll wait for the hub's proceed message before using tools or editing files.`
+	if !isValidInitialPlan(ticketStyle) {
+		t.Fatalf("ticket-style initial plan was rejected")
+	}
+	if !isSubstantialInitialPlan(ticketStyle) {
+		t.Fatalf("ticket-style plan should pass soft substantial gate")
+	}
 }
 
 func TestHandleInitialPlanResponseMarksAcceptedOrCorrection(t *testing.T) {
@@ -1711,6 +1743,38 @@ func TestHandleInitialPlanResponseMarksAcceptedOrCorrection(t *testing.T) {
 	}
 	if s.hasSystemMarker("claw-valid-plan", initialPlanCorrectionSentMarker) {
 		t.Fatalf("valid initial plan marked correction sent")
+	}
+}
+
+func TestHandleInitialPlanResponseSoftAcceptsAfterCorrection(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, nil, "", "", "")
+	_, err := db.Exec(
+		`INSERT INTO claws(id, tenant_id, name, tags, created_at) VALUES(?,?,?,?,datetime('now'))`,
+		"claw-soft-plan", "test-tenant-id", "claw soft plan", `[]`,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.insertSystemMarker("claw-soft-plan", "test-tenant-id", initialPlanRequiredMarker)
+	s.insertSystemMarker("claw-soft-plan", "test-tenant-id", initialPlanCorrectionSentMarker)
+
+	// Substantial plan with plan+verification but intentionally avoids some
+	// strict understanding keywords; after a correction this must proceed.
+	soft := strings.Repeat("Rough plan: add the lint workflow, wire pnpm cache, and run typecheck. ", 8) +
+		"Verification: run lint and typecheck in CI and confirm the PR checks go green."
+	s.handleInitialPlanResponse("claw-soft-plan", "test-tenant-id", soft)
+	if !s.hasSystemMarker("claw-soft-plan", initialPlanAcceptedMarker) {
+		t.Fatalf("substantial plan after correction was not soft-accepted")
+	}
+	var proceedCount int
+	if err := db.QueryRow(
+		`SELECT COUNT(*) FROM messages WHERE claw_id=? AND role='hub' AND content=?`,
+		"claw-soft-plan", initialPlanProceedContent,
+	).Scan(&proceedCount); err != nil {
+		t.Fatal(err)
+	}
+	if proceedCount != 1 {
+		t.Fatalf("expected proceed message after soft accept, got %d", proceedCount)
 	}
 }
 
@@ -2258,9 +2322,10 @@ func TestDeliveredPromptReservesTurnBeforeFirstActivity(t *testing.T) {
 	}
 }
 
-func TestSendNextQueuedMessageWaitsInterTurnCooldown(t *testing.T) {
+func TestSendNextQueuedMessageDeliversImmediatelyAfterTurnEnd(t *testing.T) {
 	s, db := NewTestServerWithConfig(t, &types.HubConfig{ClawToken: "claw-token"}, "", "", "")
-	const clawID = "claw-inter-turn-cooldown"
+	// Unique ID avoids any residual async cleanup noise from other tests in the package.
+	clawID := "claw-inter-turn-" + uuid.NewString()[:8]
 	insertPendingMessage(t, db, clawID, "first", now().Add(-time.Second))
 	insertPendingMessage(t, db, clawID, "second", now())
 
@@ -2271,28 +2336,37 @@ func TestSendNextQueuedMessageWaitsInterTurnCooldown(t *testing.T) {
 	if got := readTestHubMessage(t, clawWS).Content; got != "first" {
 		t.Fatalf("first delivered content = %q, want first", got)
 	}
-
-	// Speed up the cooldown so the test remains fast, but still measurable.
-	oldCooldown := interTurnCooldown
-	interTurnCooldown = 50 * time.Millisecond
-	t.Cleanup(func() { interTurnCooldown = oldCooldown })
+	// Ensure the first delivery's delivered_at mark landed before we finish the
+	// turn and admit the next pending row (otherwise sendNext can re-pick first).
+	waitForMessagesDelivered(t, db, clawID, 1)
 
 	s.mu.RLock()
 	cc := s.claws[clawID]
 	s.mu.RUnlock()
+	if cc == nil {
+		t.Fatal("claw not registered after connect")
+	}
 	cc.mu.Lock()
 	cc.finishTurnLocked()
+	if cc.isBusyLocked() {
+		cc.mu.Unlock()
+		t.Fatal("claw still busy after finishTurnLocked")
+	}
 	cc.mu.Unlock()
 
+	// The hub no longer pauses between turns: lock-conflict recovery lives in
+	// the bridge (same-session sessions.send retry with backoff), so the next
+	// queued message must be admitted without delay.
 	start := time.Now()
 	s.sendNextQueuedMessage(cc)
 	elapsed := time.Since(start)
 
+	waitForMessagesDelivered(t, db, clawID, 2)
 	if got := readTestHubMessage(t, clawWS).Content; got != "second" {
 		t.Fatalf("second delivered content = %q, want second", got)
 	}
-	if elapsed < interTurnCooldown {
-		t.Fatalf("sendNextQueuedMessage returned too fast: %s, want at least %s", elapsed, interTurnCooldown)
+	if elapsed > 500*time.Millisecond {
+		t.Fatalf("sendNextQueuedMessage took too long: %s, want prompt delivery", elapsed)
 	}
 }
 
@@ -2501,5 +2575,55 @@ func TestMergeDockerContainerEnvPreservesWorkflowSecrets(t *testing.T) {
 	}
 	if got["ELASTICCLAW_CLAW_ID"] != "claw-123" {
 		t.Fatalf("ELASTICCLAW_CLAW_ID = %q, want managed claw ID", got["ELASTICCLAW_CLAW_ID"])
+	}
+}
+
+func TestAgentActivityGenericReasoningUpsertsButToolEventsInsert(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{ClawToken: "claw-token"}, "", "", "")
+	const clawID = "activity-storage-test"
+	conn := watchdogClaw(t, s, clawID)
+	_ = watchdogClawConn(t, s, clawID)
+
+	write := func(m types.WSMessage) {
+		if err := wsjson.Write(context.Background(), conn, m); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Send a burst of generic reasoning activity frames.
+	for i := 0; i < 5; i++ {
+		write(types.WSMessage{Type: "agent_activity", Payload: map[string]any{
+			"kind":    "activity",
+			"message": fmt.Sprintf("The user wants%s", strings.Repeat(".", i+1)),
+		}})
+	}
+	// Send two distinct tool events.
+	write(types.WSMessage{Type: "agent_activity", Payload: map[string]any{
+		"kind": "tool", "tool": "bash", "phase": "running", "command": "git status",
+	}})
+	write(types.WSMessage{Type: "agent_activity", Payload: map[string]any{
+		"kind": "tool", "tool": "bash", "phase": "completed", "command": "git status",
+	}})
+
+	eventuallyWatchdog(t, func() bool {
+		var n int
+		_ = db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND role='activity'`, clawID).Scan(&n)
+		return n >= 3
+	}, "activity rows persisted")
+
+	var total int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND role='activity'`, clawID).Scan(&total); err != nil {
+		t.Fatalf("count activity rows: %v", err)
+	}
+	if total != 3 {
+		t.Fatalf("activity rows = %d, want 3 (1 upserted reasoning + 2 tool events)", total)
+	}
+
+	var latestReasoning string
+	if err := db.QueryRow(`SELECT content FROM messages WHERE claw_id=? AND id=?`, clawID, "activity-stream:"+clawID).Scan(&latestReasoning); err != nil {
+		t.Fatalf("read upserted reasoning row: %v", err)
+	}
+	if !strings.Contains(latestReasoning, "The user wants") {
+		t.Fatalf("upserted reasoning content unexpected: %q", latestReasoning)
 	}
 }

@@ -21,6 +21,9 @@ type githubInstallation struct {
 	Account struct {
 		Login string `json:"login"`
 	} `json:"account"`
+	// Permissions are the scopes granted to this installation (may lag the
+	// App's configured permissions until the owner accepts an update).
+	Permissions map[string]string `json:"permissions"`
 }
 
 // githubAppMeta is the response from GET /app (authenticated as the App).
@@ -218,8 +221,27 @@ type RepoAccess struct {
 	Permissions string // "read" or "write"
 }
 
+// maxScopedInstallationRepos is GitHub's documented limit for the
+// `repositories` array on POST /app/installations/{id}/access_tokens.
+// Larger claw allowlists still work: we mint a permission-restricted
+// installation token (no name list) and git clones prefer single-repo
+// tokens via handleGitHubToken ?repo=owner/name.
+const maxScopedInstallationRepos = 50
+
 // InstallationToken mints a fresh installation access token scoped to the given repos.
 // installationID is looked up automatically if not provided (0).
+//
+// When repos is empty, GitHub grants the installation's default access to all
+// repositories the installation can see.
+//
+// When 1 ≤ len(repos) ≤ maxScopedInstallationRepos, the token is restricted to
+// that explicit name allowlist.
+//
+// When len(repos) > maxScopedInstallationRepos, GitHub cannot accept a longer
+// name list. We still mint a token with the requested permission levels but
+// omit the repositories field (installation-visible repos only). Callers that
+// need least-privilege for individual clones should pass a single-element
+// repos slice (credential helper ?repo=).
 func (p *GitHubTokenProvider) InstallationToken(ctx context.Context, installationID int64, repos []RepoAccess) (string, time.Time, error) {
 	// Auto-discover installation ID if not set
 	if installationID == 0 {
@@ -239,38 +261,53 @@ func (p *GitHubTokenProvider) InstallationToken(ctx context.Context, installatio
 		return "", time.Time{}, fmt.Errorf("sign app jwt: %w", err)
 	}
 
-	// Build request body scoped to repos with correct permissions.
-	// GitHub token permissions: contents=read means read-only, contents=write means read+write.
+	// Build request body with correct permissions.
+	// Installation tokens only receive the permissions listed here (capped by
+	// what this installation was granted). Requesting a scope the installation
+	// lacks makes POST /access_tokens fail — so optional scopes like workflows
+	// are included only after GET /app/installations/{id} confirms write/admin.
+	// contents=write alone is not enough to create or update files under
+	// .github/workflows/; GitHub requires the workflows scope when available.
 	var bodyStr string
 	if len(repos) > 0 {
-		repoNames := make([]string, 0, len(repos))
-		// Track the highest permission needed across all repos
 		needsWrite := false
 		for _, r := range repos {
-			parts := strings.SplitN(r.Repo, "/", 2)
-			name := r.Repo
-			if len(parts) == 2 {
-				name = parts[1]
-			}
-			repoNames = append(repoNames, name)
 			if r.Permissions == "write" {
 				needsWrite = true
+				break
 			}
 		}
 		contentsPermission := "read"
 		if needsWrite {
 			contentsPermission = "write"
 		}
-		b, _ := json.Marshal(map[string]interface{}{
-			"repositories": repoNames,
-			"permissions": map[string]string{
-				"contents":      contentsPermission,
-				"pull_requests": contentsPermission,
-				"metadata":      "read",
-				"checks":        "read", // needed for gh pr checks / CI status
-				"statuses":      "read", // needed for commit status checks
-			},
-		})
+		perms := map[string]string{
+			"contents":      contentsPermission,
+			"pull_requests": contentsPermission,
+			"metadata":      "read",
+			"checks":        "read", // needed for gh pr checks / CI status
+			"statuses":      "read", // needed for commit status checks
+		}
+		if needsWrite && p.installationHasWorkflowsWrite(ctx, installationID) {
+			perms["workflows"] = "write"
+		}
+		body := map[string]interface{}{
+			"permissions": perms,
+		}
+		if len(repos) <= maxScopedInstallationRepos {
+			repoNames := make([]string, 0, len(repos))
+			for _, r := range repos {
+				parts := strings.SplitN(r.Repo, "/", 2)
+				name := r.Repo
+				if len(parts) == 2 {
+					name = parts[1]
+				}
+				repoNames = append(repoNames, name)
+			}
+			body["repositories"] = repoNames
+		}
+		// else: omit repositories — required for 50+ allowlists; git path uses ?repo=
+		b, _ := json.Marshal(body)
 		bodyStr = string(b)
 	}
 
@@ -339,4 +376,56 @@ func (p *GitHubTokenProvider) CheckAppPermissions(ctx context.Context) (map[stri
 		return nil, fmt.Errorf("decode app meta: %w", err)
 	}
 	return meta.Permissions, nil
+}
+
+// installationHasWorkflowsWrite reports whether this installation was granted
+// workflows write (or admin). App-level config is not enough: an org may still
+// be on an older permission set until they accept the App update. On lookup
+// failure, returns false so we omit the scope and still mint a working token.
+func (p *GitHubTokenProvider) installationHasWorkflowsWrite(ctx context.Context, installationID int64) bool {
+	if installationID == 0 {
+		return false
+	}
+	perms, err := p.installationPermissions(ctx, installationID)
+	if err != nil || perms == nil {
+		return false
+	}
+	level := strings.ToLower(strings.TrimSpace(perms["workflows"]))
+	return level == "write" || level == "admin"
+}
+
+// installationPermissions returns the scopes granted to a specific installation
+// via GET /app/installations/{id}.
+func (p *GitHubTokenProvider) installationPermissions(ctx context.Context, installationID int64) (map[string]string, error) {
+	appJWT, err := p.appJWT()
+	if err != nil {
+		return nil, fmt.Errorf("sign app jwt: %w", err)
+	}
+
+	url := p.apiURL(fmt.Sprintf("/app/installations/%d", installationID))
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("build request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+appJWT)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+
+	resp, err := p.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("github get installation: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		var errBody map[string]interface{}
+		json.NewDecoder(resp.Body).Decode(&errBody)
+		return nil, fmt.Errorf("github get installation %d: %v", resp.StatusCode, errBody["message"])
+	}
+
+	var inst githubInstallation
+	if err := json.NewDecoder(resp.Body).Decode(&inst); err != nil {
+		return nil, fmt.Errorf("decode installation: %w", err)
+	}
+	return inst.Permissions, nil
 }

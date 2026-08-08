@@ -1,4 +1,4 @@
-.PHONY: build build-bridge build-bridge-linux test test-bootstrap test-container e2e e2e-github e2e-linear e2e-jira e2e-replicated-github e2e-replicated-linear e2e-replicated-jira e2e-docker e2e-run clean install lint tidy clawpatch-init clawpatch-review clawpatch-report clawpatch-show clawpatch-triage clawpatch-pr dev dev-up dev-up-d dev-down dev-reset dev-logs dev-restart dev-sh-hub dev-sh-web dev-agent-build dev-claw _dev-config-check
+.PHONY: build build-bridge build-bridge-linux test test-bootstrap test-container e2e e2e-github e2e-linear e2e-jira e2e-replicated-github e2e-replicated-linear e2e-replicated-jira e2e-exedev-github e2e-docker e2e-run clean install lint tidy clawpatch-init clawpatch-review clawpatch-report clawpatch-show clawpatch-triage clawpatch-pr dev dev-up dev-up-d dev-down dev-reset dev-logs dev-restart dev-sh-hub dev-sh-web dev-agent-build dev-claw _dev-config-check
 
 
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
@@ -53,7 +53,7 @@ test-factory: ## Run factory integration tests
 test-parity: ## Run parity matrix integration tests (all trackers)
 	go test -v -tags integration -timeout 300s ./pkg/hub/... -run TestParity
 
-e2e: e2e-github e2e-linear e2e-jira e2e-replicated-github e2e-replicated-linear e2e-replicated-jira e2e-docker ## Run all real E2E suites sequentially
+e2e: e2e-github e2e-linear e2e-jira e2e-replicated-github e2e-replicated-linear e2e-replicated-jira e2e-exedev-github e2e-docker ## Run all real E2E suites sequentially
 
 e2e-github: ## Run the real Daytona + GitHub Issues E2E suite
 	$(MAKE) e2e-run E2E_TEST=TestDaytonaGitHubIssuesWorkflowE2E
@@ -73,6 +73,9 @@ e2e-replicated-linear: ## Run the real Replicated CMX + Linear E2E suite
 e2e-replicated-jira: ## Run the real Replicated CMX + Jira Cloud E2E suite
 	$(MAKE) e2e-run E2E_TEST=TestReplicatedJiraWorkflowE2E
 
+e2e-exedev-github: ## Run the real exe.dev + GitHub Issues E2E suite
+	$(MAKE) e2e-run E2E_TEST=TestExedevGitHubIssuesWorkflowE2E
+
 e2e-docker: ## Run the real Docker workflow E2E suite
 	$(MAKE) e2e-run E2E_TEST=TestDockerWorkflowE2E
 
@@ -90,12 +93,13 @@ e2e-run: build-dev build-bridge-linux
 	NGROK_DOMAIN_JSON="$$(mktemp -t elasticclaw-ngrok-domain.XXXXXX.json)"; \
 	DAYTONA_IDS="$$(mktemp -t elasticclaw-daytona-sandbox-ids.XXXXXX)"; \
 	REPLICATED_IDS="$$(mktemp -t elasticclaw-replicated-vm-ids.XXXXXX)"; \
+	EXEDEV_IDS="$$(mktemp -t elasticclaw-exedev-vm-ids.XXXXXX)"; \
 	E2E_RUN_ID_RAW="$${ELASTICCLAW_E2E_RUN_ID:-$$(python3 -c 'import time,uuid; print(f"{time.time_ns()}-{uuid.uuid4().hex[:8]}")')}"; \
 	E2E_RUN_ID="$$(printf '%s' "$$E2E_RUN_ID_RAW" | python3 -c 'import sys; value=sys.stdin.read().strip().lower(); out="".join(ch if ch.isalnum() and ch.isascii() or ch == "-" else "-" for ch in value).strip("-") or "run"; print((out[:32].strip("-")) or "run")')"; \
 	NGROK_PID=""; \
 	NGROK_DOMAIN_ID=""; \
 	printf 'version: "3"\nagent:\n  web_addr: "%s"\n' "$$NGROK_API_ADDR" > "$$NGROK_CONFIG"; \
-	cleanup() { code="$$?"; ELASTICCLAW_E2E_DAYTONA_SANDBOX_ID_FILE="$$DAYTONA_IDS" ELASTICCLAW_E2E_REPLICATED_VM_ID_FILE="$$REPLICATED_IDS" go test -tags e2e -v ./test/e2e -run 'TestCleanupRecorded(DaytonaSandboxes|ReplicatedVMs)' -count=1 -timeout 6m >/dev/null 2>&1 || true; if [ -n "$$NGROK_PID" ]; then kill "$$NGROK_PID" >/dev/null 2>&1 || true; fi; if [ -n "$$NGROK_DOMAIN_ID" ]; then ngrok api reserved-domains delete "$$NGROK_DOMAIN_ID" --api-key "$$NGROK_API_KEY" >/dev/null 2>&1 || true; fi; rm -f "$$NGROK_LOG" "$$NGROK_CONFIG" "$$NGROK_DOMAIN_JSON" "$$DAYTONA_IDS" "$$REPLICATED_IDS"; exit "$$code"; }; \
+	cleanup() { code="$$?"; ELASTICCLAW_E2E_DAYTONA_SANDBOX_ID_FILE="$$DAYTONA_IDS" ELASTICCLAW_E2E_REPLICATED_VM_ID_FILE="$$REPLICATED_IDS" ELASTICCLAW_E2E_EXEDEV_VM_ID_FILE="$$EXEDEV_IDS" go test -tags e2e -v ./test/e2e -run 'TestCleanupRecorded(DaytonaSandboxes|ReplicatedVMs|ExedevVMs)' -count=1 -timeout 6m >/dev/null 2>&1 || true; if [ -n "$$NGROK_PID" ]; then kill "$$NGROK_PID" >/dev/null 2>&1 || true; fi; if [ -n "$$NGROK_DOMAIN_ID" ]; then ngrok api reserved-domains delete "$$NGROK_DOMAIN_ID" --api-key "$$NGROK_API_KEY" >/dev/null 2>&1 || true; fi; rm -f "$$NGROK_LOG" "$$NGROK_CONFIG" "$$NGROK_DOMAIN_JSON" "$$DAYTONA_IDS" "$$REPLICATED_IDS" "$$EXEDEV_IDS"; exit "$$code"; }; \
 	trap cleanup EXIT INT TERM; \
 	NGROK_HOST="ec-$$(git rev-parse --short HEAD 2>/dev/null || echo dev)-$$E2E_RUN_ID.ngrok-free.app"; \
 	echo "Creating temporary ngrok reserved domain https://$$NGROK_HOST"; \
@@ -130,6 +134,7 @@ e2e-run: build-dev build-bridge-linux
 			ELASTICCLAW_E2E_BRIDGE_BINARY="$(CURDIR)/bin/claw-bridge-linux-amd64" \
 			ELASTICCLAW_E2E_DAYTONA_SANDBOX_ID_FILE="$$DAYTONA_IDS" \
 			ELASTICCLAW_E2E_REPLICATED_VM_ID_FILE="$$REPLICATED_IDS" \
+			ELASTICCLAW_E2E_EXEDEV_VM_ID_FILE="$$EXEDEV_IDS" \
 			ELASTICCLAW_E2E_HUB_ADDR="$$HUB_ADDR" \
 			ELASTICCLAW_E2E_PUBLIC_URL="$$ELASTICCLAW_E2E_PUBLIC_URL" \
 			ELASTICCLAW_E2E_RUN_ID="$$E2E_RUN_ID" \

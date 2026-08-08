@@ -2,6 +2,7 @@
 
 import { useState, useRef, useEffect, useCallback, useMemo, memo } from "react"
 import { Send, Terminal, TerminalSquare, ChevronLeft, ChevronRight, ChevronDown, Loader2, LayoutGrid, Info, MessageSquare, Trash2, AlertCircle, Wrench, GripVertical, Settings2, Paperclip, File as FileIcon, X, ExternalLink } from "lucide-react"
+import { CopyTranscriptButton } from "@/components/copy-transcript-button"
 import {
   DndContext,
   closestCenter,
@@ -37,7 +38,7 @@ import dynamic from "next/dynamic"
 import { useBranding } from "@/hooks/use-branding"
 import { BootstrapProgress } from "@/components/bootstrap-progress"
 import { ClawTitle } from "@/components/claw-title"
-import { isTerminalAssistantMessage } from "@/lib/messages"
+import { isTerminalAssistantMessage, windowMessagesByDurableCount } from "@/lib/messages"
 import { DependencyDowntimeBanner } from "@/components/dependency-downtime-banner"
 import type { TypewriterState } from "@/hooks/use-typewriter"
 
@@ -65,7 +66,8 @@ interface ConversationViewProps {
 }
 
 const FOLLOW_LATEST_THRESHOLD_PX = 24
-const BOARD_CARD_MESSAGE_WINDOW = 50
+/** Last N durable conversation turns on board cards (activities do not count). */
+const BOARD_CARD_DURABLE_MESSAGE_WINDOW = 50
 const EMPTY_MESSAGES: Message[] = []
 const noopClawAction = (_clawId: string) => {}
 const noopClawMessageAction = (_clawId: string, _content: string) => {}
@@ -505,7 +507,12 @@ const ClawBoardCard = memo(function ClawBoardCard({
   const cardFollowingLatest = useRef(true)
   const [isCardFollowingLatest, setIsCardFollowingLatest] = useState(true)
   const [expandedActivityGroups, setExpandedActivityGroups] = useState<Record<string, boolean>>({})
-  const visibleMessages = useMemo(() => messages.slice(-BOARD_CARD_MESSAGE_WINDOW), [messages])
+  // Window by durable turns only — a tool-activity flood must not age out
+  // earlier user/claw messages from the card (refresh would still show them).
+  const visibleMessages = useMemo(
+    () => windowMessagesByDurableCount(messages, BOARD_CARD_DURABLE_MESSAGE_WINDOW),
+    [messages]
+  )
   const conversationItems = useMemo(() => compactActivityRuns(visibleMessages), [visibleMessages])
   const latestActivity = useMemo(() => latestActivityMessage(visibleMessages), [visibleMessages])
   const activityNow = useActivityNow(Boolean(latestActivity))
@@ -696,6 +703,13 @@ const ClawBoardCard = memo(function ClawBoardCard({
                   <ExternalLink className="size-3.5 text-emerald-400" />
                 </a>
               )}
+              <CopyTranscriptButton
+                claw={claw}
+                messages={messages}
+                streamingText={streamingBuffer?.text}
+                size="icon"
+                stopPropagation
+              />
               <button
                 onClick={handleFlip}
                 className="p-1 rounded hover:bg-accent transition-colors"
@@ -1144,10 +1158,6 @@ function isHiddenActivity(message: Message): boolean {
   return message.activity?.kind === "still_working" || message.content.startsWith("No streamed output")
 }
 
-function isStaleModelWait(message: Message, latestActivity: Message | null): boolean {
-  return message.activity?.kind === "model_started" && latestActivity?.id !== message.id
-}
-
 function hasEarlierTerminalAssistant(messages: Message[], index: number): boolean {
   for (let i = index - 1; i >= 0; i -= 1) {
     if (isTerminalAssistantMessage(messages[i])) return true
@@ -1188,24 +1198,16 @@ type ConversationItem =
 function compactActivityRuns(messages: Message[]): ConversationItem[] {
   const items: ConversationItem[] = []
   let run: Message[] = []
-  const latestActivity = latestActivityMessage(messages)
 
   const flush = () => {
-    const visible = run.filter((message) => !isHiddenActivity(message) && !isStaleModelWait(message, latestActivity))
+    const visible = run.filter((message) => !isHiddenActivity(message))
     run = []
     if (visible.length === 0) return
-    if (visible.length === 1) {
-      items.push({ type: "message", message: visible[0] })
-      return
-    }
-    const collapsed = visible.slice(0, -1)
-    const latest = visible[visible.length - 1]
     items.push({
       type: "activity-summary",
-      id: `activity-summary-${collapsed[0].id}-${collapsed[collapsed.length - 1].id}`,
-      messages: collapsed,
+      id: `activity-summary-${visible[0].id}-${visible[visible.length - 1].id}`,
+      messages: visible,
     })
-    items.push({ type: "message", message: latest })
   }
 
   for (const message of messages) {
@@ -1732,6 +1734,12 @@ function ClawChatView({
             <span className="text-sm text-muted-foreground font-mono">{formatUptime(claw.uptime)}</span>
           </div>
           <div className="flex items-center gap-2">
+            <CopyTranscriptButton
+              claw={claw}
+              messages={messages}
+              streamingText={streamingBuffer?.text}
+              size="sm"
+            />
             {claw.ssh_host && (
               <Button variant="outline" size="sm" onClick={() => setTerminalOpen(true)}>
                 <TerminalSquare className="size-3.5 mr-1.5" />

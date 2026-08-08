@@ -429,7 +429,7 @@ func TestStorePRMentionConcurrentDuplicate(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			errs[i] = s.storePRMention("claw-dup", "owner/repo", 7, "https://github.com/owner/repo/pull/7")
+			_, errs[i] = s.storePRMention("claw-dup", "owner/repo", 7, "https://github.com/owner/repo/pull/7")
 		}(i)
 	}
 	wg.Wait()

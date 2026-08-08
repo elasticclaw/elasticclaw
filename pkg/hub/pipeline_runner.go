@@ -917,12 +917,20 @@ func (e *routedRequiredGateError) Error() string {
 // MoveIssue.IssueID (including template references like {{.Inputs.xxx}}).
 func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, ctx pipelineContext) (injectDelivered bool, err error) {
 	issueID := ctx.IssueID
+	// Captured for PR registration after any required gate has been evaluated.
+	// Scanning immediately after the run would arm claw_prs before a failing
+	// required gate could block the stage (and leave the watcher able to kill
+	// the claw on merge/close while the workflow is still blocked).
+	var runStdoutForPRScan string
 	if strings.TrimSpace(stage.OnEnter.Run.Command) != "" {
 		log.Printf("[pipeline] running workflow command for claw %s stage %q: %s", clawID[:8], stage.ID, stage.OnEnter.Run.Command)
 		result, err := s.executePipelineRunAction(clawID, stage.OnEnter.Run)
 		// Persist output so later stages can reference it via {{ .Outputs.<name>.<key> }}
 		if stage.OnEnter.Run.Output != "" && result != nil {
 			s.persistPipelineOutput(clawID, stage.ID, stage.OnEnter.Run.Output, result)
+		}
+		if result != nil {
+			runStdoutForPRScan = result.Stdout
 		}
 		if err != nil || (result != nil && result.ExitCode != 0) {
 			msg := formatPipelineRunFailure(stage.OnEnter.Run, result, err)
@@ -941,6 +949,15 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, ctx pipelineCon
 			}
 		} else {
 			log.Printf("[pipeline] workflow command completed for claw %s stage %q", clawID[:8], stage.ID)
+			if result != nil {
+				if result.Stdout != "" {
+					log.Printf("[pipeline] workflow command stdout for claw %s:\n%s", clawID[:8], result.Stdout)
+				}
+				if result.Stderr != "" {
+					log.Printf("[pipeline] workflow command stderr for claw %s:\n%s", clawID[:8], result.Stderr)
+				}
+				s.injectHubMessageByID(clawID, fmt.Sprintf("[hub] Workflow command completed for stage %q (exit %d)", stage.ID, result.ExitCode))
+			}
 		}
 	}
 
@@ -969,6 +986,17 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, ctx pipelineCon
 				log.Printf("[pipeline] %s", msg)
 				s.injectHubMessageByID(clawID, "[hub] Error: "+msg)
 				return false, errors.New(msg)
+			}
+		} else {
+			log.Printf("[pipeline] dependency updates completed for claw %s stage %q", clawID[:8], stage.ID)
+			if result != nil {
+				if result.Stdout != "" {
+					log.Printf("[pipeline] dependency update stdout for claw %s:\n%s", clawID[:8], result.Stdout)
+				}
+				if result.Stderr != "" {
+					log.Printf("[pipeline] dependency update stderr for claw %s:\n%s", clawID[:8], result.Stderr)
+				}
+				s.injectHubMessageByID(clawID, "[hub] "+formatDependencyUpdateSummary(result))
 			}
 		}
 	}
@@ -1028,6 +1056,27 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, ctx pipelineCon
 
 	// Evaluate gate if configured
 	if stage.Gate != nil {
+		// Re-entering *this* plan_gate stage after it already passed must not
+		// re-run validation forever. Scoped per stageID so a later plan_gate
+		// in the same workflow still evaluates its own output (Greptile).
+		if stage.PlanGate && s.hasSystemMarker(clawID, planGateAcceptedMarker(stage.ID)) {
+			alreadyRouted := false
+			if pl := parsePipelineForContext(ctx); pl != nil {
+				alreadyRouted = pl.StageForGateResult(stage.ID, "pass") != nil
+			}
+			// Destination stage inject owns the next agent turn when routed.
+			if alreadyRouted {
+				s.publishHubNotice(clawID, planGateAlreadyAcceptedContent)
+			} else {
+				s.injectHubMessageByID(clawID, planGateAlreadyAcceptedContent)
+			}
+			s.safeGo("pipeline plan-gate already accepted", func() {
+				s.autoTransitionAfterGate(clawID, stage.ID, "pass", ctx)
+			})
+			// injectDelivered only when we queued a model turn (no route).
+			return !alreadyRouted, nil
+		}
+
 		gateResult := s.evaluateGate(clawID, stage.ID, stage.Gate)
 		log.Printf("[pipeline] gate evaluated for claw %s stage %q: verdict=%s", clawID[:8], stage.ID, gateResult.Verdict)
 		// Normalise "skipped" → "pass" when TreatSkippedAsPass is set so that
@@ -1041,29 +1090,71 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, ctx pipelineCon
 			gateResultHasRoute = pl.StageForGateResult(stage.ID, autoTransitionVerdict) != nil
 		}
 		notifyGateResult := func(message string) {
+			// Always surface gate outcomes in the transcript for human observers.
+			// When a gate_result route will inject the next stage prompt, use a
+			// notice (no extra model turn); otherwise inject so the agent sees it.
 			if gateResultHasRoute {
-				// The destination stage owns the next model prompt. Keep mechanical
-				// gate bookkeeping visible in the dashboard without consuming an
-				// extra turn before that stage's on_enter instructions.
 				s.publishHubNotice(clawID, message)
 				return
 			}
 			s.injectHubMessageByID(clawID, message)
 		}
-		// Report the gate result in chat.
+		// Report the gate result in chat with friendlier plan-gate wording.
+		stageLabel := strings.TrimSpace(stage.Label)
+		if stageLabel == "" {
+			stageLabel = stage.ID
+		}
 		if gateResult.Verdict == "pass" {
-			notifyGateResult(fmt.Sprintf("[hub] Gate passed: %s", stage.Label))
+			if stage.PlanGate {
+				notifyGateResult(fmt.Sprintf("[hub] ✓ Plan approved (%s). Moving to implementation.", stageLabel))
+			} else {
+				notifyGateResult(fmt.Sprintf("[hub] ✓ Gate passed: %s", stageLabel))
+			}
 		} else if gateResult.Verdict == "skipped" && stage.Gate.TreatSkippedAsPass {
-			notifyGateResult(fmt.Sprintf("[hub] Gate skipped (treated as pass): %s", stage.Label))
+			notifyGateResult(fmt.Sprintf("[hub] Gate skipped (treated as pass): %s", stageLabel))
 		} else if gateResult.Verdict == "error" {
-			msg := fmt.Sprintf("[hub] Gate error (no condition matched): %s", stage.Label)
+			msg := fmt.Sprintf("[hub] Gate error (no condition matched): %s", stageLabel)
 			notifyGateResult(msg)
 		} else {
-			msg := fmt.Sprintf("[hub] Gate failed: %s", stage.Label)
+			msg := fmt.Sprintf("[hub] ✗ Gate failed: %s", stageLabel)
 			if gateResult.MatchedPath != "" {
 				msg += fmt.Sprintf("\n- path: %s\n- value: %s", gateResult.MatchedPath, gateResult.MatchedValue)
 			}
+			if gateResult.Reason != "" {
+				msg += "\n- reason: " + gateResult.Reason
+			}
 			notifyGateResult(msg)
+		}
+		// Deterministic plan gates mark plan accepted so freeform never re-fires
+		// if something races; freeform is already skipped when HasPlanGate().
+		// Per-stage marker powers re-entry short-circuit without skipping later
+		// plan_gate stages in the same workflow.
+		if stage.PlanGate && autoTransitionVerdict == "pass" {
+			if tenantID := s.tenantIDForClaw(clawID); tenantID != "" {
+				_ = s.insertSystemMarker(clawID, tenantID, initialPlanAcceptedMarker)
+				_ = s.insertSystemMarker(clawID, tenantID, planGateAcceptedMarker(stage.ID))
+			}
+			// Surface the approved plan in chat even when the agent only said
+			// [PLAN_READY]. Prefer gate JSON fields; fall back to a short notice
+			// when the validator only printed {"status":"ok"}.
+			var summary string
+			if stage.Gate != nil && stage.Gate.Output != "" {
+				if outs := s.loadPipelineOutputs(clawID); outs != nil {
+					summary = formatPlanGateSummary(outs[stage.Gate.Output])
+				}
+			}
+			if summary == "" {
+				summary = formatPlanGateSummary(nil)
+			}
+			s.publishHubNotice(clawID, summary)
+			// When a gate_result route will inject the destination stage prompt,
+			// do not also inject proceed — that queues a duplicate agent turn
+			// before the implement instructions arrive (Greptile).
+			if gateResultHasRoute {
+				s.publishHubNotice(clawID, planGateProceedContent)
+			} else {
+				s.injectHubMessageByID(clawID, planGateProceedContent)
+			}
 		}
 		// Auto-transition to next stage if a gate_result trigger matches.
 		s.safeGo("pipeline gate auto-transition", func() {
@@ -1083,6 +1174,13 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, ctx pipelineCon
 			}
 			return false, fmt.Errorf("required gate %q %s", stage.ID, gateResult.Verdict)
 		}
+	}
+
+	// Scripts like verify-github-pr-links emit PR URLs in JSON. Register them
+	// only after a required gate (if any) has allowed the stage to continue, so
+	// a failed gate cannot leave the PR watcher armed on a blocked claw.
+	if strings.TrimSpace(runStdoutForPRScan) != "" {
+		s.scanMessageForPRs(clawID, runStdoutForPRScan)
 	}
 
 	if stage.OnEnter.Inject != "" {
@@ -1524,6 +1622,13 @@ func (s *Server) transitionResolvedPipelineStageWithContext(clawID string, stage
 	// (like output_matches) don't re-fire on subsequent messages.
 	s.recordPipelineStageVisit(clawID, stage.ID)
 	log.Printf("[pipeline] claw %s → stage %q (%s)", clawID[:8], stage.ID, stage.Label)
+	// User-visible stage progress in the transcript (dashboard only — does not
+	// queue a model turn). Makes workflow progress less of a black box.
+	stageLabel := strings.TrimSpace(stage.Label)
+	if stageLabel == "" {
+		stageLabel = stage.ID
+	}
+	s.publishHubNotice(clawID, fmt.Sprintf("[hub] ▶ Stage: %s", stageLabel))
 	injectDelivered, onEnterErr := s.runOnEnter(clawID, stage, ctx)
 	stageActionsSucceeded := onEnterErr == nil
 	var routedGateErr *routedRequiredGateError

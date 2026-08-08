@@ -86,9 +86,17 @@ func TestExtractDonePRURLs(t *testing.T) {
 			wantURLs: []string{"https://github.com/org/repo/pull/42"},
 		},
 		{
-			name:     "DONE on its own line, URL on next line — not picked up",
+			name:     "DONE on its own line, URL on next line",
 			message:  "[DONE]\nhttps://github.com/org/repo/pull/99",
-			wantURLs: nil,
+			wantURLs: []string{"https://github.com/org/repo/pull/99"},
+		},
+		{
+			name:    "DONE then multiple PR URLs on following lines",
+			message: "[DONE]\nhttps://github.com/org/repo/pull/1\nhttps://github.com/org/other/pull/2",
+			wantURLs: []string{
+				"https://github.com/org/repo/pull/1",
+				"https://github.com/org/other/pull/2",
+			},
 		},
 		{
 			name:     "no DONE token at all",
@@ -306,6 +314,138 @@ stages:
 	}
 	if !strings.Contains(injected, "Android validation started") {
 		t.Fatalf("injected message = %q, want validation inject", injected)
+	}
+}
+
+func TestRegisterDonePRURLsAtomicMulti(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
+	const clawID = "claw-register-atomic"
+	_, err := db.Exec(
+		`INSERT INTO claws(id, tenant_id, name, template, status, created_at) VALUES(?,?,?,?,?,datetime('now'))`,
+		clawID, "test-tenant-id", "claw", "elasticclaw", "connected",
+	)
+	if err != nil {
+		t.Fatalf("insert claw: %v", err)
+	}
+
+	failURL := s.registerDonePRURLs(clawID, []string{
+		"https://github.com/org/repo/pull/1",
+		"https://github.com/org/other/pull/2",
+	})
+	if failURL != "" {
+		t.Fatalf("registerDonePRURLs failed on %q", failURL)
+	}
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM claw_prs WHERE claw_id=?`, clawID).Scan(&count); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if count != 2 {
+		t.Fatalf("claw_prs count = %d, want 2", count)
+	}
+}
+
+func TestHandleClawDoneSignal_PipelineDoneStillRegistersPRURLs(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
+	s.hubCfg.Factories = []*types.FactoryConfig{
+		{
+			Name:     "github_todo",
+			Template: "elasticclaw",
+			PipelineYAML: `
+stages:
+  - id: working
+    entry: true
+  - id: pr_opened
+    triggers:
+      - message_contains: "[DONE]"
+    on_enter:
+      inject: "verify prs"
+  - id: merged
+    triggers:
+      - pr_merged: {}
+    terminal: true
+`,
+		},
+	}
+
+	const clawID = "claw-done-pipeline-prs"
+	_, err := db.Exec(
+		`INSERT INTO claws(id, tenant_id, name, template, status, tags, github_issue_id, pipeline_stage, created_at) VALUES(?,?,?,?,?,?,?,?,datetime('now'))`,
+		clawID, "test-tenant-id", "issue-1", "elasticclaw", "connected", `["factory:github_todo"]`, "org/repo/1", "working",
+	)
+	if err != nil {
+		t.Fatalf("insert claw: %v", err)
+	}
+
+	// Pipeline owns [DONE] — previously this path returned before registering PRs.
+	s.handleClawDoneSignal(clawID, "[DONE]\nhttps://github.com/org/repo/pull/42\nhttps://github.com/org/other/pull/7")
+
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM claw_prs WHERE claw_id=?`, clawID).Scan(&count); err != nil {
+		t.Fatalf("count claw_prs: %v", err)
+	}
+	if count != 2 {
+		t.Fatalf("claw_prs count = %d, want 2 (pipeline [DONE] must still arm PR monitoring)", count)
+	}
+
+	var stage string
+	if err := db.QueryRow(`SELECT pipeline_stage FROM claws WHERE id=?`, clawID).Scan(&stage); err != nil {
+		t.Fatalf("select pipeline_stage: %v", err)
+	}
+	if stage != "pr_opened" {
+		t.Fatalf("pipeline_stage = %q, want pr_opened", stage)
+	}
+}
+
+func TestHandleClawDoneSignal_PipelineDoneBlockedByFailedRequiredGate(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
+	s.hubCfg.Factories = []*types.FactoryConfig{
+		{
+			Name:     "gated_todo",
+			Template: "elasticclaw",
+			PipelineYAML: `
+stages:
+  - id: working
+    entry: true
+  - id: pr_opened
+    triggers:
+      - message_contains: "[DONE]"
+    on_enter:
+      inject: "should not reach"
+`,
+		},
+	}
+
+	const clawID = "claw-done-pipeline-gate"
+	_, err := db.Exec(
+		`INSERT INTO claws(id, tenant_id, name, template, status, tags, github_issue_id, pipeline_stage, created_at) VALUES(?,?,?,?,?,?,?,?,datetime('now'))`,
+		clawID, "test-tenant-id", "issue-2", "elasticclaw", "connected", `["factory:gated_todo"]`, "org/repo/2", "working",
+	)
+	if err != nil {
+		t.Fatalf("insert claw: %v", err)
+	}
+	_, err = db.Exec(`
+		INSERT INTO pipeline_gate_results(claw_id, stage_id, output_name, verdict, matched_path, matched_value, required, created_at)
+		VALUES(?, ?, ?, ?, ?, ?, ?, datetime('now'))`,
+		clawID, "pr_opened", "pr_links", "fail", "status", "failed", 1)
+	if err != nil {
+		t.Fatalf("insert gate result: %v", err)
+	}
+
+	s.handleClawDoneSignal(clawID, "[DONE] https://github.com/org/repo/pull/99")
+
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM claw_prs WHERE claw_id=?`, clawID).Scan(&count); err != nil {
+		t.Fatalf("count claw_prs: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("claw_prs count = %d, want 0 when required gate failed", count)
+	}
+	var stage string
+	if err := db.QueryRow(`SELECT pipeline_stage FROM claws WHERE id=?`, clawID).Scan(&stage); err != nil {
+		t.Fatalf("select pipeline_stage: %v", err)
+	}
+	if stage != "working" {
+		t.Fatalf("pipeline_stage = %q, want working (blocked)", stage)
 	}
 }
 

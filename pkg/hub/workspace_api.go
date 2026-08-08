@@ -210,6 +210,11 @@ func (s *Server) handleWorkspaceWorkflowsPush(w http.ResponseWriter, r *http.Req
 		}
 	}
 	if err := saveExternalWorkflows(name, req.Workflows); err != nil {
+		if isWorkspaceNotFound(err) {
+			// Missing workspace is a client mistake (wrong --workspace name), not a server fault.
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
 		http.Error(w, "save workflows: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -564,7 +569,9 @@ func workflowToView(workspaceName string, workflow *types.WorkflowConfig) Workfl
 func (s *Server) resolveWorkflowConfig(workspaceName, workflowName string) (*types.WorkspaceConfig, *types.WorkflowConfig, bool, error) {
 	workspace, err := loadExternalWorkspace(workspaceName)
 	if err != nil {
-		if os.IsNotExist(err) {
+		// Typed workspace-not-found (and legacy os.IsNotExist) must map to 404,
+		// not 500 — loadExternalWorkspaceConfig no longer returns bare IsNotExist.
+		if isWorkspaceNotFound(err) || os.IsNotExist(err) {
 			return nil, nil, false, nil
 		}
 		return nil, nil, false, err
