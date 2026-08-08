@@ -48,9 +48,12 @@ name: delivery
 enabled: true
 initial_state: implementing
 states:
-  implementing: {}
-  awaiting_ci: {}
+  implementing:
+    phase: build
+  awaiting_ci:
+    phase: pr
   completed:
+    phase: done
     terminal: true
 transitions:
   open:

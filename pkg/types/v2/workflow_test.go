@@ -183,6 +183,24 @@ states:
 	}
 }
 
+func TestEnabledWorkflowRequiresDisplayPhaseForEveryState(t *testing.T) {
+	yaml := `
+schema_version: 2
+name: missing-phase
+enabled: true
+initial_state: s
+states:
+  s:
+    phase: build
+  done:
+    terminal: true
+`
+	_, err := v2.ParseAndValidateWorkflow([]byte(yaml))
+	if err == nil || !strings.Contains(err.Error(), "phase is required") {
+		t.Fatalf("error = %v, want required phase", err)
+	}
+}
+
 func TestWorkflowV2RejectsTranscriptControl(t *testing.T) {
 	for name, yaml := range map[string]string{
 		"event": `

@@ -105,6 +105,9 @@ func ValidateWorkflow(wf *Workflow) (*ResolvedWorkflow, error) {
 		if st.Phase != "" && !IsDisplayPhase(st.Phase) {
 			return nil, fmt.Errorf("workflow %q: states.%s.phase %q is unsupported", wf.Name, name, st.Phase)
 		}
+		if wf.Enabled && st.Phase == "" {
+			return nil, fmt.Errorf("workflow %q: states.%s.phase is required when the workflow is enabled", wf.Name, name)
+		}
 		if err := validateNoTranscriptFacts(fmt.Sprintf("states.%s.invariant", name), st.Invariant); err != nil {
 			return nil, fmt.Errorf("workflow %q: %w", wf.Name, err)
 		}
