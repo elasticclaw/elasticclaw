@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"regexp"
 	"sort"
 	"strconv"
@@ -737,13 +738,58 @@ func (s *Server) firePRConditions(pr clawPR, stage pipeline.Stage, ctx pipelineC
 	}
 }
 
+// githubAppConfigsForTokens returns GitHub Apps for hub-side API minting
+// (PR watcher, reconciler, issue poller). Factories often configure apps only
+// on the workspace (no hub-global github_apps); include those so token
+// resolution matches agent credential helpers.
+//
+// Order: workspace apps first (primary for factory deploys), then hub apps.
+// Duplicate AppIDs are skipped after the first occurrence.
+func (s *Server) githubAppConfigsForTokens() []*types.GitHubAppConfig {
+	var apps []*types.GitHubAppConfig
+	seen := map[int64]bool{}
+	add := func(list []*types.GitHubAppConfig) {
+		for _, app := range list {
+			if app == nil || app.AppID == 0 || app.PrivateKeyPEM == "" {
+				continue
+			}
+			if seen[app.AppID] {
+				continue
+			}
+			seen[app.AppID] = true
+			apps = append(apps, app)
+		}
+	}
+	// Workspace-scoped apps (adversaries, etc.)
+	if entries, err := os.ReadDir(workspacesDir()); err == nil {
+		names := make([]string, 0, len(entries))
+		for _, e := range entries {
+			if e.IsDir() && !strings.HasPrefix(e.Name(), ".") {
+				names = append(names, e.Name())
+			}
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			wsApps, err := loadWorkspaceGitHubAppConfigs(name)
+			if err != nil {
+				log.Printf("[github] load workspace %q github apps: %v", name, err)
+				continue
+			}
+			add(wsApps)
+		}
+	}
+	s.mu.RLock()
+	hubApps := append([]*types.GitHubAppConfig(nil), s.hubCfg.GitHubApps...)
+	s.mu.RUnlock()
+	add(hubApps)
+	return apps
+}
+
 // resolveGitHubTokenWithRepos is a shared helper that resolves a GitHub App installation token
 // with optional repo-scoped access.
 func (s *Server) resolveGitHubTokenWithRepos(repoAccess []RepoAccess) string {
-	s.mu.RLock()
-	cfg := s.hubCfg
-	s.mu.RUnlock()
-	if len(cfg.GitHubApps) == 0 {
+	appCfgs := s.githubAppConfigsForTokens()
+	if len(appCfgs) == 0 {
 		return ""
 	}
 	// Installation tokens live an hour. Minting one per call cost two extra
@@ -755,15 +801,18 @@ func (s *Server) resolveGitHubTokenWithRepos(repoAccess []RepoAccess) string {
 	if cached, ok := s.ghTokenCache[cacheKey]; ok && time.Now().Before(cached.expiresAt) {
 		return cached.token
 	}
-	for _, appCfg := range cfg.GitHubApps {
+	var lastErr error
+	for _, appCfg := range appCfgs {
 		provider, err := NewGitHubTokenProvider(appCfg)
 		if err != nil {
-			log.Printf("[pr-watcher] CRITICAL: GitHub token provider setup failed: %v", err)
+			log.Printf("[pr-watcher] CRITICAL: GitHub token provider setup failed (app_id=%d): %v", appCfg.AppID, err)
+			lastErr = err
 			continue
 		}
 		token, expiresAt, err := provider.InstallationToken(context.Background(), 0, repoAccess)
 		if err != nil {
-			log.Printf("[pr-watcher] CRITICAL: GitHub token provider failed: %v", err)
+			log.Printf("[pr-watcher] GitHub token provider failed (app_id=%d): %v", appCfg.AppID, err)
+			lastErr = err
 			continue
 		}
 		if s.ghTokenCache == nil {
@@ -774,6 +823,9 @@ func (s *Server) resolveGitHubTokenWithRepos(repoAccess []RepoAccess) string {
 			s.ghTokenCache[cacheKey] = cachedGitHubToken{token: token, expiresAt: expiry}
 		}
 		return token
+	}
+	if lastErr != nil {
+		log.Printf("[pr-watcher] CRITICAL: GitHub token resolution failed after trying %d app(s): %v", len(appCfgs), lastErr)
 	}
 	return ""
 }

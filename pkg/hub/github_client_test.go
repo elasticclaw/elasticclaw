@@ -4,7 +4,9 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -284,6 +286,50 @@ func TestInstallationTokensAreCachedAcrossCalls(t *testing.T) {
 	}
 	if got := atomic.LoadInt64(&mints); got != 2 {
 		t.Fatalf("installation tokens minted=%d, want 2 (one per distinct scope)", got)
+	}
+}
+
+// Factories often configure GitHub Apps only on the workspace (no hub-global
+// github_apps). PR watcher / poller / reconciler must still mint tokens.
+func TestResolveGitHubTokenUsesWorkspaceAppsWhenHubHasNone(t *testing.T) {
+	var mints int64
+	oldTransport := http.DefaultTransport
+	http.DefaultTransport = githubAppAnyTokenTransport{base: oldTransport, mints: &mints}
+	t.Cleanup(func() { http.DefaultTransport = oldTransport })
+
+	// Point hub config dir at a temp tree with one workspace app only.
+	tmp := t.TempDir()
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", tmp+"/hub.yaml")
+	wsDir := tmp + "/workspaces/adversaries/.elasticclaw-managed"
+	if err := os.MkdirAll(wsDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	// Minimal workspace marker so the dir is a real workspace.
+	if err := os.WriteFile(tmp+"/workspaces/adversaries/elasticclaw-config.yaml", []byte("schema_version: v1\nname: adversaries\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	pem := testGitHubAppPEM(t)
+	appsYAML := "github_apps:\n  AdversaryLabs:\n    app_id: 1\n    url: https://github.com/apps/factory-marecampbell-com\n    private_key_pem: |\n"
+	for _, line := range strings.Split(pem, "\n") {
+		appsYAML += "      " + line + "\n"
+	}
+	if err := os.WriteFile(wsDir+"/github_apps.yaml", []byte(appsYAML), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// No hub-global apps.
+	s, _ := NewTestServerWithConfig(t, &types.HubConfig{}, "", "", "")
+	if got := s.resolveGitHubToken(); got != "tok" {
+		t.Fatalf("unscoped token from workspace app = %q, want tok", got)
+	}
+	if got := s.resolveGitHubTokenForRepo("adversarylabs/engineering-review-adversary"); got != "tok" {
+		t.Fatalf("repo token from workspace app = %q, want tok", got)
+	}
+	if got := atomic.LoadInt64(&mints); got != 2 {
+		t.Fatalf("installation tokens minted=%d, want 2", got)
+	}
+	if !s.isOwnAppBot("factory-marecampbell-com[bot]") {
+		t.Fatal("expected workspace app bot login to be recognized as own app bot")
 	}
 }
 
