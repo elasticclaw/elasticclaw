@@ -1937,16 +1937,28 @@ func hiddenSystemMessagesArgs() []interface{} {
 		initialPlanAcceptedMarker,
 		initialPlanCorrectionSentMarker,
 		// planGateAcceptedMarker is per-stage: __PLAN_GATE_ACCEPTED__:<stageID>
-		planGateAcceptedMarkerPrefix + "%",
+		// Escape LIKE metacharacters so underscores in the prefix are literal
+		// (SQL LIKE treats _ as a single-char wildcard without ESCAPE).
+		sqlLikeLiteralPrefix(planGateAcceptedMarkerPrefix) + "%",
 	}
 }
 
 func hiddenSystemMessagesSQL() string {
 	// Exact markers (wake / freeform plan) plus per-stage plan_gate accepted markers.
+	// ESCAPE '\' makes \_ and \% literal in the prefix pattern.
 	return `AND NOT (role = 'system' AND (
 		content IN (?, ?, ?, ?, ?, ?)
-		OR content LIKE ?
+		OR content LIKE ? ESCAPE '\'
 	))`
+}
+
+// sqlLikeLiteralPrefix escapes \, %, and _ so a marker prefix can be used with
+// LIKE ? ESCAPE '\' without treating underscores as wildcards.
+func sqlLikeLiteralPrefix(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, `%`, `\%`)
+	s = strings.ReplaceAll(s, `_`, `\_`)
+	return s
 }
 
 func (s *Server) handleMessageTimeline(w http.ResponseWriter, r *http.Request, tenantID, clawID string) {
