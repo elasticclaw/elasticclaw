@@ -511,6 +511,8 @@ func producerOwnsFact(producer Producer, key string) bool {
 		return producer == ProducerCI
 	case "pull_request":
 		return producer == ProducerSourceControl
+	case "delivery":
+		return producer == ProducerSourceControl || producer == ProducerEngine
 	case "review":
 		return producer == ProducerReview
 	case "operator":

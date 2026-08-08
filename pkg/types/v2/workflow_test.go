@@ -458,6 +458,47 @@ ci:
 	}
 }
 
+func TestWorkflowRejectsUnsupportedEvidencePolicyShape(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want string
+	}{
+		{name: "operator", body: `ci:
+  policies:
+    bad:
+      quorum:
+        - pipeline: github-pr
+          checks: [lint]`, want: "unsupported CI policy field"},
+		{name: "empty checks", body: `ci:
+  policies:
+    bad:
+      pipeline: github-pr
+      checks: []`, want: "checks must be a non-empty list"},
+		{name: "review minimum", body: `review:
+  policies:
+    bad:
+      connection: github-reviews
+      approvals:
+        minimum: -1`, want: "non-negative integer"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			yaml := `schema_version: 2
+name: invalid-policy
+initial_state: start
+states:
+  start:
+    phase: plan
+` + tt.body
+			_, err := v2.ParseAndValidateWorkflow([]byte(yaml))
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("error = %v, want %q", err, tt.want)
+			}
+		})
+	}
+}
+
 func TestWorkflowRejectsEffectWithoutCapability(t *testing.T) {
 	// github-production has trigger_run restricted to false in validWorkspaceYAML
 	yaml := `
