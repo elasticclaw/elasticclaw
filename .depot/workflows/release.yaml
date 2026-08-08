@@ -103,14 +103,30 @@ jobs:
   update-homebrew:
     runs-on: depot-ubuntu-24.04
     needs: release
-    if: ${{ !contains(github.ref_name, '-') }}  # skip prereleases
+    # Stable tags → Formula/elasticclaw.rb (bin: elasticclaw)
+    # Prerelease tags (CalVer with hyphen, e.g. 2026.8.8-rc1) →
+    # Formula/elasticclaw-beta.rb (bin: elasticclaw-beta), matching adversarylabs/adversary.
     steps:
       - name: Update Homebrew formula
         env:
           TAP_TOKEN: ${{ secrets.TAP_TOKEN }}
         run: |
+          set -euo pipefail
           VERSION="${GITHUB_REF_NAME}"
           VERSION_NO_V="${VERSION#v}"
+
+          # Prerelease if tag contains a hyphen (same rule as Create GitHub Release).
+          if echo "$VERSION" | grep -qE '^20[0-9]{2}\.[0-9]+\.[0-9]+(\.[0-9]+)?-.+'; then
+            FORMULA_FILE="elasticclaw-beta.rb"
+            FORMULA_CLASS="ElasticclawBeta"
+            INSTALLED_BINARY="elasticclaw-beta"
+            COMMIT_MSG="elasticclaw-beta ${VERSION}"
+          else
+            FORMULA_FILE="elasticclaw.rb"
+            FORMULA_CLASS="Elasticclaw"
+            INSTALLED_BINARY="elasticclaw"
+            COMMIT_MSG="elasticclaw ${VERSION}"
+          fi
 
           SHA_ARM64=$(curl -fsSL "https://github.com/elasticclaw/elasticclaw/releases/download/${VERSION}/elasticclaw-darwin-arm64" | sha256sum | awk '{print $1}')
           SHA_AMD64=$(curl -fsSL "https://github.com/elasticclaw/elasticclaw/releases/download/${VERSION}/elasticclaw-darwin-amd64" | sha256sum | awk '{print $1}')
@@ -119,19 +135,39 @@ jobs:
           cd tap
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+          mkdir -p Formula
 
-          awk -v arm_sha="${SHA_ARM64}" -v amd_sha="${SHA_AMD64}" -v ver="${VERSION_NO_V}" '
-            /version ".*"/ { sub(/version ".*"/, "version \"" ver "\"") }
-            /url ".*"/ { sub(/v#{version}/, "#{version}") }
-            /on_arm/ { in_arm=1 }
-            /on_intel/ { in_arm=0; in_amd=1 }
-            /end/ { in_arm=0; in_amd=0 }
-            in_arm && /sha256/ { sub(/sha256 ".*"/, "sha256 \"" arm_sha "\"") }
-            in_amd && /sha256/ { sub(/sha256 ".*"/, "sha256 \"" amd_sha "\"") }
-            { print }
-          ' Formula/elasticclaw.rb > Formula/elasticclaw.rb.tmp
-          mv Formula/elasticclaw.rb.tmp Formula/elasticclaw.rb
+          # Generate the formula in full so stable and beta stay in lockstep
+          # (class name + installed binary differ for prereleases).
+          cat > "Formula/${FORMULA_FILE}" <<EOF
+          class ${FORMULA_CLASS} < Formula
+            desc "Provision and manage AI agent claws from the command line"
+            homepage "https://github.com/elasticclaw/elasticclaw"
+            version "${VERSION_NO_V}"
+            license "Apache-2.0"
 
-          git add Formula/elasticclaw.rb
-          git diff --staged --quiet || git commit -m "elasticclaw ${VERSION}"
+            on_macos do
+              on_arm do
+                url "https://github.com/elasticclaw/elasticclaw/releases/download/#{version}/elasticclaw-darwin-arm64"
+                sha256 "${SHA_ARM64}"
+              end
+              on_intel do
+                url "https://github.com/elasticclaw/elasticclaw/releases/download/#{version}/elasticclaw-darwin-amd64"
+                sha256 "${SHA_AMD64}"
+              end
+            end
+
+            def install
+              bin_name = Hardware::CPU.arm? ? "elasticclaw-darwin-arm64" : "elasticclaw-darwin-amd64"
+              bin.install bin_name => "${INSTALLED_BINARY}"
+            end
+
+            test do
+              assert_match "elasticclaw", shell_output("#{bin}/${INSTALLED_BINARY} version 2>&1")
+            end
+          end
+          EOF
+
+          git add "Formula/${FORMULA_FILE}"
+          git diff --staged --quiet || git commit -m "${COMMIT_MSG}"
           git push

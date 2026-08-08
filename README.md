@@ -67,6 +67,13 @@ brew tap elasticclaw/elasticclaw
 brew install elasticclaw
 ```
 
+Prerelease builds publish a separate formula so stable installs stay on
+non-prerelease tags only:
+
+```bash
+brew install elasticclaw/elasticclaw/elasticclaw-beta
+```
+
 Deploy ElasticClaw Server to an Ubuntu VPS:
 
 ```bash
