@@ -12,6 +12,7 @@ import (
 	"strings"
 	"text/tabwriter"
 
+	workflowv2 "github.com/elasticclaw/elasticclaw/pkg/hub/workflowv2"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 	v2 "github.com/elasticclaw/elasticclaw/pkg/types/v2"
 	"github.com/spf13/cobra"
@@ -28,9 +29,73 @@ func WorkflowCmd() *cobra.Command {
 	cmd.AddCommand(workflowPushCmd())
 	cmd.AddCommand(workflowTriggerCmd())
 	cmd.AddCommand(workflowRunsCmd())
+	cmd.AddCommand(workflowInspectCmd())
 	cmd.AddCommand(workflowLogsCmd())
 	cmd.AddCommand(workflowConvertCmd())
 	return cmd
+}
+
+func workflowInspectCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "inspect <run-id>",
+		Short: "Explain the durable state of a workflow v2 run",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runWorkflowInspect(args[0])
+		},
+	}
+}
+
+func runWorkflowInspect(runID string) error {
+	hubURL, clawToken, err := resolveHubConn()
+	if err != nil {
+		return err
+	}
+	path := "/api/v2/workflow-runs/" + url.PathEscape(runID)
+	req, _ := http.NewRequest(http.MethodGet, hubURL+path, nil)
+	req.Header.Set("Authorization", "Bearer "+clawToken)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("inspect workflow run failed: %w", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode == http.StatusNotFound {
+		return fmt.Errorf("workflow v2 run %s not found", runID)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("hub returned %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	var inspection workflowv2.Inspection
+	if err := json.Unmarshal(body, &inspection); err != nil {
+		return fmt.Errorf("decode workflow run: %w", err)
+	}
+	if jsonOut {
+		return json.NewEncoder(os.Stdout).Encode(inspection)
+	}
+	printWorkflowInspection(inspection)
+	return nil
+}
+
+func printWorkflowInspection(inspection workflowv2.Inspection) {
+	run := inspection.Run
+	fmt.Printf("Run: %s\nWorkflow: %s/%s\nState: %s (phase %s, version %d)\nStatus: %s\n",
+		run.ID, run.WorkspaceName, run.WorkflowName, run.State, run.DisplayPhase, run.StateVersion, run.Status)
+	if len(inspection.Waiting) > 0 {
+		fmt.Println("Waiting:")
+		for _, reason := range inspection.Waiting {
+			fmt.Printf("  - %s: %s\n", reason.Kind, reason.Detail)
+		}
+	}
+	if len(inspection.ExpectedTransitions) > 0 {
+		fmt.Println("Expected transitions:")
+		for _, transition := range inspection.ExpectedTransitions {
+			fmt.Printf("  - %s --[%s]--> %s\n", run.State, transition.EventKind, transition.ToState)
+		}
+	}
+	fmt.Printf("Delivery: %d active PR(s), %d open, %d merged, %d closed\n",
+		inspection.Delivery.ActivePullRequests, inspection.Delivery.OpenPullRequests,
+		inspection.Delivery.MergedPullRequests, inspection.Delivery.ClosedPullRequests)
 }
 
 type workflowCLIView struct {
