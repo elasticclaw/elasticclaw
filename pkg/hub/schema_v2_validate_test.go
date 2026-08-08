@@ -1,6 +1,8 @@
 package hub
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -177,6 +179,57 @@ func TestSaveExternalWorkflowsAcceptsValidV2Pair(t *testing.T) {
 	}})
 	if err != nil {
 		t.Fatalf("save valid v2 workflow pair: %v", err)
+	}
+}
+
+func TestSaveExternalWorkflowsValidatesBatchBeforeMutation(t *testing.T) {
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
+	if err := saveExternalWorkspace(&types.WorkspaceConfig{
+		Name:  "engineering",
+		Files: map[string]string{"elasticclaw-config.yaml": testWorkspaceV2YAML},
+	}); err != nil {
+		t.Fatalf("seed workspace: %v", err)
+	}
+	oldWorkflow := `
+schema_version: 2
+name: first
+initial_state: planning
+states:
+  planning:
+    description: old-content
+  done:
+    terminal: true
+`
+	if err := saveExternalWorkflows("engineering", []*types.WorkflowConfig{{Name: "first", RawConfig: oldWorkflow}}); err != nil {
+		t.Fatalf("seed workflow: %v", err)
+	}
+	newWorkflow := strings.Replace(oldWorkflow, "old-content", "new-content", 1)
+	invalidWorkflow := `
+schema_version: 2
+name: invalid
+initial_state: planning
+states:
+  planning:
+    phase: unsupported
+  done:
+    terminal: true
+`
+	err := saveExternalWorkflows("engineering", []*types.WorkflowConfig{
+		{Name: "first", RawConfig: newWorkflow},
+		{Name: "invalid", RawConfig: invalidWorkflow},
+	})
+	if err == nil {
+		t.Fatal("expected invalid batch to fail")
+	}
+	persisted, readErr := os.ReadFile(filepath.Join(workspacesDir(), "engineering", "workflows", "first.yaml"))
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if !strings.Contains(string(persisted), "old-content") || strings.Contains(string(persisted), "new-content") {
+		t.Fatalf("valid item was partially persisted before later validation failure:\n%s", persisted)
+	}
+	if _, statErr := os.Stat(filepath.Join(workspacesDir(), "engineering", "workflows", "invalid.yaml")); !os.IsNotExist(statErr) {
+		t.Fatalf("invalid workflow should not be persisted, stat error=%v", statErr)
 	}
 }
 

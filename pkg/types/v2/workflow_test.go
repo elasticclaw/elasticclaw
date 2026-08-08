@@ -1,6 +1,7 @@
 package v2_test
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -508,7 +509,8 @@ transitions:
 }
 
 func TestWorkflowRejectsUnsupportedPredicate(t *testing.T) {
-	yaml := `
+	for _, operator := range []string{"regex", "matches", "javascript", "shell", "gte"} {
+		yaml := fmt.Sprintf(`
 schema_version: 2
 name: bad-pred
 initial_state: s
@@ -521,67 +523,13 @@ events:
     clauses:
       - from: s
         when:
-          x:
-            regex: ".*"
-`
-	_, err := v2.ParseAndValidateWorkflow([]byte(yaml))
-	// regex is treated as nested field not operator - actually absorbConstraint
-	// will try flatten as field "regex". Bare scalar ".*" under regex field is ok as equals-like.
-	// Need a clear unsupported op at operator position.
-	// Use when: {js: "return true"} which is field js with scalar - also allowed as domain.
-	// Better: when with all containing unsupported op map.
-	_ = err
-	yaml2 := `
-schema_version: 2
-name: bad-pred
-initial_state: s
-states:
-  s: {}
-  done:
-    terminal: true
-events:
-  e:
-    clauses:
-      - from: s
-        when:
-          x:
-            matches: ".*"
-`
-	// "matches" is not a known operator; treated as nested field path x.matches with scalar.
-	// The RFC restricted language is for operators. Nested unknown field names under
-	// a field constraint map that aren't ops get flattened as deeper fields.
-	// Force operator position via:
-	yaml3 := `
-schema_version: 2
-name: bad-pred
-initial_state: s
-states:
-  s: {}
-  done:
-    terminal: true
-events:
-  e:
-    clauses:
-      - from: s
-        when:
-          all:
-            - conclusion:
-                regex: fail
-`
-	_, err = v2.ParseAndValidateWorkflow([]byte(yaml3))
-	// conclusion -> map{regex: fail}: regex is not an allowed op and not nested further meaningfully.
-	// absorbConstraint sees map with key regex - not allowedPredicateOps, so flattenPredicates(conclusion, map)
-	// which treats regex as field under conclusion - scalar leaf - allowed.
-	// To reject unsupported operators we need validatePredicateNode to reject unknown ops
-	// when they appear as sole keys that look like ops... Currently only known ops are validated
-	// as operators; unknown keys are field names. That's acceptable for Phase 1: only
-	// equals/not_equals/in/not_in/exists/all/any are *interpreted* as ops; other keys are fields.
-	// Reject clear case: bare top-level op that's not allowed - hard with current design.
-	// Instead assert valid restricted ops work and overlap analysis uses them.
-	_ = yaml2
-	if err != nil {
-		// if we do get an error, fine
-		t.Logf("got error (ok): %v", err)
+          conclusion:
+            %s: failure
+`, operator)
+		_, err := v2.ParseAndValidateWorkflow([]byte(yaml))
+		if err == nil || !strings.Contains(err.Error(), "unsupported predicate operator") {
+			t.Fatalf("operator %q error = %v", operator, err)
+		}
 	}
 }
 

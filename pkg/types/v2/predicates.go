@@ -17,6 +17,16 @@ var allowedPredicateOps = map[string]bool{
 	"any":        true,
 }
 
+// unsupportedPredicateOps are common executable or non-analyzable operators
+// that must fail loudly rather than being mistaken for nested fact names.
+var unsupportedPredicateOps = map[string]bool{
+	"regex": true, "matches": true, "match": true,
+	"contains": true, "starts_with": true, "ends_with": true,
+	"gt": true, "gte": true, "lt": true, "lte": true,
+	"script": true, "javascript": true, "js": true,
+	"shell": true, "expression": true, "expr": true,
+}
+
 // ValidatePredicateTree walks a when/assert-style map and ensures only the
 // restricted predicate language is used at operator positions.
 // Field maps like {conclusion: {equals: success}} are allowed.
@@ -30,6 +40,11 @@ func ValidatePredicateTree(path string, tree map[string]interface{}) error {
 func validatePredicateNode(path string, node interface{}) error {
 	switch n := node.(type) {
 	case map[string]interface{}:
+		for key := range n {
+			if unsupportedPredicateOps[strings.ToLower(strings.TrimSpace(key))] {
+				return fmt.Errorf("%s.%s: unsupported predicate operator %q (allowed: equals, not_equals, in, not_in, exists, all, any)", path, key, key)
+			}
+		}
 		// Either a logical combinator (all/any) or a field -> constraint map,
 		// or a single operator map (equals/in/…).
 		if len(n) == 1 {

@@ -665,20 +665,19 @@ func saveExternalWorkflows(workspaceName string, workflows []*types.WorkflowConf
 		}
 		return err
 	}
-	workflowDir := filepath.Join(workspacesDir(), workspaceName, "workflows")
-	if err := os.MkdirAll(workflowDir, 0750); err != nil {
-		return fmt.Errorf("mkdir %s: %w", workflowDir, err)
+	type workflowWrite struct {
+		workflow *types.WorkflowConfig
+		data     []byte
 	}
+	// Validate and marshal the complete batch before touching the filesystem.
+	// A client error in one document must not partially persist earlier items.
+	writes := make([]workflowWrite, 0, len(workflows))
 	for _, workflow := range workflows {
 		if workflow == nil {
 			continue
 		}
 		if err := validateName(workflow.Name); err != nil {
 			return fmt.Errorf("workflow %q: %w", workflow.Name, err)
-		}
-		targetPath := filepath.Join(workflowDir, strings.ToLower(workflow.Name)+".yaml")
-		if err := removeCaseVariantWorkflowFiles(workflowDir, workflow.Name, targetPath); err != nil {
-			return err
 		}
 		data := []byte(workflow.RawConfig)
 		if len(strings.TrimSpace(string(data))) == 0 {
@@ -693,7 +692,20 @@ func saveExternalWorkflows(workspaceName string, workflows []*types.WorkflowConf
 		if err := validateWorkflowDocumentAtStore(data, workspaceYAML); err != nil {
 			return fmt.Errorf("workflow %q: %w", workflow.Name, err)
 		}
-		if err := os.WriteFile(targetPath, data, 0640); err != nil {
+		writes = append(writes, workflowWrite{workflow: workflow, data: data})
+	}
+
+	workflowDir := filepath.Join(workspacesDir(), workspaceName, "workflows")
+	if err := os.MkdirAll(workflowDir, 0750); err != nil {
+		return fmt.Errorf("mkdir %s: %w", workflowDir, err)
+	}
+	for _, write := range writes {
+		workflow := write.workflow
+		targetPath := filepath.Join(workflowDir, strings.ToLower(workflow.Name)+".yaml")
+		if err := removeCaseVariantWorkflowFiles(workflowDir, workflow.Name, targetPath); err != nil {
+			return err
+		}
+		if err := os.WriteFile(targetPath, write.data, 0640); err != nil {
 			return fmt.Errorf("write workflow %q: %w", workflow.Name, err)
 		}
 	}
