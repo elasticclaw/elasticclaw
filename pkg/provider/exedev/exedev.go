@@ -189,14 +189,28 @@ func (p *Provider) Status(ctx context.Context, instanceID string) (types.Instanc
 }
 
 // Exec runs a command inside the VM via SSH.
+//
+// The remote command is always a single shell-quoted string. OpenSSH (and
+// exe.dev's remote command repl) concatenate multi-arg remote commands with
+// spaces and without re-quoting, so:
+//
+//	ssh host bash -lc 'cd "$HOME/..." && script.sh'
+//
+// becomes a broken remote line where bash -lc only sees the first word. That
+// made workflow gates (verify-github-pr-links, depot CI) exit 0 with empty
+// stdout. Quote-join every argv so the remote shell receives one intact command.
 func (p *Provider) Exec(ctx context.Context, instanceID string, cmdArgs []string) (*types.ExecResult, error) {
 	host := p.vmHost(instanceID)
 	if host == "" {
 		return nil, fmt.Errorf("exedev exec: cannot determine host for %s", instanceID)
 	}
+	if len(cmdArgs) == 0 {
+		return nil, fmt.Errorf("exedev exec: empty command")
+	}
 
 	args := p.sshVMArgs(host)
-	args = append(args, cmdArgs...)
+	// One remote argv only — see comment above.
+	args = append(args, shellQuote(cmdArgs))
 	cmd := exec.CommandContext(ctx, "ssh", args...)
 	var stdoutBuf, stderrBuf bytes.Buffer
 	cmd.Stdout = &stdoutBuf

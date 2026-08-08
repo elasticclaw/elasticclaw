@@ -2,8 +2,41 @@ package exedev
 
 import (
 	"path"
+	"strings"
 	"testing"
 )
+
+func TestShellQuoteJoinsArgsAsSingleRemoteCommand(t *testing.T) {
+	t.Parallel()
+	// Matches how pipeline_runner invokes Exec for workflow run actions.
+	workspaceCmd := `~/.elasticclaw/flake-run bash -lc 'cd "$HOME/.openclaw/workspace" && bash scripts/verify-github-pr-links.sh'`
+	got := shellQuote([]string{"bash", "-lc", workspaceCmd})
+	// Must be one shell word-stream that re-expands to bash -lc <full script>.
+	if !strings.HasPrefix(got, "'bash' '-lc' '") {
+		t.Fatalf("shellQuote prefix = %q, want 'bash' '-lc' '…'", got)
+	}
+	if !strings.Contains(got, "verify-github-pr-links.sh") {
+		t.Fatalf("shellQuote missing script path: %q", got)
+	}
+	// Inner single quotes must be escaped so the remote shell keeps the full -lc payload.
+	if strings.Count(got, "bash") < 2 {
+		t.Fatalf("shellQuote should embed nested bash -lc: %q", got)
+	}
+	// Regression: multi-arg ssh used to drop everything after the first word of
+	// the -lc payload; a single remote argv is what Exec must pass to ssh.
+	if strings.Contains(got, "\x00") {
+		t.Fatal("shellQuote must not embed NULs")
+	}
+}
+
+func TestShellQuoteEscapesEmbeddedSingleQuotes(t *testing.T) {
+	t.Parallel()
+	got := shellQuote([]string{"echo", "it's"})
+	want := `'echo' 'it'"'"'s'`
+	if got != want {
+		t.Fatalf("shellQuote = %q, want %q", got, want)
+	}
+}
 
 func TestExpandRemotePathLocalRules(t *testing.T) {
 	t.Parallel()
