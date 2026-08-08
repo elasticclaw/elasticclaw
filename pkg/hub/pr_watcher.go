@@ -871,19 +871,17 @@ func (s *Server) resolveGitHubTokenForRepo(repo string) string {
 	return s.resolveGitHubTokenWithRepos([]RepoAccess{{Repo: repo, Permissions: "read"}})
 }
 
-// tokenForRepo prefers a repo-scoped installation token so multi-org workspace
-// GitHub Apps are not collapsed onto the first unscoped installation. Falls
-// back to an unscoped mint only when scoped minting fails (legacy single-app).
+// tokenForRepo returns a repo-scoped installation token for owner/repo.
+// It does not fall back to an unscoped mint: the first configured app's
+// unscoped token can 404/403 for repos only another workspace app can see,
+// and repeated "permanent" 404s can wrongly terminate the claw.
 func (s *Server) tokenForRepo(repo string) string {
-	if tok := s.resolveGitHubTokenForRepo(repo); tok != "" {
-		return tok
-	}
-	return s.resolveGitHubToken()
+	return s.resolveGitHubTokenForRepo(repo)
 }
 
 // resolveGitHubToken returns an unscoped GitHub App installation token.
-// Prefer tokenForRepo / resolveGitHubTokenForRepo when a repository is known —
-// unscoped tokens from the first configured app may not reach other orgs.
+// Prefer tokenForRepo when a repository is known — unscoped tokens from the
+// first configured app may not reach other orgs.
 func (s *Server) resolveGitHubToken() string {
 	return s.resolveGitHubTokenWithRepos(nil)
 }

@@ -512,10 +512,9 @@ func (s *Server) processGitHubCheckEvent(event string, payload githubCheckPayloa
 			continue
 		}
 		for _, pr := range prs {
-			token := s.resolveGitHubTokenForRepo(pr.repo)
-			if token == "" {
-				token = s.resolveGitHubToken()
-			}
+			// Repo-scoped only — do not fall back to an unscoped token from a
+			// different workspace app (wrong-org 404s look like deleted PRs).
+			token := s.tokenForRepo(pr.repo)
 			if token == "" {
 				log.Printf("[github-webhook] CRITICAL: GitHub token resolution failed; cannot check CI for %s#%d", repo, number)
 				continue
