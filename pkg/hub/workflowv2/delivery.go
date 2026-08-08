@@ -160,7 +160,7 @@ func (s *Store) SubmitDelivery(ctx context.Context, runID, attemptID string, man
 			}
 			if existingHead != "" {
 				if _, err := tx.ExecContext(ctx, `UPDATE workflow_v2_evidence SET superseded_at=?
-					WHERE run_id=? AND pr_id=? AND head_sha=? AND superseded_at=0`, now.UnixMilli(), runID, pr.ID, existingHead); err != nil {
+					WHERE run_id=? AND pr_id=? AND superseded_at=0`, now.UnixMilli(), runID, pr.ID); err != nil {
 					return nil, err
 				}
 			}
@@ -254,5 +254,5 @@ func (s *Store) deliveryFacts(ctx context.Context, runID string) (map[string]int
 		return nil, err
 	}
 	return map[string]interface{}{"count": count, "open": open, "merged": merged,
-		"all_merged": count > 0 && merged == count}, nil
+		"all_merged": merged == count}, nil
 }

@@ -162,6 +162,10 @@ func TestEmptyDeliveryManifestSupportsNoPRWorkflow(t *testing.T) {
 	if inspection.Delivery.ActivePullRequests != 0 {
 		t.Fatalf("delivery = %#v", inspection.Delivery)
 	}
+	deliveryFacts, ok := inspection.Facts["delivery"].(map[string]interface{})
+	if !ok || deliveryFacts["all_merged"] != true {
+		t.Fatalf("zero-PR delivery should be vacuously merged: %#v", inspection.Facts["delivery"])
+	}
 }
 
 func TestUnverifiedOpenPRSupersessionCannotRemoveDelivery(t *testing.T) {

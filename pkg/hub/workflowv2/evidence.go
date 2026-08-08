@@ -45,19 +45,16 @@ func (s *Store) RecordEvidence(ctx context.Context, input EvidenceInput, produce
 	if s == nil || s.db == nil {
 		return DeliveryPolicyResult{}, fmt.Errorf("workflow v2 store is not configured")
 	}
+	input.Domain = strings.ToLower(strings.TrimSpace(input.Domain))
+	input.Connection = strings.TrimSpace(input.Connection)
+	input.ExternalID = strings.TrimSpace(input.ExternalID)
+	input.Kind = strings.TrimSpace(input.Kind)
+	input.Status = strings.ToLower(strings.TrimSpace(input.Status))
 	if err := validateEvidenceProducer(input.Domain, producer); err != nil {
 		return DeliveryPolicyResult{}, err
 	}
 	if input.RunID == "" || input.PRID == "" || input.HeadSHA == "" || input.ExternalID == "" || input.Kind == "" || input.Status == "" {
 		return DeliveryPolicyResult{}, fmt.Errorf("run, pull request, head, external id, kind, and status are required")
-	}
-	var currentHead string
-	if err := s.db.QueryRowContext(ctx, `SELECT current_head_sha FROM workflow_v2_delivery_prs
-		WHERE id=? AND run_id=? AND active=1`, input.PRID, input.RunID).Scan(&currentHead); err != nil {
-		return DeliveryPolicyResult{}, fmt.Errorf("load active delivery: %w", err)
-	}
-	if currentHead != input.HeadSHA {
-		return DeliveryPolicyResult{}, fmt.Errorf("evidence head %s is stale; current head is %s", input.HeadSHA, currentHead)
 	}
 	if strings.TrimSpace(input.Provenance.Producer) != string(producer) {
 		return DeliveryPolicyResult{}, fmt.Errorf("evidence provenance producer %q does not match trusted adapter %q",
@@ -85,15 +82,38 @@ func (s *Store) RecordEvidence(ctx context.Context, input EvidenceInput, produce
 	if id == "" {
 		id = uuid.NewString()
 	}
-	_, err = s.db.ExecContext(ctx, `INSERT INTO workflow_v2_evidence(
-		id,run_id,pr_id,head_sha,domain,connection,external_id,kind,status,payload_json,provenance_json,observed_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
-		ON CONFLICT(run_id,domain,connection,external_id,kind,head_sha) DO UPDATE SET
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+	if err != nil {
+		return DeliveryPolicyResult{}, err
+	}
+	defer tx.Rollback()
+	var currentHead string
+	var headGeneration int
+	if err := tx.QueryRowContext(ctx, `SELECT p.current_head_sha,COALESCE(MAX(h.generation),0)
+		FROM workflow_v2_delivery_prs p LEFT JOIN workflow_v2_delivery_heads h ON h.pr_id=p.id
+		WHERE p.id=? AND p.run_id=? AND p.active=1 GROUP BY p.id`, input.PRID, input.RunID).Scan(
+		&currentHead, &headGeneration); err != nil {
+		return DeliveryPolicyResult{}, fmt.Errorf("load active delivery: %w", err)
+	}
+	if currentHead != input.HeadSHA {
+		return DeliveryPolicyResult{}, fmt.Errorf("evidence head %s is stale; current head is %s", input.HeadSHA, currentHead)
+	}
+	if headGeneration < 1 {
+		return DeliveryPolicyResult{}, fmt.Errorf("active delivery has no verified head generation")
+	}
+	_, err = tx.ExecContext(ctx, `INSERT INTO workflow_v2_evidence(
+		id,run_id,pr_id,head_sha,head_generation,domain,connection,external_id,kind,status,payload_json,provenance_json,observed_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+		ON CONFLICT(run_id,pr_id,domain,connection,external_id,kind,head_generation) DO UPDATE SET
 		status=excluded.status,payload_json=excluded.payload_json,provenance_json=excluded.provenance_json,
-		observed_at=excluded.observed_at,superseded_at=0`, id, input.RunID, input.PRID, input.HeadSHA,
-		input.Domain, input.Connection, input.ExternalID, input.Kind, input.Status, string(payloadJSON),
+		observed_at=excluded.observed_at,superseded_at=0
+		WHERE excluded.observed_at>=workflow_v2_evidence.observed_at`, id, input.RunID, input.PRID, input.HeadSHA,
+		headGeneration, input.Domain, input.Connection, input.ExternalID, input.Kind, input.Status, string(payloadJSON),
 		provenanceJSON, observed.UnixMilli())
 	if err != nil {
+		return DeliveryPolicyResult{}, err
+	}
+	if err := tx.Commit(); err != nil {
 		return DeliveryPolicyResult{}, err
 	}
 	result, err := s.EvaluateDeliveryPolicy(ctx, input.RunID)
@@ -198,6 +218,7 @@ type storedEvidence struct {
 	Kind       string
 	Status     string
 	Payload    map[string]interface{}
+	ObservedAt time.Time
 }
 
 func (s *Store) EvaluateDeliveryPolicy(ctx context.Context, runID string) (DeliveryPolicyResult, error) {
@@ -217,7 +238,7 @@ func (s *Store) EvaluateDeliveryPolicy(ctx context.Context, runID string) (Deliv
 		return DeliveryPolicyResult{}, err
 	}
 	result := DeliveryPolicyResult{PullRequestCount: prs.count, CISatisfied: true, CIStatus: policySatisfied,
-		ReviewSatisfied: true, ReviewStatus: policySatisfied, AllMerged: prs.count > 0 && prs.count == prs.merged}
+		ReviewSatisfied: true, ReviewStatus: policySatisfied, AllMerged: prs.count == prs.merged}
 	policy := workflow.Workflow.Delivery
 	if policy == nil || policy.PullRequests == nil {
 		result.MinimumMet = true
@@ -226,18 +247,23 @@ func (s *Store) EvaluateDeliveryPolicy(ctx context.Context, runID string) (Deliv
 	}
 	requirements := policy.PullRequests
 	result.MinimumMet = prs.count >= requirements.Minimum && (!requirements.Required || prs.count > 0)
-	rows, err := s.db.QueryContext(ctx, `SELECT id,current_head_sha FROM workflow_v2_delivery_prs
-		WHERE run_id=? AND active=1 ORDER BY repository,pr_number`, runID)
+	rows, err := s.db.QueryContext(ctx, `SELECT p.id,COALESCE(MAX(h.generation),0)
+		FROM workflow_v2_delivery_prs p LEFT JOIN workflow_v2_delivery_heads h ON h.pr_id=p.id
+		WHERE p.run_id=? AND p.active=1 GROUP BY p.id ORDER BY p.repository,p.pr_number`, runID)
 	if err != nil {
 		return DeliveryPolicyResult{}, err
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var prID, head string
-		if err := rows.Scan(&prID, &head); err != nil {
+		var prID string
+		var generation int
+		if err := rows.Scan(&prID, &generation); err != nil {
 			return DeliveryPolicyResult{}, err
 		}
-		evidence, err := loadCurrentEvidence(ctx, s.db, runID, prID, head)
+		if generation < 1 {
+			return DeliveryPolicyResult{}, fmt.Errorf("active delivery %s has no verified head generation", prID)
+		}
+		evidence, err := loadCurrentEvidence(ctx, s.db, runID, prID, generation)
 		if err != nil {
 			return DeliveryPolicyResult{}, err
 		}
@@ -271,10 +297,10 @@ func (s *Store) EvaluateDeliveryPolicy(ctx context.Context, runID string) (Deliv
 	return result, nil
 }
 
-func loadCurrentEvidence(ctx context.Context, db *sql.DB, runID, prID, head string) ([]storedEvidence, error) {
-	rows, err := db.QueryContext(ctx, `SELECT domain,connection,external_id,kind,status,payload_json
-		FROM workflow_v2_evidence WHERE run_id=? AND pr_id=? AND head_sha=? AND superseded_at=0
-		ORDER BY domain,connection,external_id,kind`, runID, prID, head)
+func loadCurrentEvidence(ctx context.Context, db *sql.DB, runID, prID string, generation int) ([]storedEvidence, error) {
+	rows, err := db.QueryContext(ctx, `SELECT domain,connection,external_id,kind,status,payload_json,observed_at
+		FROM workflow_v2_evidence WHERE run_id=? AND pr_id=? AND head_generation=? AND superseded_at=0
+		ORDER BY domain,connection,external_id,kind,observed_at`, runID, prID, generation)
 	if err != nil {
 		return nil, err
 	}
@@ -283,12 +309,14 @@ func loadCurrentEvidence(ctx context.Context, db *sql.DB, runID, prID, head stri
 	for rows.Next() {
 		var item storedEvidence
 		var payload string
-		if err := rows.Scan(&item.Domain, &item.Connection, &item.ExternalID, &item.Kind, &item.Status, &payload); err != nil {
+		var observedAt int64
+		if err := rows.Scan(&item.Domain, &item.Connection, &item.ExternalID, &item.Kind, &item.Status, &payload, &observedAt); err != nil {
 			return nil, err
 		}
 		if err := json.Unmarshal([]byte(payload), &item.Payload); err != nil {
 			return nil, err
 		}
+		item.ObservedAt = time.UnixMilli(observedAt).UTC()
 		result = append(result, item)
 	}
 	return result, rows.Err()
@@ -390,19 +418,23 @@ func evaluateEvidenceLeaf(leaf map[string]interface{}, domain string, evidence [
 			return "", fmt.Errorf("CI policy leaf checks must not be empty")
 		}
 		for _, check := range checks {
-			found := false
+			var latest *storedEvidence
 			for _, item := range evidence {
 				if item.Domain == "ci" && item.Kind == check && item.Payload["pipeline"] == pipeline {
-					if item.Status == "success" {
-						found = true
-						break
-					}
-					if isFailureEvidenceStatus(item.Status) {
-						return policyUnsatisfied, nil
+					candidate := item
+					if latest == nil || candidate.ObservedAt.After(latest.ObservedAt) ||
+						(candidate.ObservedAt.Equal(latest.ObservedAt) && candidate.ExternalID > latest.ExternalID) {
+						latest = &candidate
 					}
 				}
 			}
-			if !found {
+			if latest == nil {
+				return policyPending, nil
+			}
+			if isFailureEvidenceStatus(latest.Status) {
+				return policyUnsatisfied, nil
+			}
+			if latest.Status != "success" {
 				return policyPending, nil
 			}
 		}
@@ -422,17 +454,26 @@ func evaluateEvidenceLeaf(leaf map[string]interface{}, domain string, evidence [
 			minimum = parsed
 		}
 	}
-	seen := map[string]bool{}
-	changesRequested := false
+	latestByPrincipal := map[string]storedEvidence{}
 	for _, item := range evidence {
-		if item.Domain == "review" && item.Connection == connection && item.Kind == "approval" && item.Status == "approved" {
-			seen[item.ExternalID] = true
+		if item.Domain != "review" || item.Connection != connection || item.Kind != "approval" {
+			continue
 		}
-		if item.Domain == "review" && item.Connection == connection && isFailureEvidenceStatus(item.Status) {
-			changesRequested = true
+		current, ok := latestByPrincipal[item.ExternalID]
+		if !ok || item.ObservedAt.After(current.ObservedAt) ||
+			(item.ObservedAt.Equal(current.ObservedAt) && item.Status > current.Status) {
+			latestByPrincipal[item.ExternalID] = item
 		}
 	}
-	if len(seen) >= minimum && !changesRequested {
+	approvals := 0
+	changesRequested := false
+	for _, item := range latestByPrincipal {
+		if item.Status == "approved" {
+			approvals++
+		}
+		changesRequested = changesRequested || isFailureEvidenceStatus(item.Status)
+	}
+	if approvals >= minimum && !changesRequested {
 		return policySatisfied, nil
 	}
 	if changesRequested {

@@ -172,6 +172,11 @@ func TestEvidenceForOldHeadIsRejectedAndInvalidated(t *testing.T) {
 	attempt, pr := createPolicyDelivery(t, store, "run-stale-evidence", "head-1", "open")
 	recordPolicyEvidence(t, store, "run-stale-evidence", pr, "ci", "github-actions", "lint-run", "lint", "success",
 		map[string]interface{}{"pipeline": "github-pr"}, workflowv2.ProducerCI)
+	initial := recordPolicyEvidence(t, store, "run-stale-evidence", pr, "ci", "github-actions", "unit-run", "unit", "success",
+		map[string]interface{}{"pipeline": "github-pr"}, workflowv2.ProducerCI)
+	if !initial.CISatisfied {
+		t.Fatalf("initial head CI = %#v", initial)
+	}
 	prURL := pr.URL
 	now := time.Date(2026, 8, 8, 12, 5, 0, 0, time.UTC)
 	updated, err := store.SubmitDelivery(context.Background(), "run-stale-evidence", attempt.ID, typesv2.DeliveryManifest{
@@ -198,6 +203,96 @@ func TestEvidenceForOldHeadIsRejectedAndInvalidated(t *testing.T) {
 	}
 	if result.CISatisfied {
 		t.Fatalf("new head inherited old CI evidence: %#v; updated=%#v", result, updated)
+	}
+	returned, err := store.SubmitDelivery(context.Background(), "run-stale-evidence", attempt.ID, typesv2.DeliveryManifest{
+		PullRequests: []typesv2.PullRequestClaim{{URL: prURL}},
+	}, workflowv2.PullRequestVerifierFunc(func(context.Context, workflowv2.Run, *typesv2.Workspace,
+		typesv2.PullRequestClaim) (typesv2.VerifiedPullRequest, error) {
+		return typesv2.VerifiedPullRequest{URL: prURL, RepositoryName: "api", Repository: "org/api", Number: 10,
+			SourceBranch: "feature", BaseBranch: "main", HeadSHA: "head-1", State: "open", VerifiedAt: now.Add(time.Minute),
+			Provenance: typesv2.EvidenceProvenance{Producer: string(workflowv2.ProducerSourceControl), ObservedAt: now.Add(time.Minute)}}, nil
+	}))
+	if err != nil {
+		t.Fatalf("return to prior head: %v", err)
+	}
+	result, err = store.EvaluateDeliveryPolicy(context.Background(), "run-stale-evidence")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.CISatisfied {
+		t.Fatalf("returned head inherited evidence from its old generation: %#v; returned=%#v", result, returned)
+	}
+	var generations int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM workflow_v2_delivery_heads WHERE pr_id=?`, pr.ID).Scan(&generations); err != nil {
+		t.Fatal(err)
+	}
+	if generations != 3 {
+		t.Fatalf("head generations = %d, want 3", generations)
+	}
+}
+
+func TestCIPolicyUsesLatestCheckObservation(t *testing.T) {
+	db := openRuntimeDB(t)
+	store := workflowv2.NewStore(db)
+	_, pr := createPolicyDelivery(t, store, "run-latest-ci", "head-1", "open")
+	base := time.Date(2026, 8, 8, 12, 1, 0, 0, time.UTC)
+	record := func(externalID, kind, status string, observed time.Time) workflowv2.DeliveryPolicyResult {
+		result, err := store.RecordEvidence(context.Background(), workflowv2.EvidenceInput{
+			RunID: "run-latest-ci", PRID: pr.ID, HeadSHA: pr.HeadSHA, Domain: "ci", Connection: "github-actions",
+			ExternalID: externalID, Kind: kind, Status: status, Payload: map[string]interface{}{"pipeline": "github-pr"},
+			ObservedAt: observed, Provenance: typesv2.EvidenceProvenance{Producer: string(workflowv2.ProducerCI),
+				Connection: "github-actions", ObservedAt: observed},
+		}, workflowv2.ProducerCI)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return result
+	}
+	record("lint-old", "lint", "failure", base)
+	record("unit", "unit", "success", base)
+	latest := record("lint-new", "lint", "success", base.Add(time.Minute))
+	if !latest.CISatisfied || latest.CIStatus != "satisfied" {
+		t.Fatalf("newer successful rerun did not replace failure: %#v", latest)
+	}
+	regressed := record("lint-old", "lint", "failure", base.Add(-time.Minute))
+	if !regressed.CISatisfied || regressed.CIStatus != "satisfied" {
+		t.Fatalf("out-of-order evidence regressed policy: %#v", regressed)
+	}
+	failed := record("lint-newest", "lint", "failure", base.Add(2*time.Minute))
+	if failed.CISatisfied || failed.CIStatus != "unsatisfied" {
+		t.Fatalf("newest failure did not fail policy: %#v", failed)
+	}
+}
+
+func TestEvidenceIdentityIsScopedToPullRequest(t *testing.T) {
+	db := openRuntimeDB(t)
+	store := workflowv2.NewStore(db)
+	attempt := createDeliveryRun(t, store, "run-evidence-pr-scope")
+	apiURL := "https://github.example/org/api/pull/10"
+	webURL := "https://github.example/org/web/pull/20"
+	verified, err := store.SubmitDelivery(context.Background(), "run-evidence-pr-scope", attempt.ID,
+		typesv2.DeliveryManifest{PullRequests: []typesv2.PullRequestClaim{{URL: apiURL}, {URL: webURL}}},
+		deliveryVerifier(map[string]string{apiURL: "shared-head", webURL: "shared-head"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	observed := time.Date(2026, 8, 8, 12, 1, 0, 0, time.UTC)
+	for _, pr := range verified {
+		if _, err := store.RecordEvidence(context.Background(), workflowv2.EvidenceInput{
+			RunID: "run-evidence-pr-scope", PRID: pr.ID, HeadSHA: pr.HeadSHA, Domain: "ci", Connection: "github",
+			ExternalID: "same-provider-id", Kind: "unit", Status: "success",
+			Payload: map[string]interface{}{"pipeline": "shared"}, ObservedAt: observed,
+			Provenance: typesv2.EvidenceProvenance{Producer: string(workflowv2.ProducerCI), ObservedAt: observed},
+		}, workflowv2.ProducerCI); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM workflow_v2_evidence WHERE run_id='run-evidence-pr-scope'`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 2 {
+		t.Fatalf("cross-PR evidence rows = %d, want 2", count)
 	}
 }
 
