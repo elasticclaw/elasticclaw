@@ -123,6 +123,47 @@ func TestAgentControlIsTypedDeduplicatedAndAttemptBound(t *testing.T) {
 	}
 }
 
+func TestDuplicateHeartbeatDoesNotExtendTaskLiveness(t *testing.T) {
+	db := openRuntimeDB(t)
+	store := workflowv2.NewStore(db)
+	current := time.Date(2026, 8, 8, 12, 0, 0, 0, time.UTC)
+	store.SetClock(func() time.Time { return current })
+	createRuntimeRun(t, store, "run-heartbeat-replay")
+	attempt, err := store.StartAttempt(context.Background(), "run-heartbeat-replay", "claw-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO workflow_v2_agent_tasks(
+		id,run_id,effect_id,attempt_id,state,state_version,status,instructions,heartbeat_deadline,deadline,created_at,updated_at)
+		VALUES(?,?,?,?,?,?,'running',?,?,?,?,?)`, "task-heartbeat", "run-heartbeat-replay", "", attempt.ID, "building", 1,
+		"implement", current.Add(time.Minute).UnixMilli(), current.Add(time.Hour).UnixMilli(), current.UnixMilli(), current.UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+	envelope := typesv2.ControlEnvelope{ProtocolVersion: typesv2.ControlProtocolVersion, MessageID: "heartbeat-1",
+		Kind: typesv2.MessageAgentTaskHeartbeat, RunID: "run-heartbeat-replay", AttemptID: attempt.ID,
+		TaskID: "task-heartbeat", Payload: json.RawMessage(`{"task":{"heartbeat":true}}`)}
+	first, err := store.ApplyAgentControl(context.Background(), envelope)
+	if err != nil || first.Disposition != typesv2.DispositionAccepted {
+		t.Fatalf("first heartbeat = %#v, %v", first, err)
+	}
+	var firstDeadline int64
+	if err := db.QueryRow(`SELECT heartbeat_deadline FROM workflow_v2_agent_tasks WHERE id='task-heartbeat'`).Scan(&firstDeadline); err != nil {
+		t.Fatal(err)
+	}
+	current = current.Add(30 * time.Second)
+	duplicate, err := store.ApplyAgentControl(context.Background(), envelope)
+	if err != nil || duplicate.Disposition != typesv2.DispositionDuplicate {
+		t.Fatalf("duplicate heartbeat = %#v, %v", duplicate, err)
+	}
+	var replayedDeadline int64
+	if err := db.QueryRow(`SELECT heartbeat_deadline FROM workflow_v2_agent_tasks WHERE id='task-heartbeat'`).Scan(&replayedDeadline); err != nil {
+		t.Fatal(err)
+	}
+	if replayedDeadline != firstDeadline {
+		t.Fatalf("duplicate heartbeat extended deadline from %d to %d", firstDeadline, replayedDeadline)
+	}
+}
+
 func TestStartingNewAttemptInvalidatesOldControlIdentity(t *testing.T) {
 	db := openRuntimeDB(t)
 	store := workflowv2.NewStore(db)

@@ -163,3 +163,99 @@ func TestEmptyDeliveryManifestSupportsNoPRWorkflow(t *testing.T) {
 		t.Fatalf("delivery = %#v", inspection.Delivery)
 	}
 }
+
+func TestUnverifiedOpenPRSupersessionCannotRemoveDelivery(t *testing.T) {
+	db := openRuntimeDB(t)
+	store := workflowv2.NewStore(db)
+	attempt := createDeliveryRun(t, store, "run-supersede-open")
+	oldURL := "https://github.example/org/api/pull/10"
+	newURL := "https://github.example/org/api/pull/11"
+	if _, err := store.SubmitDelivery(context.Background(), "run-supersede-open", attempt.ID, typesv2.DeliveryManifest{
+		PullRequests: []typesv2.PullRequestClaim{{URL: oldURL}},
+	}, deliveryVerifier(map[string]string{oldURL: "old-head", newURL: "new-head"})); err != nil {
+		t.Fatal(err)
+	}
+	_, err := store.SubmitDelivery(context.Background(), "run-supersede-open", attempt.ID, typesv2.DeliveryManifest{
+		PullRequests: []typesv2.PullRequestClaim{{URL: newURL, Supersedes: oldURL}},
+	}, deliveryVerifier(map[string]string{oldURL: "old-head", newURL: "new-head"}))
+	if err == nil || !strings.Contains(err.Error(), "still open") {
+		t.Fatalf("supersession error = %v", err)
+	}
+	var active, total int
+	_ = db.QueryRow(`SELECT COALESCE(SUM(active),0),COUNT(*) FROM workflow_v2_delivery_prs WHERE run_id='run-supersede-open'`).Scan(&active, &total)
+	if active != 1 || total != 1 {
+		t.Fatalf("active/total deliveries = %d/%d", active, total)
+	}
+}
+
+func TestAttemptRevokedDuringVerificationCannotWriteDelivery(t *testing.T) {
+	db := openRuntimeDB(t)
+	store := workflowv2.NewStore(db)
+	attempt := createDeliveryRun(t, store, "run-revoked-delivery")
+	prURL := "https://github.example/org/api/pull/10"
+	verifier := workflowv2.PullRequestVerifierFunc(func(_ context.Context, _ workflowv2.Run, _ *typesv2.Workspace,
+		claim typesv2.PullRequestClaim) (typesv2.VerifiedPullRequest, error) {
+		if _, err := store.StartAttempt(context.Background(), "run-revoked-delivery", "replacement-claw"); err != nil {
+			t.Fatal(err)
+		}
+		now := time.Date(2026, 8, 8, 12, 0, 0, 0, time.UTC)
+		return typesv2.VerifiedPullRequest{URL: claim.URL, RepositoryName: "api", Repository: "org/api", Number: 10,
+			SourceBranch: "feature", BaseBranch: "main", HeadSHA: "head", State: "open", VerifiedAt: now,
+			Provenance: typesv2.EvidenceProvenance{Producer: string(workflowv2.ProducerSourceControl), ObservedAt: now}}, nil
+	})
+	_, err := store.SubmitDelivery(context.Background(), "run-revoked-delivery", attempt.ID,
+		typesv2.DeliveryManifest{PullRequests: []typesv2.PullRequestClaim{{URL: prURL}}}, verifier)
+	if err == nil || !strings.Contains(err.Error(), "superseded during verification") {
+		t.Fatalf("error = %v", err)
+	}
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM workflow_v2_delivery_prs WHERE run_id='run-revoked-delivery'`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("revoked attempt wrote %d deliveries", count)
+	}
+}
+
+func TestSourceControlConfirmedClosedPRCanBeSuperseded(t *testing.T) {
+	db := openRuntimeDB(t)
+	store := workflowv2.NewStore(db)
+	attempt := createDeliveryRun(t, store, "run-supersede-closed")
+	oldURL := "https://github.example/org/api/pull/10"
+	newURL := "https://github.example/org/api/pull/11"
+	states := map[string]string{oldURL: "open", newURL: "open"}
+	heads := map[string]string{oldURL: "old-head", newURL: "new-head"}
+	verifier := workflowv2.PullRequestVerifierFunc(func(_ context.Context, _ workflowv2.Run, _ *typesv2.Workspace,
+		claim typesv2.PullRequestClaim) (typesv2.VerifiedPullRequest, error) {
+		parts := strings.Split(strings.TrimPrefix(claim.URL, "https://github.example/org/api/pull/"), "/")
+		number := 0
+		_, _ = fmt.Sscanf(parts[0], "%d", &number)
+		now := time.Date(2026, 8, 8, 12, 0, 0, 0, time.UTC)
+		return typesv2.VerifiedPullRequest{URL: claim.URL, RepositoryName: "api", Repository: "org/api", Number: number,
+			SourceBranch: "feature", BaseBranch: "main", HeadSHA: heads[claim.URL], State: states[claim.URL], VerifiedAt: now,
+			Provenance: typesv2.EvidenceProvenance{Producer: string(workflowv2.ProducerSourceControl), ObservedAt: now}}, nil
+	})
+	if _, err := store.SubmitDelivery(context.Background(), "run-supersede-closed", attempt.ID,
+		typesv2.DeliveryManifest{PullRequests: []typesv2.PullRequestClaim{{URL: oldURL}}}, verifier); err != nil {
+		t.Fatal(err)
+	}
+	states[oldURL] = "closed"
+	if _, err := store.SubmitDelivery(context.Background(), "run-supersede-closed", attempt.ID,
+		typesv2.DeliveryManifest{PullRequests: []typesv2.PullRequestClaim{{URL: oldURL}}}, verifier); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.SubmitDelivery(context.Background(), "run-supersede-closed", attempt.ID,
+		typesv2.DeliveryManifest{PullRequests: []typesv2.PullRequestClaim{{URL: newURL, Supersedes: oldURL}}}, verifier); err != nil {
+		t.Fatal(err)
+	}
+	var oldActive, newActive int
+	if err := db.QueryRow(`SELECT active FROM workflow_v2_delivery_prs WHERE run_id='run-supersede-closed' AND url=?`, oldURL).Scan(&oldActive); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT active FROM workflow_v2_delivery_prs WHERE run_id='run-supersede-closed' AND url=?`, newURL).Scan(&newActive); err != nil {
+		t.Fatal(err)
+	}
+	if oldActive != 0 || newActive != 1 {
+		t.Fatalf("old/new active = %d/%d", oldActive, newActive)
+	}
+}

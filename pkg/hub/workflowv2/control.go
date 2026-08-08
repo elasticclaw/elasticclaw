@@ -235,7 +235,9 @@ func (s *Store) ApplyAgentControl(ctx context.Context, envelope typesv2.ControlE
 	if err != nil {
 		return typesv2.ControlReceipt{}, err
 	}
-	if (result.Disposition == typesv2.DispositionAccepted || result.Disposition == typesv2.DispositionDuplicate) && envelope.TaskID != "" {
+	updateTask := result.Disposition == typesv2.DispositionAccepted ||
+		(result.Disposition == typesv2.DispositionDuplicate && envelope.Kind != typesv2.MessageAgentTaskHeartbeat)
+	if updateTask && envelope.TaskID != "" {
 		if err := s.updateTaskFromControl(ctx, envelope); err != nil {
 			return typesv2.ControlReceipt{}, err
 		}
