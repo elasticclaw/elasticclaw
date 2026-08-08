@@ -335,6 +335,41 @@ func TestResolveGitHubTokenUsesWorkspaceAppsWhenHubHasNone(t *testing.T) {
 	}
 }
 
+// Same AppID on workspace (bad PEM) and hub (good PEM) must not drop the hub
+// entry via AppID dedupe — resolution should fall through to the hub key.
+func TestResolveGitHubTokenFallsThroughBadWorkspaceKeySameAppID(t *testing.T) {
+	var mints int64
+	oldTransport := http.DefaultTransport
+	http.DefaultTransport = githubAppAnyTokenTransport{base: oldTransport, mints: &mints}
+	t.Cleanup(func() { http.DefaultTransport = oldTransport })
+
+	tmp := t.TempDir()
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", tmp+"/hub.yaml")
+	wsDir := tmp + "/workspaces/adversaries/.elasticclaw-managed"
+	if err := os.MkdirAll(wsDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(tmp+"/workspaces/adversaries/elasticclaw-config.yaml", []byte("schema_version: v1\nname: adversaries\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	// Non-empty but unusable PEM (provider setup fails); hub has a valid key for AppID 1.
+	badYAML := "github_apps:\n  Broken:\n    app_id: 1\n    private_key_pem: |\n      -----BEGIN RSA PRIVATE KEY-----\n      not-a-real-key\n      -----END RSA PRIVATE KEY-----\n"
+	if err := os.WriteFile(wsDir+"/github_apps.yaml", []byte(badYAML), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	goodPEM := testGitHubAppPEM(t)
+	s, _ := NewTestServerWithConfig(t, &types.HubConfig{
+		GitHubApps: []*types.GitHubAppConfig{{AppID: 1, PrivateKeyPEM: goodPEM}},
+	}, "", "", "")
+	if got := s.tokenForRepo("owner/repo"); got != "tok" {
+		t.Fatalf("tokenForRepo with bad workspace + good hub same AppID = %q, want tok", got)
+	}
+	if got := atomic.LoadInt64(&mints); got != 1 {
+		t.Fatalf("mints=%d, want 1 (hub key after workspace setup failure)", got)
+	}
+}
+
 func TestPRWatcherIntervalScalesWithTrackedPRs(t *testing.T) {
 	if got := prWatcherInterval(0); got != prWatcherBaseInterval {
 		t.Fatalf("interval(0)=%s, want %s", got, prWatcherBaseInterval)

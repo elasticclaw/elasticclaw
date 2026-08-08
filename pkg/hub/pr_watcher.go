@@ -755,19 +755,16 @@ func (s *Server) firePRConditions(pr clawPR, stage pipeline.Stage, ctx pipelineC
 // resolution matches agent credential helpers.
 //
 // Order: workspace apps first (primary for factory deploys), then hub apps.
-// Duplicate AppIDs are skipped after the first occurrence.
+// Same AppID may appear more than once (e.g. workspace key unusable, hub key
+// valid). resolveGitHubTokenWithRepos tries each entry in order and skips
+// setup/mint failures, so we must not drop later credentials by AppID.
 func (s *Server) githubAppConfigsForTokens() []*types.GitHubAppConfig {
 	var apps []*types.GitHubAppConfig
-	seen := map[int64]bool{}
 	add := func(list []*types.GitHubAppConfig) {
 		for _, app := range list {
 			if app == nil || app.AppID == 0 || app.PrivateKeyPEM == "" {
 				continue
 			}
-			if seen[app.AppID] {
-				continue
-			}
-			seen[app.AppID] = true
 			apps = append(apps, app)
 		}
 	}
