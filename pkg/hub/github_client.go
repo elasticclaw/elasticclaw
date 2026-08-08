@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"log"
@@ -91,7 +92,15 @@ func (c *githubClient) get(url, token string) (*githubResponse, error) {
 	return c.doGet(url, token, true)
 }
 
+func (c *githubClient) getContext(ctx context.Context, url, token string) (*githubResponse, error) {
+	return c.doGetContext(ctx, url, token, true)
+}
+
 func (c *githubClient) doGet(url, token string, conditional bool) (*githubResponse, error) {
+	return c.doGetContext(context.Background(), url, token, conditional)
+}
+
+func (c *githubClient) doGetContext(ctx context.Context, url, token string, conditional bool) (*githubResponse, error) {
 	if until, blocked := c.blockedUntilTime(); blocked {
 		return nil, &githubAPIError{
 			StatusCode:  http.StatusForbidden,
@@ -101,7 +110,7 @@ func (c *githubClient) doGet(url, token string, conditional bool) (*githubRespon
 		}
 	}
 
-	req, err := http.NewRequest(http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -136,7 +145,7 @@ func (c *githubClient) doGet(url, token string, conditional bool) (*githubRespon
 		}
 		// The entry was evicted after the validator was sent; ask again unconditionally.
 		c.forget(url)
-		return c.doGet(url, token, false)
+		return c.doGetContext(ctx, url, token, false)
 	}
 	if resp.StatusCode == http.StatusOK {
 		c.store(url, resp.Header.Get("ETag"), body)
