@@ -54,3 +54,29 @@ func TestParseVersionFromOutput(t *testing.T) {
 		})
 	}
 }
+
+func TestSameReleaseVersion(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		a, b string
+		want bool
+	}{
+		{"0.1.0", "v0.1.0", true},
+		{"v0.1.0", "v0.1.0", true},
+		{"2026.8.8-beta.2", "2026.8.8-beta.2", true},
+		{"v2026.8.8-beta.2", "2026.8.8-beta.2", true},
+		{"0.1.0", "0.1.1", false},
+		{"unknown", "v0.1.0", false},
+		{"", "v0.1.0", false},
+		{"0.1.0", "unknown", false},
+	}
+	for _, tc := range cases {
+		name := tc.a + " vs " + tc.b
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			if got := sameReleaseVersion(tc.a, tc.b); got != tc.want {
+				t.Fatalf("sameReleaseVersion(%q, %q) = %v, want %v", tc.a, tc.b, got, tc.want)
+			}
+		})
+	}
+}

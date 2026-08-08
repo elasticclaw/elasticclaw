@@ -110,7 +110,10 @@ func runHubUpgrade(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("Remote: %s  →  Target: %s\n", remoteVer, targetVer)
 
-	if remoteVer == targetVer {
+	// Compare normalized tags so remote "0.1.0" matches GitHub target "v0.1.0"
+	// (and CalVer with/without accidental v). Download still uses targetVer as
+	// the exact release tag on GitHub.
+	if sameReleaseVersion(remoteVer, targetVer) {
 		fmt.Println("Already up to date.")
 		return nil
 	}
@@ -189,11 +192,34 @@ func inferSSHFromProfile(profileName string) (string, string) {
 	return fmt.Sprintf("ssh://root@%s", host), hubProfile.SSHKey
 }
 
+// normalizeReleaseVersion strips a single leading "v" so GitHub tags like
+// v0.1.0 and binary output like "0.1.0" compare equal.
+func normalizeReleaseVersion(v string) string {
+	v = strings.TrimSpace(v)
+	if v == "" || v == "unknown" {
+		return v
+	}
+	return strings.TrimPrefix(v, "v")
+}
+
+// sameReleaseVersion reports whether two version strings refer to the same
+// release tag, ignoring an optional leading "v".
+func sameReleaseVersion(a, b string) bool {
+	na, nb := normalizeReleaseVersion(a), normalizeReleaseVersion(b)
+	if na == "" || nb == "" || na == "unknown" || nb == "unknown" {
+		return false
+	}
+	return na == nb
+}
+
 // parseVersionFromOutput extracts the version tag from elasticclaw version output.
 // Accepts CalVer with or without a leading "v", e.g.:
 //
 //	elasticclaw 2026.8.8-beta.2 (commit: abc, built: ...)
 //	elasticclaw v0.1.0 (commit: abc, built: ...)
+//
+// The returned value is normalized (no leading "v") for display; comparisons
+// with GitHub tags should use sameReleaseVersion so "v0.1.0" still matches.
 func parseVersionFromOutput(s string) string {
 	for _, line := range strings.Split(s, "\n") {
 		line = strings.TrimSpace(line)
@@ -204,7 +230,7 @@ func parseVersionFromOutput(s string) string {
 		if strings.HasPrefix(line, "elasticclaw ") {
 			fields := strings.Fields(line)
 			if len(fields) >= 2 {
-				return strings.TrimPrefix(fields[1], "v")
+				return normalizeReleaseVersion(fields[1])
 			}
 		}
 		// JSON: {"version":"...","commit":"...","buildDate":"..."}
@@ -213,7 +239,7 @@ func parseVersionFromOutput(s string) string {
 			if i := strings.Index(line, key); i >= 0 {
 				rest := line[i+len(key):]
 				if j := strings.IndexByte(rest, '"'); j > 0 {
-					return strings.TrimPrefix(rest[:j], "v")
+					return normalizeReleaseVersion(rest[:j])
 				}
 			}
 		}
