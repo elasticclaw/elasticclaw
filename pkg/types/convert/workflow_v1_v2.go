@@ -139,6 +139,7 @@ func convertWorkflowV1ToV2(data []byte, opts Options) (Result, error) {
 	out := v2.Workflow{
 		SchemaVersion: 2,
 		Name:          name,
+		Enabled:       false, // conversion is always an inactive draft
 		InitialState:  initial,
 		States:        states,
 	}

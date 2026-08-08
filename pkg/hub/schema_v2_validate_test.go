@@ -45,6 +45,7 @@ ci:
 const testWorkflowV2YAML = `
 schema_version: 2
 name: delivery
+enabled: true
 initial_state: implementing
 states:
   implementing: {}
@@ -290,5 +291,29 @@ stages:
 	}})
 	if err != nil {
 		t.Fatalf("save v1 workflow: %v", err)
+	}
+}
+
+func TestV2WorkflowProjectionDefaultsMissingEnabledToFalse(t *testing.T) {
+	workflow, err := loadExternalWorkflowDocument("draft.yaml", []byte(`
+schema_version: 2
+name: draft
+initial_state: planning
+states:
+  planning:
+    phase: plan
+  done:
+    phase: done
+    terminal: true
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if workflow.Enabled == nil || *workflow.Enabled {
+		t.Fatalf("v2 enabled = %v, want explicit false", workflow.Enabled)
+	}
+	view := workflowToView("engineering", workflow)
+	if view.RuntimeAvailable || view.SchemaVersion != "2" {
+		t.Fatalf("v2 view = %#v, want schema 2 and unavailable runtime", view)
 	}
 }

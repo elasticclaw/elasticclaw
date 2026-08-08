@@ -11,6 +11,7 @@ type Workspace struct {
 	CI            *CIBlock               `yaml:"ci,omitempty" json:"ci,omitempty"`
 	IssueTrackers *ConnectionsOnlyBlock  `yaml:"issue_trackers,omitempty" json:"issue_trackers,omitempty"`
 	ReviewSystems *ConnectionsOnlyBlock  `yaml:"review_systems,omitempty" json:"review_systems,omitempty"`
+	Knowledge     *KnowledgeBlock        `yaml:"knowledge,omitempty" json:"knowledge,omitempty"`
 	Raw           map[string]interface{} `yaml:"-" json:"-"`
 }
 
@@ -56,6 +57,38 @@ type CIBlock struct {
 type ConnectionsOnlyBlock struct {
 	Connections map[string]Connection `yaml:"connections,omitempty" json:"connections,omitempty"`
 }
+
+// KnowledgeBlock declares the organizational and repository context that the
+// hub may assemble for a run. Workflows consume the resulting context bundle;
+// they do not choose repositories or credentials themselves.
+type KnowledgeBlock struct {
+	Connections map[string]Connection      `yaml:"connections,omitempty" json:"connections,omitempty"`
+	Sources     map[string]KnowledgeSource `yaml:"sources,omitempty" json:"sources,omitempty"`
+}
+
+// KnowledgeSource is one versionable input to run context assembly.
+// Repository names, when present, refer to the workspace repository map. An
+// empty repository list on repository_files means all dynamically relevant
+// workspace repositories, not an unrestricted checkout.
+type KnowledgeSource struct {
+	Type         string                 `yaml:"type" json:"type"`
+	Scope        string                 `yaml:"scope" json:"scope"`
+	Required     bool                   `yaml:"required,omitempty" json:"required,omitempty"`
+	Connection   string                 `yaml:"connection,omitempty" json:"connection,omitempty"`
+	Repositories []string               `yaml:"repositories,omitempty" json:"repositories,omitempty"`
+	Paths        []string               `yaml:"paths,omitempty" json:"paths,omitempty"`
+	Query        string                 `yaml:"query,omitempty" json:"query,omitempty"`
+	Parameters   map[string]interface{} `yaml:"parameters,omitempty" json:"parameters,omitempty"`
+}
+
+const (
+	KnowledgeTypeWorkspaceFiles  = "workspace_files"
+	KnowledgeTypeRepositoryFiles = "repository_files"
+	KnowledgeTypeRetrieval       = "retrieval"
+
+	KnowledgeScopeOrganization = "organization"
+	KnowledgeScopeRepository   = "repository"
+)
 
 // Connection is a named provider endpoint + auth + optional capability narrows.
 type Connection struct {
@@ -146,6 +179,15 @@ func (w *Workspace) HasReviewSystemConnection(name string) bool {
 		return false
 	}
 	_, ok := w.ReviewSystems.Connections[name]
+	return ok
+}
+
+// HasKnowledgeConnection reports whether a knowledge connection exists.
+func (w *Workspace) HasKnowledgeConnection(name string) bool {
+	if w == nil || w.Knowledge == nil || w.Knowledge.Connections == nil {
+		return false
+	}
+	_, ok := w.Knowledge.Connections[name]
 	return ok
 }
 

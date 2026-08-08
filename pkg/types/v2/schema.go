@@ -1,6 +1,7 @@
-// Package v2 implements workspace and workflow schema version 2 foundations
-// from RFC issue #544 (Phase 1): parse, structural validation, pair validation,
-// and immutable content revisions. V1 schemas remain in package types.
+// Package v2 defines the deterministic workspace, workflow, and typed control
+// contracts from RFC issue #544: strict parsing, validation, immutable content
+// revisions, dynamic delivery, context assembly, and protocol negotiation.
+// V1 schemas and transcript-driven execution remain isolated in package types.
 package v2
 
 import (

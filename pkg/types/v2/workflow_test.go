@@ -10,25 +10,33 @@ import (
 const validWorkflowYAML = `
 schema_version: 2
 name: pull-request-delivery
+enabled: true
 initial_state: implementing
 
 states:
   implementing:
     description: Work is in progress.
+    phase: build
   awaiting_ci:
     description: A verified pull request exists and CI is unresolved.
+    phase: pr
     invariant:
       pull_request:
         state: open
   fixing:
     description: Verified evidence indicates more work is required.
+    phase: build
   awaiting_review:
     description: CI policy is satisfied.
+    phase: review
   ready_to_merge:
     description: Ready.
+    phase: review
   completed:
+    phase: done
     terminal: true
   cancelled:
+    phase: done
     terminal: true
 
 transitions:
@@ -111,6 +119,14 @@ review:
             minimum: 1
       invalidate_on_new_head: true
 
+delivery:
+  pull_requests:
+    required: true
+    minimum: 1
+    ci_policy: merge_ready
+    review_policy: required_review
+    completion: all_merged
+
 events:
   ci.run.completed:
     clauses:
@@ -141,6 +157,128 @@ func TestParseAndValidateWorkflowValidRFCShape(t *testing.T) {
 	}
 	if resolved.Revision == "" {
 		t.Fatal("expected non-empty revision")
+	}
+	if resolved.Workflow.States["implementing"].Phase != v2.PhaseBuild {
+		t.Fatalf("phase = %q, want build", resolved.Workflow.States["implementing"].Phase)
+	}
+	if resolved.Workflow.Delivery.PullRequests.Minimum != 1 {
+		t.Fatalf("delivery minimum = %d, want 1", resolved.Workflow.Delivery.PullRequests.Minimum)
+	}
+}
+
+func TestWorkflowRejectsUnknownDisplayPhase(t *testing.T) {
+	yaml := `
+schema_version: 2
+name: invalid-phase
+initial_state: s
+states:
+  s:
+    phase: deploy
+  done:
+    terminal: true
+`
+	_, err := v2.ParseAndValidateWorkflow([]byte(yaml))
+	if err == nil || !strings.Contains(err.Error(), "unsupported") {
+		t.Fatalf("error = %v, want unsupported phase", err)
+	}
+}
+
+func TestWorkflowV2RejectsTranscriptControl(t *testing.T) {
+	for name, yaml := range map[string]string{
+		"event": `
+schema_version: 2
+name: transcript-event
+initial_state: s
+states:
+  s: {}
+  done: {terminal: true}
+transitions:
+  bad:
+    from: s
+    on: message.received
+    to: done
+`,
+		"fact": `
+schema_version: 2
+name: transcript-fact
+initial_state: s
+states:
+  s: {}
+  done: {terminal: true}
+transitions:
+  bad:
+    from: s
+    on: custom.signal
+    when:
+      conversation:
+        text:
+          equals: "[DONE]"
+    to: done
+`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := v2.ParseAndValidateWorkflow([]byte(yaml))
+			if err == nil || !strings.Contains(err.Error(), "conversation/transcript") {
+				t.Fatalf("error = %v, want conversation/transcript rejection", err)
+			}
+		})
+	}
+}
+
+func TestWorkflowV2AllowsMarkersAsInertDescription(t *testing.T) {
+	yaml := `
+schema_version: 2
+name: inert-prose
+initial_state: s
+states:
+  s:
+    description: The agent may literally explain [DONE] here without changing state.
+  done: {terminal: true}
+`
+	if _, err := v2.ParseAndValidateWorkflow([]byte(yaml)); err != nil {
+		t.Fatalf("inert prose should remain valid: %v", err)
+	}
+}
+
+func TestWorkflowDeliveryCannotDeclareRepositories(t *testing.T) {
+	yaml := `
+schema_version: 2
+name: fixed-repositories
+initial_state: s
+states:
+  s: {}
+  done:
+    terminal: true
+delivery:
+  pull_requests:
+    required: true
+    minimum: 1
+    repositories: [primary]
+`
+	_, err := v2.ParseAndValidateWorkflow([]byte(yaml))
+	if err == nil || !strings.Contains(err.Error(), "field repositories not found") {
+		t.Fatalf("error = %v, want strict unknown delivery repository field", err)
+	}
+}
+
+func TestWorkflowRejectsUnknownDeliveryPolicy(t *testing.T) {
+	yaml := `
+schema_version: 2
+name: bad-delivery-policy
+initial_state: s
+states:
+  s: {}
+  done:
+    terminal: true
+delivery:
+  pull_requests:
+    required: true
+    minimum: 1
+    ci_policy: missing
+`
+	_, err := v2.ParseAndValidateWorkflow([]byte(yaml))
+	if err == nil || !strings.Contains(err.Error(), "no ci policies") {
+		t.Fatalf("error = %v, want no ci policies", err)
 	}
 }
 

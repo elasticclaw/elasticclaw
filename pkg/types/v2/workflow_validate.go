@@ -1,6 +1,7 @@
 package v2
 
 import (
+	"bytes"
 	"fmt"
 	"strings"
 
@@ -26,12 +27,14 @@ var writableNamespaces = []string{
 var knownWorkflowKeys = map[string]bool{
 	"schema_version": true,
 	"name":           true,
+	"enabled":        true,
 	"initial_state":  true,
 	"states":         true,
 	"transitions":    true,
 	"commands":       true,
 	"ci":             true,
 	"review":         true,
+	"delivery":       true,
 	"events":         true,
 }
 
@@ -56,7 +59,9 @@ func ParseWorkflow(data []byte) (*Workflow, error) {
 	}
 
 	var wf Workflow
-	if err := yaml.Unmarshal(data, &wf); err != nil {
+	decoder := yaml.NewDecoder(bytes.NewReader(data))
+	decoder.KnownFields(true)
+	if err := decoder.Decode(&wf); err != nil {
 		return nil, fmt.Errorf("parse workflow: %w", err)
 	}
 	wf.Raw = raw
@@ -97,6 +102,12 @@ func ValidateWorkflow(wf *Workflow) (*ResolvedWorkflow, error) {
 				return nil, fmt.Errorf("workflow %q: %w", wf.Name, err)
 			}
 		}
+		if st.Phase != "" && !IsDisplayPhase(st.Phase) {
+			return nil, fmt.Errorf("workflow %q: states.%s.phase %q is unsupported", wf.Name, name, st.Phase)
+		}
+		if err := validateNoTranscriptFacts(fmt.Sprintf("states.%s.invariant", name), st.Invariant); err != nil {
+			return nil, fmt.Errorf("workflow %q: %w", wf.Name, err)
+		}
 	}
 
 	// Transitions form legal graph edges.
@@ -122,6 +133,12 @@ func ValidateWorkflow(wf *Workflow) (*ResolvedWorkflow, error) {
 		}
 		if _, ok := wf.States[tr.To]; !ok {
 			return nil, fmt.Errorf("workflow %q: transitions.%s.to %q: unknown state", wf.Name, name, tr.To)
+		}
+		if isTranscriptEvent(tr.On) {
+			return nil, fmt.Errorf("workflow %q: transitions.%s.on %q: conversation/transcript events cannot control workflow v2", wf.Name, name, tr.On)
+		}
+		if err := validateNoTranscriptFacts(fmt.Sprintf("transitions.%s.when", name), tr.When); err != nil {
+			return nil, fmt.Errorf("workflow %q: %w", wf.Name, err)
 		}
 		if err := ValidatePredicateTree(fmt.Sprintf("transitions.%s.when", name), tr.When); err != nil {
 			return nil, fmt.Errorf("workflow %q: %w", wf.Name, err)
@@ -169,9 +186,12 @@ func ValidateWorkflow(wf *Workflow) (*ResolvedWorkflow, error) {
 
 	// Event clauses.
 	for eventName, def := range wf.Events {
+		if isTranscriptEvent(eventName) {
+			return nil, fmt.Errorf("workflow %q: event %q: conversation/transcript events cannot control workflow v2", wf.Name, eventName)
+		}
 		for i, clause := range def.Clauses {
 			path := fmt.Sprintf("events.%s.clauses[%d]", eventName, i)
-			// Conservative: require from (open design question in RFC).
+			// Require state scope so event handling remains deterministic.
 			fromStates, err := FromStates(clause.From)
 			if err != nil {
 				return nil, fmt.Errorf("workflow %q: %s.from: %w (from is required)", wf.Name, path, err)
@@ -182,6 +202,9 @@ func ValidateWorkflow(wf *Workflow) (*ResolvedWorkflow, error) {
 				}
 			}
 			if err := ValidatePredicateTree(path+".when", clause.When); err != nil {
+				return nil, fmt.Errorf("workflow %q: %w", wf.Name, err)
+			}
+			if err := validateNoTranscriptFacts(path+".when", clause.When); err != nil {
 				return nil, fmt.Errorf("workflow %q: %w", wf.Name, err)
 			}
 			if err := validateFactWrites(path, clause.Assert, clause.Set); err != nil {
@@ -211,12 +234,97 @@ func ValidateWorkflow(wf *Workflow) (*ResolvedWorkflow, error) {
 			}
 		}
 	}
+	if err := validateDelivery(wf); err != nil {
+		return nil, fmt.Errorf("workflow %q: %w", wf.Name, err)
+	}
 
 	rev, err := RevisionOf(wf)
 	if err != nil {
 		return nil, err
 	}
 	return &ResolvedWorkflow{Workflow: wf, Revision: rev}, nil
+}
+
+func isTranscriptEvent(event string) bool {
+	event = strings.ToLower(strings.TrimSpace(event))
+	for _, prefix := range []string{"message.", "conversation.", "transcript.", "chat.", "agent.message", "claw.message"} {
+		if strings.HasPrefix(event, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func validateNoTranscriptFacts(path string, node interface{}) error {
+	return walkNoTranscriptFacts(path, "", node)
+}
+
+func walkNoTranscriptFacts(path, prefix string, node interface{}) error {
+	switch value := node.(type) {
+	case map[string]interface{}:
+		for key, child := range value {
+			fact := key
+			if prefix != "" {
+				fact = prefix + "." + key
+			}
+			if isTranscriptFact(key) || isTranscriptFact(fact) {
+				return fmt.Errorf("%s: conversation/transcript fact %q cannot control workflow v2", path, fact)
+			}
+			if err := walkNoTranscriptFacts(path, fact, child); err != nil {
+				return err
+			}
+		}
+	case []interface{}:
+		for _, child := range value {
+			if err := walkNoTranscriptFacts(path, prefix, child); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func isTranscriptFact(fact string) bool {
+	fact = strings.ToLower(strings.TrimSpace(fact))
+	for _, prefix := range []string{"message", "conversation", "transcript", "chat", "agent.message", "claw.message"} {
+		if fact == prefix || strings.HasPrefix(fact, prefix+".") {
+			return true
+		}
+	}
+	return false
+}
+
+func validateDelivery(wf *Workflow) error {
+	if wf.Delivery == nil || wf.Delivery.PullRequests == nil {
+		return nil
+	}
+	pr := wf.Delivery.PullRequests
+	if pr.Minimum < 0 {
+		return fmt.Errorf("delivery.pull_requests.minimum cannot be negative")
+	}
+	if pr.Required && pr.Minimum == 0 {
+		return fmt.Errorf("delivery.pull_requests.minimum must be at least 1 when required")
+	}
+	if pr.Completion != "" && pr.Completion != DeliveryCompletionAllMerged {
+		return fmt.Errorf("delivery.pull_requests.completion %q is unsupported", pr.Completion)
+	}
+	if pr.CIPolicy != "" {
+		if wf.CI == nil {
+			return fmt.Errorf("delivery.pull_requests.ci_policy %q: workflow has no ci policies", pr.CIPolicy)
+		}
+		if _, ok := wf.CI.Policies[pr.CIPolicy]; !ok {
+			return fmt.Errorf("delivery.pull_requests.ci_policy %q: unknown ci policy", pr.CIPolicy)
+		}
+	}
+	if pr.ReviewPolicy != "" {
+		if wf.Review == nil {
+			return fmt.Errorf("delivery.pull_requests.review_policy %q: workflow has no review policies", pr.ReviewPolicy)
+		}
+		if _, ok := wf.Review.Policies[pr.ReviewPolicy]; !ok {
+			return fmt.Errorf("delivery.pull_requests.review_policy %q: unknown review policy", pr.ReviewPolicy)
+		}
+	}
+	return nil
 }
 
 // ValidateWorkflowAgainstWorkspace pair-validates a workflow against a resolved workspace.

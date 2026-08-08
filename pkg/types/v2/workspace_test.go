@@ -95,6 +95,29 @@ review_systems:
     greptile:
       provider: greptile
       source_control: github-production
+
+knowledge:
+  connections:
+    handbook-search:
+      provider: rag
+      base_url: https://knowledge.example.com
+      credentials: linear_api_key
+  sources:
+    engineering-principles:
+      type: workspace_files
+      scope: organization
+      required: true
+      paths: [ENGINEERING.md, PRODUCT.md]
+    repository-instructions:
+      type: repository_files
+      scope: repository
+      required: true
+      paths: [AGENTS.md]
+    architecture-search:
+      type: retrieval
+      scope: organization
+      connection: handbook-search
+      query: architecture decisions relevant to the task
 `
 
 func TestParseAndValidateWorkspaceValidRFCShape(t *testing.T) {
@@ -118,6 +141,48 @@ func TestParseAndValidateWorkspaceValidRFCShape(t *testing.T) {
 	}
 	if !resolved.Workspace.HasCIPipeline("github-pr") {
 		t.Fatal("expected github-pr pipeline")
+	}
+	if !resolved.Workspace.HasKnowledgeConnection("handbook-search") {
+		t.Fatal("expected handbook-search knowledge connection")
+	}
+}
+
+func TestWorkspaceKnowledgeCannotEscapeRepositoryAuthority(t *testing.T) {
+	yaml := `
+schema_version: 2
+name: x
+repositories:
+  primary:
+    provider: github
+    repository: org/repo
+knowledge:
+  sources:
+    instructions:
+      type: repository_files
+      scope: repository
+      repositories: [not-allowed]
+      paths: [AGENTS.md]
+`
+	_, err := v2.ParseAndValidateWorkspace([]byte(yaml))
+	if err == nil || !strings.Contains(err.Error(), "unknown repository") {
+		t.Fatalf("error = %v, want unknown repository", err)
+	}
+}
+
+func TestWorkspaceKnowledgeRejectsUnsafePath(t *testing.T) {
+	yaml := `
+schema_version: 2
+name: x
+knowledge:
+  sources:
+    principles:
+      type: workspace_files
+      scope: organization
+      paths: [../secret]
+`
+	_, err := v2.ParseAndValidateWorkspace([]byte(yaml))
+	if err == nil || !strings.Contains(err.Error(), "relative path") {
+		t.Fatalf("error = %v, want relative path", err)
 	}
 }
 

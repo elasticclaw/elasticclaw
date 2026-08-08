@@ -9,12 +9,14 @@ import (
 type Workflow struct {
 	SchemaVersion interface{}                `yaml:"schema_version" json:"schema_version"`
 	Name          string                     `yaml:"name" json:"name"`
+	Enabled       bool                       `yaml:"enabled" json:"enabled"`
 	InitialState  string                     `yaml:"initial_state" json:"initial_state"`
 	States        map[string]State           `yaml:"states" json:"states"`
 	Transitions   map[string]Transition      `yaml:"transitions,omitempty" json:"transitions,omitempty"`
 	Commands      map[string]Command         `yaml:"commands,omitempty" json:"commands,omitempty"`
 	CI            *WorkflowCI                `yaml:"ci,omitempty" json:"ci,omitempty"`
 	Review        *WorkflowReview            `yaml:"review,omitempty" json:"review,omitempty"`
+	Delivery      *WorkflowDelivery          `yaml:"delivery,omitempty" json:"delivery,omitempty"`
 	Events        map[string]EventDefinition `yaml:"events,omitempty" json:"events,omitempty"`
 	Raw           map[string]interface{}     `yaml:"-" json:"-"`
 }
@@ -22,9 +24,35 @@ type Workflow struct {
 // State is an explicit workflow state.
 type State struct {
 	Description string                 `yaml:"description,omitempty" json:"description,omitempty"`
+	Phase       DisplayPhase           `yaml:"phase,omitempty" json:"phase,omitempty"`
 	Terminal    bool                   `yaml:"terminal,omitempty" json:"terminal,omitempty"`
 	Invariant   map[string]interface{} `yaml:"invariant,omitempty" json:"invariant,omitempty"`
 	OnEnter     *StateActions          `yaml:"on_enter,omitempty" json:"on_enter,omitempty"`
+}
+
+// DisplayPhase is the stable product-level lifecycle shown to operators. The
+// authored state graph may be arbitrarily detailed and may loop between phases.
+type DisplayPhase string
+
+const (
+	PhaseSetup   DisplayPhase = "setup"
+	PhaseContext DisplayPhase = "context"
+	PhasePlan    DisplayPhase = "plan"
+	PhaseBuild   DisplayPhase = "build"
+	PhaseTest    DisplayPhase = "test"
+	PhasePR      DisplayPhase = "pr"
+	PhaseReview  DisplayPhase = "review"
+	PhaseDone    DisplayPhase = "done"
+)
+
+// IsDisplayPhase reports whether phase belongs to the stable product lifecycle.
+func IsDisplayPhase(phase DisplayPhase) bool {
+	switch phase {
+	case PhaseSetup, PhaseContext, PhasePlan, PhaseBuild, PhaseTest, PhasePR, PhaseReview, PhaseDone:
+		return true
+	default:
+		return false
+	}
 }
 
 // StateActions are effects/asserts run on state entry.
@@ -61,6 +89,25 @@ type WorkflowCI struct {
 type WorkflowReview struct {
 	Policies map[string]Policy `yaml:"policies,omitempty" json:"policies,omitempty"`
 }
+
+// WorkflowDelivery declares aggregate constraints over the run-owned,
+// dynamically submitted delivery collection. It intentionally contains no
+// repository list; repository authority comes exclusively from the workspace.
+type WorkflowDelivery struct {
+	PullRequests *PullRequestDelivery `yaml:"pull_requests,omitempty" json:"pull_requests,omitempty"`
+}
+
+// PullRequestDelivery applies named CI/review policies to every active,
+// hub-verified PR and defines when that aggregate can complete.
+type PullRequestDelivery struct {
+	Required     bool   `yaml:"required,omitempty" json:"required,omitempty"`
+	Minimum      int    `yaml:"minimum,omitempty" json:"minimum,omitempty"`
+	CIPolicy     string `yaml:"ci_policy,omitempty" json:"ci_policy,omitempty"`
+	ReviewPolicy string `yaml:"review_policy,omitempty" json:"review_policy,omitempty"`
+	Completion   string `yaml:"completion,omitempty" json:"completion,omitempty"`
+}
+
+const DeliveryCompletionAllMerged = "all_merged"
 
 // Policy is a composable all/any/not policy tree. Leaf nodes reference
 // pipeline/connection names; structure is intentionally loose at parse time

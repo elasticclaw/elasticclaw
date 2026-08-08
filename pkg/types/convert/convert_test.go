@@ -124,6 +124,9 @@ func TestConvertWorkflowV1ToV2(t *testing.T) {
 	if !resolved.Workflow.States["merged"].Terminal {
 		t.Fatal("merged should be terminal")
 	}
+	if resolved.Workflow.Enabled || !strings.Contains(string(res.Output), "enabled: false") {
+		t.Fatalf("converted workflow must be an explicitly inactive draft:\n%s", res.Output)
+	}
 
 	// Deterministic PR edges present; message_contains not turned into trusted transitions.
 	hasMerged := false

@@ -1,7 +1,9 @@
 package v2
 
 import (
+	"bytes"
 	"fmt"
+	pathpkg "path"
 	"regexp"
 	"strings"
 
@@ -22,6 +24,7 @@ var knownWorkspaceKeys = map[string]bool{
 	"ci":             true,
 	"issue_trackers": true,
 	"review_systems": true,
+	"knowledge":      true,
 }
 
 // ParseWorkspace unmarshals workspace v2 YAML. It does not validate.
@@ -45,7 +48,9 @@ func ParseWorkspace(data []byte) (*Workspace, error) {
 	}
 
 	var ws Workspace
-	if err := yaml.Unmarshal(data, &ws); err != nil {
+	decoder := yaml.NewDecoder(bytes.NewReader(data))
+	decoder.KnownFields(true)
+	if err := decoder.Decode(&ws); err != nil {
 		return nil, fmt.Errorf("parse workspace: %w", err)
 	}
 	ws.Raw = raw
@@ -175,6 +180,21 @@ func ValidateWorkspace(ws *Workspace) (*ResolvedWorkspace, error) {
 		}
 	}
 
+	// Knowledge connections and sources. Sources are workspace-owned so a
+	// workflow can never expand repository or credential authority.
+	if ws.Knowledge != nil {
+		for name, conn := range ws.Knowledge.Connections {
+			if err := validateConnection("knowledge.connections", name, conn, ws); err != nil {
+				return nil, err
+			}
+		}
+		for name, source := range ws.Knowledge.Sources {
+			if err := validateKnowledgeSource(name, source, ws); err != nil {
+				return nil, err
+			}
+		}
+	}
+
 	resolvedSC := map[string]map[ConnectionCapability]bool{}
 	if ws.SourceControl != nil {
 		for name, conn := range ws.SourceControl.Connections {
@@ -197,6 +217,66 @@ func ValidateWorkspace(ws *Workspace) (*ResolvedWorkspace, error) {
 		ResolvedIssueTrackers: resolvedIT,
 		ResolvedReviewSystems: resolvedRS,
 	}, nil
+}
+
+func validateKnowledgeSource(name string, source KnowledgeSource, ws *Workspace) error {
+	if err := validateResourceName("knowledge.sources", name); err != nil {
+		return err
+	}
+	path := "knowledge.sources." + name
+	kind := strings.TrimSpace(source.Type)
+	switch kind {
+	case KnowledgeTypeWorkspaceFiles, KnowledgeTypeRepositoryFiles, KnowledgeTypeRetrieval:
+	case "":
+		return fmt.Errorf("%s.type is required", path)
+	default:
+		return fmt.Errorf("%s.type %q is unsupported", path, kind)
+	}
+	scope := strings.TrimSpace(source.Scope)
+	if scope != KnowledgeScopeOrganization && scope != KnowledgeScopeRepository {
+		return fmt.Errorf("%s.scope %q must be %q or %q", path, scope, KnowledgeScopeOrganization, KnowledgeScopeRepository)
+	}
+
+	if kind == KnowledgeTypeRetrieval {
+		if strings.TrimSpace(source.Connection) == "" {
+			return fmt.Errorf("%s.connection is required for retrieval", path)
+		}
+		if !ws.HasKnowledgeConnection(source.Connection) {
+			return fmt.Errorf("%s.connection %q: unknown knowledge connection", path, source.Connection)
+		}
+	} else if strings.TrimSpace(source.Connection) != "" {
+		return fmt.Errorf("%s.connection is only valid for retrieval", path)
+	}
+
+	if kind == KnowledgeTypeWorkspaceFiles || kind == KnowledgeTypeRepositoryFiles {
+		if len(source.Paths) == 0 {
+			return fmt.Errorf("%s.paths is required for %s", path, kind)
+		}
+		for i, p := range source.Paths {
+			p = strings.TrimSpace(p)
+			if p == "" || strings.HasPrefix(p, "/") || pathpkg.Clean(p) != p || hasParentPathSegment(p) {
+				return fmt.Errorf("%s.paths[%d] %q must be a non-empty relative path without '..'", path, i, p)
+			}
+		}
+	}
+	if kind != KnowledgeTypeRepositoryFiles && len(source.Repositories) > 0 {
+		return fmt.Errorf("%s.repositories is only valid for repository_files", path)
+	}
+	for i, repo := range source.Repositories {
+		if !ws.HasRepository(repo) {
+			return fmt.Errorf("%s.repositories[%d] %q: unknown repository", path, i, repo)
+		}
+	}
+	return nil
+}
+
+func hasParentPathSegment(value string) bool {
+	for _, segment := range strings.Split(value, "/") {
+		if segment == ".." {
+			return true
+		}
+	}
+	return false
 }
 
 // ParseAndValidateWorkspace is the shipped entry point for workspace v2 YAML.
