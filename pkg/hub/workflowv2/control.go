@@ -35,8 +35,9 @@ func (s *Store) StartAttempt(ctx context.Context, runID, clawID string) (Attempt
 		return Attempt{}, err
 	}
 	defer tx.Rollback()
-	var status string
-	if err := tx.QueryRowContext(ctx, `SELECT status FROM workflow_v2_runs WHERE id=?`, runID).Scan(&status); err != nil {
+	var status, currentTaskID string
+	if err := tx.QueryRowContext(ctx, `SELECT status,current_task_id FROM workflow_v2_runs WHERE id=?`, runID).Scan(
+		&status, &currentTaskID); err != nil {
 		return Attempt{}, err
 	}
 	if status != string(RunActive) && status != string(RunSuspended) {
@@ -55,8 +56,67 @@ func (s *Store) StartAttempt(ctx context.Context, runID, clawID string) (Attempt
 		VALUES(?,?,?,?,?,?,?)`, attempt.ID, runID, clawID, number, attempt.Status, now.UnixMilli(), now.UnixMilli()); err != nil {
 		return Attempt{}, err
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE workflow_v2_runs SET current_attempt_id=?,updated_at=? WHERE id=?`,
-		attempt.ID, now.UnixMilli(), runID); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE workflow_v2_control_outbox SET status='cancelled',updated_at=?
+		WHERE run_id=? AND status IN ('pending','sent')`, now.UnixMilli(), runID); err != nil {
+		return Attempt{}, err
+	}
+	replacementTaskID := ""
+	if currentTaskID != "" {
+		var oldTask typesv2.AgentTask
+		var oldEffectID, oldStatus, allowedJSON, artifactsJSON string
+		var deadline int64
+		err := tx.QueryRowContext(ctx, `SELECT id,effect_id,attempt_id,state,state_version,status,instructions,
+			allowed_actions,required_artifacts,deadline FROM workflow_v2_agent_tasks WHERE id=? AND run_id=?`,
+			currentTaskID, runID).Scan(&oldTask.ID, &oldEffectID, &oldTask.AttemptID, &oldTask.State,
+			&oldTask.StateVersion, &oldStatus, &oldTask.Instructions, &allowedJSON, &artifactsJSON, &deadline)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return Attempt{}, err
+		}
+		if err == nil && (oldStatus == string(typesv2.AgentTaskAssigned) || oldStatus == string(typesv2.AgentTaskRunning)) {
+			if _, err := tx.ExecContext(ctx, `UPDATE workflow_v2_agent_tasks SET status='cancelled',terminal_reason=?,
+				updated_at=?,finished_at=? WHERE id=? AND run_id=? AND status IN ('assigned','running')`,
+				"superseded by a new attempt", now.UnixMilli(), now.UnixMilli(), currentTaskID, runID); err != nil {
+				return Attempt{}, err
+			}
+			_ = json.Unmarshal([]byte(allowedJSON), &oldTask.AllowedActions)
+			_ = json.Unmarshal([]byte(artifactsJSON), &oldTask.RequiredArtifacts)
+			oldTask.ID = uuid.NewString()
+			oldTask.AttemptID = attempt.ID
+			oldTask.Status = typesv2.AgentTaskAssigned
+			oldTask.HeartbeatDeadline = now.Add(2 * time.Minute)
+			oldTask.Deadline = time.UnixMilli(deadline).UTC()
+			if _, err := tx.ExecContext(ctx, `INSERT INTO workflow_v2_agent_tasks(
+				id,run_id,effect_id,attempt_id,state,state_version,status,instructions,allowed_actions,required_artifacts,
+				heartbeat_deadline,deadline,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+				oldTask.ID, runID, oldEffectID, attempt.ID, oldTask.State, oldTask.StateVersion, string(oldTask.Status),
+				oldTask.Instructions, allowedJSON, artifactsJSON, oldTask.HeartbeatDeadline.UnixMilli(), deadline,
+				now.UnixMilli(), now.UnixMilli()); err != nil {
+				return Attempt{}, err
+			}
+			taskJSON, err := json.Marshal(oldTask)
+			if err != nil {
+				return Attempt{}, err
+			}
+			envelope := typesv2.ControlEnvelope{
+				ProtocolVersion: typesv2.ControlProtocolVersion, MessageID: uuid.NewString(), Kind: typesv2.MessageAgentTaskAssign,
+				RunID: runID, AttemptID: attempt.ID, TaskID: oldTask.ID, ExpectedStateVersion: &oldTask.StateVersion,
+				CausationID: currentTaskID, SentAt: now, Payload: taskJSON,
+			}
+			envelopeJSON, err := json.Marshal(envelope)
+			if err != nil {
+				return Attempt{}, err
+			}
+			if _, err := tx.ExecContext(ctx, `INSERT INTO workflow_v2_control_outbox(
+				message_id,run_id,attempt_id,task_id,kind,envelope_json,status,next_attempt_at,created_at,updated_at)
+				VALUES(?,?,?,?,?,?,'pending',0,?,?)`, envelope.MessageID, runID, attempt.ID, oldTask.ID,
+				string(envelope.Kind), string(envelopeJSON), now.UnixMilli(), now.UnixMilli()); err != nil {
+				return Attempt{}, err
+			}
+			replacementTaskID = oldTask.ID
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE workflow_v2_runs SET current_attempt_id=?,current_task_id=?,updated_at=? WHERE id=?`,
+		attempt.ID, replacementTaskID, now.UnixMilli(), runID); err != nil {
 		return Attempt{}, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -80,6 +140,14 @@ func (s *Store) Snapshot(ctx context.Context, runID, attemptID string) (typesv2.
 	run, err := s.GetRun(ctx, runID)
 	if err != nil {
 		return typesv2.WorkflowSnapshot{}, err
+	}
+	if attemptID == "" || attemptID != run.CurrentAttemptID {
+		return typesv2.WorkflowSnapshot{}, fmt.Errorf("workflow snapshot attempt is no longer active")
+	}
+	var active int
+	if err := s.db.QueryRowContext(ctx, `SELECT 1 FROM workflow_v2_attempts WHERE id=? AND run_id=? AND status='active'`,
+		attemptID, runID).Scan(&active); err != nil {
+		return typesv2.WorkflowSnapshot{}, fmt.Errorf("workflow snapshot attempt is no longer active")
 	}
 	snapshot := typesv2.WorkflowSnapshot{RunID: run.ID, AttemptID: attemptID, State: run.State,
 		DisplayPhase: run.DisplayPhase, StateVersion: run.StateVersion}
@@ -185,9 +253,11 @@ func (s *Store) ReadyControl(ctx context.Context, runID, attemptID string, limit
 		limit = 100
 	}
 	now := s.now().UTC().UnixMilli()
-	rows, err := s.db.QueryContext(ctx, `SELECT envelope_json FROM workflow_v2_control_outbox
-		WHERE run_id=? AND attempt_id=? AND status IN ('pending','sent') AND next_attempt_at<=?
-		ORDER BY created_at,message_id LIMIT ?`, runID, attemptID, now, limit)
+	rows, err := s.db.QueryContext(ctx, `SELECT o.envelope_json FROM workflow_v2_control_outbox o
+		JOIN workflow_v2_runs r ON r.id=o.run_id JOIN workflow_v2_attempts a ON a.id=o.attempt_id
+		WHERE o.run_id=? AND o.attempt_id=? AND r.current_attempt_id=o.attempt_id AND a.status='active'
+		AND o.status IN ('pending','sent') AND o.next_attempt_at<=?
+		ORDER BY o.created_at,o.message_id LIMIT ?`, runID, attemptID, now, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -350,6 +420,13 @@ func updateBoundTask(ctx context.Context, tx *sql.Tx, runID string, input EventI
 	}
 	if changed != 1 {
 		return fmt.Errorf("active task not found")
+	}
+	if typesv2.ControlMessageKind(input.Kind) == typesv2.MessageAgentTaskCompleted ||
+		typesv2.ControlMessageKind(input.Kind) == typesv2.MessageAgentTaskFailed {
+		if _, err := tx.ExecContext(ctx, `UPDATE workflow_v2_runs SET current_task_id='',updated_at=?
+			WHERE id=? AND current_task_id=? AND current_attempt_id=?`, now.UnixMilli(), runID, input.TaskID, input.AttemptID); err != nil {
+			return err
+		}
 	}
 	return nil
 }

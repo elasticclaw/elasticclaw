@@ -121,6 +121,13 @@ func TestAgentControlIsTypedDeduplicatedAndAttemptBound(t *testing.T) {
 	if taskStatus != string(typesv2.AgentTaskCompleted) {
 		t.Fatalf("task status = %q", taskStatus)
 	}
+	var currentTaskID string
+	if err := db.QueryRow(`SELECT current_task_id FROM workflow_v2_runs WHERE id='run-agent-control'`).Scan(&currentTaskID); err != nil {
+		t.Fatal(err)
+	}
+	if currentTaskID != "" {
+		t.Fatalf("terminal task remained current: %q", currentTaskID)
+	}
 }
 
 func TestDuplicateHeartbeatDoesNotExtendTaskLiveness(t *testing.T) {
@@ -194,6 +201,76 @@ func TestStartingNewAttemptInvalidatesOldControlIdentity(t *testing.T) {
 		TaskID: "old-task", Payload: json.RawMessage(`{"task":{"heartbeat":true}}`),
 	}); err == nil {
 		t.Fatal("superseded attempt was allowed to submit a control envelope")
+	}
+}
+
+func TestStartingNewAttemptReassignsCurrentTask(t *testing.T) {
+	db := openRuntimeDB(t)
+	store := workflowv2.NewStore(db)
+	current := time.Date(2026, 8, 8, 12, 0, 0, 0, time.UTC)
+	store.SetClock(func() time.Time { return current })
+	createRuntimeRun(t, store, "run-task-reassign")
+	first, err := store.StartAttempt(context.Background(), "run-task-reassign", "claw-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO workflow_v2_agent_tasks(
+		id,run_id,effect_id,attempt_id,state,state_version,status,instructions,allowed_actions,required_artifacts,
+		heartbeat_deadline,deadline,created_at,updated_at) VALUES(?,?,?,?,?,?,'running',?,?,?,?,?,?,?)`,
+		"task-original", "run-task-reassign", "effect-1", first.ID, "building", 1, "implement", `["commit"]`, `["tests"]`,
+		current.Add(time.Minute).UnixMilli(), current.Add(time.Hour).UnixMilli(), current.UnixMilli(), current.UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE workflow_v2_runs SET current_task_id='task-original' WHERE id='run-task-reassign'`); err != nil {
+		t.Fatal(err)
+	}
+	version := uint64(1)
+	if err := store.EnqueueControl(context.Background(), typesv2.ControlEnvelope{
+		ProtocolVersion: typesv2.ControlProtocolVersion, MessageID: "old-assignment", Kind: typesv2.MessageAgentTaskAssign,
+		RunID: "run-task-reassign", AttemptID: first.ID, TaskID: "task-original", ExpectedStateVersion: &version,
+		Payload: json.RawMessage(`{"instructions":"implement"}`),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	second, err := store.StartAttempt(context.Background(), "run-task-reassign", "claw-2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := store.GetRun(context.Background(), "run-task-reassign")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.CurrentAttemptID != second.ID || run.CurrentTaskID == "" || run.CurrentTaskID == "task-original" {
+		t.Fatalf("run after reassignment = %#v", run)
+	}
+	var oldStatus, oldOutboxStatus, newAttempt, newStatus string
+	if err := db.QueryRow(`SELECT status FROM workflow_v2_agent_tasks WHERE id='task-original'`).Scan(&oldStatus); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT status FROM workflow_v2_control_outbox WHERE message_id='old-assignment'`).Scan(&oldOutboxStatus); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT attempt_id,status FROM workflow_v2_agent_tasks WHERE id=?`, run.CurrentTaskID).Scan(
+		&newAttempt, &newStatus); err != nil {
+		t.Fatal(err)
+	}
+	if oldStatus != string(typesv2.AgentTaskCancelled) || oldOutboxStatus != "cancelled" ||
+		newAttempt != second.ID || newStatus != string(typesv2.AgentTaskAssigned) {
+		t.Fatalf("old/new task state = %s/%s/%s/%s", oldStatus, oldOutboxStatus, newAttempt, newStatus)
+	}
+	if ready, err := store.ReadyControl(context.Background(), "run-task-reassign", first.ID, 10); err != nil || len(ready) != 0 {
+		t.Fatalf("old attempt ready control = %#v, %v", ready, err)
+	}
+	ready, err := store.ReadyControl(context.Background(), "run-task-reassign", second.ID, 10)
+	if err != nil || len(ready) != 1 || ready[0].TaskID != run.CurrentTaskID {
+		t.Fatalf("replacement assignment = %#v, %v", ready, err)
+	}
+	if _, err := store.Snapshot(context.Background(), "run-task-reassign", first.ID); err == nil {
+		t.Fatal("superseded attempt received a snapshot")
+	}
+	snapshot, err := store.Snapshot(context.Background(), "run-task-reassign", second.ID)
+	if err != nil || snapshot.CurrentTask == nil || snapshot.CurrentTask.ID != run.CurrentTaskID {
+		t.Fatalf("replacement snapshot = %#v, %v", snapshot, err)
 	}
 }
 

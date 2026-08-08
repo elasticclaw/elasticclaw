@@ -293,6 +293,7 @@ type ContextBundleSource struct {
 	Type           string   `json:"type"`
 	Scope          string   `json:"scope"`
 	Required       bool     `json:"required"`
+	Repositories   []string `json:"repositories,omitempty"`
 	Status         string   `json:"status"`
 	SourceRevision string   `json:"source_revision,omitempty"`
 	ContentDigest  string   `json:"content_digest,omitempty"`

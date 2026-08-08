@@ -81,6 +81,9 @@ func TestAssembleContextUsesPinnedWorkspaceAndRelevantRepositories(t *testing.T)
 	if len(bundle.Sources) != 2 || bundle.Revision == "" {
 		t.Fatalf("bundle = %#v", bundle)
 	}
+	if got := bundle.Sources[1].Repositories; !reflect.DeepEqual(got, []string{"web"}) {
+		t.Fatalf("bundle repository scope = %#v", got)
+	}
 	if got := seen["repository-guidance"].Repositories; !reflect.DeepEqual(got, []string{"web"}) {
 		t.Fatalf("resolved repositories = %#v", got)
 	}
@@ -145,7 +148,7 @@ func TestRequiredKnowledgeFailureSuspendsWithoutExplicitRecoveryEdge(t *testing.
 			if name == "principles" {
 				return typesv2.ContextBundleSource{}, errors.New("knowledge service unavailable")
 			}
-			return typesv2.ContextBundleSource{Status: "ready"}, nil
+			return typesv2.ContextBundleSource{Status: "ready", ContentDigest: "sha256:repository"}, nil
 		}))
 	if err != nil {
 		t.Fatal(err)
@@ -159,5 +162,50 @@ func TestRequiredKnowledgeFailureSuspendsWithoutExplicitRecoveryEdge(t *testing.
 	}
 	if run.Status != workflowv2.RunSuspended || run.State != "gathering" || run.WaitingReason == "" {
 		t.Fatalf("run = %#v", run)
+	}
+}
+
+func TestRequiredKnowledgeFailedStatusSuspendsRun(t *testing.T) {
+	db := openRuntimeDB(t)
+	store := workflowv2.NewStore(db)
+	createContextRun(t, store, "run-context-failed-status")
+	_, err := store.AssembleContext(context.Background(), "run-context-failed-status", []string{"api"},
+		workflowv2.KnowledgeResolverFunc(func(_ context.Context, _ workflowv2.Run, name string,
+			_ typesv2.KnowledgeSource) (typesv2.ContextBundleSource, error) {
+			if name == "principles" {
+				return typesv2.ContextBundleSource{Status: "failed", Error: "source unavailable"}, nil
+			}
+			return typesv2.ContextBundleSource{Status: "ready", ContentDigest: "sha256:repository"}, nil
+		}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := store.GetRun(context.Background(), "run-context-failed-status")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.Status != workflowv2.RunSuspended {
+		t.Fatalf("run = %#v", run)
+	}
+}
+
+func TestInvalidKnowledgeStatusCleansProvisionalBundle(t *testing.T) {
+	db := openRuntimeDB(t)
+	store := workflowv2.NewStore(db)
+	createContextRun(t, store, "run-context-invalid-status")
+	_, err := store.AssembleContext(context.Background(), "run-context-invalid-status", []string{"api"},
+		workflowv2.KnowledgeResolverFunc(func(context.Context, workflowv2.Run, string,
+			typesv2.KnowledgeSource) (typesv2.ContextBundleSource, error) {
+			return typesv2.ContextBundleSource{Status: "partial"}, nil
+		}))
+	if err == nil {
+		t.Fatal("unsupported resolver status was accepted")
+	}
+	var bundles int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM workflow_v2_context_bundles WHERE run_id='run-context-invalid-status'`).Scan(&bundles); err != nil {
+		t.Fatal(err)
+	}
+	if bundles != 0 {
+		t.Fatalf("provisional bundles = %d, want 0", bundles)
 	}
 }

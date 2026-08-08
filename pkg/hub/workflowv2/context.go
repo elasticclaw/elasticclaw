@@ -70,6 +70,10 @@ func (s *Store) AssembleContext(ctx context.Context, runID string, relevantRepos
 		VALUES(?,?,?,'assembling','[]',?,?)`, bundle.ID, runID, "assembling:"+bundle.ID, nowMillis, nowMillis); err != nil {
 		return typesv2.ContextBundle{}, err
 	}
+	defer func() {
+		_, _ = s.db.ExecContext(context.Background(), `DELETE FROM workflow_v2_context_bundles WHERE id=? AND run_id=? AND status='assembling'`,
+			bundle.ID, runID)
+	}()
 
 	status := "ready"
 	if workspace.Workspace.Knowledge != nil {
@@ -88,14 +92,26 @@ func (s *Store) AssembleContext(ctx context.Context, runID string, relevantRepos
 			resolved.Type = source.Type
 			resolved.Scope = source.Scope
 			resolved.Required = source.Required
+			resolved.Repositories = append([]string(nil), source.Repositories...)
 			if resolveErr != nil {
 				resolved.Status = "failed"
 				resolved.Error = resolveErr.Error()
-				if source.Required {
-					status = "failed"
-				}
 			} else if strings.TrimSpace(resolved.Status) == "" {
 				resolved.Status = "ready"
+			}
+			if resolved.Status != "ready" && resolved.Status != "failed" {
+				return typesv2.ContextBundle{}, fmt.Errorf("knowledge resolver returned unsupported status %q for source %q",
+					resolved.Status, name)
+			}
+			if resolved.Status == "ready" && strings.TrimSpace(resolved.SourceRevision) == "" &&
+				strings.TrimSpace(resolved.ContentDigest) == "" {
+				return typesv2.ContextBundle{}, fmt.Errorf("knowledge source %q is ready without a revision or content digest", name)
+			}
+			if resolved.Status == "failed" && strings.TrimSpace(resolved.Error) == "" {
+				return typesv2.ContextBundle{}, fmt.Errorf("knowledge source %q failed without an error", name)
+			}
+			if source.Required && resolved.Status != "ready" {
+				status = "failed"
 			}
 			bundle.Sources = append(bundle.Sources, resolved)
 		}
