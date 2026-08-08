@@ -263,3 +263,49 @@ func TestSourceControlConfirmedClosedPRCanBeSuperseded(t *testing.T) {
 		t.Fatalf("old/new active = %d/%d", oldActive, newActive)
 	}
 }
+
+func TestSupersessionRejectsTargetChangedAfterVerification(t *testing.T) {
+	db := openRuntimeDB(t)
+	store := workflowv2.NewStore(db)
+	attempt := createDeliveryRun(t, store, "run-supersede-head-race")
+	oldURL := "https://github.example/org/api/pull/10"
+	newURL := "https://github.example/org/api/pull/11"
+	verifiedPR := func(claim typesv2.PullRequestClaim, number int, head, state string) typesv2.VerifiedPullRequest {
+		now := time.Date(2026, 8, 8, 12, 0, 0, 0, time.UTC)
+		return typesv2.VerifiedPullRequest{URL: claim.URL, RepositoryName: "api", Repository: "org/api", Number: number,
+			SourceBranch: "feature", BaseBranch: "main", HeadSHA: head, State: state, VerifiedAt: now,
+			Provenance: typesv2.EvidenceProvenance{Producer: string(workflowv2.ProducerSourceControl), ObservedAt: now}}
+	}
+	if _, err := store.SubmitDelivery(context.Background(), "run-supersede-head-race", attempt.ID,
+		typesv2.DeliveryManifest{PullRequests: []typesv2.PullRequestClaim{{URL: oldURL}}},
+		workflowv2.PullRequestVerifierFunc(func(_ context.Context, _ workflowv2.Run, _ *typesv2.Workspace,
+			claim typesv2.PullRequestClaim) (typesv2.VerifiedPullRequest, error) {
+			return verifiedPR(claim, 10, "old-head", "closed"), nil
+		})); err != nil {
+		t.Fatal(err)
+	}
+	_, err := store.SubmitDelivery(context.Background(), "run-supersede-head-race", attempt.ID,
+		typesv2.DeliveryManifest{PullRequests: []typesv2.PullRequestClaim{{URL: newURL, Supersedes: oldURL}}},
+		workflowv2.PullRequestVerifierFunc(func(_ context.Context, _ workflowv2.Run, _ *typesv2.Workspace,
+			claim typesv2.PullRequestClaim) (typesv2.VerifiedPullRequest, error) {
+			if claim.URL == oldURL {
+				if _, updateErr := db.Exec(`UPDATE workflow_v2_delivery_prs SET current_head_sha='raced-head' WHERE run_id=? AND url=?`,
+					"run-supersede-head-race", oldURL); updateErr != nil {
+					return typesv2.VerifiedPullRequest{}, updateErr
+				}
+				return verifiedPR(claim, 10, "old-head", "closed"), nil
+			}
+			return verifiedPR(claim, 11, "new-head", "open"), nil
+		}))
+	if err == nil {
+		t.Fatal("supersession accepted a target that changed after verification")
+	}
+	var active, total int
+	if err := db.QueryRow(`SELECT COALESCE(SUM(active),0),COUNT(*) FROM workflow_v2_delivery_prs
+		WHERE run_id='run-supersede-head-race'`).Scan(&active, &total); err != nil {
+		t.Fatal(err)
+	}
+	if active != 1 || total != 1 {
+		t.Fatalf("delivery after rejected supersession = active %d total %d", active, total)
+	}
+}

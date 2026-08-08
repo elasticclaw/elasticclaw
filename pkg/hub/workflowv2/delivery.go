@@ -19,6 +19,12 @@ type PullRequestVerifier interface {
 type PullRequestVerifierFunc func(context.Context, Run, *typesv2.Workspace,
 	typesv2.PullRequestClaim) (typesv2.VerifiedPullRequest, error)
 
+type verifiedSupersession struct {
+	ID      string
+	HeadSHA string
+	State   string
+}
+
 func (f PullRequestVerifierFunc) VerifyPullRequest(ctx context.Context, run Run, workspace *typesv2.Workspace,
 	claim typesv2.PullRequestClaim) (typesv2.VerifiedPullRequest, error) {
 	return f(ctx, run, workspace, claim)
@@ -57,7 +63,7 @@ func (s *Store) SubmitDelivery(ctx context.Context, runID, attemptID string, man
 	}
 
 	verified := make([]typesv2.VerifiedPullRequest, 0, len(manifest.PullRequests))
-	trustedSupersedes := make(map[string]string)
+	trustedSupersedes := make(map[string]verifiedSupersession)
 	claimsByURL := map[string]bool{}
 	identities := map[string]bool{}
 	for i, claim := range manifest.PullRequests {
@@ -104,7 +110,9 @@ func (s *Store) SubmitDelivery(ctx context.Context, runID, attemptID string, man
 				return nil, fmt.Errorf("verify pull_requests[%d] supersedes %q: target head changed; reconcile it first", i, supersedes)
 			}
 			pr.Supersedes = targetID
-			trustedSupersedes[pr.Repository+"#"+fmt.Sprint(pr.Number)] = targetID
+			trustedSupersedes[pr.Repository+"#"+fmt.Sprint(pr.Number)] = verifiedSupersession{
+				ID: targetID, HeadSHA: resolvedTarget.HeadSHA, State: resolvedTarget.State,
+			}
 		}
 		verified = append(verified, pr)
 	}
@@ -167,12 +175,13 @@ func (s *Store) SubmitDelivery(ctx context.Context, runID, attemptID string, man
 		}
 		if pr.Supersedes != "" {
 			identity := pr.Repository + "#" + fmt.Sprint(pr.Number)
-			if trustedSupersedes[identity] != pr.Supersedes {
+			trusted, ok := trustedSupersedes[identity]
+			if !ok || trusted.ID != pr.Supersedes {
 				return nil, fmt.Errorf("superseded pull request was not trusted by the verifier")
 			}
 			result, err := tx.ExecContext(ctx, `UPDATE workflow_v2_delivery_prs SET active=0,updated_at=?
-				WHERE run_id=? AND active=1 AND id!=? AND id=? AND state IN ('closed','merged')`,
-				now.UnixMilli(), runID, pr.ID, pr.Supersedes)
+				WHERE run_id=? AND active=1 AND id!=? AND id=? AND current_head_sha=? AND state=?`,
+				now.UnixMilli(), runID, pr.ID, trusted.ID, trusted.HeadSHA, trusted.State)
 			if err != nil {
 				return nil, err
 			}
@@ -190,7 +199,7 @@ func (s *Store) SubmitDelivery(ctx context.Context, runID, attemptID string, man
 		return nil, err
 	}
 	eventResult, err := s.ApplyEvent(ctx, runID, EventInput{
-		ID: uuid.NewString(), Kind: "delivery.verified", Producer: ProducerSourceControl,
+		ID: uuid.NewString(), Kind: "delivery.verified", AttemptID: attemptID, Producer: ProducerSourceControl,
 		Payload: map[string]interface{}{"delivery": summary},
 		Facts: map[string]interface{}{
 			"delivery.count": summary["count"], "delivery.open": summary["open"],
@@ -208,7 +217,7 @@ func (s *Store) SubmitDelivery(ctx context.Context, runID, attemptID string, man
 	if err != nil {
 		return nil, err
 	}
-	if err := s.publishEvidencePolicyEvents(ctx, runID, "", policyResult, now); err != nil {
+	if err := s.publishEvidencePolicyEvents(ctx, runID, attemptID, "", policyResult, now); err != nil {
 		return nil, err
 	}
 	sort.Slice(verified, func(i, j int) bool {

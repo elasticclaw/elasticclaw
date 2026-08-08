@@ -336,7 +336,7 @@ func authorizeBoundAttempt(ctx context.Context, tx *sql.Tx, run Run, input Event
 	if input.AttemptID == "" {
 		return nil
 	}
-	if input.Producer != ProducerAgent || run.CurrentAttemptID != input.AttemptID {
+	if run.CurrentAttemptID != input.AttemptID {
 		return fmt.Errorf("control envelope attempt is no longer active")
 	}
 	var active int

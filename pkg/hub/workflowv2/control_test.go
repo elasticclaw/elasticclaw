@@ -204,6 +204,37 @@ func TestStartingNewAttemptInvalidatesOldControlIdentity(t *testing.T) {
 	}
 }
 
+func TestAttemptBoundTrustedEventRejectsRevokedAttempt(t *testing.T) {
+	db := openRuntimeDB(t)
+	store := workflowv2.NewStore(db)
+	createRuntimeRun(t, store, "run-revoked-trusted-event")
+	first, err := store.StartAttempt(context.Background(), "run-revoked-trusted-event", "claw-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.StartAttempt(context.Background(), "run-revoked-trusted-event", "claw-2"); err != nil {
+		t.Fatal(err)
+	}
+	_, err = store.ApplyEvent(context.Background(), "run-revoked-trusted-event", workflowv2.EventInput{
+		ID: "late-delivery-event", Kind: "delivery.verified", AttemptID: first.ID,
+		Producer: workflowv2.ProducerSourceControl,
+		Payload:  map[string]interface{}{"delivery": map[string]interface{}{"count": 1}},
+		Provenance: typesv2.EvidenceProvenance{
+			Producer: string(workflowv2.ProducerSourceControl), ObservedAt: time.Now().UTC(),
+		},
+	})
+	if err == nil {
+		t.Fatal("trusted event from revoked attempt was accepted")
+	}
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM workflow_v2_events WHERE id='late-delivery-event'`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("revoked event rows = %d", count)
+	}
+}
+
 func TestStartingNewAttemptReassignsCurrentTask(t *testing.T) {
 	db := openRuntimeDB(t)
 	store := workflowv2.NewStore(db)

@@ -120,13 +120,14 @@ func (s *Store) RecordEvidence(ctx context.Context, input EvidenceInput, produce
 	if err != nil {
 		return DeliveryPolicyResult{}, err
 	}
-	if err := s.publishEvidencePolicyEvents(ctx, input.RunID, input.Domain, result, observed); err != nil {
+	if err := s.publishEvidencePolicyEvents(ctx, input.RunID, "", input.Domain, result, observed); err != nil {
 		return DeliveryPolicyResult{}, err
 	}
 	return result, nil
 }
 
-func (s *Store) publishEvidencePolicyEvents(ctx context.Context, runID, domain string, result DeliveryPolicyResult, observed time.Time) error {
+func (s *Store) publishEvidencePolicyEvents(ctx context.Context, runID, attemptID, domain string,
+	result DeliveryPolicyResult, observed time.Time) error {
 	var workflowYAML string
 	if err := s.db.QueryRowContext(ctx, `SELECT workflow_yaml FROM workflow_v2_runs WHERE id=?`, runID).Scan(&workflowYAML); err != nil {
 		return err
@@ -140,7 +141,7 @@ func (s *Store) publishEvidencePolicyEvents(ctx context.Context, runID, domain s
 		if domain == "ci" && requirements.CIPolicy != "" {
 			status := result.CIStatus
 			event, err := s.ApplyEvent(ctx, runID, EventInput{
-				ID: uuid.NewString(), Kind: "ci.policy.evaluated", Producer: ProducerCI,
+				ID: uuid.NewString(), Kind: "ci.policy.evaluated", AttemptID: attemptID, Producer: ProducerCI,
 				Payload:    map[string]interface{}{"ci": map[string]interface{}{"policy": requirements.CIPolicy, "status": status}},
 				Facts:      map[string]interface{}{"ci.policy": requirements.CIPolicy, "ci.status": status},
 				Provenance: typesv2.EvidenceProvenance{Producer: string(ProducerCI), ObservedAt: observed},
@@ -155,7 +156,7 @@ func (s *Store) publishEvidencePolicyEvents(ctx context.Context, runID, domain s
 		if domain == "review" && requirements.ReviewPolicy != "" {
 			status := result.ReviewStatus
 			event, err := s.ApplyEvent(ctx, runID, EventInput{
-				ID: uuid.NewString(), Kind: "review.policy.evaluated", Producer: ProducerReview,
+				ID: uuid.NewString(), Kind: "review.policy.evaluated", AttemptID: attemptID, Producer: ProducerReview,
 				Payload:    map[string]interface{}{"review": map[string]interface{}{"policy": requirements.ReviewPolicy, "status": status}},
 				Facts:      map[string]interface{}{"review.policy": requirements.ReviewPolicy, "review.status": status},
 				Provenance: typesv2.EvidenceProvenance{Producer: string(ProducerReview), ObservedAt: observed},
@@ -169,7 +170,7 @@ func (s *Store) publishEvidencePolicyEvents(ctx context.Context, runID, domain s
 		}
 	}
 	deliveryEvent, err := s.ApplyEvent(ctx, runID, EventInput{
-		ID: uuid.NewString(), Kind: "workflow.delivery.evaluated", Producer: ProducerEngine,
+		ID: uuid.NewString(), Kind: "workflow.delivery.evaluated", AttemptID: attemptID, Producer: ProducerEngine,
 		Payload: map[string]interface{}{"workflow": map[string]interface{}{"delivery": result}},
 		Facts: map[string]interface{}{
 			"delivery.minimum_met": result.MinimumMet, "delivery.ci_satisfied": result.CISatisfied,
