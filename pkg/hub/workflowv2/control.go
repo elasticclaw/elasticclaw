@@ -141,16 +141,43 @@ func (s *Store) EnqueueControl(ctx context.Context, envelope typesv2.ControlEnve
 	if err := typesv2.ValidateControlEnvelope(envelope, typesv2.DirectionHubToClaw); err != nil {
 		return err
 	}
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var currentAttempt string
+	var currentVersion uint64
+	var runStatus string
+	if err := tx.QueryRowContext(ctx, `SELECT current_attempt_id,state_version,status FROM workflow_v2_runs WHERE id=?`,
+		envelope.RunID).Scan(&currentAttempt, &currentVersion, &runStatus); err != nil {
+		return err
+	}
+	if runStatus != string(RunActive) && runStatus != string(RunSuspended) {
+		return fmt.Errorf("cannot enqueue control for %s run", runStatus)
+	}
+	if envelope.AttemptID == "" {
+		envelope.AttemptID = currentAttempt
+	}
+	if envelope.AttemptID == "" || envelope.AttemptID != currentAttempt {
+		return fmt.Errorf("control envelope does not target the current attempt")
+	}
+	if envelope.ExpectedStateVersion != nil && *envelope.ExpectedStateVersion != currentVersion {
+		return fmt.Errorf("control envelope state version %d is stale; current version is %d",
+			*envelope.ExpectedStateVersion, currentVersion)
+	}
 	raw, err := json.Marshal(envelope)
 	if err != nil {
 		return err
 	}
 	now := s.now().UTC().UnixMilli()
-	_, err = s.db.ExecContext(ctx, `INSERT INTO workflow_v2_control_outbox(
+	if _, err := tx.ExecContext(ctx, `INSERT INTO workflow_v2_control_outbox(
 		message_id,run_id,attempt_id,task_id,kind,envelope_json,status,next_attempt_at,created_at,updated_at)
 		VALUES(?,?,?,?,?,?,'pending',0,?,?) ON CONFLICT(message_id) DO NOTHING`, envelope.MessageID,
-		envelope.RunID, envelope.AttemptID, envelope.TaskID, string(envelope.Kind), string(raw), now, now)
-	return err
+		envelope.RunID, envelope.AttemptID, envelope.TaskID, string(envelope.Kind), string(raw), now, now); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *Store) ReadyControl(ctx context.Context, runID, attemptID string, limit int) ([]typesv2.ControlEnvelope, error) {
@@ -213,13 +240,8 @@ func (s *Store) ApplyAgentControl(ctx context.Context, envelope typesv2.ControlE
 	if err := typesv2.ValidateControlEnvelope(envelope, typesv2.DirectionClawToHub); err != nil {
 		return typesv2.ControlReceipt{}, err
 	}
-	var active int
-	if err := s.db.QueryRowContext(ctx, `SELECT 1 FROM workflow_v2_attempts a JOIN workflow_v2_runs r ON r.id=a.run_id
-		WHERE r.id=? AND r.current_attempt_id=? AND a.id=? AND a.status='active'`, envelope.RunID,
-		envelope.AttemptID, envelope.AttemptID).Scan(&active); errors.Is(err, sql.ErrNoRows) {
-		return typesv2.ControlReceipt{}, fmt.Errorf("control envelope attempt is no longer active")
-	} else if err != nil {
-		return typesv2.ControlReceipt{}, err
+	if envelope.Kind == typesv2.MessageDeliverySubmitted || envelope.Kind == typesv2.MessagePullRequestClaimed {
+		return typesv2.ControlReceipt{}, fmt.Errorf("delivery claims require trusted source-control verification")
 	}
 	var payload map[string]interface{}
 	if len(envelope.Payload) > 0 {
@@ -229,38 +251,85 @@ func (s *Store) ApplyAgentControl(ctx context.Context, envelope typesv2.ControlE
 	}
 	result, err := s.ApplyEvent(ctx, envelope.RunID, EventInput{
 		ID: envelope.MessageID, MessageID: envelope.MessageID, Kind: string(envelope.Kind),
+		AttemptID: envelope.AttemptID, TaskID: envelope.TaskID,
 		ExpectedStateVersion: envelope.ExpectedStateVersion, Producer: ProducerAgent, Payload: payload,
 		Provenance: typesv2.EvidenceProvenance{Producer: string(ProducerAgent), ObservedAt: s.now().UTC()},
 	})
 	if err != nil {
 		return typesv2.ControlReceipt{}, err
 	}
-	updateTask := result.Disposition == typesv2.DispositionAccepted ||
-		(result.Disposition == typesv2.DispositionDuplicate && envelope.Kind != typesv2.MessageAgentTaskHeartbeat)
-	if updateTask && envelope.TaskID != "" {
-		if err := s.updateTaskFromControl(ctx, envelope); err != nil {
-			return typesv2.ControlReceipt{}, err
-		}
-	}
 	return typesv2.ControlReceipt{MessageID: envelope.MessageID, Disposition: result.Disposition,
 		StateVersion: result.Run.StateVersion, Reason: result.Reason}, nil
 }
 
-func (s *Store) updateTaskFromControl(ctx context.Context, envelope typesv2.ControlEnvelope) error {
-	now := s.now().UTC()
+func authorizeBoundAttempt(ctx context.Context, tx *sql.Tx, run Run, input EventInput) error {
+	if input.AttemptID == "" {
+		return nil
+	}
+	if input.Producer != ProducerAgent || run.CurrentAttemptID != input.AttemptID {
+		return fmt.Errorf("control envelope attempt is no longer active")
+	}
+	var active int
+	if err := tx.QueryRowContext(ctx, `SELECT 1 FROM workflow_v2_attempts
+		WHERE id=? AND run_id=? AND status='active'`, input.AttemptID, run.ID).Scan(&active); errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("control envelope attempt is no longer active")
+	} else if err != nil {
+		return err
+	}
+	return nil
+}
+
+func authorizeBoundTask(ctx context.Context, tx *sql.Tx, run Run, input EventInput) error {
+	if input.TaskID == "" {
+		return nil
+	}
+	if input.Producer != ProducerAgent || run.CurrentTaskID != input.TaskID {
+		return fmt.Errorf("control envelope does not name the current task")
+	}
+	var taskVersion uint64
+	var taskStatus string
+	err := tx.QueryRowContext(ctx, `SELECT state_version,status FROM workflow_v2_agent_tasks
+		WHERE id=? AND run_id=? AND attempt_id=?`, input.TaskID, run.ID, input.AttemptID).Scan(&taskVersion, &taskStatus)
+	if errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("control envelope does not name the current task")
+	}
+	if err != nil {
+		return err
+	}
+	if input.ExpectedStateVersion != nil && *input.ExpectedStateVersion != taskVersion {
+		return fmt.Errorf("control envelope state version does not match assigned task")
+	}
+	if taskStatus != string(typesv2.AgentTaskAssigned) && taskStatus != string(typesv2.AgentTaskRunning) {
+		return fmt.Errorf("task status %q does not accept control messages", taskStatus)
+	}
+	return nil
+}
+
+func updateBoundTask(ctx context.Context, tx *sql.Tx, runID string, input EventInput, now time.Time) error {
+	if input.TaskID == "" {
+		return nil
+	}
 	status := ""
 	finished := int64(0)
-	switch envelope.Kind {
+	switch typesv2.ControlMessageKind(input.Kind) {
 	case typesv2.MessageAgentTaskStarted:
 		status = string(typesv2.AgentTaskRunning)
 	case typesv2.MessageAgentTaskHeartbeat:
-		_, err := s.db.ExecContext(ctx, `UPDATE workflow_v2_agent_tasks SET last_heartbeat_at=?,heartbeat_deadline=?,updated_at=?
+		result, err := tx.ExecContext(ctx, `UPDATE workflow_v2_agent_tasks SET last_heartbeat_at=?,heartbeat_deadline=?,updated_at=?
 			WHERE id=? AND run_id=? AND attempt_id=? AND status IN ('assigned','running')`, now.UnixMilli(),
-			now.Add(2*time.Minute).UnixMilli(), now.UnixMilli(), envelope.TaskID, envelope.RunID, envelope.AttemptID)
-		if err == nil {
-			_, err = s.db.ExecContext(ctx, `UPDATE workflow_v2_attempts SET heartbeat_at=? WHERE id=? AND run_id=? AND status='active'`,
-				now.UnixMilli(), envelope.AttemptID, envelope.RunID)
+			now.Add(2*time.Minute).UnixMilli(), now.UnixMilli(), input.TaskID, runID, input.AttemptID)
+		if err != nil {
+			return err
 		}
+		changed, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if changed != 1 {
+			return fmt.Errorf("active task not found")
+		}
+		_, err = tx.ExecContext(ctx, `UPDATE workflow_v2_attempts SET heartbeat_at=? WHERE id=? AND run_id=? AND status='active'`,
+			now.UnixMilli(), input.AttemptID, runID)
 		return err
 	case typesv2.MessageAgentTaskCompleted:
 		status, finished = string(typesv2.AgentTaskCompleted), now.UnixMilli()
@@ -269,9 +338,9 @@ func (s *Store) updateTaskFromControl(ctx context.Context, envelope typesv2.Cont
 	default:
 		return nil
 	}
-	result, err := s.db.ExecContext(ctx, `UPDATE workflow_v2_agent_tasks SET status=?,last_heartbeat_at=?,updated_at=?,finished_at=?
-		WHERE id=? AND run_id=? AND attempt_id=? AND status IN ('assigned','running')`, status, now.UnixMilli(),
-		now.UnixMilli(), finished, envelope.TaskID, envelope.RunID, envelope.AttemptID)
+	result, err := tx.ExecContext(ctx, `UPDATE workflow_v2_agent_tasks SET status=?,last_heartbeat_at=?,updated_at=?,finished_at=?
+		WHERE id=? AND run_id=? AND attempt_id=? AND status IN ('assigned','running')`, status, now.UnixMilli(), now.UnixMilli(), finished,
+		input.TaskID, runID, input.AttemptID)
 	if err != nil {
 		return err
 	}
@@ -279,7 +348,7 @@ func (s *Store) updateTaskFromControl(ctx context.Context, envelope typesv2.Cont
 	if err != nil {
 		return err
 	}
-	if changed == 0 && envelope.Kind != typesv2.MessageAgentTaskCompleted && envelope.Kind != typesv2.MessageAgentTaskFailed {
+	if changed != 1 {
 		return fmt.Errorf("active task not found")
 	}
 	return nil

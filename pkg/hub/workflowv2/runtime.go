@@ -71,6 +71,8 @@ type EventInput struct {
 	ID                   string
 	MessageID            string
 	Kind                 string
+	AttemptID            string
+	TaskID               string
 	ExpectedStateVersion *uint64
 	Producer             Producer
 	Provenance           typesv2.EvidenceProvenance
@@ -223,6 +225,9 @@ func (s *Store) ApplyEvent(ctx context.Context, runID string, input EventInput) 
 	if err != nil {
 		return EventResult{}, err
 	}
+	if err := authorizeBoundAttempt(ctx, tx, stored, input); err != nil {
+		return EventResult{}, err
+	}
 	if existing, found, err := findDuplicateEvent(ctx, tx, runID, input.ID, input.MessageID); err != nil {
 		return EventResult{}, err
 	} else if found {
@@ -234,6 +239,9 @@ func (s *Store) ApplyEvent(ctx context.Context, runID string, input EventInput) 
 			return EventResult{}, err
 		}
 		return EventResult{EventID: existing, Disposition: typesv2.DispositionDuplicate, Reason: reason, Run: stored}, nil
+	}
+	if err := authorizeBoundTask(ctx, tx, stored, input); err != nil {
+		return EventResult{}, err
 	}
 
 	workflow, err := typesv2.ParseAndValidateWorkflow([]byte(workflowYAML))
@@ -319,6 +327,9 @@ func (s *Store) ApplyEvent(ctx context.Context, runID string, input EventInput) 
 				return EventResult{}, err
 			}
 		}
+		if err := updateBoundTask(ctx, tx, runID, input, now); err != nil {
+			return EventResult{}, err
+		}
 		if err := insertEventReceipt(ctx, tx, runID, input.ID, input.MessageID, typesv2.DispositionAccepted, stored.StateVersion, "", now); err != nil {
 			return EventResult{}, err
 		}
@@ -396,6 +407,9 @@ func (s *Store) ApplyEvent(ctx context.Context, runID string, input EventInput) 
 			"states."+transitionDef.To+".on_enter.effects", destination.OnEnter.Effects, now); err != nil {
 			return EventResult{}, err
 		}
+	}
+	if err := updateBoundTask(ctx, tx, runID, input, now); err != nil {
+		return EventResult{}, err
 	}
 	if err := insertEventReceipt(ctx, tx, runID, input.ID, input.MessageID, typesv2.DispositionAccepted, toVersion, "", now); err != nil {
 		return EventResult{}, err

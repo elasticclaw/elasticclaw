@@ -139,6 +139,9 @@ func TestDuplicateHeartbeatDoesNotExtendTaskLiveness(t *testing.T) {
 		"implement", current.Add(time.Minute).UnixMilli(), current.Add(time.Hour).UnixMilli(), current.UnixMilli(), current.UnixMilli()); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := db.Exec(`UPDATE workflow_v2_runs SET current_task_id=? WHERE id=?`, "task-heartbeat", "run-heartbeat-replay"); err != nil {
+		t.Fatal(err)
+	}
 	envelope := typesv2.ControlEnvelope{ProtocolVersion: typesv2.ControlProtocolVersion, MessageID: "heartbeat-1",
 		Kind: typesv2.MessageAgentTaskHeartbeat, RunID: "run-heartbeat-replay", AttemptID: attempt.ID,
 		TaskID: "task-heartbeat", Payload: json.RawMessage(`{"task":{"heartbeat":true}}`)}
@@ -191,6 +194,146 @@ func TestStartingNewAttemptInvalidatesOldControlIdentity(t *testing.T) {
 		TaskID: "old-task", Payload: json.RawMessage(`{"task":{"heartbeat":true}}`),
 	}); err == nil {
 		t.Fatal("superseded attempt was allowed to submit a control envelope")
+	}
+}
+
+func TestAgentControlMustNameCurrentTask(t *testing.T) {
+	db := openRuntimeDB(t)
+	store := workflowv2.NewStore(db)
+	createRuntimeRun(t, store, "run-current-task")
+	attempt, err := store.StartAttempt(context.Background(), "run-current-task", "claw-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	if _, err := db.Exec(`INSERT INTO workflow_v2_agent_tasks(
+		id,run_id,effect_id,attempt_id,state,state_version,status,instructions,heartbeat_deadline,deadline,created_at,updated_at)
+		VALUES(?,?,?,?,?,?,'assigned',?,?,?,?,?)`, "task-current", "run-current-task", "", attempt.ID, "building", 1,
+		"implement", now.Add(2*time.Minute).UnixMilli(), now.Add(time.Hour).UnixMilli(), now.UnixMilli(), now.UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE workflow_v2_runs SET current_task_id=? WHERE id=?`, "task-current", "run-current-task"); err != nil {
+		t.Fatal(err)
+	}
+	version := uint64(1)
+	_, err = store.ApplyAgentControl(context.Background(), typesv2.ControlEnvelope{
+		ProtocolVersion: typesv2.ControlProtocolVersion, MessageID: "wrong-task-complete",
+		Kind: typesv2.MessageAgentTaskCompleted, RunID: "run-current-task", AttemptID: attempt.ID,
+		TaskID: "task-invented", ExpectedStateVersion: &version,
+		Payload: json.RawMessage(`{"task":{"result":"success"}}`),
+	})
+	if err == nil {
+		t.Fatal("control message for an invented task was accepted")
+	}
+	run, err := store.GetRun(context.Background(), "run-current-task")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.StateVersion != 1 || run.State != "building" {
+		t.Fatalf("run changed after rejected control: %#v", run)
+	}
+}
+
+func TestAgentControlRollsBackEventWhenTaskUpdateFails(t *testing.T) {
+	db := openRuntimeDB(t)
+	store := workflowv2.NewStore(db)
+	createRuntimeRun(t, store, "run-atomic-control")
+	attempt, err := store.StartAttempt(context.Background(), "run-atomic-control", "claw-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	if _, err := db.Exec(`INSERT INTO workflow_v2_agent_tasks(
+		id,run_id,effect_id,attempt_id,state,state_version,status,instructions,heartbeat_deadline,deadline,created_at,updated_at)
+		VALUES(?,?,?,?,?,?,'assigned',?,?,?,?,?)`, "task-atomic", "run-atomic-control", "", attempt.ID, "building", 1,
+		"implement", now.Add(2*time.Minute).UnixMilli(), now.Add(time.Hour).UnixMilli(), now.UnixMilli(), now.UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE workflow_v2_runs SET current_task_id=? WHERE id=?`, "task-atomic", "run-atomic-control"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TRIGGER reject_task_completion BEFORE UPDATE OF status ON workflow_v2_agent_tasks
+		WHEN NEW.id='task-atomic' AND NEW.status='completed' BEGIN SELECT RAISE(ABORT, 'simulated task write failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+	version := uint64(1)
+	_, err = store.ApplyAgentControl(context.Background(), typesv2.ControlEnvelope{
+		ProtocolVersion: typesv2.ControlProtocolVersion, MessageID: "atomic-complete",
+		Kind: typesv2.MessageAgentTaskCompleted, RunID: "run-atomic-control", AttemptID: attempt.ID,
+		TaskID: "task-atomic", ExpectedStateVersion: &version,
+		Payload: json.RawMessage(`{"task":{"result":"success"}}`),
+	})
+	if err == nil {
+		t.Fatal("simulated task write failure did not fail control application")
+	}
+	run, err := store.GetRun(context.Background(), "run-atomic-control")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.StateVersion != 1 || run.State != "building" {
+		t.Fatalf("run advanced despite failed task update: %#v", run)
+	}
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM workflow_v2_events WHERE id='atomic-complete'`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("event persisted despite failed task update: %d", count)
+	}
+}
+
+func TestDeliveryControlRequiresTrustedVerificationPath(t *testing.T) {
+	db := openRuntimeDB(t)
+	store := workflowv2.NewStore(db)
+	createRuntimeRun(t, store, "run-unverified-delivery")
+	attempt, err := store.StartAttempt(context.Background(), "run-unverified-delivery", "claw-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	version := uint64(1)
+	_, err = store.ApplyAgentControl(context.Background(), typesv2.ControlEnvelope{
+		ProtocolVersion: typesv2.ControlProtocolVersion, MessageID: "unverified-delivery",
+		Kind: typesv2.MessageDeliverySubmitted, RunID: "run-unverified-delivery", AttemptID: attempt.ID,
+		ExpectedStateVersion: &version, Payload: json.RawMessage(`{"delivery":{"pull_requests":[]}}`),
+	})
+	if err == nil {
+		t.Fatal("unverified delivery entered through the generic control path")
+	}
+	run, err := store.GetRun(context.Background(), "run-unverified-delivery")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.StateVersion != 1 || run.State != "building" {
+		t.Fatalf("run changed after rejected delivery: %#v", run)
+	}
+}
+
+func TestControlOutboxRejectsSupersededAttempt(t *testing.T) {
+	db := openRuntimeDB(t)
+	store := workflowv2.NewStore(db)
+	createRuntimeRun(t, store, "run-stale-assignment")
+	first, err := store.StartAttempt(context.Background(), "run-stale-assignment", "claw-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.StartAttempt(context.Background(), "run-stale-assignment", "claw-2"); err != nil {
+		t.Fatal(err)
+	}
+	version := uint64(1)
+	err = store.EnqueueControl(context.Background(), typesv2.ControlEnvelope{
+		ProtocolVersion: typesv2.ControlProtocolVersion, MessageID: "stale-assignment",
+		Kind: typesv2.MessageAgentTaskAssign, RunID: "run-stale-assignment", AttemptID: first.ID,
+		TaskID: "task-old", ExpectedStateVersion: &version, Payload: json.RawMessage(`{"instructions":"old"}`),
+	})
+	if err == nil {
+		t.Fatal("control assignment for a superseded attempt was queued")
+	}
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM workflow_v2_control_outbox WHERE run_id='run-stale-assignment'`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("stale outbox rows = %d", count)
 	}
 }
 
