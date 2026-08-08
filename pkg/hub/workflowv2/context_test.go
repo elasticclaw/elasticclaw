@@ -99,6 +99,20 @@ func TestAssembleContextUsesPinnedWorkspaceAndRelevantRepositories(t *testing.T)
 	if !ok || contextFacts["status"] != "ready" || contextFacts["revision"] != bundle.Revision {
 		t.Fatalf("context facts = %#v", inspection.Facts["context"])
 	}
+	repeated, err := store.AssembleContext(context.Background(), "run-context", []string{"web"}, resolver)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if repeated.ID != bundle.ID || repeated.Revision != bundle.Revision {
+		t.Fatalf("repeated bundle = %#v, want id/revision %s/%s", repeated, bundle.ID, bundle.Revision)
+	}
+	var bundleCount int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM workflow_v2_context_bundles WHERE run_id='run-context'`).Scan(&bundleCount); err != nil {
+		t.Fatal(err)
+	}
+	if bundleCount != 1 {
+		t.Fatalf("context bundle count = %d, want 1", bundleCount)
+	}
 }
 
 func TestAssembleContextRejectsRepositoryOutsideWorkspace(t *testing.T) {

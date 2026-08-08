@@ -3,11 +3,13 @@ package workflowv2
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	typesv2 "github.com/elasticclaw/elasticclaw/pkg/types/v2"
 	"github.com/google/uuid"
@@ -106,14 +108,35 @@ func (s *Store) AssembleContext(ctx context.Context, runID string, relevantRepos
 	if err != nil {
 		return typesv2.ContextBundle{}, err
 	}
-	result, err := s.db.ExecContext(ctx, `UPDATE workflow_v2_context_bundles SET revision=?,status=?,sources_json=?,updated_at=?
-		WHERE id=? AND run_id=? AND status='assembling'`, bundle.Revision, status, string(sourcesJSON),
-		s.now().UTC().UnixMilli(), bundle.ID, runID)
-	if err != nil {
-		return typesv2.ContextBundle{}, err
+	var existingID, existingStatus, existingSources string
+	var existingCreated int64
+	existingErr := s.db.QueryRowContext(ctx, `SELECT id,status,sources_json,created_at FROM workflow_v2_context_bundles
+		WHERE run_id=? AND revision=? AND id!=?`, runID, bundle.Revision, bundle.ID).Scan(
+		&existingID, &existingStatus, &existingSources, &existingCreated)
+	if existingErr != nil && existingErr != sql.ErrNoRows {
+		return typesv2.ContextBundle{}, existingErr
 	}
-	if changed, err := result.RowsAffected(); err != nil || changed != 1 {
-		return typesv2.ContextBundle{}, fmt.Errorf("context bundle changed while assembling")
+	if existingID != "" {
+		if _, err := s.db.ExecContext(ctx, `DELETE FROM workflow_v2_context_bundles WHERE id=? AND run_id=? AND status='assembling'`,
+			bundle.ID, runID); err != nil {
+			return typesv2.ContextBundle{}, err
+		}
+		bundle.ID = existingID
+		bundle.CreatedAt = time.UnixMilli(existingCreated).UTC()
+		if err := json.Unmarshal([]byte(existingSources), &bundle.Sources); err != nil {
+			return typesv2.ContextBundle{}, err
+		}
+		status = existingStatus
+	} else {
+		result, err := s.db.ExecContext(ctx, `UPDATE workflow_v2_context_bundles SET revision=?,status=?,sources_json=?,updated_at=?
+			WHERE id=? AND run_id=? AND status='assembling'`, bundle.Revision, status, string(sourcesJSON),
+			s.now().UTC().UnixMilli(), bundle.ID, runID)
+		if err != nil {
+			return typesv2.ContextBundle{}, err
+		}
+		if changed, err := result.RowsAffected(); err != nil || changed != 1 {
+			return typesv2.ContextBundle{}, fmt.Errorf("context bundle changed while assembling")
+		}
 	}
 	if _, err := s.db.ExecContext(ctx, `UPDATE workflow_v2_runs SET context_bundle_id=?,updated_at=? WHERE id=?`,
 		bundle.ID, s.now().UTC().UnixMilli(), runID); err != nil {
