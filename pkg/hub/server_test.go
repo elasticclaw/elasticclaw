@@ -954,6 +954,8 @@ func TestHandleMessagesFiltersWakeMarkers(t *testing.T) {
 		{ID: "plan-required-1", ClawID: "claw-1", TenantID: "test-tenant-id", Role: "system", Content: initialPlanRequiredMarker, CreatedAt: now()},
 		{ID: "plan-accepted-1", ClawID: "claw-1", TenantID: "test-tenant-id", Role: "system", Content: initialPlanAcceptedMarker, CreatedAt: now()},
 		{ID: "plan-correction-1", ClawID: "claw-1", TenantID: "test-tenant-id", Role: "system", Content: initialPlanCorrectionSentMarker, CreatedAt: now()},
+		// Per-stage plan_gate marker must not leak into the chat UI/transcript.
+		{ID: "plan-gate-1", ClawID: "claw-1", TenantID: "test-tenant-id", Role: "system", Content: planGateAcceptedMarker("plan_validate"), CreatedAt: now()},
 		{ID: "user-1", ClawID: "claw-1", TenantID: "test-tenant-id", Role: "user", Content: "hello", CreatedAt: now()},
 	} {
 		_, err := db.Exec(
@@ -980,6 +982,71 @@ func TestHandleMessagesFiltersWakeMarkers(t *testing.T) {
 	}
 	if len(msgs) != 1 || msgs[0].ID != "user-1" {
 		t.Fatalf("expected only user message, got %#v", msgs)
+	}
+}
+
+func TestSQLLikeLiteralPrefixEscapesWildcards(t *testing.T) {
+	// Underscores must be escaped so LIKE does not treat them as single-char wildcards.
+	got := sqlLikeLiteralPrefix("__PLAN_GATE_ACCEPTED__:")
+	want := `\_\_PLAN\_GATE\_ACCEPTED\_\_:`
+	if got != want {
+		t.Fatalf("sqlLikeLiteralPrefix = %q, want %q", got, want)
+	}
+	if got := sqlLikeLiteralPrefix(`a%b_c\d`); got != `a\%b\_c\\d` {
+		t.Fatalf("escape order wrong: %q", got)
+	}
+}
+
+func TestHandleMessagesDoesNotHideUnrelatedUnderscoreMarkers(t *testing.T) {
+	// Without ESCAPE, LIKE '__PLAN_GATE_ACCEPTED__:%' would also match any string
+	// of the same shape with different letters (each _ is a wildcard).
+	s, db := NewTestServerWithConfig(t, nil, "", "", "")
+	_, err := db.Exec(
+		`INSERT INTO claws(id, tenant_id, name, tags, created_at) VALUES(?,?,?,?,datetime('now'))`,
+		"claw-like", "test-tenant-id", "claw", `[]`,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Same length/shape as __PLAN_GATE_ACCEPTED__:x but different content.
+	lookalike := "XXPLANXGATEDACCEPTEDXX:not-a-real-marker"
+	if len(lookalike) != len(planGateAcceptedMarker("not-a-real-marker")) {
+		// Keep the test meaningful if the prefix length changes.
+		lookalike = strings.Repeat("X", len(planGateAcceptedMarkerPrefix)) + "not-a-real-marker"
+	}
+	for _, msg := range []types.HubMessage{
+		{ID: "lookalike", ClawID: "claw-like", TenantID: "test-tenant-id", Role: "system", Content: lookalike, CreatedAt: now()},
+		{ID: "real-gate", ClawID: "claw-like", TenantID: "test-tenant-id", Role: "system", Content: planGateAcceptedMarker("plan_validate"), CreatedAt: now()},
+		{ID: "user-1", ClawID: "claw-like", TenantID: "test-tenant-id", Role: "user", Content: "hello", CreatedAt: now()},
+	} {
+		if _, err := db.Exec(
+			`INSERT INTO messages(id,claw_id,tenant_id,role,content,created_at) VALUES(?,?,?,?,?,?)`,
+			msg.ID, msg.ClawID, msg.TenantID, msg.Role, msg.Content, msg.CreatedAt,
+		); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/messages/claw-like", nil)
+	req = req.WithContext(context.WithValue(req.Context(), ctxTenantKey{}, "test-tenant-id"))
+	rec := httptest.NewRecorder()
+	s.handleMessages(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d", rec.Code)
+	}
+	var msgs []types.HubMessage
+	if err := json.NewDecoder(rec.Body).Decode(&msgs); err != nil {
+		t.Fatal(err)
+	}
+	ids := map[string]bool{}
+	for _, m := range msgs {
+		ids[m.ID] = true
+	}
+	if !ids["user-1"] || !ids["lookalike"] {
+		t.Fatalf("expected user + lookalike system message visible, got %#v", msgs)
+	}
+	if ids["real-gate"] {
+		t.Fatalf("real plan_gate marker must stay hidden, got %#v", msgs)
 	}
 }
 
