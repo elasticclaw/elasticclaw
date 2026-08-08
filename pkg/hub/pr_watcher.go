@@ -87,8 +87,9 @@ func (s *Server) storePRMention(clawID, repo string, prNumber int, prURL string)
 		s.trackPROpened(factory.Name, issueID, clawID, repo, prNumber)
 	}
 
-	// Get the current max comment ID and head SHA to avoid flooding with historical data
-	token := s.resolveGitHubToken()
+	// Get the current max comment ID and head SHA to avoid flooding with historical data.
+	// Prefer a repo-scoped installation token so multi-org workspace apps work.
+	token := s.tokenForRepo(repo)
 	var maxCommentID int64
 	var maxReviewID int64
 	var lastCommentAt string
@@ -199,7 +200,7 @@ func (s *Server) preparePRMention(clawID, repo string, prNumber int, prURL strin
 	}
 
 	row = prMentionCandidate{repo: repo, number: prNumber, url: prURL}
-	token := s.resolveGitHubToken()
+	token := s.tokenForRepo(repo)
 	if token == "" {
 		return false, row, nil
 	}
@@ -435,12 +436,8 @@ func (s *Server) reconcileDeadClawPRs() {
 	if len(prs) == 0 {
 		return
 	}
-	globalToken := s.resolveGitHubToken()
 	for _, p := range prs {
-		repoToken := s.resolveGitHubTokenForRepo(p.repo)
-		if repoToken == "" {
-			repoToken = globalToken
-		}
+		repoToken := s.tokenForRepo(p.repo)
 		if repoToken == "" {
 			log.Printf("[pr-reconciler] no token available for %s, skipping run %s", p.repo, p.runID)
 			continue
@@ -600,12 +597,14 @@ func (s *Server) pollAllPRs() {
 	lowPriorityOK := defaultGitHubClient.allowLowPriority()
 	s.logGitHubBudget(lowPriorityOK)
 
-	token := s.resolveGitHubToken()
-	if token == "" {
+	// Prefer per-repo installation tokens. An unscoped mint from the first app
+	// cannot be reused across orgs when multiple workspace GitHub Apps exist
+	// (Greptile P1): merge/CI checks for later apps would 404/403 silently.
+	if len(s.githubAppConfigsForTokens()) == 0 {
 		if len(prs) > 0 {
 			s.mu.Lock()
 			if time.Since(s.lastTokenFailureLog) >= time.Minute {
-				log.Printf("[pr-watcher] CRITICAL: GitHub token resolution failed; PR watcher is effectively disabled for %d tracked PR(s)", len(prs))
+				log.Printf("[pr-watcher] CRITICAL: no GitHub Apps configured (hub or workspace); PR watcher disabled for %d tracked PR(s)", len(prs))
 				s.lastTokenFailureLog = time.Now()
 			}
 			s.mu.Unlock()
@@ -618,10 +617,18 @@ func (s *Server) pollAllPRs() {
 	}
 
 	terminatedClaws := map[string]bool{}
+	tokenMisses := 0
 	for _, r := range prs {
 		log.Printf("[pr-watcher] poll: claw=%s status=%s pr=%s", r.pr.clawID[:8], r.clawStatus, r.pr.prURL)
 		// Skip PRs for claws that were already terminated in this poll
 		if terminatedClaws[r.pr.clawID] {
+			continue
+		}
+
+		token := s.tokenForRepo(r.pr.repo)
+		if token == "" {
+			tokenMisses++
+			log.Printf("[pr-watcher] no token for %s (claw %s); skipping this PR", r.pr.repo, shortID(r.pr.clawID))
 			continue
 		}
 
@@ -647,11 +654,7 @@ func (s *Server) pollAllPRs() {
 		// Always check CI status (failures and, just as importantly, green)
 		s.checkCIStatus(r.pr, token)
 
-		repoToken := s.resolveGitHubTokenForRepo(r.pr.repo)
-		if repoToken == "" {
-			repoToken = token
-		}
-		commentsData, err := githubAPIList(fmt.Sprintf("repos/%s/issues/%d/comments", r.pr.repo, r.pr.prNumber), repoToken)
+		commentsData, err := githubAPIList(fmt.Sprintf("repos/%s/issues/%d/comments", r.pr.repo, r.pr.prNumber), token)
 		if err != nil {
 			log.Printf("[pr-watcher] error fetching comments for %s: %v", r.pr.prURL, err)
 			continue
@@ -669,7 +672,7 @@ func (s *Server) pollAllPRs() {
 
 		// Greptile posts inline review comments via the pulls/{n}/comments API.
 		// Fetch and track them separately from issue comments.
-		reviewCommentsData, err := githubAPIList(fmt.Sprintf("repos/%s/pulls/%d/comments", r.pr.repo, r.pr.prNumber), repoToken)
+		reviewCommentsData, err := githubAPIList(fmt.Sprintf("repos/%s/pulls/%d/comments", r.pr.repo, r.pr.prNumber), token)
 		if err != nil {
 			log.Printf("[pr-watcher] error fetching review comments for %s: %v", r.pr.prURL, err)
 		} else {
@@ -677,7 +680,7 @@ func (s *Server) pollAllPRs() {
 			s.updateReviewCommentWatermark(r.pr, reviewCommentsData)
 		}
 
-		reviewsData, err := githubAPIList(fmt.Sprintf("repos/%s/pulls/%d/reviews", r.pr.repo, r.pr.prNumber), repoToken)
+		reviewsData, err := githubAPIList(fmt.Sprintf("repos/%s/pulls/%d/reviews", r.pr.repo, r.pr.prNumber), token)
 		if err != nil {
 			log.Printf("[pr-watcher] error fetching reviews for %s: %v", r.pr.prURL, err)
 		} else {
@@ -702,6 +705,14 @@ func (s *Server) pollAllPRs() {
 				}
 			}
 		}
+	}
+	if tokenMisses > 0 && tokenMisses == len(prs) {
+		s.mu.Lock()
+		if time.Since(s.lastTokenFailureLog) >= time.Minute {
+			log.Printf("[pr-watcher] CRITICAL: GitHub token resolution failed for all %d tracked PR(s)", len(prs))
+			s.lastTokenFailureLog = time.Now()
+		}
+		s.mu.Unlock()
 	}
 }
 
@@ -850,11 +861,29 @@ func githubTokenCacheKey(repoAccess []RepoAccess) string {
 
 // resolveGitHubTokenForRepo returns a GitHub App installation token scoped to the given repo.
 // Use this for private repos — an unscoped token won't have read access.
+// When multiple workspace apps cover different orgs, this tries each app until
+// one can mint for owner/repo (cached per repo).
 func (s *Server) resolveGitHubTokenForRepo(repo string) string {
+	repo = strings.TrimSpace(repo)
+	if repo == "" {
+		return ""
+	}
 	return s.resolveGitHubTokenWithRepos([]RepoAccess{{Repo: repo, Permissions: "read"}})
 }
 
-// resolveGitHubToken returns a GitHub App installation token for PR polling.
+// tokenForRepo prefers a repo-scoped installation token so multi-org workspace
+// GitHub Apps are not collapsed onto the first unscoped installation. Falls
+// back to an unscoped mint only when scoped minting fails (legacy single-app).
+func (s *Server) tokenForRepo(repo string) string {
+	if tok := s.resolveGitHubTokenForRepo(repo); tok != "" {
+		return tok
+	}
+	return s.resolveGitHubToken()
+}
+
+// resolveGitHubToken returns an unscoped GitHub App installation token.
+// Prefer tokenForRepo / resolveGitHubTokenForRepo when a repository is known —
+// unscoped tokens from the first configured app may not reach other orgs.
 func (s *Server) resolveGitHubToken() string {
 	return s.resolveGitHubTokenWithRepos(nil)
 }

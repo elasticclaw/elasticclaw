@@ -261,11 +261,13 @@ func TestPollAllPRsStopsCallingGitHubWhileRateLimited(t *testing.T) {
 		t.Fatalf("nextPollDelay=%s, want a backoff longer than %s", delay, prWatcherBaseInterval)
 	}
 
-	// One unscoped and one repo-scoped token for the whole run, not one per call.
-	if got := atomic.LoadInt64(&mints); got != 2 {
-		t.Fatalf("installation tokens minted=%d, want 2 (tokens must be cached)", got)
+	// Repo-scoped only (pollAllPRs uses tokenForRepo so multi-org workspace apps
+	// are not collapsed onto a single unscoped installation token).
+	if got := atomic.LoadInt64(&mints); got != 1 {
+		t.Fatalf("installation tokens minted=%d, want 1 (repo-scoped token cached across polls)", got)
 	}
 }
+
 
 func TestInstallationTokensAreCachedAcrossCalls(t *testing.T) {
 	var mints int64
