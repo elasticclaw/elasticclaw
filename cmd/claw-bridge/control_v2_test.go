@@ -184,6 +184,24 @@ func TestOldTaskCleanupCannotRemoveReplacementCancellation(t *testing.T) {
 	supervisor.unregisterTaskCancellation("task-reused", newCancellation)
 }
 
+func TestTaskCancellationIsRegisteredBeforeExecutionStarts(t *testing.T) {
+	supervisor := newControlSupervisor(context.Background(), "ws://invalid", "claw", "token",
+		bridgeRegistration(true), openTestBridgeControlStore(t))
+	task := typesv2.AgentTask{ID: "task-immediate-cancel", Deadline: time.Now().Add(time.Minute)}
+	taskCtx, cancel, activeCancellation := supervisor.prepareTaskExecution(context.Background(), task)
+	defer cancel()
+	defer supervisor.unregisterTaskCancellation("task-immediate-cancel", activeCancellation)
+
+	// This is the ordering used by startTask: registration occurs on the reader
+	// goroutine before execution is launched and before it can read a cancel.
+	supervisor.cancelTask("task-immediate-cancel")
+	select {
+	case <-taskCtx.Done():
+	case <-time.After(time.Second):
+		t.Fatal("immediate cancellation did not reach the registered task")
+	}
+}
+
 func TestBridgeRejectsTaskAssignmentOlderThanAuthoritativeSnapshot(t *testing.T) {
 	store := openTestBridgeControlStore(t)
 	binding := workflowControlBinding{RunID: "run-stale-task", AttemptID: "attempt-stale-task"}

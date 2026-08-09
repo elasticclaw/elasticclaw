@@ -438,7 +438,7 @@ func (s *controlSupervisor) runConnection(ctx context.Context, binding workflowC
 				return err
 			}
 			if startTask != nil && receipt.Disposition == typesv2.DispositionAccepted {
-				go s.executeTask(ctx, binding, frame.Envelope.MessageID, *startTask)
+				s.startTask(ctx, binding, frame.Envelope.MessageID, *startTask)
 			}
 		default:
 			return fmt.Errorf("unsupported control frame %q", frame.Type)
@@ -549,8 +549,33 @@ func (s *controlSupervisor) acceptHubEnvelope(binding workflowControlBinding,
 		Disposition: typesv2.DispositionAccepted, StateVersion: s.stateVersion(binding)}, task, nil
 }
 
-func (s *controlSupervisor) executeTask(ctx context.Context, binding workflowControlBinding,
+// startTask registers cancellation synchronously on the WebSocket reader path
+// before it launches agent work. A cancellation frame read immediately after
+// the assignment can therefore always find and stop this task.
+func (s *controlSupervisor) startTask(ctx context.Context, binding workflowControlBinding,
 	assignmentMessageID string, task typesv2.AgentTask) {
+	taskCtx, cancel, activeCancellation := s.prepareTaskExecution(ctx, task)
+	go s.executeTask(taskCtx, binding, assignmentMessageID, task, cancel, activeCancellation)
+}
+
+func (s *controlSupervisor) prepareTaskExecution(ctx context.Context,
+	task typesv2.AgentTask) (context.Context, context.CancelFunc, *activeTaskCancellation) {
+	deadline := task.Deadline
+	if deadline.IsZero() {
+		deadline = time.Now().Add(2 * time.Hour)
+	}
+	taskCtx, cancel := context.WithDeadline(ctx, deadline)
+	activeCancellation := s.registerTaskCancellation(task.ID, cancel)
+	return taskCtx, cancel, activeCancellation
+}
+
+func (s *controlSupervisor) executeTask(taskCtx context.Context, binding workflowControlBinding,
+	assignmentMessageID string, task typesv2.AgentTask, cancel context.CancelFunc,
+	activeCancellation *activeTaskCancellation) {
+	defer func() {
+		cancel()
+		s.unregisterTaskCancellation(task.ID, activeCancellation)
+	}()
 	claimed, err := s.store.setIncomingStatus(assignmentMessageID, "accepted", "running")
 	if err != nil || !claimed {
 		if err != nil {
@@ -565,17 +590,6 @@ func (s *controlSupervisor) executeTask(ctx context.Context, binding workflowCon
 		s.finishTask(binding, assignmentMessageID, task, typesv2.MessageAgentTaskFailed, "gateway is not ready")
 		return
 	}
-	deadline := task.Deadline
-	if deadline.IsZero() {
-		deadline = time.Now().Add(2 * time.Hour)
-	}
-	taskCtx, cancel := context.WithDeadline(ctx, deadline)
-	activeCancellation := s.registerTaskCancellation(task.ID, cancel)
-	defer func() {
-		cancel()
-		s.unregisterTaskCancellation(task.ID, activeCancellation)
-	}()
-
 	if err := s.enqueueTaskEvent(binding, task, typesv2.MessageAgentTaskStarted, map[string]interface{}{
 		"execution": map[string]interface{}{"bridge_started_at": time.Now().UTC()},
 	}); err != nil {
@@ -672,7 +686,7 @@ func (s *controlSupervisor) recoverInterrupted(ctx context.Context, binding work
 		}
 		var task typesv2.AgentTask
 		if json.Unmarshal(envelope.Payload, &task) == nil {
-			go s.executeTask(ctx, binding, envelope.MessageID, task)
+			s.startTask(ctx, binding, envelope.MessageID, task)
 		}
 	}
 }
