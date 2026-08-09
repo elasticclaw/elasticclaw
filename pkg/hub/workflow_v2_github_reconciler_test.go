@@ -26,6 +26,7 @@ func TestWorkflowV2PeriodicReconciliationRecoversLostGitHubWebhooks(t *testing.T
 
 	var pullRequests, checks, workflows, reviews, inlineComments, discussionComments atomic.Int64
 	var exposeWebhookComment atomic.Bool
+	var editWebhookComment atomic.Bool
 	gh := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case strings.HasSuffix(r.URL.Path, "/repos/org/api/pulls/10"):
@@ -64,9 +65,15 @@ func TestWorkflowV2PeriodicReconciliationRecoversLostGitHubWebhooks(t *testing.T
 				 "updated_at":"2026-08-09T11:02:00Z","user":{"login":"dave","type":"User"}}
 			`
 			if exposeWebhookComment.Load() {
-				body += `,{"id":89,"body":"Webhook and poll see the same feedback.",
+				commentBody := "Webhook and poll see the same feedback."
+				updatedAt := "2026-08-09T12:03:00Z"
+				if editWebhookComment.Load() {
+					commentBody = "Edited feedback converges without another fix task."
+					updatedAt = "2026-08-09T12:04:00Z"
+				}
+				body += `,{"id":89,"body":"` + commentBody + `",
 				 "html_url":"https://github.com/org/api/pull/10#discussion_r89","path":"api.go","line":43,
-				 "commit_id":"head-2","created_at":"2026-08-09T12:03:00Z","updated_at":"2026-08-09T12:03:00Z",
+				 "commit_id":"head-2","created_at":"2026-08-09T12:03:00Z","updated_at":"` + updatedAt + `",
 				 "user":{"login":"erin","type":"User"}}`
 			}
 			_, _ = w.Write([]byte(body + `]`))
@@ -204,6 +211,36 @@ func TestWorkflowV2PeriodicReconciliationRecoversLostGitHubWebhooks(t *testing.T
 	if convergedTasks != taskCount {
 		t.Fatalf("reconciliation convergence changed task count from %d to %d", taskCount, convergedTasks)
 	}
+	editWebhookComment.Store(true)
+	if err := s.reconcileWorkflowV2GitHub(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	var receivedAfterEdit, reconciledAfterEdit, tasksAfterEdit int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM workflow_v2_events
+		WHERE run_id=? AND kind='review.feedback.received'`, run.ID).Scan(&receivedAfterEdit); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM workflow_v2_events
+		WHERE run_id=? AND kind='review.feedback.reconciled'`, run.ID).Scan(&reconciledAfterEdit); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM workflow_v2_agent_tasks WHERE run_id=?`, run.ID).Scan(&tasksAfterEdit); err != nil {
+		t.Fatal(err)
+	}
+	var feedbackJSON string
+	if err := db.QueryRow(`SELECT value_json FROM workflow_v2_facts
+		WHERE run_id=? AND fact_key='review.feedback'`, run.ID).Scan(&feedbackJSON); err != nil {
+		t.Fatal(err)
+	}
+	if receivedAfterEdit != feedbackAfterWebhook || reconciledAfterEdit != 1 || tasksAfterEdit != convergedTasks ||
+		!strings.Contains(feedbackJSON, "Edited feedback converges") {
+		t.Fatalf("edited feedback received/reconciled/tasks/fact = %d/%d/%d/%s",
+			receivedAfterEdit, reconciledAfterEdit, tasksAfterEdit, feedbackJSON)
+	}
+	var revisedEvents int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM workflow_v2_events WHERE run_id=?`, run.ID).Scan(&revisedEvents); err != nil {
+		t.Fatal(err)
+	}
 	if err := s.reconcileWorkflowV2GitHub(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -214,9 +251,9 @@ func TestWorkflowV2PeriodicReconciliationRecoversLostGitHubWebhooks(t *testing.T
 	if err := db.QueryRow(`SELECT COUNT(*) FROM workflow_v2_agent_tasks WHERE run_id=?`, run.ID).Scan(&replayTasks); err != nil {
 		t.Fatal(err)
 	}
-	if replayEvents != convergedEvents || replayTasks != convergedTasks {
+	if replayEvents != revisedEvents || replayTasks != convergedTasks {
 		t.Fatalf("reconciliation replay changed events/tasks from %d/%d to %d/%d",
-			convergedEvents, convergedTasks, replayEvents, replayTasks)
+			revisedEvents, convergedTasks, replayEvents, replayTasks)
 	}
 }
 

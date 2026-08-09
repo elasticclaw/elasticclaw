@@ -268,11 +268,11 @@ func (s *Server) reconcileWorkflowV2GitHubReviews(ctx context.Context, store *wo
 			feedback := map[string]interface{}{"kind": "review", "author": item.review.User.Login,
 				"body": item.review.Body, "url": item.review.HTMLURL, "repository": target.Repository,
 				"number": target.Number, "pull_request_url": target.URL}
-			eventID := workflowV2GitHubFeedbackEventID(target, "review",
-				strconv.FormatInt(item.review.ID, 10), item.review.Body, "", 0)
-			if _, err := store.ApplyReviewFeedback(ctx, target, eventID, feedback, typesv2.EvidenceProvenance{
+			rawID := strconv.FormatInt(item.review.ID, 10)
+			eventID := workflowV2GitHubFeedbackEventID(target, "review", rawID)
+			if _, err := store.ReconcileReviewFeedback(ctx, target, eventID, feedback, typesv2.EvidenceProvenance{
 				Producer: string(workflowv2.ProducerReview), Principal: item.review.User.Login,
-				ExternalID: strconv.FormatInt(item.review.ID, 10), ObservedAt: item.observed, Reconciled: true,
+				ExternalID: "review:" + rawID, ObservedAt: item.observed, Reconciled: true,
 			}); err != nil && ctx.Err() == nil {
 				log.Printf("[workflow-v2 github] reconcile feedback for run %s: %v", target.RunID, err)
 			}
@@ -372,11 +372,11 @@ func (s *Server) reconcileWorkflowV2GitHubComment(ctx context.Context, store *wo
 	if comment.Line > 0 {
 		feedback["line"] = comment.Line
 	}
-	eventID := workflowV2GitHubFeedbackEventID(target, kind, strconv.FormatInt(comment.ID, 10),
-		comment.Body, comment.Path, comment.Line)
-	if _, err := store.ApplyReviewFeedback(ctx, target, eventID, feedback, typesv2.EvidenceProvenance{
+	rawID := strconv.FormatInt(comment.ID, 10)
+	eventID := workflowV2GitHubFeedbackEventID(target, kind, rawID)
+	if _, err := store.ReconcileReviewFeedback(ctx, target, eventID, feedback, typesv2.EvidenceProvenance{
 		Producer: string(workflowv2.ProducerReview), Principal: comment.User.Login,
-		ExternalID: strconv.FormatInt(comment.ID, 10), ObservedAt: observed, Reconciled: true,
+		ExternalID: kind + ":" + rawID, ObservedAt: observed, Reconciled: true,
 	}); err != nil && ctx.Err() == nil {
 		log.Printf("[workflow-v2 github] reconcile %s for run %s: %v", kind, target.RunID, err)
 	}

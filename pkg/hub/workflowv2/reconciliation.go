@@ -1,8 +1,11 @@
 package workflowv2
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -232,6 +235,66 @@ func (s *Store) ReconcilePullRequest(ctx context.Context, target DeliveryTarget,
 // in the resulting agent task; no conversation row participates.
 func (s *Store) ApplyReviewFeedback(ctx context.Context, target DeliveryTarget, eventID string,
 	feedback map[string]interface{}, provenance typesv2.EvidenceProvenance) (EventResult, error) {
+	return s.applyReviewFeedbackEvent(ctx, target, eventID, "review.feedback.received", feedback, provenance)
+}
+
+// ReconcileReviewFeedback converges edits to an existing provider feedback
+// object without emitting review.feedback.received twice. The stable received
+// event controls workflow execution; a content revision is an auditable but
+// distinct reconciliation event that only refreshes the protected typed fact.
+func (s *Store) ReconcileReviewFeedback(ctx context.Context, target DeliveryTarget, eventID string,
+	feedback map[string]interface{}, provenance typesv2.EvidenceProvenance) (EventResult, error) {
+	received, err := s.ApplyReviewFeedback(ctx, target, eventID, feedback, provenance)
+	if err != nil || received.Disposition != typesv2.DispositionDuplicate {
+		return received, err
+	}
+	current, sameObject, sameContent, err := s.currentReviewFeedback(ctx, target.RunID, feedback, provenance)
+	if err != nil || !sameObject || sameContent || current.ObservedAt.After(provenance.ObservedAt) {
+		return received, err
+	}
+	encoded, err := json.Marshal(feedback)
+	if err != nil {
+		return EventResult{}, err
+	}
+	digest := sha256.Sum256(encoded)
+	revisionID := eventID + ":revision:" + hex.EncodeToString(digest[:])
+	return s.applyReviewFeedbackEvent(ctx, target, revisionID, "review.feedback.reconciled", feedback, provenance)
+}
+
+func (s *Store) currentReviewFeedback(ctx context.Context, runID string, feedback map[string]interface{},
+	provenance typesv2.EvidenceProvenance) (typesv2.EvidenceProvenance, bool, bool, error) {
+	var valueJSON, provenanceJSON string
+	err := s.db.QueryRowContext(ctx, `SELECT value_json,provenance_json FROM workflow_v2_facts
+		WHERE run_id=? AND fact_key='review.feedback'`, runID).Scan(&valueJSON, &provenanceJSON)
+	if err == sql.ErrNoRows {
+		return typesv2.EvidenceProvenance{}, false, false, nil
+	}
+	if err != nil {
+		return typesv2.EvidenceProvenance{}, false, false, err
+	}
+	var current typesv2.EvidenceProvenance
+	if err := json.Unmarshal([]byte(provenanceJSON), &current); err != nil {
+		return typesv2.EvidenceProvenance{}, false, false, err
+	}
+	encoded, err := json.Marshal(feedback)
+	if err != nil {
+		return typesv2.EvidenceProvenance{}, false, false, err
+	}
+	var currentFeedback map[string]interface{}
+	if err := json.Unmarshal([]byte(valueJSON), &currentFeedback); err != nil {
+		return typesv2.EvidenceProvenance{}, false, false, err
+	}
+	return current, currentFeedback["kind"] == feedback["kind"] &&
+			reviewFeedbackExternalIDsMatch(current.ExternalID, provenance.ExternalID),
+		bytes.Equal([]byte(valueJSON), encoded), nil
+}
+
+func reviewFeedbackExternalIDsMatch(current, incoming string) bool {
+	return current == incoming || (current != "" && strings.HasSuffix(incoming, ":"+current))
+}
+
+func (s *Store) applyReviewFeedbackEvent(ctx context.Context, target DeliveryTarget, eventID, eventKind string,
+	feedback map[string]interface{}, provenance typesv2.EvidenceProvenance) (EventResult, error) {
 	if target.RunID == "" || target.AttemptID == "" || target.PRID == "" || target.HeadSHA == "" {
 		return EventResult{}, fmt.Errorf("review feedback requires an owned delivery target")
 	}
@@ -239,12 +302,12 @@ func (s *Store) ApplyReviewFeedback(ctx context.Context, target DeliveryTarget, 
 		eventID = uuid.NewString()
 	}
 	return s.applyEventWithMutation(ctx, target.RunID, EventInput{
-		ID: eventID, MessageID: eventID, Kind: "review.feedback.received", AttemptID: target.AttemptID,
+		ID: eventID, MessageID: eventID, Kind: eventKind, AttemptID: target.AttemptID,
 		Producer: ProducerReview, Provenance: provenance,
 	}, func(ctx context.Context, tx *sql.Tx, input *EventInput) error {
-		var currentProvenance string
-		err := tx.QueryRowContext(ctx, `SELECT provenance_json FROM workflow_v2_facts
-			WHERE run_id=? AND fact_key='review.feedback'`, target.RunID).Scan(&currentProvenance)
+		var currentValue, currentProvenance string
+		err := tx.QueryRowContext(ctx, `SELECT value_json,provenance_json FROM workflow_v2_facts
+			WHERE run_id=? AND fact_key='review.feedback'`, target.RunID).Scan(&currentValue, &currentProvenance)
 		if err != nil && err != sql.ErrNoRows {
 			return err
 		}
@@ -255,6 +318,16 @@ func (s *Store) ApplyReviewFeedback(ctx context.Context, target DeliveryTarget, 
 			}
 			if current.ObservedAt.After(provenance.ObservedAt) {
 				return fmt.Errorf("review feedback observation is older than the current fact")
+			}
+			if eventKind == "review.feedback.reconciled" {
+				var currentFeedback map[string]interface{}
+				if err := json.Unmarshal([]byte(currentValue), &currentFeedback); err != nil {
+					return fmt.Errorf("decode current review feedback: %w", err)
+				}
+				if currentFeedback["kind"] != feedback["kind"] ||
+					!reviewFeedbackExternalIDsMatch(current.ExternalID, provenance.ExternalID) {
+					return fmt.Errorf("review feedback object changed while reconciling")
+				}
 			}
 		}
 		var headSHA string

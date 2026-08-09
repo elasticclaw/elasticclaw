@@ -383,19 +383,18 @@ func (s *Server) applyWorkflowV2GitHubFeedback(target workflowv2.DeliveryTarget,
 	if line > 0 {
 		feedback["line"] = line
 	}
-	eventID := workflowV2GitHubFeedbackEventID(target, kind, externalID, body, path, line)
-	_, err := workflowv2.NewStore(s.db).ApplyReviewFeedback(context.Background(), target, eventID, feedback,
+	eventID := workflowV2GitHubFeedbackEventID(target, kind, externalID)
+	_, err := workflowv2.NewStore(s.db).ReconcileReviewFeedback(context.Background(), target, eventID, feedback,
 		typesv2.EvidenceProvenance{Producer: string(workflowv2.ProducerReview), Principal: author,
-			ExternalID: externalID, ObservedAt: observed})
+			ExternalID: kind + ":" + externalID, ObservedAt: observed})
 	if err != nil {
 		log.Printf("[workflow-v2 github] apply feedback to run %s: %v", target.RunID, err)
 	}
 }
 
-func workflowV2GitHubFeedbackEventID(target workflowv2.DeliveryTarget, kind, externalID, body, filePath string,
-	line int) string {
+func workflowV2GitHubFeedbackEventID(target workflowv2.DeliveryTarget, kind, externalID string) string {
 	return workflowV2GitHubEventID(target.RunID, "review_feedback", kind, externalID,
-		target.Repository, strconv.Itoa(target.Number), body, filePath, strconv.Itoa(line))
+		target.Repository, strconv.Itoa(target.Number))
 }
 
 func workflowV2GitHubReviewConnections(target workflowv2.DeliveryTarget) []string {
