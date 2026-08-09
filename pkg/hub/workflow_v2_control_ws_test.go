@@ -253,6 +253,11 @@ stages:
 			t.Fatal(err)
 		}
 	}
+	if _, err := db.Exec(`INSERT INTO messages(id,claw_id,tenant_id,role,content,created_at,delivered_at)
+		VALUES('v2-queued-before-reconnect',?,?,'user','proceed [DONE] https://github.com/org/repo/pull/99',datetime('now'),NULL)`,
+		v2ClawID, "test-tenant-id"); err != nil {
+		t.Fatal(err)
+	}
 	store := workflowv2.NewStore(db)
 	run, err := store.CreateRun(context.Background(), workflowv2.CreateRunRequest{
 		ID: "run-concurrent-v2", TenantID: "test-tenant-id", InitialClawID: v2ClawID,
@@ -398,7 +403,7 @@ stages:
 	}
 	var v2State string
 	var v2Version uint64
-	var v2Events, v2LegacyPRs, v2InjectedMessages int
+	var v2Events, v2LegacyPRs, v2DisplayOnlyMessages, v2PendingMessages int
 	if err := db.QueryRow(`SELECT state,state_version FROM workflow_v2_runs WHERE id=?`, run.ID).
 		Scan(&v2State, &v2Version); err != nil {
 		t.Fatal(err)
@@ -409,12 +414,18 @@ stages:
 	if err := db.QueryRow(`SELECT COUNT(*) FROM claw_prs WHERE claw_id=?`, v2ClawID).Scan(&v2LegacyPRs); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND role!='claw'`, v2ClawID).
-		Scan(&v2InjectedMessages); err != nil {
+	if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND role!='claw'
+		AND delivered_at IS NOT NULL AND format='workflow_v2_display_only'`, v2ClawID).
+		Scan(&v2DisplayOnlyMessages); err != nil {
 		t.Fatal(err)
 	}
-	if v2State != "done" || v2Version != 2 || v2Events != 3 || v2LegacyPRs != 0 || v2InjectedMessages != 0 {
-		t.Fatalf("V2 state/version/events/legacy_prs/injected = %q/%d/%d/%d/%d",
-			v2State, v2Version, v2Events, v2LegacyPRs, v2InjectedMessages)
+	if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND delivered_at IS NULL`, v2ClawID).
+		Scan(&v2PendingMessages); err != nil {
+		t.Fatal(err)
+	}
+	if v2State != "done" || v2Version != 2 || v2Events != 3 || v2LegacyPRs != 0 ||
+		v2DisplayOnlyMessages != 1 || v2PendingMessages != 0 {
+		t.Fatalf("V2 state/version/events/legacy_prs/display_only/pending = %q/%d/%d/%d/%d/%d",
+			v2State, v2Version, v2Events, v2LegacyPRs, v2DisplayOnlyMessages, v2PendingMessages)
 	}
 }

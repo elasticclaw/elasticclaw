@@ -8877,8 +8877,12 @@ func (s *Server) enqueueSessionLostResume(clawID, prefix, marker string) {
 func (s *Server) sendStreamingNudge(cc *clawConn, text string) {
 	cc.mu.RLock()
 	clawID := cc.id
+	workflowV2Controlled := cc.workflowV2Controlled
 	turnOpen := cc.isBusyLocked()
 	cc.mu.RUnlock()
+	if workflowV2Controlled {
+		return
+	}
 	// The nudge targets the in-flight turn. This runs on a goroutine, so the
 	// turn may have ended (and deleteStaleWatchdogNags already run) before we
 	// get here — queueing now would deliver the stale nudge as the next
@@ -8896,6 +8900,19 @@ func (s *Server) sendStreamingNudge(cc *clawConn, text string) {
 // sendNextQueuedMessage delivers the oldest pending message if the claw is idle.
 func (s *Server) sendNextQueuedMessage(cc *clawConn) {
 	cc.mu.Lock()
+	if cc.workflowV2Controlled {
+		clawID, tenantID := cc.id, cc.tenantID
+		cc.mu.Unlock()
+		// Conversation rows remain visible in the transcript, but they are
+		// never inputs to a V2-owned execution. Settle any old or newly queued
+		// rows so reconnects cannot repeatedly reconsider them for delivery.
+		if _, err := s.db.Exec(`UPDATE messages SET delivered_at=created_at,
+			format=CASE WHEN format='' THEN 'workflow_v2_display_only' ELSE format END
+			WHERE claw_id=? AND tenant_id=? AND delivered_at IS NULL`, clawID, tenantID); err != nil {
+			log.Printf("[workflow-v2] settle display-only messages for %s: %v", shortID(clawID), err)
+		}
+		return
+	}
 	if cc.isBusyLocked() || cc.deliveryInFlight || cc.noProgressPaused {
 		cc.mu.Unlock()
 		return
