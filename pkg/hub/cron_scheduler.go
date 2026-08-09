@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
@@ -189,11 +190,18 @@ func (cs *cronScheduler) removeWorkflow(workspaceName, workflowName string) {
 		return
 	}
 	key := workspaceName + "/" + workflowName
-	if entryID, ok := cs.entries[key]; ok {
-		cs.cron.Remove(entryID)
-		delete(cs.entries, key)
-		delete(cs.workflows, key)
-		log.Printf("[cron] removed schedule for %s", key)
+
+	// Storage deletes workflows by lowercased filename, so the deletion URL may
+	// use a different casing than the workflow name stored in the scheduler.
+	// Find and remove the matching entry case-insensitively.
+	for entryKey, entryID := range cs.entries {
+		if strings.EqualFold(entryKey, key) {
+			cs.cron.Remove(entryID)
+			delete(cs.entries, entryKey)
+			delete(cs.workflows, entryKey)
+			log.Printf("[cron] removed schedule for %s", entryKey)
+			return
+		}
 	}
 }
 
