@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -95,12 +96,37 @@ func TestWorkflowV2GitHubCIAndReviewUseTypedRuntimeOnly(t *testing.T) {
 	http.DefaultTransport = githubAppTokenTransport{base: oldTransport}
 	t.Cleanup(func() { http.DefaultTransport = oldTransport })
 
+	var emptyChecks atomic.Bool
+	var staleReview atomic.Bool
 	gh := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.Contains(r.URL.Path, "/check-runs") {
+			if emptyChecks.Load() {
+				_, _ = w.Write([]byte(`{"check_runs":[]}`))
+				return
+			}
 			_, _ = w.Write([]byte(`{"check_runs":[
-                {"id":101,"name":"lint","status":"completed","conclusion":"success","completed_at":"2026-08-09T12:00:00Z"},
-                {"id":102,"name":"unit","status":"completed","conclusion":"success","completed_at":"2026-08-09T12:00:01Z"}
-            ]}`))
+				{"id":101,"name":"lint","status":"completed","conclusion":"success","completed_at":"2026-08-09T12:00:00Z","app":{"slug":"github-actions"},"check_suite":{"id":501}},
+				{"id":102,"name":"unit","status":"completed","conclusion":"success","completed_at":"2026-08-09T12:00:01Z","app":{"slug":"github-actions"},"check_suite":{"id":501}},
+				{"id":103,"name":"lint","status":"completed","conclusion":"success","completed_at":"2026-08-09T12:00:02Z","app":{"slug":"untrusted-ci"},"check_suite":{"id":999}}
+			]}`))
+			return
+		}
+		if strings.Contains(r.URL.Path, "/actions/runs") {
+			_, _ = w.Write([]byte(`{"workflow_runs":[
+				{"name":"CI","path":".github/workflows/ci.yml","check_suite_id":501}
+			]}`))
+			return
+		}
+		if strings.Contains(r.URL.Path, "/pulls/10/reviews/77") {
+			commitID := "head-1"
+			if staleReview.Load() {
+				commitID = "old-head"
+			}
+			_, _ = w.Write([]byte(`{"id":77,"state":"CHANGES_REQUESTED",
+				"body":"Handle the nil response before dereferencing it.",
+				"html_url":"https://github.com/org/api/pull/10#pullrequestreview-77",
+				"commit_id":"` + commitID + `","submitted_at":"2026-08-09T12:01:00Z",
+				"user":{"login":"alice","type":"User"}}`))
 			return
 		}
 		http.NotFound(w, r)
@@ -162,6 +188,15 @@ func TestWorkflowV2GitHubCIAndReviewUseTypedRuntimeOnly(t *testing.T) {
 	if !policy.CISatisfied || policy.ReviewSatisfied {
 		t.Fatalf("policy after CI = %#v", policy)
 	}
+	emptyChecks.Store(true)
+	s.processGitHubCheckEvent("check_run", checkPayload)
+	policy, err = store.EvaluateDeliveryPolicy(context.Background(), run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if policy.CISatisfied || policy.CIStatus != "pending" {
+		t.Fatalf("empty authoritative check snapshot retained stale evidence: %#v", policy)
+	}
 
 	var review githubPRReviewPayload
 	review.Action = "submitted"
@@ -171,9 +206,22 @@ func TestWorkflowV2GitHubCIAndReviewUseTypedRuntimeOnly(t *testing.T) {
 	review.Review.HTMLURL = prURL + "#pullrequestreview-77"
 	review.Review.User.Login = "alice"
 	review.Review.User.Type = "User"
+	review.Review.CommitID = "head-1"
+	review.Review.SubmittedAt = "2026-08-09T12:01:00Z"
 	review.PullRequest.Number = 10
 	review.PullRequest.HTMLURL = prURL
 	review.Repository.FullName = "org/api"
+	staleReview.Store(true)
+	s.processGitHubPRReviewEvent(review)
+	var reviewEvidence int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM workflow_v2_evidence WHERE run_id=? AND domain='review'`,
+		run.ID).Scan(&reviewEvidence); err != nil {
+		t.Fatal(err)
+	}
+	if reviewEvidence != 0 {
+		t.Fatalf("delayed old-head review created %d evidence rows", reviewEvidence)
+	}
+	staleReview.Store(false)
 	s.processGitHubPRReviewEvent(review)
 	if err := s.drainWorkflowV2Effects(context.Background(), "test-v2-github-worker"); err != nil {
 		t.Fatal(err)

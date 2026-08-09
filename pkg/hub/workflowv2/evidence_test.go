@@ -186,13 +186,21 @@ func TestTypedReviewFeedbackIsIncludedInFixTask(t *testing.T) {
 	attempt, pr := createPolicyDelivery(t, store, "run-review-feedback", "head-1", "open")
 	feedback := map[string]interface{}{"author": "alice", "body": "Handle the nil response before dereferencing it.",
 		"url": "https://github.example/org/api/pull/10#discussion_r1"}
-	if _, err := store.ApplyReviewFeedback(context.Background(), workflowv2.DeliveryTarget{
+	observed := time.Date(2026, 8, 8, 12, 10, 0, 0, time.UTC)
+	target := workflowv2.DeliveryTarget{
 		RunID: "run-review-feedback", AttemptID: attempt.ID, PRID: pr.ID, Repository: pr.Repository,
 		RepositoryName: pr.RepositoryName, Number: pr.Number, URL: pr.URL, HeadSHA: pr.HeadSHA,
-	}, "feedback-1", feedback, typesv2.EvidenceProvenance{
-		Producer: string(workflowv2.ProducerReview), Principal: "alice", ObservedAt: time.Now().UTC(),
+	}
+	if _, err := store.ApplyReviewFeedback(context.Background(), target, "feedback-1", feedback, typesv2.EvidenceProvenance{
+		Producer: string(workflowv2.ProducerReview), Principal: "alice", ObservedAt: observed,
 	}); err != nil {
 		t.Fatal(err)
+	}
+	if _, err := store.ApplyReviewFeedback(context.Background(), target, "feedback-older",
+		map[string]interface{}{"body": "obsolete feedback"}, typesv2.EvidenceProvenance{
+			Producer: string(workflowv2.ProducerReview), Principal: "alice", ObservedAt: observed.Add(-time.Minute),
+		}); err == nil || !strings.Contains(err.Error(), "older") {
+		t.Fatalf("out-of-order feedback error = %v", err)
 	}
 	recordPolicyEvidence(t, store, "run-review-feedback", pr, "review", "github-reviews", "alice", "approval",
 		"changes_requested", nil, workflowv2.ProducerReview)
@@ -462,6 +470,23 @@ func TestReconciledCheckSetCannotTransitionOnMixedSnapshot(t *testing.T) {
 	}
 	if result.CIStatus != "pending" {
 		t.Fatalf("out-of-order snapshot regressed policy: %#v", result)
+	}
+	result, err = store.ReconcileEvidenceSnapshot(context.Background(), []workflowv2.EvidenceScope{{
+		RunID: "run-atomic-ci-snapshot", PRID: pr.ID, HeadSHA: pr.HeadSHA, Domain: "ci",
+		Connection: "github-actions", Pipeline: "github-pr",
+	}}, nil, workflowv2.ProducerCI)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.CIStatus != "pending" {
+		t.Fatalf("empty snapshot policy = %#v", result)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM workflow_v2_evidence WHERE run_id=? AND superseded_at=0`,
+		"run-atomic-ci-snapshot").Scan(&currentRows); err != nil {
+		t.Fatal(err)
+	}
+	if currentRows != 0 {
+		t.Fatalf("empty snapshot retained %d current evidence rows", currentRows)
 	}
 }
 

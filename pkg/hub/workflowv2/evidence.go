@@ -31,6 +31,17 @@ type EvidenceInput struct {
 	ObservedAt time.Time
 }
 
+// EvidenceScope identifies the authoritative subject set replaced by one
+// reconciliation snapshot. Pipeline is required for pipeline-scoped CI data.
+type EvidenceScope struct {
+	RunID      string
+	PRID       string
+	HeadSHA    string
+	Domain     string
+	Connection string
+	Pipeline   string
+}
+
 type DeliveryPolicyResult struct {
 	Revision         string `json:"revision"`
 	PullRequestCount int    `json:"pull_request_count"`
@@ -46,7 +57,7 @@ type DeliveryPolicyResult struct {
 // RecordEvidence accepts only adapter-owned evidence for the current verified
 // PR head, then recomputes the workflow's aggregate delivery policy.
 func (s *Store) RecordEvidence(ctx context.Context, input EvidenceInput, producer Producer) (DeliveryPolicyResult, error) {
-	return s.recordEvidenceSet(ctx, []EvidenceInput{input}, producer, false)
+	return s.recordEvidenceSet(ctx, nil, []EvidenceInput{input}, producer, false)
 }
 
 // ReconcileEvidenceSet atomically replaces the current adapter-owned evidence
@@ -55,15 +66,38 @@ func (s *Store) RecordEvidence(ctx context.Context, input EvidenceInput, produce
 // transient mixture of old and new check results.
 func (s *Store) ReconcileEvidenceSet(ctx context.Context, inputs []EvidenceInput,
 	producer Producer) (DeliveryPolicyResult, error) {
-	return s.recordEvidenceSet(ctx, inputs, producer, true)
+	if len(inputs) == 0 {
+		return DeliveryPolicyResult{}, fmt.Errorf("evidence set must not be empty without explicit scopes")
+	}
+	scopes := make([]EvidenceScope, 0, len(inputs))
+	seen := map[string]bool{}
+	for _, input := range inputs {
+		pipeline, _ := input.Payload["pipeline"].(string)
+		scope := EvidenceScope{RunID: input.RunID, PRID: input.PRID, HeadSHA: input.HeadSHA,
+			Domain: input.Domain, Connection: input.Connection, Pipeline: strings.TrimSpace(pipeline)}
+		key := scope.Connection + "\x00" + scope.Pipeline
+		if !seen[key] {
+			seen[key] = true
+			scopes = append(scopes, scope)
+		}
+	}
+	return s.recordEvidenceSet(ctx, scopes, inputs, producer, true)
 }
 
-func (s *Store) recordEvidenceSet(ctx context.Context, inputs []EvidenceInput, producer Producer,
+// ReconcileEvidenceSnapshot replaces explicit scopes even when a provider
+// returns no observations, ensuring an empty authoritative snapshot clears
+// stale success or failure evidence atomically.
+func (s *Store) ReconcileEvidenceSnapshot(ctx context.Context, scopes []EvidenceScope, inputs []EvidenceInput,
+	producer Producer) (DeliveryPolicyResult, error) {
+	return s.recordEvidenceSet(ctx, scopes, inputs, producer, true)
+}
+
+func (s *Store) recordEvidenceSet(ctx context.Context, scopes []EvidenceScope, inputs []EvidenceInput, producer Producer,
 	reconcile bool) (DeliveryPolicyResult, error) {
 	if s == nil || s.db == nil {
 		return DeliveryPolicyResult{}, fmt.Errorf("workflow v2 store is not configured")
 	}
-	if len(inputs) == 0 {
+	if len(inputs) == 0 && len(scopes) == 0 {
 		return DeliveryPolicyResult{}, fmt.Errorf("evidence set must not be empty")
 	}
 	type preparedEvidence struct {
@@ -76,6 +110,28 @@ func (s *Store) recordEvidenceSet(ctx context.Context, inputs []EvidenceInput, p
 	}
 	prepared := make([]preparedEvidence, 0, len(inputs))
 	var runID, prID, headSHA, domain string
+	if len(scopes) > 0 {
+		for index := range scopes {
+			scope := &scopes[index]
+			scope.RunID = strings.TrimSpace(scope.RunID)
+			scope.PRID = strings.TrimSpace(scope.PRID)
+			scope.HeadSHA = strings.TrimSpace(scope.HeadSHA)
+			scope.Domain = strings.ToLower(strings.TrimSpace(scope.Domain))
+			scope.Connection = strings.TrimSpace(scope.Connection)
+			scope.Pipeline = strings.TrimSpace(scope.Pipeline)
+			if scope.RunID == "" || scope.PRID == "" || scope.HeadSHA == "" || scope.Domain == "" || scope.Connection == "" {
+				return DeliveryPolicyResult{}, fmt.Errorf("evidence scope[%d]: run, pull request, head, domain, and connection are required", index)
+			}
+			if err := validateEvidenceProducer(scope.Domain, producer); err != nil {
+				return DeliveryPolicyResult{}, err
+			}
+			if index == 0 {
+				runID, prID, headSHA, domain = scope.RunID, scope.PRID, scope.HeadSHA, scope.Domain
+			} else if scope.RunID != runID || scope.PRID != prID || scope.HeadSHA != headSHA || scope.Domain != domain {
+				return DeliveryPolicyResult{}, fmt.Errorf("evidence scopes must share run, pull request, head, and domain")
+			}
+		}
+	}
 	observed := time.Time{}
 	for index, raw := range inputs {
 		input := raw
@@ -90,7 +146,7 @@ func (s *Store) recordEvidenceSet(ctx context.Context, inputs []EvidenceInput, p
 		if input.RunID == "" || input.PRID == "" || input.HeadSHA == "" || input.ExternalID == "" || input.Kind == "" || input.Status == "" {
 			return DeliveryPolicyResult{}, fmt.Errorf("evidence[%d]: run, pull request, head, external id, kind, and status are required", index)
 		}
-		if index == 0 {
+		if runID == "" {
 			runID, prID, headSHA, domain = input.RunID, input.PRID, input.HeadSHA, input.Domain
 		} else if input.RunID != runID || input.PRID != prID || input.HeadSHA != headSHA || input.Domain != domain {
 			return DeliveryPolicyResult{}, fmt.Errorf("evidence set must share run, pull request, head, and domain")
@@ -128,6 +184,20 @@ func (s *Store) recordEvidenceSet(ctx context.Context, inputs []EvidenceInput, p
 		prepared = append(prepared, preparedEvidence{input: input, id: id, payloadJSON: payloadJSON,
 			provenanceJSON: provenanceJSON, observed: itemObserved, pipeline: strings.TrimSpace(pipeline)})
 	}
+	if observed.IsZero() {
+		observed = s.now().UTC()
+	}
+	if reconcile {
+		allowedScopes := map[string]bool{}
+		for _, scope := range scopes {
+			allowedScopes[scope.Connection+"\x00"+scope.Pipeline] = true
+		}
+		for _, item := range prepared {
+			if !allowedScopes[item.input.Connection+"\x00"+item.pipeline] {
+				return DeliveryPolicyResult{}, fmt.Errorf("evidence input is outside its reconciliation scopes")
+			}
+		}
+	}
 	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
 	if err != nil {
 		return DeliveryPolicyResult{}, err
@@ -148,24 +218,18 @@ func (s *Store) recordEvidenceSet(ctx context.Context, inputs []EvidenceInput, p
 		return DeliveryPolicyResult{}, fmt.Errorf("active delivery has no verified head generation")
 	}
 	if reconcile {
-		seenSubjects := map[string]bool{}
 		reconciledAt := s.now().UTC().UnixMilli()
-		for _, item := range prepared {
-			subject := item.input.Connection + "\x00" + item.pipeline
-			if seenSubjects[subject] {
-				continue
-			}
-			seenSubjects[subject] = true
-			if item.pipeline != "" {
+		for _, scope := range scopes {
+			if scope.Pipeline != "" {
 				_, err = tx.ExecContext(ctx, `UPDATE workflow_v2_evidence SET superseded_at=?
 					WHERE run_id=? AND pr_id=? AND head_generation=? AND domain=? AND connection=?
 					AND json_extract(payload_json,'$.pipeline')=? AND superseded_at=0 AND observed_at<=?`, reconciledAt,
-					runID, prID, headGeneration, domain, item.input.Connection, item.pipeline, observed.UnixMilli())
+					runID, prID, headGeneration, domain, scope.Connection, scope.Pipeline, observed.UnixMilli())
 			} else {
 				_, err = tx.ExecContext(ctx, `UPDATE workflow_v2_evidence SET superseded_at=?
 					WHERE run_id=? AND pr_id=? AND head_generation=? AND domain=? AND connection=?
 					AND superseded_at=0 AND observed_at<=?`, reconciledAt, runID, prID, headGeneration, domain,
-					item.input.Connection, observed.UnixMilli())
+					scope.Connection, observed.UnixMilli())
 			}
 			if err != nil {
 				return DeliveryPolicyResult{}, err

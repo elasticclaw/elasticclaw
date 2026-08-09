@@ -3,6 +3,7 @@ package workflowv2
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -214,6 +215,21 @@ func (s *Store) ApplyReviewFeedback(ctx context.Context, target DeliveryTarget, 
 		ID: eventID, MessageID: eventID, Kind: "review.feedback.received", AttemptID: target.AttemptID,
 		Producer: ProducerReview, Provenance: provenance,
 	}, func(ctx context.Context, tx *sql.Tx, input *EventInput) error {
+		var currentProvenance string
+		err := tx.QueryRowContext(ctx, `SELECT provenance_json FROM workflow_v2_facts
+			WHERE run_id=? AND fact_key='review.feedback'`, target.RunID).Scan(&currentProvenance)
+		if err != nil && err != sql.ErrNoRows {
+			return err
+		}
+		if err == nil {
+			var current typesv2.EvidenceProvenance
+			if err := json.Unmarshal([]byte(currentProvenance), &current); err != nil {
+				return fmt.Errorf("decode current review feedback provenance: %w", err)
+			}
+			if current.ObservedAt.After(provenance.ObservedAt) {
+				return fmt.Errorf("review feedback observation is older than the current fact")
+			}
+		}
 		var headSHA string
 		if err := tx.QueryRowContext(ctx, `SELECT current_head_sha FROM workflow_v2_delivery_prs
 			WHERE id=? AND run_id=? AND repository=? AND pr_number=? AND active=1`, target.PRID,

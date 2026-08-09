@@ -411,11 +411,13 @@ type githubPRReviewCommentPayload struct {
 type githubPRReviewPayload struct {
 	Action string `json:"action"` // "submitted", "edited", "dismissed"
 	Review struct {
-		ID      int64  `json:"id"`
-		State   string `json:"state"` // "changes_requested", "approved", "commented"
-		Body    string `json:"body"`
-		HTMLURL string `json:"html_url"`
-		User    struct {
+		ID          int64  `json:"id"`
+		State       string `json:"state"` // "changes_requested", "approved", "commented"
+		Body        string `json:"body"`
+		HTMLURL     string `json:"html_url"`
+		CommitID    string `json:"commit_id"`
+		SubmittedAt string `json:"submitted_at"`
+		User        struct {
 			Login string `json:"login"`
 			Type  string `json:"type"`
 		} `json:"user"`
