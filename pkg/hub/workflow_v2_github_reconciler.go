@@ -268,9 +268,8 @@ func (s *Server) reconcileWorkflowV2GitHubReviews(ctx context.Context, store *wo
 			feedback := map[string]interface{}{"kind": "review", "author": item.review.User.Login,
 				"body": item.review.Body, "url": item.review.HTMLURL, "repository": target.Repository,
 				"number": target.Number, "pull_request_url": target.URL}
-			eventID := workflowV2GitHubEventID(target.RunID, "review_feedback", "reconciled",
-				strconv.FormatInt(item.review.ID, 10), item.review.SubmittedAt,
-				workflowV2GitHubEventID("", item.review.State, item.review.Body))
+			eventID := workflowV2GitHubFeedbackEventID(target, "review",
+				strconv.FormatInt(item.review.ID, 10), item.review.Body, "", 0)
 			if _, err := store.ApplyReviewFeedback(ctx, target, eventID, feedback, typesv2.EvidenceProvenance{
 				Producer: string(workflowv2.ProducerReview), Principal: item.review.User.Login,
 				ExternalID: strconv.FormatInt(item.review.ID, 10), ObservedAt: item.observed, Reconciled: true,
@@ -373,8 +372,8 @@ func (s *Server) reconcileWorkflowV2GitHubComment(ctx context.Context, store *wo
 	if comment.Line > 0 {
 		feedback["line"] = comment.Line
 	}
-	eventID := workflowV2GitHubEventID(target.RunID, "review_feedback", kind,
-		strconv.FormatInt(comment.ID, 10), comment.UpdatedAt)
+	eventID := workflowV2GitHubFeedbackEventID(target, kind, strconv.FormatInt(comment.ID, 10),
+		comment.Body, comment.Path, comment.Line)
 	if _, err := store.ApplyReviewFeedback(ctx, target, eventID, feedback, typesv2.EvidenceProvenance{
 		Producer: string(workflowv2.ProducerReview), Principal: comment.User.Login,
 		ExternalID: strconv.FormatInt(comment.ID, 10), ObservedAt: observed, Reconciled: true,

@@ -25,6 +25,7 @@ func TestWorkflowV2PeriodicReconciliationRecoversLostGitHubWebhooks(t *testing.T
 	})
 
 	var pullRequests, checks, workflows, reviews, inlineComments, discussionComments atomic.Int64
+	var exposeWebhookComment atomic.Bool
 	gh := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case strings.HasSuffix(r.URL.Path, "/repos/org/api/pulls/10"):
@@ -54,14 +55,21 @@ func TestWorkflowV2PeriodicReconciliationRecoversLostGitHubWebhooks(t *testing.T
 			]`))
 		case strings.HasSuffix(r.URL.Path, "/repos/org/api/pulls/10/comments"):
 			inlineComments.Add(1)
-			_, _ = w.Write([]byte(`[
+			body := `[
 				{"id":88,"body":"Recover this missed inline comment.",
 				 "html_url":"https://github.com/org/api/pull/10#discussion_r88","path":"api.go","line":42,
 				 "commit_id":"head-2","created_at":"2026-08-09T12:02:00Z","updated_at":"2026-08-09T12:02:00Z",
 				 "user":{"login":"carol","type":"User"}},
 				{"id":87,"body":"old head","commit_id":"head-1","created_at":"2026-08-09T11:02:00Z",
 				 "updated_at":"2026-08-09T11:02:00Z","user":{"login":"dave","type":"User"}}
-			]`))
+			`
+			if exposeWebhookComment.Load() {
+				body += `,{"id":89,"body":"Webhook and poll see the same feedback.",
+				 "html_url":"https://github.com/org/api/pull/10#discussion_r89","path":"api.go","line":43,
+				 "commit_id":"head-2","created_at":"2026-08-09T12:03:00Z","updated_at":"2026-08-09T12:03:00Z",
+				 "user":{"login":"erin","type":"User"}}`
+			}
+			_, _ = w.Write([]byte(body + `]`))
 		case strings.HasSuffix(r.URL.Path, "/repos/org/api/issues/10/comments"):
 			discussionComments.Add(1)
 			_, _ = w.Write([]byte(`[]`))
@@ -150,6 +158,27 @@ func TestWorkflowV2PeriodicReconciliationRecoversLostGitHubWebhooks(t *testing.T
 		t.Fatalf("evidence/messages/API calls = %d/%d/%d/%d/%d/%d/%d/%d", currentEvidence, messages,
 			pullRequests.Load(), checks.Load(), workflows.Load(), reviews.Load(), inlineComments.Load(), discussionComments.Load())
 	}
+	var webhookComment githubPRReviewCommentPayload
+	webhookComment.Action = "created"
+	webhookComment.Comment.ID = 89
+	webhookComment.Comment.Body = "Webhook and poll see the same feedback."
+	webhookComment.Comment.HTMLURL = "https://github.com/org/api/pull/10#discussion_r89"
+	webhookComment.Comment.Path = "api.go"
+	webhookComment.Comment.Line = 43
+	webhookComment.Comment.CommitID = "head-2"
+	webhookComment.Comment.UpdatedAt = "2026-08-09T12:03:00Z"
+	webhookComment.Comment.User.Login = "erin"
+	webhookComment.Comment.User.Type = "User"
+	webhookComment.PullRequest.Number = 10
+	webhookComment.PullRequest.HTMLURL = prURL
+	webhookComment.Repository.FullName = "org/api"
+	s.processGitHubPRReviewCommentEvent(webhookComment)
+	var feedbackAfterWebhook int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM workflow_v2_events
+		WHERE run_id=? AND kind='review.feedback.received'`, run.ID).Scan(&feedbackAfterWebhook); err != nil {
+		t.Fatal(err)
+	}
+	exposeWebhookComment.Store(true)
 
 	// A second pass converges the CI policy fact to the aggregate revision that
 	// includes the review snapshot written later in the first pass.
@@ -162,6 +191,15 @@ func TestWorkflowV2PeriodicReconciliationRecoversLostGitHubWebhooks(t *testing.T
 	}
 	if err := db.QueryRow(`SELECT COUNT(*) FROM workflow_v2_agent_tasks WHERE run_id=?`, run.ID).Scan(&convergedTasks); err != nil {
 		t.Fatal(err)
+	}
+	var feedbackAfterPoll int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM workflow_v2_events
+		WHERE run_id=? AND kind='review.feedback.received'`, run.ID).Scan(&feedbackAfterPoll); err != nil {
+		t.Fatal(err)
+	}
+	if feedbackAfterPoll != feedbackAfterWebhook {
+		t.Fatalf("webhook feedback count changed from %d to %d after polling the same provider comment",
+			feedbackAfterWebhook, feedbackAfterPoll)
 	}
 	if convergedTasks != taskCount {
 		t.Fatalf("reconciliation convergence changed task count from %d to %d", taskCount, convergedTasks)

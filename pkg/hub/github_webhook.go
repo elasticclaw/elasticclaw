@@ -388,12 +388,14 @@ func (s *Server) findOpenTaskRunPR(repo string, prNumber int) (runID string, ok 
 type githubPRReviewCommentPayload struct {
 	Action  string `json:"action"` // "created", "edited", "deleted"
 	Comment struct {
-		ID      int64  `json:"id"`
-		Body    string `json:"body"`
-		HTMLURL string `json:"html_url"`
-		Path    string `json:"path"`
-		Line    int    `json:"line"`
-		User    struct {
+		ID        int64  `json:"id"`
+		Body      string `json:"body"`
+		HTMLURL   string `json:"html_url"`
+		Path      string `json:"path"`
+		Line      int    `json:"line"`
+		CommitID  string `json:"commit_id"`
+		UpdatedAt string `json:"updated_at"`
+		User      struct {
 			Login string `json:"login"`
 			Type  string `json:"type"`
 		} `json:"user"`
@@ -586,10 +588,11 @@ type githubIssueCommentPayload struct {
 		} `json:"pull_request"`
 	} `json:"issue"`
 	Comment struct {
-		ID      int64  `json:"id"`
-		Body    string `json:"body"`
-		HTMLURL string `json:"html_url"`
-		User    struct {
+		ID        int64  `json:"id"`
+		Body      string `json:"body"`
+		HTMLURL   string `json:"html_url"`
+		UpdatedAt string `json:"updated_at"`
+		User      struct {
 			Login string `json:"login"`
 			Type  string `json:"type"`
 		} `json:"user"`
