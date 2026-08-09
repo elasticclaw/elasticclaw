@@ -67,10 +67,10 @@ func (s *Store) ClaimEffect(ctx context.Context, worker string, lease time.Durat
 	if err := expireEffectLeases(ctx, tx, now); err != nil {
 		return nil, err
 	}
-	row := tx.QueryRowContext(ctx, `SELECT id,run_id,effect_key,kind,payload_json,status,attempt_count,next_attempt_at,last_error
-		FROM workflow_v2_effects
-		WHERE status IN ('planned','retryable_failed') AND next_attempt_at<=?
-		ORDER BY next_attempt_at,created_at,id LIMIT 1`, now.UnixMilli())
+	row := tx.QueryRowContext(ctx, `SELECT e.id,e.run_id,e.effect_key,e.kind,e.payload_json,e.status,e.attempt_count,e.next_attempt_at,e.last_error
+		FROM workflow_v2_effects e JOIN workflow_v2_runs r ON r.id=e.run_id
+		WHERE e.status IN ('planned','retryable_failed') AND e.next_attempt_at<=? AND r.status='active'
+		ORDER BY e.next_attempt_at,e.created_at,e.id LIMIT 1`, now.UnixMilli())
 	var effect Effect
 	var payloadJSON string
 	var status string

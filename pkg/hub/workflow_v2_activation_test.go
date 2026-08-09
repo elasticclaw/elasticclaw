@@ -142,3 +142,86 @@ func TestWorkspaceFileKnowledgeResolverRejectsMissingRequiredDocument(t *testing
 		t.Fatalf("error = %v", err)
 	}
 }
+
+func TestWorkflowV2ActivationFailureCancelsBoundRun(t *testing.T) {
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
+	t.Setenv("ELASTICCLAW_NOOP_PROVIDER", "1")
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token", ClawToken: "claw-token",
+		Providers: map[string]types.ProviderConfig{"noop": {Type: "noop"}}}, "", "", "")
+	workspaceYAML := `
+schema_version: 2
+name: failing-context
+execution:
+  provider: noop
+repositories:
+  primary:
+    provider: github
+    repository: org/repo
+knowledge:
+  sources:
+    principles:
+      type: workspace_files
+      scope: organization
+      required: true
+      paths: [MISSING.md]
+`
+	workflowYAML := `
+schema_version: 2
+name: guarded-context
+enabled: true
+initial_state: gathering
+states:
+  gathering:
+    phase: context
+    invariant:
+      context:
+        status:
+          equals: ready
+    on_enter:
+      effects:
+        - agent.task:
+            prompt: This must never execute without context.
+  completed:
+    phase: done
+    terminal: true
+transitions:
+  ready:
+    from: gathering
+    on: context.bundle.ready
+    to: completed
+`
+	if err := saveExternalWorkspace(&types.WorkspaceConfig{Name: "failing-context", Files: map[string]string{
+		"elasticclaw-config.yaml": workspaceYAML,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := saveExternalWorkflows("failing-context", []*types.WorkflowConfig{{
+		Name: "guarded-context", RawConfig: workflowYAML,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/workspaces/failing-context/workflows/guarded-context/trigger", strings.NewReader(`{"inputs":{}}`))
+	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+	var runStatus, attemptStatus, effectStatus, clawStatus string
+	if err := db.QueryRow(`SELECT r.status,a.status,e.status,c.status FROM workflow_v2_runs r
+		JOIN workflow_v2_attempts a ON a.id=r.current_attempt_id
+		JOIN workflow_v2_effects e ON e.run_id=r.id
+		JOIN claws c ON c.id=a.claw_id
+		WHERE r.workspace_name='failing-context'`).Scan(&runStatus, &attemptStatus, &effectStatus, &clawStatus); err != nil {
+		t.Fatal(err)
+	}
+	if runStatus != "cancelled" || attemptStatus != "cancelled" || effectStatus != "cancelled" || clawStatus != "deleted" {
+		t.Fatalf("run/attempt/effect/claw = %q/%q/%q/%q", runStatus, attemptStatus, effectStatus, clawStatus)
+	}
+	if err := s.drainWorkflowV2Effects(t.Context(), "test-cancelled-worker"); err != nil {
+		t.Fatal(err)
+	}
+}

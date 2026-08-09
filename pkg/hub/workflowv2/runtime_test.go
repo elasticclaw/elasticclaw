@@ -180,6 +180,80 @@ func TestCreateRunAtomicallyBindsInitialAttempt(t *testing.T) {
 	}
 }
 
+func TestActivationPendingBlocksEffectsUntilContextIsPinned(t *testing.T) {
+	db := openRuntimeDB(t)
+	store := workflowv2.NewStore(db)
+	run, err := store.CreateRun(context.Background(), workflowv2.CreateRunRequest{
+		ID: "run-activation-pending", TenantID: "tenant-1", InitialClawID: "claw-pending",
+		WorkspaceYAML: []byte(runtimeWorkspaceYAML), WorkflowYAML: []byte(runtimeWorkflowYAML),
+		ActivationPending: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.Status != workflowv2.RunSuspended || run.WaitingReason == "" {
+		t.Fatalf("pending run = %#v", run)
+	}
+	if claim, err := store.ClaimEffect(context.Background(), "worker-before-context", time.Minute); err != nil || claim != nil {
+		t.Fatalf("pre-context effect claim = %#v, %v", claim, err)
+	}
+	bundle, err := store.AssembleOrganizationContext(context.Background(), run.ID,
+		workflowv2.KnowledgeResolverFunc(func(context.Context, workflowv2.Run, string,
+			typesv2.KnowledgeSource) (typesv2.ContextBundleSource, error) {
+			t.Fatal("workspace without knowledge sources invoked resolver")
+			return typesv2.ContextBundleSource{}, nil
+		}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bundle.ID == "" {
+		t.Fatal("organization context bundle was not pinned")
+	}
+	if err := store.CompleteActivation(context.Background(), run.ID); err != nil {
+		t.Fatal(err)
+	}
+	claim, err := store.ClaimEffect(context.Background(), "worker-after-context", time.Minute)
+	if err != nil || claim == nil {
+		t.Fatalf("post-context effect claim = %#v, %v", claim, err)
+	}
+}
+
+func TestCancelActivationClosesAttemptAndEffects(t *testing.T) {
+	db := openRuntimeDB(t)
+	store := workflowv2.NewStore(db)
+	run, err := store.CreateRun(context.Background(), workflowv2.CreateRunRequest{
+		ID: "run-activation-cancel", TenantID: "tenant-1", InitialClawID: "claw-cancel",
+		WorkspaceYAML: []byte(runtimeWorkspaceYAML), WorkflowYAML: []byte(runtimeWorkflowYAML),
+		ActivationPending: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CancelActivation(context.Background(), run.ID, "knowledge resolver unavailable"); err != nil {
+		t.Fatal(err)
+	}
+	run, err = store.GetRun(context.Background(), run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.Status != workflowv2.RunCancelled || !strings.Contains(run.WaitingReason, "knowledge resolver") {
+		t.Fatalf("cancelled run = %#v", run)
+	}
+	var attemptStatus, effectStatus string
+	if err := db.QueryRow(`SELECT status FROM workflow_v2_attempts WHERE id=?`, run.CurrentAttemptID).Scan(&attemptStatus); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT status FROM workflow_v2_effects WHERE run_id=?`, run.ID).Scan(&effectStatus); err != nil {
+		t.Fatal(err)
+	}
+	if attemptStatus != "cancelled" || effectStatus != string(workflowv2.EffectCancelled) {
+		t.Fatalf("attempt/effect status = %q/%q", attemptStatus, effectStatus)
+	}
+	if claim, err := store.ClaimEffect(context.Background(), "worker-after-cancel", time.Minute); err != nil || claim != nil {
+		t.Fatalf("cancelled effect claim = %#v, %v", claim, err)
+	}
+}
+
 func TestInspectRunExplainsDurableWaitingState(t *testing.T) {
 	db := openRuntimeDB(t)
 	store := workflowv2.NewStore(db)

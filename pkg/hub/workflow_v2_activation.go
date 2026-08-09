@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/elasticclaw/elasticclaw/pkg/hub/workflowv2"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
@@ -60,12 +61,23 @@ func (s *Server) triggerWorkflowV2Config(w http.ResponseWriter, r *http.Request,
 			store := workflowv2.NewStore(s.db)
 			run, err := store.CreateRun(ctx, workflowv2.CreateRunRequest{
 				ID: runID, TenantID: tenantID, InitialClawID: clawID,
-				WorkspaceYAML: workspaceYAML, WorkflowYAML: workflowYAML,
+				WorkspaceYAML: workspaceYAML, WorkflowYAML: workflowYAML, ActivationPending: true,
 			})
-			if err != nil || run.DisplayPhase != typesv2.PhaseContext {
+			if err != nil {
 				return err
 			}
 			_, err = store.AssembleOrganizationContext(ctx, run.ID, workspaceFileKnowledgeResolver(workspace.Files))
+			if err == nil {
+				err = store.CompleteActivation(ctx, run.ID)
+			}
+			if err == nil {
+				return nil
+			}
+			cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if cleanupErr := store.CancelActivation(cleanupCtx, run.ID, err.Error()); cleanupErr != nil {
+				return errors.Join(err, fmt.Errorf("cancel failed workflow v2 activation: %w", cleanupErr))
+			}
 			return err
 		},
 	})

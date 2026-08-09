@@ -77,7 +77,7 @@ func (s *Store) assembleContext(ctx context.Context, runID string, relevantRepos
 	}
 	sort.Strings(relevant)
 
-	bundle := typesv2.ContextBundle{ID: uuid.NewString(), RunID: runID, CreatedAt: s.now().UTC()}
+	bundle := typesv2.ContextBundle{ID: uuid.NewString(), RunID: runID, Sources: []typesv2.ContextBundleSource{}, CreatedAt: s.now().UTC()}
 	nowMillis := bundle.CreatedAt.UnixMilli()
 	if _, err := s.db.ExecContext(ctx, `INSERT INTO workflow_v2_context_bundles(id,run_id,revision,status,sources_json,created_at,updated_at)
 		VALUES(?,?,?,'assembling','[]',?,?)`, bundle.ID, runID, "assembling:"+bundle.ID, nowMillis, nowMillis); err != nil {

@@ -461,11 +461,24 @@ func TestV2WorkflowRejectsLegacyPatchAndTriggersDeterministicRun(t *testing.T) {
 	t.Setenv("ELASTICCLAW_NOOP_PROVIDER", "1")
 	s, db := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token", ClawToken: "claw-token",
 		Providers: map[string]types.ProviderConfig{"noop": {Type: "noop"}}}, "", "", "")
-	workspaceYAML := testWorkspaceV2YAML + "\nexecution:\n  provider: noop\n"
+	workspaceYAML := testWorkspaceV2YAML + `
+execution:
+  provider: noop
+knowledge:
+  sources:
+    principles:
+      type: workspace_files
+      scope: organization
+      required: true
+      paths: [ENGINEERING.md]
+`
 
 	if err := saveExternalWorkspace(&types.WorkspaceConfig{
-		Name:  "engineering",
-		Files: map[string]string{"elasticclaw-config.yaml": workspaceYAML},
+		Name: "engineering",
+		Files: map[string]string{
+			"elasticclaw-config.yaml": workspaceYAML,
+			"ENGINEERING.md":          "# Engineering\n\nUse typed control protocols.\n",
+		},
 	}); err != nil {
 		t.Fatalf("seed workspace: %v", err)
 	}
@@ -508,14 +521,16 @@ func TestV2WorkflowRejectsLegacyPatchAndTriggersDeterministicRun(t *testing.T) {
 		t.Fatalf("trigger response = %#v", created)
 	}
 	waitForWorkflowV2TestClaw(t, db, created["claw_id"])
-	var currentAttemptID, boundClawID string
-	if err := db.QueryRow(`SELECT r.current_attempt_id,a.claw_id FROM workflow_v2_runs r
-		JOIN workflow_v2_attempts a ON a.id=r.current_attempt_id WHERE r.id=?`, created["run_id"]).
-		Scan(&currentAttemptID, &boundClawID); err != nil {
+	var currentAttemptID, boundClawID, contextBundleID, sourcesJSON string
+	if err := db.QueryRow(`SELECT r.current_attempt_id,a.claw_id,r.context_bundle_id,b.sources_json FROM workflow_v2_runs r
+		JOIN workflow_v2_attempts a ON a.id=r.current_attempt_id
+		JOIN workflow_v2_context_bundles b ON b.id=r.context_bundle_id WHERE r.id=?`, created["run_id"]).
+		Scan(&currentAttemptID, &boundClawID, &contextBundleID, &sourcesJSON); err != nil {
 		t.Fatal(err)
 	}
-	if currentAttemptID == "" || boundClawID != created["claw_id"] {
-		t.Fatalf("attempt/claw = %q/%q", currentAttemptID, boundClawID)
+	if currentAttemptID == "" || boundClawID != created["claw_id"] || contextBundleID == "" ||
+		!strings.Contains(sourcesJSON, "Use typed control protocols") {
+		t.Fatalf("attempt/claw/context/sources = %q/%q/%q/%s", currentAttemptID, boundClawID, contextBundleID, sourcesJSON)
 	}
 	if err := s.drainWorkflowV2Effects(t.Context(), "test-v2-worker"); err != nil {
 		t.Fatal(err)

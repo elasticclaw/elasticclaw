@@ -69,6 +69,9 @@ type CreateRunRequest struct {
 	// is created. Production activation uses this so a newly provisioned bridge
 	// cannot connect before its control-plane binding exists.
 	InitialClawID string
+	// ActivationPending keeps effects unclaimable until organization context
+	// has been assembled and CompleteActivation has released the run.
+	ActivationPending bool
 }
 
 type EventInput struct {
@@ -146,10 +149,14 @@ func (s *Store) CreateRun(ctx context.Context, req CreateRunRequest) (Run, error
 	}
 	now := s.now().UTC()
 	status := RunActive
+	waitingReason := ""
 	finishedAt := int64(0)
 	if initial.Terminal {
 		status = terminalRunStatus(rwf.Workflow.InitialState)
 		finishedAt = now.UnixMilli()
+	} else if req.ActivationPending {
+		status = RunSuspended
+		waitingReason = activationPendingReason
 	}
 
 	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
@@ -159,17 +166,17 @@ func (s *Store) CreateRun(ctx context.Context, req CreateRunRequest) (Run, error
 	defer tx.Rollback()
 	currentAttemptID := ""
 	if strings.TrimSpace(req.InitialClawID) != "" {
-		if status != RunActive {
+		if initial.Terminal {
 			return Run{}, fmt.Errorf("terminal workflow cannot start an execution attempt")
 		}
 		currentAttemptID = uuid.NewString()
 	}
 	_, err = tx.ExecContext(ctx, `INSERT INTO workflow_v2_runs(
 		id,tenant_id,workspace_name,workflow_name,workspace_revision,workflow_revision,
-		workspace_yaml,workflow_yaml,state,display_phase,state_version,status,current_attempt_id,created_at,updated_at,finished_at
-	) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		workspace_yaml,workflow_yaml,state,display_phase,state_version,status,waiting_reason,current_attempt_id,created_at,updated_at,finished_at
+	) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		runID, req.TenantID, rws.Workspace.Name, rwf.Workflow.Name, string(rws.Revision), string(rwf.Revision),
-		string(req.WorkspaceYAML), string(req.WorkflowYAML), rwf.Workflow.InitialState, string(initial.Phase), 1, string(status), currentAttemptID,
+		string(req.WorkspaceYAML), string(req.WorkflowYAML), rwf.Workflow.InitialState, string(initial.Phase), 1, string(status), waitingReason, currentAttemptID,
 		now.UnixMilli(), now.UnixMilli(), finishedAt)
 	if err != nil {
 		return Run{}, fmt.Errorf("create workflow v2 run: %w", err)
@@ -213,6 +220,91 @@ func (s *Store) CreateRun(ctx context.Context, req CreateRunRequest) (Run, error
 		return Run{}, err
 	}
 	return s.GetRun(ctx, runID)
+}
+
+const activationPendingReason = "workflow activation pending organization context"
+
+// CompleteActivation releases a context-pinned run for effect execution. It is
+// idempotent when context assembly already advanced the run or deliberately
+// suspended it on a domain-level context failure.
+func (s *Store) CompleteActivation(ctx context.Context, runID string) error {
+	if s == nil || s.db == nil {
+		return fmt.Errorf("workflow v2 store is not configured")
+	}
+	now := s.now().UTC().UnixMilli()
+	result, err := s.db.ExecContext(ctx, `UPDATE workflow_v2_runs SET status='active',waiting_reason='',updated_at=?
+		WHERE id=? AND status='suspended' AND waiting_reason=? AND context_bundle_id!=''`,
+		now, runID, activationPendingReason)
+	if err != nil {
+		return err
+	}
+	if changed, err := result.RowsAffected(); err != nil {
+		return err
+	} else if changed == 1 {
+		return nil
+	}
+	var status, waitingReason, contextBundleID string
+	if err := s.db.QueryRowContext(ctx, `SELECT status,waiting_reason,context_bundle_id FROM workflow_v2_runs WHERE id=?`,
+		runID).Scan(&status, &waitingReason, &contextBundleID); err != nil {
+		return err
+	}
+	if contextBundleID == "" {
+		return fmt.Errorf("workflow v2 run has no organization context bundle")
+	}
+	if status == string(RunActive) || (status == string(RunSuspended) && waitingReason != activationPendingReason) {
+		return nil
+	}
+	return fmt.Errorf("workflow v2 run cannot complete activation from status %q", status)
+}
+
+// CancelActivation terminally closes a run whose pre-provision activation
+// failed, including every attempt and queued effect that could otherwise be
+// left bound to the claw being deleted by the caller.
+func (s *Store) CancelActivation(ctx context.Context, runID, reason string) error {
+	if s == nil || s.db == nil {
+		return fmt.Errorf("workflow v2 store is not configured")
+	}
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		reason = "workflow activation failed"
+	}
+	now := s.now().UTC().UnixMilli()
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `UPDATE workflow_v2_effect_attempts SET status='cancelled',error=?,finished_at=?
+		WHERE status='running' AND effect_id IN (SELECT id FROM workflow_v2_effects WHERE run_id=?)`, reason, now, runID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE workflow_v2_effects SET status='cancelled',lease_owner='',lease_expires_at=0,
+		last_error=?,updated_at=? WHERE run_id=? AND status IN ('planned','running','retryable_failed','unknown')`, reason, now, runID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE workflow_v2_control_outbox SET status='cancelled',last_error=?,updated_at=?
+		WHERE run_id=? AND status IN ('pending','sent')`, reason, now, runID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE workflow_v2_agent_tasks SET status='cancelled',terminal_reason=?,updated_at=?,finished_at=?
+		WHERE run_id=? AND status IN ('assigned','running')`, reason, now, now, runID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE workflow_v2_attempts SET status='cancelled',reason=?,finished_at=?
+		WHERE run_id=? AND status IN ('provisioning','active')`, reason, now, runID); err != nil {
+		return err
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE workflow_v2_runs SET status='cancelled',waiting_reason=?,current_task_id='',
+		updated_at=?,finished_at=? WHERE id=? AND status IN ('active','suspended')`, reason, now, now, runID)
+	if err != nil {
+		return err
+	}
+	if changed, err := result.RowsAffected(); err != nil {
+		return err
+	} else if changed != 1 {
+		return fmt.Errorf("workflow v2 run is not cancellable during activation")
+	}
+	return tx.Commit()
 }
 
 func (s *Store) GetRun(ctx context.Context, runID string) (Run, error) {
