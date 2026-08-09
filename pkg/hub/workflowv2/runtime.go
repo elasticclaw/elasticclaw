@@ -65,6 +65,10 @@ type CreateRunRequest struct {
 	TenantID      string
 	WorkspaceYAML []byte
 	WorkflowYAML  []byte
+	// InitialClawID atomically binds the first execution attempt while the run
+	// is created. Production activation uses this so a newly provisioned bridge
+	// cannot connect before its control-plane binding exists.
+	InitialClawID string
 }
 
 type EventInput struct {
@@ -153,15 +157,29 @@ func (s *Store) CreateRun(ctx context.Context, req CreateRunRequest) (Run, error
 		return Run{}, err
 	}
 	defer tx.Rollback()
+	currentAttemptID := ""
+	if strings.TrimSpace(req.InitialClawID) != "" {
+		if status != RunActive {
+			return Run{}, fmt.Errorf("terminal workflow cannot start an execution attempt")
+		}
+		currentAttemptID = uuid.NewString()
+	}
 	_, err = tx.ExecContext(ctx, `INSERT INTO workflow_v2_runs(
 		id,tenant_id,workspace_name,workflow_name,workspace_revision,workflow_revision,
-		workspace_yaml,workflow_yaml,state,display_phase,state_version,status,created_at,updated_at,finished_at
-	) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		workspace_yaml,workflow_yaml,state,display_phase,state_version,status,current_attempt_id,created_at,updated_at,finished_at
+	) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		runID, req.TenantID, rws.Workspace.Name, rwf.Workflow.Name, string(rws.Revision), string(rwf.Revision),
-		string(req.WorkspaceYAML), string(req.WorkflowYAML), rwf.Workflow.InitialState, string(initial.Phase), 1, string(status),
+		string(req.WorkspaceYAML), string(req.WorkflowYAML), rwf.Workflow.InitialState, string(initial.Phase), 1, string(status), currentAttemptID,
 		now.UnixMilli(), now.UnixMilli(), finishedAt)
 	if err != nil {
 		return Run{}, fmt.Errorf("create workflow v2 run: %w", err)
+	}
+	if currentAttemptID != "" {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO workflow_v2_attempts(
+			id,run_id,claw_id,number,status,started_at,heartbeat_at) VALUES(?,?,?,?,?,?,?)`,
+			currentAttemptID, runID, strings.TrimSpace(req.InitialClawID), 1, "active", now.UnixMilli(), now.UnixMilli()); err != nil {
+			return Run{}, fmt.Errorf("create initial workflow v2 attempt: %w", err)
+		}
 	}
 
 	eventID := uuid.NewString()

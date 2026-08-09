@@ -313,6 +313,11 @@ func loadExternalWorkspace(name string) (*types.WorkspaceConfig, error) {
 	if files, err := config.ReadTemplateFiles(dir); err == nil {
 		workspace.Files = files
 	}
+	if workspace.SchemaVersion == "2" {
+		if err := loadDeclaredWorkspaceKnowledgeFiles(dir, &workspace); err != nil {
+			return nil, err
+		}
+	}
 
 	workflowDir := filepath.Join(dir, "workflows")
 	entries, err := os.ReadDir(workflowDir)
@@ -343,6 +348,66 @@ func loadExternalWorkspace(name string) (*types.WorkspaceConfig, error) {
 		}
 	}
 	return &workspace, nil
+}
+
+// loadDeclaredWorkspaceKnowledgeFiles supplements the legacy OpenClaw file
+// allow-list with only the workspace_files paths explicitly authorized by a
+// validated V2 workspace document. V1 loading remains byte-for-byte unchanged.
+func loadDeclaredWorkspaceKnowledgeFiles(dir string, workspace *types.WorkspaceConfig) error {
+	if workspace == nil || workspace.Files == nil {
+		return nil
+	}
+	resolved, err := v2.ParseAndValidateWorkspace([]byte(workspace.Files["elasticclaw-config.yaml"]))
+	if err != nil || resolved.Workspace.Knowledge == nil {
+		return nil
+	}
+	for _, source := range resolved.Workspace.Knowledge.Sources {
+		if source.Type != v2.KnowledgeTypeWorkspaceFiles {
+			continue
+		}
+		for _, name := range source.Paths {
+			if _, loaded := workspace.Files[name]; loaded {
+				continue
+			}
+			content, err := readWorkspaceKnowledgeFile(dir, name)
+			if os.IsNotExist(err) {
+				// Missing required/optional files are represented by the context
+				// resolver, where source policy and provenance are available.
+				continue
+			}
+			if err != nil {
+				return fmt.Errorf("read workspace knowledge file %q: %w", name, err)
+			}
+			workspace.Files[name] = string(content)
+		}
+	}
+	return nil
+}
+
+func readWorkspaceKnowledgeFile(dir, name string) ([]byte, error) {
+	safeName, err := cleanWorkspaceFilePath(name)
+	if err != nil {
+		return nil, err
+	}
+	current := dir
+	parts := strings.Split(filepath.FromSlash(safeName), string(filepath.Separator))
+	for i, part := range parts {
+		current = filepath.Join(current, part)
+		info, err := os.Lstat(current)
+		if err != nil {
+			return nil, err
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return nil, fmt.Errorf("symbolic links are not allowed")
+		}
+		if i < len(parts)-1 && !info.IsDir() {
+			return nil, fmt.Errorf("path component is not a directory")
+		}
+		if i == len(parts)-1 && !info.Mode().IsRegular() {
+			return nil, fmt.Errorf("path is not a regular file")
+		}
+	}
+	return os.ReadFile(current)
 }
 
 // errWorkspaceNotFound is returned when a workspace name does not exist on the hub.

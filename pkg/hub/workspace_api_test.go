@@ -456,45 +456,82 @@ func TestWorkspaceWorkflowPatchUpdatesTriggerControls(t *testing.T) {
 	}
 }
 
-func TestV2WorkflowCannotEnterLegacyPatchOrTriggerPaths(t *testing.T) {
+func TestV2WorkflowRejectsLegacyPatchAndTriggersDeterministicRun(t *testing.T) {
 	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
-	s, _ := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
+	t.Setenv("ELASTICCLAW_NOOP_PROVIDER", "1")
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token", ClawToken: "claw-token",
+		Providers: map[string]types.ProviderConfig{"noop": {Type: "noop"}}}, "", "", "")
+	workspaceYAML := testWorkspaceV2YAML + "\nexecution:\n  provider: noop\n"
 
 	if err := saveExternalWorkspace(&types.WorkspaceConfig{
 		Name:  "engineering",
-		Files: map[string]string{"elasticclaw-config.yaml": testWorkspaceV2YAML},
+		Files: map[string]string{"elasticclaw-config.yaml": workspaceYAML},
 	}); err != nil {
 		t.Fatalf("seed workspace: %v", err)
 	}
 	if err := saveExternalWorkflows("engineering", []*types.WorkflowConfig{{
-		Name:      "delivery",
-		RawConfig: testWorkflowV2YAML,
+		Name: "delivery",
+		RawConfig: strings.Replace(testWorkflowV2YAML, "  implementing:\n    phase: build", `  implementing:
+    phase: build
+    on_enter:
+      effects:
+        - agent.task:
+            prompt: Implement the requested change.`, 1),
 	}}); err != nil {
 		t.Fatalf("seed workflow: %v", err)
 	}
 
-	for _, tc := range []struct {
-		method string
-		body   string
-	}{
-		{http.MethodPatch, `{"enabled":false}`},
-		{http.MethodPost, `{"inputs":{}}`},
-	} {
-		path := "/api/workspaces/engineering/workflows/delivery"
-		if tc.method == http.MethodPost {
-			path += "/trigger"
-		}
-		req := httptest.NewRequest(tc.method, path, strings.NewReader(tc.body))
-		req.Header.Set("Authorization", "Bearer test-token")
-		req.Header.Set("Content-Type", "application/json")
-		rr := httptest.NewRecorder()
-		s.Handler().ServeHTTP(rr, req)
-		if rr.Code != http.StatusConflict {
-			t.Fatalf("%s status = %d, want %d, body = %s", tc.method, rr.Code, http.StatusConflict, rr.Body.String())
-		}
-		if !strings.Contains(rr.Body.String(), "v2") {
-			t.Fatalf("%s response does not explain v2 boundary: %s", tc.method, rr.Body.String())
-		}
+	req := httptest.NewRequest(http.MethodPatch, "/api/workspaces/engineering/workflows/delivery",
+		strings.NewReader(`{"enabled":false}`))
+	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusConflict || !strings.Contains(rr.Body.String(), "v2") {
+		t.Fatalf("patch status/body = %d/%s", rr.Code, rr.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/api/workspaces/engineering/workflows/delivery/trigger",
+		strings.NewReader(`{"inputs":{"issue":"org/repo#42"}}`))
+	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Content-Type", "application/json")
+	rr = httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("trigger status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+	var created map[string]string
+	if err := json.Unmarshal(rr.Body.Bytes(), &created); err != nil {
+		t.Fatal(err)
+	}
+	if created["run_id"] == "" || created["claw_id"] == "" {
+		t.Fatalf("trigger response = %#v", created)
+	}
+	waitForWorkflowV2TestClaw(t, db, created["claw_id"])
+	var currentAttemptID, boundClawID string
+	if err := db.QueryRow(`SELECT r.current_attempt_id,a.claw_id FROM workflow_v2_runs r
+		JOIN workflow_v2_attempts a ON a.id=r.current_attempt_id WHERE r.id=?`, created["run_id"]).
+		Scan(&currentAttemptID, &boundClawID); err != nil {
+		t.Fatal(err)
+	}
+	if currentAttemptID == "" || boundClawID != created["claw_id"] {
+		t.Fatalf("attempt/claw = %q/%q", currentAttemptID, boundClawID)
+	}
+	if err := s.drainWorkflowV2Effects(t.Context(), "test-v2-worker"); err != nil {
+		t.Fatal(err)
+	}
+	var taskCount, outboxCount, conversationCount int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM workflow_v2_agent_tasks WHERE run_id=?`, created["run_id"]).Scan(&taskCount); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM workflow_v2_control_outbox WHERE run_id=?`, created["run_id"]).Scan(&outboxCount); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=?`, created["claw_id"]).Scan(&conversationCount); err != nil {
+		t.Fatal(err)
+	}
+	if taskCount != 1 || outboxCount != 1 || conversationCount != 0 {
+		t.Fatalf("task/outbox/conversation = %d/%d/%d", taskCount, outboxCount, conversationCount)
 	}
 
 	loaded, err := loadExternalWorkspace("engineering")

@@ -149,6 +149,37 @@ func TestCreateRunPinsRevisionsAndInitialEntry(t *testing.T) {
 	}
 }
 
+func TestCreateRunAtomicallyBindsInitialAttempt(t *testing.T) {
+	db := openRuntimeDB(t)
+	store := workflowv2.NewStore(db)
+	run, err := store.CreateRun(context.Background(), workflowv2.CreateRunRequest{
+		ID: "run-bound", TenantID: "tenant-1", InitialClawID: "claw-bound",
+		WorkspaceYAML: []byte(runtimeWorkspaceYAML), WorkflowYAML: []byte(runtimeWorkflowYAML),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.CurrentAttemptID == "" {
+		t.Fatal("run has no initial attempt")
+	}
+	binding, found, err := store.ActiveControlBinding(context.Background(), "tenant-1", "claw-bound")
+	if err != nil || !found {
+		t.Fatalf("binding found=%v err=%v", found, err)
+	}
+	if binding.RunID != run.ID || binding.AttemptID != run.CurrentAttemptID {
+		t.Fatalf("binding = %#v, run = %#v", binding, run)
+	}
+	var attemptNumber int
+	var status string
+	if err := db.QueryRow(`SELECT number,status FROM workflow_v2_attempts WHERE id=?`, run.CurrentAttemptID).
+		Scan(&attemptNumber, &status); err != nil {
+		t.Fatal(err)
+	}
+	if attemptNumber != 1 || status != "active" {
+		t.Fatalf("attempt number/status = %d/%q", attemptNumber, status)
+	}
+}
+
 func TestInspectRunExplainsDurableWaitingState(t *testing.T) {
 	db := openRuntimeDB(t)
 	store := workflowv2.NewStore(db)

@@ -458,6 +458,7 @@ func (s *Server) Run(opts ...RunOptions) error {
 }
 
 func (s *Server) run(ctx context.Context, opts ...RunOptions) error {
+	go s.runWorkflowV2Worker(ctx)
 	noWebUI := len(opts) > 0 && opts[0].NoWebUI
 	mux := http.NewServeMux()
 	s.mux = mux

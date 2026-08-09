@@ -118,6 +118,28 @@ func TestAssembleContextUsesPinnedWorkspaceAndRelevantRepositories(t *testing.T)
 	}
 }
 
+func TestAssembleOrganizationContextDefersRepositorySources(t *testing.T) {
+	db := openRuntimeDB(t)
+	store := workflowv2.NewStore(db)
+	createContextRun(t, store, "run-org-context")
+	var resolved []string
+	bundle, err := store.AssembleOrganizationContext(context.Background(), "run-org-context",
+		workflowv2.KnowledgeResolverFunc(func(_ context.Context, _ workflowv2.Run, name string,
+			source typesv2.KnowledgeSource) (typesv2.ContextBundleSource, error) {
+			resolved = append(resolved, name)
+			return typesv2.ContextBundleSource{Status: "ready", ContentDigest: "sha256:" + name}, nil
+		}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(resolved, []string{"principles"}) || len(bundle.Sources) != 1 {
+		t.Fatalf("resolved=%#v bundle=%#v", resolved, bundle)
+	}
+	if bundle.Sources[0].Scope != typesv2.KnowledgeScopeOrganization {
+		t.Fatalf("source = %#v", bundle.Sources[0])
+	}
+}
+
 func TestAssembleContextRejectsRepositoryOutsideWorkspace(t *testing.T) {
 	db := openRuntimeDB(t)
 	store := workflowv2.NewStore(db)
