@@ -156,7 +156,7 @@ func (s *Store) SubmitDelivery(ctx context.Context, runID, attemptID string, man
 	if eventResult.Disposition != typesv2.DispositionAccepted {
 		return nil, fmt.Errorf("delivery verification event was %s: %s", eventResult.Disposition, eventResult.Reason)
 	}
-	if _, err := s.evaluateAndPublishDeliveryPolicy(ctx, runID, "", "", now); err != nil {
+	if _, err := s.evaluateAndPublishDeliveryPolicy(ctx, runID, attemptID, "", now); err != nil {
 		return nil, err
 	}
 	sort.Slice(verified, func(i, j int) bool {

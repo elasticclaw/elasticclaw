@@ -81,6 +81,10 @@ func TestPolicyEventRejectsSupersededEvaluationRevision(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	firstAttempt, err := store.StartAttempt(context.Background(), "run-policy-revision", "claw-1")
+	if err != nil {
+		t.Fatal(err)
+	}
 	now := time.Date(2026, 8, 8, 12, 0, 0, 0, time.UTC).UnixMilli()
 	if _, err := db.Exec(`INSERT INTO workflow_v2_delivery_prs(
 		id,run_id,url,repository_name,repository,pr_number,source_branch,base_branch,current_head_sha,state,
@@ -134,5 +138,30 @@ func TestPolicyEventRejectsSupersededEvaluationRevision(t *testing.T) {
 	}
 	if eventCount != 0 || run.State != "reviewing" {
 		t.Fatalf("stale event count/run = %d/%#v", eventCount, run)
+	}
+	current, err := store.EvaluateDeliveryPolicy(context.Background(), "run-policy-revision")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.StartAttempt(context.Background(), "run-policy-revision", "claw-2"); err != nil {
+		t.Fatal(err)
+	}
+	_, err = store.applyDeliveryPolicyEvent(context.Background(), "run-policy-revision", current, EventInput{
+		ID: "revoked-policy-event", Kind: "workflow.delivery.evaluated", AttemptID: firstAttempt.ID,
+		Producer: ProducerEngine,
+		Payload:  map[string]interface{}{"workflow": map[string]interface{}{"delivery": current}},
+		Facts:    map[string]interface{}{"delivery.satisfied": current.Satisfied},
+		Provenance: typesv2.EvidenceProvenance{
+			Producer: string(ProducerEngine), ObservedAt: time.UnixMilli(now + 1).UTC(),
+		},
+	})
+	if err == nil {
+		t.Fatal("policy event from revoked attempt was accepted")
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM workflow_v2_events WHERE id='revoked-policy-event'`).Scan(&eventCount); err != nil {
+		t.Fatal(err)
+	}
+	if eventCount != 0 {
+		t.Fatalf("revoked policy event rows = %d", eventCount)
 	}
 }
