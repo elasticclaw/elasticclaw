@@ -24,6 +24,42 @@ func TestOpenDBSetsBusyTimeout(t *testing.T) {
 	}
 }
 
+func TestWorkflowV2MigrationIsAdditiveToExistingHubData(t *testing.T) {
+	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "hub.db")+"?_time_format=sqlite&_pragma=foreign_keys(on)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`CREATE TABLE tenants (
+		id TEXT PRIMARY KEY, name TEXT NOT NULL, token TEXT NOT NULL UNIQUE,
+		claw_token TEXT NOT NULL UNIQUE, created_at DATETIME NOT NULL
+	)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO tenants(id,name,token,claw_token,created_at) VALUES(?,?,?,?,?)`,
+		"legacy-tenant", "Legacy", "legacy-token", "legacy-claw-token", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := migrate(db); err != nil {
+		t.Fatalf("migrate legacy database: %v", err)
+	}
+	var name string
+	if err := db.QueryRow(`SELECT name FROM tenants WHERE id='legacy-tenant'`).Scan(&name); err != nil {
+		t.Fatalf("legacy row was not preserved: %v", err)
+	}
+	if name != "Legacy" {
+		t.Fatalf("legacy tenant name = %q", name)
+	}
+	var v2Tables int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name LIKE 'workflow_v2_%'`).Scan(&v2Tables); err != nil {
+		t.Fatal(err)
+	}
+	if v2Tables == 0 {
+		t.Fatal("workflow v2 tables were not added")
+	}
+}
+
 func TestClawsTriggerActorJSONDefaultIsValidJSON(t *testing.T) {
 	t.Run("fresh schema", func(t *testing.T) {
 		db, err := openDB(filepath.Join(t.TempDir(), "hub.db"))

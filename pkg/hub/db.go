@@ -7,6 +7,8 @@ import (
 	"strings"
 	"time"
 
+	workflowv2 "github.com/elasticclaw/elasticclaw/pkg/hub/workflowv2"
+
 	_ "modernc.org/sqlite" // pure-Go SQLite, no CGO required
 )
 
@@ -751,6 +753,9 @@ func migrate(db *sql.DB) error {
 	);
 	`)
 	if err != nil {
+		return err
+	}
+	if err := workflowv2.Migrate(db); err != nil {
 		return err
 	}
 	if err := rebuildTaskRunSummariesStatusV3(db); err != nil {
