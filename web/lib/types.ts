@@ -1,4 +1,4 @@
-export type ClawStatus = "connected" | "idle" | "offline" | "provisioning" | "error"
+export type ClawStatus = "connected" | "idle" | "offline" | "provisioning" | "preview" | "error"
 
 export interface Claw {
   id: string
@@ -17,6 +17,11 @@ export interface Claw {
   bootstrap_status?: string
   githubIssueId?: string
   githubIssueUrl?: string
+  previewPort?: number
+  previewUrl?: string
+  previewLabel?: string
+  previewReady?: boolean
+  previewExpiresAt?: number
   // SSH / terminal access
   ssh_host?: string
   ssh_port?: number
@@ -64,7 +69,7 @@ export interface ApiClaw {
   id: string
   name: string
   template: string
-  status: "connected" | "offline" | "provisioning" | "starting" | "error" | "idle"
+  status: "connected" | "offline" | "provisioning" | "starting" | "preview" | "error" | "idle"
   last_seen: string
   created_at: string
   tenant_id: string
@@ -77,6 +82,11 @@ export interface ApiClaw {
   bootstrap_status?: string
   github_issue_id?: string
   github_issue_url?: string
+  preview_port?: number
+  preview_url?: string
+  preview_label?: string
+  preview_ready?: boolean
+  preview_expires_at?: number
 }
 
 export interface ApiMessage {

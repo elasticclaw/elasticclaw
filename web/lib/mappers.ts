@@ -80,6 +80,8 @@ export function mapApiStatus(status: ApiClaw["status"]): ClawStatus {
       return "connected"
     case "idle":
       return "idle"
+    case "preview":
+      return "preview"
     case "provisioning":
     case "starting":
       return "provisioning"
@@ -111,6 +113,11 @@ export function mapApiClaw(
     bootstrap_status: overrides.bootstrap_status ?? apiClaw.bootstrap_status,
     githubIssueId: overrides.githubIssueId ?? apiClaw.github_issue_id,
     githubIssueUrl: overrides.githubIssueUrl ?? apiClaw.github_issue_url,
+    previewPort: overrides.previewPort ?? apiClaw.preview_port,
+    previewUrl: overrides.previewUrl ?? apiClaw.preview_url,
+    previewLabel: overrides.previewLabel ?? apiClaw.preview_label,
+    previewReady: overrides.previewReady ?? apiClaw.preview_ready,
+    previewExpiresAt: overrides.previewExpiresAt ?? apiClaw.preview_expires_at,
     ssh_host: apiClaw.ssh_host,
     ssh_port: apiClaw.ssh_port,
     ssh_user: apiClaw.ssh_user,

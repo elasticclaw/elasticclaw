@@ -132,6 +132,35 @@ func TestWorkflowManualTriggerContextIncludesTaskAndWorkspaceContext(t *testing.
 	}
 }
 
+func TestAppendWorkflowPreviewContextRequiresDynamicPersistentServer(t *testing.T) {
+	content := appendWorkflowPreviewContext(
+		"Existing context\n",
+		&types.WorkflowPreview{Port: 4173, Label: "QA build"},
+	)
+
+	for _, want := range []string{
+		"Existing context",
+		"## Browser Preview Required",
+		"repository's own documented start command and package manager",
+		"`0.0.0.0:4173`",
+		"tool subprocesses may be reaped",
+		"/preview/start",
+		"ElasticClaw will run the command outside the tool-call lifecycle",
+		"Do not assume the route is `/`",
+		"including a visible marker from the change",
+		"`path`",
+		`{"path":"/setup"}`,
+		"/preview/ready",
+		"ElasticClaw detaches and stops the AI agent",
+		"credential-free preview until its TTL expires",
+		"Preview ready: [Open QA preview](PREVIEW_URL)",
+	} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("preview context missing %q:\n%s", want, content)
+		}
+	}
+}
+
 func TestGitHubPRContextDoesNotRequestNewPR(t *testing.T) {
 	var payload githubPRPayload
 	payload.Number = 7

@@ -108,6 +108,12 @@ func migrate(db *sql.DB) error {
 	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN trigger_actor_json TEXT NOT NULL DEFAULT '{}'`)
 	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN stop_comment_pending INTEGER NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN no_progress_paused INTEGER NOT NULL DEFAULT 0`)
+	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN preview_port INTEGER NOT NULL DEFAULT 0`)
+	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN preview_url TEXT NOT NULL DEFAULT ''`)
+	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN preview_label TEXT NOT NULL DEFAULT ''`)
+	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN preview_ready INTEGER NOT NULL DEFAULT 0`)
+	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN preview_ttl_seconds INTEGER NOT NULL DEFAULT 1800`)
+	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN preview_expires_at INTEGER NOT NULL DEFAULT 0`)
 	// idle_since (epoch millis, 0 = not latched) is the durable once-per-idle-
 	// stretch latch for agent_idle notifications: the status watchdog sets it
 	// when it fires the notification for a stretch, and the claw-pass notifier
@@ -321,6 +327,12 @@ func migrate(db *sql.DB) error {
 		trigger_actor_json TEXT NOT NULL DEFAULT '{}',
 		stop_comment_pending INTEGER NOT NULL DEFAULT 0,
 		no_progress_paused INTEGER NOT NULL DEFAULT 0,
+		preview_port INTEGER NOT NULL DEFAULT 0,
+		preview_url TEXT NOT NULL DEFAULT '',
+		preview_label TEXT NOT NULL DEFAULT '',
+		preview_ready INTEGER NOT NULL DEFAULT 0,
+		preview_ttl_seconds INTEGER NOT NULL DEFAULT 1800,
+		preview_expires_at INTEGER NOT NULL DEFAULT 0,
 		idle_since INTEGER NOT NULL DEFAULT 0
 	);
 

@@ -180,6 +180,57 @@ func (s *Server) reapOnce() {
 		actions++
 		return true
 	}
+	previewRows, err := s.db.Query(
+		`SELECT id, tenant_id, COALESCE(provider,''), COALESCE(provider_id,'')
+		   FROM claws
+		  WHERE status='preview' AND preview_expires_at > 0 AND preview_expires_at <= ?`,
+		n.UnixMilli(),
+	)
+	if err == nil {
+		type expiredPreview struct{ id, tenantID, provider, providerID string }
+		var previews []expiredPreview
+		for previewRows.Next() {
+			var preview expiredPreview
+			if previewRows.Scan(&preview.id, &preview.tenantID, &preview.provider, &preview.providerID) == nil {
+				previews = append(previews, preview)
+			}
+		}
+		previewRows.Close()
+		for _, preview := range previews {
+			if !take() {
+				break
+			}
+			applied, finishErr := s.finishClawTerminalTx(
+				preview.id,
+				"deleted",
+				"",
+				"completed",
+				"QA preview TTL expired",
+				terminalTxOpts{},
+			)
+			if finishErr != nil {
+				log.Printf("[reaper] expire preview %s: %v", preview.id, finishErr)
+				continue
+			}
+			if !applied {
+				continue
+			}
+			_, _ = s.db.Exec(`DELETE FROM claw_prs WHERE claw_id=?`, preview.id)
+			if s.cronScheduler != nil {
+				s.cronScheduler.releaseClawWorkflowSlot(preview.id)
+			}
+			s.broadcastToUsers(preview.tenantID, types.WSMessage{
+				Type:    "claw_status",
+				Payload: map[string]string{"claw_id": preview.id, "status": "deleted"},
+			})
+			if preview.providerID != "" {
+				go s.terminateVMForClaw(preview.id, preview.provider, preview.providerID)
+			}
+			log.Printf("[reaper] expired QA preview for claw %s", preview.id)
+		}
+	} else {
+		log.Printf("[reaper] preview query: %v", err)
+	}
 	rows, err := s.db.Query(`SELECT id, status FROM claws WHERE status IN ('offline','provisioning','starting')`)
 	if err != nil {
 		log.Printf("[reaper] claw query: %v", err)

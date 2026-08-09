@@ -1,6 +1,8 @@
 package hub
 
 import (
+	"fmt"
+
 	"github.com/elasticclaw/elasticclaw/pkg/provider/daytona"
 	dockerpkg "github.com/elasticclaw/elasticclaw/pkg/provider/docker"
 	"github.com/elasticclaw/elasticclaw/pkg/provider/exedev"
@@ -8,6 +10,20 @@ import (
 	replicated "github.com/elasticclaw/elasticclaw/pkg/provider/replicated"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 )
+
+func previewPorts(port int) []int {
+	if port == 0 {
+		return nil
+	}
+	return []int{port}
+}
+
+func instancePreviewURL(instance *types.Instance, port int) string {
+	if instance == nil || port == 0 {
+		return ""
+	}
+	return instance.ProviderMeta[fmt.Sprintf("preview_url_%d", port)]
+}
 
 func newDaytonaProvider(cfg types.ProviderConfig) (*daytona.Provider, error) {
 	return daytona.New(map[string]interface{}{

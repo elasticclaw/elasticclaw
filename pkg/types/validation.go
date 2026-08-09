@@ -223,6 +223,21 @@ func (w *WorkflowConfig) Validate() error {
 	if w.Provider != "" && !validProviders[w.Provider] {
 		return fmt.Errorf("workflow %q: invalid provider %q (must be one of: %s)", w.Name, w.Provider, validProviderList)
 	}
+	if w.Preview != nil {
+		if w.Preview.Port < 1 || w.Preview.Port > 65535 {
+			return fmt.Errorf("workflow %q: preview.port must be between 1 and 65535", w.Name)
+		}
+		switch w.Preview.Port {
+		case 18789, 18790, 22222, 2280, 33333:
+			return fmt.Errorf("workflow %q: preview.port %d is reserved for sandbox infrastructure", w.Name, w.Preview.Port)
+		}
+		if w.Preview.TTL != "" {
+			ttl, err := time.ParseDuration(w.Preview.TTL)
+			if err != nil || ttl < time.Minute || ttl > 24*time.Hour {
+				return fmt.Errorf("workflow %q: preview.ttl must be a duration between 1m and 24h", w.Name)
+			}
+		}
+	}
 	if w.Trigger != nil {
 		if err := validateWorkflowTrigger(w.Name, w.Trigger); err != nil {
 			return err

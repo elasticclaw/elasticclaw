@@ -1026,11 +1026,12 @@ func (s *Server) provisionPendingClaw(clawID string) {
 		tagsJSON, color                                            string
 		linearIssueID, githubIssueID, shortcutStoryID, jiraIssueID string
 		tenantID                                                   string
+		previewPort                                                int
 	)
 	err := s.db.QueryRow(
-		`SELECT tenant_id, name, template, provider, default_model, template_files, github_repos, linear_workspace, nix, docker, tags, color, llm_key, linear_issue_id, github_issue_id, shortcut_story_id, jira_issue_id FROM claws WHERE id=?`,
+		`SELECT tenant_id, name, template, provider, default_model, template_files, github_repos, linear_workspace, nix, docker, tags, color, llm_key, linear_issue_id, github_issue_id, shortcut_story_id, jira_issue_id, preview_port FROM claws WHERE id=?`,
 		clawID,
-	).Scan(&tenantID, &name, &template, &provider, &defaultModel, &templateFilesJSON, &githubReposJSON, &linearWorkspace, &nixEnabled, &dockerEnabled, &tagsJSON, &color, &llmKey, &linearIssueID, &githubIssueID, &shortcutStoryID, &jiraIssueID)
+	).Scan(&tenantID, &name, &template, &provider, &defaultModel, &templateFilesJSON, &githubReposJSON, &linearWorkspace, &nixEnabled, &dockerEnabled, &tagsJSON, &color, &llmKey, &linearIssueID, &githubIssueID, &shortcutStoryID, &jiraIssueID, &previewPort)
 	if err != nil {
 		log.Printf("[factory] failed to fetch pending claw %s: %v", clawID[:8], err)
 		s.stopAgentWithReason(clawID, fmt.Sprintf("Factory provision failed: failed to fetch pending claw: %v", err), false)
@@ -1165,6 +1166,7 @@ func (s *Server) provisionPendingClaw(clawID string) {
 		Files:        templateFiles,
 		Env:          env,
 		ProviderName: "ec-" + clawID[:8],
+		PreviewPort:  previewPort,
 	}
 	if tmplCfg != nil && req.InstanceType == "" {
 		req.InstanceType = tmplCfg.InstanceType
@@ -1189,6 +1191,8 @@ func (s *Server) provisionPendingClaw(clawID string) {
 		provErr = s.provisionDaytona(ctx, clawID, req, provCfg, fileBytes, env)
 	case "exedev":
 		provErr = s.provisionExedev(ctx, clawID, req, provCfg, fileBytes, env)
+	case "docker":
+		provErr = s.provisionDocker(ctx, clawID, req, provCfg, fileBytes)
 	case "lambda-microvms":
 		provErr = s.provisionLambdaMicroVMs(ctx, clawID, req, provCfg, fileBytes)
 	case "noop":

@@ -114,6 +114,24 @@ func TestExampleGitHubIssueWorkflowPublishesNestedTrigger(t *testing.T) {
 	}
 }
 
+func TestExampleManualLivePreviewWorkflowValidates(t *testing.T) {
+	path := filepath.Join("..", "examples", "workflows", "manual-live-preview.yaml")
+	workflows, err := readWorkflowFiles([]string{path})
+	if err != nil {
+		t.Fatalf("read workflow: %v", err)
+	}
+	if len(workflows) != 1 {
+		t.Fatalf("workflow count = %d, want 1", len(workflows))
+	}
+	workflow := workflows[0]
+	if err := workflow.Validate(); err != nil {
+		t.Fatalf("validate workflow: %v", err)
+	}
+	if workflow.Preview == nil || workflow.Preview.Port != 3000 {
+		t.Fatalf("preview config = %#v", workflow.Preview)
+	}
+}
+
 func TestCronWorkflowFileValidatesForPush(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "dependency-update.yaml")
 	data := []byte(`

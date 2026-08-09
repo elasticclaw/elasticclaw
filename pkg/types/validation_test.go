@@ -44,6 +44,64 @@ func TestValidateRepositoryAccessPatterns(t *testing.T) {
 	}
 }
 
+func TestWorkflowConfigValidatePreviewPort(t *testing.T) {
+	tests := []struct {
+		name    string
+		port    int
+		wantErr string
+	}{
+		{name: "valid application port", port: 3000},
+		{name: "zero", port: 0, wantErr: "between 1 and 65535"},
+		{name: "too large", port: 65536, wantErr: "between 1 and 65535"},
+		{name: "gateway reserved", port: 18789, wantErr: "reserved"},
+		{name: "sandbox infrastructure port reserved", port: 22222, wantErr: "reserved"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			workflow := &WorkflowConfig{
+				Name:    "preview",
+				Preview: &WorkflowPreview{Port: tt.port},
+			}
+			err := workflow.Validate()
+			if tt.wantErr == "" && err != nil {
+				t.Fatalf("Validate() error = %v", err)
+			}
+			if tt.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tt.wantErr)) {
+				t.Fatalf("Validate() error = %v, want containing %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestWorkflowConfigValidatePreviewTTL(t *testing.T) {
+	tests := []struct {
+		ttl     string
+		wantErr bool
+	}{
+		{ttl: ""},
+		{ttl: "30m"},
+		{ttl: "24h"},
+		{ttl: "30s", wantErr: true},
+		{ttl: "25h", wantErr: true},
+		{ttl: "later", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.ttl, func(t *testing.T) {
+			workflow := &WorkflowConfig{
+				Name:    "preview",
+				Preview: &WorkflowPreview{Port: 3000, TTL: tt.ttl},
+			}
+			err := workflow.Validate()
+			if tt.wantErr && (err == nil || !strings.Contains(err.Error(), "preview.ttl")) {
+				t.Fatalf("Validate() error = %v, want preview.ttl error", err)
+			}
+			if !tt.wantErr && err != nil {
+				t.Fatalf("Validate() error = %v", err)
+			}
+		})
+	}
+}
+
 func TestFactoryConfigValidate(t *testing.T) {
 	tests := []struct {
 		name    string

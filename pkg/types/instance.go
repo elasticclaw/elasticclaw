@@ -38,6 +38,7 @@ const (
 	StatusRunning   InstanceStatus = "running"
 	StatusStarting  InstanceStatus = "starting"
 	StatusStopped   InstanceStatus = "stopped"
+	StatusPreview   InstanceStatus = "preview"
 	StatusUnhealthy InstanceStatus = "unhealthy"
 	StatusError     InstanceStatus = "error"
 	StatusNotFound  InstanceStatus = "not_found"

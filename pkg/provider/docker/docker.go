@@ -49,32 +49,14 @@ func (p *Provider) Info() types.ProviderInfo {
 	return types.ProviderInfo{
 		Name:         "docker",
 		Type:         types.ProviderTypeStateful,
-		Capabilities: []string{"exec"},
+		Capabilities: []string{"exec", "preview"},
 	}
 }
 
 // Create launches an agent container. req.Name is used as the container name;
 // req.Env is passed as environment variables via -e flags.
 func (p *Provider) Create(ctx context.Context, req types.CreateRequest) (*types.Instance, error) {
-	args := []string{
-		"run", "-d",
-		"--name", req.Name,
-		"--label", containerLabel + "=" + req.Name,
-		"--add-host", "host.docker.internal:host-gateway",
-	}
-	if p.cfg.Image == defaultImage {
-		args = append(args, "--entrypoint", "sh")
-	}
-	if p.cfg.Network != "" {
-		args = append(args, "--network", p.cfg.Network)
-	}
-	for k, v := range req.Env {
-		args = append(args, "-e", k+"="+v)
-	}
-	args = append(args, p.cfg.Image)
-	if p.cfg.Image == defaultImage {
-		args = append(args, "-lc", "trap 'exit 0' TERM INT; while :; do sleep 3600; done")
-	}
+	args := dockerCreateArgs(p.cfg, req)
 
 	out, err := dockerRun(ctx, args...)
 	if err != nil {
@@ -82,17 +64,68 @@ func (p *Provider) Create(ctx context.Context, req types.CreateRequest) (*types.
 	}
 
 	containerID := strings.TrimSpace(string(out))
+	providerMeta := map[string]string{
+		"container_id":   containerID,
+		"container_name": req.Name,
+	}
+	for _, port := range req.PreviewPorts {
+		previewURL, err := p.PreviewURL(ctx, req.Name, port)
+		if err != nil {
+			_, _ = dockerRun(context.Background(), "rm", "-f", req.Name)
+			return nil, err
+		}
+		providerMeta[fmt.Sprintf("preview_url_%d", port)] = previewURL
+	}
 	return &types.Instance{
-		Name:      req.Name,
-		ID:        req.Name, // use name as stable ID; full ID in ProviderMeta
-		Provider:  "docker",
-		Status:    types.StatusRunning,
-		CreatedAt: time.Now().UTC(),
-		ProviderMeta: map[string]string{
-			"container_id":   containerID,
-			"container_name": req.Name,
-		},
+		Name:         req.Name,
+		ID:           req.Name, // use name as stable ID; full ID in ProviderMeta
+		Provider:     "docker",
+		Status:       types.StatusRunning,
+		CreatedAt:    time.Now().UTC(),
+		ProviderMeta: providerMeta,
 	}, nil
+}
+
+func dockerCreateArgs(cfg Config, req types.CreateRequest) []string {
+	args := []string{
+		"run", "-d",
+		"--name", req.Name,
+		"--label", containerLabel + "=" + req.Name,
+		"--add-host", "host.docker.internal:host-gateway",
+	}
+	if cfg.Image == defaultImage {
+		args = append(args, "--entrypoint", "sh")
+	}
+	if cfg.Network != "" {
+		args = append(args, "--network", cfg.Network)
+	}
+	for _, port := range req.PreviewPorts {
+		args = append(args, "--publish", fmt.Sprintf("127.0.0.1::%d", port))
+	}
+	for k, v := range req.Env {
+		args = append(args, "-e", k+"="+v)
+	}
+	args = append(args, cfg.Image)
+	if cfg.Image == defaultImage {
+		args = append(args, "-lc", "trap 'exit 0' TERM INT; while :; do sleep 3600; done")
+	}
+	return args
+}
+
+// PreviewURL returns the localhost URL assigned to a published container port.
+func (p *Provider) PreviewURL(ctx context.Context, instanceID string, port int) (string, error) {
+	out, err := dockerRun(ctx, "port", instanceID, fmt.Sprintf("%d/tcp", port))
+	if err != nil {
+		return "", fmt.Errorf("docker preview port %d: %w", port, err)
+	}
+	address := strings.TrimSpace(string(out))
+	if newline := strings.LastIndex(address, "\n"); newline >= 0 {
+		address = strings.TrimSpace(address[newline+1:])
+	}
+	if address == "" {
+		return "", fmt.Errorf("docker preview port %d has no published address", port)
+	}
+	return "http://" + address, nil
 }
 
 // CopyIn copies content into a running container using a tar stream piped to docker cp.
