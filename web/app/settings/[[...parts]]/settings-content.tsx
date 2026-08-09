@@ -3164,7 +3164,7 @@ function WorkflowSummaryRow({
   return (
     <div className="px-4 py-3">
       <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
-        <div className="min-w-0 md:min-w-[35ch]">
+        <div className="min-w-0 flex-1">
           <p className="text-sm font-medium">
             <WorkflowName name={workflow.name} />
           </p>
@@ -3174,7 +3174,7 @@ function WorkflowSummaryRow({
             {workflow.projects?.length ? ` · projects: ${workflow.projects.join(", ")}` : ""}
           </p>
         </div>
-        <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-2 shrink-0">
           <label className="flex items-center gap-2 text-xs text-muted-foreground">
             <Switch
               checked={workflow.enabled}
