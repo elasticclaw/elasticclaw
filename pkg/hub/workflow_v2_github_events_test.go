@@ -104,14 +104,27 @@ func TestWorkflowV2GitHubCIAndReviewUseTypedRuntimeOnly(t *testing.T) {
 				_, _ = w.Write([]byte(`{"check_runs":[]}`))
 				return
 			}
+			if r.URL.Query().Get("page") == "2" {
+				_, _ = w.Write([]byte(`{"check_runs":[
+					{"id":102,"name":"unit","status":"completed","conclusion":"success","completed_at":"2026-08-09T12:00:01Z","app":{"slug":"github-actions"},"check_suite":{"id":502}}
+				]}`))
+				return
+			}
+			w.Header().Set("Link", workflowV2GitHubTestNextLink(r))
 			_, _ = w.Write([]byte(`{"check_runs":[
 				{"id":101,"name":"lint","status":"completed","conclusion":"success","completed_at":"2026-08-09T12:00:00Z","app":{"slug":"github-actions"},"check_suite":{"id":501}},
-				{"id":102,"name":"unit","status":"completed","conclusion":"success","completed_at":"2026-08-09T12:00:01Z","app":{"slug":"github-actions"},"check_suite":{"id":501}},
 				{"id":103,"name":"lint","status":"completed","conclusion":"success","completed_at":"2026-08-09T12:00:02Z","app":{"slug":"untrusted-ci"},"check_suite":{"id":999}}
 			]}`))
 			return
 		}
 		if strings.Contains(r.URL.Path, "/actions/runs") {
+			if r.URL.Query().Get("page") == "2" {
+				_, _ = w.Write([]byte(`{"workflow_runs":[
+					{"name":"CI","path":".github/workflows/ci.yml","check_suite_id":502}
+				]}`))
+				return
+			}
+			w.Header().Set("Link", workflowV2GitHubTestNextLink(r))
 			_, _ = w.Write([]byte(`{"workflow_runs":[
 				{"name":"CI","path":".github/workflows/ci.yml","check_suite_id":501}
 			]}`))
@@ -249,4 +262,14 @@ func TestWorkflowV2GitHubCIAndReviewUseTypedRuntimeOnly(t *testing.T) {
 	if evidence != 3 || outbox != 1 || messages != 0 {
 		t.Fatalf("evidence/outbox/messages = %d/%d/%d", evidence, outbox, messages)
 	}
+}
+
+func workflowV2GitHubTestNextLink(r *http.Request) string {
+	next := *r.URL
+	query := next.Query()
+	query.Set("page", "2")
+	next.RawQuery = query.Encode()
+	next.Scheme = "http"
+	next.Host = r.Host
+	return "<" + next.String() + `>; rel="next"`
 }

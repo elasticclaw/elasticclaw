@@ -139,32 +139,34 @@ func (s *Server) processWorkflowV2GitHubCheckEvent(event string, payload githubC
 				log.Printf("[workflow-v2 github] no repository-scoped token for CI %s", target.Repository)
 				continue
 			}
-			data, err := githubAPIWithBaseContext(context.Background(), s.ghBaseURL(),
-				fmt.Sprintf("repos/%s/commits/%s/check-runs?filter=latest&per_page=100", target.Repository, headSHA), token)
+			rawRuns, err := githubAPICollectionWithBaseContext(context.Background(), s.ghBaseURL(),
+				fmt.Sprintf("repos/%s/commits/%s/check-runs?filter=latest&per_page=100", target.Repository, headSHA),
+				token, "check_runs")
 			if err != nil {
 				log.Printf("[workflow-v2 github] reconcile checks for %s@%s: %v", target.Repository, headSHA, err)
 				continue
 			}
-			rawRuns, _ := json.Marshal(data["check_runs"])
-			if err := json.Unmarshal(rawRuns, &checks); err != nil {
+			rawChecks, _ := json.Marshal(rawRuns)
+			if err := json.Unmarshal(rawChecks, &checks); err != nil {
 				log.Printf("[workflow-v2 github] decode check runs for %s: %v", target.Repository, err)
 				continue
 			}
 			checksByRepository[target.Repository] = checks
-			runsData, err := githubAPIWithBaseContext(context.Background(), s.ghBaseURL(),
-				fmt.Sprintf("repos/%s/actions/runs?head_sha=%s&per_page=100", target.Repository, headSHA), token)
+			rawRuns, err = githubAPICollectionWithBaseContext(context.Background(), s.ghBaseURL(),
+				fmt.Sprintf("repos/%s/actions/runs?head_sha=%s&per_page=100", target.Repository, headSHA),
+				token, "workflow_runs")
 			if err != nil {
 				log.Printf("[workflow-v2 github] reconcile workflow runs for %s@%s: %v", target.Repository, headSHA, err)
 				delete(checksByRepository, target.Repository)
 				continue
 			}
-			rawRuns, _ = json.Marshal(runsData["workflow_runs"])
+			rawWorkflowRuns, _ := json.Marshal(rawRuns)
 			var workflowRuns []struct {
 				Name         string `json:"name"`
 				Path         string `json:"path"`
 				CheckSuiteID int64  `json:"check_suite_id"`
 			}
-			if err := json.Unmarshal(rawRuns, &workflowRuns); err != nil {
+			if err := json.Unmarshal(rawWorkflowRuns, &workflowRuns); err != nil {
 				log.Printf("[workflow-v2 github] decode workflow runs for %s: %v", target.Repository, err)
 				delete(checksByRepository, target.Repository)
 				continue
