@@ -265,6 +265,10 @@ type controlSocketWriter struct {
 	conn *websocket.Conn
 }
 
+type activeTaskCancellation struct {
+	cancel context.CancelFunc
+}
+
 func (w *controlSocketWriter) write(ctx context.Context, frame typesv2.ControlFrame) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -287,14 +291,14 @@ type controlSupervisor struct {
 	connected   bool
 	snapshot    *typesv2.WorkflowSnapshot
 	gateway     *gatewaySession
-	activeTasks map[string]context.CancelFunc
+	activeTasks map[string]*activeTaskCancellation
 	recovered   map[workflowControlBinding]bool
 }
 
 func newControlSupervisor(ctx context.Context, wsURL, clawID, token string,
 	bridge typesv2.BridgeRegistration, store *bridgeControlStore) *controlSupervisor {
 	return &controlSupervisor{ctx: ctx, wsURL: wsURL, clawID: clawID, token: token,
-		bridge: bridge, store: store, activeTasks: map[string]context.CancelFunc{},
+		bridge: bridge, store: store, activeTasks: map[string]*activeTaskCancellation{},
 		recovered: map[workflowControlBinding]bool{}}
 }
 
@@ -566,14 +570,10 @@ func (s *controlSupervisor) executeTask(ctx context.Context, binding workflowCon
 		deadline = time.Now().Add(2 * time.Hour)
 	}
 	taskCtx, cancel := context.WithDeadline(ctx, deadline)
-	s.mu.Lock()
-	s.activeTasks[task.ID] = cancel
-	s.mu.Unlock()
+	activeCancellation := s.registerTaskCancellation(task.ID, cancel)
 	defer func() {
 		cancel()
-		s.mu.Lock()
-		delete(s.activeTasks, task.ID)
-		s.mu.Unlock()
+		s.unregisterTaskCancellation(task.ID, activeCancellation)
 	}()
 
 	if err := s.enqueueTaskEvent(binding, task, typesv2.MessageAgentTaskStarted, map[string]interface{}{
@@ -758,21 +758,39 @@ func (s *controlSupervisor) stateVersion(binding workflowControlBinding) uint64 
 }
 
 func (s *controlSupervisor) cancelTask(taskID string) {
-	s.mu.Lock()
-	cancel := s.activeTasks[taskID]
-	s.mu.Unlock()
-	if cancel != nil {
-		cancel()
+	s.mu.RLock()
+	activeCancellation := s.activeTasks[taskID]
+	s.mu.RUnlock()
+	if activeCancellation != nil {
+		activeCancellation.cancel()
 	}
 }
 
-func (s *controlSupervisor) cancelAllTasks() {
+func (s *controlSupervisor) registerTaskCancellation(taskID string,
+	cancel context.CancelFunc) *activeTaskCancellation {
+	activeCancellation := &activeTaskCancellation{cancel: cancel}
 	s.mu.Lock()
-	cancels := make([]context.CancelFunc, 0, len(s.activeTasks))
-	for _, cancel := range s.activeTasks {
-		cancels = append(cancels, cancel)
+	s.activeTasks[taskID] = activeCancellation
+	s.mu.Unlock()
+	return activeCancellation
+}
+
+func (s *controlSupervisor) unregisterTaskCancellation(taskID string,
+	activeCancellation *activeTaskCancellation) {
+	s.mu.Lock()
+	if s.activeTasks[taskID] == activeCancellation {
+		delete(s.activeTasks, taskID)
 	}
 	s.mu.Unlock()
+}
+
+func (s *controlSupervisor) cancelAllTasks() {
+	s.mu.RLock()
+	cancels := make([]context.CancelFunc, 0, len(s.activeTasks))
+	for _, activeCancellation := range s.activeTasks {
+		cancels = append(cancels, activeCancellation.cancel)
+	}
+	s.mu.RUnlock()
 	for _, cancel := range cancels {
 		cancel()
 	}

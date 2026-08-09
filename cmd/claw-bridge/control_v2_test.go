@@ -160,6 +160,30 @@ func TestBridgeRegistrationOnlyAdvertisesControlWhenDurableStoreIsAvailable(t *t
 	}
 }
 
+func TestOldTaskCleanupCannotRemoveReplacementCancellation(t *testing.T) {
+	supervisor := newControlSupervisor(context.Background(), "ws://invalid", "claw", "token",
+		bridgeRegistration(true), openTestBridgeControlStore(t))
+	oldCancelled := make(chan struct{})
+	oldCancellation := supervisor.registerTaskCancellation("task-reused", func() { close(oldCancelled) })
+	newCancelled := make(chan struct{})
+	newCancellation := supervisor.registerTaskCancellation("task-reused", func() { close(newCancelled) })
+
+	supervisor.unregisterTaskCancellation("task-reused", oldCancellation)
+	supervisor.cancelTask("task-reused")
+
+	select {
+	case <-newCancelled:
+	default:
+		t.Fatal("replacement task cancellation was removed by old task cleanup")
+	}
+	select {
+	case <-oldCancelled:
+		t.Fatal("cancelling the replacement task cancelled the old task")
+	default:
+	}
+	supervisor.unregisterTaskCancellation("task-reused", newCancellation)
+}
+
 func TestBridgeRejectsTaskAssignmentOlderThanAuthoritativeSnapshot(t *testing.T) {
 	store := openTestBridgeControlStore(t)
 	binding := workflowControlBinding{RunID: "run-stale-task", AttemptID: "attempt-stale-task"}
