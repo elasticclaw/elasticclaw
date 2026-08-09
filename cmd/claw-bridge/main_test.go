@@ -1440,7 +1440,8 @@ func TestRunHubLoopDoesNotLeakKeepaliveGoroutinesAcrossReconnects(t *testing.T) 
 	before := stableGoroutineCount(t)
 	const cycles = 5
 	for range cycles {
-		err := runHubLoop(ctx, wsURL, "claw-test", "test-claw", "test-template", "tok", "", gwClient, gwSession, proxy, queue, newMessageDeduper())
+		err := runHubLoop(ctx, wsURL, "claw-test", "test-claw", "test-template", "tok", "",
+			bridgeRegistration(false), nil, gwClient, gwSession, proxy, queue, newMessageDeduper())
 		if err == nil {
 			t.Fatal("runHubLoop returned nil error, want read error after hub-side close")
 		}

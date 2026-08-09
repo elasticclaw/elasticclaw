@@ -94,6 +94,30 @@ type ControlRegistration struct {
 	Bridge    BridgeRegistration `json:"bridge"`
 }
 
+// ValidateControlRegistration validates the durable identity presented by a
+// bridge before the hub accepts a dedicated workflow control connection.
+func ValidateControlRegistration(registration ControlRegistration) error {
+	if strings.TrimSpace(registration.Token) == "" {
+		return fmt.Errorf("token is required")
+	}
+	if strings.TrimSpace(registration.ClawID) == "" {
+		return fmt.Errorf("claw_id is required")
+	}
+	if strings.TrimSpace(registration.RunID) == "" {
+		return fmt.Errorf("run_id is required")
+	}
+	if strings.TrimSpace(registration.AttemptID) == "" {
+		return fmt.Errorf("attempt_id is required")
+	}
+	if strings.TrimSpace(registration.Bridge.BridgeVersion) == "" {
+		return fmt.Errorf("bridge_version is required")
+	}
+	if !registration.Bridge.SupportsProtocol(ProtocolControlV2) {
+		return fmt.Errorf("control registration requires bridge protocol %s", ProtocolControlV2)
+	}
+	return nil
+}
+
 // ControlFrame is the only wire frame accepted on /claw/control/ws.
 type ControlFrame struct {
 	Type         string               `json:"type"`

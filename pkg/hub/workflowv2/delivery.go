@@ -3,6 +3,7 @@ package workflowv2
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"net/url"
 	"sort"
@@ -29,31 +30,126 @@ func (f PullRequestVerifierFunc) VerifyPullRequest(ctx context.Context, run Run,
 // authority comes solely from the pinned workspace repository map.
 func (s *Store) SubmitDelivery(ctx context.Context, runID, attemptID string, manifest typesv2.DeliveryManifest,
 	verifier PullRequestVerifier) ([]typesv2.VerifiedPullRequest, error) {
+	verified, eventResult, err := s.submitDelivery(ctx, runID, attemptID, uuid.NewString(), "", nil, manifest, verifier)
+	if err != nil {
+		return nil, err
+	}
+	if eventResult.Disposition != typesv2.DispositionAccepted {
+		return nil, fmt.Errorf("delivery verification event was %s: %s", eventResult.Disposition, eventResult.Reason)
+	}
+	return verified, nil
+}
+
+// ApplyDeliveryControl verifies an untrusted delivery manifest through the
+// configured source-control connection and uses the incoming message identity
+// for durable deduplication and state-version guarding.
+func (s *Store) ApplyDeliveryControl(ctx context.Context, envelope typesv2.ControlEnvelope,
+	verifier PullRequestVerifier) (typesv2.ControlReceipt, error) {
+	if err := typesv2.ValidateControlEnvelope(envelope, typesv2.DirectionClawToHub); err != nil {
+		return typesv2.ControlReceipt{}, err
+	}
+	if envelope.Kind != typesv2.MessageDeliverySubmitted && envelope.Kind != typesv2.MessagePullRequestClaimed {
+		return typesv2.ControlReceipt{}, fmt.Errorf("message kind %q is not a delivery submission", envelope.Kind)
+	}
+	var manifest typesv2.DeliveryManifest
+	if err := json.Unmarshal(envelope.Payload, &manifest); err != nil {
+		return typesv2.ControlReceipt{}, fmt.Errorf("decode delivery manifest: %w", err)
+	}
+	if receipt, handled, err := s.preflightDeliveryControl(ctx, envelope); err != nil {
+		return typesv2.ControlReceipt{}, err
+	} else if handled {
+		return receipt, nil
+	}
+	_, eventResult, err := s.submitDelivery(ctx, envelope.RunID, envelope.AttemptID, envelope.MessageID,
+		envelope.MessageID, envelope.ExpectedStateVersion, manifest, verifier)
+	if err != nil {
+		return typesv2.ControlReceipt{}, err
+	}
+	return typesv2.ControlReceipt{MessageID: envelope.MessageID, Disposition: eventResult.Disposition,
+		StateVersion: eventResult.Run.StateVersion, Reason: eventResult.Reason}, nil
+}
+
+func (s *Store) preflightDeliveryControl(ctx context.Context,
+	envelope typesv2.ControlEnvelope) (typesv2.ControlReceipt, bool, error) {
+	now := s.now().UTC()
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+	if err != nil {
+		return typesv2.ControlReceipt{}, false, err
+	}
+	defer tx.Rollback()
+	run, _, err := getRunForUpdate(ctx, tx, envelope.RunID)
+	if err != nil {
+		return typesv2.ControlReceipt{}, false, err
+	}
+	input := EventInput{ID: envelope.MessageID, MessageID: envelope.MessageID, Kind: "delivery.verified",
+		AttemptID: envelope.AttemptID, ExpectedStateVersion: envelope.ExpectedStateVersion,
+		Producer: ProducerSourceControl, Provenance: typesv2.EvidenceProvenance{
+			Producer: string(ProducerSourceControl), ObservedAt: now,
+		}}
+	if err := authorizeBoundAttempt(ctx, tx, run, input); err != nil {
+		return typesv2.ControlReceipt{}, false, err
+	}
+	if existing, found, err := findDuplicateEvent(ctx, tx, run.ID, input.ID, input.MessageID); err != nil {
+		return typesv2.ControlReceipt{}, false, err
+	} else if found {
+		reason := "event already received"
+		if err := insertEventReceipt(ctx, tx, run.ID, existing, input.MessageID, typesv2.DispositionDuplicate,
+			run.StateVersion, reason, now); err != nil {
+			return typesv2.ControlReceipt{}, false, err
+		}
+		if err := tx.Commit(); err != nil {
+			return typesv2.ControlReceipt{}, false, err
+		}
+		return typesv2.ControlReceipt{MessageID: envelope.MessageID, Disposition: typesv2.DispositionDuplicate,
+			StateVersion: run.StateVersion, Reason: reason}, true, nil
+	}
+	if envelope.ExpectedStateVersion == nil || *envelope.ExpectedStateVersion == run.StateVersion {
+		return typesv2.ControlReceipt{}, false, nil
+	}
+	reason := fmt.Sprintf("expected state version %d, current version is %d", *envelope.ExpectedStateVersion, run.StateVersion)
+	if err := insertEvent(ctx, tx, input.ID, run.ID, input.MessageID, input.Kind, input.ExpectedStateVersion,
+		run.StateVersion, typesv2.DispositionStaleState, reason, ProducerSourceControl, input.Provenance, nil, nil, now); err != nil {
+		return typesv2.ControlReceipt{}, false, err
+	}
+	if err := insertEventReceipt(ctx, tx, run.ID, input.ID, input.MessageID, typesv2.DispositionStaleState,
+		run.StateVersion, reason, now); err != nil {
+		return typesv2.ControlReceipt{}, false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return typesv2.ControlReceipt{}, false, err
+	}
+	return typesv2.ControlReceipt{MessageID: envelope.MessageID, Disposition: typesv2.DispositionStaleState,
+		StateVersion: run.StateVersion, Reason: reason}, true, nil
+}
+
+func (s *Store) submitDelivery(ctx context.Context, runID, attemptID, eventID, messageID string,
+	expectedStateVersion *uint64, manifest typesv2.DeliveryManifest,
+	verifier PullRequestVerifier) ([]typesv2.VerifiedPullRequest, EventResult, error) {
 	if s == nil || s.db == nil {
-		return nil, fmt.Errorf("workflow v2 store is not configured")
+		return nil, EventResult{}, fmt.Errorf("workflow v2 store is not configured")
 	}
 	if verifier == nil && len(manifest.PullRequests) > 0 {
-		return nil, fmt.Errorf("pull request verifier is required")
+		return nil, EventResult{}, fmt.Errorf("pull request verifier is required")
 	}
 	if len(manifest.PullRequests) > 100 {
-		return nil, fmt.Errorf("delivery manifest exceeds 100 pull requests")
+		return nil, EventResult{}, fmt.Errorf("delivery manifest exceeds 100 pull requests")
 	}
 	run, err := s.GetRun(ctx, runID)
 	if err != nil {
-		return nil, err
+		return nil, EventResult{}, err
 	}
 	var activeAttempt int
 	if err := s.db.QueryRowContext(ctx, `SELECT 1 FROM workflow_v2_attempts WHERE id=? AND run_id=? AND status='active'`,
 		attemptID, runID).Scan(&activeAttempt); err != nil || run.CurrentAttemptID != attemptID {
-		return nil, fmt.Errorf("delivery attempt is not active")
+		return nil, EventResult{}, fmt.Errorf("delivery attempt is not active")
 	}
 	var workspaceYAML string
 	if err := s.db.QueryRowContext(ctx, `SELECT workspace_yaml FROM workflow_v2_runs WHERE id=?`, runID).Scan(&workspaceYAML); err != nil {
-		return nil, err
+		return nil, EventResult{}, err
 	}
 	resolvedWorkspace, err := typesv2.ParseAndValidateWorkspace([]byte(workspaceYAML))
 	if err != nil {
-		return nil, fmt.Errorf("load pinned workspace: %w", err)
+		return nil, EventResult{}, fmt.Errorf("load pinned workspace: %w", err)
 	}
 
 	verified := make([]typesv2.VerifiedPullRequest, 0, len(manifest.PullRequests))
@@ -62,26 +158,26 @@ func (s *Store) SubmitDelivery(ctx context.Context, runID, attemptID string, man
 	for i, claim := range manifest.PullRequests {
 		claim.URL = strings.TrimSpace(claim.URL)
 		if strings.TrimSpace(claim.Supersedes) != "" {
-			return nil, fmt.Errorf("pull_requests[%d].supersedes requires hub-owned source-control reconciliation", i)
+			return nil, EventResult{}, fmt.Errorf("pull_requests[%d].supersedes requires hub-owned source-control reconciliation", i)
 		}
 		parsed, err := url.Parse(claim.URL)
 		if err != nil || (parsed.Scheme != "https" && parsed.Scheme != "http") || parsed.Host == "" {
-			return nil, fmt.Errorf("pull_requests[%d].url is not an absolute HTTP(S) URL", i)
+			return nil, EventResult{}, fmt.Errorf("pull_requests[%d].url is not an absolute HTTP(S) URL", i)
 		}
 		if claimsByURL[claim.URL] {
-			return nil, fmt.Errorf("pull_requests[%d].url is duplicated", i)
+			return nil, EventResult{}, fmt.Errorf("pull_requests[%d].url is duplicated", i)
 		}
 		claimsByURL[claim.URL] = true
 		pr, err := verifier.VerifyPullRequest(ctx, run, resolvedWorkspace.Workspace, claim)
 		if err != nil {
-			return nil, fmt.Errorf("verify pull_requests[%d] %s: %w", i, claim.URL, err)
+			return nil, EventResult{}, fmt.Errorf("verify pull_requests[%d] %s: %w", i, claim.URL, err)
 		}
 		if err := validateVerifiedPullRequest(resolvedWorkspace.Workspace, claim, pr); err != nil {
-			return nil, fmt.Errorf("verify pull_requests[%d] %s: %w", i, claim.URL, err)
+			return nil, EventResult{}, fmt.Errorf("verify pull_requests[%d] %s: %w", i, claim.URL, err)
 		}
 		identity := pr.Repository + "#" + fmt.Sprint(pr.Number)
 		if identities[identity] {
-			return nil, fmt.Errorf("pull_requests[%d] duplicates verified PR %s", i, identity)
+			return nil, EventResult{}, fmt.Errorf("pull_requests[%d] duplicates verified PR %s", i, identity)
 		}
 		identities[identity] = true
 		verified = append(verified, pr)
@@ -89,7 +185,8 @@ func (s *Store) SubmitDelivery(ctx context.Context, runID, attemptID string, man
 
 	now := s.now().UTC()
 	eventResult, err := s.applyEventWithMutation(ctx, runID, EventInput{
-		ID: uuid.NewString(), Kind: "delivery.verified", AttemptID: attemptID, Producer: ProducerSourceControl,
+		ID: eventID, MessageID: messageID, Kind: "delivery.verified", AttemptID: attemptID,
+		ExpectedStateVersion: expectedStateVersion, Producer: ProducerSourceControl,
 		Provenance: typesv2.EvidenceProvenance{Producer: string(ProducerSourceControl), ObservedAt: now},
 	}, func(ctx context.Context, tx *sql.Tx, input *EventInput) error {
 		for i := range verified {
@@ -151,13 +248,12 @@ func (s *Store) SubmitDelivery(ctx context.Context, runID, attemptID string, man
 		return nil
 	})
 	if err != nil {
-		return nil, err
+		return nil, EventResult{}, err
 	}
-	if eventResult.Disposition != typesv2.DispositionAccepted {
-		return nil, fmt.Errorf("delivery verification event was %s: %s", eventResult.Disposition, eventResult.Reason)
-	}
-	if _, err := s.evaluateAndPublishDeliveryPolicy(ctx, runID, attemptID, "", now); err != nil {
-		return nil, err
+	if eventResult.Disposition == typesv2.DispositionAccepted {
+		if _, err := s.evaluateAndPublishDeliveryPolicy(ctx, runID, attemptID, "", now); err != nil {
+			return nil, EventResult{}, err
+		}
 	}
 	sort.Slice(verified, func(i, j int) bool {
 		if verified[i].Repository == verified[j].Repository {
@@ -165,7 +261,7 @@ func (s *Store) SubmitDelivery(ctx context.Context, runID, attemptID string, man
 		}
 		return verified[i].Repository < verified[j].Repository
 	})
-	return verified, nil
+	return verified, eventResult, nil
 }
 
 func validateVerifiedPullRequest(workspace *typesv2.Workspace, claim typesv2.PullRequestClaim,

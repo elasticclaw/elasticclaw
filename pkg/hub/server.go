@@ -37,10 +37,12 @@ import (
 	"github.com/elasticclaw/elasticclaw/pkg/hub/artifact"
 	"github.com/elasticclaw/elasticclaw/pkg/hub/notify"
 	"github.com/elasticclaw/elasticclaw/pkg/hub/pipeline"
+	"github.com/elasticclaw/elasticclaw/pkg/hub/workflowv2"
 	daytona "github.com/elasticclaw/elasticclaw/pkg/provider/daytona"
 	exedevProvider "github.com/elasticclaw/elasticclaw/pkg/provider/exedev"
 	replicatedpkg "github.com/elasticclaw/elasticclaw/pkg/provider/replicated"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
+	typesv2 "github.com/elasticclaw/elasticclaw/pkg/types/v2"
 	"github.com/google/uuid"
 	gossh "golang.org/x/crypto/ssh"
 	"nhooyr.io/websocket"
@@ -512,6 +514,9 @@ func (s *Server) run(ctx context.Context, opts ...RunOptions) error {
 func (s *Server) registerRoutes(mux *http.ServeMux) {
 	// Claw WebSocket
 	mux.HandleFunc("/claw/ws", s.handleClawWS)
+	// Dedicated workflow v2 control WebSocket. Authentication and wire types
+	// are intentionally separate from the conversation channel above.
+	mux.HandleFunc("/claw/control/ws", s.handleWorkflowV2ControlWS)
 
 	// Browser WebSocket
 	mux.HandleFunc("/api/ws", s.withAuth(s.handleUserWS))
@@ -2302,6 +2307,23 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 	// Status channels must not mutate claw DB state (rp.GatewayReady is nil,
 	// so initialStatus would incorrectly overwrite 'starting'/'bootstrap_needed').
 	isStatusChannel := rp.Channel == "status"
+	var workflowControl *workflowV2ControlBinding
+	if !isStatusChannel {
+		binding, found, bindingErr := workflowv2.NewStore(s.db).ActiveControlBinding(ctx, tenantID, clawID)
+		if bindingErr != nil {
+			conn.Close(websocket.StatusInternalError, "workflow control binding unavailable")
+			return
+		}
+		if found {
+			bridge := typesv2.BridgeRegistration{BridgeVersion: rp.BridgeVersion,
+				Protocols: rp.Protocols, Capabilities: rp.Capabilities}
+			if err := typesv2.ValidateBridgeForWorkflow("2", bridge); err != nil {
+				conn.Close(websocket.StatusPolicyViolation, "active workflow requires control.v2")
+				return
+			}
+			workflowControl = &workflowV2ControlBinding{RunID: binding.RunID, AttemptID: binding.AttemptID}
+		}
+	}
 
 	var bootstrapOK int
 	var provider string
@@ -2412,6 +2434,9 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 	// Bind managed model credentials to this authenticated WebSocket instead of
 	// accepting a caller-supplied claw ID on a tenant-token HTTP endpoint.
 	ackPayload := map[string]any{"claw_id": clawID}
+	if workflowControl != nil {
+		ackPayload["workflow_control"] = workflowControl
+	}
 	modelAuthAuthorized := s.validModelAuthToken(clawID, rp.ModelAuthToken)
 	if modelAuthAuthorized {
 		credential, credentialErr := s.managedGrokCredential(context.WithValue(ctx, ctxTenantKey{}, tenantID), clawID)
@@ -6015,7 +6040,7 @@ const (
 	// written on plan_gate pass. Hidden from chat/timeline/transcript APIs.
 	planGateAcceptedMarkerPrefix = "__PLAN_GATE_ACCEPTED__:"
 	defaultWakeContent           = "Introduce yourself briefly and let the user know you're ready to help."
-	initialPlanWakeContent          = `Initial plan required before implementation.
+	initialPlanWakeContent       = `Initial plan required before implementation.
 
 Before editing files, running builds, or doing broad tool exploration, send one visible assistant message that contains:
 1. Your understanding of the issue or task.

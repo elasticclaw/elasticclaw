@@ -3,6 +3,7 @@ package workflowv2_test
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -68,6 +69,63 @@ func TestAttemptSnapshotAndControlOutbox(t *testing.T) {
 	}
 	if snapshot.RunID != "run-control" || snapshot.AttemptID != attempt.ID || snapshot.StateVersion != 1 || snapshot.State != "building" {
 		t.Fatalf("snapshot = %#v", snapshot)
+	}
+}
+
+func TestRejectedHubControlSuspendsRunInsteadOfDroppingCommand(t *testing.T) {
+	db := openRuntimeDB(t)
+	store := workflowv2.NewStore(db)
+	createRuntimeRun(t, store, "run-control-rejected")
+	attempt, err := store.StartAttempt(context.Background(), "run-control-rejected", "claw-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelope := typesv2.ControlEnvelope{ProtocolVersion: typesv2.ControlProtocolVersion,
+		MessageID: "sync-rejected", Kind: typesv2.MessageWorkflowSync,
+		RunID: "run-control-rejected", AttemptID: attempt.ID}
+	if err := store.EnqueueControl(context.Background(), envelope); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AcknowledgeControl(context.Background(), envelope.RunID, attempt.ID, typesv2.ControlReceipt{
+		MessageID: envelope.MessageID, Disposition: typesv2.DispositionRejected, Reason: "unsupported snapshot",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	run, err := store.GetRun(context.Background(), envelope.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.Status != workflowv2.RunSuspended || !strings.Contains(run.WaitingReason, "unsupported snapshot") {
+		t.Fatalf("run = %#v", run)
+	}
+	ready, err := store.ReadyControl(context.Background(), envelope.RunID, attempt.ID, 10)
+	if err != nil || len(ready) != 0 {
+		t.Fatalf("ready = %#v, err=%v", ready, err)
+	}
+}
+
+func TestActiveControlBindingRejectsAmbiguousClawAssignment(t *testing.T) {
+	db := openRuntimeDB(t)
+	store := workflowv2.NewStore(db)
+	createRuntimeRun(t, store, "run-binding-1")
+	first, err := store.StartAttempt(context.Background(), "run-binding-1", "claw-shared")
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding, found, err := store.ActiveControlBinding(context.Background(), "tenant-1", "claw-shared")
+	if err != nil || !found || binding.RunID != "run-binding-1" || binding.AttemptID != first.ID {
+		t.Fatalf("binding = %#v, found=%v, err=%v", binding, found, err)
+	}
+
+	createRuntimeRun(t, store, "run-binding-2")
+	if _, err := store.StartAttempt(context.Background(), "run-binding-2", "claw-shared"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.ActiveControlBinding(context.Background(), "tenant-1", "claw-shared"); err == nil {
+		t.Fatal("ambiguous active control bindings were accepted")
+	}
+	if _, found, err := store.ActiveControlBinding(context.Background(), "other-tenant", "claw-shared"); err != nil || found {
+		t.Fatalf("cross-tenant binding found=%v err=%v", found, err)
 	}
 }
 

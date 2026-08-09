@@ -3941,6 +3941,9 @@ func main() {
 	if len(os.Args) > 1 && os.Args[1] == "linear" {
 		os.Exit(runLinearCLI(os.Args[2:]))
 	}
+	if len(os.Args) > 1 && os.Args[1] == "control" {
+		os.Exit(runControlCLI(os.Args[2:]))
+	}
 
 	// Bootstrap mode: run all VM setup steps before entering the bridge loop.
 	// Activated by --bootstrap flag or ELASTICCLAW_BOOTSTRAP=1 env var.
@@ -3964,14 +3967,15 @@ func main() {
 	clawName := envOr("ELASTICCLAW_CLAW_NAME", clawID)
 	templateName := envOr("ELASTICCLAW_TEMPLATE", "")
 
-	// Build WebSocket URL from hub URL directly
-	wsURL := strings.TrimRight(hubURL, "/")
-	if strings.HasPrefix(wsURL, "http://") {
-		wsURL = "ws://" + wsURL[7:]
-	} else if strings.HasPrefix(wsURL, "https://") {
-		wsURL = "wss://" + wsURL[8:]
+	// Build independent conversation and workflow-control WebSocket URLs.
+	wsBaseURL := strings.TrimRight(hubURL, "/")
+	if strings.HasPrefix(wsBaseURL, "http://") {
+		wsBaseURL = "ws://" + wsBaseURL[7:]
+	} else if strings.HasPrefix(wsBaseURL, "https://") {
+		wsBaseURL = "wss://" + wsBaseURL[8:]
 	}
-	wsURL += "/claw/ws"
+	wsURL := wsBaseURL + "/claw/ws"
+	controlWSURL := wsBaseURL + "/claw/control/ws"
 	log.Printf("  Mode:    direct")
 
 	log.Printf("claw-bridge starting")
@@ -3992,20 +3996,35 @@ func main() {
 		log.Printf("  ⚠️  gateway not responding at %s (will retry)", gatewayAddr)
 	}
 
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
 	// Start local HTTP proxy so tools in the sandbox can reach hub APIs
 	// via http://localhost:18790 without needing a public hub URL.
 	proxy := newHTTPProxy(nil) // send func wired up in runHubLoop
 	queue := &msgQueue{}
 	deduper := newMessageDeduper()
+	var control *controlSupervisor
+	var controlHandler http.Handler = unavailableControlHandler{reason: "workflow v2 control is unavailable"}
+	if controlPath, pathErr := defaultBridgeControlStorePath(); pathErr != nil {
+		log.Printf("[control-v2] disabled: %v", pathErr)
+	} else if controlStore, storeErr := openBridgeControlStore(controlPath); storeErr != nil {
+		log.Printf("[control-v2] disabled: %v", storeErr)
+	} else {
+		defer controlStore.close()
+		control = newControlSupervisor(ctx, controlWSURL, clawID, token, bridgeRegistration(true), controlStore)
+		controlHandler = control
+	}
+	protocolRegistration := bridgeRegistration(control != nil)
+	localMux := http.NewServeMux()
+	localMux.Handle(localControlPath, controlHandler)
+	localMux.Handle("/", proxy)
 	go func() {
 		log.Printf("[bridge] local HTTP proxy on 127.0.0.1:18790")
-		if err := http.ListenAndServe("127.0.0.1:18790", proxy); err != nil {
+		if err := http.ListenAndServe("127.0.0.1:18790", localMux); err != nil {
 			log.Printf("[bridge] HTTP proxy error: %v", err)
 		}
 	}()
-
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
 
 	// Establish the persistent gateway session before entering the hub loop.
 	// Retry until we succeed (gateway may not be ready yet).
@@ -4037,12 +4056,16 @@ func main() {
 	}
 	log.Printf("[bridge] gateway session ready: %s", gwSession.getSessionKey())
 	setActiveGatewaySession(gwSession)
+	if control != nil {
+		control.setGatewaySession(gwSession)
+	}
 
 	// Start status channel goroutine (lightweight second WS to hub)
 	go runStatusChannel(ctx, wsURL, clawID, clawName, templateName, token)
 
 	for {
-		if err := runHubLoop(ctx, wsURL, clawID, clawName, templateName, token, modelAuthToken, gwClient, gwSession, proxy, queue, deduper); err != nil {
+		if err := runHubLoop(ctx, wsURL, clawID, clawName, templateName, token, modelAuthToken,
+			protocolRegistration, control, gwClient, gwSession, proxy, queue, deduper); err != nil {
 			if ctx.Err() != nil {
 				log.Printf("shutting down")
 				return
@@ -4179,7 +4202,9 @@ func runStatusChannel(ctx context.Context, wsURL, clawID, clawName, templateName
 	}
 }
 
-func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, token, modelAuthToken string, gwClient *gatewayClient, gwSession *gatewaySession, proxy *httpProxy, queue *msgQueue, deduper *messageDeduper) error {
+func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, token, modelAuthToken string,
+	protocolRegistration bridgeProtocolRegistration, control *controlSupervisor, gwClient *gatewayClient,
+	gwSession *gatewaySession, proxy *httpProxy, queue *msgQueue, deduper *messageDeduper) error {
 	conn, _, err := websocket.Dial(ctx, wsURL, &websocket.DialOptions{
 		HTTPHeader: http.Header{
 			"User-Agent":                 {"claw-bridge/1.0"},
@@ -4207,6 +4232,9 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 			"token":            token,
 			"model_auth_token": modelAuthToken,
 			"gateway_ready":    gwSession.IsReady(),
+			"bridge_version":   protocolRegistration.BridgeVersion,
+			"protocols":        protocolRegistration.Protocols,
+			"capabilities":     protocolRegistration.Capabilities,
 		}),
 	}
 	if err := writeHub(reg); err != nil {
@@ -4224,6 +4252,7 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 	var registered struct {
 		ModelAuthCredential *managedModelAuthCredential `json:"model_auth_credential"`
 		ModelAuthError      string                      `json:"model_auth_error"`
+		WorkflowControl     *workflowControlBinding     `json:"workflow_control"`
 	}
 	if len(ack.Payload) > 0 && string(ack.Payload) != "null" {
 		if err := json.Unmarshal(ack.Payload, &registered); err != nil {
@@ -4238,6 +4267,9 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 		lastModelAuthSync.Store(time.Now().UnixNano())
 	} else if registered.ModelAuthError != "" {
 		log.Printf("[model-auth] %s", registered.ModelAuthError)
+	}
+	if control != nil {
+		control.updateBinding(registered.WorkflowControl)
 	}
 	log.Printf("registered with hub as %s", clawID)
 
