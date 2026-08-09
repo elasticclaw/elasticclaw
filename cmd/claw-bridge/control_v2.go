@@ -590,9 +590,8 @@ func (s *controlSupervisor) executeTask(taskCtx context.Context, binding workflo
 		s.finishTask(binding, assignmentMessageID, task, typesv2.MessageAgentTaskFailed, "gateway is not ready")
 		return
 	}
-	if err := s.enqueueTaskEvent(binding, task, typesv2.MessageAgentTaskStarted, map[string]interface{}{
-		"execution": map[string]interface{}{"bridge_started_at": time.Now().UTC()},
-	}); err != nil {
+	if err := s.enqueueTaskEvent(binding, task, typesv2.MessageAgentTaskStarted,
+		taskLifecyclePayload(map[string]interface{}{"bridge_started_at": time.Now().UTC()})); err != nil {
 		s.finishTask(binding, assignmentMessageID, task, typesv2.MessageAgentTaskFailed, err.Error())
 		return
 	}
@@ -608,7 +607,7 @@ func (s *controlSupervisor) executeTask(taskCtx context.Context, binding workflo
 				return
 			case <-ticker.C:
 				_ = s.enqueueTaskEvent(binding, task, typesv2.MessageAgentTaskHeartbeat,
-					map[string]interface{}{"execution": map[string]interface{}{"heartbeat_at": time.Now().UTC()}})
+					taskLifecyclePayload(map[string]interface{}{"heartbeat_at": time.Now().UTC()}))
 			}
 		}
 	}()
@@ -620,9 +619,9 @@ func (s *controlSupervisor) executeTask(taskCtx context.Context, binding workflo
 		return
 	}
 	digest := sha256.Sum256([]byte(response))
-	payload := map[string]interface{}{"execution": map[string]interface{}{
+	payload := taskLifecyclePayload(map[string]interface{}{
 		"gateway_turn_completed": true, "response_bytes": len(response), "response_sha256": hex.EncodeToString(digest[:]),
-	}}
+	})
 	if err := s.enqueueTaskEvent(binding, task, typesv2.MessageAgentTaskCompleted, payload); err != nil {
 		log.Printf("[control-v2] queue completion for task %s: %v", task.ID, err)
 		return
@@ -632,12 +631,15 @@ func (s *controlSupervisor) executeTask(taskCtx context.Context, binding workflo
 
 func (s *controlSupervisor) finishTask(binding workflowControlBinding, assignmentMessageID string,
 	task typesv2.AgentTask, kind typesv2.ControlMessageKind, reason string) {
-	if err := s.enqueueTaskEvent(binding, task, kind,
-		map[string]interface{}{"execution": map[string]interface{}{"error": reason}}); err != nil {
+	if err := s.enqueueTaskEvent(binding, task, kind, taskLifecyclePayload(map[string]interface{}{"error": reason})); err != nil {
 		log.Printf("[control-v2] queue terminal event for task %s: %v", task.ID, err)
 		return
 	}
 	_, _ = s.store.setIncomingStatus(assignmentMessageID, "running", "failed")
+}
+
+func taskLifecyclePayload(values map[string]interface{}) map[string]interface{} {
+	return map[string]interface{}{"task": values}
 }
 
 func (s *controlSupervisor) enqueueTaskEvent(binding workflowControlBinding, task typesv2.AgentTask,

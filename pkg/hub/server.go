@@ -267,6 +267,7 @@ type clawConn struct {
 	forcedFinishCount       int             // consecutive watchdog-forced streaming turn finishes
 	workflowStartPending    bool            // true while initial volume attach / wake is in flight
 	workflowStartDone       bool            // true once initial volume attach / wake has completed
+	workflowV2Controlled    bool            // typed control owns execution; conversation text is display-only
 	streamingBuf            strings.Builder // accumulates chunks for current in-flight response
 	streamingMsgID          string          // pre-assigned message ID for the current stream
 	streamingSplit          bool            // true once activity has split this turn into multiple persisted segments
@@ -2579,8 +2580,16 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 	// so initialStatus would incorrectly overwrite 'starting'/'bootstrap_needed').
 	isStatusChannel := rp.Channel == "status"
 	var workflowControl *workflowV2ControlBinding
+	workflowV2Controlled := false
 	if !isStatusChannel {
-		binding, found, bindingErr := workflowv2.NewStore(s.db).ActiveControlBinding(ctx, tenantID, clawID)
+		workflowStore := workflowv2.NewStore(s.db)
+		var ownershipErr error
+		workflowV2Controlled, ownershipErr = workflowStore.OwnsClawExecution(ctx, tenantID, clawID)
+		if ownershipErr != nil {
+			conn.Close(websocket.StatusInternalError, "workflow control ownership unavailable")
+			return
+		}
+		binding, found, bindingErr := workflowStore.ActiveControlBinding(ctx, tenantID, clawID)
 		if bindingErr != nil {
 			conn.Close(websocket.StatusInternalError, "workflow control binding unavailable")
 			return
@@ -2688,7 +2697,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 	// turn end closely enough for autoResumeRecentTurnWindow.
 	var lastClawMsgAt time.Time
 	_ = s.db.QueryRow(`SELECT created_at FROM messages WHERE claw_id=? AND role='claw' ORDER BY created_at DESC LIMIT 1`, clawID).Scan(&lastClawMsgAt)
-	cc := &clawConn{id: clawID, tenantID: tenantID, conn: conn, gatewayReady: gatewayReadyBool(rp.GatewayReady), tags: registrationTags, lastUserMessageAt: time.Now(), lastStatusAt: time.Now(), connectedAt: time.Now(), noProgressPaused: noProgressPaused}
+	cc := &clawConn{id: clawID, tenantID: tenantID, conn: conn, gatewayReady: gatewayReadyBool(rp.GatewayReady), tags: registrationTags, lastUserMessageAt: time.Now(), lastStatusAt: time.Now(), connectedAt: time.Now(), noProgressPaused: noProgressPaused, workflowV2Controlled: workflowV2Controlled}
 	var old *clawConn
 	s.mu.Lock()
 	if s.gatewayRestartCounts != nil {
@@ -2747,10 +2756,10 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 
 	// Initialize entry pipeline stage only after bridge connects so on_enter inject
 	// can be delivered over WS.
-	if allowWake && cc.gatewayReady && currentStatus == "connected" {
+	if !cc.workflowV2Controlled && allowWake && cc.gatewayReady && currentStatus == "connected" {
 		s.startWorkflowAfterVolumes(ctx, cc, clawID)
 	}
-	if allowWake && cc.gatewayReady && currentStatus == "connected" && !s.hasRecentCheckpoint(clawID, time.Hour) {
+	if !cc.workflowV2Controlled && allowWake && cc.gatewayReady && currentStatus == "connected" && !s.hasRecentCheckpoint(clawID, time.Hour) {
 		go s.requestBootstrapCheckpoint(clawID)
 	}
 
@@ -3191,9 +3200,13 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 				)
 				s.broadcastToUsers(tenantID, types.WSMessage{Type: "message", Payload: hm})
 			}
-			automaticContinuationPaused, bridgeErrTurn := s.observeTurnOutcome(cc, clawID, hm.ID, turnContent)
-			if !automaticContinuationPaused {
-				s.handleInitialPlanResponse(clawID, tenantID, turnContent)
+			automaticContinuationPaused := false
+			bridgeErrTurn := false
+			if !cc.workflowV2Controlled {
+				automaticContinuationPaused, bridgeErrTurn = s.observeTurnOutcome(cc, clawID, hm.ID, turnContent)
+				if !automaticContinuationPaused {
+					s.handleInitialPlanResponse(clawID, tenantID, turnContent)
+				}
 			}
 			// Every [DONE]/[TERMINATE] gate below asks pipeline.MessageSignals,
 			// never strings.Contains. They used to disagree: the pipeline
@@ -3201,15 +3214,18 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 			// so pipelineHandledDone stayed false and the legacy handler ran on
 			// exactly the text the pipeline had just rejected — the NEXT-707
 			// outcome, reached by the code that was supposed to prevent it.
-			doneSignalled := turnMaySignal(turnContent, doneSignalToken, bridgeErrTurn)
+			doneSignalled := false
 			// Evaluate pipeline triggers. If a pipeline explicitly owns a
 			// [DONE] trigger, let it handle that signal instead of the
 			// legacy factory PR-URL completion path below.
 			pipelineHandledDone := false
 			var pipelineDoneCtx pipelineContext
 			var pipelineDoneStage *pipeline.Stage
-			if doneSignalled {
-				pipelineDoneCtx, pipelineDoneStage, pipelineHandledDone = s.pipelineStageForMessageContains(clawID, turnContent)
+			if !cc.workflowV2Controlled && !bridgeErrTurn {
+				doneSignalled = turnMaySignal(turnContent, doneSignalToken, bridgeErrTurn)
+				if doneSignalled {
+					pipelineDoneCtx, pipelineDoneStage, pipelineHandledDone = s.pipelineStageForMessageContains(clawID, turnContent)
+				}
 			}
 			if automaticContinuationPaused {
 				pipelineHandledDone = false
@@ -3234,14 +3250,14 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 						})
 					}
 				}
-			} else if !doneSignalled && !bridgeErrTurn {
+			} else if !cc.workflowV2Controlled && !doneSignalled && !bridgeErrTurn {
 				s.safeGo("pipeline message triggers", func() { s.checkPipelineMessageTriggers(clawID, turnContent) })
 			}
 			// A known token written mid-sentence no longer transitions
 			// anything. Tell the agent so, or the run freezes with nobody
 			// aware the signal was dropped. Skipped while continuation is
 			// paused: that claw is already being held, not waiting on us.
-			if !automaticContinuationPaused && !bridgeErrTurn {
+			if !cc.workflowV2Controlled && !automaticContinuationPaused && !bridgeErrTurn {
 				s.safeGo("unanchored signal nudge", func() { s.nudgeUnanchoredSignal(clawID, turnContent) })
 			}
 			// Clear typing indicator now that response is complete
@@ -3253,7 +3269,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 				},
 			})
 			// Check for [DONE] signal from a factory-created claw
-			if doneSignalled {
+			if !cc.workflowV2Controlled && doneSignalled {
 				s.safeGo("done checkpoint", func() {
 					if _, err := s.requestCheckpoint(context.Background(), clawID, "done", "hub", false, checkpointRequestTimeout); err != nil {
 						log.Printf("[checkpoint] done request for %s failed: %v", shortID(clawID), err)
@@ -3267,7 +3283,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 			// lifecycle. Anchored for the same reason as [DONE], with a worse
 			// blast radius: under substring matching an agent writing "I will
 			// not send [TERMINATE] yet" tore down its own claw.
-			if turnMaySignal(turnContent, terminateSignalToken, bridgeErrTurn) {
+			if !cc.workflowV2Controlled && turnMaySignal(turnContent, terminateSignalToken, bridgeErrTurn) {
 				go s.handleClawTerminateSignal(clawID, turnContent)
 			}
 			// Detect and store PR URLs mentioned mid-work. [DONE] turns are
@@ -3280,16 +3296,18 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 			// Gated on doneSignalled, not on the token appearing: a turn that
 			// merely mentions [DONE] registers nothing, so skipping the scan
 			// there would silently drop PR URLs the agent did post.
-			if doneSignalled {
-				log.Printf("[pr-watcher] skipping PR scan for claw %s: [DONE] registration is handled explicitly", shortID(clawID))
-			} else if !bridgeErrTurn {
-				// A transport error can quote a repository URL (git and CI
-				// failures routinely do). Arming the PR watcher on text the
-				// agent never wrote would watch a PR nobody opened.
-				go s.scanMessageForPRs(clawID, turnContent, true)
+			if !cc.workflowV2Controlled {
+				if doneSignalled {
+					log.Printf("[pr-watcher] skipping PR scan for claw %s: [DONE] registration is handled explicitly", shortID(clawID))
+				} else if !bridgeErrTurn {
+					// A transport error can quote a repository URL (git and CI
+					// failures routinely do). Arming the PR watcher on text the
+					// agent never wrote would watch a PR nobody opened.
+					go s.scanMessageForPRs(clawID, turnContent, true)
+				}
 			}
 			// Detect tool error loops and inject a corrective message
-			if !automaticContinuationPaused && detectToolLoop(hm.Content) {
+			if !cc.workflowV2Controlled && !automaticContinuationPaused && detectToolLoop(hm.Content) {
 				s.mu.RLock()
 				loopCC := s.claws[clawID]
 				s.mu.RUnlock()
