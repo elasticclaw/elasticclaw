@@ -77,6 +77,33 @@ type ControlReceipt struct {
 	Reason       string             `json:"reason,omitempty"`
 }
 
+const (
+	ControlFrameRegister   = "register"
+	ControlFrameRegistered = "registered"
+	ControlFrameEnvelope   = "envelope"
+	ControlFrameReceipt    = "receipt"
+)
+
+// ControlRegistration authenticates the bridge's dedicated workflow channel.
+// It is intentionally separate from the conversation WebSocket registration.
+type ControlRegistration struct {
+	Token     string             `json:"token"`
+	ClawID    string             `json:"claw_id"`
+	RunID     string             `json:"run_id"`
+	AttemptID string             `json:"attempt_id"`
+	Bridge    BridgeRegistration `json:"bridge"`
+}
+
+// ControlFrame is the only wire frame accepted on /claw/control/ws.
+type ControlFrame struct {
+	Type         string               `json:"type"`
+	Registration *ControlRegistration `json:"registration,omitempty"`
+	Snapshot     *WorkflowSnapshot    `json:"snapshot,omitempty"`
+	Envelope     *ControlEnvelope     `json:"envelope,omitempty"`
+	Receipt      *ControlReceipt      `json:"receipt,omitempty"`
+	Error        string               `json:"error,omitempty"`
+}
+
 // WorkflowEvent is the durable input record consumed by the v2 engine. Its
 // payload is typed by Kind; freeform conversation messages have no producer in
 // this event model.
@@ -266,6 +293,7 @@ type ContextBundleSource struct {
 	Type           string   `json:"type"`
 	Scope          string   `json:"scope"`
 	Required       bool     `json:"required"`
+	Repositories   []string `json:"repositories,omitempty"`
 	Status         string   `json:"status"`
 	SourceRevision string   `json:"source_revision,omitempty"`
 	ContentDigest  string   `json:"content_digest,omitempty"`
@@ -280,7 +308,9 @@ type DeliveryManifest struct {
 }
 
 type PullRequestClaim struct {
-	URL        string `json:"url"`
+	URL string `json:"url"`
+	// Supersedes is reserved for a hub-owned source-control reconciler. Claw
+	// submissions that set it are rejected rather than trusted to remove PRs.
 	Supersedes string `json:"supersedes,omitempty"`
 }
 

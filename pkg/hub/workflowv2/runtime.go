@@ -71,12 +71,17 @@ type EventInput struct {
 	ID                   string
 	MessageID            string
 	Kind                 string
+	AttemptID            string
+	TaskID               string
 	ExpectedStateVersion *uint64
 	Producer             Producer
 	Provenance           typesv2.EvidenceProvenance
 	Payload              map[string]interface{}
 	Facts                map[string]interface{}
+	mutation             eventMutation
 }
+
+type eventMutation func(context.Context, *sql.Tx, *EventInput) error
 
 type EventResult struct {
 	EventID     string                     `json:"event_id"`
@@ -223,6 +228,9 @@ func (s *Store) ApplyEvent(ctx context.Context, runID string, input EventInput) 
 	if err != nil {
 		return EventResult{}, err
 	}
+	if err := authorizeBoundAttempt(ctx, tx, stored, input); err != nil {
+		return EventResult{}, err
+	}
 	if existing, found, err := findDuplicateEvent(ctx, tx, runID, input.ID, input.MessageID); err != nil {
 		return EventResult{}, err
 	} else if found {
@@ -234,6 +242,14 @@ func (s *Store) ApplyEvent(ctx context.Context, runID string, input EventInput) 
 			return EventResult{}, err
 		}
 		return EventResult{EventID: existing, Disposition: typesv2.DispositionDuplicate, Reason: reason, Run: stored}, nil
+	}
+	if err := authorizeBoundTask(ctx, tx, stored, input); err != nil {
+		return EventResult{}, err
+	}
+	if input.mutation != nil {
+		if err := input.mutation(ctx, tx, &input); err != nil {
+			return EventResult{}, err
+		}
 	}
 
 	workflow, err := typesv2.ParseAndValidateWorkflow([]byte(workflowYAML))
@@ -319,6 +335,9 @@ func (s *Store) ApplyEvent(ctx context.Context, runID string, input EventInput) 
 				return EventResult{}, err
 			}
 		}
+		if err := updateBoundTask(ctx, tx, runID, input, now); err != nil {
+			return EventResult{}, err
+		}
 		if err := insertEventReceipt(ctx, tx, runID, input.ID, input.MessageID, typesv2.DispositionAccepted, stored.StateVersion, "", now); err != nil {
 			return EventResult{}, err
 		}
@@ -397,6 +416,9 @@ func (s *Store) ApplyEvent(ctx context.Context, runID string, input EventInput) 
 			return EventResult{}, err
 		}
 	}
+	if err := updateBoundTask(ctx, tx, runID, input, now); err != nil {
+		return EventResult{}, err
+	}
 	if err := insertEventReceipt(ctx, tx, runID, input.ID, input.MessageID, typesv2.DispositionAccepted, toVersion, "", now); err != nil {
 		return EventResult{}, err
 	}
@@ -413,6 +435,12 @@ func (s *Store) ApplyEvent(ctx context.Context, runID string, input EventInput) 
 			FromState: stored.State, ToState: transitionDef.To, FromVersion: stored.StateVersion,
 			ToVersion: toVersion, CreatedAt: now},
 	}, nil
+}
+
+func (s *Store) applyEventWithMutation(ctx context.Context, runID string, input EventInput,
+	mutation eventMutation) (EventResult, error) {
+	input.mutation = mutation
+	return s.ApplyEvent(ctx, runID, input)
 }
 
 func (s *Store) rejectAndSuspend(ctx context.Context, tx *sql.Tx, run Run, input EventInput, reason string, now time.Time) (EventResult, error) {
@@ -511,6 +539,8 @@ func producerOwnsFact(producer Producer, key string) bool {
 		return producer == ProducerCI
 	case "pull_request":
 		return producer == ProducerSourceControl
+	case "delivery":
+		return producer == ProducerSourceControl || producer == ProducerEngine
 	case "review":
 		return producer == ProducerReview
 	case "operator":

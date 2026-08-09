@@ -224,15 +224,21 @@ func ValidateWorkflow(wf *Workflow) (*ResolvedWorkflow, error) {
 
 	// Policy structure: minimal name checks; resource refs checked in pair validation.
 	if wf.CI != nil {
-		for name := range wf.CI.Policies {
+		for name, policy := range wf.CI.Policies {
 			if err := validateResourceName("ci.policies", name); err != nil {
+				return nil, fmt.Errorf("workflow %q: %w", wf.Name, err)
+			}
+			if err := validateEvidencePolicy("ci.policies."+name, policy, "ci"); err != nil {
 				return nil, fmt.Errorf("workflow %q: %w", wf.Name, err)
 			}
 		}
 	}
 	if wf.Review != nil {
-		for name := range wf.Review.Policies {
+		for name, policy := range wf.Review.Policies {
 			if err := validateResourceName("review.policies", name); err != nil {
+				return nil, fmt.Errorf("workflow %q: %w", wf.Name, err)
+			}
+			if err := validateEvidencePolicy("review.policies."+name, policy, "review"); err != nil {
 				return nil, fmt.Errorf("workflow %q: %w", wf.Name, err)
 			}
 		}
@@ -246,6 +252,139 @@ func ValidateWorkflow(wf *Workflow) (*ResolvedWorkflow, error) {
 		return nil, err
 	}
 	return &ResolvedWorkflow{Workflow: wf, Revision: rev}, nil
+}
+
+func validateEvidencePolicy(path string, policy Policy, mode string) error {
+	return validateEvidencePolicyNode(path, map[string]interface{}(policy), mode, true)
+}
+
+func validateEvidencePolicyNode(path string, node interface{}, mode string, root bool) error {
+	value, ok := evidencePolicyMap(node)
+	if !ok || len(value) == 0 {
+		return fmt.Errorf("%s must be a non-empty policy object", path)
+	}
+	operator := ""
+	for _, candidate := range []string{"all", "any", "not"} {
+		if _, exists := value[candidate]; exists {
+			if operator != "" {
+				return fmt.Errorf("%s cannot combine policy operators %q and %q", path, operator, candidate)
+			}
+			operator = candidate
+		}
+	}
+	metadata := map[string]bool{}
+	if root && mode == "ci" {
+		metadata["satisfied_for"] = true
+	}
+	if root && mode == "review" {
+		metadata["invalidate_on_new_head"] = true
+	}
+	if raw, exists := value["satisfied_for"]; exists {
+		if mode != "ci" || raw != "current_pr_head" {
+			return fmt.Errorf("%s.satisfied_for must be %q", path, "current_pr_head")
+		}
+	}
+	if raw, exists := value["invalidate_on_new_head"]; exists {
+		invalidate, ok := raw.(bool)
+		if mode != "review" || !ok || !invalidate {
+			return fmt.Errorf("%s.invalidate_on_new_head must be true", path)
+		}
+	}
+	if operator != "" {
+		for key := range value {
+			if key != operator && !metadata[key] {
+				return fmt.Errorf("%s: unsupported field %q beside %s", path, key, operator)
+			}
+		}
+		switch operator {
+		case "all", "any":
+			items, ok := value[operator].([]interface{})
+			if !ok || len(items) == 0 {
+				return fmt.Errorf("%s.%s must be a non-empty list", path, operator)
+			}
+			for i, item := range items {
+				if err := validateEvidencePolicyNode(fmt.Sprintf("%s.%s[%d]", path, operator, i), item, mode, false); err != nil {
+					return err
+				}
+			}
+		case "not":
+			if err := validateEvidencePolicyNode(path+".not", value["not"], mode, false); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	if mode == "ci" {
+		for key := range value {
+			if key != "pipeline" && key != "checks" && !metadata[key] {
+				return fmt.Errorf("%s: unsupported CI policy field %q", path, key)
+			}
+		}
+		pipeline, _ := value["pipeline"].(string)
+		if strings.TrimSpace(pipeline) == "" {
+			return fmt.Errorf("%s.pipeline is required", path)
+		}
+		checks, ok := value["checks"].([]interface{})
+		if !ok || len(checks) == 0 {
+			return fmt.Errorf("%s.checks must be a non-empty list", path)
+		}
+		for i, check := range checks {
+			if name, ok := check.(string); !ok || strings.TrimSpace(name) == "" {
+				return fmt.Errorf("%s.checks[%d] must be a non-empty string", path, i)
+			}
+		}
+		return nil
+	}
+	for key := range value {
+		if key != "connection" && key != "approvals" && !metadata[key] {
+			return fmt.Errorf("%s: unsupported review policy field %q", path, key)
+		}
+	}
+	connection, _ := value["connection"].(string)
+	if strings.TrimSpace(connection) == "" {
+		return fmt.Errorf("%s.connection is required", path)
+	}
+	approvals, ok := evidencePolicyMap(value["approvals"])
+	if !ok {
+		return fmt.Errorf("%s.approvals is required", path)
+	}
+	for key := range approvals {
+		if key != "minimum" {
+			return fmt.Errorf("%s.approvals: unsupported field %q", path, key)
+		}
+	}
+	minimum, ok := policyNonNegativeInteger(approvals["minimum"])
+	if !ok || minimum < 0 {
+		return fmt.Errorf("%s.approvals.minimum must be a non-negative integer", path)
+	}
+	return nil
+}
+
+func evidencePolicyMap(value interface{}) (map[string]interface{}, bool) {
+	switch typed := value.(type) {
+	case map[string]interface{}:
+		return typed, true
+	case Policy:
+		return map[string]interface{}(typed), true
+	default:
+		return nil, false
+	}
+}
+
+func policyNonNegativeInteger(value interface{}) (int, bool) {
+	switch number := value.(type) {
+	case int:
+		return number, number >= 0
+	case int64:
+		return int(number), number >= 0
+	case uint64:
+		return int(number), true
+	case float64:
+		integer := int(number)
+		return integer, number >= 0 && number == float64(integer)
+	default:
+		return 0, false
+	}
 }
 
 func isTranscriptEvent(event string) bool {

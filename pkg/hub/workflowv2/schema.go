@@ -224,7 +224,6 @@ func Migrate(db *sql.DB) error {
 		head_sha    TEXT NOT NULL,
 		generation  INTEGER NOT NULL CHECK(generation > 0),
 		observed_at INTEGER NOT NULL,
-		UNIQUE(pr_id, head_sha),
 		UNIQUE(pr_id, generation)
 	);
 
@@ -233,6 +232,7 @@ func Migrate(db *sql.DB) error {
 		run_id          TEXT NOT NULL REFERENCES workflow_v2_runs(id) ON DELETE CASCADE,
 		pr_id           TEXT NOT NULL DEFAULT '',
 		head_sha         TEXT NOT NULL DEFAULT '',
+		head_generation  INTEGER NOT NULL DEFAULT 0 CHECK(head_generation >= 0),
 		domain           TEXT NOT NULL CHECK(domain IN ('ci','review','pull_request','operator','effect','context')),
 		connection       TEXT NOT NULL DEFAULT '',
 		external_id      TEXT NOT NULL DEFAULT '',
@@ -242,9 +242,9 @@ func Migrate(db *sql.DB) error {
 		provenance_json  TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(provenance_json) AND json_type(provenance_json)='object'),
 		observed_at      INTEGER NOT NULL,
 		superseded_at    INTEGER NOT NULL DEFAULT 0,
-		UNIQUE(run_id, domain, connection, external_id, kind, head_sha)
+		UNIQUE(run_id, pr_id, domain, connection, external_id, kind, head_generation)
 	);
-	CREATE INDEX IF NOT EXISTS idx_workflow_v2_evidence_subject ON workflow_v2_evidence(run_id, pr_id, head_sha, domain, superseded_at);
+	CREATE INDEX IF NOT EXISTS idx_workflow_v2_evidence_subject ON workflow_v2_evidence(run_id, pr_id, head_generation, domain, superseded_at);
 
 	CREATE TABLE IF NOT EXISTS workflow_v2_control_outbox (
 		message_id       TEXT PRIMARY KEY,

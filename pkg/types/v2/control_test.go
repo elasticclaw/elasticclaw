@@ -1,6 +1,8 @@
 package v2_test
 
 import (
+	"bytes"
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -46,6 +48,23 @@ func TestControlCatalogContainsNoConversationMessages(t *testing.T) {
 		if strings.Contains(string(kind), "message") || strings.Contains(string(kind), "conversation") {
 			t.Fatalf("control kind %q crosses conversation boundary", kind)
 		}
+	}
+}
+
+func TestControlWireFrameIsSeparateFromConversationMessages(t *testing.T) {
+	frame := v2.ControlFrame{
+		Type: v2.ControlFrameRegister,
+		Registration: &v2.ControlRegistration{
+			Token: "token", ClawID: "claw-1", RunID: "run-1", AttemptID: "attempt-1",
+			Bridge: v2.BridgeRegistration{BridgeVersion: "test", Protocols: []string{v2.ProtocolControlV2}},
+		},
+	}
+	raw, err := json.Marshal(frame)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(raw, []byte(`"content"`)) || bytes.Contains(raw, []byte(`"role"`)) {
+		t.Fatalf("control registration contains conversation fields: %s", raw)
 	}
 }
 
