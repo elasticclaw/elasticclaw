@@ -246,6 +246,42 @@ func (s *Store) ApplyEvent(ctx context.Context, runID string, input EventInput) 
 	if err := authorizeBoundTask(ctx, tx, stored, input); err != nil {
 		return EventResult{}, err
 	}
+	// Preserve authorization precedence over compare-and-swap handling. The
+	// mutation callback may add trusted payload/facts and is authorized again
+	// below after it runs.
+	if disposition, reason := authorizeEvent(input); disposition != "" {
+		if err := insertEvent(ctx, tx, input.ID, runID, input.MessageID, input.Kind, input.ExpectedStateVersion,
+			stored.StateVersion, disposition, reason, input.Producer, input.Provenance, input.Payload, input.Facts, now); err != nil {
+			return EventResult{}, err
+		}
+		if err := insertEventReceipt(ctx, tx, runID, input.ID, input.MessageID, disposition, stored.StateVersion, reason, now); err != nil {
+			return EventResult{}, err
+		}
+		if err := tx.Commit(); err != nil {
+			return EventResult{}, err
+		}
+		return EventResult{EventID: input.ID, Disposition: disposition, Reason: reason, Run: stored}, nil
+	}
+	// A mutation callback may write authoritative domain state. Reject stale
+	// compare-and-swap inputs before invoking it so a stale control frame cannot
+	// alter delivery, evidence, or other domain rows while receiving a
+	// stale_state disposition.
+	if input.ExpectedStateVersion != nil && *input.ExpectedStateVersion != stored.StateVersion {
+		reason := fmt.Sprintf("expected state version %d, current version is %d", *input.ExpectedStateVersion, stored.StateVersion)
+		if err := insertEvent(ctx, tx, input.ID, runID, input.MessageID, input.Kind, input.ExpectedStateVersion,
+			stored.StateVersion, typesv2.DispositionStaleState, reason, input.Producer, input.Provenance,
+			input.Payload, input.Facts, now); err != nil {
+			return EventResult{}, err
+		}
+		if err := insertEventReceipt(ctx, tx, runID, input.ID, input.MessageID, typesv2.DispositionStaleState,
+			stored.StateVersion, reason, now); err != nil {
+			return EventResult{}, err
+		}
+		if err := tx.Commit(); err != nil {
+			return EventResult{}, err
+		}
+		return EventResult{EventID: input.ID, Disposition: typesv2.DispositionStaleState, Reason: reason, Run: stored}, nil
+	}
 	if input.mutation != nil {
 		if err := input.mutation(ctx, tx, &input); err != nil {
 			return EventResult{}, err
@@ -261,10 +297,6 @@ func (s *Store) ApplyEvent(ctx context.Context, runID string, input EventInput) 
 	}
 
 	disposition, reason := authorizeEvent(input)
-	if disposition == "" && input.ExpectedStateVersion != nil && *input.ExpectedStateVersion != stored.StateVersion {
-		disposition = typesv2.DispositionStaleState
-		reason = fmt.Sprintf("expected state version %d, current version is %d", *input.ExpectedStateVersion, stored.StateVersion)
-	}
 	if disposition != "" {
 		if err := insertEvent(ctx, tx, input.ID, runID, input.MessageID, input.Kind, input.ExpectedStateVersion,
 			stored.StateVersion, disposition, reason, input.Producer, input.Provenance, input.Payload, input.Facts, now); err != nil {

@@ -88,6 +88,77 @@ func TestSubmitDeliveryVerifiesMultipleWorkspaceRepositories(t *testing.T) {
 	}
 }
 
+func TestApplyDeliveryControlUsesMessageIdentityForDeduplication(t *testing.T) {
+	db := openRuntimeDB(t)
+	store := workflowv2.NewStore(db)
+	attempt := createDeliveryRun(t, store, "run-delivery-control")
+	apiURL := "https://github.example/org/api/pull/10"
+	payload := []byte(`{"pull_requests":[{"url":"https://github.example/org/api/pull/10"}]}`)
+	stateVersion := uint64(1)
+	envelope := typesv2.ControlEnvelope{ProtocolVersion: typesv2.ControlProtocolVersion,
+		MessageID: "delivery-control-1", Kind: typesv2.MessageDeliverySubmitted,
+		RunID: "run-delivery-control", AttemptID: attempt.ID, ExpectedStateVersion: &stateVersion, Payload: payload}
+	verificationCalls := 0
+	baseVerifier := deliveryVerifier(map[string]string{apiURL: "api-head-1"})
+	verifier := workflowv2.PullRequestVerifierFunc(func(ctx context.Context, run workflowv2.Run,
+		workspace *typesv2.Workspace, claim typesv2.PullRequestClaim) (typesv2.VerifiedPullRequest, error) {
+		verificationCalls++
+		return baseVerifier.VerifyPullRequest(ctx, run, workspace, claim)
+	})
+	first, err := store.ApplyDeliveryControl(context.Background(), envelope, verifier)
+	if err != nil || first.Disposition != typesv2.DispositionAccepted {
+		t.Fatalf("first receipt = %#v, err=%v", first, err)
+	}
+	duplicate, err := store.ApplyDeliveryControl(context.Background(), envelope, verifier)
+	if err != nil || duplicate.Disposition != typesv2.DispositionDuplicate {
+		t.Fatalf("duplicate receipt = %#v, err=%v", duplicate, err)
+	}
+	var events, deliveries int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM workflow_v2_events WHERE id=?`, envelope.MessageID).Scan(&events); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM workflow_v2_delivery_prs WHERE run_id=?`, envelope.RunID).Scan(&deliveries); err != nil {
+		t.Fatal(err)
+	}
+	if events != 1 || deliveries != 1 {
+		t.Fatalf("events/deliveries = %d/%d", events, deliveries)
+	}
+	if verificationCalls != 1 {
+		t.Fatalf("duplicate control performed %d source-control verifications", verificationCalls)
+	}
+}
+
+func TestApplyDeliveryControlRejectsStaleStateBeforeMutation(t *testing.T) {
+	db := openRuntimeDB(t)
+	store := workflowv2.NewStore(db)
+	attempt := createDeliveryRun(t, store, "run-delivery-control-stale")
+	staleVersion := uint64(0)
+	envelope := typesv2.ControlEnvelope{ProtocolVersion: typesv2.ControlProtocolVersion,
+		MessageID: "delivery-control-stale", Kind: typesv2.MessageDeliverySubmitted,
+		RunID: "run-delivery-control-stale", AttemptID: attempt.ID, ExpectedStateVersion: &staleVersion,
+		Payload: []byte(`{"pull_requests":[{"url":"https://github.example/org/api/pull/10"}]}`)}
+	verificationCalls := 0
+	verifier := workflowv2.PullRequestVerifierFunc(func(context.Context, workflowv2.Run, *typesv2.Workspace,
+		typesv2.PullRequestClaim) (typesv2.VerifiedPullRequest, error) {
+		verificationCalls++
+		return typesv2.VerifiedPullRequest{}, nil
+	})
+	receipt, err := store.ApplyDeliveryControl(context.Background(), envelope, verifier)
+	if err != nil || receipt.Disposition != typesv2.DispositionStaleState {
+		t.Fatalf("receipt = %#v, err=%v", receipt, err)
+	}
+	var deliveries int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM workflow_v2_delivery_prs WHERE run_id=?`, envelope.RunID).Scan(&deliveries); err != nil {
+		t.Fatal(err)
+	}
+	if deliveries != 0 {
+		t.Fatalf("stale control mutated %d deliveries", deliveries)
+	}
+	if verificationCalls != 0 {
+		t.Fatalf("stale control performed %d source-control verifications", verificationCalls)
+	}
+}
+
 func TestSubmitDeliveryRejectsAnyRepositoryOutsidePinnedWorkspaceAtomically(t *testing.T) {
 	db := openRuntimeDB(t)
 	store := workflowv2.NewStore(db)

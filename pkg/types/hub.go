@@ -68,13 +68,16 @@ type FileReadResp struct {
 
 // RegisterPayload is sent by a claw on connect.
 type RegisterPayload struct {
-	ClawID         string `json:"claw_id"`
-	Name           string `json:"name"`
-	Template       string `json:"template"`
-	Token          string `json:"token"`                      // hub claw token for auth
-	ModelAuthToken string `json:"model_auth_token,omitempty"` // per-claw proof for managed model credentials
-	GatewayReady   *bool  `json:"gateway_ready,omitempty"`    // true once openclaw gateway session is established; nil means unknown (old bridge, assume ready)
-	Channel        string `json:"channel,omitempty"`          // "status" for status channel, empty for main
+	ClawID         string   `json:"claw_id"`
+	Name           string   `json:"name"`
+	Template       string   `json:"template"`
+	Token          string   `json:"token"`                      // hub claw token for auth
+	ModelAuthToken string   `json:"model_auth_token,omitempty"` // per-claw proof for managed model credentials
+	GatewayReady   *bool    `json:"gateway_ready,omitempty"`    // true once openclaw gateway session is established; nil means unknown (old bridge, assume ready)
+	Channel        string   `json:"channel,omitempty"`          // "status" for status channel, empty for main
+	BridgeVersion  string   `json:"bridge_version,omitempty"`   // protocol negotiation; absent on old bridges
+	Protocols      []string `json:"protocols,omitempty"`        // conversation.v1 and, on new bridges, control.v2
+	Capabilities   []string `json:"capabilities,omitempty"`     // optional narrow bridge capabilities
 }
 
 // CheckpointCreatePayload asks a connected bridge to prepare a checkpoint.

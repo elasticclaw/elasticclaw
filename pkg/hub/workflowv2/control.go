@@ -22,6 +22,49 @@ type Attempt struct {
 	StartedAt time.Time `json:"started_at"`
 }
 
+type ControlBinding struct {
+	RunID     string `json:"run_id"`
+	AttemptID string `json:"attempt_id"`
+}
+
+// ActiveControlBinding returns the single active workflow v2 attempt assigned
+// to a claw. Multiple bindings are rejected rather than choosing one and
+// risking cross-run control delivery.
+func (s *Store) ActiveControlBinding(ctx context.Context, tenantID, clawID string) (ControlBinding, bool, error) {
+	if s == nil || s.db == nil {
+		return ControlBinding{}, false, fmt.Errorf("workflow v2 store is not configured")
+	}
+	if strings.TrimSpace(tenantID) == "" || strings.TrimSpace(clawID) == "" {
+		return ControlBinding{}, false, fmt.Errorf("tenant id and claw id are required")
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT r.id,a.id FROM workflow_v2_runs r
+		JOIN workflow_v2_attempts a ON a.id=r.current_attempt_id
+		WHERE r.tenant_id=? AND a.claw_id=? AND a.status='active'
+		AND r.status IN ('active','suspended') ORDER BY r.updated_at DESC,r.id LIMIT 2`, tenantID, clawID)
+	if err != nil {
+		return ControlBinding{}, false, err
+	}
+	defer rows.Close()
+	var bindings []ControlBinding
+	for rows.Next() {
+		var binding ControlBinding
+		if err := rows.Scan(&binding.RunID, &binding.AttemptID); err != nil {
+			return ControlBinding{}, false, err
+		}
+		bindings = append(bindings, binding)
+	}
+	if err := rows.Err(); err != nil {
+		return ControlBinding{}, false, err
+	}
+	if len(bindings) == 0 {
+		return ControlBinding{}, false, nil
+	}
+	if len(bindings) > 1 {
+		return ControlBinding{}, false, fmt.Errorf("claw %s has multiple active workflow v2 attempts", clawID)
+	}
+	return bindings[0], true, nil
+}
+
 func (s *Store) StartAttempt(ctx context.Context, runID, clawID string) (Attempt, error) {
 	if s == nil || s.db == nil {
 		return Attempt{}, fmt.Errorf("workflow v2 store is not configured")
@@ -289,6 +332,13 @@ func (s *Store) AcknowledgeControl(ctx context.Context, runID, attemptID string,
 	if strings.TrimSpace(receipt.MessageID) == "" {
 		return fmt.Errorf("message id is required")
 	}
+	switch receipt.Disposition {
+	case typesv2.DispositionAccepted, typesv2.DispositionDuplicate:
+	case typesv2.DispositionRejected, typesv2.DispositionStaleState, typesv2.DispositionUnauthorized:
+		return s.rejectControl(ctx, runID, attemptID, receipt)
+	default:
+		return fmt.Errorf("unsupported control receipt disposition %q", receipt.Disposition)
+	}
 	now := s.now().UTC().UnixMilli()
 	result, err := s.db.ExecContext(ctx, `UPDATE workflow_v2_control_outbox SET status='acknowledged',acknowledged_at=?,updated_at=?
 		WHERE message_id=? AND run_id=? AND attempt_id=? AND status IN ('pending','sent')`,
@@ -304,6 +354,48 @@ func (s *Store) AcknowledgeControl(ctx context.Context, runID, attemptID string,
 		return fmt.Errorf("control message is not pending for this attempt")
 	}
 	return nil
+}
+
+func (s *Store) rejectControl(ctx context.Context, runID, attemptID string, receipt typesv2.ControlReceipt) error {
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	now := s.now().UTC().UnixMilli()
+	result, err := tx.ExecContext(ctx, `UPDATE workflow_v2_control_outbox SET status='cancelled',acknowledged_at=?,updated_at=?
+		WHERE message_id=? AND run_id=? AND attempt_id=? AND status IN ('pending','sent')`,
+		now, now, receipt.MessageID, runID, attemptID)
+	if err != nil {
+		return err
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if changed != 1 {
+		return fmt.Errorf("control message is not pending for this attempt")
+	}
+	reason := fmt.Sprintf("control message %s was %s by the claw", receipt.MessageID, receipt.Disposition)
+	if detail := strings.TrimSpace(receipt.Reason); detail != "" {
+		if len(detail) > 500 {
+			detail = detail[:500]
+		}
+		reason += ": " + detail
+	}
+	result, err = tx.ExecContext(ctx, `UPDATE workflow_v2_runs SET status='suspended',waiting_reason=?,updated_at=?
+		WHERE id=? AND current_attempt_id=? AND status IN ('active','suspended')`, reason, now, runID, attemptID)
+	if err != nil {
+		return err
+	}
+	changed, err = result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if changed != 1 {
+		return fmt.Errorf("workflow attempt is no longer active")
+	}
+	return tx.Commit()
 }
 
 func (s *Store) ApplyAgentControl(ctx context.Context, envelope typesv2.ControlEnvelope) (typesv2.ControlReceipt, error) {
@@ -330,6 +422,70 @@ func (s *Store) ApplyAgentControl(ctx context.Context, envelope typesv2.ControlE
 	}
 	return typesv2.ControlReceipt{MessageID: envelope.MessageID, Disposition: result.Disposition,
 		StateVersion: result.Run.StateVersion, Reason: result.Reason}, nil
+}
+
+// RejectAgentControl durably records a validation/application failure for an
+// authenticated envelope that was already bound to the active run attempt by
+// the transport. This keeps malformed messages in the same audit and
+// deduplication model as accepted messages.
+func (s *Store) RejectAgentControl(ctx context.Context, envelope typesv2.ControlEnvelope, reason string) (typesv2.ControlReceipt, error) {
+	if s == nil || s.db == nil {
+		return typesv2.ControlReceipt{}, fmt.Errorf("workflow v2 store is not configured")
+	}
+	if strings.TrimSpace(envelope.MessageID) == "" || strings.TrimSpace(envelope.RunID) == "" ||
+		strings.TrimSpace(envelope.AttemptID) == "" {
+		return typesv2.ControlReceipt{}, fmt.Errorf("message id, run id, and attempt id are required")
+	}
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		reason = "control message was rejected"
+	}
+	if len(reason) > 1000 {
+		reason = reason[:1000]
+	}
+	now := s.now().UTC()
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+	if err != nil {
+		return typesv2.ControlReceipt{}, err
+	}
+	defer tx.Rollback()
+	run, _, err := getRunForUpdate(ctx, tx, envelope.RunID)
+	if err != nil {
+		return typesv2.ControlReceipt{}, err
+	}
+	input := EventInput{ID: envelope.MessageID, MessageID: envelope.MessageID, Kind: string(envelope.Kind),
+		AttemptID: envelope.AttemptID, TaskID: envelope.TaskID, ExpectedStateVersion: envelope.ExpectedStateVersion,
+		Producer: ProducerAgent, Provenance: typesv2.EvidenceProvenance{Producer: string(ProducerAgent), ObservedAt: now}}
+	if err := authorizeBoundAttempt(ctx, tx, run, input); err != nil {
+		return typesv2.ControlReceipt{}, err
+	}
+	if existing, found, err := findDuplicateEvent(ctx, tx, run.ID, input.ID, input.MessageID); err != nil {
+		return typesv2.ControlReceipt{}, err
+	} else if found {
+		duplicateReason := "event already received"
+		if err := insertEventReceipt(ctx, tx, run.ID, existing, input.MessageID, typesv2.DispositionDuplicate,
+			run.StateVersion, duplicateReason, now); err != nil {
+			return typesv2.ControlReceipt{}, err
+		}
+		if err := tx.Commit(); err != nil {
+			return typesv2.ControlReceipt{}, err
+		}
+		return typesv2.ControlReceipt{MessageID: envelope.MessageID, Disposition: typesv2.DispositionDuplicate,
+			StateVersion: run.StateVersion, Reason: duplicateReason}, nil
+	}
+	if err := insertEvent(ctx, tx, input.ID, run.ID, input.MessageID, input.Kind, input.ExpectedStateVersion,
+		run.StateVersion, typesv2.DispositionRejected, reason, ProducerAgent, input.Provenance, nil, nil, now); err != nil {
+		return typesv2.ControlReceipt{}, err
+	}
+	if err := insertEventReceipt(ctx, tx, run.ID, input.ID, input.MessageID, typesv2.DispositionRejected,
+		run.StateVersion, reason, now); err != nil {
+		return typesv2.ControlReceipt{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return typesv2.ControlReceipt{}, err
+	}
+	return typesv2.ControlReceipt{MessageID: envelope.MessageID, Disposition: typesv2.DispositionRejected,
+		StateVersion: run.StateVersion, Reason: reason}, nil
 }
 
 func authorizeBoundAttempt(ctx context.Context, tx *sql.Tx, run Run, input EventInput) error {

@@ -37,6 +37,26 @@ func TestControlEnvelopeRequiresTypedDirectionAndStateVersion(t *testing.T) {
 	}
 }
 
+func TestControlRegistrationRequiresDurableIdentityAndProtocol(t *testing.T) {
+	valid := v2.ControlRegistration{
+		Token: "token", ClawID: "claw-1", RunID: "run-1", AttemptID: "attempt-1",
+		Bridge: v2.BridgeRegistration{BridgeVersion: "test", Protocols: []string{v2.ProtocolConversationV1, v2.ProtocolControlV2}},
+	}
+	if err := v2.ValidateControlRegistration(valid); err != nil {
+		t.Fatalf("valid registration: %v", err)
+	}
+	withoutAttempt := valid
+	withoutAttempt.AttemptID = ""
+	if err := v2.ValidateControlRegistration(withoutAttempt); err == nil || !strings.Contains(err.Error(), "attempt_id") {
+		t.Fatalf("missing attempt error = %v", err)
+	}
+	oldBridge := valid
+	oldBridge.Bridge.Protocols = []string{v2.ProtocolConversationV1}
+	if err := v2.ValidateControlRegistration(oldBridge); err == nil || !strings.Contains(err.Error(), v2.ProtocolControlV2) {
+		t.Fatalf("old bridge error = %v", err)
+	}
+}
+
 func TestControlCatalogContainsNoConversationMessages(t *testing.T) {
 	kinds := []v2.ControlMessageKind{
 		v2.MessageWorkflowSync,
