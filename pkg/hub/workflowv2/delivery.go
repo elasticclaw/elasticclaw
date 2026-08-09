@@ -19,12 +19,6 @@ type PullRequestVerifier interface {
 type PullRequestVerifierFunc func(context.Context, Run, *typesv2.Workspace,
 	typesv2.PullRequestClaim) (typesv2.VerifiedPullRequest, error)
 
-type verifiedSupersession struct {
-	ID      string
-	HeadSHA string
-	State   string
-}
-
 func (f PullRequestVerifierFunc) VerifyPullRequest(ctx context.Context, run Run, workspace *typesv2.Workspace,
 	claim typesv2.PullRequestClaim) (typesv2.VerifiedPullRequest, error) {
 	return f(ctx, run, workspace, claim)
@@ -63,11 +57,13 @@ func (s *Store) SubmitDelivery(ctx context.Context, runID, attemptID string, man
 	}
 
 	verified := make([]typesv2.VerifiedPullRequest, 0, len(manifest.PullRequests))
-	trustedSupersedes := make(map[string]verifiedSupersession)
 	claimsByURL := map[string]bool{}
 	identities := map[string]bool{}
 	for i, claim := range manifest.PullRequests {
 		claim.URL = strings.TrimSpace(claim.URL)
+		if strings.TrimSpace(claim.Supersedes) != "" {
+			return nil, fmt.Errorf("pull_requests[%d].supersedes requires hub-owned source-control reconciliation", i)
+		}
 		parsed, err := url.Parse(claim.URL)
 		if err != nil || (parsed.Scheme != "https" && parsed.Scheme != "http") || parsed.Host == "" {
 			return nil, fmt.Errorf("pull_requests[%d].url is not an absolute HTTP(S) URL", i)
@@ -88,32 +84,6 @@ func (s *Store) SubmitDelivery(ctx context.Context, runID, attemptID string, man
 			return nil, fmt.Errorf("pull_requests[%d] duplicates verified PR %s", i, identity)
 		}
 		identities[identity] = true
-		if supersedes := strings.TrimSpace(claim.Supersedes); supersedes != "" {
-			var targetID, targetURL, targetHead string
-			err := s.db.QueryRowContext(ctx, `SELECT id,url,current_head_sha FROM workflow_v2_delivery_prs
-				WHERE run_id=? AND active=1 AND (id=? OR url=?)`, runID, supersedes, supersedes).Scan(&targetID, &targetURL, &targetHead)
-			if err != nil {
-				return nil, fmt.Errorf("verify pull_requests[%d] supersedes %q: active target not found", i, supersedes)
-			}
-			resolvedTarget, err := verifier.VerifyPullRequest(ctx, run, resolvedWorkspace.Workspace,
-				typesv2.PullRequestClaim{URL: targetURL})
-			if err != nil {
-				return nil, fmt.Errorf("verify pull_requests[%d] superseded target %s: %w", i, targetURL, err)
-			}
-			if err := validateVerifiedPullRequest(resolvedWorkspace.Workspace, typesv2.PullRequestClaim{URL: targetURL}, resolvedTarget); err != nil {
-				return nil, fmt.Errorf("verify pull_requests[%d] superseded target %s: %w", i, targetURL, err)
-			}
-			if resolvedTarget.State != "closed" && resolvedTarget.State != "merged" {
-				return nil, fmt.Errorf("verify pull_requests[%d] supersedes %q: target is still %s", i, supersedes, resolvedTarget.State)
-			}
-			if resolvedTarget.HeadSHA != targetHead {
-				return nil, fmt.Errorf("verify pull_requests[%d] supersedes %q: target head changed; reconcile it first", i, supersedes)
-			}
-			pr.Supersedes = targetID
-			trustedSupersedes[pr.Repository+"#"+fmt.Sprint(pr.Number)] = verifiedSupersession{
-				ID: targetID, HeadSHA: resolvedTarget.HeadSHA, State: resolvedTarget.State,
-			}
-		}
 		verified = append(verified, pr)
 	}
 
@@ -168,22 +138,6 @@ func (s *Store) SubmitDelivery(ctx context.Context, runID, attemptID string, man
 					}
 				}
 			}
-			if pr.Supersedes != "" {
-				identity := pr.Repository + "#" + fmt.Sprint(pr.Number)
-				trusted, ok := trustedSupersedes[identity]
-				if !ok || trusted.ID != pr.Supersedes {
-					return fmt.Errorf("superseded pull request was not trusted by the verifier")
-				}
-				result, err := tx.ExecContext(ctx, `UPDATE workflow_v2_delivery_prs SET active=0,updated_at=?
-					WHERE run_id=? AND active=1 AND id!=? AND id=? AND current_head_sha=? AND state=?`,
-					now.UnixMilli(), runID, pr.ID, trusted.ID, trusted.HeadSHA, trusted.State)
-				if err != nil {
-					return err
-				}
-				if changed, err := result.RowsAffected(); err != nil || changed != 1 {
-					return fmt.Errorf("superseded pull request %q is not an active delivery", pr.Supersedes)
-				}
-			}
 		}
 		summary, err := deliveryFactsFrom(ctx, tx, runID)
 		if err != nil {
@@ -202,11 +156,7 @@ func (s *Store) SubmitDelivery(ctx context.Context, runID, attemptID string, man
 	if eventResult.Disposition != typesv2.DispositionAccepted {
 		return nil, fmt.Errorf("delivery verification event was %s: %s", eventResult.Disposition, eventResult.Reason)
 	}
-	policyResult, err := s.EvaluateDeliveryPolicy(ctx, runID)
-	if err != nil {
-		return nil, err
-	}
-	if err := s.publishEvidencePolicyEvents(ctx, runID, "", "", policyResult, now); err != nil {
+	if _, err := s.evaluateAndPublishDeliveryPolicy(ctx, runID, "", "", now); err != nil {
 		return nil, err
 	}
 	sort.Slice(verified, func(i, j int) bool {

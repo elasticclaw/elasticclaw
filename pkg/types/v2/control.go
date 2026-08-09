@@ -308,7 +308,9 @@ type DeliveryManifest struct {
 }
 
 type PullRequestClaim struct {
-	URL        string `json:"url"`
+	URL string `json:"url"`
+	// Supersedes is reserved for a hub-owned source-control reconciler. Claw
+	// submissions that set it are rejected rather than trusted to remove PRs.
 	Supersedes string `json:"supersedes,omitempty"`
 }
 

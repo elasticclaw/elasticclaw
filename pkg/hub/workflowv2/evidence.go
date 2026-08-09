@@ -2,8 +2,11 @@ package workflowv2
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -29,6 +32,7 @@ type EvidenceInput struct {
 }
 
 type DeliveryPolicyResult struct {
+	Revision         string `json:"revision"`
 	PullRequestCount int    `json:"pull_request_count"`
 	MinimumMet       bool   `json:"minimum_met"`
 	CISatisfied      bool   `json:"ci_satisfied"`
@@ -116,14 +120,27 @@ func (s *Store) RecordEvidence(ctx context.Context, input EvidenceInput, produce
 	if err := tx.Commit(); err != nil {
 		return DeliveryPolicyResult{}, err
 	}
-	result, err := s.EvaluateDeliveryPolicy(ctx, input.RunID)
-	if err != nil {
-		return DeliveryPolicyResult{}, err
+	return s.evaluateAndPublishDeliveryPolicy(ctx, input.RunID, "", input.Domain, observed)
+}
+
+var errDeliveryPolicyChanged = errors.New("delivery policy inputs changed before publication")
+
+func (s *Store) evaluateAndPublishDeliveryPolicy(ctx context.Context, runID, attemptID, domain string,
+	observed time.Time) (DeliveryPolicyResult, error) {
+	for attempt := 0; attempt < 5; attempt++ {
+		result, err := s.EvaluateDeliveryPolicy(ctx, runID)
+		if err != nil {
+			return DeliveryPolicyResult{}, err
+		}
+		if err := s.publishEvidencePolicyEvents(ctx, runID, attemptID, domain, result, observed); err != nil {
+			if errors.Is(err, errDeliveryPolicyChanged) {
+				continue
+			}
+			return DeliveryPolicyResult{}, err
+		}
+		return result, nil
 	}
-	if err := s.publishEvidencePolicyEvents(ctx, input.RunID, "", input.Domain, result, observed); err != nil {
-		return DeliveryPolicyResult{}, err
-	}
-	return result, nil
+	return DeliveryPolicyResult{}, fmt.Errorf("delivery policy kept changing during publication")
 }
 
 func (s *Store) publishEvidencePolicyEvents(ctx context.Context, runID, attemptID, domain string,
@@ -140,10 +157,14 @@ func (s *Store) publishEvidencePolicyEvents(ctx context.Context, runID, attemptI
 		requirements := workflow.Workflow.Delivery.PullRequests
 		if domain == "ci" && requirements.CIPolicy != "" {
 			status := result.CIStatus
-			event, err := s.ApplyEvent(ctx, runID, EventInput{
+			event, err := s.applyDeliveryPolicyEvent(ctx, runID, result, EventInput{
 				ID: uuid.NewString(), Kind: "ci.policy.evaluated", AttemptID: attemptID, Producer: ProducerCI,
-				Payload:    map[string]interface{}{"ci": map[string]interface{}{"policy": requirements.CIPolicy, "status": status}},
-				Facts:      map[string]interface{}{"ci.policy": requirements.CIPolicy, "ci.status": status},
+				Payload: map[string]interface{}{"ci": map[string]interface{}{
+					"policy": requirements.CIPolicy, "status": status, "revision": result.Revision,
+				}},
+				Facts: map[string]interface{}{
+					"ci.policy": requirements.CIPolicy, "ci.status": status, "ci.policy_revision": result.Revision,
+				},
 				Provenance: typesv2.EvidenceProvenance{Producer: string(ProducerCI), ObservedAt: observed},
 			})
 			if err != nil {
@@ -155,10 +176,15 @@ func (s *Store) publishEvidencePolicyEvents(ctx context.Context, runID, attemptI
 		}
 		if domain == "review" && requirements.ReviewPolicy != "" {
 			status := result.ReviewStatus
-			event, err := s.ApplyEvent(ctx, runID, EventInput{
+			event, err := s.applyDeliveryPolicyEvent(ctx, runID, result, EventInput{
 				ID: uuid.NewString(), Kind: "review.policy.evaluated", AttemptID: attemptID, Producer: ProducerReview,
-				Payload:    map[string]interface{}{"review": map[string]interface{}{"policy": requirements.ReviewPolicy, "status": status}},
-				Facts:      map[string]interface{}{"review.policy": requirements.ReviewPolicy, "review.status": status},
+				Payload: map[string]interface{}{"review": map[string]interface{}{
+					"policy": requirements.ReviewPolicy, "status": status, "revision": result.Revision,
+				}},
+				Facts: map[string]interface{}{
+					"review.policy": requirements.ReviewPolicy, "review.status": status,
+					"review.policy_revision": result.Revision,
+				},
 				Provenance: typesv2.EvidenceProvenance{Producer: string(ProducerReview), ObservedAt: observed},
 			})
 			if err != nil {
@@ -169,13 +195,13 @@ func (s *Store) publishEvidencePolicyEvents(ctx context.Context, runID, attemptI
 			}
 		}
 	}
-	deliveryEvent, err := s.ApplyEvent(ctx, runID, EventInput{
+	deliveryEvent, err := s.applyDeliveryPolicyEvent(ctx, runID, result, EventInput{
 		ID: uuid.NewString(), Kind: "workflow.delivery.evaluated", AttemptID: attemptID, Producer: ProducerEngine,
 		Payload: map[string]interface{}{"workflow": map[string]interface{}{"delivery": result}},
 		Facts: map[string]interface{}{
 			"delivery.minimum_met": result.MinimumMet, "delivery.ci_satisfied": result.CISatisfied,
 			"delivery.review_satisfied": result.ReviewSatisfied, "delivery.all_merged": result.AllMerged,
-			"delivery.satisfied": result.Satisfied,
+			"delivery.satisfied": result.Satisfied, "delivery.policy_revision": result.Revision,
 		},
 		Provenance: typesv2.EvidenceProvenance{Producer: string(ProducerEngine), ObservedAt: observed},
 	})
@@ -186,6 +212,20 @@ func (s *Store) publishEvidencePolicyEvents(ctx context.Context, runID, attemptI
 		return fmt.Errorf("delivery policy event was %s: %s", deliveryEvent.Disposition, deliveryEvent.Reason)
 	}
 	return nil
+}
+
+func (s *Store) applyDeliveryPolicyEvent(ctx context.Context, runID string, expected DeliveryPolicyResult,
+	input EventInput) (EventResult, error) {
+	return s.applyEventWithMutation(ctx, runID, input, func(ctx context.Context, tx *sql.Tx, _ *EventInput) error {
+		current, err := evaluateDeliveryPolicy(ctx, tx, runID)
+		if err != nil {
+			return err
+		}
+		if current.Revision != expected.Revision {
+			return errDeliveryPolicyChanged
+		}
+		return nil
+	})
 }
 
 func validateEvidenceProducer(domain string, producer Producer) error {
@@ -223,23 +263,63 @@ type storedEvidence struct {
 }
 
 func (s *Store) EvaluateDeliveryPolicy(ctx context.Context, runID string) (DeliveryPolicyResult, error) {
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable, ReadOnly: true})
+	if err != nil {
+		return DeliveryPolicyResult{}, err
+	}
+	defer tx.Rollback()
+	result, err := evaluateDeliveryPolicy(ctx, tx, runID)
+	if err != nil {
+		return DeliveryPolicyResult{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return DeliveryPolicyResult{}, err
+	}
+	return result, nil
+}
+
+type policyQueryer interface {
+	QueryRowContext(context.Context, string, ...interface{}) *sql.Row
+	QueryContext(context.Context, string, ...interface{}) (*sql.Rows, error)
+}
+
+type deliveryPolicySubject struct {
+	ID         string           `json:"id"`
+	Repository string           `json:"repository"`
+	Number     int              `json:"number"`
+	State      string           `json:"state"`
+	HeadSHA    string           `json:"head_sha"`
+	Generation int              `json:"generation"`
+	Evidence   []storedEvidence `json:"evidence"`
+}
+
+func evaluateDeliveryPolicy(ctx context.Context, queryer policyQueryer, runID string) (DeliveryPolicyResult, error) {
 	var workflowYAML string
-	if err := s.db.QueryRowContext(ctx, `SELECT workflow_yaml FROM workflow_v2_runs WHERE id=?`, runID).Scan(&workflowYAML); err != nil {
+	if err := queryer.QueryRowContext(ctx, `SELECT workflow_yaml FROM workflow_v2_runs WHERE id=?`, runID).Scan(&workflowYAML); err != nil {
 		return DeliveryPolicyResult{}, err
 	}
 	workflow, err := typesv2.ParseAndValidateWorkflow([]byte(workflowYAML))
 	if err != nil {
 		return DeliveryPolicyResult{}, err
 	}
-	var prs struct {
-		count, merged int
-	}
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*),COALESCE(SUM(CASE WHEN state='merged' THEN 1 ELSE 0 END),0)
-		FROM workflow_v2_delivery_prs WHERE run_id=? AND active=1`, runID).Scan(&prs.count, &prs.merged); err != nil {
+	subjects, err := loadDeliveryPolicySubjects(ctx, queryer, runID)
+	if err != nil {
 		return DeliveryPolicyResult{}, err
 	}
-	result := DeliveryPolicyResult{PullRequestCount: prs.count, CISatisfied: true, CIStatus: policySatisfied,
-		ReviewSatisfied: true, ReviewStatus: policySatisfied, AllMerged: prs.count == prs.merged}
+	revisionJSON, err := json.Marshal(subjects)
+	if err != nil {
+		return DeliveryPolicyResult{}, err
+	}
+	revisionHash := sha256.Sum256(revisionJSON)
+	merged := 0
+	for _, subject := range subjects {
+		if subject.State == "merged" {
+			merged++
+		}
+	}
+	result := DeliveryPolicyResult{Revision: "sha256:" + hex.EncodeToString(revisionHash[:]), PullRequestCount: len(subjects),
+		CISatisfied: true, CIStatus: policySatisfied, ReviewSatisfied: true, ReviewStatus: policySatisfied,
+		AllMerged: len(subjects) == merged}
 	policy := workflow.Workflow.Delivery
 	if policy == nil || policy.PullRequests == nil {
 		result.MinimumMet = true
@@ -247,30 +327,11 @@ func (s *Store) EvaluateDeliveryPolicy(ctx context.Context, runID string) (Deliv
 		return result, nil
 	}
 	requirements := policy.PullRequests
-	result.MinimumMet = prs.count >= requirements.Minimum && (!requirements.Required || prs.count > 0)
-	rows, err := s.db.QueryContext(ctx, `SELECT p.id,COALESCE(MAX(h.generation),0)
-		FROM workflow_v2_delivery_prs p LEFT JOIN workflow_v2_delivery_heads h ON h.pr_id=p.id
-		WHERE p.run_id=? AND p.active=1 GROUP BY p.id ORDER BY p.repository,p.pr_number`, runID)
-	if err != nil {
-		return DeliveryPolicyResult{}, err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var prID string
-		var generation int
-		if err := rows.Scan(&prID, &generation); err != nil {
-			return DeliveryPolicyResult{}, err
-		}
-		if generation < 1 {
-			return DeliveryPolicyResult{}, fmt.Errorf("active delivery %s has no verified head generation", prID)
-		}
-		evidence, err := loadCurrentEvidence(ctx, s.db, runID, prID, generation)
-		if err != nil {
-			return DeliveryPolicyResult{}, err
-		}
+	result.MinimumMet = len(subjects) >= requirements.Minimum && (!requirements.Required || len(subjects) > 0)
+	for _, subject := range subjects {
 		if requirements.CIPolicy != "" {
 			definition := workflow.Workflow.CI.Policies[requirements.CIPolicy]
-			status, err := evaluateEvidencePolicyStatus(definition, "ci", evidence)
+			status, err := evaluateEvidencePolicyStatus(definition, "ci", subject.Evidence)
 			if err != nil {
 				return DeliveryPolicyResult{}, fmt.Errorf("evaluate CI policy %s: %w", requirements.CIPolicy, err)
 			}
@@ -278,15 +339,12 @@ func (s *Store) EvaluateDeliveryPolicy(ctx context.Context, runID string) (Deliv
 		}
 		if requirements.ReviewPolicy != "" {
 			definition := workflow.Workflow.Review.Policies[requirements.ReviewPolicy]
-			status, err := evaluateEvidencePolicyStatus(definition, "review", evidence)
+			status, err := evaluateEvidencePolicyStatus(definition, "review", subject.Evidence)
 			if err != nil {
 				return DeliveryPolicyResult{}, fmt.Errorf("evaluate review policy %s: %w", requirements.ReviewPolicy, err)
 			}
 			result.ReviewStatus = combineAllPolicyStatus(result.ReviewStatus, status)
 		}
-	}
-	if err := rows.Err(); err != nil {
-		return DeliveryPolicyResult{}, err
 	}
 	result.CISatisfied = result.CIStatus == policySatisfied
 	result.ReviewSatisfied = result.ReviewStatus == policySatisfied
@@ -298,8 +356,44 @@ func (s *Store) EvaluateDeliveryPolicy(ctx context.Context, runID string) (Deliv
 	return result, nil
 }
 
-func loadCurrentEvidence(ctx context.Context, db *sql.DB, runID, prID string, generation int) ([]storedEvidence, error) {
-	rows, err := db.QueryContext(ctx, `SELECT domain,connection,external_id,kind,status,payload_json,observed_at
+func loadDeliveryPolicySubjects(ctx context.Context, queryer policyQueryer, runID string) ([]deliveryPolicySubject, error) {
+	rows, err := queryer.QueryContext(ctx, `SELECT p.id,p.repository,p.pr_number,p.state,p.current_head_sha,
+		COALESCE(MAX(h.generation),0) FROM workflow_v2_delivery_prs p
+		LEFT JOIN workflow_v2_delivery_heads h ON h.pr_id=p.id
+		WHERE p.run_id=? AND p.active=1 GROUP BY p.id ORDER BY p.repository,p.pr_number`, runID)
+	if err != nil {
+		return nil, err
+	}
+	var subjects []deliveryPolicySubject
+	for rows.Next() {
+		var subject deliveryPolicySubject
+		if err := rows.Scan(&subject.ID, &subject.Repository, &subject.Number, &subject.State, &subject.HeadSHA,
+			&subject.Generation); err != nil {
+			return nil, err
+		}
+		if subject.Generation < 1 {
+			return nil, fmt.Errorf("active delivery %s has no verified head generation", subject.ID)
+		}
+		subjects = append(subjects, subject)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for i := range subjects {
+		evidence, err := loadCurrentEvidence(ctx, queryer, runID, subjects[i].ID, subjects[i].Generation)
+		if err != nil {
+			return nil, err
+		}
+		subjects[i].Evidence = evidence
+	}
+	return subjects, nil
+}
+
+func loadCurrentEvidence(ctx context.Context, queryer policyQueryer, runID, prID string, generation int) ([]storedEvidence, error) {
+	rows, err := queryer.QueryContext(ctx, `SELECT domain,connection,external_id,kind,status,payload_json,observed_at
 		FROM workflow_v2_evidence WHERE run_id=? AND pr_id=? AND head_generation=? AND superseded_at=0
 		ORDER BY domain,connection,external_id,kind,observed_at`, runID, prID, generation)
 	if err != nil {
