@@ -13,6 +13,42 @@ import (
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 )
 
+func TestReadWorkflowFilesPreservesV2Document(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "delivery.yaml")
+	raw := `schema_version: 2
+name: delivery
+enabled: false
+initial_state: planning
+states:
+  planning:
+    phase: plan
+  done:
+    phase: done
+    terminal: true
+`
+	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	workflows, err := readWorkflowFiles([]string{path})
+	if err != nil {
+		t.Fatalf("read v2 workflow: %v", err)
+	}
+	if len(workflows) != 1 {
+		t.Fatalf("workflow count = %d, want 1", len(workflows))
+	}
+	wf := workflows[0]
+	if wf.SchemaVersion != "2" || wf.Name != "delivery" || wf.Enabled == nil || *wf.Enabled {
+		t.Fatalf("v2 projection = %#v", wf)
+	}
+	if wf.RawConfig != raw {
+		t.Fatalf("authored v2 YAML was not preserved:\n%s", wf.RawConfig)
+	}
+	if len(wf.Stages) != 0 || wf.PipelineYAML != "" {
+		t.Fatalf("v2 workflow entered v1 normalization: %#v", wf)
+	}
+}
+
 func TestSanitizeWorkflowResultForTable(t *testing.T) {
 	tests := []struct {
 		name     string

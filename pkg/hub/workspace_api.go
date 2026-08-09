@@ -13,8 +13,24 @@ import (
 	"time"
 
 	"github.com/elasticclaw/elasticclaw/pkg/types"
+	v2 "github.com/elasticclaw/elasticclaw/pkg/types/v2"
 	"github.com/google/uuid"
 )
+
+// isWorkflowV2 reports whether a workflow push payload is schema v2.
+// Prefers RawConfig when present so integer schema_version: 2 is detected.
+func isWorkflowV2(workflow *types.WorkflowConfig) bool {
+	if workflow == nil {
+		return false
+	}
+	if raw := strings.TrimSpace(workflow.RawConfig); raw != "" {
+		version, err := v2.DetectSchemaVersion([]byte(raw))
+		if err == nil && v2.IsV2(version) {
+			return true
+		}
+	}
+	return v2.IsV2(workflow.SchemaVersion)
+}
 
 // WorkspaceView is the API view of a persisted workspace.
 type WorkspaceView struct {
@@ -37,6 +53,7 @@ type WorkspaceAccess struct {
 // WorkflowView is a workflow-shaped projection of a legacy factory.
 type WorkflowView struct {
 	Name                 string                 `json:"name"`
+	SchemaVersion        string                 `json:"schemaVersion,omitempty"`
 	WorkspaceName        string                 `json:"workspaceName"`
 	Source               string                 `json:"source"`
 	Integration          string                 `json:"integration"`
@@ -48,6 +65,7 @@ type WorkflowView struct {
 	ExcludeLabels        []string               `json:"exclude_labels,omitempty"`
 	AssignedTo           string                 `json:"assignedTo,omitempty"`
 	Enabled              bool                   `json:"enabled"`
+	RuntimeAvailable     bool                   `json:"runtimeAvailable"`
 	HasWebhookSecret     bool                   `json:"hasWebhookSecret"`
 	WebhookSecretRef     string                 `json:"webhookSecretRef,omitempty"`
 	PipelineYAML         string                 `json:"pipelineYAML,omitempty"`
@@ -116,17 +134,26 @@ func (s *Server) handleWorkspacesPush(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var saveErrs []string
+	clientErr := false
 	for _, workspace := range req.Workspaces {
 		if workspace == nil {
 			saveErrs = append(saveErrs, "workspace cannot be nil")
+			clientErr = true
 			continue
 		}
 		if err := saveExternalWorkspace(workspace); err != nil {
 			saveErrs = append(saveErrs, fmt.Sprintf("save workspace %q: %v", workspace.Name, err))
+			if strings.Contains(err.Error(), "invalid workspace v2") || strings.Contains(err.Error(), "workspace name") {
+				clientErr = true
+			}
 		}
 	}
 	if len(saveErrs) > 0 {
-		http.Error(w, strings.Join(saveErrs, "; "), http.StatusInternalServerError)
+		status := http.StatusInternalServerError
+		if clientErr {
+			status = http.StatusBadRequest
+		}
+		http.Error(w, strings.Join(saveErrs, "; "), status)
 		return
 	}
 
@@ -195,6 +222,10 @@ func (s *Server) handleWorkspaceWorkflowsPush(w http.ResponseWriter, r *http.Req
 			http.Error(w, "workflow cannot be nil", http.StatusBadRequest)
 			return
 		}
+		// V2 workflows use a separate schema; do not run v1 normalize/validate on them.
+		if isWorkflowV2(workflow) {
+			continue
+		}
 		if err := types.NormalizeWorkflowConfig(workflow); err != nil {
 			http.Error(w, "invalid workflow: "+err.Error(), http.StatusBadRequest)
 			return
@@ -214,7 +245,12 @@ func (s *Server) handleWorkspaceWorkflowsPush(w http.ResponseWriter, r *http.Req
 			http.Error(w, err.Error(), http.StatusNotFound)
 			return
 		}
-		http.Error(w, "save workflows: "+err.Error(), http.StatusInternalServerError)
+		// Validation failures at the store boundary are client errors.
+		status := http.StatusInternalServerError
+		if strings.Contains(err.Error(), "invalid workflow v2") || strings.Contains(err.Error(), "invalid workspace v2") {
+			status = http.StatusBadRequest
+		}
+		http.Error(w, "save workflows: "+err.Error(), status)
 		return
 	}
 	if s.cronScheduler != nil {
@@ -294,6 +330,10 @@ func (s *Server) handleWorkspaceWorkflowPatch(w http.ResponseWriter, r *http.Req
 		http.Error(w, "workflow not found", http.StatusNotFound)
 		return
 	}
+	if isWorkflowV2(workflow) {
+		http.Error(w, "workflow v2 activation is managed by the v2 runtime and cannot be changed through the v1 workflow patch API", http.StatusConflict)
+		return
+	}
 	if req.Enabled != nil {
 		workflow.Enabled = req.Enabled
 	}
@@ -347,6 +387,12 @@ func (s *Server) handleWorkspaceWorkflowTrigger(w http.ResponseWriter, r *http.R
 }
 
 func (s *Server) triggerWorkflowConfig(w http.ResponseWriter, r *http.Request, workspace *types.WorkspaceConfig, workflow *types.WorkflowConfig) {
+	// Until the deterministic runtime is installed, v2 is authorable but never
+	// normalized or executed through the legacy transcript-driven engine.
+	if isWorkflowV2(workflow) {
+		jsonError(w, http.StatusConflict, "workflow v2 runtime is not active; this workflow cannot execute through the v1 engine")
+		return
+	}
 	if !workflow.EnableManualTrigger {
 		jsonError(w, http.StatusForbidden, "workflow does not support manual triggers")
 		return
@@ -547,6 +593,7 @@ func workflowToView(workspaceName string, workflow *types.WorkflowConfig) Workfl
 	}
 	return WorkflowView{
 		Name:                 workflow.Name,
+		SchemaVersion:        workflow.SchemaVersion,
 		WorkspaceName:        workspaceName,
 		Source:               "workflow",
 		Integration:          workflow.Integration,
@@ -557,6 +604,7 @@ func workflowToView(workspaceName string, workflow *types.WorkflowConfig) Workfl
 		ExcludeLabels:        append([]string(nil), workflow.ExcludeLabels...),
 		AssignedTo:           workflow.AssignedTo,
 		Enabled:              workflow.Enabled == nil || *workflow.Enabled,
+		RuntimeAvailable:     !isWorkflowV2(workflow),
 		EnableManualTrigger:  workflow.EnableManualTrigger,
 		SecretRefs:           cloneStringMap(workflow.SecretRefs),
 		Volumes:              append([]types.WorkflowVolume(nil), workflow.Volumes...),

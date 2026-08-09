@@ -13,6 +13,7 @@ import (
 	"text/tabwriter"
 
 	"github.com/elasticclaw/elasticclaw/pkg/types"
+	v2 "github.com/elasticclaw/elasticclaw/pkg/types/v2"
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
 )
@@ -28,6 +29,7 @@ func WorkflowCmd() *cobra.Command {
 	cmd.AddCommand(workflowTriggerCmd())
 	cmd.AddCommand(workflowRunsCmd())
 	cmd.AddCommand(workflowLogsCmd())
+	cmd.AddCommand(workflowConvertCmd())
 	return cmd
 }
 
@@ -193,6 +195,9 @@ func runWorkflowPush(workspace string, paths []string) error {
 		return fmt.Errorf("no workflow YAML files found")
 	}
 	for _, workflow := range workflows {
+		if v2.IsV2(workflow.SchemaVersion) {
+			continue // strict v2 validation happened while reading the authored document
+		}
 		if err := workflow.Validate(); err != nil {
 			return fmt.Errorf("validation failed for workflow %q: %w", workflow.Name, err)
 		}
@@ -257,6 +262,25 @@ func readWorkflowFiles(paths []string) ([]*types.WorkflowConfig, error) {
 		if err != nil {
 			return nil, fmt.Errorf("read %s: %w", path, err)
 		}
+		version, err := v2.DetectSchemaVersion(data)
+		if err != nil {
+			return nil, fmt.Errorf("parse %s: %w", path, err)
+		}
+		if v2.IsV2(version) {
+			resolved, err := v2.ParseAndValidateWorkflow(data)
+			if err != nil {
+				return nil, fmt.Errorf("validate %s: %w", path, err)
+			}
+			enabled := resolved.Workflow.Enabled
+			workflows = append(workflows, &types.WorkflowConfig{
+				SchemaVersion: "2",
+				Name:          resolved.Workflow.Name,
+				Enabled:       &enabled,
+				RawConfig:     string(data),
+			})
+			continue
+		}
+
 		var workflow types.WorkflowConfig
 		if err := yaml.Unmarshal(data, &workflow); err != nil {
 			return nil, fmt.Errorf("parse %s: %w", path, err)

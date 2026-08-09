@@ -456,6 +456,56 @@ func TestWorkspaceWorkflowPatchUpdatesTriggerControls(t *testing.T) {
 	}
 }
 
+func TestV2WorkflowCannotEnterLegacyPatchOrTriggerPaths(t *testing.T) {
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
+	s, _ := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
+
+	if err := saveExternalWorkspace(&types.WorkspaceConfig{
+		Name:  "engineering",
+		Files: map[string]string{"elasticclaw-config.yaml": testWorkspaceV2YAML},
+	}); err != nil {
+		t.Fatalf("seed workspace: %v", err)
+	}
+	if err := saveExternalWorkflows("engineering", []*types.WorkflowConfig{{
+		Name:      "delivery",
+		RawConfig: testWorkflowV2YAML,
+	}}); err != nil {
+		t.Fatalf("seed workflow: %v", err)
+	}
+
+	for _, tc := range []struct {
+		method string
+		body   string
+	}{
+		{http.MethodPatch, `{"enabled":false}`},
+		{http.MethodPost, `{"inputs":{}}`},
+	} {
+		path := "/api/workspaces/engineering/workflows/delivery"
+		if tc.method == http.MethodPost {
+			path += "/trigger"
+		}
+		req := httptest.NewRequest(tc.method, path, strings.NewReader(tc.body))
+		req.Header.Set("Authorization", "Bearer test-token")
+		req.Header.Set("Content-Type", "application/json")
+		rr := httptest.NewRecorder()
+		s.Handler().ServeHTTP(rr, req)
+		if rr.Code != http.StatusConflict {
+			t.Fatalf("%s status = %d, want %d, body = %s", tc.method, rr.Code, http.StatusConflict, rr.Body.String())
+		}
+		if !strings.Contains(rr.Body.String(), "v2") {
+			t.Fatalf("%s response does not explain v2 boundary: %s", tc.method, rr.Body.String())
+		}
+	}
+
+	loaded, err := loadExternalWorkspace("engineering")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(loaded.Workflows) != 1 || !strings.Contains(loaded.Workflows[0].RawConfig, "enabled: true") {
+		t.Fatalf("v2 document was mutated by legacy path: %#v", loaded.Workflows)
+	}
+}
+
 func TestWorkspaceWorkflowPatchReloadsCronScheduler(t *testing.T) {
 	configDir := t.TempDir()
 	t.Setenv("ELASTICCLAW_HUB_CONFIG", configDir+"/hub.yaml")

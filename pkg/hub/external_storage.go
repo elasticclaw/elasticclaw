@@ -11,6 +11,7 @@ import (
 
 	"github.com/elasticclaw/elasticclaw/pkg/config"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
+	v2 "github.com/elasticclaw/elasticclaw/pkg/types/v2"
 	"gopkg.in/yaml.v3"
 )
 
@@ -326,18 +327,20 @@ func loadExternalWorkspace(name string) (*types.WorkspaceConfig, error) {
 		if err != nil {
 			return nil, fmt.Errorf("read workflow %s: %w", e.Name(), err)
 		}
-		var workflow types.WorkflowConfig
-		if err := yaml.Unmarshal(data, &workflow); err != nil {
-			return nil, fmt.Errorf("parse workflow %s: %w", e.Name(), err)
+		workflow, err := loadExternalWorkflowDocument(e.Name(), data)
+		if err != nil {
+			return nil, err
 		}
-		workflow.RawConfig = string(data)
-		if workflow.Name == "" {
-			workflow.Name = strings.TrimSuffix(e.Name(), ".yaml")
+		workspace.Workflows = append(workspace.Workflows, workflow)
+	}
+	// Ensure raw config is present for settings UI even if ReadTemplateFiles missed it.
+	if workspace.Files == nil {
+		workspace.Files = map[string]string{}
+	}
+	if _, ok := workspace.Files["elasticclaw-config.yaml"]; !ok {
+		if raw, err := readExternalWorkspaceYAML(name); err == nil {
+			workspace.Files["elasticclaw-config.yaml"] = string(raw)
 		}
-		if err := types.NormalizeWorkflowConfig(&workflow); err != nil {
-			return nil, fmt.Errorf("normalize workflow %s: %w", e.Name(), err)
-		}
-		workspace.Workflows = append(workspace.Workflows, &workflow)
 	}
 	return &workspace, nil
 }
@@ -358,6 +361,54 @@ func (e *errWorkspaceNotFound) Error() string {
 func isWorkspaceNotFound(err error) bool {
 	var target *errWorkspaceNotFound
 	return errors.As(err, &target)
+}
+
+// loadExternalWorkflowDocument loads a v1 or v2 workflow file for hub APIs.
+// V2 documents keep RawConfig as the source of truth and skip v1 normalize semantics.
+func loadExternalWorkflowDocument(fileName string, data []byte) (*types.WorkflowConfig, error) {
+	version, err := v2.DetectSchemaVersion(data)
+	if err != nil {
+		return nil, fmt.Errorf("parse workflow %s: %w", fileName, err)
+	}
+	if v2.IsV2(version) {
+		// Prefer name from validated v2 doc; do not force v1 stage/trigger normalize.
+		name := strings.TrimSuffix(fileName, ".yaml")
+		enabled := false // missing/invalid v2 documents are always fail-closed
+		if resolved, err := v2.ParseAndValidateWorkflow(data); err == nil && resolved.Workflow.Name != "" {
+			name = resolved.Workflow.Name
+			enabled = resolved.Workflow.Enabled
+		} else {
+			var probe struct {
+				Name string `yaml:"name"`
+			}
+			_ = yaml.Unmarshal(data, &probe)
+			if strings.TrimSpace(probe.Name) != "" {
+				name = probe.Name
+			}
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "[hub] workflow %q v2 validation warning: %v\n", fileName, err)
+			}
+		}
+		return &types.WorkflowConfig{
+			SchemaVersion: "2",
+			Name:          name,
+			Enabled:       &enabled,
+			RawConfig:     string(data),
+		}, nil
+	}
+
+	var workflow types.WorkflowConfig
+	if err := yaml.Unmarshal(data, &workflow); err != nil {
+		return nil, fmt.Errorf("parse workflow %s: %w", fileName, err)
+	}
+	workflow.RawConfig = string(data)
+	if workflow.Name == "" {
+		workflow.Name = strings.TrimSuffix(fileName, ".yaml")
+	}
+	if err := types.NormalizeWorkflowConfig(&workflow); err != nil {
+		return nil, fmt.Errorf("normalize workflow %s: %w", fileName, err)
+	}
+	return &workflow, nil
 }
 
 func loadExternalWorkspaceConfig(name string) (types.WorkspaceConfig, error) {
@@ -392,11 +443,100 @@ func loadExternalWorkspaceConfig(name string) (types.WorkspaceConfig, error) {
 		}
 		configPath = legacyPath
 	}
+
+	version, err := v2.DetectSchemaVersion(data)
+	if err != nil {
+		return types.WorkspaceConfig{}, fmt.Errorf("parse %s: %w", filepath.Base(configPath), err)
+	}
+
+	// V2 configs use map-shaped repositories/connections that cannot unmarshal into
+	// the v1 WorkspaceConfig type. Load a shell config + projected access fields so
+	// list/settings APIs include the workspace instead of silently skipping it.
+	if v2.IsV2(version) {
+		return loadExternalWorkspaceConfigV2(name, data, configPath)
+	}
+
 	var workspace types.WorkspaceConfig
 	if err := yaml.Unmarshal(data, &workspace); err != nil {
 		return types.WorkspaceConfig{}, fmt.Errorf("parse workspace %q %s: %w", name, filepath.Base(configPath), err)
 	}
 	return workspace, nil
+}
+
+// loadExternalWorkspaceConfigV2 builds a WorkspaceConfig shell for hub APIs from
+// authored v2 YAML without requiring the v1 repositories list shape.
+func loadExternalWorkspaceConfigV2(name string, data []byte, configPath string) (types.WorkspaceConfig, error) {
+	var probe struct {
+		Name string `yaml:"name"`
+	}
+	if err := yaml.Unmarshal(data, &probe); err != nil {
+		return types.WorkspaceConfig{}, fmt.Errorf("parse %s: %w", filepath.Base(configPath), err)
+	}
+	ws := types.WorkspaceConfig{
+		SchemaVersion: "2",
+		Name:          strings.TrimSpace(probe.Name),
+	}
+	if ws.Name == "" {
+		ws.Name = name
+	}
+
+	resolved, err := v2.ParseAndValidateWorkspace(data)
+	if err != nil {
+		// Still return a listable shell so settings UI can surface the workspace
+		// name; full config is available via Files after ReadTemplateFiles.
+		fmt.Fprintf(os.Stderr, "[hub] workspace %q v2 validation warning: %v\n", name, err)
+		return ws, nil
+	}
+	if resolved.Workspace.Name != "" {
+		ws.Name = resolved.Workspace.Name
+	}
+	ws.Repositories = projectV2RepositoriesForAccess(resolved.Workspace)
+	ws.Secrets = projectV2CredentialSecrets(resolved.Workspace)
+	return ws, nil
+}
+
+// projectV2RepositoriesForAccess maps named v2 repositories into the legacy
+// access list used by WorkspaceView / settings UI.
+func projectV2RepositoriesForAccess(ws *v2.Workspace) types.RepositoryAccessList {
+	if ws == nil || len(ws.Repositories) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(ws.Repositories))
+	for name := range ws.Repositories {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	out := make(types.RepositoryAccessList, 0, len(names))
+	for _, name := range names {
+		repo := ws.Repositories[name]
+		out = append(out, types.GitHubRepoAccess{
+			Repo:        strings.TrimSpace(repo.Repository),
+			Permissions: "read", // v2 does not model per-repo permissions on the resource
+		})
+	}
+	return out
+}
+
+// projectV2CredentialSecrets exposes hub secret *names* referenced by v2 credentials.
+func projectV2CredentialSecrets(ws *v2.Workspace) []string {
+	if ws == nil || len(ws.Credentials) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(ws.Credentials))
+	seen := map[string]struct{}{}
+	for _, cred := range ws.Credentials {
+		secret := strings.TrimSpace(cred.Secret)
+		if secret == "" {
+			continue
+		}
+		if _, ok := seen[secret]; ok {
+			continue
+		}
+		seen[secret] = struct{}{}
+		names = append(names, secret)
+	}
+	sort.Strings(names)
+	return names
 }
 
 func loadExternalWorkflowsByIntegration(integration string) ([]*types.WorkspaceConfig, error) {
@@ -448,15 +588,6 @@ func saveExternalWorkspace(workspace *types.WorkspaceConfig) error {
 		return err
 	}
 
-	dir := filepath.Join(workspacesDir(), workspace.Name)
-	workflowDir := filepath.Join(dir, "workflows")
-	if err := os.MkdirAll(workflowDir, 0750); err != nil {
-		return fmt.Errorf("mkdir %s: %w", workflowDir, err)
-	}
-	if err := removeWorkspaceAuthoredFiles(dir); err != nil {
-		return err
-	}
-
 	data := []byte(workspace.Files["elasticclaw-config.yaml"])
 	if len(strings.TrimSpace(string(data))) == 0 {
 		var err error
@@ -464,6 +595,21 @@ func saveExternalWorkspace(workspace *types.WorkspaceConfig) error {
 		if err != nil {
 			return fmt.Errorf("marshal elasticclaw-config.yaml: %w", err)
 		}
+	}
+	// Refuse invalid v2 workspace documents at the store boundary (RFC #544 inv. 28).
+	// V1 documents continue through the existing WorkspaceConfig.Validate path above.
+	// Validate before mutating the on-disk tree so a rejection cannot wipe existing files.
+	if err := validateWorkspaceDocumentAtStore(data); err != nil {
+		return err
+	}
+
+	dir := filepath.Join(workspacesDir(), workspace.Name)
+	workflowDir := filepath.Join(dir, "workflows")
+	if err := os.MkdirAll(workflowDir, 0750); err != nil {
+		return fmt.Errorf("mkdir %s: %w", workflowDir, err)
+	}
+	if err := removeWorkspaceAuthoredFiles(dir); err != nil {
+		return err
 	}
 	if err := os.WriteFile(filepath.Join(dir, "elasticclaw-config.yaml"), data, 0640); err != nil {
 		return fmt.Errorf("write elasticclaw-config.yaml: %w", err)
@@ -504,27 +650,34 @@ func saveExternalWorkflows(workspaceName string, workflows []*types.WorkflowConf
 	if err := validateName(workspaceName); err != nil {
 		return err
 	}
-	if _, err := loadExternalWorkspaceConfig(workspaceName); err != nil {
-		// Preserve workspace-not-found for HTTP 404 mapping; wrap other load failures.
-		if isWorkspaceNotFound(err) {
-			return err
+	// Prefer raw YAML for store-time validation. V2 workspace documents use map-shaped
+	// repositories/connections that cannot be unmarshaled into the v1 WorkspaceConfig type.
+	workspaceYAML, err := readExternalWorkspaceYAML(workspaceName)
+	if err != nil {
+		// Fall back to the legacy typed load only to preserve the established
+		// workspace-not-found error and HTTP 404 mapping. Other load failures keep
+		// their existing context rather than being reported as v2 validation errors.
+		if _, loadErr := loadExternalWorkspaceConfig(workspaceName); loadErr != nil {
+			if isWorkspaceNotFound(loadErr) {
+				return loadErr
+			}
+			return fmt.Errorf("load workspace %q: %w", workspaceName, loadErr)
 		}
-		return fmt.Errorf("load workspace %q: %w", workspaceName, err)
+		return err
 	}
-	workflowDir := filepath.Join(workspacesDir(), workspaceName, "workflows")
-	if err := os.MkdirAll(workflowDir, 0750); err != nil {
-		return fmt.Errorf("mkdir %s: %w", workflowDir, err)
+	type workflowWrite struct {
+		workflow *types.WorkflowConfig
+		data     []byte
 	}
+	// Validate and marshal the complete batch before touching the filesystem.
+	// A client error in one document must not partially persist earlier items.
+	writes := make([]workflowWrite, 0, len(workflows))
 	for _, workflow := range workflows {
 		if workflow == nil {
 			continue
 		}
 		if err := validateName(workflow.Name); err != nil {
 			return fmt.Errorf("workflow %q: %w", workflow.Name, err)
-		}
-		targetPath := filepath.Join(workflowDir, strings.ToLower(workflow.Name)+".yaml")
-		if err := removeCaseVariantWorkflowFiles(workflowDir, workflow.Name, targetPath); err != nil {
-			return err
 		}
 		data := []byte(workflow.RawConfig)
 		if len(strings.TrimSpace(string(data))) == 0 {
@@ -534,7 +687,25 @@ func saveExternalWorkflows(workspaceName string, workflows []*types.WorkflowConf
 				return fmt.Errorf("marshal workflow %q: %w", workflow.Name, err)
 			}
 		}
-		if err := os.WriteFile(targetPath, data, 0640); err != nil {
+		// Refuse invalid v2 workflow documents (and invalid v2 workspace pairs).
+		// V1 workflows keep the Normalize+Validate path at the API boundary.
+		if err := validateWorkflowDocumentAtStore(data, workspaceYAML); err != nil {
+			return fmt.Errorf("workflow %q: %w", workflow.Name, err)
+		}
+		writes = append(writes, workflowWrite{workflow: workflow, data: data})
+	}
+
+	workflowDir := filepath.Join(workspacesDir(), workspaceName, "workflows")
+	if err := os.MkdirAll(workflowDir, 0750); err != nil {
+		return fmt.Errorf("mkdir %s: %w", workflowDir, err)
+	}
+	for _, write := range writes {
+		workflow := write.workflow
+		targetPath := filepath.Join(workflowDir, strings.ToLower(workflow.Name)+".yaml")
+		if err := removeCaseVariantWorkflowFiles(workflowDir, workflow.Name, targetPath); err != nil {
+			return err
+		}
+		if err := os.WriteFile(targetPath, write.data, 0640); err != nil {
 			return fmt.Errorf("write workflow %q: %w", workflow.Name, err)
 		}
 	}
