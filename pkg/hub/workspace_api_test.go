@@ -305,6 +305,13 @@ func TestWorkflowDeleteWithWhitespaceName(t *testing.T) {
 		t.Fatalf("workflow push status = %d, body = %s", rr.Code, rr.Body.String())
 	}
 
+	// Workflow names are normalized on push, so the persisted file has no
+	// surrounding whitespace even though the request body did.
+	workflowPath := filepath.Join(configDir, "workspaces", "engineering", "workflows", "bugfix.yaml")
+	if _, err := os.Stat(workflowPath); err != nil {
+		t.Fatalf("normalized workflow file not found: %v", err)
+	}
+
 	req = httptest.NewRequest(http.MethodDelete, "/api/workspaces/engineering/workflows/%20bugfix%20", nil)
 	req.Header.Set("Authorization", "Bearer test-token")
 	rr = httptest.NewRecorder()
@@ -313,9 +320,8 @@ func TestWorkflowDeleteWithWhitespaceName(t *testing.T) {
 		t.Fatalf("workflow delete status = %d, body = %s", rr.Code, rr.Body.String())
 	}
 
-	workflowPath := filepath.Join(configDir, "workspaces", "engineering", "workflows", " bugfix .yaml")
 	if _, err := os.Stat(workflowPath); !os.IsNotExist(err) {
-		t.Fatalf("workflow file with whitespace still exists after delete: %s", workflowPath)
+		t.Fatalf("workflow file still exists after delete: %s", workflowPath)
 	}
 }
 

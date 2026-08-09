@@ -319,6 +319,36 @@ func TestRunWorkflowRmDeletesWorkflow(t *testing.T) {
 	}
 }
 
+func TestWorkflowRmCommandWiring(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if r.URL.Path == "/api/workspaces/prod/workflows/bugfix" {
+			_ = json.NewEncoder(w).Encode(map[string]string{"deleted": "bugfix"})
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	t.Setenv("ELASTICCLAW_HUB_URL", server.URL)
+	t.Setenv("ELASTICCLAW_CLAW_TOKEN", "test-token")
+
+	out, err := captureStdout(func() error {
+		cmd := WorkflowCmd()
+		cmd.SetArgs([]string{"rm", "bugfix", "--workspace", "prod"})
+		return cmd.Execute()
+	})
+	if err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+	if !strings.Contains(out, "Removed workflow \"bugfix\" from workspace \"prod\"") {
+		t.Fatalf("output missing removal confirmation:\n%s", out)
+	}
+}
+
 func TestRunWorkflowRunsListsRunsAndShortAgentID(t *testing.T) {
 	started := time.Date(2026, 7, 24, 9, 0, 0, 0, time.UTC)
 	finished := started.Add(5 * time.Minute)

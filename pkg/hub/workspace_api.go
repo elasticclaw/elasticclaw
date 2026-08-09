@@ -3,6 +3,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -222,6 +223,7 @@ func (s *Server) handleWorkspaceWorkflowsPush(w http.ResponseWriter, r *http.Req
 			http.Error(w, "workflow cannot be nil", http.StatusBadRequest)
 			return
 		}
+		workflow.Name = strings.TrimSpace(workflow.Name)
 		// V2 workflows use a separate schema; do not run v1 normalize/validate on them.
 		if isWorkflowV2(workflow) {
 			continue
@@ -366,14 +368,14 @@ func (s *Server) handleWorkspaceWorkflowPatch(w http.ResponseWriter, r *http.Req
 }
 
 func (s *Server) handleWorkspaceWorkflowDelete(w http.ResponseWriter, r *http.Request) {
-	workspaceName := r.PathValue("workspace")
-	workflowName := r.PathValue("workflow")
+	workspaceName := strings.TrimSpace(r.PathValue("workspace"))
+	workflowName := strings.TrimSpace(r.PathValue("workflow"))
 	if workspaceName == "" || workflowName == "" {
 		http.Error(w, "workspace and workflow names required", http.StatusBadRequest)
 		return
 	}
 	if err := deleteExternalWorkflow(workspaceName, workflowName); err != nil {
-		if err.Error() == "workflow not found" {
+		if errors.Is(err, errWorkflowNotFound) {
 			http.Error(w, err.Error(), http.StatusNotFound)
 			return
 		}

@@ -300,9 +300,10 @@ func runWorkflowPush(workspace string, paths []string) error {
 func workflowRmCmd() *cobra.Command {
 	var workspace string
 	cmd := &cobra.Command{
-		Use:   "rm <name>",
-		Short: "Remove a workflow from a workspace",
-		Args:  cobra.ExactArgs(1),
+		Use:     "rm <name>",
+		Aliases: []string{"delete", "remove"},
+		Short:   "Remove a workflow from a workspace",
+		Args:    cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runWorkflowRm(workspace, args[0])
 		},
