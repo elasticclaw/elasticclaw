@@ -199,6 +199,7 @@ func (s *Server) validateGitHubSignature(body []byte, sig string) bool {
 
 // processGitHubPREvent finds matching factories and creates claws for a PR event.
 func (s *Server) processGitHubPREvent(payload githubPRPayload) {
+	s.processWorkflowV2GitHubPREvent(payload)
 	factories := s.resolveFactories()
 
 	repoFullName := payload.Repository.FullName
@@ -410,11 +411,13 @@ type githubPRReviewCommentPayload struct {
 type githubPRReviewPayload struct {
 	Action string `json:"action"` // "submitted", "edited", "dismissed"
 	Review struct {
-		ID      int64  `json:"id"`
-		State   string `json:"state"` // "changes_requested", "approved", "commented"
-		Body    string `json:"body"`
-		HTMLURL string `json:"html_url"`
-		User    struct {
+		ID          int64  `json:"id"`
+		State       string `json:"state"` // "changes_requested", "approved", "commented"
+		Body        string `json:"body"`
+		HTMLURL     string `json:"html_url"`
+		CommitID    string `json:"commit_id"`
+		SubmittedAt string `json:"submitted_at"`
+		User        struct {
 			Login string `json:"login"`
 			Type  string `json:"type"`
 		} `json:"user"`
@@ -491,6 +494,7 @@ func (s *Server) processGitHubCheckEvent(event string, payload githubCheckPayloa
 	if payload.Action != "completed" {
 		return
 	}
+	s.processWorkflowV2GitHubCheckEvent(event, payload)
 
 	headSHA, prNumbers, _ := payload.checkEventSummary(event)
 	repo := payload.Repository.FullName
@@ -525,6 +529,7 @@ func (s *Server) processGitHubCheckEvent(event string, payload githubCheckPayloa
 }
 
 func (s *Server) processGitHubPRReviewCommentEvent(payload githubPRReviewCommentPayload) {
+	s.processWorkflowV2GitHubReviewCommentEvent(payload)
 	if payload.Action != "created" {
 		return
 	}
@@ -547,6 +552,7 @@ func (s *Server) processGitHubPRReviewCommentEvent(payload githubPRReviewComment
 }
 
 func (s *Server) processGitHubPRReviewEvent(payload githubPRReviewPayload) {
+	s.processWorkflowV2GitHubReviewEvent(payload)
 	if payload.Action != "submitted" || !strings.EqualFold(payload.Review.State, "changes_requested") {
 		return
 	}
@@ -580,6 +586,7 @@ type githubIssueCommentPayload struct {
 		} `json:"pull_request"`
 	} `json:"issue"`
 	Comment struct {
+		ID      int64  `json:"id"`
 		Body    string `json:"body"`
 		HTMLURL string `json:"html_url"`
 		User    struct {
@@ -626,6 +633,7 @@ func (s *Server) processGitHubIssueComment(payload githubIssueCommentPayload) {
 // If a claw exists for the PR, it injects the comment. If not, it tries to create a claw
 // (useful when a PR was opened before the webhook was configured or the opened event was missed).
 func (s *Server) processGitHubIssueCommentEvent(payload githubIssueCommentPayload) {
+	s.processWorkflowV2GitHubIssueCommentEvent(payload)
 	if payload.Action != "created" {
 		return // only care about new comments
 	}

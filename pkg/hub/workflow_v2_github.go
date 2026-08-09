@@ -97,6 +97,67 @@ func githubAPIWithBaseContext(ctx context.Context, baseURL, path, token string) 
 	return result, nil
 }
 
+// githubAPICollectionWithBaseContext follows GitHub's Link pagination for a
+// named top-level collection. Every next URL must remain on the configured API
+// origin before the repository-scoped token is sent.
+func githubAPICollectionWithBaseContext(ctx context.Context, baseURL, requestPath, token, key string) ([]json.RawMessage, error) {
+	base, err := url.Parse(strings.TrimRight(baseURL, "/"))
+	if err != nil || base.Scheme == "" || base.Host == "" {
+		return nil, fmt.Errorf("invalid GitHub API base URL")
+	}
+	next := strings.TrimRight(baseURL, "/") + "/" + strings.TrimLeft(requestPath, "/")
+	visited := map[string]bool{}
+	var result []json.RawMessage
+	for page := 0; next != ""; page++ {
+		if page >= 100 || visited[next] {
+			return nil, fmt.Errorf("GitHub API pagination exceeded safe limit")
+		}
+		visited[next] = true
+		parsed, err := url.Parse(next)
+		if err != nil || !strings.EqualFold(parsed.Scheme, base.Scheme) || !strings.EqualFold(parsed.Host, base.Host) {
+			return nil, fmt.Errorf("GitHub API pagination left configured origin")
+		}
+		resp, err := defaultGitHubClient.getContext(ctx, next, token)
+		if err != nil {
+			return nil, err
+		}
+		if resp.StatusCode >= http.StatusBadRequest {
+			return nil, &githubAPIError{StatusCode: resp.StatusCode, Body: string(resp.Body), RateLimited: resp.rateLimited()}
+		}
+		var document map[string]json.RawMessage
+		if err := json.Unmarshal(resp.Body, &document); err != nil {
+			return nil, fmt.Errorf("github API parse error: %w", err)
+		}
+		var pageItems []json.RawMessage
+		if err := json.Unmarshal(document[key], &pageItems); err != nil {
+			return nil, fmt.Errorf("github API collection %q parse error: %w", key, err)
+		}
+		result = append(result, pageItems...)
+		next = githubNextPage(resp.Header.Get("Link"))
+	}
+	return result, nil
+}
+
+func githubNextPage(link string) string {
+	for _, entry := range strings.Split(link, ",") {
+		parts := strings.Split(entry, ";")
+		if len(parts) < 2 {
+			continue
+		}
+		relNext := false
+		for _, parameter := range parts[1:] {
+			if strings.TrimSpace(parameter) == `rel="next"` {
+				relNext = true
+				break
+			}
+		}
+		if relNext {
+			return strings.TrimSuffix(strings.TrimPrefix(strings.TrimSpace(parts[0]), "<"), ">")
+		}
+	}
+	return ""
+}
+
 func parseWorkflowV2GitHubPRURL(raw string) (string, int, error) {
 	parsed, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.RawQuery != "" || parsed.Fragment != "" {

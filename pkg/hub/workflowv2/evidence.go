@@ -31,6 +31,17 @@ type EvidenceInput struct {
 	ObservedAt time.Time
 }
 
+// EvidenceScope identifies the authoritative subject set replaced by one
+// reconciliation snapshot. Pipeline is required for pipeline-scoped CI data.
+type EvidenceScope struct {
+	RunID      string
+	PRID       string
+	HeadSHA    string
+	Domain     string
+	Connection string
+	Pipeline   string
+}
+
 type DeliveryPolicyResult struct {
 	Revision         string `json:"revision"`
 	PullRequestCount int    `json:"pull_request_count"`
@@ -46,45 +57,146 @@ type DeliveryPolicyResult struct {
 // RecordEvidence accepts only adapter-owned evidence for the current verified
 // PR head, then recomputes the workflow's aggregate delivery policy.
 func (s *Store) RecordEvidence(ctx context.Context, input EvidenceInput, producer Producer) (DeliveryPolicyResult, error) {
+	return s.recordEvidenceSet(ctx, nil, []EvidenceInput{input}, producer, false)
+}
+
+// ReconcileEvidenceSet atomically replaces the current adapter-owned evidence
+// represented by one snapshot and publishes policy events only after every
+// sibling observation is durable. CI adapters use this to avoid evaluating a
+// transient mixture of old and new check results.
+func (s *Store) ReconcileEvidenceSet(ctx context.Context, inputs []EvidenceInput,
+	producer Producer) (DeliveryPolicyResult, error) {
+	if len(inputs) == 0 {
+		return DeliveryPolicyResult{}, fmt.Errorf("evidence set must not be empty without explicit scopes")
+	}
+	scopes := make([]EvidenceScope, 0, len(inputs))
+	seen := map[string]bool{}
+	for _, input := range inputs {
+		pipeline, _ := input.Payload["pipeline"].(string)
+		scope := EvidenceScope{RunID: input.RunID, PRID: input.PRID, HeadSHA: input.HeadSHA,
+			Domain: input.Domain, Connection: input.Connection, Pipeline: strings.TrimSpace(pipeline)}
+		key := scope.Connection + "\x00" + scope.Pipeline
+		if !seen[key] {
+			seen[key] = true
+			scopes = append(scopes, scope)
+		}
+	}
+	return s.recordEvidenceSet(ctx, scopes, inputs, producer, true)
+}
+
+// ReconcileEvidenceSnapshot replaces explicit scopes even when a provider
+// returns no observations, ensuring an empty authoritative snapshot clears
+// stale success or failure evidence atomically.
+func (s *Store) ReconcileEvidenceSnapshot(ctx context.Context, scopes []EvidenceScope, inputs []EvidenceInput,
+	producer Producer) (DeliveryPolicyResult, error) {
+	return s.recordEvidenceSet(ctx, scopes, inputs, producer, true)
+}
+
+func (s *Store) recordEvidenceSet(ctx context.Context, scopes []EvidenceScope, inputs []EvidenceInput, producer Producer,
+	reconcile bool) (DeliveryPolicyResult, error) {
 	if s == nil || s.db == nil {
 		return DeliveryPolicyResult{}, fmt.Errorf("workflow v2 store is not configured")
 	}
-	input.Domain = strings.ToLower(strings.TrimSpace(input.Domain))
-	input.Connection = strings.TrimSpace(input.Connection)
-	input.ExternalID = strings.TrimSpace(input.ExternalID)
-	input.Kind = strings.TrimSpace(input.Kind)
-	input.Status = strings.ToLower(strings.TrimSpace(input.Status))
-	if err := validateEvidenceProducer(input.Domain, producer); err != nil {
-		return DeliveryPolicyResult{}, err
+	if len(inputs) == 0 && len(scopes) == 0 {
+		return DeliveryPolicyResult{}, fmt.Errorf("evidence set must not be empty")
 	}
-	if input.RunID == "" || input.PRID == "" || input.HeadSHA == "" || input.ExternalID == "" || input.Kind == "" || input.Status == "" {
-		return DeliveryPolicyResult{}, fmt.Errorf("run, pull request, head, external id, kind, and status are required")
+	type preparedEvidence struct {
+		input          EvidenceInput
+		id             string
+		payloadJSON    []byte
+		provenanceJSON string
+		observed       time.Time
+		pipeline       string
 	}
-	if strings.TrimSpace(input.Provenance.Producer) != string(producer) {
-		return DeliveryPolicyResult{}, fmt.Errorf("evidence provenance producer %q does not match trusted adapter %q",
-			input.Provenance.Producer, producer)
+	prepared := make([]preparedEvidence, 0, len(inputs))
+	var runID, prID, headSHA, domain string
+	if len(scopes) > 0 {
+		for index := range scopes {
+			scope := &scopes[index]
+			scope.RunID = strings.TrimSpace(scope.RunID)
+			scope.PRID = strings.TrimSpace(scope.PRID)
+			scope.HeadSHA = strings.TrimSpace(scope.HeadSHA)
+			scope.Domain = strings.ToLower(strings.TrimSpace(scope.Domain))
+			scope.Connection = strings.TrimSpace(scope.Connection)
+			scope.Pipeline = strings.TrimSpace(scope.Pipeline)
+			if scope.RunID == "" || scope.PRID == "" || scope.HeadSHA == "" || scope.Domain == "" || scope.Connection == "" {
+				return DeliveryPolicyResult{}, fmt.Errorf("evidence scope[%d]: run, pull request, head, domain, and connection are required", index)
+			}
+			if err := validateEvidenceProducer(scope.Domain, producer); err != nil {
+				return DeliveryPolicyResult{}, err
+			}
+			if index == 0 {
+				runID, prID, headSHA, domain = scope.RunID, scope.PRID, scope.HeadSHA, scope.Domain
+			} else if scope.RunID != runID || scope.PRID != prID || scope.HeadSHA != headSHA || scope.Domain != domain {
+				return DeliveryPolicyResult{}, fmt.Errorf("evidence scopes must share run, pull request, head, and domain")
+			}
+		}
 	}
-	observed := input.ObservedAt.UTC()
+	observed := time.Time{}
+	for index, raw := range inputs {
+		input := raw
+		input.Domain = strings.ToLower(strings.TrimSpace(input.Domain))
+		input.Connection = strings.TrimSpace(input.Connection)
+		input.ExternalID = strings.TrimSpace(input.ExternalID)
+		input.Kind = strings.TrimSpace(input.Kind)
+		input.Status = strings.ToLower(strings.TrimSpace(input.Status))
+		if err := validateEvidenceProducer(input.Domain, producer); err != nil {
+			return DeliveryPolicyResult{}, err
+		}
+		if input.RunID == "" || input.PRID == "" || input.HeadSHA == "" || input.ExternalID == "" || input.Kind == "" || input.Status == "" {
+			return DeliveryPolicyResult{}, fmt.Errorf("evidence[%d]: run, pull request, head, external id, kind, and status are required", index)
+		}
+		if runID == "" {
+			runID, prID, headSHA, domain = input.RunID, input.PRID, input.HeadSHA, input.Domain
+		} else if input.RunID != runID || input.PRID != prID || input.HeadSHA != headSHA || input.Domain != domain {
+			return DeliveryPolicyResult{}, fmt.Errorf("evidence set must share run, pull request, head, and domain")
+		}
+		if strings.TrimSpace(input.Provenance.Producer) != string(producer) {
+			return DeliveryPolicyResult{}, fmt.Errorf("evidence provenance producer %q does not match trusted adapter %q",
+				input.Provenance.Producer, producer)
+		}
+		itemObserved := input.ObservedAt.UTC()
+		if itemObserved.IsZero() {
+			itemObserved = s.now().UTC()
+		}
+		if observed.IsZero() || itemObserved.After(observed) {
+			observed = itemObserved
+		}
+		if input.Provenance.ObservedAt.IsZero() {
+			input.Provenance.ObservedAt = itemObserved
+		}
+		payloadJSON, err := json.Marshal(input.Payload)
+		if err != nil {
+			return DeliveryPolicyResult{}, err
+		}
+		if input.Payload == nil {
+			payloadJSON = []byte("{}")
+		}
+		provenanceJSON, err := marshalObject(input.Provenance)
+		if err != nil {
+			return DeliveryPolicyResult{}, err
+		}
+		id := strings.TrimSpace(input.ID)
+		if id == "" {
+			id = uuid.NewString()
+		}
+		pipeline, _ := input.Payload["pipeline"].(string)
+		prepared = append(prepared, preparedEvidence{input: input, id: id, payloadJSON: payloadJSON,
+			provenanceJSON: provenanceJSON, observed: itemObserved, pipeline: strings.TrimSpace(pipeline)})
+	}
 	if observed.IsZero() {
 		observed = s.now().UTC()
 	}
-	if input.Provenance.ObservedAt.IsZero() {
-		input.Provenance.ObservedAt = observed
-	}
-	payloadJSON, err := json.Marshal(input.Payload)
-	if err != nil {
-		return DeliveryPolicyResult{}, err
-	}
-	if input.Payload == nil {
-		payloadJSON = []byte("{}")
-	}
-	provenanceJSON, err := marshalObject(input.Provenance)
-	if err != nil {
-		return DeliveryPolicyResult{}, err
-	}
-	id := strings.TrimSpace(input.ID)
-	if id == "" {
-		id = uuid.NewString()
+	if reconcile {
+		allowedScopes := map[string]bool{}
+		for _, scope := range scopes {
+			allowedScopes[scope.Connection+"\x00"+scope.Pipeline] = true
+		}
+		for _, item := range prepared {
+			if !allowedScopes[item.input.Connection+"\x00"+item.pipeline] {
+				return DeliveryPolicyResult{}, fmt.Errorf("evidence input is outside its reconciliation scopes")
+			}
+		}
 	}
 	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
 	if err != nil {
@@ -95,32 +207,54 @@ func (s *Store) RecordEvidence(ctx context.Context, input EvidenceInput, produce
 	var headGeneration int
 	if err := tx.QueryRowContext(ctx, `SELECT p.current_head_sha,COALESCE(MAX(h.generation),0)
 		FROM workflow_v2_delivery_prs p LEFT JOIN workflow_v2_delivery_heads h ON h.pr_id=p.id
-		WHERE p.id=? AND p.run_id=? AND p.active=1 GROUP BY p.id`, input.PRID, input.RunID).Scan(
+		WHERE p.id=? AND p.run_id=? AND p.active=1 GROUP BY p.id`, prID, runID).Scan(
 		&currentHead, &headGeneration); err != nil {
 		return DeliveryPolicyResult{}, fmt.Errorf("load active delivery: %w", err)
 	}
-	if currentHead != input.HeadSHA {
-		return DeliveryPolicyResult{}, fmt.Errorf("evidence head %s is stale; current head is %s", input.HeadSHA, currentHead)
+	if currentHead != headSHA {
+		return DeliveryPolicyResult{}, fmt.Errorf("evidence head %s is stale; current head is %s", headSHA, currentHead)
 	}
 	if headGeneration < 1 {
 		return DeliveryPolicyResult{}, fmt.Errorf("active delivery has no verified head generation")
 	}
-	_, err = tx.ExecContext(ctx, `INSERT INTO workflow_v2_evidence(
-		id,run_id,pr_id,head_sha,head_generation,domain,connection,external_id,kind,status,payload_json,provenance_json,observed_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
-		ON CONFLICT(run_id,pr_id,domain,connection,external_id,kind,head_generation) DO UPDATE SET
-		status=excluded.status,payload_json=excluded.payload_json,provenance_json=excluded.provenance_json,
-		observed_at=excluded.observed_at,superseded_at=0
-		WHERE excluded.observed_at>=workflow_v2_evidence.observed_at`, id, input.RunID, input.PRID, input.HeadSHA,
-		headGeneration, input.Domain, input.Connection, input.ExternalID, input.Kind, input.Status, string(payloadJSON),
-		provenanceJSON, observed.UnixMilli())
-	if err != nil {
-		return DeliveryPolicyResult{}, err
+	if reconcile {
+		reconciledAt := s.now().UTC().UnixMilli()
+		for _, scope := range scopes {
+			if scope.Pipeline != "" {
+				_, err = tx.ExecContext(ctx, `UPDATE workflow_v2_evidence SET superseded_at=?
+					WHERE run_id=? AND pr_id=? AND head_generation=? AND domain=? AND connection=?
+					AND json_extract(payload_json,'$.pipeline')=? AND superseded_at=0 AND observed_at<=?`, reconciledAt,
+					runID, prID, headGeneration, domain, scope.Connection, scope.Pipeline, observed.UnixMilli())
+			} else {
+				_, err = tx.ExecContext(ctx, `UPDATE workflow_v2_evidence SET superseded_at=?
+					WHERE run_id=? AND pr_id=? AND head_generation=? AND domain=? AND connection=?
+					AND superseded_at=0 AND observed_at<=?`, reconciledAt, runID, prID, headGeneration, domain,
+					scope.Connection, observed.UnixMilli())
+			}
+			if err != nil {
+				return DeliveryPolicyResult{}, err
+			}
+		}
+	}
+	for _, item := range prepared {
+		input := item.input
+		_, err = tx.ExecContext(ctx, `INSERT INTO workflow_v2_evidence(
+			id,run_id,pr_id,head_sha,head_generation,domain,connection,external_id,kind,status,payload_json,provenance_json,observed_at)
+			VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+			ON CONFLICT(run_id,pr_id,domain,connection,external_id,kind,head_generation) DO UPDATE SET
+			status=excluded.status,payload_json=excluded.payload_json,provenance_json=excluded.provenance_json,
+			observed_at=excluded.observed_at,superseded_at=0
+			WHERE excluded.observed_at>=workflow_v2_evidence.observed_at`, item.id, runID, prID, headSHA,
+			headGeneration, domain, input.Connection, input.ExternalID, input.Kind, input.Status, string(item.payloadJSON),
+			item.provenanceJSON, item.observed.UnixMilli())
+		if err != nil {
+			return DeliveryPolicyResult{}, err
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return DeliveryPolicyResult{}, err
 	}
-	return s.evaluateAndPublishDeliveryPolicy(ctx, input.RunID, "", input.Domain, observed)
+	return s.evaluateAndPublishDeliveryPolicy(ctx, runID, "", domain, observed)
 }
 
 var errDeliveryPolicyChanged = errors.New("delivery policy inputs changed before publication")
