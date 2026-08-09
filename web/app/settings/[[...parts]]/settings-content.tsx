@@ -3172,8 +3172,8 @@ function WorkflowSummaryRow({
 }) {
   return (
     <div className="px-4 py-3">
-      <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
-        <div className="min-w-0 flex-1">
+      <div className="flex flex-col flex-wrap gap-3 md:flex-row md:items-start md:justify-between">
+        <div className="flex-auto flex-shrink-0">
           <p className="text-sm font-medium">
             <WorkflowName name={workflow.name} />
           </p>
