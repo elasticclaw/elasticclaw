@@ -195,10 +195,11 @@ func (s *Store) assembleContext(ctx context.Context, runID string, relevantRepos
 	if eventResult.Disposition != typesv2.DispositionAccepted {
 		return typesv2.ContextBundle{}, fmt.Errorf("context event was %s: %s", eventResult.Disposition, eventResult.Reason)
 	}
-	if status == "failed" && eventResult.Transition == nil && eventResult.Run.Status == RunActive {
+	if status == "failed" && eventResult.Transition == nil &&
+		(eventResult.Run.Status == RunActive || eventResult.Run.Status == RunSuspended) {
 		reason := "one or more required knowledge sources failed"
 		if _, err := s.db.ExecContext(ctx, `UPDATE workflow_v2_runs SET status='suspended',waiting_reason=?,updated_at=?
-			WHERE id=? AND state_version=? AND status='active'`, reason, s.now().UTC().UnixMilli(), runID, eventResult.Run.StateVersion); err != nil {
+			WHERE id=? AND state_version=? AND status IN ('active','suspended')`, reason, s.now().UTC().UnixMilli(), runID, eventResult.Run.StateVersion); err != nil {
 			return typesv2.ContextBundle{}, err
 		}
 	}
