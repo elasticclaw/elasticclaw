@@ -124,13 +124,19 @@ func githubAPICollectionWithBaseContext(ctx context.Context, baseURL, requestPat
 		if resp.StatusCode >= http.StatusBadRequest {
 			return nil, &githubAPIError{StatusCode: resp.StatusCode, Body: string(resp.Body), RateLimited: resp.rateLimited()}
 		}
-		var document map[string]json.RawMessage
-		if err := json.Unmarshal(resp.Body, &document); err != nil {
-			return nil, fmt.Errorf("github API parse error: %w", err)
-		}
 		var pageItems []json.RawMessage
-		if err := json.Unmarshal(document[key], &pageItems); err != nil {
-			return nil, fmt.Errorf("github API collection %q parse error: %w", key, err)
+		if key == "" {
+			if err := json.Unmarshal(resp.Body, &pageItems); err != nil {
+				return nil, fmt.Errorf("github API array parse error: %w", err)
+			}
+		} else {
+			var document map[string]json.RawMessage
+			if err := json.Unmarshal(resp.Body, &document); err != nil {
+				return nil, fmt.Errorf("github API parse error: %w", err)
+			}
+			if err := json.Unmarshal(document[key], &pageItems); err != nil {
+				return nil, fmt.Errorf("github API collection %q parse error: %w", key, err)
+			}
 		}
 		result = append(result, pageItems...)
 		next = githubNextPage(resp.Header.Get("Link"))

@@ -115,6 +115,13 @@ func (s *Server) processWorkflowV2GitHubCheckEvent(event string, payload githubC
 	if len(targets) == 0 {
 		return
 	}
+	if err := s.reconcileWorkflowV2GitHubChecks(context.Background(), store, targets, headSHA); err != nil {
+		log.Printf("[workflow-v2 github] reconcile check snapshot: %v", err)
+	}
+}
+
+func (s *Server) reconcileWorkflowV2GitHubChecks(ctx context.Context, store *workflowv2.Store,
+	targets []workflowv2.DeliveryTarget, headSHA string) error {
 	type githubCheck struct {
 		ID          int64  `json:"id"`
 		Name        string `json:"name"`
@@ -132,6 +139,9 @@ func (s *Server) processWorkflowV2GitHubCheckEvent(event string, payload githubC
 	checksByRepository := map[string][]githubCheck{}
 	workflowRunsByRepository := map[string]map[int64]struct{ name, path string }{}
 	for _, target := range targets {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		checks, loaded := checksByRepository[target.Repository]
 		if !loaded {
 			token := s.tokenForRepo(target.Repository)
@@ -139,7 +149,7 @@ func (s *Server) processWorkflowV2GitHubCheckEvent(event string, payload githubC
 				log.Printf("[workflow-v2 github] no repository-scoped token for CI %s", target.Repository)
 				continue
 			}
-			rawRuns, err := githubAPICollectionWithBaseContext(context.Background(), s.ghBaseURL(),
+			rawRuns, err := githubAPICollectionWithBaseContext(ctx, s.ghBaseURL(),
 				fmt.Sprintf("repos/%s/commits/%s/check-runs?filter=latest&per_page=100", target.Repository, headSHA),
 				token, "check_runs")
 			if err != nil {
@@ -152,7 +162,7 @@ func (s *Server) processWorkflowV2GitHubCheckEvent(event string, payload githubC
 				continue
 			}
 			checksByRepository[target.Repository] = checks
-			rawRuns, err = githubAPICollectionWithBaseContext(context.Background(), s.ghBaseURL(),
+			rawRuns, err = githubAPICollectionWithBaseContext(ctx, s.ghBaseURL(),
 				fmt.Sprintf("repos/%s/actions/runs?head_sha=%s&per_page=100", target.Repository, headSHA),
 				token, "workflow_runs")
 			if err != nil {
@@ -224,12 +234,13 @@ func (s *Server) processWorkflowV2GitHubCheckEvent(event string, payload githubC
 			}
 		}
 		if len(evidenceScopes) > 0 {
-			if _, err := store.ReconcileEvidenceSnapshot(context.Background(), evidenceScopes, evidenceInputs,
+			if _, err := store.ReconcileEvidenceSnapshot(ctx, evidenceScopes, evidenceInputs,
 				workflowv2.ProducerCI); err != nil {
 				log.Printf("[workflow-v2 github] reconcile check snapshot for run %s: %v", target.RunID, err)
 			}
 		}
 	}
+	return nil
 }
 
 func workflowV2GitHubWorkflowMatches(configured, name, workflowPath string) bool {
@@ -303,8 +314,7 @@ func (s *Server) processWorkflowV2GitHubReviewEvent(payload githubPRReviewPayloa
 		if status == "changes_requested" {
 			// Persist the typed feedback fact before review evidence can take a
 			// policy transition that schedules an include_facts agent task.
-			feedbackID := fmt.Sprintf("%d:%s:%s", payload.Review.ID, payload.Action,
-				workflowV2GitHubEventID("", body))
+			feedbackID := strconv.FormatInt(payload.Review.ID, 10)
 			s.applyWorkflowV2GitHubFeedback(target, "review", feedbackID, login, body, url, "", 0, observed)
 		}
 		connections := workflowV2GitHubReviewConnections(target)
@@ -326,12 +336,14 @@ func (s *Server) processWorkflowV2GitHubReviewEvent(payload githubPRReviewPayloa
 }
 
 func (s *Server) processWorkflowV2GitHubReviewCommentEvent(payload githubPRReviewCommentPayload) {
-	if payload.Action != "created" || !s.isHumanGitHubActor(payload.Comment.User.Login, payload.Comment.User.Type) {
+	if payload.Action != "created" || strings.TrimSpace(payload.Comment.CommitID) == "" ||
+		!s.isHumanGitHubActor(payload.Comment.User.Login, payload.Comment.User.Type) {
 		return
 	}
 	s.processWorkflowV2GitHubFeedbackTargets(payload.Repository.FullName, payload.PullRequest.Number,
 		"inline_comment", strconv.FormatInt(payload.Comment.ID, 10), payload.Comment.User.Login, payload.Comment.Body,
-		payload.Comment.HTMLURL, payload.Comment.Path, payload.Comment.Line, time.Time{})
+		payload.Comment.HTMLURL, payload.Comment.Path, payload.Comment.Line, payload.Comment.CommitID,
+		parseGitHubTime(payload.Comment.UpdatedAt))
 }
 
 func (s *Server) processWorkflowV2GitHubIssueCommentEvent(payload githubIssueCommentPayload) {
@@ -340,17 +352,20 @@ func (s *Server) processWorkflowV2GitHubIssueCommentEvent(payload githubIssueCom
 	}
 	s.processWorkflowV2GitHubFeedbackTargets(payload.Repository.FullName, payload.Issue.Number,
 		"pull_request_comment", strconv.FormatInt(payload.Comment.ID, 10), payload.Comment.User.Login, payload.Comment.Body,
-		payload.Comment.HTMLURL, "", 0, time.Time{})
+		payload.Comment.HTMLURL, "", 0, "", parseGitHubTime(payload.Comment.UpdatedAt))
 }
 
 func (s *Server) processWorkflowV2GitHubFeedbackTargets(repository string, number int, kind, externalID string,
-	author, body, url, path string, line int, observed time.Time) {
+	author, body, url, path string, line int, headSHA string, observed time.Time) {
 	targets, err := workflowv2.NewStore(s.db).ActiveDeliveryTargets(context.Background(), repository, number)
 	if err != nil {
 		log.Printf("[workflow-v2 github] find feedback targets: %v", err)
 		return
 	}
 	for _, target := range targets {
+		if headSHA != "" && target.HeadSHA != headSHA {
+			continue
+		}
 		s.applyWorkflowV2GitHubFeedback(target, kind, externalID, author, body, url, path, line, observed)
 	}
 }
@@ -368,14 +383,18 @@ func (s *Server) applyWorkflowV2GitHubFeedback(target workflowv2.DeliveryTarget,
 	if line > 0 {
 		feedback["line"] = line
 	}
-	eventID := workflowV2GitHubEventID(target.RunID, "review_feedback", kind,
-		externalID, target.Repository, strconv.Itoa(target.Number))
-	_, err := workflowv2.NewStore(s.db).ApplyReviewFeedback(context.Background(), target, eventID, feedback,
+	eventID := workflowV2GitHubFeedbackEventID(target, kind, externalID)
+	_, err := workflowv2.NewStore(s.db).ReconcileReviewFeedback(context.Background(), target, eventID, feedback,
 		typesv2.EvidenceProvenance{Producer: string(workflowv2.ProducerReview), Principal: author,
-			ExternalID: externalID, ObservedAt: observed})
+			ExternalID: kind + ":" + externalID, ObservedAt: observed})
 	if err != nil {
 		log.Printf("[workflow-v2 github] apply feedback to run %s: %v", target.RunID, err)
 	}
+}
+
+func workflowV2GitHubFeedbackEventID(target workflowv2.DeliveryTarget, kind, externalID string) string {
+	return workflowV2GitHubEventID(target.RunID, "review_feedback", kind, externalID,
+		target.Repository, strconv.Itoa(target.Number))
 }
 
 func workflowV2GitHubReviewConnections(target workflowv2.DeliveryTarget) []string {

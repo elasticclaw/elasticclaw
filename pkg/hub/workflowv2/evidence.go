@@ -290,44 +290,63 @@ func (s *Store) publishEvidencePolicyEvents(ctx context.Context, runID, attemptI
 	if workflow.Workflow.Delivery != nil && workflow.Workflow.Delivery.PullRequests != nil {
 		requirements := workflow.Workflow.Delivery.PullRequests
 		if domain == "ci" && requirements.CIPolicy != "" {
-			status := result.CIStatus
-			event, err := s.applyDeliveryPolicyEvent(ctx, runID, result, EventInput{
-				ID: uuid.NewString(), Kind: "ci.policy.evaluated", AttemptID: attemptID, Producer: ProducerCI,
-				Payload: map[string]interface{}{"ci": map[string]interface{}{
-					"policy": requirements.CIPolicy, "status": status, "revision": result.Revision,
-				}},
-				Facts: map[string]interface{}{
-					"ci.policy": requirements.CIPolicy, "ci.status": status, "ci.policy_revision": result.Revision,
-				},
-				Provenance: typesv2.EvidenceProvenance{Producer: string(ProducerCI), ObservedAt: observed},
-			})
+			unchanged, err := s.policyRevisionMatches(ctx, runID, "ci.policy_revision", result.Revision)
 			if err != nil {
 				return err
 			}
-			if event.Disposition != typesv2.DispositionAccepted {
-				return fmt.Errorf("CI policy event was %s: %s", event.Disposition, event.Reason)
+			if !unchanged {
+				status := result.CIStatus
+				event, err := s.applyDeliveryPolicyEvent(ctx, runID, result, EventInput{
+					ID: uuid.NewString(), Kind: "ci.policy.evaluated", AttemptID: attemptID, Producer: ProducerCI,
+					Payload: map[string]interface{}{"ci": map[string]interface{}{
+						"policy": requirements.CIPolicy, "status": status, "revision": result.Revision,
+					}},
+					Facts: map[string]interface{}{
+						"ci.policy": requirements.CIPolicy, "ci.status": status, "ci.policy_revision": result.Revision,
+					},
+					Provenance: typesv2.EvidenceProvenance{Producer: string(ProducerCI), ObservedAt: observed},
+				})
+				if err != nil {
+					return err
+				}
+				if event.Disposition != typesv2.DispositionAccepted {
+					return fmt.Errorf("CI policy event was %s: %s", event.Disposition, event.Reason)
+				}
 			}
 		}
 		if domain == "review" && requirements.ReviewPolicy != "" {
-			status := result.ReviewStatus
-			event, err := s.applyDeliveryPolicyEvent(ctx, runID, result, EventInput{
-				ID: uuid.NewString(), Kind: "review.policy.evaluated", AttemptID: attemptID, Producer: ProducerReview,
-				Payload: map[string]interface{}{"review": map[string]interface{}{
-					"policy": requirements.ReviewPolicy, "status": status, "revision": result.Revision,
-				}},
-				Facts: map[string]interface{}{
-					"review.policy": requirements.ReviewPolicy, "review.status": status,
-					"review.policy_revision": result.Revision,
-				},
-				Provenance: typesv2.EvidenceProvenance{Producer: string(ProducerReview), ObservedAt: observed},
-			})
+			unchanged, err := s.policyRevisionMatches(ctx, runID, "review.policy_revision", result.Revision)
 			if err != nil {
 				return err
 			}
-			if event.Disposition != typesv2.DispositionAccepted {
-				return fmt.Errorf("review policy event was %s: %s", event.Disposition, event.Reason)
+			if !unchanged {
+				status := result.ReviewStatus
+				event, err := s.applyDeliveryPolicyEvent(ctx, runID, result, EventInput{
+					ID: uuid.NewString(), Kind: "review.policy.evaluated", AttemptID: attemptID, Producer: ProducerReview,
+					Payload: map[string]interface{}{"review": map[string]interface{}{
+						"policy": requirements.ReviewPolicy, "status": status, "revision": result.Revision,
+					}},
+					Facts: map[string]interface{}{
+						"review.policy": requirements.ReviewPolicy, "review.status": status,
+						"review.policy_revision": result.Revision,
+					},
+					Provenance: typesv2.EvidenceProvenance{Producer: string(ProducerReview), ObservedAt: observed},
+				})
+				if err != nil {
+					return err
+				}
+				if event.Disposition != typesv2.DispositionAccepted {
+					return fmt.Errorf("review policy event was %s: %s", event.Disposition, event.Reason)
+				}
 			}
 		}
+	}
+	unchanged, err := s.policyRevisionMatches(ctx, runID, "delivery.policy_revision", result.Revision)
+	if err != nil {
+		return err
+	}
+	if unchanged {
+		return nil
 	}
 	deliveryEvent, err := s.applyDeliveryPolicyEvent(ctx, runID, result, EventInput{
 		ID: uuid.NewString(), Kind: "workflow.delivery.evaluated", AttemptID: attemptID, Producer: ProducerEngine,
@@ -346,6 +365,23 @@ func (s *Store) publishEvidencePolicyEvents(ctx context.Context, runID, attemptI
 		return fmt.Errorf("delivery policy event was %s: %s", deliveryEvent.Disposition, deliveryEvent.Reason)
 	}
 	return nil
+}
+
+func (s *Store) policyRevisionMatches(ctx context.Context, runID, factKey, revision string) (bool, error) {
+	var valueJSON string
+	err := s.db.QueryRowContext(ctx, `SELECT value_json FROM workflow_v2_facts WHERE run_id=? AND fact_key=?`,
+		runID, factKey).Scan(&valueJSON)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	var current string
+	if err := json.Unmarshal([]byte(valueJSON), &current); err != nil {
+		return false, fmt.Errorf("decode %s: %w", factKey, err)
+	}
+	return current == revision, nil
 }
 
 func (s *Store) applyDeliveryPolicyEvent(ctx context.Context, runID string, expected DeliveryPolicyResult,

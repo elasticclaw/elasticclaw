@@ -344,8 +344,12 @@ func TestSuspendedRunsAreNotExternalDeliveryTargets(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(byPR) != 0 || len(byHead) != 0 {
-		t.Fatalf("suspended targets by PR/head = %#v/%#v", byPR, byHead)
+	all, err := store.ActiveDeliveryTargetsAll(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(byPR) != 0 || len(byHead) != 0 || len(all) != 0 {
+		t.Fatalf("suspended targets by PR/head/all = %#v/%#v/%#v", byPR, byHead, all)
 	}
 }
 
@@ -487,6 +491,51 @@ func TestReconciledCheckSetCannotTransitionOnMixedSnapshot(t *testing.T) {
 	}
 	if currentRows != 0 {
 		t.Fatalf("empty snapshot retained %d current evidence rows", currentRows)
+	}
+}
+
+func TestPolicyPublicationSuppressesIdenticalSnapshotsButAllowsRevisionCycles(t *testing.T) {
+	db := openRuntimeDB(t)
+	store := workflowv2.NewStore(db)
+	_, pr := createPolicyDelivery(t, store, "run-policy-revisions", "head-1", "open")
+	observed := time.Date(2026, 8, 9, 12, 0, 0, 0, time.UTC)
+	scopes := []workflowv2.EvidenceScope{{RunID: "run-policy-revisions", PRID: pr.ID,
+		HeadSHA: pr.HeadSHA, Domain: "ci", Connection: "github-actions", Pipeline: "github-pr"}}
+	inputs := []workflowv2.EvidenceInput{
+		{RunID: "run-policy-revisions", PRID: pr.ID, HeadSHA: pr.HeadSHA, Domain: "ci",
+			Connection: "github-actions", ExternalID: "github-pr:lint", Kind: "lint", Status: "success",
+			Payload: map[string]interface{}{"pipeline": "github-pr"}, ObservedAt: observed,
+			Provenance: typesv2.EvidenceProvenance{Producer: string(workflowv2.ProducerCI), ObservedAt: observed}},
+		{RunID: "run-policy-revisions", PRID: pr.ID, HeadSHA: pr.HeadSHA, Domain: "ci",
+			Connection: "github-actions", ExternalID: "github-pr:unit", Kind: "unit", Status: "success",
+			Payload: map[string]interface{}{"pipeline": "github-pr"}, ObservedAt: observed.Add(time.Second),
+			Provenance: typesv2.EvidenceProvenance{Producer: string(workflowv2.ProducerCI), ObservedAt: observed.Add(time.Second)}},
+	}
+	reconcile := func(snapshot []workflowv2.EvidenceInput) {
+		t.Helper()
+		if _, err := store.ReconcileEvidenceSnapshot(context.Background(), scopes, snapshot, workflowv2.ProducerCI); err != nil {
+			t.Fatal(err)
+		}
+	}
+	countPolicyEvents := func() int {
+		t.Helper()
+		var count int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM workflow_v2_events
+			WHERE run_id='run-policy-revisions' AND kind='ci.policy.evaluated'`).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		return count
+	}
+
+	reconcile(inputs)
+	reconcile(inputs)
+	if got := countPolicyEvents(); got != 1 {
+		t.Fatalf("identical success snapshots published %d CI policy events, want 1", got)
+	}
+	reconcile(nil)
+	reconcile(inputs)
+	if got := countPolicyEvents(); got != 3 {
+		t.Fatalf("success -> pending -> success published %d CI policy events, want 3", got)
 	}
 }
 
