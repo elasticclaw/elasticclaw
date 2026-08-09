@@ -2,6 +2,7 @@ package workflowv2_test
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -47,7 +48,20 @@ states:
     phase: review
   fixing:
     phase: build
+    on_enter:
+      effects:
+        - agent.task:
+            prompt: Address the trusted review feedback.
+            include_facts: [review.feedback]
 transitions:
+  ci_failed:
+    from: reviewing
+    on: ci.policy.evaluated
+    when:
+      ci:
+        status:
+          equals: unsatisfied
+    to: fixing
   review_failed:
     from: reviewing
     on: review.policy.evaluated
@@ -166,6 +180,37 @@ func TestUnsatisfiedReviewLoopsBackToBuild(t *testing.T) {
 	}
 }
 
+func TestTypedReviewFeedbackIsIncludedInFixTask(t *testing.T) {
+	db := openRuntimeDB(t)
+	store := workflowv2.NewStore(db)
+	attempt, pr := createPolicyDelivery(t, store, "run-review-feedback", "head-1", "open")
+	feedback := map[string]interface{}{"author": "alice", "body": "Handle the nil response before dereferencing it.",
+		"url": "https://github.example/org/api/pull/10#discussion_r1"}
+	if _, err := store.ApplyReviewFeedback(context.Background(), workflowv2.DeliveryTarget{
+		RunID: "run-review-feedback", AttemptID: attempt.ID, PRID: pr.ID, Repository: pr.Repository,
+		RepositoryName: pr.RepositoryName, Number: pr.Number, URL: pr.URL, HeadSHA: pr.HeadSHA,
+	}, "feedback-1", feedback, typesv2.EvidenceProvenance{
+		Producer: string(workflowv2.ProducerReview), Principal: "alice", ObservedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	recordPolicyEvidence(t, store, "run-review-feedback", pr, "review", "github-reviews", "alice", "approval",
+		"changes_requested", nil, workflowv2.ProducerReview)
+	claim, err := store.ClaimEffect(context.Background(), "feedback-worker", time.Minute)
+	if err != nil || claim == nil {
+		t.Fatalf("claim = %#v, %v", claim, err)
+	}
+	task, err := store.MaterializeAgentTask(context.Background(), claim.Effect.ID, claim.AttemptID,
+		"feedback-worker", time.Minute, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(task.Instructions, "Handle the nil response") ||
+		!strings.Contains(task.Instructions, `"review.feedback"`) {
+		t.Fatalf("task instructions = %s", task.Instructions)
+	}
+}
+
 func TestEvidenceForOldHeadIsRejectedAndInvalidated(t *testing.T) {
 	db := openRuntimeDB(t)
 	store := workflowv2.NewStore(db)
@@ -231,6 +276,99 @@ func TestEvidenceForOldHeadIsRejectedAndInvalidated(t *testing.T) {
 	}
 }
 
+func TestTrustedPullRequestReconciliationInvalidatesOldHeadEvidence(t *testing.T) {
+	db := openRuntimeDB(t)
+	store := workflowv2.NewStore(db)
+	_, pr := createPolicyDelivery(t, store, "run-pr-reconcile", "head-1", "open")
+	recordPolicyEvidence(t, store, "run-pr-reconcile", pr, "ci", "github-actions", "lint-1", "lint", "success",
+		map[string]interface{}{"pipeline": "github-pr"}, workflowv2.ProducerCI)
+	targets, err := store.ActiveDeliveryTargets(context.Background(), "org/api", 10)
+	if err != nil || len(targets) != 1 {
+		t.Fatalf("targets = %#v, %v", targets, err)
+	}
+	observed := time.Date(2026, 8, 8, 12, 6, 0, 0, time.UTC)
+	reconciled := typesv2.VerifiedPullRequest{
+		ID: pr.ID, URL: pr.URL, RepositoryName: "api", Repository: "org/api", Number: 10,
+		SourceBranch: "feature", BaseBranch: "main", HeadSHA: "head-2", State: "open", VerifiedAt: observed,
+		Provenance: typesv2.EvidenceProvenance{Producer: string(workflowv2.ProducerSourceControl),
+			Connection: "github", ObservedAt: observed},
+	}
+	event, err := store.ReconcilePullRequest(context.Background(), targets[0], "github-sync-1",
+		"pull_request.head_changed", reconciled)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if event.Disposition != typesv2.DispositionAccepted {
+		t.Fatalf("event = %#v", event)
+	}
+	var head string
+	var generations, currentEvidence, supersededEvidence int
+	if err := db.QueryRow(`SELECT current_head_sha FROM workflow_v2_delivery_prs WHERE id=?`, pr.ID).Scan(&head); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM workflow_v2_delivery_heads WHERE pr_id=?`, pr.ID).Scan(&generations); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM workflow_v2_evidence WHERE pr_id=? AND superseded_at=0`, pr.ID).Scan(&currentEvidence); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM workflow_v2_evidence WHERE pr_id=? AND superseded_at>0`, pr.ID).Scan(&supersededEvidence); err != nil {
+		t.Fatal(err)
+	}
+	if head != "head-2" || generations != 2 || currentEvidence != 0 || supersededEvidence != 1 {
+		t.Fatalf("head/generations/current/superseded = %q/%d/%d/%d", head, generations, currentEvidence, supersededEvidence)
+	}
+}
+
+func TestSuspendedRunsAreNotExternalDeliveryTargets(t *testing.T) {
+	db := openRuntimeDB(t)
+	store := workflowv2.NewStore(db)
+	_, pr := createPolicyDelivery(t, store, "run-suspended-target", "head-1", "open")
+	if _, err := db.Exec(`UPDATE workflow_v2_runs SET status='suspended',waiting_reason='operator review'
+		WHERE id='run-suspended-target'`); err != nil {
+		t.Fatal(err)
+	}
+	byPR, err := store.ActiveDeliveryTargets(context.Background(), pr.Repository, pr.Number)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byHead, err := store.ActiveDeliveryTargetsByHead(context.Background(), pr.HeadSHA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(byPR) != 0 || len(byHead) != 0 {
+		t.Fatalf("suspended targets by PR/head = %#v/%#v", byPR, byHead)
+	}
+}
+
+func TestReviewFeedbackRejectsStaleDeliveryHead(t *testing.T) {
+	db := openRuntimeDB(t)
+	store := workflowv2.NewStore(db)
+	_, pr := createPolicyDelivery(t, store, "run-stale-feedback", "head-1", "open")
+	targets, err := store.ActiveDeliveryTargets(context.Background(), pr.Repository, pr.Number)
+	if err != nil || len(targets) != 1 {
+		t.Fatalf("targets = %#v, %v", targets, err)
+	}
+	if _, err := db.Exec(`UPDATE workflow_v2_delivery_prs SET current_head_sha='head-2' WHERE id=?`, pr.ID); err != nil {
+		t.Fatal(err)
+	}
+	_, err = store.ApplyReviewFeedback(context.Background(), targets[0], "stale-feedback",
+		map[string]interface{}{"body": "old head comment"}, typesv2.EvidenceProvenance{
+			Producer: string(workflowv2.ProducerReview), Principal: "alice", ObservedAt: time.Now().UTC(),
+		})
+	if err == nil || !strings.Contains(err.Error(), "stale") {
+		t.Fatalf("error = %v, want stale head rejection", err)
+	}
+	var events int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM workflow_v2_events WHERE run_id=? AND id='stale-feedback'`,
+		"run-stale-feedback").Scan(&events); err != nil {
+		t.Fatal(err)
+	}
+	if events != 0 {
+		t.Fatalf("events = %d", events)
+	}
+}
+
 func TestCIPolicyUsesLatestCheckObservation(t *testing.T) {
 	db := openRuntimeDB(t)
 	store := workflowv2.NewStore(db)
@@ -261,6 +399,69 @@ func TestCIPolicyUsesLatestCheckObservation(t *testing.T) {
 	failed := record("lint-newest", "lint", "failure", base.Add(2*time.Minute))
 	if failed.CISatisfied || failed.CIStatus != "unsatisfied" {
 		t.Fatalf("newest failure did not fail policy: %#v", failed)
+	}
+}
+
+func TestReconciledCheckSetCannotTransitionOnMixedSnapshot(t *testing.T) {
+	db := openRuntimeDB(t)
+	store := workflowv2.NewStore(db)
+	_, pr := createPolicyDelivery(t, store, "run-atomic-ci-snapshot", "head-1", "open")
+	old := time.Date(2026, 8, 8, 12, 1, 0, 0, time.UTC)
+	if _, err := db.Exec(`INSERT INTO workflow_v2_evidence(
+		id,run_id,pr_id,head_sha,head_generation,domain,connection,external_id,kind,status,
+		payload_json,provenance_json,observed_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		"old-unit", "run-atomic-ci-snapshot", pr.ID, pr.HeadSHA, 1, "ci", "github-actions",
+		"github-pr:old-unit", "unit", "failure", `{"pipeline":"github-pr"}`,
+		`{"producer":"ci","observed_at":"2026-08-08T12:01:00Z"}`, old.UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+	current := old.Add(time.Minute)
+	input := func(externalID, kind, status string) workflowv2.EvidenceInput {
+		return workflowv2.EvidenceInput{RunID: "run-atomic-ci-snapshot", PRID: pr.ID, HeadSHA: pr.HeadSHA,
+			Domain: "ci", Connection: "github-actions", ExternalID: "github-pr:" + externalID,
+			Kind: kind, Status: status, Payload: map[string]interface{}{"pipeline": "github-pr"},
+			ObservedAt: current, Provenance: typesv2.EvidenceProvenance{Producer: string(workflowv2.ProducerCI),
+				Connection: "github-actions", ExternalID: externalID, ObservedAt: current, Reconciled: true}}
+	}
+	result, err := store.ReconcileEvidenceSet(context.Background(), []workflowv2.EvidenceInput{
+		input("lint", "lint", "success"), input("unit", "unit", "pending"),
+	}, workflowv2.ProducerCI)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := store.GetRun(context.Background(), "run-atomic-ci-snapshot")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.CIStatus != "pending" || run.State != "reviewing" || run.StateVersion != 1 {
+		t.Fatalf("policy/run = %#v/%#v", result, run)
+	}
+	var currentRows, supersededRows int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM workflow_v2_evidence WHERE run_id=? AND superseded_at=0`,
+		run.ID).Scan(&currentRows); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM workflow_v2_evidence WHERE run_id=? AND superseded_at>0`,
+		run.ID).Scan(&supersededRows); err != nil {
+		t.Fatal(err)
+	}
+	if currentRows != 2 || supersededRows != 1 {
+		t.Fatalf("current/superseded evidence = %d/%d", currentRows, supersededRows)
+	}
+	olderInput := func(externalID, kind string) workflowv2.EvidenceInput {
+		item := input(externalID, kind, "failure")
+		item.ObservedAt = old
+		item.Provenance.ObservedAt = old
+		return item
+	}
+	result, err = store.ReconcileEvidenceSet(context.Background(), []workflowv2.EvidenceInput{
+		olderInput("lint", "lint"), olderInput("unit", "unit"),
+	}, workflowv2.ProducerCI)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.CIStatus != "pending" {
+		t.Fatalf("out-of-order snapshot regressed policy: %#v", result)
 	}
 }
 

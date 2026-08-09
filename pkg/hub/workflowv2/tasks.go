@@ -67,6 +67,7 @@ func (s *Store) MaterializeAgentTask(ctx context.Context, effectID, effectAttemp
 		Instructions      string   `json:"instructions"`
 		AllowedActions    []string `json:"allowed_actions"`
 		RequiredArtifacts []string `json:"required_artifacts"`
+		IncludeFacts      []string `json:"include_facts"`
 	}
 	if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil {
 		return typesv2.AgentTask{}, fmt.Errorf("decode agent task effect: %w", err)
@@ -77,6 +78,38 @@ func (s *Store) MaterializeAgentTask(ctx context.Context, effectID, effectAttemp
 	}
 	if instructions == "" {
 		return typesv2.AgentTask{}, fmt.Errorf("agent task effect instructions are required")
+	}
+	if len(payload.IncludeFacts) > 20 {
+		return typesv2.AgentTask{}, fmt.Errorf("agent task effect includes more than 20 facts")
+	}
+	if len(payload.IncludeFacts) > 0 {
+		factValues := map[string]interface{}{}
+		seenFacts := map[string]bool{}
+		for _, key := range payload.IncludeFacts {
+			key = strings.TrimSpace(key)
+			if key == "" || seenFacts[key] {
+				return typesv2.AgentTask{}, fmt.Errorf("agent task effect include_facts must contain unique non-empty keys")
+			}
+			seenFacts[key] = true
+			var raw []byte
+			if err := tx.QueryRowContext(ctx, `SELECT value_json FROM workflow_v2_facts WHERE run_id=? AND fact_key=?`,
+				runID, key).Scan(&raw); err != nil {
+				if errors.Is(err, sql.ErrNoRows) {
+					return typesv2.AgentTask{}, fmt.Errorf("agent task required fact %q is unavailable", key)
+				}
+				return typesv2.AgentTask{}, err
+			}
+			var value interface{}
+			if err := json.Unmarshal(raw, &value); err != nil {
+				return typesv2.AgentTask{}, fmt.Errorf("decode agent task fact %q: %w", key, err)
+			}
+			factValues[key] = value
+		}
+		factsJSON, err := json.Marshal(factValues)
+		if err != nil {
+			return typesv2.AgentTask{}, err
+		}
+		instructions += "\n\nTyped workflow facts:\n" + string(factsJSON)
 	}
 	if payload.AllowedActions == nil {
 		payload.AllowedActions = []string{}

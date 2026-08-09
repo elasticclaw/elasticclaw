@@ -636,7 +636,29 @@ func validateEffectsAgainstWorkspace(path string, effects []map[string]interface
 					return fmt.Errorf("%s: unknown issue_tracker connection %q", epath, conn)
 				}
 			case "agent.task":
-				// agent tasks do not require workspace pipeline refs
+				prompt, _ := cfg["prompt"].(string)
+				instructions, _ := cfg["instructions"].(string)
+				if strings.TrimSpace(prompt) == "" && strings.TrimSpace(instructions) == "" {
+					return fmt.Errorf("%s: prompt or instructions is required", epath)
+				}
+				if rawFacts, exists := cfg["include_facts"]; exists {
+					facts, ok := rawFacts.([]interface{})
+					if !ok || len(facts) == 0 || len(facts) > 20 {
+						return fmt.Errorf("%s.include_facts must be a list of 1 to 20 fact keys", epath)
+					}
+					seen := map[string]bool{}
+					for index, rawFact := range facts {
+						fact, ok := rawFact.(string)
+						fact = strings.TrimSpace(fact)
+						if !ok || fact == "" || seen[fact] {
+							return fmt.Errorf("%s.include_facts[%d] must be a unique non-empty fact key", epath, index)
+						}
+						if isTranscriptFact(fact) {
+							return fmt.Errorf("%s.include_facts[%d]: conversation/transcript fact %q cannot control workflow v2", epath, index, fact)
+						}
+						seen[fact] = true
+					}
+				}
 			default:
 				// Unknown effect ops: reject at pair validation so they fail closed.
 				return fmt.Errorf("%s: unsupported effect operation %q", epath, op)

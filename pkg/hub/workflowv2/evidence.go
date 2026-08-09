@@ -46,45 +46,87 @@ type DeliveryPolicyResult struct {
 // RecordEvidence accepts only adapter-owned evidence for the current verified
 // PR head, then recomputes the workflow's aggregate delivery policy.
 func (s *Store) RecordEvidence(ctx context.Context, input EvidenceInput, producer Producer) (DeliveryPolicyResult, error) {
+	return s.recordEvidenceSet(ctx, []EvidenceInput{input}, producer, false)
+}
+
+// ReconcileEvidenceSet atomically replaces the current adapter-owned evidence
+// represented by one snapshot and publishes policy events only after every
+// sibling observation is durable. CI adapters use this to avoid evaluating a
+// transient mixture of old and new check results.
+func (s *Store) ReconcileEvidenceSet(ctx context.Context, inputs []EvidenceInput,
+	producer Producer) (DeliveryPolicyResult, error) {
+	return s.recordEvidenceSet(ctx, inputs, producer, true)
+}
+
+func (s *Store) recordEvidenceSet(ctx context.Context, inputs []EvidenceInput, producer Producer,
+	reconcile bool) (DeliveryPolicyResult, error) {
 	if s == nil || s.db == nil {
 		return DeliveryPolicyResult{}, fmt.Errorf("workflow v2 store is not configured")
 	}
-	input.Domain = strings.ToLower(strings.TrimSpace(input.Domain))
-	input.Connection = strings.TrimSpace(input.Connection)
-	input.ExternalID = strings.TrimSpace(input.ExternalID)
-	input.Kind = strings.TrimSpace(input.Kind)
-	input.Status = strings.ToLower(strings.TrimSpace(input.Status))
-	if err := validateEvidenceProducer(input.Domain, producer); err != nil {
-		return DeliveryPolicyResult{}, err
+	if len(inputs) == 0 {
+		return DeliveryPolicyResult{}, fmt.Errorf("evidence set must not be empty")
 	}
-	if input.RunID == "" || input.PRID == "" || input.HeadSHA == "" || input.ExternalID == "" || input.Kind == "" || input.Status == "" {
-		return DeliveryPolicyResult{}, fmt.Errorf("run, pull request, head, external id, kind, and status are required")
+	type preparedEvidence struct {
+		input          EvidenceInput
+		id             string
+		payloadJSON    []byte
+		provenanceJSON string
+		observed       time.Time
+		pipeline       string
 	}
-	if strings.TrimSpace(input.Provenance.Producer) != string(producer) {
-		return DeliveryPolicyResult{}, fmt.Errorf("evidence provenance producer %q does not match trusted adapter %q",
-			input.Provenance.Producer, producer)
-	}
-	observed := input.ObservedAt.UTC()
-	if observed.IsZero() {
-		observed = s.now().UTC()
-	}
-	if input.Provenance.ObservedAt.IsZero() {
-		input.Provenance.ObservedAt = observed
-	}
-	payloadJSON, err := json.Marshal(input.Payload)
-	if err != nil {
-		return DeliveryPolicyResult{}, err
-	}
-	if input.Payload == nil {
-		payloadJSON = []byte("{}")
-	}
-	provenanceJSON, err := marshalObject(input.Provenance)
-	if err != nil {
-		return DeliveryPolicyResult{}, err
-	}
-	id := strings.TrimSpace(input.ID)
-	if id == "" {
-		id = uuid.NewString()
+	prepared := make([]preparedEvidence, 0, len(inputs))
+	var runID, prID, headSHA, domain string
+	observed := time.Time{}
+	for index, raw := range inputs {
+		input := raw
+		input.Domain = strings.ToLower(strings.TrimSpace(input.Domain))
+		input.Connection = strings.TrimSpace(input.Connection)
+		input.ExternalID = strings.TrimSpace(input.ExternalID)
+		input.Kind = strings.TrimSpace(input.Kind)
+		input.Status = strings.ToLower(strings.TrimSpace(input.Status))
+		if err := validateEvidenceProducer(input.Domain, producer); err != nil {
+			return DeliveryPolicyResult{}, err
+		}
+		if input.RunID == "" || input.PRID == "" || input.HeadSHA == "" || input.ExternalID == "" || input.Kind == "" || input.Status == "" {
+			return DeliveryPolicyResult{}, fmt.Errorf("evidence[%d]: run, pull request, head, external id, kind, and status are required", index)
+		}
+		if index == 0 {
+			runID, prID, headSHA, domain = input.RunID, input.PRID, input.HeadSHA, input.Domain
+		} else if input.RunID != runID || input.PRID != prID || input.HeadSHA != headSHA || input.Domain != domain {
+			return DeliveryPolicyResult{}, fmt.Errorf("evidence set must share run, pull request, head, and domain")
+		}
+		if strings.TrimSpace(input.Provenance.Producer) != string(producer) {
+			return DeliveryPolicyResult{}, fmt.Errorf("evidence provenance producer %q does not match trusted adapter %q",
+				input.Provenance.Producer, producer)
+		}
+		itemObserved := input.ObservedAt.UTC()
+		if itemObserved.IsZero() {
+			itemObserved = s.now().UTC()
+		}
+		if observed.IsZero() || itemObserved.After(observed) {
+			observed = itemObserved
+		}
+		if input.Provenance.ObservedAt.IsZero() {
+			input.Provenance.ObservedAt = itemObserved
+		}
+		payloadJSON, err := json.Marshal(input.Payload)
+		if err != nil {
+			return DeliveryPolicyResult{}, err
+		}
+		if input.Payload == nil {
+			payloadJSON = []byte("{}")
+		}
+		provenanceJSON, err := marshalObject(input.Provenance)
+		if err != nil {
+			return DeliveryPolicyResult{}, err
+		}
+		id := strings.TrimSpace(input.ID)
+		if id == "" {
+			id = uuid.NewString()
+		}
+		pipeline, _ := input.Payload["pipeline"].(string)
+		prepared = append(prepared, preparedEvidence{input: input, id: id, payloadJSON: payloadJSON,
+			provenanceJSON: provenanceJSON, observed: itemObserved, pipeline: strings.TrimSpace(pipeline)})
 	}
 	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
 	if err != nil {
@@ -95,32 +137,60 @@ func (s *Store) RecordEvidence(ctx context.Context, input EvidenceInput, produce
 	var headGeneration int
 	if err := tx.QueryRowContext(ctx, `SELECT p.current_head_sha,COALESCE(MAX(h.generation),0)
 		FROM workflow_v2_delivery_prs p LEFT JOIN workflow_v2_delivery_heads h ON h.pr_id=p.id
-		WHERE p.id=? AND p.run_id=? AND p.active=1 GROUP BY p.id`, input.PRID, input.RunID).Scan(
+		WHERE p.id=? AND p.run_id=? AND p.active=1 GROUP BY p.id`, prID, runID).Scan(
 		&currentHead, &headGeneration); err != nil {
 		return DeliveryPolicyResult{}, fmt.Errorf("load active delivery: %w", err)
 	}
-	if currentHead != input.HeadSHA {
-		return DeliveryPolicyResult{}, fmt.Errorf("evidence head %s is stale; current head is %s", input.HeadSHA, currentHead)
+	if currentHead != headSHA {
+		return DeliveryPolicyResult{}, fmt.Errorf("evidence head %s is stale; current head is %s", headSHA, currentHead)
 	}
 	if headGeneration < 1 {
 		return DeliveryPolicyResult{}, fmt.Errorf("active delivery has no verified head generation")
 	}
-	_, err = tx.ExecContext(ctx, `INSERT INTO workflow_v2_evidence(
-		id,run_id,pr_id,head_sha,head_generation,domain,connection,external_id,kind,status,payload_json,provenance_json,observed_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
-		ON CONFLICT(run_id,pr_id,domain,connection,external_id,kind,head_generation) DO UPDATE SET
-		status=excluded.status,payload_json=excluded.payload_json,provenance_json=excluded.provenance_json,
-		observed_at=excluded.observed_at,superseded_at=0
-		WHERE excluded.observed_at>=workflow_v2_evidence.observed_at`, id, input.RunID, input.PRID, input.HeadSHA,
-		headGeneration, input.Domain, input.Connection, input.ExternalID, input.Kind, input.Status, string(payloadJSON),
-		provenanceJSON, observed.UnixMilli())
-	if err != nil {
-		return DeliveryPolicyResult{}, err
+	if reconcile {
+		seenSubjects := map[string]bool{}
+		reconciledAt := s.now().UTC().UnixMilli()
+		for _, item := range prepared {
+			subject := item.input.Connection + "\x00" + item.pipeline
+			if seenSubjects[subject] {
+				continue
+			}
+			seenSubjects[subject] = true
+			if item.pipeline != "" {
+				_, err = tx.ExecContext(ctx, `UPDATE workflow_v2_evidence SET superseded_at=?
+					WHERE run_id=? AND pr_id=? AND head_generation=? AND domain=? AND connection=?
+					AND json_extract(payload_json,'$.pipeline')=? AND superseded_at=0 AND observed_at<=?`, reconciledAt,
+					runID, prID, headGeneration, domain, item.input.Connection, item.pipeline, observed.UnixMilli())
+			} else {
+				_, err = tx.ExecContext(ctx, `UPDATE workflow_v2_evidence SET superseded_at=?
+					WHERE run_id=? AND pr_id=? AND head_generation=? AND domain=? AND connection=?
+					AND superseded_at=0 AND observed_at<=?`, reconciledAt, runID, prID, headGeneration, domain,
+					item.input.Connection, observed.UnixMilli())
+			}
+			if err != nil {
+				return DeliveryPolicyResult{}, err
+			}
+		}
+	}
+	for _, item := range prepared {
+		input := item.input
+		_, err = tx.ExecContext(ctx, `INSERT INTO workflow_v2_evidence(
+			id,run_id,pr_id,head_sha,head_generation,domain,connection,external_id,kind,status,payload_json,provenance_json,observed_at)
+			VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+			ON CONFLICT(run_id,pr_id,domain,connection,external_id,kind,head_generation) DO UPDATE SET
+			status=excluded.status,payload_json=excluded.payload_json,provenance_json=excluded.provenance_json,
+			observed_at=excluded.observed_at,superseded_at=0
+			WHERE excluded.observed_at>=workflow_v2_evidence.observed_at`, item.id, runID, prID, headSHA,
+			headGeneration, domain, input.Connection, input.ExternalID, input.Kind, input.Status, string(item.payloadJSON),
+			item.provenanceJSON, item.observed.UnixMilli())
+		if err != nil {
+			return DeliveryPolicyResult{}, err
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return DeliveryPolicyResult{}, err
 	}
-	return s.evaluateAndPublishDeliveryPolicy(ctx, input.RunID, "", input.Domain, observed)
+	return s.evaluateAndPublishDeliveryPolicy(ctx, runID, "", domain, observed)
 }
 
 var errDeliveryPolicyChanged = errors.New("delivery policy inputs changed before publication")

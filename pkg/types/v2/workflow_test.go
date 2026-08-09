@@ -244,6 +244,30 @@ transitions:
 	}
 }
 
+func TestWorkflowV2RejectsTranscriptFactsInAgentTasks(t *testing.T) {
+	workflow := `
+schema_version: 2
+name: transcript-agent-task
+enabled: true
+initial_state: build
+states:
+  build:
+    phase: build
+    on_enter:
+      effects:
+        - agent.task:
+            prompt: Continue the work.
+            include_facts: [conversation.body]
+  done:
+    phase: done
+    terminal: true
+`
+	_, _, err := v2.ParseAndValidateWorkflowPair([]byte(workflow), []byte(validWorkspaceYAML))
+	if err == nil || !strings.Contains(err.Error(), "conversation/transcript") {
+		t.Fatalf("error = %v, want conversation/transcript rejection", err)
+	}
+}
+
 func TestWorkflowV2AllowsMarkersAsInertDescription(t *testing.T) {
 	yaml := `
 schema_version: 2
