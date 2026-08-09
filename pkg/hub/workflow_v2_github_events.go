@@ -115,6 +115,13 @@ func (s *Server) processWorkflowV2GitHubCheckEvent(event string, payload githubC
 	if len(targets) == 0 {
 		return
 	}
+	if err := s.reconcileWorkflowV2GitHubChecks(context.Background(), store, targets, headSHA); err != nil {
+		log.Printf("[workflow-v2 github] reconcile check snapshot: %v", err)
+	}
+}
+
+func (s *Server) reconcileWorkflowV2GitHubChecks(ctx context.Context, store *workflowv2.Store,
+	targets []workflowv2.DeliveryTarget, headSHA string) error {
 	type githubCheck struct {
 		ID          int64  `json:"id"`
 		Name        string `json:"name"`
@@ -132,6 +139,9 @@ func (s *Server) processWorkflowV2GitHubCheckEvent(event string, payload githubC
 	checksByRepository := map[string][]githubCheck{}
 	workflowRunsByRepository := map[string]map[int64]struct{ name, path string }{}
 	for _, target := range targets {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		checks, loaded := checksByRepository[target.Repository]
 		if !loaded {
 			token := s.tokenForRepo(target.Repository)
@@ -139,7 +149,7 @@ func (s *Server) processWorkflowV2GitHubCheckEvent(event string, payload githubC
 				log.Printf("[workflow-v2 github] no repository-scoped token for CI %s", target.Repository)
 				continue
 			}
-			rawRuns, err := githubAPICollectionWithBaseContext(context.Background(), s.ghBaseURL(),
+			rawRuns, err := githubAPICollectionWithBaseContext(ctx, s.ghBaseURL(),
 				fmt.Sprintf("repos/%s/commits/%s/check-runs?filter=latest&per_page=100", target.Repository, headSHA),
 				token, "check_runs")
 			if err != nil {
@@ -152,7 +162,7 @@ func (s *Server) processWorkflowV2GitHubCheckEvent(event string, payload githubC
 				continue
 			}
 			checksByRepository[target.Repository] = checks
-			rawRuns, err = githubAPICollectionWithBaseContext(context.Background(), s.ghBaseURL(),
+			rawRuns, err = githubAPICollectionWithBaseContext(ctx, s.ghBaseURL(),
 				fmt.Sprintf("repos/%s/actions/runs?head_sha=%s&per_page=100", target.Repository, headSHA),
 				token, "workflow_runs")
 			if err != nil {
@@ -224,12 +234,13 @@ func (s *Server) processWorkflowV2GitHubCheckEvent(event string, payload githubC
 			}
 		}
 		if len(evidenceScopes) > 0 {
-			if _, err := store.ReconcileEvidenceSnapshot(context.Background(), evidenceScopes, evidenceInputs,
+			if _, err := store.ReconcileEvidenceSnapshot(ctx, evidenceScopes, evidenceInputs,
 				workflowv2.ProducerCI); err != nil {
 				log.Printf("[workflow-v2 github] reconcile check snapshot for run %s: %v", target.RunID, err)
 			}
 		}
 	}
+	return nil
 }
 
 func workflowV2GitHubWorkflowMatches(configured, name, workflowPath string) bool {

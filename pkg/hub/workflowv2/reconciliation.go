@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	typesv2 "github.com/elasticclaw/elasticclaw/pkg/types/v2"
 	"github.com/google/uuid"
@@ -23,6 +24,7 @@ type DeliveryTarget struct {
 	Number         int
 	URL            string
 	HeadSHA        string
+	HeadObservedAt time.Time
 	State          string
 	WorkspaceYAML  string
 	WorkflowYAML   string
@@ -40,7 +42,9 @@ func (s *Store) ActiveDeliveryTargets(ctx context.Context, repository string, nu
 		return nil, fmt.Errorf("repository and positive pull request number are required")
 	}
 	rows, err := s.db.QueryContext(ctx, `SELECT r.id,r.current_attempt_id,p.id,p.repository_name,p.repository,
-		p.pr_number,p.url,p.current_head_sha,p.state,r.workspace_yaml,r.workflow_yaml
+		p.pr_number,p.url,p.current_head_sha,p.state,r.workspace_yaml,r.workflow_yaml,
+		COALESCE((SELECT h.observed_at FROM workflow_v2_delivery_heads h WHERE h.pr_id=p.id
+			ORDER BY h.generation DESC LIMIT 1),p.verified_at)
 		FROM workflow_v2_delivery_prs p JOIN workflow_v2_runs r ON r.id=p.run_id
 		JOIN workflow_v2_attempts a ON a.id=r.current_attempt_id
 		WHERE p.repository=? AND p.pr_number=? AND p.active=1 AND r.status='active'
@@ -49,17 +53,7 @@ func (s *Store) ActiveDeliveryTargets(ctx context.Context, repository string, nu
 		return nil, err
 	}
 	defer rows.Close()
-	var targets []DeliveryTarget
-	for rows.Next() {
-		var target DeliveryTarget
-		if err := rows.Scan(&target.RunID, &target.AttemptID, &target.PRID, &target.RepositoryName,
-			&target.Repository, &target.Number, &target.URL, &target.HeadSHA, &target.State,
-			&target.WorkspaceYAML, &target.WorkflowYAML); err != nil {
-			return nil, err
-		}
-		targets = append(targets, target)
-	}
-	return targets, rows.Err()
+	return scanDeliveryTargets(rows)
 }
 
 // ActiveDeliveryTargetsByHead resolves check webhooks that omit pull request
@@ -74,7 +68,9 @@ func (s *Store) ActiveDeliveryTargetsByHead(ctx context.Context, headSHA string)
 		return nil, fmt.Errorf("pull request head SHA is required")
 	}
 	rows, err := s.db.QueryContext(ctx, `SELECT r.id,r.current_attempt_id,p.id,p.repository_name,p.repository,
-		p.pr_number,p.url,p.current_head_sha,p.state,r.workspace_yaml,r.workflow_yaml
+		p.pr_number,p.url,p.current_head_sha,p.state,r.workspace_yaml,r.workflow_yaml,
+		COALESCE((SELECT h.observed_at FROM workflow_v2_delivery_heads h WHERE h.pr_id=p.id
+			ORDER BY h.generation DESC LIMIT 1),p.verified_at)
 		FROM workflow_v2_delivery_prs p JOIN workflow_v2_runs r ON r.id=p.run_id
 		JOIN workflow_v2_attempts a ON a.id=r.current_attempt_id
 		WHERE p.current_head_sha=? AND p.active=1 AND r.status='active' AND a.status='active'
@@ -83,14 +79,42 @@ func (s *Store) ActiveDeliveryTargetsByHead(ctx context.Context, headSHA string)
 		return nil, err
 	}
 	defer rows.Close()
+	return scanDeliveryTargets(rows)
+}
+
+// ActiveDeliveryTargetsAll returns every currently owned V2 delivery subject
+// for periodic provider reconciliation. V1 rows and suspended runs are never
+// selected.
+func (s *Store) ActiveDeliveryTargetsAll(ctx context.Context) ([]DeliveryTarget, error) {
+	if s == nil || s.db == nil {
+		return nil, fmt.Errorf("workflow v2 store is not configured")
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT r.id,r.current_attempt_id,p.id,p.repository_name,p.repository,
+		p.pr_number,p.url,p.current_head_sha,p.state,r.workspace_yaml,r.workflow_yaml,
+		COALESCE((SELECT h.observed_at FROM workflow_v2_delivery_heads h WHERE h.pr_id=p.id
+			ORDER BY h.generation DESC LIMIT 1),p.verified_at)
+		FROM workflow_v2_delivery_prs p JOIN workflow_v2_runs r ON r.id=p.run_id
+		JOIN workflow_v2_attempts a ON a.id=r.current_attempt_id
+		WHERE p.active=1 AND r.status='active' AND a.status='active'
+		ORDER BY r.updated_at,p.repository,p.pr_number,r.id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanDeliveryTargets(rows)
+}
+
+func scanDeliveryTargets(rows *sql.Rows) ([]DeliveryTarget, error) {
 	var targets []DeliveryTarget
 	for rows.Next() {
 		var target DeliveryTarget
+		var headObservedAt int64
 		if err := rows.Scan(&target.RunID, &target.AttemptID, &target.PRID, &target.RepositoryName,
 			&target.Repository, &target.Number, &target.URL, &target.HeadSHA, &target.State,
-			&target.WorkspaceYAML, &target.WorkflowYAML); err != nil {
+			&target.WorkspaceYAML, &target.WorkflowYAML, &headObservedAt); err != nil {
 			return nil, err
 		}
+		target.HeadObservedAt = time.UnixMilli(headObservedAt).UTC()
 		targets = append(targets, target)
 	}
 	return targets, rows.Err()
@@ -137,6 +161,9 @@ func (s *Store) ReconcilePullRequest(ctx context.Context, target DeliveryTarget,
 			WHERE id=? AND run_id=? AND repository=? AND pr_number=? AND active=1`, target.PRID,
 			target.RunID, target.Repository, target.Number).Scan(&currentHead, &currentState); err != nil {
 			return err
+		}
+		if currentHead != target.HeadSHA || currentState != target.State {
+			return fmt.Errorf("verified delivery changed while reconciling")
 		}
 		provenanceJSON, err := marshalObject(verified.Provenance)
 		if err != nil {
