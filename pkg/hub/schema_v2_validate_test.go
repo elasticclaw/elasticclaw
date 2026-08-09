@@ -369,7 +369,7 @@ states:
 		t.Fatalf("v2 enabled = %v, want explicit false", workflow.Enabled)
 	}
 	view := workflowToView("engineering", workflow)
-	if view.RuntimeAvailable || view.SchemaVersion != "2" {
-		t.Fatalf("v2 view = %#v, want schema 2 and unavailable runtime", view)
+	if !view.RuntimeAvailable || view.SchemaVersion != "2" {
+		t.Fatalf("v2 view = %#v, want schema 2 and available runtime", view)
 	}
 }

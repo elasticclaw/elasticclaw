@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
+	"time"
 
 	workflowv2 "github.com/elasticclaw/elasticclaw/pkg/hub/workflowv2"
 	typesv2 "github.com/elasticclaw/elasticclaw/pkg/types/v2"
@@ -118,6 +120,28 @@ func TestAssembleContextUsesPinnedWorkspaceAndRelevantRepositories(t *testing.T)
 	}
 }
 
+func TestAssembleOrganizationContextDefersRepositorySources(t *testing.T) {
+	db := openRuntimeDB(t)
+	store := workflowv2.NewStore(db)
+	createContextRun(t, store, "run-org-context")
+	var resolved []string
+	bundle, err := store.AssembleOrganizationContext(context.Background(), "run-org-context",
+		workflowv2.KnowledgeResolverFunc(func(_ context.Context, _ workflowv2.Run, name string,
+			source typesv2.KnowledgeSource) (typesv2.ContextBundleSource, error) {
+			resolved = append(resolved, name)
+			return typesv2.ContextBundleSource{Status: "ready", ContentDigest: "sha256:" + name}, nil
+		}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(resolved, []string{"principles"}) || len(bundle.Sources) != 1 {
+		t.Fatalf("resolved=%#v bundle=%#v", resolved, bundle)
+	}
+	if bundle.Sources[0].Scope != typesv2.KnowledgeScopeOrganization {
+		t.Fatalf("source = %#v", bundle.Sources[0])
+	}
+}
+
 func TestAssembleContextRejectsRepositoryOutsideWorkspace(t *testing.T) {
 	db := openRuntimeDB(t)
 	store := workflowv2.NewStore(db)
@@ -186,6 +210,40 @@ func TestRequiredKnowledgeFailedStatusSuspendsRun(t *testing.T) {
 	}
 	if run.Status != workflowv2.RunSuspended {
 		t.Fatalf("run = %#v", run)
+	}
+}
+
+func TestActivationPendingRequiredKnowledgeFailureRemainsSuspended(t *testing.T) {
+	db := openRuntimeDB(t)
+	store := workflowv2.NewStore(db)
+	run, err := store.CreateRun(context.Background(), workflowv2.CreateRunRequest{
+		ID: "run-context-activation-failure", TenantID: "tenant-1", InitialClawID: "claw-context-failure",
+		WorkspaceYAML: []byte(contextWorkspaceYAML), WorkflowYAML: []byte(runtimeWorkflowYAML),
+		ActivationPending: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = store.AssembleOrganizationContext(context.Background(), run.ID,
+		workflowv2.KnowledgeResolverFunc(func(context.Context, workflowv2.Run, string,
+			typesv2.KnowledgeSource) (typesv2.ContextBundleSource, error) {
+			return typesv2.ContextBundleSource{}, errors.New("required handbook unavailable")
+		}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CompleteActivation(context.Background(), run.ID); err != nil {
+		t.Fatal(err)
+	}
+	run, err = store.GetRun(context.Background(), run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.Status != workflowv2.RunSuspended || !strings.Contains(run.WaitingReason, "required knowledge") {
+		t.Fatalf("failed-context activation = %#v", run)
+	}
+	if claim, err := store.ClaimEffect(context.Background(), "worker-without-required-context", time.Minute); err != nil || claim != nil {
+		t.Fatalf("failed-context effect claim = %#v, %v", claim, err)
 	}
 }
 

@@ -387,10 +387,8 @@ func (s *Server) handleWorkspaceWorkflowTrigger(w http.ResponseWriter, r *http.R
 }
 
 func (s *Server) triggerWorkflowConfig(w http.ResponseWriter, r *http.Request, workspace *types.WorkspaceConfig, workflow *types.WorkflowConfig) {
-	// Until the deterministic runtime is installed, v2 is authorable but never
-	// normalized or executed through the legacy transcript-driven engine.
 	if isWorkflowV2(workflow) {
-		jsonError(w, http.StatusConflict, "workflow v2 runtime is not active; this workflow cannot execute through the v1 engine")
+		s.triggerWorkflowV2Config(w, r, workspace, workflow)
 		return
 	}
 	if !workflow.EnableManualTrigger {
@@ -604,7 +602,7 @@ func workflowToView(workspaceName string, workflow *types.WorkflowConfig) Workfl
 		ExcludeLabels:        append([]string(nil), workflow.ExcludeLabels...),
 		AssignedTo:           workflow.AssignedTo,
 		Enabled:              workflow.Enabled == nil || *workflow.Enabled,
-		RuntimeAvailable:     !isWorkflowV2(workflow),
+		RuntimeAvailable:     true,
 		EnableManualTrigger:  workflow.EnableManualTrigger,
 		SecretRefs:           cloneStringMap(workflow.SecretRefs),
 		Volumes:              append([]types.WorkflowVolume(nil), workflow.Volumes...),

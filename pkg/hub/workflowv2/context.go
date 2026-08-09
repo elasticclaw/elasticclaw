@@ -31,6 +31,19 @@ func (f KnowledgeResolverFunc) ResolveKnowledge(ctx context.Context, run Run, na
 // caller may only narrow repository_files sources to named workspace repos.
 func (s *Store) AssembleContext(ctx context.Context, runID string, relevantRepositories []string,
 	resolver KnowledgeResolver) (typesv2.ContextBundle, error) {
+	return s.assembleContext(ctx, runID, relevantRepositories, "", resolver)
+}
+
+// AssembleOrganizationContext builds the mandatory pre-plan layer without
+// prematurely resolving repository-scoped sources. Repository context is
+// expanded later, after planning has selected names from the pinned workspace.
+func (s *Store) AssembleOrganizationContext(ctx context.Context, runID string,
+	resolver KnowledgeResolver) (typesv2.ContextBundle, error) {
+	return s.assembleContext(ctx, runID, nil, typesv2.KnowledgeScopeOrganization, resolver)
+}
+
+func (s *Store) assembleContext(ctx context.Context, runID string, relevantRepositories []string,
+	scope string, resolver KnowledgeResolver) (typesv2.ContextBundle, error) {
 	if s == nil || s.db == nil {
 		return typesv2.ContextBundle{}, fmt.Errorf("workflow v2 store is not configured")
 	}
@@ -64,7 +77,7 @@ func (s *Store) AssembleContext(ctx context.Context, runID string, relevantRepos
 	}
 	sort.Strings(relevant)
 
-	bundle := typesv2.ContextBundle{ID: uuid.NewString(), RunID: runID, CreatedAt: s.now().UTC()}
+	bundle := typesv2.ContextBundle{ID: uuid.NewString(), RunID: runID, Sources: []typesv2.ContextBundleSource{}, CreatedAt: s.now().UTC()}
 	nowMillis := bundle.CreatedAt.UnixMilli()
 	if _, err := s.db.ExecContext(ctx, `INSERT INTO workflow_v2_context_bundles(id,run_id,revision,status,sources_json,created_at,updated_at)
 		VALUES(?,?,?,'assembling','[]',?,?)`, bundle.ID, runID, "assembling:"+bundle.ID, nowMillis, nowMillis); err != nil {
@@ -84,6 +97,9 @@ func (s *Store) AssembleContext(ctx context.Context, runID string, relevantRepos
 		sort.Strings(names)
 		for _, name := range names {
 			source := workspace.Workspace.Knowledge.Sources[name]
+			if scope != "" && source.Scope != scope {
+				continue
+			}
 			if source.Type == typesv2.KnowledgeTypeRepositoryFiles && len(source.Repositories) == 0 {
 				source.Repositories = append([]string(nil), relevant...)
 			}
@@ -179,10 +195,11 @@ func (s *Store) AssembleContext(ctx context.Context, runID string, relevantRepos
 	if eventResult.Disposition != typesv2.DispositionAccepted {
 		return typesv2.ContextBundle{}, fmt.Errorf("context event was %s: %s", eventResult.Disposition, eventResult.Reason)
 	}
-	if status == "failed" && eventResult.Transition == nil && eventResult.Run.Status == RunActive {
+	if status == "failed" && eventResult.Transition == nil &&
+		(eventResult.Run.Status == RunActive || eventResult.Run.Status == RunSuspended) {
 		reason := "one or more required knowledge sources failed"
 		if _, err := s.db.ExecContext(ctx, `UPDATE workflow_v2_runs SET status='suspended',waiting_reason=?,updated_at=?
-			WHERE id=? AND state_version=? AND status='active'`, reason, s.now().UTC().UnixMilli(), runID, eventResult.Run.StateVersion); err != nil {
+			WHERE id=? AND state_version=? AND status IN ('active','suspended')`, reason, s.now().UTC().UnixMilli(), runID, eventResult.Run.StateVersion); err != nil {
 			return typesv2.ContextBundle{}, err
 		}
 	}

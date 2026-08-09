@@ -11,6 +11,7 @@ import (
 
 	"github.com/elasticclaw/elasticclaw/pkg/config"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
+	typesv2 "github.com/elasticclaw/elasticclaw/pkg/types/v2"
 	"github.com/google/uuid"
 )
 
@@ -28,6 +29,10 @@ type workflowCreateOptions struct {
 	issueCreatedAt       time.Time
 	reason               string
 	triggerActor         *triggerActor
+	// beforeProvision runs after the claw and analytics row exist but before
+	// provider work begins. Workflow v2 uses it to atomically create the run and
+	// initial attempt, closing the bridge-registration race.
+	beforeProvision func(context.Context, string, string) error
 }
 
 const hubInternalTemplateFilePrefix = "__hub__/"
@@ -58,7 +63,14 @@ func (s *Server) createClawFromWorkflowWithOptions(workspace *types.WorkspaceCon
 	}
 
 	var tmplCfg *types.TemplateConfig
-	if cfgContent, ok := templateFiles["elasticclaw-config.yaml"]; ok {
+	var workspaceV2 *typesv2.Workspace
+	if isWorkflowV2(workflow) {
+		resolved, err := typesv2.ParseAndValidateWorkspace([]byte(templateFiles["elasticclaw-config.yaml"]))
+		if err != nil {
+			return "", false, fmt.Errorf("parse workspace v2 execution config: %w", err)
+		}
+		workspaceV2 = resolved.Workspace
+	} else if cfgContent, ok := templateFiles["elasticclaw-config.yaml"]; ok {
 		var err error
 		tmplCfg, err = config.ParseTemplateConfig([]byte(cfgContent))
 		if err != nil {
@@ -94,6 +106,9 @@ func (s *Server) createClawFromWorkflowWithOptions(workspace *types.WorkspaceCon
 	}
 
 	provider := workflow.Provider
+	if workspaceV2 != nil && workspaceV2.Execution != nil {
+		provider = strings.TrimSpace(workspaceV2.Execution.Provider)
+	}
 	if provider == "" && tmplCfg != nil {
 		provider = tmplCfg.Provider
 	}
@@ -222,6 +237,14 @@ func (s *Server) createClawFromWorkflowWithOptions(workspace *types.WorkspaceCon
 			linearWorkspace = tmplCfg.Linear.Workspace
 		}
 	}
+	if workspaceV2 != nil && workspaceV2.Execution != nil {
+		if workspaceV2.Execution.Nix {
+			nixEnabled = 1
+		}
+		if workspaceV2.Execution.Docker {
+			dockerEnabled = 1
+		}
+	}
 	s.mu.RLock()
 	defaultModel, llmKey = resolveModelAndLLMKey(s.hubCfg, llmKey, defaultModel)
 	s.mu.RUnlock()
@@ -312,6 +335,18 @@ func (s *Server) createClawFromWorkflowWithOptions(workspace *types.WorkspaceCon
 		}
 		go s.promotePendingClaws()
 		return "", false, fmt.Errorf("task run analytics: %w", err)
+	}
+	if opts.beforeProvision != nil {
+		callbackCtx := opts.ctx
+		if callbackCtx == nil {
+			callbackCtx = context.Background()
+		}
+		if err := opts.beforeProvision(callbackCtx, clawID, tenantID); err != nil {
+			_, _ = s.finishClawTerminalTx(clawID, "deleted", "", "failed",
+				"workflow v2 activation failed: "+err.Error(), terminalTxOpts{})
+			go s.promotePendingClaws()
+			return "", false, fmt.Errorf("activate workflow v2 run: %w", err)
+		}
 	}
 
 	log.Printf("[workflow] created claw %s (%s) for workflow %s/%s (status=%s, reason=%s)", clawName, clawID[:8], workspace.Name, workflow.Name, initialStatus, opts.reason)
