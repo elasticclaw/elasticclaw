@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"text/tabwriter"
+	"time"
 
 	workflowv2 "github.com/elasticclaw/elasticclaw/pkg/hub/workflowv2"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
@@ -101,6 +102,7 @@ func printWorkflowInspection(inspection workflowv2.Inspection) {
 type workflowCLIView struct {
 	Name                 string                   `json:"name"`
 	WorkspaceName        string                   `json:"workspaceName"`
+	SchemaVersion        string                   `json:"schemaVersion"`
 	Source               string                   `json:"source"`
 	Integration          string                   `json:"integration"`
 	IntegrationWorkspace string                   `json:"integrationWorkspace"`
@@ -401,15 +403,27 @@ func runWorkflowTrigger(workspace, name string, inputs []string) error {
 }
 
 func runWorkflowRuns(workspace, name string, limit int) error {
-	hubURL, clawToken, err := resolveHubConn()
-	if err != nil {
-		return err
-	}
 	if limit <= 0 {
 		limit = 50
 	}
 	if limit > 200 {
 		limit = 200
+	}
+
+	view, err := fetchWorkflowView(workspace, name)
+	if err != nil {
+		return err
+	}
+	if v2.IsV2(view.SchemaVersion) {
+		return runWorkflowV2Runs(workspace, name, limit)
+	}
+	return runWorkflowV1Runs(workspace, name, limit)
+}
+
+func runWorkflowV1Runs(workspace, name string, limit int) error {
+	hubURL, clawToken, err := resolveHubConn()
+	if err != nil {
+		return err
 	}
 
 	path := fmt.Sprintf("/api/workspaces/%s/workflows/%s/cron/runs?limit=%d", url.PathEscape(workspace), url.PathEscape(name), limit)
@@ -473,6 +487,96 @@ func runWorkflowRuns(workspace, name string, limit int) error {
 	return nil
 }
 
+type workflowV2RunHistoryRow struct {
+	RunID             string     `json:"run_id"`
+	AttemptID         string     `json:"attempt_id"`
+	AttemptNumber     int        `json:"attempt_number"`
+	RunStatus         string     `json:"run_status"`
+	AttemptStatus     string     `json:"attempt_status"`
+	DisplayPhase      string     `json:"display_phase"`
+	TriggerType       string     `json:"trigger_type"`
+	ClawID            string     `json:"claw_id,omitempty"`
+	StartedAt         time.Time  `json:"started_at"`
+	UpdatedAt         time.Time  `json:"updated_at"`
+	FinishedAt        *time.Time `json:"finished_at,omitempty"`
+	AttemptFinishedAt *time.Time `json:"attempt_finished_at,omitempty"`
+}
+
+func runWorkflowV2Runs(workspace, name string, limit int) error {
+	hubURL, clawToken, err := resolveHubConn()
+	if err != nil {
+		return err
+	}
+
+	path := fmt.Sprintf("/api/v2/workspaces/%s/workflows/%s/runs?limit=%d", url.PathEscape(workspace), url.PathEscape(name), limit)
+	req, _ := http.NewRequest(http.MethodGet, hubURL+path, nil)
+	req.Header.Set("Authorization", "Bearer "+clawToken)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("fetch workflow runs failed: %w", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("hub returned %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+
+	var result struct {
+		Runs  []workflowV2RunHistoryRow `json:"runs"`
+		Count int                       `json:"count"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return fmt.Errorf("decode response: %w", err)
+	}
+
+	if jsonOut {
+		return json.NewEncoder(os.Stdout).Encode(result.Runs)
+	}
+	if len(result.Runs) == 0 {
+		fmt.Printf("No runs found for workflow %q in workspace %q.\n", name, workspace)
+		return nil
+	}
+
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(w, "RUN ID\tATTEMPT\tSTATUS\tTRIGGER\tSTARTED\tFINISHED\tRESULT\tAGENT")
+	for _, run := range result.Runs {
+		started := "—"
+		if !run.StartedAt.IsZero() {
+			started = run.StartedAt.Format("2006-01-02 15:04:05")
+		}
+		finished := "—"
+		if run.FinishedAt != nil && !run.FinishedAt.IsZero() {
+			finished = run.FinishedAt.Format("2006-01-02 15:04:05")
+		}
+		clawID := "—"
+		if run.ClawID != "" {
+			clawID = shortID(run.ClawID)
+		}
+		display := string(run.DisplayPhase)
+		if display == "" {
+			display = "—"
+		}
+		status := run.RunStatus
+		if run.AttemptStatus != "" && run.AttemptStatus != run.RunStatus {
+			status = fmt.Sprintf("%s (%s)", run.RunStatus, run.AttemptStatus)
+		}
+		fmt.Fprintf(w, "%s\t%d\t%s\t%s\t%s\t%s\t%s\t%s\n",
+			run.RunID,
+			run.AttemptNumber,
+			status,
+			run.TriggerType,
+			started,
+			finished,
+			display,
+			clawID,
+		)
+	}
+	w.Flush()
+	fmt.Printf("\nShowing %d run(s).\n", result.Count)
+	return nil
+}
+
 // sanitizeWorkflowResultForTable makes a workflow result safe for tabwriter output.
 // It strips control characters (tabs, newlines, carriage returns), collapses whitespace,
 // and truncates by rune length so multibyte characters are not sliced in half.
@@ -494,21 +598,36 @@ func sanitizeWorkflowResultForTable(result string, maxRunes int) string {
 }
 
 func workflowLogsCmd() *cobra.Command {
-	var workspace string
+	var workspace, attempt string
 	cmd := &cobra.Command{
 		Use:   "logs <workflow> <run-id>",
 		Short: "Show detailed agent logs for a workflow run",
-		Long:  "Show detailed agent activity logs for a workflow run by run ID.",
+		Long:  "Show detailed agent activity logs for a workflow run by run ID. For v2 workflows, use --attempt to read logs for a specific attempt.",
 		Args:  cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runWorkflowLogs(workspace, args[0], args[1])
+			return runWorkflowLogs(workspace, args[0], args[1], attempt)
 		},
 	}
 	cmd.Flags().StringVar(&workspace, "workspace", "default", "workspace name")
+	cmd.Flags().StringVar(&attempt, "attempt", "", "attempt id (v2 workflows only)")
 	return cmd
 }
 
-func runWorkflowLogs(workspace, name, runID string) error {
+func runWorkflowLogs(workspace, name, runID, attemptID string) error {
+	view, err := fetchWorkflowView(workspace, name)
+	if err != nil {
+		return err
+	}
+	if v2.IsV2(view.SchemaVersion) {
+		return runWorkflowV2Logs(workspace, name, runID, attemptID)
+	}
+	if attemptID != "" {
+		return fmt.Errorf("--attempt is only supported for v2 workflows")
+	}
+	return runWorkflowV1Logs(workspace, name, runID)
+}
+
+func runWorkflowV1Logs(workspace, name, runID string) error {
 	hubURL, clawToken, err := resolveHubConn()
 	if err != nil {
 		return err
@@ -536,8 +655,44 @@ func runWorkflowLogs(workspace, name, runID string) error {
 	if run.ClawID == "" {
 		return fmt.Errorf("workflow run %s is not linked to an agent", runID)
 	}
+	return fetchAndPrintActivityLogs(hubURL, clawToken, runID, run.ClawID, run.Status)
+}
 
-	msgPath := fmt.Sprintf("/api/messages/%s/activity?limit=500", url.PathEscape(run.ClawID))
+func runWorkflowV2Logs(workspace, name, runID, attemptID string) error {
+	hubURL, clawToken, err := resolveHubConn()
+	if err != nil {
+		return err
+	}
+
+	var logPath string
+	if attemptID != "" {
+		logPath = fmt.Sprintf("/api/v2/workflow-runs/%s/attempts/%s/logs", url.PathEscape(runID), url.PathEscape(attemptID))
+	} else {
+		logPath = fmt.Sprintf("/api/v2/workflow-runs/%s/logs", url.PathEscape(runID))
+	}
+	logReq, _ := http.NewRequest(http.MethodGet, hubURL+logPath, nil)
+	logReq.Header.Set("Authorization", "Bearer "+clawToken)
+	logResp, err := http.DefaultClient.Do(logReq)
+	if err != nil {
+		return fmt.Errorf("fetch agent logs failed: %w", err)
+	}
+	defer logResp.Body.Close()
+	logBody, _ := io.ReadAll(logResp.Body)
+	if logResp.StatusCode == http.StatusNotFound {
+		return fmt.Errorf("workflow run %s not found", runID)
+	}
+	if logResp.StatusCode != http.StatusOK {
+		return fmt.Errorf("hub returned %d: %s", logResp.StatusCode, strings.TrimSpace(string(logBody)))
+	}
+	var messages []types.HubMessage
+	if err := json.Unmarshal(logBody, &messages); err != nil {
+		return fmt.Errorf("decode logs: %w", err)
+	}
+	return printActivityLogs(runID, attemptID, "", "", messages)
+}
+
+func fetchAndPrintActivityLogs(hubURL, clawToken, runID, clawID, status string) error {
+	msgPath := fmt.Sprintf("/api/messages/%s/activity?limit=500", url.PathEscape(clawID))
 	msgReq, _ := http.NewRequest(http.MethodGet, hubURL+msgPath, nil)
 	msgReq.Header.Set("Authorization", "Bearer "+clawToken)
 	msgResp, err := http.DefaultClient.Do(msgReq)
@@ -553,17 +708,36 @@ func runWorkflowLogs(workspace, name, runID string) error {
 	if err := json.Unmarshal(msgBody, &messages); err != nil {
 		return fmt.Errorf("decode logs: %w", err)
 	}
+	return printActivityLogs(runID, "", clawID, status, messages)
+}
 
+func printActivityLogs(runID, attemptID, clawID, status string, messages []types.HubMessage) error {
 	if jsonOut {
 		return json.NewEncoder(os.Stdout).Encode(messages)
 	}
-
 	if len(messages) == 0 {
-		fmt.Printf("No agent logs found for run %s (agent %s).\n", runID, shortID(run.ClawID))
+		if attemptID != "" {
+			fmt.Printf("No agent logs found for run %s attempt %s.\n", runID, shortID(attemptID))
+		} else {
+			fmt.Printf("No agent logs found for run %s.\n", runID)
+		}
 		return nil
 	}
-
-	fmt.Printf("Agent logs for run %s (agent %s, status %s):\n\n", runID, shortID(run.ClawID), run.Status)
+	if attemptID != "" {
+		fmt.Printf("Agent logs for run %s attempt %s", runID, shortID(attemptID))
+	} else {
+		fmt.Printf("Agent logs for run %s", runID)
+	}
+	if clawID != "" {
+		fmt.Printf(" (agent %s", shortID(clawID))
+		if status != "" {
+			fmt.Printf(", status %s", status)
+		}
+		fmt.Print(")")
+	} else if status != "" {
+		fmt.Printf(" (status %s)", status)
+	}
+	fmt.Print(":\n\n")
 	printCollapsedActivityMessages(messages)
 	return nil
 }

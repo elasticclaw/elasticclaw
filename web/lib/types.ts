@@ -392,3 +392,40 @@ export interface WorkflowRunsResponse {
   runs: WorkflowRun[]
   count: number
 }
+
+export interface WorkflowV2RunAttempt {
+  id: string
+  run_id: string
+  claw_id: string
+  number: number
+  status: string
+  started_at: string
+  heartbeat_at?: string
+  finished_at?: string
+}
+
+export interface WorkflowV2Run {
+  run_id: string
+  attempt_id: string
+  attempt_number: number
+  tenant_id?: string
+  workspace_name: string
+  workflow_name: string
+  state: string
+  display_phase: string
+  run_status: string
+  attempt_status: string
+  waiting_reason?: string
+  trigger_type: string
+  claw_id?: string
+  created_at: string
+  started_at: string
+  updated_at: string
+  finished_at?: string
+  attempt_finished_at?: string
+}
+
+export interface WorkflowV2RunsResponse {
+  runs: WorkflowV2Run[]
+  count: number
+}
