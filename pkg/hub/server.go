@@ -3067,7 +3067,6 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 						go s.recordClawAgentStarted(clawID)
 						shouldWake = true
 						wakeConn = cc
-						go s.requestBootstrapCheckpoint(clawID)
 					}
 				}
 				s.heartbeatWorkflowVolumeLeases(clawID)
@@ -3089,7 +3088,10 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 					}
 				}
 				if shouldWake {
-					s.startWorkflowAfterVolumes(ctx, wakeConn, clawID)
+					if !s.workflowV2OwnsExecution(wakeConn) {
+						go s.requestBootstrapCheckpoint(clawID)
+						s.startWorkflowAfterVolumes(ctx, wakeConn, clawID)
+					}
 				}
 				// Check for streaming turn timeout (12 minutes)
 				s.mu.RLock()
@@ -5179,13 +5181,15 @@ func (s *Server) promoteBootstrapReadyClaw(clawID string) bool {
 	})
 	go s.recordClawAgentStarted(clawID)
 	log.Printf("[bridge] ✓ ready after bootstrap: %s", clawID[:8])
-	go s.requestBootstrapCheckpoint(clawID)
-	s.startWorkflowAfterVolumes(context.Background(), cc, clawID)
+	if !s.workflowV2OwnsExecution(cc) {
+		go s.requestBootstrapCheckpoint(clawID)
+		s.startWorkflowAfterVolumes(context.Background(), cc, clawID)
+	}
 	return true
 }
 
 func (s *Server) startWorkflowAfterVolumes(ctx context.Context, cc *clawConn, clawID string) {
-	if cc == nil {
+	if cc == nil || s.workflowV2OwnsExecution(cc) {
 		return
 	}
 	cc.mu.Lock()
@@ -5212,6 +5216,11 @@ func (s *Server) startWorkflowAfterVolumes(ctx context.Context, cc *clawConn, cl
 		cc.workflowStartDone = true
 		cc.mu.Unlock()
 
+		// Ownership can change while volume attachment is in flight. Crossing
+		// this boundary would start an untyped legacy turn for a V2 claw.
+		if s.workflowV2OwnsExecution(cc) {
+			return
+		}
 		if s.initializePipelineEntryIfNeeded(clawID) {
 			// The entry inject just briefed this session with full task
 			// context (a retried claw can land here when it died before its
@@ -6622,6 +6631,9 @@ func planGateAcceptedMarker(stageID string) string {
 // For factory claws, it sends a task-specific prompt.
 // A marker is stored in DB so reconnects after hub restart don't re-introduce.
 func (s *Server) sendWakeMessage(cc *clawConn, clawID string) {
+	if s.workflowV2OwnsExecution(cc) {
+		return
+	}
 	cc.mu.Lock()
 	if cc.isBusyLocked() || cc.noProgressPaused {
 		cc.mu.Unlock()
@@ -6632,6 +6644,12 @@ func (s *Server) sendWakeMessage(cc *clawConn, clawID string) {
 	cc.streamingTimeoutSent = false
 	cc.contextWarningSent = false
 	cc.mu.Unlock()
+	if s.workflowV2OwnsExecution(cc) {
+		cc.mu.Lock()
+		cc.abortTurnLocked()
+		cc.mu.Unlock()
+		return
+	}
 
 	wakeContent := defaultWakeContent
 	if s.clawNeedsInitialPlan(clawID) {
@@ -6664,7 +6682,7 @@ func (s *Server) sendWakeMessage(cc *clawConn, clawID string) {
 }
 
 func (s *Server) sendInitialPlanInstruction(cc *clawConn, clawID string) {
-	if cc == nil || !s.clawNeedsInitialPlan(clawID) || s.hasSystemMarker(clawID, initialPlanAcceptedMarker) {
+	if cc == nil || s.workflowV2OwnsExecution(cc) || !s.clawNeedsInitialPlan(clawID) || s.hasSystemMarker(clawID, initialPlanAcceptedMarker) {
 		return
 	}
 	cc.mu.Lock()
@@ -6677,6 +6695,12 @@ func (s *Server) sendInitialPlanInstruction(cc *clawConn, clawID string) {
 	cc.streamingTimeoutSent = false
 	cc.contextWarningSent = false
 	cc.mu.Unlock()
+	if s.workflowV2OwnsExecution(cc) {
+		cc.mu.Lock()
+		cc.abortTurnLocked()
+		cc.mu.Unlock()
+		return
+	}
 	if !s.insertSystemMarker(clawID, cc.tenantID, initialPlanRequiredMarker) {
 		cc.mu.Lock()
 		cc.abortTurnLocked()

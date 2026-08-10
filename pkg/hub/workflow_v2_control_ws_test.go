@@ -229,6 +229,41 @@ func TestNewBridgeStillUsesConversationPathForV1(t *testing.T) {
 	}
 }
 
+func TestBootstrapPromotionDoesNotStartLegacyWorkflowForV2(t *testing.T) {
+	const clawID = "claw-v2-bootstrap-ready"
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token", ClawToken: "claw-token"}, "", "", "")
+	if _, err := db.Exec(`INSERT INTO claws(id,tenant_id,name,template,provider,status,bootstrap_ok,created_at)
+		VALUES(?,?,?,?,?,'starting',1,datetime('now'))`, clawID, "test-tenant-id", clawID, "elasticclaw", "daytona"); err != nil {
+		t.Fatal(err)
+	}
+	store := workflowv2.NewStore(db)
+	if _, err := store.CreateRun(context.Background(), workflowv2.CreateRunRequest{
+		ID: "run-v2-bootstrap-ready", TenantID: "test-tenant-id", InitialClawID: clawID,
+		WorkspaceYAML: []byte(workflowV2APIWorkspace), WorkflowYAML: []byte(workflowV2APIWorkflow),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cc := &clawConn{id: clawID, tenantID: "test-tenant-id", gatewayReady: true}
+	s.claws[clawID] = cc
+	if !s.promoteBootstrapReadyClaw(clawID) {
+		t.Fatal("bootstrap-ready V2 claw was not promoted")
+	}
+	cc.mu.RLock()
+	controlled := cc.workflowV2Controlled
+	startPending, startDone := cc.workflowStartPending, cc.workflowStartDone
+	cc.mu.RUnlock()
+	if !controlled || startPending || startDone {
+		t.Fatalf("V2 bootstrap promotion control/pending/done = %v/%v/%v", controlled, startPending, startDone)
+	}
+	var legacyMessages int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=?`, clawID).Scan(&legacyMessages); err != nil {
+		t.Fatal(err)
+	}
+	if legacyMessages != 0 {
+		t.Fatalf("legacy bootstrap messages = %d, want 0", legacyMessages)
+	}
+}
+
 func TestV1AndV2ConversationMessagesRunConcurrentlyWithoutCrossingControlPlanes(t *testing.T) {
 	const (
 		v1ClawID = "claw-concurrent-v1"
