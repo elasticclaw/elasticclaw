@@ -312,82 +312,122 @@ func (s *Server) restoreClawFromCheckpoint(ctx context.Context, tenantID, clawID
 	return nil
 }
 
-func (s *Server) provisionStoredClaw(clawID string) {
+type storedClawProvision struct {
+	tenantID, name, template, provider, defaultModel, linearWorkspace, llmKey string
+	nixEnabled, dockerEnabled                                                 int
+	templateFiles                                                             map[string]string
+	tmplCfg                                                                   *types.TemplateConfig
+	env, resolvedSecrets                                                      map[string]string
+}
+
+// loadStoredClawProvision rebuilds the persisted claw configuration required to
+// reprovision a claw, including the workspace/workflow-derived environment.
+func (s *Server) loadStoredClawProvision(clawID string) (*storedClawProvision, error) {
 	var (
-		tenantID, name, template, provider, defaultModel, templateFilesJSON, githubReposJSON, linearWorkspace, llmKey string
-		nixEnabled, dockerEnabled                                                                                     int
+		tenantID, name, template, provider, defaultModel, templateFilesJSON, githubReposJSON, linearWorkspace, llmKey, tagsJSON string
+		nixEnabled, dockerEnabled                                                                                               int
 	)
 	err := s.db.QueryRow(
-		`SELECT tenant_id, name, template, provider, default_model, template_files, github_repos, linear_workspace, nix, docker, llm_key FROM claws WHERE id=?`,
+		`SELECT tenant_id, name, template, provider, default_model, template_files, github_repos, linear_workspace, nix, docker, llm_key, COALESCE(tags,'[]') FROM claws WHERE id=?`,
 		clawID,
-	).Scan(&tenantID, &name, &template, &provider, &defaultModel, &templateFilesJSON, &githubReposJSON, &linearWorkspace, &nixEnabled, &dockerEnabled, &llmKey)
+	).Scan(&tenantID, &name, &template, &provider, &defaultModel, &templateFilesJSON, &githubReposJSON, &linearWorkspace, &nixEnabled, &dockerEnabled, &llmKey, &tagsJSON)
+	if err != nil {
+		return nil, err
+	}
+	var templateFiles map[string]string
+	if err := json.Unmarshal([]byte(templateFilesJSON), &templateFiles); err != nil {
+		// Reprovisioning with no template files at all would produce a silently
+		// crippled claw; fail the restore so the operator sees it instead.
+		return nil, fmt.Errorf("unmarshal template_files: %w", err)
+	}
+	// A nil map is not an error: a claw stored without template files marshals
+	// to "null", which unmarshals successfully into nil.
+	if templateFiles == nil {
+		templateFiles = map[string]string{}
+	}
+	var tmplCfg *types.TemplateConfig
+	if cfgContent, ok := templateFiles["elasticclaw-config.yaml"]; ok {
+		parsed, parseErr := config.ParseTemplateConfig([]byte(cfgContent))
+		if parseErr != nil {
+			log.Printf("[restore] claw %s: failed to parse elasticclaw-config.yaml; reprovisioning without template config: %v", shortID(clawID), parseErr)
+		} else {
+			tmplCfg = parsed
+		}
+	}
+	var tags []string
+	_ = json.Unmarshal([]byte(tagsJSON), &tags)
+	_, workflowName := workflowTags(tags)
+	workspaceName := template
+	var workflow *types.WorkflowConfig
+	if workflowName != "" {
+		if _, loadedWorkflow, found := loadWorkflowPipelineContext(workspaceName, workflowName); found {
+			workflow = loadedWorkflow
+		} else {
+			log.Printf("[restore] claw %s: workflow %q in workspace %q not found; reprovisioning without workflow secrets", shortID(clawID), workflowName, workspaceName)
+		}
+	}
+	env, resolvedSecrets, resolveErr := s.resolveClawEnv(workspaceName, workflow, tmplCfg, clawID)
+	if resolveErr != nil {
+		return nil, resolveErr
+	}
+	return &storedClawProvision{
+		tenantID: tenantID, name: name, template: template, provider: provider,
+		defaultModel: defaultModel, linearWorkspace: linearWorkspace, llmKey: llmKey,
+		nixEnabled: nixEnabled, dockerEnabled: dockerEnabled, templateFiles: templateFiles,
+		tmplCfg: tmplCfg, env: env, resolvedSecrets: resolvedSecrets,
+	}, nil
+}
+
+func (s *Server) provisionStoredClaw(clawID string) {
+	stored, err := s.loadStoredClawProvision(clawID)
 	if err != nil {
 		log.Printf("[restore] failed to load claw %s: %v", shortID(clawID), err)
 		s.stopAgentWithReason(clawID, fmt.Sprintf("Restore failed: %v", err), false)
 		return
 	}
-	var templateFiles map[string]string
-	_ = json.Unmarshal([]byte(templateFilesJSON), &templateFiles)
 	s.mu.RLock()
-	clawToken := s.hubCfg.ClawToken
-	provCfg, ok := s.hubCfg.Providers[provider]
-	hubSecrets := s.hubCfg.Secrets
+	provCfg, ok := s.hubCfg.Providers[stored.provider]
 	s.mu.RUnlock()
 	if !ok {
-		s.stopAgentWithReason(clawID, fmt.Sprintf("Restore failed: provider %q is not configured", provider), false)
+		s.stopAgentWithReason(clawID, fmt.Sprintf("Restore failed: provider %q is not configured", stored.provider), false)
 		return
 	}
-	env := map[string]string{
-		"ELASTICCLAW_HUB_URL":    s.clawHubURL(),
-		"ELASTICCLAW_CLAW_ID":    clawID,
-		"ELASTICCLAW_CLAW_TOKEN": clawToken,
-	}
-	var tmplCfg *types.TemplateConfig
-	if cfgContent, ok := templateFiles["elasticclaw-config.yaml"]; ok {
-		if parsed, parseErr := config.ParseTemplateConfig([]byte(cfgContent)); parseErr == nil {
-			tmplCfg = parsed
-			for envName, secretRef := range parsed.SecretRefs {
-				if val, ok := hubSecrets[secretRef]; ok {
-					env[envName] = val
-				}
-			}
-		}
-	}
-	templateFiles = injectFigmaAPIDocs(templateFiles, env)
-	fileBytes := make(map[string][]byte, len(templateFiles))
-	for k, v := range templateFiles {
+	stored.templateFiles["SECRETS.md"] = buildSecretsFile(stored.resolvedSecrets)
+	stored.templateFiles = injectFigmaAPIDocs(stored.templateFiles, stored.env)
+	fileBytes := make(map[string][]byte, len(stored.templateFiles))
+	for k, v := range stored.templateFiles {
 		fileBytes[k] = []byte(v)
 	}
 	req := types.CreateClawRequest{
-		Name:         name,
-		TemplateName: template,
-		Provider:     provider,
-		DefaultModel: defaultModel,
-		Files:        templateFiles,
-		Env:          env,
-		Nix:          nixEnabled != 0,
-		Docker:       dockerEnabled != 0,
-		LLMKey:       llmKey,
+		Name:         stored.name,
+		TemplateName: stored.template,
+		Provider:     stored.provider,
+		DefaultModel: stored.defaultModel,
+		Files:        stored.templateFiles,
+		Env:          stored.env,
+		Nix:          stored.nixEnabled != 0,
+		Docker:       stored.dockerEnabled != 0,
+		LLMKey:       stored.llmKey,
 		ProviderName: "ec-" + clawID[:8] + "-r" + uuid.New().String()[:4],
 	}
-	if tmplCfg != nil {
-		req.InstanceType = tmplCfg.InstanceType
-		req.Snapshot = tmplCfg.Snapshot
-		req.TTL = tmplCfg.TTL
+	if stored.tmplCfg != nil {
+		req.InstanceType = stored.tmplCfg.InstanceType
+		req.Snapshot = stored.tmplCfg.Snapshot
+		req.TTL = stored.tmplCfg.TTL
 	}
 	ctx := context.Background()
 	var provErr error
-	switch provider {
+	switch stored.provider {
 	case "daytona":
-		provErr = s.provisionDaytona(ctx, clawID, req, provCfg, fileBytes, env)
+		provErr = s.provisionDaytona(ctx, clawID, req, provCfg, fileBytes, stored.env)
 	case "replicated":
-		provErr = s.provisionReplicated(ctx, clawID, req, provCfg, env)
+		provErr = s.provisionReplicated(ctx, clawID, req, provCfg, stored.env)
 	case "exedev":
-		provErr = s.provisionExedev(ctx, clawID, req, provCfg, fileBytes, env)
+		provErr = s.provisionExedev(ctx, clawID, req, provCfg, fileBytes, stored.env)
 	case "lambda-microvms":
 		provErr = s.provisionLambdaMicroVMs(ctx, clawID, req, provCfg, fileBytes)
 	default:
-		provErr = fmt.Errorf("unsupported provider: %s", provider)
+		provErr = fmt.Errorf("unsupported provider: %s", stored.provider)
 	}
 	if provErr != nil {
 		log.Printf("[restore] provision failed for claw %s: %v", clawID, provErr)
@@ -398,7 +438,7 @@ func (s *Server) provisionStoredClaw(clawID string) {
 	_ = s.db.QueryRow(`SELECT COALESCE(restore_checkpoint_id,'') FROM claws WHERE id=?`, clawID).Scan(&restoreCheckpointID)
 	createdAt := now()
 	_, _ = s.db.Exec(`INSERT INTO messages(id,claw_id,tenant_id,role,content,created_at,format,delivered_at) VALUES(?,?,?,?,?,?,?,?)`,
-		uuid.New().String(), clawID, tenantID, "system", fmt.Sprintf("[hub] Restoring from checkpoint %s.", restoreCheckpointID), createdAt, "pre", createdAt)
+		uuid.New().String(), clawID, stored.tenantID, "system", fmt.Sprintf("[hub] Restoring from checkpoint %s.", restoreCheckpointID), createdAt, "pre", createdAt)
 }
 
 func (s *Server) requestCheckpoint(ctx context.Context, clawID, reason, createdBy string, wait bool, timeout time.Duration) (string, error) {
