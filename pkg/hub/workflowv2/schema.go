@@ -5,6 +5,7 @@ package workflowv2
 import (
 	"database/sql"
 	"fmt"
+	"strings"
 )
 
 // Migrate adds v2 runtime storage without changing or reinterpreting any v1
@@ -31,6 +32,7 @@ func Migrate(db *sql.DB) error {
 		current_attempt_id TEXT NOT NULL DEFAULT '',
 		current_task_id    TEXT NOT NULL DEFAULT '',
 		context_bundle_id  TEXT NOT NULL DEFAULT '',
+		trigger_type       TEXT NOT NULL DEFAULT 'manual',
 		created_at         INTEGER NOT NULL,
 		updated_at         INTEGER NOT NULL,
 		finished_at        INTEGER NOT NULL DEFAULT 0
@@ -265,6 +267,26 @@ func Migrate(db *sql.DB) error {
 	`)
 	if err != nil {
 		return fmt.Errorf("workflow v2 migrate: %w", err)
+	}
+	if err := addColumnIfMissing(db, "workflow_v2_runs", "trigger_type", "TEXT NOT NULL DEFAULT 'manual'"); err != nil {
+		return fmt.Errorf("workflow v2 migrate: %w", err)
+	}
+	return nil
+}
+
+func addColumnIfMissing(db *sql.DB, table, column, columnDef string) error {
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info(?) WHERE name = ?`, table, column).Scan(&count); err != nil {
+		return fmt.Errorf("inspect column %s.%s: %w", table, column, err)
+	}
+	if count > 0 {
+		return nil
+	}
+	if _, err := db.Exec(fmt.Sprintf(`ALTER TABLE %q ADD COLUMN %q %s`, table, column, columnDef)); err != nil {
+		msg := strings.ToLower(err.Error())
+		if !strings.Contains(msg, "duplicate column name") && !strings.Contains(msg, "no such table") {
+			return fmt.Errorf("add column %s.%s: %w", table, column, err)
+		}
 	}
 	return nil
 }

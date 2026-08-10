@@ -67,6 +67,7 @@ func (s *Server) triggerWorkflowV2Config(w http.ResponseWriter, r *http.Request,
 			run, err := store.CreateRun(ctx, workflowv2.CreateRunRequest{
 				ID: runID, TenantID: tenantID, InitialClawID: clawID,
 				WorkspaceYAML: workspaceYAML, WorkflowYAML: workflowYAML, ActivationPending: true,
+				TriggerType: "manual",
 			})
 			if err != nil {
 				return err

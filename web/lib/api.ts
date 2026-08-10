@@ -20,6 +20,8 @@ import type {
   TaskRunsResponse,
   TaskRunSummary,
   WorkflowRunsResponse,
+  WorkflowV2RunAttempt,
+  WorkflowV2RunsResponse,
 } from "./types"
 import { getHubUrl, setHubUrl } from "./hub-url"
 import { getAuthToken, requestAuthToken, clearAuthTokens } from "./auth-storage"
@@ -313,6 +315,7 @@ export interface WorkspaceAccess {
 export interface Workflow {
   name: string
   workspaceName: string
+  schemaVersion?: string
   source: string
   integration: string
   integrationWorkspace?: string
@@ -377,6 +380,31 @@ export async function fetchCronWorkflowRuns(workspaceName: string, workflowName:
   return apiFetch<WorkflowRunsResponse>(
     `/api/workspaces/${encodeURIComponent(workspaceName)}/workflows/${encodeURIComponent(workflowName)}/cron/runs?limit=${limit}`
   )
+}
+
+export async function fetchV2WorkflowRuns(workspaceName: string, workflowName: string, limit = 50): Promise<WorkflowV2RunsResponse> {
+  return apiFetch<WorkflowV2RunsResponse>(
+    `/api/v2/workspaces/${encodeURIComponent(workspaceName)}/workflows/${encodeURIComponent(workflowName)}/runs?limit=${limit}`
+  )
+}
+
+export async function fetchV2WorkflowRunAttempts(runId: string): Promise<{ attempts: WorkflowV2RunAttempt[]; count: number }> {
+  return apiFetch<{ attempts: WorkflowV2RunAttempt[]; count: number }>(`/api/v2/workflow-runs/${encodeURIComponent(runId)}/attempts`)
+}
+
+export async function fetchV2WorkflowRunLogs(runId: string): Promise<ApiMessage[]> {
+  return apiFetch<ApiMessage[]>(`/api/v2/workflow-runs/${encodeURIComponent(runId)}/logs?limit=500`)
+}
+
+export async function fetchV2WorkflowAttemptLogs(runId: string, attemptId: string): Promise<ApiMessage[]> {
+  return apiFetch<ApiMessage[]>(
+    `/api/v2/workflow-runs/${encodeURIComponent(runId)}/attempts/${encodeURIComponent(attemptId)}/logs?limit=500`
+  )
+}
+
+export function isV2Workflow(workflow: Workflow): boolean {
+  const v = (workflow.schemaVersion || "").trim().toLowerCase()
+  return v === "2" || v === "v2"
 }
 
 function taskRunAnalyticsQuery(filters?: TaskRunAnalyticsFilters): string {

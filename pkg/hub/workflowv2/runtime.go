@@ -55,6 +55,7 @@ type Run struct {
 	CurrentAttemptID  string               `json:"current_attempt_id,omitempty"`
 	CurrentTaskID     string               `json:"current_task_id,omitempty"`
 	ContextBundleID   string               `json:"context_bundle_id,omitempty"`
+	TriggerType       string               `json:"trigger_type"`
 	CreatedAt         time.Time            `json:"created_at"`
 	UpdatedAt         time.Time            `json:"updated_at"`
 	FinishedAt        *time.Time           `json:"finished_at,omitempty"`
@@ -65,6 +66,7 @@ type CreateRunRequest struct {
 	TenantID      string
 	WorkspaceYAML []byte
 	WorkflowYAML  []byte
+	TriggerType   string
 	// InitialClawID atomically binds the first execution attempt while the run
 	// is created. Production activation uses this so a newly provisioned bridge
 	// cannot connect before its control-plane binding exists.
@@ -151,6 +153,10 @@ func (s *Store) CreateRun(ctx context.Context, req CreateRunRequest) (Run, error
 	status := RunActive
 	waitingReason := ""
 	finishedAt := int64(0)
+	triggerType := strings.TrimSpace(req.TriggerType)
+	if triggerType == "" {
+		triggerType = "manual"
+	}
 	if initial.Terminal {
 		status = terminalRunStatus(rwf.Workflow.InitialState)
 		finishedAt = now.UnixMilli()
@@ -173,10 +179,11 @@ func (s *Store) CreateRun(ctx context.Context, req CreateRunRequest) (Run, error
 	}
 	_, err = tx.ExecContext(ctx, `INSERT INTO workflow_v2_runs(
 		id,tenant_id,workspace_name,workflow_name,workspace_revision,workflow_revision,
-		workspace_yaml,workflow_yaml,state,display_phase,state_version,status,waiting_reason,current_attempt_id,created_at,updated_at,finished_at
-	) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		workspace_yaml,workflow_yaml,state,display_phase,state_version,status,waiting_reason,current_attempt_id,trigger_type,created_at,updated_at,finished_at
+	) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		runID, req.TenantID, rws.Workspace.Name, rwf.Workflow.Name, string(rws.Revision), string(rwf.Revision),
 		string(req.WorkspaceYAML), string(req.WorkflowYAML), rwf.Workflow.InitialState, string(initial.Phase), 1, string(status), waitingReason, currentAttemptID,
+		triggerType,
 		now.UnixMilli(), now.UnixMilli(), finishedAt)
 	if err != nil {
 		return Run{}, fmt.Errorf("create workflow v2 run: %w", err)
@@ -313,7 +320,7 @@ func (s *Store) GetRun(ctx context.Context, runID string) (Run, error) {
 	}
 	return scanRun(s.db.QueryRowContext(ctx, `SELECT id,tenant_id,workspace_name,workflow_name,
 		workspace_revision,workflow_revision,state,display_phase,state_version,status,waiting_reason,
-		current_attempt_id,current_task_id,context_bundle_id,created_at,updated_at,finished_at
+		current_attempt_id,current_task_id,context_bundle_id,trigger_type,created_at,updated_at,finished_at
 		FROM workflow_v2_runs WHERE id=?`, runID))
 }
 
@@ -1072,7 +1079,7 @@ func getRunForUpdate(ctx context.Context, tx *sql.Tx, runID string) (Run, string
 	var workflowYAML string
 	row := tx.QueryRowContext(ctx, `SELECT id,tenant_id,workspace_name,workflow_name,
 		workspace_revision,workflow_revision,state,display_phase,state_version,status,waiting_reason,
-		current_attempt_id,current_task_id,context_bundle_id,created_at,updated_at,finished_at,workflow_yaml
+		current_attempt_id,current_task_id,context_bundle_id,trigger_type,created_at,updated_at,finished_at,workflow_yaml
 		FROM workflow_v2_runs WHERE id=?`, runID)
 	run, err := scanRunWithWorkflow(row, &workflowYAML)
 	return run, workflowYAML, err
@@ -1086,7 +1093,7 @@ func scanRun(row scanner) (Run, error) {
 	var created, updated, finished int64
 	err := row.Scan(&run.ID, &run.TenantID, &run.WorkspaceName, &run.WorkflowName,
 		&run.WorkspaceRevision, &run.WorkflowRevision, &run.State, &phase, &run.StateVersion, &status, &run.WaitingReason,
-		&run.CurrentAttemptID, &run.CurrentTaskID, &run.ContextBundleID, &created, &updated, &finished)
+		&run.CurrentAttemptID, &run.CurrentTaskID, &run.ContextBundleID, &run.TriggerType, &created, &updated, &finished)
 	if err != nil {
 		return Run{}, err
 	}
@@ -1100,7 +1107,7 @@ func scanRunWithWorkflow(row scanner, workflowYAML *string) (Run, error) {
 	var created, updated, finished int64
 	err := row.Scan(&run.ID, &run.TenantID, &run.WorkspaceName, &run.WorkflowName,
 		&run.WorkspaceRevision, &run.WorkflowRevision, &run.State, &phase, &run.StateVersion, &status, &run.WaitingReason,
-		&run.CurrentAttemptID, &run.CurrentTaskID, &run.ContextBundleID, &created, &updated, &finished, workflowYAML)
+		&run.CurrentAttemptID, &run.CurrentTaskID, &run.ContextBundleID, &run.TriggerType, &created, &updated, &finished, workflowYAML)
 	if err != nil {
 		return Run{}, err
 	}

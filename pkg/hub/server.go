@@ -755,6 +755,10 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/analytics/tickets", s.withAnalyticsViewAuth(s.handleTaskRunAnalyticsTickets))
 	mux.HandleFunc("/api/dependencies/status", s.withAuth(s.handleDependencyStatus))
 	mux.HandleFunc("/api/v2/workflow-runs/{runId}", s.withAuth(s.handleWorkflowV2Run))
+	mux.HandleFunc("/api/v2/workspaces/{workspace}/workflows/{workflow}/runs", s.withAuth(s.handleWorkflowV2Runs))
+	mux.HandleFunc("/api/v2/workflow-runs/{runId}/logs", s.withAuth(s.handleWorkflowV2RunLogs))
+	mux.HandleFunc("/api/v2/workflow-runs/{runId}/attempts", s.withAuth(s.handleWorkflowV2RunAttempts))
+	mux.HandleFunc("/api/v2/workflow-runs/{runId}/attempts/{attemptId}/logs", s.withAuth(s.handleWorkflowV2AttemptLogs))
 	mux.HandleFunc("/api/workspaces", s.withAdminForMethods(s.handleWorkspacesCRUD, http.MethodPost, http.MethodDelete)) // workspace CRUD
 	mux.HandleFunc("/api/workspaces/{name}/workflows", s.withAdminForMethods(s.handleWorkspaceWorkflowsList, http.MethodPost))
 	mux.HandleFunc("/api/workspaces/{workspace}/workflows/{workflow}", s.withAdminForMethods(s.handleWorkspaceWorkflowDetail, http.MethodPatch, http.MethodDelete))
