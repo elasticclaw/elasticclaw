@@ -1281,8 +1281,10 @@ func buildGitHubPRContext(pr githubPRPayload) string {
 	b.WriteString(`
 ## Git & GitHub Auth
 
-A git credential helper is pre-configured. You do NOT need to run gh auth login or set GH_TOKEN.
+A git credential helper is pre-configured. /usr/local/bin/gh is a wrapper that calls the credential helper to fetch a fresh GitHub App token before each invocation. You do NOT need to run gh auth login or set GH_TOKEN.
 Just use git and gh commands directly — authentication is handled automatically.
+
+Do not use gh auth status to verify authentication; it checks the persisted hosts.yml file and may report "not authenticated" even when the wrapper is working. Use a real command such as gh api rate_limit or gh repo view <owner>/<repo>.
 
 To check out this PR:
 `)

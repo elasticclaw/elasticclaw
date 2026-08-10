@@ -6558,7 +6558,9 @@ func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.Pr
 		githubSection := fmt.Sprintf(`
 ## GitHub Access
 
-This agent has authenticated access to the following repositories via a GitHub App installation token. The token is fetched automatically — you don't need to configure anything.
+This agent has already authenticated to GitHub via an ElasticClaw GitHub App. The credential helper is installed and will mint a fresh, scoped installation token for every git/gh operation. **Do not run gh auth login, gh auth setup-git, or set GITHUB_TOKEN/GH_TOKEN yourself.** Just use git and gh commands directly.
+
+How it works: /usr/local/bin/gh is a wrapper that calls /usr/local/bin/elasticclaw-git-credentials to fetch a token from the hub before delegating to the real gh binary. The credential helper hits the hub's /api/github/token endpoint and returns a short-lived GitHub App installation token. Nothing is persisted in ~/.config/gh/hosts.yml, so gh auth status may look empty even though gh is authenticated.
 
 %s
 **git** and **gh CLI** are pre-configured and will work without any additional auth setup:
@@ -6568,7 +6570,9 @@ git clone https://github.com/owner/repo
 gh pr create
 gh issue list
 `+"```\n"+`
-Tokens are short-lived and refreshed automatically on each git/gh operation.
+Do not use gh auth status to verify authentication. Instead, run a real command such as gh api rate_limit or gh repo view <owner>/<repo>.
+
+If you see an authentication prompt or error, do not try to fix it by logging in. Verify the credential helper is being invoked (e.g. "git credential fill" returns "username=x-access-token" and a password). The helper is the source of truth.
 `, repoLines)
 		if existing, ok := files["TOOLS.md"]; ok {
 			files["TOOLS.md"] = existing + "\n" + githubSection
