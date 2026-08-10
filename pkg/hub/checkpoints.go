@@ -312,7 +312,17 @@ func (s *Server) restoreClawFromCheckpoint(ctx context.Context, tenantID, clawID
 	return nil
 }
 
-func (s *Server) provisionStoredClaw(clawID string) {
+type storedClawProvision struct {
+	tenantID, name, template, provider, defaultModel, linearWorkspace, llmKey string
+	nixEnabled, dockerEnabled                                                 int
+	templateFiles                                                             map[string]string
+	tmplCfg                                                                   *types.TemplateConfig
+	env, resolvedSecrets                                                      map[string]string
+}
+
+// loadStoredClawProvision rebuilds the persisted claw configuration required to
+// reprovision a claw, including the workspace/workflow-derived environment.
+func (s *Server) loadStoredClawProvision(clawID string) (*storedClawProvision, error) {
 	var (
 		tenantID, name, template, provider, defaultModel, templateFilesJSON, githubReposJSON, linearWorkspace, llmKey, tagsJSON string
 		nixEnabled, dockerEnabled                                                                                               int
@@ -322,18 +332,14 @@ func (s *Server) provisionStoredClaw(clawID string) {
 		clawID,
 	).Scan(&tenantID, &name, &template, &provider, &defaultModel, &templateFilesJSON, &githubReposJSON, &linearWorkspace, &nixEnabled, &dockerEnabled, &llmKey, &tagsJSON)
 	if err != nil {
-		log.Printf("[restore] failed to load claw %s: %v", shortID(clawID), err)
-		s.stopAgentWithReason(clawID, fmt.Sprintf("Restore failed: %v", err), false)
-		return
+		return nil, err
 	}
 	var templateFiles map[string]string
-	_ = json.Unmarshal([]byte(templateFilesJSON), &templateFiles)
-	s.mu.RLock()
-	provCfg, ok := s.hubCfg.Providers[provider]
-	s.mu.RUnlock()
-	if !ok {
-		s.stopAgentWithReason(clawID, fmt.Sprintf("Restore failed: provider %q is not configured", provider), false)
-		return
+	if err := json.Unmarshal([]byte(templateFilesJSON), &templateFiles); err != nil {
+		log.Printf("[restore] claw %s: failed to unmarshal template_files: %v", shortID(clawID), err)
+	}
+	if templateFiles == nil {
+		templateFiles = map[string]string{}
 	}
 	var tmplCfg *types.TemplateConfig
 	if cfgContent, ok := templateFiles["elasticclaw-config.yaml"]; ok {
@@ -349,50 +355,72 @@ func (s *Server) provisionStoredClaw(clawID string) {
 	if workflowName != "" {
 		if _, loadedWorkflow, found := loadWorkflowPipelineContext(workspaceName, workflowName); found {
 			workflow = loadedWorkflow
+		} else {
+			log.Printf("[restore] claw %s: workflow %q in workspace %q not found; reprovisioning without workflow secrets", shortID(clawID), workflowName, workspaceName)
 		}
 	}
 	env, resolvedSecrets, resolveErr := s.resolveClawEnv(workspaceName, workflow, tmplCfg, clawID)
 	if resolveErr != nil {
-		log.Printf("[restore] failed to resolve environment for claw %s: %v", shortID(clawID), resolveErr)
-		s.stopAgentWithReason(clawID, fmt.Sprintf("Restore failed: %v", resolveErr), false)
+		return nil, resolveErr
+	}
+	return &storedClawProvision{
+		tenantID: tenantID, name: name, template: template, provider: provider,
+		defaultModel: defaultModel, linearWorkspace: linearWorkspace, llmKey: llmKey,
+		nixEnabled: nixEnabled, dockerEnabled: dockerEnabled, templateFiles: templateFiles,
+		tmplCfg: tmplCfg, env: env, resolvedSecrets: resolvedSecrets,
+	}, nil
+}
+
+func (s *Server) provisionStoredClaw(clawID string) {
+	stored, err := s.loadStoredClawProvision(clawID)
+	if err != nil {
+		log.Printf("[restore] failed to load claw %s: %v", shortID(clawID), err)
+		s.stopAgentWithReason(clawID, fmt.Sprintf("Restore failed: %v", err), false)
 		return
 	}
-	templateFiles["SECRETS.md"] = buildSecretsFile(resolvedSecrets)
-	templateFiles = injectFigmaAPIDocs(templateFiles, env)
-	fileBytes := make(map[string][]byte, len(templateFiles))
-	for k, v := range templateFiles {
+	s.mu.RLock()
+	provCfg, ok := s.hubCfg.Providers[stored.provider]
+	s.mu.RUnlock()
+	if !ok {
+		s.stopAgentWithReason(clawID, fmt.Sprintf("Restore failed: provider %q is not configured", stored.provider), false)
+		return
+	}
+	stored.templateFiles["SECRETS.md"] = buildSecretsFile(stored.resolvedSecrets)
+	stored.templateFiles = injectFigmaAPIDocs(stored.templateFiles, stored.env)
+	fileBytes := make(map[string][]byte, len(stored.templateFiles))
+	for k, v := range stored.templateFiles {
 		fileBytes[k] = []byte(v)
 	}
 	req := types.CreateClawRequest{
-		Name:         name,
-		TemplateName: template,
-		Provider:     provider,
-		DefaultModel: defaultModel,
-		Files:        templateFiles,
-		Env:          env,
-		Nix:          nixEnabled != 0,
-		Docker:       dockerEnabled != 0,
-		LLMKey:       llmKey,
+		Name:         stored.name,
+		TemplateName: stored.template,
+		Provider:     stored.provider,
+		DefaultModel: stored.defaultModel,
+		Files:        stored.templateFiles,
+		Env:          stored.env,
+		Nix:          stored.nixEnabled != 0,
+		Docker:       stored.dockerEnabled != 0,
+		LLMKey:       stored.llmKey,
 		ProviderName: "ec-" + clawID[:8] + "-r" + uuid.New().String()[:4],
 	}
-	if tmplCfg != nil {
-		req.InstanceType = tmplCfg.InstanceType
-		req.Snapshot = tmplCfg.Snapshot
-		req.TTL = tmplCfg.TTL
+	if stored.tmplCfg != nil {
+		req.InstanceType = stored.tmplCfg.InstanceType
+		req.Snapshot = stored.tmplCfg.Snapshot
+		req.TTL = stored.tmplCfg.TTL
 	}
 	ctx := context.Background()
 	var provErr error
-	switch provider {
+	switch stored.provider {
 	case "daytona":
-		provErr = s.provisionDaytona(ctx, clawID, req, provCfg, fileBytes, env)
+		provErr = s.provisionDaytona(ctx, clawID, req, provCfg, fileBytes, stored.env)
 	case "replicated":
-		provErr = s.provisionReplicated(ctx, clawID, req, provCfg, env)
+		provErr = s.provisionReplicated(ctx, clawID, req, provCfg, stored.env)
 	case "exedev":
-		provErr = s.provisionExedev(ctx, clawID, req, provCfg, fileBytes, env)
+		provErr = s.provisionExedev(ctx, clawID, req, provCfg, fileBytes, stored.env)
 	case "lambda-microvms":
 		provErr = s.provisionLambdaMicroVMs(ctx, clawID, req, provCfg, fileBytes)
 	default:
-		provErr = fmt.Errorf("unsupported provider: %s", provider)
+		provErr = fmt.Errorf("unsupported provider: %s", stored.provider)
 	}
 	if provErr != nil {
 		log.Printf("[restore] provision failed for claw %s: %v", clawID, provErr)
@@ -403,7 +431,7 @@ func (s *Server) provisionStoredClaw(clawID string) {
 	_ = s.db.QueryRow(`SELECT COALESCE(restore_checkpoint_id,'') FROM claws WHERE id=?`, clawID).Scan(&restoreCheckpointID)
 	createdAt := now()
 	_, _ = s.db.Exec(`INSERT INTO messages(id,claw_id,tenant_id,role,content,created_at,format,delivered_at) VALUES(?,?,?,?,?,?,?,?)`,
-		uuid.New().String(), clawID, tenantID, "system", fmt.Sprintf("[hub] Restoring from checkpoint %s.", restoreCheckpointID), createdAt, "pre", createdAt)
+		uuid.New().String(), clawID, stored.tenantID, "system", fmt.Sprintf("[hub] Restoring from checkpoint %s.", restoreCheckpointID), createdAt, "pre", createdAt)
 }
 
 func (s *Server) requestCheckpoint(ctx context.Context, clawID, reason, createdBy string, wait bool, timeout time.Duration) (string, error) {

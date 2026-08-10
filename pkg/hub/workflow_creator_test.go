@@ -3,6 +3,7 @@
 package hub
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/elasticclaw/elasticclaw/pkg/types"
@@ -13,41 +14,97 @@ func TestResolveClawEnvIncludesWorkflowAndIntegrationSecrets(t *testing.T) {
 	server, _ := NewTestServerWithConfig(t, &types.HubConfig{
 		ClawToken: "claw-token",
 		Secrets: map[string]string{
-			"shared": "hub-value",
+			"template-ref": "template-value",
 		},
 	}, "", "", "")
 
-	workspace := &types.WorkspaceConfig{Name: "env-workspace"}
+	for _, tc := range []struct {
+		name, integration, tokenEnv string
+	}{
+		{name: "linear", integration: "linear", tokenEnv: "LINEAR_API_KEY"},
+		{name: "jira", integration: "jira", tokenEnv: "JIRA_API_KEY"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			workspace := &types.WorkspaceConfig{Name: "env-workspace-" + tc.name}
+			workflow := &types.WorkflowConfig{
+				Name:        tc.name + "-workflow",
+				Integration: tc.integration,
+				SecretRefs:  map[string]string{"WORKFLOW_SECRET": "workflow-ref"},
+			}
+			SaveWorkspaceForTest(t, workspace, []*types.WorkflowConfig{workflow})
+			if err := saveWorkspaceSecret(workspace.Name, "workflow-ref", "workflow-value"); err != nil {
+				t.Fatalf("save workspace secret: %v", err)
+			}
+			SaveWorkspaceIssueTrackerForTest(t, workspace.Name, tc.integration, "default", tc.name+"-token", "")
+
+			env, resolvedSecrets, err := server.resolveClawEnv(workspace.Name, workflow, &types.TemplateConfig{
+				SecretRefs: map[string]string{"TEMPLATE_SECRET": "template-ref"},
+			}, "claw-id")
+			if err != nil {
+				t.Fatalf("resolve claw env: %v", err)
+			}
+			if got := env["WORKFLOW_SECRET"]; got != "workflow-value" {
+				t.Fatalf("workflow secret = %q, want workflow-value", got)
+			}
+			if got := env["TEMPLATE_SECRET"]; got != "template-value" {
+				t.Fatalf("template secret = %q, want template-value", got)
+			}
+			if got := env[tc.tokenEnv]; got != tc.name+"-token" {
+				t.Fatalf("%s = %q, want %s-token", tc.tokenEnv, got, tc.name)
+			}
+			for _, key := range []string{"WORKFLOW_SECRET", "TEMPLATE_SECRET", tc.tokenEnv} {
+				if _, ok := resolvedSecrets[key]; !ok {
+					t.Fatalf("%s missing from resolved secrets", key)
+				}
+			}
+		})
+	}
+}
+
+func TestLoadStoredClawProvisionIncludesWorkflowAndIntegrationSecrets(t *testing.T) {
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
+	server, db := NewTestServerWithConfig(t, &types.HubConfig{
+		ClawToken: "claw-token",
+		Secrets:   map[string]string{"template-ref": "template-value"},
+	}, "", "", "")
+
+	workspace := &types.WorkspaceConfig{Name: "restore-workspace"}
 	workflow := &types.WorkflowConfig{
-		Name:        "linear-workflow",
+		Name:        "restore-workflow",
 		Integration: "linear",
-		SecretRefs:  map[string]string{"WORKFLOW_SECRET": "shared"},
+		SecretRefs:  map[string]string{"WORKFLOW_SECRET": "workflow-ref"},
 	}
 	SaveWorkspaceForTest(t, workspace, []*types.WorkflowConfig{workflow})
-	if err := saveWorkspaceSecret(workspace.Name, "shared", "workspace-value"); err != nil {
+	if err := saveWorkspaceSecret(workspace.Name, "workflow-ref", "workflow-value"); err != nil {
 		t.Fatalf("save workspace secret: %v", err)
 	}
 	SaveWorkspaceIssueTrackerForTest(t, workspace.Name, "linear", "default", "linear-token", "")
 
-	env, resolvedSecrets, err := server.resolveClawEnv(workspace.Name, workflow, &types.TemplateConfig{
-		SecretRefs: map[string]string{"TEMPLATE_SECRET": "shared"},
-	}, "claw-id")
+	templateFiles, err := json.Marshal(map[string]string{
+		"elasticclaw-config.yaml": "secret_refs:\n  TEMPLATE_SECRET: template-ref\n",
+	})
 	if err != nil {
-		t.Fatalf("resolve claw env: %v", err)
+		t.Fatalf("marshal template files: %v", err)
 	}
-	if got := env["WORKFLOW_SECRET"]; got != "workspace-value" {
-		t.Fatalf("workflow secret = %q, want workspace-value", got)
+	if _, err := db.Exec(`INSERT INTO claws(id, tenant_id, name, template, provider, default_model, template_files, github_repos, linear_workspace, nix, docker, llm_key, tags, status, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,datetime('now'))`,
+		"restore-claw", "test-tenant-id", "restore claw", workspace.Name, "noop", "", string(templateFiles), "[]", "", 0, 0, "", `["workspace:restore-workspace","workflow:restore-workflow"]`, "provisioning"); err != nil {
+		t.Fatalf("insert claw: %v", err)
 	}
-	if got := env["TEMPLATE_SECRET"]; got != "workspace-value" {
-		t.Fatalf("template secret = %q, want workspace-value", got)
+
+	stored, err := server.loadStoredClawProvision("restore-claw")
+	if err != nil {
+		t.Fatalf("load stored claw provision: %v", err)
 	}
-	if got := env["LINEAR_API_KEY"]; got != "linear-token" {
-		t.Fatalf("LINEAR_API_KEY = %q, want linear-token", got)
-	}
-	if _, ok := resolvedSecrets["WORKFLOW_SECRET"]; !ok {
-		t.Fatal("workflow secret missing from resolved secrets")
-	}
-	if _, ok := resolvedSecrets["LINEAR_API_KEY"]; !ok {
-		t.Fatal("Linear integration token missing from resolved secrets")
+	for key, want := range map[string]string{
+		"TEMPLATE_SECRET": "template-value",
+		"WORKFLOW_SECRET": "workflow-value",
+		"LINEAR_API_KEY":  "linear-token",
+	} {
+		if got := stored.env[key]; got != want {
+			t.Errorf("%s = %q, want %q", key, got, want)
+		}
+		if _, ok := stored.resolvedSecrets[key]; !ok {
+			t.Errorf("%s missing from resolved secrets", key)
+		}
 	}
 }
