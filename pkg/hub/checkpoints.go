@@ -314,13 +314,13 @@ func (s *Server) restoreClawFromCheckpoint(ctx context.Context, tenantID, clawID
 
 func (s *Server) provisionStoredClaw(clawID string) {
 	var (
-		tenantID, name, template, provider, defaultModel, templateFilesJSON, githubReposJSON, linearWorkspace, llmKey string
-		nixEnabled, dockerEnabled                                                                                     int
+		tenantID, name, template, provider, defaultModel, templateFilesJSON, githubReposJSON, linearWorkspace, llmKey, tagsJSON string
+		nixEnabled, dockerEnabled                                                                                               int
 	)
 	err := s.db.QueryRow(
-		`SELECT tenant_id, name, template, provider, default_model, template_files, github_repos, linear_workspace, nix, docker, llm_key FROM claws WHERE id=?`,
+		`SELECT tenant_id, name, template, provider, default_model, template_files, github_repos, linear_workspace, nix, docker, llm_key, COALESCE(tags,'[]') FROM claws WHERE id=?`,
 		clawID,
-	).Scan(&tenantID, &name, &template, &provider, &defaultModel, &templateFilesJSON, &githubReposJSON, &linearWorkspace, &nixEnabled, &dockerEnabled, &llmKey)
+	).Scan(&tenantID, &name, &template, &provider, &defaultModel, &templateFilesJSON, &githubReposJSON, &linearWorkspace, &nixEnabled, &dockerEnabled, &llmKey, &tagsJSON)
 	if err != nil {
 		log.Printf("[restore] failed to load claw %s: %v", shortID(clawID), err)
 		s.stopAgentWithReason(clawID, fmt.Sprintf("Restore failed: %v", err), false)
@@ -329,30 +329,35 @@ func (s *Server) provisionStoredClaw(clawID string) {
 	var templateFiles map[string]string
 	_ = json.Unmarshal([]byte(templateFilesJSON), &templateFiles)
 	s.mu.RLock()
-	clawToken := s.hubCfg.ClawToken
 	provCfg, ok := s.hubCfg.Providers[provider]
-	hubSecrets := s.hubCfg.Secrets
 	s.mu.RUnlock()
 	if !ok {
 		s.stopAgentWithReason(clawID, fmt.Sprintf("Restore failed: provider %q is not configured", provider), false)
 		return
 	}
-	env := map[string]string{
-		"ELASTICCLAW_HUB_URL":    s.clawHubURL(),
-		"ELASTICCLAW_CLAW_ID":    clawID,
-		"ELASTICCLAW_CLAW_TOKEN": clawToken,
-	}
 	var tmplCfg *types.TemplateConfig
 	if cfgContent, ok := templateFiles["elasticclaw-config.yaml"]; ok {
 		if parsed, parseErr := config.ParseTemplateConfig([]byte(cfgContent)); parseErr == nil {
 			tmplCfg = parsed
-			for envName, secretRef := range parsed.SecretRefs {
-				if val, ok := hubSecrets[secretRef]; ok {
-					env[envName] = val
-				}
-			}
 		}
 	}
+	var tags []string
+	_ = json.Unmarshal([]byte(tagsJSON), &tags)
+	_, workflowName := workflowTags(tags)
+	workspaceName := template
+	var workflow *types.WorkflowConfig
+	if workflowName != "" {
+		if _, loadedWorkflow, found := loadWorkflowPipelineContext(workspaceName, workflowName); found {
+			workflow = loadedWorkflow
+		}
+	}
+	env, resolvedSecrets, resolveErr := s.resolveClawEnv(workspaceName, workflow, tmplCfg, clawID)
+	if resolveErr != nil {
+		log.Printf("[restore] failed to resolve environment for claw %s: %v", shortID(clawID), resolveErr)
+		s.stopAgentWithReason(clawID, fmt.Sprintf("Restore failed: %v", resolveErr), false)
+		return
+	}
+	templateFiles["SECRETS.md"] = buildSecretsFile(resolvedSecrets)
 	templateFiles = injectFigmaAPIDocs(templateFiles, env)
 	fileBytes := make(map[string][]byte, len(templateFiles))
 	for k, v := range templateFiles {

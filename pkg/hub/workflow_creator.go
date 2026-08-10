@@ -120,77 +120,16 @@ func (s *Server) createClawFromWorkflowWithOptions(workspace *types.WorkspaceCon
 	}
 
 	s.mu.RLock()
-	clawToken := s.hubCfg.ClawToken
-	hubSecrets := s.hubCfg.Secrets
 	defaultModel := s.hubCfg.DefaultModel
 	provCfg, ok := s.hubCfg.Providers[provider]
 	s.mu.RUnlock()
 	if !ok {
 		return "", false, fmt.Errorf("provider %q is not configured on this hub", provider)
 	}
-	workspaceSecrets, err := loadWorkspaceSecrets(workspace.Name)
-	if err != nil {
-		return "", false, fmt.Errorf("load workspace secrets: %w", err)
-	}
-	resolveSecret := func(secretRef string) (string, bool) {
-		if val, ok := workspaceSecrets[secretRef]; ok {
-			return val, true
-		}
-		if val, ok := hubSecrets[secretRef]; ok {
-			return val, true
-		}
-		return "", false
-	}
-
 	clawID := uuid.New().String()
-	env := map[string]string{
-		"ELASTICCLAW_HUB_URL":    s.clawHubURL(),
-		"ELASTICCLAW_CLAW_ID":    clawID,
-		"ELASTICCLAW_CLAW_TOKEN": clawToken,
-	}
-
-	resolvedSecrets := map[string]string{}
-	if workflow.Integration == "linear" {
-		if token := s.resolveLinearTokenForWorkflow(workspace.Name, workflow); token != "" {
-			env["LINEAR_API_KEY"] = token
-			resolvedSecrets["LINEAR_API_KEY"] = "Linear integration token"
-		}
-	}
-	if workflow.Integration == "jira" {
-		if tracker, ok := s.resolveJiraTrackerForWorkflow(workspace.Name, workflow); ok && tracker.Token != "" {
-			env["JIRA_API_KEY"] = tracker.Token
-			resolvedSecrets["JIRA_API_KEY"] = "Jira integration token"
-			if tracker.BaseURL != "" {
-				env["JIRA_BASE_URL"] = tracker.BaseURL
-			}
-			if tracker.Username != "" {
-				env["JIRA_USERNAME"] = tracker.Username
-			}
-		}
-	}
-	if tmplCfg != nil {
-		for envName, envVar := range tmplCfg.Env {
-			if envVar.Secret != "" {
-				if val, ok := resolveSecret(envVar.Secret); ok {
-					env[envName] = val
-					resolvedSecrets[envName] = "workspace env secret"
-				}
-				continue
-			}
-			env[envName] = envVar.Value
-		}
-		for envName, secretRef := range tmplCfg.SecretRefs {
-			if val, ok := resolveSecret(secretRef); ok {
-				env[envName] = val
-				resolvedSecrets[envName] = "workspace secret_ref"
-			}
-		}
-	}
-	for envName, secretRef := range workflow.SecretRefs {
-		if val, ok := resolveSecret(secretRef); ok {
-			env[envName] = val
-			resolvedSecrets[envName] = "workflow secret_ref"
-		}
+	env, resolvedSecrets, err := s.resolveClawEnv(workspace.Name, workflow, tmplCfg, clawID)
+	if err != nil {
+		return "", false, fmt.Errorf("resolve claw environment: %w", err)
 	}
 	// Workspace identity is hub-managed and must not be overridden by
 	// workspace or workflow environment configuration.
@@ -412,6 +351,72 @@ func (s *Server) createClawFromWorkflowWithOptions(workspace *types.WorkspaceCon
 	}()
 
 	return clawID, false, nil
+}
+
+// resolveClawEnv reconstructs the environment supplied to a claw. Workspace
+// secrets intentionally take precedence over hub secrets for all secret refs.
+func (s *Server) resolveClawEnv(workspaceName string, workflow *types.WorkflowConfig, tmplCfg *types.TemplateConfig, clawID string) (map[string]string, map[string]string, error) {
+	s.mu.RLock()
+	clawToken := s.hubCfg.ClawToken
+	hubSecrets := s.hubCfg.Secrets
+	s.mu.RUnlock()
+	workspaceSecrets, err := loadWorkspaceSecrets(workspaceName)
+	if err != nil {
+		return nil, nil, fmt.Errorf("load workspace secrets: %w", err)
+	}
+	resolveSecret := func(secretRef string) (string, bool) {
+		if val, ok := workspaceSecrets[secretRef]; ok {
+			return val, true
+		}
+		val, ok := hubSecrets[secretRef]
+		return val, ok
+	}
+	env := map[string]string{
+		"ELASTICCLAW_HUB_URL": s.clawHubURL(), "ELASTICCLAW_CLAW_ID": clawID, "ELASTICCLAW_CLAW_TOKEN": clawToken,
+	}
+	resolvedSecrets := map[string]string{}
+	if workflow != nil && workflow.Integration == "linear" {
+		if token := s.resolveLinearTokenForWorkflow(workspaceName, workflow); token != "" {
+			env["LINEAR_API_KEY"] = token
+			resolvedSecrets["LINEAR_API_KEY"] = "Linear integration token"
+		}
+	}
+	if workflow != nil && workflow.Integration == "jira" {
+		if tracker, ok := s.resolveJiraTrackerForWorkflow(workspaceName, workflow); ok && tracker.Token != "" {
+			env["JIRA_API_KEY"] = tracker.Token
+			resolvedSecrets["JIRA_API_KEY"] = "Jira integration token"
+			if tracker.BaseURL != "" {
+				env["JIRA_BASE_URL"] = tracker.BaseURL
+			}
+			if tracker.Username != "" {
+				env["JIRA_USERNAME"] = tracker.Username
+			}
+		}
+	}
+	if tmplCfg != nil {
+		for envName, envVar := range tmplCfg.Env {
+			if envVar.Secret != "" {
+				if val, ok := resolveSecret(envVar.Secret); ok {
+					env[envName], resolvedSecrets[envName] = val, "workspace env secret"
+				}
+				continue
+			}
+			env[envName] = envVar.Value
+		}
+		for envName, secretRef := range tmplCfg.SecretRefs {
+			if val, ok := resolveSecret(secretRef); ok {
+				env[envName], resolvedSecrets[envName] = val, "workspace secret_ref"
+			}
+		}
+	}
+	if workflow != nil {
+		for envName, secretRef := range workflow.SecretRefs {
+			if val, ok := resolveSecret(secretRef); ok {
+				env[envName], resolvedSecrets[envName] = val, "workflow secret_ref"
+			}
+		}
+	}
+	return env, resolvedSecrets, nil
 }
 
 func (s *Server) resolveWorkflowGroupLimit(workflow *types.WorkflowConfig) (string, int) {
