@@ -8161,12 +8161,14 @@ func (s *Server) enqueueSessionLostResume(clawID, prefix, marker string) {
 	s.injectHubMessageByID(clawID, b.String())
 }
 
-// Do not reintroduce periodic mid-turn injection: pinned OpenClaw
-// (cliversion.OpenClawVersion) aborts the in-flight turn with
-// EmbeddedAttemptSessionTakeoverError without upstream support.
+// Queue streaming watchdog nudges for delivery after the active turn. Do not
+// reintroduce mid-turn status-channel injection: pinned OpenClaw
+// (cliversion.OpenClawVersion) treats it as session takeover and aborts the
+// in-flight turn with EmbeddedAttemptSessionTakeoverError without upstream
+// support.
 func (s *Server) sendStreamingNudge(cc *clawConn, text string) {
 	cc.mu.RLock()
-	sc, clawID, tenantID := cc.statusConn, cc.id, cc.tenantID
+	clawID := cc.id
 	turnOpen := cc.isBusyLocked()
 	cc.mu.RUnlock()
 	// The nudge targets the in-flight turn. This runs on a goroutine, so the
@@ -8177,28 +8179,10 @@ func (s *Server) sendStreamingNudge(cc *clawConn, text string) {
 		log.Printf("[watchdog] dropping nudge for %s: turn already ended", shortID(clawID))
 		return
 	}
-	if sc == nil {
-		s.injectHubMessageByID(clawID, text)
-		return
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if err := wsjson.Write(ctx, sc, types.WSMessage{Type: "nudge", Payload: mustJSONRaw(map[string]string{"claw_id": clawID, "content": text})}); err != nil {
-		// Up to 5s may have elapsed; re-check before falling back to the queue.
-		cc.mu.RLock()
-		turnOpen = cc.isBusyLocked()
-		cc.mu.RUnlock()
-		if !turnOpen {
-			log.Printf("[watchdog] dropping nudge for %s: turn ended during status-channel send", shortID(clawID))
-			return
-		}
-		log.Printf("[watchdog] nudge over status channel for %s failed, queueing: %v", shortID(clawID), err)
-		s.injectHubMessageByID(clawID, text)
-		return
-	}
-	msg := types.HubMessage{ID: uuid.New().String(), ClawID: clawID, TenantID: tenantID, Role: "hub", Content: text, Format: "pre", CreatedAt: now()}
-	_, _ = s.db.Exec(`INSERT INTO messages(id,claw_id,tenant_id,role,content,format,created_at,delivered_at) VALUES(?,?,?,?,?,?,?,?)`, msg.ID, msg.ClawID, msg.TenantID, msg.Role, msg.Content, msg.Format, msg.CreatedAt, msg.CreatedAt)
-	s.broadcastToUsers(tenantID, types.WSMessage{Type: "message", Payload: msg})
+	// Keep the text unchanged: injectMessage deduplicates identical pending hub
+	// messages, so repeated warnings for the same condition collapse rather than
+	// building a stale FIFO backlog.
+	s.injectHubMessageByID(clawID, text)
 }
 
 // sendNextQueuedMessage delivers the oldest pending message if the claw is idle.

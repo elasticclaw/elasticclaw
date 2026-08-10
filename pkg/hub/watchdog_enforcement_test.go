@@ -556,7 +556,7 @@ func TestSessionRotatedNotConnectedDoesNotEnqueueResume(t *testing.T) {
 	}
 }
 
-func TestStreamingNudgeGoesOverStatusChannel(t *testing.T) {
+func TestStreamingNudgeIsQueuedNotInjectedMidTurn(t *testing.T) {
 	s, db := NewTestServerWithConfig(t, &types.HubConfig{ClawToken: "claw-token"}, "", "", "")
 	const clawID = "watchdog-nudge-status-channel"
 	_ = watchdogClaw(t, s, clawID)
@@ -593,29 +593,18 @@ func TestStreamingNudgeGoesOverStatusChannel(t *testing.T) {
 	cc.mu.Unlock()
 	s.sendStreamingNudge(cc, streamingTimeoutNudge)
 
-	// The nudge must arrive over the status channel, not the message queue.
-	var got types.WSMessage
-	if err := wsjson.Read(ctx, statusConn, &got); err != nil {
-		t.Fatal(err)
-	}
-	if got.Type != "nudge" {
-		t.Fatalf("status channel message type=%q, want nudge", got.Type)
-	}
-	payload, _ := got.Payload.(map[string]interface{})
-	if payload["claw_id"] != clawID || payload["content"] != streamingTimeoutNudge {
-		t.Fatalf("nudge payload=%#v", payload)
-	}
-	// The UI row is recorded as already delivered — never queued for the agent.
+	// Even with a connected status channel, the nudge is queued rather than
+	// injected into the active OpenClaw session.
 	var delivered, pending int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND content=? AND delivered_at IS NOT NULL`, clawID, streamingTimeoutNudge).Scan(&delivered); err != nil || delivered != 1 {
-		t.Fatalf("delivered rows=%d err=%v, want 1", delivered, err)
+	if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND content=? AND delivered_at IS NOT NULL`, clawID, streamingTimeoutNudge).Scan(&delivered); err != nil || delivered != 0 {
+		t.Fatalf("delivered rows=%d err=%v, want 0", delivered, err)
 	}
-	if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND content=? AND delivered_at IS NULL`, clawID, streamingTimeoutNudge).Scan(&pending); err != nil || pending != 0 {
-		t.Fatalf("pending rows=%d err=%v, want 0", pending, err)
+	if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND content=? AND delivered_at IS NULL`, clawID, streamingTimeoutNudge).Scan(&pending); err != nil || pending != 1 {
+		t.Fatalf("pending rows=%d err=%v, want 1", pending, err)
 	}
 }
 
-func TestStreamingNudgeFallsBackToQueueWithoutStatusChannel(t *testing.T) {
+func TestStreamingNudgeQueuesWithoutStatusChannel(t *testing.T) {
 	s, db := NewTestServerWithConfig(t, &types.HubConfig{ClawToken: "claw-token"}, "", "", "")
 	const clawID = "watchdog-nudge-fallback"
 	_ = watchdogClaw(t, s, clawID)
@@ -628,6 +617,25 @@ func TestStreamingNudgeFallsBackToQueueWithoutStatusChannel(t *testing.T) {
 	s.sendStreamingNudge(cc, streamingTimeoutNudge)
 	var pending int
 	if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND content=? AND delivered_at IS NULL`, clawID, streamingTimeoutNudge).Scan(&pending); err != nil || pending != 1 {
+		t.Fatalf("pending rows=%d err=%v, want 1", pending, err)
+	}
+}
+
+func TestStreamingNudgeDeduplicatesPendingWarnings(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{ClawToken: "claw-token"}, "", "", "")
+	const clawID = "watchdog-nudge-dedup"
+	_ = watchdogClaw(t, s, clawID)
+	cc := watchdogClawConn(t, s, clawID)
+	cc.mu.Lock()
+	cc.streamingStartedAt = time.Now()
+	cc.streamingMsgID = "stream"
+	cc.mu.Unlock()
+
+	s.sendStreamingNudge(cc, contextNearlyFullNudge)
+	s.sendStreamingNudge(cc, contextNearlyFullNudge)
+
+	var pending int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND content=? AND delivered_at IS NULL`, clawID, contextNearlyFullNudge).Scan(&pending); err != nil || pending != 1 {
 		t.Fatalf("pending rows=%d err=%v, want 1", pending, err)
 	}
 }
