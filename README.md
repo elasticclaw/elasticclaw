@@ -30,9 +30,12 @@ Instead of manually launching agents one at a time, you define **workspaces** an
 - **Scoped GitHub App credentials** give each agent temporary repo access instead of broad personal tokens.
 - **Issue tracker integrations** turn Linear, GitHub Issues, Shortcut, and webhook events into structured work.
 - **Sandbox providers** run each agent in an isolated workspace using Daytona, Replicated CMX, or exe.dev.
+- **Dual-driver browser evidence** verifies UI flows with either the Playwright-backed OpenClaw browser or Browser Use and carries safe screenshots, E2E videos, and traces into the pull request.
 - **Single-binary ElasticClaw Server** gives you the API, web UI, state, settings, and workflow automation in one self-hosted Go service.
 
 Each running agent runs [OpenClaw](https://github.com/openclaw/openclaw), connects back to ElasticClaw Server through the connector, clones the allowed repos, receives the issue context, and works inside an ephemeral VM.
+
+For browser-visible changes, ElasticClaw prepares both OpenClaw's Playwright-backed Chromium runtime and the Browser Use CLI. The injected workflow requires a readiness check before page control, named sessions, branch/run-scoped manifests, screenshots plus video only when behavior warrants it, console and page-error checks, cleanup, and truthful submission status. Agents may compare the two drivers while keeping their runs separate, then commit reviewer-safe evidence under `.github/pr-evidence/` so image and video or trace links also work in private repositories. If a selected driver or route cannot run, the PR records that blocker instead of claiming verification.
 
 ## The Workflow Loop
 

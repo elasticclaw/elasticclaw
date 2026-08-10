@@ -33,13 +33,14 @@ type workflowCreateOptions struct {
 const hubInternalTemplateFilePrefix = "__hub__/"
 
 func workspaceTemplateFiles(files map[string]string) map[string]string {
-	filtered := make(map[string]string, len(files))
+	filtered := make(map[string]string, len(files)+1)
 	for name, content := range files {
 		if strings.HasPrefix(name, hubInternalTemplateFilePrefix) {
 			continue
 		}
 		filtered[name] = content
 	}
+	appendBrowserEvidenceTools(filtered)
 	return filtered
 }
 

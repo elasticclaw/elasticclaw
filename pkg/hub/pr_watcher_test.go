@@ -616,7 +616,7 @@ func TestCheckCIStatusFailureMessageUnchangedAndRerunCanTurnGreen(t *testing.T) 
 
 	msgs := ciMessages(t, db, clawID)
 	want := "CI failed on PR #42 ([owner/repo](https://github.com/owner/repo/pull/42)):\n\n" +
-		"**verify** — [view logs](https://ci/1)\n\nPlease fix these failures on the same branch."
+		"**verify** — [view logs](https://ci/1)\n\nPlease fix these failures on the same branch. Preserve completed task outputs and reviewer evidence; do not delete or weaken them merely to make CI pass. Diagnose the actual failing check."
 	if len(msgs) != 1 || msgs[0] != want {
 		t.Fatalf("failure message = %v, want %q", msgs, want)
 	}
