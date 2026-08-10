@@ -108,3 +108,41 @@ func TestLoadStoredClawProvisionIncludesWorkflowAndIntegrationSecrets(t *testing
 		}
 	}
 }
+
+// Malformed template_files must fail the restore rather than silently
+// reprovisioning a claw with no template files at all. A stored "null" is not
+// malformed: it is what a claw with no template files marshals to.
+func TestLoadStoredClawProvisionRejectsMalformedTemplateFiles(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		templateFiles string
+		wantErr       bool
+	}{
+		{name: "malformed", templateFiles: `{"broken`, wantErr: true},
+		{name: "null is empty not malformed", templateFiles: `null`},
+		{name: "empty object", templateFiles: `{}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
+			server, db := NewTestServerWithConfig(t, &types.HubConfig{ClawToken: "claw-token"}, "", "", "")
+			if _, err := db.Exec(`INSERT INTO claws(id, tenant_id, name, template, provider, default_model, template_files, github_repos, linear_workspace, nix, docker, llm_key, tags, status, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,datetime('now'))`,
+				"restore-claw", "test-tenant-id", "restore claw", "restore-workspace", "noop", "", tc.templateFiles, "[]", "", 0, 0, "", `[]`, "provisioning"); err != nil {
+				t.Fatalf("insert claw: %v", err)
+			}
+
+			stored, err := server.loadStoredClawProvision("restore-claw")
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("loadStoredClawProvision succeeded, want error for malformed template_files")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("load stored claw provision: %v", err)
+			}
+			if stored.templateFiles == nil {
+				t.Fatal("templateFiles is nil; writing SECRETS.md into it would panic")
+			}
+		})
+	}
+}

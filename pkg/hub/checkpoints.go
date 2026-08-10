@@ -336,14 +336,21 @@ func (s *Server) loadStoredClawProvision(clawID string) (*storedClawProvision, e
 	}
 	var templateFiles map[string]string
 	if err := json.Unmarshal([]byte(templateFilesJSON), &templateFiles); err != nil {
-		log.Printf("[restore] claw %s: failed to unmarshal template_files: %v", shortID(clawID), err)
+		// Reprovisioning with no template files at all would produce a silently
+		// crippled claw; fail the restore so the operator sees it instead.
+		return nil, fmt.Errorf("unmarshal template_files: %w", err)
 	}
+	// A nil map is not an error: a claw stored without template files marshals
+	// to "null", which unmarshals successfully into nil.
 	if templateFiles == nil {
 		templateFiles = map[string]string{}
 	}
 	var tmplCfg *types.TemplateConfig
 	if cfgContent, ok := templateFiles["elasticclaw-config.yaml"]; ok {
-		if parsed, parseErr := config.ParseTemplateConfig([]byte(cfgContent)); parseErr == nil {
+		parsed, parseErr := config.ParseTemplateConfig([]byte(cfgContent))
+		if parseErr != nil {
+			log.Printf("[restore] claw %s: failed to parse elasticclaw-config.yaml; reprovisioning without template config: %v", shortID(clawID), parseErr)
+		} else {
 			tmplCfg = parsed
 		}
 	}
