@@ -253,22 +253,7 @@ stages:
 			t.Fatal(err)
 		}
 	}
-	if _, err := db.Exec(`INSERT INTO messages(id,claw_id,tenant_id,role,content,created_at,delivered_at)
-		VALUES('v2-queued-before-reconnect',?,?,'user','proceed [DONE] https://github.com/org/repo/pull/99',datetime('now'),NULL)`,
-		v2ClawID, "test-tenant-id"); err != nil {
-		t.Fatal(err)
-	}
 	store := workflowv2.NewStore(db)
-	run, err := store.CreateRun(context.Background(), workflowv2.CreateRunRequest{
-		ID: "run-concurrent-v2", TenantID: "test-tenant-id", InitialClawID: v2ClawID,
-		WorkspaceYAML: []byte(workflowV2APIWorkspace), WorkflowYAML: []byte(workflowV2APIWorkflow),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := s.drainWorkflowV2Effects(context.Background(), "concurrent-v2-worker"); err != nil {
-		t.Fatal(err)
-	}
 
 	server := httptest.NewServer(s.Handler())
 	t.Cleanup(server.Close)
@@ -281,7 +266,7 @@ stages:
 			t.Fatal(err)
 		}
 		if err := wsjson.Write(ctx, conn, types.WSMessage{Type: "register", Payload: map[string]interface{}{
-			"claw_id": clawID, "token": "claw-token", "gateway_ready": true,
+			"claw_id": clawID, "token": "claw-token", "gateway_ready": false,
 			"bridge_version": "test", "protocols": []string{typesv2.ProtocolConversationV1, typesv2.ProtocolControlV2},
 		}}); err != nil {
 			conn.CloseNow()
@@ -298,6 +283,32 @@ stages:
 	defer v1Conn.CloseNow()
 	v2Conn := connect(v2ClawID)
 	defer v2Conn.CloseNow()
+
+	// Activate V2 only after its normal conversation socket is connected. This
+	// exercises the ownership refresh path instead of the registration snapshot.
+	run, err := store.CreateRun(context.Background(), workflowv2.CreateRunRequest{
+		ID: "run-concurrent-v2", TenantID: "test-tenant-id", InitialClawID: v2ClawID,
+		WorkspaceYAML: []byte(workflowV2APIWorkspace), WorkflowYAML: []byte(workflowV2APIWorkflow),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.drainWorkflowV2Effects(context.Background(), "concurrent-v2-worker"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO messages(id,claw_id,tenant_id,role,content,created_at,delivered_at)
+		VALUES('v2-queued-after-activation',?,?,'user','proceed [DONE] https://github.com/org/repo/pull/99',datetime('now'),NULL)`,
+		v2ClawID, "test-tenant-id"); err != nil {
+		t.Fatal(err)
+	}
+	s.mu.RLock()
+	v2CC := s.claws[v2ClawID]
+	s.mu.RUnlock()
+	if v2CC == nil {
+		t.Fatal("connected V2 claw is missing")
+	}
+	s.sendNextQueuedMessage(v2CC)
+
 	controlConn, _, err := websocket.Dial(ctx,
 		"ws"+strings.TrimPrefix(server.URL, "http")+"/claw/control/ws", &websocket.DialOptions{HTTPHeader: http.Header{
 			clawControlTokenHeader: {"claw-token"},
