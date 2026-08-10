@@ -48,7 +48,13 @@ How it works: `/usr/local/bin/gh` is a wrapper that calls the credential helper 
 
 Do not use `gh auth status` to check authentication — it looks at the persisted `hosts.yml` file and can report "not authenticated" even when the wrapper is working. To verify gh is ready, run a real command such as `gh api rate_limit` or `gh repo view <owner>/<repo>`.
 
-If you see an auth prompt or error, the correct response is to verify the credential helper is being invoked (e.g. `git credential fill` returns `username=x-access-token` and a password), not to try logging in again. The helper is the source of truth.
+If you see an auth prompt or error, verify the credential helper is being invoked by running:
+
+```bash
+printf 'protocol=https\nhost=github.com\n' | git credential fill
+```
+
+This should return `username=x-access-token` and a password. Do not try logging in again. The helper is the source of truth.
 
 NEVER force push and rebase unless you are resolving conflicts. When addressing standard feedback, it's preferable to push a new commit.
 

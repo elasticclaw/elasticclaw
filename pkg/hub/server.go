@@ -6572,7 +6572,12 @@ gh issue list
 `+"```\n"+`
 Do not use gh auth status to verify authentication. Instead, run a real command such as gh api rate_limit or gh repo view <owner>/<repo>.
 
-If you see an authentication prompt or error, do not try to fix it by logging in. Verify the credential helper is being invoked (e.g. "git credential fill" returns "username=x-access-token" and a password). The helper is the source of truth.
+If you see an authentication prompt or error, do not try to fix it by logging in. Verify the credential helper is being invoked by running:
+
+`+"```bash\n"+`printf 'protocol=https\nhost=github.com\n' | git credential fill
+`+"```\n"+`
+
+This should return "username=x-access-token" and a password. The helper is the source of truth.
 `, repoLines)
 		if existing, ok := files["TOOLS.md"]; ok {
 			files["TOOLS.md"] = existing + "\n" + githubSection
