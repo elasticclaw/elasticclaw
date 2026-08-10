@@ -1145,6 +1145,8 @@ const PROVIDER_OPTIONS = [
 
 const PROVIDER_MODELS: Record<string, LLMModelOption[]> = {
   anthropic: [
+    { id: "anthropic/claude-opus-5",     name: "Claude Opus 5" },
+    { id: "anthropic/claude-sonnet-5",   name: "Claude Sonnet 5" },
     { id: "anthropic/claude-sonnet-4-6", name: "Claude Sonnet 4.6" },
     { id: "anthropic/claude-opus-4-5",   name: "Claude Opus 4.5" },
     { id: "anthropic/claude-sonnet-4-5", name: "Claude Sonnet 4.5" },
