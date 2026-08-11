@@ -452,9 +452,13 @@ export function TaskRunAnalyticsView({ workspaceScope }: { workspaceScope?: stri
                   >
                     <TableCell><StatusBadge status={run.status} /></TableCell>
                     <TableCell>
-                      <div className="min-w-[180px]">
-                        <div className="font-medium">{run.ownerDisplayName || run.factoryName || run.ownerType}</div>
-                        <div className="text-xs text-muted-foreground">{ownerSecondaryLine(run)}</div>
+                      <div className="min-w-[35ch]">
+                        <div className="font-medium truncate" title={run.ownerDisplayName || run.factoryName || run.ownerType}>
+                          {run.ownerDisplayName || run.factoryName || run.ownerType}
+                        </div>
+                        <div className="text-xs text-muted-foreground truncate" title={ownerSecondaryLine(run)}>
+                          {ownerSecondaryLine(run)}
+                        </div>
                       </div>
                     </TableCell>
                     <TableCell>
@@ -638,7 +642,7 @@ export function RunDetailPanel({ run, details, loading, error, onClose }: { run:
           <DetailItem label="Status" value={<StatusBadge status={run.status} />} />
           <DetailItem label="Phase" value={formatLabel(run.phase)} />
           <DetailItem label="Issue" value={run.issueId ? (run.issueTitle ? `${run.issueId}: ${run.issueTitle}` : run.issueId) : "None"} />
-          <DetailItem label="Workflow" value={run.workflowName || "None"} />
+          <DetailItem label="Workflow" value={run.workflowName || "None"} title={run.workflowName || undefined} />
           <DetailItem label="Started" value={formatTime(run.startedAt)} />
           <DetailItem label="Duration" value={formatDurationMs(runDurationMs(run))} />
           <DetailItem label="Failure" value={run.failureType ? formatLabel(run.failureType) : "None"} />

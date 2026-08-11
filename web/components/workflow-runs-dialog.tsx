@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation"
 import { AlertCircle, BarChart3, Calendar, ExternalLink, History, Loader2 } from "lucide-react"
 import { ApiError, fetchCronWorkflowRuns, fetchV2WorkflowRuns, isV2Workflow, type Workflow } from "@/lib/api"
 import { WorkflowRunLogsDialog } from "@/components/workflow-run-logs-dialog"
+import { WorkflowName } from "@/components/workflow-name"
 import type { WorkflowRun, WorkflowV2Run } from "@/lib/types"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -67,7 +68,7 @@ export function WorkflowRunsDialog({ workflow }: { workflow: Workflow }) {
           <DialogHeader className="shrink-0 border-b px-6 py-5 pr-12">
             <DialogTitle>Run history</DialogTitle>
             <DialogDescription>
-              Recent executions of <span className="font-medium">{workflow.name}</span> in{" "}
+              Recent executions of <WorkflowName name={workflow.name} className="font-medium" /> in{" "}
               <span className="font-medium">{workflow.workspaceName}</span>.
             </DialogDescription>
           </DialogHeader>

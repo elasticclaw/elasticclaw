@@ -15,6 +15,7 @@ import { VALID_SECTIONS, type Section } from "./sections"
 import { fetchWorkspaces, updateWorkflowControls, type RepositoryAccess, type Workspace, type Workflow } from "@/lib/api"
 import { useBranding } from "@/hooks/use-branding"
 import { AnalyticsCommandCenter } from "@/components/analytics-command-center"
+import { WorkflowName } from "@/components/workflow-name"
 import { WorkflowRunsDialog } from "@/components/workflow-runs-dialog"
 
 function isValidSection(s: string): s is Section {
@@ -455,7 +456,7 @@ export default function SettingsSectionPage() {
         </aside>
 
         {/* Content */}
-        <main className={(section === "ai-config" || section === "troubleshoot" || section === "workspace-analytics") ? "flex-1 min-h-0 flex flex-col overflow-hidden" : "flex-1 overflow-y-auto p-8 max-w-2xl"}>
+        <main className={(section === "ai-config" || section === "troubleshoot" || section === "workspace-analytics") ? "flex-1 min-h-0 flex flex-col overflow-hidden" : "flex-1 overflow-y-auto p-8 max-w-4xl"}>
           {error && <p className="mb-4 text-sm text-red-500">{error}</p>}
           {success && <p className="mb-4 text-sm text-green-500">{success}</p>}
 
@@ -3173,9 +3174,11 @@ function WorkflowSummaryRow({
 }) {
   return (
     <div className="px-4 py-3">
-      <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
-        <div className="min-w-0">
-          <p className="text-sm font-medium truncate">{workflow.name}</p>
+      <div className="flex flex-col flex-wrap gap-3 md:flex-row md:items-start md:justify-between">
+        <div className="flex-auto flex-shrink-0">
+          <p className="text-sm font-medium">
+            <WorkflowName name={workflow.name} />
+          </p>
           <p className="text-xs text-muted-foreground truncate">
             {workflow.workspaceName} · {workflow.integration || "manual"}
             {workflow.triggerStatus ? ` · ${workflow.triggerStatus}` : ""}
