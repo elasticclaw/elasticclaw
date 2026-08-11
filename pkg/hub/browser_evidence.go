@@ -30,6 +30,16 @@ Run ` + "`browser-use doctor`" + ` before page control. Use one scenario-specifi
 - Embed standalone images with ` + "`![description](../blob/<branch>/.github/pr-evidence/<safe-branch>/<run>/<image>?raw=true)`" + ` and link traces to their corresponding ` + "`../blob/<branch>/...`" + ` path. These links work for authorized reviewers of private repositories.
 - Never commit credentials, browser state, cookies, secret-bearing HAR files, or captures with private user data. Treat local-only paths as incomplete PR evidence.
 - Do not mark screenshots, video, E2E, lint, tests, or builds as verified unless the command passed and the retained media is linked from the PR.
+
+### Jira diagnostic attachments
+
+Jira attachment contents are intentionally excluded from the task prompt. For Jira-triggered work, use the issue key from ` + "`CONTEXT.md`" + ` and fetch only the evidence needed for the investigation with the sandbox-provided ` + "`JIRA_BASE_URL`" + `, ` + "`JIRA_API_KEY`" + `, and optional ` + "`JIRA_USERNAME`" + ` variables.
+
+- Never print credentials, enable shell tracing, or place authorization headers in commands that will be copied into messages or logs.
+- Query ` + "`$JIRA_BASE_URL/rest/api/2/issue/<issue-key>?fields=attachment`" + ` to discover attachment metadata. With ` + "`JIRA_USERNAME`" + ` use HTTP basic authentication; without it use ` + "`Authorization: Bearer`" + `. Do not paste the returned JSON into the conversation.
+- Download only selected attachments into a task-scoped directory such as ` + "`.artifacts/jira-attachments/<issue-key>/`" + `. Use restrictive permissions, treat filenames and content URLs as untrusted, sanitize local filenames, enforce a reasonable size limit, and do not forward Jira authorization across hosts or untrusted redirects.
+- Screenshots and recordings may be inspected with browser/media tooling. Treat logs and HAR exports as potentially secret-bearing; summarize only relevant findings and never commit the raw Jira attachment unless the task explicitly requires a safe artifact and it has been reviewed for credentials and private data.
+- If Jira credentials, attachment permission, or download access is unavailable, report the exact blocker without claiming the evidence was inspected.
 `
 
 const browserEvidencePRPolicy = "\nFor browser-visible changes, complete browser verification before `[DONE]`:\n" +

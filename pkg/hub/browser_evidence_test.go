@@ -34,6 +34,12 @@ func TestWorkspaceTemplateFilesAddsBrowserEvidenceTools(t *testing.T) {
 		"full PR lifecycle",
 		"private repositories",
 		"Never commit credentials",
+		"Jira attachment contents are intentionally excluded",
+		"fields=attachment",
+		"JIRA_API_KEY",
+		"Do not paste the returned JSON",
+		"task-scoped directory",
+		"HAR exports as potentially secret-bearing",
 	} {
 		if !strings.Contains(got["TOOLS.md"], want) {
 			t.Errorf("TOOLS.md missing %q:\n%s", want, got["TOOLS.md"])

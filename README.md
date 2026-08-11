@@ -37,6 +37,8 @@ Each running agent runs [OpenClaw](https://github.com/openclaw/openclaw), connec
 
 For browser-visible changes, ElasticClaw prepares both OpenClaw's Playwright-backed Chromium runtime and the Browser Use CLI. The injected workflow requires a readiness check before page control, named sessions, branch/run-scoped manifests, screenshots plus video only when behavior warrants it, console and page-error checks, cleanup, and truthful submission status. Agents may compare the two drivers while keeping their runs separate, then commit reviewer-safe evidence under `.github/pr-evidence/` so image and video or trace links also work in private repositories. If a selected driver or route cannot run, the PR records that blocker instead of claiming verification.
 
+For Jira-triggered investigations, attachment contents stay out of the task prompt. Sandboxed agents use their scoped Jira credentials to discover and download only the screenshots, recordings, logs, or HAR exports needed for the task, while treating those files as untrusted and potentially sensitive.
+
 ## The Workflow Loop
 
 ```mermaid
