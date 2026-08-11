@@ -1,18 +1,24 @@
 package hub
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/elasticclaw/elasticclaw/pkg/cliversion"
+)
 
 const browserEvidenceToolsSection = `## Browser verification and PR evidence
 
 For browser-visible work, choose and report one of two independent drivers. Use both when the task is comparing them; do not silently substitute one when the selected driver's readiness gate fails.
 
+Browser tooling is demand-driven so non-browser agents do not pay its download and sandbox-startup cost. Install or repair only the selected driver after its readiness check fails; do not assume a custom sandbox image already contains browser binaries.
+
 ### Driver A: Playwright-backed OpenClaw browser
 
-Run ` + "`openclaw browser doctor`" + ` before page control, then use the isolated managed browser's ` + "`start --headless`" + `, ` + "`open`" + `/` + "`navigate`" + `, ` + "`snapshot`" + `, ref-based actions, ` + "`wait`" + `, ` + "`screenshot`" + `, ` + "`console`" + `, and ` + "`errors`" + ` commands. Reuse a repository's existing Playwright E2E runner when it already covers the flow; retain its screenshot, video, and trace output.
+Run ` + "`openclaw browser doctor`" + ` before page control. If it reports a missing Chromium binary, locate OpenClaw's bundled ` + "`playwright-core/cli.js`" + ` beneath ` + "`$(npm root -g)/openclaw`" + ` and run it with ` + "`node <cli-path> install --with-deps chromium`" + ` using ` + "`PLAYWRIGHT_BROWSERS_PATH=$HOME/.cache/ms-playwright`" + `, then rerun doctor. Use the isolated managed browser's ` + "`start --headless`" + `, ` + "`open`" + `/` + "`navigate`" + `, ` + "`snapshot`" + `, ref-based actions, ` + "`wait`" + `, ` + "`screenshot`" + `, ` + "`console`" + `, and ` + "`errors`" + ` commands. Reuse a repository's existing Playwright E2E runner when it already covers the flow; retain its screenshot, video, and trace output.
 
 ### Driver B: Browser Use
 
-Run ` + "`browser-use doctor`" + ` before page control. Use one scenario-specific session for the whole flow, for example ` + "`browser-use --session pr-verification open <url>`" + `, followed by ` + "`state`" + `, ` + "`click`" + `, ` + "`input`" + `, ` + "`wait`" + `, and ` + "`screenshot --full <path>`" + `. For interactive or timing-sensitive behavior, use ` + "`browser-use --session pr-verification record start <path>.mp4`" + ` and ` + "`record stop`" + `. Always close the named session. Do not use a personal Chrome profile or persist cookies in PR evidence.
+Run ` + "`browser-use doctor`" + ` before page control. If the command or runtime is unavailable, install ` + "`uv`" + ` in the sandbox when needed, install the pinned ` + "`browser-use[video]==" + cliversion.BrowserUseVersion + "`" + ` tool with Python 3.12, run ` + "`browser-use install`" + `, ensure ` + "`ffmpeg`" + `/` + "`ffprobe`" + ` are available from the sandbox package manager, and rerun doctor. Use one scenario-specific session for the whole flow, for example ` + "`browser-use --session pr-verification open <url>`" + `, followed by ` + "`state`" + `, ` + "`click`" + `, ` + "`input`" + `, ` + "`wait`" + `, and ` + "`screenshot --full <path>`" + `. For interactive or timing-sensitive behavior, use ` + "`browser-use --session pr-verification record start <path>.mp4`" + ` and ` + "`record stop`" + `. Always close the named session. Do not use a personal Chrome profile or persist cookies in PR evidence.
 
 ### Evidence lifecycle
 

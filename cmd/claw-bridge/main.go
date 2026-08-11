@@ -2625,86 +2625,6 @@ func installOpenClaw() error {
 	return nil
 }
 
-// installOpenClawBrowserRuntime installs the Chromium build expected by the
-// Playwright runtime bundled with OpenClaw. Keep this best-effort: a repository
-// may be backend-only, and a transient browser download must not prevent the
-// claw from doing otherwise useful work. Browser-visible PRs still fail closed
-// at the evidence policy when doctor cannot start a browser.
-func installOpenClawBrowserRuntime() error {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return err
-	}
-	script := openClawBrowserRuntimeInstallScript()
-	cmd := exec.Command("bash", "-c", script)
-	cmd.Env = append(os.Environ(), "HOME="+home)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	return cmd.Run()
-}
-
-func openClawBrowserRuntimeInstallScript() string {
-	return `set -euo pipefail
-NPM_ROOT="$(npm root -g)"
-PW_CLI="$(find "$NPM_ROOT/openclaw" -path '*/playwright-core/cli.js' -print -quit 2>/dev/null)"
-[ -n "$PW_CLI" ] || { echo 'OpenClaw Playwright CLI not found' >&2; exit 1; }
-export PLAYWRIGHT_BROWSERS_PATH="$HOME/.cache/ms-playwright"
-mkdir -p "$PLAYWRIGHT_BROWSERS_PATH"
-if find "$PLAYWRIGHT_BROWSERS_PATH" -type f \( -name chromium -o -name chrome \) -perm -111 -print -quit | grep -q .; then
-  exit 0
-fi
-node "$PW_CLI" install --with-deps chromium
-find "$PLAYWRIGHT_BROWSERS_PATH" -type f \( -name chromium -o -name chrome \) -perm -111 -print -quit | grep -q .`
-}
-
-// installBrowserUseRuntime installs the actual Browser Use CLI in a uv-managed
-// Python 3.12 environment. It intentionally lives alongside OpenClaw's
-// Playwright-backed browser so workspaces can compare both verification paths.
-func installBrowserUseRuntime() error {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return err
-	}
-	version := cliversion.FromEnv("ELASTICCLAW_BROWSER_USE_VERSION", cliversion.BrowserUseVersion)
-	script := browserUseRuntimeInstallScript(version)
-	cmd := exec.Command("bash", "-c", script)
-	cmd.Env = append(os.Environ(), "HOME="+home)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	return cmd.Run()
-}
-
-func browserUseRuntimeInstallScript(version string) string {
-	return fmt.Sprintf(`set -euo pipefail
-export PATH="$HOME/.local/bin:$PATH"
-if ! command -v ffmpeg >/dev/null 2>&1; then
-  if command -v apt-get >/dev/null 2>&1; then
-    sudo apt-get update -qq
-    sudo apt-get install -y ffmpeg
-  elif command -v dnf >/dev/null 2>&1; then
-    sudo dnf install -y ffmpeg
-  elif command -v yum >/dev/null 2>&1; then
-    sudo yum install -y ffmpeg
-  else
-    echo 'No supported package manager found for ffmpeg' >&2
-    exit 1
-  fi
-fi
-ffmpeg -version >/dev/null
-if ! command -v uv >/dev/null 2>&1; then
-  curl -LsSf https://astral.sh/uv/install.sh | sh
-fi
-EXPECTED_VERSION=%s
-if ! command -v browser-use >/dev/null 2>&1 || ! uv tool list | grep -Fqx "browser-use v$EXPECTED_VERSION"; then
-  uv tool install --python 3.12 --force %s
-fi
-if ! browser-use doctor; then
-  browser-use install
-  browser-use doctor
-fi
-browser-use record --help >/dev/null`, shellQuote(version), shellQuote("browser-use[video]=="+version))
-}
-
 func cliCodingProviderForModel(model string) string {
 	switch {
 	case strings.HasPrefix(model, "codex/"):
@@ -3771,17 +3691,6 @@ func runBootstrap() error {
 	if err := installOpenClaw(); err != nil {
 		return fmt.Errorf("installOpenClaw: %w", err)
 	}
-	if err := installOpenClawBrowserRuntime(); err != nil {
-		log.Printf("[bootstrap] Playwright browser runtime warning: %v (browser-visible work must report this blocker)", err)
-	} else {
-		log.Printf("[bootstrap] Playwright-backed OpenClaw browser runtime ready")
-	}
-	if err := installBrowserUseRuntime(); err != nil {
-		log.Printf("[bootstrap] Browser Use runtime warning: %v (Browser Use verification must report this blocker)", err)
-	} else {
-		log.Printf("[bootstrap] Browser Use runtime ready")
-	}
-
 	// Step 3b: Install pinned CLI-backed model providers when selected.
 	if err := installSelectedCodingModelCLI(); err != nil {
 		return fmt.Errorf("installSelectedCodingModelCLI: %w", err)

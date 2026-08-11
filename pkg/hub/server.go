@@ -3489,13 +3489,6 @@ echo "openclaw package_version=$PACKAGE_VERSION"; \
 case "$OPENCLAW_VERSION" in *%s*) ;; *) echo "expected openclaw %s"; exit 1 ;; esac`, daytonaOpenClawVersion, daytonaOpenClawVersion)); err != nil {
 		return err
 	}
-	if err := exec("install browser runtime", 6*time.Minute, daytonaInstallBrowserRuntimeCommand()); err != nil {
-		log.Printf("[daytona] warning: browser runtime install failed for claw %s: %v", clawID, err)
-	}
-	if err := exec("install browser use runtime", 10*time.Minute, daytonaInstallBrowserUseRuntimeCommand()); err != nil {
-		log.Printf("[daytona] warning: Browser Use runtime install failed for claw %s: %v", clawID, err)
-	}
-
 	// Step 1b: Install Nix (Determinate Systems) if requested.
 	var nixEnabled int
 	_ = s.db.QueryRow(`SELECT nix FROM claws WHERE id=?`, clawID).Scan(&nixEnabled)
@@ -4258,53 +4251,6 @@ fi
 openclaw plugins info codex --json >/dev/null`, shellQuote(spec))
 }
 
-func daytonaInstallBrowserRuntimeCommand() string {
-	return `export HOME=/home/daytona
-export NVM_DIR=/usr/local/share/nvm
-NPM="$NVM_DIR/current/bin/npm"
-PREFIX="$("$NPM" config get prefix)"
-export PATH="$PREFIX/bin:$NVM_DIR/current/bin:/usr/local/bin:$PATH"
-PW_CLI="$(find "$PREFIX/lib/node_modules/openclaw" -path '*/playwright-core/cli.js' -print -quit 2>/dev/null)"
-[ -n "$PW_CLI" ] || { echo 'OpenClaw Playwright CLI not found'; exit 1; }
-export PLAYWRIGHT_BROWSERS_PATH="$HOME/.cache/ms-playwright"
-mkdir -p "$PLAYWRIGHT_BROWSERS_PATH"
-node "$PW_CLI" install --with-deps chromium
-find "$PLAYWRIGHT_BROWSERS_PATH" -type f \( -name chromium -o -name chrome \) -perm -111 -print -quit | grep -q .`
-}
-
-func daytonaInstallBrowserUseRuntimeCommand() string {
-	version := cliversion.FromEnv("ELASTICCLAW_BROWSER_USE_VERSION", cliversion.BrowserUseVersion)
-	return fmt.Sprintf(`set -euo pipefail
-export HOME=/home/daytona
-export PATH="$HOME/.local/bin:/usr/local/bin:$PATH"
-if ! command -v ffmpeg >/dev/null 2>&1; then
-  if command -v apt-get >/dev/null 2>&1; then
-    sudo apt-get update -qq
-    sudo apt-get install -y ffmpeg
-  elif command -v dnf >/dev/null 2>&1; then
-    sudo dnf install -y ffmpeg
-  elif command -v yum >/dev/null 2>&1; then
-    sudo yum install -y ffmpeg
-  else
-    echo 'No supported package manager found for ffmpeg' >&2
-    exit 1
-  fi
-fi
-ffmpeg -version >/dev/null
-if ! command -v uv >/dev/null 2>&1; then
-  curl -LsSf https://astral.sh/uv/install.sh | sh
-fi
-EXPECTED_VERSION=%s
-if ! command -v browser-use >/dev/null 2>&1 || ! uv tool list | grep -Fqx "browser-use v$EXPECTED_VERSION"; then
-  uv tool install --python 3.12 --force %s
-fi
-if ! browser-use doctor; then
-  browser-use install
-  browser-use doctor
-fi
-browser-use record --help >/dev/null`, shellQuote(version), shellQuote("browser-use[video]=="+version))
-}
-
 func daytonaOpenClawInstallStatusCommand(version string) string {
 	return fmt.Sprintf(`export HOME=/home/daytona
 LOG=/tmp/openclaw-install.log
@@ -4869,7 +4815,7 @@ func daytonaBootstrapStatusForStep(label string) string {
 	switch label {
 	case "uninstall old openclaw", "install openclaw", "verify openclaw":
 		return "Preparing runtime"
-	case "install nix", "install docker", "install browser runtime", "install browser use runtime", "preflight required commands", "stage openclaw plugin deps":
+	case "install nix", "install docker", "preflight required commands", "stage openclaw plugin deps":
 		return "Preparing runtime"
 	case "configure openclaw model", "start openclaw gateway":
 		return "Configuring OpenClaw"

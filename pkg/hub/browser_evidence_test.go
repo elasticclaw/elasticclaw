@@ -3,6 +3,8 @@ package hub
 import (
 	"strings"
 	"testing"
+
+	"github.com/elasticclaw/elasticclaw/pkg/cliversion"
 )
 
 func TestWorkspaceTemplateFilesAddsBrowserEvidenceTools(t *testing.T) {
@@ -11,8 +13,14 @@ func TestWorkspaceTemplateFilesAddsBrowserEvidenceTools(t *testing.T) {
 
 	for _, want := range []string{
 		"## Browser verification and PR evidence",
+		"Browser tooling is demand-driven",
+		"do not assume a custom sandbox image",
 		"openclaw browser doctor",
+		"playwright-core/cli.js",
+		"install --with-deps chromium",
 		"browser-use doctor",
+		"browser-use[video]==" + cliversion.BrowserUseVersion,
+		"browser-use install",
 		"record start",
 		"existing Playwright E2E runner",
 		".artifacts/browser-evidence/branches/<safe-branch>",
