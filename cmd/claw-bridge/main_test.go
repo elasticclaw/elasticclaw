@@ -8,6 +8,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -2261,6 +2262,41 @@ func TestReconnectGatewayReportsStaleConnectionNoop(t *testing.T) {
 	}
 	if got := gs.currentConn(); got != current {
 		t.Fatalf("current connection changed on stale reconnect: got %p, want %p", got, current)
+	}
+}
+
+func TestReconnectGatewayWithTimeoutWhenChallengeNeverArrives(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Skipf("local listener unavailable: %v", err)
+	}
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.CloseNow()
+		// Simulate a gateway whose event loop is wedged after the upgrade: it
+		// accepts WebSocket connections but never emits connect.challenge.
+		<-r.Context().Done()
+	}))
+	srv.Listener = listener
+	srv.Start()
+	defer srv.Close()
+
+	current := &websocket.Conn{}
+	gs := &gatewaySession{
+		client:  &gatewayClient{addr: strings.TrimPrefix(srv.URL, "http://")},
+		conn:    current,
+		pending: make(map[string]chan gwFrame),
+	}
+	started := time.Now()
+	_, err = gs.reconnectGatewayWithTimeout(context.Background(), current, 100*time.Millisecond)
+	if err == nil {
+		t.Fatal("reconnectGatewayWithTimeout error = nil, want timeout")
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("reconnect returned after %s, want roughly the timeout", elapsed)
 	}
 }
 

@@ -643,6 +643,8 @@ const (
 	gwRole     = "operator"
 )
 
+const gatewayReconnectTimeout = 30 * time.Second
+
 var defaultScopes = []string{
 	"operator.admin",
 	"operator.read",
@@ -1304,6 +1306,13 @@ func (gs *gatewaySession) reconnectGateway(ctx context.Context, expectedOld *web
 	return true, nil
 }
 
+func (gs *gatewaySession) reconnectGatewayWithTimeout(ctx context.Context, expectedOld *websocket.Conn, timeout time.Duration) (bool, error) {
+	reconnectCtx, cancel := context.WithTimeout(ctx, timeout)
+	reconnected, err := gs.reconnectGateway(reconnectCtx, expectedOld)
+	cancel()
+	return reconnected, err
+}
+
 // readLoop reads frames from the gateway forever, dispatching responses to
 // pending channels and agent events to the in-flight handler.
 // When the connection drops it reconnects and re-subscribes.
@@ -1343,7 +1352,8 @@ func (gs *gatewaySession) readLoop(ctx context.Context) {
 				if !gs.isCurrentConn(conn) {
 					break
 				}
-				if _, err := gs.reconnectGateway(ctx, conn); err != nil {
+				_, err := gs.reconnectGatewayWithTimeout(ctx, conn, gatewayReconnectTimeout)
+				if err != nil {
 					if !gs.isCurrentConn(conn) {
 						break
 					}
