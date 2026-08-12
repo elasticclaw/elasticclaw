@@ -248,8 +248,15 @@ type clawConn struct {
 
 const (
 	defaultGatewayUnhealthyMax = 12
-	defaultBusyTurnMax         = 45 * time.Minute
-	defaultSilentDeathMax      = 10 * time.Minute
+	// defaultBusyTurnMax is a backstop for a lost terminal message, not a turn
+	// cap: the bridge owns the cap (agentTurnTimeout, 1h) and always ends a turn
+	// with a message. So this must stay above the bridge's cap plus a reaper tick
+	// and the bridge's own error reporting, or the watchdog force-finishes turns
+	// that are merely long — publishing a partial "[interrupted]" reply, draining
+	// the next queued message into a bridge still working on the previous one,
+	// and killing the agent on the second occurrence.
+	defaultBusyTurnMax    = 70 * time.Minute
+	defaultSilentDeathMax = 10 * time.Minute
 )
 
 const (
