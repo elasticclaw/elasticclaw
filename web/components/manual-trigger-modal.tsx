@@ -14,6 +14,7 @@ import {
   DialogDescription,
 } from "@/components/ui/dialog"
 import { triggerWorkflow, type WorkflowInput, type Workflow } from "@/lib/api"
+import { WorkflowName } from "@/components/workflow-name"
 
 interface ManualTriggerModalProps {
   open: boolean
@@ -103,7 +104,7 @@ export function ManualTriggerModal({ open, onOpenChange, workflow }: ManualTrigg
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <Zap className="size-4 text-amber-500" />
-            Trigger {workflow.name}
+            Trigger <WorkflowName name={workflow.name} />
           </DialogTitle>
           <DialogDescription>
             {workflow.inputs && workflow.inputs.length > 0

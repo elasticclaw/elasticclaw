@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useState, type ReactNode } from "react"
+import { useEffect, useMemo, useState, type ReactNode } from "react"
 import { AlertCircle, Loader2 } from "lucide-react"
 import { ApiError, fetchActivityMessages } from "@/lib/api"
 import type { AgentActivity, ApiMessage } from "@/lib/types"
@@ -10,7 +10,12 @@ import { cn } from "@/lib/utils"
 
 const activityPageSize = 100
 
-export function ClawActivityLog({ clawId }: { clawId: string }) {
+interface ActivityLogFetcher {
+  fetchInitial: () => Promise<ApiMessage[]>
+  fetchOlder: (before: string) => Promise<ApiMessage[]>
+}
+
+export function ClawActivityLog({ clawId, fetcher }: { clawId?: string; fetcher?: ActivityLogFetcher }) {
   const [messages, setMessages] = useState<ApiMessage[]>([])
   const [loading, setLoading] = useState(false)
   const [loadingOlder, setLoadingOlder] = useState(false)
@@ -18,8 +23,15 @@ export function ClawActivityLog({ clawId }: { clawId: string }) {
   const [accessDenied, setAccessDenied] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
+  const activeFetcher: ActivityLogFetcher | null = useMemo(() => {
+    return fetcher || (clawId ? {
+      fetchInitial: () => fetchActivityMessages(clawId, { limit: activityPageSize, order: "desc" }),
+      fetchOlder: (before: string) => fetchActivityMessages(clawId, { before, limit: activityPageSize, order: "desc" }),
+    } : null)
+  }, [fetcher, clawId])
+
   useEffect(() => {
-    if (!clawId) return
+    if (!activeFetcher) return
     let cancelled = false
     queueMicrotask(() => {
       if (cancelled) return
@@ -27,7 +39,7 @@ export function ClawActivityLog({ clawId }: { clawId: string }) {
       setMessages([])
       setAccessDenied(false)
       setError(null)
-      fetchActivityMessages(clawId, { limit: activityPageSize, order: "desc" })
+      activeFetcher.fetchInitial()
         .then((page) => {
           if (cancelled) return
           setMessages(page.reverse())
@@ -41,15 +53,16 @@ export function ClawActivityLog({ clawId }: { clawId: string }) {
         .finally(() => { if (!cancelled) setLoading(false) })
     })
     return () => { cancelled = true }
-  }, [clawId])
+  }, [activeFetcher])
 
   const loadOlder = async () => {
+    if (!activeFetcher) return
     const before = messages[0]?.created_at
     if (!before || loadingOlder) return
     setLoadingOlder(true)
     setError(null)
     try {
-      const page = await fetchActivityMessages(clawId, { before, limit: activityPageSize, order: "desc" })
+      const page = await activeFetcher.fetchOlder(before)
       setMessages((current) => [...page.reverse(), ...current])
       setHasOlder(page.length === activityPageSize)
     } catch (err) {
