@@ -15,6 +15,7 @@ const (
 	gatewayLogCaptureLimit   = 256 * 1024
 	gatewayLogCaptureTimeout = 20 * time.Second
 	gatewayLogCaptureCommand = "tail -c 262144 /home/daytona/.openclaw/gateway.log 2>/dev/null"
+	bridgeLogCaptureCommand  = "tail -c 262144 /home/daytona/claw-bridge.log 2>/dev/null"
 )
 
 // gatewayLogExecutor is deliberately limited to the operation needed for
@@ -53,27 +54,53 @@ func (s *Server) captureGatewayLog(clawID, provider, providerID string) {
 }
 
 func captureGatewayLogWithExecutor(ctx context.Context, executor gatewayLogExecutor, clawID, providerID, dataDir string) error {
-	ctx, cancel := context.WithTimeout(ctx, gatewayLogCaptureTimeout)
-	defer cancel()
-
-	// Pass the script as a single element: ExecWithTimeout joins cmdArgs and wraps
-	// the result in `bash -c '...'` itself, so a "bash -c" prefix here would nest a
-	// second shell that swallows the arguments. Use an absolute path rather than ~,
-	// which is unreliable in Daytona exec sessions.
-	result, err := executor.ExecWithTimeout(ctx, providerID, []string{gatewayLogCaptureCommand}, gatewayLogCaptureTimeout)
-	if err != nil {
-		return err
-	}
-	if result == nil {
-		return fmt.Errorf("empty exec result")
-	}
-	// A missing log or a dead sandbox is the normal case, not something to record:
-	// writing an empty file would make a failed capture look like a successful one.
-	if result.ExitCode != 0 || len(result.Stdout) == 0 {
-		return nil
+	var firstErr error
+	keepErr := func(err error) {
+		if firstErr == nil {
+			firstErr = err
+		}
 	}
 
-	contents := []byte(result.Stdout)
+	for _, capture := range []struct {
+		name    string
+		command string
+	}{
+		{name: "gateway", command: gatewayLogCaptureCommand},
+		{name: "bridge", command: bridgeLogCaptureCommand},
+	} {
+		if ctx.Err() != nil {
+			keepErr(ctx.Err())
+			break
+		}
+		// Each capture gets its own time box. Sharing one would let a hung tail
+		// against a half-dead sandbox starve the second file — and the bridge log
+		// is the one the NEXT-655 post-mortem proved we need most.
+		execCtx, cancel := context.WithTimeout(ctx, gatewayLogCaptureTimeout)
+		// ExecWithTimeout wraps this single script argument in `bash -c`; do not
+		// add a second shell here.
+		result, err := executor.ExecWithTimeout(execCtx, providerID, []string{capture.command}, gatewayLogCaptureTimeout)
+		cancel()
+		if err != nil {
+			// A transport failure means the hub could not reach the sandbox at all
+			// — bad credentials, a network error, a rate limit. That is worth
+			// surfacing, unlike a missing log file.
+			keepErr(fmt.Errorf("%s log: %w", capture.name, err))
+			continue
+		}
+		// A missing log or an already-dead sandbox is the normal case on teardown:
+		// stay quiet, and write nothing rather than an empty file that would read
+		// as a successful but blank post-mortem.
+		if result == nil || result.ExitCode != 0 || len(result.Stdout) == 0 {
+			continue
+		}
+		if err := writeGatewayLogCapture(dataDir, clawID, capture.name, []byte(result.Stdout)); err != nil {
+			keepErr(err)
+		}
+	}
+	return firstErr
+}
+
+func writeGatewayLogCapture(dataDir, clawID, source string, contents []byte) error {
 	if len(contents) > gatewayLogCaptureLimit {
 		contents = contents[len(contents)-gatewayLogCaptureLimit:]
 	}
@@ -82,7 +109,7 @@ func captureGatewayLogWithExecutor(ctx context.Context, executor gatewayLogExecu
 	if err := os.MkdirAll(diagnosticsDir, 0o700); err != nil {
 		return fmt.Errorf("create diagnostics directory: %w", err)
 	}
-	filename := fmt.Sprintf("%s-%s.log", filepath.Base(clawID), time.Now().UTC().Format(time.RFC3339Nano))
+	filename := fmt.Sprintf("%s-%s-%s.log", filepath.Base(clawID), time.Now().UTC().Format(time.RFC3339Nano), source)
 	path := filepath.Join(diagnosticsDir, filename)
 	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
@@ -100,6 +127,6 @@ func captureGatewayLogWithExecutor(ctx context.Context, executor gatewayLogExecu
 	if err := os.Chmod(path, 0o600); err != nil {
 		return fmt.Errorf("secure capture file: %w", err)
 	}
-	log.Printf("[gateway-log] captured %d bytes for %s at %s", len(contents), shortID(clawID), path)
+	log.Printf("[gateway-log] captured %s log: %d bytes for %s at %s", source, len(contents), shortID(clawID), path)
 	return nil
 }
