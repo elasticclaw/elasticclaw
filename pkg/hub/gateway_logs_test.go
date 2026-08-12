@@ -110,8 +110,12 @@ func TestCaptureGatewayLogCapturesOtherFileWhenOneTailIsEmpty(t *testing.T) {
 	if err != nil || len(files) != 1 {
 		t.Fatalf("bridge capture files = %q, %v; want one", files, err)
 	}
-	if _, err := os.Stat(strings.Replace(files[0], "-bridge.log", "-gateway.log", 1)); !os.IsNotExist(err) {
-		t.Fatalf("gateway capture exists or stat failed: %v", err)
+	// Glob rather than deriving the gateway name from the bridge one: each capture
+	// stamps its own timestamp, so a derived path never exists and the assertion
+	// would pass even if a gateway file had been written.
+	gatewayFiles, err := filepath.Glob(filepath.Join(dataDir, "diagnostics", "*-gateway.log"))
+	if err != nil || len(gatewayFiles) != 0 {
+		t.Fatalf("gateway capture files = %q, %v; want none", gatewayFiles, err)
 	}
 }
 
