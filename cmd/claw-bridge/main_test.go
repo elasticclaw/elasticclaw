@@ -2300,6 +2300,135 @@ func TestReconnectGatewayWithTimeoutWhenChallengeNeverArrives(t *testing.T) {
 	}
 }
 
+func TestNewGatewaySessionTimesOutWhenChallengeNeverArrives(t *testing.T) {
+	connectionClosed := make(chan struct{})
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Skipf("local listener unavailable: %v", err)
+	}
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.CloseNow()
+		// Accept the upgrade but never emit connect.challenge, as a frozen
+		// gateway can after validating the WebSocket connection.
+		//
+		// Once Accept hijacks the connection, net/http no longer owns it, so
+		// r.Context() never observes the peer closing the socket. Block on a
+		// read instead: it only returns once the client tears down its side.
+		_, _, _ = conn.Read(context.Background())
+		close(connectionClosed)
+	}))
+	srv.Listener = listener
+	srv.Start()
+	defer srv.Close()
+
+	const attemptTimeout = 100 * time.Millisecond
+	started := time.Now()
+	_, err = newGatewaySession(context.Background(), &gatewayClient{
+		addr: strings.TrimPrefix(srv.URL, "http://"),
+	}, attemptTimeout)
+	if err == nil {
+		t.Fatal("newGatewaySession error = nil, want timeout")
+	}
+	if elapsed := time.Since(started); elapsed < attemptTimeout/2 || elapsed > time.Second {
+		t.Fatalf("newGatewaySession returned after %s, want roughly %s", elapsed, attemptTimeout)
+	}
+	select {
+	case <-connectionClosed:
+		// The attempt closed its connection; no read loop remains against it.
+	case <-time.After(time.Second):
+		t.Fatal("frozen gateway connection remained open after failed startup attempt")
+	}
+}
+
+func TestNewGatewaySessionReadLoopOutlivesAttemptTimeout(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	requestReceived := make(chan struct{})
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Skipf("local listener unavailable: %v", err)
+	}
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			t.Errorf("accept websocket: %v", err)
+			return
+		}
+		defer conn.CloseNow()
+		ctx := r.Context()
+
+		challengePayload, _ := json.Marshal(map[string]string{"nonce": "nonce"})
+		if err := wsjson.Write(ctx, conn, gwFrame{Type: "event", Event: "connect.challenge", Payload: challengePayload}); err != nil {
+			t.Errorf("write challenge: %v", err)
+			return
+		}
+		for {
+			var req gwFrame
+			if err := wsjson.Read(ctx, conn, &req); err != nil {
+				return
+			}
+			switch req.Method {
+			case "connect", "sessions.subscribe", "sessions.get":
+				if err := wsjson.Write(ctx, conn, gwFrame{Type: "res", ID: req.ID, OK: true}); err != nil {
+					t.Errorf("write %s response: %v", req.Method, err)
+					return
+				}
+				if req.Method == "sessions.get" {
+					close(requestReceived)
+				}
+			case "sessions.create":
+				payload, _ := json.Marshal(map[string]string{"key": "session-1"})
+				if err := wsjson.Write(ctx, conn, gwFrame{Type: "res", ID: req.ID, OK: true, Payload: payload}); err != nil {
+					t.Errorf("write sessions.create response: %v", err)
+					return
+				}
+			case "sessions.describe":
+				// setReady() kicks off an async context-usage poll; answer it so
+				// it doesn't trip the "unexpected request method" default below.
+				if err := wsjson.Write(ctx, conn, gwFrame{Type: "res", ID: req.ID, OK: true}); err != nil {
+					t.Errorf("write sessions.describe response: %v", err)
+					return
+				}
+			default:
+				t.Errorf("unexpected request method %q", req.Method)
+				return
+			}
+		}
+	}))
+	srv.Listener = listener
+	srv.Start()
+	defer srv.Close()
+
+	const attemptTimeout = 100 * time.Millisecond
+	parentCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	client := &gatewayClient{
+		addr:   strings.TrimPrefix(srv.URL, "http://"),
+		token:  "token",
+		device: &deviceIdentity{DeviceID: "device-1", PublicKeyPem: testPEM("PUBLIC KEY"), PrivateKeyPem: testPEM("PRIVATE KEY")},
+	}
+	gs, err := newGatewaySession(parentCtx, client, attemptTimeout)
+	if err != nil {
+		t.Fatalf("newGatewaySession: %v", err)
+	}
+	defer gs.currentConn().CloseNow()
+
+	time.Sleep(2 * attemptTimeout)
+	requestCtx, requestCancel := context.WithTimeout(parentCtx, time.Second)
+	defer requestCancel()
+	if _, err := gs.sendReq(requestCtx, "sessions.get", map[string]string{"key": "session-1"}); err != nil {
+		t.Fatalf("request after attempt timeout: %v", err)
+	}
+	select {
+	case <-requestReceived:
+	case <-time.After(time.Second):
+		t.Fatal("read loop did not dispatch response after attempt timeout")
+	}
+}
+
 func TestGatewaySessionRetriesSendAfterClosedGatewayWrite(t *testing.T) {
 	var connections atomic.Int32
 	var acceptedSends atomic.Int32
