@@ -30,7 +30,11 @@ func TestCaptureGatewayLogWritesSecureTail(t *testing.T) {
 	if err := captureGatewayLogWithExecutor(context.Background(), executor, "claw-123", "sandbox-123", dataDir); err != nil {
 		t.Fatalf("captureGatewayLogWithExecutor: %v", err)
 	}
-	if got, want := executor.args, []string{"bash", "-lc", "tail -c 262144 ~/.openclaw/gateway.log"}; len(got) != len(want) || got[0] != want[0] || got[1] != want[1] || got[2] != want[2] {
+	// One element, no "bash -c" prefix: the Daytona provider joins cmdArgs and wraps
+	// them in `bash -c '...'`, so a prefix here nests a second shell that eats the
+	// arguments and silently tails nothing. The stub cannot catch that, so assert the
+	// shape.
+	if got, want := executor.args, []string{gatewayLogCaptureCommand}; len(got) != len(want) || got[0] != want[0] {
 		t.Fatalf("exec args = %q, want %q", got, want)
 	}
 	if executor.timeout != gatewayLogCaptureTimeout {
@@ -69,6 +73,33 @@ func TestCaptureGatewayLogExecErrorLeavesNoFile(t *testing.T) {
 	}
 	if len(files) != 0 {
 		t.Fatalf("capture files = %q, want none", files)
+	}
+}
+
+func TestCaptureGatewayLogSkipsEmptyAndFailedTail(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		result *types.ExecResult
+	}{
+		{"missing log", &types.ExecResult{ExitCode: 1}},
+		{"empty log", &types.ExecResult{Stdout: ""}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dataDir := t.TempDir()
+			executor := &gatewayLogExecutorStub{result: tc.result}
+			if err := captureGatewayLogWithExecutor(context.Background(), executor, "claw-123", "sandbox-123", dataDir); err != nil {
+				t.Fatalf("captureGatewayLogWithExecutor: %v", err)
+			}
+			// An empty capture file would read as a successful post-mortem that
+			// happens to be blank, hiding the fact that nothing was preserved.
+			files, err := filepath.Glob(filepath.Join(dataDir, "diagnostics", "*.log"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(files) != 0 {
+				t.Fatalf("capture files = %q, want none", files)
+			}
+		})
 	}
 }
 

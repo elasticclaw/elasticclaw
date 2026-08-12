@@ -2627,7 +2627,12 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 							if unhealthyCount == 4 && !cc.streamingStartedAt.IsZero() {
 								go s.injectHubMessageByID(clawID, "[hub] The gateway has been unresponsive for about a minute. If you're stuck in a long operation, consider sending [DONE] and starting fresh.")
 							}
-							if unhealthyCount == gatewayUnhealthyMax {
+							// Retry the escalation every gatewayUnhealthyMax checks rather than
+							// only on the first crossing. escalateClawHealthFailure declines
+							// while the claw is not yet 'connected' or is protected, and now
+							// that reconnects no longer reset the counter, a single declined
+							// attempt would otherwise be the last one this claw ever gets.
+							if unhealthyCount >= gatewayUnhealthyMax && unhealthyCount%gatewayUnhealthyMax == 0 {
 								shouldEscalateGateway = true
 							}
 						}

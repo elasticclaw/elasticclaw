@@ -14,6 +14,7 @@ import (
 const (
 	gatewayLogCaptureLimit   = 256 * 1024
 	gatewayLogCaptureTimeout = 20 * time.Second
+	gatewayLogCaptureCommand = "tail -c 262144 /home/daytona/.openclaw/gateway.log 2>/dev/null"
 )
 
 // gatewayLogExecutor is deliberately limited to the operation needed for
@@ -55,12 +56,21 @@ func captureGatewayLogWithExecutor(ctx context.Context, executor gatewayLogExecu
 	ctx, cancel := context.WithTimeout(ctx, gatewayLogCaptureTimeout)
 	defer cancel()
 
-	result, err := executor.ExecWithTimeout(ctx, providerID, []string{"bash", "-lc", "tail -c 262144 ~/.openclaw/gateway.log"}, gatewayLogCaptureTimeout)
+	// Pass the script as a single element: ExecWithTimeout joins cmdArgs and wraps
+	// the result in `bash -c '...'` itself, so a "bash -c" prefix here would nest a
+	// second shell that swallows the arguments. Use an absolute path rather than ~,
+	// which is unreliable in Daytona exec sessions.
+	result, err := executor.ExecWithTimeout(ctx, providerID, []string{gatewayLogCaptureCommand}, gatewayLogCaptureTimeout)
 	if err != nil {
 		return err
 	}
 	if result == nil {
 		return fmt.Errorf("empty exec result")
+	}
+	// A missing log or a dead sandbox is the normal case, not something to record:
+	// writing an empty file would make a failed capture look like a successful one.
+	if result.ExitCode != 0 || len(result.Stdout) == 0 {
+		return nil
 	}
 
 	contents := []byte(result.Stdout)
