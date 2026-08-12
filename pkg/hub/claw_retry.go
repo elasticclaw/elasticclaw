@@ -108,16 +108,7 @@ func (s *Server) escalateClawHealthFailure(clawID, reason string) {
 }
 
 func (s *Server) escalateGatewayHealthFailure(clawID string) {
-	s.mu.RLock()
-	cc := s.claws[clawID]
-	s.mu.RUnlock()
-	if cc == nil {
-		return
-	}
-	cc.mu.RLock()
-	unhealthyCount := cc.gatewayUnhealthyCount
-	cc.mu.RUnlock()
-	if unhealthyCount < 12 {
+	if s.gatewayUnhealthyCount(clawID) < s.livenessSettings().gatewayUnhealthyMax {
 		return
 	}
 	s.escalateClawHealthFailure(clawID, "workspace unresponsive: gateway unhealthy for ~3m")

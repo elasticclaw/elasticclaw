@@ -36,13 +36,13 @@ func watchdogClaw(t *testing.T, s *Server, clawID string) *websocket.Conn {
 	// delivered_at is set so the seed can never be drained as a pending
 	// message and interfere with queue-draining tests.
 	if _, err := s.db.Exec(
-		`INSERT INTO claws(id,tenant_id,name,template,status,created_at) VALUES(?,?,?,?,?,?)`,
+		`INSERT OR IGNORE INTO claws(id,tenant_id,name,template,status,created_at) VALUES(?,?,?,?,?,?)`,
 		clawID, "test-tenant-id", "watchdog claw", "elasticclaw", "offline", time.Now(),
 	); err != nil {
 		t.Fatalf("pre-create claws row: %v", err)
 	}
 	if _, err := s.db.Exec(
-		`INSERT INTO messages(id,claw_id,tenant_id,role,content,format,created_at,delivered_at) VALUES(?,?,?,?,?,?,?,?)`,
+		`INSERT OR IGNORE INTO messages(id,claw_id,tenant_id,role,content,format,created_at,delivered_at) VALUES(?,?,?,?,?,?,?,?)`,
 		"seed-"+clawID, clawID, "test-tenant-id", "system", "seed", "pre", time.Now(), time.Now(),
 	); err != nil {
 		t.Fatalf("seed wake-suppression message: %v", err)
@@ -116,7 +116,6 @@ func TestWatchdogHealthyHeartbeatResetsUnhealthyCounter(t *testing.T) {
 	s, _ := NewTestServerWithConfig(t, &types.HubConfig{ClawToken: "claw-token"}, "", "", "")
 	const clawID = "watchdog-heartbeat-reset"
 	conn := watchdogClaw(t, s, clawID)
-	cc := watchdogClawConn(t, s, clawID)
 	writeHeartbeat := func(healthy bool) {
 		t.Helper()
 		if err := wsjson.Write(context.Background(), conn, types.WSMessage{Type: "heartbeat", Payload: map[string]any{"gateway_healthy": healthy}}); err != nil {
@@ -127,20 +126,59 @@ func TestWatchdogHealthyHeartbeatResetsUnhealthyCounter(t *testing.T) {
 		writeHeartbeat(false)
 	}
 	eventuallyWatchdog(t, func() bool {
-		cc.mu.RLock()
-		defer cc.mu.RUnlock()
-		return cc.gatewayUnhealthyCount == defaultGatewayUnhealthyMax-1
+		return s.gatewayUnhealthyCount(clawID) == defaultGatewayUnhealthyMax-1
 	}, "unhealthy heartbeat count")
 	writeHeartbeat(true)
-	eventuallyWatchdog(t, func() bool { cc.mu.RLock(); defer cc.mu.RUnlock(); return cc.gatewayUnhealthyCount == 0 }, "healthy reset")
+	eventuallyWatchdog(t, func() bool { return s.gatewayUnhealthyCount(clawID) == 0 }, "healthy reset")
 	for i := 0; i < defaultGatewayUnhealthyMax-1; i++ {
 		writeHeartbeat(false)
 	}
 	eventuallyWatchdog(t, func() bool {
-		cc.mu.RLock()
-		defer cc.mu.RUnlock()
-		return cc.gatewayUnhealthyCount == defaultGatewayUnhealthyMax-1
+		return s.gatewayUnhealthyCount(clawID) == defaultGatewayUnhealthyMax-1
 	}, "post-reset unhealthy count")
+}
+
+func TestWatchdogUnhealthyCounterSurvivesBridgeReconnect(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{ClawToken: "claw-token"}, "", "", "")
+	s.cronScheduler = newCronScheduler(s)
+	const clawID = "watchdog-unhealthy-reconnect"
+	conn := watchdogClaw(t, s, clawID)
+	if _, err := db.Exec(`UPDATE claws SET provider='noop', status='connected', bootstrap_ok=1 WHERE id=?`, clawID); err != nil {
+		t.Fatal(err)
+	}
+	runID, _, err := s.ensureTaskRunForClaw(clawID, TaskRunStart{RunKind: taskRunKindPRTask, OwnerType: taskRunOwnerFactory, AnalyticsEnabled: true, Tags: []string{}})
+	if err != nil {
+		t.Fatalf("create task run: %v", err)
+	}
+	writeUnhealthy := func(conn *websocket.Conn) {
+		t.Helper()
+		if err := wsjson.Write(context.Background(), conn, types.WSMessage{Type: "heartbeat", Payload: map[string]any{"gateway_healthy": false}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	first := defaultGatewayUnhealthyMax / 2
+	for i := 0; i < first; i++ {
+		writeUnhealthy(conn)
+	}
+	eventuallyWatchdog(t, func() bool { return s.gatewayUnhealthyCount(clawID) == first }, "unhealthy count before reconnect")
+	if err := conn.Close(websocket.StatusNormalClosure, "reconnect"); err != nil {
+		t.Fatal(err)
+	}
+	eventuallyWatchdog(t, func() bool {
+		s.mu.RLock()
+		defer s.mu.RUnlock()
+		return s.claws[clawID] == nil
+	}, "bridge disconnect")
+	conn = watchdogClaw(t, s, clawID)
+	for i := first; i < defaultGatewayUnhealthyMax; i++ {
+		writeUnhealthy(conn)
+	}
+	eventuallyWatchdog(t, func() bool {
+		var attempts, retryEvents int
+		_ = db.QueryRow(`SELECT attempt_count FROM task_runs WHERE id=?`, runID).Scan(&attempts)
+		_ = db.QueryRow(`SELECT COUNT(*) FROM task_run_events WHERE run_id=? AND event_key=?`, runID, "retry:"+clawID+":2").Scan(&retryEvents)
+		return attempts == 2 && retryEvents == 1
+	}, "replacement attempt scheduled after reconnect")
 }
 
 func TestHeartbeatRestartCountChangeDetectedInBothDirections(t *testing.T) {
