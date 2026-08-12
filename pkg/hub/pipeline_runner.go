@@ -2057,7 +2057,10 @@ func (s *Server) stopAgentTerminalWithReason(clawID, reason string, skipVMTermin
 
 	// 5. Terminate VM if still running
 	if providerID != "" && !skipVMTerminate {
-		go s.terminateVMForClaw(clawID, provider, providerID)
+		go func() {
+			s.captureGatewayLog(clawID, provider, providerID)
+			s.terminateVMForClaw(clawID, provider, providerID)
+		}()
 	}
 
 	log.Printf("[stopAgent] claw %s stopped: %s", clawID[:8], reason)
