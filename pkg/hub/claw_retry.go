@@ -330,7 +330,10 @@ func (s *Server) replaceClawInstance(ctx context.Context, tenantID, clawID, reas
 	}
 	s.mu.Unlock()
 	if providerID != "" {
-		go s.terminateVM(provider, providerID)
+		go func() {
+			s.captureGatewayLog(clawID, provider, providerID)
+			s.terminateVM(provider, providerID)
+		}()
 	}
 
 	bootstrapStatus := fmt.Sprintf("retrying (attempt %d/%d)", attempt, maxClawAttempts)

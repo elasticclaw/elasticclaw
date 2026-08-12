@@ -16,14 +16,27 @@ func TestLivenessSettingsWatchdogDefaults(t *testing.T) {
 }
 
 func TestLivenessSettingsWatchdogConfig(t *testing.T) {
-	checks := 7
-	s := &Server{hubCfg: &types.HubConfig{Liveness: &types.LivenessConfig{
-		GatewayUnhealthyChecks: &checks,
-		BusyTurnMax:            "20m",
-		SilentDeathMax:         "8m",
-	}}}
-	cfg := s.livenessSettings()
-	if cfg.gatewayUnhealthyMax != 7 || cfg.busyTurnMax != 20*time.Minute || cfg.silentDeathMax != 8*time.Minute {
-		t.Fatalf("watchdog config = %#v, want 7/20m/8m", cfg)
+	tests := []struct {
+		name        string
+		busyTurnMax string
+		wantBusy    time.Duration
+	}{
+		{name: "clamps below floor", busyTurnMax: "20m", wantBusy: minBusyTurnMax},
+		{name: "honors above floor", busyTurnMax: "90m", wantBusy: 90 * time.Minute},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			checks := 7
+			s := &Server{hubCfg: &types.HubConfig{Liveness: &types.LivenessConfig{
+				GatewayUnhealthyChecks: &checks,
+				BusyTurnMax:            tt.busyTurnMax,
+				SilentDeathMax:         "8m",
+			}}}
+			cfg := s.livenessSettings()
+			if cfg.gatewayUnhealthyMax != 7 || cfg.busyTurnMax != tt.wantBusy || cfg.silentDeathMax != 8*time.Minute {
+				t.Fatalf("watchdog config = %#v, want 7/%s/8m", cfg, tt.wantBusy)
+			}
+		})
 	}
 }

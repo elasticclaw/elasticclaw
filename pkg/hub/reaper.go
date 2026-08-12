@@ -65,6 +65,10 @@ func (s *Server) livenessSettings() livenessSettings {
 	cfg.claimTTL = parse(l.ClaimTTL, cfg.claimTTL, "claim_ttl")
 	cfg.interval = parse(l.ReaperInterval, cfg.interval, "reaper_interval")
 	cfg.busyTurnMax = parse(l.BusyTurnMax, cfg.busyTurnMax, "busy_turn_max")
+	if cfg.busyTurnMax < minBusyTurnMax {
+		log.Printf("[reaper] busy_turn_max %s is below the minimum %s (bridge turn cap plus recovery margin); using %s", cfg.busyTurnMax, minBusyTurnMax, minBusyTurnMax)
+		cfg.busyTurnMax = minBusyTurnMax
+	}
 	cfg.silentDeathMax = parse(l.SilentDeathMax, cfg.silentDeathMax, "silent_death_max")
 	cfg.prConditionsMaxWait = parse(l.PRConditionsMaxWait, cfg.prConditionsMaxWait, "pr_conditions_max_wait")
 	if l.GatewayUnhealthyChecks != nil {

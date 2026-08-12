@@ -66,6 +66,17 @@ var (
 	gatewayRestartBase int
 )
 
+// agentTurnTimeout bounds one agent turn. A turn spans an entire injected hub
+// message, which for implementation tasks routinely includes installs and full
+// test suites, so this is deliberately generous: exceeding it costs the whole
+// session context, not just the current step.
+//
+// The bridge is the authority on the turn cap; the hub's busy-turn watchdog
+// (defaultBusyTurnMax in pkg/hub/server.go) only recovers turns the bridge
+// never closed. Raising this without raising that one makes the watchdog
+// force-finish healthy long turns, so the two must move together.
+const agentTurnTimeout = time.Hour
+
 // ─── hub wire types ─────────────────────────────────────────────────────────
 
 type hubMsg struct {
@@ -4338,7 +4349,7 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 	}
 	runTurn := func(content string) {
 		go func(c string) {
-			agentCtx, agentCancel := context.WithTimeout(context.Background(), 30*time.Minute)
+			agentCtx, agentCancel := context.WithTimeout(context.Background(), agentTurnTimeout)
 			defer agentCancel()
 			reply, agentErr := gwSession.SendMessage(agentCtx, c, func(chunk string) {
 				_ = writeHub(hubMsg{
@@ -4458,7 +4469,7 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 					return
 				}
 
-				agentCtx, agentCancel := context.WithTimeout(context.Background(), 30*time.Minute)
+				agentCtx, agentCancel := context.WithTimeout(context.Background(), agentTurnTimeout)
 				defer agentCancel()
 
 				log.Printf("[bridge] → openclaw: %q", content[:min(len(content), 80)])
