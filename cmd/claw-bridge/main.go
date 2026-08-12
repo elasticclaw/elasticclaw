@@ -968,6 +968,12 @@ type gatewaySession struct {
 
 	connMu sync.Mutex
 	conn   *websocket.Conn
+	// sessionCancel stops the permanent read loop, and is called only when
+	// startup abandons this session. A healthy session never cancels it: its
+	// read loop is meant to live as long as the parent context. Holding the
+	// func here rather than in a local also keeps go vet's lostcancel check
+	// satisfied, since the success path deliberately does not call it.
+	sessionCancel context.CancelFunc
 
 	reconnectMu sync.Mutex
 
@@ -1001,25 +1007,40 @@ type gatewayUsage struct {
 // newGatewaySession creates a gatewaySession, establishes the gateway
 // connection, resolves (or creates) the persistent session, subscribes,
 // and starts the background read loop.
-func newGatewaySession(ctx context.Context, client *gatewayClient) (*gatewaySession, error) {
+func newGatewaySession(ctx context.Context, client *gatewayClient, attemptTimeout time.Duration) (*gatewaySession, error) {
 	gs := &gatewaySession{
 		client:  client,
 		pending: make(map[string]chan gwFrame),
 	}
 
-	if err := gs.connect(ctx); err != nil {
+	// The startup handshake must be bounded, but the read loop is permanent.
+	// Keep their contexts separate: readLoop exits permanently when its context
+	// is cancelled, while connect and initSession must time out so startup can
+	// retry a wedged gateway.
+	attemptCtx, cancelAttempt := context.WithTimeout(ctx, attemptTimeout)
+	defer cancelAttempt()
+	sessionCtx, cancelSession := context.WithCancel(ctx)
+	gs.sessionCancel = cancelSession
+
+	if err := gs.connect(attemptCtx); err != nil {
+		gs.sessionCancel()
 		return nil, err
 	}
 
 	// Start read loop BEFORE initSession — sendReq depends on the read loop
 	// to dispatch responses; without it sendReq blocks forever.
-	go gs.readLoop(ctx)
+	go gs.readLoop(sessionCtx)
 
-	if err := gs.initSession(ctx); err != nil {
+	if err := gs.initSession(attemptCtx); err != nil {
+		// Stop the discarded session before closing its connection. Otherwise its
+		// read loop can treat the close as a gateway outage and reconnect itself.
+		gs.sessionCancel()
 		gs.conn.CloseNow()
 		return nil, err
 	}
 
+	// Do not cancel sessionCtx here: it intentionally lives with the parent
+	// context for the lifetime of a healthy gateway session.
 	return gs, nil
 }
 
@@ -4052,7 +4073,7 @@ func main() {
 				continue
 			}
 		}
-		gwSession, err = newGatewaySession(ctx, gwClient)
+		gwSession, err = newGatewaySession(ctx, gwClient, gatewayReconnectTimeout)
 		if err != nil {
 			log.Printf("[bridge] failed to init gateway session: %v — retrying in 5s", err)
 			select {
