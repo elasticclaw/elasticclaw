@@ -124,3 +124,19 @@ func TestIsDaytonaNotFound(t *testing.T) {
 		t.Fatal("non-404 Daytona error should not be recognized as not found")
 	}
 }
+
+func TestTruncateFileCommandQuotesPath(t *testing.T) {
+	// Empty content cannot go through the upload API, which rejects it with
+	// "bad request: http: no such file" — a 0-byte .gitkeep or SQLite -wal in a
+	// checkpoint used to fail the entire restore because of it.
+	got := truncateFileCommand("/home/daytona/.openclaw/workspace/$SECRET/`touch /tmp/pwn`/it's.txt")
+	want := `: > '/home/daytona/.openclaw/workspace/$SECRET/` + "`touch /tmp/pwn`" + `/it'"'"'s.txt'`
+	if got != want {
+		t.Fatalf("truncateFileCommand = %q, want %q", got, want)
+	}
+	// A "bash -c" prefix here would nest a second shell inside the one
+	// ExecWithTimeout adds, and the path would never reach tail/truncate.
+	if strings.HasPrefix(got, "bash ") || strings.Contains(got, `> "`) {
+		t.Fatalf("expected a bare single-quoted redirect, got %q", got)
+	}
+}

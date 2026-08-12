@@ -163,6 +163,14 @@ func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'"
 }
 
+// truncateFileCommand creates or empties a file. It is returned as a single
+// script string because ExecWithTimeout joins cmdArgs and wraps the result in
+// `bash -c` itself — adding a "bash -c" prefix here would nest a second shell
+// that swallows the arguments.
+func truncateFileCommand(absPath string) string {
+	return ": > " + shellQuote(absPath)
+}
+
 // Status checks current sandbox state
 func (p *Provider) Status(ctx context.Context, instanceID string) (types.InstanceStatus, error) {
 	sandbox, err := p.client.Get(ctx, instanceID)
@@ -224,6 +232,22 @@ func (p *Provider) WriteFile(ctx context.Context, instanceID, remotePath string,
 		if err := sandbox.FileSystem.CreateFolder(ctx, dir); err != nil {
 			return fmt.Errorf("daytona writefile %s: %w", remotePath, err)
 		}
+	}
+
+	// Daytona's upload rejects empty content with "bad request: http: no such
+	// file", so an empty file has to be created through the shell instead. The
+	// payload is fixed-size, so this cannot hit the argv limit that made the
+	// old base64 upload path fail. Create() sidesteps the same API limitation by
+	// skipping empty template files outright.
+	if len(content) == 0 {
+		result, err := p.ExecWithTimeout(ctx, instanceID, []string{truncateFileCommand(absPath)}, 30*time.Second)
+		if err != nil {
+			return fmt.Errorf("daytona writefile %s (empty): %w", remotePath, err)
+		}
+		if result.ExitCode != 0 {
+			return fmt.Errorf("daytona writefile %s (empty) failed: %s", remotePath, result.Stdout)
+		}
+		return nil
 	}
 
 	if err := sandbox.FileSystem.UploadFile(ctx, content, absPath); err != nil {
