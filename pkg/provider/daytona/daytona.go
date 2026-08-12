@@ -207,6 +207,31 @@ func (p *Provider) Exec(ctx context.Context, instanceID string, cmdArgs []string
 	return p.ExecWithTimeout(ctx, instanceID, cmdArgs, 60*time.Second)
 }
 
+// WriteFile writes content to a file in an existing sandbox.
+func (p *Provider) WriteFile(ctx context.Context, instanceID, remotePath string, content []byte) error {
+	sandbox, err := p.client.Get(ctx, instanceID)
+	if err != nil {
+		return fmt.Errorf("daytona writefile %s: %w", remotePath, err)
+	}
+
+	absPath := remotePath
+	if !strings.HasPrefix(remotePath, "/") {
+		absPath = "/home/daytona/" + remotePath
+	}
+
+	dir := getDir(absPath)
+	if dir != "" && dir != "." {
+		if err := sandbox.FileSystem.CreateFolder(ctx, dir); err != nil {
+			return fmt.Errorf("daytona writefile %s: %w", remotePath, err)
+		}
+	}
+
+	if err := sandbox.FileSystem.UploadFile(ctx, content, absPath); err != nil {
+		return fmt.Errorf("daytona writefile %s: %w", remotePath, err)
+	}
+	return nil
+}
+
 // ExecWithTimeout runs a command with an explicit timeout. Use for long-running
 // operations like package installs that exceed the default 60s SDK HTTP timeout.
 func (p *Provider) ExecWithTimeout(ctx context.Context, instanceID string, cmdArgs []string, timeout time.Duration) (*types.ExecResult, error) {

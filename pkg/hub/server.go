@@ -63,6 +63,8 @@ type Server struct {
 	users map[string]*userConn // tenant_id -> []conn (broadcast)
 	// gatewayRestartCounts retains the heartbeat counter across WebSocket reconnects.
 	gatewayRestartCounts map[string]int
+	// gatewayUnhealthyCounts survives WebSocket reconnects so flapping gateways still escalate.
+	gatewayUnhealthyCounts map[string]int
 	// autoResumeRestartCounts records restart counts already handled per claw. Guarded by s.mu.
 	autoResumeRestartCounts map[string]int
 	lastTokenFailureLog     time.Time
@@ -198,31 +200,36 @@ func (s *Server) validModelAuthToken(clawID, token string) bool {
 	return want != "" && hmac.Equal([]byte(want), []byte(strings.TrimSpace(token)))
 }
 
+func (s *Server) gatewayUnhealthyCount(clawID string) int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.gatewayUnhealthyCounts[clawID]
+}
+
 type clawConn struct {
 	mu sync.RWMutex // protects mutable fields below
 
-	id                    string
-	tenantID              string
-	conn                  *websocket.Conn
-	tags                  []string        // cached from DB at registration time for access-control checks
-	contextUsage          int             // 0-100, updated from heartbeats
-	gatewayReady          bool            // true once bridge reports gateway session established
-	gatewayUnhealthyCount int             // consecutive unhealthy heartbeats
-	gatewayRestartCount   int             // cumulative bridge restarts reported by heartbeats
-	forcedFinishCount     int             // consecutive watchdog-forced streaming turn finishes
-	workflowStartPending  bool            // true while initial volume attach / wake is in flight
-	workflowStartDone     bool            // true once initial volume attach / wake has completed
-	streamingBuf          strings.Builder // accumulates chunks for current in-flight response
-	streamingMsgID        string          // pre-assigned message ID for the current stream
-	streamingSplit        bool            // true once activity has split this turn into multiple persisted segments
-	streamingStartedAt    time.Time       // when the current streaming turn started (zero if not streaming)
-	streamingTimeoutSent  bool            // true once the 12-min timeout message has been injected this turn
-	contextWarningSent    bool            // true once the context-nearly-full warning has been injected this turn
-	awaitingResponse      bool            // true as soon as a prompt is delivered, before the first chunk/activity
-	noProgressPaused      bool            // automatic delivery is paused after repeated turns with unchanged progress
-	lastTurnFinishedAt    time.Time       // when the last streaming turn ended (for post-restart resume window)
-	connectedAt           time.Time       // when this connection registered; immutable after registration
-	idleNotifiedAt        time.Time       // when the agent_idle notification fired for the current idle stretch (zero = armed)
+	id                   string
+	tenantID             string
+	conn                 *websocket.Conn
+	tags                 []string        // cached from DB at registration time for access-control checks
+	contextUsage         int             // 0-100, updated from heartbeats
+	gatewayReady         bool            // true once bridge reports gateway session established
+	gatewayRestartCount  int             // cumulative bridge restarts reported by heartbeats
+	forcedFinishCount    int             // consecutive watchdog-forced streaming turn finishes
+	workflowStartPending bool            // true while initial volume attach / wake is in flight
+	workflowStartDone    bool            // true once initial volume attach / wake has completed
+	streamingBuf         strings.Builder // accumulates chunks for current in-flight response
+	streamingMsgID       string          // pre-assigned message ID for the current stream
+	streamingSplit       bool            // true once activity has split this turn into multiple persisted segments
+	streamingStartedAt   time.Time       // when the current streaming turn started (zero if not streaming)
+	streamingTimeoutSent bool            // true once the 12-min timeout message has been injected this turn
+	contextWarningSent   bool            // true once the context-nearly-full warning has been injected this turn
+	awaitingResponse     bool            // true as soon as a prompt is delivered, before the first chunk/activity
+	noProgressPaused     bool            // automatic delivery is paused after repeated turns with unchanged progress
+	lastTurnFinishedAt   time.Time       // when the last streaming turn ended (for post-restart resume window)
+	connectedAt          time.Time       // when this connection registered; immutable after registration
+	idleNotifiedAt       time.Time       // when the agent_idle notification fired for the current idle stretch (zero = armed)
 
 	deliveryInFlight bool // serializes DB-backed delivery writes
 
@@ -379,6 +386,7 @@ func NewServer(addr, dbPath, identityDir string, hubCfg *types.HubConfig) (*Serv
 		claws:                   make(map[string]*clawConn),
 		users:                   make(map[string]*userConn),
 		gatewayRestartCounts:    make(map[string]int),
+		gatewayUnhealthyCounts:  make(map[string]int),
 		autoResumeRestartCounts: make(map[string]int),
 		dependencyStatus:        newDependencyStatusService(hubCfg),
 		fileAckWaiters:          make(map[string]chan types.FileAck),
@@ -1686,6 +1694,7 @@ func (s *Server) handleClawDetail(w http.ResponseWriter, r *http.Request) {
 			cc.conn.Close(websocket.StatusNormalClosure, "killed")
 			delete(s.claws, clawID)
 		}
+		delete(s.gatewayUnhealthyCounts, clawID)
 		s.mu.Unlock()
 		go func() {
 			s.checkpointBeforeTermination(clawID, "manual-kill")
@@ -2605,16 +2614,25 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 							}
 						}
 						if !hb.GatewayHealthy {
-							cc.gatewayUnhealthyCount++
-							if cc.gatewayUnhealthyCount == 1 {
-								log.Printf("[heartbeat] %s (%s): gateway unhealthy", rp.Name, clawID[:8])
-							} else if cc.gatewayUnhealthyCount%4 == 0 {
-								log.Printf("[heartbeat] %s (%s): gateway unhealthy for %d consecutive checks", rp.Name, clawID[:8], cc.gatewayUnhealthyCount)
+							if s.gatewayUnhealthyCounts == nil {
+								s.gatewayUnhealthyCounts = make(map[string]int)
 							}
-							if cc.gatewayUnhealthyCount == 4 && !cc.streamingStartedAt.IsZero() {
+							s.gatewayUnhealthyCounts[clawID]++
+							unhealthyCount := s.gatewayUnhealthyCounts[clawID]
+							if unhealthyCount == 1 {
+								log.Printf("[heartbeat] %s (%s): gateway unhealthy", rp.Name, clawID[:8])
+							} else if unhealthyCount%4 == 0 {
+								log.Printf("[heartbeat] %s (%s): gateway unhealthy for %d consecutive checks", rp.Name, clawID[:8], unhealthyCount)
+							}
+							if unhealthyCount == 4 && !cc.streamingStartedAt.IsZero() {
 								go s.injectHubMessageByID(clawID, "[hub] The gateway has been unresponsive for about a minute. If you're stuck in a long operation, consider sending [DONE] and starting fresh.")
 							}
-							if cc.gatewayUnhealthyCount == gatewayUnhealthyMax {
+							// Retry the escalation every gatewayUnhealthyMax checks rather than
+							// only on the first crossing. escalateClawHealthFailure declines
+							// while the claw is not yet 'connected' or is protected, and now
+							// that reconnects no longer reset the counter, a single declined
+							// attempt would otherwise be the last one this claw ever gets.
+							if unhealthyCount >= gatewayUnhealthyMax && unhealthyCount%gatewayUnhealthyMax == 0 {
 								shouldEscalateGateway = true
 							}
 						}
@@ -2623,9 +2641,9 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 						if hb.ContextUsage != prevUsage && (hb.ContextUsage >= 80 || prevUsage >= 80) {
 							log.Printf("[heartbeat] %s (%s): context_usage=%d%%", rp.Name, clawID[:8], hb.ContextUsage)
 						}
-						if hb.GatewayHealthy && cc.gatewayUnhealthyCount > 0 {
-							log.Printf("[heartbeat] %s (%s): gateway recovered after %d unhealthy checks", rp.Name, clawID[:8], cc.gatewayUnhealthyCount)
-							cc.gatewayUnhealthyCount = 0
+						if hb.GatewayHealthy && s.gatewayUnhealthyCounts[clawID] > 0 {
+							log.Printf("[heartbeat] %s (%s): gateway recovered after %d unhealthy checks", rp.Name, clawID[:8], s.gatewayUnhealthyCounts[clawID])
+							s.gatewayUnhealthyCounts[clawID] = 0
 						}
 						// Inject context warning once per streaming turn when usage is >=95%
 						if !cc.streamingStartedAt.IsZero() &&

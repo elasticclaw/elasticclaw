@@ -2044,6 +2044,7 @@ func (s *Server) stopAgentTerminalWithReason(clawID, reason string, skipVMTermin
 		cc.conn.Close(1000, "Agent stopped: "+safeReason)
 		delete(s.claws, clawID)
 	}
+	delete(s.gatewayUnhealthyCounts, clawID)
 	s.mu.Unlock()
 
 	// 4. Write issue-tracker comment without delaying agent shutdown.
@@ -2056,7 +2057,10 @@ func (s *Server) stopAgentTerminalWithReason(clawID, reason string, skipVMTermin
 
 	// 5. Terminate VM if still running
 	if providerID != "" && !skipVMTerminate {
-		go s.terminateVMForClaw(clawID, provider, providerID)
+		go func() {
+			s.captureGatewayLog(clawID, provider, providerID)
+			s.terminateVMForClaw(clawID, provider, providerID)
+		}()
 	}
 
 	log.Printf("[stopAgent] claw %s stopped: %s", clawID[:8], reason)

@@ -108,19 +108,15 @@ func (s *Server) escalateClawHealthFailure(clawID, reason string) {
 }
 
 func (s *Server) escalateGatewayHealthFailure(clawID string) {
-	s.mu.RLock()
-	cc := s.claws[clawID]
-	s.mu.RUnlock()
-	if cc == nil {
+	unhealthyMax := s.livenessSettings().gatewayUnhealthyMax
+	if s.gatewayUnhealthyCount(clawID) < unhealthyMax {
 		return
 	}
-	cc.mu.RLock()
-	unhealthyCount := cc.gatewayUnhealthyCount
-	cc.mu.RUnlock()
-	if unhealthyCount < 12 {
-		return
-	}
-	s.escalateClawHealthFailure(clawID, "workspace unresponsive: gateway unhealthy for ~3m")
+	// Report the check count rather than a duration: the threshold is configurable
+	// via gateway_unhealthy_checks, and the heartbeat cadence that would turn it into
+	// a duration lives in the bridge, not here. Keep the "workspace unresponsive"
+	// prefix — classifyAgentFailure matches on it.
+	s.escalateClawHealthFailure(clawID, fmt.Sprintf("workspace unresponsive: gateway unhealthy for %d consecutive checks", unhealthyMax))
 }
 
 // prepareClawRetry atomically fails the current attempt and creates its
