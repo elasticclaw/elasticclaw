@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -13,20 +14,26 @@ import (
 
 type gatewayLogExecutorStub struct {
 	result  *types.ExecResult
+	results []*types.ExecResult
 	err     error
-	args    []string
+	args    [][]string
 	timeout time.Duration
 }
 
 func (s *gatewayLogExecutorStub) ExecWithTimeout(_ context.Context, _ string, args []string, timeout time.Duration) (*types.ExecResult, error) {
-	s.args = args
+	s.args = append(s.args, args)
 	s.timeout = timeout
+	if len(s.results) > 0 {
+		result := s.results[0]
+		s.results = s.results[1:]
+		return result, s.err
+	}
 	return s.result, s.err
 }
 
 func TestCaptureGatewayLogWritesSecureTail(t *testing.T) {
 	dataDir := t.TempDir()
-	executor := &gatewayLogExecutorStub{result: &types.ExecResult{Stdout: "gateway stopped: out of memory\n"}}
+	executor := &gatewayLogExecutorStub{results: []*types.ExecResult{{Stdout: "gateway stopped: out of memory\n"}, {Stdout: "bridge reconnect timed out\n"}}}
 	if err := captureGatewayLogWithExecutor(context.Background(), executor, "claw-123", "sandbox-123", dataDir); err != nil {
 		t.Fatalf("captureGatewayLogWithExecutor: %v", err)
 	}
@@ -34,7 +41,7 @@ func TestCaptureGatewayLogWritesSecureTail(t *testing.T) {
 	// them in `bash -c '...'`, so a prefix here nests a second shell that eats the
 	// arguments and silently tails nothing. The stub cannot catch that, so assert the
 	// shape.
-	if got, want := executor.args, []string{gatewayLogCaptureCommand}; len(got) != len(want) || got[0] != want[0] {
+	if got, want := executor.args, [][]string{{gatewayLogCaptureCommand}, {bridgeLogCaptureCommand}}; len(got) != len(want) || got[0][0] != want[0][0] || got[1][0] != want[1][0] {
 		t.Fatalf("exec args = %q, want %q", got, want)
 	}
 	if executor.timeout != gatewayLogCaptureTimeout {
@@ -42,28 +49,45 @@ func TestCaptureGatewayLogWritesSecureTail(t *testing.T) {
 	}
 
 	files, err := filepath.Glob(filepath.Join(dataDir, "diagnostics", "claw-123-*.log"))
-	if err != nil || len(files) != 1 {
-		t.Fatalf("capture files = %q, %v; want one", files, err)
+	if err != nil || len(files) != 2 {
+		t.Fatalf("capture files = %q, %v; want two", files, err)
 	}
-	contents, err := os.ReadFile(files[0])
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got, want := string(contents), "gateway stopped: out of memory\n"; got != want {
-		t.Fatalf("capture contents = %q, want %q", got, want)
-	}
-	info, err := os.Stat(files[0])
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got, want := info.Mode().Perm(), os.FileMode(0o600); got != want {
-		t.Fatalf("capture mode = %o, want %o", got, want)
+
+	// Each file must carry the content of its OWN source. Asserting only that
+	// some file contains some expected line would stay green if the two captures
+	// were swapped, and an on-call reader would blame the bridge for a gateway
+	// stall.
+	for suffix, want := range map[string]string{
+		"-gateway.log": "gateway stopped: out of memory",
+		"-bridge.log":  "bridge reconnect timed out",
+	} {
+		matches, err := filepath.Glob(filepath.Join(dataDir, "diagnostics", "claw-123-*"+suffix))
+		if err != nil || len(matches) != 1 {
+			t.Fatalf("%s files = %q, %v; want one", suffix, matches, err)
+		}
+		contents, err := os.ReadFile(matches[0])
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(contents), want) {
+			t.Fatalf("%s contents = %q, want it to contain %q", suffix, contents, want)
+		}
+		info, err := os.Stat(matches[0])
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := info.Mode().Perm(), os.FileMode(0o600); got != want {
+			t.Fatalf("%s mode = %o, want %o", suffix, got, want)
+		}
 	}
 }
 
 func TestCaptureGatewayLogExecErrorLeavesNoFile(t *testing.T) {
 	dataDir := t.TempDir()
 	executor := &gatewayLogExecutorStub{err: errors.New("sandbox not found")}
+	// A transport error must still surface: silently returning nil would make a
+	// rotated API key indistinguishable from "the sandbox had no logs", and the
+	// caller's one-line failure log would never fire.
 	if err := captureGatewayLogWithExecutor(context.Background(), executor, "claw-123", "sandbox-123", dataDir); err == nil {
 		t.Fatal("captureGatewayLogWithExecutor error = nil, want error")
 	}
@@ -73,6 +97,21 @@ func TestCaptureGatewayLogExecErrorLeavesNoFile(t *testing.T) {
 	}
 	if len(files) != 0 {
 		t.Fatalf("capture files = %q, want none", files)
+	}
+}
+
+func TestCaptureGatewayLogCapturesOtherFileWhenOneTailIsEmpty(t *testing.T) {
+	dataDir := t.TempDir()
+	executor := &gatewayLogExecutorStub{results: []*types.ExecResult{{ExitCode: 1}, {Stdout: "bridge was stuck\n"}}}
+	if err := captureGatewayLogWithExecutor(context.Background(), executor, "claw-123", "sandbox-123", dataDir); err != nil {
+		t.Fatalf("captureGatewayLogWithExecutor: %v", err)
+	}
+	files, err := filepath.Glob(filepath.Join(dataDir, "diagnostics", "*-bridge.log"))
+	if err != nil || len(files) != 1 {
+		t.Fatalf("bridge capture files = %q, %v; want one", files, err)
+	}
+	if _, err := os.Stat(strings.Replace(files[0], "-bridge.log", "-gateway.log", 1)); !os.IsNotExist(err) {
+		t.Fatalf("gateway capture exists or stat failed: %v", err)
 	}
 }
 
