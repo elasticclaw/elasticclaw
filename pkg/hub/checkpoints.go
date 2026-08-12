@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
-	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -1021,24 +1020,12 @@ func (s *Server) restoreCheckpointToDaytona(ctx context.Context, clawID, instanc
 			return fmt.Errorf("read checkpoint blob %s: %w", f.SHA256, err)
 		}
 		remote := restoreRemotePath(f.Path, "/home/daytona", "/home/daytona/.openclaw/workspace")
-		cmd := checkpointDaytonaRestoreCommand(remote, data)
-		result, err := p.ExecWithTimeout(ctx, instanceID, []string{"bash", "-c", cmd}, 30*time.Second)
-		if err != nil {
+		if err := p.WriteFile(ctx, instanceID, remote, data); err != nil {
 			return fmt.Errorf("restore %s: %w", f.Path, err)
-		}
-		if result.ExitCode != 0 {
-			return fmt.Errorf("restore %s failed: %s", f.Path, result.Stdout)
 		}
 	}
 	s.markRestoreApplied(clawID, checkpointID)
 	return nil
-}
-
-func checkpointDaytonaRestoreCommand(remote string, data []byte) string {
-	encoded := base64.StdEncoding.EncodeToString(data)
-	return fmt.Sprintf(`export HOME=/home/daytona; mkdir -p %s; base64 -d > %s <<'ELASTICCLAW_CHECKPOINT_EOF'
-%s
-ELASTICCLAW_CHECKPOINT_EOF`, checkpointShellQuote(filepath.Dir(remote)), checkpointShellQuote(remote), encoded)
 }
 
 func (s *Server) restoreCheckpointToExedev(ctx context.Context, clawID, vmName string, p *exedevProvider.Provider) error {
