@@ -923,6 +923,11 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, ctx pipelineCon
 	// the claw on merge/close while the workflow is still blocked).
 	var runStdoutForPRScan string
 	if strings.TrimSpace(stage.OnEnter.Run.Command) != "" {
+		startMsg := fmt.Sprintf("[hub] ▶ Running workflow command for stage %q", stage.ID)
+		if stage.OnEnter.Run.Timeout != "" {
+			startMsg += fmt.Sprintf(" (timeout %s)", stage.OnEnter.Run.Timeout)
+		}
+		s.publishHubNotice(clawID, startMsg)
 		log.Printf("[pipeline] running workflow command for claw %s stage %q: %s", clawID[:8], stage.ID, stage.OnEnter.Run.Command)
 		result, err := s.executePipelineRunAction(clawID, stage.OnEnter.Run)
 		// Persist output so later stages can reference it via {{ .Outputs.<name>.<key> }}
@@ -963,6 +968,11 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, ctx pipelineCon
 
 	if dependencyUpdatesConfigured(stage.OnEnter.DependencyUpdates) {
 		outputName := dependencyUpdatesOutputName(stage.OnEnter.DependencyUpdates)
+		startMsg := fmt.Sprintf("[hub] ▶ Running dependency updates for stage %q", stage.ID)
+		if len(stage.OnEnter.DependencyUpdates.Ecosystems) > 0 {
+			startMsg += fmt.Sprintf(" (ecosystems: %s)", strings.Join(stage.OnEnter.DependencyUpdates.Ecosystems, ", "))
+		}
+		s.publishHubNotice(clawID, startMsg)
 		log.Printf("[pipeline] running dependency updates for claw %s stage %q output %q", clawID[:8], stage.ID, outputName)
 		result, err := s.executeDependencyUpdatesAction(clawID, stage.ID, stage.OnEnter.DependencyUpdates)
 		if err != nil || (result != nil && result.ExitCode != 0) {
@@ -1003,6 +1013,7 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, ctx pipelineCon
 
 	// Execute judge action if configured
 	if stage.OnEnter.Judge.Instructions != "" {
+		s.publishHubNotice(clawID, fmt.Sprintf("[hub] ▶ Running judge for stage %q", stage.ID))
 		log.Printf("[pipeline] running judge for claw %s stage %q", clawID[:8], stage.ID)
 		judgeResult, err := s.executeJudgeAction(clawID, stage.OnEnter.Judge, ctx)
 		if err != nil {
