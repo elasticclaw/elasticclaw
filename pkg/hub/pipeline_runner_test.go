@@ -1483,9 +1483,9 @@ func TestRunOnEnterJudgeBlocksOnFail(t *testing.T) {
 	if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=?`, clawID).Scan(&messageCount); err != nil {
 		t.Fatalf("count messages: %v", err)
 	}
-	// Should have 1 error message from the judge failure, not the inject message
-	if messageCount != 1 {
-		t.Fatalf("expected 1 message (judge error), got %d", messageCount)
+	// Should have 2 messages: judge start notice + judge error. Inject should NOT appear.
+	if messageCount != 2 {
+		t.Fatalf("expected 2 messages (judge start notice + judge error), got %d", messageCount)
 	}
 }
 
@@ -1522,9 +1522,9 @@ func TestRunOnEnterJudgeContinueOnError(t *testing.T) {
 	if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=?`, clawID).Scan(&messageCount); err != nil {
 		t.Fatalf("count messages: %v", err)
 	}
-	// Should have 2 messages: judge error + inject message (because continue_on_error=true)
-	if messageCount != 2 {
-		t.Fatalf("expected 2 messages (judge error + inject), got %d", messageCount)
+	// Should have 3 messages: judge start notice + judge error + inject message (because continue_on_error=true)
+	if messageCount != 3 {
+		t.Fatalf("expected 3 messages (judge start notice + judge error + inject), got %d", messageCount)
 	}
 }
 
@@ -1566,8 +1566,8 @@ func TestRunOnEnterRunCommandLogsAndInjectsOnSuccess(t *testing.T) {
 	if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=?`, clawID).Scan(&messageCount); err != nil {
 		t.Fatalf("count messages: %v", err)
 	}
-	if messageCount != 2 {
-		t.Fatalf("expected 2 messages (run completion + inject), got %d", messageCount)
+	if messageCount != 3 {
+		t.Fatalf("expected 3 messages (run start notice + run completion + inject), got %d", messageCount)
 	}
 }
 
@@ -1609,9 +1609,9 @@ func TestRunOnEnterDependencyUpdatesStopsOnError(t *testing.T) {
 	if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=?`, clawID).Scan(&messageCount); err != nil {
 		t.Fatalf("count messages: %v", err)
 	}
-	// Should have 1 error message; inject message should NOT appear because the stage aborted.
-	if messageCount != 1 {
-		t.Fatalf("expected 1 message (deps error), got %d", messageCount)
+	// Should have 2 messages: deps start notice + deps error. Inject message should NOT appear because the stage aborted.
+	if messageCount != 2 {
+		t.Fatalf("expected 2 messages (deps start notice + deps error), got %d", messageCount)
 	}
 }
 
@@ -1654,9 +1654,9 @@ func TestRunOnEnterDependencyUpdatesContinueOnError(t *testing.T) {
 	if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=?`, clawID).Scan(&messageCount); err != nil {
 		t.Fatalf("count messages: %v", err)
 	}
-	// Should have 2 messages: deps warning + inject message (because continue_on_error=true).
-	if messageCount != 2 {
-		t.Fatalf("expected 2 messages (deps warning + inject), got %d", messageCount)
+	// Should have 3 messages: deps start notice + deps warning + inject message (because continue_on_error=true).
+	if messageCount != 3 {
+		t.Fatalf("expected 3 messages (deps start notice + deps warning + inject), got %d", messageCount)
 	}
 }
 
@@ -1698,8 +1698,8 @@ func TestRunOnEnterDependencyUpdatesLogsAndInjectsOnSuccess(t *testing.T) {
 	if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=?`, clawID).Scan(&messageCount); err != nil {
 		t.Fatalf("count messages: %v", err)
 	}
-	if messageCount != 2 {
-		t.Fatalf("expected 2 messages (deps summary + inject), got %d", messageCount)
+	if messageCount != 3 {
+		t.Fatalf("expected 3 messages (deps start notice + deps summary + inject), got %d", messageCount)
 	}
 }
 
