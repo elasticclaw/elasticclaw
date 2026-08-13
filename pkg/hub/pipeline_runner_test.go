@@ -1122,6 +1122,50 @@ func TestInjectTemplateDataMergesOutputs(t *testing.T) {
 	}
 }
 
+func TestInjectRendersOutputsWithoutIssue(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
+
+	const clawID = "claw-cron-outputs"
+	_, err := db.Exec(
+		`INSERT INTO claws(id, tenant_id, name, template, status, pipeline_stage, created_at) VALUES(?,?,?,?,?,?,datetime('now'))`,
+		clawID, "test-tenant-id", "cron claw", "elasticclaw", "connected", "",
+	)
+	if err != nil {
+		t.Fatalf("insert claw: %v", err)
+	}
+
+	// Persist output from a prior run so a cron/manual stage can reference it.
+	s.persistPipelineOutput(clawID, "prepare", "branch_prep", &pipelineRunResult{
+		ExitCode: 0,
+		Stdout:   `{"status":"ready","branch":"deps/ec2-update-go","base_branch":"main"}`,
+	})
+
+	stage := pipeline.Stage{
+		ID:    "use_output",
+		Label: "Use Output",
+		OnEnter: pipeline.OnEnter{
+			Inject: "Status: {{ .Outputs.branch_prep.status }}\nBranch: {{ .Outputs.branch_prep.branch }}",
+		},
+	}
+
+	delivered, err := s.runOnEnter(clawID, stage, pipelineContext{})
+	if err != nil {
+		t.Fatalf("runOnEnter: %v", err)
+	}
+	if !delivered {
+		t.Fatalf("expected inject to be delivered")
+	}
+
+	want := "Status: ready\nBranch: deps/ec2-update-go"
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND content=?`, clawID, want).Scan(&count); err != nil {
+		t.Fatalf("count messages: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("expected 1 rendered inject message with %q, got %d", want, count)
+	}
+}
+
 func TestTransitionPipelineStageConcurrentCallsRunOnEnterOnce(t *testing.T) {
 	s, db := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
 
