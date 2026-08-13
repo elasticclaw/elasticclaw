@@ -1198,110 +1198,74 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, ctx pipelineCon
 		injectMsg := stage.OnEnter.Inject
 		manualInputs := s.loadManualTriggerInputs(clawID)
 
-		// Render {{.Issue.Identifier}}, {{.Issue.Title}}, {{.Issue.URL}} if this is a Linear claw
-		// GitHub Issues IDs are owner/repo/number format (contain "/"), Shortcut IDs start with "sc-"
-		if issueID != "" && !strings.HasPrefix(issueID, "sc-") && !strings.Contains(issueID, "/") {
-			log.Printf("[pipeline] attempting to render template for claw %s issue %s", clawID[:8], issueID)
-			linearToken := s.resolveLinearTokenForPipeline(ctx)
-			if linearToken == "" {
-				s.warnPipelineRender(clawID, "%s: no Linear issue tracker token configured; rendering inject with fallback issue context", ctx.Name())
-				injectMsg = renderInjectWithData(clawID, injectMsg, s.injectTemplateData(clawID, map[string]interface{}{
-					"Issue": &linearIssueDetails{Identifier: issueID},
-				}))
-				goto injectMessage
-			}
-			details, err := s.fetchLinearIssueDetails(linearToken, issueID)
-			if err != nil {
-				s.warnPipelineRender(clawID, "%s: failed to fetch Linear issue details for %s: %v", ctx.Name(), issueID, err)
-				details = &linearIssueDetails{Identifier: issueID}
-			}
-			if details == nil {
-				s.warnPipelineRender(clawID, "%s: Linear issue %s returned no details", ctx.Name(), issueID)
-				details = &linearIssueDetails{Identifier: issueID}
-			}
-			tmpl, err := template.New("inject").Parse(injectMsg)
-			if err != nil {
-				s.warnPipelineRender(clawID, "%s: inject template parse failed: %v", ctx.Name(), err)
-				goto injectMessage
-			}
-			var buf bytes.Buffer
-			data := s.injectTemplateData(clawID, map[string]interface{}{
-				"Issue": details,
-			})
-			if err := tmpl.Execute(&buf, data); err != nil {
-				s.warnPipelineRender(clawID, "%s: inject template execute failed: %v", ctx.Name(), err)
-				goto injectMessage
-			}
-			injectMsg = buf.String()
-		} else if strings.Contains(issueID, "/") {
-			// GitHub issue — fetch details and render with same {{.Issue.*}} variables
-			ghToken := s.resolveGitHubIssuesTokenForPipeline(ctx)
-			details := fallbackGitHubIssueDetails(issueID)
-			if ghToken == "" {
-				s.warnPipelineRender(clawID, "%s: no GitHub Issues token configured; rendering inject with fallback issue context", ctx.Name())
-				injectMsg = renderInjectWithData(clawID, injectMsg, s.injectTemplateData(clawID, map[string]interface{}{
-					"Issue": details,
-				}))
-				goto injectMessage
-			}
-			parts := strings.Split(issueID, "/")
-			if len(parts) != 3 {
-				s.warnPipelineRender(clawID, "%s: invalid GitHub issue ID format %q", ctx.Name(), issueID)
-				goto injectMessage
-			}
-			repo := parts[0] + "/" + parts[1]
-			var issueNum int
-			if _, err := fmt.Sscanf(parts[2], "%d", &issueNum); err != nil {
-				s.warnPipelineRender(clawID, "%s: invalid GitHub issue number in %q: %v", ctx.Name(), issueID, err)
-				goto injectMessage
-			}
-			base := s.githubBaseURL
-			if base == "" {
-				base = "https://api.github.com"
-			}
-			fetchedDetails, err := s.fetchGitHubIssueDetailsWithRetry(clawID, ghToken, repo, issueNum, base)
-			if err != nil || fetchedDetails == nil {
-				s.warnPipelineRender(clawID, "%s: failed to fetch GitHub issue details for %s: %v", ctx.Name(), issueID, err)
-			} else {
-				details = fetchedDetails
-			}
-			log.Printf("[pipeline] fetched GitHub issue %s: #%s title=%s", issueID, details.Identifier, details.Title)
-			tmpl, err := template.New("inject").Parse(injectMsg)
-			if err != nil {
-				s.warnPipelineRender(clawID, "%s: inject template parse failed: %v", ctx.Name(), err)
-				goto injectMessage
-			}
-			var buf bytes.Buffer
-			data := s.injectTemplateData(clawID, map[string]interface{}{
-				"Issue": details,
-			})
-			if err := tmpl.Execute(&buf, data); err != nil {
-				s.warnPipelineRender(clawID, "%s: inject template execute failed: %v", ctx.Name(), err)
-				goto injectMessage
-			}
-			injectMsg = buf.String()
-		} else {
-			log.Printf("[pipeline] skipping template render for claw %s: issueID=%q", clawID[:8], issueID)
-		}
+		// Build base template data from issue context, manual inputs, and persisted outputs.
+		baseData := map[string]interface{}{}
 
-		// For manual triggers, also try rendering with {{ .Inputs.* }} variables
-		// if no issue context was available
-		if issueID == "" {
-			tmpl, err := template.New("inject").Parse(injectMsg)
-			if err == nil {
-				var buf bytes.Buffer
-				if manualInputs != nil {
-					data := s.injectTemplateData(clawID, map[string]interface{}{
-						"Inputs": manualInputs,
-					})
-					if err := tmpl.Execute(&buf, data); err == nil {
-						injectMsg = buf.String()
+		// Render {{.Issue.Identifier}}, {{.Issue.Title}}, {{.Issue.URL}} when this
+		// claw is backed by a Linear or GitHub issue. Shortcut IDs (sc-...) are
+		// intentionally excluded from the Issue namespace.
+		if issueID != "" && !strings.HasPrefix(issueID, "sc-") {
+			if !strings.Contains(issueID, "/") {
+				// Linear issue
+				log.Printf("[pipeline] attempting to render template for claw %s issue %s", clawID[:8], issueID)
+				linearToken := s.resolveLinearTokenForPipeline(ctx)
+				details := &linearIssueDetails{Identifier: issueID}
+				if linearToken == "" {
+					s.warnPipelineRender(clawID, "%s: no Linear issue tracker token configured; rendering inject with fallback issue context", ctx.Name())
+				} else {
+					var err error
+					details, err = s.fetchLinearIssueDetails(linearToken, issueID)
+					if err != nil {
+						s.warnPipelineRender(clawID, "%s: failed to fetch Linear issue details for %s: %v", ctx.Name(), issueID, err)
+						details = &linearIssueDetails{Identifier: issueID}
+					}
+					if details == nil {
+						s.warnPipelineRender(clawID, "%s: Linear issue %s returned no details", ctx.Name(), issueID)
+						details = &linearIssueDetails{Identifier: issueID}
 					}
 				}
+				baseData["Issue"] = details
+			} else {
+				// GitHub issue — fetch details and render with same {{.Issue.*}} variables
+				ghToken := s.resolveGitHubIssuesTokenForPipeline(ctx)
+				details := fallbackGitHubIssueDetails(issueID)
+				if ghToken != "" {
+					parts := strings.Split(issueID, "/")
+					if len(parts) == 3 {
+						repo := parts[0] + "/" + parts[1]
+						var issueNum int
+						if _, err := fmt.Sscanf(parts[2], "%d", &issueNum); err == nil {
+							base := s.githubBaseURL
+							if base == "" {
+								base = "https://api.github.com"
+							}
+							fetchedDetails, err := s.fetchGitHubIssueDetailsWithRetry(clawID, ghToken, repo, issueNum, base)
+							if err != nil || fetchedDetails == nil {
+								s.warnPipelineRender(clawID, "%s: failed to fetch GitHub issue details for %s: %v", ctx.Name(), issueID, err)
+							} else {
+								details = fetchedDetails
+							}
+						} else {
+							s.warnPipelineRender(clawID, "%s: invalid GitHub issue number in %q: %v", ctx.Name(), issueID, err)
+						}
+					} else {
+						s.warnPipelineRender(clawID, "%s: invalid GitHub issue ID format %q", ctx.Name(), issueID)
+					}
+					log.Printf("[pipeline] fetched GitHub issue %s: #%s title=%s", issueID, details.Identifier, details.Title)
+				} else {
+					s.warnPipelineRender(clawID, "%s: no GitHub Issues token configured; rendering inject with fallback issue context", ctx.Name())
+				}
+				baseData["Issue"] = details
 			}
 		}
 
-	injectMessage:
+		if manualInputs != nil {
+			baseData["Inputs"] = manualInputs
+		}
+
+		// Always render with persisted outputs so cron and manual workflows can use {{.Outputs.*}}.
+		injectMsg = renderInjectWithData(clawID, injectMsg, s.injectTemplateData(clawID, baseData))
+
 		if inputContext := formatManualTriggerInputs(manualInputs); inputContext != "" {
 			injectMsg = inputContext + "\n\n" + injectMsg
 		}
