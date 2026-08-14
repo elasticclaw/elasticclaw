@@ -1,6 +1,6 @@
 "use client"
 
-import { Search, Pin, X, ChevronDown, PanelLeftClose, PanelLeft, Loader2, AlertCircle, LogOut, Settings, Plus } from "lucide-react"
+import { Search, Pin, X, ChevronDown, PanelLeftClose, PanelLeft, Loader2, AlertCircle, LogOut, Settings, Plus, BarChart3, LayoutGrid } from "lucide-react"
 import { useBranding } from "@/hooks/use-branding"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -56,6 +56,8 @@ interface SidebarProps {
   onToggleCollapse: () => void
   isAdmin?: boolean
   onSelectWorkflow?: (workflow: Workflow | null) => void
+  view?: "agents" | "analytics"
+  onToggleView?: () => void
 }
 
 /** Thin wrapper that gives ClawCard sortable DnD powers */
@@ -111,6 +113,8 @@ export function Sidebar({
   onToggleCollapse,
   isAdmin = true,
   onSelectWorkflow,
+  view = "agents",
+  onToggleView,
 }: SidebarProps) {
   const tagKeys = allTags
   const { appName } = useBranding()
@@ -171,6 +175,24 @@ export function Sidebar({
     load()
     return () => { cancelled = true }
   }, [claws.length, fetchManualWorkflows]) // re-check when claws change (new claw from trigger)
+
+  const handleSignOut = useCallback(async () => {
+    const token = getAuthToken() || ""
+    if (token) {
+      const { getHubUrl } = await import("@/lib/hub-url")
+      const hubUrl = getHubUrl()
+      const logoutUrl = hubUrl ? `${hubUrl}/api/auth/logout` : "/api/auth/logout"
+      await fetch(logoutUrl, { method: "POST", headers: { Authorization: `Bearer ${token}` } }).catch(() => {})
+    }
+    clearConfig()
+    window.location.href = "/login"
+  }, [])
+
+  // The view toggle row points at the destination: it reads "Analytics" while
+  // on the agents board and "Agents" while on analytics.
+  const inAnalytics = view === "analytics"
+  const viewToggleLabel = inAnalytics ? "Agents" : "Analytics"
+  const ViewToggleIcon = inAnalytics ? LayoutGrid : BarChart3
 
   const sensors = useSensors(
     useSensor(PointerSensor, {
@@ -247,7 +269,7 @@ export function Sidebar({
             </Button>
           )}
         </div>
-        <div className="flex flex-col items-center gap-1 py-2 overflow-y-auto flex-1">
+        <div className="flex flex-col items-center gap-1 py-2 overflow-y-auto flex-1 min-h-0">
           {allClaws.map((claw) => {
             const isSelected = claw.id === selectedClawId
             const hasUnread = claw.unreadCount > 0
@@ -285,6 +307,45 @@ export function Sidebar({
               </button>
             )
           })}
+        </div>
+
+        {/* Footer: view toggle + settings (admin) and sign out */}
+        <div className="p-2 border-t border-border flex flex-col items-center gap-1">
+          {isAdmin && (
+            <>
+              <Button
+                variant="ghost"
+                size="icon"
+                className={cn(
+                  "size-8 text-muted-foreground hover:text-foreground",
+                  inAnalytics && "bg-muted text-foreground"
+                )}
+                title={viewToggleLabel}
+                onClick={onToggleView}
+              >
+                <ViewToggleIcon className="size-4" />
+              </Button>
+              <Button
+                variant="ghost"
+                size="icon"
+                className="size-8 text-muted-foreground hover:text-foreground"
+                title="Settings"
+                onClick={() => { window.location.href = "/settings" }}
+              >
+                <Settings className="size-4" />
+              </Button>
+              <div className="my-0.5 w-6 border-t border-border" />
+            </>
+          )}
+          <Button
+            variant="ghost"
+            size="icon"
+            className="size-8 text-muted-foreground hover:text-destructive hover:bg-destructive/10"
+            title="Sign out"
+            onClick={handleSignOut}
+          >
+            <LogOut className="size-4" />
+          </Button>
         </div>
       </aside>
     )
@@ -422,7 +483,7 @@ export function Sidebar({
           </div>
         )}
 
-        <ScrollArea className="flex-1 scrollbar-hide">
+        <ScrollArea className="flex-1 min-h-0 scrollbar-hide">
           <div className="p-2">
             {!searchQuery && pinnedClaws.length > 0 && claws.length > 0 && (
               <div className="flex items-center gap-1.5 px-2 py-2">
@@ -473,40 +534,37 @@ export function Sidebar({
         </DragOverlay>
       </DndContext>
 
-      {/* Logout + Settings */}
+      {/* Footer: view toggle + settings (admin) and sign out */}
       <div className="p-2 border-t border-border">
-        <div className="flex items-center gap-1">
-          <Button
-            variant="ghost"
-            size="sm"
-            className="flex-1 justify-start gap-2 text-muted-foreground hover:text-foreground"
-            onClick={async () => {
-              const token = getAuthToken() || ""
-              if (token) {
-                const { getHubUrl } = await import("@/lib/hub-url")
-                const hubUrl = getHubUrl()
-                const logoutUrl = hubUrl ? `${hubUrl}/api/auth/logout` : "/api/auth/logout"
-                await fetch(logoutUrl, { method: "POST", headers: { Authorization: `Bearer ${token}` } }).catch(() => {})
-              }
-              clearConfig()
-              window.location.href = "/login"
-            }}
-          >
-            <LogOut className="size-4" />
-            Sign out
-          </Button>
-          {isAdmin && (
-            <Button
-              variant="ghost"
-              size="icon"
-              className="size-8 text-muted-foreground hover:text-foreground flex-shrink-0"
-              onClick={() => { window.location.href = "/settings" }}
-              title="Settings"
+        {isAdmin && (
+          <>
+            <button
+              onClick={onToggleView}
+              className={cn(
+                "flex w-full min-h-9 items-center gap-[9px] rounded-lg px-2.5 text-[12.5px] text-muted-foreground transition-colors hover:bg-muted hover:text-foreground",
+                inAnalytics && "bg-muted text-foreground"
+              )}
             >
-              <Settings className="size-4" />
-            </Button>
-          )}
-        </div>
+              <ViewToggleIcon className="size-4 flex-shrink-0" />
+              {viewToggleLabel}
+            </button>
+            <button
+              onClick={() => { window.location.href = "/settings" }}
+              className="flex w-full min-h-9 items-center gap-[9px] rounded-lg px-2.5 text-[12.5px] text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+            >
+              <Settings className="size-4 flex-shrink-0" />
+              Settings
+            </button>
+            <div className="my-1 border-t border-border" />
+          </>
+        )}
+        <button
+          onClick={handleSignOut}
+          className="flex w-full min-h-9 items-center gap-[9px] rounded-lg px-2.5 text-[12.5px] text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive"
+        >
+          <LogOut className="size-4 flex-shrink-0" />
+          Sign out
+        </button>
       </div>
     </aside>
     )

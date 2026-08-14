@@ -1,10 +1,10 @@
 "use client"
 
 import { useParams, usePathname, useRouter } from "next/navigation"
-import React, { Suspense, useEffect, useState, useCallback, useRef } from "react"
+import React, { useEffect, useState, useCallback, useRef } from "react"
 import { getHubUrl } from "@/lib/hub-url"
 import { getAuthToken } from "@/lib/auth-storage"
-import { Cpu, Key, Github, ChevronLeft, Shield, Zap, Copy, Check, LayoutTemplate, Trash2, Lock, Sparkles, Send, RotateCcw, Eye, EyeOff, ExternalLink, AlertTriangle, X, CheckCircle2, Webhook, Stethoscope, ArrowRight, Wrench, GitBranch, ChevronDown, BarChart3 } from "lucide-react"
+import { Cpu, Key, Github, ChevronLeft, Shield, Zap, Copy, Check, LayoutTemplate, Trash2, Lock, Sparkles, Send, RotateCcw, Eye, EyeOff, ExternalLink, AlertTriangle, X, CheckCircle2, Webhook, Stethoscope, ArrowRight, Wrench, GitBranch, ChevronDown } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Switch } from "@/components/ui/switch"
@@ -14,7 +14,6 @@ import Link from "next/link"
 import { VALID_SECTIONS, type Section } from "./sections"
 import { fetchWorkspaces, updateWorkflowControls, type RepositoryAccess, type Workspace, type Workflow } from "@/lib/api"
 import { useBranding } from "@/hooks/use-branding"
-import { AnalyticsCommandCenter } from "@/components/analytics-command-center"
 import { WorkflowRunsDialog } from "@/components/workflow-runs-dialog"
 
 function isValidSection(s: string): s is Section {
@@ -24,7 +23,6 @@ function isValidSection(s: string): s is Section {
 const WORKSPACE_SECTIONS = new Set<Section>([
   "workspaces",
   "workflows",
-  "workspace-analytics",
   "github",
   "issue-trackers",
   "secrets",
@@ -344,7 +342,6 @@ export default function SettingsSectionPage() {
       items: [
         { id: "workspaces", label: "Overview", icon: LayoutTemplate },
         { id: "workflows", label: "Workflows", icon: GitBranch },
-        { id: "workspace-analytics", label: "Analytics", icon: BarChart3 },
         { id: "github", label: "GitHub Apps", icon: Github },
         { id: "issue-trackers", label: "Issue Trackers", icon: Zap },
         { id: "secrets", label: "Secrets", icon: Lock },
@@ -369,9 +366,6 @@ export default function SettingsSectionPage() {
     },
   ]
   const settingsHref = (id: Section) => {
-    if (id === "workspace-analytics") {
-      return selectedWorkspace ? `/analytics?workspace=${encodeURIComponent(selectedWorkspace)}` : "/analytics"
-    }
     if (WORKSPACE_SECTIONS.has(id) && selectedWorkspace) {
       const workspaceBase = `/settings/${encodeURIComponent(selectedWorkspace)}`
       return id === "workspaces" ? workspaceBase : `${workspaceBase}/${id}`
@@ -455,7 +449,7 @@ export default function SettingsSectionPage() {
         </aside>
 
         {/* Content */}
-        <main className={(section === "ai-config" || section === "troubleshoot" || section === "workspace-analytics") ? "flex-1 min-h-0 flex flex-col overflow-hidden" : "flex-1 overflow-y-auto p-8 max-w-2xl"}>
+        <main className={(section === "ai-config" || section === "troubleshoot") ? "flex-1 min-h-0 flex flex-col overflow-hidden" : "flex-1 overflow-y-auto p-8 max-w-2xl"}>
           {error && <p className="mb-4 text-sm text-red-500">{error}</p>}
           {success && <p className="mb-4 text-sm text-green-500">{success}</p>}
 
@@ -479,11 +473,6 @@ export default function SettingsSectionPage() {
           )}
           {section === "workflows" && (
             <WorkflowsSection selectedWorkspace={selectedWorkspace} />
-          )}
-          {section === "workspace-analytics" && (
-            <Suspense fallback={null}>
-              <AnalyticsCommandCenter workspaceScope={selectedWorkspace || undefined} />
-            </Suspense>
           )}
           {section === "secrets" && (
             <SecretsSection settings={settings} workspace={selectedWorkspace} />

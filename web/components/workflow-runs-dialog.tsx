@@ -121,7 +121,7 @@ export function WorkflowRunsDialog({ workflow }: { workflow: Workflow }) {
               onClick={() => {
                 setOpen(false)
                 router.push(
-                  `/settings/workspace-analytics?workspace=${encodeURIComponent(workflow.workspaceName)}&workflow=${encodeURIComponent(workflow.name)}`
+                  `/analytics?workspace=${encodeURIComponent(workflow.workspaceName)}&workflow=${encodeURIComponent(workflow.name)}`
                 )
               }}
             >
