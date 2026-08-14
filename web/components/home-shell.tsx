@@ -32,10 +32,10 @@ export function HomeShell() {
   // Last analytics query string, so toggling away and back restores filters.
   const analyticsSearchRef = useRef("")
 
-  const [selectedClawId, setSelectedClawId] = useState<string | null>(() => {
-    if (typeof window === 'undefined') return null
-    return localStorage.getItem('elasticclaw_selected_claw') ?? null
-  })
+  // Storage-backed state is resolved after mount, never in the initializer:
+  // reading localStorage during the first client render makes it disagree with
+  // the SSR pass and React throws away the tree (hydration mismatch).
+  const [selectedClawId, setSelectedClawId] = useState<string | null>(null)
   const [searchQuery, setSearchQuery] = useState("")
   const [activeTagFilters, setActiveTagFilters] = useState<string[]>([])
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
@@ -43,10 +43,13 @@ export function HomeShell() {
   // board header hamburger; the footer destinations move to a bottom tab bar.
   const isMobile = useIsMobile()
   const [drawerOpen, setDrawerOpen] = useState(false)
-  const [configuredState, setConfiguredState] = useState<boolean | null>(() => {
-    if (typeof window === "undefined") return null
-    return isConfigured()
-  })
+  const [configuredState, setConfiguredState] = useState<boolean | null>(null)
+
+  // Hydrate storage-backed state once, after the client tree matches the server.
+  useEffect(() => {
+    setConfiguredState(isConfigured())
+    setSelectedClawId(localStorage.getItem("elasticclaw_selected_claw") ?? null)
+  }, [])
   const [isAdmin, setIsAdmin] = useState(false)
   const [adminChecked, setAdminChecked] = useState(false)
   const [selectedWorkflow, setSelectedWorkflow] = useState<Workflow | null>(null)
