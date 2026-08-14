@@ -23,6 +23,7 @@ import { CSS } from "@dnd-kit/utilities"
 import { MarkdownContent } from "@/components/markdown-content"
 import { COLOR_CLASSES, mapApiMessage } from "@/lib/mappers"
 import { useWindowedMessages } from "@/hooks/use-windowed-messages"
+import { useProgrammaticScrollFlag, usePinnedAutoScroll } from "@/hooks/use-pinned-scroll"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Badge } from "@/components/ui/badge"
@@ -331,7 +332,7 @@ function ClawCardBack({ claw }: { claw: Claw }) {
   }, [claw.id])
 
   return (
-    <div className="flex-1 overflow-y-auto scrollbar-hide p-4 space-y-4">
+    <div className="flex-1 overflow-y-auto scrollbar-thin p-4 space-y-4">
       <div>
         <h3 className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-2">
           Purpose
@@ -459,7 +460,8 @@ const ClawBoardCard = memo(function ClawBoardCard({
   )
   const conversationItems = useMemo(() => compactActivityRuns(visibleMessages), [visibleMessages])
   const latestActivity = useMemo(() => latestActivityMessage(visibleMessages), [visibleMessages])
-  const activityNow = useActivityNow(Boolean(latestActivity))
+  // Named apart from the module-level `activityNow` tick that useActivityNow reads.
+  const activityNowMs = useActivityNow(Boolean(latestActivity))
   const isStreaming = claw.isStreaming || Boolean(streamingBuffer?.hadChunks && streamingBuffer.text)
 
   const {
@@ -482,41 +484,38 @@ const ClawBoardCard = memo(function ClawBoardCard({
     setExpandedActivityGroups((prev) => ({ ...prev, [id]: !prev[id] }))
   }, [])
 
-  useEffect(() => {
-    if (!cardFollowingLatest.current) return
-    const el = msgScrollRef.current
-    if (!el) return
-    const scrollToLatest = () => {
-      if (cardFollowingLatest.current) el.scrollTop = el.scrollHeight
-    }
-    // Rich activity rows can finish sizing across several layout/paint passes,
-    // so retry briefly to land on the true bottom once their height settles.
-    const timers = [0, 50, 150].map((delay) => window.setTimeout(scrollToLatest, delay))
-    return () => timers.forEach(window.clearTimeout)
-  }, [messages])
+  const cardContentRef = useRef<HTMLDivElement>(null)
+  const { isProgrammaticRef: isCardProgrammaticScrollRef, mark: markCardProgrammaticScroll } = useProgrammaticScrollFlag()
 
-  // The streaming text lives outside `messages`, so follow it separately. It grows on
-  // every typewriter frame and needs no staged retries — its height is already settled.
-  useEffect(() => {
-    if (!cardFollowingLatest.current) return
-    const el = msgScrollRef.current
-    if (el) el.scrollTop = el.scrollHeight
-  }, [streamingBuffer?.text])
+  // Follow new rows and late content settling (rich activity rows sizing,
+  // streaming growth) while following; never touch the scroll otherwise.
+  usePinnedAutoScroll({
+    scrollRef: msgScrollRef,
+    contentRef: cardContentRef,
+    pinnedRef: cardFollowingLatest,
+    markProgrammaticScroll: markCardProgrammaticScroll,
+    bottomAnchor: messages,
+  })
 
   const handleCardScroll = useCallback(() => {
+    // Scrolls we initiate must not recompute the follow state mid-animation.
+    if (isCardProgrammaticScrollRef.current) return
     const el = msgScrollRef.current
     if (!el) return
     const followingLatest = el.scrollHeight - el.scrollTop - el.clientHeight <= FOLLOW_LATEST_THRESHOLD_PX
     cardFollowingLatest.current = followingLatest
     setIsCardFollowingLatest(followingLatest)
-  }, [])
+  }, [isCardProgrammaticScrollRef])
 
   const scrollCardToLatest = useCallback(() => {
     cardFollowingLatest.current = true
     setIsCardFollowingLatest(true)
     const el = msgScrollRef.current
-    if (el) el.scrollTop = el.scrollHeight
-  }, [])
+    if (el) {
+      markCardProgrammaticScroll()
+      el.scrollTop = el.scrollHeight
+    }
+  }, [markCardProgrammaticScroll])
   
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()
@@ -686,7 +685,9 @@ const ClawBoardCard = memo(function ClawBoardCard({
           
           {/* Messages area */}
           <div className="flex-1 relative min-h-0 overflow-hidden">
-          <div ref={msgScrollRef} onScroll={handleCardScroll} className="h-full overflow-y-auto scrollbar-hide p-3 space-y-2">
+          <div ref={msgScrollRef} onScroll={handleCardScroll} className="h-full overflow-y-auto scrollbar-thin p-3">
+            {/* Content wrapper — the ResizeObserver in usePinnedAutoScroll watches it. */}
+            <div ref={cardContentRef} className="space-y-2">
             {messages.length === 0 && !streamingBuffer ? (
               <p className="text-xs text-muted-foreground text-center py-4">
                 No messages yet
@@ -745,7 +746,7 @@ const ClawBoardCard = memo(function ClawBoardCard({
                       message={message}
                       variant="card"
                       label={isLatestVisibleActivity ? "Last activity" : undefined}
-                      now={isLatestVisibleActivity ? activityNow : undefined}
+                      now={isLatestVisibleActivity ? activityNowMs : undefined}
                     />
                   )
                 }
@@ -795,6 +796,7 @@ const ClawBoardCard = memo(function ClawBoardCard({
             {streamingBuffer && (
               <StreamingMessage state={streamingBuffer} variant="card" clawName={claw.name} />
             )}
+            </div>
           </div>
           {!isCardFollowingLatest && (
             <button
@@ -1541,7 +1543,15 @@ function ClawChatView({
     onPaste,
   } = useAttachments(claw.id)
 
-  const { messages, hasOlder, loadingOlder, scrollRef, onScroll: onWindowScroll } = useWindowedMessages({
+  const {
+    messages,
+    hasOlder,
+    loadingOlder,
+    scrollRef,
+    onScroll: onWindowScroll,
+    isProgrammaticScrollRef,
+    markProgrammaticScroll,
+  } = useWindowedMessages({
     clawId: claw.id,
     liveMessages,
   })
@@ -1550,48 +1560,37 @@ function ClawChatView({
   const [showScrollBtn, setShowScrollBtn] = useState(false)
   // Track whether user has scrolled away from the bottom
   const pinnedToBottom = useRef(true)
-
-  const isAtBottom = useCallback(() => {
-    const el = scrollRef.current
-    if (!el) return true
-    return el.scrollHeight - el.scrollTop - el.clientHeight < 60
-  }, [scrollRef])
+  const contentRef = useRef<HTMLDivElement>(null)
 
   const scrollToBottom = useCallback(() => {
     const el = scrollRef.current
     if (!el) return
+    markProgrammaticScroll()
     el.scrollTop = el.scrollHeight
     pinnedToBottom.current = true
     setShowScrollBtn(false)
-  }, [scrollRef])
+  }, [scrollRef, markProgrammaticScroll])
 
   const handleScroll = useCallback(() => {
+    // Scrolls we initiate must not recompute the pin from a mid-animation position.
+    if (isProgrammaticScrollRef.current) return
     const el = scrollRef.current
     if (!el) return
     const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 60
     pinnedToBottom.current = atBottom
     setShowScrollBtn(!atBottom)
     onWindowScroll()
-  }, [onWindowScroll, scrollRef])
+  }, [onWindowScroll, scrollRef, isProgrammaticScrollRef])
 
-  // Only auto-scroll when pinned to bottom
-  useEffect(() => {
-    if (!pinnedToBottom.current) return
-    const run = () => {
-      const el = scrollRef.current
-      if (el && pinnedToBottom.current) el.scrollTop = el.scrollHeight
-    }
-    const timers = [0, 50, 150, 400, 800].map((d) => setTimeout(run, d))
-    return () => timers.forEach(clearTimeout)
-  }, [messages, scrollRef])
-
-  // The streaming text lives outside `messages`, so follow it separately. It grows on
-  // every typewriter frame and needs no staged retries — its height is already settled.
-  useEffect(() => {
-    if (!pinnedToBottom.current) return
-    const el = scrollRef.current
-    if (el) el.scrollTop = el.scrollHeight
-  }, [streamingBuffer?.text, scrollRef])
+  // Follow new rows and late content settling (markdown, images, streaming
+  // growth) while pinned; never touch the scroll position otherwise.
+  usePinnedAutoScroll({
+    scrollRef,
+    contentRef,
+    pinnedRef: pinnedToBottom,
+    markProgrammaticScroll,
+    bottomAnchor: messages,
+  })
 
   const isSlashCommand = (value: string, command: string) =>
     value === command || value.startsWith(`${command} `)
@@ -1680,8 +1679,8 @@ function ClawChatView({
         <BootstrapProgress claw={claw} variant="full" />
       </header>
 
-      <div ref={scrollRef} onScroll={handleScroll} className="flex-1 overflow-y-auto scrollbar-hide p-6 relative">
-        <div className="space-y-4 max-w-3xl mx-auto">
+      <div ref={scrollRef} onScroll={handleScroll} className="flex-1 overflow-y-auto scrollbar-thin p-6 relative">
+        <div ref={contentRef} className="space-y-4 max-w-3xl mx-auto">
           {loadingOlder && (
             <div className="flex justify-center py-2">
               <span className="text-xs text-muted-foreground animate-pulse">Loading older messages...</span>

@@ -452,38 +452,38 @@ export function Sidebar({
         onDragStart={handleDragStart}
         onDragEnd={handleDragEnd}
       >
-        {/* Pinned Section */}
-        {pinnedClaws.length > 0 && !searchQuery && (
-          <div className="border-b border-border">
-            <div className="flex items-center gap-1.5 px-4 py-2">
-              <Pin className="size-3 text-muted-foreground" />
-              <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
-                Pinned
-              </span>
+        {/* Pinned section lives inside the scroll area — a long pinned list
+            must scroll with the rest instead of squeezing "All Agents" out. */}
+        <ScrollArea className="flex-1 min-h-0">
+          {pinnedClaws.length > 0 && !searchQuery && (
+            <div className="border-b border-border">
+              <div className="flex items-center gap-1.5 px-4 py-2">
+                <Pin className="size-3 text-muted-foreground" />
+                <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
+                  Pinned
+                </span>
+              </div>
+              <div className="px-2 pb-2">
+                <SortableContext
+                  items={pinnedClaws.map((c) => c.id)}
+                  strategy={verticalListSortingStrategy}
+                >
+                  {pinnedClaws.map((claw) => (
+                    <SortableClawCard
+                      key={claw.id}
+                      claw={claw}
+                      isSelected={claw.id === selectedClawId}
+                      onClick={() => onSelectClaw(claw.id)}
+                      onTogglePin={(e) => {
+                        e.stopPropagation()
+                        onTogglePin(claw.id)
+                      }}
+                    />
+                  ))}
+                </SortableContext>
+              </div>
             </div>
-            <div className="px-2 pb-2">
-              <SortableContext
-                items={pinnedClaws.map((c) => c.id)}
-                strategy={verticalListSortingStrategy}
-              >
-                {pinnedClaws.map((claw) => (
-                  <SortableClawCard
-                    key={claw.id}
-                    claw={claw}
-                    isSelected={claw.id === selectedClawId}
-                    onClick={() => onSelectClaw(claw.id)}
-                    onTogglePin={(e) => {
-                      e.stopPropagation()
-                      onTogglePin(claw.id)
-                    }}
-                  />
-                ))}
-              </SortableContext>
-            </div>
-          </div>
-        )}
-
-        <ScrollArea className="flex-1 min-h-0 scrollbar-hide">
+          )}
           <div className="p-2">
             {!searchQuery && pinnedClaws.length > 0 && claws.length > 0 && (
               <div className="flex items-center gap-1.5 px-2 py-2">

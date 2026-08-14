@@ -1,13 +1,18 @@
 "use client"
 
-import { useState, useRef, useCallback, useEffect } from "react"
+import { useState, useRef, useCallback, useEffect, useLayoutEffect, useMemo } from "react"
 import { fetchMessageTimeline } from "@/lib/api"
 import { mapApiMessage } from "@/lib/mappers"
 import { isLiveSegmentCoveredByDurable } from "@/lib/messages"
+import { useProgrammaticScrollFlag } from "@/hooks/use-pinned-scroll"
 import type { Message } from "@/lib/types"
 
 // Timeline page size — durable turns + activity_summary rows (not live tool floods).
 const PAGE_SIZE = 100
+// After a prepend restores the reading position, ignore top-of-scroll pager
+// triggers briefly — late layout (markdown, images) can shift content back
+// under the threshold and would otherwise page again immediately.
+const LOAD_OLDER_COOLDOWN_MS = 600
 const ROLE_ORDER: Record<Message["role"], number> = {
   user: 0,
   hub: 1,
@@ -46,6 +51,10 @@ interface UseWindowedMessages {
   loadOlder: () => Promise<void>
   scrollRef: React.RefObject<HTMLDivElement | null>
   onScroll: () => void
+  /** True while a scroll we initiated is settling — scroll handlers must ignore those events. */
+  isProgrammaticScrollRef: React.RefObject<boolean>
+  /** Call right before any programmatic `scrollTop` write on `scrollRef`. */
+  markProgrammaticScroll: () => void
 }
 
 export function useWindowedMessages({ clawId, liveMessages }: UseWindowedMessagesOptions): UseWindowedMessages {
@@ -55,12 +64,20 @@ export function useWindowedMessages({ clawId, liveMessages }: UseWindowedMessage
   const scrollRef = useRef<HTMLDivElement>(null)
   const loadedClawId = useRef<string | null>(null)
   const oldestTimestamp = useRef<string | null>(null)
+  const { isProgrammaticRef: isProgrammaticScrollRef, mark: markProgrammaticScroll } = useProgrammaticScrollFlag()
+  const loadInFlight = useRef(false)
+  const cooldownUntil = useRef(0)
+  // scrollHeight captured immediately before a prepend commits; consumed by the
+  // restore layout effect below.
+  const pendingRestore = useRef<number | null>(null)
 
   // Initial load — last PAGE_SIZE messages
   useEffect(() => {
     if (!clawId || loadedClawId.current === clawId) return
     loadedClawId.current = clawId
     oldestTimestamp.current = null
+    pendingRestore.current = null
+    cooldownUntil.current = 0
     setHistoricalMsgs([])
     setHasOlder(false)
 
@@ -76,11 +93,9 @@ export function useWindowedMessages({ clawId, liveMessages }: UseWindowedMessage
 
   // Load older messages when user scrolls to top
   const loadOlder = useCallback(async () => {
-    if (!hasOlder || loadingOlder || !oldestTimestamp.current) return
+    if (!hasOlder || loadInFlight.current || !oldestTimestamp.current) return
+    loadInFlight.current = true
     setLoadingOlder(true)
-
-    const el = scrollRef.current
-    const prevHeight = el?.scrollHeight ?? 0
 
     try {
       const apiMsgs = await fetchMessageTimeline(clawId, { before: oldestTimestamp.current, limit: PAGE_SIZE })
@@ -94,32 +109,53 @@ export function useWindowedMessages({ clawId, liveMessages }: UseWindowedMessage
       setHasOlder(hasOlderConversationPage(older, PAGE_SIZE))
       oldestTimestamp.current = oldestConversationCursor(older)
 
+      // Capture the height right before the prepend commits (not before the
+      // fetch — streaming may have grown the transcript while it was in
+      // flight). The restore effect below turns it into a delta once the new
+      // rows have actually laid out.
+      pendingRestore.current = scrollRef.current?.scrollHeight ?? 0
       setHistoricalMsgs((prev) => [...older, ...prev])
-
-      // Restore scroll position so prepend doesn't jump
-      requestAnimationFrame(() => {
-        if (el) {
-          el.scrollTop = el.scrollHeight - prevHeight
-        }
-      })
     } catch (err) {
       console.warn("Failed to load older messages:", err)
     } finally {
+      loadInFlight.current = false
       setLoadingOlder(false)
     }
-  }, [clawId, hasOlder, loadingOlder])
+  }, [clawId, hasOlder])
 
-  // Trigger loadOlder when scrolled near the top
-  const onScroll = useCallback(() => {
+  // Restore the reading position after a prepend. A layout effect keyed on the
+  // first message id runs synchronously after the new rows render, so the
+  // scrollHeight delta is measured against the real post-prepend layout — a
+  // single pre-captured height restored in a rAF could land mid-layout, jump
+  // the view, and immediately retrigger the top-of-scroll pager.
+  const firstHistoricalId = historicalMsgs[0]?.id
+  useLayoutEffect(() => {
+    if (pendingRestore.current === null) return
+    const prevHeight = pendingRestore.current
+    pendingRestore.current = null
     const el = scrollRef.current
-    if (!el || loadingOlder || !hasOlder) return
+    if (el) {
+      markProgrammaticScroll()
+      el.scrollTop += el.scrollHeight - prevHeight
+    }
+    cooldownUntil.current = Date.now() + LOAD_OLDER_COOLDOWN_MS
+  }, [firstHistoricalId, markProgrammaticScroll])
+
+  // Trigger loadOlder when the user scrolls near the top
+  const onScroll = useCallback(() => {
+    if (isProgrammaticScrollRef.current) return
+    const el = scrollRef.current
+    if (!el || loadInFlight.current || !hasOlder) return
+    if (Date.now() < cooldownUntil.current) return
     if (el.scrollTop < 200) {
       loadOlder()
     }
-  }, [loadOlder, loadingOlder, hasOlder])
+  }, [loadOlder, hasOlder, isProgrammaticScrollRef])
 
-  // Merge historical + live, deduplicate, sort by timestamp, cap window
-  const messages = (() => {
+  // Merge historical + live, deduplicate, sort by timestamp, cap window.
+  // Memoized — this array drives the auto-scroll effects downstream, so a
+  // fresh identity on every render would re-run them during streaming.
+  const messages = useMemo(() => {
     const seen = new Set<string>()
     const all: Message[] = []
     for (const m of historicalMsgs) {
@@ -139,9 +175,9 @@ export function useWindowedMessages({ clawId, liveMessages }: UseWindowedMessage
     }
     all.sort(compareMessages)
     return all
-  })()
+  }, [historicalMsgs, liveMessages])
 
-  return { messages, hasOlder, loadingOlder, loadOlder, scrollRef, onScroll }
+  return { messages, hasOlder, loadingOlder, loadOlder, scrollRef, onScroll, isProgrammaticScrollRef, markProgrammaticScroll }
 }
 
 function compareMessages(a: Message, b: Message): number {
