@@ -70,12 +70,14 @@ export function StepRow({
   /** Live clock (ms) — pass while the step is running so elapsed time ticks. */
   now?: number
 }) {
-  // Failed steps auto-expand until the user explicitly toggles them.
+  // Failed steps auto-expand until the user explicitly toggles them — full
+  // density only: a board card cannot afford an error dump eating its height,
+  // the red row + exit code already mark the failure there.
   const [userToggled, setUserToggled] = useState<boolean | null>(null)
   const anchor = useToggleAnchor()
   const hasBody = Boolean(step.result || step.error)
-  const expanded = (userToggled ?? step.status === "failed") && hasBody
   const isCard = density === "card"
+  const expanded = (userToggled ?? (step.status === "failed" && !isCard)) && hasBody
 
   const running = step.status === "running"
   const liveElapsed = running && now ? Math.max(0, now - step.startedAt.getTime()) : null

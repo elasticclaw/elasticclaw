@@ -10,7 +10,9 @@ import {
   pairActivitySteps,
   timelineStats,
   trailingActivityRun,
+  type Step,
 } from "@/lib/turns"
+import type { NowStripState } from "@/components/agent-timeline/now-strip"
 import { AgentTimeline } from "@/components/agent-timeline/timeline"
 import { TimelineToolbar, useTimelineDensity } from "@/components/agent-timeline/timeline-toolbar"
 import { NowStrip } from "@/components/agent-timeline/now-strip"
@@ -197,6 +199,104 @@ function StreamingMessage({
       </div>
     </div>
   )
+}
+
+function firstMeaningfulLine(text: string): string {
+  for (const line of text.split("\n")) {
+    const trimmed = line.replace(/^#+\s*/, "").trim()
+    if (trimmed) return trimmed
+  }
+  return text.trim()
+}
+
+/**
+ * The last question sentence of a message, if it plausibly asks the user
+ * something ("posso forçar push?"). The "?" must end the message or a
+ * sentence; the question starts after the previous sentence/line break.
+ */
+function extractQuestion(text: string): string | null {
+  const trimmed = text.trim()
+  const qIdx = trimmed.lastIndexOf("?")
+  if (qIdx === -1) return null
+  if (qIdx !== trimmed.length - 1 && !/\s/.test(trimmed[qIdx + 1])) return null
+  const before = trimmed.slice(0, qIdx)
+  const boundary = before.match(/[.!?\n][^.!?\n]*$/)
+  const start = boundary?.index !== undefined ? boundary.index + 1 : 0
+  const question = trimmed.slice(start, qIdx + 1).trim()
+  return question || null
+}
+
+function lastActivityError(messages: Message[]): string | null {
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const m = messages[i]
+    if (m.role === "activity" && m.activity?.error) return m.activity.error
+  }
+  return null
+}
+
+interface BoardCardNow {
+  state: NowStripState
+  text?: string
+  at?: number | null
+}
+
+/**
+ * The card's status line: is the agent working, waiting on the user, finished,
+ * broken, or gone — and the one-liner that proves it. Working defers to the
+ * NowStrip's live content (tool + elapsed + last-output age).
+ */
+function boardCardNow(
+  claw: Claw,
+  messages: Message[],
+  latestStep: Step | null,
+  isStreaming: boolean
+): BoardCardNow | null {
+  // BootstrapProgress owns the provisioning story.
+  if (claw.status === "provisioning") return null
+
+  let lastAt: number | null = null
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    if (messages[i].role === "system") continue
+    lastAt = messages[i].timestamp.getTime()
+    break
+  }
+
+  if (claw.status === "error") {
+    return {
+      state: "error",
+      text: claw.reason || lastActivityError(messages) || "Agent errored",
+      at: lastAt,
+    }
+  }
+  if (claw.status === "offline") {
+    const seen = claw.last_seen ? new Date(claw.last_seen).getTime() : NaN
+    return { state: "offline", at: Number.isFinite(seen) ? seen : lastAt }
+  }
+  if (isStreaming || latestStep?.status === "running") return { state: "working" }
+
+  // Nothing live: surface what the agent ended with. Transcript tail decides —
+  // trailing tool activity beats older prose, a question flags "needs you".
+  if (latestStep) {
+    return {
+      state: "done",
+      text: latestStep.detail ? `${latestStep.title} · ${latestStep.detail}` : latestStep.title,
+      at: (latestStep.endedAt ?? latestStep.startedAt).getTime(),
+    }
+  }
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const m = messages[i]
+    if (m.role === "system" || m.role === "activity" || m.role === "activity_summary") continue
+    const at = m.timestamp.getTime()
+    if (m.role === "claw") {
+      const text = m.content.trim()
+      const question = extractQuestion(text)
+      if (question) return { state: "waiting", text: question, at }
+      return { state: "done", text: firstMeaningfulLine(text), at }
+    }
+    if (m.role === "hub") return { state: "done", text: m.content, at }
+    if (m.role === "user") return { state: "done", text: "Waiting to start", at }
+  }
+  return { state: "done", text: "Idle", at: lastAt }
 }
 
 function formatUptime(seconds: number): string {
@@ -462,14 +562,40 @@ const ClawBoardCard = memo(function ClawBoardCard({
     [messages]
   )
   const conversationItems = useMemo(() => compactActivityRuns(visibleMessages), [visibleMessages])
-  // Latest step of the trailing activity run — the card's "what is happening
-  // right now" row (paired start/terminal, live elapsed while running).
+  // An offline/errored claw cannot still be running its dangling last step.
+  const allowTrailingRunning = claw.status !== "offline" && claw.status !== "error"
+  // Latest step of the trailing activity run — drives the card's status line
+  // (paired start/terminal, live elapsed while running).
   const latestStep = useMemo(() => {
-    const steps = demoteStaleRunning(pairActivitySteps(trailingActivityRun(visibleMessages)), true)
+    const steps = demoteStaleRunning(
+      pairActivitySteps(trailingActivityRun(visibleMessages)),
+      allowTrailingRunning
+    )
     return steps.length > 0 ? steps[steps.length - 1] : null
-  }, [visibleMessages])
+  }, [visibleMessages, allowTrailingRunning])
   const activityNowMs = useNowTick(Boolean(latestStep))
   const isStreaming = claw.isStreaming || Boolean(streamingBuffer?.hadChunks && streamingBuffer.text)
+  const cardNow = useMemo(
+    () => boardCardNow(claw, visibleMessages, latestStep, isStreaming),
+    [claw, visibleMessages, latestStep, isStreaming]
+  )
+  const runningStep = latestStep?.status === "running" ? latestStep : null
+  const lastMessageAt = messages.length > 0 ? messages[messages.length - 1].timestamp.getTime() : 0
+  // Footer stat line: steps and failures over the loaded window, plus whatever
+  // is still summarized behind unexpanded placeholders.
+  const cardStats = useMemo(() => {
+    const steps = pairActivitySteps(visibleMessages)
+    let toolCalls = 0
+    let failures = 0
+    for (const step of steps) {
+      if (step.kind === "tool") toolCalls += 1
+      if (step.status === "failed") failures += 1
+    }
+    for (const m of visibleMessages) {
+      if (m.role === "activity_summary") toolCalls += m.activitySummary?.count ?? 0
+    }
+    return { toolCalls, failures }
+  }, [visibleMessages])
 
   const {
     attachments,
@@ -697,7 +823,21 @@ const ClawBoardCard = memo(function ClawBoardCard({
               </div>
             )}
           </div>
-          
+
+          {/* Status line — what this agent is doing, with no clicks */}
+          {cardNow && (
+            <NowStrip
+              clawId={claw.id}
+              step={runningStep}
+              isStreaming={isStreaming}
+              lastMessageAt={lastMessageAt}
+              variant="card"
+              state={cardNow.state}
+              statusText={cardNow.text}
+              statusAt={cardNow.at}
+            />
+          )}
+
           {/* Messages area */}
           <div className="flex-1 relative min-h-0 overflow-hidden">
           <div
@@ -717,7 +857,7 @@ const ClawBoardCard = memo(function ClawBoardCard({
                 No messages yet
               </p>
             ) : (
-              conversationItems.map((item) => {
+              conversationItems.map((item, index) => {
                 if (item.type === "activity-summary") {
                   return (
                     <ActivitySummaryBlock
@@ -726,6 +866,10 @@ const ClawBoardCard = memo(function ClawBoardCard({
                       messages={item.messages}
                       summary={item.summary}
                       density="card"
+                      now={activityNowMs}
+                      keepTrailingRunning={
+                        allowTrailingRunning && index === conversationItems.length - 1
+                      }
                     />
                   )
                 }
@@ -808,14 +952,6 @@ const ClawBoardCard = memo(function ClawBoardCard({
                 )
               })
             )}
-            {latestStep && (
-              <div>
-                <div className="mb-0.5 text-[9px] uppercase tracking-wider text-muted-foreground/60">
-                  {latestStep.status === "running" ? "Now" : "Last activity"}
-                </div>
-                <StepRow step={latestStep} density="card" now={activityNowMs} />
-              </div>
-            )}
             {streamingBuffer && (
               <StreamingMessage state={streamingBuffer} variant="card" clawName={claw.name} />
             )}
@@ -836,7 +972,20 @@ const ClawBoardCard = memo(function ClawBoardCard({
             </button>
           )}
           </div>
-          
+
+          {/* Footer stat line */}
+          <div className="flex items-center gap-3 border-t border-border px-3 py-1 font-mono text-[10px] text-muted-foreground">
+            <span>
+              {cardStats.toolCalls} step{cardStats.toolCalls === 1 ? "" : "s"}
+            </span>
+            {cardStats.failures > 0 && (
+              <span className="text-red-400">
+                {cardStats.failures} failed
+              </span>
+            )}
+            <span className="ml-auto">ctx {claw.contextUsage}%</span>
+          </div>
+
           {/* Input area */}
           <form onSubmit={isPending ? (e) => e.preventDefault() : handleSubmit} className="p-2 border-t border-border flex flex-col gap-1.5">
             {attachments.length > 0 && (
