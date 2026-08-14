@@ -17,7 +17,6 @@ import { NowStrip } from "@/components/agent-timeline/now-strip"
 import { StepRow } from "@/components/agent-timeline/step-row"
 import { ActivitySummaryBlock } from "@/components/agent-timeline/activity-summary-block"
 import { useNowTick } from "@/hooks/use-now"
-import { useLastOutputAt } from "@/hooks/use-last-output"
 import { CopyTranscriptButton } from "@/components/copy-transcript-button"
 import {
   DndContext,
@@ -1226,11 +1225,9 @@ function ClawChatView({
   const isWorking = claw.isStreaming || Boolean(runningStep)
 
   // "Last output Xs ago" — the staleness signal. Live arrivals (chunks,
-  // activities) are noted event-side in use-hub; durable messages cover the
-  // just-opened case where nothing has streamed yet.
-  const liveOutputAt = useLastOutputAt(claw.id)
+  // activities) are noted event-side in use-hub; the NowStrip subscribes to
+  // them itself so per-chunk notifications do not re-render this panel.
   const lastMessageAt = messages.length > 0 ? messages[messages.length - 1].timestamp.getTime() : 0
-  const lastOutputAt = Math.max(lastMessageAt, liveOutputAt ?? 0) || null
 
   const [showScrollBtn, setShowScrollBtn] = useState(false)
   // Track whether user has scrolled away from the bottom
@@ -1412,7 +1409,7 @@ function ClawChatView({
       </header>
 
       {isWorking && (
-        <NowStrip step={runningStep} isStreaming={claw.isStreaming} lastOutputAt={lastOutputAt} />
+        <NowStrip clawId={claw.id} step={runningStep} isStreaming={claw.isStreaming} lastMessageAt={lastMessageAt} />
       )}
       <TimelineToolbar density={density} onDensityChange={setDensity} stats={stats} />
 
@@ -1433,7 +1430,7 @@ function ClawChatView({
           ) : (
             <AgentTimeline
               clawId={claw.id}
-              messages={messages}
+              turns={turns}
               density={density}
               renderMessage={renderMessage}
               isWorking={isWorking}

@@ -1,8 +1,8 @@
 "use client"
 
-import { useCallback, useMemo, useState, type ReactNode } from "react"
+import { useCallback, useState, type ReactNode } from "react"
 import type { Message } from "@/lib/types"
-import { groupIntoTurns, type Turn } from "@/lib/turns"
+import type { Turn } from "@/lib/turns"
 import { useNowTick } from "@/hooks/use-now"
 import { TurnCard } from "./turn-card"
 import { ToggleAnchorContext } from "./anchor-context"
@@ -21,7 +21,7 @@ function turnDefaultExpanded(turn: Turn, isLast: boolean, density: TimelineDensi
  */
 export function AgentTimeline({
   clawId,
-  messages,
+  turns,
   density,
   renderMessage,
   isWorking,
@@ -31,7 +31,8 @@ export function AgentTimeline({
   markProgrammaticScroll,
 }: {
   clawId: string
-  messages: Message[]
+  /** Precomputed by the owner (which also derives stats/now-strip from them). */
+  turns: Turn[]
   density: TimelineDensity
   renderMessage: (message: Message) => ReactNode
   /** Claw is streaming or mid-tool — the last turn presents as running. */
@@ -43,21 +44,22 @@ export function AgentTimeline({
   pinnedRef?: React.RefObject<boolean>
   markProgrammaticScroll?: () => void
 }) {
-  const turns = useMemo(() => groupIntoTurns(messages), [messages])
   const [expandedOverrides, setExpandedOverrides] = useState<Record<string, boolean>>({})
   const hasLiveWork = isWorking || turns.some((t) => t.status === "running")
   const now = useNowTick(hasLiveWork)
 
   // Compensate scrollTop after a toggle so content above the viewport does not
-  // shift the reading position. Discrete-event state updates flush
-  // synchronously in React DOM, so by the time the microtask runs the DOM has
-  // the post-toggle layout.
+  // shift the reading position. Measured now, applied in a rAF: React 19
+  // schedules even sync-lane renders in a microtask, so a microtask queued
+  // here would run *before* the toggle commits and always measure delta 0. A
+  // rAF runs after the commit but before paint, so the compensation is never
+  // visible as a jump.
   const anchor = useCallback(
     (el: HTMLElement) => {
       const scroller = scrollRef.current
       if (!scroller || pinnedRef?.current) return
       const top = el.getBoundingClientRect().top
-      queueMicrotask(() => {
+      requestAnimationFrame(() => {
         const delta = el.getBoundingClientRect().top - top
         if (delta !== 0) {
           markProgrammaticScroll?.()
@@ -67,6 +69,12 @@ export function AgentTimeline({
     },
     [scrollRef, pinnedRef, markProgrammaticScroll]
   )
+
+  // Stable across renders so memoized TurnCards do not re-render when a
+  // sibling toggles.
+  const toggleTurn = useCallback((key: string, current: boolean) => {
+    setExpandedOverrides((prev) => ({ ...prev, [key]: !current }))
+  }, [])
 
   const visibleTurns = density === "problems"
     ? turns.filter((turn, i) => turn.hasProblems || turn.failedCount > 0 || (i === turns.length - 1 && isWorking))
@@ -85,17 +93,16 @@ export function AgentTimeline({
       <div className="space-y-3">
         {visibleTurns.map((turn) => {
           const isLast = turn === turns[turns.length - 1]
-          const expanded =
-            expandedOverrides[`${density}:${turn.id}`] ?? turnDefaultExpanded(turn, isLast, density)
+          const toggleKey = `${density}:${turn.id}`
+          const expanded = expandedOverrides[toggleKey] ?? turnDefaultExpanded(turn, isLast, density)
           return (
             <TurnCard
               key={turn.id}
               turn={turn}
               density={density}
               expanded={expanded}
-              onToggle={() =>
-                setExpandedOverrides((prev) => ({ ...prev, [`${density}:${turn.id}`]: !expanded }))
-              }
+              toggleKey={toggleKey}
+              onToggle={toggleTurn}
               clawId={clawId}
               renderMessage={renderMessage}
               now={hasLiveWork && isLast ? now : undefined}

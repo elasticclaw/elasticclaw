@@ -3,24 +3,34 @@
 import { cn } from "@/lib/utils"
 import { formatAge, formatDurationMs, type Step } from "@/lib/turns"
 import { useNowTick } from "@/hooks/use-now"
+import { useLastOutputAt } from "@/hooks/use-last-output"
 
 /**
  * Sticky strip under the chat header while the agent is working: what is
  * running right now, for how long, and how long ago the last output arrived —
  * the staleness signal that tells the user whether the agent is stuck.
+ *
+ * Subscribes to the per-chunk output store itself: noteOutput fires on every
+ * websocket chunk, and only this strip should re-render for that — not the
+ * whole chat panel.
  */
 export function NowStrip({
+  clawId,
   step,
   isStreaming,
-  lastOutputAt,
+  lastMessageAt,
 }: {
+  clawId: string
   /** The currently running step (tool or model wait), if any. */
   step: Step | null
   isStreaming: boolean
-  /** Timestamp (ms) of the most recent output of any kind. */
-  lastOutputAt: number | null
+  /** Timestamp (ms) of the newest durable message — covers the just-opened
+   *  case where nothing has streamed yet. */
+  lastMessageAt: number
 }) {
   const now = useNowTick(true)
+  const liveOutputAt = useLastOutputAt(clawId)
+  const lastOutputAt = Math.max(lastMessageAt, liveOutputAt ?? 0) || null
   const elapsed = step ? Math.max(0, now - step.startedAt.getTime()) : null
   const outputAge = lastOutputAt !== null ? now - lastOutputAt : null
   // Quiet for a while with something supposedly running — surface it.
