@@ -7,9 +7,16 @@ import type { ActivitySummary as ActivitySummaryMeta, Message } from "@/lib/type
 
 // ─── Activity helpers (moved from conversation-view.tsx) ─────────────────────
 
+// Phase vocabularies mirror the bridge's isToolStartPhase/isToolTerminalPhase
+// (cmd/claw-bridge/main.go) — older bridges forward gateway phases verbatim,
+// so the web must accept the full set or start/terminal events stop pairing.
+const START_PHASES = ["running", "start", "started", "in_progress"]
+const TERMINAL_PHASES = ["completed", "complete", "done", "failed", "error", "cancelled", "canceled"]
+
 export function isPhaseMessage(value?: string): boolean {
   if (!value) return false
-  return ["running", "completed", "complete", "done", "failed", "error"].includes(value.toLowerCase())
+  const lower = value.toLowerCase()
+  return START_PHASES.includes(lower) || TERMINAL_PHASES.includes(lower)
 }
 
 export function nonPhaseMessage(value?: string): string {
@@ -80,12 +87,13 @@ export function activityGroupKey(message: Message): string {
 }
 
 export function isRunningActivity(message: Message): boolean {
-  return message.activity?.kind === "tool" && (message.activity.phase === "running" || message.activity.message === "running")
+  const phase = (message.activity?.phase || message.activity?.message || "").toLowerCase()
+  return message.activity?.kind === "tool" && START_PHASES.includes(phase)
 }
 
 export function isTerminalActivity(message: Message): boolean {
   const phase = (message.activity?.phase || message.activity?.message || "").toLowerCase()
-  return message.activity?.kind === "tool" && ["completed", "complete", "done", "failed", "error"].includes(phase)
+  return message.activity?.kind === "tool" && TERMINAL_PHASES.includes(phase)
 }
 
 /** Drop start events whose terminal twin is present (legacy row-level dedupe). */
@@ -213,10 +221,23 @@ export function pairActivitySteps(activities: Message[]): Step[] {
     }
     const key = activity.call_id || activityGroupKey(message)
     if (isRunningActivity(message)) {
+      // A call_id names one call: a second running event for an open call is a
+      // progress pulse ("running for 2m"), not a new step. Without the merge
+      // the pulse would both duplicate the row and steal the terminal event
+      // (the stack pops most-recent-first), leaving the real start running
+      // forever. The hash-fallback path keeps the stack semantics — there,
+      // identical running events may genuinely be distinct calls.
+      const openStack = open.get(key)
+      if (activity.call_id && openStack && openStack.length > 0) {
+        const step = openStack[openStack.length - 1]
+        const statusText = activityStatusText(message)
+        if (statusText) step.statusText = statusText
+        step.messages.push(message)
+        continue
+      }
       const step = makeStep(message, "tool", "running")
       steps.push(step)
-      const stack = open.get(key)
-      if (stack) stack.push(step)
+      if (openStack) openStack.push(step)
       else open.set(key, [step])
     } else if (isTerminalActivity(message)) {
       const started = open.get(key)?.pop()
