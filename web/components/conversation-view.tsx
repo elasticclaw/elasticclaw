@@ -675,7 +675,7 @@ const ClawBoardCard = memo(function ClawBoardCard({
         "shrink-0 relative",
         // Mobile cards size to their content (capped below) instead of a
         // fixed desktop-carryover height — several agents fit per screen.
-        isMobile ? "w-full" : "w-[320px] h-full [perspective:1000px]"
+        isMobile ? "w-full" : "w-[500px] h-full [perspective:1000px]"
       )}
     >
       <div
@@ -1812,7 +1812,8 @@ export function ConversationView({
 
   const scrollBoard = (direction: "left" | "right") => {
     if (boardRef.current) {
-      const scrollAmount = 340
+      // One card plus the flex gap, so the arrows page card-by-card.
+      const scrollAmount = 516
       boardRef.current.scrollBy({
         left: direction === "left" ? -scrollAmount : scrollAmount,
         behavior: "smooth",
