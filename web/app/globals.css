@@ -3,6 +3,14 @@
 
 @custom-variant dark (&:is(.dark *));
 
+/* Full-viewport height with mobile-safe dynamic units: 100dvh tracks the
+   visible viewport as browser chrome collapses; 100vh is the fallback for
+   browsers without dvh support. Used by the app shell and sidebar. */
+@utility h-screen-safe {
+  height: 100vh;
+  height: 100dvh;
+}
+
 :root {
   --background: oklch(1 0 0);
   --foreground: oklch(0.145 0 0);

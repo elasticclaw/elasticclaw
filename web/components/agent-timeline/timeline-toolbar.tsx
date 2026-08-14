@@ -67,7 +67,7 @@ export function TimelineToolbar({
   stats: TimelineStats
 }) {
   return (
-    <div className="flex items-center justify-between gap-3 border-b border-border px-6 py-1.5">
+    <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 border-b border-border px-3 md:px-6 py-1.5">
       <div className="flex items-center gap-0.5 rounded-md border border-border bg-muted/30 p-0.5">
         {DENSITY_OPTIONS.map((option) => (
           <button

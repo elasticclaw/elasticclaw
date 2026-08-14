@@ -109,13 +109,14 @@ export function StepRow({
         className={cn(
           "grid grid-cols-[auto_1fr_auto] items-baseline gap-x-2",
           isCard ? "py-0.5" : "py-1",
-          hasBody && "cursor-pointer rounded-sm hover:bg-muted/30"
+          // 44px tap target for expandable rows on touch screens
+          hasBody && "cursor-pointer rounded-sm hover:bg-muted/30 max-md:min-h-11 max-md:items-center"
         )}
       >
         <span className="self-center">
           <StepIcon step={step} className={cn(isCard ? "size-2.5" : "size-3", "shrink-0", stepTextTone(step))} />
         </span>
-        <span className="flex min-w-0 items-baseline gap-1.5">
+        <span className="flex min-w-0 items-baseline gap-1.5 max-md:flex-wrap max-md:gap-y-0">
           {running && (
             <span className="relative flex size-1.5 self-center">
               <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-blue-400 opacity-75" />
@@ -128,7 +129,9 @@ export function StepRow({
           {step.detail && (
             <span
               className={cn(
-                "min-w-0 truncate text-muted-foreground",
+                // Mobile: wrap to two lines with break-all so long paths never
+                // force horizontal overflow; desktop keeps the one-line truncate.
+                "min-w-0 truncate max-md:line-clamp-2 max-md:whitespace-normal max-md:break-all text-muted-foreground",
                 step.detailKind !== "text" && "font-mono",
                 isCard ? "text-[10px]" : "text-xs"
               )}
@@ -235,7 +238,7 @@ function StepGroupRow({
           setExpanded((v) => !v)
         }}
         className={cn(
-          "grid w-full grid-cols-[auto_1fr_auto] items-center gap-x-2 rounded-sm text-left hover:bg-muted/30",
+          "grid w-full grid-cols-[auto_1fr_auto] items-center gap-x-2 rounded-sm text-left hover:bg-muted/30 max-md:min-h-11",
           isCard ? "py-0.5" : "py-1"
         )}
       >

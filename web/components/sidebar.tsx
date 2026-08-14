@@ -6,8 +6,9 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { ClawCard } from "@/components/claw-card"
-import { clearConfig, fetchWorkspaces, type Workflow } from "@/lib/api"
-import { getAuthToken } from "@/lib/auth-storage"
+import { fetchWorkspaces, type Workflow } from "@/lib/api"
+import { signOut } from "@/lib/sign-out"
+import { useIsMobile } from "@/hooks/use-mobile"
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -58,6 +59,12 @@ interface SidebarProps {
   onSelectWorkflow?: (workflow: Workflow | null) => void
   view?: "agents" | "analytics"
   onToggleView?: () => void
+  /**
+   * "inline" is the desktop column; "drawer" renders inside the mobile Sheet:
+   * full-size, no collapse toggle, and no footer (the bottom tab bar and the
+   * board header menu own those destinations on mobile).
+   */
+  variant?: "inline" | "drawer"
 }
 
 /** Thin wrapper that gives ClawCard sortable DnD powers */
@@ -115,7 +122,9 @@ export function Sidebar({
   onSelectWorkflow,
   view = "agents",
   onToggleView,
+  variant = "inline",
 }: SidebarProps) {
+  const inDrawer = variant === "drawer"
   const tagKeys = allTags
   const { appName } = useBranding()
   const [activeDragClaw, setActiveDragClaw] = useState<Claw | null>(null)
@@ -176,17 +185,7 @@ export function Sidebar({
     return () => { cancelled = true }
   }, [claws.length, fetchManualWorkflows]) // re-check when claws change (new claw from trigger)
 
-  const handleSignOut = useCallback(async () => {
-    const token = getAuthToken() || ""
-    if (token) {
-      const { getHubUrl } = await import("@/lib/hub-url")
-      const hubUrl = getHubUrl()
-      const logoutUrl = hubUrl ? `${hubUrl}/api/auth/logout` : "/api/auth/logout"
-      await fetch(logoutUrl, { method: "POST", headers: { Authorization: `Bearer ${token}` } }).catch(() => {})
-    }
-    clearConfig()
-    window.location.href = "/login"
-  }, [])
+  const handleSignOut = useCallback(() => signOut(), [])
 
   // The view toggle row points at the destination: it reads "Analytics" while
   // on the agents board and "Agents" while on analytics.
@@ -194,12 +193,15 @@ export function Sidebar({
   const viewToggleLabel = inAnalytics ? "Agents" : "Analytics"
   const ViewToggleIcon = inAnalytics ? LayoutGrid : BarChart3
 
+  // On touch/mobile a 6px activation would steal one-finger scrolling, so
+  // reordering requires a press-and-hold instead. Desktop keeps the 6px
+  // distance so clicks pass through.
+  const isMobile = useIsMobile()
   const sensors = useSensors(
     useSensor(PointerSensor, {
-      activationConstraint: {
-        // Require 6px movement before drag starts — lets clicks pass through
-        distance: 6,
-      },
+      activationConstraint: isMobile
+        ? { delay: 350, tolerance: 8 }
+        : { distance: 6 },
     })
   )
 
@@ -243,9 +245,9 @@ export function Sidebar({
 
   let sidebar: React.ReactElement
 
-  if (isCollapsed) {
+  if (isCollapsed && !inDrawer) {
     sidebar = (
-      <aside className="w-12 h-screen flex flex-col border-r border-border bg-card">
+      <aside className="w-12 h-screen-safe flex flex-col border-r border-border bg-card">
         <div className="p-2 border-b border-border flex flex-col items-center gap-1">
           <Button
             variant="ghost"
@@ -351,8 +353,13 @@ export function Sidebar({
     )
   } else {
     sidebar = (
-      <aside className="w-[260px] h-screen flex flex-col border-r border-border bg-card">
-      <div className="flex items-center justify-between p-4 border-b border-border">
+      <aside
+        className={cn(
+          "flex flex-col bg-card",
+          inDrawer ? "w-full h-full" : "w-[260px] h-screen-safe border-r border-border"
+        )}
+      >
+      <div className={cn("flex items-center justify-between p-4 border-b border-border", inDrawer && "pr-12")}>
         <h1 className="text-lg font-semibold tracking-tight text-foreground">
           {appName}
         </h1>
@@ -369,15 +376,17 @@ export function Sidebar({
               {loadingManualWorkflows ? <Loader2 className="size-4 animate-spin" /> : <Plus className="size-4" />}
             </Button>
           )}
-          <Button
-            variant="ghost"
-            size="icon"
-            onClick={onToggleCollapse}
-            className="size-8"
-            title="Collapse sidebar"
-          >
-            <PanelLeftClose className="size-4" />
-          </Button>
+          {!inDrawer && (
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={onToggleCollapse}
+              className="size-8"
+              title="Collapse sidebar"
+            >
+              <PanelLeftClose className="size-4" />
+            </Button>
+          )}
         </div>
       </div>
 
@@ -534,7 +543,10 @@ export function Sidebar({
         </DragOverlay>
       </DndContext>
 
-      {/* Footer: view toggle + settings (admin) and sign out */}
+      {/* Footer: view toggle + settings (admin) and sign out. Hidden in the
+          mobile drawer — the bottom tab bar and the board header menu own
+          these destinations there. */}
+      {!inDrawer && (
       <div className="p-2 border-t border-border">
         {isAdmin && (
           <>
@@ -566,6 +578,7 @@ export function Sidebar({
           Sign out
         </button>
       </div>
+      )}
     </aside>
     )
   }

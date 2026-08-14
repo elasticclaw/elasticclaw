@@ -33,7 +33,9 @@ export function NowStrip({
       : "Working"
 
   return (
-    <div className="flex items-center gap-2 border-b border-border bg-muted/20 px-6 py-1.5 text-xs">
+    /* On phones the detail drops to a second full-width line (order-last +
+       basis-full) so the strip wraps to two lines instead of truncating away. */
+    <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 border-b border-border bg-muted/20 px-4 md:px-6 py-1.5 text-xs">
       <span className="relative flex size-2 shrink-0">
         <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-green-400 opacity-75" />
         <span className="relative inline-flex size-2 rounded-full bg-green-500" />
@@ -41,7 +43,10 @@ export function NowStrip({
       <span className="shrink-0 font-medium text-foreground">{what}</span>
       {step?.detail && (
         <span
-          className={cn("min-w-0 truncate text-muted-foreground", step.detailKind !== "text" && "font-mono")}
+          className={cn(
+            "min-w-0 truncate text-muted-foreground max-md:order-last max-md:basis-full max-md:break-all",
+            step.detailKind !== "text" && "font-mono"
+          )}
           title={step.detail}
         >
           {step.detail}

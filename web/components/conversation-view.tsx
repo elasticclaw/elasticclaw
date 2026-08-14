@@ -1,7 +1,7 @@
 "use client"
 
 import { useState, useRef, useEffect, useCallback, useMemo, memo } from "react"
-import { Send, Terminal, TerminalSquare, ChevronLeft, ChevronRight, ChevronDown, Loader2, LayoutGrid, Info, MessageSquare, Trash2, AlertCircle, Wrench, GripVertical, Settings2, Paperclip, File as FileIcon, X } from "lucide-react"
+import { Send, Terminal, TerminalSquare, ChevronLeft, ChevronRight, ChevronDown, Loader2, LayoutGrid, Info, MessageSquare, Trash2, AlertCircle, Wrench, GripVertical, Settings2, Paperclip, File as FileIcon, X, Menu, MoreVertical, LogOut, ClipboardCopy } from "lucide-react"
 import {
   compactActivityRuns,
   demoteStaleRunning,
@@ -45,6 +45,15 @@ import { Input } from "@/components/ui/input"
 import { Badge } from "@/components/ui/badge"
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet"
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog"
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu"
+import { useIsMobile } from "@/hooks/use-mobile"
+import { signOut } from "@/lib/sign-out"
+import { copyTextToClipboard, formatChatTranscript } from "@/lib/transcript"
 import { cn } from "@/lib/utils"
 import type { Claw, DependencyStatus, Message, ClawStatus } from "@/lib/types"
 import { getTerminalWsUrl, fetchClawPRs, type ClawPR } from "@/lib/api"
@@ -80,6 +89,8 @@ interface ConversationViewProps {
   onSelectClaw: (id: string) => void
   onDeselectClaw: () => void
   onReorderClaws: (ids: string[]) => void
+  /** Mobile only: opens the sidebar drawer from the board header hamburger. */
+  onOpenMenu?: () => void
 }
 
 const FOLLOW_LATEST_THRESHOLD_PX = 24
@@ -173,7 +184,7 @@ function StreamingMessage({
     <div className="flex w-full justify-start">
       <div
         className={cn(
-          "w-[70%] min-w-0 rounded-lg px-4 py-3",
+          "w-fit max-w-[88%] md:w-[70%] md:max-w-none min-w-0 rounded-lg px-4 py-3",
           (clawColor && COLOR_CLASSES[clawColor]?.bubble) || "bg-secondary"
         )}
       >
@@ -431,6 +442,10 @@ const ClawBoardCard = memo(function ClawBoardCard({
   const cardTextareaRef = useRef<HTMLTextAreaElement>(null)
   const cardFileInputRef = useRef<HTMLInputElement>(null)
   const [isFlipped, setIsFlipped] = useState(false)
+  // The 3D flip (perspective/preserve-3d) is brittle on mobile Safari — on
+  // phones the card is full-width in a vertical list and front/back is a
+  // plain visibility swap instead of a rotateY transform.
+  const isMobile = useIsMobile()
   const [showTerminal, setShowTerminal] = useState(false)
   const [confirmKill, setConfirmKill] = useState(false)
   const hasUnread = claw.unreadCount > 0
@@ -529,22 +544,22 @@ const ClawBoardCard = memo(function ClawBoardCard({
     <>
     <div
       className={cn(
-        "w-[320px] h-full shrink-0 relative",
-        "[perspective:1000px]"
+        "shrink-0 relative",
+        isMobile ? "w-full h-[420px]" : "w-[320px] h-full [perspective:1000px]"
       )}
     >
       <div
         className={cn(
-          "relative w-full h-full transition-transform duration-500",
-          "[transform-style:preserve-3d]",
-          isFlipped && "[transform:rotateY(180deg)]"
+          "relative w-full h-full",
+          !isMobile && "transition-transform duration-500 [transform-style:preserve-3d]",
+          !isMobile && isFlipped && "[transform:rotateY(180deg)]"
         )}
       >
         {/* Front - Chat view */}
         <div
           className={cn(
             "absolute inset-0 flex flex-col rounded-lg border border-border bg-card",
-            "[backface-visibility:hidden]",
+            isMobile ? isFlipped && "hidden" : "[backface-visibility:hidden]",
             hasUnread && "border-blue-500/30 bg-blue-950/10",
             isPending && "opacity-75"
           )}
@@ -576,15 +591,17 @@ const ClawBoardCard = memo(function ClawBoardCard({
           {/* Header - clickable to open full view */}
           <div className="p-3 border-b border-border">
             <div className="flex items-center gap-2 mb-1">
-              {/* Drag handle */}
-              <span
-                {...dragHandleProps}
-                className="cursor-grab active:cursor-grabbing text-muted-foreground/40 hover:text-muted-foreground/80 transition-colors shrink-0 -ml-1"
-                title="Drag to reorder"
-                onClick={(e) => e.stopPropagation()}
-              >
-                <GripVertical className="size-3.5" />
-              </span>
+              {/* Drag handle — desktop board only; mobile has no reordering */}
+              {dragHandleProps && (
+                <span
+                  {...dragHandleProps}
+                  className="cursor-grab active:cursor-grabbing text-muted-foreground/40 hover:text-muted-foreground/80 transition-colors shrink-0 -ml-1"
+                  title="Drag to reorder"
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  <GripVertical className="size-3.5" />
+                </span>
+              )}
               <StatusDot status={claw.status} isStreaming={isStreaming} />
               {claw.githubIssueUrl ? (
                 <>
@@ -834,7 +851,7 @@ const ClawBoardCard = memo(function ClawBoardCard({
                 type="button"
                 size="icon"
                 variant="ghost"
-                className="size-8 shrink-0"
+                className="size-8 max-md:size-11 shrink-0"
                 disabled={isPending}
                 onClick={(e) => { e.stopPropagation(); cardFileInputRef.current?.click() }}
                 title="Attach files"
@@ -874,7 +891,7 @@ const ClawBoardCard = memo(function ClawBoardCard({
               <Button
                 type="submit"
                 size="icon"
-                className="size-8 shrink-0"
+                className="size-8 max-md:size-11 shrink-0"
                 disabled={!canSubmitCard}
                 onClick={(e) => e.stopPropagation()}
               >
@@ -888,7 +905,9 @@ const ClawBoardCard = memo(function ClawBoardCard({
         <div
           className={cn(
             "absolute inset-0 flex flex-col rounded-lg border border-border bg-card",
-            "[backface-visibility:hidden] [transform:rotateY(180deg)]"
+            isMobile
+              ? !isFlipped && "hidden"
+              : "[backface-visibility:hidden] [transform:rotateY(180deg)]"
           )}
         >
           {/* Header */}
@@ -1103,7 +1122,7 @@ const MessageBubble = memo(function MessageBubble({
     <div className={cn("flex w-full", isUser ? "justify-end" : "justify-start")}>
       <div
         className={cn(
-          "w-[70%] min-w-0 rounded-lg px-4 py-3",
+          "w-fit max-w-[88%] md:w-[70%] md:max-w-none min-w-0 rounded-lg px-4 py-3",
           isUser
             ? "bg-blue-600/20 border border-blue-500/20"
             : (clawColor && COLOR_CLASSES[clawColor]?.bubble) || "bg-secondary"
@@ -1170,6 +1189,7 @@ function ClawChatView({
   const [cmdToast, setCmdToast] = useState<string | null>(null)
   const [terminalOpen, setTerminalOpen] = useState(false)
   const [confirmKill, setConfirmKill] = useState(false)
+  const isMobile = useIsMobile()
   const bottomRef = useRef<HTMLDivElement>(null)
   const panelTextareaRef = useRef<HTMLTextAreaElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
@@ -1307,39 +1327,87 @@ function ClawChatView({
         </div>
       )}
       <header className="border-b border-border">
-        <div className="px-6 pt-2">
+        <div className="px-4 md:px-6 pt-2">
           <ContextProgressBar usage={claw.contextUsage} size="lg" />
         </div>
-        <div className="flex items-center justify-between px-6 py-3">
-          <div className="flex min-w-0 items-center gap-4">
-            <Button variant="ghost" size="icon" onClick={onDeselectClaw} title="Back to dashboard" className="size-8">
-              <LayoutGrid className="size-4" />
+        {isMobile ? (
+          /* Full-screen detail: back chevron, truncated name, actions in ⋯ */
+          <div className="flex items-center gap-1 px-2 py-1.5">
+            <Button variant="ghost" size="icon" onClick={onDeselectClaw} title="Back to dashboard" className="size-11 shrink-0">
+              <ChevronLeft className="size-5" />
             </Button>
-            <ClawTitle
-              name={claw.name}
-              githubIssueId={claw.githubIssueId}
-              githubIssueUrl={claw.githubIssueUrl}
-              className="flex-1 font-mono text-xl font-semibold text-foreground"
-            />
+            <div className="min-w-0 flex-1">
+              <ClawTitle
+                name={claw.name}
+                githubIssueId={claw.githubIssueId}
+                githubIssueUrl={claw.githubIssueUrl}
+                className="block font-mono text-base font-semibold text-foreground"
+              />
+            </div>
             <StatusBadge status={claw.status} />
-            <span className="text-sm text-muted-foreground font-mono">{formatUptime(claw.uptime)}</span>
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button variant="ghost" size="icon" className="size-11 shrink-0" title="More actions">
+                  <MoreVertical className="size-5" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end">
+                <DropdownMenuItem
+                  disabled={messages.length === 0 && !streamingBuffer?.text?.trim()}
+                  onClick={() => {
+                    void copyTextToClipboard(
+                      formatChatTranscript({ claw, messages, streamingText: streamingBuffer?.text })
+                    )
+                  }}
+                >
+                  <ClipboardCopy className="size-4" />
+                  Copy transcript
+                </DropdownMenuItem>
+                {claw.ssh_host && (
+                  <DropdownMenuItem onClick={() => setTerminalOpen(true)}>
+                    <TerminalSquare className="size-4" />
+                    Terminal
+                  </DropdownMenuItem>
+                )}
+                <DropdownMenuItem variant="destructive" onClick={() => setConfirmKill(true)}>
+                  <Trash2 className="size-4" />
+                  Kill
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
           </div>
-          <div className="flex items-center gap-2">
-            <CopyTranscriptButton
-              claw={claw}
-              messages={messages}
-              streamingText={streamingBuffer?.text}
-              size="sm"
-            />
-            {claw.ssh_host && (
-              <Button variant="outline" size="sm" onClick={() => setTerminalOpen(true)}>
-                <TerminalSquare className="size-3.5 mr-1.5" />
-                Terminal
+        ) : (
+          <div className="flex items-center justify-between px-6 py-3">
+            <div className="flex min-w-0 items-center gap-4">
+              <Button variant="ghost" size="icon" onClick={onDeselectClaw} title="Back to dashboard" className="size-8">
+                <LayoutGrid className="size-4" />
               </Button>
-            )}
-            <Button variant="destructive" size="sm" onClick={() => setConfirmKill(true)}>Kill</Button>
+              <ClawTitle
+                name={claw.name}
+                githubIssueId={claw.githubIssueId}
+                githubIssueUrl={claw.githubIssueUrl}
+                className="flex-1 font-mono text-xl font-semibold text-foreground"
+              />
+              <StatusBadge status={claw.status} />
+              <span className="text-sm text-muted-foreground font-mono">{formatUptime(claw.uptime)}</span>
+            </div>
+            <div className="flex items-center gap-2">
+              <CopyTranscriptButton
+                claw={claw}
+                messages={messages}
+                streamingText={streamingBuffer?.text}
+                size="sm"
+              />
+              {claw.ssh_host && (
+                <Button variant="outline" size="sm" onClick={() => setTerminalOpen(true)}>
+                  <TerminalSquare className="size-3.5 mr-1.5" />
+                  Terminal
+                </Button>
+              )}
+              <Button variant="destructive" size="sm" onClick={() => setConfirmKill(true)}>Kill</Button>
+            </div>
           </div>
-        </div>
+        )}
         <BootstrapProgress claw={claw} variant="full" />
       </header>
 
@@ -1348,7 +1416,7 @@ function ClawChatView({
       )}
       <TimelineToolbar density={density} onDensityChange={setDensity} stats={stats} />
 
-      <div ref={scrollRef} onScroll={handleScroll} className="flex-1 overflow-y-auto scrollbar-thin p-6 relative">
+      <div ref={scrollRef} onScroll={handleScroll} className="flex-1 overflow-y-auto scrollbar-thin p-4 md:p-6 relative">
         <div ref={contentRef} className="space-y-4 max-w-3xl mx-auto">
           {loadingOlder && (
             <div className="flex justify-center py-2">
@@ -1397,7 +1465,8 @@ function ClawChatView({
         )}
       </div>
 
-      <div className="p-4 border-t border-border">
+      {/* Composer — padded above the home indicator on notched phones */}
+      <div className="p-4 border-t border-border pb-[calc(1rem+env(safe-area-inset-bottom))] md:pb-4">
         {cmdToast && (
           <div className="mb-2 max-w-3xl mx-auto text-xs text-amber-400 bg-amber-500/10 border border-amber-500/20 rounded-md px-3 py-2">
             {cmdToast}
@@ -1441,7 +1510,7 @@ function ClawChatView({
               size="icon"
               variant="ghost"
               onClick={() => fileInputRef.current?.click()}
-              className="shrink-0"
+              className="shrink-0 max-md:size-11"
               title="Attach files"
             >
               <Paperclip className="size-4" />
@@ -1474,7 +1543,7 @@ function ClawChatView({
               rows={1}
               className="flex-1 resize-none overflow-hidden rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 min-h-[40px]"
             />
-            <Button type="submit" size="icon" disabled={!canSubmit} className="shrink-0">
+            <Button type="submit" size="icon" disabled={!canSubmit} className="shrink-0 max-md:size-11">
               <Send className="size-4" />
               <span className="sr-only">Send message</span>
             </Button>
@@ -1525,10 +1594,12 @@ export function ConversationView({
   onSelectClaw,
   onDeselectClaw,
   onReorderClaws,
+  onOpenMenu,
 }: ConversationViewProps) {
   const boardRef = useRef<HTMLDivElement>(null)
   const [activeDragClaw, setActiveDragClaw] = useState<Claw | null>(null)
   const { logoUrl } = useBranding()
+  const isMobile = useIsMobile()
   const handleCardClick = useCallback((clawId: string) => onSelectClaw(clawId), [onSelectClaw])
   const handleCardSendMessage = useCallback((clawId: string, content: string) => onSendMessageToClaw(clawId, content), [onSendMessageToClaw])
   const handleCardKill = useCallback((clawId: string) => onKillClaw(clawId), [onKillClaw])
@@ -1596,27 +1667,51 @@ export function ConversationView({
     return (
       <main className="flex-1 flex flex-col bg-background min-w-0 overflow-hidden">
         {/* Header */}
-        <header className="flex items-center justify-between px-6 py-4 border-b border-border shrink-0">
-          <div className="flex items-center gap-3">
-            <Terminal className="size-5 text-muted-foreground" />
-            <h2 className="text-lg font-medium text-foreground">
+        <header className="flex items-center justify-between gap-2 px-3 md:px-6 py-2 md:py-4 border-b border-border shrink-0">
+          <div className="flex min-w-0 items-center gap-1 md:gap-3">
+            {isMobile && onOpenMenu ? (
+              <Button variant="ghost" size="icon" className="size-11 shrink-0" onClick={onOpenMenu} title="Open agent list">
+                <Menu className="size-5" />
+              </Button>
+            ) : (
+              <Terminal className="size-5 text-muted-foreground" />
+            )}
+            <h2 className="truncate text-lg font-medium text-foreground">
               {loading ? "Agents" : `${allClaws.length} Active Agents`}
             </h2>
           </div>
           <div className="flex min-w-0 flex-wrap items-center justify-end gap-x-4 gap-y-2 text-xs text-muted-foreground">
             <DependencyDowntimeBanner dependencies={downtimeDependencies} />
-            <div className="flex items-center gap-1.5">
-              <span className="size-2 rounded-full bg-green-500" />
-              <span>Connected</span>
+            <div className="hidden md:flex items-center gap-4">
+              <div className="flex items-center gap-1.5">
+                <span className="size-2 rounded-full bg-green-500" />
+                <span>Connected</span>
+              </div>
+              <div className="flex items-center gap-1.5">
+                <span className="size-2 rounded-full bg-amber-500" />
+                <span>Idle</span>
+              </div>
+              <div className="flex items-center gap-1.5">
+                <span className="size-2 rounded-full bg-red-500" />
+                <span>Offline</span>
+              </div>
             </div>
-            <div className="flex items-center gap-1.5">
-              <span className="size-2 rounded-full bg-amber-500" />
-              <span>Idle</span>
-            </div>
-            <div className="flex items-center gap-1.5">
-              <span className="size-2 rounded-full bg-red-500" />
-              <span>Offline</span>
-            </div>
+            {isMobile && (
+              /* Sign out moves here on mobile — the tab bar has no room for it */
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button variant="ghost" size="icon" className="size-11 shrink-0" title="More">
+                    <MoreVertical className="size-5" />
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end">
+                  <DropdownMenuItem onClick={() => { void signOut() }}>
+                    <LogOut className="size-4" />
+                    Sign out
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
+            )}
           </div>
         </header>
 
@@ -1640,6 +1735,22 @@ export function ConversationView({
                 <span className="text-muted-foreground select-none">$ </span>
                 elasticclaw create --name my-agent
               </div>
+            </div>
+          ) : isMobile ? (
+            /* Single-column vertical list: full-width cards, no reordering,
+               no scroll arrows — one-finger vertical scrolling only. */
+            <div className="h-full overflow-y-auto overflow-x-hidden p-3 flex flex-col gap-3">
+              {sortedClaws.map((c) => (
+                <ClawBoardCard
+                  key={c.id}
+                  claw={c}
+                  messages={allMessages[c.id] ?? EMPTY_MESSAGES}
+                  streamingBuffer={streamingBuffers[c.id]}
+                  onClick={handleCardClick}
+                  onSendMessage={handleCardSendMessage}
+                  onKill={handleCardKill}
+                />
+              ))}
             </div>
           ) : (
           <>

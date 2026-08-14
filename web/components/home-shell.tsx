@@ -7,6 +7,9 @@ import { ConversationView } from "@/components/conversation-view"
 import { AnalyticsCommandCenter } from "@/components/analytics-command-center"
 import { SetupScreen } from "@/components/setup-screen"
 import { ManualTriggerModal } from "@/components/manual-trigger-modal"
+import { MobileTabBar } from "@/components/mobile-tab-bar"
+import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet"
+import { useIsMobile } from "@/hooks/use-mobile"
 import { useHub } from "@/hooks/use-hub"
 import { isConfigured, type Workflow } from "@/lib/api"
 import { requestAuthToken } from "@/lib/auth-storage"
@@ -34,6 +37,10 @@ export function HomeShell() {
   const [searchQuery, setSearchQuery] = useState("")
   const [activeTagFilters, setActiveTagFilters] = useState<string[]>([])
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
+  // Below 768px the sidebar becomes a slide-over drawer opened from the
+  // board header hamburger; the footer destinations move to a bottom tab bar.
+  const isMobile = useIsMobile()
+  const [drawerOpen, setDrawerOpen] = useState(false)
   const [configuredState, setConfiguredState] = useState<boolean | null>(() => {
     if (typeof window === "undefined") return null
     return isConfigured()
@@ -175,6 +182,7 @@ export function HomeShell() {
       localStorage.setItem('elasticclaw_selected_claw', id)
       setUnreadCount(id, 0)
       loadMessages(id)
+      setDrawerOpen(false)
     },
     [loadMessages, setUnreadCount]
   )
@@ -245,7 +253,7 @@ export function HomeShell() {
 
   // Show loading state until we know if configured
   if (configuredState === null) {
-    return <div className="flex h-screen bg-background items-center justify-center" />
+    return <div className="flex h-screen-safe bg-background items-center justify-center" />
   }
 
   // Show setup screen if not configured
@@ -253,30 +261,48 @@ export function HomeShell() {
     return <SetupScreen onConnected={() => setConfiguredState(true)} />
   }
 
+  const sidebar = (
+    <Sidebar
+      claws={filteredClaws}
+      pinnedClaws={filteredPinnedClaws}
+      allClawIds={claws.map((c) => c.id)}
+      selectedClawId={selectedClawId}
+      onSelectClaw={handleSelectClaw}
+      onTogglePin={handleTogglePin}
+      searchQuery={searchQuery}
+      onSearchChange={setSearchQuery}
+      allTags={allTags}
+      activeTagFilters={activeTagFilters}
+      onAddTagFilter={handleAddTagFilter}
+      onRemoveTagFilter={handleRemoveTagFilter}
+      onClearTagFilters={handleClearTagFilters}
+      isCollapsed={!isMobile && sidebarCollapsed}
+      onToggleCollapse={() => setSidebarCollapsed(!sidebarCollapsed)}
+      onReorderClaws={reorderClaws}
+      isAdmin={isAdmin}
+      onSelectWorkflow={setSelectedWorkflow}
+      view={view}
+      onToggleView={handleToggleView}
+      variant={isMobile ? "drawer" : "inline"}
+    />
+  )
+
+  // The tab bar shows on the board and analytics; the agent detail view is
+  // full-screen (back chevron returns to the board).
+  const showTabBar = isMobile && (view === "analytics" || !selectedClaw)
+
   return (
-    <div className="flex h-screen bg-background">
-      <Sidebar
-        claws={filteredClaws}
-        pinnedClaws={filteredPinnedClaws}
-        allClawIds={claws.map((c) => c.id)}
-        selectedClawId={selectedClawId}
-        onSelectClaw={handleSelectClaw}
-        onTogglePin={handleTogglePin}
-        searchQuery={searchQuery}
-        onSearchChange={setSearchQuery}
-        allTags={allTags}
-        activeTagFilters={activeTagFilters}
-        onAddTagFilter={handleAddTagFilter}
-        onRemoveTagFilter={handleRemoveTagFilter}
-        onClearTagFilters={handleClearTagFilters}
-        isCollapsed={sidebarCollapsed}
-        onToggleCollapse={() => setSidebarCollapsed(!sidebarCollapsed)}
-        onReorderClaws={reorderClaws}
-        isAdmin={isAdmin}
-        onSelectWorkflow={setSelectedWorkflow}
-        view={view}
-        onToggleView={handleToggleView}
-      />
+    <div className="flex h-screen-safe bg-background">
+      {isMobile ? (
+        <Sheet open={drawerOpen} onOpenChange={setDrawerOpen}>
+          <SheetContent side="left" className="w-[85vw] max-w-[320px] gap-0 p-0">
+            <SheetTitle className="sr-only">Agents</SheetTitle>
+            {sidebar}
+          </SheetContent>
+        </Sheet>
+      ) : (
+        sidebar
+      )}
       <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
         {view === "analytics" ? (
           isAdmin ? (
@@ -301,6 +327,15 @@ export function HomeShell() {
             onReorderClaws={reorderClaws}
             loading={loading}
             hubError={hubError}
+            onOpenMenu={isMobile ? () => setDrawerOpen(true) : undefined}
+          />
+        )}
+        {showTabBar && (
+          <MobileTabBar
+            view={view}
+            isAdmin={isAdmin}
+            onSelectAgents={() => { if (view === "analytics") handleToggleView() }}
+            onSelectAnalytics={() => { if (view === "agents") handleToggleView() }}
           />
         )}
       </div>
