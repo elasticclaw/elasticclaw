@@ -188,15 +188,17 @@ export function HomeShell() {
   )
 
   // When in board view (no claw selected), all cards are visible — clear unread
-  // for any claw that has messages showing on screen.
+  // for any claw that has messages showing on screen. Analytics shares this
+  // shell with selectedClawId === null but shows no cards, so it must not
+  // silently mark replies as read.
   useEffect(() => {
-    if (selectedClawId) return
+    if (view !== "agents" || selectedClawId) return
     const withUnread = claws.filter((c) => c.unreadCount > 0)
     if (withUnread.length === 0) return
     for (const c of withUnread) {
       setUnreadCount(c.id, 0)
     }
-  }, [selectedClawId, claws, setUnreadCount])
+  }, [view, selectedClawId, claws, setUnreadCount])
 
   const handleTogglePin = useCallback(
     (id: string) => {
