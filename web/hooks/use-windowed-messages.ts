@@ -70,11 +70,17 @@ export function useWindowedMessages({ clawId, liveMessages }: UseWindowedMessage
   // scrollHeight captured immediately before a prepend commits; consumed by the
   // restore layout effect below.
   const pendingRestore = useRef<number | null>(null)
+  // Bumped on every claw switch; fetches capture it at start and drop their
+  // response if it moved — otherwise agent A's slow initial or "load older"
+  // fetch would land after switching to agent B and replace B's transcript.
+  const fetchGeneration = useRef(0)
 
   // Initial load — last PAGE_SIZE messages
   useEffect(() => {
     if (!clawId || loadedClawId.current === clawId) return
     loadedClawId.current = clawId
+    fetchGeneration.current += 1
+    const generation = fetchGeneration.current
     oldestTimestamp.current = null
     pendingRestore.current = null
     cooldownUntil.current = 0
@@ -83,6 +89,7 @@ export function useWindowedMessages({ clawId, liveMessages }: UseWindowedMessage
 
     fetchMessageTimeline(clawId, { limit: PAGE_SIZE })
       .then((apiMsgs) => {
+        if (fetchGeneration.current !== generation) return
         const msgs = apiMsgs.map(mapApiMessage)
         setHistoricalMsgs(msgs)
         oldestTimestamp.current = oldestConversationCursor(msgs)
@@ -96,9 +103,11 @@ export function useWindowedMessages({ clawId, liveMessages }: UseWindowedMessage
     if (!hasOlder || loadInFlight.current || !oldestTimestamp.current) return
     loadInFlight.current = true
     setLoadingOlder(true)
+    const generation = fetchGeneration.current
 
     try {
       const apiMsgs = await fetchMessageTimeline(clawId, { before: oldestTimestamp.current, limit: PAGE_SIZE })
+      if (fetchGeneration.current !== generation) return
       const older = apiMsgs.map(mapApiMessage)
 
       if (older.length === 0) {
