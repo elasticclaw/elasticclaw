@@ -21,6 +21,7 @@ import {
   pruneOldestLiveActivities,
 } from "@/lib/messages"
 import { useTypewriter, type TypewriterState } from "@/hooks/use-typewriter"
+import { noteOutput } from "@/hooks/use-last-output"
 
 export interface HubState {
   claws: Claw[]
@@ -434,6 +435,7 @@ export function useHub(selectedClawId: string | null): HubState {
         if (type === "chunk") {
           // Streaming chunk — feed into typewriter
           const { claw_id, content } = payload
+          noteOutput(claw_id)
           pushChunk(claw_id, content)
           setClaws((prev) =>
             prev.map((c) =>
@@ -454,8 +456,13 @@ export function useHub(selectedClawId: string | null): HubState {
             url: payload.url,
             message: payload.message,
             error: payload.error,
+            call_id: payload.call_id,
+            duration_ms: payload.duration_ms,
+            exit_code: payload.exit_code,
+            result: payload.result,
           }
           if (isUnhelpfulActivity(activity)) return
+          noteOutput(clawId)
           const currentMessages = messagesRef.current[clawId] || []
           const lastDurable = [...currentMessages].reverse().find((message) => !isTransientMessage(message) && message.role !== "activity")
           if (activity.kind === "model_started" && lastDurable && isTerminalAssistantMessage(lastDurable)) return

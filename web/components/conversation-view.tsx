@@ -2,6 +2,22 @@
 
 import { useState, useRef, useEffect, useCallback, useMemo, memo } from "react"
 import { Send, Terminal, TerminalSquare, ChevronLeft, ChevronRight, ChevronDown, Loader2, LayoutGrid, Info, MessageSquare, Trash2, AlertCircle, Wrench, GripVertical, Settings2, Paperclip, File as FileIcon, X } from "lucide-react"
+import {
+  compactActivityRuns,
+  demoteStaleRunning,
+  groupIntoTurns,
+  latestRunningStep,
+  pairActivitySteps,
+  timelineStats,
+  trailingActivityRun,
+} from "@/lib/turns"
+import { AgentTimeline } from "@/components/agent-timeline/timeline"
+import { TimelineToolbar, useTimelineDensity } from "@/components/agent-timeline/timeline-toolbar"
+import { NowStrip } from "@/components/agent-timeline/now-strip"
+import { StepRow } from "@/components/agent-timeline/step-row"
+import { ActivitySummaryBlock } from "@/components/agent-timeline/activity-summary-block"
+import { useNowTick } from "@/hooks/use-now"
+import { useLastOutputAt } from "@/hooks/use-last-output"
 import { CopyTranscriptButton } from "@/components/copy-transcript-button"
 import {
   DndContext,
@@ -21,7 +37,7 @@ import {
 } from "@dnd-kit/sortable"
 import { CSS } from "@dnd-kit/utilities"
 import { MarkdownContent } from "@/components/markdown-content"
-import { COLOR_CLASSES, mapApiMessage } from "@/lib/mappers"
+import { COLOR_CLASSES } from "@/lib/mappers"
 import { useWindowedMessages } from "@/hooks/use-windowed-messages"
 import { useProgrammaticScrollFlag, usePinnedAutoScroll } from "@/hooks/use-pinned-scroll"
 import { Button } from "@/components/ui/button"
@@ -30,8 +46,8 @@ import { Badge } from "@/components/ui/badge"
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet"
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog"
 import { cn } from "@/lib/utils"
-import type { ActivitySummary as ActivitySummaryMeta, Claw, DependencyStatus, Message, ClawStatus } from "@/lib/types"
-import { getTerminalWsUrl, fetchActivityMessages, fetchClawPRs, type ClawPR } from "@/lib/api"
+import type { Claw, DependencyStatus, Message, ClawStatus } from "@/lib/types"
+import { getTerminalWsUrl, fetchClawPRs, type ClawPR } from "@/lib/api"
 import { buildAttachmentsFooter, splitAttachmentsFooter, formatBytes, type ParsedAttachment } from "@/lib/attachments"
 import { useAttachments } from "@/hooks/use-attachments"
 import { AttachmentChip } from "@/components/attachment-chip"
@@ -39,7 +55,7 @@ import dynamic from "next/dynamic"
 import { useBranding } from "@/hooks/use-branding"
 import { BootstrapProgress } from "@/components/bootstrap-progress"
 import { ClawTitle } from "@/components/claw-title"
-import { isTerminalAssistantMessage, windowMessagesByDurableCount } from "@/lib/messages"
+import { windowMessagesByDurableCount } from "@/lib/messages"
 import { DependencyDowntimeBanner } from "@/components/dependency-downtime-banner"
 import type { TypewriterState } from "@/hooks/use-typewriter"
 
@@ -72,35 +88,6 @@ const BOARD_CARD_DURABLE_MESSAGE_WINDOW = 50
 const EMPTY_MESSAGES: Message[] = []
 const noopClawAction = (_clawId: string) => {}
 const noopClawMessageAction = (_clawId: string, _content: string) => {}
-
-let activityNow = Date.now()
-// Browser timer handle (window.setInterval returns a number, not a Node Timeout)
-let activityTimer: number | null = null
-const activityListeners = new Set<() => void>()
-
-function useActivityNow(active: boolean): number {
-  const [now, setNow] = useState(activityNow)
-  useEffect(() => {
-    if (!active) return
-    const listener = () => setNow(activityNow)
-    activityListeners.add(listener)
-    if (!activityTimer) {
-      activityTimer = window.setInterval(() => {
-        activityNow = Date.now()
-        activityListeners.forEach((notify) => notify())
-      }, 1_000)
-    }
-    listener()
-    return () => {
-      activityListeners.delete(listener)
-      if (activityListeners.size === 0 && activityTimer) {
-        window.clearInterval(activityTimer)
-        activityTimer = null
-      }
-    }
-  }, [active])
-  return now
-}
 
 // The typewriter reveals text every animation frame, but re-parsing markdown that
 // often is what made the board expensive. Sample the buffer instead: the reveal
@@ -451,7 +438,6 @@ const ClawBoardCard = memo(function ClawBoardCard({
   const msgScrollRef = useRef<HTMLDivElement>(null)
   const cardFollowingLatest = useRef(true)
   const [isCardFollowingLatest, setIsCardFollowingLatest] = useState(true)
-  const [expandedActivityGroups, setExpandedActivityGroups] = useState<Record<string, boolean>>({})
   // Window by durable turns only — a tool-activity flood must not age out
   // earlier user/claw messages from the card (refresh would still show them).
   const visibleMessages = useMemo(
@@ -459,9 +445,13 @@ const ClawBoardCard = memo(function ClawBoardCard({
     [messages]
   )
   const conversationItems = useMemo(() => compactActivityRuns(visibleMessages), [visibleMessages])
-  const latestActivity = useMemo(() => latestActivityMessage(visibleMessages), [visibleMessages])
-  // Named apart from the module-level `activityNow` tick that useActivityNow reads.
-  const activityNowMs = useActivityNow(Boolean(latestActivity))
+  // Latest step of the trailing activity run — the card's "what is happening
+  // right now" row (paired start/terminal, live elapsed while running).
+  const latestStep = useMemo(() => {
+    const steps = demoteStaleRunning(pairActivitySteps(trailingActivityRun(visibleMessages)), true)
+    return steps.length > 0 ? steps[steps.length - 1] : null
+  }, [visibleMessages])
+  const activityNowMs = useNowTick(Boolean(latestStep))
   const isStreaming = claw.isStreaming || Boolean(streamingBuffer?.hadChunks && streamingBuffer.text)
 
   const {
@@ -479,10 +469,6 @@ const ClawBoardCard = memo(function ClawBoardCard({
   const stillUploading = attachments.some((a) => a.status === "uploading")
   const hasErrored = attachments.some((a) => a.status === "error")
   const canSubmitCard = !isPending && !stillUploading && !hasErrored && (input.trim().length > 0 || attachments.some((a) => a.status === "ready"))
-
-  const toggleActivityGroup = useCallback((id: string) => {
-    setExpandedActivityGroups((prev) => ({ ...prev, [id]: !prev[id] }))
-  }, [])
 
   const cardContentRef = useRef<HTMLDivElement>(null)
   const { isProgrammaticRef: isCardProgrammaticScrollRef, mark: markCardProgrammaticScroll } = useProgrammaticScrollFlag()
@@ -696,18 +682,16 @@ const ClawBoardCard = memo(function ClawBoardCard({
               conversationItems.map((item) => {
                 if (item.type === "activity-summary") {
                   return (
-                    <ActivitySummary
+                    <ActivitySummaryBlock
                       key={item.id}
-                      item={item}
-                      expanded={Boolean(expandedActivityGroups[item.id])}
-                      onToggle={() => toggleActivityGroup(item.id)}
                       clawId={claw.id}
-                      variant="card"
+                      messages={item.messages}
+                      summary={item.summary}
+                      density="card"
                     />
                   )
                 }
                 const { message } = item
-                const isLatestVisibleActivity = message.role === "activity" && latestActivity?.id === message.id
                 if (message.content === "__THINKING__") {
                   return (
                     <div key={message.id} className="flex gap-1 py-2 pl-2">
@@ -740,15 +724,8 @@ const ClawBoardCard = memo(function ClawBoardCard({
                   )
                 }
                 if (message.role === "activity") {
-                  return (
-                    <ActivityRow
-                      key={message.id}
-                      message={message}
-                      variant="card"
-                      label={isLatestVisibleActivity ? "Last activity" : undefined}
-                      now={isLatestVisibleActivity ? activityNowMs : undefined}
-                    />
-                  )
+                  const step = demoteStaleRunning(pairActivitySteps([message]), false)[0]
+                  return step ? <StepRow key={message.id} step={step} density="card" /> : null
                 }
                 const { body: cardBody, attachments: cardAttachments } = message.role === "user"
                   ? splitAttachmentsFooter(message.content)
@@ -792,6 +769,14 @@ const ClawBoardCard = memo(function ClawBoardCard({
                   </div>
                 )
               })
+            )}
+            {latestStep && (
+              <div>
+                <div className="mb-0.5 text-[9px] uppercase tracking-wider text-muted-foreground/60">
+                  {latestStep.status === "running" ? "Now" : "Last activity"}
+                </div>
+                <StepRow step={latestStep} density="card" now={activityNowMs} />
+              </div>
             )}
             {streamingBuffer && (
               <StreamingMessage state={streamingBuffer} variant="card" clawName={claw.name} />
@@ -1036,350 +1021,6 @@ function formatTimestamp(date: Date): string {
   return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
 }
 
-function activityTitle(message: Message): string {
-  const activity = message.activity
-  if (!activity) return "Activity"
-  if (activity.kind === "session_error") return "Session issue"
-  if (activity.error) return "Agent error"
-  if (activity.kind === "model_started") return "Waiting for model"
-  if (activity.kind === "tool") return activity.tool || activity.phase || "Tool"
-  if (activity.kind === "diagnostic") return "Diagnostic"
-  return activity.tool || activity.phase || activity.stream || "Activity"
-}
-
-function activityDetail(message: Message): string {
-  const activity = message.activity
-  if (!activity) return nonPhaseMessage(message.content)
-  if (activity.kind === "model_started" && activity.message?.startsWith("waiting for ")) {
-    return activity.message.replace(/^waiting for\s+/, "")
-  }
-  return activity.error || activity.command || activity.path || activity.url || activity.detail || nonPhaseMessage(activity.message) || nonPhaseMessage(message.content)
-}
-
-function activityDetailKind(message: Message): "command" | "path" | "url" | "text" {
-  const activity = message.activity
-  if (activity?.command) return "command"
-  if (activity?.path) return "path"
-  if (activity?.url) return "url"
-  return "text"
-}
-
-function activityStatusText(message: Message): string {
-  const activity = message.activity
-  if (!activity?.message || isPhaseMessage(activity.message)) return ""
-  const detail = activityDetail(message)
-  return activity.message === detail ? "" : activity.message
-}
-
-function isPhaseMessage(value?: string): boolean {
-  if (!value) return false
-  return ["running", "completed", "complete", "done", "failed", "error"].includes(value.toLowerCase())
-}
-
-function nonPhaseMessage(value?: string): string {
-  return isPhaseMessage(value) ? "" : value || ""
-}
-
-function activityIcon(message: Message, className: string) {
-  const kind = message.activity?.kind
-  if (message.activity?.error || kind === "session_error") return <AlertCircle className={className} />
-  if (kind === "tool") return <Wrench className={className} />
-  if (kind === "model_started") return <Loader2 className={cn(className, "animate-spin")} />
-  return <Info className={className} />
-}
-
-function isHiddenActivity(message: Message): boolean {
-  return message.activity?.kind === "still_working" || message.content.startsWith("No streamed output")
-}
-
-function hasEarlierTerminalAssistant(messages: Message[], index: number): boolean {
-  for (let i = index - 1; i >= 0; i -= 1) {
-    if (isTerminalAssistantMessage(messages[i])) return true
-  }
-  return false
-}
-
-function activityTone(message: Message): "error" | "warning" | "normal" {
-  if (message.activity?.error && message.activity.kind === "tool") return "error"
-  if (message.activity?.error || message.activity?.kind === "session_error") return "warning"
-  return "normal"
-}
-
-function latestActivityMessage(messages: Message[]): Message | null {
-  for (let i = messages.length - 1; i >= 0; i -= 1) {
-    const message = messages[i]
-    if (message.role !== "activity" || isHiddenActivity(message)) continue
-    if (message.activity?.kind === "model_started" && hasEarlierTerminalAssistant(messages, i)) continue
-    return message
-  }
-  return null
-}
-
-function formatActivityAge(timestamp: Date, now: number): string {
-  const seconds = Math.max(0, Math.floor((now - timestamp.getTime()) / 1000))
-  if (seconds < 60) return `${seconds}s ago`
-  const minutes = Math.floor(seconds / 60)
-  const remainingSeconds = seconds % 60
-  if (minutes < 60) return remainingSeconds > 0 ? `${minutes}m ${remainingSeconds}s ago` : `${minutes}m ago`
-  const hours = Math.floor(minutes / 60)
-  return `${hours}h ago`
-}
-
-type ConversationItem =
-  | { type: "message"; message: Message }
-  | { type: "activity-summary"; id: string; messages: Message[]; summary?: ActivitySummaryMeta }
-
-function compactActivityRuns(messages: Message[]): ConversationItem[] {
-  const items: ConversationItem[] = []
-  let run: Message[] = []
-
-  const flush = () => {
-    const visible = run.filter((message) => !isHiddenActivity(message))
-    run = []
-    if (visible.length === 0) return
-    items.push({
-      type: "activity-summary",
-      id: `activity-summary-${visible[0].id}-${visible[visible.length - 1].id}`,
-      messages: visible,
-    })
-  }
-
-  for (const message of messages) {
-    if (message.role === "activity_summary") {
-      flush()
-      items.push({ type: "activity-summary", id: message.id, messages: [], summary: message.activitySummary })
-      continue
-    }
-    if (message.role === "activity") {
-      run.push(message)
-      continue
-    }
-    flush()
-    items.push({ type: "message", message })
-  }
-  flush()
-
-  return items
-}
-
-function activityGroupKey(message: Message): string {
-  const activity = message.activity
-  if (!activity) return message.id
-  return [
-    activity.kind || "",
-    activity.tool || "",
-    activity.detail || "",
-    activity.command || "",
-    activity.path || "",
-    activity.url || "",
-  ].join("\u0000")
-}
-
-function isRunningActivity(message: Message): boolean {
-  return message.activity?.kind === "tool" && (message.activity.phase === "running" || message.activity.message === "running")
-}
-
-function isTerminalActivity(message: Message): boolean {
-  const phase = (message.activity?.phase || message.activity?.message || "").toLowerCase()
-  return message.activity?.kind === "tool" && ["completed", "complete", "done", "failed", "error"].includes(phase)
-}
-
-function coalesceActivityMessages(messages: Message[]): Message[] {
-  const terminalKeys = new Set(messages.filter(isTerminalActivity).map(activityGroupKey))
-  return messages.filter((message) => !(isRunningActivity(message) && terminalKeys.has(activityGroupKey(message))))
-}
-
-function activitySummaryLabel(messages: Message[], countOverride?: number): string {
-  if (countOverride && countOverride > 0) {
-    return `${countOverride} earlier tool call${countOverride === 1 ? "" : "s"}`
-  }
-  const toolCount = messages.filter((message) => message.activity?.kind === "tool").length
-  const noun = toolCount === messages.length ? "tool call" : "activity update"
-  return `${messages.length} earlier ${noun}${messages.length === 1 ? "" : "s"}`
-}
-
-function ActivityRow({
-  message,
-  variant = "full",
-  label,
-  now,
-}: {
-  message: Message
-  variant?: "card" | "full"
-  label?: string
-  now?: number
-}) {
-  if (isHiddenActivity(message)) return null
-  const detail = activityDetail(message)
-  const detailKind = activityDetailKind(message)
-  const statusText = activityStatusText(message)
-  const tone = activityTone(message)
-  const age = now ? `updated ${formatActivityAge(message.timestamp, now)}` : ""
-
-  if (variant === "card") {
-    return (
-      <div className={cn(
-        "rounded border px-1.5 py-1 text-[10px]",
-        tone === "error"
-          ? "border-red-500/20 bg-red-500/5 text-red-400"
-          : tone === "warning"
-            ? "border-amber-500/20 bg-amber-500/5 text-amber-400"
-          : "border-border/50 bg-muted/30 text-muted-foreground"
-      )}>
-        <div className="flex min-w-0 items-center gap-1.5">
-          {activityIcon(message, "size-2.5 shrink-0")}
-          {label && <span className="font-medium shrink-0">{label}</span>}
-          <span className="min-w-0 truncate font-medium">{activityTitle(message)}</span>
-          {statusText && (
-            <span className="min-w-0 truncate text-muted-foreground/50">{statusText}</span>
-          )}
-          {age && <span className="ml-auto shrink-0 text-muted-foreground/60" suppressHydrationWarning>{age}</span>}
-        </div>
-        {detail && (
-          <span
-            className={cn(
-              "mt-0.5 block truncate pl-4 text-muted-foreground/70",
-              detailKind !== "text" && "font-mono"
-            )}
-            title={detail}
-          >
-            {detail}
-          </span>
-        )}
-      </div>
-    )
-  }
-
-  return (
-    <div className="flex items-center gap-2 py-2">
-      <div className="flex-1 h-px bg-border/50" />
-      <div className={cn(
-        "min-w-0 max-w-[82%] rounded border px-2.5 py-1.5 text-xs",
-        tone === "error"
-          ? "border-red-500/20 bg-red-500/5 text-red-400"
-          : tone === "warning"
-            ? "border-amber-500/20 bg-amber-500/5 text-amber-400"
-          : "border-border/60 bg-muted/35 text-muted-foreground"
-      )}>
-        <div className="flex min-w-0 items-center gap-2">
-          {activityIcon(message, "size-3 shrink-0")}
-          <span className="min-w-0 truncate font-medium">{activityTitle(message)}</span>
-          {statusText && (
-            <span className="min-w-0 truncate text-muted-foreground/50">{statusText}</span>
-          )}
-          <span className="ml-auto shrink-0 text-muted-foreground/50" suppressHydrationWarning>
-            {formatTimestamp(message.timestamp)}
-          </span>
-        </div>
-        {detail && (
-          <span
-            className={cn(
-              "mt-1 block truncate pl-5 text-muted-foreground/80",
-              detailKind !== "text" && "font-mono"
-            )}
-            title={detail}
-          >
-            {detail}
-          </span>
-        )}
-      </div>
-      <div className="flex-1 h-px bg-border/50" />
-    </div>
-  )
-}
-
-function ActivitySummary({
-  item,
-  expanded,
-  onToggle,
-  clawId,
-  variant = "full",
-}: {
-  item: Extract<ConversationItem, { type: "activity-summary" }>
-  expanded: boolean
-  onToggle: () => void
-  clawId: string
-  variant?: "card" | "full"
-}) {
-  const [loadedMessages, setLoadedMessages] = useState<Message[] | null>(null)
-  const [loading, setLoading] = useState(false)
-  const visibleMessages = coalesceActivityMessages([...(item.messages || []), ...(loadedMessages || [])])
-  const countOverride = item.summary?.count
-  const loadedCount = loadedMessages?.length ?? item.messages.length
-  const isPartial = Boolean(countOverride && loadedMessages && loadedCount < countOverride)
-  const handleToggle = () => {
-    onToggle()
-    if (expanded || !item.summary || loadedMessages || loading) return
-    const summaryCount = item.summary.count || 0
-    const limit = Math.max(200, Math.min(summaryCount || 200, 500))
-    const newestFirst = summaryCount > limit
-    setLoading(true)
-    fetchActivityMessages(clawId, {
-      from: item.summary.from,
-      to: item.summary.to,
-      limit,
-      order: newestFirst ? "desc" : "asc",
-    })
-      .then((apiMsgs) => {
-        const mapped = apiMsgs.map(mapApiMessage)
-        setLoadedMessages(newestFirst ? mapped.reverse() : mapped)
-      })
-      .catch(console.warn)
-      .finally(() => setLoading(false))
-  }
-  if (variant === "card") {
-    return (
-      <div className="space-y-1">
-        <button
-          type="button"
-          onClick={handleToggle}
-          className="w-full rounded border border-border/50 bg-muted/20 px-1.5 py-1 text-left text-[10px] text-muted-foreground hover:bg-muted/35"
-        >
-          {expanded ? "Hide" : "Show"} {activitySummaryLabel(visibleMessages, countOverride)}
-        </button>
-        {expanded && loading && (
-          <div className="px-1.5 text-[10px] text-muted-foreground">Loading tool calls...</div>
-        )}
-        {expanded && isPartial && (
-          <div className="px-1.5 text-[10px] text-muted-foreground">
-            Showing latest {loadedCount} of {countOverride} tool calls
-          </div>
-        )}
-        {expanded && visibleMessages.map((message) => (
-          <ActivityRow key={message.id} message={message} variant="card" />
-        ))}
-      </div>
-    )
-  }
-
-  return (
-    <div className="space-y-1">
-      <div className="flex items-center gap-2 py-1">
-        <div className="flex-1 h-px bg-border/50" />
-        <button
-          type="button"
-          onClick={handleToggle}
-          className="rounded border border-border/60 bg-muted/25 px-2.5 py-1 text-xs text-muted-foreground hover:bg-muted/40 hover:text-foreground"
-        >
-          {expanded ? "Hide" : "Show"} {activitySummaryLabel(visibleMessages, countOverride)}
-        </button>
-        <div className="flex-1 h-px bg-border/50" />
-      </div>
-      {expanded && loading && (
-        <div className="text-center text-xs text-muted-foreground">Loading tool calls...</div>
-      )}
-      {expanded && isPartial && (
-        <div className="text-center text-xs text-muted-foreground">
-          Showing latest {loadedCount} of {countOverride} tool calls
-        </div>
-      )}
-      {expanded && visibleMessages.map((message) => (
-        <ActivityRow key={message.id} message={message} />
-      ))}
-    </div>
-  )
-}
-
 const MessageBubble = memo(function MessageBubble({
   message,
   clawId,
@@ -1416,7 +1057,10 @@ const MessageBubble = memo(function MessageBubble({
   }
 
   if (message.role === "activity") {
-    return <ActivityRow message={message} />
+    // Activities normally render inside turn cards; this is a defensive
+    // fallback for stray rows reaching the bubble path.
+    const step = demoteStaleRunning(pairActivitySteps([message]), false)[0]
+    return step ? <StepRow step={step} /> : null
   }
 
   // Thinking indicator
@@ -1555,8 +1199,19 @@ function ClawChatView({
     clawId: claw.id,
     liveMessages,
   })
-  const conversationItems = useMemo(() => compactActivityRuns(messages), [messages])
-  const [expandedActivityGroups, setExpandedActivityGroups] = useState<Record<string, boolean>>({})
+  const [density, setDensity] = useTimelineDensity()
+  const turns = useMemo(() => groupIntoTurns(messages), [messages])
+  const stats = useMemo(() => timelineStats(turns), [turns])
+  const runningStep = useMemo(() => latestRunningStep(turns), [turns])
+  const isWorking = claw.isStreaming || Boolean(runningStep)
+
+  // "Last output Xs ago" — the staleness signal. Live arrivals (chunks,
+  // activities) are noted event-side in use-hub; durable messages cover the
+  // just-opened case where nothing has streamed yet.
+  const liveOutputAt = useLastOutputAt(claw.id)
+  const lastMessageAt = messages.length > 0 ? messages[messages.length - 1].timestamp.getTime() : 0
+  const lastOutputAt = Math.max(lastMessageAt, liveOutputAt ?? 0) || null
+
   const [showScrollBtn, setShowScrollBtn] = useState(false)
   // Track whether user has scrolled away from the bottom
   const pinnedToBottom = useRef(true)
@@ -1599,9 +1254,18 @@ function ClawChatView({
   const hasErrored = attachments.some((a) => a.status === "error")
   const canSubmit = !stillUploading && !hasErrored && (input.trim().length > 0 || attachments.some((a) => a.status === "ready"))
 
-  const toggleActivityGroup = useCallback((id: string) => {
-    setExpandedActivityGroups((prev) => ({ ...prev, [id]: !prev[id] }))
-  }, [])
+  const renderMessage = useCallback(
+    (message: Message) => (
+      <MessageBubble
+        key={message.id}
+        message={message}
+        clawId={claw.id}
+        clawName={claw.name}
+        clawColor={claw.color}
+      />
+    ),
+    [claw.id, claw.name, claw.color]
+  )
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -1679,6 +1343,11 @@ function ClawChatView({
         <BootstrapProgress claw={claw} variant="full" />
       </header>
 
+      {isWorking && (
+        <NowStrip step={runningStep} isStreaming={claw.isStreaming} lastOutputAt={lastOutputAt} />
+      )}
+      <TimelineToolbar density={density} onDensityChange={setDensity} stats={stats} />
+
       <div ref={scrollRef} onScroll={handleScroll} className="flex-1 overflow-y-auto scrollbar-thin p-6 relative">
         <div ref={contentRef} className="space-y-4 max-w-3xl mx-auto">
           {loadingOlder && (
@@ -1694,26 +1363,25 @@ function ClawChatView({
           {messages.length === 0 && !streamingBuffer ? (
             <p className="text-center text-muted-foreground py-12">No messages yet. Start the conversation below.</p>
           ) : (
-            conversationItems.map((item) => (
-              item.type === "activity-summary" ? (
-                <ActivitySummary
-                  key={item.id}
-                  item={item}
-                  expanded={Boolean(expandedActivityGroups[item.id])}
-                  onToggle={() => toggleActivityGroup(item.id)}
-                  clawId={claw.id}
-                />
-              ) : (
-                <MessageBubble key={item.message.id} message={item.message} clawId={claw.id} clawName={claw.name} clawColor={claw.color} />
-              )
-            ))
-          )}
-          {streamingBuffer && (
-            <StreamingMessage
-              state={streamingBuffer}
-              variant="chat"
-              clawName={claw.name}
-              clawColor={claw.color}
+            <AgentTimeline
+              clawId={claw.id}
+              messages={messages}
+              density={density}
+              renderMessage={renderMessage}
+              isWorking={isWorking}
+              streamingSlot={
+                streamingBuffer ? (
+                  <StreamingMessage
+                    state={streamingBuffer}
+                    variant="chat"
+                    clawName={claw.name}
+                    clawColor={claw.color}
+                  />
+                ) : undefined
+              }
+              scrollRef={scrollRef}
+              pinnedRef={pinnedToBottom}
+              markProgrammaticScroll={markProgrammaticScroll}
             />
           )}
           <div ref={bottomRef} className="h-4" />
