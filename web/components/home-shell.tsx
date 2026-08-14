@@ -11,6 +11,8 @@ import { MobileTabBar } from "@/components/mobile-tab-bar"
 import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet"
 import { useIsMobile } from "@/hooks/use-mobile"
 import { useHub } from "@/hooks/use-hub"
+import { useBoardActivityPrefetch } from "@/hooks/use-board-activity-prefetch"
+import { demoteStaleRunning, pairActivitySteps, trailingActivityRun } from "@/lib/turns"
 import { isConfigured, type Workflow } from "@/lib/api"
 import { requestAuthToken } from "@/lib/auth-storage"
 
@@ -108,6 +110,7 @@ export function HomeShell() {
     hubError,
     reorderClaws,
     loadMessages,
+    prefetchTrailingActivity,
     setUnreadCount,
     setPinned,
     send,
@@ -169,6 +172,34 @@ export function HomeShell() {
       loadMessages(c.id)
     }
   }, [claws, loadMessages]) // re-runs when claws first populate
+
+  // Board cards need step rows without interaction: as each timeline lands,
+  // expand its trailing activity summaries (bounded + concurrency-capped).
+  useBoardActivityPrefetch({
+    active: view === "agents" && !selectedClawId,
+    claws,
+    messages,
+    prefetch: prefetchTrailingActivity,
+  })
+
+  // Sidebar second line: what each active claw is running right now. Only the
+  // trailing activity run is scanned, so this stays cheap per message update.
+  const sidebarActivity = useMemo(() => {
+    const lines: Record<string, string> = {}
+    for (const claw of claws) {
+      if (claw.status !== "connected" && !claw.isStreaming) continue
+      const msgs = messages[claw.id]
+      if (!msgs || msgs.length === 0) continue
+      const steps = demoteStaleRunning(pairActivitySteps(trailingActivityRun(msgs)), true)
+      const last = steps[steps.length - 1]
+      if (last && last.status === "running") {
+        lines[claw.id] = last.detail ? `${last.title} · ${last.detail}` : last.title
+      } else if (claw.isStreaming) {
+        lines[claw.id] = "Writing a reply"
+      }
+    }
+    return lines
+  }, [claws, messages])
 
   // Mark messages as read when selecting a claw + lazy load history
   const handleSelectClaw = useCallback(
@@ -281,6 +312,7 @@ export function HomeShell() {
       isCollapsed={!isMobile && sidebarCollapsed}
       onToggleCollapse={() => setSidebarCollapsed(!sidebarCollapsed)}
       onReorderClaws={reorderClaws}
+      activityLines={sidebarActivity}
       isAdmin={isAdmin}
       onSelectWorkflow={setSelectedWorkflow}
       view={view}

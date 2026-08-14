@@ -55,6 +55,8 @@ interface SidebarProps {
   onClearTagFilters: () => void
   isCollapsed: boolean
   onToggleCollapse: () => void
+  /** Per-claw "current tool" one-liners for the second row line. */
+  activityLines?: Record<string, string>
   isAdmin?: boolean
   onSelectWorkflow?: (workflow: Workflow | null) => void
   view?: "agents" | "analytics"
@@ -73,11 +75,13 @@ function SortableClawCard({
   isSelected,
   onClick,
   onTogglePin,
+  activityLine,
 }: {
   claw: Claw
   isSelected: boolean
   onClick: () => void
   onTogglePin: (e: React.MouseEvent) => void
+  activityLine?: string
 }) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } =
     useSortable({ id: claw.id })
@@ -96,6 +100,7 @@ function SortableClawCard({
         isSelected={isSelected}
         onClick={onClick}
         onTogglePin={onTogglePin}
+        activityLine={activityLine}
       />
     </div>
   )
@@ -118,6 +123,7 @@ export function Sidebar({
   onClearTagFilters,
   isCollapsed,
   onToggleCollapse,
+  activityLines,
   isAdmin = true,
   onSelectWorkflow,
   view = "agents",
@@ -487,6 +493,7 @@ export function Sidebar({
                         e.stopPropagation()
                         onTogglePin(claw.id)
                       }}
+                      activityLine={activityLines?.[claw.id]}
                     />
                   ))}
                 </SortableContext>
@@ -520,6 +527,7 @@ export function Sidebar({
                       e.stopPropagation()
                       onTogglePin(claw.id)
                     }}
+                    activityLine={activityLines?.[claw.id]}
                   />
                 ))}
               </SortableContext>
