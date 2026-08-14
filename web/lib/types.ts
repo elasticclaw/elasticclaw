@@ -57,6 +57,10 @@ export interface AgentActivity {
   url?: string
   message?: string
   error?: string
+  call_id?: string
+  duration_ms?: number
+  exit_code?: number
+  result?: string
 }
 
 // Raw API types
