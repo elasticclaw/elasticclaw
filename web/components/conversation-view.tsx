@@ -208,7 +208,7 @@ function formatUptime(seconds: number): string {
   return mins > 0 ? `${hours}h ${mins}m` : `${hours}h`
 }
 
-function StatusBadge({ status }: { status: ClawStatus }) {
+function StatusBadge({ status, className }: { status: ClawStatus; className?: string }) {
   return (
     <Badge
       variant="outline"
@@ -216,7 +216,8 @@ function StatusBadge({ status }: { status: ClawStatus }) {
         "text-xs font-medium",
         status === "connected" && "border-green-500/50 text-green-500",
         status === "idle" && "border-amber-500/50 text-amber-500",
-        status === "offline" && "border-red-500/50 text-red-500"
+        status === "offline" && "border-red-500/50 text-red-500",
+        className
       )}
     >
       {status}
@@ -1338,7 +1339,7 @@ function ClawChatView({
             <Button variant="ghost" size="icon" onClick={onDeselectClaw} title="Back to dashboard" className="size-11 shrink-0">
               <ChevronLeft className="size-5" />
             </Button>
-            <div className="min-w-0 flex-1">
+            <div className="min-w-0 flex-1 overflow-hidden">
               <ClawTitle
                 name={claw.name}
                 githubIssueId={claw.githubIssueId}
@@ -1346,7 +1347,10 @@ function ClawChatView({
                 className="block font-mono text-base font-semibold text-foreground"
               />
             </div>
-            <StatusBadge status={claw.status} />
+            {/* Uptime is intentionally dropped here: at 320-375px it does not
+                fit next to the badge and the menu (it stays visible on the
+                board card and desktop header). The badge never shrinks. */}
+            <StatusBadge status={claw.status} className="shrink-0" />
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
                 <Button variant="ghost" size="icon" className="size-11 shrink-0" title="More actions">

@@ -8,10 +8,15 @@ export function IssueAwareTitle({ name }: { name: string }) {
     return <span className="block min-w-0 truncate">{name}</span>
   }
 
+  // The path segment gives way first (high shrink factor); the issue segment
+  // only starts truncating once the path is fully collapsed. Neither segment
+  // is shrink-proof: a hard shrink-0 tail wider than the container would
+  // overflow and paint under whatever sits next to the title (the status
+  // badge, on narrow phone headers).
   return (
-    <span className="min-w-0 flex items-baseline">
-      <span className="min-w-0 truncate">{name.slice(0, lastSlash + 1)}</span>
-      <span className="shrink-0">{name.slice(lastSlash + 1)}</span>
+    <span className="min-w-0 max-w-full flex items-baseline">
+      <span className="min-w-0 shrink-[100] truncate">{name.slice(0, lastSlash + 1)}</span>
+      <span className="min-w-0 truncate">{name.slice(lastSlash + 1)}</span>
     </span>
   )
 }
