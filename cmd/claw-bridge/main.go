@@ -820,6 +820,15 @@ type agentActivity struct {
 	Result     string `json:"result,omitempty"`
 }
 
+// inFlightToolCall is an unresolved tool start awaiting its terminal event.
+// The content signature is kept so terminals that omit the payload call ID can
+// still find their start, whether the start's ID was payload-provided or
+// synthesized.
+type inFlightToolCall struct {
+	startedAt time.Time
+	base      string
+}
+
 // inFlightState tracks a single in-progress agent turn.
 type inFlightState struct {
 	onChunk             func(string)
@@ -832,7 +841,7 @@ type inFlightState struct {
 	lastToolPulseAt     time.Time
 	modelWaitStartedAt  time.Time
 	lastModelPulseAt    time.Time
-	inFlightCalls       map[string]time.Time
+	inFlightCalls       map[string]inFlightToolCall
 	callOccurrences     map[string]int
 }
 
@@ -898,40 +907,43 @@ func (inf *inFlightState) resolveToolCall(a *agentActivity, now time.Time) {
 	inf.mu.Lock()
 	defer inf.mu.Unlock()
 	if inf.inFlightCalls == nil {
-		inf.inFlightCalls = make(map[string]time.Time)
+		inf.inFlightCalls = make(map[string]inFlightToolCall)
 	}
 	if inf.callOccurrences == nil {
 		inf.callOccurrences = make(map[string]int)
 	}
 	base := toolCallSignature(a.Stream, a.Tool, a.Command, a.Path, a.URL)
 	if a.CallID == "" {
-		if isToolTerminalPhase(a.Phase) {
-			var matchedID string
-			var matchedAt time.Time
-			for id, startedAt := range inf.inFlightCalls {
-				if strings.HasPrefix(id, base+"-") {
-					if matchedAt.IsZero() || startedAt.Before(matchedAt) {
-						matchedID, matchedAt = id, startedAt
-					}
-				}
+		// Match by content signature: earliest unresolved start with the same
+		// signature, regardless of whether its ID was payload-provided or
+		// synthesized. Terminals adopt (and close) it; repeated start/progress
+		// events without an ID reuse it instead of piling up one phantom
+		// in-flight call per progress update.
+		var matchedID string
+		var matchedAt time.Time
+		for id, call := range inf.inFlightCalls {
+			if call.base == base && (matchedAt.IsZero() || call.startedAt.Before(matchedAt)) {
+				matchedID, matchedAt = id, call.startedAt
 			}
-			if matchedID != "" {
-				a.CallID = matchedID
+		}
+		if matchedID != "" {
+			a.CallID = matchedID
+			if isToolTerminalPhase(a.Phase) {
 				a.DurationMs = now.Sub(matchedAt).Milliseconds()
 				delete(inf.inFlightCalls, matchedID)
-				return
 			}
+			return
 		}
 		inf.callOccurrences[base]++
 		a.CallID = fmt.Sprintf("%s-%d", base, inf.callOccurrences[base])
 	}
 	if isToolStartPhase(a.Phase) {
 		if _, exists := inf.inFlightCalls[a.CallID]; !exists {
-			inf.inFlightCalls[a.CallID] = now
+			inf.inFlightCalls[a.CallID] = inFlightToolCall{startedAt: now, base: base}
 		}
 	} else if isToolTerminalPhase(a.Phase) {
-		if startedAt, exists := inf.inFlightCalls[a.CallID]; exists {
-			a.DurationMs = now.Sub(startedAt).Milliseconds()
+		if call, exists := inf.inFlightCalls[a.CallID]; exists {
+			a.DurationMs = now.Sub(call.startedAt).Milliseconds()
 			delete(inf.inFlightCalls, a.CallID)
 		}
 	}
@@ -995,7 +1007,11 @@ func cleanAgentActivity(a agentActivity) agentActivity {
 	a.Message = sanitizeActivityText(a.Message)
 	a.Error = sanitizeActivityText(a.Error)
 	a.CallID = sanitizeActivityText(a.CallID)
-	a.Result = truncateResult(sanitizeActivityTextLimit(a.Result, 0), 2000)
+	// Truncate before redacting: results can be megabytes of tool output, and
+	// the redaction scan lowercases the remaining string once per replacer. A
+	// secret split by the cut still redacts — the prefix match runs to
+	// end-of-string. Redaction may grow the text slightly; that is fine.
+	a.Result = sanitizeActivityTextLimit(truncateResult(a.Result, 2000), 0)
 	return a
 }
 
@@ -1576,19 +1592,24 @@ func (gs *gatewaySession) readLoop(ctx context.Context) {
 				meta := firstNonEmpty(agentPayload.Data.Meta, nestedString(rawAgentPayload.Data, "meta"))
 				command, path, url, detail := resolveToolActivityDetail(tool, command, path, url, meta, rawAgentPayload.Data)
 				activity := agentActivity{
-					Kind:     kind,
-					Stream:   agentPayload.Stream,
-					Phase:    agentPayload.Data.Phase,
-					Tool:     tool,
-					Detail:   detail,
-					Command:  command,
-					Path:     path,
-					URL:      url,
-					Message:  firstNonEmpty(agentPayload.Data.Message, agentPayload.Data.Status),
-					Error:    agentPayload.Data.Error,
-					CallID:   nestedString(rawAgentPayload.Data, "call_id", "callId", "id", "tool_use_id", "toolCallId", "toolUseId"),
-					ExitCode: nestedExitCode(rawAgentPayload.Data, "exit_code", "exitCode", "code", "status_code"),
-					Result:   nestedString(rawAgentPayload.Data, "result", "output", "stdout", "content", "text"),
+					Kind:    kind,
+					Stream:  agentPayload.Stream,
+					Phase:   agentPayload.Data.Phase,
+					Tool:    tool,
+					Detail:  detail,
+					Command: command,
+					Path:    path,
+					URL:     url,
+					Message: firstNonEmpty(agentPayload.Data.Message, agentPayload.Data.Status),
+					Error:   agentPayload.Data.Error,
+					CallID:  toolCallID(rawAgentPayload.Data),
+				}
+				// Outcome fields exist only once the call finished. Scraping them
+				// from start events would surface tool *inputs* (e.g. a Write's
+				// file content under data.input.content) as the call's result.
+				if isToolTerminalPhase(activity.Phase) {
+					activity.ExitCode = nestedExitCode(rawAgentPayload.Data, "exit_code", "exitCode", "status_code")
+					activity.Result = nestedString(rawAgentPayload.Data, "result", "output", "stdout", "content", "text")
 				}
 				inf.resolveToolCall(&activity, time.Now())
 				activity = cleanAgentActivity(activity)
@@ -1728,6 +1749,39 @@ func sanitizeActivityPayloadValue(value interface{}, depth int) interface{} {
 	default:
 		return typed
 	}
+}
+
+// toolCallID extracts the gateway's tool-call correlation ID. Deliberately
+// narrow: only explicit call-ID keys at the top level, plus the ID of a
+// tool_call/call object. The generic nestedString recursion is not used here —
+// it would happily pick up entity IDs from tool *arguments* (data.input.id),
+// which unpairs starts from terminals and cross-pairs unrelated calls.
+func toolCallID(data map[string]interface{}) string {
+	callIDKeys := []string{"call_id", "callId", "tool_use_id", "toolCallId", "toolUseId"}
+	stringAt := func(m map[string]interface{}, keys ...string) string {
+		for _, key := range keys {
+			if s, ok := m[key].(string); ok {
+				if s = strings.TrimSpace(s); s != "" {
+					return s
+				}
+			}
+		}
+		return ""
+	}
+	if len(data) == 0 {
+		return ""
+	}
+	if id := stringAt(data, callIDKeys...); id != "" {
+		return id
+	}
+	for _, containerKey := range []string{"tool_call", "toolCall", "call"} {
+		if m, ok := data[containerKey].(map[string]interface{}); ok {
+			if id := stringAt(m, append(callIDKeys, "id")...); id != "" {
+				return id
+			}
+		}
+	}
+	return ""
 }
 
 func nestedString(data map[string]interface{}, keys ...string) string {
