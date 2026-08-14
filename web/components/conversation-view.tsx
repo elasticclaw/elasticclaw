@@ -330,7 +330,9 @@ function ClawCardBack({ claw }: { claw: Claw }) {
   }, [claw.id])
 
   return (
-    <div className="flex-1 overflow-y-auto scrollbar-thin p-4 space-y-4">
+    /* max-md cap mirrors the front face's message list: mobile cards are
+       content-sized, so the info panel scrolls inside its own bound. */
+    <div className="flex-1 overflow-y-auto scrollbar-thin p-4 space-y-4 max-md:max-h-[40vh]">
       <div>
         <h3 className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-2">
           Purpose
@@ -545,21 +547,31 @@ const ClawBoardCard = memo(function ClawBoardCard({
     <div
       className={cn(
         "shrink-0 relative",
-        isMobile ? "w-full h-[420px]" : "w-[320px] h-full [perspective:1000px]"
+        // Mobile cards size to their content (capped below) instead of a
+        // fixed desktop-carryover height — several agents fit per screen.
+        isMobile ? "w-full" : "w-[320px] h-full [perspective:1000px]"
       )}
     >
       <div
         className={cn(
-          "relative w-full h-full",
-          !isMobile && "transition-transform duration-500 [transform-style:preserve-3d]",
+          "relative w-full",
+          !isMobile && "h-full transition-transform duration-500 [transform-style:preserve-3d]",
           !isMobile && isFlipped && "[transform:rotateY(180deg)]"
         )}
       >
-        {/* Front - Chat view */}
+        {/* Front - Chat view. On mobile it is in normal flow and sizes to its
+            content; the message list below carries its own viewport cap and
+            scrolls inside, so the whole card stays around 60vh at most. (A
+            max-height on the card itself would not work: `h-full` inside a
+            max-height-clamped auto container resolves against an indefinite
+            height, so the inner scroller would overflow and get clipped
+            instead of scrolling.) */}
         <div
           className={cn(
-            "absolute inset-0 flex flex-col rounded-lg border border-border bg-card",
-            isMobile ? isFlipped && "hidden" : "[backface-visibility:hidden]",
+            "flex flex-col rounded-lg border border-border bg-card",
+            isMobile
+              ? cn("relative", isFlipped && "hidden")
+              : "absolute inset-0 [backface-visibility:hidden]",
             hasUnread && "border-blue-500/30 bg-blue-950/10",
             isPending && "opacity-75"
           )}
@@ -688,7 +700,16 @@ const ClawBoardCard = memo(function ClawBoardCard({
           
           {/* Messages area */}
           <div className="flex-1 relative min-h-0 overflow-hidden">
-          <div ref={msgScrollRef} onScroll={handleCardScroll} className="h-full overflow-y-auto scrollbar-thin p-3">
+          <div
+            ref={msgScrollRef}
+            onScroll={handleCardScroll}
+            className={cn(
+              "overflow-y-auto scrollbar-thin p-3",
+              // vh cap so mobile cards are content-sized with an internal
+              // scroll; desktop fills the fixed-height card as before.
+              isMobile ? "max-h-[40vh]" : "h-full"
+            )}
+          >
             {/* Content wrapper — the ResizeObserver in usePinnedAutoScroll watches it. */}
             <div ref={cardContentRef} className="space-y-2">
             {messages.length === 0 && !streamingBuffer ? (
@@ -904,10 +925,10 @@ const ClawBoardCard = memo(function ClawBoardCard({
         {/* Back - Bot info */}
         <div
           className={cn(
-            "absolute inset-0 flex flex-col rounded-lg border border-border bg-card",
+            "flex flex-col rounded-lg border border-border bg-card",
             isMobile
-              ? !isFlipped && "hidden"
-              : "[backface-visibility:hidden] [transform:rotateY(180deg)]"
+              ? cn("relative", !isFlipped && "hidden")
+              : "absolute inset-0 [backface-visibility:hidden] [transform:rotateY(180deg)]"
           )}
         >
           {/* Header */}
