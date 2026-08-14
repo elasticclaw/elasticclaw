@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useMemo, useEffect, useCallback, useRef, Suspense } from "react"
+import { useState, useMemo, useEffect, useCallback, useRef, useSyncExternalStore, Suspense } from "react"
 import { usePathname } from "next/navigation"
 import { Sidebar } from "@/components/sidebar"
 import { ConversationView } from "@/components/conversation-view"
@@ -13,7 +13,16 @@ import { useIsMobile } from "@/hooks/use-mobile"
 import { useHub } from "@/hooks/use-hub"
 import { useBoardActivityPrefetch } from "@/hooks/use-board-activity-prefetch"
 import { demoteStaleRunning, pairActivitySteps, trailingActivityRun } from "@/lib/turns"
-import { isConfigured, type Workflow } from "@/lib/api"
+import { type Workflow } from "@/lib/api"
+import {
+  subscribeToShellStorage,
+  getSelectedClawId,
+  getServerSelectedClawId,
+  writeSelectedClawId,
+  getConfigured,
+  getServerConfigured,
+  markConfigured,
+} from "@/lib/shell-storage"
 import { requestAuthToken } from "@/lib/auth-storage"
 
 export type HomeView = "agents" | "analytics"
@@ -32,10 +41,14 @@ export function HomeShell() {
   // Last analytics query string, so toggling away and back restores filters.
   const analyticsSearchRef = useRef("")
 
-  // Storage-backed state is resolved after mount, never in the initializer:
-  // reading localStorage during the first client render makes it disagree with
-  // the SSR pass and React throws away the tree (hydration mismatch).
-  const [selectedClawId, setSelectedClawId] = useState<string | null>(null)
+  // Storage-backed state comes from an external store, never from a useState
+  // initializer: reading localStorage during the first client render makes it
+  // disagree with the SSR pass and React throws away the tree.
+  const selectedClawId = useSyncExternalStore(
+    subscribeToShellStorage,
+    getSelectedClawId,
+    getServerSelectedClawId
+  )
   const [searchQuery, setSearchQuery] = useState("")
   const [activeTagFilters, setActiveTagFilters] = useState<string[]>([])
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
@@ -43,13 +56,11 @@ export function HomeShell() {
   // board header hamburger; the footer destinations move to a bottom tab bar.
   const isMobile = useIsMobile()
   const [drawerOpen, setDrawerOpen] = useState(false)
-  const [configuredState, setConfiguredState] = useState<boolean | null>(null)
-
-  // Hydrate storage-backed state once, after the client tree matches the server.
-  useEffect(() => {
-    setConfiguredState(isConfigured())
-    setSelectedClawId(localStorage.getItem("elasticclaw_selected_claw") ?? null)
-  }, [])
+  const configuredState = useSyncExternalStore(
+    subscribeToShellStorage,
+    getConfigured,
+    getServerConfigured
+  )
   const [isAdmin, setIsAdmin] = useState(false)
   const [adminChecked, setAdminChecked] = useState(false)
   const [selectedWorkflow, setSelectedWorkflow] = useState<Workflow | null>(null)
@@ -212,8 +223,7 @@ export function HomeShell() {
         analyticsSearchRef.current = window.location.search
         window.history.pushState(null, "", "/")
       }
-      setSelectedClawId(id)
-      localStorage.setItem('elasticclaw_selected_claw', id)
+      writeSelectedClawId(id)
       setUnreadCount(id, 0)
       loadMessages(id)
       setDrawerOpen(false)
@@ -272,16 +282,14 @@ export function HomeShell() {
   const handleKill = useCallback(() => {
     if (!selectedClawId) return
     killClaw(selectedClawId)
-    setSelectedClawId(null)
-    localStorage.removeItem('elasticclaw_selected_claw')
+    writeSelectedClawId(null)
   }, [selectedClawId, killClaw])
 
   const handleKillClaw = useCallback(
     (clawId: string) => {
       killClaw(clawId)
       if (selectedClawId === clawId) {
-        setSelectedClawId(null)
-        localStorage.removeItem('elasticclaw_selected_claw')
+        writeSelectedClawId(null)
       }
     },
     [selectedClawId, killClaw]
@@ -294,7 +302,7 @@ export function HomeShell() {
 
   // Show setup screen if not configured
   if (!configuredState) {
-    return <SetupScreen onConnected={() => setConfiguredState(true)} />
+    return <SetupScreen onConnected={markConfigured} />
   }
 
   const sidebar = (
@@ -360,7 +368,7 @@ export function HomeShell() {
             onKill={handleKill}
             onKillClaw={handleKillClaw}
             onSelectClaw={handleSelectClaw}
-            onDeselectClaw={() => { setSelectedClawId(null); localStorage.removeItem('elasticclaw_selected_claw') }}
+            onDeselectClaw={() => writeSelectedClawId(null)}
             onReorderClaws={reorderClaws}
             loading={loading}
             hubError={hubError}
