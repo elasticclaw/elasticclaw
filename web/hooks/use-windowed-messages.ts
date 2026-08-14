@@ -1,7 +1,7 @@
 "use client"
 
 import { useState, useRef, useCallback, useEffect, useLayoutEffect, useMemo } from "react"
-import { fetchMessageTimeline } from "@/lib/api"
+import { fetchActivityMessages, fetchMessageTimeline } from "@/lib/api"
 import { mapApiMessage } from "@/lib/mappers"
 import { isLiveSegmentCoveredByDurable } from "@/lib/messages"
 import { useProgrammaticScrollFlag } from "@/hooks/use-pinned-scroll"
@@ -9,6 +9,15 @@ import type { Message } from "@/lib/types"
 
 // Timeline page size — durable turns + activity_summary rows (not live tool floods).
 const PAGE_SIZE = 100
+// The timeline endpoint returns activity_summary placeholders, not the tool
+// rows themselves — so a freshly loaded transcript would report "done" on a
+// turn whose last step is still running and "no failures" over failures it
+// simply has not loaded. Prefetch the trailing summaries (enough to cover the
+// current/last turn) so the loaded state is honest without manual expansion.
+const PREFETCH_SUMMARY_COUNT = 2
+const PREFETCH_ROW_BUDGET = 200
+// Per-summary cap when the user explicitly asks to load all remaining calls.
+const LOAD_ALL_SUMMARY_LIMIT = 500
 // After a prepend restores the reading position, ignore top-of-scroll pager
 // triggers briefly — late layout (markdown, images) can shift content back
 // under the threshold and would otherwise page again immediately.
@@ -39,6 +48,57 @@ function hasOlderConversationPage(messages: Message[], pageSize: number): boolea
   return messages[0]?.role !== "activity_summary"
 }
 
+/** Newest-first picks of unexpanded summaries, bounded by count and row budget. */
+function selectTrailingSummaries(messages: Message[]): { id: string; limit: number }[] {
+  const picks: { id: string; limit: number }[] = []
+  let budget = PREFETCH_ROW_BUDGET
+  for (let i = messages.length - 1; i >= 0 && picks.length < PREFETCH_SUMMARY_COUNT && budget > 0; i -= 1) {
+    const message = messages[i]
+    if (message.role !== "activity_summary" || !message.activitySummary) continue
+    const limit = Math.min(Math.max(1, message.activitySummary.count || 0), budget)
+    picks.push({ id: message.id, limit })
+    budget -= limit
+  }
+  return picks
+}
+
+/**
+ * Fetch the activity rows behind one activity_summary placeholder and return
+ * the messages that should replace it in the transcript. When the summary is
+ * larger than `limit`, the newest rows are loaded and the unloaded remainder
+ * stays behind as a smaller summary — still visible and expandable, never
+ * silently dropped.
+ */
+async function expandSummaryMessage(clawId: string, summary: Message, limit: number): Promise<Message[]> {
+  const meta = summary.activitySummary
+  if (!meta) return [summary]
+  const count = meta.count || 0
+  const capped = Math.min(Math.max(1, count), limit)
+  const newestFirst = count > capped
+  const apiMsgs = await fetchActivityMessages(clawId, {
+    from: meta.from,
+    to: meta.to,
+    limit: capped,
+    order: newestFirst ? "desc" : "asc",
+  })
+  const rows = apiMsgs.map(mapApiMessage)
+  if (newestFirst) rows.reverse()
+  if (rows.length === 0) return [summary]
+  if (newestFirst) {
+    const remainder: Message = {
+      ...summary,
+      activitySummary: {
+        count: count - rows.length,
+        from: meta.from,
+        // Exclusive of the oldest loaded row so a later expand does not refetch it.
+        to: new Date(rows[0].timestamp.getTime() - 1).toISOString(),
+      },
+    }
+    return [remainder, ...rows]
+  }
+  return rows
+}
+
 interface UseWindowedMessagesOptions {
   clawId: string
   liveMessages: Message[] // streaming/new messages from websocket
@@ -55,6 +115,11 @@ interface UseWindowedMessages {
   isProgrammaticScrollRef: React.RefObject<boolean>
   /** Call right before any programmatic `scrollTop` write on `scrollRef`. */
   markProgrammaticScroll: () => void
+  /** Tool calls still hidden behind unexpanded activity_summary rows. */
+  unloadedActivityCount: number
+  loadingActivity: boolean
+  /** Expand every remaining activity_summary into real rows (explicit user action). */
+  loadAllActivity: () => Promise<void>
 }
 
 export function useWindowedMessages({ clawId, liveMessages }: UseWindowedMessagesOptions): UseWindowedMessages {
@@ -74,6 +139,14 @@ export function useWindowedMessages({ clawId, liveMessages }: UseWindowedMessage
   // response if it moved — otherwise agent A's slow initial or "load older"
   // fetch would land after switching to agent B and replace B's transcript.
   const fetchGeneration = useRef(0)
+  const [loadingActivity, setLoadingActivity] = useState(false)
+  const loadAllInFlight = useRef(false)
+  // Mirror so loadAllActivity sees the current transcript without re-creating
+  // the callback on every message.
+  const historicalRef = useRef<Message[]>([])
+  useEffect(() => {
+    historicalRef.current = historicalMsgs
+  }, [historicalMsgs])
 
   // Initial load — last PAGE_SIZE messages
   useEffect(() => {
@@ -88,15 +161,63 @@ export function useWindowedMessages({ clawId, liveMessages }: UseWindowedMessage
     setHasOlder(false)
 
     fetchMessageTimeline(clawId, { limit: PAGE_SIZE })
-      .then((apiMsgs) => {
+      .then(async (apiMsgs) => {
         if (fetchGeneration.current !== generation) return
         const msgs = apiMsgs.map(mapApiMessage)
         setHistoricalMsgs(msgs)
         oldestTimestamp.current = oldestConversationCursor(msgs)
         setHasOlder(hasOlderConversationPage(msgs, PAGE_SIZE))
+
+        // Prefetch the trailing summaries so the last turn's steps are real on
+        // load: without them the Problems filter, the now strip and the turn
+        // status pill are all blind to what actually happened.
+        for (const pick of selectTrailingSummaries(msgs)) {
+          const target = msgs.find((m) => m.id === pick.id)
+          if (!target) continue
+          try {
+            const replacement = await expandSummaryMessage(clawId, target, pick.limit)
+            if (fetchGeneration.current !== generation) return
+            setHistoricalMsgs((prev) => prev.flatMap((m) => (m.id === pick.id ? replacement : [m])))
+          } catch (err) {
+            console.warn("Failed to prefetch activity rows:", err)
+          }
+        }
       })
       .catch(console.warn)
   }, [clawId])
+
+  // Load every remaining summary — the "Load them" affordance of the Problems
+  // filter. Sequential on purpose: bounded, cancellable via the generation.
+  const loadAllActivity = useCallback(async () => {
+    if (loadAllInFlight.current) return
+    loadAllInFlight.current = true
+    setLoadingActivity(true)
+    const generation = fetchGeneration.current
+    try {
+      const summaries = historicalRef.current.filter(
+        (m) => m.role === "activity_summary" && m.activitySummary
+      )
+      for (const summary of summaries) {
+        const replacement = await expandSummaryMessage(clawId, summary, LOAD_ALL_SUMMARY_LIMIT)
+        if (fetchGeneration.current !== generation) return
+        setHistoricalMsgs((prev) => prev.flatMap((m) => (m.id === summary.id ? replacement : [m])))
+      }
+    } catch (err) {
+      console.warn("Failed to load tool calls:", err)
+    } finally {
+      loadAllInFlight.current = false
+      setLoadingActivity(false)
+    }
+  }, [clawId])
+
+  const unloadedActivityCount = useMemo(
+    () =>
+      historicalMsgs.reduce(
+        (sum, m) => sum + (m.role === "activity_summary" ? m.activitySummary?.count ?? 0 : 0),
+        0
+      ),
+    [historicalMsgs]
+  )
 
   // Load older messages when user scrolls to top
   const loadOlder = useCallback(async () => {
@@ -186,7 +307,19 @@ export function useWindowedMessages({ clawId, liveMessages }: UseWindowedMessage
     return all
   }, [historicalMsgs, liveMessages])
 
-  return { messages, hasOlder, loadingOlder, loadOlder, scrollRef, onScroll, isProgrammaticScrollRef, markProgrammaticScroll }
+  return {
+    messages,
+    hasOlder,
+    loadingOlder,
+    loadOlder,
+    scrollRef,
+    onScroll,
+    isProgrammaticScrollRef,
+    markProgrammaticScroll,
+    unloadedActivityCount,
+    loadingActivity,
+    loadAllActivity,
+  }
 }
 
 function compareMessages(a: Message, b: Message): number {

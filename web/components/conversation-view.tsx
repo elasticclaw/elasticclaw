@@ -1214,12 +1214,17 @@ function ClawChatView({
     onScroll: onWindowScroll,
     isProgrammaticScrollRef,
     markProgrammaticScroll,
+    unloadedActivityCount,
+    loadingActivity,
+    loadAllActivity,
   } = useWindowedMessages({
     clawId: claw.id,
     liveMessages,
   })
   const [density, setDensity] = useTimelineDensity()
-  const turns = useMemo(() => groupIntoTurns(messages), [messages])
+  // An offline/errored claw cannot still be running its dangling last step.
+  const allowTrailingRunning = claw.status !== "offline" && claw.status !== "error"
+  const turns = useMemo(() => groupIntoTurns(messages, allowTrailingRunning), [messages, allowTrailingRunning])
   const stats = useMemo(() => timelineStats(turns), [turns])
   const runningStep = useMemo(() => latestRunningStep(turns), [turns])
   const isWorking = claw.isStreaming || Boolean(runningStep)
@@ -1447,6 +1452,9 @@ function ClawChatView({
               scrollRef={scrollRef}
               pinnedRef={pinnedToBottom}
               markProgrammaticScroll={markProgrammaticScroll}
+              unloadedToolCalls={unloadedActivityCount}
+              loadingUnloaded={loadingActivity}
+              onLoadUnloaded={loadAllActivity}
             />
           )}
           <div ref={bottomRef} className="h-4" />

@@ -15,6 +15,35 @@ function turnDefaultExpanded(turn: Turn, isLast: boolean, density: TimelineDensi
 }
 
 /**
+ * The Problems filter can only judge loaded tool calls — when activity_summary
+ * rows remain unexpanded it must say so and offer to load them, never imply
+ * the unloaded calls were clean.
+ */
+function UnloadedActivityNotice({
+  message,
+  loading,
+  onLoad,
+}: {
+  message: string
+  loading: boolean
+  onLoad: () => void
+}) {
+  return (
+    <div className="flex flex-wrap items-center justify-center gap-x-2 gap-y-1 py-4 text-center text-sm text-muted-foreground">
+      <span>{message}</span>
+      <button
+        type="button"
+        onClick={onLoad}
+        disabled={loading}
+        className="rounded border border-border bg-muted/30 px-2.5 py-0.5 text-xs text-foreground hover:bg-muted/50 disabled:opacity-60"
+      >
+        {loading ? "Loading..." : "Load them"}
+      </button>
+    </div>
+  )
+}
+
+/**
  * The turn-based transcript. Owns per-turn expansion (current turn expanded,
  * older turns collapsed) and the scroll anchoring that keeps the reading
  * position still when anything above the viewport expands or collapses.
@@ -29,6 +58,9 @@ export function AgentTimeline({
   scrollRef,
   pinnedRef,
   markProgrammaticScroll,
+  unloadedToolCalls = 0,
+  loadingUnloaded = false,
+  onLoadUnloaded,
 }: {
   clawId: string
   /** Precomputed by the owner (which also derives stats/now-strip from them). */
@@ -43,6 +75,10 @@ export function AgentTimeline({
   /** While pinned to bottom the auto-scroll owns the position — skip anchoring. */
   pinnedRef?: React.RefObject<boolean>
   markProgrammaticScroll?: () => void
+  /** Tool calls still behind unexpanded activity_summary rows. */
+  unloadedToolCalls?: number
+  loadingUnloaded?: boolean
+  onLoadUnloaded?: () => void
 }) {
   const [expandedOverrides, setExpandedOverrides] = useState<Record<string, boolean>>({})
   const hasLiveWork = isWorking || turns.some((t) => t.status === "running")
@@ -80,7 +116,20 @@ export function AgentTimeline({
     ? turns.filter((turn, i) => turn.hasProblems || turn.failedCount > 0 || (i === turns.length - 1 && isWorking))
     : turns
 
+  const showUnloadedNotice = density === "problems" && unloadedToolCalls > 0 && Boolean(onLoadUnloaded)
+  const totalToolCalls = turns.reduce((sum, turn) => sum + turn.toolCallCount, 0)
+  const loadedToolCalls = Math.max(0, totalToolCalls - unloadedToolCalls)
+
   if (density === "problems" && visibleTurns.length === 0) {
+    if (showUnloadedNotice) {
+      return (
+        <UnloadedActivityNotice
+          message={`No failures in the ${loadedToolCalls} loaded tool call${loadedToolCalls === 1 ? "" : "s"} · ${unloadedToolCalls} earlier call${unloadedToolCalls === 1 ? "" : "s"} not loaded`}
+          loading={loadingUnloaded}
+          onLoad={onLoadUnloaded!}
+        />
+      )
+    }
     return (
       <p className="py-12 text-center text-sm text-muted-foreground">
         No failures in this transcript.
@@ -113,6 +162,13 @@ export function AgentTimeline({
           )
         })}
         {turns.length === 0 && (density === "conversation" || density === "all") && streamingSlot}
+        {showUnloadedNotice && (
+          <UnloadedActivityNotice
+            message={`${unloadedToolCalls} earlier tool call${unloadedToolCalls === 1 ? "" : "s"} not loaded — failures in them are not shown`}
+            loading={loadingUnloaded}
+            onLoad={onLoadUnloaded!}
+          />
+        )}
       </div>
     </ToggleAnchorContext.Provider>
   )

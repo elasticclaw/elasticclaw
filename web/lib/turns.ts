@@ -366,8 +366,12 @@ export interface Turn {
  * A turn starts at a user message (or at the start of the transcript) and
  * holds everything until the next user message: hub notices, tool steps, and
  * the agent's prose. Only the last turn may be "running".
+ *
+ * `allowTrailingRunning` gates that on live claw state: an offline/errored
+ * claw cannot still be running its dangling last step, so history loaded for
+ * it must not present as live.
  */
-export function groupIntoTurns(messages: Message[]): Turn[] {
+export function groupIntoTurns(messages: Message[], allowTrailingRunning = true): Turn[] {
   const turns: Turn[] = []
   let current: Message[] = []
   let currentUser: Message | null = null
@@ -393,7 +397,7 @@ export function groupIntoTurns(messages: Message[]): Turn[] {
   for (let t = 0; t < turns.length; t += 1) {
     const isLast = t === turns.length - 1
     const turn = turns[t]
-    const demoted = demoteStaleRunning(turn.steps, isLast)
+    const demoted = demoteStaleRunning(turn.steps, isLast && allowTrailingRunning)
     if (demoted !== turn.steps) {
       const byId = new Map(demoted.map((s) => [s.id, s]))
       turn.steps = demoted
