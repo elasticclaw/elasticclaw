@@ -3,6 +3,14 @@
 
 @custom-variant dark (&:is(.dark *));
 
+/* Full-viewport height with mobile-safe dynamic units: 100dvh tracks the
+   visible viewport as browser chrome collapses; 100vh is the fallback for
+   browsers without dvh support. Used by the app shell and sidebar. */
+@utility h-screen-safe {
+  height: 100vh;
+  height: 100dvh;
+}
+
 :root {
   --background: oklch(1 0 0);
   --foreground: oklch(0.145 0 0);
@@ -141,4 +149,27 @@
 }
 .scrollbar-hide::-webkit-scrollbar {
   display: none; /* Chrome/Safari/Opera */
+}
+
+/* Slim, token-colored scrollbar — keeps overflow visible without the bulk of
+   the native chrome. Use on transcripts and other tall panes. */
+.scrollbar-thin {
+  scrollbar-width: thin; /* Firefox */
+  scrollbar-color: var(--border) transparent;
+}
+.scrollbar-thin::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+.scrollbar-thin::-webkit-scrollbar-track {
+  background: transparent;
+}
+.scrollbar-thin::-webkit-scrollbar-thumb {
+  background-color: var(--border);
+  border-radius: 9999px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+.scrollbar-thin::-webkit-scrollbar-thumb:hover {
+  background-color: var(--ring);
 }

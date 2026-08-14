@@ -24,6 +24,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
@@ -803,16 +804,29 @@ type agentResult struct {
 }
 
 type agentActivity struct {
-	Kind    string `json:"kind"`
-	Stream  string `json:"stream,omitempty"`
-	Phase   string `json:"phase,omitempty"`
-	Tool    string `json:"tool,omitempty"`
-	Detail  string `json:"detail,omitempty"`
-	Command string `json:"command,omitempty"`
-	Path    string `json:"path,omitempty"`
-	URL     string `json:"url,omitempty"`
-	Message string `json:"message,omitempty"`
-	Error   string `json:"error,omitempty"`
+	Kind       string `json:"kind"`
+	Stream     string `json:"stream,omitempty"`
+	Phase      string `json:"phase,omitempty"`
+	Tool       string `json:"tool,omitempty"`
+	Detail     string `json:"detail,omitempty"`
+	Command    string `json:"command,omitempty"`
+	Path       string `json:"path,omitempty"`
+	URL        string `json:"url,omitempty"`
+	Message    string `json:"message,omitempty"`
+	Error      string `json:"error,omitempty"`
+	CallID     string `json:"call_id,omitempty"`
+	DurationMs int64  `json:"duration_ms,omitempty"`
+	ExitCode   *int   `json:"exit_code,omitempty"`
+	Result     string `json:"result,omitempty"`
+}
+
+// inFlightToolCall is an unresolved tool start awaiting its terminal event.
+// The content signature is kept so terminals that omit the payload call ID can
+// still find their start, whether the start's ID was payload-provided or
+// synthesized.
+type inFlightToolCall struct {
+	startedAt time.Time
+	base      string
 }
 
 // inFlightState tracks a single in-progress agent turn.
@@ -827,6 +841,8 @@ type inFlightState struct {
 	lastToolPulseAt     time.Time
 	modelWaitStartedAt  time.Time
 	lastModelPulseAt    time.Time
+	inFlightCalls       map[string]inFlightToolCall
+	callOccurrences     map[string]int
 }
 
 func (inf *inFlightState) emitActivity(a agentActivity) {
@@ -858,6 +874,78 @@ func (inf *inFlightState) noteActivity(a agentActivity) {
 		inf.lastToolPulseAt = time.Time{}
 		inf.modelWaitStartedAt = time.Now()
 		inf.lastModelPulseAt = time.Time{}
+	}
+}
+
+func isToolStartPhase(phase string) bool {
+	switch strings.ToLower(strings.TrimSpace(phase)) {
+	case "running", "start", "started", "in_progress":
+		return true
+	}
+	return false
+}
+
+func isToolTerminalPhase(phase string) bool {
+	switch strings.ToLower(strings.TrimSpace(phase)) {
+	case "completed", "complete", "done", "failed", "error", "cancelled", "canceled":
+		return true
+	}
+	return false
+}
+
+func toolCallSignature(stream, tool, command, path, url string) string {
+	sum := sha256.Sum256([]byte(strings.Join([]string{stream, tool, command, path, url}, "\x00")))
+	return fmt.Sprintf("%x", sum[:])[:12]
+}
+
+// resolveToolCall records starts and matches terminal events to their start.
+// Gateway payload IDs win; synthesized IDs distinguish repeated identical calls.
+func (inf *inFlightState) resolveToolCall(a *agentActivity, now time.Time) {
+	if a.Kind != "tool" {
+		return
+	}
+	inf.mu.Lock()
+	defer inf.mu.Unlock()
+	if inf.inFlightCalls == nil {
+		inf.inFlightCalls = make(map[string]inFlightToolCall)
+	}
+	if inf.callOccurrences == nil {
+		inf.callOccurrences = make(map[string]int)
+	}
+	base := toolCallSignature(a.Stream, a.Tool, a.Command, a.Path, a.URL)
+	if a.CallID == "" {
+		// Match by content signature: earliest unresolved start with the same
+		// signature, regardless of whether its ID was payload-provided or
+		// synthesized. Terminals adopt (and close) it; repeated start/progress
+		// events without an ID reuse it instead of piling up one phantom
+		// in-flight call per progress update.
+		var matchedID string
+		var matchedAt time.Time
+		for id, call := range inf.inFlightCalls {
+			if call.base == base && (matchedAt.IsZero() || call.startedAt.Before(matchedAt)) {
+				matchedID, matchedAt = id, call.startedAt
+			}
+		}
+		if matchedID != "" {
+			a.CallID = matchedID
+			if isToolTerminalPhase(a.Phase) {
+				a.DurationMs = now.Sub(matchedAt).Milliseconds()
+				delete(inf.inFlightCalls, matchedID)
+			}
+			return
+		}
+		inf.callOccurrences[base]++
+		a.CallID = fmt.Sprintf("%s-%d", base, inf.callOccurrences[base])
+	}
+	if isToolStartPhase(a.Phase) {
+		if _, exists := inf.inFlightCalls[a.CallID]; !exists {
+			inf.inFlightCalls[a.CallID] = inFlightToolCall{startedAt: now, base: base}
+		}
+	} else if isToolTerminalPhase(a.Phase) {
+		if call, exists := inf.inFlightCalls[a.CallID]; exists {
+			a.DurationMs = now.Sub(call.startedAt).Milliseconds()
+			delete(inf.inFlightCalls, a.CallID)
+		}
 	}
 }
 
@@ -918,10 +1006,20 @@ func cleanAgentActivity(a agentActivity) agentActivity {
 	a.URL = sanitizeActivityText(a.URL)
 	a.Message = sanitizeActivityText(a.Message)
 	a.Error = sanitizeActivityText(a.Error)
+	a.CallID = sanitizeActivityText(a.CallID)
+	// Truncate before redacting: results can be megabytes of tool output, and
+	// the redaction scan lowercases the remaining string once per replacer. A
+	// secret split by the cut still redacts — the prefix match runs to
+	// end-of-string. Redaction may grow the text slightly; that is fine.
+	a.Result = sanitizeActivityTextLimit(truncateResult(a.Result, 2000), 0)
 	return a
 }
 
 func sanitizeActivityText(value string) string {
+	return sanitizeActivityTextLimit(value, 2000)
+}
+
+func sanitizeActivityTextLimit(value string, max int) string {
 	value = strings.TrimSpace(value)
 	if value == "" {
 		return ""
@@ -943,11 +1041,25 @@ func sanitizeActivityText(value string) string {
 	for _, r := range replacers {
 		value = redactActivityPrefix(value, r.prefix, r.value)
 	}
-	const maxActivityTextLen = 2000
-	if len(value) > maxActivityTextLen {
-		value = value[:maxActivityTextLen-3] + "..."
+	if max > 0 && len(value) > max {
+		value = truncateUTF8Prefix(value, max-3) + "..."
 	}
 	return value
+}
+
+func truncateResult(value string, max int) string {
+	if max <= 0 || len(value) <= max {
+		return value
+	}
+	return truncateUTF8Prefix(value, max) + "\n… (truncated)"
+}
+
+func truncateUTF8Prefix(value string, max int) string {
+	end := max
+	for end > 0 && (value[end]&0xc0) == 0x80 {
+		end--
+	}
+	return value[:end]
 }
 
 func redactActivityPrefix(value, prefix, replacement string) string {
@@ -1479,7 +1591,7 @@ func (gs *gatewaySession) readLoop(ctx context.Context) {
 				url := firstNonEmpty(agentPayload.Data.URL, agentPayload.Data.URI, nestedString(rawAgentPayload.Data, "url", "uri"))
 				meta := firstNonEmpty(agentPayload.Data.Meta, nestedString(rawAgentPayload.Data, "meta"))
 				command, path, url, detail := resolveToolActivityDetail(tool, command, path, url, meta, rawAgentPayload.Data)
-				activity := cleanAgentActivity(agentActivity{
+				activity := agentActivity{
 					Kind:    kind,
 					Stream:  agentPayload.Stream,
 					Phase:   agentPayload.Data.Phase,
@@ -1490,7 +1602,17 @@ func (gs *gatewaySession) readLoop(ctx context.Context) {
 					URL:     url,
 					Message: firstNonEmpty(agentPayload.Data.Message, agentPayload.Data.Status),
 					Error:   agentPayload.Data.Error,
-				})
+					CallID:  toolCallID(rawAgentPayload.Data),
+				}
+				// Outcome fields exist only once the call finished. Scraping them
+				// from start events would surface tool *inputs* (e.g. a Write's
+				// file content under data.input.content) as the call's result.
+				if isToolTerminalPhase(activity.Phase) {
+					activity.ExitCode = nestedExitCode(rawAgentPayload.Data, "exit_code", "exitCode", "status_code")
+					activity.Result = nestedString(rawAgentPayload.Data, "result", "output", "stdout", "content", "text")
+				}
+				inf.resolveToolCall(&activity, time.Now())
+				activity = cleanAgentActivity(activity)
 				if kind == "tool" && activity.Command == "" && activity.Path == "" && activity.URL == "" && activity.Detail == "" {
 					logMissingToolActivityDetail(agentPayload.Stream, activity.Phase, activity.Tool, rawAgentPayload.Data)
 				}
@@ -1629,6 +1751,39 @@ func sanitizeActivityPayloadValue(value interface{}, depth int) interface{} {
 	}
 }
 
+// toolCallID extracts the gateway's tool-call correlation ID. Deliberately
+// narrow: only explicit call-ID keys at the top level, plus the ID of a
+// tool_call/call object. The generic nestedString recursion is not used here —
+// it would happily pick up entity IDs from tool *arguments* (data.input.id),
+// which unpairs starts from terminals and cross-pairs unrelated calls.
+func toolCallID(data map[string]interface{}) string {
+	callIDKeys := []string{"call_id", "callId", "tool_use_id", "toolCallId", "toolUseId"}
+	stringAt := func(m map[string]interface{}, keys ...string) string {
+		for _, key := range keys {
+			if s, ok := m[key].(string); ok {
+				if s = strings.TrimSpace(s); s != "" {
+					return s
+				}
+			}
+		}
+		return ""
+	}
+	if len(data) == 0 {
+		return ""
+	}
+	if id := stringAt(data, callIDKeys...); id != "" {
+		return id
+	}
+	for _, containerKey := range []string{"tool_call", "toolCall", "call"} {
+		if m, ok := data[containerKey].(map[string]interface{}); ok {
+			if id := stringAt(m, append(callIDKeys, "id")...); id != "" {
+				return id
+			}
+		}
+	}
+	return ""
+}
+
 func nestedString(data map[string]interface{}, keys ...string) string {
 	if len(data) == 0 {
 		return ""
@@ -1644,6 +1799,53 @@ func nestedString(data map[string]interface{}, keys ...string) string {
 		}
 	}
 	return ""
+}
+
+func nestedExitCode(data map[string]interface{}, keys ...string) *int {
+	if len(data) == 0 {
+		return nil
+	}
+	for _, key := range keys {
+		if code, ok := exitCodeValue(data[key]); ok {
+			return &code
+		}
+	}
+	for _, containerKey := range []string{"raw_params", "params", "input", "arguments", "args", "request", "item", "tool_call", "toolCall", "call", "details", "metadata", "payload"} {
+		if code := nestedExitCodeContainer(data[containerKey], keys...); code != nil {
+			return code
+		}
+	}
+	return nil
+}
+
+func nestedExitCodeContainer(value interface{}, keys ...string) *int {
+	switch typed := value.(type) {
+	case map[string]interface{}:
+		return nestedExitCode(typed, keys...)
+	case []interface{}:
+		for _, item := range typed {
+			if code := nestedExitCodeContainer(item, keys...); code != nil {
+				return code
+			}
+		}
+	}
+	return nil
+}
+
+func exitCodeValue(value interface{}) (int, bool) {
+	switch typed := value.(type) {
+	case float64:
+		return int(typed), typed == float64(int(typed))
+	case json.Number:
+		code, err := strconv.Atoi(string(typed))
+		return code, err == nil
+	case string:
+		code, err := strconv.Atoi(strings.TrimSpace(typed))
+		return code, err == nil
+	case int:
+		return typed, true
+	}
+	return 0, false
 }
 
 func nestedContainerString(value interface{}, keys ...string) string {

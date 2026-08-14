@@ -2229,10 +2229,22 @@ func (s *Server) activitySummary(clawID, tenantID string, from, to *time.Time, f
 	if err != nil {
 		return nil, err
 	}
+	// Stamp the summary with the newest activity it covers so clients sorting
+	// by timestamp keep it next to its conversation gap. The raw MAX() string
+	// is in the driver's storage format (`_time_format=sqlite`), not RFC3339 —
+	// parsing only RFC3339 here used to fall through to now(), which pushed
+	// every summary to the end of the transcript.
 	createdAt := now()
 	if maxCreated != "" {
-		if parsed, err := time.Parse(time.RFC3339Nano, maxCreated); err == nil {
-			createdAt = parsed
+		for _, layout := range []string{
+			time.RFC3339Nano,
+			"2006-01-02 15:04:05.999999999-07:00", // modernc.org/sqlite "sqlite" time format
+			"2006-01-02 15:04:05",
+		} {
+			if parsed, err := time.Parse(layout, maxCreated); err == nil {
+				createdAt = parsed
+				break
+			}
 		}
 	}
 	return &types.HubMessage{

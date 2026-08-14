@@ -6,6 +6,10 @@ export function isTerminalAssistantMessage(message: Message): boolean {
 
 /** Client-only rows that never come from the timeline API. */
 export function isTransientMessage(message: Message): boolean {
+  // Server-issued summary rows have ids like "activity-summary-<uuid>" which
+  // collide with the client "activity-" prefix — they are durable API rows
+  // (their cached remainder must survive merges), never transient.
+  if (message.role === "activity_summary") return false
   return (
     message.id.startsWith("activity-") ||
     message.id.startsWith("live-") ||
@@ -61,6 +65,31 @@ export function isLiveSegmentCoveredByDurable(
   if (!bestId) return false
   claimedDurableIds?.add(bestId)
   return true
+}
+
+/**
+ * True when a client live activity row and a durable activity row describe the
+ * same tool event (same content and activity identity, close in time). Used to
+ * drop the transient twin once the durable row is loaded.
+ */
+export function isDuplicateLiveActivity(existing: Message, candidate: Message): boolean {
+  if (existing.role !== "activity" || candidate.role !== "activity") return false
+  const timeDelta = Math.abs(messageTimeMs(existing) - messageTimeMs(candidate))
+  if (timeDelta > 2000) return false
+  if (existing.content !== candidate.content) return false
+
+  const existingActivity = existing.activity
+  const candidateActivity = candidate.activity
+  if (!existingActivity || !candidateActivity) return true
+
+  return (
+    existingActivity.kind === candidateActivity.kind &&
+    existingActivity.phase === candidateActivity.phase &&
+    existingActivity.tool === candidateActivity.tool &&
+    existingActivity.command === candidateActivity.command &&
+    existingActivity.path === candidateActivity.path &&
+    existingActivity.url === candidateActivity.url
+  )
 }
 
 /**

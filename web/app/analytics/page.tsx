@@ -1,28 +1,10 @@
 "use client"
 
-import { Suspense, useEffect } from "react"
-import { useRouter, useSearchParams } from "next/navigation"
+import { HomeShell } from "@/components/home-shell"
 
-function AnalyticsRedirect() {
-  const router = useRouter()
-  const params = useSearchParams()
-
-  useEffect(() => {
-    const queryString = params.toString()
-    router.replace(`/settings/workspace-analytics${queryString ? `?${queryString}` : ""}`)
-  }, [params, router])
-
-  return (
-    <div className="flex h-full items-center justify-center p-6 text-sm text-muted-foreground">
-      Redirecting to settings…
-    </div>
-  )
-}
-
+// Deep link into the analytics view of the same shell rendered at "/".
+// HomeShell derives the view from the pathname, so this static-export route
+// only needs to hydrate the shared component.
 export default function AnalyticsPage() {
-  return (
-    <Suspense fallback={null}>
-      <AnalyticsRedirect />
-    </Suspense>
-  )
+  return <HomeShell />
 }

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Smoke check for Next.js static export of the settings route.
+# Smoke check for the Next.js static export.
 # Verifies that all expected paths are generated in web/out/.
 #
 # Usage: ./scripts/check-static-export.sh [out_dir]
@@ -10,8 +10,10 @@ set -euo pipefail
 OUT_DIR="${1:-out}"
 ERRORS=0
 
-# Expected paths that must exist for the settings route
+# Expected paths that must exist for the settings route, plus the
+# standalone analytics route the agents shell toggles into.
 EXPECTED_PATHS=(
+  "analytics/index.html"
   "settings/index.html"
   "settings/runtimes/index.html"
   "settings/models/index.html"
@@ -20,7 +22,6 @@ EXPECTED_PATHS=(
   "settings/issue-trackers/index.html"
   "settings/workspaces/index.html"
   "settings/workflows/index.html"
-  "settings/workspace-analytics/index.html"
   "settings/secrets/index.html"
   "settings/mcp-servers/index.html"
   "settings/ai-config/index.html"
@@ -35,7 +36,6 @@ EXPECTED_PATHS=(
   "settings/_workspace/issue-trackers/index.html"
   "settings/_workspace/workspaces/index.html"
   "settings/_workspace/workflows/index.html"
-  "settings/_workspace/workspace-analytics/index.html"
   "settings/_workspace/secrets/index.html"
   "settings/_workspace/mcp-servers/index.html"
   "settings/_workspace/ai-config/index.html"

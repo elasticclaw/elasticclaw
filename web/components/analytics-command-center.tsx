@@ -1,7 +1,7 @@
 "use client"
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react"
-import { usePathname, useRouter, useSearchParams } from "next/navigation"
+import { usePathname, useSearchParams } from "next/navigation"
 import { Info } from "lucide-react"
 import {
   Bar,
@@ -26,6 +26,7 @@ import {
   fetchTaskRunFilterOptions,
   fetchTaskRunPRs,
   fetchTaskRuns,
+  fetchWorkspaces,
 } from "@/lib/api"
 import type {
   AnalyticsCostDriver,
@@ -45,6 +46,12 @@ import {
   urlFilterKeys,
 } from "@/components/task-run-analytics-view"
 import { Button } from "@/components/ui/button"
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+} from "@/components/ui/select"
 import {
   ChartContainer,
   ChartTooltip,
@@ -122,8 +129,7 @@ function isoDayRange(day: string) {
   }
 }
 
-export function AnalyticsCommandCenter({ workspaceScope }: { workspaceScope?: string } = {}) {
-  const router = useRouter()
+export function AnalyticsCommandCenter() {
   const pathname = usePathname()
   const params = useSearchParams()
   const paramsKey = params.toString()
@@ -139,12 +145,17 @@ export function AnalyticsCommandCenter({ workspaceScope }: { workspaceScope?: st
       if (value) (nextFilters as Record<string, string>)[filterKey] = value
     }
 
-    if (workspaceScope && !params.get("workspace")) {
-      nextFilters.workspace = workspaceScope
-    }
-
     return nextFilters
-  }, [params, workspaceScope])
+  }, [params])
+  const [workspaceNames, setWorkspaceNames] = useState<string[]>([])
+
+  useEffect(() => {
+    let cancelled = false
+    fetchWorkspaces()
+      .then((data) => { if (!cancelled) setWorkspaceNames(data.map((workspace) => workspace.name)) })
+      .catch(() => { if (!cancelled) setWorkspaceNames([]) })
+    return () => { cancelled = true }
+  }, [])
   const [summary, setSummary] = useState<TaskRunAnalyticsSummary>()
   const [costs, setCosts] = useState<CostOverview>()
   const [yearCosts, setYearCosts] = useState<CostOverview>()
@@ -193,9 +204,13 @@ export function AnalyticsCommandCenter({ workspaceScope }: { workspaceScope?: st
         else nextParams.delete(filterKey)
       })
       nextParams.delete("cursor")
-      router.replace(`${pathname}${nextParams.size ? `?${nextParams}` : ""}`, { scroll: false })
+      // Native history API instead of router.replace: Next syncs
+      // usePathname/useSearchParams with replaceState, and this avoids a
+      // client navigation that would remount the shared home shell (killing
+      // the hub WebSocket) when analytics renders as a view of "/".
+      window.history.replaceState(null, "", `${pathname}${nextParams.size ? `?${nextParams}` : ""}`)
     },
-    [paramsKey, pathname, router]
+    [paramsKey, pathname]
   )
 
   const load = useCallback(
@@ -391,7 +406,7 @@ export function AnalyticsCommandCenter({ workspaceScope }: { workspaceScope?: st
         <header>
           <h1 className="text-2xl font-semibold tracking-tight">Analytics</h1>
         </header>
-        <FilterBar filters={filters} options={options} onChange={setFilters} />
+        <FilterBar filters={filters} options={options} workspaces={workspaceNames} onChange={setFilters} />
         {error && <p className="text-sm text-destructive">{error}</p>}
 
         <div className="grid gap-5 xl:grid-cols-[6fr_3fr]">
@@ -526,13 +541,50 @@ export function AnalyticsCommandCenter({ workspaceScope }: { workspaceScope?: st
   )
 }
 
+const allWorkspacesValue = "__all"
+
+function WorkspaceSelect({
+  value,
+  workspaces,
+  onChange,
+}: {
+  value?: string
+  workspaces: string[]
+  onChange: (value?: string) => void
+}) {
+  // Keep a workspace coming from a shared URL selectable even if it isn't in
+  // (or hasn't loaded into) the workspace list yet.
+  const values = value && !workspaces.includes(value) ? [value, ...workspaces] : workspaces
+
+  return (
+    <Select
+      value={value ?? allWorkspacesValue}
+      onValueChange={(next) => onChange(next === allWorkspacesValue ? undefined : next)}
+    >
+      <SelectTrigger size="sm" className="w-full bg-background font-medium">
+        <span className="truncate">
+          <span className="text-muted-foreground font-normal">Workspace:</span> {value ?? "All workspaces"}
+        </span>
+      </SelectTrigger>
+      <SelectContent>
+        <SelectItem value={allWorkspacesValue}>All workspaces</SelectItem>
+        {values.map((workspace) => (
+          <SelectItem key={workspace} value={workspace}>{workspace}</SelectItem>
+        ))}
+      </SelectContent>
+    </Select>
+  )
+}
+
 function FilterBar({
   filters,
   options,
+  workspaces,
   onChange,
 }: {
   filters: TaskRunAnalyticsFilters
   options?: TaskRunFilterOptions
+  workspaces: string[]
   onChange: (updates: Record<string, string | undefined>) => void
 }) {
   const selectFilters = [
@@ -544,6 +596,13 @@ function FilterBar({
 
   return (
     <div className="flex flex-wrap gap-2 rounded-lg border bg-card p-2">
+      <div className="w-56">
+        <WorkspaceSelect
+          value={filters.workspace}
+          workspaces={workspaces}
+          onChange={(value) => onChange({ workspace: value })}
+        />
+      </div>
       <div className="flex overflow-hidden rounded-md border">
         {[["7d", 7], ["30d", 30], ["90d", 90], ["MTD", 0]].map(([label, days]) => (
           <Button

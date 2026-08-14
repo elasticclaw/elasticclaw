@@ -14,13 +14,16 @@ import {
   isConfigured,
 } from "@/lib/api"
 import { mapApiClaw, mapApiMessage, mapApiStatus, computeUptime } from "@/lib/mappers"
+import { expandSummaryMessage, selectTrailingSummaries } from "@/lib/activity-prefetch"
 import {
+  isDuplicateLiveActivity,
   isLiveSegmentCoveredByDurable,
   isTerminalAssistantMessage,
   isTransientMessage,
   pruneOldestLiveActivities,
 } from "@/lib/messages"
 import { useTypewriter, type TypewriterState } from "@/hooks/use-typewriter"
+import { noteOutput } from "@/hooks/use-last-output"
 
 export interface HubState {
   claws: Claw[]
@@ -36,6 +39,13 @@ export interface HubState {
   createClaw: (req: { name: string; template: string }) => Promise<void>
   killClaw: (clawId: string) => Promise<void>
   loadMessages: (clawId: string) => Promise<void>
+  /**
+   * Expand the trailing activity_summary placeholders of a claw's cached
+   * timeline into real activity rows (board cards need step data without user
+   * interaction). Bounded per claw; returns false when `cancelled` interrupted
+   * it so the caller can retry later. No-op when nothing is unexpanded.
+   */
+  prefetchTrailingActivity: (clawId: string, cancelled?: () => boolean) => Promise<boolean>
   setPinned: (clawId: string, pinned: boolean) => void
   setUnreadCount: (clawId: string, count: number) => void
   refreshClaws: () => Promise<void>
@@ -49,6 +59,11 @@ const MESSAGES_KEY = "elasticclaw_messages"
 const MAX_CACHED_PER_CLAW = 200
 /** Cap live tool/activity rows in memory so floods don't bloat the client. */
 const MAX_LIVE_ACTIVITIES_PER_CLAW = 200
+// Board prefetch bounds: trailing summaries only, cheap enough to run for
+// every visible card without noticeably delaying the initial board load. The
+// row budget is the real cap; the summary count only bounds request fan-out.
+const BOARD_PREFETCH_SUMMARIES = 4
+const BOARD_PREFETCH_ROW_BUDGET = 40
 
 function readCachedMessages(): Record<string, Message[]> {
   if (typeof window === "undefined") return {}
@@ -340,6 +355,18 @@ export function useHub(selectedClawId: string | null): HubState {
         const existingNonOpt = existing.filter((m) => !m.id.startsWith('opt-') && !isTransientMessage(m))
         const apiIds = new Set(msgs.map((m) => m.id))
         const cachedOnly = existingNonOpt.filter((m) => !apiIds.has(m.id))
+        // Prefer the cached version of an activity_summary row over the API's:
+        // the board prefetch replaces (part of) its range with real rows and
+        // leaves a smaller remainder under the same deterministic id.
+        // Re-adding the full placeholder would double-count the expanded rows
+        // kept via cachedOnly. Summary ids are hashes of claw+range, so an id
+        // match means the same range — the cached remainder is never stale.
+        const existingSummaries = new Map(
+          existingNonOpt.filter((m) => m.role === "activity_summary").map((m) => [m.id, m])
+        )
+        const apiPreferred = msgs.map((m) =>
+          m.role === "activity_summary" ? existingSummaries.get(m.id) ?? m : m
+        )
         const inflight = existing.filter((m) => m.id.startsWith('opt-') &&
           !msgs.some((r) => r.content === m.content && r.role === m.role))
         // Keep in-flight tool activity and live text segments that the API has
@@ -356,11 +383,26 @@ export function useHub(selectedClawId: string | null): HubState {
           }
           return true
         })
+        // Dedupe by id — a cached transcript that ever picked up duplicate
+        // rows (e.g. two copies of the same durable activity) must self-heal
+        // here instead of re-persisting the duplication forever.
+        const mergedSeen = new Set<string>()
         const merged = pruneOldestLiveActivities(
-          [...msgs, ...cachedOnly, ...inflight, ...liveTransient],
+          [...apiPreferred, ...cachedOnly, ...inflight, ...liveTransient].filter((m) => {
+            if (mergedSeen.has(m.id)) return false
+            mergedSeen.add(m.id)
+            return true
+          }),
           MAX_LIVE_ACTIVITIES_PER_CLAW
         )
-        merged.sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime())
+        // Timestamp sort with a role tie-break: a summary is stamped with the
+        // newest activity it covers, so on equal times it must land AFTER the
+        // covered rows — otherwise it splits a step run mid-pair.
+        merged.sort((a, b) => {
+          const delta = a.timestamp.getTime() - b.timestamp.getTime()
+          if (delta !== 0) return delta
+          return (a.role === "activity_summary" ? 1 : 0) - (b.role === "activity_summary" ? 1 : 0)
+        })
         const next = { ...prev, [clawId]: merged }
         persistMessages(next)
         return next
@@ -379,6 +421,59 @@ export function useHub(selectedClawId: string | null): HubState {
       console.warn(`Failed to load messages for ${clawId}:`, err)
     }
   }, [persistMessages])
+
+  const prefetchTrailingActivity = useCallback(
+    async (clawId: string, cancelled?: () => boolean): Promise<boolean> => {
+      const picks = selectTrailingSummaries(messagesRef.current[clawId] || [], {
+        maxSummaries: BOARD_PREFETCH_SUMMARIES,
+        rowBudget: BOARD_PREFETCH_ROW_BUDGET,
+      })
+      for (const pick of picks) {
+        if (cancelled?.()) return false
+        const target = (messagesRef.current[clawId] || []).find((m) => m.id === pick.id)
+        // A remainder emptied by a concurrent expansion keeps the id — skip it.
+        if (!target?.activitySummary || target.activitySummary.count <= 0) continue
+        let replacement: Message[]
+        try {
+          replacement = await expandSummaryMessage(clawId, target, pick.limit, {
+            keepEmptyRemainder: true,
+          })
+        } catch (err) {
+          console.warn(`Failed to prefetch activity rows for ${clawId}:`, err)
+          return false
+        }
+        if (cancelled?.()) return false
+        const durableRows = replacement.filter((m) => m.role === "activity")
+        setMessages((prev) => {
+          const existing = prev[clawId]
+          if (!existing?.some((m) => m.id === pick.id)) return prev
+          // Dedupe by id (a concurrent expansion of the same summary must not
+          // insert its rows twice) and drop transient live twins now
+          // represented by durable rows — otherwise steps render twice.
+          const seenIds = new Set<string>()
+          const merged = existing
+            .flatMap((m) => (m.id === pick.id ? replacement : [m]))
+            .filter((m) => {
+              if (seenIds.has(m.id)) return false
+              seenIds.add(m.id)
+              if (
+                m.role === "activity" &&
+                isTransientMessage(m) &&
+                durableRows.some((d) => isDuplicateLiveActivity(d, m))
+              ) {
+                return false
+              }
+              return true
+            })
+          const next = { ...prev, [clawId]: merged }
+          persistMessages(next)
+          return next
+        })
+      }
+      return true
+    },
+    [persistMessages]
+  )
 
   const connectWebSocket = useCallback(function connect() {
     if (!shouldReconnectRef.current) return
@@ -434,6 +529,7 @@ export function useHub(selectedClawId: string | null): HubState {
         if (type === "chunk") {
           // Streaming chunk — feed into typewriter
           const { claw_id, content } = payload
+          noteOutput(claw_id)
           pushChunk(claw_id, content)
           setClaws((prev) =>
             prev.map((c) =>
@@ -454,8 +550,13 @@ export function useHub(selectedClawId: string | null): HubState {
             url: payload.url,
             message: payload.message,
             error: payload.error,
+            call_id: payload.call_id,
+            duration_ms: payload.duration_ms,
+            exit_code: payload.exit_code,
+            result: payload.result,
           }
           if (isUnhelpfulActivity(activity)) return
+          noteOutput(clawId)
           const currentMessages = messagesRef.current[clawId] || []
           const lastDurable = [...currentMessages].reverse().find((message) => !isTransientMessage(message) && message.role !== "activity")
           if (activity.kind === "model_started" && lastDurable && isTerminalAssistantMessage(lastDurable)) return
@@ -707,6 +808,7 @@ export function useHub(selectedClawId: string | null): HubState {
     createClaw,
     killClaw,
     loadMessages,
+    prefetchTrailingActivity,
     setPinned,
     setUnreadCount,
     refreshClaws,

@@ -19,6 +19,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"nhooyr.io/websocket"
 	"nhooyr.io/websocket/wsjson"
@@ -760,6 +761,126 @@ func TestNestedStringExtractsToolCommandDetails(t *testing.T) {
 				t.Fatalf("nestedString() = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestToolActivityOutcomeFields(t *testing.T) {
+	tests := []struct {
+		name string
+		run  func(t *testing.T)
+	}{
+		{
+			name: "call id comes from payload",
+			run: func(t *testing.T) {
+				data := map[string]interface{}{"tool_call": map[string]interface{}{"callId": "gateway-call-7"}}
+				if got := toolCallID(data); got != "gateway-call-7" {
+					t.Fatalf("payload call ID = %q", got)
+				}
+			},
+		},
+		{
+			name: "entity ids inside tool arguments are not call ids",
+			run: func(t *testing.T) {
+				data := map[string]interface{}{
+					"phase": "running",
+					"input": map[string]interface{}{"id": "ENG-123", "call_id": "also-not-ours"},
+				}
+				if got := toolCallID(data); got != "" {
+					t.Fatalf("call ID scraped from tool arguments: %q", got)
+				}
+			},
+		},
+		{
+			name: "progress updates without an id reuse the open call",
+			run: func(t *testing.T) {
+				inf := &inFlightState{}
+				at := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+				first := agentActivity{Kind: "tool", Stream: "tool", Phase: "started", Tool: "exec", Command: "go test ./..."}
+				inf.resolveToolCall(&first, at)
+				progress := agentActivity{Kind: "tool", Stream: "tool", Phase: "in_progress", Tool: "exec", Command: "go test ./..."}
+				inf.resolveToolCall(&progress, at.Add(time.Second))
+				if first.CallID == "" || first.CallID != progress.CallID {
+					t.Fatalf("IDs = %q, %q; want progress to reuse the open call", first.CallID, progress.CallID)
+				}
+				if want := toolCallSignature("tool", "exec", "go test ./...", "", "") + "-1"; first.CallID != want {
+					t.Fatalf("first ID = %q, want %q", first.CallID, want)
+				}
+				if len(inf.inFlightCalls) != 1 {
+					t.Fatalf("in-flight calls = %d, want 1 (no phantom entry per progress event)", len(inf.inFlightCalls))
+				}
+			},
+		},
+		{
+			name: "sequential identical calls get distinct ids",
+			run: func(t *testing.T) {
+				inf := &inFlightState{}
+				at := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+				first := agentActivity{Kind: "tool", Stream: "tool", Phase: "started", Tool: "exec", Command: "go test ./..."}
+				inf.resolveToolCall(&first, at)
+				done := agentActivity{Kind: "tool", Stream: "tool", Phase: "completed", Tool: "exec", Command: "go test ./..."}
+				inf.resolveToolCall(&done, at.Add(time.Second))
+				if done.CallID != first.CallID || done.DurationMs != 1000 {
+					t.Fatalf("terminal id/duration = %q/%d, want %q/1000", done.CallID, done.DurationMs, first.CallID)
+				}
+				second := agentActivity{Kind: "tool", Stream: "tool", Phase: "started", Tool: "exec", Command: "go test ./..."}
+				inf.resolveToolCall(&second, at.Add(2*time.Second))
+				if second.CallID == "" || second.CallID == first.CallID {
+					t.Fatalf("IDs = %q, %q; want distinct ids across sequential calls", first.CallID, second.CallID)
+				}
+			},
+		},
+		{
+			name: "terminal without id matches a payload-id start by signature",
+			run: func(t *testing.T) {
+				inf := &inFlightState{}
+				at := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+				started := agentActivity{Kind: "tool", Stream: "tool", Phase: "started", Tool: "exec", Command: "sleep 5", CallID: "gw-1"}
+				inf.resolveToolCall(&started, at)
+				done := agentActivity{Kind: "tool", Stream: "tool", Phase: "completed", Tool: "exec", Command: "sleep 5"}
+				inf.resolveToolCall(&done, at.Add(5*time.Second))
+				if done.CallID != "gw-1" || done.DurationMs != 5000 {
+					t.Fatalf("terminal id/duration = %q/%d, want gw-1/5000", done.CallID, done.DurationMs)
+				}
+				if len(inf.inFlightCalls) != 0 {
+					t.Fatalf("in-flight calls = %d, want 0", len(inf.inFlightCalls))
+				}
+			},
+		},
+		{
+			name: "terminal event receives duration",
+			run: func(t *testing.T) {
+				inf := &inFlightState{}
+				started := agentActivity{Kind: "tool", Phase: "started", Tool: "exec", CallID: "call-1"}
+				inf.resolveToolCall(&started, time.Unix(100, 0))
+				completed := agentActivity{Kind: "tool", Phase: "completed", Tool: "exec", CallID: "call-1"}
+				inf.resolveToolCall(&completed, time.Unix(101, 250000000))
+				if completed.DurationMs != 1250 || len(inf.inFlightCalls) != 0 {
+					t.Fatalf("duration/state = %d/%d, want 1250/0", completed.DurationMs, len(inf.inFlightCalls))
+				}
+			},
+		},
+		{
+			name: "exit code zero survives cleaning",
+			run: func(t *testing.T) {
+				code := nestedExitCode(map[string]interface{}{"exit_code": float64(0)}, "exit_code", "exitCode", "status_code")
+				activity := cleanAgentActivity(agentActivity{Kind: "tool", ExitCode: code})
+				if activity.ExitCode == nil || *activity.ExitCode != 0 {
+					t.Fatalf("exit code = %#v, want pointer to 0", activity.ExitCode)
+				}
+			},
+		},
+		{
+			name: "result truncates at rune boundary",
+			run: func(t *testing.T) {
+				result := truncateResult(strings.Repeat("é", 1001), 2000)
+				if !utf8.ValidString(result) || !strings.HasSuffix(result, "\n… (truncated)") || !strings.HasPrefix(result, strings.Repeat("é", 1000)) {
+					t.Fatalf("result was not safely truncated: %q", result[len(result)-min(len(result), 40):])
+				}
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, tt.run)
 	}
 }
 

@@ -1,7 +1,24 @@
 "use client"
 
 import { useState, useRef, useEffect, useCallback, useMemo, memo } from "react"
-import { Send, Terminal, TerminalSquare, ChevronLeft, ChevronRight, ChevronDown, Loader2, LayoutGrid, Info, MessageSquare, Trash2, AlertCircle, Wrench, GripVertical, Settings2, Paperclip, File as FileIcon, X } from "lucide-react"
+import { Send, Terminal, TerminalSquare, ChevronLeft, ChevronRight, ChevronDown, Loader2, LayoutGrid, Info, MessageSquare, Trash2, AlertCircle, Wrench, GripVertical, Settings2, Paperclip, File as FileIcon, X, Menu, MoreVertical, LogOut, ClipboardCopy } from "lucide-react"
+import {
+  compactActivityRuns,
+  demoteStaleRunning,
+  groupIntoTurns,
+  latestRunningStep,
+  pairActivitySteps,
+  timelineStats,
+  trailingActivityRun,
+  type Step,
+} from "@/lib/turns"
+import type { NowStripState } from "@/components/agent-timeline/now-strip"
+import { AgentTimeline } from "@/components/agent-timeline/timeline"
+import { TimelineToolbar, useTimelineDensity } from "@/components/agent-timeline/timeline-toolbar"
+import { NowStrip } from "@/components/agent-timeline/now-strip"
+import { StepRow } from "@/components/agent-timeline/step-row"
+import { ActivitySummaryBlock } from "@/components/agent-timeline/activity-summary-block"
+import { useNowTick } from "@/hooks/use-now"
 import { CopyTranscriptButton } from "@/components/copy-transcript-button"
 import {
   DndContext,
@@ -21,16 +38,26 @@ import {
 } from "@dnd-kit/sortable"
 import { CSS } from "@dnd-kit/utilities"
 import { MarkdownContent } from "@/components/markdown-content"
-import { COLOR_CLASSES, mapApiMessage } from "@/lib/mappers"
+import { COLOR_CLASSES } from "@/lib/mappers"
 import { useWindowedMessages } from "@/hooks/use-windowed-messages"
+import { useProgrammaticScrollFlag, usePinnedAutoScroll } from "@/hooks/use-pinned-scroll"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Badge } from "@/components/ui/badge"
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet"
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog"
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu"
+import { useIsMobile } from "@/hooks/use-mobile"
+import { signOut } from "@/lib/sign-out"
+import { copyTextToClipboard, formatChatTranscript } from "@/lib/transcript"
 import { cn } from "@/lib/utils"
-import type { ActivitySummary as ActivitySummaryMeta, Claw, DependencyStatus, Message, ClawStatus } from "@/lib/types"
-import { getTerminalWsUrl, fetchActivityMessages, fetchClawPRs, type ClawPR } from "@/lib/api"
+import type { Claw, DependencyStatus, Message, ClawStatus } from "@/lib/types"
+import { getTerminalWsUrl, fetchClawPRs, type ClawPR } from "@/lib/api"
 import { buildAttachmentsFooter, splitAttachmentsFooter, formatBytes, type ParsedAttachment } from "@/lib/attachments"
 import { useAttachments } from "@/hooks/use-attachments"
 import { AttachmentChip } from "@/components/attachment-chip"
@@ -38,7 +65,7 @@ import dynamic from "next/dynamic"
 import { useBranding } from "@/hooks/use-branding"
 import { BootstrapProgress } from "@/components/bootstrap-progress"
 import { ClawTitle } from "@/components/claw-title"
-import { isTerminalAssistantMessage, windowMessagesByDurableCount } from "@/lib/messages"
+import { windowMessagesByDurableCount } from "@/lib/messages"
 import { DependencyDowntimeBanner } from "@/components/dependency-downtime-banner"
 import type { TypewriterState } from "@/hooks/use-typewriter"
 
@@ -63,6 +90,8 @@ interface ConversationViewProps {
   onSelectClaw: (id: string) => void
   onDeselectClaw: () => void
   onReorderClaws: (ids: string[]) => void
+  /** Mobile only: opens the sidebar drawer from the board header hamburger. */
+  onOpenMenu?: () => void
 }
 
 const FOLLOW_LATEST_THRESHOLD_PX = 24
@@ -71,35 +100,6 @@ const BOARD_CARD_DURABLE_MESSAGE_WINDOW = 50
 const EMPTY_MESSAGES: Message[] = []
 const noopClawAction = (_clawId: string) => {}
 const noopClawMessageAction = (_clawId: string, _content: string) => {}
-
-let activityNow = Date.now()
-// Browser timer handle (window.setInterval returns a number, not a Node Timeout)
-let activityTimer: number | null = null
-const activityListeners = new Set<() => void>()
-
-function useActivityNow(active: boolean): number {
-  const [now, setNow] = useState(activityNow)
-  useEffect(() => {
-    if (!active) return
-    const listener = () => setNow(activityNow)
-    activityListeners.add(listener)
-    if (!activityTimer) {
-      activityTimer = window.setInterval(() => {
-        activityNow = Date.now()
-        activityListeners.forEach((notify) => notify())
-      }, 1_000)
-    }
-    listener()
-    return () => {
-      activityListeners.delete(listener)
-      if (activityListeners.size === 0 && activityTimer) {
-        window.clearInterval(activityTimer)
-        activityTimer = null
-      }
-    }
-  }, [active])
-  return now
-}
 
 // The typewriter reveals text every animation frame, but re-parsing markdown that
 // often is what made the board expensive. Sample the buffer instead: the reveal
@@ -185,7 +185,7 @@ function StreamingMessage({
     <div className="flex w-full justify-start">
       <div
         className={cn(
-          "w-[70%] min-w-0 rounded-lg px-4 py-3",
+          "w-fit max-w-[88%] md:w-[70%] md:max-w-none min-w-0 rounded-lg px-4 py-3",
           (clawColor && COLOR_CLASSES[clawColor]?.bubble) || "bg-secondary"
         )}
       >
@@ -201,6 +201,104 @@ function StreamingMessage({
   )
 }
 
+function firstMeaningfulLine(text: string): string {
+  for (const line of text.split("\n")) {
+    const trimmed = line.replace(/^#+\s*/, "").trim()
+    if (trimmed) return trimmed
+  }
+  return text.trim()
+}
+
+/**
+ * The last question sentence of a message, if it plausibly asks the user
+ * something ("posso forçar push?"). The "?" must end the message or a
+ * sentence; the question starts after the previous sentence/line break.
+ */
+function extractQuestion(text: string): string | null {
+  const trimmed = text.trim()
+  const qIdx = trimmed.lastIndexOf("?")
+  if (qIdx === -1) return null
+  if (qIdx !== trimmed.length - 1 && !/\s/.test(trimmed[qIdx + 1])) return null
+  const before = trimmed.slice(0, qIdx)
+  const boundary = before.match(/[.!?\n][^.!?\n]*$/)
+  const start = boundary?.index !== undefined ? boundary.index + 1 : 0
+  const question = trimmed.slice(start, qIdx + 1).trim()
+  return question || null
+}
+
+function lastActivityError(messages: Message[]): string | null {
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const m = messages[i]
+    if (m.role === "activity" && m.activity?.error) return m.activity.error
+  }
+  return null
+}
+
+interface BoardCardNow {
+  state: NowStripState
+  text?: string
+  at?: number | null
+}
+
+/**
+ * The card's status line: is the agent working, waiting on the user, finished,
+ * broken, or gone — and the one-liner that proves it. Working defers to the
+ * NowStrip's live content (tool + elapsed + last-output age).
+ */
+function boardCardNow(
+  claw: Claw,
+  messages: Message[],
+  latestStep: Step | null,
+  isStreaming: boolean
+): BoardCardNow | null {
+  // BootstrapProgress owns the provisioning story.
+  if (claw.status === "provisioning") return null
+
+  let lastAt: number | null = null
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    if (messages[i].role === "system") continue
+    lastAt = messages[i].timestamp.getTime()
+    break
+  }
+
+  if (claw.status === "error") {
+    return {
+      state: "error",
+      text: claw.reason || lastActivityError(messages) || "Agent errored",
+      at: lastAt,
+    }
+  }
+  if (claw.status === "offline") {
+    const seen = claw.last_seen ? new Date(claw.last_seen).getTime() : NaN
+    return { state: "offline", at: Number.isFinite(seen) ? seen : lastAt }
+  }
+  if (isStreaming || latestStep?.status === "running") return { state: "working" }
+
+  // Nothing live: surface what the agent ended with. Transcript tail decides —
+  // trailing tool activity beats older prose, a question flags "needs you".
+  if (latestStep) {
+    return {
+      state: "done",
+      text: latestStep.detail ? `${latestStep.title} · ${latestStep.detail}` : latestStep.title,
+      at: (latestStep.endedAt ?? latestStep.startedAt).getTime(),
+    }
+  }
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const m = messages[i]
+    if (m.role === "system" || m.role === "activity" || m.role === "activity_summary") continue
+    const at = m.timestamp.getTime()
+    if (m.role === "claw") {
+      const text = m.content.trim()
+      const question = extractQuestion(text)
+      if (question) return { state: "waiting", text: question, at }
+      return { state: "done", text: firstMeaningfulLine(text), at }
+    }
+    if (m.role === "hub") return { state: "done", text: m.content, at }
+    if (m.role === "user") return { state: "done", text: "Waiting to start", at }
+  }
+  return { state: "done", text: "Idle", at: lastAt }
+}
+
 function formatUptime(seconds: number): string {
   if (seconds === 0) return "—"
   if (seconds < 60) return `${seconds}s`
@@ -210,7 +308,7 @@ function formatUptime(seconds: number): string {
   return mins > 0 ? `${hours}h ${mins}m` : `${hours}h`
 }
 
-function StatusBadge({ status }: { status: ClawStatus }) {
+function StatusBadge({ status, className }: { status: ClawStatus; className?: string }) {
   return (
     <Badge
       variant="outline"
@@ -218,7 +316,8 @@ function StatusBadge({ status }: { status: ClawStatus }) {
         "text-xs font-medium",
         status === "connected" && "border-green-500/50 text-green-500",
         status === "idle" && "border-amber-500/50 text-amber-500",
-        status === "offline" && "border-red-500/50 text-red-500"
+        status === "offline" && "border-red-500/50 text-red-500",
+        className
       )}
     >
       {status}
@@ -331,7 +430,9 @@ function ClawCardBack({ claw }: { claw: Claw }) {
   }, [claw.id])
 
   return (
-    <div className="flex-1 overflow-y-auto scrollbar-hide p-4 space-y-4">
+    /* max-md cap mirrors the front face's message list: mobile cards are
+       content-sized, so the info panel scrolls inside its own bound. */
+    <div className="flex-1 overflow-y-auto scrollbar-thin p-4 space-y-4 max-md:max-h-[40vh]">
       <div>
         <h3 className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-2">
           Purpose
@@ -443,6 +544,10 @@ const ClawBoardCard = memo(function ClawBoardCard({
   const cardTextareaRef = useRef<HTMLTextAreaElement>(null)
   const cardFileInputRef = useRef<HTMLInputElement>(null)
   const [isFlipped, setIsFlipped] = useState(false)
+  // The 3D flip (perspective/preserve-3d) is brittle on mobile Safari — on
+  // phones the card is full-width in a vertical list and front/back is a
+  // plain visibility swap instead of a rotateY transform.
+  const isMobile = useIsMobile()
   const [showTerminal, setShowTerminal] = useState(false)
   const [confirmKill, setConfirmKill] = useState(false)
   const hasUnread = claw.unreadCount > 0
@@ -450,7 +555,6 @@ const ClawBoardCard = memo(function ClawBoardCard({
   const msgScrollRef = useRef<HTMLDivElement>(null)
   const cardFollowingLatest = useRef(true)
   const [isCardFollowingLatest, setIsCardFollowingLatest] = useState(true)
-  const [expandedActivityGroups, setExpandedActivityGroups] = useState<Record<string, boolean>>({})
   // Window by durable turns only — a tool-activity flood must not age out
   // earlier user/claw messages from the card (refresh would still show them).
   const visibleMessages = useMemo(
@@ -458,9 +562,40 @@ const ClawBoardCard = memo(function ClawBoardCard({
     [messages]
   )
   const conversationItems = useMemo(() => compactActivityRuns(visibleMessages), [visibleMessages])
-  const latestActivity = useMemo(() => latestActivityMessage(visibleMessages), [visibleMessages])
-  const activityNow = useActivityNow(Boolean(latestActivity))
+  // An offline/errored claw cannot still be running its dangling last step.
+  const allowTrailingRunning = claw.status !== "offline" && claw.status !== "error"
+  // Latest step of the trailing activity run — drives the card's status line
+  // (paired start/terminal, live elapsed while running).
+  const latestStep = useMemo(() => {
+    const steps = demoteStaleRunning(
+      pairActivitySteps(trailingActivityRun(visibleMessages)),
+      allowTrailingRunning
+    )
+    return steps.length > 0 ? steps[steps.length - 1] : null
+  }, [visibleMessages, allowTrailingRunning])
+  const activityNowMs = useNowTick(Boolean(latestStep))
   const isStreaming = claw.isStreaming || Boolean(streamingBuffer?.hadChunks && streamingBuffer.text)
+  const cardNow = useMemo(
+    () => boardCardNow(claw, visibleMessages, latestStep, isStreaming),
+    [claw, visibleMessages, latestStep, isStreaming]
+  )
+  const runningStep = latestStep?.status === "running" ? latestStep : null
+  const lastMessageAt = messages.length > 0 ? messages[messages.length - 1].timestamp.getTime() : 0
+  // Footer stat line: steps and failures over the loaded window, plus whatever
+  // is still summarized behind unexpanded placeholders.
+  const cardStats = useMemo(() => {
+    const steps = pairActivitySteps(visibleMessages)
+    let toolCalls = 0
+    let failures = 0
+    for (const step of steps) {
+      if (step.kind === "tool") toolCalls += 1
+      if (step.status === "failed") failures += 1
+    }
+    for (const m of visibleMessages) {
+      if (m.role === "activity_summary") toolCalls += m.activitySummary?.count ?? 0
+    }
+    return { toolCalls, failures }
+  }, [visibleMessages])
 
   const {
     attachments,
@@ -478,45 +613,38 @@ const ClawBoardCard = memo(function ClawBoardCard({
   const hasErrored = attachments.some((a) => a.status === "error")
   const canSubmitCard = !isPending && !stillUploading && !hasErrored && (input.trim().length > 0 || attachments.some((a) => a.status === "ready"))
 
-  const toggleActivityGroup = useCallback((id: string) => {
-    setExpandedActivityGroups((prev) => ({ ...prev, [id]: !prev[id] }))
-  }, [])
+  const cardContentRef = useRef<HTMLDivElement>(null)
+  const { isProgrammaticRef: isCardProgrammaticScrollRef, mark: markCardProgrammaticScroll } = useProgrammaticScrollFlag()
 
-  useEffect(() => {
-    if (!cardFollowingLatest.current) return
-    const el = msgScrollRef.current
-    if (!el) return
-    const scrollToLatest = () => {
-      if (cardFollowingLatest.current) el.scrollTop = el.scrollHeight
-    }
-    // Rich activity rows can finish sizing across several layout/paint passes,
-    // so retry briefly to land on the true bottom once their height settles.
-    const timers = [0, 50, 150].map((delay) => window.setTimeout(scrollToLatest, delay))
-    return () => timers.forEach(window.clearTimeout)
-  }, [messages])
-
-  // The streaming text lives outside `messages`, so follow it separately. It grows on
-  // every typewriter frame and needs no staged retries — its height is already settled.
-  useEffect(() => {
-    if (!cardFollowingLatest.current) return
-    const el = msgScrollRef.current
-    if (el) el.scrollTop = el.scrollHeight
-  }, [streamingBuffer?.text])
+  // Follow new rows and late content settling (rich activity rows sizing,
+  // streaming growth) while following; never touch the scroll otherwise.
+  usePinnedAutoScroll({
+    scrollRef: msgScrollRef,
+    contentRef: cardContentRef,
+    pinnedRef: cardFollowingLatest,
+    markProgrammaticScroll: markCardProgrammaticScroll,
+    bottomAnchor: messages,
+  })
 
   const handleCardScroll = useCallback(() => {
+    // Scrolls we initiate must not recompute the follow state mid-animation.
+    if (isCardProgrammaticScrollRef.current) return
     const el = msgScrollRef.current
     if (!el) return
     const followingLatest = el.scrollHeight - el.scrollTop - el.clientHeight <= FOLLOW_LATEST_THRESHOLD_PX
     cardFollowingLatest.current = followingLatest
     setIsCardFollowingLatest(followingLatest)
-  }, [])
+  }, [isCardProgrammaticScrollRef])
 
   const scrollCardToLatest = useCallback(() => {
     cardFollowingLatest.current = true
     setIsCardFollowingLatest(true)
     const el = msgScrollRef.current
-    if (el) el.scrollTop = el.scrollHeight
-  }, [])
+    if (el) {
+      markCardProgrammaticScroll()
+      el.scrollTop = el.scrollHeight
+    }
+  }, [markCardProgrammaticScroll])
   
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()
@@ -544,22 +672,32 @@ const ClawBoardCard = memo(function ClawBoardCard({
     <>
     <div
       className={cn(
-        "w-[320px] h-full shrink-0 relative",
-        "[perspective:1000px]"
+        "shrink-0 relative",
+        // Mobile cards size to their content (capped below) instead of a
+        // fixed desktop-carryover height — several agents fit per screen.
+        isMobile ? "w-full" : "w-[500px] h-full [perspective:1000px]"
       )}
     >
       <div
         className={cn(
-          "relative w-full h-full transition-transform duration-500",
-          "[transform-style:preserve-3d]",
-          isFlipped && "[transform:rotateY(180deg)]"
+          "relative w-full",
+          !isMobile && "h-full transition-transform duration-500 [transform-style:preserve-3d]",
+          !isMobile && isFlipped && "[transform:rotateY(180deg)]"
         )}
       >
-        {/* Front - Chat view */}
+        {/* Front - Chat view. On mobile it is in normal flow and sizes to its
+            content; the message list below carries its own viewport cap and
+            scrolls inside, so the whole card stays around 60vh at most. (A
+            max-height on the card itself would not work: `h-full` inside a
+            max-height-clamped auto container resolves against an indefinite
+            height, so the inner scroller would overflow and get clipped
+            instead of scrolling.) */}
         <div
           className={cn(
-            "absolute inset-0 flex flex-col rounded-lg border border-border bg-card",
-            "[backface-visibility:hidden]",
+            "flex flex-col rounded-lg border border-border bg-card",
+            isMobile
+              ? cn("relative", isFlipped && "hidden")
+              : "absolute inset-0 [backface-visibility:hidden]",
             hasUnread && "border-blue-500/30 bg-blue-950/10",
             isPending && "opacity-75"
           )}
@@ -591,15 +729,17 @@ const ClawBoardCard = memo(function ClawBoardCard({
           {/* Header - clickable to open full view */}
           <div className="p-3 border-b border-border">
             <div className="flex items-center gap-2 mb-1">
-              {/* Drag handle */}
-              <span
-                {...dragHandleProps}
-                className="cursor-grab active:cursor-grabbing text-muted-foreground/40 hover:text-muted-foreground/80 transition-colors shrink-0 -ml-1"
-                title="Drag to reorder"
-                onClick={(e) => e.stopPropagation()}
-              >
-                <GripVertical className="size-3.5" />
-              </span>
+              {/* Drag handle — desktop board only; mobile has no reordering */}
+              {dragHandleProps && (
+                <span
+                  {...dragHandleProps}
+                  className="cursor-grab active:cursor-grabbing text-muted-foreground/40 hover:text-muted-foreground/80 transition-colors shrink-0 -ml-1"
+                  title="Drag to reorder"
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  <GripVertical className="size-3.5" />
+                </span>
+              )}
               <StatusDot status={claw.status} isStreaming={isStreaming} />
               {claw.githubIssueUrl ? (
                 <>
@@ -683,30 +823,57 @@ const ClawBoardCard = memo(function ClawBoardCard({
               </div>
             )}
           </div>
-          
+
+          {/* Status line — what this agent is doing, with no clicks */}
+          {cardNow && (
+            <NowStrip
+              clawId={claw.id}
+              step={runningStep}
+              isStreaming={isStreaming}
+              lastMessageAt={lastMessageAt}
+              variant="card"
+              state={cardNow.state}
+              statusText={cardNow.text}
+              statusAt={cardNow.at}
+            />
+          )}
+
           {/* Messages area */}
           <div className="flex-1 relative min-h-0 overflow-hidden">
-          <div ref={msgScrollRef} onScroll={handleCardScroll} className="h-full overflow-y-auto scrollbar-hide p-3 space-y-2">
+          <div
+            ref={msgScrollRef}
+            onScroll={handleCardScroll}
+            className={cn(
+              "overflow-y-auto scrollbar-thin p-3",
+              // vh cap so mobile cards are content-sized with an internal
+              // scroll; desktop fills the fixed-height card as before.
+              isMobile ? "max-h-[40vh]" : "h-full"
+            )}
+          >
+            {/* Content wrapper — the ResizeObserver in usePinnedAutoScroll watches it. */}
+            <div ref={cardContentRef} className="space-y-2">
             {messages.length === 0 && !streamingBuffer ? (
               <p className="text-xs text-muted-foreground text-center py-4">
                 No messages yet
               </p>
             ) : (
-              conversationItems.map((item) => {
+              conversationItems.map((item, index) => {
                 if (item.type === "activity-summary") {
                   return (
-                    <ActivitySummary
+                    <ActivitySummaryBlock
                       key={item.id}
-                      item={item}
-                      expanded={Boolean(expandedActivityGroups[item.id])}
-                      onToggle={() => toggleActivityGroup(item.id)}
                       clawId={claw.id}
-                      variant="card"
+                      messages={item.messages}
+                      summary={item.summary}
+                      density="card"
+                      now={activityNowMs}
+                      keepTrailingRunning={
+                        allowTrailingRunning && index === conversationItems.length - 1
+                      }
                     />
                   )
                 }
                 const { message } = item
-                const isLatestVisibleActivity = message.role === "activity" && latestActivity?.id === message.id
                 if (message.content === "__THINKING__") {
                   return (
                     <div key={message.id} className="flex gap-1 py-2 pl-2">
@@ -739,15 +906,8 @@ const ClawBoardCard = memo(function ClawBoardCard({
                   )
                 }
                 if (message.role === "activity") {
-                  return (
-                    <ActivityRow
-                      key={message.id}
-                      message={message}
-                      variant="card"
-                      label={isLatestVisibleActivity ? "Last activity" : undefined}
-                      now={isLatestVisibleActivity ? activityNow : undefined}
-                    />
-                  )
+                  const step = demoteStaleRunning(pairActivitySteps([message]), false)[0]
+                  return step ? <StepRow key={message.id} step={step} density="card" /> : null
                 }
                 const { body: cardBody, attachments: cardAttachments } = message.role === "user"
                   ? splitAttachmentsFooter(message.content)
@@ -795,6 +955,7 @@ const ClawBoardCard = memo(function ClawBoardCard({
             {streamingBuffer && (
               <StreamingMessage state={streamingBuffer} variant="card" clawName={claw.name} />
             )}
+            </div>
           </div>
           {!isCardFollowingLatest && (
             <button
@@ -811,7 +972,20 @@ const ClawBoardCard = memo(function ClawBoardCard({
             </button>
           )}
           </div>
-          
+
+          {/* Footer stat line */}
+          <div className="flex items-center gap-3 border-t border-border px-3 py-1 font-mono text-[10px] text-muted-foreground">
+            <span>
+              {cardStats.toolCalls} step{cardStats.toolCalls === 1 ? "" : "s"}
+            </span>
+            {cardStats.failures > 0 && (
+              <span className="text-red-400">
+                {cardStats.failures} failed
+              </span>
+            )}
+            <span className="ml-auto">ctx {claw.contextUsage}%</span>
+          </div>
+
           {/* Input area */}
           <form onSubmit={isPending ? (e) => e.preventDefault() : handleSubmit} className="p-2 border-t border-border flex flex-col gap-1.5">
             {attachments.length > 0 && (
@@ -847,7 +1021,7 @@ const ClawBoardCard = memo(function ClawBoardCard({
                 type="button"
                 size="icon"
                 variant="ghost"
-                className="size-8 shrink-0"
+                className="size-8 max-md:size-11 shrink-0"
                 disabled={isPending}
                 onClick={(e) => { e.stopPropagation(); cardFileInputRef.current?.click() }}
                 title="Attach files"
@@ -887,7 +1061,7 @@ const ClawBoardCard = memo(function ClawBoardCard({
               <Button
                 type="submit"
                 size="icon"
-                className="size-8 shrink-0"
+                className="size-8 max-md:size-11 shrink-0"
                 disabled={!canSubmitCard}
                 onClick={(e) => e.stopPropagation()}
               >
@@ -900,8 +1074,10 @@ const ClawBoardCard = memo(function ClawBoardCard({
         {/* Back - Bot info */}
         <div
           className={cn(
-            "absolute inset-0 flex flex-col rounded-lg border border-border bg-card",
-            "[backface-visibility:hidden] [transform:rotateY(180deg)]"
+            "flex flex-col rounded-lg border border-border bg-card",
+            isMobile
+              ? cn("relative", !isFlipped && "hidden")
+              : "absolute inset-0 [backface-visibility:hidden] [transform:rotateY(180deg)]"
           )}
         >
           {/* Header */}
@@ -1034,350 +1210,6 @@ function formatTimestamp(date: Date): string {
   return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
 }
 
-function activityTitle(message: Message): string {
-  const activity = message.activity
-  if (!activity) return "Activity"
-  if (activity.kind === "session_error") return "Session issue"
-  if (activity.error) return "Agent error"
-  if (activity.kind === "model_started") return "Waiting for model"
-  if (activity.kind === "tool") return activity.tool || activity.phase || "Tool"
-  if (activity.kind === "diagnostic") return "Diagnostic"
-  return activity.tool || activity.phase || activity.stream || "Activity"
-}
-
-function activityDetail(message: Message): string {
-  const activity = message.activity
-  if (!activity) return nonPhaseMessage(message.content)
-  if (activity.kind === "model_started" && activity.message?.startsWith("waiting for ")) {
-    return activity.message.replace(/^waiting for\s+/, "")
-  }
-  return activity.error || activity.command || activity.path || activity.url || activity.detail || nonPhaseMessage(activity.message) || nonPhaseMessage(message.content)
-}
-
-function activityDetailKind(message: Message): "command" | "path" | "url" | "text" {
-  const activity = message.activity
-  if (activity?.command) return "command"
-  if (activity?.path) return "path"
-  if (activity?.url) return "url"
-  return "text"
-}
-
-function activityStatusText(message: Message): string {
-  const activity = message.activity
-  if (!activity?.message || isPhaseMessage(activity.message)) return ""
-  const detail = activityDetail(message)
-  return activity.message === detail ? "" : activity.message
-}
-
-function isPhaseMessage(value?: string): boolean {
-  if (!value) return false
-  return ["running", "completed", "complete", "done", "failed", "error"].includes(value.toLowerCase())
-}
-
-function nonPhaseMessage(value?: string): string {
-  return isPhaseMessage(value) ? "" : value || ""
-}
-
-function activityIcon(message: Message, className: string) {
-  const kind = message.activity?.kind
-  if (message.activity?.error || kind === "session_error") return <AlertCircle className={className} />
-  if (kind === "tool") return <Wrench className={className} />
-  if (kind === "model_started") return <Loader2 className={cn(className, "animate-spin")} />
-  return <Info className={className} />
-}
-
-function isHiddenActivity(message: Message): boolean {
-  return message.activity?.kind === "still_working" || message.content.startsWith("No streamed output")
-}
-
-function hasEarlierTerminalAssistant(messages: Message[], index: number): boolean {
-  for (let i = index - 1; i >= 0; i -= 1) {
-    if (isTerminalAssistantMessage(messages[i])) return true
-  }
-  return false
-}
-
-function activityTone(message: Message): "error" | "warning" | "normal" {
-  if (message.activity?.error && message.activity.kind === "tool") return "error"
-  if (message.activity?.error || message.activity?.kind === "session_error") return "warning"
-  return "normal"
-}
-
-function latestActivityMessage(messages: Message[]): Message | null {
-  for (let i = messages.length - 1; i >= 0; i -= 1) {
-    const message = messages[i]
-    if (message.role !== "activity" || isHiddenActivity(message)) continue
-    if (message.activity?.kind === "model_started" && hasEarlierTerminalAssistant(messages, i)) continue
-    return message
-  }
-  return null
-}
-
-function formatActivityAge(timestamp: Date, now: number): string {
-  const seconds = Math.max(0, Math.floor((now - timestamp.getTime()) / 1000))
-  if (seconds < 60) return `${seconds}s ago`
-  const minutes = Math.floor(seconds / 60)
-  const remainingSeconds = seconds % 60
-  if (minutes < 60) return remainingSeconds > 0 ? `${minutes}m ${remainingSeconds}s ago` : `${minutes}m ago`
-  const hours = Math.floor(minutes / 60)
-  return `${hours}h ago`
-}
-
-type ConversationItem =
-  | { type: "message"; message: Message }
-  | { type: "activity-summary"; id: string; messages: Message[]; summary?: ActivitySummaryMeta }
-
-function compactActivityRuns(messages: Message[]): ConversationItem[] {
-  const items: ConversationItem[] = []
-  let run: Message[] = []
-
-  const flush = () => {
-    const visible = run.filter((message) => !isHiddenActivity(message))
-    run = []
-    if (visible.length === 0) return
-    items.push({
-      type: "activity-summary",
-      id: `activity-summary-${visible[0].id}-${visible[visible.length - 1].id}`,
-      messages: visible,
-    })
-  }
-
-  for (const message of messages) {
-    if (message.role === "activity_summary") {
-      flush()
-      items.push({ type: "activity-summary", id: message.id, messages: [], summary: message.activitySummary })
-      continue
-    }
-    if (message.role === "activity") {
-      run.push(message)
-      continue
-    }
-    flush()
-    items.push({ type: "message", message })
-  }
-  flush()
-
-  return items
-}
-
-function activityGroupKey(message: Message): string {
-  const activity = message.activity
-  if (!activity) return message.id
-  return [
-    activity.kind || "",
-    activity.tool || "",
-    activity.detail || "",
-    activity.command || "",
-    activity.path || "",
-    activity.url || "",
-  ].join("\u0000")
-}
-
-function isRunningActivity(message: Message): boolean {
-  return message.activity?.kind === "tool" && (message.activity.phase === "running" || message.activity.message === "running")
-}
-
-function isTerminalActivity(message: Message): boolean {
-  const phase = (message.activity?.phase || message.activity?.message || "").toLowerCase()
-  return message.activity?.kind === "tool" && ["completed", "complete", "done", "failed", "error"].includes(phase)
-}
-
-function coalesceActivityMessages(messages: Message[]): Message[] {
-  const terminalKeys = new Set(messages.filter(isTerminalActivity).map(activityGroupKey))
-  return messages.filter((message) => !(isRunningActivity(message) && terminalKeys.has(activityGroupKey(message))))
-}
-
-function activitySummaryLabel(messages: Message[], countOverride?: number): string {
-  if (countOverride && countOverride > 0) {
-    return `${countOverride} earlier tool call${countOverride === 1 ? "" : "s"}`
-  }
-  const toolCount = messages.filter((message) => message.activity?.kind === "tool").length
-  const noun = toolCount === messages.length ? "tool call" : "activity update"
-  return `${messages.length} earlier ${noun}${messages.length === 1 ? "" : "s"}`
-}
-
-function ActivityRow({
-  message,
-  variant = "full",
-  label,
-  now,
-}: {
-  message: Message
-  variant?: "card" | "full"
-  label?: string
-  now?: number
-}) {
-  if (isHiddenActivity(message)) return null
-  const detail = activityDetail(message)
-  const detailKind = activityDetailKind(message)
-  const statusText = activityStatusText(message)
-  const tone = activityTone(message)
-  const age = now ? `updated ${formatActivityAge(message.timestamp, now)}` : ""
-
-  if (variant === "card") {
-    return (
-      <div className={cn(
-        "rounded border px-1.5 py-1 text-[10px]",
-        tone === "error"
-          ? "border-red-500/20 bg-red-500/5 text-red-400"
-          : tone === "warning"
-            ? "border-amber-500/20 bg-amber-500/5 text-amber-400"
-          : "border-border/50 bg-muted/30 text-muted-foreground"
-      )}>
-        <div className="flex min-w-0 items-center gap-1.5">
-          {activityIcon(message, "size-2.5 shrink-0")}
-          {label && <span className="font-medium shrink-0">{label}</span>}
-          <span className="min-w-0 truncate font-medium">{activityTitle(message)}</span>
-          {statusText && (
-            <span className="min-w-0 truncate text-muted-foreground/50">{statusText}</span>
-          )}
-          {age && <span className="ml-auto shrink-0 text-muted-foreground/60" suppressHydrationWarning>{age}</span>}
-        </div>
-        {detail && (
-          <span
-            className={cn(
-              "mt-0.5 block truncate pl-4 text-muted-foreground/70",
-              detailKind !== "text" && "font-mono"
-            )}
-            title={detail}
-          >
-            {detail}
-          </span>
-        )}
-      </div>
-    )
-  }
-
-  return (
-    <div className="flex items-center gap-2 py-2">
-      <div className="flex-1 h-px bg-border/50" />
-      <div className={cn(
-        "min-w-0 max-w-[82%] rounded border px-2.5 py-1.5 text-xs",
-        tone === "error"
-          ? "border-red-500/20 bg-red-500/5 text-red-400"
-          : tone === "warning"
-            ? "border-amber-500/20 bg-amber-500/5 text-amber-400"
-          : "border-border/60 bg-muted/35 text-muted-foreground"
-      )}>
-        <div className="flex min-w-0 items-center gap-2">
-          {activityIcon(message, "size-3 shrink-0")}
-          <span className="min-w-0 truncate font-medium">{activityTitle(message)}</span>
-          {statusText && (
-            <span className="min-w-0 truncate text-muted-foreground/50">{statusText}</span>
-          )}
-          <span className="ml-auto shrink-0 text-muted-foreground/50" suppressHydrationWarning>
-            {formatTimestamp(message.timestamp)}
-          </span>
-        </div>
-        {detail && (
-          <span
-            className={cn(
-              "mt-1 block truncate pl-5 text-muted-foreground/80",
-              detailKind !== "text" && "font-mono"
-            )}
-            title={detail}
-          >
-            {detail}
-          </span>
-        )}
-      </div>
-      <div className="flex-1 h-px bg-border/50" />
-    </div>
-  )
-}
-
-function ActivitySummary({
-  item,
-  expanded,
-  onToggle,
-  clawId,
-  variant = "full",
-}: {
-  item: Extract<ConversationItem, { type: "activity-summary" }>
-  expanded: boolean
-  onToggle: () => void
-  clawId: string
-  variant?: "card" | "full"
-}) {
-  const [loadedMessages, setLoadedMessages] = useState<Message[] | null>(null)
-  const [loading, setLoading] = useState(false)
-  const visibleMessages = coalesceActivityMessages([...(item.messages || []), ...(loadedMessages || [])])
-  const countOverride = item.summary?.count
-  const loadedCount = loadedMessages?.length ?? item.messages.length
-  const isPartial = Boolean(countOverride && loadedMessages && loadedCount < countOverride)
-  const handleToggle = () => {
-    onToggle()
-    if (expanded || !item.summary || loadedMessages || loading) return
-    const summaryCount = item.summary.count || 0
-    const limit = Math.max(200, Math.min(summaryCount || 200, 500))
-    const newestFirst = summaryCount > limit
-    setLoading(true)
-    fetchActivityMessages(clawId, {
-      from: item.summary.from,
-      to: item.summary.to,
-      limit,
-      order: newestFirst ? "desc" : "asc",
-    })
-      .then((apiMsgs) => {
-        const mapped = apiMsgs.map(mapApiMessage)
-        setLoadedMessages(newestFirst ? mapped.reverse() : mapped)
-      })
-      .catch(console.warn)
-      .finally(() => setLoading(false))
-  }
-  if (variant === "card") {
-    return (
-      <div className="space-y-1">
-        <button
-          type="button"
-          onClick={handleToggle}
-          className="w-full rounded border border-border/50 bg-muted/20 px-1.5 py-1 text-left text-[10px] text-muted-foreground hover:bg-muted/35"
-        >
-          {expanded ? "Hide" : "Show"} {activitySummaryLabel(visibleMessages, countOverride)}
-        </button>
-        {expanded && loading && (
-          <div className="px-1.5 text-[10px] text-muted-foreground">Loading tool calls...</div>
-        )}
-        {expanded && isPartial && (
-          <div className="px-1.5 text-[10px] text-muted-foreground">
-            Showing latest {loadedCount} of {countOverride} tool calls
-          </div>
-        )}
-        {expanded && visibleMessages.map((message) => (
-          <ActivityRow key={message.id} message={message} variant="card" />
-        ))}
-      </div>
-    )
-  }
-
-  return (
-    <div className="space-y-1">
-      <div className="flex items-center gap-2 py-1">
-        <div className="flex-1 h-px bg-border/50" />
-        <button
-          type="button"
-          onClick={handleToggle}
-          className="rounded border border-border/60 bg-muted/25 px-2.5 py-1 text-xs text-muted-foreground hover:bg-muted/40 hover:text-foreground"
-        >
-          {expanded ? "Hide" : "Show"} {activitySummaryLabel(visibleMessages, countOverride)}
-        </button>
-        <div className="flex-1 h-px bg-border/50" />
-      </div>
-      {expanded && loading && (
-        <div className="text-center text-xs text-muted-foreground">Loading tool calls...</div>
-      )}
-      {expanded && isPartial && (
-        <div className="text-center text-xs text-muted-foreground">
-          Showing latest {loadedCount} of {countOverride} tool calls
-        </div>
-      )}
-      {expanded && visibleMessages.map((message) => (
-        <ActivityRow key={message.id} message={message} />
-      ))}
-    </div>
-  )
-}
-
 const MessageBubble = memo(function MessageBubble({
   message,
   clawId,
@@ -1414,7 +1246,10 @@ const MessageBubble = memo(function MessageBubble({
   }
 
   if (message.role === "activity") {
-    return <ActivityRow message={message} />
+    // Activities normally render inside turn cards; this is a defensive
+    // fallback for stray rows reaching the bubble path.
+    const step = demoteStaleRunning(pairActivitySteps([message]), false)[0]
+    return step ? <StepRow step={step} /> : null
   }
 
   // Thinking indicator
@@ -1457,7 +1292,7 @@ const MessageBubble = memo(function MessageBubble({
     <div className={cn("flex w-full", isUser ? "justify-end" : "justify-start")}>
       <div
         className={cn(
-          "w-[70%] min-w-0 rounded-lg px-4 py-3",
+          "w-fit max-w-[88%] md:w-[70%] md:max-w-none min-w-0 rounded-lg px-4 py-3",
           isUser
             ? "bg-blue-600/20 border border-blue-500/20"
             : (clawColor && COLOR_CLASSES[clawColor]?.bubble) || "bg-secondary"
@@ -1524,6 +1359,7 @@ function ClawChatView({
   const [cmdToast, setCmdToast] = useState<string | null>(null)
   const [terminalOpen, setTerminalOpen] = useState(false)
   const [confirmKill, setConfirmKill] = useState(false)
+  const isMobile = useIsMobile()
   const bottomRef = useRef<HTMLDivElement>(null)
   const panelTextareaRef = useRef<HTMLTextAreaElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
@@ -1541,57 +1377,68 @@ function ClawChatView({
     onPaste,
   } = useAttachments(claw.id)
 
-  const { messages, hasOlder, loadingOlder, scrollRef, onScroll: onWindowScroll } = useWindowedMessages({
+  const {
+    messages,
+    hasOlder,
+    loadingOlder,
+    scrollRef,
+    onScroll: onWindowScroll,
+    isProgrammaticScrollRef,
+    markProgrammaticScroll,
+    unloadedActivityCount,
+    loadingActivity,
+    loadAllActivity,
+  } = useWindowedMessages({
     clawId: claw.id,
     liveMessages,
   })
-  const conversationItems = useMemo(() => compactActivityRuns(messages), [messages])
-  const [expandedActivityGroups, setExpandedActivityGroups] = useState<Record<string, boolean>>({})
+  const [density, setDensity] = useTimelineDensity()
+  // An offline/errored claw cannot still be running its dangling last step.
+  const allowTrailingRunning = claw.status !== "offline" && claw.status !== "error"
+  const turns = useMemo(() => groupIntoTurns(messages, allowTrailingRunning), [messages, allowTrailingRunning])
+  const stats = useMemo(() => timelineStats(turns), [turns])
+  const runningStep = useMemo(() => latestRunningStep(turns), [turns])
+  const isWorking = claw.isStreaming || Boolean(runningStep)
+
+  // "Last output Xs ago" — the staleness signal. Live arrivals (chunks,
+  // activities) are noted event-side in use-hub; the NowStrip subscribes to
+  // them itself so per-chunk notifications do not re-render this panel.
+  const lastMessageAt = messages.length > 0 ? messages[messages.length - 1].timestamp.getTime() : 0
+
   const [showScrollBtn, setShowScrollBtn] = useState(false)
   // Track whether user has scrolled away from the bottom
   const pinnedToBottom = useRef(true)
-
-  const isAtBottom = useCallback(() => {
-    const el = scrollRef.current
-    if (!el) return true
-    return el.scrollHeight - el.scrollTop - el.clientHeight < 60
-  }, [scrollRef])
+  const contentRef = useRef<HTMLDivElement>(null)
 
   const scrollToBottom = useCallback(() => {
     const el = scrollRef.current
     if (!el) return
+    markProgrammaticScroll()
     el.scrollTop = el.scrollHeight
     pinnedToBottom.current = true
     setShowScrollBtn(false)
-  }, [scrollRef])
+  }, [scrollRef, markProgrammaticScroll])
 
   const handleScroll = useCallback(() => {
+    // Scrolls we initiate must not recompute the pin from a mid-animation position.
+    if (isProgrammaticScrollRef.current) return
     const el = scrollRef.current
     if (!el) return
     const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 60
     pinnedToBottom.current = atBottom
     setShowScrollBtn(!atBottom)
     onWindowScroll()
-  }, [onWindowScroll, scrollRef])
+  }, [onWindowScroll, scrollRef, isProgrammaticScrollRef])
 
-  // Only auto-scroll when pinned to bottom
-  useEffect(() => {
-    if (!pinnedToBottom.current) return
-    const run = () => {
-      const el = scrollRef.current
-      if (el && pinnedToBottom.current) el.scrollTop = el.scrollHeight
-    }
-    const timers = [0, 50, 150, 400, 800].map((d) => setTimeout(run, d))
-    return () => timers.forEach(clearTimeout)
-  }, [messages, scrollRef])
-
-  // The streaming text lives outside `messages`, so follow it separately. It grows on
-  // every typewriter frame and needs no staged retries — its height is already settled.
-  useEffect(() => {
-    if (!pinnedToBottom.current) return
-    const el = scrollRef.current
-    if (el) el.scrollTop = el.scrollHeight
-  }, [streamingBuffer?.text, scrollRef])
+  // Follow new rows and late content settling (markdown, images, streaming
+  // growth) while pinned; never touch the scroll position otherwise.
+  usePinnedAutoScroll({
+    scrollRef,
+    contentRef,
+    pinnedRef: pinnedToBottom,
+    markProgrammaticScroll,
+    bottomAnchor: messages,
+  })
 
   const isSlashCommand = (value: string, command: string) =>
     value === command || value.startsWith(`${command} `)
@@ -1600,9 +1447,18 @@ function ClawChatView({
   const hasErrored = attachments.some((a) => a.status === "error")
   const canSubmit = !stillUploading && !hasErrored && (input.trim().length > 0 || attachments.some((a) => a.status === "ready"))
 
-  const toggleActivityGroup = useCallback((id: string) => {
-    setExpandedActivityGroups((prev) => ({ ...prev, [id]: !prev[id] }))
-  }, [])
+  const renderMessage = useCallback(
+    (message: Message) => (
+      <MessageBubble
+        key={message.id}
+        message={message}
+        clawId={claw.id}
+        clawName={claw.name}
+        clawColor={claw.color}
+      />
+    ),
+    [claw.id, claw.name, claw.color]
+  )
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -1644,44 +1500,100 @@ function ClawChatView({
         </div>
       )}
       <header className="border-b border-border">
-        <div className="px-6 pt-2">
+        <div className="px-4 md:px-6 pt-2">
           <ContextProgressBar usage={claw.contextUsage} size="lg" />
         </div>
-        <div className="flex items-center justify-between px-6 py-3">
-          <div className="flex min-w-0 items-center gap-4">
-            <Button variant="ghost" size="icon" onClick={onDeselectClaw} title="Back to dashboard" className="size-8">
-              <LayoutGrid className="size-4" />
+        {isMobile ? (
+          /* Full-screen detail: back chevron, truncated name, actions in ⋯ */
+          <div className="flex items-center gap-1 px-2 py-1.5">
+            <Button variant="ghost" size="icon" onClick={onDeselectClaw} title="Back to dashboard" className="size-11 shrink-0">
+              <ChevronLeft className="size-5" />
             </Button>
-            <ClawTitle
-              name={claw.name}
-              githubIssueId={claw.githubIssueId}
-              githubIssueUrl={claw.githubIssueUrl}
-              className="flex-1 font-mono text-xl font-semibold text-foreground"
-            />
-            <StatusBadge status={claw.status} />
-            <span className="text-sm text-muted-foreground font-mono">{formatUptime(claw.uptime)}</span>
+            <div className="min-w-0 flex-1 overflow-hidden">
+              <ClawTitle
+                name={claw.name}
+                githubIssueId={claw.githubIssueId}
+                githubIssueUrl={claw.githubIssueUrl}
+                className="block font-mono text-base font-semibold text-foreground"
+              />
+            </div>
+            {/* Uptime is intentionally dropped here: at 320-375px it does not
+                fit next to the badge and the menu (it stays visible on the
+                board card and desktop header). The badge never shrinks. */}
+            <StatusBadge status={claw.status} className="shrink-0" />
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button variant="ghost" size="icon" className="size-11 shrink-0" title="More actions">
+                  <MoreVertical className="size-5" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end">
+                <DropdownMenuItem
+                  disabled={messages.length === 0 && !streamingBuffer?.text?.trim()}
+                  onClick={() => {
+                    void copyTextToClipboard(
+                      formatChatTranscript({ claw, messages, streamingText: streamingBuffer?.text })
+                    )
+                  }}
+                >
+                  <ClipboardCopy className="size-4" />
+                  Copy transcript
+                </DropdownMenuItem>
+                {claw.ssh_host && (
+                  <DropdownMenuItem onClick={() => setTerminalOpen(true)}>
+                    <TerminalSquare className="size-4" />
+                    Terminal
+                  </DropdownMenuItem>
+                )}
+                <DropdownMenuItem variant="destructive" onClick={() => setConfirmKill(true)}>
+                  <Trash2 className="size-4" />
+                  Kill
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
           </div>
-          <div className="flex items-center gap-2">
-            <CopyTranscriptButton
-              claw={claw}
-              messages={messages}
-              streamingText={streamingBuffer?.text}
-              size="sm"
-            />
-            {claw.ssh_host && (
-              <Button variant="outline" size="sm" onClick={() => setTerminalOpen(true)}>
-                <TerminalSquare className="size-3.5 mr-1.5" />
-                Terminal
+        ) : (
+          <div className="flex items-center justify-between px-6 py-3">
+            <div className="flex min-w-0 items-center gap-4">
+              <Button variant="ghost" size="icon" onClick={onDeselectClaw} title="Back to dashboard" className="size-8">
+                <LayoutGrid className="size-4" />
               </Button>
-            )}
-            <Button variant="destructive" size="sm" onClick={() => setConfirmKill(true)}>Kill</Button>
+              <ClawTitle
+                name={claw.name}
+                githubIssueId={claw.githubIssueId}
+                githubIssueUrl={claw.githubIssueUrl}
+                className="flex-1 font-mono text-xl font-semibold text-foreground"
+              />
+              <StatusBadge status={claw.status} />
+              <span className="text-sm text-muted-foreground font-mono">{formatUptime(claw.uptime)}</span>
+            </div>
+            <div className="flex items-center gap-2">
+              <CopyTranscriptButton
+                claw={claw}
+                messages={messages}
+                streamingText={streamingBuffer?.text}
+                size="sm"
+              />
+              {claw.ssh_host && (
+                <Button variant="outline" size="sm" onClick={() => setTerminalOpen(true)}>
+                  <TerminalSquare className="size-3.5 mr-1.5" />
+                  Terminal
+                </Button>
+              )}
+              <Button variant="destructive" size="sm" onClick={() => setConfirmKill(true)}>Kill</Button>
+            </div>
           </div>
-        </div>
+        )}
         <BootstrapProgress claw={claw} variant="full" />
       </header>
 
-      <div ref={scrollRef} onScroll={handleScroll} className="flex-1 overflow-y-auto scrollbar-hide p-6 relative">
-        <div className="space-y-4 max-w-3xl mx-auto">
+      {isWorking && (
+        <NowStrip clawId={claw.id} step={runningStep} isStreaming={claw.isStreaming} lastMessageAt={lastMessageAt} />
+      )}
+      <TimelineToolbar density={density} onDensityChange={setDensity} stats={stats} />
+
+      <div ref={scrollRef} onScroll={handleScroll} className="flex-1 overflow-y-auto scrollbar-thin p-4 md:p-6 relative">
+        <div ref={contentRef} className="space-y-4 max-w-3xl mx-auto">
           {loadingOlder && (
             <div className="flex justify-center py-2">
               <span className="text-xs text-muted-foreground animate-pulse">Loading older messages...</span>
@@ -1695,26 +1607,28 @@ function ClawChatView({
           {messages.length === 0 && !streamingBuffer ? (
             <p className="text-center text-muted-foreground py-12">No messages yet. Start the conversation below.</p>
           ) : (
-            conversationItems.map((item) => (
-              item.type === "activity-summary" ? (
-                <ActivitySummary
-                  key={item.id}
-                  item={item}
-                  expanded={Boolean(expandedActivityGroups[item.id])}
-                  onToggle={() => toggleActivityGroup(item.id)}
-                  clawId={claw.id}
-                />
-              ) : (
-                <MessageBubble key={item.message.id} message={item.message} clawId={claw.id} clawName={claw.name} clawColor={claw.color} />
-              )
-            ))
-          )}
-          {streamingBuffer && (
-            <StreamingMessage
-              state={streamingBuffer}
-              variant="chat"
-              clawName={claw.name}
-              clawColor={claw.color}
+            <AgentTimeline
+              clawId={claw.id}
+              turns={turns}
+              density={density}
+              renderMessage={renderMessage}
+              isWorking={isWorking}
+              streamingSlot={
+                streamingBuffer ? (
+                  <StreamingMessage
+                    state={streamingBuffer}
+                    variant="chat"
+                    clawName={claw.name}
+                    clawColor={claw.color}
+                  />
+                ) : undefined
+              }
+              scrollRef={scrollRef}
+              pinnedRef={pinnedToBottom}
+              markProgrammaticScroll={markProgrammaticScroll}
+              unloadedToolCalls={unloadedActivityCount}
+              loadingUnloaded={loadingActivity}
+              onLoadUnloaded={loadAllActivity}
             />
           )}
           <div ref={bottomRef} className="h-4" />
@@ -1730,7 +1644,8 @@ function ClawChatView({
         )}
       </div>
 
-      <div className="p-4 border-t border-border">
+      {/* Composer — padded above the home indicator on notched phones */}
+      <div className="p-4 border-t border-border pb-[calc(1rem+env(safe-area-inset-bottom))] md:pb-4">
         {cmdToast && (
           <div className="mb-2 max-w-3xl mx-auto text-xs text-amber-400 bg-amber-500/10 border border-amber-500/20 rounded-md px-3 py-2">
             {cmdToast}
@@ -1774,7 +1689,7 @@ function ClawChatView({
               size="icon"
               variant="ghost"
               onClick={() => fileInputRef.current?.click()}
-              className="shrink-0"
+              className="shrink-0 max-md:size-11"
               title="Attach files"
             >
               <Paperclip className="size-4" />
@@ -1807,7 +1722,7 @@ function ClawChatView({
               rows={1}
               className="flex-1 resize-none overflow-hidden rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 min-h-[40px]"
             />
-            <Button type="submit" size="icon" disabled={!canSubmit} className="shrink-0">
+            <Button type="submit" size="icon" disabled={!canSubmit} className="shrink-0 max-md:size-11">
               <Send className="size-4" />
               <span className="sr-only">Send message</span>
             </Button>
@@ -1858,10 +1773,12 @@ export function ConversationView({
   onSelectClaw,
   onDeselectClaw,
   onReorderClaws,
+  onOpenMenu,
 }: ConversationViewProps) {
   const boardRef = useRef<HTMLDivElement>(null)
   const [activeDragClaw, setActiveDragClaw] = useState<Claw | null>(null)
   const { logoUrl } = useBranding()
+  const isMobile = useIsMobile()
   const handleCardClick = useCallback((clawId: string) => onSelectClaw(clawId), [onSelectClaw])
   const handleCardSendMessage = useCallback((clawId: string, content: string) => onSendMessageToClaw(clawId, content), [onSendMessageToClaw])
   const handleCardKill = useCallback((clawId: string) => onKillClaw(clawId), [onKillClaw])
@@ -1895,7 +1812,8 @@ export function ConversationView({
 
   const scrollBoard = (direction: "left" | "right") => {
     if (boardRef.current) {
-      const scrollAmount = 340
+      // One card plus the flex gap, so the arrows page card-by-card.
+      const scrollAmount = 516
       boardRef.current.scrollBy({
         left: direction === "left" ? -scrollAmount : scrollAmount,
         behavior: "smooth",
@@ -1929,27 +1847,51 @@ export function ConversationView({
     return (
       <main className="flex-1 flex flex-col bg-background min-w-0 overflow-hidden">
         {/* Header */}
-        <header className="flex items-center justify-between px-6 py-4 border-b border-border shrink-0">
-          <div className="flex items-center gap-3">
-            <Terminal className="size-5 text-muted-foreground" />
-            <h2 className="text-lg font-medium text-foreground">
+        <header className="flex items-center justify-between gap-2 px-3 md:px-6 py-2 md:py-4 border-b border-border shrink-0">
+          <div className="flex min-w-0 items-center gap-1 md:gap-3">
+            {isMobile && onOpenMenu ? (
+              <Button variant="ghost" size="icon" className="size-11 shrink-0" onClick={onOpenMenu} title="Open agent list">
+                <Menu className="size-5" />
+              </Button>
+            ) : (
+              <Terminal className="size-5 text-muted-foreground" />
+            )}
+            <h2 className="truncate text-lg font-medium text-foreground">
               {loading ? "Agents" : `${allClaws.length} Active Agents`}
             </h2>
           </div>
           <div className="flex min-w-0 flex-wrap items-center justify-end gap-x-4 gap-y-2 text-xs text-muted-foreground">
             <DependencyDowntimeBanner dependencies={downtimeDependencies} />
-            <div className="flex items-center gap-1.5">
-              <span className="size-2 rounded-full bg-green-500" />
-              <span>Connected</span>
+            <div className="hidden md:flex items-center gap-4">
+              <div className="flex items-center gap-1.5">
+                <span className="size-2 rounded-full bg-green-500" />
+                <span>Connected</span>
+              </div>
+              <div className="flex items-center gap-1.5">
+                <span className="size-2 rounded-full bg-amber-500" />
+                <span>Idle</span>
+              </div>
+              <div className="flex items-center gap-1.5">
+                <span className="size-2 rounded-full bg-red-500" />
+                <span>Offline</span>
+              </div>
             </div>
-            <div className="flex items-center gap-1.5">
-              <span className="size-2 rounded-full bg-amber-500" />
-              <span>Idle</span>
-            </div>
-            <div className="flex items-center gap-1.5">
-              <span className="size-2 rounded-full bg-red-500" />
-              <span>Offline</span>
-            </div>
+            {isMobile && (
+              /* Sign out moves here on mobile — the tab bar has no room for it */
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button variant="ghost" size="icon" className="size-11 shrink-0" title="More">
+                    <MoreVertical className="size-5" />
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end">
+                  <DropdownMenuItem onClick={() => { void signOut() }}>
+                    <LogOut className="size-4" />
+                    Sign out
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
+            )}
           </div>
         </header>
 
@@ -1973,6 +1915,22 @@ export function ConversationView({
                 <span className="text-muted-foreground select-none">$ </span>
                 elasticclaw create --name my-agent
               </div>
+            </div>
+          ) : isMobile ? (
+            /* Single-column vertical list: full-width cards, no reordering,
+               no scroll arrows — one-finger vertical scrolling only. */
+            <div className="h-full overflow-y-auto overflow-x-hidden p-3 flex flex-col gap-3">
+              {sortedClaws.map((c) => (
+                <ClawBoardCard
+                  key={c.id}
+                  claw={c}
+                  messages={allMessages[c.id] ?? EMPTY_MESSAGES}
+                  streamingBuffer={streamingBuffers[c.id]}
+                  onClick={handleCardClick}
+                  onSendMessage={handleCardSendMessage}
+                  onKill={handleCardKill}
+                />
+              ))}
             </div>
           ) : (
           <>
