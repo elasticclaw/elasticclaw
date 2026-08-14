@@ -1,9 +1,10 @@
 "use client"
 
 import { useState, useRef, useCallback, useEffect, useLayoutEffect, useMemo } from "react"
-import { fetchActivityMessages, fetchMessageTimeline } from "@/lib/api"
+import { fetchMessageTimeline } from "@/lib/api"
 import { mapApiMessage } from "@/lib/mappers"
-import { isLiveSegmentCoveredByDurable } from "@/lib/messages"
+import { expandSummaryMessage, selectTrailingSummaries } from "@/lib/activity-prefetch"
+import { isDuplicateLiveActivity, isLiveSegmentCoveredByDurable } from "@/lib/messages"
 import { useProgrammaticScrollFlag } from "@/hooks/use-pinned-scroll"
 import type { Message } from "@/lib/types"
 
@@ -46,57 +47,6 @@ function hasOlderConversationPage(messages: Message[], pageSize: number): boolea
   const conversations = conversationMessages(messages)
   if (conversations.length < pageSize) return false
   return messages[0]?.role !== "activity_summary"
-}
-
-/** Newest-first picks of unexpanded summaries, bounded by count and row budget. */
-function selectTrailingSummaries(messages: Message[]): { id: string; limit: number }[] {
-  const picks: { id: string; limit: number }[] = []
-  let budget = PREFETCH_ROW_BUDGET
-  for (let i = messages.length - 1; i >= 0 && picks.length < PREFETCH_SUMMARY_COUNT && budget > 0; i -= 1) {
-    const message = messages[i]
-    if (message.role !== "activity_summary" || !message.activitySummary) continue
-    const limit = Math.min(Math.max(1, message.activitySummary.count || 0), budget)
-    picks.push({ id: message.id, limit })
-    budget -= limit
-  }
-  return picks
-}
-
-/**
- * Fetch the activity rows behind one activity_summary placeholder and return
- * the messages that should replace it in the transcript. When the summary is
- * larger than `limit`, the newest rows are loaded and the unloaded remainder
- * stays behind as a smaller summary — still visible and expandable, never
- * silently dropped.
- */
-async function expandSummaryMessage(clawId: string, summary: Message, limit: number): Promise<Message[]> {
-  const meta = summary.activitySummary
-  if (!meta) return [summary]
-  const count = meta.count || 0
-  const capped = Math.min(Math.max(1, count), limit)
-  const newestFirst = count > capped
-  const apiMsgs = await fetchActivityMessages(clawId, {
-    from: meta.from,
-    to: meta.to,
-    limit: capped,
-    order: newestFirst ? "desc" : "asc",
-  })
-  const rows = apiMsgs.map(mapApiMessage)
-  if (newestFirst) rows.reverse()
-  if (rows.length === 0) return [summary]
-  if (newestFirst) {
-    const remainder: Message = {
-      ...summary,
-      activitySummary: {
-        count: count - rows.length,
-        from: meta.from,
-        // Exclusive of the oldest loaded row so a later expand does not refetch it.
-        to: new Date(rows[0].timestamp.getTime() - 1).toISOString(),
-      },
-    }
-    return [remainder, ...rows]
-  }
-  return rows
 }
 
 interface UseWindowedMessagesOptions {
@@ -171,7 +121,10 @@ export function useWindowedMessages({ clawId, liveMessages }: UseWindowedMessage
         // Prefetch the trailing summaries so the last turn's steps are real on
         // load: without them the Problems filter, the now strip and the turn
         // status pill are all blind to what actually happened.
-        for (const pick of selectTrailingSummaries(msgs)) {
+        for (const pick of selectTrailingSummaries(msgs, {
+          maxSummaries: PREFETCH_SUMMARY_COUNT,
+          rowBudget: PREFETCH_ROW_BUDGET,
+        })) {
           const target = msgs.find((m) => m.id === pick.id)
           if (!target) continue
           try {
@@ -328,22 +281,3 @@ function compareMessages(a: Message, b: Message): number {
   return (ROLE_ORDER[a.role] ?? 9) - (ROLE_ORDER[b.role] ?? 9)
 }
 
-function isDuplicateLiveActivity(existing: Message, candidate: Message): boolean {
-  if (existing.role !== "activity" || candidate.role !== "activity") return false
-  const timeDelta = Math.abs(existing.timestamp.getTime() - candidate.timestamp.getTime())
-  if (timeDelta > 2000) return false
-  if (existing.content !== candidate.content) return false
-
-  const existingActivity = existing.activity
-  const candidateActivity = candidate.activity
-  if (!existingActivity || !candidateActivity) return true
-
-  return (
-    existingActivity.kind === candidateActivity.kind &&
-    existingActivity.phase === candidateActivity.phase &&
-    existingActivity.tool === candidateActivity.tool &&
-    existingActivity.command === candidateActivity.command &&
-    existingActivity.path === candidateActivity.path &&
-    existingActivity.url === candidateActivity.url
-  )
-}

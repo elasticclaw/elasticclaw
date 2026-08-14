@@ -434,13 +434,16 @@ function buildTurn(userMessage: Message | null, rest: Message[], index: number):
       run.push(message)
       continue
     }
-    flushRun()
     if (message.role === "activity_summary") {
-      if (!summaryMeta && message.activitySummary) summaryMeta = message.activitySummary
-      summaryCount += message.activitySummary?.count ?? 0
+      // Empty remainders must not split a step run (see compactActivityRuns).
+      if (!message.activitySummary || message.activitySummary.count <= 0) continue
+      flushRun()
+      if (!summaryMeta) summaryMeta = message.activitySummary
+      summaryCount += message.activitySummary.count
       items.push({ type: "summary", message })
       continue
     }
+    flushRun()
     if (message.role === "claw") agentReplies.push(message)
     items.push({ type: "message", message })
   }
@@ -629,6 +632,10 @@ export function compactActivityRuns(messages: Message[]): ConversationItem[] {
 
   for (const message of messages) {
     if (message.role === "activity_summary") {
+      // Fully-expanded remainders (count 0) are bookkeeping rows — they must
+      // not split a run of activity rows, or start/terminal pairs straddling
+      // them stop pairing and render as two steps.
+      if (!message.activitySummary || message.activitySummary.count <= 0) continue
       flush()
       items.push({ type: "activity-summary", id: message.id, messages: [], summary: message.activitySummary })
       continue
@@ -650,6 +657,13 @@ export function trailingActivityRun(messages: Message[]): Message[] {
   const run: Message[] = []
   for (let i = messages.length - 1; i >= 0; i -= 1) {
     const message = messages[i]
+    // Empty summary remainders are invisible bookkeeping — look past them.
+    if (
+      message.role === "activity_summary" &&
+      (!message.activitySummary || message.activitySummary.count <= 0)
+    ) {
+      continue
+    }
     if (message.role !== "activity") break
     if (!isHiddenActivity(message)) run.unshift(message)
   }
