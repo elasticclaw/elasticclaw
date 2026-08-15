@@ -68,31 +68,31 @@ export function TimelineToolbar({
 }) {
   return (
     <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 border-b border-border px-3 md:px-6 py-1.5">
-      <div className="flex items-center gap-0.5 rounded-md border border-border bg-muted/30 p-0.5">
+      <div className="flex items-center border border-border">
         {DENSITY_OPTIONS.map((option) => (
           <button
             key={option.value}
             type="button"
             onClick={() => onDensityChange(option.value)}
             className={cn(
-              "rounded px-2 py-0.5 text-xs transition-colors",
+              "border-r border-border px-2 py-1 font-heading text-xs transition-colors last:border-r-0",
               density === option.value
-                ? "bg-secondary font-medium text-foreground"
-                : "text-muted-foreground hover:text-foreground"
+                ? "bg-primary font-medium text-primary-foreground"
+                : "text-muted-foreground hover:bg-accent hover:text-accent-foreground"
             )}
           >
             {option.label}
           </button>
         ))}
       </div>
-      <span className="flex shrink-0 items-center gap-1.5 rounded-full border border-border bg-muted/20 px-2.5 py-0.5 text-[10.5px] text-muted-foreground">
+      <span className="flex shrink-0 items-center gap-1.5 border border-border px-2.5 py-0.5 font-mono text-[10.5px] text-muted-foreground">
         <span>{stats.turns} turn{stats.turns === 1 ? "" : "s"}</span>
         <span className="text-border">·</span>
         <span>{stats.toolCalls} tool call{stats.toolCalls === 1 ? "" : "s"}</span>
         {stats.failures > 0 && (
           <>
             <span className="text-border">·</span>
-            <span className="font-medium text-red-400">{stats.failures} failed</span>
+            <span className="font-medium text-destructive">{stats.failures} failed</span>
           </>
         )}
       </span>

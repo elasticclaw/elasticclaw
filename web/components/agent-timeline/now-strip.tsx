@@ -23,16 +23,16 @@ import { useLastOutputAt } from "@/hooks/use-last-output"
 export type NowStripState = "working" | "waiting" | "done" | "error" | "offline"
 
 const STATE_DOT: Record<Exclude<NowStripState, "working">, string> = {
-  waiting: "bg-amber-400",
+  waiting: "bg-status-warning",
   done: "bg-muted-foreground/50",
-  error: "bg-red-500",
+  error: "bg-status-failed",
   offline: "bg-muted-foreground/40",
 }
 
 const STATE_TEXT: Record<Exclude<NowStripState, "working">, string> = {
-  waiting: "text-amber-300/90",
+  waiting: "text-status-warning",
   done: "text-muted-foreground",
-  error: "text-red-400",
+  error: "text-destructive",
   offline: "text-muted-foreground/70",
 }
 
@@ -75,10 +75,10 @@ export function NowStrip({
           : "offline"
         : statusText || (state === "error" ? "Agent errored" : "Idle")
     return (
-      <div className="flex min-w-0 items-center gap-1.5 border-b border-border bg-muted/20 px-3 py-1 text-[10px] leading-4">
+      <div className="flex min-w-0 items-center gap-1.5 border-b border-border bg-foreground/5 px-3 py-1 text-[10px] leading-4">
         <span className={cn("size-1.5 shrink-0 rounded-full", dotClass, state === "waiting" && "animate-pulse")} />
         {state === "waiting" && (
-          <span className="shrink-0 font-medium text-amber-400">Needs you</span>
+          <span className="shrink-0 font-medium text-status-warning">Needs you</span>
         )}
         <span className={cn("min-w-0 flex-1 truncate", textClass)} title={text} suppressHydrationWarning={state === "offline" || undefined}>
           {text}
@@ -110,15 +110,15 @@ export function NowStrip({
        truncating away. Card variant: one line, truncate hard. */
     <div
       className={cn(
-        "border-b border-border bg-muted/20",
+        "border-b border-border bg-foreground/5",
         isCard
           ? "flex min-w-0 items-center gap-1.5 px-3 py-1 text-[10px] leading-4"
           : "flex flex-wrap items-center gap-x-2 gap-y-0.5 px-4 md:px-6 py-1.5 text-xs"
       )}
     >
       <span className={cn("relative flex shrink-0", isCard ? "size-1.5" : "size-2")}>
-        <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-green-400 opacity-75" />
-        <span className={cn("relative inline-flex rounded-full bg-green-500", isCard ? "size-1.5" : "size-2")} />
+        <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-status-active opacity-75" />
+        <span className={cn("relative inline-flex rounded-full bg-status-active", isCard ? "size-1.5" : "size-2")} />
       </span>
       <span className="shrink-0 font-medium text-foreground">{what}</span>
       {step?.detail && (
@@ -141,7 +141,7 @@ export function NowStrip({
       >
         {elapsed !== null && <span suppressHydrationWarning>{formatDurationMs(elapsed)}</span>}
         {outputAge !== null && (
-          <span className={cn(stale && "text-amber-400")} suppressHydrationWarning>
+          <span className={cn(stale && "text-status-warning")} suppressHydrationWarning>
             last output {formatAge(lastOutputAt as number, now)}
           </span>
         )}

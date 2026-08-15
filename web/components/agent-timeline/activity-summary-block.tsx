@@ -110,7 +110,7 @@ export function ActivitySummaryBlock({
           <button
             type="button"
             onClick={(e) => handleToggle(e.currentTarget)}
-            className="w-full rounded border border-border/50 bg-muted/20 px-1.5 py-0.5 text-left text-[10px] text-muted-foreground hover:bg-muted/35"
+            className="w-full border border-border px-1.5 py-0.5 text-left font-mono text-[10px] text-muted-foreground hover:bg-foreground/5"
           >
             {expanded ? "Hide" : "Show"} {summaryLabel(earlierCount)}
           </button>
@@ -141,7 +141,7 @@ export function ActivitySummaryBlock({
         <button
           type="button"
           onClick={(e) => handleToggle(e.currentTarget)}
-          className="rounded border border-border/60 bg-muted/25 px-2.5 py-1 text-xs text-muted-foreground hover:bg-muted/40 hover:text-foreground"
+          className="border border-border px-2.5 py-1 font-mono text-xs text-muted-foreground hover:bg-foreground/5 hover:text-foreground"
         >
           {expanded ? "Hide" : "Show"} {label}
         </button>

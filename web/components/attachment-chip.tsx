@@ -68,13 +68,13 @@ export function AttachmentChip({
           loading="lazy"
           className={cn(
             thumbCls,
-            "rounded-md border",
-            source?.kind === "history" ? "object-contain bg-background/40" : "object-cover",
+            "border",
+            source?.kind === "history" ? "object-contain bg-transparent" : "object-cover",
             status === "error" ? "border-destructive/50 opacity-60" : "border-border"
           )}
         />
         {status === "uploading" && (
-          <div className="absolute inset-0 flex items-center justify-center rounded-md bg-background/60">
+          <div className="absolute inset-0 flex items-center justify-center bg-background/60">
             <Loader2 className={size === "sm" ? "size-3 animate-spin" : "size-4 animate-spin"} />
           </div>
         )}
@@ -83,7 +83,7 @@ export function AttachmentChip({
             type="button"
             onClick={(e) => { e.stopPropagation(); e.preventDefault(); onRemove() }}
             className={cn(
-              "absolute rounded-full bg-background border border-border text-muted-foreground hover:text-foreground shadow-sm",
+              "absolute bg-background border border-border text-muted-foreground hover:text-foreground shadow-sm",
               size === "sm" ? "-top-1 -right-1 p-0.5" : "-top-1.5 -right-1.5 p-0.5"
             )}
             aria-label={`Remove ${name}`}
@@ -109,7 +109,7 @@ export function AttachmentChip({
   return (
     <div
       className={cn(
-        "flex items-center gap-1.5 rounded-md border",
+        "flex items-center gap-1.5 border font-mono",
         pad,
         textSize,
         status === "error"

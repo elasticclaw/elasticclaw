@@ -44,15 +44,15 @@ function StepIcon({ step, className }: { step: Step; className: string }) {
 }
 
 function stepAccent(step: Step): string {
-  if (step.status === "running") return "border-l-blue-500"
-  if (step.status === "failed") return "border-l-red-500"
-  if (step.tone === "warning") return "border-l-amber-500/70"
+  if (step.status === "running") return "border-l-primary"
+  if (step.status === "failed") return "border-l-destructive"
+  if (step.tone === "warning") return "border-l-status-warning"
   return "border-l-transparent"
 }
 
 function stepTextTone(step: Step): string {
-  if (step.status === "failed" || step.tone === "error") return "text-red-400"
-  if (step.tone === "warning") return "text-amber-400"
+  if (step.status === "failed" || step.tone === "error") return "text-destructive"
+  if (step.tone === "warning") return "text-status-warning"
   return "text-foreground/80"
 }
 
@@ -112,7 +112,7 @@ export function StepRow({
           "grid grid-cols-[auto_1fr_auto] items-baseline gap-x-2",
           isCard ? "py-0.5" : "py-1",
           // 44px tap target for expandable rows on touch screens
-          hasBody && "cursor-pointer rounded-sm hover:bg-muted/30 max-md:min-h-11 max-md:items-center"
+          hasBody && "cursor-pointer hover:bg-foreground/5 max-md:min-h-11 max-md:items-center"
         )}
       >
         <span className="self-center">
@@ -121,8 +121,8 @@ export function StepRow({
         <span className="flex min-w-0 items-baseline gap-1.5 max-md:flex-wrap max-md:gap-y-0">
           {running && (
             <span className="relative flex size-1.5 self-center">
-              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-blue-400 opacity-75" />
-              <span className="relative inline-flex size-1.5 rounded-full bg-blue-500" />
+              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-status-active opacity-75" />
+              <span className="relative inline-flex size-1.5 rounded-full bg-status-active" />
             </span>
           )}
           <span className={cn("shrink-0 font-medium", isCard ? "text-[10px]" : "text-xs", stepTextTone(step))}>
@@ -146,7 +146,7 @@ export function StepRow({
             <span className="min-w-0 truncate text-xs text-muted-foreground/50">{step.statusText}</span>
           )}
           {showExit && (
-            <span className={cn("shrink-0 rounded bg-red-500/10 px-1 font-mono text-red-400", isCard ? "text-[9px]" : "text-[10px]")}>
+            <span className={cn("shrink-0 border border-destructive/40 bg-destructive/10 px-1 font-mono text-destructive", isCard ? "text-[9px]" : "text-[10px]")}>
               exit {step.exitCode}
             </span>
           )}
@@ -166,7 +166,7 @@ export function StepRow({
         <div className={cn("mb-1 space-y-1", isCard ? "pr-1" : "pr-2")}>
           {step.error && (
             <pre className={cn(
-              "overflow-y-auto whitespace-pre-wrap break-words rounded border border-red-500/20 bg-red-500/5 p-2 font-mono text-red-400",
+              "overflow-y-auto whitespace-pre-wrap break-words border border-destructive/40 bg-destructive/5 p-2 font-mono text-destructive",
               isCard ? "max-h-32 text-[10px]" : "max-h-64 text-[11px]"
             )}>
               {step.error}
@@ -174,7 +174,7 @@ export function StepRow({
           )}
           {step.result && (
             <pre className={cn(
-              "overflow-y-auto whitespace-pre-wrap break-words rounded border border-border/50 bg-muted/40 p-2 font-mono text-muted-foreground",
+              "overflow-y-auto whitespace-pre-wrap break-words border border-border bg-transparent p-2 font-mono text-muted-foreground",
               isCard ? "max-h-32 text-[10px]" : "max-h-64 text-[11px]"
             )}>
               {step.result}
@@ -240,7 +240,7 @@ function StepGroupRow({
           setExpanded((v) => !v)
         }}
         className={cn(
-          "grid w-full grid-cols-[auto_1fr_auto] items-center gap-x-2 rounded-sm text-left hover:bg-muted/30 max-md:min-h-11",
+          "grid w-full grid-cols-[auto_1fr_auto] items-center gap-x-2 text-left hover:bg-foreground/5 max-md:min-h-11",
           isCard ? "py-0.5" : "py-1"
         )}
       >

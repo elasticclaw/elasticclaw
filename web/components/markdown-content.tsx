@@ -20,8 +20,8 @@ const components: Components = {
   p: ({ children }) => <p className="mb-2 last:mb-0 leading-relaxed">{children}</p>,
   code: ({ children, className }) => {
     const isBlock = className?.startsWith("language-")
-    if (isBlock) return <code className="block bg-black/40 rounded px-3 py-2 text-xs font-mono whitespace-pre my-2">{children}</code>
-    return <code className="bg-black/40 rounded px-1.5 py-0.5 text-xs font-mono break-words">{children}</code>
+    if (isBlock) return <code className="block border border-border bg-transparent px-3 py-2 text-[11px] font-mono whitespace-pre my-2">{children}</code>
+    return <code className="border border-border bg-transparent px-1.5 py-0.5 text-[11px] font-mono break-words">{children}</code>
   },
   pre: ({ children }) => <pre className="not-prose my-2 overflow-x-auto">{children}</pre>,
   ul: ({ children }) => <ul className="list-disc list-outside ml-4 mb-2 last:mb-0 space-y-0.5">{children}</ul>,
@@ -31,7 +31,7 @@ const components: Components = {
   table: ({ children }) => <div className="overflow-x-auto my-2"><table className="text-xs border-collapse w-full">{children}</table></div>,
   th: ({ children }) => <th className="border border-border px-2 py-1 bg-muted text-left font-semibold">{children}</th>,
   td: ({ children }) => <td className="border border-border px-2 py-1">{children}</td>,
-  a: ({ href, children }) => <a href={href} target="_blank" rel="noopener noreferrer" className="text-blue-400 hover:underline">{children}</a>,
+  a: ({ href, children }) => <a href={href} target="_blank" rel="noopener noreferrer" className="text-accent-foreground hover:underline">{children}</a>,
   hr: () => <hr className="border-border my-3" />,
   strong: ({ children }) => <strong className="font-semibold">{children}</strong>,
   em: ({ children }) => <em className="italic">{children}</em>,

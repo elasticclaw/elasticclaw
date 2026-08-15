@@ -3,6 +3,7 @@
 import { memo, useMemo, type ReactNode } from "react"
 import { ChevronRight } from "lucide-react"
 import { cn } from "@/lib/utils"
+import { Blueprint } from "@/components/ui/blueprint"
 import type { Message } from "@/lib/types"
 import {
   collapseStepRuns,
@@ -26,16 +27,16 @@ function StatusPill({ status }: { status: TurnStatus }) {
   return (
     <span
       className={cn(
-        "inline-flex items-center gap-1 rounded-full border px-1.5 py-px text-[10px] font-medium",
-        status === "running" && "border-blue-500/40 text-blue-400",
-        status === "failed" && "border-red-500/40 text-red-400",
+        "inline-flex items-center gap-1 border px-1.5 py-px font-mono text-[10px] font-medium",
+        status === "running" && "border-primary text-accent-foreground",
+        status === "failed" && "border-destructive text-destructive",
         status === "ok" && "border-border text-muted-foreground"
       )}
     >
       {status === "running" && (
         <span className="relative flex size-1.5">
-          <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-blue-400 opacity-75" />
-          <span className="relative inline-flex size-1.5 rounded-full bg-blue-500" />
+          <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-status-active opacity-75" />
+          <span className="relative inline-flex size-1.5 rounded-full bg-status-active" />
         </span>
       )}
       {status === "running" ? "running" : status === "failed" ? "failed" : "done"}
@@ -114,14 +115,14 @@ export const TurnCard = memo(function TurnCard({
   )
 
   return (
-    <section className="overflow-hidden rounded-xl border border-border bg-card">
+    <Blueprint className="grid bg-transparent">
       <button
         type="button"
         onClick={(e) => {
           anchor(e.currentTarget)
           onToggle(toggleKey, expanded)
         }}
-        className="flex w-full items-center gap-2 bg-muted/30 px-3 py-2 text-left hover:bg-muted/50"
+        className="flex w-full items-center gap-2 border-b border-border bg-foreground/5 px-3 py-2 text-left hover:bg-foreground/10"
       >
         <ChevronRight
           className={cn("size-3.5 shrink-0 text-muted-foreground transition-transform", expanded && "rotate-90")}
@@ -130,7 +131,7 @@ export const TurnCard = memo(function TurnCard({
         <StatusPill status={status} />
         <span className="ml-auto flex shrink-0 items-center gap-2 text-[10.5px] text-muted-foreground">
           {turn.failedCount > 0 && (
-            <span className="text-red-400">{turn.failedCount} failed</span>
+            <span className="text-destructive">{turn.failedCount} failed</span>
           )}
           <span>{stepNoun}</span>
           {duration && <span className="font-mono">{duration}</span>}
@@ -163,6 +164,6 @@ export const TurnCard = memo(function TurnCard({
           {children}
         </div>
       )}
-    </section>
+    </Blueprint>
   )
 })
