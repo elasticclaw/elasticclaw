@@ -7,7 +7,8 @@ import type { Claw, ClawStatus } from "@/lib/types"
 import { COLOR_CLASSES, CLAW_COLORS } from "@/lib/mappers"
 import { TagEditor } from "@/components/tag-editor"
 import { patchClaw } from "@/lib/api"
-import { Loader2, Pin, AlertCircle, Pencil } from "lucide-react"
+import { Pin, Pencil } from "lucide-react"
+import { StatusDot, UnreadBadge } from "@/components/ui/status-dot"
 import { BootstrapProgress } from "@/components/bootstrap-progress"
 import { ClawTitle } from "@/components/claw-title"
 
@@ -23,35 +24,8 @@ interface ClawCardProps {
 }
 
 function StatusIndicator({ status, isStreaming }: { status: ClawStatus; isStreaming: boolean }) {
-  if (isStreaming) {
-    return <Loader2 className="size-3.5 text-green-500 animate-spin shrink-0" />
-  }
-  if (status === "provisioning") {
-    return <Loader2 className="size-3.5 text-blue-400 animate-spin shrink-0" />
-  }
-  if (status === "error") {
-    return <AlertCircle className="size-3.5 text-red-500 shrink-0" />
-  }
-  return (
-    <span
-      className={cn(
-        "size-2 rounded-full shrink-0",
-        status === "connected" && "bg-green-500",
-        status === "idle" && "bg-amber-500",
-        status === "offline" && "bg-muted-foreground"
-      )}
-    />
-  )
-}
-
-function UnreadBadge({ count }: { count: number }) {
-  if (count === 0) return null
-  
-  return (
-    <span className="flex items-center justify-center min-w-5 h-5 px-1.5 text-xs font-medium bg-blue-600 text-white rounded-full">
-      {count > 99 ? "99+" : count}
-    </span>
-  )
+  const dotStatus = status === "error" ? "failed" : status === "provisioning" ? "offline" : status === "idle" ? "idle" : status === "offline" ? "offline" : "active"
+  return <StatusDot status={dotStatus} pulse={isStreaming} label={null} />
 }
 
 export function ClawCard({ claw, isSelected, onClick, onTogglePin, onTagsChange, showPinButton = true, activityLine }: ClawCardProps) {
@@ -120,13 +94,7 @@ export function ClawCard({ claw, isSelected, onClick, onTogglePin, onTagsChange,
   }
   const hasUnread = claw.unreadCount > 0
   const isPending = claw.status === "provisioning" || claw.status === "error"
-  const railClass = claw.isStreaming
-    ? "border-l-green-500"
-    : claw.status === "provisioning"
-      ? "border-l-blue-400"
-      : claw.status === "error"
-        ? "border-l-red-500"
-        : COLOR_CLASSES[localColor]?.border ?? "border-l-border"
+  const railClass = claw.isStreaming ? "border-l-primary" : claw.status === "error" ? "border-l-destructive" : "border-l-neutral-400"
 
   return (
     <div
@@ -140,11 +108,11 @@ export function ClawCard({ claw, isSelected, onClick, onTogglePin, onTagsChange,
         }
       }}
       className={cn(
-        "w-full min-w-0 text-left p-3 rounded-md transition-colors relative group border-l-2",
+        "w-full min-w-0 text-left p-3  transition-colors relative group border-l-2",
         railClass,
         isPending ? "cursor-pointer opacity-70 hover:bg-accent" : "cursor-pointer hover:bg-accent",
         isSelected && "bg-accent",
-        hasUnread && !isSelected && "bg-blue-950/30"
+        hasUnread && !isSelected && "bg-accent"
       )}
     >
       <div className="flex items-center gap-2 mb-1">
@@ -240,7 +208,7 @@ export function ClawCard({ claw, isSelected, onClick, onTogglePin, onTagsChange,
             {showColorPicker && typeof document !== 'undefined' && createPortal(
               <div
                 data-color-picker
-                className="fixed bg-popover border border-border rounded-lg p-2 shadow-xl"
+                className="fixed bg-popover border border-border  p-2 shadow-xl"
                 style={{ top: pickerPos.top, left: pickerPos.left, zIndex: 99999 }}
               >
                 <div className="grid grid-cols-8 gap-1">

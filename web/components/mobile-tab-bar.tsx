@@ -22,7 +22,7 @@ export function MobileTabBar({
   onSelectAnalytics: () => void
 }) {
   return (
-    <nav className="shrink-0 border-t border-border bg-card pb-[env(safe-area-inset-bottom)]">
+    <nav className="shrink-0 border-t border-border bg-background pb-[env(safe-area-inset-bottom)]">
       <div className="flex">
         <TabItem
           label="Agents"
@@ -68,7 +68,7 @@ function TabItem({
       onClick={onClick}
       className={cn(
         "flex min-h-12 flex-1 flex-col items-center justify-center gap-0.5 py-1.5 text-[10px] font-medium transition-colors",
-        active ? "text-foreground" : "text-muted-foreground hover:text-foreground"
+        active ? "bg-accent text-accent-foreground" : "text-muted-foreground hover:text-accent-foreground hover:bg-accent"
       )}
       aria-current={active ? "page" : undefined}
     >

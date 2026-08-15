@@ -1,6 +1,6 @@
 "use client"
 
-import { Search, Pin, X, ChevronDown, PanelLeftClose, PanelLeft, Loader2, AlertCircle, LogOut, Settings, Plus, BarChart3, LayoutGrid } from "lucide-react"
+import { Search, Pin, X, ChevronDown, PanelLeftClose, PanelLeft, Loader2, LogOut, Settings, Plus, BarChart3, LayoutGrid } from "lucide-react"
 import { useBranding } from "@/hooks/use-branding"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -16,6 +16,8 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import { cn } from "@/lib/utils"
+import { Kicker } from "@/components/ui/kicker"
+import { StatusDot, UnreadBadge } from "@/components/ui/status-dot"
 import type { Claw } from "@/lib/types"
 import {
   DndContext,
@@ -253,7 +255,7 @@ export function Sidebar({
 
   if (isCollapsed && !inDrawer) {
     sidebar = (
-      <aside className="w-12 h-screen-safe flex flex-col border-r border-border bg-card">
+      <aside className="w-12 h-screen-safe flex flex-col border-r border-border bg-background">
         <div className="p-2 border-b border-border flex flex-col items-center gap-1">
           <Button
             variant="ghost"
@@ -287,31 +289,12 @@ export function Sidebar({
                 onClick={() => onSelectClaw(claw.id)}
                 title={claw.name}
                 className={cn(
-                  "relative size-8 rounded-md flex items-center justify-center transition-colors hover:bg-accent",
+                  "relative size-8 flex items-center justify-center transition-colors hover:bg-accent",
                   isSelected && "bg-accent"
                 )}
               >
-                {/* Status dot */}
-                {claw.status === "provisioning" ? (
-                  <Loader2 className="size-3.5 text-blue-400 animate-spin" />
-                ) : claw.status === "error" ? (
-                  <AlertCircle className="size-3.5 text-red-500" />
-                ) : claw.isStreaming ? (
-                  <Loader2 className="size-3.5 text-green-500 animate-spin" />
-                ) : (
-                  <span className={cn(
-                    "size-2.5 rounded-full",
-                    claw.status === "connected" && "bg-green-500",
-                    claw.status === "idle" && "bg-amber-500",
-                    claw.status === "offline" && "bg-muted-foreground/50"
-                  )} />
-                )}
-                {/* Unread badge */}
-                {hasUnread && (
-                  <span className="absolute -top-0.5 -right-0.5 size-3.5 flex items-center justify-center text-[8px] font-bold bg-blue-600 text-white rounded-full">
-                    {claw.unreadCount > 9 ? "9+" : claw.unreadCount}
-                  </span>
-                )}
+                <StatusDot status={claw.status === "error" ? "failed" : claw.status === "idle" ? "idle" : claw.status === "offline" || claw.status === "provisioning" ? "offline" : "active"} pulse={claw.isStreaming} label={null} />
+                {hasUnread && <UnreadBadge count={claw.unreadCount} max={9} className="absolute -top-0.5 -right-0.5" />}
               </button>
             )
           })}
@@ -361,14 +344,12 @@ export function Sidebar({
     sidebar = (
       <aside
         className={cn(
-          "flex flex-col bg-card",
+          "flex flex-col bg-background",
           inDrawer ? "w-full h-full" : "w-[260px] h-screen-safe border-r border-border"
         )}
       >
-      <div className={cn("flex items-center justify-between p-4 border-b border-border", inDrawer && "pr-12")}>
-        <h1 className="text-lg font-semibold tracking-tight text-foreground">
-          {appName}
-        </h1>
+      <div className={cn("flex items-center justify-between gap-2 p-4 border-b border-border", inDrawer && "pr-12")}>
+        <div className="flex items-center gap-2 min-w-0"><span className="size-[9px] shrink-0 bg-primary" /><h1 className="font-heading text-[19px] leading-none text-foreground truncate">{appName}</h1><Kicker className="ml-auto">hub</Kicker></div>
         <div className="flex items-center gap-1">
           {manualWorkflows.length > 0 && (
             <Button
@@ -403,7 +384,7 @@ export function Sidebar({
             placeholder="Filter by name or workflow..."
             value={searchQuery}
             onChange={(e) => onSearchChange(e.target.value)}
-            className="pl-8 h-8 text-sm bg-background"
+            className="pl-8 h-8 text-sm"
           />
         </div>
 
@@ -438,7 +419,7 @@ export function Sidebar({
             <span
               key={tag}
               title={tag}
-              className="inline-flex items-center gap-1 px-2 py-1 text-xs bg-secondary text-foreground rounded max-w-[120px]"
+              className="inline-flex items-center gap-1 px-2 py-1 text-xs bg-industry-100 text-industry-800 max-w-[120px]"
             >
               <span className="truncate">{tag}</span>
               <button
@@ -474,9 +455,7 @@ export function Sidebar({
             <div className="border-b border-border">
               <div className="flex items-center gap-1.5 px-4 py-2">
                 <Pin className="size-3 text-muted-foreground" />
-                <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
-                  Pinned
-                </span>
+                <Kicker>Pinned</Kicker>
               </div>
               <div className="px-2 pb-2">
                 <SortableContext
@@ -503,9 +482,7 @@ export function Sidebar({
           <div className="p-2">
             {!searchQuery && pinnedClaws.length > 0 && claws.length > 0 && (
               <div className="flex items-center gap-1.5 px-2 py-2">
-                <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
-                  All Agents
-                </span>
+                <Kicker>Agents · {claws.length}</Kicker>
               </div>
             )}
             {claws.length === 0 && pinnedClaws.length === 0 ? (
@@ -561,8 +538,8 @@ export function Sidebar({
             <button
               onClick={onToggleView}
               className={cn(
-                "flex w-full min-h-9 items-center gap-[9px] rounded-lg px-2.5 text-[12.5px] text-muted-foreground transition-colors hover:bg-muted hover:text-foreground",
-                inAnalytics && "bg-muted text-foreground"
+                "flex w-full min-h-9 items-center gap-[9px] px-2.5 text-[12.5px] text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground",
+                inAnalytics && "bg-accent text-accent-foreground"
               )}
             >
               <ViewToggleIcon className="size-4 flex-shrink-0" />
@@ -570,7 +547,7 @@ export function Sidebar({
             </button>
             <button
               onClick={() => { window.location.href = "/settings" }}
-              className="flex w-full min-h-9 items-center gap-[9px] rounded-lg px-2.5 text-[12.5px] text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+              className="flex w-full min-h-9 items-center gap-[9px] px-2.5 text-[12.5px] text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
             >
               <Settings className="size-4 flex-shrink-0" />
               Settings
@@ -580,7 +557,7 @@ export function Sidebar({
         )}
         <button
           onClick={handleSignOut}
-          className="flex w-full min-h-9 items-center gap-[9px] rounded-lg px-2.5 text-[12.5px] text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive"
+          className="flex w-full min-h-9 items-center gap-[9px] px-2.5 text-[12.5px] text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive"
         >
           <LogOut className="size-4 flex-shrink-0" />
           Sign out
@@ -638,7 +615,7 @@ function WorkflowPickerOverlay({
         if (e.target === e.currentTarget) onClose()
       }}
     >
-      <div className="bg-card border border-border rounded-lg shadow-lg w-[320px] max-w-[90vw]">
+      <div className="bg-card border border-border  shadow-lg w-[320px] max-w-[90vw]">
         <div className="flex items-center justify-between p-3 border-b border-border">
           <h3 className="text-sm font-medium">Select Workflow</h3>
           <Button variant="ghost" size="icon" className="size-7" onClick={onClose}>

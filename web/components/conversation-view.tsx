@@ -44,6 +44,8 @@ import { useProgrammaticScrollFlag, usePinnedAutoScroll } from "@/hooks/use-pinn
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Badge } from "@/components/ui/badge"
+import { Blueprint } from "@/components/ui/blueprint"
+import { StatusDot as SharedStatusDot, UnreadBadge } from "@/components/ui/status-dot"
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet"
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog"
 import {
@@ -154,7 +156,7 @@ function StreamingMessage({
       </div>
     ) : (
       <div className="flex justify-start">
-        <div className="bg-secondary rounded-lg px-4 py-3">
+        <div className="bg-secondary  px-4 py-3">
           <div className="flex items-center gap-1.5">
             <span className="size-1.5 rounded-full bg-muted-foreground/60 animate-bounce [animation-delay:0ms]" />
             <span className="size-1.5 rounded-full bg-muted-foreground/60 animate-bounce [animation-delay:150ms]" />
@@ -185,7 +187,7 @@ function StreamingMessage({
     <div className="flex w-full justify-start">
       <div
         className={cn(
-          "w-fit max-w-[88%] md:w-[70%] md:max-w-none min-w-0 rounded-lg px-4 py-3",
+          "w-fit max-w-[88%] md:w-[70%] md:max-w-none min-w-0  px-4 py-3",
           (clawColor && COLOR_CLASSES[clawColor]?.bubble) || "bg-secondary"
         )}
       >
@@ -309,63 +311,32 @@ function formatUptime(seconds: number): string {
 }
 
 function StatusBadge({ status, className }: { status: ClawStatus; className?: string }) {
+  const tone = status === "error" ? "destructive" : status === "connected" ? "outline" : "neutral"
   return (
-    <Badge
-      variant="outline"
-      className={cn(
-        "text-xs font-medium",
-        status === "connected" && "border-green-500/50 text-green-500",
-        status === "idle" && "border-amber-500/50 text-amber-500",
-        status === "offline" && "border-red-500/50 text-red-500",
-        className
-      )}
-    >
+    <Badge variant={tone} className={cn("font-mono text-[10px]", className)}>
       {status}
     </Badge>
   )
 }
 
 function StatusDot({ status, isStreaming }: { status: ClawStatus; isStreaming: boolean }) {
-  if (isStreaming) return <Loader2 className="size-3.5 text-green-500 animate-spin" />
-  if (status === "provisioning") return <Loader2 className="size-3.5 text-blue-400 animate-spin" />
-  if (status === "error") return <AlertCircle className="size-3.5 text-red-500" />
-  return (
-    <span
-      className={cn(
-        "size-2 rounded-full shrink-0",
-        status === "connected" && "bg-green-500",
-        status === "idle" && "bg-amber-500",
-        status === "offline" && "bg-muted-foreground"
-      )}
-    />
-  )
+  const dotStatus = status === "error" ? "failed" : status === "idle" ? "idle" : status === "offline" || status === "provisioning" ? "offline" : "active"
+  return <SharedStatusDot status={dotStatus} pulse={isStreaming} label={null} />
 }
 
 function ContextProgressBar({ usage, size = "sm" }: { usage: number; size?: "sm" | "lg" }) {
-  const getColor = (value: number) => {
-    if (value >= 90) return "bg-red-500"
-    if (value >= 70) return "bg-amber-500"
-    return "bg-green-500"
-  }
-
-  const getBgColor = (value: number) => {
-    if (value >= 90) return "bg-red-500/20"
-    if (value >= 70) return "bg-amber-500/20"
-    return "bg-green-500/20"
-  }
-
   if (size === "lg") {
     return (
       <div className="group relative flex items-center">
         <div 
           className={cn(
-            "h-1.5 group-hover:h-3 rounded-full transition-all duration-200 overflow-hidden",
+            "h-1.5 group-hover:h-3 border border-border transition-all duration-200 overflow-hidden",
             "w-24 group-hover:w-32",
-            getBgColor(usage)
+            "bg-transparent"
           )}
         >
           <div 
-            className={cn("h-full rounded-full transition-all", getColor(usage))}
+            className="h-full bg-primary transition-all"
             style={{ width: `${usage}%` }}
           />
         </div>
@@ -380,12 +351,11 @@ function ContextProgressBar({ usage, size = "sm" }: { usage: number; size?: "sm"
     <div className="group relative">
       <div 
         className={cn(
-          "h-1 group-hover:h-2.5 rounded-full transition-all duration-200 overflow-hidden w-full",
-          getBgColor(usage)
+          "h-1 group-hover:h-2.5 border border-border transition-all duration-200 overflow-hidden w-full bg-transparent"
         )}
       >
         <div 
-          className={cn("h-full rounded-full transition-all", getColor(usage))}
+          className="h-full bg-primary transition-all"
           style={{ width: `${usage}%` }}
         />
       </div>
@@ -459,7 +429,7 @@ function ClawCardBack({ claw }: { claw: Claw }) {
           <StatusDot status={claw.status} isStreaming={claw.isStreaming} />
           <span className="text-sm text-foreground capitalize">{claw.status}</span>
           {claw.isStreaming && (
-            <span className="text-xs text-green-500">(streaming)</span>
+            <span className="text-xs text-status-active">(streaming)</span>
           )}
         </div>
       </div>
@@ -509,7 +479,7 @@ function ClawCardBack({ claw }: { claw: Claw }) {
           <div className="space-y-1.5">
             {prs.map(pr => (
               <a key={pr.id} href={pr.url} target="_blank" rel="noopener noreferrer"
-                className="flex items-center gap-2 text-xs text-blue-400 hover:underline">
+                className="flex items-center gap-2 text-xs text-primary hover:underline">
                 <span className="font-mono text-muted-foreground">#{pr.prNumber}</span>
                 <span className="truncate">{pr.repo}</span>
               </a>
@@ -692,13 +662,13 @@ const ClawBoardCard = memo(function ClawBoardCard({
             max-height-clamped auto container resolves against an indefinite
             height, so the inner scroller would overflow and get clipped
             instead of scrolling.) */}
-        <div
+        <Blueprint
           className={cn(
-            "flex flex-col rounded-lg border border-border bg-card",
+            "flex flex-col bg-transparent",
             isMobile
               ? cn("relative", isFlipped && "hidden")
               : "absolute inset-0 [backface-visibility:hidden]",
-            hasUnread && "border-blue-500/30 bg-blue-950/10",
+            hasUnread && "border-primary bg-accent",
             isPending && "opacity-75"
           )}
           onDragEnter={isPending ? undefined : onDragEnter}
@@ -707,28 +677,24 @@ const ClawBoardCard = memo(function ClawBoardCard({
           onDrop={isPending ? undefined : onDrop}
         >
           {dragHover && !isPending && (
-            <div className="pointer-events-none absolute inset-0 z-30 flex items-center justify-center rounded-lg border-2 border-dashed border-ring bg-background/80">
+            <div className="pointer-events-none absolute inset-0 z-30 flex items-center justify-center  border-2 border-dashed border-ring bg-background/80">
               <div className="text-xs font-medium text-foreground">Drop files</div>
             </div>
           )}
           {isStreaming && (
-            <div className="absolute left-0 top-0 bottom-0 w-1 bg-green-500 rounded-l-lg z-10" />
+            <div className="absolute left-0 top-0 bottom-0 w-0.5 bg-status-active z-10" />
           )}
           {claw.status === "provisioning" && (
-            <div className="absolute left-0 top-0 bottom-0 w-1 bg-blue-400 rounded-l-lg z-10 animate-pulse" />
+            <div className="absolute left-0 top-0 bottom-0 w-0.5 bg-status-offline z-10 animate-pulse" />
           )}
           {claw.status === "error" && (
-            <div className="absolute left-0 top-0 bottom-0 w-1 bg-red-500 rounded-l-lg z-10" />
+            <div className="absolute left-0 top-0 bottom-0 w-0.5 bg-status-failed z-10" />
           )}
           
           {/* Context usage bar */}
-          <div className="px-3 pt-2">
-            <ContextProgressBar usage={claw.contextUsage} size="sm" />
-          </div>
-          
           {/* Header - clickable to open full view */}
-          <div className="p-3 border-b border-border">
-            <div className="flex items-center gap-2 mb-1">
+          <div className="px-3 py-2 border-b border-border">
+            <div className="flex items-center gap-2">
               {/* Drag handle — desktop board only; mobile has no reordering */}
               {dragHandleProps && (
                 <span
@@ -770,11 +736,7 @@ const ClawBoardCard = memo(function ClawBoardCard({
                   <ClawTitle name={claw.name} className="block" />
                 </button>
               )}
-              {hasUnread && (
-                <span className="px-1.5 py-0.5 text-[10px] font-medium bg-blue-500 text-white rounded-full">
-                  {claw.unreadCount > 99 ? "99+" : claw.unreadCount}
-                </span>
-              )}
+              {hasUnread && <UnreadBadge count={claw.unreadCount} />}
               <CopyTranscriptButton
                 claw={claw}
                 messages={messages}
@@ -790,38 +752,6 @@ const ClawBoardCard = memo(function ClawBoardCard({
                 <Info className="size-3.5 text-muted-foreground" />
               </button>
             </div>
-            <div className="flex items-center justify-between">
-              <span className="text-xs text-muted-foreground truncate">
-                {claw.template}
-              </span>
-              <span className="text-xs font-mono">
-                {claw.status === "provisioning" ? (
-                  <span className="text-blue-400">starting...</span>
-                ) : claw.status === "error" ? (
-                  <span className="text-red-500">error</span>
-                ) : (
-                  <span className="text-muted-foreground">{formatUptime(claw.uptime)}</span>
-                )}
-              </span>
-            </div>
-            <BootstrapProgress claw={claw} />
-            {claw.tags.length > 0 && (
-              <div className="flex flex-wrap gap-1 mt-2">
-                {claw.tags.slice(0, 3).map((tag) => (
-                  <span
-                    key={tag}
-                    className="inline-flex items-center px-1.5 py-0.5 text-[10px] font-medium bg-secondary text-muted-foreground rounded"
-                  >
-                    {tag}
-                  </span>
-                ))}
-                {claw.tags.length > 3 && (
-                  <span className="text-[10px] text-muted-foreground">
-                    +{claw.tags.length - 3}
-                  </span>
-                )}
-              </div>
-            )}
           </div>
 
           {/* Status line — what this agent is doing, with no clicks */}
@@ -837,6 +767,9 @@ const ClawBoardCard = memo(function ClawBoardCard({
               statusAt={cardNow.at}
             />
           )}
+          <div className="border-b border-border px-3 py-1.5">
+            <ContextProgressBar usage={claw.contextUsage} size="sm" />
+          </div>
 
           {/* Messages area */}
           <div className="flex-1 relative min-h-0 overflow-hidden">
@@ -918,8 +851,8 @@ const ClawBoardCard = memo(function ClawBoardCard({
                     className={cn(
                       "text-xs p-2 rounded",
                       message.role === "user"
-                        ? "bg-blue-600/20 border border-blue-500/20 ml-4"
-                        : "bg-secondary mr-4"
+                        ? "bg-accent border border-primary ml-4"
+                        : "mr-4"
                     )}
                   >
                     <div className="flex items-center gap-1 mb-0.5">
@@ -964,7 +897,7 @@ const ClawBoardCard = memo(function ClawBoardCard({
                 event.stopPropagation()
                 scrollCardToLatest()
               }}
-              className="absolute bottom-2 left-1/2 -translate-x-1/2 z-10 flex items-center gap-1 px-2.5 py-1 rounded-full bg-background/95 backdrop-blur-sm border border-border text-[10px] font-medium text-muted-foreground hover:text-foreground hover:bg-accent transition-colors shadow-md"
+              className="absolute bottom-2 left-1/2 -translate-x-1/2 z-10 flex items-center gap-1 px-2.5 py-1 bg-background/95 backdrop-blur-sm border border-border text-[10px] font-medium text-muted-foreground hover:text-foreground hover:bg-accent transition-colors shadow-md"
               aria-label="Follow latest claw activity"
             >
               <ChevronDown className="size-3" />
@@ -979,7 +912,7 @@ const ClawBoardCard = memo(function ClawBoardCard({
               {cardStats.toolCalls} step{cardStats.toolCalls === 1 ? "" : "s"}
             </span>
             {cardStats.failures > 0 && (
-              <span className="text-red-400">
+              <span className="text-destructive">
                 {cardStats.failures} failed
               </span>
             )}
@@ -1053,7 +986,7 @@ const ClawBoardCard = memo(function ClawBoardCard({
                 }}
                 onPaste={onPaste}
                 placeholder={isPending ? (claw.status === "error" ? "Provisioning failed" : claw.status === "offline" ? "Agent offline" : "Starting up...") : "Send message..."}
-                className="flex-1 resize-none overflow-hidden rounded-md border border-input bg-background px-2 py-1.5 text-xs ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 min-h-[32px]"
+                className="flex-1 resize-none overflow-hidden border border-input bg-surface px-2 py-1.5 text-xs ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 min-h-[32px]"
                 disabled={isPending}
                 ref={cardTextareaRef}
                 onClick={(e) => e.stopPropagation()}
@@ -1069,12 +1002,12 @@ const ClawBoardCard = memo(function ClawBoardCard({
               </Button>
             </div>
           </form>
-        </div>
+        </Blueprint>
 
         {/* Back - Bot info */}
         <div
           className={cn(
-            "flex flex-col rounded-lg border border-border bg-card",
+            "flex flex-col  border border-border bg-card",
             isMobile
               ? cn("relative", !isFlipped && "hidden")
               : "absolute inset-0 [backface-visibility:hidden] [transform:rotateY(180deg)]"
@@ -1256,7 +1189,7 @@ const MessageBubble = memo(function MessageBubble({
   if (message.content === "__THINKING__") {
     return (
       <div className="flex justify-start">
-        <div className="bg-secondary rounded-lg px-4 py-3">
+        <div className="bg-secondary  px-4 py-3">
           <div className="flex items-center gap-1.5">
             <span className="size-1.5 rounded-full bg-muted-foreground/60 animate-bounce [animation-delay:0ms]" />
             <span className="size-1.5 rounded-full bg-muted-foreground/60 animate-bounce [animation-delay:150ms]" />
@@ -1274,7 +1207,7 @@ const MessageBubble = memo(function MessageBubble({
     return (
       <div className="flex items-start gap-2 py-1">
         <div className={cn(
-          "flex items-start gap-1.5 text-muted-foreground/60 text-xs italic bg-muted/40 border border-border/40 rounded px-3 py-1.5 max-w-[85%]",
+          "flex items-start gap-1.5 text-muted-foreground/60 text-xs italic border border-border px-3 py-1.5 max-w-[85%]",
           message.format === "pre" && "whitespace-pre-wrap"
         )}>
           <Settings2 className="size-3 shrink-0 text-muted-foreground/50 mt-0.5" />
@@ -1292,10 +1225,10 @@ const MessageBubble = memo(function MessageBubble({
     <div className={cn("flex w-full", isUser ? "justify-end" : "justify-start")}>
       <div
         className={cn(
-          "w-fit max-w-[88%] md:w-[70%] md:max-w-none min-w-0 rounded-lg px-4 py-3",
+          "w-fit max-w-[88%] md:w-[70%] md:max-w-none min-w-0  px-4 py-3",
           isUser
-            ? "bg-blue-600/20 border border-blue-500/20"
-            : (clawColor && COLOR_CLASSES[clawColor]?.bubble) || "bg-secondary"
+            ? "bg-accent border border-primary"
+            : ""
         )}
       >
         <div className="flex items-center gap-2 mb-1">
@@ -1495,7 +1428,7 @@ function ClawChatView({
       onDrop={onDrop}
     >
       {dragHover && (
-        <div className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center bg-background/70 border-2 border-dashed border-ring rounded-sm">
+        <div className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center bg-background/70 border-2 border-dashed border-ring">
           <div className="text-sm text-foreground font-medium">Drop files to attach</div>
         </div>
       )}
@@ -1636,7 +1569,7 @@ function ClawChatView({
         {showScrollBtn && (
           <button
             onClick={scrollToBottom}
-            className="absolute bottom-4 left-1/2 -translate-x-1/2 z-10 flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-secondary border border-border text-xs text-muted-foreground hover:text-foreground hover:bg-accent transition-colors shadow-md"
+            className="absolute bottom-4 left-1/2 -translate-x-1/2 z-10 flex items-center gap-1.5 px-3 py-1.5 border border-border bg-background text-xs text-muted-foreground hover:text-foreground hover:bg-accent transition-colors shadow-md"
           >
             <ChevronDown className="size-3.5" />
             <span>Scroll to bottom</span>
@@ -1647,13 +1580,13 @@ function ClawChatView({
       {/* Composer — padded above the home indicator on notched phones */}
       <div className="p-4 border-t border-border pb-[calc(1rem+env(safe-area-inset-bottom))] md:pb-4">
         {cmdToast && (
-          <div className="mb-2 max-w-3xl mx-auto text-xs text-amber-400 bg-amber-500/10 border border-amber-500/20 rounded-md px-3 py-2">
+          <div className="mb-2 max-w-3xl mx-auto text-xs text-status-warning bg-status-warning/10 border border-status-warning/40  px-3 py-2">
             {cmdToast}
           </div>
         )}
         <form
           onSubmit={handleSubmit}
-          className="flex flex-col gap-2 max-w-3xl mx-auto rounded-md"
+          className="flex flex-col gap-2 max-w-3xl mx-auto "
         >
           {attachments.length > 0 && (
             <div className="flex flex-wrap gap-2">
@@ -1720,7 +1653,7 @@ function ClawChatView({
               ref={panelTextareaRef}
               placeholder="Message agent, /stop, or attach files"
               rows={1}
-              className="flex-1 resize-none overflow-hidden rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 min-h-[40px]"
+              className="flex-1 resize-none overflow-hidden  border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 min-h-[40px]"
             />
             <Button type="submit" size="icon" disabled={!canSubmit} className="shrink-0 max-md:size-11">
               <Send className="size-4" />
@@ -1825,13 +1758,13 @@ export function ConversationView({
     return (
       <main className="flex-1 flex flex-col bg-background min-w-0 overflow-hidden">
         <div className="flex flex-col items-center justify-center h-full gap-4 text-center px-8">
-          <div className="rounded-full bg-red-500/10 p-4">
-            <AlertCircle className="size-8 text-red-500" />
+          <div className="bg-status-failed/10 p-4">
+            <AlertCircle className="size-8 text-destructive" />
           </div>
           <div className="space-y-2">
             <p className="text-base font-medium text-foreground">Cannot reach the hub</p>
             <p className="text-sm text-muted-foreground max-w-sm">Make sure <code className="bg-muted px-1 rounded text-xs">ELASTICCLAW_HUB_URL</code> and <code className="bg-muted px-1 rounded text-xs">ELASTICCLAW_HUB_TOKEN</code> are set correctly.</p>
-            <a href="/api/debug" target="_blank" rel="noopener" className="text-xs text-blue-400 hover:underline">
+            <a href="/api/debug" target="_blank" rel="noopener" className="text-xs text-primary hover:underline">
               View debug info →
             </a>
           </div>
@@ -1864,15 +1797,15 @@ export function ConversationView({
             <DependencyDowntimeBanner dependencies={downtimeDependencies} />
             <div className="hidden md:flex items-center gap-4">
               <div className="flex items-center gap-1.5">
-                <span className="size-2 rounded-full bg-green-500" />
+                <span className="size-2 rounded-full bg-status-active" />
                 <span>Connected</span>
               </div>
               <div className="flex items-center gap-1.5">
-                <span className="size-2 rounded-full bg-amber-500" />
+                <span className="size-2 rounded-full bg-status-warning" />
                 <span>Idle</span>
               </div>
               <div className="flex items-center gap-1.5">
-                <span className="size-2 rounded-full bg-red-500" />
+                <span className="size-2 rounded-full bg-status-failed" />
                 <span>Offline</span>
               </div>
             </div>
@@ -1911,7 +1844,7 @@ export function ConversationView({
                   Start your first agent from the CLI to get started.
                 </p>
               </div>
-              <div className="bg-muted rounded-lg px-4 py-3 font-mono text-sm text-foreground/80 max-w-md w-full text-left">
+              <div className="bg-muted  px-4 py-3 font-mono text-sm text-foreground/80 max-w-md w-full text-left">
                 <span className="text-muted-foreground select-none">$ </span>
                 elasticclaw create --name my-agent
               </div>
