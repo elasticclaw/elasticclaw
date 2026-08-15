@@ -11,96 +11,140 @@
   height: 100dvh;
 }
 
+/* ---------------------------------------------------------------------------
+   INDUSTRY DESIGN SYSTEM — tokens
+   Dark technical wireframe: steel-blue accent on a technical ground, square
+   corners, transparent line-drawing panels, hairline dividers.
+   See web/DESIGN.md for the conventions these tokens encode.
+
+   The console is dark-only (<html className="dark"> in app/layout.tsx), so
+   :root and .dark carry the SAME dark-ground values — there is no theme
+   toggle to switch between. The source system does define a light ground
+   (bg #f2f2f3, text #1d1f20, accent #5980a6, surface #e9e9ea, divider
+   rgba(29,31,32,.16), mirrored ramps); port those into :root and wire
+   next-themes if the console ever needs a light mode.
+--------------------------------------------------------------------------- */
+
 :root {
-  --background: oklch(1 0 0);
-  --foreground: oklch(0.145 0 0);
-  --card: oklch(1 0 0);
-  --card-foreground: oklch(0.145 0 0);
-  --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.145 0 0);
-  --primary: oklch(0.205 0 0);
-  --primary-foreground: oklch(0.985 0 0);
-  --secondary: oklch(0.97 0 0);
-  --secondary-foreground: oklch(0.205 0 0);
-  --muted: oklch(0.97 0 0);
-  --muted-foreground: oklch(0.556 0 0);
-  --accent: oklch(0.97 0 0);
-  --accent-foreground: oklch(0.205 0 0);
-  --destructive: oklch(0.577 0.245 27.325);
-  --destructive-foreground: oklch(0.577 0.245 27.325);
-  --border: oklch(0.922 0 0);
-  --input: oklch(0.922 0 0);
-  --ring: oklch(0.708 0 0);
-  --chart-1: oklch(0.646 0.222 41.116);
-  --chart-2: oklch(0.6 0.118 184.704);
-  --chart-3: oklch(0.398 0.07 227.392);
-  --chart-4: oklch(0.828 0.189 84.429);
-  --chart-5: oklch(0.769 0.188 70.08);
-  --heatmap-1: oklch(0.86 0.08 250);
-  --heatmap-2: oklch(0.72 0.13 250);
-  --heatmap-3: oklch(0.59 0.17 250);
-  --heatmap-4: oklch(0.46 0.16 250);
-  --heatmap-5: oklch(0.32 0.12 250);
-  --radius: 0.625rem;
-  --sidebar: oklch(0.985 0 0);
-  --sidebar-foreground: oklch(0.145 0 0);
-  --sidebar-primary: oklch(0.205 0 0);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.97 0 0);
-  --sidebar-accent-foreground: oklch(0.205 0 0);
-  --sidebar-border: oklch(0.922 0 0);
-  --sidebar-ring: oklch(0.708 0 0);
+  --background: #16181a;
+  --foreground: #eceded;
+
+  /* Panels are transparent line drawings — hairline border, no fill. */
+  --card: transparent;
+  --card-foreground: #eceded;
+
+  /* Floating layers must be opaque so they never show the page through. */
+  --popover: #1f2224;
+  --popover-foreground: #eceded;
+  --surface: #1f2224;
+
+  /* The solid accent primary button is the only filled object in the system. */
+  --primary: #8fb4d8;
+  --primary-foreground: #16181a;
+
+  --secondary: transparent;
+  --secondary-foreground: #eceded;
+
+  --muted: #26262a;
+  --muted-foreground: #98989b;
+
+  /* --accent is the nav-active / hover TINT, not the accent hue itself.
+     The hue lives in --primary and --accent-foreground. */
+  --accent: rgba(143, 180, 216, 0.1);
+  --accent-foreground: #8fb4d8;
+
+  /* The only non-accent hue in the system. Danger only — never decoration. */
+  --destructive: #c96a6a;
+  --destructive-foreground: #16181a;
+
+  --border: rgba(236, 237, 237, 0.2);
+  --input: rgba(236, 237, 237, 0.2);
+  --ring: #8fb4d8;
+
+  /* Charts stay inside the accent ramp plus one neutral. */
+  --chart-1: #8fb4d8;
+  --chart-2: #416180;
+  --chart-3: #6b93ba;
+  --chart-4: #7a7a7d;
+  --chart-5: #305066;
+
+  /* Heatmap steps = accent ramp 200..600. */
+  --heatmap-1: #24384b;
+  --heatmap-2: #305066;
+  --heatmap-3: #416180;
+  --heatmap-4: #6b93ba;
+  --heatmap-5: #94bce3;
+
+  /* Square corners everywhere. Dots and avatars opt back in with rounded-full. */
+  --radius: 0px;
+
+  /* The sidebar sits on the ground, not on a raised surface. */
+  --sidebar: #16181a;
+  --sidebar-foreground: #eceded;
+  --sidebar-primary: #8fb4d8;
+  --sidebar-primary-foreground: #16181a;
+  --sidebar-accent: rgba(143, 180, 216, 0.1);
+  --sidebar-accent-foreground: #8fb4d8;
+  --sidebar-border: rgba(236, 237, 237, 0.2);
+  --sidebar-ring: #8fb4d8;
 }
 
 .dark {
-  --background: #0a0a0a;
-  --foreground: #fafafa;
-  --card: #0f0f0f;
-  --card-foreground: #fafafa;
-  --popover: #0f0f0f;
-  --popover-foreground: #fafafa;
-  --primary: #fafafa;
-  --primary-foreground: #0a0a0a;
-  --secondary: #1a1a1a;
-  --secondary-foreground: #fafafa;
-  --muted: #1a1a1a;
-  --muted-foreground: #737373;
-  --accent: #1a1a1a;
-  --accent-foreground: #fafafa;
-  --destructive: #dc2626;
-  --destructive-foreground: #fafafa;
-  --border: #262626;
-  --input: #262626;
-  --ring: #404040;
-  --chart-1: oklch(0.488 0.243 264.376);
-  --chart-2: oklch(0.696 0.17 162.48);
-  --chart-3: oklch(0.769 0.188 70.08);
-  --chart-4: oklch(0.627 0.265 303.9);
-  --chart-5: oklch(0.645 0.246 16.439);
-  --heatmap-1: oklch(0.35 0.09 250);
-  --heatmap-2: oklch(0.45 0.13 250);
-  --heatmap-3: oklch(0.56 0.16 250);
-  --heatmap-4: oklch(0.67 0.15 250);
-  --heatmap-5: oklch(0.78 0.12 250);
-  --sidebar: #0f0f0f;
-  --sidebar-foreground: #fafafa;
-  --sidebar-primary: #fafafa;
-  --sidebar-primary-foreground: #0a0a0a;
-  --sidebar-accent: #1a1a1a;
-  --sidebar-accent-foreground: #fafafa;
-  --sidebar-border: #262626;
-  --sidebar-ring: #404040;
+  --background: #16181a;
+  --foreground: #eceded;
+  --card: transparent;
+  --card-foreground: #eceded;
+  --popover: #1f2224;
+  --popover-foreground: #eceded;
+  --surface: #1f2224;
+  --primary: #8fb4d8;
+  --primary-foreground: #16181a;
+  --secondary: transparent;
+  --secondary-foreground: #eceded;
+  --muted: #26262a;
+  --muted-foreground: #98989b;
+  --accent: rgba(143, 180, 216, 0.1);
+  --accent-foreground: #8fb4d8;
+  --destructive: #c96a6a;
+  --destructive-foreground: #16181a;
+  --border: rgba(236, 237, 237, 0.2);
+  --input: rgba(236, 237, 237, 0.2);
+  --ring: #8fb4d8;
+  --chart-1: #8fb4d8;
+  --chart-2: #416180;
+  --chart-3: #6b93ba;
+  --chart-4: #7a7a7d;
+  --chart-5: #305066;
+  --heatmap-1: #24384b;
+  --heatmap-2: #305066;
+  --heatmap-3: #416180;
+  --heatmap-4: #6b93ba;
+  --heatmap-5: #94bce3;
+  --radius: 0px;
+  --sidebar: #16181a;
+  --sidebar-foreground: #eceded;
+  --sidebar-primary: #8fb4d8;
+  --sidebar-primary-foreground: #16181a;
+  --sidebar-accent: rgba(143, 180, 216, 0.1);
+  --sidebar-accent-foreground: #8fb4d8;
+  --sidebar-border: rgba(236, 237, 237, 0.2);
+  --sidebar-ring: #8fb4d8;
 }
 
 @theme inline {
-  --font-sans: 'Geist', 'Geist Fallback';
-  --font-mono: 'Geist Mono', 'Geist Mono Fallback';
+  /* Barlow Condensed 600 for headings, Barlow for body, system mono for
+     agent names, paths, ticket ids, numbers and axis labels. */
+  --font-sans: var(--font-barlow), system-ui, sans-serif;
+  --font-heading: var(--font-barlow-condensed), system-ui, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, monospace;
+
   --color-background: var(--background);
   --color-foreground: var(--foreground);
   --color-card: var(--card);
   --color-card-foreground: var(--card-foreground);
   --color-popover: var(--popover);
   --color-popover-foreground: var(--popover-foreground);
+  --color-surface: var(--surface);
   --color-primary: var(--primary);
   --color-primary-foreground: var(--primary-foreground);
   --color-secondary: var(--secondary);
@@ -119,10 +163,63 @@
   --color-chart-3: var(--chart-3);
   --color-chart-4: var(--chart-4);
   --color-chart-5: var(--chart-5);
-  --radius-sm: calc(var(--radius) - 4px);
-  --radius-md: calc(var(--radius) - 2px);
-  --radius-lg: var(--radius);
-  --radius-xl: calc(var(--radius) + 4px);
+  --color-heatmap-1: var(--heatmap-1);
+  --color-heatmap-2: var(--heatmap-2);
+  --color-heatmap-3: var(--heatmap-3);
+  --color-heatmap-4: var(--heatmap-4);
+  --color-heatmap-5: var(--heatmap-5);
+
+  /* Accent tonal ramp. Named industry-* rather than accent-* because
+     --color-accent is already taken by the shadcn tint token above.
+     100–300 = tinted fills / hovers / subtle borders, 500 = base,
+     700–900 = text on those tinted fills and pressed states. */
+  --color-industry-100: #1b2836;
+  --color-industry-200: #24384b;
+  --color-industry-300: #305066;
+  --color-industry-400: #416180;
+  --color-industry-500: #6b93ba;
+  --color-industry-600: #94bce3;
+  --color-industry-700: #b5d9fd;
+  --color-industry-800: #d6ebff;
+  --color-industry-900: #eef6ff;
+
+  /* Neutral tonal ramp. This intentionally OVERRIDES Tailwind's default
+     neutral palette: pre-existing text-neutral-400 / bg-neutral-800 usages
+     resnap onto the Industry ramp, which is the desired outcome. */
+  --color-neutral-100: #26262a;
+  --color-neutral-200: #333337;
+  --color-neutral-300: #454549;
+  --color-neutral-400: #5d5d60;
+  --color-neutral-500: #7a7a7d;
+  --color-neutral-600: #98989b;
+  --color-neutral-700: #b7b7ba;
+  --color-neutral-800: #d4d4d7;
+  --color-neutral-900: #ececef;
+
+  /* Status is expressed ONLY through these tokens — never a raw palette class. */
+  --color-status-active: #8fb4d8;
+  --color-status-idle: #7a7a7d;
+  --color-status-offline: #98989b;
+  --color-status-warning: #d0a24c;
+  --color-status-failed: var(--destructive);
+  --color-status-unread-bg: #8fb4d8;
+  --color-status-unread-fg: #16181a;
+
+  /* Square by decree: every derived radius collapses to 0. Round corners are
+     opt-in per element (rounded-full on dots and avatars). */
+  --radius-xs: 0px;
+  --radius-sm: 0px;
+  --radius-md: 0px;
+  --radius-lg: 0px;
+  --radius-xl: 0px;
+  --radius-2xl: 0px;
+  --radius-3xl: 0px;
+
+  /* Elevation via tokens, not ad-hoc box-shadows. */
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.5);
+  --shadow-md: 0 3px 10px rgba(0, 0, 0, 0.55);
+  --shadow-lg: 0 12px 32px rgba(0, 0, 0, 0.65);
+
   --color-sidebar: var(--sidebar);
   --color-sidebar-foreground: var(--sidebar-foreground);
   --color-sidebar-primary: var(--sidebar-primary);
@@ -135,10 +232,120 @@
 
 @layer base {
   * {
-    @apply border-border outline-ring/50;
+    @apply border-border;
   }
   body {
     @apply bg-background text-foreground;
+    font-size: 15px;
+    line-height: 1.55;
+  }
+
+  h1,
+  h2,
+  h3,
+  h4,
+  h5,
+  h6 {
+    font-family: var(--font-barlow-condensed), system-ui, sans-serif;
+    font-weight: 600;
+    line-height: 1.12;
+    letter-spacing: -0.015em;
+  }
+  h1 {
+    font-size: 42px;
+  }
+  h2 {
+    font-size: 32px;
+  }
+  h3 {
+    font-size: 25px;
+  }
+  h4 {
+    font-size: 20px;
+  }
+  h5 {
+    font-size: 16px;
+  }
+  h6 {
+    font-size: 13px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+
+  /* Never a browser default focus ring. */
+  :focus-visible {
+    outline: 2px solid var(--ring);
+    outline-offset: 2px;
+  }
+  ::selection {
+    background: color-mix(in srgb, var(--primary) 30%, transparent);
+  }
+
+  /* Lucide icons are thin-stroke throughout. */
+  svg.lucide {
+    stroke-width: 1.5;
+  }
+}
+
+@layer components {
+  /* Blueprint frame — a bordered box with four 11px "+" registration marks
+     sitting 6px outside its corners. The marks are child spans (see
+     components/ui/blueprint.tsx), so the frame must never be overflow-hidden;
+     put scroll containers inside it. */
+  .blueprint {
+    position: relative;
+    border: 1px solid var(--border);
+    border-radius: 0;
+  }
+  .blueprint > .corner {
+    position: absolute;
+    width: 11px;
+    height: 11px;
+    color: color-mix(in srgb, var(--foreground) 55%, transparent);
+  }
+  .blueprint > .corner::before,
+  .blueprint > .corner::after {
+    content: '';
+    position: absolute;
+    background: currentColor;
+  }
+  .blueprint > .corner::before {
+    left: 5px;
+    top: 0;
+    width: 1px;
+    height: 100%;
+  }
+  .blueprint > .corner::after {
+    top: 5px;
+    left: 0;
+    width: 100%;
+    height: 1px;
+  }
+  .blueprint > .corner.tl {
+    top: -6px;
+    left: -6px;
+  }
+  .blueprint > .corner.tr {
+    top: -6px;
+    right: -6px;
+  }
+  .blueprint > .corner.bl {
+    bottom: -6px;
+    left: -6px;
+  }
+  .blueprint > .corner.br {
+    bottom: -6px;
+    right: -6px;
+  }
+
+  /* Kicker — the small uppercase label above a heading, table header or
+     KPI value. Add text-accent-foreground to emphasize one. */
+  .kicker {
+    font-size: 10px;
+    line-height: 1.4;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--muted-foreground);
   }
 }
 
@@ -166,7 +373,6 @@
 }
 .scrollbar-thin::-webkit-scrollbar-thumb {
   background-color: var(--border);
-  border-radius: 9999px;
   border: 2px solid transparent;
   background-clip: padding-box;
 }

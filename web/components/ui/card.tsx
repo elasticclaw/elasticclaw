@@ -7,7 +7,9 @@ function Card({ className, ...props }: React.ComponentProps<'div'>) {
     <div
       data-slot="card"
       className={cn(
-        'bg-card text-card-foreground flex flex-col gap-6 rounded-xl border py-6 shadow-sm',
+        // Panels are transparent line drawings: hairline border, no fill, no
+        // shadow. Wrap in <Blueprint> when the panel should wear corner marks.
+        'bg-card text-card-foreground border-border flex flex-col gap-6 border py-6',
         className,
       )}
       {...props}
