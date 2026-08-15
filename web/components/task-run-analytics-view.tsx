@@ -28,6 +28,7 @@ import type {
 } from "@/lib/types"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
+import { KpiGrid } from "@/components/ui/kpi"
 import { ChartContainer, ChartTooltip, ChartTooltipContent, type ChartConfig } from "@/components/ui/chart"
 import { RunLogsDialog } from "@/components/run-logs-dialog"
 import { Input } from "@/components/ui/input"
@@ -365,7 +366,7 @@ export function TaskRunAnalyticsView({ workspaceScope }: { workspaceScope?: stri
                       />
                     }
                   />
-                  <Bar dataKey="costUsd" fill="var(--color-costUsd)" radius={2} />
+                  <Bar dataKey="costUsd" fill="var(--chart-1)" radius={0} />
                 </BarChart>
               </ChartContainer>
             )}
@@ -390,7 +391,7 @@ export function TaskRunAnalyticsView({ workspaceScope }: { workspaceScope?: stri
               </div>
             </div>
           )}
-          <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-7">
+          <KpiGrid columns={7} className="grid-cols-2 sm:grid-cols-4 xl:grid-cols-7">
             <Metric label="Runs" value={kpiSummary?.totalRuns ?? 0} active={activeKpi === "runs"} onClick={() => applyKpiFilter("runs")} />
             <Metric label="Clean" title="PR merged or closed with zero human interaction." value={kpiSummary?.byStatus.clean ?? 0} tone="success" active={activeKpi === "clean"} onClick={() => applyKpiFilter("clean")} />
             <Metric label="Human on the loop" title="PR merged or closed; a human interacted via the PR (comment, review, or code push)." value={kpiSummary?.byStatus.human_in_the_loop ?? 0} active={activeKpi === "humanInTheLoop"} onClick={() => applyKpiFilter("humanInTheLoop")} />
@@ -398,7 +399,7 @@ export function TaskRunAnalyticsView({ workspaceScope }: { workspaceScope?: stri
             <Metric label="Failed" title="No PR was ever delivered or the run definitively failed before delivery." value={kpiSummary?.byStatus.failed ?? 0} tone="danger" active={activeKpi === "failed"} onClick={() => applyKpiFilter("failed")} />
             <Metric label="Human touches" value={kpiSummary?.humanInteractions ?? 0} active={activeKpi === "humanTouches"} onClick={() => applyKpiFilter("humanTouches")} />
             <Metric label="Merged PRs" value={kpiSummary?.prCounts.merged ?? 0} active={activeKpi === "mergedPrs"} onClick={() => applyKpiFilter("mergedPrs")} />
-          </div>
+          </KpiGrid>
           <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-6">
             <FilterSelect label="Factory" value={filters.factory} values={options?.factories} onChange={(value) => setFilter("factory", value)} />
             <FilterSelect label="Workflow" value={filters.workflow} values={options?.workflows} onChange={(value) => setFilter("workflow", value)} />
@@ -410,14 +411,14 @@ export function TaskRunAnalyticsView({ workspaceScope }: { workspaceScope?: stri
         </header>
 
         {error && (
-          <div className="mx-4 mt-3 flex items-center gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive lg:mx-6">
+          <div className="mx-4 mt-3 flex items-center gap-2 border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive lg:mx-6">
             <AlertCircle className="size-4" />
             {error}
           </div>
         )}
 
         <div className="min-h-0 flex-1 overflow-auto px-4 py-3 lg:px-6">
-          <div className="overflow-hidden rounded-md border border-border">
+          <div className="overflow-hidden border border-border">
             <Table>
               <TableHeader>
                 <TableRow>
@@ -515,28 +516,20 @@ function Metric({ label, title, value, tone, active, onClick }: { label: string;
       title={title}
       aria-pressed={active}
       onClick={onClick}
-      className={cn(
-        "rounded-md border border-border bg-card px-3 py-2 text-left transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-        active && "border-primary/60 bg-accent"
-      )}
+      className={cn("bg-background px-3 py-3 text-left transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring", active && "bg-accent")}
     >
-      <div className="text-xs text-muted-foreground">{label}</div>
-      <div className={cn(
-        "mt-1 text-xl font-semibold",
-        tone === "success" && "text-emerald-600 dark:text-emerald-400",
-        tone === "warning" && "text-amber-600 dark:text-amber-400",
-        tone === "danger" && "text-red-600 dark:text-red-400"
-      )}>{value}</div>
+      <div className="kicker">{label}</div>
+      <div className={cn("mt-1 font-heading text-[30px] leading-none font-semibold tabular-nums", tone === "danger" && "text-destructive", tone !== "danger" && "text-foreground")}>{value}</div>
     </button>
   )
 }
 
 function CostCard({ label, value, sub, title }: { label: string; value: ReactNode; sub?: ReactNode; title?: string }) {
   return (
-    <div className="rounded-md border border-border bg-card px-3 py-2" title={title}>
-      <div className="text-xs text-muted-foreground">{label}</div>
-      <div className="mt-1 flex items-baseline gap-2 text-xl font-semibold">{value}</div>
-      {sub && <div className="mt-1 text-xs text-muted-foreground">{sub}</div>}
+    <div className="bg-background px-3 py-3" title={title}>
+      <div className="kicker">{label}</div>
+      <div className="mt-1 flex items-baseline gap-2 font-heading text-[30px] leading-none font-semibold tabular-nums">{value}</div>
+      {sub && <div className="mt-1 text-[11px] text-muted-foreground">{sub}</div>}
     </div>
   )
 }
@@ -553,8 +546,8 @@ function DeltaIndicator({ pct }: { pct: number }) {
         flat
           ? "text-muted-foreground"
           : up
-            ? "text-red-600 dark:text-red-400"
-            : "text-emerald-600 dark:text-emerald-400"
+            ? "text-destructive"
+            : "text-accent-foreground"
       )}
     >
       <Icon className="size-3" />
@@ -569,8 +562,8 @@ function ConfidenceBadge({ confidence }: { confidence: "high" | "medium" | "low"
       variant="outline"
       className={cn(
         "text-xs font-normal",
-        confidence === "high" && "border-emerald-500/40 text-emerald-700 dark:text-emerald-300",
-        confidence === "medium" && "border-amber-500/50 text-amber-700 dark:text-amber-300",
+        confidence === "high" && "border-primary text-accent-foreground",
+        confidence === "medium" && "border-neutral-500 text-neutral-800",
         confidence === "low" && "text-muted-foreground"
       )}
     >
@@ -615,7 +608,7 @@ export function RunDetailPanel({ run, details, loading, error, onClose }: { run:
   if (!run || !mounted) return null
   return createPortal(
     <>
-    <div className="fixed inset-0 z-[55] bg-black/50" onClick={onClose} aria-hidden="true" />
+    <div className="fixed inset-0 z-[55] bg-background/80" onClick={onClose} aria-hidden="true" />
     <aside className="fixed inset-y-0 right-0 z-[60] flex w-full max-w-[66vw] flex-col border-l border-border bg-card shadow-xl">
       <div className="flex items-start justify-between gap-3 border-b border-border p-4">
         <div className="min-w-0">
@@ -628,7 +621,7 @@ export function RunDetailPanel({ run, details, loading, error, onClose }: { run:
       </div>
       <div className="min-h-0 flex-1 space-y-4 overflow-auto p-4">
         {error && (
-          <div className="flex items-center gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+          <div className="flex items-center gap-2 border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
             <AlertCircle className="size-4" />
             {error}
           </div>
@@ -661,7 +654,7 @@ export function RunDetailPanel({ run, details, loading, error, onClose }: { run:
           <h3 className="mb-2 text-xs font-medium uppercase text-muted-foreground">Pull Requests</h3>
           <div className="space-y-2">
             {(details?.prs ?? []).map((pr) => (
-              <a key={pr.id} href={pr.url} target="_blank" rel="noreferrer" className="flex items-center justify-between rounded-md border border-border px-3 py-2 text-sm hover:bg-accent">
+              <a key={pr.id} href={pr.url} target="_blank" rel="noreferrer" className="flex items-center justify-between border border-border px-3 py-2 text-sm hover:bg-accent">
                 <span className="flex min-w-0 items-center gap-2">
                   <GitPullRequest className="size-4 text-muted-foreground" />
                   <span className="truncate">{pr.repo}#{pr.prNumber}</span>
@@ -678,7 +671,7 @@ export function RunDetailPanel({ run, details, loading, error, onClose }: { run:
             {(details?.attempts ?? []).map((attempt) => {
               const attemptDurationMs = durationBetween(attempt.startedAt, attempt.finishedAt)
               return (
-                <div key={attempt.id} className="rounded-md border border-border px-3 py-2 text-sm">
+                <div key={attempt.id} className="border border-border px-3 py-2 text-sm">
                   <div className="flex items-center justify-between">
                     <span>Attempt {attempt.attemptNumber}</span>
                     <Badge variant="outline">{attempt.status}</Badge>
@@ -696,7 +689,7 @@ export function RunDetailPanel({ run, details, loading, error, onClose }: { run:
           <h3 className="mb-2 text-xs font-medium uppercase text-muted-foreground">Events</h3>
           <div className="space-y-2">
             {(details?.events ?? []).slice(-MAX_DISPLAYED_EVENTS).reverse().map((event) => (
-              <div key={event.id} className="rounded-md border border-border px-3 py-2 text-sm">
+              <div key={event.id} className="border border-border px-3 py-2 text-sm">
                 <div className="flex items-center justify-between gap-2">
                   <span className="truncate">{formatLabel(event.eventType)}</span>
                   <span className="text-xs text-muted-foreground">{formatTime(event.eventTime)}</span>
@@ -730,7 +723,7 @@ function TimingSection({ run }: { run: TaskRunSummary }) {
 
 function DetailItem({ label, value, title }: { label: string; value: ReactNode; title?: string }) {
   return (
-    <div title={title} className="rounded-md border border-border px-3 py-2">
+    <div title={title} className="border border-border px-3 py-2">
       <div className="text-xs text-muted-foreground">{label}</div>
       <div className="mt-1 truncate">{value}</div>
     </div>
@@ -748,7 +741,7 @@ export function StatusBadge({ status }: { status: string }) {
     <Badge
       title={status === "clean" ? "PR merged or closed with zero human interaction." : status === "human_in_the_loop" ? "PR merged or closed; a human interacted via the PR (comment, review, or code push)." : status === "warning" ? "PR merged or closed; a human interacted via the factory dashboard." : status === "failed" ? "No PR was ever delivered or the run definitively failed before delivery." : status === "running" ? "In progress; no failure has occurred." : undefined}
       variant={status === "failed" ? "destructive" : status === "running" ? "secondary" : "outline"}
-      className={cn(status === "clean" && "border-emerald-500/40 text-emerald-700 dark:text-emerald-300", status === "human_in_the_loop" && "border-blue-500/50 text-blue-700 dark:text-blue-300", status === "warning" && "border-amber-500/50 text-amber-700 dark:text-amber-300")}
+      className={cn(status === "clean" && "border-primary text-accent-foreground", status === "human_in_the_loop" && "border-industry-400 text-industry-800", status === "warning" && "border-primary text-accent-foreground")}
     >
       {icon}
       {formatLabel(status)}
