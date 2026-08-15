@@ -1801,11 +1801,11 @@ export function ConversationView({
                 <span>Connected</span>
               </div>
               <div className="flex items-center gap-1.5">
-                <span className="size-2 rounded-full bg-status-warning" />
+                <span className="size-2 rounded-full bg-status-idle" />
                 <span>Idle</span>
               </div>
               <div className="flex items-center gap-1.5">
-                <span className="size-2 rounded-full bg-status-failed" />
+                <span className="size-2 rounded-full bg-status-offline" />
                 <span>Offline</span>
               </div>
             </div>
