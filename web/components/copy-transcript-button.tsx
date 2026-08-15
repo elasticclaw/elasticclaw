@@ -76,7 +76,7 @@ export function CopyTranscriptButton({
         )}
       >
         {copied ? (
-          <Check className="size-3.5 text-green-500" />
+          <Check className="size-3.5 text-status-active" />
         ) : (
           <ClipboardCopy className="size-3.5 text-muted-foreground" />
         )}
@@ -95,7 +95,7 @@ export function CopyTranscriptButton({
       className={className}
     >
       {copied ? (
-        <Check className="size-3.5 mr-1.5 text-green-500" />
+        <Check className="size-3.5 mr-1.5 text-status-active" />
       ) : (
         <ClipboardCopy className="size-3.5 mr-1.5" />
       )}

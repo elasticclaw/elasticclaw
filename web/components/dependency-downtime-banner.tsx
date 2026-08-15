@@ -46,7 +46,7 @@ export function DependencyDowntimeBanner({ dependencies, className }: Dependency
           aria-label={`${text}: ${names}`}
           title={title}
           className={cn(
-            "inline-flex h-7 max-w-full items-center gap-1.5 whitespace-nowrap rounded-md border border-amber-500/40 bg-amber-500/10 px-2.5 text-xs font-medium text-amber-500 outline-none ring-offset-background transition-colors focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
+            "inline-flex h-7 max-w-full items-center gap-1.5 whitespace-nowrap rounded-md border border-status-warning/40 bg-status-warning/10 px-2.5 text-xs font-medium text-status-warning outline-none ring-offset-background transition-colors focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
             className
           )}
         >

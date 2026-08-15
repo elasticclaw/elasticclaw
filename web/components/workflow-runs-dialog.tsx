@@ -149,14 +149,14 @@ function statusVariant(status: string) {
   switch (status.toLowerCase()) {
     case "completed":
     case "success":
-      return "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
+      return "border-status-active/30 bg-status-active/10 text-status-active"
     case "failed":
     case "error":
-      return "border-red-500/30 bg-red-500/10 text-red-700 dark:text-red-300"
+      return "border-destructive/30 bg-destructive/10 text-destructive"
     case "running":
-      return "border-blue-500/30 bg-blue-500/10 text-blue-700 dark:text-blue-300"
+      return "border-primary/30 bg-primary/10 text-accent-foreground"
     case "skipped":
-      return "border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300"
+      return "border-status-warning/30 bg-status-warning/10 text-status-warning"
     case "pending":
     default:
       return "border-border bg-muted text-muted-foreground"

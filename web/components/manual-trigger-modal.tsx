@@ -102,7 +102,7 @@ export function ManualTriggerModal({ open, onOpenChange, workflow }: ManualTrigg
       <DialogContent className="sm:max-w-md">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
-            <Zap className="size-4 text-amber-500" />
+            <Zap className="size-4 text-status-warning" />
             Trigger {workflow.name}
           </DialogTitle>
           <DialogDescription>
@@ -126,7 +126,7 @@ export function ManualTriggerModal({ open, onOpenChange, workflow }: ManualTrigg
         )}
 
         {triggerError && (
-          <div className="flex items-center gap-1.5 text-sm text-red-500 bg-red-50 p-2 rounded">
+          <div className="flex items-center gap-1.5 text-sm text-destructive bg-destructive/10 p-2 rounded">
             <AlertCircle className="size-4" />
             <span>{triggerError}</span>
           </div>
@@ -168,7 +168,7 @@ function WorkflowInputField({
     <div className="space-y-1.5">
       <label className="text-sm font-medium flex items-center gap-1">
         {input.name}
-        {input.required && <span className="text-red-500">*</span>}
+        {input.required && <span className="text-destructive">*</span>}
         <Badge variant="secondary" className="text-[10px] font-normal">
           {input.type}
         </Badge>

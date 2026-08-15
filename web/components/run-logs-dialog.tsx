@@ -126,7 +126,7 @@ function OutputBlock({ output }: { output: TaskRunOutput }) {
           <div className="text-sm font-medium">{output.outputName}</div>
           {output.attemptId && <div className="text-xs text-muted-foreground">{output.attemptId}</div>}
         </div>
-        <Badge className={cn("border", output.exitCode === 0 ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300" : "border-red-500/30 bg-red-500/10 text-red-700 dark:text-red-300")}>Exit {output.exitCode}</Badge>
+        <Badge className={cn("border", output.exitCode === 0 ? "border-status-active/30 bg-status-active/10 text-status-active" : "border-destructive/30 bg-destructive/10 text-destructive")}>Exit {output.exitCode}</Badge>
       </div>
       {output.stdout && <LogStream label="stdout" value={output.stdout} />}
       {output.stderr && <LogStream label="stderr" value={output.stderr} error />}
