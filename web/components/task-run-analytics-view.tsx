@@ -391,7 +391,7 @@ export function TaskRunAnalyticsView({ workspaceScope }: { workspaceScope?: stri
               </div>
             </div>
           )}
-          <KpiGrid columns={7} className="grid-cols-2 sm:grid-cols-4 xl:grid-cols-7">
+          <KpiGrid className="grid-cols-2 sm:grid-cols-4 xl:grid-cols-7">
             <Metric label="Runs" value={kpiSummary?.totalRuns ?? 0} active={activeKpi === "runs"} onClick={() => applyKpiFilter("runs")} />
             <Metric label="Clean" title="PR merged or closed with zero human interaction." value={kpiSummary?.byStatus.clean ?? 0} tone="success" active={activeKpi === "clean"} onClick={() => applyKpiFilter("clean")} />
             <Metric label="Human on the loop" title="PR merged or closed; a human interacted via the PR (comment, review, or code push)." value={kpiSummary?.byStatus.human_in_the_loop ?? 0} active={activeKpi === "humanInTheLoop"} onClick={() => applyKpiFilter("humanInTheLoop")} />

@@ -8,11 +8,13 @@ import { cn } from '@/lib/utils'
  * background is the border color and each cell paints the ground back over it,
  * so there are no double rules and no per-cell border bookkeeping.
  *
- * Pass `columns` (or override with a grid-cols-* class) to shape the grid.
+ * Shape the grid with grid-cols-* classes (responsive variants included), or
+ * pass `columns` for a fixed count — the inline style is only emitted when
+ * `columns` is given, so it never overrides responsive classes.
  */
 function KpiGrid({
   className,
-  columns = 4,
+  columns,
   style,
   ...props
 }: React.ComponentProps<'div'> & { columns?: number }) {
@@ -20,10 +22,11 @@ function KpiGrid({
     <div
       data-slot="kpi-grid"
       className={cn('border-border bg-border grid gap-px border', className)}
-      style={{
-        gridTemplateColumns: `repeat(${columns}, minmax(0, 1fr))`,
-        ...style,
-      }}
+      style={
+        columns !== undefined
+          ? { gridTemplateColumns: `repeat(${columns}, minmax(0, 1fr))`, ...style }
+          : style
+      }
       {...props}
     />
   )
