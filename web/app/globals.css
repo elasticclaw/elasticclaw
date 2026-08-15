@@ -61,12 +61,21 @@
   --input: rgba(236, 237, 237, 0.2);
   --ring: #8fb4d8;
 
-  /* Charts stay inside the accent ramp plus one neutral. */
-  --chart-1: #8fb4d8;
-  --chart-2: #416180;
-  --chart-3: #6b93ba;
-  --chart-4: #7a7a7d;
-  --chart-5: #305066;
+  /* Chart marks are deeper and more chromatic than the UI accent (which is
+     tuned for chrome, not data): a fixed categorical order validated for
+     lightness band, chroma, CVD and normal-vision separation on this ground.
+     Assign in order, never cycled; slot 5 is the gray "Other" fold. The
+     -positive/-attention/-warning/-negative aliases are the semantic
+     assignment for status series (outcome charts). */
+  --chart-1: #5381c4;
+  --chart-2: #20a07b;
+  --chart-3: #b08e00;
+  --chart-4: #856ab2;
+  --chart-5: #7d8792;
+  --chart-positive: #5381c4;
+  --chart-attention: #20a07b;
+  --chart-warning: #b08e00;
+  --chart-negative: #ac4647;
 
   /* Heatmap steps = accent ramp 200..600. */
   --heatmap-1: #24384b;
@@ -110,11 +119,15 @@
   --border: rgba(236, 237, 237, 0.2);
   --input: rgba(236, 237, 237, 0.2);
   --ring: #8fb4d8;
-  --chart-1: #8fb4d8;
-  --chart-2: #416180;
-  --chart-3: #6b93ba;
-  --chart-4: #7a7a7d;
-  --chart-5: #305066;
+  --chart-1: #5381c4;
+  --chart-2: #20a07b;
+  --chart-3: #b08e00;
+  --chart-4: #856ab2;
+  --chart-5: #7d8792;
+  --chart-positive: #5381c4;
+  --chart-attention: #20a07b;
+  --chart-warning: #b08e00;
+  --chart-negative: #ac4647;
   --heatmap-1: #24384b;
   --heatmap-2: #305066;
   --heatmap-3: #416180;
@@ -163,6 +176,10 @@
   --color-chart-3: var(--chart-3);
   --color-chart-4: var(--chart-4);
   --color-chart-5: var(--chart-5);
+  --color-chart-positive: var(--chart-positive);
+  --color-chart-attention: var(--chart-attention);
+  --color-chart-warning: var(--chart-warning);
+  --color-chart-negative: var(--chart-negative);
   --color-heatmap-1: var(--heatmap-1);
   --color-heatmap-2: var(--heatmap-2);
   --color-heatmap-3: var(--heatmap-3);

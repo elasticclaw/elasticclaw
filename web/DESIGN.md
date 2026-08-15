@@ -23,7 +23,9 @@ All theming lives in `app/globals.css` (Tailwind v4, CSS-first). The console is 
 | Neutral ramp | `--color-neutral-100..900` | `bg-neutral-100`, `text-neutral-700` | Overrides Tailwind's default neutral palette with the Industry ramp — existing `neutral-*` usages resnap onto it, which is intended. |
 | Status | `--color-status-{active,idle,offline,warning,failed}` | `bg-status-active`, `text-status-failed` | The **only** way to express agent/run state. |
 | Unread | `--color-status-unread-{bg,fg}` | `bg-status-unread-bg` | The square unread counter. |
-| Charts | `--chart-1..5`, `--heatmap-1..5` | `fill-chart-1`, `bg-heatmap-3` | Series and heatmap steps, all inside the accent ramp plus one neutral. |
+| Charts (categorical) | `--chart-1..5` | `fill-chart-1`, `bg-chart-1` | Deeper, more chromatic than the UI accent — chart marks need it (validated for lightness band, chroma, CVD and normal-vision separation on this ground). Fixed order: blue, teal, sand, violet, gray; assign in order, never cycled; slot 5 is the gray "Other" fold. Never color marks with the UI accent or the ramps. |
+| Charts (status series) | `--chart-{positive,attention,warning,negative}` | `fill`/`stroke` via `var(--chart-positive)` | For series that ARE states (Clean / Human on the loop / Warning / Failed, Delivered / In progress / Failed). Same validated set, semantic assignment. |
+| Heatmaps | `--heatmap-1..5` | `bg-heatmap-3` | Sequential single-hue steps from the accent ramp — magnitude, not identity. Funnels likewise stay single-hue (opacity steps of `chart-1`). |
 | Radius | `--radius: 0px` (all steps) | `rounded-*` → 0 | Square by default. Round is opt-in via `rounded-full`. |
 | Elevation | `--shadow-sm/md/lg` | `shadow-md`, `shadow-lg` | Floating layers only. Never an ad-hoc `box-shadow`. |
 | Body font | `--font-sans` (Barlow) | `font-sans` | Body copy, 15px/1.55. |
