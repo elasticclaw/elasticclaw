@@ -1,6 +1,5 @@
 "use client"
 
-import { CheckCircle2, Circle, Loader2 } from "lucide-react"
 import type { Claw } from "@/lib/types"
 import { cn } from "@/lib/utils"
 
@@ -57,18 +56,17 @@ export function BootstrapProgress({
   if (variant === "sidebar") {
     return (
       <div className="mt-1.5 w-full min-w-0 overflow-hidden space-y-1">
-        <div className="flex min-w-0 items-center justify-between gap-2 text-[9px]">
-          <span className="min-w-0 truncate font-medium text-blue-400">{detail}</span>
-          <span className="shrink-0 text-muted-foreground/50">{currentIndex + 1}/{STEPS.length}</span>
+        <div className="flex min-w-0 items-center justify-between gap-2 font-mono text-[9px] text-muted-foreground">
+          <span className="min-w-0 truncate">{detail}</span>
+          <span className="shrink-0">{currentIndex + 1}/{STEPS.length}</span>
         </div>
         <div className="grid min-w-0 grid-cols-5 gap-0.5">
           {STEPS.map((step, index) => (
             <div
               key={step.key}
               className={cn(
-                "h-0.5 rounded-full bg-border",
-                index < currentIndex && "bg-blue-500/70",
-                index === currentIndex && "bg-blue-400 animate-pulse"
+                "h-[3px] bg-foreground/14",
+                index <= currentIndex && "bg-primary"
               )}
               title={step.label}
             />
@@ -81,18 +79,17 @@ export function BootstrapProgress({
   if (variant === "compact") {
     return (
       <div className="mt-2 space-y-1.5">
-        <div className="flex items-center justify-between text-[10px]">
-          <span className="font-medium text-blue-400">{detail}</span>
-          <span className="text-muted-foreground/60">{currentIndex + 1}/{STEPS.length}</span>
+        <div className="flex items-center justify-between font-mono text-[10px] text-muted-foreground">
+          <span>{detail}</span>
+          <span>{currentIndex + 1}/{STEPS.length}</span>
         </div>
         <div className="grid grid-cols-5 gap-1">
           {STEPS.map((step, index) => (
             <div
               key={step.key}
               className={cn(
-                "h-1 rounded-full bg-border",
-                index < currentIndex && "bg-blue-500/70",
-                index === currentIndex && "bg-blue-400 animate-pulse"
+                "h-[3px] bg-foreground/14",
+                index <= currentIndex && "bg-primary"
               )}
               title={step.label}
             />
@@ -103,45 +100,20 @@ export function BootstrapProgress({
   }
 
   return (
-    <div className="border-t border-border/60 px-6 py-3">
-      <div className="mb-2 flex items-center justify-between">
-        <div className="flex items-center gap-2">
-          <Loader2 className="size-3.5 animate-spin text-blue-400" />
-          <span className="text-sm font-medium text-foreground">Setting up agent</span>
+    <div className="border-t border-border px-6 py-3">
+      <div className="grid gap-1.5">
+        <div className="grid grid-cols-5 gap-1">
+          {STEPS.map((step, index) => (
+            <div
+              key={step.key}
+              className={cn("h-[3px] bg-foreground/14", index <= currentIndex && "bg-primary")}
+              title={step.label}
+            />
+          ))}
         </div>
-        <span className="text-xs text-muted-foreground">{detail}</span>
-      </div>
-      <div className="grid grid-cols-5 gap-2">
-        {STEPS.map((step, index) => {
-          const isDone = index < currentIndex
-          const isCurrent = index === currentIndex
-          return (
-            <div key={step.key} className="min-w-0">
-              <div
-                className={cn(
-                  "mb-1 h-1 rounded-full bg-border",
-                  isDone && "bg-blue-500/70",
-                  isCurrent && "bg-blue-400 animate-pulse"
-                )}
-              />
-              <div className="flex min-w-0 items-center gap-1.5">
-                {isDone ? (
-                  <CheckCircle2 className="size-3 shrink-0 text-blue-400" />
-                ) : isCurrent ? (
-                  <Loader2 className="size-3 shrink-0 animate-spin text-blue-400" />
-                ) : (
-                  <Circle className="size-3 shrink-0 text-muted-foreground/40" />
-                )}
-                <span className={cn(
-                  "truncate text-[11px]",
-                  isCurrent ? "font-medium text-foreground" : "text-muted-foreground"
-                )}>
-                  {step.label}
-                </span>
-              </div>
-            </div>
-          )
-        })}
+        <span className="truncate font-mono text-[10px] text-muted-foreground">
+          {detail} · {currentIndex + 1}/{STEPS.length}
+        </span>
       </div>
     </div>
   )
