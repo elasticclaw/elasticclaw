@@ -4,21 +4,24 @@ import { cva, type VariantProps } from 'class-variance-authority'
 
 import { cn } from '@/lib/utils'
 
+// Modernist buttons: the heading face at weight 800, 14px, 8px radius. The
+// accent carries the primary action; everything else is a divider outline or a
+// bare ink wash, so a screen never shows two competing filled buttons.
 const buttonVariants = cva(
-  "inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-all disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg:not([class*='size-'])]:size-4 shrink-0 [&_svg]:shrink-0 outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px] aria-invalid:ring-destructive/20 dark:aria-invalid:ring-destructive/40 aria-invalid:border-destructive",
+  "inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-extrabold leading-none tracking-normal transition-colors disabled:pointer-events-none disabled:opacity-45 [&_svg]:pointer-events-none [&_svg:not([class*='size-'])]:size-4 shrink-0 [&_svg]:shrink-0 outline-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring aria-invalid:border-destructive",
   {
     variants: {
       variant: {
-        default: 'bg-primary text-primary-foreground hover:bg-primary/90',
+        default:
+          'bg-primary text-primary-foreground hover:bg-[var(--ds-accent-hover)] active:bg-[var(--ds-accent-active)]',
         destructive:
-          'bg-destructive text-white hover:bg-destructive/90 focus-visible:ring-destructive/20 dark:focus-visible:ring-destructive/40 dark:bg-destructive/60',
+          'bg-destructive text-primary-foreground hover:bg-[var(--ds-accent-hover)] active:bg-[var(--ds-accent-active)]',
         outline:
-          'border bg-background shadow-xs hover:bg-accent hover:text-accent-foreground dark:bg-input/30 dark:border-input dark:hover:bg-input/50',
+          'border border-border bg-transparent text-foreground hover:bg-foreground/7 active:bg-foreground/14',
         secondary:
-          'bg-secondary text-secondary-foreground hover:bg-secondary/80',
-        ghost:
-          'hover:bg-accent hover:text-accent-foreground dark:hover:bg-accent/50',
-        link: 'text-primary underline-offset-4 hover:underline',
+          'bg-secondary text-secondary-foreground hover:bg-foreground/14 active:bg-foreground/18',
+        ghost: 'hover:bg-foreground/8 active:bg-foreground/14',
+        link: 'text-primary underline-offset-4 hover:underline hover:text-[var(--ds-accent-hover)]',
       },
       size: {
         default: 'h-9 px-4 py-2 has-[>svg]:px-3',
@@ -29,6 +32,14 @@ const buttonVariants = cva(
         'icon-lg': 'size-10',
       },
     },
+    compoundVariants: [
+      // A ghost button carrying a label reads as the system's tertiary action,
+      // so it takes the accent. Icon-only ghosts stay ink — the shell is full
+      // of them and an all-red toolbar would drown the real accents.
+      { variant: 'ghost', size: 'default', className: 'text-primary' },
+      { variant: 'ghost', size: 'sm', className: 'text-primary' },
+      { variant: 'ghost', size: 'lg', className: 'text-primary' },
+    ],
     defaultVariants: {
       variant: 'default',
       size: 'default',
