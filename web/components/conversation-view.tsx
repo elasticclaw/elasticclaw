@@ -154,7 +154,7 @@ function StreamingMessage({
       </div>
     ) : (
       <div className="flex justify-start">
-        <div className="bg-secondary rounded-lg px-4 py-3">
+        <div className="rounded-lg border border-border bg-card px-4 py-3">
           <div className="flex items-center gap-1.5">
             <span className="size-1.5 rounded-full bg-muted-foreground/60 animate-bounce [animation-delay:0ms]" />
             <span className="size-1.5 rounded-full bg-muted-foreground/60 animate-bounce [animation-delay:150ms]" />
@@ -169,9 +169,9 @@ function StreamingMessage({
 
   if (variant === "card") {
     return (
-      <div className="text-xs p-2 rounded bg-secondary mr-4">
+      <div className="text-xs p-2 rounded-md border border-border bg-foreground/4 mr-4">
         <div className="flex items-center gap-1 mb-0.5">
-          <span className="font-medium text-foreground/70">{clawName}</span>
+          <span className="font-mono text-foreground">{clawName}</span>
           <span className="text-muted-foreground" suppressHydrationWarning>
             {formatTimestamp(startedAt)}
           </span>
@@ -185,12 +185,12 @@ function StreamingMessage({
     <div className="flex w-full justify-start">
       <div
         className={cn(
-          "w-fit max-w-[88%] md:w-[70%] md:max-w-none min-w-0 rounded-lg px-4 py-3",
-          (clawColor && COLOR_CLASSES[clawColor]?.bubble) || "bg-secondary"
+          "w-fit max-w-[88%] md:w-[70%] md:max-w-none min-w-0 rounded-lg border border-border px-4 py-3",
+          (clawColor && COLOR_CLASSES[clawColor]?.bubble) || "bg-card"
         )}
       >
         <div className="flex items-center gap-2 mb-1">
-          <span className="text-xs font-medium text-foreground">{clawName}</span>
+          <span className="font-mono text-xs text-foreground">{clawName}</span>
           <span className="text-xs text-muted-foreground" suppressHydrationWarning>
             {formatTimestamp(startedAt)}
           </span>
@@ -313,10 +313,11 @@ function StatusBadge({ status, className }: { status: ClawStatus; className?: st
     <Badge
       variant="outline"
       className={cn(
-        "text-xs font-medium",
-        status === "connected" && "border-green-500/50 text-green-500",
-        status === "idle" && "border-amber-500/50 text-amber-500",
-        status === "offline" && "border-red-500/50 text-red-500",
+        // Outline tag from the mockup topbar: hairline border, status hue.
+        "rounded-full font-mono text-xs font-normal lowercase",
+        status === "connected" && "border-status-ok/60 text-status-ok",
+        status === "idle" && "border-status-warn/60 text-status-warn",
+        status === "offline" && "border-destructive/60 text-destructive",
         className
       )}
     >
@@ -326,15 +327,15 @@ function StatusBadge({ status, className }: { status: ClawStatus; className?: st
 }
 
 function StatusDot({ status, isStreaming }: { status: ClawStatus; isStreaming: boolean }) {
-  if (isStreaming) return <Loader2 className="size-3.5 text-green-500 animate-spin" />
-  if (status === "provisioning") return <Loader2 className="size-3.5 text-blue-400 animate-spin" />
-  if (status === "error") return <AlertCircle className="size-3.5 text-red-500" />
+  if (isStreaming) return <Loader2 className="size-3.5 text-status-ok animate-spin" />
+  if (status === "provisioning") return <Loader2 className="size-3.5 text-data animate-spin" />
+  if (status === "error") return <AlertCircle className="size-3.5 text-destructive" />
   return (
     <span
       className={cn(
         "size-2 rounded-full shrink-0",
-        status === "connected" && "bg-green-500",
-        status === "idle" && "bg-amber-500",
+        status === "connected" && "bg-status-ok",
+        status === "idle" && "bg-status-warn",
         status === "offline" && "bg-muted-foreground"
       )}
     />
@@ -343,16 +344,14 @@ function StatusDot({ status, isStreaming }: { status: ClawStatus; isStreaming: b
 
 function ContextProgressBar({ usage, size = "sm" }: { usage: number; size?: "sm" | "lg" }) {
   const getColor = (value: number) => {
-    if (value >= 90) return "bg-red-500"
-    if (value >= 70) return "bg-amber-500"
-    return "bg-green-500"
+    if (value >= 90) return "bg-destructive"
+    if (value >= 70) return "bg-status-warn"
+    return "bg-status-ok"
   }
 
-  const getBgColor = (value: number) => {
-    if (value >= 90) return "bg-red-500/20"
-    if (value >= 70) return "bg-amber-500/20"
-    return "bg-green-500/20"
-  }
+  // The mockup's meter track is one neutral ink wash at every level — only the
+  // fill carries the status hue.
+  const getBgColor = (_value: number) => "bg-foreground/14"
 
   if (size === "lg") {
     return (
@@ -434,7 +433,7 @@ function ClawCardBack({ claw }: { claw: Claw }) {
        content-sized, so the info panel scrolls inside its own bound. */
     <div className="flex-1 overflow-y-auto scrollbar-thin p-4 space-y-4 max-md:max-h-[40vh]">
       <div>
-        <h3 className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-2">
+        <h3 className="kicker text-muted-foreground mb-2">
           Purpose
         </h3>
         <p className="text-sm text-foreground leading-relaxed">
@@ -443,7 +442,7 @@ function ClawCardBack({ claw }: { claw: Claw }) {
       </div>
 
       <div>
-        <h3 className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-2">
+        <h3 className="kicker text-muted-foreground mb-2">
           Source
         </h3>
         <p className="text-sm font-mono text-foreground">
@@ -452,20 +451,20 @@ function ClawCardBack({ claw }: { claw: Claw }) {
       </div>
 
       <div>
-        <h3 className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-2">
+        <h3 className="kicker text-muted-foreground mb-2">
           Status
         </h3>
         <div className="flex items-center gap-2">
           <StatusDot status={claw.status} isStreaming={claw.isStreaming} />
           <span className="text-sm text-foreground capitalize">{claw.status}</span>
           {claw.isStreaming && (
-            <span className="text-xs text-green-500">(streaming)</span>
+            <span className="text-xs text-status-ok">(streaming)</span>
           )}
         </div>
       </div>
 
       <div>
-        <h3 className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-2">
+        <h3 className="kicker text-muted-foreground mb-2">
           Context Usage
         </h3>
         <div className="flex items-center gap-2">
@@ -477,7 +476,7 @@ function ClawCardBack({ claw }: { claw: Claw }) {
       </div>
 
       <div>
-        <h3 className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-2">
+        <h3 className="kicker text-muted-foreground mb-2">
           Uptime
         </h3>
         <p className="text-sm font-mono text-foreground">
@@ -487,14 +486,14 @@ function ClawCardBack({ claw }: { claw: Claw }) {
 
       {claw.tags.length > 0 && (
         <div>
-          <h3 className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-2">
+          <h3 className="kicker text-muted-foreground mb-2">
             Tags
           </h3>
           <div className="flex flex-wrap gap-1.5">
             {claw.tags.map((tag) => (
               <span
                 key={tag}
-                className="inline-flex items-center px-2 py-1 text-xs font-medium bg-secondary text-muted-foreground rounded"
+                className="inline-flex items-center rounded-full bg-tint-neutral px-2.5 py-0.5 text-[11px] text-tint-neutral-foreground"
               >
                 {tag}
               </span>
@@ -505,12 +504,14 @@ function ClawCardBack({ claw }: { claw: Claw }) {
 
       {prs.length > 0 && (
         <div>
-          <h3 className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-2">Pull Requests</h3>
-          <div className="space-y-1.5">
+          <h3 className="kicker text-muted-foreground mb-2">Pull Requests</h3>
+          {/* PR chips from the board mockup: mono on a divider-bordered pill
+              that picks up the accent on hover. */}
+          <div className="flex flex-wrap gap-1.5">
             {prs.map(pr => (
               <a key={pr.id} href={pr.url} target="_blank" rel="noopener noreferrer"
-                className="flex items-center gap-2 text-xs text-blue-400 hover:underline">
-                <span className="font-mono text-muted-foreground">#{pr.prNumber}</span>
+                className="inline-flex min-w-0 items-center gap-1.5 rounded-full border border-border px-2.5 py-0.5 font-mono text-[11px] text-foreground transition-colors hover:border-primary hover:text-primary">
+                <span className="shrink-0">#{pr.prNumber}</span>
                 <span className="truncate">{pr.repo}</span>
               </a>
             ))}
@@ -694,11 +695,13 @@ const ClawBoardCard = memo(function ClawBoardCard({
             instead of scrolling.) */}
         <div
           className={cn(
-            "flex flex-col rounded-lg border border-border bg-card",
+            // overflow-hidden so the state strip and composer sit flush inside
+            // the card's rounded edge, as in the board mockup.
+            "flex flex-col overflow-hidden rounded-lg border border-border bg-card",
             isMobile
               ? cn("relative", isFlipped && "hidden")
               : "absolute inset-0 [backface-visibility:hidden]",
-            hasUnread && "border-blue-500/30 bg-blue-950/10",
+            hasUnread && "border-data/50",
             isPending && "opacity-75"
           )}
           onDragEnter={isPending ? undefined : onDragEnter}
@@ -707,27 +710,42 @@ const ClawBoardCard = memo(function ClawBoardCard({
           onDrop={isPending ? undefined : onDrop}
         >
           {dragHover && !isPending && (
-            <div className="pointer-events-none absolute inset-0 z-30 flex items-center justify-center rounded-lg border-2 border-dashed border-ring bg-background/80">
+            <div className="pointer-events-none absolute inset-0 z-30 flex items-center justify-center rounded-lg border-2 border-dashed border-ring bg-[var(--ds-scrim)]">
               <div className="text-xs font-medium text-foreground">Drop files</div>
             </div>
           )}
           {isStreaming && (
-            <div className="absolute left-0 top-0 bottom-0 w-1 bg-green-500 rounded-l-lg z-10" />
+            <div className="absolute left-0 top-0 bottom-0 w-1 bg-status-ok z-10" />
           )}
           {claw.status === "provisioning" && (
-            <div className="absolute left-0 top-0 bottom-0 w-1 bg-blue-400 rounded-l-lg z-10 animate-pulse" />
+            <div className="absolute left-0 top-0 bottom-0 w-1 bg-data z-10 animate-pulse" />
           )}
           {claw.status === "error" && (
-            <div className="absolute left-0 top-0 bottom-0 w-1 bg-red-500 rounded-l-lg z-10" />
+            <div className="absolute left-0 top-0 bottom-0 w-1 bg-destructive z-10" />
           )}
-          
+
+          {/* State strip — the card's loudest signal, so it leads the card
+              exactly as in the board mockup, above the identity block. */}
+          {cardNow && (
+            <NowStrip
+              clawId={claw.id}
+              step={runningStep}
+              isStreaming={isStreaming}
+              lastMessageAt={lastMessageAt}
+              variant="card"
+              state={cardNow.state}
+              statusText={cardNow.text}
+              statusAt={cardNow.at}
+            />
+          )}
+
           {/* Context usage bar */}
           <div className="px-3 pt-2">
             <ContextProgressBar usage={claw.contextUsage} size="sm" />
           </div>
-          
+
           {/* Header - clickable to open full view */}
-          <div className="p-3 border-b border-border">
+          <div className="p-3 border-b-2 border-border">
             <div className="flex items-center gap-2 mb-1">
               {/* Drag handle — desktop board only; mobile has no reordering */}
               {dragHandleProps && (
@@ -752,7 +770,7 @@ const ClawBoardCard = memo(function ClawBoardCard({
                   {!isPending && (
                     <button
                       onClick={() => onClick(claw.id)}
-                      className="p-1 rounded hover:bg-accent transition-colors"
+                      className="p-1 rounded-md text-muted-foreground hover:bg-foreground/8 hover:text-foreground transition-colors"
                       title="Open conversation"
                     >
                       <MessageSquare className="size-3.5 text-muted-foreground" />
@@ -771,7 +789,7 @@ const ClawBoardCard = memo(function ClawBoardCard({
                 </button>
               )}
               {hasUnread && (
-                <span className="px-1.5 py-0.5 text-[10px] font-medium bg-blue-500 text-white rounded-full">
+                <span className="inline-flex min-w-5 items-center justify-center rounded-full bg-primary px-1.5 py-0.5 text-[10px] font-semibold text-primary-foreground">
                   {claw.unreadCount > 99 ? "99+" : claw.unreadCount}
                 </span>
               )}
@@ -784,7 +802,7 @@ const ClawBoardCard = memo(function ClawBoardCard({
               />
               <button
                 onClick={handleFlip}
-                className="p-1 rounded hover:bg-accent transition-colors"
+                className="p-1 rounded-md text-muted-foreground hover:bg-foreground/8 hover:text-foreground transition-colors"
                 title="View bot info"
               >
                 <Info className="size-3.5 text-muted-foreground" />
@@ -796,9 +814,9 @@ const ClawBoardCard = memo(function ClawBoardCard({
               </span>
               <span className="text-xs font-mono">
                 {claw.status === "provisioning" ? (
-                  <span className="text-blue-400">starting...</span>
+                  <span className="text-data">starting...</span>
                 ) : claw.status === "error" ? (
-                  <span className="text-red-500">error</span>
+                  <span className="text-destructive">error</span>
                 ) : (
                   <span className="text-muted-foreground">{formatUptime(claw.uptime)}</span>
                 )}
@@ -810,33 +828,19 @@ const ClawBoardCard = memo(function ClawBoardCard({
                 {claw.tags.slice(0, 3).map((tag) => (
                   <span
                     key={tag}
-                    className="inline-flex items-center px-1.5 py-0.5 text-[10px] font-medium bg-secondary text-muted-foreground rounded"
+                    className="inline-flex items-center rounded-full bg-tint-neutral px-2 py-0.5 text-[10px] text-tint-neutral-foreground"
                   >
                     {tag}
                   </span>
                 ))}
                 {claw.tags.length > 3 && (
-                  <span className="text-[10px] text-muted-foreground">
+                  <span className="font-mono text-[10px] text-muted-foreground">
                     +{claw.tags.length - 3}
                   </span>
                 )}
               </div>
             )}
           </div>
-
-          {/* Status line — what this agent is doing, with no clicks */}
-          {cardNow && (
-            <NowStrip
-              clawId={claw.id}
-              step={runningStep}
-              isStreaming={isStreaming}
-              lastMessageAt={lastMessageAt}
-              variant="card"
-              state={cardNow.state}
-              statusText={cardNow.text}
-              statusAt={cardNow.at}
-            />
-          )}
 
           {/* Messages area */}
           <div className="flex-1 relative min-h-0 overflow-hidden">
@@ -886,20 +890,20 @@ const ClawBoardCard = memo(function ClawBoardCard({
                 if (message.role === "system") {
                   return (
                     <div key={message.id} className="flex items-center gap-2 py-1">
-                      <div className="flex-1 h-px bg-border/50" />
-                      <span className="text-[9px] text-muted-foreground/50 uppercase tracking-wider">
+                      <div className="flex-1 h-px bg-border" />
+                      <span className="kicker text-muted-foreground">
                         {message.content === "__TOOL_GAP__" ? "tool" : message.content}
                       </span>
-                      <div className="flex-1 h-px bg-border/50" />
+                      <div className="flex-1 h-px bg-border" />
                     </div>
                   )
                 }
                 if (message.role === "hub") {
                   return (
                     <div key={message.id} className="flex items-start gap-1.5 py-0.5">
-                      <Settings2 className="size-2.5 shrink-0 text-muted-foreground/40 mt-0.5" />
+                      <Settings2 className="size-2.5 shrink-0 text-muted-foreground mt-0.5" />
                       <span className={cn(
-                        "text-[10px] italic text-muted-foreground/60 leading-tight",
+                        "font-mono text-[10px] text-muted-foreground leading-tight",
                         message.format === "pre" && "whitespace-pre-wrap"
                       )}>{message.content}</span>
                     </div>
@@ -916,14 +920,14 @@ const ClawBoardCard = memo(function ClawBoardCard({
                   <div
                     key={message.id}
                     className={cn(
-                      "text-xs p-2 rounded",
+                      "text-xs p-2 rounded-md",
                       message.role === "user"
-                        ? "bg-blue-600/20 border border-blue-500/20 ml-4"
-                        : "bg-secondary mr-4"
+                        ? "bg-foreground/8 ml-4"
+                        : "border border-border bg-foreground/4 mr-4"
                     )}
                   >
                     <div className="flex items-center gap-1 mb-0.5">
-                      <span className="font-medium text-foreground/70">
+                      <span className={cn(message.role === "user" ? "font-medium text-foreground" : "font-mono text-foreground")}>
                         {message.role === "user" ? "You" : claw.name}
                       </span>
                       <span className="text-muted-foreground" suppressHydrationWarning>
@@ -964,7 +968,7 @@ const ClawBoardCard = memo(function ClawBoardCard({
                 event.stopPropagation()
                 scrollCardToLatest()
               }}
-              className="absolute bottom-2 left-1/2 -translate-x-1/2 z-10 flex items-center gap-1 px-2.5 py-1 rounded-full bg-background/95 backdrop-blur-sm border border-border text-[10px] font-medium text-muted-foreground hover:text-foreground hover:bg-accent transition-colors shadow-md"
+              className="absolute bottom-2 left-1/2 -translate-x-1/2 z-10 flex items-center gap-1 px-2.5 py-1 rounded-full bg-card/95 backdrop-blur-sm border border-border font-mono text-[10px] text-muted-foreground hover:text-foreground hover:bg-foreground/8 transition-colors shadow-ds-md"
               aria-label="Follow latest claw activity"
             >
               <ChevronDown className="size-3" />
@@ -979,7 +983,7 @@ const ClawBoardCard = memo(function ClawBoardCard({
               {cardStats.toolCalls} step{cardStats.toolCalls === 1 ? "" : "s"}
             </span>
             {cardStats.failures > 0 && (
-              <span className="text-red-400">
+              <span className="text-destructive">
                 {cardStats.failures} failed
               </span>
             )}
@@ -987,7 +991,7 @@ const ClawBoardCard = memo(function ClawBoardCard({
           </div>
 
           {/* Input area */}
-          <form onSubmit={isPending ? (e) => e.preventDefault() : handleSubmit} className="p-2 border-t border-border flex flex-col gap-1.5">
+          <form onSubmit={isPending ? (e) => e.preventDefault() : handleSubmit} className="p-2 border-t-2 border-border flex flex-col gap-1.5">
             {attachments.length > 0 && (
               <div className="flex flex-wrap gap-1">
                 {attachments.map((a) => (
@@ -1053,7 +1057,7 @@ const ClawBoardCard = memo(function ClawBoardCard({
                 }}
                 onPaste={onPaste}
                 placeholder={isPending ? (claw.status === "error" ? "Provisioning failed" : claw.status === "offline" ? "Agent offline" : "Starting up...") : "Send message..."}
-                className="flex-1 resize-none overflow-hidden rounded-md border border-input bg-background px-2 py-1.5 text-xs ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 min-h-[32px]"
+                className="flex-1 resize-none overflow-hidden rounded-md border border-input bg-background px-2 py-1.5 text-xs placeholder:text-muted-foreground focus-visible:outline-none focus-visible:border-ring min-h-[32px]"
                 disabled={isPending}
                 ref={cardTextareaRef}
                 onClick={(e) => e.stopPropagation()}
@@ -1074,14 +1078,14 @@ const ClawBoardCard = memo(function ClawBoardCard({
         {/* Back - Bot info */}
         <div
           className={cn(
-            "flex flex-col rounded-lg border border-border bg-card",
+            "flex flex-col overflow-hidden rounded-lg border border-border bg-card",
             isMobile
               ? cn("relative", !isFlipped && "hidden")
               : "absolute inset-0 [backface-visibility:hidden] [transform:rotateY(180deg)]"
           )}
         >
           {/* Header */}
-          <div className="p-3 border-b border-border">
+          <div className="p-3 border-b-2 border-border">
             <div className="flex items-center gap-2">
               <StatusDot status={claw.status} isStreaming={claw.isStreaming} />
               <ClawTitle
@@ -1094,8 +1098,8 @@ const ClawBoardCard = memo(function ClawBoardCard({
                 <button
                   onClick={(e) => { e.stopPropagation(); setShowTerminal((v) => !v) }}
                   className={cn(
-                    "p-1 rounded hover:bg-accent transition-colors",
-                    showTerminal && "bg-accent text-foreground"
+                    "p-1 rounded-md text-muted-foreground hover:bg-foreground/8 hover:text-foreground transition-colors",
+                    showTerminal && "bg-foreground/10 text-foreground"
                   )}
                   title="Toggle terminal"
                 >
@@ -1104,7 +1108,7 @@ const ClawBoardCard = memo(function ClawBoardCard({
               )}
               <button
                 onClick={handleFlip}
-                className="p-1 rounded hover:bg-accent transition-colors"
+                className="p-1 rounded-md text-muted-foreground hover:bg-foreground/8 hover:text-foreground transition-colors"
                 title="View chat"
               >
                 <MessageSquare className="size-3.5 text-muted-foreground" />
@@ -1116,7 +1120,7 @@ const ClawBoardCard = memo(function ClawBoardCard({
           <ClawCardBack claw={claw} />
 
           {/* Footer */}
-          <div className="p-3 border-t border-border space-y-2">
+          <div className="p-3 border-t-2 border-border space-y-2">
             <Button 
               variant="outline" 
               size="sm" 
@@ -1148,7 +1152,7 @@ const ClawBoardCard = memo(function ClawBoardCard({
     {claw.ssh_host && (
       <Dialog open={showTerminal} onOpenChange={setShowTerminal}>
         <DialogContent className="!max-w-none w-[95vw] h-[90vh] flex flex-col p-0 gap-0">
-          <DialogHeader className="px-4 py-3 border-b border-border shrink-0">
+          <DialogHeader className="px-4 py-3 border-b-2 border-border shrink-0">
             <DialogTitle className="font-mono text-sm">{claw.name} — terminal</DialogTitle>
           </DialogHeader>
           <div className="flex-1 min-h-0">
@@ -1225,21 +1229,20 @@ const MessageBubble = memo(function MessageBubble({
     if (message.content === "__TOOL_GAP__") {
       return (
         <div className="flex items-center gap-2 py-2">
-          <div className="flex-1 h-px bg-border/50" />
-          <div className="flex items-center gap-1.5 text-muted-foreground/50">
+          <div className="flex-1 h-px bg-border" />
+          <div className="flex items-center gap-1.5 text-muted-foreground">
             <Wrench className="size-3" />
-            <span className="text-[10px] uppercase tracking-wider">tool call</span>
+            <span className="kicker">tool call</span>
           </div>
-          <div className="flex-1 h-px bg-border/50" />
+          <div className="flex-1 h-px bg-border" />
         </div>
       )
     }
+    /* System rule from the mockup: an uppercase kicker held between hairlines. */
     return (
       <div className="flex items-center gap-3 py-4">
         <div className="flex-1 h-px bg-border" />
-        <span className="text-xs text-muted-foreground uppercase tracking-wider font-medium">
-          {message.content}
-        </span>
+        <span className="kicker text-muted-foreground">{message.content}</span>
         <div className="flex-1 h-px bg-border" />
       </div>
     )
@@ -1256,7 +1259,7 @@ const MessageBubble = memo(function MessageBubble({
   if (message.content === "__THINKING__") {
     return (
       <div className="flex justify-start">
-        <div className="bg-secondary rounded-lg px-4 py-3">
+        <div className="rounded-lg border border-border bg-card px-4 py-3">
           <div className="flex items-center gap-1.5">
             <span className="size-1.5 rounded-full bg-muted-foreground/60 animate-bounce [animation-delay:0ms]" />
             <span className="size-1.5 rounded-full bg-muted-foreground/60 animate-bounce [animation-delay:150ms]" />
@@ -1274,11 +1277,11 @@ const MessageBubble = memo(function MessageBubble({
     return (
       <div className="flex items-start gap-2 py-1">
         <div className={cn(
-          "flex items-start gap-1.5 text-muted-foreground/60 text-xs italic bg-muted/40 border border-border/40 rounded px-3 py-1.5 max-w-[85%]",
+          "flex items-start gap-1.5 rounded-md border border-border bg-foreground/4 px-3 py-1.5 font-mono text-xs text-muted-foreground max-w-[85%]",
           message.format === "pre" && "whitespace-pre-wrap"
         )}>
-          <Settings2 className="size-3 shrink-0 text-muted-foreground/50 mt-0.5" />
-          <span className="text-muted-foreground/80">{message.content}</span>
+          <Settings2 className="size-3 shrink-0 text-muted-foreground mt-0.5" />
+          <span>{message.content}</span>
         </div>
       </div>
     )
@@ -1292,17 +1295,19 @@ const MessageBubble = memo(function MessageBubble({
     <div className={cn("flex w-full", isUser ? "justify-end" : "justify-start")}>
       <div
         className={cn(
+          // User: a right-aligned ink-wash bubble, no border. Agent: the
+          // mockup's surface bubble on a divider hairline.
           "w-fit max-w-[88%] md:w-[70%] md:max-w-none min-w-0 rounded-lg px-4 py-3",
           isUser
-            ? "bg-blue-600/20 border border-blue-500/20"
-            : (clawColor && COLOR_CLASSES[clawColor]?.bubble) || "bg-secondary"
+            ? "bg-foreground/10"
+            : cn("border border-border", (clawColor && COLOR_CLASSES[clawColor]?.bubble) || "bg-card")
         )}
       >
         <div className="flex items-center gap-2 mb-1">
           <span
             className={cn(
-              "text-xs font-medium",
-              isUser ? "text-muted-foreground" : "text-foreground"
+              "text-xs",
+              isUser ? "font-medium text-muted-foreground" : "font-mono text-foreground"
             )}
           >
             {isUser ? "You" : clawName}
@@ -1495,12 +1500,14 @@ function ClawChatView({
       onDrop={onDrop}
     >
       {dragHover && (
-        <div className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center bg-background/70 border-2 border-dashed border-ring rounded-sm">
+        <div className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center border-2 border-dashed border-ring bg-[var(--ds-scrim)]">
           <div className="text-sm text-foreground font-medium">Drop files to attach</div>
         </div>
       )}
-      <header className="border-b border-border">
-        <div className="px-4 md:px-6 pt-2">
+      <header className="border-b-2 border-border">
+        {/* Mockup topbar meter: a kicker-labelled pill track, status-ok fill. */}
+        <div className="flex items-center gap-2 px-4 md:px-6 pt-2">
+          <span className="kicker shrink-0 text-muted-foreground">ctx</span>
           <ContextProgressBar usage={claw.contextUsage} size="lg" />
         </div>
         {isMobile ? (
@@ -1636,7 +1643,7 @@ function ClawChatView({
         {showScrollBtn && (
           <button
             onClick={scrollToBottom}
-            className="absolute bottom-4 left-1/2 -translate-x-1/2 z-10 flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-secondary border border-border text-xs text-muted-foreground hover:text-foreground hover:bg-accent transition-colors shadow-md"
+            className="absolute bottom-4 left-1/2 -translate-x-1/2 z-10 flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-card border border-border text-xs text-muted-foreground hover:text-foreground hover:bg-foreground/8 transition-colors shadow-ds-md"
           >
             <ChevronDown className="size-3.5" />
             <span>Scroll to bottom</span>
@@ -1645,9 +1652,9 @@ function ClawChatView({
       </div>
 
       {/* Composer — padded above the home indicator on notched phones */}
-      <div className="p-4 border-t border-border pb-[calc(1rem+env(safe-area-inset-bottom))] md:pb-4">
+      <div className="p-4 border-t-2 border-border pb-[calc(1rem+env(safe-area-inset-bottom))] md:pb-4">
         {cmdToast && (
-          <div className="mb-2 max-w-3xl mx-auto text-xs text-amber-400 bg-amber-500/10 border border-amber-500/20 rounded-md px-3 py-2">
+          <div className="mb-2 max-w-3xl mx-auto rounded-md border border-status-warn/40 bg-status-warn/10 px-3 py-2 text-xs text-status-warn">
             {cmdToast}
           </div>
         )}
@@ -1720,7 +1727,7 @@ function ClawChatView({
               ref={panelTextareaRef}
               placeholder="Message agent, /stop, or attach files"
               rows={1}
-              className="flex-1 resize-none overflow-hidden rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 min-h-[40px]"
+              className="flex-1 resize-none overflow-hidden rounded-md border border-input bg-background px-3 py-2 text-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:border-ring min-h-[40px]"
             />
             <Button type="submit" size="icon" disabled={!canSubmit} className="shrink-0 max-md:size-11">
               <Send className="size-4" />
@@ -1736,7 +1743,7 @@ function ClawChatView({
       {claw.ssh_host && (
         <Dialog open={terminalOpen} onOpenChange={setTerminalOpen}>
           <DialogContent className="!max-w-none w-[95vw] h-[90vh] flex flex-col p-0 gap-0">
-            <DialogHeader className="px-4 py-3 border-b border-border shrink-0">
+            <DialogHeader className="px-4 py-3 border-b-2 border-border shrink-0">
               <DialogTitle className="font-mono text-sm">{claw.name} — terminal</DialogTitle>
             </DialogHeader>
             <div className="flex-1 min-h-0">
@@ -1825,13 +1832,13 @@ export function ConversationView({
     return (
       <main className="flex-1 flex flex-col bg-background min-w-0 overflow-hidden">
         <div className="flex flex-col items-center justify-center h-full gap-4 text-center px-8">
-          <div className="rounded-full bg-red-500/10 p-4">
-            <AlertCircle className="size-8 text-red-500" />
+          <div className="rounded-full bg-destructive/10 p-4">
+            <AlertCircle className="size-8 text-destructive" />
           </div>
           <div className="space-y-2">
             <p className="text-base font-medium text-foreground">Cannot reach the hub</p>
-            <p className="text-sm text-muted-foreground max-w-sm">Make sure <code className="bg-muted px-1 rounded text-xs">ELASTICCLAW_HUB_URL</code> and <code className="bg-muted px-1 rounded text-xs">ELASTICCLAW_HUB_TOKEN</code> are set correctly.</p>
-            <a href="/api/debug" target="_blank" rel="noopener" className="text-xs text-blue-400 hover:underline">
+            <p className="text-sm text-muted-foreground max-w-sm">Make sure <code className="rounded-sm bg-tint-neutral px-1 font-mono text-xs text-tint-neutral-foreground">ELASTICCLAW_HUB_URL</code> and <code className="rounded-sm bg-tint-neutral px-1 font-mono text-xs text-tint-neutral-foreground">ELASTICCLAW_HUB_TOKEN</code> are set correctly.</p>
+            <a href="/api/debug" target="_blank" rel="noopener" className="text-xs text-primary hover:underline">
               View debug info →
             </a>
           </div>
@@ -1847,7 +1854,7 @@ export function ConversationView({
     return (
       <main className="flex-1 flex flex-col bg-background min-w-0 overflow-hidden">
         {/* Header */}
-        <header className="flex items-center justify-between gap-2 px-3 md:px-6 py-2 md:py-4 border-b border-border shrink-0">
+        <header className="flex items-center justify-between gap-2 px-3 md:px-6 py-2 md:py-4 border-b-2 border-border shrink-0">
           <div className="flex min-w-0 items-center gap-1 md:gap-3">
             {isMobile && onOpenMenu ? (
               <Button variant="ghost" size="icon" className="size-11 shrink-0" onClick={onOpenMenu} title="Open agent list">
@@ -1864,15 +1871,15 @@ export function ConversationView({
             <DependencyDowntimeBanner dependencies={downtimeDependencies} />
             <div className="hidden md:flex items-center gap-4">
               <div className="flex items-center gap-1.5">
-                <span className="size-2 rounded-full bg-green-500" />
+                <span className="size-2 rounded-full bg-status-ok" />
                 <span>Connected</span>
               </div>
               <div className="flex items-center gap-1.5">
-                <span className="size-2 rounded-full bg-amber-500" />
+                <span className="size-2 rounded-full bg-status-warn" />
                 <span>Idle</span>
               </div>
               <div className="flex items-center gap-1.5">
-                <span className="size-2 rounded-full bg-red-500" />
+                <span className="size-2 rounded-full bg-destructive" />
                 <span>Offline</span>
               </div>
             </div>
@@ -1911,7 +1918,7 @@ export function ConversationView({
                   Start your first agent from the CLI to get started.
                 </p>
               </div>
-              <div className="bg-muted rounded-lg px-4 py-3 font-mono text-sm text-foreground/80 max-w-md w-full text-left">
+              <div className="rounded-lg border border-border bg-card px-4 py-3 font-mono text-sm text-foreground/80 max-w-md w-full text-left">
                 <span className="text-muted-foreground select-none">$ </span>
                 elasticclaw create --name my-agent
               </div>
@@ -1937,7 +1944,7 @@ export function ConversationView({
           <Button
             variant="ghost"
             size="icon"
-            className="absolute left-2 top-1/2 -translate-y-1/2 z-10 bg-background/80 backdrop-blur-sm border border-border shadow-sm"
+            className="absolute left-2 top-1/2 -translate-y-1/2 z-10 bg-card/90 backdrop-blur-sm border border-border shadow-ds-sm"
             onClick={() => scrollBoard("left")}
           >
             <ChevronLeft className="size-4" />
@@ -1992,7 +1999,7 @@ export function ConversationView({
           <Button
             variant="ghost"
             size="icon"
-            className="absolute right-2 top-1/2 -translate-y-1/2 z-10 bg-background/80 backdrop-blur-sm border border-border shadow-sm"
+            className="absolute right-2 top-1/2 -translate-y-1/2 z-10 bg-card/90 backdrop-blur-sm border border-border shadow-ds-sm"
             onClick={() => scrollBoard("right")}
           >
             <ChevronRight className="size-4" />

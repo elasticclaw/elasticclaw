@@ -110,7 +110,7 @@ export function ActivitySummaryBlock({
           <button
             type="button"
             onClick={(e) => handleToggle(e.currentTarget)}
-            className="w-full rounded border border-border/50 bg-muted/20 px-1.5 py-0.5 text-left text-[10px] text-muted-foreground hover:bg-muted/35"
+            className="w-full rounded-sm border border-border bg-foreground/4 px-1.5 py-0.5 text-left font-mono text-[10px] text-muted-foreground hover:bg-foreground/8"
           >
             {expanded ? "Hide" : "Show"} {summaryLabel(earlierCount)}
           </button>
@@ -137,15 +137,15 @@ export function ActivitySummaryBlock({
   return (
     <div className="space-y-1">
       <div className="flex items-center gap-2 py-1">
-        <div className="h-px flex-1 bg-border/50" />
+        <div className="h-px flex-1 bg-border" />
         <button
           type="button"
           onClick={(e) => handleToggle(e.currentTarget)}
-          className="rounded border border-border/60 bg-muted/25 px-2.5 py-1 text-xs text-muted-foreground hover:bg-muted/40 hover:text-foreground"
+          className="rounded-md border border-border bg-foreground/4 px-2.5 py-1 font-mono text-xs text-muted-foreground hover:bg-foreground/8 hover:text-foreground"
         >
           {expanded ? "Hide" : "Show"} {label}
         </button>
-        <div className="h-px flex-1 bg-border/50" />
+        <div className="h-px flex-1 bg-border" />
       </div>
       {expanded && loading && (
         <div className="text-center text-xs text-muted-foreground">Loading tool calls...</div>

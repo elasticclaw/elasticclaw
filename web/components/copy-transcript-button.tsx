@@ -71,12 +71,12 @@ export function CopyTranscriptButton({
         disabled={disabled}
         title={title}
         className={cn(
-          "p-1 rounded hover:bg-accent transition-colors disabled:opacity-40 disabled:pointer-events-none",
+          "p-1 rounded-md hover:bg-foreground/8 transition-colors disabled:opacity-40 disabled:pointer-events-none",
           className
         )}
       >
         {copied ? (
-          <Check className="size-3.5 text-green-500" />
+          <Check className="size-3.5 text-status-ok" />
         ) : (
           <ClipboardCopy className="size-3.5 text-muted-foreground" />
         )}
@@ -95,7 +95,7 @@ export function CopyTranscriptButton({
       className={className}
     >
       {copied ? (
-        <Check className="size-3.5 mr-1.5 text-green-500" />
+        <Check className="size-3.5 mr-1.5 text-status-ok" />
       ) : (
         <ClipboardCopy className="size-3.5 mr-1.5" />
       )}

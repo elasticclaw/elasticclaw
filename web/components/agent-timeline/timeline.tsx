@@ -35,7 +35,7 @@ function UnloadedActivityNotice({
         type="button"
         onClick={onLoad}
         disabled={loading}
-        className="rounded border border-border bg-muted/30 px-2.5 py-0.5 text-xs text-foreground hover:bg-muted/50 disabled:opacity-60"
+        className="rounded-md border border-border bg-foreground/4 px-2.5 py-0.5 text-xs text-foreground hover:bg-foreground/8 disabled:opacity-60"
       >
         {loading ? "Loading..." : "Load them"}
       </button>
