@@ -139,11 +139,38 @@ export const CLAW_LANE_META: Record<ClawLane, { title: string; note: string }> =
 }
 
 /**
- * Lane membership, derived from the same signals the board card already shows
- * in its state strip — no extra data is fetched. Errors (which include a
- * failed provisioning) and a trailing unanswered question mean the agent is
- * stuck on the user; a live stream or a running tool step means it is working;
- * everything else (finished turn, offline) is idle.
+ * Does the transcript end on a question the user never answered? Only a
+ * trailing claw message counts: any tool activity after it — expanded rows or
+ * a still-collapsed summary — means the agent kept going on its own.
+ */
+export function hasUnansweredQuestion(messages: Message[]): boolean {
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const m = messages[i]
+    if (m.role === "system") continue
+    // Empty summary remainders are invisible bookkeeping — look past them.
+    if (
+      m.role === "activity_summary" &&
+      (!m.activitySummary || m.activitySummary.count <= 0)
+    ) {
+      continue
+    }
+    if (m.role === "claw") return extractQuestion(m.content) !== null
+    return false
+  }
+  return false
+}
+
+/**
+ * Lane membership. Deliberately built on signals that do not depend on how
+ * much of the transcript a given page happens to have loaded: the claw status
+ * the hub reports, plus a trailing unanswered question.
+ *
+ * The status is the authority on "live": the hub keeps a claw `connected`
+ * only while its agent session is attached and parks a finished one as
+ * `idle`. Reading liveness off the transcript instead used to split the same
+ * claw across lanes — the board expands trailing activity summaries into
+ * steps, other pages leave them collapsed, so a running step was visible on
+ * one page and invisible on the next.
  */
 export function clawLane(claw: Claw, messages: Message[], isStreaming: boolean): ClawLane {
   if (claw.status === "error") return "attention"
@@ -151,19 +178,11 @@ export function clawLane(claw: Claw, messages: Message[], isStreaming: boolean):
   if (claw.status === "provisioning") return "working"
   if (claw.status === "offline") return "idle"
   if (isStreaming) return "working"
-
-  const visible = windowMessagesByDurableCount(messages, BOARD_CARD_DURABLE_MESSAGE_WINDOW)
-  const now = boardCardNow(claw, visible, trailingLatestStep(claw, visible), isStreaming)
-  if (!now) return "working"
-  switch (now.state) {
-    case "error":
-    case "waiting":
-      return "attention"
-    case "working":
-      return "working"
-    default:
-      return "idle"
-  }
+  // Blocked on the user outranks a live session. Costs nothing when the
+  // transcript is absent — an empty tail simply never matches.
+  if (hasUnansweredQuestion(windowMessagesByDurableCount(messages, BOARD_CARD_DURABLE_MESSAGE_WINDOW)))
+    return "attention"
+  return claw.status === "connected" ? "working" : "idle"
 }
 
 /** Lane per claw id, ready to hand to the board and the sidebar. */

@@ -487,7 +487,11 @@ export function Sidebar({
       >
         {/* Pinned section lives inside the scroll area — a long pinned list
             must scroll with the rest instead of squeezing "All Agents" out. */}
-        <ScrollArea className="flex-1 min-h-0">
+        {/* Radix sizes the viewport's content div as a table, so one long
+            activity line stretches every row past the sidebar and pushes the
+            right-aligned group counts out of view. Pin it to the viewport
+            width and the truncation inside the rows does its job. */}
+        <ScrollArea className="flex-1 min-h-0 [&>[data-slot=scroll-area-viewport]>div]:!block [&>[data-slot=scroll-area-viewport]>div]:!w-full">
           {pinnedClaws.length > 0 && !searchQuery && (
             <div className="border-b-2 border-border">
               <div className="flex items-center gap-1.5 px-4 py-2 text-muted-foreground">

@@ -18,7 +18,7 @@ import {
   CLAW_LANE_ORDER,
   allowsTrailingRunning,
   boardCardNow,
-  clawLane,
+  trailingLatestStep,
   type ClawLane,
 } from "@/lib/claw-lanes"
 import { AgentTimeline } from "@/components/agent-timeline/timeline"
@@ -477,13 +477,10 @@ const ClawBoardCard = memo(function ClawBoardCard({
   const allowTrailingRunning = allowsTrailingRunning(claw)
   // Latest step of the trailing activity run — drives the card's status line
   // (paired start/terminal, live elapsed while running).
-  const latestStep = useMemo(() => {
-    const steps = demoteStaleRunning(
-      pairActivitySteps(trailingActivityRun(visibleMessages)),
-      allowTrailingRunning
-    )
-    return steps.length > 0 ? steps[steps.length - 1] : null
-  }, [visibleMessages, allowTrailingRunning])
+  const latestStep = useMemo(
+    () => trailingLatestStep(claw, visibleMessages),
+    [claw, visibleMessages]
+  )
   const activityNowMs = useNowTick(Boolean(latestStep))
   const isStreaming = claw.isStreaming || Boolean(streamingBuffer?.hadChunks && streamingBuffer.text)
   const cardNow = useMemo(
