@@ -42,12 +42,15 @@ export const COLOR_CLASSES: Record<string, {
   lime:    { border: "border-[var(--ds-accent-2-400)]",  bubble: "bg-[var(--ds-accent-2-400)]/10",  dot: "bg-[var(--ds-accent-2-400)]",  badge: "bg-[var(--ds-accent-2-400)]/20 text-[var(--ds-accent-2-300)]" },
   green:   { border: "border-status-ok",                 bubble: "bg-status-ok/10",                 dot: "bg-status-ok",                 badge: "bg-status-ok/20 text-status-ok" },
   emerald: { border: "border-[var(--ds-accent-2-300)]",  bubble: "bg-[var(--ds-accent-2-300)]/10",  dot: "bg-[var(--ds-accent-2-300)]",  badge: "bg-[var(--ds-accent-2-300)]/20 text-[var(--ds-accent-2-200)]" },
-  teal:    { border: "border-heatmap-1",                 bubble: "bg-heatmap-1/10",                 dot: "bg-heatmap-1",                 badge: "bg-heatmap-1/20 text-heatmap-1" },
-  cyan:    { border: "border-heatmap-2",                 bubble: "bg-heatmap-2/10",                 dot: "bg-heatmap-2",                 badge: "bg-heatmap-2/20 text-heatmap-2" },
-  sky:     { border: "border-heatmap-4",                 bubble: "bg-heatmap-4/10",                 dot: "bg-heatmap-4",                 badge: "bg-heatmap-4/20 text-heatmap-4" },
+  // The heatmap ramp is reversed in dark mode, so its low steps sit at the
+  // card surface's luminance — identity colors must stay on the bright half
+  // (the shell ships dark-only).
+  teal:    { border: "border-data-light",                bubble: "bg-data-light/10",                dot: "bg-data-light",                badge: "bg-data-light/20 text-data-light" },
+  cyan:    { border: "border-heatmap-4",                 bubble: "bg-heatmap-4/10",                 dot: "bg-heatmap-4",                 badge: "bg-heatmap-4/20 text-heatmap-5" },
+  sky:     { border: "border-heatmap-5",                 bubble: "bg-heatmap-5/10",                 dot: "bg-heatmap-5",                 badge: "bg-heatmap-5/20 text-heatmap-5" },
   blue:    { border: "border-data",                      bubble: "bg-data/10",                      dot: "bg-data",                      badge: "bg-data/20 text-data-light" },
   indigo:  { border: "border-data-dark",                 bubble: "bg-data-dark/10",                 dot: "bg-data-dark",                 badge: "bg-data-dark/20 text-data-light" },
-  violet:  { border: "border-heatmap-5",                 bubble: "bg-heatmap-5/10",                 dot: "bg-heatmap-5",                 badge: "bg-heatmap-5/20 text-heatmap-5" },
+  violet:  { border: "border-[var(--ds-accent-2-200)]",  bubble: "bg-[var(--ds-accent-2-200)]/10",  dot: "bg-[var(--ds-accent-2-200)]",  badge: "bg-[var(--ds-accent-2-200)]/20 text-[var(--ds-accent-2-200)]" },
   purple:  { border: "border-[var(--ds-accent-2-600)]",  bubble: "bg-[var(--ds-accent-2-600)]/10",  dot: "bg-[var(--ds-accent-2-600)]",  badge: "bg-[var(--ds-accent-2-600)]/20 text-[var(--ds-accent-2-300)]" },
   pink:    { border: "border-[var(--ds-accent-2-500)]",  bubble: "bg-[var(--ds-accent-2-500)]/10",  dot: "bg-[var(--ds-accent-2-500)]",  badge: "bg-[var(--ds-accent-2-500)]/20 text-[var(--ds-accent-2-200)]" },
   rose:    { border: "border-[var(--ds-accent-400)]",    bubble: "bg-[var(--ds-accent-400)]/10",    dot: "bg-[var(--ds-accent-400)]",    badge: "bg-[var(--ds-accent-400)]/20 text-[var(--ds-accent-200)]" },
