@@ -16,30 +16,41 @@ function autoColor(name: string): string {
   return CLAW_COLORS[h % CLAW_COLORS.length]
 }
 
-// Tailwind color classes for each named color
-// All must be in the safelist so Tailwind includes them
+/**
+ * Per-claw accent classes, keyed by the legacy color names the API stores.
+ *
+ * The Modernist system has no 16-hue palette: it has one accent, a secondary
+ * accent, a data hue, three status hues and a neutral ramp. The 16 keys are
+ * therefore spread across those families at different ramp steps, which keeps
+ * every claw visually distinguishable while never introducing a color the
+ * design system does not own. Keys and the { border, bubble, dot, badge }
+ * shape are unchanged, so consumers keep working.
+ *
+ * Every class below must stay a full literal string — Tailwind v4 only emits
+ * classes it can find verbatim in the source.
+ */
 export const COLOR_CLASSES: Record<string, {
   border: string
   bubble: string
   dot: string
   badge: string
 }> = {
-  slate:   { border: "border-slate-500",   bubble: "bg-slate-500/10",   dot: "bg-slate-400",   badge: "bg-slate-500/20 text-slate-300" },
-  red:     { border: "border-red-500",     bubble: "bg-red-500/10",     dot: "bg-red-400",     badge: "bg-red-500/20 text-red-300" },
-  orange:  { border: "border-orange-500",  bubble: "bg-orange-500/10",  dot: "bg-orange-400",  badge: "bg-orange-500/20 text-orange-300" },
-  amber:   { border: "border-amber-500",   bubble: "bg-amber-500/10",   dot: "bg-amber-400",   badge: "bg-amber-500/20 text-amber-300" },
-  lime:    { border: "border-lime-500",    bubble: "bg-lime-500/10",    dot: "bg-lime-400",    badge: "bg-lime-500/20 text-lime-300" },
-  green:   { border: "border-green-500",   bubble: "bg-green-500/10",   dot: "bg-green-400",   badge: "bg-green-500/20 text-green-300" },
-  emerald: { border: "border-emerald-500", bubble: "bg-emerald-500/10", dot: "bg-emerald-400", badge: "bg-emerald-500/20 text-emerald-300" },
-  teal:    { border: "border-teal-500",    bubble: "bg-teal-500/10",    dot: "bg-teal-400",    badge: "bg-teal-500/20 text-teal-300" },
-  cyan:    { border: "border-cyan-500",    bubble: "bg-cyan-500/10",    dot: "bg-cyan-400",    badge: "bg-cyan-500/20 text-cyan-300" },
-  sky:     { border: "border-sky-500",     bubble: "bg-sky-500/10",     dot: "bg-sky-400",     badge: "bg-sky-500/20 text-sky-300" },
-  blue:    { border: "border-blue-500",    bubble: "bg-blue-500/10",    dot: "bg-blue-400",    badge: "bg-blue-500/20 text-blue-300" },
-  indigo:  { border: "border-indigo-500",  bubble: "bg-indigo-500/10",  dot: "bg-indigo-400",  badge: "bg-indigo-500/20 text-indigo-300" },
-  violet:  { border: "border-violet-500",  bubble: "bg-violet-500/10",  dot: "bg-violet-400",  badge: "bg-violet-500/20 text-violet-300" },
-  purple:  { border: "border-purple-500",  bubble: "bg-purple-500/10",  dot: "bg-purple-400",  badge: "bg-purple-500/20 text-purple-300" },
-  pink:    { border: "border-pink-500",    bubble: "bg-pink-500/10",    dot: "bg-pink-400",    badge: "bg-pink-500/20 text-pink-300" },
-  rose:    { border: "border-rose-500",    bubble: "bg-rose-500/10",    dot: "bg-rose-400",    badge: "bg-rose-500/20 text-rose-300" },
+  slate:   { border: "border-[var(--ds-neutral-500)]",   bubble: "bg-[var(--ds-neutral-500)]/10",   dot: "bg-[var(--ds-neutral-500)]",   badge: "bg-[var(--ds-neutral-500)]/20 text-[var(--ds-neutral-300)]" },
+  red:     { border: "border-[var(--ds-accent-600)]",    bubble: "bg-[var(--ds-accent-600)]/10",    dot: "bg-[var(--ds-accent-600)]",    badge: "bg-[var(--ds-accent-600)]/20 text-[var(--ds-accent-300)]" },
+  orange:  { border: "border-[var(--ds-accent-500)]",    bubble: "bg-[var(--ds-accent-500)]/10",    dot: "bg-[var(--ds-accent-500)]",    badge: "bg-[var(--ds-accent-500)]/20 text-[var(--ds-accent-300)]" },
+  amber:   { border: "border-status-warn",               bubble: "bg-status-warn/10",               dot: "bg-status-warn",               badge: "bg-status-warn/20 text-status-warn" },
+  lime:    { border: "border-[var(--ds-accent-2-400)]",  bubble: "bg-[var(--ds-accent-2-400)]/10",  dot: "bg-[var(--ds-accent-2-400)]",  badge: "bg-[var(--ds-accent-2-400)]/20 text-[var(--ds-accent-2-300)]" },
+  green:   { border: "border-status-ok",                 bubble: "bg-status-ok/10",                 dot: "bg-status-ok",                 badge: "bg-status-ok/20 text-status-ok" },
+  emerald: { border: "border-[var(--ds-accent-2-300)]",  bubble: "bg-[var(--ds-accent-2-300)]/10",  dot: "bg-[var(--ds-accent-2-300)]",  badge: "bg-[var(--ds-accent-2-300)]/20 text-[var(--ds-accent-2-200)]" },
+  teal:    { border: "border-heatmap-1",                 bubble: "bg-heatmap-1/10",                 dot: "bg-heatmap-1",                 badge: "bg-heatmap-1/20 text-heatmap-1" },
+  cyan:    { border: "border-heatmap-2",                 bubble: "bg-heatmap-2/10",                 dot: "bg-heatmap-2",                 badge: "bg-heatmap-2/20 text-heatmap-2" },
+  sky:     { border: "border-heatmap-4",                 bubble: "bg-heatmap-4/10",                 dot: "bg-heatmap-4",                 badge: "bg-heatmap-4/20 text-heatmap-4" },
+  blue:    { border: "border-data",                      bubble: "bg-data/10",                      dot: "bg-data",                      badge: "bg-data/20 text-data-light" },
+  indigo:  { border: "border-data-dark",                 bubble: "bg-data-dark/10",                 dot: "bg-data-dark",                 badge: "bg-data-dark/20 text-data-light" },
+  violet:  { border: "border-heatmap-5",                 bubble: "bg-heatmap-5/10",                 dot: "bg-heatmap-5",                 badge: "bg-heatmap-5/20 text-heatmap-5" },
+  purple:  { border: "border-[var(--ds-accent-2-600)]",  bubble: "bg-[var(--ds-accent-2-600)]/10",  dot: "bg-[var(--ds-accent-2-600)]",  badge: "bg-[var(--ds-accent-2-600)]/20 text-[var(--ds-accent-2-300)]" },
+  pink:    { border: "border-[var(--ds-accent-2-500)]",  bubble: "bg-[var(--ds-accent-2-500)]/10",  dot: "bg-[var(--ds-accent-2-500)]",  badge: "bg-[var(--ds-accent-2-500)]/20 text-[var(--ds-accent-2-200)]" },
+  rose:    { border: "border-[var(--ds-accent-400)]",    bubble: "bg-[var(--ds-accent-400)]/10",    dot: "bg-[var(--ds-accent-400)]",    badge: "bg-[var(--ds-accent-400)]/20 text-[var(--ds-accent-200)]" },
 }
 
 /**

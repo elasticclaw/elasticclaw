@@ -24,20 +24,20 @@ interface ClawCardProps {
 
 function StatusIndicator({ status, isStreaming }: { status: ClawStatus; isStreaming: boolean }) {
   if (isStreaming) {
-    return <Loader2 className="size-3.5 text-green-500 animate-spin shrink-0" />
+    return <Loader2 className="size-3.5 text-status-ok animate-spin shrink-0" />
   }
   if (status === "provisioning") {
-    return <Loader2 className="size-3.5 text-blue-400 animate-spin shrink-0" />
+    return <Loader2 className="size-3.5 text-data animate-spin shrink-0" />
   }
   if (status === "error") {
-    return <AlertCircle className="size-3.5 text-red-500 shrink-0" />
+    return <AlertCircle className="size-3.5 text-destructive shrink-0" />
   }
   return (
     <span
       className={cn(
         "size-2 rounded-full shrink-0",
-        status === "connected" && "bg-green-500",
-        status === "idle" && "bg-amber-500",
+        status === "connected" && "bg-status-ok",
+        status === "idle" && "bg-status-warn",
         status === "offline" && "bg-muted-foreground"
       )}
     />
@@ -46,9 +46,9 @@ function StatusIndicator({ status, isStreaming }: { status: ClawStatus; isStream
 
 function UnreadBadge({ count }: { count: number }) {
   if (count === 0) return null
-  
+
   return (
-    <span className="flex items-center justify-center min-w-5 h-5 px-1.5 text-xs font-medium bg-blue-600 text-white rounded-full">
+    <span className="flex items-center justify-center min-w-5 h-5 px-1.5 font-mono text-[11px] font-semibold bg-primary text-primary-foreground rounded-full">
       {count > 99 ? "99+" : count}
     </span>
   )
@@ -121,11 +121,11 @@ export function ClawCard({ claw, isSelected, onClick, onTogglePin, onTagsChange,
   const hasUnread = claw.unreadCount > 0
   const isPending = claw.status === "provisioning" || claw.status === "error"
   const railClass = claw.isStreaming
-    ? "border-l-green-500"
+    ? "border-l-status-ok"
     : claw.status === "provisioning"
-      ? "border-l-blue-400"
+      ? "border-l-data"
       : claw.status === "error"
-        ? "border-l-red-500"
+        ? "border-l-destructive"
         : COLOR_CLASSES[localColor]?.border ?? "border-l-border"
 
   return (
@@ -140,19 +140,23 @@ export function ClawCard({ claw, isSelected, onClick, onTogglePin, onTagsChange,
         }
       }}
       className={cn(
-        "w-full min-w-0 text-left p-3 rounded-md transition-colors relative group border-l-2",
+        // Sidebar agent row: 2px color rail on the left, square against it and
+        // rounded away from it, exactly like the mockup's .agent-row.
+        "w-full min-w-0 text-left p-3 rounded-l-none rounded-r-md transition-colors relative group border-l-2 cursor-pointer",
         railClass,
-        isPending ? "cursor-pointer opacity-70 hover:bg-accent" : "cursor-pointer hover:bg-accent",
-        isSelected && "bg-accent",
-        hasUnread && !isSelected && "bg-blue-950/30"
+        isPending && "opacity-70",
+        hasUnread && !isSelected
+          ? "bg-primary/10 hover:bg-primary/14"
+          : "hover:bg-foreground/7",
+        isSelected && "bg-foreground/10"
       )}
     >
       <div className="flex items-center gap-2 mb-1">
         <StatusIndicator status={claw.status} isStreaming={claw.isStreaming} />
         <span 
           className={cn(
-            "font-mono text-sm min-w-0 flex-1 group/name flex items-center gap-1",
-            hasUnread ? "text-foreground font-medium" : "text-foreground"
+            "font-mono text-[13px] min-w-0 flex-1 group/name flex items-center gap-1 text-foreground",
+            hasUnread && "font-medium"
           )}
         >
           {editingName ? (
@@ -163,7 +167,7 @@ export function ClawCard({ claw, isSelected, onClick, onTogglePin, onTagsChange,
               onKeyDown={handleNameKeyDown}
               onBlur={commitRename}
               onClick={(e) => e.stopPropagation()}
-              className="bg-transparent border-b border-ring outline-none text-sm font-mono w-full"
+              className="bg-transparent border-b border-ring outline-none text-[13px] font-mono w-full"
             />
           ) : (
             <>
@@ -188,7 +192,7 @@ export function ClawCard({ claw, isSelected, onClick, onTogglePin, onTagsChange,
           <button
             onClick={onTogglePin}
             className={cn(
-              "p-1 rounded hover:bg-background/50 transition-opacity",
+              "p-1 rounded-sm hover:bg-foreground/10 transition-opacity",
               claw.pinned ? "opacity-100" : "opacity-0 group-hover:opacity-100"
             )}
             title={claw.pinned ? "Unpin" : "Pin"}
@@ -240,7 +244,7 @@ export function ClawCard({ claw, isSelected, onClick, onTogglePin, onTagsChange,
             {showColorPicker && typeof document !== 'undefined' && createPortal(
               <div
                 data-color-picker
-                className="fixed bg-popover border border-border rounded-lg p-2 shadow-xl"
+                className="fixed bg-popover border border-border rounded-lg p-2 shadow-ds-lg"
                 style={{ top: pickerPos.top, left: pickerPos.left, zIndex: 99999 }}
               >
                 <div className="grid grid-cols-8 gap-1">
