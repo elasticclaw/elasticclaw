@@ -382,19 +382,19 @@ export default function SettingsSectionPage() {
   return (
     <div className="h-screen bg-background flex flex-col overflow-hidden">
       {/* Header */}
-      <header className="border-b border-border px-6 py-4 flex items-center gap-4">
+      <header className="border-b-2 border-border px-6 py-4 flex items-center gap-4">
         <Button variant="ghost" size="icon" onClick={() => window.location.href = "/"}>
           <ChevronLeft className="size-4" />
         </Button>
-        <h1 className="text-lg font-semibold">Configure</h1>
+        <h1 className="text-lg">Configure</h1>
         {version && <span className="ml-auto text-xs text-muted-foreground font-mono">{version}</span>}
       </header>
 
       <div className="flex flex-1 min-h-0 overflow-hidden">
         {/* Left nav */}
-        <aside className="w-56 border-r border-border p-4 flex flex-col overflow-y-auto">
+        <aside className="w-56 border-r-2 border-sidebar-border bg-sidebar text-sidebar-foreground p-4 flex flex-col overflow-y-auto">
           <div className="relative mb-1">
-            <div className="pointer-events-none absolute left-3 top-1/2 z-10 flex size-5 -translate-y-1/2 items-center justify-center rounded bg-blue-600 text-[11px] font-semibold text-white shadow-sm">
+            <div className="pointer-events-none absolute left-3 top-1/2 z-10 flex size-5 -translate-y-1/2 items-center justify-center rounded-md bg-sidebar-primary text-[11px] font-extrabold text-sidebar-primary-foreground shadow-ds-sm">
               {selectedWorkspaceInitial}
             </div>
             <select
@@ -418,11 +418,9 @@ export default function SettingsSectionPage() {
             {navGroups.map((group, groupIdx) => (
               <div key={group.label}>
                 {groupIdx > 0 && <div className="h-5" />}
-                {groupIdx > 0 && (
-                  <p className="px-3 pb-1 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground/70">
+                <p className="px-3 pb-1 kicker">
                     {group.label}
-                  </p>
-                )}
+                </p>
                 {group.items.map(({ id, label, icon: Icon }) => (
                   <Link
                     key={id}
@@ -430,7 +428,7 @@ export default function SettingsSectionPage() {
                     className={cn(
                       "w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition-colors text-left",
                       section === id
-                        ? "bg-primary/10 text-primary font-medium"
+                        ? "bg-sidebar-accent text-sidebar-accent-foreground font-medium"
                         : "text-muted-foreground hover:bg-secondary hover:text-foreground"
                     )}
                   >
@@ -450,8 +448,8 @@ export default function SettingsSectionPage() {
 
         {/* Content */}
         <main className={(section === "ai-config" || section === "troubleshoot") ? "flex-1 min-h-0 flex flex-col overflow-hidden" : "flex-1 overflow-y-auto p-8 max-w-2xl"}>
-          {error && <p className="mb-4 text-sm text-red-500">{error}</p>}
-          {success && <p className="mb-4 text-sm text-green-500">{success}</p>}
+          {error && <p className="mb-4 text-sm text-destructive">{error}</p>}
+          {success && <p className="mb-4 text-sm text-status-ok">{success}</p>}
 
           {settings && section === "runtimes" && (
             <RuntimesSection settings={settings} onSave={save} saving={saving} />
@@ -729,7 +727,7 @@ function RuntimesSection({ settings, onSave, saving }: { settings: SettingsData;
   return (
     <div className="space-y-6">
       <div>
-        <h2 className="text-base font-semibold mb-1">Sandbox Runtimes</h2>
+        <h2 className="text-base mb-1">Sandbox Runtimes</h2>
         <p className="text-sm text-muted-foreground mb-4">Configure VM providers for spawning agents.</p>
 
         <div className="flex items-center gap-2 mb-6">
@@ -756,12 +754,12 @@ function RuntimesSection({ settings, onSave, saving }: { settings: SettingsData;
                   <div className="flex items-center gap-2">
                     <span className="text-sm font-medium">{p.label}</span>
                     {p.alpha && (
-                      <span className="text-xs bg-amber-500/20 text-amber-300 px-1.5 py-0.5 rounded">
+                      <span className="text-xs bg-status-warn/20 text-status-warn px-1.5 py-0.5 rounded">
                         Alpha
                       </span>
                     )}
                     {p.configured && (
-                      <span className="text-xs bg-green-500/20 text-green-400 px-1.5 py-0.5 rounded flex items-center gap-1">
+                      <span className="text-xs bg-status-ok/20 text-status-ok px-1.5 py-0.5 rounded flex items-center gap-1">
                         <CheckCircle2 className="size-3" /> Configured
                       </span>
                     )}
@@ -829,7 +827,7 @@ function RuntimesSection({ settings, onSave, saving }: { settings: SettingsData;
         <DialogContent className="max-w-lg max-h-[90vh] overflow-y-auto p-0 gap-0">
           <DialogTitle className="sr-only">{modalTitle}</DialogTitle>
           <div className="flex items-center justify-between px-5 py-4 border-b border-border">
-            <h3 className="font-medium">{modalTitle}</h3>
+            <h3>{modalTitle}</h3>
           </div>
 
           <div className="p-5 space-y-4">
@@ -918,7 +916,7 @@ function RuntimesSection({ settings, onSave, saving }: { settings: SettingsData;
                           setTimeout(() => setCopiedKey(false), 2000)
                         }}
                       >
-                        {copiedKey ? <Check className="size-3 text-green-500" /> : <Copy className="size-3" />}
+                        {copiedKey ? <Check className="size-3 text-status-ok" /> : <Copy className="size-3" />}
                       </Button>
                     </div>
                   ) : (
@@ -1003,9 +1001,9 @@ function RuntimesSection({ settings, onSave, saving }: { settings: SettingsData;
 
             {formProvider === "lambda-microvms" && (
               <>
-                <div className="bg-amber-500/10 border border-amber-500/20 rounded-lg p-3">
+                <div className="bg-status-warn/10 border border-status-warn/20 rounded-lg p-3">
                   <div className="flex items-center gap-2 mb-1">
-                    <span className="text-xs bg-amber-500/20 text-amber-300 px-1.5 py-0.5 rounded">Alpha</span>
+                    <span className="text-xs bg-status-warn/20 text-status-warn px-1.5 py-0.5 rounded">Alpha</span>
                     <p className="text-xs font-medium">AWS Lambda MicroVMs</p>
                   </div>
                   <p className="text-xs text-muted-foreground">
@@ -1280,8 +1278,8 @@ function LLMSection({ settings, onSave, saving }: { settings: SettingsData; onSa
 
   function renderLoginWindow(win: Window, text: string) {
     win.document.body.style.margin = "0"
-    win.document.body.style.background = "#0a0a0a"
-    win.document.body.style.color = "#f5f5f5"
+    win.document.body.style.background = "#141416"
+    win.document.body.style.color = "#f2f2f4"
     win.document.body.style.fontFamily = "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace"
     win.document.body.style.whiteSpace = "pre-wrap"
     win.document.body.style.padding = "24px"
@@ -1352,7 +1350,7 @@ function LLMSection({ settings, onSave, saving }: { settings: SettingsData; onSa
   return (
     <div className="space-y-6">
       <div>
-        <h2 className="text-base font-semibold mb-1">Models</h2>
+        <h2 className="text-base mb-1">Models</h2>
         <p className="text-sm text-muted-foreground mb-4">
           API keys for LLM providers. The default key is used unless overridden by a workflow.
         </p>
@@ -1362,7 +1360,7 @@ function LLMSection({ settings, onSave, saving }: { settings: SettingsData; onSa
             {llmKeys.length} key{llmKeys.length !== 1 ? "s" : ""} configured
           </span>
           {needsAttention > 0 && (
-            <span className="text-xs bg-red-500/10 text-red-400 border border-red-500/20 px-2 py-1 rounded font-medium flex items-center gap-1">
+            <span className="text-xs bg-destructive/10 text-destructive border border-destructive/20 px-2 py-1 rounded font-medium flex items-center gap-1">
               <AlertTriangle className="size-3" /> {needsAttention} need{needsAttention !== 1 ? "" : "s"} attention
             </span>
           )}
@@ -1372,7 +1370,7 @@ function LLMSection({ settings, onSave, saving }: { settings: SettingsData; onSa
       {/* Needs Attention */}
       {needsAttention > 0 && (
         <div>
-          <p className="text-sm font-medium text-yellow-400 mb-2 flex items-center gap-1.5">
+          <p className="text-sm font-medium text-status-warn mb-2 flex items-center gap-1.5">
             <AlertTriangle className="size-4" /> Needs Attention
           </p>
           <div className="space-y-2">
@@ -1380,7 +1378,7 @@ function LLMSection({ settings, onSave, saving }: { settings: SettingsData; onSa
               <div
                 key={k.name}
                 onClick={() => openEdit(llmKeys.indexOf(k))}
-                className="border border-red-500/20 rounded-lg p-3 flex items-center justify-between cursor-pointer hover:bg-red-500/5 transition-colors"
+                className="border border-destructive/20 rounded-lg p-3 flex items-center justify-between cursor-pointer hover:bg-destructive/5 transition-colors"
               >
                 <div className="flex items-center gap-3">
                   <div className="w-8 h-8 rounded-lg bg-muted flex items-center justify-center">
@@ -1397,7 +1395,7 @@ function LLMSection({ settings, onSave, saving }: { settings: SettingsData; onSa
                       ) : (
                         <span className="text-xs text-muted-foreground">using provider default</span>
                       )}
-                      <span className="text-xs text-red-400 flex items-center gap-1">✕ Invalid</span>
+                      <span className="text-xs text-destructive flex items-center gap-1">✕ Invalid</span>
                     </div>
                   </div>
                 </div>
@@ -1443,7 +1441,7 @@ function LLMSection({ settings, onSave, saving }: { settings: SettingsData; onSa
                       ) : (
                         <span className="text-xs text-muted-foreground">using provider default</span>
                       )}
-                      <span className="text-xs text-green-400 flex items-center gap-1">✓ Valid</span>
+                      <span className="text-xs text-status-ok flex items-center gap-1">✓ Valid</span>
                     </div>
                   </div>
                 </div>
@@ -1476,7 +1474,7 @@ function LLMSection({ settings, onSave, saving }: { settings: SettingsData; onSa
         <DialogContent className="max-w-lg max-h-[90vh] overflow-y-auto p-0 gap-0">
           <DialogTitle className="sr-only">{modalMode === "add" ? "Add Model Key" : `Edit ${formName}`}</DialogTitle>
           <div className="flex items-center justify-between px-5 py-4 border-b border-border">
-            <h3 className="font-medium">{modalMode === "add" ? "Add Model Key" : `Edit ${formName}`}</h3>
+            <h3>{modalMode === "add" ? "Add Model Key" : `Edit ${formName}`}</h3>
           </div>
 
           <div className="p-5 space-y-4">
@@ -1552,7 +1550,7 @@ function LLMSection({ settings, onSave, saving }: { settings: SettingsData; onSa
                               <div className="font-mono text-lg font-semibold tracking-wide text-foreground">{loginJob.code}</div>
                             </div>
                             <Button type="button" size="sm" variant="outline" className="h-8 shrink-0 gap-1.5" onClick={() => copyLoginCode(loginJob.code || "")}>
-                              {copiedLoginCode ? <Check className="size-3.5 text-green-500" /> : <Copy className="size-3.5" />}
+                              {copiedLoginCode ? <Check className="size-3.5 text-status-ok" /> : <Copy className="size-3.5" />}
                               {copiedLoginCode ? "Copied" : "Copy"}
                             </Button>
                           </div>
@@ -1561,11 +1559,11 @@ function LLMSection({ settings, onSave, saving }: { settings: SettingsData; onSa
                       {!loginJob.code && loginJob.output && (
                         <pre className="max-h-24 overflow-auto whitespace-pre-wrap break-words rounded border border-border bg-background/60 p-2 text-[11px] text-muted-foreground">{loginJob.output}</pre>
                       )}
-                      {loginJob.error && <div className="text-red-400">{loginJob.error}</div>}
-                      {loginJob.status === "complete" && <div className="text-green-400">Profile saved. Save this model key to use it.</div>}
+                      {loginJob.error && <div className="text-destructive">{loginJob.error}</div>}
+                      {loginJob.status === "complete" && <div className="text-status-ok">Profile saved. Save this model key to use it.</div>}
                     </div>
                   )}
-                  {loginError && <div className="text-xs text-red-400">{loginError}</div>}
+                  {loginError && <div className="text-xs text-destructive">{loginError}</div>}
                 </div>
               )}
               <div>
@@ -1765,7 +1763,7 @@ function GitHubSection({ settings, onSave, saving, workspace }: { settings: Sett
 
   return (
     <div>
-      <h2 className="text-base font-semibold mb-1">GitHub Apps</h2>
+      <h2 className="text-base mb-1">GitHub Apps</h2>
       <div className="text-sm text-muted-foreground mb-6 space-y-1.5">
         <p>
           Register a GitHub App so your {brandName} workflows can access repositories.
@@ -1802,7 +1800,7 @@ function GitHubSection({ settings, onSave, saving, workspace }: { settings: Sett
                     {app.installation && <p className="text-xs text-muted-foreground">Installation: {app.installation}</p>}
                   </div>
                   <div className="flex items-center gap-2">
-                    <span className={cn("text-xs px-2 py-1 rounded", (app.privateKeySet || app.private_key_set) ? "bg-green-500/20 text-green-400" : "bg-yellow-500/20 text-yellow-400")}>
+                    <span className={cn("text-xs px-2 py-1 rounded", (app.privateKeySet || app.private_key_set) ? "bg-status-ok/20 text-status-ok" : "bg-status-warn/20 text-status-warn")}>
                       {(app.privateKeySet || app.private_key_set) ? "Key set" : "No key"}
                     </span>
                     <Button size="sm" variant="ghost" className="text-destructive hover:text-destructive h-7 px-2" disabled={saving}
@@ -1829,7 +1827,7 @@ function GitHubSection({ settings, onSave, saving, workspace }: { settings: Sett
                   )}
                 </div>
                 <div className="flex items-center gap-2">
-                  <span className={cn("text-xs px-2 py-1 rounded", app.keySet ? "bg-green-500/20 text-green-400" : "bg-yellow-500/20 text-yellow-400")}>
+                  <span className={cn("text-xs px-2 py-1 rounded", app.keySet ? "bg-status-ok/20 text-status-ok" : "bg-status-warn/20 text-status-warn")}>
                     {app.keySet ? "Key set" : "No key"}
                   </span>
                   <Button size="sm" variant="ghost" className="text-destructive hover:text-destructive h-7 px-2" disabled={saving}
@@ -1848,25 +1846,25 @@ function GitHubSection({ settings, onSave, saving, workspace }: { settings: Sett
 
               {/* Permission check results */}
               {app.permCheckError && (
-                <div className="mt-3 rounded-lg bg-yellow-500/10 border border-yellow-500/20 px-3 py-2.5 flex items-start gap-2">
-                  <AlertTriangle className="size-4 text-yellow-400 shrink-0 mt-0.5" />
+                <div className="mt-3 rounded-lg bg-status-warn/10 border border-status-warn/20 px-3 py-2.5 flex items-start gap-2">
+                  <AlertTriangle className="size-4 text-status-warn shrink-0 mt-0.5" />
                   <div>
-                    <p className="text-xs font-medium text-yellow-400">Permission check failed</p>
-                    <p className="text-xs text-yellow-400/80">{app.permCheckError}</p>
+                    <p className="text-xs font-medium text-status-warn">Permission check failed</p>
+                    <p className="text-xs text-status-warn/80">{app.permCheckError}</p>
                   </div>
                 </div>
               )}
               {app.permissions && app.permissions.length > 0 && (
                 <div className="mt-3">
                   {app.permCheckOk === false && (
-                    <div className="rounded-lg bg-yellow-500/10 border border-yellow-500/20 px-3 py-2.5 mb-2 flex items-center justify-between">
+                    <div className="rounded-lg bg-status-warn/10 border border-status-warn/20 px-3 py-2.5 mb-2 flex items-center justify-between">
                       <div className="flex items-center gap-2">
-                        <Shield className="size-4 text-yellow-400" />
+                        <Shield className="size-4 text-status-warn" />
                         <div>
-                          <p className="text-xs font-medium text-yellow-400">
+                          <p className="text-xs font-medium text-status-warn">
                             {app.permissions.filter(p => !p.ok).length} permission{app.permissions.filter(p => !p.ok).length !== 1 ? "s" : ""} need attention
                           </p>
-                          <p className="text-xs text-yellow-400/70">
+                          <p className="text-xs text-status-warn/70">
                             {app.permissions.filter(p => p.ok).length} of {app.permissions.length} required permissions granted
                           </p>
                         </div>
@@ -1892,15 +1890,15 @@ function GitHubSection({ settings, onSave, saving, workspace }: { settings: Sett
                       <div className="mt-2 space-y-1">
                         <p className="text-[10px] uppercase tracking-wider text-muted-foreground/60 font-medium">Needs Attention</p>
                         {app.permissions.filter(p => !p.ok).map(p => (
-                          <div key={p.name} className="flex items-center justify-between rounded-lg bg-yellow-500/10 border border-yellow-500/20 px-3 py-2">
+                          <div key={p.name} className="flex items-center justify-between rounded-lg bg-status-warn/10 border border-status-warn/20 px-3 py-2">
                             <div className="flex items-center gap-2">
-                              <AlertTriangle className="size-3.5 text-yellow-400" />
-                              <span className="text-sm font-mono text-yellow-400">{p.name}</span>
+                              <AlertTriangle className="size-3.5 text-status-warn" />
+                              <span className="text-sm font-mono text-status-warn">{p.name}</span>
                             </div>
                             <div className="flex items-center gap-1.5 text-xs">
-                              <span className="px-1.5 py-0.5 rounded bg-yellow-500/20 text-yellow-400">{p.granted || "not set"}</span>
+                              <span className="px-1.5 py-0.5 rounded bg-status-warn/20 text-status-warn">{p.granted || "not set"}</span>
                               <span className="text-muted-foreground">→</span>
-                              <span className="px-1.5 py-0.5 rounded border border-yellow-500/30 text-yellow-400">needs {p.needed}</span>
+                              <span className="px-1.5 py-0.5 rounded border border-status-warn/30 text-status-warn">needs {p.needed}</span>
                             </div>
                           </div>
                         ))}
@@ -1911,12 +1909,12 @@ function GitHubSection({ settings, onSave, saving, workspace }: { settings: Sett
                       <div className="mt-2 space-y-1">
                         <p className="text-[10px] uppercase tracking-wider text-muted-foreground/60 font-medium">Configured</p>
                         {app.permissions.filter(p => p.ok).map(p => (
-                          <div key={p.name} className="flex items-center justify-between rounded-lg bg-green-500/10 border border-green-500/20 px-3 py-2">
+                          <div key={p.name} className="flex items-center justify-between rounded-lg bg-status-ok/10 border border-status-ok/20 px-3 py-2">
                             <div className="flex items-center gap-2">
-                              <CheckCircle2 className="size-3.5 text-green-400" />
-                              <span className="text-sm font-mono text-green-400">{p.name}</span>
+                              <CheckCircle2 className="size-3.5 text-status-ok" />
+                              <span className="text-sm font-mono text-status-ok">{p.name}</span>
                             </div>
-                            <span className="text-xs px-1.5 py-0.5 rounded bg-green-500/20 text-green-400">{p.granted}</span>
+                            <span className="text-xs px-1.5 py-0.5 rounded bg-status-ok/20 text-status-ok">{p.granted}</span>
                           </div>
                         ))}
                       </div>
@@ -1938,7 +1936,7 @@ function GitHubSection({ settings, onSave, saving, workspace }: { settings: Sett
         <DialogContent className="max-w-lg max-h-[90vh] overflow-y-auto p-0 gap-0">
           <DialogTitle className="sr-only">Add GitHub App</DialogTitle>
           <div className="flex items-center justify-between px-5 py-4 border-b border-border">
-            <h3 className="font-medium">Add GitHub App</h3>
+            <h3>Add GitHub App</h3>
           </div>
 
           <div className="p-5 space-y-4">
@@ -1982,9 +1980,9 @@ function GitHubSection({ settings, onSave, saving, workspace }: { settings: Sett
               </div>
 
               {testError && (
-                <div className="rounded-lg bg-red-500/10 border border-red-500/20 px-3 py-2.5 flex items-start gap-2">
-                  <AlertTriangle className="size-4 text-red-400 shrink-0 mt-0.5" />
-                  <p className="text-xs text-red-400">{testError}</p>
+                <div className="rounded-lg bg-destructive/10 border border-destructive/20 px-3 py-2.5 flex items-start gap-2">
+                  <AlertTriangle className="size-4 text-destructive shrink-0 mt-0.5" />
+                  <p className="text-xs text-destructive">{testError}</p>
                 </div>
               )}
 
@@ -1993,11 +1991,11 @@ function GitHubSection({ settings, onSave, saving, workspace }: { settings: Sett
                 <div className="space-y-3">
                   {/* permCheckOk is true — all good */}
                   {testResult.permCheckOk === true && (
-                    <div className="rounded-lg bg-green-500/10 border border-green-500/20 px-3 py-2.5 flex items-center gap-2">
-                      <CheckCircle2 className="size-4 text-green-400" />
+                    <div className="rounded-lg bg-status-ok/10 border border-status-ok/20 px-3 py-2.5 flex items-center gap-2">
+                      <CheckCircle2 className="size-4 text-status-ok" />
                       <div>
-                        <p className="text-xs font-medium text-green-400">All {totalCount} required permissions granted</p>
-                        <p className="text-xs text-green-400/70">This GitHub App is ready to use.</p>
+                        <p className="text-xs font-medium text-status-ok">All {totalCount} required permissions granted</p>
+                        <p className="text-xs text-status-ok/70">This GitHub App is ready to use.</p>
                       </div>
                     </div>
                   )}
@@ -2006,19 +2004,19 @@ function GitHubSection({ settings, onSave, saving, workspace }: { settings: Sett
                   {(testResult.permCheckOk === false || testResult.permCheckOk == null) && (
                     <>
                       {testResult.permCheckError ? (
-                        <div className="rounded-lg bg-yellow-500/10 border border-yellow-500/20 px-3 py-2.5 flex items-start gap-2">
-                          <AlertTriangle className="size-4 text-yellow-400 shrink-0 mt-0.5" />
-                          <p className="text-xs text-yellow-400">{testResult.permCheckError}</p>
+                        <div className="rounded-lg bg-status-warn/10 border border-status-warn/20 px-3 py-2.5 flex items-start gap-2">
+                          <AlertTriangle className="size-4 text-status-warn shrink-0 mt-0.5" />
+                          <p className="text-xs text-status-warn">{testResult.permCheckError}</p>
                         </div>
                       ) : (
-                        <div className="rounded-lg bg-yellow-500/10 border border-yellow-500/20 px-3 py-2.5 flex items-center justify-between">
+                        <div className="rounded-lg bg-status-warn/10 border border-status-warn/20 px-3 py-2.5 flex items-center justify-between">
                           <div className="flex items-center gap-2">
-                            <Shield className="size-4 text-yellow-400" />
+                            <Shield className="size-4 text-status-warn" />
                             <div>
-                              <p className="text-xs font-medium text-yellow-400">
+                              <p className="text-xs font-medium text-status-warn">
                                 {needsAttention} permission{needsAttention !== 1 ? "s" : ""} need attention
                               </p>
-                              <p className="text-xs text-yellow-400/70">
+                              <p className="text-xs text-status-warn/70">
                                 {configuredCount} of {totalCount} required permissions granted
                               </p>
                             </div>
@@ -2042,15 +2040,15 @@ function GitHubSection({ settings, onSave, saving, workspace }: { settings: Sett
                         <>
                           <p className="text-[10px] uppercase tracking-wider text-muted-foreground/60 font-medium">Needs Attention</p>
                           {testResult.permissions.filter(p => !p.ok).map(p => (
-                            <div key={p.name} className="flex items-center justify-between rounded-lg bg-yellow-500/10 border border-yellow-500/20 px-3 py-2">
+                            <div key={p.name} className="flex items-center justify-between rounded-lg bg-status-warn/10 border border-status-warn/20 px-3 py-2">
                               <div className="flex items-center gap-2">
-                                <AlertTriangle className="size-3.5 text-yellow-400" />
-                                <span className="text-sm font-mono text-yellow-400">{p.name}</span>
+                                <AlertTriangle className="size-3.5 text-status-warn" />
+                                <span className="text-sm font-mono text-status-warn">{p.name}</span>
                               </div>
                               <div className="flex items-center gap-1.5 text-xs">
-                                <span className="px-1.5 py-0.5 rounded bg-yellow-500/20 text-yellow-400">{p.granted || "not set"}</span>
+                                <span className="px-1.5 py-0.5 rounded bg-status-warn/20 text-status-warn">{p.granted || "not set"}</span>
                                 <span className="text-muted-foreground">→</span>
-                                <span className="px-1.5 py-0.5 rounded border border-yellow-500/30 text-yellow-400">needs {p.needed}</span>
+                                <span className="px-1.5 py-0.5 rounded border border-status-warn/30 text-status-warn">needs {p.needed}</span>
                               </div>
                             </div>
                           ))}
@@ -2060,12 +2058,12 @@ function GitHubSection({ settings, onSave, saving, workspace }: { settings: Sett
                         <>
                           <p className="text-[10px] uppercase tracking-wider text-muted-foreground/60 font-medium mt-2">Configured</p>
                           {testResult.permissions.filter(p => p.ok).map(p => (
-                            <div key={p.name} className="flex items-center justify-between rounded-lg bg-green-500/10 border border-green-500/20 px-3 py-2">
+                            <div key={p.name} className="flex items-center justify-between rounded-lg bg-status-ok/10 border border-status-ok/20 px-3 py-2">
                               <div className="flex items-center gap-2">
-                                <CheckCircle2 className="size-3.5 text-green-400" />
-                                <span className="text-sm font-mono text-green-400">{p.name}</span>
+                                <CheckCircle2 className="size-3.5 text-status-ok" />
+                                <span className="text-sm font-mono text-status-ok">{p.name}</span>
                               </div>
-                              <span className="text-xs px-1.5 py-0.5 rounded bg-green-500/20 text-green-400">{p.granted}</span>
+                              <span className="text-xs px-1.5 py-0.5 rounded bg-status-ok/20 text-status-ok">{p.granted}</span>
                             </div>
                           ))}
                         </>
@@ -2093,8 +2091,8 @@ function GitHubSection({ settings, onSave, saving, workspace }: { settings: Sett
             {testResult === null ? (
               <>
                 <div className="flex items-center gap-2">
-                  <AlertTriangle className="size-5 text-yellow-400" />
-                  <h3 className="font-medium">Test Recommended</h3>
+                  <AlertTriangle className="size-5 text-status-warn" />
+                  <h3>Test Recommended</h3>
                 </div>
                 <p className="text-sm text-muted-foreground">
                   You haven&apos;t tested this GitHub App yet. We recommend clicking <strong>Test Permissions</strong> first to verify it works.
@@ -2103,14 +2101,14 @@ function GitHubSection({ settings, onSave, saving, workspace }: { settings: Sett
             ) : (
               <>
                 <div className="flex items-center gap-2">
-                  <AlertTriangle className="size-5 text-yellow-400" />
-                  <h3 className="font-medium">Permissions Missing</h3>
+                  <AlertTriangle className="size-5 text-status-warn" />
+                  <h3>Permissions Missing</h3>
                 </div>
                 <p className="text-sm text-muted-foreground">
                   This GitHub App is missing required permissions. It <strong>will not work</strong> for agents until fixed.
                 </p>
                 {testResult.permCheckError && (
-                  <p className="text-xs text-yellow-400 bg-yellow-500/10 rounded px-2 py-1.5">{testResult.permCheckError}</p>
+                  <p className="text-xs text-status-warn bg-status-warn/10 rounded px-2 py-1.5">{testResult.permCheckError}</p>
                 )}
               </>
             )}
@@ -2214,7 +2212,7 @@ function AuthenticationSection({ settings, onSave, saving }: { settings: Setting
   return (
     <div className="space-y-6">
       <div>
-        <h2 className="text-base font-semibold mb-0.5">Authentication</h2>
+        <h2 className="text-base mb-0.5">Authentication</h2>
         <p className="text-sm text-muted-foreground">Both methods can be active simultaneously. GitHub OAuth users and password users both have full access unless tag-based restrictions are configured.</p>
       </div>
 
@@ -2222,14 +2220,14 @@ function AuthenticationSection({ settings, onSave, saving }: { settings: Setting
       <div className="border border-border rounded-lg p-5 space-y-3 max-w-lg">
         <div className="flex items-center justify-between">
           <div>
-            <h3 className="text-sm font-medium">Password Login</h3>
+            <h3 className="text-sm ">Password Login</h3>
             <p className="text-xs text-muted-foreground mt-0.5">
               {settings.auth?.disablePasswordAuth ? 'Disabled — GitHub OAuth only.' : 'Enabled. Used by the hub token and UI password.'}
             </p>
           </div>
           {settings.auth?.disablePasswordAuth
             ? <span className="text-xs bg-muted text-muted-foreground px-2 py-0.5 rounded font-medium">Disabled</span>
-            : <span className="text-xs bg-green-500/20 text-green-400 px-2 py-0.5 rounded font-medium">Active</span>
+            : <span className="text-xs bg-status-ok/20 text-status-ok px-2 py-0.5 rounded font-medium">Active</span>
           }
         </div>
 
@@ -2249,7 +2247,7 @@ function AuthenticationSection({ settings, onSave, saving }: { settings: Setting
               )}
             >
               <span className={cn(
-                'pointer-events-none inline-block h-4 w-4 rounded-full bg-white shadow-lg transform transition-transform',
+                'pointer-events-none inline-block h-4 w-4 rounded-full bg-background shadow-lg transform transition-transform',
                 settings.auth?.disablePasswordAuth ? 'translate-x-4' : 'translate-x-0'
               )} />
             </button>
@@ -2266,7 +2264,7 @@ function AuthenticationSection({ settings, onSave, saving }: { settings: Setting
               <label className="text-xs text-muted-foreground mb-1 block">Confirm Password</label>
               <Input type="password" value={pwConfirm} onChange={e => setPwConfirm(e.target.value)} className="h-8 text-sm" placeholder="Repeat password" />
             </div>
-            {pwErr && <p className="text-xs text-red-500">{pwErr}</p>}
+            {pwErr && <p className="text-xs text-destructive">{pwErr}</p>}
             <Button size="sm" disabled={saving || !newPw || !pwConfirm} onClick={handlePasswordSave}>
               Change Password
             </Button>
@@ -2278,11 +2276,11 @@ function AuthenticationSection({ settings, onSave, saving }: { settings: Setting
       <div className="border border-border rounded-lg p-5 space-y-3 max-w-lg">
         <div className="flex items-center justify-between">
           <div>
-            <h3 className="text-sm font-medium">GitHub OAuth</h3>
+            <h3 className="text-sm ">GitHub OAuth</h3>
             <p className="text-xs text-muted-foreground mt-0.5">Let users log in with their GitHub account.</p>
           </div>
           {ghOAuth
-            ? <span className="text-xs bg-green-500/20 text-green-400 px-2 py-0.5 rounded font-medium">Active</span>
+            ? <span className="text-xs bg-status-ok/20 text-status-ok px-2 py-0.5 rounded font-medium">Active</span>
             : <span className="text-xs bg-muted text-muted-foreground px-2 py-0.5 rounded font-medium">Inactive</span>
           }
         </div>
@@ -2314,14 +2312,14 @@ function AuthenticationSection({ settings, onSave, saving }: { settings: Setting
             )}
 
             <div className="space-y-3">
-              <h4 className="text-xs font-medium text-muted-foreground uppercase tracking-wide">App Credentials</h4>
+              <h4 className="text-xs text-muted-foreground uppercase tracking-wide">App Credentials</h4>
               <div>
                 <label className="text-xs text-muted-foreground mb-1 block">Client ID</label>
                 <Input value={clientId} onChange={e => setClientId(e.target.value)} className="h-8 text-sm font-mono" placeholder="Ov23li..." />
               </div>
               <div>
                 <label className="text-xs text-muted-foreground mb-1 block">
-                  Client Secret{ghOAuth?.clientSecretSet && <span className="ml-1 text-green-500">(set)</span>}
+                  Client Secret{ghOAuth?.clientSecretSet && <span className="ml-1 text-status-ok">(set)</span>}
                 </label>
                 <Input
                   type="password"
@@ -2334,7 +2332,7 @@ function AuthenticationSection({ settings, onSave, saving }: { settings: Setting
             </div>
 
             <div className="space-y-3">
-              <h4 className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Allowlist <span className="normal-case font-normal">(leave blank = any GitHub user)</span></h4>
+              <h4 className="text-xs text-muted-foreground uppercase tracking-wide">Allowlist <span className="normal-case font-normal">(leave blank = any GitHub user)</span></h4>
               <div>
                 <label className="text-xs text-muted-foreground mb-1 block">Usernames</label>
                 <Input value={allowedUsers} onChange={e => setAllowedUsers(e.target.value)} className="h-8 text-sm" placeholder="alice, bob" />
@@ -2350,7 +2348,7 @@ function AuthenticationSection({ settings, onSave, saving }: { settings: Setting
             </div>
 
             <div className="space-y-3">
-              <h4 className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Admins</h4>
+              <h4 className="text-xs text-muted-foreground uppercase tracking-wide">Admins</h4>
               <div>
                 <label className="text-xs text-muted-foreground mb-1 block">GitHub Usernames</label>
                 <Input value={admins} onChange={e => setAdmins(e.target.value)} className="h-8 text-sm" placeholder="alice, bob" />
@@ -2359,7 +2357,7 @@ function AuthenticationSection({ settings, onSave, saving }: { settings: Setting
             </div>
 
             <div className="space-y-3">
-              <h4 className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Tag-Based Access Control <span className="normal-case font-normal">(optional)</span></h4>
+              <h4 className="text-xs text-muted-foreground uppercase tracking-wide">Tag-Based Access Control <span className="normal-case font-normal">(optional)</span></h4>
               <div>
                 <label className="text-xs text-muted-foreground mb-1 block">View requires tag</label>
                 <Input value={viewTags} onChange={e => setViewTags(e.target.value)} className="h-8 text-sm font-mono" placeholder="user, team=frontend" />
@@ -2371,7 +2369,7 @@ function AuthenticationSection({ settings, onSave, saving }: { settings: Setting
               </div>
             </div>
 
-            {ghErr && <p className="text-xs text-red-500">{ghErr}</p>}
+            {ghErr && <p className="text-xs text-destructive">{ghErr}</p>}
 
             <div className="flex gap-2">
               <Button size="sm" disabled={saving} onClick={handleGitHubSave}>
@@ -2586,9 +2584,9 @@ function IntegrationsSection({ settings, onSave, saving, selectedWorkspace, hubP
   const modalIcon = (modalMode === "add" ? modalType : editType) === "linear"
     ? <Zap className="size-4" />
     : (modalMode === "add" ? modalType : editType) === "shortcut"
-    ? <span className="text-[#F4603C]">⚡</span>
+    ? <span className="text-primary">⚡</span>
     : (modalMode === "add" ? modalType : editType) === "jira"
-    ? <span className="text-[#0052CC] font-semibold text-sm">J</span>
+    ? <span className="text-data font-semibold text-sm">J</span>
     : <Github className="size-4" />
 
   const githubIssuesTokenParams = new URLSearchParams({
@@ -2634,7 +2632,7 @@ function IntegrationsSection({ settings, onSave, saving, selectedWorkspace, hubP
   return (
     <div className="space-y-6">
       <div>
-        <h2 className="text-base font-semibold mb-1">Issue Trackers</h2>
+        <h2 className="text-base mb-1">Issue Trackers</h2>
         <p className="text-sm text-muted-foreground mb-4">Connect issue trackers to sync and create issues from workflows.</p>
 
         {/* Summary badges */}
@@ -2674,9 +2672,9 @@ function IntegrationsSection({ settings, onSave, saving, selectedWorkspace, hubP
                 {tracker.type === "linear" ? (
                   <Zap className="size-4 text-muted-foreground" />
                 ) : tracker.type === "shortcut" ? (
-                  <span className="text-[#F4603C]">⚡</span>
+                  <span className="text-primary">⚡</span>
                 ) : tracker.type === "jira" ? (
-                  <span className="text-[#0052CC] font-semibold text-sm">J</span>
+                  <span className="text-data font-semibold text-sm">J</span>
                 ) : (
                   <Github className="size-4 text-muted-foreground" />
                 )}
@@ -2692,11 +2690,11 @@ function IntegrationsSection({ settings, onSave, saving, selectedWorkspace, hubP
                     ) : null}
                     <span className="text-xs text-muted-foreground">·</span>
                     {tracker.tokenSet ? (
-                      <span className="text-xs text-green-400 flex items-center gap-1">
+                      <span className="text-xs text-status-ok flex items-center gap-1">
                         <CheckCircle2 className="size-3" /> Connected
                       </span>
                     ) : (
-                      <span className="text-xs text-red-400 flex items-center gap-1">
+                      <span className="text-xs text-destructive flex items-center gap-1">
                         <AlertTriangle className="size-3" /> Token revoked
                       </span>
                     )}
@@ -2736,7 +2734,7 @@ function IntegrationsSection({ settings, onSave, saving, selectedWorkspace, hubP
               onClick={() => openAdd("shortcut")}
               className="w-full flex items-center gap-2 px-3 py-2 text-sm hover:bg-muted transition-colors text-left"
             >
-              <span className="text-[#F4603C]">⚡</span>
+              <span className="text-primary">⚡</span>
               <span>Shortcut</span>
             </button>
             <button
@@ -2750,7 +2748,7 @@ function IntegrationsSection({ settings, onSave, saving, selectedWorkspace, hubP
               onClick={() => openAdd("jira")}
               className="w-full flex items-center gap-2 px-3 py-2 text-sm hover:bg-muted transition-colors text-left"
             >
-              <span className="text-[#0052CC] font-semibold text-sm">J</span>
+              <span className="text-data font-semibold text-sm">J</span>
               <span>Jira</span>
             </button>
           </div>
@@ -2764,7 +2762,7 @@ function IntegrationsSection({ settings, onSave, saving, selectedWorkspace, hubP
           <div className="flex items-center justify-between px-5 py-4 border-b border-border">
             <div className="flex items-center gap-2">
               {modalIcon}
-              <h3 className="font-medium">{modalTitle}</h3>
+              <h3>{modalTitle}</h3>
             </div>
           </div>
           <div className="p-5 space-y-4">
@@ -2803,7 +2801,7 @@ function IntegrationsSection({ settings, onSave, saving, selectedWorkspace, hubP
                     {setupTab === "token" ? (
                     <div className="mt-4 space-y-4">
                       <div>
-                        <h4 className="text-sm font-medium">{activeTrackerType === "github-issues" ? "GitHub PAT" : "Linear API Token"}</h4>
+                        <h4 className="text-sm ">{activeTrackerType === "github-issues" ? "GitHub PAT" : "Linear API Token"}</h4>
                         <p className="text-xs text-muted-foreground mt-1">
                           {activeTrackerType === "github-issues"
                             ? `Used by ${appName} to read and update issues.`
@@ -2819,7 +2817,7 @@ function IntegrationsSection({ settings, onSave, saving, selectedWorkspace, hubP
                     ) : (
                     <div className="mt-4 space-y-4">
                       <div>
-                        <h4 className="text-sm font-medium">Webhook</h4>
+                        <h4 className="text-sm ">Webhook</h4>
                         <p className="text-xs text-muted-foreground mt-1">
                           {activeTrackerType === "github-issues"
                             ? "Create a repo or org webhook for Issues events."
@@ -2994,7 +2992,7 @@ function WebhooksSection({ hubUrl, selectedWorkspace }: { hubUrl: string; select
   return (
     <div className="space-y-6">
       <div>
-        <h2 className="text-base font-semibold mb-1">Webhooks</h2>
+        <h2 className="text-base mb-1">Webhooks</h2>
         <p className="text-sm text-muted-foreground mb-6">
           Use these URLs to send events into the selected workspace.
         </p>
@@ -3004,7 +3002,7 @@ function WebhooksSection({ hubUrl, selectedWorkspace }: { hubUrl: string; select
         {urls.map(({ name, url, hint }) => (
           <div key={name} className="border border-border rounded-lg p-4 space-y-3">
             <div>
-              <h4 className="text-sm font-medium">{name}</h4>
+              <h4 className="text-sm ">{name}</h4>
               <p className="text-xs text-muted-foreground mt-1">{hint}</p>
             </div>
             <div className="flex items-center gap-2">
@@ -3012,7 +3010,7 @@ function WebhooksSection({ hubUrl, selectedWorkspace }: { hubUrl: string; select
                 {url || "Loading…"}
               </code>
               <Button variant="outline" size="sm" className="shrink-0" onClick={() => doCopy(url, name)} disabled={!url}>
-                {copied === name ? <Check className="size-3.5 text-green-500" /> : <Copy className="size-3.5" />}
+                {copied === name ? <Check className="size-3.5 text-status-ok" /> : <Copy className="size-3.5" />}
                 <span className="ml-1.5">{copied === name ? "Copied" : "Copy"}</span>
               </Button>
             </div>
@@ -3045,7 +3043,7 @@ function WorkspacesSection({ selectedWorkspace }: { selectedWorkspace: string })
   return (
     <div className="space-y-6">
       {error && (
-        <div className="text-sm text-red-500 bg-red-500/10 border border-red-500/20 rounded-md px-3 py-2">
+        <div className="text-sm text-destructive bg-destructive/10 border border-destructive/20 rounded-md px-3 py-2">
           {error}
         </div>
       )}
@@ -3060,7 +3058,7 @@ function WorkspacesSection({ selectedWorkspace }: { selectedWorkspace: string })
         <div className="space-y-4">
           {visibleWorkspaces.map((workspace) => (
             <div key={workspace.name} className="space-y-4">
-              <h2 className="text-base font-semibold">{workspace.name}</h2>
+              <h2 className="text-base ">{workspace.name}</h2>
               <div className="overflow-hidden rounded-md border border-border bg-muted/40">
                 <YamlHighlight code={workspace.config || "No elasticclaw-config.yaml content available."} />
               </div>
@@ -3119,14 +3117,14 @@ function WorkflowsSection({ selectedWorkspace }: { selectedWorkspace: string }) 
   return (
     <div className="space-y-6">
       <div>
-        <h2 className="text-base font-semibold mb-1">Workflows</h2>
+        <h2 className="text-base mb-1">Workflows</h2>
         <p className="text-sm text-muted-foreground">
           Workflows define triggers and runtime behavior within this workspace.
         </p>
       </div>
 
       {error && (
-        <div className="text-sm text-red-500 bg-red-500/10 border border-red-500/20 rounded-md px-3 py-2">
+        <div className="text-sm text-destructive bg-destructive/10 border border-destructive/20 rounded-md px-3 py-2">
           {error}
         </div>
       )}
@@ -3193,7 +3191,7 @@ function WorkflowSummaryRow({
           <WorkflowRunsDialog workflow={workflow} />
           <span className={cn(
             "text-xs px-2 py-0.5 rounded",
-            workflow.enabled ? "bg-muted text-muted-foreground" : "bg-amber-500/10 text-amber-500"
+            workflow.enabled ? "bg-muted text-muted-foreground" : "bg-status-warn/10 text-status-warn"
           )}>
             {workflow.enabled ? "enabled" : "paused"}
           </span>
@@ -3206,7 +3204,7 @@ function WorkflowSummaryRow({
 function WorkspaceRepositoryList({ values }: { values: RepositoryAccess[] }) {
   return (
     <div className="space-y-1">
-      <h4 className="text-xs font-medium text-muted-foreground">Repositories</h4>
+      <h4 className="text-xs text-muted-foreground">Repositories</h4>
       {values.length === 0 ? (
         <p className="text-xs text-muted-foreground/70">None</p>
       ) : (
@@ -3229,7 +3227,7 @@ function WorkspaceRepositoryList({ values }: { values: RepositoryAccess[] }) {
 function WorkspaceAccessList({ title, values }: { title: string; values: string[] }) {
   return (
     <div className="space-y-1">
-      <h4 className="text-xs font-medium text-muted-foreground">{title}</h4>
+      <h4 className="text-xs text-muted-foreground">{title}</h4>
       {values.length === 0 ? (
         <p className="text-xs text-muted-foreground/70">None</p>
       ) : (
@@ -3308,7 +3306,7 @@ function SecretsSection({ settings, workspace }: { settings: SettingsData | null
   return (
     <div className="space-y-6">
       <div>
-        <h2 className="text-base font-semibold mb-1">Secrets</h2>
+        <h2 className="text-base mb-1">Secrets</h2>
         <p className="text-sm text-muted-foreground mb-6">
           Named secrets for workspace <code className="bg-muted px-1 rounded text-xs">{workspace || "default"}</code>. Values are stored on the hub and referenced from workspace env or workflow secret refs.
         </p>
@@ -3332,7 +3330,7 @@ function SecretsSection({ settings, workspace }: { settings: SettingsData | null
       </div>
 
       <div className="border border-border rounded-lg p-5 space-y-4">
-        <h3 className="text-sm font-medium">Add Secret</h3>
+        <h3 className="text-sm ">Add Secret</h3>
         <div className="flex gap-2">
           <Input placeholder="Name (e.g. linear_webhook_secret)" value={newName} onChange={e => setNewName(e.target.value)} className="font-mono text-sm" />
           <Input placeholder="Value" type="password" value={newValue} onChange={e => setNewValue(e.target.value)} className="font-mono text-sm" />
@@ -3826,7 +3824,7 @@ function AIConfigSection() {
       {/* Header */}
       <div className="px-8 pt-6 pb-3 flex-none flex items-start justify-between gap-4">
         <div>
-          <h2 className="text-base font-semibold mb-0.5">Configure with AI</h2>
+          <h2 className="text-base mb-0.5">Configure with AI</h2>
           <p className="text-sm text-muted-foreground">
             Describe changes in plain English. The AI will propose a hub.yaml update for you to review and apply.
           </p>
@@ -3866,7 +3864,7 @@ function AIConfigSection() {
           )}
           {applySuccess && (
             <div className="flex items-center gap-3">
-              <p className="text-sm text-green-600">&check; Config applied.</p>
+              <p className="text-sm text-status-ok">&check; Config applied.</p>
               {backupPath && (
                 <Button size="sm" variant="outline" onClick={revertConfig} disabled={reverting}>
                   <RotateCcw className="size-3.5 mr-1" />
@@ -3955,24 +3953,24 @@ function AIConfigSection() {
               <span className={cn(
                 "text-xs font-medium uppercase tracking-wide px-2 py-0.5 rounded",
                 yamlStreaming
-                  ? "bg-blue-500/15 text-blue-500 dark:text-blue-400"
+                  ? "bg-data/15 text-data dark:text-data"
                   : proposedYaml
-                    ? "bg-amber-500/15 text-amber-600 dark:text-amber-400"
+                    ? "bg-status-warn/15 text-status-warn dark:text-status-warn"
                     : "bg-muted text-muted-foreground"
               )}>
                 {yamlLabel}
               </span>
               {yamlStreaming && (
                 <span className="flex gap-0.5 items-center">
-                  <span className="size-1.5 rounded-full bg-blue-400 animate-bounce [animation-delay:0ms]" />
-                  <span className="size-1.5 rounded-full bg-blue-400 animate-bounce [animation-delay:150ms]" />
-                  <span className="size-1.5 rounded-full bg-blue-400 animate-bounce [animation-delay:300ms]" />
+                  <span className="size-1.5 rounded-full bg-data animate-bounce [animation-delay:0ms]" />
+                  <span className="size-1.5 rounded-full bg-data animate-bounce [animation-delay:150ms]" />
+                  <span className="size-1.5 rounded-full bg-data animate-bounce [animation-delay:300ms]" />
                 </span>
               )}
             </div>
             <div className="flex items-center gap-2">
               {revealSecrets && (
-                <span className="text-xs text-amber-500 font-medium">Secrets visible</span>
+                <span className="text-xs text-status-warn font-medium">Secrets visible</span>
               )}
               <Button
                 size="icon"
@@ -3988,11 +3986,11 @@ function AIConfigSection() {
 
           {/* YAML display — fills available height, scrollable */}
           <div className={cn(
-            "flex-1 min-h-0 border rounded-lg overflow-hidden bg-[#0d1117] relative transition-colors duration-300",
-            yamlStreaming ? "border-blue-500/50" : "border-border"
+            "flex-1 min-h-0 border rounded-lg overflow-hidden bg-card relative transition-colors duration-300",
+            yamlStreaming ? "border-data/50" : "border-border"
           )}>
             {yamlStreaming
-              ? <pre className="h-full overflow-auto p-3 text-xs font-mono leading-relaxed text-gray-300 whitespace-pre">{streamingYaml}<span className="animate-pulse text-amber-400">&#x258c;</span></pre>
+              ? <pre className="h-full overflow-auto p-3 text-xs font-mono leading-relaxed text-muted-foreground whitespace-pre">{streamingYaml}<span className="animate-pulse text-status-warn">&#x258c;</span></pre>
               : displayedYaml
                 ? <YamlHighlight code={displayedYaml} />
                 : <p className="p-3 text-xs text-muted-foreground">Loading…</p>
@@ -4153,7 +4151,7 @@ function MCPServersSection({ settings, onSave, saving }: { settings: SettingsDat
   return (
     <div className="space-y-6">
       <div>
-        <h2 className="text-base font-semibold mb-1">MCP Servers</h2>
+        <h2 className="text-base mb-1">MCP Servers</h2>
         <p className="text-sm text-muted-foreground mb-4">
           Model Context Protocol servers add tools to your agents. Configure them here and reference them in workflows.
         </p>
@@ -4162,7 +4160,7 @@ function MCPServersSection({ settings, onSave, saving }: { settings: SettingsDat
             {mcps.length} server{mcps.length !== 1 ? "s" : ""} configured
           </span>
           {enabledCount > 0 && (
-            <span className="text-xs bg-green-500/10 text-green-400 border border-green-500/20 px-2 py-1 rounded font-medium">
+            <span className="text-xs bg-status-ok/10 text-status-ok border border-status-ok/20 px-2 py-1 rounded font-medium">
               {enabledCount} enabled
             </span>
           )}
@@ -4187,13 +4185,13 @@ function MCPServersSection({ settings, onSave, saving }: { settings: SettingsDat
                   className={cn(
                     "relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full transition-colors duration-200",
                     mcp.enabled
-                      ? "bg-green-600 border-2 border-transparent"
+                      ? "bg-status-ok border-2 border-transparent"
                       : "bg-transparent border-2 border-muted-foreground/40"
                   )}
                 >
                   <span className={cn(
                     "pointer-events-none inline-block size-4 rounded-full shadow-sm transform transition-transform duration-200",
-                    mcp.enabled ? "bg-white translate-x-4" : "bg-muted-foreground/50 translate-x-0"
+                    mcp.enabled ? "bg-background translate-x-4" : "bg-muted-foreground/50 translate-x-0"
                   )} />
                 </button>
                 <div>
@@ -4226,7 +4224,7 @@ function MCPServersSection({ settings, onSave, saving }: { settings: SettingsDat
         <DialogContent className="max-w-lg max-h-[90vh] overflow-y-auto p-0 gap-0">
           <DialogTitle className="sr-only">{modalMode === "add" ? "Add MCP Server" : `Edit ${formName}`}</DialogTitle>
           <div className="flex items-center justify-between px-5 py-4 border-b border-border">
-            <h3 className="font-medium">{modalMode === "add" ? "Add MCP Server" : `Edit ${formName}`}</h3>
+            <h3>{modalMode === "add" ? "Add MCP Server" : `Edit ${formName}`}</h3>
           </div>
 
           <div className="p-5 space-y-4">
@@ -4517,7 +4515,7 @@ function TroubleshootSection() {
     <div className="flex flex-col" style={{ height: "calc(100vh - 8rem)" }}>
       <div className="px-8 pt-6 pb-3 flex-none flex items-start justify-between gap-4">
         <div>
-          <h2 className="text-base font-semibold mb-0.5">Troubleshoot</h2>
+          <h2 className="text-base mb-0.5">Troubleshoot</h2>
           <p className="text-sm text-muted-foreground">
             Describe what&apos;s not working. The AI will analyze your logs, config, and source code.
           </p>
@@ -4601,7 +4599,7 @@ function TroubleshootSection() {
           </div>
 
           {error && (
-            <div className="rounded-lg border border-red-500/20 bg-red-500/5 p-3 text-sm text-red-500 flex-none">
+            <div className="rounded-lg border border-destructive/20 bg-destructive/5 p-3 text-sm text-destructive flex-none">
               {error}
             </div>
           )}
@@ -4664,17 +4662,17 @@ function DoctorSection() {
 
   const severityIcon = (s: string) => {
     switch (s) {
-      case "critical": return <AlertTriangle className="size-4 text-red-500" />
-      case "warning": return <AlertTriangle className="size-4 text-amber-500" />
-      default: return <CheckCircle2 className="size-4 text-blue-400" />
+      case "critical": return <AlertTriangle className="size-4 text-destructive" />
+      case "warning": return <AlertTriangle className="size-4 text-status-warn" />
+      default: return <CheckCircle2 className="size-4 text-data" />
     }
   }
 
   const severityBadge = (s: string) => {
     const classes: Record<string, string> = {
-      critical: "bg-red-500/10 text-red-500 border-red-500/20",
-      warning: "bg-amber-500/10 text-amber-500 border-amber-500/20",
-      info: "bg-blue-400/10 text-blue-400 border-blue-400/20",
+      critical: "bg-destructive/10 text-destructive border-destructive/20",
+      warning: "bg-status-warn/10 text-status-warn border-status-warn/20",
+      info: "bg-data/10 text-data border-data/20",
     }
     return (
       <span className={cn("text-[10px] uppercase tracking-wider font-semibold px-2 py-0.5 rounded border", classes[s] || classes.info)}>
@@ -4687,7 +4685,7 @@ function DoctorSection() {
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <div>
-          <h2 className="text-base font-semibold mb-1">Doctor</h2>
+          <h2 className="text-base mb-1">Doctor</h2>
           <p className="text-sm text-muted-foreground">
             Diagnose hub configuration issues and get actionable fixes.
           </p>
@@ -4712,7 +4710,7 @@ function DoctorSection() {
       </div>
 
       {error && (
-        <div className="rounded-lg border border-red-500/20 bg-red-500/5 p-4 text-sm text-red-500">
+        <div className="rounded-lg border border-destructive/20 bg-destructive/5 p-4 text-sm text-destructive">
           {error}
         </div>
       )}
@@ -4724,25 +4722,25 @@ function DoctorSection() {
               <p className="text-2xl font-bold">{report.summary.total}</p>
               <p className="text-xs text-muted-foreground mt-1">Checks</p>
             </div>
-            <div className="rounded-lg border border-red-500/20 bg-red-500/5 p-3 text-center">
-              <p className="text-2xl font-bold text-red-500">{report.summary.critical}</p>
+            <div className="rounded-lg border border-destructive/20 bg-destructive/5 p-3 text-center">
+              <p className="text-2xl font-bold text-destructive">{report.summary.critical}</p>
               <p className="text-xs text-muted-foreground mt-1">Critical</p>
             </div>
-            <div className="rounded-lg border border-amber-500/20 bg-amber-500/5 p-3 text-center">
-              <p className="text-2xl font-bold text-amber-500">{report.summary.warning}</p>
+            <div className="rounded-lg border border-status-warn/20 bg-status-warn/5 p-3 text-center">
+              <p className="text-2xl font-bold text-status-warn">{report.summary.warning}</p>
               <p className="text-xs text-muted-foreground mt-1">Warnings</p>
             </div>
-            <div className="rounded-lg border border-emerald-500/20 bg-emerald-500/5 p-3 text-center">
-              <p className="text-2xl font-bold text-emerald-500">{report.summary.passed}</p>
+            <div className="rounded-lg border border-status-ok/20 bg-status-ok/5 p-3 text-center">
+              <p className="text-2xl font-bold text-status-ok">{report.summary.passed}</p>
               <p className="text-xs text-muted-foreground mt-1">Passed</p>
             </div>
           </div>
 
           {visibleChecks.length === 0 ? (
             allPassing ? (
-              <div className="rounded-lg border border-emerald-500/20 bg-emerald-500/5 p-6 text-center">
-                <CheckCircle2 className="size-8 text-emerald-500 mx-auto mb-2" />
-                <p className="text-sm font-medium text-emerald-500">All checks passing</p>
+              <div className="rounded-lg border border-status-ok/20 bg-status-ok/5 p-6 text-center">
+                <CheckCircle2 className="size-8 text-status-ok mx-auto mb-2" />
+                <p className="text-sm font-medium text-status-ok">All checks passing</p>
                 <p className="text-xs text-muted-foreground mt-1">
                   {report.summary.passed} check{report.summary.passed !== 1 ? "s" : ""} passed with no issues
                 </p>
@@ -4758,18 +4756,18 @@ function DoctorSection() {
                   className={cn(
                     "rounded-lg border p-4",
                     check.ok
-                      ? "border-emerald-500/20 bg-emerald-500/5"
+                      ? "border-status-ok/20 bg-status-ok/5"
                       : check.severity === "critical"
-                        ? "border-red-500/20 bg-red-500/5"
+                        ? "border-destructive/20 bg-destructive/5"
                         : check.severity === "warning"
-                          ? "border-amber-500/20 bg-amber-500/5"
+                          ? "border-status-warn/20 bg-status-warn/5"
                           : "border-border"
                   )}
                 >
                   <div className="flex items-start gap-3">
                     <div className="mt-0.5 shrink-0">
                       {check.ok ? (
-                        <CheckCircle2 className="size-4 text-emerald-500" />
+                        <CheckCircle2 className="size-4 text-status-ok" />
                       ) : (
                         severityIcon(check.severity)
                       )}
@@ -4784,7 +4782,7 @@ function DoctorSection() {
                       <p className="text-sm font-medium mt-1">{check.title}</p>
                       <p className="text-sm text-muted-foreground mt-0.5 whitespace-pre-wrap">{linkifyText(check.description)}</p>
                       {check.error && (
-                        <p className="text-xs text-red-400 mt-1 font-mono">{check.error}</p>
+                        <p className="text-xs text-destructive mt-1 font-mono">{check.error}</p>
                       )}
                       {check.fixAction && !check.ok && (
                         <div className="mt-3">
