@@ -30,7 +30,8 @@ export function WorkflowRunLogsDialog({ run }: { run: WorkflowRun }) {
           <DialogHeader className="shrink-0 border-b px-6 py-5 pr-12">
             <DialogTitle>Agent logs</DialogTitle>
             <DialogDescription>
-              Agent activity for run {shortId(run.id)} of {run.workflow_name} in {run.workspace_name}.
+              Agent activity for run <span className="font-mono">{shortId(run.id)}</span> of{" "}
+              <span className="font-mono">{run.workflow_name}</span> in {run.workspace_name}.
             </DialogDescription>
           </DialogHeader>
           <div className="min-h-0 flex-1 px-6 pb-6">

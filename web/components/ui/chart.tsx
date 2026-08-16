@@ -49,13 +49,17 @@ function ChartContainer({
   const uniqueId = React.useId()
   const chartId = `chart-${id || uniqueId.replace(/:/g, '')}`
 
+  // The '#ccc' / '#fff' inside the selectors below are Recharts' own hardcoded
+  // stroke attributes — they are what we match on, never what we paint with.
+  // Every declaration resolves to a design-system token, so grid rules, tooltip
+  // cursors and the ring around dots follow the theme instead of staying grey.
   return (
     <ChartContext.Provider value={{ config }}>
       <div
         data-slot="chart"
         data-chart={chartId}
         className={cn(
-          "[&_.recharts-cartesian-axis-tick_text]:fill-muted-foreground [&_.recharts-cartesian-grid_line[stroke='#ccc']]:stroke-border/50 [&_.recharts-curve.recharts-tooltip-cursor]:stroke-border [&_.recharts-polar-grid_[stroke='#ccc']]:stroke-border [&_.recharts-radial-bar-background-sector]:fill-muted [&_.recharts-rectangle.recharts-tooltip-cursor]:fill-muted [&_.recharts-reference-line_[stroke='#ccc']]:stroke-border flex aspect-video justify-center text-xs [&_.recharts-dot[stroke='#fff']]:stroke-transparent [&_.recharts-layer]:outline-hidden [&_.recharts-sector]:outline-hidden [&_.recharts-sector[stroke='#fff']]:stroke-transparent [&_.recharts-surface]:outline-hidden",
+          "[&_.recharts-cartesian-axis-tick_text]:fill-muted-foreground [&_.recharts-cartesian-axis-tick_text]:font-mono [&_.recharts-cartesian-axis-tick_text]:text-[10px] [&_.recharts-cartesian-grid_line[stroke='#ccc']]:stroke-border/40 [&_.recharts-curve.recharts-tooltip-cursor]:stroke-border [&_.recharts-polar-grid_[stroke='#ccc']]:stroke-border [&_.recharts-radial-bar-background-sector]:fill-foreground/8 [&_.recharts-rectangle.recharts-tooltip-cursor]:fill-foreground/8 [&_.recharts-reference-line_[stroke='#ccc']]:stroke-border flex aspect-video justify-center text-xs [&_.recharts-dot[stroke='#fff']]:stroke-background [&_.recharts-layer]:outline-hidden [&_.recharts-sector]:outline-hidden [&_.recharts-sector[stroke='#fff']]:stroke-background [&_.recharts-surface]:outline-hidden",
           className,
         )}
         {...props}
@@ -173,7 +177,7 @@ function ChartTooltipContent({
   return (
     <div
       className={cn(
-        'border-border/50 bg-background grid min-w-[8rem] items-start gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs shadow-xl',
+        'border-border bg-card text-card-foreground shadow-ds-lg grid min-w-[8rem] items-start gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs',
         className,
       )}
     >
@@ -270,8 +274,10 @@ function ChartLegendContent({
   return (
     <div
       className={cn(
-        'flex items-center justify-center gap-4',
-        verticalAlign === 'top' ? 'pb-3' : 'pt-3',
+        'text-muted-foreground flex flex-wrap items-center justify-center gap-x-4 gap-y-1.5 text-[11px]',
+        verticalAlign === 'top'
+          ? 'border-border mb-3 border-b pb-2'
+          : 'border-border mt-3 border-t pt-2',
         className,
       )}
     >
@@ -288,7 +294,7 @@ function ChartLegendContent({
               <itemConfig.icon />
             ) : (
               <div
-                className="h-2 w-2 shrink-0 rounded-[2px]"
+                className="size-[9px] shrink-0 rounded-[2px]"
                 style={{
                   backgroundColor: item.color,
                 }}
