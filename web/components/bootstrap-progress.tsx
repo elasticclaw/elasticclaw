@@ -58,8 +58,8 @@ export function BootstrapProgress({
     return (
       <div className="mt-1.5 w-full min-w-0 overflow-hidden space-y-1">
         <div className="flex min-w-0 items-center justify-between gap-2 text-[9px]">
-          <span className="min-w-0 truncate font-medium text-blue-400">{detail}</span>
-          <span className="shrink-0 text-muted-foreground/50">{currentIndex + 1}/{STEPS.length}</span>
+          <span className="min-w-0 truncate font-medium text-data">{detail}</span>
+          <span className="shrink-0 font-mono text-muted-foreground">{currentIndex + 1}/{STEPS.length}</span>
         </div>
         <div className="grid min-w-0 grid-cols-5 gap-0.5">
           {STEPS.map((step, index) => (
@@ -67,8 +67,8 @@ export function BootstrapProgress({
               key={step.key}
               className={cn(
                 "h-0.5 rounded-full bg-border",
-                index < currentIndex && "bg-blue-500/70",
-                index === currentIndex && "bg-blue-400 animate-pulse"
+                index < currentIndex && "bg-data/70",
+                index === currentIndex && "bg-data-light animate-pulse"
               )}
               title={step.label}
             />
@@ -82,8 +82,8 @@ export function BootstrapProgress({
     return (
       <div className="mt-2 space-y-1.5">
         <div className="flex items-center justify-between text-[10px]">
-          <span className="font-medium text-blue-400">{detail}</span>
-          <span className="text-muted-foreground/60">{currentIndex + 1}/{STEPS.length}</span>
+          <span className="font-medium text-data">{detail}</span>
+          <span className="font-mono text-muted-foreground">{currentIndex + 1}/{STEPS.length}</span>
         </div>
         <div className="grid grid-cols-5 gap-1">
           {STEPS.map((step, index) => (
@@ -91,8 +91,8 @@ export function BootstrapProgress({
               key={step.key}
               className={cn(
                 "h-1 rounded-full bg-border",
-                index < currentIndex && "bg-blue-500/70",
-                index === currentIndex && "bg-blue-400 animate-pulse"
+                index < currentIndex && "bg-data/70",
+                index === currentIndex && "bg-data-light animate-pulse"
               )}
               title={step.label}
             />
@@ -106,7 +106,7 @@ export function BootstrapProgress({
     <div className="border-t border-border/60 px-6 py-3">
       <div className="mb-2 flex items-center justify-between">
         <div className="flex items-center gap-2">
-          <Loader2 className="size-3.5 animate-spin text-blue-400" />
+          <Loader2 className="size-3.5 animate-spin text-data" />
           <span className="text-sm font-medium text-foreground">Setting up agent</span>
         </div>
         <span className="text-xs text-muted-foreground">{detail}</span>
@@ -120,15 +120,15 @@ export function BootstrapProgress({
               <div
                 className={cn(
                   "mb-1 h-1 rounded-full bg-border",
-                  isDone && "bg-blue-500/70",
-                  isCurrent && "bg-blue-400 animate-pulse"
+                  isDone && "bg-data/70",
+                  isCurrent && "bg-data-light animate-pulse"
                 )}
               />
               <div className="flex min-w-0 items-center gap-1.5">
                 {isDone ? (
-                  <CheckCircle2 className="size-3 shrink-0 text-blue-400" />
+                  <CheckCircle2 className="size-3 shrink-0 text-data" />
                 ) : isCurrent ? (
-                  <Loader2 className="size-3 shrink-0 animate-spin text-blue-400" />
+                  <Loader2 className="size-3 shrink-0 animate-spin text-data" />
                 ) : (
                   <Circle className="size-3 shrink-0 text-muted-foreground/40" />
                 )}

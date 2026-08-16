@@ -26,16 +26,16 @@ function StatusPill({ status }: { status: TurnStatus }) {
   return (
     <span
       className={cn(
-        "inline-flex items-center gap-1 rounded-full border px-1.5 py-px text-[10px] font-medium",
-        status === "running" && "border-blue-500/40 text-blue-400",
-        status === "failed" && "border-red-500/40 text-red-400",
+        "inline-flex items-center gap-1 rounded-full border px-1.5 py-px font-mono text-[10px]",
+        status === "running" && "border-data/50 text-data",
+        status === "failed" && "border-destructive/50 text-destructive",
         status === "ok" && "border-border text-muted-foreground"
       )}
     >
       {status === "running" && (
         <span className="relative flex size-1.5">
-          <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-blue-400 opacity-75" />
-          <span className="relative inline-flex size-1.5 rounded-full bg-blue-500" />
+          <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-data opacity-75" />
+          <span className="relative inline-flex size-1.5 rounded-full bg-data" />
         </span>
       )}
       {status === "running" ? "running" : status === "failed" ? "failed" : "done"}
@@ -114,27 +114,29 @@ export const TurnCard = memo(function TurnCard({
   )
 
   return (
-    <section className="overflow-hidden rounded-xl border border-border bg-card">
+    /* The mockup's activity group: a hairline-bordered block on a faint ink
+       wash, holding the monospaced step rows. */
+    <section className="overflow-hidden rounded-lg border border-border bg-foreground/4">
       <button
         type="button"
         onClick={(e) => {
           anchor(e.currentTarget)
           onToggle(toggleKey, expanded)
         }}
-        className="flex w-full items-center gap-2 bg-muted/30 px-3 py-2 text-left hover:bg-muted/50"
+        className="flex w-full items-center gap-2 px-3 py-2 text-left transition-colors hover:bg-foreground/7"
       >
         <ChevronRight
           className={cn("size-3.5 shrink-0 text-muted-foreground transition-transform", expanded && "rotate-90")}
         />
         <span className="min-w-0 truncate text-sm font-medium text-foreground">{label}</span>
         <StatusPill status={status} />
-        <span className="ml-auto flex shrink-0 items-center gap-2 text-[10.5px] text-muted-foreground">
+        <span className="ml-auto flex shrink-0 items-center gap-2 font-mono text-[10.5px] text-muted-foreground">
           {turn.failedCount > 0 && (
-            <span className="text-red-400">{turn.failedCount} failed</span>
+            <span className="text-destructive">{turn.failedCount} failed</span>
           )}
           <span>{stepNoun}</span>
-          {duration && <span className="font-mono">{duration}</span>}
-          <span className="font-mono" suppressHydrationWarning>{clock}</span>
+          {duration && <span>{duration}</span>}
+          <span suppressHydrationWarning>{clock}</span>
         </span>
       </button>
 

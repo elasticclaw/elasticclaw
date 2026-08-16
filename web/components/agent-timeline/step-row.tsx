@@ -44,15 +44,15 @@ function StepIcon({ step, className }: { step: Step; className: string }) {
 }
 
 function stepAccent(step: Step): string {
-  if (step.status === "running") return "border-l-blue-500"
-  if (step.status === "failed") return "border-l-red-500"
-  if (step.tone === "warning") return "border-l-amber-500/70"
+  if (step.status === "running") return "border-l-data"
+  if (step.status === "failed") return "border-l-destructive"
+  if (step.tone === "warning") return "border-l-status-warn/70"
   return "border-l-transparent"
 }
 
 function stepTextTone(step: Step): string {
-  if (step.status === "failed" || step.tone === "error") return "text-red-400"
-  if (step.tone === "warning") return "text-amber-400"
+  if (step.status === "failed" || step.tone === "error") return "text-destructive"
+  if (step.tone === "warning") return "text-status-warn"
   return "text-foreground/80"
 }
 
@@ -112,7 +112,7 @@ export function StepRow({
           "grid grid-cols-[auto_1fr_auto] items-baseline gap-x-2",
           isCard ? "py-0.5" : "py-1",
           // 44px tap target for expandable rows on touch screens
-          hasBody && "cursor-pointer rounded-sm hover:bg-muted/30 max-md:min-h-11 max-md:items-center"
+          hasBody && "cursor-pointer rounded-sm hover:bg-foreground/7 max-md:min-h-11 max-md:items-center"
         )}
       >
         <span className="self-center">
@@ -121,11 +121,13 @@ export function StepRow({
         <span className="flex min-w-0 items-baseline gap-1.5 max-md:flex-wrap max-md:gap-y-0">
           {running && (
             <span className="relative flex size-1.5 self-center">
-              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-blue-400 opacity-75" />
-              <span className="relative inline-flex size-1.5 rounded-full bg-blue-500" />
+              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-data opacity-75" />
+              <span className="relative inline-flex size-1.5 rounded-full bg-data" />
             </span>
           )}
-          <span className={cn("shrink-0 font-medium", isCard ? "text-[10px]" : "text-xs", stepTextTone(step))}>
+          {/* The mockup renders a step as one monospaced line: tool, target,
+              duration — so the tool name is mono here, not a sans label. */}
+          <span className={cn("shrink-0 font-mono", isCard ? "text-[10px]" : "text-xs", stepTextTone(step))}>
             {step.title}
           </span>
           {step.detail && (
@@ -143,10 +145,10 @@ export function StepRow({
             </span>
           )}
           {step.statusText && !isCard && (
-            <span className="min-w-0 truncate text-xs text-muted-foreground/50">{step.statusText}</span>
+            <span className="min-w-0 truncate text-xs text-muted-foreground">{step.statusText}</span>
           )}
           {showExit && (
-            <span className={cn("shrink-0 rounded bg-red-500/10 px-1 font-mono text-red-400", isCard ? "text-[9px]" : "text-[10px]")}>
+            <span className={cn("shrink-0 rounded-sm bg-destructive/12 px-1 font-mono text-destructive", isCard ? "text-[9px]" : "text-[10px]")}>
               exit {step.exitCode}
             </span>
           )}
@@ -158,7 +160,7 @@ export function StepRow({
             </span>
           )}
           {hasBody && (
-            <ChevronRight className={cn("size-3 text-muted-foreground/50 transition-transform", expanded && "rotate-90")} />
+            <ChevronRight className={cn("size-3 text-muted-foreground transition-transform", expanded && "rotate-90")} />
           )}
         </span>
       </div>
@@ -166,7 +168,7 @@ export function StepRow({
         <div className={cn("mb-1 space-y-1", isCard ? "pr-1" : "pr-2")}>
           {step.error && (
             <pre className={cn(
-              "overflow-y-auto whitespace-pre-wrap break-words rounded border border-red-500/20 bg-red-500/5 p-2 font-mono text-red-400",
+              "overflow-y-auto whitespace-pre-wrap break-words rounded-md border border-destructive/30 bg-destructive/8 p-2 font-mono text-destructive",
               isCard ? "max-h-32 text-[10px]" : "max-h-64 text-[11px]"
             )}>
               {step.error}
@@ -174,7 +176,7 @@ export function StepRow({
           )}
           {step.result && (
             <pre className={cn(
-              "overflow-y-auto whitespace-pre-wrap break-words rounded border border-border/50 bg-muted/40 p-2 font-mono text-muted-foreground",
+              "overflow-y-auto whitespace-pre-wrap break-words rounded-md border border-border bg-foreground/4 p-2 font-mono text-muted-foreground",
               isCard ? "max-h-32 text-[10px]" : "max-h-64 text-[11px]"
             )}>
               {step.result}
@@ -240,19 +242,19 @@ function StepGroupRow({
           setExpanded((v) => !v)
         }}
         className={cn(
-          "grid w-full grid-cols-[auto_1fr_auto] items-center gap-x-2 rounded-sm text-left hover:bg-muted/30 max-md:min-h-11",
+          "grid w-full grid-cols-[auto_1fr_auto] items-center gap-x-2 rounded-sm text-left hover:bg-foreground/7 max-md:min-h-11",
           isCard ? "py-0.5" : "py-1"
         )}
       >
         <Icon className={cn(isCard ? "size-2.5" : "size-3", "shrink-0 text-muted-foreground")} />
-        <span className={cn("min-w-0 truncate font-medium text-muted-foreground", isCard ? "text-[10px]" : "text-xs")}>
+        <span className={cn("min-w-0 truncate font-mono text-muted-foreground", isCard ? "text-[10px]" : "text-xs")}>
           {label}
         </span>
         <span className="flex items-center gap-1">
           {totalMs > 0 && (
             <span className="font-mono text-[10.5px] text-muted-foreground">{formatDurationMs(totalMs)}</span>
           )}
-          <ChevronRight className={cn("size-3 text-muted-foreground/50 transition-transform", expanded && "rotate-90")} />
+          <ChevronRight className={cn("size-3 text-muted-foreground transition-transform", expanded && "rotate-90")} />
         </span>
       </button>
       {expanded && (

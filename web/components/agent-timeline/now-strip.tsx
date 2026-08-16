@@ -23,18 +23,27 @@ import { useLastOutputAt } from "@/hooks/use-last-output"
 export type NowStripState = "working" | "waiting" | "done" | "error" | "offline"
 
 const STATE_DOT: Record<Exclude<NowStripState, "working">, string> = {
-  waiting: "bg-amber-400",
-  done: "bg-muted-foreground/50",
-  error: "bg-red-500",
-  offline: "bg-muted-foreground/40",
+  waiting: "bg-status-warn",
+  done: "bg-muted-foreground",
+  error: "bg-destructive",
+  offline: "bg-muted-foreground/60",
 }
 
 const STATE_TEXT: Record<Exclude<NowStripState, "working">, string> = {
-  waiting: "text-amber-300/90",
+  waiting: "text-status-warn",
   done: "text-muted-foreground",
-  error: "text-red-400",
-  offline: "text-muted-foreground/70",
+  error: "text-destructive",
+  offline: "text-muted-foreground",
 }
+
+/** Geometry of the board card's state row — no type utilities here, so the
+ *  quiet (mono) and loud (Archivo 800) variants never fight over the cascade:
+ *  same-property Tailwind utilities win by source order in the sheet, not by
+ *  the order they appear in a className string. */
+const STATE_ROW =
+  "flex min-w-0 items-center gap-1.5 border-b border-border px-3 py-1 leading-4"
+const STATE_ROW_QUIET = "font-mono text-[10px]"
+const STATE_ROW_LOUD = "font-sans text-[11px] font-extrabold uppercase tracking-[0.1em]"
 
 export function NowStrip({
   clawId,
@@ -74,17 +83,40 @@ export function NowStrip({
           ? `last seen ${formatAge(statusAt, now)}`
           : "offline"
         : statusText || (state === "error" ? "Agent errored" : "Idle")
+    // The two loud states get the mockup's full-width state strip: a solid
+    // accent band for "needs you", the deep accent tint for a failure. The
+    // quiet states stay a plain mono line so the board reads at a glance.
+    const isBanner = state === "waiting" || state === "error"
     return (
-      <div className="flex min-w-0 items-center gap-1.5 border-b border-border bg-muted/20 px-3 py-1 text-[10px] leading-4">
-        <span className={cn("size-1.5 shrink-0 rounded-full", dotClass, state === "waiting" && "animate-pulse")} />
-        {state === "waiting" && (
-          <span className="shrink-0 font-medium text-amber-400">Needs you</span>
+      <div
+        className={cn(
+          STATE_ROW,
+          isBanner ? STATE_ROW_LOUD : STATE_ROW_QUIET,
+          state === "waiting" && "bg-primary text-primary-foreground",
+          state === "error" && "bg-[var(--ds-accent-800)] text-[var(--ds-accent-100)]"
         )}
-        <span className={cn("min-w-0 flex-1 truncate", textClass)} title={text} suppressHydrationWarning={state === "offline" || undefined}>
+      >
+        {!isBanner && <span className={cn("size-1.5 shrink-0 rounded-full", dotClass)} />}
+        {state === "waiting" && <span className="shrink-0">Waiting on you</span>}
+        <span
+          className={cn(
+            "min-w-0 flex-1 truncate",
+            state === "waiting" && "font-mono text-[10px] font-normal normal-case tracking-normal opacity-85",
+            !isBanner && textClass
+          )}
+          title={text}
+          suppressHydrationWarning={state === "offline" || undefined}
+        >
           {text}
         </span>
         {state !== "offline" && statusAt != null && statusAt > 0 && (
-          <span className="shrink-0 font-mono text-[9.5px] text-muted-foreground" suppressHydrationWarning>
+          <span
+            className={cn(
+              "shrink-0 font-mono text-[9.5px] font-normal normal-case tracking-normal",
+              isBanner ? "opacity-85" : "text-muted-foreground"
+            )}
+            suppressHydrationWarning
+          >
             {formatAge(statusAt, now)}
           </span>
         )}
@@ -110,17 +142,17 @@ export function NowStrip({
        truncating away. Card variant: one line, truncate hard. */
     <div
       className={cn(
-        "border-b border-border bg-muted/20",
+        "border-b border-border",
         isCard
-          ? "flex min-w-0 items-center gap-1.5 px-3 py-1 text-[10px] leading-4"
-          : "flex flex-wrap items-center gap-x-2 gap-y-0.5 px-4 md:px-6 py-1.5 text-xs"
+          ? cn(STATE_ROW, STATE_ROW_QUIET, "text-status-ok")
+          : "flex flex-wrap items-center gap-x-2 gap-y-0.5 bg-foreground/4 px-4 md:px-6 py-1.5 text-xs"
       )}
     >
       <span className={cn("relative flex shrink-0", isCard ? "size-1.5" : "size-2")}>
-        <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-green-400 opacity-75" />
-        <span className={cn("relative inline-flex rounded-full bg-green-500", isCard ? "size-1.5" : "size-2")} />
+        <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-status-ok opacity-75" />
+        <span className={cn("relative inline-flex rounded-full bg-status-ok", isCard ? "size-1.5" : "size-2")} />
       </span>
-      <span className="shrink-0 font-medium text-foreground">{what}</span>
+      <span className={cn("shrink-0", isCard ? "text-status-ok" : "font-medium text-foreground")}>{what}</span>
       {step?.detail && (
         <span
           className={cn(
@@ -141,7 +173,7 @@ export function NowStrip({
       >
         {elapsed !== null && <span suppressHydrationWarning>{formatDurationMs(elapsed)}</span>}
         {outputAge !== null && (
-          <span className={cn(stale && "text-amber-400")} suppressHydrationWarning>
+          <span className={cn(stale && "text-status-warn")} suppressHydrationWarning>
             last output {formatAge(lastOutputAt as number, now)}
           </span>
         )}
