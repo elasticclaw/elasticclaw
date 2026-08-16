@@ -10,6 +10,16 @@ interface TerminalProps {
 }
 
 /**
+ * xterm.js needs concrete color strings, so design tokens are resolved from the
+ * document at mount time instead of being handed over as `var(--…)`.
+ */
+function readToken(name: string, fallback: string): string {
+  if (typeof window === "undefined") return fallback
+  const value = getComputedStyle(document.documentElement).getPropertyValue(name).trim()
+  return value || fallback
+}
+
+/**
  * XTerminal — browser-only SSH terminal component.
  * Dynamically imports xterm.js to avoid SSR issues.
  */
@@ -32,31 +42,38 @@ export function XTerminal({ clawId, wsUrl, className }: TerminalProps) {
       const { FitAddon } = await import("@xterm/addon-fit")
       if (!mounted || !containerRef.current) return
 
+      const surface = readToken("--ds-surface", "#1e1e21")
+      const text = readToken("--ds-text", "#f2f2f4")
+
       const term = new Terminal({
         cursorBlink: true,
         fontFamily: '"JetBrains Mono", "Fira Code", "Cascadia Code", monospace',
         fontSize: 13,
         theme: {
-          background: "#1e1e1e",
-          foreground: "#d4d4d4",
-          cursor: "#d4d4d4",
-          selectionBackground: "#264f78",
-          black: "#1e1e1e",
-          red: "#f44747",
-          green: "#4ec9b0",
-          yellow: "#dcdcaa",
-          blue: "#569cd6",
-          magenta: "#c586c0",
-          cyan: "#9cdcfe",
-          white: "#d4d4d4",
-          brightBlack: "#808080",
-          brightRed: "#f44747",
-          brightGreen: "#4ec9b0",
-          brightYellow: "#dcdcaa",
-          brightBlue: "#569cd6",
-          brightMagenta: "#c586c0",
-          brightCyan: "#9cdcfe",
-          brightWhite: "#ffffff",
+          background: surface,
+          foreground: text,
+          cursor: "#ff563c",
+          cursorAccent: surface,
+          selectionBackground: "rgba(255, 86, 60, 0.32)",
+          selectionForeground: text,
+          // ANSI 16 tuned for the Modernist dark surface: the red family follows
+          // the accent, the other hues stay distinguishable as semantic ANSI slots.
+          black: "#2b2b30",
+          red: "#ff563c",
+          green: "#2fb37a",
+          yellow: "#d9a13a",
+          blue: "#6f9dea",
+          magenta: "#c98ad6",
+          cyan: "#4fbfc4",
+          white: "#d5d5d8",
+          brightBlack: "#7b7b80",
+          brightRed: "#ff8a76",
+          brightGreen: "#57d19c",
+          brightYellow: "#f0bf5f",
+          brightBlue: "#93b8f4",
+          brightMagenta: "#e0aeea",
+          brightCyan: "#7ad9dd",
+          brightWhite: "#f7f7f8",
         },
       })
 
@@ -127,7 +144,7 @@ export function XTerminal({ clawId, wsUrl, className }: TerminalProps) {
     <div
       ref={containerRef}
       className={className}
-      style={{ background: "#1e1e1e" }}
+      style={{ background: "var(--ds-surface)" }}
     />
   )
 }
