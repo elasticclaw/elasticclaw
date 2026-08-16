@@ -6,6 +6,38 @@ import { getHubUrl } from "@/lib/hub-url"
 import { clearConfig } from "@/lib/api"
 import { setGitHubToken, setHubToken, getOAuthState, setOAuthState, removeOAuthState, getOAuthNext, setOAuthNext, removeOAuthNext } from "@/lib/auth-storage"
 import { useBranding } from "@/hooks/use-branding"
+import { Button } from "@/components/ui/button"
+import { Input } from "@/components/ui/input"
+import { Field } from "@/components/ui/field"
+
+function GitHubMark() {
+  return (
+    <svg viewBox="0 0 16 16" className="size-4 fill-current" aria-hidden="true">
+      <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8z" />
+    </svg>
+  )
+}
+
+// The auth card is shared by the loaded form and the Suspense fallback so both
+// states present the same 360px surface instead of one reflowing into the other.
+function AuthCard({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="grid h-screen place-items-center bg-background p-4">
+      <div className="w-full max-w-[360px] space-y-4 rounded-lg border border-border bg-card p-8">
+        {children}
+      </div>
+    </div>
+  )
+}
+
+function AuthHeading({ appName, caption }: { appName: string; caption: string }) {
+  return (
+    <div>
+      <h1 className="text-[26px]">{appName}</h1>
+      <p className="mt-1 text-sm text-muted-foreground">{caption}</p>
+    </div>
+  )
+}
 
 interface AuthConfig {
   github_oauth_enabled: boolean
@@ -179,70 +211,54 @@ function LoginForm() {
   const isCallback = !!searchParams.get("code")
 
   return (
-    <div className="flex h-screen bg-background items-center justify-center">
-      <div className="w-full max-w-sm space-y-6 p-8 border border-border rounded-xl bg-card">
-        <div className="space-y-1 text-center">
-          <h1 className="text-2xl font-semibold tracking-tight">{appName}</h1>
-          <p className="text-sm text-muted-foreground">
-            {isCallback ? "Completing sign-in…" : "Sign in to continue"}
-          </p>
-        </div>
+    <AuthCard>
+      <AuthHeading appName={appName} caption={isCallback ? "Completing sign-in…" : "Sign in to continue"} />
 
-        {isCallback && !error && (
-          <p className="text-center text-sm text-muted-foreground animate-pulse">Signing you in with GitHub…</p>
-        )}
+      {isCallback && !error && (
+        <p className="animate-pulse text-sm text-muted-foreground">Signing you in with GitHub…</p>
+      )}
 
-        {error && <p className="text-sm text-red-500 text-center">{error}</p>}
+      {error && <p className="text-sm text-destructive">{error}</p>}
 
-        {!isCallback && (
-          <>
-            {showGitHub && (
-              <button
-                type="button"
-                onClick={handleGitHubSignIn}
-                className="w-full flex items-center justify-center gap-2 rounded-md border border-border bg-background px-3 py-2 text-sm font-medium hover:bg-accent hover:text-accent-foreground"
-              >
-                <svg viewBox="0 0 16 16" className="h-4 w-4 fill-current" aria-hidden="true">
-                  <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8z" />
-                </svg>
-                Sign in with GitHub
-              </button>
-            )}
+      {!isCallback && (
+        <>
+          {showGitHub && (
+            <Button
+              type="button"
+              variant="outline"
+              onClick={handleGitHubSignIn}
+              className="w-full justify-start"
+            >
+              <GitHubMark />
+              Sign in with GitHub
+            </Button>
+          )}
 
-            {showGitHub && showPassword && (
-              <div className="relative">
-                <div className="absolute inset-0 flex items-center">
-                  <span className="w-full border-t border-border" />
-                </div>
-                <div className="relative flex justify-center text-xs uppercase">
-                  <span className="bg-card px-2 text-muted-foreground">or</span>
-                </div>
-              </div>
-            )}
+          {showGitHub && showPassword && (
+            <div className="flex items-center gap-3 kicker text-muted-foreground before:h-0.5 before:flex-1 before:bg-border before:content-[''] after:h-0.5 after:flex-1 after:bg-border after:content-['']">
+              or
+            </div>
+          )}
 
-            {showPassword && (
-              <form onSubmit={handleSubmit} className="space-y-4">
-                <input
+          {showPassword && (
+            <form onSubmit={handleSubmit} className="space-y-3">
+              <Field>
+                <Input
                   type="password"
                   placeholder="Access token"
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
                   autoFocus={!showGitHub}
-                  className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring"
                 />
-                <button
-                  type="submit"
-                  disabled={loading || !password}
-                  className="w-full rounded-md bg-primary px-3 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
-                >
-                  {loading ? "Signing in…" : "Sign in"}
-                </button>
-              </form>
-            )}
-          </>
-        )}
-      </div>
-    </div>
+              </Field>
+              <Button type="submit" disabled={loading || !password} className="w-full justify-start">
+                {loading ? "Signing in…" : "Sign in"}
+              </Button>
+            </form>
+          )}
+        </>
+      )}
+    </AuthCard>
   )
 }
 
@@ -250,14 +266,9 @@ function LoginFallback() {
   const { appName } = useBranding()
 
   return (
-    <div className="flex h-screen bg-background items-center justify-center">
-      <div className="w-full max-w-sm space-y-6 p-8 border border-border rounded-xl bg-card">
-        <div className="space-y-1 text-center">
-          <h1 className="text-2xl font-semibold tracking-tight">{appName}</h1>
-          <p className="text-sm text-muted-foreground">Loading…</p>
-        </div>
-      </div>
-    </div>
+    <AuthCard>
+      <AuthHeading appName={appName} caption="Loading…" />
+    </AuthCard>
   )
 }
 

@@ -24,17 +24,17 @@ export function SetupScreen({ onConnected }: { onConnected: () => void }) {
   }
 
   return (
-    <div className="flex h-screen bg-background items-center justify-center">
-      <div className="w-full max-w-md p-8 space-y-6">
-        <div className="space-y-2">
-          <h1 className="text-2xl font-bold">Connect to {appName} Server</h1>
-          <p className="text-sm text-muted-foreground">
+    <div className="grid h-screen place-items-center bg-background p-4">
+      <div className="w-full max-w-[440px] space-y-6">
+        <div>
+          <h1 className="text-[26px]">Connect to {appName} Server</h1>
+          <p className="mt-2 text-sm text-muted-foreground">
             Enter your {appName} Server URL and authentication token to get started.
           </p>
         </div>
 
         <div className="space-y-4">
-          <Field>
+          <Field className="gap-1.5">
             <FieldLabel htmlFor="hub-url">{appName} Server URL</FieldLabel>
             <Input
               id="hub-url"
@@ -44,7 +44,7 @@ export function SetupScreen({ onConnected }: { onConnected: () => void }) {
               onKeyDown={(e) => e.key === "Enter" && handleConnect()}
             />
           </Field>
-          <Field>
+          <Field className="gap-1.5">
             <FieldLabel htmlFor="hub-token">Token</FieldLabel>
             <Input
               id="hub-token"
@@ -59,16 +59,23 @@ export function SetupScreen({ onConnected }: { onConnected: () => void }) {
         </div>
 
         <Button
-          className="w-full"
+          className="w-full justify-start"
           onClick={handleConnect}
           disabled={!hubUrl.trim() || !hubToken.trim()}
         >
           Connect
         </Button>
 
-        <p className="text-xs text-muted-foreground text-center">
-          You can also set <code className="bg-muted px-1 rounded">NEXT_PUBLIC_HUB_URL</code> and{" "}
-          <code className="bg-muted px-1 rounded">NEXT_PUBLIC_HUB_TOKEN</code> environment variables.
+        <p className="text-xs text-muted-foreground">
+          You can also set{" "}
+          <code className="rounded-sm bg-foreground/10 px-1.5 py-px font-mono text-[0.92em] text-foreground">
+            NEXT_PUBLIC_HUB_URL
+          </code>{" "}
+          and{" "}
+          <code className="rounded-sm bg-foreground/10 px-1.5 py-px font-mono text-[0.92em] text-foreground">
+            NEXT_PUBLIC_HUB_TOKEN
+          </code>{" "}
+          environment variables.
         </p>
       </div>
     </div>
