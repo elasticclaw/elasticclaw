@@ -11,90 +11,203 @@
   height: 100dvh;
 }
 
+/* ══════════════════════════════════════════════════════════════════════════
+   LAYER A — Modernist design system
+   ──────────────────────────────────────────────────────────────────────────
+   This block IS the design system: raw role colors, tonal ramps, tints,
+   shadows, radii and status hues, ported from docs/design/modernist/styles.css
+   (plus the three product status colors from that folder's app.css). It is the
+   replaceable layer — swapping the design system means re-tuning only the
+   values here; nothing below (layer B, the shadcn mapping) needs to change.
+   The app shell renders dark-only via <html className="dark">, so the .dark
+   block carries the values users actually see; :root keeps the light set so
+   the ramp stays legible and any future light mode is a one-line switch.
+   ══════════════════════════════════════════════════════════════════════════ */
+
 :root {
-  --background: oklch(1 0 0);
-  --foreground: oklch(0.145 0 0);
-  --card: oklch(1 0 0);
-  --card-foreground: oklch(0.145 0 0);
-  --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.145 0 0);
-  --primary: oklch(0.205 0 0);
-  --primary-foreground: oklch(0.985 0 0);
-  --secondary: oklch(0.97 0 0);
-  --secondary-foreground: oklch(0.205 0 0);
-  --muted: oklch(0.97 0 0);
-  --muted-foreground: oklch(0.556 0 0);
-  --accent: oklch(0.97 0 0);
-  --accent-foreground: oklch(0.205 0 0);
-  --destructive: oklch(0.577 0.245 27.325);
-  --destructive-foreground: oklch(0.577 0.245 27.325);
-  --border: oklch(0.922 0 0);
-  --input: oklch(0.922 0 0);
-  --ring: oklch(0.708 0 0);
-  --chart-1: oklch(0.646 0.222 41.116);
-  --chart-2: oklch(0.6 0.118 184.704);
-  --chart-3: oklch(0.398 0.07 227.392);
-  --chart-4: oklch(0.828 0.189 84.429);
-  --chart-5: oklch(0.769 0.188 70.08);
-  --heatmap-1: oklch(0.86 0.08 250);
-  --heatmap-2: oklch(0.72 0.13 250);
-  --heatmap-3: oklch(0.59 0.17 250);
-  --heatmap-4: oklch(0.46 0.16 250);
-  --heatmap-5: oklch(0.32 0.12 250);
-  --radius: 0.625rem;
-  --sidebar: oklch(0.985 0 0);
-  --sidebar-foreground: oklch(0.145 0 0);
-  --sidebar-primary: oklch(0.205 0 0);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.97 0 0);
-  --sidebar-accent-foreground: oklch(0.205 0 0);
-  --sidebar-border: oklch(0.922 0 0);
-  --sidebar-ring: oklch(0.708 0 0);
+  /* — role colors (light) — */
+  --ds-bg: #f4f4f5;
+  --ds-surface: #e8e8ea;
+  --ds-text: #1b1b1d;
+  --ds-accent: #ec3013;
+  --ds-accent-2: #e15b47;
+  --ds-divider: color-mix(in srgb, #1b1b1d 40%, transparent);
+
+  /* — tonal ramps — generated in OKLCH on one shared lightness scale, so the
+       same step of any role matches the others in visual value. The ramps do
+       NOT flip in dark mode: a step always means the same color. */
+  --ds-neutral-100: #f7f7f8;
+  --ds-neutral-200: #e9e9eb;
+  --ds-neutral-300: #d5d5d8;
+  --ds-neutral-400: #b8b8bc;
+  --ds-neutral-500: #99999e;
+  --ds-neutral-600: #7b7b80;
+  --ds-neutral-700: #5e5e63;
+  --ds-neutral-800: #424247;
+  --ds-neutral-900: #2b2b30;
+
+  --ds-accent-100: #fff2ef;
+  --ds-accent-200: #ffe0d9;
+  --ds-accent-300: #ffc4b8;
+  --ds-accent-400: #ff9783;
+  --ds-accent-500: #ff563c;
+  --ds-accent-600: #dd2b0f;
+  --ds-accent-700: #ae1800;
+  --ds-accent-800: #7c1405;
+  --ds-accent-900: #4d170e;
+
+  --ds-accent-2-100: #fff2ef;
+  --ds-accent-2-200: #ffe0da;
+  --ds-accent-2-300: #ffc4b9;
+  --ds-accent-2-400: #ff9784;
+  --ds-accent-2-500: #ef6853;
+  --ds-accent-2-600: #c94b39;
+  --ds-accent-2-700: #9e3526;
+  --ds-accent-2-800: #71261b;
+  --ds-accent-2-900: #471d16;
+
+  /* — tinted fills — the pair a chip or callout uses; both members flip
+       together in dark mode so contrast holds either way. */
+  --ds-tint-accent-bg: var(--ds-accent-100);
+  --ds-tint-accent-fg: var(--ds-accent-800);
+  --ds-tint-accent-2-bg: var(--ds-accent-2-100);
+  --ds-tint-accent-2-fg: var(--ds-accent-2-800);
+  --ds-tint-neutral-bg: var(--ds-neutral-100);
+  --ds-tint-neutral-fg: var(--ds-neutral-800);
+
+  /* — pressed / hover accents — one ramp step past the accent, in the
+       direction that reads as "deeper" against the current ground. */
+  --ds-accent-hover: var(--ds-accent-600);
+  --ds-accent-active: var(--ds-accent-700);
+
+  /* — elevation — soft ink-tinted shadows on a light ground. */
+  --ds-shadow-sm: 0 1px 2px color-mix(in srgb, #2b2b30 14%, transparent);
+  --ds-shadow-md: 0 3px 10px color-mix(in srgb, #2b2b30 16%, transparent);
+  --ds-shadow-lg: 0 12px 32px color-mix(in srgb, #2b2b30 22%, transparent);
+  --ds-scrim: color-mix(in srgb, var(--ds-neutral-900) 50%, transparent);
+
+  /* — radii — */
+  --ds-radius-sm: 4px;
+  --ds-radius-md: 8px;
+  --ds-radius-lg: 12px;
+  --ds-radius-pill: 999px;
+
+  /* — product status colors — the mono palette has no role for
+       running / warning / failed, so these are defined in OKLCH at the
+       accent's lightness and chroma, varying only hue. */
+  --ds-status-ok: oklch(0.62 0.16 152);
+  --ds-status-warn: oklch(0.62 0.16 75);
+  --ds-status-bad: var(--ds-accent);
+
+  /* — data hue — the one non-status, non-accent color, used by charts and
+       heatmaps so quantitative marks never read as "alert". */
+  --ds-data: oklch(0.66 0.12 250);
+  --ds-data-light: oklch(0.77 0.085 245);
+  --ds-data-dark: oklch(0.52 0.11 258);
 }
 
 .dark {
-  --background: #0a0a0a;
-  --foreground: #fafafa;
-  --card: #0f0f0f;
-  --card-foreground: #fafafa;
-  --popover: #0f0f0f;
-  --popover-foreground: #fafafa;
-  --primary: #fafafa;
-  --primary-foreground: #0a0a0a;
-  --secondary: #1a1a1a;
-  --secondary-foreground: #fafafa;
-  --muted: #1a1a1a;
-  --muted-foreground: #737373;
-  --accent: #1a1a1a;
-  --accent-foreground: #fafafa;
-  --destructive: #dc2626;
-  --destructive-foreground: #fafafa;
-  --border: #262626;
-  --input: #262626;
-  --ring: #404040;
-  --chart-1: oklch(0.488 0.243 264.376);
-  --chart-2: oklch(0.696 0.17 162.48);
-  --chart-3: oklch(0.769 0.188 70.08);
-  --chart-4: oklch(0.627 0.265 303.9);
-  --chart-5: oklch(0.645 0.246 16.439);
-  --heatmap-1: oklch(0.35 0.09 250);
-  --heatmap-2: oklch(0.45 0.13 250);
-  --heatmap-3: oklch(0.56 0.16 250);
-  --heatmap-4: oklch(0.67 0.15 250);
-  --heatmap-5: oklch(0.78 0.12 250);
-  --sidebar: #0f0f0f;
-  --sidebar-foreground: #fafafa;
-  --sidebar-primary: #fafafa;
-  --sidebar-primary-foreground: #0a0a0a;
-  --sidebar-accent: #1a1a1a;
-  --sidebar-accent-foreground: #fafafa;
-  --sidebar-border: #262626;
-  --sidebar-ring: #404040;
+  /* — role colors (dark) — the values the app actually ships. */
+  --ds-bg: #141416;
+  --ds-surface: #1e1e21;
+  --ds-text: #f2f2f4;
+  --ds-accent: #ff563c;
+  --ds-accent-2: #ef6853;
+  --ds-divider: color-mix(in srgb, #f2f2f4 34%, transparent);
+
+  --ds-tint-accent-bg: color-mix(in srgb, var(--ds-accent-700) 45%, transparent);
+  --ds-tint-accent-fg: var(--ds-accent-200);
+  --ds-tint-accent-2-bg: color-mix(in srgb, var(--ds-accent-2-700) 45%, transparent);
+  --ds-tint-accent-2-fg: var(--ds-accent-2-200);
+  --ds-tint-neutral-bg: color-mix(in srgb, var(--ds-neutral-100) 12%, transparent);
+  --ds-tint-neutral-fg: var(--ds-neutral-200);
+
+  --ds-accent-hover: var(--ds-accent-400);
+  --ds-accent-active: var(--ds-accent-300);
+
+  --ds-shadow-sm: 0 1px 2px rgb(0 0 0 / 0.5);
+  --ds-shadow-md: 0 3px 10px rgb(0 0 0 / 0.55);
+  --ds-shadow-lg: 0 12px 32px rgb(0 0 0 / 0.6);
+  --ds-scrim: color-mix(in srgb, #000 62%, transparent);
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   LAYER B — shadcn mapping
+   ──────────────────────────────────────────────────────────────────────────
+   The component tokens shadcn/ui and the app screens consume, expressed
+   entirely in terms of layer A. Nothing here holds a literal color.
+   ══════════════════════════════════════════════════════════════════════════ */
+
+:root {
+  --background: var(--ds-bg);
+  --foreground: var(--ds-text);
+  --card: var(--ds-surface);
+  --card-foreground: var(--ds-text);
+  --popover: var(--ds-surface);
+  --popover-foreground: var(--ds-text);
+
+  --primary: var(--ds-accent);
+  --primary-foreground: var(--ds-bg);
+
+  /* Secondary / muted surfaces sit one notch off the ground: a soft ink wash
+     rather than a second opaque gray, so they layer on cards and on the bg. */
+  --secondary: color-mix(in srgb, var(--ds-text) 8%, transparent);
+  --secondary-foreground: var(--ds-text);
+  --muted: color-mix(in srgb, var(--ds-text) 6%, transparent);
+  --muted-foreground: color-mix(in srgb, var(--ds-text) 58%, transparent);
+  --accent: color-mix(in srgb, var(--ds-text) 10%, transparent);
+  --accent-foreground: var(--ds-text);
+
+  --destructive: var(--ds-accent);
+  --destructive-foreground: var(--ds-bg);
+
+  /* Divider at full strength is right for the 2px structural rules; every
+     input and card edge in the mockups uses the same color, so --border keeps
+     it and components choose the weight. */
+  --border: var(--ds-divider);
+  --input: var(--ds-divider);
+  --ring: var(--ds-accent);
+
+  /* Charts: the analytics mockup's scale — data blue, its light and dark
+     variants, a neutral, and the status hues for pass/fail series. */
+  --chart-1: var(--ds-data);
+  --chart-2: var(--ds-data-light);
+  --chart-3: var(--ds-data-dark);
+  --chart-4: var(--ds-neutral-600);
+  --chart-5: var(--ds-status-warn);
+
+  /* Heatmap, re-based on the data hue. */
+  --heatmap-1: oklch(0.86 0.05 250);
+  --heatmap-2: oklch(0.75 0.09 250);
+  --heatmap-3: oklch(0.66 0.12 250);
+  --heatmap-4: oklch(0.55 0.11 254);
+  --heatmap-5: oklch(0.42 0.09 258);
+
+  --radius: 0.5rem;
+
+  --sidebar: var(--ds-surface);
+  --sidebar-foreground: var(--ds-text);
+  --sidebar-primary: var(--ds-accent);
+  --sidebar-primary-foreground: var(--ds-bg);
+  --sidebar-accent: color-mix(in srgb, var(--ds-text) 10%, transparent);
+  --sidebar-accent-foreground: var(--ds-text);
+  --sidebar-border: var(--ds-divider);
+  --sidebar-ring: var(--ds-accent);
+}
+
+.dark {
+  /* Dark inherits the whole mapping above through layer A; only the chart and
+     heatmap ends need re-ordering so the ramp climbs out of the dark ground. */
+  --heatmap-1: oklch(0.34 0.07 258);
+  --heatmap-2: oklch(0.46 0.1 254);
+  --heatmap-3: oklch(0.58 0.12 250);
+  --heatmap-4: oklch(0.69 0.11 248);
+  --heatmap-5: oklch(0.8 0.08 245);
 }
 
 @theme inline {
-  --font-sans: 'Geist', 'Geist Fallback';
-  --font-mono: 'Geist Mono', 'Geist Mono Fallback';
+  --font-sans: 'Archivo', 'Archivo Fallback', system-ui, sans-serif;
+  --font-mono: 'Geist Mono', 'Geist Mono Fallback', ui-monospace, 'SF Mono', Menlo, monospace;
   --color-background: var(--background);
   --color-foreground: var(--foreground);
   --color-card: var(--card);
@@ -119,10 +232,36 @@
   --color-chart-3: var(--chart-3);
   --color-chart-4: var(--chart-4);
   --color-chart-5: var(--chart-5);
-  --radius-sm: calc(var(--radius) - 4px);
-  --radius-md: calc(var(--radius) - 2px);
-  --radius-lg: var(--radius);
-  --radius-xl: calc(var(--radius) + 4px);
+
+  /* First-class product tokens — these generate real utilities
+     (bg-status-ok, text-status-warn, border-data, bg-accent-2, …) so screens
+     never need a raw palette class or an inline style. */
+  --color-status-ok: var(--ds-status-ok);
+  --color-status-warn: var(--ds-status-warn);
+  --color-status-bad: var(--ds-status-bad);
+  --color-data: var(--ds-data);
+  --color-data-light: var(--ds-data-light);
+  --color-data-dark: var(--ds-data-dark);
+  --color-accent-2: var(--ds-accent-2);
+  --color-tint-accent: var(--ds-tint-accent-bg);
+  --color-tint-accent-foreground: var(--ds-tint-accent-fg);
+  --color-tint-accent-2: var(--ds-tint-accent-2-bg);
+  --color-tint-accent-2-foreground: var(--ds-tint-accent-2-fg);
+  --color-tint-neutral: var(--ds-tint-neutral-bg);
+  --color-tint-neutral-foreground: var(--ds-tint-neutral-fg);
+  --color-heatmap-1: var(--heatmap-1);
+  --color-heatmap-2: var(--heatmap-2);
+  --color-heatmap-3: var(--heatmap-3);
+  --color-heatmap-4: var(--heatmap-4);
+  --color-heatmap-5: var(--heatmap-5);
+
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-xl: 16px;
+  --shadow-ds-sm: var(--ds-shadow-sm);
+  --shadow-ds-md: var(--ds-shadow-md);
+  --shadow-ds-lg: var(--ds-shadow-lg);
   --color-sidebar: var(--sidebar);
   --color-sidebar-foreground: var(--sidebar-foreground);
   --color-sidebar-primary: var(--sidebar-primary);
@@ -139,7 +278,34 @@
   }
   body {
     @apply bg-background text-foreground;
+    font-size: 15px;
+    line-height: 1.55;
   }
+  /* Modernist headings: Archivo 800, tight tracking. Set on the elements
+     themselves so Tailwind utilities (text-sm, font-normal, …) still win. */
+  h1,
+  h2,
+  h3,
+  h4,
+  h5,
+  h6 {
+    font-family: var(--font-sans);
+    font-weight: 800;
+    letter-spacing: -0.015em;
+    line-height: 1.12;
+  }
+  ::selection {
+    background: color-mix(in srgb, var(--ds-accent) 30%, transparent);
+  }
+}
+
+/* Uppercase letter-spaced kicker — the small label above a section title or
+   in a card header. Used across the board, analytics and settings screens. */
+@utility kicker {
+  font-size: 10px;
+  line-height: 1.4;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
 }
 
 /* Hide scrollbars while keeping scroll functionality */
