@@ -1,0 +1,279 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>ElasticClaw — Agents</title>
+<link rel="stylesheet" href="../../styles.css" />
+<link rel="stylesheet" href="app.css" />
+<style>
+.ic{width:16px;height:16px;display:block;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+.ic-sm{width:14px;height:14px}
+.search-wrap{position:relative}
+.search-wrap .ic{position:absolute;left:10px;top:50%;transform:translateY(-50%);color:color-mix(in srgb,var(--color-text) 55%,transparent)}
+.search-wrap .input{padding-left:32px;min-height:32px}
+.lanes{padding:var(--space-4);display:grid;gap:var(--space-6)}
+.lane-head{display:flex;align-items:center;gap:var(--space-2);padding-bottom:var(--space-2);border-bottom:2px solid var(--color-divider);margin-bottom:var(--space-3)}
+.lane-title{font-family:var(--font-heading);font-weight:var(--font-heading-weight);font-size:13px;letter-spacing:0.08em;text-transform:uppercase}
+.lane-count{display:inline-flex;align-items:center;justify-content:center;min-width:20px;height:20px;padding:0 6px;border-radius:var(--radius-pill);background:color-mix(in srgb,var(--color-text) 12%,transparent);font-size:11px;font-weight:600}
+.lane[data-tone="act"] .lane-title{color:var(--color-accent)}
+.lane[data-tone="act"] .lane-count{background:var(--color-accent);color:var(--color-bg)}
+.lane[data-tone="run"] .lane-title{color:var(--status-ok)}
+.lane-note{font-size:12px;color:color-mix(in srgb,var(--color-text) 55%,transparent);margin-left:auto}
+.cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(360px,1fr));gap:var(--space-4);align-items:start}
+.cards > *{min-width:0}
+.board-card{width:auto}
+.state{display:flex;align-items:center;gap:8px;padding:8px var(--space-3);font-family:var(--font-heading);font-weight:var(--font-heading-weight);font-size:11px;letter-spacing:0.1em;text-transform:uppercase}
+.state-act{background:var(--color-accent);color:var(--color-bg)}
+.state-err{background:var(--color-accent-800);color:var(--color-accent-100)}
+.state-run{background:color-mix(in srgb,var(--status-ok) 20%,transparent);color:var(--status-ok)}
+.state-idle{background:color-mix(in srgb,var(--color-text) 8%,transparent);color:color-mix(in srgb,var(--color-text) 60%,transparent)}
+.state .why{margin-left:auto;font-family:var(--font-mono);font-weight:400;font-size:11px;letter-spacing:0;text-transform:none;opacity:0.85;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:55%}
+.card-off{opacity:0.55}
+.msgs{max-height:190px}
+.ask{padding:var(--space-3);border-bottom:1px solid var(--color-divider);display:grid;gap:var(--space-2)}
+.ask p{margin:0;font-size:13px}
+.ask .row{gap:6px}
+.state-run,.state-idle{font-family:var(--font-mono);font-weight:400;font-size:11px;letter-spacing:0;text-transform:none;background:transparent;border-bottom:1px solid var(--color-divider)}
+.state-run{color:var(--status-ok)}
+.state-idle{color:color-mix(in srgb,var(--color-text) 55%,transparent)}
+.state-run .why,.state-idle .why{color:color-mix(in srgb,var(--color-text) 55%,transparent)}
+.pr{display:inline-flex;align-items:center;gap:5px;padding:2px 8px;border:1px solid var(--color-divider);border-radius:var(--radius-pill);font-family:var(--font-mono);font-size:11px;color:inherit;text-decoration:none}
+.pr:hover{border-color:var(--color-accent);color:var(--color-accent)}
+.pr .ic{width:12px;height:12px}
+.side-group[data-tone="act"]{color:var(--color-accent)}
+.side-group .n{margin-left:auto;font-variant-numeric:tabular-nums}
+.agent-row[data-act]{border-left-color:var(--color-accent);background:color-mix(in srgb,var(--color-accent) 10%,transparent)}
+.agent-row[data-act]:hover{background:color-mix(in srgb,var(--color-accent) 16%,transparent)}
+.agent-row[data-off]{opacity:0.6}
+.mark{display:inline-flex;align-items:center;gap:3px;flex:none;font-family:var(--font-mono);font-size:10px;color:color-mix(in srgb,var(--color-text) 55%,transparent)}
+.mark .ic{width:11px;height:11px}
+.agent-row[data-act] .agent-row-sub{color:var(--color-accent)}
+</style>
+</head>
+<body>
+<svg style="display:none" aria-hidden="true">
+<symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"></circle><path d="m21 21-4.3-4.3"></path></symbol>
+<symbol id="i-plus" viewBox="0 0 24 24"><path d="M5 12h14"></path><path d="M12 5v14"></path></symbol>
+<symbol id="i-panel" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"></rect><path d="M9 3v18"></path><path d="m16 15-3-3 3-3"></path></symbol>
+<symbol id="i-chevron-down" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"></path></symbol>
+<symbol id="i-chart" viewBox="0 0 24 24"><path d="M3 3v18h18"></path><path d="M18 17V9"></path><path d="M13 17V5"></path><path d="M8 17v-3"></path></symbol>
+<symbol id="i-settings" viewBox="0 0 24 24"><path d="M20 7h-9"></path><path d="M14 17H5"></path><circle cx="17" cy="17" r="3"></circle><circle cx="7" cy="7" r="3"></circle></symbol>
+<symbol id="i-logout" viewBox="0 0 24 24"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path><path d="m16 17 5-5-5-5"></path><path d="M21 12H9"></path></symbol>
+<symbol id="i-send" viewBox="0 0 24 24"><path d="m22 2-7 20-4-9-9-4Z"></path><path d="M22 2 11 13"></path></symbol>
+<symbol id="i-clip" viewBox="0 0 24 24"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"></path></symbol>
+<symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"></circle><path d="M12 16v-4"></path><path d="M12 8h.01"></path></symbol>
+<symbol id="i-msg" viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path></symbol>
+<symbol id="i-pin" viewBox="0 0 24 24"><path d="M12 17v5"></path><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"></path></symbol>
+<symbol id="i-pr" viewBox="0 0 24 24"><circle cx="6" cy="6" r="3"></circle><circle cx="6" cy="18" r="3"></circle><path d="M6 9v6"></path><circle cx="18" cy="18" r="3"></circle><path d="M18 15V9a3 3 0 0 0-3-3h-2"></path><path d="m15 4-2 2 2 2"></path></symbol>
+<symbol id="i-copy" viewBox="0 0 24 24"><rect x="8" y="8" width="13" height="13" rx="2"></rect><path d="M5 16V5a2 2 0 0 1 2-2h11"></path></symbol>
+</svg>
+
+<div class="app">
+  <aside class="side">
+    <div class="side-head">
+      <span class="side-brand">ElasticClaw</span>
+      <button class="icon-btn" title="Create Agent"><svg class="ic"><use href="#i-plus"></use></svg></button>
+      <button class="icon-btn" title="Collapse sidebar"><svg class="ic"><use href="#i-panel"></use></svg></button>
+    </div>
+    <div class="side-filters">
+      <div class="search-wrap"><svg class="ic"><use href="#i-search"></use></svg><input class="input" placeholder="Filter by name or workflow..." /></div>
+      <div class="row" style="flex-wrap:wrap;gap:6px">
+        <button class="btn btn-secondary" style="font-size:12px;padding:4px 10px">Tags <svg class="ic ic-sm"><use href="#i-chevron-down"></use></svg></button>
+      </div>
+    </div>
+    <div class="side-list">
+      <div class="side-group" data-tone="act">Needs you<span class="n">2</span></div>
+      <div style="padding:0 var(--space-2) var(--space-2)">
+        <button class="agent-row" data-act aria-current="true"><span class="agent-row-top"><span class="dot warn"></span><span class="agent-row-name">claw-4817</span><span class="mark"><svg class="ic"><use href="#i-pr"></use></svg>#221</span></span><span class="agent-row-sub">Waiting on you · force push?</span></button>
+        <button class="agent-row" data-act><span class="agent-row-top"><span class="dot bad"></span><span class="agent-row-name">claw-4805</span></span><span class="agent-row-sub">Provisioning failed</span></button>
+      </div>
+      <hr class="rule" />
+      <div class="side-group">Working<span class="n">2</span></div>
+      <div style="padding:0 var(--space-2) var(--space-2)">
+        <button class="agent-row"><span class="agent-row-top"><span class="dot ok"></span><span class="agent-row-name">claw-4821</span><span class="badge-count">3</span></span><span class="agent-row-sub">Edit · pkg/hub/db.go</span></button>
+        <button class="agent-row"><span class="agent-row-top"><span class="dot ok"></span><span class="agent-row-name">claw-4822</span></span><span class="agent-row-sub">Bash · go test ./pkg/hub</span></button>
+      </div>
+      <hr class="rule" />
+      <div class="side-group">Idle &amp; offline<span class="n">1</span></div>
+      <div style="padding:0 var(--space-2) var(--space-2)">
+        <button class="agent-row" data-off><span class="agent-row-top"><span class="dot"></span><span class="agent-row-name">claw-4790</span><span class="mark"><svg class="ic"><use href="#i-pr"></use></svg>#218</span></span><span class="agent-row-sub">Offline · last seen 2h ago</span></button>
+      </div>
+    </div>
+    <div class="side-foot">
+      <a class="side-item" href="analytics.html"><svg class="ic"><use href="#i-chart"></use></svg>Analytics</a>
+      <a class="side-item" href="settings.html"><svg class="ic"><use href="#i-settings"></use></svg>Settings</a>
+      <hr class="rule" style="margin:var(--space-1) 0" />
+      <a class="side-item" href="login.html"><svg class="ic"><use href="#i-logout"></use></svg>Sign out</a>
+    </div>
+  </aside>
+
+  <main class="main">
+    <div class="scroll">
+      <div class="lanes">
+
+        <section class="lane" data-tone="act">
+          <div class="lane-head"><span class="lane-title">Needs you</span><span class="lane-count">2</span><span class="lane-note">Blocked until you answer or restart</span></div>
+          <div class="cards">
+
+            <article class="board-card">
+              <div class="state state-act"><span>Waiting on you</span><span class="why">asked 22m ago</span></div>
+              <div class="card-head">
+                <div class="row" style="margin-bottom:4px">
+                  <span class="dot warn"></span>
+                  <a class="mono" href="conversation.html" style="flex:1;font-size:14px;font-weight:600;color:var(--color-text);text-decoration:none">claw-4817</a>
+                  <button class="icon-btn" title="Open conversation"><svg class="ic ic-sm"><use href="#i-msg"></use></svg></button>
+                  <button class="icon-btn" title="View bot info"><svg class="ic ic-sm"><use href="#i-info"></use></svg></button>
+                </div>
+                <div class="row" style="justify-content:space-between">
+                  <span class="text-muted" style="font-size:12px">github-issue · elasticclaw</span>
+                  <span class="mono text-muted" style="font-size:12px">3h 04m · ctx 71%</span>
+                </div>
+                <div class="row" style="gap:6px;margin-top:var(--space-2)"><a class="pr" href="#"><svg class="ic"><use href="#i-pr"></use></svg>PR #221 · draft</a><span class="tag tag-neutral">web</span><span class="tag tag-neutral">ui</span></div>
+              </div>
+              <div class="ask">
+                <p>“O push foi rejeitado porque a branch remota mudou. Posso forçar push?”</p>
+                <div class="row"><button class="btn btn-primary" style="font-size:13px">Reply</button><button class="btn btn-secondary" style="font-size:13px">Open conversation</button></div>
+              </div>
+              <div class="msgs">
+                <div class="step"><span>Bash</span><span>pnpm build</span><span>1m 08s</span></div>
+                <div class="step" style="color:var(--color-accent)"><span>Bash</span><span>git push --force-with-lease</span><span>failed</span></div>
+              </div>
+              <div class="card-stats"><span>14 steps</span><span style="color:var(--status-bad)">1 failed</span><span style="margin-left:auto">ctx 71%</span></div>
+              <form class="composer" onsubmit="return false">
+                <button class="btn btn-secondary btn-icon" type="button" title="Attach files"><svg class="ic ic-sm"><use href="#i-clip"></use></svg></button>
+                <input class="input" placeholder="Send message..." />
+                <button class="btn btn-primary btn-icon" type="submit"><svg class="ic ic-sm"><use href="#i-send"></use></svg></button>
+              </form>
+            </article>
+
+            <article class="board-card">
+              <div class="state state-err"><span>Provisioning failed</span><span class="why">07:12 · replicated CMX</span></div>
+              <div class="card-head">
+                <div class="row" style="margin-bottom:4px">
+                  <span class="dot bad"></span>
+                  <span class="mono" style="flex:1;font-size:14px;font-weight:600">claw-4805</span>
+                  <button class="icon-btn" title="View bot info"><svg class="ic ic-sm"><use href="#i-info"></use></svg></button>
+                </div>
+                <div class="row" style="justify-content:space-between">
+                  <span class="text-muted" style="font-size:12px">linear-story · elasticclaw</span>
+                  <span class="mono" style="font-size:12px;color:var(--status-bad)">error</span>
+                </div>
+              </div>
+              <div class="ask">
+                <p class="text-muted" style="font-size:13px">Sandbox did not return a VM within 300s. Nothing ran; the ticket is untouched.</p>
+                <div class="row"><button class="btn btn-primary" style="font-size:13px">Retry run</button><button class="btn btn-secondary" style="font-size:13px">Kill</button></div>
+              </div>
+              <div class="msgs">
+                <div class="msg msg-agent"><div class="msg-head"><b>hub</b> 07:12</div>Provisioning failed: replicated CMX did not return a VM within 300s.</div>
+              </div>
+              <div class="card-stats"><span>0 steps</span><span style="margin-left:auto">ctx 12%</span></div>
+              <form class="composer" onsubmit="return false">
+                <button class="btn btn-secondary btn-icon" type="button" disabled title="Attach files"><svg class="ic ic-sm"><use href="#i-clip"></use></svg></button>
+                <input class="input" placeholder="Provisioning failed" disabled />
+                <button class="btn btn-primary btn-icon" type="submit" disabled><svg class="ic ic-sm"><use href="#i-send"></use></svg></button>
+              </form>
+            </article>
+
+          </div>
+        </section>
+
+        <section class="lane" data-tone="run">
+          <div class="lane-head"><span class="lane-title">Working</span><span class="lane-count">2</span><span class="lane-note">Live — no action needed</span></div>
+          <div class="cards">
+
+            <article class="board-card">
+              <div class="state state-run"><span>Working</span><span class="why">Edit pkg/hub/db.go · 0:42</span></div>
+              <div class="card-head">
+                <div class="row" style="margin-bottom:4px">
+                  <span class="dot ok"></span>
+                  <a class="mono" href="conversation.html" style="flex:1;font-size:14px;font-weight:600;color:var(--color-text);text-decoration:none">claw-4821</a>
+                  <span class="badge-count">3</span>
+                  <button class="icon-btn" title="Copy transcript"><svg class="ic ic-sm"><use href="#i-copy"></use></svg></button>
+                  <button class="icon-btn" title="View bot info"><svg class="ic ic-sm"><use href="#i-info"></use></svg></button>
+                </div>
+                <div class="row" style="justify-content:space-between">
+                  <span class="text-muted" style="font-size:12px">linear-story · elasticclaw</span>
+                  <span class="mono text-muted" style="font-size:12px">1h 12m · ctx 38%</span>
+                </div>
+                <div class="row" style="gap:6px;margin-top:var(--space-2)"><a class="pr" href="#"><svg class="ic"><use href="#i-pr"></use></svg>PR #220 · open</a><span class="tag tag-neutral">backend</span><span class="tag tag-neutral">hub</span><span class="tag tag-neutral">p1</span></div>
+              </div>
+              <div class="msgs">
+                <div class="msg msg-you"><div class="msg-head"><b>You</b> 09:14</div>Adiciona o índice em task_runs e roda os testes do hub.</div>
+                <div class="step"><span>Edit</span><span>pkg/hub/db.go · +18 −2</span><span>0.9s</span></div>
+                <div class="step"><span>Bash</span><span>go test ./pkg/hub -run Migration</span><span>34s</span></div>
+                <div class="msg msg-agent"><div class="msg-head"><b>claw-4821</b> 09:31</div>Migração criada e testes do pacote hub passando.</div>
+              </div>
+              <div class="card-stats"><span>27 steps</span><span style="margin-left:auto">ctx 38%</span></div>
+              <form class="composer" onsubmit="return false">
+                <button class="btn btn-secondary btn-icon" type="button" title="Attach files"><svg class="ic ic-sm"><use href="#i-clip"></use></svg></button>
+                <input class="input" placeholder="Send message..." />
+                <button class="btn btn-primary btn-icon" type="submit"><svg class="ic ic-sm"><use href="#i-send"></use></svg></button>
+              </form>
+            </article>
+
+            <article class="board-card">
+              <div class="state state-run"><span>Working</span><span class="why">Bash go test ./pkg/hub · 1:18</span></div>
+              <div class="card-head">
+                <div class="row" style="margin-bottom:4px">
+                  <span class="dot ok"></span>
+                  <a class="mono" href="conversation.html" style="flex:1;font-size:14px;font-weight:600;color:var(--color-text);text-decoration:none">claw-4822</a>
+                  <button class="icon-btn" title="View bot info"><svg class="ic ic-sm"><use href="#i-info"></use></svg></button>
+                </div>
+                <div class="row" style="justify-content:space-between">
+                  <span class="text-muted" style="font-size:12px">linear-story · elasticclaw</span>
+                  <span class="mono text-muted" style="font-size:12px">26m · ctx 21%</span>
+                </div>
+                <div class="row" style="gap:6px;margin-top:var(--space-2)"><span class="tag tag-neutral">backend</span></div>
+              </div>
+              <div class="msgs">
+                <div class="step"><span>Read</span><span>pkg/hub/checkpoints.go</span><span>0.7s</span></div>
+                <div class="step"><span>Bash</span><span>go test ./pkg/hub</span><span>running</span></div>
+              </div>
+              <div class="card-stats"><span>9 steps</span><span style="margin-left:auto">ctx 21%</span></div>
+              <form class="composer" onsubmit="return false">
+                <button class="btn btn-secondary btn-icon" type="button" title="Attach files"><svg class="ic ic-sm"><use href="#i-clip"></use></svg></button>
+                <input class="input" placeholder="Send message..." />
+                <button class="btn btn-primary btn-icon" type="submit"><svg class="ic ic-sm"><use href="#i-send"></use></svg></button>
+              </form>
+            </article>
+
+          </div>
+        </section>
+
+        <section class="lane">
+          <div class="lane-head"><span class="lane-title">Idle &amp; offline</span><span class="lane-count">1</span><span class="lane-note">Finished or disconnected</span></div>
+          <div class="cards">
+            <article class="board-card card-off">
+              <div class="state state-idle"><span>Offline</span><span class="why">last seen 2h ago</span></div>
+              <div class="card-head">
+                <div class="row" style="margin-bottom:4px">
+                  <span class="dot"></span>
+                  <span class="mono" style="flex:1;font-size:14px;font-weight:600">claw-4790</span>
+                  <button class="icon-btn" title="View bot info"><svg class="ic ic-sm"><use href="#i-info"></use></svg></button>
+                </div>
+                <div class="row" style="justify-content:space-between">
+                  <span class="text-muted" style="font-size:12px">github-issue · elasticclaw</span>
+                  <span class="mono text-muted" style="font-size:12px">4h 41m · ctx 64%</span>
+                </div>
+                <div class="row" style="gap:6px;margin-top:var(--space-2)"><a class="pr" href="#"><svg class="ic"><use href="#i-pr"></use></svg>PR #218 · awaiting review</a></div>
+              </div>
+              <div class="msgs">
+                <div class="msg msg-agent"><div class="msg-head"><b>claw-4790</b> 06:02</div>PR #218 aberto e aguardando review.</div>
+              </div>
+              <div class="card-stats"><span>31 steps</span><span style="margin-left:auto">ctx 64%</span></div>
+              <form class="composer" onsubmit="return false">
+                <button class="btn btn-secondary btn-icon" type="button" disabled title="Attach files"><svg class="ic ic-sm"><use href="#i-clip"></use></svg></button>
+                <input class="input" placeholder="Agent offline" disabled />
+                <button class="btn btn-primary btn-icon" type="submit" disabled><svg class="ic ic-sm"><use href="#i-send"></use></svg></button>
+              </form>
+            </article>
+          </div>
+        </section>
+
+      </div>
+    </div>
+  </main>
+</div>
+</body>
+</html>

@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>ElasticClaw — Connect</title>
+<link rel="stylesheet" href="../../styles.css" />
+<link rel="stylesheet" href="app.css" />
+<style>
+.center{display:grid;place-items:center;height:100vh;padding:var(--space-4)}
+.setup{width:100%;max-width:440px;display:grid;gap:var(--space-6)}
+code{font-family:var(--font-mono);font-size:0.92em;background:color-mix(in srgb,var(--color-text) 10%,transparent);padding:1px 5px;border-radius:var(--radius-sm)}
+</style>
+</head>
+<body>
+<main class="center">
+  <div class="setup">
+    <div>
+      <h2 style="font-size:26px;margin:0 0 var(--space-2)">Connect to ElasticClaw Server</h2>
+      <p class="text-muted" style="margin:0;font-size:14px">Enter your ElasticClaw Server URL and authentication token to get started.</p>
+    </div>
+    <div class="stack">
+      <div class="field"><label for="hub-url">ElasticClaw Server URL</label><input id="hub-url" class="input" placeholder="http://your-server-host:8080" /></div>
+      <div class="field"><label for="hub-token">Token</label><input id="hub-token" class="input" type="password" placeholder="your-auth-token" /></div>
+    </div>
+    <button class="btn btn-primary btn-block">Connect</button>
+    <p class="text-muted" style="font-size:12px;margin:0">You can also set <code>NEXT_PUBLIC_HUB_URL</code> and <code>NEXT_PUBLIC_HUB_TOKEN</code> environment variables.</p>
+  </div>
+</main>
+</body>
+</html>

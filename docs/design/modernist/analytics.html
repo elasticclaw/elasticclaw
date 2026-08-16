@@ -1,0 +1,314 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>ElasticClaw — Analytics</title>
+<link rel="stylesheet" href="../../styles.css" />
+<link rel="stylesheet" href="app.css" />
+<style>
+.ic{width:16px;height:16px;display:block;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+.ic-sm{width:14px;height:14px}
+/* One semantic scale for every chart: outcome series keep their meaning,
+   money series read as one accent ramp so cost never looks like an outcome. */
+.wrap{--c-clean:var(--status-ok);--c-human:var(--color-neutral-500);--c-warn:var(--status-warn);--c-fail:var(--color-accent);--c-data:oklch(0.66 0.12 250);--c-1:var(--c-data);--c-2:oklch(0.77 0.085 245);--c-3:oklch(0.52 0.11 258);--c-4:var(--color-neutral-600)}
+.wrap{max-width:1400px;margin:0 auto;padding:var(--space-6) var(--space-6) var(--space-8);display:grid;grid-template-columns:minmax(0,1fr);gap:var(--space-6);container-type:inline-size}
+.wrap > *{min-width:0}
+
+/* — sticky header: title and the filters that scope everything below — */
+.page-head{position:sticky;top:0;z-index:5;background:var(--color-bg);border-bottom:2px solid var(--color-divider);padding:var(--space-4) var(--space-6) var(--space-3)}
+.head-inner{max-width:1400px;margin:0 auto;display:grid;gap:var(--space-3)}
+.head-top{display:flex;align-items:baseline;gap:var(--space-3);flex-wrap:wrap}
+.head-top h2{margin:0}
+.period{margin-left:auto}
+.filters{display:flex;flex-wrap:wrap;align-items:center;gap:var(--space-2)}
+.filters .sep{width:1px;align-self:stretch;background:var(--color-divider);margin:0 var(--space-1)}
+.sel{min-height:32px;padding:4px 10px;font:inherit;font-size:13px;color:var(--color-text);background:var(--color-surface);border:1px solid var(--color-divider);border-radius:var(--radius-md)}
+.sel:hover{border-color:color-mix(in srgb,var(--color-text) 45%,transparent)}
+.applied{display:inline-flex;align-items:center;gap:6px;padding:3px 10px;border-radius:var(--radius-pill);background:color-mix(in srgb,var(--color-accent) 18%,transparent);color:var(--color-accent);font-size:12px}
+
+/* KPIs — one container query scale so the tile count snaps to sane numbers
+   at every width (the sidebar makes viewport breakpoints lie). Tiles use a
+   3-row grid so labels, values and deltas align across every tile. */
+.kpis{display:grid;grid-template-columns:minmax(0,1fr);gap:var(--space-6)}
+.kpis > section{min-width:0;display:grid;gap:var(--space-2);align-content:start}
+.kpi-grid{display:grid;gap:var(--space-2);grid-template-columns:repeat(2,minmax(0,1fr))}
+@container (min-width:520px){.kpi-grid{grid-template-columns:repeat(3,minmax(0,1fr))}}
+@container (min-width:820px){.kpi-grid[data-cols="6"]{grid-template-columns:repeat(6,minmax(0,1fr))}}
+@container (min-width:1120px){.kpis{grid-template-columns:2fr 1fr}}
+.kpi{display:grid;grid-template-rows:auto 1fr auto;gap:6px;min-width:0;padding:var(--space-3);border:1px solid var(--color-divider);border-radius:var(--radius-lg);background:var(--color-surface)}
+.kpi .lbl{margin:0;font-size:11px;line-height:1.35;text-wrap:pretty;color:color-mix(in srgb,var(--color-text) 62%,transparent)}
+.kpi .val{margin:auto 0 0;font-family:var(--font-heading);font-weight:var(--font-heading-weight);font-size:23px;line-height:1;letter-spacing:-0.02em}
+.kpi .delta{margin:0;font-size:11px;font-weight:600;min-height:15px;display:flex;align-items:center;gap:4px;white-space:nowrap}
+.kpi .delta em{font-style:normal;font-weight:400;color:color-mix(in srgb,var(--color-text) 55%,transparent)}
+.up{color:var(--status-ok)}.down{color:var(--color-accent)}
+
+/* — panels — */
+.grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(380px,1fr));gap:var(--space-6)}
+.grid2 > .panel{min-width:0}
+.panel{padding:var(--space-4) var(--space-4) var(--space-3)}
+.panel > header{display:grid;gap:2px;margin-bottom:var(--space-3)}
+.panel > header h3{margin:0;font-size:15px}
+.panel > header p{margin:0;font-size:12px;color:color-mix(in srgb,var(--color-text) 58%,transparent)}
+
+/* — charts — */
+.plot{position:relative;padding-left:34px}
+.plot .ymax,.plot .ymid,.plot .yzero{position:absolute;left:0;font-family:var(--font-mono);font-size:10px;color:color-mix(in srgb,var(--color-text) 45%,transparent)}
+.plot .ymax{top:-5px}.plot .ymid{top:calc(50% - 5px)}.plot .yzero{bottom:-5px}
+.plot::before,.plot::after{content:"";position:absolute;left:34px;right:0;height:1px;background:color-mix(in srgb,var(--color-text) 10%,transparent)}
+.plot::before{top:50%}.plot::after{bottom:0}
+.chart{display:flex;align-items:flex-end;gap:3px;height:180px}
+.chart .col{flex:1;display:flex;flex-direction:column;justify-content:flex-end;gap:1px;min-width:0}
+.chart .col i{display:block;border-radius:1px}
+.axis{display:flex;justify-content:space-between;margin:8px 0 0 34px;font-family:var(--font-mono);font-size:10px;color:color-mix(in srgb,var(--color-text) 45%,transparent)}
+.legend{display:flex;flex-wrap:wrap;gap:var(--space-3);margin-top:var(--space-3);padding-top:var(--space-2);border-top:1px solid var(--color-divider);font-size:11px;color:color-mix(in srgb,var(--color-text) 62%,transparent)}
+.legend span{display:inline-flex;align-items:center;gap:6px}
+.legend i{width:9px;height:9px;border-radius:2px;display:block}
+.funnel{display:grid;gap:var(--space-4);padding-top:var(--space-2)}
+.funnel .lab{display:flex;justify-content:space-between;align-items:baseline;font-size:13px;margin-bottom:6px}
+.funnel .lab b{font-family:var(--font-heading);font-weight:var(--font-heading-weight);font-size:16px}
+.funnel .bar{height:18px;border-radius:var(--radius-sm);background:color-mix(in srgb,var(--color-text) 9%,transparent);overflow:hidden}
+.funnel .bar i{display:block;height:100%;background:var(--c-1)}
+.funnel .drop{font-size:11px;color:color-mix(in srgb,var(--color-text) 55%,transparent)}
+.hbars{display:grid;gap:10px;padding-top:var(--space-2)}
+.hbar{display:grid;grid-template-columns:88px minmax(0,1fr) 56px;align-items:center;gap:var(--space-2);font-size:12px}
+.hbar .track{height:16px;border-radius:var(--radius-sm);background:color-mix(in srgb,var(--color-text) 8%,transparent);overflow:hidden}
+.hbar .track i{display:block;height:100%;background:var(--c-1)}
+.hbar .num{text-align:right;font-variant-numeric:tabular-nums}
+.heat{display:grid;grid-auto-flow:column;grid-auto-columns:minmax(0,1fr);grid-template-rows:repeat(7,11px);gap:3px}
+.heat i{width:auto;height:11px;border-radius:2px;display:block}
+.heat-legend{display:flex;align-items:center;justify-content:flex-end;gap:4px;margin-top:var(--space-3);font-size:11px;color:color-mix(in srgb,var(--color-text) 55%,transparent)}
+.heat-legend i{width:11px;height:11px;border-radius:2px;display:block}
+.tscroll{overflow-x:auto}
+.tscroll .table{min-width:660px}
+.tabular{font-variant-numeric:tabular-nums}
+/* Run status reads as its outcome color — the same scale the charts use. */
+.st{display:inline-flex;align-items:center;gap:6px;padding:2px 10px 2px 8px;border-radius:var(--radius-pill);border:1px solid currentColor;font-size:11px;letter-spacing:0.02em}
+.st i{width:7px;height:7px;border-radius:var(--radius-pill);background:currentColor;flex:none}
+.st span{color:var(--color-text)}
+.st-clean{color:var(--c-clean)}
+.st-human{color:var(--c-human)}
+.st-warn{color:var(--c-warn)}
+.st-fail{color:var(--c-fail);background:color-mix(in srgb,var(--color-accent) 14%,transparent)}
+.table td,.table th{white-space:nowrap}
+</style>
+</head>
+<body>
+<svg style="display:none" aria-hidden="true">
+<symbol id="i-grid" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1"></rect><rect x="14" y="3" width="7" height="7" rx="1"></rect><rect x="14" y="14" width="7" height="7" rx="1"></rect><rect x="3" y="14" width="7" height="7" rx="1"></rect></symbol>
+<symbol id="i-settings" viewBox="0 0 24 24"><path d="M20 7h-9"></path><path d="M14 17H5"></path><circle cx="17" cy="17" r="3"></circle><circle cx="7" cy="7" r="3"></circle></symbol>
+<symbol id="i-logout" viewBox="0 0 24 24"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path><path d="m16 17 5-5-5-5"></path><path d="M21 12H9"></path></symbol>
+<symbol id="i-pr" viewBox="0 0 24 24"><circle cx="6" cy="6" r="3"></circle><circle cx="6" cy="18" r="3"></circle><path d="M6 9v6"></path><circle cx="18" cy="18" r="3"></circle><path d="M18 15V9a3 3 0 0 0-3-3h-2"></path><path d="m15 4-2 2 2 2"></path></symbol>
+</svg>
+
+<div class="app">
+  <aside class="side">
+    <div class="side-head"><span class="side-brand">ElasticClaw</span></div>
+    <div class="side-list">
+      <div class="side-group" style="color:var(--color-accent)">Needs you<span style="margin-left:auto">2</span></div>
+      <div style="padding:0 var(--space-2) var(--space-2)">
+        <a class="agent-row" href="board.html" style="border-left-color:var(--color-accent)"><span class="agent-row-top"><span class="dot warn"></span><span class="agent-row-name">claw-4817</span></span><span class="agent-row-sub" style="color:var(--color-accent)">Waiting on you · force push?</span></a>
+        <a class="agent-row" href="board.html" style="border-left-color:var(--color-accent)"><span class="agent-row-top"><span class="dot bad"></span><span class="agent-row-name">claw-4805</span></span><span class="agent-row-sub" style="color:var(--color-accent)">Provisioning failed</span></a>
+      </div>
+      <hr class="rule" />
+      <div class="side-group">Working<span style="margin-left:auto">2</span></div>
+      <div style="padding:0 var(--space-2)">
+        <a class="agent-row" href="conversation.html"><span class="agent-row-top"><span class="dot ok"></span><span class="agent-row-name">claw-4821</span></span><span class="agent-row-sub">Edit · pkg/hub/db.go</span></a>
+        <a class="agent-row" href="conversation.html"><span class="agent-row-top"><span class="dot ok"></span><span class="agent-row-name">claw-4822</span></span><span class="agent-row-sub">Bash · go test ./pkg/hub</span></a>
+      </div>
+    </div>
+    <div class="side-foot">
+      <a class="side-item" href="board.html"><svg class="ic"><use href="#i-grid"></use></svg>Agents</a>
+      <a class="side-item" href="settings.html"><svg class="ic"><use href="#i-settings"></use></svg>Settings</a>
+      <hr class="rule" style="margin:var(--space-1) 0" />
+      <a class="side-item" href="login.html"><svg class="ic"><use href="#i-logout"></use></svg>Sign out</a>
+    </div>
+  </aside>
+
+  <main class="main">
+    <div class="scroll">
+      <header class="page-head">
+        <div class="head-inner">
+          <div class="head-top">
+            <h2>Analytics</h2>
+            <span class="text-muted" style="font-size:13px">Jul 17 – Aug 16, 2026 · compared with the previous 30 days</span>
+            <div class="seg period">
+              <label class="seg-opt"><input type="radio" name="period" /><span>7d</span></label>
+              <label class="seg-opt"><input type="radio" name="period" checked /><span>30d</span></label>
+              <label class="seg-opt"><input type="radio" name="period" /><span>90d</span></label>
+              <label class="seg-opt"><input type="radio" name="period" /><span>MTD</span></label>
+            </div>
+          </div>
+          <div class="filters">
+            <select class="sel" style="min-width:190px"><option>Workspace: All workspaces</option><option>elasticclaw</option></select>
+            <span class="sep"></span>
+            <select class="sel"><option>Factory: All</option></select>
+            <select class="sel"><option>Workflow: linear-story</option><option>All</option></select>
+            <select class="sel"><option>Repo: All</option></select>
+            <select class="sel"><option>Model: All</option></select>
+            <span class="applied">Workflow: linear-story ×</span>
+            <button class="btn btn-ghost" style="font-size:12px">Clear filters</button>
+          </div>
+        </div>
+      </header>
+
+      <div class="wrap">
+
+        <div class="kpis">
+          <section>
+            <p class="kicker" style="margin:0">Effectiveness</p>
+            <div class="kpi-grid" data-cols="6">
+              <div class="kpi"><p class="lbl">Runs started</p><p class="val tabular">412</p><p class="delta up">↑ 12.4% <em>vs prior</em></p></div>
+              <div class="kpi"><p class="lbl">Tickets worked on</p><p class="val tabular">188</p><p class="delta up">↑ 6.1% <em>vs prior</em></p></div>
+              <div class="kpi"><p class="lbl">Runs that delivered</p><p class="val tabular">68.4%</p><p class="delta up">↑ 3.2% <em>vs prior</em></p></div>
+              <div class="kpi"><p class="lbl">Tickets delivered</p><p class="val tabular">81.9%</p><p class="delta down">↓ 1.8% <em>vs prior</em></p></div>
+              <div class="kpi"><p class="lbl">Avg ticket → PR opened</p><p class="val tabular">3.4h</p><p class="delta up">↓ 9.0% <em>vs prior</em></p></div>
+              <div class="kpi"><p class="lbl">Avg ready for review → merge</p><p class="val tabular">5.1h</p><p class="delta down">↑ 4.4% <em>vs prior</em></p></div>
+            </div>
+          </section>
+          <section>
+            <p class="kicker" style="margin:0">Cost</p>
+            <div class="kpi-grid" data-cols="3">
+              <div class="kpi"><p class="lbl">Total AI spend</p><p class="val tabular">$2,884</p><p class="delta down">↑ 18.2% <em>vs prior</em></p></div>
+              <div class="kpi"><p class="lbl">Spend per run</p><p class="val tabular">$7.00</p><p class="delta">&nbsp;</p></div>
+              <div class="kpi"><p class="lbl">Spend per ticket</p><p class="val tabular">$15.34</p><p class="delta up">↓ 4.1% <em>vs prior</em></p></div>
+            </div>
+          </section>
+        </div>
+
+        <div class="grid2">
+          <section class="panel">
+            <header><h3>Run outcomes over time</h3><p>Each bar is a day. Clean = delivered with no human help.</p></header>
+            <div class="plot"><span class="ymax">32</span><span class="ymid">16</span><span class="yzero">0</span><div class="chart" id="outcomes"></div></div>
+            <div class="axis"><span>Jul 17</span><span>Aug 1</span><span>Aug 16</span></div>
+            <div class="legend"><span><i style="background:var(--c-clean)"></i>Clean</span><span><i style="background:var(--c-human)"></i>Human on the loop</span><span><i style="background:var(--c-warn)"></i>Warning</span><span><i style="background:var(--c-fail)"></i>Failed</span></div>
+          </section>
+          <section class="panel">
+            <header><h3>Delivery funnel</h3><p>From the agent starting to the pull request being finished.</p></header>
+            <div class="funnel">
+              <div><div class="lab"><span>Agent started</span><b class="tabular">412</b></div><div class="bar"><i style="width:100%"></i></div></div>
+              <div><div class="lab"><span>PR opened <span class="drop">· 80.3% of started</span></span><b class="tabular">331</b></div><div class="bar"><i style="width:80.3%"></i></div></div>
+              <div><div class="lab"><span>PR finished <span class="drop">· 85.2% of opened</span></span><b class="tabular">282</b></div><div class="bar"><i style="width:68.4%"></i></div></div>
+            </div>
+          </section>
+        </div>
+
+        <div class="grid2">
+          <section class="panel">
+            <header><h3>Ticket throughput</h3><p>Distinct tickets by the day of their first run, by outcome.</p></header>
+            <div class="plot"><span class="ymax">24</span><span class="ymid">12</span><span class="yzero">0</span><div class="chart" id="tickets"></div></div>
+            <div class="axis"><span>Jul 17</span><span>Aug 1</span><span>Aug 16</span></div>
+            <div class="legend"><span><i style="background:var(--c-clean)"></i>Delivered</span><span><i style="background:var(--c-human)"></i>In progress</span><span><i style="background:var(--c-fail)"></i>Failed</span></div>
+          </section>
+          <section class="panel">
+            <header><h3>Runs per ticket</h3><p>A long tail of 3+ means repeated retries on the same tickets.</p></header>
+            <div class="hbars">
+              <div class="hbar"><span>1 run</span><span class="track"><i style="width:100%"></i></span><span class="num">112</span></div>
+              <div class="hbar"><span>2 runs</span><span class="track"><i style="width:46%"></i></span><span class="num">52</span></div>
+              <div class="hbar"><span>3 runs</span><span class="track"><i style="width:16%"></i></span><span class="num">18</span></div>
+              <div class="hbar"><span>4+ runs</span><span class="track"><i style="width:5%"></i></span><span class="num">6</span></div>
+            </div>
+          </section>
+        </div>
+
+        <section class="panel">
+          <header><h3>Cost by day</h3><p>Darker means more spend. Click a day to focus the whole page on it.</p></header>
+          <div class="heat" id="heat"></div>
+          <div class="heat-legend">Less <i style="background:color-mix(in srgb,var(--c-data) 22%,transparent)"></i><i style="background:color-mix(in srgb,var(--c-data) 42%,transparent)"></i><i style="background:color-mix(in srgb,var(--c-data) 62%,transparent)"></i><i style="background:color-mix(in srgb,var(--c-data) 82%,transparent)"></i><i style="background:var(--c-data)"></i> More</div>
+        </section>
+
+        <div class="grid2">
+          <section class="panel">
+            <header><h3>Daily cost by model</h3><p>Spend per day, split by AI model.</p></header>
+            <div class="plot"><span class="ymax">$180</span><span class="ymid">$90</span><span class="yzero">$0</span><div class="chart" id="models"></div></div>
+            <div class="axis"><span>Jul 17</span><span>Aug 1</span><span>Aug 16</span></div>
+            <div class="legend"><span><i style="background:var(--c-1)"></i>claude-sonnet-4.5</span><span><i style="background:var(--c-2)"></i>gpt-5</span><span><i style="background:var(--c-3)"></i>grok-build</span><span><i style="background:var(--c-4)"></i>Other</span></div>
+          </section>
+          <section class="panel">
+            <header><h3>Cost per merged PR</h3><p>Weekly average; the dashed line is the period average ($9.80).</p></header>
+            <div class="plot" style="padding-left:34px"><span class="ymax">$16</span><span class="ymid">$8</span><span class="yzero">$0</span>
+              <svg viewBox="0 0 320 180" style="width:100%;height:180px;display:block" preserveAspectRatio="none">
+                <line x1="0" y1="106" x2="320" y2="106" stroke="var(--color-neutral-500)" stroke-dasharray="4 4" />
+                <polyline points="0,135 53,119 106,126 160,99 213,86 266,94 320,76" fill="none" stroke="var(--c-1)" stroke-width="2" vector-effect="non-scaling-stroke" />
+              </svg>
+            </div>
+            <div class="axis"><span>Jul 6</span><span>Jul 27</span><span>Aug 10</span></div>
+            <div class="legend"><span><i style="background:var(--c-1)"></i>Cost per merged PR</span><span><i style="background:var(--color-neutral-500)"></i>Period average</span></div>
+          </section>
+        </div>
+
+        <div class="grid2">
+          <section class="panel">
+            <header><h3>Workflow cost comparison</h3><p>Daily spend of the most expensive workflows, side by side.</p></header>
+            <div class="plot"><span class="ymax">$120</span><span class="ymid">$60</span><span class="yzero">$0</span>
+              <svg viewBox="0 0 320 180" style="width:100%;height:180px;display:block" preserveAspectRatio="none">
+                <polyline points="0,144 45,126 91,135 137,108 183,101 229,86 275,94 320,70" fill="none" stroke="var(--c-1)" stroke-width="2" vector-effect="non-scaling-stroke" />
+                <polyline points="0,162 45,158 91,151 137,155 183,135 229,142 275,126 320,119" fill="none" stroke="var(--c-2)" stroke-width="2" vector-effect="non-scaling-stroke" />
+                <polyline points="0,173 45,169 91,171 137,164 183,167 229,160 275,162 320,153" fill="none" stroke="var(--c-4)" stroke-width="2" vector-effect="non-scaling-stroke" />
+              </svg>
+            </div>
+            <div class="axis"><span>Jul 17</span><span>Aug 1</span><span>Aug 16</span></div>
+            <div class="legend"><span><i style="background:var(--c-1)"></i>linear-story</span><span><i style="background:var(--c-2)"></i>github-issue</span><span><i style="background:var(--c-4)"></i>Other</span></div>
+          </section>
+          <section class="panel">
+            <header><h3>Most expensive tickets</h3><p>Where the money concentrates in the selected period.</p></header>
+            <div class="hbars">
+              <div class="hbar"><span class="mono">ELA-288</span><span class="track"><i style="width:100%"></i></span><span class="num">$184</span></div>
+              <div class="hbar"><span class="mono">ELA-309</span><span class="track"><i style="width:77%"></i></span><span class="num">$142</span></div>
+              <div class="hbar"><span class="mono">ELA-274</span><span class="track"><i style="width:59%"></i></span><span class="num">$108</span></div>
+              <div class="hbar"><span class="mono">ELA-311</span><span class="track"><i style="width:41%"></i></span><span class="num">$76</span></div>
+              <div class="hbar"><span class="mono">ELA-298</span><span class="track"><i style="width:26%"></i></span><span class="num">$48</span></div>
+            </div>
+          </section>
+        </div>
+
+        <section class="panel">
+          <header><h3>Runs</h3><p>Every run in the selected period. Click a row for attempts, events and PRs.</p></header>
+          <div class="tscroll">
+          <table class="table">
+            <thead><tr><th>Status</th><th>Ticket</th><th>Model</th><th>Factory/Workflow</th><th style="text-align:right">Cost</th><th style="text-align:right">Duration</th><th style="text-align:right">Start date</th></tr></thead>
+            <tbody>
+              <tr><td><span class="st st-clean"><i></i><span>clean</span></span></td><td class="mono">ELA-311</td><td>claude-sonnet-4.5</td><td>linear-story</td><td class="tabular" style="text-align:right">$6.12</td><td class="tabular" style="text-align:right">42m</td><td class="tabular" style="text-align:right">8/16/2026</td></tr>
+              <tr><td><span class="st st-human"><i></i><span>human</span></span></td><td class="mono">ELA-309</td><td>claude-sonnet-4.5</td><td>github-issue</td><td class="tabular" style="text-align:right">$11.40</td><td class="tabular" style="text-align:right">1.8h</td><td class="tabular" style="text-align:right">8/16/2026</td></tr>
+              <tr><td><span class="st st-fail"><i></i><span>failed</span></span></td><td class="mono">ELA-306</td><td>gpt-5</td><td>linear-story</td><td class="tabular" style="text-align:right">$3.88</td><td class="tabular" style="text-align:right">21m</td><td class="tabular" style="text-align:right">8/15/2026</td></tr>
+              <tr><td><span class="st st-clean"><i></i><span>clean</span></span></td><td class="mono">ELA-304</td><td>claude-sonnet-4.5</td><td>linear-story</td><td class="tabular" style="text-align:right">$5.02</td><td class="tabular" style="text-align:right">36m</td><td class="tabular" style="text-align:right">8/15/2026</td></tr>
+              <tr><td><span class="st st-warn"><i></i><span>warning</span></span></td><td class="mono">ELA-298</td><td>grok-build</td><td>github-issue</td><td class="tabular" style="text-align:right">$9.77</td><td class="tabular" style="text-align:right">2.4h</td><td class="tabular" style="text-align:right">8/14/2026</td></tr>
+            </tbody>
+          </table>
+          </div>
+          <div class="row" style="justify-content:center;gap:var(--space-3);margin-top:var(--space-3)">
+            <button class="btn btn-secondary" disabled>Previous</button>
+            <span class="text-muted" style="font-size:13px">Page 1</span>
+            <button class="btn btn-secondary">Next</button>
+          </div>
+        </section>
+
+        <section class="panel">
+          <header><h3>Top cost drivers</h3><p>By workflow — total spend and efficiency in the selected period.</p></header>
+          <div class="tscroll">
+          <table class="table">
+            <thead><tr><th>Workflow</th><th style="text-align:right">Runs</th><th style="text-align:right">Success</th><th style="text-align:right">Cost</th><th style="text-align:right">Cost / merged PR</th></tr></thead>
+            <tbody>
+              <tr><td>linear-story</td><td class="tabular" style="text-align:right">241</td><td class="tabular" style="text-align:right">71.4%</td><td class="tabular" style="text-align:right">$1,702.44</td><td class="tabular" style="text-align:right">$9.88</td></tr>
+              <tr><td>github-issue</td><td class="tabular" style="text-align:right">128</td><td class="tabular" style="text-align:right">64.8%</td><td class="tabular" style="text-align:right">$894.10</td><td class="tabular" style="text-align:right">$10.77</td></tr>
+              <tr><td>linear-issue-plan-gate</td><td class="tabular" style="text-align:right">43</td><td class="tabular" style="text-align:right">58.1%</td><td class="tabular" style="text-align:right">$287.92</td><td class="tabular" style="text-align:right">$11.52</td></tr>
+            </tbody>
+          </table>
+          </div>
+        </section>
+      </div>
+    </div>
+  </main>
+</div>
+
+<script>
+const rnd=(s=>()=>(s=s*16807%2147483647)/2147483647)(42);
+function stack(el,series,n){const host=document.getElementById(el);if(!host)return;let html='';for(let d=0;d<n;d++){let col='<div class="col">';for(const s of series){const h=Math.round(s.base*(0.35+rnd()*0.65));if(h>0)col+='<i style="height:'+h+'px;background:'+s.color+'"></i>'}html+=col+'</div>'}host.innerHTML=html}
+stack('outcomes',[{base:22,color:'var(--c-fail)'},{base:12,color:'var(--c-warn)'},{base:30,color:'var(--c-human)'},{base:62,color:'var(--c-clean)'}],30);
+stack('tickets',[{base:18,color:'var(--c-fail)'},{base:32,color:'var(--c-human)'},{base:70,color:'var(--c-clean)'}],30);
+stack('models',[{base:18,color:'var(--c-4)'},{base:26,color:'var(--c-3)'},{base:34,color:'var(--c-2)'},{base:66,color:'var(--c-1)'}],30);
+const heat=document.getElementById('heat');
+if(heat){let h='';for(let i=0;i<364;i++){const v=rnd();const lv=v<0.28?0:Math.ceil(v*5);const bg=lv===0?'color-mix(in srgb, var(--color-text) 9%, transparent)':'color-mix(in srgb, var(--c-data) '+[0,22,42,62,82,100][lv]+'%, transparent)';h+='<i style="background:'+bg+'"></i>'}heat.innerHTML=h}
+</script>
+</body>
+</html>

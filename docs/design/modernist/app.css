@@ -1,0 +1,73 @@
+/* ElasticClaw screens — layout scaffolding only. Every color, font, radius,
+   space and shadow comes from ../../styles.css (Modernist). The three status
+   colors below are the one addition: the product carries running / warning /
+   failed semantics the mono palette has no role for, so they are defined in
+   OKLCH at the accent's lightness and chroma, varying only hue. */
+@import url('https://fonts.googleapis.com/css2?family=Archivo:wght@400;600;800&display=swap');
+:root{--font-mono:ui-monospace,"SF Mono",Menlo,monospace;--status-ok:oklch(0.62 0.16 152);--status-warn:oklch(0.62 0.16 75);--status-bad:var(--color-accent)}
+html,body{height:100%}
+body{margin:0;overflow:hidden}
+.app{display:flex;height:100vh;background:var(--color-bg);color:var(--color-text)}
+.mono{font-family:var(--font-mono)}
+.rule{height:2px;background:var(--color-divider);border:0;margin:0}
+
+/* — sidebar — */
+.side{width:260px;flex:none;display:flex;flex-direction:column;border-right:2px solid var(--color-divider);background:var(--color-surface)}
+.side-head{display:flex;align-items:center;gap:var(--space-2);padding:var(--space-4);border-bottom:2px solid var(--color-divider)}
+.side-brand{font-family:var(--font-heading);font-weight:var(--font-heading-weight);font-size:18px;margin-right:auto;letter-spacing:-0.015em}
+.side-filters{padding:var(--space-3);border-bottom:2px solid var(--color-divider);display:grid;gap:var(--space-2)}
+.side-list{flex:1;min-height:0;overflow-y:auto}
+.side-group{display:flex;align-items:center;gap:6px;padding:var(--space-2) var(--space-4);font-size:10px;letter-spacing:0.1em;text-transform:uppercase;color:color-mix(in srgb,var(--color-text) 55%,transparent)}
+.side-foot{padding:var(--space-2);border-top:2px solid var(--color-divider);display:grid;gap:2px}
+.side-item{display:flex;align-items:center;gap:9px;width:100%;min-height:36px;padding:0 10px;border:0;border-radius:var(--radius-md);background:transparent;color:color-mix(in srgb,var(--color-text) 70%,transparent);font:inherit;font-size:13px;cursor:pointer;text-align:left;text-decoration:none}
+.side-item:hover{background:color-mix(in srgb,var(--color-text) 7%,transparent);color:var(--color-text)}
+.side-item[aria-current]{background:color-mix(in srgb,var(--color-text) 10%,transparent);color:var(--color-text)}
+
+/* — agent row in the sidebar — */
+.agent-row{display:block;width:100%;text-align:left;padding:var(--space-3);border:0;border-left:2px solid var(--color-divider);border-radius:0 var(--radius-md) var(--radius-md) 0;background:transparent;color:inherit;font:inherit;text-decoration:none;cursor:pointer}
+.agent-row:hover{background:color-mix(in srgb,var(--color-text) 6%,transparent)}
+.agent-row[aria-current]{background:color-mix(in srgb,var(--color-text) 10%,transparent)}
+.agent-row-top{display:flex;align-items:center;gap:8px}
+.agent-row-name{flex:1;min-width:0;font-family:var(--font-mono);font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.agent-row-sub{display:block;padding-left:20px;margin-top:2px;font-family:var(--font-mono);font-size:10px;line-height:1.4;color:color-mix(in srgb,var(--color-text) 55%,transparent);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+/* — status marks — */
+.dot{width:8px;height:8px;border-radius:var(--radius-pill);flex:none;background:var(--color-neutral-500)}
+.dot.ok{background:var(--status-ok)}
+.dot.warn{background:var(--status-warn)}
+.dot.bad{background:var(--status-bad)}
+.badge-count{display:inline-flex;align-items:center;justify-content:center;min-width:20px;height:20px;padding:0 6px;border-radius:var(--radius-pill);background:var(--color-accent);color:var(--color-bg);font-size:11px;font-weight:600}
+
+/* — main region — */
+.main{flex:1;min-width:0;display:flex;flex-direction:column;overflow:hidden}
+.topbar{display:flex;align-items:center;gap:var(--space-3);padding:var(--space-3) var(--space-4);border-bottom:2px solid var(--color-divider)}
+.icon-btn{display:inline-flex;align-items:center;justify-content:center;width:32px;height:32px;border:0;border-radius:var(--radius-md);background:transparent;color:color-mix(in srgb,var(--color-text) 65%,transparent);cursor:pointer}
+.icon-btn:hover{background:color-mix(in srgb,var(--color-text) 8%,transparent);color:var(--color-text)}
+.spacer{margin-left:auto}
+.scroll{flex:1;min-height:0;overflow:auto}
+
+/* — the board — */
+.board{display:flex;gap:var(--space-4);padding:var(--space-4);height:100%;align-items:stretch}
+.board-card{width:500px;flex:none;display:flex;flex-direction:column;border:1px solid var(--color-divider);border-radius:var(--radius-lg);background:var(--color-surface);overflow:hidden}
+.card-head{padding:var(--space-3);border-bottom:2px solid var(--color-divider)}
+.meter{height:4px;border-radius:var(--radius-pill);background:color-mix(in srgb,var(--color-text) 12%,transparent);overflow:hidden}
+.meter > i{display:block;height:100%;background:var(--status-ok)}
+.now{display:flex;align-items:center;gap:8px;padding:6px var(--space-3);border-bottom:1px solid var(--color-divider);font-family:var(--font-mono);font-size:11px;color:color-mix(in srgb,var(--color-text) 70%,transparent)}
+.msgs{flex:1;min-height:0;overflow-y:auto;padding:var(--space-3);display:grid;gap:var(--space-2);align-content:start}
+.msg{padding:var(--space-2);border-radius:var(--radius-md);font-size:12px}
+.msg-you{background:color-mix(in srgb,var(--color-text) 8%,transparent);margin-left:32px}
+.msg-agent{background:color-mix(in srgb,var(--color-text) 4%,transparent);border:1px solid var(--color-divider);margin-right:32px}
+.msg-head{display:flex;align-items:center;gap:6px;margin-bottom:2px;font-size:11px;color:color-mix(in srgb,var(--color-text) 55%,transparent)}
+.msg-head b{color:var(--color-text);font-weight:600}
+.step{display:grid;grid-template-columns:auto 1fr auto;align-items:baseline;gap:8px;font-family:var(--font-mono);font-size:11px;color:color-mix(in srgb,var(--color-text) 65%,transparent)}
+.card-stats{display:flex;gap:var(--space-3);padding:4px var(--space-3);border-top:1px solid var(--color-divider);font-family:var(--font-mono);font-size:10px;color:color-mix(in srgb,var(--color-text) 55%,transparent)}
+.composer{display:flex;gap:6px;padding:var(--space-2);border-top:2px solid var(--color-divider)}
+
+/* — generic bits — */
+.stack{display:grid;gap:var(--space-3)}
+.row{display:flex;align-items:center;gap:var(--space-2)}
+.kicker{font-size:10px;letter-spacing:0.1em;text-transform:uppercase;color:color-mix(in srgb,var(--color-text) 55%,transparent)}
+.panel{border:1px solid var(--color-divider);border-radius:var(--radius-lg);background:var(--color-surface);padding:var(--space-4)}
+.panel > h2{font-size:15px;margin-bottom:var(--space-3)}
+a{color:var(--color-accent)}
+a:hover{color:var(--color-accent-hover)}

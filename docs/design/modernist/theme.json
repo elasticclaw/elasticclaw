@@ -1,0 +1,49 @@
+{
+  "name": "Modernist",
+  "palette": {
+    "hue": 8,
+    "band": "light",
+    "scheme": "mono",
+    "sat": 0.85,
+    "bg": "#f4f4f5",
+    "surface": "#e8e8ea",
+    "text": "#1b1b1d",
+    "accent": "#ec3013",
+    "accent2": "#e15b47"
+  },
+  "fonts": {
+    "heading": {
+      "family": "Archivo",
+      "class": "grotesque",
+      "weights": [
+        400,
+        600,
+        800
+      ]
+    },
+    "body": {
+      "family": "Archivo",
+      "class": "grotesque",
+      "weights": [
+        400,
+        600,
+        800
+      ]
+    }
+  },
+  "density": 1,
+  "radius": 8,
+  "layoutStyle": "grid",
+  "dividers": "strong",
+  "buttonAlign": "left",
+  "imageTreatment": "grayscale",
+  "photo": "modernist",
+  "colorScheme": "system",
+  "paletteDark": {
+    "bg": "#141416",
+    "surface": "#1e1e21",
+    "text": "#f2f2f4",
+    "accent": "#ff563c",
+    "accent2": "#ef6853"
+  }
+}
