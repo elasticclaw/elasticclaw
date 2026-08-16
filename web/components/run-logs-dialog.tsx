@@ -107,9 +107,9 @@ function OutputTab({ open, runId }: { open: boolean; runId: string }) {
   return (
     <div className="space-y-4">
       {groups.map(([stage, stageOutputs]) => (
-        <section key={stage} className="rounded-md border">
-          <h3 className="border-b bg-muted/40 px-4 py-2 text-sm font-semibold">{stage}</h3>
-          <div className="divide-y">
+        <section key={stage} className="overflow-hidden rounded-lg border border-border">
+          <h3 className="border-b border-border bg-foreground/4 px-4 py-2 text-sm">{stage}</h3>
+          <div className="divide-y divide-border">
             {stageOutputs.map((output) => <OutputBlock key={`${output.clawId}-${output.outputName}`} output={output} />)}
           </div>
         </section>
@@ -124,9 +124,9 @@ function OutputBlock({ output }: { output: TaskRunOutput }) {
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div>
           <div className="text-sm font-medium">{output.outputName}</div>
-          {output.attemptId && <div className="text-xs text-muted-foreground">{output.attemptId}</div>}
+          {output.attemptId && <div className="font-mono text-[11px] text-muted-foreground">{output.attemptId}</div>}
         </div>
-        <Badge className={cn("border", output.exitCode === 0 ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300" : "border-red-500/30 bg-red-500/10 text-red-700 dark:text-red-300")}>Exit {output.exitCode}</Badge>
+        <Badge className={cn("border font-mono", output.exitCode === 0 ? "border-status-ok bg-status-ok/12 text-status-ok" : "border-primary bg-tint-accent text-primary")}>Exit {output.exitCode}</Badge>
       </div>
       {output.stdout && <LogStream label="stdout" value={output.stdout} />}
       {output.stderr && <LogStream label="stderr" value={output.stderr} error />}
@@ -136,5 +136,5 @@ function OutputBlock({ output }: { output: TaskRunOutput }) {
 }
 
 function LogStream({ label, value, error = false }: { label: string; value: string; error?: boolean }) {
-  return <div><div className={cn("mb-1 text-xs font-medium text-muted-foreground", error && "text-destructive")}>{label}</div><pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-md bg-muted p-3 font-mono text-xs">{value}</pre></div>
+  return <div><div className={cn("kicker mb-1 font-semibold text-muted-foreground", error && "text-destructive")}>{label}</div><pre className="scrollbar-thin max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-md border border-border bg-foreground/4 p-3 font-mono text-xs">{value}</pre></div>
 }

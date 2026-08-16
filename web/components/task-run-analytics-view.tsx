@@ -36,7 +36,8 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { cn } from "@/lib/utils"
 
 const costChartConfig = {
-  costUsd: { label: "Cost", color: "var(--chart-1)" },
+  // Spend is a money series, so it takes the data hue, never an outcome color.
+  costUsd: { label: "Cost", color: "var(--color-data)" },
 } satisfies ChartConfig
 
 export type DetailState = {
@@ -296,11 +297,11 @@ export function TaskRunAnalyticsView({ workspaceScope }: { workspaceScope?: stri
   return (
     <main className="flex h-full min-w-0 bg-background">
       <section className="flex min-w-0 flex-1 flex-col">
-        <header className="flex flex-col gap-3 border-b border-border px-4 py-3 lg:px-6">
+        <header className="flex flex-col gap-3 border-b-2 border-border px-4 py-3 lg:px-6">
           <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
             <div>
-              <h2 className="text-lg font-semibold tracking-tight">Task Run Analytics</h2>
-              <p className="text-sm text-muted-foreground">PR-scoped run outcomes, warnings, and delivery failures.</p>
+              <h2 className="text-lg tracking-tight">Task Run Analytics</h2>
+              <p className="mt-0.5 text-xs text-muted-foreground">PR-scoped run outcomes, warnings, and delivery failures.</p>
             </div>
             <div className="flex w-fit items-center gap-2">
               <Button variant="ghost" size="sm" onClick={clearFilters}>Reset</Button>
@@ -312,7 +313,7 @@ export function TaskRunAnalyticsView({ workspaceScope }: { workspaceScope?: stri
           </div>
           <div className="flex flex-col gap-2">
             <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
-              <h3 className="text-xs font-medium uppercase text-muted-foreground">AI Spend</h3>
+              <h3 className="kicker font-semibold text-muted-foreground">AI Spend</h3>
               {ignoredCostFilters.length > 0 && (
                 <span className="text-xs italic text-muted-foreground">Ignores {formatFilterList(ignoredCostFilters)} filters</span>
               )}
@@ -372,7 +373,7 @@ export function TaskRunAnalyticsView({ workspaceScope }: { workspaceScope?: stri
           </div>
           {generalStats && (
             <div className="flex flex-col gap-2">
-              <h3 className="text-xs font-medium uppercase text-muted-foreground">General Stats</h3>
+              <h3 className="kicker font-semibold text-muted-foreground">General Stats</h3>
               <div className="grid gap-2 sm:grid-cols-3">
                 <CostCard
                   label="Avg ticket to PR"
@@ -417,7 +418,7 @@ export function TaskRunAnalyticsView({ workspaceScope }: { workspaceScope?: stri
         )}
 
         <div className="min-h-0 flex-1 overflow-auto px-4 py-3 lg:px-6">
-          <div className="overflow-hidden rounded-md border border-border">
+          <div className="overflow-hidden rounded-lg border border-border bg-card">
             <Table>
               <TableHeader>
                 <TableRow>
@@ -453,20 +454,20 @@ export function TaskRunAnalyticsView({ workspaceScope }: { workspaceScope?: stri
                     <TableCell><StatusBadge status={run.status} /></TableCell>
                     <TableCell>
                       <div className="min-w-[180px]">
-                        <div className="font-medium">{run.ownerDisplayName || run.factoryName || run.ownerType}</div>
-                        <div className="text-xs text-muted-foreground">{ownerSecondaryLine(run)}</div>
+                        <div className="font-mono font-medium">{run.ownerDisplayName || run.factoryName || run.ownerType}</div>
+                        <div className="text-[11px] text-muted-foreground">{ownerSecondaryLine(run)}</div>
                       </div>
                     </TableCell>
                     <TableCell>
                       {run.issueId ? (
-                        <span className="block max-w-[200px] truncate">
+                        <span className="block max-w-[200px] truncate font-mono">
                           {run.issueTitle ? `${run.issueId}: ${run.issueTitle}` : run.issueId}
                         </span>
                       ) : (
                         <span className="text-muted-foreground">None</span>
                       )}
                     </TableCell>
-                    <TableCell>{run.repo || <span className="text-muted-foreground">None</span>}</TableCell>
+                    <TableCell className="font-mono">{run.repo || <span className="font-sans text-muted-foreground">None</span>}</TableCell>
                     <TableCell>{run.model || <span className="text-muted-foreground">Unknown</span>}</TableCell>
                     <TableCell>
                       <div className="flex max-w-[260px] flex-wrap gap-1">
@@ -516,16 +517,16 @@ function Metric({ label, title, value, tone, active, onClick }: { label: string;
       aria-pressed={active}
       onClick={onClick}
       className={cn(
-        "rounded-md border border-border bg-card px-3 py-2 text-left transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-        active && "border-primary/60 bg-accent"
+        "rounded-lg border border-border bg-card px-3 py-2 text-left transition-colors hover:bg-foreground/4 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring",
+        active && "border-primary bg-foreground/7"
       )}
     >
-      <div className="text-xs text-muted-foreground">{label}</div>
+      <div className="text-[11px] leading-[1.35] text-muted-foreground">{label}</div>
       <div className={cn(
-        "mt-1 text-xl font-semibold",
-        tone === "success" && "text-emerald-600 dark:text-emerald-400",
-        tone === "warning" && "text-amber-600 dark:text-amber-400",
-        tone === "danger" && "text-red-600 dark:text-red-400"
+        "mt-1 text-[23px] font-extrabold leading-none tracking-[-0.02em] tabular-nums",
+        tone === "success" && "text-status-ok",
+        tone === "warning" && "text-status-warn",
+        tone === "danger" && "text-destructive"
       )}>{value}</div>
     </button>
   )
@@ -533,10 +534,10 @@ function Metric({ label, title, value, tone, active, onClick }: { label: string;
 
 function CostCard({ label, value, sub, title }: { label: string; value: ReactNode; sub?: ReactNode; title?: string }) {
   return (
-    <div className="rounded-md border border-border bg-card px-3 py-2" title={title}>
-      <div className="text-xs text-muted-foreground">{label}</div>
-      <div className="mt-1 flex items-baseline gap-2 text-xl font-semibold">{value}</div>
-      {sub && <div className="mt-1 text-xs text-muted-foreground">{sub}</div>}
+    <div className="rounded-lg border border-border bg-card px-3 py-2" title={title}>
+      <div className="text-[11px] leading-[1.35] text-muted-foreground">{label}</div>
+      <div className="mt-1 flex items-baseline gap-2 text-[23px] font-extrabold leading-none tracking-[-0.02em] tabular-nums">{value}</div>
+      {sub && <div className="mt-1.5 text-[11px] text-muted-foreground">{sub}</div>}
     </div>
   )
 }
@@ -548,13 +549,9 @@ function DeltaIndicator({ pct }: { pct: number }) {
   return (
     <span
       className={cn(
-        "flex items-center gap-0.5 text-xs font-medium",
-        // A spend increase is worse (red); a decrease is better (emerald); flat is neutral.
-        flat
-          ? "text-muted-foreground"
-          : up
-            ? "text-red-600 dark:text-red-400"
-            : "text-emerald-600 dark:text-emerald-400"
+        "flex items-center gap-0.5 text-[11px] font-semibold",
+        // A spend increase is worse (accent); a decrease is better (status-ok); flat is neutral.
+        flat ? "text-muted-foreground" : up ? "text-primary" : "text-status-ok"
       )}
     >
       <Icon className="size-3" />
@@ -568,10 +565,10 @@ function ConfidenceBadge({ confidence }: { confidence: "high" | "medium" | "low"
     <Badge
       variant="outline"
       className={cn(
-        "text-xs font-normal",
-        confidence === "high" && "border-emerald-500/40 text-emerald-700 dark:text-emerald-300",
-        confidence === "medium" && "border-amber-500/50 text-amber-700 dark:text-amber-300",
-        confidence === "low" && "text-muted-foreground"
+        "font-normal",
+        confidence === "high" && "border-status-ok text-status-ok",
+        confidence === "medium" && "border-status-warn text-status-warn",
+        confidence === "low" && "border-border text-muted-foreground"
       )}
     >
       {formatLabel(confidence)}
@@ -587,7 +584,7 @@ export function FilterSelect({ label, value, values, onChange }: { label: string
 
   return (
     <Select value={value ?? anyValue} onValueChange={(next) => onChange(next === anyValue ? undefined : next)}>
-      <SelectTrigger size="sm" className="w-full bg-background">
+      <SelectTrigger size="sm" className="w-full text-[13px]">
         <span className="truncate">
           <span className="text-muted-foreground">{label}:</span> {displayValue}
         </span>
@@ -615,12 +612,12 @@ export function RunDetailPanel({ run, details, loading, error, onClose }: { run:
   if (!run || !mounted) return null
   return createPortal(
     <>
-    <div className="fixed inset-0 z-[55] bg-black/50" onClick={onClose} aria-hidden="true" />
-    <aside className="fixed inset-y-0 right-0 z-[60] flex w-full max-w-[66vw] flex-col border-l border-border bg-card shadow-xl">
-      <div className="flex items-start justify-between gap-3 border-b border-border p-4">
+    <div className="fixed inset-0 z-[55] bg-[var(--ds-scrim)]" onClick={onClose} aria-hidden="true" />
+    <aside className="fixed inset-y-0 right-0 z-[60] flex w-full max-w-[66vw] flex-col border-l-2 border-border bg-card shadow-ds-lg">
+      <div className="flex items-start justify-between gap-3 border-b-2 border-border p-4">
         <div className="min-w-0">
-          <div className="truncate text-sm font-semibold">{run.ownerDisplayName || run.runId}</div>
-          <div className="truncate text-xs text-muted-foreground">{run.runId}</div>
+          <div className="truncate text-[15px] font-extrabold tracking-[-0.015em]">{run.ownerDisplayName || run.runId}</div>
+          <div className="truncate font-mono text-xs text-muted-foreground">{run.runId}</div>
         </div>
         <Button variant="ghost" size="icon" className="size-8" onClick={onClose} aria-label="Close detail panel">
           <XCircle className="size-4" />
@@ -646,7 +643,7 @@ export function RunDetailPanel({ run, details, loading, error, onClose }: { run:
         </section>
         {hasUsageData(run) && (
           <section>
-            <h3 className="mb-2 text-xs font-medium uppercase text-muted-foreground">Usage</h3>
+            <h3 className="kicker mb-2 font-semibold text-muted-foreground">Usage</h3>
             <div className="grid grid-cols-2 gap-2 text-sm">
               <DetailItem label="Prompt tokens" value={formatCompactTokens(run.inputTokens)} />
               <DetailItem label="Completion tokens" value={formatCompactTokens(run.outputTokens)} />
@@ -658,10 +655,10 @@ export function RunDetailPanel({ run, details, loading, error, onClose }: { run:
         )}
         <TimingSection run={run} />
         <section>
-          <h3 className="mb-2 text-xs font-medium uppercase text-muted-foreground">Pull Requests</h3>
+          <h3 className="kicker mb-2 font-semibold text-muted-foreground">Pull Requests</h3>
           <div className="space-y-2">
             {(details?.prs ?? []).map((pr) => (
-              <a key={pr.id} href={pr.url} target="_blank" rel="noreferrer" className="flex items-center justify-between rounded-md border border-border px-3 py-2 text-sm hover:bg-accent">
+              <a key={pr.id} href={pr.url} target="_blank" rel="noreferrer" className="flex items-center justify-between rounded-md border border-border px-3 py-2 text-sm hover:bg-foreground/7">
                 <span className="flex min-w-0 items-center gap-2">
                   <GitPullRequest className="size-4 text-muted-foreground" />
                   <span className="truncate">{pr.repo}#{pr.prNumber}</span>
@@ -673,7 +670,7 @@ export function RunDetailPanel({ run, details, loading, error, onClose }: { run:
           </div>
         </section>
         <section>
-          <h3 className="mb-2 text-xs font-medium uppercase text-muted-foreground">Attempts</h3>
+          <h3 className="kicker mb-2 font-semibold text-muted-foreground">Attempts</h3>
           <div className="space-y-2">
             {(details?.attempts ?? []).map((attempt) => {
               const attemptDurationMs = durationBetween(attempt.startedAt, attempt.finishedAt)
@@ -693,7 +690,7 @@ export function RunDetailPanel({ run, details, loading, error, onClose }: { run:
           </div>
         </section>
         <section>
-          <h3 className="mb-2 text-xs font-medium uppercase text-muted-foreground">Events</h3>
+          <h3 className="kicker mb-2 font-semibold text-muted-foreground">Events</h3>
           <div className="space-y-2">
             {(details?.events ?? []).slice(-MAX_DISPLAYED_EVENTS).reverse().map((event) => (
               <div key={event.id} className="rounded-md border border-border px-3 py-2 text-sm">
@@ -718,7 +715,7 @@ function TimingSection({ run }: { run: TaskRunSummary }) {
   if (phases.length === 0) return null
   return (
     <section>
-      <h3 className="mb-2 text-xs font-medium uppercase text-muted-foreground">Timing</h3>
+      <h3 className="kicker mb-2 font-semibold text-muted-foreground">Timing</h3>
       <div className="grid grid-cols-2 gap-2 text-sm">
         {phases.map((phase) => (
           <DetailItem key={phase.label} label={phase.label} value={formatDurationMs(phase.ms)} title={phase.title} />
@@ -731,10 +728,22 @@ function TimingSection({ run }: { run: TaskRunSummary }) {
 function DetailItem({ label, value, title }: { label: string; value: ReactNode; title?: string }) {
   return (
     <div title={title} className="rounded-md border border-border px-3 py-2">
-      <div className="text-xs text-muted-foreground">{label}</div>
+      <div className="text-[11px] text-muted-foreground">{label}</div>
       <div className="mt-1 truncate">{value}</div>
     </div>
   )
+}
+
+// A run status reads as its outcome color — the same semantic scale the charts
+// use — drawn as an outlined pill. Failed is the one outcome that also takes a
+// soft accent fill, so a broken run is findable at a glance in a long table.
+// Full literal class strings: Tailwind only sees classes it can read verbatim.
+const statusPillClasses: Record<string, string> = {
+  clean: "border-status-ok text-status-ok",
+  human_in_the_loop: "border-[var(--ds-neutral-500)] text-[var(--ds-neutral-500)]",
+  warning: "border-status-warn text-status-warn",
+  failed: "border-primary bg-tint-accent text-primary",
+  running: "border-data text-data",
 }
 
 export function StatusBadge({ status }: { status: string }) {
@@ -747,8 +756,8 @@ export function StatusBadge({ status }: { status: string }) {
   return (
     <Badge
       title={status === "clean" ? "PR merged or closed with zero human interaction." : status === "human_in_the_loop" ? "PR merged or closed; a human interacted via the PR (comment, review, or code push)." : status === "warning" ? "PR merged or closed; a human interacted via the factory dashboard." : status === "failed" ? "No PR was ever delivered or the run definitively failed before delivery." : status === "running" ? "In progress; no failure has occurred." : undefined}
-      variant={status === "failed" ? "destructive" : status === "running" ? "secondary" : "outline"}
-      className={cn(status === "clean" && "border-emerald-500/40 text-emerald-700 dark:text-emerald-300", status === "human_in_the_loop" && "border-blue-500/50 text-blue-700 dark:text-blue-300", status === "warning" && "border-amber-500/50 text-amber-700 dark:text-amber-300")}
+      variant="outline"
+      className={cn("tracking-[0.02em]", statusPillClasses[status] ?? "border-border text-muted-foreground")}
     >
       {icon}
       {formatLabel(status)}

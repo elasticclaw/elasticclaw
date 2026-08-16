@@ -71,18 +71,43 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 const commandCenterUrlFilterKeys = ["workspace", ...urlFilterKeys, "from", "to"] as const
 // Matches the heatmap's custom tooltip (bg-card/border/shadow-md) so every
 // explanatory tooltip in this file shares one look, in both themes.
-const tooltipContentClassName = "max-w-xs rounded-lg border bg-card text-foreground shadow-md"
+const tooltipContentClassName = "max-w-xs rounded-lg border border-border bg-card text-card-foreground shadow-ds-md"
 const tooltipArrowClassName = "bg-card fill-card"
+// One semantic scale for every chart on this screen. Outcome series always read
+// as outcome colors (clean = ok, human = neutral, warning = warn, failed =
+// accent); money and volume series read as the single data-blue ramp, so cost
+// can never be mistaken for an outcome. Everything points at a theme token so
+// the charts re-tint with the design system rather than at a frozen hex.
 const chartConfig = {
-  clean: { label: "Clean", color: "#0ca30c" },
-  humanInTheLoop: { label: "Human on the loop", color: "#2a78d6" },
-  warning: { label: "Warning", color: "#fab219" },
-  failed: { label: "Failed", color: "#d03b3b" },
-  ticketDelivered: { label: "Delivered", color: "#0ca30c" },
-  ticketInProgress: { label: "In progress", color: "#64748b" },
-  ticketFailed: { label: "Failed", color: "#d03b3b" },
-  costPerMergedPr: { label: "Cost / merged PR", color: "var(--chart-1)" },
+  clean: { label: "Clean", color: "var(--color-status-ok)" },
+  humanInTheLoop: { label: "Human on the loop", color: "var(--ds-neutral-500)" },
+  warning: { label: "Warning", color: "var(--color-status-warn)" },
+  failed: { label: "Failed", color: "var(--color-primary)" },
+  ticketDelivered: { label: "Delivered", color: "var(--color-status-ok)" },
+  ticketInProgress: { label: "In progress", color: "var(--ds-neutral-500)" },
+  ticketFailed: { label: "Failed", color: "var(--color-primary)" },
+  costPerMergedPr: { label: "Cost / merged PR", color: "var(--color-data)" },
 } satisfies ChartConfig
+// Legends: small square swatches over a 1px rule, muted 11px labels.
+const legendProps = {
+  iconType: "square",
+  iconSize: 9,
+  wrapperStyle: {
+    fontSize: 11,
+    paddingTop: 10,
+    marginTop: 4,
+    borderTop: "1px solid var(--color-border)",
+  },
+} as const
+// Money and volume series step down the single data-blue ramp and end on the
+// neutrals, so a cost series is never confused with an outcome color.
+const costSeriesColors = [
+  "var(--color-data)",
+  "var(--color-data-light)",
+  "var(--color-data-dark)",
+  "var(--ds-neutral-600)",
+  "var(--ds-neutral-400)",
+]
 const usd = new Intl.NumberFormat(undefined, {
   style: "currency",
   currency: "USD",
@@ -403,8 +428,8 @@ export function AnalyticsCommandCenter() {
   return (
     <main className="h-full overflow-auto bg-background">
       <div className="mx-auto max-w-[1400px] space-y-5 p-5 lg:p-6">
-        <header>
-          <h1 className="text-2xl font-semibold tracking-tight">Analytics</h1>
+        <header className="border-b-2 border-border pb-4">
+          <h1 className="text-2xl tracking-tight">Analytics</h1>
         </header>
         <FilterBar filters={filters} options={options} workspaces={workspaceNames} onChange={setFilters} />
         {error && <p className="text-sm text-destructive">{error}</p>}
@@ -561,7 +586,7 @@ function WorkspaceSelect({
       value={value ?? allWorkspacesValue}
       onValueChange={(next) => onChange(next === allWorkspacesValue ? undefined : next)}
     >
-      <SelectTrigger size="sm" className="w-full bg-background font-medium">
+      <SelectTrigger size="sm" className="w-full text-[13px] font-medium">
         <span className="truncate">
           <span className="text-muted-foreground font-normal">Workspace:</span> {value ?? "All workspaces"}
         </span>
@@ -595,7 +620,7 @@ function FilterBar({
   ] as const
 
   return (
-    <div className="flex flex-wrap gap-2 rounded-lg border bg-card p-2">
+    <div className="flex flex-wrap items-center gap-2 rounded-lg border border-border bg-card p-2">
       <div className="w-56">
         <WorkspaceSelect
           value={filters.workspace}
@@ -603,13 +628,13 @@ function FilterBar({
           onChange={(value) => onChange({ workspace: value })}
         />
       </div>
-      <div className="flex overflow-hidden rounded-md border">
+      <div className="flex h-8 divide-x divide-border overflow-hidden rounded-md border border-border">
         {[["7d", 7], ["30d", 30], ["90d", 90], ["MTD", 0]].map(([label, days]) => (
           <Button
             key={label}
             variant="ghost"
             size="sm"
-            className="rounded-none"
+            className="h-full rounded-none text-[13px] font-medium text-foreground"
             onClick={() => {
               const to = new Date()
               const from = new Date()
@@ -662,14 +687,14 @@ function Heatmap({ heatmap, maxCost, selectedDay, onSelectDay, onClearSelectedDa
   }
   const selectedDayLabel = selectedDay && new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", year: "numeric" }).format(new Date(`${selectedDay}T00:00:00`))
 
-  return <section ref={containerRef} className="relative rounded-lg border bg-card p-4"><div className="mb-4 flex items-center gap-1"><h2 className="text-sm font-semibold">Cost by day</h2><InfoTooltip text="Each square is a day; darker means more spend. Click a day to focus the whole page on it." />{selectedDayLabel && <span className="ml-2 inline-flex items-center gap-1 rounded-full bg-muted px-2 py-0.5 text-xs text-muted-foreground">{selectedDayLabel}<button type="button" aria-label={`Clear ${selectedDayLabel} filter`} onClick={onClearSelectedDay} className="rounded-full px-0.5 text-foreground hover:bg-accent">×</button></span>}</div><div className="flex gap-2"><div className="flex w-6 flex-col text-center text-[10px] text-muted-foreground"><div className="mb-1 h-4" aria-hidden="true" /><div className="grid flex-1 grid-rows-7 gap-1">{["M", "T", "W", "T", "F", "S", "S"].map((day, index) => <span key={`${day}-${index}`} className="flex items-center justify-center">{day}</span>)}</div></div><div className="min-w-0 flex-1"><div className="relative mb-1 h-4 text-[10px] text-muted-foreground">{heatmap.monthLabels.map(({ week, label }) => <span key={`${week}-${label}`} className="absolute" style={{ left: `${(week / 52) * 100}%` }}>{label}</span>)}</div><div className="grid grid-flow-col grid-cols-[repeat(52,minmax(0,1fr))] grid-rows-7 gap-1">{heatmap.days.map(({ iso, point }) => { const level = point?.costUsd ? Math.min(5, Math.ceil((point.costUsd / maxCost) * 5)) : 0; const selected = iso === selectedDay; return <button key={iso} onClick={() => onSelectDay(iso)} onMouseEnter={(event) => showTooltip(iso, point, event.clientX, event.clientY)} onMouseMove={(event) => showTooltip(iso, point, event.clientX, event.clientY)} onMouseLeave={() => setTooltip(null)} onFocus={(event) => { const rect = event.currentTarget.getBoundingClientRect(); showTooltip(iso, point, rect.left + rect.width / 2, rect.top + rect.height / 2) }} onBlur={() => setTooltip(null)} className={`aspect-square cursor-pointer rounded-sm border border-black/5 transition-shadow hover:ring-2 hover:ring-ring hover:ring-offset-1 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1 ${selected ? "ring-2 ring-primary ring-offset-1" : ""}`} style={{ background: level ? `var(--heatmap-${level})` : "var(--muted)" }} /> })}</div></div></div>{tooltip && <div role="tooltip" className="pointer-events-none absolute z-10 rounded-lg border bg-card px-2 py-1.5 text-xs text-foreground shadow-md" style={{ left: tooltip.x, top: tooltip.y }}><div>{new Intl.DateTimeFormat(undefined, { weekday: "short", month: "short", day: "numeric", year: "numeric" }).format(new Date(`${tooltip.iso}T00:00:00`))}</div><div className="text-muted-foreground">{usdWhole.format(tooltip.point?.costUsd ?? 0)} · {tooltip.point?.runCount ?? 0} runs</div></div>}<div className="mt-3 flex justify-end gap-1 text-xs text-muted-foreground">Less {Array.from({ length: 5 }, (_, index) => <i key={index} className="size-3 rounded-sm" style={{ background: `var(--heatmap-${index + 1})` }} />)} More</div></section>
+  return <section ref={containerRef} className="relative rounded-lg border border-border bg-card p-4"><div className="mb-4 flex items-center gap-1.5"><h2 className="text-[15px]">Cost by day</h2><InfoTooltip text="Each square is a day; darker means more spend. Click a day to focus the whole page on it." />{selectedDayLabel && <span className="ml-2 inline-flex items-center gap-1 rounded-full border border-border px-2 py-0.5 font-mono text-[11px] text-muted-foreground">{selectedDayLabel}<button type="button" aria-label={`Clear ${selectedDayLabel} filter`} onClick={onClearSelectedDay} className="rounded-full px-0.5 text-foreground hover:bg-foreground/10">×</button></span>}</div><div className="flex gap-2"><div className="flex w-6 flex-col text-center font-mono text-[10px] text-muted-foreground"><div className="mb-1 h-4" aria-hidden="true" /><div className="grid flex-1 grid-rows-7 gap-1">{["M", "T", "W", "T", "F", "S", "S"].map((day, index) => <span key={`${day}-${index}`} className="flex items-center justify-center">{day}</span>)}</div></div><div className="min-w-0 flex-1"><div className="relative mb-1 h-4 font-mono text-[10px] text-muted-foreground">{heatmap.monthLabels.map(({ week, label }) => <span key={`${week}-${label}`} className="absolute" style={{ left: `${(week / 52) * 100}%` }}>{label}</span>)}</div><div className="grid grid-flow-col grid-cols-[repeat(52,minmax(0,1fr))] grid-rows-7 gap-1">{heatmap.days.map(({ iso, point }) => { const level = point?.costUsd ? Math.min(5, Math.ceil((point.costUsd / maxCost) * 5)) : 0; const selected = iso === selectedDay; return <button key={iso} onClick={() => onSelectDay(iso)} onMouseEnter={(event) => showTooltip(iso, point, event.clientX, event.clientY)} onMouseMove={(event) => showTooltip(iso, point, event.clientX, event.clientY)} onMouseLeave={() => setTooltip(null)} onFocus={(event) => { const rect = event.currentTarget.getBoundingClientRect(); showTooltip(iso, point, rect.left + rect.width / 2, rect.top + rect.height / 2) }} onBlur={() => setTooltip(null)} className={`aspect-square cursor-pointer rounded-sm border border-foreground/8 transition-shadow hover:ring-2 hover:ring-ring hover:ring-offset-1 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1 ${selected ? "ring-2 ring-primary ring-offset-1" : ""}`} style={{ background: level ? `var(--heatmap-${level})` : "var(--muted)" }} /> })}</div></div></div>{tooltip && <div role="tooltip" className="pointer-events-none absolute z-10 rounded-lg border border-border bg-card px-2 py-1.5 text-xs text-foreground shadow-ds-md" style={{ left: tooltip.x, top: tooltip.y }}><div>{new Intl.DateTimeFormat(undefined, { weekday: "short", month: "short", day: "numeric", year: "numeric" }).format(new Date(`${tooltip.iso}T00:00:00`))}</div><div className="text-muted-foreground">{usdWhole.format(tooltip.point?.costUsd ?? 0)} · {tooltip.point?.runCount ?? 0} runs</div></div>}<div className="mt-3 flex items-center justify-end gap-1 text-[11px] text-muted-foreground">Less {Array.from({ length: 5 }, (_, index) => <i key={index} className="size-[11px] rounded-[2px]" style={{ background: `var(--heatmap-${index + 1})` }} />)} More</div></section>
 }
 
 function useModelData(costs?: CostOverview) { return useMemo(() => { const models = (costs?.seriesByModel ?? []).slice(0, 4); return (costs?.dailySeries ?? []).map((day, index) => ({ date: day.date, Other: Math.max(0, day.costUsd - models.reduce((sum, model) => sum + (model.dailySeries[index]?.costUsd ?? 0), 0)), ...Object.fromEntries(models.map((model) => [model.model, model.dailySeries[index]?.costUsd ?? 0])) })) }, [costs]) }
 function useWorkflowCostComparisonData(drivers: AnalyticsCostDriver[]) { return useMemo(() => { const topDrivers = [...drivers].sort((a, b) => b.costUsd - a.costUsd).slice(0, 5); const topNames = topDrivers.map((driver) => driver.name); const topNameSet = new Set(topNames); const dataByDate = new Map<string, Record<string, string | number>>(); for (const driver of drivers) for (const point of driver.dailyCost) { const row = dataByDate.get(point.date) ?? { date: point.date, Other: 0, ...Object.fromEntries(topNames.map((name) => [name, 0])) }; if (topNameSet.has(driver.name)) row[driver.name] = Number(row[driver.name]) + point.costUsd; else row.Other = Number(row.Other) + point.costUsd; dataByDate.set(point.date, row) } return { data: [...dataByDate.values()].sort((a, b) => String(a.date).localeCompare(String(b.date))), topNames } }, [drivers]) }
-function DailyCostChart({ costs, modelData }: { costs?: CostOverview; modelData: Record<string, string | number>[] }) { const labels = [...(costs?.seriesByModel ?? []).slice(0, 4).map((item) => item.model), "Other"]; return <ChartContainer config={chartConfig} className="h-64 w-full"><BarChart data={modelData}><CartesianGrid vertical={false} /><XAxis dataKey="date" tickFormatter={formatDate} /><YAxis /><ChartTooltip content={<ChartTooltipContent />} /><Legend formatter={legendTextFormatter} />{labels.map((label, index) => <Bar key={label} dataKey={label} name={label} stackId="cost" fill={`var(--chart-${index + 1})`} />)}</BarChart></ChartContainer> }
-function WorkflowCostComparisonChart({ drivers }: { drivers: AnalyticsCostDriver[] }) { const { data, topNames } = useWorkflowCostComparisonData(drivers); if (drivers.length === 0) return <p className="py-8 text-center text-sm text-muted-foreground">No cost data for this period.</p>; return <ChartContainer config={chartConfig} className="h-64 w-full"><LineChart data={data}><CartesianGrid vertical={false} /><XAxis dataKey="date" tickFormatter={formatDate} /><YAxis /><ChartTooltip content={<ChartTooltipContent />} /><Legend formatter={legendTextFormatter} />{topNames.map((name, index) => <Line key={name} type="monotone" dataKey={name} name={name} stroke={`var(--chart-${index + 1})`} dot={false} strokeWidth={2} />)}{drivers.length > 5 && <Line type="monotone" dataKey="Other" name="Other" stroke="var(--muted-foreground)" dot={false} strokeWidth={2} />}</LineChart></ChartContainer> }
-function OutcomesChart({ effect }: { effect?: AnalyticsEffectiveness }) { return <ChartContainer config={chartConfig} className="h-64 w-full"><BarChart data={effect?.outcomesByDay}><CartesianGrid vertical={false} /><XAxis dataKey="date" tickFormatter={formatDate} /><YAxis allowDecimals={false} /><ChartTooltip content={<ChartTooltipContent />} /><Legend formatter={legendTextFormatter} /><Bar dataKey="clean" name="Clean" stackId="outcome" fill="var(--color-clean)" /><Bar dataKey="humanInTheLoop" name="Human on the loop" stackId="outcome" fill="var(--color-humanInTheLoop)" /><Bar dataKey="warning" name="Warning" stackId="outcome" fill="var(--color-warning)" /><Bar dataKey="failed" name="Failed" stackId="outcome" fill="var(--color-failed)" /></BarChart></ChartContainer> }
+function DailyCostChart({ costs, modelData }: { costs?: CostOverview; modelData: Record<string, string | number>[] }) { const labels = [...(costs?.seriesByModel ?? []).slice(0, 4).map((item) => item.model), "Other"]; return <ChartContainer config={chartConfig} className="h-64 w-full"><BarChart data={modelData}><CartesianGrid vertical={false} /><XAxis dataKey="date" tickFormatter={formatDate} /><YAxis /><ChartTooltip content={<ChartTooltipContent />} /><Legend {...legendProps} formatter={legendTextFormatter} />{labels.map((label, index) => <Bar key={label} dataKey={label} name={label} stackId="cost" fill={costSeriesColors[index % costSeriesColors.length]} />)}</BarChart></ChartContainer> }
+function WorkflowCostComparisonChart({ drivers }: { drivers: AnalyticsCostDriver[] }) { const { data, topNames } = useWorkflowCostComparisonData(drivers); if (drivers.length === 0) return <p className="py-8 text-center text-sm text-muted-foreground">No cost data for this period.</p>; return <ChartContainer config={chartConfig} className="h-64 w-full"><LineChart data={data}><CartesianGrid vertical={false} /><XAxis dataKey="date" tickFormatter={formatDate} /><YAxis /><ChartTooltip content={<ChartTooltipContent />} /><Legend {...legendProps} formatter={legendTextFormatter} />{topNames.map((name, index) => <Line key={name} type="monotone" dataKey={name} name={name} stroke={costSeriesColors[index % costSeriesColors.length]} dot={false} strokeWidth={2} />)}{drivers.length > 5 && <Line type="monotone" dataKey="Other" name="Other" stroke="var(--muted-foreground)" dot={false} strokeWidth={2} />}</LineChart></ChartContainer> }
+function OutcomesChart({ effect }: { effect?: AnalyticsEffectiveness }) { return <ChartContainer config={chartConfig} className="h-64 w-full"><BarChart data={effect?.outcomesByDay}><CartesianGrid vertical={false} /><XAxis dataKey="date" tickFormatter={formatDate} /><YAxis allowDecimals={false} /><ChartTooltip content={<ChartTooltipContent />} /><Legend {...legendProps} formatter={legendTextFormatter} /><Bar dataKey="clean" name="Clean" stackId="outcome" fill="var(--color-clean)" /><Bar dataKey="humanInTheLoop" name="Human on the loop" stackId="outcome" fill="var(--color-humanInTheLoop)" /><Bar dataKey="warning" name="Warning" stackId="outcome" fill="var(--color-warning)" /><Bar dataKey="failed" name="Failed" stackId="outcome" fill="var(--color-failed)" /></BarChart></ChartContainer> }
 function DeliveryFunnel({ effect }: { effect?: AnalyticsEffectiveness }) {
   const stages = [
     ["agentStarted", "Agent started"],
@@ -677,24 +702,24 @@ function DeliveryFunnel({ effect }: { effect?: AnalyticsEffectiveness }) {
     ["prFinished", "PR finished"],
   ] as const
 
-  return <div className="space-y-3 pt-3">{stages.map(([name, label], index) => {
+  return <div className="space-y-4 pt-2">{stages.map(([name, label], index) => {
     const value = effect?.funnel[name] ?? 0
     const previous = index ? effect?.funnel[stages[index - 1][0]] ?? 0 : 0
-    return <div key={name}><div className="mb-1 flex justify-between text-sm"><span>{label}</span><span className="tabular-nums">{value} {index ? `(${formatPercent(previous ? value / previous : undefined)})` : ""}</span></div><div className="h-5 rounded bg-muted"><div className="h-full rounded bg-chart-1" style={{ width: `${Math.min(100, (value / (effect?.funnel.agentStarted || 1)) * 100)}%` }} /></div></div>
+    return <div key={name}><div className="mb-1.5 flex items-baseline justify-between gap-2 text-[13px]"><span>{label}</span><span className="font-extrabold tabular-nums">{value} {index ? <span className="text-[11px] font-normal text-muted-foreground">({formatPercent(previous ? value / previous : undefined)})</span> : ""}</span></div><div className="h-[18px] overflow-hidden rounded-sm bg-foreground/9"><div className="h-full bg-data" style={{ width: `${Math.min(100, (value / (effect?.funnel.agentStarted || 1)) * 100)}%` }} /></div></div>
   })}</div>
 }
-function TicketThroughputChart({ effect }: { effect?: AnalyticsEffectiveness }) { if (!effect?.ticketsByDay?.length) return <p className="py-8 text-center text-sm text-muted-foreground">No ticket data for this period.</p>; return <ChartContainer config={chartConfig} className="h-64 w-full"><BarChart data={effect.ticketsByDay}><CartesianGrid vertical={false} /><XAxis dataKey="date" tickFormatter={formatDate} /><YAxis allowDecimals={false} /><ChartTooltip content={<ChartTooltipContent />} /><Legend formatter={legendTextFormatter} /><Bar dataKey="delivered" name="Delivered" stackId="ticket" fill="var(--color-ticketDelivered)" /><Bar dataKey="inProgress" name="In progress" stackId="ticket" fill="var(--color-ticketInProgress)" /><Bar dataKey="failed" name="Failed" stackId="ticket" fill="var(--color-ticketFailed)" /></BarChart></ChartContainer> }
-function RunsPerTicketChart({ effect }: { effect?: AnalyticsEffectiveness }) { if (!effect?.runsPerTicket?.length) return <p className="py-8 text-center text-sm text-muted-foreground">No ticket data for this period.</p>; return <ChartContainer config={chartConfig} className="h-64 w-full"><BarChart data={effect.runsPerTicket} layout="vertical" margin={{ right: 36 }}><CartesianGrid horizontal={false} /><XAxis type="number" allowDecimals={false} /><YAxis type="category" dataKey="bucket" width={40} /><Bar dataKey="tickets" fill="var(--chart-1)" radius={4}><LabelList dataKey="tickets" position="right" /></Bar></BarChart></ChartContainer> }
+function TicketThroughputChart({ effect }: { effect?: AnalyticsEffectiveness }) { if (!effect?.ticketsByDay?.length) return <p className="py-8 text-center text-sm text-muted-foreground">No ticket data for this period.</p>; return <ChartContainer config={chartConfig} className="h-64 w-full"><BarChart data={effect.ticketsByDay}><CartesianGrid vertical={false} /><XAxis dataKey="date" tickFormatter={formatDate} /><YAxis allowDecimals={false} /><ChartTooltip content={<ChartTooltipContent />} /><Legend {...legendProps} formatter={legendTextFormatter} /><Bar dataKey="delivered" name="Delivered" stackId="ticket" fill="var(--color-ticketDelivered)" /><Bar dataKey="inProgress" name="In progress" stackId="ticket" fill="var(--color-ticketInProgress)" /><Bar dataKey="failed" name="Failed" stackId="ticket" fill="var(--color-ticketFailed)" /></BarChart></ChartContainer> }
+function RunsPerTicketChart({ effect }: { effect?: AnalyticsEffectiveness }) { if (!effect?.runsPerTicket?.length) return <p className="py-8 text-center text-sm text-muted-foreground">No ticket data for this period.</p>; return <ChartContainer config={chartConfig} className="h-64 w-full"><BarChart data={effect.runsPerTicket} layout="vertical" margin={{ right: 36 }}><CartesianGrid horizontal={false} /><XAxis type="number" allowDecimals={false} /><YAxis type="category" dataKey="bucket" width={40} /><Bar dataKey="tickets" fill="var(--color-data)" radius={4}><LabelList dataKey="tickets" position="right" fill="var(--color-foreground)" fontSize={11} /></Bar></BarChart></ChartContainer> }
 function TopTicketTooltip({ active, payload }: { active?: boolean; payload?: { payload?: AnalyticsEffectiveness["topTicketsByCost"][number] }[] }) { const ticket = payload?.[0]?.payload; if (!active || !ticket) return null; const outcome = ticket.outcome === "in_progress" ? "In progress" : ticket.outcome ? ticket.outcome.charAt(0).toUpperCase() + ticket.outcome.slice(1) : "—"; return <div className={`${tooltipContentClassName} px-3 py-2 text-xs`}><div className="font-medium">{ticket.issueTitle}</div><div className="text-muted-foreground">{usd.format(ticket.costUsd)} · {ticket.runs} runs · {outcome}</div></div> }
-function TopTicketsByCostChart({ effect }: { effect?: AnalyticsEffectiveness }) { if (!effect?.topTicketsByCost?.length) return <p className="py-8 text-center text-sm text-muted-foreground">No ticket data for this period.</p>; return <ChartContainer config={chartConfig} className="h-64 w-full"><BarChart data={effect.topTicketsByCost} layout="vertical" margin={{ right: 36 }}><CartesianGrid horizontal={false} /><XAxis type="number" tickFormatter={(value) => usdWhole.format(value)} /><YAxis type="category" dataKey="issueId" width={90} interval={0} tickFormatter={(id) => (id.length > 14 ? id.slice(0, 13) + "…" : id)} /><ChartTooltip content={<TopTicketTooltip />} /><Bar dataKey="costUsd" fill="var(--chart-1)" radius={4}><LabelList dataKey="costUsd" position="right" formatter={(value: number) => usd.format(value)} /></Bar></BarChart></ChartContainer> }
-function CostPerMergedPrChart({ effect }: { effect?: AnalyticsEffectiveness }) { return <ChartContainer config={chartConfig} className="h-64 w-full"><LineChart data={effect?.costPerMergedPr.weekly}><CartesianGrid vertical={false} /><XAxis dataKey="weekStart" tickFormatter={formatDate} /><YAxis /><ChartTooltip content={<ChartTooltipContent />} /><ReferenceLine y={effect?.costPerMergedPr.average} stroke="var(--muted-foreground)" /><Line type="monotone" dataKey="costPerMergedPr" name="Cost per merged PR" stroke="var(--color-costPerMergedPr)" dot={false} /></LineChart></ChartContainer> }
+function TopTicketsByCostChart({ effect }: { effect?: AnalyticsEffectiveness }) { if (!effect?.topTicketsByCost?.length) return <p className="py-8 text-center text-sm text-muted-foreground">No ticket data for this period.</p>; return <ChartContainer config={chartConfig} className="h-64 w-full"><BarChart data={effect.topTicketsByCost} layout="vertical" margin={{ right: 36 }}><CartesianGrid horizontal={false} /><XAxis type="number" tickFormatter={(value) => usdWhole.format(value)} /><YAxis type="category" dataKey="issueId" width={90} interval={0} tickFormatter={(id) => (id.length > 14 ? id.slice(0, 13) + "…" : id)} /><ChartTooltip content={<TopTicketTooltip />} /><Bar dataKey="costUsd" fill="var(--color-data)" radius={4}><LabelList dataKey="costUsd" position="right" fill="var(--color-foreground)" fontSize={11} formatter={(value: number) => usd.format(value)} /></Bar></BarChart></ChartContainer> }
+function CostPerMergedPrChart({ effect }: { effect?: AnalyticsEffectiveness }) { return <ChartContainer config={chartConfig} className="h-64 w-full"><LineChart data={effect?.costPerMergedPr.weekly}><CartesianGrid vertical={false} /><XAxis dataKey="weekStart" tickFormatter={formatDate} /><YAxis /><ChartTooltip content={<ChartTooltipContent />} /><ReferenceLine y={effect?.costPerMergedPr.average} stroke="var(--ds-neutral-500)" strokeDasharray="4 4" /><Line type="monotone" dataKey="costPerMergedPr" name="Cost per merged PR" stroke="var(--color-costPerMergedPr)" dot={false} /></LineChart></ChartContainer> }
 function CostDrivers({ drivers }: { drivers: AnalyticsCostDriver[] }) {
-  return <section className="rounded-lg border bg-card p-4"><div className="mb-3 flex items-center justify-between gap-3"><div><div className="flex items-center gap-1"><h2 className="text-sm font-semibold">Top cost drivers</h2><InfoTooltip text="Where the money goes: total spend and efficiency per workflow in the selected period." /></div><p className="text-xs text-muted-foreground">By workflow</p></div></div><Table><TableHeader><TableRow><TableHead>Workflow</TableHead><TableHead className="text-right">Runs</TableHead><TableHead className="text-right">Success</TableHead><TableHead className="text-right">Cost</TableHead><TableHead className="text-right">Cost / merged PR</TableHead></TableRow></TableHeader><TableBody>{drivers.slice(0, 10).map((driver) => <TableRow key={driver.name}><TableCell className="font-medium">{driver.name}</TableCell><TableCell className="text-right tabular-nums">{driver.runs}</TableCell><TableCell className="text-right tabular-nums">{formatPercent(driver.successRate)}</TableCell><TableCell className="text-right tabular-nums">{usd.format(driver.costUsd)}</TableCell><TableCell className="text-right tabular-nums">{usd.format(driver.costPerMergedPr)}</TableCell></TableRow>)}</TableBody></Table></section>
+  return <section className="rounded-lg border border-border bg-card p-4"><div className="mb-3 flex items-center justify-between gap-3"><div><div className="flex items-center gap-1.5"><h2 className="text-[15px]">Top cost drivers</h2><InfoTooltip text="Where the money goes: total spend and efficiency per workflow in the selected period." /></div><p className="mt-0.5 text-xs text-muted-foreground">By workflow</p></div></div><Table><TableHeader><TableRow><TableHead>Workflow</TableHead><TableHead className="text-right">Runs</TableHead><TableHead className="text-right">Success</TableHead><TableHead className="text-right">Cost</TableHead><TableHead className="text-right">Cost / merged PR</TableHead></TableRow></TableHeader><TableBody>{drivers.slice(0, 10).map((driver) => <TableRow key={driver.name}><TableCell className="font-medium">{driver.name}</TableCell><TableCell className="text-right tabular-nums">{driver.runs}</TableCell><TableCell className="text-right tabular-nums">{formatPercent(driver.successRate)}</TableCell><TableCell className="text-right tabular-nums">{usd.format(driver.costUsd)}</TableCell><TableCell className="text-right tabular-nums">{usd.format(driver.costPerMergedPr)}</TableCell></TableRow>)}</TableBody></Table></section>
 }
 const runsTableRightAlignedHeaders = new Set(["Cost", "Duration", "Start date"])
-function RunsTable({ runs, page, canGoPrevious, canGoNext, onSelect, onPrevious, onNext }: { runs: TaskRunSummary[]; page: number; canGoPrevious: boolean; canGoNext: boolean; onSelect: (runId: string) => void; onPrevious: () => void; onNext: () => void }) { return <section className="rounded-lg border bg-card p-4"><h2 className="mb-3 text-sm font-semibold">Runs</h2><Table><TableHeader><TableRow>{["Status", "Ticket", "Model", "Factory/Workflow", "Cost", "Duration", "Start date"].map((label) => <TableHead key={label} className={runsTableRightAlignedHeaders.has(label) ? "text-right" : ""}>{label}</TableHead>)}</TableRow></TableHeader><TableBody>{runs.map((run) => <TableRow key={run.runId} className="cursor-pointer" onClick={() => onSelect(run.runId)}><TableCell><StatusBadge status={run.status} /></TableCell><TableCell>{run.issueId || "—"}</TableCell><TableCell>{run.model || "—"}</TableCell><TableCell>{run.factoryName || run.workflowName || "—"}</TableCell><TableCell className="text-right tabular-nums">{usd.format(run.estimatedCostUsd || 0)}</TableCell><TableCell className="text-right tabular-nums">{formatDuration(run.finishedAt ? run.finishedAt - run.startedAt : undefined)}</TableCell><TableCell className="text-right tabular-nums">{run.startedAt ? new Date(run.startedAt).toLocaleDateString() : "—"}</TableCell></TableRow>)}</TableBody></Table><div className="mt-3 flex items-center justify-center gap-3"><Button variant="outline" size="sm" disabled={!canGoPrevious} onClick={onPrevious}>Previous</Button><span className="text-sm text-muted-foreground">Page {page}</span><Button variant="outline" size="sm" disabled={!canGoNext} onClick={onNext}>Next</Button></div></section> }
+function RunsTable({ runs, page, canGoPrevious, canGoNext, onSelect, onPrevious, onNext }: { runs: TaskRunSummary[]; page: number; canGoPrevious: boolean; canGoNext: boolean; onSelect: (runId: string) => void; onPrevious: () => void; onNext: () => void }) { return <section className="rounded-lg border border-border bg-card p-4"><h2 className="mb-3 text-[15px]">Runs</h2><Table><TableHeader><TableRow>{["Status", "Ticket", "Model", "Factory/Workflow", "Cost", "Duration", "Start date"].map((label) => <TableHead key={label} className={runsTableRightAlignedHeaders.has(label) ? "text-right" : ""}>{label}</TableHead>)}</TableRow></TableHeader><TableBody>{runs.map((run) => <TableRow key={run.runId} className="cursor-pointer" onClick={() => onSelect(run.runId)}><TableCell><StatusBadge status={run.status} /></TableCell><TableCell className="font-mono">{run.issueId || "—"}</TableCell><TableCell>{run.model || "—"}</TableCell><TableCell>{run.factoryName || run.workflowName || "—"}</TableCell><TableCell className="text-right tabular-nums">{usd.format(run.estimatedCostUsd || 0)}</TableCell><TableCell className="text-right tabular-nums">{formatDuration(run.finishedAt ? run.finishedAt - run.startedAt : undefined)}</TableCell><TableCell className="text-right tabular-nums">{run.startedAt ? new Date(run.startedAt).toLocaleDateString() : "—"}</TableCell></TableRow>)}</TableBody></Table><div className="mt-3 flex items-center justify-center gap-3"><Button variant="outline" size="sm" disabled={!canGoPrevious} onClick={onPrevious}>Previous</Button><span className="text-sm text-muted-foreground">Page {page}</span><Button variant="outline" size="sm" disabled={!canGoNext} onClick={onNext}>Next</Button></div></section> }
 function calculateDelta(current?: number | null, prior?: number | null) { return current == null || prior == null || prior === 0 ? undefined : (current - prior) / prior }
-function KpiGroup({ title, columns = "sm:grid-cols-5", children }: { title: string; columns?: string; children: ReactNode }) { return <div><p className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">{title}</p><div className={`grid grid-cols-2 gap-2 ${columns}`}>{children}</div></div> }
+function KpiGroup({ title, columns = "sm:grid-cols-5", children }: { title: string; columns?: string; children: ReactNode }) { return <div><p className="kicker mb-2 font-semibold text-muted-foreground">{title}</p><div className={`grid grid-cols-2 gap-2 ${columns}`}>{children}</div></div> }
 function Kpi({ label, value, change, good, cost, onClick, title }: { label: string; value?: string | number; change?: number; good?: boolean; cost?: boolean; onClick?: () => void; title?: string }) {
   const bad = cost ? (change ?? 0) > 0 : good ? (change ?? 0) < 0 : (change ?? 0) > 0
   const disabled = !onClick
@@ -703,19 +728,19 @@ function Kpi({ label, value, change, good, cost, onClick, title }: { label: stri
       type="button"
       disabled={disabled}
       onClick={onClick}
-      className="flex h-full w-full min-w-0 flex-col rounded-lg border bg-card p-3 text-left"
+      className="flex h-full w-full min-w-0 flex-col rounded-lg border border-border bg-card p-3 text-left transition-colors enabled:hover:bg-foreground/4"
     >
-      <p className="flex min-h-8 items-center gap-1 text-xs text-muted-foreground">
+      <p className="flex min-h-8 items-center gap-1 text-[11px] leading-[1.35] text-muted-foreground">
         {label}
         {title && <Info aria-hidden className="size-3.5 shrink-0 text-muted-foreground" />}
       </p>
       <div className="mt-auto">
-      <p className="mt-2 text-xl font-semibold tracking-tight">{value ?? "—"}</p>
+      <p className="mt-2 text-[23px] font-extrabold leading-none tracking-[-0.02em] tabular-nums">{value ?? "—"}</p>
       {/* Always render the delta row, even when there's no change, so every
           tile reserves the same space and labels/values align across the grid. */}
       <p
-        className={`truncate text-xs font-medium ${
-          change == null ? "invisible" : bad ? "text-red-600 dark:text-red-400" : "text-emerald-600 dark:text-emerald-400"
+        className={`mt-1.5 truncate text-[11px] font-semibold ${
+          change == null ? "invisible" : bad ? "text-primary" : "text-status-ok"
         }`}
       >
         {change != null ? (
@@ -762,4 +787,4 @@ function InfoTooltip({ text }: { text: string }) {
     </Tooltip>
   )
 }
-function ChartCard({ title, info, children }: { title: string; info?: string; children: ReactNode }) { return <section className="rounded-lg border bg-card p-4"><div className="flex items-center gap-1"><h2 className="text-sm font-semibold">{title}</h2>{info && <InfoTooltip text={info} />}</div>{children}</section> }
+function ChartCard({ title, info, children }: { title: string; info?: string; children: ReactNode }) { return <section className="rounded-lg border border-border bg-card p-4"><div className="mb-3 flex items-center gap-1.5"><h2 className="text-[15px]">{title}</h2>{info && <InfoTooltip text={info} />}</div>{children}</section> }

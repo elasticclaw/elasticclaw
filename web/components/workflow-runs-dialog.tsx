@@ -69,7 +69,7 @@ export function WorkflowRunsDialog({ workflow }: { workflow: Workflow }) {
               <EmptyState>No runs have been recorded for this workflow yet.</EmptyState>
             )}
             {!loading && !error && runs.length > 0 && (
-              <div className="rounded-md border">
+              <div className="overflow-hidden rounded-lg border border-border">
                 <Table>
                   <TableHeader>
                     <TableRow>
@@ -139,27 +139,30 @@ export function WorkflowRunsDialog({ workflow }: { workflow: Workflow }) {
 function StatusBadge({ status }: { status: string }) {
   const variant = statusVariant(status)
   return (
-    <Badge className={cn("text-[10px]", variant)}>
+    <Badge className={cn("border text-[10px] tracking-[0.02em]", variant)}>
       {status}
     </Badge>
   )
 }
 
+// Outlined pills in the run's outcome color; a failed run additionally takes a
+// soft accent fill so it stands out in a long history. Full literal classes —
+// Tailwind only generates what it can read verbatim in the source.
 function statusVariant(status: string) {
   switch (status.toLowerCase()) {
     case "completed":
     case "success":
-      return "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
+      return "border-status-ok bg-status-ok/12 text-status-ok"
     case "failed":
     case "error":
-      return "border-red-500/30 bg-red-500/10 text-red-700 dark:text-red-300"
+      return "border-primary bg-tint-accent text-primary"
     case "running":
-      return "border-blue-500/30 bg-blue-500/10 text-blue-700 dark:text-blue-300"
+      return "border-data bg-data/12 text-data"
     case "skipped":
-      return "border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300"
+      return "border-status-warn bg-status-warn/12 text-status-warn"
     case "pending":
     default:
-      return "border-border bg-muted text-muted-foreground"
+      return "border-border bg-foreground/6 text-muted-foreground"
   }
 }
 
@@ -174,7 +177,7 @@ function LoadingState({ label }: { label: string }) {
 
 function EmptyState({ children }: { children: ReactNode }) {
   return (
-    <div className="flex h-40 items-center justify-center gap-2 rounded-md border border-dashed text-sm text-muted-foreground">
+    <div className="flex h-40 items-center justify-center gap-2 rounded-lg border border-dashed border-border text-sm text-muted-foreground">
       <Calendar className="size-4" />
       {children}
     </div>
@@ -184,7 +187,7 @@ function EmptyState({ children }: { children: ReactNode }) {
 function Notice({ children, destructive = false }: { children: ReactNode; destructive?: boolean }) {
   return (
     <div className={cn(
-      "flex items-center gap-2 rounded-md border px-4 py-3 text-sm",
+      "flex items-center gap-2 rounded-lg border border-border px-4 py-3 text-sm",
       destructive && "border-destructive/30 bg-destructive/10 text-destructive"
     )}>
       <AlertCircle className={cn("size-4 shrink-0", destructive && "text-destructive")} />
