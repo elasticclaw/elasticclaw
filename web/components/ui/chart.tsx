@@ -274,7 +274,7 @@ function ChartLegendContent({
   return (
     <div
       className={cn(
-        'text-muted-foreground flex flex-wrap items-center justify-center gap-x-4 gap-y-1.5 text-[11px]',
+        'text-muted-foreground flex flex-wrap items-center justify-start gap-x-3 gap-y-1.5 text-[11px]',
         verticalAlign === 'top'
           ? 'border-border mb-3 border-b pb-2'
           : 'border-border mt-3 border-t pt-2',
@@ -300,7 +300,10 @@ function ChartLegendContent({
                 }}
               />
             )}
-            {itemConfig?.label}
+            {/* Series that aren't in the chart config (model names, workflow
+                names — they only exist at runtime) fall back to the payload's
+                own label so the legend never renders an empty swatch. */}
+            {itemConfig?.label ?? item.value}
           </div>
         )
       })}

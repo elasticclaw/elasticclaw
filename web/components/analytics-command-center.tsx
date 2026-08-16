@@ -6,9 +6,6 @@ import { Info } from "lucide-react"
 import {
   Bar,
   BarChart,
-  CartesianGrid,
-  LabelList,
-  Legend,
   Line,
   LineChart,
   ReferenceLine,
@@ -42,6 +39,7 @@ import {
   FilterSelect,
   RunDetailPanel,
   StatusBadge,
+  formatLabel,
   type DetailState,
   urlFilterKeys,
 } from "@/components/task-run-analytics-view"
@@ -54,6 +52,8 @@ import {
 } from "@/components/ui/select"
 import {
   ChartContainer,
+  ChartLegend,
+  ChartLegendContent,
   ChartTooltip,
   ChartTooltipContent,
   type ChartConfig,
@@ -88,17 +88,48 @@ const chartConfig = {
   ticketFailed: { label: "Failed", color: "var(--color-primary)" },
   costPerMergedPr: { label: "Cost / merged PR", color: "var(--color-data)" },
 } satisfies ChartConfig
-// Legends: small square swatches over a 1px rule, muted 11px labels.
-const legendProps = {
-  iconType: "square",
-  iconSize: 9,
-  wrapperStyle: {
-    fontSize: 11,
-    paddingTop: 10,
-    marginTop: 4,
-    borderTop: "1px solid var(--color-border)",
-  },
-} as const
+// — plot language —
+// The mockup's charts are almost bare: no cartesian grid, no axis lines, no
+// tick marks. Only two hairlines (the mid rule and the baseline) hold the
+// vertical scale, and each axis is reduced to three mono labels. Everything
+// below expresses that in Recharts terms so every plot on the page reads the
+// same way.
+const hairline = { stroke: "var(--color-foreground)", strokeOpacity: 0.1, strokeWidth: 1 } as const
+const axisProps = { axisLine: false, tickLine: false, tickMargin: 8, interval: 0 } as const
+const plotMargin = { top: 6, right: 6, left: 0, bottom: 0 } as const
+
+// Round a max up to a value whose half is still a readable number, so the mid
+// hairline always lands on the middle label.
+function niceCeiling(value: number) {
+  if (!Number.isFinite(value) || value <= 0) return 1
+  const step = 10 ** Math.floor(Math.log10(value))
+  const normalized = value / step
+  const rounded = normalized <= 1 ? 1 : normalized <= 2 ? 2 : normalized <= 4 ? 4 : normalized <= 5 ? 5 : 10
+  return rounded * step
+}
+
+function yScale(maxValue: number) {
+  const max = niceCeiling(maxValue)
+  return { domain: [0, max] as [number, number], ticks: [0, max / 2, max], mid: max / 2 }
+}
+
+// Three x labels: the start, the middle and the end of the range.
+function edgeTicks<Row>(rows: Row[] | undefined, pick: (row: Row) => string) {
+  if (!rows?.length) return undefined
+  if (rows.length < 3) return rows.map(pick)
+  return [rows[0], rows[Math.floor((rows.length - 1) / 2)], rows[rows.length - 1]].map(pick)
+}
+
+function stackedMax(rows: readonly Record<string, unknown>[] | undefined, keys: readonly string[]) {
+  return Math.max(
+    0,
+    ...(rows ?? []).map((row) => keys.reduce((sum, key) => sum + (Number(row[key]) || 0), 0))
+  )
+}
+
+function seriesMax(rows: readonly Record<string, unknown>[] | undefined, keys: readonly string[]) {
+  return Math.max(0, ...(rows ?? []).flatMap((row) => keys.map((key) => Number(row[key]) || 0)))
+}
 // Money and volume series step down the single data-blue ramp and end on the
 // neutrals, so a cost series is never confused with an outcome color.
 const costSeriesColors = [
@@ -119,11 +150,34 @@ const usdWhole = new Intl.NumberFormat(undefined, {
   maximumFractionDigits: 0,
 })
 
-// Recharts colors legend item text with the series color by default. Our chart
-// rules keep the swatch colored but render the label text in the muted
-// foreground, so wrap it and let the Legend's own dot/line swatch carry the color.
-function legendTextFormatter(value: string) {
-  return <span className="text-muted-foreground">{value}</span>
+const periodOptions = [
+  ["7d", 7],
+  ["30d", 30],
+  ["90d", 90],
+  ["MTD", 0],
+] as const
+
+const monthDay = new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric" })
+const monthDayYear = new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", year: "numeric" })
+
+// Caption under the page title: the range the whole screen is currently scoped
+// to. Derived from the range the loader actually applied, never from the clock.
+function formatPeriodRange(from?: string, to?: string) {
+  if (!from || !to) return undefined
+  return `${monthDay.format(new Date(from))} – ${monthDayYear.format(new Date(to))}`
+}
+
+// Which segment of the period control the applied range corresponds to, if any
+// (a heatmap day selection matches none of them).
+function activePeriodLabel(from?: string, to?: string) {
+  if (!from || !to) return undefined
+  const start = new Date(from)
+  const end = new Date(to)
+  const days = Math.round((end.getTime() - start.getTime()) / 86_400_000)
+  const exact = periodOptions.find(([, span]) => span > 0 && span === days)
+  if (exact) return exact[0]
+  const sameMonth = start.getDate() === 1 && start.getMonth() === end.getMonth() && start.getFullYear() === end.getFullYear()
+  return sameMonth ? "MTD" : undefined
 }
 
 function formatDate(value: string) {
@@ -196,6 +250,10 @@ export function AnalyticsCommandCenter() {
   const [detailLoading, setDetailLoading] = useState(false)
   const [detailError, setDetailError] = useState<string | null>(null)
   const [error, setError] = useState<string>()
+  // The range the loader actually used — the URL may carry none, in which case
+  // it defaults to the last 30 days. Kept in state so the header can caption
+  // the period without reading the clock during render.
+  const [appliedRange, setAppliedRange] = useState<{ from?: string; to?: string }>({})
   const loadAbortController = useRef<AbortController | null>(null)
   const loadRequestId = useRef(0)
   // Track the current page cursor in a ref so the polling effect below can read the
@@ -258,6 +316,7 @@ export function AnalyticsCommandCenter() {
           effectiveFilters.from = from.toISOString()
           effectiveFilters.to = to.toISOString()
         }
+        setAppliedRange({ from: effectiveFilters.from, to: effectiveFilters.to })
         const runFilters = { ...effectiveFilters, cursor }
         // The year heatmap always shows the trailing year, regardless of the
         // selected period. taskRunAnalyticsCostsUseRunFilters in
@@ -424,14 +483,26 @@ export function AnalyticsCommandCenter() {
     return range.from === filters.from && range.to === filters.to ? day : undefined
   })()
   const modelData = useModelData(costs)
+  const periodCaption = formatPeriodRange(appliedRange.from, appliedRange.to)
+  const activePeriod = activePeriodLabel(appliedRange.from, appliedRange.to)
 
   return (
     <main className="h-full overflow-auto bg-background">
+      {/* Sticky head: the title, the period it is scoped to, and the filters
+          that scope everything below — they stay reachable while scrolling. */}
+      <header className="sticky top-0 z-10 border-b-2 border-border bg-background px-5 pt-4 pb-3 lg:px-6">
+        <div className="mx-auto grid max-w-[1400px] gap-3">
+          <div className="flex flex-wrap items-baseline gap-3">
+            <h1 className="text-2xl tracking-tight">Analytics</h1>
+            {periodCaption && <span className="text-[13px] text-muted-foreground">{periodCaption}</span>}
+            <div className="ml-auto">
+              <PeriodControl active={activePeriod} onChange={setFilters} />
+            </div>
+          </div>
+          <FilterBar filters={filters} options={options} workspaces={workspaceNames} onChange={setFilters} />
+        </div>
+      </header>
       <div className="mx-auto max-w-[1400px] space-y-5 p-5 lg:p-6">
-        <header className="border-b-2 border-border pb-4">
-          <h1 className="text-2xl tracking-tight">Analytics</h1>
-        </header>
-        <FilterBar filters={filters} options={options} workspaces={workspaceNames} onChange={setFilters} />
         {error && <p className="text-sm text-destructive">{error}</p>}
 
         <div className="grid gap-5 xl:grid-cols-[6fr_3fr]">
@@ -501,20 +572,69 @@ export function AnalyticsCommandCenter() {
         </div>
 
         <div className="grid gap-5 lg:grid-cols-2">
-          <ChartCard title="Run outcomes over time" info="Each bar is a day. Clean = delivered with no human help; Human on the loop = a human helped via the pull request; Warning = a human had to step in from the dashboard; Failed = nothing was delivered.">
+          <ChartCard
+            title="Run outcomes over time"
+            description="Each bar is a day. Clean = delivered with no human help."
+            info="Each bar is a day. Clean = delivered with no human help; Human on the loop = a human helped via the pull request; Warning = a human had to step in from the dashboard; Failed = nothing was delivered."
+          >
             <OutcomesChart effect={effect} />
           </ChartCard>
-          <ChartCard title="Delivery funnel" info="How many runs made it from the agent starting, to opening a pull request, to that pull request being finished (merged or closed). Percentages show the conversion from the previous stage.">
+          <ChartCard
+            title="Delivery funnel"
+            description="From the agent starting to the pull request being finished."
+            info="How many runs made it from the agent starting, to opening a pull request, to that pull request being finished (merged or closed). Percentages show the conversion from the previous stage."
+          >
             <DeliveryFunnel effect={effect} />
           </ChartCard>
         </div>
 
         <div className="grid gap-5 lg:grid-cols-2">
-          <ChartCard title="Ticket throughput" info="Each bar is a day: how many distinct tickets had their first run that day, by how the ticket ended up. Delivered = at least one run delivered the work.">
+          <ChartCard
+            title="Ticket throughput"
+            description="Distinct tickets by the day of their first run, by outcome."
+            info="Each bar is a day: how many distinct tickets had their first run that day, by how the ticket ended up. Delivered = at least one run delivered the work."
+          >
             <TicketThroughputChart effect={effect} />
           </ChartCard>
-          <ChartCard title="Runs per ticket" info="How many runs each ticket needed. A long tail of 3+ means lots of retries on the same tickets.">
+          <ChartCard
+            title="Runs per ticket"
+            description="A long tail of 3+ means repeated retries on the same tickets."
+          >
             <RunsPerTicketChart effect={effect} />
+          </ChartCard>
+        </div>
+
+        <Heatmap
+          heatmap={heatmap}
+          maxCost={maxHeatCost}
+          selectedDay={selectedDay}
+          onSelectDay={(day) => setFilters(day === selectedDay ? { from: undefined, to: undefined } : isoDayRange(day))}
+          onClearSelectedDay={() => setFilters({ from: undefined, to: undefined })}
+        />
+
+        <div className="grid gap-5 lg:grid-cols-2">
+          <ChartCard title="Daily cost by model" description="Spend per day, split by AI model.">
+            <DailyCostChart costs={costs} modelData={modelData} />
+          </ChartCard>
+          <ChartCard
+            title="Cost per merged PR"
+            description="Weekly average; the dashed line is the period average."
+            info="Weekly average of what one merged pull request cost. The reference line is the period average."
+          >
+            <CostPerMergedPrChart effect={effect} />
+          </ChartCard>
+        </div>
+
+        <div className="grid gap-5 lg:grid-cols-2">
+          <ChartCard title="Workflow cost comparison" description="Daily spend of the most expensive workflows, side by side.">
+            <WorkflowCostComparisonChart drivers={drivers} />
+          </ChartCard>
+          <ChartCard
+            title="Most expensive tickets"
+            description="Where the money concentrates in the selected period."
+            info="Cost counts only the runs inside the selected period."
+          >
+            <TopTicketsByCostChart effect={effect} />
           </ChartCard>
         </div>
 
@@ -528,31 +648,6 @@ export function AnalyticsCommandCenter() {
           onNext={handleNextPage}
         />
 
-        <Heatmap
-          heatmap={heatmap}
-          maxCost={maxHeatCost}
-          selectedDay={selectedDay}
-          onSelectDay={(day) => setFilters(day === selectedDay ? { from: undefined, to: undefined } : isoDayRange(day))}
-          onClearSelectedDay={() => setFilters({ from: undefined, to: undefined })}
-        />
-
-        <div className="grid gap-5 lg:grid-cols-2">
-          <ChartCard title="Daily cost by model" info="How much was spent per day, split by AI model.">
-            <DailyCostChart costs={costs} modelData={modelData} />
-          </ChartCard>
-          <ChartCard title="Cost per merged PR" info="Weekly average of what one merged pull request cost. The reference line is the period average.">
-            <CostPerMergedPrChart effect={effect} />
-          </ChartCard>
-        </div>
-
-        <div className="grid gap-5 lg:grid-cols-2">
-          <ChartCard title="Workflow cost comparison" info="Daily spend of the most expensive workflows in the selected period, compared side by side.">
-            <WorkflowCostComparisonChart drivers={drivers} />
-          </ChartCard>
-          <ChartCard title="Most expensive tickets" info="Where the money concentrates: the costliest tickets in the selected period (cost counts only this period's runs).">
-            <TopTicketsByCostChart effect={effect} />
-          </ChartCard>
-        </div>
         <CostDrivers drivers={drivers} />
       </div>
       <RunDetailPanel
@@ -618,37 +713,26 @@ function FilterBar({
     ["Repo", "repo", options?.repos],
     ["Model", "model", options?.models],
   ] as const
+  // Chips restate what is currently scoping the page — the same values the
+  // selects hold, nothing more — and their × clears that one filter.
+  const applied = [
+    ["Workspace", "workspace", filters.workspace] as const,
+    ...selectFilters.map(([label, key]) => [label, key, filters[key]] as const),
+  ].filter(([, , value]) => Boolean(value))
 
   return (
-    <div className="flex flex-wrap items-center gap-2 rounded-lg border border-border bg-card p-2">
-      <div className="w-56">
+    <div className="flex flex-wrap items-center gap-2">
+      <div className="w-[190px]">
         <WorkspaceSelect
           value={filters.workspace}
           workspaces={workspaces}
           onChange={(value) => onChange({ workspace: value })}
         />
       </div>
-      <div className="flex h-8 divide-x divide-border overflow-hidden rounded-md border border-border">
-        {[["7d", 7], ["30d", 30], ["90d", 90], ["MTD", 0]].map(([label, days]) => (
-          <Button
-            key={label}
-            variant="ghost"
-            size="sm"
-            className="h-full rounded-none text-[13px] font-medium text-foreground"
-            onClick={() => {
-              const to = new Date()
-              const from = new Date()
-              if (days) from.setDate(to.getDate() - Number(days))
-              else from.setDate(1)
-              onChange({ from: from.toISOString(), to: to.toISOString() })
-            }}
-          >
-            {label}
-          </Button>
-        ))}
-      </div>
+      {/* Hairline that separates the workspace scope from the run filters. */}
+      <span aria-hidden className="mx-1 h-6 w-px bg-border" />
       {selectFilters.map(([label, key, values]) => (
-        <div key={key} className="w-48">
+        <div key={key} className="w-[168px]">
           <FilterSelect
             label={label}
             value={filters[key]}
@@ -656,6 +740,68 @@ function FilterBar({
             onChange={(value) => onChange({ [key]: value })}
           />
         </div>
+      ))}
+      {applied.map(([label, key, value]) => (
+        <span
+          key={key}
+          className="inline-flex items-center gap-1.5 rounded-full bg-tint-accent px-2.5 py-[3px] text-xs text-primary"
+        >
+          {label}: {formatLabel(String(value))}
+          <button
+            type="button"
+            aria-label={`Clear the ${label.toLowerCase()} filter`}
+            onClick={() => onChange({ [key]: undefined })}
+            className="-mr-1 rounded-full px-1 leading-none hover:bg-primary/15"
+          >
+            ×
+          </button>
+        </span>
+      ))}
+      {applied.length > 0 && (
+        <Button
+          variant="ghost"
+          size="sm"
+          className="h-8 px-2 text-xs text-primary hover:bg-primary/10 hover:text-primary"
+          onClick={() => onChange(Object.fromEntries(applied.map(([, key]) => [key, undefined])))}
+        >
+          Clear filters
+        </Button>
+      )}
+    </div>
+  )
+}
+
+// The period segmented control: one active segment on the accent, the rest
+// plain, hairline-divided — the mockup's .seg.
+function PeriodControl({
+  active,
+  onChange,
+}: {
+  active?: string
+  onChange: (updates: Record<string, string | undefined>) => void
+}) {
+  return (
+    <div className="flex h-8 shrink-0 overflow-hidden rounded-md border border-border">
+      {periodOptions.map(([label, days], index) => (
+        <button
+          key={label}
+          type="button"
+          aria-pressed={active === label}
+          className={`px-3 text-[13px] transition-colors ${index ? "border-l border-border" : ""} ${
+            active === label
+              ? "bg-primary text-primary-foreground"
+              : "text-foreground hover:bg-foreground/7"
+          }`}
+          onClick={() => {
+            const to = new Date()
+            const from = new Date()
+            if (days) from.setDate(to.getDate() - days)
+            else from.setDate(1)
+            onChange({ from: from.toISOString(), to: to.toISOString() })
+          }}
+        >
+          {label}
+        </button>
       ))}
     </div>
   )
@@ -692,9 +838,99 @@ function Heatmap({ heatmap, maxCost, selectedDay, onSelectDay, onClearSelectedDa
 
 function useModelData(costs?: CostOverview) { return useMemo(() => { const models = (costs?.seriesByModel ?? []).slice(0, 4); return (costs?.dailySeries ?? []).map((day, index) => ({ date: day.date, Other: Math.max(0, day.costUsd - models.reduce((sum, model) => sum + (model.dailySeries[index]?.costUsd ?? 0), 0)), ...Object.fromEntries(models.map((model) => [model.model, model.dailySeries[index]?.costUsd ?? 0])) })) }, [costs]) }
 function useWorkflowCostComparisonData(drivers: AnalyticsCostDriver[]) { return useMemo(() => { const topDrivers = [...drivers].sort((a, b) => b.costUsd - a.costUsd).slice(0, 5); const topNames = topDrivers.map((driver) => driver.name); const topNameSet = new Set(topNames); const dataByDate = new Map<string, Record<string, string | number>>(); for (const driver of drivers) for (const point of driver.dailyCost) { const row = dataByDate.get(point.date) ?? { date: point.date, Other: 0, ...Object.fromEntries(topNames.map((name) => [name, 0])) }; if (topNameSet.has(driver.name)) row[driver.name] = Number(row[driver.name]) + point.costUsd; else row.Other = Number(row.Other) + point.costUsd; dataByDate.set(point.date, row) } return { data: [...dataByDate.values()].sort((a, b) => String(a.date).localeCompare(String(b.date))), topNames } }, [drivers]) }
-function DailyCostChart({ costs, modelData }: { costs?: CostOverview; modelData: Record<string, string | number>[] }) { const labels = [...(costs?.seriesByModel ?? []).slice(0, 4).map((item) => item.model), "Other"]; return <ChartContainer config={chartConfig} className="h-64 w-full"><BarChart data={modelData}><CartesianGrid vertical={false} /><XAxis dataKey="date" tickFormatter={formatDate} /><YAxis /><ChartTooltip content={<ChartTooltipContent />} /><Legend {...legendProps} formatter={legendTextFormatter} />{labels.map((label, index) => <Bar key={label} dataKey={label} name={label} stackId="cost" fill={costSeriesColors[index % costSeriesColors.length]} />)}</BarChart></ChartContainer> }
-function WorkflowCostComparisonChart({ drivers }: { drivers: AnalyticsCostDriver[] }) { const { data, topNames } = useWorkflowCostComparisonData(drivers); if (drivers.length === 0) return <p className="py-8 text-center text-sm text-muted-foreground">No cost data for this period.</p>; return <ChartContainer config={chartConfig} className="h-64 w-full"><LineChart data={data}><CartesianGrid vertical={false} /><XAxis dataKey="date" tickFormatter={formatDate} /><YAxis /><ChartTooltip content={<ChartTooltipContent />} /><Legend {...legendProps} formatter={legendTextFormatter} />{topNames.map((name, index) => <Line key={name} type="monotone" dataKey={name} name={name} stroke={costSeriesColors[index % costSeriesColors.length]} dot={false} strokeWidth={2} />)}{drivers.length > 5 && <Line type="monotone" dataKey="Other" name="Other" stroke="var(--muted-foreground)" dot={false} strokeWidth={2} />}</LineChart></ChartContainer> }
-function OutcomesChart({ effect }: { effect?: AnalyticsEffectiveness }) { return <ChartContainer config={chartConfig} className="h-64 w-full"><BarChart data={effect?.outcomesByDay}><CartesianGrid vertical={false} /><XAxis dataKey="date" tickFormatter={formatDate} /><YAxis allowDecimals={false} /><ChartTooltip content={<ChartTooltipContent />} /><Legend {...legendProps} formatter={legendTextFormatter} /><Bar dataKey="clean" name="Clean" stackId="outcome" fill="var(--color-clean)" /><Bar dataKey="humanInTheLoop" name="Human on the loop" stackId="outcome" fill="var(--color-humanInTheLoop)" /><Bar dataKey="warning" name="Warning" stackId="outcome" fill="var(--color-warning)" /><Bar dataKey="failed" name="Failed" stackId="outcome" fill="var(--color-failed)" /></BarChart></ChartContainer> }
+// The two hairlines plus the three-label axes every plot on the page shares.
+// `max` sets the vertical scale; passing it explicitly keeps the mid rule and
+// the middle label on the same pixel. Returned as an array rather than a
+// component: Recharts looks its axes up among its own children, so a wrapper
+// component would hide them.
+function plotFrame({
+  max,
+  ticks,
+  dataKey = "date",
+  formatValue,
+}: {
+  max: number
+  ticks?: (string | number)[]
+  dataKey?: string
+  formatValue?: (value: number) => string
+}) {
+  const scale = yScale(max)
+  return [
+    <ReferenceLine key="mid" y={scale.mid} {...hairline} />,
+    <ReferenceLine key="base" y={0} {...hairline} />,
+    <XAxis key="x" dataKey={dataKey} ticks={ticks} tickFormatter={formatDate} {...axisProps} />,
+    <YAxis
+      key="y"
+      width={34}
+      domain={scale.domain}
+      ticks={scale.ticks}
+      tickFormatter={formatValue}
+      {...axisProps}
+    />,
+  ]
+}
+
+function DailyCostChart({ costs, modelData }: { costs?: CostOverview; modelData: Record<string, string | number>[] }) {
+  const labels = [...(costs?.seriesByModel ?? []).slice(0, 4).map((item) => item.model), "Other"]
+  return (
+    <ChartContainer config={chartConfig} className="h-64 w-full">
+      <BarChart data={modelData} margin={plotMargin} barCategoryGap={2}>
+        {plotFrame({
+          max: stackedMax(modelData, labels),
+          ticks: edgeTicks(modelData, (row) => String(row.date)),
+          formatValue: (value) => usdWhole.format(value),
+        })}
+        <ChartTooltip content={<ChartTooltipContent />} />
+        <ChartLegend content={<ChartLegendContent />} />
+        {labels.map((label, index) => (
+          <Bar key={label} dataKey={label} name={label} stackId="cost" fill={costSeriesColors[index % costSeriesColors.length]} />
+        ))}
+      </BarChart>
+    </ChartContainer>
+  )
+}
+
+function WorkflowCostComparisonChart({ drivers }: { drivers: AnalyticsCostDriver[] }) {
+  const { data, topNames } = useWorkflowCostComparisonData(drivers)
+  if (drivers.length === 0) return <EmptyPlot>No cost data for this period.</EmptyPlot>
+  const keys = drivers.length > 5 ? [...topNames, "Other"] : topNames
+  return (
+    <ChartContainer config={chartConfig} className="h-64 w-full">
+      <LineChart data={data} margin={plotMargin}>
+        {plotFrame({
+          max: seriesMax(data, keys),
+          ticks: edgeTicks(data, (row) => String(row.date)),
+          formatValue: (value) => usdWhole.format(value),
+        })}
+        <ChartTooltip content={<ChartTooltipContent />} />
+        <ChartLegend content={<ChartLegendContent />} />
+        {topNames.map((name, index) => (
+          <Line key={name} type="monotone" dataKey={name} name={name} stroke={costSeriesColors[index % costSeriesColors.length]} dot={false} strokeWidth={2} />
+        ))}
+        {drivers.length > 5 && <Line type="monotone" dataKey="Other" name="Other" stroke="var(--ds-neutral-600)" dot={false} strokeWidth={2} />}
+      </LineChart>
+    </ChartContainer>
+  )
+}
+
+const outcomeKeys = ["clean", "humanInTheLoop", "warning", "failed"] as const
+
+function OutcomesChart({ effect }: { effect?: AnalyticsEffectiveness }) {
+  const rows = effect?.outcomesByDay ?? []
+  return (
+    <ChartContainer config={chartConfig} className="h-64 w-full">
+      <BarChart data={rows} margin={plotMargin} barCategoryGap={2}>
+        {plotFrame({ max: stackedMax(rows, outcomeKeys), ticks: edgeTicks(rows, (row) => row.date) })}
+        <ChartTooltip content={<ChartTooltipContent />} />
+        <ChartLegend content={<ChartLegendContent />} />
+        <Bar dataKey="clean" name="Clean" stackId="outcome" fill="var(--color-clean)" />
+        <Bar dataKey="humanInTheLoop" name="Human on the loop" stackId="outcome" fill="var(--color-humanInTheLoop)" />
+        <Bar dataKey="warning" name="Warning" stackId="outcome" fill="var(--color-warning)" />
+        <Bar dataKey="failed" name="Failed" stackId="outcome" fill="var(--color-failed)" />
+      </BarChart>
+    </ChartContainer>
+  )
+}
 function DeliveryFunnel({ effect }: { effect?: AnalyticsEffectiveness }) {
   const stages = [
     ["agentStarted", "Agent started"],
@@ -702,22 +938,163 @@ function DeliveryFunnel({ effect }: { effect?: AnalyticsEffectiveness }) {
     ["prFinished", "PR finished"],
   ] as const
 
-  return <div className="space-y-4 pt-2">{stages.map(([name, label], index) => {
-    const value = effect?.funnel[name] ?? 0
-    const previous = index ? effect?.funnel[stages[index - 1][0]] ?? 0 : 0
-    return <div key={name}><div className="mb-1.5 flex items-baseline justify-between gap-2 text-[13px]"><span>{label}</span><span className="font-extrabold tabular-nums">{value} {index ? <span className="text-[11px] font-normal text-muted-foreground">({formatPercent(previous ? value / previous : undefined)})</span> : ""}</span></div><div className="h-[18px] overflow-hidden rounded-sm bg-foreground/9"><div className="h-full bg-data" style={{ width: `${Math.min(100, (value / (effect?.funnel.agentStarted || 1)) * 100)}%` }} /></div></div>
-  })}</div>
+  return (
+    <div className="grid gap-4 pt-2">
+      {stages.map(([name, label], index) => {
+        const value = effect?.funnel[name] ?? 0
+        const previousStage = index ? stages[index - 1] : undefined
+        const previousValue = previousStage ? effect?.funnel[previousStage[0]] ?? 0 : 0
+        const conversion = previousStage && previousValue ? value / previousValue : undefined
+        return (
+          <div key={name}>
+            <div className="mb-1.5 flex items-baseline justify-between gap-2 text-[13px]">
+              <span>
+                {label}
+                {previousStage && conversion != null && (
+                  <span className="text-[11px] text-muted-foreground">
+                    {" "}· {formatPercent(conversion)} of {previousStage[1].toLowerCase()}
+                  </span>
+                )}
+              </span>
+              <span className="text-[16px] font-extrabold tabular-nums">{value}</span>
+            </div>
+            <div className="h-[18px] overflow-hidden rounded-sm bg-foreground/9">
+              <div
+                className="h-full bg-data"
+                style={{ width: `${Math.min(100, (value / (effect?.funnel.agentStarted || 1)) * 100)}%` }}
+              />
+            </div>
+          </div>
+        )
+      })}
+    </div>
+  )
 }
-function TicketThroughputChart({ effect }: { effect?: AnalyticsEffectiveness }) { if (!effect?.ticketsByDay?.length) return <p className="py-8 text-center text-sm text-muted-foreground">No ticket data for this period.</p>; return <ChartContainer config={chartConfig} className="h-64 w-full"><BarChart data={effect.ticketsByDay}><CartesianGrid vertical={false} /><XAxis dataKey="date" tickFormatter={formatDate} /><YAxis allowDecimals={false} /><ChartTooltip content={<ChartTooltipContent />} /><Legend {...legendProps} formatter={legendTextFormatter} /><Bar dataKey="delivered" name="Delivered" stackId="ticket" fill="var(--color-ticketDelivered)" /><Bar dataKey="inProgress" name="In progress" stackId="ticket" fill="var(--color-ticketInProgress)" /><Bar dataKey="failed" name="Failed" stackId="ticket" fill="var(--color-ticketFailed)" /></BarChart></ChartContainer> }
-function RunsPerTicketChart({ effect }: { effect?: AnalyticsEffectiveness }) { if (!effect?.runsPerTicket?.length) return <p className="py-8 text-center text-sm text-muted-foreground">No ticket data for this period.</p>; return <ChartContainer config={chartConfig} className="h-64 w-full"><BarChart data={effect.runsPerTicket} layout="vertical" margin={{ right: 36 }}><CartesianGrid horizontal={false} /><XAxis type="number" allowDecimals={false} /><YAxis type="category" dataKey="bucket" width={40} /><Bar dataKey="tickets" fill="var(--color-data)" radius={4}><LabelList dataKey="tickets" position="right" fill="var(--color-foreground)" fontSize={11} /></Bar></BarChart></ChartContainer> }
-function TopTicketTooltip({ active, payload }: { active?: boolean; payload?: { payload?: AnalyticsEffectiveness["topTicketsByCost"][number] }[] }) { const ticket = payload?.[0]?.payload; if (!active || !ticket) return null; const outcome = ticket.outcome === "in_progress" ? "In progress" : ticket.outcome ? ticket.outcome.charAt(0).toUpperCase() + ticket.outcome.slice(1) : "—"; return <div className={`${tooltipContentClassName} px-3 py-2 text-xs`}><div className="font-medium">{ticket.issueTitle}</div><div className="text-muted-foreground">{usd.format(ticket.costUsd)} · {ticket.runs} runs · {outcome}</div></div> }
-function TopTicketsByCostChart({ effect }: { effect?: AnalyticsEffectiveness }) { if (!effect?.topTicketsByCost?.length) return <p className="py-8 text-center text-sm text-muted-foreground">No ticket data for this period.</p>; return <ChartContainer config={chartConfig} className="h-64 w-full"><BarChart data={effect.topTicketsByCost} layout="vertical" margin={{ right: 36 }}><CartesianGrid horizontal={false} /><XAxis type="number" tickFormatter={(value) => usdWhole.format(value)} /><YAxis type="category" dataKey="issueId" width={90} interval={0} tickFormatter={(id) => (id.length > 14 ? id.slice(0, 13) + "…" : id)} /><ChartTooltip content={<TopTicketTooltip />} /><Bar dataKey="costUsd" fill="var(--color-data)" radius={4}><LabelList dataKey="costUsd" position="right" fill="var(--color-foreground)" fontSize={11} formatter={(value: number) => usd.format(value)} /></Bar></BarChart></ChartContainer> }
-function CostPerMergedPrChart({ effect }: { effect?: AnalyticsEffectiveness }) { return <ChartContainer config={chartConfig} className="h-64 w-full"><LineChart data={effect?.costPerMergedPr.weekly}><CartesianGrid vertical={false} /><XAxis dataKey="weekStart" tickFormatter={formatDate} /><YAxis /><ChartTooltip content={<ChartTooltipContent />} /><ReferenceLine y={effect?.costPerMergedPr.average} stroke="var(--ds-neutral-500)" strokeDasharray="4 4" /><Line type="monotone" dataKey="costPerMergedPr" name="Cost per merged PR" stroke="var(--color-costPerMergedPr)" dot={false} /></LineChart></ChartContainer> }
+
+function EmptyPlot({ children }: { children: ReactNode }) {
+  return <p className="py-8 text-center text-sm text-muted-foreground">{children}</p>
+}
+
+// The mockup's .hbars: a fixed label column, a track that carries the bar, and
+// a tabular number. Plain markup — a horizontal Recharts plot buys nothing here
+// and cannot align its rows with the label column.
+function HBars({
+  rows,
+  gridClassName,
+  labelClassName = "",
+}: {
+  rows: { key: string; label: string; value: number; formatted: string; title?: string }[]
+  // Full literal class strings: Tailwind only sees classes it can read verbatim.
+  gridClassName: string
+  labelClassName?: string
+}) {
+  const max = Math.max(...rows.map((row) => row.value), 0)
+  return (
+    <div className="grid gap-2.5 pt-2">
+      {rows.map((row) => (
+        <div
+          key={row.key}
+          title={row.title}
+          className={`grid items-center gap-2 text-xs ${gridClassName}`}
+        >
+          <span className={`truncate ${labelClassName}`}>{row.label}</span>
+          <span className="h-4 overflow-hidden rounded-sm bg-foreground/8">
+            <span className="block h-full bg-data" style={{ width: `${max ? (row.value / max) * 100 : 0}%` }} />
+          </span>
+          <span className="text-right tabular-nums">{row.formatted}</span>
+        </div>
+      ))}
+    </div>
+  )
+}
+const ticketKeys = ["delivered", "inProgress", "failed"] as const
+
+function TicketThroughputChart({ effect }: { effect?: AnalyticsEffectiveness }) {
+  const rows = effect?.ticketsByDay ?? []
+  if (!rows.length) return <EmptyPlot>No ticket data for this period.</EmptyPlot>
+  return (
+    <ChartContainer config={chartConfig} className="h-64 w-full">
+      <BarChart data={rows} margin={plotMargin} barCategoryGap={2}>
+        {plotFrame({ max: stackedMax(rows, ticketKeys), ticks: edgeTicks(rows, (row) => row.date) })}
+        <ChartTooltip content={<ChartTooltipContent />} />
+        <ChartLegend content={<ChartLegendContent />} />
+        <Bar dataKey="delivered" name="Delivered" stackId="ticket" fill="var(--color-ticketDelivered)" />
+        <Bar dataKey="inProgress" name="In progress" stackId="ticket" fill="var(--color-ticketInProgress)" />
+        <Bar dataKey="failed" name="Failed" stackId="ticket" fill="var(--color-ticketFailed)" />
+      </BarChart>
+    </ChartContainer>
+  )
+}
+
+function RunsPerTicketChart({ effect }: { effect?: AnalyticsEffectiveness }) {
+  const buckets = effect?.runsPerTicket ?? []
+  if (!buckets.length) return <EmptyPlot>No ticket data for this period.</EmptyPlot>
+  return (
+    <HBars
+      gridClassName="grid-cols-[88px_minmax(0,1fr)_56px]"
+      rows={buckets.map((bucket) => ({
+        key: bucket.bucket,
+        label: `${bucket.bucket} ${bucket.bucket === "1" ? "run" : "runs"}`,
+        value: bucket.tickets,
+        formatted: String(bucket.tickets),
+      }))}
+    />
+  )
+}
+
+function TopTicketsByCostChart({ effect }: { effect?: AnalyticsEffectiveness }) {
+  const tickets = effect?.topTicketsByCost ?? []
+  if (!tickets.length) return <EmptyPlot>No ticket data for this period.</EmptyPlot>
+  return (
+    <HBars
+      gridClassName="grid-cols-[110px_minmax(0,1fr)_64px]"
+      labelClassName="font-mono"
+      rows={tickets.map((ticket) => ({
+        key: ticket.issueId,
+        label: ticket.issueId,
+        value: ticket.costUsd,
+        formatted: usd.format(ticket.costUsd),
+        // The detail the old Recharts tooltip carried, kept on the row itself.
+        title: `${ticket.issueTitle} — ${usd.format(ticket.costUsd)} · ${ticket.runs} runs`,
+      }))}
+    />
+  )
+}
+function CostPerMergedPrChart({ effect }: { effect?: AnalyticsEffectiveness }) {
+  const rows = effect?.costPerMergedPr.weekly ?? []
+  const average = effect?.costPerMergedPr.average ?? 0
+  const scale = yScale(Math.max(seriesMax(rows, ["costPerMergedPr"]), average))
+  return (
+    <ChartContainer config={chartConfig} className="h-64 w-full">
+      <LineChart data={rows} margin={plotMargin}>
+        <ReferenceLine y={scale.mid} {...hairline} />
+        <ReferenceLine y={0} {...hairline} />
+        <XAxis
+          dataKey="weekStart"
+          ticks={edgeTicks(rows, (row) => row.weekStart)}
+          tickFormatter={formatDate}
+          {...axisProps}
+        />
+        <YAxis
+          width={34}
+          domain={scale.domain}
+          ticks={scale.ticks}
+          tickFormatter={(value) => usdWhole.format(value)}
+          {...axisProps}
+        />
+        <ChartTooltip content={<ChartTooltipContent />} />
+        <ChartLegend content={<ChartLegendContent />} />
+        <ReferenceLine y={average} stroke="var(--ds-neutral-500)" strokeDasharray="4 4" />
+        <Line type="monotone" dataKey="costPerMergedPr" name="Cost per merged PR" stroke="var(--color-costPerMergedPr)" dot={false} strokeWidth={2} />
+      </LineChart>
+    </ChartContainer>
+  )
+}
 function CostDrivers({ drivers }: { drivers: AnalyticsCostDriver[] }) {
-  return <section className="rounded-lg border border-border bg-card p-4"><div className="mb-3 flex items-center justify-between gap-3"><div><div className="flex items-center gap-1.5"><h2 className="text-[15px]">Top cost drivers</h2><InfoTooltip text="Where the money goes: total spend and efficiency per workflow in the selected period." /></div><p className="mt-0.5 text-xs text-muted-foreground">By workflow</p></div></div><Table><TableHeader><TableRow><TableHead>Workflow</TableHead><TableHead className="text-right">Runs</TableHead><TableHead className="text-right">Success</TableHead><TableHead className="text-right">Cost</TableHead><TableHead className="text-right">Cost / merged PR</TableHead></TableRow></TableHeader><TableBody>{drivers.slice(0, 10).map((driver) => <TableRow key={driver.name}><TableCell className="font-medium">{driver.name}</TableCell><TableCell className="text-right tabular-nums">{driver.runs}</TableCell><TableCell className="text-right tabular-nums">{formatPercent(driver.successRate)}</TableCell><TableCell className="text-right tabular-nums">{usd.format(driver.costUsd)}</TableCell><TableCell className="text-right tabular-nums">{usd.format(driver.costPerMergedPr)}</TableCell></TableRow>)}</TableBody></Table></section>
+  return <section className="rounded-lg border border-border bg-card p-4"><PanelHeader title="Top cost drivers" description="By workflow — total spend and efficiency in the selected period." /><Table><TableHeader><TableRow><TableHead>Workflow</TableHead><TableHead className="text-right">Runs</TableHead><TableHead className="text-right">Success</TableHead><TableHead className="text-right">Cost</TableHead><TableHead className="text-right">Cost / merged PR</TableHead></TableRow></TableHeader><TableBody>{drivers.slice(0, 10).map((driver) => <TableRow key={driver.name}><TableCell className="font-medium">{driver.name}</TableCell><TableCell className="text-right tabular-nums">{driver.runs}</TableCell><TableCell className="text-right tabular-nums">{formatPercent(driver.successRate)}</TableCell><TableCell className="text-right tabular-nums">{usd.format(driver.costUsd)}</TableCell><TableCell className="text-right tabular-nums">{usd.format(driver.costPerMergedPr)}</TableCell></TableRow>)}</TableBody></Table></section>
 }
 const runsTableRightAlignedHeaders = new Set(["Cost", "Duration", "Start date"])
-function RunsTable({ runs, page, canGoPrevious, canGoNext, onSelect, onPrevious, onNext }: { runs: TaskRunSummary[]; page: number; canGoPrevious: boolean; canGoNext: boolean; onSelect: (runId: string) => void; onPrevious: () => void; onNext: () => void }) { return <section className="rounded-lg border border-border bg-card p-4"><h2 className="mb-3 text-[15px]">Runs</h2><Table><TableHeader><TableRow>{["Status", "Ticket", "Model", "Factory/Workflow", "Cost", "Duration", "Start date"].map((label) => <TableHead key={label} className={runsTableRightAlignedHeaders.has(label) ? "text-right" : ""}>{label}</TableHead>)}</TableRow></TableHeader><TableBody>{runs.map((run) => <TableRow key={run.runId} className="cursor-pointer" onClick={() => onSelect(run.runId)}><TableCell><StatusBadge status={run.status} /></TableCell><TableCell className="font-mono">{run.issueId || "—"}</TableCell><TableCell>{run.model || "—"}</TableCell><TableCell>{run.factoryName || run.workflowName || "—"}</TableCell><TableCell className="text-right tabular-nums">{usd.format(run.estimatedCostUsd || 0)}</TableCell><TableCell className="text-right tabular-nums">{formatDuration(run.finishedAt ? run.finishedAt - run.startedAt : undefined)}</TableCell><TableCell className="text-right tabular-nums">{run.startedAt ? new Date(run.startedAt).toLocaleDateString() : "—"}</TableCell></TableRow>)}</TableBody></Table><div className="mt-3 flex items-center justify-center gap-3"><Button variant="outline" size="sm" disabled={!canGoPrevious} onClick={onPrevious}>Previous</Button><span className="text-sm text-muted-foreground">Page {page}</span><Button variant="outline" size="sm" disabled={!canGoNext} onClick={onNext}>Next</Button></div></section> }
+function RunsTable({ runs, page, canGoPrevious, canGoNext, onSelect, onPrevious, onNext }: { runs: TaskRunSummary[]; page: number; canGoPrevious: boolean; canGoNext: boolean; onSelect: (runId: string) => void; onPrevious: () => void; onNext: () => void }) { return <section className="rounded-lg border border-border bg-card p-4"><PanelHeader title="Runs" description="Every run in the selected period. Click a row for attempts, events and PRs." /><Table><TableHeader><TableRow>{["Status", "Ticket", "Model", "Factory/Workflow", "Cost", "Duration", "Start date"].map((label) => <TableHead key={label} className={runsTableRightAlignedHeaders.has(label) ? "text-right" : ""}>{label}</TableHead>)}</TableRow></TableHeader><TableBody>{runs.map((run) => <TableRow key={run.runId} className="cursor-pointer" onClick={() => onSelect(run.runId)}><TableCell><StatusBadge status={run.status} /></TableCell><TableCell className="font-mono">{run.issueId || "—"}</TableCell><TableCell>{run.model || "—"}</TableCell><TableCell>{run.factoryName || run.workflowName || "—"}</TableCell><TableCell className="text-right tabular-nums">{usd.format(run.estimatedCostUsd || 0)}</TableCell><TableCell className="text-right tabular-nums">{formatDuration(run.finishedAt ? run.finishedAt - run.startedAt : undefined)}</TableCell><TableCell className="text-right tabular-nums">{run.startedAt ? new Date(run.startedAt).toLocaleDateString() : "—"}</TableCell></TableRow>)}</TableBody></Table><div className="mt-3 flex items-center justify-center gap-3"><Button variant="outline" size="sm" disabled={!canGoPrevious} onClick={onPrevious}>Previous</Button><span className="text-sm text-muted-foreground">Page {page}</span><Button variant="outline" size="sm" disabled={!canGoNext} onClick={onNext}>Next</Button></div></section> }
 function calculateDelta(current?: number | null, prior?: number | null) { return current == null || prior == null || prior === 0 ? undefined : (current - prior) / prior }
 function KpiGroup({ title, columns = "sm:grid-cols-5", children }: { title: string; columns?: string; children: ReactNode }) { return <div><p className="kicker mb-2 font-semibold text-muted-foreground">{title}</p><div className={`grid grid-cols-2 gap-2 ${columns}`}>{children}</div></div> }
 function Kpi({ label, value, change, good, cost, onClick, title }: { label: string; value?: string | number; change?: number; good?: boolean; cost?: boolean; onClick?: () => void; title?: string }) {
@@ -728,31 +1105,31 @@ function Kpi({ label, value, change, good, cost, onClick, title }: { label: stri
       type="button"
       disabled={disabled}
       onClick={onClick}
-      className="flex h-full w-full min-w-0 flex-col rounded-lg border border-border bg-card p-3 text-left transition-colors enabled:hover:bg-foreground/4"
+      className="grid h-full w-full min-w-0 grid-rows-[auto_1fr_auto] gap-1.5 rounded-lg border border-border bg-card p-3 text-left transition-colors enabled:hover:bg-foreground/4"
     >
-      <p className="flex min-h-8 items-center gap-1 text-[11px] leading-[1.35] text-muted-foreground">
+      {/* Three rows — label, value, delta — so labels of different lengths
+          never push the values out of line across the grid. */}
+      <span className="flex items-start gap-1 text-pretty text-[11px] leading-[1.35] text-muted-foreground">
         {label}
-        {title && <Info aria-hidden className="size-3.5 shrink-0 text-muted-foreground" />}
-      </p>
-      <div className="mt-auto">
-      <p className="mt-2 text-[23px] font-extrabold leading-none tracking-[-0.02em] tabular-nums">{value ?? "—"}</p>
-      {/* Always render the delta row, even when there's no change, so every
-          tile reserves the same space and labels/values align across the grid. */}
-      <p
-        className={`mt-1.5 truncate text-[11px] font-semibold ${
+        {title && <Info aria-hidden className="mt-px size-3.5 shrink-0 text-muted-foreground" />}
+      </span>
+      <span className="self-end text-[23px] font-extrabold leading-none tracking-[-0.02em] tabular-nums">{value ?? "—"}</span>
+      {/* Always render the delta row, even when the API has no prior-period
+          value to compare against, so every tile reserves the same space. */}
+      <span
+        className={`flex min-h-[15px] items-center gap-1 truncate whitespace-nowrap text-[11px] font-semibold ${
           change == null ? "invisible" : bad ? "text-primary" : "text-status-ok"
         }`}
       >
         {change != null ? (
           <>
-            {change > 0 ? "+" : ""}
-            {(change * 100).toFixed(1)}% <span className="font-normal text-muted-foreground">vs prior</span>
+            {change > 0 ? "↑" : "↓"} {Math.abs(change * 100).toFixed(1)}%{" "}
+            <span className="font-normal text-muted-foreground">vs prior</span>
           </>
         ) : (
           " "
         )}
-      </p>
-      </div>
+      </span>
     </button>
   )
   if (!title) return button
@@ -787,4 +1164,26 @@ function InfoTooltip({ text }: { text: string }) {
     </Tooltip>
   )
 }
-function ChartCard({ title, info, children }: { title: string; info?: string; children: ReactNode }) { return <section className="rounded-lg border border-border bg-card p-4"><div className="mb-3 flex items-center gap-1.5"><h2 className="text-[15px]">{title}</h2>{info && <InfoTooltip text={info} />}</div>{children}</section> }
+// Panel header: a 15px Archivo-800 title and a 12px muted line saying what the
+// panel shows. The info tooltip stays only where it carries more than the
+// description does.
+function PanelHeader({ title, description, info }: { title: string; description?: string; info?: string }) {
+  return (
+    <header className="mb-3 grid gap-0.5">
+      <div className="flex items-center gap-1.5">
+        <h2 className="text-[15px]">{title}</h2>
+        {info && <InfoTooltip text={info} />}
+      </div>
+      {description && <p className="text-xs text-muted-foreground">{description}</p>}
+    </header>
+  )
+}
+
+function ChartCard({ title, description, info, children }: { title: string; description?: string; info?: string; children: ReactNode }) {
+  return (
+    <section className="rounded-lg border border-border bg-card p-4">
+      <PanelHeader title={title} description={description} info={info} />
+      {children}
+    </section>
+  )
+}

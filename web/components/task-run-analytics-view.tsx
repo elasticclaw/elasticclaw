@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react"
 import { createPortal } from "react-dom"
 import { usePathname, useRouter, useSearchParams } from "next/navigation"
-import { AlertCircle, ArrowDown, ArrowUp, CheckCircle2, CircleDot, ExternalLink, GitPullRequest, Minus, RefreshCw, Search, Users, XCircle } from "lucide-react"
+import { AlertCircle, ArrowDown, ArrowUp, ExternalLink, GitPullRequest, Minus, RefreshCw, Search, XCircle } from "lucide-react"
 import { Bar, BarChart, XAxis } from "recharts"
 import {
   fetchCostOverview,
@@ -747,20 +747,16 @@ const statusPillClasses: Record<string, string> = {
 }
 
 export function StatusBadge({ status }: { status: string }) {
-  const statusIcons: Record<string, ReactNode> = {
-    clean: <CheckCircle2 className="size-3" />,
-    human_in_the_loop: <Users className="size-3" />,
-    failed: <XCircle className="size-3" />,
-  }
-  const icon = statusIcons[status] ?? <CircleDot className="size-3" />
   return (
     <Badge
       title={status === "clean" ? "PR merged or closed with zero human interaction." : status === "human_in_the_loop" ? "PR merged or closed; a human interacted via the PR (comment, review, or code push)." : status === "warning" ? "PR merged or closed; a human interacted via the factory dashboard." : status === "failed" ? "No PR was ever delivered or the run definitively failed before delivery." : status === "running" ? "In progress; no failure has occurred." : undefined}
       variant="outline"
-      className={cn("tracking-[0.02em]", statusPillClasses[status] ?? "border-border text-muted-foreground")}
+      className={cn("gap-1.5 pl-2 tracking-[0.02em]", statusPillClasses[status] ?? "border-border text-muted-foreground")}
     >
-      {icon}
-      {formatLabel(status)}
+      {/* The outcome reads from the dot and the ring; the label itself stays in
+          the normal text color so a row of pills isn't a row of colored words. */}
+      <span aria-hidden className="size-[7px] shrink-0 rounded-full bg-current" />
+      <span className="text-foreground">{formatLabel(status)}</span>
     </Badge>
   )
 }
@@ -776,7 +772,7 @@ function formatFilterList(labels: string[]) {
   return filterListFormatter.format(labels)
 }
 
-function formatLabel(value: string) {
+export function formatLabel(value: string) {
   return value.replace(/_/g, " ").replace(/\b\w/g, (match) => match.toUpperCase())
 }
 
