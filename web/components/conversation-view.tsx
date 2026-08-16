@@ -1,7 +1,7 @@
 "use client"
 
 import { useState, useRef, useEffect, useCallback, useMemo, memo } from "react"
-import { Send, Terminal, TerminalSquare, ChevronLeft, ChevronRight, ChevronDown, Loader2, LayoutGrid, Info, MessageSquare, Trash2, AlertCircle, Wrench, GripVertical, Settings2, Paperclip, File as FileIcon, X, Menu, MoreVertical, LogOut, ClipboardCopy } from "lucide-react"
+import { Send, Terminal, TerminalSquare, ChevronLeft, ChevronDown, Loader2, LayoutGrid, Info, MessageSquare, Trash2, AlertCircle, Wrench, GripVertical, Settings2, Paperclip, File as FileIcon, X, Menu, MoreVertical, LogOut, ClipboardCopy } from "lucide-react"
 import {
   compactActivityRuns,
   demoteStaleRunning,
@@ -12,7 +12,15 @@ import {
   trailingActivityRun,
   type Step,
 } from "@/lib/turns"
-import type { NowStripState } from "@/components/agent-timeline/now-strip"
+import {
+  BOARD_CARD_DURABLE_MESSAGE_WINDOW,
+  CLAW_LANE_META,
+  CLAW_LANE_ORDER,
+  allowsTrailingRunning,
+  boardCardNow,
+  clawLane,
+  type ClawLane,
+} from "@/lib/claw-lanes"
 import { AgentTimeline } from "@/components/agent-timeline/timeline"
 import { TimelineToolbar, useTimelineDensity } from "@/components/agent-timeline/timeline-toolbar"
 import { NowStrip } from "@/components/agent-timeline/now-strip"
@@ -33,7 +41,7 @@ import {
 import {
   SortableContext,
   useSortable,
-  horizontalListSortingStrategy,
+  rectSortingStrategy,
   arrayMove,
 } from "@dnd-kit/sortable"
 import { CSS } from "@dnd-kit/utilities"
@@ -90,13 +98,13 @@ interface ConversationViewProps {
   onSelectClaw: (id: string) => void
   onDeselectClaw: () => void
   onReorderClaws: (ids: string[]) => void
+  /** Status lane per claw id — the board groups its cards by it. */
+  clawLanes: Record<string, ClawLane>
   /** Mobile only: opens the sidebar drawer from the board header hamburger. */
   onOpenMenu?: () => void
 }
 
 const FOLLOW_LATEST_THRESHOLD_PX = 24
-/** Last N durable conversation turns on board cards (activities do not count). */
-const BOARD_CARD_DURABLE_MESSAGE_WINDOW = 50
 const EMPTY_MESSAGES: Message[] = []
 const noopClawAction = (_clawId: string) => {}
 const noopClawMessageAction = (_clawId: string, _content: string) => {}
@@ -199,104 +207,6 @@ function StreamingMessage({
       </div>
     </div>
   )
-}
-
-function firstMeaningfulLine(text: string): string {
-  for (const line of text.split("\n")) {
-    const trimmed = line.replace(/^#+\s*/, "").trim()
-    if (trimmed) return trimmed
-  }
-  return text.trim()
-}
-
-/**
- * The last question sentence of a message, if it plausibly asks the user
- * something ("posso forçar push?"). The "?" must end the message or a
- * sentence; the question starts after the previous sentence/line break.
- */
-function extractQuestion(text: string): string | null {
-  const trimmed = text.trim()
-  const qIdx = trimmed.lastIndexOf("?")
-  if (qIdx === -1) return null
-  if (qIdx !== trimmed.length - 1 && !/\s/.test(trimmed[qIdx + 1])) return null
-  const before = trimmed.slice(0, qIdx)
-  const boundary = before.match(/[.!?\n][^.!?\n]*$/)
-  const start = boundary?.index !== undefined ? boundary.index + 1 : 0
-  const question = trimmed.slice(start, qIdx + 1).trim()
-  return question || null
-}
-
-function lastActivityError(messages: Message[]): string | null {
-  for (let i = messages.length - 1; i >= 0; i -= 1) {
-    const m = messages[i]
-    if (m.role === "activity" && m.activity?.error) return m.activity.error
-  }
-  return null
-}
-
-interface BoardCardNow {
-  state: NowStripState
-  text?: string
-  at?: number | null
-}
-
-/**
- * The card's status line: is the agent working, waiting on the user, finished,
- * broken, or gone — and the one-liner that proves it. Working defers to the
- * NowStrip's live content (tool + elapsed + last-output age).
- */
-function boardCardNow(
-  claw: Claw,
-  messages: Message[],
-  latestStep: Step | null,
-  isStreaming: boolean
-): BoardCardNow | null {
-  // BootstrapProgress owns the provisioning story.
-  if (claw.status === "provisioning") return null
-
-  let lastAt: number | null = null
-  for (let i = messages.length - 1; i >= 0; i -= 1) {
-    if (messages[i].role === "system") continue
-    lastAt = messages[i].timestamp.getTime()
-    break
-  }
-
-  if (claw.status === "error") {
-    return {
-      state: "error",
-      text: claw.reason || lastActivityError(messages) || "Agent errored",
-      at: lastAt,
-    }
-  }
-  if (claw.status === "offline") {
-    const seen = claw.last_seen ? new Date(claw.last_seen).getTime() : NaN
-    return { state: "offline", at: Number.isFinite(seen) ? seen : lastAt }
-  }
-  if (isStreaming || latestStep?.status === "running") return { state: "working" }
-
-  // Nothing live: surface what the agent ended with. Transcript tail decides —
-  // trailing tool activity beats older prose, a question flags "needs you".
-  if (latestStep) {
-    return {
-      state: "done",
-      text: latestStep.detail ? `${latestStep.title} · ${latestStep.detail}` : latestStep.title,
-      at: (latestStep.endedAt ?? latestStep.startedAt).getTime(),
-    }
-  }
-  for (let i = messages.length - 1; i >= 0; i -= 1) {
-    const m = messages[i]
-    if (m.role === "system" || m.role === "activity" || m.role === "activity_summary") continue
-    const at = m.timestamp.getTime()
-    if (m.role === "claw") {
-      const text = m.content.trim()
-      const question = extractQuestion(text)
-      if (question) return { state: "waiting", text: question, at }
-      return { state: "done", text: firstMeaningfulLine(text), at }
-    }
-    if (m.role === "hub") return { state: "done", text: m.content, at }
-    if (m.role === "user") return { state: "done", text: "Waiting to start", at }
-  }
-  return { state: "done", text: "Idle", at: lastAt }
 }
 
 function formatUptime(seconds: number): string {
@@ -545,9 +455,9 @@ const ClawBoardCard = memo(function ClawBoardCard({
   const cardTextareaRef = useRef<HTMLTextAreaElement>(null)
   const cardFileInputRef = useRef<HTMLInputElement>(null)
   const [isFlipped, setIsFlipped] = useState(false)
-  // The 3D flip (perspective/preserve-3d) is brittle on mobile Safari — on
-  // phones the card is full-width in a vertical list and front/back is a
-  // plain visibility swap instead of a rotateY transform.
+  // Front/back is a plain visibility swap. The old rotateY flip needed a
+  // fixed card height to position the back face; lane cards size to their
+  // content, and the 3D transform was brittle on mobile Safari anyway.
   const isMobile = useIsMobile()
   const [showTerminal, setShowTerminal] = useState(false)
   const [confirmKill, setConfirmKill] = useState(false)
@@ -564,7 +474,7 @@ const ClawBoardCard = memo(function ClawBoardCard({
   )
   const conversationItems = useMemo(() => compactActivityRuns(visibleMessages), [visibleMessages])
   // An offline/errored claw cannot still be running its dangling last step.
-  const allowTrailingRunning = claw.status !== "offline" && claw.status !== "error"
+  const allowTrailingRunning = allowsTrailingRunning(claw)
   // Latest step of the trailing activity run — drives the card's status line
   // (paired start/terminal, live elapsed while running).
   const latestStep = useMemo(() => {
@@ -671,36 +581,18 @@ const ClawBoardCard = memo(function ClawBoardCard({
   
   return (
     <>
-    <div
-      className={cn(
-        "shrink-0 relative",
-        // Mobile cards size to their content (capped below) instead of a
-        // fixed desktop-carryover height — several agents fit per screen.
-        isMobile ? "w-full" : "w-[500px] h-full [perspective:1000px]"
-      )}
-    >
-      <div
-        className={cn(
-          "relative w-full",
-          !isMobile && "h-full transition-transform duration-500 [transform-style:preserve-3d]",
-          !isMobile && isFlipped && "[transform:rotateY(180deg)]"
-        )}
-      >
-        {/* Front - Chat view. On mobile it is in normal flow and sizes to its
-            content; the message list below carries its own viewport cap and
-            scrolls inside, so the whole card stays around 60vh at most. (A
-            max-height on the card itself would not work: `h-full` inside a
-            max-height-clamped auto container resolves against an indefinite
-            height, so the inner scroller would overflow and get clipped
-            instead of scrolling.) */}
+    <div className="relative w-full min-w-0">
+      <div className="relative w-full">
+        {/* Front - Chat view. The card sits in normal flow and sizes to its
+            content on every breakpoint — lanes lay cards out in a grid, so a
+            fixed height would leave short cards padded with dead space. The
+            message list below carries its own cap and scrolls inside. */}
         <div
           className={cn(
             // overflow-hidden so the state strip and composer sit flush inside
             // the card's rounded edge, as in the board mockup.
-            "flex flex-col overflow-hidden rounded-lg border border-border bg-card",
-            isMobile
-              ? cn("relative", isFlipped && "hidden")
-              : "absolute inset-0 [backface-visibility:hidden]",
+            "relative flex flex-col overflow-hidden rounded-lg border border-border bg-card",
+            isFlipped && "hidden",
             hasUnread && "border-data/50",
             isPending && "opacity-75"
           )}
@@ -849,9 +741,10 @@ const ClawBoardCard = memo(function ClawBoardCard({
             onScroll={handleCardScroll}
             className={cn(
               "overflow-y-auto scrollbar-thin p-3",
-              // vh cap so mobile cards are content-sized with an internal
-              // scroll; desktop fills the fixed-height card as before.
-              isMobile ? "max-h-[40vh]" : "h-full"
+              // Content-sized with an internal scroll: the mockup caps the
+              // lane card's message area at ~190px; phones get more room
+              // because a single card owns the whole viewport width.
+              isMobile ? "max-h-[40vh]" : "max-h-[190px]"
             )}
           >
             {/* Content wrapper — the ResizeObserver in usePinnedAutoScroll watches it. */}
@@ -1078,10 +971,8 @@ const ClawBoardCard = memo(function ClawBoardCard({
         {/* Back - Bot info */}
         <div
           className={cn(
-            "flex flex-col overflow-hidden rounded-lg border border-border bg-card",
-            isMobile
-              ? cn("relative", !isFlipped && "hidden")
-              : "absolute inset-0 [backface-visibility:hidden] [transform:rotateY(180deg)]"
+            "relative flex flex-col overflow-hidden rounded-lg border border-border bg-card",
+            !isFlipped && "hidden"
           )}
         >
           {/* Header */}
@@ -1192,11 +1083,10 @@ const SortableClawBoardCard = memo(function SortableClawBoardCard({
     transform: CSS.Transform.toString(transform),
     transition,
     opacity: isDragging ? 0.35 : 1,
-    height: "100%",
   }
 
   return (
-    <div ref={setNodeRef} style={style} className="h-full">
+    <div ref={setNodeRef} style={style} className="min-w-0">
       <ClawBoardCard
         claw={claw}
         messages={messages}
@@ -1399,7 +1289,7 @@ function ClawChatView({
   })
   const [density, setDensity] = useTimelineDensity()
   // An offline/errored claw cannot still be running its dangling last step.
-  const allowTrailingRunning = claw.status !== "offline" && claw.status !== "error"
+  const allowTrailingRunning = allowsTrailingRunning(claw)
   const turns = useMemo(() => groupIntoTurns(messages, allowTrailingRunning), [messages, allowTrailingRunning])
   const stats = useMemo(() => timelineStats(turns), [turns])
   const runningStep = useMemo(() => latestRunningStep(turns), [turns])
@@ -1780,9 +1670,9 @@ export function ConversationView({
   onSelectClaw,
   onDeselectClaw,
   onReorderClaws,
+  clawLanes,
   onOpenMenu,
 }: ConversationViewProps) {
-  const boardRef = useRef<HTMLDivElement>(null)
   const [activeDragClaw, setActiveDragClaw] = useState<Claw | null>(null)
   const { logoUrl } = useBranding()
   const isMobile = useIsMobile()
@@ -1801,32 +1691,29 @@ export function ConversationView({
     setActiveDragClaw(found ?? null)
   }
 
+  // Manual order still applies, but only inside a lane: status decides which
+  // lane a card lives in, so a drop across lanes has nowhere to land and is
+  // ignored. The stored order stays global — moving a card past its lane
+  // neighbours in that list is exactly the within-lane move the user made.
   function handleBoardDragEnd(event: DragEndEvent) {
     setActiveDragClaw(null)
     const { active, over } = event
     if (!over || active.id === over.id) return
+    if (clawLanes[active.id as string] !== clawLanes[over.id as string]) return
     const ids = allClaws.map((c) => c.id)
     const oldIdx = ids.indexOf(active.id as string)
     const newIdx = ids.indexOf(over.id as string)
+    if (oldIdx === -1 || newIdx === -1) return
     onReorderClaws(arrayMove(ids, oldIdx, newIdx))
   }
 
-  // On initial load, scroll board to leftmost active card
-  useEffect(() => {
-    if (!boardRef.current) return
-    boardRef.current.scrollLeft = 0
-  }, [])
-
-  const scrollBoard = (direction: "left" | "right") => {
-    if (boardRef.current) {
-      // One card plus the flex gap, so the arrows page card-by-card.
-      const scrollAmount = 516
-      boardRef.current.scrollBy({
-        left: direction === "left" ? -scrollAmount : scrollAmount,
-        behavior: "smooth",
-      })
-    }
-  }
+  // Cards grouped into the three status lanes, keeping the stored order
+  // within each lane.
+  const laneGroups = useMemo(() => {
+    const groups: Record<ClawLane, Claw[]> = { attention: [], working: [], idle: [] }
+    for (const c of allClaws) groups[clawLanes[c.id] ?? "idle"].push(c)
+    return groups
+  }, [allClaws, clawLanes])
 
   if (hubError) {
     return (
@@ -1923,88 +1810,114 @@ export function ConversationView({
                 elasticclaw create --name my-agent
               </div>
             </div>
-          ) : isMobile ? (
-            /* Single-column vertical list: full-width cards, no reordering,
-               no scroll arrows — one-finger vertical scrolling only. */
-            <div className="h-full overflow-y-auto overflow-x-hidden p-3 flex flex-col gap-3">
-              {sortedClaws.map((c) => (
-                <ClawBoardCard
-                  key={c.id}
-                  claw={c}
-                  messages={allMessages[c.id] ?? EMPTY_MESSAGES}
-                  streamingBuffer={streamingBuffers[c.id]}
-                  onClick={handleCardClick}
-                  onSendMessage={handleCardSendMessage}
-                  onKill={handleCardKill}
-                />
-              ))}
-            </div>
           ) : (
-          <>
-          <Button
-            variant="ghost"
-            size="icon"
-            className="absolute left-2 top-1/2 -translate-y-1/2 z-10 bg-card/90 backdrop-blur-sm border border-border shadow-ds-sm"
-            onClick={() => scrollBoard("left")}
-          >
-            <ChevronLeft className="size-4" />
-          </Button>
-
-          <DndContext
-            sensors={sensors}
-            collisionDetection={closestCenter}
-            onDragStart={handleBoardDragStart}
-            onDragEnd={handleBoardDragEnd}
-          >
-            <SortableContext
-              items={sortedClaws.map((c) => c.id)}
-              strategy={horizontalListSortingStrategy}
+            /* Status lanes stacked down a scrolling page. Cards inside a lane
+               flow into an auto-fill grid, so the board reads top-to-bottom by
+               urgency instead of sideways through a carousel. */
+            <DndContext
+              sensors={sensors}
+              collisionDetection={closestCenter}
+              onDragStart={handleBoardDragStart}
+              onDragEnd={handleBoardDragEnd}
             >
-              <div
-                ref={boardRef}
-                className="flex gap-4 h-full overflow-x-auto overflow-y-hidden py-6 px-12 items-stretch"
-                style={{ scrollbarWidth: "none", msOverflowStyle: "none" }}
-              >
-                {sortedClaws.map((c) => (
-                  <SortableClawBoardCard
-                    key={c.id}
-                    claw={c}
-                    messages={allMessages[c.id] ?? EMPTY_MESSAGES}
-                    streamingBuffer={streamingBuffers[c.id]}
-                    onClick={handleCardClick}
-                    onSendMessage={handleCardSendMessage}
-                    onKill={handleCardKill}
-                  />
-                ))}
+              <div className="grid h-full content-start gap-6 overflow-y-auto overflow-x-hidden p-3 md:p-4">
+                {CLAW_LANE_ORDER.map((lane) => {
+                  const laneClaws = laneGroups[lane]
+                  // Empty lanes are omitted — no headers over nothing.
+                  if (laneClaws.length === 0) return null
+                  const meta = CLAW_LANE_META[lane]
+                  return (
+                    <section key={lane}>
+                      <div className="mb-3 flex items-center gap-2 border-b-2 border-border pb-2">
+                        <h3
+                          className={cn(
+                            "text-[13px] font-extrabold uppercase tracking-[0.08em]",
+                            lane === "attention" && "text-primary",
+                            lane === "working" && "text-status-ok",
+                            lane === "idle" && "text-foreground"
+                          )}
+                        >
+                          {meta.title}
+                        </h3>
+                        <span
+                          className={cn(
+                            "inline-flex h-5 min-w-5 items-center justify-center rounded-full px-1.5 text-[11px] font-semibold tabular-nums",
+                            lane === "attention"
+                              ? "bg-primary text-primary-foreground"
+                              : "bg-foreground/12 text-foreground"
+                          )}
+                        >
+                          {laneClaws.length}
+                        </span>
+                        <span className="ml-auto hidden text-xs text-muted-foreground sm:block">
+                          {meta.note}
+                        </span>
+                      </div>
+                      <SortableContext
+                        items={laneClaws.map((c) => c.id)}
+                        strategy={rectSortingStrategy}
+                      >
+                        <div className="grid grid-cols-1 items-start gap-4 md:grid-cols-[repeat(auto-fill,minmax(360px,1fr))]">
+                          {laneClaws.map((c) => {
+                            const card = isMobile ? (
+                              /* No reordering on touch: a 6px activation would
+                                 steal one-finger scrolling. */
+                              <ClawBoardCard
+                                claw={c}
+                                messages={allMessages[c.id] ?? EMPTY_MESSAGES}
+                                streamingBuffer={streamingBuffers[c.id]}
+                                onClick={handleCardClick}
+                                onSendMessage={handleCardSendMessage}
+                                onKill={handleCardKill}
+                              />
+                            ) : (
+                              <SortableClawBoardCard
+                                claw={c}
+                                messages={allMessages[c.id] ?? EMPTY_MESSAGES}
+                                streamingBuffer={streamingBuffers[c.id]}
+                                onClick={handleCardClick}
+                                onSendMessage={handleCardSendMessage}
+                                onKill={handleCardKill}
+                              />
+                            )
+                            return lane === "idle" ? (
+                              // Dimmed until hovered: parked agents stay
+                              // readable without competing with the live ones.
+                              <div
+                                key={c.id}
+                                className="min-w-0 opacity-[0.55] transition-opacity hover:opacity-100 focus-within:opacity-100"
+                              >
+                                {card}
+                              </div>
+                            ) : (
+                              <div key={c.id} className="min-w-0">
+                                {card}
+                              </div>
+                            )
+                          })}
+                        </div>
+                      </SortableContext>
+                    </section>
+                  )
+                })}
               </div>
-            </SortableContext>
 
-            {/* Ghost card following cursor during drag */}
-            <DragOverlay>
-              {activeDragClaw ? (
-                <div className="opacity-90 shadow-2xl h-full" style={{ width: 320 }}>
-                  <ClawBoardCard
-                    claw={activeDragClaw}
-                    messages={allMessages[activeDragClaw.id] ?? EMPTY_MESSAGES}
-                    streamingBuffer={streamingBuffers[activeDragClaw.id]}
-                    onClick={noopClawAction}
-                    onSendMessage={noopClawMessageAction}
-                    onKill={noopClawAction}
-                  />
-                </div>
-              ) : null}
-            </DragOverlay>
-          </DndContext>
-
-          <Button
-            variant="ghost"
-            size="icon"
-            className="absolute right-2 top-1/2 -translate-y-1/2 z-10 bg-card/90 backdrop-blur-sm border border-border shadow-ds-sm"
-            onClick={() => scrollBoard("right")}
-          >
-            <ChevronRight className="size-4" />
-          </Button>
-          </>
+              {/* Ghost card following cursor during drag */}
+              <DragOverlay>
+                {activeDragClaw ? (
+                  <div className="opacity-90 shadow-ds-lg" style={{ width: 360 }}>
+                    <ClawBoardCard
+                      claw={activeDragClaw}
+                      messages={allMessages[activeDragClaw.id] ?? EMPTY_MESSAGES}
+                      streamingBuffer={streamingBuffers[activeDragClaw.id]}
+                      onClick={noopClawAction}
+                      onSendMessage={noopClawMessageAction}
+                      onKill={noopClawAction}
+                    />
+                  </div>
+                ) : null}
+              </DragOverlay>
+            </DndContext>
           )}
         </div>
       </main>

@@ -16,6 +16,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import { cn } from "@/lib/utils"
+import { CLAW_LANE_META, CLAW_LANE_ORDER, type ClawLane } from "@/lib/claw-lanes"
 import type { Claw } from "@/lib/types"
 import {
   DndContext,
@@ -34,7 +35,7 @@ import {
   arrayMove,
 } from "@dnd-kit/sortable"
 import { CSS } from "@dnd-kit/utilities"
-import { useState, useEffect, useCallback } from "react"
+import { useState, useEffect, useCallback, useMemo } from "react"
 
 type TagFilter = string
 
@@ -57,6 +58,8 @@ interface SidebarProps {
   onToggleCollapse: () => void
   /** Per-claw "current tool" one-liners for the second row line. */
   activityLines?: Record<string, string>
+  /** Status lane per claw id — the list is grouped by it, board-style. */
+  clawLanes: Record<string, ClawLane>
   isAdmin?: boolean
   onSelectWorkflow?: (workflow: Workflow | null) => void
   view?: "agents" | "analytics"
@@ -124,6 +127,7 @@ export function Sidebar({
   isCollapsed,
   onToggleCollapse,
   activityLines,
+  clawLanes,
   isAdmin = true,
   onSelectWorkflow,
   view = "agents",
@@ -227,6 +231,8 @@ export function Sidebar({
     const targetInPinned = pinnedClaws.some((c) => c.id === over.id)
 
     if (inPinned !== targetInPinned) return // don't allow crossing sections
+    // Status decides the group, so reordering only makes sense inside a lane.
+    if (!inPinned && clawLanes[active.id as string] !== clawLanes[over.id as string]) return
 
     if (inPinned) {
       // Reorder within pinned — update full order accounting for the pinned move
@@ -248,6 +254,18 @@ export function Sidebar({
 
   // Merge pinned + unpinned for collapsed view (order already applied by parent)
   const allClaws = [...pinnedClaws, ...claws.filter(c => !pinnedClaws.find(p => p.id === c.id))]
+
+  // The filtered list, split into the same three status lanes the board uses.
+  // Filtering and search run before this, so a group only ever holds rows that
+  // survived them; empty groups are dropped.
+  const laneSections = useMemo(() => {
+    const groups: Record<ClawLane, Claw[]> = { attention: [], working: [], idle: [] }
+    for (const c of claws) groups[clawLanes[c.id] ?? "idle"].push(c)
+    return CLAW_LANE_ORDER.filter((lane) => groups[lane].length > 0).map((lane) => ({
+      lane,
+      claws: groups[lane],
+    }))
+  }, [claws, clawLanes])
 
   let sidebar: React.ReactElement
 
@@ -501,38 +519,57 @@ export function Sidebar({
               </div>
             </div>
           )}
-          <div className="p-2">
-            {!searchQuery && pinnedClaws.length > 0 && claws.length > 0 && (
-              <div className="flex items-center gap-1.5 px-2 py-2 text-muted-foreground">
-                <span className="kicker">All Agents</span>
-                <span className="ml-auto font-mono text-[10px] tabular-nums">
-                  {claws.length}
-                </span>
-              </div>
-            )}
+          <div className="pb-2">
             {claws.length === 0 && pinnedClaws.length === 0 ? (
               <p className="text-sm text-muted-foreground text-center py-8">
                 No agents found
               </p>
             ) : (
-              <SortableContext
-                items={claws.map((c) => c.id)}
-                strategy={verticalListSortingStrategy}
-              >
-                {claws.map((claw) => (
-                  <SortableClawCard
-                    key={claw.id}
-                    claw={claw}
-                    isSelected={claw.id === selectedClawId}
-                    onClick={() => onSelectClaw(claw.id)}
-                    onTogglePin={(e) => {
-                      e.stopPropagation()
-                      onTogglePin(claw.id)
-                    }}
-                    activityLine={activityLines?.[claw.id]}
-                  />
-                ))}
-              </SortableContext>
+              laneSections.map(({ lane, claws: laneClaws }, index) => (
+                <div
+                  key={lane}
+                  className={cn(index > 0 && "border-t-2 border-border")}
+                >
+                  <div className="flex items-center gap-1.5 px-4 py-2">
+                    <span
+                      className={cn(
+                        "kicker",
+                        lane === "attention" ? "text-primary" : "text-muted-foreground"
+                      )}
+                    >
+                      {CLAW_LANE_META[lane].title}
+                    </span>
+                    <span
+                      className={cn(
+                        "ml-auto font-mono text-[10px] tabular-nums",
+                        lane === "attention" ? "text-primary" : "text-muted-foreground"
+                      )}
+                    >
+                      {laneClaws.length}
+                    </span>
+                  </div>
+                  <div className="px-2 pb-2">
+                    <SortableContext
+                      items={laneClaws.map((c) => c.id)}
+                      strategy={verticalListSortingStrategy}
+                    >
+                      {laneClaws.map((claw) => (
+                        <SortableClawCard
+                          key={claw.id}
+                          claw={claw}
+                          isSelected={claw.id === selectedClawId}
+                          onClick={() => onSelectClaw(claw.id)}
+                          onTogglePin={(e) => {
+                            e.stopPropagation()
+                            onTogglePin(claw.id)
+                          }}
+                          activityLine={activityLines?.[claw.id]}
+                        />
+                      ))}
+                    </SortableContext>
+                  </div>
+                </div>
+              ))
             )}
           </div>
         </ScrollArea>

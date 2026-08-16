@@ -13,6 +13,7 @@ import { useIsMobile } from "@/hooks/use-mobile"
 import { useHub } from "@/hooks/use-hub"
 import { useBoardActivityPrefetch } from "@/hooks/use-board-activity-prefetch"
 import { demoteStaleRunning, pairActivitySteps, trailingActivityRun } from "@/lib/turns"
+import { clawLanes as deriveClawLanes } from "@/lib/claw-lanes"
 import { type Workflow } from "@/lib/api"
 import {
   subscribeToShellStorage,
@@ -215,6 +216,18 @@ export function HomeShell() {
     return lines
   }, [claws, messages])
 
+  // Status lane per agent, shared by the board and the sidebar so both group
+  // the same way. Derived from the claw status and its loaded transcript tail
+  // — the exact signals the card's state strip already renders.
+  const lanes = useMemo(
+    () =>
+      deriveClawLanes(claws, messages, (claw) => {
+        const buffer = streamingBuffers[claw.id]
+        return claw.isStreaming || Boolean(buffer?.hadChunks && buffer.text)
+      }),
+    [claws, messages, streamingBuffers]
+  )
+
   // Mark messages as read when selecting a claw + lazy load history
   const handleSelectClaw = useCallback(
     (id: string) => {
@@ -324,6 +337,7 @@ export function HomeShell() {
       onToggleCollapse={() => setSidebarCollapsed(!sidebarCollapsed)}
       onReorderClaws={reorderClaws}
       activityLines={sidebarActivity}
+      clawLanes={lanes}
       isAdmin={isAdmin}
       onSelectWorkflow={setSelectedWorkflow}
       view={view}
@@ -370,6 +384,7 @@ export function HomeShell() {
             onSelectClaw={handleSelectClaw}
             onDeselectClaw={() => writeSelectedClawId(null)}
             onReorderClaws={reorderClaws}
+            clawLanes={lanes}
             loading={loading}
             hubError={hubError}
             onOpenMenu={isMobile ? () => setDrawerOpen(true) : undefined}
