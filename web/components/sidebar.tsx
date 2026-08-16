@@ -253,8 +253,8 @@ export function Sidebar({
 
   if (isCollapsed && !inDrawer) {
     sidebar = (
-      <aside className="w-12 h-screen-safe flex flex-col border-r border-border bg-card">
-        <div className="p-2 border-b border-border flex flex-col items-center gap-1">
+      <aside className="w-12 h-screen-safe flex flex-col border-r-2 border-border bg-card">
+        <div className="p-2 border-b-2 border-border flex flex-col items-center gap-1">
           <Button
             variant="ghost"
             size="icon"
@@ -287,28 +287,28 @@ export function Sidebar({
                 onClick={() => onSelectClaw(claw.id)}
                 title={claw.name}
                 className={cn(
-                  "relative size-8 rounded-md flex items-center justify-center transition-colors hover:bg-accent",
-                  isSelected && "bg-accent"
+                  "relative size-8 rounded-md flex items-center justify-center transition-colors hover:bg-foreground/7",
+                  isSelected && "bg-foreground/10"
                 )}
               >
                 {/* Status dot */}
                 {claw.status === "provisioning" ? (
-                  <Loader2 className="size-3.5 text-blue-400 animate-spin" />
+                  <Loader2 className="size-3.5 text-data animate-spin" />
                 ) : claw.status === "error" ? (
-                  <AlertCircle className="size-3.5 text-red-500" />
+                  <AlertCircle className="size-3.5 text-destructive" />
                 ) : claw.isStreaming ? (
-                  <Loader2 className="size-3.5 text-green-500 animate-spin" />
+                  <Loader2 className="size-3.5 text-status-ok animate-spin" />
                 ) : (
                   <span className={cn(
                     "size-2.5 rounded-full",
-                    claw.status === "connected" && "bg-green-500",
-                    claw.status === "idle" && "bg-amber-500",
+                    claw.status === "connected" && "bg-status-ok",
+                    claw.status === "idle" && "bg-status-warn",
                     claw.status === "offline" && "bg-muted-foreground/50"
                   )} />
                 )}
                 {/* Unread badge */}
                 {hasUnread && (
-                  <span className="absolute -top-0.5 -right-0.5 size-3.5 flex items-center justify-center text-[8px] font-bold bg-blue-600 text-white rounded-full">
+                  <span className="absolute -top-0.5 -right-0.5 size-3.5 flex items-center justify-center font-mono text-[8px] font-bold bg-primary text-primary-foreground rounded-full">
                     {claw.unreadCount > 9 ? "9+" : claw.unreadCount}
                   </span>
                 )}
@@ -318,7 +318,7 @@ export function Sidebar({
         </div>
 
         {/* Footer: view toggle + settings (admin) and sign out */}
-        <div className="p-2 border-t border-border flex flex-col items-center gap-1">
+        <div className="p-2 border-t-2 border-border flex flex-col items-center gap-1">
           {isAdmin && (
             <>
               <Button
@@ -326,7 +326,7 @@ export function Sidebar({
                 size="icon"
                 className={cn(
                   "size-8 text-muted-foreground hover:text-foreground",
-                  inAnalytics && "bg-muted text-foreground"
+                  inAnalytics && "bg-foreground/10 text-foreground"
                 )}
                 title={viewToggleLabel}
                 onClick={onToggleView}
@@ -362,11 +362,11 @@ export function Sidebar({
       <aside
         className={cn(
           "flex flex-col bg-card",
-          inDrawer ? "w-full h-full" : "w-[260px] h-screen-safe border-r border-border"
+          inDrawer ? "w-full h-full" : "w-[260px] h-screen-safe border-r-2 border-border"
         )}
       >
-      <div className={cn("flex items-center justify-between p-4 border-b border-border", inDrawer && "pr-12")}>
-        <h1 className="text-lg font-semibold tracking-tight text-foreground">
+      <div className={cn("flex items-center justify-between p-4 border-b-2 border-border", inDrawer && "pr-12")}>
+        <h1 className="text-[18px] font-extrabold tracking-[-0.015em] text-foreground">
           {appName}
         </h1>
         <div className="flex items-center gap-1">
@@ -396,7 +396,7 @@ export function Sidebar({
         </div>
       </div>
 
-      <div className="p-3 border-b border-border space-y-2">
+      <div className="p-3 border-b-2 border-border space-y-2">
         <div className="relative">
           <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 size-4 text-muted-foreground" />
           <Input
@@ -438,7 +438,7 @@ export function Sidebar({
             <span
               key={tag}
               title={tag}
-              className="inline-flex items-center gap-1 px-2 py-1 text-xs bg-secondary text-foreground rounded max-w-[120px]"
+              className="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] tracking-[0.02em] bg-tint-neutral text-tint-neutral-foreground rounded-full max-w-[120px]"
             >
               <span className="truncate">{tag}</span>
               <button
@@ -471,11 +471,12 @@ export function Sidebar({
             must scroll with the rest instead of squeezing "All Agents" out. */}
         <ScrollArea className="flex-1 min-h-0">
           {pinnedClaws.length > 0 && !searchQuery && (
-            <div className="border-b border-border">
-              <div className="flex items-center gap-1.5 px-4 py-2">
-                <Pin className="size-3 text-muted-foreground" />
-                <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
-                  Pinned
+            <div className="border-b-2 border-border">
+              <div className="flex items-center gap-1.5 px-4 py-2 text-muted-foreground">
+                <Pin className="size-3" />
+                <span className="kicker">Pinned</span>
+                <span className="ml-auto font-mono text-[10px] tabular-nums">
+                  {pinnedClaws.length}
                 </span>
               </div>
               <div className="px-2 pb-2">
@@ -502,9 +503,10 @@ export function Sidebar({
           )}
           <div className="p-2">
             {!searchQuery && pinnedClaws.length > 0 && claws.length > 0 && (
-              <div className="flex items-center gap-1.5 px-2 py-2">
-                <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
-                  All Agents
+              <div className="flex items-center gap-1.5 px-2 py-2 text-muted-foreground">
+                <span className="kicker">All Agents</span>
+                <span className="ml-auto font-mono text-[10px] tabular-nums">
+                  {claws.length}
                 </span>
               </div>
             )}
@@ -538,7 +540,7 @@ export function Sidebar({
         {/* Drag overlay — ghost card that follows the cursor */}
         <DragOverlay>
           {activeDragClaw ? (
-            <div className="opacity-90 shadow-xl">
+            <div className="opacity-90 shadow-ds-lg">
               <ClawCard
                 claw={activeDragClaw}
                 isSelected={activeDragClaw.id === selectedClawId}
@@ -555,14 +557,14 @@ export function Sidebar({
           mobile drawer — the bottom tab bar and the board header menu own
           these destinations there. */}
       {!inDrawer && (
-      <div className="p-2 border-t border-border">
+      <div className="p-2 border-t-2 border-border">
         {isAdmin && (
           <>
             <button
               onClick={onToggleView}
               className={cn(
-                "flex w-full min-h-9 items-center gap-[9px] rounded-lg px-2.5 text-[12.5px] text-muted-foreground transition-colors hover:bg-muted hover:text-foreground",
-                inAnalytics && "bg-muted text-foreground"
+                "flex w-full min-h-9 items-center gap-[9px] rounded-md px-2.5 text-[13px] text-muted-foreground transition-colors hover:bg-foreground/7 hover:text-foreground",
+                inAnalytics && "bg-foreground/10 text-foreground"
               )}
             >
               <ViewToggleIcon className="size-4 flex-shrink-0" />
@@ -570,17 +572,17 @@ export function Sidebar({
             </button>
             <button
               onClick={() => { window.location.href = "/settings" }}
-              className="flex w-full min-h-9 items-center gap-[9px] rounded-lg px-2.5 text-[12.5px] text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+              className="flex w-full min-h-9 items-center gap-[9px] rounded-md px-2.5 text-[13px] text-muted-foreground transition-colors hover:bg-foreground/7 hover:text-foreground"
             >
               <Settings className="size-4 flex-shrink-0" />
               Settings
             </button>
-            <div className="my-1 border-t border-border" />
+            <div className="my-1 border-t-2 border-border" />
           </>
         )}
         <button
           onClick={handleSignOut}
-          className="flex w-full min-h-9 items-center gap-[9px] rounded-lg px-2.5 text-[12.5px] text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive"
+          className="flex w-full min-h-9 items-center gap-[9px] rounded-md px-2.5 text-[13px] text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive"
         >
           <LogOut className="size-4 flex-shrink-0" />
           Sign out
@@ -633,14 +635,14 @@ function WorkflowPickerOverlay({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-[var(--ds-scrim)]"
       onClick={(e) => {
         if (e.target === e.currentTarget) onClose()
       }}
     >
-      <div className="bg-card border border-border rounded-lg shadow-lg w-[320px] max-w-[90vw]">
+      <div className="bg-card border border-border rounded-lg shadow-ds-lg w-[320px] max-w-[90vw]">
         <div className="flex items-center justify-between p-3 border-b border-border">
-          <h3 className="text-sm font-medium">Select Workflow</h3>
+          <h3 className="text-sm font-extrabold tracking-[-0.015em]">Select Workflow</h3>
           <Button variant="ghost" size="icon" className="size-7" onClick={onClose}>
             <X className="size-4" />
           </Button>
@@ -653,7 +655,7 @@ function WorkflowPickerOverlay({
           ) : workflows.map((workflow) => (
             <button
               key={`${workflow.workspaceName}/${workflow.name}`}
-              className="w-full text-left px-3 py-2 text-sm rounded hover:bg-accent transition-colors"
+              className="w-full text-left px-3 py-2 text-sm rounded-md hover:bg-foreground/7 transition-colors"
               onClick={() => onSelect(workflow)}
             >
               <div className="font-medium">{workflow.name}</div>

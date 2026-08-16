@@ -102,7 +102,7 @@ export function ManualTriggerModal({ open, onOpenChange, workflow }: ManualTrigg
       <DialogContent className="sm:max-w-md">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
-            <Zap className="size-4 text-amber-500" />
+            <Zap className="size-4 text-status-warn" />
             Trigger {workflow.name}
           </DialogTitle>
           <DialogDescription>
@@ -126,7 +126,7 @@ export function ManualTriggerModal({ open, onOpenChange, workflow }: ManualTrigg
         )}
 
         {triggerError && (
-          <div className="flex items-center gap-1.5 text-sm text-red-500 bg-red-50 p-2 rounded">
+          <div className="flex items-center gap-1.5 rounded-md bg-destructive/10 p-2 text-sm text-destructive">
             <AlertCircle className="size-4" />
             <span>{triggerError}</span>
           </div>
@@ -166,9 +166,9 @@ function WorkflowInputField({
 }) {
   return (
     <div className="space-y-1.5">
-      <label className="text-sm font-medium flex items-center gap-1">
+      <label className="flex items-center gap-1.5 font-mono text-[13px]">
         {input.name}
-        {input.required && <span className="text-red-500">*</span>}
+        {input.required && <span className="text-destructive">*</span>}
         <Badge variant="secondary" className="text-[10px] font-normal">
           {input.type}
         </Badge>
@@ -178,7 +178,7 @@ function WorkflowInputField({
       )}
       {input.type === "enum" && input.options ? (
         <select
-          className="w-full text-sm border border-border rounded-md px-3 py-2 bg-background"
+          className="w-full rounded-md border border-input bg-card px-2.5 py-1.5 text-sm outline-none transition-colors hover:border-foreground/45 focus-visible:border-primary"
           value={value || input.default || ""}
           onChange={(e) => onChange(e.target.value)}
         >
@@ -188,7 +188,7 @@ function WorkflowInputField({
         </select>
       ) : input.type === "bool" ? (
         <select
-          className="w-full text-sm border border-border rounded-md px-3 py-2 bg-background"
+          className="w-full rounded-md border border-input bg-card px-2.5 py-1.5 text-sm outline-none transition-colors hover:border-foreground/45 focus-visible:border-primary"
           value={value || input.default || "false"}
           onChange={(e) => onChange(e.target.value)}
         >
