@@ -276,6 +276,67 @@ export interface TaskRunsResponse {
   limit: number
 }
 
+export interface AnalyticsTicketRunSummary {
+  runId: string
+  status: string
+  phase: string
+  attemptCount: number
+  cost: number
+  totalTokens: number
+  humanTouches: number
+  startedAt: number
+  lastActivity: number
+}
+
+export interface AnalyticsTicketPR extends TaskRunPR {
+  runId: string
+}
+
+export interface AnalyticsTicketStoryEntry {
+  id: string
+  eventType: string
+  label: string
+  actor: string
+  time: number
+  runId: string
+  kind: "good" | "bad" | "human" | "neutral"
+  count: number
+}
+
+export interface AnalyticsTicket {
+  issueId: string
+  issueTitle: string
+  status: "delivered" | "pr_open" | "in_progress" | "failed"
+  requester: string
+  requesterRole?: string
+  team?: string
+  priority: string
+  ask: string
+  source: string
+  reportedAt: number
+  runIds: string[]
+  runs: AnalyticsTicketRunSummary[]
+  runCount: number
+  attemptCount: number
+  failedRunCount: number
+  cost: number
+  totalTokens: number
+  humanTouches: number
+  prs: AnalyticsTicketPR[]
+  mergedPrCount: number
+  openPrCount: number
+  timeToFirstRun: number
+  leadTime: number
+  lastActivity: number
+  story: AnalyticsTicketStoryEntry[]
+}
+
+export interface AnalyticsTicketsResponse {
+  tickets: AnalyticsTicket[]
+  nextCursor?: string
+  limit: number
+}
+
 export interface TaskRunAttempt {
   id: string
   attemptId: string

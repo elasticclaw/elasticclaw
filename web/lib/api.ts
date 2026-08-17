@@ -455,6 +455,10 @@ export async function fetchTaskRuns(filters?: TaskRunAnalyticsFilters, options?:
   return apiFetch<TaskRunsResponse>(`/api/analytics/runs${appendViewerTimezone(taskRunAnalyticsQuery(filters))}`, options)
 }
 
+export async function fetchAnalyticsTickets(filters?: TaskRunAnalyticsFilters, options?: AnalyticsRequestOptions): Promise<AnalyticsTicketsResponse> {
+  return apiFetch<AnalyticsTicketsResponse>(`/api/analytics/tickets${appendViewerTimezone(taskRunAnalyticsQuery(filters))}`, options)
+}
+
 export async function fetchTaskRun(runId: string): Promise<{ run: TaskRunSummary }> {
   return apiFetch<{ run: TaskRunSummary }>(`/api/analytics/runs/${encodeURIComponent(runId)}${appendViewerTimezone("")}`)
 }
