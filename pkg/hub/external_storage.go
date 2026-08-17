@@ -882,6 +882,25 @@ func deleteExternalWorkspace(name string) error {
 	return os.RemoveAll(filepath.Join(workspacesDir(), name))
 }
 
+var errWorkflowNotFound = errors.New("workflow not found")
+
+func deleteExternalWorkflow(workspaceName, workflowName string) error {
+	if err := validateName(workspaceName); err != nil {
+		return err
+	}
+	if err := validateName(workflowName); err != nil {
+		return err
+	}
+	path := filepath.Join(workspacesDir(), workspaceName, "workflows", strings.ToLower(workflowName)+".yaml")
+	if err := os.Remove(path); err != nil {
+		if os.IsNotExist(err) {
+			return errWorkflowNotFound
+		}
+		return err
+	}
+	return nil
+}
+
 // ── Migration ────────────────────────────────────────────────────────────────
 
 // migrationMarkerPath returns the path to the migration marker file.

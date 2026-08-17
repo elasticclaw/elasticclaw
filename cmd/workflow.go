@@ -27,6 +27,7 @@ func WorkflowCmd() *cobra.Command {
 	cmd.AddCommand(workflowListCmd())
 	cmd.AddCommand(workflowShowCmd())
 	cmd.AddCommand(workflowPushCmd())
+	cmd.AddCommand(workflowRmCmd())
 	cmd.AddCommand(workflowTriggerCmd())
 	cmd.AddCommand(workflowRunsCmd())
 	cmd.AddCommand(workflowInspectCmd())
@@ -293,6 +294,45 @@ func runWorkflowPush(workspace string, paths []string) error {
 	for _, workflow := range result.Workflows {
 		fmt.Printf("  ✓ %s\n", workflow.Name)
 	}
+	return nil
+}
+
+func workflowRmCmd() *cobra.Command {
+	var workspace string
+	cmd := &cobra.Command{
+		Use:     "rm <name>",
+		Aliases: []string{"delete", "remove"},
+		Short:   "Remove a workflow from a workspace",
+		Args:    cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runWorkflowRm(workspace, args[0])
+		},
+	}
+	cmd.Flags().StringVar(&workspace, "workspace", "default", "workspace name")
+	return cmd
+}
+
+func runWorkflowRm(workspace, name string) error {
+	hubURL, clawToken, err := resolveHubConn()
+	if err != nil {
+		return err
+	}
+	path := fmt.Sprintf("/api/workspaces/%s/workflows/%s", url.PathEscape(workspace), url.PathEscape(name))
+	req, _ := http.NewRequest(http.MethodDelete, hubURL+path, nil)
+	req.Header.Set("Authorization", "Bearer "+clawToken)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("remove workflow failed: %w", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode == http.StatusNotFound {
+		return fmt.Errorf("workflow %q not found in workspace %q", name, workspace)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("hub returned %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	fmt.Printf("Removed workflow %q from workspace %q.\n", name, workspace)
 	return nil
 }
 

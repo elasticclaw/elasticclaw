@@ -218,6 +218,256 @@ func TestWorkflowPushPersistsWorkspaceWorkflows(t *testing.T) {
 	}
 }
 
+func TestWorkflowDeleteRemovesWorkflow(t *testing.T) {
+	configDir := t.TempDir()
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", configDir+"/hub.yaml")
+	s, _ := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
+
+	body := `{"workspaces":[{"name":"engineering","repositories":[]}]}`
+	req := httptest.NewRequest(http.MethodPost, "/api/workspaces", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("workspace push status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+
+	body = `{"workflows":[{"name":"bugfix","integration":"github","enable_manual_trigger":true}]}`
+	req = httptest.NewRequest(http.MethodPost, "/api/workspaces/engineering/workflows", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Content-Type", "application/json")
+	rr = httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("workflow push status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodDelete, "/api/workspaces/engineering/workflows/bugfix", nil)
+	req.Header.Set("Authorization", "Bearer test-token")
+	rr = httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("workflow delete status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+	var result map[string]string
+	if err := json.Unmarshal(rr.Body.Bytes(), &result); err != nil {
+		t.Fatalf("decode delete response: %v", err)
+	}
+	if result["deleted"] != "bugfix" {
+		t.Fatalf("deleted = %q, want bugfix", result["deleted"])
+	}
+
+	workflowPath := filepath.Join(configDir, "workspaces", "engineering", "workflows", "bugfix.yaml")
+	if _, err := os.Stat(workflowPath); !os.IsNotExist(err) {
+		t.Fatalf("workflow file still exists after delete: %s", workflowPath)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/workspaces/engineering/workflows/bugfix", nil)
+	req.Header.Set("Authorization", "Bearer test-token")
+	rr = httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("get deleted workflow status = %d, want 404, body = %s", rr.Code, rr.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodDelete, "/api/workspaces/engineering/workflows/bugfix", nil)
+	req.Header.Set("Authorization", "Bearer test-token")
+	rr = httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("delete missing workflow status = %d, want 404, body = %s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestWorkflowDeleteWithWhitespaceName(t *testing.T) {
+	configDir := t.TempDir()
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", configDir+"/hub.yaml")
+	s, _ := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
+
+	body := `{"workspaces":[{"name":"engineering","repositories":[]}]}`
+	req := httptest.NewRequest(http.MethodPost, "/api/workspaces", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("workspace push status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+
+	body = `{"workflows":[{"name":" bugfix ","integration":"github","enable_manual_trigger":true}]}`
+	req = httptest.NewRequest(http.MethodPost, "/api/workspaces/engineering/workflows", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Content-Type", "application/json")
+	rr = httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("workflow push status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+
+	// Workflow names are normalized on push, so the persisted file has no
+	// surrounding whitespace even though the request body did.
+	workflowPath := filepath.Join(configDir, "workspaces", "engineering", "workflows", "bugfix.yaml")
+	if _, err := os.Stat(workflowPath); err != nil {
+		t.Fatalf("normalized workflow file not found: %v", err)
+	}
+
+	req = httptest.NewRequest(http.MethodDelete, "/api/workspaces/engineering/workflows/%20bugfix%20", nil)
+	req.Header.Set("Authorization", "Bearer test-token")
+	rr = httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("workflow delete status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+
+	if _, err := os.Stat(workflowPath); !os.IsNotExist(err) {
+		t.Fatalf("workflow file still exists after delete: %s", workflowPath)
+	}
+}
+
+func TestWorkflowDeleteRemovesCronSchedule(t *testing.T) {
+	configDir := t.TempDir()
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", configDir+"/hub.yaml")
+	s, _ := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
+	s.cronScheduler = newCronScheduler(s)
+	s.cronScheduler.cron = cron.New(cron.WithSeconds())
+
+	body := `{"workspaces":[{"name":"engineering"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/api/workspaces", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("workspace push status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+
+	body = `{"workflows":[{"schemaVersion":"v1","name":"dependency-update-go","trigger":{"cron":{"schedule":"*/1 * * * *","timezone":"America/Chicago","overlap_policy":"skip","timeout":"2h"}},"stages":[{"id":"working","entry":true}]}]}`
+	req = httptest.NewRequest(http.MethodPost, "/api/workspaces/engineering/workflows", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Content-Type", "application/json")
+	rr = httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("workflow push status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+
+	if _, ok := s.cronScheduler.entries["engineering/dependency-update-go"]; !ok {
+		t.Fatalf("cron workflow was not registered: %#v", s.cronScheduler.entries)
+	}
+
+	req = httptest.NewRequest(http.MethodDelete, "/api/workspaces/engineering/workflows/dependency-update-go", nil)
+	req.Header.Set("Authorization", "Bearer test-token")
+	rr = httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("workflow delete status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+
+	if _, ok := s.cronScheduler.entries["engineering/dependency-update-go"]; ok {
+		t.Fatalf("cron entry for deleted workflow still exists: %#v", s.cronScheduler.entries)
+	}
+}
+
+func TestWorkflowDeleteRemovesCronScheduleWithCaseMismatch(t *testing.T) {
+	configDir := t.TempDir()
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", configDir+"/hub.yaml")
+	s, _ := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
+	s.cronScheduler = newCronScheduler(s)
+	s.cronScheduler.cron = cron.New(cron.WithSeconds())
+
+	body := `{"workspaces":[{"name":"engineering"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/api/workspaces", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("workspace push status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+
+	body = `{"workflows":[{"schemaVersion":"v1","name":"Dependency-Update-Go","trigger":{"cron":{"schedule":"*/1 * * * *","timezone":"America/Chicago","overlap_policy":"skip","timeout":"2h"}},"stages":[{"id":"working","entry":true}]}]}`
+	req = httptest.NewRequest(http.MethodPost, "/api/workspaces/engineering/workflows", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Content-Type", "application/json")
+	rr = httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("workflow push status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+
+	if _, ok := s.cronScheduler.entries["engineering/Dependency-Update-Go"]; !ok {
+		t.Fatalf("cron workflow was not registered: %#v", s.cronScheduler.entries)
+	}
+
+	// Delete using a different casing than the stored workflow name.
+	req = httptest.NewRequest(http.MethodDelete, "/api/workspaces/engineering/workflows/dependency-update-go", nil)
+	req.Header.Set("Authorization", "Bearer test-token")
+	rr = httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("workflow delete status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+
+	if _, ok := s.cronScheduler.entries["engineering/Dependency-Update-Go"]; ok {
+		t.Fatalf("cron entry for deleted workflow still exists: %#v", s.cronScheduler.entries)
+	}
+}
+
+func TestWorkflowDeleteRemovesLegacyWhitespaceWorkflow(t *testing.T) {
+	configDir := t.TempDir()
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", configDir+"/hub.yaml")
+	s, _ := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
+	s.cronScheduler = newCronScheduler(s)
+	s.cronScheduler.cron = cron.New(cron.WithSeconds())
+
+	body := `{"workspaces":[{"name":"engineering"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/api/workspaces", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("workspace push status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+
+	// Simulate a legacy workflow persisted before push-time trimming: the file
+	// on disk has surrounding whitespace, and the cron scheduler uses the same
+	// unnormalized key.
+	workflowPath := filepath.Join(configDir, "workspaces", "engineering", "workflows", " bugfix .yaml")
+	if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {
+		t.Fatalf("create workflows dir: %v", err)
+	}
+	if err := os.WriteFile(workflowPath, []byte("legacy workflow"), 0o644); err != nil {
+		t.Fatalf("write legacy workflow file: %v", err)
+	}
+	key := "engineering/ bugfix"
+	entryID, err := s.cronScheduler.cron.AddFunc("* * * * * *", func() {})
+	if err != nil {
+		t.Fatalf("add cron func: %v", err)
+	}
+	s.cronScheduler.entries[key] = entryID
+	s.cronScheduler.workflows[key] = &scheduledWorkflow{key: key}
+
+	// Delete using the trimmed URL. The handler should fall back to the raw
+	// path value and remove the legacy file and cron entry.
+	req = httptest.NewRequest(http.MethodDelete, "/api/workspaces/engineering/workflows/%20bugfix%20", nil)
+	req.Header.Set("Authorization", "Bearer test-token")
+	rr = httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("workflow delete status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+
+	if _, err := os.Stat(workflowPath); !os.IsNotExist(err) {
+		t.Fatalf("legacy workflow file still exists after delete: %s", workflowPath)
+	}
+
+	if _, ok := s.cronScheduler.entries[key]; ok {
+		t.Fatalf("cron entry for legacy workflow still exists: %#v", s.cronScheduler.entries)
+	}
+}
+
 func TestWorkflowPushAcceptsNestedGitHubIssuesTrigger(t *testing.T) {
 	configDir := t.TempDir()
 	t.Setenv("ELASTICCLAW_HUB_CONFIG", configDir+"/hub.yaml")
