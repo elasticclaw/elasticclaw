@@ -374,21 +374,37 @@ func (s *Server) handleWorkspaceWorkflowDelete(w http.ResponseWriter, r *http.Re
 		http.Error(w, "workspace and workflow names required", http.StatusBadRequest)
 		return
 	}
+
+	// Track the names used for the actual deletion so the cron scheduler key
+	// is removed correctly. Fall back to raw (untrimmed) path values to handle
+	// workflows persisted before push-time trimming was introduced.
+	deletedWorkspaceName := workspaceName
+	deletedWorkflowName := workflowName
 	if err := deleteExternalWorkflow(workspaceName, workflowName); err != nil {
-		if errors.Is(err, errWorkflowNotFound) {
-			http.Error(w, err.Error(), http.StatusNotFound)
+		if !errors.Is(err, errWorkflowNotFound) {
+			http.Error(w, "delete workflow: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
-		http.Error(w, "delete workflow: "+err.Error(), http.StatusInternalServerError)
-		return
+		rawWorkspaceName := r.PathValue("workspace")
+		rawWorkflowName := r.PathValue("workflow")
+		if err := deleteExternalWorkflow(rawWorkspaceName, rawWorkflowName); err != nil {
+			if errors.Is(err, errWorkflowNotFound) {
+				http.Error(w, err.Error(), http.StatusNotFound)
+				return
+			}
+			http.Error(w, "delete workflow: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		deletedWorkspaceName = rawWorkspaceName
+		deletedWorkflowName = rawWorkflowName
 	}
 	if s.cronScheduler != nil {
-		s.cronScheduler.removeWorkflow(workspaceName, workflowName)
+		s.cronScheduler.removeWorkflow(deletedWorkspaceName, deletedWorkflowName)
 		if err := s.cronScheduler.reload(); err != nil {
-			log.Printf("[cron] failed to reload workflows after workflow delete for workspace %s workflow %s: %v", workspaceName, workflowName, err)
+			log.Printf("[cron] failed to reload workflows after workflow delete for workspace %s workflow %s: %v", deletedWorkspaceName, deletedWorkflowName, err)
 		}
 	}
-	jsonOK(w, map[string]string{"deleted": workflowName})
+	jsonOK(w, map[string]string{"deleted": deletedWorkflowName})
 }
 
 func (s *Server) handleWorkspaceWorkflowTrigger(w http.ResponseWriter, r *http.Request) {

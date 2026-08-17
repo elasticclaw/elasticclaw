@@ -414,6 +414,60 @@ func TestWorkflowDeleteRemovesCronScheduleWithCaseMismatch(t *testing.T) {
 	}
 }
 
+func TestWorkflowDeleteRemovesLegacyWhitespaceWorkflow(t *testing.T) {
+	configDir := t.TempDir()
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", configDir+"/hub.yaml")
+	s, _ := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
+	s.cronScheduler = newCronScheduler(s)
+	s.cronScheduler.cron = cron.New(cron.WithSeconds())
+
+	body := `{"workspaces":[{"name":"engineering"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/api/workspaces", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("workspace push status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+
+	// Simulate a legacy workflow persisted before push-time trimming: the file
+	// on disk has surrounding whitespace, and the cron scheduler uses the same
+	// unnormalized key.
+	workflowPath := filepath.Join(configDir, "workspaces", "engineering", "workflows", " bugfix .yaml")
+	if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {
+		t.Fatalf("create workflows dir: %v", err)
+	}
+	if err := os.WriteFile(workflowPath, []byte("legacy workflow"), 0o644); err != nil {
+		t.Fatalf("write legacy workflow file: %v", err)
+	}
+	key := "engineering/ bugfix"
+	entryID, err := s.cronScheduler.cron.AddFunc("* * * * * *", func() {})
+	if err != nil {
+		t.Fatalf("add cron func: %v", err)
+	}
+	s.cronScheduler.entries[key] = entryID
+	s.cronScheduler.workflows[key] = &scheduledWorkflow{key: key}
+
+	// Delete using the trimmed URL. The handler should fall back to the raw
+	// path value and remove the legacy file and cron entry.
+	req = httptest.NewRequest(http.MethodDelete, "/api/workspaces/engineering/workflows/%20bugfix%20", nil)
+	req.Header.Set("Authorization", "Bearer test-token")
+	rr = httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("workflow delete status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+
+	if _, err := os.Stat(workflowPath); !os.IsNotExist(err) {
+		t.Fatalf("legacy workflow file still exists after delete: %s", workflowPath)
+	}
+
+	if _, ok := s.cronScheduler.entries[key]; ok {
+		t.Fatalf("cron entry for legacy workflow still exists: %#v", s.cronScheduler.entries)
+	}
+}
+
 func TestWorkflowPushAcceptsNestedGitHubIssuesTrigger(t *testing.T) {
 	configDir := t.TempDir()
 	t.Setenv("ELASTICCLAW_HUB_CONFIG", configDir+"/hub.yaml")
