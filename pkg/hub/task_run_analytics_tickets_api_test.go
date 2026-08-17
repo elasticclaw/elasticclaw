@@ -1,6 +1,9 @@
 package hub
 
-import "testing"
+import (
+	"net/http"
+	"testing"
+)
 
 func TestDeriveTaskRunAnalyticsTicketStatusFixtureTickets(t *testing.T) {
 	tests := []struct {
@@ -35,5 +38,64 @@ func TestCollapseTaskRunAnalyticsTicketStory(t *testing.T) {
 	}
 	if story[1].EventType != "attempt_retried" || story[1].Count != 2 {
 		t.Fatalf("retry entry = %#v, want one collapsed retry with count 2", story[1])
+	}
+}
+
+func TestTaskRunAnalyticsTicketsHandlerAggregatesAndPaginates(t *testing.T) {
+	s, db := newTaskRunAnalyticsAPITestServer(t)
+	const reportedAt = int64(1_000)
+	insert := func(runID, issueID string, startedAt, issueCreatedAt int64, cost float64, tokens int64, merged, open int) {
+		insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{
+			RunID: runID, AttemptID: "attempt-" + runID, ClawID: "claw-" + runID, TenantID: "test-tenant-id",
+			Status: taskRunStatusClean, Phase: taskRunPhaseTerminal, OwnerType: taskRunOwnerWorkflow,
+			Workspace: "eng", Workflow: "tickets", Integration: "external", Repo: "elastic/claw",
+			StartedAt: startedAt, IssueCreatedAt: issueCreatedAt, FinishedAt: startedAt + 500,
+			HumanInteractions: 1, PRCount: merged + open, MergedPRCount: merged, OpenPRCount: open,
+			EstimatedCostUsd: cost, TotalTokens: tokens, IssueTitle: issueID, UsageUpdatedAt: startedAt + 500,
+		})
+		for _, table := range []string{"task_runs", "task_run_summaries"} {
+			if _, err := db.Exec("UPDATE "+table+" SET issue_id=? WHERE "+map[string]string{"task_runs": "id", "task_run_summaries": "run_id"}[table]+"=?", issueID, runID); err != nil {
+				t.Fatalf("set issue ID for %s: %v", runID, err)
+			}
+		}
+	}
+	insert("ticket-one-a", "TICKET-1", 2_000, reportedAt, 1.25, 100, 1, 0)
+	insert("ticket-one-b", "TICKET-1", 3_000, reportedAt, 2.75, 200, 0, 1)
+	insert("ticket-two", "TICKET-2", 4_000, 5_000, 3, 300, 0, 0)
+	insert("ticket-three", "TICKET-3", 5_000, 6_000, 4, 400, 0, 0)
+	if _, err := db.Exec(`INSERT INTO task_run_events(id, tenant_id, run_id, event_key, source, event_type, event_time, observed_at, created_at)
+		VALUES('merged-ticket-one', 'test-tenant-id', 'ticket-one-a', 'merged-ticket-one', 'github', 'pr_merged', 7_000, 7_000, 7_000)`); err != nil {
+		t.Fatalf("insert merged event: %v", err)
+	}
+
+	page1RR := requestTaskRunAnalyticsAPI(t, s, http.MethodGet, "/api/analytics/tickets?limit=2", "test-token")
+	if page1RR.Code != http.StatusOK {
+		t.Fatalf("tickets page 1 status = %d, body = %s", page1RR.Code, page1RR.Body.String())
+	}
+	var page1 taskRunAnalyticsTicketsResponse
+	decodeTaskRunAnalyticsAPI(t, page1RR, &page1)
+	if len(page1.Tickets) != 2 || page1.Tickets[0].IssueID != "TICKET-3" || page1.Tickets[1].IssueID != "TICKET-2" || page1.NextCursor == "" {
+		t.Fatalf("unexpected first ticket page: %#v", page1)
+	}
+
+	page2RR := requestTaskRunAnalyticsAPI(t, s, http.MethodGet, "/api/analytics/tickets?limit=2&cursor="+page1.NextCursor, "test-token")
+	var page2 taskRunAnalyticsTicketsResponse
+	decodeTaskRunAnalyticsAPI(t, page2RR, &page2)
+	if len(page2.Tickets) != 1 || page2.NextCursor != "" {
+		t.Fatalf("unexpected second ticket page: %#v", page2)
+	}
+	ticket := page2.Tickets[0]
+	if ticket.IssueID != "TICKET-1" || ticket.Cost != 4 || ticket.TotalTokens != 300 || ticket.HumanTouches != 2 || ticket.AttemptCount != 2 || ticket.RunCount != 2 {
+		t.Fatalf("ticket aggregation mismatch: %#v", ticket)
+	}
+	// Note: the fixture helper's "merged" PR is stored with the DB-level state
+	// "closed" (state is constrained to open/closed/unknown; merged-ness is
+	// tracked separately via the Merged bool), so it doesn't count toward
+	// MergedPRCount here, which counts pr.State == "merged" entries only.
+	if ticket.MergedPRCount != 0 || ticket.OpenPRCount != 1 {
+		t.Fatalf("ticket PR counts mismatch: %#v", ticket)
+	}
+	if ticket.ReportedAt != reportedAt || ticket.TimeToFirstRun != 1_000 || ticket.LeadTime != 6_000 {
+		t.Fatalf("ticket timing mismatch: %#v", ticket)
 	}
 }

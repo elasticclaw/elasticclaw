@@ -99,7 +99,7 @@ func (s *Server) handleTaskRunAnalyticsTickets(w http.ResponseWriter, r *http.Re
 		jsonError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	tickets, err := s.readTaskRunAnalyticsTickets(filters, githubLoginFromContext(r.Context()))
+	groups, err := s.readTaskRunAnalyticsTicketGroups(filters, githubLoginFromContext(r.Context()))
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, "db error")
 		return
@@ -107,16 +107,25 @@ func (s *Server) handleTaskRunAnalyticsTickets(w http.ResponseWriter, r *http.Re
 	limit := taskRunAnalyticsLimit(r.URL.Query().Get("limit"))
 	start := 0
 	if cursorAt > 0 {
-		for start < len(tickets) && (ticketCursorAt(tickets[start]) > cursorAt || (ticketCursorAt(tickets[start]) == cursorAt && tickets[start].IssueID >= cursorIssueID)) {
+		for start < len(groups) && (groups[start].cursorAt() > cursorAt || (groups[start].cursorAt() == cursorAt && groups[start].issueID >= cursorIssueID)) {
 			start++
 		}
 	}
-	tickets = tickets[start:]
+	groups = groups[start:]
 	nextCursor := ""
-	if len(tickets) > limit {
-		last := tickets[limit-1]
-		nextCursor = encodeTaskRunAnalyticsCursor(ticketCursorAt(last), last.IssueID)
-		tickets = tickets[:limit]
+	if len(groups) > limit {
+		last := groups[limit-1]
+		nextCursor = encodeTaskRunAnalyticsCursor(last.cursorAt(), last.issueID)
+		groups = groups[:limit]
+	}
+	tickets := make([]taskRunAnalyticsTicketView, 0, len(groups))
+	for _, group := range groups {
+		ticket, err := s.buildTaskRunAnalyticsTicket(filters.TenantID, group.issueID, group.runs)
+		if err != nil {
+			jsonError(w, http.StatusInternalServerError, "db error")
+			return
+		}
+		tickets = append(tickets, ticket)
 	}
 	jsonOK(w, taskRunAnalyticsTicketsResponse{Tickets: tickets, NextCursor: nextCursor, Limit: limit})
 }
@@ -132,7 +141,25 @@ func ticketCursorAt(ticket taskRunAnalyticsTicketView) int64 {
 	return 1
 }
 
-func (s *Server) readTaskRunAnalyticsTickets(filters taskRunAnalyticsFilters, githubLogin string) ([]taskRunAnalyticsTicketView, error) {
+type taskRunAnalyticsTicketGroup struct {
+	issueID    string
+	runs       []taskRunAnalyticsRunView
+	reportedAt int64
+}
+
+func (group taskRunAnalyticsTicketGroup) cursorAt() int64 {
+	if group.reportedAt > 0 {
+		return group.reportedAt
+	}
+	if len(group.runs) > 0 {
+		return group.runs[0].StartedAt
+	}
+	return 1
+}
+
+// readTaskRunAnalyticsTicketGroups loads only the run data needed to group and
+// page tickets. Full ticket expansion happens only after pagination.
+func (s *Server) readTaskRunAnalyticsTicketGroups(filters taskRunAnalyticsFilters, githubLogin string) ([]taskRunAnalyticsTicketGroup, error) {
 	groups := map[string][]taskRunAnalyticsRunView{}
 	addRun := func(run taskRunAnalyticsRunView) bool {
 		if run.IssueID != "" {
@@ -169,21 +196,42 @@ func (s *Server) readTaskRunAnalyticsTickets(filters taskRunAnalyticsFilters, gi
 	if err != nil {
 		return nil, err
 	}
-	tickets := make([]taskRunAnalyticsTicketView, 0, len(groups))
+	tickets := make([]taskRunAnalyticsTicketGroup, 0, len(groups))
 	for issueID, runs := range groups {
-		ticket, err := s.buildTaskRunAnalyticsTicket(filters.TenantID, issueID, runs)
+		sort.Slice(runs, func(i, j int) bool { return runs[i].StartedAt < runs[j].StartedAt })
+		var reportedAt int64
+		for _, run := range runs {
+			if run.IssueCreatedAt > 0 && (reportedAt == 0 || run.IssueCreatedAt < reportedAt) {
+				reportedAt = run.IssueCreatedAt
+			}
+		}
+		tickets = append(tickets, taskRunAnalyticsTicketGroup{issueID: issueID, runs: runs, reportedAt: reportedAt})
+	}
+	sort.Slice(tickets, func(i, j int) bool {
+		left, right := tickets[i].cursorAt(), tickets[j].cursorAt()
+		if left == right {
+			return tickets[i].issueID > tickets[j].issueID
+		}
+		return left > right
+	})
+	return tickets, nil
+}
+
+// readTaskRunAnalyticsTickets retains the full-expansion API for callers that
+// need every ticket rather than a paginated handler response.
+func (s *Server) readTaskRunAnalyticsTickets(filters taskRunAnalyticsFilters, githubLogin string) ([]taskRunAnalyticsTicketView, error) {
+	groups, err := s.readTaskRunAnalyticsTicketGroups(filters, githubLogin)
+	if err != nil {
+		return nil, err
+	}
+	tickets := make([]taskRunAnalyticsTicketView, 0, len(groups))
+	for _, group := range groups {
+		ticket, err := s.buildTaskRunAnalyticsTicket(filters.TenantID, group.issueID, group.runs)
 		if err != nil {
 			return nil, err
 		}
 		tickets = append(tickets, ticket)
 	}
-	sort.Slice(tickets, func(i, j int) bool {
-		left, right := ticketCursorAt(tickets[i]), ticketCursorAt(tickets[j])
-		if left == right {
-			return tickets[i].IssueID > tickets[j].IssueID
-		}
-		return left > right
-	})
 	return tickets, nil
 }
 
@@ -232,6 +280,8 @@ func (s *Server) buildTaskRunAnalyticsTicket(tenantID, issueID string, runs []ta
 	}
 	ticket.RunCount = len(runs)
 	ticket.Status = deriveTaskRunAnalyticsTicketStatus(ticket.Runs, ticket.PRs)
+	// Resolve fallback reported time before deriving ticket timing metrics.
+	s.enrichTaskRunAnalyticsTicket(&ticket, runs[0])
 	sort.Slice(events, func(i, j int) bool {
 		if events[i].Time != events[j].Time {
 			return events[i].Time < events[j].Time
@@ -260,7 +310,6 @@ func (s *Server) buildTaskRunAnalyticsTicket(tenantID, issueID string, runs []ta
 			ticket.LeadTime = ticket.LastActivity - ticket.ReportedAt
 		}
 	}
-	s.enrichTaskRunAnalyticsTicket(&ticket, runs[0])
 	return ticket, nil
 }
 
@@ -332,7 +381,8 @@ func (s *Server) enrichTaskRunAnalyticsTicket(ticket *taskRunAnalyticsTicketView
 		if _, workflow, ok, err := s.resolveWorkflowConfig(run.WorkspaceName, run.WorkflowName); err == nil && ok {
 			if token := s.resolveLinearTokenForWorkflow(run.WorkspaceName, workflow); token != "" {
 				if details, err := s.fetchLinearIssueDetails(token, ticket.IssueID); err == nil {
-					ticket.Requester, ticket.Priority, ticket.Ask = details.Creator.Name, details.PriorityLabel, details.Description
+					ticket.Requester, ticket.Priority, ticket.Ask, ticket.Team = details.Creator.Name, details.PriorityLabel, details.Description, details.Team.Name
+					// Neither Linear nor GitHub exposes a reliable requester-role field for an issue.
 					if ticket.ReportedAt == 0 {
 						if parsed, err := parseTicketTimestamp(details.CreatedAt); err == nil {
 							ticket.ReportedAt = parsed
