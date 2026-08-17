@@ -12,7 +12,7 @@ func TestDeriveTaskRunAnalyticsTicketStatusFixtureTickets(t *testing.T) {
 		prs     []taskRunAnalyticsTicketPRView
 		want    string
 	}{
-		{issueID: "ADV-812", runs: []taskRunAnalyticsTicketRunSummary{{RunID: "run_8f21c4", Status: "clean"}, {RunID: "run_c41d90", Status: "human_in_the_loop"}, {RunID: "run_6b21f8", Status: "warning"}, {RunID: "run_3c05a1", Status: "failed"}}, prs: []taskRunAnalyticsTicketPRView{{taskRunAnalyticsPRView: taskRunAnalyticsPRView{ID: "pr1", State: "merged"}, RunID: "run_8f21c4"}, {taskRunAnalyticsPRView: taskRunAnalyticsPRView{ID: "pr8", State: "closed"}, RunID: "run_c41d90"}, {taskRunAnalyticsPRView: taskRunAnalyticsPRView{ID: "pr9", State: "closed"}, RunID: "run_6b21f8"}}, want: "delivered"},
+		{issueID: "ADV-812", runs: []taskRunAnalyticsTicketRunSummary{{RunID: "run_8f21c4", Status: "clean"}, {RunID: "run_c41d90", Status: "human_in_the_loop"}, {RunID: "run_6b21f8", Status: "warning"}, {RunID: "run_3c05a1", Status: "failed"}}, prs: []taskRunAnalyticsTicketPRView{{taskRunAnalyticsPRView: taskRunAnalyticsPRView{ID: "pr1", State: "closed", Merged: true}, RunID: "run_8f21c4"}, {taskRunAnalyticsPRView: taskRunAnalyticsPRView{ID: "pr8", State: "closed"}, RunID: "run_c41d90"}, {taskRunAnalyticsPRView: taskRunAnalyticsPRView{ID: "pr9", State: "closed"}, RunID: "run_6b21f8"}}, want: "delivered"},
 		{issueID: "PLT-31", runs: []taskRunAnalyticsTicketRunSummary{{RunID: "run_4a12bd", Status: "clean"}, {RunID: "run_d90c33", Status: "failed"}}, prs: []taskRunAnalyticsTicketPRView{{taskRunAnalyticsPRView: taskRunAnalyticsPRView{ID: "pr6", State: "open"}, RunID: "run_4a12bd"}}, want: "pr_open"},
 		{issueID: "SUP-201", runs: []taskRunAnalyticsTicketRunSummary{{RunID: "run_5c33bb", Status: "failed"}, {RunID: "run_e77b02", Status: "failed"}}, want: "failed"},
 		{issueID: "ADV-806", runs: []taskRunAnalyticsTicketRunSummary{{RunID: "run_1b77c0", Status: "running"}}, want: "in_progress"},
@@ -38,6 +38,55 @@ func TestCollapseTaskRunAnalyticsTicketStory(t *testing.T) {
 	}
 	if story[1].EventType != "attempt_retried" || story[1].Count != 2 {
 		t.Fatalf("retry entry = %#v, want one collapsed retry with count 2", story[1])
+	}
+}
+
+func TestTaskRunAnalyticsTicketStoryUsesHubNativeEventTypes(t *testing.T) {
+	tests := []struct {
+		eventType string
+		label     string
+		kind      string
+	}{
+		{eventType: "human_review_comment", label: "Human reviewed", kind: "human"},
+		{eventType: "human_dashboard_message", label: "Human stepped in", kind: "human"},
+		{eventType: "pr_closed_unmerged", label: "Attempt discarded", kind: "bad"},
+	}
+	for _, test := range tests {
+		t.Run(test.eventType, func(t *testing.T) {
+			entry := ticketStoryEntry(taskRunAnalyticsEventView{EventType: test.eventType}, "run-1")
+			if entry.Label != test.label || entry.Kind != test.kind {
+				t.Fatalf("ticketStoryEntry(%q) = %#v", test.eventType, entry)
+			}
+		})
+	}
+}
+
+func TestTaskRunAnalyticsTicketLeadTimeWithoutEvents(t *testing.T) {
+	s, db := newTaskRunAnalyticsAPITestServer(t)
+	const reportedAt = int64(1_000)
+	insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{
+		RunID: "eventless-running", AttemptID: "attempt-eventless", ClawID: "claw-eventless", TenantID: "test-tenant-id",
+		Status: taskRunStatusRunning, Phase: taskRunPhaseAgentRunning, OwnerType: taskRunOwnerWorkflow,
+		Workspace: "eng", Workflow: "tickets", Integration: "external", Repo: "elastic/claw",
+		StartedAt: 2_000, IssueCreatedAt: reportedAt, IssueTitle: "Eventless ticket",
+	})
+	if _, err := db.Exec("DELETE FROM task_run_events WHERE run_id=?", "eventless-running"); err != nil {
+		t.Fatalf("delete fixture events: %v", err)
+	}
+	for _, table := range []string{"task_runs", "task_run_summaries"} {
+		if _, err := db.Exec("UPDATE "+table+" SET issue_id=? WHERE "+map[string]string{"task_runs": "id", "task_run_summaries": "run_id"}[table]+"=?", "EVENTLESS-1", "eventless-running"); err != nil {
+			t.Fatalf("set issue ID for %s: %v", table, err)
+		}
+	}
+
+	rr := requestTaskRunAnalyticsAPI(t, s, http.MethodGet, "/api/analytics/tickets", "test-token")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("tickets status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+	var response taskRunAnalyticsTicketsResponse
+	decodeTaskRunAnalyticsAPI(t, rr, &response)
+	if len(response.Tickets) != 1 || response.Tickets[0].LeadTime != 0 {
+		t.Fatalf("eventless ticket lead time mismatch: %#v", response.Tickets)
 	}
 }
 
@@ -88,11 +137,7 @@ func TestTaskRunAnalyticsTicketsHandlerAggregatesAndPaginates(t *testing.T) {
 	if ticket.IssueID != "TICKET-1" || ticket.Cost != 4 || ticket.TotalTokens != 300 || ticket.HumanTouches != 2 || ticket.AttemptCount != 2 || ticket.RunCount != 2 {
 		t.Fatalf("ticket aggregation mismatch: %#v", ticket)
 	}
-	// Note: the fixture helper's "merged" PR is stored with the DB-level state
-	// "closed" (state is constrained to open/closed/unknown; merged-ness is
-	// tracked separately via the Merged bool), so it doesn't count toward
-	// MergedPRCount here, which counts pr.State == "merged" entries only.
-	if ticket.MergedPRCount != 0 || ticket.OpenPRCount != 1 {
+	if ticket.MergedPRCount != 1 || ticket.OpenPRCount != 1 {
 		t.Fatalf("ticket PR counts mismatch: %#v", ticket)
 	}
 	if ticket.ReportedAt != reportedAt || ticket.TimeToFirstRun != 1_000 || ticket.LeadTime != 6_000 {

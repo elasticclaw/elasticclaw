@@ -72,16 +72,20 @@ type taskRunAnalyticsTicketView struct {
 	Story          []taskRunAnalyticsTicketStoryEntry `json:"story"`
 }
 
+// agent_idle is intentionally unmapped because the kit has no user-facing idle story entry.
 var taskRunAnalyticsStoryLabels = map[string]string{
 	"run_queued": "Work queued", "agent_started": "Agent started working", "pr_opened": "Pull request opened",
-	"ci_succeeded": "Checks passed", "review_commented": "Human reviewed", "dashboard_message_sent": "Human stepped in",
-	"pr_merged": "Shipped", "pr_closed": "Attempt discarded", "provision_failed": "Blocked: no sandbox available",
-	"verification_failed": "Blocked: tests would not pass", "context_exhausted": "Blocked: agent ran out of context", "attempt_retried": "Retried",
+	"ci_succeeded": "Checks passed", "human_review_comment": "Human reviewed", "human_dashboard_message": "Human stepped in",
+	"pr_merged": "Shipped", "pr_closed_unmerged": "Attempt discarded", "provision_failed": "Blocked: no sandbox available",
+	// No hub-native verification-failed event type exists yet.
+	"verification_failed": "Blocked: tests would not pass", "context_exhausted": "Blocked: agent ran out of context",
+	// Currently unreachable pending a hub-native retry event type.
+	"attempt_retried": "Retried",
 }
 
 var taskRunAnalyticsStoryKinds = map[string]string{
 	"pr_merged": "good", "ci_succeeded": "good", "provision_failed": "bad", "verification_failed": "bad",
-	"context_exhausted": "bad", "pr_closed": "bad", "review_commented": "human", "dashboard_message_sent": "human",
+	"context_exhausted": "bad", "pr_closed_unmerged": "bad", "human_review_comment": "human", "human_dashboard_message": "human",
 }
 
 func (s *Server) handleTaskRunAnalyticsTickets(w http.ResponseWriter, r *http.Request) {
@@ -267,7 +271,7 @@ func (s *Server) buildTaskRunAnalyticsTicket(tenantID, issueID string, runs []ta
 		}
 		for _, pr := range prs {
 			ticket.PRs = append(ticket.PRs, taskRunAnalyticsTicketPRView{taskRunAnalyticsPRView: pr, RunID: run.RunID})
-			if pr.State == "merged" {
+			if pr.Merged {
 				ticket.MergedPRCount++
 			}
 			if pr.State == "open" {
@@ -306,7 +310,7 @@ func (s *Server) buildTaskRunAnalyticsTicket(tenantID, issueID string, runs []ta
 	}
 	if ticket.ReportedAt > 0 {
 		ticket.TimeToFirstRun = firstStart - ticket.ReportedAt
-		if ticket.LeadTime == 0 {
+		if len(events) > 0 && ticket.LeadTime == 0 {
 			ticket.LeadTime = ticket.LastActivity - ticket.ReportedAt
 		}
 	}
@@ -327,7 +331,7 @@ func taskRunTicketCostAndTokens(run taskRunAnalyticsRunView) (float64, int64) {
 
 func deriveTaskRunAnalyticsTicketStatus(runs []taskRunAnalyticsTicketRunSummary, prs []taskRunAnalyticsTicketPRView) string {
 	for _, pr := range prs {
-		if pr.State == "merged" {
+		if pr.Merged {
 			return "delivered"
 		}
 	}
@@ -367,6 +371,7 @@ func collapseTaskRunAnalyticsTicketStory(events []taskRunAnalyticsTicketStoryEnt
 		if event.Kind == "" {
 			event.Kind = "neutral"
 		}
+		// Currently unreachable via the event pipeline pending a hub-native retry event type.
 		if event.EventType == "attempt_retried" && len(story) > 0 && story[len(story)-1].EventType == "attempt_retried" {
 			story[len(story)-1].Count++
 			continue
