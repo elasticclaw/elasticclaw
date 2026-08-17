@@ -20,6 +20,8 @@ type livenessSettings struct {
 	gatewayUnhealthyMax                                  int
 	busyTurnMax, silentDeathMax                          time.Duration
 	prConditionsMaxWait                                  time.Duration
+	idleResumeEnabled                                    bool
+	idleResumeAfter                                      time.Duration
 }
 
 func (s *Server) livenessEnabled() bool {
@@ -42,6 +44,8 @@ func (s *Server) livenessSettings() livenessSettings {
 		busyTurnMax:         defaultBusyTurnMax,
 		silentDeathMax:      defaultSilentDeathMax,
 		prConditionsMaxWait: 2 * time.Hour,
+		idleResumeEnabled:   true,
+		idleResumeAfter:     defaultIdleResumeAfter,
 	}
 	s.mu.RLock()
 	l := livenessConfig(s.hubCfg)
@@ -71,6 +75,16 @@ func (s *Server) livenessSettings() livenessSettings {
 	}
 	cfg.silentDeathMax = parse(l.SilentDeathMax, cfg.silentDeathMax, "silent_death_max")
 	cfg.prConditionsMaxWait = parse(l.PRConditionsMaxWait, cfg.prConditionsMaxWait, "pr_conditions_max_wait")
+	if l.IdleResume != nil {
+		cfg.idleResumeEnabled = *l.IdleResume
+	}
+	cfg.idleResumeAfter = parse(l.IdleResumeAfter, cfg.idleResumeAfter, "idle_resume_after")
+	if cfg.idleResumeAfter < minIdleResumeAfter {
+		// Below a minute the threshold no longer describes a stall: a claw
+		// pausing for seconds between turns would be "resumed" mid-progress.
+		log.Printf("[reaper] idle_resume_after %s is below the minimum %s; using %s", cfg.idleResumeAfter, minIdleResumeAfter, minIdleResumeAfter)
+		cfg.idleResumeAfter = minIdleResumeAfter
+	}
 	if l.GatewayUnhealthyChecks != nil {
 		if *l.GatewayUnhealthyChecks <= 0 {
 			log.Printf("[reaper] invalid gateway_unhealthy_checks %d; using %d", *l.GatewayUnhealthyChecks, cfg.gatewayUnhealthyMax)

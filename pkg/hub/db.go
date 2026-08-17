@@ -117,6 +117,22 @@ func migrate(db *sql.DB) error {
 	if err := addColumn(db, "claws", "idle_since", `INTEGER NOT NULL DEFAULT 0`); err != nil {
 		return err
 	}
+	// idle_resume_at (epoch millis, 0 = not resumed) is the durable
+	// once-per-idle-stretch latch for the idle AUTO-RESUME recovery, kept
+	// separate from idle_since because the two fire at different thresholds
+	// and must not silence each other. Without it a hub restart would forget
+	// that a stretch was already poked and prompt the same stalled agent again
+	// on the first tick after boot.
+	if err := addColumn(db, "claws", "idle_resume_at", `INTEGER NOT NULL DEFAULT 0`); err != nil {
+		return err
+	}
+	// idle_resume_count is the lifetime attempt counter behind the runaway cap
+	// (agentIdleResumeMaxAttempts): a claw that wakes, replies nothing, and
+	// idles again would otherwise be poked forever, since each wake clears the
+	// per-stretch latch.
+	if err := addColumn(db, "claws", "idle_resume_count", `INTEGER NOT NULL DEFAULT 0`); err != nil {
+		return err
+	}
 	_, _ = db.Exec(`ALTER TABLE claw_prs ADD COLUMN last_comment_at TEXT NOT NULL DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE claw_prs ADD COLUMN pr_conditions_fired INTEGER NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE claw_prs ADD COLUMN permanent_failure_count INTEGER NOT NULL DEFAULT 0`)
@@ -321,7 +337,9 @@ func migrate(db *sql.DB) error {
 		trigger_actor_json TEXT NOT NULL DEFAULT '{}',
 		stop_comment_pending INTEGER NOT NULL DEFAULT 0,
 		no_progress_paused INTEGER NOT NULL DEFAULT 0,
-		idle_since INTEGER NOT NULL DEFAULT 0
+		idle_since INTEGER NOT NULL DEFAULT 0,
+		idle_resume_at INTEGER NOT NULL DEFAULT 0,
+		idle_resume_count INTEGER NOT NULL DEFAULT 0
 	);
 
 

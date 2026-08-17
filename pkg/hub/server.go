@@ -99,6 +99,14 @@ type Server struct {
 	agentIdleBaselineAt      time.Time
 	agentIdleBaselineCleared bool
 
+	// agentIdleResumeBaselineAt caches the persisted idle AUTO-RESUME baseline
+	// (see agentIdleResumeBaseline in agent_idle.go). Deliberately separate
+	// state from the alert baseline above: the resume never reads the
+	// notification config, so disabling Slack must not move its baseline.
+	agentIdleResumeBaselineMu      sync.Mutex
+	agentIdleResumeBaselineAt      time.Time
+	agentIdleResumeBaselineCleared bool
+
 	replicatedBootstrapEnvMu sync.Mutex
 	replicatedBootstrapEnv   map[string]map[string]string // temporary handoff while a Replicated VM becomes reachable
 
@@ -5789,6 +5797,10 @@ func (s *Server) checkClawStatus() {
 		// broadcasts, not idleness. Riding this 2-minute tick means a
 		// threshold of T fires between T and T+2m — deliberately not tightened.
 		s.checkAgentIdle(now, id, cc)
+		// Recovery for the same signal, at a longer threshold and independent
+		// of whether anyone is being notified (NEXT-713: an agent parked in a
+		// tool call that never returns is only unstuck by a prompt).
+		s.checkAgentIdleResume(now, id, cc)
 
 		// If user sent a message in the last 2 minutes, skip status broadcast
 		if now.Sub(lastUserMessageAt) < 2*time.Minute {
