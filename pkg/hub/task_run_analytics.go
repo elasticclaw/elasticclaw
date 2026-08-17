@@ -79,6 +79,8 @@ const (
 	taskRunEventManualStopBeforeDelivery = "manual_stop_before_delivery"
 	taskRunEventAgentStopped             = "agent_stopped"
 	taskRunEventAgentIdle                = "agent_idle"
+	taskRunEventCISucceeded              = "ci_succeeded"
+	taskRunEventCIFailed                 = "ci_failed"
 	taskRunEventManualResume             = "human_manual_stop_or_resume"
 	taskRunEventManualRetry              = "human_manual_stop_or_resume"
 	taskRunEventSettingsChanged          = "human_settings_or_status_change"

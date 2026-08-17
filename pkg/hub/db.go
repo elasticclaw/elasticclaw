@@ -141,6 +141,18 @@ func migrate(db *sql.DB) error {
 	if err := addColumn(db, "claw_prs", "last_ci_conclusion", `TEXT NOT NULL DEFAULT ''`); err != nil {
 		return err
 	}
+	if err := addColumn(db, "claw_prs", "state", `TEXT NOT NULL DEFAULT 'open'`); err != nil {
+		return err
+	}
+	if err := addColumn(db, "claw_prs", "merged", `INTEGER NOT NULL DEFAULT 0`); err != nil {
+		return err
+	}
+	if err := addColumn(db, "claw_prs", "merged_at", `TEXT`); err != nil {
+		return err
+	}
+	if err := addColumn(db, "messages", "user_login", `TEXT`); err != nil {
+		return err
+	}
 	_, _ = db.Exec(`ALTER TABLE messages ADD COLUMN format TEXT NOT NULL DEFAULT ''`)
 	if _, err := db.Exec(`ALTER TABLE messages ADD COLUMN delivered_at DATETIME`); err == nil {
 		// A failed backfill must abort startup: the column now exists, so a
@@ -351,6 +363,7 @@ func migrate(db *sql.DB) error {
 		role       TEXT NOT NULL,
 		content    TEXT NOT NULL,
 		format     TEXT NOT NULL DEFAULT '',
+		user_login TEXT,
 		created_at DATETIME NOT NULL,
 		delivered_at DATETIME
 	);
@@ -482,7 +495,7 @@ func migrate(db *sql.DB) error {
 			'approval_only_pr_review','human_requested_changes','human_review_comment','human_pr_comment',
 			'human_manual_code_push','human_tracker_update','human_dashboard_message',
 			'human_manual_stop_or_resume','human_settings_or_status_change',
-			'unknown_human_interaction','pr_replaced','correction','retraction'
+			'unknown_human_interaction','pr_replaced','correction','retraction','ci_succeeded','ci_failed'
 		)),
 		event_time         INTEGER NOT NULL,
 		observed_at        INTEGER NOT NULL,
@@ -619,6 +632,9 @@ func migrate(db *sql.DB) error {
 		pr_url      TEXT NOT NULL,
 		last_ci_sha TEXT NOT NULL DEFAULT '',   -- last SHA we checked CI on
 		last_ci_conclusion TEXT NOT NULL DEFAULT '', -- terminal CI verdict already delivered for last_ci_sha: '' | 'success' | 'failure'
+		state       TEXT NOT NULL DEFAULT 'open',
+		merged      INTEGER NOT NULL DEFAULT 0,
+		merged_at   TEXT,
 		last_comment_id INTEGER NOT NULL DEFAULT 0, -- last bugbot/pipeline comment ID seen
 		last_comment_at TEXT NOT NULL DEFAULT '', -- timestamp of last seen comment
 		last_review_comment_id INTEGER NOT NULL DEFAULT 0, -- last PR review comment ID seen
@@ -864,7 +880,7 @@ func rebuildTaskRunSummariesStatusV3(db *sql.DB) error {
 }
 
 // rebuildTaskRunEventsAgentIdleV1 widens the task_run_events.event_type CHECK
-// to allow 'agent_idle'. SQLite cannot alter a CHECK in place, so databases
+// to allow the latest event types. SQLite cannot alter a CHECK in place, so databases
 // created before the type existed get the rebuild-and-copy treatment (the
 // same pattern as rebuildTaskRunSummariesStatusV3): create the table with the
 // current schema, copy every row, swap, and recreate the indexes. Fresh
@@ -878,7 +894,7 @@ func rebuildTaskRunEventsAgentIdleV1(db *sql.DB) error {
 		}
 		return fmt.Errorf("read task run events schema: %w", err)
 	}
-	if strings.Contains(schema, "'agent_idle'") {
+	if strings.Contains(schema, "'ci_succeeded'") && strings.Contains(schema, "'ci_failed'") {
 		return nil
 	}
 	tx, err := db.Begin()
@@ -903,7 +919,7 @@ func rebuildTaskRunEventsAgentIdleV1(db *sql.DB) error {
 			'approval_only_pr_review','human_requested_changes','human_review_comment','human_pr_comment',
 			'human_manual_code_push','human_tracker_update','human_dashboard_message',
 			'human_manual_stop_or_resume','human_settings_or_status_change',
-			'unknown_human_interaction','pr_replaced','correction','retraction'
+			'unknown_human_interaction','pr_replaced','correction','retraction','ci_succeeded','ci_failed'
 		)),
 		event_time         INTEGER NOT NULL,
 		observed_at        INTEGER NOT NULL,

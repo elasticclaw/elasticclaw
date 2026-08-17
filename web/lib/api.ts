@@ -267,6 +267,9 @@ export interface ClawPR {
   prNumber: number
   url: string
   createdAt: string
+  state: "open" | "merged" | "closed"
+  merged: boolean
+  mergedAt?: string
 }
 
 export async function fetchClawPRs(clawId: string): Promise<ClawPR[]> {

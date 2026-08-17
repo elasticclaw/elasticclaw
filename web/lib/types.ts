@@ -38,6 +38,7 @@ export interface Message {
   // API fields
   claw_id?: string
   tenant_id?: string
+  userLogin?: string
 }
 
 export interface ActivitySummary {
@@ -91,6 +92,7 @@ export interface ApiMessage {
   content: string
   format?: string
   created_at: string
+  user_login?: string
 }
 
 export interface CreateClawRequest {
@@ -232,6 +234,7 @@ export interface TaskRunSummary {
   integration: string
   integrationWorkspace: string
   issueId: string | null
+  issueCreatedAt: number
   clawId: string
   model: string | null
   llmKey: string

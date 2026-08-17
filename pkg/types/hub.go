@@ -33,6 +33,7 @@ type HubMessage struct {
 	Role      string    `json:"role" db:"role"` // "user" | "claw"
 	Content   string    `json:"content" db:"content"`
 	Format    string    `json:"format,omitempty" db:"format"` // "pre" = preserve whitespace
+	UserLogin *string   `json:"user_login,omitempty" db:"user_login"`
 	CreatedAt time.Time `json:"created_at" db:"created_at"`
 }
 

@@ -111,6 +111,7 @@ type taskRunAnalyticsRunView struct {
 	Integration           string   `json:"integration"`
 	IntegrationWorkspace  string   `json:"integrationWorkspace"`
 	IssueID               string   `json:"issueId"`
+	IssueCreatedAt        int64    `json:"issueCreatedAt"`
 	ClawID                string   `json:"clawId"`
 	Model                 string   `json:"model"`
 	LLMKey                string   `json:"llmKey"`
@@ -1241,7 +1242,7 @@ func addTaskRunAnalyticsOwnerFilter(where *[]string, args *[]any, values []strin
 func taskRunAnalyticsRunColumns() string {
 	return `run_id, initial_attempt_id, current_attempt_id, status, phase, attempt_count,
 		owner_type, workspace_name, workflow_name, factory_name, owner_id, owner_display_name,
-		run_kind, integration, integration_workspace, issue_id, claw_id, model, llm_key, repo,
+		run_kind, integration, integration_workspace, issue_id, issue_created_at, claw_id, model, llm_key, repo,
 		primary_pr_url, pr_count, open_pr_count, merged_pr_count, closed_pr_count, warning_types,
 		failure_type, human_interaction_count, started_at, queued_at, provision_started_at,
 		agent_started_at, pr_opened_at, ready_at, merged_at, finished_at, timeout_at, last_event_at,
@@ -1260,7 +1261,7 @@ func scanTaskRunAnalyticsRuns(rows *sql.Rows) ([]taskRunAnalyticsRunView, error)
 		if err := rows.Scan(
 			&run.RunID, &run.InitialAttemptID, &run.CurrentAttemptID, &run.Status, &run.Phase, &run.AttemptCount,
 			&run.OwnerType, &run.WorkspaceName, &run.WorkflowName, &run.FactoryName, &run.OwnerID, &run.OwnerDisplayName,
-			&run.RunKind, &run.Integration, &run.IntegrationWorkspace, &run.IssueID, &run.ClawID, &run.Model, &run.LLMKey,
+			&run.RunKind, &run.Integration, &run.IntegrationWorkspace, &run.IssueID, &run.IssueCreatedAt, &run.ClawID, &run.Model, &run.LLMKey,
 			&run.Repo, &run.PrimaryPRURL, &run.PRCount, &run.OpenPRCount, &run.MergedPRCount, &run.ClosedPRCount,
 			&warningsJSON, &run.FailureType, &run.HumanInteractionCount, &run.StartedAt, &run.QueuedAt,
 			&run.ProvisionStartedAt, &run.AgentStartedAt, &run.PROpenedAt, &run.ReadyAt, &run.MergedAt, &run.FinishedAt,

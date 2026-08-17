@@ -143,5 +143,6 @@ export function mapApiMessage(apiMsg: ApiMessage): Message {
     timestamp: new Date(apiMsg.created_at),
     claw_id: apiMsg.claw_id,
     tenant_id: apiMsg.tenant_id,
+    userLogin: apiMsg.user_login,
   }
 }

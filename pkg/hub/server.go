@@ -1832,10 +1832,13 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 			ID: uuid.New().String(), ClawID: clawID, TenantID: tenantID,
 			Role: "user", Content: body.Content, CreatedAt: now(),
 		}
+		if ghLoginMsg != "" {
+			msg.UserLogin = &ghLoginMsg
+		}
 		s.resumeNoProgressAfterUserInput(clawID)
 		if _, err := s.db.Exec(
-			`INSERT INTO messages(id,claw_id,tenant_id,role,content,created_at,delivered_at) VALUES(?,?,?,?,?,?,NULL)`,
-			msg.ID, msg.ClawID, msg.TenantID, msg.Role, msg.Content, msg.CreatedAt,
+			`INSERT INTO messages(id,claw_id,tenant_id,role,content,user_login,created_at,delivered_at) VALUES(?,?,?,?,?,?,?,NULL)`,
+			msg.ID, msg.ClawID, msg.TenantID, msg.Role, msg.Content, msg.UserLogin, msg.CreatedAt,
 		); err != nil {
 			http.Error(w, "db error", http.StatusInternalServerError)
 			return
@@ -1893,7 +1896,7 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		args := append([]interface{}{clawID, tenantID, before}, hideArgs...)
 		args = append(args, limit)
 		rows, err = s.db.Query(
-			`SELECT id, claw_id, tenant_id, role, content, COALESCE(format,''), created_at FROM messages
+			`SELECT id, claw_id, tenant_id, role, content, COALESCE(format,''), user_login, created_at FROM messages
 			 WHERE claw_id = ? AND tenant_id = ? AND created_at < ?
 			 `+hideSQL+`
 			 ORDER BY created_at DESC LIMIT ?`,
@@ -1903,7 +1906,7 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		args := append([]interface{}{clawID, tenantID, after}, hideArgs...)
 		args = append(args, limit)
 		rows, err = s.db.Query(
-			`SELECT id, claw_id, tenant_id, role, content, COALESCE(format,''), created_at FROM messages
+			`SELECT id, claw_id, tenant_id, role, content, COALESCE(format,''), user_login, created_at FROM messages
 			 WHERE claw_id = ? AND tenant_id = ? AND created_at > ?
 			 `+hideSQL+`
 			 ORDER BY created_at ASC LIMIT ?`,
@@ -1914,7 +1917,7 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		args := append([]interface{}{clawID, tenantID}, hideArgs...)
 		args = append(args, limit)
 		rows, err = s.db.Query(
-			`SELECT id, claw_id, tenant_id, role, content, COALESCE(format,''), created_at FROM messages
+			`SELECT id, claw_id, tenant_id, role, content, COALESCE(format,''), user_login, created_at FROM messages
 			 WHERE claw_id = ? AND tenant_id = ?
 			 `+hideSQL+`
 			 ORDER BY created_at DESC LIMIT ?`,
@@ -1929,7 +1932,7 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 	var msgs []types.HubMessage
 	for rows.Next() {
 		var m types.HubMessage
-		if err := rows.Scan(&m.ID, &m.ClawID, &m.TenantID, &m.Role, &m.Content, &m.Format, &m.CreatedAt); err != nil {
+		if err := rows.Scan(&m.ID, &m.ClawID, &m.TenantID, &m.Role, &m.Content, &m.Format, &m.UserLogin, &m.CreatedAt); err != nil {
 			continue
 		}
 		msgs = append(msgs, m)
@@ -2078,7 +2081,7 @@ func (s *Server) handleMessageActivity(w http.ResponseWriter, r *http.Request, t
 		order = "asc"
 	}
 
-	query := `SELECT id, claw_id, tenant_id, role, content, COALESCE(format,''), created_at
+	query := `SELECT id, claw_id, tenant_id, role, content, COALESCE(format,''), user_login, created_at
 		FROM messages
 		WHERE claw_id = ? AND tenant_id = ? AND role = 'activity'`
 	args := []interface{}{clawID, tenantID}
@@ -2160,7 +2163,7 @@ func scanHubMessages(rows *sql.Rows) ([]types.HubMessage, error) {
 	var msgs []types.HubMessage
 	for rows.Next() {
 		var m types.HubMessage
-		if err := rows.Scan(&m.ID, &m.ClawID, &m.TenantID, &m.Role, &m.Content, &m.Format, &m.CreatedAt); err != nil {
+		if err := rows.Scan(&m.ID, &m.ClawID, &m.TenantID, &m.Role, &m.Content, &m.Format, &m.UserLogin, &m.CreatedAt); err != nil {
 			return nil, err
 		}
 		msgs = append(msgs, m)
@@ -2169,7 +2172,7 @@ func scanHubMessages(rows *sql.Rows) ([]types.HubMessage, error) {
 }
 
 func (s *Server) queryConversationMessages(clawID, tenantID, before string, limit int) ([]types.HubMessage, error) {
-	query := `SELECT id, claw_id, tenant_id, role, content, COALESCE(format,''), created_at FROM messages
+	query := `SELECT id, claw_id, tenant_id, role, content, COALESCE(format,''), user_login, created_at FROM messages
 		WHERE claw_id = ? AND tenant_id = ? AND role != 'activity' ` + hiddenSystemMessagesSQL()
 	args := []interface{}{clawID, tenantID}
 	args = append(args, hiddenSystemMessagesArgs()...)
@@ -8263,10 +8266,10 @@ func (s *Server) sendNextQueuedMessage(cc *clawConn) {
 	}()
 
 	var msg types.HubMessage
-	err := s.db.QueryRow(`SELECT id, claw_id, tenant_id, role, content, COALESCE(format,''), created_at
+	err := s.db.QueryRow(`SELECT id, claw_id, tenant_id, role, content, COALESCE(format,''), user_login, created_at
 		FROM messages WHERE claw_id=? AND tenant_id=? AND delivered_at IS NULL
 		ORDER BY created_at, rowid LIMIT 1`, clawID, tenantID).Scan(
-		&msg.ID, &msg.ClawID, &msg.TenantID, &msg.Role, &msg.Content, &msg.Format, &msg.CreatedAt)
+		&msg.ID, &msg.ClawID, &msg.TenantID, &msg.Role, &msg.Content, &msg.Format, &msg.UserLogin, &msg.CreatedAt)
 	if err == sql.ErrNoRows {
 		return
 	}

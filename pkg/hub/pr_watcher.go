@@ -181,13 +181,13 @@ func (s *Server) scanMessageForPRs(clawID, content string) {
 
 // prMentionCandidate is a PR URL pending claw_prs registration.
 type prMentionCandidate struct {
-	repo     string
-	number   int
-	url      string
-	comment  int64
-	review   int64
+	repo      string
+	number    int
+	url       string
+	comment   int64
+	review    int64
 	commentAt string
-	headSHA  string
+	headSHA   string
 }
 
 // preparePRMention loads GitHub watermarks for a PR insert. alreadyTracked is
@@ -491,6 +491,9 @@ type clawPR struct {
 	lastReviewID        int64
 	prConditionsFired   bool
 	createdAt           string
+	state               string
+	merged              bool
+	mergedAt            *string
 }
 
 // loadClawPRsByNumber hydrates every tracked-PR row for a (repo, number) pair
@@ -975,6 +978,19 @@ func (s *Server) checkCIStatus(pr clawPR, token string) {
 	}
 	if claimed, err := res.RowsAffected(); err != nil || claimed == 0 {
 		return
+	}
+
+	ciEventType := taskRunEventCISucceeded
+	if conclusion == ciConclusionFailure {
+		ciEventType = taskRunEventCIFailed
+	}
+	if err := s.recordTaskRunEventForClaw(pr.clawID, TaskRunEvent{
+		EventKey: "ci:" + pr.id + ":" + headSHA + ":" + conclusion,
+		Source:   taskRunSourcePRWatcher, EventType: ciEventType, ActorType: taskRunActorSystem,
+		TargetType: "pull_request", TargetURL: pr.prURL,
+		Detail: map[string]any{"repo": pr.repo, "prNumber": pr.prNumber, "headSha": headSHA, "conclusion": conclusion}, OccurredAt: now(),
+	}); err != nil {
+		log.Printf("[pr-watcher] record CI event for %s: %v", pr.prURL, err)
 	}
 
 	if conclusion == ciConclusionFailure {
@@ -1741,7 +1757,7 @@ func (s *Server) handleClawPRs(w http.ResponseWriter, r *http.Request, clawID st
 	}
 
 	rows, err := s.db.Query(
-		`SELECT id, repo, pr_number, pr_url, created_at FROM claw_prs WHERE claw_id=? ORDER BY created_at ASC`,
+		`SELECT id, repo, pr_number, pr_url, state, merged, merged_at, created_at FROM claw_prs WHERE claw_id=? ORDER BY created_at ASC`,
 		clawID,
 	)
 	if err != nil {
@@ -1750,16 +1766,19 @@ func (s *Server) handleClawPRs(w http.ResponseWriter, r *http.Request, clawID st
 	}
 	defer rows.Close()
 	type PR struct {
-		ID        string `json:"id"`
-		Repo      string `json:"repo"`
-		PRNumber  int    `json:"prNumber"`
-		URL       string `json:"url"`
-		CreatedAt string `json:"createdAt"`
+		ID        string  `json:"id"`
+		Repo      string  `json:"repo"`
+		PRNumber  int     `json:"prNumber"`
+		URL       string  `json:"url"`
+		State     string  `json:"state"`
+		Merged    bool    `json:"merged"`
+		MergedAt  *string `json:"mergedAt,omitempty"`
+		CreatedAt string  `json:"createdAt"`
 	}
 	var prs []PR
 	for rows.Next() {
 		var p PR
-		if err := rows.Scan(&p.ID, &p.Repo, &p.PRNumber, &p.URL, &p.CreatedAt); err != nil {
+		if err := rows.Scan(&p.ID, &p.Repo, &p.PRNumber, &p.URL, &p.State, &p.Merged, &p.MergedAt, &p.CreatedAt); err != nil {
 			continue
 		}
 		prs = append(prs, p)
@@ -1768,6 +1787,18 @@ func (s *Server) handleClawPRs(w http.ResponseWriter, r *http.Request, clawID st
 		prs = []PR{}
 	}
 	jsonOK(w, prs)
+}
+
+// clawPRStoredState folds GitHub's two-way `state` (open|closed) and its
+// separate `merged` flag into the three-way open|merged|closed value the
+// dashboard's claw_prs.state column and /api/claws/:id/prs expose. GitHub
+// reports state=="closed" for merged PRs too, so `merged` must be checked
+// first or a merged PR would be indistinguishable from a rejected one.
+func clawPRStoredState(githubState string, merged bool) string {
+	if merged {
+		return "merged"
+	}
+	return githubState
 }
 
 // checkPRMerged checks if a tracked PR is merged or closed.
@@ -1818,6 +1849,14 @@ func (s *Server) checkPRMerged(pr clawPR, token string) bool {
 	mergedAtValue, _ := data["merged_at"].(string)
 	createdAtValue, _ := data["created_at"].(string)
 	mergedAt := parseRFC3339Timestamp(mergedAtValue)
+	var mergedAtDB any
+	if mergedAtValue != "" {
+		mergedAtDB = mergedAtValue
+	}
+	storedState := clawPRStoredState(state, merged)
+	if _, err := s.db.Exec(`UPDATE claw_prs SET state=?, merged=?, merged_at=? WHERE id=?`, storedState, merged, mergedAtDB, pr.id); err != nil {
+		log.Printf("[pr-watcher] update PR state for %s: %v", pr.prURL, err)
+	}
 	createdAt := parseRFC3339Timestamp(createdAtValue)
 	// Detection time is only a sound approximation of ready_at while the PR is
 	// still open. On the poll that first observes a merged or closed PR, now()
