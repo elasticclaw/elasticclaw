@@ -48,6 +48,47 @@ const oldTaskRunEventsSchema = `CREATE TABLE task_run_events (
 	created_at         INTEGER NOT NULL
 )`
 
+// The post-agent_idle, pre-CI-events task_run_events schema: identical to
+// the current one except ci_succeeded and ci_failed are absent from the
+// event_type CHECK.
+const agentIdleTaskRunEventsSchema = `CREATE TABLE task_run_events (
+	id                 TEXT PRIMARY KEY,
+	tenant_id          TEXT NOT NULL,
+	run_id             TEXT NOT NULL REFERENCES task_runs(id) ON DELETE CASCADE,
+	attempt_id         TEXT NOT NULL DEFAULT '',
+	event_key          TEXT NOT NULL,
+	source             TEXT NOT NULL DEFAULT 'hub' CHECK(source IN ('github','linear','shortcut','elasticclaw','hub','provider','agent','unknown')),
+	source_event_id    TEXT NOT NULL DEFAULT '',
+	source_delivery_id TEXT NOT NULL DEFAULT '',
+	event_type         TEXT NOT NULL CHECK(event_type IN (
+		'task_start','task_completed','run_claimed','run_queued','provision_started','claw_created','agent_started',
+		'creation_failed','provision_failed','bootstrap_failed','model_selected','agent_stopped',
+		'manual_stop_before_delivery','provider_lost','done_without_pr','permission_or_auth_failed',
+		'timeout','unknown_failure','agent_idle','pr_associated','pr_opened','pr_closed_unmerged','pr_merged',
+		'approval_only_pr_review','human_requested_changes','human_review_comment','human_pr_comment',
+		'human_manual_code_push','human_tracker_update','human_dashboard_message',
+		'human_manual_stop_or_resume','human_settings_or_status_change',
+		'unknown_human_interaction','pr_replaced','correction','retraction'
+	)),
+	event_time         INTEGER NOT NULL,
+	observed_at        INTEGER NOT NULL,
+	actor_type         TEXT NOT NULL DEFAULT 'unknown' CHECK(actor_type IN ('agent','human','bot','system','unknown')),
+	actor_source       TEXT NOT NULL DEFAULT '',
+	actor_id           TEXT NOT NULL DEFAULT '',
+	actor_login        TEXT NOT NULL DEFAULT '',
+	actor_display_name TEXT NOT NULL DEFAULT '',
+	actor_classification_reason TEXT NOT NULL DEFAULT '',
+	interaction_role   TEXT NOT NULL DEFAULT '' CHECK(interaction_role IN ('','allowed_start','allowed_approval','allowed_merge','warning','neutral','terminal')),
+	target_type        TEXT NOT NULL DEFAULT '',
+	target_id          TEXT NOT NULL DEFAULT '',
+	target_url         TEXT NOT NULL DEFAULT '',
+	target_label       TEXT NOT NULL DEFAULT '',
+	warning_type       TEXT NOT NULL DEFAULT '',
+	failure_type       TEXT NOT NULL DEFAULT '' CHECK(failure_type IN ('','creation_failed','provision_failed','bootstrap_failed','agent_stopped','manual_stop_before_delivery','done_without_pr','no_pr','pr_closed_unmerged','timeout','provider_lost','permission_or_auth_failed','unknown')),
+	detail             TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(detail) AND json_type(detail) = 'object'),
+	created_at         INTEGER NOT NULL
+)`
+
 func insertOldSchemaEvent(t *testing.T, db *sql.DB, id, eventType string) {
 	t.Helper()
 	if _, err := db.Exec(`
@@ -166,6 +207,85 @@ func TestRebuildTaskRunEventsAgentIdleV1MigratesPopulatedDatabase(t *testing.T) 
 		if n != 1 {
 			t.Fatalf("index %s missing after rebuild", name)
 		}
+	}
+}
+
+// TestRebuildTaskRunEventsAgentIdleV1AddsCIEventsAfterAgentIdle verifies the
+// rebuild does not mistake the intermediate agent_idle-only schema for the
+// current one, while a subsequent call correctly skips the finished schema.
+func TestRebuildTaskRunEventsAgentIdleV1AddsCIEventsAfterAgentIdle(t *testing.T) {
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`CREATE TABLE task_runs (id TEXT PRIMARY KEY)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO task_runs(id) VALUES('run-1')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(agentIdleTaskRunEventsSchema); err != nil {
+		t.Fatal(err)
+	}
+	for _, stmt := range []string{
+		`CREATE UNIQUE INDEX idx_task_run_events_tenant_key ON task_run_events(tenant_id, run_id, event_key)`,
+		`CREATE INDEX idx_task_run_events_run_time ON task_run_events(run_id, event_time, id)`,
+		`CREATE INDEX idx_task_run_events_type_time ON task_run_events(event_type, event_time)`,
+		`CREATE INDEX idx_task_run_events_tenant_run_time ON task_run_events(tenant_id, run_id, event_time, observed_at, event_key)`,
+		`CREATE INDEX idx_task_run_events_source_event ON task_run_events(tenant_id, source, source_event_id)`,
+		`CREATE INDEX idx_task_run_events_observed ON task_run_events(tenant_id, observed_at)`,
+	} {
+		if _, err := db.Exec(stmt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	insertOldSchemaEvent(t, db, "ev-idle", "agent_idle")
+	if _, err := db.Exec(`INSERT INTO task_run_events(id, tenant_id, run_id, event_key, event_type, event_time, observed_at, created_at) VALUES('ev-ci-before','tenant','run-1','key-ci-before','ci_succeeded',100,100,100)`); err == nil {
+		t.Fatal("intermediate schema accepted ci_succeeded; fixture is wrong")
+	}
+
+	if err := rebuildTaskRunEventsAgentIdleV1(db); err != nil {
+		t.Fatalf("rebuild intermediate schema: %v", err)
+	}
+	var schema string
+	if err := db.QueryRow(`SELECT sql FROM sqlite_master WHERE type='table' AND name='task_run_events'`).Scan(&schema); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(schema, "'ci_succeeded'") || !strings.Contains(schema, "'ci_failed'") {
+		t.Fatalf("rebuilt schema lacks CI event types: %s", schema)
+	}
+	var eventType string
+	if err := db.QueryRow(`SELECT event_type FROM task_run_events WHERE id='ev-idle'`).Scan(&eventType); err != nil || eventType != "agent_idle" {
+		t.Fatalf("pre-existing agent_idle row = %q, %v; want agent_idle", eventType, err)
+	}
+	for _, eventType := range []string{"ci_succeeded", "ci_failed"} {
+		if _, err := db.Exec(`INSERT INTO task_run_events(id, tenant_id, run_id, event_key, event_type, event_time, observed_at, created_at) VALUES(?,?,?,?,?,?,?,?)`, "ev-"+eventType, "tenant", "run-1", "key-"+eventType, eventType, 200, 200, 200); err != nil {
+			t.Fatalf("rebuilt schema rejects %s: %v", eventType, err)
+		}
+	}
+
+	// A rebuild drops and recreates the table, so this index distinguishes the
+	// guard's true skip branch from a second (otherwise successful) rebuild.
+	if _, err := db.Exec(`CREATE INDEX idx_task_run_events_guard_sentinel ON task_run_events(id)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := rebuildTaskRunEventsAgentIdleV1(db); err != nil {
+		t.Fatalf("second rebuild over current schema: %v", err)
+	}
+	var sentinelCount int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_task_run_events_guard_sentinel'`).Scan(&sentinelCount); err != nil {
+		t.Fatal(err)
+	}
+	if sentinelCount != 1 {
+		t.Fatal("second rebuild did not skip the current schema")
+	}
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM task_run_events WHERE event_type IN ('agent_idle','ci_succeeded','ci_failed')`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 3 {
+		t.Fatalf("rows after skipped second rebuild = %d, want 3", count)
 	}
 }
 
