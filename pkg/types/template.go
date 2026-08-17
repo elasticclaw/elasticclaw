@@ -615,6 +615,29 @@ type LivenessConfig struct {
 	SilentDeathMax         string `yaml:"silent_death_max,omitempty" json:"silentDeathMax,omitempty"`
 	// PRConditionsMaxWait is the maximum time a PR may wait for pr_conditions before the run errors.
 	PRConditionsMaxWait string `yaml:"pr_conditions_max_wait,omitempty" json:"prConditionsMaxWait,omitempty"`
+	// IdleResume controls the idle auto-resume recovery (default on). It lives
+	// here and not under notifications because muting an alert channel must
+	// never disable recovery: an agent parked in a tool call that never
+	// returns is only unstuck by a prompt, and before this the only thing that
+	// ever delivered one was a human typing "continue".
+	IdleResume *bool `yaml:"idle_resume,omitempty" json:"idleResume,omitempty"`
+	// IdleResumeAfter is how long an eligible claw must sit with no turn
+	// running before the hub injects the resume prompt. Deliberately longer
+	// than the agent_idle alert threshold so the alert stays the early signal
+	// and the resume is the escalation.
+	//
+	// Set it ABOVE the longest legitimate wait between turns for the factory
+	// it applies to. The hub cannot distinguish "stalled in a tool call that
+	// will never return" from "correctly waiting longer than this for
+	// something real": a claw that legitimately waits longer is poked and told
+	// to stop waiting, which is at best a wasted turn and at worst pushes the
+	// agent off a wait it should have kept. Because the attempt counter behind
+	// the runaway cap is a LIFETIME counter (it is not reset by a turn, or the
+	// cap could never be reached in the wake-do-nothing-idle loop it exists to
+	// bound), every premature poke permanently consumes part of that claw's
+	// recovery budget — a threshold set too low can exhaust the budget on
+	// healthy waits and leave nothing for the stall it was added for.
+	IdleResumeAfter string `yaml:"idle_resume_after,omitempty" json:"idleResumeAfter,omitempty"`
 }
 
 // IntegrationsConfig holds configs for external integrations.
