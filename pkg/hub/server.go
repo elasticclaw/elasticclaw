@@ -3228,10 +3228,13 @@ func (s *Server) handleUserWS(w http.ResponseWriter, r *http.Request) {
 			hm.TenantID = tenantID
 			hm.Role = "user"
 			hm.CreatedAt = now()
+			if ghLogin != "" {
+				hm.UserLogin = &ghLogin
+			}
 			s.resumeNoProgressAfterUserInput(hm.ClawID)
 			_, _ = s.db.Exec(
-				`INSERT INTO messages(id,claw_id,tenant_id,role,content,created_at,delivered_at) VALUES(?,?,?,?,?,?,NULL)`,
-				hm.ID, hm.ClawID, hm.TenantID, hm.Role, hm.Content, hm.CreatedAt,
+				`INSERT INTO messages(id,claw_id,tenant_id,role,content,user_login,created_at,delivered_at) VALUES(?,?,?,?,?,?,?,NULL)`,
+				hm.ID, hm.ClawID, hm.TenantID, hm.Role, hm.Content, hm.UserLogin, hm.CreatedAt,
 			)
 			s.recordTaskRunDashboardMessage(hm.ClawID, ghLogin, hm.ID)
 			s.mu.RLock()

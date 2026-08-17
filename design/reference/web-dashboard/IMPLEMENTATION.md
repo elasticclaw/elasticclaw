@@ -144,4 +144,9 @@ GATE 6: full-suite green + final visual pass + departures documented below.
 
 ## Accepted departures
 
-(fill in as gates approve divergences)
+- `checkPRMerged` in `pr_watcher.go` deletes `claw_prs` rows on both merge and
+  close-without-merge. Consequently, terminal `claw_prs.state`, `merged`, and
+  `merged_at` values cannot be observed through `GET /api/claws/:id/prs`; only
+  open rows (or their absence) are visible. If Phase 5's “Delivery (PR rows w/
+  state)” requires terminal PR state, it must source it from `task_run_prs`,
+  which is retained on merge and close.
