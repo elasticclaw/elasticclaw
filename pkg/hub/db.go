@@ -153,6 +153,22 @@ func migrate(db *sql.DB) error {
 	if err := addColumn(db, "messages", "user_login", `TEXT`); err != nil {
 		return err
 	}
+	// v13: structured pipeline spans and their hub-observed log records.
+	if err := addColumn(db, "pipeline_outputs", "span_id", `TEXT NOT NULL DEFAULT ''`); err != nil {
+		return err
+	}
+	if err := addColumn(db, "pipeline_outputs", "span_kind", `TEXT NOT NULL DEFAULT 'INTERNAL'`); err != nil {
+		return err
+	}
+	if err := addColumn(db, "pipeline_outputs", "duration_ms", `INTEGER NOT NULL DEFAULT 0`); err != nil {
+		return err
+	}
+	if err := addColumn(db, "pipeline_outputs", "status", `TEXT NOT NULL DEFAULT 'OK'`); err != nil {
+		return err
+	}
+	if err := addColumn(db, "pipeline_outputs", "records", `TEXT NOT NULL DEFAULT '[]'`); err != nil {
+		return err
+	}
 	_, _ = db.Exec(`ALTER TABLE messages ADD COLUMN format TEXT NOT NULL DEFAULT ''`)
 	if _, err := db.Exec(`ALTER TABLE messages ADD COLUMN delivered_at DATETIME`); err == nil {
 		// A failed backfill must abort startup: the column now exists, so a
@@ -708,6 +724,11 @@ func migrate(db *sql.DB) error {
 		stdout       TEXT NOT NULL DEFAULT '',
 		stderr       TEXT NOT NULL DEFAULT '',
 		parsed_json  TEXT NOT NULL DEFAULT '{}',
+		span_id      TEXT NOT NULL DEFAULT '',
+		span_kind    TEXT NOT NULL DEFAULT 'INTERNAL',
+		duration_ms  INTEGER NOT NULL DEFAULT 0,
+		status       TEXT NOT NULL DEFAULT 'OK',
+		records      TEXT NOT NULL DEFAULT '[]',
 		created_at   DATETIME NOT NULL,
 		PRIMARY KEY (claw_id, output_name)
 	);

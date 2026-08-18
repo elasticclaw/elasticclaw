@@ -430,6 +430,7 @@ func (s *Server) provisionStoredClaw(clawID string) {
 	}
 	if provErr != nil {
 		log.Printf("[restore] provision failed for claw %s: %v", clawID, provErr)
+		s.recordPipelineFailureRecord(clawID, "provision", "provision", "FATAL", provErr.Error(), map[string]interface{}{"error.type": "provision_failed"})
 		s.stopAgentWithReason(clawID, fmt.Sprintf("Restore provision failed: %v", provErr), false)
 		return
 	}

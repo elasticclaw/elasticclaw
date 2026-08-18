@@ -523,8 +523,8 @@ func TestTaskRunAnalyticsAPIOutputs(t *testing.T) {
 		{clawID: "unrelated", stageID: "hidden", name: "other", stdout: "ignore", createdAt: time.UnixMilli(ts + 300)},
 	} {
 		if _, err := db.Exec(`
-			INSERT INTO pipeline_outputs(claw_id, stage_id, output_name, stdout, stderr, exit_code, created_at)
-			VALUES(?,?,?,?,?,?,?)`, output.clawID, output.stageID, output.name, output.stdout, output.stderr, output.exitCode, output.createdAt); err != nil {
+		INSERT INTO pipeline_outputs(claw_id, stage_id, output_name, stdout, stderr, exit_code, span_id, span_kind, duration_ms, status, records, created_at)
+			VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`, output.clawID, output.stageID, output.name, output.stdout, output.stderr, output.exitCode, "span-"+output.name, "INTERNAL", 12, "OK", `[{"ts":1700000000000,"sev":"INFO","severityNumber":9,"body":"stage finished","attrs":{"process.exit_code":0}}]`, output.createdAt); err != nil {
 			t.Fatalf("insert pipeline output: %v", err)
 		}
 	}
@@ -540,6 +540,9 @@ func TestTaskRunAnalyticsAPIOutputs(t *testing.T) {
 	}
 	if response.Outputs[1].AttemptID != "attempt-two" || response.Outputs[1].ExitCode != 1 || response.Outputs[1].Stderr != "failed test" {
 		t.Fatalf("unexpected second output: %#v", response.Outputs[1])
+	}
+	if response.TraceID != "run-outputs" || response.Outputs[0].SpanID != "span-checkout" || response.Outputs[0].SpanKind != "INTERNAL" || response.Outputs[0].DurationMs != 12 || len(response.Outputs[0].Records) != 1 || response.Outputs[0].Records[0].SeverityNumber != 9 {
+		t.Fatalf("structured output payload = %#v, trace=%q", response.Outputs[0], response.TraceID)
 	}
 
 	insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{

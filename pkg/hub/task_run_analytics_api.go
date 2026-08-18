@@ -80,6 +80,7 @@ type taskRunAnalyticsPRsResponse struct {
 
 type taskRunAnalyticsOutputsResponse struct {
 	Outputs []taskRunAnalyticsOutputView `json:"outputs"`
+	TraceID string                       `json:"traceId,omitempty"`
 }
 
 type taskRunAnalyticsFilterOptionsResponse struct {
@@ -205,14 +206,19 @@ type taskRunAnalyticsPRView struct {
 }
 
 type taskRunAnalyticsOutputView struct {
-	ClawID     string `json:"clawId"`
-	AttemptID  string `json:"attemptId,omitempty"`
-	StageID    string `json:"stageId"`
-	OutputName string `json:"outputName"`
-	Stdout     string `json:"stdout"`
-	Stderr     string `json:"stderr"`
-	ExitCode   int    `json:"exitCode"`
-	CreatedAt  int64  `json:"createdAt"`
+	ClawID     string              `json:"clawId"`
+	AttemptID  string              `json:"attemptId,omitempty"`
+	StageID    string              `json:"stageId"`
+	OutputName string              `json:"outputName"`
+	Stdout     string              `json:"stdout"`
+	Stderr     string              `json:"stderr"`
+	ExitCode   int                 `json:"exitCode"`
+	SpanID     string              `json:"spanId"`
+	SpanKind   string              `json:"spanKind"`
+	DurationMs int64               `json:"durationMs"`
+	Status     string              `json:"status"`
+	Records    []pipelineLogRecord `json:"records"`
+	CreatedAt  int64               `json:"createdAt"`
 }
 
 type taskRunAnalyticsFilters struct {
@@ -472,7 +478,9 @@ func (s *Server) handleTaskRunAnalyticsRunSubresource(w http.ResponseWriter, r *
 			jsonError(w, http.StatusInternalServerError, "db error")
 			return
 		}
-		jsonOK(w, taskRunAnalyticsOutputsResponse{Outputs: outputs})
+		// run_id is already the durable identifier shared by all attempts, so it
+		// is the run-level trace ID rather than introducing another synthetic ID.
+		jsonOK(w, taskRunAnalyticsOutputsResponse{Outputs: outputs, TraceID: runID})
 	default:
 		jsonError(w, http.StatusNotFound, "not found")
 	}
@@ -991,7 +999,7 @@ func (s *Server) readTaskRunAnalyticsOutputs(tenantID, runID, runClawID string) 
 		args = append(args, clawID)
 	}
 	rows, err := s.db.Query(`
-		SELECT claw_id, stage_id, output_name, stdout, stderr, exit_code, created_at
+		SELECT claw_id, stage_id, output_name, stdout, stderr, exit_code, span_id, span_kind, duration_ms, status, records, created_at
 		  FROM pipeline_outputs
 		 WHERE claw_id IN (`+placeholders+`)
 		 ORDER BY created_at ASC, claw_id ASC, output_name ASC`, args...)
@@ -1003,8 +1011,15 @@ func (s *Server) readTaskRunAnalyticsOutputs(tenantID, runID, runClawID string) 
 	for rows.Next() {
 		var output taskRunAnalyticsOutputView
 		var createdAt time.Time
-		if err := rows.Scan(&output.ClawID, &output.StageID, &output.OutputName, &output.Stdout, &output.Stderr, &output.ExitCode, &createdAt); err != nil {
+		var recordsJSON string
+		if err := rows.Scan(&output.ClawID, &output.StageID, &output.OutputName, &output.Stdout, &output.Stderr, &output.ExitCode, &output.SpanID, &output.SpanKind, &output.DurationMs, &output.Status, &recordsJSON, &createdAt); err != nil {
 			return nil, err
+		}
+		if err := json.Unmarshal([]byte(recordsJSON), &output.Records); err != nil {
+			return nil, fmt.Errorf("decode pipeline output records: %w", err)
+		}
+		if output.Records == nil {
+			output.Records = []pipelineLogRecord{}
 		}
 		output.AttemptID = attemptByClaw[output.ClawID]
 		output.CreatedAt = epochMillis(createdAt)

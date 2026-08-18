@@ -383,7 +383,20 @@ export interface TaskRunOutput {
   stdout: string
   stderr: string
   exitCode: number
+  spanId: string
+  spanKind: string
+  durationMs: number
+  status: 'OK' | 'ERROR'
+  records: TaskRunLogRecord[]
   createdAt: number
+}
+
+export interface TaskRunLogRecord {
+  ts: number
+  sev: 'TRACE' | 'DEBUG' | 'INFO' | 'WARN' | 'ERROR' | 'FATAL'
+  severityNumber: number
+  body: string
+  attrs: Record<string, unknown>
 }
 
 export interface TaskRunPR {
