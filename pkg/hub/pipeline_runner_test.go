@@ -1,7 +1,9 @@
 package hub
 
 import (
+	"database/sql"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -2377,3 +2379,491 @@ func TestBuildWorkspaceRunCommand(t *testing.T) {
 		t.Fatal("expected error for bad template_files JSON")
 	}
 }
+
+// commentIssueMock is a lightweight tracker mock that captures the last
+// comment body received per integration path. Each integration's rendered
+// text is stored on lastBody keyed by integration name so tests can assert
+// on the actual bytes the pipeline sent.
+type commentIssueMock struct {
+	*httptest.Server
+	mu          sync.Mutex
+	lastBody    map[string]string
+	callCount   map[string]int
+	forceStatus int
+	// order captures each request kind in receive order for coexistence checks.
+	order []string
+}
+
+func newCommentIssueMock(t *testing.T, forceStatus int) *commentIssueMock {
+	t.Helper()
+	m := &commentIssueMock{
+		lastBody:    map[string]string{},
+		callCount:   map[string]int{},
+		forceStatus: forceStatus,
+	}
+	m.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		bodyBytes, _ := io.ReadAll(r.Body)
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		switch {
+		case r.URL.Path == "/graphql":
+			// Linear: first call is issue lookup, second is commentCreate mutation.
+			var q struct {
+				Query     string            `json:"query"`
+				Variables map[string]string `json:"variables"`
+			}
+			_ = json.Unmarshal(bodyBytes, &q)
+			if strings.Contains(q.Query, "commentCreate") {
+				m.callCount["linear"]++
+				m.order = append(m.order, "linear-comment")
+				m.lastBody["linear"] = q.Variables["body"]
+				if m.forceStatus != 0 {
+					w.WriteHeader(m.forceStatus)
+					return
+				}
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"data": map[string]any{"commentCreate": map[string]any{"success": true}},
+				})
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"data": map[string]any{"issue": map[string]any{"id": "issue-uuid"}},
+			})
+		case strings.HasSuffix(r.URL.Path, "/comment") && strings.Contains(r.URL.Path, "/rest/api/2/issue/"):
+			m.callCount["jira"]++
+			m.order = append(m.order, "jira-comment")
+			var payload struct {
+				Body string `json:"body"`
+			}
+			_ = json.Unmarshal(bodyBytes, &payload)
+			m.lastBody["jira"] = payload.Body
+			if m.forceStatus != 0 {
+				w.WriteHeader(m.forceStatus)
+				return
+			}
+			w.WriteHeader(http.StatusCreated)
+		case strings.HasSuffix(r.URL.Path, "/transitions") && r.Method == http.MethodGet:
+			// Jira move_issue lookup — return a matching transition ID.
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"transitions": []map[string]any{{"id": "1", "name": "In Progress", "to": map[string]string{"name": "In Progress"}}},
+			})
+		case strings.HasSuffix(r.URL.Path, "/transitions"):
+			m.callCount["jira-move"]++
+			m.order = append(m.order, "jira-move")
+			w.WriteHeader(http.StatusNoContent)
+		case strings.HasSuffix(r.URL.Path, "/comments") && strings.Contains(r.URL.Path, "/repos/"):
+			m.callCount["github"]++
+			m.order = append(m.order, "github-comment")
+			var payload struct {
+				Body string `json:"body"`
+			}
+			_ = json.Unmarshal(bodyBytes, &payload)
+			m.lastBody["github"] = payload.Body
+			if m.forceStatus != 0 {
+				w.WriteHeader(m.forceStatus)
+				return
+			}
+			w.WriteHeader(http.StatusCreated)
+		case strings.Contains(r.URL.Path, "/api/v3/stories/") && strings.HasSuffix(r.URL.Path, "/comments"):
+			m.callCount["shortcut"]++
+			m.order = append(m.order, "shortcut-comment")
+			var payload struct {
+				Text string `json:"text"`
+			}
+			_ = json.Unmarshal(bodyBytes, &payload)
+			m.lastBody["shortcut"] = payload.Text
+			// Record the story ID from the path so tests can verify sc- prefix stripping.
+			m.lastBody["shortcut-path"] = r.URL.Path
+			if m.forceStatus != 0 {
+				w.WriteHeader(m.forceStatus)
+				return
+			}
+			w.WriteHeader(http.StatusCreated)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(m.Close)
+	return m
+}
+
+const commentIssueTestPRURL = "https://github.com/acme/repo/pull/42"
+
+// clawHubMessages returns the persisted hub-role message bodies for a claw.
+// Comment_issue tests use this to assert start notices and warnings.
+func clawHubMessages(t *testing.T, db *sql.DB, clawID string) []string {
+	t.Helper()
+	rows, err := db.Query(`SELECT content FROM messages WHERE claw_id=? AND role='hub' ORDER BY created_at ASC, rowid ASC`, clawID)
+	if err != nil {
+		t.Fatalf("select messages: %v", err)
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var content string
+		if err := rows.Scan(&content); err != nil {
+			t.Fatalf("scan message: %v", err)
+		}
+		out = append(out, content)
+	}
+	return out
+}
+
+func clawHasHubMessage(t *testing.T, db *sql.DB, clawID, needle string) bool {
+	t.Helper()
+	for _, msg := range clawHubMessages(t, db, clawID) {
+		if strings.Contains(msg, needle) {
+			return true
+		}
+	}
+	return false
+}
+
+func TestRunOnEnterCommentIssueJiraRendersBodyWithPR(t *testing.T) {
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
+	mock := newCommentIssueMock(t, 0)
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{}, "", "", "")
+	s.jiraBaseURL = mock.URL
+	s.trackerMoveBackoff = func(int) time.Duration { return 0 }
+
+	workspace := &types.WorkspaceConfig{Name: "workspace"}
+	workflow := &types.WorkflowConfig{Name: "wf", Integration: "jira", Workspace: "default"}
+	SaveWorkspaceForTest(t, workspace, []*types.WorkflowConfig{workflow})
+	SaveWorkspaceIssueTrackerWithBaseForTest(t, "workspace", "jira", "default", mock.URL, "user", "token", "")
+
+	const clawID = "claw-comment-jira"
+	if _, err := db.Exec(
+		`INSERT INTO claws(id, tenant_id, name, template, status, created_at) VALUES(?,?,?,?,?,datetime('now'))`,
+		clawID, "test-tenant-id", "claw", "base", "connected",
+	); err != nil {
+		t.Fatalf("insert claw: %v", err)
+	}
+	if _, err := db.Exec(
+		`INSERT INTO claw_prs(id, claw_id, repo, pr_number, pr_url, created_at) VALUES(?,?,?,?,?,datetime('now'))`,
+		"pr-1", clawID, "acme/repo", 42, commentIssueTestPRURL,
+	); err != nil {
+		t.Fatalf("insert claw_prs: %v", err)
+	}
+
+	stage := pipeline.Stage{
+		ID: "notify",
+		OnEnter: pipeline.OnEnter{
+			CommentIssue: pipeline.CommentIssueAction{
+				Body: "Ticket: {{.Issue.Identifier}} PR: {{.PullRequest.URL}}",
+			},
+		},
+	}
+
+	if _, err := s.runOnEnter(clawID, stage, pipelineContext{Workspace: workspace, Workflow: workflow, IssueID: "PROJ-1"}); err != nil {
+		t.Fatalf("runOnEnter: %v", err)
+	}
+	if got := mock.lastBody["jira"]; got != "Ticket: PROJ-1 PR: "+commentIssueTestPRURL {
+		t.Fatalf("jira body = %q, want rendered template with issue+PR", got)
+	}
+	if mock.callCount["jira"] != 1 {
+		t.Fatalf("jira comment call count = %d, want 1", mock.callCount["jira"])
+	}
+	// Start notice should reach the transcript before the dispatch.
+	if !clawHasHubMessage(t, db, clawID, `▶ Posting comment_issue for stage "notify"`) {
+		t.Fatal("expected start notice in transcript")
+	}
+}
+
+func TestRunOnEnterCommentIssueLinearUsesLinearBranch(t *testing.T) {
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
+	mock := newCommentIssueMock(t, 0)
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{}, "", mock.URL, "")
+	s.trackerMoveBackoff = func(int) time.Duration { return 0 }
+
+	workspace := &types.WorkspaceConfig{Name: "workspace"}
+	workflow := &types.WorkflowConfig{Name: "wf", Integration: "linear", Workspace: "default"}
+	SaveWorkspaceForTest(t, workspace, []*types.WorkflowConfig{workflow})
+	SaveWorkspaceIssueTrackerForTest(t, "workspace", "linear", "default", "linear-token", "")
+
+	const clawID = "claw-comment-linear"
+	if _, err := db.Exec(
+		`INSERT INTO claws(id, tenant_id, name, template, status, created_at) VALUES(?,?,?,?,?,datetime('now'))`,
+		clawID, "test-tenant-id", "claw", "base", "connected",
+	); err != nil {
+		t.Fatalf("insert claw: %v", err)
+	}
+
+	stage := pipeline.Stage{
+		ID: "notify",
+		OnEnter: pipeline.OnEnter{
+			CommentIssue: pipeline.CommentIssueAction{Body: "Ticket: {{.Issue.Identifier}}"},
+		},
+	}
+
+	if _, err := s.runOnEnter(clawID, stage, pipelineContext{Workspace: workspace, Workflow: workflow, IssueID: "ELA-1"}); err != nil {
+		t.Fatalf("runOnEnter: %v", err)
+	}
+	if got := mock.lastBody["linear"]; got != "Ticket: ELA-1" {
+		t.Fatalf("linear body = %q, want rendered template", got)
+	}
+	if mock.callCount["linear"] != 1 {
+		t.Fatalf("linear comment call count = %d, want 1", mock.callCount["linear"])
+	}
+}
+
+func TestRunOnEnterCommentIssueGitHubIssues(t *testing.T) {
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
+	mock := newCommentIssueMock(t, 0)
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{}, mock.URL, "", "")
+	s.trackerMoveBackoff = func(int) time.Duration { return 0 }
+
+	workspace := &types.WorkspaceConfig{Name: "workspace"}
+	workflow := &types.WorkflowConfig{Name: "wf", Integration: "github-issues", Workspace: "default"}
+	SaveWorkspaceForTest(t, workspace, []*types.WorkflowConfig{workflow})
+	SaveWorkspaceIssueTrackerForTest(t, "workspace", "github-issues", "default", "gh-token", "")
+
+	const clawID = "claw-comment-gh"
+	if _, err := db.Exec(
+		`INSERT INTO claws(id, tenant_id, name, template, status, created_at) VALUES(?,?,?,?,?,datetime('now'))`,
+		clawID, "test-tenant-id", "claw", "base", "connected",
+	); err != nil {
+		t.Fatalf("insert claw: %v", err)
+	}
+
+	stage := pipeline.Stage{
+		ID: "notify",
+		OnEnter: pipeline.OnEnter{
+			CommentIssue: pipeline.CommentIssueAction{Body: "Hello from stage"},
+		},
+	}
+	if _, err := s.runOnEnter(clawID, stage, pipelineContext{Workspace: workspace, Workflow: workflow, IssueID: "acme/repo/7"}); err != nil {
+		t.Fatalf("runOnEnter: %v", err)
+	}
+	if got := mock.lastBody["github"]; got != "Hello from stage" {
+		t.Fatalf("github body = %q, want %q", got, "Hello from stage")
+	}
+	if mock.callCount["github"] != 1 {
+		t.Fatalf("github comment call count = %d, want 1", mock.callCount["github"])
+	}
+}
+
+func TestRunOnEnterCommentIssueShortcutBareNumberGetsPrefix(t *testing.T) {
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
+	mock := newCommentIssueMock(t, 0)
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{}, "", "", mock.URL)
+	s.trackerMoveBackoff = func(int) time.Duration { return 0 }
+
+	workspace := &types.WorkspaceConfig{Name: "workspace"}
+	workflow := &types.WorkflowConfig{Name: "wf", Integration: "shortcut", Workspace: "default"}
+	SaveWorkspaceForTest(t, workspace, []*types.WorkflowConfig{workflow})
+	SaveWorkspaceIssueTrackerForTest(t, "workspace", "shortcut", "default", "sc-token", "")
+
+	const clawID = "claw-comment-sc"
+	if _, err := db.Exec(
+		`INSERT INTO claws(id, tenant_id, name, template, status, created_at) VALUES(?,?,?,?,?,datetime('now'))`,
+		clawID, "test-tenant-id", "claw", "base", "connected",
+	); err != nil {
+		t.Fatalf("insert claw: %v", err)
+	}
+
+	// Bare numeric issue_id override — mirrors MoveIssue's sc- prefix rule.
+	stage := pipeline.Stage{
+		ID: "notify",
+		OnEnter: pipeline.OnEnter{
+			CommentIssue: pipeline.CommentIssueAction{Body: "hi", IssueID: "123"},
+		},
+	}
+	if _, err := s.runOnEnter(clawID, stage, pipelineContext{Workspace: workspace, Workflow: workflow, IssueID: ""}); err != nil {
+		t.Fatalf("runOnEnter: %v", err)
+	}
+	if mock.callCount["shortcut"] != 1 {
+		t.Fatalf("shortcut comment call count = %d, want 1", mock.callCount["shortcut"])
+	}
+	if got := mock.lastBody["shortcut-path"]; got != "/api/v3/stories/123/comments" {
+		t.Fatalf("shortcut path = %q, want /api/v3/stories/123/comments (sc- prefix stripping)", got)
+	}
+}
+
+func TestRunOnEnterCommentIssueContinueOnErrorSwallowsFailure(t *testing.T) {
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
+	mock := newCommentIssueMock(t, http.StatusInternalServerError)
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{}, "", "", "")
+	s.jiraBaseURL = mock.URL
+	s.trackerMoveBackoff = func(int) time.Duration { return 0 }
+
+	workspace := &types.WorkspaceConfig{Name: "workspace"}
+	workflow := &types.WorkflowConfig{Name: "wf", Integration: "jira", Workspace: "default"}
+	SaveWorkspaceForTest(t, workspace, []*types.WorkflowConfig{workflow})
+	SaveWorkspaceIssueTrackerWithBaseForTest(t, "workspace", "jira", "default", mock.URL, "u", "t", "")
+
+	const clawID = "claw-comment-continue"
+	if _, err := db.Exec(
+		`INSERT INTO claws(id, tenant_id, name, template, status, created_at) VALUES(?,?,?,?,?,datetime('now'))`,
+		clawID, "test-tenant-id", "claw", "base", "connected",
+	); err != nil {
+		t.Fatalf("insert claw: %v", err)
+	}
+
+	stage := pipeline.Stage{
+		ID: "notify",
+		OnEnter: pipeline.OnEnter{
+			CommentIssue: pipeline.CommentIssueAction{Body: "hi", ContinueOnError: true},
+		},
+	}
+	if _, err := s.runOnEnter(clawID, stage, pipelineContext{Workspace: workspace, Workflow: workflow, IssueID: "PROJ-1"}); err != nil {
+		t.Fatalf("runOnEnter returned error with ContinueOnError=true: %v", err)
+	}
+	if !clawHasHubMessage(t, db, clawID, "comment_issue failed") {
+		t.Fatal("expected warning message injected on failure")
+	}
+}
+
+func TestRunOnEnterCommentIssueNonTerminalReturnsError(t *testing.T) {
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
+	mock := newCommentIssueMock(t, http.StatusInternalServerError)
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{}, "", "", "")
+	s.jiraBaseURL = mock.URL
+	s.trackerMoveBackoff = func(int) time.Duration { return 0 }
+
+	workspace := &types.WorkspaceConfig{Name: "workspace"}
+	workflow := &types.WorkflowConfig{Name: "wf", Integration: "jira", Workspace: "default"}
+	SaveWorkspaceForTest(t, workspace, []*types.WorkflowConfig{workflow})
+	SaveWorkspaceIssueTrackerWithBaseForTest(t, "workspace", "jira", "default", mock.URL, "u", "t", "")
+
+	const clawID = "claw-comment-nonterm-err"
+	if _, err := db.Exec(
+		`INSERT INTO claws(id, tenant_id, name, template, status, created_at) VALUES(?,?,?,?,?,datetime('now'))`,
+		clawID, "test-tenant-id", "claw", "base", "connected",
+	); err != nil {
+		t.Fatalf("insert claw: %v", err)
+	}
+
+	stage := pipeline.Stage{
+		ID: "notify",
+		OnEnter: pipeline.OnEnter{
+			CommentIssue: pipeline.CommentIssueAction{Body: "hi"},
+		},
+	}
+	if _, err := s.runOnEnter(clawID, stage, pipelineContext{Workspace: workspace, Workflow: workflow, IssueID: "PROJ-1"}); err == nil {
+		t.Fatal("expected runOnEnter to return error on non-terminal stage with ContinueOnError=false")
+	}
+}
+
+func TestRunOnEnterCommentIssueTerminalStageSwallowsError(t *testing.T) {
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
+	mock := newCommentIssueMock(t, http.StatusInternalServerError)
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{}, "", "", "")
+	s.jiraBaseURL = mock.URL
+	s.trackerMoveBackoff = func(int) time.Duration { return 0 }
+
+	workspace := &types.WorkspaceConfig{Name: "workspace"}
+	workflow := &types.WorkflowConfig{Name: "wf", Integration: "jira", Workspace: "default"}
+	SaveWorkspaceForTest(t, workspace, []*types.WorkflowConfig{workflow})
+	SaveWorkspaceIssueTrackerWithBaseForTest(t, "workspace", "jira", "default", mock.URL, "u", "t", "")
+
+	const clawID = "claw-comment-terminal"
+	if _, err := db.Exec(
+		`INSERT INTO claws(id, tenant_id, name, template, status, created_at) VALUES(?,?,?,?,?,datetime('now'))`,
+		clawID, "test-tenant-id", "claw", "base", "connected",
+	); err != nil {
+		t.Fatalf("insert claw: %v", err)
+	}
+
+	// Terminal stage must never return an error just because the comment
+	// dispatch failed — the workflow's termination path must still run.
+	stage := pipeline.Stage{
+		ID:       "final",
+		Terminal: true,
+		OnEnter: pipeline.OnEnter{
+			CommentIssue: pipeline.CommentIssueAction{Body: "hi"},
+		},
+	}
+	if _, err := s.runOnEnter(clawID, stage, pipelineContext{Workspace: workspace, Workflow: workflow, IssueID: "PROJ-1"}); err != nil {
+		t.Fatalf("runOnEnter on terminal stage returned error: %v", err)
+	}
+}
+
+func TestRunOnEnterMoveAndCommentIssueBothFire(t *testing.T) {
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
+	mock := newCommentIssueMock(t, 0)
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{}, "", "", "")
+	s.jiraBaseURL = mock.URL
+	s.trackerMoveBackoff = func(int) time.Duration { return 0 }
+
+	workspace := &types.WorkspaceConfig{Name: "workspace"}
+	workflow := &types.WorkflowConfig{Name: "wf", Integration: "jira", Workspace: "default"}
+	SaveWorkspaceForTest(t, workspace, []*types.WorkflowConfig{workflow})
+	SaveWorkspaceIssueTrackerWithBaseForTest(t, "workspace", "jira", "default", mock.URL, "u", "t", "")
+
+	const clawID = "claw-both"
+	if _, err := db.Exec(
+		`INSERT INTO claws(id, tenant_id, name, template, status, created_at) VALUES(?,?,?,?,?,datetime('now'))`,
+		clawID, "test-tenant-id", "claw", "base", "connected",
+	); err != nil {
+		t.Fatalf("insert claw: %v", err)
+	}
+
+	stage := pipeline.Stage{
+		ID: "notify",
+		OnEnter: pipeline.OnEnter{
+			MoveIssue:    pipeline.MoveIssueAction{Status: "In Progress"},
+			CommentIssue: pipeline.CommentIssueAction{Body: "moved and commented"},
+		},
+	}
+	if _, err := s.runOnEnter(clawID, stage, pipelineContext{Workspace: workspace, Workflow: workflow, IssueID: "PROJ-1"}); err != nil {
+		t.Fatalf("runOnEnter: %v", err)
+	}
+	if mock.callCount["jira-move"] != 1 {
+		t.Fatalf("jira move call count = %d, want 1", mock.callCount["jira-move"])
+	}
+	if mock.callCount["jira"] != 1 {
+		t.Fatalf("jira comment call count = %d, want 1", mock.callCount["jira"])
+	}
+	// Move must dispatch before comment so the comment observes post-move state.
+	var moveIdx, commentIdx = -1, -1
+	for i, kind := range mock.order {
+		if kind == "jira-move" && moveIdx == -1 {
+			moveIdx = i
+		}
+		if kind == "jira-comment" && commentIdx == -1 {
+			commentIdx = i
+		}
+	}
+	if moveIdx == -1 || commentIdx == -1 || moveIdx > commentIdx {
+		t.Fatalf("expected move to precede comment, order = %v", mock.order)
+	}
+}
+
+func TestRunOnEnterCommentIssueEmptyBodyIsNoOp(t *testing.T) {
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
+	mock := newCommentIssueMock(t, 0)
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{}, "", "", "")
+	s.jiraBaseURL = mock.URL
+	s.trackerMoveBackoff = func(int) time.Duration { return 0 }
+
+	workspace := &types.WorkspaceConfig{Name: "workspace"}
+	workflow := &types.WorkflowConfig{Name: "wf", Integration: "jira", Workspace: "default"}
+	SaveWorkspaceForTest(t, workspace, []*types.WorkflowConfig{workflow})
+	SaveWorkspaceIssueTrackerWithBaseForTest(t, "workspace", "jira", "default", mock.URL, "u", "t", "")
+
+	const clawID = "claw-comment-empty"
+	if _, err := db.Exec(
+		`INSERT INTO claws(id, tenant_id, name, template, status, created_at) VALUES(?,?,?,?,?,datetime('now'))`,
+		clawID, "test-tenant-id", "claw", "base", "connected",
+	); err != nil {
+		t.Fatalf("insert claw: %v", err)
+	}
+
+	// Empty Body must short-circuit before the start notice and dispatch.
+	stage := pipeline.Stage{
+		ID: "notify",
+		OnEnter: pipeline.OnEnter{
+			CommentIssue: pipeline.CommentIssueAction{Body: ""},
+		},
+	}
+	if _, err := s.runOnEnter(clawID, stage, pipelineContext{Workspace: workspace, Workflow: workflow, IssueID: "PROJ-1"}); err != nil {
+		t.Fatalf("runOnEnter: %v", err)
+	}
+	if mock.callCount["jira"] != 0 {
+		t.Fatalf("expected 0 jira comment calls for empty body, got %d", mock.callCount["jira"])
+	}
+	if clawHasHubMessage(t, db, clawID, "Posting comment_issue") {
+		t.Fatal("empty body must not emit start notice")
+	}
+}
+

@@ -912,9 +912,11 @@ func (e *routedRequiredGateError) Error() string {
 // - stage.OnEnter.Run: executes a command in the agent workspace
 // - stage.OnEnter.Inject: injects a user message into the claw
 // - stage.OnEnter.MoveIssue: moves the Linear/Shortcut issue to the named status
+// - stage.OnEnter.CommentIssue: posts a rendered comment to the tracker issue
 //
 // issueID is the default issue from the trigger; it can be overridden by
-// MoveIssue.IssueID (including template references like {{.Inputs.xxx}}).
+// MoveIssue.IssueID or CommentIssue.IssueID (including template references
+// like {{.Inputs.xxx}}).
 func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, ctx pipelineContext) (injectDelivered bool, err error) {
 	issueID := ctx.IssueID
 	// Captured for PR registration after any required gate has been evaluated.
@@ -1324,94 +1326,224 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, ctx pipelineCon
 
 	targetStatus := stage.OnEnter.MoveIssue.Status
 	if targetStatus == "" {
-		return injectDelivered, nil
+		goto commentIssue
 	}
 
-	// If pipeline specifies an explicit issue_id, resolve it from templates or use directly
-	resolvedIssueID := issueID
-	if stage.OnEnter.MoveIssue.IssueID != "" {
-		resolvedIssueID = stage.OnEnter.MoveIssue.IssueID
-		// Support template syntax {{.Inputs.xxx}} for manual trigger inputs
-		if strings.Contains(resolvedIssueID, "{{.Inputs.") {
-			inputs := s.loadManualTriggerInputs(clawID)
-			if inputs != nil {
-				tmpl, err := template.New("issue_id").Parse(resolvedIssueID)
-				if err == nil {
-					var buf bytes.Buffer
-					data := s.injectTemplateData(clawID, map[string]interface{}{
-						"Inputs": inputs,
-					})
-					if err := tmpl.Execute(&buf, data); err == nil {
-						resolvedIssueID = buf.String()
-					}
+	{
+		// If pipeline specifies an explicit issue_id, resolve it from templates or use directly
+		resolvedIssueID, _ := s.resolveIssueID(clawID, ctx, stage.OnEnter.MoveIssue.IssueID, issueID)
+		if resolvedIssueID == "" {
+			goto commentIssue
+		}
+
+		// Determine issue tracker: explicit workflow/factory integration takes precedence,
+		// fall back to ID-format heuristics only when integration is empty.
+		var isShortcut, isGitHub, isJira bool
+		switch ctx.Integration() {
+		case "shortcut":
+			isShortcut = true
+		case "github", "github-issues":
+			isGitHub = true
+		case "jira":
+			isJira = true
+		default:
+			isShortcut = strings.HasPrefix(resolvedIssueID, "sc-")
+			isGitHub = strings.Contains(resolvedIssueID, "/")
+		}
+
+		if isJira {
+			tracker, ok := s.resolveJiraTrackerForPipeline(ctx)
+			if !ok {
+				log.Printf("[pipeline] %s: no Jira tracker for connection %q, skipping move_issue", ctx.Name(), ctx.TrackerName())
+				goto commentIssue
+			}
+			if err := s.moveJiraIssue(tracker, resolvedIssueID, targetStatus); err != nil {
+				log.Printf("[pipeline] failed to move Jira issue %s to %q: %v", resolvedIssueID, targetStatus, err)
+			} else {
+				log.Printf("[pipeline] moved Jira issue %s to %q", resolvedIssueID, targetStatus)
+			}
+		} else if isShortcut {
+			// Shortcut story — ensure sc- prefix if missing (e.g. template rendered bare number)
+			scID := resolvedIssueID
+			if !strings.HasPrefix(scID, "sc-") {
+				scID = "sc-" + scID
+			}
+			scToken := s.resolveShortcutTokenForPipeline(ctx)
+			if scToken == "" {
+				log.Printf("[pipeline] %s: no Shortcut token for connection %q, skipping move_issue", ctx.Name(), ctx.TrackerName())
+				goto commentIssue
+			}
+			if err := moveShortcutStory(s.resolveShortcutBaseURL(), scToken, scID, targetStatus); err != nil {
+				log.Printf("[pipeline] failed to move story %s to %q: %v", scID, targetStatus, err)
+			} else {
+				log.Printf("[pipeline] moved story %s to %q", scID, targetStatus)
+			}
+		} else if isGitHub {
+			// GitHub issue (owner/repo/number format)
+			ghToken := s.resolveGitHubIssuesTokenForPipeline(ctx)
+			if ghToken == "" {
+				log.Printf("[pipeline] %s: no GitHub Issues token for move_issue, skipping", ctx.Name())
+				goto commentIssue
+			}
+			parts := strings.Split(resolvedIssueID, "/")
+			if len(parts) != 3 {
+				log.Printf("[pipeline] %s: GitHub issue ID %q is not owner/repo/number format — skipping move_issue", ctx.Name(), resolvedIssueID)
+				goto commentIssue
+			}
+			repo := parts[0] + "/" + parts[1]
+			var issueNum int
+			if _, err := fmt.Sscanf(parts[2], "%d", &issueNum); err != nil {
+				log.Printf("[pipeline] %s: invalid GitHub issue number in %q — skipping move_issue", ctx.Name(), resolvedIssueID)
+				goto commentIssue
+			}
+			if err := moveGitHubIssue(ghToken, repo, issueNum, targetStatus, s.githubBaseURL); err != nil {
+				log.Printf("[pipeline] failed to move GitHub issue %s to %q: %v", resolvedIssueID, targetStatus, err)
+			} else {
+				log.Printf("[pipeline] moved GitHub issue %s to %q", resolvedIssueID, targetStatus)
+			}
+		} else {
+			// Linear issue
+			linearToken := s.resolveLinearTokenForPipeline(ctx)
+			if linearToken == "" {
+				log.Printf("[pipeline] %s: no Linear token for connection %q, skipping move_issue", ctx.Name(), ctx.TrackerName())
+				goto commentIssue
+			}
+			if err := s.moveLinearIssueOnServer(linearToken, resolvedIssueID, targetStatus); err != nil {
+				log.Printf("[pipeline] failed to move issue %s to %q: %v", resolvedIssueID, targetStatus, err)
+			} else {
+				log.Printf("[pipeline] moved issue %s to %q", resolvedIssueID, targetStatus)
+			}
+		}
+	}
+
+commentIssue:
+	if err := s.runCommentIssueOnStage(clawID, stage, ctx, issueID); err != nil {
+		return injectDelivered, err
+	}
+	return injectDelivered, nil
+}
+
+// pipelinePullRequest is the template-facing view of the claw's active PR.
+// Only fields intentionally exposed to comment_issue bodies are included.
+type pipelinePullRequest struct {
+	URL string
+}
+
+// loadPipelinePullRequest returns the most recently registered PR for a claw,
+// or nil when the claw has no PR row yet. Templates dereference nil safely with
+// {{ if .PullRequest }}…{{ end }}, so callers should pass either the struct or
+// nil directly rather than synthesizing an empty value.
+func (s *Server) loadPipelinePullRequest(clawID string) *pipelinePullRequest {
+	var prURL string
+	err := s.db.QueryRow(`SELECT pr_url FROM claw_prs WHERE claw_id=? ORDER BY rowid DESC LIMIT 1`, clawID).Scan(&prURL)
+	if err != nil {
+		return nil
+	}
+	if strings.TrimSpace(prURL) == "" {
+		return nil
+	}
+	return &pipelinePullRequest{URL: prURL}
+}
+
+// resolveIssueID resolves an optional explicit issue ID (with template
+// support) against the fallback trigger issue. When explicit is empty, the
+// fallback is returned unchanged. Template rendering follows the same
+// semantics as the on_enter.inject path — {{.Inputs.*}} for manual triggers
+// and {{.Issue.*}} for automatic triggers.
+func (s *Server) resolveIssueID(clawID string, ctx pipelineContext, explicit, fallback string) (string, error) {
+	if explicit == "" {
+		return fallback, nil
+	}
+	resolved := explicit
+	if strings.Contains(resolved, "{{.Inputs.") {
+		inputs := s.loadManualTriggerInputs(clawID)
+		if inputs != nil {
+			tmpl, err := template.New("issue_id").Parse(resolved)
+			if err == nil {
+				var buf bytes.Buffer
+				data := s.injectTemplateData(clawID, map[string]interface{}{
+					"Inputs": inputs,
+				})
+				if err := tmpl.Execute(&buf, data); err == nil {
+					resolved = buf.String()
 				}
 			}
 		}
-		// Support template syntax {{.Issue.xxx}} for automatic triggers
-		if strings.Contains(resolvedIssueID, "{{.Issue.") {
-			var details *linearIssueDetails
-			if issueID != "" && !strings.HasPrefix(issueID, "sc-") && !strings.Contains(issueID, "/") {
-				linearToken := s.resolveLinearTokenForPipeline(ctx)
-				if linearToken != "" {
-					d, err := s.fetchLinearIssueDetails(linearToken, issueID)
-					if err == nil && d != nil {
-						details = d
-					}
+	}
+	if strings.Contains(resolved, "{{.Issue.") {
+		var linearDetails *linearIssueDetails
+		if fallback != "" && !strings.HasPrefix(fallback, "sc-") && !strings.Contains(fallback, "/") {
+			linearToken := s.resolveLinearTokenForPipeline(ctx)
+			if linearToken != "" {
+				if d, err := s.fetchLinearIssueDetails(linearToken, fallback); err == nil && d != nil {
+					linearDetails = d
 				}
-			} else if strings.Contains(issueID, "/") {
-				ghToken := s.resolveGitHubIssuesTokenForPipeline(ctx)
-				if ghToken != "" {
-					parts := strings.Split(issueID, "/")
-					if len(parts) == 3 {
-						repo := parts[0] + "/" + parts[1]
-						var issueNum int
-						if _, err := fmt.Sscanf(parts[2], "%d", &issueNum); err == nil {
-							base := s.githubBaseURL
-							if base == "" {
-								base = "https://api.github.com"
-							}
-							d, err := s.fetchGitHubIssueDetails(ghToken, repo, issueNum, base)
-							if err == nil && d != nil {
-								var ghDetails githubIssueDetails = *d
-								tmpl, err := template.New("issue_id").Parse(resolvedIssueID)
-								if err == nil {
-									var buf bytes.Buffer
-									data := s.injectTemplateData(clawID, map[string]interface{}{
-										"Issue": &ghDetails,
-									})
-									if err := tmpl.Execute(&buf, data); err == nil {
-										resolvedIssueID = buf.String()
-									}
+			}
+		} else if strings.Contains(fallback, "/") {
+			ghToken := s.resolveGitHubIssuesTokenForPipeline(ctx)
+			if ghToken != "" {
+				parts := strings.Split(fallback, "/")
+				if len(parts) == 3 {
+					repo := parts[0] + "/" + parts[1]
+					var issueNum int
+					if _, err := fmt.Sscanf(parts[2], "%d", &issueNum); err == nil {
+						base := s.githubBaseURL
+						if base == "" {
+							base = "https://api.github.com"
+						}
+						if d, err := s.fetchGitHubIssueDetails(ghToken, repo, issueNum, base); err == nil && d != nil {
+							var ghDetails githubIssueDetails = *d
+							tmpl, err := template.New("issue_id").Parse(resolved)
+							if err == nil {
+								var buf bytes.Buffer
+								data := s.injectTemplateData(clawID, map[string]interface{}{
+									"Issue": &ghDetails,
+								})
+								if err := tmpl.Execute(&buf, data); err == nil {
+									resolved = buf.String()
 								}
-								goto issueResolved
 							}
+							return resolved, nil
 						}
 					}
 				}
 			}
-			if details != nil {
-				tmpl, err := template.New("issue_id").Parse(resolvedIssueID)
-				if err == nil {
-					var buf bytes.Buffer
-					data := s.injectTemplateData(clawID, map[string]interface{}{
-						"Issue": details,
-					})
-					if err := tmpl.Execute(&buf, data); err == nil {
-						resolvedIssueID = buf.String()
-					}
+		}
+		if linearDetails != nil {
+			tmpl, err := template.New("issue_id").Parse(resolved)
+			if err == nil {
+				var buf bytes.Buffer
+				data := s.injectTemplateData(clawID, map[string]interface{}{
+					"Issue": linearDetails,
+				})
+				if err := tmpl.Execute(&buf, data); err == nil {
+					resolved = buf.String()
 				}
 			}
 		}
 	}
-issueResolved:
-	if resolvedIssueID == "" {
-		return injectDelivered, nil
+	return resolved, nil
+}
+
+// runCommentIssueOnStage posts a rendered comment_issue body to the workflow's
+// tracker issue. Failures are always logged and surfaced as an in-transcript
+// warning; they only propagate as an error when ContinueOnError is false and
+// the stage is not terminal, so a failed comment on a terminal stage never
+// blocks completion.
+func (s *Server) runCommentIssueOnStage(clawID string, stage pipeline.Stage, ctx pipelineContext, issueID string) error {
+	if strings.TrimSpace(stage.OnEnter.CommentIssue.Body) == "" {
+		return nil
 	}
 
-	// Determine issue tracker: explicit workflow/factory integration takes precedence,
-	// fall back to ID-format heuristics only when integration is empty.
+	resolvedIssueID, _ := s.resolveIssueID(clawID, ctx, stage.OnEnter.CommentIssue.IssueID, issueID)
+	if resolvedIssueID == "" {
+		return nil
+	}
+
+	// Determine issue tracker with the same heuristic as move_issue.
 	var isShortcut, isGitHub, isJira bool
-	switch ctx.Integration() {
+	integration := ctx.Integration()
+	switch integration {
 	case "shortcut":
 		isShortcut = true
 	case "github", "github-issues":
@@ -1423,70 +1555,145 @@ issueResolved:
 		isGitHub = strings.Contains(resolvedIssueID, "/")
 	}
 
+	// Build template data: {{.Issue.*}}, {{.Inputs.*}}, {{.PullRequest.*}}
+	// (plus {{.Outputs.*}} via injectTemplateData) mirror the inject path so
+	// authors can share templates between inject and comment_issue.
+	data := map[string]interface{}{}
+	if manualInputs := s.loadManualTriggerInputs(clawID); manualInputs != nil {
+		data["Inputs"] = manualInputs
+	}
+	if pr := s.loadPipelinePullRequest(clawID); pr != nil {
+		data["PullRequest"] = pr
+	}
+	switch {
+	case isGitHub:
+		details := fallbackGitHubIssueDetails(resolvedIssueID)
+		ghToken := s.resolveGitHubIssuesTokenForPipeline(ctx)
+		if ghToken != "" {
+			parts := strings.Split(resolvedIssueID, "/")
+			if len(parts) == 3 {
+				repo := parts[0] + "/" + parts[1]
+				var issueNum int
+				if _, err := fmt.Sscanf(parts[2], "%d", &issueNum); err == nil {
+					base := s.githubBaseURL
+					if base == "" {
+						base = "https://api.github.com"
+					}
+					if d, err := s.fetchGitHubIssueDetailsWithRetry(clawID, ghToken, repo, issueNum, base); err == nil && d != nil {
+						details = d
+					}
+				}
+			}
+		}
+		data["Issue"] = details
+	case isShortcut, isJira:
+		// Shortcut/Jira: no rich fetch — use a bare identifier stub so the
+		// {{.Issue.Identifier}} template still resolves without a live API call.
+		data["Issue"] = &linearIssueDetails{Identifier: resolvedIssueID}
+	default:
+		// Linear: try live fetch, fall back to identifier-only stub.
+		details := &linearIssueDetails{Identifier: resolvedIssueID}
+		linearToken := s.resolveLinearTokenForPipeline(ctx)
+		if linearToken != "" {
+			if d, err := s.fetchLinearIssueDetails(linearToken, resolvedIssueID); err == nil && d != nil {
+				details = d
+			}
+		}
+		data["Issue"] = details
+	}
+	renderedBody := renderInjectWithData(clawID, stage.OnEnter.CommentIssue.Body, s.injectTemplateData(clawID, data))
+
+	handleErr := func(integration string, err error) error {
+		log.Printf("[pipeline] failed to comment %s issue %s: %v", integration, resolvedIssueID, err)
+		s.injectHubMessageByID(clawID, "[hub] Warning: comment_issue failed: "+err.Error())
+		if stage.Terminal {
+			return nil
+		}
+		if stage.OnEnter.CommentIssue.ContinueOnError {
+			return nil
+		}
+		return err
+	}
+
 	if isJira {
 		tracker, ok := s.resolveJiraTrackerForPipeline(ctx)
 		if !ok {
-			log.Printf("[pipeline] %s: no Jira tracker for connection %q, skipping move_issue", ctx.Name(), ctx.TrackerName())
-			return injectDelivered, nil
+			log.Printf("[pipeline] %s: no Jira tracker for connection %q, skipping comment_issue", ctx.Name(), ctx.TrackerName())
+			return nil
 		}
-		if err := s.moveJiraIssue(tracker, resolvedIssueID, targetStatus); err != nil {
-			log.Printf("[pipeline] failed to move Jira issue %s to %q: %v", resolvedIssueID, targetStatus, err)
-		} else {
-			log.Printf("[pipeline] moved Jira issue %s to %q", resolvedIssueID, targetStatus)
+		s.publishHubNotice(clawID, fmt.Sprintf("[hub] ▶ Posting comment_issue for stage %q", stage.ID))
+		if err := s.retryTrackerMove("comment jira issue", func() error {
+			return s.commentJiraIssue(tracker, resolvedIssueID, renderedBody)
+		}); err != nil {
+			return handleErr("jira", err)
 		}
-	} else if isShortcut {
-		// Shortcut story — ensure sc- prefix if missing (e.g. template rendered bare number)
+		log.Printf("[pipeline] commented jira issue %s", resolvedIssueID)
+		return nil
+	}
+	if isShortcut {
 		scID := resolvedIssueID
 		if !strings.HasPrefix(scID, "sc-") {
 			scID = "sc-" + scID
 		}
 		scToken := s.resolveShortcutTokenForPipeline(ctx)
 		if scToken == "" {
-			log.Printf("[pipeline] %s: no Shortcut token for connection %q, skipping move_issue", ctx.Name(), ctx.TrackerName())
-			return injectDelivered, nil
+			log.Printf("[pipeline] %s: no Shortcut token for connection %q, skipping comment_issue", ctx.Name(), ctx.TrackerName())
+			return nil
 		}
-		if err := moveShortcutStory(s.resolveShortcutBaseURL(), scToken, scID, targetStatus); err != nil {
-			log.Printf("[pipeline] failed to move story %s to %q: %v", scID, targetStatus, err)
-		} else {
-			log.Printf("[pipeline] moved story %s to %q", scID, targetStatus)
+		s.publishHubNotice(clawID, fmt.Sprintf("[hub] ▶ Posting comment_issue for stage %q", stage.ID))
+		if err := s.retryTrackerMove("comment shortcut issue", func() error {
+			return commentShortcutIssue(s.resolveShortcutBaseURL(), scToken, scID, renderedBody)
+		}); err != nil {
+			return handleErr("shortcut", err)
 		}
-	} else if isGitHub {
-		// GitHub issue (owner/repo/number format)
+		log.Printf("[pipeline] commented shortcut issue %s", scID)
+		return nil
+	}
+	if isGitHub {
 		ghToken := s.resolveGitHubIssuesTokenForPipeline(ctx)
 		if ghToken == "" {
-			log.Printf("[pipeline] %s: no GitHub Issues token for move_issue, skipping", ctx.Name())
-			return injectDelivered, nil
+			log.Printf("[pipeline] %s: no GitHub Issues token for comment_issue, skipping", ctx.Name())
+			return nil
 		}
 		parts := strings.Split(resolvedIssueID, "/")
 		if len(parts) != 3 {
-			log.Printf("[pipeline] %s: GitHub issue ID %q is not owner/repo/number format — skipping move_issue", ctx.Name(), resolvedIssueID)
-			return injectDelivered, nil
+			log.Printf("[pipeline] %s: GitHub issue ID %q is not owner/repo/number format — skipping comment_issue", ctx.Name(), resolvedIssueID)
+			return nil
 		}
 		repo := parts[0] + "/" + parts[1]
 		var issueNum int
 		if _, err := fmt.Sscanf(parts[2], "%d", &issueNum); err != nil {
-			log.Printf("[pipeline] %s: invalid GitHub issue number in %q — skipping move_issue", ctx.Name(), resolvedIssueID)
-			return injectDelivered, nil
+			log.Printf("[pipeline] %s: invalid GitHub issue number in %q — skipping comment_issue", ctx.Name(), resolvedIssueID)
+			return nil
 		}
-		if err := moveGitHubIssue(ghToken, repo, issueNum, targetStatus, s.githubBaseURL); err != nil {
-			log.Printf("[pipeline] failed to move GitHub issue %s to %q: %v", resolvedIssueID, targetStatus, err)
-		} else {
-			log.Printf("[pipeline] moved GitHub issue %s to %q", resolvedIssueID, targetStatus)
+		s.publishHubNotice(clawID, fmt.Sprintf("[hub] ▶ Posting comment_issue for stage %q", stage.ID))
+		base := s.githubBaseURL
+		if err := s.retryTrackerMove("comment github issue", func() error {
+			if base == "" {
+				return commentGitHubIssue(ghToken, repo, issueNum, renderedBody)
+			}
+			return commentGitHubIssueWithBase(base, ghToken, repo, issueNum, renderedBody)
+		}); err != nil {
+			return handleErr("github", err)
 		}
-	} else {
-		// Linear issue
-		linearToken := s.resolveLinearTokenForPipeline(ctx)
-		if linearToken == "" {
-			log.Printf("[pipeline] %s: no Linear token for connection %q, skipping move_issue", ctx.Name(), ctx.TrackerName())
-			return injectDelivered, nil
-		}
-		if err := s.moveLinearIssueOnServer(linearToken, resolvedIssueID, targetStatus); err != nil {
-			log.Printf("[pipeline] failed to move issue %s to %q: %v", resolvedIssueID, targetStatus, err)
-		} else {
-			log.Printf("[pipeline] moved issue %s to %q", resolvedIssueID, targetStatus)
-		}
+		log.Printf("[pipeline] commented github issue %s", resolvedIssueID)
+		return nil
 	}
-	return injectDelivered, nil
+
+	// Linear
+	linearToken := s.resolveLinearTokenForPipeline(ctx)
+	if linearToken == "" {
+		log.Printf("[pipeline] %s: no Linear token for connection %q, skipping comment_issue", ctx.Name(), ctx.TrackerName())
+		return nil
+	}
+	s.publishHubNotice(clawID, fmt.Sprintf("[hub] ▶ Posting comment_issue for stage %q", stage.ID))
+	if err := s.retryTrackerMove("comment linear issue", func() error {
+		return s.commentLinearIssue(linearToken, resolvedIssueID, renderedBody)
+	}); err != nil {
+		return handleErr("linear", err)
+	}
+	log.Printf("[pipeline] commented linear issue %s", resolvedIssueID)
+	return nil
 }
 
 func pipelineTerminalWorkflowRunResult(stage pipeline.Stage, stageActionsSucceeded bool) (status, result string) {

@@ -715,7 +715,13 @@ func (s *Server) queryJiraIssues(tracker workspaceIssueTracker, since time.Time,
 	if base == "" {
 		return nil, fmt.Errorf("missing Jira base URL")
 	}
-	jql := fmt.Sprintf("updated >= %q", since.Format("2006-01-02 15:04"))
+	// Use relative date to avoid Jira interpreting naive datetime in user's profile timezone.
+	// since is UTC "now - last_tick"; convert to minutes ago (round up) and use "-Nm".
+	minutesAgo := int(time.Since(since).Minutes()) + 1
+	if minutesAgo < 1 {
+		minutesAgo = 1
+	}
+	jql := fmt.Sprintf("updated >= \"-%dm\"", minutesAgo)
 	if len(projects) > 0 {
 		quoted := make([]string, 0, len(projects))
 		for _, project := range projects {
@@ -734,7 +740,7 @@ func (s *Server) queryJiraIssues(tracker workspaceIssueTracker, since time.Time,
 		requestBody := map[string]any{
 			"jql":        jql,
 			"maxResults": 100,
-			"fields":     []string{"summary", "description", "status", "labels", "assignee", "project", "updated"},
+			"fields":     []string{"*all"},
 		}
 		if nextPageToken != "" {
 			requestBody["nextPageToken"] = nextPageToken
@@ -745,6 +751,8 @@ func (s *Server) queryJiraIssues(tracker workspaceIssueTracker, since time.Time,
 			return nil, err
 		}
 		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", "application/json")
+		req.Header.Set("User-Agent", "elasticclaw-hub/1.0")
 		applyJiraAuth(req, tracker)
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {

@@ -171,6 +171,47 @@ func TestConvertWorkflowPairWithConvertedWorkspace(t *testing.T) {
 	}
 }
 
+func TestConvertWorkflowV1CommentIssueEmitsWarning(t *testing.T) {
+	const commentIssueWorkflow = `
+schema_version: v1
+name: comment-issue-workflow
+
+trigger:
+  linear:
+    team_key: ELA
+    labels:
+      - agent-ready
+
+stages:
+  - id: working
+    label: Working
+    entry: true
+    on_enter:
+      inject: |
+        Start work.
+      comment_issue: "Starting work on {{.Issue.Identifier}}"
+  - id: done
+    label: Done
+    terminal: true
+`
+	res, err := convert.Convert(convert.KindWorkflow, []byte(commentIssueWorkflow), convert.Options{To: "2"})
+	if err != nil {
+		t.Fatalf("convert: %v", err)
+	}
+	joined := strings.Join(res.Warnings, "\n")
+	if !strings.Contains(joined, "on_enter.comment_issue: not auto-converted") {
+		t.Fatalf("expected comment_issue warning, got:\n%s", joined)
+	}
+	// Sibling inject must still convert into an agent.task effect.
+	resolved, err := v2.ParseAndValidateWorkflow(res.Output)
+	if err != nil {
+		t.Fatalf("validate converted: %v\n%s", err, res.Output)
+	}
+	if resolved.Workflow.States["working"].OnEnter == nil || len(resolved.Workflow.States["working"].OnEnter.Effects) == 0 {
+		t.Fatalf("expected working state to retain converted inject effect:\n%s", res.Output)
+	}
+}
+
 func TestConvertRejectsUnknownTarget(t *testing.T) {
 	_, err := convert.Convert(convert.KindWorkspace, []byte(sampleWorkspaceV1), convert.Options{To: "3"})
 	if err == nil || !strings.Contains(err.Error(), "no converter") {
