@@ -47,6 +47,8 @@
   --status-idle: #f59e0b;
   --status-offline: var(--muted-foreground);
   --status-error: #ef4444;
+  --text-error: #f87171;
+  --text-warning: #fbbf24;
   /* Heatmap — one blue family, evenly stepped in lightness, calm chroma. */
   --heatmap-1: oklch(0.34 0.055 250);
   --heatmap-2: oklch(0.45 0.075 250);
@@ -98,6 +100,8 @@
   --status-idle: #f59e0b;
   --status-offline: var(--muted-foreground);
   --status-error: #ef4444;
+  --text-error: #f87171;
+  --text-warning: #fbbf24;
   --heatmap-1: oklch(0.34 0.055 250);
   --heatmap-2: oklch(0.45 0.075 250);
   --heatmap-3: oklch(0.56 0.095 250);

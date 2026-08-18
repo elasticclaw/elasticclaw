@@ -35,14 +35,34 @@ function StatusIndicator({ status, isStreaming }: { status: ClawStatus; isStream
   }
   return (
     <span
-      className={cn(
-        "size-2 rounded-full shrink-0",
-        status === "connected" && "bg-green-500",
-        status === "idle" && "bg-amber-500",
-        status === "offline" && "bg-muted-foreground"
-      )}
+      className="size-2 rounded-full shrink-0"
+      style={{
+        backgroundColor:
+          status === "connected" ? "var(--status-connected)"
+          : status === "idle" ? "var(--status-idle)"
+          : "var(--status-offline)",
+      }}
     />
   )
+}
+
+/* Freshness for the status line: uptime while the agent is up, else how long
+   since the hub last saw it. */
+function rowAge(claw: Claw) {
+  if ((claw.status === "connected" || claw.isStreaming) && claw.uptime > 0) {
+    const minutes = Math.floor(claw.uptime / 60)
+    if (minutes < 60) return `${minutes}m`
+    return `${Math.floor(minutes / 60)}h ${String(minutes % 60).padStart(2, "0")}m`
+  }
+  if (!claw.last_seen) return undefined
+  const ms = Date.now() - new Date(claw.last_seen).getTime()
+  if (Number.isNaN(ms) || ms < 0) return undefined
+  const minutes = Math.floor(ms / 60_000)
+  if (minutes < 1) return "now"
+  if (minutes < 60) return `${minutes}m ago`
+  const hours = Math.floor(minutes / 60)
+  if (hours < 24) return `${hours}h ago`
+  return `${Math.floor(hours / 24)}d ago`
 }
 
 function UnreadBadge({ count }: { count: number }) {
@@ -120,7 +140,6 @@ export function ClawCard({ claw, isSelected, onClick, onTogglePin, onTagsChange,
     }
   }
   const hasUnread = claw.unreadCount > 0
-  const isPending = claw.status === "provisioning" || claw.status === "error"
   const railClass = claw.isStreaming
     ? "border-l-green-500"
     : claw.status === "provisioning"
@@ -141,9 +160,12 @@ export function ClawCard({ claw, isSelected, onClick, onTogglePin, onTagsChange,
         }
       }}
       className={cn(
-        "w-full min-w-0 text-left p-3 rounded-md transition-colors relative group border-l-2",
+        "w-full min-w-0 text-left p-3 rounded-md transition-colors relative group border-l-2 cursor-pointer",
         railClass,
-        isPending ? "cursor-pointer opacity-70 hover:bg-accent" : "cursor-pointer hover:bg-accent",
+        // Hover stays translucent so the opaque selected surface reads apart
+        // from it; only offline rows dim — provisioning and error need eyes.
+        "hover:bg-muted/45",
+        claw.status === "offline" && "opacity-75",
         isSelected && "bg-accent",
         hasUnread && !isSelected && "bg-blue-950/30"
       )}
@@ -203,14 +225,21 @@ export function ClawCard({ claw, isSelected, onClick, onTogglePin, onTagsChange,
           </button>
         )}
       </div>
-      {stateChip && <div className="pl-5 pr-1 pb-1">{stateChip}</div>}
-      {activityLine && (
-        <div className="min-w-0 pl-5 pr-1">
-          <span className="block truncate font-mono text-[10px] leading-4 text-muted-foreground" title={activityLine}>
-            {activityLine}
+      {/* Status line, one baseline row like the kit AgentRow: STATE chip, a
+          detail that is never empty (live activity, else the template), and
+          the age on the right edge. */}
+      <div className="mt-[3px] flex min-w-0 items-baseline gap-1.5 pl-5 pr-1">
+        {stateChip}
+        {(activityLine || claw.template) && (
+          <span
+            className={cn("min-w-0 flex-1 truncate font-mono text-[11px] leading-4", claw.status === "error" ? "text-[var(--text-error,var(--destructive))]" : "text-muted-foreground")}
+            title={activityLine || claw.template}
+          >
+            {activityLine || claw.template}
           </span>
-        </div>
-      )}
+        )}
+        {rowAge(claw) && <span className="ml-auto shrink-0 font-mono text-[10px] text-muted-foreground">{rowAge(claw)}</span>}
+      </div>
       <div className="min-w-0 max-w-[170px] overflow-hidden pl-5 pr-1">
         <BootstrapProgress claw={claw} variant="sidebar" />
       </div>
