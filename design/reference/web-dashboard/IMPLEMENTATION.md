@@ -157,3 +157,7 @@ GATE 6: full-suite green + final visual pass + departures documented below.
   role"; port shows requester name only) — `tickets_api.go:396` notes neither
   Linear nor GitHub exposes a reliable requester-role field for us to surface,
   so this is a data-availability gap, not a rendering gap. Kept as-is.
+- Heatmap grid anchors on a Monday with a partial last column (GitHub-style). The kit
+  fixture anchors 363+mondayIndex(end) days back from the end day, which lands the first
+  cell on the end's own weekday and drifts every row off its M-S label; diverged for
+  correctness (2026-08-19).
