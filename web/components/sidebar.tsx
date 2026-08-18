@@ -254,7 +254,9 @@ export function Sidebar({
   if (isCollapsed && !inDrawer) {
     sidebar = (
       <aside className="w-12 h-screen-safe flex flex-col border-r border-border bg-card">
-        <div className="p-2 border-b border-border flex flex-col items-center gap-1">
+        {/* py matches the board header so the rail's hairline meets it at the
+            same height; Create Agent moves below the line to keep it that way. */}
+        <div className="px-2 py-2.5 border-b border-border flex flex-col items-center">
           <Button
             variant="ghost"
             size="icon"
@@ -264,6 +266,8 @@ export function Sidebar({
           >
             <PanelLeft className="size-4" />
           </Button>
+        </div>
+        <div className="flex flex-col items-center gap-1 py-2 overflow-y-auto flex-1 min-h-0">
           {manualWorkflows.length > 0 && (
             <Button
               variant="ghost"
@@ -276,8 +280,6 @@ export function Sidebar({
               {loadingManualWorkflows ? <Loader2 className="size-4 animate-spin" /> : <Plus className="size-4" />}
             </Button>
           )}
-        </div>
-        <div className="flex flex-col items-center gap-1 py-2 overflow-y-auto flex-1 min-h-0">
           {allClaws.map((claw) => {
             const isSelected = claw.id === selectedClawId
             const hasUnread = claw.unreadCount > 0
