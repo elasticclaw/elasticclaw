@@ -1,0 +1,36 @@
+"use client"
+
+import { useEffect } from "react"
+import { CheckCircle2, ChevronRight, GitMerge, GitPullRequest, X, XCircle } from "lucide-react"
+import type { AnalyticsTicket, AnalyticsTicketRunSummary } from "@/lib/types"
+import { TicketStatusBadge, RunStatusBadge } from "@/components/ds"
+import { Button } from "@/components/ui/button"
+
+const usd = new Intl.NumberFormat(undefined, { style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: 2 })
+const caption = "text-[10px] font-medium uppercase tracking-[0.08em] text-muted-foreground"
+const duration = (ms?: number) => { if (!ms) return "—"; const s = Math.round(ms / 1000); return s < 60 ? `${s}s` : s < 3600 ? `${Math.floor(s / 60)}m ${s % 60 ? `${s % 60}s` : ""}` : `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m` }
+const date = (value?: number) => value ? new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", year: "numeric" }).format(new Date(value)) : "—"
+
+function Section({ title, children }: { title: string; children: React.ReactNode }) { return <section className="overflow-hidden rounded-lg border bg-card"><h3 className="border-b px-3 py-2 text-sm font-medium">{title}</h3><div className="space-y-2 p-3">{children}</div></section> }
+function Row({ label, value, mono }: { label: string; value: React.ReactNode; mono?: boolean }) { return <div className="flex gap-3 py-0.5 text-sm"><span className={`${caption} w-27 shrink-0`}>{label}</span><span className={mono ? "min-w-0 break-all font-mono text-xs" : "min-w-0"}>{value}</span></div> }
+
+export function TicketDetailPanel({ ticket, onClose, onOpenRun }: { ticket: AnalyticsTicket | null; onClose: () => void; onOpenRun: (run: AnalyticsTicketRunSummary) => void }) {
+  useEffect(() => { const close = (event: KeyboardEvent) => { if (event.key === "Escape") onClose() }; document.addEventListener("keydown", close); return () => document.removeEventListener("keydown", close) }, [onClose])
+  if (!ticket) return null
+  const open = ticket.prs.filter((pr) => pr.state === "open")
+  const delivered = ticket.status === "delivered"
+  const outcome = delivered ? "Work was delivered through a merged pull request." : ticket.status === "pr_open" ? "A pull request is open and awaiting review." : ticket.status === "in_progress" ? "Work is currently in progress." : "The work did not reach delivery."
+  return <>
+    <div className="fixed inset-0 z-[45] bg-black/50" onClick={onClose} aria-hidden="true" />
+    <aside className="fixed inset-y-0 right-0 z-[50] flex w-full max-w-[66vw] flex-col border-l bg-background shadow-xl">
+      <header className="flex items-start justify-between gap-3 border-b bg-card p-4"><div className="min-w-0 space-y-1"><div className="flex flex-wrap items-center gap-2"><TicketStatusBadge status={ticket.status} /><span className={caption}>{ticket.priority} priority</span><span className={caption}>via {ticket.source}</span></div><h2 className="text-pretty text-base font-semibold tracking-tight">{ticket.issueId}: {ticket.issueTitle}</h2><p className="text-xs text-muted-foreground">{ticket.requester || "Unknown requester"} · {ticket.team || "Unassigned"} · reported {date(ticket.reportedAt)}</p><p className="font-mono text-xs text-muted-foreground">{ticket.repo || "—"} · {ticket.workflowName || "—"}</p></div><div className="flex shrink-0 gap-1">{open[0] && <Button asChild variant="outline" size="sm"><a href={open[0].url} target="_blank" rel="noreferrer">Review PR</a></Button>}<Button variant="ghost" size="icon" className="size-8" onClick={onClose} aria-label="Close ticket detail"><X className="size-4" /></Button></div></header>
+      <div className="min-h-0 flex-1 space-y-4 overflow-auto p-4"><div className="grid grid-cols-2 gap-2 lg:grid-cols-4">{[["Lead time", duration(ticket.leadTime), delivered ? "report → merge" : "report → last activity"], ["Time to first run", duration(ticket.timeToFirstRun), "report → agent started"], ["Total cost", usd.format(ticket.cost), `${ticket.runCount} runs · ${ticket.attemptCount} attempts`], ["Human touches", String(ticket.humanTouches), ticket.humanTouches ? "reviews and nudges" : "fully autonomous"]].map(([label, value, sub]) => <div key={label} className="rounded-lg border bg-card p-3"><div className={caption}>{label}</div><div className="mt-1 text-lg font-semibold tabular-nums">{value}</div><div className="text-[11px] text-muted-foreground">{sub}</div></div>)}</div>
+        <Section title="What was asked for"><p className="text-sm leading-6">{ticket.ask || ticket.issueTitle}</p><Row label="Requested by" value={ticket.requester || "Unknown"} /><Row label="Team" value={ticket.team || "Unassigned"} /><Row label="Ticket" value={ticket.issueId} mono /></Section>
+        <Section title="Where it stands"><p className="text-sm text-muted-foreground">{outcome}</p></Section>
+        <Section title="Delivery">{ticket.prs.length ? ticket.prs.map((pr) => { const Icon = pr.state === "merged" ? GitMerge : pr.state === "closed" ? XCircle : GitPullRequest; const color = pr.state === "merged" ? "text-success" : pr.state === "open" ? "text-chart-1" : "text-muted-foreground"; return <a key={pr.id} href={pr.url} target="_blank" rel="noreferrer" className="flex items-center gap-2 rounded-md border px-3 py-2 text-sm hover:bg-accent"><Icon className={`size-4 ${color}`} /><span className="font-mono">{pr.repo}#{pr.prNumber}</span><span className={`${caption} ${color}`}>{pr.state}</span><span className="ml-auto font-mono text-[11px] text-muted-foreground">{pr.runId}</span></a> }) : <p className="text-sm text-muted-foreground">No delivery links recorded.</p>}</Section>
+        <Section title="How it went">{ticket.story.map((item, index) => <div key={item.id} className="flex gap-2"><div className="flex w-2 flex-col items-center"><i className={`mt-1.5 size-2 rounded-full ${item.kind === "good" ? "bg-success" : item.kind === "bad" ? "bg-destructive" : item.kind === "human" ? "bg-chart-1" : "bg-muted-foreground"}`} />{index < ticket.story.length - 1 && <i className="w-px flex-1 bg-border" />}</div><div className="min-w-0 flex-1 pb-2"><div className="flex gap-2 text-sm"><span>{item.label}{item.count > 1 ? ` (${item.count}×)` : ""}</span><span className="ml-auto font-mono text-[11px] text-muted-foreground">{date(item.time)}</span></div><p className="text-xs text-muted-foreground">{item.actor}</p></div></div>)}</Section>
+        <Section title="Runs on this ticket">{ticket.runs.map((run, index) => { const prs = ticket.prs.filter((pr) => pr.runId === run.runId); const produced = prs.length ? `produced ${prs.map((pr) => `#${pr.prNumber}`).join(", ")}` : run.status === "running" ? "still working" : "nothing"; return <button type="button" key={run.runId} onClick={() => onOpenRun(run)} className="flex w-full items-center gap-2 rounded-md border px-3 py-2 text-left text-sm hover:bg-accent"><span className={`${caption} w-10`}>Try {index + 1}</span><RunStatusBadge status={run.status} /><span className="min-w-0 flex-1 truncate text-muted-foreground">{produced}</span><span className="font-mono text-xs">{duration(run.lastActivity - run.startedAt)} · {usd.format(run.cost)}</span><ChevronRight className="size-4 text-muted-foreground" /></button> })}</Section>
+      </div>
+    </aside>
+  </>
+}

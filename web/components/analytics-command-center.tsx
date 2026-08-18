@@ -45,10 +45,11 @@ import type {
 } from "@/lib/types"
 import {
   FilterSelect,
-  RunDetailPanel,
   type DetailState,
   urlFilterKeys,
 } from "@/components/task-run-analytics-view"
+import { RunDetailPanel } from "@/components/run-detail-panel"
+import { TicketDetailPanel } from "@/components/ticket-detail-panel"
 import { ChartCard, DatePickerRange, KpiTile, RunStatusBadge, TicketStatusBadge } from "@/components/ds"
 import { WorkflowName } from "@/components/workflow-name"
 import { Button } from "@/components/ui/button"
@@ -206,6 +207,7 @@ export function AnalyticsCommandCenter() {
   const selectedRun = selectedRunId
     ? foundRun ?? (selectedRunCache?.runId === selectedRunId ? selectedRunCache.run : null)
     : null
+  const selectedTicket = selectedTicketId ? tickets.find((ticket) => ticket.issueId === selectedTicketId) ?? null : null
 
   const setFilters = useCallback(
     (updates: Record<string, string | undefined>) => {
@@ -575,6 +577,11 @@ export function AnalyticsCommandCenter() {
         loading={detailLoading}
         error={detailError}
         onClose={() => setSelectedRunId(null)}
+      />
+      <TicketDetailPanel
+        ticket={selectedTicket}
+        onClose={() => { setSelectedTicketId(null); setSelectedRunId(null) }}
+        onOpenRun={(ticketRun) => setSelectedRunId(ticketRun.runId)}
       />
     </main>
   )

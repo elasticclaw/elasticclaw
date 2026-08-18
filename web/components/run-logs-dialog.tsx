@@ -30,7 +30,7 @@ export function RunLogsDialog({ run, attempts }: { run: TaskRunSummary; attempts
       <Tooltip>
         <TooltipTrigger asChild>
           <span className="inline-flex" tabIndex={disabled ? 0 : undefined}>
-            <Button variant="outline" size="sm" disabled={disabled} onClick={() => setOpen(true)}>
+            <Button variant="outline" size="sm" disabled={disabled} onClick={() => { setTab("actions"); setOpen(true) }}>
               <FileTerminal className="size-4" />
               Agent logs
             </Button>
@@ -39,7 +39,7 @@ export function RunLogsDialog({ run, attempts }: { run: TaskRunSummary; attempts
         {disabled && <TooltipContent>This run is not linked to an agent, so logs are unavailable.</TooltipContent>}
       </Tooltip>
       <Dialog open={open} onOpenChange={setOpen}>
-        <DialogContent className="flex h-[min(85vh,800px)] flex-col gap-3 overflow-hidden p-0 sm:max-w-5xl">
+        <DialogContent className="z-[71] flex h-[min(85vh,800px)] flex-col gap-3 overflow-hidden p-0 sm:max-w-5xl">
           <DialogHeader className="shrink-0 border-b px-6 py-5 pr-12">
             <DialogTitle>Agent logs</DialogTitle>
             <DialogDescription>Agent activity and pipeline output for {run.ownerDisplayName || run.runId}.</DialogDescription>
@@ -67,7 +67,7 @@ export function RunLogsDialog({ run, attempts }: { run: TaskRunSummary; attempts
               <ClawActivityLog clawId={clawId} />
             </TabsContent>
             <TabsContent value="output" className="min-h-0 overflow-auto">
-              <OutputTab open={open} runId={run.runId} />
+              <OutputTab open={open} runId={run.runId} workspaceName={run.workspaceName} />
             </TabsContent>
           </Tabs>
         </DialogContent>
@@ -76,10 +76,13 @@ export function RunLogsDialog({ run, attempts }: { run: TaskRunSummary; attempts
   )
 }
 
-function OutputTab({ open, runId }: { open: boolean; runId: string }) {
+function OutputTab({ open, runId, workspaceName }: { open: boolean; runId: string; workspaceName: string }) {
   const [outputs, setOutputs] = useState<TaskRunOutput[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [traceId, setTraceId] = useState<string>()
+  const [minSeverity, setMinSeverity] = useState(0)
+  const [raw, setRaw] = useState(false)
   useEffect(() => {
     if (!open) return
     let cancelled = false
@@ -88,7 +91,7 @@ function OutputTab({ open, runId }: { open: boolean; runId: string }) {
       setLoading(true)
       setError(null)
       fetchTaskRunOutputs(runId)
-        .then((response) => { if (!cancelled) setOutputs(response.outputs) })
+        .then((response) => { if (!cancelled) { setOutputs(response.outputs); setTraceId(response.traceId) } })
         .catch((err) => { if (!cancelled) setError(err instanceof Error ? err.message : "Unable to load pipeline output") })
         .finally(() => { if (!cancelled) setLoading(false) })
     })
@@ -106,11 +109,15 @@ function OutputTab({ open, runId }: { open: boolean; runId: string }) {
   if (outputs.length === 0) return <EmptyState>No pipeline output was recorded for this run.</EmptyState>
   return (
     <div className="space-y-4">
+      <div className="flex flex-wrap items-center gap-2 rounded-lg border bg-card px-3 py-2 font-mono text-[11px]">
+        <AttrChip name="service.name" value="elasticclaw-pipeline" /><AttrChip name="deployment.environment" value={workspaceName} /><AttrChip name="trace_id" value={traceId || "—"} />
+        <div className="ml-auto flex items-center gap-1">{([ ["ALL", 0], ["DEBUG", 5], ["INFO", 9], ["WARN", 13], ["ERROR", 17] ] as const).map(([name, rank]) => <Button key={name} variant={minSeverity === rank ? "secondary" : "ghost"} size="sm" className="h-6 px-2 font-mono text-[10px]" onClick={() => setMinSeverity(rank)}>{name}</Button>)}<Button variant={raw ? "secondary" : "ghost"} size="sm" className="h-6 px-2 font-mono text-[10px]" onClick={() => setRaw((value) => !value)}>RAW</Button></div>
+      </div>
       {groups.map(([stage, stageOutputs]) => (
         <section key={stage} className="rounded-md border">
           <h3 className="border-b bg-muted/40 px-4 py-2 text-sm font-semibold">{stage}</h3>
           <div className="divide-y">
-            {stageOutputs.map((output) => <OutputBlock key={`${output.clawId}-${output.outputName}`} output={output} />)}
+            {stageOutputs.map((output) => <OutputBlock key={`${output.clawId}-${output.outputName}`} output={output} minSeverity={minSeverity} raw={raw} />)}
           </div>
         </section>
       ))}
@@ -118,19 +125,23 @@ function OutputTab({ open, runId }: { open: boolean; runId: string }) {
   )
 }
 
-function OutputBlock({ output }: { output: TaskRunOutput }) {
+function AttrChip({ name, value }: { name: string; value: unknown }) { return <span className="rounded bg-muted px-1"><span className="text-muted-foreground">{name}=</span>{String(value)}</span> }
+const severityTone: Record<string, string> = { DEBUG: "text-muted-foreground", INFO: "text-chart-1", WARN: "text-amber-600", ERROR: "text-destructive", FATAL: "bg-destructive text-destructive-foreground" }
+function OutputBlock({ output, minSeverity, raw }: { output: TaskRunOutput; minSeverity: number; raw: boolean }) {
+  const records = output.records.filter((record) => record.severityNumber >= minSeverity)
+  const counts = output.records.reduce<Record<string, number>>((result, record) => ({ ...result, [record.sev]: (result[record.sev] || 0) + 1 }), {})
+  const showRaw = raw || output.records.length === 0
   return (
     <div className="space-y-3 p-4">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div>
           <div className="text-sm font-medium">{output.outputName}</div>
-          {output.attemptId && <div className="text-xs text-muted-foreground">{output.attemptId}</div>}
+          <div className="font-mono text-xs text-muted-foreground">{output.spanKind} · span_id={output.spanId} · {(output.durationMs / 1000).toFixed(2)}s · exit={output.exitCode}</div>
         </div>
         <Badge className={cn("border", output.exitCode === 0 ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300" : "border-red-500/30 bg-red-500/10 text-red-700 dark:text-red-300")}>Exit {output.exitCode}</Badge>
       </div>
-      {output.stdout && <LogStream label="stdout" value={output.stdout} />}
-      {output.stderr && <LogStream label="stderr" value={output.stderr} error />}
-      {!output.stdout && !output.stderr && <p className="text-sm text-muted-foreground">This output did not write to stdout or stderr.</p>}
+      {showRaw ? <>{output.stdout && <LogStream label="stdout" value={output.stdout} />}{output.stderr && <LogStream label="stderr" value={output.stderr} error />}{!output.stdout && !output.stderr && <p className="text-sm text-muted-foreground">This output did not write to stdout or stderr.</p>}</> : records.length ? <div className="divide-y rounded-md border">{records.map((record, index) => <div key={index} className="grid grid-cols-[auto_auto_1fr] gap-2 px-3 py-2 font-mono text-xs"><span className="text-muted-foreground">{new Date(record.ts).toLocaleTimeString()}</span><span className={`w-12 text-center ${severityTone[record.sev] || ""}`}>{record.sev}</span><span className={record.severityNumber >= 17 ? "text-destructive" : ""}>{record.body} {Object.entries(record.attrs || {}).map(([key, value]) => <AttrChip key={key} name={key} value={value} />)}</span></div>)}</div> : <p className="text-sm text-muted-foreground">No records at this severity.</p>}
+      <div className="flex gap-2 border-t pt-2 font-mono text-[11px] text-muted-foreground"><span>{output.records.length} records</span>{Object.entries(counts).map(([name, count]) => <span key={name}>{count} {name.toLowerCase()}</span>)}<span className="ml-auto">{output.attemptId}</span></div>
     </div>
   )
 }
