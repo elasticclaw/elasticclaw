@@ -249,6 +249,18 @@ export function Sidebar({
   // Merge pinned + unpinned for collapsed view (order already applied by parent)
   const allClaws = [...pinnedClaws, ...claws.filter(c => !pinnedClaws.find(p => p.id === c.id))]
 
+  // The collapsed rail keeps the expanded list's grouping: same section order,
+  // same pinned-first sort — collapsing must not reshuffle the agents.
+  const railSections = (["attention", "working", "offline"] as AgentSectionName[])
+    .map((key) => ({
+      key,
+      meta: AGENT_SECTION[key],
+      items: allClaws
+        .filter((candidate) => agentSection(candidate, { isWaitingOnYou: isWaitingOnYou(allMessages[candidate.id] ?? []) }) === key)
+        .sort((a, b) => Number(b.pinned) - Number(a.pinned)),
+    }))
+    .filter((section) => section.items.length > 0)
+
   let sidebar: React.ReactElement
 
   if (isCollapsed && !inDrawer) {
@@ -280,7 +292,16 @@ export function Sidebar({
               {loadingManualWorkflows ? <Loader2 className="size-4 animate-spin" /> : <Plus className="size-4" />}
             </Button>
           )}
-          {allClaws.map((claw) => {
+          {railSections.map((section) => (
+            <div key={section.key} className="flex flex-col items-center gap-1">
+              {/* Section marker: a short bar in the section color, standing in
+                  for the expanded header. */}
+              <span
+                className="mt-1 h-0.5 w-6 rounded-full"
+                title={`${section.meta.label} (${section.items.length})`}
+                style={{ backgroundColor: `color-mix(in srgb, ${section.meta.color} 60%, transparent)` }}
+              />
+              {section.items.map((claw) => {
             const isSelected = claw.id === selectedClawId
             const hasUnread = claw.unreadCount > 0
             return (
@@ -317,6 +338,8 @@ export function Sidebar({
               </button>
             )
           })}
+            </div>
+          ))}
         </div>
 
         {/* Footer: view toggle + settings (admin) and sign out */}
