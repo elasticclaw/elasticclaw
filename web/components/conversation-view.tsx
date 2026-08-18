@@ -38,7 +38,8 @@ import {
 } from "@dnd-kit/sortable"
 import { CSS } from "@dnd-kit/utilities"
 import { MarkdownContent } from "@/components/markdown-content"
-import { COLOR_CLASSES } from "@/lib/mappers"
+import { COLOR_CLASSES, CLAW_COLORS } from "@/lib/mappers"
+import { TagEditor } from "@/components/tag-editor"
 import { useWindowedMessages } from "@/hooks/use-windowed-messages"
 import { useProgrammaticScrollFlag, usePinnedAutoScroll } from "@/hooks/use-pinned-scroll"
 import { Button } from "@/components/ui/button"
@@ -58,7 +59,7 @@ import { signOut } from "@/lib/sign-out"
 import { copyTextToClipboard, formatChatTranscript } from "@/lib/transcript"
 import { cn } from "@/lib/utils"
 import type { Claw, DependencyStatus, Message, ClawStatus } from "@/lib/types"
-import { getTerminalWsUrl, fetchClawPRs, type ClawPR } from "@/lib/api"
+import { getTerminalWsUrl, fetchClawPRs, patchClaw, type ClawPR } from "@/lib/api"
 import { buildAttachmentsFooter, splitAttachmentsFooter, formatBytes, type ParsedAttachment } from "@/lib/attachments"
 import { useAttachments } from "@/hooks/use-attachments"
 import { AttachmentChip } from "@/components/attachment-chip"
@@ -474,23 +475,44 @@ function ClawCardBack({ claw }: { claw: Claw }) {
         </p>
       </div>
 
-      {claw.tags.length > 0 && (
-        <div>
-          <h3 className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-2">
-            Tags
-          </h3>
-          <div className="flex flex-wrap gap-1.5">
-            {claw.tags.map((tag) => (
-              <span
-                key={tag}
-                className="inline-flex items-center px-2 py-1 text-xs font-medium bg-secondary text-muted-foreground rounded"
-              >
-                {tag}
-              </span>
-            ))}
-          </div>
+      {/* Editing moved here from the sidebar row, which stays read-only per
+          the kit AgentRow. */}
+      <div>
+        <h3 className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-2">Name</h3>
+        <input
+          defaultValue={claw.name}
+          onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur() }}
+          onBlur={(e) => {
+            const name = e.target.value.trim()
+            if (!name || name === claw.name) return
+            patchClaw(claw.id, { name }).catch((err) => console.error("Failed to rename", err))
+          }}
+          className="w-full rounded-md border border-input bg-input/30 px-2.5 py-1.5 font-mono text-sm outline-none focus-visible:border-ring"
+        />
+      </div>
+
+      <div>
+        <h3 className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-2">Tags</h3>
+        <TagEditor clawId={claw.id} tags={claw.tags} onTagsChange={() => {}} />
+      </div>
+
+      <div>
+        <h3 className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-2">Color</h3>
+        <div className="flex flex-wrap gap-1.5">
+          {CLAW_COLORS.map((color) => (
+            <button
+              key={color}
+              onClick={() => { patchClaw(claw.id, { color }).catch((err) => console.error("Failed to update color", err)) }}
+              className={cn(
+                "size-4 rounded-full transition-transform hover:scale-125",
+                COLOR_CLASSES[color]?.dot,
+                claw.color === color && "ring-2 ring-offset-1 ring-offset-background ring-foreground"
+              )}
+              title={color}
+            />
+          ))}
         </div>
-      )}
+      </div>
 
       {prs.length > 0 && (
         <div>
