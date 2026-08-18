@@ -333,6 +333,7 @@ export function AnalyticsCommandCenter() {
   )
 
   const loadTickets = useCallback(async (ticketCursor?: string) => {
+    const requestId = ++loadRequestId.current
     try {
       const effectiveFilters = { ...filters }
       if (!effectiveFilters.from && !effectiveFilters.to) {
@@ -343,10 +344,12 @@ export function AnalyticsCommandCenter() {
         effectiveFilters.to = to.toISOString()
       }
       const ticketsData = await fetchAnalyticsTickets({ ...effectiveFilters, cursor: ticketCursor })
+      if (requestId !== loadRequestId.current) return
       setTickets(ticketsData.tickets)
       setNextTicketCursor(ticketsData.nextCursor)
       setTicketTotal(ticketsData.total)
     } catch (loadError) {
+      if (requestId !== loadRequestId.current) return
       setError(loadError instanceof Error ? loadError.message : "Unable to load tickets")
     }
   }, [filters])

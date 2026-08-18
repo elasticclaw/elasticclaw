@@ -25,21 +25,48 @@ const TurnMessages = memo(function TurnMessages({
   showProse,
   firstClawMessageIndex,
   renderMessage,
-  renderStepWork,
+  showStepWork,
+  density,
+  expanded,
+  toggleKey,
+  clawId,
+  now,
+  forceRunning,
+  onToggle,
 }: {
   turn: Turn
   showProse: boolean
   firstClawMessageIndex: number
   renderMessage: (message: Message) => ReactNode
-  renderStepWork: () => ReactNode
+  showStepWork: boolean
+  density: TimelineDensity
+  expanded: boolean
+  toggleKey: string
+  clawId: string
+  now?: number
+  forceRunning: boolean
+  onToggle: (key: string, current: boolean) => void
 }) {
+  const stepWork = showStepWork ? (
+    <TurnCard
+      turn={turn}
+      density={density}
+      expanded={expanded}
+      toggleKey={toggleKey}
+      onToggle={onToggle}
+      clawId={clawId}
+      now={now}
+      forceRunning={forceRunning}
+    />
+  ) : null
+
   return <>
     {showProse && turn.userMessage && renderMessage(turn.userMessage)}
-    {firstClawMessageIndex === -1 && renderStepWork()}
+    {firstClawMessageIndex === -1 && stepWork}
     {turn.items.map((item, index) => item.type === "message" ? (
       <Fragment key={item.message.id}>
         {showProse && renderMessage(item.message)}
-        {index === firstClawMessageIndex && renderStepWork()}
+        {index === firstClawMessageIndex && stepWork}
       </Fragment>
     ) : null)}
   </>
@@ -180,18 +207,6 @@ export function AgentTimeline({
           const firstClawMessageIndex = turn.items.findIndex(
             (item) => item.type === "message" && item.message.role === "claw"
           )
-          const renderStepWork = () => showStepWork && (
-            <TurnCard
-              turn={turn}
-              density={density}
-              expanded={expanded}
-              toggleKey={toggleKey}
-              onToggle={toggleTurn}
-              clawId={clawId}
-              now={hasLiveWork && isLast ? now : undefined}
-              forceRunning={isLast && isWorking}
-            />
-          )
           return (
             <Fragment key={turn.id}>
               <TurnMessages
@@ -199,7 +214,14 @@ export function AgentTimeline({
                 showProse={showProse}
                 firstClawMessageIndex={firstClawMessageIndex}
                 renderMessage={renderMessage}
-                renderStepWork={renderStepWork}
+                showStepWork={showStepWork}
+                density={density}
+                expanded={expanded}
+                toggleKey={toggleKey}
+                clawId={clawId}
+                now={hasLiveWork && isLast ? now : undefined}
+                forceRunning={isLast && isWorking}
+                onToggle={toggleTurn}
               />
               {isLast && showProse ? streamingSlot : null}
             </Fragment>
