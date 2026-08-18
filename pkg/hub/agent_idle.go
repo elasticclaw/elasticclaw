@@ -45,14 +45,26 @@ import (
 // this way, 46 seconds after an auto-resume that fired 6 minutes into a fresh
 // connection following a hub restart.
 //
-// The grace is the bridge's own per-turn cap (agentTurnTimeout in
-// cmd/claw-bridge): past it no turn can still be secretly in flight, because
-// the bridge would have ended it. It is an upper bound, not a wait — the guard
-// lifts the moment a turn ends where this connection can see it, which any
-// working agent does within a turn or two. A claw that produces no turn
-// boundary at all is a stalled gateway, and that is claw_retry's job (it
-// replaces after 12 unhealthy heartbeats), not the idle resume's.
-const agentIdleResumeBlindGrace = time.Hour
+// The grace tracks minBusyTurnMax rather than the bridge cap it is derived
+// from. The bridge's cap (agentTurnTimeout, 1h) ends the WAIT, but teardown —
+// abortActiveSession, then createFreshSession — still runs before the error
+// reply reaches the hub, so a turn that began just before a reconnect can be
+// unwinding past connectedAt+1h. minBusyTurnMax already encodes exactly this
+// slack for the busy-turn watchdog; the three constants move together.
+//
+// It is an upper bound, not a wait: the guard lifts the moment a turn ends
+// where this connection can see it, which any working agent does within a turn
+// or two.
+//
+// Two limits worth stating rather than implying. The cap is a timer inside the
+// bridge PROCESS — if that process dies mid-turn the timer dies with it, and
+// whether the gateway-side run also stops depends on OpenClaw, which is
+// upstream and not verifiable here. And a claw that never produces a boundary
+// is NOT covered by claw_retry: that escalates on 12 consecutive
+// gateway_healthy=false heartbeats, while a stalled agent behind a healthy
+// gateway heartbeats healthy forever — the exact shape of NEXT-713. Between
+// the two mechanisms sits a gap where only the human agent_idle alert fires.
+const agentIdleResumeBlindGrace = minBusyTurnMax
 
 const (
 	lifecycleDefaultIdleAfter = 5 * time.Minute

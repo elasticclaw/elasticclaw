@@ -402,9 +402,13 @@ func TestAgentIdleResumeWaitsOutTheBlindWindow(t *testing.T) {
 	}
 }
 
-// The guard is an upper bound, not a permanent veto: past the bridge's own turn
-// cap no turn can still be secretly in flight, so a claw that never produced a
-// boundary is resumable again.
+// The guard is an upper bound, not a permanent veto: past the grace a claw that
+// never produced a boundary is resumable again.
+//
+// This is a spec test, not a regression test: it passes with the guard deleted
+// too. It guards against the guard becoming a permanent veto, which is the
+// opposite failure from the one TestAgentIdleResumeWaitsOutTheBlindWindow
+// covers.
 func TestAgentIdleResumeFiresAfterTheBlindWindowElapses(t *testing.T) {
 	s, db := newIdleResumeTestServer(t, nil)
 	const clawID = "resume-blind-elapsed"
@@ -417,5 +421,27 @@ func TestAgentIdleResumeFiresAfterTheBlindWindowElapses(t *testing.T) {
 	s.checkAgentIdleResume(time.Now(), clawID, old)
 	if got := idleResumeMessages(t, db, clawID); got != 1 {
 		t.Fatalf("past the blind window the resume must fire, got %d messages", got)
+	}
+}
+
+// An ordinary bridge reconnect must not re-blind the hub: the old connection
+// knew turn tracking was live and had no reservation open, so the new one
+// inherits that knowledge. Without this a claw whose bridge flaps more often
+// than the grace would never be resumed at all.
+func TestAgentIdleResumeCarriesTurnVisibilityAcrossReconnect(t *testing.T) {
+	prev := &clawConn{id: "c", turnBoundarySeen: true}
+	next := &clawConn{id: "c"}
+	next.turnBoundarySeen = prev.turnBoundarySeen && !prev.isBusyLocked()
+	if !next.turnBoundarySeen {
+		t.Fatal("a reconnect from an idle, turn-aware connection must stay unblinded")
+	}
+
+	// But a connection that had a turn reservation open may have lost sight of
+	// that turn, so the new one starts blind.
+	busy := &clawConn{id: "c", turnBoundarySeen: true, awaitingResponse: true}
+	after := &clawConn{id: "c"}
+	after.turnBoundarySeen = busy.turnBoundarySeen && !busy.isBusyLocked()
+	if after.turnBoundarySeen {
+		t.Fatal("a reconnect from a busy connection must start blind")
 	}
 }

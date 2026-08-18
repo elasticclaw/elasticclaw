@@ -2457,6 +2457,14 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 		cc.statusConn = old.statusConn
 		cc.lastStatusAt = old.lastStatusAt
 		cc.lastTurnFinishedAt = old.lastTurnFinishedAt
+		// Carry the turn-visibility flag across an ordinary bridge reconnect,
+		// but only from a connection that had no turn reservation open. The
+		// reservation is taken BEFORE the socket write in every delivery path,
+		// so "the old conn was not busy" means the hub had started no turn it
+		// could then lose sight of — the new conn inherits real knowledge, not
+		// an assumption. A hub restart has no old conn here and stays blind,
+		// which is the case that cost NEXT-724 a turn.
+		cc.turnBoundarySeen = old.turnBoundarySeen && !old.isBusyLocked()
 		old.mu.RUnlock()
 	}
 	if cc.lastTurnFinishedAt.IsZero() {
