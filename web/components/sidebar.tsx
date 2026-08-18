@@ -365,7 +365,8 @@ export function Sidebar({
           inDrawer ? "w-full h-full" : "w-[260px] h-screen-safe border-r border-border"
         )}
       >
-      <div className={cn("flex items-center justify-between p-4 border-b border-border", inDrawer && "pr-12")}>
+      {/* py matches the board header so the two hairlines meet at the same height. */}
+      <div className={cn("flex items-center justify-between px-4 py-2.5 border-b border-border", inDrawer && "pr-12")}>
         <h1 className="text-lg font-semibold tracking-tight text-foreground">
           {appName}
         </h1>
