@@ -97,6 +97,7 @@ interface ConversationViewProps {
   onDeselectClaw: () => void
   onReorderClaws: (ids: string[]) => void
   currentUserLogin?: string | null
+  currentUserResolved: boolean
   /** Mobile only: opens the sidebar drawer from the board header hamburger. */
   onOpenMenu?: () => void
 }
@@ -126,14 +127,19 @@ function fetchCachedClawPRs(clawId: string) {
 
 function useClawPRs(clawId: string, enabled: boolean) {
   const [prs, setPrs] = useState<ClawPR[]>(() => clawPRCache.get(clawId) ?? [])
+  const [hasLoaded, setHasLoaded] = useState(() => clawPRCache.has(clawId))
 
   useEffect(() => {
     setPrs(clawPRCache.get(clawId) ?? [])
+    setHasLoaded(clawPRCache.has(clawId))
     if (!enabled) return
-    void fetchCachedClawPRs(clawId).then(setPrs).catch(() => {})
+    void fetchCachedClawPRs(clawId).then((nextPRs) => {
+      setPrs(nextPRs)
+      setHasLoaded(true)
+    }).catch(() => {})
   }, [clawId, enabled])
 
-  return prs
+  return { prs, hasLoaded }
 }
 
 // The typewriter reveals text every animation frame, but re-parsing markdown that
@@ -441,7 +447,7 @@ function KillConfirmDialog({ clawName, open, onConfirm, onCancel }: {
 }
 
 function ClawCardBack({ claw, open }: { claw: Claw; open: boolean }) {
-  const prs = useClawPRs(claw.id, open)
+  const { prs } = useClawPRs(claw.id, open)
 
   return (
     /* max-md cap mirrors the front face's message list: mobile cards are
@@ -567,6 +573,7 @@ const ClawBoardCard = memo(function ClawBoardCard({
   onKill,
   dragHandleProps,
   currentUserLogin,
+  currentUserResolved,
 }: { 
   claw: Claw
   messages: Message[]
@@ -576,6 +583,7 @@ const ClawBoardCard = memo(function ClawBoardCard({
   onKill: (clawId: string) => void
   dragHandleProps?: React.HTMLAttributes<HTMLElement>
   currentUserLogin?: string | null
+  currentUserResolved: boolean
 }) {
   const [input, setInput] = useState("")
   const cardTextareaRef = useRef<HTMLTextAreaElement>(null)
@@ -586,7 +594,8 @@ const ClawBoardCard = memo(function ClawBoardCard({
   const [detailsOpen, setDetailsOpen] = useState(false)
   const [copied, setCopied] = useState(false)
   const [prsOpen, setPrsOpen] = useState(false)
-  const prs = useClawPRs(claw.id, prsOpen)
+  const { prs, hasLoaded: hasLoadedPrs } = useClawPRs(claw.id, prsOpen)
+  const openPRCount = hasLoadedPrs ? prs.length : claw.openPrCount
   const hasUnread = claw.unreadCount > 0
   const isPending = claw.status === "provisioning" || claw.status === "error" || claw.status === "offline"
   const msgScrollRef = useRef<HTMLDivElement>(null)
@@ -775,7 +784,7 @@ const ClawBoardCard = memo(function ClawBoardCard({
                 <div className="mt-1 flex items-center gap-1 text-xs text-muted-foreground"><span className="truncate">{claw.template}</span><span>·</span><span className={cn("font-mono shrink-0", claw.status === "provisioning" && "text-[var(--status-provisioning)]", claw.status === "error" && "text-[var(--status-error)]")}>{claw.status === "provisioning" ? "starting..." : claw.status === "error" ? "error" : formatUptime(claw.uptime)}</span></div>
               </div>
               <div className="flex shrink-0 items-center gap-1 border-l border-border pl-2">
-                <Popover open={prsOpen} onOpenChange={setPrsOpen}><PopoverTrigger asChild><CardAction icon={GitPullRequest} label={prs.length > 0 ? `Open ${prs.length} pull request${prs.length === 1 ? "" : "s"}` : "Pull requests"} count={prs.length || undefined} tone="var(--chart-1)" onClick={(event) => event.stopPropagation()} /></PopoverTrigger><PopoverContent className="w-72 p-2" align="end"><span className="block px-2 py-1 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">Open pull requests</span>{prs.length > 0 ? prs.map((pr) => <a key={pr.id} href={pr.url} target="_blank" rel="noopener noreferrer" onClick={(event) => event.stopPropagation()} className="block rounded px-2 py-1 hover:bg-accent" aria-label={`Open ${pr.repo} pull request #${pr.prNumber}: ${pr.title}`} title={`${pr.repo}#${pr.prNumber}: ${pr.title}`}><div className="font-mono text-xs text-[var(--chart-1)]">{pr.repo}#{pr.prNumber}</div><div className="truncate text-xs text-muted-foreground">{pr.title}</div></a>) : <p className="px-2 py-1 text-xs text-muted-foreground">No open pull requests.</p>}</PopoverContent></Popover>
+                {openPRCount > 0 && <Popover open={prsOpen} onOpenChange={setPrsOpen}><PopoverTrigger asChild><CardAction icon={GitPullRequest} label={`Open ${openPRCount} pull request${openPRCount === 1 ? "" : "s"}`} count={openPRCount} tone="var(--chart-1)" onClick={(event) => event.stopPropagation()} /></PopoverTrigger><PopoverContent className="w-72 p-2" align="end"><span className="block px-2 py-1 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">Open pull requests</span>{prs.length > 0 ? prs.map((pr) => <a key={pr.id} href={pr.url} target="_blank" rel="noopener noreferrer" onClick={(event) => event.stopPropagation()} className="block rounded px-2 py-1 hover:bg-accent" aria-label={`Open ${pr.repo} pull request #${pr.prNumber}: ${pr.title}`} title={`${pr.repo}#${pr.prNumber}: ${pr.title}`}><div className="font-mono text-xs text-[var(--chart-1)]">{pr.repo}#{pr.prNumber}</div><div className="truncate text-xs text-muted-foreground">{pr.title}</div></a>) : <p className="px-2 py-1 text-xs text-muted-foreground">No open pull requests.</p>}</PopoverContent></Popover>}
                 <CardAction icon={copied ? CheckCircle2 : ClipboardCopy} label={copied ? "Transcript copied" : "Copy transcript"} confirmed={copied} onClick={copyTranscript} />
                 <CardAction icon={Info} label="Agent details" onClick={(event) => { event.stopPropagation(); setDetailsOpen(true) }} />
               </div>
@@ -885,7 +894,7 @@ const ClawBoardCard = memo(function ClawBoardCard({
                   const step = demoteStaleRunning(pairActivitySteps([message]), false)[0]
                   return step ? <StepRow key={message.id} step={step} density="card" /> : null
                 }
-                const author = messageAuthor(message, currentUserLogin)
+                const author = messageAuthor(message, currentUserLogin, currentUserResolved)
                 const { body: cardBody, attachments: cardAttachments } = author.kind === "self" || author.kind === "teammate" || author.kind === "unknown"
                   ? splitAttachmentsFooter(message.content)
                   : { body: message.content, attachments: [] as ParsedAttachment[] }
@@ -1091,6 +1100,7 @@ const SortableClawBoardCard = memo(function SortableClawBoardCard({
   onSendMessage,
   onKill,
   currentUserLogin,
+  currentUserResolved,
 }: {
   claw: Claw
   messages: Message[]
@@ -1099,6 +1109,7 @@ const SortableClawBoardCard = memo(function SortableClawBoardCard({
   onSendMessage: (clawId: string, content: string) => void
   onKill: (clawId: string) => void
   currentUserLogin?: string | null
+  currentUserResolved: boolean
 }) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } =
     useSortable({ id: claw.id })
@@ -1120,6 +1131,7 @@ const SortableClawBoardCard = memo(function SortableClawBoardCard({
         onSendMessage={onSendMessage}
         onKill={onKill}
         currentUserLogin={currentUserLogin}
+        currentUserResolved={currentUserResolved}
         dragHandleProps={{ ...attributes, ...listeners }}
       />
     </div>
@@ -1160,12 +1172,14 @@ const MessageBubble = memo(function MessageBubble({
   clawName,
   clawColor,
   currentUserLogin,
+  currentUserResolved,
 }: {
   message: Message
   clawId: string
   clawName: string
   clawColor?: string
   currentUserLogin?: string | null
+  currentUserResolved: boolean
 }) {
   if (message.role === "system") {
     if (message.content === "__TOOL_GAP__") {
@@ -1213,7 +1227,7 @@ const MessageBubble = memo(function MessageBubble({
     )
   }
 
-  const author = messageAuthor(message, currentUserLogin)
+  const author = messageAuthor(message, currentUserLogin, currentUserResolved)
   const isUser = author.kind === "self" || author.kind === "teammate" || author.kind === "unknown"
   const isHub = message.role === "hub"
 
@@ -1290,6 +1304,7 @@ function ClawChatView({
   onKill,
   onDeselectClaw,
   currentUserLogin,
+  currentUserResolved,
 }: {
   claw: Claw
   messages: Message[]
@@ -1298,6 +1313,7 @@ function ClawChatView({
   onKill: () => void
   onDeselectClaw: () => void
   currentUserLogin?: string | null
+  currentUserResolved: boolean
 }) {
   const [input, setInput] = useState("")
   const [cmdToast, setCmdToast] = useState<string | null>(null)
@@ -1400,9 +1416,10 @@ function ClawChatView({
         clawName={claw.name}
         clawColor={claw.color}
         currentUserLogin={currentUserLogin}
+        currentUserResolved={currentUserResolved}
       />
     ),
-    [claw.id, claw.name, claw.color, currentUserLogin]
+    [claw.id, claw.name, claw.color, currentUserLogin, currentUserResolved]
   )
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -1720,6 +1737,7 @@ export function ConversationView({
   onReorderClaws,
   onOpenMenu,
   currentUserLogin,
+  currentUserResolved,
 }: ConversationViewProps) {
   const boardRef = useRef<HTMLDivElement>(null)
   const [activeDragClaw, setActiveDragClaw] = useState<Claw | null>(null)
@@ -1863,7 +1881,7 @@ export function ConversationView({
             /* Single-column vertical list: full-width cards, no reordering,
                no scroll arrows — one-finger vertical scrolling only. */
             <div className="h-full overflow-y-auto overflow-x-hidden p-3 space-y-5">
-              {boardSections.filter((section) => section.items.length).map((section) => <BoardSection key={section.key} section={section} isMobile><div className="flex flex-col gap-3">{section.items.map((c) => <ClawBoardCard key={c.id} claw={c} messages={allMessages[c.id] ?? EMPTY_MESSAGES} streamingBuffer={streamingBuffers[c.id]} onClick={handleCardClick} onSendMessage={handleCardSendMessage} onKill={handleCardKill} currentUserLogin={currentUserLogin} />)}</div></BoardSection>)}
+              {boardSections.filter((section) => section.items.length).map((section) => <BoardSection key={section.key} section={section} isMobile><div className="flex flex-col gap-3">{section.items.map((c) => <ClawBoardCard key={c.id} claw={c} messages={allMessages[c.id] ?? EMPTY_MESSAGES} streamingBuffer={streamingBuffers[c.id]} onClick={handleCardClick} onSendMessage={handleCardSendMessage} onKill={handleCardKill} currentUserLogin={currentUserLogin} currentUserResolved={currentUserResolved} />)}</div></BoardSection>)}
             </div>
           ) : (
           <>
@@ -1887,7 +1905,7 @@ export function ConversationView({
                 className="flex gap-6 h-full overflow-x-auto overflow-y-hidden p-3 items-stretch"
                 style={{ scrollbarWidth: "none", msOverflowStyle: "none" }}
               >
-                {boardSections.filter((section) => section.items.length).map((section) => <BoardSection key={section.key} section={section} className="h-full shrink-0"><SortableContext items={section.items.map((c) => c.id)} strategy={horizontalListSortingStrategy}><div className="flex flex-1 min-h-0 gap-3">{section.items.map((c) => <SortableClawBoardCard key={c.id} claw={c} messages={allMessages[c.id] ?? EMPTY_MESSAGES} streamingBuffer={streamingBuffers[c.id]} onClick={handleCardClick} onSendMessage={handleCardSendMessage} onKill={handleCardKill} currentUserLogin={currentUserLogin} />)}</div></SortableContext></BoardSection>)}
+                {boardSections.filter((section) => section.items.length).map((section) => <BoardSection key={section.key} section={section} className="h-full shrink-0"><SortableContext items={section.items.map((c) => c.id)} strategy={horizontalListSortingStrategy}><div className="flex flex-1 min-h-0 gap-3">{section.items.map((c) => <SortableClawBoardCard key={c.id} claw={c} messages={allMessages[c.id] ?? EMPTY_MESSAGES} streamingBuffer={streamingBuffers[c.id]} onClick={handleCardClick} onSendMessage={handleCardSendMessage} onKill={handleCardKill} currentUserLogin={currentUserLogin} currentUserResolved={currentUserResolved} />)}</div></SortableContext></BoardSection>)}
               </div>
 
             {/* Ghost card following cursor during drag */}
@@ -1902,6 +1920,7 @@ export function ConversationView({
                     onSendMessage={noopClawMessageAction}
                     onKill={noopClawAction}
                     currentUserLogin={currentUserLogin}
+                    currentUserResolved={currentUserResolved}
                   />
                 </div>
               ) : null}
@@ -1933,6 +1952,7 @@ export function ConversationView({
       onKill={onKill}
       onDeselectClaw={onDeselectClaw}
       currentUserLogin={currentUserLogin}
+      currentUserResolved={currentUserResolved}
     />
   )
 }

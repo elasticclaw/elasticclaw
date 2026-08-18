@@ -1315,6 +1315,45 @@ func (s *Server) handleClaws(w http.ResponseWriter, r *http.Request) {
 	if out == nil {
 		out = []types.Claw{}
 	}
+	if len(out) > 0 {
+		placeholders := make([]string, len(out))
+		args := make([]any, len(out))
+		for i, claw := range out {
+			placeholders[i] = "?"
+			args[i] = claw.ID
+		}
+		prRows, err := s.db.Query(
+			`SELECT claw_id, COUNT(*) FROM claw_prs WHERE claw_id IN (`+strings.Join(placeholders, ",")+`) AND state = 'open' GROUP BY claw_id`,
+			args...,
+		)
+		if err != nil {
+			log.Printf("handleClaws open PR count query error: %v", err)
+			http.Error(w, fmt.Sprintf("db error: %v", err), http.StatusInternalServerError)
+			return
+		}
+		openPRCounts := make(map[string]int, len(out))
+		for prRows.Next() {
+			var clawID string
+			var count int
+			if err := prRows.Scan(&clawID, &count); err != nil {
+				prRows.Close()
+				log.Printf("handleClaws open PR count scan error: %v", err)
+				http.Error(w, fmt.Sprintf("db error: %v", err), http.StatusInternalServerError)
+				return
+			}
+			openPRCounts[clawID] = count
+		}
+		if err := prRows.Err(); err != nil {
+			prRows.Close()
+			log.Printf("handleClaws open PR count rows error: %v", err)
+			http.Error(w, fmt.Sprintf("db error: %v", err), http.StatusInternalServerError)
+			return
+		}
+		prRows.Close()
+		for i := range out {
+			out[i].OpenPRCount = openPRCounts[out[i].ID]
+		}
+	}
 	jsonOK(w, out)
 }
 

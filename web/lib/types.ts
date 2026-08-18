@@ -12,6 +12,7 @@ export interface Claw {
   tags: string[]
   color: string // accent color name, e.g. "blue", "emerald"
   contextUsage: number // 0-100 percentage, hardcoded 0 for now
+  openPrCount: number
   description?: string
   reason?: string // stop reason when status is error
   bootstrap_status?: string
@@ -75,6 +76,7 @@ export interface ApiClaw {
   created_at: string
   tenant_id: string
   context_usage?: number
+  open_pr_count?: number
   tags?: string[]
   color?: string
   ssh_host?: string

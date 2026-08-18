@@ -375,6 +375,7 @@ export function HomeShell() {
             loading={loading}
             hubError={hubError}
             currentUserLogin={currentUserLogin}
+            currentUserResolved={adminChecked}
             onOpenMenu={isMobile ? () => setDrawerOpen(true) : undefined}
           />
         )}

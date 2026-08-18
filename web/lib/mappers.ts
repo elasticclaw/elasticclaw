@@ -106,6 +106,7 @@ export function mapApiClaw(
     tags: overrides.tags ?? (apiClaw.tags ?? []),
     color: overrides.color ?? (apiClaw.color || autoColor(apiClaw.name)),
     contextUsage: overrides.contextUsage ?? apiClaw.context_usage ?? 0,
+    openPrCount: overrides.openPrCount ?? apiClaw.open_pr_count ?? 0,
     description: overrides.description,
     reason: overrides.reason,
     bootstrap_status: overrides.bootstrap_status ?? apiClaw.bootstrap_status,
