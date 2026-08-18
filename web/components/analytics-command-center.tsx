@@ -677,7 +677,7 @@ function FilterBar({
         <span className="self-stretch border-l" aria-hidden="true" />
         <div className="flex flex-1 flex-wrap gap-2">
       {selectFilters.map(([label, key, values]) => (
-        <div key={key} className="w-[158px]">
+        <div key={key} className="w-[200px]">
           <MultiFilterSelect
             label={label}
             value={filters[key]}
