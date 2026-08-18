@@ -43,3 +43,6 @@ bootopt
 # Docker dev environment (contains secrets — never commit)
 docker/hub.dev.yaml
 tmp/
+
+# GitHub App private keys pasted for rotation (never commit)
+*.pem

@@ -11,8 +11,9 @@ written to disk and swapped into the running config, and token providers are
 built per use from the current config.
 
 Usage:
-    hack/rotate-github-app-key.py --pem ~/Downloads/new-key.pem
-    hack/rotate-github-app-key.py --pem ... --check-only   # validate, write nothing
+    paste the new key into hack/github-app-key.pem (gitignored), then
+    hack/rotate-github-app-key.py --check-only   # validate, write nothing
+    hack/rotate-github-app-key.py                # rotate hub + workspace
 
 Reads the hub URL and admin token from ~/.elasticclaw/config.yaml (profile
 "faster" by default); override with --url / --token or ELASTICCLAW_HUB_URL /
@@ -32,6 +33,7 @@ import urllib.error
 import urllib.request
 
 CONFIG_PATH = os.path.expanduser("~/.elasticclaw/config.yaml")
+DEFAULT_PEM = os.path.join(os.path.dirname(os.path.abspath(__file__)), "github-app-key.pem")
 MANAGED_DIR = ".elasticclaw-managed"
 
 
@@ -100,8 +102,10 @@ class Hub:
 
 def load_pem(path: str) -> str:
     if not os.path.exists(path):
-        die(f"PEM file not found: {path}")
+        die(f"PEM file not found: {path} (copy hack/github-app-key.pem.example and paste the key)")
     pem = open(path, encoding="utf-8").read().strip()
+    if "<paste" in pem:
+        die(f"{path} still has the placeholder — paste the real key into it")
     if "PRIVATE KEY" not in pem:
         die(f"{path} does not look like a private key PEM")
     if subprocess.run(["which", "openssl"], capture_output=True).returncode == 0:
@@ -154,7 +158,11 @@ def backup_remote(profile: dict, workspace: str) -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="Rotate the hub + workspace GitHub App private key")
-    ap.add_argument("--pem", required=True, help="path to the new GitHub App private key (.pem)")
+    ap.add_argument(
+        "--pem",
+        default=DEFAULT_PEM,
+        help="path to the new GitHub App private key (default: hack/github-app-key.pem)",
+    )
     ap.add_argument("--profile", default="faster", help="local CLI profile (default: faster)")
     ap.add_argument("--workspace", default="faster", help="hub workspace (default: faster)")
     ap.add_argument("--app-id", type=int, default=0, help="app id to rotate (default: the only configured one)")
