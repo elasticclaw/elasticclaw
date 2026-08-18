@@ -261,7 +261,10 @@ export const Sidebar = memo(function Sidebar({
         .filter((candidate) => agentSections.get(candidate.id) === key)
         .sort((a, b) => Number(b.pinned) - Number(a.pinned)),
     }))
-    .filter((section) => section.items.length > 0), [allClaws, agentSections])
+    .filter((section) => section.items.length > 0)
+    // ids computed here so SortableContext gets a stable array — a fresh one
+    // per render re-renders every useSortable row through context.
+    .map((section) => ({ ...section, ids: section.items.map((candidate) => candidate.id) })), [allClaws, agentSections])
 
   let sidebar: React.ReactElement
 
@@ -504,7 +507,7 @@ export const Sidebar = memo(function Sidebar({
                 No agents found
               </p>
             ) : (
-              sections.map(({ key, meta, items }) => {
+              sections.map(({ key, meta, items, ids }) => {
                 const Icon = meta.icon
                 return <section key={key} className="min-w-0 pb-1">
                   <div className="sticky top-0 left-0 right-0 z-10 flex w-full min-w-0 items-center gap-2 border-y px-3 py-1.5" style={{ backgroundColor: `color-mix(in srgb, ${meta.color} 10%, var(--card))`, borderColor: `color-mix(in srgb, ${meta.color} 30%, var(--border))` }}>
@@ -515,7 +518,7 @@ export const Sidebar = memo(function Sidebar({
                   </div>
                   <div className="space-y-1 px-2 py-2">
                     {items.length === 0 ? <p className="px-2 py-1 text-xs text-muted-foreground">{meta.empty}</p> :
-                      <SortableContext items={items.map((candidate) => candidate.id)} strategy={verticalListSortingStrategy}>
+                      <SortableContext items={ids} strategy={verticalListSortingStrategy}>
                         {items.map((candidate) => <SortableClawCard key={candidate.id} claw={candidate} isSelected={candidate.id === selectedClawId} onSelectClaw={onSelectClaw} onTogglePin={onTogglePin} activityLine={activityLines?.[candidate.id]} />)}
                       </SortableContext>}
                   </div>

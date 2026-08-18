@@ -141,7 +141,7 @@ function localDayRange(date: Date) {
   return { from: from.toISOString(), to: to.toISOString() }
 }
 
-export function AnalyticsCommandCenter() {
+function AnalyticsCommandCenterInner() {
   const pathname = usePathname()
   const params = useSearchParams()
   const paramsKey = params.toString()
@@ -451,6 +451,14 @@ export function AnalyticsCommandCenter() {
     const range = isoDayRange(day)
     return range.from === filters.from && range.to === filters.to ? day : undefined
   })()
+  // Stable handlers so the memoized Heatmap (and its 364 memoized cells) only
+  // re-render when the selection actually changes.
+  const selectedDayRef = useRef<string | false | undefined>(undefined)
+  selectedDayRef.current = selectedDay
+  const selectDay = useCallback((day: string) => {
+    setFilters(day === selectedDayRef.current ? { from: undefined, to: undefined } : isoDayRange(day))
+  }, [setFilters])
+  const clearSelectedDay = useCallback(() => setFilters({ from: undefined, to: undefined }), [setFilters])
   const modelData = useModelData(costs)
 
   return (
@@ -563,8 +571,8 @@ export function AnalyticsCommandCenter() {
           heatmap={heatmap}
           maxCost={maxHeatCost}
           selectedDay={selectedDay}
-          onSelectDay={(day) => setFilters(day === selectedDay ? { from: undefined, to: undefined } : isoDayRange(day))}
-          onClearSelectedDay={() => setFilters({ from: undefined, to: undefined })}
+          onSelectDay={selectDay}
+          onClearSelectedDay={clearSelectedDay}
         />
         </ChartCard>
 
@@ -727,7 +735,7 @@ const HeatmapCell = memo(function HeatmapCell({ iso, point, level, selected, onS
   return <button onClick={() => onSelectDay(iso)} onMouseEnter={(event) => onShowTooltip(iso, point, event.currentTarget)} onMouseLeave={onHideTooltip} onFocus={(event) => onShowTooltip(iso, point, event.currentTarget)} onBlur={onHideTooltip} className={`aspect-square cursor-pointer rounded-sm border border-black/5 transition-shadow hover:ring-2 hover:ring-ring hover:ring-offset-1 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1 ${selected ? "ring-2 ring-primary ring-offset-1" : ""}`} style={{ background: level ? `var(--heatmap-${level})` : "var(--muted)" }} />
 })
 
-function Heatmap({ heatmap, maxCost, selectedDay, onSelectDay, onClearSelectedDay }: { heatmap: ReturnType<typeof useHeatmap>; maxCost: number; selectedDay?: string; onSelectDay: (day: string) => void; onClearSelectedDay: () => void }) {
+const Heatmap = memo(function Heatmap({ heatmap, maxCost, selectedDay, onSelectDay, onClearSelectedDay }: { heatmap: ReturnType<typeof useHeatmap>; maxCost: number; selectedDay?: string; onSelectDay: (day: string) => void; onClearSelectedDay: () => void }) {
   const containerRef = useRef<HTMLDivElement>(null)
   const [tooltip, setTooltip] = useState<{ iso: string; point: HeatmapPoint; x: number; y: number } | null>(null)
   const showTooltip = useCallback((iso: string, point: HeatmapPoint, target: HTMLButtonElement) => {
@@ -739,7 +747,7 @@ function Heatmap({ heatmap, maxCost, selectedDay, onSelectDay, onClearSelectedDa
   const selectedDayLabel = selectedDay && new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", year: "numeric" }).format(new Date(`${selectedDay}T00:00:00`))
 
   return <div ref={containerRef} className="relative">{selectedDayLabel && <div className="mb-4 flex items-center gap-1"><span className="inline-flex items-center gap-1 rounded-full bg-muted px-2 py-0.5 text-xs text-muted-foreground">{selectedDayLabel}<button type="button" aria-label={`Clear ${selectedDayLabel} filter`} onClick={onClearSelectedDay} className="rounded-full px-0.5 text-foreground hover:bg-accent">×</button></span></div>}<div className="flex gap-2"><div className="flex w-6 flex-col text-center text-[10px] text-muted-foreground"><div className="mb-1 h-4" aria-hidden="true" /><div className="grid flex-1 grid-rows-7 gap-[3px]">{["M", "T", "W", "T", "F", "S", "S"].map((day, index) => <span key={`${day}-${index}`} className="flex items-center justify-center">{day}</span>)}</div></div><div className="min-w-0 flex-1"><div className="relative mb-1 h-4 text-[10px] text-muted-foreground">{heatmap.monthLabels.map(({ week, label }) => <span key={`${week}-${label}`} className="absolute" style={{ left: `${(week / 52) * 100}%` }}>{label}</span>)}</div><div className="grid grid-flow-col grid-cols-[repeat(52,minmax(0,1fr))] grid-rows-7 gap-[3px]">{heatmap.days.map(({ iso, point }) => { const level = point?.costUsd ? Math.min(5, Math.ceil((point.costUsd / maxCost) * 5)) : 0; return <HeatmapCell key={iso} iso={iso} point={point} level={level} selected={iso === selectedDay} onSelectDay={onSelectDay} onShowTooltip={showTooltip} onHideTooltip={hideTooltip} /> })}</div></div></div>{tooltip && <div role="tooltip" className="pointer-events-none absolute z-10 rounded-lg border bg-card px-2 py-1.5 text-xs text-foreground shadow-md" style={{ left: tooltip.x, top: tooltip.y }}><div>{new Intl.DateTimeFormat(undefined, { weekday: "short", month: "short", day: "numeric", year: "numeric" }).format(new Date(`${tooltip.iso}T00:00:00`))}</div><div className="text-muted-foreground">{usdWhole.format(tooltip.point?.costUsd ?? 0)} · {tooltip.point?.runCount ?? 0} runs</div></div>}<div className="mt-3 flex justify-end gap-1 text-xs text-muted-foreground">Less {Array.from({ length: 5 }, (_, index) => <i key={index} className="size-3 rounded-sm" style={{ background: `var(--heatmap-${index + 1})` }} />)} More</div></div>
-}
+})
 
 function useModelData(costs?: CostOverview) { return useMemo(() => { const models = (costs?.seriesByModel ?? []).slice(0, 4); return (costs?.dailySeries ?? []).map((day, index) => ({ date: day.date, Other: Math.max(0, day.costUsd - models.reduce((sum, model) => sum + (model.dailySeries[index]?.costUsd ?? 0), 0)), ...Object.fromEntries(models.map((model) => [model.model, model.dailySeries[index]?.costUsd ?? 0])) })) }, [costs]) }
 function useWorkflowCostComparisonData(drivers: AnalyticsCostDriver[]) { return useMemo(() => { const topDrivers = [...drivers].sort((a, b) => b.costUsd - a.costUsd).slice(0, 5); const topNames = topDrivers.map((driver) => driver.name); const topNameSet = new Set(topNames); const dataByDate = new Map<string, Record<string, string | number>>(); for (const driver of drivers) for (const point of driver.dailyCost) { const row = dataByDate.get(point.date) ?? { date: point.date, Other: 0, ...Object.fromEntries(topNames.map((name) => [name, 0])) }; if (topNameSet.has(driver.name)) row[driver.name] = Number(row[driver.name]) + point.costUsd; else row.Other = Number(row.Other) + point.costUsd; dataByDate.set(point.date, row) } return { data: [...dataByDate.values()].sort((a, b) => String(a.date).localeCompare(String(b.date))), topNames } }, [drivers]) }
@@ -791,3 +799,7 @@ function InfoTooltip({ text }: { text: string }) {
     </Tooltip>
   )
 }
+
+// Memoized: the home shell re-renders on every WS chunk while the hub is
+// streaming, and this page (with recharts) must not re-render with it.
+export const AnalyticsCommandCenter = memo(AnalyticsCommandCenterInner)

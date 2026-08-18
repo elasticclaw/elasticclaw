@@ -181,11 +181,19 @@ export function HomeShell() {
 
   // Keep streamed message churn out of Sidebar: it only needs each claw's
   // resolved section, not the complete transcript map.
+  // Recomputed per message update, but identity-stable when nothing changed:
+  // a fresh Map per WS chunk would re-render every sidebar row.
+  const sidebarSectionsRef = useRef<Map<string, AgentSectionName>>(new Map())
   const sidebarSections = useMemo(() => {
     const sections = new Map<string, AgentSectionName>()
     for (const claw of claws) {
       sections.set(claw.id, agentSection(claw, { isWaitingOnYou: isWaitingOnYou(messages[claw.id] ?? []) }))
     }
+    const previous = sidebarSectionsRef.current
+    if (previous.size === sections.size && [...sections].every(([id, section]) => previous.get(id) === section)) {
+      return previous
+    }
+    sidebarSectionsRef.current = sections
     return sections
   }, [claws, messages])
 
@@ -212,6 +220,7 @@ export function HomeShell() {
 
   // Sidebar second line: what each active claw is running right now. Only the
   // trailing activity run is scanned, so this stays cheap per message update.
+  const sidebarActivityRef = useRef<Record<string, string>>({})
   const sidebarActivity = useMemo(() => {
     const lines: Record<string, string> = {}
     for (const claw of claws) {
@@ -226,6 +235,14 @@ export function HomeShell() {
         lines[claw.id] = "Writing a reply"
       }
     }
+    // Identity-stable when the lines did not change, so unaffected sidebar
+    // rows can bail out of chunk-driven re-renders.
+    const previous = sidebarActivityRef.current
+    const keys = Object.keys(lines)
+    if (keys.length === Object.keys(previous).length && keys.every((id) => previous[id] === lines[id])) {
+      return previous
+    }
+    sidebarActivityRef.current = lines
     return lines
   }, [claws, messages])
 

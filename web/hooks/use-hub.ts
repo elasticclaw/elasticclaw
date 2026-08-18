@@ -590,11 +590,13 @@ export function useHub(selectedClawId: string | null): HubState {
             persistMessages(next)
             return next
           })
-          setClaws((prev) =>
-            prev.map((c) =>
-              c.id === clawId ? { ...c, isStreaming: true } : c
-            )
-          )
+          // Bail when already streaming — this fires per chunk, and a fresh
+          // claws array per chunk re-renders the whole shell.
+          setClaws((prev) => {
+            const target = prev.find((c) => c.id === clawId)
+            if (!target || target.isStreaming) return prev
+            return prev.map((c) => (c.id === clawId ? { ...c, isStreaming: true } : c))
+          })
         } else if (type === "message") {
           // Final message — hold until typewriter drains, then commit
           const msg = mapApiMessage(payload)
