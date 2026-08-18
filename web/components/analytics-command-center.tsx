@@ -492,6 +492,10 @@ export function AnalyticsCommandCenter() {
               label="Cost per run"
               title="Total cost divided by the number of runs."
               value={usd.format(summary?.totalRuns ? totalCost / summary.totalRuns : 0)}
+              change={calculateDelta(
+                summary?.totalRuns ? totalCost / summary.totalRuns : undefined,
+                priorCost && summary?.prior?.totalRuns ? priorCost / summary.prior.totalRuns : undefined
+              )}
               cost
             />
             <Kpi
@@ -519,7 +523,7 @@ export function AnalyticsCommandCenter() {
           <ChartCard title="Ticket throughput" stat={ticketThroughputStat(effect)} info="Each bar is a day: how many distinct tickets had their first run that day, by how the ticket ended up. Delivered = at least one run delivered the work.">
             <TicketThroughputChart effect={effect} />
           </ChartCard>
-          <ChartCard title="Runs per ticket" stat={`${effect?.runsPerTicket.reduce((sum, bucket) => sum + bucket.tickets, 0) ?? 0} tickets · ${effect?.runsPerTicket.find((bucket) => bucket.bucket === "3+")?.tickets ?? 0} needed 3+`} info="How many runs each ticket needed. A long tail of 3+ means lots of retries on the same tickets.">
+          <ChartCard title="Runs per ticket" stat={`${effect?.runsPerTicket.reduce((sum, bucket) => sum + bucket.tickets, 0) ?? 0} tickets · ${effect?.runsPerTicket.reduce((sum, bucket) => sum + (bucket.bucket === "3" || bucket.bucket === "4+" ? bucket.tickets : 0), 0) ?? 0} needed 3+`} info="How many runs each ticket needed. A long tail of 3+ means lots of retries on the same tickets.">
             <RunsPerTicketChart effect={effect} />
           </ChartCard>
         </div>
@@ -636,7 +640,7 @@ function FilterBar({
       <div className="flex flex-wrap items-center gap-2">
         <div className="flex flex-wrap items-center gap-2">
           <DatePickerRange value={dateRange} onChange={(range) => onChange({ from: range?.from?.toISOString(), to: range?.to ? isoDayRange(isoDate(range.to)).to : undefined })} />
-      <div className="w-56">
+      <div className="w-[204px]">
         <WorkspaceSelect
           value={filters.workspace}
           workspaces={workspaces}
@@ -646,7 +650,7 @@ function FilterBar({
         <span className="hidden self-stretch border-l sm:block" aria-hidden="true" />
         <div className="flex flex-1 flex-wrap gap-2">
       {selectFilters.map(([label, key, values]) => (
-        <div key={key} className="w-48">
+        <div key={key} className="w-[158px]">
           <FilterSelect
             label={label}
             value={filters[key]}
