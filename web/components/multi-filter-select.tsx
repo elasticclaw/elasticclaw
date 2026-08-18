@@ -40,12 +40,16 @@ export function MultiFilterSelect({
       </PopoverTrigger>
       <PopoverContent align="start" className="w-[158px] p-1">
         <div className="max-h-56 overflow-y-auto">
-          {values.map((item) => (
-            <label key={item} className="flex cursor-pointer items-center gap-2 rounded-sm px-2 py-1.5 text-sm hover:bg-accent">
-              <Checkbox checked={selectedSet.has(item)} onCheckedChange={() => toggle(item)} />
-              <span className="min-w-0 truncate">{item}</span>
-            </label>
-          ))}
+          {values.length === 0 ? (
+            <p className="px-2 py-1.5 text-sm text-muted-foreground">No options</p>
+          ) : (
+            values.map((item) => (
+              <label key={item} className="flex cursor-pointer items-center gap-2 rounded-sm px-2 py-1.5 text-sm hover:bg-accent">
+                <Checkbox checked={selectedSet.has(item)} onCheckedChange={() => toggle(item)} />
+                <span className="min-w-0 truncate">{item}</span>
+              </label>
+            ))
+          )}
         </div>
       </PopoverContent>
     </Popover>
