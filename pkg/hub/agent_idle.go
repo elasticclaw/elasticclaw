@@ -32,6 +32,28 @@ import (
 // idle_since. Exactly one of the two ever fires for a claw (the same
 // task_run_id ownership rule the other lifecycle kinds follow).
 
+// agentIdleResumeBlindGrace bounds the window in which the hub must not
+// auto-resume a claw because it cannot see whether a turn is running.
+//
+// A clawConn carries no in-flight turn state across a fresh registration —
+// neither a hub restart nor a bridge reconnect hands it over — while the
+// gateway on the sandbox keeps running the turn it already had. In that window
+// isBusyLocked() reports false for a claw that is genuinely mid-turn, and
+// injecting into it is not a nudge: pinned OpenClaw treats a mid-turn injection
+// as a session takeover and aborts the turn with
+// EmbeddedAttemptSessionTakeoverError. NEXT-724 lost a 16-minute turn exactly
+// this way, 46 seconds after an auto-resume that fired 6 minutes into a fresh
+// connection following a hub restart.
+//
+// The grace is the bridge's own per-turn cap (agentTurnTimeout in
+// cmd/claw-bridge): past it no turn can still be secretly in flight, because
+// the bridge would have ended it. It is an upper bound, not a wait — the guard
+// lifts the moment a turn ends where this connection can see it, which any
+// working agent does within a turn or two. A claw that produces no turn
+// boundary at all is a stalled gateway, and that is claw_retry's job (it
+// replaces after 12 unhealthy heartbeats), not the idle resume's.
+const agentIdleResumeBlindGrace = time.Hour
+
 const (
 	lifecycleDefaultIdleAfter = 5 * time.Minute
 
@@ -113,6 +135,11 @@ type agentIdleSnapshot struct {
 	noProgressPaused bool
 	lastTurn         time.Time
 	notifiedAt       time.Time
+	connectedAt      time.Time
+	// turnBoundarySeen is false while the hub has never watched a turn end on
+	// this connection, which is exactly when it cannot tell an idle agent from
+	// one whose turn it simply cannot see.
+	turnBoundarySeen bool
 	// stretchStartAt is zero when the connection carries no usable clock at
 	// all (registration always stamps connectedAt, so this is unreachable in
 	// production and simply means "do not judge this claw").
@@ -140,6 +167,8 @@ func agentIdleSnapshotOf(cc *clawConn) agentIdleSnapshot {
 		noProgressPaused: cc.noProgressPaused,
 		lastTurn:         cc.lastTurnFinishedAt,
 		notifiedAt:       cc.idleNotifiedAt,
+		connectedAt:      cc.connectedAt,
+		turnBoundarySeen: cc.turnBoundarySeen,
 	}
 	start := cc.lastTurnFinishedAt
 	if start.IsZero() {
@@ -419,6 +448,11 @@ func (s *Server) checkAgentIdleResume(nowAt time.Time, clawID string, cc *clawCo
 		// unchanged — and the same stretch would be resumed twice. Re-arming
 		// is driven by lastTurnFinishedAt actually moving past the latched
 		// stretch instead (see below).
+		return
+	}
+	if !snap.turnBoundarySeen && nowAt.Sub(snap.connectedAt) < agentIdleResumeBlindGrace {
+		// No turn has ended where this connection could see it, so "idle" here
+		// may mean "mid-turn and invisible". Injecting would abort that turn.
 		return
 	}
 	if snap.noProgressPaused {

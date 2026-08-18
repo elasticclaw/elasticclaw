@@ -238,6 +238,7 @@ type clawConn struct {
 	lastTurnFinishedAt   time.Time       // when the last streaming turn ended (for post-restart resume window)
 	connectedAt          time.Time       // when this connection registered; immutable after registration
 	idleNotifiedAt       time.Time       // when the agent_idle notification fired for the current idle stretch (zero = armed)
+	turnBoundarySeen     bool            // a turn actually ended on THIS connection, so turn tracking is known live (see agentIdleResumeBlindGrace)
 
 	deliveryInFlight bool // serializes DB-backed delivery writes
 
@@ -299,6 +300,11 @@ func (cc *clawConn) isBusyLocked() bool {
 func (cc *clawConn) finishTurnLocked() {
 	cc.resetTurnStateLocked()
 	cc.lastTurnFinishedAt = time.Now()
+	// A turn ended where this connection could observe it, so the hub's turn
+	// tracking is demonstrably live for this claw and nothing can be secretly
+	// in flight behind it. checkAgentIdleResume keys its blind-window guard on
+	// this.
+	cc.turnBoundarySeen = true
 	// A finished turn starts a new idle stretch: re-arm the idle alert so a
 	// claw that goes idle, works, then goes idle again notifies twice.
 	cc.idleNotifiedAt = time.Time{}

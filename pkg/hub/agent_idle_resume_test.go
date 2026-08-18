@@ -98,7 +98,10 @@ func TestAgentIdleResumeFiresWithoutNotificationsOncePerStretchAndRearms(t *test
 	// in-memory state and lastTurnFinishedAt is re-seeded with a little drift.
 	restarted := &clawConn{id: clawID, tenantID: "test-tenant-id",
 		connectedAt:        time.Now().Add(-12 * time.Minute),
-		lastTurnFinishedAt: cc.lastTurnFinishedAt.Add(2 * time.Second)}
+		lastTurnFinishedAt: cc.lastTurnFinishedAt.Add(2 * time.Second),
+		// A turn ended on the new connection, so the blind-window guard is
+		// lifted and this exercises the durable latch, not the guard.
+		turnBoundarySeen: true}
 	s.checkAgentIdleResume(time.Now(), clawID, restarted)
 	if got := idleResumeMessages(t, db, clawID); got != 1 {
 		t.Fatalf("restart re-resumed the same stretch: %d messages", got)
@@ -361,5 +364,58 @@ func TestLivenessIdleResumeSettings(t *testing.T) {
 	off := false
 	if got := settings(&types.LivenessConfig{IdleResume: &off}); got.idleResumeEnabled {
 		t.Fatal("idle_resume: false did not disable auto-resume")
+	}
+}
+
+// NEXT-724: a fresh connection carries no in-flight turn state, so a claw that
+// is mid-turn on the sandbox looks idle to the hub. Injecting there is a
+// session takeover, not a nudge — it aborted a 16-minute turn in production.
+func TestAgentIdleResumeWaitsOutTheBlindWindow(t *testing.T) {
+	s, db := newIdleResumeTestServer(t, nil)
+	const clawID = "resume-blind"
+	insertSlackTestClaw(t, db, clawID, "connected", 0, "", oldEnough)
+	setClawPipelineStage(t, db, clawID, "implement")
+
+	// Connected 20 minutes ago and idle 20 by the stretch clock — comfortably
+	// past the resume threshold, so the ONLY thing that can hold the resume back
+	// is the blind-window guard. Still inside the grace, and no turn has ended
+	// where this connection could see it: exactly the post-restart shape.
+	blind := &clawConn{id: clawID, tenantID: "test-tenant-id",
+		connectedAt:        time.Now().Add(-20 * time.Minute),
+		lastTurnFinishedAt: time.Now().Add(-30 * time.Minute)}
+	s.checkAgentIdleResume(time.Now(), clawID, blind)
+	if got := idleResumeMessages(t, db, clawID); got != 0 {
+		t.Fatalf("resumed inside the blind window: %d messages", got)
+	}
+	if at, count := clawIdleResumeState(t, db, clawID); at != 0 || count != 0 {
+		t.Fatalf("blind window must not latch or spend an attempt: at=%d count=%d", at, count)
+	}
+
+	// A turn ends where the hub can see it: turn tracking is live, guard lifts.
+	blind.mu.Lock()
+	blind.finishTurnLocked()
+	blind.mu.Unlock()
+	blind.lastTurnFinishedAt = time.Now().Add(-15 * time.Minute) // idle again
+	s.checkAgentIdleResume(time.Now(), clawID, blind)
+	if got := idleResumeMessages(t, db, clawID); got != 1 {
+		t.Fatalf("an observed turn boundary must lift the guard, got %d messages", got)
+	}
+}
+
+// The guard is an upper bound, not a permanent veto: past the bridge's own turn
+// cap no turn can still be secretly in flight, so a claw that never produced a
+// boundary is resumable again.
+func TestAgentIdleResumeFiresAfterTheBlindWindowElapses(t *testing.T) {
+	s, db := newIdleResumeTestServer(t, nil)
+	const clawID = "resume-blind-elapsed"
+	insertSlackTestClaw(t, db, clawID, "connected", 0, "", oldEnough)
+	setClawPipelineStage(t, db, clawID, "implement")
+
+	old := &clawConn{id: clawID, tenantID: "test-tenant-id",
+		connectedAt:        time.Now().Add(-agentIdleResumeBlindGrace - time.Minute),
+		lastTurnFinishedAt: time.Now().Add(-15 * time.Minute)}
+	s.checkAgentIdleResume(time.Now(), clawID, old)
+	if got := idleResumeMessages(t, db, clawID); got != 1 {
+		t.Fatalf("past the blind window the resume must fire, got %d messages", got)
 	}
 }
