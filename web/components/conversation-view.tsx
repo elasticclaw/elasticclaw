@@ -1841,10 +1841,10 @@ export function ConversationView({
           >
               <div
                 ref={boardRef}
-                className="flex gap-6 h-full overflow-x-auto overflow-y-hidden py-6 px-12 items-stretch"
+                className="flex gap-6 h-full overflow-x-auto overflow-y-hidden p-3 items-stretch"
                 style={{ scrollbarWidth: "none", msOverflowStyle: "none" }}
               >
-                {boardSections.filter((section) => section.items.length).map((section) => <BoardSection key={section.key} section={section} className="h-full shrink-0"><SortableContext items={section.items.map((c) => c.id)} strategy={horizontalListSortingStrategy}><div className="flex flex-1 min-h-0 gap-4">{section.items.map((c) => <SortableClawBoardCard key={c.id} claw={c} messages={allMessages[c.id] ?? EMPTY_MESSAGES} streamingBuffer={streamingBuffers[c.id]} onClick={handleCardClick} onSendMessage={handleCardSendMessage} onKill={handleCardKill} currentUserLogin={currentUserLogin} />)}</div></SortableContext></BoardSection>)}
+                {boardSections.filter((section) => section.items.length).map((section) => <BoardSection key={section.key} section={section} className="h-full shrink-0"><SortableContext items={section.items.map((c) => c.id)} strategy={horizontalListSortingStrategy}><div className="flex flex-1 min-h-0 gap-3">{section.items.map((c) => <SortableClawBoardCard key={c.id} claw={c} messages={allMessages[c.id] ?? EMPTY_MESSAGES} streamingBuffer={streamingBuffers[c.id]} onClick={handleCardClick} onSendMessage={handleCardSendMessage} onKill={handleCardKill} currentUserLogin={currentUserLogin} />)}</div></SortableContext></BoardSection>)}
               </div>
 
             {/* Ghost card following cursor during drag */}
