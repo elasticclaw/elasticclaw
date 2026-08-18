@@ -33,7 +33,7 @@ export function RunLogsDialog({ run, attempts }: { run: TaskRunSummary; attempts
       <Tooltip>
         <TooltipTrigger asChild>
           <span className="inline-flex" tabIndex={disabled ? 0 : undefined}>
-            <Button variant="outline" size="sm" disabled={disabled} onClick={() => { setTab("actions"); setOpen(true) }}>
+            <Button variant="outline" size="sm" disabled={disabled} onClick={() => { setTab(run.clawId ? "actions" : "output"); setOpen(true) }}>
               <FileTerminal className="size-4" />
               Agent logs
             </Button>
@@ -139,10 +139,10 @@ function OutputBlock({ output, minSeverity, raw }: { output: TaskRunOutput; minS
           <div className="text-sm font-medium">{output.outputName}</div>
           <div className="font-mono text-xs text-muted-foreground">{output.spanKind} · span_id={output.spanId} · {(output.durationMs / 1000).toFixed(2)}s · exit={output.exitCode}</div>
         </div>
-        <Badge className={cn("border", output.exitCode === 0 ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300" : "border-red-500/30 bg-red-500/10 text-red-700 dark:text-red-300")}>Exit {output.exitCode}</Badge>
+        <Badge className="border" style={{ borderColor: `color-mix(in srgb, var(--chart-${output.status === "OK" ? "2" : "4"}) 30%, transparent)`, backgroundColor: `color-mix(in srgb, var(--chart-${output.status === "OK" ? "2" : "4"}) 15%, transparent)`, color: `var(--chart-${output.status === "OK" ? "2" : "4"})` }}>{output.status}</Badge>
       </div>
       {showRaw ? <>{output.stdout && <LogStream label="stdout" value={output.stdout} />}{output.stderr && <LogStream label="stderr" value={output.stderr} error />}{!output.stdout && !output.stderr && <p className="text-sm text-muted-foreground">This output did not write to stdout or stderr.</p>}</> : records.length ? <div className="divide-y rounded-md border">{records.map((record, index) => <div key={index} className="grid grid-cols-[auto_auto_1fr] gap-2 px-3 py-2 font-mono text-xs"><span className="text-muted-foreground">{new Date(record.ts).toLocaleTimeString()}</span><SeverityChip severity={record.sev} /><span className={record.severityNumber >= SEVERITY.ERROR.rank ? "text-destructive" : ""}>{record.body} {Object.entries(record.attrs || {}).map(([key, value]) => <AttrChip key={key} k={key} v={value as string | number | boolean | null | undefined} />)}</span></div>)}</div> : <p className="text-sm text-muted-foreground">No records at this severity.</p>}
-      <div className="flex gap-2 border-t pt-2 font-mono text-[11px] text-muted-foreground"><span>{output.records.length} records</span>{Object.entries(counts).map(([name, count]) => <span key={name}>{count} {name.toLowerCase()}</span>)}<span className="ml-auto">{output.attemptId}</span></div>
+      <div className="flex gap-2 border-t pt-2 font-mono text-[11px] text-muted-foreground"><span>{output.records.length} records</span>{(["WARN", "ERROR", "FATAL"] as const).map((severity) => counts[severity] ? <span key={severity} style={{ color: SEVERITY[severity].color }}>{counts[severity]} {severity.toLowerCase()}</span> : null)}<span className="ml-auto">{output.attemptId}</span></div>
     </div>
   )
 }
