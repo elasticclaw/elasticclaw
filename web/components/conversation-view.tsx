@@ -1,7 +1,7 @@
 "use client"
 
 import { useState, useRef, useEffect, useCallback, useMemo, memo } from "react"
-import { Send, Terminal, TerminalSquare, ChevronLeft, ChevronRight, ChevronDown, Loader2, LayoutGrid, Info, Trash2, AlertCircle, Wrench, GripVertical, Settings2, Paperclip, File as FileIcon, X, Menu, MoreVertical, LogOut, ClipboardCopy, CheckCircle2, GitPullRequest } from "lucide-react"
+import { Send, Terminal, TerminalSquare, ChevronLeft, ChevronRight, ChevronDown, Loader2, LayoutGrid, Info, Trash2, AlertCircle, Wrench, GripVertical, Settings2, Paperclip, File as FileIcon, X, Menu, MoreVertical, LogOut, ClipboardCopy, CheckCircle2, GitPullRequest, Bot } from "lucide-react"
 import {
   compactActivityRuns,
   demoteStaleRunning,
@@ -72,6 +72,7 @@ import { windowMessagesByDurableCount } from "@/lib/messages"
 import { DependencyDowntimeBanner } from "@/components/dependency-downtime-banner"
 import type { TypewriterState } from "@/hooks/use-typewriter"
 import { extractQuestion, isWaitingOnYou } from "@/lib/waiting-on-you"
+import { messageAuthor } from "@/lib/message-author"
 
 const XTerminal = dynamic(
   () => import("@/components/terminal").then((m) => m.XTerminal),
@@ -94,6 +95,7 @@ interface ConversationViewProps {
   onSelectClaw: (id: string) => void
   onDeselectClaw: () => void
   onReorderClaws: (ids: string[]) => void
+  currentUserLogin?: string | null
   /** Mobile only: opens the sidebar drawer from the board header hamburger. */
   onOpenMenu?: () => void
 }
@@ -518,6 +520,7 @@ const ClawBoardCard = memo(function ClawBoardCard({
   onSendMessage,
   onKill,
   dragHandleProps,
+  currentUserLogin,
 }: { 
   claw: Claw
   messages: Message[]
@@ -526,6 +529,7 @@ const ClawBoardCard = memo(function ClawBoardCard({
   onSendMessage: (clawId: string, content: string) => void
   onKill: (clawId: string) => void
   dragHandleProps?: React.HTMLAttributes<HTMLElement>
+  currentUserLogin?: string | null
 }) {
   const [input, setInput] = useState("")
   const cardTextareaRef = useRef<HTMLTextAreaElement>(null)
@@ -838,7 +842,8 @@ const ClawBoardCard = memo(function ClawBoardCard({
                   const step = demoteStaleRunning(pairActivitySteps([message]), false)[0]
                   return step ? <StepRow key={message.id} step={step} density="card" /> : null
                 }
-                const { body: cardBody, attachments: cardAttachments } = message.role === "user"
+                const author = messageAuthor(message, currentUserLogin)
+                const { body: cardBody, attachments: cardAttachments } = author.kind === "self" || author.kind === "teammate"
                   ? splitAttachmentsFooter(message.content)
                   : { body: message.content, attachments: [] as ParsedAttachment[] }
                 return (
@@ -846,15 +851,15 @@ const ClawBoardCard = memo(function ClawBoardCard({
                     key={message.id}
                     className={cn(
                       "text-xs p-2 rounded",
-                      message.role === "user"
+                      author.kind === "self"
                         ? "bg-blue-600/20 border border-blue-500/20 ml-4"
                         : "bg-secondary mr-4"
                     )}
                   >
                     <div className="flex items-center gap-1 mb-0.5">
-                      <span className="font-medium text-foreground/70">
-                        {message.role === "user" ? "You" : claw.name}
-                      </span>
+                      {author.kind === "agent" ? <Bot className="size-3 text-muted-foreground" /> : author.kind === "teammate" ? <span className="flex size-4 items-center justify-center rounded-full text-[8px] font-semibold text-background" style={{ backgroundColor: author.color }}>{author.initials}</span> : null}
+                      <span className="font-medium text-foreground/70" style={author.kind === "teammate" ? { color: author.color } : undefined}>{author.kind === "self" ? "You" : author.kind === "teammate" ? author.name : claw.name}</span>
+                      {author.kind === "teammate" && <span className="text-[9px] text-muted-foreground">teammate</span>}
                       <span className="text-muted-foreground" suppressHydrationWarning>
                         {formatTimestamp(message.timestamp)}
                       </span>
@@ -1042,6 +1047,7 @@ const SortableClawBoardCard = memo(function SortableClawBoardCard({
   onClick,
   onSendMessage,
   onKill,
+  currentUserLogin,
 }: {
   claw: Claw
   messages: Message[]
@@ -1049,6 +1055,7 @@ const SortableClawBoardCard = memo(function SortableClawBoardCard({
   onClick: (clawId: string) => void
   onSendMessage: (clawId: string, content: string) => void
   onKill: (clawId: string) => void
+  currentUserLogin?: string | null
 }) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } =
     useSortable({ id: claw.id })
@@ -1069,6 +1076,7 @@ const SortableClawBoardCard = memo(function SortableClawBoardCard({
         onClick={onClick}
         onSendMessage={onSendMessage}
         onKill={onKill}
+        currentUserLogin={currentUserLogin}
         dragHandleProps={{ ...attributes, ...listeners }}
       />
     </div>
@@ -1108,11 +1116,13 @@ const MessageBubble = memo(function MessageBubble({
   clawId,
   clawName,
   clawColor,
+  currentUserLogin,
 }: {
   message: Message
   clawId: string
   clawName: string
   clawColor?: string
+  currentUserLogin?: string | null
 }) {
   if (message.role === "system") {
     if (message.content === "__TOOL_GAP__") {
@@ -1160,7 +1170,8 @@ const MessageBubble = memo(function MessageBubble({
     )
   }
 
-  const isUser = message.role === "user"
+  const author = messageAuthor(message, currentUserLogin)
+  const isUser = author.kind === "self" || author.kind === "teammate"
   const isHub = message.role === "hub"
 
   if (isHub) {
@@ -1182,24 +1193,19 @@ const MessageBubble = memo(function MessageBubble({
     : { body: message.content, attachments: [] as ParsedAttachment[] }
 
   return (
-    <div className={cn("flex w-full", isUser ? "justify-end" : "justify-start")}>
+    <div className={cn("flex w-full", author.kind === "self" ? "justify-end" : "justify-start")}>
       <div
         className={cn(
           "w-fit max-w-[88%] md:w-[70%] md:max-w-none min-w-0 rounded-lg px-4 py-3",
-          isUser
+          author.kind === "self"
             ? "bg-blue-600/20 border border-blue-500/20"
-            : (clawColor && COLOR_CLASSES[clawColor]?.bubble) || "bg-secondary"
+            : author.kind === "teammate" ? "bg-secondary" : (clawColor && COLOR_CLASSES[clawColor]?.bubble) || "bg-secondary"
         )}
       >
         <div className="flex items-center gap-2 mb-1">
-          <span
-            className={cn(
-              "text-xs font-medium",
-              isUser ? "text-muted-foreground" : "text-foreground"
-            )}
-          >
-            {isUser ? "You" : clawName}
-          </span>
+          {author.kind === "agent" ? <Bot className="size-4 text-muted-foreground" /> : author.kind === "teammate" ? <span className="flex size-5 items-center justify-center rounded-full text-[9px] font-semibold text-background" style={{ backgroundColor: author.color }}>{author.initials}</span> : null}
+          <span className={cn("text-xs font-medium", author.kind === "self" ? "text-muted-foreground" : "text-foreground")} style={author.kind === "teammate" ? { color: author.color } : undefined}>{author.kind === "self" ? "You" : author.kind === "teammate" ? author.name : clawName}</span>
+          {author.kind === "teammate" && <span className="text-[10px] text-muted-foreground">teammate</span>}
           <span className="text-xs text-muted-foreground" suppressHydrationWarning>
             {formatTimestamp(message.timestamp)}
           </span>
@@ -1240,6 +1246,7 @@ function ClawChatView({
   onSendMessage,
   onKill,
   onDeselectClaw,
+  currentUserLogin,
 }: {
   claw: Claw
   messages: Message[]
@@ -1247,6 +1254,7 @@ function ClawChatView({
   onSendMessage: (content: string) => void
   onKill: () => void
   onDeselectClaw: () => void
+  currentUserLogin?: string | null
 }) {
   const [input, setInput] = useState("")
   const [cmdToast, setCmdToast] = useState<string | null>(null)
@@ -1348,9 +1356,10 @@ function ClawChatView({
         clawId={claw.id}
         clawName={claw.name}
         clawColor={claw.color}
+        currentUserLogin={currentUserLogin}
       />
     ),
-    [claw.id, claw.name, claw.color]
+    [claw.id, claw.name, claw.color, currentUserLogin]
   )
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -1667,6 +1676,7 @@ export function ConversationView({
   onDeselectClaw,
   onReorderClaws,
   onOpenMenu,
+  currentUserLogin,
 }: ConversationViewProps) {
   const boardRef = useRef<HTMLDivElement>(null)
   const [activeDragClaw, setActiveDragClaw] = useState<Claw | null>(null)
@@ -1823,7 +1833,7 @@ export function ConversationView({
             /* Single-column vertical list: full-width cards, no reordering,
                no scroll arrows — one-finger vertical scrolling only. */
             <div className="h-full overflow-y-auto overflow-x-hidden p-3 space-y-5">
-              {boardSections.filter((section) => section.items.length).map((section) => <BoardSection key={section.key} section={section} isMobile><div className="flex flex-col gap-3">{section.items.map((c) => <ClawBoardCard key={c.id} claw={c} messages={allMessages[c.id] ?? EMPTY_MESSAGES} streamingBuffer={streamingBuffers[c.id]} onClick={handleCardClick} onSendMessage={handleCardSendMessage} onKill={handleCardKill} />)}</div></BoardSection>)}
+              {boardSections.filter((section) => section.items.length).map((section) => <BoardSection key={section.key} section={section} isMobile><div className="flex flex-col gap-3">{section.items.map((c) => <ClawBoardCard key={c.id} claw={c} messages={allMessages[c.id] ?? EMPTY_MESSAGES} streamingBuffer={streamingBuffers[c.id]} onClick={handleCardClick} onSendMessage={handleCardSendMessage} onKill={handleCardKill} currentUserLogin={currentUserLogin} />)}</div></BoardSection>)}
             </div>
           ) : (
           <>
@@ -1847,7 +1857,7 @@ export function ConversationView({
                 className="flex gap-6 h-full overflow-x-auto overflow-y-hidden py-6 px-12 items-stretch"
                 style={{ scrollbarWidth: "none", msOverflowStyle: "none" }}
               >
-                {boardSections.filter((section) => section.items.length).map((section) => <BoardSection key={section.key} section={section} className="h-full shrink-0"><SortableContext items={section.items.map((c) => c.id)} strategy={horizontalListSortingStrategy}><div className="flex flex-1 min-h-0 gap-4">{section.items.map((c) => <SortableClawBoardCard key={c.id} claw={c} messages={allMessages[c.id] ?? EMPTY_MESSAGES} streamingBuffer={streamingBuffers[c.id]} onClick={handleCardClick} onSendMessage={handleCardSendMessage} onKill={handleCardKill} />)}</div></SortableContext></BoardSection>)}
+                {boardSections.filter((section) => section.items.length).map((section) => <BoardSection key={section.key} section={section} className="h-full shrink-0"><SortableContext items={section.items.map((c) => c.id)} strategy={horizontalListSortingStrategy}><div className="flex flex-1 min-h-0 gap-4">{section.items.map((c) => <SortableClawBoardCard key={c.id} claw={c} messages={allMessages[c.id] ?? EMPTY_MESSAGES} streamingBuffer={streamingBuffers[c.id]} onClick={handleCardClick} onSendMessage={handleCardSendMessage} onKill={handleCardKill} currentUserLogin={currentUserLogin} />)}</div></SortableContext></BoardSection>)}
               </div>
 
             {/* Ghost card following cursor during drag */}
@@ -1861,6 +1871,7 @@ export function ConversationView({
                     onClick={noopClawAction}
                     onSendMessage={noopClawMessageAction}
                     onKill={noopClawAction}
+                    currentUserLogin={currentUserLogin}
                   />
                 </div>
               ) : null}
@@ -1891,6 +1902,7 @@ export function ConversationView({
       onSendMessage={onSendMessage}
       onKill={onKill}
       onDeselectClaw={onDeselectClaw}
+      currentUserLogin={currentUserLogin}
     />
   )
 }

@@ -62,6 +62,7 @@ export function HomeShell() {
     getServerConfigured
   )
   const [isAdmin, setIsAdmin] = useState(false)
+  const [currentUserLogin, setCurrentUserLogin] = useState<string | null>(null)
   const [adminChecked, setAdminChecked] = useState(false)
   const [selectedWorkflow, setSelectedWorkflow] = useState<Workflow | null>(null)
 
@@ -85,11 +86,13 @@ export function HomeShell() {
         .then(data => {
           if (cancelled) return
           setIsAdmin(data?.is_admin === true)
+          setCurrentUserLogin(typeof data?.login === "string" ? data.login : null)
           setAdminChecked(true)
         })
         .catch(() => {
           if (cancelled) return
           setIsAdmin(false)
+          setCurrentUserLogin(null)
           setAdminChecked(true)
         })
     }
@@ -371,6 +374,7 @@ export function HomeShell() {
             onReorderClaws={reorderClaws}
             loading={loading}
             hubError={hubError}
+            currentUserLogin={currentUserLogin}
             onOpenMenu={isMobile ? () => setDrawerOpen(true) : undefined}
           />
         )}
