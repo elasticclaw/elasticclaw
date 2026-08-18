@@ -20,6 +20,12 @@ Deliberate divergences from the kit must be listed in this file under "Accepted 
 - Kill dead code: `TaskRunAnalyticsView` (extract still-used exports first).
 - Login: light restyle to kit aesthetics.
 - Single PR, atomic commits per phase, draft, assignee AnaBerg, merge (never rebase/force-push).
+- Filter bar dimensions (Factory/Workflow/Repo/Model) are MULTI-select (decided 2026-08-18,
+  supersedes the kit's single-value selects): each dimension accepts several values (OR
+  semantics), every selected value becomes its own removable chip, and the analytics API
+  accepts comma-separated lists for those keys. Everything else follows the kit FilterBar:
+  "Label: All" placeholders, raw values (no title-casing), Clear all right-aligned in the
+  top row, the scope|dimension rule always visible.
 
 ## Phases
 
