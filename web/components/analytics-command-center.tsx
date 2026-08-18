@@ -207,7 +207,14 @@ export function AnalyticsCommandCenter() {
   const selectedRun = selectedRunId
     ? foundRun ?? (selectedRunCache?.runId === selectedRunId ? selectedRunCache.run : null)
     : null
-  const selectedTicket = selectedTicketId ? tickets.find((ticket) => ticket.issueId === selectedTicketId) ?? null : null
+  const [selectedTicketCache, setSelectedTicketCache] = useState<{ issueId: string; ticket: AnalyticsTicket } | null>(null)
+  const foundTicket = selectedTicketId ? tickets.find((ticket) => ticket.issueId === selectedTicketId) ?? null : null
+  if (selectedTicketId && foundTicket && (selectedTicketCache?.issueId !== selectedTicketId || selectedTicketCache.ticket !== foundTicket)) {
+    setSelectedTicketCache({ issueId: selectedTicketId, ticket: foundTicket })
+  }
+  const selectedTicket = selectedTicketId
+    ? foundTicket ?? (selectedTicketCache?.issueId === selectedTicketId ? selectedTicketCache.ticket : null)
+    : null
 
   const setFilters = useCallback(
     (updates: Record<string, string | undefined>) => {
@@ -309,6 +316,9 @@ export function AnalyticsCommandCenter() {
         setOptions(optionsData)
         if (!append && !silent) {
           setSelectedRunId(null)
+          setSelectedTicketId(null)
+          setSelectedRunCache(null)
+          setSelectedTicketCache(null)
           setDetails(null)
           setDetailError(null)
         }

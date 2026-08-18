@@ -4,6 +4,8 @@ import { useEffect, useMemo, useState } from "react"
 import { FileTerminal } from "lucide-react"
 import { ApiError, fetchTaskRunOutputs } from "@/lib/api"
 import type { TaskRunAttempt, TaskRunOutput, TaskRunSummary } from "@/lib/types"
+import { useEscapeToClose } from "@/hooks/use-escape-to-close"
+import { AttrChip, SEVERITY, SeverityChip } from "@/components/ds"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog"
@@ -25,6 +27,7 @@ export function RunLogsDialog({ run, attempts }: { run: TaskRunSummary; attempts
   const clawId = selectedClawId ?? defaultClawId
 
   const disabled = !run.clawId
+  useEscapeToClose(() => setOpen(false), open)
   return (
     <>
       <Tooltip>
@@ -110,8 +113,8 @@ function OutputTab({ open, runId, workspaceName }: { open: boolean; runId: strin
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-center gap-2 rounded-lg border bg-card px-3 py-2 font-mono text-[11px]">
-        <AttrChip name="service.name" value="elasticclaw-pipeline" /><AttrChip name="deployment.environment" value={workspaceName} /><AttrChip name="trace_id" value={traceId || "—"} />
-        <div className="ml-auto flex items-center gap-1">{([ ["ALL", 0], ["DEBUG", 5], ["INFO", 9], ["WARN", 13], ["ERROR", 17] ] as const).map(([name, rank]) => <Button key={name} variant={minSeverity === rank ? "secondary" : "ghost"} size="sm" className="h-6 px-2 font-mono text-[10px]" onClick={() => setMinSeverity(rank)}>{name}</Button>)}<Button variant={raw ? "secondary" : "ghost"} size="sm" className="h-6 px-2 font-mono text-[10px]" onClick={() => setRaw((value) => !value)}>RAW</Button></div>
+        <AttrChip k="service.name" v="elasticclaw-pipeline" /><AttrChip k="deployment.environment" v={workspaceName} /><AttrChip k="trace_id" v={traceId || "—"} />
+        <div className="ml-auto flex items-center gap-1">{([ ["ALL", 0], ["DEBUG", SEVERITY.DEBUG.rank], ["INFO", SEVERITY.INFO.rank], ["WARN", SEVERITY.WARN.rank], ["ERROR", SEVERITY.ERROR.rank] ] as const).map(([name, rank]) => <Button key={name} variant={minSeverity === rank ? "secondary" : "ghost"} size="sm" className="h-6 px-2 font-mono text-[10px]" onClick={() => setMinSeverity(rank)}>{name}</Button>)}<Button variant={raw ? "secondary" : "ghost"} size="sm" className="h-6 px-2 font-mono text-[10px]" onClick={() => setRaw((value) => !value)}>RAW</Button></div>
       </div>
       {groups.map(([stage, stageOutputs]) => (
         <section key={stage} className="rounded-md border">
@@ -125,8 +128,6 @@ function OutputTab({ open, runId, workspaceName }: { open: boolean; runId: strin
   )
 }
 
-function AttrChip({ name, value }: { name: string; value: unknown }) { return <span className="rounded bg-muted px-1"><span className="text-muted-foreground">{name}=</span>{String(value)}</span> }
-const severityTone: Record<string, string> = { DEBUG: "text-muted-foreground", INFO: "text-chart-1", WARN: "text-amber-600", ERROR: "text-destructive", FATAL: "bg-destructive text-destructive-foreground" }
 function OutputBlock({ output, minSeverity, raw }: { output: TaskRunOutput; minSeverity: number; raw: boolean }) {
   const records = output.records.filter((record) => record.severityNumber >= minSeverity)
   const counts = output.records.reduce<Record<string, number>>((result, record) => ({ ...result, [record.sev]: (result[record.sev] || 0) + 1 }), {})
@@ -140,7 +141,7 @@ function OutputBlock({ output, minSeverity, raw }: { output: TaskRunOutput; minS
         </div>
         <Badge className={cn("border", output.exitCode === 0 ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300" : "border-red-500/30 bg-red-500/10 text-red-700 dark:text-red-300")}>Exit {output.exitCode}</Badge>
       </div>
-      {showRaw ? <>{output.stdout && <LogStream label="stdout" value={output.stdout} />}{output.stderr && <LogStream label="stderr" value={output.stderr} error />}{!output.stdout && !output.stderr && <p className="text-sm text-muted-foreground">This output did not write to stdout or stderr.</p>}</> : records.length ? <div className="divide-y rounded-md border">{records.map((record, index) => <div key={index} className="grid grid-cols-[auto_auto_1fr] gap-2 px-3 py-2 font-mono text-xs"><span className="text-muted-foreground">{new Date(record.ts).toLocaleTimeString()}</span><span className={`w-12 text-center ${severityTone[record.sev] || ""}`}>{record.sev}</span><span className={record.severityNumber >= 17 ? "text-destructive" : ""}>{record.body} {Object.entries(record.attrs || {}).map(([key, value]) => <AttrChip key={key} name={key} value={value} />)}</span></div>)}</div> : <p className="text-sm text-muted-foreground">No records at this severity.</p>}
+      {showRaw ? <>{output.stdout && <LogStream label="stdout" value={output.stdout} />}{output.stderr && <LogStream label="stderr" value={output.stderr} error />}{!output.stdout && !output.stderr && <p className="text-sm text-muted-foreground">This output did not write to stdout or stderr.</p>}</> : records.length ? <div className="divide-y rounded-md border">{records.map((record, index) => <div key={index} className="grid grid-cols-[auto_auto_1fr] gap-2 px-3 py-2 font-mono text-xs"><span className="text-muted-foreground">{new Date(record.ts).toLocaleTimeString()}</span><SeverityChip severity={record.sev} /><span className={record.severityNumber >= SEVERITY.ERROR.rank ? "text-destructive" : ""}>{record.body} {Object.entries(record.attrs || {}).map(([key, value]) => <AttrChip key={key} k={key} v={value as string | number | boolean | null | undefined} />)}</span></div>)}</div> : <p className="text-sm text-muted-foreground">No records at this severity.</p>}
       <div className="flex gap-2 border-t pt-2 font-mono text-[11px] text-muted-foreground"><span>{output.records.length} records</span>{Object.entries(counts).map(([name, count]) => <span key={name}>{count} {name.toLowerCase()}</span>)}<span className="ml-auto">{output.attemptId}</span></div>
     </div>
   )

@@ -1,8 +1,8 @@
 "use client"
 
-import { useEffect } from "react"
 import { CheckCircle2, ChevronRight, GitMerge, GitPullRequest, X, XCircle } from "lucide-react"
 import type { AnalyticsTicket, AnalyticsTicketRunSummary } from "@/lib/types"
+import { useEscapeToClose } from "@/hooks/use-escape-to-close"
 import { TicketStatusBadge, RunStatusBadge } from "@/components/ds"
 import { Button } from "@/components/ui/button"
 
@@ -15,7 +15,7 @@ function Section({ title, children }: { title: string; children: React.ReactNode
 function Row({ label, value, mono }: { label: string; value: React.ReactNode; mono?: boolean }) { return <div className="flex gap-3 py-0.5 text-sm"><span className={`${caption} w-27 shrink-0`}>{label}</span><span className={mono ? "min-w-0 break-all font-mono text-xs" : "min-w-0"}>{value}</span></div> }
 
 export function TicketDetailPanel({ ticket, onClose, onOpenRun }: { ticket: AnalyticsTicket | null; onClose: () => void; onOpenRun: (run: AnalyticsTicketRunSummary) => void }) {
-  useEffect(() => { const close = (event: KeyboardEvent) => { if (event.key === "Escape") onClose() }; document.addEventListener("keydown", close); return () => document.removeEventListener("keydown", close) }, [onClose])
+  useEscapeToClose(onClose, Boolean(ticket))
   if (!ticket) return null
   const open = ticket.prs.filter((pr) => pr.state === "open")
   const delivered = ticket.status === "delivered"
@@ -23,7 +23,7 @@ export function TicketDetailPanel({ ticket, onClose, onOpenRun }: { ticket: Anal
   return <>
     <div className="fixed inset-0 z-[45] bg-black/50" onClick={onClose} aria-hidden="true" />
     <aside className="fixed inset-y-0 right-0 z-[50] flex w-full max-w-[66vw] flex-col border-l bg-background shadow-xl">
-      <header className="flex items-start justify-between gap-3 border-b bg-card p-4"><div className="min-w-0 space-y-1"><div className="flex flex-wrap items-center gap-2"><TicketStatusBadge status={ticket.status} /><span className={caption}>{ticket.priority} priority</span><span className={caption}>via {ticket.source}</span></div><h2 className="text-pretty text-base font-semibold tracking-tight">{ticket.issueId}: {ticket.issueTitle}</h2><p className="text-xs text-muted-foreground">{ticket.requester || "Unknown requester"} · {ticket.team || "Unassigned"} · reported {date(ticket.reportedAt)}</p><p className="font-mono text-xs text-muted-foreground">{ticket.repo || "—"} · {ticket.workflowName || "—"}</p></div><div className="flex shrink-0 gap-1">{open[0] && <Button asChild variant="outline" size="sm"><a href={open[0].url} target="_blank" rel="noreferrer">Review PR</a></Button>}<Button variant="ghost" size="icon" className="size-8" onClick={onClose} aria-label="Close ticket detail"><X className="size-4" /></Button></div></header>
+      <header className="flex items-start justify-between gap-3 border-b bg-card p-4"><div className="min-w-0 space-y-1"><div className="flex flex-wrap items-center gap-2"><TicketStatusBadge status={ticket.status} /><span className={caption}>{ticket.priority ? `${ticket.priority} priority` : "No priority"}</span><span className={caption}>via {ticket.source}</span></div><h2 className="text-pretty text-base font-semibold tracking-tight">{ticket.issueId}: {ticket.issueTitle}</h2><p className="text-xs text-muted-foreground">{ticket.requester || "Unknown requester"} · {ticket.team || "Unassigned"} · reported {date(ticket.reportedAt)}</p><p className="font-mono text-xs text-muted-foreground">{ticket.repo || "—"} · {ticket.workflowName || "—"}</p></div><div className="flex shrink-0 gap-1">{open[0] && <Button asChild variant="outline" size="sm"><a href={open[0].url} target="_blank" rel="noreferrer">Review PR</a></Button>}<Button variant="ghost" size="icon" className="size-8" onClick={onClose} aria-label="Close ticket detail"><X className="size-4" /></Button></div></header>
       <div className="min-h-0 flex-1 space-y-4 overflow-auto p-4"><div className="grid grid-cols-2 gap-2 lg:grid-cols-4">{[["Lead time", duration(ticket.leadTime), delivered ? "report → merge" : "report → last activity"], ["Time to first run", duration(ticket.timeToFirstRun), "report → agent started"], ["Total cost", usd.format(ticket.cost), `${ticket.runCount} runs · ${ticket.attemptCount} attempts`], ["Human touches", String(ticket.humanTouches), ticket.humanTouches ? "reviews and nudges" : "fully autonomous"]].map(([label, value, sub]) => <div key={label} className="rounded-lg border bg-card p-3"><div className={caption}>{label}</div><div className="mt-1 text-lg font-semibold tabular-nums">{value}</div><div className="text-[11px] text-muted-foreground">{sub}</div></div>)}</div>
         <Section title="What was asked for"><p className="text-sm leading-6">{ticket.ask || ticket.issueTitle}</p><Row label="Requested by" value={ticket.requester || "Unknown"} /><Row label="Team" value={ticket.team || "Unassigned"} /><Row label="Ticket" value={ticket.issueId} mono /></Section>
         <Section title="Where it stands"><p className="text-sm text-muted-foreground">{outcome}</p></Section>

@@ -1,8 +1,8 @@
 "use client"
 
-import { useEffect } from "react"
 import { AlertCircle, ExternalLink, X } from "lucide-react"
 import type { TaskRunSummary } from "@/lib/types"
+import { useEscapeToClose } from "@/hooks/use-escape-to-close"
 import type { DetailState } from "@/components/task-run-analytics-view"
 import { RunStatusBadge } from "@/components/ds"
 import { Button } from "@/components/ui/button"
@@ -18,7 +18,7 @@ function Section({ title, children }: { title: string; children: React.ReactNode
 function Row({ label: name, value, tone, mono = true }: { label: string; value: React.ReactNode; tone?: "error" | "muted"; mono?: boolean }) { return <div className="flex gap-3 py-0.5 text-sm"><span className={`${caption} w-26 shrink-0`}>{name}</span><span className={`${mono ? "font-mono text-xs" : ""} min-w-0 break-all ${tone === "error" ? "text-destructive" : tone === "muted" ? "text-muted-foreground" : ""}`}>{value}</span></div> }
 
 export function RunDetailPanel({ run, details, loading, error, onClose }: { run: TaskRunSummary | null; details: DetailState | null; loading: boolean; error: string | null; onClose: () => void }) {
-  useEffect(() => { const close = (event: KeyboardEvent) => { if (event.key === "Escape") onClose() }; document.addEventListener("keydown", close); return () => document.removeEventListener("keydown", close) }, [onClose])
+  useEscapeToClose(onClose, Boolean(run))
   if (!run) return null
   const phases = [["Queued wait", between(run.queuedAt, run.agentStartedAt)], ["Implementation", between(run.agentStartedAt, run.prOpenedAt)], ["Ready to merge", run.mergedAt ? run.readyToMergeMs : undefined]].filter((phase): phase is [string, number] => phase[1] != null)
   const max = Math.max(...phases.map(([, ms]) => ms), 1)
