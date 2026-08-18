@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react"
 import { FileTerminal } from "lucide-react"
-import { ApiError, fetchTaskRunOutputs } from "@/lib/api"
+import { fetchTaskRunOutputs } from "@/lib/api"
 import type { TaskRunAttempt, TaskRunOutput, TaskRunSummary } from "@/lib/types"
 import { useEscapeToClose } from "@/hooks/use-escape-to-close"
 import { AttrChip, SEVERITY, SeverityChip } from "@/components/ds"
@@ -18,6 +18,10 @@ import { cn } from "@/lib/utils"
 export function RunLogsDialog({ run, attempts }: { run: TaskRunSummary; attempts: TaskRunAttempt[] }) {
   const [open, setOpen] = useState(false)
   const [tab, setTab] = useState("actions")
+  const [outputs, setOutputs] = useState<TaskRunOutput[]>([])
+  const [outputsLoading, setOutputsLoading] = useState(false)
+  const [outputsError, setOutputsError] = useState<string | null>(null)
+  const [traceId, setTraceId] = useState<string>()
   const attemptOptions = useMemo(() => attempts.filter((attempt) => attempt.clawId), [attempts])
   const defaultClawId = useMemo(
     () => attemptOptions.find((attempt) => attempt.attemptId === run.currentAttemptId)?.clawId || run.clawId,
@@ -27,7 +31,28 @@ export function RunLogsDialog({ run, attempts }: { run: TaskRunSummary; attempts
   const clawId = selectedClawId ?? defaultClawId
 
   const disabled = !run.clawId
+  const hasAgentActivity = attemptOptions.length > 0
   useEscapeToClose(() => setOpen(false), open)
+  useEffect(() => {
+    if (!open) return
+    let cancelled = false
+    queueMicrotask(() => {
+      if (cancelled) return
+      setOutputsLoading(true)
+      setOutputsError(null)
+      fetchTaskRunOutputs(run.runId)
+        .then((response) => {
+          if (cancelled) return
+          setOutputs(response.outputs)
+          setTraceId(response.traceId)
+          // A run that never reached the agent has no activity—open its pipeline output.
+          if (!hasAgentActivity && response.outputs.length > 0) setTab("output")
+        })
+        .catch((err) => { if (!cancelled) setOutputsError(err instanceof Error ? err.message : "Unable to load pipeline output") })
+        .finally(() => { if (!cancelled) setOutputsLoading(false) })
+    })
+    return () => { cancelled = true }
+  }, [hasAgentActivity, open, run.runId])
   return (
     <>
       <Tooltip>
@@ -70,7 +95,7 @@ export function RunLogsDialog({ run, attempts }: { run: TaskRunSummary; attempts
               <ClawActivityLog clawId={clawId} />
             </TabsContent>
             <TabsContent value="output" className="min-h-0 overflow-auto">
-              <OutputTab open={open} runId={run.runId} workspaceName={run.workspaceName} />
+              <OutputTab outputs={outputs} loading={outputsLoading} error={outputsError} traceId={traceId} workspaceName={run.workspaceName} />
             </TabsContent>
           </Tabs>
         </DialogContent>
@@ -79,28 +104,9 @@ export function RunLogsDialog({ run, attempts }: { run: TaskRunSummary; attempts
   )
 }
 
-function OutputTab({ open, runId, workspaceName }: { open: boolean; runId: string; workspaceName: string }) {
-  const [outputs, setOutputs] = useState<TaskRunOutput[]>([])
-  const [loading, setLoading] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-  const [traceId, setTraceId] = useState<string>()
+function OutputTab({ outputs, loading, error, traceId, workspaceName }: { outputs: TaskRunOutput[]; loading: boolean; error: string | null; traceId?: string; workspaceName: string }) {
   const [minSeverity, setMinSeverity] = useState(0)
   const [raw, setRaw] = useState(false)
-  useEffect(() => {
-    if (!open) return
-    let cancelled = false
-    queueMicrotask(() => {
-      if (cancelled) return
-      setLoading(true)
-      setError(null)
-      fetchTaskRunOutputs(runId)
-        .then((response) => { if (!cancelled) { setOutputs(response.outputs); setTraceId(response.traceId) } })
-        .catch((err) => { if (!cancelled) setError(err instanceof Error ? err.message : "Unable to load pipeline output") })
-        .finally(() => { if (!cancelled) setLoading(false) })
-    })
-    return () => { cancelled = true }
-  }, [open, runId])
-
   const groups = useMemo(() => {
     const grouped = new Map<string, TaskRunOutput[]>()
     for (const output of outputs) grouped.set(output.stageId || "Unspecified stage", [...(grouped.get(output.stageId || "Unspecified stage") || []), output])
