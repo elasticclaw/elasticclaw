@@ -29,6 +29,11 @@ func activeTriggerStatus(status string) bool {
 	}
 }
 
+// manualWorkflowTriggerSource is the trigger source a human's "run it now"
+// button produces. Named so the exemption in triggerSourceSkipsBackoff and the
+// call sites cannot drift apart on a string literal.
+const manualWorkflowTriggerSource = "manual workflow trigger"
+
 func triggerPayloadJSON(payload any) string {
 	if payload == nil {
 		return "{}"
@@ -68,8 +73,14 @@ func factoryTriggerBackoff(retryCount int) time.Duration {
 // exemption: integration webhooks label themselves "<integration> webhook" and
 // do back off, because their events can repeat on their own (label churn,
 // comment edits).
+//
+// The manual trigger is exempt for the opposite reason: a human pressing the
+// button is the override, and making them wait up to 30 minutes — behind
+// "already has an active trigger claim", which does not describe a backoff —
+// is the worst possible reading of a deliberate retry. It cannot spin either;
+// it fires once per press.
 func triggerSourceSkipsBackoff(source string) bool {
-	return source == "webhook"
+	return source == "webhook" || source == manualWorkflowTriggerSource
 }
 
 func (s *Server) claimFactoryTrigger(factoryName, integration, triggerKey, source string, payload any) (bool, error) {
@@ -150,17 +161,21 @@ func (s *Server) claimFactoryTrigger(factoryName, integration, triggerKey, sourc
 		}
 	}
 
-	// bornDeadClawMax separates a claw that never got going from one that did its
-	// job and was cleaned up. Both end up 'deleted', so status alone cannot tell
-	// them apart, and charging the long-lived one a retry would make every
-	// SUCCESSFUL ticket pay a backoff the next time its trigger fires — with the
-	// counter ratcheting, because nothing ever resets it. The measured churn is
-	// claws dying within ~3 minutes of bootstrap, so the cutoff sits well above
-	// that and well below any real run.
+	// The age cutoff exists only to disambiguate 'deleted', which is written
+	// both by a claw that never got going and by one that did its job and was
+	// cleaned up. Charging the long-lived one would make every SUCCESSFUL ticket
+	// pay a backoff on its next trigger, and the counter would ratchet.
+	//
+	// 'error' needs no such cutoff: a claw is never marked errored on the way
+	// out of a successful run, so an errored claw is a failed attempt at any
+	// age. Gating it by age left the original burn loop intact one notch slower
+	// — a bootstrap that dies at minute 11, or a failure on the first long turn,
+	// fell through uncharged and got an immediate replacement, forever.
 	const bornDeadClawMax = 10 * 60 // seconds
 
-	clawDiedYoung := clawAgeSeconds.Valid && clawAgeSeconds.Int64 <= bornDeadClawMax
-	if clawID != "" && (clawStatus == "error" || clawStatus == "deleted") && clawDiedYoung {
+	clawFailed := clawStatus == "error" ||
+		(clawStatus == "deleted" && clawAgeSeconds.Valid && clawAgeSeconds.Int64 <= bornDeadClawMax)
+	if clawID != "" && clawFailed {
 		// The claw this trigger already paid for died young. Charge it as a failed
 		// attempt instead of dropping into the reclaim below, which reclaims with
 		// no wait and no retry_count bump. The failed-trigger guard above cannot
@@ -185,6 +200,21 @@ func (s *Server) claimFactoryTrigger(factoryName, integration, triggerKey, sourc
 		}
 		// Exempt sources still get charged the retry, but reclaim immediately —
 		// see triggerSourceSkipsBackoff.
+	}
+
+	// A claw that outlived the cutoff is evidence the failure healed, so the
+	// charges that led here are stale: clear them instead of letting a ticket
+	// carry a lifetime count that sends its next transient death straight to the
+	// 30m cap. Only this branch resets — completeFactoryTrigger must not, since
+	// it fires when a claw is CREATED, not when the work succeeds.
+	if clawID != "" && clawStatus == "deleted" && !clawFailed && retryCount > 0 {
+		if _, err = tx.Exec(`
+			UPDATE factory_triggers SET retry_count=0
+			 WHERE factory_name=? AND integration=? AND trigger_key=?`,
+			factoryName, integration, triggerKey,
+		); err != nil {
+			return false, err
+		}
 	}
 
 	// Reclaim path: reached when the trigger has no claw and is not actively

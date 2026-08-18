@@ -522,3 +522,89 @@ func TestClaimFactoryTriggerDoesNotChargeLongLivedClaw(t *testing.T) {
 		t.Fatalf("a successful run must not leave a retry charge behind, got retry_count=%d", retryCount)
 	}
 }
+
+// An errored claw is a failed attempt at any age: nothing marks a claw errored
+// on the way out of a successful run. Gating it by age left the original burn
+// loop intact for anything that dies past the cutoff — a slow bootstrap, or a
+// failure on the first long turn.
+func TestClaimFactoryTriggerChargesErroredClawRegardlessOfAge(t *testing.T) {
+	s := newFactoryTriggerTestServer(t)
+	triggerKey := factoryTriggerKey("shortcut", "sc-old-error")
+	if _, err := s.db.Exec(`INSERT INTO claws(id, tenant_id, name, template, status, created_at) VALUES(?,?,?,?,?,?)`,
+		"claw-old-error", "tenant", "claw", "template", "error", now().Add(-2*time.Hour)); err != nil {
+		t.Fatalf("seed claw: %v", err)
+	}
+	if claimed, err := s.claimFactoryTrigger("qa", "shortcut", triggerKey, "poll", nil); err != nil || !claimed {
+		t.Fatalf("initial claim = %v, %v", claimed, err)
+	}
+	if err := s.completeFactoryTrigger("qa", "shortcut", triggerKey, "claw-old-error"); err != nil {
+		t.Fatalf("complete: %v", err)
+	}
+
+	claimed, err := s.claimFactoryTrigger("qa", "shortcut", triggerKey, "poll", nil)
+	if err != nil {
+		t.Fatalf("second claim: %v", err)
+	}
+	if claimed {
+		t.Fatal("an errored claw must be charged a retry whatever its age")
+	}
+	var retryCount int
+	if err := s.db.QueryRow(`SELECT retry_count FROM factory_triggers WHERE trigger_key=?`, triggerKey).Scan(&retryCount); err != nil {
+		t.Fatalf("read retry_count: %v", err)
+	}
+	if retryCount != 1 {
+		t.Fatalf("retry_count = %d, want 1", retryCount)
+	}
+}
+
+// Surviving the cutoff is evidence the failure healed, so the stale charges go.
+// Otherwise a ticket that once churned carries the count for life and its next
+// transient death starts at the 30m cap instead of 30s.
+func TestClaimFactoryTriggerClearsStaleChargesAfterAHealthyRun(t *testing.T) {
+	s := newFactoryTriggerTestServer(t)
+	triggerKey := factoryTriggerKey("shortcut", "sc-healed")
+	if _, err := s.db.Exec(`INSERT INTO claws(id, tenant_id, name, template, status, created_at) VALUES(?,?,?,?,?,?)`,
+		"claw-healed", "tenant", "claw", "template", "deleted", now().Add(-2*time.Hour)); err != nil {
+		t.Fatalf("seed claw: %v", err)
+	}
+	if claimed, err := s.claimFactoryTrigger("qa", "shortcut", triggerKey, "poll", nil); err != nil || !claimed {
+		t.Fatalf("initial claim = %v, %v", claimed, err)
+	}
+	if err := s.completeFactoryTrigger("qa", "shortcut", triggerKey, "claw-healed"); err != nil {
+		t.Fatalf("complete: %v", err)
+	}
+	// A history of churn from earlier attempts.
+	if _, err := s.db.Exec(`UPDATE factory_triggers SET retry_count=7 WHERE trigger_key=?`, triggerKey); err != nil {
+		t.Fatalf("seed retry_count: %v", err)
+	}
+
+	claimed, err := s.claimFactoryTrigger("qa", "shortcut", triggerKey, "poll", nil)
+	if err != nil {
+		t.Fatalf("reclaim: %v", err)
+	}
+	if !claimed {
+		t.Fatal("a long-lived claw must be reclaimed immediately")
+	}
+	var retryCount int
+	if err := s.db.QueryRow(`SELECT retry_count FROM factory_triggers WHERE trigger_key=?`, triggerKey).Scan(&retryCount); err != nil {
+		t.Fatalf("read retry_count: %v", err)
+	}
+	if retryCount != 0 {
+		t.Fatalf("stale charges survived a healthy run: retry_count=%d", retryCount)
+	}
+}
+
+// The human override the code's comment promised did not exist: the manual
+// trigger sat on the non-exempt side and was refused for up to 30 minutes
+// behind a message about an "active trigger claim".
+func TestManualWorkflowTriggerSkipsBackoff(t *testing.T) {
+	if !triggerSourceSkipsBackoff(manualWorkflowTriggerSource) {
+		t.Fatal("the manual trigger is the human override and must not wait out a backoff")
+	}
+	if triggerSourceSkipsBackoff("poll") {
+		t.Fatal("the poller must keep backing off — it is the only source that can spin")
+	}
+	if triggerSourceSkipsBackoff("linear webhook") {
+		t.Fatal("integration webhooks repeat on their own and must keep backing off")
+	}
+}
