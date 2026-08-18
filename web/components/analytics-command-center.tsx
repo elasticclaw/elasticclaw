@@ -43,11 +43,8 @@ import type {
   TaskRunFilterOptions,
   TaskRunSummary,
 } from "@/lib/types"
-import {
-  FilterSelect,
-  type DetailState,
-  urlFilterKeys,
-} from "@/components/task-run-analytics-view"
+import { FilterSelect } from "@/components/filter-select"
+import { type DetailState, urlFilterKeys } from "@/lib/task-run-filters"
 import { RunDetailPanel } from "@/components/run-detail-panel"
 import { TicketDetailPanel } from "@/components/ticket-detail-panel"
 import { ChartCard, DatePickerRange, KpiTile, RunStatusBadge, TicketStatusBadge } from "@/components/ds"

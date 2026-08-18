@@ -3,7 +3,7 @@
 import { AlertCircle, ExternalLink, X } from "lucide-react"
 import type { TaskRunSummary } from "@/lib/types"
 import { useEscapeToClose } from "@/hooks/use-escape-to-close"
-import type { DetailState } from "@/components/task-run-analytics-view"
+import type { DetailState } from "@/lib/task-run-filters"
 import { RunStatusBadge } from "@/components/ds"
 import { Button } from "@/components/ui/button"
 import { RunLogsDialog } from "@/components/run-logs-dialog"
