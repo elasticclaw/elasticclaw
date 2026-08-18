@@ -8,7 +8,7 @@ export const TICKET_STATUS: Record<TicketStatus, { icon: LucideIcon; label: stri
   delivered: { icon: CheckCircle2, label: 'Delivered', color: 'var(--chart-2)', title: 'At least one pull request for this ticket was merged.' },
   pr_open: { icon: GitPullRequest, label: 'PR open', color: 'var(--chart-1)', title: 'Pull requests are open and awaiting review — none merged or closed yet.' },
   in_progress: { icon: CircleDot, label: 'In progress', color: 'var(--chart-5)', title: 'An agent is still working; no pull request has been opened yet.' },
-  failed: { icon: XCircle, label: 'Failed', color: 'var(--chart-4)', title: 'Every run on this ticket failed and nothing was delivered.' },
+  failed: { icon: XCircle, label: 'Failed', color: 'var(--destructive)', title: 'Every run on this ticket failed and nothing was delivered.' },
 }
 
 export function TicketStatusBadge({ status, size = 12, className }: { status: TicketStatus; size?: number; className?: string }) {

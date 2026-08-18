@@ -1,7 +1,7 @@
 'use client'
 
 import * as React from 'react'
-import { format, startOfMonth, subDays } from 'date-fns'
+import { format, isSameDay, startOfMonth, subDays } from 'date-fns'
 import { CalendarIcon } from 'lucide-react'
 import type { DateRange } from 'react-day-picker'
 
@@ -38,7 +38,7 @@ export function DatePickerRange({ value, onChange, className }: DatePickerRangeP
 
   function selectRange(range: DateRange | undefined) {
     onChange(range)
-    if (range?.from && range.to) setOpen(false)
+    if (range?.from && range.to && value?.from && !isSameDay(range.from, range.to)) setOpen(false)
   }
 
   function selectPreset(days: number) {

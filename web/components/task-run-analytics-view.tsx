@@ -3,7 +3,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react"
 import { createPortal } from "react-dom"
 import { usePathname, useRouter, useSearchParams } from "next/navigation"
-import { AlertCircle, ArrowDown, ArrowUp, CheckCircle2, CircleDot, ExternalLink, GitPullRequest, Minus, RefreshCw, Search, Users, XCircle } from "lucide-react"
+import { AlertCircle, ArrowDown, ArrowUp, ExternalLink, GitPullRequest, Minus, RefreshCw, Search, XCircle } from "lucide-react"
+import { RunStatusBadge } from "@/components/ds"
 import { Bar, BarChart, XAxis } from "recharts"
 import {
   fetchCostOverview,
@@ -450,7 +451,7 @@ export function TaskRunAnalyticsView({ workspaceScope }: { workspaceScope?: stri
                       }
                     }}
                   >
-                    <TableCell><StatusBadge status={run.status} /></TableCell>
+                    <TableCell><RunStatusBadge status={run.status} /></TableCell>
                     <TableCell>
                       <div className="min-w-[35ch]">
                         <div className="font-medium truncate" title={run.ownerDisplayName || run.factoryName || run.ownerType}>
@@ -639,7 +640,7 @@ export function RunDetailPanel({ run, details, loading, error, onClose }: { run:
         )}
         <RunLogsDialog key={run.runId} run={run} attempts={details?.attempts ?? []} />
         <section className="grid grid-cols-2 gap-2 text-sm">
-          <DetailItem label="Status" value={<StatusBadge status={run.status} />} />
+          <DetailItem label="Status" value={<RunStatusBadge status={run.status} />} />
           <DetailItem label="Phase" value={formatLabel(run.phase)} />
           <DetailItem label="Issue" value={run.issueId ? (run.issueTitle ? `${run.issueId}: ${run.issueTitle}` : run.issueId) : "None"} />
           <DetailItem label="Workflow" value={run.workflowName || "None"} title={run.workflowName || undefined} />
@@ -738,25 +739,6 @@ function DetailItem({ label, value, title }: { label: string; value: ReactNode; 
       <div className="text-xs text-muted-foreground">{label}</div>
       <div className="mt-1 truncate">{value}</div>
     </div>
-  )
-}
-
-export function StatusBadge({ status }: { status: string }) {
-  const statusIcons: Record<string, ReactNode> = {
-    clean: <CheckCircle2 className="size-3" />,
-    human_in_the_loop: <Users className="size-3" />,
-    failed: <XCircle className="size-3" />,
-  }
-  const icon = statusIcons[status] ?? <CircleDot className="size-3" />
-  return (
-    <Badge
-      title={status === "clean" ? "PR merged or closed with zero human interaction." : status === "human_in_the_loop" ? "PR merged or closed; a human interacted via the PR (comment, review, or code push)." : status === "warning" ? "PR merged or closed; a human interacted via the factory dashboard." : status === "failed" ? "No PR was ever delivered or the run definitively failed before delivery." : status === "running" ? "In progress; no failure has occurred." : undefined}
-      variant={status === "failed" ? "destructive" : status === "running" ? "secondary" : "outline"}
-      className={cn(status === "clean" && "border-emerald-500/40 text-emerald-700 dark:text-emerald-300", status === "human_in_the_loop" && "border-blue-500/50 text-blue-700 dark:text-blue-300", status === "warning" && "border-amber-500/50 text-amber-700 dark:text-amber-300")}
-    >
-      {icon}
-      {formatLabel(status)}
-    </Badge>
   )
 }
 
