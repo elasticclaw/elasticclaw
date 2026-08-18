@@ -852,7 +852,7 @@ const ClawBoardCard = memo(function ClawBoardCard({
                     className={cn(
                       "text-xs p-2 rounded",
                       author.kind === "self"
-                        ? "bg-blue-600/20 border border-blue-500/20 ml-4"
+                        ? "bg-blue-600/[0.28] border border-blue-500/45 ml-4"
                         : "bg-secondary mr-4"
                     )}
                   >
@@ -1198,7 +1198,7 @@ const MessageBubble = memo(function MessageBubble({
         className={cn(
           "w-fit max-w-[88%] md:w-[70%] md:max-w-none min-w-0 rounded-lg px-4 py-3",
           author.kind === "self"
-            ? "bg-blue-600/20 border border-blue-500/20"
+            ? "bg-blue-600/[0.28] border border-blue-500/45"
             : author.kind === "teammate" ? "bg-secondary" : (clawColor && COLOR_CLASSES[clawColor]?.bubble) || "bg-secondary"
         )}
       >
