@@ -1,6 +1,6 @@
 import { Check } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
-import type * as React from 'react'
+import * as React from 'react'
 
 import { cn } from '@/lib/utils'
 
@@ -9,19 +9,33 @@ export interface CardActionProps extends Omit<React.ComponentProps<'button'>, 'c
   label: string
   count?: number
   confirmed?: boolean
+  tone?: string
 }
 
-export function CardAction({ icon: Icon, label, count, confirmed = false, className, ...props }: CardActionProps) {
+export function CardAction({ icon: Icon, label, count, confirmed = false, tone, className, onMouseEnter, onMouseLeave, ...props }: CardActionProps) {
+  const [hover, setHover] = React.useState(false)
+  const hasCount = (count ?? 0) > 0
+  const color = confirmed ? 'var(--chart-2)' : tone ?? (hover ? 'var(--foreground)' : 'var(--muted-foreground)')
+
   return (
     <button
       type="button"
       aria-label={label}
       title={label}
-      className={cn('relative inline-flex size-7 items-center justify-center border-l text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground', className)}
+      onMouseEnter={(event) => {
+        setHover(true)
+        onMouseEnter?.(event)
+      }}
+      onMouseLeave={(event) => {
+        setHover(false)
+        onMouseLeave?.(event)
+      }}
+      className={cn('inline-flex h-6 shrink-0 items-center gap-1 rounded-md border bg-transparent px-[5px] font-mono text-[10px] font-medium transition-colors hover:bg-accent', hasCount && 'pr-[7px]', className)}
+      style={{ borderColor: hasCount ? 'var(--border)' : 'transparent', color }}
       {...props}
     >
-      {confirmed ? <Check className="size-4 text-chart-2" /> : <Icon className="size-4" />}
-      {count !== undefined ? <span className="absolute -right-1 -top-1 min-w-4 rounded-full bg-chart-1 px-1 text-[10px] leading-4 text-white">{count}</span> : null}
+      {confirmed ? <Check className="size-3.5" /> : <Icon className="size-3.5" />}
+      {hasCount ? <span>{count}</span> : null}
     </button>
   )
 }

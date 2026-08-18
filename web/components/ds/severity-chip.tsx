@@ -6,8 +6,8 @@ export const SEVERITY: Record<Severity, { rank: number; color: string; bg: strin
   TRACE: { rank: 1, color: 'var(--muted-foreground)', bg: 'var(--muted)' },
   DEBUG: { rank: 5, color: 'var(--muted-foreground)', bg: 'var(--muted)' },
   INFO: { rank: 9, color: 'var(--chart-1)', bg: 'color-mix(in srgb, var(--chart-1) 15%, transparent)' },
-  WARN: { rank: 13, color: 'var(--status-idle)', bg: 'color-mix(in srgb, var(--status-idle) 15%, transparent)' },
-  ERROR: { rank: 17, color: 'var(--destructive)', bg: 'color-mix(in srgb, var(--destructive) 15%, transparent)' },
+  WARN: { rank: 13, color: 'var(--chart-3)', bg: 'color-mix(in srgb, var(--chart-3) 15%, transparent)' },
+  ERROR: { rank: 17, color: 'var(--chart-4)', bg: 'color-mix(in srgb, var(--chart-4) 15%, transparent)' },
   FATAL: { rank: 21, color: '#fff', bg: 'var(--destructive)' },
 }
 

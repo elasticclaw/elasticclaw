@@ -12,6 +12,7 @@ import {
   ChartCard,
   DatePickerRange,
   KpiTile,
+  RunStatusBadge,
   SeverityChip,
   TicketStatusBadge,
   agentSection,
@@ -48,13 +49,14 @@ export default function DesignSystemGalleryPage() {
       </section>
       <section className="mt-8">
         <h2 className="text-sm font-medium">Card actions and KPI tiles</h2>
-        <GalleryItem label="CardAction — default / count / confirmed"><div className="flex border"><CardAction icon={ExternalLink} label="Open pull requests" count={2} /><CardAction icon={Copy} label="Copy transcript" confirmed /></div></GalleryItem>
-        <GalleryItem label="KpiTile — good and bad deltas"><KpiTile label="Delivered" value="42" delta="12%" deltaDirection="up" deltaTone="good" /><KpiTile label="Cost" value="$83.20" delta="8%" deltaDirection="up" deltaTone="bad" /></GalleryItem>
+        <GalleryItem label="CardAction — default / count / confirmed"><div className="flex items-center gap-2"><CardAction icon={ExternalLink} label="Open pull requests" count={2} tone="var(--chart-1)" /><CardAction icon={Copy} label="Copy transcript" confirmed /></div></GalleryItem>
+        <GalleryItem label="KpiTile — good and bad deltas"><KpiTile label="Delivered" value="42" delta="12%" deltaDirection="up" deltaTone="good" info="Delivered tickets compared with the prior period." /><KpiTile label="Cost" value="$83.20" delta="8%" deltaDirection="up" deltaTone="bad" /></GalleryItem>
       </section>
       <section className="mt-8">
         <h2 className="text-sm font-medium">Cards, tickets, and log chips</h2>
         <GalleryItem label="ChartCard — header, body, stat line"><ChartCard className="w-80" title="Throughput" info="Completed tickets by day" stat="4 steps · ctx 64%"><div className="p-4 text-sm text-muted-foreground">Chart body</div></ChartCard></GalleryItem>
         {(['delivered', 'pr_open', 'in_progress', 'failed'] as const).map((status) => <GalleryItem key={status} label={`TicketStatusBadge — ${status}`}><TicketStatusBadge status={status} /></GalleryItem>)}
+        {(['clean', 'human_in_the_loop', 'warning', 'failed', 'running', 'fallback'] as const).map((status) => <GalleryItem key={status} label={`RunStatusBadge — ${status}`}><RunStatusBadge status={status} /></GalleryItem>)}
         {(['TRACE', 'DEBUG', 'INFO', 'WARN', 'ERROR', 'FATAL'] as const).map((severity) => <GalleryItem key={severity} label={`SeverityChip — ${severity}`}><SeverityChip severity={severity} /><AttrChip k="duration_ms" v={240} /><AttrChip k="service.name" v="elasticclaw" /></GalleryItem>)}
         <GalleryItem label="personColor — stable chart token"><span className="font-mono text-xs" style={{ color: personColor('anaberg') }}>{personColor('anaberg')}</span></GalleryItem>
       </section>
