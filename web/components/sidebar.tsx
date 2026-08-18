@@ -75,17 +75,17 @@ interface SidebarProps {
 }
 
 /** Thin wrapper that gives ClawCard sortable DnD powers */
-function SortableClawCard({
+const SortableClawCard = memo(function SortableClawCard({
   claw,
   isSelected,
-  onClick,
+  onSelectClaw,
   onTogglePin,
   activityLine,
 }: {
   claw: Claw
   isSelected: boolean
-  onClick: () => void
-  onTogglePin: (e: React.MouseEvent) => void
+  onSelectClaw: (id: string) => void
+  onTogglePin: (id: string) => void
   activityLine?: string
 }) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } =
@@ -97,20 +97,23 @@ function SortableClawCard({
     opacity: isDragging ? 0.4 : 1,
     cursor: isDragging ? "grabbing" : undefined,
   }
+  const handleClick = useCallback(() => onSelectClaw(claw.id), [claw.id, onSelectClaw])
+  const handleTogglePin = useCallback((event: React.MouseEvent) => { event.stopPropagation(); onTogglePin(claw.id) }, [claw.id, onTogglePin])
+  const stateChip = useMemo(() => <AgentStateChip status={claw.status} isStreaming={claw.isStreaming} />, [claw.status, claw.isStreaming])
 
   return (
     <div ref={setNodeRef} style={style} {...attributes} {...listeners} className="w-full min-w-0">
       <ClawCard
         claw={claw}
         isSelected={isSelected}
-        onClick={onClick}
-        onTogglePin={onTogglePin}
+        onClick={handleClick}
+        onTogglePin={handleTogglePin}
         activityLine={activityLine}
-        stateChip={<AgentStateChip status={claw.status} isStreaming={claw.isStreaming} />}
+        stateChip={stateChip}
       />
     </div>
   )
-}
+})
 
 export const Sidebar = memo(function Sidebar({
   claws,
@@ -513,7 +516,7 @@ export const Sidebar = memo(function Sidebar({
                   <div className="space-y-1 px-2 py-2">
                     {items.length === 0 ? <p className="px-2 py-1 text-xs text-muted-foreground">{meta.empty}</p> :
                       <SortableContext items={items.map((candidate) => candidate.id)} strategy={verticalListSortingStrategy}>
-                        {items.map((candidate) => <SortableClawCard key={candidate.id} claw={candidate} isSelected={candidate.id === selectedClawId} onClick={() => onSelectClaw(candidate.id)} onTogglePin={(event) => { event.stopPropagation(); onTogglePin(candidate.id) }} activityLine={activityLines?.[candidate.id]} />)}
+                        {items.map((candidate) => <SortableClawCard key={candidate.id} claw={candidate} isSelected={candidate.id === selectedClawId} onSelectClaw={onSelectClaw} onTogglePin={onTogglePin} activityLine={activityLines?.[candidate.id]} />)}
                       </SortableContext>}
                   </div>
                 </section>

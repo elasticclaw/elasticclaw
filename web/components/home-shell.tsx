@@ -137,6 +137,7 @@ export function HomeShell() {
   } = hub
 
   const claws = rawClaws
+  const allClawIds = useMemo(() => claws.map((claw) => claw.id), [claws])
 
   // Collect all unique tags from all claws
   const allTags = useMemo(() => {
@@ -322,7 +323,7 @@ export function HomeShell() {
     <Sidebar
       claws={filteredClaws}
       pinnedClaws={filteredPinnedClaws}
-      allClawIds={claws.map((c) => c.id)}
+      allClawIds={allClawIds}
       agentSections={sidebarSections}
       selectedClawId={selectedClawId}
       onSelectClaw={handleSelectClaw}
