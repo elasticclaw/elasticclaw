@@ -46,3 +46,6 @@ tmp/
 
 # GitHub App private keys pasted for rotation (never commit)
 *.pem
+
+# Python
+__pycache__/
