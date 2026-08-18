@@ -501,24 +501,50 @@ func (s *Server) handleTaskRunAnalyticsFilterOptions(w http.ResponseWriter, r *h
 
 func parseTaskRunAnalyticsFilters(r *http.Request) (taskRunAnalyticsFilters, error) {
 	q := r.URL.Query()
-	for _, key := range []string{"status", "owner", "owner_type", "workspace", "workflow", "factory", "integration", "repo", "model", "warning_type", "failure_type"} {
-		if len(splitTaskRunAnalyticsValues(q, key)) > 50 {
-			return taskRunAnalyticsFilters{}, fmt.Errorf("too many values for filter %s, max 50", key)
+	status := splitTaskRunAnalyticsValues(q, "status")
+	owner := splitTaskRunAnalyticsValues(q, "owner", "owner_id", "ownerId", "owner_display_name", "ownerDisplayName")
+	ownerType := splitTaskRunAnalyticsValues(q, "owner_type", "ownerType")
+	workspace := splitTaskRunAnalyticsValues(q, "workspace", "workspace_name", "workspaceName")
+	workflow := splitTaskRunAnalyticsValues(q, "workflow", "workflow_name", "workflowName")
+	factory := splitTaskRunAnalyticsValues(q, "factory", "factory_name", "factoryName")
+	integration := splitTaskRunAnalyticsValues(q, "integration")
+	repo := splitTaskRunAnalyticsValues(q, "repo")
+	model := splitTaskRunAnalyticsValues(q, "model")
+	warningType := splitTaskRunAnalyticsValues(q, "warning_type", "warningType")
+	failureType := splitTaskRunAnalyticsValues(q, "failure_type", "failureType")
+	for _, filter := range []struct {
+		key    string
+		values []string
+	}{
+		{"status", status},
+		{"owner", owner},
+		{"owner_type", ownerType},
+		{"workspace", workspace},
+		{"workflow", workflow},
+		{"factory", factory},
+		{"integration", integration},
+		{"repo", repo},
+		{"model", model},
+		{"warning_type", warningType},
+		{"failure_type", failureType},
+	} {
+		if len(filter.values) > 50 {
+			return taskRunAnalyticsFilters{}, fmt.Errorf("too many values for filter %s, max 50", filter.key)
 		}
 	}
 	filters := taskRunAnalyticsFilters{
 		TenantID:    tenantFromCtx(r),
-		Status:      splitTaskRunAnalyticsValues(q, "status"),
-		Owner:       splitTaskRunAnalyticsValues(q, "owner", "owner_id", "ownerId", "owner_display_name", "ownerDisplayName"),
-		OwnerType:   splitTaskRunAnalyticsValues(q, "owner_type", "ownerType"),
-		Workspace:   splitTaskRunAnalyticsValues(q, "workspace", "workspace_name", "workspaceName"),
-		Workflow:    splitTaskRunAnalyticsValues(q, "workflow", "workflow_name", "workflowName"),
-		Factory:     splitTaskRunAnalyticsValues(q, "factory", "factory_name", "factoryName"),
-		Integration: splitTaskRunAnalyticsValues(q, "integration"),
-		Repo:        splitTaskRunAnalyticsValues(q, "repo"),
-		Model:       splitTaskRunAnalyticsValues(q, "model"),
-		WarningType: splitTaskRunAnalyticsValues(q, "warning_type", "warningType"),
-		FailureType: splitTaskRunAnalyticsValues(q, "failure_type", "failureType"),
+		Status:      status,
+		Owner:       owner,
+		OwnerType:   ownerType,
+		Workspace:   workspace,
+		Workflow:    workflow,
+		Factory:     factory,
+		Integration: integration,
+		Repo:        repo,
+		Model:       model,
+		WarningType: warningType,
+		FailureType: failureType,
 	}
 	var err error
 	if filters.FromStartedAt, err = parseTaskRunAnalyticsTime(q, "from", "start", "started_after", "startedAfter"); err != nil {
@@ -903,6 +929,43 @@ func (s *Server) readTaskRunAnalyticsAttempts(tenantID, runID string) ([]taskRun
 	return attempts, rows.Err()
 }
 
+func (s *Server) readTaskRunAnalyticsAttemptsForRuns(tenantID string, runIDs []string) (map[string][]taskRunAnalyticsAttemptView, error) {
+	attemptsByRun := map[string][]taskRunAnalyticsAttemptView{}
+	if len(runIDs) == 0 {
+		return attemptsByRun, nil
+	}
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(runIDs)), ",")
+	args := make([]any, 0, len(runIDs)+1)
+	args = append(args, tenantID)
+	for _, runID := range runIDs {
+		args = append(args, runID)
+	}
+	rows, err := s.db.Query(`
+		SELECT run_id, id, attempt_id, attempt_number, trigger_id, claw_id, status, failure_type,
+		       started_at, finished_at, created_at, updated_at
+		  FROM task_run_attempts
+		 WHERE tenant_id=? AND run_id IN (`+placeholders+`)`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var runID string
+		var attempt taskRunAnalyticsAttemptView
+		if err := rows.Scan(&runID, &attempt.ID, &attempt.AttemptID, &attempt.AttemptNumber, &attempt.TriggerID, &attempt.ClawID, &attempt.Status, &attempt.FailureType, &attempt.StartedAt, &attempt.FinishedAt, &attempt.CreatedAt, &attempt.UpdatedAt); err != nil {
+			return nil, err
+		}
+		attemptsByRun[runID] = append(attemptsByRun[runID], attempt)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for _, attempts := range attemptsByRun {
+		sort.Slice(attempts, func(i, j int) bool { return attempts[i].AttemptNumber < attempts[j].AttemptNumber })
+	}
+	return attemptsByRun, nil
+}
+
 func (s *Server) readTaskRunAnalyticsEvents(tenantID, runID string) ([]taskRunAnalyticsEventView, error) {
 	rows, err := s.db.Query(`
 		SELECT id, attempt_id, event_key, source, source_event_id, source_delivery_id, event_type,
@@ -934,6 +997,59 @@ func (s *Server) readTaskRunAnalyticsEvents(tenantID, runID string) ([]taskRunAn
 	return events, rows.Err()
 }
 
+func (s *Server) readTaskRunAnalyticsEventsForRuns(tenantID string, runIDs []string) (map[string][]taskRunAnalyticsEventView, error) {
+	eventsByRun := map[string][]taskRunAnalyticsEventView{}
+	if len(runIDs) == 0 {
+		return eventsByRun, nil
+	}
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(runIDs)), ",")
+	args := make([]any, 0, len(runIDs)+1)
+	args = append(args, tenantID)
+	for _, runID := range runIDs {
+		args = append(args, runID)
+	}
+	rows, err := s.db.Query(`
+		SELECT run_id, id, attempt_id, event_key, source, source_event_id, source_delivery_id, event_type,
+		       event_time, observed_at, actor_type, actor_id, actor_login, actor_display_name,
+		       interaction_role, target_type, target_id, target_url, warning_type, failure_type,
+		       detail, created_at
+		  FROM task_run_events
+		 WHERE tenant_id=? AND run_id IN (`+placeholders+`)`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var runID, detailJSON string
+		var event taskRunAnalyticsEventView
+		if err := rows.Scan(&runID, &event.ID, &event.AttemptID, &event.EventKey, &event.Source, &event.SourceEventID, &event.SourceDeliveryID, &event.EventType, &event.EventTime, &event.ObservedAt, &event.ActorType, &event.ActorID, &event.ActorLogin, &event.ActorDisplayName, &event.InteractionRole, &event.TargetType, &event.TargetID, &event.TargetURL, &event.WarningType, &event.FailureType, &detailJSON, &event.CreatedAt); err != nil {
+			return nil, err
+		}
+		event.Detail = map[string]any{}
+		if detailJSON != "" {
+			if err := json.Unmarshal([]byte(detailJSON), &event.Detail); err != nil {
+				log.Printf("[task-run-analytics] failed to unmarshal event detail for %s: %v", event.ID, err)
+			}
+		}
+		eventsByRun[runID] = append(eventsByRun[runID], event)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for _, events := range eventsByRun {
+		sort.Slice(events, func(i, j int) bool {
+			if events[i].EventTime != events[j].EventTime {
+				return events[i].EventTime < events[j].EventTime
+			}
+			if events[i].ObservedAt != events[j].ObservedAt {
+				return events[i].ObservedAt < events[j].ObservedAt
+			}
+			return events[i].EventKey < events[j].EventKey
+		})
+	}
+	return eventsByRun, nil
+}
+
 func (s *Server) readTaskRunAnalyticsPRs(tenantID, runID string) ([]taskRunAnalyticsPRView, error) {
 	rows, err := s.db.Query(`
 		SELECT id, repo, pr_number, pr_url, head_sha, head_branch, last_agent_head_sha, base_branch,
@@ -956,6 +1072,50 @@ func (s *Server) readTaskRunAnalyticsPRs(tenantID, runID string) ([]taskRunAnaly
 		prs = append(prs, pr)
 	}
 	return prs, rows.Err()
+}
+
+func (s *Server) readTaskRunAnalyticsPRsForRuns(tenantID string, runIDs []string) (map[string][]taskRunAnalyticsPRView, error) {
+	prsByRun := map[string][]taskRunAnalyticsPRView{}
+	if len(runIDs) == 0 {
+		return prsByRun, nil
+	}
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(runIDs)), ",")
+	args := make([]any, 0, len(runIDs)+1)
+	args = append(args, tenantID)
+	for _, runID := range runIDs {
+		args = append(args, runID)
+	}
+	rows, err := s.db.Query(`
+		SELECT run_id, id, repo, pr_number, pr_url, head_sha, head_branch, last_agent_head_sha, base_branch,
+		       state, merged, opened_at, closed_at, merged_at, merged_by_login, created_at, updated_at
+		  FROM task_run_prs
+		 WHERE tenant_id=? AND run_id IN (`+placeholders+`)`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var runID string
+		var pr taskRunAnalyticsPRView
+		var merged int
+		if err := rows.Scan(&runID, &pr.ID, &pr.Repo, &pr.PRNumber, &pr.URL, &pr.HeadSHA, &pr.HeadBranch, &pr.LastAgentHeadSHA, &pr.BaseBranch, &pr.State, &merged, &pr.OpenedAt, &pr.ClosedAt, &pr.MergedAt, &pr.MergedByLogin, &pr.CreatedAt, &pr.UpdatedAt); err != nil {
+			return nil, err
+		}
+		pr.Merged = merged == 1
+		prsByRun[runID] = append(prsByRun[runID], pr)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for _, prs := range prsByRun {
+		sort.Slice(prs, func(i, j int) bool {
+			if prs[i].OpenedAt != prs[j].OpenedAt {
+				return prs[i].OpenedAt < prs[j].OpenedAt
+			}
+			return prs[i].PRNumber < prs[j].PRNumber
+		})
+	}
+	return prsByRun, nil
 }
 
 func (s *Server) readTaskRunAnalyticsOutputs(tenantID, runID, runClawID string) ([]taskRunAnalyticsOutputView, error) {

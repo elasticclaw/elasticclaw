@@ -301,19 +301,26 @@ func (s *Server) buildTaskRunAnalyticsTicket(ctx context.Context, tenantID, issu
 	sort.Slice(runs, func(i, j int) bool { return runs[i].StartedAt < runs[j].StartedAt })
 	ticket := taskRunAnalyticsTicketView{IssueID: issueID, IssueTitle: runs[0].IssueTitle, Source: runs[0].Integration, Repo: runs[0].Repo, WorkflowName: runs[0].WorkflowName, WorkspaceName: runs[0].WorkspaceName, RunIDs: []string{}, Runs: []taskRunAnalyticsTicketRunSummary{}, PRs: []taskRunAnalyticsTicketPRView{}, Story: []taskRunAnalyticsTicketStoryEntry{}}
 	events := []taskRunAnalyticsTicketStoryEntry{}
+	runIDs := make([]string, 0, len(runs))
 	for _, run := range runs {
-		attempts, err := s.readTaskRunAnalyticsAttempts(tenantID, run.RunID)
-		if err != nil {
-			return ticket, err
-		}
-		prs, err := s.readTaskRunAnalyticsPRs(tenantID, run.RunID)
-		if err != nil {
-			return ticket, err
-		}
-		runEvents, err := s.readTaskRunAnalyticsEvents(tenantID, run.RunID)
-		if err != nil {
-			return ticket, err
-		}
+		runIDs = append(runIDs, run.RunID)
+	}
+	attemptsByRun, err := s.readTaskRunAnalyticsAttemptsForRuns(tenantID, runIDs)
+	if err != nil {
+		return ticket, err
+	}
+	prsByRun, err := s.readTaskRunAnalyticsPRsForRuns(tenantID, runIDs)
+	if err != nil {
+		return ticket, err
+	}
+	eventsByRun, err := s.readTaskRunAnalyticsEventsForRuns(tenantID, runIDs)
+	if err != nil {
+		return ticket, err
+	}
+	for _, run := range runs {
+		attempts := attemptsByRun[run.RunID]
+		prs := prsByRun[run.RunID]
+		runEvents := eventsByRun[run.RunID]
 		ticket.RunIDs = append(ticket.RunIDs, run.RunID)
 		cost, tokens := taskRunTicketCostAndTokens(run)
 		ticket.Runs = append(ticket.Runs, taskRunAnalyticsTicketRunSummary{RunID: run.RunID, Status: run.Status, Phase: run.Phase, Model: run.Model, AttemptCount: len(attempts), Cost: cost, TotalTokens: tokens, HumanTouches: run.HumanInteractionCount, StartedAt: run.StartedAt, LastActivity: run.LastEventAt})
