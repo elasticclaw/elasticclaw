@@ -249,7 +249,10 @@ export const Sidebar = memo(function Sidebar({
   }
 
   // Merge pinned + unpinned for collapsed view (order already applied by parent)
-  const allClaws = [...pinnedClaws, ...claws.filter(c => !pinnedClaws.find(p => p.id === c.id))]
+  const allClaws = useMemo(
+    () => [...pinnedClaws, ...claws.filter(c => !pinnedClaws.find(p => p.id === c.id))],
+    [pinnedClaws, claws]
+  )
 
   // The collapsed rail keeps the expanded list's grouping: same section order,
   // same pinned-first sort — collapsing must not reshuffle the agents.

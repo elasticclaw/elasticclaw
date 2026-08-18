@@ -54,6 +54,9 @@ export function HomeShell() {
   const [searchQuery, setSearchQuery] = useState("")
   const [activeTagFilters, setActiveTagFilters] = useState<string[]>([])
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
+  const handleToggleSidebarCollapse = useCallback(() => {
+    setSidebarCollapsed((collapsed) => !collapsed)
+  }, [])
   // Below 768px the sidebar becomes a slide-over drawer opened from the
   // board header hamburger; the footer destinations move to a bottom tab bar.
   const isMobile = useIsMobile()
@@ -353,7 +356,7 @@ export function HomeShell() {
       onRemoveTagFilter={handleRemoveTagFilter}
       onClearTagFilters={handleClearTagFilters}
       isCollapsed={!isMobile && sidebarCollapsed}
-      onToggleCollapse={() => setSidebarCollapsed(!sidebarCollapsed)}
+      onToggleCollapse={handleToggleSidebarCollapse}
       onReorderClaws={reorderClaws}
       activityLines={sidebarActivity}
       isAdmin={isAdmin}
