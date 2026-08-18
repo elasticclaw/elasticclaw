@@ -47,7 +47,7 @@ import { FilterSelect } from "@/components/filter-select"
 import { type DetailState, urlFilterKeys } from "@/lib/task-run-filters"
 import { RunDetailPanel } from "@/components/run-detail-panel"
 import { TicketDetailPanel } from "@/components/ticket-detail-panel"
-import { ChartCard, DatePickerRange, KpiTile, RunStatusBadge, TicketStatusBadge } from "@/components/ds"
+import { ChartCard, DatePickerRange, defaultPeriod, KpiTile, RunStatusBadge, TicketStatusBadge } from "@/components/ds"
 import { WorkflowName } from "@/components/workflow-name"
 import { Button } from "@/components/ui/button"
 import {
@@ -648,7 +648,9 @@ function FilterBar({
   ] as const
 
   const activeFilters = [...(filters.workspace ? [{ key: "workspace", label: `Workspace: ${filters.workspace}` }] : []), ...selectFilters.flatMap(([label, key]) => filters[key] ? [{ key, label: `${label}: ${filters[key]}` }] : [])]
-  const dateRange: DateRange | undefined = filters.from || filters.to ? { from: filters.from ? new Date(filters.from) : undefined, to: filters.to ? new Date(filters.to) : undefined } : undefined
+  // No from/to in the URL means the default period — show it as such so the
+  // trigger reads "Last 30 days" instead of "Select date range".
+  const dateRange: DateRange = filters.from || filters.to ? { from: filters.from ? new Date(filters.from) : undefined, to: filters.to ? new Date(filters.to) : undefined } : defaultPeriod()
   return (
     <div className="rounded-lg border bg-card p-2">
       <div className="flex flex-wrap items-center gap-2">
