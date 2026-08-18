@@ -1,7 +1,7 @@
 "use client"
 
 import { useState, useRef, useEffect, useCallback, useMemo, memo } from "react"
-import { Send, Terminal, TerminalSquare, ChevronLeft, ChevronRight, ChevronDown, Loader2, LayoutGrid, Info, MessageSquare, Trash2, AlertCircle, Wrench, GripVertical, Settings2, Paperclip, File as FileIcon, X, Menu, MoreVertical, LogOut, ClipboardCopy } from "lucide-react"
+import { Send, Terminal, TerminalSquare, ChevronLeft, ChevronRight, ChevronDown, Loader2, LayoutGrid, Info, MessageSquare, Trash2, AlertCircle, Wrench, GripVertical, Settings2, Paperclip, File as FileIcon, X, Menu, MoreVertical, LogOut, ClipboardCopy, CheckCircle2, GitPullRequest } from "lucide-react"
 import {
   compactActivityRuns,
   demoteStaleRunning,
@@ -45,6 +45,7 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Badge } from "@/components/ui/badge"
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet"
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog"
 import {
   DropdownMenu,
@@ -64,6 +65,7 @@ import { AttachmentChip } from "@/components/attachment-chip"
 import dynamic from "next/dynamic"
 import { useBranding } from "@/hooks/use-branding"
 import { BootstrapProgress } from "@/components/bootstrap-progress"
+import { AGENT_SECTION, agentSection, type AgentSectionName } from "@/components/ds/agent-section"
 import { ClawTitle } from "@/components/claw-title"
 import { windowMessagesByDurableCount } from "@/lib/messages"
 import { DependencyDowntimeBanner } from "@/components/dependency-downtime-banner"
@@ -543,13 +545,12 @@ const ClawBoardCard = memo(function ClawBoardCard({
   const [input, setInput] = useState("")
   const cardTextareaRef = useRef<HTMLTextAreaElement>(null)
   const cardFileInputRef = useRef<HTMLInputElement>(null)
-  const [isFlipped, setIsFlipped] = useState(false)
-  // The 3D flip (perspective/preserve-3d) is brittle on mobile Safari — on
-  // phones the card is full-width in a vertical list and front/back is a
-  // plain visibility swap instead of a rotateY transform.
   const isMobile = useIsMobile()
   const [showTerminal, setShowTerminal] = useState(false)
   const [confirmKill, setConfirmKill] = useState(false)
+  const [detailsOpen, setDetailsOpen] = useState(false)
+  const [copied, setCopied] = useState(false)
+  const [prs, setPrs] = useState<ClawPR[]>([])
   const hasUnread = claw.unreadCount > 0
   const isPending = claw.status === "provisioning" || claw.status === "error" || claw.status === "offline"
   const msgScrollRef = useRef<HTMLDivElement>(null)
@@ -663,10 +664,16 @@ const ClawBoardCard = memo(function ClawBoardCard({
     }
   }
 
-  const handleFlip = (e: React.MouseEvent) => {
-    e.stopPropagation()
-    setIsFlipped(!isFlipped)
-  }
+  useEffect(() => {
+    fetchClawPRs(claw.id).then((items) => setPrs(items.filter((pr) => pr.state === "open"))).catch(() => setPrs([]))
+  }, [claw.id])
+
+  const copyTranscript = useCallback(async (event: React.MouseEvent) => {
+    event.stopPropagation()
+    await copyTextToClipboard(formatChatTranscript({ claw, messages, streamingText: streamingBuffer?.text }))
+    setCopied(true)
+    window.setTimeout(() => setCopied(false), 1400)
+  }, [claw, messages, streamingBuffer?.text])
   
   return (
     <>
@@ -675,17 +682,11 @@ const ClawBoardCard = memo(function ClawBoardCard({
         "shrink-0 relative",
         // Mobile cards size to their content (capped below) instead of a
         // fixed desktop-carryover height — several agents fit per screen.
-        isMobile ? "w-full" : "w-[500px] h-full [perspective:1000px]"
+        isMobile ? "w-full" : "w-[500px] h-full"
       )}
     >
-      <div
-        className={cn(
-          "relative w-full",
-          !isMobile && "h-full transition-transform duration-500 [transform-style:preserve-3d]",
-          !isMobile && isFlipped && "[transform:rotateY(180deg)]"
-        )}
-      >
-        {/* Front - Chat view. On mobile it is in normal flow and sizes to its
+      <div className="relative h-full w-full">
+        {/* Chat view. On mobile it is in normal flow and sizes to its
             content; the message list below carries its own viewport cap and
             scrolls inside, so the whole card stays around 60vh at most. (A
             max-height on the card itself would not work: `h-full` inside a
@@ -695,9 +696,7 @@ const ClawBoardCard = memo(function ClawBoardCard({
         <div
           className={cn(
             "flex flex-col rounded-lg border border-border bg-card",
-            isMobile
-              ? cn("relative", isFlipped && "hidden")
-              : "absolute inset-0 [backface-visibility:hidden]",
+            isMobile ? "relative" : "absolute inset-0",
             hasUnread && "border-blue-500/30 bg-blue-950/10",
             isPending && "opacity-75"
           )}
@@ -711,15 +710,7 @@ const ClawBoardCard = memo(function ClawBoardCard({
               <div className="text-xs font-medium text-foreground">Drop files</div>
             </div>
           )}
-          {isStreaming && (
-            <div className="absolute left-0 top-0 bottom-0 w-1 bg-green-500 rounded-l-lg z-10" />
-          )}
-          {claw.status === "provisioning" && (
-            <div className="absolute left-0 top-0 bottom-0 w-1 bg-blue-400 rounded-l-lg z-10 animate-pulse" />
-          )}
-          {claw.status === "error" && (
-            <div className="absolute left-0 top-0 bottom-0 w-1 bg-red-500 rounded-l-lg z-10" />
-          )}
+          <div className="absolute left-0 top-0 bottom-0 w-1 rounded-l-lg z-10" style={{ backgroundColor: isStreaming ? "var(--status-streaming)" : claw.status === "provisioning" ? "var(--status-provisioning)" : claw.status === "error" ? "var(--status-error)" : AGENT_SECTION[agentSection(claw, { isWaitingOnYou: false })].color }} />
           
           {/* Context usage bar */}
           <div className="px-3 pt-2">
@@ -728,7 +719,7 @@ const ClawBoardCard = memo(function ClawBoardCard({
           
           {/* Header - clickable to open full view */}
           <div className="p-3 border-b border-border">
-            <div className="flex items-center gap-2 mb-1">
+            <div className="flex items-start gap-2 mb-1">
               {/* Drag handle — desktop board only; mobile has no reordering */}
               {dragHandleProps && (
                 <span
@@ -740,69 +731,21 @@ const ClawBoardCard = memo(function ClawBoardCard({
                   <GripVertical className="size-3.5" />
                 </span>
               )}
-              <StatusDot status={claw.status} isStreaming={isStreaming} />
-              {claw.githubIssueUrl ? (
-                <>
-                  <ClawTitle
-                    name={claw.name}
-                    githubIssueId={claw.githubIssueId}
-                    githubIssueUrl={claw.githubIssueUrl}
-                    className="flex-1 font-mono text-sm font-medium text-foreground"
-                  />
-                  {!isPending && (
-                    <button
-                      onClick={() => onClick(claw.id)}
-                      className="p-1 rounded hover:bg-accent transition-colors"
-                      title="Open conversation"
-                    >
-                      <MessageSquare className="size-3.5 text-muted-foreground" />
-                    </button>
-                  )}
-                </>
-              ) : (
-                <button
-                  onClick={isPending ? undefined : () => onClick(claw.id)}
-                  className={cn(
-                    "min-w-0 font-mono text-sm font-medium text-foreground flex-1 text-left",
-                    !isPending && "hover:underline"
-                  )}
-                >
-                  <ClawTitle name={claw.name} className="block" />
-                </button>
-              )}
-              {hasUnread && (
-                <span className="px-1.5 py-0.5 text-[10px] font-medium bg-blue-500 text-white rounded-full">
-                  {claw.unreadCount > 99 ? "99+" : claw.unreadCount}
-                </span>
-              )}
-              <CopyTranscriptButton
-                claw={claw}
-                messages={messages}
-                streamingText={streamingBuffer?.text}
-                size="icon"
-                stopPropagation
-              />
-              <button
-                onClick={handleFlip}
-                className="p-1 rounded hover:bg-accent transition-colors"
-                title="View bot info"
-              >
-                <Info className="size-3.5 text-muted-foreground" />
-              </button>
-            </div>
-            <div className="flex items-center justify-between">
-              <span className="text-xs text-muted-foreground truncate">
-                {claw.template}
-              </span>
-              <span className="text-xs font-mono">
-                {claw.status === "provisioning" ? (
-                  <span className="text-blue-400">starting...</span>
-                ) : claw.status === "error" ? (
-                  <span className="text-red-500">error</span>
-                ) : (
-                  <span className="text-muted-foreground">{formatUptime(claw.uptime)}</span>
-                )}
-              </span>
+              <div className="min-w-0 flex-1">
+                <div className="flex min-w-0 items-center gap-2">
+                  <StatusDot status={claw.status} isStreaming={isStreaming} />
+                  <button onClick={isPending ? undefined : () => onClick(claw.id)} className="min-w-0 flex-1 text-left font-mono text-sm font-medium text-foreground hover:underline">
+                    <ClawTitle name={claw.name} githubIssueId={claw.githubIssueId} githubIssueUrl={claw.githubIssueUrl} className="block" />
+                  </button>
+                  {hasUnread && <span className="rounded-full bg-blue-500 px-1.5 py-0.5 text-[10px] font-medium text-white">{claw.unreadCount > 99 ? "99+" : claw.unreadCount}</span>}
+                </div>
+                <div className="mt-1 flex items-center gap-1 text-xs text-muted-foreground"><span className="truncate">{claw.template}</span><span>·</span><span className={cn("font-mono shrink-0", claw.status === "provisioning" && "text-[var(--status-provisioning)]", claw.status === "error" && "text-[var(--status-error)]")}>{claw.status === "provisioning" ? "starting..." : claw.status === "error" ? "error" : formatUptime(claw.uptime)}</span></div>
+              </div>
+              <div className="flex shrink-0 items-center gap-1 border-l border-border pl-2">
+                {prs.length > 0 && <Popover><PopoverTrigger asChild><button onClick={(event) => event.stopPropagation()} className="flex items-center gap-1 rounded p-1 text-[var(--chart-1)] hover:bg-accent" aria-label="Open pull requests" title="Open pull requests"><GitPullRequest className="size-3.5" /><span className="font-mono text-[10px]">{prs.length}</span></button></PopoverTrigger><PopoverContent className="w-72 p-2" align="end">{prs.map((pr) => <div key={pr.id} className="py-1"><div className="font-mono text-xs text-[var(--chart-1)]">{pr.repo}#{pr.prNumber}</div><div className="truncate text-xs text-muted-foreground">{(pr as ClawPR & { title?: string }).title || "Pull request"}</div></div>)}</PopoverContent></Popover>}
+                <button onClick={copyTranscript} className={cn("rounded p-1 hover:bg-accent", copied && "text-[var(--chart-2)]")} aria-label={copied ? "Transcript copied" : "Copy transcript"} title={copied ? "Transcript copied" : "Copy transcript"}>{copied ? <CheckCircle2 className="size-3.5" /> : <ClipboardCopy className="size-3.5" />}</button>
+                <button onClick={(event) => { event.stopPropagation(); setDetailsOpen(true) }} className="rounded p-1 hover:bg-accent" aria-label="Agent details" title="Agent details"><Info className="size-3.5" /></button>
+              </div>
             </div>
             <BootstrapProgress claw={claw} />
             {claw.tags.length > 0 && (
@@ -1071,80 +1014,20 @@ const ClawBoardCard = memo(function ClawBoardCard({
           </form>
         </div>
 
-        {/* Back - Bot info */}
-        <div
-          className={cn(
-            "flex flex-col rounded-lg border border-border bg-card",
-            isMobile
-              ? cn("relative", !isFlipped && "hidden")
-              : "absolute inset-0 [backface-visibility:hidden] [transform:rotateY(180deg)]"
-          )}
-        >
-          {/* Header */}
-          <div className="p-3 border-b border-border">
-            <div className="flex items-center gap-2">
-              <StatusDot status={claw.status} isStreaming={claw.isStreaming} />
-              <ClawTitle
-                name={claw.name}
-                githubIssueId={claw.githubIssueId}
-                githubIssueUrl={claw.githubIssueUrl}
-                className="flex-1 font-mono text-sm font-medium text-foreground"
-              />
-              {claw.ssh_host && (
-                <button
-                  onClick={(e) => { e.stopPropagation(); setShowTerminal((v) => !v) }}
-                  className={cn(
-                    "p-1 rounded hover:bg-accent transition-colors",
-                    showTerminal && "bg-accent text-foreground"
-                  )}
-                  title="Toggle terminal"
-                >
-                  <TerminalSquare className="size-3.5 text-muted-foreground" />
-                </button>
-              )}
-              <button
-                onClick={handleFlip}
-                className="p-1 rounded hover:bg-accent transition-colors"
-                title="View chat"
-              >
-                <MessageSquare className="size-3.5 text-muted-foreground" />
-              </button>
-            </div>
-          </div>
-
-          {/* Bot info content */}
-          <ClawCardBack claw={claw} />
-
-          {/* Footer */}
-          <div className="p-3 border-t border-border space-y-2">
-            <Button 
-              variant="outline" 
-              size="sm" 
-              className="w-full"
-              onClick={() => onClick(claw.id)}
-            >
-              Open Full View
-            </Button>
-            <div className="flex gap-2">
-              <Button 
-                variant="destructive" 
-                size="sm" 
-                className="flex-1"
-                onClick={(e) => {
-                  e.stopPropagation()
-                  setConfirmKill(true)
-                }}
-              >
-                <Trash2 className="size-3 mr-1.5" />
-                Kill
-              </Button>
-            </div>
-          </div>
-        </div>
       </div>
     </div>
+    <Sheet open={detailsOpen} onOpenChange={setDetailsOpen}>
+      <SheetContent className="flex w-full flex-col sm:max-w-md">
+        <SheetHeader><SheetTitle className="font-mono text-sm">{claw.name} — Agent details</SheetTitle></SheetHeader>
+        <ClawCardBack claw={claw} />
+        <div className="flex gap-2 border-t border-border pt-3">
+          <Button variant="destructive" size="sm" className="flex-1" onClick={() => setConfirmKill(true)}><Trash2 className="mr-1.5 size-3" />Kill</Button>
+          <Button variant="outline" size="sm" className="flex-1" disabled={!claw.ssh_host} onClick={() => setShowTerminal(true)}><TerminalSquare className="mr-1.5 size-3" />Terminal</Button>
+        </div>
+      </SheetContent>
+    </Sheet>
     <KillConfirmDialog clawName={claw.name} open={confirmKill} onConfirm={() => { setConfirmKill(false); onKill(claw.id) }} onCancel={() => setConfirmKill(false)} />
-    {/* Terminal dialog — outside perspective container to avoid stacking context clipping */}
+    {/* Terminal dialog stays outside the card so it can fill the viewport. */}
     {claw.ssh_host && (
       <Dialog open={showTerminal} onOpenChange={setShowTerminal}>
         <DialogContent className="!max-w-none w-[95vw] h-[90vh] flex flex-col p-0 gap-0">
@@ -1205,6 +1088,28 @@ const SortableClawBoardCard = memo(function SortableClawBoardCard({
     </div>
   )
 })
+
+function BoardSection({
+  section,
+  className,
+  children,
+}: {
+  section: { key: AgentSectionName; meta: typeof AGENT_SECTION[AgentSectionName]; items: Claw[] }
+  className?: string
+  children: React.ReactNode
+}) {
+  const Icon = section.meta.icon
+  return (
+    <section className={cn("flex min-w-[500px] flex-col gap-3", className)}>
+      <div className="flex items-center gap-2 rounded-md border px-3 py-2" style={{ backgroundColor: `color-mix(in srgb, ${section.meta.color} 10%, var(--card))`, borderColor: `color-mix(in srgb, ${section.meta.color} 30%, var(--border))` }}>
+        <Icon className="size-[13px]" style={{ color: section.meta.color }} />
+        <span className="text-xs font-semibold uppercase tracking-wider">{section.meta.label}</span>
+        <span className="ml-auto rounded-full px-1.5 font-mono text-[10px]" style={{ backgroundColor: `color-mix(in srgb, ${section.meta.color} 10%, transparent)`, color: section.meta.color }}>{section.items.length}</span>
+      </div>
+      {children}
+    </section>
+  )
+}
 
 function formatTimestamp(date: Date): string {
   return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
@@ -1843,6 +1748,13 @@ export function ConversationView({
   if (!claw) {
     // Use the server-maintained order (respects user drag preference + falls back to API order)
     const sortedClaws = allClaws
+    const boardSections = (["attention", "working", "offline"] as AgentSectionName[]).map((key) => ({
+      key,
+      meta: AGENT_SECTION[key],
+      items: sortedClaws.filter((candidate) => agentSection(candidate, { isWaitingOnYou: false }) === key),
+    }))
+    const sectionSummary = boardSections.filter((section) => section.items.length > 0)
+      .map((section) => `${section.items.length} ${section.meta.label.toLowerCase()}`).join(" · ")
 
     return (
       <main className="flex-1 flex flex-col bg-background min-w-0 overflow-hidden">
@@ -1856,9 +1768,7 @@ export function ConversationView({
             ) : (
               <Terminal className="size-5 text-muted-foreground" />
             )}
-            <h2 className="truncate text-lg font-medium text-foreground">
-              {loading ? "Agents" : `${allClaws.length} Active Agents`}
-            </h2>
+            <div className="min-w-0"><h2 className="truncate text-lg font-medium text-foreground">Agents</h2><p className="truncate font-mono text-[10px] text-muted-foreground">{loading ? "Loading agents" : sectionSummary}</p></div>
           </div>
           <div className="flex min-w-0 flex-wrap items-center justify-end gap-x-4 gap-y-2 text-xs text-muted-foreground">
             <DependencyDowntimeBanner dependencies={downtimeDependencies} />
@@ -1919,18 +1829,8 @@ export function ConversationView({
           ) : isMobile ? (
             /* Single-column vertical list: full-width cards, no reordering,
                no scroll arrows — one-finger vertical scrolling only. */
-            <div className="h-full overflow-y-auto overflow-x-hidden p-3 flex flex-col gap-3">
-              {sortedClaws.map((c) => (
-                <ClawBoardCard
-                  key={c.id}
-                  claw={c}
-                  messages={allMessages[c.id] ?? EMPTY_MESSAGES}
-                  streamingBuffer={streamingBuffers[c.id]}
-                  onClick={handleCardClick}
-                  onSendMessage={handleCardSendMessage}
-                  onKill={handleCardKill}
-                />
-              ))}
+            <div className="h-full overflow-y-auto overflow-x-hidden p-3 space-y-5">
+              {boardSections.filter((section) => section.items.length).map((section) => <BoardSection key={section.key} section={section} className="flex flex-col gap-3"><div className="flex flex-col gap-3">{section.items.map((c) => <ClawBoardCard key={c.id} claw={c} messages={allMessages[c.id] ?? EMPTY_MESSAGES} streamingBuffer={streamingBuffers[c.id]} onClick={handleCardClick} onSendMessage={handleCardSendMessage} onKill={handleCardKill} />)}</div></BoardSection>)}
             </div>
           ) : (
           <>
@@ -1949,28 +1849,13 @@ export function ConversationView({
             onDragStart={handleBoardDragStart}
             onDragEnd={handleBoardDragEnd}
           >
-            <SortableContext
-              items={sortedClaws.map((c) => c.id)}
-              strategy={horizontalListSortingStrategy}
-            >
               <div
                 ref={boardRef}
-                className="flex gap-4 h-full overflow-x-auto overflow-y-hidden py-6 px-12 items-stretch"
+                className="flex gap-6 h-full overflow-x-auto overflow-y-hidden py-6 px-12 items-stretch"
                 style={{ scrollbarWidth: "none", msOverflowStyle: "none" }}
               >
-                {sortedClaws.map((c) => (
-                  <SortableClawBoardCard
-                    key={c.id}
-                    claw={c}
-                    messages={allMessages[c.id] ?? EMPTY_MESSAGES}
-                    streamingBuffer={streamingBuffers[c.id]}
-                    onClick={handleCardClick}
-                    onSendMessage={handleCardSendMessage}
-                    onKill={handleCardKill}
-                  />
-                ))}
+                {boardSections.filter((section) => section.items.length).map((section) => <BoardSection key={section.key} section={section} className="h-full shrink-0"><SortableContext items={section.items.map((c) => c.id)} strategy={horizontalListSortingStrategy}><div className="flex h-[calc(100%-38px)] gap-4">{section.items.map((c) => <SortableClawBoardCard key={c.id} claw={c} messages={allMessages[c.id] ?? EMPTY_MESSAGES} streamingBuffer={streamingBuffers[c.id]} onClick={handleCardClick} onSendMessage={handleCardSendMessage} onKill={handleCardKill} />)}</div></SortableContext></BoardSection>)}
               </div>
-            </SortableContext>
 
             {/* Ghost card following cursor during drag */}
             <DragOverlay>

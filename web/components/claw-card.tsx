@@ -20,6 +20,7 @@ interface ClawCardProps {
   showPinButton?: boolean
   /** One-line "what it is running right now" — shown under the name when set. */
   activityLine?: string
+  stateChip?: React.ReactNode
 }
 
 function StatusIndicator({ status, isStreaming }: { status: ClawStatus; isStreaming: boolean }) {
@@ -54,7 +55,7 @@ function UnreadBadge({ count }: { count: number }) {
   )
 }
 
-export function ClawCard({ claw, isSelected, onClick, onTogglePin, onTagsChange, showPinButton = true, activityLine }: ClawCardProps) {
+export function ClawCard({ claw, isSelected, onClick, onTogglePin, onTagsChange, showPinButton = true, activityLine, stateChip }: ClawCardProps) {
   const [localTags, setLocalTags] = useState(claw.tags)
   const [localName, setLocalName] = useState(claw.name)
   const [localColor, setLocalColor] = useState(claw.color)
@@ -202,6 +203,7 @@ export function ClawCard({ claw, isSelected, onClick, onTogglePin, onTagsChange,
           </button>
         )}
       </div>
+      {stateChip && <div className="pl-5 pr-1 pb-1">{stateChip}</div>}
       {activityLine && (
         <div className="min-w-0 pl-5 pr-1">
           <span className="block truncate font-mono text-[10px] leading-4 text-muted-foreground" title={activityLine}>

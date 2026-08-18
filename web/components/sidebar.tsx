@@ -1,6 +1,6 @@
 "use client"
 
-import { Search, Pin, X, ChevronDown, PanelLeftClose, PanelLeft, Loader2, AlertCircle, LogOut, Settings, Plus, BarChart3, LayoutGrid } from "lucide-react"
+import { Search, X, ChevronDown, PanelLeftClose, PanelLeft, Loader2, AlertCircle, LogOut, Settings, Plus, BarChart3, LayoutGrid } from "lucide-react"
 import { useBranding } from "@/hooks/use-branding"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -19,6 +19,8 @@ import {
 } from "@/components/ui/dropdown-menu"
 import { cn } from "@/lib/utils"
 import type { Claw } from "@/lib/types"
+import { AgentStateChip } from "@/components/ds/agent-state-chip"
+import { AGENT_SECTION, agentSection, type AgentSectionName } from "@/components/ds/agent-section"
 import {
   DndContext,
   closestCenter,
@@ -103,6 +105,7 @@ function SortableClawCard({
         onClick={onClick}
         onTogglePin={onTogglePin}
         activityLine={activityLine}
+        stateChip={<AgentStateChip status={claw.status} isStreaming={claw.isStreaming} />}
       />
     </div>
   )
@@ -224,28 +227,20 @@ export function Sidebar({
     const { active, over } = event
     if (!over || active.id === over.id) return
 
-    // Figure out which list the drag happened in (pinned vs main)
-    const inPinned = pinnedClaws.some((c) => c.id === active.id)
-    const targetInPinned = pinnedClaws.some((c) => c.id === over.id)
+    const visible = [...pinnedClaws, ...claws.filter((c) => !pinnedClaws.some((p) => p.id === c.id))]
+    const activeClaw = visible.find((c) => c.id === active.id)
+    const overClaw = visible.find((c) => c.id === over.id)
+    if (!activeClaw || !overClaw) return
+    const sectionFor = (candidate: Claw) => agentSection(candidate, { isWaitingOnYou: false })
+    const section = sectionFor(activeClaw)
+    if (section !== sectionFor(overClaw)) return
 
-    if (inPinned !== targetInPinned) return // don't allow crossing sections
-
-    if (inPinned) {
-      // Reorder within pinned — update full order accounting for the pinned move
-      const pinnedIds = pinnedClaws.map((c) => c.id)
-      const oldIdx = pinnedIds.indexOf(active.id as string)
-      const newIdx = pinnedIds.indexOf(over.id as string)
-      const reordered = arrayMove(pinnedIds, oldIdx, newIdx)
-      const unpinnedIds = allClawIds.filter((id) => !pinnedIds.includes(id))
-      onReorderClaws([...reordered, ...unpinnedIds])
-    } else {
-      const unpinnedIds = claws.map((c) => c.id)
-      const oldIdx = unpinnedIds.indexOf(active.id as string)
-      const newIdx = unpinnedIds.indexOf(over.id as string)
-      const reordered = arrayMove(unpinnedIds, oldIdx, newIdx)
-      const pinnedIds = pinnedClaws.map((c) => c.id)
-      onReorderClaws([...pinnedIds, ...reordered])
-    }
+    const ids = visible.filter((candidate) => sectionFor(candidate) === section).map((candidate) => candidate.id)
+    const reordered = arrayMove(ids, ids.indexOf(active.id as string), ids.indexOf(over.id as string))
+    const order = allClawIds.slice()
+    let next = 0
+    const rewritten = order.map((id) => ids.includes(id) ? reordered[next++] : id)
+    onReorderClaws(rewritten)
   }
 
   // Merge pinned + unpinned for collapsed view (order already applied by parent)
@@ -472,67 +467,32 @@ export function Sidebar({
         {/* Pinned section lives inside the scroll area — a long pinned list
             must scroll with the rest instead of squeezing "All Agents" out. */}
         <ScrollArea className="flex-1 min-h-0">
-          {pinnedClaws.length > 0 && !searchQuery && (
-            <div className="border-b border-border">
-              <div className="flex items-center gap-1.5 px-4 py-2">
-                <Pin className="size-3 text-muted-foreground" />
-                <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
-                  Pinned
-                </span>
-              </div>
-              <div className="px-2 pb-2">
-                <SortableContext
-                  items={pinnedClaws.map((c) => c.id)}
-                  strategy={verticalListSortingStrategy}
-                >
-                  {pinnedClaws.map((claw) => (
-                    <SortableClawCard
-                      key={claw.id}
-                      claw={claw}
-                      isSelected={claw.id === selectedClawId}
-                      onClick={() => onSelectClaw(claw.id)}
-                      onTogglePin={(e) => {
-                        e.stopPropagation()
-                        onTogglePin(claw.id)
-                      }}
-                      activityLine={activityLines?.[claw.id]}
-                    />
-                  ))}
-                </SortableContext>
-              </div>
-            </div>
-          )}
-          <div className="p-2">
-            {!searchQuery && pinnedClaws.length > 0 && claws.length > 0 && (
-              <div className="flex items-center gap-1.5 px-2 py-2">
-                <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
-                  All Agents
-                </span>
-              </div>
-            )}
-            {claws.length === 0 && pinnedClaws.length === 0 ? (
+          <div>
+            {allClaws.length === 0 ? (
               <p className="text-sm text-muted-foreground text-center py-8">
                 No agents found
               </p>
             ) : (
-              <SortableContext
-                items={claws.map((c) => c.id)}
-                strategy={verticalListSortingStrategy}
-              >
-                {claws.map((claw) => (
-                  <SortableClawCard
-                    key={claw.id}
-                    claw={claw}
-                    isSelected={claw.id === selectedClawId}
-                    onClick={() => onSelectClaw(claw.id)}
-                    onTogglePin={(e) => {
-                      e.stopPropagation()
-                      onTogglePin(claw.id)
-                    }}
-                    activityLine={activityLines?.[claw.id]}
-                  />
-                ))}
-              </SortableContext>
+              (["attention", "working", "offline"] as AgentSectionName[]).map((key) => {
+                const meta = AGENT_SECTION[key]
+                const Icon = meta.icon
+                const items = allClaws.filter((candidate) => agentSection(candidate, { isWaitingOnYou: false }) === key)
+                  .sort((a, b) => Number(b.pinned) - Number(a.pinned))
+                return <section key={key} className="pb-1">
+                  <div className="sticky top-0 z-10 flex items-center gap-2 border-y px-3 py-1.5" style={{ backgroundColor: `color-mix(in srgb, ${meta.color} 10%, var(--card))`, borderColor: `color-mix(in srgb, ${meta.color} 30%, var(--border))` }}>
+                    <span className="w-[3px] self-stretch rounded-full" style={{ backgroundColor: meta.color }} />
+                    <Icon className="size-[13px]" style={{ color: meta.color }} />
+                    <span className="text-xs font-semibold uppercase tracking-wider">{meta.label}</span>
+                    <span className="ml-auto rounded-full px-1.5 font-mono text-[10px] font-medium" style={{ backgroundColor: `color-mix(in srgb, ${meta.color} 10%, transparent)`, color: meta.color }}>{items.length}</span>
+                  </div>
+                  <div className="space-y-1 px-2 py-2">
+                    {items.length === 0 ? <p className="px-2 py-1 text-xs text-muted-foreground">{meta.empty}</p> :
+                      <SortableContext items={items.map((candidate) => candidate.id)} strategy={verticalListSortingStrategy}>
+                        {items.map((candidate) => <SortableClawCard key={candidate.id} claw={candidate} isSelected={candidate.id === selectedClawId} onClick={() => onSelectClaw(candidate.id)} onTogglePin={(event) => { event.stopPropagation(); onTogglePin(candidate.id) }} activityLine={activityLines?.[candidate.id]} />)}
+                      </SortableContext>}
+                  </div>
+                </section>
+              })
             )}
           </div>
         </ScrollArea>
