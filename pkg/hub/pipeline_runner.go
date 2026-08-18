@@ -14,6 +14,7 @@ import (
 	osexec "os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"text/template"
 	"time"
 
@@ -21,6 +22,9 @@ import (
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 	"github.com/google/uuid"
 )
+
+// Pipeline output records use a JSON read-modify-write; serialize it to avoid lost appends.
+var pipelineLogRecordMu sync.Mutex
 
 // githubIssueDetails holds the fields we fetch for pipeline template rendering.
 type githubIssueDetails struct {
@@ -607,6 +611,8 @@ func (s *Server) persistPipelineOutput(clawID, stageID, outputName string, resul
 }
 
 func (s *Server) appendPipelineLogRecord(clawID, outputName string, record pipelineLogRecord) {
+	pipelineLogRecordMu.Lock()
+	defer pipelineLogRecordMu.Unlock()
 	var raw string
 	if err := s.db.QueryRow(`SELECT records FROM pipeline_outputs WHERE claw_id=? AND output_name=?`, clawID, outputName).Scan(&raw); err != nil {
 		return
@@ -617,7 +623,11 @@ func (s *Server) appendPipelineLogRecord(clawID, outputName string, record pipel
 	}
 	records = append(records, record)
 	b, _ := json.Marshal(records)
-	if _, err := s.db.Exec(`UPDATE pipeline_outputs SET records=? WHERE claw_id=? AND output_name=?`, string(b), clawID, outputName); err != nil {
+	status := "OK"
+	if record.Sev == "ERROR" || record.Sev == "FATAL" {
+		status = "ERROR"
+	}
+	if _, err := s.db.Exec(`UPDATE pipeline_outputs SET records=?, status=CASE WHEN ?='ERROR' THEN 'ERROR' ELSE status END WHERE claw_id=? AND output_name=?`, string(b), status, clawID, outputName); err != nil {
 		log.Printf("[pipeline] append log record: %v", err)
 	}
 }

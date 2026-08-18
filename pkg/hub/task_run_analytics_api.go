@@ -501,6 +501,11 @@ func (s *Server) handleTaskRunAnalyticsFilterOptions(w http.ResponseWriter, r *h
 
 func parseTaskRunAnalyticsFilters(r *http.Request) (taskRunAnalyticsFilters, error) {
 	q := r.URL.Query()
+	for _, key := range []string{"status", "owner", "owner_type", "workspace", "workflow", "factory", "integration", "repo", "model", "warning_type", "failure_type"} {
+		if len(splitTaskRunAnalyticsValues(q, key)) > 50 {
+			return taskRunAnalyticsFilters{}, fmt.Errorf("too many values for filter %s, max 50", key)
+		}
+	}
 	filters := taskRunAnalyticsFilters{
 		TenantID:    tenantFromCtx(r),
 		Status:      splitTaskRunAnalyticsValues(q, "status"),

@@ -138,7 +138,9 @@ func migrate(db *sql.DB) error {
 	_, _ = db.Exec(`ALTER TABLE claw_prs ADD COLUMN permanent_failure_count INTEGER NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE claw_prs ADD COLUMN last_review_comment_id INTEGER NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE claw_prs ADD COLUMN last_review_id INTEGER NOT NULL DEFAULT 0`)
-	_, _ = db.Exec(`ALTER TABLE claw_prs ADD COLUMN title TEXT NOT NULL DEFAULT ''`)
+	if err := addColumn(db, "claw_prs", "title", `TEXT NOT NULL DEFAULT ''`); err != nil {
+		return err
+	}
 	if err := addColumn(db, "claw_prs", "last_ci_conclusion", `TEXT NOT NULL DEFAULT ''`); err != nil {
 		return err
 	}
@@ -168,6 +170,14 @@ func migrate(db *sql.DB) error {
 		return err
 	}
 	if err := addColumn(db, "pipeline_outputs", "records", `TEXT NOT NULL DEFAULT '[]'`); err != nil {
+		return err
+	}
+	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS ticket_metadata (
+		tenant_id TEXT NOT NULL, issue_id TEXT NOT NULL, requester TEXT NOT NULL DEFAULT '',
+		requester_role TEXT NOT NULL DEFAULT '', team TEXT NOT NULL DEFAULT '', priority TEXT NOT NULL DEFAULT '',
+		ask TEXT NOT NULL DEFAULT '', reported_at INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL,
+		PRIMARY KEY (tenant_id, issue_id)
+	)`); err != nil {
 		return err
 	}
 	_, _ = db.Exec(`ALTER TABLE messages ADD COLUMN format TEXT NOT NULL DEFAULT ''`)

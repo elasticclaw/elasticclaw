@@ -580,16 +580,16 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/factories/{name}/trigger", s.withAuth(s.handleFactoryTrigger))                                // POST manual trigger
 	mux.HandleFunc("/api/factories/{name}/analytics", s.withAuth(s.handleFactoryAnalytics))                            // GET factory analytics
 	mux.HandleFunc("/api/factories", s.withAdminForMethods(s.handleFactoriesCRUD, http.MethodPost, http.MethodDelete)) // factory CRUD (GET list, POST push)
-	mux.HandleFunc("/api/analytics/factories", s.withAuth(s.handleAllFactoriesAnalytics))                              // GET all factories analytics
-	mux.HandleFunc("/api/analytics/summary", s.withAuth(s.handleTaskRunAnalyticsSummary))
-	mux.HandleFunc("/api/analytics/costs", s.withAuth(s.handleTaskRunAnalyticsCosts))
-	mux.HandleFunc("/api/analytics/effectiveness", s.withAuth(s.handleTaskRunAnalyticsEffectiveness))
-	mux.HandleFunc("/api/analytics/cost-drivers", s.withAuth(s.handleTaskRunAnalyticsCostDrivers))
-	mux.HandleFunc("/api/analytics/general-stats", s.withAuth(s.handleTaskRunAnalyticsGeneralStats))
-	mux.HandleFunc("/api/analytics/filter-options", s.withAuth(s.handleTaskRunAnalyticsFilterOptions))
-	mux.HandleFunc("/api/analytics/runs", s.withAuth(s.handleTaskRunAnalyticsRuns))
-	mux.HandleFunc("/api/analytics/runs/", s.withAuth(s.handleTaskRunAnalyticsRuns))
-	mux.HandleFunc("/api/analytics/tickets", s.withAuth(s.handleTaskRunAnalyticsTickets))
+	mux.HandleFunc("/api/analytics/factories", s.withAdminAuth(s.handleAllFactoriesAnalytics))                         // GET all factories analytics
+	mux.HandleFunc("/api/analytics/summary", s.withAdminAuth(s.handleTaskRunAnalyticsSummary))
+	mux.HandleFunc("/api/analytics/costs", s.withAdminAuth(s.handleTaskRunAnalyticsCosts))
+	mux.HandleFunc("/api/analytics/effectiveness", s.withAdminAuth(s.handleTaskRunAnalyticsEffectiveness))
+	mux.HandleFunc("/api/analytics/cost-drivers", s.withAdminAuth(s.handleTaskRunAnalyticsCostDrivers))
+	mux.HandleFunc("/api/analytics/general-stats", s.withAdminAuth(s.handleTaskRunAnalyticsGeneralStats))
+	mux.HandleFunc("/api/analytics/filter-options", s.withAdminAuth(s.handleTaskRunAnalyticsFilterOptions))
+	mux.HandleFunc("/api/analytics/runs", s.withAdminAuth(s.handleTaskRunAnalyticsRuns))
+	mux.HandleFunc("/api/analytics/runs/", s.withAdminAuth(s.handleTaskRunAnalyticsRuns))
+	mux.HandleFunc("/api/analytics/tickets", s.withAdminAuth(s.handleTaskRunAnalyticsTickets))
 	mux.HandleFunc("/api/dependencies/status", s.withAuth(s.handleDependencyStatus))
 	mux.HandleFunc("/api/v2/workflow-runs/{runId}", s.withAuth(s.handleWorkflowV2Run))
 	mux.HandleFunc("/api/workspaces", s.withAdminForMethods(s.handleWorkspacesCRUD, http.MethodPost, http.MethodDelete)) // workspace CRUD
@@ -704,6 +704,41 @@ func (s *Server) withAuth(next http.HandlerFunc) http.HandlerFunc {
 		}
 		r = r.WithContext(ctx)
 		next(w, r)
+	}
+}
+
+func (s *Server) withAdminAuth(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+		if token == "" {
+			token = r.URL.Query().Get("token")
+		}
+		tenantID, githubLogin, ok := s.resolveAuthToken(token)
+		if !ok {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		s.mu.RLock()
+		var accessCfg *types.AccessConfig
+		if s.hubCfg.Auth != nil {
+			accessCfg = s.hubCfg.Auth.Access
+		}
+		s.mu.RUnlock()
+		// Non-admin access is permitted only when the tenant has configured
+		// tag-scoped viewing (ViewRequiresTags): those callers are restricted
+		// downstream to their own tagged runs by the existing per-row ACL
+		// (see taskRunAnalyticsViewACL), so they never see the tenant-wide
+		// data the admin gate exists to protect. Anyone else authenticated
+		// but neither admin nor tag-scoped is rejected.
+		if githubLogin != "" && !isAccessAdmin(accessCfg, githubLogin) && (accessCfg == nil || len(accessCfg.ViewRequiresTags) == 0) {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		ctx := context.WithValue(r.Context(), ctxTenantKey{}, tenantID)
+		if githubLogin != "" {
+			ctx = context.WithValue(ctx, ctxGitHubLoginKey{}, githubLogin)
+		}
+		next(w, r.WithContext(ctx))
 	}
 }
 
@@ -3233,10 +3268,13 @@ func (s *Server) handleUserWS(w http.ResponseWriter, r *http.Request) {
 				hm.UserLogin = &ghLogin
 			}
 			s.resumeNoProgressAfterUserInput(hm.ClawID)
-			_, _ = s.db.Exec(
+			if _, err := s.db.Exec(
 				`INSERT INTO messages(id,claw_id,tenant_id,role,content,user_login,created_at,delivered_at) VALUES(?,?,?,?,?,?,?,NULL)`,
 				hm.ID, hm.ClawID, hm.TenantID, hm.Role, hm.Content, hm.UserLogin, hm.CreatedAt,
-			)
+			); err != nil {
+				log.Printf("[ws] failed to persist message: %v", err)
+				continue
+			}
 			s.recordTaskRunDashboardMessage(hm.ClawID, ghLogin, hm.ID)
 			s.mu.RLock()
 			cc := s.claws[hm.ClawID]
@@ -8302,7 +8340,9 @@ func (s *Server) sendNextQueuedMessage(cc *clawConn) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	err = wsjson.Write(ctx, conn, types.WSMessage{Type: "message", Payload: msg})
+	clawMsg := msg
+	clawMsg.UserLogin = nil
+	err = wsjson.Write(ctx, conn, types.WSMessage{Type: "message", Payload: clawMsg})
 	if err != nil {
 		cc.mu.Lock()
 		cc.abortTurnLocked()

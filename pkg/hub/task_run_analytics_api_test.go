@@ -766,12 +766,18 @@ func TestTaskRunAnalyticsAPIAccessControlAggregates(t *testing.T) {
 func TestTaskRunAnalyticsAPIAllowsMissingClawsWithoutViewRestrictions(t *testing.T) {
 	s, db := NewTestServerWithConfig(t, &types.HubConfig{
 		Token: "test-token",
-		Auth:  &types.AuthConfig{SessionSecret: "analytics-session-secret"},
+		Auth: &types.AuthConfig{
+			SessionSecret: "analytics-session-secret",
+			Access:        &types.AccessConfig{Admins: []string{"alice"}},
+		},
 	}, "", "", "")
 	insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{
 		RunID: "run-deleted-claw", AttemptID: "attempt-deleted-claw", ClawID: "claw-deleted", TenantID: "test-tenant-id",
 		Status: taskRunStatusClean, OwnerType: taskRunOwnerFactory, Factory: "bugfix", StartedAt: 1760000000000,
 	})
+	// alice is an admin (analytics is admin-only); this test otherwise
+	// verifies runs are visible tenant-wide when no ViewRequiresTags ACL
+	// is configured, even when the run's claw row has been deleted.
 	session, err := signGitHubSession("analytics-session-secret", "alice", "", "")
 	if err != nil {
 		t.Fatal(err)
