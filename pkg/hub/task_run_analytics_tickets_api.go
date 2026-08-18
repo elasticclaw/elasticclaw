@@ -494,7 +494,7 @@ func (s *Server) readOrScheduleTaskRunAnalyticsTicketMetadata(ctx context.Contex
 		}
 		metadata := taskRunAnalyticsTicketView{IssueID: ticket.IssueID, IssueTitle: ticket.IssueTitle, Source: ticket.Source, ReportedAt: ticket.ReportedAt}
 		s.enrichTaskRunAnalyticsTicket(&metadata, run)
-		if _, err := s.db.Exec(`INSERT INTO ticket_metadata(tenant_id,issue_id,requester,requester_role,team,priority,ask,reported_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(tenant_id,issue_id) DO UPDATE SET requester=excluded.requester, requester_role=excluded.requester_role, team=excluded.team, priority=excluded.priority, ask=excluded.ask, reported_at=excluded.reported_at, updated_at=excluded.updated_at`, tenantID, metadata.IssueID, metadata.Requester, metadata.RequesterRole, metadata.Team, metadata.Priority, metadata.Ask, metadata.ReportedAt, now()); err != nil {
+		if _, err := s.db.Exec(`INSERT INTO ticket_metadata(tenant_id,issue_id,requester,requester_role,team,priority,ask,reported_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(tenant_id,issue_id) DO UPDATE SET requester=excluded.requester, requester_role=excluded.requester_role, team=excluded.team, priority=excluded.priority, ask=excluded.ask, reported_at=excluded.reported_at, updated_at=excluded.updated_at`, tenantID, metadata.IssueID, metadata.Requester, metadata.RequesterRole, metadata.Team, metadata.Priority, metadata.Ask, metadata.ReportedAt, now().UnixMilli()); err != nil {
 			log.Printf("[task-run-analytics] write ticket metadata %s: %v", metadata.IssueID, err)
 		}
 	}()
