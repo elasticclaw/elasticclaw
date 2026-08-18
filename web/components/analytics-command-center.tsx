@@ -2,7 +2,8 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react"
 import { usePathname, useSearchParams } from "next/navigation"
-import { Info } from "lucide-react"
+import { ChevronDown, ChevronRight, Info } from "lucide-react"
+import type { DateRange } from "react-day-picker"
 import {
   Bar,
   BarChart,
@@ -19,18 +20,21 @@ import {
   fetchAnalyticsCostDrivers,
   fetchAnalyticsCosts,
   fetchAnalyticsEffectiveness,
+  fetchAnalyticsTickets,
   fetchGeneralStats,
   fetchTaskRunAnalyticsSummary,
   fetchTaskRunAttempts,
   fetchTaskRunEvents,
   fetchTaskRunFilterOptions,
   fetchTaskRunPRs,
+  fetchTaskRun,
   fetchTaskRuns,
   fetchWorkspaces,
 } from "@/lib/api"
 import { cn } from "@/lib/utils"
 import type {
   AnalyticsCostDriver,
+  AnalyticsTicket,
   AnalyticsEffectiveness,
   CostOverview,
   GeneralStats,
@@ -45,7 +49,7 @@ import {
   type DetailState,
   urlFilterKeys,
 } from "@/components/task-run-analytics-view"
-import { RunStatusBadge } from "@/components/ds"
+import { ChartCard, DatePickerRange, KpiTile, RunStatusBadge, TicketStatusBadge } from "@/components/ds"
 import { WorkflowName } from "@/components/workflow-name"
 import { Button } from "@/components/ui/button"
 import {
@@ -76,13 +80,13 @@ const commandCenterUrlFilterKeys = ["workspace", ...urlFilterKeys, "from", "to"]
 const tooltipContentClassName = "max-w-xs rounded-lg border bg-card text-foreground shadow-md"
 const tooltipArrowClassName = "bg-card fill-card"
 const chartConfig = {
-  clean: { label: "Clean", color: "#0ca30c" },
-  humanInTheLoop: { label: "Human on the loop", color: "#2a78d6" },
-  warning: { label: "Warning", color: "#fab219" },
-  failed: { label: "Failed", color: "#d03b3b" },
-  ticketDelivered: { label: "Delivered", color: "#0ca30c" },
-  ticketInProgress: { label: "In progress", color: "#64748b" },
-  ticketFailed: { label: "Failed", color: "#d03b3b" },
+  clean: { label: "Clean", color: "var(--chart-2)" },
+  humanInTheLoop: { label: "Human on the loop", color: "var(--chart-1)" },
+  warning: { label: "Warning", color: "var(--chart-3)" },
+  failed: { label: "Failed", color: "var(--chart-4)" },
+  ticketDelivered: { label: "Delivered", color: "var(--chart-2)" },
+  ticketInProgress: { label: "In progress", color: "var(--chart-5)" },
+  ticketFailed: { label: "Failed", color: "var(--chart-4)" },
   costPerMergedPr: { label: "Cost / merged PR", color: "var(--chart-1)" },
 } satisfies ChartConfig
 const usd = new Intl.NumberFormat(undefined, {
@@ -165,10 +169,15 @@ export function AnalyticsCommandCenter() {
   const [stats, setStats] = useState<GeneralStats>()
   const [drivers, setDrivers] = useState<AnalyticsCostDriver[]>([])
   const [runs, setRuns] = useState<TaskRunSummary[]>([])
+  const [tickets, setTickets] = useState<AnalyticsTicket[]>([])
+  const [ticketTotal, setTicketTotal] = useState(0)
   const [options, setOptions] = useState<TaskRunFilterOptions>()
   const [nextCursor, setNextCursor] = useState<string>()
+  const [nextTicketCursor, setNextTicketCursor] = useState<string>()
   const [cursorStack, setCursorStack] = useState<(string | undefined)[]>([undefined])
+  const [ticketCursorStack, setTicketCursorStack] = useState<(string | undefined)[]>([undefined])
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null)
+  const [selectedTicketId, setSelectedTicketId] = useState<string | null>(null)
   const [details, setDetails] = useState<DetailState | null>(null)
   const [detailLoading, setDetailLoading] = useState(false)
   const [detailError, setDetailError] = useState<string | null>(null)
@@ -216,7 +225,7 @@ export function AnalyticsCommandCenter() {
   )
 
   const load = useCallback(
-    async (cursor?: string, loadOptions: { append?: boolean; silent?: boolean } = {}) => {
+    async (cursor?: string, loadOptions: { append?: boolean; silent?: boolean; ticketCursor?: string } = {}) => {
       const { append = false, silent = false } = loadOptions
       loadAbortController.current?.abort()
       const controller = new AbortController()
@@ -236,6 +245,7 @@ export function AnalyticsCommandCenter() {
           effectiveFilters.to = to.toISOString()
         }
         const runFilters = { ...effectiveFilters, cursor }
+        const ticketFilters = { ...effectiveFilters, cursor: loadOptions.ticketCursor }
         // The year heatmap always shows the trailing year, regardless of the
         // selected period. taskRunAnalyticsCostsUseRunFilters in
         // pkg/hub/task_run_analytics_costs_api.go must be used whenever a
@@ -262,6 +272,7 @@ export function AnalyticsCommandCenter() {
           statsData,
           driversData,
           runsData,
+          ticketsData,
           optionsData,
         ] = await Promise.all([
           fetchTaskRunAnalyticsSummary(effectiveFilters, { signal: controller.signal }),
@@ -277,6 +288,7 @@ export function AnalyticsCommandCenter() {
           fetchGeneralStats(effectiveFilters, { signal: controller.signal }),
           fetchAnalyticsCostDrivers(effectiveFilters, "workflow", { signal: controller.signal }),
           fetchTaskRuns(runFilters, { signal: controller.signal }),
+          fetchAnalyticsTickets(ticketFilters, { signal: controller.signal }),
           options ? Promise.resolve(options) : fetchTaskRunFilterOptions({ signal: controller.signal }),
         ])
         if (controller.signal.aborted || requestId !== loadRequestId.current) return
@@ -289,6 +301,9 @@ export function AnalyticsCommandCenter() {
         setDrivers(driversData)
         setRuns((currentRuns) => (append ? [...currentRuns, ...runsData.runs] : runsData.runs))
         setNextCursor(runsData.nextCursor)
+        setTickets(ticketsData.tickets)
+        setNextTicketCursor(ticketsData.nextCursor)
+        setTicketTotal(ticketsData.total)
         setOptions(optionsData)
         if (!append && !silent) {
           setSelectedRunId(null)
@@ -309,6 +324,7 @@ export function AnalyticsCommandCenter() {
   useEffect(() => {
     queueMicrotask(() => {
       setCursorStack([undefined])
+      setTicketCursorStack([undefined])
       void load()
     })
     return () => {
@@ -318,8 +334,8 @@ export function AnalyticsCommandCenter() {
 
   const silentRefresh = useCallback(() => {
     const currentCursor = cursorStackRef.current[cursorStackRef.current.length - 1]
-    void load(currentCursor, { append: false, silent: true })
-  }, [load])
+    void load(currentCursor, { append: false, silent: true, ticketCursor: ticketCursorStack[ticketCursorStack.length - 1] })
+  }, [load, ticketCursorStack])
 
   useEffect(() => {
     const tick = () => {
@@ -356,6 +372,19 @@ export function AnalyticsCommandCenter() {
     void load(nextStack[nextStack.length - 1])
   }, [cursorStack, load])
 
+  const handleNextTicketPage = useCallback(() => {
+    if (!nextTicketCursor) return
+    setTicketCursorStack((currentStack) => [...currentStack, nextTicketCursor])
+    void load(cursorStackRef.current[cursorStackRef.current.length - 1], { ticketCursor: nextTicketCursor })
+  }, [load, nextTicketCursor])
+
+  const handlePreviousTicketPage = useCallback(() => {
+    if (ticketCursorStack.length <= 1) return
+    const nextStack = ticketCursorStack.slice(0, -1)
+    setTicketCursorStack(nextStack)
+    void load(cursorStackRef.current[cursorStackRef.current.length - 1], { ticketCursor: nextStack[nextStack.length - 1] })
+  }, [load, ticketCursorStack])
+
   useEffect(() => {
     if (!selectedRunId) return
 
@@ -366,12 +395,16 @@ export function AnalyticsCommandCenter() {
       setDetailError(null)
       setDetails(null)
       Promise.all([
+        fetchTaskRun(selectedRunId),
         fetchTaskRunAttempts(selectedRunId),
         fetchTaskRunEvents(selectedRunId),
         fetchTaskRunPRs(selectedRunId),
       ])
-        .then(([attempts, events, prs]) => {
-          if (!cancelled) setDetails({ attempts: attempts.attempts, events: events.events, prs: prs.prs })
+        .then(([runData, attempts, events, prs]) => {
+          if (!cancelled) {
+            setSelectedRunCache({ runId: selectedRunId, run: runData.run })
+            setDetails({ attempts: attempts.attempts, events: events.events, prs: prs.prs })
+          }
         })
         .catch((detailLoadError) => {
           if (!cancelled) {
@@ -403,7 +436,7 @@ export function AnalyticsCommandCenter() {
   const modelData = useModelData(costs)
 
   return (
-    <main className="h-full overflow-auto bg-background">
+    <main className="h-full overflow-auto bg-background" data-selected-ticket={selectedTicketId ?? undefined}>
       <div className="mx-auto max-w-[1400px] space-y-5 p-5 lg:p-6">
         <header>
           <h1 className="text-2xl font-semibold tracking-tight">Analytics</h1>
@@ -411,8 +444,8 @@ export function AnalyticsCommandCenter() {
         <FilterBar filters={filters} options={options} workspaces={workspaceNames} onChange={setFilters} />
         {error && <p className="text-sm text-destructive">{error}</p>}
 
-        <div className="grid gap-5 xl:grid-cols-[6fr_3fr]">
-          <KpiGroup title="Effectiveness" columns="sm:grid-cols-6">
+        <KpiStrip>
+          <KpiGroupLabel title="Effectiveness" />
             <Kpi
               label="Runs"
               title="Task runs started in the selected period."
@@ -455,8 +488,7 @@ export function AnalyticsCommandCenter() {
               value={formatDuration(stats?.prOpenToMergeMs.avgMs)}
               change={calculateDelta(stats?.prOpenToMergeMs.avgMs, stats?.prior?.prOpenToMergeMs.avgMs)}
             />
-          </KpiGroup>
-          <KpiGroup title="Cost" columns="sm:grid-cols-3">
+          <KpiGroupLabel title="Cost" />
             <Kpi label="Total cost" title="Total AI spend of the runs in the selected period." value={usdWhole.format(totalCost)} change={costDelta} cost />
             <Kpi
               label="Cost per run"
@@ -474,37 +506,39 @@ export function AnalyticsCommandCenter() {
               )}
               cost
             />
-          </KpiGroup>
-        </div>
+        </KpiStrip>
 
         <div className="grid gap-5 lg:grid-cols-2">
-          <ChartCard title="Run outcomes over time" info="Each bar is a day. Clean = delivered with no human help; Human on the loop = a human helped via the pull request; Warning = a human had to step in from the dashboard; Failed = nothing was delivered.">
+          <ChartCard title="Run outcomes over time" stat={outcomesStat(effect)} info="Each bar is a day. Clean = delivered with no human help; Human on the loop = a human helped via the pull request; Warning = a human had to step in from the dashboard; Failed = nothing was delivered.">
             <OutcomesChart effect={effect} />
           </ChartCard>
-          <ChartCard title="Delivery funnel" info="How many runs made it from the agent starting, to opening a pull request, to that pull request being finished (merged or closed). Percentages show the conversion from the previous stage.">
+          <ChartCard title="Delivery funnel" stat={`${effect?.funnel.agentStarted ?? 0} started · ${formatPercent(effect?.funnel.agentStarted ? (effect.funnel.prFinished / effect.funnel.agentStarted) : undefined)} end to end`} info="How many runs made it from the agent starting, to opening a pull request, to that pull request being finished (merged or closed). Percentages show the conversion from the previous stage.">
             <DeliveryFunnel effect={effect} />
           </ChartCard>
         </div>
 
         <div className="grid gap-5 lg:grid-cols-2">
-          <ChartCard title="Ticket throughput" info="Each bar is a day: how many distinct tickets had their first run that day, by how the ticket ended up. Delivered = at least one run delivered the work.">
+          <ChartCard title="Ticket throughput" stat={ticketThroughputStat(effect)} info="Each bar is a day: how many distinct tickets had their first run that day, by how the ticket ended up. Delivered = at least one run delivered the work.">
             <TicketThroughputChart effect={effect} />
           </ChartCard>
-          <ChartCard title="Runs per ticket" info="How many runs each ticket needed. A long tail of 3+ means lots of retries on the same tickets.">
+          <ChartCard title="Runs per ticket" stat={`${effect?.runsPerTicket.reduce((sum, bucket) => sum + bucket.tickets, 0) ?? 0} tickets · ${effect?.runsPerTicket.find((bucket) => bucket.bucket === "3+")?.tickets ?? 0} needed 3+`} info="How many runs each ticket needed. A long tail of 3+ means lots of retries on the same tickets.">
             <RunsPerTicketChart effect={effect} />
           </ChartCard>
         </div>
 
-        <RunsTable
-          runs={runs}
-          page={cursorStack.length}
-          canGoPrevious={cursorStack.length > 1}
-          canGoNext={Boolean(nextCursor)}
+        <TicketsTable
+          tickets={tickets}
+          total={ticketTotal}
+          page={ticketCursorStack.length}
+          canGoPrevious={ticketCursorStack.length > 1}
+          canGoNext={Boolean(nextTicketCursor)}
           onSelect={setSelectedRunId}
-          onPrevious={handlePreviousPage}
-          onNext={handleNextPage}
+          onSelectTicket={setSelectedTicketId}
+          onPrevious={handlePreviousTicketPage}
+          onNext={handleNextTicketPage}
         />
 
+        <ChartCard title="Cost by day" stat={`${heatmap.days.length} days · ${usdWhole.format(yearCosts?.dailySeries.reduce((sum, point) => sum + point.costUsd, 0) ?? 0)} total`} info="Each square is a day; darker means more spend. Click a day to focus the whole page on it.">
         <Heatmap
           heatmap={heatmap}
           maxCost={maxHeatCost}
@@ -512,21 +546,22 @@ export function AnalyticsCommandCenter() {
           onSelectDay={(day) => setFilters(day === selectedDay ? { from: undefined, to: undefined } : isoDayRange(day))}
           onClearSelectedDay={() => setFilters({ from: undefined, to: undefined })}
         />
+        </ChartCard>
 
         <div className="grid gap-5 lg:grid-cols-2">
-          <ChartCard title="Daily cost by model" info="How much was spent per day, split by AI model.">
+          <ChartCard title="Daily cost by model" stat={`${costs?.dailySeries.length ?? 0} days · ${usdWhole.format(totalCost)} total`} info="How much was spent per day, split by AI model.">
             <DailyCostChart costs={costs} modelData={modelData} />
           </ChartCard>
-          <ChartCard title="Cost per merged PR" info="Weekly average of what one merged pull request cost. The reference line is the period average.">
+          <ChartCard title="Cost per merged PR" stat={`${effect?.costPerMergedPr.weekly.length ?? 0} weeks · avg ${usd.format(effect?.costPerMergedPr.average ?? 0)}`} info="Weekly average of what one merged pull request cost. The reference line is the period average.">
             <CostPerMergedPrChart effect={effect} />
           </ChartCard>
         </div>
 
         <div className="grid gap-5 lg:grid-cols-2">
-          <ChartCard title="Workflow cost comparison" info="Daily spend of the most expensive workflows in the selected period, compared side by side.">
+          <ChartCard title="Workflow cost comparison" stat={`${drivers.length} workflows · ${usdWhole.format(drivers.reduce((sum, driver) => sum + driver.costUsd, 0))} total`} info="Daily spend of the most expensive workflows in the selected period, compared side by side.">
             <WorkflowCostComparisonChart drivers={drivers} />
           </ChartCard>
-          <ChartCard title="Most expensive tickets" info="Where the money concentrates: the costliest tickets in the selected period (cost counts only this period's runs).">
+          <ChartCard title="Most expensive tickets" stat={`${effect?.topTicketsByCost.length ?? 0} tickets · ${usdWhole.format(effect?.topTicketsByCost.reduce((sum, ticket) => sum + ticket.costUsd, 0) ?? 0)} combined`} info="Where the money concentrates: the costliest tickets in the selected period (cost counts only this period's runs).">
             <TopTicketsByCostChart effect={effect} />
           </ChartCard>
         </div>
@@ -596,34 +631,22 @@ function FilterBar({
     ["Model", "model", options?.models],
   ] as const
 
+  const activeFilters = [...(filters.workspace ? [{ key: "workspace", label: `Workspace: ${filters.workspace}` }] : []), ...selectFilters.flatMap(([label, key]) => filters[key] ? [{ key, label: `${label}: ${filters[key]}` }] : [])]
+  const dateRange: DateRange | undefined = filters.from || filters.to ? { from: filters.from ? new Date(filters.from) : undefined, to: filters.to ? new Date(filters.to) : undefined } : undefined
   return (
-    <div className="flex flex-wrap gap-2 rounded-lg border bg-card p-2">
+    <div className="rounded-lg border bg-card p-2">
+      <div className="flex flex-wrap items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <DatePickerRange value={dateRange} onChange={(range) => onChange({ from: range?.from?.toISOString(), to: range?.to?.toISOString() })} />
       <div className="w-56">
         <WorkspaceSelect
           value={filters.workspace}
           workspaces={workspaces}
           onChange={(value) => onChange({ workspace: value })}
         />
-      </div>
-      <div className="flex overflow-hidden rounded-md border">
-        {[["7d", 7], ["30d", 30], ["90d", 90], ["MTD", 0]].map(([label, days]) => (
-          <Button
-            key={label}
-            variant="ghost"
-            size="sm"
-            className="rounded-none"
-            onClick={() => {
-              const to = new Date()
-              const from = new Date()
-              if (days) from.setDate(to.getDate() - Number(days))
-              else from.setDate(1)
-              onChange({ from: from.toISOString(), to: to.toISOString() })
-            }}
-          >
-            {label}
-          </Button>
-        ))}
-      </div>
+        </div>
+        <span className="hidden self-stretch border-l sm:block" aria-hidden="true" />
+        <div className="flex flex-1 flex-wrap gap-2">
       {selectFilters.map(([label, key, values]) => (
         <div key={key} className="w-48">
           <FilterSelect
@@ -634,6 +657,10 @@ function FilterBar({
           />
         </div>
       ))}
+        </div>
+      </div>
+      </div>
+      {activeFilters.length > 0 && <div className="mt-2 flex flex-wrap items-center gap-2 border-t pt-2"><span className="text-[10px] font-medium uppercase tracking-[0.08em] text-muted-foreground">Filtering by</span>{activeFilters.map((filter) => <button key={filter.key} type="button" onClick={() => onChange({ [filter.key]: undefined })} className="rounded-full border bg-muted px-2 py-0.5 text-xs text-muted-foreground hover:bg-accent">{filter.label} ×</button>)}<Button variant="ghost" size="sm" className="ml-auto" onClick={() => onChange(Object.fromEntries(activeFilters.map((filter) => [filter.key, undefined])))}>Clear all</Button></div>}
     </div>
   )
 }
@@ -656,7 +683,7 @@ function useHeatmap(costs?: CostOverview) {
 }
 
 function Heatmap({ heatmap, maxCost, selectedDay, onSelectDay, onClearSelectedDay }: { heatmap: ReturnType<typeof useHeatmap>; maxCost: number; selectedDay?: string; onSelectDay: (day: string) => void; onClearSelectedDay: () => void }) {
-  const containerRef = useRef<HTMLElement>(null)
+  const containerRef = useRef<HTMLDivElement>(null)
   const [tooltip, setTooltip] = useState<{ iso: string; point: (typeof heatmap.days)[number]["point"]; x: number; y: number } | null>(null)
   const showTooltip = (iso: string, point: (typeof heatmap.days)[number]["point"], clientX: number, clientY: number) => {
     const rect = containerRef.current?.getBoundingClientRect()
@@ -664,7 +691,7 @@ function Heatmap({ heatmap, maxCost, selectedDay, onSelectDay, onClearSelectedDa
   }
   const selectedDayLabel = selectedDay && new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", year: "numeric" }).format(new Date(`${selectedDay}T00:00:00`))
 
-  return <section ref={containerRef} className="relative rounded-lg border bg-card p-4"><div className="mb-4 flex items-center gap-1"><h2 className="text-sm font-semibold">Cost by day</h2><InfoTooltip text="Each square is a day; darker means more spend. Click a day to focus the whole page on it." />{selectedDayLabel && <span className="ml-2 inline-flex items-center gap-1 rounded-full bg-muted px-2 py-0.5 text-xs text-muted-foreground">{selectedDayLabel}<button type="button" aria-label={`Clear ${selectedDayLabel} filter`} onClick={onClearSelectedDay} className="rounded-full px-0.5 text-foreground hover:bg-accent">×</button></span>}</div><div className="flex gap-2"><div className="flex w-6 flex-col text-center text-[10px] text-muted-foreground"><div className="mb-1 h-4" aria-hidden="true" /><div className="grid flex-1 grid-rows-7 gap-1">{["M", "T", "W", "T", "F", "S", "S"].map((day, index) => <span key={`${day}-${index}`} className="flex items-center justify-center">{day}</span>)}</div></div><div className="min-w-0 flex-1"><div className="relative mb-1 h-4 text-[10px] text-muted-foreground">{heatmap.monthLabels.map(({ week, label }) => <span key={`${week}-${label}`} className="absolute" style={{ left: `${(week / 52) * 100}%` }}>{label}</span>)}</div><div className="grid grid-flow-col grid-cols-[repeat(52,minmax(0,1fr))] grid-rows-7 gap-1">{heatmap.days.map(({ iso, point }) => { const level = point?.costUsd ? Math.min(5, Math.ceil((point.costUsd / maxCost) * 5)) : 0; const selected = iso === selectedDay; return <button key={iso} onClick={() => onSelectDay(iso)} onMouseEnter={(event) => showTooltip(iso, point, event.clientX, event.clientY)} onMouseMove={(event) => showTooltip(iso, point, event.clientX, event.clientY)} onMouseLeave={() => setTooltip(null)} onFocus={(event) => { const rect = event.currentTarget.getBoundingClientRect(); showTooltip(iso, point, rect.left + rect.width / 2, rect.top + rect.height / 2) }} onBlur={() => setTooltip(null)} className={`aspect-square cursor-pointer rounded-sm border border-black/5 transition-shadow hover:ring-2 hover:ring-ring hover:ring-offset-1 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1 ${selected ? "ring-2 ring-primary ring-offset-1" : ""}`} style={{ background: level ? `var(--heatmap-${level})` : "var(--muted)" }} /> })}</div></div></div>{tooltip && <div role="tooltip" className="pointer-events-none absolute z-10 rounded-lg border bg-card px-2 py-1.5 text-xs text-foreground shadow-md" style={{ left: tooltip.x, top: tooltip.y }}><div>{new Intl.DateTimeFormat(undefined, { weekday: "short", month: "short", day: "numeric", year: "numeric" }).format(new Date(`${tooltip.iso}T00:00:00`))}</div><div className="text-muted-foreground">{usdWhole.format(tooltip.point?.costUsd ?? 0)} · {tooltip.point?.runCount ?? 0} runs</div></div>}<div className="mt-3 flex justify-end gap-1 text-xs text-muted-foreground">Less {Array.from({ length: 5 }, (_, index) => <i key={index} className="size-3 rounded-sm" style={{ background: `var(--heatmap-${index + 1})` }} />)} More</div></section>
+  return <div ref={containerRef} className="relative p-4"><div className="mb-4 flex items-center gap-1">{selectedDayLabel && <span className="inline-flex items-center gap-1 rounded-full bg-muted px-2 py-0.5 text-xs text-muted-foreground">{selectedDayLabel}<button type="button" aria-label={`Clear ${selectedDayLabel} filter`} onClick={onClearSelectedDay} className="rounded-full px-0.5 text-foreground hover:bg-accent">×</button></span>}</div><div className="flex gap-2"><div className="flex w-6 flex-col text-center text-[10px] text-muted-foreground"><div className="mb-1 h-4" aria-hidden="true" /><div className="grid flex-1 grid-rows-7 gap-1">{["M", "T", "W", "T", "F", "S", "S"].map((day, index) => <span key={`${day}-${index}`} className="flex items-center justify-center">{day}</span>)}</div></div><div className="min-w-0 flex-1"><div className="relative mb-1 h-4 text-[10px] text-muted-foreground">{heatmap.monthLabels.map(({ week, label }) => <span key={`${week}-${label}`} className="absolute" style={{ left: `${(week / 52) * 100}%` }}>{label}</span>)}</div><div className="grid grid-flow-col grid-cols-[repeat(52,minmax(0,1fr))] grid-rows-7 gap-1">{heatmap.days.map(({ iso, point }) => { const level = point?.costUsd ? Math.min(5, Math.ceil((point.costUsd / maxCost) * 5)) : 0; const selected = iso === selectedDay; return <button key={iso} onClick={() => onSelectDay(iso)} onMouseEnter={(event) => showTooltip(iso, point, event.clientX, event.clientY)} onMouseMove={(event) => showTooltip(iso, point, event.clientX, event.clientY)} onMouseLeave={() => setTooltip(null)} onFocus={(event) => { const rect = event.currentTarget.getBoundingClientRect(); showTooltip(iso, point, rect.left + rect.width / 2, rect.top + rect.height / 2) }} onBlur={() => setTooltip(null)} className={`aspect-square cursor-pointer rounded-sm border border-black/5 transition-shadow hover:ring-2 hover:ring-ring hover:ring-offset-1 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1 ${selected ? "ring-2 ring-primary ring-offset-1" : ""}`} style={{ background: level ? `var(--heatmap-${level})` : "var(--muted)" }} /> })}</div></div></div>{tooltip && <div role="tooltip" className="pointer-events-none absolute z-10 rounded-lg border bg-card px-2 py-1.5 text-xs text-foreground shadow-md" style={{ left: tooltip.x, top: tooltip.y }}><div>{new Intl.DateTimeFormat(undefined, { weekday: "short", month: "short", day: "numeric", year: "numeric" }).format(new Date(`${tooltip.iso}T00:00:00`))}</div><div className="text-muted-foreground">{usdWhole.format(tooltip.point?.costUsd ?? 0)} · {tooltip.point?.runCount ?? 0} runs</div></div>}<div className="mt-3 flex justify-end gap-1 text-xs text-muted-foreground">Less {Array.from({ length: 5 }, (_, index) => <i key={index} className="size-3 rounded-sm" style={{ background: `var(--heatmap-${index + 1})` }} />)} More</div></div>
 }
 
 function useModelData(costs?: CostOverview) { return useMemo(() => { const models = (costs?.seriesByModel ?? []).slice(0, 4); return (costs?.dailySeries ?? []).map((day, index) => ({ date: day.date, Other: Math.max(0, day.costUsd - models.reduce((sum, model) => sum + (model.dailySeries[index]?.costUsd ?? 0), 0)), ...Object.fromEntries(models.map((model) => [model.model, model.dailySeries[index]?.costUsd ?? 0])) })) }, [costs]) }
@@ -691,64 +718,17 @@ function TopTicketTooltip({ active, payload }: { active?: boolean; payload?: { p
 function TopTicketsByCostChart({ effect }: { effect?: AnalyticsEffectiveness }) { if (!effect?.topTicketsByCost?.length) return <p className="py-8 text-center text-sm text-muted-foreground">No ticket data for this period.</p>; return <ChartContainer config={chartConfig} className="h-64 w-full"><BarChart data={effect.topTicketsByCost} layout="vertical" margin={{ right: 36 }}><CartesianGrid horizontal={false} /><XAxis type="number" tickFormatter={(value) => usdWhole.format(value)} /><YAxis type="category" dataKey="issueId" width={90} interval={0} tickFormatter={(id) => (id.length > 14 ? id.slice(0, 13) + "…" : id)} /><ChartTooltip content={<TopTicketTooltip />} /><Bar dataKey="costUsd" fill="var(--chart-1)" radius={4}><LabelList dataKey="costUsd" position="right" formatter={(value: number) => usd.format(value)} /></Bar></BarChart></ChartContainer> }
 function CostPerMergedPrChart({ effect }: { effect?: AnalyticsEffectiveness }) { return <ChartContainer config={chartConfig} className="h-64 w-full"><LineChart data={effect?.costPerMergedPr.weekly}><CartesianGrid vertical={false} /><XAxis dataKey="weekStart" tickFormatter={formatDate} /><YAxis /><ChartTooltip content={<ChartTooltipContent />} /><ReferenceLine y={effect?.costPerMergedPr.average} stroke="var(--muted-foreground)" /><Line type="monotone" dataKey="costPerMergedPr" name="Cost per merged PR" stroke="var(--color-costPerMergedPr)" dot={false} /></LineChart></ChartContainer> }
 function CostDrivers({ drivers }: { drivers: AnalyticsCostDriver[] }) {
-  return <section className="rounded-lg border bg-card p-4"><div className="mb-3 flex items-center justify-between gap-3"><div><div className="flex items-center gap-1"><h2 className="text-sm font-semibold">Top cost drivers</h2><InfoTooltip text="Where the money goes: total spend and efficiency per workflow in the selected period." /></div><p className="text-xs text-muted-foreground">By workflow</p></div></div><Table><TableHeader><TableRow><TableHead className="min-w-[35ch]">Workflow</TableHead><TableHead className="text-right">Runs</TableHead><TableHead className="text-right">Success</TableHead><TableHead className="text-right">Cost</TableHead><TableHead className="text-right">Cost / merged PR</TableHead></TableRow></TableHeader><TableBody>{drivers.slice(0, 10).map((driver) => <TableRow key={driver.name}><TableCell className="font-medium min-w-[35ch]"><WorkflowName name={driver.name} /></TableCell><TableCell className="text-right tabular-nums">{driver.runs}</TableCell><TableCell className="text-right tabular-nums">{formatPercent(driver.successRate)}</TableCell><TableCell className="text-right tabular-nums">{usd.format(driver.costUsd)}</TableCell><TableCell className="text-right tabular-nums">{usd.format(driver.costPerMergedPr)}</TableCell></TableRow>)}</TableBody></Table></section>
+  return <ChartCard title="Top cost drivers" info="Where the money goes: total spend and efficiency per workflow in the selected period." stat={`${drivers.length} workflows · ${usdWhole.format(drivers.reduce((sum, driver) => sum + driver.costUsd, 0))} total`}><div className="p-4"><Table><TableHeader><TableRow><TableHead className="min-w-[35ch]">Workflow</TableHead><TableHead className="text-right">Runs</TableHead><TableHead className="text-right">Success</TableHead><TableHead className="text-right">Cost</TableHead><TableHead className="text-right">Cost / merged PR</TableHead></TableRow></TableHeader><TableBody>{drivers.slice(0, 10).map((driver) => <TableRow key={driver.name}><TableCell className="font-medium min-w-[35ch]"><WorkflowName name={driver.name} /></TableCell><TableCell className="text-right tabular-nums">{driver.runs}</TableCell><TableCell className="text-right tabular-nums">{formatPercent(driver.successRate)}</TableCell><TableCell className="text-right tabular-nums">{usd.format(driver.costUsd)}</TableCell><TableCell className="text-right tabular-nums">{usd.format(driver.costPerMergedPr)}</TableCell></TableRow>)}</TableBody></Table></div></ChartCard>
 }
-const runsTableRightAlignedHeaders = new Set(["Cost", "Duration", "Start date"])
-function RunsTable({ runs, page, canGoPrevious, canGoNext, onSelect, onPrevious, onNext }: { runs: TaskRunSummary[]; page: number; canGoPrevious: boolean; canGoNext: boolean; onSelect: (runId: string) => void; onPrevious: () => void; onNext: () => void }) { return <section className="rounded-lg border bg-card p-4"><h2 className="mb-3 text-sm font-semibold">Runs</h2><Table><TableHeader><TableRow>{["Status", "Ticket", "Model", "Factory/Workflow", "Cost", "Duration", "Start date"].map((label) => <TableHead key={label} className={cn(runsTableRightAlignedHeaders.has(label) ? "text-right" : "", label === "Factory/Workflow" ? "min-w-[35ch]" : "")}>{label}</TableHead>)}</TableRow></TableHeader><TableBody>{runs.map((run) => <TableRow key={run.runId} className="cursor-pointer" onClick={() => onSelect(run.runId)}><TableCell><RunStatusBadge status={run.status} /></TableCell><TableCell>{run.issueId || "—"}</TableCell><TableCell>{run.model || "—"}</TableCell><TableCell><WorkflowName name={run.factoryName || run.workflowName || "—"} /></TableCell><TableCell className="text-right tabular-nums">{usd.format(run.estimatedCostUsd || 0)}</TableCell><TableCell className="text-right tabular-nums">{formatDuration(run.finishedAt ? run.finishedAt - run.startedAt : undefined)}</TableCell><TableCell className="text-right tabular-nums">{run.startedAt ? new Date(run.startedAt).toLocaleDateString() : "—"}</TableCell></TableRow>)}</TableBody></Table><div className="mt-3 flex items-center justify-center gap-3"><Button variant="outline" size="sm" disabled={!canGoPrevious} onClick={onPrevious}>Previous</Button><span className="text-sm text-muted-foreground">Page {page}</span><Button variant="outline" size="sm" disabled={!canGoNext} onClick={onNext}>Next</Button></div></section> }
+function TicketsTable({ tickets, total, page, canGoPrevious, canGoNext, onSelect, onSelectTicket, onPrevious, onNext }: { tickets: AnalyticsTicket[]; total: number; page: number; canGoPrevious: boolean; canGoNext: boolean; onSelect: (runId: string) => void; onSelectTicket: (ticketId: string) => void; onPrevious: () => void; onNext: () => void }) { const [expanded, setExpanded] = useState<string | null>(null); const delivered = tickets.filter((ticket) => ticket.status === "delivered").length; const awaitingReview = tickets.filter((ticket) => ticket.status === "pr_open").length; return <ChartCard title="Tickets" info="Tickets group all runs for the same issue." stat={`${tickets.length} of ${total} tickets · ${delivered} delivered · ${awaitingReview} awaiting review`}><Table><TableHeader><TableRow>{["", "Status", "Ticket", "Requester", "Runs", "Cost", "Lead time", "Last activity"].map((label) => <TableHead key={label} className={label === "" ? "w-8" : ["Runs", "Cost", "Lead time", "Last activity"].includes(label) ? "text-right" : undefined}>{label}</TableHead>)}</TableRow></TableHeader><TableBody>{tickets.map((ticket) => <><TableRow key={ticket.issueId} className="cursor-pointer" onClick={() => onSelectTicket(ticket.issueId)}><TableCell><button type="button" aria-label={`Toggle ${ticket.issueId} runs`} onClick={(event) => { event.stopPropagation(); setExpanded(expanded === ticket.issueId ? null : ticket.issueId) }}>{expanded === ticket.issueId ? <ChevronDown className="size-4" /> : <ChevronRight className="size-4" />}</button></TableCell><TableCell><TicketStatusBadge status={ticket.status} /></TableCell><TableCell><div className="font-medium">{ticket.issueTitle || ticket.issueId}</div><div className="font-mono text-xs text-muted-foreground">{ticket.issueId} · {ticket.source || "—"}</div></TableCell><TableCell>{ticket.requester || "—"}</TableCell><TableCell className="text-right tabular-nums">{ticket.runCount}</TableCell><TableCell className="text-right tabular-nums">{usd.format(ticket.cost)}</TableCell><TableCell className="text-right tabular-nums">{formatDuration(ticket.leadTime)}</TableCell><TableCell className="text-right tabular-nums">{ticket.lastActivity ? new Date(ticket.lastActivity).toLocaleDateString() : "—"}</TableCell></TableRow>{expanded === ticket.issueId && ticket.runs.map((run, index) => <TableRow key={run.runId} className="cursor-pointer bg-muted/30" onClick={() => onSelect(run.runId)}><TableCell /><TableCell><RunStatusBadge status={run.status} /></TableCell><TableCell><div>Try {index + 1}</div><div className="font-mono text-xs text-muted-foreground">{run.runId} · —</div></TableCell><TableCell colSpan={2}>{ticket.prs.filter((pr) => pr.runId === run.runId).length ? `${ticket.prs.filter((pr) => pr.runId === run.runId).length} PR${ticket.prs.filter((pr) => pr.runId === run.runId).length === 1 ? "" : "s"}` : run.status === "failed" ? "Failed" : "—"}</TableCell><TableCell className="text-right tabular-nums">{run.attemptCount}</TableCell><TableCell className="text-right tabular-nums">{usd.format(run.cost)} · {formatDuration(run.lastActivity - run.startedAt)}</TableCell><TableCell className="text-right tabular-nums">{new Date(run.startedAt).toLocaleDateString()}</TableCell></TableRow>)}</>)}</TableBody></Table><div className="flex justify-center gap-3 p-3"><Button variant="outline" size="sm" disabled={!canGoPrevious} onClick={onPrevious}>Previous</Button><span className="text-sm text-muted-foreground">Page {page}</span><Button variant="outline" size="sm" disabled={!canGoNext} onClick={onNext}>Next</Button></div></ChartCard> }
+function outcomesStat(effect?: AnalyticsEffectiveness) { const days = effect?.outcomesByDay ?? []; const total = days.reduce((sum, day) => sum + day.clean + day.humanInTheLoop + day.warning + day.failed, 0); return `${days.length} days · avg ${days.length ? (total / days.length).toFixed(1) : "0"} runs` }
+function ticketThroughputStat(effect?: AnalyticsEffectiveness) { const days = effect?.ticketsByDay ?? []; const total = days.reduce((sum, day) => sum + day.delivered + day.inProgress + day.failed, 0); return `${days.length} days · avg ${days.length ? (total / days.length).toFixed(1) : "0"} tickets` }
 function calculateDelta(current?: number | null, prior?: number | null) { return current == null || prior == null || prior === 0 ? undefined : (current - prior) / prior }
-function KpiGroup({ title, columns = "sm:grid-cols-5", children }: { title: string; columns?: string; children: ReactNode }) { return <div><p className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">{title}</p><div className={`grid grid-cols-2 gap-2 ${columns}`}>{children}</div></div> }
+function KpiStrip({ children }: { children: ReactNode }) { const ref = useRef<HTMLDivElement>(null); const [columns, setColumns] = useState(6); useEffect(() => { const element = ref.current; if (!element) return; const measure = () => { const width = element.clientWidth; const fits = (count: number) => (width - (count - 1) * 8) / count >= 158; setColumns(fits(6) ? 6 : fits(3) ? 3 : 1) }; measure(); const observer = new ResizeObserver(measure); observer.observe(element); return () => observer.disconnect() }, []); return <div ref={ref} className="grid gap-2" style={{ gridTemplateColumns: `repeat(${columns}, minmax(0, 1fr))` }}>{children}</div> }
+function KpiGroupLabel({ title }: { title: string }) { return <p className="col-span-full mb-0 text-xs font-semibold uppercase tracking-wide text-muted-foreground">{title}</p> }
 function Kpi({ label, value, change, good, cost, onClick, title }: { label: string; value?: string | number; change?: number; good?: boolean; cost?: boolean; onClick?: () => void; title?: string }) {
   const bad = cost ? (change ?? 0) > 0 : good ? (change ?? 0) < 0 : (change ?? 0) > 0
-  const disabled = !onClick
-  const button = (
-    <button
-      type="button"
-      disabled={disabled}
-      onClick={onClick}
-      className="flex h-full w-full min-w-0 flex-col rounded-lg border bg-card p-3 text-left"
-    >
-      <p className="flex min-h-8 items-center gap-1 text-xs text-muted-foreground">
-        {label}
-        {title && <Info aria-hidden className="size-3.5 shrink-0 text-muted-foreground" />}
-      </p>
-      <div className="mt-auto">
-      <p className="mt-2 text-xl font-semibold tracking-tight">{value ?? "—"}</p>
-      {/* Always render the delta row, even when there's no change, so every
-          tile reserves the same space and labels/values align across the grid. */}
-      <p
-        className={`truncate text-xs font-medium ${
-          change == null ? "invisible" : bad ? "text-red-600 dark:text-red-400" : "text-emerald-600 dark:text-emerald-400"
-        }`}
-      >
-        {change != null ? (
-          <>
-            {change > 0 ? "+" : ""}
-            {(change * 100).toFixed(1)}% <span className="font-normal text-muted-foreground">vs prior</span>
-          </>
-        ) : (
-          " "
-        )}
-      </p>
-      </div>
-    </button>
-  )
-  if (!title) return button
-  return (
-    <Tooltip delayDuration={200}>
-      <TooltipTrigger asChild>
-        {disabled ? (
-          <span className="block h-full w-full" tabIndex={0}>
-            {button}
-          </span>
-        ) : (
-          button
-        )}
-      </TooltipTrigger>
-      <TooltipContent className={tooltipContentClassName} arrowClassName={tooltipArrowClassName}>
-        {title}
-      </TooltipContent>
-    </Tooltip>
-  )
+  return <KpiTile label={label} value={value} info={title} delta={change == null ? undefined : `${Math.abs(change * 100).toFixed(1)}%`} deltaDirection={change != null && change < 0 ? "down" : "up"} deltaTone={bad ? "bad" : "good"} onClick={onClick} className={onClick ? "cursor-pointer" : undefined} />
 }
 function InfoTooltip({ text }: { text: string }) {
   return (
@@ -764,4 +744,3 @@ function InfoTooltip({ text }: { text: string }) {
     </Tooltip>
   )
 }
-function ChartCard({ title, info, children }: { title: string; info?: string; children: ReactNode }) { return <section className="rounded-lg border bg-card p-4"><div className="flex items-center gap-1"><h2 className="text-sm font-semibold">{title}</h2>{info && <InfoTooltip text={info} />}</div>{children}</section> }

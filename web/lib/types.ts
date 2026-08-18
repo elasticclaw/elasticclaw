@@ -335,6 +335,7 @@ export interface AnalyticsTicketsResponse {
   tickets: AnalyticsTicket[]
   nextCursor?: string
   limit: number
+  total: number
 }
 
 export interface TaskRunAttempt {

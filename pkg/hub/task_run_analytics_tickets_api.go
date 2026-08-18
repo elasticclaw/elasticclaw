@@ -14,6 +14,7 @@ type taskRunAnalyticsTicketsResponse struct {
 	Tickets    []taskRunAnalyticsTicketView `json:"tickets"`
 	NextCursor string                       `json:"nextCursor,omitempty"`
 	Limit      int                          `json:"limit"`
+	Total      int                          `json:"total"`
 }
 
 type taskRunAnalyticsTicketRunSummary struct {
@@ -108,6 +109,7 @@ func (s *Server) handleTaskRunAnalyticsTickets(w http.ResponseWriter, r *http.Re
 		jsonError(w, http.StatusInternalServerError, "db error")
 		return
 	}
+	total := len(groups)
 	limit := taskRunAnalyticsLimit(r.URL.Query().Get("limit"))
 	start := 0
 	if cursorAt > 0 {
@@ -131,7 +133,7 @@ func (s *Server) handleTaskRunAnalyticsTickets(w http.ResponseWriter, r *http.Re
 		}
 		tickets = append(tickets, ticket)
 	}
-	jsonOK(w, taskRunAnalyticsTicketsResponse{Tickets: tickets, NextCursor: nextCursor, Limit: limit})
+	jsonOK(w, taskRunAnalyticsTicketsResponse{Tickets: tickets, NextCursor: nextCursor, Limit: limit, Total: total})
 }
 
 // Tickets are ordered by reported time (falling back to their first run) and issue ID.

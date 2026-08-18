@@ -26,7 +26,7 @@ export function KpiTile({ label, value, delta, deltaDirection = 'up', deltaTone 
       </div>
       <div className="mt-auto flex flex-col gap-px">
         <div className="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap font-mono text-lg font-medium tracking-tight tabular-nums">{value ?? '—'}</div>
-        {delta ? <div className={cn('flex min-w-0 items-center gap-[3px] overflow-hidden whitespace-nowrap font-mono text-[11px]', color)}><Arrow className="size-3" />{delta}<span className="min-w-0 overflow-hidden text-ellipsis text-muted-foreground">vs prior</span></div> : null}
+        <div className={cn('flex min-w-0 items-center gap-[3px] overflow-hidden whitespace-nowrap font-mono text-[11px]', color, !delta && 'invisible')}><Arrow className="size-3" />{delta ?? '—'}<span className="min-w-0 overflow-hidden text-ellipsis text-muted-foreground">vs prior</span></div>
       </div>
     </div>
   )
