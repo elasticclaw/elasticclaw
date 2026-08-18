@@ -3,6 +3,7 @@ import type {
   ApiMessage,
   AnalyticsCostDriver,
   AnalyticsEffectiveness,
+  AnalyticsTicketsResponse,
   CostOverview,
   CreateClawRequest,
   DependencyStatusResponse,
