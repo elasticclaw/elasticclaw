@@ -1,9 +1,8 @@
 "use client"
 
-import { memo, useMemo, type ReactNode } from "react"
+import { memo, useMemo } from "react"
 import { ChevronRight } from "lucide-react"
 import { cn } from "@/lib/utils"
-import type { Message } from "@/lib/types"
 import {
   collapseStepRuns,
   formatDurationMs,
@@ -63,10 +62,10 @@ const CollapsedStepList = memo(function CollapsedStepList({
 })
 
 /**
- * One turn of the conversation as a card: header with generated label, status
- * pill, step count and duration; body with the prose and the step rows.
- * Collapsed turns keep the prose visible in conversation density — collapsing
- * hides the step rows, not the conversation.
+ * The step-work portion of a turn: header with generated label, status pill,
+ * step count and duration; body with the step rows. Conversation bubbles are
+ * deliberately rendered by AgentTimeline so they remain chronologically
+ * independent from the work card.
  *
  * Memoized: during streaming the owner re-renders per frame, but only the
  * last turn's props actually change — older cards must not recompute labels
@@ -79,10 +78,8 @@ export const TurnCard = memo(function TurnCard({
   toggleKey,
   onToggle,
   clawId,
-  renderMessage,
   now,
   forceRunning,
-  children,
 }: {
   turn: Turn
   density: TimelineDensity
@@ -92,16 +89,12 @@ export const TurnCard = memo(function TurnCard({
   toggleKey: string
   onToggle: (key: string, expanded: boolean) => void
   clawId: string
-  renderMessage: (message: Message) => ReactNode
   /** Live clock while this turn has running steps. */
   now?: number
   /** Claw is streaming — the last turn shows as running even between steps. */
   forceRunning?: boolean
-  /** Trailing slot (streaming prose) rendered at the end of the body. */
-  children?: ReactNode
 }) {
   const anchor = useToggleAnchor()
-  const showProse = density === "conversation" || density === "all"
   const problemsOnly = density === "problems"
   const status: TurnStatus = turn.status === "ok" && forceRunning ? "running" : turn.status
   const label = useMemo(() => turnLabel(turn), [turn])
@@ -138,15 +131,9 @@ export const TurnCard = memo(function TurnCard({
         </span>
       </button>
 
-      {((showProse && (Boolean(turn.userMessage) || turn.items.some((i) => i.type === "message"))) ||
-        expanded ||
-        Boolean(children)) && (
+      {expanded && (
         <div className="space-y-3 px-3 py-3">
-          {showProse && turn.userMessage && renderMessage(turn.userMessage)}
           {turn.items.map((item) => {
-            if (item.type === "message") {
-              return showProse ? renderMessage(item.message) : null
-            }
             if (item.type === "steps") {
               return expanded ? renderSteps(item.id, item.steps) : null
             }
@@ -160,7 +147,6 @@ export const TurnCard = memo(function TurnCard({
               />
             )
           })}
-          {children}
         </div>
       )}
     </section>

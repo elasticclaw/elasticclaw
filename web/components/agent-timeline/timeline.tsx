@@ -1,6 +1,6 @@
 "use client"
 
-import { useCallback, useState, type ReactNode } from "react"
+import { Fragment, useCallback, useState, type ReactNode } from "react"
 import type { Message } from "@/lib/types"
 import type { Turn } from "@/lib/turns"
 import { useNowTick } from "@/hooks/use-now"
@@ -12,6 +12,12 @@ function turnDefaultExpanded(turn: Turn, isLast: boolean, density: TimelineDensi
   if (density === "all" || density === "tools") return true
   if (density === "problems") return turn.hasProblems || turn.failedCount > 0
   return isLast
+}
+
+function hasStepWork(turn: Turn): boolean {
+  return turn.toolCallCount > 0 ||
+    turn.items.some((item) => item.type === "summary") ||
+    turn.steps.some((step) => step.status === "running")
 }
 
 /**
@@ -144,21 +150,38 @@ export function AgentTimeline({
           const isLast = turn === turns[turns.length - 1]
           const toggleKey = `${density}:${turn.id}`
           const expanded = expandedOverrides[toggleKey] ?? turnDefaultExpanded(turn, isLast, density)
-          return (
+          const showProse = density === "conversation" || density === "all"
+          const showStepWork = hasStepWork(turn)
+          const firstClawMessageIndex = turn.items.findIndex(
+            (item) => item.type === "message" && item.message.role === "claw"
+          )
+          const renderStepWork = () => showStepWork && (
             <TurnCard
-              key={turn.id}
               turn={turn}
               density={density}
               expanded={expanded}
               toggleKey={toggleKey}
               onToggle={toggleTurn}
               clawId={clawId}
-              renderMessage={renderMessage}
               now={hasLiveWork && isLast ? now : undefined}
               forceRunning={isLast && isWorking}
-            >
-              {isLast && (density === "conversation" || density === "all") ? streamingSlot : null}
-            </TurnCard>
+            />
+          )
+          return (
+            <Fragment key={turn.id}>
+              {showProse && turn.userMessage && renderMessage(turn.userMessage)}
+              {showStepWork && firstClawMessageIndex === -1 && renderStepWork()}
+              {turn.items.map((item, index) => {
+                if (item.type !== "message") return null
+                return (
+                  <Fragment key={item.message.id}>
+                    {showProse && renderMessage(item.message)}
+                    {showStepWork && index === firstClawMessageIndex && renderStepWork()}
+                  </Fragment>
+                )
+              })}
+              {isLast && showProse ? streamingSlot : null}
+            </Fragment>
           )
         })}
         {turns.length === 0 && (density === "conversation" || density === "all") && streamingSlot}
