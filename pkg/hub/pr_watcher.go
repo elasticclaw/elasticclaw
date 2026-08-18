@@ -95,6 +95,7 @@ func (s *Server) storePRMention(clawID, repo string, prNumber int, prURL string)
 	var lastCommentAt string
 	var lastCommentTime time.Time
 	var headSHA string
+	var title string
 	if token != "" {
 		commentsData, err := githubAPIList(fmt.Sprintf("repos/%s/issues/%d/comments", repo, prNumber), token)
 		if err == nil {
@@ -125,6 +126,7 @@ func (s *Server) storePRMention(clawID, repo string, prNumber int, prURL string)
 			if headObj, ok := prData["head"].(map[string]interface{}); ok {
 				headSHA, _ = headObj["sha"].(string)
 			}
+			title, _ = prData["title"].(string)
 		}
 		reviewsData, err := githubAPIList(fmt.Sprintf("repos/%s/pulls/%d/reviews", repo, prNumber), token)
 		if err == nil {
@@ -138,8 +140,8 @@ func (s *Server) storePRMention(clawID, repo string, prNumber int, prURL string)
 	// hitting the (claw_id, pr_url) unique index means the PR is already
 	// tracked — idempotent success, not a persistence failure.
 	res, err := s.db.Exec(
-		`INSERT OR IGNORE INTO claw_prs(id,claw_id,repo,pr_number,pr_url,last_comment_id,last_comment_at,last_review_id,last_ci_sha,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)`,
-		prID, clawID, repo, prNumber, prURL, maxCommentID, lastCommentAt, maxReviewID, headSHA, now(),
+		`INSERT OR IGNORE INTO claw_prs(id,claw_id,repo,pr_number,pr_url,title,last_comment_id,last_comment_at,last_review_id,last_ci_sha,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
+		prID, clawID, repo, prNumber, prURL, title, maxCommentID, lastCommentAt, maxReviewID, headSHA, now(),
 	)
 	if err != nil {
 		log.Printf("[pr-watcher] failed to persist PR %s#%d for claw %s: %v", repo, prNumber, clawID[:8], err)
@@ -188,6 +190,7 @@ type prMentionCandidate struct {
 	review    int64
 	commentAt string
 	headSHA   string
+	title     string
 }
 
 // preparePRMention loads GitHub watermarks for a PR insert. alreadyTracked is
@@ -233,6 +236,7 @@ func (s *Server) preparePRMention(clawID, repo string, prNumber int, prURL strin
 		if headObj, ok := prData["head"].(map[string]interface{}); ok {
 			row.headSHA, _ = headObj["sha"].(string)
 		}
+		row.title, _ = prData["title"].(string)
 	}
 	reviewsData, err := githubAPIList(fmt.Sprintf("repos/%s/pulls/%d/reviews", repo, prNumber), token)
 	if err == nil {
@@ -272,8 +276,8 @@ func (s *Server) insertClawPRsAtomic(clawID string, rows []prMentionCandidate) s
 		}
 		prID := uuid.New().String()
 		res, err := tx.Exec(
-			`INSERT OR IGNORE INTO claw_prs(id,claw_id,repo,pr_number,pr_url,last_comment_id,last_comment_at,last_review_id,last_ci_sha,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)`,
-			prID, clawID, row.repo, row.number, row.url, row.comment, row.commentAt, row.review, row.headSHA, now(),
+			`INSERT OR IGNORE INTO claw_prs(id,claw_id,repo,pr_number,pr_url,title,last_comment_id,last_comment_at,last_review_id,last_ci_sha,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
+			prID, clawID, row.repo, row.number, row.url, row.title, row.comment, row.commentAt, row.review, row.headSHA, now(),
 		)
 		if err != nil {
 			log.Printf("[pr-watcher] failed to persist PR %s#%d for claw %s: %v", row.repo, row.number, shortID(clawID), err)
@@ -1757,7 +1761,7 @@ func (s *Server) handleClawPRs(w http.ResponseWriter, r *http.Request, clawID st
 	}
 
 	rows, err := s.db.Query(
-		`SELECT id, repo, pr_number, pr_url, state, merged, merged_at, created_at FROM claw_prs WHERE claw_id=? ORDER BY created_at ASC`,
+		`SELECT id, repo, pr_number, pr_url, title, state, merged, merged_at, created_at FROM claw_prs WHERE claw_id=? ORDER BY created_at ASC`,
 		clawID,
 	)
 	if err != nil {
@@ -1770,6 +1774,7 @@ func (s *Server) handleClawPRs(w http.ResponseWriter, r *http.Request, clawID st
 		Repo      string  `json:"repo"`
 		PRNumber  int     `json:"prNumber"`
 		URL       string  `json:"url"`
+		Title     string  `json:"title"`
 		State     string  `json:"state"`
 		Merged    bool    `json:"merged"`
 		MergedAt  *string `json:"mergedAt,omitempty"`
@@ -1778,7 +1783,7 @@ func (s *Server) handleClawPRs(w http.ResponseWriter, r *http.Request, clawID st
 	var prs []PR
 	for rows.Next() {
 		var p PR
-		if err := rows.Scan(&p.ID, &p.Repo, &p.PRNumber, &p.URL, &p.State, &p.Merged, &p.MergedAt, &p.CreatedAt); err != nil {
+		if err := rows.Scan(&p.ID, &p.Repo, &p.PRNumber, &p.URL, &p.Title, &p.State, &p.Merged, &p.MergedAt, &p.CreatedAt); err != nil {
 			continue
 		}
 		prs = append(prs, p)
@@ -1844,6 +1849,7 @@ func (s *Server) checkPRMerged(pr clawPR, token string) bool {
 		s.detectHumanCodePush(pr.clawID, runID, pr.repo, pr.prNumber, pr.prURL, headSHA, token)
 	}
 	state, _ := data["state"].(string)
+	title, _ := data["title"].(string)
 	merged, _ := data["merged"].(bool)
 	draft, _ := data["draft"].(bool)
 	mergedAtValue, _ := data["merged_at"].(string)
@@ -1854,7 +1860,7 @@ func (s *Server) checkPRMerged(pr clawPR, token string) bool {
 		mergedAtDB = mergedAtValue
 	}
 	storedState := clawPRStoredState(state, merged)
-	if _, err := s.db.Exec(`UPDATE claw_prs SET state=?, merged=?, merged_at=? WHERE id=?`, storedState, merged, mergedAtDB, pr.id); err != nil {
+	if _, err := s.db.Exec(`UPDATE claw_prs SET title=?, state=?, merged=?, merged_at=? WHERE id=?`, title, storedState, merged, mergedAtDB, pr.id); err != nil {
 		log.Printf("[pr-watcher] update PR state for %s: %v", pr.prURL, err)
 	}
 	createdAt := parseRFC3339Timestamp(createdAtValue)

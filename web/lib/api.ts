@@ -267,6 +267,7 @@ export interface ClawPR {
   repo: string
   prNumber: number
   url: string
+  title: string
   createdAt: string
   state: "open" | "merged" | "closed"
   merged: boolean

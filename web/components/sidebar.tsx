@@ -469,8 +469,8 @@ export function Sidebar({
       >
         {/* Pinned section lives inside the scroll area — a long pinned list
             must scroll with the rest instead of squeezing "All Agents" out. */}
-        <ScrollArea className="flex-1 min-h-0">
-          <div>
+        <ScrollArea className="flex-1 min-h-0 min-w-0">
+          <div className="w-full min-w-0 overflow-hidden">
             {allClaws.length === 0 ? (
               <p className="text-sm text-muted-foreground text-center py-8">
                 No agents found
@@ -481,12 +481,12 @@ export function Sidebar({
                 const Icon = meta.icon
                 const items = allClaws.filter((candidate) => agentSection(candidate, { isWaitingOnYou: isWaitingOnYou(allMessages[candidate.id] ?? []) }) === key)
                   .sort((a, b) => Number(b.pinned) - Number(a.pinned))
-                return <section key={key} className="pb-1">
-                  <div className="sticky top-0 z-10 flex items-center gap-2 border-y px-3 py-1.5" style={{ backgroundColor: `color-mix(in srgb, ${meta.color} 10%, var(--card))`, borderColor: `color-mix(in srgb, ${meta.color} 30%, var(--border))` }}>
+                return <section key={key} className="min-w-0 pb-1">
+                  <div className="sticky top-0 left-0 right-0 z-10 flex w-full min-w-0 items-center gap-2 border-y px-3 py-1.5" style={{ backgroundColor: `color-mix(in srgb, ${meta.color} 10%, var(--card))`, borderColor: `color-mix(in srgb, ${meta.color} 30%, var(--border))` }}>
                     <span className="w-[3px] self-stretch rounded-full" style={{ backgroundColor: meta.color }} />
                     <Icon className="size-[13px]" style={{ color: meta.color }} />
-                    <span className="text-xs font-semibold uppercase tracking-wider">{meta.label}</span>
-                    <span className="ml-auto rounded-full px-1.5 font-mono text-[10px] font-medium" style={{ backgroundColor: `color-mix(in srgb, ${meta.color} 10%, transparent)`, color: meta.color }}>{items.length}</span>
+                    <span className="min-w-0 truncate text-xs font-semibold uppercase tracking-wider">{meta.label}</span>
+                    <span className="ml-auto shrink-0 rounded-full px-1.5 font-mono text-[10px] font-medium" style={{ backgroundColor: `color-mix(in srgb, ${meta.color} 22%, transparent)`, color: meta.color }}>{items.length}</span>
                   </div>
                   <div className="space-y-1 px-2 py-2">
                     {items.length === 0 ? <p className="px-2 py-1 text-xs text-muted-foreground">{meta.empty}</p> :

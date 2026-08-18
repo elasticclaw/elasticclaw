@@ -138,6 +138,7 @@ func migrate(db *sql.DB) error {
 	_, _ = db.Exec(`ALTER TABLE claw_prs ADD COLUMN permanent_failure_count INTEGER NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE claw_prs ADD COLUMN last_review_comment_id INTEGER NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE claw_prs ADD COLUMN last_review_id INTEGER NOT NULL DEFAULT 0`)
+	_, _ = db.Exec(`ALTER TABLE claw_prs ADD COLUMN title TEXT NOT NULL DEFAULT ''`)
 	if err := addColumn(db, "claw_prs", "last_ci_conclusion", `TEXT NOT NULL DEFAULT ''`); err != nil {
 		return err
 	}
@@ -646,6 +647,7 @@ func migrate(db *sql.DB) error {
 		repo        TEXT NOT NULL,  -- e.g. "owner/repo"
 		pr_number   INTEGER NOT NULL,
 		pr_url      TEXT NOT NULL,
+		title       TEXT NOT NULL DEFAULT '',
 		last_ci_sha TEXT NOT NULL DEFAULT '',   -- last SHA we checked CI on
 		last_ci_conclusion TEXT NOT NULL DEFAULT '', -- terminal CI verdict already delivered for last_ci_sha: '' | 'success' | 'failure'
 		state       TEXT NOT NULL DEFAULT 'open',

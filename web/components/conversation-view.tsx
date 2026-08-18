@@ -1,7 +1,7 @@
 "use client"
 
 import { useState, useRef, useEffect, useCallback, useMemo, memo } from "react"
-import { Send, Terminal, TerminalSquare, ChevronLeft, ChevronRight, ChevronDown, Loader2, LayoutGrid, Info, MessageSquare, Trash2, AlertCircle, Wrench, GripVertical, Settings2, Paperclip, File as FileIcon, X, Menu, MoreVertical, LogOut, ClipboardCopy, CheckCircle2, GitPullRequest } from "lucide-react"
+import { Send, Terminal, TerminalSquare, ChevronLeft, ChevronRight, ChevronDown, Loader2, LayoutGrid, Info, Trash2, AlertCircle, Wrench, GripVertical, Settings2, Paperclip, File as FileIcon, X, Menu, MoreVertical, LogOut, ClipboardCopy, CheckCircle2, GitPullRequest } from "lucide-react"
 import {
   compactActivityRuns,
   demoteStaleRunning,
@@ -66,6 +66,7 @@ import dynamic from "next/dynamic"
 import { useBranding } from "@/hooks/use-branding"
 import { BootstrapProgress } from "@/components/bootstrap-progress"
 import { AGENT_SECTION, agentSection, type AgentSectionName } from "@/components/ds/agent-section"
+import { CardAction } from "@/components/ds/card-action"
 import { ClawTitle } from "@/components/claw-title"
 import { windowMessagesByDurableCount } from "@/lib/messages"
 import { DependencyDowntimeBanner } from "@/components/dependency-downtime-banner"
@@ -727,10 +728,9 @@ const ClawBoardCard = memo(function ClawBoardCard({
                 <div className="mt-1 flex items-center gap-1 text-xs text-muted-foreground"><span className="truncate">{claw.template}</span><span>·</span><span className={cn("font-mono shrink-0", claw.status === "provisioning" && "text-[var(--status-provisioning)]", claw.status === "error" && "text-[var(--status-error)]")}>{claw.status === "provisioning" ? "starting..." : claw.status === "error" ? "error" : formatUptime(claw.uptime)}</span></div>
               </div>
               <div className="flex shrink-0 items-center gap-1 border-l border-border pl-2">
-                <button onClick={(event) => { event.stopPropagation(); onClick(claw.id) }} className="rounded p-1 hover:bg-accent" aria-label="Open conversation" title="Open conversation"><MessageSquare className="size-3.5" /></button>
-                {prs.length > 0 && <Popover><PopoverTrigger asChild><button onClick={(event) => event.stopPropagation()} className="flex items-center gap-1 rounded p-1 text-[var(--chart-1)] hover:bg-accent" aria-label={`Open ${prs.length} pull request${prs.length === 1 ? "" : "s"}`} title="Open pull requests"><GitPullRequest className="size-3.5" /><span className="font-mono text-[10px]">{prs.length}</span></button></PopoverTrigger><PopoverContent className="w-72 p-2" align="end">{prs.map((pr) => <a key={pr.id} href={pr.url} target="_blank" rel="noopener noreferrer" onClick={(event) => event.stopPropagation()} className="block rounded px-2 py-1 hover:bg-accent" aria-label={`Open ${pr.repo} pull request #${pr.prNumber}`} title={`Open ${pr.repo}#${pr.prNumber}`}><div className="font-mono text-xs text-[var(--chart-1)]">{pr.repo}#{pr.prNumber}</div><div className="text-xs text-muted-foreground capitalize">{pr.state}</div></a>)}</PopoverContent></Popover>}
-                <button onClick={copyTranscript} className={cn("rounded p-1 hover:bg-accent", copied && "text-[var(--chart-2)]")} aria-label={copied ? "Transcript copied" : "Copy transcript"} title={copied ? "Transcript copied" : "Copy transcript"}>{copied ? <CheckCircle2 className="size-3.5" /> : <ClipboardCopy className="size-3.5" />}</button>
-                <button onClick={(event) => { event.stopPropagation(); setDetailsOpen(true) }} className="rounded p-1 hover:bg-accent" aria-label="Agent details" title="Agent details"><Info className="size-3.5" /></button>
+                {prs.length > 0 && <Popover><PopoverTrigger asChild><CardAction icon={GitPullRequest} label={`Open ${prs.length} pull request${prs.length === 1 ? "" : "s"}`} count={prs.length} tone="var(--chart-1)" onClick={(event) => event.stopPropagation()} /></PopoverTrigger><PopoverContent className="w-72 p-2" align="end">{prs.map((pr) => <a key={pr.id} href={pr.url} target="_blank" rel="noopener noreferrer" onClick={(event) => event.stopPropagation()} className="block rounded px-2 py-1 hover:bg-accent" aria-label={`Open ${pr.repo} pull request #${pr.prNumber}: ${pr.title}`} title={`${pr.repo}#${pr.prNumber}: ${pr.title}`}><div className="font-mono text-xs text-[var(--chart-1)]">{pr.repo}#{pr.prNumber}</div><div className="truncate text-xs text-muted-foreground">{pr.title}</div></a>)}</PopoverContent></Popover>}
+                <CardAction icon={copied ? CheckCircle2 : ClipboardCopy} label={copied ? "Transcript copied" : "Copy transcript"} confirmed={copied} onClick={copyTranscript} />
+                <CardAction icon={Info} label="Agent details" onClick={(event) => { event.stopPropagation(); setDetailsOpen(true) }} />
               </div>
             </div>
             <BootstrapProgress claw={claw} />
@@ -1092,7 +1092,7 @@ function BoardSection({
       <div className="flex items-center gap-2 rounded-md border px-3 py-2" style={{ backgroundColor: `color-mix(in srgb, ${section.meta.color} 10%, var(--card))`, borderColor: `color-mix(in srgb, ${section.meta.color} 30%, var(--border))` }}>
         <Icon className="size-[13px]" style={{ color: section.meta.color }} />
         <span className="text-xs font-semibold uppercase tracking-wider">{section.meta.label}</span>
-        <span className="ml-auto rounded-full px-1.5 font-mono text-[10px]" style={{ backgroundColor: `color-mix(in srgb, ${section.meta.color} 10%, transparent)`, color: section.meta.color }}>{section.items.length}</span>
+        <span className="ml-auto rounded-full px-1.5 font-mono text-[10px]" style={{ backgroundColor: `color-mix(in srgb, ${section.meta.color} 22%, transparent)`, color: section.meta.color }}>{section.items.length}</span>
       </div>
       {children}
     </section>
