@@ -15,7 +15,7 @@ export interface KpiTileProps extends React.ComponentProps<'div'> {
 
 export function KpiTile({ label, value, delta, deltaDirection = 'up', deltaTone = 'good', info, tooltip, className, ...props }: KpiTileProps) {
   const Arrow = deltaDirection === 'up' ? ArrowUpRight : ArrowDownRight
-  const color = deltaTone === 'good' ? 'text-chart-2' : 'text-chart-4'
+  const color = deltaTone === 'good' ? 'text-success' : 'text-destructive'
   const help = info ?? tooltip
 
   return (
