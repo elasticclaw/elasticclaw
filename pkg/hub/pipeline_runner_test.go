@@ -689,11 +689,21 @@ stages:
 		t.Fatalf("pipeline stage = %q, want implement", got)
 	}
 	var pendingImplement int
-	if err := db.QueryRow(
-		`SELECT COUNT(*) FROM messages WHERE claw_id=? AND content=? AND delivered_at IS NULL`,
-		clawID, "Implement the issue now.",
-	).Scan(&pendingImplement); err != nil {
-		t.Fatal(err)
+	// The stage is recorded before its on_enter actions run, so wait for the
+	// asynchronously routed inject rather than assuming the stage update means
+	// the inject has already been persisted.
+	deadline = time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if err := db.QueryRow(
+			`SELECT COUNT(*) FROM messages WHERE claw_id=? AND content=? AND delivered_at IS NULL`,
+			clawID, "Implement the issue now.",
+		).Scan(&pendingImplement); err != nil {
+			t.Fatal(err)
+		}
+		if pendingImplement == 1 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 	if pendingImplement != 1 {
 		t.Fatalf("destination inject pending count = %d, want 1", pendingImplement)
