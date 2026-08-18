@@ -23,29 +23,25 @@ const PRESETS: { id: string; name: string; days?: number }[] = [
   { id: 'mtd', name: 'Month to date' },
 ]
 
-function presetRange(preset: { days?: number }): DateRange {
-  const to = new Date()
+function presetRange(preset: { days?: number }, to = new Date()): DateRange {
   return { from: preset.days ? subDays(to, preset.days) : startOfMonth(to), to }
 }
 
 /* The analytics default period when the URL carries no from/to — kept here so
    the trigger can resolve it to the "Last 30 days" preset label. */
-export function defaultPeriod(): DateRange {
-  return presetRange(PRESETS[1])
-}
-
-function activePreset(range?: DateRange) {
+function activePreset(range: DateRange | undefined, now?: Date) {
+  if (!now) return undefined
   if (!range?.from || !range.to) return undefined
   return PRESETS.find((preset) => {
-    const candidate = presetRange(preset)
+    const candidate = presetRange(preset, now)
     return isSameDay(candidate.from!, range.from!) && isSameDay(candidate.to!, range.to!)
   })
 }
 
 /* The current period is always readable as text — the active preset's name, or
    the resolved dates — instead of inferred from which button looks active. */
-function rangeLabel(range?: DateRange) {
-  const preset = activePreset(range)
+function rangeLabel(range: DateRange | undefined, now?: Date) {
+  const preset = activePreset(range, now)
   if (preset) return preset.name
   if (!range?.from) return 'Select date range'
   if (!range.to) return format(range.from, 'MMM d, yyyy')
@@ -54,7 +50,11 @@ function rangeLabel(range?: DateRange) {
 
 export function DatePickerRange({ value, onChange, className }: DatePickerRangeProps) {
   const [open, setOpen] = React.useState(false)
-  const active = activePreset(value)
+  // Reading the clock after mount keeps this static-exported control render-pure.
+  const [now, setNow] = React.useState<Date>()
+  React.useEffect(() => { setNow(new Date()) }, [])
+  const resolvedValue = value ?? (now ? presetRange(PRESETS[1], now) : undefined)
+  const active = activePreset(resolvedValue, now)
 
   // Picking a start day keeps the popover open until an end day is chosen; a
   // click over an already-complete range starts a fresh one instead of
@@ -74,7 +74,7 @@ export function DatePickerRange({ value, onChange, className }: DatePickerRangeP
         <Button variant="outline" className={cn('justify-start font-normal', className)}>
           <CalendarDays className="size-3.5 text-muted-foreground" />
           <span className="text-muted-foreground">Period:</span>
-          <span className="font-medium">{rangeLabel(value)}</span>
+          <span className="font-medium">{rangeLabel(resolvedValue, now)}</span>
           <ChevronDown className="size-3.5 text-muted-foreground" />
         </Button>
       </PopoverTrigger>
@@ -99,10 +99,10 @@ export function DatePickerRange({ value, onChange, className }: DatePickerRangeP
         </div>
         <Calendar
           mode="range"
-          selected={value}
+          selected={resolvedValue}
           onSelect={selectRange}
           numberOfMonths={1}
-          defaultMonth={value?.to ?? value?.from}
+          defaultMonth={resolvedValue?.to ?? resolvedValue?.from}
           className="[&_[data-range-middle=true]]:!bg-[color-mix(in_srgb,var(--primary)_16%,transparent)] [&_[data-range-middle=true]]:!text-foreground"
         />
       </PopoverContent>

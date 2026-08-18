@@ -1,6 +1,6 @@
 "use client"
 
-import { Fragment, useCallback, useState, type ReactNode } from "react"
+import { Fragment, memo, useCallback, useState, type ReactNode } from "react"
 import type { Message } from "@/lib/types"
 import type { Turn } from "@/lib/turns"
 import { useNowTick } from "@/hooks/use-now"
@@ -19,6 +19,31 @@ function hasStepWork(turn: Turn): boolean {
     turn.items.some((item) => item.type === "summary") ||
     turn.steps.some((step) => step.status === "running")
 }
+
+const TurnMessages = memo(function TurnMessages({
+  turn,
+  showProse,
+  firstClawMessageIndex,
+  renderMessage,
+  renderStepWork,
+}: {
+  turn: Turn
+  showProse: boolean
+  firstClawMessageIndex: number
+  renderMessage: (message: Message) => ReactNode
+  renderStepWork: () => ReactNode
+}) {
+  return <>
+    {showProse && turn.userMessage && renderMessage(turn.userMessage)}
+    {firstClawMessageIndex === -1 && renderStepWork()}
+    {turn.items.map((item, index) => item.type === "message" ? (
+      <Fragment key={item.message.id}>
+        {showProse && renderMessage(item.message)}
+        {index === firstClawMessageIndex && renderStepWork()}
+      </Fragment>
+    ) : null)}
+  </>
+})
 
 /**
  * The Problems filter can only judge loaded tool calls — when activity_summary
@@ -169,17 +194,13 @@ export function AgentTimeline({
           )
           return (
             <Fragment key={turn.id}>
-              {showProse && turn.userMessage && renderMessage(turn.userMessage)}
-              {showStepWork && firstClawMessageIndex === -1 && renderStepWork()}
-              {turn.items.map((item, index) => {
-                if (item.type !== "message") return null
-                return (
-                  <Fragment key={item.message.id}>
-                    {showProse && renderMessage(item.message)}
-                    {showStepWork && index === firstClawMessageIndex && renderStepWork()}
-                  </Fragment>
-                )
-              })}
+              <TurnMessages
+                turn={turn}
+                showProse={showProse}
+                firstClawMessageIndex={firstClawMessageIndex}
+                renderMessage={renderMessage}
+                renderStepWork={renderStepWork}
+              />
               {isLast && showProse ? streamingSlot : null}
             </Fragment>
           )

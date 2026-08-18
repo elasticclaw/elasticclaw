@@ -18,7 +18,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import { cn } from "@/lib/utils"
-import type { Claw, Message } from "@/lib/types"
+import type { Claw } from "@/lib/types"
 import { AgentStateChip } from "@/components/ds/agent-state-chip"
 import { AGENT_SECTION, agentSection, type AgentSectionName } from "@/components/ds/agent-section"
 import {
@@ -38,8 +38,7 @@ import {
   arrayMove,
 } from "@dnd-kit/sortable"
 import { CSS } from "@dnd-kit/utilities"
-import { useState, useEffect, useCallback } from "react"
-import { isWaitingOnYou } from "@/lib/waiting-on-you"
+import { useState, useEffect, useCallback, useMemo } from "react"
 
 type TagFilter = string
 
@@ -47,7 +46,7 @@ interface SidebarProps {
   claws: Claw[]
   pinnedClaws: Claw[]
   allClawIds: string[]
-  allMessages: Record<string, Message[]>
+  agentSections: Map<string, AgentSectionName>
   selectedClawId: string | null
   onSelectClaw: (id: string) => void
   onTogglePin: (id: string) => void
@@ -117,7 +116,7 @@ export function Sidebar({
   claws,
   pinnedClaws,
   allClawIds,
-  allMessages,
+  agentSections,
   selectedClawId,
   onSelectClaw,
   onTogglePin,
@@ -234,7 +233,7 @@ export function Sidebar({
     const activeClaw = visible.find((c) => c.id === active.id)
     const overClaw = visible.find((c) => c.id === over.id)
     if (!activeClaw || !overClaw) return
-    const sectionFor = (candidate: Claw) => agentSection(candidate, { isWaitingOnYou: isWaitingOnYou(allMessages[candidate.id] ?? []) })
+    const sectionFor = (candidate: Claw) => agentSections.get(candidate.id) ?? agentSection(candidate, { isWaitingOnYou: false })
     const section = sectionFor(activeClaw)
     if (section !== sectionFor(overClaw)) return
 
@@ -251,15 +250,15 @@ export function Sidebar({
 
   // The collapsed rail keeps the expanded list's grouping: same section order,
   // same pinned-first sort — collapsing must not reshuffle the agents.
-  const railSections = (["attention", "working", "offline"] as AgentSectionName[])
+  const sections = useMemo(() => (["attention", "working", "offline"] as AgentSectionName[])
     .map((key) => ({
       key,
       meta: AGENT_SECTION[key],
       items: allClaws
-        .filter((candidate) => agentSection(candidate, { isWaitingOnYou: isWaitingOnYou(allMessages[candidate.id] ?? []) }) === key)
+        .filter((candidate) => agentSections.get(candidate.id) === key)
         .sort((a, b) => Number(b.pinned) - Number(a.pinned)),
     }))
-    .filter((section) => section.items.length > 0)
+    .filter((section) => section.items.length > 0), [allClaws, agentSections])
 
   let sidebar: React.ReactElement
 
@@ -292,7 +291,7 @@ export function Sidebar({
               {loadingManualWorkflows ? <Loader2 className="size-4 animate-spin" /> : <Plus className="size-4" />}
             </Button>
           )}
-          {railSections.map((section) => (
+          {sections.map((section) => (
             <div key={section.key} className="flex flex-col items-center gap-1">
               {/* Section marker: a short bar in the section color, standing in
                   for the expanded header. */}
@@ -502,11 +501,8 @@ export function Sidebar({
                 No agents found
               </p>
             ) : (
-              (["attention", "working", "offline"] as AgentSectionName[]).map((key) => {
-                const meta = AGENT_SECTION[key]
+              sections.map(({ key, meta, items }) => {
                 const Icon = meta.icon
-                const items = allClaws.filter((candidate) => agentSection(candidate, { isWaitingOnYou: isWaitingOnYou(allMessages[candidate.id] ?? []) }) === key)
-                  .sort((a, b) => Number(b.pinned) - Number(a.pinned))
                 return <section key={key} className="min-w-0 pb-1">
                   <div className="sticky top-0 left-0 right-0 z-10 flex w-full min-w-0 items-center gap-2 border-y px-3 py-1.5" style={{ backgroundColor: `color-mix(in srgb, ${meta.color} 10%, var(--card))`, borderColor: `color-mix(in srgb, ${meta.color} 30%, var(--border))` }}>
                     <span className="w-[3px] self-stretch rounded-full" style={{ backgroundColor: meta.color }} />

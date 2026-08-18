@@ -1746,6 +1746,16 @@ export function ConversationView({
   const handleCardClick = useCallback((clawId: string) => onSelectClaw(clawId), [onSelectClaw])
   const handleCardSendMessage = useCallback((clawId: string, content: string) => onSendMessageToClaw(clawId, content), [onSendMessageToClaw])
   const handleCardKill = useCallback((clawId: string) => onKillClaw(clawId), [onKillClaw])
+  const boardSections = useMemo(() => {
+    const itemsBySection = new Map<AgentSectionName, Claw[]>([
+      ["attention", []], ["working", []], ["offline", []],
+    ])
+    for (const candidate of allClaws) {
+      const section = agentSection(candidate, { isWaitingOnYou: isWaitingOnYou(allMessages[candidate.id] ?? EMPTY_MESSAGES) })
+      itemsBySection.get(section)!.push(candidate)
+    }
+    return (["attention", "working", "offline"] as AgentSectionName[]).map((key) => ({ key, meta: AGENT_SECTION[key], items: itemsBySection.get(key)! }))
+  }, [allClaws, allMessages])
 
   const sensors = useSensors(
     useSensor(PointerSensor, {
@@ -1765,7 +1775,7 @@ export function ConversationView({
     const activeClaw = allClaws.find((candidate) => candidate.id === active.id)
     const overClaw = allClaws.find((candidate) => candidate.id === over.id)
     if (!activeClaw || !overClaw) return
-    const sectionFor = (candidate: Claw) => agentSection(candidate, { isWaitingOnYou: isWaitingOnYou(allMessages[candidate.id] ?? EMPTY_MESSAGES) })
+    const sectionFor = (candidate: Claw) => boardSections.find((section) => section.items.includes(candidate))?.key
     if (sectionFor(activeClaw) !== sectionFor(overClaw)) return
     const ids = allClaws.map((c) => c.id)
     const oldIdx = ids.indexOf(active.id as string)
@@ -1811,12 +1821,6 @@ export function ConversationView({
 
   if (!claw) {
     // Use the server-maintained order (respects user drag preference + falls back to API order)
-    const sortedClaws = allClaws
-    const boardSections = (["attention", "working", "offline"] as AgentSectionName[]).map((key) => ({
-      key,
-      meta: AGENT_SECTION[key],
-      items: sortedClaws.filter((candidate) => agentSection(candidate, { isWaitingOnYou: isWaitingOnYou(allMessages[candidate.id] ?? EMPTY_MESSAGES) }) === key),
-    }))
     const sectionSummary = boardSections.filter((section) => section.items.length > 0)
       .map((section) => `${section.items.length} ${section.meta.label.toLowerCase()}`).join(" · ")
 
@@ -1858,7 +1862,7 @@ export function ConversationView({
 
         {/* Board view */}
         <div className="flex-1 relative min-h-0">
-          {sortedClaws.length === 0 && !loading ? (
+          {allClaws.length === 0 && !loading ? (
             <div className="flex flex-col items-center justify-center h-full gap-6 px-8 text-center">
               <img
                 src={logoUrl || "/mascot.png?v=2"}

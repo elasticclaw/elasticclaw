@@ -24,6 +24,8 @@ import {
   markConfigured,
 } from "@/lib/shell-storage"
 import { requestAuthToken } from "@/lib/auth-storage"
+import { isWaitingOnYou } from "@/lib/waiting-on-you"
+import { agentSection, type AgentSectionName } from "@/components/ds/agent-section"
 
 export type HomeView = "agents" | "analytics"
 
@@ -176,6 +178,16 @@ export function HomeShell() {
     )
   }, [pinnedClaws, activeTagFilters, matchesSearchQuery])
 
+  // Keep streamed message churn out of Sidebar: it only needs each claw's
+  // resolved section, not the complete transcript map.
+  const sidebarSections = useMemo(() => {
+    const sections = new Map<string, AgentSectionName>()
+    for (const claw of claws) {
+      sections.set(claw.id, agentSection(claw, { isWaitingOnYou: isWaitingOnYou(messages[claw.id] ?? []) }))
+    }
+    return sections
+  }, [claws, messages])
+
   // Eagerly load messages for all claws once the claw list is first available.
   // Covers: initial load, refresh, navigating back from /settings.
   // Board cards are passive — they never trigger loadMessages themselves.
@@ -311,7 +323,7 @@ export function HomeShell() {
       claws={filteredClaws}
       pinnedClaws={filteredPinnedClaws}
       allClawIds={claws.map((c) => c.id)}
-      allMessages={messages}
+      agentSections={sidebarSections}
       selectedClawId={selectedClawId}
       onSelectClaw={handleSelectClaw}
       onTogglePin={handleTogglePin}

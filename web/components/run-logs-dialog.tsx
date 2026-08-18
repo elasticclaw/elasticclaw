@@ -111,7 +111,12 @@ function OutputTab({ outputs, loading, error, traceId, workspaceName }: { output
   const [raw, setRaw] = useState(false)
   const groups = useMemo(() => {
     const grouped = new Map<string, TaskRunOutput[]>()
-    for (const output of outputs) grouped.set(output.stageId || "Unspecified stage", [...(grouped.get(output.stageId || "Unspecified stage") || []), output])
+    for (const output of outputs) {
+      const stage = output.stageId || "Unspecified stage"
+      const stageOutputs = grouped.get(stage)
+      if (stageOutputs) stageOutputs.push(output)
+      else grouped.set(stage, [output])
+    }
     return [...grouped.entries()]
   }, [outputs])
 
@@ -137,8 +142,14 @@ function OutputTab({ outputs, loading, error, traceId, workspaceName }: { output
 }
 
 function OutputBlock({ output, minSeverity, raw }: { output: TaskRunOutput; minSeverity: number; raw: boolean }) {
-  const records = output.records.filter((record) => record.severityNumber >= minSeverity)
-  const counts = output.records.reduce<Record<string, number>>((result, record) => ({ ...result, [record.sev]: (result[record.sev] || 0) + 1 }), {})
+  const { records, counts } = useMemo(() => {
+    const counts: Record<string, number> = {}
+    const records = output.records.filter((record) => {
+      counts[record.sev] = (counts[record.sev] || 0) + 1
+      return record.severityNumber >= minSeverity
+    })
+    return { records, counts }
+  }, [output.records, minSeverity])
   const showRaw = raw || output.records.length === 0
   return (
     <div className="space-y-3 p-4">

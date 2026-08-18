@@ -47,7 +47,7 @@ import { MultiFilterSelect, selectedFilterValues, serializeFilterValues } from "
 import { type DetailState, urlFilterKeys } from "@/lib/task-run-filters"
 import { RunDetailPanel } from "@/components/run-detail-panel"
 import { TicketDetailPanel } from "@/components/ticket-detail-panel"
-import { ChartCard, DatePickerRange, defaultPeriod, KpiTile, RunStatusBadge, TicketStatusBadge } from "@/components/ds"
+import { ChartCard, DatePickerRange, KpiTile, RunStatusBadge, TicketStatusBadge } from "@/components/ds"
 import { WorkflowName } from "@/components/workflow-name"
 import { Button } from "@/components/ui/button"
 import {
@@ -178,9 +178,7 @@ export function AnalyticsCommandCenter() {
   const [tickets, setTickets] = useState<AnalyticsTicket[]>([])
   const [ticketTotal, setTicketTotal] = useState(0)
   const [options, setOptions] = useState<TaskRunFilterOptions>()
-  const [nextCursor, setNextCursor] = useState<string>()
   const [nextTicketCursor, setNextTicketCursor] = useState<string>()
-  const [cursorStack, setCursorStack] = useState<(string | undefined)[]>([undefined])
   const [ticketCursorStack, setTicketCursorStack] = useState<(string | undefined)[]>([undefined])
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null)
   const [selectedTicketId, setSelectedTicketId] = useState<string | null>(null)
@@ -191,13 +189,6 @@ export function AnalyticsCommandCenter() {
   const loadAbortController = useRef<AbortController | null>(null)
   const loadRequestId = useRef(0)
   const optionsLoadedRef = useRef(false)
-  // Track the current page cursor in a ref so the polling effect below can read the
-  // latest value on every tick without re-arming the interval when cursorStack changes.
-  const cursorStackRef = useRef(cursorStack)
-
-  useEffect(() => {
-    cursorStackRef.current = cursorStack
-  }, [cursorStack])
 
   // Cache the last-known run object per selectedRunId so a silent poll that
   // drops the selected run off the current page (e.g. a new run pushes it
@@ -315,7 +306,6 @@ export function AnalyticsCommandCenter() {
         setStats(statsData)
         setDrivers(driversData)
         setRuns((currentRuns) => (append ? [...currentRuns, ...runsData.runs] : runsData.runs))
-        setNextCursor(runsData.nextCursor)
         setTickets(ticketsData.tickets)
         setNextTicketCursor(ticketsData.nextCursor)
         setTicketTotal(ticketsData.total)
@@ -342,9 +332,27 @@ export function AnalyticsCommandCenter() {
     [filters]
   )
 
+  const loadTickets = useCallback(async (ticketCursor?: string) => {
+    try {
+      const effectiveFilters = { ...filters }
+      if (!effectiveFilters.from && !effectiveFilters.to) {
+        const to = new Date()
+        const from = new Date(to)
+        from.setDate(to.getDate() - 30)
+        effectiveFilters.from = from.toISOString()
+        effectiveFilters.to = to.toISOString()
+      }
+      const ticketsData = await fetchAnalyticsTickets({ ...effectiveFilters, cursor: ticketCursor })
+      setTickets(ticketsData.tickets)
+      setNextTicketCursor(ticketsData.nextCursor)
+      setTicketTotal(ticketsData.total)
+    } catch (loadError) {
+      setError(loadError instanceof Error ? loadError.message : "Unable to load tickets")
+    }
+  }, [filters])
+
   useEffect(() => {
     queueMicrotask(() => {
-      setCursorStack([undefined])
       setTicketCursorStack([undefined])
       void load()
     })
@@ -354,8 +362,7 @@ export function AnalyticsCommandCenter() {
   }, [load])
 
   const silentRefresh = useCallback(() => {
-    const currentCursor = cursorStackRef.current[cursorStackRef.current.length - 1]
-    void load(currentCursor, { append: false, silent: true, ticketCursor: ticketCursorStack[ticketCursorStack.length - 1] })
+    void load(undefined, { append: false, silent: true, ticketCursor: ticketCursorStack[ticketCursorStack.length - 1] })
   }, [load, ticketCursorStack])
 
   useEffect(() => {
@@ -380,31 +387,18 @@ export function AnalyticsCommandCenter() {
     // Re-arm when load changes for new filters/options; each tick reads the latest cursor from the ref.
   }, [silentRefresh])
 
-  const handleNextPage = useCallback(() => {
-    if (!nextCursor) return
-    setCursorStack((currentStack) => [...currentStack, nextCursor])
-    void load(nextCursor)
-  }, [load, nextCursor])
-
-  const handlePreviousPage = useCallback(() => {
-    if (cursorStack.length <= 1) return
-    const nextStack = cursorStack.slice(0, -1)
-    setCursorStack(nextStack)
-    void load(nextStack[nextStack.length - 1])
-  }, [cursorStack, load])
-
   const handleNextTicketPage = useCallback(() => {
     if (!nextTicketCursor) return
     setTicketCursorStack((currentStack) => [...currentStack, nextTicketCursor])
-    void load(cursorStackRef.current[cursorStackRef.current.length - 1], { ticketCursor: nextTicketCursor })
-  }, [load, nextTicketCursor])
+    void loadTickets(nextTicketCursor)
+  }, [loadTickets, nextTicketCursor])
 
   const handlePreviousTicketPage = useCallback(() => {
     if (ticketCursorStack.length <= 1) return
     const nextStack = ticketCursorStack.slice(0, -1)
     setTicketCursorStack(nextStack)
-    void load(cursorStackRef.current[cursorStackRef.current.length - 1], { ticketCursor: nextStack[nextStack.length - 1] })
-  }, [load, ticketCursorStack])
+    void loadTickets(nextStack[nextStack.length - 1])
+  }, [loadTickets, ticketCursorStack])
 
   useEffect(() => {
     if (!selectedRunId) return
@@ -674,7 +668,7 @@ function FilterBar({
   }
   // No from/to in the URL means the default period — show it as such so the
   // trigger reads "Last 30 days" instead of "Select date range".
-  const dateRange: DateRange = filters.from || filters.to ? { from: filters.from ? new Date(filters.from) : undefined, to: filters.to ? new Date(filters.to) : undefined } : defaultPeriod()
+  const dateRange: DateRange | undefined = filters.from || filters.to ? { from: filters.from ? new Date(filters.from) : undefined, to: filters.to ? new Date(filters.to) : undefined } : undefined
   return (
     <div className="rounded-lg border bg-card p-2">
       {/* One flat flex row, like the kit: scope controls, rule, dimensions,
@@ -729,7 +723,7 @@ function Heatmap({ heatmap, maxCost, selectedDay, onSelectDay, onClearSelectedDa
   const [tooltip, setTooltip] = useState<{ iso: string; point: (typeof heatmap.days)[number]["point"]; x: number; y: number } | null>(null)
   const showTooltip = (iso: string, point: (typeof heatmap.days)[number]["point"], clientX: number, clientY: number) => {
     const rect = containerRef.current?.getBoundingClientRect()
-    if (rect) setTooltip({ iso, point, x: clientX - rect.left + 12, y: clientY - rect.top + 12 })
+    if (rect) setTooltip((current) => current?.iso === iso ? current : { iso, point, x: clientX - rect.left + 12, y: clientY - rect.top + 12 })
   }
   const selectedDayLabel = selectedDay && new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", year: "numeric" }).format(new Date(`${selectedDay}T00:00:00`))
 
@@ -762,7 +756,7 @@ function CostPerMergedPrChart({ effect }: { effect?: AnalyticsEffectiveness }) {
 function CostDrivers({ drivers }: { drivers: AnalyticsCostDriver[] }) {
   return <ChartCard title="Top cost drivers" info="Where the money goes: total spend and efficiency per workflow in the selected period." stat={`${drivers.length} workflows · ${usdWhole.format(drivers.reduce((sum, driver) => sum + driver.costUsd, 0))} total`}><Table className="[&_th]:h-auto [&_th]:px-2 [&_th]:pt-0 [&_th]:pb-2 [&_th]:text-xs [&_td]:px-2 [&_td]:py-[9px]"><TableHeader><TableRow><TableHead className="min-w-[35ch]">Workflow</TableHead><TableHead className="text-right">Runs</TableHead><TableHead className="text-right">Success</TableHead><TableHead className="text-right">Cost</TableHead><TableHead className="text-right">Cost / merged PR</TableHead></TableRow></TableHeader><TableBody>{drivers.slice(0, 10).map((driver) => <TableRow key={driver.name}><TableCell className="font-medium min-w-[35ch]"><WorkflowName name={driver.name} /></TableCell><TableCell className="text-right tabular-nums">{driver.runs}</TableCell><TableCell className="text-right tabular-nums">{formatPercent(driver.successRate)}</TableCell><TableCell className="text-right tabular-nums">{usd.format(driver.costUsd)}</TableCell><TableCell className="text-right tabular-nums">{usd.format(driver.costPerMergedPr)}</TableCell></TableRow>)}</TableBody></Table></ChartCard>
 }
-function TicketsTable({ tickets, total, page, canGoPrevious, canGoNext, onSelect, onSelectTicket, onPrevious, onNext }: { tickets: AnalyticsTicket[]; total: number; page: number; canGoPrevious: boolean; canGoNext: boolean; onSelect: (runId: string) => void; onSelectTicket: (ticketId: string) => void; onPrevious: () => void; onNext: () => void }) { const [expanded, setExpanded] = useState<Set<string>>(() => new Set()); const toggleExpanded = (issueId: string) => setExpanded((previous) => { const next = new Set(previous); if (next.has(issueId)) next.delete(issueId); else next.add(issueId); return next }); const delivered = tickets.filter((ticket) => ticket.status === "delivered").length; const awaitingReview = tickets.filter((ticket) => ticket.status === "pr_open").length; return <ChartCard title="Unique tickets" info="One row per ticket. Expand to see every run that served it; open a row for the business view, a run for the technical view." stat={<><span>{tickets.length} of {total} tickets</span><span className="ml-auto">{delivered} delivered · {awaitingReview} awaiting review</span></>}><Table className="[&_th]:h-auto [&_th]:px-2 [&_th]:pt-0 [&_th]:pb-2 [&_th]:text-xs [&_td]:px-2 [&_td]:py-[9px]"><TableHeader><TableRow>{["", "Status", "Ticket", "Requester", "Runs", "Cost", "Lead time", "Last activity"].map((label) => <TableHead key={label} className={label === "" ? "w-8" : ["Runs", "Cost", "Lead time", "Last activity"].includes(label) ? "text-right" : undefined}>{label}</TableHead>)}</TableRow></TableHeader><TableBody>{tickets.map((ticket) => <Fragment key={ticket.issueId}><TableRow className="cursor-pointer" onClick={() => onSelectTicket(ticket.issueId)}><TableCell><button type="button" aria-label={`Toggle ${ticket.issueId} runs`} aria-expanded={expanded.has(ticket.issueId)} onClick={(event) => { event.stopPropagation(); toggleExpanded(ticket.issueId) }}>{expanded.has(ticket.issueId) ? <ChevronDown className="size-4" /> : <ChevronRight className="size-4" />}</button></TableCell><TableCell><TicketStatusBadge status={ticket.status} /></TableCell><TableCell><div className="font-medium">{ticket.issueTitle || ticket.issueId}</div><div className="font-mono text-xs text-muted-foreground">{ticket.issueId} · {ticket.workflowName || ticket.source || "—"}</div></TableCell><TableCell>{ticket.requester || "—"}</TableCell><TableCell className="text-right tabular-nums">{ticket.runCount}</TableCell><TableCell className="text-right tabular-nums">{usd.format(ticket.cost)}</TableCell><TableCell className="text-right tabular-nums">{formatDuration(ticket.leadTime)}</TableCell><TableCell className="text-right tabular-nums">{ticket.lastActivity ? new Date(ticket.lastActivity).toLocaleDateString() : "—"}</TableCell></TableRow>{expanded.has(ticket.issueId) && ticket.runs.map((run, index) => <TableRow key={run.runId} className="cursor-pointer bg-muted/30" onClick={() => onSelect(run.runId)}><TableCell /><TableCell><RunStatusBadge status={run.status} /></TableCell><TableCell><div>Try {index + 1}</div><div className="font-mono text-xs text-muted-foreground">{run.runId} · {run.model || "—"}</div></TableCell><TableCell>{ticket.prs.filter((pr) => pr.runId === run.runId).length ? `${ticket.prs.filter((pr) => pr.runId === run.runId).length} PR${ticket.prs.filter((pr) => pr.runId === run.runId).length === 1 ? "" : "s"}` : run.status === "failed" ? "Failed" : "—"}</TableCell><TableCell className="text-right tabular-nums">{run.attemptCount}</TableCell><TableCell className="text-right tabular-nums">{usd.format(run.cost)}</TableCell><TableCell className="text-right tabular-nums">{formatDuration(run.lastActivity - run.startedAt)}</TableCell><TableCell className="text-right tabular-nums">{new Date(run.startedAt).toLocaleDateString()}</TableCell></TableRow>)}</Fragment>)}</TableBody></Table><div className="mt-3 flex justify-center gap-3"><Button variant="outline" size="sm" disabled={!canGoPrevious} onClick={onPrevious}>Previous</Button><span className="text-sm text-muted-foreground">Page {page}</span><Button variant="outline" size="sm" disabled={!canGoNext} onClick={onNext}>Next</Button></div></ChartCard> }
+function TicketsTable({ tickets, total, page, canGoPrevious, canGoNext, onSelect, onSelectTicket, onPrevious, onNext }: { tickets: AnalyticsTicket[]; total: number; page: number; canGoPrevious: boolean; canGoNext: boolean; onSelect: (runId: string) => void; onSelectTicket: (ticketId: string) => void; onPrevious: () => void; onNext: () => void }) { const [expanded, setExpanded] = useState<Set<string>>(() => new Set()); const toggleExpanded = (issueId: string) => setExpanded((previous) => { const next = new Set(previous); if (next.has(issueId)) next.delete(issueId); else next.add(issueId); return next }); const delivered = tickets.filter((ticket) => ticket.status === "delivered").length; const awaitingReview = tickets.filter((ticket) => ticket.status === "pr_open").length; return <ChartCard title="Unique tickets" info="One row per ticket. Expand to see every run that served it; open a row for the business view, a run for the technical view." stat={<><span>{tickets.length} of {total} tickets</span><span className="ml-auto">{delivered} delivered · {awaitingReview} awaiting review</span></>}><Table className="[&_th]:h-auto [&_th]:px-2 [&_th]:pt-0 [&_th]:pb-2 [&_th]:text-xs [&_td]:px-2 [&_td]:py-[9px]"><TableHeader><TableRow>{["", "Status", "Ticket", "Requester", "Runs", "Cost", "Lead time", "Last activity"].map((label) => <TableHead key={label} className={label === "" ? "w-8" : ["Runs", "Cost", "Lead time", "Last activity"].includes(label) ? "text-right" : undefined}>{label}</TableHead>)}</TableRow></TableHeader><TableBody>{tickets.map((ticket) => <Fragment key={ticket.issueId}><TableRow className="cursor-pointer" onClick={() => onSelectTicket(ticket.issueId)}><TableCell><button type="button" aria-label={`Toggle ${ticket.issueId} runs`} aria-expanded={expanded.has(ticket.issueId)} onClick={(event) => { event.stopPropagation(); toggleExpanded(ticket.issueId) }}>{expanded.has(ticket.issueId) ? <ChevronDown className="size-4" /> : <ChevronRight className="size-4" />}</button></TableCell><TableCell><TicketStatusBadge status={ticket.status} /></TableCell><TableCell><div className="font-medium">{ticket.issueTitle || ticket.issueId}</div><div className="font-mono text-xs text-muted-foreground">{ticket.issueId} · {ticket.workflowName || ticket.source || "—"}</div></TableCell><TableCell>{ticket.requester || "—"}</TableCell><TableCell className="text-right tabular-nums">{ticket.runCount}</TableCell><TableCell className="text-right tabular-nums">{usd.format(ticket.cost)}</TableCell><TableCell className="text-right tabular-nums">{formatDuration(ticket.leadTime)}</TableCell><TableCell className="text-right tabular-nums">{ticket.lastActivity ? new Date(ticket.lastActivity).toLocaleDateString() : "—"}</TableCell></TableRow>{expanded.has(ticket.issueId) && ticket.runs.map((run, index) => { const prs = ticket.prs.filter((pr) => pr.runId === run.runId); return <TableRow key={run.runId} className="cursor-pointer bg-muted/30" onClick={() => onSelect(run.runId)}><TableCell /><TableCell><RunStatusBadge status={run.status} /></TableCell><TableCell><div>Try {index + 1}</div><div className="font-mono text-xs text-muted-foreground">{run.runId} · {run.model || "—"}</div></TableCell><TableCell>{prs.length ? `${prs.length} PR${prs.length === 1 ? "" : "s"}` : run.status === "failed" ? "Failed" : "—"}</TableCell><TableCell className="text-right tabular-nums">{run.attemptCount}</TableCell><TableCell className="text-right tabular-nums">{usd.format(run.cost)}</TableCell><TableCell className="text-right tabular-nums">{formatDuration(run.lastActivity - run.startedAt)}</TableCell><TableCell className="text-right tabular-nums">{new Date(run.startedAt).toLocaleDateString()}</TableCell></TableRow>})}</Fragment>)}</TableBody></Table><div className="mt-3 flex justify-center gap-3"><Button variant="outline" size="sm" disabled={!canGoPrevious} onClick={onPrevious}>Previous</Button><span className="text-sm text-muted-foreground">Page {page}</span><Button variant="outline" size="sm" disabled={!canGoNext} onClick={onNext}>Next</Button></div></ChartCard> }
 function outcomesStat(effect?: AnalyticsEffectiveness) { const days = effect?.outcomesByDay ?? []; const total = days.reduce((sum, day) => sum + day.clean + day.humanInTheLoop + day.warning + day.failed, 0); return `${days.length} days · avg ${days.length ? (total / days.length).toFixed(1) : "0"} runs` }
 function ticketThroughputStat(effect?: AnalyticsEffectiveness) { const days = effect?.ticketsByDay ?? []; const total = days.reduce((sum, day) => sum + day.delivered + day.inProgress + day.failed, 0); return `${days.length} days · avg ${days.length ? (total / days.length).toFixed(1) : "0"} tickets` }
 function calculateDelta(current?: number | null, prior?: number | null) { return current == null || prior == null || prior === 0 ? undefined : (current - prior) / prior }

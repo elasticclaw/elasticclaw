@@ -6,6 +6,7 @@ import { COLOR_CLASSES } from "@/lib/mappers"
 import { Loader2, Pin, AlertCircle } from "lucide-react"
 import { BootstrapProgress } from "@/components/bootstrap-progress"
 import { ClawTitle } from "@/components/claw-title"
+import { useNowTick } from "@/hooks/use-now"
 
 interface ClawCardProps {
   claw: Claw
@@ -53,14 +54,14 @@ function UnreadBadge({ count }: { count: number }) {
 
 /* Freshness for the status line: uptime while the agent is up, else how long
    since the hub last saw it. */
-function rowAge(claw: Claw) {
+function rowAge(claw: Claw, now: number) {
   if ((claw.status === "connected" || claw.isStreaming) && claw.uptime > 0) {
     const minutes = Math.floor(claw.uptime / 60)
     if (minutes < 60) return `${minutes}m`
     return `${Math.floor(minutes / 60)}h ${String(minutes % 60).padStart(2, "0")}m`
   }
   if (!claw.last_seen) return undefined
-  const ms = Date.now() - new Date(claw.last_seen).getTime()
+  const ms = now - new Date(claw.last_seen).getTime()
   if (Number.isNaN(ms) || ms < 0) return undefined
   const minutes = Math.floor(ms / 60_000)
   if (minutes < 1) return "now"
@@ -75,6 +76,7 @@ function rowAge(claw: Claw) {
    detail + age) and up to three read-only tags. Renaming, tag editing and the
    color picker live in the board card's Agent details sheet. */
 export function ClawCard({ claw, isSelected, onClick, onTogglePin, showPinButton = true, activityLine, stateChip }: ClawCardProps) {
+  const now = useNowTick(Boolean(claw.last_seen))
   const hasUnread = claw.unreadCount > 0
   const railClass = claw.isStreaming
     ? "border-l-green-500"
@@ -84,7 +86,7 @@ export function ClawCard({ claw, isSelected, onClick, onTogglePin, showPinButton
         ? "border-l-red-500"
         : COLOR_CLASSES[claw.color]?.border ?? "border-l-border"
   const detail = activityLine || claw.template
-  const age = rowAge(claw)
+  const age = rowAge(claw, now)
 
   return (
     <div
