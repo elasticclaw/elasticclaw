@@ -100,7 +100,7 @@ function SortableClawCard({
   }
 
   return (
-    <div ref={setNodeRef} style={style} {...attributes} {...listeners}>
+    <div ref={setNodeRef} style={style} {...attributes} {...listeners} className="w-full min-w-0">
       <ClawCard
         claw={claw}
         isSelected={isSelected}
@@ -469,7 +469,7 @@ export function Sidebar({
       >
         {/* Pinned section lives inside the scroll area — a long pinned list
             must scroll with the rest instead of squeezing "All Agents" out. */}
-        <ScrollArea className="flex-1 min-h-0 min-w-0">
+        <ScrollArea className="flex-1 min-h-0 min-w-0 overflow-x-hidden [&>[data-slot=scroll-area-viewport]>div]:!block [&>[data-slot=scroll-area-viewport]>div]:!w-full [&>[data-slot=scroll-area-viewport]>div]:!min-w-0">
           <div className="w-full min-w-0 overflow-hidden">
             {allClaws.length === 0 ? (
               <p className="text-sm text-muted-foreground text-center py-8">
