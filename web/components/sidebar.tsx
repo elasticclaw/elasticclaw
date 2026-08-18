@@ -18,7 +18,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import { cn } from "@/lib/utils"
-import type { Claw } from "@/lib/types"
+import type { Claw, Message } from "@/lib/types"
 import { AgentStateChip } from "@/components/ds/agent-state-chip"
 import { AGENT_SECTION, agentSection, type AgentSectionName } from "@/components/ds/agent-section"
 import {
@@ -39,6 +39,7 @@ import {
 } from "@dnd-kit/sortable"
 import { CSS } from "@dnd-kit/utilities"
 import { useState, useEffect, useCallback } from "react"
+import { isWaitingOnYou } from "@/lib/waiting-on-you"
 
 type TagFilter = string
 
@@ -46,6 +47,7 @@ interface SidebarProps {
   claws: Claw[]
   pinnedClaws: Claw[]
   allClawIds: string[]
+  allMessages: Record<string, Message[]>
   selectedClawId: string | null
   onSelectClaw: (id: string) => void
   onTogglePin: (id: string) => void
@@ -115,6 +117,7 @@ export function Sidebar({
   claws,
   pinnedClaws,
   allClawIds,
+  allMessages,
   selectedClawId,
   onSelectClaw,
   onTogglePin,
@@ -231,7 +234,7 @@ export function Sidebar({
     const activeClaw = visible.find((c) => c.id === active.id)
     const overClaw = visible.find((c) => c.id === over.id)
     if (!activeClaw || !overClaw) return
-    const sectionFor = (candidate: Claw) => agentSection(candidate, { isWaitingOnYou: false })
+    const sectionFor = (candidate: Claw) => agentSection(candidate, { isWaitingOnYou: isWaitingOnYou(allMessages[candidate.id] ?? []) })
     const section = sectionFor(activeClaw)
     if (section !== sectionFor(overClaw)) return
 
@@ -476,7 +479,7 @@ export function Sidebar({
               (["attention", "working", "offline"] as AgentSectionName[]).map((key) => {
                 const meta = AGENT_SECTION[key]
                 const Icon = meta.icon
-                const items = allClaws.filter((candidate) => agentSection(candidate, { isWaitingOnYou: false }) === key)
+                const items = allClaws.filter((candidate) => agentSection(candidate, { isWaitingOnYou: isWaitingOnYou(allMessages[candidate.id] ?? []) }) === key)
                   .sort((a, b) => Number(b.pinned) - Number(a.pinned))
                 return <section key={key} className="pb-1">
                   <div className="sticky top-0 z-10 flex items-center gap-2 border-y px-3 py-1.5" style={{ backgroundColor: `color-mix(in srgb, ${meta.color} 10%, var(--card))`, borderColor: `color-mix(in srgb, ${meta.color} 30%, var(--border))` }}>

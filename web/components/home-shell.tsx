@@ -146,17 +146,16 @@ export function HomeShell() {
 
   const pinnedClaws = useMemo(() => claws.filter((c) => c.pinned), [claws])
   const unpinnedClaws = useMemo(() => claws.filter((c) => !c.pinned), [claws])
+  const matchesSearchQuery = useCallback((claw: typeof claws[number]) => {
+    const query = searchQuery.trim().toLowerCase()
+    return !query || claw.name.toLowerCase().includes(query) || claw.tags.some((tag) => tag.toLowerCase().includes(query))
+  }, [searchQuery])
 
   const filteredClaws = useMemo(() => {
     let result = searchQuery.trim() ? claws : unpinnedClaws
 
     if (searchQuery.trim()) {
-      const query = searchQuery.toLowerCase()
-      result = result.filter(
-        (c) =>
-          c.name.toLowerCase().includes(query) ||
-          c.tags.some((tag) => tag.toLowerCase().includes(query))
-      )
+      result = result.filter(matchesSearchQuery)
     }
 
     if (activeTagFilters.length > 0) {
@@ -166,14 +165,13 @@ export function HomeShell() {
     }
 
     return result
-  }, [claws, unpinnedClaws, searchQuery, activeTagFilters])
+  }, [claws, unpinnedClaws, searchQuery, activeTagFilters, matchesSearchQuery])
 
   const filteredPinnedClaws = useMemo(() => {
-    if (activeTagFilters.length === 0) return pinnedClaws
-    return pinnedClaws.filter((c) =>
-      activeTagFilters.every((tag) => c.tags.includes(tag))
+    return pinnedClaws.filter((claw) =>
+      matchesSearchQuery(claw) && activeTagFilters.every((tag) => claw.tags.includes(tag))
     )
-  }, [pinnedClaws, activeTagFilters])
+  }, [pinnedClaws, activeTagFilters, matchesSearchQuery])
 
   // Eagerly load messages for all claws once the claw list is first available.
   // Covers: initial load, refresh, navigating back from /settings.
@@ -310,6 +308,7 @@ export function HomeShell() {
       claws={filteredClaws}
       pinnedClaws={filteredPinnedClaws}
       allClawIds={claws.map((c) => c.id)}
+      allMessages={messages}
       selectedClawId={selectedClawId}
       onSelectClaw={handleSelectClaw}
       onTogglePin={handleTogglePin}

@@ -70,6 +70,7 @@ import { ClawTitle } from "@/components/claw-title"
 import { windowMessagesByDurableCount } from "@/lib/messages"
 import { DependencyDowntimeBanner } from "@/components/dependency-downtime-banner"
 import type { TypewriterState } from "@/hooks/use-typewriter"
+import { extractQuestion, isWaitingOnYou } from "@/lib/waiting-on-you"
 
 const XTerminal = dynamic(
   () => import("@/components/terminal").then((m) => m.XTerminal),
@@ -209,23 +210,6 @@ function firstMeaningfulLine(text: string): string {
     if (trimmed) return trimmed
   }
   return text.trim()
-}
-
-/**
- * The last question sentence of a message, if it plausibly asks the user
- * something ("posso forçar push?"). The "?" must end the message or a
- * sentence; the question starts after the previous sentence/line break.
- */
-function extractQuestion(text: string): string | null {
-  const trimmed = text.trim()
-  const qIdx = trimmed.lastIndexOf("?")
-  if (qIdx === -1) return null
-  if (qIdx !== trimmed.length - 1 && !/\s/.test(trimmed[qIdx + 1])) return null
-  const before = trimmed.slice(0, qIdx)
-  const boundary = before.match(/[.!?\n][^.!?\n]*$/)
-  const start = boundary?.index !== undefined ? boundary.index + 1 : 0
-  const question = trimmed.slice(start, qIdx + 1).trim()
-  return question || null
 }
 
 function lastActivityError(messages: Message[]): string | null {
@@ -576,6 +560,7 @@ const ClawBoardCard = memo(function ClawBoardCard({
   }, [visibleMessages, allowTrailingRunning])
   const activityNowMs = useNowTick(Boolean(latestStep))
   const isStreaming = claw.isStreaming || Boolean(streamingBuffer?.hadChunks && streamingBuffer.text)
+  const waitingOnYou = useMemo(() => isWaitingOnYou(messages), [messages])
   const cardNow = useMemo(
     () => boardCardNow(claw, visibleMessages, latestStep, isStreaming),
     [claw, visibleMessages, latestStep, isStreaming]
@@ -710,7 +695,7 @@ const ClawBoardCard = memo(function ClawBoardCard({
               <div className="text-xs font-medium text-foreground">Drop files</div>
             </div>
           )}
-          <div className="absolute left-0 top-0 bottom-0 w-1 rounded-l-lg z-10" style={{ backgroundColor: isStreaming ? "var(--status-streaming)" : claw.status === "provisioning" ? "var(--status-provisioning)" : claw.status === "error" ? "var(--status-error)" : AGENT_SECTION[agentSection(claw, { isWaitingOnYou: false })].color }} />
+          <div className="absolute left-0 top-0 bottom-0 w-1 rounded-l-lg z-10" style={{ backgroundColor: isStreaming ? "var(--status-streaming)" : claw.status === "provisioning" ? "var(--status-provisioning)" : claw.status === "error" ? "var(--status-error)" : AGENT_SECTION[agentSection(claw, { isWaitingOnYou: waitingOnYou })].color }} />
           
           {/* Context usage bar */}
           <div className="px-3 pt-2">
@@ -742,7 +727,8 @@ const ClawBoardCard = memo(function ClawBoardCard({
                 <div className="mt-1 flex items-center gap-1 text-xs text-muted-foreground"><span className="truncate">{claw.template}</span><span>·</span><span className={cn("font-mono shrink-0", claw.status === "provisioning" && "text-[var(--status-provisioning)]", claw.status === "error" && "text-[var(--status-error)]")}>{claw.status === "provisioning" ? "starting..." : claw.status === "error" ? "error" : formatUptime(claw.uptime)}</span></div>
               </div>
               <div className="flex shrink-0 items-center gap-1 border-l border-border pl-2">
-                {prs.length > 0 && <Popover><PopoverTrigger asChild><button onClick={(event) => event.stopPropagation()} className="flex items-center gap-1 rounded p-1 text-[var(--chart-1)] hover:bg-accent" aria-label="Open pull requests" title="Open pull requests"><GitPullRequest className="size-3.5" /><span className="font-mono text-[10px]">{prs.length}</span></button></PopoverTrigger><PopoverContent className="w-72 p-2" align="end">{prs.map((pr) => <div key={pr.id} className="py-1"><div className="font-mono text-xs text-[var(--chart-1)]">{pr.repo}#{pr.prNumber}</div><div className="truncate text-xs text-muted-foreground">{(pr as ClawPR & { title?: string }).title || "Pull request"}</div></div>)}</PopoverContent></Popover>}
+                <button onClick={(event) => { event.stopPropagation(); onClick(claw.id) }} className="rounded p-1 hover:bg-accent" aria-label="Open conversation" title="Open conversation"><MessageSquare className="size-3.5" /></button>
+                {prs.length > 0 && <Popover><PopoverTrigger asChild><button onClick={(event) => event.stopPropagation()} className="flex items-center gap-1 rounded p-1 text-[var(--chart-1)] hover:bg-accent" aria-label={`Open ${prs.length} pull request${prs.length === 1 ? "" : "s"}`} title="Open pull requests"><GitPullRequest className="size-3.5" /><span className="font-mono text-[10px]">{prs.length}</span></button></PopoverTrigger><PopoverContent className="w-72 p-2" align="end">{prs.map((pr) => <a key={pr.id} href={pr.url} target="_blank" rel="noopener noreferrer" onClick={(event) => event.stopPropagation()} className="block rounded px-2 py-1 hover:bg-accent" aria-label={`Open ${pr.repo} pull request #${pr.prNumber}`} title={`Open ${pr.repo}#${pr.prNumber}`}><div className="font-mono text-xs text-[var(--chart-1)]">{pr.repo}#{pr.prNumber}</div><div className="text-xs text-muted-foreground capitalize">{pr.state}</div></a>)}</PopoverContent></Popover>}
                 <button onClick={copyTranscript} className={cn("rounded p-1 hover:bg-accent", copied && "text-[var(--chart-2)]")} aria-label={copied ? "Transcript copied" : "Copy transcript"} title={copied ? "Transcript copied" : "Copy transcript"}>{copied ? <CheckCircle2 className="size-3.5" /> : <ClipboardCopy className="size-3.5" />}</button>
                 <button onClick={(event) => { event.stopPropagation(); setDetailsOpen(true) }} className="rounded p-1 hover:bg-accent" aria-label="Agent details" title="Agent details"><Info className="size-3.5" /></button>
               </div>
@@ -1092,15 +1078,17 @@ const SortableClawBoardCard = memo(function SortableClawBoardCard({
 function BoardSection({
   section,
   className,
+  isMobile = false,
   children,
 }: {
   section: { key: AgentSectionName; meta: typeof AGENT_SECTION[AgentSectionName]; items: Claw[] }
   className?: string
+  isMobile?: boolean
   children: React.ReactNode
 }) {
   const Icon = section.meta.icon
   return (
-    <section className={cn("flex min-w-[500px] flex-col gap-3", className)}>
+    <section className={cn("flex flex-col gap-3", !isMobile && "min-w-[500px]", className)}>
       <div className="flex items-center gap-2 rounded-md border px-3 py-2" style={{ backgroundColor: `color-mix(in srgb, ${section.meta.color} 10%, var(--card))`, borderColor: `color-mix(in srgb, ${section.meta.color} 30%, var(--border))` }}>
         <Icon className="size-[13px]" style={{ color: section.meta.color }} />
         <span className="text-xs font-semibold uppercase tracking-wider">{section.meta.label}</span>
@@ -1703,6 +1691,11 @@ export function ConversationView({
     setActiveDragClaw(null)
     const { active, over } = event
     if (!over || active.id === over.id) return
+    const activeClaw = allClaws.find((candidate) => candidate.id === active.id)
+    const overClaw = allClaws.find((candidate) => candidate.id === over.id)
+    if (!activeClaw || !overClaw) return
+    const sectionFor = (candidate: Claw) => agentSection(candidate, { isWaitingOnYou: isWaitingOnYou(allMessages[candidate.id] ?? EMPTY_MESSAGES) })
+    if (sectionFor(activeClaw) !== sectionFor(overClaw)) return
     const ids = allClaws.map((c) => c.id)
     const oldIdx = ids.indexOf(active.id as string)
     const newIdx = ids.indexOf(over.id as string)
@@ -1751,7 +1744,7 @@ export function ConversationView({
     const boardSections = (["attention", "working", "offline"] as AgentSectionName[]).map((key) => ({
       key,
       meta: AGENT_SECTION[key],
-      items: sortedClaws.filter((candidate) => agentSection(candidate, { isWaitingOnYou: false }) === key),
+      items: sortedClaws.filter((candidate) => agentSection(candidate, { isWaitingOnYou: isWaitingOnYou(allMessages[candidate.id] ?? EMPTY_MESSAGES) }) === key),
     }))
     const sectionSummary = boardSections.filter((section) => section.items.length > 0)
       .map((section) => `${section.items.length} ${section.meta.label.toLowerCase()}`).join(" · ")
@@ -1830,7 +1823,7 @@ export function ConversationView({
             /* Single-column vertical list: full-width cards, no reordering,
                no scroll arrows — one-finger vertical scrolling only. */
             <div className="h-full overflow-y-auto overflow-x-hidden p-3 space-y-5">
-              {boardSections.filter((section) => section.items.length).map((section) => <BoardSection key={section.key} section={section} className="flex flex-col gap-3"><div className="flex flex-col gap-3">{section.items.map((c) => <ClawBoardCard key={c.id} claw={c} messages={allMessages[c.id] ?? EMPTY_MESSAGES} streamingBuffer={streamingBuffers[c.id]} onClick={handleCardClick} onSendMessage={handleCardSendMessage} onKill={handleCardKill} />)}</div></BoardSection>)}
+              {boardSections.filter((section) => section.items.length).map((section) => <BoardSection key={section.key} section={section} isMobile><div className="flex flex-col gap-3">{section.items.map((c) => <ClawBoardCard key={c.id} claw={c} messages={allMessages[c.id] ?? EMPTY_MESSAGES} streamingBuffer={streamingBuffers[c.id]} onClick={handleCardClick} onSendMessage={handleCardSendMessage} onKill={handleCardKill} />)}</div></BoardSection>)}
             </div>
           ) : (
           <>
@@ -1854,7 +1847,7 @@ export function ConversationView({
                 className="flex gap-6 h-full overflow-x-auto overflow-y-hidden py-6 px-12 items-stretch"
                 style={{ scrollbarWidth: "none", msOverflowStyle: "none" }}
               >
-                {boardSections.filter((section) => section.items.length).map((section) => <BoardSection key={section.key} section={section} className="h-full shrink-0"><SortableContext items={section.items.map((c) => c.id)} strategy={horizontalListSortingStrategy}><div className="flex h-[calc(100%-38px)] gap-4">{section.items.map((c) => <SortableClawBoardCard key={c.id} claw={c} messages={allMessages[c.id] ?? EMPTY_MESSAGES} streamingBuffer={streamingBuffers[c.id]} onClick={handleCardClick} onSendMessage={handleCardSendMessage} onKill={handleCardKill} />)}</div></SortableContext></BoardSection>)}
+                {boardSections.filter((section) => section.items.length).map((section) => <BoardSection key={section.key} section={section} className="h-full shrink-0"><SortableContext items={section.items.map((c) => c.id)} strategy={horizontalListSortingStrategy}><div className="flex flex-1 min-h-0 gap-4">{section.items.map((c) => <SortableClawBoardCard key={c.id} claw={c} messages={allMessages[c.id] ?? EMPTY_MESSAGES} streamingBuffer={streamingBuffers[c.id]} onClick={handleCardClick} onSendMessage={handleCardSendMessage} onKill={handleCardKill} />)}</div></SortableContext></BoardSection>)}
               </div>
 
             {/* Ghost card following cursor during drag */}
