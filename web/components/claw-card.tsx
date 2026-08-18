@@ -7,6 +7,7 @@ import { Loader2, Pin, AlertCircle } from "lucide-react"
 import { BootstrapProgress } from "@/components/bootstrap-progress"
 import { ClawTitle } from "@/components/claw-title"
 import { useNowTick } from "@/hooks/use-now"
+import { memo } from "react"
 
 interface ClawCardProps {
   claw: Claw
@@ -75,7 +76,7 @@ function rowAge(claw: Claw, now: number) {
    mono name, unread pill, hover-only pin; then one status line (state chip +
    detail + age) and up to three read-only tags. Renaming, tag editing and the
    color picker live in the board card's Agent details sheet. */
-export function ClawCard({ claw, isSelected, onClick, onTogglePin, showPinButton = true, activityLine, stateChip }: ClawCardProps) {
+export const ClawCard = memo(function ClawCard({ claw, isSelected, onClick, onTogglePin, showPinButton = true, activityLine, stateChip }: ClawCardProps) {
   const now = useNowTick(Boolean(claw.last_seen))
   const hasUnread = claw.unreadCount > 0
   const railClass = claw.isStreaming
@@ -173,4 +174,4 @@ export function ClawCard({ claw, isSelected, onClick, onTogglePin, showPinButton
       )}
     </div>
   )
-}
+})

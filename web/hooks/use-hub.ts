@@ -531,11 +531,14 @@ export function useHub(selectedClawId: string | null): HubState {
           const { claw_id, content } = payload
           noteOutput(claw_id)
           pushChunk(claw_id, content)
-          setClaws((prev) =>
-            prev.map((c) =>
-                c.id === claw_id ? { ...c, isStreaming: true } : c
+          setClaws((prev) => {
+            const claw = prev.find((c) => c.id === claw_id)
+            if (!claw || claw.isStreaming) return prev
+
+            return prev.map((c) =>
+              c.id === claw_id ? { ...c, isStreaming: true } : c
             )
-          )
+          })
         } else if (type === "agent_activity") {
           const clawId = payload.claw_id
           if (!clawId) return

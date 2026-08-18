@@ -38,7 +38,7 @@ import {
   arrayMove,
 } from "@dnd-kit/sortable"
 import { CSS } from "@dnd-kit/utilities"
-import { useState, useEffect, useCallback, useMemo } from "react"
+import { memo, useState, useEffect, useCallback, useMemo } from "react"
 
 type TagFilter = string
 
@@ -112,7 +112,7 @@ function SortableClawCard({
   )
 }
 
-export function Sidebar({
+export const Sidebar = memo(function Sidebar({
   claws,
   pinnedClaws,
   allClawIds,
@@ -593,7 +593,7 @@ export function Sidebar({
       )}
     </>
   )
-}
+})
 
 /** WorkflowPickerOverlay is a keyboard-accessible overlay for picking a workflow.
  *  Closes on Escape key and click outside the card. */
