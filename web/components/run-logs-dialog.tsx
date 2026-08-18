@@ -31,7 +31,9 @@ export function RunLogsDialog({ run, attempts }: { run: TaskRunSummary; attempts
   const clawId = selectedClawId ?? defaultClawId
 
   const disabled = !run.clawId
-  const hasAgentActivity = attemptOptions.length > 0
+  // A run that died before the agent started (e.g. failed provisioning) has
+  // claw-linked attempts but no agent activity to show.
+  const hasAgentActivity = attemptOptions.length > 0 && Boolean(run.agentStartedAt)
   useEscapeToClose(() => setOpen(false), open)
   useEffect(() => {
     if (!open) return
@@ -58,7 +60,7 @@ export function RunLogsDialog({ run, attempts }: { run: TaskRunSummary; attempts
       <Tooltip>
         <TooltipTrigger asChild>
           <span className="inline-flex" tabIndex={disabled ? 0 : undefined}>
-            <Button variant="outline" size="sm" disabled={disabled} onClick={() => { setTab(run.clawId ? "actions" : "output"); setOpen(true) }}>
+            <Button variant="outline" size="sm" disabled={disabled} onClick={() => { setTab(hasAgentActivity ? "actions" : "output"); setOpen(true) }}>
               <FileTerminal className="size-4" />
               Agent logs
             </Button>
