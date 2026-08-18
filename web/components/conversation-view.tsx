@@ -1762,49 +1762,36 @@ export function ConversationView({
     return (
       <main className="flex-1 flex flex-col bg-background min-w-0 overflow-hidden">
         {/* Header */}
-        <header className="flex items-center justify-between gap-2 px-3 md:px-6 py-2 md:py-4 border-b border-border shrink-0">
-          <div className="flex min-w-0 items-center gap-1 md:gap-3">
-            {isMobile && onOpenMenu ? (
-              <Button variant="ghost" size="icon" className="size-11 shrink-0" onClick={onOpenMenu} title="Open agent list">
-                <Menu className="size-5" />
-              </Button>
-            ) : (
-              <Terminal className="size-5 text-muted-foreground" />
-            )}
-            <div className="min-w-0"><h2 className="truncate text-lg font-medium text-foreground">Agents</h2><p className="truncate font-mono text-[10px] text-muted-foreground">{loading ? "Loading agents" : sectionSummary}</p></div>
-          </div>
-          <div className="flex min-w-0 flex-wrap items-center justify-end gap-x-4 gap-y-2 text-xs text-muted-foreground">
+        {/* Kit BoardScreen header: one row — glyph, "Agents", the section
+            summary inline in mono, and the overflow menu on the right edge.
+            The old status legend is gone: the section bands carry that
+            vocabulary now. */}
+        <header className="flex shrink-0 items-center gap-2 border-b border-border px-3 py-2 md:px-4 md:py-2.5">
+          {isMobile && onOpenMenu ? (
+            <Button variant="ghost" size="icon" className="size-11 shrink-0" onClick={onOpenMenu} title="Open agent list">
+              <Menu className="size-5" />
+            </Button>
+          ) : (
+            <LayoutGrid className="size-4 shrink-0 text-muted-foreground" />
+          )}
+          <span className="shrink-0 text-sm font-medium">Agents</span>
+          <span className="min-w-0 truncate font-mono text-[10.5px] text-muted-foreground">{loading ? "Loading agents" : sectionSummary}</span>
+          <div className="ml-auto flex min-w-0 items-center gap-2">
             <DependencyDowntimeBanner dependencies={downtimeDependencies} />
-            <div className="hidden md:flex items-center gap-4">
-              <div className="flex items-center gap-1.5">
-                <span className="size-2 rounded-full bg-green-500" />
-                <span>Connected</span>
-              </div>
-              <div className="flex items-center gap-1.5">
-                <span className="size-2 rounded-full bg-amber-500" />
-                <span>Idle</span>
-              </div>
-              <div className="flex items-center gap-1.5">
-                <span className="size-2 rounded-full bg-red-500" />
-                <span>Offline</span>
-              </div>
-            </div>
-            {isMobile && (
-              /* Sign out moves here on mobile — the tab bar has no room for it */
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                  <Button variant="ghost" size="icon" className="size-11 shrink-0" title="More">
-                    <MoreVertical className="size-5" />
-                  </Button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent align="end">
-                  <DropdownMenuItem onClick={() => { void signOut() }}>
-                    <LogOut className="size-4" />
-                    Sign out
-                  </DropdownMenuItem>
-                </DropdownMenuContent>
-              </DropdownMenu>
-            )}
+            {/* Sign out lives here on mobile — the tab bar has no room for it */}
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button variant="ghost" size={isMobile ? "icon" : "icon-sm"} className={isMobile ? "size-11 shrink-0" : "shrink-0"} title="More" aria-label="More">
+                  <MoreVertical className={isMobile ? "size-5" : "size-4"} />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end">
+                <DropdownMenuItem onClick={() => { void signOut() }}>
+                  <LogOut className="size-4" />
+                  Sign out
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
           </div>
         </header>
 
