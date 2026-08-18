@@ -137,6 +137,7 @@ export const TurnCard = memo(function TurnCard({
             if (item.type === "steps") {
               return expanded ? renderSteps(item.id, item.steps) : null
             }
+            if (item.type === "message") return null
             // Lazy historical tool calls — keep the fetch-on-expand flow.
             if (!expanded || problemsOnly) return null
             return (

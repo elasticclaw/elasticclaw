@@ -578,8 +578,12 @@ func (s *Server) persistPipelineOutput(clawID, stageID, outputName string, resul
 		startedAttrs := map[string]interface{}{"stage.id": stageID}
 		finishedAttrs := map[string]interface{}{"process.exit_code": result.ExitCode}
 		if result.Command != "" {
-			startedAttrs["process.command"] = result.Command
-			finishedAttrs["process.command"] = result.Command
+			command := result.Command
+			if len(command) > 500 {
+				command = command[:500] + "…"
+			}
+			startedAttrs["process.command"] = command
+			finishedAttrs["process.command"] = command
 		}
 		records = append(records, newPipelineLogRecord(result.StartedAt, "INFO", "stage started", startedAttrs))
 		severity := "INFO"

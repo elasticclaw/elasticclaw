@@ -478,7 +478,7 @@ export async function fetchTaskRunPRs(runId: string): Promise<{ prs: TaskRunPR[]
 }
 
 export async function fetchTaskRunOutputs(runId: string): Promise<{ outputs: TaskRunOutput[]; traceId?: string }> {
-	return apiFetch<{ outputs: TaskRunOutput[]; traceId?: string }>(`/api/analytics/runs/${encodeURIComponent(runId)}/outputs`)
+  return apiFetch<{ outputs: TaskRunOutput[]; traceId?: string }>(`/api/analytics/runs/${encodeURIComponent(runId)}/outputs`)
 }
 
 export async function fetchTaskRunFilterOptions(options?: AnalyticsRequestOptions): Promise<TaskRunFilterOptions> {

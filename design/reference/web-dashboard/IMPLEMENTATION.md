@@ -153,3 +153,7 @@ GATE 6: full-suite green + final visual pass + departures documented below.
 - `checkPRMerged` in `pr_watcher.go` deletes `claw_prs` rows when a PR merges or
   closes without merging, so `GET /api/claws/:id/prs` cannot expose terminal PR
   state. Phase 5's Delivery rows source terminal state from retained `task_run_prs`.
+- Ticket panel narrative drops the requester's role (kit shows "requester and
+  role"; port shows requester name only) — `tickets_api.go:396` notes neither
+  Linear nor GitHub exposes a reliable requester-role field for us to surface,
+  so this is a data-availability gap, not a rendering gap. Kept as-is.

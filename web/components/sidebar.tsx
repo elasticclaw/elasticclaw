@@ -324,18 +324,13 @@ export const Sidebar = memo(function Sidebar({
               >
                 {/* Status dot */}
                 {claw.status === "provisioning" ? (
-                  <Loader2 className="size-3.5 text-blue-400 animate-spin" />
+                  <Loader2 className="size-3.5 animate-spin" style={{ color: "var(--status-provisioning)" }} />
                 ) : claw.status === "error" ? (
-                  <AlertCircle className="size-3.5 text-red-500" />
+                  <AlertCircle className="size-3.5" style={{ color: "var(--status-error)" }} />
                 ) : claw.isStreaming ? (
-                  <Loader2 className="size-3.5 text-green-500 animate-spin" />
+                  <Loader2 className="size-3.5 animate-spin" style={{ color: "var(--status-streaming)" }} />
                 ) : (
-                  <span className={cn(
-                    "size-2.5 rounded-full",
-                    claw.status === "connected" && "bg-green-500",
-                    claw.status === "idle" && "bg-amber-500",
-                    claw.status === "offline" && "bg-muted-foreground/50"
-                  )} />
+                  <span className="size-2.5 rounded-full" style={{ backgroundColor: claw.status === "connected" ? "var(--status-connected)" : claw.status === "idle" ? "var(--status-idle)" : "var(--status-offline)" }} />
                 )}
                 {/* Unread badge */}
                 {hasUnread && (
@@ -516,7 +511,7 @@ export const Sidebar = memo(function Sidebar({
                   <div className="sticky top-0 left-0 right-0 z-10 flex w-full min-w-0 items-center gap-2 border-y px-3 py-1.5" style={{ backgroundColor: `color-mix(in srgb, ${meta.color} 10%, var(--card))`, borderColor: `color-mix(in srgb, ${meta.color} 30%, var(--border))` }}>
                     <span className="w-[3px] self-stretch rounded-full" style={{ backgroundColor: meta.color }} />
                     <Icon className="size-[13px]" style={{ color: meta.color }} />
-                    <span className="min-w-0 truncate text-xs font-semibold uppercase tracking-wider">{meta.label}</span>
+                    <span className="min-w-0 truncate text-xs font-semibold uppercase tracking-[0.08em]">{meta.label}</span>
                     <span className="ml-auto shrink-0 rounded-full px-1.5 font-mono text-[10px] font-medium" style={{ backgroundColor: `color-mix(in srgb, ${meta.color} 22%, transparent)`, color: meta.color }}>{items.length}</span>
                   </div>
                   <div className="space-y-1 px-2 py-2">

@@ -448,13 +448,16 @@ function KillConfirmDialog({ clawName, open, onConfirm, onCancel }: {
 
 function ClawCardBack({ claw, open }: { claw: Claw; open: boolean }) {
   const { prs } = useClawPRs(claw.id, open)
+  const [localTags, setLocalTags] = useState(claw.tags)
+
+  useEffect(() => setLocalTags(claw.tags), [claw.id, claw.tags])
 
   return (
     /* max-md cap mirrors the front face's message list: mobile cards are
        content-sized, so the info panel scrolls inside its own bound. */
     <div className="flex-1 overflow-y-auto scrollbar-thin p-4 space-y-4 max-md:max-h-[40vh]">
       <div>
-        <h3 className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-2">
+        <h3 className="text-xs font-medium text-muted-foreground uppercase tracking-[0.08em] mb-2">
           Purpose
         </h3>
         <p className="text-sm text-foreground leading-relaxed">
@@ -463,7 +466,7 @@ function ClawCardBack({ claw, open }: { claw: Claw; open: boolean }) {
       </div>
 
       <div>
-        <h3 className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-2">
+        <h3 className="text-xs font-medium text-muted-foreground uppercase tracking-[0.08em] mb-2">
           Source
         </h3>
         <p className="text-sm font-mono text-foreground">
@@ -472,7 +475,7 @@ function ClawCardBack({ claw, open }: { claw: Claw; open: boolean }) {
       </div>
 
       <div>
-        <h3 className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-2">
+        <h3 className="text-xs font-medium text-muted-foreground uppercase tracking-[0.08em] mb-2">
           Status
         </h3>
         <div className="flex items-center gap-2">
@@ -485,7 +488,7 @@ function ClawCardBack({ claw, open }: { claw: Claw; open: boolean }) {
       </div>
 
       <div>
-        <h3 className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-2">
+        <h3 className="text-xs font-medium text-muted-foreground uppercase tracking-[0.08em] mb-2">
           Context Usage
         </h3>
         <div className="flex items-center gap-2">
@@ -497,7 +500,7 @@ function ClawCardBack({ claw, open }: { claw: Claw; open: boolean }) {
       </div>
 
       <div>
-        <h3 className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-2">
+        <h3 className="text-xs font-medium text-muted-foreground uppercase tracking-[0.08em] mb-2">
           Uptime
         </h3>
         <p className="text-sm font-mono text-foreground">
@@ -508,7 +511,7 @@ function ClawCardBack({ claw, open }: { claw: Claw; open: boolean }) {
       {/* Editing moved here from the sidebar row, which stays read-only per
           the kit AgentRow. */}
       <div>
-        <h3 className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-2">Name</h3>
+        <h3 className="text-xs font-medium text-muted-foreground uppercase tracking-[0.08em] mb-2">Name</h3>
         <input
           defaultValue={claw.name}
           onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur() }}
@@ -522,12 +525,12 @@ function ClawCardBack({ claw, open }: { claw: Claw; open: boolean }) {
       </div>
 
       <div>
-        <h3 className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-2">Tags</h3>
-        <TagEditor clawId={claw.id} tags={claw.tags} onTagsChange={() => {}} />
+        <h3 className="text-xs font-medium text-muted-foreground uppercase tracking-[0.08em] mb-2">Tags</h3>
+        <TagEditor clawId={claw.id} tags={localTags} onTagsChange={setLocalTags} />
       </div>
 
       <div>
-        <h3 className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-2">Color</h3>
+        <h3 className="text-xs font-medium text-muted-foreground uppercase tracking-[0.08em] mb-2">Color</h3>
         <div className="flex flex-wrap gap-1.5">
           {CLAW_COLORS.map((color) => (
             <button
@@ -546,7 +549,7 @@ function ClawCardBack({ claw, open }: { claw: Claw; open: boolean }) {
 
       {prs.length > 0 && (
         <div>
-          <h3 className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-2">Pull Requests</h3>
+          <h3 className="text-xs font-medium text-muted-foreground uppercase tracking-[0.08em] mb-2">Pull Requests</h3>
           <div className="space-y-1.5">
             {prs.map(pr => (
               <a key={pr.id} href={pr.url} target="_blank" rel="noopener noreferrer"
@@ -1754,7 +1757,7 @@ export function ConversationView({
       const section = agentSection(candidate, { isWaitingOnYou: isWaitingOnYou(allMessages[candidate.id] ?? EMPTY_MESSAGES) })
       itemsBySection.get(section)!.push(candidate)
     }
-    return (["attention", "working", "offline"] as AgentSectionName[]).map((key) => ({ key, meta: AGENT_SECTION[key], items: itemsBySection.get(key)! }))
+    return (["attention", "working", "offline"] as AgentSectionName[]).map((key) => ({ key, meta: AGENT_SECTION[key], items: itemsBySection.get(key)!.sort((a, b) => Number(b.pinned) - Number(a.pinned)) }))
   }, [allClaws, allMessages])
 
   const sensors = useSensors(
