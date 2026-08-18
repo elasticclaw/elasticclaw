@@ -570,13 +570,19 @@ func (s *Server) persistPipelineOutput(clawID, stageID, outputName string, resul
 		status = "ERROR"
 	}
 	records := []pipelineLogRecord{}
-	if result.Command != "" {
-		records = append(records, newPipelineLogRecord(result.StartedAt, "INFO", "stage started", map[string]interface{}{"stage.id": stageID, "process.command": result.Command}))
+	if !result.StartedAt.IsZero() {
+		startedAttrs := map[string]interface{}{"stage.id": stageID}
+		finishedAttrs := map[string]interface{}{"process.exit_code": result.ExitCode}
+		if result.Command != "" {
+			startedAttrs["process.command"] = result.Command
+			finishedAttrs["process.command"] = result.Command
+		}
+		records = append(records, newPipelineLogRecord(result.StartedAt, "INFO", "stage started", startedAttrs))
 		severity := "INFO"
 		if result.ExitCode != 0 {
 			severity = "ERROR"
 		}
-		records = append(records, newPipelineLogRecord(result.StartedAt.Add(time.Duration(result.DurationMs)*time.Millisecond), severity, "stage finished", map[string]interface{}{"process.command": result.Command, "process.exit_code": result.ExitCode}))
+		records = append(records, newPipelineLogRecord(result.StartedAt.Add(time.Duration(result.DurationMs)*time.Millisecond), severity, "stage finished", finishedAttrs))
 	}
 	recordsJSON, _ := json.Marshal(records)
 	spanID := uuid.NewString()
@@ -1098,6 +1104,7 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, ctx pipelineCon
 	if stage.OnEnter.Judge.Instructions != "" {
 		s.publishHubNotice(clawID, fmt.Sprintf("[hub] ▶ Running judge for stage %q", stage.ID))
 		log.Printf("[pipeline] running judge for claw %s stage %q", clawID[:8], stage.ID)
+		started := time.Now()
 		judgeResult, err := s.executeJudgeAction(clawID, stage.OnEnter.Judge, ctx)
 		if err != nil {
 			msg := fmt.Sprintf("Judge stage failed: %v", err)
@@ -1111,9 +1118,11 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, ctx pipelineCon
 			// Persist judge output so later stages can reference it
 			if stage.OnEnter.Judge.Output != "" {
 				result := &pipelineRunResult{
-					ExitCode: 0,
-					Stdout:   judgeResult.RawJSON,
-					Stderr:   "",
+					ExitCode:   0,
+					Stdout:     judgeResult.RawJSON,
+					Stderr:     "",
+					StartedAt:  started,
+					DurationMs: time.Since(started).Milliseconds(),
 				}
 				s.persistPipelineOutput(clawID, stage.ID, stage.OnEnter.Judge.Output, result)
 			}
