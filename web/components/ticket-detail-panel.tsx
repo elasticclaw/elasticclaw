@@ -4,6 +4,7 @@ import { CheckCircle2, ChevronRight, GitMerge, GitPullRequest, X, XCircle } from
 import { useEffect, useRef } from "react"
 import type { AnalyticsTicket, AnalyticsTicketRunSummary } from "@/lib/types"
 import { useEscapeToClose } from "@/hooks/use-escape-to-close"
+import { useFocusTrap } from "@/hooks/use-focus-trap"
 import { TicketStatusBadge, RunStatusBadge } from "@/components/ds"
 import { Button } from "@/components/ui/button"
 
@@ -19,6 +20,7 @@ function Row({ label, value, mono }: { label: string; value: React.ReactNode; mo
 export function TicketDetailPanel({ ticket, onClose, onOpenRun }: { ticket: AnalyticsTicket | null; onClose: () => void; onOpenRun: (run: AnalyticsTicketRunSummary) => void }) {
   useEscapeToClose(onClose, Boolean(ticket))
   const panelRef = useRef<HTMLElement>(null)
+  useFocusTrap(panelRef, Boolean(ticket))
   const previousFocusRef = useRef<HTMLElement | null>(null)
   useEffect(() => {
     if (!ticket) return

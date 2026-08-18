@@ -69,7 +69,7 @@ export function RunLogsDialog({ run, attempts }: { run: TaskRunSummary; attempts
         {disabled && <TooltipContent>This run is not linked to an agent, so logs are unavailable.</TooltipContent>}
       </Tooltip>
       <Dialog open={open} onOpenChange={setOpen}>
-        <DialogContent className="z-[71] flex h-[min(85vh,800px)] flex-col gap-3 overflow-hidden p-0 sm:max-w-5xl">
+        <DialogContent overlayClassName="z-[70]" className="z-[71] flex h-[min(85vh,800px)] flex-col gap-3 overflow-hidden p-0 sm:max-w-5xl">
           <DialogHeader className="shrink-0 border-b px-6 py-5 pr-12">
             <DialogTitle>Agent logs</DialogTitle>
             <DialogDescription>Agent activity and pipeline output for {run.ownerDisplayName || run.runId}.</DialogDescription>

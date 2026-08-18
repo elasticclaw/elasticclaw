@@ -333,16 +333,12 @@ function formatUptime(seconds: number): string {
 }
 
 function StatusBadge({ status, className }: { status: ClawStatus; className?: string }) {
+  const color = status === "connected" ? "var(--status-connected)" : status === "idle" ? "var(--status-idle)" : status === "provisioning" ? "var(--status-provisioning)" : status === "error" ? "var(--status-error)" : "var(--status-offline)"
   return (
     <Badge
       variant="outline"
-      className={cn(
-        "text-xs font-medium",
-        status === "connected" && "border-green-500/50 text-green-500",
-        status === "idle" && "border-amber-500/50 text-amber-500",
-        status === "offline" && "border-red-500/50 text-red-500",
-        className
-      )}
+      className={cn("text-xs font-medium", className)}
+      style={{ color, borderColor: `color-mix(in srgb, ${color} 50%, transparent)` }}
     >
       {status}
     </Badge>
@@ -350,18 +346,12 @@ function StatusBadge({ status, className }: { status: ClawStatus; className?: st
 }
 
 function StatusDot({ status, isStreaming }: { status: ClawStatus; isStreaming: boolean }) {
-  if (isStreaming) return <Loader2 className="size-3.5 text-green-500 animate-spin" />
-  if (status === "provisioning") return <Loader2 className="size-3.5 text-blue-400 animate-spin" />
-  if (status === "error") return <AlertCircle className="size-3.5 text-red-500" />
+  if (isStreaming) return <Loader2 className="size-3.5 animate-spin" style={{ color: "var(--status-streaming)" }} />
+  if (status === "provisioning") return <Loader2 className="size-3.5 animate-spin" style={{ color: "var(--status-provisioning)" }} />
+  if (status === "error") return <AlertCircle className="size-3.5" style={{ color: "var(--status-error)" }} />
+  const color = status === "connected" ? "var(--status-connected)" : status === "idle" ? "var(--status-idle)" : "var(--status-offline)"
   return (
-    <span
-      className={cn(
-        "size-2 rounded-full shrink-0",
-        status === "connected" && "bg-green-500",
-        status === "idle" && "bg-amber-500",
-        status === "offline" && "bg-muted-foreground"
-      )}
-    />
+    <span className="size-2 rounded-full shrink-0" style={{ backgroundColor: color }} />
   )
 }
 
@@ -787,7 +777,7 @@ const ClawBoardCard = memo(function ClawBoardCard({
                 <div className="mt-1 flex items-center gap-1 text-xs text-muted-foreground"><span className="truncate">{claw.template}</span><span>·</span><span className={cn("font-mono shrink-0", claw.status === "provisioning" && "text-[var(--status-provisioning)]", claw.status === "error" && "text-[var(--status-error)]")}>{claw.status === "provisioning" ? "starting..." : claw.status === "error" ? "error" : formatUptime(claw.uptime)}</span></div>
               </div>
               <div className="flex shrink-0 items-center gap-1 border-l border-border pl-2">
-                {openPRCount > 0 && <Popover open={prsOpen} onOpenChange={setPrsOpen}><PopoverTrigger asChild><CardAction icon={GitPullRequest} label={`Open ${openPRCount} pull request${openPRCount === 1 ? "" : "s"}`} count={openPRCount} tone="var(--chart-1)" onClick={(event) => event.stopPropagation()} /></PopoverTrigger><PopoverContent className="w-72 p-2" align="end"><span className="block px-2 py-1 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">Open pull requests</span>{prs.length > 0 ? prs.map((pr) => <a key={pr.id} href={pr.url} target="_blank" rel="noopener noreferrer" onClick={(event) => event.stopPropagation()} className="block rounded px-2 py-1 hover:bg-accent" aria-label={`Open ${pr.repo} pull request #${pr.prNumber}: ${pr.title}`} title={`${pr.repo}#${pr.prNumber}: ${pr.title}`}><div className="font-mono text-xs text-[var(--chart-1)]">{pr.repo}#{pr.prNumber}</div><div className="truncate text-xs text-muted-foreground">{pr.title}</div></a>) : <p className="px-2 py-1 text-xs text-muted-foreground">No open pull requests.</p>}</PopoverContent></Popover>}
+                {openPRCount > 0 && <Popover open={prsOpen} onOpenChange={setPrsOpen}><PopoverTrigger asChild><CardAction icon={GitPullRequest} label={`Open ${openPRCount} pull request${openPRCount === 1 ? "" : "s"}`} count={openPRCount} tone="var(--chart-1)" onClick={(event) => event.stopPropagation()} /></PopoverTrigger><PopoverContent className="w-72 p-2" align="end"><span className="block px-2 py-1 text-[10px] font-medium uppercase tracking-[0.08em] text-muted-foreground">Open pull requests</span>{prs.length > 0 ? prs.map((pr) => <a key={pr.id} href={pr.url} target="_blank" rel="noopener noreferrer" onClick={(event) => event.stopPropagation()} className="block rounded px-2 py-1 hover:bg-accent" aria-label={`Open ${pr.repo} pull request #${pr.prNumber}: ${pr.title}`} title={`${pr.repo}#${pr.prNumber}: ${pr.title}`}><div className="font-mono text-xs text-[var(--chart-1)]">{pr.repo}#{pr.prNumber}</div><div className="truncate text-xs text-muted-foreground">{pr.title}</div></a>) : <p className="px-2 py-1 text-xs text-muted-foreground">No open pull requests.</p>}</PopoverContent></Popover>}
                 <CardAction icon={copied ? CheckCircle2 : ClipboardCopy} label={copied ? "Transcript copied" : "Copy transcript"} confirmed={copied} onClick={copyTranscript} />
                 <CardAction icon={Info} label="Agent details" onClick={(event) => { event.stopPropagation(); setDetailsOpen(true) }} />
               </div>
@@ -875,7 +865,7 @@ const ClawBoardCard = memo(function ClawBoardCard({
                   return (
                     <div key={message.id} className="flex items-center gap-2 py-1">
                       <div className="flex-1 h-px bg-border/50" />
-                      <span className="text-[9px] text-muted-foreground/50 uppercase tracking-wider">
+                      <span className="text-[9px] text-muted-foreground/50 uppercase tracking-[0.08em]">
                         {message.content === "__TOOL_GAP__" ? "tool" : message.content}
                       </span>
                       <div className="flex-1 h-px bg-border/50" />
@@ -902,15 +892,13 @@ const ClawBoardCard = memo(function ClawBoardCard({
                   ? splitAttachmentsFooter(message.content)
                   : { body: message.content, attachments: [] as ParsedAttachment[] }
                 return (
-                  <div
-                    key={message.id}
-                    className={cn(
+                  <div key={message.id} className={cn("flex w-full", author.kind === "self" ? "justify-end" : "justify-start")}>
+                    <div className={cn(
                       "text-xs p-2 rounded",
                       author.kind === "self"
-                        ? "bg-blue-600/[0.28] border border-blue-500/45 ml-4"
-                        : "bg-secondary mr-4"
-                    )}
-                  >
+                        ? "bg-blue-600/[0.28] border border-blue-500/45"
+                        : author.kind === "teammate" || author.kind === "unknown" ? "bg-secondary" : (claw.color && COLOR_CLASSES[claw.color]?.bubble) || "bg-secondary"
+                    )}>
                     <div className="flex items-center gap-1 mb-0.5">
                       {author.kind === "agent" ? <Bot className="size-3 text-muted-foreground" /> : author.kind === "teammate" ? <span className="flex size-4 items-center justify-center rounded-full text-[8px] font-semibold text-background" style={{ backgroundColor: author.color }}>{author.initials}</span> : null}
                       <span className="font-medium text-foreground/70" style={author.kind === "teammate" ? { color: author.color } : undefined}>{author.kind === "self" ? "You" : author.kind === "teammate" ? author.name : author.kind === "unknown" ? "Teammate" : claw.name}</span>
@@ -937,6 +925,7 @@ const ClawBoardCard = memo(function ClawBoardCard({
                         ))}
                       </div>
                     )}
+                    </div>
                   </div>
                 )
               })
@@ -1157,7 +1146,7 @@ function BoardSection({
     <section className={cn("flex flex-col gap-3", !isMobile && "min-w-[500px]", className)}>
       <div className="flex items-center gap-2 rounded-md border px-3 py-2" style={{ backgroundColor: `color-mix(in srgb, ${section.meta.color} 10%, var(--card))`, borderColor: `color-mix(in srgb, ${section.meta.color} 30%, var(--border))` }}>
         <Icon className="size-[13px]" style={{ color: section.meta.color }} />
-        <span className="text-xs font-semibold uppercase tracking-wider">{section.meta.label}</span>
+        <span className="text-xs font-semibold uppercase tracking-[0.08em]">{section.meta.label}</span>
         <span className="ml-auto rounded-full px-1.5 font-mono text-[10px]" style={{ backgroundColor: `color-mix(in srgb, ${section.meta.color} 22%, transparent)`, color: section.meta.color }}>{section.items.length}</span>
       </div>
       {children}
@@ -1191,7 +1180,7 @@ const MessageBubble = memo(function MessageBubble({
           <div className="flex-1 h-px bg-border/50" />
           <div className="flex items-center gap-1.5 text-muted-foreground/50">
             <Wrench className="size-3" />
-            <span className="text-[10px] uppercase tracking-wider">tool call</span>
+            <span className="text-[10px] uppercase tracking-[0.08em]">tool call</span>
           </div>
           <div className="flex-1 h-px bg-border/50" />
         </div>
@@ -1200,7 +1189,7 @@ const MessageBubble = memo(function MessageBubble({
     return (
       <div className="flex items-center gap-3 py-4">
         <div className="flex-1 h-px bg-border" />
-        <span className="text-xs text-muted-foreground uppercase tracking-wider font-medium">
+        <span className="text-xs text-muted-foreground uppercase tracking-[0.08em] font-medium">
           {message.content}
         </span>
         <div className="flex-1 h-px bg-border" />
