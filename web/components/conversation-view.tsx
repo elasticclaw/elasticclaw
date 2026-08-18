@@ -107,6 +107,34 @@ const BOARD_CARD_DURABLE_MESSAGE_WINDOW = 50
 const EMPTY_MESSAGES: Message[] = []
 const noopClawAction = (_clawId: string) => {}
 const noopClawMessageAction = (_clawId: string, _content: string) => {}
+const clawPRCache = new Map<string, ClawPR[]>()
+const clawPRRequests = new Map<string, Promise<ClawPR[]>>()
+
+function fetchCachedClawPRs(clawId: string) {
+  const pending = clawPRRequests.get(clawId)
+  if (pending) return pending
+  const request = fetchClawPRs(clawId)
+    .then((prs) => {
+      const openPrs = prs.filter((pr) => pr.state === "open")
+      clawPRCache.set(clawId, openPrs)
+      return openPrs
+    })
+    .finally(() => clawPRRequests.delete(clawId))
+  clawPRRequests.set(clawId, request)
+  return request
+}
+
+function useClawPRs(clawId: string, enabled: boolean) {
+  const [prs, setPrs] = useState<ClawPR[]>(() => clawPRCache.get(clawId) ?? [])
+
+  useEffect(() => {
+    setPrs(clawPRCache.get(clawId) ?? [])
+    if (!enabled) return
+    void fetchCachedClawPRs(clawId).then(setPrs).catch(() => {})
+  }, [clawId, enabled])
+
+  return prs
+}
 
 // The typewriter reveals text every animation frame, but re-parsing markdown that
 // often is what made the board expensive. Sample the buffer instead: the reveal
@@ -412,12 +440,8 @@ function KillConfirmDialog({ clawName, open, onConfirm, onCancel }: {
   )
 }
 
-function ClawCardBack({ claw }: { claw: Claw }) {
-  const [prs, setPrs] = useState<ClawPR[]>([])
-
-  useEffect(() => {
-    fetchClawPRs(claw.id).then(setPrs).catch(() => {})
-  }, [claw.id])
+function ClawCardBack({ claw, open }: { claw: Claw; open: boolean }) {
+  const prs = useClawPRs(claw.id, open)
 
   return (
     /* max-md cap mirrors the front face's message list: mobile cards are
@@ -561,7 +585,8 @@ const ClawBoardCard = memo(function ClawBoardCard({
   const [confirmKill, setConfirmKill] = useState(false)
   const [detailsOpen, setDetailsOpen] = useState(false)
   const [copied, setCopied] = useState(false)
-  const [prs, setPrs] = useState<ClawPR[]>([])
+  const [prsOpen, setPrsOpen] = useState(false)
+  const prs = useClawPRs(claw.id, prsOpen)
   const hasUnread = claw.unreadCount > 0
   const isPending = claw.status === "provisioning" || claw.status === "error" || claw.status === "offline"
   const msgScrollRef = useRef<HTMLDivElement>(null)
@@ -676,10 +701,6 @@ const ClawBoardCard = memo(function ClawBoardCard({
     }
   }
 
-  useEffect(() => {
-    fetchClawPRs(claw.id).then((items) => setPrs(items.filter((pr) => pr.state === "open"))).catch(() => setPrs([]))
-  }, [claw.id])
-
   const copyTranscript = useCallback(async (event: React.MouseEvent) => {
     event.stopPropagation()
     await copyTextToClipboard(formatChatTranscript({ claw, messages, streamingText: streamingBuffer?.text }))
@@ -754,7 +775,7 @@ const ClawBoardCard = memo(function ClawBoardCard({
                 <div className="mt-1 flex items-center gap-1 text-xs text-muted-foreground"><span className="truncate">{claw.template}</span><span>·</span><span className={cn("font-mono shrink-0", claw.status === "provisioning" && "text-[var(--status-provisioning)]", claw.status === "error" && "text-[var(--status-error)]")}>{claw.status === "provisioning" ? "starting..." : claw.status === "error" ? "error" : formatUptime(claw.uptime)}</span></div>
               </div>
               <div className="flex shrink-0 items-center gap-1 border-l border-border pl-2">
-                {prs.length > 0 && <Popover><PopoverTrigger asChild><CardAction icon={GitPullRequest} label={`Open ${prs.length} pull request${prs.length === 1 ? "" : "s"}`} count={prs.length} tone="var(--chart-1)" onClick={(event) => event.stopPropagation()} /></PopoverTrigger><PopoverContent className="w-72 p-2" align="end"><span className="block px-2 py-1 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">Open pull requests</span>{prs.map((pr) => <a key={pr.id} href={pr.url} target="_blank" rel="noopener noreferrer" onClick={(event) => event.stopPropagation()} className="block rounded px-2 py-1 hover:bg-accent" aria-label={`Open ${pr.repo} pull request #${pr.prNumber}: ${pr.title}`} title={`${pr.repo}#${pr.prNumber}: ${pr.title}`}><div className="font-mono text-xs text-[var(--chart-1)]">{pr.repo}#{pr.prNumber}</div><div className="truncate text-xs text-muted-foreground">{pr.title}</div></a>)}</PopoverContent></Popover>}
+                <Popover open={prsOpen} onOpenChange={setPrsOpen}><PopoverTrigger asChild><CardAction icon={GitPullRequest} label={prs.length > 0 ? `Open ${prs.length} pull request${prs.length === 1 ? "" : "s"}` : "Pull requests"} count={prs.length || undefined} tone="var(--chart-1)" onClick={(event) => event.stopPropagation()} /></PopoverTrigger><PopoverContent className="w-72 p-2" align="end"><span className="block px-2 py-1 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">Open pull requests</span>{prs.length > 0 ? prs.map((pr) => <a key={pr.id} href={pr.url} target="_blank" rel="noopener noreferrer" onClick={(event) => event.stopPropagation()} className="block rounded px-2 py-1 hover:bg-accent" aria-label={`Open ${pr.repo} pull request #${pr.prNumber}: ${pr.title}`} title={`${pr.repo}#${pr.prNumber}: ${pr.title}`}><div className="font-mono text-xs text-[var(--chart-1)]">{pr.repo}#{pr.prNumber}</div><div className="truncate text-xs text-muted-foreground">{pr.title}</div></a>) : <p className="px-2 py-1 text-xs text-muted-foreground">No open pull requests.</p>}</PopoverContent></Popover>
                 <CardAction icon={copied ? CheckCircle2 : ClipboardCopy} label={copied ? "Transcript copied" : "Copy transcript"} confirmed={copied} onClick={copyTranscript} />
                 <CardAction icon={Info} label="Agent details" onClick={(event) => { event.stopPropagation(); setDetailsOpen(true) }} />
               </div>
@@ -865,7 +886,7 @@ const ClawBoardCard = memo(function ClawBoardCard({
                   return step ? <StepRow key={message.id} step={step} density="card" /> : null
                 }
                 const author = messageAuthor(message, currentUserLogin)
-                const { body: cardBody, attachments: cardAttachments } = author.kind === "self" || author.kind === "teammate"
+                const { body: cardBody, attachments: cardAttachments } = author.kind === "self" || author.kind === "teammate" || author.kind === "unknown"
                   ? splitAttachmentsFooter(message.content)
                   : { body: message.content, attachments: [] as ParsedAttachment[] }
                 return (
@@ -880,8 +901,8 @@ const ClawBoardCard = memo(function ClawBoardCard({
                   >
                     <div className="flex items-center gap-1 mb-0.5">
                       {author.kind === "agent" ? <Bot className="size-3 text-muted-foreground" /> : author.kind === "teammate" ? <span className="flex size-4 items-center justify-center rounded-full text-[8px] font-semibold text-background" style={{ backgroundColor: author.color }}>{author.initials}</span> : null}
-                      <span className="font-medium text-foreground/70" style={author.kind === "teammate" ? { color: author.color } : undefined}>{author.kind === "self" ? "You" : author.kind === "teammate" ? author.name : claw.name}</span>
-                      {author.kind === "teammate" && <span className="text-[9px] text-muted-foreground">teammate</span>}
+                      <span className="font-medium text-foreground/70" style={author.kind === "teammate" ? { color: author.color } : undefined}>{author.kind === "self" ? "You" : author.kind === "teammate" ? author.name : author.kind === "unknown" ? "Teammate" : claw.name}</span>
+                      {(author.kind === "teammate" || author.kind === "unknown") && <span className="text-[9px] text-muted-foreground">teammate</span>}
                       <span className="text-muted-foreground" suppressHydrationWarning>
                         {formatTimestamp(message.timestamp)}
                       </span>
@@ -1032,7 +1053,7 @@ const ClawBoardCard = memo(function ClawBoardCard({
     <Sheet open={detailsOpen} onOpenChange={setDetailsOpen}>
       <SheetContent className="flex w-full flex-col sm:max-w-md">
         <SheetHeader><SheetTitle className="font-mono text-sm">{claw.name} — Agent details</SheetTitle></SheetHeader>
-        <ClawCardBack claw={claw} />
+        <ClawCardBack claw={claw} open={detailsOpen} />
         <div className="flex gap-2 border-t border-border pt-3">
           <Button variant="destructive" size="sm" className="flex-1" onClick={() => setConfirmKill(true)}><Trash2 className="mr-1.5 size-3" />Kill</Button>
           <Button variant="outline" size="sm" className="flex-1" disabled={!claw.ssh_host} onClick={() => setShowTerminal(true)}><TerminalSquare className="mr-1.5 size-3" />Terminal</Button>
@@ -1193,7 +1214,7 @@ const MessageBubble = memo(function MessageBubble({
   }
 
   const author = messageAuthor(message, currentUserLogin)
-  const isUser = author.kind === "self" || author.kind === "teammate"
+  const isUser = author.kind === "self" || author.kind === "teammate" || author.kind === "unknown"
   const isHub = message.role === "hub"
 
   if (isHub) {
@@ -1221,13 +1242,13 @@ const MessageBubble = memo(function MessageBubble({
           "w-fit max-w-[88%] md:w-[70%] md:max-w-none min-w-0 rounded-lg px-4 py-3",
           author.kind === "self"
             ? "bg-blue-600/[0.28] border border-blue-500/45"
-            : author.kind === "teammate" ? "bg-secondary" : (clawColor && COLOR_CLASSES[clawColor]?.bubble) || "bg-secondary"
+            : author.kind === "teammate" || author.kind === "unknown" ? "bg-secondary" : (clawColor && COLOR_CLASSES[clawColor]?.bubble) || "bg-secondary"
         )}
       >
         <div className="flex items-center gap-2 mb-1">
           {author.kind === "agent" ? <Bot className="size-4 text-muted-foreground" /> : author.kind === "teammate" ? <span className="flex size-5 items-center justify-center rounded-full text-[9px] font-semibold text-background" style={{ backgroundColor: author.color }}>{author.initials}</span> : null}
-          <span className={cn("text-xs font-medium", author.kind === "self" ? "text-muted-foreground" : "text-foreground")} style={author.kind === "teammate" ? { color: author.color } : undefined}>{author.kind === "self" ? "You" : author.kind === "teammate" ? author.name : clawName}</span>
-          {author.kind === "teammate" && <span className="text-[10px] text-muted-foreground">teammate</span>}
+          <span className={cn("text-xs font-medium", author.kind === "self" ? "text-muted-foreground" : "text-foreground")} style={author.kind === "teammate" ? { color: author.color } : undefined}>{author.kind === "self" ? "You" : author.kind === "teammate" ? author.name : author.kind === "unknown" ? "Teammate" : clawName}</span>
+          {(author.kind === "teammate" || author.kind === "unknown") && <span className="text-[10px] text-muted-foreground">teammate</span>}
           <span className="text-xs text-muted-foreground" suppressHydrationWarning>
             {formatTimestamp(message.timestamp)}
           </span>

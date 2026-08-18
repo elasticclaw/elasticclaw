@@ -43,7 +43,7 @@ import type {
   TaskRunFilterOptions,
   TaskRunSummary,
 } from "@/lib/types"
-import { MultiFilterSelect } from "@/components/multi-filter-select"
+import { MultiFilterSelect, selectedFilterValues, serializeFilterValues } from "@/components/multi-filter-select"
 import { type DetailState, urlFilterKeys } from "@/lib/task-run-filters"
 import { RunDetailPanel } from "@/components/run-detail-panel"
 import { TicketDetailPanel } from "@/components/ticket-detail-panel"
@@ -133,6 +133,14 @@ function isoDayRange(day: string) {
   }
 }
 
+function localDayRange(date: Date) {
+  const from = new Date(date)
+  from.setHours(0, 0, 0, 0)
+  const to = new Date(date)
+  to.setHours(23, 59, 59, 999)
+  return { from: from.toISOString(), to: to.toISOString() }
+}
+
 export function AnalyticsCommandCenter() {
   const pathname = usePathname()
   const params = useSearchParams()
@@ -182,6 +190,7 @@ export function AnalyticsCommandCenter() {
   const [error, setError] = useState<string>()
   const loadAbortController = useRef<AbortController | null>(null)
   const loadRequestId = useRef(0)
+  const optionsLoadedRef = useRef(false)
   // Track the current page cursor in a ref so the polling effect below can read the
   // latest value on every tick without re-arming the interval when cursorStack changes.
   const cursorStackRef = useRef(cursorStack)
@@ -295,7 +304,7 @@ export function AnalyticsCommandCenter() {
           fetchAnalyticsCostDrivers(effectiveFilters, "workflow", { signal: controller.signal }),
           fetchTaskRuns(runFilters, { signal: controller.signal }),
           fetchAnalyticsTickets(ticketFilters, { signal: controller.signal }),
-          options ? Promise.resolve(options) : fetchTaskRunFilterOptions({ signal: controller.signal }),
+          optionsLoadedRef.current ? Promise.resolve(undefined) : fetchTaskRunFilterOptions({ signal: controller.signal }),
         ])
         if (controller.signal.aborted || requestId !== loadRequestId.current) return
 
@@ -310,7 +319,10 @@ export function AnalyticsCommandCenter() {
         setTickets(ticketsData.tickets)
         setNextTicketCursor(ticketsData.nextCursor)
         setTicketTotal(ticketsData.total)
-        setOptions(optionsData)
+        if (optionsData) {
+          optionsLoadedRef.current = true
+          setOptions(optionsData)
+        }
         if (!append && !silent) {
           setSelectedRunId(null)
           setSelectedTicketId(null)
@@ -327,7 +339,7 @@ export function AnalyticsCommandCenter() {
         }
       }
     },
-    [filters, options]
+    [filters]
   )
 
   useEffect(() => {
@@ -579,6 +591,7 @@ export function AnalyticsCommandCenter() {
         <CostDrivers drivers={drivers} />
       </div>
       <RunDetailPanel
+        runId={selectedRunId}
         run={selectedRun}
         details={details}
         loading={detailLoading}
@@ -649,15 +662,15 @@ function FilterBar({
 
   const activeFilters: Array<{ key: "workspace" | (typeof selectFilters)[number][1]; label: string; value: string }> = [
     ...(filters.workspace ? [{ key: "workspace" as const, label: `Workspace: ${filters.workspace}`, value: filters.workspace }] : []),
-    ...selectFilters.flatMap(([label, key]) => (filters[key]?.split(",").map((value) => value.trim()).filter(Boolean) ?? []).map((value) => ({ key, label: `${label}: ${value}`, value }))),
+    ...selectFilters.flatMap(([label, key]) => selectedFilterValues(filters[key]).map((value) => ({ key, label: `${label}: ${value}`, value }))),
   ]
   const removeFilterValue = (filter: { key: "workspace" | (typeof selectFilters)[number][1]; label: string; value: string }) => {
     if (filter.key === "workspace") {
       onChange({ workspace: undefined })
       return
     }
-    const remaining = (filters[filter.key] ?? "").split(",").map((value) => value.trim()).filter((value) => value && value !== filter.value)
-    onChange({ [filter.key]: remaining.length > 0 ? remaining.join(",") : undefined })
+    const remaining = selectedFilterValues(filters[filter.key]).filter((value) => value !== filter.value)
+    onChange({ [filter.key]: remaining.length > 0 ? serializeFilterValues(remaining) : undefined })
   }
   // No from/to in the URL means the default period — show it as such so the
   // trigger reads "Last 30 days" instead of "Select date range".
@@ -668,7 +681,7 @@ function FilterBar({
           Clear all — items wrap naturally instead of the dimensions forming
           their own block. */}
       <div className="flex flex-wrap items-center gap-2">
-        <DatePickerRange value={dateRange} onChange={(range) => onChange({ from: range?.from?.toISOString(), to: range?.to ? isoDayRange(isoDate(range.to)).to : undefined })} />
+        <DatePickerRange value={dateRange} onChange={(range) => onChange({ from: range?.from ? localDayRange(range.from).from : undefined, to: range?.to ? localDayRange(range.to).to : undefined })} />
         <div className="w-[204px]">
           <WorkspaceSelect
             value={filters.workspace}

@@ -4,6 +4,7 @@ import type { Message } from "@/lib/types"
 export type MessageAuthor =
   | { kind: "self" }
   | { kind: "teammate"; login: string; name: string; initials: string; color: string }
+  | { kind: "unknown" }
   | { kind: "agent" }
 
 function initials(login: string): string {
@@ -13,6 +14,7 @@ function initials(login: string): string {
 
 export function messageAuthor(message: Message, me?: string | null): MessageAuthor {
   if (message.role !== "user") return { kind: "agent" }
-  if (!message.userLogin || message.userLogin === me) return { kind: "self" }
+  if (message.optimisticSelf || (message.userLogin && me && message.userLogin === me)) return { kind: "self" }
+  if (!message.userLogin) return { kind: "unknown" }
   return { login: message.userLogin, name: message.userLogin, initials: initials(message.userLogin), color: personColor(message.userLogin), kind: "teammate" }
 }

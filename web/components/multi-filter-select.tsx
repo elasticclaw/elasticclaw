@@ -4,8 +4,18 @@ import { ChevronDown } from "lucide-react"
 import { Checkbox } from "@/components/ui/checkbox"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 
-function selectedFilterValues(value?: string) {
-  return value?.split(",").map((item) => item.trim()).filter(Boolean) ?? []
+export function selectedFilterValues(value?: string) {
+  return value?.split(",").map((item) => {
+    try {
+      return decodeURIComponent(item)
+    } catch {
+      return item.trim()
+    }
+  }).filter(Boolean) ?? []
+}
+
+export function serializeFilterValues(values: string[]) {
+  return values.map((value) => encodeURIComponent(value)).join(",")
 }
 
 export function MultiFilterSelect({
@@ -27,7 +37,7 @@ export function MultiFilterSelect({
     const next = selectedSet.has(item)
       ? selected.filter((selectedItem) => selectedItem !== item)
       : [...selected, item]
-    onChange(next.length > 0 ? next.join(",") : undefined)
+    onChange(next.length > 0 ? serializeFilterValues(next) : undefined)
   }
 
   return (

@@ -736,6 +736,7 @@ export function useHub(selectedClawId: string | null): HubState {
       role: "user",
       content: content.trim(),
       timestamp: new Date(),
+      optimisticSelf: true,
     }
     setMessages((prev) => {
       const next = { ...prev, [clawId]: [...(prev[clawId] || []), optimistic] }

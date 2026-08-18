@@ -39,6 +39,7 @@ export interface Message {
   claw_id?: string
   tenant_id?: string
   userLogin?: string
+  optimisticSelf?: boolean
 }
 
 export interface ActivitySummary {

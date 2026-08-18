@@ -17,9 +17,12 @@ const between = (a?: number, b?: number) => a && b && b >= a ? b - a : undefined
 function Section({ title, stat, children }: { title: string; stat?: { left: string; right?: string; tone?: "error" }; children: React.ReactNode }) { return <section className="overflow-hidden rounded-lg border bg-card"><h3 className="border-b px-3 py-2 text-sm font-medium">{title}</h3><div className="space-y-2 p-3">{children}</div>{stat && <div className="flex items-center gap-3 border-t px-3 py-1 font-mono text-[10px] text-muted-foreground"><span>{stat.left}</span>{stat.right && <span className={`ml-auto ${stat.tone === "error" ? "text-destructive" : ""}`}>{stat.right}</span>}</div>}</section> }
 function Row({ label: name, value, tone, mono = true }: { label: string; value: React.ReactNode; tone?: "error" | "muted"; mono?: boolean }) { return <div className="flex gap-3 py-0.5 text-sm"><span className={`${caption} w-26 shrink-0`}>{name}</span><span className={`${mono ? "font-mono text-xs" : ""} min-w-0 break-all ${tone === "error" ? "text-destructive" : tone === "muted" ? "text-muted-foreground" : ""}`}>{value}</span></div> }
 
-export function RunDetailPanel({ run, details, loading, error, onClose }: { run: TaskRunSummary | null; details: DetailState | null; loading: boolean; error: string | null; onClose: () => void }) {
-  useEscapeToClose(onClose, Boolean(run))
-  if (!run) return null
+export function RunDetailPanel({ runId, run, details, loading, error, onClose }: { runId: string | null; run: TaskRunSummary | null; details: DetailState | null; loading: boolean; error: string | null; onClose: () => void }) {
+  useEscapeToClose(onClose, Boolean(runId))
+  if (!runId) return null
+  if (!run) {
+    return <><div className="fixed inset-0 z-[55] bg-black/50" onClick={onClose} aria-hidden="true" /><aside className="fixed inset-y-0 right-0 z-[60] flex w-full max-w-[66vw] flex-col border-l bg-background shadow-xl"><header className="flex items-center justify-between border-b bg-card p-4"><h2 className="font-mono text-sm font-semibold">Run details</h2><Button variant="ghost" size="icon" className="size-8" onClick={onClose} aria-label="Close run detail"><X className="size-4" /></Button></header><div className="flex-1 p-4">{error ? <p className="flex items-center gap-2 rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive"><AlertCircle className="size-4" />{error}</p> : loading ? <p className="text-sm text-muted-foreground">Loading run details…</p> : <p className="text-sm text-muted-foreground">Run details are unavailable.</p>}</div></aside></>
+  }
   const phases = [["Queued wait", between(run.queuedAt, run.agentStartedAt)], ["Implementation", between(run.agentStartedAt, run.prOpenedAt)], ["Ready to merge", run.mergedAt ? run.readyToMergeMs : undefined]].filter((phase): phase is [string, number] => phase[1] != null)
   const max = Math.max(...phases.map(([, ms]) => ms), 1)
   const prCount = details?.prs.length ?? 0

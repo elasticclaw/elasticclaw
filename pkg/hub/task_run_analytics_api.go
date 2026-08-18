@@ -1475,7 +1475,13 @@ func splitTaskRunAnalyticsValues(q url.Values, keys ...string) []string {
 	for _, key := range keys {
 		for _, raw := range q[key] {
 			for _, part := range strings.Split(raw, ",") {
-				part = strings.TrimSpace(part)
+				decoded, err := url.QueryUnescape(part)
+				if err == nil && decoded != part {
+					part = decoded
+				} else {
+					// Preserve legacy plain-comma URLs when a segment is not encoded.
+					part = strings.TrimSpace(part)
+				}
 				if part == "" || seen[part] {
 					continue
 				}
