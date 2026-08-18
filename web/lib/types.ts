@@ -280,6 +280,7 @@ export interface AnalyticsTicketRunSummary {
   runId: string
   status: string
   phase: string
+  model: string
   attemptCount: number
   cost: number
   totalTokens: number
@@ -313,6 +314,9 @@ export interface AnalyticsTicket {
   priority: string
   ask: string
   source: string
+  repo?: string
+  workflowName?: string
+  workspaceName?: string
   reportedAt: number
   runIds: string[]
   runs: AnalyticsTicketRunSummary[]

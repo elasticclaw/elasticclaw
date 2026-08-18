@@ -21,6 +21,7 @@ type taskRunAnalyticsTicketRunSummary struct {
 	RunID        string  `json:"runId"`
 	Status       string  `json:"status"`
 	Phase        string  `json:"phase"`
+	Model        string  `json:"model"`
 	AttemptCount int     `json:"attemptCount"`
 	Cost         float64 `json:"cost"`
 	TotalTokens  int64   `json:"totalTokens"`
@@ -55,6 +56,9 @@ type taskRunAnalyticsTicketView struct {
 	Priority       string                             `json:"priority"`
 	Ask            string                             `json:"ask"`
 	Source         string                             `json:"source"`
+	Repo           string                             `json:"repo,omitempty"`
+	WorkflowName   string                             `json:"workflowName,omitempty"`
+	WorkspaceName  string                             `json:"workspaceName,omitempty"`
 	ReportedAt     int64                              `json:"reportedAt"`
 	RunIDs         []string                           `json:"runIds"`
 	Runs           []taskRunAnalyticsTicketRunSummary `json:"runs"`
@@ -243,7 +247,7 @@ func (s *Server) readTaskRunAnalyticsTickets(filters taskRunAnalyticsFilters, gi
 
 func (s *Server) buildTaskRunAnalyticsTicket(tenantID, issueID string, runs []taskRunAnalyticsRunView) (taskRunAnalyticsTicketView, error) {
 	sort.Slice(runs, func(i, j int) bool { return runs[i].StartedAt < runs[j].StartedAt })
-	ticket := taskRunAnalyticsTicketView{IssueID: issueID, IssueTitle: runs[0].IssueTitle, Source: runs[0].Integration, RunIDs: []string{}, Runs: []taskRunAnalyticsTicketRunSummary{}, PRs: []taskRunAnalyticsTicketPRView{}, Story: []taskRunAnalyticsTicketStoryEntry{}}
+	ticket := taskRunAnalyticsTicketView{IssueID: issueID, IssueTitle: runs[0].IssueTitle, Source: runs[0].Integration, Repo: runs[0].Repo, WorkflowName: runs[0].WorkflowName, WorkspaceName: runs[0].WorkspaceName, RunIDs: []string{}, Runs: []taskRunAnalyticsTicketRunSummary{}, PRs: []taskRunAnalyticsTicketPRView{}, Story: []taskRunAnalyticsTicketStoryEntry{}}
 	events := []taskRunAnalyticsTicketStoryEntry{}
 	for _, run := range runs {
 		attempts, err := s.readTaskRunAnalyticsAttempts(tenantID, run.RunID)
@@ -260,7 +264,7 @@ func (s *Server) buildTaskRunAnalyticsTicket(tenantID, issueID string, runs []ta
 		}
 		ticket.RunIDs = append(ticket.RunIDs, run.RunID)
 		cost, tokens := taskRunTicketCostAndTokens(run)
-		ticket.Runs = append(ticket.Runs, taskRunAnalyticsTicketRunSummary{RunID: run.RunID, Status: run.Status, Phase: run.Phase, AttemptCount: len(attempts), Cost: cost, TotalTokens: tokens, HumanTouches: run.HumanInteractionCount, StartedAt: run.StartedAt, LastActivity: run.LastEventAt})
+		ticket.Runs = append(ticket.Runs, taskRunAnalyticsTicketRunSummary{RunID: run.RunID, Status: run.Status, Phase: run.Phase, Model: run.Model, AttemptCount: len(attempts), Cost: cost, TotalTokens: tokens, HumanTouches: run.HumanInteractionCount, StartedAt: run.StartedAt, LastActivity: run.LastEventAt})
 		ticket.AttemptCount += len(attempts)
 		ticket.Cost += cost
 		ticket.TotalTokens += tokens

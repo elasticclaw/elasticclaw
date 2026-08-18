@@ -54,7 +54,7 @@ export default function DesignSystemGalleryPage() {
       </section>
       <section className="mt-8">
         <h2 className="text-sm font-medium">Cards, tickets, and log chips</h2>
-        <GalleryItem label="ChartCard — header, body, stat line"><ChartCard className="w-80" title="Throughput" info="Completed tickets by day" stat="4 steps · ctx 64%"><div className="p-4 text-sm text-muted-foreground">Chart body</div></ChartCard></GalleryItem>
+        <GalleryItem label="ChartCard — header, body, stat line"><ChartCard className="w-80" title="Throughput" info="Completed tickets by day" stat="4 steps · ctx 64%"><div className="text-sm text-muted-foreground">Chart body</div></ChartCard></GalleryItem>
         {(['delivered', 'pr_open', 'in_progress', 'failed'] as const).map((status) => <GalleryItem key={status} label={`TicketStatusBadge — ${status}`}><TicketStatusBadge status={status} /></GalleryItem>)}
         {(['clean', 'human_in_the_loop', 'warning', 'failed', 'running', 'fallback'] as const).map((status) => <GalleryItem key={status} label={`RunStatusBadge — ${status}`}><RunStatusBadge status={status} /></GalleryItem>)}
         {(['TRACE', 'DEBUG', 'INFO', 'WARN', 'ERROR', 'FATAL'] as const).map((severity) => <GalleryItem key={severity} label={`SeverityChip — ${severity}`}><SeverityChip severity={severity} /><AttrChip k="duration_ms" v={240} /><AttrChip k="service.name" v="elasticclaw" /></GalleryItem>)}
