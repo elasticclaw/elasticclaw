@@ -164,6 +164,41 @@ func TestTaskRunAnalyticsAPISummaryRunsFiltersAndPagination(t *testing.T) {
 	}
 }
 
+func TestTaskRunAnalyticsAPIMultiValueDimensionFilters(t *testing.T) {
+	s, db := newTaskRunAnalyticsAPITestServer(t)
+	for _, fixture := range []apiRunFixture{
+		{RunID: "model-a", AttemptID: "attempt-model-a", ClawID: "claw-model-a", TenantID: "test-tenant-id", Status: taskRunStatusClean, Phase: taskRunPhaseTerminal, OwnerType: taskRunOwnerWorkflow, Workflow: "alpha", Model: "x", StartedAt: 4_000},
+		{RunID: "model-b", AttemptID: "attempt-model-b", ClawID: "claw-model-b", TenantID: "test-tenant-id", Status: taskRunStatusClean, Phase: taskRunPhaseTerminal, OwnerType: taskRunOwnerWorkflow, Workflow: "beta", Model: "y", StartedAt: 3_000},
+		{RunID: "workflow-and-model", AttemptID: "attempt-workflow-and-model", ClawID: "claw-workflow-and-model", TenantID: "test-tenant-id", Status: taskRunStatusClean, Phase: taskRunPhaseTerminal, OwnerType: taskRunOwnerWorkflow, Workflow: "beta", Model: "x", StartedAt: 2_000},
+		{RunID: "other", AttemptID: "attempt-other", ClawID: "claw-other", TenantID: "test-tenant-id", Status: taskRunStatusClean, Phase: taskRunPhaseTerminal, OwnerType: taskRunOwnerWorkflow, Workflow: "gamma", Model: "z", StartedAt: 1_000},
+	} {
+		insertTaskRunAnalyticsAPIRun(t, db, fixture)
+	}
+
+	tests := []struct {
+		name  string
+		query string
+		want  int
+	}{
+		{name: "one dimension returns the union", query: "model=x,y", want: 3},
+		{name: "dimensions combine with and semantics", query: "workflow=alpha,beta&model=x", want: 2},
+		{name: "single value remains supported", query: "model=x", want: 2},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			rr := requestTaskRunAnalyticsAPI(t, s, http.MethodGet, "/api/analytics/summary?"+test.query, "test-token")
+			if rr.Code != http.StatusOK {
+				t.Fatalf("summary status = %d, body = %s", rr.Code, rr.Body.String())
+			}
+			var response taskRunAnalyticsSummaryResponse
+			decodeTaskRunAnalyticsAPI(t, rr, &response)
+			if response.TotalRuns != test.want {
+				t.Fatalf("total runs = %d, want %d for %s", response.TotalRuns, test.want, test.query)
+			}
+		})
+	}
+}
+
 func TestTaskRunAnalyticsEffectivenessCountsClosedUnmergedAsSuccessNotMerge(t *testing.T) {
 	s, db := newTaskRunAnalyticsAPITestServer(t)
 	insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{RunID: "closed", AttemptID: "a", ClawID: "c", TenantID: "test-tenant-id", Status: taskRunStatusWarning, Phase: taskRunPhaseTerminal, OwnerType: taskRunOwnerFactory, Factory: "f", StartedAt: 1760000000000, FinishedAt: 1760000001000, PRCount: 1, ClosedPRCount: 1, WarningTypes: []string{taskRunWarningPRClosedUnmerged}})

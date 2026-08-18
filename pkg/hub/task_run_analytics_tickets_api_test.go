@@ -144,3 +144,35 @@ func TestTaskRunAnalyticsTicketsHandlerAggregatesAndPaginates(t *testing.T) {
 		t.Fatalf("ticket timing mismatch: %#v", ticket)
 	}
 }
+
+func TestTaskRunAnalyticsTicketsHandlerHonorsMultiValueDimensionFilters(t *testing.T) {
+	s, db := newTaskRunAnalyticsAPITestServer(t)
+	for _, fixture := range []apiRunFixture{
+		{RunID: "ticket-model-a", AttemptID: "attempt-ticket-model-a", ClawID: "claw-ticket-model-a", TenantID: "test-tenant-id", Status: taskRunStatusClean, Phase: taskRunPhaseTerminal, OwnerType: taskRunOwnerWorkflow, Workflow: "alpha", Model: "x", StartedAt: 3_000, IssueTitle: "A"},
+		{RunID: "ticket-model-b", AttemptID: "attempt-ticket-model-b", ClawID: "claw-ticket-model-b", TenantID: "test-tenant-id", Status: taskRunStatusClean, Phase: taskRunPhaseTerminal, OwnerType: taskRunOwnerWorkflow, Workflow: "beta", Model: "y", StartedAt: 2_000, IssueTitle: "B"},
+		{RunID: "ticket-other", AttemptID: "attempt-ticket-other", ClawID: "claw-ticket-other", TenantID: "test-tenant-id", Status: taskRunStatusClean, Phase: taskRunPhaseTerminal, OwnerType: taskRunOwnerWorkflow, Workflow: "gamma", Model: "z", StartedAt: 1_000, IssueTitle: "Other"},
+	} {
+		insertTaskRunAnalyticsAPIRun(t, db, fixture)
+	}
+
+	for _, test := range []struct {
+		name  string
+		query string
+		want  int
+	}{
+		{name: "one dimension returns matching ticket union", query: "model=x,y", want: 2},
+		{name: "dimensions combine with and semantics", query: "workflow=alpha,beta&model=x", want: 1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			rr := requestTaskRunAnalyticsAPI(t, s, http.MethodGet, "/api/analytics/tickets?"+test.query, "test-token")
+			if rr.Code != http.StatusOK {
+				t.Fatalf("tickets status = %d, body = %s", rr.Code, rr.Body.String())
+			}
+			var response taskRunAnalyticsTicketsResponse
+			decodeTaskRunAnalyticsAPI(t, rr, &response)
+			if response.Total != test.want || len(response.Tickets) != test.want {
+				t.Fatalf("tickets = %#v, want %d", response, test.want)
+			}
+		})
+	}
+}

@@ -43,7 +43,7 @@ import type {
   TaskRunFilterOptions,
   TaskRunSummary,
 } from "@/lib/types"
-import { FilterSelect } from "@/components/filter-select"
+import { MultiFilterSelect } from "@/components/multi-filter-select"
 import { type DetailState, urlFilterKeys } from "@/lib/task-run-filters"
 import { RunDetailPanel } from "@/components/run-detail-panel"
 import { TicketDetailPanel } from "@/components/ticket-detail-panel"
@@ -616,7 +616,7 @@ function WorkspaceSelect({
     >
       <SelectTrigger size="sm" className="w-full bg-background font-medium">
         <span className="truncate">
-          <span className="text-muted-foreground font-normal">Workspace:</span> {value ?? "All workspaces"}
+          <span className="text-muted-foreground font-normal">Workspace:</span> {value ?? "All"}
         </span>
       </SelectTrigger>
       <SelectContent>
@@ -647,7 +647,18 @@ function FilterBar({
     ["Model", "model", options?.models],
   ] as const
 
-  const activeFilters = [...(filters.workspace ? [{ key: "workspace", label: `Workspace: ${filters.workspace}` }] : []), ...selectFilters.flatMap(([label, key]) => filters[key] ? [{ key, label: `${label}: ${filters[key]}` }] : [])]
+  const activeFilters: Array<{ key: "workspace" | (typeof selectFilters)[number][1]; label: string; value: string }> = [
+    ...(filters.workspace ? [{ key: "workspace" as const, label: `Workspace: ${filters.workspace}`, value: filters.workspace }] : []),
+    ...selectFilters.flatMap(([label, key]) => (filters[key]?.split(",").map((value) => value.trim()).filter(Boolean) ?? []).map((value) => ({ key, label: `${label}: ${value}`, value }))),
+  ]
+  const removeFilterValue = (filter: { key: "workspace" | (typeof selectFilters)[number][1]; label: string; value: string }) => {
+    if (filter.key === "workspace") {
+      onChange({ workspace: undefined })
+      return
+    }
+    const remaining = (filters[filter.key] ?? "").split(",").map((value) => value.trim()).filter((value) => value && value !== filter.value)
+    onChange({ [filter.key]: remaining.length > 0 ? remaining.join(",") : undefined })
+  }
   // No from/to in the URL means the default period — show it as such so the
   // trigger reads "Last 30 days" instead of "Select date range".
   const dateRange: DateRange = filters.from || filters.to ? { from: filters.from ? new Date(filters.from) : undefined, to: filters.to ? new Date(filters.to) : undefined } : defaultPeriod()
@@ -663,11 +674,11 @@ function FilterBar({
           onChange={(value) => onChange({ workspace: value })}
         />
         </div>
-        <span className="hidden self-stretch border-l sm:block" aria-hidden="true" />
+        <span className="self-stretch border-l" aria-hidden="true" />
         <div className="flex flex-1 flex-wrap gap-2">
       {selectFilters.map(([label, key, values]) => (
         <div key={key} className="w-[158px]">
-          <FilterSelect
+          <MultiFilterSelect
             label={label}
             value={filters[key]}
             values={values}
@@ -676,9 +687,10 @@ function FilterBar({
         </div>
       ))}
         </div>
+        {activeFilters.length > 0 && <button type="button" className="ml-auto text-xs text-muted-foreground hover:text-foreground" onClick={() => onChange({ workspace: undefined, factory: undefined, workflow: undefined, repo: undefined, model: undefined })}>Clear all</button>}
       </div>
       </div>
-      {activeFilters.length > 0 && <div className="mt-2 flex flex-wrap items-center gap-2 border-t pt-2"><span className="text-[10px] font-medium uppercase tracking-[0.08em] text-muted-foreground">Filtering by</span>{activeFilters.map((filter) => <button key={filter.key} type="button" onClick={() => onChange({ [filter.key]: undefined })} className="rounded-full border bg-muted px-2 py-0.5 text-xs text-muted-foreground hover:bg-accent">{filter.label} ×</button>)}<Button variant="ghost" size="sm" className="ml-auto" onClick={() => onChange(Object.fromEntries(activeFilters.map((filter) => [filter.key, undefined])))}>Clear all</Button></div>}
+      {activeFilters.length > 0 && <div className="mt-2 flex flex-wrap items-center gap-2 border-t pt-2"><span className="text-[10px] font-medium uppercase tracking-[0.08em] text-muted-foreground">Filtering by</span>{activeFilters.map((filter) => <button key={`${filter.key}-${filter.value}`} type="button" onClick={() => removeFilterValue(filter)} className="flex items-center gap-1 rounded-md border bg-muted px-2 py-0.5 text-xs text-muted-foreground hover:bg-accent"><span>{filter.label}</span><span className="border-l pl-1" aria-hidden="true">×</span></button>)}</div>}
     </div>
   )
 }
