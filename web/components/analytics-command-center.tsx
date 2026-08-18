@@ -2,7 +2,7 @@
 
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react"
 import { usePathname, useSearchParams } from "next/navigation"
-import { ChevronDown, ChevronRight, Info } from "lucide-react"
+import { ChevronDown, ChevronRight, Info, X } from "lucide-react"
 import type { DateRange } from "react-day-picker"
 import {
   Bar,
@@ -614,9 +614,9 @@ function WorkspaceSelect({
       value={value ?? allWorkspacesValue}
       onValueChange={(next) => onChange(next === allWorkspacesValue ? undefined : next)}
     >
-      <SelectTrigger size="sm" className="w-full bg-background font-medium">
+      <SelectTrigger size="sm" className="w-full bg-input/30 text-xs hover:bg-input/50">
         <span className="truncate">
-          <span className="text-muted-foreground font-normal">Workspace:</span> {value ?? "All"}
+          <span className="text-muted-foreground">Workspace:</span> <span className={value ? "text-foreground" : "text-muted-foreground"}>{value ?? "All"}</span>
         </span>
       </SelectTrigger>
       <SelectContent>
@@ -664,33 +664,32 @@ function FilterBar({
   const dateRange: DateRange = filters.from || filters.to ? { from: filters.from ? new Date(filters.from) : undefined, to: filters.to ? new Date(filters.to) : undefined } : defaultPeriod()
   return (
     <div className="rounded-lg border bg-card p-2">
+      {/* One flat flex row, like the kit: scope controls, rule, dimensions,
+          Clear all — items wrap naturally instead of the dimensions forming
+          their own block. */}
       <div className="flex flex-wrap items-center gap-2">
-        <div className="flex flex-wrap items-center gap-2">
-          <DatePickerRange value={dateRange} onChange={(range) => onChange({ from: range?.from?.toISOString(), to: range?.to ? isoDayRange(isoDate(range.to)).to : undefined })} />
-      <div className="w-[204px]">
-        <WorkspaceSelect
-          value={filters.workspace}
-          workspaces={workspaces}
-          onChange={(value) => onChange({ workspace: value })}
-        />
-        </div>
-        <span className="self-stretch border-l" aria-hidden="true" />
-        <div className="flex flex-1 flex-wrap gap-2">
-      {selectFilters.map(([label, key, values]) => (
-        <div key={key} className="w-[200px]">
-          <MultiFilterSelect
-            label={label}
-            value={filters[key]}
-            values={values}
-            onChange={(value) => onChange({ [key]: value })}
+        <DatePickerRange value={dateRange} onChange={(range) => onChange({ from: range?.from?.toISOString(), to: range?.to ? isoDayRange(isoDate(range.to)).to : undefined })} />
+        <div className="w-[204px]">
+          <WorkspaceSelect
+            value={filters.workspace}
+            workspaces={workspaces}
+            onChange={(value) => onChange({ workspace: value })}
           />
         </div>
-      ))}
-        </div>
+        <span className="mx-0.5 w-px self-stretch bg-border" aria-hidden="true" />
+        {selectFilters.map(([label, key, values]) => (
+          <div key={key} className="w-[158px]">
+            <MultiFilterSelect
+              label={label}
+              value={filters[key]}
+              values={values}
+              onChange={(value) => onChange({ [key]: value })}
+            />
+          </div>
+        ))}
         {activeFilters.length > 0 && <button type="button" className="ml-auto text-xs text-muted-foreground hover:text-foreground" onClick={() => onChange({ workspace: undefined, factory: undefined, workflow: undefined, repo: undefined, model: undefined })}>Clear all</button>}
       </div>
-      </div>
-      {activeFilters.length > 0 && <div className="mt-2 flex flex-wrap items-center gap-2 border-t pt-2"><span className="text-[10px] font-medium uppercase tracking-[0.08em] text-muted-foreground">Filtering by</span>{activeFilters.map((filter) => <button key={`${filter.key}-${filter.value}`} type="button" onClick={() => removeFilterValue(filter)} className="flex items-center gap-1 rounded-md border bg-muted px-2 py-0.5 text-xs text-muted-foreground hover:bg-accent"><span>{filter.label}</span><span className="border-l pl-1" aria-hidden="true">×</span></button>)}</div>}
+      {activeFilters.length > 0 && <div className="mt-2 flex flex-wrap items-center gap-1.5 border-t pt-2"><span className="text-[10px] font-medium uppercase tracking-[0.08em] text-muted-foreground">Filtering by</span>{activeFilters.map((filter) => <span key={`${filter.key}-${filter.value}`} title={filter.label} className="group inline-flex max-w-[220px] items-center gap-0.5 rounded-sm bg-secondary px-2 py-1 text-xs font-medium text-foreground"><span className="truncate">{filter.label}</span><button type="button" aria-label={`Remove ${filter.label}`} onClick={() => removeFilterValue(filter)} className="ml-0.5 flex cursor-pointer opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100"><X className="size-3" /></button></span>)}</div>}
     </div>
   )
 }

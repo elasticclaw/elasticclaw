@@ -33,12 +33,12 @@ export function MultiFilterSelect({
   return (
     <Popover>
       <PopoverTrigger asChild>
-        <button type="button" className="flex h-8 w-[200px] items-center justify-between gap-2 rounded-md border border-input bg-background px-3 text-sm font-medium shadow-xs outline-none transition-[color,box-shadow] hover:bg-accent focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50">
-          <span className="truncate"><span className="text-muted-foreground font-normal">{label}:</span> {summary}</span>
-          <ChevronDown className="size-4 shrink-0 text-muted-foreground opacity-50" />
+        <button type="button" className="flex h-8 w-full items-center justify-between gap-1 rounded-md border border-input bg-input/30 px-2.5 text-xs shadow-xs outline-none transition-[color,box-shadow] hover:bg-input/50 focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50">
+          <span className="truncate"><span className="text-muted-foreground">{label}:</span> <span className={selected.length === 0 ? "text-muted-foreground" : "text-foreground"}>{summary}</span></span>
+          <ChevronDown className="size-3 shrink-0 text-muted-foreground" />
         </button>
       </PopoverTrigger>
-      <PopoverContent align="start" className="w-[200px] p-1">
+      <PopoverContent align="start" className="w-[var(--radix-popover-trigger-width)] min-w-[158px] p-1">
         <div className="max-h-56 overflow-y-auto">
           {values.length === 0 ? (
             <p className="px-2 py-1.5 text-sm text-muted-foreground">No options</p>
