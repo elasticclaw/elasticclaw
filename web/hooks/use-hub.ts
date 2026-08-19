@@ -759,7 +759,7 @@ export function useHub(selectedClawId: string | null): HubState {
       const sent = await apiSendMessage(clawId, content.trim())
       // Replace the optimistic message with the real one from the DB
       // so it survives cache persistence (opt- IDs are filtered out)
-      const realMsg = mapApiMessage(sent)
+      const realMsg = { ...mapApiMessage(sent), optimisticSelf: true }
       setMessages((prev) => {
         const msgs = prev[clawId] || []
         const replaced = msgs.map((m) => m.id === optimistic.id ? realMsg : m)

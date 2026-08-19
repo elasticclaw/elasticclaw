@@ -264,10 +264,10 @@ export const Sidebar = memo(function Sidebar({
         .filter((candidate) => agentSections.get(candidate.id) === key)
         .sort((a, b) => Number(b.pinned) - Number(a.pinned)),
     }))
-    .filter((section) => section.items.length > 0)
     // ids computed here so SortableContext gets a stable array — a fresh one
     // per render re-renders every useSortable row through context.
     .map((section) => ({ ...section, ids: section.items.map((candidate) => candidate.id) })), [allClaws, agentSections])
+  const collapsedSections = useMemo(() => sections.filter((section) => section.items.length > 0), [sections])
 
   let sidebar: React.ReactElement
 
@@ -300,7 +300,7 @@ export const Sidebar = memo(function Sidebar({
               {loadingManualWorkflows ? <Loader2 className="size-4 animate-spin" /> : <Plus className="size-4" />}
             </Button>
           )}
-          {sections.map((section) => (
+          {collapsedSections.map((section) => (
             <div key={section.key} className="flex flex-col items-center gap-1">
               {/* Section marker: a short bar in the section color, standing in
                   for the expanded header. */}

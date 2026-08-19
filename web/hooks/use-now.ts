@@ -39,3 +39,16 @@ export function useNowTick(active: boolean): number {
   }, [active])
   return now
 }
+
+/** Returns a clock refreshed once per minute for age labels. */
+export function useNowMinuteTick(active: boolean): number {
+  const [now, setNow] = useState(Date.now)
+  useEffect(() => {
+    if (!active) return
+    const refresh = () => setNow(Date.now())
+    refresh()
+    const timer = window.setInterval(refresh, 60_000)
+    return () => window.clearInterval(timer)
+  }, [active])
+  return now
+}

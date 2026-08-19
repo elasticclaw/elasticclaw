@@ -6,7 +6,7 @@ import { COLOR_CLASSES } from "@/lib/mappers"
 import { Loader2, Pin, AlertCircle } from "lucide-react"
 import { BootstrapProgress } from "@/components/bootstrap-progress"
 import { ClawTitle } from "@/components/claw-title"
-import { useNowTick } from "@/hooks/use-now"
+import { useNowMinuteTick } from "@/hooks/use-now"
 import { memo } from "react"
 
 interface ClawCardProps {
@@ -77,15 +77,16 @@ function rowAge(claw: Claw, now: number) {
    detail + age) and up to three read-only tags. Renaming, tag editing and the
    color picker live in the board card's Agent details sheet. */
 export const ClawCard = memo(function ClawCard({ claw, isSelected, onClick, onTogglePin, showPinButton = true, activityLine, stateChip }: ClawCardProps) {
-  const now = useNowTick(Boolean(claw.last_seen))
+  const now = useNowMinuteTick(Boolean(claw.last_seen))
   const hasUnread = claw.unreadCount > 0
-  const railClass = claw.isStreaming
-    ? "border-l-green-500"
+  const railStyle = claw.isStreaming
+    ? { borderLeftColor: "var(--status-streaming)" }
     : claw.status === "provisioning"
-      ? "border-l-blue-400"
+      ? { borderLeftColor: "var(--status-provisioning)" }
       : claw.status === "error"
-        ? "border-l-red-500"
-        : COLOR_CLASSES[claw.color]?.border ?? "border-l-border"
+        ? { borderLeftColor: "var(--status-error)" }
+        : undefined
+  const railClass = railStyle ? "" : COLOR_CLASSES[claw.color]?.border ?? "border-l-border"
   const detail = activityLine || claw.template
   const age = rowAge(claw, now)
 
@@ -110,6 +111,7 @@ export const ClawCard = memo(function ClawCard({ claw, isSelected, onClick, onTo
         isSelected && "bg-accent",
         hasUnread && !isSelected && "bg-blue-950/30"
       )}
+      style={railStyle}
     >
       <div className="flex items-center gap-2">
         <StatusIndicator status={claw.status} isStreaming={claw.isStreaming} />

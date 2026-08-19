@@ -111,9 +111,10 @@ function formatDate(value: string) {
 
 function formatDuration(milliseconds?: number | null) {
   if (!milliseconds || milliseconds < 0) return "—"
-  return milliseconds < 3_600_000
-    ? `${Math.round(milliseconds / 60_000)}m`
-    : `${(milliseconds / 3_600_000).toFixed(1)}h`
+  const minutes = Math.round(milliseconds / 60_000)
+  if (minutes < 60) return `${minutes}m`
+  const hours = Math.floor(minutes / 60)
+  return hours < 24 ? `${hours}h ${String(minutes % 60).padStart(2, "0")}m` : `${Math.floor(hours / 24)}d ${hours % 24}h`
 }
 
 function formatPercent(value?: number) {
@@ -178,6 +179,9 @@ function AnalyticsCommandCenterInner() {
   const [options, setOptions] = useState<TaskRunFilterOptions>()
   const [nextTicketCursor, setNextTicketCursor] = useState<string>()
   const [ticketCursorStack, setTicketCursorStack] = useState<(string | undefined)[]>([undefined])
+  const ticketCursorStackRef = useRef(ticketCursorStack)
+  const [ticketsLoading, setTicketsLoading] = useState(false)
+  const ticketsLoadingRef = useRef(false)
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null)
   const [selectedTicketId, setSelectedTicketId] = useState<string | null>(null)
   const [details, setDetails] = useState<DetailState | null>(null)
@@ -187,6 +191,10 @@ function AnalyticsCommandCenterInner() {
   const loadAbortController = useRef<AbortController | null>(null)
   const loadRequestId = useRef(0)
   const optionsLoadedRef = useRef(false)
+
+  useEffect(() => {
+    ticketCursorStackRef.current = ticketCursorStack
+  }, [ticketCursorStack])
 
   // Cache the last-known run object per selectedRunId so a silent poll that
   // drops the selected run off the current page (e.g. a new run pushes it
@@ -281,7 +289,7 @@ function AnalyticsCommandCenterInner() {
         ] = await Promise.all([
           fetchTaskRunAnalyticsSummary(effectiveFilters, { signal: controller.signal }),
           fetchAnalyticsCosts(effectiveFilters, 30, "model", undefined, { signal: controller.signal }),
-          fetchAnalyticsCosts(
+          silent ? Promise.resolve(undefined) : fetchAnalyticsCosts(
             yearCostFilters,
             366,
             undefined,
@@ -299,7 +307,7 @@ function AnalyticsCommandCenterInner() {
 
         setSummary(summaryData)
         setCosts(costsData)
-        setYearCosts(yearCostsData)
+        if (yearCostsData) setYearCosts(yearCostsData)
         setEffect(effectData)
         setStats(statsData)
         setDrivers(driversData)
@@ -331,6 +339,9 @@ function AnalyticsCommandCenterInner() {
   )
 
   const loadTickets = useCallback(async (ticketCursor?: string) => {
+    if (ticketsLoadingRef.current) return
+    ticketsLoadingRef.current = true
+    setTicketsLoading(true)
     const requestId = ++loadRequestId.current
     try {
       const effectiveFilters = { ...filters }
@@ -349,6 +360,9 @@ function AnalyticsCommandCenterInner() {
     } catch (loadError) {
       if (requestId !== loadRequestId.current) return
       setError(loadError instanceof Error ? loadError.message : "Unable to load tickets")
+    } finally {
+      ticketsLoadingRef.current = false
+      setTicketsLoading(false)
     }
   }, [filters])
 
@@ -363,8 +377,9 @@ function AnalyticsCommandCenterInner() {
   }, [load])
 
   const silentRefresh = useCallback(() => {
-    void load(undefined, { append: false, silent: true, ticketCursor: ticketCursorStack[ticketCursorStack.length - 1] })
-  }, [load, ticketCursorStack])
+    const cursorStack = ticketCursorStackRef.current
+    void load(undefined, { append: false, silent: true, ticketCursor: cursorStack[cursorStack.length - 1] })
+  }, [load])
 
   useEffect(() => {
     const tick = () => {
@@ -389,13 +404,13 @@ function AnalyticsCommandCenterInner() {
   }, [silentRefresh])
 
   const handleNextTicketPage = useCallback(() => {
-    if (!nextTicketCursor) return
+    if (!nextTicketCursor || ticketsLoadingRef.current) return
     setTicketCursorStack((currentStack) => [...currentStack, nextTicketCursor])
     void loadTickets(nextTicketCursor)
   }, [loadTickets, nextTicketCursor])
 
   const handlePreviousTicketPage = useCallback(() => {
-    if (ticketCursorStack.length <= 1) return
+    if (ticketCursorStack.length <= 1 || ticketsLoadingRef.current) return
     const nextStack = ticketCursorStack.slice(0, -1)
     setTicketCursorStack(nextStack)
     void loadTickets(nextStack[nextStack.length - 1])
@@ -452,7 +467,9 @@ function AnalyticsCommandCenterInner() {
   // Stable handlers so the memoized Heatmap (and its 364 memoized cells) only
   // re-render when the selection actually changes.
   const selectedDayRef = useRef<string | false | undefined>(undefined)
-  selectedDayRef.current = selectedDay
+  useEffect(() => {
+    selectedDayRef.current = selectedDay
+  }, [selectedDay])
   const selectDay = useCallback((day: string) => {
     setFilters(day === selectedDayRef.current ? { from: undefined, to: undefined } : isoDayRange(day))
   }, [setFilters])
@@ -535,19 +552,19 @@ function AnalyticsCommandCenterInner() {
         </KpiStrip>
 
         <div className="grid gap-5 lg:grid-cols-2">
-          <ChartCard title="Run outcomes over time" stat={outcomesStat(effect)} info="Each bar is a day. Clean = delivered with no human help; Human on the loop = a human helped via the pull request; Warning = a human had to step in from the dashboard; Failed = nothing was delivered.">
+          <ChartCard title="Run outcomes over time" stat={{ left: `${effect?.outcomesByDay.length ?? 0} days`, right: outcomesStat(effect) }} info="Each bar is a day. Clean = delivered with no human help; Human on the loop = a human helped via the pull request; Warning = a human had to step in from the dashboard; Failed = nothing was delivered.">
             <OutcomesChart effect={effect} />
           </ChartCard>
-          <ChartCard title="Delivery funnel" stat={`${effect?.funnel.agentStarted ?? 0} started · ${formatPercent(effect?.funnel.agentStarted ? (effect.funnel.prFinished / effect.funnel.agentStarted) : undefined)} end to end`} info="How many runs made it from the agent starting, to opening a pull request, to that pull request being finished (merged or closed). Percentages show the conversion from the previous stage.">
+          <ChartCard title="Delivery funnel" stat={{ left: `${effect?.funnel.agentStarted ?? 0} started`, right: `${formatPercent(effect?.funnel.agentStarted ? (effect.funnel.prFinished / effect.funnel.agentStarted) : undefined)} end to end` }} info="How many runs made it from the agent starting, to opening a pull request, to that pull request being finished (merged or closed). Percentages show the conversion from the previous stage.">
             <DeliveryFunnel effect={effect} />
           </ChartCard>
         </div>
 
         <div className="grid gap-5 lg:grid-cols-2">
-          <ChartCard title="Ticket throughput" stat={ticketThroughputStat(effect)} info="Each bar is a day: how many distinct tickets had their first run that day, by how the ticket ended up. Delivered = at least one run delivered the work.">
+          <ChartCard title="Ticket throughput" stat={{ left: `${effect?.ticketsByDay.length ?? 0} days`, right: ticketThroughputStat(effect) }} info="Each bar is a day: how many distinct tickets had their first run that day, by how the ticket ended up. Delivered = at least one run delivered the work.">
             <TicketThroughputChart effect={effect} />
           </ChartCard>
-          <ChartCard title="Runs per ticket" stat={`${effect?.runsPerTicket.reduce((sum, bucket) => sum + bucket.tickets, 0) ?? 0} tickets · ${effect?.runsPerTicket.reduce((sum, bucket) => sum + (bucket.bucket === "3" || bucket.bucket === "4+" ? bucket.tickets : 0), 0) ?? 0} needed 3+`} info="How many runs each ticket needed. A long tail of 3+ means lots of retries on the same tickets.">
+          <ChartCard title="Runs per ticket" stat={{ left: `${effect?.runsPerTicket.reduce((sum, bucket) => sum + bucket.tickets, 0) ?? 0} tickets`, right: `${effect?.runsPerTicket.reduce((sum, bucket) => sum + (bucket.bucket === "3" || bucket.bucket === "4+" ? bucket.tickets : 0), 0) ?? 0} needed 3+` }} info="How many runs each ticket needed. A long tail of 3+ means lots of retries on the same tickets.">
             <RunsPerTicketChart effect={effect} />
           </ChartCard>
         </div>
@@ -557,14 +574,14 @@ function AnalyticsCommandCenterInner() {
           total={ticketTotal}
           page={ticketCursorStack.length}
           canGoPrevious={ticketCursorStack.length > 1}
-          canGoNext={Boolean(nextTicketCursor)}
+          canGoNext={Boolean(nextTicketCursor)} loading={ticketsLoading}
           onSelect={setSelectedRunId}
           onSelectTicket={setSelectedTicketId}
           onPrevious={handlePreviousTicketPage}
           onNext={handleNextTicketPage}
         />
 
-        <ChartCard title="Cost by day" stat={`${heatmap.days.length} days · ${usdWhole.format(yearCosts?.dailySeries.reduce((sum, point) => sum + point.costUsd, 0) ?? 0)} total`} info="Each square is a day; darker means more spend. Click a day to focus the whole page on it.">
+        <ChartCard title="Cost by day" stat={{ left: `${heatmap.days.length} days`, right: `${usdWhole.format(yearCosts?.dailySeries.reduce((sum, point) => sum + point.costUsd, 0) ?? 0)} total` }} info="Each square is a day; brighter means more spend. Click a day to focus the whole page on it.">
         <Heatmap
           heatmap={heatmap}
           maxCost={maxHeatCost}
@@ -575,19 +592,19 @@ function AnalyticsCommandCenterInner() {
         </ChartCard>
 
         <div className="grid gap-5 lg:grid-cols-2">
-          <ChartCard title="Daily cost by model" stat={`${costs?.dailySeries.length ?? 0} days · ${usdWhole.format(totalCost)} total`} info="How much was spent per day, split by AI model.">
+          <ChartCard title="Daily cost by model" stat={{ left: `${costs?.dailySeries.length ?? 0} days`, right: `${usdWhole.format(totalCost)} total` }} info="How much was spent per day, split by AI model.">
             <DailyCostChart costs={costs} modelData={modelData} />
           </ChartCard>
-          <ChartCard title="Cost per merged PR" stat={`${effect?.costPerMergedPr.weekly.length ?? 0} weeks · avg ${usd.format(effect?.costPerMergedPr.average ?? 0)}`} info="Weekly average of what one merged pull request cost. The reference line is the period average.">
+          <ChartCard title="Cost per merged PR" stat={{ left: `${effect?.costPerMergedPr.weekly.length ?? 0} weeks`, right: `avg ${usd.format(effect?.costPerMergedPr.average ?? 0)}` }} info="Weekly average of what one merged pull request cost. The reference line is the period average.">
             <CostPerMergedPrChart effect={effect} />
           </ChartCard>
         </div>
 
         <div className="grid gap-5 lg:grid-cols-2">
-          <ChartCard title="Workflow cost comparison" stat={`${drivers.length} workflows · ${usdWhole.format(drivers.reduce((sum, driver) => sum + driver.costUsd, 0))} total`} info="Daily spend of the most expensive workflows in the selected period, compared side by side.">
+          <ChartCard title="Workflow cost comparison" stat={{ left: `${drivers.length} workflows`, right: `${usdWhole.format(drivers.reduce((sum, driver) => sum + driver.costUsd, 0))} total` }} info="Daily spend of the most expensive workflows in the selected period, compared side by side.">
             <WorkflowCostComparisonChart drivers={drivers} />
           </ChartCard>
-          <ChartCard title="Most expensive tickets" stat={`${effect?.topTicketsByCost.length ?? 0} tickets · ${usdWhole.format(effect?.topTicketsByCost.reduce((sum, ticket) => sum + ticket.costUsd, 0) ?? 0)} combined`} info="Where the money concentrates: the costliest tickets in the selected period (cost counts only this period's runs).">
+          <ChartCard title="Most expensive tickets" stat={{ left: `${effect?.topTicketsByCost.length ?? 0} tickets`, right: `${usdWhole.format(effect?.topTicketsByCost.reduce((sum, ticket) => sum + ticket.costUsd, 0) ?? 0)} combined` }} info="Where the money concentrates: the costliest tickets in the selected period (cost counts only this period's runs).">
             <TopTicketsByCostChart effect={effect} />
           </ChartCard>
         </div>
@@ -778,7 +795,7 @@ function CostPerMergedPrChart({ effect }: { effect?: AnalyticsEffectiveness }) {
 function CostDrivers({ drivers }: { drivers: AnalyticsCostDriver[] }) {
   return <ChartCard title="Top cost drivers" info="Where the money goes: total spend and efficiency per workflow in the selected period." stat={`${drivers.length} workflows · ${usdWhole.format(drivers.reduce((sum, driver) => sum + driver.costUsd, 0))} total`}><Table className="[&_th]:h-auto [&_th]:px-2 [&_th]:pt-0 [&_th]:pb-2 [&_th]:text-xs [&_td]:px-2 [&_td]:py-[9px]"><TableHeader><TableRow><TableHead className="min-w-[35ch]">Workflow</TableHead><TableHead className="text-right">Runs</TableHead><TableHead className="text-right">Success</TableHead><TableHead className="text-right">Cost</TableHead><TableHead className="text-right">Cost / merged PR</TableHead></TableRow></TableHeader><TableBody>{drivers.slice(0, 10).map((driver) => <TableRow key={driver.name}><TableCell className="font-medium min-w-[35ch]"><WorkflowName name={driver.name} /></TableCell><TableCell className="text-right tabular-nums">{driver.runs}</TableCell><TableCell className="text-right tabular-nums">{formatPercent(driver.successRate)}</TableCell><TableCell className="text-right tabular-nums">{usd.format(driver.costUsd)}</TableCell><TableCell className="text-right tabular-nums">{usd.format(driver.costPerMergedPr)}</TableCell></TableRow>)}</TableBody></Table></ChartCard>
 }
-function TicketsTable({ tickets, total, page, canGoPrevious, canGoNext, onSelect, onSelectTicket, onPrevious, onNext }: { tickets: AnalyticsTicket[]; total: number; page: number; canGoPrevious: boolean; canGoNext: boolean; onSelect: (runId: string) => void; onSelectTicket: (ticketId: string) => void; onPrevious: () => void; onNext: () => void }) { const [expanded, setExpanded] = useState<Set<string>>(() => new Set()); const toggleExpanded = (issueId: string) => setExpanded((previous) => { const next = new Set(previous); if (next.has(issueId)) next.delete(issueId); else next.add(issueId); return next }); const delivered = tickets.filter((ticket) => ticket.status === "delivered").length; const awaitingReview = tickets.filter((ticket) => ticket.status === "pr_open").length; return <ChartCard title="Unique tickets" info="One row per ticket. Expand to see every run that served it; open a row for the business view, a run for the technical view." stat={<><span>{tickets.length} of {total} tickets</span><span className="ml-auto">{delivered} delivered · {awaitingReview} awaiting review</span></>}><Table className="[&_th]:h-auto [&_th]:px-2 [&_th]:pt-0 [&_th]:pb-2 [&_th]:text-xs [&_td]:px-2 [&_td]:py-[9px]"><TableHeader><TableRow>{["", "Status", "Ticket", "Requester", "Runs", "Cost", "Lead time", "Last activity"].map((label) => <TableHead key={label} className={label === "" ? "w-8" : ["Runs", "Cost", "Lead time", "Last activity"].includes(label) ? "text-right" : undefined}>{label}</TableHead>)}</TableRow></TableHeader><TableBody>{tickets.map((ticket) => <Fragment key={ticket.issueId}><TableRow className="cursor-pointer" onClick={() => onSelectTicket(ticket.issueId)}><TableCell><button type="button" aria-label={`Toggle ${ticket.issueId} runs`} aria-expanded={expanded.has(ticket.issueId)} onClick={(event) => { event.stopPropagation(); toggleExpanded(ticket.issueId) }}>{expanded.has(ticket.issueId) ? <ChevronDown className="size-4" /> : <ChevronRight className="size-4" />}</button></TableCell><TableCell><TicketStatusBadge status={ticket.status} /></TableCell><TableCell><div className="font-medium">{ticket.issueTitle || ticket.issueId}</div><div className="font-mono text-xs text-muted-foreground">{ticket.issueId} · {ticket.workflowName || ticket.source || "—"}</div></TableCell><TableCell>{ticket.requester || "—"}</TableCell><TableCell className="text-right tabular-nums">{ticket.runCount}</TableCell><TableCell className="text-right tabular-nums">{usd.format(ticket.cost)}</TableCell><TableCell className="text-right tabular-nums">{formatDuration(ticket.leadTime)}</TableCell><TableCell className="text-right tabular-nums">{ticket.lastActivity ? new Date(ticket.lastActivity).toLocaleDateString() : "—"}</TableCell></TableRow>{expanded.has(ticket.issueId) && ticket.runs.map((run, index) => { const prs = ticket.prs.filter((pr) => pr.runId === run.runId); return <TableRow key={run.runId} className="cursor-pointer bg-muted/30" onClick={() => onSelect(run.runId)}><TableCell /><TableCell><RunStatusBadge status={run.status} /></TableCell><TableCell><div>Try {index + 1}</div><div className="font-mono text-xs text-muted-foreground">{run.runId} · {run.model || "—"}</div></TableCell><TableCell>{prs.length ? prs.map((pr) => `#${pr.prNumber} ${pr.merged ? "merged" : pr.state}`).join(", ") : run.status === "failed" ? "Failed" : "—"}</TableCell><TableCell className="text-right tabular-nums">{run.attemptCount}</TableCell><TableCell className="text-right tabular-nums">{usd.format(run.cost)}</TableCell><TableCell className="text-right tabular-nums">{formatDuration(run.lastActivity - run.startedAt)}</TableCell><TableCell className="text-right tabular-nums">{new Date(run.startedAt).toLocaleDateString()}</TableCell></TableRow>})}</Fragment>)}</TableBody></Table><div className="mt-3 flex justify-center gap-3"><Button variant="outline" size="sm" disabled={!canGoPrevious} onClick={onPrevious}>Previous</Button><span className="text-sm text-muted-foreground">Page {page}</span><Button variant="outline" size="sm" disabled={!canGoNext} onClick={onNext}>Next</Button></div></ChartCard> }
+function TicketsTable({ tickets, total, page, canGoPrevious, canGoNext, onSelect, onSelectTicket, onPrevious, onNext, loading }: { tickets: AnalyticsTicket[]; total: number; page: number; canGoPrevious: boolean; canGoNext: boolean; onSelect: (runId: string) => void; onSelectTicket: (ticketId: string) => void; onPrevious: () => void; onNext: () => void; loading: boolean }) { const [expanded, setExpanded] = useState<Set<string>>(() => new Set()); const toggleExpanded = (issueId: string) => setExpanded((previous) => { const next = new Set(previous); if (next.has(issueId)) next.delete(issueId); else next.add(issueId); return next }); const delivered = tickets.filter((ticket) => ticket.status === "delivered").length; const awaitingReview = tickets.filter((ticket) => ticket.status === "pr_open").length; return <ChartCard title="Unique tickets" info="One row per ticket. Expand to see every run that served it; open a row for the business view, a run for the technical view." stat={<><span>{tickets.length} of {total} tickets</span><span className="ml-auto">{delivered} delivered · {awaitingReview} awaiting review</span></>}><Table className="[&_th]:h-auto [&_th]:px-2 [&_th]:pt-0 [&_th]:pb-2 [&_th]:text-xs [&_td]:px-2 [&_td]:py-[9px]"><TableHeader><TableRow>{["", "Status", "Ticket", "Requester", "Runs", "Cost", "Lead time", "Last activity"].map((label) => <TableHead key={label} className={label === "" ? "w-8" : ["Runs", "Cost", "Lead time", "Last activity"].includes(label) ? "text-right" : undefined}>{label}</TableHead>)}</TableRow></TableHeader><TableBody>{tickets.map((ticket) => <Fragment key={ticket.issueId}><TableRow className="cursor-pointer" onClick={() => onSelectTicket(ticket.issueId)}><TableCell><button type="button" aria-label={`Toggle ${ticket.issueId} runs`} aria-expanded={expanded.has(ticket.issueId)} onClick={(event) => { event.stopPropagation(); toggleExpanded(ticket.issueId) }}>{expanded.has(ticket.issueId) ? <ChevronDown className="size-4" /> : <ChevronRight className="size-4" />}</button></TableCell><TableCell><TicketStatusBadge status={ticket.status} /></TableCell><TableCell><div className="font-medium">{ticket.issueTitle || ticket.issueId}</div><div className="font-mono text-xs text-muted-foreground">{ticket.issueId} · {ticket.workflowName || ticket.source || "—"}</div></TableCell><TableCell>{ticket.requester || "—"}</TableCell><TableCell className="text-right tabular-nums">{ticket.runCount}</TableCell><TableCell className="text-right tabular-nums">{usd.format(ticket.cost)}</TableCell><TableCell className="text-right tabular-nums">{formatDuration(ticket.leadTime)}</TableCell><TableCell className="text-right tabular-nums">{ticket.lastActivity ? new Date(ticket.lastActivity).toLocaleDateString() : "—"}</TableCell></TableRow>{expanded.has(ticket.issueId) && ticket.runs.map((run, index) => { const prs = ticket.prs.filter((pr) => pr.runId === run.runId); return <TableRow key={run.runId} className="cursor-pointer bg-muted/30" onClick={() => onSelect(run.runId)}><TableCell /><TableCell><RunStatusBadge status={run.status} /></TableCell><TableCell><div>Try {index + 1}</div><div className="font-mono text-xs text-muted-foreground">{run.runId} · {run.model || "—"}</div></TableCell><TableCell>{prs.length ? prs.map((pr) => `#${pr.prNumber} ${pr.merged ? "merged" : pr.state}`).join(", ") : run.status === "failed" ? "Failed" : "—"}</TableCell><TableCell className="text-right tabular-nums">{run.attemptCount}</TableCell><TableCell className="text-right tabular-nums">{usd.format(run.cost)}</TableCell><TableCell className="text-right tabular-nums">{formatDuration(run.lastActivity - run.startedAt)}</TableCell><TableCell className="text-right tabular-nums">{new Date(run.startedAt).toLocaleDateString()}</TableCell></TableRow>})}</Fragment>)}</TableBody></Table><div className="mt-3 flex justify-center gap-3"><Button variant="outline" size="sm" disabled={!canGoPrevious || loading} onClick={onPrevious}>Previous</Button><span className="text-sm text-muted-foreground">Page {page}</span><Button variant="outline" size="sm" disabled={!canGoNext || loading} onClick={onNext}>Next</Button></div></ChartCard> }
 function outcomesStat(effect?: AnalyticsEffectiveness) { const days = effect?.outcomesByDay ?? []; const total = days.reduce((sum, day) => sum + day.clean + day.humanInTheLoop + day.warning + day.failed, 0); return `${days.length} days · avg ${days.length ? (total / days.length).toFixed(1) : "0"} runs` }
 function ticketThroughputStat(effect?: AnalyticsEffectiveness) { const days = effect?.ticketsByDay ?? []; const total = days.reduce((sum, day) => sum + day.delivered + day.inProgress + day.failed, 0); return `${days.length} days · avg ${days.length ? (total / days.length).toFixed(1) : "0"} tickets` }
 function calculateDelta(current?: number | null, prior?: number | null) { return current == null || prior == null || prior === 0 ? undefined : (current - prior) / prior }

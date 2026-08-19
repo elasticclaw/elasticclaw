@@ -15,8 +15,9 @@ function initials(login: string): string {
 export function messageAuthor(message: Message, me?: string | null, meResolved = true): MessageAuthor {
   if (message.role !== "user") return { kind: "agent" }
   if (message.optimisticSelf) return { kind: "self" }
+  if (!meResolved && !message.userLogin) return { kind: "self" }
   if (!meResolved) return { kind: "unknown" }
   if (message.userLogin && me && message.userLogin === me) return { kind: "self" }
-  if (!message.userLogin || !me) return { kind: "unknown" }
+  if (!message.userLogin || !me) return { kind: "self" }
   return { login: message.userLogin, name: message.userLogin, initials: initials(message.userLogin), color: personColor(message.userLogin), kind: "teammate" }
 }

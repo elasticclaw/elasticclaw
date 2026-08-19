@@ -13,7 +13,7 @@ export function RunStatusBadge({ status }: { status: string }) {
     failed: <XCircle className="size-3" />,
   }
   const icon = statusIcons[status] ?? <CircleDot className="size-3" />
-  const color = status === 'clean' ? 'var(--chart-2)' : status === 'human_in_the_loop' ? 'var(--chart-1)' : status === 'warning' ? 'var(--chart-5)' : undefined
+  const color = status === 'clean' ? 'var(--chart-2)' : status === 'human_in_the_loop' ? 'var(--chart-1)' : status === 'warning' ? 'var(--text-warning)' : undefined
   return (
     <Badge
       title={status === 'clean' ? 'PR merged or closed with zero human interaction.' : status === 'human_in_the_loop' ? 'PR merged or closed; a human interacted via the PR (comment, review, or code push).' : status === 'warning' ? 'PR merged or closed; a human interacted via the factory dashboard.' : status === 'failed' ? 'No PR was ever delivered or the run definitively failed before delivery.' : status === 'running' ? 'In progress; no failure has occurred.' : undefined}

@@ -10,7 +10,7 @@ import { Button } from "@/components/ui/button"
 
 const usd = new Intl.NumberFormat(undefined, { style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: 2 })
 const caption = "text-[10px] font-medium uppercase tracking-[0.08em] text-muted-foreground"
-const duration = (ms?: number) => { if (!ms) return "—"; const s = Math.round(ms / 1000); return s < 60 ? `${s}s` : s < 3600 ? `${Math.floor(s / 60)}m ${s % 60 ? `${s % 60}s` : ""}` : `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m` }
+const duration = (ms?: number) => { if (!ms) return "—"; const s = Math.round(ms / 1000); if (s < 60) return `${s}s`; const minutes = Math.round(s / 60); if (minutes < 60) return `${minutes}m`; const hours = Math.floor(minutes / 60); return hours < 24 ? `${hours}h ${String(minutes % 60).padStart(2, "0")}m` : `${Math.floor(hours / 24)}d ${hours % 24}h` }
 const date = (value?: number) => value ? new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", year: "numeric" }).format(new Date(value)) : "—"
 const time = (value?: number) => value ? new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }).format(new Date(value)) : "—"
 
@@ -27,14 +27,14 @@ export function TicketDetailPanel({ ticket, onClose, onOpenRun }: { ticket: Anal
     previousFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null
     panelRef.current?.focus()
     return () => previousFocusRef.current?.focus()
-  }, [ticket])
+  }, [ticket?.issueId])
   if (!ticket) return null
   const open = ticket.prs.filter((pr) => pr.state === "open")
   const delivered = ticket.status === "delivered"
   const outcome = delivered ? "Work was delivered through a merged pull request." : ticket.status === "pr_open" ? `Work is done and waiting on a human: ${open.length} pull request${open.length === 1 ? "" : "s"} open, none merged or closed yet.` : ticket.status === "in_progress" ? "Work is currently in progress." : "The work did not reach delivery."
   return <>
     <div className="fixed inset-0 z-[45] bg-black/50" onClick={onClose} aria-hidden="true" />
-    <aside ref={panelRef} tabIndex={-1} role="dialog" aria-modal="true" aria-labelledby="ticket-detail-title" className="fixed inset-y-0 right-0 z-[50] flex w-full max-w-[66vw] flex-col border-l bg-background shadow-xl">
+    <aside ref={panelRef} tabIndex={-1} role="dialog" aria-modal="true" aria-labelledby="ticket-detail-title" className="fixed inset-y-0 right-0 z-[50] flex w-full max-w-full md:max-w-[66vw] flex-col border-l bg-background shadow-xl">
       <header className="flex items-start justify-between gap-3 border-b bg-card p-4"><div className="min-w-0 space-y-1"><div className="flex flex-wrap items-center gap-2"><TicketStatusBadge status={ticket.status} /><span className={caption}>{ticket.priority ? `${ticket.priority} priority` : "No priority"}</span><span className={caption}>via {ticket.source}</span></div><h2 id="ticket-detail-title" className="text-pretty text-base font-semibold tracking-tight">{ticket.issueId}: {ticket.issueTitle}</h2><p className="text-xs text-muted-foreground">{ticket.requester || "Unknown requester"} · {ticket.team || "Unassigned"} · reported {date(ticket.reportedAt)}</p><p className="font-mono text-xs text-muted-foreground">{ticket.repo || "—"} · {ticket.workflowName || "—"}</p></div><div className="flex shrink-0 gap-1">{open[0] && <Button asChild variant="outline" size="sm"><a href={open[0].url} target="_blank" rel="noreferrer">Review PR</a></Button>}<Button variant="ghost" size="icon" className="size-8" onClick={onClose} aria-label="Close ticket detail"><X className="size-4" /></Button></div></header>
       <div className="min-h-0 flex-1 space-y-4 overflow-auto p-4"><div className="grid grid-cols-2 gap-2 lg:grid-cols-4">{[["Lead time", duration(ticket.leadTime), delivered ? "report → merge" : "report → last activity"], ["Time to first run", duration(ticket.timeToFirstRun), "report → agent started"], ["Total cost", usd.format(ticket.cost), `${ticket.runCount} runs · ${ticket.attemptCount} attempts`], ["Human touches", String(ticket.humanTouches), ticket.humanTouches ? "reviews and nudges" : "fully autonomous"]].map(([label, value, sub]) => <div key={label} className="rounded-lg border bg-card p-3"><div className={caption}>{label}</div><div className="mt-1 text-lg font-semibold tabular-nums">{value}</div><div className="text-[11px] text-muted-foreground">{sub}</div></div>)}</div>
         <Section title="What was asked for"><p className="text-sm leading-6">{ticket.ask || ticket.issueTitle}</p><Row label="Requested by" value={ticket.requester || "Unknown"} /><Row label="Team" value={ticket.team || "Unassigned"} /><Row label="Ticket" value={ticket.issueId} mono /></Section>

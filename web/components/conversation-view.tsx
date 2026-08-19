@@ -74,6 +74,7 @@ import { DependencyDowntimeBanner } from "@/components/dependency-downtime-banne
 import type { TypewriterState } from "@/hooks/use-typewriter"
 import { extractQuestion, isWaitingOnYou } from "@/lib/waiting-on-you"
 import { messageAuthor } from "@/lib/message-author"
+import { toast } from "@/hooks/use-toast"
 
 const XTerminal = dynamic(
   () => import("@/components/terminal").then((m) => m.XTerminal),
@@ -439,8 +440,10 @@ function KillConfirmDialog({ clawName, open, onConfirm, onCancel }: {
 function ClawCardBack({ claw, open }: { claw: Claw; open: boolean }) {
   const { prs } = useClawPRs(claw.id, open)
   const [localTags, setLocalTags] = useState(claw.tags)
+  const [localName, setLocalName] = useState(claw.name)
 
   useEffect(() => setLocalTags(claw.tags), [claw.id, claw.tags])
+  useEffect(() => setLocalName(claw.name), [claw.id, claw.name])
 
   return (
     /* max-md cap mirrors the front face's message list: mobile cards are
@@ -503,12 +506,19 @@ function ClawCardBack({ claw, open }: { claw: Claw; open: boolean }) {
       <div>
         <h3 className="text-xs font-medium text-muted-foreground uppercase tracking-[0.08em] mb-2">Name</h3>
         <input
-          defaultValue={claw.name}
+          value={localName}
+          onChange={(e) => setLocalName(e.target.value)}
           onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur() }}
           onBlur={(e) => {
-            const name = e.target.value.trim()
-            if (!name || name === claw.name) return
-            patchClaw(claw.id, { name }).catch((err) => console.error("Failed to rename", err))
+            const name = localName.trim()
+            if (!name || name === claw.name) {
+              setLocalName(claw.name)
+              return
+            }
+            patchClaw(claw.id, { name }).catch(() => {
+              setLocalName(claw.name)
+              toast({ variant: "destructive", title: "Unable to rename agent" })
+            })
           }}
           className="w-full rounded-md border border-input bg-input/30 px-2.5 py-1.5 font-mono text-sm outline-none focus-visible:border-ring"
         />
