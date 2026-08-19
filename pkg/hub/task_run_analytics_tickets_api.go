@@ -120,7 +120,7 @@ func (s *Server) handleTaskRunAnalyticsTickets(w http.ResponseWriter, r *http.Re
 		return
 	}
 	if key := r.URL.Query().Get("key"); key != "" {
-		ticket, err := s.readTaskRunAnalyticsTicketByKey(r.Context(), filters.TenantID, key)
+		ticket, err := s.readTaskRunAnalyticsTicketByKey(r.Context(), filters, key)
 		if err != nil {
 			jsonError(w, http.StatusInternalServerError, "db error")
 			return
@@ -291,12 +291,14 @@ func (s *Server) loadTaskRunAnalyticsTicketCursorKey() error {
 	return nil
 }
 
-func (s *Server) readTaskRunAnalyticsTicketByKey(ctx context.Context, tenantID, key string) (*taskRunAnalyticsTicketView, error) {
+func (s *Server) readTaskRunAnalyticsTicketByKey(ctx context.Context, filters taskRunAnalyticsFilters, key string) (*taskRunAnalyticsTicketView, error) {
 	parts := strings.Split(key, taskRunAnalyticsTicketKeySeparator)
 	if len(parts) != 3 {
 		return nil, nil
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT `+taskRunAnalyticsRunColumns()+` FROM task_run_summaries WHERE tenant_id=? AND integration=? AND integration_workspace=? AND issue_id=?`, tenantID, parts[0], parts[1], parts[2])
+	where, args := taskRunAnalyticsSummaryWhere(filters)
+	runWhere := where + ` AND ` + taskRunAnalyticsTicketKeySQL + ` IN (?)`
+	rows, err := s.db.QueryContext(ctx, `SELECT `+taskRunAnalyticsRunColumns()+` FROM task_run_summaries `+runWhere, append(args, key)...)
 	if err != nil {
 		return nil, err
 	}
@@ -309,23 +311,23 @@ func (s *Server) readTaskRunAnalyticsTicketByKey(ctx context.Context, tenantID, 
 	for _, run := range runs {
 		runIDs = append(runIDs, run.RunID)
 	}
-	attempts, err := s.readTaskRunAnalyticsAttemptsForRuns(tenantID, runIDs)
+	attempts, err := s.readTaskRunAnalyticsAttemptsForRuns(filters.TenantID, runIDs)
 	if err != nil {
 		return nil, err
 	}
-	prs, err := s.readTaskRunAnalyticsPRsForRuns(tenantID, runIDs)
+	prs, err := s.readTaskRunAnalyticsPRsForRuns(filters.TenantID, runIDs)
 	if err != nil {
 		return nil, err
 	}
-	events, err := s.readTaskRunAnalyticsEventsForRunsForTickets(tenantID, runIDs)
+	events, err := s.readTaskRunAnalyticsEventsForRunsForTickets(filters.TenantID, runIDs)
 	if err != nil {
 		return nil, err
 	}
-	metadata, err := s.readTaskRunAnalyticsTicketMetadataPage(ctx, tenantID, []string{key})
+	metadata, err := s.readTaskRunAnalyticsTicketMetadataPage(ctx, filters.TenantID, []string{key})
 	if err != nil {
 		return nil, err
 	}
-	ticket, err := s.buildTaskRunAnalyticsTicket(tenantID, parts[2], runs, attempts, prs, events, metadata[key])
+	ticket, err := s.buildTaskRunAnalyticsTicket(filters.TenantID, parts[2], runs, attempts, prs, events, metadata[key])
 	if err != nil {
 		return nil, err
 	}

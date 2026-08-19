@@ -21,7 +21,9 @@ function Row({ label, value, mono }: { label: string; value: React.ReactNode; mo
 
 export function TicketDetailPanel({ ticket, onClose, onOpenRun }: { ticket: AnalyticsTicket | null; onClose: () => void; onOpenRun: (run: AnalyticsTicketRunSummary) => void }) {
   const [detail, setDetail] = useState<AnalyticsTicket | null>(null)
-  useEffect(() => { if (!ticket) { setDetail(null); return }; const controller = new AbortController(); setDetail(null); void fetchAnalyticsTicket(ticket.ticketKey, { signal: controller.signal }).then((response) => setDetail(response.ticket)).catch(() => {}); return () => controller.abort() }, [ticket?.ticketKey])
+  const [error, setError] = useState<string | null>(null)
+  const [retry, setRetry] = useState(0)
+  useEffect(() => { if (!ticket) { setDetail(null); setError(null); return }; const controller = new AbortController(); setDetail(null); setError(null); void fetchAnalyticsTicket(ticket.ticketKey, { signal: controller.signal }).then((response) => setDetail(response.ticket)).catch(() => { if (!controller.signal.aborted) setError("Failed to load ticket details.") }); return () => controller.abort() }, [ticket?.ticketKey, retry])
   useEscapeToClose(onClose, Boolean(ticket))
   const panelRef = useRef<HTMLElement>(null)
   useFocusTrap(panelRef, Boolean(ticket))
@@ -33,7 +35,7 @@ export function TicketDetailPanel({ ticket, onClose, onOpenRun }: { ticket: Anal
     return () => previousFocusRef.current?.focus()
   }, [ticket?.issueId])
   if (!ticket) return null
-  if (!detail) return <><div className="fixed inset-0 z-[45] bg-black/50" onClick={onClose} aria-hidden="true" /><aside className="fixed inset-y-0 right-0 z-[50] flex w-full max-w-full items-center justify-center border-l bg-background shadow-xl md:max-w-[66vw]" role="dialog" aria-modal="true"><Button variant="ghost" className="absolute right-3 top-3" onClick={onClose}>Close</Button><p className="text-sm text-muted-foreground">Loading ticket details…</p></aside></>
+  if (!detail) return <><div className="fixed inset-0 z-[45] bg-black/50" onClick={onClose} aria-hidden="true" /><aside className="fixed inset-y-0 right-0 z-[50] flex w-full max-w-full items-center justify-center border-l bg-background shadow-xl md:max-w-[66vw]" role="dialog" aria-modal="true"><Button variant="ghost" className="absolute right-3 top-3" onClick={onClose}>Close</Button><div className="flex items-center gap-2"><p className="text-sm text-muted-foreground">{error || "Loading ticket details…"}</p>{error && <Button variant="outline" size="sm" onClick={() => setRetry((value) => value + 1)}>Retry</Button>}</div></aside></>
   ticket = detail
   const open = ticket.prs.filter((pr) => pr.state === "open")
   const delivered = ticket.status === "delivered"
