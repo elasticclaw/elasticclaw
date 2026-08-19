@@ -18,6 +18,7 @@ var ticketMetadataEnrichment = make(chan struct{}, 32)
 var ticketMetadataInflight sync.Map
 
 const taskRunAnalyticsTicketCacheTTL = time.Minute
+const taskRunAnalyticsTicketCacheMaxEntries = 256
 
 type taskRunAnalyticsTicketTotalCacheEntry struct {
 	total     int
@@ -275,10 +276,33 @@ func (s *Server) readTaskRunAnalyticsTicketTotal(where string, args []any) (int,
 	if s.ticketAnalyticsTotalCache == nil {
 		s.ticketAnalyticsTotalCache = map[string]taskRunAnalyticsTicketTotalCacheEntry{}
 	}
+	pruneTaskRunAnalyticsTicketTotalCache(s.ticketAnalyticsTotalCache, now)
+	if len(s.ticketAnalyticsTotalCache) >= taskRunAnalyticsTicketCacheMaxEntries {
+		evictOldestTaskRunAnalyticsTicketTotalCacheEntry(s.ticketAnalyticsTotalCache)
+	}
 	s.ticketAnalyticsTotalCache[key] = taskRunAnalyticsTicketTotalCacheEntry{total: total, expiresAt: now.Add(taskRunAnalyticsTicketCacheTTL)}
 	s.ticketAnalyticsTotalQueries++
 	s.ticketAnalyticsCacheMu.Unlock()
 	return total, nil
+}
+
+func pruneTaskRunAnalyticsTicketTotalCache(cache map[string]taskRunAnalyticsTicketTotalCacheEntry, now time.Time) {
+	for key, entry := range cache {
+		if !now.Before(entry.expiresAt) {
+			delete(cache, key)
+		}
+	}
+}
+
+func evictOldestTaskRunAnalyticsTicketTotalCacheEntry(cache map[string]taskRunAnalyticsTicketTotalCacheEntry) {
+	var oldestKey string
+	var oldestExpiry time.Time
+	for key, entry := range cache {
+		if oldestKey == "" || entry.expiresAt.Before(oldestExpiry) {
+			oldestKey, oldestExpiry = key, entry.expiresAt
+		}
+	}
+	delete(cache, oldestKey)
 }
 
 func taskRunAnalyticsTicketGroupsFromHydration(ids []string, runs []taskRunAnalyticsRunView) []taskRunAnalyticsTicketGroup {
@@ -350,7 +374,7 @@ func (s *Server) readTaskRunAnalyticsTicketGroups(filters taskRunAnalyticsFilter
 	s.ticketAnalyticsCacheMu.Lock()
 	if entry, ok := s.ticketAnalyticsACLGroupCache[key]; ok && now.Before(entry.expiresAt) {
 		s.ticketAnalyticsCacheMu.Unlock()
-		return entry.groups, entry.truncated, nil
+		return cloneTaskRunAnalyticsTicketGroups(entry.groups), entry.truncated, nil
 	}
 	s.ticketAnalyticsCacheMu.Unlock()
 
@@ -394,10 +418,42 @@ func (s *Server) readTaskRunAnalyticsTicketGroups(filters taskRunAnalyticsFilter
 	if s.ticketAnalyticsACLGroupCache == nil {
 		s.ticketAnalyticsACLGroupCache = map[string]taskRunAnalyticsTicketACLGroupCacheEntry{}
 	}
-	s.ticketAnalyticsACLGroupCache[key] = taskRunAnalyticsTicketACLGroupCacheEntry{groups: tickets, truncated: truncated, expiresAt: now.Add(taskRunAnalyticsTicketCacheTTL)}
+	pruneTaskRunAnalyticsTicketACLGroupCache(s.ticketAnalyticsACLGroupCache, now)
+	if len(s.ticketAnalyticsACLGroupCache) >= taskRunAnalyticsTicketCacheMaxEntries {
+		evictOldestTaskRunAnalyticsTicketACLGroupCacheEntry(s.ticketAnalyticsACLGroupCache)
+	}
+	s.ticketAnalyticsACLGroupCache[key] = taskRunAnalyticsTicketACLGroupCacheEntry{groups: cloneTaskRunAnalyticsTicketGroups(tickets), truncated: truncated, expiresAt: now.Add(taskRunAnalyticsTicketCacheTTL)}
 	s.ticketAnalyticsACLStreams++
 	s.ticketAnalyticsCacheMu.Unlock()
 	return tickets, truncated, nil
+}
+
+func pruneTaskRunAnalyticsTicketACLGroupCache(cache map[string]taskRunAnalyticsTicketACLGroupCacheEntry, now time.Time) {
+	for key, entry := range cache {
+		if !now.Before(entry.expiresAt) {
+			delete(cache, key)
+		}
+	}
+}
+
+func evictOldestTaskRunAnalyticsTicketACLGroupCacheEntry(cache map[string]taskRunAnalyticsTicketACLGroupCacheEntry) {
+	var oldestKey string
+	var oldestExpiry time.Time
+	for key, entry := range cache {
+		if oldestKey == "" || entry.expiresAt.Before(oldestExpiry) {
+			oldestKey, oldestExpiry = key, entry.expiresAt
+		}
+	}
+	delete(cache, oldestKey)
+}
+
+func cloneTaskRunAnalyticsTicketGroups(groups []taskRunAnalyticsTicketGroup) []taskRunAnalyticsTicketGroup {
+	cloned := make([]taskRunAnalyticsTicketGroup, len(groups))
+	for i, group := range groups {
+		cloned[i] = group
+		cloned[i].runs = append([]taskRunAnalyticsRunView(nil), group.runs...)
+	}
+	return cloned
 }
 
 func (s *Server) buildTaskRunAnalyticsTicket(ctx context.Context, tenantID, issueID string, runs []taskRunAnalyticsRunView, attemptsByRun map[string][]taskRunAnalyticsAttemptView, prsByRun map[string][]taskRunAnalyticsPRView, eventsByRun map[string][]taskRunAnalyticsEventView, metadata taskRunAnalyticsTicketMetadata) (taskRunAnalyticsTicketView, error) {
