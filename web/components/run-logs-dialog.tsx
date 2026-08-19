@@ -2,8 +2,8 @@
 
 import { useEffect, useMemo, useState } from "react"
 import { FileTerminal } from "lucide-react"
-import { fetchTaskRunOutputs } from "@/lib/api"
-import type { TaskRunAttempt, TaskRunOutput, TaskRunSummary } from "@/lib/types"
+import { fetchActivityMessages, fetchTaskRunOutputs } from "@/lib/api"
+import type { ApiMessage, Message, TaskRunAttempt, TaskRunOutput, TaskRunSummary } from "@/lib/types"
 import { useEscapeToClose } from "@/hooks/use-escape-to-close"
 import { AttrChip } from "@/components/ds/attr-chip"
 import { SEVERITY, SeverityChip } from "@/components/ds/severity-chip"
@@ -13,8 +13,10 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } f
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
-import { ClawActivityLog, EmptyState, LoadingState, Notice } from "@/components/claw-activity-log"
+import { EmptyState, LoadingState, Notice } from "@/components/claw-activity-log"
 import { cn } from "@/lib/utils"
+import { StepRow } from "@/components/agent-timeline/step-row"
+import { pairActivitySteps } from "@/lib/turns"
 
 export function RunLogsDialog({ run, attempts }: { run: TaskRunSummary; attempts: TaskRunAttempt[] }) {
   const [open, setOpen] = useState(false)
@@ -95,7 +97,7 @@ export function RunLogsDialog({ run, attempts }: { run: TaskRunSummary; attempts
               )}
             </div>
             <TabsContent value="actions" className="min-h-0 overflow-hidden">
-              <ClawActivityLog clawId={clawId} />
+              <ActionsTab clawId={clawId} />
             </TabsContent>
             <TabsContent value="output" className="min-h-0 overflow-auto">
               <OutputTab outputs={outputs} loading={outputsLoading} error={outputsError} traceId={traceId} workspaceName={run.workspaceName} />
@@ -105,6 +107,43 @@ export function RunLogsDialog({ run, attempts }: { run: TaskRunSummary; attempts
       </Dialog>
     </>
   )
+}
+
+function ActionsTab({ clawId }: { clawId?: string }) {
+  const [messages, setMessages] = useState<ApiMessage[]>([])
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (!clawId) return
+    let cancelled = false
+    queueMicrotask(() => {
+      if (cancelled) return
+      setLoading(true)
+      setError(null)
+      fetchActivityMessages(clawId, { limit: 100, order: "asc" })
+        .then((data) => { if (!cancelled) setMessages(data) })
+        .catch((err) => { if (!cancelled) setError(err instanceof Error ? err.message : "Unable to load agent activity") })
+        .finally(() => { if (!cancelled) setLoading(false) })
+    })
+    return () => { cancelled = true }
+  }, [clawId])
+
+  const steps = useMemo(() => pairActivitySteps(messages.map(activityMessage)), [messages])
+  if (!clawId) return <EmptyState>No agent actions were recorded for this attempt.</EmptyState>
+  if (loading) return <LoadingState label="Loading agent activity..." />
+  if (error) return <Notice destructive>{error}</Notice>
+  if (steps.length === 0) return <EmptyState>No agent actions were recorded for this attempt.</EmptyState>
+  return <div className="h-full overflow-auto rounded-md border p-2">{steps.map((step) => <StepRow key={step.id} step={step} />)}</div>
+}
+
+function activityMessage(message: ApiMessage): Message {
+  let activity: Message["activity"]
+  if (message.format?.startsWith("activity:")) {
+    try { activity = JSON.parse(message.format.slice("activity:".length)) }
+    catch { activity = undefined }
+  }
+  return { id: message.id, role: message.role, content: message.content, timestamp: new Date(message.created_at), activity }
 }
 
 function OutputTab({ outputs, loading, error, traceId, workspaceName }: { outputs: TaskRunOutput[]; loading: boolean; error: string | null; traceId?: string; workspaceName: string }) {

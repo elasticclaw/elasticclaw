@@ -23,7 +23,7 @@ function GalleryItem({ label, children }: { label: string; children: React.React
   return <div className="flex flex-wrap items-center gap-3 border-b py-4"><span className="w-72 font-mono text-xs text-muted-foreground">{label}</span>{children}</div>
 }
 
-export default function DesignSystemGalleryPage() {
+export function DesignSystemGalleryPage() {
   const [range, setRange] = React.useState<DateRange | undefined>()
   return (
     <main className="mx-auto max-w-5xl p-8">
@@ -61,3 +61,5 @@ export default function DesignSystemGalleryPage() {
     </main>
   )
 }
+
+export default DesignSystemGalleryPage

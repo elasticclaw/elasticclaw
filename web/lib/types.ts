@@ -192,16 +192,16 @@ export interface GeneralStats {
 }
 
 export interface AnalyticsEffectiveness {
-  outcomesByDay: { date: string; clean: number; humanInTheLoop: number; warning: number; failed: number }[]
+  outcomesByDay: { date: string; clean: number; humanInTheLoop: number; warning: number; failed: number }[] | null
   funnel: { agentStarted: number; prOpened: number; prFinished: number }
-  costPerMergedPr: { weekly: { weekStart: string; costUsd: number; mergedPrs: number; costPerMergedPr: number }[]; average: number }
+  costPerMergedPr: { weekly: { weekStart: string; costUsd: number; mergedPrs: number; costPerMergedPr: number }[] | null; average: number }
   mergeRate: number
   successRate: number
   uniqueTickets: number
   ticketSuccessRate: number
-  ticketsByDay: { date: string; delivered: number; inProgress: number; failed: number }[]
-  runsPerTicket: { bucket: string; tickets: number }[]
-  topTicketsByCost: { issueId: string; issueTitle: string; costUsd: number; runs: number; outcome: string }[]
+  ticketsByDay: { date: string; delivered: number; inProgress: number; failed: number }[] | null
+  runsPerTicket: { bucket: string; tickets: number }[] | null
+  topTicketsByCost: { issueId: string; issueTitle: string; costUsd: number; runs: number; outcome: string }[] | null
   prior?: {
     successRate: number
     ticketSuccessRate: number

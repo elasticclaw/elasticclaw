@@ -75,50 +75,64 @@ export function HomeShell() {
   const [currentUserLogin, setCurrentUserLogin] = useState<string | null>(null)
   const [currentUserResolved, setCurrentUserResolved] = useState(false)
   const [adminChecked, setAdminChecked] = useState(false)
+  const [adminCheckFailed, setAdminCheckFailed] = useState(false)
   const [selectedWorkflow, setSelectedWorkflow] = useState<Workflow | null>(null)
 
-  // Fetch admin status
-  useEffect(() => {
-    let cancelled = false
-    async function loadAdminStatus() {
+  const loadAdminStatus = useCallback(async () => {
       const token = await requestAuthToken()
-      if (cancelled) return
       if (!token) {
         setIsAdmin(false)
+        setCurrentUserLogin(null)
+        setCurrentUserResolved(false)
         setAdminChecked(true)
+        setAdminCheckFailed(false)
         return
       }
       const { getHubUrl } = await import("@/lib/hub-url")
-      if (cancelled) return
       const hubUrl = getHubUrl()
       const url = hubUrl ? `${hubUrl}/api/auth/me` : "/api/auth/me"
-      fetch(url, { headers: { Authorization: `Bearer ${token}` } })
+      return fetch(url, { headers: { Authorization: `Bearer ${token}` } })
         .then(async (response) => {
           if (response.ok) return response.json()
           if (response.status === 401 || response.status === 403) throw new Error("Unauthorized")
           throw new Error("Unable to resolve current user")
         })
         .then(data => {
-          if (cancelled) return
           setIsAdmin(data?.is_admin === true)
           setCurrentUserLogin(typeof data?.login === "string" ? data.login : null)
           setCurrentUserResolved(true)
           setAdminChecked(true)
+          setAdminCheckFailed(false)
         })
         .catch((error) => {
-          if (cancelled) return
           if (error instanceof Error && error.message === "Unauthorized") {
             setIsAdmin(false)
             setCurrentUserLogin(null)
             setCurrentUserResolved(false)
             setAdminChecked(true)
+            setAdminCheckFailed(false)
+          } else {
+            setAdminChecked(false)
+            setAdminCheckFailed(true)
           }
         })
-    }
-    loadAdminStatus()
-    window.addEventListener("focus", loadAdminStatus)
-    return () => { cancelled = true; window.removeEventListener("focus", loadAdminStatus) }
   }, [])
+
+  // Fetch admin status.
+  useEffect(() => {
+    let cancelled = false
+    const guardedLoadAdminStatus = () => {
+      void loadAdminStatus().catch(() => {
+        if (!cancelled) {
+          setAdminChecked(false)
+          setAdminCheckFailed(true)
+        }
+      })
+    }
+    guardedLoadAdminStatus()
+    window.addEventListener("focus", guardedLoadAdminStatus)
+    return () => { cancelled = true; window.removeEventListener("focus", guardedLoadAdminStatus) }
+  }, [loadAdminStatus])
 
   // Non-admins never see analytics: deep links bounce back to the agents view.
   useEffect(() => {
@@ -397,6 +411,14 @@ export function HomeShell() {
             <Suspense fallback={null}>
               <AnalyticsCommandCenter />
             </Suspense>
+          ) : adminCheckFailed ? (
+            <div className="flex min-h-64 items-center justify-center p-6">
+              <div className="max-w-sm rounded-lg border bg-card p-5 text-center">
+                <p className="font-medium">Unable to check analytics access.</p>
+                <p className="mt-1 text-sm text-muted-foreground">Check your connection and try again.</p>
+                <button type="button" className="mt-4 rounded-md bg-primary px-3 py-2 text-sm text-primary-foreground" onClick={() => void loadAdminStatus()}>Retry</button>
+              </div>
+            </div>
           ) : null
         ) : (
           <ConversationView

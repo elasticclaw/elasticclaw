@@ -99,6 +99,9 @@ const usdWhole = new Intl.NumberFormat(undefined, {
   currency: "USD",
   maximumFractionDigits: 0,
 })
+const shortDateFormatter = new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric" })
+const heatmapMonthFormatter = new Intl.DateTimeFormat(undefined, { month: "short" })
+const heatmapDateFormatter = new Intl.DateTimeFormat(undefined, { weekday: "short", month: "short", day: "numeric", year: "numeric", timeZone: "UTC" })
 
 // Recharts colors legend item text with the series color by default. Our chart
 // rules keep the swatch colored but render the label text in the muted
@@ -108,9 +111,7 @@ function legendTextFormatter(value: string) {
 }
 
 function formatDate(value: string) {
-  return new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric" }).format(
-    new Date(`${value}T00:00:00`)
-  )
+  return shortDateFormatter.format(new Date(`${value}T00:00:00`))
 }
 
 function formatDuration(milliseconds?: number | null) {
@@ -135,6 +136,12 @@ function localDayRange(date: Date) {
   const to = new Date(date)
   to.setHours(23, 59, 59, 999)
   return { from: from.toISOString(), to: to.toISOString() }
+}
+
+function filterDate(value?: string) {
+  if (!value) return undefined
+  const date = /^\d+$/.test(value) ? new Date(Number(value)) : new Date(value)
+  return Number.isNaN(date.getTime()) ? undefined : date
 }
 
 function AnalyticsCommandCenterInner() {
@@ -412,7 +419,8 @@ function AnalyticsCommandCenterInner() {
       if (document.hidden) return
       silentRefresh()
     }
-    const intervalId = setInterval(tick, 60_000)
+    const refreshInterval = 60_000 + Math.round((Math.random() * 20_000) - 10_000)
+    const intervalId = setInterval(tick, refreshInterval)
 
     const handleVisibilityChange = () => {
       if (!document.hidden) {
@@ -484,9 +492,11 @@ function AnalyticsCommandCenterInner() {
   const heatmap = useHeatmap(yearCosts)
   const maxHeatCost = Math.max(...heatmap.days.map((day) => day.point?.costUsd ?? 0), 0)
   const selectedDay = filters.from && filters.to && (() => {
-    const day = localDateKey(new Date(filters.from))
-    const range = localDayRange(new Date(`${day}T00:00:00`))
-    return range.from === filters.from && range.to === filters.to ? day : undefined
+    const from = filterDate(filters.from)
+    const to = filterDate(filters.to)
+    if (!from || !to) return undefined
+    const day = from.toISOString().slice(0, 10)
+    return from.toISOString() === `${day}T00:00:00.000Z` && to.toISOString() === `${day}T23:59:59.999Z` ? day : undefined
   })()
   // Stable handlers so the memoized Heatmap (and its 364 memoized cells) only
   // re-render when the selection actually changes.
@@ -495,7 +505,7 @@ function AnalyticsCommandCenterInner() {
     selectedDayRef.current = selectedDay
   }, [selectedDay])
   const selectDay = useCallback((day: string) => {
-    setFilters(day === selectedDayRef.current ? { from: undefined, to: undefined } : localDayRange(new Date(`${day}T00:00:00`)))
+    setFilters(day === selectedDayRef.current ? { from: undefined, to: undefined } : { from: `${day}T00:00:00.000Z`, to: `${day}T23:59:59.999Z` })
   }, [setFilters])
   const clearSelectedDay = useCallback(() => setFilters({ from: undefined, to: undefined }), [setFilters])
   const modelData = useModelData(costs)
@@ -576,7 +586,7 @@ function AnalyticsCommandCenterInner() {
         </KpiStrip>
 
         <div className="grid gap-5 lg:grid-cols-2">
-          <ChartCard title="Run outcomes over time" stat={{ left: `${effect?.outcomesByDay.length ?? 0} days`, right: outcomesStat(effect) }} info="Each bar is a day. Clean = delivered with no human help; Human on the loop = a human helped via the pull request; Warning = a human had to step in from the dashboard; Failed = nothing was delivered.">
+          <ChartCard title="Run outcomes over time" stat={{ left: `${effect?.outcomesByDay?.length ?? 0} days`, right: outcomesStat(effect) }} info="Each bar is a day. Clean = delivered with no human help; Human on the loop = a human helped via the pull request; Warning = a human had to step in from the dashboard; Failed = nothing was delivered.">
             <OutcomesChart effect={effect} />
           </ChartCard>
           <ChartCard title="Delivery funnel" stat={{ left: `${effect?.funnel.agentStarted ?? 0} started`, right: `${formatPercent(effect?.funnel.agentStarted ? (effect.funnel.prFinished / effect.funnel.agentStarted) : undefined)} end to end` }} info="How many runs made it from the agent starting, to opening a pull request, to that pull request being finished (merged or closed). Percentages show the conversion from the previous stage.">
@@ -585,10 +595,10 @@ function AnalyticsCommandCenterInner() {
         </div>
 
         <div className="grid gap-5 lg:grid-cols-2">
-          <ChartCard title="Ticket throughput" stat={{ left: `${effect?.ticketsByDay.length ?? 0} days`, right: ticketThroughputStat(effect) }} info="Each bar is a day: how many distinct tickets had their first run that day, by how the ticket ended up. Delivered = at least one run delivered the work.">
+          <ChartCard title="Ticket throughput" stat={{ left: `${effect?.ticketsByDay?.length ?? 0} days`, right: ticketThroughputStat(effect) }} info="Each bar is a day: how many distinct tickets had their first run that day, by how the ticket ended up. Delivered = at least one run delivered the work.">
             <TicketThroughputChart effect={effect} />
           </ChartCard>
-          <ChartCard title="Runs per ticket" stat={{ left: `${effect?.runsPerTicket.reduce((sum, bucket) => sum + bucket.tickets, 0) ?? 0} tickets`, right: `${effect?.runsPerTicket.reduce((sum, bucket) => sum + (bucket.bucket === "3" || bucket.bucket === "4+" ? bucket.tickets : 0), 0) ?? 0} needed 3+` }} info="How many runs each ticket needed. A long tail of 3+ means lots of retries on the same tickets.">
+          <ChartCard title="Runs per ticket" stat={{ left: `${(effect?.runsPerTicket ?? []).reduce((sum, bucket) => sum + bucket.tickets, 0)} tickets`, right: `${(effect?.runsPerTicket ?? []).reduce((sum, bucket) => sum + (bucket.bucket === "3" || bucket.bucket === "4+" ? bucket.tickets : 0), 0)} needed 3+` }} info="How many runs each ticket needed. A long tail of 3+ means lots of retries on the same tickets.">
             <RunsPerTicketChart effect={effect} />
           </ChartCard>
         </div>
@@ -619,7 +629,7 @@ function AnalyticsCommandCenterInner() {
           <ChartCard title="Daily cost by model" stat={{ left: `${costs?.dailySeries.length ?? 0} days`, right: `${usdWhole.format(totalCost)} total` }} info="How much was spent per day, split by AI model.">
             <DailyCostChart costs={costs} modelData={modelData} />
           </ChartCard>
-          <ChartCard title="Cost per merged PR" stat={{ left: `${effect?.costPerMergedPr.weekly.length ?? 0} weeks`, right: `avg ${usd.format(effect?.costPerMergedPr.average ?? 0)}` }} info="Weekly average of what one merged pull request cost. The reference line is the period average.">
+          <ChartCard title="Cost per merged PR" stat={{ left: `${effect?.costPerMergedPr.weekly?.length ?? 0} weeks`, right: `avg ${usd.format(effect?.costPerMergedPr.average ?? 0)}` }} info="Weekly average of what one merged pull request cost. The reference line is the period average.">
             <CostPerMergedPrChart effect={effect} />
           </ChartCard>
         </div>
@@ -628,7 +638,7 @@ function AnalyticsCommandCenterInner() {
           <ChartCard title="Workflow cost comparison" stat={{ left: `${drivers.length} workflows`, right: `${usdWhole.format(drivers.reduce((sum, driver) => sum + driver.costUsd, 0))} total` }} info="Daily spend of the most expensive workflows in the selected period, compared side by side.">
             <WorkflowCostComparisonChart drivers={drivers} />
           </ChartCard>
-          <ChartCard title="Most expensive tickets" stat={{ left: `${effect?.topTicketsByCost.length ?? 0} tickets`, right: `${usdWhole.format(effect?.topTicketsByCost.reduce((sum, ticket) => sum + ticket.costUsd, 0) ?? 0)} combined` }} info="Where the money concentrates: the costliest tickets in the selected period (cost counts only this period's runs).">
+          <ChartCard title="Most expensive tickets" stat={{ left: `${effect?.topTicketsByCost?.length ?? 0} tickets`, right: `${usdWhole.format((effect?.topTicketsByCost ?? []).reduce((sum, ticket) => sum + ticket.costUsd, 0))} combined` }} info="Where the money concentrates: the costliest tickets in the selected period (cost counts only this period's runs).">
             <TopTicketsByCostChart effect={effect} />
           </ChartCard>
         </div>
@@ -718,7 +728,9 @@ function FilterBar({
   }
   // No from/to in the URL means the default period — show it as such so the
   // trigger reads "Last 30 days" instead of "Select date range".
-  const dateRange: DateRange | undefined = filters.from || filters.to ? { from: filters.from ? new Date(filters.from) : undefined, to: filters.to ? new Date(filters.to) : undefined } : undefined
+  const from = filterDate(filters.from)
+  const to = filterDate(filters.to)
+  const dateRange: DateRange | undefined = from || to ? { from, to } : undefined
   return (
     <div className="rounded-lg border bg-card p-2">
       {/* One flat flex row, like the kit: scope controls, rule, dimensions,
@@ -768,7 +780,7 @@ function useHeatmap(costs?: CostOverview) {
     const start = new Date(end); start.setDate(start.getDate() - mondayIndex - 357)
     const total = 358 + mondayIndex
     const days = Array.from({ length: total }, (_, index) => { const date = new Date(start); date.setDate(date.getDate() + index); const iso = localDateKey(date); return { iso, point: costsByDate.get(iso), week: Math.floor(index / 7), day: index % 7 } })
-    const monthLabels = days.filter((day, index) => index === 0 || day.iso.slice(5, 7) !== days[index - 1].iso.slice(5, 7)).map((day) => ({ week: day.week, label: new Intl.DateTimeFormat(undefined, { month: "short" }).format(new Date(`${day.iso}T00:00:00`)) }))
+    const monthLabels = days.filter((day, index) => index === 0 || day.iso.slice(5, 7) !== days[index - 1].iso.slice(5, 7)).map((day) => ({ week: day.week, label: heatmapMonthFormatter.format(new Date(`${day.iso}T00:00:00`)) }))
     return { days, monthLabels, padCount: 364 - total }
   }, [costs])
 }
@@ -776,7 +788,7 @@ function useHeatmap(costs?: CostOverview) {
 type HeatmapPoint = ReturnType<typeof useHeatmap>["days"][number]["point"]
 
 const HeatmapCell = memo(function HeatmapCell({ iso, point, level, selected, onSelectDay, onShowTooltip, onHideTooltip }: { iso: string; point: HeatmapPoint; level: number; selected: boolean; onSelectDay: (day: string) => void; onShowTooltip: (iso: string, point: HeatmapPoint, target: HTMLButtonElement) => void; onHideTooltip: () => void }) {
-  const tooltip = `${new Intl.DateTimeFormat(undefined, { weekday: "short", month: "short", day: "numeric", year: "numeric" }).format(new Date(`${iso}T00:00:00`))}: ${usdWhole.format(point?.costUsd ?? 0)} · ${point?.runCount ?? 0} runs`
+  const tooltip = `${heatmapDateFormatter.format(new Date(`${iso}T00:00:00Z`))}: ${usdWhole.format(point?.costUsd ?? 0)} · ${point?.runCount ?? 0} runs`
   return <button aria-label={tooltip} aria-pressed={selected} onClick={() => onSelectDay(iso)} onMouseEnter={(event) => onShowTooltip(iso, point, event.currentTarget)} onMouseLeave={onHideTooltip} onFocus={(event) => onShowTooltip(iso, point, event.currentTarget)} onBlur={onHideTooltip} className={`aspect-square cursor-pointer rounded-sm border border-black/5 transition-shadow hover:ring-2 hover:ring-ring hover:ring-offset-1 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1 ${selected ? "ring-2 ring-primary ring-offset-1" : ""}`} style={{ background: level ? `var(--heatmap-${level})` : "var(--muted)" }} />
 })
 
@@ -789,7 +801,7 @@ const Heatmap = memo(function Heatmap({ heatmap, maxCost, selectedDay, onSelectD
     if (containerRect) setTooltip((current) => current?.iso === iso ? current : { iso, point, x: cellRect.left + cellRect.width / 2 - containerRect.left + 12, y: cellRect.top + cellRect.height / 2 - containerRect.top + 12 })
   }, [])
   const hideTooltip = useCallback(() => setTooltip(null), [])
-  return <div ref={containerRef} className="relative"><div className="flex gap-2"><div className="flex w-6 flex-col text-center text-[10px] text-muted-foreground"><div className="mb-1 h-4" aria-hidden="true" /><div className="grid flex-1 grid-rows-7 gap-[3px]">{["M", "T", "W", "T", "F", "S", "S"].map((day, index) => <span key={`${day}-${index}`} className="flex items-center justify-center">{day}</span>)}</div></div><div className="min-w-0 flex-1"><div className="relative mb-1 h-4 text-[10px] text-muted-foreground">{heatmap.monthLabels.map(({ week, label }) => <span key={`${week}-${label}`} className="absolute" style={{ left: `${(week / 52) * 100}%` }}>{label}</span>)}</div><div className="grid grid-flow-col grid-cols-[repeat(52,minmax(0,1fr))] grid-rows-7 gap-[3px]">{heatmap.days.map(({ iso, point }) => { const level = point?.costUsd ? Math.min(5, Math.ceil((point.costUsd / maxCost) * 5)) : 0; return <HeatmapCell key={iso} iso={iso} point={point} level={level} selected={iso === selectedDay} onSelectDay={onSelectDay} onShowTooltip={showTooltip} onHideTooltip={hideTooltip} /> })}{Array.from({ length: heatmap.padCount }, (_, index) => <span key={`pad-${index}`} aria-hidden="true" className="aspect-square" />)}</div></div></div>{tooltip && <div role="tooltip" className="pointer-events-none absolute z-10 rounded-lg border bg-card px-2 py-1.5 text-xs text-foreground shadow-md" style={{ left: tooltip.x, top: tooltip.y }}><div>{new Intl.DateTimeFormat(undefined, { weekday: "short", month: "short", day: "numeric", year: "numeric" }).format(new Date(`${tooltip.iso}T00:00:00`))}</div><div className="text-muted-foreground">{usdWhole.format(tooltip.point?.costUsd ?? 0)} · {tooltip.point?.runCount ?? 0} runs</div></div>}<div className="mt-3 flex justify-end gap-1 text-xs text-muted-foreground">Less {Array.from({ length: 5 }, (_, index) => <i key={index} className="size-3 rounded-sm" style={{ background: `var(--heatmap-${index + 1})` }} />)} More</div></div>
+  return <div ref={containerRef} className="relative"><div className="flex gap-2"><div className="flex w-6 flex-col text-center text-[10px] text-muted-foreground"><div className="mb-1 h-4" aria-hidden="true" /><div className="grid flex-1 grid-rows-7 gap-[3px]">{["M", "T", "W", "T", "F", "S", "S"].map((day, index) => <span key={`${day}-${index}`} className="flex items-center justify-center">{day}</span>)}</div></div><div className="min-w-0 flex-1"><div className="relative mb-1 h-4 text-[10px] text-muted-foreground">{heatmap.monthLabels.map(({ week, label }) => <span key={`${week}-${label}`} className="absolute" style={{ left: `${(week / 52) * 100}%` }}>{label}</span>)}</div><div className="grid grid-flow-col grid-cols-[repeat(52,minmax(0,1fr))] grid-rows-7 gap-[3px]">{heatmap.days.map(({ iso, point }) => { const level = point?.costUsd ? Math.min(5, Math.ceil((point.costUsd / maxCost) * 5)) : 0; return <HeatmapCell key={iso} iso={iso} point={point} level={level} selected={iso === selectedDay} onSelectDay={onSelectDay} onShowTooltip={showTooltip} onHideTooltip={hideTooltip} /> })}{Array.from({ length: heatmap.padCount }, (_, index) => <span key={`pad-${index}`} aria-hidden="true" className="aspect-square" />)}</div></div></div>{tooltip && <div role="tooltip" className="pointer-events-none absolute z-10 rounded-lg border bg-card px-2 py-1.5 text-xs text-foreground shadow-md" style={{ left: tooltip.x, top: tooltip.y }}><div>{heatmapDateFormatter.format(new Date(`${tooltip.iso}T00:00:00Z`))}</div><div className="text-muted-foreground">{usdWhole.format(tooltip.point?.costUsd ?? 0)} · {tooltip.point?.runCount ?? 0} runs</div></div>}<div className="mt-3 flex justify-end gap-1 text-xs text-muted-foreground">Less {Array.from({ length: 5 }, (_, index) => <i key={index} className="size-3 rounded-sm" style={{ background: `var(--heatmap-${index + 1})` }} />)} More</div></div>
 })
 
 function SelectedDayChip({ selectedDay, onClear }: { selectedDay?: string; onClear: () => void }) {
@@ -802,7 +814,7 @@ function useModelData(costs?: CostOverview) { return useMemo(() => { const model
 function useWorkflowCostComparisonData(drivers: AnalyticsCostDriver[]) { return useMemo(() => { const topDrivers = [...drivers].sort((a, b) => b.costUsd - a.costUsd).slice(0, 5); const topNames = topDrivers.map((driver) => driver.name); const topNameSet = new Set(topNames); const dataByDate = new Map<string, Record<string, string | number>>(); for (const driver of drivers) for (const point of driver.dailyCost) { const row = dataByDate.get(point.date) ?? { date: point.date, Other: 0, ...Object.fromEntries(topNames.map((name) => [name, 0])) }; if (topNameSet.has(driver.name)) row[driver.name] = Number(row[driver.name]) + point.costUsd; else row.Other = Number(row.Other) + point.costUsd; dataByDate.set(point.date, row) } return { data: [...dataByDate.values()].sort((a, b) => String(a.date).localeCompare(String(b.date))), topNames } }, [drivers]) }
 function DailyCostChart({ costs, modelData }: { costs?: CostOverview; modelData: Record<string, string | number>[] }) { const labels = [...(costs?.seriesByModel ?? []).slice(0, 4).map((item) => item.model), "Other"]; return <ChartContainer config={chartConfig} className="h-64 w-full"><BarChart data={modelData}><CartesianGrid vertical={false} /><XAxis dataKey="date" tickFormatter={formatDate} /><YAxis /><ChartTooltip content={<ChartTooltipContent />} /><Legend formatter={legendTextFormatter} />{labels.map((label, index) => <Bar key={label} dataKey={label} name={label} stackId="cost" fill={`var(--chart-${index + 1})`} />)}</BarChart></ChartContainer> }
 function WorkflowCostComparisonChart({ drivers }: { drivers: AnalyticsCostDriver[] }) { const { data, topNames } = useWorkflowCostComparisonData(drivers); if (drivers.length === 0) return <p className="py-8 text-center text-sm text-muted-foreground">No cost data for this period.</p>; return <ChartContainer config={chartConfig} className="h-64 w-full"><LineChart data={data}><CartesianGrid vertical={false} /><XAxis dataKey="date" tickFormatter={formatDate} /><YAxis /><ChartTooltip content={<ChartTooltipContent />} /><Legend formatter={legendTextFormatter} />{topNames.map((name, index) => <Line key={name} type="monotone" dataKey={name} name={name} stroke={`var(--chart-${index + 1})`} dot={false} strokeWidth={2} />)}{drivers.length > 5 && <Line type="monotone" dataKey="Other" name="Other" stroke="var(--muted-foreground)" dot={false} strokeWidth={2} />}</LineChart></ChartContainer> }
-function OutcomesChart({ effect }: { effect?: AnalyticsEffectiveness }) { return <ChartContainer config={chartConfig} className="h-64 w-full"><BarChart data={effect?.outcomesByDay}><CartesianGrid vertical={false} /><XAxis dataKey="date" tickFormatter={formatDate} /><YAxis allowDecimals={false} /><ChartTooltip content={<ChartTooltipContent />} /><Legend formatter={legendTextFormatter} /><Bar dataKey="clean" name="Clean" stackId="outcome" fill="var(--color-clean)" /><Bar dataKey="humanInTheLoop" name="Human on the loop" stackId="outcome" fill="var(--color-humanInTheLoop)" /><Bar dataKey="warning" name="Warning" stackId="outcome" fill="var(--color-warning)" /><Bar dataKey="failed" name="Failed" stackId="outcome" fill="var(--color-failed)" /></BarChart></ChartContainer> }
+function OutcomesChart({ effect }: { effect?: AnalyticsEffectiveness }) { return <ChartContainer config={chartConfig} className="h-64 w-full"><BarChart data={effect?.outcomesByDay ?? []}><CartesianGrid vertical={false} /><XAxis dataKey="date" tickFormatter={formatDate} /><YAxis allowDecimals={false} /><ChartTooltip content={<ChartTooltipContent />} /><Legend formatter={legendTextFormatter} /><Bar dataKey="clean" name="Clean" stackId="outcome" fill="var(--color-clean)" /><Bar dataKey="humanInTheLoop" name="Human on the loop" stackId="outcome" fill="var(--color-humanInTheLoop)" /><Bar dataKey="warning" name="Warning" stackId="outcome" fill="var(--color-warning)" /><Bar dataKey="failed" name="Failed" stackId="outcome" fill="var(--color-failed)" /></BarChart></ChartContainer> }
 function DeliveryFunnel({ effect }: { effect?: AnalyticsEffectiveness }) {
   const stages = [
     ["agentStarted", "Agent started"],
@@ -816,11 +828,12 @@ function DeliveryFunnel({ effect }: { effect?: AnalyticsEffectiveness }) {
     return <div key={name}><div className="mb-1 flex justify-between text-sm"><span>{label}</span><span className="tabular-nums">{value} {index ? `(${formatPercent(previous ? value / previous : undefined)})` : ""}</span></div><div className="h-5 rounded bg-muted"><div className="h-full rounded bg-chart-1" style={{ width: `${Math.min(100, (value / (effect?.funnel.agentStarted || 1)) * 100)}%` }} /></div></div>
   })}</div>
 }
-function TicketThroughputChart({ effect }: { effect?: AnalyticsEffectiveness }) { if (!effect?.ticketsByDay?.length) return <p className="py-8 text-center text-sm text-muted-foreground">No ticket data for this period.</p>; return <ChartContainer config={chartConfig} className="h-64 w-full"><BarChart data={effect.ticketsByDay}><CartesianGrid vertical={false} /><XAxis dataKey="date" tickFormatter={formatDate} /><YAxis allowDecimals={false} /><ChartTooltip content={<ChartTooltipContent />} /><Legend formatter={legendTextFormatter} /><Bar dataKey="delivered" name="Delivered" stackId="ticket" fill="var(--color-ticketDelivered)" /><Bar dataKey="inProgress" name="In progress" stackId="ticket" fill="var(--color-ticketInProgress)" /><Bar dataKey="failed" name="Failed" stackId="ticket" fill="var(--color-ticketFailed)" /></BarChart></ChartContainer> }
-function RunsPerTicketChart({ effect }: { effect?: AnalyticsEffectiveness }) { if (!effect?.runsPerTicket?.length) return <p className="py-8 text-center text-sm text-muted-foreground">No ticket data for this period.</p>; return <ChartContainer config={chartConfig} className="h-64 w-full"><BarChart data={effect.runsPerTicket} layout="vertical" margin={{ right: 36 }}><CartesianGrid horizontal={false} /><XAxis type="number" allowDecimals={false} /><YAxis type="category" dataKey="bucket" width={40} /><Bar dataKey="tickets" fill="var(--chart-1)" radius={4}><LabelList dataKey="tickets" position="right" /></Bar></BarChart></ChartContainer> }
-function TopTicketTooltip({ active, payload }: { active?: boolean; payload?: { payload?: AnalyticsEffectiveness["topTicketsByCost"][number] }[] }) { const ticket = payload?.[0]?.payload; if (!active || !ticket) return null; const outcome = ticket.outcome === "in_progress" ? "In progress" : ticket.outcome ? ticket.outcome.charAt(0).toUpperCase() + ticket.outcome.slice(1) : "—"; return <div className={`${tooltipContentClassName} px-3 py-2 text-xs`}><div className="font-medium">{ticket.issueTitle}</div><div className="text-muted-foreground">{usd.format(ticket.costUsd)} · {ticket.runs} runs · {outcome}</div></div> }
-function TopTicketsByCostChart({ effect }: { effect?: AnalyticsEffectiveness }) { if (!effect?.topTicketsByCost?.length) return <p className="py-8 text-center text-sm text-muted-foreground">No ticket data for this period.</p>; return <ChartContainer config={chartConfig} className="h-64 w-full"><BarChart data={effect.topTicketsByCost} layout="vertical" margin={{ right: 36 }}><CartesianGrid horizontal={false} /><XAxis type="number" tickFormatter={(value) => usdWhole.format(value)} /><YAxis type="category" dataKey="issueId" width={90} interval={0} tickFormatter={(id) => (id.length > 14 ? id.slice(0, 13) + "…" : id)} /><ChartTooltip content={<TopTicketTooltip />} /><Bar dataKey="costUsd" fill="var(--chart-1)" radius={4}><LabelList dataKey="costUsd" position="right" formatter={(value: number) => usd.format(value)} /></Bar></BarChart></ChartContainer> }
-function CostPerMergedPrChart({ effect }: { effect?: AnalyticsEffectiveness }) { return <ChartContainer config={chartConfig} className="h-64 w-full"><LineChart data={effect?.costPerMergedPr.weekly}><CartesianGrid vertical={false} /><XAxis dataKey="weekStart" tickFormatter={formatDate} /><YAxis /><ChartTooltip content={<ChartTooltipContent />} /><ReferenceLine y={effect?.costPerMergedPr.average} stroke="var(--muted-foreground)" /><Line type="monotone" dataKey="costPerMergedPr" name="Cost per merged PR" stroke="var(--color-costPerMergedPr)" dot={false} /></LineChart></ChartContainer> }
+function TicketThroughputChart({ effect }: { effect?: AnalyticsEffectiveness }) { const days = effect?.ticketsByDay ?? []; if (!days.length) return <p className="py-8 text-center text-sm text-muted-foreground">No ticket data for this period.</p>; return <ChartContainer config={chartConfig} className="h-64 w-full"><BarChart data={days}><CartesianGrid vertical={false} /><XAxis dataKey="date" tickFormatter={formatDate} /><YAxis allowDecimals={false} /><ChartTooltip content={<ChartTooltipContent />} /><Legend formatter={legendTextFormatter} /><Bar dataKey="delivered" name="Delivered" stackId="ticket" fill="var(--color-ticketDelivered)" /><Bar dataKey="inProgress" name="In progress" stackId="ticket" fill="var(--color-ticketInProgress)" /><Bar dataKey="failed" name="Failed" stackId="ticket" fill="var(--color-ticketFailed)" /></BarChart></ChartContainer> }
+function RunsPerTicketChart({ effect }: { effect?: AnalyticsEffectiveness }) { const buckets = effect?.runsPerTicket ?? []; if (!buckets.length) return <p className="py-8 text-center text-sm text-muted-foreground">No ticket data for this period.</p>; return <ChartContainer config={chartConfig} className="h-64 w-full"><BarChart data={buckets} layout="vertical" margin={{ right: 36 }}><CartesianGrid horizontal={false} /><XAxis type="number" allowDecimals={false} /><YAxis type="category" dataKey="bucket" width={40} /><Bar dataKey="tickets" fill="var(--chart-1)" radius={4}><LabelList dataKey="tickets" position="right" /></Bar></BarChart></ChartContainer> }
+type TopTicket = NonNullable<AnalyticsEffectiveness["topTicketsByCost"]>[number]
+function TopTicketTooltip({ active, payload }: { active?: boolean; payload?: { payload?: TopTicket }[] }) { const ticket = payload?.[0]?.payload; if (!active || !ticket) return null; const outcome = ticket.outcome === "in_progress" ? "In progress" : ticket.outcome ? ticket.outcome.charAt(0).toUpperCase() + ticket.outcome.slice(1) : "—"; return <div className={`${tooltipContentClassName} px-3 py-2 text-xs`}><div className="font-medium">{ticket.issueTitle}</div><div className="text-muted-foreground">{usd.format(ticket.costUsd)} · {ticket.runs} runs · {outcome}</div></div> }
+function TopTicketsByCostChart({ effect }: { effect?: AnalyticsEffectiveness }) { const tickets = effect?.topTicketsByCost ?? []; if (!tickets.length) return <p className="py-8 text-center text-sm text-muted-foreground">No ticket data for this period.</p>; return <ChartContainer config={chartConfig} className="h-64 w-full"><BarChart data={tickets} layout="vertical" margin={{ right: 36 }}><CartesianGrid horizontal={false} /><XAxis type="number" tickFormatter={(value) => usdWhole.format(value)} /><YAxis type="category" dataKey="issueId" width={90} interval={0} tickFormatter={(id) => (id.length > 14 ? id.slice(0, 13) + "…" : id)} /><ChartTooltip content={<TopTicketTooltip />} /><Bar dataKey="costUsd" fill="var(--chart-1)" radius={4}><LabelList dataKey="costUsd" position="right" formatter={(value: number) => usd.format(value)} /></Bar></BarChart></ChartContainer> }
+function CostPerMergedPrChart({ effect }: { effect?: AnalyticsEffectiveness }) { return <ChartContainer config={chartConfig} className="h-64 w-full"><LineChart data={effect?.costPerMergedPr.weekly ?? []}><CartesianGrid vertical={false} /><XAxis dataKey="weekStart" tickFormatter={formatDate} /><YAxis /><ChartTooltip content={<ChartTooltipContent />} /><ReferenceLine y={effect?.costPerMergedPr.average} stroke="var(--muted-foreground)" /><Line type="monotone" dataKey="costPerMergedPr" name="Cost per merged PR" stroke="var(--color-costPerMergedPr)" dot={false} /></LineChart></ChartContainer> }
 function CostDrivers({ drivers }: { drivers: AnalyticsCostDriver[] }) {
   return <ChartCard title="Top cost drivers" sub="By workflow" info="Where the money goes: total spend and efficiency per workflow in the selected period." stat={`${drivers.length} workflows · ${usdWhole.format(drivers.reduce((sum, driver) => sum + driver.costUsd, 0))} total`}><Table className="[&_th]:h-auto [&_th]:px-2 [&_th]:pt-0 [&_th]:pb-2 [&_th]:text-xs [&_td]:px-2 [&_td]:py-[9px]"><TableHeader><TableRow><TableHead className="min-w-[35ch]">Workflow</TableHead><TableHead className="text-right">Runs</TableHead><TableHead className="text-right">Success</TableHead><TableHead className="text-right">Cost</TableHead><TableHead className="text-right">Cost / merged PR</TableHead></TableRow></TableHeader><TableBody>{drivers.slice(0, 10).map((driver) => <TableRow key={driver.name}><TableCell className="font-medium min-w-[35ch]"><WorkflowName name={driver.name} /></TableCell><TableCell className="text-right font-mono tabular-nums">{driver.runs}</TableCell><TableCell className="text-right font-mono tabular-nums">{formatPercent(driver.successRate)}</TableCell><TableCell className="text-right font-mono tabular-nums">{usd.format(driver.costUsd)}</TableCell><TableCell className="text-right font-mono tabular-nums">{usd.format(driver.costPerMergedPr)}</TableCell></TableRow>)}</TableBody></Table></ChartCard>
 }
