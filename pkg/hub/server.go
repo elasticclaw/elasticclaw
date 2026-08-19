@@ -578,14 +578,14 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/workspaces/{workspace}/webhooks/external", s.handleExternalWebhook)
 	mux.HandleFunc("/api/factories/", s.withAuth(s.handleFactoryEvents))                                               // GET /api/factories/:name/events
 	mux.HandleFunc("/api/factories/{name}/trigger", s.withAuth(s.handleFactoryTrigger))                                // POST manual trigger
-	mux.HandleFunc("/api/factories/{name}/analytics", s.withAuth(s.handleFactoryAnalytics))                            // GET factory analytics
+	mux.HandleFunc("/api/factories/{name}/analytics", s.withStrictAdminAuth(s.handleFactoryAnalytics))                 // GET factory analytics
 	mux.HandleFunc("/api/factories", s.withAdminForMethods(s.handleFactoriesCRUD, http.MethodPost, http.MethodDelete)) // factory CRUD (GET list, POST push)
-	mux.HandleFunc("/api/analytics/factories", s.withAdminAuth(s.handleAllFactoriesAnalytics))                         // GET all factories analytics
+	mux.HandleFunc("/api/analytics/factories", s.withStrictAdminAuth(s.handleAllFactoriesAnalytics))                   // GET all factories analytics
 	mux.HandleFunc("/api/analytics/summary", s.withAdminAuth(s.handleTaskRunAnalyticsSummary))
-	mux.HandleFunc("/api/analytics/costs", s.withAdminAuth(s.handleTaskRunAnalyticsCosts))
-	mux.HandleFunc("/api/analytics/effectiveness", s.withAdminAuth(s.handleTaskRunAnalyticsEffectiveness))
-	mux.HandleFunc("/api/analytics/cost-drivers", s.withAdminAuth(s.handleTaskRunAnalyticsCostDrivers))
-	mux.HandleFunc("/api/analytics/general-stats", s.withAdminAuth(s.handleTaskRunAnalyticsGeneralStats))
+	mux.HandleFunc("/api/analytics/costs", s.withStrictAdminAuth(s.handleTaskRunAnalyticsCosts))
+	mux.HandleFunc("/api/analytics/effectiveness", s.withStrictAdminAuth(s.handleTaskRunAnalyticsEffectiveness))
+	mux.HandleFunc("/api/analytics/cost-drivers", s.withStrictAdminAuth(s.handleTaskRunAnalyticsCostDrivers))
+	mux.HandleFunc("/api/analytics/general-stats", s.withStrictAdminAuth(s.handleTaskRunAnalyticsGeneralStats))
 	mux.HandleFunc("/api/analytics/filter-options", s.withAdminAuth(s.handleTaskRunAnalyticsFilterOptions))
 	mux.HandleFunc("/api/analytics/runs", s.withAdminAuth(s.handleTaskRunAnalyticsRuns))
 	mux.HandleFunc("/api/analytics/runs/", s.withAdminAuth(s.handleTaskRunAnalyticsRuns))
@@ -708,10 +708,26 @@ func (s *Server) withAuth(next http.HandlerFunc) http.HandlerFunc {
 }
 
 func (s *Server) withAdminAuth(next http.HandlerFunc) http.HandlerFunc {
+	return s.withAdminAuthMode(next, true)
+}
+
+// withStrictAdminAuth permits only administrators (or legacy tenant tokens).
+// Analytics routes are strict by default: /api/analytics/factories, costs,
+// effectiveness, cost-drivers, and general-stats, plus
+// /api/factories/{name}/analytics, use this wrapper. The tag-scoped bypass in
+// withAdminAuth is opt-in only for /api/analytics/summary, filter-options,
+// runs, runs/, and tickets, whose handlers call taskRunAnalyticsViewACL for
+// every returned row.
+func (s *Server) withStrictAdminAuth(next http.HandlerFunc) http.HandlerFunc {
+	return s.withAdminAuthMode(next, false)
+}
+
+func (s *Server) withAdminAuthMode(next http.HandlerFunc, allowTagScoped bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 		if token == "" {
-			token = r.URL.Query().Get("token")
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
 		}
 		tenantID, githubLogin, ok := s.resolveAuthToken(token)
 		if !ok {
@@ -724,13 +740,7 @@ func (s *Server) withAdminAuth(next http.HandlerFunc) http.HandlerFunc {
 			accessCfg = s.hubCfg.Auth.Access
 		}
 		s.mu.RUnlock()
-		// Non-admin access is permitted only when the tenant has configured
-		// tag-scoped viewing (ViewRequiresTags): those callers are restricted
-		// downstream to their own tagged runs by the existing per-row ACL
-		// (see taskRunAnalyticsViewACL), so they never see the tenant-wide
-		// data the admin gate exists to protect. Anyone else authenticated
-		// but neither admin nor tag-scoped is rejected.
-		if githubLogin != "" && !isAccessAdmin(accessCfg, githubLogin) && (accessCfg == nil || len(accessCfg.ViewRequiresTags) == 0) {
+		if githubLogin != "" && !isAccessAdmin(accessCfg, githubLogin) && (!allowTagScoped || accessCfg == nil || len(accessCfg.ViewRequiresTags) == 0) {
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}
