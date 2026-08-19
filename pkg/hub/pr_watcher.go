@@ -970,19 +970,6 @@ func (s *Server) checkCIStatus(pr clawPR, token string) {
 		conclusion = ciConclusionFailure
 	}
 
-	// Conditional UPDATE = claim, same idiom as claimPipelineStageTransition.
-	// Exactly one poll (and exactly one hub process) observes a given
-	// (sha, conclusion) pair, so the injection below cannot double-fire.
-	res, err := s.db.Exec(
-		`UPDATE claw_prs SET last_ci_sha=?, last_ci_conclusion=? WHERE id=? AND NOT (last_ci_sha=? AND last_ci_conclusion=?)`,
-		headSHA, conclusion, pr.id, headSHA, conclusion)
-	if err != nil {
-		log.Printf("[pr-watcher] failed to claim CI status for %s: %v", pr.prURL, err)
-		return
-	}
-	if claimed, err := res.RowsAffected(); err != nil || claimed == 0 {
-		return
-	}
 	tenantID, runID, attemptID, hasRun, err := s.taskRunContextForClaw(pr.clawID)
 	if err != nil {
 		log.Printf("[pr-watcher] find CI task run for %s: %v", pr.prURL, err)
@@ -994,6 +981,20 @@ func (s *Server) checkCIStatus(pr clawPR, token string) {
 		return
 	}
 	defer tx.Rollback()
+
+	// Conditional UPDATE = claim, same idiom as claimPipelineStageTransition.
+	// Exactly one poll (and exactly one hub process) observes a given
+	// (sha, conclusion) pair, so the injection below cannot double-fire.
+	res, err := tx.Exec(
+		`UPDATE claw_prs SET last_ci_sha=?, last_ci_conclusion=? WHERE id=? AND NOT (last_ci_sha=? AND last_ci_conclusion=?)`,
+		headSHA, conclusion, pr.id, headSHA, conclusion)
+	if err != nil {
+		log.Printf("[pr-watcher] failed to claim CI status for %s: %v", pr.prURL, err)
+		return
+	}
+	if claimed, err := res.RowsAffected(); err != nil || claimed == 0 {
+		return
+	}
 
 	ciEventType := taskRunEventCISucceeded
 	if conclusion == ciConclusionFailure {
