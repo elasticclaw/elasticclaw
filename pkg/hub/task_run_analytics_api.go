@@ -1055,10 +1055,21 @@ func (s *Server) readTaskRunAnalyticsEventsForRuns(tenantID string, runIDs []str
 		return eventsByRun, nil
 	}
 	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(runIDs)), ",")
-	args := make([]any, 0, len(runIDs)+1)
+	args := make([]any, 0, len(runIDs)+1+len(taskRunAnalyticsStoryLabels))
 	args = append(args, tenantID)
 	for _, runID := range runIDs {
 		args = append(args, runID)
+	}
+	// Only the event types collapseTaskRunAnalyticsTicketStory consumes are
+	// needed here; everything else costs a row scan and a JSON unmarshal for
+	// a detail blob that gets discarded.
+	storyEventTypes := make([]string, 0, len(taskRunAnalyticsStoryLabels))
+	for eventType := range taskRunAnalyticsStoryLabels {
+		storyEventTypes = append(storyEventTypes, eventType)
+	}
+	eventTypePlaceholders := strings.TrimSuffix(strings.Repeat("?,", len(storyEventTypes)), ",")
+	for _, eventType := range storyEventTypes {
+		args = append(args, eventType)
 	}
 	rows, err := s.db.Query(`
 		SELECT run_id, id, attempt_id, event_key, source, source_event_id, source_delivery_id, event_type,
@@ -1066,7 +1077,7 @@ func (s *Server) readTaskRunAnalyticsEventsForRuns(tenantID string, runIDs []str
 		       interaction_role, target_type, target_id, target_url, warning_type, failure_type,
 		       detail, created_at
 		  FROM task_run_events
-		 WHERE tenant_id=? AND run_id IN (`+placeholders+`)`, args...)
+		 WHERE tenant_id=? AND run_id IN (`+placeholders+`) AND event_type IN (`+eventTypePlaceholders+`)`, args...)
 	if err != nil {
 		return nil, err
 	}

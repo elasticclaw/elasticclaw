@@ -17,6 +17,19 @@ import (
 var ticketMetadataEnrichment = make(chan struct{}, 32)
 var ticketMetadataInflight sync.Map
 
+const taskRunAnalyticsTicketCacheTTL = time.Minute
+
+type taskRunAnalyticsTicketTotalCacheEntry struct {
+	total     int
+	expiresAt time.Time
+}
+
+type taskRunAnalyticsTicketACLGroupCacheEntry struct {
+	groups    []taskRunAnalyticsTicketGroup
+	truncated bool
+	expiresAt time.Time
+}
+
 type taskRunAnalyticsTicketsResponse struct {
 	Tickets    []taskRunAnalyticsTicketView `json:"tickets"`
 	NextCursor string                       `json:"nextCursor,omitempty"`
@@ -172,11 +185,14 @@ func (s *Server) handleTaskRunAnalyticsTickets(w http.ResponseWriter, r *http.Re
 
 func (s *Server) readTaskRunAnalyticsTicketGroupsPage(filters taskRunAnalyticsFilters, githubLogin string, cursorAt int64, cursorIssueID string, limit int) ([]taskRunAnalyticsTicketGroup, int, bool, error) {
 	// Restricted OAuth callers retain the established ACL stream; normal tenant reads are SQL paginated.
-	if s.taskRunAnalyticsViewACL(githubLogin) != nil {
-		groups, truncated, err := s.readTaskRunAnalyticsTicketGroups(filters, githubLogin, s.taskRunAnalyticsViewACL(githubLogin))
+	accessCfg := s.taskRunAnalyticsViewACL(githubLogin)
+	if accessCfg != nil {
+		groups, truncated, err := s.readTaskRunAnalyticsTicketGroups(filters, githubLogin, accessCfg)
 		if err != nil {
 			return nil, 0, false, err
 		}
+		// ACL totals count only tickets observed in the bounded materialized run
+		// window; unlike the SQL path, they are not a tenant-wide exact count.
 		total := len(groups)
 		start := 0
 		for start < len(groups) && cursorAt > 0 && (groups[start].cursorAt() > cursorAt || (groups[start].cursorAt() == cursorAt && groups[start].issueID >= cursorIssueID)) {
@@ -185,8 +201,8 @@ func (s *Server) readTaskRunAnalyticsTicketGroupsPage(filters taskRunAnalyticsFi
 		return groups[start:], total, truncated, nil
 	}
 	where, args := taskRunAnalyticsSummaryWhere(filters)
-	var total int
-	if err := s.db.QueryRow(`SELECT COUNT(DISTINCT issue_id) FROM task_run_summaries `+where+` AND issue_id != ''`, args...).Scan(&total); err != nil {
+	total, err := s.readTaskRunAnalyticsTicketTotal(where, args)
+	if err != nil {
 		return nil, 0, false, err
 	}
 	orderAt := `MAX(COALESCE(NULLIF(MIN(NULLIF(issue_created_at,0)),0), MIN(started_at), 1), 1)`
@@ -235,6 +251,34 @@ func (s *Server) readTaskRunAnalyticsTicketGroupsPage(filters taskRunAnalyticsFi
 		return nil, 0, false, err
 	}
 	return taskRunAnalyticsTicketGroupsFromHydration(ids, runs), total, false, nil
+}
+
+func taskRunAnalyticsTicketCacheKey(where string, args []any, githubLogin string) string {
+	return fmt.Sprintf("%s|%#v|%s", where, args, githubLogin)
+}
+
+func (s *Server) readTaskRunAnalyticsTicketTotal(where string, args []any) (int, error) {
+	key := taskRunAnalyticsTicketCacheKey(where, args, "")
+	now := time.Now()
+	s.ticketAnalyticsCacheMu.Lock()
+	if entry, ok := s.ticketAnalyticsTotalCache[key]; ok && now.Before(entry.expiresAt) {
+		s.ticketAnalyticsCacheMu.Unlock()
+		return entry.total, nil
+	}
+	s.ticketAnalyticsCacheMu.Unlock()
+
+	var total int
+	if err := s.db.QueryRow(`SELECT COUNT(DISTINCT issue_id) FROM task_run_summaries `+where+` AND issue_id != ''`, args...).Scan(&total); err != nil {
+		return 0, err
+	}
+	s.ticketAnalyticsCacheMu.Lock()
+	if s.ticketAnalyticsTotalCache == nil {
+		s.ticketAnalyticsTotalCache = map[string]taskRunAnalyticsTicketTotalCacheEntry{}
+	}
+	s.ticketAnalyticsTotalCache[key] = taskRunAnalyticsTicketTotalCacheEntry{total: total, expiresAt: now.Add(taskRunAnalyticsTicketCacheTTL)}
+	s.ticketAnalyticsTotalQueries++
+	s.ticketAnalyticsCacheMu.Unlock()
+	return total, nil
 }
 
 func taskRunAnalyticsTicketGroupsFromHydration(ids []string, runs []taskRunAnalyticsRunView) []taskRunAnalyticsTicketGroup {
@@ -300,6 +344,16 @@ const taskRunAnalyticsTicketACLMaxRuns = 5_000
 // reads cannot express tag permissions in SQL, so cap their materialized run
 // window rather than allowing a restricted request to retain an unbounded set.
 func (s *Server) readTaskRunAnalyticsTicketGroups(filters taskRunAnalyticsFilters, githubLogin string, accessCfg *types.AccessConfig) ([]taskRunAnalyticsTicketGroup, bool, error) {
+	where, args := taskRunAnalyticsSummaryWhere(filters)
+	key := taskRunAnalyticsTicketCacheKey(where, args, githubLogin)
+	now := time.Now()
+	s.ticketAnalyticsCacheMu.Lock()
+	if entry, ok := s.ticketAnalyticsACLGroupCache[key]; ok && now.Before(entry.expiresAt) {
+		s.ticketAnalyticsCacheMu.Unlock()
+		return entry.groups, entry.truncated, nil
+	}
+	s.ticketAnalyticsCacheMu.Unlock()
+
 	groups := map[string][]taskRunAnalyticsRunView{}
 	materializedRuns := 0
 	truncated := false
@@ -336,6 +390,13 @@ func (s *Server) readTaskRunAnalyticsTicketGroups(filters taskRunAnalyticsFilter
 		}
 		return left > right
 	})
+	s.ticketAnalyticsCacheMu.Lock()
+	if s.ticketAnalyticsACLGroupCache == nil {
+		s.ticketAnalyticsACLGroupCache = map[string]taskRunAnalyticsTicketACLGroupCacheEntry{}
+	}
+	s.ticketAnalyticsACLGroupCache[key] = taskRunAnalyticsTicketACLGroupCacheEntry{groups: tickets, truncated: truncated, expiresAt: now.Add(taskRunAnalyticsTicketCacheTTL)}
+	s.ticketAnalyticsACLStreams++
+	s.ticketAnalyticsCacheMu.Unlock()
 	return tickets, truncated, nil
 }
 

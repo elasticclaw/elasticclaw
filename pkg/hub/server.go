@@ -76,6 +76,14 @@ type Server struct {
 	// lastRateLimitSkipLog throttles the "poll skipped, quota exhausted" log. Guarded by s.mu.
 	lastRateLimitSkipLog time.Time
 
+	// ticketAnalyticsCacheMu protects short-lived ticket analytics results. The
+	// ticket endpoint is refreshed frequently and its aggregates are expensive.
+	ticketAnalyticsCacheMu       sync.Mutex
+	ticketAnalyticsTotalCache    map[string]taskRunAnalyticsTicketTotalCacheEntry
+	ticketAnalyticsACLGroupCache map[string]taskRunAnalyticsTicketACLGroupCacheEntry
+	ticketAnalyticsTotalQueries  int
+	ticketAnalyticsACLStreams    int
+
 	// ghTokenCache holds GitHub App installation tokens until shortly before
 	// they expire, keyed by requested repo access.
 	ghTokenMu    sync.Mutex

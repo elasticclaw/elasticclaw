@@ -11,11 +11,25 @@ import (
 	"testing"
 	"time"
 
+	"github.com/elasticclaw/elasticclaw/pkg/types"
 	"modernc.org/sqlite"
 )
 
 func TestTaskRunAnalyticsTicketPageQueriesUseTicketPageIndex(t *testing.T) {
 	_, db := newTaskRunAnalyticsAPITestServer(t)
+	for issue := 0; issue < 60; issue++ {
+		for run := 0; run < 3; run++ {
+			runID := fmt.Sprintf("ticket-plan-%02d-%d", issue, run)
+			insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{
+				RunID: runID, AttemptID: "attempt-" + runID, ClawID: "claw-" + runID, TenantID: "test-tenant-id",
+				Status: taskRunStatusClean, Phase: taskRunPhaseTerminal, OwnerType: taskRunOwnerWorkflow,
+				StartedAt: int64(10_000 + issue*10 + run), IssueCreatedAt: int64(5_000 + issue),
+			})
+			if _, err := db.Exec(`UPDATE task_run_summaries SET issue_id=? WHERE run_id=?`, fmt.Sprintf("PLAN-%02d", issue), runID); err != nil {
+				t.Fatalf("set fixture issue ID: %v", err)
+			}
+		}
+	}
 	filters := taskRunAnalyticsFilters{TenantID: "test-tenant-id"}
 	where, args := taskRunAnalyticsSummaryWhere(filters)
 	orderAt := `MAX(COALESCE(NULLIF(MIN(NULLIF(issue_created_at,0)),0), MIN(started_at), 1), 1)`
@@ -47,9 +61,72 @@ func TestTaskRunAnalyticsTicketPageQueriesUseTicketPageIndex(t *testing.T) {
 			t.Fatalf("read ticket page plan: %v", err)
 		}
 		rows.Close()
-		if !strings.Contains(strings.Join(details, "\n"), "idx_task_run_summaries_ticket_page") {
+		plan := strings.Join(details, "\n")
+		if !strings.Contains(plan, "idx_task_run_summaries_ticket_page") {
 			t.Fatalf("ticket page query did not use idx_task_run_summaries_ticket_page: %s", strings.Join(details, "; "))
 		}
+		if strings.Contains(query, "SELECT issue_id") && strings.Contains(plan, "SCAN task_run_summaries") && !strings.Contains(plan, "USING INDEX") && !strings.Contains(plan, "USING COVERING INDEX") {
+			t.Fatalf("ticket page query performed a full table scan: %s", plan)
+		}
+	}
+}
+
+func TestTaskRunAnalyticsTicketPageCachesTotalAcrossCursors(t *testing.T) {
+	s, db := newTaskRunAnalyticsAPITestServer(t)
+	for issue := 0; issue < 12; issue++ {
+		runID := fmt.Sprintf("ticket-total-%02d", issue)
+		insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{
+			RunID: runID, AttemptID: "attempt-" + runID, ClawID: "claw-" + runID, TenantID: "test-tenant-id",
+			Status: taskRunStatusClean, Phase: taskRunPhaseTerminal, OwnerType: taskRunOwnerWorkflow,
+			StartedAt: int64(1_000 + issue), IssueCreatedAt: int64(1_000 + issue),
+		})
+		if _, err := db.Exec(`UPDATE task_run_summaries SET issue_id=? WHERE run_id=?`, fmt.Sprintf("TOTAL-%02d", issue), runID); err != nil {
+			t.Fatalf("set fixture issue ID: %v", err)
+		}
+	}
+	filters := taskRunAnalyticsFilters{TenantID: "test-tenant-id"}
+	page1, total1, _, err := s.readTaskRunAnalyticsTicketGroupsPage(filters, "", 0, "", 5)
+	if err != nil || total1 != 12 || len(page1) != 6 {
+		t.Fatalf("first ticket page = %d groups, total %d, err %v", len(page1), total1, err)
+	}
+	page2, total2, _, err := s.readTaskRunAnalyticsTicketGroupsPage(filters, "", page1[4].cursorAt(), page1[4].issueID, 5)
+	if err != nil || total2 != 12 || len(page2) == 0 || page2[0].issueID == page1[0].issueID {
+		t.Fatalf("second ticket page = %#v, total %d, err %v", page2, total2, err)
+	}
+	if s.ticketAnalyticsTotalQueries != 1 {
+		t.Fatalf("COUNT(DISTINCT issue_id) queries = %d, want 1 across cursor pages", s.ticketAnalyticsTotalQueries)
+	}
+}
+
+func TestTaskRunAnalyticsTicketACLGroupsCacheStream(t *testing.T) {
+	s, db := newTaskRunAnalyticsAPITestServer(t)
+	accessCfg := &types.AccessConfig{ViewRequiresTags: []string{"owner={user}"}}
+	for issue := 0; issue < 80; issue++ {
+		runID := fmt.Sprintf("ticket-acl-%02d", issue)
+		clawID := "claw-" + runID
+		insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{
+			RunID: runID, AttemptID: "attempt-" + runID, ClawID: clawID, TenantID: "test-tenant-id",
+			Status: taskRunStatusClean, Phase: taskRunPhaseTerminal, OwnerType: taskRunOwnerWorkflow,
+			StartedAt: int64(1_000 + issue), IssueCreatedAt: int64(1_000 + issue),
+		})
+		if _, err := db.Exec(`UPDATE task_run_summaries SET issue_id=? WHERE run_id=?`, fmt.Sprintf("ACL-%02d", issue), runID); err != nil {
+			t.Fatalf("set fixture issue ID: %v", err)
+		}
+		if _, err := db.Exec(`INSERT INTO claws(id, tenant_id, name, tags, created_at) VALUES(?,?,?,?,datetime('now'))`, clawID, "test-tenant-id", clawID, `["owner=alice"]`); err != nil {
+			t.Fatalf("insert fixture claw: %v", err)
+		}
+	}
+	filters := taskRunAnalyticsFilters{TenantID: "test-tenant-id"}
+	page1, _, err := s.readTaskRunAnalyticsTicketGroups(filters, "alice", accessCfg)
+	if err != nil || len(page1) != 80 {
+		t.Fatalf("first ACL ticket groups = %d, err %v", len(page1), err)
+	}
+	page2, _, err := s.readTaskRunAnalyticsTicketGroups(filters, "alice", accessCfg)
+	if err != nil || len(page2) != len(page1) {
+		t.Fatalf("second ACL ticket groups = %d, err %v", len(page2), err)
+	}
+	if s.ticketAnalyticsACLStreams != 1 {
+		t.Fatalf("ACL ticket streams = %d, want cached single stream", s.ticketAnalyticsACLStreams)
 	}
 }
 
