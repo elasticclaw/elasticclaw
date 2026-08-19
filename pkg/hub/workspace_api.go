@@ -556,7 +556,11 @@ func (s *Server) createClawForManualGitHubIssueWorkflow(ctx context.Context, wor
 }
 
 func (s *Server) queryGitHubIssue(repo, token, base string, issueNumber int) (githubIssuesPollItem, error) {
-	item, err := githubAPIWithBase(base, fmt.Sprintf("repos/%s/issues/%d", repo, issueNumber), token)
+	return s.queryGitHubIssueContext(context.Background(), repo, token, base, issueNumber)
+}
+
+func (s *Server) queryGitHubIssueContext(ctx context.Context, repo, token, base string, issueNumber int) (githubIssuesPollItem, error) {
+	item, err := githubAPIWithBaseContext(ctx, base, fmt.Sprintf("repos/%s/issues/%d", repo, issueNumber), token)
 	if err != nil {
 		return githubIssuesPollItem{}, err
 	}

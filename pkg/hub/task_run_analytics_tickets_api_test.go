@@ -111,8 +111,8 @@ func TestTaskRunAnalyticsEffectivenessAndTicketsShareTicketTotalCache(t *testing
 	if _, err := s.readTaskRunAnalyticsEffectiveness(filters); err != nil {
 		t.Fatalf("read effectiveness: %v", err)
 	}
-	if s.ticketAnalyticsTotalQueries != 1 {
-		t.Fatalf("COUNT(DISTINCT issue_id) queries = %d, want 1", s.ticketAnalyticsTotalQueries)
+	if s.ticketAnalyticsTotalQueries != 0 {
+		t.Fatalf("effectiveness must not use the caption total cache; queries = %d", s.ticketAnalyticsTotalQueries)
 	}
 	if _, _, err := s.readTaskRunAnalyticsTicketGroupsPage(filters, 0, "", 10); err != nil {
 		t.Fatalf("read ticket page: %v", err)
@@ -298,6 +298,26 @@ func TestTaskRunAnalyticsTicketsHandlerHonorsMultiValueDimensionFilters(t *testi
 	}
 }
 
+func TestTaskRunAnalyticsTicketsSeparatesTrackerWorkspaces(t *testing.T) {
+	s, db := newTaskRunAnalyticsAPITestServer(t)
+	for _, workspace := range []string{"linear-a", "linear-b"} {
+		runID := "same-issue-" + workspace
+		insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{RunID: runID, AttemptID: "attempt-" + runID, ClawID: "claw-" + runID, TenantID: "test-tenant-id", Status: taskRunStatusClean, Phase: taskRunPhaseTerminal, OwnerType: taskRunOwnerWorkflow, Integration: "linear", StartedAt: 1_000, IssueTitle: workspace})
+		if _, err := db.Exec(`UPDATE task_run_summaries SET issue_id=?, integration_workspace=? WHERE run_id=?`, "ENG-1", workspace, runID); err != nil {
+			t.Fatalf("set tracker workspace: %v", err)
+		}
+	}
+	rr := requestTaskRunAnalyticsAPI(t, s, http.MethodGet, "/api/analytics/tickets", "test-token")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("tickets status = %d: %s", rr.Code, rr.Body.String())
+	}
+	var response taskRunAnalyticsTicketsResponse
+	decodeTaskRunAnalyticsAPI(t, rr, &response)
+	if response.Total != 2 || len(response.Tickets) != 2 {
+		t.Fatalf("tickets = %#v, want two distinct workspaces", response)
+	}
+}
+
 // Regression test for finding #16: a fresh cached ticket_metadata row with a
 // zero reported_at (e.g. read before the tracker backfill lands) must not
 // clobber a non-zero, run-derived ReportedAt already set on the ticket.
@@ -320,10 +340,13 @@ func TestApplyOrScheduleTaskRunAnalyticsTicketMetadataKeepsCachedValuesAfterEnri
 	}
 
 	s.applyOrScheduleTaskRunAnalyticsTicketMetadata("test-tenant-id", &taskRunAnalyticsTicketView{IssueID: issueID}, taskRunAnalyticsRunView{}, taskRunAnalyticsTicketMetadata{})
-	key := "test-tenant-id:" + issueID
+	key := "test-tenant-id:" + taskRunAnalyticsTicketKey("", "", issueID)
+	// The enrichment worker is asynchronous; give it a chance to publish its
+	// inflight marker before observing completion.
+	time.Sleep(time.Millisecond)
 	deadline := time.Now().Add(2 * time.Second)
 	for {
-		if _, inflight := ticketMetadataInflight.Load(key); !inflight {
+		if _, inflight := s.ticketMetadataInflight.Load(key); !inflight {
 			break
 		}
 		if time.Now().After(deadline) {
@@ -386,7 +409,7 @@ func TestTaskRunAnalyticsTicketsHandlerUsesConstantQueriesPerPage(t *testing.T) 
 			if _, err := db.Exec(`UPDATE task_run_summaries SET issue_id=? WHERE run_id=?`, issueID, runID); err != nil {
 				t.Fatalf("set issue ID: %v", err)
 			}
-			if _, err := db.Exec(`INSERT INTO ticket_metadata(tenant_id,issue_id,updated_at) VALUES(?,?,?)`, "test-tenant-id", issueID, time.Now().UnixMilli()); err != nil {
+			if _, err := db.Exec(`INSERT INTO ticket_metadata(tenant_id,integration,issue_id,updated_at) VALUES(?,?,?,?)`, "test-tenant-id", "external", issueID, time.Now().UnixMilli()); err != nil {
 				t.Fatalf("seed ticket metadata: %v", err)
 			}
 		}

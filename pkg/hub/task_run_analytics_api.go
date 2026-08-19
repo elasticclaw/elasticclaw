@@ -1070,7 +1070,11 @@ func (s *Server) readTaskRunAnalyticsOutputs(tenantID, runID, runClawID string) 
 }
 
 func (s *Server) readTaskRunAnalyticsFilterOptions(tenantID string) (taskRunAnalyticsFilterOptionsResponse, error) {
-	response := taskRunAnalyticsFilterOptionsResponse{}
+	response := taskRunAnalyticsFilterOptionsResponse{
+		Workspaces: make([]string, 0), Workflows: make([]string, 0), Factories: make([]string, 0),
+		Integrations: make([]string, 0), Repos: make([]string, 0), Models: make([]string, 0),
+		Statuses: make([]string, 0), WarningTypes: make([]string, 0), FailureTypes: make([]string, 0),
+	}
 	var err error
 	response.Workspaces, err = s.readDistinctTaskRunAnalyticsValues(tenantID, "workspace_name")
 	if err != nil {

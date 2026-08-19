@@ -256,11 +256,14 @@ func migrate(db *sql.DB) error {
 		return err
 	}
 	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS ticket_metadata (
-		tenant_id TEXT NOT NULL, issue_id TEXT NOT NULL, requester TEXT NOT NULL DEFAULT '',
+		tenant_id TEXT NOT NULL, integration TEXT NOT NULL DEFAULT '', integration_workspace TEXT NOT NULL DEFAULT '', issue_id TEXT NOT NULL, requester TEXT NOT NULL DEFAULT '',
 		requester_role TEXT NOT NULL DEFAULT '', team TEXT NOT NULL DEFAULT '', priority TEXT NOT NULL DEFAULT '',
 		ask TEXT NOT NULL DEFAULT '', reported_at INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL,
-		PRIMARY KEY (tenant_id, issue_id)
+		PRIMARY KEY (tenant_id, integration, integration_workspace, issue_id)
 	)`); err != nil {
+		return err
+	}
+	if err := migrateTicketMetadataKey(db); err != nil {
 		return err
 	}
 	_, _ = db.Exec(`ALTER TABLE messages ADD COLUMN format TEXT NOT NULL DEFAULT ''`)
@@ -956,6 +959,48 @@ func migrate(db *sql.DB) error {
 		}
 	}
 	return nil
+}
+
+func migrateTicketMetadataKey(db *sql.DB) error {
+	rows, err := db.Query(`PRAGMA table_info(ticket_metadata)`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	hasIntegration := false
+	for rows.Next() {
+		var cid, pk int
+		var name, typ string
+		var notNull int
+		var def any
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &def, &pk); err != nil {
+			return err
+		}
+		if name == "integration" {
+			hasIntegration = true
+		}
+	}
+	if err := rows.Err(); err != nil || hasIntegration {
+		return err
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err = tx.Exec(`ALTER TABLE ticket_metadata RENAME TO ticket_metadata_legacy`); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(`CREATE TABLE ticket_metadata (tenant_id TEXT NOT NULL, integration TEXT NOT NULL DEFAULT '', integration_workspace TEXT NOT NULL DEFAULT '', issue_id TEXT NOT NULL, requester TEXT NOT NULL DEFAULT '', requester_role TEXT NOT NULL DEFAULT '', team TEXT NOT NULL DEFAULT '', priority TEXT NOT NULL DEFAULT '', ask TEXT NOT NULL DEFAULT '', reported_at INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL, PRIMARY KEY (tenant_id, integration, integration_workspace, issue_id))`); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(`INSERT INTO ticket_metadata(tenant_id,issue_id,requester,requester_role,team,priority,ask,reported_at,updated_at) SELECT tenant_id,issue_id,requester,requester_role,team,priority,ask,reported_at,updated_at FROM ticket_metadata_legacy`); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(`DROP TABLE ticket_metadata_legacy`); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func rebuildTaskRunSummariesStatusV3(db *sql.DB) error {

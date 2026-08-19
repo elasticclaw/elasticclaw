@@ -2,6 +2,9 @@ package hub
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"fmt"
 	"log"
@@ -9,16 +12,13 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 )
-
-var ticketMetadataEnrichment = make(chan struct{}, 32)
-var ticketMetadataInflight sync.Map
 
 const taskRunAnalyticsTicketCacheTTL = 5 * time.Minute
 const taskRunAnalyticsTicketCacheMaxEntries = 256
 const taskRunAnalyticsTicketMaxPageDepth = 100
+const taskRunAnalyticsTicketMetadataRefreshLimit = 16
 
 type taskRunAnalyticsTicketTotalCacheEntry struct {
 	total     int
@@ -117,7 +117,7 @@ func (s *Server) handleTaskRunAnalyticsTickets(w http.ResponseWriter, r *http.Re
 		jsonError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	cursorAt, cursorIssueID, cursorDepth, err := decodeTaskRunAnalyticsTicketCursor(r.URL.Query().Get("cursor"))
+	cursorAt, cursorIssueID, cursorDepth, err := s.decodeTaskRunAnalyticsTicketCursor(r.URL.Query().Get("cursor"))
 	if err != nil {
 		jsonError(w, http.StatusBadRequest, err.Error())
 		return
@@ -132,7 +132,7 @@ func (s *Server) handleTaskRunAnalyticsTickets(w http.ResponseWriter, r *http.Re
 	if len(groups) > limit {
 		last := groups[limit-1]
 		if cursorDepth+1 < taskRunAnalyticsTicketMaxPageDepth {
-			nextCursor = encodeTaskRunAnalyticsTicketCursor(last.cursorAt(), last.issueID, cursorDepth+1)
+			nextCursor = s.encodeTaskRunAnalyticsTicketCursor(last.cursorAt(), last.key, cursorDepth+1)
 		}
 		groups = groups[:limit]
 	}
@@ -144,7 +144,7 @@ func (s *Server) handleTaskRunAnalyticsTickets(w http.ResponseWriter, r *http.Re
 		for _, run := range group.runs {
 			runIDs = append(runIDs, run.RunID)
 		}
-		issueIDs = append(issueIDs, group.issueID)
+		issueIDs = append(issueIDs, group.key)
 	}
 	attemptsByRun, err := s.readTaskRunAnalyticsAttemptsForRuns(filters.TenantID, runIDs)
 	if err != nil {
@@ -168,7 +168,7 @@ func (s *Server) handleTaskRunAnalyticsTickets(w http.ResponseWriter, r *http.Re
 	}
 	tickets := make([]taskRunAnalyticsTicketView, 0, len(groups))
 	for _, group := range groups {
-		ticket, err := s.buildTaskRunAnalyticsTicket(filters.TenantID, group.issueID, group.runs, attemptsByRun, prsByRun, eventsByRun, metadataByIssue[group.issueID])
+		ticket, err := s.buildTaskRunAnalyticsTicket(filters.TenantID, group.issueID, group.runs, attemptsByRun, prsByRun, eventsByRun, metadataByIssue[group.key])
 		if err != nil {
 			jsonError(w, http.StatusInternalServerError, "db error")
 			return
@@ -195,13 +195,13 @@ func (s *Server) readTaskRunAnalyticsTicketGroupsPage(filters taskRunAnalyticsFi
 	groupWhere := where + ` AND issue_id != ''`
 	groupArgs := append([]any{}, args...)
 	if cursorAt > 0 && cursorIssueID != "" {
-		groupWhere += ` GROUP BY issue_id HAVING (` + orderAt + ` < ? OR (` + orderAt + ` = ? AND issue_id < ?))`
+		groupWhere += ` GROUP BY ` + taskRunAnalyticsTicketKeySQL + ` HAVING (` + orderAt + ` < ? OR (` + orderAt + ` = ? AND ` + taskRunAnalyticsTicketKeySQL + ` < ?))`
 		groupArgs = append(groupArgs, cursorAt, cursorAt, cursorIssueID)
 	} else {
-		groupWhere += ` GROUP BY issue_id`
+		groupWhere += ` GROUP BY ` + taskRunAnalyticsTicketKeySQL
 	}
 	groupArgs = append(groupArgs, limit+1)
-	rows, err := s.db.Query(`SELECT issue_id, `+orderAt+` FROM task_run_summaries `+groupWhere+` ORDER BY 2 DESC, issue_id DESC LIMIT ?`, groupArgs...)
+	rows, err := s.db.Query(`SELECT `+taskRunAnalyticsTicketKeySQL+`, `+orderAt+` FROM task_run_summaries `+groupWhere+` ORDER BY 2 DESC, 1 DESC LIMIT ?`, groupArgs...)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -222,7 +222,7 @@ func (s *Server) readTaskRunAnalyticsTicketGroupsPage(filters taskRunAnalyticsFi
 		return []taskRunAnalyticsTicketGroup{}, total, nil
 	}
 	ph := strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",")
-	runWhere := where + ` AND issue_id IN (` + ph + `)`
+	runWhere := where + ` AND ` + taskRunAnalyticsTicketKeySQL + ` IN (` + ph + `)`
 	runArgs := append([]any{}, args...)
 	for _, id := range ids {
 		runArgs = append(runArgs, id)
@@ -239,20 +239,34 @@ func (s *Server) readTaskRunAnalyticsTicketGroupsPage(filters taskRunAnalyticsFi
 	return taskRunAnalyticsTicketGroupsFromHydration(ids, runs), total, nil
 }
 
-func encodeTaskRunAnalyticsTicketCursor(cursorAt int64, issueID string, depth int) string {
+func randomTicketCursorKey() []byte {
+	key := make([]byte, 32)
+	if _, err := rand.Read(key); err != nil {
+		panic("generate ticket cursor key: " + err.Error())
+	}
+	return key
+}
+
+// Ticket cursor depth gates an expensive aggregate, so it is MACed instead of
+// trusting a client-rewritable page counter.
+func (s *Server) encodeTaskRunAnalyticsTicketCursor(cursorAt int64, issueID string, depth int) string {
 	if cursorAt <= 0 || issueID == "" || depth <= 0 {
 		return ""
 	}
-	return "ticket:" + strconv.Itoa(depth) + ":" + strconv.FormatInt(cursorAt, 10) + ":" + base64.RawURLEncoding.EncodeToString([]byte(issueID))
+	payload := strconv.Itoa(depth) + ":" + strconv.FormatInt(cursorAt, 10) + ":" + base64.RawURLEncoding.EncodeToString([]byte(issueID))
+	mac := hmac.New(sha256.New, s.ticketCursorKey)
+	_, _ = mac.Write([]byte(payload))
+	return "ticket:" + payload + ":" + base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
 }
 
-func decodeTaskRunAnalyticsTicketCursor(raw string) (int64, string, int, error) {
+func (s *Server) decodeTaskRunAnalyticsTicketCursor(raw string) (int64, string, int, error) {
 	if !strings.HasPrefix(raw, "ticket:") {
-		cursorAt, issueID, err := decodeTaskRunAnalyticsCursor(raw)
-		return cursorAt, issueID, 0, err
+		// Pre-signature cursors are deliberately restarted rather than trusted:
+		// their client-controlled depth could bypass the aggregate page cap.
+		return 0, "", 0, nil
 	}
 	parts := strings.Split(raw, ":")
-	if len(parts) != 4 || parts[3] == "" {
+	if len(parts) != 5 || parts[3] == "" || parts[4] == "" {
 		return 0, "", 0, fmt.Errorf("invalid cursor")
 	}
 	depth, err := strconv.Atoi(parts[1])
@@ -265,6 +279,15 @@ func decodeTaskRunAnalyticsTicketCursor(raw string) (int64, string, int, error) 
 	}
 	issueID, err := base64.RawURLEncoding.DecodeString(parts[3])
 	if err != nil || len(issueID) == 0 {
+		return 0, "", 0, fmt.Errorf("invalid cursor")
+	}
+	signature, err := base64.RawURLEncoding.DecodeString(parts[4])
+	if err != nil {
+		return 0, "", 0, fmt.Errorf("invalid cursor")
+	}
+	mac := hmac.New(sha256.New, s.ticketCursorKey)
+	_, _ = mac.Write([]byte(strings.Join(parts[1:4], ":")))
+	if !hmac.Equal(signature, mac.Sum(nil)) {
 		return 0, "", 0, fmt.Errorf("invalid cursor")
 	}
 	return cursorAt, string(issueID), depth, nil
@@ -309,7 +332,7 @@ func (s *Server) readTaskRunAnalyticsTicketTotal(where string, args []any) (int,
 		s.ticketAnalyticsCacheMu.Unlock()
 
 		var total int
-		if err := s.db.QueryRow(`SELECT COUNT(DISTINCT issue_id) FROM task_run_summaries `+where+` AND issue_id != ''`, args...).Scan(&total); err != nil {
+		if err := s.db.QueryRow(`SELECT COUNT(DISTINCT `+taskRunAnalyticsTicketKeySQL+`) FROM task_run_summaries `+where+` AND issue_id != ''`, args...).Scan(&total); err != nil {
 			return 0, err
 		}
 		s.ticketAnalyticsCacheMu.Lock()
@@ -355,6 +378,9 @@ func evictOldestTaskRunAnalyticsTicketTotalCacheEntry(cache map[string]taskRunAn
 func taskRunAnalyticsTicketGroupsFromHydration(ids []string, runs []taskRunAnalyticsRunView) []taskRunAnalyticsTicketGroup {
 	byID := map[string][]taskRunAnalyticsRunView{}
 	for _, run := range runs {
+		key := taskRunAnalyticsTicketKey(run.Integration, run.IntegrationWorkspace, run.IssueID)
+		byID[key] = append(byID[key], run)
+		// Keep the small pure helper usable by legacy unit fixtures that pass raw IDs.
 		byID[run.IssueID] = append(byID[run.IssueID], run)
 	}
 	groups := make([]taskRunAnalyticsTicketGroup, 0, len(ids))
@@ -375,9 +401,17 @@ func taskRunAnalyticsTicketGroupsFromHydration(ids []string, runs []taskRunAnaly
 }
 
 type taskRunAnalyticsTicketGroup struct {
+	key        string
 	issueID    string
 	runs       []taskRunAnalyticsRunView
 	reportedAt int64
+}
+
+const taskRunAnalyticsTicketKeySeparator = "\x1f"
+const taskRunAnalyticsTicketKeySQL = "integration || char(31) || integration_workspace || char(31) || issue_id"
+
+func taskRunAnalyticsTicketKey(integration, workspace, issueID string) string {
+	return integration + taskRunAnalyticsTicketKeySeparator + workspace + taskRunAnalyticsTicketKeySeparator + issueID
 }
 
 func nonEmptyTaskRunAnalyticsTicketGroups(groups []taskRunAnalyticsTicketGroup) []taskRunAnalyticsTicketGroup {
@@ -395,7 +429,7 @@ func taskRunAnalyticsTicketGroupWithRuns(issueID string, runs []taskRunAnalytics
 	if len(runs) == 0 {
 		return taskRunAnalyticsTicketGroup{}, false
 	}
-	return taskRunAnalyticsTicketGroup{issueID: issueID, runs: runs, reportedAt: reportedAt}, true
+	return taskRunAnalyticsTicketGroup{key: issueID, issueID: runs[0].IssueID, runs: runs, reportedAt: reportedAt}, true
 }
 
 func (group taskRunAnalyticsTicketGroup) cursorAt() int64 {
@@ -583,7 +617,7 @@ func (s *Server) readTaskRunAnalyticsTicketMetadataPage(ctx context.Context, ten
 		for _, id := range issueIDs[start:end] {
 			args = append(args, id)
 		}
-		rows, err := s.db.QueryContext(ctx, `SELECT issue_id, requester, requester_role, team, priority, ask, reported_at, updated_at FROM ticket_metadata WHERE tenant_id=? AND issue_id IN (`+ph+`)`, args...)
+		rows, err := s.db.QueryContext(ctx, `SELECT integration || char(31) || integration_workspace || char(31) || issue_id, requester, requester_role, team, priority, ask, reported_at, updated_at FROM ticket_metadata WHERE tenant_id=? AND integration || char(31) || integration_workspace || char(31) || issue_id IN (`+ph+`)`, args...)
 		if err != nil {
 			return nil, err
 		}
@@ -614,39 +648,52 @@ func (s *Server) applyOrScheduleTaskRunAnalyticsTicketMetadata(tenantID string, 
 		if time.Since(time.UnixMilli(metadata.updatedAt)) < 15*time.Minute {
 			return
 		}
+		// Terminal tickets do not change tracker metadata in a way the panel needs.
+		if ticket.Status == "delivered" || ticket.Status == "failed" {
+			return
+		}
+		if ticket.Source == "github-issues" && !defaultGitHubClient.allowLowPriority() {
+			return
+		}
+		if !s.allowTaskRunAnalyticsTicketMetadataRefresh() {
+			return
+		}
 	}
-	key := tenantID + ":" + ticket.IssueID
-	if _, loaded := ticketMetadataInflight.LoadOrStore(key, struct{}{}); loaded {
+	metadataKey := taskRunAnalyticsTicketKey(run.Integration, run.IntegrationWorkspace, ticket.IssueID)
+	key := tenantID + ":" + metadataKey
+	if _, loaded := s.ticketMetadataInflight.LoadOrStore(key, struct{}{}); loaded {
 		return
 	}
 	select {
-	case ticketMetadataEnrichment <- struct{}{}:
+	case s.ticketMetadataEnrichment <- struct{}{}:
 	default:
-		ticketMetadataInflight.Delete(key)
+		s.ticketMetadataInflight.Delete(key)
 		return
 	}
 	go func() {
-		defer ticketMetadataInflight.Delete(key)
-		defer func() { <-ticketMetadataEnrichment }()
+		defer s.ticketMetadataInflight.Delete(key)
+		defer func() { <-s.ticketMetadataEnrichment }()
 		metadata := taskRunAnalyticsTicketView{IssueID: ticket.IssueID, IssueTitle: ticket.IssueTitle, Source: ticket.Source, ReportedAt: ticket.ReportedAt}
 		s.enrichTaskRunAnalyticsTicket(&metadata, run)
-		resolved := metadata.Requester != "" || metadata.RequesterRole != "" || metadata.Team != "" || metadata.Priority != "" || metadata.Ask != ""
-		if !resolved {
-			var exists bool
-			if err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM ticket_metadata WHERE tenant_id=? AND issue_id=?)`, tenantID, metadata.IssueID).Scan(&exists); err != nil {
-				return
-			}
-			if exists {
-				if _, err := s.db.Exec(`UPDATE ticket_metadata SET updated_at=? WHERE tenant_id=? AND issue_id=?`, now().UnixMilli(), tenantID, metadata.IssueID); err != nil {
-					log.Printf("[task-run-analytics] backoff ticket metadata %s: %v", metadata.IssueID, err)
-				}
-				return
-			}
-		}
-		if _, err := s.db.Exec(`INSERT INTO ticket_metadata(tenant_id,issue_id,requester,requester_role,team,priority,ask,reported_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(tenant_id,issue_id) DO UPDATE SET requester=CASE WHEN excluded.requester != '' THEN excluded.requester ELSE ticket_metadata.requester END, requester_role=CASE WHEN excluded.requester_role != '' THEN excluded.requester_role ELSE ticket_metadata.requester_role END, team=CASE WHEN excluded.team != '' THEN excluded.team ELSE ticket_metadata.team END, priority=CASE WHEN excluded.priority != '' THEN excluded.priority ELSE ticket_metadata.priority END, ask=CASE WHEN excluded.ask != '' THEN excluded.ask ELSE ticket_metadata.ask END, reported_at=CASE WHEN excluded.reported_at != 0 THEN excluded.reported_at ELSE ticket_metadata.reported_at END, updated_at=excluded.updated_at`, tenantID, metadata.IssueID, metadata.Requester, metadata.RequesterRole, metadata.Team, metadata.Priority, metadata.Ask, metadata.ReportedAt, now().UnixMilli()); err != nil {
+		// The upsert preserves existing fields while recording the retry time.
+		if _, err := s.db.Exec(`INSERT INTO ticket_metadata(tenant_id,integration,integration_workspace,issue_id,requester,requester_role,team,priority,ask,reported_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(tenant_id,integration,integration_workspace,issue_id) DO UPDATE SET requester=CASE WHEN excluded.requester != '' THEN excluded.requester ELSE ticket_metadata.requester END, requester_role=CASE WHEN excluded.requester_role != '' THEN excluded.requester_role ELSE ticket_metadata.requester_role END, team=CASE WHEN excluded.team != '' THEN excluded.team ELSE ticket_metadata.team END, priority=CASE WHEN excluded.priority != '' THEN excluded.priority ELSE ticket_metadata.priority END, ask=CASE WHEN excluded.ask != '' THEN excluded.ask ELSE ticket_metadata.ask END, reported_at=CASE WHEN excluded.reported_at != 0 THEN excluded.reported_at ELSE ticket_metadata.reported_at END, updated_at=excluded.updated_at`, tenantID, run.Integration, run.IntegrationWorkspace, metadata.IssueID, metadata.Requester, metadata.RequesterRole, metadata.Team, metadata.Priority, metadata.Ask, metadata.ReportedAt, now().UnixMilli()); err != nil {
 			log.Printf("[task-run-analytics] write ticket metadata %s: %v", metadata.IssueID, err)
 		}
 	}()
+}
+
+func (s *Server) allowTaskRunAnalyticsTicketMetadataRefresh() bool {
+	s.ticketMetadataRefreshMu.Lock()
+	defer s.ticketMetadataRefreshMu.Unlock()
+	now := time.Now()
+	if s.ticketMetadataRefreshAt.IsZero() || now.Sub(s.ticketMetadataRefreshAt) >= 15*time.Minute {
+		s.ticketMetadataRefreshAt, s.ticketMetadataRefreshes = now, 0
+	}
+	if s.ticketMetadataRefreshes >= taskRunAnalyticsTicketMetadataRefreshLimit {
+		return false
+	}
+	s.ticketMetadataRefreshes++
+	return true
 }
 
 func (s *Server) enrichTaskRunAnalyticsGitHubTicket(ticket *taskRunAnalyticsTicketView, run taskRunAnalyticsRunView) {
@@ -670,7 +717,9 @@ func (s *Server) enrichTaskRunAnalyticsGitHubTicket(ticket *taskRunAnalyticsTick
 	if base == "" {
 		base = "https://api.github.com"
 	}
-	issue, err := s.queryGitHubIssue(parts[0]+"/"+parts[1], token, base, number)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	issue, err := s.queryGitHubIssueContext(ctx, parts[0]+"/"+parts[1], token, base, number)
 	if err != nil {
 		log.Printf("[task-run-analytics] GitHub ticket enrichment failed for %s: %v", ticket.IssueID, err)
 		return

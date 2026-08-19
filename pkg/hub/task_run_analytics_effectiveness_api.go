@@ -105,7 +105,13 @@ func (s *Server) readTaskRunAnalyticsEffectivenessWithTicketAggregates(f taskRun
 		return taskRunAnalyticsEffectivenessResponse{}, err
 	}
 	defer rows.Close()
-	out := taskRunAnalyticsEffectivenessResponse{}
+	out := taskRunAnalyticsEffectivenessResponse{
+		OutcomesByDay:    make([]taskRunAnalyticsOutcomesDay, 0),
+		TicketsByDay:     make([]taskRunAnalyticsTicketsDay, 0),
+		RunsPerTicket:    make([]taskRunAnalyticsRunsPerTicket, 0),
+		TopTicketsByCost: make([]taskRunAnalyticsTopTicket, 0),
+		CostPerMergedPr:  taskRunAnalyticsCostPerMerged{Weekly: make([]taskRunAnalyticsWeeklyCost, 0)},
+	}
 	byDay := map[string]*taskRunAnalyticsOutcomesDay{}
 	weekly := map[string]*taskRunAnalyticsWeeklyCost{}
 	var finished, success, opened, merged, mergedRuns int
@@ -156,11 +162,6 @@ func (s *Server) readTaskRunAnalyticsEffectivenessWithTicketAggregates(f taskRun
 	if err = rows.Err(); err != nil {
 		return out, err
 	}
-	uniqueTickets, err := s.readTaskRunAnalyticsTicketTotal(w, a)
-	if err != nil {
-		return out, err
-	}
-	out.UniqueTickets = uniqueTickets
 	var finishedTickets, successfulTickets int
 	if !includeTicketAggregates {
 		ticketRows, err := s.db.Query(`SELECT issue_id, COALESCE(SUM(CASE WHEN status != 'running' THEN 1 ELSE 0 END),0), COALESCE(SUM(CASE WHEN status IN ('clean','human_in_the_loop','warning') THEN 1 ELSE 0 END),0) FROM task_run_summaries `+w+` AND issue_id != '' GROUP BY issue_id`, a...)
@@ -180,6 +181,7 @@ func (s *Server) readTaskRunAnalyticsEffectivenessWithTicketAggregates(f taskRun
 					successfulTickets++
 				}
 			}
+			out.UniqueTickets++
 		}
 		if err = ticketRows.Err(); err != nil {
 			return out, err
@@ -214,6 +216,7 @@ func (s *Server) readTaskRunAnalyticsEffectivenessWithTicketAggregates(f taskRun
 		if err = ticketRows.Err(); err != nil {
 			return out, err
 		}
+		out.UniqueTickets = len(tickets)
 		ticketsByDay := map[string]*taskRunAnalyticsTicketsDay{}
 		runBuckets := map[string]int{"1": 0, "2": 0, "3": 0, "4+": 0}
 		for _, t := range tickets {

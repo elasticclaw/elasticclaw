@@ -84,6 +84,13 @@ type Server struct {
 	ticketAnalyticsTotalCache   map[string]taskRunAnalyticsTicketTotalCacheEntry
 	ticketAnalyticsTotalGroup   singleflight.Group
 	ticketAnalyticsTotalQueries int
+	// Ticket metadata work is per server so independent hubs do not share work.
+	ticketMetadataEnrichment chan struct{}
+	ticketMetadataInflight   sync.Map
+	ticketMetadataRefreshMu  sync.Mutex
+	ticketMetadataRefreshAt  time.Time
+	ticketMetadataRefreshes  int
+	ticketCursorKey          []byte
 
 	// ghTokenCache holds GitHub App installation tokens until shortly before
 	// they expire, keyed by requested repo access.
@@ -411,23 +418,25 @@ func NewServer(addr, dbPath, identityDir string, hubCfg *types.HubConfig) (*Serv
 	}
 	log.Printf("Hub SSH public key:\n%s", id.PublicKey)
 	srv := &Server{
-		db:                      db,
-		addr:                    addr,
-		hubCfg:                  hubCfg,
-		identity:                id,
-		artifacts:               artifacts,
-		claws:                   make(map[string]*clawConn),
-		users:                   make(map[string]*userConn),
-		gatewayRestartCounts:    make(map[string]int),
-		gatewayUnhealthyCounts:  make(map[string]int),
-		autoResumeRestartCounts: make(map[string]int),
-		dependencyStatus:        newDependencyStatusService(hubCfg),
-		fileAckWaiters:          make(map[string]chan types.FileAck),
-		fileReadWaiters:         make(map[string]chan types.FileReadResp),
-		checkpointWaiters:       make(map[string]chan error),
-		webhookDedup:            make(map[string]time.Time),
-		reaperFirstSeen:         make(map[string]time.Time),
-		nowFunc:                 now,
+		db:                       db,
+		addr:                     addr,
+		hubCfg:                   hubCfg,
+		identity:                 id,
+		artifacts:                artifacts,
+		claws:                    make(map[string]*clawConn),
+		users:                    make(map[string]*userConn),
+		gatewayRestartCounts:     make(map[string]int),
+		gatewayUnhealthyCounts:   make(map[string]int),
+		autoResumeRestartCounts:  make(map[string]int),
+		dependencyStatus:         newDependencyStatusService(hubCfg),
+		fileAckWaiters:           make(map[string]chan types.FileAck),
+		fileReadWaiters:          make(map[string]chan types.FileReadResp),
+		checkpointWaiters:        make(map[string]chan error),
+		webhookDedup:             make(map[string]time.Time),
+		reaperFirstSeen:          make(map[string]time.Time),
+		nowFunc:                  now,
+		ticketMetadataEnrichment: make(chan struct{}, 32),
+		ticketCursorKey:          randomTicketCursorKey(),
 	}
 	if srv.livenessEnabled() {
 		srv.reconcileOnBoot()
