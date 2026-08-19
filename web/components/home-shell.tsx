@@ -1,10 +1,10 @@
 "use client"
 
 import { useState, useMemo, useEffect, useCallback, useRef, useSyncExternalStore, Suspense } from "react"
+import dynamic from "next/dynamic"
 import { usePathname } from "next/navigation"
 import { Sidebar } from "@/components/sidebar"
 import { ConversationView } from "@/components/conversation-view"
-import { AnalyticsCommandCenter } from "@/components/analytics-command-center"
 import { SetupScreen } from "@/components/setup-screen"
 import { ManualTriggerModal } from "@/components/manual-trigger-modal"
 import { MobileTabBar } from "@/components/mobile-tab-bar"
@@ -26,6 +26,8 @@ import {
 import { requestAuthToken } from "@/lib/auth-storage"
 import { isWaitingOnYou } from "@/lib/waiting-on-you"
 import { agentSection, type AgentSectionName } from "@/components/ds/agent-section"
+
+const AnalyticsCommandCenter = dynamic(() => import("@/components/analytics-command-center").then((module) => module.AnalyticsCommandCenter))
 
 export type HomeView = "agents" | "analytics"
 
@@ -186,19 +188,17 @@ export function HomeShell() {
   // resolved section, not the complete transcript map.
   // Recomputed per message update, but identity-stable when nothing changed:
   // a fresh Map per WS chunk would re-render every sidebar row.
-  const sidebarSectionsRef = useRef<Map<string, AgentSectionName>>(new Map())
-  const sidebarSections = useMemo(() => {
+  const calculatedSidebarSections = useMemo(() => {
     const sections = new Map<string, AgentSectionName>()
     for (const claw of claws) {
       sections.set(claw.id, agentSection(claw, { isWaitingOnYou: isWaitingOnYou(messages[claw.id] ?? []) }))
     }
-    const previous = sidebarSectionsRef.current
-    if (previous.size === sections.size && [...sections].every(([id, section]) => previous.get(id) === section)) {
-      return previous
-    }
-    sidebarSectionsRef.current = sections
     return sections
   }, [claws, messages])
+  const [sidebarSections, setSidebarSections] = useState(calculatedSidebarSections)
+  if (sidebarSections.size !== calculatedSidebarSections.size || [...sidebarSections].some(([id, section]) => calculatedSidebarSections.get(id) !== section)) {
+    setSidebarSections(calculatedSidebarSections)
+  }
 
   // Eagerly load messages for all claws once the claw list is first available.
   // Covers: initial load, refresh, navigating back from /settings.
@@ -223,8 +223,7 @@ export function HomeShell() {
 
   // Sidebar second line: what each active claw is running right now. Only the
   // trailing activity run is scanned, so this stays cheap per message update.
-  const sidebarActivityRef = useRef<Record<string, string>>({})
-  const sidebarActivity = useMemo(() => {
+  const calculatedSidebarActivity = useMemo(() => {
     const lines: Record<string, string> = {}
     for (const claw of claws) {
       if (claw.status !== "connected" && !claw.isStreaming) continue
@@ -238,16 +237,12 @@ export function HomeShell() {
         lines[claw.id] = "Writing a reply"
       }
     }
-    // Identity-stable when the lines did not change, so unaffected sidebar
-    // rows can bail out of chunk-driven re-renders.
-    const previous = sidebarActivityRef.current
-    const keys = Object.keys(lines)
-    if (keys.length === Object.keys(previous).length && keys.every((id) => previous[id] === lines[id])) {
-      return previous
-    }
-    sidebarActivityRef.current = lines
     return lines
   }, [claws, messages])
+  const [sidebarActivity, setSidebarActivity] = useState(calculatedSidebarActivity)
+  if (Object.keys(sidebarActivity).length !== Object.keys(calculatedSidebarActivity).length || Object.keys(sidebarActivity).some((id) => sidebarActivity[id] !== calculatedSidebarActivity[id])) {
+    setSidebarActivity(calculatedSidebarActivity)
+  }
 
   // Mark messages as read when selecting a claw + lazy load history
   const handleSelectClaw = useCallback(

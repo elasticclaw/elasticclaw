@@ -237,7 +237,6 @@ export interface TaskRunSummary {
   integration: string
   integrationWorkspace: string
   issueId: string | null
-  issueCreatedAt: number
   clawId: string
   model: string | null
   llmKey: string
@@ -312,7 +311,6 @@ export interface AnalyticsTicket {
   issueTitle: string
   status: "delivered" | "pr_open" | "in_progress" | "failed"
   requester: string
-  requesterRole?: string
   team?: string
   priority: string
   ask: string
@@ -321,7 +319,6 @@ export interface AnalyticsTicket {
   workflowName?: string
   workspaceName?: string
   reportedAt: number
-  runIds: string[]
   runs: AnalyticsTicketRunSummary[]
   runCount: number
   attemptCount: number

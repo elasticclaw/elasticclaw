@@ -47,7 +47,11 @@ import { MultiFilterSelect, selectedFilterValues, serializeFilterValues } from "
 import { type DetailState, urlFilterKeys } from "@/lib/task-run-filters"
 import { RunDetailPanel } from "@/components/run-detail-panel"
 import { TicketDetailPanel } from "@/components/ticket-detail-panel"
-import { ChartCard, DatePickerRange, KpiTile, RunStatusBadge, TicketStatusBadge } from "@/components/ds"
+import { ChartCard } from "@/components/ds/chart-card"
+import { DatePickerRange } from "@/components/ds/date-picker-range"
+import { KpiTile } from "@/components/ds/kpi-tile"
+import { RunStatusBadge } from "@/components/ds/run-status-badge"
+import { TicketStatusBadge } from "@/components/ds/ticket-status-badge"
 import { WorkflowName } from "@/components/workflow-name"
 import { Button } from "@/components/ui/button"
 import {
@@ -190,11 +194,36 @@ function AnalyticsCommandCenterInner() {
   const [error, setError] = useState<string>()
   const loadAbortController = useRef<AbortController | null>(null)
   const loadRequestId = useRef(0)
+  const ticketsAbortController = useRef<AbortController | null>(null)
+  const ticketsRequestId = useRef(0)
+  const defaultWindowRef = useRef<{ filtersKey: string; from: string; to: string } | undefined>(undefined)
+  const yearCostsRef = useRef<CostOverview | undefined>(undefined)
   const optionsLoadedRef = useRef(false)
+
+  const effectiveFiltersFor = useCallback(() => {
+    const effectiveFilters = { ...filters }
+    if (!effectiveFilters.from && !effectiveFilters.to) {
+      let defaultWindow = defaultWindowRef.current
+      if (!defaultWindow || defaultWindow.filtersKey !== paramsKey) {
+        const to = new Date()
+        const from = new Date(to)
+        from.setDate(to.getDate() - 30)
+        defaultWindow = { filtersKey: paramsKey, from: from.toISOString(), to: to.toISOString() }
+        defaultWindowRef.current = defaultWindow
+      }
+      effectiveFilters.from = defaultWindow.from
+      effectiveFilters.to = defaultWindow.to
+    }
+    return effectiveFilters
+  }, [filters, paramsKey])
 
   useEffect(() => {
     ticketCursorStackRef.current = ticketCursorStack
   }, [ticketCursorStack])
+
+  useEffect(() => {
+    yearCostsRef.current = yearCosts
+  }, [yearCosts])
 
   // Cache the last-known run object per selectedRunId so a silent poll that
   // drops the selected run off the current page (e.g. a new run pushes it
@@ -243,19 +272,13 @@ function AnalyticsCommandCenterInner() {
       const controller = new AbortController()
       loadAbortController.current = controller
       const requestId = ++loadRequestId.current
+      const ticketRequestId = ticketsRequestId.current
       try {
         if (!silent) setError(undefined)
         // Default to the last 30 days so every widget reads the same period.
         // Computed here (not in render) — reading the clock during render
         // suspends the prerender under Next's cacheComponents semantics.
-        const effectiveFilters = { ...filters }
-        if (!effectiveFilters.from && !effectiveFilters.to) {
-          const to = new Date()
-          const from = new Date(to)
-          from.setDate(to.getDate() - 30)
-          effectiveFilters.from = from.toISOString()
-          effectiveFilters.to = to.toISOString()
-        }
+        const effectiveFilters = effectiveFiltersFor()
         const runFilters = { ...effectiveFilters, cursor }
         const ticketFilters = { ...effectiveFilters, cursor: loadOptions.ticketCursor }
         // The year heatmap always shows the trailing year, regardless of the
@@ -289,13 +312,15 @@ function AnalyticsCommandCenterInner() {
         ] = await Promise.all([
           fetchTaskRunAnalyticsSummary(effectiveFilters, { signal: controller.signal }),
           fetchAnalyticsCosts(effectiveFilters, 30, "model", undefined, { signal: controller.signal }),
-          silent ? Promise.resolve(undefined) : fetchAnalyticsCosts(
-            yearCostFilters,
-            366,
-            undefined,
-            hasYearRunLevelFilter ? undefined : "ledger",
-            { signal: controller.signal }
-          ),
+          !silent || yearCostsRef.current === undefined
+            ? fetchAnalyticsCosts(
+                yearCostFilters,
+                366,
+                undefined,
+                hasYearRunLevelFilter ? undefined : "ledger",
+                { signal: controller.signal }
+              )
+            : Promise.resolve(undefined),
           fetchAnalyticsEffectiveness(effectiveFilters, { signal: controller.signal }),
           fetchGeneralStats(effectiveFilters, { signal: controller.signal }),
           fetchAnalyticsCostDrivers(effectiveFilters, "workflow", { signal: controller.signal }),
@@ -312,9 +337,11 @@ function AnalyticsCommandCenterInner() {
         setStats(statsData)
         setDrivers(driversData)
         setRuns((currentRuns) => (append ? [...currentRuns, ...runsData.runs] : runsData.runs))
-        setTickets(ticketsData.tickets)
-        setNextTicketCursor(ticketsData.nextCursor)
-        setTicketTotal(ticketsData.total)
+        if (ticketRequestId === ticketsRequestId.current && !ticketsLoadingRef.current) {
+          setTickets(ticketsData.tickets)
+          setNextTicketCursor(ticketsData.nextCursor)
+          setTicketTotal(ticketsData.total)
+        }
         if (optionsData) {
           optionsLoadedRef.current = true
           setOptions(optionsData)
@@ -327,6 +354,7 @@ function AnalyticsCommandCenterInner() {
           setDetails(null)
           setDetailError(null)
         }
+        if (silent) setError(undefined)
       } catch (loadError) {
         if (controller.signal.aborted || (loadError instanceof Error && loadError.name === "AbortError")) return
         if (requestId !== loadRequestId.current) return
@@ -335,36 +363,34 @@ function AnalyticsCommandCenterInner() {
         }
       }
     },
-    [filters]
+    [effectiveFiltersFor]
   )
 
-  const loadTickets = useCallback(async (ticketCursor?: string) => {
+  const loadTickets = useCallback(async (ticketCursor: string | undefined, nextCursorStack: (string | undefined)[]) => {
     if (ticketsLoadingRef.current) return
     ticketsLoadingRef.current = true
     setTicketsLoading(true)
-    const requestId = ++loadRequestId.current
+    ticketsAbortController.current?.abort()
+    const controller = new AbortController()
+    ticketsAbortController.current = controller
+    const requestId = ++ticketsRequestId.current
     try {
-      const effectiveFilters = { ...filters }
-      if (!effectiveFilters.from && !effectiveFilters.to) {
-        const to = new Date()
-        const from = new Date(to)
-        from.setDate(to.getDate() - 30)
-        effectiveFilters.from = from.toISOString()
-        effectiveFilters.to = to.toISOString()
-      }
-      const ticketsData = await fetchAnalyticsTickets({ ...effectiveFilters, cursor: ticketCursor })
-      if (requestId !== loadRequestId.current) return
+      const ticketsData = await fetchAnalyticsTickets({ ...effectiveFiltersFor(), cursor: ticketCursor }, { signal: controller.signal })
+      if (controller.signal.aborted || requestId !== ticketsRequestId.current) return
       setTickets(ticketsData.tickets)
       setNextTicketCursor(ticketsData.nextCursor)
       setTicketTotal(ticketsData.total)
+      setTicketCursorStack(nextCursorStack)
     } catch (loadError) {
-      if (requestId !== loadRequestId.current) return
+      if (controller.signal.aborted || (loadError instanceof Error && loadError.name === "AbortError") || requestId !== ticketsRequestId.current) return
       setError(loadError instanceof Error ? loadError.message : "Unable to load tickets")
     } finally {
-      ticketsLoadingRef.current = false
-      setTicketsLoading(false)
+      if (requestId === ticketsRequestId.current) {
+        ticketsLoadingRef.current = false
+        setTicketsLoading(false)
+      }
     }
-  }, [filters])
+  }, [effectiveFiltersFor])
 
   useEffect(() => {
     queueMicrotask(() => {
@@ -373,6 +399,7 @@ function AnalyticsCommandCenterInner() {
     })
     return () => {
       loadAbortController.current?.abort()
+      ticketsAbortController.current?.abort()
     }
   }, [load])
 
@@ -405,15 +432,13 @@ function AnalyticsCommandCenterInner() {
 
   const handleNextTicketPage = useCallback(() => {
     if (!nextTicketCursor || ticketsLoadingRef.current) return
-    setTicketCursorStack((currentStack) => [...currentStack, nextTicketCursor])
-    void loadTickets(nextTicketCursor)
+    void loadTickets(nextTicketCursor, [...ticketCursorStackRef.current, nextTicketCursor])
   }, [loadTickets, nextTicketCursor])
 
   const handlePreviousTicketPage = useCallback(() => {
     if (ticketCursorStack.length <= 1 || ticketsLoadingRef.current) return
     const nextStack = ticketCursorStack.slice(0, -1)
-    setTicketCursorStack(nextStack)
-    void loadTickets(nextStack[nextStack.length - 1])
+    void loadTickets(nextStack[nextStack.length - 1], nextStack)
   }, [loadTickets, ticketCursorStack])
 
   useEffect(() => {
@@ -477,7 +502,7 @@ function AnalyticsCommandCenterInner() {
   const modelData = useModelData(costs)
 
   return (
-    <main className="h-full overflow-auto bg-background" data-selected-ticket={selectedTicketId ?? undefined}>
+    <main className="h-full overflow-auto bg-background">
       <div className="mx-auto max-w-[1400px] space-y-5 p-5 lg:p-6">
         <header>
           <h1 className="text-2xl font-semibold tracking-tight">Analytics</h1>
@@ -581,7 +606,7 @@ function AnalyticsCommandCenterInner() {
           onNext={handleNextTicketPage}
         />
 
-        <ChartCard title="Cost by day" stat={{ left: `${heatmap.days.length} days`, right: `${usdWhole.format(yearCosts?.dailySeries.reduce((sum, point) => sum + point.costUsd, 0) ?? 0)} total` }} info="Each square is a day; brighter means more spend. Click a day to focus the whole page on it.">
+        <ChartCard title="Cost by day" extra={<SelectedDayChip selectedDay={selectedDay} onClear={clearSelectedDay} />} stat={{ left: `${heatmap.days.length} days`, right: `${usdWhole.format(yearCosts?.dailySeries.reduce((sum, point) => sum + point.costUsd, 0) ?? 0)} total` }} info="Each square is a day; brighter means more spend. Click a day to focus the whole page on it.">
         <Heatmap
           heatmap={heatmap}
           maxCost={maxHeatCost}
@@ -764,10 +789,14 @@ const Heatmap = memo(function Heatmap({ heatmap, maxCost, selectedDay, onSelectD
     if (containerRect) setTooltip((current) => current?.iso === iso ? current : { iso, point, x: cellRect.left + cellRect.width / 2 - containerRect.left + 12, y: cellRect.top + cellRect.height / 2 - containerRect.top + 12 })
   }, [])
   const hideTooltip = useCallback(() => setTooltip(null), [])
-  const selectedDayLabel = selectedDay && new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", year: "numeric" }).format(new Date(`${selectedDay}T00:00:00`))
-
-  return <div ref={containerRef} className="relative">{selectedDayLabel && <div className="mb-4 flex items-center gap-1"><span className="inline-flex items-center gap-1 rounded-full bg-muted px-2 py-0.5 text-xs text-muted-foreground">{selectedDayLabel}<button type="button" aria-label={`Clear ${selectedDayLabel} filter`} onClick={onClearSelectedDay} className="rounded-full px-0.5 text-foreground hover:bg-accent">×</button></span></div>}<div className="flex gap-2"><div className="flex w-6 flex-col text-center text-[10px] text-muted-foreground"><div className="mb-1 h-4" aria-hidden="true" /><div className="grid flex-1 grid-rows-7 gap-[3px]">{["M", "T", "W", "T", "F", "S", "S"].map((day, index) => <span key={`${day}-${index}`} className="flex items-center justify-center">{day}</span>)}</div></div><div className="min-w-0 flex-1"><div className="relative mb-1 h-4 text-[10px] text-muted-foreground">{heatmap.monthLabels.map(({ week, label }) => <span key={`${week}-${label}`} className="absolute" style={{ left: `${(week / 52) * 100}%` }}>{label}</span>)}</div><div className="grid grid-flow-col grid-cols-[repeat(52,minmax(0,1fr))] grid-rows-7 gap-[3px]">{heatmap.days.map(({ iso, point }) => { const level = point?.costUsd ? Math.min(5, Math.ceil((point.costUsd / maxCost) * 5)) : 0; return <HeatmapCell key={iso} iso={iso} point={point} level={level} selected={iso === selectedDay} onSelectDay={onSelectDay} onShowTooltip={showTooltip} onHideTooltip={hideTooltip} /> })}{Array.from({ length: heatmap.padCount }, (_, index) => <span key={`pad-${index}`} aria-hidden="true" className="aspect-square" />)}</div></div></div>{tooltip && <div role="tooltip" className="pointer-events-none absolute z-10 rounded-lg border bg-card px-2 py-1.5 text-xs text-foreground shadow-md" style={{ left: tooltip.x, top: tooltip.y }}><div>{new Intl.DateTimeFormat(undefined, { weekday: "short", month: "short", day: "numeric", year: "numeric" }).format(new Date(`${tooltip.iso}T00:00:00`))}</div><div className="text-muted-foreground">{usdWhole.format(tooltip.point?.costUsd ?? 0)} · {tooltip.point?.runCount ?? 0} runs</div></div>}<div className="mt-3 flex justify-end gap-1 text-xs text-muted-foreground">Less {Array.from({ length: 5 }, (_, index) => <i key={index} className="size-3 rounded-sm" style={{ background: `var(--heatmap-${index + 1})` }} />)} More</div></div>
+  return <div ref={containerRef} className="relative"><div className="flex gap-2"><div className="flex w-6 flex-col text-center text-[10px] text-muted-foreground"><div className="mb-1 h-4" aria-hidden="true" /><div className="grid flex-1 grid-rows-7 gap-[3px]">{["M", "T", "W", "T", "F", "S", "S"].map((day, index) => <span key={`${day}-${index}`} className="flex items-center justify-center">{day}</span>)}</div></div><div className="min-w-0 flex-1"><div className="relative mb-1 h-4 text-[10px] text-muted-foreground">{heatmap.monthLabels.map(({ week, label }) => <span key={`${week}-${label}`} className="absolute" style={{ left: `${(week / 52) * 100}%` }}>{label}</span>)}</div><div className="grid grid-flow-col grid-cols-[repeat(52,minmax(0,1fr))] grid-rows-7 gap-[3px]">{heatmap.days.map(({ iso, point }) => { const level = point?.costUsd ? Math.min(5, Math.ceil((point.costUsd / maxCost) * 5)) : 0; return <HeatmapCell key={iso} iso={iso} point={point} level={level} selected={iso === selectedDay} onSelectDay={onSelectDay} onShowTooltip={showTooltip} onHideTooltip={hideTooltip} /> })}{Array.from({ length: heatmap.padCount }, (_, index) => <span key={`pad-${index}`} aria-hidden="true" className="aspect-square" />)}</div></div></div>{tooltip && <div role="tooltip" className="pointer-events-none absolute z-10 rounded-lg border bg-card px-2 py-1.5 text-xs text-foreground shadow-md" style={{ left: tooltip.x, top: tooltip.y }}><div>{new Intl.DateTimeFormat(undefined, { weekday: "short", month: "short", day: "numeric", year: "numeric" }).format(new Date(`${tooltip.iso}T00:00:00`))}</div><div className="text-muted-foreground">{usdWhole.format(tooltip.point?.costUsd ?? 0)} · {tooltip.point?.runCount ?? 0} runs</div></div>}<div className="mt-3 flex justify-end gap-1 text-xs text-muted-foreground">Less {Array.from({ length: 5 }, (_, index) => <i key={index} className="size-3 rounded-sm" style={{ background: `var(--heatmap-${index + 1})` }} />)} More</div></div>
 })
+
+function SelectedDayChip({ selectedDay, onClear }: { selectedDay?: string; onClear: () => void }) {
+  if (!selectedDay) return null
+  const label = new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", year: "numeric" }).format(new Date(`${selectedDay}T00:00:00`))
+  return <span className="inline-flex items-center gap-1 rounded-full bg-muted px-2 py-0.5 text-xs text-muted-foreground">{label}<button type="button" aria-label={`Clear ${label} filter`} onClick={onClear} className="rounded-full px-0.5 text-foreground hover:bg-accent">×</button></span>
+}
 
 function useModelData(costs?: CostOverview) { return useMemo(() => { const models = (costs?.seriesByModel ?? []).slice(0, 4); return (costs?.dailySeries ?? []).map((day, index) => ({ date: day.date, Other: Math.max(0, day.costUsd - models.reduce((sum, model) => sum + (model.dailySeries[index]?.costUsd ?? 0), 0)), ...Object.fromEntries(models.map((model) => [model.model, model.dailySeries[index]?.costUsd ?? 0])) })) }, [costs]) }
 function useWorkflowCostComparisonData(drivers: AnalyticsCostDriver[]) { return useMemo(() => { const topDrivers = [...drivers].sort((a, b) => b.costUsd - a.costUsd).slice(0, 5); const topNames = topDrivers.map((driver) => driver.name); const topNameSet = new Set(topNames); const dataByDate = new Map<string, Record<string, string | number>>(); for (const driver of drivers) for (const point of driver.dailyCost) { const row = dataByDate.get(point.date) ?? { date: point.date, Other: 0, ...Object.fromEntries(topNames.map((name) => [name, 0])) }; if (topNameSet.has(driver.name)) row[driver.name] = Number(row[driver.name]) + point.costUsd; else row.Other = Number(row.Other) + point.costUsd; dataByDate.set(point.date, row) } return { data: [...dataByDate.values()].sort((a, b) => String(a.date).localeCompare(String(b.date))), topNames } }, [drivers]) }
@@ -793,7 +822,7 @@ function TopTicketTooltip({ active, payload }: { active?: boolean; payload?: { p
 function TopTicketsByCostChart({ effect }: { effect?: AnalyticsEffectiveness }) { if (!effect?.topTicketsByCost?.length) return <p className="py-8 text-center text-sm text-muted-foreground">No ticket data for this period.</p>; return <ChartContainer config={chartConfig} className="h-64 w-full"><BarChart data={effect.topTicketsByCost} layout="vertical" margin={{ right: 36 }}><CartesianGrid horizontal={false} /><XAxis type="number" tickFormatter={(value) => usdWhole.format(value)} /><YAxis type="category" dataKey="issueId" width={90} interval={0} tickFormatter={(id) => (id.length > 14 ? id.slice(0, 13) + "…" : id)} /><ChartTooltip content={<TopTicketTooltip />} /><Bar dataKey="costUsd" fill="var(--chart-1)" radius={4}><LabelList dataKey="costUsd" position="right" formatter={(value: number) => usd.format(value)} /></Bar></BarChart></ChartContainer> }
 function CostPerMergedPrChart({ effect }: { effect?: AnalyticsEffectiveness }) { return <ChartContainer config={chartConfig} className="h-64 w-full"><LineChart data={effect?.costPerMergedPr.weekly}><CartesianGrid vertical={false} /><XAxis dataKey="weekStart" tickFormatter={formatDate} /><YAxis /><ChartTooltip content={<ChartTooltipContent />} /><ReferenceLine y={effect?.costPerMergedPr.average} stroke="var(--muted-foreground)" /><Line type="monotone" dataKey="costPerMergedPr" name="Cost per merged PR" stroke="var(--color-costPerMergedPr)" dot={false} /></LineChart></ChartContainer> }
 function CostDrivers({ drivers }: { drivers: AnalyticsCostDriver[] }) {
-  return <ChartCard title="Top cost drivers" info="Where the money goes: total spend and efficiency per workflow in the selected period." stat={`${drivers.length} workflows · ${usdWhole.format(drivers.reduce((sum, driver) => sum + driver.costUsd, 0))} total`}><Table className="[&_th]:h-auto [&_th]:px-2 [&_th]:pt-0 [&_th]:pb-2 [&_th]:text-xs [&_td]:px-2 [&_td]:py-[9px]"><TableHeader><TableRow><TableHead className="min-w-[35ch]">Workflow</TableHead><TableHead className="text-right">Runs</TableHead><TableHead className="text-right">Success</TableHead><TableHead className="text-right">Cost</TableHead><TableHead className="text-right">Cost / merged PR</TableHead></TableRow></TableHeader><TableBody>{drivers.slice(0, 10).map((driver) => <TableRow key={driver.name}><TableCell className="font-medium min-w-[35ch]"><WorkflowName name={driver.name} /></TableCell><TableCell className="text-right tabular-nums">{driver.runs}</TableCell><TableCell className="text-right tabular-nums">{formatPercent(driver.successRate)}</TableCell><TableCell className="text-right tabular-nums">{usd.format(driver.costUsd)}</TableCell><TableCell className="text-right tabular-nums">{usd.format(driver.costPerMergedPr)}</TableCell></TableRow>)}</TableBody></Table></ChartCard>
+  return <ChartCard title="Top cost drivers" sub="By workflow" info="Where the money goes: total spend and efficiency per workflow in the selected period." stat={`${drivers.length} workflows · ${usdWhole.format(drivers.reduce((sum, driver) => sum + driver.costUsd, 0))} total`}><Table className="[&_th]:h-auto [&_th]:px-2 [&_th]:pt-0 [&_th]:pb-2 [&_th]:text-xs [&_td]:px-2 [&_td]:py-[9px]"><TableHeader><TableRow><TableHead className="min-w-[35ch]">Workflow</TableHead><TableHead className="text-right">Runs</TableHead><TableHead className="text-right">Success</TableHead><TableHead className="text-right">Cost</TableHead><TableHead className="text-right">Cost / merged PR</TableHead></TableRow></TableHeader><TableBody>{drivers.slice(0, 10).map((driver) => <TableRow key={driver.name}><TableCell className="font-medium min-w-[35ch]"><WorkflowName name={driver.name} /></TableCell><TableCell className="text-right tabular-nums">{driver.runs}</TableCell><TableCell className="text-right tabular-nums">{formatPercent(driver.successRate)}</TableCell><TableCell className="text-right tabular-nums">{usd.format(driver.costUsd)}</TableCell><TableCell className="text-right tabular-nums">{usd.format(driver.costPerMergedPr)}</TableCell></TableRow>)}</TableBody></Table></ChartCard>
 }
 function TicketsTable({ tickets, total, page, canGoPrevious, canGoNext, onSelect, onSelectTicket, onPrevious, onNext, loading }: { tickets: AnalyticsTicket[]; total: number; page: number; canGoPrevious: boolean; canGoNext: boolean; onSelect: (runId: string) => void; onSelectTicket: (ticketId: string) => void; onPrevious: () => void; onNext: () => void; loading: boolean }) { const [expanded, setExpanded] = useState<Set<string>>(() => new Set()); const toggleExpanded = (issueId: string) => setExpanded((previous) => { const next = new Set(previous); if (next.has(issueId)) next.delete(issueId); else next.add(issueId); return next }); const delivered = tickets.filter((ticket) => ticket.status === "delivered").length; const awaitingReview = tickets.filter((ticket) => ticket.status === "pr_open").length; return <ChartCard title="Unique tickets" info="One row per ticket. Expand to see every run that served it; open a row for the business view, a run for the technical view." stat={<><span>{tickets.length} of {total} tickets</span><span className="ml-auto">{delivered} delivered · {awaitingReview} awaiting review</span></>}><Table className="[&_th]:h-auto [&_th]:px-2 [&_th]:pt-0 [&_th]:pb-2 [&_th]:text-xs [&_td]:px-2 [&_td]:py-[9px]"><TableHeader><TableRow>{["", "Status", "Ticket", "Requester", "Runs", "Cost", "Lead time", "Last activity"].map((label) => <TableHead key={label} className={label === "" ? "w-8" : ["Runs", "Cost", "Lead time", "Last activity"].includes(label) ? "text-right" : undefined}>{label}</TableHead>)}</TableRow></TableHeader><TableBody>{tickets.map((ticket) => <Fragment key={ticket.issueId}><TableRow className="cursor-pointer" onClick={() => onSelectTicket(ticket.issueId)}><TableCell><button type="button" aria-label={`Toggle ${ticket.issueId} runs`} aria-expanded={expanded.has(ticket.issueId)} onClick={(event) => { event.stopPropagation(); toggleExpanded(ticket.issueId) }}>{expanded.has(ticket.issueId) ? <ChevronDown className="size-4" /> : <ChevronRight className="size-4" />}</button></TableCell><TableCell><TicketStatusBadge status={ticket.status} /></TableCell><TableCell><div className="font-medium">{ticket.issueTitle || ticket.issueId}</div><div className="font-mono text-xs text-muted-foreground">{ticket.issueId} · {ticket.workflowName || ticket.source || "—"}</div></TableCell><TableCell>{ticket.requester || "—"}</TableCell><TableCell className="text-right tabular-nums">{ticket.runCount}</TableCell><TableCell className="text-right tabular-nums">{usd.format(ticket.cost)}</TableCell><TableCell className="text-right tabular-nums">{formatDuration(ticket.leadTime)}</TableCell><TableCell className="text-right tabular-nums">{ticket.lastActivity ? new Date(ticket.lastActivity).toLocaleDateString() : "—"}</TableCell></TableRow>{expanded.has(ticket.issueId) && ticket.runs.map((run, index) => { const prs = ticket.prs.filter((pr) => pr.runId === run.runId); return <TableRow key={run.runId} className="cursor-pointer bg-muted/30" onClick={() => onSelect(run.runId)}><TableCell /><TableCell><RunStatusBadge status={run.status} /></TableCell><TableCell><div>Try {index + 1}</div><div className="font-mono text-xs text-muted-foreground">{run.runId} · {run.model || "—"}</div></TableCell><TableCell>{prs.length ? prs.map((pr) => `#${pr.prNumber} ${pr.merged ? "merged" : pr.state}`).join(", ") : run.status === "failed" ? "Failed" : "—"}</TableCell><TableCell className="text-right tabular-nums">{run.attemptCount}</TableCell><TableCell className="text-right tabular-nums">{usd.format(run.cost)}</TableCell><TableCell className="text-right tabular-nums">{formatDuration(run.lastActivity - run.startedAt)}</TableCell><TableCell className="text-right tabular-nums">{new Date(run.startedAt).toLocaleDateString()}</TableCell></TableRow>})}</Fragment>)}</TableBody></Table><div className="mt-3 flex justify-center gap-3"><Button variant="outline" size="sm" disabled={!canGoPrevious || loading} onClick={onPrevious}>Previous</Button><span className="text-sm text-muted-foreground">Page {page}</span><Button variant="outline" size="sm" disabled={!canGoNext || loading} onClick={onNext}>Next</Button></div></ChartCard> }
 function outcomesStat(effect?: AnalyticsEffectiveness) { const days = effect?.outcomesByDay ?? []; const total = days.reduce((sum, day) => sum + day.clean + day.humanInTheLoop + day.warning + day.failed, 0); return `${days.length} days · avg ${days.length ? (total / days.length).toFixed(1) : "0"} runs` }

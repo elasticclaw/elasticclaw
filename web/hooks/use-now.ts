@@ -9,6 +9,9 @@ let sharedNow = Date.now()
 // Browser timer handle (window.setInterval returns a number, not a Node Timeout)
 let sharedTimer: number | null = null
 const listeners = new Set<() => void>()
+let sharedMinuteNow = Date.now()
+let sharedMinuteTimer: number | null = null
+const minuteListeners = new Set<() => void>()
 
 /**
  * Returns Date.now() refreshed once per second while `active` is true.
@@ -42,13 +45,24 @@ export function useNowTick(active: boolean): number {
 
 /** Returns a clock refreshed once per minute for age labels. */
 export function useNowMinuteTick(active: boolean): number {
-  const [now, setNow] = useState(Date.now)
+  const [now, setNow] = useState(sharedMinuteNow)
   useEffect(() => {
     if (!active) return
-    const refresh = () => setNow(Date.now())
-    refresh()
-    const timer = window.setInterval(refresh, 60_000)
-    return () => window.clearInterval(timer)
+    const listener = () => setNow(sharedMinuteNow)
+    minuteListeners.add(listener)
+    if (!sharedMinuteTimer) {
+      sharedMinuteTimer = window.setInterval(() => {
+        sharedMinuteNow = Date.now()
+        minuteListeners.forEach((notify) => notify())
+      }, 60_000)
+    }
+    return () => {
+      minuteListeners.delete(listener)
+      if (minuteListeners.size === 0 && sharedMinuteTimer) {
+        window.clearInterval(sharedMinuteTimer)
+        sharedMinuteTimer = null
+      }
+    }
   }, [active])
   return now
 }

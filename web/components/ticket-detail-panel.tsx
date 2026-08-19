@@ -5,7 +5,8 @@ import { useEffect, useRef } from "react"
 import type { AnalyticsTicket, AnalyticsTicketRunSummary } from "@/lib/types"
 import { useEscapeToClose } from "@/hooks/use-escape-to-close"
 import { useFocusTrap } from "@/hooks/use-focus-trap"
-import { TicketStatusBadge, RunStatusBadge } from "@/components/ds"
+import { TicketStatusBadge } from "@/components/ds/ticket-status-badge"
+import { RunStatusBadge } from "@/components/ds/run-status-badge"
 import { Button } from "@/components/ui/button"
 
 const usd = new Intl.NumberFormat(undefined, { style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: 2 })

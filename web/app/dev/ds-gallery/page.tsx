@@ -3,6 +3,7 @@
 import * as React from 'react'
 import { Copy, ExternalLink } from 'lucide-react'
 import type { DateRange } from 'react-day-picker'
+import { notFound } from 'next/navigation'
 
 import {
   AgentStateChip,
@@ -25,7 +26,7 @@ function GalleryItem({ label, children }: { label: string; children: React.React
 
 export default function DesignSystemGalleryPage() {
   const [range, setRange] = React.useState<DateRange | undefined>()
-  if (process.env.NODE_ENV === 'production') return <main className="p-8">Not available in production.</main>
+  if (process.env.NODE_ENV !== 'development') notFound()
 
   return (
     <main className="mx-auto max-w-5xl p-8">

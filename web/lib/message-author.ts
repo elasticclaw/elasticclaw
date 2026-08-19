@@ -1,4 +1,4 @@
-import { personColor } from "@/components/ds"
+import { personColor } from "@/components/ds/person-color"
 import type { Message } from "@/lib/types"
 
 export type MessageAuthor =
@@ -18,6 +18,7 @@ export function messageAuthor(message: Message, me?: string | null, meResolved =
   if (!meResolved && !message.userLogin) return { kind: "self" }
   if (!meResolved) return { kind: "unknown" }
   if (message.userLogin && me && message.userLogin === me) return { kind: "self" }
+  if (!me && message.userLogin) return { login: message.userLogin, name: message.userLogin, initials: initials(message.userLogin), color: personColor(message.userLogin), kind: "teammate" }
   if (!me) return { kind: "self" }
   if (!message.userLogin) return { kind: "unknown" }
   return { login: message.userLogin, name: message.userLogin, initials: initials(message.userLogin), color: personColor(message.userLogin), kind: "teammate" }

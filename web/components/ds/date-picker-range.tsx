@@ -50,22 +50,27 @@ function rangeLabel(range: DateRange | undefined, now?: Date) {
 
 export function DatePickerRange({ value, onChange, className }: DatePickerRangeProps) {
   const [open, setOpen] = React.useState(false)
+  const [pendingRange, setPendingRange] = React.useState<DateRange>()
   // Reading the clock after mount keeps this static-exported control render-pure.
   const [now, setNow] = React.useState<Date>()
   React.useEffect(() => { setNow(new Date()) }, [])
-  const resolvedValue = value ?? (now ? presetRange(PRESETS[1], now) : undefined)
+  const resolvedValue = pendingRange ?? value ?? (now ? presetRange(PRESETS[1], now) : undefined)
   const active = activePreset(resolvedValue, now)
 
   // Picking a start day keeps the popover open until an end day is chosen; a
   // click over an already-complete range starts a fresh one instead of
   // extending `to` (react-day-picker's default).
   function selectRange(range: DateRange | undefined, day: Date) {
-    if (value?.from && value.to) {
-      onChange({ from: day, to: undefined })
+    if ((pendingRange ?? value)?.from && (pendingRange ?? value)?.to) {
+      setPendingRange({ from: day, to: undefined })
       return
     }
-    onChange(range)
-    if (range?.from && range.to) setOpen(false)
+    setPendingRange(range)
+    if (range?.from && range.to) {
+      onChange(range)
+      setPendingRange(undefined)
+      setOpen(false)
+    }
   }
 
   return (
@@ -84,7 +89,7 @@ export function DatePickerRange({ value, onChange, className }: DatePickerRangeP
             <button
               key={preset.id}
               type="button"
-              onClick={() => { onChange(presetRange(preset)); setOpen(false) }}
+              onClick={() => { setPendingRange(undefined); onChange(presetRange(preset)); setOpen(false) }}
               className={cn(
                 'rounded-md px-2 py-1.5 text-left text-xs',
                 active?.id === preset.id ? 'bg-muted font-medium text-foreground' : 'text-muted-foreground hover:bg-muted/50',
@@ -94,8 +99,8 @@ export function DatePickerRange({ value, onChange, className }: DatePickerRangeP
             </button>
           ))}
           <div className="my-1 border-t" />
-          <span className="px-2 font-mono text-[11px] text-muted-foreground">{value?.from ? format(value.from, 'yyyy-MM-dd') : '—'}</span>
-          <span className="px-2 font-mono text-[11px] text-muted-foreground">{value?.to ? format(value.to, 'yyyy-MM-dd') : '…'}</span>
+          <span className="px-2 font-mono text-[11px] text-muted-foreground">{resolvedValue?.from ? format(resolvedValue.from, 'yyyy-MM-dd') : '—'}</span>
+          <span className="px-2 font-mono text-[11px] text-muted-foreground">{resolvedValue?.to ? format(resolvedValue.to, 'yyyy-MM-dd') : '…'}</span>
         </div>
         <Calendar
           mode="range"
