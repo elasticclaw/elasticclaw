@@ -842,8 +842,15 @@ func workflowIntegration(workflow *types.WorkflowConfig) string {
 }
 
 func recordTaskRunEventTx(tx *sql.Tx, input TaskRunEvent) error {
+	_, err := recordTaskRunEventIfNewTx(tx, input)
+	return err
+}
+
+// recordTaskRunEventIfNewTx writes an event and reports whether its event key
+// was newly claimed.
+func recordTaskRunEventIfNewTx(tx *sql.Tx, input TaskRunEvent) (bool, error) {
 	if input.RunID == "" || input.EventType == "" {
-		return fmt.Errorf("record task run event: missing run id or event type")
+		return false, fmt.Errorf("record task run event: missing run id or event type")
 	}
 	if input.EventTime.IsZero() {
 		input.EventTime = firstNonZeroTime(input.OccurredAt, now())
@@ -865,7 +872,7 @@ func recordTaskRunEventTx(tx *sql.Tx, input TaskRunEvent) error {
 	}
 	if input.TenantID == "" {
 		if err := tx.QueryRow(`SELECT tenant_id FROM task_runs WHERE id=?`, input.RunID).Scan(&input.TenantID); err != nil {
-			return err
+			return false, err
 		}
 	}
 	if isHumanWarningEvent(input) && input.WarningType == "" {
@@ -885,11 +892,11 @@ func recordTaskRunEventTx(tx *sql.Tx, input TaskRunEvent) error {
 	}
 	detail, err := sanitizeTaskRunDetail(input.Detail)
 	if err != nil {
-		return err
+		return false, err
 	}
 	eventTime := epochMillis(input.EventTime)
 	observedAt := epochMillis(input.ObservedAt)
-	_, err = tx.Exec(`
+	res, err := tx.Exec(`
 		INSERT INTO task_run_events(
 			id, tenant_id, run_id, attempt_id, event_key, source, source_event_id, source_delivery_id,
 			event_type, event_time, observed_at, actor_type, actor_source, actor_id, actor_login,
@@ -902,7 +909,11 @@ func recordTaskRunEventTx(tx *sql.Tx, input TaskRunEvent) error {
 		"", input.ActorID, input.ActorLogin, input.ActorDisplayName, "", input.InteractionRole, input.TargetType,
 		input.TargetID, input.TargetURL, "", input.WarningType, input.FailureType, detail, observedAt,
 	)
-	return err
+	if err != nil {
+		return false, err
+	}
+	claimed, err := res.RowsAffected()
+	return claimed != 0, err
 }
 
 func applyTaskRunPREventTx(tx *sql.Tx, input TaskRunEvent) error {

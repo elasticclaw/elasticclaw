@@ -204,6 +204,22 @@ func (s *Server) readTaskRunAnalyticsTicketTimingForRuns(tenantID string, runIDs
 	if len(runIDs) == 0 {
 		return eventsByRun, nil
 	}
+	if len(runIDs) > 500 {
+		for start := 0; start < len(runIDs); start += 500 {
+			end := start + 500
+			if end > len(runIDs) {
+				end = len(runIDs)
+			}
+			chunk, err := s.readTaskRunAnalyticsTicketTimingForRuns(tenantID, runIDs[start:end])
+			if err != nil {
+				return nil, err
+			}
+			for id, values := range chunk {
+				eventsByRun[id] = append(eventsByRun[id], values...)
+			}
+		}
+		return eventsByRun, nil
+	}
 	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(runIDs)), ",")
 	args := make([]any, 0, len(runIDs)+1)
 	args = append(args, tenantID)

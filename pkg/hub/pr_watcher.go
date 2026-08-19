@@ -1000,8 +1000,8 @@ func (s *Server) checkCIStatus(pr clawPR, token string) {
 	}
 
 	// Conditional UPDATE = claim, same idiom as claimPipelineStageTransition.
-	// Exactly one poll (and exactly one hub process) observes a given
-	// (sha, conclusion) pair, so the injection below cannot double-fire.
+	// A merged PR may have removed its row earlier in this poll; in that case
+	// the task-run event key becomes the durable claim instead.
 	res, err := tx.Exec(
 		`UPDATE claw_prs SET last_ci_sha=?, last_ci_conclusion=? WHERE id=? AND NOT (last_ci_sha=? AND last_ci_conclusion=?)`,
 		headSHA, conclusion, pr.id, headSHA, conclusion)
@@ -1009,14 +1009,29 @@ func (s *Server) checkCIStatus(pr clawPR, token string) {
 		log.Printf("[pr-watcher] failed to claim CI status for %s: %v", pr.prURL, err)
 		return
 	}
-	if claimed, err := res.RowsAffected(); err != nil || claimed == 0 {
+	claimed, err := res.RowsAffected()
+	if err != nil {
 		return
+	}
+	if claimed == 0 {
+		var rowExists int
+		if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM claw_prs WHERE id=?)`, pr.id).Scan(&rowExists); err != nil {
+			log.Printf("[pr-watcher] check CI claim for %s: %v", pr.prURL, err)
+			return
+		}
+		if rowExists != 0 {
+			return
+		}
+		if !hasRun {
+			return
+		}
 	}
 
 	ciEventType := taskRunEventCISucceeded
 	if conclusion == ciConclusionFailure {
 		ciEventType = taskRunEventCIFailed
 	}
+	recordedEvent := !hasRun
 	if hasRun {
 		event := TaskRunEvent{
 			EventKey: "ci:" + pr.id + ":" + headSHA + ":" + conclusion,
@@ -1024,17 +1039,24 @@ func (s *Server) checkCIStatus(pr clawPR, token string) {
 			TargetType: "pull_request", TargetURL: pr.prURL,
 			Detail: map[string]any{"repo": pr.repo, "prNumber": pr.prNumber, "headSha": headSHA, "conclusion": conclusion}, OccurredAt: now(),
 		}
-		if err := recordTaskRunEventTx(tx, event); err != nil {
+		var err error
+		recordedEvent, err = recordTaskRunEventIfNewTx(tx, event)
+		if err != nil {
 			log.Printf("[pr-watcher] record CI event for %s: %v", pr.prURL, err)
 			return
 		}
-		if err := materializeTaskRunTx(tx, runID); err != nil {
-			log.Printf("[pr-watcher] materialize CI event for %s: %v", pr.prURL, err)
-			return
+		if recordedEvent {
+			if err := materializeTaskRunTx(tx, runID); err != nil {
+				log.Printf("[pr-watcher] materialize CI event for %s: %v", pr.prURL, err)
+				return
+			}
 		}
 	}
 	if err := tx.Commit(); err != nil {
 		log.Printf("[pr-watcher] commit CI claim for %s: %v", pr.prURL, err)
+		return
+	}
+	if !recordedEvent {
 		return
 	}
 
