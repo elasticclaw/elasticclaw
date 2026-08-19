@@ -15,7 +15,7 @@ import (
 var ticketMetadataEnrichment = make(chan struct{}, 32)
 var ticketMetadataInflight sync.Map
 
-const taskRunAnalyticsTicketCacheTTL = 5 * time.Minute
+const taskRunAnalyticsTicketCacheTTL = 60 * time.Second
 const taskRunAnalyticsTicketCacheMaxEntries = 256
 
 type taskRunAnalyticsTicketTotalCacheEntry struct {

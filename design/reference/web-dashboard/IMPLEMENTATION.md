@@ -169,3 +169,7 @@ GATE 6: full-suite green + final visual pass + departures documented below.
 	  the watermark outside the event transaction could permanently consume it when the event
 	  write rolled back. The task-run lookup, conditional claim, and event write therefore stay
 	  transactional; a cheap `claw_prs` pre-read skips BEGIN/ROLLBACK for already-settled polls.
+- `readTaskRunAnalyticsTicketTotal` in `pkg/hub/task_run_analytics_tickets_api.go` caches the
+  ticket-total caption for 60s via `taskRunAnalyticsTicketCacheTTL`, rather than coupling
+  write paths to aggregate-cache invalidation. Ticket rows are always freshly queried; bounded
+  staleness is acceptable for this UI-only count (2026-08-19).
