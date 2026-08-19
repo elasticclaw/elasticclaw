@@ -3,7 +3,7 @@ import type { RefObject } from "react"
 
 const focusableSelector = '[href], button, [tabindex]:not([tabindex="-1"]), input, select, textarea'
 
-export function useFocusTrap(containerRef: RefObject<HTMLElement | null>, active: boolean) {
+export function useFocusTrap(containerRef: RefObject<HTMLElement | null>, active: boolean, dependency?: unknown) {
   useEffect(() => {
     const container = containerRef.current
     if (!active || !container) return
@@ -32,5 +32,5 @@ export function useFocusTrap(containerRef: RefObject<HTMLElement | null>, active
 
     container.addEventListener("keydown", handleKeyDown)
     return () => container.removeEventListener("keydown", handleKeyDown)
-  }, [active, containerRef])
+  }, [active, containerRef, dependency])
 }

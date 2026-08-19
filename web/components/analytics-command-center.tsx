@@ -184,6 +184,10 @@ function AnalyticsCommandCenterInner() {
   const [drivers, setDrivers] = useState<AnalyticsCostDriver[]>([])
   const [runs, setRuns] = useState<TaskRunSummary[]>([])
   const [tickets, setTickets] = useState<AnalyticsTicket[]>([])
+  // The exact filters (including the frozen default window) the currently
+  // loaded ticket list was fetched with — passed to TicketDetailPanel so it
+  // describes the same window/filters as the row that was clicked.
+  const [ticketsEffectiveFilters, setTicketsEffectiveFilters] = useState<TaskRunAnalyticsFilters | undefined>(undefined)
   const [ticketTotal, setTicketTotal] = useState(0)
   const [options, setOptions] = useState<TaskRunFilterOptions>()
   const [nextTicketCursor, setNextTicketCursor] = useState<string>()
@@ -382,9 +386,11 @@ function AnalyticsCommandCenterInner() {
     ticketsAbortController.current = controller
     const requestId = ++ticketsRequestId.current
     try {
-      const ticketsData = await fetchAnalyticsTickets({ ...effectiveFiltersFor(Boolean(ticketCursor)), cursor: ticketCursor }, { signal: controller.signal })
+      const effectiveFilters = effectiveFiltersFor(Boolean(ticketCursor))
+      const ticketsData = await fetchAnalyticsTickets({ ...effectiveFilters, cursor: ticketCursor }, { signal: controller.signal })
       if (controller.signal.aborted || requestId !== ticketsRequestId.current) return
       setTickets(ticketsData.tickets)
+      setTicketsEffectiveFilters(effectiveFilters)
       setNextTicketCursor(ticketsData.nextCursor)
       setTicketTotal(ticketsData.total)
       setTicketCursorStack(nextCursorStack)
@@ -663,6 +669,7 @@ function AnalyticsCommandCenterInner() {
       />
       <TicketDetailPanel
         ticket={selectedTicket}
+        filters={ticketsEffectiveFilters}
         onClose={() => { setSelectedTicketId(null); setSelectedRunId(null) }}
         onOpenRun={(ticketRun) => setSelectedRunId(ticketRun.runId)}
       />
@@ -723,11 +730,12 @@ function FilterBar({
     ["Model", "model", options?.models],
   ] as const
 
-  const activeFilters: Array<{ key: "workspace" | (typeof selectFilters)[number][1]; label: string; value: string }> = [
+  const activeFilters: Array<{ key: "workspace" | "status" | "warningType" | "failureType" | (typeof selectFilters)[number][1]; label: string; value: string }> = [
     ...(filters.workspace ? [{ key: "workspace" as const, label: `Workspace: ${filters.workspace}`, value: filters.workspace }] : []),
     ...selectFilters.flatMap(([label, key]) => selectedFilterValues(filters[key]).map((value) => ({ key, label: `${label}: ${value}`, value }))),
+    ...([["Status", "status"], ["Warning", "warningType"], ["Failure", "failureType"]] as const).flatMap(([label, key]) => selectedFilterValues(filters[key]).map((value) => ({ key, label: `${label}: ${value}`, value }))),
   ]
-  const removeFilterValue = (filter: { key: "workspace" | (typeof selectFilters)[number][1]; label: string; value: string }) => {
+  const removeFilterValue = (filter: { key: "workspace" | "status" | "warningType" | "failureType" | (typeof selectFilters)[number][1]; label: string; value: string }) => {
     if (filter.key === "workspace") {
       onChange({ workspace: undefined })
       return
@@ -771,7 +779,7 @@ function FilterBar({
             />
           </div>
         ))}
-        {activeFilters.length > 0 && <button type="button" className="ml-auto text-xs text-muted-foreground hover:text-foreground" onClick={() => onChange({ workspace: undefined, factory: undefined, workflow: undefined, repo: undefined, model: undefined })}>Clear all</button>}
+        {activeFilters.length > 0 && <button type="button" className="ml-auto text-xs text-muted-foreground hover:text-foreground" onClick={() => onChange({ workspace: undefined, factory: undefined, workflow: undefined, repo: undefined, model: undefined, status: undefined, warningType: undefined, failureType: undefined })}>Clear all</button>}
       </div>
       {activeFilters.length > 0 && <div className="mt-2 flex flex-wrap items-center gap-1.5 border-t pt-2"><span className="text-[10px] font-medium uppercase tracking-[0.08em] text-muted-foreground">Filtering by</span>{activeFilters.map((filter) => <span key={`${filter.key}-${filter.value}`} title={filter.label} className="group inline-flex max-w-[220px] items-center gap-0.5 rounded-sm bg-secondary px-2 py-1 text-xs font-medium text-foreground"><span className="truncate">{filter.label}</span><button type="button" aria-label={`Remove ${filter.label}`} onClick={() => removeFilterValue(filter)} className="ml-0.5 flex cursor-pointer opacity-60 transition-opacity hover:opacity-100 focus-visible:opacity-100"><X className="size-3" /></button></span>)}</div>}
     </div>

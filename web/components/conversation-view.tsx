@@ -29,6 +29,7 @@ import {
   DragEndEvent,
   DragOverlay,
   DragStartEvent,
+  CollisionDetection,
 } from "@dnd-kit/core"
 import {
   SortableContext,
@@ -1777,6 +1778,9 @@ export function ConversationView({
       itemsBySection.get(section)!.push(candidate)
     }
     return (["attention", "working", "offline"] as AgentSectionName[]).map((key) => ({ key, meta: AGENT_SECTION[key], items: itemsBySection.get(key)!.sort((a, b) => Number(b.pinned) - Number(a.pinned)) }))
+      // ids computed here so SortableContext gets a stable array — a fresh one
+      // per render re-renders every useSortable row through context.
+      .map((section) => ({ ...section, ids: section.items.map((candidate) => candidate.id) }))
   }, [allClaws, allMessages])
 
   const sensors = useSensors(
@@ -1789,6 +1793,18 @@ export function ConversationView({
     const found = allClaws.find((c) => c.id === event.active.id)
     setActiveDragClaw(found ?? null)
   }
+
+  const collisionDetectionForClaws: CollisionDetection = useCallback((args) => {
+    const activeClaw = allClaws.find((candidate) => candidate.id === args.active.id)
+    if (!activeClaw) return closestCenter(args)
+    const sectionFor = (candidate: Claw) => boardSections.find((section) => section.items.includes(candidate))?.key
+    const activeSection = sectionFor(activeClaw)
+    const allowed = args.droppableContainers.filter((container) => {
+      const overClaw = allClaws.find((candidate) => candidate.id === container.id)
+      return container.id === args.active.id || Boolean(overClaw && sectionFor(overClaw) === activeSection && overClaw.pinned === activeClaw.pinned)
+    })
+    return closestCenter({ ...args, droppableContainers: allowed })
+  }, [allClaws, boardSections])
 
   function handleBoardDragEnd(event: DragEndEvent) {
     setActiveDragClaw(null)
@@ -1923,7 +1939,7 @@ export function ConversationView({
 
           <DndContext
             sensors={sensors}
-            collisionDetection={closestCenter}
+            collisionDetection={collisionDetectionForClaws}
             onDragStart={handleBoardDragStart}
             onDragEnd={handleBoardDragEnd}
           >
@@ -1932,7 +1948,7 @@ export function ConversationView({
                 className="flex gap-6 h-full overflow-x-auto overflow-y-hidden p-3 items-stretch"
                 style={{ scrollbarWidth: "none", msOverflowStyle: "none" }}
               >
-                {boardSections.filter((section) => section.items.length).map((section) => <BoardSection key={section.key} section={section} className="h-full shrink-0"><SortableContext items={section.items.map((c) => c.id)} strategy={horizontalListSortingStrategy}><div className="flex flex-1 min-h-0 gap-3">{section.items.map((c) => <SortableClawBoardCard key={c.id} claw={c} messages={allMessages[c.id] ?? EMPTY_MESSAGES} streamingBuffer={streamingBuffers[c.id]} onClick={handleCardClick} onSendMessage={handleCardSendMessage} onKill={handleCardKill} currentUserLogin={currentUserLogin} currentUserResolved={currentUserResolved} />)}</div></SortableContext></BoardSection>)}
+                {boardSections.filter((section) => section.items.length).map((section) => <BoardSection key={section.key} section={section} className="h-full shrink-0"><SortableContext items={section.ids} strategy={horizontalListSortingStrategy}><div className="flex flex-1 min-h-0 gap-3">{section.items.map((c) => <SortableClawBoardCard key={c.id} claw={c} messages={allMessages[c.id] ?? EMPTY_MESSAGES} streamingBuffer={streamingBuffers[c.id]} onClick={handleCardClick} onSendMessage={handleCardSendMessage} onKill={handleCardKill} currentUserLogin={currentUserLogin} currentUserResolved={currentUserResolved} />)}</div></SortableContext></BoardSection>)}
               </div>
 
             {/* Ghost card following cursor during drag */}

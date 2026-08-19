@@ -462,8 +462,9 @@ export async function fetchAnalyticsTickets(filters?: TaskRunAnalyticsFilters, o
   return apiFetch<AnalyticsTicketsResponse>(`/api/analytics/tickets${appendViewerTimezone(taskRunAnalyticsQuery(filters))}`, options)
 }
 
-export async function fetchAnalyticsTicket(ticketKey: string, options?: AnalyticsRequestOptions): Promise<{ ticket: AnalyticsTicket }> {
-  return apiFetch<{ ticket: AnalyticsTicket }>(`/api/analytics/tickets?key=${encodeURIComponent(ticketKey)}`, options)
+export async function fetchAnalyticsTicket(ticketKey: string, filters?: TaskRunAnalyticsFilters, options?: AnalyticsRequestOptions): Promise<{ ticket: AnalyticsTicket }> {
+  const query = appendViewerTimezone(taskRunAnalyticsQuery(filters))
+  return apiFetch<{ ticket: AnalyticsTicket }>(`/api/analytics/tickets${query}${query ? "&" : "?"}key=${encodeURIComponent(ticketKey)}`, options)
 }
 
 export async function fetchTaskRun(runId: string): Promise<{ run: TaskRunSummary }> {

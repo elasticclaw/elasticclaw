@@ -2,7 +2,7 @@
 
 import { CheckCircle2, ChevronRight, GitMerge, GitPullRequest, X, XCircle } from "lucide-react"
 import { useEffect, useRef, useState } from "react"
-import type { AnalyticsTicket, AnalyticsTicketRunSummary } from "@/lib/types"
+import type { AnalyticsTicket, AnalyticsTicketRunSummary, TaskRunAnalyticsFilters } from "@/lib/types"
 import { fetchAnalyticsTicket } from "@/lib/api"
 import { useEscapeToClose } from "@/hooks/use-escape-to-close"
 import { useFocusTrap } from "@/hooks/use-focus-trap"
@@ -21,7 +21,7 @@ const time = (value?: number) => value ? timeFormatter.format(new Date(value)) :
 function Section({ title, stat, children }: { title: string; stat?: { left: string; right?: string; tone?: "error" }; children: React.ReactNode }) { return <section className="overflow-hidden rounded-lg border bg-card"><div className="flex items-center gap-3 border-b px-3 py-2"><h3 className="text-sm font-medium">{title}</h3>{stat && <div className="ml-auto flex items-center gap-3 font-mono text-[10px] text-muted-foreground"><span>{stat.left}</span>{stat.right && <span className={stat.tone === "error" ? "text-destructive" : ""}>{stat.right}</span>}</div>}</div><div className="space-y-2 p-3">{children}</div></section> }
 function Row({ label, value, mono }: { label: string; value: React.ReactNode; mono?: boolean }) { return <div className="flex gap-3 py-0.5 text-sm"><span className={`${caption} w-27 shrink-0`}>{label}</span><span className={mono ? "min-w-0 break-all font-mono text-xs" : "min-w-0"}>{value}</span></div> }
 
-export function TicketDetailPanel({ ticket, onClose, onOpenRun }: { ticket: AnalyticsTicket | null; onClose: () => void; onOpenRun: (run: AnalyticsTicketRunSummary) => void }) {
+export function TicketDetailPanel({ ticket, filters, onClose, onOpenRun }: { ticket: AnalyticsTicket | null; filters?: TaskRunAnalyticsFilters; onClose: () => void; onOpenRun: (run: AnalyticsTicketRunSummary) => void }) {
   const [detail, setDetail] = useState<AnalyticsTicket | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [retry, setRetry] = useState(0)
@@ -34,23 +34,23 @@ export function TicketDetailPanel({ ticket, onClose, onOpenRun }: { ticket: Anal
   useEffect(() => {
     if (!ticket) return
     const controller = new AbortController()
-    void fetchAnalyticsTicket(ticket.ticketKey, { signal: controller.signal })
+    void fetchAnalyticsTicket(ticket.ticketKey, filters, { signal: controller.signal })
       .then((response) => setDetail(response.ticket))
       .catch(() => { if (!controller.signal.aborted) setError("Failed to load ticket details.") })
     return () => controller.abort()
-  }, [ticket?.ticketKey, retry])
+  }, [ticket?.ticketKey, filters, retry])
   useEscapeToClose(onClose, Boolean(ticket))
   const panelRef = useRef<HTMLElement>(null)
-  useFocusTrap(panelRef, Boolean(ticket))
+  useFocusTrap(panelRef, Boolean(ticket), Boolean(detail))
   const previousFocusRef = useRef<HTMLElement | null>(null)
   useEffect(() => {
     if (!ticket) return
     previousFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null
     panelRef.current?.focus()
     return () => previousFocusRef.current?.focus()
-  }, [ticket?.issueId])
+  }, [ticket?.issueId, Boolean(detail)])
   if (!ticket) return null
-  if (!detail) return <><div className="fixed inset-0 z-[45] bg-black/50" onClick={onClose} aria-hidden="true" /><aside className="fixed inset-y-0 right-0 z-[50] flex w-full max-w-full items-center justify-center border-l bg-background shadow-xl md:max-w-[66vw]" role="dialog" aria-modal="true"><Button variant="ghost" className="absolute right-3 top-3" onClick={onClose}>Close</Button><div className="flex items-center gap-2"><p className="text-sm text-muted-foreground">{error || "Loading ticket details…"}</p>{error && <Button variant="outline" size="sm" onClick={() => setRetry((value) => value + 1)}>Retry</Button>}</div></aside></>
+  if (!detail) return <><div className="fixed inset-0 z-[45] bg-black/50" onClick={onClose} aria-hidden="true" /><aside ref={panelRef} tabIndex={-1} className="fixed inset-y-0 right-0 z-[50] flex w-full max-w-full items-center justify-center border-l bg-background shadow-xl md:max-w-[66vw]" role="dialog" aria-modal="true"><Button variant="ghost" className="absolute right-3 top-3" onClick={onClose}>Close</Button><div className="flex items-center gap-2"><p className="text-sm text-muted-foreground">{error || "Loading ticket details…"}</p>{error && <Button variant="outline" size="sm" onClick={() => { setError(null); setRetry((value) => value + 1) }}>Retry</Button>}</div></aside></>
   const current = detail
   const open = current.prs.filter((pr) => pr.state === "open")
   const delivered = current.status === "delivered"

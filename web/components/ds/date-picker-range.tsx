@@ -51,6 +51,12 @@ function formatUTCDay(date: Date, dateFormat: string) {
   return format(new Date(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()), dateFormat)
 }
 
+function calendarRange(range: DateRange | undefined): DateRange | undefined {
+  if (!range?.from || !range.to || !isSameUTCDay(range.from, range.to)) return range
+  const localNoon = (date: Date) => new Date(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate(), 12)
+  return { from: localNoon(range.from), to: localNoon(range.to) }
+}
+
 /* The current period is always readable as text — the active preset's name, or
    the resolved dates — instead of inferred from which button looks active. */
 function rangeLabel(range: DateRange | undefined, now: Date) {
@@ -111,12 +117,12 @@ export function DatePickerRange({ value, onChange, className }: DatePickerRangeP
             </button>
           ))}
           <div className="my-1 border-t" />
-          <span className="px-2 font-mono text-[11px] text-muted-foreground">{resolvedValue?.from ? format(resolvedValue.from, 'yyyy-MM-dd') : '—'}</span>
-          <span className="px-2 font-mono text-[11px] text-muted-foreground">{resolvedValue?.to ? format(resolvedValue.to, 'yyyy-MM-dd') : '…'}</span>
+          <span className="px-2 font-mono text-[11px] text-muted-foreground">{resolvedValue?.from ? resolvedValue.to && isSameUTCDay(resolvedValue.from, resolvedValue.to) ? formatUTCDay(resolvedValue.from, 'yyyy-MM-dd') : format(resolvedValue.from, 'yyyy-MM-dd') : '—'}</span>
+          <span className="px-2 font-mono text-[11px] text-muted-foreground">{resolvedValue?.to ? resolvedValue.from && isSameUTCDay(resolvedValue.from, resolvedValue.to) ? formatUTCDay(resolvedValue.to, 'yyyy-MM-dd') : format(resolvedValue.to, 'yyyy-MM-dd') : '…'}</span>
         </div>
         <Calendar
           mode="range"
-          selected={resolvedValue}
+          selected={calendarRange(resolvedValue)}
           onSelect={selectRange}
           numberOfMonths={1}
           defaultMonth={resolvedValue?.to ?? resolvedValue?.from}
