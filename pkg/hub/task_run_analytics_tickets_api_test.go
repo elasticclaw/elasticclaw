@@ -108,11 +108,11 @@ func TestTaskRunAnalyticsTicketPageCachesTotalAcrossCursors(t *testing.T) {
 		}
 	}
 	filters := taskRunAnalyticsFilters{TenantID: "test-tenant-id"}
-	page1, total1, err := s.readTaskRunAnalyticsTicketGroupsPage(filters, 0, "", 5)
-	if err != nil || total1 != 12 || len(page1) != 6 {
+	page1, total1, hasNextPage, _, err := s.readTaskRunAnalyticsTicketGroupsPage(filters, 0, "", 5)
+	if err != nil || total1 != 12 || len(page1) != 5 || !hasNextPage {
 		t.Fatalf("first ticket page = %d groups, total %d, err %v", len(page1), total1, err)
 	}
-	page2, total2, err := s.readTaskRunAnalyticsTicketGroupsPage(filters, page1[4].cursorAt(), page1[4].issueID, 5)
+	page2, total2, _, _, err := s.readTaskRunAnalyticsTicketGroupsPage(filters, page1[4].cursorAt(), page1[4].issueID, 5)
 	if err != nil || total2 != 12 || len(page2) == 0 || page2[0].issueID == page1[0].issueID {
 		t.Fatalf("second ticket page = %#v, total %d, err %v", page2, total2, err)
 	}
@@ -137,7 +137,7 @@ func TestTaskRunAnalyticsEffectivenessAndTicketsShareTicketTotalCache(t *testing
 	if s.ticketAnalyticsTotalQueries != 0 {
 		t.Fatalf("effectiveness must not use the caption total cache; queries = %d", s.ticketAnalyticsTotalQueries)
 	}
-	if _, _, err := s.readTaskRunAnalyticsTicketGroupsPage(filters, 0, "", 10); err != nil {
+	if _, _, _, _, err := s.readTaskRunAnalyticsTicketGroupsPage(filters, 0, "", 10); err != nil {
 		t.Fatalf("read ticket page: %v", err)
 	}
 	if s.ticketAnalyticsTotalQueries != 1 {
@@ -342,7 +342,7 @@ func TestTaskRunAnalyticsTicketsSeparatesTrackerWorkspaces(t *testing.T) {
 	keys := map[string]bool{}
 	for _, ticket := range response.Tickets {
 		keys[ticket.TicketKey] = true
-		if ticket.IssueID != "ENG-1" || ticket.Ask != "" || ticket.Story != nil {
+		if ticket.IssueID != "ENG-1" || ticket.Ask != "" || len(ticket.Story) != 0 {
 			t.Fatalf("list ticket = %#v, want a lightweight ENG-1 row", ticket)
 		}
 	}
@@ -389,18 +389,22 @@ func TestApplyOrScheduleTaskRunAnalyticsTicketMetadataKeepsCachedValuesAfterEnri
 	}
 
 	var requester, role, team, priority, ask string
-	var reportedAt, gotUpdatedAt int64
-	if err := db.QueryRow(`SELECT requester,requester_role,team,priority,ask,reported_at,updated_at FROM ticket_metadata WHERE tenant_id=? AND issue_id=?`, "test-tenant-id", issueID).Scan(&requester, &role, &team, &priority, &ask, &reportedAt, &gotUpdatedAt); err != nil {
-		t.Fatalf("read cached metadata: %v", err)
+	var reportedAt, gotUpdatedAt, lastAttemptAt int64
+	for {
+		err := db.QueryRow(`SELECT requester,requester_role,team,priority,ask,reported_at,updated_at,last_attempt_at FROM ticket_metadata WHERE tenant_id=? AND issue_id=?`, "test-tenant-id", issueID).Scan(&requester, &role, &team, &priority, &ask, &reportedAt, &gotUpdatedAt, &lastAttemptAt)
+		if err != nil {
+			t.Fatalf("read cached metadata: %v", err)
+		}
+		if lastAttemptAt > 0 || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(time.Millisecond)
 	}
 	if requester != "requester" || role != "manager" || team != "platform" || priority != "high" || ask != "fix it" || reportedAt != 999 {
 		t.Fatalf("metadata after failed enrichment = %q/%q/%q/%q/%q/%d, want cached values unchanged", requester, role, team, priority, ask, reportedAt)
 	}
-	// A failed re-enrichment attempt must still bump updated_at so the 15-minute
-	// backoff window applies; otherwise a persistently failing tracker call
-	// (outage, rotated token, unrecognized source) is retried on every request.
-	if gotUpdatedAt <= updatedAt {
-		t.Fatalf("updated_at after failed enrichment = %d, want bumped past %d to enforce backoff", gotUpdatedAt, updatedAt)
+	if gotUpdatedAt != updatedAt || lastAttemptAt <= updatedAt {
+		t.Fatalf("failed enrichment timestamps = updated_at %d, last_attempt_at %d; want unchanged freshness and a recorded retry", gotUpdatedAt, lastAttemptAt)
 	}
 }
 

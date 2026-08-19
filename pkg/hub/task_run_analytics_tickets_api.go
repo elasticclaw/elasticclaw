@@ -20,6 +20,7 @@ const taskRunAnalyticsTicketCacheMaxEntries = 256
 const taskRunAnalyticsTicketMaxPageDepth = 100
 const taskRunAnalyticsTicketMetadataRefreshLimit = 16
 const taskRunAnalyticsTicketMetadataColdLimit = 48
+const taskRunAnalyticsTicketMetadataRetryBackoff = 2 * time.Minute
 
 type taskRunAnalyticsTicketTotalCacheEntry struct {
 	total     int
@@ -140,18 +141,16 @@ func (s *Server) handleTaskRunAnalyticsTickets(w http.ResponseWriter, r *http.Re
 		return
 	}
 	limit := taskRunAnalyticsLimit(r.URL.Query().Get("limit"))
-	groups, total, err := s.readTaskRunAnalyticsTicketGroupsPage(filters, cursorAt, cursorIssueID, limit)
+	groups, total, hasNextPage, lastGroup, err := s.readTaskRunAnalyticsTicketGroupsPage(filters, cursorAt, cursorIssueID, limit)
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, "db error")
 		return
 	}
 	nextCursor := ""
-	if len(groups) > limit {
-		last := groups[limit-1]
+	if hasNextPage {
 		if cursorDepth+1 < taskRunAnalyticsTicketMaxPageDepth {
-			nextCursor = s.encodeTaskRunAnalyticsTicketCursor(last.cursorAt(), last.key, cursorDepth+1)
+			nextCursor = s.encodeTaskRunAnalyticsTicketCursor(lastGroup.cursorAt(), lastGroup.key, cursorDepth+1)
 		}
-		groups = groups[:limit]
 	}
 	groups = nonEmptyTaskRunAnalyticsTicketGroups(groups)
 
@@ -173,7 +172,7 @@ func (s *Server) handleTaskRunAnalyticsTickets(w http.ResponseWriter, r *http.Re
 		jsonError(w, http.StatusInternalServerError, "db error")
 		return
 	}
-	eventsByRun, err := s.readTaskRunAnalyticsEventsForRunsForTickets(filters.TenantID, runIDs)
+	eventsByRun, err := s.readTaskRunAnalyticsTicketTimingForRuns(filters.TenantID, runIDs)
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, "db error")
 		return
@@ -185,17 +184,50 @@ func (s *Server) handleTaskRunAnalyticsTickets(w http.ResponseWriter, r *http.Re
 	}
 	tickets := make([]taskRunAnalyticsTicketView, 0, len(groups))
 	for _, group := range groups {
-		ticket, err := s.buildTaskRunAnalyticsTicket(filters.TenantID, group.issueID, group.runs, attemptsByRun, prsByRun, eventsByRun, metadataByIssue[group.key])
+		ticket, err := s.buildTaskRunAnalyticsTicket(filters.TenantID, group.issueID, group.runs, attemptsByRun, prsByRun, eventsByRun, metadataByIssue[group.key], false)
 		if err != nil {
 			jsonError(w, http.StatusInternalServerError, "db error")
 			return
 		}
 		ticket.TicketKey = group.key
 		// The caption intentionally uses this cached total; accepted departures allow its 5-minute staleness.
-		ticket.Ask, ticket.Story = "", nil
+		ticket.Ask, ticket.Story = "", []taskRunAnalyticsTicketStoryEntry{}
 		tickets = append(tickets, ticket)
 	}
 	jsonOK(w, taskRunAnalyticsTicketsResponse{Tickets: tickets, NextCursor: nextCursor, Limit: limit, Total: total})
+}
+
+// readTaskRunAnalyticsTicketTimingForRuns keeps list-row timing accurate without
+// materializing the per-event story used only by the ticket detail panel.
+func (s *Server) readTaskRunAnalyticsTicketTimingForRuns(tenantID string, runIDs []string) (map[string][]taskRunAnalyticsEventView, error) {
+	eventsByRun := map[string][]taskRunAnalyticsEventView{}
+	if len(runIDs) == 0 {
+		return eventsByRun, nil
+	}
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(runIDs)), ",")
+	args := make([]any, 0, len(runIDs)+1)
+	args = append(args, tenantID)
+	for _, runID := range runIDs {
+		args = append(args, runID)
+	}
+	rows, err := s.db.Query(`SELECT run_id, MAX(event_time), MIN(CASE WHEN event_type='pr_merged' THEN event_time END) FROM task_run_events WHERE tenant_id=? AND run_id IN (`+placeholders+`) GROUP BY run_id`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var runID string
+		var lastActivity int64
+		var firstMergedAt *int64
+		if err := rows.Scan(&runID, &lastActivity, &firstMergedAt); err != nil {
+			return nil, err
+		}
+		eventsByRun[runID] = append(eventsByRun[runID], taskRunAnalyticsEventView{EventTime: lastActivity})
+		if firstMergedAt != nil {
+			eventsByRun[runID] = append(eventsByRun[runID], taskRunAnalyticsEventView{EventType: "pr_merged", EventTime: *firstMergedAt})
+		}
+	}
+	return eventsByRun, rows.Err()
 }
 
 // readTaskRunAnalyticsTicketGroupsPage groups by issue_id and orders by a
@@ -205,11 +237,11 @@ func (s *Server) handleTaskRunAnalyticsTickets(w http.ResponseWriter, r *http.Re
 // trims output, not aggregation work, making this O(window) per page. That is
 // acceptable at current ticket volumes, but the page-depth cap is a stopgap
 // until a materialized per-issue ordering column can provide the real fix.
-func (s *Server) readTaskRunAnalyticsTicketGroupsPage(filters taskRunAnalyticsFilters, cursorAt int64, cursorIssueID string, limit int) ([]taskRunAnalyticsTicketGroup, int, error) {
+func (s *Server) readTaskRunAnalyticsTicketGroupsPage(filters taskRunAnalyticsFilters, cursorAt int64, cursorIssueID string, limit int) ([]taskRunAnalyticsTicketGroup, int, bool, taskRunAnalyticsTicketGroup, error) {
 	where, args := taskRunAnalyticsSummaryWhere(filters)
 	total, err := s.readTaskRunAnalyticsTicketTotal(where, args)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, false, taskRunAnalyticsTicketGroup{}, err
 	}
 	orderAt := `MAX(COALESCE(NULLIF(MIN(NULLIF(issue_created_at,0)),0), MIN(started_at), 1), 1)`
 	groupWhere := where + ` AND issue_id != ''`
@@ -223,40 +255,47 @@ func (s *Server) readTaskRunAnalyticsTicketGroupsPage(filters taskRunAnalyticsFi
 	groupArgs = append(groupArgs, limit+1)
 	rows, err := s.db.Query(`SELECT `+taskRunAnalyticsTicketKeySQL+`, `+orderAt+` FROM task_run_summaries `+groupWhere+` ORDER BY 2 DESC, 1 DESC LIMIT ?`, groupArgs...)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, false, taskRunAnalyticsTicketGroup{}, err
 	}
 	defer rows.Close()
 	ids := []string{}
+	cursorGroups := []taskRunAnalyticsTicketGroup{}
 	for rows.Next() {
 		var id string
 		var ignored int64
 		if err := rows.Scan(&id, &ignored); err != nil {
-			return nil, 0, err
+			return nil, 0, false, taskRunAnalyticsTicketGroup{}, err
 		}
 		ids = append(ids, id)
+		cursorGroups = append(cursorGroups, taskRunAnalyticsTicketGroup{key: id, reportedAt: ignored})
 	}
 	if err := rows.Err(); err != nil {
-		return nil, 0, err
+		return nil, 0, false, taskRunAnalyticsTicketGroup{}, err
 	}
 	if len(ids) == 0 {
-		return []taskRunAnalyticsTicketGroup{}, total, nil
+		return []taskRunAnalyticsTicketGroup{}, total, false, taskRunAnalyticsTicketGroup{}, nil
 	}
-	ph := strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",")
+	hasNextPage := len(ids) > limit
+	hydratedIDs := ids
+	if hasNextPage {
+		hydratedIDs = ids[:limit]
+	}
+	ph := strings.TrimSuffix(strings.Repeat("?,", len(hydratedIDs)), ",")
 	runWhere := where + ` AND ` + taskRunAnalyticsTicketKeySQL + ` IN (` + ph + `)`
 	runArgs := append([]any{}, args...)
-	for _, id := range ids {
+	for _, id := range hydratedIDs {
 		runArgs = append(runArgs, id)
 	}
 	runRows, err := s.db.Query(`SELECT `+taskRunAnalyticsRunColumns()+` FROM task_run_summaries `+runWhere, runArgs...)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, false, taskRunAnalyticsTicketGroup{}, err
 	}
 	defer runRows.Close()
 	runs, err := scanTaskRunAnalyticsRuns(runRows)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, false, taskRunAnalyticsTicketGroup{}, err
 	}
-	return taskRunAnalyticsTicketGroupsFromHydration(ids, runs), total, nil
+	return taskRunAnalyticsTicketGroupsFromHydration(hydratedIDs, runs), total, hasNextPage, cursorGroups[len(hydratedIDs)-1], nil
 }
 
 func randomTicketCursorKey() []byte {
@@ -297,8 +336,8 @@ func (s *Server) readTaskRunAnalyticsTicketByKey(ctx context.Context, filters ta
 		return nil, nil
 	}
 	where, args := taskRunAnalyticsSummaryWhere(filters)
-	runWhere := where + ` AND ` + taskRunAnalyticsTicketKeySQL + ` IN (?)`
-	rows, err := s.db.QueryContext(ctx, `SELECT `+taskRunAnalyticsRunColumns()+` FROM task_run_summaries `+runWhere, append(args, key)...)
+	runWhere := where + ` AND integration = ? AND integration_workspace = ? AND issue_id = ?`
+	rows, err := s.db.QueryContext(ctx, `SELECT `+taskRunAnalyticsRunColumns()+` FROM task_run_summaries `+runWhere, append(args, parts[0], parts[1], parts[2])...)
 	if err != nil {
 		return nil, err
 	}
@@ -327,7 +366,7 @@ func (s *Server) readTaskRunAnalyticsTicketByKey(ctx context.Context, filters ta
 	if err != nil {
 		return nil, err
 	}
-	ticket, err := s.buildTaskRunAnalyticsTicket(filters.TenantID, parts[2], runs, attempts, prs, events, metadata[key])
+	ticket, err := s.buildTaskRunAnalyticsTicket(filters.TenantID, parts[2], runs, attempts, prs, events, metadata[key], true)
 	if err != nil {
 		return nil, err
 	}
@@ -529,7 +568,7 @@ func (group taskRunAnalyticsTicketGroup) cursorAt() int64 {
 	return 1
 }
 
-func (s *Server) buildTaskRunAnalyticsTicket(tenantID, issueID string, runs []taskRunAnalyticsRunView, attemptsByRun map[string][]taskRunAnalyticsAttemptView, prsByRun map[string][]taskRunAnalyticsPRView, eventsByRun map[string][]taskRunAnalyticsEventView, metadata taskRunAnalyticsTicketMetadata) (taskRunAnalyticsTicketView, error) {
+func (s *Server) buildTaskRunAnalyticsTicket(tenantID, issueID string, runs []taskRunAnalyticsRunView, attemptsByRun map[string][]taskRunAnalyticsAttemptView, prsByRun map[string][]taskRunAnalyticsPRView, eventsByRun map[string][]taskRunAnalyticsEventView, metadata taskRunAnalyticsTicketMetadata, includeStory bool) (taskRunAnalyticsTicketView, error) {
 	sort.Slice(runs, func(i, j int) bool { return runs[i].StartedAt < runs[j].StartedAt })
 	ticket := taskRunAnalyticsTicketView{TicketKey: taskRunAnalyticsTicketKey(runs[0].Integration, runs[0].IntegrationWorkspace, issueID), IssueID: issueID, IssueTitle: runs[0].IssueTitle, Source: runs[0].Integration, Repo: runs[0].Repo, WorkflowName: runs[0].WorkflowName, WorkspaceName: runs[0].WorkspaceName, RunIDs: []string{}, Runs: []taskRunAnalyticsTicketRunSummary{}, PRs: []taskRunAnalyticsTicketPRView{}, Story: []taskRunAnalyticsTicketStoryEntry{}}
 	events := []taskRunAnalyticsTicketStoryEntry{}
@@ -560,7 +599,11 @@ func (s *Server) buildTaskRunAnalyticsTicket(tenantID, issueID string, runs []ta
 			}
 		}
 		for _, event := range runEvents {
-			events = append(events, ticketStoryEntry(event, run.RunID))
+			if includeStory {
+				events = append(events, ticketStoryEntry(event, run.RunID))
+			} else {
+				events = append(events, taskRunAnalyticsTicketStoryEntry{EventType: event.EventType, Time: event.EventTime, RunID: run.RunID})
+			}
 		}
 	}
 	ticket.RunCount = len(runs)
@@ -576,7 +619,9 @@ func (s *Server) buildTaskRunAnalyticsTicket(tenantID, issueID string, runs []ta
 		}
 		return events[i].ID < events[j].ID
 	})
-	ticket.Story = collapseTaskRunAnalyticsTicketStory(events)
+	if includeStory {
+		ticket.Story = collapseTaskRunAnalyticsTicketStory(events)
+	}
 	firstStart := runs[0].StartedAt
 	for _, event := range events {
 		if event.Time > ticket.LastActivity {
@@ -662,7 +707,7 @@ func collapseTaskRunAnalyticsTicketStory(events []taskRunAnalyticsTicketStoryEnt
 	return story
 }
 
-func (s *Server) enrichTaskRunAnalyticsTicket(ticket *taskRunAnalyticsTicketView, run taskRunAnalyticsRunView) {
+func (s *Server) enrichTaskRunAnalyticsTicket(ticket *taskRunAnalyticsTicketView, run taskRunAnalyticsRunView) bool {
 	if ticket.Source == "linear" {
 		if _, workflow, ok, err := s.resolveWorkflowConfig(run.WorkspaceName, run.WorkflowName); err == nil && ok {
 			if token := s.resolveLinearTokenForWorkflow(run.WorkspaceName, workflow); token != "" {
@@ -674,7 +719,7 @@ func (s *Server) enrichTaskRunAnalyticsTicket(ticket *taskRunAnalyticsTicketView
 							ticket.ReportedAt = parsed
 						}
 					}
-					return
+					return true
 				} else {
 					log.Printf("[task-run-analytics] Linear ticket enrichment failed for %s: %v", ticket.IssueID, err)
 				}
@@ -682,14 +727,15 @@ func (s *Server) enrichTaskRunAnalyticsTicket(ticket *taskRunAnalyticsTicketView
 		}
 	}
 	if ticket.Source == "github-issues" {
-		s.enrichTaskRunAnalyticsGitHubTicket(ticket, run)
+		return s.enrichTaskRunAnalyticsGitHubTicket(ticket, run)
 	}
+	return false
 }
 
 // readOrScheduleTaskRunAnalyticsTicketMetadata keeps tracker HTTP out of the request path.
 type taskRunAnalyticsTicketMetadata struct {
 	requester, requesterRole, team, priority, ask string
-	reportedAt, updatedAt                         int64
+	reportedAt, updatedAt, lastAttemptAt          int64
 }
 
 func (s *Server) readTaskRunAnalyticsTicketMetadataPage(ctx context.Context, tenantID string, issueIDs []string) (map[string]taskRunAnalyticsTicketMetadata, error) {
@@ -712,14 +758,14 @@ func (s *Server) readTaskRunAnalyticsTicketMetadataPage(ctx context.Context, ten
 		if len(terms) == 0 {
 			continue
 		}
-		rows, err := s.db.QueryContext(ctx, `SELECT integration || char(31) || integration_workspace || char(31) || issue_id, requester, requester_role, team, priority, ask, reported_at, updated_at FROM ticket_metadata WHERE tenant_id=? AND (`+strings.Join(terms, " OR ")+`)`, args...)
+		rows, err := s.db.QueryContext(ctx, `SELECT integration || char(31) || integration_workspace || char(31) || issue_id, requester, requester_role, team, priority, ask, reported_at, updated_at, last_attempt_at FROM ticket_metadata WHERE tenant_id=? AND (`+strings.Join(terms, " OR ")+`)`, args...)
 		if err != nil {
 			return nil, err
 		}
 		for rows.Next() {
 			var id string
 			var m taskRunAnalyticsTicketMetadata
-			if err := rows.Scan(&id, &m.requester, &m.requesterRole, &m.team, &m.priority, &m.ask, &m.reportedAt, &m.updatedAt); err != nil {
+			if err := rows.Scan(&id, &m.requester, &m.requesterRole, &m.team, &m.priority, &m.ask, &m.reportedAt, &m.updatedAt, &m.lastAttemptAt); err != nil {
 				rows.Close()
 				return nil, err
 			}
@@ -751,6 +797,9 @@ func (s *Server) applyOrScheduleTaskRunAnalyticsTicketMetadata(tenantID string, 
 			return
 		}
 	}
+	if metadata.lastAttemptAt > 0 && time.Since(time.UnixMilli(metadata.lastAttemptAt)) < taskRunAnalyticsTicketMetadataRetryBackoff {
+		return
+	}
 	metadataKey := taskRunAnalyticsTicketKey(run.Integration, run.IntegrationWorkspace, ticket.IssueID)
 	key := tenantID + ":" + metadataKey
 	if _, loaded := s.ticketMetadataInflight.LoadOrStore(key, struct{}{}); loaded {
@@ -777,9 +826,14 @@ func (s *Server) applyOrScheduleTaskRunAnalyticsTicketMetadata(tenantID string, 
 		defer s.ticketMetadataInflight.Delete(key)
 		defer func() { <-s.ticketMetadataEnrichment }()
 		metadata := taskRunAnalyticsTicketView{IssueID: ticket.IssueID, IssueTitle: ticket.IssueTitle, Source: ticket.Source, ReportedAt: ticket.ReportedAt}
-		s.enrichTaskRunAnalyticsTicket(&metadata, run)
-		// The upsert preserves existing fields while recording the retry time.
-		if _, err := s.db.Exec(`INSERT INTO ticket_metadata(tenant_id,integration,integration_workspace,issue_id,requester,requester_role,team,priority,ask,reported_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(tenant_id,integration,integration_workspace,issue_id) DO UPDATE SET requester=CASE WHEN excluded.requester != '' THEN excluded.requester ELSE ticket_metadata.requester END, requester_role=CASE WHEN excluded.requester_role != '' THEN excluded.requester_role ELSE ticket_metadata.requester_role END, team=CASE WHEN excluded.team != '' THEN excluded.team ELSE ticket_metadata.team END, priority=CASE WHEN excluded.priority != '' THEN excluded.priority ELSE ticket_metadata.priority END, ask=CASE WHEN excluded.ask != '' THEN excluded.ask ELSE ticket_metadata.ask END, reported_at=CASE WHEN excluded.reported_at != 0 THEN excluded.reported_at ELSE ticket_metadata.reported_at END, updated_at=excluded.updated_at`, tenantID, run.Integration, run.IntegrationWorkspace, metadata.IssueID, metadata.Requester, metadata.RequesterRole, metadata.Team, metadata.Priority, metadata.Ask, metadata.ReportedAt, now().UnixMilli()); err != nil {
+		succeeded := s.enrichTaskRunAnalyticsTicket(&metadata, run)
+		// Successful fetches refresh metadata; failed attempts only start a short retry backoff.
+		attemptedAt := now().UnixMilli()
+		updatedAt := int64(0)
+		if succeeded {
+			updatedAt = attemptedAt
+		}
+		if _, err := s.db.Exec(`INSERT INTO ticket_metadata(tenant_id,integration,integration_workspace,issue_id,requester,requester_role,team,priority,ask,reported_at,updated_at,last_attempt_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(tenant_id,integration,integration_workspace,issue_id) DO UPDATE SET requester=CASE WHEN excluded.requester != '' THEN excluded.requester ELSE ticket_metadata.requester END, requester_role=CASE WHEN excluded.requester_role != '' THEN excluded.requester_role ELSE ticket_metadata.requester_role END, team=CASE WHEN excluded.team != '' THEN excluded.team ELSE ticket_metadata.team END, priority=CASE WHEN excluded.priority != '' THEN excluded.priority ELSE ticket_metadata.priority END, ask=CASE WHEN excluded.ask != '' THEN excluded.ask ELSE ticket_metadata.ask END, reported_at=CASE WHEN excluded.reported_at != 0 THEN excluded.reported_at ELSE ticket_metadata.reported_at END, updated_at=CASE WHEN excluded.updated_at != 0 THEN excluded.updated_at ELSE ticket_metadata.updated_at END, last_attempt_at=excluded.last_attempt_at`, tenantID, run.Integration, run.IntegrationWorkspace, metadata.IssueID, metadata.Requester, metadata.RequesterRole, metadata.Team, metadata.Priority, metadata.Ask, metadata.ReportedAt, updatedAt, attemptedAt); err != nil {
 			log.Printf("[task-run-analytics] write ticket metadata %s: %v", metadata.IssueID, err)
 		}
 	}()
@@ -814,22 +868,22 @@ func (s *Server) allowTaskRunAnalyticsTicketMetadataRefresh() bool {
 	return true
 }
 
-func (s *Server) enrichTaskRunAnalyticsGitHubTicket(ticket *taskRunAnalyticsTicketView, run taskRunAnalyticsRunView) {
+func (s *Server) enrichTaskRunAnalyticsGitHubTicket(ticket *taskRunAnalyticsTicketView, run taskRunAnalyticsRunView) bool {
 	parts := strings.Split(ticket.IssueID, "/")
 	if len(parts) != 3 {
-		return
+		return false
 	}
 	number, err := strconv.Atoi(parts[2])
 	if err != nil {
-		return
+		return false
 	}
 	_, workflow, ok, err := s.resolveWorkflowConfig(run.WorkspaceName, run.WorkflowName)
 	if err != nil || !ok {
-		return
+		return false
 	}
 	token := s.resolveGitHubIssuesTokenForWorkflow(run.WorkspaceName, workflow)
 	if token == "" {
-		return
+		return false
 	}
 	base := s.githubBaseURL
 	if base == "" {
@@ -840,7 +894,7 @@ func (s *Server) enrichTaskRunAnalyticsGitHubTicket(ticket *taskRunAnalyticsTick
 	issue, err := s.queryGitHubIssueContext(ctx, parts[0]+"/"+parts[1], token, base, number)
 	if err != nil {
 		log.Printf("[task-run-analytics] GitHub ticket enrichment failed for %s: %v", ticket.IssueID, err)
-		return
+		return false
 	}
 	ticket.Requester, ticket.Ask = issue.User.Login, issue.Body
 	if ticket.IssueTitle == "" {
@@ -851,6 +905,7 @@ func (s *Server) enrichTaskRunAnalyticsGitHubTicket(ticket *taskRunAnalyticsTick
 			ticket.ReportedAt = parsed
 		}
 	}
+	return true
 }
 
 func parseTicketTimestamp(value string) (int64, error) {

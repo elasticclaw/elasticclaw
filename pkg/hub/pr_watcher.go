@@ -646,21 +646,23 @@ func (s *Server) pollAllPRs() {
 		// Check if PR is merged/closed for any non-terminal claw status.
 		// checkPRMerged also runs human code push detection off the same PR
 		// fetch, before any termination handling.
-		if s.checkPRMerged(r.pr, token) {
+		merged := s.checkPRMerged(r.pr, token)
+		if lowPriorityOK || merged {
+			// Record a terminal CI result before the merge/close continue below can
+			// remove the PR row, so a CI verdict landing in the same poll as the
+			// merge still emits its ci_succeeded/ci_failed event. Outside the merge
+			// case this stays gated by the budget reserve like the rest of the
+			// low-priority checks below.
+			s.checkCIStatus(r.pr, token)
+		}
+		if merged {
 			terminatedClaws[r.pr.clawID] = true
 			continue // claw is being terminated, skip other checks
 		}
 		if !lowPriorityOK {
 			// Merge detection above is the only call worth the remaining budget.
-			// NOTE: this also suppresses the green-CI wake-up below, so a claw
-			// waiting on CI stays idle until the budget recovers. The webhook
-			// path is the fix for that; polling alone cannot be both cheap and
-			// prompt.
 			continue
 		}
-		// Always check CI status (failures and, just as importantly, green)
-		s.checkCIStatus(r.pr, token)
-
 		commentsData, err := githubAPIList(fmt.Sprintf("repos/%s/issues/%d/comments", r.pr.repo, r.pr.prNumber), token)
 		if err != nil {
 			log.Printf("[pr-watcher] error fetching comments for %s: %v", r.pr.prURL, err)

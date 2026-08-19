@@ -258,12 +258,15 @@ func migrate(db *sql.DB) error {
 	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS ticket_metadata (
 		tenant_id TEXT NOT NULL, integration TEXT NOT NULL DEFAULT '', integration_workspace TEXT NOT NULL DEFAULT '', issue_id TEXT NOT NULL, requester TEXT NOT NULL DEFAULT '',
 		requester_role TEXT NOT NULL DEFAULT '', team TEXT NOT NULL DEFAULT '', priority TEXT NOT NULL DEFAULT '',
-		ask TEXT NOT NULL DEFAULT '', reported_at INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL,
+		ask TEXT NOT NULL DEFAULT '', reported_at INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL, last_attempt_at INTEGER NOT NULL DEFAULT 0,
 		PRIMARY KEY (tenant_id, integration, integration_workspace, issue_id)
 	)`); err != nil {
 		return err
 	}
 	if err := migrateTicketMetadataKey(db); err != nil {
+		return err
+	}
+	if err := addColumn(db, "ticket_metadata", "last_attempt_at", `INTEGER NOT NULL DEFAULT 0`); err != nil {
 		return err
 	}
 	_, _ = db.Exec(`ALTER TABLE messages ADD COLUMN format TEXT NOT NULL DEFAULT ''`)
@@ -991,7 +994,7 @@ func migrateTicketMetadataKey(db *sql.DB) error {
 	if _, err = tx.Exec(`ALTER TABLE ticket_metadata RENAME TO ticket_metadata_legacy`); err != nil {
 		return err
 	}
-	if _, err = tx.Exec(`CREATE TABLE ticket_metadata (tenant_id TEXT NOT NULL, integration TEXT NOT NULL DEFAULT '', integration_workspace TEXT NOT NULL DEFAULT '', issue_id TEXT NOT NULL, requester TEXT NOT NULL DEFAULT '', requester_role TEXT NOT NULL DEFAULT '', team TEXT NOT NULL DEFAULT '', priority TEXT NOT NULL DEFAULT '', ask TEXT NOT NULL DEFAULT '', reported_at INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL, PRIMARY KEY (tenant_id, integration, integration_workspace, issue_id))`); err != nil {
+	if _, err = tx.Exec(`CREATE TABLE ticket_metadata (tenant_id TEXT NOT NULL, integration TEXT NOT NULL DEFAULT '', integration_workspace TEXT NOT NULL DEFAULT '', issue_id TEXT NOT NULL, requester TEXT NOT NULL DEFAULT '', requester_role TEXT NOT NULL DEFAULT '', team TEXT NOT NULL DEFAULT '', priority TEXT NOT NULL DEFAULT '', ask TEXT NOT NULL DEFAULT '', reported_at INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL, last_attempt_at INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (tenant_id, integration, integration_workspace, issue_id))`); err != nil {
 		return err
 	}
 	if _, err = tx.Exec(`INSERT INTO ticket_metadata(tenant_id,issue_id,requester,requester_role,team,priority,ask,reported_at,updated_at) SELECT tenant_id,issue_id,requester,requester_role,team,priority,ask,reported_at,updated_at FROM ticket_metadata_legacy`); err != nil {
