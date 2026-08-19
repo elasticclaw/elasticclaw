@@ -85,12 +85,14 @@ type Server struct {
 	ticketAnalyticsTotalGroup   singleflight.Group
 	ticketAnalyticsTotalQueries int
 	// Ticket metadata work is per server so independent hubs do not share work.
-	ticketMetadataEnrichment chan struct{}
-	ticketMetadataInflight   sync.Map
-	ticketMetadataRefreshMu  sync.Mutex
-	ticketMetadataRefreshAt  time.Time
-	ticketMetadataRefreshes  int
-	ticketCursorKey          []byte
+	ticketMetadataEnrichment      chan struct{}
+	ticketMetadataInflight        sync.Map
+	ticketMetadataRefreshMu       sync.Mutex
+	ticketMetadataRefreshAt       time.Time
+	ticketMetadataRefreshes       int
+	ticketMetadataColdAt          time.Time
+	ticketMetadataColdEnrichments int
+	ticketCursorKey               []byte
 
 	// ghTokenCache holds GitHub App installation tokens until shortly before
 	// they expire, keyed by requested repo access.
@@ -438,6 +440,10 @@ func NewServer(addr, dbPath, identityDir string, hubCfg *types.HubConfig) (*Serv
 		ticketMetadataEnrichment: make(chan struct{}, 32),
 		ticketCursorKey:          randomTicketCursorKey(),
 	}
+	if err := srv.loadTaskRunAnalyticsTicketCursorKey(); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("ticket cursor key: %w", err)
+	}
 	if srv.livenessEnabled() {
 		srv.reconcileOnBoot()
 	}
@@ -735,6 +741,9 @@ func (s *Server) withAuth(next http.HandlerFunc) http.HandlerFunc {
 func (s *Server) withStrictAdminAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+		if token == "" {
+			token = r.Header.Get(webSessionHeader)
+		}
 		if token == "" {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return

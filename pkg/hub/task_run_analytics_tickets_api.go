@@ -19,6 +19,7 @@ const taskRunAnalyticsTicketCacheTTL = 5 * time.Minute
 const taskRunAnalyticsTicketCacheMaxEntries = 256
 const taskRunAnalyticsTicketMaxPageDepth = 100
 const taskRunAnalyticsTicketMetadataRefreshLimit = 16
+const taskRunAnalyticsTicketMetadataColdLimit = 48
 
 type taskRunAnalyticsTicketTotalCacheEntry struct {
 	total     int
@@ -62,6 +63,7 @@ type taskRunAnalyticsTicketStoryEntry struct {
 }
 
 type taskRunAnalyticsTicketView struct {
+	TicketKey      string                             `json:"ticketKey"`
 	IssueID        string                             `json:"issueId"`
 	IssueTitle     string                             `json:"issueTitle"`
 	Status         string                             `json:"status"`
@@ -115,6 +117,21 @@ func (s *Server) handleTaskRunAnalyticsTickets(w http.ResponseWriter, r *http.Re
 	filters, err := parseTaskRunAnalyticsFilters(r)
 	if err != nil {
 		jsonError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if key := r.URL.Query().Get("key"); key != "" {
+		ticket, err := s.readTaskRunAnalyticsTicketByKey(r.Context(), filters.TenantID, key)
+		if err != nil {
+			jsonError(w, http.StatusInternalServerError, "db error")
+			return
+		}
+		if ticket == nil {
+			jsonError(w, http.StatusNotFound, "ticket not found")
+			return
+		}
+		jsonOK(w, struct {
+			Ticket taskRunAnalyticsTicketView `json:"ticket"`
+		}{Ticket: *ticket})
 		return
 	}
 	cursorAt, cursorIssueID, cursorDepth, err := s.decodeTaskRunAnalyticsTicketCursor(r.URL.Query().Get("cursor"))
@@ -173,6 +190,9 @@ func (s *Server) handleTaskRunAnalyticsTickets(w http.ResponseWriter, r *http.Re
 			jsonError(w, http.StatusInternalServerError, "db error")
 			return
 		}
+		ticket.TicketKey = group.key
+		// The caption intentionally uses this cached total; accepted departures allow its 5-minute staleness.
+		ticket.Ask, ticket.Story = "", nil
 		tickets = append(tickets, ticket)
 	}
 	jsonOK(w, taskRunAnalyticsTicketsResponse{Tickets: tickets, NextCursor: nextCursor, Limit: limit, Total: total})
@@ -247,6 +267,72 @@ func randomTicketCursorKey() []byte {
 	return key
 }
 
+func (s *Server) loadTaskRunAnalyticsTicketCursorKey() error {
+	if _, err := s.db.Exec(`CREATE TABLE IF NOT EXISTS hub_settings (key TEXT PRIMARY KEY, value BLOB NOT NULL)`); err != nil {
+		return err
+	}
+	var key []byte
+	err := s.db.QueryRow(`SELECT value FROM hub_settings WHERE key=?`, "task_run_analytics_ticket_cursor_key").Scan(&key)
+	if err == nil && len(key) >= 32 {
+		s.ticketCursorKey = key
+		return nil
+	}
+	if err != nil && !strings.Contains(err.Error(), "no rows") {
+		return err
+	}
+	key = randomTicketCursorKey()
+	if _, err := s.db.Exec(`INSERT INTO hub_settings(key,value) VALUES(?,?) ON CONFLICT(key) DO NOTHING`, "task_run_analytics_ticket_cursor_key", key); err != nil {
+		return err
+	}
+	if err := s.db.QueryRow(`SELECT value FROM hub_settings WHERE key=?`, "task_run_analytics_ticket_cursor_key").Scan(&key); err != nil {
+		return err
+	}
+	s.ticketCursorKey = key
+	return nil
+}
+
+func (s *Server) readTaskRunAnalyticsTicketByKey(ctx context.Context, tenantID, key string) (*taskRunAnalyticsTicketView, error) {
+	parts := strings.Split(key, taskRunAnalyticsTicketKeySeparator)
+	if len(parts) != 3 {
+		return nil, nil
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT `+taskRunAnalyticsRunColumns()+` FROM task_run_summaries WHERE tenant_id=? AND integration=? AND integration_workspace=? AND issue_id=?`, tenantID, parts[0], parts[1], parts[2])
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	runs, err := scanTaskRunAnalyticsRuns(rows)
+	if err != nil || len(runs) == 0 {
+		return nil, err
+	}
+	runIDs := make([]string, 0, len(runs))
+	for _, run := range runs {
+		runIDs = append(runIDs, run.RunID)
+	}
+	attempts, err := s.readTaskRunAnalyticsAttemptsForRuns(tenantID, runIDs)
+	if err != nil {
+		return nil, err
+	}
+	prs, err := s.readTaskRunAnalyticsPRsForRuns(tenantID, runIDs)
+	if err != nil {
+		return nil, err
+	}
+	events, err := s.readTaskRunAnalyticsEventsForRunsForTickets(tenantID, runIDs)
+	if err != nil {
+		return nil, err
+	}
+	metadata, err := s.readTaskRunAnalyticsTicketMetadataPage(ctx, tenantID, []string{key})
+	if err != nil {
+		return nil, err
+	}
+	ticket, err := s.buildTaskRunAnalyticsTicket(tenantID, parts[2], runs, attempts, prs, events, metadata[key])
+	if err != nil {
+		return nil, err
+	}
+	ticket.TicketKey = key
+	return &ticket, nil
+}
+
 // Ticket cursor depth gates an expensive aggregate, so it is MACed instead of
 // trusting a client-rewritable page counter.
 func (s *Server) encodeTaskRunAnalyticsTicketCursor(cursorAt int64, issueID string, depth int) string {
@@ -288,7 +374,8 @@ func (s *Server) decodeTaskRunAnalyticsTicketCursor(raw string) (int64, string, 
 	mac := hmac.New(sha256.New, s.ticketCursorKey)
 	_, _ = mac.Write([]byte(strings.Join(parts[1:4], ":")))
 	if !hmac.Equal(signature, mac.Sum(nil)) {
-		return 0, "", 0, fmt.Errorf("invalid cursor")
+		// A restart may rotate a legacy key; restart safely rather than reject pagination.
+		return 0, "", 0, nil
 	}
 	return cursorAt, string(issueID), depth, nil
 }
@@ -380,8 +467,6 @@ func taskRunAnalyticsTicketGroupsFromHydration(ids []string, runs []taskRunAnaly
 	for _, run := range runs {
 		key := taskRunAnalyticsTicketKey(run.Integration, run.IntegrationWorkspace, run.IssueID)
 		byID[key] = append(byID[key], run)
-		// Keep the small pure helper usable by legacy unit fixtures that pass raw IDs.
-		byID[run.IssueID] = append(byID[run.IssueID], run)
 	}
 	groups := make([]taskRunAnalyticsTicketGroup, 0, len(ids))
 	for _, id := range ids {
@@ -444,7 +529,7 @@ func (group taskRunAnalyticsTicketGroup) cursorAt() int64 {
 
 func (s *Server) buildTaskRunAnalyticsTicket(tenantID, issueID string, runs []taskRunAnalyticsRunView, attemptsByRun map[string][]taskRunAnalyticsAttemptView, prsByRun map[string][]taskRunAnalyticsPRView, eventsByRun map[string][]taskRunAnalyticsEventView, metadata taskRunAnalyticsTicketMetadata) (taskRunAnalyticsTicketView, error) {
 	sort.Slice(runs, func(i, j int) bool { return runs[i].StartedAt < runs[j].StartedAt })
-	ticket := taskRunAnalyticsTicketView{IssueID: issueID, IssueTitle: runs[0].IssueTitle, Source: runs[0].Integration, Repo: runs[0].Repo, WorkflowName: runs[0].WorkflowName, WorkspaceName: runs[0].WorkspaceName, RunIDs: []string{}, Runs: []taskRunAnalyticsTicketRunSummary{}, PRs: []taskRunAnalyticsTicketPRView{}, Story: []taskRunAnalyticsTicketStoryEntry{}}
+	ticket := taskRunAnalyticsTicketView{TicketKey: taskRunAnalyticsTicketKey(runs[0].Integration, runs[0].IntegrationWorkspace, issueID), IssueID: issueID, IssueTitle: runs[0].IssueTitle, Source: runs[0].Integration, Repo: runs[0].Repo, WorkflowName: runs[0].WorkflowName, WorkspaceName: runs[0].WorkspaceName, RunIDs: []string{}, Runs: []taskRunAnalyticsTicketRunSummary{}, PRs: []taskRunAnalyticsTicketPRView{}, Story: []taskRunAnalyticsTicketStoryEntry{}}
 	events := []taskRunAnalyticsTicketStoryEntry{}
 	for _, run := range runs {
 		attempts := attemptsByRun[run.RunID]
@@ -612,12 +697,20 @@ func (s *Server) readTaskRunAnalyticsTicketMetadataPage(ctx context.Context, ten
 		if end > len(issueIDs) {
 			end = len(issueIDs)
 		}
-		ph := strings.TrimSuffix(strings.Repeat("?,", end-start), ",")
 		args := []any{tenantID}
+		terms := make([]string, 0, end-start)
 		for _, id := range issueIDs[start:end] {
-			args = append(args, id)
+			parts := strings.Split(id, taskRunAnalyticsTicketKeySeparator)
+			if len(parts) != 3 {
+				continue
+			}
+			terms = append(terms, "(integration=? AND integration_workspace=? AND issue_id=?)")
+			args = append(args, parts[0], parts[1], parts[2])
 		}
-		rows, err := s.db.QueryContext(ctx, `SELECT integration || char(31) || integration_workspace || char(31) || issue_id, requester, requester_role, team, priority, ask, reported_at, updated_at FROM ticket_metadata WHERE tenant_id=? AND integration || char(31) || integration_workspace || char(31) || issue_id IN (`+ph+`)`, args...)
+		if len(terms) == 0 {
+			continue
+		}
+		rows, err := s.db.QueryContext(ctx, `SELECT integration || char(31) || integration_workspace || char(31) || issue_id, requester, requester_role, team, priority, ask, reported_at, updated_at FROM ticket_metadata WHERE tenant_id=? AND (`+strings.Join(terms, " OR ")+`)`, args...)
 		if err != nil {
 			return nil, err
 		}
@@ -655,9 +748,6 @@ func (s *Server) applyOrScheduleTaskRunAnalyticsTicketMetadata(tenantID string, 
 		if ticket.Source == "github-issues" && !defaultGitHubClient.allowLowPriority() {
 			return
 		}
-		if !s.allowTaskRunAnalyticsTicketMetadataRefresh() {
-			return
-		}
 	}
 	metadataKey := taskRunAnalyticsTicketKey(run.Integration, run.IntegrationWorkspace, ticket.IssueID)
 	key := tenantID + ":" + metadataKey
@@ -670,6 +760,17 @@ func (s *Server) applyOrScheduleTaskRunAnalyticsTicketMetadata(tenantID string, 
 		s.ticketMetadataInflight.Delete(key)
 		return
 	}
+	if metadata.updatedAt > 0 {
+		if !s.allowTaskRunAnalyticsTicketMetadataRefresh() {
+			s.ticketMetadataInflight.Delete(key)
+			<-s.ticketMetadataEnrichment
+			return
+		}
+	} else if !s.allowTaskRunAnalyticsTicketMetadataColdEnrichment() {
+		s.ticketMetadataInflight.Delete(key)
+		<-s.ticketMetadataEnrichment
+		return
+	}
 	go func() {
 		defer s.ticketMetadataInflight.Delete(key)
 		defer func() { <-s.ticketMetadataEnrichment }()
@@ -680,6 +781,21 @@ func (s *Server) applyOrScheduleTaskRunAnalyticsTicketMetadata(tenantID string, 
 			log.Printf("[task-run-analytics] write ticket metadata %s: %v", metadata.IssueID, err)
 		}
 	}()
+}
+
+func (s *Server) allowTaskRunAnalyticsTicketMetadataColdEnrichment() bool {
+	// Cold lookups deserve a larger independent budget, but must not consume the refresh budget or burst the pool.
+	s.ticketMetadataRefreshMu.Lock()
+	defer s.ticketMetadataRefreshMu.Unlock()
+	n := time.Now()
+	if s.ticketMetadataColdAt.IsZero() || n.Sub(s.ticketMetadataColdAt) >= 15*time.Minute {
+		s.ticketMetadataColdAt, s.ticketMetadataColdEnrichments = n, 0
+	}
+	if s.ticketMetadataColdEnrichments >= taskRunAnalyticsTicketMetadataColdLimit {
+		return false
+	}
+	s.ticketMetadataColdEnrichments++
+	return true
 }
 
 func (s *Server) allowTaskRunAnalyticsTicketMetadataRefresh() bool {

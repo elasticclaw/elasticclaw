@@ -59,6 +59,7 @@ type taskRunAnalyticsRunsPerTicket struct {
 	Tickets int    `json:"tickets"`
 }
 type taskRunAnalyticsTopTicket struct {
+	TicketKey  string  `json:"ticketKey"`
 	IssueID    string  `json:"issueId"`
 	IssueTitle string  `json:"issueTitle"`
 	CostUsd    float64 `json:"costUsd"`
@@ -200,7 +201,7 @@ func (s *Server) readTaskRunAnalyticsEffectivenessWithTicketAggregates(f taskRun
 		}
 		defer ticketRows.Close()
 		type ticketAggregate struct {
-			issueID, issueTitle                string
+			key, issueID, issueTitle           string
 			runs, finished, delivered, running int
 			cost                               float64
 			earliest, latest                   int64
@@ -212,6 +213,7 @@ func (s *Server) readTaskRunAnalyticsEffectivenessWithTicketAggregates(f taskRun
 			if err = ticketRows.Scan(&ticketKey, &t.issueID, &t.issueTitle, &t.runs, &t.finished, &t.delivered, &t.running, &t.cost, &t.earliest, &t.latest); err != nil {
 				return out, err
 			}
+			t.key = ticketKey
 			tickets[ticketKey] = &t
 		}
 		if err = ticketRows.Err(); err != nil {
@@ -253,7 +255,7 @@ func (s *Server) readTaskRunAnalyticsEffectivenessWithTicketAggregates(f taskRun
 			}
 			runBuckets[bucket]++
 			if t.cost > 0 {
-				out.TopTicketsByCost = append(out.TopTicketsByCost, taskRunAnalyticsTopTicket{IssueID: t.issueID, IssueTitle: t.issueTitle, CostUsd: t.cost, Runs: t.runs, Outcome: outcome})
+				out.TopTicketsByCost = append(out.TopTicketsByCost, taskRunAnalyticsTopTicket{TicketKey: t.key, IssueID: t.issueID, IssueTitle: t.issueTitle, CostUsd: t.cost, Runs: t.runs, Outcome: outcome})
 			}
 		}
 		for _, d := range ticketsByDay {

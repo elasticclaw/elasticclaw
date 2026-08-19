@@ -201,7 +201,7 @@ export interface AnalyticsEffectiveness {
   ticketSuccessRate: number
   ticketsByDay: { date: string; delivered: number; inProgress: number; failed: number }[] | null
   runsPerTicket: { bucket: string; tickets: number }[] | null
-  topTicketsByCost: { issueId: string; issueTitle: string; costUsd: number; runs: number; outcome: string }[] | null
+  topTicketsByCost: { ticketKey: string; issueId: string; issueTitle: string; costUsd: number; runs: number; outcome: string }[] | null
   prior?: {
     successRate: number
     ticketSuccessRate: number
@@ -307,6 +307,7 @@ export interface AnalyticsTicketStoryEntry {
 }
 
 export interface AnalyticsTicket {
+  ticketKey: string
   issueId: string
   issueTitle: string
   status: "delivered" | "pr_open" | "in_progress" | "failed"

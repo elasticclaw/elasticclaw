@@ -71,6 +71,29 @@ func TestTaskRunAnalyticsTicketPageQueriesUseTicketPageIndex(t *testing.T) {
 	}
 }
 
+func TestTaskRunAnalyticsTicketMetadataPageSeeksPrimaryKey(t *testing.T) {
+	_, db := newTaskRunAnalyticsAPITestServer(t)
+	query := `EXPLAIN QUERY PLAN SELECT issue_id FROM ticket_metadata WHERE tenant_id=? AND ((integration=? AND integration_workspace=? AND issue_id=?) OR (integration=? AND integration_workspace=? AND issue_id=?))`
+	rows, err := db.Query(query, "test-tenant-id", "linear", "a", "ENG-42", "github", "b", "ENG-42")
+	if err != nil {
+		t.Fatalf("explain metadata lookup: %v", err)
+	}
+	defer rows.Close()
+	var details []string
+	for rows.Next() {
+		var id, parent, unused int
+		var detail string
+		if err := rows.Scan(&id, &parent, &unused, &detail); err != nil {
+			t.Fatal(err)
+		}
+		details = append(details, detail)
+	}
+	plan := strings.Join(details, "\n")
+	if !strings.Contains(plan, "SEARCH ticket_metadata") || strings.Contains(plan, "SCAN ticket_metadata") {
+		t.Fatalf("metadata lookup did not seek its primary key: %s", plan)
+	}
+}
+
 func TestTaskRunAnalyticsTicketPageCachesTotalAcrossCursors(t *testing.T) {
 	s, db := newTaskRunAnalyticsAPITestServer(t)
 	for issue := 0; issue < 12; issue++ {
@@ -316,6 +339,16 @@ func TestTaskRunAnalyticsTicketsSeparatesTrackerWorkspaces(t *testing.T) {
 	if response.Total != 2 || len(response.Tickets) != 2 {
 		t.Fatalf("tickets = %#v, want two distinct workspaces", response)
 	}
+	keys := map[string]bool{}
+	for _, ticket := range response.Tickets {
+		keys[ticket.TicketKey] = true
+		if ticket.IssueID != "ENG-1" || ticket.Ask != "" || ticket.Story != nil {
+			t.Fatalf("list ticket = %#v, want a lightweight ENG-1 row", ticket)
+		}
+	}
+	if !keys[taskRunAnalyticsTicketKey("linear", "linear-a", "ENG-1")] || !keys[taskRunAnalyticsTicketKey("linear", "linear-b", "ENG-1")] {
+		t.Fatalf("ticket keys = %#v, want independent composite identities", keys)
+	}
 }
 
 // Regression test for finding #16: a fresh cached ticket_metadata row with a
@@ -377,8 +410,8 @@ func TestTaskRunAnalyticsTicketsHandlerSkipsEmptyGroups(t *testing.T) {
 	// This is the id/order-to-hydration handoff: the ordered ID list includes
 	// TICKET-EMPTY, while hydration returns no run for it.
 	groups := taskRunAnalyticsTicketGroupsFromHydration(
-		[]string{"TICKET-EMPTY", "TICKET-POPULATED"},
-		[]taskRunAnalyticsRunView{{RunID: "run-populated", IssueID: "TICKET-POPULATED"}},
+		[]string{taskRunAnalyticsTicketKey("linear", "empty", "TICKET-EMPTY"), taskRunAnalyticsTicketKey("linear", "populated", "TICKET-POPULATED")},
+		[]taskRunAnalyticsRunView{{RunID: "run-populated", Integration: "linear", IntegrationWorkspace: "populated", IssueID: "TICKET-POPULATED"}},
 	)
 	if len(groups) != 1 || groups[0].issueID != "TICKET-POPULATED" {
 		t.Fatalf("hydrated groups = %#v, want only populated group", groups)

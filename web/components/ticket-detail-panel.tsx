@@ -1,8 +1,9 @@
 "use client"
 
 import { CheckCircle2, ChevronRight, GitMerge, GitPullRequest, X, XCircle } from "lucide-react"
-import { useEffect, useRef } from "react"
+import { useEffect, useRef, useState } from "react"
 import type { AnalyticsTicket, AnalyticsTicketRunSummary } from "@/lib/types"
+import { fetchAnalyticsTicket } from "@/lib/api"
 import { useEscapeToClose } from "@/hooks/use-escape-to-close"
 import { useFocusTrap } from "@/hooks/use-focus-trap"
 import { TicketStatusBadge } from "@/components/ds/ticket-status-badge"
@@ -19,6 +20,8 @@ function Section({ title, stat, children }: { title: string; stat?: { left: stri
 function Row({ label, value, mono }: { label: string; value: React.ReactNode; mono?: boolean }) { return <div className="flex gap-3 py-0.5 text-sm"><span className={`${caption} w-27 shrink-0`}>{label}</span><span className={mono ? "min-w-0 break-all font-mono text-xs" : "min-w-0"}>{value}</span></div> }
 
 export function TicketDetailPanel({ ticket, onClose, onOpenRun }: { ticket: AnalyticsTicket | null; onClose: () => void; onOpenRun: (run: AnalyticsTicketRunSummary) => void }) {
+  const [detail, setDetail] = useState<AnalyticsTicket | null>(null)
+  useEffect(() => { if (!ticket) { setDetail(null); return }; const controller = new AbortController(); setDetail(null); void fetchAnalyticsTicket(ticket.ticketKey, { signal: controller.signal }).then((response) => setDetail(response.ticket)).catch(() => {}); return () => controller.abort() }, [ticket?.ticketKey])
   useEscapeToClose(onClose, Boolean(ticket))
   const panelRef = useRef<HTMLElement>(null)
   useFocusTrap(panelRef, Boolean(ticket))
@@ -30,6 +33,8 @@ export function TicketDetailPanel({ ticket, onClose, onOpenRun }: { ticket: Anal
     return () => previousFocusRef.current?.focus()
   }, [ticket?.issueId])
   if (!ticket) return null
+  if (!detail) return <><div className="fixed inset-0 z-[45] bg-black/50" onClick={onClose} aria-hidden="true" /><aside className="fixed inset-y-0 right-0 z-[50] flex w-full max-w-full items-center justify-center border-l bg-background shadow-xl md:max-w-[66vw]" role="dialog" aria-modal="true"><Button variant="ghost" className="absolute right-3 top-3" onClick={onClose}>Close</Button><p className="text-sm text-muted-foreground">Loading ticket details…</p></aside></>
+  ticket = detail
   const open = ticket.prs.filter((pr) => pr.state === "open")
   const delivered = ticket.status === "delivered"
   const outcome = delivered ? "Work was delivered through a merged pull request." : ticket.status === "pr_open" ? `Work is done and waiting on a human: ${open.length} pull request${open.length === 1 ? "" : "s"} open, none merged or closed yet.` : ticket.status === "in_progress" ? "Work is currently in progress." : "The work did not reach delivery."

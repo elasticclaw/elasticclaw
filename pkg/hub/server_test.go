@@ -1984,6 +1984,21 @@ func TestWebAdminAuthRequiresAccessAdminForGitHubSession(t *testing.T) {
 	}
 }
 
+func TestStrictAdminAuthAcceptsWebSessionHeader(t *testing.T) {
+	s, _ := NewTestServerWithConfig(t, &types.HubConfig{Token: "hub-token", Auth: &types.AuthConfig{SessionSecret: "session-secret", Access: &types.AccessConfig{Admins: []string{"admin-user"}}}}, "", "", "")
+	session, err := signGitHubSession("session-secret", "admin-user", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/api/analytics/tickets", nil)
+	req.Header.Set(webSessionHeader, session)
+	rec := httptest.NewRecorder()
+	s.withStrictAdminAuth(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNoContent) })(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusNoContent)
+	}
+}
+
 func TestAdminForMethodsRequiresAdminForMutations(t *testing.T) {
 	s, _ := NewTestServerWithConfig(t, &types.HubConfig{
 		Token: "hub-token",

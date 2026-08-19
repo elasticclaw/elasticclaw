@@ -3,6 +3,7 @@ import type {
   ApiMessage,
   AnalyticsCostDriver,
   AnalyticsEffectiveness,
+  AnalyticsTicket,
   AnalyticsTicketsResponse,
   CostOverview,
   CreateClawRequest,
@@ -459,6 +460,10 @@ export async function fetchTaskRuns(filters?: TaskRunAnalyticsFilters, options?:
 
 export async function fetchAnalyticsTickets(filters?: TaskRunAnalyticsFilters, options?: AnalyticsRequestOptions): Promise<AnalyticsTicketsResponse> {
   return apiFetch<AnalyticsTicketsResponse>(`/api/analytics/tickets${appendViewerTimezone(taskRunAnalyticsQuery(filters))}`, options)
+}
+
+export async function fetchAnalyticsTicket(ticketKey: string, options?: AnalyticsRequestOptions): Promise<{ ticket: AnalyticsTicket }> {
+  return apiFetch<{ ticket: AnalyticsTicket }>(`/api/analytics/tickets?key=${encodeURIComponent(ticketKey)}`, options)
 }
 
 export async function fetchTaskRun(runId: string): Promise<{ run: TaskRunSummary }> {
