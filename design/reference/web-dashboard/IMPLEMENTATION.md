@@ -170,6 +170,10 @@ GATE 6: full-suite green + final visual pass + departures documented below.
 	  write rolled back. The task-run lookup, conditional claim, and event write therefore stay
 	  transactional; a cheap `claw_prs` pre-read skips BEGIN/ROLLBACK for already-settled polls.
 - `readTaskRunAnalyticsTicketTotal` in `pkg/hub/task_run_analytics_tickets_api.go` caches the
-  ticket-total caption for 60s via `taskRunAnalyticsTicketCacheTTL`, rather than coupling
-  write paths to aggregate-cache invalidation. Ticket rows are always freshly queried; bounded
-  staleness is acceptable for this UI-only count (2026-08-19).
+  ticket-total caption for 5 minutes (`taskRunAnalyticsTicketCacheTTL`), invalidated whenever
+  any run summary is (re)materialized via a generation counter bumped in
+  `materializeTaskRunTx`. Both the cache key and the COUNT query use the started_at window
+  quantized down to the minute, so viewers whose windows differ by <60s share one total that
+  describes exactly the quantized window it was computed for. Ticket rows are always freshly
+  queried; up to one minute of window-edge skew on this UI-only caption is accepted
+  (2026-08-19).

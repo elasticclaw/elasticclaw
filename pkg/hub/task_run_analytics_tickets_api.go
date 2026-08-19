@@ -9,14 +9,20 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
 var ticketMetadataEnrichment = make(chan struct{}, 32)
 var ticketMetadataInflight sync.Map
 
-const taskRunAnalyticsTicketCacheTTL = 60 * time.Second
+const taskRunAnalyticsTicketCacheTTL = 5 * time.Minute
 const taskRunAnalyticsTicketCacheMaxEntries = 256
+
+// ticketAnalyticsGeneration invalidates cached ticket totals whenever any run
+// summary is (re)materialized. Bumped inside the write transaction on purpose:
+// a rollback after the bump only costs one extra recompute, never staleness.
+var ticketAnalyticsGeneration atomic.Int64
 
 type taskRunAnalyticsTicketTotalCacheEntry struct {
 	total     int
@@ -230,17 +236,26 @@ func (s *Server) readTaskRunAnalyticsTicketGroupsPage(filters taskRunAnalyticsFi
 	return taskRunAnalyticsTicketGroupsFromHydration(ids, runs), total, false, nil
 }
 
-func taskRunAnalyticsTicketCacheKey(where string, args []any) string {
+// quantizeTaskRunAnalyticsTicketArgs snaps int64 args (the started_at window
+// bounds — the only int64s the analytics where-builder produces) down to the
+// minute. The quantized args feed BOTH the cache key and the COUNT query, so a
+// cached total always describes exactly the window its key names.
+func quantizeTaskRunAnalyticsTicketArgs(args []any) []any {
 	quantized := append([]any(nil), args...)
 	for i, arg := range quantized {
 		if value, ok := arg.(int64); ok {
 			quantized[i] = value / int64(time.Minute/time.Millisecond) * int64(time.Minute/time.Millisecond)
 		}
 	}
-	return fmt.Sprintf("%s|%#v", where, quantized)
+	return quantized
+}
+
+func taskRunAnalyticsTicketCacheKey(where string, args []any) string {
+	return fmt.Sprintf("g%d|%s|%#v", ticketAnalyticsGeneration.Load(), where, args)
 }
 
 func (s *Server) readTaskRunAnalyticsTicketTotal(where string, args []any) (int, error) {
+	args = quantizeTaskRunAnalyticsTicketArgs(args)
 	key := taskRunAnalyticsTicketCacheKey(where, args)
 	now := time.Now()
 	s.ticketAnalyticsCacheMu.Lock()
@@ -271,8 +286,9 @@ func (s *Server) readTaskRunAnalyticsTicketTotal(where string, args []any) (int,
 		if len(s.ticketAnalyticsTotalCache) >= taskRunAnalyticsTicketCacheMaxEntries {
 			evictOldestTaskRunAnalyticsTicketTotalCacheEntry(s.ticketAnalyticsTotalCache)
 		}
-		// Ticket rows are always freshly queried. Total is only a UI caption, so
-		// bounded staleness avoids write-path coupling for this aggregate.
+		// Ticket rows are always freshly queried. Total is only a UI caption:
+		// summary writes invalidate via ticketAnalyticsGeneration in the key,
+		// and the TTL bounds staleness from the minute-quantized window edges.
 		s.ticketAnalyticsTotalCache[key] = taskRunAnalyticsTicketTotalCacheEntry{total: total, expiresAt: now.Add(taskRunAnalyticsTicketCacheTTL)}
 		s.ticketAnalyticsTotalQueries++
 		s.ticketAnalyticsCacheMu.Unlock()

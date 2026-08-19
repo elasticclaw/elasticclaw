@@ -1104,11 +1104,14 @@ func materializeTaskRunTx(tx *sql.Tx, runID string) error {
 	); err != nil {
 		return err
 	}
-	_, err = tx.Exec(`
+	if _, err := tx.Exec(`
 		UPDATE task_runs
 		   SET updated_at=?
-		 WHERE id=?`, updatedAt, runID)
-	return err
+		 WHERE id=?`, updatedAt, runID); err != nil {
+		return err
+	}
+	ticketAnalyticsGeneration.Add(1)
+	return nil
 }
 
 func isHumanTaskRunEvent(event taskRunEventProjection) bool {
