@@ -87,7 +87,7 @@ export function HomeShell() {
         setCurrentUserResolved(false)
         setAdminChecked(true)
         setAdminCheckFailed(false)
-        return true
+        return false
       }
       const { getHubUrl } = await import("@/lib/hub-url")
       const hubUrl = getHubUrl()

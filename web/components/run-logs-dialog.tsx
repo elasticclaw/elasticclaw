@@ -99,7 +99,7 @@ export function RunLogsDialog({ run, attempts }: { run: TaskRunSummary; attempts
               )}
             </div>
             <TabsContent value="actions" className="min-h-0 overflow-hidden">
-              <ActionsTab clawId={clawId} keepTrailingRunning={run.status === "running"} />
+              <ActionsTab clawId={clawId} keepTrailingRunning={clawId === defaultClawId && run.status === "running"} />
             </TabsContent>
             <TabsContent value="output" className="min-h-0 overflow-auto">
               <OutputTab outputs={outputs} loading={outputsLoading} error={outputsError} traceId={traceId} workspaceName={run.workspaceName} />
