@@ -186,7 +186,7 @@ func (s *Server) readTaskRunAnalyticsEffectivenessWithTicketAggregates(f taskRun
 		}
 	} else {
 		ticketRows, err := s.db.Query(`SELECT issue_id,
-			COALESCE((SELECT t2.issue_title FROM task_run_summaries t2 WHERE t2.issue_id = task_run_summaries.issue_id AND t2.issue_title != '' ORDER BY t2.started_at DESC LIMIT 1), ''),
+			COALESCE(SUBSTR(MAX(CASE WHEN issue_title != '' THEN printf('%020d|%s', started_at, issue_title) END), 22), ''),
 			COUNT(*),
 			COALESCE(SUM(CASE WHEN status != 'running' THEN 1 ELSE 0 END),0),
 			COALESCE(SUM(CASE WHEN status IN ('clean','human_in_the_loop','warning') THEN 1 ELSE 0 END),0),
