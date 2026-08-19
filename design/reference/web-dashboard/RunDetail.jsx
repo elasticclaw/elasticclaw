@@ -1,7 +1,7 @@
 const DS = window.ElasticClawDesignSystem_0b1de0
 const { Button, Badge, Icon, Select, StepRow } = DS
 
-/* Drill-down for the Runs table — web/components/task-run-analytics-view.tsx
+/* Drill-down for the Runs table — web/components/analytics-command-center.tsx
    `RunDetailPanel` (scrim + right-hand sheet) plus `RunLogsDialog` (the Agent
    logs modal with Actions / Output tabs). Formatters mirror the source's Intl
    setup; `formatLabel` is its underscore→Title Case helper. */

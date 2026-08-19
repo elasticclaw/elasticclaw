@@ -179,7 +179,7 @@ func migrate(db *sql.DB) error {
 		if _, err := tx.Exec(`
 		UPDATE claw_prs
 		SET state = COALESCE((
-			SELECT CASE WHEN trp.merged = 1 OR trp.state = 'closed' THEN 'closed' END
+			SELECT CASE WHEN trp.merged = 1 THEN 'merged' WHEN trp.state = 'closed' THEN 'closed' END
 			FROM task_run_prs trp
 			JOIN task_runs tr ON tr.id = trp.run_id
 			WHERE tr.claw_id = claw_prs.claw_id
@@ -207,6 +207,34 @@ func migrate(db *sql.DB) error {
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit claw PR state backfill: %w", err)
+	}
+	// v2 corrects merged rows that v1 recorded as closed. Keep this one-shot so
+	// normal startup never rewrites current PR state.
+	tx, err = db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin claw PR state backfill v2: %w", err)
+	}
+	defer tx.Rollback()
+	result, err = tx.Exec(`INSERT OR IGNORE INTO hub_migrations(name, applied_at) VALUES('claw_prs_state_backfill_v2', ?)`, now().UnixMilli())
+	if err != nil {
+		return fmt.Errorf("mark claw PR state backfill v2: %w", err)
+	}
+	if changed, err := result.RowsAffected(); err != nil {
+		return fmt.Errorf("inspect claw PR state backfill v2 marker: %w", err)
+	} else if changed == 1 {
+		if _, err := tx.Exec(`
+		UPDATE claw_prs SET state = 'merged'
+		WHERE state = 'closed' AND merged = 1
+		  AND EXISTS (
+			SELECT 1 FROM task_run_prs trp JOIN task_runs tr ON tr.id = trp.run_id
+			WHERE tr.claw_id = claw_prs.claw_id AND trp.repo = claw_prs.repo
+			  AND trp.pr_number = claw_prs.pr_number AND trp.merged = 1
+		  )`); err != nil && !isBenignAddColumnErr(err) {
+			return fmt.Errorf("correct claw PR state backfill v2: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit claw PR state backfill v2: %w", err)
 	}
 	if err := addColumn(db, "messages", "user_login", `TEXT`); err != nil {
 		return err

@@ -722,17 +722,8 @@ func (s *Server) withAuth(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-func (s *Server) withAdminAuth(next http.HandlerFunc) http.HandlerFunc {
-	return s.withAdminAuthMode(next, true)
-}
-
 // withStrictAdminAuth permits only administrators (or legacy tenant tokens).
-// All analytics routes use this wrapper.
 func (s *Server) withStrictAdminAuth(next http.HandlerFunc) http.HandlerFunc {
-	return s.withAdminAuthMode(next, false)
-}
-
-func (s *Server) withAdminAuthMode(next http.HandlerFunc, allowTagScoped bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 		if token == "" {
@@ -750,7 +741,7 @@ func (s *Server) withAdminAuthMode(next http.HandlerFunc, allowTagScoped bool) h
 			accessCfg = s.hubCfg.Auth.Access
 		}
 		s.mu.RUnlock()
-		if githubLogin != "" && !isAccessAdmin(accessCfg, githubLogin) && (!allowTagScoped || accessCfg == nil || len(accessCfg.ViewRequiresTags) == 0) {
+		if githubLogin != "" && !isAccessAdmin(accessCfg, githubLogin) {
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}

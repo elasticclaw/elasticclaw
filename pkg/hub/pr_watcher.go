@@ -1026,10 +1026,6 @@ func (s *Server) checkCIStatus(pr clawPR, token string) {
 			log.Printf("[pr-watcher] record CI event for %s: %v", pr.prURL, err)
 			return
 		}
-		if err := applyTaskRunPREventTx(tx, event); err != nil {
-			log.Printf("[pr-watcher] apply CI event for %s: %v", pr.prURL, err)
-			return
-		}
 		if err := materializeTaskRunTx(tx, runID); err != nil {
 			log.Printf("[pr-watcher] materialize CI event for %s: %v", pr.prURL, err)
 			return

@@ -496,36 +496,52 @@ func (s *Server) handleTaskRunAnalyticsFilterOptions(w http.ResponseWriter, r *h
 
 func parseTaskRunAnalyticsFilters(r *http.Request) (taskRunAnalyticsFilters, error) {
 	q := r.URL.Query()
-	status := splitTaskRunAnalyticsValues(q, "status")
-	owner := splitTaskRunAnalyticsValues(q, "owner", "owner_id", "ownerId", "owner_display_name", "ownerDisplayName")
-	ownerType := splitTaskRunAnalyticsValues(q, "owner_type", "ownerType")
-	workspace := splitTaskRunAnalyticsValues(q, "workspace", "workspace_name", "workspaceName")
-	workflow := splitTaskRunAnalyticsValues(q, "workflow", "workflow_name", "workflowName")
-	factory := splitTaskRunAnalyticsValues(q, "factory", "factory_name", "factoryName")
-	integration := splitTaskRunAnalyticsValues(q, "integration")
-	repo := splitTaskRunAnalyticsValues(q, "repo")
-	model := splitTaskRunAnalyticsValues(q, "model")
-	warningType := splitTaskRunAnalyticsValues(q, "warning_type", "warningType")
-	failureType := splitTaskRunAnalyticsValues(q, "failure_type", "failureType")
-	for _, filter := range []struct {
-		key    string
-		values []string
-	}{
-		{"status", status},
-		{"owner", owner},
-		{"owner_type", ownerType},
-		{"workspace", workspace},
-		{"workflow", workflow},
-		{"factory", factory},
-		{"integration", integration},
-		{"repo", repo},
-		{"model", model},
-		{"warning_type", warningType},
-		{"failure_type", failureType},
-	} {
-		if len(filter.values) > 50 {
-			return taskRunAnalyticsFilters{}, fmt.Errorf("too many values for filter %s, max 50", filter.key)
-		}
+	read := func(key string, aliases ...string) ([]string, error) {
+		return splitTaskRunAnalyticsValues(q, append([]string{key}, aliases...)...)
+	}
+	status, err := read("status")
+	if err != nil {
+		return taskRunAnalyticsFilters{}, err
+	}
+	owner, err := read("owner", "owner_id", "ownerId", "owner_display_name", "ownerDisplayName")
+	if err != nil {
+		return taskRunAnalyticsFilters{}, err
+	}
+	ownerType, err := read("owner_type", "ownerType")
+	if err != nil {
+		return taskRunAnalyticsFilters{}, err
+	}
+	workspace, err := read("workspace", "workspace_name", "workspaceName")
+	if err != nil {
+		return taskRunAnalyticsFilters{}, err
+	}
+	workflow, err := read("workflow", "workflow_name", "workflowName")
+	if err != nil {
+		return taskRunAnalyticsFilters{}, err
+	}
+	factory, err := read("factory", "factory_name", "factoryName")
+	if err != nil {
+		return taskRunAnalyticsFilters{}, err
+	}
+	integration, err := read("integration")
+	if err != nil {
+		return taskRunAnalyticsFilters{}, err
+	}
+	repo, err := read("repo")
+	if err != nil {
+		return taskRunAnalyticsFilters{}, err
+	}
+	model, err := read("model")
+	if err != nil {
+		return taskRunAnalyticsFilters{}, err
+	}
+	warningType, err := read("warning_type", "warningType")
+	if err != nil {
+		return taskRunAnalyticsFilters{}, err
+	}
+	failureType, err := read("failure_type", "failureType")
+	if err != nil {
+		return taskRunAnalyticsFilters{}, err
 	}
 	filters := taskRunAnalyticsFilters{
 		TenantID:    tenantFromCtx(r),
@@ -541,7 +557,6 @@ func parseTaskRunAnalyticsFilters(r *http.Request) (taskRunAnalyticsFilters, err
 		WarningType: warningType,
 		FailureType: failureType,
 	}
-	var err error
 	if filters.FromStartedAt, err = parseTaskRunAnalyticsTime(q, "from", "start", "started_after", "startedAfter"); err != nil {
 		return filters, err
 	}
@@ -1281,7 +1296,9 @@ func scanTaskRunAnalyticsRuns(rows *sql.Rows) ([]taskRunAnalyticsRunView, error)
 	return runs, rows.Err()
 }
 
-func splitTaskRunAnalyticsValues(q url.Values, keys ...string) []string {
+const taskRunAnalyticsFilterValueLimit = 100
+
+func splitTaskRunAnalyticsValues(q url.Values, keys ...string) ([]string, error) {
 	seen := map[string]bool{}
 	values := []string{}
 	for _, key := range keys {
@@ -1299,10 +1316,13 @@ func splitTaskRunAnalyticsValues(q url.Values, keys ...string) []string {
 				}
 				seen[part] = true
 				values = append(values, part)
+				if len(values) > taskRunAnalyticsFilterValueLimit {
+					return nil, fmt.Errorf("too many values for filter %s, max %d", keys[0], taskRunAnalyticsFilterValueLimit)
+				}
 			}
 		}
 	}
-	return values
+	return values, nil
 }
 
 func parseTaskRunAnalyticsTime(q url.Values, keys ...string) (int64, error) {

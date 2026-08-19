@@ -156,9 +156,11 @@ func (s *Server) readTaskRunAnalyticsEffectivenessWithTicketAggregates(f taskRun
 	if err = rows.Err(); err != nil {
 		return out, err
 	}
-	if err = s.db.QueryRow(`SELECT COUNT(DISTINCT issue_id) FROM task_run_summaries `+w+` AND issue_id != ''`, a...).Scan(&out.UniqueTickets); err != nil {
+	uniqueTickets, err := s.readTaskRunAnalyticsTicketTotal(w, a)
+	if err != nil {
 		return out, err
 	}
+	out.UniqueTickets = uniqueTickets
 	var finishedTickets, successfulTickets int
 	if !includeTicketAggregates {
 		ticketRows, err := s.db.Query(`SELECT issue_id, COALESCE(SUM(CASE WHEN status != 'running' THEN 1 ELSE 0 END),0), COALESCE(SUM(CASE WHEN status IN ('clean','human_in_the_loop','warning') THEN 1 ELSE 0 END),0) FROM task_run_summaries `+w+` AND issue_id != '' GROUP BY issue_id`, a...)
@@ -183,7 +185,14 @@ func (s *Server) readTaskRunAnalyticsEffectivenessWithTicketAggregates(f taskRun
 			return out, err
 		}
 	} else {
-		ticketRows, err := s.db.Query(`SELECT issue_id, issue_title, status, started_at, estimated_cost_usd FROM task_run_summaries `+w+` AND issue_id != ''`, a...)
+		ticketRows, err := s.db.Query(`SELECT issue_id,
+			COALESCE((SELECT t2.issue_title FROM task_run_summaries t2 WHERE t2.issue_id = task_run_summaries.issue_id AND t2.issue_title != '' ORDER BY t2.started_at DESC LIMIT 1), ''),
+			COUNT(*),
+			COALESCE(SUM(CASE WHEN status != 'running' THEN 1 ELSE 0 END),0),
+			COALESCE(SUM(CASE WHEN status IN ('clean','human_in_the_loop','warning') THEN 1 ELSE 0 END),0),
+			COALESCE(SUM(CASE WHEN status = 'running' THEN 1 ELSE 0 END),0),
+			COALESCE(SUM(estimated_cost_usd),0), MIN(started_at), MAX(started_at)
+			FROM task_run_summaries `+w+` AND issue_id != '' GROUP BY issue_id`, a...)
 		if err != nil {
 			return out, err
 		}
@@ -196,33 +205,11 @@ func (s *Server) readTaskRunAnalyticsEffectivenessWithTicketAggregates(f taskRun
 		}
 		tickets := map[string]*ticketAggregate{}
 		for ticketRows.Next() {
-			var issueID, issueTitle, status string
-			var startedAt int64
-			var cost float64
-			if err = ticketRows.Scan(&issueID, &issueTitle, &status, &startedAt, &cost); err != nil {
+			var t ticketAggregate
+			if err = ticketRows.Scan(&t.issueID, &t.issueTitle, &t.runs, &t.finished, &t.delivered, &t.running, &t.cost, &t.earliest, &t.latest); err != nil {
 				return out, err
 			}
-			t := tickets[issueID]
-			if t == nil {
-				t = &ticketAggregate{issueID: issueID, earliest: startedAt, latest: startedAt, issueTitle: issueTitle}
-				tickets[issueID] = t
-			} else if startedAt >= t.latest {
-				t.latest, t.issueTitle = startedAt, issueTitle
-			}
-			if startedAt < t.earliest {
-				t.earliest = startedAt
-			}
-			t.runs++
-			t.cost += cost
-			if status != taskRunStatusRunning {
-				t.finished++
-			}
-			if status == taskRunStatusClean || status == taskRunStatusHumanInTheLoop || status == taskRunStatusWarning {
-				t.delivered++
-			}
-			if status == taskRunStatusRunning {
-				t.running++
-			}
+			tickets[t.issueID] = &t
 		}
 		if err = ticketRows.Err(); err != nil {
 			return out, err

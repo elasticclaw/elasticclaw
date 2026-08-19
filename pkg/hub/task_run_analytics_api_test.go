@@ -3,6 +3,7 @@ package hub
 import (
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -29,7 +30,10 @@ func TestSplitTaskRunAnalyticsValuesPreservesDoubleEncodedCommas(t *testing.T) {
 	if err != nil {
 		t.Fatalf("build client-shaped request: %v", err)
 	}
-	got := splitTaskRunAnalyticsValues(request.URL.Query(), "workspace")
+	got, err := splitTaskRunAnalyticsValues(request.URL.Query(), "workspace")
+	if err != nil {
+		t.Fatalf("splitTaskRunAnalyticsValues(): %v", err)
+	}
 	if len(got) != 2 || got[0] != "Research, Development" || got[1] != "Operations" {
 		t.Fatalf("splitTaskRunAnalyticsValues() = %#v", got)
 	}
@@ -40,9 +44,26 @@ func TestSplitTaskRunAnalyticsValuesPreservesLiteralPlus(t *testing.T) {
 	if err != nil {
 		t.Fatalf("build request: %v", err)
 	}
-	got := splitTaskRunAnalyticsValues(request.URL.Query(), "model")
+	got, err := splitTaskRunAnalyticsValues(request.URL.Query(), "model")
+	if err != nil {
+		t.Fatalf("splitTaskRunAnalyticsValues(): %v", err)
+	}
 	if len(got) != 1 || got[0] != "build+test" {
 		t.Fatalf("splitTaskRunAnalyticsValues() = %#v, want [build+test]", got)
+	}
+}
+
+func TestTaskRunAnalyticsRejectsTooManyFilterValues(t *testing.T) {
+	s, _ := newTaskRunAnalyticsAPITestServer(t)
+	values := make([]string, taskRunAnalyticsFilterValueLimit+1)
+	for i := range values {
+		values[i] = fmt.Sprintf("status-%d", i)
+	}
+	r := httptest.NewRequest(http.MethodGet, "/api/analytics/tickets?status="+strings.Join(values, ","), nil)
+	w := httptest.NewRecorder()
+	s.handleTaskRunAnalyticsTickets(w, r)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d: %s", w.Code, http.StatusBadRequest, w.Body.String())
 	}
 }
 

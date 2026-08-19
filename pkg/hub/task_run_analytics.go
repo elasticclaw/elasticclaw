@@ -1110,7 +1110,6 @@ func materializeTaskRunTx(tx *sql.Tx, runID string) error {
 		 WHERE id=?`, updatedAt, runID); err != nil {
 		return err
 	}
-	ticketAnalyticsGeneration.Add(1)
 	return nil
 }
 

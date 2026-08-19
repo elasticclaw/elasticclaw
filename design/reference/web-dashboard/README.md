@@ -11,8 +11,8 @@ Recreation of the Next.js dashboard at `web/` in the [elasticclaw/elasticclaw](h
 | `Conversation.jsx` | `web/components/conversation-view.tsx` chat panel + `agent-timeline/*` |
 | `analytics.html` + `Analytics.jsx` | `web/components/analytics-command-center.tsx` — shell, filter bar, both KPI groups |
 | `AnalyticsCharts.jsx` | the same file's `OutcomesChart`, `TicketThroughputChart`, `DeliveryFunnel`, `RunsPerTicketChart`, `TopTicketsByCostChart`, `CostPerMergedPrChart`, `WorkflowCostComparisonChart`, `DailyCostChart` (Recharts replaced by SVG/CSS at the same shapes) |
-| `RunDetail.jsx` | `web/components/task-run-analytics-view.tsx` — `RunDetailPanel` (scrim + right sheet) and `StatusBadge`, plus `web/components/run-logs-dialog.tsx` (Agent logs modal, Actions / Output tabs) |
-| `AnalyticsTables.jsx` | the same file's `RunsTable`, `CostDrivers` and the trailing-year `Heatmap` ("Cost by day", 52×7) |
+| `RunDetail.jsx` | `web/components/analytics-command-center.tsx` — `RunDetailPanel` (scrim + right sheet) and `StatusBadge`, plus `web/components/run-logs-dialog.tsx` (Agent logs modal, Actions / Output tabs) |
+| `AnalyticsTables.jsx` | `web/components/analytics-command-center.tsx`'s `RunsTable`, `CostDrivers` and the trailing-year `Heatmap` ("Cost by day", 52×7) |
 | `Login.jsx` | `web/app/login/page.tsx` `LoginForm` |
 | `data.js` | shapes from `web/lib/types.ts` (`Claw`, `Message`, `AgentActivity`) |
 
@@ -27,7 +27,7 @@ Recreation of the Next.js dashboard at `web/` in the [elasticclaw/elasticclaw](h
 
 ## Deliberately not recreated
 
-- **Task-run explorer page** (`web/components/task-run-analytics-view.tsx`'s own header: AI Spend cards, General Stats, the seven clickable Metric tiles and its wider 11-column table). The run **drill-down** from that file *is* recreated — `RunDetail.jsx`, reachable from any row of the Runs table.
+- **Task-run explorer page** (`web/components/analytics-command-center.tsx` and its `ds/*` pieces: AI Spend cards, General Stats, the seven clickable Metric tiles and its wider 11-column table). The run **drill-down** is recreated — `RunDetail.jsx`, reachable from any row of the Runs table.
 - **Sidebar rows** show a STATE chip + detail + age instead of the source's dot-only lifecycle encoding; see the AgentRow note in the root readme.
 - **Agent logs → Actions tab** embeds `ClawActivityLog` upstream; here the same tool activity renders through the design system's `StepRow`.
 - **Agent logs → Output tab reads as OpenTelemetry.** Upstream prints a raw stdout/stderr blob per stage, which stops being readable past a few lines. Same data, OTEL shape: a resource header (`service.name`, `deployment.environment`, `trace_id`), one **span** per stage output (`span_id`, `span.kind`, duration, status OK/ERROR, exit code), and **log records** with a millisecond timestamp, a severity chip (TRACE/DEBUG/INFO/WARN/ERROR/FATAL carrying OTEL severity numbers 1/5/9/13/17/21 in its tooltip), a body, and typed attributes as `key=value` chips (numbers tinted). A severity filter narrows by `severity_number >=`, and **RAW** falls back to the verbatim stdout/stderr the source shows. Severity colors come from the chart tokens, so they match the rest of analytics.

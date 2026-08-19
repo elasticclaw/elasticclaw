@@ -85,16 +85,40 @@ func TestTaskRunAnalyticsTicketPageCachesTotalAcrossCursors(t *testing.T) {
 		}
 	}
 	filters := taskRunAnalyticsFilters{TenantID: "test-tenant-id"}
-	page1, total1, _, err := s.readTaskRunAnalyticsTicketGroupsPage(filters, 0, "", 5)
+	page1, total1, err := s.readTaskRunAnalyticsTicketGroupsPage(filters, 0, "", 5)
 	if err != nil || total1 != 12 || len(page1) != 6 {
 		t.Fatalf("first ticket page = %d groups, total %d, err %v", len(page1), total1, err)
 	}
-	page2, total2, _, err := s.readTaskRunAnalyticsTicketGroupsPage(filters, page1[4].cursorAt(), page1[4].issueID, 5)
+	page2, total2, err := s.readTaskRunAnalyticsTicketGroupsPage(filters, page1[4].cursorAt(), page1[4].issueID, 5)
 	if err != nil || total2 != 12 || len(page2) == 0 || page2[0].issueID == page1[0].issueID {
 		t.Fatalf("second ticket page = %#v, total %d, err %v", page2, total2, err)
 	}
 	if s.ticketAnalyticsTotalQueries != 1 {
 		t.Fatalf("COUNT(DISTINCT issue_id) queries = %d, want 1 across cursor pages", s.ticketAnalyticsTotalQueries)
+	}
+}
+
+func TestTaskRunAnalyticsEffectivenessAndTicketsShareTicketTotalCache(t *testing.T) {
+	s, db := newTaskRunAnalyticsAPITestServer(t)
+	insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{
+		RunID: "ticket-cache-shared", AttemptID: "attempt-ticket-cache-shared", ClawID: "claw-ticket-cache-shared", TenantID: "test-tenant-id",
+		Status: taskRunStatusClean, Phase: taskRunPhaseTerminal, OwnerType: taskRunOwnerWorkflow, StartedAt: 1_000,
+	})
+	if _, err := db.Exec(`UPDATE task_run_summaries SET issue_id='CACHE-1' WHERE run_id='ticket-cache-shared'`); err != nil {
+		t.Fatalf("set fixture issue ID: %v", err)
+	}
+	filters := taskRunAnalyticsFilters{TenantID: "test-tenant-id"}
+	if _, err := s.readTaskRunAnalyticsEffectiveness(filters); err != nil {
+		t.Fatalf("read effectiveness: %v", err)
+	}
+	if s.ticketAnalyticsTotalQueries != 1 {
+		t.Fatalf("COUNT(DISTINCT issue_id) queries = %d, want 1", s.ticketAnalyticsTotalQueries)
+	}
+	if _, _, err := s.readTaskRunAnalyticsTicketGroupsPage(filters, 0, "", 10); err != nil {
+		t.Fatalf("read ticket page: %v", err)
+	}
+	if s.ticketAnalyticsTotalQueries != 1 {
+		t.Fatalf("COUNT(DISTINCT issue_id) queries = %d after shared read, want 1", s.ticketAnalyticsTotalQueries)
 	}
 }
 
@@ -124,13 +148,16 @@ func TestCollapseTaskRunAnalyticsTicketStory(t *testing.T) {
 		{ID: "e1", EventType: "run_queued", Label: taskRunAnalyticsStoryLabels["run_queued"], Time: 1, Count: 1},
 		{ID: "e2", EventType: "attempt_retried", Label: taskRunAnalyticsStoryLabels["attempt_retried"], Time: 2, Count: 1},
 		{ID: "e3", EventType: "attempt_retried", Label: taskRunAnalyticsStoryLabels["attempt_retried"], Time: 3, Count: 1},
-		{ID: "e4", EventType: "ci_failed", Time: 4, Count: 1},
+		{ID: "e4", EventType: "ci_failed", Label: taskRunAnalyticsStoryLabels["ci_failed"], Kind: taskRunAnalyticsStoryKinds["ci_failed"], Time: 4, Count: 1},
 	})
-	if len(story) != 2 {
-		t.Fatalf("story entries = %d, want 2: %#v", len(story), story)
+	if len(story) != 3 {
+		t.Fatalf("story entries = %d, want 3: %#v", len(story), story)
 	}
 	if story[1].EventType != "attempt_retried" || story[1].Count != 2 {
 		t.Fatalf("retry entry = %#v, want one collapsed retry with count 2", story[1])
+	}
+	if story[2].EventType != "ci_failed" || story[2].Label != "Blocked: tests would not pass" || story[2].Kind != "bad" {
+		t.Fatalf("CI failure story entry = %#v", story[2])
 	}
 }
 
@@ -143,6 +170,7 @@ func TestTaskRunAnalyticsTicketStoryUsesHubNativeEventTypes(t *testing.T) {
 		{eventType: "human_review_comment", label: "Human reviewed", kind: "human"},
 		{eventType: "human_dashboard_message", label: "Human stepped in", kind: "human"},
 		{eventType: "pr_closed_unmerged", label: "Attempt discarded", kind: "bad"},
+		{eventType: "ci_failed", label: "Blocked: tests would not pass", kind: "bad"},
 	}
 	for _, test := range tests {
 		t.Run(test.eventType, func(t *testing.T) {

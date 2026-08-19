@@ -9,7 +9,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 )
 
@@ -19,11 +18,6 @@ var ticketMetadataInflight sync.Map
 const taskRunAnalyticsTicketCacheTTL = 5 * time.Minute
 const taskRunAnalyticsTicketCacheMaxEntries = 256
 
-// ticketAnalyticsGeneration invalidates cached ticket totals whenever any run
-// summary is (re)materialized. Bumped inside the write transaction on purpose:
-// a rollback after the bump only costs one extra recompute, never staleness.
-var ticketAnalyticsGeneration atomic.Int64
-
 type taskRunAnalyticsTicketTotalCacheEntry struct {
 	total     int
 	expiresAt time.Time
@@ -32,7 +26,6 @@ type taskRunAnalyticsTicketTotalCacheEntry struct {
 type taskRunAnalyticsTicketsResponse struct {
 	Tickets    []taskRunAnalyticsTicketView `json:"tickets"`
 	NextCursor string                       `json:"nextCursor,omitempty"`
-	Truncated  bool                         `json:"truncated,omitempty"`
 	Limit      int                          `json:"limit"`
 	Total      int                          `json:"total"`
 }
@@ -100,16 +93,15 @@ type taskRunAnalyticsTicketView struct {
 // agent_idle is intentionally unmapped because the kit has no user-facing idle story entry.
 var taskRunAnalyticsStoryLabels = map[string]string{
 	"run_queued": "Work queued", "agent_started": "Agent started working", "pr_opened": "Pull request opened",
-	"ci_succeeded": "Checks passed", "human_review_comment": "Human reviewed", "human_dashboard_message": "Human stepped in",
+	"ci_succeeded": "Checks passed", "ci_failed": "Blocked: tests would not pass", "human_review_comment": "Human reviewed", "human_dashboard_message": "Human stepped in",
 	"pr_merged": "Shipped", "pr_closed_unmerged": "Attempt discarded", "provision_failed": "Blocked: no sandbox available",
-	// No hub-native verification-failed event type exists yet.
-	"verification_failed": "Blocked: tests would not pass", "context_exhausted": "Blocked: agent ran out of context",
+	"context_exhausted": "Blocked: agent ran out of context",
 	// Currently unreachable pending a hub-native retry event type.
 	"attempt_retried": "Retried",
 }
 
 var taskRunAnalyticsStoryKinds = map[string]string{
-	"pr_merged": "good", "ci_succeeded": "good", "provision_failed": "bad", "verification_failed": "bad",
+	"pr_merged": "good", "ci_succeeded": "good", "ci_failed": "bad", "provision_failed": "bad",
 	"context_exhausted": "bad", "pr_closed_unmerged": "bad", "human_review_comment": "human", "human_dashboard_message": "human",
 }
 
@@ -129,7 +121,7 @@ func (s *Server) handleTaskRunAnalyticsTickets(w http.ResponseWriter, r *http.Re
 		return
 	}
 	limit := taskRunAnalyticsLimit(r.URL.Query().Get("limit"))
-	groups, total, truncated, err := s.readTaskRunAnalyticsTicketGroupsPage(filters, cursorAt, cursorIssueID, limit)
+	groups, total, err := s.readTaskRunAnalyticsTicketGroupsPage(filters, cursorAt, cursorIssueID, limit)
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, "db error")
 		return
@@ -179,14 +171,14 @@ func (s *Server) handleTaskRunAnalyticsTickets(w http.ResponseWriter, r *http.Re
 		}
 		tickets = append(tickets, ticket)
 	}
-	jsonOK(w, taskRunAnalyticsTicketsResponse{Tickets: tickets, NextCursor: nextCursor, Truncated: truncated, Limit: limit, Total: total})
+	jsonOK(w, taskRunAnalyticsTicketsResponse{Tickets: tickets, NextCursor: nextCursor, Limit: limit, Total: total})
 }
 
-func (s *Server) readTaskRunAnalyticsTicketGroupsPage(filters taskRunAnalyticsFilters, cursorAt int64, cursorIssueID string, limit int) ([]taskRunAnalyticsTicketGroup, int, bool, error) {
+func (s *Server) readTaskRunAnalyticsTicketGroupsPage(filters taskRunAnalyticsFilters, cursorAt int64, cursorIssueID string, limit int) ([]taskRunAnalyticsTicketGroup, int, error) {
 	where, args := taskRunAnalyticsSummaryWhere(filters)
 	total, err := s.readTaskRunAnalyticsTicketTotal(where, args)
 	if err != nil {
-		return nil, 0, false, err
+		return nil, 0, err
 	}
 	orderAt := `MAX(COALESCE(NULLIF(MIN(NULLIF(issue_created_at,0)),0), MIN(started_at), 1), 1)`
 	groupWhere := where + ` AND issue_id != ''`
@@ -200,7 +192,7 @@ func (s *Server) readTaskRunAnalyticsTicketGroupsPage(filters taskRunAnalyticsFi
 	groupArgs = append(groupArgs, limit+1)
 	rows, err := s.db.Query(`SELECT issue_id, `+orderAt+` FROM task_run_summaries `+groupWhere+` ORDER BY 2 DESC, issue_id DESC LIMIT ?`, groupArgs...)
 	if err != nil {
-		return nil, 0, false, err
+		return nil, 0, err
 	}
 	defer rows.Close()
 	ids := []string{}
@@ -208,15 +200,15 @@ func (s *Server) readTaskRunAnalyticsTicketGroupsPage(filters taskRunAnalyticsFi
 		var id string
 		var ignored int64
 		if err := rows.Scan(&id, &ignored); err != nil {
-			return nil, 0, false, err
+			return nil, 0, err
 		}
 		ids = append(ids, id)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, 0, false, err
+		return nil, 0, err
 	}
 	if len(ids) == 0 {
-		return []taskRunAnalyticsTicketGroup{}, total, false, nil
+		return []taskRunAnalyticsTicketGroup{}, total, nil
 	}
 	ph := strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",")
 	runWhere := where + ` AND issue_id IN (` + ph + `)`
@@ -226,32 +218,32 @@ func (s *Server) readTaskRunAnalyticsTicketGroupsPage(filters taskRunAnalyticsFi
 	}
 	runRows, err := s.db.Query(`SELECT `+taskRunAnalyticsRunColumns()+` FROM task_run_summaries `+runWhere, runArgs...)
 	if err != nil {
-		return nil, 0, false, err
+		return nil, 0, err
 	}
 	defer runRows.Close()
 	runs, err := scanTaskRunAnalyticsRuns(runRows)
 	if err != nil {
-		return nil, 0, false, err
+		return nil, 0, err
 	}
-	return taskRunAnalyticsTicketGroupsFromHydration(ids, runs), total, false, nil
+	return taskRunAnalyticsTicketGroupsFromHydration(ids, runs), total, nil
 }
 
 // quantizeTaskRunAnalyticsTicketArgs snaps int64 args (the started_at window
 // bounds — the only int64s the analytics where-builder produces) down to the
-// minute. The quantized args feed BOTH the cache key and the COUNT query, so a
+// cache TTL. The quantized args feed BOTH the cache key and the COUNT query, so a
 // cached total always describes exactly the window its key names.
 func quantizeTaskRunAnalyticsTicketArgs(args []any) []any {
 	quantized := append([]any(nil), args...)
 	for i, arg := range quantized {
 		if value, ok := arg.(int64); ok {
-			quantized[i] = value / int64(time.Minute/time.Millisecond) * int64(time.Minute/time.Millisecond)
+			quantized[i] = value / int64(taskRunAnalyticsTicketCacheTTL/time.Millisecond) * int64(taskRunAnalyticsTicketCacheTTL/time.Millisecond)
 		}
 	}
 	return quantized
 }
 
 func taskRunAnalyticsTicketCacheKey(where string, args []any) string {
-	return fmt.Sprintf("g%d|%s|%#v", ticketAnalyticsGeneration.Load(), where, args)
+	return fmt.Sprintf("%s|%#v", where, args)
 }
 
 func (s *Server) readTaskRunAnalyticsTicketTotal(where string, args []any) (int, error) {
@@ -286,9 +278,8 @@ func (s *Server) readTaskRunAnalyticsTicketTotal(where string, args []any) (int,
 		if len(s.ticketAnalyticsTotalCache) >= taskRunAnalyticsTicketCacheMaxEntries {
 			evictOldestTaskRunAnalyticsTicketTotalCacheEntry(s.ticketAnalyticsTotalCache)
 		}
-		// Ticket rows are always freshly queried. Total is only a UI caption:
-		// summary writes invalidate via ticketAnalyticsGeneration in the key,
-		// and the TTL bounds staleness from the minute-quantized window edges.
+		// Ticket rows are always freshly queried. Total is only a UI caption;
+		// the TTL bounds staleness from the quantized window edges.
 		s.ticketAnalyticsTotalCache[key] = taskRunAnalyticsTicketTotalCacheEntry{total: total, expiresAt: now.Add(taskRunAnalyticsTicketCacheTTL)}
 		s.ticketAnalyticsTotalQueries++
 		s.ticketAnalyticsCacheMu.Unlock()
