@@ -108,6 +108,15 @@ func TestExtractDonePRURLs(t *testing.T) {
 			message:  "Here is a summary.\n\n[DONE] https://github.com/org/repo/pull/55\n\nThanks!",
 			wantURLs: []string{"https://github.com/org/repo/pull/55"},
 		},
+		{
+			// pipeline.MessageSignals accepts the token in any case, so this
+			// turn DOES advance the stage. If the URL scan stayed
+			// case-sensitive the stage would advance with nothing registered
+			// and merge tracking would never arm.
+			name:     "lowercase done token still yields its PR URLs",
+			message:  "[done] https://github.com/org/repo/pull/56",
+			wantURLs: []string{"https://github.com/org/repo/pull/56"},
+		},
 	}
 
 	for _, tt := range tests {

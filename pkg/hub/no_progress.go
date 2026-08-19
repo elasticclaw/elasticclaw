@@ -13,6 +13,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/elasticclaw/elasticclaw/pkg/hub/pipeline"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 )
 
@@ -25,7 +26,11 @@ var commitMarkerPattern = regexp.MustCompile(`(?i)\b[0-9a-f]{7,40}\b`)
 // latest outcomes are substantially the same and that state has not changed.
 // This is deliberately progress-based rather than a lifetime or turn limit.
 func (s *Server) observeCompletedTurn(clawID, messageID, content string) bool {
-	if strings.Contains(content, "[DONE]") || strings.Contains(content, "[TERMINATE]") {
+	// Anchored, like every other signal test in the hub. A turn that merely
+	// mentions a token has not signalled anything and must not buy itself
+	// immunity from the no-progress check — an agent repeating "I can't send
+	// [DONE] yet" every turn is the exact shape this watchdog exists to catch.
+	if pipeline.MessageSignals(content, doneSignalToken) || pipeline.MessageSignals(content, terminateSignalToken) {
 		return false
 	}
 	s.noProgressMu.Lock()
