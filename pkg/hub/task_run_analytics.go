@@ -741,9 +741,10 @@ func taskRunPhaseEventForClawStatus(status string) string {
 // task run once its sandbox actually becomes ready (claws.status flips to
 // "connected"). ensureTaskRunForClaw only records phase events using the
 // claw's status at run-creation time, which is always "provisioning" or
-// "pending" — so without this, agent_started_at is never set for the normal
-// bootstrap flow. Safe to call repeatedly: the event key is deterministic
-// and recordTaskRunEventTx dedupes on (tenant_id, run_id, event_key).
+// "pending". Bridge registration also calls this because bootstrap commonly
+// finishes before the bridge connects and bypasses the promotion path. Safe
+// to call repeatedly: the event key is deterministic and
+// recordTaskRunEventTx dedupes on (tenant_id, run_id, event_key).
 func (s *Server) recordClawAgentStarted(clawID string) {
 	if s == nil || s.db == nil || clawID == "" {
 		return

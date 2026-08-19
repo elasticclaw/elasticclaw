@@ -633,7 +633,7 @@ func (s *Server) parkAgentIdleStretch(nowAt time.Time, clawID string, cc *clawCo
 		if _, err := s.db.Exec(`
 			INSERT INTO slack_notification_deliveries(event_id, run_id, delivered_at, message_ts, status)
 			VALUES(?,?,?,?,?) ON CONFLICT(event_id) DO NOTHING`,
-			lifecycleClawIdleKey(clawID, stretchStart), lifecycleClawThreadKey(clawID),
+			lifecycleClawIdleKey(clawID, stretchStart), lifecycleClawRunKey(clawID),
 			epochMillis(nowAt), "", notificationDeliveryStatusSkipped); err != nil {
 			log.Printf("[agent-idle] park claw %s: %v", shortID(clawID), err)
 			return // retry next tick; nothing latched yet

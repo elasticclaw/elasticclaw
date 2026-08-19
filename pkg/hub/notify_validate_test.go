@@ -173,6 +173,43 @@ func TestWorkflowPushAcceptsValidNotifyVia(t *testing.T) {
 	}
 }
 
+// A severity typo is an author-time error too: pipeline.Parse stays lenient
+// on notify blocks (a bad severity must not kill every stage action of a
+// running pipeline), so this save path is the only place the author can be
+// told about it while nothing is running.
+func TestWorkflowPushRejectsInvalidNotifySeverity(t *testing.T) {
+	s := newNotifyValidateTestServer(t, notifyValidateTestNotifiers())
+	rr := pushWorkflowsForTest(t, s, []*types.WorkflowConfig{{
+		Name:                "release",
+		Integration:         "github",
+		EnableManualTrigger: true,
+		Stages: []types.WorkflowStage{
+			notifyWorkflowStage("announce", map[string]interface{}{"via": "eng-agents", "text": "hi", "severity": "urgent"}),
+		},
+	}})
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body = %s", rr.Code, rr.Body.String())
+	}
+	if body := rr.Body.String(); !strings.Contains(body, `stage "announce"`) || !strings.Contains(body, `"urgent"`) {
+		t.Fatalf("error does not name the stage and the bad severity: %s", body)
+	}
+}
+
+func TestWorkflowPushAcceptsKnownNotifySeverity(t *testing.T) {
+	s := newNotifyValidateTestServer(t, notifyValidateTestNotifiers())
+	rr := pushWorkflowsForTest(t, s, []*types.WorkflowConfig{{
+		Name:                "release",
+		Integration:         "github",
+		EnableManualTrigger: true,
+		Stages: []types.WorkflowStage{
+			notifyWorkflowStage("announce", map[string]interface{}{"via": "eng-agents", "text": "hi", "severity": "warning"}),
+		},
+	}})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body = %s", rr.Code, rr.Body.String())
+	}
+}
+
 // The check must cover both authoring shapes: a directly authored
 // pipeline_yaml: string is judged exactly like stages:.
 func TestWorkflowPushValidatesAuthoredPipelineYAML(t *testing.T) {

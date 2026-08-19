@@ -11,11 +11,12 @@ import (
 )
 
 // notifyActionRef locates one enabled notify action inside a pipeline: the
-// stage that declares it and its trimmed "via" notifier name (empty when the
-// action has no usable via).
+// stage that declares it, its trimmed "via" notifier name (empty when the
+// action has no usable via) and its raw "severity" value.
 type notifyActionRef struct {
-	StageID string
-	Via     string
+	StageID  string
+	Via      string
+	Severity string
 }
 
 // notifyActionRefs parses pipelineYAML and returns a ref for every enabled
@@ -36,8 +37,9 @@ func notifyActionRefs(pipelineYAML string) []notifyActionRef {
 			continue
 		}
 		refs = append(refs, notifyActionRef{
-			StageID: stage.ID,
-			Via:     strings.TrimSpace(stage.OnEnter.Notify.Via),
+			StageID:  stage.ID,
+			Via:      strings.TrimSpace(stage.OnEnter.Notify.Via),
+			Severity: stage.OnEnter.Notify.Severity,
 		})
 	}
 	return refs
@@ -62,7 +64,8 @@ func effectiveWorkflowPipelineYAML(workflow *types.WorkflowConfig) (string, erro
 
 // validateNotifyVias rejects a pipeline at save time when it contains a
 // notify action whose "via" is blank or names no notifier in notifiers (the
-// set under notifications.notifiers in hub.yaml). Every offending action is
+// set under notifications.notifiers in hub.yaml), or whose "severity" is not
+// one of the four known values. Every offending action is
 // reported in one error, prefixed with label — `workflow "release"`,
 // `factory "triage"` — naming its stage and listing the defined notifier
 // names so a typo is obvious. It is a free function taking the notifier set
@@ -92,6 +95,14 @@ func validateNotifyVias(notifiers map[string]types.NotifierConfig, label, pipeli
 	}
 	var problems []string
 	for _, ref := range notifyActionRefs(pipelineYAML) {
+		// Severity is checked here rather than in pipeline.Validate so a
+		// typo is rejected while the author is still saving: failing
+		// pipeline.Parse instead would let the save through and then kill
+		// every stage action of a running pipeline, notify or not.
+		if _, ok := notifySeverity(ref.Severity); !ok {
+			problems = append(problems, fmt.Sprintf(
+				"stage %q has notify severity %q, which must be info, success, warning or error", ref.StageID, ref.Severity))
+		}
 		if ref.Via == "" {
 			problems = append(problems, fmt.Sprintf(
 				"stage %q has a notify action without a \"via\" (the name of a notifier under notifications.notifiers)", ref.StageID))

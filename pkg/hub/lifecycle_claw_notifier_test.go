@@ -60,7 +60,7 @@ func insertSlackTestWorkflowRun(t *testing.T, db *sql.DB, id, clawID, status str
 	}
 }
 
-func TestLifecycleClawNotifierAdhocLifecycleThreadsUnderOneRoot(t *testing.T) {
+func TestLifecycleClawNotifierAdhocLifecyclePostsTopLevel(t *testing.T) {
 	fake := newFakeSlackServer(t)
 	s, db := newSlackNotifierTestServer(t, fake.server.URL, nil)
 	setSlackWatermark(t, s, 0)
@@ -75,7 +75,7 @@ func TestLifecycleClawNotifierAdhocLifecycleThreadsUnderOneRoot(t *testing.T) {
 	}
 	root := fake.request(0)
 	if root.ThreadTS != "" {
-		t.Fatalf("first claw message should be the thread root, got thread_ts %q", root.ThreadTS)
+		t.Fatalf("first claw message must be top-level, got thread_ts %q", root.ThreadTS)
 	}
 	if !strings.Contains(root.Fallback, "Agent started") || !strings.Contains(root.Fallback, "name-claw-adhoc") {
 		t.Fatalf("agent_started fallback = %q", root.Fallback)
@@ -125,13 +125,12 @@ func TestLifecycleClawNotifierAdhocLifecycleThreadsUnderOneRoot(t *testing.T) {
 		t.Fatal("failure message does not include bootstrap_diagnostic as the reason")
 	}
 
-	// All three thread under the same claw root.
-	var threadTS string
-	if err := db.QueryRow(`SELECT thread_ts FROM slack_run_threads WHERE run_id=?`, lifecycleClawThreadKey("claw-adhoc")).Scan(&threadTS); err != nil {
-		t.Fatalf("claw thread root row: %v", err)
+	if prMsg.ThreadTS != "" || failMsg.ThreadTS != "" {
+		t.Fatalf("claw lifecycle messages must be top-level: pr=%q fail=%q", prMsg.ThreadTS, failMsg.ThreadTS)
 	}
-	if prMsg.ThreadTS != threadTS || failMsg.ThreadTS != threadTS {
-		t.Fatalf("claw events not threaded under one root: pr=%q fail=%q root=%q", prMsg.ThreadTS, failMsg.ThreadTS, threadTS)
+	var threadRows int
+	if err := db.QueryRow(`SELECT COUNT(1) FROM slack_run_threads`).Scan(&threadRows); err != nil || threadRows != 0 {
+		t.Fatalf("claw lifecycle notifier wrote %d thread rows (err %v), want 0", threadRows, err)
 	}
 
 	// Deliveries recorded under the namespaced synthetic keys.
@@ -341,9 +340,9 @@ func TestLifecycleClawNotifierFailureToggleOff(t *testing.T) {
 	}
 }
 
-// A task-run thread and a claw thread must not interfere: each gets its own
-// root and its own replies.
-func TestLifecycleClawAndTaskRunThreadsAreIndependent(t *testing.T) {
+// Task-run and ad-hoc claw events must all remain independently visible at
+// the channel top level.
+func TestLifecycleClawAndTaskRunEventsAreTopLevel(t *testing.T) {
 	fake := newFakeSlackServer(t)
 	s, db := newSlackNotifierTestServer(t, fake.server.URL, nil)
 	setSlackWatermark(t, s, 0)
@@ -367,31 +366,15 @@ func TestLifecycleClawAndTaskRunThreadsAreIndependent(t *testing.T) {
 		t.Fatalf("sent %d messages, want 2 task-run + 2 claw", fake.count())
 	}
 
-	var runRoot, clawRoot string
-	if err := db.QueryRow(`SELECT thread_ts FROM slack_run_threads WHERE run_id='run-1'`).Scan(&runRoot); err != nil {
-		t.Fatalf("run thread root: %v", err)
-	}
-	if err := db.QueryRow(`SELECT thread_ts FROM slack_run_threads WHERE run_id=?`, lifecycleClawThreadKey("claw-adhoc")).Scan(&clawRoot); err != nil {
-		t.Fatalf("claw thread root: %v", err)
-	}
-	if runRoot == clawRoot {
-		t.Fatalf("task-run and claw threads share a root ts %q", runRoot)
-	}
 	for i := 0; i < fake.count(); i++ {
 		req := fake.request(i)
-		if req.ThreadTS == "" {
-			continue // a root
+		if req.ThreadTS != "" {
+			t.Fatalf("message %d posted in thread %q, want top-level", i, req.ThreadTS)
 		}
-		switch {
-		case strings.Contains(req.Fallback, "acme/app#7"):
-			if req.ThreadTS != runRoot {
-				t.Fatalf("task-run reply threaded under %q, want run root %q", req.ThreadTS, runRoot)
-			}
-		case strings.Contains(req.Fallback, "acme/tools#3"):
-			if req.ThreadTS != clawRoot {
-				t.Fatalf("claw reply threaded under %q, want claw root %q", req.ThreadTS, clawRoot)
-			}
-		}
+	}
+	var threadRows int
+	if err := db.QueryRow(`SELECT COUNT(1) FROM slack_run_threads`).Scan(&threadRows); err != nil || threadRows != 0 {
+		t.Fatalf("lifecycle notifier wrote %d thread rows (err %v), want 0", threadRows, err)
 	}
 }
 

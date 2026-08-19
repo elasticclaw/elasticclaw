@@ -40,10 +40,7 @@ import (
 //
 // Dedupe reuses slack_notification_deliveries with namespaced synthetic keys
 // ("claw:<id>:agent_started", "claw:<id>:failure", "claw:<id>:pr:<url>") that
-// can never collide with task_run_events ids. Threading reuses
-// slack_run_threads with the namespaced key "claw:<id>" in the run_id column,
-// so all events for one ad-hoc claw share one thread and existing run threads
-// keep working unchanged.
+// can never collide with task_run_events ids.
 const (
 	// lifecycleStateClawBaselineKey marks that the claw pass has recorded the
 	// current claw/PR state as history. Set on the first enabled run so
@@ -79,6 +76,10 @@ func lifecycleClawPRKey(clawID, prURL string) string {
 	return "claw:" + clawID + ":pr:" + prURL
 }
 
+// lifecycleClawRunKey keeps synthetic claw delivery rows distinct from
+// task-run rows.
+func lifecycleClawRunKey(clawID string) string { return "claw:" + clawID }
+
 // lifecycleClawIdleKey keys one idle stretch of one ad-hoc claw. The latch
 // value (claws.idle_since, the stretch's start in millis) is part of the key
 // so a claw that goes idle, works, and goes idle again gets a fresh key — and
@@ -87,10 +88,6 @@ func lifecycleClawPRKey(clawID, prURL string) string {
 func lifecycleClawIdleKey(clawID string, idleSince int64) string {
 	return "claw:" + clawID + ":idle:" + strconv.FormatInt(idleSince, 10)
 }
-
-// lifecycleClawThreadKey namespaces the claw id for the slack_run_threads run_id
-// column so claw threads can never collide with task run ids.
-func lifecycleClawThreadKey(clawID string) string { return "claw:" + clawID }
 
 // lifecycleClawRow is the claws-table context the claw pass renders messages from.
 type lifecycleClawRow struct {
@@ -483,15 +480,15 @@ func (s *Server) deliverLifecycleClawEvent(d lifecycleDelivery, claw lifecycleCl
 		return true
 	}
 
-	threadKey := lifecycleClawThreadKey(claw.ID)
-	err := s.postLifecycleEvent(d, ev, runCtx, threadKey, deliveryKey, claw.TenantID)
+	runKey := lifecycleClawRunKey(claw.ID)
+	err := s.postLifecycleEvent(d, ev, runCtx, runKey, deliveryKey)
 	if err == nil {
 		s.clearPollWarning(lifecycleSendWarningKey)
 		return true
 	}
 	// Same send-failure policy as the task-run pass: config errors pause,
 	// permanent errors are burned as failed, transient errors stop the pass.
-	handled, _ := s.handleLifecycleSendError(err, "claw event "+deliveryKey, deliveryKey, threadKey)
+	handled, _ := s.handleLifecycleSendError(err, "claw event "+deliveryKey, deliveryKey, runKey)
 	return handled
 }
 
@@ -555,7 +552,7 @@ func (s *Server) lifecycleClawPRPass(d lifecycleDelivery) {
 			// cursor to move past it); the task-run pass dedupes under its
 			// own event ids, so the keys never collide.
 			s.recordNotificationDelivery(lifecycleClawPRKey(pr.Claw.ID, pr.PRURL),
-				lifecycleClawThreadKey(pr.Claw.ID), "", notificationDeliveryStatusSkipped)
+				lifecycleClawRunKey(pr.Claw.ID), "", notificationDeliveryStatusSkipped)
 			continue
 		}
 		if pr.ClawCreatedAt > cutoff {

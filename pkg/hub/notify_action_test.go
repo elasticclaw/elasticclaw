@@ -130,8 +130,17 @@ func TestNotifyActionSendsRenderedSlackMessage(t *testing.T) {
 	}
 	waitForSlackRequests(t, fake, 1)
 	req := fake.request(0)
-	if req.Text != "Build passed" {
-		t.Fatalf("Slack text = %q, want %q", req.Text, "Build passed")
+	if req.Text != "" {
+		t.Fatalf("semantic Slack message has top-level text %q, want empty", req.Text)
+	}
+	if req.Fallback != "Build passed" {
+		t.Fatalf("Slack fallback = %q, want %q", req.Fallback, "Build passed")
+	}
+	if req.Color != notify.SlackColorInfo || len(req.Blocks) == 0 {
+		t.Fatalf("plain notify action did not use semantic Slack rendering: color=%q blocks=%d", req.Color, len(req.Blocks))
+	}
+	if blocks := fmt.Sprintf("%v", req.Blocks); !strings.Contains(blocks, "Build passed") {
+		t.Fatalf("blocks %q do not preserve rendered operator text", blocks)
 	}
 	if req.Channel != "C0RELEASE1" {
 		t.Fatalf("Slack channel = %q, want templated target %q", req.Channel, "C0RELEASE1")
@@ -145,6 +154,35 @@ func TestNotifyActionSendsRenderedSlackMessage(t *testing.T) {
 // {{.Issue.*}} from the pipeline context and {{.Inputs.*}} from a manual
 // trigger. A message with a subject opts into Slack's rich (attachment)
 // rendering, so the subject is asserted inside the blocks.
+// severity: picks the colour stripe; a value the save-time check never lets
+// through still sends, as info, with a warning.
+func TestNotifyActionMapsSeverity(t *testing.T) {
+	for severity, want := range map[string]string{
+		"warning": notify.SlackColorWarning,
+		"error":   notify.SlackColorError,
+		"success": notify.SlackColorSuccess,
+		"urgent":  notify.SlackColorInfo,
+	} {
+		t.Run(severity, func(t *testing.T) {
+			fake := newFakeSlackServer(t)
+			s, _, clawID := newNotifyActionTestServer(t, notifyTestNotifiers(fake.server.URL))
+			stage := pipeline.Stage{ID: "announce", OnEnter: pipeline.OnEnter{Notify: pipeline.NotifyAction{
+				Enabled:  true,
+				Via:      notifyTestVia,
+				Text:     "Build failed",
+				Severity: severity,
+			}}}
+			if _, err := s.runOnEnter(clawID, stage, pipelineContext{}); err != nil {
+				t.Fatalf("notify action blocked the stage transition: %v", err)
+			}
+			waitForSlackRequests(t, fake, 1)
+			if got := fake.request(0).Color; got != want {
+				t.Fatalf("severity %q colour = %q, want %q", severity, got, want)
+			}
+		})
+	}
+}
+
 func TestNotifyActionRendersIssueAndInputTemplates(t *testing.T) {
 	fake := newFakeSlackServer(t)
 	s, db, _ := newNotifyActionTestServer(t, notifyTestNotifiers(fake.server.URL))
@@ -171,8 +209,11 @@ func TestNotifyActionRendersIssueAndInputTemplates(t *testing.T) {
 	}
 	waitForSlackRequests(t, fake, 1)
 	req := fake.request(0)
-	if want := "Merged https://github.com/octo/app/issues/7"; req.Fallback != want {
-		t.Fatalf("fallback = %q, want rendered text %q", req.Fallback, want)
+	// The fallback leads with the rendered text and appends the issue
+	// identifier as summary context, matching the lifecycle cards' slot
+	// discipline.
+	if want := "Merged https://github.com/octo/app/issues/7 — octo/app/7"; req.Fallback != want {
+		t.Fatalf("fallback = %q, want %q", req.Fallback, want)
 	}
 	blocks := fmt.Sprintf("%v", req.Blocks)
 	if !strings.Contains(blocks, "#7 requested by ana") {
@@ -204,9 +245,16 @@ func TestNotifyActionEscapesUntrustedTemplateData(t *testing.T) {
 		t.Fatalf("notify action blocked the stage transition: %v", err)
 	}
 	waitForSlackRequests(t, fake, 1)
+	// The notify action now renders through the semantic tier, so the
+	// escaped text lands in the fallback and blocks, not the top-level
+	// "text" field (which the semantic tier always omits).
 	want := "Build &lt;!channel&gt; &lt;https://evil.example|Approve&gt; &amp; done"
-	if got := fake.request(0).Text; got != want {
-		t.Fatalf("Slack text = %q, want escaped %q", got, want)
+	req := fake.request(0)
+	if req.Fallback != want {
+		t.Fatalf("Slack fallback = %q, want escaped %q", req.Fallback, want)
+	}
+	if blocks := fmt.Sprintf("%v", req.Blocks); !strings.Contains(blocks, want) {
+		t.Fatalf("blocks %q do not contain escaped text %q", blocks, want)
 	}
 }
 

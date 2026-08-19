@@ -1070,6 +1070,7 @@ stages:
         via: eng-agents
         text: "PR merged: {{.Issue.URL}}"
         subject: "{{.Issue.Identifier}} merged"
+        severity: warning
         target: "{{.Outputs.build.channel}}"
         options:
           unfurl_links: false
@@ -1090,11 +1091,36 @@ stages:
 	if action.Subject != "{{.Issue.Identifier}} merged" {
 		t.Fatalf("subject = %q", action.Subject)
 	}
+	if action.Severity != "warning" {
+		t.Fatalf("severity = %q, want warning", action.Severity)
+	}
 	if action.Target != "{{.Outputs.build.channel}}" {
 		t.Fatalf("target = %q", action.Target)
 	}
 	if v, ok := action.Options["unfurl_links"].(bool); !ok || v {
 		t.Fatalf("options.unfurl_links = %#v, want false", action.Options["unfurl_links"])
+	}
+}
+
+func TestParseNotifyActionBadSeverityIsNotFatal(t *testing.T) {
+	// A severity typo is rejected when the workflow is SAVED
+	// (TestWorkflowPushRejectsInvalidNotifySeverity in pkg/hub). Parse must
+	// stay lenient: failing here would make one notify typo stop every stage
+	// action of an already-running pipeline, not just the notification.
+	p, err := pipeline.Parse([]byte(`
+stages:
+  - id: announce
+    on_enter:
+      notify:
+        via: eng-agents
+        text: hello
+        severity: urgent
+`))
+	if err != nil {
+		t.Fatalf("Parse error = %v, want the pipeline to survive a notify typo", err)
+	}
+	if got := p.Stages[0].OnEnter.Notify.Severity; got != "urgent" {
+		t.Fatalf("severity = %q, want the raw value preserved for the validator", got)
 	}
 }
 
