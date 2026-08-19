@@ -26,6 +26,7 @@ export function useNowTick(active: boolean): number {
     const listener = () => setNow(sharedNow)
     listeners.add(listener)
     if (!sharedTimer) {
+      sharedNow = Date.now()
       sharedTimer = window.setInterval(() => {
         sharedNow = Date.now()
         listeners.forEach((notify) => notify())

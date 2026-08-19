@@ -100,6 +100,7 @@ const usdWhole = new Intl.NumberFormat(undefined, {
   maximumFractionDigits: 0,
 })
 const shortDateFormatter = new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric" })
+const fullDateFormatter = new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", year: "numeric" })
 const heatmapMonthFormatter = new Intl.DateTimeFormat(undefined, { month: "short" })
 const heatmapDateFormatter = new Intl.DateTimeFormat(undefined, { weekday: "short", month: "short", day: "numeric", year: "numeric", timeZone: "UTC" })
 
@@ -138,8 +139,7 @@ function localDayRange(date: Date) {
   return { from: from.toISOString(), to: to.toISOString() }
 }
 
-function utcDayRange(date: Date) {
-  const day = date.toISOString().slice(0, 10)
+function utcDayRange(day: string) {
   return { from: `${day}T00:00:00.000Z`, to: `${day}T23:59:59.999Z` }
 }
 
@@ -414,7 +414,9 @@ function AnalyticsCommandCenterInner() {
     }
   }, [load])
 
+  const lastRefreshAt = useRef(0)
   const silentRefresh = useCallback(() => {
+    lastRefreshAt.current = Date.now()
     const cursorStack = ticketCursorStackRef.current
     void load(undefined, { append: false, silent: true, ticketCursor: cursorStack[cursorStack.length - 1] })
   }, [load])
@@ -430,6 +432,7 @@ function AnalyticsCommandCenterInner() {
     const handleVisibilityChange = () => {
       if (!document.hidden) {
         // Tab just became visible again — refresh immediately rather than waiting for the next tick.
+        if (Date.now() - lastRefreshAt.current < 30_000) return
         silentRefresh()
       }
     }
@@ -500,7 +503,7 @@ function AnalyticsCommandCenterInner() {
     const from = filterDate(filters.from)
     const to = filterDate(filters.to)
     if (!from || !to) return undefined
-    const range = utcDayRange(from)
+    const range = utcDayRange(from.toISOString().slice(0, 10))
     return from.toISOString() === range.from && to.toISOString() === range.to ? range.from.slice(0, 10) : undefined
   })()
   // Stable handlers so the memoized Heatmap (and its 364 memoized cells) only
@@ -510,7 +513,7 @@ function AnalyticsCommandCenterInner() {
     selectedDayRef.current = selectedDay
   }, [selectedDay])
   const selectDay = useCallback((day: string) => {
-    const range = utcDayRange(new Date(`${day}T00:00:00.000Z`))
+    const range = utcDayRange(day)
     setFilters(day === selectedDayRef.current ? { from: undefined, to: undefined } : range)
   }, [setFilters])
   const clearSelectedDay = useCallback(() => setFilters({ from: undefined, to: undefined }), [setFilters])
@@ -745,7 +748,7 @@ function FilterBar({
       <div className="flex flex-wrap items-center gap-2">
         <DatePickerRange value={dateRange} onChange={(range) => {
           if (range?.from && range.to && localDateKey(range.from) === localDateKey(range.to)) {
-            onChange(utcDayRange(range.from))
+            onChange(utcDayRange(localDateKey(range.from)))
             return
           }
           onChange({ from: range?.from ? localDayRange(range.from).from : undefined, to: range?.to ? localDayRange(range.to).to : undefined })
@@ -818,7 +821,7 @@ const Heatmap = memo(function Heatmap({ heatmap, maxCost, selectedDay, onSelectD
 
 function SelectedDayChip({ selectedDay, onClear }: { selectedDay?: string; onClear: () => void }) {
   if (!selectedDay) return null
-  const label = new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", year: "numeric" }).format(new Date(`${selectedDay}T00:00:00`))
+  const label = fullDateFormatter.format(new Date(`${selectedDay}T00:00:00`))
   return <span className="inline-flex items-center gap-1 rounded-full bg-muted px-2 py-0.5 text-xs text-muted-foreground">{label}<button type="button" aria-label={`Clear ${label} filter`} onClick={onClear} className="rounded-full px-0.5 text-foreground hover:bg-accent">×</button></span>
 }
 
@@ -849,7 +852,7 @@ function CostPerMergedPrChart({ effect }: { effect?: AnalyticsEffectiveness }) {
 function CostDrivers({ drivers }: { drivers: AnalyticsCostDriver[] }) {
   return <ChartCard title="Top cost drivers" sub="By workflow" info="Where the money goes: total spend and efficiency per workflow in the selected period." stat={`${drivers.length} workflows · ${usdWhole.format(drivers.reduce((sum, driver) => sum + driver.costUsd, 0))} total`}><Table className="[&_th]:h-auto [&_th]:px-2 [&_th]:pt-0 [&_th]:pb-2 [&_th]:text-xs [&_td]:px-2 [&_td]:py-[9px]"><TableHeader><TableRow><TableHead className="min-w-[35ch]">Workflow</TableHead><TableHead className="text-right">Runs</TableHead><TableHead className="text-right">Success</TableHead><TableHead className="text-right">Cost</TableHead><TableHead className="text-right">Cost / merged PR</TableHead></TableRow></TableHeader><TableBody>{drivers.slice(0, 10).map((driver) => <TableRow key={driver.name}><TableCell className="font-medium min-w-[35ch]"><WorkflowName name={driver.name} /></TableCell><TableCell className="text-right font-mono tabular-nums">{driver.runs}</TableCell><TableCell className="text-right font-mono tabular-nums">{formatPercent(driver.successRate)}</TableCell><TableCell className="text-right font-mono tabular-nums">{usd.format(driver.costUsd)}</TableCell><TableCell className="text-right font-mono tabular-nums">{usd.format(driver.costPerMergedPr)}</TableCell></TableRow>)}</TableBody></Table></ChartCard>
 }
-function TicketsTable({ tickets, total, page, canGoPrevious, canGoNext, onSelect, onSelectTicket, onPrevious, onNext, loading }: { tickets: AnalyticsTicket[]; total: number; page: number; canGoPrevious: boolean; canGoNext: boolean; onSelect: (runId: string) => void; onSelectTicket: (ticketId: string) => void; onPrevious: () => void; onNext: () => void; loading: boolean }) { const [expanded, setExpanded] = useState<Set<string>>(() => new Set()); const toggleExpanded = (ticketKey: string) => setExpanded((previous) => { const next = new Set(previous); if (next.has(ticketKey)) next.delete(ticketKey); else next.add(ticketKey); return next }); const activate = (event: KeyboardEvent, action: () => void) => { if (event.target !== event.currentTarget) return; if (event.key === "Enter" || event.key === " ") { event.preventDefault(); action() } }; const delivered = tickets.filter((ticket) => ticket.status === "delivered").length; const awaitingReview = tickets.filter((ticket) => ticket.status === "pr_open").length; return <ChartCard title="Unique tickets" info="One row per ticket. Expand to see every run that served it; open a row for the business view, a run for the technical view." stat={<><span>{tickets.length} of {total} tickets</span><span className="ml-auto">{delivered} delivered · {awaitingReview} awaiting review</span></>}><Table className="[&_th]:h-auto [&_th]:px-2 [&_th]:pt-0 [&_th]:pb-2 [&_th]:text-xs [&_td]:px-2 [&_td]:py-[9px]"><TableHeader><TableRow>{["", "Status", "Ticket", "Requester", "Runs", "Cost", "Lead time", "Last activity"].map((label) => <TableHead key={label} className={label === "" ? "w-8" : ["Runs", "Cost", "Lead time", "Last activity"].includes(label) ? "text-right" : undefined}>{label}</TableHead>)}</TableRow></TableHeader><TableBody>{tickets.map((ticket) => <Fragment key={ticket.ticketKey}><TableRow tabIndex={0} className="cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset" onClick={() => onSelectTicket(ticket.ticketKey)} onKeyDown={(event) => activate(event, () => onSelectTicket(ticket.ticketKey))}><TableCell><button type="button" aria-label={`Toggle ${ticket.issueId} runs`} aria-expanded={expanded.has(ticket.ticketKey)} onClick={(event) => { event.stopPropagation(); toggleExpanded(ticket.ticketKey) }}>{expanded.has(ticket.ticketKey) ? <ChevronDown className="size-4" /> : <ChevronRight className="size-4" />}</button></TableCell><TableCell><TicketStatusBadge status={ticket.status} /></TableCell><TableCell><div className="font-medium">{ticket.issueTitle || ticket.issueId}</div><div className="font-mono text-xs text-muted-foreground">{ticket.issueId} · {ticket.workflowName || ticket.source || "—"}</div></TableCell><TableCell>{ticket.requester || "—"}</TableCell><TableCell className="text-right font-mono tabular-nums">{ticket.runCount}</TableCell><TableCell className="text-right font-mono tabular-nums">{usd.format(ticket.cost)}</TableCell><TableCell className="text-right font-mono tabular-nums">{formatDuration(ticket.leadTime)}</TableCell><TableCell className="text-right font-mono tabular-nums">{ticket.lastActivity ? new Date(ticket.lastActivity).toLocaleDateString() : "—"}</TableCell></TableRow>{expanded.has(ticket.ticketKey) && ticket.runs.map((run, index) => { const prs = ticket.prs.filter((pr) => pr.runId === run.runId); return <TableRow key={run.runId} tabIndex={0} className="cursor-pointer bg-muted/30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset" onClick={() => onSelect(run.runId)} onKeyDown={(event) => activate(event, () => onSelect(run.runId))}><TableCell /><TableCell><RunStatusBadge status={run.status} /></TableCell><TableCell><div>Try {index + 1}</div><div className="font-mono text-xs text-muted-foreground">{run.runId} · {run.model || "—"}</div></TableCell><TableCell>{prs.length ? prs.map((pr) => `#${pr.prNumber} ${pr.merged ? "merged" : pr.state}`).join(", ") : run.status === "failed" ? "Failed" : "—"}</TableCell><TableCell className="text-right font-mono tabular-nums">{run.attemptCount}</TableCell><TableCell className="text-right font-mono tabular-nums">{usd.format(run.cost)}</TableCell><TableCell className="text-right font-mono tabular-nums">{formatDuration(run.lastActivity - run.startedAt)}</TableCell><TableCell className="text-right font-mono tabular-nums">{new Date(run.startedAt).toLocaleDateString()}</TableCell></TableRow>})}</Fragment>)}</TableBody></Table><div className="mt-3 flex justify-center gap-3"><Button variant="outline" size="sm" disabled={!canGoPrevious || loading} onClick={onPrevious}>Previous</Button><span className="text-sm text-muted-foreground">Page {page}</span><Button variant="outline" size="sm" disabled={!canGoNext || loading} onClick={onNext}>Next</Button></div></ChartCard> }
+function TicketsTable({ tickets, total, page, canGoPrevious, canGoNext, onSelect, onSelectTicket, onPrevious, onNext, loading }: { tickets: AnalyticsTicket[]; total: number; page: number; canGoPrevious: boolean; canGoNext: boolean; onSelect: (runId: string) => void; onSelectTicket: (ticketId: string) => void; onPrevious: () => void; onNext: () => void; loading: boolean }) { const [expanded, setExpanded] = useState<Set<string>>(() => new Set()); const toggleExpanded = (ticketKey: string) => setExpanded((previous) => { const next = new Set(previous); if (next.has(ticketKey)) next.delete(ticketKey); else next.add(ticketKey); return next }); const activate = (event: KeyboardEvent, action: () => void) => { if (event.target !== event.currentTarget) return; if (event.key === "Enter" || event.key === " ") { event.preventDefault(); action() } }; const delivered = tickets.filter((ticket) => ticket.status === "delivered").length; const awaitingReview = tickets.filter((ticket) => ticket.status === "pr_open").length; return <ChartCard title="Unique tickets" info="One row per ticket. Expand to see every run that served it; open a row for the business view, a run for the technical view." stat={<><span>{tickets.length} of {total} tickets</span><span className="ml-auto">{delivered} delivered · {awaitingReview} awaiting review</span></>}><Table className="[&_th]:h-auto [&_th]:px-2 [&_th]:pt-0 [&_th]:pb-2 [&_th]:text-xs [&_td]:px-2 [&_td]:py-[9px]"><TableHeader><TableRow>{["", "Status", "Ticket", "Requester", "Runs", "Cost", "Lead time", "Last activity"].map((label) => <TableHead key={label} className={label === "" ? "w-8" : ["Runs", "Cost", "Lead time", "Last activity"].includes(label) ? "text-right" : undefined}>{label}</TableHead>)}</TableRow></TableHeader><TableBody>{tickets.map((ticket) => <Fragment key={ticket.ticketKey}><TableRow tabIndex={0} className="cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset" onClick={() => onSelectTicket(ticket.ticketKey)} onKeyDown={(event) => activate(event, () => onSelectTicket(ticket.ticketKey))}><TableCell><button type="button" aria-label={`Toggle ${ticket.issueId} runs`} aria-expanded={expanded.has(ticket.ticketKey)} onClick={(event) => { event.stopPropagation(); toggleExpanded(ticket.ticketKey) }}>{expanded.has(ticket.ticketKey) ? <ChevronDown className="size-4" /> : <ChevronRight className="size-4" />}</button></TableCell><TableCell><TicketStatusBadge status={ticket.status} /></TableCell><TableCell><div className="font-medium">{ticket.issueTitle || ticket.issueId}</div><div className="font-mono text-xs text-muted-foreground">{ticket.issueId} · {ticket.workflowName || ticket.source || "—"}</div></TableCell><TableCell>{ticket.requester || "—"}</TableCell><TableCell className="text-right font-mono tabular-nums">{ticket.runCount}</TableCell><TableCell className="text-right font-mono tabular-nums">{usd.format(ticket.cost)}</TableCell><TableCell className="text-right font-mono tabular-nums">{formatDuration(ticket.leadTime)}</TableCell><TableCell className="text-right font-mono tabular-nums">{ticket.lastActivity ? shortDateFormatter.format(new Date(ticket.lastActivity)) : "—"}</TableCell></TableRow>{expanded.has(ticket.ticketKey) && ticket.runs.map((run, index) => { const prs = ticket.prs.filter((pr) => pr.runId === run.runId); return <TableRow key={run.runId} tabIndex={0} className="cursor-pointer bg-muted/30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset" onClick={() => onSelect(run.runId)} onKeyDown={(event) => activate(event, () => onSelect(run.runId))}><TableCell /><TableCell><RunStatusBadge status={run.status} /></TableCell><TableCell><div>Try {index + 1}</div><div className="font-mono text-xs text-muted-foreground">{run.runId} · {run.model || "—"}</div></TableCell><TableCell>{prs.length ? prs.map((pr) => `#${pr.prNumber} ${pr.merged ? "merged" : pr.state}`).join(", ") : run.status === "failed" ? "Failed" : "—"}</TableCell><TableCell className="text-right font-mono tabular-nums">{run.attemptCount}</TableCell><TableCell className="text-right font-mono tabular-nums">{usd.format(run.cost)}</TableCell><TableCell className="text-right font-mono tabular-nums">{formatDuration(run.lastActivity - run.startedAt)}</TableCell><TableCell className="text-right font-mono tabular-nums">{shortDateFormatter.format(new Date(run.startedAt))}</TableCell></TableRow>})}</Fragment>)}</TableBody></Table><div className="mt-3 flex justify-center gap-3"><Button variant="outline" size="sm" disabled={!canGoPrevious || loading} onClick={onPrevious}>Previous</Button><span className="text-sm text-muted-foreground">Page {page}</span><Button variant="outline" size="sm" disabled={!canGoNext || loading} onClick={onNext}>Next</Button></div></ChartCard> }
 function outcomesStat(effect?: AnalyticsEffectiveness) { const days = effect?.outcomesByDay ?? []; const total = days.reduce((sum, day) => sum + day.clean + day.humanInTheLoop + day.warning + day.failed, 0); return `avg ${days.length ? (total / days.length).toFixed(1) : "0"} runs` }
 function ticketThroughputStat(effect?: AnalyticsEffectiveness) { const days = effect?.ticketsByDay ?? []; const total = days.reduce((sum, day) => sum + day.delivered + day.inProgress + day.failed, 0); return `avg ${days.length ? (total / days.length).toFixed(1) : "0"} tickets` }
 function calculateDelta(current?: number | null, prior?: number | null) { return current == null || prior == null || prior === 0 ? undefined : (current - prior) / prior }

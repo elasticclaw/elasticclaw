@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useMemo, useState } from "react"
+import { useEffect, useMemo, useRef, useState } from "react"
 import { FileTerminal, Loader2 } from "lucide-react"
 import { fetchActivityMessages, fetchTaskRunOutputs } from "@/lib/api"
 import type { ApiMessage, Message, TaskRunAttempt, TaskRunOutput, TaskRunSummary } from "@/lib/types"
@@ -99,7 +99,7 @@ export function RunLogsDialog({ run, attempts }: { run: TaskRunSummary; attempts
               )}
             </div>
             <TabsContent value="actions" className="min-h-0 overflow-hidden">
-              <ActionsTab clawId={clawId} />
+              <ActionsTab clawId={clawId} keepTrailingRunning={run.status === "running"} />
             </TabsContent>
             <TabsContent value="output" className="min-h-0 overflow-auto">
               <OutputTab outputs={outputs} loading={outputsLoading} error={outputsError} traceId={traceId} workspaceName={run.workspaceName} />
@@ -111,19 +111,22 @@ export function RunLogsDialog({ run, attempts }: { run: TaskRunSummary; attempts
   )
 }
 
-function ActionsTab({ clawId }: { clawId?: string }) {
+function ActionsTab({ clawId, keepTrailingRunning }: { clawId?: string; keepTrailingRunning: boolean }) {
   const [messages, setMessages] = useState<ApiMessage[]>([])
   const [loading, setLoading] = useState(false)
   const [loadingOlder, setLoadingOlder] = useState(false)
   const [hasOlder, setHasOlder] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const clawIdRef = useRef(clawId)
 
   useEffect(() => {
+    clawIdRef.current = clawId
     if (!clawId) return
     let cancelled = false
     queueMicrotask(() => {
       if (cancelled) return
       setLoading(true)
+      setLoadingOlder(false)
       setMessages([])
       setHasOlder(false)
       setError(null)
@@ -146,16 +149,17 @@ function ActionsTab({ clawId }: { clawId?: string }) {
     setError(null)
     try {
       const page = await fetchActivityMessages(clawId, { before, limit: activityPageSize, order: "desc" })
+      if (clawIdRef.current !== clawId) return
       setMessages((current) => [...page.reverse(), ...current])
       setHasOlder(page.length === activityPageSize)
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Unable to load older activity")
+      if (clawIdRef.current === clawId) setError(err instanceof Error ? err.message : "Unable to load older activity")
     } finally {
-      setLoadingOlder(false)
+      if (clawIdRef.current === clawId) setLoadingOlder(false)
     }
   }
 
-  const steps = useMemo(() => demoteStaleRunning(pairActivitySteps(messages.map(activityMessage)), false), [messages])
+  const steps = useMemo(() => demoteStaleRunning(pairActivitySteps(messages.map(activityMessage)), keepTrailingRunning), [keepTrailingRunning, messages])
   if (!clawId) return <EmptyState>No agent actions were recorded for this attempt.</EmptyState>
   if (loading) return <LoadingState label="Loading agent activity..." />
   if (error && messages.length === 0) return <Notice destructive>{error}</Notice>

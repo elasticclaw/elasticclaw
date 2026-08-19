@@ -12,9 +12,11 @@ import { Button } from "@/components/ui/button"
 
 const usd = new Intl.NumberFormat(undefined, { style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: 2 })
 const caption = "text-[10px] font-medium uppercase tracking-[0.08em] text-muted-foreground"
+const dateFormatter = new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", year: "numeric" })
+const timeFormatter = new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })
 const duration = (ms?: number) => { if (!ms) return "—"; const s = Math.round(ms / 1000); if (s < 60) return `${s}s`; const minutes = Math.round(s / 60); if (minutes < 60) return `${minutes}m`; const hours = Math.floor(minutes / 60); return hours < 24 ? `${hours}h ${String(minutes % 60).padStart(2, "0")}m` : `${Math.floor(hours / 24)}d ${hours % 24}h` }
-const date = (value?: number) => value ? new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", year: "numeric" }).format(new Date(value)) : "—"
-const time = (value?: number) => value ? new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }).format(new Date(value)) : "—"
+const date = (value?: number) => value ? dateFormatter.format(new Date(value)) : "—"
+const time = (value?: number) => value ? timeFormatter.format(new Date(value)) : "—"
 
 function Section({ title, stat, children }: { title: string; stat?: { left: string; right?: string; tone?: "error" }; children: React.ReactNode }) { return <section className="overflow-hidden rounded-lg border bg-card"><div className="flex items-center gap-3 border-b px-3 py-2"><h3 className="text-sm font-medium">{title}</h3>{stat && <div className="ml-auto flex items-center gap-3 font-mono text-[10px] text-muted-foreground"><span>{stat.left}</span>{stat.right && <span className={stat.tone === "error" ? "text-destructive" : ""}>{stat.right}</span>}</div>}</div><div className="space-y-2 p-3">{children}</div></section> }
 function Row({ label, value, mono }: { label: string; value: React.ReactNode; mono?: boolean }) { return <div className="flex gap-3 py-0.5 text-sm"><span className={`${caption} w-27 shrink-0`}>{label}</span><span className={mono ? "min-w-0 break-all font-mono text-xs" : "min-w-0"}>{value}</span></div> }

@@ -238,6 +238,7 @@ export const Sidebar = memo(function Sidebar({
     const sectionFor = (candidate: Claw) => agentSections.get(candidate.id) ?? agentSection(candidate, { isWaitingOnYou: false })
     const section = sectionFor(activeClaw)
     if (section !== sectionFor(overClaw)) return
+    if (activeClaw.pinned !== overClaw.pinned) return
 
     const ids = visible.filter((candidate) => sectionFor(candidate) === section).map((candidate) => candidate.id)
     const reordered = arrayMove(ids, ids.indexOf(active.id as string), ids.indexOf(over.id as string))

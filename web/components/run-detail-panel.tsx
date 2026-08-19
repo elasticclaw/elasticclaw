@@ -12,9 +12,10 @@ import { RunLogsDialog } from "@/components/run-logs-dialog"
 
 const caption = "text-[10px] font-medium uppercase tracking-[0.08em] text-muted-foreground"
 const usd = new Intl.NumberFormat(undefined, { style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: 2 })
+const timeFormatter = new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })
 const label = (v: string) => v.replace(/_/g, " ").replace(/\b\w/g, (m) => m.toUpperCase())
 const duration = (ms?: number) => { if (ms == null) return "—"; const s = Math.max(0, Math.round(ms / 1000)); return s < 60 ? `${s}s` : s < 3600 ? `${Math.floor(s / 60)}m ${s % 60 ? `${s % 60}s` : ""}` : `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m` }
-const time = (v?: number) => v ? new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }).format(new Date(v)) : "—"
+const time = (v?: number) => v ? timeFormatter.format(new Date(v)) : "—"
 const between = (a?: number, b?: number) => a && b && b >= a ? b - a : undefined
 function Section({ title, stat, children }: { title: string; stat?: { left: string; right?: string; tone?: "error" }; children: React.ReactNode }) { return <section className="overflow-hidden rounded-lg border bg-card"><h3 className="border-b px-3 py-2 text-sm font-medium">{title}</h3><div className="space-y-2 p-3">{children}</div>{stat && <div className="flex items-center gap-3 border-t px-3 py-1 font-mono text-[10px] text-muted-foreground"><span>{stat.left}</span>{stat.right && <span className={`ml-auto ${stat.tone === "error" ? "text-destructive" : ""}`}>{stat.right}</span>}</div>}</section> }
 function Row({ label: name, value, tone, mono = true }: { label: string; value: React.ReactNode; tone?: "error" | "muted"; mono?: boolean }) { return <div className="flex gap-3 py-0.5 text-sm"><span className={`${caption} w-26 shrink-0`}>{name}</span><span className={`${mono ? "font-mono text-xs" : ""} min-w-0 break-all ${tone === "error" ? "text-destructive" : tone === "muted" ? "text-muted-foreground" : ""}`}>{value}</span></div> }

@@ -1799,6 +1799,7 @@ export function ConversationView({
     if (!activeClaw || !overClaw) return
     const sectionFor = (candidate: Claw) => boardSections.find((section) => section.items.includes(candidate))?.key
     if (sectionFor(activeClaw) !== sectionFor(overClaw)) return
+    if (activeClaw.pinned !== overClaw.pinned) return
     const ids = allClaws.map((c) => c.id)
     const oldIdx = ids.indexOf(active.id as string)
     const newIdx = ids.indexOf(over.id as string)

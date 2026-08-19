@@ -76,6 +76,7 @@ export function HomeShell() {
   const [currentUserResolved, setCurrentUserResolved] = useState(false)
   const [adminChecked, setAdminChecked] = useState(false)
   const [adminCheckFailed, setAdminCheckFailed] = useState(false)
+  const lastAdminCheckAt = useRef(0)
   const [selectedWorkflow, setSelectedWorkflow] = useState<Workflow | null>(null)
 
   const loadAdminStatus = useCallback(async () => {
@@ -86,7 +87,7 @@ export function HomeShell() {
         setCurrentUserResolved(false)
         setAdminChecked(true)
         setAdminCheckFailed(false)
-        return
+        return true
       }
       const { getHubUrl } = await import("@/lib/hub-url")
       const hubUrl = getHubUrl()
@@ -103,6 +104,7 @@ export function HomeShell() {
           setCurrentUserResolved(true)
           setAdminChecked(true)
           setAdminCheckFailed(false)
+          return true
         })
         .catch((error) => {
           if (error instanceof Error && error.message === "Unauthorized") {
@@ -111,9 +113,11 @@ export function HomeShell() {
             setCurrentUserResolved(false)
             setAdminChecked(true)
             setAdminCheckFailed(false)
+            return true
           } else {
             setAdminChecked(false)
             setAdminCheckFailed(true)
+            return false
           }
         })
   }, [])
@@ -122,7 +126,12 @@ export function HomeShell() {
   useEffect(() => {
     let cancelled = false
     const guardedLoadAdminStatus = () => {
-      void loadAdminStatus().catch(() => {
+      if (lastAdminCheckAt.current && Date.now() - lastAdminCheckAt.current < 60_000) return
+      lastAdminCheckAt.current = Date.now()
+      void loadAdminStatus().then((succeeded) => {
+        if (!succeeded) lastAdminCheckAt.current = 0
+      }).catch(() => {
+        lastAdminCheckAt.current = 0
         if (!cancelled) {
           setAdminChecked(false)
           setAdminCheckFailed(true)
