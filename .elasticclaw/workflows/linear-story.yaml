@@ -21,6 +21,9 @@ stages:
 
         Read the issue and CONTEXT.md and start working on the issue.
         Narrate your progress as you go. Keep me updated.
+        When the PR is open, reply with `[DONE]` on the first line and list the PR URL after
+        it. The hub reads the signal only when `[DONE]` opens a line; mentioned inside a
+        sentence it is ignored.
 
   - id: pr_opened
     label: PR Opened

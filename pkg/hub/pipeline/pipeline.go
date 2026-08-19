@@ -49,7 +49,10 @@ type IssueLabelsSkip struct {
 // Trigger defines a condition that causes a transition into the parent stage.
 // Exactly one field should be set.
 type Trigger struct {
-	// MessageContains matches when a claw message contains this substring.
+	// MessageContains matches when this token opens a line of a claw message,
+	// ignoring leading whitespace and markdown decoration. The name is kept for
+	// YAML compatibility, but the match is anchored, not a substring scan: see
+	// MessageSignals for why. A token quoted mid-sentence does not match.
 	MessageContains string `yaml:"message_contains"`
 	// PRMerged is true when the pr_merged key is present in the YAML (even with null value).
 	PRMerged bool
@@ -547,18 +550,129 @@ func (p *Pipeline) StageByID(id string) *Stage {
 	return nil
 }
 
-// StageForMessageContains returns the first stage that has a message_contains
-// trigger matching the given message text. Returns nil if none match.
+// StageForMessageContains returns the first stage whose message_contains
+// trigger token opens a line of the given message. Returns nil if none match.
+// The matching rule is MessageSignals; read it before changing this.
 func (p *Pipeline) StageForMessageContains(message string) *Stage {
 	for i := range p.Stages {
 		for _, t := range p.Stages[i].Triggers {
-			if t.MessageContains != "" && containsFold(message, t.MessageContains) {
+			if t.MessageContains != "" && MessageSignals(message, t.MessageContains) {
 				return &p.Stages[i]
 			}
 		}
 	}
 	return nil
 }
+
+// MessageContainsTokens returns the distinct message_contains tokens declared by
+// this pipeline, in stage order. It exists so the hub can tell which tokens are
+// meaningful to a given run without re-parsing triggers, which is what the
+// unanchored-signal nudge needs.
+// StageIDForMessageContainsToken returns the id of the first stage triggered by
+// this token, or "" if none declares it. The caller needs it to tell a token
+// whose stage is still ahead from one whose stage is already behind.
+func (p *Pipeline) StageIDForMessageContainsToken(token string) string {
+	for i := range p.Stages {
+		for _, t := range p.Stages[i].Triggers {
+			if t.MessageContains != "" && strings.EqualFold(t.MessageContains, token) {
+				return p.Stages[i].ID
+			}
+		}
+	}
+	return ""
+}
+
+func (p *Pipeline) MessageContainsTokens() []string {
+	var tokens []string
+	seen := map[string]bool{}
+	for i := range p.Stages {
+		for _, t := range p.Stages[i].Triggers {
+			if t.MessageContains == "" {
+				continue
+			}
+			key := strings.ToUpper(t.MessageContains)
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			tokens = append(tokens, t.MessageContains)
+		}
+	}
+	return tokens
+}
+
+// MessageSignals reports whether message emits token as a signal: the token must
+// ANCHOR at the start of some line of the message, ignoring leading whitespace
+// and markdown decoration. It is the single definition of "the agent sent this
+// signal", and every caller in the hub must use it — the pipeline trigger path,
+// the legacy [DONE] and [TERMINATE] gates in server.go, and handleClawDoneSignal
+// itself. One message getting two different verdicts on two code paths is how
+// NEXT-707 turned a partial fix into a worse bug than the original.
+//
+// A bare substring match burned us twice in two days. NEXT-724: a claw that had
+// no ticket yet described the process it would follow — "5. Commit locally and
+// signal `[IMPLEMENTATION_DONE]` per the lifecycle table" — and the hub jumped
+// straight to review_loop; the run died 4h20 later at $6.64 with zero PRs.
+// NEXT-707: an agent reported a legitimate blocker with "sending `[DONE]` now
+// would be a false signal", and the hub opened a PR stage, stamped Agent
+// Finished on Linear and pinged Slack for human review — the agent was declared
+// done because it said it was NOT declaring itself done.
+//
+// Anchoring is unconditional, not a per-pipeline opt-in: the hub is shared by
+// factories we do not own, and a flag defaulting either way is wrong. Defaulting
+// off leaves every factory carrying the bug that cost these two runs; defaulting
+// on makes the flag dead weight nobody would ever set.
+//
+// This tightens the contract rather than restating it. The injects in this repo
+// were NOT uniform — .elasticclaw/workflows/github-issue.yaml only said "say
+// [DONE]" — so anchoring is what makes them uniform, and they have been reworded
+// to match. Injects we do not own (other repos' workflows) may still ask for the
+// token loosely; MessageMentionsUnanchored plus the hub's nudge is the safety net
+// for those, converting a silent freeze into a recoverable one.
+func MessageSignals(message, token string) bool {
+	if token == "" {
+		return false
+	}
+	for _, line := range strings.Split(message, "\n") {
+		line = strings.TrimLeft(line, signalDecoration)
+		if len(line) >= len(token) && equalFold(line[:len(token)], token) {
+			return true
+		}
+	}
+	return false
+}
+
+// MessageMentionsUnanchored reports whether token appears somewhere in message
+// but never opens a line — precisely the shape that used to transition the
+// pipeline and now does not. The hub uses it to nudge the agent to resend, so
+// that a mis-formatted signal fails loudly instead of hanging the run forever.
+func MessageMentionsUnanchored(message, token string) bool {
+	if token == "" {
+		return false
+	}
+	return containsFold(message, token) && !MessageSignals(message, token)
+}
+
+// signalDecoration is what may sit between the start of a line and the signal
+// token. A missed signal is worse than a spurious one — a spurious transition
+// wastes a run, a missed one freezes the pipeline forever — so this has to
+// tolerate how agents actually decorate the token. Observed in this hub:
+// **[REVIEW_LOOP_PASSED]** (bold), `[DONE]` (backticked), and the bare token.
+// Underscore joins asterisk because it is the same markdown emphasis marker, and
+// '#' because a heading marker only ever exists at the start of a line.
+//
+// Blockquote '>' is deliberately excluded: quoting the inject back is exactly the
+// NEXT-707 shape, and no agent has ever been seen signalling from inside a quote.
+// List markers ('-', '1.') are excluded for the same reason — NEXT-724 was a
+// numbered list item.
+//
+// '\r' is deliberately absent. It looks like it belongs next to '\t', but the
+// split below is on '\n', so a CRLF message always leaves '\r' at the END of the
+// preceding line and never at the start of one: it would pin nothing and protect
+// nothing. Every character here is covered by exactly one case in
+// TestStageForMessageContainsAnchoring; add a case with the character, or do not
+// add the character.
+const signalDecoration = " \t*_`#"
 
 // StageForPRMerged returns the first stage with a pr_merged trigger, or nil.
 func (p *Pipeline) StageForPRMerged() *Stage {
@@ -686,7 +800,9 @@ func GetJSONPath(m map[string]interface{}, path string) interface{} {
 	return current
 }
 
-// containsFold reports whether s contains substr, case-insensitively.
+// containsFold reports whether s contains substr, case-insensitively. Only
+// MessageMentionsUnanchored may use it: an unanchored mention is grounds for a
+// nudge, never for a stage transition.
 func containsFold(s, substr string) bool {
 	if len(substr) == 0 {
 		return true

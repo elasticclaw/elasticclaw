@@ -21,6 +21,110 @@ import (
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 )
 
+// The two lifecycle tokens the hub understands on its own, independent of any
+// pipeline's message_contains triggers. Both are matched with
+// pipeline.MessageSignals — never strings.Contains.
+const (
+	doneSignalToken      = "[DONE]"
+	terminateSignalToken = "[TERMINATE]"
+)
+
+// signalTokensForClaw lists the tokens that mean something to this claw: the two
+// built-in lifecycle tokens plus whatever its pipeline declares. Used only to
+// decide what an unanchored mention should be nudged about.
+func (s *Server) signalTokensForClaw(clawID string) []string {
+	tokens := []string{doneSignalToken, terminateSignalToken}
+	seen := map[string]bool{doneSignalToken: true, terminateSignalToken: true}
+	ctx, ok := s.findPipelineContextForClaw(clawID)
+	if !ok {
+		return tokens
+	}
+	pl := parsePipelineForContext(ctx)
+	if pl == nil {
+		return tokens
+	}
+	for _, t := range pl.MessageContainsTokens() {
+		key := strings.ToUpper(t)
+		if seen[key] {
+			continue
+		}
+		// Never nudge about a token whose stage is already behind us. The inject
+		// that leaves such a stage often tells the agent NOT to emit it again,
+		// so "resend it at the start of a line" would be talking it into a
+		// backwards transition — message_contains triggers have no visited-stage
+		// guard of their own.
+		if stageID := pl.StageIDForMessageContainsToken(t); stageID != "" && s.hasVisitedPipelineStage(clawID, stageID) {
+			continue
+		}
+		seen[key] = true
+		tokens = append(tokens, t)
+	}
+	return tokens
+}
+
+// unanchoredSignalNudgeText is a pure function of the token on purpose: an
+// identical string is what lets both dedup layers below recognise a repeat.
+func unanchoredSignalNudgeText(token string) string {
+	return fmt.Sprintf(
+		"[hub] I saw %s in your last message, but not at the start of a line, so it was not read as a signal and nothing advanced. "+
+			"A signal only counts when the token opens its own line (a leading backtick, *, _ or # is fine; prose before it is not). "+
+			"If you meant to send it, resend it now with %s opening the first line. "+
+			"If you were only referring to the token, ignore this — you will not be told about %s again.",
+		token, token, token)
+}
+
+// nudgeUnanchoredSignal tells an agent that wrote a known signal token
+// mid-sentence to resend it anchored.
+//
+// Anchoring trades a spurious transition for a missed one, and a missed signal
+// is a run that hangs until a human notices — the worst failure mode the hub
+// has. This is what keeps it recoverable: the agent is told, in the same
+// channel, that the hub saw the token and did not act on it.
+//
+// Three things keep it from becoming spam:
+//
+//  1. If ANY known token is properly anchored in this message, we say nothing.
+//     The agent signalled correctly; a stray mention alongside it is commentary.
+//  2. At most one nudge per turn, even if several tokens were quoted loosely.
+//  3. At most one nudge per token per claw, ever. The text is a constant per
+//     token, so the check below is an exact-match lookup over this claw's
+//     messages — an agent that quotes [DONE] in twenty consecutive turns gets
+//     exactly one nudge. injectMessage's pending-duplicate check is a second
+//     layer underneath, covering races between concurrent turns.
+//
+// No new queue: this rides the existing hub message injection.
+func (s *Server) nudgeUnanchoredSignal(clawID, message string) {
+	tokens := s.signalTokensForClaw(clawID)
+	var stray []string
+	for _, token := range tokens {
+		if pipeline.MessageSignals(message, token) {
+			return // rule 1
+		}
+		if pipeline.MessageMentionsUnanchored(message, token) {
+			stray = append(stray, token)
+		}
+	}
+	for _, token := range stray {
+		text := unanchoredSignalNudgeText(token)
+		var alreadyNudged bool
+		if err := s.db.QueryRow(
+			`SELECT EXISTS(SELECT 1 FROM messages WHERE claw_id=? AND role='hub' AND content=?)`,
+			clawID, text,
+		).Scan(&alreadyNudged); err != nil {
+			// Fail closed. Unlike a watchdog nudge, a duplicate here is pure
+			// noise in the agent's context, and the next turn retries anyway.
+			log.Printf("[pipeline] unanchored-signal nudge dedup check for claw %s failed, skipping: %v", shortID(clawID), err)
+			return
+		}
+		if alreadyNudged {
+			continue
+		}
+		log.Printf("[pipeline] claw %s wrote %s unanchored; nudging to resend on its own line", shortID(clawID), token)
+		s.injectHubMessageByID(clawID, text)
+		return // rule 2
+	}
+}
+
 // githubIssueDetails holds the fields we fetch for pipeline template rendering.
 type githubIssueDetails struct {
 	Identifier  string `json:"identifier"`
