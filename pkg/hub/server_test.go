@@ -1447,6 +1447,52 @@ func TestClawRegistrationPreservesTemplateWhenBridgeOmitsIt(t *testing.T) {
 	}
 }
 
+func TestClawRegistrationAlreadyConnectedRecordsAgentStartedOnce(t *testing.T) {
+	ready := true
+	const clawID = "claw-registration-agent-started"
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{ClawToken: "claw-token"}, "", "", "")
+	insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{
+		RunID: "run-registration-agent-started", AttemptID: "attempt-registration-agent-started", ClawID: clawID,
+		TenantID: "test-tenant-id", OwnerType: taskRunOwnerFactory, Factory: "factory", StartedAt: epochMillis(now()),
+	})
+	if _, err := db.Exec(`INSERT INTO claws(id, tenant_id, name, template, status, bootstrap_ok, task_run_id, created_at) VALUES(?,?,?,?,?,?,?,?)`,
+		clawID, "test-tenant-id", "started", "base", "starting", 1, "run-registration-agent-started", now()); err != nil {
+		t.Fatal(err)
+	}
+
+	ts := httptest.NewServer(s.Handler())
+	t.Cleanup(ts.Close)
+	register := func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		conn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(ts.URL, "http")+"/claw/ws", nil)
+		if err != nil {
+			t.Fatalf("dial claw ws: %v", err)
+		}
+		defer conn.Close(websocket.StatusNormalClosure, "done")
+		if err := wsjson.Write(ctx, conn, types.WSMessage{Type: "register", Payload: types.RegisterPayload{ClawID: clawID, Name: "started", Template: "base", Token: "claw-token", GatewayReady: &ready}}); err != nil {
+			t.Fatalf("register claw: %v", err)
+		}
+		var ack types.WSMessage
+		if err := wsjson.Read(ctx, conn, &ack); err != nil || ack.Type != "registered" {
+			t.Fatalf("registration ack = %#v, err = %v", ack, err)
+		}
+	}
+
+	register()
+	waitForNotify(t, "agent_started event", func() bool {
+		var count int
+		_ = db.QueryRow(`SELECT COUNT(*) FROM task_run_events WHERE run_id=? AND event_type=?`, "run-registration-agent-started", taskRunEventAgentStarted).Scan(&count)
+		return count == 1
+	})
+	register()
+	time.Sleep(25 * time.Millisecond)
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM task_run_events WHERE run_id=? AND event_type=?`, "run-registration-agent-started", taskRunEventAgentStarted).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("agent_started rows = %d (err %v), want one across reconnects", count, err)
+	}
+}
+
 func TestClawWorkspaceNameFallsBackToTags(t *testing.T) {
 	tests := []struct {
 		name         string

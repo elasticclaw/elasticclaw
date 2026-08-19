@@ -2387,6 +2387,12 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 			conn.Close(websocket.StatusPolicyViolation, "claw deleted")
 			return
 		}
+		// Bootstrap commonly completes before the bridge registers, so the
+		// upsert reaches connected directly and the promotion UPDATE never
+		// records agent_started. The event key makes reconnects harmless.
+		if currentStatus == "connected" {
+			go s.recordClawAgentStarted(clawID)
+		}
 	} else {
 		// For status channel, just read current status from DB
 		_ = s.db.QueryRow(`SELECT status FROM claws WHERE id = ? AND tenant_id = ?`, clawID, tenantID).Scan(&currentStatus)
