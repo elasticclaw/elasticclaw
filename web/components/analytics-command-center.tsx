@@ -605,7 +605,7 @@ function AnalyticsCommandCenterInner() {
           onNext={handleNextTicketPage}
         />
 
-        <ChartCard title="Cost by day" extra={<SelectedDayChip selectedDay={selectedDay} onClear={clearSelectedDay} />} stat={{ left: `${heatmap.days.length} days`, right: `${usdWhole.format(yearCosts?.dailySeries.reduce((sum, point) => sum + point.costUsd, 0) ?? 0)} total` }} info="Each square is a day; brighter means more spend. Click a day to focus the whole page on it.">
+        <ChartCard title="Cost by day" extra={<SelectedDayChip selectedDay={selectedDay} onClear={clearSelectedDay} />} stat={{ left: `${heatmap.days.length} days`, right: `${usdWhole.format(yearCosts?.dailySeries.reduce((sum, point) => sum + point.costUsd, 0) ?? 0)} total` }} info="Each square is a day; stronger colour means more spend. Click a day to focus the whole page on it.">
         <Heatmap
           heatmap={heatmap}
           maxCost={maxHeatCost}
@@ -777,7 +777,7 @@ type HeatmapPoint = ReturnType<typeof useHeatmap>["days"][number]["point"]
 
 const HeatmapCell = memo(function HeatmapCell({ iso, point, level, selected, onSelectDay, onShowTooltip, onHideTooltip }: { iso: string; point: HeatmapPoint; level: number; selected: boolean; onSelectDay: (day: string) => void; onShowTooltip: (iso: string, point: HeatmapPoint, target: HTMLButtonElement) => void; onHideTooltip: () => void }) {
   const tooltip = `${new Intl.DateTimeFormat(undefined, { weekday: "short", month: "short", day: "numeric", year: "numeric" }).format(new Date(`${iso}T00:00:00`))}: ${usdWhole.format(point?.costUsd ?? 0)} · ${point?.runCount ?? 0} runs`
-  return <button aria-label={tooltip} title={tooltip} aria-pressed={selected} onClick={() => onSelectDay(iso)} onMouseEnter={(event) => onShowTooltip(iso, point, event.currentTarget)} onMouseLeave={onHideTooltip} onFocus={(event) => onShowTooltip(iso, point, event.currentTarget)} onBlur={onHideTooltip} className={`aspect-square cursor-pointer rounded-sm border border-black/5 transition-shadow hover:ring-2 hover:ring-ring hover:ring-offset-1 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1 ${selected ? "ring-2 ring-primary ring-offset-1" : ""}`} style={{ background: level ? `var(--heatmap-${level})` : "var(--muted)" }} />
+  return <button aria-label={tooltip} aria-pressed={selected} onClick={() => onSelectDay(iso)} onMouseEnter={(event) => onShowTooltip(iso, point, event.currentTarget)} onMouseLeave={onHideTooltip} onFocus={(event) => onShowTooltip(iso, point, event.currentTarget)} onBlur={onHideTooltip} className={`aspect-square cursor-pointer rounded-sm border border-black/5 transition-shadow hover:ring-2 hover:ring-ring hover:ring-offset-1 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1 ${selected ? "ring-2 ring-primary ring-offset-1" : ""}`} style={{ background: level ? `var(--heatmap-${level})` : "var(--muted)" }} />
 })
 
 const Heatmap = memo(function Heatmap({ heatmap, maxCost, selectedDay, onSelectDay, onClearSelectedDay }: { heatmap: ReturnType<typeof useHeatmap>; maxCost: number; selectedDay?: string; onSelectDay: (day: string) => void; onClearSelectedDay: () => void }) {
