@@ -264,8 +264,14 @@ func TestApplyOrScheduleTaskRunAnalyticsTicketMetadataKeepsCachedValuesAfterEnri
 	if err := db.QueryRow(`SELECT requester,requester_role,team,priority,ask,reported_at,updated_at FROM ticket_metadata WHERE tenant_id=? AND issue_id=?`, "test-tenant-id", issueID).Scan(&requester, &role, &team, &priority, &ask, &reportedAt, &gotUpdatedAt); err != nil {
 		t.Fatalf("read cached metadata: %v", err)
 	}
-	if requester != "requester" || role != "manager" || team != "platform" || priority != "high" || ask != "fix it" || reportedAt != 999 || gotUpdatedAt != updatedAt {
-		t.Fatalf("metadata after failed enrichment = %q/%q/%q/%q/%q/%d/%d, want unchanged", requester, role, team, priority, ask, reportedAt, gotUpdatedAt)
+	if requester != "requester" || role != "manager" || team != "platform" || priority != "high" || ask != "fix it" || reportedAt != 999 {
+		t.Fatalf("metadata after failed enrichment = %q/%q/%q/%q/%q/%d, want cached values unchanged", requester, role, team, priority, ask, reportedAt)
+	}
+	// A failed re-enrichment attempt must still bump updated_at so the 15-minute
+	// backoff window applies; otherwise a persistently failing tracker call
+	// (outage, rotated token, unrecognized source) is retried on every request.
+	if gotUpdatedAt <= updatedAt {
+		t.Fatalf("updated_at after failed enrichment = %d, want bumped past %d to enforce backoff", gotUpdatedAt, updatedAt)
 	}
 }
 

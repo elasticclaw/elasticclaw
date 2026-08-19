@@ -552,7 +552,12 @@ func (s *Server) applyOrScheduleTaskRunAnalyticsTicketMetadata(tenantID string, 
 	if _, loaded := ticketMetadataInflight.LoadOrStore(key, struct{}{}); loaded {
 		return
 	}
-	ticketMetadataEnrichment <- struct{}{}
+	select {
+	case ticketMetadataEnrichment <- struct{}{}:
+	default:
+		ticketMetadataInflight.Delete(key)
+		return
+	}
 	go func() {
 		defer ticketMetadataInflight.Delete(key)
 		defer func() { <-ticketMetadataEnrichment }()
@@ -561,7 +566,13 @@ func (s *Server) applyOrScheduleTaskRunAnalyticsTicketMetadata(tenantID string, 
 		resolved := metadata.Requester != "" || metadata.RequesterRole != "" || metadata.Team != "" || metadata.Priority != "" || metadata.Ask != ""
 		if !resolved {
 			var exists bool
-			if err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM ticket_metadata WHERE tenant_id=? AND issue_id=?)`, tenantID, metadata.IssueID).Scan(&exists); err != nil || exists {
+			if err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM ticket_metadata WHERE tenant_id=? AND issue_id=?)`, tenantID, metadata.IssueID).Scan(&exists); err != nil {
+				return
+			}
+			if exists {
+				if _, err := s.db.Exec(`UPDATE ticket_metadata SET updated_at=? WHERE tenant_id=? AND issue_id=?`, now().UnixMilli(), tenantID, metadata.IssueID); err != nil {
+					log.Printf("[task-run-analytics] backoff ticket metadata %s: %v", metadata.IssueID, err)
+				}
 				return
 			}
 		}
