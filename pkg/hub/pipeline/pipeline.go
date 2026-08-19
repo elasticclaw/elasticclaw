@@ -302,9 +302,8 @@ type NotifyAction struct {
 	// Subject names what the message is about; templated. It is a semantic
 	// field: providers with a native subject line (email) use it there, and
 	// every other provider renders it inside its rich layout rather than
-	// dropping it — on Slack, setting Subject upgrades the message from a
-	// plain text line to the Block Kit attachment layout, with the subject on
-	// its own line under the text. Omit it to keep the plain rendering.
+	// dropping it — on Slack, the subject gets its own line under the text
+	// inside the Block Kit attachment every notify action now renders as.
 	Subject string `yaml:"subject,omitempty"`
 	// Severity controls provider-native emphasis (the colour stripe). It
 	// must be info, success, warning or error when set; the value is
