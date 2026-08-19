@@ -20,15 +20,15 @@ func TestAnalyticsRoutesRequireAppropriateAdminAccess(t *testing.T) {
 		strict bool
 	}{
 		{path: "/api/analytics/factories", strict: true},
-		{path: "/api/analytics/summary"},
+		{path: "/api/analytics/summary", strict: true},
 		{path: "/api/analytics/costs", strict: true},
 		{path: "/api/analytics/effectiveness", strict: true},
 		{path: "/api/analytics/cost-drivers", strict: true},
 		{path: "/api/analytics/general-stats", strict: true},
-		{path: "/api/analytics/filter-options"},
-		{path: "/api/analytics/runs"},
-		{path: "/api/analytics/runs/"},
-		{path: "/api/analytics/tickets"},
+		{path: "/api/analytics/filter-options", strict: true},
+		{path: "/api/analytics/runs", strict: true},
+		{path: "/api/analytics/runs/", strict: true},
+		{path: "/api/analytics/tickets", strict: true},
 		{path: "/api/factories/example/analytics", strict: true},
 	}
 	assertAnalyticsRouteTableMatchesRegistrations(t, routes)

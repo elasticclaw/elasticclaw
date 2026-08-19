@@ -159,7 +159,24 @@ func migrate(db *sql.DB) error {
 	// The PR watcher never polls claws in terminal/offline states. Legacy rows
 	// therefore cannot safely retain the historical default of "open". Preserve
 	// a known terminal task-run PR state when available; otherwise mark it unknown.
-	if _, err := db.Exec(`
+	// This backfill applies only to rows predating the state column, so record its
+	// completion transactionally and never rewrite PRs created after migration.
+	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS hub_migrations (name TEXT PRIMARY KEY, applied_at INTEGER NOT NULL)`); err != nil {
+		return fmt.Errorf("create migration markers: %w", err)
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin claw PR state backfill: %w", err)
+	}
+	defer tx.Rollback()
+	result, err := tx.Exec(`INSERT OR IGNORE INTO hub_migrations(name, applied_at) VALUES('claw_prs_state_backfill_v1', ?)`, now().UnixMilli())
+	if err != nil {
+		return fmt.Errorf("mark claw PR state backfill: %w", err)
+	}
+	if changed, err := result.RowsAffected(); err != nil {
+		return fmt.Errorf("inspect claw PR state backfill marker: %w", err)
+	} else if changed == 1 {
+		if _, err := tx.Exec(`
 		UPDATE claw_prs
 		SET state = COALESCE((
 			SELECT CASE WHEN trp.merged = 1 OR trp.state = 'closed' THEN 'closed' END
@@ -185,7 +202,11 @@ func migrate(db *sql.DB) error {
 		), 0)
 		WHERE state = 'open'
 		  AND EXISTS (SELECT 1 FROM claws c WHERE c.id = claw_prs.claw_id AND c.status IN ('deleted','error','offline'))`); err != nil && !isBenignAddColumnErr(err) {
-		return err
+			return fmt.Errorf("backfill claw PR state: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit claw PR state backfill: %w", err)
 	}
 	if err := addColumn(db, "messages", "user_login", `TEXT`); err != nil {
 		return err
@@ -359,7 +380,7 @@ func migrate(db *sql.DB) error {
 	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_volume_leases_volume_active ON volume_leases(volume_id, released_at, expires_at)`)
 	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_volume_leases_claw ON volume_leases(claw_id, released_at)`)
 
-	_, err := db.Exec(`
+	_, err = db.Exec(`
 	CREATE TABLE IF NOT EXISTS tenants (
 		id        TEXT PRIMARY KEY,
 		name      TEXT NOT NULL,
@@ -677,7 +698,7 @@ func migrate(db *sql.DB) error {
 	CREATE INDEX IF NOT EXISTS idx_task_run_summaries_model ON task_run_summaries(tenant_id, model, started_at DESC);
 	CREATE INDEX IF NOT EXISTS idx_task_run_summaries_repo ON task_run_summaries(tenant_id, repo, started_at DESC);
 	CREATE INDEX IF NOT EXISTS idx_task_run_summaries_timeout ON task_run_summaries(tenant_id, timeout_at);
-	CREATE INDEX IF NOT EXISTS idx_task_run_summaries_ticket_page ON task_run_summaries(tenant_id, issue_id, started_at DESC, issue_created_at DESC);
+	CREATE INDEX IF NOT EXISTS idx_task_run_summaries_ticket_page ON task_run_summaries(tenant_id, status, requires_pr, analytics_enabled, started_at DESC, issue_id, issue_created_at DESC);
 
 	CREATE TABLE IF NOT EXISTS hub_templates (
 		name       TEXT PRIMARY KEY,
@@ -883,6 +904,11 @@ func migrate(db *sql.DB) error {
 	if err := backfillTaskRunReadyAtV1(db); err != nil {
 		return err
 	}
+	// The dashboard filters ticket pages by a started-at window. Keep that
+	// window adjacent to tenant_id so SQLite can seek it before grouping tickets.
+	if _, err := db.Exec(`DROP INDEX IF EXISTS idx_task_run_summaries_ticket_page; CREATE INDEX idx_task_run_summaries_ticket_page ON task_run_summaries(tenant_id, status, requires_pr, analytics_enabled, started_at DESC, issue_id, issue_created_at DESC)`); err != nil {
+		return fmt.Errorf("create ticket page index: %w", err)
+	}
 	for _, p := range []struct {
 		model                          string
 		in, out, cacheRead, cacheWrite float64
@@ -942,7 +968,7 @@ func rebuildTaskRunSummariesStatusV3(db *sql.DB) error {
 		CREATE INDEX idx_task_run_summaries_model ON task_run_summaries(tenant_id, model, started_at DESC);
 		CREATE INDEX idx_task_run_summaries_repo ON task_run_summaries(tenant_id, repo, started_at DESC);
 		CREATE INDEX idx_task_run_summaries_timeout ON task_run_summaries(tenant_id, timeout_at);
-		CREATE INDEX idx_task_run_summaries_ticket_page ON task_run_summaries(tenant_id, issue_id, started_at DESC, issue_created_at DESC)`); err != nil {
+		CREATE INDEX idx_task_run_summaries_ticket_page ON task_run_summaries(tenant_id, status, requires_pr, analytics_enabled, started_at DESC, issue_id, issue_created_at DESC)`); err != nil {
 		return fmt.Errorf("replace task run summaries v3: %w", err)
 	}
 	return tx.Commit()

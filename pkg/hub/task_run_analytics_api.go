@@ -11,8 +11,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	"github.com/elasticclaw/elasticclaw/pkg/types"
 )
 
 const taskRunAnalyticsDefaultLimit = 50
@@ -357,12 +355,12 @@ func (s *Server) handleTaskRunAnalyticsSummary(w http.ResponseWriter, r *http.Re
 		jsonError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	response, err := s.readTaskRunAnalyticsSummaryForRequest(filters, githubLoginFromContext(r.Context()))
+	response, err := s.readTaskRunAnalyticsSummary(filters)
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, "db error")
 		return
 	}
-	prior, err := s.readTaskRunAnalyticsSummaryForRequest(taskRunAnalyticsPriorFilters(filters, time.Now().UTC()), githubLoginFromContext(r.Context()))
+	prior, err := s.readTaskRunAnalyticsSummary(taskRunAnalyticsPriorFilters(filters, time.Now().UTC()))
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, "db error")
 		return
@@ -391,7 +389,7 @@ func (s *Server) handleTaskRunAnalyticsRuns(w http.ResponseWriter, r *http.Reque
 		jsonError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	runs, nextCursor, err := s.readTaskRunAnalyticsRunsForRequest(filters, limit, cursorStartedAt, cursorRunID, githubLoginFromContext(r.Context()))
+	runs, nextCursor, err := s.readTaskRunAnalyticsRuns(filters, limit, cursorStartedAt, cursorRunID)
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, "db error")
 		return
@@ -436,9 +434,6 @@ func (s *Server) handleTaskRunAnalyticsRunSubresource(w http.ResponseWriter, r *
 	}
 	if !found {
 		jsonError(w, http.StatusNotFound, "not found")
-		return
-	}
-	if !s.canViewTaskRunAnalyticsRun(w, r, tenantID, run.ClawID) {
 		return
 	}
 	if len(parts) == 1 {
@@ -491,7 +486,7 @@ func (s *Server) handleTaskRunAnalyticsFilterOptions(w http.ResponseWriter, r *h
 		jsonError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	response, err := s.readTaskRunAnalyticsFilterOptionsForRequest(tenantFromCtx(r), githubLoginFromContext(r.Context()))
+	response, err := s.readTaskRunAnalyticsFilterOptions(tenantFromCtx(r))
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, "db error")
 		return
@@ -678,236 +673,6 @@ func (s *Server) readTaskRunAnalyticsRuns(filters taskRunAnalyticsFilters, limit
 	return runs, nextCursor, nil
 }
 
-func (s *Server) readTaskRunAnalyticsRunsForRequest(filters taskRunAnalyticsFilters, limit int, cursorStartedAt int64, cursorRunID, githubLogin string) ([]taskRunAnalyticsRunView, string, error) {
-	accessCfg := s.taskRunAnalyticsViewACL(githubLogin)
-	if accessCfg == nil {
-		return s.readTaskRunAnalyticsRuns(filters, limit, cursorStartedAt, cursorRunID)
-	}
-
-	visible := make([]taskRunAnalyticsRunView, 0, limit+1)
-	nextCursor := ""
-	err := s.forEachViewableTaskRunAnalyticsRun(filters, cursorStartedAt, cursorRunID, githubLogin, accessCfg, func(run taskRunAnalyticsRunView) bool {
-		visible = append(visible, run)
-		if len(visible) == limit+1 {
-			last := visible[limit-1]
-			visible = visible[:limit]
-			nextCursor = encodeTaskRunAnalyticsCursor(last.StartedAt, last.RunID)
-			return false
-		}
-		return true
-	})
-	if err != nil {
-		return nil, "", err
-	}
-	return visible, nextCursor, nil
-}
-
-// taskRunAnalyticsViewACL returns the access config when the request is subject
-// to tag-based view filtering, or nil when the caller sees all tenant runs
-// (token auth, or no ViewRequiresTags configured).
-func (s *Server) taskRunAnalyticsViewACL(githubLogin string) *types.AccessConfig {
-	if githubLogin == "" {
-		return nil
-	}
-	accessCfg := s.taskRunAnalyticsAccessConfig()
-	if accessCfg == nil || len(accessCfg.ViewRequiresTags) == 0 {
-		return nil
-	}
-	return accessCfg
-}
-
-// forEachViewableTaskRunAnalyticsRun streams matching runs in batches, resolves
-// claw tags per batch, and invokes visit for each run the user can view.
-// visit returns false to stop early.
-func (s *Server) forEachViewableTaskRunAnalyticsRun(filters taskRunAnalyticsFilters, cursorStartedAt int64, cursorRunID, githubLogin string, accessCfg *types.AccessConfig, visit func(taskRunAnalyticsRunView) bool) error {
-	const batchSize = taskRunAnalyticsMaxLimit
-	batchStartedAt, batchRunID := cursorStartedAt, cursorRunID
-	for {
-		batch, batchNextCursor, err := s.readTaskRunAnalyticsRuns(filters, batchSize, batchStartedAt, batchRunID)
-		if err != nil {
-			return err
-		}
-		clawTags, err := s.readTaskRunAnalyticsClawTags(filters.TenantID, batch)
-		if err != nil {
-			return err
-		}
-		for _, run := range batch {
-			tags, found := clawTags[run.ClawID]
-			if !found || !canViewClaw(accessCfg, githubLogin, tags) {
-				continue
-			}
-			if !visit(run) {
-				return nil
-			}
-		}
-		if batchNextCursor == "" {
-			return nil
-		}
-		batchStartedAt, batchRunID, err = decodeTaskRunAnalyticsCursor(batchNextCursor)
-		if err != nil {
-			return err
-		}
-	}
-}
-
-// readTaskRunAnalyticsSummaryForRequest aggregates only over runs the caller can
-// view: for GitHub-OAuth callers under a tag ACL the totals, breakdowns, and PR
-// KPIs are computed from the ACL-filtered run stream instead of tenant-wide SQL.
-func (s *Server) readTaskRunAnalyticsSummaryForRequest(filters taskRunAnalyticsFilters, githubLogin string) (taskRunAnalyticsSummaryResponse, error) {
-	accessCfg := s.taskRunAnalyticsViewACL(githubLogin)
-	if accessCfg == nil {
-		return s.readTaskRunAnalyticsSummary(filters)
-	}
-	response := taskRunAnalyticsSummaryResponse{
-		ByStatus:         map[string]int{},
-		WarningBreakdown: map[string]int{},
-		FailureBreakdown: map[string]int{},
-	}
-	err := s.forEachViewableTaskRunAnalyticsRun(filters, 0, "", githubLogin, accessCfg, func(run taskRunAnalyticsRunView) bool {
-		response.TotalRuns++
-		response.HumanInteractions += run.HumanInteractionCount
-		response.PRCounts.Total += run.PRCount
-		response.PRCounts.Open += run.OpenPRCount
-		response.PRCounts.Merged += run.MergedPRCount
-		response.PRCounts.Closed += run.ClosedPRCount
-		if run.Status != "" {
-			response.ByStatus[run.Status]++
-		}
-		if run.FailureType != "" {
-			response.FailureBreakdown[run.FailureType]++
-		}
-		for _, warningType := range run.WarningTypes {
-			if warningType != "" {
-				response.WarningBreakdown[warningType]++
-			}
-		}
-		return true
-	})
-	return response, err
-}
-
-// readTaskRunAnalyticsFilterOptionsForRequest returns distinct filter values
-// computed only from runs the caller can view, so a restricted OAuth user does
-// not learn workspace/factory/repo/model names from runs hidden by the ACL.
-func (s *Server) readTaskRunAnalyticsFilterOptionsForRequest(tenantID, githubLogin string) (taskRunAnalyticsFilterOptionsResponse, error) {
-	accessCfg := s.taskRunAnalyticsViewACL(githubLogin)
-	if accessCfg == nil {
-		return s.readTaskRunAnalyticsFilterOptions(tenantID)
-	}
-	sets := map[string]map[string]bool{}
-	add := func(set string, value string) {
-		if value == "" {
-			return
-		}
-		if sets[set] == nil {
-			sets[set] = map[string]bool{}
-		}
-		sets[set][value] = true
-	}
-	// Same eligibility clause as the SQL variant
-	// (analytics_enabled=1 AND requires_pr=1).
-	eligible := true
-	filters := taskRunAnalyticsFilters{TenantID: tenantID, RequiresPR: &eligible, AnalyticsEnabled: &eligible}
-	err := s.forEachViewableTaskRunAnalyticsRun(filters, 0, "", githubLogin, accessCfg, func(run taskRunAnalyticsRunView) bool {
-		add("workspaces", run.WorkspaceName)
-		add("workflows", run.WorkflowName)
-		add("factories", run.FactoryName)
-		add("integrations", run.Integration)
-		add("repos", run.Repo)
-		add("models", run.Model)
-		add("statuses", run.Status)
-		add("failureTypes", run.FailureType)
-		for _, warningType := range run.WarningTypes {
-			add("warningTypes", warningType)
-		}
-		return true
-	})
-	if err != nil {
-		return taskRunAnalyticsFilterOptionsResponse{}, err
-	}
-	return taskRunAnalyticsFilterOptionsResponse{
-		Workspaces:   sortedTaskRunAnalyticsValues(sets["workspaces"]),
-		Workflows:    sortedTaskRunAnalyticsValues(sets["workflows"]),
-		Factories:    sortedTaskRunAnalyticsValues(sets["factories"]),
-		Integrations: sortedTaskRunAnalyticsValues(sets["integrations"]),
-		Repos:        sortedTaskRunAnalyticsValues(sets["repos"]),
-		Models:       sortedTaskRunAnalyticsValues(sets["models"]),
-		Statuses:     sortedTaskRunAnalyticsValues(sets["statuses"]),
-		WarningTypes: sortedTaskRunAnalyticsValues(sets["warningTypes"]),
-		FailureTypes: sortedTaskRunAnalyticsValues(sets["failureTypes"]),
-	}, nil
-}
-
-func sortedTaskRunAnalyticsValues(set map[string]bool) []string {
-	values := make([]string, 0, len(set))
-	for value := range set {
-		values = append(values, value)
-	}
-	sort.Strings(values)
-	return values
-}
-
-func (s *Server) readTaskRunAnalyticsClawTags(tenantID string, runs []taskRunAnalyticsRunView) (map[string][]string, error) {
-	clawIDs := make([]string, 0, len(runs))
-	seen := make(map[string]bool, len(runs))
-	for _, run := range runs {
-		if run.ClawID == "" || seen[run.ClawID] {
-			continue
-		}
-		seen[run.ClawID] = true
-		clawIDs = append(clawIDs, run.ClawID)
-	}
-	tagsByClawID := make(map[string][]string, len(clawIDs))
-	if len(clawIDs) == 0 {
-		return tagsByClawID, nil
-	}
-	if len(clawIDs) > 500 {
-		for start := 0; start < len(clawIDs); start += 500 {
-			end := start + 500
-			if end > len(clawIDs) {
-				end = len(clawIDs)
-			}
-			chunkRuns := make([]taskRunAnalyticsRunView, len(clawIDs[start:end]))
-			for i, id := range clawIDs[start:end] {
-				chunkRuns[i].ClawID = id
-			}
-			chunk, err := s.readTaskRunAnalyticsClawTags(tenantID, chunkRuns)
-			if err != nil {
-				return nil, err
-			}
-			for id, tags := range chunk {
-				tagsByClawID[id] = tags
-			}
-		}
-		return tagsByClawID, nil
-	}
-
-	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(clawIDs)), ",")
-	args := make([]any, 0, len(clawIDs)+1)
-	args = append(args, tenantID)
-	for _, clawID := range clawIDs {
-		args = append(args, clawID)
-	}
-	rows, err := s.db.Query(`
-		SELECT id, COALESCE(tags,'[]')
-		  FROM claws
-		 WHERE tenant_id=? AND id IN (`+placeholders+`)`, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var clawID, tagsJSON string
-		if err := rows.Scan(&clawID, &tagsJSON); err != nil {
-			return nil, err
-		}
-		var tags []string
-		_ = json.Unmarshal([]byte(tagsJSON), &tags)
-		tagsByClawID[clawID] = tags
-	}
-	return tagsByClawID, rows.Err()
-}
-
 func (s *Server) readTaskRunAnalyticsRun(tenantID, runID string) (taskRunAnalyticsRunView, bool, error) {
 	rows, err := s.db.Query(`
 		SELECT `+taskRunAnalyticsRunColumns()+`
@@ -1034,6 +799,16 @@ func (s *Server) readTaskRunAnalyticsEvents(tenantID, runID string) ([]taskRunAn
 }
 
 func (s *Server) readTaskRunAnalyticsEventsForRuns(tenantID string, runIDs []string) (map[string][]taskRunAnalyticsEventView, error) {
+	return s.readTaskRunAnalyticsEventsForRunsWithDetail(tenantID, runIDs, true)
+}
+
+// readTaskRunAnalyticsEventsForRunsForTickets avoids loading event detail JSON:
+// ticket story and timing use only event identity, type, time, and actor fields.
+func (s *Server) readTaskRunAnalyticsEventsForRunsForTickets(tenantID string, runIDs []string) (map[string][]taskRunAnalyticsEventView, error) {
+	return s.readTaskRunAnalyticsEventsForRunsWithDetail(tenantID, runIDs, false)
+}
+
+func (s *Server) readTaskRunAnalyticsEventsForRunsWithDetail(tenantID string, runIDs []string, includeDetail bool) (map[string][]taskRunAnalyticsEventView, error) {
 	eventsByRun := map[string][]taskRunAnalyticsEventView{}
 	if len(runIDs) == 0 {
 		return eventsByRun, nil
@@ -1044,7 +819,7 @@ func (s *Server) readTaskRunAnalyticsEventsForRuns(tenantID string, runIDs []str
 			if end > len(runIDs) {
 				end = len(runIDs)
 			}
-			chunk, err := s.readTaskRunAnalyticsEventsForRuns(tenantID, runIDs[start:end])
+			chunk, err := s.readTaskRunAnalyticsEventsForRunsWithDetail(tenantID, runIDs[start:end], includeDetail)
 			if err != nil {
 				return nil, err
 			}
@@ -1063,11 +838,14 @@ func (s *Server) readTaskRunAnalyticsEventsForRuns(tenantID string, runIDs []str
 	// Ticket timing uses every event, not only events with a story label. In
 	// particular, ci_failed, agent_idle, pr_replaced, and human_* events can
 	// be the most recent activity for a ticket.
+	columns := `run_id, id, event_type, event_time, actor_login, actor_display_name`
+	if includeDetail {
+		columns = `run_id, id, attempt_id, event_key, source, source_event_id, source_delivery_id, event_type,
+	       event_time, observed_at, actor_type, actor_id, actor_login, actor_display_name,
+	       interaction_role, target_type, target_id, target_url, warning_type, failure_type, detail, created_at`
+	}
 	rows, err := s.db.Query(`
-		SELECT run_id, id, attempt_id, event_key, source, source_event_id, source_delivery_id, event_type,
-		       event_time, observed_at, actor_type, actor_id, actor_login, actor_display_name,
-		       interaction_role, target_type, target_id, target_url, warning_type, failure_type,
-		       detail, created_at
+		SELECT `+columns+`
 		  FROM task_run_events
 		 WHERE tenant_id=? AND run_id IN (`+placeholders+`)`, args...)
 	if err != nil {
@@ -1077,11 +855,20 @@ func (s *Server) readTaskRunAnalyticsEventsForRuns(tenantID string, runIDs []str
 	for rows.Next() {
 		var runID, detailJSON string
 		var event taskRunAnalyticsEventView
-		if err := rows.Scan(&runID, &event.ID, &event.AttemptID, &event.EventKey, &event.Source, &event.SourceEventID, &event.SourceDeliveryID, &event.EventType, &event.EventTime, &event.ObservedAt, &event.ActorType, &event.ActorID, &event.ActorLogin, &event.ActorDisplayName, &event.InteractionRole, &event.TargetType, &event.TargetID, &event.TargetURL, &event.WarningType, &event.FailureType, &detailJSON, &event.CreatedAt); err != nil {
+		if includeDetail {
+			scanArgs := []any{&runID, &event.ID, &event.AttemptID, &event.EventKey, &event.Source, &event.SourceEventID, &event.SourceDeliveryID, &event.EventType, &event.EventTime, &event.ObservedAt, &event.ActorType, &event.ActorID, &event.ActorLogin, &event.ActorDisplayName, &event.InteractionRole, &event.TargetType, &event.TargetID, &event.TargetURL, &event.WarningType, &event.FailureType}
+			scanArgs = append(scanArgs, &detailJSON)
+			scanArgs = append(scanArgs, &event.CreatedAt)
+			if err := rows.Scan(scanArgs...); err != nil {
+				return nil, err
+			}
+		} else if err := rows.Scan(&runID, &event.ID, &event.EventType, &event.EventTime, &event.ActorLogin, &event.ActorDisplayName); err != nil {
 			return nil, err
 		}
-		event.Detail = map[string]any{}
-		if detailJSON != "" {
+		if includeDetail {
+			event.Detail = map[string]any{}
+		}
+		if includeDetail && detailJSON != "" {
 			if err := json.Unmarshal([]byte(detailJSON), &event.Detail); err != nil {
 				log.Printf("[task-run-analytics] failed to unmarshal event detail for %s: %v", event.ID, err)
 			}
@@ -1096,10 +883,13 @@ func (s *Server) readTaskRunAnalyticsEventsForRuns(tenantID string, runIDs []str
 			if events[i].EventTime != events[j].EventTime {
 				return events[i].EventTime < events[j].EventTime
 			}
-			if events[i].ObservedAt != events[j].ObservedAt {
+			if includeDetail && events[i].ObservedAt != events[j].ObservedAt {
 				return events[i].ObservedAt < events[j].ObservedAt
 			}
-			return events[i].EventKey < events[j].EventKey
+			if includeDetail {
+				return events[i].EventKey < events[j].EventKey
+			}
+			return events[i].ID < events[j].ID
 		})
 	}
 	return eventsByRun, nil
@@ -1262,55 +1052,6 @@ func (s *Server) readTaskRunAnalyticsOutputs(tenantID, runID, runClawID string) 
 		outputs = append(outputs, output)
 	}
 	return outputs, rows.Err()
-}
-
-func (s *Server) canViewTaskRunAnalyticsRun(w http.ResponseWriter, r *http.Request, tenantID, clawID string) bool {
-	githubLogin := githubLoginFromContext(r.Context())
-	if githubLogin == "" {
-		return true
-	}
-	allowed, found, err := s.taskRunAnalyticsClawAccess(tenantID, clawID, githubLogin)
-	if err != nil {
-		jsonError(w, http.StatusInternalServerError, "db error")
-		return false
-	}
-	if !found {
-		jsonError(w, http.StatusNotFound, "not found")
-		return false
-	}
-	if !allowed {
-		jsonError(w, http.StatusForbidden, "forbidden")
-		return false
-	}
-	return true
-}
-
-func (s *Server) taskRunAnalyticsClawAccess(tenantID, clawID, githubLogin string) (allowed, found bool, err error) {
-	accessCfg := s.taskRunAnalyticsAccessConfig()
-	if accessCfg == nil || len(accessCfg.ViewRequiresTags) == 0 {
-		return true, true, nil
-	}
-
-	var tagsJSON string
-	err = s.db.QueryRow(`SELECT COALESCE(tags,'[]') FROM claws WHERE id=? AND tenant_id=?`, clawID, tenantID).Scan(&tagsJSON)
-	if err == sql.ErrNoRows {
-		return false, false, nil
-	}
-	if err != nil {
-		return false, false, err
-	}
-	var clawTags []string
-	_ = json.Unmarshal([]byte(tagsJSON), &clawTags)
-	return canViewClaw(accessCfg, githubLogin, clawTags), true, nil
-}
-
-func (s *Server) taskRunAnalyticsAccessConfig() *types.AccessConfig {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	if s.hubCfg.Auth != nil {
-		return s.hubCfg.Auth.Access
-	}
-	return nil
 }
 
 func (s *Server) readTaskRunAnalyticsFilterOptions(tenantID string) (taskRunAnalyticsFilterOptionsResponse, error) {

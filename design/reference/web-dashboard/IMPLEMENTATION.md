@@ -17,6 +17,8 @@ Deliberate divergences from the kit must be listed in this file under "Accepted 
 - Charts: keep Recharts; move hardcoded hex series colors to `--chart-1..5` tokens; wrap in
   the new ChartCard anatomy (hairline header, body, mono stat line).
 - Analytics + tickets stay admin-only.
+- All `/api/analytics/*` routes (including summary, filter-options, runs, and tickets)
+  are strict admin-only; no tag-scoped analytics viewing exists.
 - Kill dead code: `TaskRunAnalyticsView` (extract still-used exports first).
 - Login: light restyle to kit aesthetics.
 - Single PR, atomic commits per phase, draft, assignee AnaBerg, merge (never rebase/force-push).
@@ -157,10 +159,8 @@ GATE 6: full-suite green + final visual pass + departures documented below.
   role"; port shows requester name only) — `tickets_api.go:396` notes neither
   Linear nor GitHub exposes a reliable requester-role field for us to surface,
   so this is a data-availability gap, not a rendering gap. Kept as-is.
-- ACL-scoped ticket pagination materializes at most 5,000 viewable runs per
-  request because tag permissions are evaluated outside SQL. Larger restricted
-  viewer windows return a truncated response rather than being retained
-  unboundedly.
+- Admin/analytics routes accept header credentials only (no `?token=` query-string
+  fallback), by deliberate round-2 security decision.
 - Heatmap grid anchors on a Monday with a partial last column (GitHub-style). The kit
   fixture anchors 363+mondayIndex(end) days back from the end day, which lands the first
   cell on the end's own weekday and drifts every row off its M-S label; diverged for

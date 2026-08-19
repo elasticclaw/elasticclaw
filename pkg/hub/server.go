@@ -31,6 +31,8 @@ import (
 	"syscall"
 	"time"
 
+	"golang.org/x/sync/singleflight"
+
 	"github.com/elasticclaw/elasticclaw/internal/webui"
 
 	"github.com/elasticclaw/elasticclaw/pkg/cliversion"
@@ -78,11 +80,10 @@ type Server struct {
 
 	// ticketAnalyticsCacheMu protects short-lived ticket analytics results. The
 	// ticket endpoint is refreshed frequently and its aggregates are expensive.
-	ticketAnalyticsCacheMu       sync.Mutex
-	ticketAnalyticsTotalCache    map[string]taskRunAnalyticsTicketTotalCacheEntry
-	ticketAnalyticsACLGroupCache map[string]taskRunAnalyticsTicketACLGroupCacheEntry
-	ticketAnalyticsTotalQueries  int
-	ticketAnalyticsACLStreams    int
+	ticketAnalyticsCacheMu      sync.Mutex
+	ticketAnalyticsTotalCache   map[string]taskRunAnalyticsTicketTotalCacheEntry
+	ticketAnalyticsTotalGroup   singleflight.Group
+	ticketAnalyticsTotalQueries int
 
 	// ghTokenCache holds GitHub App installation tokens until shortly before
 	// they expire, keyed by requested repo access.
@@ -595,15 +596,15 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/factories/{name}/analytics", s.withStrictAdminAuth(s.handleFactoryAnalytics))                 // GET factory analytics
 	mux.HandleFunc("/api/factories", s.withAdminForMethods(s.handleFactoriesCRUD, http.MethodPost, http.MethodDelete)) // factory CRUD (GET list, POST push)
 	mux.HandleFunc("/api/analytics/factories", s.withStrictAdminAuth(s.handleAllFactoriesAnalytics))                   // GET all factories analytics
-	mux.HandleFunc("/api/analytics/summary", s.withAdminAuth(s.handleTaskRunAnalyticsSummary))
+	mux.HandleFunc("/api/analytics/summary", s.withStrictAdminAuth(s.handleTaskRunAnalyticsSummary))
 	mux.HandleFunc("/api/analytics/costs", s.withStrictAdminAuth(s.handleTaskRunAnalyticsCosts))
 	mux.HandleFunc("/api/analytics/effectiveness", s.withStrictAdminAuth(s.handleTaskRunAnalyticsEffectiveness))
 	mux.HandleFunc("/api/analytics/cost-drivers", s.withStrictAdminAuth(s.handleTaskRunAnalyticsCostDrivers))
 	mux.HandleFunc("/api/analytics/general-stats", s.withStrictAdminAuth(s.handleTaskRunAnalyticsGeneralStats))
-	mux.HandleFunc("/api/analytics/filter-options", s.withAdminAuth(s.handleTaskRunAnalyticsFilterOptions))
-	mux.HandleFunc("/api/analytics/runs", s.withAdminAuth(s.handleTaskRunAnalyticsRuns))
-	mux.HandleFunc("/api/analytics/runs/", s.withAdminAuth(s.handleTaskRunAnalyticsRuns))
-	mux.HandleFunc("/api/analytics/tickets", s.withAdminAuth(s.handleTaskRunAnalyticsTickets))
+	mux.HandleFunc("/api/analytics/filter-options", s.withStrictAdminAuth(s.handleTaskRunAnalyticsFilterOptions))
+	mux.HandleFunc("/api/analytics/runs", s.withStrictAdminAuth(s.handleTaskRunAnalyticsRuns))
+	mux.HandleFunc("/api/analytics/runs/", s.withStrictAdminAuth(s.handleTaskRunAnalyticsRuns))
+	mux.HandleFunc("/api/analytics/tickets", s.withStrictAdminAuth(s.handleTaskRunAnalyticsTickets))
 	mux.HandleFunc("/api/dependencies/status", s.withAuth(s.handleDependencyStatus))
 	mux.HandleFunc("/api/v2/workflow-runs/{runId}", s.withAuth(s.handleWorkflowV2Run))
 	mux.HandleFunc("/api/workspaces", s.withAdminForMethods(s.handleWorkspacesCRUD, http.MethodPost, http.MethodDelete)) // workspace CRUD
@@ -726,12 +727,7 @@ func (s *Server) withAdminAuth(next http.HandlerFunc) http.HandlerFunc {
 }
 
 // withStrictAdminAuth permits only administrators (or legacy tenant tokens).
-// Analytics routes are strict by default: /api/analytics/factories, costs,
-// effectiveness, cost-drivers, and general-stats, plus
-// /api/factories/{name}/analytics, use this wrapper. The tag-scoped bypass in
-// withAdminAuth is opt-in only for /api/analytics/summary, filter-options,
-// runs, runs/, and tickets, whose handlers call taskRunAnalyticsViewACL for
-// every returned row.
+// All analytics routes use this wrapper.
 func (s *Server) withStrictAdminAuth(next http.HandlerFunc) http.HandlerFunc {
 	return s.withAdminAuthMode(next, false)
 }

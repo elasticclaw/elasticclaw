@@ -10,24 +10,16 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/elasticclaw/elasticclaw/pkg/types"
 )
 
 var ticketMetadataEnrichment = make(chan struct{}, 32)
 var ticketMetadataInflight sync.Map
 
-const taskRunAnalyticsTicketCacheTTL = time.Minute
+const taskRunAnalyticsTicketCacheTTL = 5 * time.Minute
 const taskRunAnalyticsTicketCacheMaxEntries = 256
 
 type taskRunAnalyticsTicketTotalCacheEntry struct {
 	total     int
-	expiresAt time.Time
-}
-
-type taskRunAnalyticsTicketACLGroupCacheEntry struct {
-	groups    []taskRunAnalyticsTicketGroup
-	truncated bool
 	expiresAt time.Time
 }
 
@@ -131,7 +123,7 @@ func (s *Server) handleTaskRunAnalyticsTickets(w http.ResponseWriter, r *http.Re
 		return
 	}
 	limit := taskRunAnalyticsLimit(r.URL.Query().Get("limit"))
-	groups, total, truncated, err := s.readTaskRunAnalyticsTicketGroupsPage(filters, githubLoginFromContext(r.Context()), cursorAt, cursorIssueID, limit)
+	groups, total, truncated, err := s.readTaskRunAnalyticsTicketGroupsPage(filters, cursorAt, cursorIssueID, limit)
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, "db error")
 		return
@@ -162,7 +154,7 @@ func (s *Server) handleTaskRunAnalyticsTickets(w http.ResponseWriter, r *http.Re
 		jsonError(w, http.StatusInternalServerError, "db error")
 		return
 	}
-	eventsByRun, err := s.readTaskRunAnalyticsEventsForRuns(filters.TenantID, runIDs)
+	eventsByRun, err := s.readTaskRunAnalyticsEventsForRunsForTickets(filters.TenantID, runIDs)
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, "db error")
 		return
@@ -174,7 +166,7 @@ func (s *Server) handleTaskRunAnalyticsTickets(w http.ResponseWriter, r *http.Re
 	}
 	tickets := make([]taskRunAnalyticsTicketView, 0, len(groups))
 	for _, group := range groups {
-		ticket, err := s.buildTaskRunAnalyticsTicket(r.Context(), filters.TenantID, group.issueID, group.runs, attemptsByRun, prsByRun, eventsByRun, metadataByIssue[group.issueID])
+		ticket, err := s.buildTaskRunAnalyticsTicket(filters.TenantID, group.issueID, group.runs, attemptsByRun, prsByRun, eventsByRun, metadataByIssue[group.issueID])
 		if err != nil {
 			jsonError(w, http.StatusInternalServerError, "db error")
 			return
@@ -184,23 +176,7 @@ func (s *Server) handleTaskRunAnalyticsTickets(w http.ResponseWriter, r *http.Re
 	jsonOK(w, taskRunAnalyticsTicketsResponse{Tickets: tickets, NextCursor: nextCursor, Truncated: truncated, Limit: limit, Total: total})
 }
 
-func (s *Server) readTaskRunAnalyticsTicketGroupsPage(filters taskRunAnalyticsFilters, githubLogin string, cursorAt int64, cursorIssueID string, limit int) ([]taskRunAnalyticsTicketGroup, int, bool, error) {
-	// Restricted OAuth callers retain the established ACL stream; normal tenant reads are SQL paginated.
-	accessCfg := s.taskRunAnalyticsViewACL(githubLogin)
-	if accessCfg != nil {
-		groups, truncated, err := s.readTaskRunAnalyticsTicketGroups(filters, githubLogin, accessCfg)
-		if err != nil {
-			return nil, 0, false, err
-		}
-		// ACL totals count only tickets observed in the bounded materialized run
-		// window; unlike the SQL path, they are not a tenant-wide exact count.
-		total := len(groups)
-		start := 0
-		for start < len(groups) && cursorAt > 0 && (groups[start].cursorAt() > cursorAt || (groups[start].cursorAt() == cursorAt && groups[start].issueID >= cursorIssueID)) {
-			start++
-		}
-		return groups[start:], total, truncated, nil
-	}
+func (s *Server) readTaskRunAnalyticsTicketGroupsPage(filters taskRunAnalyticsFilters, cursorAt int64, cursorIssueID string, limit int) ([]taskRunAnalyticsTicketGroup, int, bool, error) {
 	where, args := taskRunAnalyticsSummaryWhere(filters)
 	total, err := s.readTaskRunAnalyticsTicketTotal(where, args)
 	if err != nil {
@@ -254,12 +230,18 @@ func (s *Server) readTaskRunAnalyticsTicketGroupsPage(filters taskRunAnalyticsFi
 	return taskRunAnalyticsTicketGroupsFromHydration(ids, runs), total, false, nil
 }
 
-func taskRunAnalyticsTicketCacheKey(where string, args []any, githubLogin string) string {
-	return fmt.Sprintf("%s|%#v|%s", where, args, githubLogin)
+func taskRunAnalyticsTicketCacheKey(where string, args []any) string {
+	quantized := append([]any(nil), args...)
+	for i, arg := range quantized {
+		if value, ok := arg.(int64); ok {
+			quantized[i] = value / int64(time.Minute/time.Millisecond) * int64(time.Minute/time.Millisecond)
+		}
+	}
+	return fmt.Sprintf("%s|%#v", where, quantized)
 }
 
 func (s *Server) readTaskRunAnalyticsTicketTotal(where string, args []any) (int, error) {
-	key := taskRunAnalyticsTicketCacheKey(where, args, "")
+	key := taskRunAnalyticsTicketCacheKey(where, args)
 	now := time.Now()
 	s.ticketAnalyticsCacheMu.Lock()
 	if entry, ok := s.ticketAnalyticsTotalCache[key]; ok && now.Before(entry.expiresAt) {
@@ -268,22 +250,38 @@ func (s *Server) readTaskRunAnalyticsTicketTotal(where string, args []any) (int,
 	}
 	s.ticketAnalyticsCacheMu.Unlock()
 
-	var total int
-	if err := s.db.QueryRow(`SELECT COUNT(DISTINCT issue_id) FROM task_run_summaries `+where+` AND issue_id != ''`, args...).Scan(&total); err != nil {
+	result, err, _ := s.ticketAnalyticsTotalGroup.Do(key, func() (any, error) {
+		now := time.Now()
+		s.ticketAnalyticsCacheMu.Lock()
+		if entry, ok := s.ticketAnalyticsTotalCache[key]; ok && now.Before(entry.expiresAt) {
+			s.ticketAnalyticsCacheMu.Unlock()
+			return entry.total, nil
+		}
+		s.ticketAnalyticsCacheMu.Unlock()
+
+		var total int
+		if err := s.db.QueryRow(`SELECT COUNT(DISTINCT issue_id) FROM task_run_summaries `+where+` AND issue_id != ''`, args...).Scan(&total); err != nil {
+			return 0, err
+		}
+		s.ticketAnalyticsCacheMu.Lock()
+		if s.ticketAnalyticsTotalCache == nil {
+			s.ticketAnalyticsTotalCache = map[string]taskRunAnalyticsTicketTotalCacheEntry{}
+		}
+		pruneTaskRunAnalyticsTicketTotalCache(s.ticketAnalyticsTotalCache, now)
+		if len(s.ticketAnalyticsTotalCache) >= taskRunAnalyticsTicketCacheMaxEntries {
+			evictOldestTaskRunAnalyticsTicketTotalCacheEntry(s.ticketAnalyticsTotalCache)
+		}
+		// Ticket rows are always freshly queried. Total is only a UI caption, so
+		// bounded staleness avoids write-path coupling for this aggregate.
+		s.ticketAnalyticsTotalCache[key] = taskRunAnalyticsTicketTotalCacheEntry{total: total, expiresAt: now.Add(taskRunAnalyticsTicketCacheTTL)}
+		s.ticketAnalyticsTotalQueries++
+		s.ticketAnalyticsCacheMu.Unlock()
+		return total, nil
+	})
+	if err != nil {
 		return 0, err
 	}
-	s.ticketAnalyticsCacheMu.Lock()
-	if s.ticketAnalyticsTotalCache == nil {
-		s.ticketAnalyticsTotalCache = map[string]taskRunAnalyticsTicketTotalCacheEntry{}
-	}
-	pruneTaskRunAnalyticsTicketTotalCache(s.ticketAnalyticsTotalCache, now)
-	if len(s.ticketAnalyticsTotalCache) >= taskRunAnalyticsTicketCacheMaxEntries {
-		evictOldestTaskRunAnalyticsTicketTotalCacheEntry(s.ticketAnalyticsTotalCache)
-	}
-	s.ticketAnalyticsTotalCache[key] = taskRunAnalyticsTicketTotalCacheEntry{total: total, expiresAt: now.Add(taskRunAnalyticsTicketCacheTTL)}
-	s.ticketAnalyticsTotalQueries++
-	s.ticketAnalyticsCacheMu.Unlock()
-	return total, nil
+	return result.(int), nil
 }
 
 func pruneTaskRunAnalyticsTicketTotalCache(cache map[string]taskRunAnalyticsTicketTotalCacheEntry, now time.Time) {
@@ -361,104 +359,7 @@ func (group taskRunAnalyticsTicketGroup) cursorAt() int64 {
 	return 1
 }
 
-const taskRunAnalyticsTicketACLMaxRuns = 5_000
-
-// readTaskRunAnalyticsTicketGroups loads only the run data needed to group and
-// page tickets. Full ticket expansion happens only after pagination. ACL-backed
-// reads cannot express tag permissions in SQL, so cap their materialized run
-// window rather than allowing a restricted request to retain an unbounded set.
-func (s *Server) readTaskRunAnalyticsTicketGroups(filters taskRunAnalyticsFilters, githubLogin string, accessCfg *types.AccessConfig) ([]taskRunAnalyticsTicketGroup, bool, error) {
-	where, args := taskRunAnalyticsSummaryWhere(filters)
-	key := taskRunAnalyticsTicketCacheKey(where, args, githubLogin)
-	now := time.Now()
-	s.ticketAnalyticsCacheMu.Lock()
-	if entry, ok := s.ticketAnalyticsACLGroupCache[key]; ok && now.Before(entry.expiresAt) {
-		s.ticketAnalyticsCacheMu.Unlock()
-		return cloneTaskRunAnalyticsTicketGroups(entry.groups), entry.truncated, nil
-	}
-	s.ticketAnalyticsCacheMu.Unlock()
-
-	groups := map[string][]taskRunAnalyticsRunView{}
-	materializedRuns := 0
-	truncated := false
-	addRun := func(run taskRunAnalyticsRunView) bool {
-		if materializedRuns >= taskRunAnalyticsTicketACLMaxRuns {
-			truncated = true
-			return false
-		}
-		if run.IssueID != "" {
-			groups[run.IssueID] = append(groups[run.IssueID], run)
-			materializedRuns++
-		}
-		return true
-	}
-	err := s.forEachViewableTaskRunAnalyticsRun(filters, 0, "", githubLogin, accessCfg, addRun)
-	if err != nil {
-		return nil, false, err
-	}
-	tickets := make([]taskRunAnalyticsTicketGroup, 0, len(groups))
-	for issueID, runs := range groups {
-		sort.Slice(runs, func(i, j int) bool { return runs[i].StartedAt < runs[j].StartedAt })
-		var reportedAt int64
-		for _, run := range runs {
-			if run.IssueCreatedAt > 0 && (reportedAt == 0 || run.IssueCreatedAt < reportedAt) {
-				reportedAt = run.IssueCreatedAt
-			}
-		}
-		tickets = append(tickets, taskRunAnalyticsTicketGroup{issueID: issueID, runs: runs, reportedAt: reportedAt})
-	}
-	sort.Slice(tickets, func(i, j int) bool {
-		left, right := tickets[i].cursorAt(), tickets[j].cursorAt()
-		if left == right {
-			return tickets[i].issueID > tickets[j].issueID
-		}
-		return left > right
-	})
-	s.ticketAnalyticsCacheMu.Lock()
-	if s.ticketAnalyticsACLGroupCache == nil {
-		s.ticketAnalyticsACLGroupCache = map[string]taskRunAnalyticsTicketACLGroupCacheEntry{}
-	}
-	pruneTaskRunAnalyticsTicketACLGroupCache(s.ticketAnalyticsACLGroupCache, now)
-	if len(s.ticketAnalyticsACLGroupCache) >= taskRunAnalyticsTicketCacheMaxEntries {
-		evictOldestTaskRunAnalyticsTicketACLGroupCacheEntry(s.ticketAnalyticsACLGroupCache)
-	}
-	s.ticketAnalyticsACLGroupCache[key] = taskRunAnalyticsTicketACLGroupCacheEntry{groups: cloneTaskRunAnalyticsTicketGroups(tickets), truncated: truncated, expiresAt: now.Add(taskRunAnalyticsTicketCacheTTL)}
-	s.ticketAnalyticsACLStreams++
-	s.ticketAnalyticsCacheMu.Unlock()
-	return tickets, truncated, nil
-}
-
-func pruneTaskRunAnalyticsTicketACLGroupCache(cache map[string]taskRunAnalyticsTicketACLGroupCacheEntry, now time.Time) {
-	for key, entry := range cache {
-		if !now.Before(entry.expiresAt) {
-			delete(cache, key)
-		}
-	}
-}
-
-func evictOldestTaskRunAnalyticsTicketACLGroupCacheEntry(cache map[string]taskRunAnalyticsTicketACLGroupCacheEntry) {
-	var oldestKey string
-	var oldestExpiry time.Time
-	for key, entry := range cache {
-		if oldestKey == "" || entry.expiresAt.Before(oldestExpiry) {
-			oldestKey, oldestExpiry = key, entry.expiresAt
-		}
-	}
-	delete(cache, oldestKey)
-}
-
-func cloneTaskRunAnalyticsTicketGroups(groups []taskRunAnalyticsTicketGroup) []taskRunAnalyticsTicketGroup {
-	cloned := make([]taskRunAnalyticsTicketGroup, len(groups))
-	for i, group := range groups {
-		cloned[i] = group
-		cloned[i].runs = append([]taskRunAnalyticsRunView(nil), group.runs...)
-	}
-	return cloned
-}
-
-func (s *Server) buildTaskRunAnalyticsTicket(ctx context.Context, tenantID, issueID string, runs []taskRunAnalyticsRunView, attemptsByRun map[string][]taskRunAnalyticsAttemptView, prsByRun map[string][]taskRunAnalyticsPRView, eventsByRun map[string][]taskRunAnalyticsEventView, metadata taskRunAnalyticsTicketMetadata) (taskRunAnalyticsTicketView, error) {
-	_ = ctx
-	_ = tenantID
+func (s *Server) buildTaskRunAnalyticsTicket(tenantID, issueID string, runs []taskRunAnalyticsRunView, attemptsByRun map[string][]taskRunAnalyticsAttemptView, prsByRun map[string][]taskRunAnalyticsPRView, eventsByRun map[string][]taskRunAnalyticsEventView, metadata taskRunAnalyticsTicketMetadata) (taskRunAnalyticsTicketView, error) {
 	sort.Slice(runs, func(i, j int) bool { return runs[i].StartedAt < runs[j].StartedAt })
 	ticket := taskRunAnalyticsTicketView{IssueID: issueID, IssueTitle: runs[0].IssueTitle, Source: runs[0].Integration, Repo: runs[0].Repo, WorkflowName: runs[0].WorkflowName, WorkspaceName: runs[0].WorkspaceName, RunIDs: []string{}, Runs: []taskRunAnalyticsTicketRunSummary{}, PRs: []taskRunAnalyticsTicketPRView{}, Story: []taskRunAnalyticsTicketStoryEntry{}}
 	events := []taskRunAnalyticsTicketStoryEntry{}
