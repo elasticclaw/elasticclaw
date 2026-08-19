@@ -51,11 +51,13 @@ export function useNowMinuteTick(active: boolean): number {
     const listener = () => setNow(sharedMinuteNow)
     minuteListeners.add(listener)
     if (!sharedMinuteTimer) {
+      sharedMinuteNow = Date.now()
       sharedMinuteTimer = window.setInterval(() => {
         sharedMinuteNow = Date.now()
         minuteListeners.forEach((notify) => notify())
       }, 60_000)
     }
+    listener()
     return () => {
       minuteListeners.delete(listener)
       if (minuteListeners.size === 0 && sharedMinuteTimer) {

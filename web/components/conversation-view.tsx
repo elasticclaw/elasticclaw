@@ -129,15 +129,22 @@ function fetchCachedClawPRs(clawId: string) {
 function useClawPRs(clawId: string, enabled: boolean) {
   const [prs, setPrs] = useState<ClawPR[]>(() => clawPRCache.get(clawId) ?? [])
   const [hasLoaded, setHasLoaded] = useState(() => clawPRCache.has(clawId))
-
-  useEffect(() => {
+  const [loadedClawId, setLoadedClawId] = useState(clawId)
+  if (loadedClawId !== clawId) {
+    setLoadedClawId(clawId)
     setPrs(clawPRCache.get(clawId) ?? [])
     setHasLoaded(clawPRCache.has(clawId))
+  }
+
+  useEffect(() => {
     if (!enabled) return
+    let cancelled = false
     void fetchCachedClawPRs(clawId).then((nextPRs) => {
+      if (cancelled) return
       setPrs(nextPRs)
       setHasLoaded(true)
     }).catch(() => {})
+    return () => { cancelled = true }
   }, [clawId, enabled])
 
   return { prs, hasLoaded }
@@ -441,9 +448,13 @@ function ClawCardBack({ claw, open }: { claw: Claw; open: boolean }) {
   const { prs } = useClawPRs(claw.id, open)
   const [localTags, setLocalTags] = useState(claw.tags)
   const [localName, setLocalName] = useState(claw.name)
+  const [syncedClaw, setSyncedClaw] = useState(claw)
 
-  useEffect(() => setLocalTags(claw.tags), [claw.id, claw.tags])
-  useEffect(() => setLocalName(claw.name), [claw.id, claw.name])
+  if (syncedClaw.id !== claw.id || syncedClaw.tags !== claw.tags || syncedClaw.name !== claw.name) {
+    setSyncedClaw(claw)
+    setLocalTags(claw.tags)
+    setLocalName(claw.name)
+  }
 
   return (
     /* max-md cap mirrors the front face's message list: mobile cards are
@@ -967,7 +978,7 @@ const ClawBoardCard = memo(function ClawBoardCard({
               {cardStats.toolCalls} step{cardStats.toolCalls === 1 ? "" : "s"}
             </span>
             {cardStats.failures > 0 && (
-              <span className="text-red-400">
+              <span className="text-[var(--text-error)]">
                 {cardStats.failures} failed
               </span>
             )}
@@ -1357,7 +1368,16 @@ function ClawChatView({
   const [density, setDensity] = useTimelineDensity()
   // An offline/errored claw cannot still be running its dangling last step.
   const allowTrailingRunning = claw.status !== "offline" && claw.status !== "error"
-  const turns = useMemo(() => groupIntoTurns(messages, allowTrailingRunning), [messages, allowTrailingRunning])
+  const [turnsState, setTurnsState] = useState(() => ({
+    messages,
+    allowTrailingRunning,
+    turns: groupIntoTurns(messages, allowTrailingRunning),
+  }))
+  let turns = turnsState.turns
+  if (turnsState.messages !== messages || turnsState.allowTrailingRunning !== allowTrailingRunning) {
+    turns = groupIntoTurns(messages, allowTrailingRunning, turnsState.turns)
+    setTurnsState({ messages, allowTrailingRunning, turns })
+  }
   const stats = useMemo(() => timelineStats(turns), [turns])
   const runningStep = useMemo(() => latestRunningStep(turns), [turns])
   const isWorking = claw.isStreaming || Boolean(runningStep)

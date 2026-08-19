@@ -9,6 +9,7 @@ import { Button } from '@/components/ui/button'
 import { Calendar } from '@/components/ui/calendar'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { cn } from '@/lib/utils'
+import { useNowMinuteTick } from '@/hooks/use-now'
 
 export interface DatePickerRangeProps {
   value?: DateRange
@@ -51,9 +52,7 @@ function rangeLabel(range: DateRange | undefined, now?: Date) {
 export function DatePickerRange({ value, onChange, className }: DatePickerRangeProps) {
   const [open, setOpen] = React.useState(false)
   const [pendingRange, setPendingRange] = React.useState<DateRange>()
-  // Reading the clock after mount keeps this static-exported control render-pure.
-  const [now, setNow] = React.useState<Date>()
-  React.useEffect(() => { setNow(new Date()) }, [])
+  const now = new Date(useNowMinuteTick(true))
   const resolvedValue = pendingRange ?? value ?? (now ? presetRange(PRESETS[1], now) : undefined)
   const active = activePreset(resolvedValue, now)
 
@@ -89,7 +88,7 @@ export function DatePickerRange({ value, onChange, className }: DatePickerRangeP
             <button
               key={preset.id}
               type="button"
-              onClick={() => { setPendingRange(undefined); onChange(presetRange(preset)); setOpen(false) }}
+              onClick={() => { setPendingRange(undefined); onChange(presetRange(preset, now)); setOpen(false) }}
               className={cn(
                 'rounded-md px-2 py-1.5 text-left text-xs',
                 active?.id === preset.id ? 'bg-muted font-medium text-foreground' : 'text-muted-foreground hover:bg-muted/50',

@@ -26,8 +26,11 @@ import {
 import { requestAuthToken } from "@/lib/auth-storage"
 import { isWaitingOnYou } from "@/lib/waiting-on-you"
 import { agentSection, type AgentSectionName } from "@/components/ds/agent-section"
+import { Spinner } from "@/components/ui/spinner"
 
-const AnalyticsCommandCenter = dynamic(() => import("@/components/analytics-command-center").then((module) => module.AnalyticsCommandCenter))
+const AnalyticsCommandCenter = dynamic(() => import("@/components/analytics-command-center").then((module) => module.AnalyticsCommandCenter), {
+  loading: () => <div className="flex min-h-64 items-center justify-center text-muted-foreground"><Spinner className="size-5" /></div>,
+})
 
 export type HomeView = "agents" | "analytics"
 
@@ -70,6 +73,7 @@ export function HomeShell() {
   )
   const [isAdmin, setIsAdmin] = useState(false)
   const [currentUserLogin, setCurrentUserLogin] = useState<string | null>(null)
+  const [currentUserResolved, setCurrentUserResolved] = useState(false)
   const [adminChecked, setAdminChecked] = useState(false)
   const [selectedWorkflow, setSelectedWorkflow] = useState<Workflow | null>(null)
 
@@ -89,22 +93,25 @@ export function HomeShell() {
       const hubUrl = getHubUrl()
       const url = hubUrl ? `${hubUrl}/api/auth/me` : "/api/auth/me"
       fetch(url, { headers: { Authorization: `Bearer ${token}` } })
-        .then(r => r.ok ? r.json() : null)
+        .then(r => r.ok ? r.json() : Promise.reject(new Error("Unable to resolve current user")))
         .then(data => {
           if (cancelled) return
           setIsAdmin(data?.is_admin === true)
           setCurrentUserLogin(typeof data?.login === "string" ? data.login : null)
+          setCurrentUserResolved(true)
           setAdminChecked(true)
         })
         .catch(() => {
           if (cancelled) return
           setIsAdmin(false)
           setCurrentUserLogin(null)
+          setCurrentUserResolved(false)
           setAdminChecked(true)
         })
     }
     loadAdminStatus()
-    return () => { cancelled = true }
+    window.addEventListener("focus", loadAdminStatus)
+    return () => { cancelled = true; window.removeEventListener("focus", loadAdminStatus) }
   }, [])
 
   // Non-admins never see analytics: deep links bounce back to the agents view.
@@ -403,7 +410,7 @@ export function HomeShell() {
             loading={loading}
             hubError={hubError}
             currentUserLogin={currentUserLogin}
-            currentUserResolved={adminChecked}
+            currentUserResolved={currentUserResolved}
             onOpenMenu={isMobile ? () => setDrawerOpen(true) : undefined}
           />
         )}

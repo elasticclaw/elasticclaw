@@ -17,7 +17,8 @@ function turnDefaultExpanded(turn: Turn, isLast: boolean, density: TimelineDensi
 function hasStepWork(turn: Turn): boolean {
   return turn.toolCallCount > 0 ||
     turn.items.some((item) => item.type === "summary") ||
-    turn.steps.some((step) => step.status === "running" || step.status === "failed")
+    turn.hasProblems ||
+    turn.steps.some((step) => step.status === "running" || step.status === "failed" || step.tone !== "normal")
 }
 
 const TurnMessages = memo(function TurnMessages({
