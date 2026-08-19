@@ -2,6 +2,7 @@ package hub
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"log"
 	"net/http"
@@ -17,6 +18,7 @@ var ticketMetadataInflight sync.Map
 
 const taskRunAnalyticsTicketCacheTTL = 5 * time.Minute
 const taskRunAnalyticsTicketCacheMaxEntries = 256
+const taskRunAnalyticsTicketMaxPageDepth = 100
 
 type taskRunAnalyticsTicketTotalCacheEntry struct {
 	total     int
@@ -115,7 +117,7 @@ func (s *Server) handleTaskRunAnalyticsTickets(w http.ResponseWriter, r *http.Re
 		jsonError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	cursorAt, cursorIssueID, err := decodeTaskRunAnalyticsCursor(r.URL.Query().Get("cursor"))
+	cursorAt, cursorIssueID, cursorDepth, err := decodeTaskRunAnalyticsTicketCursor(r.URL.Query().Get("cursor"))
 	if err != nil {
 		jsonError(w, http.StatusBadRequest, err.Error())
 		return
@@ -129,7 +131,9 @@ func (s *Server) handleTaskRunAnalyticsTickets(w http.ResponseWriter, r *http.Re
 	nextCursor := ""
 	if len(groups) > limit {
 		last := groups[limit-1]
-		nextCursor = encodeTaskRunAnalyticsCursor(last.cursorAt(), last.issueID)
+		if cursorDepth+1 < taskRunAnalyticsTicketMaxPageDepth {
+			nextCursor = encodeTaskRunAnalyticsTicketCursor(last.cursorAt(), last.issueID, cursorDepth+1)
+		}
 		groups = groups[:limit]
 	}
 	groups = nonEmptyTaskRunAnalyticsTicketGroups(groups)
@@ -174,6 +178,13 @@ func (s *Server) handleTaskRunAnalyticsTickets(w http.ResponseWriter, r *http.Re
 	jsonOK(w, taskRunAnalyticsTicketsResponse{Tickets: tickets, NextCursor: nextCursor, Limit: limit, Total: total})
 }
 
+// readTaskRunAnalyticsTicketGroupsPage groups by issue_id and orders by a
+// computed aggregate that idx_task_run_summaries_ticket_page cannot serve
+// because issue_id sits behind started_at in that index. Each page therefore
+// re-aggregates and re-sorts the whole filtered window; the HAVING cursor only
+// trims output, not aggregation work, making this O(window) per page. That is
+// acceptable at current ticket volumes, but the page-depth cap is a stopgap
+// until a materialized per-issue ordering column can provide the real fix.
 func (s *Server) readTaskRunAnalyticsTicketGroupsPage(filters taskRunAnalyticsFilters, cursorAt int64, cursorIssueID string, limit int) ([]taskRunAnalyticsTicketGroup, int, error) {
 	where, args := taskRunAnalyticsSummaryWhere(filters)
 	total, err := s.readTaskRunAnalyticsTicketTotal(where, args)
@@ -226,6 +237,37 @@ func (s *Server) readTaskRunAnalyticsTicketGroupsPage(filters taskRunAnalyticsFi
 		return nil, 0, err
 	}
 	return taskRunAnalyticsTicketGroupsFromHydration(ids, runs), total, nil
+}
+
+func encodeTaskRunAnalyticsTicketCursor(cursorAt int64, issueID string, depth int) string {
+	if cursorAt <= 0 || issueID == "" || depth <= 0 {
+		return ""
+	}
+	return "ticket:" + strconv.Itoa(depth) + ":" + strconv.FormatInt(cursorAt, 10) + ":" + base64.RawURLEncoding.EncodeToString([]byte(issueID))
+}
+
+func decodeTaskRunAnalyticsTicketCursor(raw string) (int64, string, int, error) {
+	if !strings.HasPrefix(raw, "ticket:") {
+		cursorAt, issueID, err := decodeTaskRunAnalyticsCursor(raw)
+		return cursorAt, issueID, 0, err
+	}
+	parts := strings.Split(raw, ":")
+	if len(parts) != 4 || parts[3] == "" {
+		return 0, "", 0, fmt.Errorf("invalid cursor")
+	}
+	depth, err := strconv.Atoi(parts[1])
+	if err != nil || depth <= 0 || depth >= taskRunAnalyticsTicketMaxPageDepth {
+		return 0, "", 0, fmt.Errorf("invalid cursor")
+	}
+	cursorAt, err := strconv.ParseInt(parts[2], 10, 64)
+	if err != nil || cursorAt <= 0 {
+		return 0, "", 0, fmt.Errorf("invalid cursor")
+	}
+	issueID, err := base64.RawURLEncoding.DecodeString(parts[3])
+	if err != nil || len(issueID) == 0 {
+		return 0, "", 0, fmt.Errorf("invalid cursor")
+	}
+	return cursorAt, string(issueID), depth, nil
 }
 
 // quantizeTaskRunAnalyticsTicketArgs snaps int64 args (the started_at window
