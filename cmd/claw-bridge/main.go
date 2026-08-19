@@ -51,6 +51,7 @@ import (
 	"nhooyr.io/websocket/wsjson"
 
 	"github.com/elasticclaw/elasticclaw/pkg/cliversion"
+	"github.com/elasticclaw/elasticclaw/pkg/types"
 	_ "modernc.org/sqlite"
 )
 
@@ -4568,7 +4569,7 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 					// Notify the hub so it can inject a resume prompt with context.
 					_ = writeHub(hubMsg{Type: "session_rotated"})
 				} else {
-					reply = fmt.Sprintf("⚠️ error: %v", agentErr)
+					reply = fmt.Sprintf("%s %v", types.BridgeReplayErrorPrefix, agentErr)
 				}
 			}
 			if writeErr := deliver("claw", reply); writeErr != nil {
@@ -4695,7 +4696,7 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 						// Notify the hub so it can inject a resume prompt with context.
 						_ = writeHub(hubMsg{Type: "session_rotated"})
 					} else {
-						reply = fmt.Sprintf("⚠️ claw-bridge error: %v", agentErr)
+						reply = fmt.Sprintf("%s %v", types.BridgeErrorPrefix, agentErr)
 					}
 				} else {
 					log.Printf("[bridge] ← openclaw: %q", reply[:min(len(reply), 120)])
