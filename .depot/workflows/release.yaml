@@ -128,8 +128,30 @@ jobs:
             COMMIT_MSG="elasticclaw ${VERSION}"
           fi
 
-          SHA_ARM64=$(curl -fsSL "https://github.com/elasticclaw/elasticclaw/releases/download/${VERSION}/elasticclaw-darwin-arm64" | sha256sum | awk '{print $1}')
-          SHA_AMD64=$(curl -fsSL "https://github.com/elasticclaw/elasticclaw/releases/download/${VERSION}/elasticclaw-darwin-amd64" | sha256sum | awk '{print $1}')
+          # Read the checksums from the release asset instead of re-hashing each
+          # binary. The binaries embed the web UI, so they are large. One small
+          # request replaces four big downloads. The release job writes this file
+          # with "sha256sum *", so field 2 is the bare asset name.
+          CHECKSUMS=$(curl -fsSL "https://github.com/elasticclaw/elasticclaw/releases/download/${VERSION}/checksums.txt")
+          sha_for() {
+            printf '%s\n' "$CHECKSUMS" | awk -v name="$1" '$2 == name { print $1 }'
+          }
+
+          SHA_DARWIN_ARM64=$(sha_for elasticclaw-darwin-arm64)
+          SHA_DARWIN_AMD64=$(sha_for elasticclaw-darwin-amd64)
+          SHA_LINUX_ARM64=$(sha_for elasticclaw-linux-arm64)
+          SHA_LINUX_AMD64=$(sha_for elasticclaw-linux-amd64)
+
+          # A renamed or absent asset makes sha_for print nothing, and
+          # "set -euo pipefail" does not fail on an empty awk result. The tap has
+          # no CI, so an empty sha256 would reach users and break every
+          # "brew install". Fail here instead.
+          for var in SHA_DARWIN_ARM64 SHA_DARWIN_AMD64 SHA_LINUX_ARM64 SHA_LINUX_AMD64; do
+            if [[ ! "${!var}" =~ ^[0-9a-f]{64}$ ]]; then
+              echo "Invalid checksum for ${var}: '${!var}'" >&2
+              exit 1
+            fi
+          done
 
           git clone "https://x-access-token:${TAP_TOKEN}@github.com/elasticclaw/homebrew-elasticclaw.git" tap
           cd tap
@@ -149,17 +171,29 @@ jobs:
             on_macos do
               on_arm do
                 url "https://github.com/elasticclaw/elasticclaw/releases/download/#{version}/elasticclaw-darwin-arm64"
-                sha256 "${SHA_ARM64}"
+                sha256 "${SHA_DARWIN_ARM64}"
               end
               on_intel do
                 url "https://github.com/elasticclaw/elasticclaw/releases/download/#{version}/elasticclaw-darwin-amd64"
-                sha256 "${SHA_AMD64}"
+                sha256 "${SHA_DARWIN_AMD64}"
+              end
+            end
+
+            on_linux do
+              on_arm do
+                url "https://github.com/elasticclaw/elasticclaw/releases/download/#{version}/elasticclaw-linux-arm64"
+                sha256 "${SHA_LINUX_ARM64}"
+              end
+              on_intel do
+                url "https://github.com/elasticclaw/elasticclaw/releases/download/#{version}/elasticclaw-linux-amd64"
+                sha256 "${SHA_LINUX_AMD64}"
               end
             end
 
             def install
-              bin_name = Hardware::CPU.arm? ? "elasticclaw-darwin-arm64" : "elasticclaw-darwin-amd64"
-              bin.install bin_name => "${INSTALLED_BINARY}"
+              os = OS.mac? ? "darwin" : "linux"
+              arch = Hardware::CPU.arm? ? "arm64" : "amd64"
+              bin.install "elasticclaw-#{os}-#{arch}" => "${INSTALLED_BINARY}"
             end
 
             test do
