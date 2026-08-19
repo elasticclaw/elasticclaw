@@ -30,8 +30,7 @@ function presetRange(preset: { days?: number }, to = new Date()): DateRange {
 
 /* The analytics default period when the URL carries no from/to — kept here so
    the trigger can resolve it to the "Last 30 days" preset label. */
-function activePreset(range: DateRange | undefined, now?: Date) {
-  if (!now) return undefined
+function activePreset(range: DateRange | undefined, now: Date) {
   if (!range?.from || !range.to) return undefined
   return PRESETS.find((preset) => {
     const candidate = presetRange(preset, now)
@@ -41,7 +40,7 @@ function activePreset(range: DateRange | undefined, now?: Date) {
 
 /* The current period is always readable as text — the active preset's name, or
    the resolved dates — instead of inferred from which button looks active. */
-function rangeLabel(range: DateRange | undefined, now?: Date) {
+function rangeLabel(range: DateRange | undefined, now: Date) {
   const preset = activePreset(range, now)
   if (preset) return preset.name
   if (!range?.from) return 'Select date range'
@@ -52,8 +51,8 @@ function rangeLabel(range: DateRange | undefined, now?: Date) {
 export function DatePickerRange({ value, onChange, className }: DatePickerRangeProps) {
   const [open, setOpen] = React.useState(false)
   const [pendingRange, setPendingRange] = React.useState<DateRange>()
-  const now = new Date(useNowMinuteTick(true))
-  const resolvedValue = pendingRange ?? value ?? (now ? presetRange(PRESETS[1], now) : undefined)
+  const now = new Date(useNowMinuteTick(open))
+  const resolvedValue = pendingRange ?? value ?? presetRange(PRESETS[1], now)
   const active = activePreset(resolvedValue, now)
 
   // Picking a start day keeps the popover open until an end day is chosen; a

@@ -8,7 +8,6 @@ import { ScrollArea } from "@/components/ui/scroll-area"
 import { ClawCard } from "@/components/claw-card"
 import { WorkflowName } from "@/components/workflow-name"
 import { clearConfig, fetchWorkspaces, type Workflow } from "@/lib/api"
-import { getAuthToken } from "@/lib/auth-storage"
 import { signOut } from "@/lib/sign-out"
 import { useIsMobile } from "@/hooks/use-mobile"
 import {

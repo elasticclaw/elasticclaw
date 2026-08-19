@@ -93,7 +93,11 @@ export function HomeShell() {
       const hubUrl = getHubUrl()
       const url = hubUrl ? `${hubUrl}/api/auth/me` : "/api/auth/me"
       fetch(url, { headers: { Authorization: `Bearer ${token}` } })
-        .then(r => r.ok ? r.json() : Promise.reject(new Error("Unable to resolve current user")))
+        .then(async (response) => {
+          if (response.ok) return response.json()
+          if (response.status === 401 || response.status === 403) throw new Error("Unauthorized")
+          throw new Error("Unable to resolve current user")
+        })
         .then(data => {
           if (cancelled) return
           setIsAdmin(data?.is_admin === true)
@@ -101,12 +105,14 @@ export function HomeShell() {
           setCurrentUserResolved(true)
           setAdminChecked(true)
         })
-        .catch(() => {
+        .catch((error) => {
           if (cancelled) return
-          setIsAdmin(false)
-          setCurrentUserLogin(null)
-          setCurrentUserResolved(false)
-          setAdminChecked(true)
+          if (error instanceof Error && error.message === "Unauthorized") {
+            setIsAdmin(false)
+            setCurrentUserLogin(null)
+            setCurrentUserResolved(false)
+            setAdminChecked(true)
+          }
         })
     }
     loadAdminStatus()

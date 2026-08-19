@@ -19,7 +19,7 @@ export function Panel({ title, info, sub, stat, headerAction, extra, className, 
   return (
     <section className={cn('flex flex-col overflow-hidden rounded-lg border bg-card', className)} {...props}>
       <header className="flex items-center gap-2 border-b p-3">
-        <span className="min-w-0 shrink truncate text-sm font-medium">{title}</span>
+        <h2 className="min-w-0 shrink truncate text-sm font-medium">{title}</h2>
         {sub && <span className="min-w-0 truncate text-xs text-muted-foreground">{sub}</span>}
         <span className="ml-auto flex shrink-0 items-center gap-2">{info ? <InfoTooltip content={info} /> : null}{headerAction}{extra}</span>
       </header>

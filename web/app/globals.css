@@ -50,11 +50,11 @@
   --text-error: #b91c1c;
   --text-warning: #92400e;
   /* Heatmap — one blue family, evenly stepped in lightness, calm chroma. */
-  --heatmap-1: oklch(0.34 0.055 250);
-  --heatmap-2: oklch(0.45 0.075 250);
-  --heatmap-3: oklch(0.56 0.095 250);
-  --heatmap-4: oklch(0.67 0.105 250);
-  --heatmap-5: oklch(0.78 0.095 250);
+  --heatmap-1: oklch(0.93 0.025 250);
+  --heatmap-2: oklch(0.82 0.055 250);
+  --heatmap-3: oklch(0.70 0.080 250);
+  --heatmap-4: oklch(0.57 0.100 250);
+  --heatmap-5: oklch(0.44 0.105 250);
   --radius: 0.625rem;
   --sidebar: oklch(0.985 0 0);
   --sidebar-foreground: oklch(0.145 0 0);

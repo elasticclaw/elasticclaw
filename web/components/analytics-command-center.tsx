@@ -125,15 +125,8 @@ function formatPercent(value?: number) {
   return value == null ? "—" : `${(value * 100).toFixed(1)}%`
 }
 
-function isoDate(date: Date) {
-  return date.toISOString().slice(0, 10)
-}
-
-function isoDayRange(day: string) {
-  return {
-    from: new Date(`${day}T00:00:00.000Z`).toISOString(),
-    to: new Date(`${day}T23:59:59.999Z`).toISOString(),
-  }
+function localDateKey(date: Date) {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`
 }
 
 function localDayRange(date: Date) {
@@ -278,9 +271,10 @@ function AnalyticsCommandCenterInner() {
         // Default to the last 30 days so every widget reads the same period.
         // Computed here (not in render) — reading the clock during render
         // suspends the prerender under Next's cacheComponents semantics.
-        const effectiveFilters = effectiveFiltersFor()
+        const requestedTicketCursor = loadOptions.ticketCursor
+        const effectiveFilters = effectiveFiltersFor(Boolean(ticketCursorStackRef.current[ticketCursorStackRef.current.length - 1]))
         const runFilters = { ...effectiveFilters, cursor }
-        const ticketFilters = { ...effectiveFilters, cursor: loadOptions.ticketCursor }
+        const ticketFilters = { ...effectiveFilters, cursor: requestedTicketCursor }
         // The year heatmap always shows the trailing year, regardless of the
         // selected period. taskRunAnalyticsCostsUseRunFilters in
         // pkg/hub/task_run_analytics_costs_api.go must be used whenever a
@@ -337,7 +331,8 @@ function AnalyticsCommandCenterInner() {
         setStats(statsData)
         setDrivers(driversData)
         setRuns((currentRuns) => (append ? [...currentRuns, ...runsData.runs] : runsData.runs))
-        if (ticketRequestId === ticketsRequestId.current && !ticketsLoadingRef.current) {
+        const activeTicketCursor = ticketCursorStackRef.current[ticketCursorStackRef.current.length - 1]
+        if (ticketRequestId === ticketsRequestId.current && !ticketsLoadingRef.current && requestedTicketCursor === activeTicketCursor) {
           setTickets(ticketsData.tickets)
           setNextTicketCursor(ticketsData.nextCursor)
           setTicketTotal(ticketsData.total)
@@ -489,8 +484,8 @@ function AnalyticsCommandCenterInner() {
   const heatmap = useHeatmap(yearCosts)
   const maxHeatCost = Math.max(...heatmap.days.map((day) => day.point?.costUsd ?? 0), 0)
   const selectedDay = filters.from && filters.to && (() => {
-    const day = filters.from.slice(0, 10)
-    const range = isoDayRange(day)
+    const day = localDateKey(new Date(filters.from))
+    const range = localDayRange(new Date(`${day}T00:00:00`))
     return range.from === filters.from && range.to === filters.to ? day : undefined
   })()
   // Stable handlers so the memoized Heatmap (and its 364 memoized cells) only
@@ -500,7 +495,7 @@ function AnalyticsCommandCenterInner() {
     selectedDayRef.current = selectedDay
   }, [selectedDay])
   const selectDay = useCallback((day: string) => {
-    setFilters(day === selectedDayRef.current ? { from: undefined, to: undefined } : isoDayRange(day))
+    setFilters(day === selectedDayRef.current ? { from: undefined, to: undefined } : localDayRange(new Date(`${day}T00:00:00`)))
   }, [setFilters])
   const clearSelectedDay = useCallback(() => setFilters({ from: undefined, to: undefined }), [setFilters])
   const modelData = useModelData(costs)
@@ -600,7 +595,7 @@ function AnalyticsCommandCenterInner() {
 
         <TicketsTable
           tickets={tickets}
-          total={ticketTotal}
+          total={effect?.uniqueTickets ?? ticketTotal}
           page={ticketCursorStack.length}
           canGoPrevious={ticketCursorStack.length > 1}
           canGoNext={Boolean(nextTicketCursor)} loading={ticketsLoading}
@@ -764,7 +759,7 @@ function useHeatmap(costs?: CostOverview) {
     // cacheComponents semantics (and the series' last day IS "today" as far
     // as the backend is concerned).
     if (series.length === 0) return { days: [], monthLabels: [], padCount: 0 }
-    const costsByDate = new Map(series.map((point) => [point.date, point]))
+    const costsByDate = new Map(series.map((point) => [localDateKey(new Date(`${point.date}T00:00:00`)), point]))
     const end = new Date(`${series[series.length - 1].date}T00:00:00`)
     // The grid's first cell must be a MONDAY or every row drifts off its
     // weekday label: anchor on the Monday of the end's week, 51 full weeks
@@ -772,7 +767,7 @@ function useHeatmap(costs?: CostOverview) {
     const mondayIndex = (end.getDay() + 6) % 7
     const start = new Date(end); start.setDate(start.getDate() - mondayIndex - 357)
     const total = 358 + mondayIndex
-    const days = Array.from({ length: total }, (_, index) => { const date = new Date(start); date.setDate(date.getDate() + index); const iso = isoDate(date); return { iso, point: costsByDate.get(iso), week: Math.floor(index / 7), day: index % 7 } })
+    const days = Array.from({ length: total }, (_, index) => { const date = new Date(start); date.setDate(date.getDate() + index); const iso = localDateKey(date); return { iso, point: costsByDate.get(iso), week: Math.floor(index / 7), day: index % 7 } })
     const monthLabels = days.filter((day, index) => index === 0 || day.iso.slice(5, 7) !== days[index - 1].iso.slice(5, 7)).map((day) => ({ week: day.week, label: new Intl.DateTimeFormat(undefined, { month: "short" }).format(new Date(`${day.iso}T00:00:00`)) }))
     return { days, monthLabels, padCount: 364 - total }
   }, [costs])
@@ -781,7 +776,8 @@ function useHeatmap(costs?: CostOverview) {
 type HeatmapPoint = ReturnType<typeof useHeatmap>["days"][number]["point"]
 
 const HeatmapCell = memo(function HeatmapCell({ iso, point, level, selected, onSelectDay, onShowTooltip, onHideTooltip }: { iso: string; point: HeatmapPoint; level: number; selected: boolean; onSelectDay: (day: string) => void; onShowTooltip: (iso: string, point: HeatmapPoint, target: HTMLButtonElement) => void; onHideTooltip: () => void }) {
-  return <button onClick={() => onSelectDay(iso)} onMouseEnter={(event) => onShowTooltip(iso, point, event.currentTarget)} onMouseLeave={onHideTooltip} onFocus={(event) => onShowTooltip(iso, point, event.currentTarget)} onBlur={onHideTooltip} className={`aspect-square cursor-pointer rounded-sm border border-black/5 transition-shadow hover:ring-2 hover:ring-ring hover:ring-offset-1 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1 ${selected ? "ring-2 ring-primary ring-offset-1" : ""}`} style={{ background: level ? `var(--heatmap-${level})` : "var(--muted)" }} />
+  const tooltip = `${new Intl.DateTimeFormat(undefined, { weekday: "short", month: "short", day: "numeric", year: "numeric" }).format(new Date(`${iso}T00:00:00`))}: ${usdWhole.format(point?.costUsd ?? 0)} · ${point?.runCount ?? 0} runs`
+  return <button aria-label={tooltip} title={tooltip} aria-pressed={selected} onClick={() => onSelectDay(iso)} onMouseEnter={(event) => onShowTooltip(iso, point, event.currentTarget)} onMouseLeave={onHideTooltip} onFocus={(event) => onShowTooltip(iso, point, event.currentTarget)} onBlur={onHideTooltip} className={`aspect-square cursor-pointer rounded-sm border border-black/5 transition-shadow hover:ring-2 hover:ring-ring hover:ring-offset-1 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1 ${selected ? "ring-2 ring-primary ring-offset-1" : ""}`} style={{ background: level ? `var(--heatmap-${level})` : "var(--muted)" }} />
 })
 
 const Heatmap = memo(function Heatmap({ heatmap, maxCost, selectedDay, onSelectDay, onClearSelectedDay }: { heatmap: ReturnType<typeof useHeatmap>; maxCost: number; selectedDay?: string; onSelectDay: (day: string) => void; onClearSelectedDay: () => void }) {
@@ -828,9 +824,9 @@ function CostPerMergedPrChart({ effect }: { effect?: AnalyticsEffectiveness }) {
 function CostDrivers({ drivers }: { drivers: AnalyticsCostDriver[] }) {
   return <ChartCard title="Top cost drivers" sub="By workflow" info="Where the money goes: total spend and efficiency per workflow in the selected period." stat={`${drivers.length} workflows · ${usdWhole.format(drivers.reduce((sum, driver) => sum + driver.costUsd, 0))} total`}><Table className="[&_th]:h-auto [&_th]:px-2 [&_th]:pt-0 [&_th]:pb-2 [&_th]:text-xs [&_td]:px-2 [&_td]:py-[9px]"><TableHeader><TableRow><TableHead className="min-w-[35ch]">Workflow</TableHead><TableHead className="text-right">Runs</TableHead><TableHead className="text-right">Success</TableHead><TableHead className="text-right">Cost</TableHead><TableHead className="text-right">Cost / merged PR</TableHead></TableRow></TableHeader><TableBody>{drivers.slice(0, 10).map((driver) => <TableRow key={driver.name}><TableCell className="font-medium min-w-[35ch]"><WorkflowName name={driver.name} /></TableCell><TableCell className="text-right font-mono tabular-nums">{driver.runs}</TableCell><TableCell className="text-right font-mono tabular-nums">{formatPercent(driver.successRate)}</TableCell><TableCell className="text-right font-mono tabular-nums">{usd.format(driver.costUsd)}</TableCell><TableCell className="text-right font-mono tabular-nums">{usd.format(driver.costPerMergedPr)}</TableCell></TableRow>)}</TableBody></Table></ChartCard>
 }
-function TicketsTable({ tickets, total, page, canGoPrevious, canGoNext, onSelect, onSelectTicket, onPrevious, onNext, loading }: { tickets: AnalyticsTicket[]; total: number; page: number; canGoPrevious: boolean; canGoNext: boolean; onSelect: (runId: string) => void; onSelectTicket: (ticketId: string) => void; onPrevious: () => void; onNext: () => void; loading: boolean }) { const [expanded, setExpanded] = useState<Set<string>>(() => new Set()); const toggleExpanded = (issueId: string) => setExpanded((previous) => { const next = new Set(previous); if (next.has(issueId)) next.delete(issueId); else next.add(issueId); return next }); const activate = (event: KeyboardEvent, action: () => void) => { if (event.target !== event.currentTarget) return; if (event.key === "Enter" || event.key === " ") { event.preventDefault(); action() } }; const delivered = tickets.filter((ticket) => ticket.status === "delivered").length; const awaitingReview = tickets.filter((ticket) => ticket.status === "pr_open").length; return <ChartCard title="Unique tickets" info="One row per ticket. Expand to see every run that served it; open a row for the business view, a run for the technical view." stat={<><span>{tickets.length} of {total} tickets</span><span className="ml-auto">{delivered} delivered · {awaitingReview} awaiting review</span></>}><Table className="[&_th]:h-auto [&_th]:px-2 [&_th]:pt-0 [&_th]:pb-2 [&_th]:text-xs [&_td]:px-2 [&_td]:py-[9px]"><TableHeader><TableRow>{["", "Status", "Ticket", "Requester", "Runs", "Cost", "Lead time", "Last activity"].map((label) => <TableHead key={label} className={label === "" ? "w-8" : ["Runs", "Cost", "Lead time", "Last activity"].includes(label) ? "text-right" : undefined}>{label}</TableHead>)}</TableRow></TableHeader><TableBody>{tickets.map((ticket) => <Fragment key={ticket.issueId}><TableRow role="button" tabIndex={0} className="cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset" onClick={() => onSelectTicket(ticket.issueId)} onKeyDown={(event) => activate(event, () => onSelectTicket(ticket.issueId))}><TableCell><button type="button" aria-label={`Toggle ${ticket.issueId} runs`} aria-expanded={expanded.has(ticket.issueId)} onClick={(event) => { event.stopPropagation(); toggleExpanded(ticket.issueId) }}>{expanded.has(ticket.issueId) ? <ChevronDown className="size-4" /> : <ChevronRight className="size-4" />}</button></TableCell><TableCell><TicketStatusBadge status={ticket.status} /></TableCell><TableCell><div className="font-medium">{ticket.issueTitle || ticket.issueId}</div><div className="font-mono text-xs text-muted-foreground">{ticket.issueId} · {ticket.workflowName || ticket.source || "—"}</div></TableCell><TableCell>{ticket.requester || "—"}</TableCell><TableCell className="text-right font-mono tabular-nums">{ticket.runCount}</TableCell><TableCell className="text-right font-mono tabular-nums">{usd.format(ticket.cost)}</TableCell><TableCell className="text-right font-mono tabular-nums">{formatDuration(ticket.leadTime)}</TableCell><TableCell className="text-right font-mono tabular-nums">{ticket.lastActivity ? new Date(ticket.lastActivity).toLocaleDateString() : "—"}</TableCell></TableRow>{expanded.has(ticket.issueId) && ticket.runs.map((run, index) => { const prs = ticket.prs.filter((pr) => pr.runId === run.runId); return <TableRow key={run.runId} role="button" tabIndex={0} className="cursor-pointer bg-muted/30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset" onClick={() => onSelect(run.runId)} onKeyDown={(event) => activate(event, () => onSelect(run.runId))}><TableCell /><TableCell><RunStatusBadge status={run.status} /></TableCell><TableCell><div>Try {index + 1}</div><div className="font-mono text-xs text-muted-foreground">{run.runId} · {run.model || "—"}</div></TableCell><TableCell>{prs.length ? prs.map((pr) => `#${pr.prNumber} ${pr.merged ? "merged" : pr.state}`).join(", ") : run.status === "failed" ? "Failed" : "—"}</TableCell><TableCell className="text-right font-mono tabular-nums">{run.attemptCount}</TableCell><TableCell className="text-right font-mono tabular-nums">{usd.format(run.cost)}</TableCell><TableCell className="text-right font-mono tabular-nums">{formatDuration(run.lastActivity - run.startedAt)}</TableCell><TableCell className="text-right font-mono tabular-nums">{new Date(run.startedAt).toLocaleDateString()}</TableCell></TableRow>})}</Fragment>)}</TableBody></Table><div className="mt-3 flex justify-center gap-3"><Button variant="outline" size="sm" disabled={!canGoPrevious || loading} onClick={onPrevious}>Previous</Button><span className="text-sm text-muted-foreground">Page {page}</span><Button variant="outline" size="sm" disabled={!canGoNext || loading} onClick={onNext}>Next</Button></div></ChartCard> }
-function outcomesStat(effect?: AnalyticsEffectiveness) { const days = effect?.outcomesByDay ?? []; const total = days.reduce((sum, day) => sum + day.clean + day.humanInTheLoop + day.warning + day.failed, 0); return `${days.length} days · avg ${days.length ? (total / days.length).toFixed(1) : "0"} runs` }
-function ticketThroughputStat(effect?: AnalyticsEffectiveness) { const days = effect?.ticketsByDay ?? []; const total = days.reduce((sum, day) => sum + day.delivered + day.inProgress + day.failed, 0); return `${days.length} days · avg ${days.length ? (total / days.length).toFixed(1) : "0"} tickets` }
+function TicketsTable({ tickets, total, page, canGoPrevious, canGoNext, onSelect, onSelectTicket, onPrevious, onNext, loading }: { tickets: AnalyticsTicket[]; total: number; page: number; canGoPrevious: boolean; canGoNext: boolean; onSelect: (runId: string) => void; onSelectTicket: (ticketId: string) => void; onPrevious: () => void; onNext: () => void; loading: boolean }) { const [expanded, setExpanded] = useState<Set<string>>(() => new Set()); const toggleExpanded = (issueId: string) => setExpanded((previous) => { const next = new Set(previous); if (next.has(issueId)) next.delete(issueId); else next.add(issueId); return next }); const activate = (event: KeyboardEvent, action: () => void) => { if (event.target !== event.currentTarget) return; if (event.key === "Enter" || event.key === " ") { event.preventDefault(); action() } }; const delivered = tickets.filter((ticket) => ticket.status === "delivered").length; const awaitingReview = tickets.filter((ticket) => ticket.status === "pr_open").length; return <ChartCard title="Unique tickets" info="One row per ticket. Expand to see every run that served it; open a row for the business view, a run for the technical view." stat={<><span>{tickets.length} of {total} tickets</span><span className="ml-auto">{delivered} delivered · {awaitingReview} awaiting review</span></>}><Table className="[&_th]:h-auto [&_th]:px-2 [&_th]:pt-0 [&_th]:pb-2 [&_th]:text-xs [&_td]:px-2 [&_td]:py-[9px]"><TableHeader><TableRow>{["", "Status", "Ticket", "Requester", "Runs", "Cost", "Lead time", "Last activity"].map((label) => <TableHead key={label} className={label === "" ? "w-8" : ["Runs", "Cost", "Lead time", "Last activity"].includes(label) ? "text-right" : undefined}>{label}</TableHead>)}</TableRow></TableHeader><TableBody>{tickets.map((ticket) => <Fragment key={ticket.issueId}><TableRow tabIndex={0} className="cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset" onClick={() => onSelectTicket(ticket.issueId)} onKeyDown={(event) => activate(event, () => onSelectTicket(ticket.issueId))}><TableCell><button type="button" aria-label={`Toggle ${ticket.issueId} runs`} aria-expanded={expanded.has(ticket.issueId)} onClick={(event) => { event.stopPropagation(); toggleExpanded(ticket.issueId) }}>{expanded.has(ticket.issueId) ? <ChevronDown className="size-4" /> : <ChevronRight className="size-4" />}</button></TableCell><TableCell><TicketStatusBadge status={ticket.status} /></TableCell><TableCell><div className="font-medium">{ticket.issueTitle || ticket.issueId}</div><div className="font-mono text-xs text-muted-foreground">{ticket.issueId} · {ticket.workflowName || ticket.source || "—"}</div></TableCell><TableCell>{ticket.requester || "—"}</TableCell><TableCell className="text-right font-mono tabular-nums">{ticket.runCount}</TableCell><TableCell className="text-right font-mono tabular-nums">{usd.format(ticket.cost)}</TableCell><TableCell className="text-right font-mono tabular-nums">{formatDuration(ticket.leadTime)}</TableCell><TableCell className="text-right font-mono tabular-nums">{ticket.lastActivity ? new Date(ticket.lastActivity).toLocaleDateString() : "—"}</TableCell></TableRow>{expanded.has(ticket.issueId) && ticket.runs.map((run, index) => { const prs = ticket.prs.filter((pr) => pr.runId === run.runId); return <TableRow key={run.runId} tabIndex={0} className="cursor-pointer bg-muted/30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset" onClick={() => onSelect(run.runId)} onKeyDown={(event) => activate(event, () => onSelect(run.runId))}><TableCell /><TableCell><RunStatusBadge status={run.status} /></TableCell><TableCell><div>Try {index + 1}</div><div className="font-mono text-xs text-muted-foreground">{run.runId} · {run.model || "—"}</div></TableCell><TableCell>{prs.length ? prs.map((pr) => `#${pr.prNumber} ${pr.merged ? "merged" : pr.state}`).join(", ") : run.status === "failed" ? "Failed" : "—"}</TableCell><TableCell className="text-right font-mono tabular-nums">{run.attemptCount}</TableCell><TableCell className="text-right font-mono tabular-nums">{usd.format(run.cost)}</TableCell><TableCell className="text-right font-mono tabular-nums">{formatDuration(run.lastActivity - run.startedAt)}</TableCell><TableCell className="text-right font-mono tabular-nums">{new Date(run.startedAt).toLocaleDateString()}</TableCell></TableRow>})}</Fragment>)}</TableBody></Table><div className="mt-3 flex justify-center gap-3"><Button variant="outline" size="sm" disabled={!canGoPrevious || loading} onClick={onPrevious}>Previous</Button><span className="text-sm text-muted-foreground">Page {page}</span><Button variant="outline" size="sm" disabled={!canGoNext || loading} onClick={onNext}>Next</Button></div></ChartCard> }
+function outcomesStat(effect?: AnalyticsEffectiveness) { const days = effect?.outcomesByDay ?? []; const total = days.reduce((sum, day) => sum + day.clean + day.humanInTheLoop + day.warning + day.failed, 0); return `avg ${days.length ? (total / days.length).toFixed(1) : "0"} runs` }
+function ticketThroughputStat(effect?: AnalyticsEffectiveness) { const days = effect?.ticketsByDay ?? []; const total = days.reduce((sum, day) => sum + day.delivered + day.inProgress + day.failed, 0); return `avg ${days.length ? (total / days.length).toFixed(1) : "0"} tickets` }
 function calculateDelta(current?: number | null, prior?: number | null) { return current == null || prior == null || prior === 0 ? undefined : (current - prior) / prior }
 function KpiStrip({ children }: { children: ReactNode }) { const ref = useRef<HTMLDivElement>(null); const [columns, setColumns] = useState(6); useEffect(() => { const element = ref.current; if (!element) return; const measure = () => { const width = element.clientWidth; const fits = (count: number) => (width - (count - 1) * 8) / count >= 158; setColumns(fits(6) ? 6 : fits(3) ? 3 : 1) }; measure(); const observer = new ResizeObserver(measure); observer.observe(element); return () => observer.disconnect() }, []); return <div ref={ref} className="grid gap-2" style={{ gridTemplateColumns: `repeat(${columns}, minmax(0, 1fr))` }}>{children}</div> }
 function KpiGroupLabel({ title }: { title: string }) { return <p className="col-span-full mb-0 text-xs font-semibold uppercase tracking-[0.08em] text-muted-foreground">{title}</p> }
