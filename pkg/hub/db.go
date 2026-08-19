@@ -904,10 +904,8 @@ func migrate(db *sql.DB) error {
 	if err := backfillTaskRunReadyAtV1(db); err != nil {
 		return err
 	}
-	// The dashboard filters ticket pages by a started-at window. Keep that
-	// window adjacent to tenant_id so SQLite can seek it before grouping tickets.
-	if _, err := db.Exec(`DROP INDEX IF EXISTS idx_task_run_summaries_ticket_page; CREATE INDEX idx_task_run_summaries_ticket_page ON task_run_summaries(tenant_id, status, requires_pr, analytics_enabled, started_at DESC, issue_id, issue_created_at DESC)`); err != nil {
-		return fmt.Errorf("create ticket page index: %w", err)
+	if err := rebuildTaskRunSummariesTicketPageV2(db); err != nil {
+		return err
 	}
 	for _, p := range []struct {
 		model                          string
@@ -1157,6 +1155,31 @@ func backfillTaskRunAnalyticsStatusV3(db *sql.DB) error {
 		log.Printf("[task-run-analytics] status v3 backfill skipped %d of %d run(s)", skipped, len(runIDs))
 	}
 	_, err = db.Exec(`INSERT INTO hub_migrations(name, applied_at) VALUES(?, ?) ON CONFLICT(name) DO NOTHING`, migration, now().UnixMilli())
+	return err
+}
+
+// rebuildTaskRunSummariesTicketPageV2 rebuilds idx_task_run_summaries_ticket_page
+// with a started-at window adjacent to tenant_id so SQLite can seek it before
+// grouping tickets. This is a one-time rebuild: the definition already lives
+// in the CREATE INDEX IF NOT EXISTS above, so without the hub_migrations
+// gate every hub start would re-sort the (potentially large) index for no
+// reason.
+func rebuildTaskRunSummariesTicketPageV2(db *sql.DB) error {
+	const migration = "task_run_summaries_ticket_page_v2"
+	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS hub_migrations (name TEXT PRIMARY KEY, applied_at INTEGER NOT NULL)`); err != nil {
+		return fmt.Errorf("create hub migrations: %w", err)
+	}
+	var applied int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM hub_migrations WHERE name=?`, migration).Scan(&applied); err != nil {
+		return fmt.Errorf("check ticket page index rebuild: %w", err)
+	}
+	if applied > 0 {
+		return nil
+	}
+	if _, err := db.Exec(`DROP INDEX IF EXISTS idx_task_run_summaries_ticket_page; CREATE INDEX idx_task_run_summaries_ticket_page ON task_run_summaries(tenant_id, status, requires_pr, analytics_enabled, started_at DESC, issue_id, issue_created_at DESC)`); err != nil {
+		return fmt.Errorf("create ticket page index: %w", err)
+	}
+	_, err := db.Exec(`INSERT INTO hub_migrations(name, applied_at) VALUES(?, ?) ON CONFLICT(name) DO NOTHING`, migration, now().UnixMilli())
 	return err
 }
 
