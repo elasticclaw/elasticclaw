@@ -40,9 +40,22 @@ go version && node --version && npm --version && oras version
 docker version   # Docker is on the VM; use for container tests
 ```
 
-## Git
+## Git & GitHub Auth
 
-You have a git credential helper installed. Use that to interaction with git and gh.
+You are already authenticated to GitHub via the ElasticClaw credential helper. Do not run `gh auth login`, `gh auth setup-git`, or set `GITHUB_TOKEN`/`GH_TOKEN` yourself. Just use `git` and `gh` directly — the helper mints a fresh, scoped GitHub App token for every operation.
+
+How it works: `/usr/local/bin/gh` is a wrapper that calls the credential helper (`/usr/local/bin/elasticclaw-git-credentials`) to fetch a token from the hub before delegating to the real `gh` binary. The credential helper hits `$ELASTICCLAW_HUB_URL/api/github/token/$ELASTICCLAW_CLAW_ID` and returns a short-lived GitHub App installation token. Because the token is refreshed per invocation, nothing is persisted in `~/.config/gh/hosts.yml`.
+
+Do not use `gh auth status` to check authentication — it looks at the persisted `hosts.yml` file and can report "not authenticated" even when the wrapper is working. To verify gh is ready, run a real command such as `gh api rate_limit` or `gh repo view <owner>/<repo>`.
+
+If you see an auth prompt or error, verify the credential helper is being invoked by running:
+
+```bash
+printf 'protocol=https\nhost=github.com\n' | git credential fill
+```
+
+This should return `username=x-access-token` and a password. Do not try logging in again. The helper is the source of truth.
+
 NEVER force push and rebase unless you are resolving conflicts. When addressing standard feedback, it's preferable to push a new commit.
 
 ## Memory

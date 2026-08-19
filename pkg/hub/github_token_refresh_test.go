@@ -47,6 +47,13 @@ func TestGitHubCLIWrapperHandlesRealGhInUsrLocalBin(t *testing.T) {
 	assertContains(t, script, "GitHub gh wrapper already configured", "wrapper logs when already installed")
 }
 
+func TestGitHubCLIWrapperInstallEnsuresLocalBinIsFirstInPath(t *testing.T) {
+	script := buildGitHubCLIWrapperInstallScript()
+
+	assertContains(t, script, "sudo tee /etc/profile.d/elasticclaw-path.sh", "wrapper installs PATH profile to ensure /usr/local/bin is first")
+	assertContains(t, script, `export PATH="/usr/local/bin:$PATH"`, "wrapper prepends /usr/local/bin to PATH")
+}
+
 func TestGitHubCLIWrapperEscapesRealGhPathForSed(t *testing.T) {
 	script := buildGitHubCLIWrapperInstallScript()
 
