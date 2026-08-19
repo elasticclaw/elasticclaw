@@ -74,7 +74,7 @@ export function DatePickerRange({ value, onChange, className }: DatePickerRangeP
   }
 
   return (
-    <Popover open={open} onOpenChange={setOpen}>
+    <Popover open={open} onOpenChange={(nextOpen) => { setOpen(nextOpen); if (!nextOpen) setPendingRange(undefined) }}>
       <PopoverTrigger asChild>
         <Button variant="outline" className={cn('justify-start font-normal', className)}>
           <CalendarDays className="size-3.5 text-muted-foreground" />
