@@ -27,9 +27,11 @@ export function RunDetailPanel({ runId, run, details, loading, error, onClose }:
   useEffect(() => {
     if (!runId) return
     previousFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null
-    document.querySelector<HTMLElement>('[aria-label="Close run detail"]')?.focus()
     return () => previousFocusRef.current?.focus()
   }, [runId])
+  useEffect(() => {
+    if (runId) document.querySelector<HTMLElement>('[aria-label="Close run detail"]')?.focus()
+  }, [runId, Boolean(run)])
   if (!runId) return null
   if (!run) {
     return <><div className="fixed inset-0 z-[55] bg-black/50" onClick={onClose} aria-hidden="true" /><aside ref={panelRef} tabIndex={-1} role="dialog" aria-modal="true" className="fixed inset-y-0 right-0 z-[60] flex w-full max-w-full md:max-w-[66vw] flex-col border-l bg-background shadow-xl"><header className="flex items-center justify-between border-b bg-card p-4"><h2 className="font-mono text-sm font-semibold">Run details</h2><Button variant="ghost" size="icon" className="size-8" onClick={onClose} aria-label="Close run detail"><X className="size-4" /></Button></header><div className="flex-1 p-4">{error ? <p className="flex items-center gap-2 rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive"><AlertCircle className="size-4" />{error}</p> : loading ? <p className="text-sm text-muted-foreground">Loading run details…</p> : <p className="text-sm text-muted-foreground">Run details are unavailable.</p>}</div></aside></>
