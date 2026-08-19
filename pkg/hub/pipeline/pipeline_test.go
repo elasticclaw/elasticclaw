@@ -1070,6 +1070,7 @@ stages:
         via: eng-agents
         text: "PR merged: {{.Issue.URL}}"
         subject: "{{.Issue.Identifier}} merged"
+        severity: warning
         target: "{{.Outputs.build.channel}}"
         options:
           unfurl_links: false
@@ -1090,11 +1091,29 @@ stages:
 	if action.Subject != "{{.Issue.Identifier}} merged" {
 		t.Fatalf("subject = %q", action.Subject)
 	}
+	if action.Severity != "warning" {
+		t.Fatalf("severity = %q, want warning", action.Severity)
+	}
 	if action.Target != "{{.Outputs.build.channel}}" {
 		t.Fatalf("target = %q", action.Target)
 	}
 	if v, ok := action.Options["unfurl_links"].(bool); !ok || v {
 		t.Fatalf("options.unfurl_links = %#v, want false", action.Options["unfurl_links"])
+	}
+}
+
+func TestParseNotifyActionRejectsInvalidSeverity(t *testing.T) {
+	_, err := pipeline.Parse([]byte(`
+stages:
+  - id: announce
+    on_enter:
+      notify:
+        via: eng-agents
+        text: hello
+        severity: urgent
+`))
+	if err == nil || !strings.Contains(err.Error(), "notify severity") {
+		t.Fatalf("Parse error = %v, want invalid notify severity", err)
 	}
 }
 

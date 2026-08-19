@@ -40,9 +40,8 @@ const notifyActionTimeout = 10 * time.Minute
 // CloseIssue in the same on_enter make the same choice.
 //
 // A pipeline notification is a one-shot send: Message.Thread stays empty and
-// no thread bookkeeping (slack_run_threads) is written or reused — that state
-// belongs to the lifecycle notifier, whose thread roots track task runs, not
-// stages. A stage that wants threading passes provider options instead
+// no thread bookkeeping (slack_run_threads) is written or reused. A stage
+// that wants threading passes provider options instead
 // (e.g. options: {thread_ts: ...} for Slack).
 func (s *Server) executeNotifyAction(clawID string, stage pipeline.Stage, action pipeline.NotifyAction, pipelineCtx pipelineContext) {
 	via := strings.TrimSpace(action.Via)
@@ -78,11 +77,30 @@ func (s *Server) executeNotifyAction(clawID string, stage pipeline.Stage, action
 		return renderInjectWithData(clawID, text, data)
 	}
 	message := notify.Message{
-		Text:    render(action.Text),
-		Subject: render(action.Subject),
-		Target:  render(action.Target),
-		Options: action.Options,
+		Text:     render(action.Text),
+		Subject:  render(action.Subject),
+		Target:   render(action.Target),
+		Options:  action.Options,
+		Severity: notify.SeverityInfo,
 	}
+	switch action.Severity {
+	case "success":
+		message.Severity = notify.SeveritySuccess
+	case "warning":
+		message.Severity = notify.SeverityWarning
+	case "error":
+		message.Severity = notify.SeverityError
+	}
+	if pipelineCtx.IssueID != "" {
+		message.Fields = append(message.Fields, notify.Field{Label: "issue", Value: pipelineCtx.IssueID, Code: true})
+	}
+	if pipelineCtx.Workflow != nil && pipelineCtx.Workflow.Name != "" {
+		message.Fields = append(message.Fields, notify.Field{Value: "workflow " + pipelineCtx.Workflow.Name})
+	}
+	if clawID != "" {
+		message.Fields = append(message.Fields, notify.Field{Label: "claw", Value: shortID(clawID), Code: true})
+	}
+	message.Summary = pipelineNotifySummary(pipelineCtx.IssueID)
 	s.safeGo("pipeline notify", func() {
 		ctx, cancel := context.WithTimeout(context.Background(), notifyActionTimeout)
 		defer cancel()
@@ -92,6 +110,17 @@ func (s *Server) executeNotifyAction(clawID string, stage pipeline.Stage, action
 		}
 		log.Printf("[pipeline] notify action sent for claw %s stage %q via %q", clawID, stage.ID, via)
 	})
+}
+
+// pipelineNotifySummary builds the push-notification summary slot.
+// slackFallbackText already leads with msg.Text (there is no Title on a
+// pipeline notification), so Summary must not repeat it — only the issue
+// identifier adds anything the fallback headline does not already say.
+func pipelineNotifySummary(issueID string) []string {
+	if issueID == "" {
+		return nil
+	}
+	return []string{issueID}
 }
 
 // notifierForPipeline resolves the named hub notifier for a pipeline notify
