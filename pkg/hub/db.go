@@ -698,7 +698,7 @@ func migrate(db *sql.DB) error {
 	CREATE INDEX IF NOT EXISTS idx_task_run_summaries_model ON task_run_summaries(tenant_id, model, started_at DESC);
 	CREATE INDEX IF NOT EXISTS idx_task_run_summaries_repo ON task_run_summaries(tenant_id, repo, started_at DESC);
 	CREATE INDEX IF NOT EXISTS idx_task_run_summaries_timeout ON task_run_summaries(tenant_id, timeout_at);
-	CREATE INDEX IF NOT EXISTS idx_task_run_summaries_ticket_page ON task_run_summaries(tenant_id, status, requires_pr, analytics_enabled, started_at DESC, issue_id, issue_created_at DESC);
+	CREATE INDEX IF NOT EXISTS idx_task_run_summaries_ticket_page ON task_run_summaries(tenant_id, requires_pr, analytics_enabled, started_at DESC, issue_id, issue_created_at DESC, status);
 
 	CREATE TABLE IF NOT EXISTS hub_templates (
 		name       TEXT PRIMARY KEY,
@@ -966,7 +966,7 @@ func rebuildTaskRunSummariesStatusV3(db *sql.DB) error {
 		CREATE INDEX idx_task_run_summaries_model ON task_run_summaries(tenant_id, model, started_at DESC);
 		CREATE INDEX idx_task_run_summaries_repo ON task_run_summaries(tenant_id, repo, started_at DESC);
 		CREATE INDEX idx_task_run_summaries_timeout ON task_run_summaries(tenant_id, timeout_at);
-		CREATE INDEX idx_task_run_summaries_ticket_page ON task_run_summaries(tenant_id, status, requires_pr, analytics_enabled, started_at DESC, issue_id, issue_created_at DESC)`); err != nil {
+		CREATE INDEX idx_task_run_summaries_ticket_page ON task_run_summaries(tenant_id, requires_pr, analytics_enabled, started_at DESC, issue_id, issue_created_at DESC, status)`); err != nil {
 		return fmt.Errorf("replace task run summaries v3: %w", err)
 	}
 	return tx.Commit()
@@ -1176,7 +1176,7 @@ func rebuildTaskRunSummariesTicketPageV2(db *sql.DB) error {
 	if applied > 0 {
 		return nil
 	}
-	if _, err := db.Exec(`DROP INDEX IF EXISTS idx_task_run_summaries_ticket_page; CREATE INDEX idx_task_run_summaries_ticket_page ON task_run_summaries(tenant_id, status, requires_pr, analytics_enabled, started_at DESC, issue_id, issue_created_at DESC)`); err != nil {
+	if _, err := db.Exec(`DROP INDEX IF EXISTS idx_task_run_summaries_ticket_page; CREATE INDEX idx_task_run_summaries_ticket_page ON task_run_summaries(tenant_id, requires_pr, analytics_enabled, started_at DESC, issue_id, issue_created_at DESC, status)`); err != nil {
 		return fmt.Errorf("create ticket page index: %w", err)
 	}
 	_, err := db.Exec(`INSERT INTO hub_migrations(name, applied_at) VALUES(?, ?) ON CONFLICT(name) DO NOTHING`, migration, now().UnixMilli())
