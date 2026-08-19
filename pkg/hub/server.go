@@ -1344,7 +1344,7 @@ func (s *Server) handleClaws(w http.ResponseWriter, r *http.Request) {
 				placeholders[i] = "?"
 				args[i] = claw.ID
 			}
-			prRows, err := s.db.Query(`SELECT claw_id, COUNT(*) FROM claw_prs WHERE claw_id IN (`+strings.Join(placeholders, ",")+`) AND state = 'open' GROUP BY claw_id`, args...)
+			prRows, err := s.db.Query(`SELECT cp.claw_id, COUNT(*) FROM claw_prs cp JOIN claws c ON c.id = cp.claw_id WHERE cp.claw_id IN (`+strings.Join(placeholders, ",")+`) AND cp.state = 'open' AND c.status NOT IN ('deleted','error','offline') GROUP BY cp.claw_id`, args...)
 			if err != nil {
 				log.Printf("handleClaws open PR count query error: %v", err)
 				http.Error(w, fmt.Sprintf("db error: %v", err), http.StatusInternalServerError)
@@ -3353,6 +3353,8 @@ func (s *Server) handleUserWS(w http.ResponseWriter, r *http.Request) {
 			hm.CreatedAt = now()
 			if ghLogin != "" {
 				hm.UserLogin = &ghLogin
+			} else {
+				hm.UserLogin = nil
 			}
 			s.resumeNoProgressAfterUserInput(hm.ClawID)
 			if _, err := s.db.Exec(

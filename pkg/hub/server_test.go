@@ -711,6 +711,30 @@ func TestDeleteClawSoftDeletesAndHidesFromAPI(t *testing.T) {
 	}
 }
 
+func TestHandleClawsDoesNotCountLegacyOpenPRForOfflineClaw(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, nil, "", "", "")
+	if _, err := db.Exec(`INSERT INTO claws(id,tenant_id,name,status,created_at) VALUES(?,?,?,?,datetime('now'))`, "claw-offline-pr", "test-tenant-id", "offline claw", "offline"); err != nil {
+		t.Fatalf("insert claw: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO claw_prs(id,claw_id,repo,pr_number,pr_url,state,created_at) VALUES(?,?,?,?,?,?,datetime('now'))`, "legacy-offline-pr", "claw-offline-pr", "owner/repo", 1, "https://github.com/owner/repo/pull/1", "open"); err != nil {
+		t.Fatalf("insert legacy PR: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/api/claws", nil)
+	req = req.WithContext(context.WithValue(req.Context(), ctxTenantKey{}, "test-tenant-id"))
+	rec := httptest.NewRecorder()
+	s.handleClaws(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list claws status = %d: %s", rec.Code, rec.Body.String())
+	}
+	var claws []types.Claw
+	if err := json.NewDecoder(rec.Body).Decode(&claws); err != nil {
+		t.Fatalf("decode claws: %v", err)
+	}
+	if len(claws) != 1 || claws[0].OpenPRCount != 0 {
+		t.Fatalf("claws = %#v, want offline claw with zero open PRs", claws)
+	}
+}
+
 func TestDeleteClawKeepsMessages(t *testing.T) {
 	s, db := NewTestServerWithConfig(t, nil, "", "", "")
 	_, err := db.Exec(

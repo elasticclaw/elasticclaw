@@ -698,6 +698,10 @@ func (s *Server) persistPipelineOutput(clawID, stageID, outputName string, resul
 	}
 	recordsJSON, _ := json.Marshal(records)
 	spanID := uuid.NewString()
+	// Records is an uncapped JSON blob and this process-wide lock is broader than
+	// necessary; keep both concerns in mind if output log volume grows.
+	pipelineLogRecordMu.Lock()
+	defer pipelineLogRecordMu.Unlock()
 	_, err := s.db.Exec(`
 		INSERT INTO pipeline_outputs(claw_id, stage_id, output_name, exit_code, stdout, stderr, parsed_json, span_id, span_kind, duration_ms, status, records, created_at)
 		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)

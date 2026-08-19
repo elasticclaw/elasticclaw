@@ -89,6 +89,43 @@ func TestPostMessageStoresAndReturnsUserLogin(t *testing.T) {
 	}
 }
 
+func TestUserWSClearsClientSuppliedLoginForTokenAuth(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{}, "", "", "")
+	const clawID = "claw-ws-token-login"
+	if _, err := db.Exec(`INSERT INTO claws(id,tenant_id,name,status,created_at) VALUES(?,?,?,?,datetime('now'))`, clawID, "test-tenant-id", "ws claw", "connected"); err != nil {
+		t.Fatalf("insert claw: %v", err)
+	}
+	ts := httptest.NewServer(s.Handler())
+	t.Cleanup(ts.Close)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(ts.URL, "http")+"/api/ws?token=test-token", nil)
+	if err != nil {
+		t.Fatalf("dial user websocket: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close(websocket.StatusNormalClosure, "done") })
+	victim := "victim"
+	if err := wsjson.Write(ctx, conn, types.WSMessage{Type: "message", Payload: types.HubMessage{ClawID: clawID, Content: "message", UserLogin: &victim}}); err != nil {
+		t.Fatalf("write websocket message: %v", err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		var login *string
+		err := db.QueryRow(`SELECT user_login FROM messages WHERE claw_id=?`, clawID).Scan(&login)
+		if err == nil {
+			if login != nil {
+				t.Fatalf("persisted user_login = %q, want NULL", *login)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("read persisted websocket message: %v", err)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
 // TestWSMessageFrameIncludesUserLogin asserts that a "message" WS frame
 // broadcast to connected dashboard users carries user_login, following the
 // existing hub WS test patterns (pre-created claw row, t.Fatal on DB errors).

@@ -156,6 +156,37 @@ func migrate(db *sql.DB) error {
 	if err := addColumn(db, "claw_prs", "merged_at", `TEXT`); err != nil {
 		return err
 	}
+	// The PR watcher never polls claws in terminal/offline states. Legacy rows
+	// therefore cannot safely retain the historical default of "open". Preserve
+	// a known terminal task-run PR state when available; otherwise mark it unknown.
+	if _, err := db.Exec(`
+		UPDATE claw_prs
+		SET state = COALESCE((
+			SELECT CASE WHEN trp.merged = 1 OR trp.state = 'closed' THEN 'closed' END
+			FROM task_run_prs trp
+			JOIN task_runs tr ON tr.id = trp.run_id
+			WHERE tr.claw_id = claw_prs.claw_id
+			  AND trp.repo = claw_prs.repo
+			  AND trp.pr_number = claw_prs.pr_number
+			  AND (trp.merged = 1 OR trp.state = 'closed')
+			ORDER BY trp.updated_at DESC
+			LIMIT 1
+		), 'unknown'),
+			merged = COALESCE((
+			SELECT trp.merged
+			FROM task_run_prs trp
+			JOIN task_runs tr ON tr.id = trp.run_id
+			WHERE tr.claw_id = claw_prs.claw_id
+			  AND trp.repo = claw_prs.repo
+			  AND trp.pr_number = claw_prs.pr_number
+			  AND (trp.merged = 1 OR trp.state = 'closed')
+			ORDER BY trp.updated_at DESC
+			LIMIT 1
+		), 0)
+		WHERE state = 'open'
+		  AND EXISTS (SELECT 1 FROM claws c WHERE c.id = claw_prs.claw_id AND c.status IN ('deleted','error','offline'))`); err != nil && !isBenignAddColumnErr(err) {
+		return err
+	}
 	if err := addColumn(db, "messages", "user_login", `TEXT`); err != nil {
 		return err
 	}

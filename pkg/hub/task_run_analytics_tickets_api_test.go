@@ -238,6 +238,37 @@ func TestApplyOrScheduleTaskRunAnalyticsTicketMetadataKeepsNonZeroReportedAt(t *
 	}
 }
 
+func TestApplyOrScheduleTaskRunAnalyticsTicketMetadataKeepsCachedValuesAfterEnrichmentFailure(t *testing.T) {
+	s, db := newTaskRunAnalyticsAPITestServer(t)
+	const issueID = "TICKET-ENRICHMENT-FAILURE"
+	const updatedAt = int64(123456)
+	if _, err := db.Exec(`INSERT INTO ticket_metadata(tenant_id,issue_id,requester,requester_role,team,priority,ask,reported_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)`, "test-tenant-id", issueID, "requester", "manager", "platform", "high", "fix it", 999, updatedAt); err != nil {
+		t.Fatalf("insert cached metadata: %v", err)
+	}
+
+	s.applyOrScheduleTaskRunAnalyticsTicketMetadata("test-tenant-id", &taskRunAnalyticsTicketView{IssueID: issueID}, taskRunAnalyticsRunView{}, taskRunAnalyticsTicketMetadata{})
+	key := "test-tenant-id:" + issueID
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if _, inflight := ticketMetadataInflight.Load(key); !inflight {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("ticket metadata enrichment did not finish")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	var requester, role, team, priority, ask string
+	var reportedAt, gotUpdatedAt int64
+	if err := db.QueryRow(`SELECT requester,requester_role,team,priority,ask,reported_at,updated_at FROM ticket_metadata WHERE tenant_id=? AND issue_id=?`, "test-tenant-id", issueID).Scan(&requester, &role, &team, &priority, &ask, &reportedAt, &gotUpdatedAt); err != nil {
+		t.Fatalf("read cached metadata: %v", err)
+	}
+	if requester != "requester" || role != "manager" || team != "platform" || priority != "high" || ask != "fix it" || reportedAt != 999 || gotUpdatedAt != updatedAt {
+		t.Fatalf("metadata after failed enrichment = %q/%q/%q/%q/%q/%d/%d, want unchanged", requester, role, team, priority, ask, reportedAt, gotUpdatedAt)
+	}
+}
+
 // Regression test for finding #3: both the hydration and handler paths must
 // reject an empty run group before buildTaskRunAnalyticsTicket reaches runs[0].
 func TestTaskRunAnalyticsTicketsHandlerSkipsEmptyGroups(t *testing.T) {

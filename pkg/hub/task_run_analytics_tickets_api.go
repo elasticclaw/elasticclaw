@@ -552,13 +552,20 @@ func (s *Server) applyOrScheduleTaskRunAnalyticsTicketMetadata(tenantID string, 
 	if _, loaded := ticketMetadataInflight.LoadOrStore(key, struct{}{}); loaded {
 		return
 	}
+	ticketMetadataEnrichment <- struct{}{}
 	go func() {
 		defer ticketMetadataInflight.Delete(key)
-		ticketMetadataEnrichment <- struct{}{}
 		defer func() { <-ticketMetadataEnrichment }()
 		metadata := taskRunAnalyticsTicketView{IssueID: ticket.IssueID, IssueTitle: ticket.IssueTitle, Source: ticket.Source, ReportedAt: ticket.ReportedAt}
 		s.enrichTaskRunAnalyticsTicket(&metadata, run)
-		if _, err := s.db.Exec(`INSERT INTO ticket_metadata(tenant_id,issue_id,requester,requester_role,team,priority,ask,reported_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(tenant_id,issue_id) DO UPDATE SET requester=excluded.requester, requester_role=excluded.requester_role, team=excluded.team, priority=excluded.priority, ask=excluded.ask, reported_at=excluded.reported_at, updated_at=excluded.updated_at`, tenantID, metadata.IssueID, metadata.Requester, metadata.RequesterRole, metadata.Team, metadata.Priority, metadata.Ask, metadata.ReportedAt, now().UnixMilli()); err != nil {
+		resolved := metadata.Requester != "" || metadata.RequesterRole != "" || metadata.Team != "" || metadata.Priority != "" || metadata.Ask != ""
+		if !resolved {
+			var exists bool
+			if err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM ticket_metadata WHERE tenant_id=? AND issue_id=?)`, tenantID, metadata.IssueID).Scan(&exists); err != nil || exists {
+				return
+			}
+		}
+		if _, err := s.db.Exec(`INSERT INTO ticket_metadata(tenant_id,issue_id,requester,requester_role,team,priority,ask,reported_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(tenant_id,issue_id) DO UPDATE SET requester=CASE WHEN excluded.requester != '' THEN excluded.requester ELSE ticket_metadata.requester END, requester_role=CASE WHEN excluded.requester_role != '' THEN excluded.requester_role ELSE ticket_metadata.requester_role END, team=CASE WHEN excluded.team != '' THEN excluded.team ELSE ticket_metadata.team END, priority=CASE WHEN excluded.priority != '' THEN excluded.priority ELSE ticket_metadata.priority END, ask=CASE WHEN excluded.ask != '' THEN excluded.ask ELSE ticket_metadata.ask END, reported_at=CASE WHEN excluded.reported_at != 0 THEN excluded.reported_at ELSE ticket_metadata.reported_at END, updated_at=excluded.updated_at`, tenantID, metadata.IssueID, metadata.Requester, metadata.RequesterRole, metadata.Team, metadata.Priority, metadata.Ask, metadata.ReportedAt, now().UnixMilli()); err != nil {
 			log.Printf("[task-run-analytics] write ticket metadata %s: %v", metadata.IssueID, err)
 		}
 	}()

@@ -35,6 +35,17 @@ func TestSplitTaskRunAnalyticsValuesPreservesDoubleEncodedCommas(t *testing.T) {
 	}
 }
 
+func TestSplitTaskRunAnalyticsValuesPreservesLiteralPlus(t *testing.T) {
+	request, err := http.NewRequest(http.MethodGet, "/api/analytics?model=build%2Btest", nil)
+	if err != nil {
+		t.Fatalf("build request: %v", err)
+	}
+	got := splitTaskRunAnalyticsValues(request.URL.Query(), "model")
+	if len(got) != 1 || got[0] != "build+test" {
+		t.Fatalf("splitTaskRunAnalyticsValues() = %#v, want [build+test]", got)
+	}
+}
+
 func encodeURIComponentForTest(value string) string {
 	const hex = "0123456789ABCDEF"
 	var encoded strings.Builder

@@ -1543,7 +1543,7 @@ func splitTaskRunAnalyticsValues(q url.Values, keys ...string) []string {
 	for _, key := range keys {
 		for _, raw := range q[key] {
 			for _, part := range strings.Split(raw, ",") {
-				decoded, err := url.QueryUnescape(part)
+				decoded, err := url.PathUnescape(part)
 				if err == nil && decoded != part {
 					part = decoded
 				} else {
