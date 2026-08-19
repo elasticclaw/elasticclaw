@@ -340,7 +340,7 @@ func TestJiraTerminateSignalCommentsIssue(t *testing.T) {
 		t.Fatalf("find claw: %v", err)
 	}
 	bridge := factorytest.ConnectFakeBridge(t, httpSrv.URL, clawID, "EC-123", "test-claw-token")
-	bridge.SendMessage("Stopping now. [TERMINATE]")
+	bridge.SendMessage("Stopping now.\n\n[TERMINATE]")
 
 	comment := jira.waitForComment(t, "EC-123")
 	if !strings.Contains(comment, "Agent stopped: claw requested self-termination") {

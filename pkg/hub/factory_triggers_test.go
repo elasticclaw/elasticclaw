@@ -2,6 +2,7 @@ package hub
 
 import (
 	"encoding/json"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -115,7 +116,7 @@ func TestClaimFactoryTriggerSkipsActiveSameFactory(t *testing.T) {
 	}
 }
 
-func TestClaimFactoryTriggerReclaimsErroredClaw(t *testing.T) {
+func TestClaimFactoryTriggerReclaimsErroredClawAfterBackoff(t *testing.T) {
 	s := newFactoryTriggerTestServer(t)
 	triggerKey := factoryTriggerKey("shortcut", "sc-123")
 	_, _ = s.db.Exec(`INSERT INTO claws(id, tenant_id, name, template, status, created_at) VALUES(?,?,?,?,?,?)`,
@@ -136,12 +137,21 @@ func TestClaimFactoryTriggerReclaimsErroredClaw(t *testing.T) {
 	if err != nil {
 		t.Fatalf("second claim: %v", err)
 	}
+	if claimed {
+		t.Fatal("expected the dead claw to be charged a retry, not reclaimed on the spot")
+	}
+
+	ageTrigger(t, s, triggerKey, 61*time.Second)
+	claimed, err = s.claimFactoryTrigger("qa", "shortcut", triggerKey, "poll", nil)
+	if err != nil {
+		t.Fatalf("claim after backoff: %v", err)
+	}
 	if !claimed {
-		t.Fatal("expected errored claw to be reclaimable")
+		t.Fatal("expected errored claw to be reclaimable once the backoff elapsed")
 	}
 }
 
-func TestClaimFactoryTriggerReclaimsDeletedClaw(t *testing.T) {
+func TestClaimFactoryTriggerReclaimsDeletedClawAfterBackoff(t *testing.T) {
 	s := newFactoryTriggerTestServer(t)
 	triggerKey := factoryTriggerKey("shortcut", "sc-123")
 	_, _ = s.db.Exec(`INSERT INTO claws(id, tenant_id, name, template, status, created_at) VALUES(?,?,?,?,?,?)`,
@@ -162,8 +172,17 @@ func TestClaimFactoryTriggerReclaimsDeletedClaw(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reclaim: %v", err)
 	}
+	if claimed {
+		t.Fatal("expected the dead claw to be charged a retry, not reclaimed on the spot")
+	}
+
+	ageTrigger(t, s, triggerKey, 61*time.Second)
+	claimed, err = s.claimFactoryTrigger("qa", "shortcut", triggerKey, "poll", nil)
+	if err != nil {
+		t.Fatalf("claim after backoff: %v", err)
+	}
 	if !claimed {
-		t.Fatal("expected deleted claw to be reclaimable")
+		t.Fatal("expected deleted claw to be reclaimable once the backoff elapsed")
 	}
 }
 
@@ -228,7 +247,10 @@ func TestFailedFactoryTriggerBackoffAndWebhookBypass(t *testing.T) {
 	}
 }
 
-func TestCompleteFactoryTriggerResetsRetryCount(t *testing.T) {
+// Completing a claim means a claw exists, not that the ticket succeeded, so the
+// retry ladder must survive it — otherwise a claw that keeps dying after
+// creation retries at a flat 30s forever.
+func TestCompleteFactoryTriggerKeepsRetryCount(t *testing.T) {
 	s := newFactoryTriggerTestServer(t)
 	key := factoryTriggerKey("linear", "ELA-789")
 	claimed, err := s.claimFactoryTrigger("code", "linear", key, "poll", nil)
@@ -243,7 +265,346 @@ func TestCompleteFactoryTriggerResetsRetryCount(t *testing.T) {
 	if err := s.db.QueryRow(`SELECT retry_count FROM factory_triggers WHERE trigger_key=?`, key).Scan(&retryCount); err != nil {
 		t.Fatal(err)
 	}
+	if retryCount != 1 {
+		t.Fatalf("retry_count = %d, want 1", retryCount)
+	}
+}
+
+// seedTriggerWithClaw creates a claw row in the given status and links it to a
+// freshly claimed trigger, i.e. the state the hub is in right after a claw was
+// provisioned for a ticket.
+func seedTriggerWithClaw(t *testing.T, s *Server, factory, integration, key, clawID, clawStatus, source string) {
+	t.Helper()
+	claimed, err := s.claimFactoryTrigger(factory, integration, key, source, nil)
+	if err != nil {
+		t.Fatalf("seed claim: %v", err)
+	}
+	if !claimed {
+		t.Fatal("seed claim: expected trigger to be claimable")
+	}
+	linkClawToTrigger(t, s, factory, integration, key, clawID, clawStatus)
+}
+
+// linkClawToTrigger creates a claw row in the given status and completes an
+// open claim with it, i.e. what a provisioning path does after claiming.
+func linkClawToTrigger(t *testing.T, s *Server, factory, integration, key, clawID, clawStatus string) {
+	t.Helper()
+	if _, err := s.db.Exec(`INSERT INTO claws(id, tenant_id, name, template, status, created_at) VALUES(?,?,?,?,?,?)`,
+		clawID, "tenant", clawID, "template", clawStatus, now()); err != nil {
+		t.Fatalf("insert claw %s: %v", clawID, err)
+	}
+	if err := s.completeFactoryTrigger(factory, integration, key, clawID); err != nil {
+		t.Fatalf("complete claim with %s: %v", clawID, err)
+	}
+}
+
+func triggerRetryCount(t *testing.T, s *Server, key string) int {
+	t.Helper()
+	var retryCount int
+	if err := s.db.QueryRow(`SELECT retry_count FROM factory_triggers WHERE trigger_key=?`, key).Scan(&retryCount); err != nil {
+		t.Fatalf("read retry_count: %v", err)
+	}
+	return retryCount
+}
+
+func ageTrigger(t *testing.T, s *Server, key string, d time.Duration) {
+	t.Helper()
+	if _, err := s.db.Exec(`UPDATE factory_triggers SET updated_at=? WHERE trigger_key=?`, now().Add(-d), key); err != nil {
+		t.Fatalf("age trigger: %v", err)
+	}
+}
+
+// A claw that dies after creation must be charged a retry instead of being
+// reclaimed on the next tick, which is what produced several identical claws
+// per ticket for a deterministic failure.
+func TestClaimFactoryTriggerChargesDeadClawAsFailedAttempt(t *testing.T) {
+	cases := []struct {
+		name        string
+		clawStatus  string
+		source      string
+		wantClaimed bool
+	}{
+		{name: "errored claw polled", clawStatus: "error", source: "poll", wantClaimed: false},
+		{name: "deleted claw polled", clawStatus: "deleted", source: "poll", wantClaimed: false},
+		{name: "errored claw integration webhook", clawStatus: "error", source: "linear webhook", wantClaimed: false},
+		{name: "errored claw exempt webhook", clawStatus: "error", source: "webhook", wantClaimed: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newFactoryTriggerTestServer(t)
+			key := factoryTriggerKey("linear", "ELA-dead")
+			seedTriggerWithClaw(t, s, "code", "linear", key, "claw-dead", tc.clawStatus, "poll")
+
+			claimed, err := s.claimFactoryTrigger("code", "linear", key, tc.source, nil)
+			if err != nil {
+				t.Fatalf("claim after claw death: %v", err)
+			}
+			if claimed != tc.wantClaimed {
+				t.Fatalf("claim after claw death = %v, want %v", claimed, tc.wantClaimed)
+			}
+			if got := triggerRetryCount(t, s, key); got != 1 {
+				t.Fatalf("retry_count = %d, want 1", got)
+			}
+		})
+	}
+}
+
+// The dead-claw path must climb the same ladder a creation failure climbs, and
+// completing a claim must not knock it back down to the first rung.
+func TestClaimFactoryTriggerDeadClawBackoffLadder(t *testing.T) {
+	s := newFactoryTriggerTestServer(t)
+	key := factoryTriggerKey("linear", "ELA-ladder")
+	claimed, err := s.claimFactoryTrigger("code", "linear", key, "poll", nil)
+	if err != nil || !claimed {
+		t.Fatalf("initial claim = %v, %v", claimed, err)
+	}
+
+	// The wait is computed from the post-increment retry_count, so the first
+	// rung after a claw dies is 60s, the same rung a creation failure lands on.
+	for attempt, wait := range []time.Duration{60 * time.Second, 120 * time.Second, 240 * time.Second} {
+		linkClawToTrigger(t, s, "code", "linear", key, fmt.Sprintf("claw-ladder-%d", attempt), "error")
+
+		claimed, err = s.claimFactoryTrigger("code", "linear", key, "poll", nil)
+		if err != nil {
+			t.Fatalf("attempt %d: detect death: %v", attempt, err)
+		}
+		if claimed {
+			t.Fatalf("attempt %d: dead claw reclaimed with no wait", attempt)
+		}
+		if got, want := triggerRetryCount(t, s, key), attempt+1; got != want {
+			t.Fatalf("attempt %d: retry_count = %d, want %d", attempt, got, want)
+		}
+
+		ageTrigger(t, s, key, wait-time.Second)
+		claimed, err = s.claimFactoryTrigger("code", "linear", key, "poll", nil)
+		if err != nil {
+			t.Fatalf("attempt %d: claim inside backoff: %v", attempt, err)
+		}
+		if claimed {
+			t.Fatalf("attempt %d: reclaimed %s after death, want wait of %s", attempt, wait-time.Second, wait)
+		}
+
+		ageTrigger(t, s, key, wait+time.Second)
+		claimed, err = s.claimFactoryTrigger("code", "linear", key, "poll", nil)
+		if err != nil {
+			t.Fatalf("attempt %d: claim after backoff: %v", attempt, err)
+		}
+		if !claimed {
+			t.Fatalf("attempt %d: not reclaimed %s after death, want reclaim after %s", attempt, wait+time.Second, wait)
+		}
+	}
+}
+
+func TestFactoryTriggerBackoffCap(t *testing.T) {
+	cases := []struct {
+		retryCount int
+		want       time.Duration
+	}{
+		{retryCount: 0, want: 30 * time.Second},
+		{retryCount: 1, want: time.Minute},
+		{retryCount: 5, want: 16 * time.Minute},
+		{retryCount: 6, want: 30 * time.Minute},
+		{retryCount: 40, want: 30 * time.Minute},
+	}
+	for _, tc := range cases {
+		if got := factoryTriggerBackoff(tc.retryCount); got != tc.want {
+			t.Fatalf("factoryTriggerBackoff(%d) = %s, want %s", tc.retryCount, got, tc.want)
+		}
+	}
+}
+
+func TestClaimFactoryTriggerDeadClawBackoffIsCapped(t *testing.T) {
+	s := newFactoryTriggerTestServer(t)
+	key := factoryTriggerKey("linear", "ELA-cap")
+	seedTriggerWithClaw(t, s, "code", "linear", key, "claw-cap", "error", "poll")
+	if _, err := s.db.Exec(`UPDATE factory_triggers SET retry_count=20 WHERE trigger_key=?`, key); err != nil {
+		t.Fatalf("seed retry_count: %v", err)
+	}
+
+	claimed, err := s.claimFactoryTrigger("code", "linear", key, "poll", nil)
+	if err != nil {
+		t.Fatalf("detect death: %v", err)
+	}
+	if claimed {
+		t.Fatal("dead claw reclaimed with no wait")
+	}
+
+	ageTrigger(t, s, key, 29*time.Minute)
+	claimed, err = s.claimFactoryTrigger("code", "linear", key, "poll", nil)
+	if err != nil {
+		t.Fatalf("claim inside cap: %v", err)
+	}
+	if claimed {
+		t.Fatal("reclaimed after 29m, want 30m cap")
+	}
+
+	ageTrigger(t, s, key, 31*time.Minute)
+	claimed, err = s.claimFactoryTrigger("code", "linear", key, "poll", nil)
+	if err != nil {
+		t.Fatalf("claim past cap: %v", err)
+	}
+	if !claimed {
+		t.Fatal("not reclaimed after 31m, want backoff capped at 30m")
+	}
+}
+
+// A ticket nobody has attempted yet must never inherit a wait.
+func TestClaimFactoryTriggerFreshTriggerDoesNotWait(t *testing.T) {
+	s := newFactoryTriggerTestServer(t)
+	failedKey := factoryTriggerKey("linear", "ELA-failed")
+	seedTriggerWithClaw(t, s, "code", "linear", failedKey, "claw-failed", "error", "poll")
+	if claimed, err := s.claimFactoryTrigger("code", "linear", failedKey, "poll", nil); err != nil || claimed {
+		t.Fatalf("dead claw claim = %v, %v; want false, nil", claimed, err)
+	}
+
+	freshKey := factoryTriggerKey("linear", "ELA-fresh")
+	claimed, err := s.claimFactoryTrigger("code", "linear", freshKey, "poll", nil)
+	if err != nil || !claimed {
+		t.Fatalf("fresh trigger claim = %v, %v; want true, nil", claimed, err)
+	}
+}
+
+// A trigger whose claw row is gone from the database never recorded a failure,
+// so it is reclaimed straight away.
+func TestClaimFactoryTriggerMissingClawRowReclaimsImmediately(t *testing.T) {
+	s := newFactoryTriggerTestServer(t)
+	key := factoryTriggerKey("linear", "ELA-gone")
+	seedTriggerWithClaw(t, s, "code", "linear", key, "claw-gone", "running", "poll")
+	if _, err := s.db.Exec(`DELETE FROM claws WHERE id=?`, "claw-gone"); err != nil {
+		t.Fatalf("delete claw row: %v", err)
+	}
+
+	claimed, err := s.claimFactoryTrigger("code", "linear", key, "poll", nil)
+	if err != nil || !claimed {
+		t.Fatalf("claim with missing claw row = %v, %v; want true, nil", claimed, err)
+	}
+	if got := triggerRetryCount(t, s, key); got != 0 {
+		t.Fatalf("retry_count = %d, want 0", got)
+	}
+}
+
+// A claw that ran for a while and was then cleaned up is not churn. Charging it
+// a retry would make every successful ticket pay a backoff the next time its
+// trigger fires, and — since nothing ever resets retry_count — the wait would
+// ratchet up for the rest of that trigger's life.
+func TestClaimFactoryTriggerDoesNotChargeLongLivedClaw(t *testing.T) {
+	s := newFactoryTriggerTestServer(t)
+	triggerKey := factoryTriggerKey("shortcut", "sc-long-lived")
+	// Created two hours ago: this claw did its job before being deleted.
+	if _, err := s.db.Exec(`INSERT INTO claws(id, tenant_id, name, template, status, created_at) VALUES(?,?,?,?,?,?)`,
+		"claw-old", "tenant", "claw", "template", "deleted", now().Add(-2*time.Hour)); err != nil {
+		t.Fatalf("seed claw: %v", err)
+	}
+
+	claimed, err := s.claimFactoryTrigger("qa", "shortcut", triggerKey, "poll", nil)
+	if err != nil {
+		t.Fatalf("initial claim: %v", err)
+	}
+	if !claimed {
+		t.Fatal("expected initial claim")
+	}
+	if err := s.completeFactoryTrigger("qa", "shortcut", triggerKey, "claw-old"); err != nil {
+		t.Fatalf("complete: %v", err)
+	}
+
+	claimed, err = s.claimFactoryTrigger("qa", "shortcut", triggerKey, "poll", nil)
+	if err != nil {
+		t.Fatalf("second claim: %v", err)
+	}
+	if !claimed {
+		t.Fatal("a long-lived claw must be reclaimed immediately, not charged a retry")
+	}
+	var retryCount int
+	if err := s.db.QueryRow(`SELECT retry_count FROM factory_triggers WHERE trigger_key=?`, triggerKey).Scan(&retryCount); err != nil {
+		t.Fatalf("read retry_count: %v", err)
+	}
 	if retryCount != 0 {
-		t.Fatalf("retry_count = %d, want 0", retryCount)
+		t.Fatalf("a successful run must not leave a retry charge behind, got retry_count=%d", retryCount)
+	}
+}
+
+// An errored claw is a failed attempt at any age: nothing marks a claw errored
+// on the way out of a successful run. Gating it by age left the original burn
+// loop intact for anything that dies past the cutoff — a slow bootstrap, or a
+// failure on the first long turn.
+func TestClaimFactoryTriggerChargesErroredClawRegardlessOfAge(t *testing.T) {
+	s := newFactoryTriggerTestServer(t)
+	triggerKey := factoryTriggerKey("shortcut", "sc-old-error")
+	if _, err := s.db.Exec(`INSERT INTO claws(id, tenant_id, name, template, status, created_at) VALUES(?,?,?,?,?,?)`,
+		"claw-old-error", "tenant", "claw", "template", "error", now().Add(-2*time.Hour)); err != nil {
+		t.Fatalf("seed claw: %v", err)
+	}
+	if claimed, err := s.claimFactoryTrigger("qa", "shortcut", triggerKey, "poll", nil); err != nil || !claimed {
+		t.Fatalf("initial claim = %v, %v", claimed, err)
+	}
+	if err := s.completeFactoryTrigger("qa", "shortcut", triggerKey, "claw-old-error"); err != nil {
+		t.Fatalf("complete: %v", err)
+	}
+
+	claimed, err := s.claimFactoryTrigger("qa", "shortcut", triggerKey, "poll", nil)
+	if err != nil {
+		t.Fatalf("second claim: %v", err)
+	}
+	if claimed {
+		t.Fatal("an errored claw must be charged a retry whatever its age")
+	}
+	var retryCount int
+	if err := s.db.QueryRow(`SELECT retry_count FROM factory_triggers WHERE trigger_key=?`, triggerKey).Scan(&retryCount); err != nil {
+		t.Fatalf("read retry_count: %v", err)
+	}
+	if retryCount != 1 {
+		t.Fatalf("retry_count = %d, want 1", retryCount)
+	}
+}
+
+// Surviving the cutoff is evidence the failure healed, so the stale charges go.
+// Otherwise a ticket that once churned carries the count for life and its next
+// transient death starts at the 30m cap instead of 30s.
+func TestClaimFactoryTriggerClearsStaleChargesAfterAHealthyRun(t *testing.T) {
+	s := newFactoryTriggerTestServer(t)
+	triggerKey := factoryTriggerKey("shortcut", "sc-healed")
+	if _, err := s.db.Exec(`INSERT INTO claws(id, tenant_id, name, template, status, created_at) VALUES(?,?,?,?,?,?)`,
+		"claw-healed", "tenant", "claw", "template", "deleted", now().Add(-2*time.Hour)); err != nil {
+		t.Fatalf("seed claw: %v", err)
+	}
+	if claimed, err := s.claimFactoryTrigger("qa", "shortcut", triggerKey, "poll", nil); err != nil || !claimed {
+		t.Fatalf("initial claim = %v, %v", claimed, err)
+	}
+	if err := s.completeFactoryTrigger("qa", "shortcut", triggerKey, "claw-healed"); err != nil {
+		t.Fatalf("complete: %v", err)
+	}
+	// A history of churn from earlier attempts.
+	if _, err := s.db.Exec(`UPDATE factory_triggers SET retry_count=7 WHERE trigger_key=?`, triggerKey); err != nil {
+		t.Fatalf("seed retry_count: %v", err)
+	}
+
+	claimed, err := s.claimFactoryTrigger("qa", "shortcut", triggerKey, "poll", nil)
+	if err != nil {
+		t.Fatalf("reclaim: %v", err)
+	}
+	if !claimed {
+		t.Fatal("a long-lived claw must be reclaimed immediately")
+	}
+	var retryCount int
+	if err := s.db.QueryRow(`SELECT retry_count FROM factory_triggers WHERE trigger_key=?`, triggerKey).Scan(&retryCount); err != nil {
+		t.Fatalf("read retry_count: %v", err)
+	}
+	if retryCount != 0 {
+		t.Fatalf("stale charges survived a healthy run: retry_count=%d", retryCount)
+	}
+}
+
+// The human override the code's comment promised did not exist: the manual
+// trigger sat on the non-exempt side and was refused for up to 30 minutes
+// behind a message about an "active trigger claim".
+func TestManualWorkflowTriggerSkipsBackoff(t *testing.T) {
+	if !triggerSourceSkipsBackoff(manualWorkflowTriggerSource) {
+		t.Fatal("the manual trigger is the human override and must not wait out a backoff")
+	}
+	if triggerSourceSkipsBackoff("poll") {
+		t.Fatal("the poller must keep backing off — it is the only source that can spin")
+	}
+	if triggerSourceSkipsBackoff("linear webhook") {
+		t.Fatal("integration webhooks repeat on their own and must keep backing off")
 	}
 }

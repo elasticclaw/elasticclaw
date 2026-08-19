@@ -292,12 +292,288 @@ func TestEntryStage(t *testing.T) {
 
 func TestStageForMessageContains(t *testing.T) {
 	p, _ := pipeline.Parse([]byte(sampleYAML))
-	s := p.StageForMessageContains("Great work! [DONE] https://github.com/org/repo/pull/1")
+	s := p.StageForMessageContains("[DONE] https://github.com/org/repo/pull/1")
 	if s == nil {
 		t.Fatal("expected to match message_contains trigger")
 	}
 	if s.ID != "pr_opened" {
 		t.Errorf("expected 'pr_opened', got %q", s.ID)
+	}
+}
+
+// TestStageForMessageContainsAnchoring pins the line-start anchoring that
+// NEXT-724 and NEXT-707 paid for. The "does not match" cases are the verbatim
+// text from those two incidents; the "matches" cases are decorated forms this
+// hub has actually seen agents send. A regression on either side is expensive:
+// a spurious match burns a run, a missed match freezes the pipeline forever.
+func TestStageForMessageContainsAnchoring(t *testing.T) {
+	// Mirrors the real workflow tokens so the incident messages below can be
+	// quoted verbatim, token included.
+	const signalYAML = `
+stages:
+  - id: working
+    label: "Working"
+    entry: true
+
+  - id: review_loop
+    label: "Review Loop"
+    triggers:
+      - message_contains: "[IMPLEMENTATION_DONE]"
+
+  # Every token the decoration cases below use MUST have a trigger here. Without
+  # this stage, a "**[REVIEW_LOOP_PASSED]**" case matched nothing and was
+  # satisfied by an unrelated "[DONE]" line further down the same message — the
+  # decoration set had no real coverage at all and mutating it stayed green.
+  - id: android_validation
+    label: "Android Validation"
+    triggers:
+      - message_contains: "[REVIEW_LOOP_PASSED]"
+
+  - id: pr_opened
+    label: "PR Opened"
+    triggers:
+      - message_contains: "[DONE]"
+`
+	p, err := pipeline.Parse([]byte(signalYAML))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+
+	tests := []struct {
+		name    string
+		message string
+		want    string // stage ID, empty means no transition
+	}{
+		{
+			name:    "bare token opening the message",
+			message: "[DONE] https://github.com/org/repo/pull/1",
+			want:    "pr_opened",
+		},
+		// Every character of signalDecoration is pinned by at least one case:
+		// removing it from the set makes this test fail. The mapping is not
+		// one-to-one — dropping ' ' fails both the indented and the heading case
+		// (the heading needs the space after the hashes), and dropping '`' fails
+		// both backticked cases.
+		{
+			// pins '*'
+			name:    "bold token",
+			message: "**[REVIEW_LOOP_PASSED]**",
+			want:    "android_validation",
+		},
+		{
+			// pins '_'
+			name:    "italic token",
+			message: "_[REVIEW_LOOP_PASSED]_",
+			want:    "android_validation",
+		},
+		{
+			// pins '#'
+			name:    "token as a heading",
+			message: "### [REVIEW_LOOP_PASSED]\n\nAll lenses converged.",
+			want:    "android_validation",
+		},
+		{
+			// pins '`'
+			name:    "backticked token",
+			message: "`[DONE]` https://github.com/org/repo/pull/1",
+			want:    "pr_opened",
+		},
+		{
+			// The suffixed form REVIEW_LOOP.md documents. The suffix must not
+			// change gating — it exists so downstream cannot mistake a degraded
+			// pass for a clean one.
+			name:    "token with documented suffix",
+			message: "[REVIEW_LOOP_PASSED] degraded=security",
+			want:    "android_validation",
+		},
+		{
+			name:    "token with unresolved suffix, backticked",
+			message: "`[REVIEW_LOOP_PASSED]` unresolved=3\n\nThree findings carried forward.",
+			want:    "android_validation",
+		},
+		{
+			name:    "token opening a later line",
+			message: "Implementation is committed locally and the tests pass.\n\n[IMPLEMENTATION_DONE]",
+			want:    "review_loop",
+		},
+		{
+			// pins ' '
+			name:    "space-indented token",
+			message: "  [DONE] https://github.com/org/repo/pull/1",
+			want:    "pr_opened",
+		},
+		{
+			// pins '\t'
+			name:    "tab-indented token",
+			message: "Summary of the run:\n\n\t[DONE] https://github.com/org/repo/pull/1",
+			want:    "pr_opened",
+		},
+		{
+			name:    "lowercase token",
+			message: "[done] https://github.com/org/repo/pull/1",
+			want:    "pr_opened",
+		},
+		{
+			// NEXT-724, verbatim: the claw had no ticket and was listing the
+			// process it would follow once it got one. Substring matching read
+			// this as the signal itself and jumped to review_loop.
+			name:    "NEXT-724 numbered list describing the future process",
+			message: "5. Commit locally and signal `[IMPLEMENTATION_DONE]` per the lifecycle table.",
+			want:    "",
+		},
+		{
+			// NEXT-707, verbatim: the agent explained why it was NOT signalling,
+			// and was declared finished for saying so.
+			name:    "NEXT-707 refusal to signal",
+			message: "No implementation exists yet, so there is nothing to commit/push/PR —\nsending `[DONE]` now would be a false signal.",
+			want:    "",
+		},
+		{
+			name:    "token quoted mid-sentence",
+			message: "The workflow ends when I reply with [DONE] and the PR URLs.",
+			want:    "",
+		},
+		{
+			name:    "token inside a blockquoted instruction",
+			message: "> Then reply with `[DONE]` on the first line.",
+			want:    "",
+		},
+		{
+			// Decoration is allowed BEFORE the token, never prose. Bolding a
+			// whole sentence must not smuggle a mid-sentence token in.
+			name:    "bolded sentence containing the token",
+			message: "**I am not sending [REVIEW_LOOP_PASSED] until the security lens returns.**",
+			want:    "",
+		},
+		{
+			name:    "token in a heading sentence",
+			message: "### Why [REVIEW_LOOP_PASSED] is premature",
+			want:    "",
+		},
+		{
+			name:    "empty message",
+			message: "",
+			want:    "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ""
+			if stage := p.StageForMessageContains(tt.message); stage != nil {
+				got = stage.ID
+			}
+			if got != tt.want {
+				t.Errorf("StageForMessageContains(%q) = %q, want %q", tt.message, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestMessageMentionsUnanchored pins the predicate the hub's nudge is built on.
+// It must be exactly the complement of MessageSignals within "the token appears
+// at all": if these two ever both return false for a message containing the
+// token, the run freezes with nobody told, which is the failure anchoring
+// introduces and the nudge exists to undo.
+func TestMessageMentionsUnanchored(t *testing.T) {
+	tests := []struct {
+		name           string
+		message        string
+		token          string
+		wantSignals    bool
+		wantUnanchored bool
+	}{
+		{
+			name:           "anchored signal is not a stray mention",
+			message:        "[DONE] https://github.com/org/repo/pull/1",
+			token:          "[DONE]",
+			wantSignals:    true,
+			wantUnanchored: false,
+		},
+		{
+			// The dominant risk case: an inject that only said "say [DONE]" and
+			// an agent that obliged mid-sentence.
+			name:           "mid-sentence token is a stray mention",
+			message:        "Implementation complete, so [READY_TO_COMMIT].",
+			token:          "[READY_TO_COMMIT]",
+			wantSignals:    false,
+			wantUnanchored: true,
+		},
+		{
+			// Anchored once and quoted again: the agent signalled correctly, so
+			// nudging would be noise.
+			name:           "anchored plus a later stray mention",
+			message:        "[DONE] https://x/pull/1\n\nI sent [DONE] as instructed.",
+			token:          "[DONE]",
+			wantSignals:    true,
+			wantUnanchored: false,
+		},
+		{
+			name:           "token absent entirely",
+			message:        "Still working on the migration.",
+			token:          "[DONE]",
+			wantSignals:    false,
+			wantUnanchored: false,
+		},
+		{
+			name:           "case-insensitive stray mention",
+			message:        "I will not say [terminate] yet.",
+			token:          "[TERMINATE]",
+			wantSignals:    false,
+			wantUnanchored: true,
+		},
+		{
+			name:           "empty token never matches either way",
+			message:        "anything",
+			token:          "",
+			wantSignals:    false,
+			wantUnanchored: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := pipeline.MessageSignals(tt.message, tt.token); got != tt.wantSignals {
+				t.Errorf("MessageSignals(%q, %q) = %v, want %v", tt.message, tt.token, got, tt.wantSignals)
+			}
+			if got := pipeline.MessageMentionsUnanchored(tt.message, tt.token); got != tt.wantUnanchored {
+				t.Errorf("MessageMentionsUnanchored(%q, %q) = %v, want %v", tt.message, tt.token, got, tt.wantUnanchored)
+			}
+		})
+	}
+}
+
+func TestMessageContainsTokens(t *testing.T) {
+	const yamlSrc = `
+stages:
+  - id: a
+    entry: true
+    triggers:
+      - message_contains: "[IMPLEMENTATION_DONE]"
+  - id: b
+    triggers:
+      - message_contains: "[DONE]"
+      - pr_merged: {}
+  - id: c
+    triggers:
+      - message_contains: "[DONE]"
+  - id: d
+    triggers:
+      - pr_closed: {}
+`
+	p, err := pipeline.Parse([]byte(yamlSrc))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	got := p.MessageContainsTokens()
+	want := []string{"[IMPLEMENTATION_DONE]", "[DONE]"}
+	if len(got) != len(want) {
+		t.Fatalf("MessageContainsTokens() = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("MessageContainsTokens() = %v, want %v", got, want)
+		}
 	}
 }
 

@@ -32,6 +32,40 @@ import (
 // idle_since. Exactly one of the two ever fires for a claw (the same
 // task_run_id ownership rule the other lifecycle kinds follow).
 
+// agentIdleResumeBlindGrace bounds the window in which the hub must not
+// auto-resume a claw because it cannot see whether a turn is running.
+//
+// A clawConn carries no in-flight turn state across a fresh registration —
+// neither a hub restart nor a bridge reconnect hands it over — while the
+// gateway on the sandbox keeps running the turn it already had. In that window
+// isBusyLocked() reports false for a claw that is genuinely mid-turn, and
+// injecting into it is not a nudge: pinned OpenClaw treats a mid-turn injection
+// as a session takeover and aborts the turn with
+// EmbeddedAttemptSessionTakeoverError. NEXT-724 lost a 16-minute turn exactly
+// this way, 46 seconds after an auto-resume that fired 6 minutes into a fresh
+// connection following a hub restart.
+//
+// The grace tracks minBusyTurnMax rather than the bridge cap it is derived
+// from. The bridge's cap (agentTurnTimeout, 1h) ends the WAIT, but teardown —
+// abortActiveSession, then createFreshSession — still runs before the error
+// reply reaches the hub, so a turn that began just before a reconnect can be
+// unwinding past connectedAt+1h. minBusyTurnMax already encodes exactly this
+// slack for the busy-turn watchdog; the three constants move together.
+//
+// It is an upper bound, not a wait: the guard lifts the moment a turn ends
+// where this connection can see it, which any working agent does within a turn
+// or two.
+//
+// Two limits worth stating rather than implying. The cap is a timer inside the
+// bridge PROCESS — if that process dies mid-turn the timer dies with it, and
+// whether the gateway-side run also stops depends on OpenClaw, which is
+// upstream and not verifiable here. And a claw that never produces a boundary
+// is NOT covered by claw_retry: that escalates on 12 consecutive
+// gateway_healthy=false heartbeats, while a stalled agent behind a healthy
+// gateway heartbeats healthy forever — the exact shape of NEXT-713. Between
+// the two mechanisms sits a gap where only the human agent_idle alert fires.
+const agentIdleResumeBlindGrace = minBusyTurnMax
+
 const (
 	lifecycleDefaultIdleAfter = 5 * time.Minute
 
@@ -113,6 +147,11 @@ type agentIdleSnapshot struct {
 	noProgressPaused bool
 	lastTurn         time.Time
 	notifiedAt       time.Time
+	connectedAt      time.Time
+	// turnBoundarySeen is false while the hub has never watched a turn end on
+	// this connection, which is exactly when it cannot tell an idle agent from
+	// one whose turn it simply cannot see.
+	turnBoundarySeen bool
 	// stretchStartAt is zero when the connection carries no usable clock at
 	// all (registration always stamps connectedAt, so this is unreachable in
 	// production and simply means "do not judge this claw").
@@ -140,6 +179,8 @@ func agentIdleSnapshotOf(cc *clawConn) agentIdleSnapshot {
 		noProgressPaused: cc.noProgressPaused,
 		lastTurn:         cc.lastTurnFinishedAt,
 		notifiedAt:       cc.idleNotifiedAt,
+		connectedAt:      cc.connectedAt,
+		turnBoundarySeen: cc.turnBoundarySeen,
 	}
 	start := cc.lastTurnFinishedAt
 	if start.IsZero() {
@@ -419,6 +460,11 @@ func (s *Server) checkAgentIdleResume(nowAt time.Time, clawID string, cc *clawCo
 		// unchanged — and the same stretch would be resumed twice. Re-arming
 		// is driven by lastTurnFinishedAt actually moving past the latched
 		// stretch instead (see below).
+		return
+	}
+	if !snap.turnBoundarySeen && nowAt.Sub(snap.connectedAt) < agentIdleResumeBlindGrace {
+		// No turn has ended where this connection could see it, so "idle" here
+		// may mean "mid-turn and invisible". Injecting would abort that turn.
 		return
 	}
 	if snap.noProgressPaused {

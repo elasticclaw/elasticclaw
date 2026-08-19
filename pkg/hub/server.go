@@ -238,6 +238,7 @@ type clawConn struct {
 	lastTurnFinishedAt   time.Time       // when the last streaming turn ended (for post-restart resume window)
 	connectedAt          time.Time       // when this connection registered; immutable after registration
 	idleNotifiedAt       time.Time       // when the agent_idle notification fired for the current idle stretch (zero = armed)
+	turnBoundarySeen     bool            // a turn actually ended on THIS connection, so turn tracking is known live (see agentIdleResumeBlindGrace)
 
 	deliveryInFlight bool // serializes DB-backed delivery writes
 
@@ -299,6 +300,11 @@ func (cc *clawConn) isBusyLocked() bool {
 func (cc *clawConn) finishTurnLocked() {
 	cc.resetTurnStateLocked()
 	cc.lastTurnFinishedAt = time.Now()
+	// A turn ended where this connection could observe it, so the hub's turn
+	// tracking is demonstrably live for this claw and nothing can be secretly
+	// in flight behind it. checkAgentIdleResume keys its blind-window guard on
+	// this.
+	cc.turnBoundarySeen = true
 	// A finished turn starts a new idle stretch: re-arm the idle alert so a
 	// claw that goes idle, works, then goes idle again notifies twice.
 	cc.idleNotifiedAt = time.Time{}
@@ -2542,6 +2548,14 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 		cc.statusConn = old.statusConn
 		cc.lastStatusAt = old.lastStatusAt
 		cc.lastTurnFinishedAt = old.lastTurnFinishedAt
+		// Carry the turn-visibility flag across an ordinary bridge reconnect,
+		// but only from a connection that had no turn reservation open. The
+		// reservation is taken BEFORE the socket write in every delivery path,
+		// so "the old conn was not busy" means the hub had started no turn it
+		// could then lose sight of — the new conn inherits real knowledge, not
+		// an assumption. A hub restart has no old conn here and stays blind,
+		// which is the case that cost NEXT-724 a turn.
+		cc.turnBoundarySeen = old.turnBoundarySeen && !old.isBusyLocked()
 		old.mu.RUnlock()
 	}
 	if cc.lastTurnFinishedAt.IsZero() {
@@ -2943,13 +2957,20 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 				if !automaticContinuationPaused {
 					s.handleInitialPlanResponse(clawID, tenantID, turnContent)
 				}
+				// Every [DONE]/[TERMINATE] gate below asks pipeline.MessageSignals,
+				// never strings.Contains. They used to disagree: the pipeline
+				// refused an unanchored [DONE] while the legacy gates accepted it,
+				// so pipelineHandledDone stayed false and the legacy handler ran on
+				// exactly the text the pipeline had just rejected — the NEXT-707
+				// outcome, reached by the code that was supposed to prevent it.
+				doneSignalled := pipeline.MessageSignals(turnContent, doneSignalToken)
 				// Evaluate pipeline triggers. If a pipeline explicitly owns a
 				// [DONE] trigger, let it handle that signal instead of the
 				// legacy factory PR-URL completion path below.
 				pipelineHandledDone := false
 				var pipelineDoneCtx pipelineContext
 				var pipelineDoneStage *pipeline.Stage
-				if strings.Contains(turnContent, "[DONE]") {
+				if doneSignalled {
 					pipelineDoneCtx, pipelineDoneStage, pipelineHandledDone = s.pipelineStageForMessageContains(clawID, turnContent)
 				}
 				if automaticContinuationPaused {
@@ -2975,8 +2996,15 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 							})
 						}
 					}
-				} else if !strings.Contains(turnContent, "[DONE]") {
+				} else if !doneSignalled {
 					s.safeGo("pipeline message triggers", func() { s.checkPipelineMessageTriggers(clawID, turnContent) })
+				}
+				// A known token written mid-sentence no longer transitions
+				// anything. Tell the agent so, or the run freezes with nobody
+				// aware the signal was dropped. Skipped while continuation is
+				// paused: that claw is already being held, not waiting on us.
+				if !automaticContinuationPaused {
+					s.safeGo("unanchored signal nudge", func() { s.nudgeUnanchoredSignal(clawID, turnContent) })
 				}
 				// Clear typing indicator now that response is complete
 				s.broadcastToUsers(tenantID, types.WSMessage{
@@ -2987,7 +3015,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 					},
 				})
 				// Check for [DONE] signal from a factory-created claw
-				if strings.Contains(turnContent, "[DONE]") {
+				if doneSignalled {
 					s.safeGo("done checkpoint", func() {
 						if _, err := s.requestCheckpoint(context.Background(), clawID, "done", "hub", false, checkpointRequestTimeout); err != nil {
 							log.Printf("[checkpoint] done request for %s failed: %v", shortID(clawID), err)
@@ -2997,8 +3025,11 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 						s.safeGo("done signal", func() { s.handleClawDoneSignal(clawID, turnContent) })
 					}
 				}
-				// Check for [TERMINATE] signal - allows claw to manage its own lifecycle
-				if strings.Contains(turnContent, "[TERMINATE]") {
+				// Check for [TERMINATE] signal - allows claw to manage its own
+				// lifecycle. Anchored for the same reason as [DONE], with a worse
+				// blast radius: under substring matching an agent writing "I will
+				// not send [TERMINATE] yet" tore down its own claw.
+				if pipeline.MessageSignals(turnContent, terminateSignalToken) {
 					go s.handleClawTerminateSignal(clawID, turnContent)
 				}
 				// Detect and store PR URLs mentioned mid-work. [DONE] turns are
@@ -3007,7 +3038,11 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 				// stay atomic. A fallback scan here would call storePRMention
 				// per-URL and could partially arm the watcher after an aborted
 				// atomic register or a gate-blocked [DONE].
-				if strings.Contains(turnContent, "[DONE]") {
+				//
+				// Gated on doneSignalled, not on the token appearing: a turn that
+				// merely mentions [DONE] registers nothing, so skipping the scan
+				// there would silently drop PR URLs the agent did post.
+				if doneSignalled {
 					log.Printf("[pr-watcher] skipping PR scan for claw %s: [DONE] registration is handled explicitly", shortID(clawID))
 				} else {
 					go s.scanMessageForPRs(clawID, turnContent)
