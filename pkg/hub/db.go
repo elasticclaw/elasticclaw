@@ -729,7 +729,7 @@ func migrate(db *sql.DB) error {
 	CREATE INDEX IF NOT EXISTS idx_task_run_summaries_model ON task_run_summaries(tenant_id, model, started_at DESC);
 	CREATE INDEX IF NOT EXISTS idx_task_run_summaries_repo ON task_run_summaries(tenant_id, repo, started_at DESC);
 	CREATE INDEX IF NOT EXISTS idx_task_run_summaries_timeout ON task_run_summaries(tenant_id, timeout_at);
-	CREATE INDEX IF NOT EXISTS idx_task_run_summaries_ticket_page ON task_run_summaries(tenant_id, requires_pr, analytics_enabled, started_at DESC, issue_id, issue_created_at DESC, status);
+	CREATE INDEX IF NOT EXISTS idx_task_run_summaries_ticket_page ON task_run_summaries(tenant_id, requires_pr, analytics_enabled, started_at DESC, integration, integration_workspace, issue_id, issue_created_at DESC, status);
 
 	CREATE TABLE IF NOT EXISTS hub_templates (
 		name       TEXT PRIMARY KEY,
@@ -935,7 +935,7 @@ func migrate(db *sql.DB) error {
 	if err := backfillTaskRunReadyAtV1(db); err != nil {
 		return err
 	}
-	if err := rebuildTaskRunSummariesTicketPageV2(db); err != nil {
+	if err := rebuildTaskRunSummariesTicketPageV3(db); err != nil {
 		return err
 	}
 	for _, p := range []struct {
@@ -1039,7 +1039,7 @@ func rebuildTaskRunSummariesStatusV3(db *sql.DB) error {
 		CREATE INDEX idx_task_run_summaries_model ON task_run_summaries(tenant_id, model, started_at DESC);
 		CREATE INDEX idx_task_run_summaries_repo ON task_run_summaries(tenant_id, repo, started_at DESC);
 		CREATE INDEX idx_task_run_summaries_timeout ON task_run_summaries(tenant_id, timeout_at);
-		CREATE INDEX idx_task_run_summaries_ticket_page ON task_run_summaries(tenant_id, requires_pr, analytics_enabled, started_at DESC, issue_id, issue_created_at DESC, status)`); err != nil {
+		CREATE INDEX idx_task_run_summaries_ticket_page ON task_run_summaries(tenant_id, requires_pr, analytics_enabled, started_at DESC, integration, integration_workspace, issue_id, issue_created_at DESC, status)`); err != nil {
 		return fmt.Errorf("replace task run summaries v3: %w", err)
 	}
 	return tx.Commit()
@@ -1231,14 +1231,14 @@ func backfillTaskRunAnalyticsStatusV3(db *sql.DB) error {
 	return err
 }
 
-// rebuildTaskRunSummariesTicketPageV2 rebuilds idx_task_run_summaries_ticket_page
+// rebuildTaskRunSummariesTicketPageV3 rebuilds idx_task_run_summaries_ticket_page
 // with a started-at window adjacent to tenant_id so SQLite can seek it before
 // grouping tickets. This is a one-time rebuild: the definition already lives
 // in the CREATE INDEX IF NOT EXISTS above, so without the hub_migrations
 // gate every hub start would re-sort the (potentially large) index for no
 // reason.
-func rebuildTaskRunSummariesTicketPageV2(db *sql.DB) error {
-	const migration = "task_run_summaries_ticket_page_v2"
+func rebuildTaskRunSummariesTicketPageV3(db *sql.DB) error {
+	const migration = "task_run_summaries_ticket_page_v3"
 	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS hub_migrations (name TEXT PRIMARY KEY, applied_at INTEGER NOT NULL)`); err != nil {
 		return fmt.Errorf("create hub migrations: %w", err)
 	}
@@ -1249,7 +1249,7 @@ func rebuildTaskRunSummariesTicketPageV2(db *sql.DB) error {
 	if applied > 0 {
 		return nil
 	}
-	if _, err := db.Exec(`DROP INDEX IF EXISTS idx_task_run_summaries_ticket_page; CREATE INDEX idx_task_run_summaries_ticket_page ON task_run_summaries(tenant_id, requires_pr, analytics_enabled, started_at DESC, issue_id, issue_created_at DESC, status)`); err != nil {
+	if _, err := db.Exec(`DROP INDEX IF EXISTS idx_task_run_summaries_ticket_page; CREATE INDEX idx_task_run_summaries_ticket_page ON task_run_summaries(tenant_id, requires_pr, analytics_enabled, started_at DESC, integration, integration_workspace, issue_id, issue_created_at DESC, status)`); err != nil {
 		return fmt.Errorf("create ticket page index: %w", err)
 	}
 	_, err := db.Exec(`INSERT INTO hub_migrations(name, applied_at) VALUES(?, ?) ON CONFLICT(name) DO NOTHING`, migration, now().UnixMilli())
