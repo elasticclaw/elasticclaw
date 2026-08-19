@@ -54,8 +54,8 @@ func newSlackNotifierTestServer(t *testing.T, slackURL string, mutate func(*type
 
 // testLifecycleDelivery builds the delivery bundle exactly as
 // lifecycleNotifierTick does, so tests that drive a single pass or a single
-// send exercise the real notifier instance (and therefore the real pacing and
-// destination bookkeeping) instead of a hand-rolled client.
+// send exercise the real notifier instance (and therefore the real pacing)
+// instead of a hand-rolled client.
 func testLifecycleDelivery(t *testing.T, s *Server) lifecycleDelivery {
 	t.Helper()
 	cfg := s.notificationsConfig()
@@ -70,7 +70,7 @@ func testLifecycleDelivery(t *testing.T, s *Server) lifecycleDelivery {
 	if err != nil {
 		t.Fatalf("build notifier: %v", err)
 	}
-	return lifecycleDelivery{notifier: notifier, lc: cfg.Lifecycle, destination: notifierDestination(notifier)}
+	return lifecycleDelivery{notifier: notifier, lc: cfg.Lifecycle}
 }
 
 func insertSlackTestEvent(t *testing.T, db *sql.DB, id, runID, eventType string, observedAt int64, targetURL, failureType, detail string) {
@@ -167,7 +167,7 @@ func TestSlackNotifierDedupesOnCursorRescan(t *testing.T) {
 	}
 }
 
-func TestSlackNotifierThreadsEventsByRun(t *testing.T) {
+func TestSlackNotifierPostsEventsTopLevel(t *testing.T) {
 	fake := newFakeSlackServer(t)
 	s, db := newSlackNotifierTestServer(t, fake.server.URL, nil)
 
@@ -187,18 +187,12 @@ func TestSlackNotifierThreadsEventsByRun(t *testing.T) {
 	}
 	root := fake.request(0)
 	reply := fake.request(1)
-	if root.ThreadTS != "" {
-		t.Fatalf("agent_started should be the thread root, got thread_ts %q", root.ThreadTS)
+	if root.ThreadTS != "" || reply.ThreadTS != "" {
+		t.Fatalf("lifecycle messages must be top-level: root=%q reply=%q", root.ThreadTS, reply.ThreadTS)
 	}
-	if reply.ThreadTS == "" {
-		t.Fatal("pr_opened was not threaded under the run root")
-	}
-	var threadTS string
-	if err := db.QueryRow(`SELECT thread_ts FROM slack_run_threads WHERE run_id='run-1'`).Scan(&threadTS); err != nil {
-		t.Fatalf("thread root row: %v", err)
-	}
-	if reply.ThreadTS != threadTS {
-		t.Fatalf("reply thread_ts %q != stored root %q", reply.ThreadTS, threadTS)
+	var threadRows int
+	if err := db.QueryRow(`SELECT COUNT(1) FROM slack_run_threads`).Scan(&threadRows); err != nil || threadRows != 0 {
+		t.Fatalf("lifecycle notifier wrote %d thread rows (err %v), want 0", threadRows, err)
 	}
 	if !strings.Contains(reply.Fallback, "PR opened") || !strings.Contains(reply.Fallback, "acme/app#7") {
 		t.Fatalf("pr_opened fallback = %q", reply.Fallback)
@@ -231,11 +225,6 @@ func TestSlackNotifierDisabledEventToggle(t *testing.T) {
 	}
 	if req.ThreadTS != "" {
 		t.Fatal("pr_opened without a prior root should post top-level")
-	}
-	// With no agent_started root, the pr_opened message becomes the run's root.
-	var threadTS string
-	if err := db.QueryRow(`SELECT thread_ts FROM slack_run_threads WHERE run_id='run-1'`).Scan(&threadTS); err != nil {
-		t.Fatalf("thread root row: %v", err)
 	}
 	// The muted event is parked as skipped so a later re-enable can never
 	// replay it (see TestSlackNotifierMutedCategoryNotReplayedOnReenable).
@@ -1259,9 +1248,7 @@ func TestSlackNotifierTransientFailureCapUnwedgesCursor(t *testing.T) {
 	}
 }
 
-// stubNotifier is a minimal provider without DestinationReporter: it returns
-// handles (so it LOOKS threadable to the old handle-based inference) but
-// cannot name its destination.
+// stubNotifier is a minimal provider that records top-level sends.
 type stubNotifier struct{ sends int }
 
 func (s *stubNotifier) Send(ctx context.Context, msg notify.Message) (string, error) {
@@ -1272,20 +1259,12 @@ func (s *stubNotifier) Send(ctx context.Context, msg notify.Message) (string, er
 	return fmt.Sprintf("handle-%d", s.sends), nil
 }
 
-// Regression: an unknown destination ("" — the provider does not implement
-// DestinationReporter) must disable thread bookkeeping entirely, not act as a
-// match-everything wildcard. Before the fix the root row was recorded with
-// channel=” and every later event matched it, replying into threads that may
-// not exist wherever the notifier now points.
-func TestLifecycleUnknownDestinationDisablesThreading(t *testing.T) {
+func TestLifecyclePostDoesNotWriteLegacyThreadRows(t *testing.T) {
 	fake := newFakeSlackServer(t)
 	s, db := newSlackNotifierTestServer(t, fake.server.URL, nil)
 
 	stub := &stubNotifier{}
-	if got := notifierDestination(stub); got != "" {
-		t.Fatalf("notifierDestination(stub) = %q, want empty", got)
-	}
-	d := lifecycleDelivery{notifier: stub, lc: s.notificationsConfig().Lifecycle, destination: notifierDestination(stub)}
+	d := lifecycleDelivery{notifier: stub, lc: s.notificationsConfig().Lifecycle}
 
 	base := int64(1760000000000)
 	insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{
@@ -1293,17 +1272,16 @@ func TestLifecycleUnknownDestinationDisablesThreading(t *testing.T) {
 		Factory: "bugfix", StartedAt: base - 1000,
 	})
 	ev := lifecycleEventRow{ID: "ev-1", RunID: "run-1", EventType: taskRunEventAgentStarted}
-	if err := s.postLifecycleEvent(d, ev, s.lifecycleRunContextFor("run-1"), "run-1", "ev-1", "test-tenant-id"); err != nil {
+	if err := s.postLifecycleEvent(d, ev, s.lifecycleRunContextFor("run-1"), "run-1", "ev-1"); err != nil {
 		t.Fatalf("first post: %v", err)
 	}
-	// The second event must post top-level (the stub errors on any Thread) and
-	// no root row may be recorded for the unknown destination.
+	// The second event must stay top-level and no legacy root row may be written.
 	ev2 := lifecycleEventRow{ID: "ev-2", RunID: "run-1", EventType: taskRunEventPROpened}
-	if err := s.postLifecycleEvent(d, ev2, s.lifecycleRunContextFor("run-1"), "run-1", "ev-2", "test-tenant-id"); err != nil {
+	if err := s.postLifecycleEvent(d, ev2, s.lifecycleRunContextFor("run-1"), "run-1", "ev-2"); err != nil {
 		t.Fatalf("second post: %v", err)
 	}
 	var n int
 	if err := db.QueryRow(`SELECT COUNT(1) FROM slack_run_threads`).Scan(&n); err != nil || n != 0 {
-		t.Fatalf("unknown destination recorded %d thread roots (err %v), want 0", n, err)
+		t.Fatalf("lifecycle post recorded %d thread roots (err %v), want 0", n, err)
 	}
 }

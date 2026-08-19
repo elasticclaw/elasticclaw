@@ -573,9 +573,6 @@ type LifecycleNotificationsConfig struct {
 	Enabled *bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
 	// Via names the notifier (under notifications.notifiers) to send through.
 	Via string `yaml:"via" json:"via"`
-	// ThreadByRun groups all messages for a run into one thread on providers
-	// that support threading. Default true.
-	ThreadByRun *bool `yaml:"thread_by_run,omitempty" json:"threadByRun,omitempty"`
 	// PollInterval is how often the notifier scans for new events. Default "5s".
 	PollInterval string `yaml:"poll_interval,omitempty" json:"pollInterval,omitempty"`
 	// IdleAfter is how long an agent must sit idle (connected, no turn

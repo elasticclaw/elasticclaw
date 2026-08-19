@@ -23,7 +23,7 @@ import (
 // opened, failures) into outbound notifications, delivered through the
 // hub-level notifier named by notifications.lifecycle.via. All provider
 // specifics (Block Kit, colours, pacing) live in pkg/hub/notify; this file
-// owns event scanning, dedupe, threading bookkeeping and the semantic
+// owns event scanning, dedupe and the semantic
 // message content.
 //
 // The dedupe/thread/state tables keep their historical slack_* names: they
@@ -168,21 +168,6 @@ func notifierCacheKey(name string, nc types.NotifierConfig, secrets notify.Secre
 	return key
 }
 
-// notifierDestination is the provider-reported destination of a constructed
-// notifier, used only as thread-root bookkeeping: a thread root recorded for
-// one destination must not be reused after the operator points the notifier
-// at another. Asking the instance (rather than reading a provider-specific
-// settings key) keeps the hub ignorant of provider config shapes and reflects
-// exactly what the notifier was built with, overrides included. A provider
-// that cannot name its destination yields "", which callers treat as unknown
-// — threading is skipped entirely — never as a match-everything wildcard.
-func notifierDestination(n notify.Notifier) string {
-	if d, ok := n.(notify.DestinationReporter); ok {
-		return d.Destination()
-	}
-	return ""
-}
-
 // enabledLifecycleEventTypes maps the config toggles onto concrete event
 // types. All categories default to enabled when the toggles block is absent.
 func enabledLifecycleEventTypes(lc *types.LifecycleNotificationsConfig) map[string]bool {
@@ -203,10 +188,6 @@ func enabledLifecycleEventTypes(lc *types.LifecycleNotificationsConfig) map[stri
 		}
 	}
 	return enabled
-}
-
-func lifecycleThreadByRun(lc *types.LifecycleNotificationsConfig) bool {
-	return lc == nil || lc.ThreadByRun == nil || *lc.ThreadByRun
 }
 
 func (s *Server) lifecyclePollInterval() time.Duration {
@@ -339,12 +320,10 @@ type lifecycleRunContext struct {
 }
 
 // lifecycleDelivery bundles what the two event passes need to deliver one
-// message: the notifier, the lifecycle config, and the thread-root
-// destination bookkeeping value.
+// message: the notifier and lifecycle config.
 type lifecycleDelivery struct {
-	notifier    notify.Notifier
-	lc          *types.LifecycleNotificationsConfig
-	destination string
+	notifier notify.Notifier
+	lc       *types.LifecycleNotificationsConfig
 }
 
 func (s *Server) lifecycleNotifierTick() {
@@ -381,9 +360,9 @@ func (s *Server) lifecycleNotifierTick() {
 	s.clearPollWarning("notify-config")
 	s.clearPollWarning("notify-notifier")
 
-	d := lifecycleDelivery{notifier: notifier, lc: lc, destination: notifierDestination(notifier)}
+	d := lifecycleDelivery{notifier: notifier, lc: lc}
 	// Two independent event sources share the notifier, dedupe table and
-	// thread table: task-run events for claws that belong to a task run, and
+	// legacy thread table: task-run events for claws that belong to a task run, and
 	// the claw pass for ad-hoc claws (task_run_id=''). See
 	// lifecycle_claw_notifier.go for the exclusivity rule that prevents
 	// double notifications.
@@ -579,26 +558,17 @@ func (s *Server) lifecycleMaxEventRowID() (int64, error) {
 	return maxRow, err
 }
 
-// sendLifecycleEvent renders one task-run event, posts it (threaded per run
-// when configured) and records the delivery.
+// sendLifecycleEvent renders one task-run event, posts it top-level and
+// records the delivery.
 func (s *Server) sendLifecycleEvent(d lifecycleDelivery, ev lifecycleEventRow) error {
 	runCtx := s.lifecycleRunContextFor(ev.RunID)
-	return s.postLifecycleEvent(d, ev, runCtx, ev.RunID, ev.ID, ev.TenantID)
+	return s.postLifecycleEvent(d, ev, runCtx, ev.RunID, ev.ID)
 }
 
-// postLifecycleEvent renders one event, posts it (threaded per threadKey
-// when configured) and records the delivery under deliveryKey. Task-run
-// events use (run_id, event id); claw-pass events use namespaced synthetic
-// keys ("claw:<id>", "claw:<id>:<kind>") so the two sources share the thread
-// and dedupe tables without ever colliding.
-//
-// Threading rides in Message.Thread — the opaque handle a provider returned
-// from an earlier Send — so the hub never names any provider's wire field
-// (Slack maps it onto thread_ts; providers without threading ignore it).
-// Roots are only recorded and reused when the notifier reports a destination:
-// an unknown destination ("") must not match anything, or a repointed
-// notifier would reply into threads that do not exist at the new destination.
-func (s *Server) postLifecycleEvent(d lifecycleDelivery, ev lifecycleEventRow, runCtx lifecycleRunContext, threadKey, deliveryKey, tenantID string) error {
+// postLifecycleEvent renders one event, posts it top-level and records the
+// delivery under deliveryKey. The slack_run_threads table remains for legacy
+// data, but lifecycle notifications no longer read or write it.
+func (s *Server) postLifecycleEvent(d lifecycleDelivery, ev lifecycleEventRow, runCtx lifecycleRunContext, runKey, deliveryKey string) error {
 	if s.lifecycleDeliveryPending(deliveryKey) {
 		// Already sent; only the delivery-row write is outstanding (see
 		// recordNotificationDelivery). Sending again would duplicate the
@@ -607,50 +577,13 @@ func (s *Server) postLifecycleEvent(d lifecycleDelivery, ev lifecycleEventRow, r
 	}
 	msg := buildLifecycleMessage(ev, runCtx)
 
-	threading := lifecycleThreadByRun(d.lc) && d.destination != ""
-	haveRoot := false
-	if threading {
-		var rootDest, rootTS string
-		err := s.db.QueryRow(`SELECT channel, thread_ts FROM slack_run_threads WHERE run_id=?`, threadKey).Scan(&rootDest, &rootTS)
-		switch {
-		case err == nil && rootDest == d.destination:
-			msg.Thread = rootTS
-			haveRoot = true
-		case err == nil:
-			// Root recorded for another destination: the notifier was
-			// repointed. Post top-level and let the upsert below move the
-			// root to the new destination.
-		case err == sql.ErrNoRows:
-			// First message for this thread key.
-		default:
-			// A transient read failure (a locked DB) must not be mistaken for
-			// "no root": posting top-level AND upserting would replace the
-			// run's existing root, permanently splitting the run across two
-			// threads. Post top-level but leave the root bookkeeping alone.
-			log.Printf("[notify] read thread root for %s: %v", threadKey, err)
-			threading = false
-		}
-	}
-
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	handle, err := d.notifier.Send(ctx, msg)
 	if err != nil {
 		return err
 	}
-	// The first message for a thread key becomes the thread root — whatever
-	// event it is (e.g. pr_opened when agent_started is disabled).
-	if threading && !haveRoot && handle != "" {
-		_, dbErr := s.db.Exec(`
-			INSERT INTO slack_run_threads(run_id, tenant_id, channel, thread_ts, created_at)
-			VALUES(?,?,?,?,?)
-			ON CONFLICT(run_id) DO UPDATE SET channel=excluded.channel, thread_ts=excluded.thread_ts`,
-			threadKey, tenantID, d.destination, handle, epochMillis(now()))
-		if dbErr != nil {
-			log.Printf("[notify] record thread root for %s: %v", threadKey, dbErr)
-		}
-	}
-	s.recordNotificationDelivery(deliveryKey, threadKey, handle, notificationDeliveryStatusSent)
+	s.recordNotificationDelivery(deliveryKey, runKey, handle, notificationDeliveryStatusSent)
 	// A success ends any transient-failure streak for this delivery.
 	s.clearNotifierState(lifecycleTransientFailureStateKey(deliveryKey))
 	return nil
