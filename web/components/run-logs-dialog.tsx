@@ -1,7 +1,7 @@
 "use client"
 
 import { useEffect, useMemo, useState } from "react"
-import { FileTerminal } from "lucide-react"
+import { FileTerminal, Loader2 } from "lucide-react"
 import { fetchActivityMessages, fetchTaskRunOutputs } from "@/lib/api"
 import type { ApiMessage, Message, TaskRunAttempt, TaskRunOutput, TaskRunSummary } from "@/lib/types"
 import { useEscapeToClose } from "@/hooks/use-escape-to-close"
@@ -16,7 +16,9 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { EmptyState, LoadingState, Notice } from "@/components/claw-activity-log"
 import { cn } from "@/lib/utils"
 import { StepRow } from "@/components/agent-timeline/step-row"
-import { pairActivitySteps } from "@/lib/turns"
+import { demoteStaleRunning, pairActivitySteps } from "@/lib/turns"
+
+const activityPageSize = 100
 
 export function RunLogsDialog({ run, attempts }: { run: TaskRunSummary; attempts: TaskRunAttempt[] }) {
   const [open, setOpen] = useState(false)
@@ -112,6 +114,8 @@ export function RunLogsDialog({ run, attempts }: { run: TaskRunSummary; attempts
 function ActionsTab({ clawId }: { clawId?: string }) {
   const [messages, setMessages] = useState<ApiMessage[]>([])
   const [loading, setLoading] = useState(false)
+  const [loadingOlder, setLoadingOlder] = useState(false)
+  const [hasOlder, setHasOlder] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
@@ -120,21 +124,56 @@ function ActionsTab({ clawId }: { clawId?: string }) {
     queueMicrotask(() => {
       if (cancelled) return
       setLoading(true)
+      setMessages([])
+      setHasOlder(false)
       setError(null)
-      fetchActivityMessages(clawId, { limit: 100, order: "asc" })
-        .then((data) => { if (!cancelled) setMessages(data) })
+      fetchActivityMessages(clawId, { limit: activityPageSize, order: "desc" })
+        .then((page) => {
+          if (cancelled) return
+          setMessages(page.reverse())
+          setHasOlder(page.length === activityPageSize)
+        })
         .catch((err) => { if (!cancelled) setError(err instanceof Error ? err.message : "Unable to load agent activity") })
         .finally(() => { if (!cancelled) setLoading(false) })
     })
     return () => { cancelled = true }
   }, [clawId])
 
-  const steps = useMemo(() => pairActivitySteps(messages.map(activityMessage)), [messages])
+  const loadOlder = async () => {
+    const before = messages[0]?.created_at
+    if (!before || loadingOlder || !clawId) return
+    setLoadingOlder(true)
+    setError(null)
+    try {
+      const page = await fetchActivityMessages(clawId, { before, limit: activityPageSize, order: "desc" })
+      setMessages((current) => [...page.reverse(), ...current])
+      setHasOlder(page.length === activityPageSize)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to load older activity")
+    } finally {
+      setLoadingOlder(false)
+    }
+  }
+
+  const steps = useMemo(() => demoteStaleRunning(pairActivitySteps(messages.map(activityMessage)), false), [messages])
   if (!clawId) return <EmptyState>No agent actions were recorded for this attempt.</EmptyState>
   if (loading) return <LoadingState label="Loading agent activity..." />
-  if (error) return <Notice destructive>{error}</Notice>
+  if (error && messages.length === 0) return <Notice destructive>{error}</Notice>
   if (steps.length === 0) return <EmptyState>No agent actions were recorded for this attempt.</EmptyState>
-  return <div className="h-full overflow-auto rounded-md border p-2">{steps.map((step) => <StepRow key={step.id} step={step} />)}</div>
+  return (
+    <div className="flex h-full min-h-0 flex-col rounded-md border">
+      <div className="shrink-0 border-b p-2 text-center">
+        {hasOlder ? (
+          <Button variant="ghost" size="sm" onClick={loadOlder} disabled={loadingOlder}>
+            {loadingOlder && <Loader2 className="size-4 animate-spin" />}
+            Load older
+          </Button>
+        ) : <span className="text-xs text-muted-foreground">Beginning of activity</span>}
+      </div>
+      {error && <div className="border-b px-3 py-2 text-sm text-destructive">{error}</div>}
+      <div className="min-h-0 flex-1 overflow-auto p-2">{steps.map((step) => <StepRow key={step.id} step={step} />)}</div>
+    </div>
+  )
 }
 
 function activityMessage(message: ApiMessage): Message {

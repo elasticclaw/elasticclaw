@@ -138,6 +138,11 @@ function localDayRange(date: Date) {
   return { from: from.toISOString(), to: to.toISOString() }
 }
 
+function utcDayRange(date: Date) {
+  const day = date.toISOString().slice(0, 10)
+  return { from: `${day}T00:00:00.000Z`, to: `${day}T23:59:59.999Z` }
+}
+
 function filterDate(value?: string) {
   if (!value) return undefined
   const date = /^\d+$/.test(value) ? new Date(Number(value)) : new Date(value)
@@ -495,8 +500,8 @@ function AnalyticsCommandCenterInner() {
     const from = filterDate(filters.from)
     const to = filterDate(filters.to)
     if (!from || !to) return undefined
-    const day = from.toISOString().slice(0, 10)
-    return from.toISOString() === `${day}T00:00:00.000Z` && to.toISOString() === `${day}T23:59:59.999Z` ? day : undefined
+    const range = utcDayRange(from)
+    return from.toISOString() === range.from && to.toISOString() === range.to ? range.from.slice(0, 10) : undefined
   })()
   // Stable handlers so the memoized Heatmap (and its 364 memoized cells) only
   // re-render when the selection actually changes.
@@ -505,7 +510,8 @@ function AnalyticsCommandCenterInner() {
     selectedDayRef.current = selectedDay
   }, [selectedDay])
   const selectDay = useCallback((day: string) => {
-    setFilters(day === selectedDayRef.current ? { from: undefined, to: undefined } : { from: `${day}T00:00:00.000Z`, to: `${day}T23:59:59.999Z` })
+    const range = utcDayRange(new Date(`${day}T00:00:00.000Z`))
+    setFilters(day === selectedDayRef.current ? { from: undefined, to: undefined } : range)
   }, [setFilters])
   const clearSelectedDay = useCallback(() => setFilters({ from: undefined, to: undefined }), [setFilters])
   const modelData = useModelData(costs)
@@ -737,7 +743,13 @@ function FilterBar({
           Clear all — items wrap naturally instead of the dimensions forming
           their own block. */}
       <div className="flex flex-wrap items-center gap-2">
-        <DatePickerRange value={dateRange} onChange={(range) => onChange({ from: range?.from ? localDayRange(range.from).from : undefined, to: range?.to ? localDayRange(range.to).to : undefined })} />
+        <DatePickerRange value={dateRange} onChange={(range) => {
+          if (range?.from && range.to && localDateKey(range.from) === localDateKey(range.to)) {
+            onChange(utcDayRange(range.from))
+            return
+          }
+          onChange({ from: range?.from ? localDayRange(range.from).from : undefined, to: range?.to ? localDayRange(range.to).to : undefined })
+        }} />
         <div className="w-[204px]">
           <WorkspaceSelect
             value={filters.workspace}
