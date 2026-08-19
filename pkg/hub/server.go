@@ -235,6 +235,7 @@ type clawConn struct {
 	contextWarningSent   bool            // true once the context-nearly-full warning has been injected this turn
 	awaitingResponse     bool            // true as soon as a prompt is delivered, before the first chunk/activity
 	noProgressPaused     bool            // automatic delivery is paused after repeated turns with unchanged progress
+	bridgeErrorStreak    int             // consecutive turns that came back as a claw-bridge transport error (NEXT-725)
 	lastTurnFinishedAt   time.Time       // when the last streaming turn ended (for post-restart resume window)
 	connectedAt          time.Time       // when this connection registered; immutable after registration
 	idleNotifiedAt       time.Time       // when the agent_idle notification fired for the current idle stretch (zero = armed)
@@ -2862,7 +2863,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 					)
 					s.broadcastToUsers(tenantID, types.WSMessage{Type: "message", Payload: hm})
 				}
-				automaticContinuationPaused := s.observeCompletedTurn(clawID, hm.ID, turnContent)
+				automaticContinuationPaused, bridgeErrTurn := s.observeTurnOutcome(cc, clawID, hm.ID, turnContent)
 				if !automaticContinuationPaused {
 					s.handleInitialPlanResponse(clawID, tenantID, turnContent)
 				}
@@ -2872,7 +2873,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 				// so pipelineHandledDone stayed false and the legacy handler ran on
 				// exactly the text the pipeline had just rejected — the NEXT-707
 				// outcome, reached by the code that was supposed to prevent it.
-				doneSignalled := pipeline.MessageSignals(turnContent, doneSignalToken)
+				doneSignalled := turnMaySignal(turnContent, doneSignalToken, bridgeErrTurn)
 				// Evaluate pipeline triggers. If a pipeline explicitly owns a
 				// [DONE] trigger, let it handle that signal instead of the
 				// legacy factory PR-URL completion path below.
@@ -2905,14 +2906,14 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 							})
 						}
 					}
-				} else if !doneSignalled {
+				} else if !doneSignalled && !bridgeErrTurn {
 					s.safeGo("pipeline message triggers", func() { s.checkPipelineMessageTriggers(clawID, turnContent) })
 				}
 				// A known token written mid-sentence no longer transitions
 				// anything. Tell the agent so, or the run freezes with nobody
 				// aware the signal was dropped. Skipped while continuation is
 				// paused: that claw is already being held, not waiting on us.
-				if !automaticContinuationPaused {
+				if !automaticContinuationPaused && !bridgeErrTurn {
 					s.safeGo("unanchored signal nudge", func() { s.nudgeUnanchoredSignal(clawID, turnContent) })
 				}
 				// Clear typing indicator now that response is complete
@@ -2938,7 +2939,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 				// lifecycle. Anchored for the same reason as [DONE], with a worse
 				// blast radius: under substring matching an agent writing "I will
 				// not send [TERMINATE] yet" tore down its own claw.
-				if pipeline.MessageSignals(turnContent, terminateSignalToken) {
+				if turnMaySignal(turnContent, terminateSignalToken, bridgeErrTurn) {
 					go s.handleClawTerminateSignal(clawID, turnContent)
 				}
 				// Detect and store PR URLs mentioned mid-work. [DONE] turns are
@@ -2953,7 +2954,10 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 				// there would silently drop PR URLs the agent did post.
 				if doneSignalled {
 					log.Printf("[pr-watcher] skipping PR scan for claw %s: [DONE] registration is handled explicitly", shortID(clawID))
-				} else {
+				} else if !bridgeErrTurn {
+					// A transport error can quote a repository URL (git and CI
+					// failures routinely do). Arming the PR watcher on text the
+					// agent never wrote would watch a PR nobody opened.
 					go s.scanMessageForPRs(clawID, turnContent)
 				}
 				// Detect tool error loops and inject a corrective message
@@ -6336,6 +6340,15 @@ func (s *Server) insertSystemMarker(clawID, tenantID, marker string) bool {
 
 func (s *Server) handleInitialPlanResponse(clawID, tenantID, content string) {
 	if !s.hasSystemMarker(clawID, initialPlanRequiredMarker) || s.hasSystemMarker(clawID, initialPlanAcceptedMarker) {
+		return
+	}
+	// A claw-bridge transport error is not a plan attempt — the agent never
+	// saw the request. Re-sending the correction to it is what turned a full
+	// disk into an endless hourly loop on claw 1572c4e4 (NEXT-725): the ENOSPC
+	// reply cleared the length floor below, so the gate kept answering the
+	// transport. Stay silent and leave the gate armed; the next real turn is
+	// judged exactly as before.
+	if _, isBridgeError := types.BridgeTransportError(content); isBridgeError {
 		return
 	}
 	// Strict keyword match, or a substantial second attempt after we already

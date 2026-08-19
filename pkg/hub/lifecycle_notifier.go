@@ -1041,6 +1041,27 @@ func buildAgentIdleMessage(ev lifecycleEventRow, runCtx lifecycleRunContext) not
 	if subject == "" {
 		subject = "task"
 	}
+	// A bridge-error pause is carried by this event (see notifyBridgeErrorPause)
+	// and renders from the real error text. "Agent stalled" would send an
+	// operator to read the agent's chat; "no space left on device" sends them to
+	// the disk, which is the whole point of NEXT-725 — the error existed only
+	// inside the claw's chat and never reached a human.
+	if bridgeError := detailString(ev.Detail, "bridgeError"); bridgeError != "" {
+		turns := "Consecutive turns"
+		if n := intFromDetail(ev.Detail, "bridgeErrorTurns", "bridge_error_turns"); n > 0 {
+			turns = fmt.Sprintf("%d consecutive turns", n)
+		}
+		body := fmt.Sprintf("%s never reached the agent: claw-bridge returned a transport error instead. Automatic continuation is paused until someone sends a message.\n\n%s", turns, bridgeError)
+		return notify.Message{
+			Title:    style.title,
+			Emoji:    style.emoji,
+			Severity: style.severity,
+			Subject:  subject,
+			Body:     body,
+			Fields:   lifecycleMetaFields(runCtx, true, false),
+			Summary:  []string{runCtx.Repo, subject, "bridge error: " + compressSummaryReason(bridgeError)},
+		}
+	}
 	idleLabel := agentIdleDurationLabel(ev.Detail)
 	body := "No agent activity"
 	if idleLabel != "" {

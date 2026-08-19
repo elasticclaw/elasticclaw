@@ -130,6 +130,9 @@ func (s *Server) resumeNoProgressAfterUserInput(clawID string) {
 	if cc != nil {
 		cc.mu.Lock()
 		cc.noProgressPaused = false
+		// A human intervened, so the bridge-error streak starts over too: the
+		// next pause should again cost bridgeErrorPauseThreshold turns, not one.
+		cc.bridgeErrorStreak = 0
 		cc.mu.Unlock()
 	}
 	if changed, _ := res.RowsAffected(); changed > 0 {
@@ -283,4 +286,43 @@ func responseProgressMarkers(content string) []string {
 	}
 	sort.Strings(markers)
 	return markers
+}
+
+// pauseAutomaticContinuation latches the SAME no_progress_paused stop that
+// observeCompletedTurn uses, for a caller that already knows the claw must
+// stop. It exists so a second stop reason (bridge transport errors, NEXT-725)
+// reuses the existing latch — column, in-memory flag, every
+// `cc.noProgressPaused` delivery gate, and resumeNoProgressAfterUserInput —
+// instead of adding a second pause mechanism that those gates would have to
+// learn about one by one.
+//
+// It reports whether THIS call performed the pause: an already-paused claw
+// returns false so the caller does not notify a human twice about a claw that
+// is already stopped. Both writers take noProgressMu, so an observation tick
+// and a bridge error cannot both think they were the one to latch.
+func (s *Server) pauseAutomaticContinuation(clawID, notice string) bool {
+	s.noProgressMu.Lock()
+	defer s.noProgressMu.Unlock()
+
+	res, err := s.db.Exec(`UPDATE claws SET no_progress_paused=1 WHERE id=? AND COALESCE(no_progress_paused,0)=0`, clawID)
+	if err != nil {
+		log.Printf("[no-progress] pause claw %s: %v", shortID(clawID), err)
+		return false
+	}
+	changed, _ := res.RowsAffected()
+	if changed == 0 {
+		return false
+	}
+	s.mu.RLock()
+	cc := s.claws[clawID]
+	s.mu.RUnlock()
+	if cc != nil {
+		cc.mu.Lock()
+		cc.noProgressPaused = true
+		cc.mu.Unlock()
+	}
+	if notice != "" {
+		s.publishHubNotice(clawID, notice)
+	}
+	return true
 }
