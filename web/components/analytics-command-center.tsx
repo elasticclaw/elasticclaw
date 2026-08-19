@@ -350,6 +350,7 @@ function AnalyticsCommandCenterInner() {
         const activeTicketCursor = ticketCursorStackRef.current[ticketCursorStackRef.current.length - 1]
         if (ticketRequestId === ticketsRequestId.current && !ticketsLoadingRef.current && requestedTicketCursor === activeTicketCursor) {
           setTickets(ticketsData.tickets)
+          setTicketsEffectiveFilters(effectiveFilters)
           setNextTicketCursor(ticketsData.nextCursor)
           setTicketTotal(ticketsData.total)
         }
