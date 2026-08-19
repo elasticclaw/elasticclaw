@@ -128,6 +128,9 @@ func (s *Server) handleTaskRunAnalyticsTickets(w http.ResponseWriter, r *http.Re
 		nextCursor = encodeTaskRunAnalyticsCursor(last.cursorAt(), last.issueID)
 		groups = groups[:limit]
 	}
+	groups = nonEmptyTaskRunAnalyticsTicketGroups(groups)
+
+	// Keep these reads page-batched: query count must not grow with ticket count.
 	runIDs, issueIDs := []string{}, []string{}
 	for _, group := range groups {
 		for _, run := range group.runs {
@@ -157,9 +160,6 @@ func (s *Server) handleTaskRunAnalyticsTickets(w http.ResponseWriter, r *http.Re
 	}
 	tickets := make([]taskRunAnalyticsTicketView, 0, len(groups))
 	for _, group := range groups {
-		if len(group.runs) == 0 {
-			continue
-		}
 		ticket, err := s.buildTaskRunAnalyticsTicket(r.Context(), filters.TenantID, group.issueID, group.runs, attemptsByRun, prsByRun, eventsByRun, metadataByIssue[group.issueID])
 		if err != nil {
 			jsonError(w, http.StatusInternalServerError, "db error")
@@ -234,6 +234,10 @@ func (s *Server) readTaskRunAnalyticsTicketGroupsPage(filters taskRunAnalyticsFi
 	if err != nil {
 		return nil, 0, false, err
 	}
+	return taskRunAnalyticsTicketGroupsFromHydration(ids, runs), total, false, nil
+}
+
+func taskRunAnalyticsTicketGroupsFromHydration(ids []string, runs []taskRunAnalyticsRunView) []taskRunAnalyticsTicketGroup {
 	byID := map[string][]taskRunAnalyticsRunView{}
 	for _, run := range runs {
 		byID[run.IssueID] = append(byID[run.IssueID], run)
@@ -248,17 +252,35 @@ func (s *Server) readTaskRunAnalyticsTicketGroupsPage(filters taskRunAnalyticsFi
 				reported = run.IssueCreatedAt
 			}
 		}
-		if len(rs) > 0 {
-			groups = append(groups, taskRunAnalyticsTicketGroup{issueID: id, runs: rs, reportedAt: reported})
+		if group, ok := taskRunAnalyticsTicketGroupWithRuns(id, rs, reported); ok {
+			groups = append(groups, group)
 		}
 	}
-	return groups, total, false, nil
+	return groups
 }
 
 type taskRunAnalyticsTicketGroup struct {
 	issueID    string
 	runs       []taskRunAnalyticsRunView
 	reportedAt int64
+}
+
+func nonEmptyTaskRunAnalyticsTicketGroups(groups []taskRunAnalyticsTicketGroup) []taskRunAnalyticsTicketGroup {
+	filtered := make([]taskRunAnalyticsTicketGroup, 0, len(groups))
+	for _, group := range groups {
+		if len(group.runs) == 0 {
+			continue
+		}
+		filtered = append(filtered, group)
+	}
+	return filtered
+}
+
+func taskRunAnalyticsTicketGroupWithRuns(issueID string, runs []taskRunAnalyticsRunView, reportedAt int64) (taskRunAnalyticsTicketGroup, bool) {
+	if len(runs) == 0 {
+		return taskRunAnalyticsTicketGroup{}, false
+	}
+	return taskRunAnalyticsTicketGroup{issueID: issueID, runs: runs, reportedAt: reportedAt}, true
 }
 
 func (group taskRunAnalyticsTicketGroup) cursorAt() int64 {

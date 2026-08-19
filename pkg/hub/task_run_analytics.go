@@ -513,10 +513,25 @@ func (s *Server) taskRunContextForClaw(clawID string) (tenantID, runID, attemptI
 	if s == nil || s.db == nil {
 		return "", "", "", false, fmt.Errorf("task run context: missing server db")
 	}
+	return taskRunContextForClaw(s.db, clawID)
+}
+
+func (s *Server) taskRunContextForClawTx(tx *sql.Tx, clawID string) (tenantID, runID, attemptID string, ok bool, err error) {
+	if tx == nil {
+		return "", "", "", false, fmt.Errorf("task run context: missing transaction")
+	}
+	return taskRunContextForClaw(tx, clawID)
+}
+
+type taskRunContextQueryer interface {
+	QueryRow(query string, args ...any) *sql.Row
+}
+
+func taskRunContextForClaw(queryer taskRunContextQueryer, clawID string) (tenantID, runID, attemptID string, ok bool, err error) {
 	if strings.TrimSpace(clawID) == "" {
 		return "", "", "", false, fmt.Errorf("task run context: missing claw id")
 	}
-	err = s.db.QueryRow(`
+	err = queryer.QueryRow(`
 		SELECT c.tenant_id, COALESCE(c.task_run_id,''), COALESCE(tr.current_attempt_id,'')
 		  FROM claws c
 		  LEFT JOIN task_runs tr ON tr.id = c.task_run_id

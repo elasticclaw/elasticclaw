@@ -1,10 +1,17 @@
 package hub
 
 import (
+	"context"
+	"database/sql"
+	"database/sql/driver"
+	"fmt"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"modernc.org/sqlite"
 )
 
 func TestTaskRunAnalyticsTicketPageQueriesUseTicketPageIndex(t *testing.T) {
@@ -231,40 +238,116 @@ func TestApplyOrScheduleTaskRunAnalyticsTicketMetadataKeepsNonZeroReportedAt(t *
 	}
 }
 
-// Regression test for finding #3: a ticket group whose runs slice ended up
-// empty (e.g. a hydration-query race) must be skipped by the handler instead
-// of reaching buildTaskRunAnalyticsTicket, which panics on runs[0].
+// Regression test for finding #3: both the hydration and handler paths must
+// reject an empty run group before buildTaskRunAnalyticsTicket reaches runs[0].
 func TestTaskRunAnalyticsTicketsHandlerSkipsEmptyGroups(t *testing.T) {
-	s, db := newTaskRunAnalyticsAPITestServer(t)
-	insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{
-		RunID: "ticket-empty-run", AttemptID: "attempt-empty", ClawID: "claw-empty", TenantID: "test-tenant-id",
-		Status: taskRunStatusClean, Phase: taskRunPhaseTerminal, OwnerType: taskRunOwnerWorkflow,
-		Workspace: "eng", Workflow: "tickets", Integration: "external", Repo: "elastic/claw",
-		StartedAt: 1_000, IssueCreatedAt: 1_000, FinishedAt: 1_500,
-		IssueTitle: "TICKET-EMPTY", UsageUpdatedAt: 1_500,
-	})
-	for _, table := range []string{"task_runs", "task_run_summaries"} {
-		col := map[string]string{"task_runs": "id", "task_run_summaries": "run_id"}[table]
-		if _, err := db.Exec("UPDATE "+table+" SET issue_id=? WHERE "+col+"=?", "TICKET-EMPTY", "ticket-empty-run"); err != nil {
-			t.Fatalf("set issue ID: %v", err)
-		}
-	}
-	// Simulate the race: the id/order query still sees the run, but the
-	// hydration query no longer does, so buildTaskRunAnalyticsTicket would
-	// receive an empty runs slice for this group if not guarded.
-	if _, err := db.Exec(`DELETE FROM task_run_summaries WHERE run_id=?`, "ticket-empty-run"); err != nil {
-		t.Fatalf("delete summary row: %v", err)
+	// This is the id/order-to-hydration handoff: the ordered ID list includes
+	// TICKET-EMPTY, while hydration returns no run for it.
+	groups := taskRunAnalyticsTicketGroupsFromHydration(
+		[]string{"TICKET-EMPTY", "TICKET-POPULATED"},
+		[]taskRunAnalyticsRunView{{RunID: "run-populated", IssueID: "TICKET-POPULATED"}},
+	)
+	if len(groups) != 1 || groups[0].issueID != "TICKET-POPULATED" {
+		t.Fatalf("hydrated groups = %#v, want only populated group", groups)
 	}
 
-	rr := requestTaskRunAnalyticsAPI(t, s, http.MethodGet, "/api/analytics/tickets", "test-token")
-	if rr.Code != http.StatusOK {
-		t.Fatalf("tickets status = %d, body = %s (handler must not panic on empty groups)", rr.Code, rr.Body.String())
+	empty := taskRunAnalyticsTicketGroup{issueID: "TICKET-EMPTY"}
+	populated := taskRunAnalyticsTicketGroup{issueID: "TICKET-POPULATED", runs: []taskRunAnalyticsRunView{{RunID: "run-populated"}}}
+	if groups := nonEmptyTaskRunAnalyticsTicketGroups([]taskRunAnalyticsTicketGroup{empty, populated}); len(groups) != 1 || groups[0].issueID != populated.issueID {
+		t.Fatalf("handler groups = %#v, want only populated group", groups)
 	}
-	var response taskRunAnalyticsTicketsResponse
-	decodeTaskRunAnalyticsAPI(t, rr, &response)
-	for _, ticket := range response.Tickets {
-		if ticket.IssueID == "TICKET-EMPTY" {
-			t.Fatalf("expected TICKET-EMPTY to be skipped, got ticket: %#v", ticket)
+	if group, ok := taskRunAnalyticsTicketGroupWithRuns(empty.issueID, nil, 0); ok || group.issueID != "" {
+		t.Fatalf("empty hydration group = %#v, %t; want rejected", group, ok)
+	}
+}
+
+func TestTaskRunAnalyticsTicketsHandlerUsesConstantQueriesPerPage(t *testing.T) {
+	countQueries := func(ticketCount int) int64 {
+		t.Helper()
+		s, db, count := newCountingTaskRunAnalyticsAPITestServer(t)
+		for i := 0; i < ticketCount; i++ {
+			runID := fmt.Sprintf("query-count-run-%02d", i)
+			issueID := fmt.Sprintf("QUERY-COUNT-%02d", i)
+			insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{
+				RunID: runID, AttemptID: "attempt-" + runID, ClawID: "claw-" + runID, TenantID: "test-tenant-id",
+				Status: taskRunStatusClean, Phase: taskRunPhaseTerminal, OwnerType: taskRunOwnerWorkflow,
+				Workspace: "eng", Workflow: "tickets", Integration: "external", StartedAt: int64(10_000 + i), IssueTitle: issueID,
+			})
+			if _, err := db.Exec(`UPDATE task_run_summaries SET issue_id=? WHERE run_id=?`, issueID, runID); err != nil {
+				t.Fatalf("set issue ID: %v", err)
+			}
+			if _, err := db.Exec(`INSERT INTO ticket_metadata(tenant_id,issue_id,updated_at) VALUES(?,?,?)`, "test-tenant-id", issueID, time.Now().UnixMilli()); err != nil {
+				t.Fatalf("seed ticket metadata: %v", err)
+			}
 		}
+		count.Store(0)
+		rr := requestTaskRunAnalyticsAPI(t, s, http.MethodGet, "/api/analytics/tickets?limit=50", "test-token")
+		if rr.Code != http.StatusOK {
+			t.Fatalf("tickets status = %d, body = %s", rr.Code, rr.Body.String())
+		}
+		return count.Load()
 	}
+
+	three := countQueries(3)
+	fifteen := countQueries(15)
+	if three != fifteen {
+		t.Fatalf("ticket page queries grew with ticket count: 3 tickets = %d, 15 tickets = %d", three, fifteen)
+	}
+}
+
+var taskRunAnalyticsCountingDriverSequence atomic.Uint64
+
+type taskRunAnalyticsCountingDriver struct{ count *atomic.Int64 }
+
+func (d taskRunAnalyticsCountingDriver) Open(name string) (driver.Conn, error) {
+	conn, err := (&sqlite.Driver{}).Open(name)
+	if err != nil {
+		return nil, err
+	}
+	return taskRunAnalyticsCountingConn{Conn: conn, count: d.count}, nil
+}
+
+type taskRunAnalyticsCountingConn struct {
+	driver.Conn
+	count *atomic.Int64
+}
+
+func (c taskRunAnalyticsCountingConn) QueryContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
+	c.count.Add(1)
+	if queryer, ok := c.Conn.(driver.QueryerContext); ok {
+		return queryer.QueryContext(ctx, query, args)
+	}
+	return nil, driver.ErrSkip
+}
+
+func (c taskRunAnalyticsCountingConn) ExecContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
+	c.count.Add(1)
+	if executer, ok := c.Conn.(driver.ExecerContext); ok {
+		return executer.ExecContext(ctx, query, args)
+	}
+	return nil, driver.ErrSkip
+}
+
+func newCountingTaskRunAnalyticsAPITestServer(t *testing.T) (*Server, *sql.DB, *atomic.Int64) {
+	t.Helper()
+	s, _ := newTaskRunAnalyticsAPITestServer(t)
+	count := &atomic.Int64{}
+	driverName := fmt.Sprintf("task-run-analytics-counting-%d", taskRunAnalyticsCountingDriverSequence.Add(1))
+	sql.Register(driverName, taskRunAnalyticsCountingDriver{count: count})
+	db, err := sql.Open(driverName, ":memory:?_time_format=sqlite&_txlock=immediate&_pragma=foreign_keys(on)")
+	if err != nil {
+		t.Fatalf("open counting database: %v", err)
+	}
+	db.SetMaxOpenConns(1)
+	if err := migrate(db); err != nil {
+		db.Close()
+		t.Fatalf("migrate counting database: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO tenants(id,name,token,claw_token,created_at) VALUES(?,?,?,?,datetime('now'))`, "test-tenant-id", "test", "test-token", ""); err != nil {
+		db.Close()
+		t.Fatalf("seed counting tenant: %v", err)
+	}
+	s.db = db
+	t.Cleanup(func() { db.Close() })
+	return s, db, count
 }

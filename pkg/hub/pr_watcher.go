@@ -970,17 +970,32 @@ func (s *Server) checkCIStatus(pr clawPR, token string) {
 		conclusion = ciConclusionFailure
 	}
 
-	tenantID, runID, attemptID, hasRun, err := s.taskRunContextForClaw(pr.clawID)
-	if err != nil {
-		log.Printf("[pr-watcher] find CI task run for %s: %v", pr.prURL, err)
+	// Avoid BEGIN/ROLLBACK on settled polls. The conditional claim below remains
+	// authoritative because another watcher can update the watermark after this
+	// pre-read.
+	var alreadyClaimed int
+	if err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM claw_prs WHERE id=? AND last_ci_sha=? AND last_ci_conclusion=?)`, pr.id, headSHA, conclusion).Scan(&alreadyClaimed); err != nil {
+		log.Printf("[pr-watcher] read CI watermark for %s: %v", pr.prURL, err)
 		return
 	}
+	if alreadyClaimed != 0 {
+		return
+	}
+
+	// Intentionally keep task-run lookup, watermark claim, and event write in one
+	// transaction: a rolled-back event write must not permanently consume the CI
+	// watermark. The pre-read above only avoids this cost for settled polls.
 	tx, err := s.db.Begin()
 	if err != nil {
 		log.Printf("[pr-watcher] begin CI event for %s: %v", pr.prURL, err)
 		return
 	}
 	defer tx.Rollback()
+	tenantID, runID, attemptID, hasRun, err := s.taskRunContextForClawTx(tx, pr.clawID)
+	if err != nil {
+		log.Printf("[pr-watcher] find CI task run for %s: %v", pr.prURL, err)
+		return
+	}
 
 	// Conditional UPDATE = claim, same idiom as claimPipelineStageTransition.
 	// Exactly one poll (and exactly one hub process) observes a given

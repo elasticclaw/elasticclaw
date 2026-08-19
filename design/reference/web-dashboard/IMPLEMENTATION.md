@@ -165,3 +165,7 @@ GATE 6: full-suite green + final visual pass + departures documented below.
   fixture anchors 363+mondayIndex(end) days back from the end day, which lands the first
   cell on the end's own weekday and drifts every row off its M-S label; diverged for
   correctness (2026-08-19).
+- The CI-status optimization proposed in `5ac7a640` was reverted in `b87086db`: updating
+	  the watermark outside the event transaction could permanently consume it when the event
+	  write rolled back. The task-run lookup, conditional claim, and event write therefore stay
+	  transactional; a cheap `claw_prs` pre-read skips BEGIN/ROLLBACK for already-settled polls.

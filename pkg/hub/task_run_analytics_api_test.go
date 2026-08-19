@@ -14,25 +14,40 @@ import (
 )
 
 func TestSplitTaskRunAnalyticsValuesPreservesDoubleEncodedCommas(t *testing.T) {
-	// Mirrors serializeFilterValues: encode each value before joining, then let
-	// the query-string encoder perform the transport encoding.
-	clientSerialize := func(values []string) string {
-		encoded := make([]string, 0, len(values))
-		for _, value := range values {
-			encoded = append(encoded, url.QueryEscape(value))
-		}
-		return strings.Join(encoded, ",")
+	// No JS test runner is configured, so mirror encodeURIComponent byte-for-byte
+	// before URLSearchParams applies its outer transport encoding.
+	clientValue := strings.Join([]string{
+		encodeURIComponentForTest("Research, Development"),
+		encodeURIComponentForTest("Operations"),
+	}, ",")
+	queryValues := url.Values{"workspace": {clientValue}}
+	query := queryValues.Encode()
+	if query != "workspace=Research%252C%2520Development%2COperations" {
+		t.Fatalf("client wire format = %q", query)
 	}
-	query := url.Values{}
-	query.Set("workspace", clientSerialize([]string{"Research, Development", "Operations"}))
-	q, err := url.ParseQuery(query.Encode())
+	request, err := http.NewRequest(http.MethodGet, "/api/analytics?"+query, nil)
 	if err != nil {
-		t.Fatalf("parse client query: %v", err)
+		t.Fatalf("build client-shaped request: %v", err)
 	}
-	got := splitTaskRunAnalyticsValues(q, "workspace")
+	got := splitTaskRunAnalyticsValues(request.URL.Query(), "workspace")
 	if len(got) != 2 || got[0] != "Research, Development" || got[1] != "Operations" {
 		t.Fatalf("splitTaskRunAnalyticsValues() = %#v", got)
 	}
+}
+
+func encodeURIComponentForTest(value string) string {
+	const hex = "0123456789ABCDEF"
+	var encoded strings.Builder
+	for _, b := range []byte(value) {
+		if b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z' || b >= '0' && b <= '9' || strings.ContainsRune("-_.!~*'()", rune(b)) {
+			encoded.WriteByte(b)
+			continue
+		}
+		encoded.WriteByte('%')
+		encoded.WriteByte(hex[b>>4])
+		encoded.WriteByte(hex[b&0x0f])
+	}
+	return encoded.String()
 }
 
 func TestTaskRunAnalyticsAPISummaryRunsFiltersAndPagination(t *testing.T) {
