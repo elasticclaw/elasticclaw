@@ -124,11 +124,11 @@ type Notifier interface {
 }
 
 // DestinationReporter is implemented by providers that can name their
-// configured default destination (Slack: the channel ID). Callers use it only
-// as opaque bookkeeping — e.g. thread roots recorded for one destination must
-// stop matching after the operator repoints the notifier elsewhere. Callers
-// must treat a provider without this interface (or an empty string) as an
-// unknown destination, never as a match-everything wildcard.
+// configured default destination (Slack: the channel ID). The value is opaque
+// bookkeeping — it identifies where a notifier currently points so a caller
+// can tell two notifier configurations apart. Callers must treat a provider
+// without this interface (or an empty string) as an unknown destination,
+// never as a match-everything wildcard.
 type DestinationReporter interface {
 	Destination() string
 }

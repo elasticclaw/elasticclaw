@@ -361,11 +361,10 @@ func (s *Server) lifecycleNotifierTick() {
 	s.clearPollWarning("notify-notifier")
 
 	d := lifecycleDelivery{notifier: notifier, lc: lc}
-	// Two independent event sources share the notifier, dedupe table and
-	// legacy thread table: task-run events for claws that belong to a task run, and
-	// the claw pass for ad-hoc claws (task_run_id=''). See
-	// lifecycle_claw_notifier.go for the exclusivity rule that prevents
-	// double notifications.
+	// Two independent event sources share the notifier and dedupe table:
+	// task-run events for claws that belong to a task run, and the claw pass
+	// for ad-hoc claws (task_run_id=''). See lifecycle_claw_notifier.go for
+	// the exclusivity rule that prevents double notifications.
 	s.lifecycleTaskRunPass(d)
 	s.lifecycleClawPass(d)
 }

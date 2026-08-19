@@ -154,6 +154,35 @@ func TestNotifyActionSendsRenderedSlackMessage(t *testing.T) {
 // {{.Issue.*}} from the pipeline context and {{.Inputs.*}} from a manual
 // trigger. A message with a subject opts into Slack's rich (attachment)
 // rendering, so the subject is asserted inside the blocks.
+// severity: picks the colour stripe; a value the save-time check never lets
+// through still sends, as info, with a warning.
+func TestNotifyActionMapsSeverity(t *testing.T) {
+	for severity, want := range map[string]string{
+		"warning": notify.SlackColorWarning,
+		"error":   notify.SlackColorError,
+		"success": notify.SlackColorSuccess,
+		"urgent":  notify.SlackColorInfo,
+	} {
+		t.Run(severity, func(t *testing.T) {
+			fake := newFakeSlackServer(t)
+			s, _, clawID := newNotifyActionTestServer(t, notifyTestNotifiers(fake.server.URL))
+			stage := pipeline.Stage{ID: "announce", OnEnter: pipeline.OnEnter{Notify: pipeline.NotifyAction{
+				Enabled:  true,
+				Via:      notifyTestVia,
+				Text:     "Build failed",
+				Severity: severity,
+			}}}
+			if _, err := s.runOnEnter(clawID, stage, pipelineContext{}); err != nil {
+				t.Fatalf("notify action blocked the stage transition: %v", err)
+			}
+			waitForSlackRequests(t, fake, 1)
+			if got := fake.request(0).Color; got != want {
+				t.Fatalf("severity %q colour = %q, want %q", severity, got, want)
+			}
+		})
+	}
+}
+
 func TestNotifyActionRendersIssueAndInputTemplates(t *testing.T) {
 	fake := newFakeSlackServer(t)
 	s, db, _ := newNotifyActionTestServer(t, notifyTestNotifiers(fake.server.URL))

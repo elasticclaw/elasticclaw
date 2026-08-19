@@ -306,8 +306,11 @@ type NotifyAction struct {
 	// plain text line to the Block Kit attachment layout, with the subject on
 	// its own line under the text. Omit it to keep the plain rendering.
 	Subject string `yaml:"subject,omitempty"`
-	// Severity controls provider-native emphasis. It must be info, success,
-	// warning or error when set.
+	// Severity controls provider-native emphasis (the colour stripe). It
+	// must be info, success, warning or error when set; the value is
+	// rejected at save time (validateNotifyVias), never here, because
+	// Parse must stay lenient on notify blocks — a notification typo must
+	// not take a whole running pipeline down.
 	Severity string `yaml:"severity,omitempty"`
 	// Target overrides the notifier's default destination (channel, address);
 	// templated.
@@ -430,13 +433,6 @@ func (p *Pipeline) Validate() error {
 	}
 	skipEdges := make(map[string][]string)
 	for _, stage := range p.Stages {
-		if action := stage.OnEnter.Notify; action.Enabled {
-			switch action.Severity {
-			case "", "info", "success", "warning", "error":
-			default:
-				return fmt.Errorf("stage %q notify severity %q must be info, success, warning or error", stage.ID, action.Severity)
-			}
-		}
 		for _, skip := range []struct {
 			name string
 			rule *StageSkip

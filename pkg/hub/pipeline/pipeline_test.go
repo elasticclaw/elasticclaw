@@ -1102,8 +1102,12 @@ stages:
 	}
 }
 
-func TestParseNotifyActionRejectsInvalidSeverity(t *testing.T) {
-	_, err := pipeline.Parse([]byte(`
+func TestParseNotifyActionBadSeverityIsNotFatal(t *testing.T) {
+	// A severity typo is rejected when the workflow is SAVED
+	// (TestWorkflowPushRejectsInvalidNotifySeverity in pkg/hub). Parse must
+	// stay lenient: failing here would make one notify typo stop every stage
+	// action of an already-running pipeline, not just the notification.
+	p, err := pipeline.Parse([]byte(`
 stages:
   - id: announce
     on_enter:
@@ -1112,8 +1116,11 @@ stages:
         text: hello
         severity: urgent
 `))
-	if err == nil || !strings.Contains(err.Error(), "notify severity") {
-		t.Fatalf("Parse error = %v, want invalid notify severity", err)
+	if err != nil {
+		t.Fatalf("Parse error = %v, want the pipeline to survive a notify typo", err)
+	}
+	if got := p.Stages[0].OnEnter.Notify.Severity; got != "urgent" {
+		t.Fatalf("severity = %q, want the raw value preserved for the validator", got)
 	}
 }
 

@@ -76,20 +76,20 @@ func (s *Server) executeNotifyAction(clawID string, stage pipeline.Stage, action
 		}
 		return renderInjectWithData(clawID, text, data)
 	}
+	severity, known := notifySeverity(action.Severity)
+	if !known {
+		// Save-time validation rejects an unknown severity, so this can only
+		// be an artifact saved before that check existed. Warn instead of
+		// silently colouring it info, but still send: one notification typo
+		// must never suppress a stage's notification.
+		s.warnNotifyAction(clawID, stage.ID, fmt.Errorf("notify severity %q must be info, success, warning or error; sending as info", action.Severity))
+	}
 	message := notify.Message{
 		Text:     render(action.Text),
 		Subject:  render(action.Subject),
 		Target:   render(action.Target),
 		Options:  action.Options,
-		Severity: notify.SeverityInfo,
-	}
-	switch action.Severity {
-	case "success":
-		message.Severity = notify.SeveritySuccess
-	case "warning":
-		message.Severity = notify.SeverityWarning
-	case "error":
-		message.Severity = notify.SeverityError
+		Severity: severity,
 	}
 	if pipelineCtx.IssueID != "" {
 		message.Fields = append(message.Fields, notify.Field{Label: "issue", Value: pipelineCtx.IssueID, Code: true})
@@ -110,6 +110,26 @@ func (s *Server) executeNotifyAction(clawID string, stage pipeline.Stage, action
 		}
 		log.Printf("[pipeline] notify action sent for claw %s stage %q via %q", clawID, stage.ID, via)
 	})
+}
+
+// notifySeverity maps a notify action's severity: value onto the notify
+// tier's severity, reporting whether the value is known. It is the single
+// definition shared by the save-time check (validateNotifyVias) and this
+// send path, so an author can never be told a value is valid and then get a
+// different colour than the one they named. An unset severity is the
+// documented default, info.
+func notifySeverity(value string) (notify.Severity, bool) {
+	switch strings.TrimSpace(value) {
+	case "", "info":
+		return notify.SeverityInfo, true
+	case "success":
+		return notify.SeveritySuccess, true
+	case "warning":
+		return notify.SeverityWarning, true
+	case "error":
+		return notify.SeverityError, true
+	}
+	return notify.SeverityInfo, false
 }
 
 // pipelineNotifySummary builds the push-notification summary slot.
