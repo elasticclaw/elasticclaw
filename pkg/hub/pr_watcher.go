@@ -973,18 +973,7 @@ func (s *Server) checkCIStatus(pr clawPR, token string) {
 	// Conditional UPDATE = claim, same idiom as claimPipelineStageTransition.
 	// Exactly one poll (and exactly one hub process) observes a given
 	// (sha, conclusion) pair, so the injection below cannot double-fire.
-	tenantID, runID, attemptID, hasRun, err := s.taskRunContextForClaw(pr.clawID)
-	if err != nil {
-		log.Printf("[pr-watcher] find CI task run for %s: %v", pr.prURL, err)
-		return
-	}
-	tx, err := s.db.Begin()
-	if err != nil {
-		log.Printf("[pr-watcher] begin CI claim for %s: %v", pr.prURL, err)
-		return
-	}
-	defer tx.Rollback()
-	res, err := tx.Exec(
+	res, err := s.db.Exec(
 		`UPDATE claw_prs SET last_ci_sha=?, last_ci_conclusion=? WHERE id=? AND NOT (last_ci_sha=? AND last_ci_conclusion=?)`,
 		headSHA, conclusion, pr.id, headSHA, conclusion)
 	if err != nil {
@@ -994,6 +983,17 @@ func (s *Server) checkCIStatus(pr clawPR, token string) {
 	if claimed, err := res.RowsAffected(); err != nil || claimed == 0 {
 		return
 	}
+	tenantID, runID, attemptID, hasRun, err := s.taskRunContextForClaw(pr.clawID)
+	if err != nil {
+		log.Printf("[pr-watcher] find CI task run for %s: %v", pr.prURL, err)
+		return
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		log.Printf("[pr-watcher] begin CI event for %s: %v", pr.prURL, err)
+		return
+	}
+	defer tx.Rollback()
 
 	ciEventType := taskRunEventCISucceeded
 	if conclusion == ciConclusionFailure {

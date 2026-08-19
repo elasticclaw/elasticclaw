@@ -5,12 +5,21 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 )
+
+func TestSplitTaskRunAnalyticsValuesPreservesDoubleEncodedCommas(t *testing.T) {
+	q := url.Values{"workspace": {"Research%2C%20Development,Operations"}}
+	got := splitTaskRunAnalyticsValues(q, "workspace")
+	if len(got) != 2 || got[0] != "Research, Development" || got[1] != "Operations" {
+		t.Fatalf("splitTaskRunAnalyticsValues() = %#v", got)
+	}
+}
 
 func TestTaskRunAnalyticsAPISummaryRunsFiltersAndPagination(t *testing.T) {
 	s, db := newTaskRunAnalyticsAPITestServer(t)

@@ -141,6 +141,9 @@ func migrate(db *sql.DB) error {
 	if err := addColumn(db, "claw_prs", "title", `TEXT NOT NULL DEFAULT ''`); err != nil {
 		return err
 	}
+	// Existing PR titles and provider state cannot be reconstructed locally: the
+	// authoritative values live in the provider API, which migrations must not call.
+	// Consumers already treat these fields as optional until the next watcher poll.
 	if err := addColumn(db, "claw_prs", "last_ci_conclusion", `TEXT NOT NULL DEFAULT ''`); err != nil {
 		return err
 	}
@@ -643,6 +646,7 @@ func migrate(db *sql.DB) error {
 	CREATE INDEX IF NOT EXISTS idx_task_run_summaries_model ON task_run_summaries(tenant_id, model, started_at DESC);
 	CREATE INDEX IF NOT EXISTS idx_task_run_summaries_repo ON task_run_summaries(tenant_id, repo, started_at DESC);
 	CREATE INDEX IF NOT EXISTS idx_task_run_summaries_timeout ON task_run_summaries(tenant_id, timeout_at);
+	CREATE INDEX IF NOT EXISTS idx_task_run_summaries_ticket_page ON task_run_summaries(tenant_id, issue_id, started_at DESC, issue_created_at DESC);
 
 	CREATE TABLE IF NOT EXISTS hub_templates (
 		name       TEXT PRIMARY KEY,
@@ -906,7 +910,8 @@ func rebuildTaskRunSummariesStatusV3(db *sql.DB) error {
 		CREATE INDEX idx_task_run_summaries_factory ON task_run_summaries(tenant_id, factory_name, started_at DESC);
 		CREATE INDEX idx_task_run_summaries_model ON task_run_summaries(tenant_id, model, started_at DESC);
 		CREATE INDEX idx_task_run_summaries_repo ON task_run_summaries(tenant_id, repo, started_at DESC);
-		CREATE INDEX idx_task_run_summaries_timeout ON task_run_summaries(tenant_id, timeout_at)`); err != nil {
+		CREATE INDEX idx_task_run_summaries_timeout ON task_run_summaries(tenant_id, timeout_at);
+		CREATE INDEX idx_task_run_summaries_ticket_page ON task_run_summaries(tenant_id, issue_id, started_at DESC, issue_created_at DESC)`); err != nil {
 		return fmt.Errorf("replace task run summaries v3: %w", err)
 	}
 	return tx.Commit()

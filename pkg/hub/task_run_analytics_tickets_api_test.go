@@ -3,6 +3,7 @@ package hub
 import (
 	"net/http"
 	"testing"
+	"time"
 )
 
 func TestDeriveTaskRunAnalyticsTicketStatusFixtureTickets(t *testing.T) {
@@ -174,5 +175,56 @@ func TestTaskRunAnalyticsTicketsHandlerHonorsMultiValueDimensionFilters(t *testi
 				t.Fatalf("tickets = %#v, want %d", response, test.want)
 			}
 		})
+	}
+}
+
+// Regression test for finding #16: a fresh cached ticket_metadata row with a
+// zero reported_at (e.g. read before the tracker backfill lands) must not
+// clobber a non-zero, run-derived ReportedAt already set on the ticket.
+func TestApplyOrScheduleTaskRunAnalyticsTicketMetadataKeepsNonZeroReportedAt(t *testing.T) {
+	s, _ := newTaskRunAnalyticsAPITestServer(t)
+	ticket := &taskRunAnalyticsTicketView{IssueID: "TICKET-KEEP", ReportedAt: 12_345}
+	metadata := taskRunAnalyticsTicketMetadata{updatedAt: time.Now().UnixMilli(), reportedAt: 0}
+	s.applyOrScheduleTaskRunAnalyticsTicketMetadata("test-tenant-id", ticket, taskRunAnalyticsRunView{}, metadata)
+	if ticket.ReportedAt != 12_345 {
+		t.Fatalf("ReportedAt = %d, want run-derived value 12345 preserved", ticket.ReportedAt)
+	}
+}
+
+// Regression test for finding #3: a ticket group whose runs slice ended up
+// empty (e.g. a hydration-query race) must be skipped by the handler instead
+// of reaching buildTaskRunAnalyticsTicket, which panics on runs[0].
+func TestTaskRunAnalyticsTicketsHandlerSkipsEmptyGroups(t *testing.T) {
+	s, db := newTaskRunAnalyticsAPITestServer(t)
+	insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{
+		RunID: "ticket-empty-run", AttemptID: "attempt-empty", ClawID: "claw-empty", TenantID: "test-tenant-id",
+		Status: taskRunStatusClean, Phase: taskRunPhaseTerminal, OwnerType: taskRunOwnerWorkflow,
+		Workspace: "eng", Workflow: "tickets", Integration: "external", Repo: "elastic/claw",
+		StartedAt: 1_000, IssueCreatedAt: 1_000, FinishedAt: 1_500,
+		IssueTitle: "TICKET-EMPTY", UsageUpdatedAt: 1_500,
+	})
+	for _, table := range []string{"task_runs", "task_run_summaries"} {
+		col := map[string]string{"task_runs": "id", "task_run_summaries": "run_id"}[table]
+		if _, err := db.Exec("UPDATE "+table+" SET issue_id=? WHERE "+col+"=?", "TICKET-EMPTY", "ticket-empty-run"); err != nil {
+			t.Fatalf("set issue ID: %v", err)
+		}
+	}
+	// Simulate the race: the id/order query still sees the run, but the
+	// hydration query no longer does, so buildTaskRunAnalyticsTicket would
+	// receive an empty runs slice for this group if not guarded.
+	if _, err := db.Exec(`DELETE FROM task_run_summaries WHERE run_id=?`, "ticket-empty-run"); err != nil {
+		t.Fatalf("delete summary row: %v", err)
+	}
+
+	rr := requestTaskRunAnalyticsAPI(t, s, http.MethodGet, "/api/analytics/tickets", "test-token")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("tickets status = %d, body = %s (handler must not panic on empty groups)", rr.Code, rr.Body.String())
+	}
+	var response taskRunAnalyticsTicketsResponse
+	decodeTaskRunAnalyticsAPI(t, rr, &response)
+	for _, ticket := range response.Tickets {
+		if ticket.IssueID == "TICKET-EMPTY" {
+			t.Fatalf("expected TICKET-EMPTY to be skipped, got ticket: %#v", ticket)
+		}
 	}
 }

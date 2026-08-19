@@ -15,7 +15,7 @@ export function selectedFilterValues(value?: string) {
 }
 
 export function serializeFilterValues(values: string[]) {
-  return values.map((value) => encodeURIComponent(value)).join(",")
+  return values.map((value) => encodeURIComponent(value).replace(/%2C/gi, "%252C")).join(",")
 }
 
 export function MultiFilterSelect({

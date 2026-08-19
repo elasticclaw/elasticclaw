@@ -861,6 +861,26 @@ func (s *Server) readTaskRunAnalyticsClawTags(tenantID string, runs []taskRunAna
 	if len(clawIDs) == 0 {
 		return tagsByClawID, nil
 	}
+	if len(clawIDs) > 500 {
+		for start := 0; start < len(clawIDs); start += 500 {
+			end := start + 500
+			if end > len(clawIDs) {
+				end = len(clawIDs)
+			}
+			chunkRuns := make([]taskRunAnalyticsRunView, len(clawIDs[start:end]))
+			for i, id := range clawIDs[start:end] {
+				chunkRuns[i].ClawID = id
+			}
+			chunk, err := s.readTaskRunAnalyticsClawTags(tenantID, chunkRuns)
+			if err != nil {
+				return nil, err
+			}
+			for id, tags := range chunk {
+				tagsByClawID[id] = tags
+			}
+		}
+		return tagsByClawID, nil
+	}
 
 	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(clawIDs)), ",")
 	args := make([]any, 0, len(clawIDs)+1)
@@ -934,6 +954,22 @@ func (s *Server) readTaskRunAnalyticsAttemptsForRuns(tenantID string, runIDs []s
 	if len(runIDs) == 0 {
 		return attemptsByRun, nil
 	}
+	if len(runIDs) > 500 {
+		for start := 0; start < len(runIDs); start += 500 {
+			end := start + 500
+			if end > len(runIDs) {
+				end = len(runIDs)
+			}
+			chunk, err := s.readTaskRunAnalyticsAttemptsForRuns(tenantID, runIDs[start:end])
+			if err != nil {
+				return nil, err
+			}
+			for id, values := range chunk {
+				attemptsByRun[id] = append(attemptsByRun[id], values...)
+			}
+		}
+		return attemptsByRun, nil
+	}
 	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(runIDs)), ",")
 	args := make([]any, 0, len(runIDs)+1)
 	args = append(args, tenantID)
@@ -1000,6 +1036,22 @@ func (s *Server) readTaskRunAnalyticsEvents(tenantID, runID string) ([]taskRunAn
 func (s *Server) readTaskRunAnalyticsEventsForRuns(tenantID string, runIDs []string) (map[string][]taskRunAnalyticsEventView, error) {
 	eventsByRun := map[string][]taskRunAnalyticsEventView{}
 	if len(runIDs) == 0 {
+		return eventsByRun, nil
+	}
+	if len(runIDs) > 500 {
+		for start := 0; start < len(runIDs); start += 500 {
+			end := start + 500
+			if end > len(runIDs) {
+				end = len(runIDs)
+			}
+			chunk, err := s.readTaskRunAnalyticsEventsForRuns(tenantID, runIDs[start:end])
+			if err != nil {
+				return nil, err
+			}
+			for id, values := range chunk {
+				eventsByRun[id] = append(eventsByRun[id], values...)
+			}
+		}
 		return eventsByRun, nil
 	}
 	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(runIDs)), ",")
@@ -1077,6 +1129,22 @@ func (s *Server) readTaskRunAnalyticsPRs(tenantID, runID string) ([]taskRunAnaly
 func (s *Server) readTaskRunAnalyticsPRsForRuns(tenantID string, runIDs []string) (map[string][]taskRunAnalyticsPRView, error) {
 	prsByRun := map[string][]taskRunAnalyticsPRView{}
 	if len(runIDs) == 0 {
+		return prsByRun, nil
+	}
+	if len(runIDs) > 500 {
+		for start := 0; start < len(runIDs); start += 500 {
+			end := start + 500
+			if end > len(runIDs) {
+				end = len(runIDs)
+			}
+			chunk, err := s.readTaskRunAnalyticsPRsForRuns(tenantID, runIDs[start:end])
+			if err != nil {
+				return nil, err
+			}
+			for id, values := range chunk {
+				prsByRun[id] = append(prsByRun[id], values...)
+			}
+		}
 		return prsByRun, nil
 	}
 	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(runIDs)), ",")
