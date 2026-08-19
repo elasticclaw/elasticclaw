@@ -2,9 +2,49 @@ package hub
 
 import (
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 )
+
+func TestTaskRunAnalyticsTicketPageQueriesUseTicketPageIndex(t *testing.T) {
+	_, db := newTaskRunAnalyticsAPITestServer(t)
+	filters := taskRunAnalyticsFilters{TenantID: "test-tenant-id"}
+	where, args := taskRunAnalyticsSummaryWhere(filters)
+	orderAt := `MAX(COALESCE(NULLIF(MIN(NULLIF(issue_created_at,0)),0), MIN(started_at), 1), 1)`
+	queries := []string{
+		`SELECT COUNT(DISTINCT issue_id) FROM task_run_summaries ` + where + ` AND issue_id != ''`,
+		`SELECT issue_id, ` + orderAt + ` FROM task_run_summaries ` + where + ` AND issue_id != '' GROUP BY issue_id ORDER BY 2 DESC, issue_id DESC LIMIT ?`,
+	}
+	for _, query := range queries {
+		queryArgs := append([]any{}, args...)
+		if strings.Contains(query, "LIMIT ?") {
+			queryArgs = append(queryArgs, 2)
+		}
+		rows, err := db.Query(`EXPLAIN QUERY PLAN `+query, queryArgs...)
+		if err != nil {
+			t.Fatalf("explain ticket page query: %v", err)
+		}
+		var details []string
+		for rows.Next() {
+			var id, parent, unused int
+			var detail string
+			if err := rows.Scan(&id, &parent, &unused, &detail); err != nil {
+				rows.Close()
+				t.Fatalf("scan ticket page plan: %v", err)
+			}
+			details = append(details, detail)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			t.Fatalf("read ticket page plan: %v", err)
+		}
+		rows.Close()
+		if !strings.Contains(strings.Join(details, "\n"), "idx_task_run_summaries_ticket_page") {
+			t.Fatalf("ticket page query did not use idx_task_run_summaries_ticket_page: %s", strings.Join(details, "; "))
+		}
+	}
+}
 
 func TestDeriveTaskRunAnalyticsTicketStatusFixtureTickets(t *testing.T) {
 	tests := []struct {

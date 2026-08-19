@@ -15,6 +15,8 @@ export function selectedFilterValues(value?: string) {
 }
 
 export function serializeFilterValues(values: string[]) {
+  // The URLSearchParams layer encodes '%' once more. That leaves '%2C' for the
+  // hub to unescape after splitting the comma-delimited value list.
   return values.map((value) => encodeURIComponent(value)).join(",")
 }
 

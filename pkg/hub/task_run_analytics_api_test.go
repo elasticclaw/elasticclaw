@@ -14,7 +14,21 @@ import (
 )
 
 func TestSplitTaskRunAnalyticsValuesPreservesDoubleEncodedCommas(t *testing.T) {
-	q := url.Values{"workspace": {"Research%2C%20Development,Operations"}}
+	// Mirrors serializeFilterValues: encode each value before joining, then let
+	// the query-string encoder perform the transport encoding.
+	clientSerialize := func(values []string) string {
+		encoded := make([]string, 0, len(values))
+		for _, value := range values {
+			encoded = append(encoded, url.QueryEscape(value))
+		}
+		return strings.Join(encoded, ",")
+	}
+	query := url.Values{}
+	query.Set("workspace", clientSerialize([]string{"Research, Development", "Operations"}))
+	q, err := url.ParseQuery(query.Encode())
+	if err != nil {
+		t.Fatalf("parse client query: %v", err)
+	}
 	got := splitTaskRunAnalyticsValues(q, "workspace")
 	if len(got) != 2 || got[0] != "Research, Development" || got[1] != "Operations" {
 		t.Fatalf("splitTaskRunAnalyticsValues() = %#v", got)

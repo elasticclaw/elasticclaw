@@ -20,6 +20,7 @@ var ticketMetadataInflight sync.Map
 type taskRunAnalyticsTicketsResponse struct {
 	Tickets    []taskRunAnalyticsTicketView `json:"tickets"`
 	NextCursor string                       `json:"nextCursor,omitempty"`
+	Truncated  bool                         `json:"truncated,omitempty"`
 	Limit      int                          `json:"limit"`
 	Total      int                          `json:"total"`
 }
@@ -116,7 +117,7 @@ func (s *Server) handleTaskRunAnalyticsTickets(w http.ResponseWriter, r *http.Re
 		return
 	}
 	limit := taskRunAnalyticsLimit(r.URL.Query().Get("limit"))
-	groups, total, err := s.readTaskRunAnalyticsTicketGroupsPage(filters, githubLoginFromContext(r.Context()), cursorAt, cursorIssueID, limit)
+	groups, total, truncated, err := s.readTaskRunAnalyticsTicketGroupsPage(filters, githubLoginFromContext(r.Context()), cursorAt, cursorIssueID, limit)
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, "db error")
 		return
@@ -166,27 +167,27 @@ func (s *Server) handleTaskRunAnalyticsTickets(w http.ResponseWriter, r *http.Re
 		}
 		tickets = append(tickets, ticket)
 	}
-	jsonOK(w, taskRunAnalyticsTicketsResponse{Tickets: tickets, NextCursor: nextCursor, Limit: limit, Total: total})
+	jsonOK(w, taskRunAnalyticsTicketsResponse{Tickets: tickets, NextCursor: nextCursor, Truncated: truncated, Limit: limit, Total: total})
 }
 
-func (s *Server) readTaskRunAnalyticsTicketGroupsPage(filters taskRunAnalyticsFilters, githubLogin string, cursorAt int64, cursorIssueID string, limit int) ([]taskRunAnalyticsTicketGroup, int, error) {
+func (s *Server) readTaskRunAnalyticsTicketGroupsPage(filters taskRunAnalyticsFilters, githubLogin string, cursorAt int64, cursorIssueID string, limit int) ([]taskRunAnalyticsTicketGroup, int, bool, error) {
 	// Restricted OAuth callers retain the established ACL stream; normal tenant reads are SQL paginated.
 	if s.taskRunAnalyticsViewACL(githubLogin) != nil {
-		groups, err := s.readTaskRunAnalyticsTicketGroups(filters, githubLogin, s.taskRunAnalyticsViewACL(githubLogin))
+		groups, truncated, err := s.readTaskRunAnalyticsTicketGroups(filters, githubLogin, s.taskRunAnalyticsViewACL(githubLogin))
 		if err != nil {
-			return nil, 0, err
+			return nil, 0, false, err
 		}
 		total := len(groups)
 		start := 0
 		for start < len(groups) && cursorAt > 0 && (groups[start].cursorAt() > cursorAt || (groups[start].cursorAt() == cursorAt && groups[start].issueID >= cursorIssueID)) {
 			start++
 		}
-		return groups[start:], total, nil
+		return groups[start:], total, truncated, nil
 	}
 	where, args := taskRunAnalyticsSummaryWhere(filters)
 	var total int
 	if err := s.db.QueryRow(`SELECT COUNT(DISTINCT issue_id) FROM task_run_summaries `+where+` AND issue_id != ''`, args...).Scan(&total); err != nil {
-		return nil, 0, err
+		return nil, 0, false, err
 	}
 	orderAt := `MAX(COALESCE(NULLIF(MIN(NULLIF(issue_created_at,0)),0), MIN(started_at), 1), 1)`
 	groupWhere := where + ` AND issue_id != ''`
@@ -200,7 +201,7 @@ func (s *Server) readTaskRunAnalyticsTicketGroupsPage(filters taskRunAnalyticsFi
 	groupArgs = append(groupArgs, limit+1)
 	rows, err := s.db.Query(`SELECT issue_id, `+orderAt+` FROM task_run_summaries `+groupWhere+` ORDER BY 2 DESC, issue_id DESC LIMIT ?`, groupArgs...)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, false, err
 	}
 	defer rows.Close()
 	ids := []string{}
@@ -208,15 +209,15 @@ func (s *Server) readTaskRunAnalyticsTicketGroupsPage(filters taskRunAnalyticsFi
 		var id string
 		var ignored int64
 		if err := rows.Scan(&id, &ignored); err != nil {
-			return nil, 0, err
+			return nil, 0, false, err
 		}
 		ids = append(ids, id)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, 0, err
+		return nil, 0, false, err
 	}
 	if len(ids) == 0 {
-		return []taskRunAnalyticsTicketGroup{}, total, nil
+		return []taskRunAnalyticsTicketGroup{}, total, false, nil
 	}
 	ph := strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",")
 	runWhere := where + ` AND issue_id IN (` + ph + `)`
@@ -226,12 +227,12 @@ func (s *Server) readTaskRunAnalyticsTicketGroupsPage(filters taskRunAnalyticsFi
 	}
 	runRows, err := s.db.Query(`SELECT `+taskRunAnalyticsRunColumns()+` FROM task_run_summaries `+runWhere, runArgs...)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, false, err
 	}
 	defer runRows.Close()
 	runs, err := scanTaskRunAnalyticsRuns(runRows)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, false, err
 	}
 	byID := map[string][]taskRunAnalyticsRunView{}
 	for _, run := range runs {
@@ -251,7 +252,7 @@ func (s *Server) readTaskRunAnalyticsTicketGroupsPage(filters taskRunAnalyticsFi
 			groups = append(groups, taskRunAnalyticsTicketGroup{issueID: id, runs: rs, reportedAt: reported})
 		}
 	}
-	return groups, total, nil
+	return groups, total, false, nil
 }
 
 type taskRunAnalyticsTicketGroup struct {
@@ -270,19 +271,30 @@ func (group taskRunAnalyticsTicketGroup) cursorAt() int64 {
 	return 1
 }
 
+const taskRunAnalyticsTicketACLMaxRuns = 5_000
+
 // readTaskRunAnalyticsTicketGroups loads only the run data needed to group and
-// page tickets. Full ticket expansion happens only after pagination.
-func (s *Server) readTaskRunAnalyticsTicketGroups(filters taskRunAnalyticsFilters, githubLogin string, accessCfg *types.AccessConfig) ([]taskRunAnalyticsTicketGroup, error) {
+// page tickets. Full ticket expansion happens only after pagination. ACL-backed
+// reads cannot express tag permissions in SQL, so cap their materialized run
+// window rather than allowing a restricted request to retain an unbounded set.
+func (s *Server) readTaskRunAnalyticsTicketGroups(filters taskRunAnalyticsFilters, githubLogin string, accessCfg *types.AccessConfig) ([]taskRunAnalyticsTicketGroup, bool, error) {
 	groups := map[string][]taskRunAnalyticsRunView{}
+	materializedRuns := 0
+	truncated := false
 	addRun := func(run taskRunAnalyticsRunView) bool {
+		if materializedRuns >= taskRunAnalyticsTicketACLMaxRuns {
+			truncated = true
+			return false
+		}
 		if run.IssueID != "" {
 			groups[run.IssueID] = append(groups[run.IssueID], run)
+			materializedRuns++
 		}
 		return true
 	}
 	err := s.forEachViewableTaskRunAnalyticsRun(filters, 0, "", githubLogin, accessCfg, addRun)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	tickets := make([]taskRunAnalyticsTicketGroup, 0, len(groups))
 	for issueID, runs := range groups {
@@ -302,7 +314,7 @@ func (s *Server) readTaskRunAnalyticsTicketGroups(filters taskRunAnalyticsFilter
 		}
 		return left > right
 	})
-	return tickets, nil
+	return tickets, truncated, nil
 }
 
 func (s *Server) buildTaskRunAnalyticsTicket(ctx context.Context, tenantID, issueID string, runs []taskRunAnalyticsRunView, attemptsByRun map[string][]taskRunAnalyticsAttemptView, prsByRun map[string][]taskRunAnalyticsPRView, eventsByRun map[string][]taskRunAnalyticsEventView, metadata taskRunAnalyticsTicketMetadata) (taskRunAnalyticsTicketView, error) {
