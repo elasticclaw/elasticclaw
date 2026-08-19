@@ -29,6 +29,7 @@ import {
   DragEndEvent,
   DragOverlay,
   DragStartEvent,
+  CollisionDetection,
 } from "@dnd-kit/core"
 import {
   SortableContext,
@@ -225,6 +226,20 @@ export const Sidebar = memo(function Sidebar({
     const found = allVisible.find((c) => c.id === event.active.id)
     setActiveDragClaw(found ?? null)
   }
+
+  // Pinned and unpinned agents share a section's SortableContext, but reordering
+  // across that boundary is rejected in handleDragEnd. Left to dnd-kit's default
+  // collision detection, the list still previews the move while dragging and only
+  // snaps back on drop — a confusing refusal with no visible cue. Filtering out
+  // cross-pinned drop targets up front keeps the list from moving at all when the
+  // drag can't succeed, so there's nothing to snap back from.
+  const collisionDetectionForClaws: CollisionDetection = useCallback((args) => {
+    const activePinned = pinnedClaws.some((claw) => claw.id === args.active.id)
+    const allowed = args.droppableContainers.filter((container) =>
+      container.id === args.active.id || pinnedClaws.some((claw) => claw.id === container.id) === activePinned
+    )
+    return closestCenter({ ...args, droppableContainers: allowed })
+  }, [pinnedClaws])
 
   function handleDragEnd(event: DragEndEvent) {
     setActiveDragClaw(null)
@@ -492,7 +507,7 @@ export const Sidebar = memo(function Sidebar({
 
       <DndContext
         sensors={sensors}
-        collisionDetection={closestCenter}
+        collisionDetection={collisionDetectionForClaws}
         onDragStart={handleDragStart}
         onDragEnd={handleDragEnd}
       >

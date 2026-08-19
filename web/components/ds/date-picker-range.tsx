@@ -38,6 +38,19 @@ function activePreset(range: DateRange | undefined, now: Date) {
   })
 }
 
+// A single-day pick is sent as a UTC day boundary (00:00:00.000Z –
+// 23:59:59.999Z) so the filtered range matches the calendar day regardless of
+// the viewer's timezone. Formatting `to` in local time can then read as the
+// next day (e.g. 23:59:59.999Z is already Aug 14 in Europe/Berlin), so the
+// label compares and formats these as a UTC day rather than a local one.
+function isSameUTCDay(a: Date, b: Date) {
+  return a.getUTCFullYear() === b.getUTCFullYear() && a.getUTCMonth() === b.getUTCMonth() && a.getUTCDate() === b.getUTCDate()
+}
+
+function formatUTCDay(date: Date, dateFormat: string) {
+  return format(new Date(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()), dateFormat)
+}
+
 /* The current period is always readable as text — the active preset's name, or
    the resolved dates — instead of inferred from which button looks active. */
 function rangeLabel(range: DateRange | undefined, now: Date) {
@@ -45,6 +58,7 @@ function rangeLabel(range: DateRange | undefined, now: Date) {
   if (preset) return preset.name
   if (!range?.from) return 'Select date range'
   if (!range.to) return format(range.from, 'MMM d, yyyy')
+  if (isSameUTCDay(range.from, range.to)) return formatUTCDay(range.from, 'MMM d, yyyy')
   return `${format(range.from, 'MMM d')} – ${format(range.to, 'MMM d, yyyy')}`
 }
 
