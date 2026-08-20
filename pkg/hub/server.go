@@ -6596,7 +6596,9 @@ func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.Pr
 		githubSection := fmt.Sprintf(`
 ## GitHub Access
 
-This agent has authenticated access to the following repositories via a GitHub App installation token. The token is fetched automatically — you don't need to configure anything.
+This agent has already authenticated to GitHub via an ElasticClaw GitHub App. The credential helper is installed and will mint a fresh, scoped installation token for every git/gh operation. **Do not run gh auth login, gh auth setup-git, or set GITHUB_TOKEN/GH_TOKEN yourself.** Just use git and gh commands directly.
+
+How it works: /usr/local/bin/gh is a wrapper that calls /usr/local/bin/elasticclaw-git-credentials to fetch a token from the hub before delegating to the real gh binary. The credential helper hits the hub's /api/github/token endpoint and returns a short-lived GitHub App installation token. Nothing is persisted in ~/.config/gh/hosts.yml, so gh auth status may look empty even though gh is authenticated.
 
 %s
 **git** and **gh CLI** are pre-configured and will work without any additional auth setup:
@@ -6606,7 +6608,14 @@ git clone https://github.com/owner/repo
 gh pr create
 gh issue list
 `+"```\n"+`
-Tokens are short-lived and refreshed automatically on each git/gh operation.
+Do not use gh auth status to verify authentication. Instead, run a real command such as gh api rate_limit or gh repo view <owner>/<repo>.
+
+If you see an authentication prompt or error, do not try to fix it by logging in. Verify the credential helper is being invoked by running:
+
+`+"```bash\n"+`printf 'protocol=https\nhost=github.com\n' | git credential fill
+`+"```\n"+`
+
+This should return "username=x-access-token" and a password. The helper is the source of truth.
 `, repoLines)
 		if existing, ok := files["TOOLS.md"]; ok {
 			files["TOOLS.md"] = existing + "\n" + githubSection
@@ -7017,6 +7026,13 @@ GHEOF
     REAL_GH_ESCAPED="$(printf '%s' "$REAL_GH" | sed 's/[&\\|]/\\&/g')"
     sudo sed -i "s|__ELASTICCLAW_REAL_GH__|$REAL_GH_ESCAPED|g" /usr/local/bin/gh
     sudo chmod +x /usr/local/bin/gh
+    # Ensure the wrapper is found before any system gh in /usr/bin.
+    if [ -d /etc/profile.d ]; then
+      sudo tee /etc/profile.d/elasticclaw-path.sh >/dev/null << 'PATHEOF'
+export PATH="/usr/local/bin:$PATH"
+PATHEOF
+    fi
+    export PATH="/usr/local/bin:$PATH"
     echo "GitHub gh wrapper configured"
   fi
 fi`
