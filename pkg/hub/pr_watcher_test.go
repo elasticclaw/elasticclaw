@@ -539,6 +539,32 @@ func TestCheckCIStatusGreenWakesIdleClawOnce(t *testing.T) {
 	}
 }
 
+func TestCheckCIStatusAfterPRRowRemovalRecordsEventWithoutMessage(t *testing.T) {
+	s, db, pr := ciStatusFixture(t, "claw-ci-row-removed", "abcdef0123456789", `[{"name":"verify","status":"completed","conclusion":"success"}]`)
+	const runID = "run-ci-row-removed"
+	if _, err := db.Exec(`INSERT INTO task_runs(id,tenant_id,initial_attempt_id,run_kind,owner_type,claw_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)`,
+		runID, "test-tenant-id", "attempt-ci-row-removed", taskRunKindCodeTask, taskRunOwnerManual, pr.clawID, now().UnixMilli(), now().UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE claws SET task_run_id=? WHERE id=?`, runID, pr.clawID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`DELETE FROM claw_prs WHERE id=?`, pr.id); err != nil {
+		t.Fatal(err)
+	}
+	s.checkCIStatus(pr, "token")
+	if messages := ciMessages(t, db, pr.clawID); len(messages) != 0 {
+		t.Fatalf("messages = %v, want none after PR row removal", messages)
+	}
+	var events int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM task_run_events WHERE event_type=?`, taskRunEventCISucceeded).Scan(&events); err != nil {
+		t.Fatal(err)
+	}
+	if events != 1 {
+		t.Fatalf("ci events = %d, want 1", events)
+	}
+}
+
 // A stale in-memory clawPR (e.g. two overlapping polls) must not re-notify:
 // the conditional UPDATE is the authority, not the cached watermark.
 func TestCheckCIStatusGreenClaimBlocksConcurrentRepoll(t *testing.T) {

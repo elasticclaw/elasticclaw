@@ -95,6 +95,7 @@ func (s *Server) storePRMention(clawID, repo string, prNumber int, prURL string)
 	var lastCommentAt string
 	var lastCommentTime time.Time
 	var headSHA string
+	var title string
 	if token != "" {
 		commentsData, err := githubAPIList(fmt.Sprintf("repos/%s/issues/%d/comments", repo, prNumber), token)
 		if err == nil {
@@ -125,6 +126,7 @@ func (s *Server) storePRMention(clawID, repo string, prNumber int, prURL string)
 			if headObj, ok := prData["head"].(map[string]interface{}); ok {
 				headSHA, _ = headObj["sha"].(string)
 			}
+			title, _ = prData["title"].(string)
 		}
 		reviewsData, err := githubAPIList(fmt.Sprintf("repos/%s/pulls/%d/reviews", repo, prNumber), token)
 		if err == nil {
@@ -138,8 +140,8 @@ func (s *Server) storePRMention(clawID, repo string, prNumber int, prURL string)
 	// hitting the (claw_id, pr_url) unique index means the PR is already
 	// tracked — idempotent success, not a persistence failure.
 	res, err := s.db.Exec(
-		`INSERT OR IGNORE INTO claw_prs(id,claw_id,repo,pr_number,pr_url,last_comment_id,last_comment_at,last_review_id,last_ci_sha,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)`,
-		prID, clawID, repo, prNumber, prURL, maxCommentID, lastCommentAt, maxReviewID, headSHA, now(),
+		`INSERT OR IGNORE INTO claw_prs(id,claw_id,repo,pr_number,pr_url,title,last_comment_id,last_comment_at,last_review_id,last_ci_sha,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
+		prID, clawID, repo, prNumber, prURL, title, maxCommentID, lastCommentAt, maxReviewID, headSHA, now(),
 	)
 	if err != nil {
 		log.Printf("[pr-watcher] failed to persist PR %s#%d for claw %s: %v", repo, prNumber, clawID[:8], err)
@@ -181,13 +183,14 @@ func (s *Server) scanMessageForPRs(clawID, content string) {
 
 // prMentionCandidate is a PR URL pending claw_prs registration.
 type prMentionCandidate struct {
-	repo     string
-	number   int
-	url      string
-	comment  int64
-	review   int64
+	repo      string
+	number    int
+	url       string
+	comment   int64
+	review    int64
 	commentAt string
-	headSHA  string
+	headSHA   string
+	title     string
 }
 
 // preparePRMention loads GitHub watermarks for a PR insert. alreadyTracked is
@@ -233,6 +236,7 @@ func (s *Server) preparePRMention(clawID, repo string, prNumber int, prURL strin
 		if headObj, ok := prData["head"].(map[string]interface{}); ok {
 			row.headSHA, _ = headObj["sha"].(string)
 		}
+		row.title, _ = prData["title"].(string)
 	}
 	reviewsData, err := githubAPIList(fmt.Sprintf("repos/%s/pulls/%d/reviews", repo, prNumber), token)
 	if err == nil {
@@ -272,8 +276,8 @@ func (s *Server) insertClawPRsAtomic(clawID string, rows []prMentionCandidate) s
 		}
 		prID := uuid.New().String()
 		res, err := tx.Exec(
-			`INSERT OR IGNORE INTO claw_prs(id,claw_id,repo,pr_number,pr_url,last_comment_id,last_comment_at,last_review_id,last_ci_sha,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)`,
-			prID, clawID, row.repo, row.number, row.url, row.comment, row.commentAt, row.review, row.headSHA, now(),
+			`INSERT OR IGNORE INTO claw_prs(id,claw_id,repo,pr_number,pr_url,title,last_comment_id,last_comment_at,last_review_id,last_ci_sha,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
+			prID, clawID, row.repo, row.number, row.url, row.title, row.comment, row.commentAt, row.review, row.headSHA, now(),
 		)
 		if err != nil {
 			log.Printf("[pr-watcher] failed to persist PR %s#%d for claw %s: %v", row.repo, row.number, shortID(clawID), err)
@@ -491,6 +495,9 @@ type clawPR struct {
 	lastReviewID        int64
 	prConditionsFired   bool
 	createdAt           string
+	state               string
+	merged              bool
+	mergedAt            *string
 }
 
 // loadClawPRsByNumber hydrates every tracked-PR row for a (repo, number) pair
@@ -639,21 +646,21 @@ func (s *Server) pollAllPRs() {
 		// Check if PR is merged/closed for any non-terminal claw status.
 		// checkPRMerged also runs human code push detection off the same PR
 		// fetch, before any termination handling.
-		if s.checkPRMerged(r.pr, token) {
+		merged := s.checkPRMerged(r.pr, token)
+		if lowPriorityOK || merged {
+			// Record a terminal CI result even when merge handling removed the PR row
+			// earlier in this poll. Outside the merge case this stays gated by the
+			// budget reserve like the rest of the low-priority checks below.
+			s.checkCIStatus(r.pr, token)
+		}
+		if merged {
 			terminatedClaws[r.pr.clawID] = true
 			continue // claw is being terminated, skip other checks
 		}
 		if !lowPriorityOK {
 			// Merge detection above is the only call worth the remaining budget.
-			// NOTE: this also suppresses the green-CI wake-up below, so a claw
-			// waiting on CI stays idle until the budget recovers. The webhook
-			// path is the fix for that; polling alone cannot be both cheap and
-			// prompt.
 			continue
 		}
-		// Always check CI status (failures and, just as importantly, green)
-		s.checkCIStatus(r.pr, token)
-
 		commentsData, err := githubAPIList(fmt.Sprintf("repos/%s/issues/%d/comments", r.pr.repo, r.pr.prNumber), token)
 		if err != nil {
 			log.Printf("[pr-watcher] error fetching comments for %s: %v", r.pr.prURL, err)
@@ -963,17 +970,96 @@ func (s *Server) checkCIStatus(pr clawPR, token string) {
 		conclusion = ciConclusionFailure
 	}
 
+	// Avoid BEGIN/ROLLBACK on settled polls. The conditional claim below remains
+	// authoritative because another watcher can update the watermark after this
+	// pre-read.
+	var alreadyClaimed int
+	if err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM claw_prs WHERE id=? AND last_ci_sha=? AND last_ci_conclusion=?)`, pr.id, headSHA, conclusion).Scan(&alreadyClaimed); err != nil {
+		log.Printf("[pr-watcher] read CI watermark for %s: %v", pr.prURL, err)
+		return
+	}
+	if alreadyClaimed != 0 {
+		return
+	}
+
+	// Intentionally keep task-run lookup, watermark claim, and event write in one
+	// transaction: a rolled-back event write must not permanently consume the CI
+	// watermark. The pre-read above only avoids this cost for settled polls.
+	tx, err := s.db.Begin()
+	if err != nil {
+		log.Printf("[pr-watcher] begin CI event for %s: %v", pr.prURL, err)
+		return
+	}
+	defer tx.Rollback()
+	tenantID, runID, attemptID, hasRun, err := s.taskRunContextForClawTx(tx, pr.clawID)
+	if err != nil {
+		log.Printf("[pr-watcher] find CI task run for %s: %v", pr.prURL, err)
+		return
+	}
+
 	// Conditional UPDATE = claim, same idiom as claimPipelineStageTransition.
-	// Exactly one poll (and exactly one hub process) observes a given
-	// (sha, conclusion) pair, so the injection below cannot double-fire.
-	res, err := s.db.Exec(
+	// A merged PR may have removed its row earlier in this poll; in that case
+	// the task-run event key becomes the durable claim instead.
+	res, err := tx.Exec(
 		`UPDATE claw_prs SET last_ci_sha=?, last_ci_conclusion=? WHERE id=? AND NOT (last_ci_sha=? AND last_ci_conclusion=?)`,
 		headSHA, conclusion, pr.id, headSHA, conclusion)
 	if err != nil {
 		log.Printf("[pr-watcher] failed to claim CI status for %s: %v", pr.prURL, err)
 		return
 	}
-	if claimed, err := res.RowsAffected(); err != nil || claimed == 0 {
+	claimed, err := res.RowsAffected()
+	if err != nil {
+		return
+	}
+	rowRemoved := false
+	if claimed == 0 {
+		var rowExists int
+		if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM claw_prs WHERE id=?)`, pr.id).Scan(&rowExists); err != nil {
+			log.Printf("[pr-watcher] check CI claim for %s: %v", pr.prURL, err)
+			return
+		}
+		if rowExists != 0 {
+			return
+		}
+		rowRemoved = true
+		if !hasRun {
+			return
+		}
+	}
+
+	ciEventType := taskRunEventCISucceeded
+	if conclusion == ciConclusionFailure {
+		ciEventType = taskRunEventCIFailed
+	}
+	recordedEvent := !hasRun
+	if hasRun {
+		event := TaskRunEvent{
+			EventKey: "ci:" + pr.id + ":" + headSHA + ":" + conclusion,
+			TenantID: tenantID, RunID: runID, AttemptID: attemptID, Source: taskRunSourcePRWatcher, EventType: ciEventType, ActorType: taskRunActorSystem,
+			TargetType: "pull_request", TargetURL: pr.prURL,
+			Detail: map[string]any{"repo": pr.repo, "prNumber": pr.prNumber, "headSha": headSHA, "conclusion": conclusion}, OccurredAt: now(),
+		}
+		var err error
+		recordedEvent, err = recordTaskRunEventIfNewTx(tx, event)
+		if err != nil {
+			log.Printf("[pr-watcher] record CI event for %s: %v", pr.prURL, err)
+			return
+		}
+		if recordedEvent {
+			if err := materializeTaskRunTx(tx, runID); err != nil {
+				log.Printf("[pr-watcher] materialize CI event for %s: %v", pr.prURL, err)
+				return
+			}
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		log.Printf("[pr-watcher] commit CI claim for %s: %v", pr.prURL, err)
+		return
+	}
+	if !recordedEvent {
+		return
+	}
+	if rowRemoved {
 		return
 	}
 
@@ -1741,7 +1827,7 @@ func (s *Server) handleClawPRs(w http.ResponseWriter, r *http.Request, clawID st
 	}
 
 	rows, err := s.db.Query(
-		`SELECT id, repo, pr_number, pr_url, created_at FROM claw_prs WHERE claw_id=? ORDER BY created_at ASC`,
+		`SELECT id, repo, pr_number, pr_url, title, state, merged, merged_at, created_at FROM claw_prs WHERE claw_id=? ORDER BY created_at ASC`,
 		clawID,
 	)
 	if err != nil {
@@ -1750,16 +1836,20 @@ func (s *Server) handleClawPRs(w http.ResponseWriter, r *http.Request, clawID st
 	}
 	defer rows.Close()
 	type PR struct {
-		ID        string `json:"id"`
-		Repo      string `json:"repo"`
-		PRNumber  int    `json:"prNumber"`
-		URL       string `json:"url"`
-		CreatedAt string `json:"createdAt"`
+		ID        string  `json:"id"`
+		Repo      string  `json:"repo"`
+		PRNumber  int     `json:"prNumber"`
+		URL       string  `json:"url"`
+		Title     string  `json:"title"`
+		State     string  `json:"state"`
+		Merged    bool    `json:"merged"`
+		MergedAt  *string `json:"mergedAt,omitempty"`
+		CreatedAt string  `json:"createdAt"`
 	}
 	var prs []PR
 	for rows.Next() {
 		var p PR
-		if err := rows.Scan(&p.ID, &p.Repo, &p.PRNumber, &p.URL, &p.CreatedAt); err != nil {
+		if err := rows.Scan(&p.ID, &p.Repo, &p.PRNumber, &p.URL, &p.Title, &p.State, &p.Merged, &p.MergedAt, &p.CreatedAt); err != nil {
 			continue
 		}
 		prs = append(prs, p)
@@ -1768,6 +1858,18 @@ func (s *Server) handleClawPRs(w http.ResponseWriter, r *http.Request, clawID st
 		prs = []PR{}
 	}
 	jsonOK(w, prs)
+}
+
+// clawPRStoredState folds GitHub's two-way `state` (open|closed) and its
+// separate `merged` flag into the three-way open|merged|closed value the
+// dashboard's claw_prs.state column and /api/claws/:id/prs expose. GitHub
+// reports state=="closed" for merged PRs too, so `merged` must be checked
+// first or a merged PR would be indistinguishable from a rejected one.
+func clawPRStoredState(githubState string, merged bool) string {
+	if merged {
+		return "merged"
+	}
+	return githubState
 }
 
 // checkPRMerged checks if a tracked PR is merged or closed.
@@ -1813,11 +1915,20 @@ func (s *Server) checkPRMerged(pr clawPR, token string) bool {
 		s.detectHumanCodePush(pr.clawID, runID, pr.repo, pr.prNumber, pr.prURL, headSHA, token)
 	}
 	state, _ := data["state"].(string)
+	title, _ := data["title"].(string)
 	merged, _ := data["merged"].(bool)
 	draft, _ := data["draft"].(bool)
 	mergedAtValue, _ := data["merged_at"].(string)
 	createdAtValue, _ := data["created_at"].(string)
 	mergedAt := parseRFC3339Timestamp(mergedAtValue)
+	var mergedAtDB any
+	if mergedAtValue != "" {
+		mergedAtDB = mergedAtValue
+	}
+	storedState := clawPRStoredState(state, merged)
+	if _, err := s.db.Exec(`UPDATE claw_prs SET title=?, state=?, merged=?, merged_at=? WHERE id=? AND NOT (title=? AND state=? AND merged=? AND merged_at IS ?)`, title, storedState, merged, mergedAtDB, pr.id, title, storedState, merged, mergedAtDB); err != nil {
+		log.Printf("[pr-watcher] update PR state for %s: %v", pr.prURL, err)
+	}
 	createdAt := parseRFC3339Timestamp(createdAtValue)
 	// Detection time is only a sound approximation of ready_at while the PR is
 	// still open. On the poll that first observes a merged or closed PR, now()

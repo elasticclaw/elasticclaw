@@ -689,11 +689,21 @@ stages:
 		t.Fatalf("pipeline stage = %q, want implement", got)
 	}
 	var pendingImplement int
-	if err := db.QueryRow(
-		`SELECT COUNT(*) FROM messages WHERE claw_id=? AND content=? AND delivered_at IS NULL`,
-		clawID, "Implement the issue now.",
-	).Scan(&pendingImplement); err != nil {
-		t.Fatal(err)
+	// The stage is recorded before its on_enter actions run, so wait for the
+	// asynchronously routed inject rather than assuming the stage update means
+	// the inject has already been persisted.
+	deadline = time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if err := db.QueryRow(
+			`SELECT COUNT(*) FROM messages WHERE claw_id=? AND content=? AND delivered_at IS NULL`,
+			clawID, "Implement the issue now.",
+		).Scan(&pendingImplement); err != nil {
+			t.Fatal(err)
+		}
+		if pendingImplement == 1 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 	if pendingImplement != 1 {
 		t.Fatalf("destination inject pending count = %d, want 1", pendingImplement)
@@ -883,11 +893,29 @@ func TestPersistPipelineOutputStoresAndLoadsJSON(t *testing.T) {
 	}
 
 	result := &pipelineRunResult{
-		ExitCode: 0,
-		Stdout:   `{"branch":"feat/foo","commit":"abc123"}`,
-		Stderr:   "",
+		ExitCode:   0,
+		Stdout:     `{"branch":"feat/foo","commit":"abc123"}`,
+		Stderr:     "",
+		Command:    "git rev-parse HEAD",
+		StartedAt:  time.UnixMilli(1_700_000_000_000),
+		DurationMs: 42,
 	}
 	s.persistPipelineOutput(clawID, "stage-1", "git_info", result)
+	var spanID, spanKind, status, recordsJSON string
+	var duration int64
+	if err := db.QueryRow(`SELECT span_id, span_kind, duration_ms, status, records FROM pipeline_outputs WHERE claw_id=? AND output_name=?`, clawID, "git_info").Scan(&spanID, &spanKind, &duration, &status, &recordsJSON); err != nil {
+		t.Fatalf("select span metadata: %v", err)
+	}
+	if spanID == "" || spanKind != "INTERNAL" || duration != 42 || status != "OK" {
+		t.Fatalf("unexpected span metadata: %q %q %d %q", spanID, spanKind, duration, status)
+	}
+	var records []pipelineLogRecord
+	if err := json.Unmarshal([]byte(recordsJSON), &records); err != nil {
+		t.Fatalf("decode records: %v", err)
+	}
+	if len(records) != 2 || records[0].Attrs["process.command"] != "git rev-parse HEAD" || records[1].Attrs["process.exit_code"] != float64(0) {
+		t.Fatalf("unexpected records: %#v", records)
+	}
 
 	// Verify it was stored
 	var count int
@@ -1871,6 +1899,38 @@ func TestEvaluateGateFail(t *testing.T) {
 	}
 	if verdict != "fail" {
 		t.Fatalf("db verdict = %q, want fail", verdict)
+	}
+	var recordsJSON string
+	if err := db.QueryRow(`SELECT records FROM pipeline_outputs WHERE claw_id=? AND output_name=?`, clawID, "build_info").Scan(&recordsJSON); err != nil {
+		t.Fatalf("select output records: %v", err)
+	}
+	var records []pipelineLogRecord
+	if err := json.Unmarshal([]byte(recordsJSON), &records); err != nil {
+		t.Fatalf("decode output records: %v", err)
+	}
+	if len(records) != 1 || records[0].Sev != "ERROR" || records[0].Attrs["gate.verdict"] != "fail" {
+		t.Fatalf("gate failure record = %#v", records)
+	}
+}
+
+func TestRecordPipelineFailureRecord(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
+	const clawID = "claw-provision-failure"
+	if _, err := db.Exec(`INSERT INTO claws(id, tenant_id, name, template, status, created_at) VALUES(?,?,?,?,?,datetime('now'))`, clawID, "test-tenant-id", "test", "base", "error"); err != nil {
+		t.Fatalf("insert claw: %v", err)
+	}
+	s.recordPipelineFailureRecord(clawID, "provision", "provision", "FATAL", "provider unavailable", map[string]interface{}{"error.type": "provision_failed"})
+	var status, recordsJSON string
+	var exitCode int
+	if err := db.QueryRow(`SELECT exit_code, status, records FROM pipeline_outputs WHERE claw_id=? AND output_name='provision'`, clawID).Scan(&exitCode, &status, &recordsJSON); err != nil {
+		t.Fatalf("select failure output: %v", err)
+	}
+	var records []pipelineLogRecord
+	if err := json.Unmarshal([]byte(recordsJSON), &records); err != nil {
+		t.Fatalf("decode failure records: %v", err)
+	}
+	if exitCode != 1 || status != "ERROR" || len(records) != 1 || records[0].Sev != "FATAL" || records[0].Attrs["error.type"] != "provision_failed" {
+		t.Fatalf("unexpected failure output: exit=%d status=%s records=%#v", exitCode, status, records)
 	}
 }
 

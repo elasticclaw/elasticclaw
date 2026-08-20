@@ -14,6 +14,7 @@ type Claw struct {
 	LastSeen            time.Time      `json:"last_seen" db:"last_seen"`
 	CreatedAt           time.Time      `json:"created_at" db:"created_at"`
 	ContextUsage        int            `json:"context_usage"`
+	OpenPRCount         int            `json:"open_pr_count"`
 	BootstrapStatus     string         `json:"bootstrap_status,omitempty"`
 	BootstrapDiagnostic string         `json:"bootstrap_diagnostic,omitempty"`
 	GitHubIssueID       string         `json:"github_issue_id,omitempty"`
@@ -33,6 +34,7 @@ type HubMessage struct {
 	Role      string    `json:"role" db:"role"` // "user" | "claw"
 	Content   string    `json:"content" db:"content"`
 	Format    string    `json:"format,omitempty" db:"format"` // "pre" = preserve whitespace
+	UserLogin *string   `json:"user_login,omitempty" db:"user_login"`
 	CreatedAt time.Time `json:"created_at" db:"created_at"`
 }
 

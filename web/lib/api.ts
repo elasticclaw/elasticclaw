@@ -3,6 +3,8 @@ import type {
   ApiMessage,
   AnalyticsCostDriver,
   AnalyticsEffectiveness,
+  AnalyticsTicket,
+  AnalyticsTicketsResponse,
   CostOverview,
   CreateClawRequest,
   DependencyStatusResponse,
@@ -266,7 +268,11 @@ export interface ClawPR {
   repo: string
   prNumber: number
   url: string
+  title: string
   createdAt: string
+  state: "open" | "merged" | "closed"
+  merged: boolean
+  mergedAt?: string
 }
 
 export async function fetchClawPRs(clawId: string): Promise<ClawPR[]> {
@@ -452,6 +458,15 @@ export async function fetchTaskRuns(filters?: TaskRunAnalyticsFilters, options?:
   return apiFetch<TaskRunsResponse>(`/api/analytics/runs${appendViewerTimezone(taskRunAnalyticsQuery(filters))}`, options)
 }
 
+export async function fetchAnalyticsTickets(filters?: TaskRunAnalyticsFilters, options?: AnalyticsRequestOptions): Promise<AnalyticsTicketsResponse> {
+  return apiFetch<AnalyticsTicketsResponse>(`/api/analytics/tickets${appendViewerTimezone(taskRunAnalyticsQuery(filters))}`, options)
+}
+
+export async function fetchAnalyticsTicket(ticketKey: string, filters?: TaskRunAnalyticsFilters, options?: AnalyticsRequestOptions): Promise<{ ticket: AnalyticsTicket }> {
+  const query = appendViewerTimezone(taskRunAnalyticsQuery(filters))
+  return apiFetch<{ ticket: AnalyticsTicket }>(`/api/analytics/tickets${query}${query ? "&" : "?"}key=${encodeURIComponent(ticketKey)}`, options)
+}
+
 export async function fetchTaskRun(runId: string): Promise<{ run: TaskRunSummary }> {
   return apiFetch<{ run: TaskRunSummary }>(`/api/analytics/runs/${encodeURIComponent(runId)}${appendViewerTimezone("")}`)
 }
@@ -468,8 +483,8 @@ export async function fetchTaskRunPRs(runId: string): Promise<{ prs: TaskRunPR[]
   return apiFetch<{ prs: TaskRunPR[] }>(`/api/analytics/runs/${encodeURIComponent(runId)}/prs`)
 }
 
-export async function fetchTaskRunOutputs(runId: string): Promise<{ outputs: TaskRunOutput[] }> {
-  return apiFetch<{ outputs: TaskRunOutput[] }>(`/api/analytics/runs/${encodeURIComponent(runId)}/outputs`)
+export async function fetchTaskRunOutputs(runId: string): Promise<{ outputs: TaskRunOutput[]; traceId?: string }> {
+  return apiFetch<{ outputs: TaskRunOutput[]; traceId?: string }>(`/api/analytics/runs/${encodeURIComponent(runId)}/outputs`)
 }
 
 export async function fetchTaskRunFilterOptions(options?: AnalyticsRequestOptions): Promise<TaskRunFilterOptions> {

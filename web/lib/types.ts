@@ -12,6 +12,7 @@ export interface Claw {
   tags: string[]
   color: string // accent color name, e.g. "blue", "emerald"
   contextUsage: number // 0-100 percentage, hardcoded 0 for now
+  openPrCount: number
   description?: string
   reason?: string // stop reason when status is error
   bootstrap_status?: string
@@ -38,6 +39,8 @@ export interface Message {
   // API fields
   claw_id?: string
   tenant_id?: string
+  userLogin?: string
+  optimisticSelf?: boolean
 }
 
 export interface ActivitySummary {
@@ -73,6 +76,7 @@ export interface ApiClaw {
   created_at: string
   tenant_id: string
   context_usage?: number
+  open_pr_count?: number
   tags?: string[]
   color?: string
   ssh_host?: string
@@ -91,6 +95,7 @@ export interface ApiMessage {
   content: string
   format?: string
   created_at: string
+  user_login?: string
 }
 
 export interface CreateClawRequest {
@@ -187,16 +192,16 @@ export interface GeneralStats {
 }
 
 export interface AnalyticsEffectiveness {
-  outcomesByDay: { date: string; clean: number; humanInTheLoop: number; warning: number; failed: number }[]
+  outcomesByDay: { date: string; clean: number; humanInTheLoop: number; warning: number; failed: number }[] | null
   funnel: { agentStarted: number; prOpened: number; prFinished: number }
-  costPerMergedPr: { weekly: { weekStart: string; costUsd: number; mergedPrs: number; costPerMergedPr: number }[]; average: number }
+  costPerMergedPr: { weekly: { weekStart: string; costUsd: number; mergedPrs: number; costPerMergedPr: number }[] | null; average: number }
   mergeRate: number
   successRate: number
   uniqueTickets: number
   ticketSuccessRate: number
-  ticketsByDay: { date: string; delivered: number; inProgress: number; failed: number }[]
-  runsPerTicket: { bucket: string; tickets: number }[]
-  topTicketsByCost: { issueId: string; issueTitle: string; costUsd: number; runs: number; outcome: string }[]
+  ticketsByDay: { date: string; delivered: number; inProgress: number; failed: number }[] | null
+  runsPerTicket: { bucket: string; tickets: number }[] | null
+  topTicketsByCost: { ticketKey: string; issueId: string; issueTitle: string; costUsd: number; runs: number; outcome: string }[] | null
   prior?: {
     successRate: number
     ticketSuccessRate: number
@@ -273,6 +278,71 @@ export interface TaskRunsResponse {
   limit: number
 }
 
+export interface AnalyticsTicketRunSummary {
+  runId: string
+  status: string
+  phase: string
+  model: string
+  attemptCount: number
+  cost: number
+  totalTokens: number
+  humanTouches: number
+  startedAt: number
+  lastActivity: number
+}
+
+export interface AnalyticsTicketPR extends TaskRunPR {
+  runId: string
+}
+
+export interface AnalyticsTicketStoryEntry {
+  id: string
+  eventType: string
+  label: string
+  actor: string
+  time: number
+  runId: string
+  kind: "good" | "bad" | "human" | "neutral"
+  count: number
+}
+
+export interface AnalyticsTicket {
+  ticketKey: string
+  issueId: string
+  issueTitle: string
+  status: "delivered" | "pr_open" | "in_progress" | "failed"
+  requester: string
+  team?: string
+  priority: string
+  ask: string
+  source: string
+  repo?: string
+  workflowName?: string
+  workspaceName?: string
+  reportedAt: number
+  runs: AnalyticsTicketRunSummary[]
+  runCount: number
+  attemptCount: number
+  failedRunCount: number
+  cost: number
+  totalTokens: number
+  humanTouches: number
+  prs: AnalyticsTicketPR[]
+  mergedPrCount: number
+  openPrCount: number
+  timeToFirstRun: number
+  leadTime: number
+  lastActivity: number
+  story: AnalyticsTicketStoryEntry[]
+}
+
+export interface AnalyticsTicketsResponse {
+  tickets: AnalyticsTicket[]
+  nextCursor?: string
+  limit: number
+  total: number
+}
+
 export interface TaskRunAttempt {
   id: string
   attemptId: string
@@ -319,7 +389,20 @@ export interface TaskRunOutput {
   stdout: string
   stderr: string
   exitCode: number
+  spanId: string
+  spanKind: string
+  durationMs: number
+  status: 'OK' | 'ERROR'
+  records: TaskRunLogRecord[]
   createdAt: number
+}
+
+export interface TaskRunLogRecord {
+  ts: number
+  sev: 'TRACE' | 'DEBUG' | 'INFO' | 'WARN' | 'ERROR' | 'FATAL'
+  severityNumber: number
+  body: string
+  attrs: Record<string, unknown>
 }
 
 export interface TaskRunPR {

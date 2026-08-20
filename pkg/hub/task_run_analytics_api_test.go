@@ -3,14 +3,77 @@ package hub
 import (
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 )
+
+func TestSplitTaskRunAnalyticsValuesPreservesDoubleEncodedCommas(t *testing.T) {
+	// The client escapes only literal commas before URLSearchParams applies its
+	// outer transport encoding.
+	clientValue := "Research%2C%20Development,Operations"
+	queryValues := url.Values{"workspace": {clientValue}}
+	query := queryValues.Encode()
+	if query != "workspace=Research%252C%2520Development%2COperations" {
+		t.Fatalf("client wire format = %q", query)
+	}
+	request, err := http.NewRequest(http.MethodGet, "/api/analytics?"+query, nil)
+	if err != nil {
+		t.Fatalf("build client-shaped request: %v", err)
+	}
+	got, err := splitTaskRunAnalyticsValues(request.URL.Query(), "workspace")
+	if err != nil {
+		t.Fatalf("splitTaskRunAnalyticsValues(): %v", err)
+	}
+	if len(got) != 2 || got[0] != "Research, Development" || got[1] != "Operations" {
+		t.Fatalf("splitTaskRunAnalyticsValues() = %#v", got)
+	}
+}
+
+func TestSplitTaskRunAnalyticsValuesDecodesClientEscapedValues(t *testing.T) {
+	request := httptest.NewRequest(http.MethodGet, "/api/analytics?repo=org%252Frepo", nil)
+	got, err := splitTaskRunAnalyticsValues(request.URL.Query(), "repo")
+	if err != nil {
+		t.Fatalf("splitTaskRunAnalyticsValues(): %v", err)
+	}
+	if len(got) != 1 || got[0] != "org/repo" {
+		t.Fatalf("splitTaskRunAnalyticsValues() = %#v, want [org/repo]", got)
+	}
+}
+
+func TestSplitTaskRunAnalyticsValuesPreservesLiteralPlus(t *testing.T) {
+	request, err := http.NewRequest(http.MethodGet, "/api/analytics?model=build%2Btest", nil)
+	if err != nil {
+		t.Fatalf("build request: %v", err)
+	}
+	got, err := splitTaskRunAnalyticsValues(request.URL.Query(), "model")
+	if err != nil {
+		t.Fatalf("splitTaskRunAnalyticsValues(): %v", err)
+	}
+	if len(got) != 1 || got[0] != "build+test" {
+		t.Fatalf("splitTaskRunAnalyticsValues() = %#v, want [build+test]", got)
+	}
+}
+
+func TestTaskRunAnalyticsRejectsTooManyFilterValues(t *testing.T) {
+	s, _ := newTaskRunAnalyticsAPITestServer(t)
+	values := make([]string, taskRunAnalyticsFilterValueLimit+1)
+	for i := range values {
+		values[i] = fmt.Sprintf("status-%d", i)
+	}
+	r := httptest.NewRequest(http.MethodGet, "/api/analytics/tickets?status="+strings.Join(values, ","), nil)
+	w := httptest.NewRecorder()
+	s.handleTaskRunAnalyticsTickets(w, r)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d: %s", w.Code, http.StatusBadRequest, w.Body.String())
+	}
+}
 
 func TestTaskRunAnalyticsAPISummaryRunsFiltersAndPagination(t *testing.T) {
 	s, db := newTaskRunAnalyticsAPITestServer(t)
@@ -161,6 +224,41 @@ func TestTaskRunAnalyticsAPISummaryRunsFiltersAndPagination(t *testing.T) {
 	decodeTaskRunAnalyticsAPI(t, disabledRR, &disabledSummary)
 	if disabledSummary.TotalRuns != 1 || disabledSummary.ByStatus[taskRunStatusFailed] != 1 || disabledSummary.FailureBreakdown[taskRunFailureTimeout] != 1 {
 		t.Fatalf("analytics_enabled=false summary mismatch: %#v", disabledSummary)
+	}
+}
+
+func TestTaskRunAnalyticsAPIMultiValueDimensionFilters(t *testing.T) {
+	s, db := newTaskRunAnalyticsAPITestServer(t)
+	for _, fixture := range []apiRunFixture{
+		{RunID: "model-a", AttemptID: "attempt-model-a", ClawID: "claw-model-a", TenantID: "test-tenant-id", Status: taskRunStatusClean, Phase: taskRunPhaseTerminal, OwnerType: taskRunOwnerWorkflow, Workflow: "alpha", Model: "x", StartedAt: 4_000},
+		{RunID: "model-b", AttemptID: "attempt-model-b", ClawID: "claw-model-b", TenantID: "test-tenant-id", Status: taskRunStatusClean, Phase: taskRunPhaseTerminal, OwnerType: taskRunOwnerWorkflow, Workflow: "beta", Model: "y", StartedAt: 3_000},
+		{RunID: "workflow-and-model", AttemptID: "attempt-workflow-and-model", ClawID: "claw-workflow-and-model", TenantID: "test-tenant-id", Status: taskRunStatusClean, Phase: taskRunPhaseTerminal, OwnerType: taskRunOwnerWorkflow, Workflow: "beta", Model: "x", StartedAt: 2_000},
+		{RunID: "other", AttemptID: "attempt-other", ClawID: "claw-other", TenantID: "test-tenant-id", Status: taskRunStatusClean, Phase: taskRunPhaseTerminal, OwnerType: taskRunOwnerWorkflow, Workflow: "gamma", Model: "z", StartedAt: 1_000},
+	} {
+		insertTaskRunAnalyticsAPIRun(t, db, fixture)
+	}
+
+	tests := []struct {
+		name  string
+		query string
+		want  int
+	}{
+		{name: "one dimension returns the union", query: "model=x,y", want: 3},
+		{name: "dimensions combine with and semantics", query: "workflow=alpha,beta&model=x", want: 2},
+		{name: "single value remains supported", query: "model=x", want: 2},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			rr := requestTaskRunAnalyticsAPI(t, s, http.MethodGet, "/api/analytics/summary?"+test.query, "test-token")
+			if rr.Code != http.StatusOK {
+				t.Fatalf("summary status = %d, body = %s", rr.Code, rr.Body.String())
+			}
+			var response taskRunAnalyticsSummaryResponse
+			decodeTaskRunAnalyticsAPI(t, rr, &response)
+			if response.TotalRuns != test.want {
+				t.Fatalf("total runs = %d, want %d for %s", response.TotalRuns, test.want, test.query)
+			}
+		})
 	}
 }
 
@@ -523,8 +621,8 @@ func TestTaskRunAnalyticsAPIOutputs(t *testing.T) {
 		{clawID: "unrelated", stageID: "hidden", name: "other", stdout: "ignore", createdAt: time.UnixMilli(ts + 300)},
 	} {
 		if _, err := db.Exec(`
-			INSERT INTO pipeline_outputs(claw_id, stage_id, output_name, stdout, stderr, exit_code, created_at)
-			VALUES(?,?,?,?,?,?,?)`, output.clawID, output.stageID, output.name, output.stdout, output.stderr, output.exitCode, output.createdAt); err != nil {
+		INSERT INTO pipeline_outputs(claw_id, stage_id, output_name, stdout, stderr, exit_code, span_id, span_kind, duration_ms, status, records, created_at)
+			VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`, output.clawID, output.stageID, output.name, output.stdout, output.stderr, output.exitCode, "span-"+output.name, "INTERNAL", 12, "OK", `[{"ts":1700000000000,"sev":"INFO","severityNumber":9,"body":"stage finished","attrs":{"process.exit_code":0}}]`, output.createdAt); err != nil {
 			t.Fatalf("insert pipeline output: %v", err)
 		}
 	}
@@ -540,6 +638,9 @@ func TestTaskRunAnalyticsAPIOutputs(t *testing.T) {
 	}
 	if response.Outputs[1].AttemptID != "attempt-two" || response.Outputs[1].ExitCode != 1 || response.Outputs[1].Stderr != "failed test" {
 		t.Fatalf("unexpected second output: %#v", response.Outputs[1])
+	}
+	if response.TraceID != "run-outputs" || response.Outputs[0].SpanID != "span-checkout" || response.Outputs[0].SpanKind != "INTERNAL" || response.Outputs[0].DurationMs != 12 || len(response.Outputs[0].Records) != 1 || response.Outputs[0].Records[0].SeverityNumber != 9 {
+		t.Fatalf("structured output payload = %#v, trace=%q", response.Outputs[0], response.TraceID)
 	}
 
 	insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{
@@ -584,40 +685,22 @@ func TestTaskRunAnalyticsAPIAccessControl(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	listRR := requestTaskRunAnalyticsAPI(t, s, http.MethodGet, "/api/analytics/runs", bobSession)
-	var list taskRunAnalyticsRunsResponse
-	decodeTaskRunAnalyticsAPI(t, listRR, &list)
-	if len(list.Runs) != 1 || list.Runs[0].RunID != "run-bob" {
-		t.Fatalf("OAuth list was not ACL-filtered: %#v", list.Runs)
-	}
+	// Analytics routes are strict admin-only (see IMPLEMENTATION.md "Approved
+	// decisions"): a non-admin OAuth session must be forbidden on every
+	// analytics route, tag-scoped or not — there is no per-row ACL carve-out.
 	for _, path := range []string{
+		"/api/analytics/runs",
 		"/api/analytics/runs/run-alice",
 		"/api/analytics/runs/run-alice/attempts",
 		"/api/analytics/runs/run-alice/events",
 		"/api/analytics/runs/run-alice/prs",
 		"/api/analytics/runs/run-alice/outputs",
+		"/api/analytics/runs/run-bob",
 	} {
 		rr := requestTaskRunAnalyticsAPI(t, s, http.MethodGet, path, bobSession)
-		if rr.Code != http.StatusForbidden && rr.Code != http.StatusNotFound {
-			t.Fatalf("OAuth request %s status = %d, body = %s", path, rr.Code, rr.Body.String())
+		if rr.Code != http.StatusForbidden {
+			t.Fatalf("non-admin OAuth request %s status = %d, want 403, body = %s", path, rr.Code, rr.Body.String())
 		}
-	}
-	allowedRR := requestTaskRunAnalyticsAPI(t, s, http.MethodGet, "/api/analytics/runs/run-bob", bobSession)
-	if allowedRR.Code != http.StatusOK {
-		t.Fatalf("allowed OAuth detail status = %d, body = %s", allowedRR.Code, allowedRR.Body.String())
-	}
-	if _, err := db.Exec(`DELETE FROM claws WHERE id=?`, "claw-bob"); err != nil {
-		t.Fatalf("delete claw: %v", err)
-	}
-	missingClawListRR := requestTaskRunAnalyticsAPI(t, s, http.MethodGet, "/api/analytics/runs", bobSession)
-	var missingClawList taskRunAnalyticsRunsResponse
-	decodeTaskRunAnalyticsAPI(t, missingClawListRR, &missingClawList)
-	if len(missingClawList.Runs) != 0 {
-		t.Fatalf("OAuth list should hide runs with missing claws when ACLs are configured: %#v", missingClawList.Runs)
-	}
-	missingClawDetailRR := requestTaskRunAnalyticsAPI(t, s, http.MethodGet, "/api/analytics/runs/run-bob", bobSession)
-	if missingClawDetailRR.Code != http.StatusNotFound {
-		t.Fatalf("OAuth detail with configured ACL and missing claw status = %d, body = %s", missingClawDetailRR.Code, missingClawDetailRR.Body.String())
 	}
 
 	plainListRR := requestTaskRunAnalyticsAPI(t, s, http.MethodGet, "/api/analytics/runs", "test-token")
@@ -667,35 +750,17 @@ func TestTaskRunAnalyticsAPIAccessControlAggregates(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Analytics routes are strict admin-only: a non-admin OAuth session must
+	// be forbidden even though ViewRequiresTags is configured on the hub —
+	// there is no tag-scoped aggregates carve-out.
 	summaryRR := requestTaskRunAnalyticsAPI(t, s, http.MethodGet, "/api/analytics/summary", bobSession)
-	var summary taskRunAnalyticsSummaryResponse
-	decodeTaskRunAnalyticsAPI(t, summaryRR, &summary)
-	if summary.TotalRuns != 1 || summary.HumanInteractions != 1 {
-		t.Fatalf("OAuth summary was not ACL-filtered: %#v", summary)
-	}
-	if summary.ByStatus[taskRunStatusHumanInTheLoop] != 1 || summary.ByStatus[taskRunStatusFailed] != 0 || len(summary.FailureBreakdown) != 0 {
-		t.Fatalf("OAuth summary leaked hidden run breakdowns: %#v", summary)
-	}
-	if summary.WarningBreakdown[taskRunWarningHumanPRComment] != 1 {
-		t.Fatalf("OAuth summary missing viewable warning counts: %#v", summary)
-	}
-	if summary.PRCounts.Total != 1 || summary.PRCounts.Open != 0 || summary.PRCounts.Merged != 1 || summary.PRCounts.Closed != 0 {
-		t.Fatalf("OAuth summary PR counts leaked hidden runs: %#v", summary.PRCounts)
+	if summaryRR.Code != http.StatusForbidden {
+		t.Fatalf("non-admin OAuth summary status = %d, want 403, body = %s", summaryRR.Code, summaryRR.Body.String())
 	}
 
 	optionsRR := requestTaskRunAnalyticsAPI(t, s, http.MethodGet, "/api/analytics/filter-options", bobSession)
-	var options taskRunAnalyticsFilterOptionsResponse
-	decodeTaskRunAnalyticsAPI(t, optionsRR, &options)
-	assertStringSliceEqual(t, options.Workspaces, []string{"bob-space"})
-	assertStringSliceEqual(t, options.Factories, []string{"bob-factory"})
-	assertStringSliceEqual(t, options.Integrations, []string{"github"})
-	assertStringSliceEqual(t, options.Repos, []string{"bob/repo"})
-	assertStringSliceEqual(t, options.Models, []string{"bob-model"})
-	assertStringSliceEqual(t, options.Statuses, []string{taskRunStatusHumanInTheLoop})
-	assertStringSliceEqual(t, options.WarningTypes, []string{taskRunWarningHumanPRComment})
-	assertStringSliceEqual(t, options.FailureTypes, []string{})
-	if strings.Contains(optionsRR.Body.String(), "alice") {
-		t.Fatalf("filter-options leaked hidden run values: %s", optionsRR.Body.String())
+	if optionsRR.Code != http.StatusForbidden {
+		t.Fatalf("non-admin OAuth filter-options status = %d, want 403, body = %s", optionsRR.Code, optionsRR.Body.String())
 	}
 
 	plainSummaryRR := requestTaskRunAnalyticsAPI(t, s, http.MethodGet, "/api/analytics/summary", "test-token")
@@ -713,27 +778,30 @@ func TestTaskRunAnalyticsAPIAccessControlAggregates(t *testing.T) {
 		t.Fatalf("delete claw: %v", err)
 	}
 	missingClawSummaryRR := requestTaskRunAnalyticsAPI(t, s, http.MethodGet, "/api/analytics/summary", bobSession)
-	var missingClawSummary taskRunAnalyticsSummaryResponse
-	decodeTaskRunAnalyticsAPI(t, missingClawSummaryRR, &missingClawSummary)
-	if missingClawSummary.TotalRuns != 0 || len(missingClawSummary.ByStatus) != 0 {
-		t.Fatalf("OAuth summary should exclude runs with missing claws when ACLs are configured: %#v", missingClawSummary)
+	if missingClawSummaryRR.Code != http.StatusForbidden {
+		t.Fatalf("non-admin OAuth summary status = %d, want 403, body = %s", missingClawSummaryRR.Code, missingClawSummaryRR.Body.String())
 	}
 	missingClawOptionsRR := requestTaskRunAnalyticsAPI(t, s, http.MethodGet, "/api/analytics/filter-options", bobSession)
-	var missingClawOptions taskRunAnalyticsFilterOptionsResponse
-	decodeTaskRunAnalyticsAPI(t, missingClawOptionsRR, &missingClawOptions)
-	assertStringSliceEqual(t, missingClawOptions.Workspaces, []string{})
-	assertStringSliceEqual(t, missingClawOptions.Statuses, []string{})
+	if missingClawOptionsRR.Code != http.StatusForbidden {
+		t.Fatalf("non-admin OAuth filter-options status = %d, want 403, body = %s", missingClawOptionsRR.Code, missingClawOptionsRR.Body.String())
+	}
 }
 
 func TestTaskRunAnalyticsAPIAllowsMissingClawsWithoutViewRestrictions(t *testing.T) {
 	s, db := NewTestServerWithConfig(t, &types.HubConfig{
 		Token: "test-token",
-		Auth:  &types.AuthConfig{SessionSecret: "analytics-session-secret"},
+		Auth: &types.AuthConfig{
+			SessionSecret: "analytics-session-secret",
+			Access:        &types.AccessConfig{Admins: []string{"alice"}},
+		},
 	}, "", "", "")
 	insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{
 		RunID: "run-deleted-claw", AttemptID: "attempt-deleted-claw", ClawID: "claw-deleted", TenantID: "test-tenant-id",
 		Status: taskRunStatusClean, OwnerType: taskRunOwnerFactory, Factory: "bugfix", StartedAt: 1760000000000,
 	})
+	// alice is an admin (analytics is admin-only); this test otherwise
+	// verifies runs are visible tenant-wide when no ViewRequiresTags ACL
+	// is configured, even when the run's claw row has been deleted.
 	session, err := signGitHubSession("analytics-session-secret", "alice", "", "")
 	if err != nil {
 		t.Fatal(err)

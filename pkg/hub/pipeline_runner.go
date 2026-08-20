@@ -14,12 +14,24 @@ import (
 	osexec "os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"text/template"
 	"time"
 
 	"github.com/elasticclaw/elasticclaw/pkg/hub/pipeline"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
+	"github.com/google/uuid"
 )
+
+// Pipeline output records use a JSON read-modify-write; serialize only matching
+// claw/output pairs to avoid lost appends without blocking unrelated outputs.
+var pipelineLogRecordMu sync.Map
+
+func pipelineLogRecordMutex(clawID, outputName string) *sync.Mutex {
+	key := clawID + "\x00" + outputName
+	mu, _ := pipelineLogRecordMu.LoadOrStore(key, &sync.Mutex{})
+	return mu.(*sync.Mutex)
+}
 
 // The two lifecycle tokens the hub understands on its own, independent of any
 // pipeline's message_contains triggers. Both are matched with
@@ -473,9 +485,44 @@ func (s *Server) resolveJiraTrackerForPipeline(ctx pipelineContext) (workspaceIs
 const defaultPipelineRunTimeout = 10 * time.Minute
 
 type pipelineRunResult struct {
-	ExitCode int
-	Stdout   string
-	Stderr   string
+	ExitCode   int
+	Stdout     string
+	Stderr     string
+	Command    string
+	StartedAt  time.Time
+	DurationMs int64
+}
+
+// pipelineLogRecord is deliberately limited to facts observed by the hub; agent
+// stdout/stderr remains available separately because it is not structured OTEL data.
+type pipelineLogRecord struct {
+	TS             int64                  `json:"ts"`
+	Sev            string                 `json:"sev"`
+	SeverityNumber int                    `json:"severityNumber"`
+	Body           string                 `json:"body"`
+	Attrs          map[string]interface{} `json:"attrs"`
+}
+
+func pipelineSeverityNumber(severity string) int {
+	switch severity {
+	case "TRACE":
+		return 1
+	case "DEBUG":
+		return 5
+	case "INFO":
+		return 9
+	case "WARN":
+		return 13
+	case "ERROR":
+		return 17
+	case "FATAL":
+		return 21
+	}
+	return 9
+}
+
+func newPipelineLogRecord(at time.Time, severity, body string, attrs map[string]interface{}) pipelineLogRecord {
+	return pipelineLogRecord{TS: at.UnixMilli(), Sev: severity, SeverityNumber: pipelineSeverityNumber(severity), Body: body, Attrs: attrs}
 }
 
 func (s *Server) executePipelineRunAction(clawID string, action pipeline.RunAction) (*pipelineRunResult, error) {
@@ -494,7 +541,12 @@ func (s *Server) executePipelineRunAction(clawID string, action pipeline.RunActi
 		}
 		timeout = parsed
 	}
-	return s.executePipelineCommand(clawID, command, timeout)
+	started := time.Now()
+	result, err := s.executePipelineCommand(clawID, command, timeout)
+	if result != nil {
+		result.Command, result.StartedAt, result.DurationMs = command, started, time.Since(started).Milliseconds()
+	}
+	return result, err
 }
 
 func (s *Server) executePipelineCommand(clawID, command string, timeout time.Duration) (*pipelineRunResult, error) {
@@ -627,22 +679,86 @@ func (s *Server) persistPipelineOutput(clawID, stageID, outputName string, resul
 	if parsedJSON == "" {
 		parsedJSON = "{}"
 	}
+	createdAt := now()
+	status := "OK"
+	if result.ExitCode != 0 {
+		status = "ERROR"
+	}
+	records := []pipelineLogRecord{}
+	if !result.StartedAt.IsZero() {
+		startedAttrs := map[string]interface{}{"stage.id": stageID}
+		finishedAttrs := map[string]interface{}{"process.exit_code": result.ExitCode}
+		if result.Command != "" {
+			command := result.Command
+			if len(command) > 500 {
+				command = command[:500] + "…"
+			}
+			startedAttrs["process.command"] = command
+			finishedAttrs["process.command"] = command
+		}
+		records = append(records, newPipelineLogRecord(result.StartedAt, "INFO", "stage started", startedAttrs))
+		severity := "INFO"
+		if result.ExitCode != 0 {
+			severity = "ERROR"
+		}
+		records = append(records, newPipelineLogRecord(result.StartedAt.Add(time.Duration(result.DurationMs)*time.Millisecond), severity, "stage finished", finishedAttrs))
+	}
+	recordsJSON, _ := json.Marshal(records)
+	spanID := uuid.NewString()
+	// Serialize only the matching row with appendPipelineLogRecord, which performs
+	// a read-modify-write of records.
+	mu := pipelineLogRecordMutex(clawID, outputName)
+	mu.Lock()
+	defer mu.Unlock()
 	_, err := s.db.Exec(`
-		INSERT INTO pipeline_outputs(claw_id, stage_id, output_name, exit_code, stdout, stderr, parsed_json, created_at)
-		VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO pipeline_outputs(claw_id, stage_id, output_name, exit_code, stdout, stderr, parsed_json, span_id, span_kind, duration_ms, status, records, created_at)
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(claw_id, output_name) DO UPDATE SET
 			stage_id=excluded.stage_id,
 			exit_code=excluded.exit_code,
 			stdout=excluded.stdout,
 			stderr=excluded.stderr,
 			parsed_json=excluded.parsed_json,
+			span_id=excluded.span_id, span_kind=excluded.span_kind, duration_ms=excluded.duration_ms,
+			status=excluded.status, records=excluded.records,
 			created_at=excluded.created_at`,
-		clawID, stageID, outputName, result.ExitCode, result.Stdout, result.Stderr, parsedJSON, now())
+		clawID, stageID, outputName, result.ExitCode, result.Stdout, result.Stderr, parsedJSON, spanID, "INTERNAL", result.DurationMs, status, string(recordsJSON), createdAt)
 	if err != nil {
 		log.Printf("[pipeline] failed to persist output %q for claw %s: %v", outputName, clawID[:8], err)
 	} else {
 		log.Printf("[pipeline] persisted output %q for claw %s stage %s exit=%d", outputName, clawID[:8], stageID, result.ExitCode)
 	}
+}
+
+func (s *Server) appendPipelineLogRecord(clawID, outputName string, record pipelineLogRecord) {
+	mu := pipelineLogRecordMutex(clawID, outputName)
+	mu.Lock()
+	defer mu.Unlock()
+	var raw string
+	if err := s.db.QueryRow(`SELECT records FROM pipeline_outputs WHERE claw_id=? AND output_name=?`, clawID, outputName).Scan(&raw); err != nil {
+		return
+	}
+	var records []pipelineLogRecord
+	if json.Unmarshal([]byte(raw), &records) != nil {
+		records = []pipelineLogRecord{}
+	}
+	records = append(records, record)
+	b, _ := json.Marshal(records)
+	status := "OK"
+	if record.Sev == "ERROR" || record.Sev == "FATAL" {
+		status = "ERROR"
+	}
+	if _, err := s.db.Exec(`UPDATE pipeline_outputs SET records=?, status=CASE WHEN ?='ERROR' THEN 'ERROR' ELSE status END WHERE claw_id=? AND output_name=?`, string(b), status, clawID, outputName); err != nil {
+		log.Printf("[pipeline] append log record: %v", err)
+	}
+}
+
+// recordPipelineFailureRecord gives provisioning failures a synthetic output so
+// analytics can show the failure even though no pipeline command was started.
+func (s *Server) recordPipelineFailureRecord(clawID, stageID, outputName, severity, body string, attrs map[string]interface{}) {
+	result := &pipelineRunResult{ExitCode: 1, Stderr: body}
+	s.persistPipelineOutput(clawID, stageID, outputName, result)
+	s.appendPipelineLogRecord(clawID, outputName, newPipelineLogRecord(now(), severity, body, attrs))
 }
 
 func parsePipelineOutputJSON(stdout string) (map[string]interface{}, bool) {
@@ -1119,6 +1235,7 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, ctx pipelineCon
 	if stage.OnEnter.Judge.Instructions != "" {
 		s.publishHubNotice(clawID, fmt.Sprintf("[hub] ▶ Running judge for stage %q", stage.ID))
 		log.Printf("[pipeline] running judge for claw %s stage %q", clawID[:8], stage.ID)
+		started := time.Now()
 		judgeResult, err := s.executeJudgeAction(clawID, stage.OnEnter.Judge, ctx)
 		if err != nil {
 			msg := fmt.Sprintf("Judge stage failed: %v", err)
@@ -1132,9 +1249,11 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, ctx pipelineCon
 			// Persist judge output so later stages can reference it
 			if stage.OnEnter.Judge.Output != "" {
 				result := &pipelineRunResult{
-					ExitCode: 0,
-					Stdout:   judgeResult.RawJSON,
-					Stderr:   "",
+					ExitCode:   0,
+					Stdout:     judgeResult.RawJSON,
+					Stderr:     "",
+					StartedAt:  started,
+					DurationMs: time.Since(started).Milliseconds(),
 				}
 				s.persistPipelineOutput(clawID, stage.ID, stage.OnEnter.Judge.Output, result)
 			}
@@ -1931,6 +2050,7 @@ func (s *Server) evaluateGate(clawID, stageID string, gate *pipeline.Gate) *Gate
 				result.MatchedValue = strVal
 				log.Printf("[pipeline] gate %q for claw %s: fail matched path=%s value=%s", stageID, clawID[:8], gate.Fail.Path, strVal)
 				s.persistGateResult(clawID, stageID, gate, result)
+				s.appendPipelineLogRecord(clawID, gate.Output, newPipelineLogRecord(now(), "ERROR", "gate failed", map[string]interface{}{"gate.stage_id": stageID, "gate.verdict": "fail", "matched_path": result.MatchedPath, "matched_value": result.MatchedValue}))
 				return result
 			}
 		}

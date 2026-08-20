@@ -68,7 +68,8 @@ export type ActivityTone = "error" | "warning" | "normal"
 
 export function activityTone(message: Message): ActivityTone {
   if (message.activity?.error && message.activity.kind === "tool") return "error"
-  if (message.activity?.error || message.activity?.kind === "session_error") return "warning"
+  if (message.activity?.kind === "session_error") return "error"
+  if (message.activity?.error) return "warning"
   return "normal"
 }
 
@@ -371,14 +372,24 @@ export interface Turn {
  * claw cannot still be running its dangling last step, so history loaded for
  * it must not present as live.
  */
-export function groupIntoTurns(messages: Message[], allowTrailingRunning = true): Turn[] {
+const turnSources = new WeakMap<Turn, readonly Message[]>()
+
+export function groupIntoTurns(messages: Message[], allowTrailingRunning = true, previousTurns: Turn[] = []): Turn[] {
   const turns: Turn[] = []
   let current: Message[] = []
   let currentUser: Message | null = null
 
   const flushTurn = () => {
     if (!currentUser && current.length === 0) return
-    turns.push(buildTurn(currentUser, current, turns.length))
+    const source = currentUser ? [currentUser, ...current] : [...current]
+    const previous = previousTurns[turns.length]
+    const previousSource = previous && turnSources.get(previous)
+    // Streaming can only alter the trailing turn. Earlier completed segments
+    // retain identity so memoized timeline rows can skip their re-render.
+    const canReuse = Boolean(previous && turns.length < previousTurns.length - 1 && previousSource?.length === source.length && previousSource.every((message, index) => message === source[index]))
+    const turn = canReuse ? previous! : buildTurn(currentUser, current, turns.length)
+    if (!canReuse) turnSources.set(turn, source)
+    turns.push(turn)
     current = []
     currentUser = null
   }

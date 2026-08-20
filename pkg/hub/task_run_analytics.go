@@ -79,6 +79,8 @@ const (
 	taskRunEventManualStopBeforeDelivery = "manual_stop_before_delivery"
 	taskRunEventAgentStopped             = "agent_stopped"
 	taskRunEventAgentIdle                = "agent_idle"
+	taskRunEventCISucceeded              = "ci_succeeded"
+	taskRunEventCIFailed                 = "ci_failed"
 	taskRunEventManualResume             = "human_manual_stop_or_resume"
 	taskRunEventManualRetry              = "human_manual_stop_or_resume"
 	taskRunEventSettingsChanged          = "human_settings_or_status_change"
@@ -511,10 +513,25 @@ func (s *Server) taskRunContextForClaw(clawID string) (tenantID, runID, attemptI
 	if s == nil || s.db == nil {
 		return "", "", "", false, fmt.Errorf("task run context: missing server db")
 	}
+	return taskRunContextForClaw(s.db, clawID)
+}
+
+func (s *Server) taskRunContextForClawTx(tx *sql.Tx, clawID string) (tenantID, runID, attemptID string, ok bool, err error) {
+	if tx == nil {
+		return "", "", "", false, fmt.Errorf("task run context: missing transaction")
+	}
+	return taskRunContextForClaw(tx, clawID)
+}
+
+type taskRunContextQueryer interface {
+	QueryRow(query string, args ...any) *sql.Row
+}
+
+func taskRunContextForClaw(queryer taskRunContextQueryer, clawID string) (tenantID, runID, attemptID string, ok bool, err error) {
 	if strings.TrimSpace(clawID) == "" {
 		return "", "", "", false, fmt.Errorf("task run context: missing claw id")
 	}
-	err = s.db.QueryRow(`
+	err = queryer.QueryRow(`
 		SELECT c.tenant_id, COALESCE(c.task_run_id,''), COALESCE(tr.current_attempt_id,'')
 		  FROM claws c
 		  LEFT JOIN task_runs tr ON tr.id = c.task_run_id
@@ -826,8 +843,15 @@ func workflowIntegration(workflow *types.WorkflowConfig) string {
 }
 
 func recordTaskRunEventTx(tx *sql.Tx, input TaskRunEvent) error {
+	_, err := recordTaskRunEventIfNewTx(tx, input)
+	return err
+}
+
+// recordTaskRunEventIfNewTx writes an event and reports whether its event key
+// was newly claimed.
+func recordTaskRunEventIfNewTx(tx *sql.Tx, input TaskRunEvent) (bool, error) {
 	if input.RunID == "" || input.EventType == "" {
-		return fmt.Errorf("record task run event: missing run id or event type")
+		return false, fmt.Errorf("record task run event: missing run id or event type")
 	}
 	if input.EventTime.IsZero() {
 		input.EventTime = firstNonZeroTime(input.OccurredAt, now())
@@ -849,7 +873,7 @@ func recordTaskRunEventTx(tx *sql.Tx, input TaskRunEvent) error {
 	}
 	if input.TenantID == "" {
 		if err := tx.QueryRow(`SELECT tenant_id FROM task_runs WHERE id=?`, input.RunID).Scan(&input.TenantID); err != nil {
-			return err
+			return false, err
 		}
 	}
 	if isHumanWarningEvent(input) && input.WarningType == "" {
@@ -869,11 +893,11 @@ func recordTaskRunEventTx(tx *sql.Tx, input TaskRunEvent) error {
 	}
 	detail, err := sanitizeTaskRunDetail(input.Detail)
 	if err != nil {
-		return err
+		return false, err
 	}
 	eventTime := epochMillis(input.EventTime)
 	observedAt := epochMillis(input.ObservedAt)
-	_, err = tx.Exec(`
+	res, err := tx.Exec(`
 		INSERT INTO task_run_events(
 			id, tenant_id, run_id, attempt_id, event_key, source, source_event_id, source_delivery_id,
 			event_type, event_time, observed_at, actor_type, actor_source, actor_id, actor_login,
@@ -886,7 +910,11 @@ func recordTaskRunEventTx(tx *sql.Tx, input TaskRunEvent) error {
 		"", input.ActorID, input.ActorLogin, input.ActorDisplayName, "", input.InteractionRole, input.TargetType,
 		input.TargetID, input.TargetURL, "", input.WarningType, input.FailureType, detail, observedAt,
 	)
-	return err
+	if err != nil {
+		return false, err
+	}
+	claimed, err := res.RowsAffected()
+	return claimed != 0, err
 }
 
 func applyTaskRunPREventTx(tx *sql.Tx, input TaskRunEvent) error {
@@ -1088,11 +1116,13 @@ func materializeTaskRunTx(tx *sql.Tx, runID string) error {
 	); err != nil {
 		return err
 	}
-	_, err = tx.Exec(`
+	if _, err := tx.Exec(`
 		UPDATE task_runs
 		   SET updated_at=?
-		 WHERE id=?`, updatedAt, runID)
-	return err
+		 WHERE id=?`, updatedAt, runID); err != nil {
+		return err
+	}
+	return nil
 }
 
 func isHumanTaskRunEvent(event taskRunEventProjection) bool {

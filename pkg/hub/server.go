@@ -31,6 +31,8 @@ import (
 	"syscall"
 	"time"
 
+	"golang.org/x/sync/singleflight"
+
 	"github.com/elasticclaw/elasticclaw/internal/webui"
 
 	"github.com/elasticclaw/elasticclaw/pkg/cliversion"
@@ -75,6 +77,22 @@ type Server struct {
 	lastQuotaLog time.Time
 	// lastRateLimitSkipLog throttles the "poll skipped, quota exhausted" log. Guarded by s.mu.
 	lastRateLimitSkipLog time.Time
+
+	// ticketAnalyticsCacheMu protects short-lived ticket analytics results. The
+	// ticket endpoint is refreshed frequently and its aggregates are expensive.
+	ticketAnalyticsCacheMu      sync.Mutex
+	ticketAnalyticsTotalCache   map[string]taskRunAnalyticsTicketTotalCacheEntry
+	ticketAnalyticsTotalGroup   singleflight.Group
+	ticketAnalyticsTotalQueries int
+	// Ticket metadata work is per server so independent hubs do not share work.
+	ticketMetadataEnrichment      chan struct{}
+	ticketMetadataInflight        sync.Map
+	ticketMetadataRefreshMu       sync.Mutex
+	ticketMetadataRefreshAt       time.Time
+	ticketMetadataRefreshes       int
+	ticketMetadataColdAt          time.Time
+	ticketMetadataColdEnrichments int
+	ticketCursorKey               []byte
 
 	// ghTokenCache holds GitHub App installation tokens until shortly before
 	// they expire, keyed by requested repo access.
@@ -403,23 +421,29 @@ func NewServer(addr, dbPath, identityDir string, hubCfg *types.HubConfig) (*Serv
 	}
 	log.Printf("Hub SSH public key:\n%s", id.PublicKey)
 	srv := &Server{
-		db:                      db,
-		addr:                    addr,
-		hubCfg:                  hubCfg,
-		identity:                id,
-		artifacts:               artifacts,
-		claws:                   make(map[string]*clawConn),
-		users:                   make(map[string]*userConn),
-		gatewayRestartCounts:    make(map[string]int),
-		gatewayUnhealthyCounts:  make(map[string]int),
-		autoResumeRestartCounts: make(map[string]int),
-		dependencyStatus:        newDependencyStatusService(hubCfg),
-		fileAckWaiters:          make(map[string]chan types.FileAck),
-		fileReadWaiters:         make(map[string]chan types.FileReadResp),
-		checkpointWaiters:       make(map[string]chan error),
-		webhookDedup:            make(map[string]time.Time),
-		reaperFirstSeen:         make(map[string]time.Time),
-		nowFunc:                 now,
+		db:                       db,
+		addr:                     addr,
+		hubCfg:                   hubCfg,
+		identity:                 id,
+		artifacts:                artifacts,
+		claws:                    make(map[string]*clawConn),
+		users:                    make(map[string]*userConn),
+		gatewayRestartCounts:     make(map[string]int),
+		gatewayUnhealthyCounts:   make(map[string]int),
+		autoResumeRestartCounts:  make(map[string]int),
+		dependencyStatus:         newDependencyStatusService(hubCfg),
+		fileAckWaiters:           make(map[string]chan types.FileAck),
+		fileReadWaiters:          make(map[string]chan types.FileReadResp),
+		checkpointWaiters:        make(map[string]chan error),
+		webhookDedup:             make(map[string]time.Time),
+		reaperFirstSeen:          make(map[string]time.Time),
+		nowFunc:                  now,
+		ticketMetadataEnrichment: make(chan struct{}, 32),
+		ticketCursorKey:          randomTicketCursorKey(),
+	}
+	if err := srv.loadTaskRunAnalyticsTicketCursorKey(); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("ticket cursor key: %w", err)
 	}
 	if srv.livenessEnabled() {
 		srv.reconcileOnBoot()
@@ -585,17 +609,18 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/workspaces/{workspace}/webhooks/external", s.handleExternalWebhook)
 	mux.HandleFunc("/api/factories/", s.withAuth(s.handleFactoryEvents))                                               // GET /api/factories/:name/events
 	mux.HandleFunc("/api/factories/{name}/trigger", s.withAuth(s.handleFactoryTrigger))                                // POST manual trigger
-	mux.HandleFunc("/api/factories/{name}/analytics", s.withAuth(s.handleFactoryAnalytics))                            // GET factory analytics
+	mux.HandleFunc("/api/factories/{name}/analytics", s.withStrictAdminAuth(s.handleFactoryAnalytics))                 // GET factory analytics
 	mux.HandleFunc("/api/factories", s.withAdminForMethods(s.handleFactoriesCRUD, http.MethodPost, http.MethodDelete)) // factory CRUD (GET list, POST push)
-	mux.HandleFunc("/api/analytics/factories", s.withAuth(s.handleAllFactoriesAnalytics))                              // GET all factories analytics
-	mux.HandleFunc("/api/analytics/summary", s.withAuth(s.handleTaskRunAnalyticsSummary))
-	mux.HandleFunc("/api/analytics/costs", s.withAuth(s.handleTaskRunAnalyticsCosts))
-	mux.HandleFunc("/api/analytics/effectiveness", s.withAuth(s.handleTaskRunAnalyticsEffectiveness))
-	mux.HandleFunc("/api/analytics/cost-drivers", s.withAuth(s.handleTaskRunAnalyticsCostDrivers))
-	mux.HandleFunc("/api/analytics/general-stats", s.withAuth(s.handleTaskRunAnalyticsGeneralStats))
-	mux.HandleFunc("/api/analytics/filter-options", s.withAuth(s.handleTaskRunAnalyticsFilterOptions))
-	mux.HandleFunc("/api/analytics/runs", s.withAuth(s.handleTaskRunAnalyticsRuns))
-	mux.HandleFunc("/api/analytics/runs/", s.withAuth(s.handleTaskRunAnalyticsRuns))
+	mux.HandleFunc("/api/analytics/factories", s.withStrictAdminAuth(s.handleAllFactoriesAnalytics))                   // GET all factories analytics
+	mux.HandleFunc("/api/analytics/summary", s.withStrictAdminAuth(s.handleTaskRunAnalyticsSummary))
+	mux.HandleFunc("/api/analytics/costs", s.withStrictAdminAuth(s.handleTaskRunAnalyticsCosts))
+	mux.HandleFunc("/api/analytics/effectiveness", s.withStrictAdminAuth(s.handleTaskRunAnalyticsEffectiveness))
+	mux.HandleFunc("/api/analytics/cost-drivers", s.withStrictAdminAuth(s.handleTaskRunAnalyticsCostDrivers))
+	mux.HandleFunc("/api/analytics/general-stats", s.withStrictAdminAuth(s.handleTaskRunAnalyticsGeneralStats))
+	mux.HandleFunc("/api/analytics/filter-options", s.withStrictAdminAuth(s.handleTaskRunAnalyticsFilterOptions))
+	mux.HandleFunc("/api/analytics/runs", s.withStrictAdminAuth(s.handleTaskRunAnalyticsRuns))
+	mux.HandleFunc("/api/analytics/runs/", s.withStrictAdminAuth(s.handleTaskRunAnalyticsRuns))
+	mux.HandleFunc("/api/analytics/tickets", s.withStrictAdminAuth(s.handleTaskRunAnalyticsTickets))
 	mux.HandleFunc("/api/dependencies/status", s.withAuth(s.handleDependencyStatus))
 	mux.HandleFunc("/api/v2/workflow-runs/{runId}", s.withAuth(s.handleWorkflowV2Run))
 	mux.HandleFunc("/api/workspaces", s.withAdminForMethods(s.handleWorkspacesCRUD, http.MethodPost, http.MethodDelete)) // workspace CRUD
@@ -710,6 +735,40 @@ func (s *Server) withAuth(next http.HandlerFunc) http.HandlerFunc {
 		}
 		r = r.WithContext(ctx)
 		next(w, r)
+	}
+}
+
+// withStrictAdminAuth permits only administrators (or legacy tenant tokens).
+func (s *Server) withStrictAdminAuth(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+		if token == "" {
+			token = r.Header.Get(webSessionHeader)
+		}
+		if token == "" {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		tenantID, githubLogin, ok := s.resolveAuthToken(token)
+		if !ok {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		s.mu.RLock()
+		var accessCfg *types.AccessConfig
+		if s.hubCfg.Auth != nil {
+			accessCfg = s.hubCfg.Auth.Access
+		}
+		s.mu.RUnlock()
+		if githubLogin != "" && !isAccessAdmin(accessCfg, githubLogin) {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		ctx := context.WithValue(r.Context(), ctxTenantKey{}, tenantID)
+		if githubLogin != "" {
+			ctx = context.WithValue(ctx, ctxGitHubLoginKey{}, githubLogin)
+		}
+		next(w, r.WithContext(ctx))
 	}
 }
 
@@ -1286,6 +1345,48 @@ func (s *Server) handleClaws(w http.ResponseWriter, r *http.Request) {
 	if out == nil {
 		out = []types.Claw{}
 	}
+	if len(out) > 0 {
+		openPRCounts := make(map[string]int, len(out))
+		for start := 0; start < len(out); start += 500 {
+			end := start + 500
+			if end > len(out) {
+				end = len(out)
+			}
+			placeholders := make([]string, end-start)
+			args := make([]any, end-start)
+			for i, claw := range out[start:end] {
+				placeholders[i] = "?"
+				args[i] = claw.ID
+			}
+			prRows, err := s.db.Query(`SELECT cp.claw_id, COUNT(*) FROM claw_prs cp JOIN claws c ON c.id = cp.claw_id WHERE cp.claw_id IN (`+strings.Join(placeholders, ",")+`) AND cp.state = 'open' AND c.status NOT IN ('deleted','error','offline') GROUP BY cp.claw_id`, args...)
+			if err != nil {
+				log.Printf("handleClaws open PR count query error: %v", err)
+				http.Error(w, fmt.Sprintf("db error: %v", err), http.StatusInternalServerError)
+				return
+			}
+			for prRows.Next() {
+				var clawID string
+				var count int
+				if err := prRows.Scan(&clawID, &count); err != nil {
+					prRows.Close()
+					log.Printf("handleClaws open PR count scan error: %v", err)
+					http.Error(w, fmt.Sprintf("db error: %v", err), http.StatusInternalServerError)
+					return
+				}
+				openPRCounts[clawID] = count
+			}
+			if err := prRows.Err(); err != nil {
+				prRows.Close()
+				log.Printf("handleClaws open PR count rows error: %v", err)
+				http.Error(w, fmt.Sprintf("db error: %v", err), http.StatusInternalServerError)
+				return
+			}
+			prRows.Close()
+		}
+		for i := range out {
+			out[i].OpenPRCount = openPRCounts[out[i].ID]
+		}
+	}
 	jsonOK(w, out)
 }
 
@@ -1839,10 +1940,13 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 			ID: uuid.New().String(), ClawID: clawID, TenantID: tenantID,
 			Role: "user", Content: body.Content, CreatedAt: now(),
 		}
+		if ghLoginMsg != "" {
+			msg.UserLogin = &ghLoginMsg
+		}
 		s.resumeNoProgressAfterUserInput(clawID)
 		if _, err := s.db.Exec(
-			`INSERT INTO messages(id,claw_id,tenant_id,role,content,created_at,delivered_at) VALUES(?,?,?,?,?,?,NULL)`,
-			msg.ID, msg.ClawID, msg.TenantID, msg.Role, msg.Content, msg.CreatedAt,
+			`INSERT INTO messages(id,claw_id,tenant_id,role,content,user_login,created_at,delivered_at) VALUES(?,?,?,?,?,?,?,NULL)`,
+			msg.ID, msg.ClawID, msg.TenantID, msg.Role, msg.Content, msg.UserLogin, msg.CreatedAt,
 		); err != nil {
 			http.Error(w, "db error", http.StatusInternalServerError)
 			return
@@ -1900,7 +2004,7 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		args := append([]interface{}{clawID, tenantID, before}, hideArgs...)
 		args = append(args, limit)
 		rows, err = s.db.Query(
-			`SELECT id, claw_id, tenant_id, role, content, COALESCE(format,''), created_at FROM messages
+			`SELECT id, claw_id, tenant_id, role, content, COALESCE(format,''), user_login, created_at FROM messages
 			 WHERE claw_id = ? AND tenant_id = ? AND created_at < ?
 			 `+hideSQL+`
 			 ORDER BY created_at DESC LIMIT ?`,
@@ -1910,7 +2014,7 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		args := append([]interface{}{clawID, tenantID, after}, hideArgs...)
 		args = append(args, limit)
 		rows, err = s.db.Query(
-			`SELECT id, claw_id, tenant_id, role, content, COALESCE(format,''), created_at FROM messages
+			`SELECT id, claw_id, tenant_id, role, content, COALESCE(format,''), user_login, created_at FROM messages
 			 WHERE claw_id = ? AND tenant_id = ? AND created_at > ?
 			 `+hideSQL+`
 			 ORDER BY created_at ASC LIMIT ?`,
@@ -1921,7 +2025,7 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		args := append([]interface{}{clawID, tenantID}, hideArgs...)
 		args = append(args, limit)
 		rows, err = s.db.Query(
-			`SELECT id, claw_id, tenant_id, role, content, COALESCE(format,''), created_at FROM messages
+			`SELECT id, claw_id, tenant_id, role, content, COALESCE(format,''), user_login, created_at FROM messages
 			 WHERE claw_id = ? AND tenant_id = ?
 			 `+hideSQL+`
 			 ORDER BY created_at DESC LIMIT ?`,
@@ -1936,7 +2040,7 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 	var msgs []types.HubMessage
 	for rows.Next() {
 		var m types.HubMessage
-		if err := rows.Scan(&m.ID, &m.ClawID, &m.TenantID, &m.Role, &m.Content, &m.Format, &m.CreatedAt); err != nil {
+		if err := rows.Scan(&m.ID, &m.ClawID, &m.TenantID, &m.Role, &m.Content, &m.Format, &m.UserLogin, &m.CreatedAt); err != nil {
 			continue
 		}
 		msgs = append(msgs, m)
@@ -2085,7 +2189,7 @@ func (s *Server) handleMessageActivity(w http.ResponseWriter, r *http.Request, t
 		order = "asc"
 	}
 
-	query := `SELECT id, claw_id, tenant_id, role, content, COALESCE(format,''), created_at
+	query := `SELECT id, claw_id, tenant_id, role, content, COALESCE(format,''), user_login, created_at
 		FROM messages
 		WHERE claw_id = ? AND tenant_id = ? AND role = 'activity'`
 	args := []interface{}{clawID, tenantID}
@@ -2167,7 +2271,7 @@ func scanHubMessages(rows *sql.Rows) ([]types.HubMessage, error) {
 	var msgs []types.HubMessage
 	for rows.Next() {
 		var m types.HubMessage
-		if err := rows.Scan(&m.ID, &m.ClawID, &m.TenantID, &m.Role, &m.Content, &m.Format, &m.CreatedAt); err != nil {
+		if err := rows.Scan(&m.ID, &m.ClawID, &m.TenantID, &m.Role, &m.Content, &m.Format, &m.UserLogin, &m.CreatedAt); err != nil {
 			return nil, err
 		}
 		msgs = append(msgs, m)
@@ -2176,7 +2280,7 @@ func scanHubMessages(rows *sql.Rows) ([]types.HubMessage, error) {
 }
 
 func (s *Server) queryConversationMessages(clawID, tenantID, before string, limit int) ([]types.HubMessage, error) {
-	query := `SELECT id, claw_id, tenant_id, role, content, COALESCE(format,''), created_at FROM messages
+	query := `SELECT id, claw_id, tenant_id, role, content, COALESCE(format,''), user_login, created_at FROM messages
 		WHERE claw_id = ? AND tenant_id = ? AND role != 'activity' ` + hiddenSystemMessagesSQL()
 	args := []interface{}{clawID, tenantID}
 	args = append(args, hiddenSystemMessagesArgs()...)
@@ -3270,11 +3374,19 @@ func (s *Server) handleUserWS(w http.ResponseWriter, r *http.Request) {
 			hm.TenantID = tenantID
 			hm.Role = "user"
 			hm.CreatedAt = now()
+			if ghLogin != "" {
+				hm.UserLogin = &ghLogin
+			} else {
+				hm.UserLogin = nil
+			}
 			s.resumeNoProgressAfterUserInput(hm.ClawID)
-			_, _ = s.db.Exec(
-				`INSERT INTO messages(id,claw_id,tenant_id,role,content,created_at,delivered_at) VALUES(?,?,?,?,?,?,NULL)`,
-				hm.ID, hm.ClawID, hm.TenantID, hm.Role, hm.Content, hm.CreatedAt,
-			)
+			if _, err := s.db.Exec(
+				`INSERT INTO messages(id,claw_id,tenant_id,role,content,user_login,created_at,delivered_at) VALUES(?,?,?,?,?,?,?,NULL)`,
+				hm.ID, hm.ClawID, hm.TenantID, hm.Role, hm.Content, hm.UserLogin, hm.CreatedAt,
+			); err != nil {
+				log.Printf("[ws] failed to persist message: %v", err)
+				continue
+			}
 			s.recordTaskRunDashboardMessage(hm.ClawID, ghLogin, hm.ID)
 			s.mu.RLock()
 			cc := s.claws[hm.ClawID]
@@ -8333,10 +8445,10 @@ func (s *Server) sendNextQueuedMessage(cc *clawConn) {
 	}()
 
 	var msg types.HubMessage
-	err := s.db.QueryRow(`SELECT id, claw_id, tenant_id, role, content, COALESCE(format,''), created_at
+	err := s.db.QueryRow(`SELECT id, claw_id, tenant_id, role, content, COALESCE(format,''), user_login, created_at
 		FROM messages WHERE claw_id=? AND tenant_id=? AND delivered_at IS NULL
 		ORDER BY created_at, rowid LIMIT 1`, clawID, tenantID).Scan(
-		&msg.ID, &msg.ClawID, &msg.TenantID, &msg.Role, &msg.Content, &msg.Format, &msg.CreatedAt)
+		&msg.ID, &msg.ClawID, &msg.TenantID, &msg.Role, &msg.Content, &msg.Format, &msg.UserLogin, &msg.CreatedAt)
 	if err == sql.ErrNoRows {
 		return
 	}
@@ -8365,7 +8477,9 @@ func (s *Server) sendNextQueuedMessage(cc *clawConn) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	err = wsjson.Write(ctx, conn, types.WSMessage{Type: "message", Payload: msg})
+	clawMsg := msg
+	clawMsg.UserLogin = nil
+	err = wsjson.Write(ctx, conn, types.WSMessage{Type: "message", Payload: clawMsg})
 	if err != nil {
 		cc.mu.Lock()
 		cc.abortTurnLocked()

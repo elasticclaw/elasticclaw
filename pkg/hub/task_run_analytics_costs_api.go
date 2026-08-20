@@ -400,7 +400,7 @@ func (s *Server) readTaskRunAnalyticsCostSeriesByModel(f taskRunAnalyticsFilters
 	other := map[string]v{}
 	for i, m := range names {
 		if i < 4 {
-			out = append(out, taskRunAnalyticsModelCostSeries{Model: m})
+			out = append(out, taskRunAnalyticsModelCostSeries{Model: m, DailySeries: make([]taskRunAnalyticsDailyCost, 0)})
 		} else {
 			for d, x := range data[m] {
 				y := other[d]
@@ -411,7 +411,7 @@ func (s *Server) readTaskRunAnalyticsCostSeriesByModel(f taskRunAnalyticsFilters
 		}
 	}
 	if len(other) > 0 {
-		out = append(out, taskRunAnalyticsModelCostSeries{Model: "other"})
+		out = append(out, taskRunAnalyticsModelCostSeries{Model: "other", DailySeries: make([]taskRunAnalyticsDailyCost, 0)})
 		data["other"] = other
 	}
 	for i := range out {

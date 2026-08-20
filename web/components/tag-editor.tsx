@@ -24,12 +24,13 @@ export function TagEditor({ clawId, tags, onTagsChange, className }: TagEditorPr
 
   async function removeTag(tag: string) {
     const next = tags.filter((t) => t !== tag)
+    onTagsChange(next)
     setSaving(true)
     try {
       await patchClaw(clawId, { tags: next })
-      onTagsChange(next)
     } catch (e) {
       console.error("Failed to remove tag", e)
+      onTagsChange(tags)
     } finally {
       setSaving(false)
     }
@@ -43,12 +44,13 @@ export function TagEditor({ clawId, tags, onTagsChange, className }: TagEditorPr
       return
     }
     const next = [tag, ...tags]
+    onTagsChange(next)
     setSaving(true)
     try {
       await patchClaw(clawId, { tags: next })
-      onTagsChange(next)
     } catch (e) {
       console.error("Failed to add tag", e)
+      onTagsChange(tags)
     } finally {
       setSaving(false)
       setInputValue("")

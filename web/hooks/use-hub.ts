@@ -531,11 +531,14 @@ export function useHub(selectedClawId: string | null): HubState {
           const { claw_id, content } = payload
           noteOutput(claw_id)
           pushChunk(claw_id, content)
-          setClaws((prev) =>
-            prev.map((c) =>
-                c.id === claw_id ? { ...c, isStreaming: true } : c
+          setClaws((prev) => {
+            const claw = prev.find((c) => c.id === claw_id)
+            if (!claw || claw.isStreaming) return prev
+
+            return prev.map((c) =>
+              c.id === claw_id ? { ...c, isStreaming: true } : c
             )
-          )
+          })
         } else if (type === "agent_activity") {
           const clawId = payload.claw_id
           if (!clawId) return
@@ -587,11 +590,13 @@ export function useHub(selectedClawId: string | null): HubState {
             persistMessages(next)
             return next
           })
-          setClaws((prev) =>
-            prev.map((c) =>
-              c.id === clawId ? { ...c, isStreaming: true } : c
-            )
-          )
+          // Bail when already streaming — this fires per chunk, and a fresh
+          // claws array per chunk re-renders the whole shell.
+          setClaws((prev) => {
+            const target = prev.find((c) => c.id === clawId)
+            if (!target || target.isStreaming) return prev
+            return prev.map((c) => (c.id === clawId ? { ...c, isStreaming: true } : c))
+          })
         } else if (type === "message") {
           // Final message — hold until typewriter drains, then commit
           const msg = mapApiMessage(payload)
@@ -736,6 +741,7 @@ export function useHub(selectedClawId: string | null): HubState {
       role: "user",
       content: content.trim(),
       timestamp: new Date(),
+      optimisticSelf: true,
     }
     setMessages((prev) => {
       const next = { ...prev, [clawId]: [...(prev[clawId] || []), optimistic] }
@@ -753,7 +759,7 @@ export function useHub(selectedClawId: string | null): HubState {
       const sent = await apiSendMessage(clawId, content.trim())
       // Replace the optimistic message with the real one from the DB
       // so it survives cache persistence (opt- IDs are filtered out)
-      const realMsg = mapApiMessage(sent)
+      const realMsg = { ...mapApiMessage(sent), optimisticSelf: true }
       setMessages((prev) => {
         const msgs = prev[clawId] || []
         const replaced = msgs.map((m) => m.id === optimistic.id ? realMsg : m)

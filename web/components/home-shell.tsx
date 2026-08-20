@@ -1,10 +1,10 @@
 "use client"
 
 import { useState, useMemo, useEffect, useCallback, useRef, useSyncExternalStore, Suspense } from "react"
+import dynamic from "next/dynamic"
 import { usePathname } from "next/navigation"
 import { Sidebar } from "@/components/sidebar"
 import { ConversationView } from "@/components/conversation-view"
-import { AnalyticsCommandCenter } from "@/components/analytics-command-center"
 import { SetupScreen } from "@/components/setup-screen"
 import { ManualTriggerModal } from "@/components/manual-trigger-modal"
 import { MobileTabBar } from "@/components/mobile-tab-bar"
@@ -24,6 +24,13 @@ import {
   markConfigured,
 } from "@/lib/shell-storage"
 import { requestAuthToken } from "@/lib/auth-storage"
+import { isWaitingOnYou } from "@/lib/waiting-on-you"
+import { agentSection, type AgentSectionName } from "@/components/ds/agent-section"
+import { Spinner } from "@/components/ui/spinner"
+
+const AnalyticsCommandCenter = dynamic(() => import("@/components/analytics-command-center").then((module) => module.AnalyticsCommandCenter), {
+  loading: () => <div className="flex min-h-64 items-center justify-center text-muted-foreground"><Spinner className="size-5" /></div>,
+})
 
 export type HomeView = "agents" | "analytics"
 
@@ -52,6 +59,9 @@ export function HomeShell() {
   const [searchQuery, setSearchQuery] = useState("")
   const [activeTagFilters, setActiveTagFilters] = useState<string[]>([])
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
+  const handleToggleSidebarCollapse = useCallback(() => {
+    setSidebarCollapsed((collapsed) => !collapsed)
+  }, [])
   // Below 768px the sidebar becomes a slide-over drawer opened from the
   // board header hamburger; the footer destinations move to a bottom tab bar.
   const isMobile = useIsMobile()
@@ -62,40 +72,76 @@ export function HomeShell() {
     getServerConfigured
   )
   const [isAdmin, setIsAdmin] = useState(false)
+  const [currentUserLogin, setCurrentUserLogin] = useState<string | null>(null)
+  const [currentUserResolved, setCurrentUserResolved] = useState(false)
   const [adminChecked, setAdminChecked] = useState(false)
+  const [adminCheckFailed, setAdminCheckFailed] = useState(false)
+  const lastAdminCheckAt = useRef(0)
   const [selectedWorkflow, setSelectedWorkflow] = useState<Workflow | null>(null)
 
-  // Fetch admin status
-  useEffect(() => {
-    let cancelled = false
-    async function loadAdminStatus() {
+  const loadAdminStatus = useCallback(async () => {
       const token = await requestAuthToken()
-      if (cancelled) return
       if (!token) {
         setIsAdmin(false)
+        setCurrentUserLogin(null)
+        setCurrentUserResolved(false)
         setAdminChecked(true)
-        return
+        setAdminCheckFailed(false)
+        return false
       }
       const { getHubUrl } = await import("@/lib/hub-url")
-      if (cancelled) return
       const hubUrl = getHubUrl()
       const url = hubUrl ? `${hubUrl}/api/auth/me` : "/api/auth/me"
-      fetch(url, { headers: { Authorization: `Bearer ${token}` } })
-        .then(r => r.ok ? r.json() : null)
+      return fetch(url, { headers: { Authorization: `Bearer ${token}` } })
+        .then(async (response) => {
+          if (response.ok) return response.json()
+          if (response.status === 401 || response.status === 403) throw new Error("Unauthorized")
+          throw new Error("Unable to resolve current user")
+        })
         .then(data => {
-          if (cancelled) return
           setIsAdmin(data?.is_admin === true)
+          setCurrentUserLogin(typeof data?.login === "string" ? data.login : null)
+          setCurrentUserResolved(true)
           setAdminChecked(true)
+          setAdminCheckFailed(false)
+          return true
         })
-        .catch(() => {
-          if (cancelled) return
-          setIsAdmin(false)
-          setAdminChecked(true)
+        .catch((error) => {
+          if (error instanceof Error && error.message === "Unauthorized") {
+            setIsAdmin(false)
+            setCurrentUserLogin(null)
+            setCurrentUserResolved(false)
+            setAdminChecked(true)
+            setAdminCheckFailed(false)
+            return true
+          } else {
+            setAdminChecked(false)
+            setAdminCheckFailed(true)
+            return false
+          }
         })
-    }
-    loadAdminStatus()
-    return () => { cancelled = true }
   }, [])
+
+  // Fetch admin status.
+  useEffect(() => {
+    let cancelled = false
+    const guardedLoadAdminStatus = () => {
+      if (lastAdminCheckAt.current && Date.now() - lastAdminCheckAt.current < 60_000) return
+      lastAdminCheckAt.current = Date.now()
+      void loadAdminStatus().then((succeeded) => {
+        if (!succeeded) lastAdminCheckAt.current = 0
+      }).catch(() => {
+        lastAdminCheckAt.current = 0
+        if (!cancelled) {
+          setAdminChecked(false)
+          setAdminCheckFailed(true)
+        }
+      })
+    }
+    guardedLoadAdminStatus()
+    window.addEventListener("focus", guardedLoadAdminStatus)
+    return () => { cancelled = true; window.removeEventListener("focus", guardedLoadAdminStatus) }
+  }, [loadAdminStatus])
 
   // Non-admins never see analytics: deep links bounce back to the agents view.
   useEffect(() => {
@@ -132,6 +178,7 @@ export function HomeShell() {
   } = hub
 
   const claws = rawClaws
+  const allClawIds = useMemo(() => claws.map((claw) => claw.id), [claws])
 
   // Collect all unique tags from all claws
   const allTags = useMemo(() => {
@@ -146,17 +193,16 @@ export function HomeShell() {
 
   const pinnedClaws = useMemo(() => claws.filter((c) => c.pinned), [claws])
   const unpinnedClaws = useMemo(() => claws.filter((c) => !c.pinned), [claws])
+  const matchesSearchQuery = useCallback((claw: typeof claws[number]) => {
+    const query = searchQuery.trim().toLowerCase()
+    return !query || claw.name.toLowerCase().includes(query) || claw.tags.some((tag) => tag.toLowerCase().includes(query))
+  }, [searchQuery])
 
   const filteredClaws = useMemo(() => {
     let result = searchQuery.trim() ? claws : unpinnedClaws
 
     if (searchQuery.trim()) {
-      const query = searchQuery.toLowerCase()
-      result = result.filter(
-        (c) =>
-          c.name.toLowerCase().includes(query) ||
-          c.tags.some((tag) => tag.toLowerCase().includes(query))
-      )
+      result = result.filter(matchesSearchQuery)
     }
 
     if (activeTagFilters.length > 0) {
@@ -166,14 +212,29 @@ export function HomeShell() {
     }
 
     return result
-  }, [claws, unpinnedClaws, searchQuery, activeTagFilters])
+  }, [claws, unpinnedClaws, searchQuery, activeTagFilters, matchesSearchQuery])
 
   const filteredPinnedClaws = useMemo(() => {
-    if (activeTagFilters.length === 0) return pinnedClaws
-    return pinnedClaws.filter((c) =>
-      activeTagFilters.every((tag) => c.tags.includes(tag))
+    return pinnedClaws.filter((claw) =>
+      matchesSearchQuery(claw) && activeTagFilters.every((tag) => claw.tags.includes(tag))
     )
-  }, [pinnedClaws, activeTagFilters])
+  }, [pinnedClaws, activeTagFilters, matchesSearchQuery])
+
+  // Keep streamed message churn out of Sidebar: it only needs each claw's
+  // resolved section, not the complete transcript map.
+  // Recomputed per message update, but identity-stable when nothing changed:
+  // a fresh Map per WS chunk would re-render every sidebar row.
+  const calculatedSidebarSections = useMemo(() => {
+    const sections = new Map<string, AgentSectionName>()
+    for (const claw of claws) {
+      sections.set(claw.id, agentSection(claw, { isWaitingOnYou: isWaitingOnYou(messages[claw.id] ?? []) }))
+    }
+    return sections
+  }, [claws, messages])
+  const [sidebarSections, setSidebarSections] = useState(calculatedSidebarSections)
+  if (sidebarSections.size !== calculatedSidebarSections.size || [...sidebarSections].some(([id, section]) => calculatedSidebarSections.get(id) !== section)) {
+    setSidebarSections(calculatedSidebarSections)
+  }
 
   // Eagerly load messages for all claws once the claw list is first available.
   // Covers: initial load, refresh, navigating back from /settings.
@@ -198,7 +259,7 @@ export function HomeShell() {
 
   // Sidebar second line: what each active claw is running right now. Only the
   // trailing activity run is scanned, so this stays cheap per message update.
-  const sidebarActivity = useMemo(() => {
+  const calculatedSidebarActivity = useMemo(() => {
     const lines: Record<string, string> = {}
     for (const claw of claws) {
       if (claw.status !== "connected" && !claw.isStreaming) continue
@@ -214,6 +275,10 @@ export function HomeShell() {
     }
     return lines
   }, [claws, messages])
+  const [sidebarActivity, setSidebarActivity] = useState(calculatedSidebarActivity)
+  if (Object.keys(sidebarActivity).length !== Object.keys(calculatedSidebarActivity).length || Object.keys(sidebarActivity).some((id) => sidebarActivity[id] !== calculatedSidebarActivity[id])) {
+    setSidebarActivity(calculatedSidebarActivity)
+  }
 
   // Mark messages as read when selecting a claw + lazy load history
   const handleSelectClaw = useCallback(
@@ -309,7 +374,8 @@ export function HomeShell() {
     <Sidebar
       claws={filteredClaws}
       pinnedClaws={filteredPinnedClaws}
-      allClawIds={claws.map((c) => c.id)}
+      allClawIds={allClawIds}
+      agentSections={sidebarSections}
       selectedClawId={selectedClawId}
       onSelectClaw={handleSelectClaw}
       onTogglePin={handleTogglePin}
@@ -321,7 +387,7 @@ export function HomeShell() {
       onRemoveTagFilter={handleRemoveTagFilter}
       onClearTagFilters={handleClearTagFilters}
       isCollapsed={!isMobile && sidebarCollapsed}
-      onToggleCollapse={() => setSidebarCollapsed(!sidebarCollapsed)}
+      onToggleCollapse={handleToggleSidebarCollapse}
       onReorderClaws={reorderClaws}
       activityLines={sidebarActivity}
       isAdmin={isAdmin}
@@ -354,6 +420,14 @@ export function HomeShell() {
             <Suspense fallback={null}>
               <AnalyticsCommandCenter />
             </Suspense>
+          ) : adminCheckFailed ? (
+            <div className="flex min-h-64 items-center justify-center p-6">
+              <div className="max-w-sm rounded-lg border bg-card p-5 text-center">
+                <p className="font-medium">Unable to check analytics access.</p>
+                <p className="mt-1 text-sm text-muted-foreground">Check your connection and try again.</p>
+                <button type="button" className="mt-4 rounded-md bg-primary px-3 py-2 text-sm text-primary-foreground" onClick={() => void loadAdminStatus()}>Retry</button>
+              </div>
+            </div>
           ) : null
         ) : (
           <ConversationView
@@ -372,6 +446,8 @@ export function HomeShell() {
             onReorderClaws={reorderClaws}
             loading={loading}
             hubError={hubError}
+            currentUserLogin={currentUserLogin}
+            currentUserResolved={currentUserResolved}
             onOpenMenu={isMobile ? () => setDrawerOpen(true) : undefined}
           />
         )}

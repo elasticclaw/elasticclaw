@@ -1,6 +1,6 @@
 "use client"
 
-import { Search, Pin, X, ChevronDown, PanelLeftClose, PanelLeft, Loader2, AlertCircle, LogOut, Settings, Plus, BarChart3, LayoutGrid } from "lucide-react"
+import { Search, X, ChevronDown, PanelLeftClose, PanelLeft, Loader2, AlertCircle, LogOut, Settings, Plus, BarChart3, LayoutGrid } from "lucide-react"
 import { useBranding } from "@/hooks/use-branding"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -8,7 +8,6 @@ import { ScrollArea } from "@/components/ui/scroll-area"
 import { ClawCard } from "@/components/claw-card"
 import { WorkflowName } from "@/components/workflow-name"
 import { clearConfig, fetchWorkspaces, type Workflow } from "@/lib/api"
-import { getAuthToken } from "@/lib/auth-storage"
 import { signOut } from "@/lib/sign-out"
 import { useIsMobile } from "@/hooks/use-mobile"
 import {
@@ -19,6 +18,8 @@ import {
 } from "@/components/ui/dropdown-menu"
 import { cn } from "@/lib/utils"
 import type { Claw } from "@/lib/types"
+import { AgentStateChip } from "@/components/ds/agent-state-chip"
+import { AGENT_SECTION, agentSection, type AgentSectionName } from "@/components/ds/agent-section"
 import {
   DndContext,
   closestCenter,
@@ -28,6 +29,7 @@ import {
   DragEndEvent,
   DragOverlay,
   DragStartEvent,
+  CollisionDetection,
 } from "@dnd-kit/core"
 import {
   SortableContext,
@@ -36,7 +38,7 @@ import {
   arrayMove,
 } from "@dnd-kit/sortable"
 import { CSS } from "@dnd-kit/utilities"
-import { useState, useEffect, useCallback } from "react"
+import { memo, useState, useEffect, useCallback, useMemo } from "react"
 
 type TagFilter = string
 
@@ -44,6 +46,7 @@ interface SidebarProps {
   claws: Claw[]
   pinnedClaws: Claw[]
   allClawIds: string[]
+  agentSections: Map<string, AgentSectionName>
   selectedClawId: string | null
   onSelectClaw: (id: string) => void
   onTogglePin: (id: string) => void
@@ -72,17 +75,17 @@ interface SidebarProps {
 }
 
 /** Thin wrapper that gives ClawCard sortable DnD powers */
-function SortableClawCard({
+const SortableClawCard = memo(function SortableClawCard({
   claw,
   isSelected,
-  onClick,
+  onSelectClaw,
   onTogglePin,
   activityLine,
 }: {
   claw: Claw
   isSelected: boolean
-  onClick: () => void
-  onTogglePin: (e: React.MouseEvent) => void
+  onSelectClaw: (id: string) => void
+  onTogglePin: (id: string) => void
   activityLine?: string
 }) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } =
@@ -94,24 +97,29 @@ function SortableClawCard({
     opacity: isDragging ? 0.4 : 1,
     cursor: isDragging ? "grabbing" : undefined,
   }
+  const handleClick = useCallback(() => onSelectClaw(claw.id), [claw.id, onSelectClaw])
+  const handleTogglePin = useCallback((event: React.MouseEvent) => { event.stopPropagation(); onTogglePin(claw.id) }, [claw.id, onTogglePin])
+  const stateChip = useMemo(() => <AgentStateChip status={claw.status} isStreaming={claw.isStreaming} />, [claw.status, claw.isStreaming])
 
   return (
-    <div ref={setNodeRef} style={style} {...attributes} {...listeners}>
+    <div ref={setNodeRef} style={style} {...attributes} {...listeners} className="w-full min-w-0">
       <ClawCard
         claw={claw}
         isSelected={isSelected}
-        onClick={onClick}
-        onTogglePin={onTogglePin}
+        onClick={handleClick}
+        onTogglePin={handleTogglePin}
         activityLine={activityLine}
+        stateChip={stateChip}
       />
     </div>
   )
-}
+})
 
-export function Sidebar({
+export const Sidebar = memo(function Sidebar({
   claws,
   pinnedClaws,
   allClawIds,
+  agentSections,
   selectedClawId,
   onSelectClaw,
   onTogglePin,
@@ -219,44 +227,76 @@ export function Sidebar({
     setActiveDragClaw(found ?? null)
   }
 
+  // Pinned and unpinned agents share a section's SortableContext, but reordering
+  // across that boundary is rejected in handleDragEnd. Left to dnd-kit's default
+  // collision detection, the list still previews the move while dragging and only
+  // snaps back on drop — a confusing refusal with no visible cue. Filtering out
+  // cross-pinned drop targets up front keeps the list from moving at all when the
+  // drag can't succeed, so there's nothing to snap back from.
+  const collisionDetectionForClaws: CollisionDetection = useCallback((args) => {
+    const activeClaw = [...pinnedClaws, ...claws].find((claw) => claw.id === args.active.id)
+    if (!activeClaw) return closestCenter(args)
+    const activePinned = pinnedClaws.some((claw) => claw.id === args.active.id)
+    const sectionFor = (candidate: Claw) => agentSections.get(candidate.id) ?? agentSection(candidate, { isWaitingOnYou: false })
+    const activeSection = sectionFor(activeClaw)
+    const allowed = args.droppableContainers.filter((container) => {
+      const overClaw = [...pinnedClaws, ...claws].find((claw) => claw.id === container.id)
+      return container.id === args.active.id || Boolean(overClaw && sectionFor(overClaw) === activeSection && pinnedClaws.some((claw) => claw.id === overClaw.id) === activePinned)
+    })
+    return closestCenter({ ...args, droppableContainers: allowed })
+  }, [agentSections, claws, pinnedClaws])
+
   function handleDragEnd(event: DragEndEvent) {
     setActiveDragClaw(null)
     const { active, over } = event
     if (!over || active.id === over.id) return
 
-    // Figure out which list the drag happened in (pinned vs main)
-    const inPinned = pinnedClaws.some((c) => c.id === active.id)
-    const targetInPinned = pinnedClaws.some((c) => c.id === over.id)
+    const visible = [...pinnedClaws, ...claws.filter((c) => !pinnedClaws.some((p) => p.id === c.id))]
+    const activeClaw = visible.find((c) => c.id === active.id)
+    const overClaw = visible.find((c) => c.id === over.id)
+    if (!activeClaw || !overClaw) return
+    const sectionFor = (candidate: Claw) => agentSections.get(candidate.id) ?? agentSection(candidate, { isWaitingOnYou: false })
+    const section = sectionFor(activeClaw)
+    if (section !== sectionFor(overClaw)) return
+    if (activeClaw.pinned !== overClaw.pinned) return
 
-    if (inPinned !== targetInPinned) return // don't allow crossing sections
-
-    if (inPinned) {
-      // Reorder within pinned — update full order accounting for the pinned move
-      const pinnedIds = pinnedClaws.map((c) => c.id)
-      const oldIdx = pinnedIds.indexOf(active.id as string)
-      const newIdx = pinnedIds.indexOf(over.id as string)
-      const reordered = arrayMove(pinnedIds, oldIdx, newIdx)
-      const unpinnedIds = allClawIds.filter((id) => !pinnedIds.includes(id))
-      onReorderClaws([...reordered, ...unpinnedIds])
-    } else {
-      const unpinnedIds = claws.map((c) => c.id)
-      const oldIdx = unpinnedIds.indexOf(active.id as string)
-      const newIdx = unpinnedIds.indexOf(over.id as string)
-      const reordered = arrayMove(unpinnedIds, oldIdx, newIdx)
-      const pinnedIds = pinnedClaws.map((c) => c.id)
-      onReorderClaws([...pinnedIds, ...reordered])
-    }
+    const ids = visible.filter((candidate) => sectionFor(candidate) === section).map((candidate) => candidate.id)
+    const reordered = arrayMove(ids, ids.indexOf(active.id as string), ids.indexOf(over.id as string))
+    const order = allClawIds.slice()
+    let next = 0
+    const rewritten = order.map((id) => ids.includes(id) ? reordered[next++] : id)
+    onReorderClaws(rewritten)
   }
 
   // Merge pinned + unpinned for collapsed view (order already applied by parent)
-  const allClaws = [...pinnedClaws, ...claws.filter(c => !pinnedClaws.find(p => p.id === c.id))]
+  const allClaws = useMemo(
+    () => [...pinnedClaws, ...claws.filter(c => !pinnedClaws.find(p => p.id === c.id))],
+    [pinnedClaws, claws]
+  )
+
+  // The collapsed rail keeps the expanded list's grouping: same section order,
+  // same pinned-first sort — collapsing must not reshuffle the agents.
+  const sections = useMemo(() => (["attention", "working", "offline"] as AgentSectionName[])
+    .map((key) => ({
+      key,
+      meta: AGENT_SECTION[key],
+      items: allClaws
+        .filter((candidate) => agentSections.get(candidate.id) === key)
+        .sort((a, b) => Number(b.pinned) - Number(a.pinned)),
+    }))
+    // ids computed here so SortableContext gets a stable array — a fresh one
+    // per render re-renders every useSortable row through context.
+    .map((section) => ({ ...section, ids: section.items.map((candidate) => candidate.id) })), [allClaws, agentSections])
+  const collapsedSections = useMemo(() => sections.filter((section) => section.items.length > 0), [sections])
 
   let sidebar: React.ReactElement
 
   if (isCollapsed && !inDrawer) {
     sidebar = (
       <aside className="w-12 h-screen-safe flex flex-col border-r border-border bg-card">
-        <div className="p-2 border-b border-border flex flex-col items-center gap-1">
+        {/* py matches the board header so the rail's hairline meets it at the
+            same height; Create Agent moves below the line to keep it that way. */}
+        <div className="px-2 py-2.5 border-b border-border flex flex-col items-center">
           <Button
             variant="ghost"
             size="icon"
@@ -266,6 +306,8 @@ export function Sidebar({
           >
             <PanelLeft className="size-4" />
           </Button>
+        </div>
+        <div className="flex flex-col items-center gap-1 py-2 overflow-y-auto flex-1 min-h-0">
           {manualWorkflows.length > 0 && (
             <Button
               variant="ghost"
@@ -278,9 +320,16 @@ export function Sidebar({
               {loadingManualWorkflows ? <Loader2 className="size-4 animate-spin" /> : <Plus className="size-4" />}
             </Button>
           )}
-        </div>
-        <div className="flex flex-col items-center gap-1 py-2 overflow-y-auto flex-1 min-h-0">
-          {allClaws.map((claw) => {
+          {collapsedSections.map((section) => (
+            <div key={section.key} className="flex flex-col items-center gap-1">
+              {/* Section marker: a short bar in the section color, standing in
+                  for the expanded header. */}
+              <span
+                className="mt-1 h-0.5 w-6 rounded-full"
+                title={`${section.meta.label} (${section.items.length})`}
+                style={{ backgroundColor: `color-mix(in srgb, ${section.meta.color} 60%, transparent)` }}
+              />
+              {section.items.map((claw) => {
             const isSelected = claw.id === selectedClawId
             const hasUnread = claw.unreadCount > 0
             return (
@@ -295,18 +344,13 @@ export function Sidebar({
               >
                 {/* Status dot */}
                 {claw.status === "provisioning" ? (
-                  <Loader2 className="size-3.5 text-blue-400 animate-spin" />
+                  <Loader2 className="size-3.5 animate-spin" style={{ color: "var(--status-provisioning)" }} />
                 ) : claw.status === "error" ? (
-                  <AlertCircle className="size-3.5 text-red-500" />
+                  <AlertCircle className="size-3.5" style={{ color: "var(--status-error)" }} />
                 ) : claw.isStreaming ? (
-                  <Loader2 className="size-3.5 text-green-500 animate-spin" />
+                  <Loader2 className="size-3.5 animate-spin" style={{ color: "var(--status-streaming)" }} />
                 ) : (
-                  <span className={cn(
-                    "size-2.5 rounded-full",
-                    claw.status === "connected" && "bg-green-500",
-                    claw.status === "idle" && "bg-amber-500",
-                    claw.status === "offline" && "bg-muted-foreground/50"
-                  )} />
+                  <span className="size-2.5 rounded-full" style={{ backgroundColor: claw.status === "connected" ? "var(--status-connected)" : claw.status === "idle" ? "var(--status-idle)" : "var(--status-offline)" }} />
                 )}
                 {/* Unread badge */}
                 {hasUnread && (
@@ -317,6 +361,8 @@ export function Sidebar({
               </button>
             )
           })}
+            </div>
+          ))}
         </div>
 
         {/* Footer: view toggle + settings (admin) and sign out */}
@@ -367,7 +413,8 @@ export function Sidebar({
           inDrawer ? "w-full h-full" : "w-[260px] h-screen-safe border-r border-border"
         )}
       >
-      <div className={cn("flex items-center justify-between p-4 border-b border-border", inDrawer && "pr-12")}>
+      {/* py matches the board header so the two hairlines meet at the same height. */}
+      <div className={cn("flex items-center justify-between px-4 py-2.5 border-b border-border", inDrawer && "pr-12")}>
         <h1 className="text-lg font-semibold tracking-tight text-foreground">
           {appName}
         </h1>
@@ -465,74 +512,36 @@ export function Sidebar({
 
       <DndContext
         sensors={sensors}
-        collisionDetection={closestCenter}
+        collisionDetection={collisionDetectionForClaws}
         onDragStart={handleDragStart}
         onDragEnd={handleDragEnd}
       >
         {/* Pinned section lives inside the scroll area — a long pinned list
             must scroll with the rest instead of squeezing "All Agents" out. */}
-        <ScrollArea className="flex-1 min-h-0">
-          {pinnedClaws.length > 0 && !searchQuery && (
-            <div className="border-b border-border">
-              <div className="flex items-center gap-1.5 px-4 py-2">
-                <Pin className="size-3 text-muted-foreground" />
-                <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
-                  Pinned
-                </span>
-              </div>
-              <div className="px-2 pb-2">
-                <SortableContext
-                  items={pinnedClaws.map((c) => c.id)}
-                  strategy={verticalListSortingStrategy}
-                >
-                  {pinnedClaws.map((claw) => (
-                    <SortableClawCard
-                      key={claw.id}
-                      claw={claw}
-                      isSelected={claw.id === selectedClawId}
-                      onClick={() => onSelectClaw(claw.id)}
-                      onTogglePin={(e) => {
-                        e.stopPropagation()
-                        onTogglePin(claw.id)
-                      }}
-                      activityLine={activityLines?.[claw.id]}
-                    />
-                  ))}
-                </SortableContext>
-              </div>
-            </div>
-          )}
-          <div className="p-2">
-            {!searchQuery && pinnedClaws.length > 0 && claws.length > 0 && (
-              <div className="flex items-center gap-1.5 px-2 py-2">
-                <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
-                  All Agents
-                </span>
-              </div>
-            )}
-            {claws.length === 0 && pinnedClaws.length === 0 ? (
+        <ScrollArea className="flex-1 min-h-0 min-w-0 overflow-x-hidden [&>[data-slot=scroll-area-viewport]>div]:!block [&>[data-slot=scroll-area-viewport]>div]:!w-full [&>[data-slot=scroll-area-viewport]>div]:!min-w-0">
+          <div className="w-full min-w-0 overflow-hidden">
+            {allClaws.length === 0 ? (
               <p className="text-sm text-muted-foreground text-center py-8">
                 No agents found
               </p>
             ) : (
-              <SortableContext
-                items={claws.map((c) => c.id)}
-                strategy={verticalListSortingStrategy}
-              >
-                {claws.map((claw) => (
-                  <SortableClawCard
-                    key={claw.id}
-                    claw={claw}
-                    isSelected={claw.id === selectedClawId}
-                    onClick={() => onSelectClaw(claw.id)}
-                    onTogglePin={(e) => {
-                      e.stopPropagation()
-                      onTogglePin(claw.id)
-                    }}
-                    activityLine={activityLines?.[claw.id]}
-                  />
-                ))}
-              </SortableContext>
+              sections.map(({ key, meta, items, ids }) => {
+                const Icon = meta.icon
+                return <section key={key} className="min-w-0 pb-1">
+                  <div className="sticky top-0 left-0 right-0 z-10 flex w-full min-w-0 items-center gap-2 border-y px-3 py-1.5" style={{ backgroundColor: `color-mix(in srgb, ${meta.color} 10%, var(--card))`, borderColor: `color-mix(in srgb, ${meta.color} 30%, var(--border))` }}>
+                    <span className="w-[3px] self-stretch rounded-full" style={{ backgroundColor: meta.color }} />
+                    <Icon className="size-[13px]" style={{ color: meta.color }} />
+                    <span className="min-w-0 truncate text-xs font-semibold uppercase tracking-[0.08em]">{meta.label}</span>
+                    <span className="ml-auto shrink-0 rounded-full px-1.5 font-mono text-[10px] font-medium" style={{ backgroundColor: `color-mix(in srgb, ${meta.color} 22%, transparent)`, color: meta.color }}>{items.length}</span>
+                  </div>
+                  <div className="space-y-1 px-2 py-2">
+                    {items.length === 0 ? <p className="px-2 py-1 text-xs text-muted-foreground">{meta.empty}</p> :
+                      <SortableContext items={ids} strategy={verticalListSortingStrategy}>
+                        {items.map((candidate) => <SortableClawCard key={candidate.id} claw={candidate} isSelected={candidate.id === selectedClawId} onSelectClaw={onSelectClaw} onTogglePin={onTogglePin} activityLine={activityLines?.[candidate.id]} />)}
+                      </SortableContext>}
+                  </div>
+                </section>
+              })
             )}
           </div>
         </ScrollArea>
@@ -608,7 +617,7 @@ export function Sidebar({
       )}
     </>
   )
-}
+})
 
 /** WorkflowPickerOverlay is a keyboard-accessible overlay for picking a workflow.
  *  Closes on Escape key and click outside the card. */

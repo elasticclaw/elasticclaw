@@ -26,21 +26,35 @@
   --muted-foreground: oklch(0.556 0 0);
   --accent: oklch(0.97 0 0);
   --accent-foreground: oklch(0.205 0 0);
+  --success: oklch(0.627 0.194 142.495);
   --destructive: oklch(0.577 0.245 27.325);
   --destructive-foreground: oklch(0.577 0.245 27.325);
   --border: oklch(0.922 0 0);
   --input: oklch(0.922 0 0);
   --ring: oklch(0.708 0 0);
-  --chart-1: oklch(0.646 0.222 41.116);
-  --chart-2: oklch(0.6 0.118 184.704);
-  --chart-3: oklch(0.398 0.07 227.392);
-  --chart-4: oklch(0.828 0.189 84.429);
-  --chart-5: oklch(0.769 0.188 70.08);
-  --heatmap-1: oklch(0.86 0.08 250);
-  --heatmap-2: oklch(0.72 0.13 250);
-  --heatmap-3: oklch(0.59 0.17 250);
-  --heatmap-4: oklch(0.46 0.16 250);
-  --heatmap-5: oklch(0.32 0.12 250);
+  /* Charts — categorical, drawn from the product's own semantic hues
+     (blue, green, amber, red, slate) at a single lightness and a single
+     chroma ceiling, per the design kit (tokens/colors.css). */
+  --chart-1: oklch(0.70 0.115 250);
+  --chart-2: oklch(0.70 0.115 155);
+  --chart-3: oklch(0.70 0.115 75);
+  --chart-4: oklch(0.70 0.115 25);
+  --chart-5: oklch(0.70 0.040 250);
+  /* Agent lifecycle — one color per ClawStatus (kit tokens/semantic.css). */
+  --status-connected: #22c55e;
+  --status-streaming: #22c55e;
+  --status-provisioning: #60a5fa;
+  --status-idle: #f59e0b;
+  --status-offline: var(--muted-foreground);
+  --status-error: #ef4444;
+  --text-error: #b91c1c;
+  --text-warning: #92400e;
+  /* Heatmap — one blue family, evenly stepped in lightness, calm chroma. */
+  --heatmap-1: oklch(0.93 0.025 250);
+  --heatmap-2: oklch(0.82 0.055 250);
+  --heatmap-3: oklch(0.70 0.080 250);
+  --heatmap-4: oklch(0.57 0.100 250);
+  --heatmap-5: oklch(0.44 0.105 250);
   --radius: 0.625rem;
   --sidebar: oklch(0.985 0 0);
   --sidebar-foreground: oklch(0.145 0 0);
@@ -64,24 +78,35 @@
   --secondary: #1a1a1a;
   --secondary-foreground: #fafafa;
   --muted: #1a1a1a;
-  --muted-foreground: #737373;
+  /* Raised from #737373 (≈4.0:1 on --card) to clear 4.5:1 — meta text is
+     9–12px, so it needs the headroom (kit tokens/semantic.css). */
+  --muted-foreground: #8c8c8c;
   --accent: #1a1a1a;
   --accent-foreground: #fafafa;
+  --success: oklch(0.723 0.191 142.495);
   --destructive: #dc2626;
   --destructive-foreground: #fafafa;
-  --border: #262626;
+  --border: #303030; /* was #262626 — hairlines were disappearing on --card */
   --input: #262626;
   --ring: #404040;
-  --chart-1: oklch(0.488 0.243 264.376);
-  --chart-2: oklch(0.696 0.17 162.48);
-  --chart-3: oklch(0.769 0.188 70.08);
-  --chart-4: oklch(0.627 0.265 303.9);
-  --chart-5: oklch(0.645 0.246 16.439);
-  --heatmap-1: oklch(0.35 0.09 250);
-  --heatmap-2: oklch(0.45 0.13 250);
-  --heatmap-3: oklch(0.56 0.16 250);
-  --heatmap-4: oklch(0.67 0.15 250);
-  --heatmap-5: oklch(0.78 0.12 250);
+  --chart-1: oklch(0.70 0.115 250);
+  --chart-2: oklch(0.70 0.115 155);
+  --chart-3: oklch(0.70 0.115 75);
+  --chart-4: oklch(0.70 0.115 25);
+  --chart-5: oklch(0.70 0.040 250);
+  --status-connected: #22c55e;
+  --status-streaming: #22c55e;
+  --status-provisioning: #60a5fa;
+  --status-idle: #f59e0b;
+  --status-offline: var(--muted-foreground);
+  --status-error: #ef4444;
+  --text-error: #f87171;
+  --text-warning: #fbbf24;
+  --heatmap-1: oklch(0.34 0.055 250);
+  --heatmap-2: oklch(0.45 0.075 250);
+  --heatmap-3: oklch(0.56 0.095 250);
+  --heatmap-4: oklch(0.67 0.105 250);
+  --heatmap-5: oklch(0.78 0.095 250);
   --sidebar: #0f0f0f;
   --sidebar-foreground: #fafafa;
   --sidebar-primary: #fafafa;
@@ -109,6 +134,7 @@
   --color-muted-foreground: var(--muted-foreground);
   --color-accent: var(--accent);
   --color-accent-foreground: var(--accent-foreground);
+  --color-success: var(--success);
   --color-destructive: var(--destructive);
   --color-destructive-foreground: var(--destructive-foreground);
   --color-border: var(--border);
