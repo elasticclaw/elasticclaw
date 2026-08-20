@@ -272,6 +272,15 @@ export interface TaskRunSummary {
   issueTitle?: string
 }
 
+export interface TaskRunStage {
+  stageId: string
+  label: string
+  enteredAt: number
+  exitedAt: number
+  durationMs: number
+  source: string
+}
+
 export interface TaskRunsResponse {
   runs: TaskRunSummary[]
   nextCursor?: string
