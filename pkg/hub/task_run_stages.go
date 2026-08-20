@@ -94,6 +94,11 @@ func (s *Server) recordTaskRunStageEntered(clawID, stageID, label string) error 
 		SELECT t.tenant_id, t.id
 		  FROM claws c JOIN task_runs t ON t.id = c.task_run_id
 		 WHERE c.id = ?`, clawID).Scan(&tenantID, &runID); err != nil {
+		if err == sql.ErrNoRows {
+			// Claws without a task run (claws.task_run_id='') are a documented
+			// normal case; there is nothing to record for them.
+			return nil
+		}
 		return fmt.Errorf("resolve task run for claw %q: %w", clawID, err)
 	}
 	tx, err := s.db.Begin()

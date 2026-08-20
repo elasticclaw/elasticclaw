@@ -1473,10 +1473,14 @@ func backfillTaskRunStagesV1(db *sql.DB) error {
 	rows.Close()
 
 	skipped := 0
+	unprocessable := 0
 	for _, c := range candidates {
 		if c.clawID == "" {
-			skipped++
-			log.Printf("[task-run-analytics] task run stages backfill skipped run %s: no claw_id", c.runID)
+			// A missing claw_id can never self-heal, so it must not block the
+			// sentinel: counting it as skipped would re-run the full backfill
+			// on every startup forever.
+			unprocessable++
+			log.Printf("[task-run-analytics] task run stages backfill skipped run %s: no claw_id (will not retry)", c.runID)
 			continue
 		}
 		if err := backfillTaskRunStagesForRun(db, c.tenantID, c.runID, c.clawID); err != nil {
@@ -1484,7 +1488,7 @@ func backfillTaskRunStagesV1(db *sql.DB) error {
 			log.Printf("[task-run-analytics] task run stages backfill skipped run %s: %v", c.runID, err)
 		}
 	}
-	log.Printf("[task-run-analytics] task run stages backfill: %d of %d run(s) processed", len(candidates)-skipped, len(candidates))
+	log.Printf("[task-run-analytics] task run stages backfill: %d of %d run(s) processed", len(candidates)-skipped-unprocessable, len(candidates))
 	if skipped > 0 {
 		log.Printf("[task-run-analytics] task run stages backfill: %d run(s) skipped, will retry on next startup", skipped)
 		return nil
@@ -1552,24 +1556,47 @@ func backfillTaskRunStagesForRun(db *sql.DB, tenantID, runID, clawID string) err
 			return fmt.Errorf("list pipeline stage history: %w", err)
 		}
 		consumed := make([]bool, len(history))
+		stageIDByLabel := make(map[string]string)
 		for _, m := range markers {
-			best, bestDiff := -1, 10*time.Second+1
-			for i, h := range history {
-				if consumed[i] {
-					continue
+			// pipeline_stage_history records only each stage's first visit, so
+			// a revisit marker must reuse the stage id resolved for that
+			// label's first visit instead of consuming (and mislabeling)
+			// another stage's history entry.
+			stageID, seen := stageIDByLabel[m.label]
+			if !seen {
+				slug := slugTaskRunStageLabel(m.label)
+				// Pair the first visit with a history entry: prefer, within
+				// the window, an entry whose stage id matches the marker
+				// label; otherwise take the earliest unconsumed entry — both
+				// streams are in first-visit order, so the earliest candidate
+				// is right even when marker persistence lags the history
+				// write and a later entry happens to be nearer in time.
+				best := -1
+				for i, h := range history {
+					if consumed[i] {
+						continue
+					}
+					diff := m.at.Sub(h.at)
+					if diff < 0 {
+						diff = -diff
+					}
+					if diff > 10*time.Second {
+						continue
+					}
+					if best < 0 {
+						best = i
+					}
+					if stageIDMatchesLabelSlug(h.stageID, slug) {
+						best = i
+						break
+					}
 				}
-				diff := m.at.Sub(h.at)
-				if diff < 0 {
-					diff = -diff
+				stageID = slug
+				if best >= 0 {
+					stageID = history[best].stageID
+					consumed[best] = true
 				}
-				if diff < bestDiff {
-					best, bestDiff = i, diff
-				}
-			}
-			stageID := slugTaskRunStageLabel(m.label)
-			if best >= 0 && bestDiff <= 10*time.Second {
-				stageID = history[best].stageID
-				consumed[best] = true
+				stageIDByLabel[m.label] = stageID
 			}
 			if err := recordTaskRunStageEnteredTx(tx, tenantID, runID, stageID, m.label, m.at.UnixMilli(), "backfill_messages"); err != nil {
 				return err
@@ -1612,7 +1639,7 @@ func slugTaskRunStageLabel(label string) string {
 	var b strings.Builder
 	previousSpace := false
 	for _, r := range strings.ToLower(strings.TrimSpace(label)) {
-		if unicode.IsSpace(r) {
+		if unicode.IsSpace(r) || r == '-' {
 			if b.Len() > 0 {
 				previousSpace = true
 			}
@@ -1631,6 +1658,22 @@ func slugTaskRunStageLabel(label string) string {
 		return "stage"
 	}
 	return result
+}
+
+// stageIDMatchesLabelSlug reports whether a pipeline stage id and a slugged
+// marker label refer to the same stage, ignoring separator differences
+// (e.g. "pre_commit" matches the slug of "Pre-commit").
+func stageIDMatchesLabelSlug(stageID, labelSlug string) bool {
+	norm := func(s string) string {
+		var b strings.Builder
+		for _, r := range strings.ToLower(s) {
+			if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+				b.WriteRune(r)
+			}
+		}
+		return b.String()
+	}
+	return norm(stageID) == norm(labelSlug)
 }
 
 // backfillTaskRunAgentStartedAt records an inferred agent_started event for a

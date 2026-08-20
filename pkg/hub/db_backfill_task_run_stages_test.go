@@ -49,6 +49,25 @@ func TestBackfillTaskRunStagesV1(t *testing.T) {
 	seedRun("run-slug", "claw-slug", 0)
 	seedMessage("marker-slug", "claw-slug", "[hub] ▶ Stage: PR Opened & Ready!", base.Add(30*time.Second))
 
+	// A revisit within 10s of another stage's first visit must not steal that
+	// stage's history entry: Working@0s, Working@8s (revisit), Pre-commit@9s
+	// with history working@0s, pre_commit@9s.
+	seedRun("run-revisit", "claw-revisit", 0)
+	seedMessage("marker-r1", "claw-revisit", "[hub] ▶ Stage: Working", base)
+	seedMessage("marker-r2", "claw-revisit", "[hub] ▶ Stage: Working", base.Add(8*time.Second))
+	seedMessage("marker-r3", "claw-revisit", "[hub] ▶ Stage: Pre-commit", base.Add(9*time.Second))
+	seedHistory("claw-revisit", "working", base)
+	seedHistory("claw-revisit", "pre_commit", base.Add(9*time.Second))
+
+	// A delayed marker persisted nearer to the NEXT stage's history entry must
+	// still pair with its own stage: Implement marker at +1.7s sits nearer to
+	// review@+2s than to implement@+0s.
+	seedRun("run-delayed", "claw-delayed", 0)
+	seedMessage("marker-d1", "claw-delayed", "[hub] ▶ Stage: Implement", base.Add(1700*time.Millisecond))
+	seedMessage("marker-d2", "claw-delayed", "[hub] ▶ Stage: Review", base.Add(2100*time.Millisecond))
+	seedHistory("claw-delayed", "implement", base)
+	seedHistory("claw-delayed", "review", base.Add(2*time.Second))
+
 	// The startup fixture runs migrations before its data is seeded.
 	if _, err := db.Exec(`DELETE FROM hub_migrations WHERE name='task_run_stages_v1'`); err != nil {
 		t.Fatalf("reset task stage backfill sentinel: %v", err)
@@ -107,6 +126,32 @@ func TestBackfillTaskRunStagesV1(t *testing.T) {
 		t.Fatalf("slug stage ID = %q, want pr_opened_ready", slugStage)
 	}
 
+	revisitStages, err := taskRunStagesForRun(db, "test-tenant-id", "run-revisit")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(revisitStages) != 3 {
+		t.Fatalf("revisit stages = %d, want 3", len(revisitStages))
+	}
+	for i, want := range []string{"working", "working", "pre_commit"} {
+		if revisitStages[i].StageID != want {
+			t.Fatalf("revisit stage %d = %q, want %q", i, revisitStages[i].StageID, want)
+		}
+	}
+
+	delayedStages, err := taskRunStagesForRun(db, "test-tenant-id", "run-delayed")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(delayedStages) != 2 {
+		t.Fatalf("delayed stages = %d, want 2", len(delayedStages))
+	}
+	for i, want := range []string{"implement", "review"} {
+		if delayedStages[i].StageID != want {
+			t.Fatalf("delayed stage %d = %q, want %q", i, delayedStages[i].StageID, want)
+		}
+	}
+
 	var before, appliedAt int64
 	if err := db.QueryRow(`SELECT COUNT(*) FROM task_run_stages`).Scan(&before); err != nil {
 		t.Fatal(err)
@@ -135,5 +180,8 @@ func TestSlugTaskRunStageLabel(t *testing.T) {
 	}
 	if got := slugTaskRunStageLabel(" !!! "); got != "stage" {
 		t.Fatalf("empty slug fallback = %q, want stage", got)
+	}
+	if got := slugTaskRunStageLabel("Pre-commit"); got != "pre_commit" {
+		t.Fatalf("hyphen slug = %q, want pre_commit", got)
 	}
 }
