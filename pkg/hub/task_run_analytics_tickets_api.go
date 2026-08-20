@@ -846,7 +846,7 @@ func (s *Server) applyOrScheduleTaskRunAnalyticsTicketMetadata(tenantID string, 
 			<-s.ticketMetadataEnrichment
 			return
 		}
-	} else if metadata.lastAttemptAt == 0 && !s.allowTaskRunAnalyticsTicketMetadataColdEnrichment() {
+	} else if !s.allowTaskRunAnalyticsTicketMetadataColdEnrichment() {
 		s.ticketMetadataInflight.Delete(key)
 		<-s.ticketMetadataEnrichment
 		return

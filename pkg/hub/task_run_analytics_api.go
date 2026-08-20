@@ -1308,7 +1308,10 @@ func splitTaskRunAnalyticsValues(q url.Values, keys ...string) ([]string, error)
 	for _, key := range keys {
 		for _, raw := range q[key] {
 			for _, part := range strings.Split(raw, ",") {
-				part = strings.ReplaceAll(strings.ReplaceAll(part, "%2C", ","), "%2c", ",")
+				part, err := url.PathUnescape(part)
+				if err != nil {
+					return nil, fmt.Errorf("invalid value for filter %s: %w", key, err)
+				}
 				part = strings.TrimSpace(part)
 				if part == "" || seen[part] {
 					continue

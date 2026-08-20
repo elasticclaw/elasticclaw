@@ -17,10 +17,10 @@ import (
 func TestSplitTaskRunAnalyticsValuesPreservesDoubleEncodedCommas(t *testing.T) {
 	// The client escapes only literal commas before URLSearchParams applies its
 	// outer transport encoding.
-	clientValue := "Research%2C Development,Operations"
+	clientValue := "Research%2C%20Development,Operations"
 	queryValues := url.Values{"workspace": {clientValue}}
 	query := queryValues.Encode()
-	if query != "workspace=Research%252C+Development%2COperations" {
+	if query != "workspace=Research%252C%2520Development%2COperations" {
 		t.Fatalf("client wire format = %q", query)
 	}
 	request, err := http.NewRequest(http.MethodGet, "/api/analytics?"+query, nil)
@@ -36,14 +36,14 @@ func TestSplitTaskRunAnalyticsValuesPreservesDoubleEncodedCommas(t *testing.T) {
 	}
 }
 
-func TestSplitTaskRunAnalyticsValuesDoesNotDoubleDecode(t *testing.T) {
+func TestSplitTaskRunAnalyticsValuesDecodesClientEscapedValues(t *testing.T) {
 	request := httptest.NewRequest(http.MethodGet, "/api/analytics?repo=org%252Frepo", nil)
 	got, err := splitTaskRunAnalyticsValues(request.URL.Query(), "repo")
 	if err != nil {
 		t.Fatalf("splitTaskRunAnalyticsValues(): %v", err)
 	}
-	if len(got) != 1 || got[0] != "org%2Frepo" {
-		t.Fatalf("splitTaskRunAnalyticsValues() = %#v, want [org%%2Frepo]", got)
+	if len(got) != 1 || got[0] != "org/repo" {
+		t.Fatalf("splitTaskRunAnalyticsValues() = %#v, want [org/repo]", got)
 	}
 }
 
