@@ -681,8 +681,11 @@ func taskRunTicketCostAndTokens(run taskRunAnalyticsRunView) (float64, int64) {
 }
 
 func deriveTaskRunAnalyticsTicketStatus(runs []taskRunAnalyticsTicketRunSummary, prs []taskRunAnalyticsTicketPRView) string {
+	// Delivered means the PR reached a terminal state on purpose: merged, or
+	// closed after its content landed some other way (squash elsewhere, direct
+	// push). Closed-unmerged PRs are therefore delivery, not abandonment.
 	for _, pr := range prs {
-		if pr.Merged {
+		if pr.Merged || pr.State == "closed" {
 			return "delivered"
 		}
 	}

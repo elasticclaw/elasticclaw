@@ -212,6 +212,10 @@ func TestDeriveTaskRunAnalyticsTicketStatusFixtureTickets(t *testing.T) {
 		{issueID: "PLT-31", runs: []taskRunAnalyticsTicketRunSummary{{RunID: "run_4a12bd", Status: "clean"}, {RunID: "run_d90c33", Status: "failed"}}, prs: []taskRunAnalyticsTicketPRView{{taskRunAnalyticsPRView: taskRunAnalyticsPRView{ID: "pr6", State: "open"}, RunID: "run_4a12bd"}}, want: "pr_open"},
 		{issueID: "SUP-201", runs: []taskRunAnalyticsTicketRunSummary{{RunID: "run_5c33bb", Status: "failed"}, {RunID: "run_e77b02", Status: "failed"}}, want: "failed"},
 		{issueID: "ADV-806", runs: []taskRunAnalyticsTicketRunSummary{{RunID: "run_1b77c0", Status: "running"}}, want: "in_progress"},
+		// Closed-unmerged PRs count as delivery: the team closes PRs whose
+		// content landed outside the merge button (Faster NEXT-499 shape).
+		{issueID: "NEXT-499", runs: []taskRunAnalyticsTicketRunSummary{{RunID: "run_c1", Status: "clean"}}, prs: []taskRunAnalyticsTicketPRView{{taskRunAnalyticsPRView: taskRunAnalyticsPRView{ID: "pr10", State: "closed"}, RunID: "run_c1"}}, want: "delivered"},
+		{issueID: "NEXT-OPEN", runs: []taskRunAnalyticsTicketRunSummary{{RunID: "run_c2", Status: "running"}}, prs: []taskRunAnalyticsTicketPRView{{taskRunAnalyticsPRView: taskRunAnalyticsPRView{ID: "pr11", State: "open"}, RunID: "run_c2"}}, want: "pr_open"},
 	}
 	for _, test := range tests {
 		t.Run(test.issueID, func(t *testing.T) {
