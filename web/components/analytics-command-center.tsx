@@ -288,7 +288,7 @@ function AnalyticsCommandCenterInner() {
         // Computed here (not in render) — reading the clock during render
         // suspends the prerender under Next's cacheComponents semantics.
         const requestedTicketCursor = loadOptions.ticketCursor
-        const effectiveFilters = effectiveFiltersFor(false)
+        const effectiveFilters = effectiveFiltersFor(silent)
         const runFilters = { ...effectiveFilters, cursor }
         const ticketFilters = { ...effectiveFilters, cursor: requestedTicketCursor }
         // The year heatmap always shows the trailing year, regardless of the
