@@ -2627,6 +2627,128 @@ func connectTestClaw(t *testing.T, ts *httptest.Server, clawID string) *websocke
 	return conn
 }
 
+func TestClawSupersededDisconnectKeepsLiveConnectionConnected(t *testing.T) {
+	const clawID = "claw-superseded-disconnect"
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{ClawToken: "claw-token"}, "", "", "")
+	if _, err := db.Exec(`INSERT INTO claws(id,tenant_id,name,status,created_at) VALUES(?,?,?,?,?)`, clawID, "test-tenant-id", clawID, "starting", now()); err != nil {
+		t.Fatal(err)
+	}
+	ts := httptest.NewServer(s.Handler())
+	t.Cleanup(ts.Close)
+	connA := connectTestClaw(t, ts, clawID)
+	s.mu.RLock()
+	old := s.claws[clawID]
+	s.mu.RUnlock()
+	connB := connectTestClaw(t, ts, clawID)
+	t.Cleanup(func() { _ = connB.Close(websocket.StatusNormalClosure, "done") })
+
+	s.mu.RLock()
+	live := s.claws[clawID]
+	s.mu.RUnlock()
+	if live == nil || live == old {
+		t.Fatal("live connection is not connection B")
+	}
+	if err := connA.Close(websocket.StatusNormalClosure, "done"); err != nil {
+		t.Fatal(err)
+	}
+	// Conn A's teardown has no positive side effect once the fix is in place,
+	// so instead of sleeping once, hold the invariant for a window long enough
+	// that a delayed teardown still gets caught: a regression breaks it as soon
+	// as the deferred handler runs.
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		s.mu.RLock()
+		live = s.claws[clawID]
+		s.mu.RUnlock()
+		if live == nil || live == old {
+			t.Fatal("superseded disconnect evicted connection B")
+		}
+		var status string
+		if err := db.QueryRow(`SELECT status FROM claws WHERE id=?`, clawID).Scan(&status); err != nil {
+			t.Fatal(err)
+		}
+		if status != "connected" {
+			t.Fatalf("status = %q, want connected", status)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestClawDisconnectSetsOffline(t *testing.T) {
+	const clawID = "claw-normal-disconnect"
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{ClawToken: "claw-token"}, "", "", "")
+	if _, err := db.Exec(`INSERT INTO claws(id,tenant_id,name,status,created_at) VALUES(?,?,?,?,?)`, clawID, "test-tenant-id", clawID, "starting", now()); err != nil {
+		t.Fatal(err)
+	}
+	ts := httptest.NewServer(s.Handler())
+	t.Cleanup(ts.Close)
+	conn := connectTestClaw(t, ts, clawID)
+	if err := conn.Close(websocket.StatusNormalClosure, "done"); err != nil {
+		t.Fatal(err)
+	}
+	waitForNotify(t, "offline status", func() bool {
+		var status string
+		return db.QueryRow(`SELECT status FROM claws WHERE id=?`, clawID).Scan(&status) == nil && status == "offline"
+	})
+}
+
+func TestClawHeartbeatRevivesOnlyOffline(t *testing.T) {
+	const clawID = "claw-heartbeat-revive"
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{ClawToken: "claw-token"}, "", "", "")
+	if _, err := db.Exec(`INSERT INTO claws(id,tenant_id,name,status,created_at) VALUES(?,?,?,?,?)`, clawID, "test-tenant-id", clawID, "starting", now()); err != nil {
+		t.Fatal(err)
+	}
+	ts := httptest.NewServer(s.Handler())
+	t.Cleanup(ts.Close)
+	conn := connectTestClaw(t, ts, clawID)
+	t.Cleanup(func() { _ = conn.Close(websocket.StatusNormalClosure, "done") })
+
+	// Sends a heartbeat and returns only once the hub has processed it. The
+	// heartbeat path refreshes last_seen after deciding whether to revive, so
+	// an advanced last_seen means the revive decision has already been made —
+	// without that signal the assertions below would race the read loop and
+	// pass vacuously on the status the test itself just wrote.
+	staleSeen := time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
+	heartbeat := func() {
+		if _, err := db.Exec(`UPDATE claws SET last_seen=? WHERE id=?`, staleSeen, clawID); err != nil {
+			t.Fatal(err)
+		}
+		if err := wsjson.Write(context.Background(), conn, types.WSMessage{Type: "heartbeat", Payload: map[string]any{"gateway_healthy": true}}); err != nil {
+			t.Fatal(err)
+		}
+		waitForNotify(t, "heartbeat processed", func() bool {
+			var lastSeen time.Time
+			return db.QueryRow(`SELECT last_seen FROM claws WHERE id=?`, clawID).Scan(&lastSeen) == nil && !lastSeen.Equal(staleSeen)
+		})
+	}
+	assertStatus := func(want string) {
+		t.Helper()
+		var status string
+		if err := db.QueryRow(`SELECT status FROM claws WHERE id=?`, clawID).Scan(&status); err != nil {
+			t.Fatal(err)
+		}
+		if status != want {
+			t.Fatalf("claw status = %q, want %q", status, want)
+		}
+	}
+
+	if _, err := db.Exec(`UPDATE claws SET status='offline' WHERE id=?`, clawID); err != nil {
+		t.Fatal(err)
+	}
+	heartbeat()
+	assertStatus("connected")
+	if _, err := db.Exec(`UPDATE claws SET status='error' WHERE id=?`, clawID); err != nil {
+		t.Fatal(err)
+	}
+	heartbeat()
+	assertStatus("error")
+	if _, err := db.Exec(`UPDATE claws SET status='idle' WHERE id=?`, clawID); err != nil {
+		t.Fatal(err)
+	}
+	heartbeat()
+	assertStatus("idle")
+}
+
 func readTestHubMessage(t *testing.T, conn *websocket.Conn) types.HubMessage {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
