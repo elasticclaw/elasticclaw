@@ -1787,7 +1787,7 @@ export function ConversationView({
     const clawsById = new Map(allClaws.map((candidate) => [candidate.id, candidate]))
     return (["attention", "working", "offline"] as AgentSectionName[]).map((key, index) => {
       const ids = boardSectionIds[index]
-      const items = ids.map((id) => clawsById.get(id)!)
+      const items = ids.map((id) => clawsById.get(id)).filter((candidate): candidate is Claw => candidate !== undefined)
       return { key, meta: AGENT_SECTION[key], items, ids }
     })
   }, [allClaws, boardSectionIds])

@@ -209,11 +209,11 @@ function AnalyticsCommandCenterInner() {
   const yearCostsRef = useRef<CostOverview | undefined>(undefined)
   const optionsLoadedRef = useRef(false)
 
-  const effectiveFiltersFor = useCallback(() => {
+  const effectiveFiltersFor = useCallback((freeze: boolean) => {
     const effectiveFilters = { ...filters }
     if (!effectiveFilters.from && !effectiveFilters.to) {
       let defaultWindow = defaultWindowRef.current
-      if (!defaultWindow || defaultWindow.filtersKey !== paramsKey) {
+      if (!freeze || !defaultWindow || defaultWindow.filtersKey !== paramsKey) {
         const to = new Date()
         const from = new Date(to)
         from.setDate(to.getDate() - 30)
@@ -288,7 +288,7 @@ function AnalyticsCommandCenterInner() {
         // Computed here (not in render) — reading the clock during render
         // suspends the prerender under Next's cacheComponents semantics.
         const requestedTicketCursor = loadOptions.ticketCursor
-        const effectiveFilters = effectiveFiltersFor()
+        const effectiveFilters = effectiveFiltersFor(false)
         const runFilters = { ...effectiveFilters, cursor }
         const ticketFilters = { ...effectiveFilters, cursor: requestedTicketCursor }
         // The year heatmap always shows the trailing year, regardless of the
@@ -387,7 +387,7 @@ function AnalyticsCommandCenterInner() {
     ticketsAbortController.current = controller
     const requestId = ++ticketsRequestId.current
     try {
-      const effectiveFilters = effectiveFiltersFor()
+      const effectiveFilters = effectiveFiltersFor(true)
       const ticketsData = await fetchAnalyticsTickets({ ...effectiveFilters, cursor: ticketCursor }, { signal: controller.signal })
       if (controller.signal.aborted || requestId !== ticketsRequestId.current) return
       setTickets(ticketsData.tickets)
