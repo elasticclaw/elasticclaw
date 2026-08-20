@@ -5,7 +5,9 @@ import (
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -21,6 +23,9 @@ const taskRunAnalyticsTicketMaxPageDepth = 100
 const taskRunAnalyticsTicketMetadataRefreshLimit = 16
 const taskRunAnalyticsTicketMetadataColdLimit = 48
 const taskRunAnalyticsTicketMetadataRetryBackoff = 2 * time.Minute
+const taskRunAnalyticsTicketMetadataFailureThreshold = 3
+
+var errInvalidTaskRunAnalyticsTicketKey = errors.New("invalid ticket key")
 
 type taskRunAnalyticsTicketTotalCacheEntry struct {
 	total     int
@@ -123,6 +128,10 @@ func (s *Server) handleTaskRunAnalyticsTickets(w http.ResponseWriter, r *http.Re
 	if key := r.URL.Query().Get("key"); key != "" {
 		ticket, err := s.readTaskRunAnalyticsTicketByKey(r.Context(), filters, key)
 		if err != nil {
+			if errors.Is(err, errInvalidTaskRunAnalyticsTicketKey) {
+				jsonError(w, http.StatusBadRequest, err.Error())
+				return
+			}
 			jsonError(w, http.StatusInternalServerError, "db error")
 			return
 		}
@@ -332,14 +341,14 @@ func (s *Server) loadTaskRunAnalyticsTicketCursorKey() error {
 		s.ticketCursorKey = key
 		return nil
 	}
-	if err != nil && !strings.Contains(err.Error(), "no rows") {
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return err
 	}
 	key = randomTicketCursorKey()
-	if _, err := s.db.Exec(`INSERT INTO hub_settings(key,value) VALUES(?,?) ON CONFLICT(key) DO NOTHING`, "task_run_analytics_ticket_cursor_key", key); err != nil {
-		return err
+	if err == nil {
+		log.Printf("[task-run-analytics] replaced invalid ticket cursor key")
 	}
-	if err := s.db.QueryRow(`SELECT value FROM hub_settings WHERE key=?`, "task_run_analytics_ticket_cursor_key").Scan(&key); err != nil {
+	if _, err := s.db.Exec(`INSERT INTO hub_settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`, "task_run_analytics_ticket_cursor_key", key); err != nil {
 		return err
 	}
 	s.ticketCursorKey = key
@@ -348,8 +357,8 @@ func (s *Server) loadTaskRunAnalyticsTicketCursorKey() error {
 
 func (s *Server) readTaskRunAnalyticsTicketByKey(ctx context.Context, filters taskRunAnalyticsFilters, key string) (*taskRunAnalyticsTicketView, error) {
 	parts := strings.Split(key, taskRunAnalyticsTicketKeySeparator)
-	if len(parts) != 3 {
-		return nil, nil
+	if len(parts) != 3 || parts[2] == "" {
+		return nil, errInvalidTaskRunAnalyticsTicketKey
 	}
 	where, args := taskRunAnalyticsSummaryWhere(filters)
 	runWhere := where + ` AND integration = ? AND integration_workspace = ? AND issue_id = ?`
@@ -752,6 +761,7 @@ func (s *Server) enrichTaskRunAnalyticsTicket(ticket *taskRunAnalyticsTicketView
 type taskRunAnalyticsTicketMetadata struct {
 	requester, requesterRole, team, priority, ask string
 	reportedAt, updatedAt, lastAttemptAt          int64
+	consecutiveFailures                           int
 }
 
 func (s *Server) readTaskRunAnalyticsTicketMetadataPage(ctx context.Context, tenantID string, issueIDs []string) (map[string]taskRunAnalyticsTicketMetadata, error) {
@@ -774,14 +784,14 @@ func (s *Server) readTaskRunAnalyticsTicketMetadataPage(ctx context.Context, ten
 		if len(terms) == 0 {
 			continue
 		}
-		rows, err := s.db.QueryContext(ctx, `SELECT integration || char(31) || integration_workspace || char(31) || issue_id, requester, requester_role, team, priority, ask, reported_at, updated_at, last_attempt_at FROM ticket_metadata WHERE tenant_id=? AND (`+strings.Join(terms, " OR ")+`)`, args...)
+		rows, err := s.db.QueryContext(ctx, `SELECT integration || char(31) || integration_workspace || char(31) || issue_id, requester, requester_role, team, priority, ask, reported_at, updated_at, last_attempt_at, consecutive_failures FROM ticket_metadata WHERE tenant_id=? AND (`+strings.Join(terms, " OR ")+`)`, args...)
 		if err != nil {
 			return nil, err
 		}
 		for rows.Next() {
 			var id string
 			var m taskRunAnalyticsTicketMetadata
-			if err := rows.Scan(&id, &m.requester, &m.requesterRole, &m.team, &m.priority, &m.ask, &m.reportedAt, &m.updatedAt, &m.lastAttemptAt); err != nil {
+			if err := rows.Scan(&id, &m.requester, &m.requesterRole, &m.team, &m.priority, &m.ask, &m.reportedAt, &m.updatedAt, &m.lastAttemptAt, &m.consecutiveFailures); err != nil {
 				rows.Close()
 				return nil, err
 			}
@@ -813,6 +823,9 @@ func (s *Server) applyOrScheduleTaskRunAnalyticsTicketMetadata(tenantID string, 
 			return
 		}
 	}
+	if metadata.consecutiveFailures >= taskRunAnalyticsTicketMetadataFailureThreshold && metadata.lastAttemptAt > 0 && time.Since(time.UnixMilli(metadata.lastAttemptAt)) < 15*time.Minute {
+		return
+	}
 	if metadata.lastAttemptAt > 0 && time.Since(time.UnixMilli(metadata.lastAttemptAt)) < taskRunAnalyticsTicketMetadataRetryBackoff {
 		return
 	}
@@ -833,7 +846,7 @@ func (s *Server) applyOrScheduleTaskRunAnalyticsTicketMetadata(tenantID string, 
 			<-s.ticketMetadataEnrichment
 			return
 		}
-	} else if !s.allowTaskRunAnalyticsTicketMetadataColdEnrichment() {
+	} else if metadata.lastAttemptAt == 0 && !s.allowTaskRunAnalyticsTicketMetadataColdEnrichment() {
 		s.ticketMetadataInflight.Delete(key)
 		<-s.ticketMetadataEnrichment
 		return
@@ -843,13 +856,17 @@ func (s *Server) applyOrScheduleTaskRunAnalyticsTicketMetadata(tenantID string, 
 		defer func() { <-s.ticketMetadataEnrichment }()
 		metadata := taskRunAnalyticsTicketView{IssueID: ticket.IssueID, IssueTitle: ticket.IssueTitle, Source: ticket.Source, ReportedAt: ticket.ReportedAt}
 		succeeded := s.enrichTaskRunAnalyticsTicket(&metadata, run)
-		// Successful fetches refresh metadata; failed attempts only start a short retry backoff.
+		// Failed attempts retry quickly at first, then settle into the freshness window.
 		attemptedAt := now().UnixMilli()
 		updatedAt := int64(0)
 		if succeeded {
 			updatedAt = attemptedAt
 		}
-		if _, err := s.db.Exec(`INSERT INTO ticket_metadata(tenant_id,integration,integration_workspace,issue_id,requester,requester_role,team,priority,ask,reported_at,updated_at,last_attempt_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(tenant_id,integration,integration_workspace,issue_id) DO UPDATE SET requester=CASE WHEN excluded.requester != '' THEN excluded.requester ELSE ticket_metadata.requester END, requester_role=CASE WHEN excluded.requester_role != '' THEN excluded.requester_role ELSE ticket_metadata.requester_role END, team=CASE WHEN excluded.team != '' THEN excluded.team ELSE ticket_metadata.team END, priority=CASE WHEN excluded.priority != '' THEN excluded.priority ELSE ticket_metadata.priority END, ask=CASE WHEN excluded.ask != '' THEN excluded.ask ELSE ticket_metadata.ask END, reported_at=CASE WHEN excluded.reported_at != 0 THEN excluded.reported_at ELSE ticket_metadata.reported_at END, updated_at=CASE WHEN excluded.updated_at != 0 THEN excluded.updated_at ELSE ticket_metadata.updated_at END, last_attempt_at=excluded.last_attempt_at`, tenantID, run.Integration, run.IntegrationWorkspace, metadata.IssueID, metadata.Requester, metadata.RequesterRole, metadata.Team, metadata.Priority, metadata.Ask, metadata.ReportedAt, updatedAt, attemptedAt); err != nil {
+		consecutiveFailures := 0
+		if !succeeded {
+			consecutiveFailures = 1
+		}
+		if _, err := s.db.Exec(`INSERT INTO ticket_metadata(tenant_id,integration,integration_workspace,issue_id,requester,requester_role,team,priority,ask,reported_at,updated_at,last_attempt_at,consecutive_failures) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(tenant_id,integration,integration_workspace,issue_id) DO UPDATE SET requester=CASE WHEN excluded.requester != '' THEN excluded.requester ELSE ticket_metadata.requester END, requester_role=CASE WHEN excluded.requester_role != '' THEN excluded.requester_role ELSE ticket_metadata.requester_role END, team=CASE WHEN excluded.team != '' THEN excluded.team ELSE ticket_metadata.team END, priority=CASE WHEN excluded.priority != '' THEN excluded.priority ELSE ticket_metadata.priority END, ask=CASE WHEN excluded.ask != '' THEN excluded.ask ELSE ticket_metadata.ask END, reported_at=CASE WHEN excluded.reported_at != 0 THEN excluded.reported_at ELSE ticket_metadata.reported_at END, updated_at=CASE WHEN excluded.updated_at != 0 THEN excluded.updated_at ELSE ticket_metadata.updated_at END, last_attempt_at=excluded.last_attempt_at, consecutive_failures=CASE WHEN excluded.updated_at != 0 THEN 0 ELSE ticket_metadata.consecutive_failures+1 END`, tenantID, run.Integration, run.IntegrationWorkspace, metadata.IssueID, metadata.Requester, metadata.RequesterRole, metadata.Team, metadata.Priority, metadata.Ask, metadata.ReportedAt, updatedAt, attemptedAt, consecutiveFailures); err != nil {
 			log.Printf("[task-run-analytics] write ticket metadata %s: %v", metadata.IssueID, err)
 		}
 	}()

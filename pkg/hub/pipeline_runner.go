@@ -23,8 +23,15 @@ import (
 	"github.com/google/uuid"
 )
 
-// Pipeline output records use a JSON read-modify-write; serialize it to avoid lost appends.
-var pipelineLogRecordMu sync.Mutex
+// Pipeline output records use a JSON read-modify-write; serialize only matching
+// claw/output pairs to avoid lost appends without blocking unrelated outputs.
+var pipelineLogRecordMu sync.Map
+
+func pipelineLogRecordMutex(clawID, outputName string) *sync.Mutex {
+	key := clawID + "\x00" + outputName
+	mu, _ := pipelineLogRecordMu.LoadOrStore(key, &sync.Mutex{})
+	return mu.(*sync.Mutex)
+}
 
 // The two lifecycle tokens the hub understands on its own, independent of any
 // pipeline's message_contains triggers. Both are matched with
@@ -698,10 +705,11 @@ func (s *Server) persistPipelineOutput(clawID, stageID, outputName string, resul
 	}
 	recordsJSON, _ := json.Marshal(records)
 	spanID := uuid.NewString()
-	// Records is an uncapped JSON blob and this process-wide lock is broader than
-	// necessary; keep both concerns in mind if output log volume grows.
-	pipelineLogRecordMu.Lock()
-	defer pipelineLogRecordMu.Unlock()
+	// Serialize only the matching row with appendPipelineLogRecord, which performs
+	// a read-modify-write of records.
+	mu := pipelineLogRecordMutex(clawID, outputName)
+	mu.Lock()
+	defer mu.Unlock()
 	_, err := s.db.Exec(`
 		INSERT INTO pipeline_outputs(claw_id, stage_id, output_name, exit_code, stdout, stderr, parsed_json, span_id, span_kind, duration_ms, status, records, created_at)
 		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -723,8 +731,9 @@ func (s *Server) persistPipelineOutput(clawID, stageID, outputName string, resul
 }
 
 func (s *Server) appendPipelineLogRecord(clawID, outputName string, record pipelineLogRecord) {
-	pipelineLogRecordMu.Lock()
-	defer pipelineLogRecordMu.Unlock()
+	mu := pipelineLogRecordMutex(clawID, outputName)
+	mu.Lock()
+	defer mu.Unlock()
 	var raw string
 	if err := s.db.QueryRow(`SELECT records FROM pipeline_outputs WHERE claw_id=? AND output_name=?`, clawID, outputName).Scan(&raw); err != nil {
 		return

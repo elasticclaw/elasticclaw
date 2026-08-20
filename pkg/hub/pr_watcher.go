@@ -648,11 +648,9 @@ func (s *Server) pollAllPRs() {
 		// fetch, before any termination handling.
 		merged := s.checkPRMerged(r.pr, token)
 		if lowPriorityOK || merged {
-			// Record a terminal CI result before the merge/close continue below can
-			// remove the PR row, so a CI verdict landing in the same poll as the
-			// merge still emits its ci_succeeded/ci_failed event. Outside the merge
-			// case this stays gated by the budget reserve like the rest of the
-			// low-priority checks below.
+			// Record a terminal CI result even when merge handling removed the PR row
+			// earlier in this poll. Outside the merge case this stays gated by the
+			// budget reserve like the rest of the low-priority checks below.
 			s.checkCIStatus(r.pr, token)
 		}
 		if merged {
@@ -1013,6 +1011,7 @@ func (s *Server) checkCIStatus(pr clawPR, token string) {
 	if err != nil {
 		return
 	}
+	rowRemoved := false
 	if claimed == 0 {
 		var rowExists int
 		if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM claw_prs WHERE id=?)`, pr.id).Scan(&rowExists); err != nil {
@@ -1022,6 +1021,7 @@ func (s *Server) checkCIStatus(pr clawPR, token string) {
 		if rowExists != 0 {
 			return
 		}
+		rowRemoved = true
 		if !hasRun {
 			return
 		}
@@ -1057,6 +1057,9 @@ func (s *Server) checkCIStatus(pr clawPR, token string) {
 		return
 	}
 	if !recordedEvent {
+		return
+	}
+	if rowRemoved {
 		return
 	}
 
@@ -1923,7 +1926,7 @@ func (s *Server) checkPRMerged(pr clawPR, token string) bool {
 		mergedAtDB = mergedAtValue
 	}
 	storedState := clawPRStoredState(state, merged)
-	if _, err := s.db.Exec(`UPDATE claw_prs SET title=?, state=?, merged=?, merged_at=? WHERE id=?`, title, storedState, merged, mergedAtDB, pr.id); err != nil {
+	if _, err := s.db.Exec(`UPDATE claw_prs SET title=?, state=?, merged=?, merged_at=? WHERE id=? AND NOT (title=? AND state=? AND merged=? AND merged_at IS ?)`, title, storedState, merged, mergedAtDB, pr.id, title, storedState, merged, mergedAtDB); err != nil {
 		log.Printf("[pr-watcher] update PR state for %s: %v", pr.prURL, err)
 	}
 	createdAt := parseRFC3339Timestamp(createdAtValue)

@@ -15,15 +15,12 @@ import (
 )
 
 func TestSplitTaskRunAnalyticsValuesPreservesDoubleEncodedCommas(t *testing.T) {
-	// No JS test runner is configured, so mirror encodeURIComponent byte-for-byte
-	// before URLSearchParams applies its outer transport encoding.
-	clientValue := strings.Join([]string{
-		encodeURIComponentForTest("Research, Development"),
-		encodeURIComponentForTest("Operations"),
-	}, ",")
+	// The client escapes only literal commas before URLSearchParams applies its
+	// outer transport encoding.
+	clientValue := "Research%2C Development,Operations"
 	queryValues := url.Values{"workspace": {clientValue}}
 	query := queryValues.Encode()
-	if query != "workspace=Research%252C%2520Development%2COperations" {
+	if query != "workspace=Research%252C+Development%2COperations" {
 		t.Fatalf("client wire format = %q", query)
 	}
 	request, err := http.NewRequest(http.MethodGet, "/api/analytics?"+query, nil)
@@ -36,6 +33,17 @@ func TestSplitTaskRunAnalyticsValuesPreservesDoubleEncodedCommas(t *testing.T) {
 	}
 	if len(got) != 2 || got[0] != "Research, Development" || got[1] != "Operations" {
 		t.Fatalf("splitTaskRunAnalyticsValues() = %#v", got)
+	}
+}
+
+func TestSplitTaskRunAnalyticsValuesDoesNotDoubleDecode(t *testing.T) {
+	request := httptest.NewRequest(http.MethodGet, "/api/analytics?repo=org%252Frepo", nil)
+	got, err := splitTaskRunAnalyticsValues(request.URL.Query(), "repo")
+	if err != nil {
+		t.Fatalf("splitTaskRunAnalyticsValues(): %v", err)
+	}
+	if len(got) != 1 || got[0] != "org%2Frepo" {
+		t.Fatalf("splitTaskRunAnalyticsValues() = %#v, want [org%%2Frepo]", got)
 	}
 }
 
@@ -65,21 +73,6 @@ func TestTaskRunAnalyticsRejectsTooManyFilterValues(t *testing.T) {
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want %d: %s", w.Code, http.StatusBadRequest, w.Body.String())
 	}
-}
-
-func encodeURIComponentForTest(value string) string {
-	const hex = "0123456789ABCDEF"
-	var encoded strings.Builder
-	for _, b := range []byte(value) {
-		if b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z' || b >= '0' && b <= '9' || strings.ContainsRune("-_.!~*'()", rune(b)) {
-			encoded.WriteByte(b)
-			continue
-		}
-		encoded.WriteByte('%')
-		encoded.WriteByte(hex[b>>4])
-		encoded.WriteByte(hex[b&0x0f])
-	}
-	return encoded.String()
 }
 
 func TestTaskRunAnalyticsAPISummaryRunsFiltersAndPagination(t *testing.T) {

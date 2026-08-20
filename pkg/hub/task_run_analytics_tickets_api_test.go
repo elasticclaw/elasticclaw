@@ -94,6 +94,62 @@ func TestTaskRunAnalyticsTicketMetadataPageSeeksPrimaryKey(t *testing.T) {
 	}
 }
 
+func TestTaskRunAnalyticsTicketDetailSeeksTicketIndex(t *testing.T) {
+	_, db := newTaskRunAnalyticsAPITestServer(t)
+	rows, err := db.Query(`EXPLAIN QUERY PLAN SELECT run_id FROM task_run_summaries WHERE tenant_id=? AND integration=? AND integration_workspace=? AND issue_id=? AND started_at>=?`, "test-tenant-id", "linear", "workspace", "ENG-42", int64(0))
+	if err != nil {
+		t.Fatalf("explain ticket detail lookup: %v", err)
+	}
+	defer rows.Close()
+	var details []string
+	for rows.Next() {
+		var id, parent, unused int
+		var detail string
+		if err := rows.Scan(&id, &parent, &unused, &detail); err != nil {
+			t.Fatal(err)
+		}
+		details = append(details, detail)
+	}
+	plan := strings.Join(details, "\n")
+	if !strings.Contains(plan, "idx_task_run_summaries_ticket_detail") || strings.Contains(plan, "SCAN task_run_summaries") {
+		t.Fatalf("ticket detail lookup did not seek detail index: %s", plan)
+	}
+}
+
+func TestTaskRunAnalyticsTicketRejectsEmptyIssueIDKey(t *testing.T) {
+	s, _ := newTaskRunAnalyticsAPITestServer(t)
+	rr := requestTaskRunAnalyticsAPI(t, s, http.MethodGet, "/api/analytics/tickets?key=linear%1Fworkspace%1F", "test-token")
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d: %s", rr.Code, http.StatusBadRequest, rr.Body.String())
+	}
+}
+
+func TestTaskRunAnalyticsTicketCursorKeyReplacesShortStoredValue(t *testing.T) {
+	s, db := newTaskRunAnalyticsAPITestServer(t)
+	if _, err := db.Exec(`CREATE TABLE hub_settings (key TEXT PRIMARY KEY, value BLOB NOT NULL)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO hub_settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`, "task_run_analytics_ticket_cursor_key", []byte("short")); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.loadTaskRunAnalyticsTicketCursorKey(); err != nil {
+		t.Fatal(err)
+	}
+	if len(s.ticketCursorKey) < 32 {
+		t.Fatalf("cursor key length = %d, want at least 32", len(s.ticketCursorKey))
+	}
+}
+
+func TestTaskRunAnalyticsTicketMetadataFailedThreeTimesUsesLongBackoff(t *testing.T) {
+	s, _ := newTaskRunAnalyticsAPITestServer(t)
+	ticket := &taskRunAnalyticsTicketView{IssueID: "UNENRICHABLE", Source: "external"}
+	metadata := taskRunAnalyticsTicketMetadata{lastAttemptAt: time.Now().UnixMilli(), consecutiveFailures: taskRunAnalyticsTicketMetadataFailureThreshold}
+	s.applyOrScheduleTaskRunAnalyticsTicketMetadata("test-tenant-id", ticket, taskRunAnalyticsRunView{Integration: "external"}, metadata)
+	if s.ticketMetadataColdEnrichments != 0 {
+		t.Fatalf("cold enrichments = %d, want failed ticket to remain in long backoff", s.ticketMetadataColdEnrichments)
+	}
+}
+
 func TestTaskRunAnalyticsTicketPageCachesTotalAcrossCursors(t *testing.T) {
 	s, db := newTaskRunAnalyticsAPITestServer(t)
 	for issue := 0; issue < 12; issue++ {
