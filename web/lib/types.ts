@@ -276,7 +276,7 @@ export interface TaskRunStage {
   stageId: string
   label: string
   enteredAt: number
-  exitedAt: number
+  exitedAt?: number
   durationMs: number
   source: string
 }
