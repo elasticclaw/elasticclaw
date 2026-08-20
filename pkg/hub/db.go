@@ -642,6 +642,19 @@ func migrate(db *sql.DB) error {
 	CREATE INDEX IF NOT EXISTS idx_task_run_events_source_event ON task_run_events(tenant_id, source, source_event_id);
 	CREATE INDEX IF NOT EXISTS idx_task_run_events_observed ON task_run_events(tenant_id, observed_at);
 
+	CREATE TABLE IF NOT EXISTS task_run_stages (
+		tenant_id  TEXT NOT NULL,
+		run_id     TEXT NOT NULL,
+		seq        INTEGER NOT NULL,
+		stage_id   TEXT NOT NULL,
+		label      TEXT NOT NULL DEFAULT '',
+		entered_at INTEGER NOT NULL,
+		exited_at  INTEGER,
+		source     TEXT NOT NULL DEFAULT 'live' CHECK(source IN ('live','backfill_messages','backfill_history','v2_transitions')),
+		PRIMARY KEY (tenant_id, run_id, seq)
+	);
+	CREATE INDEX IF NOT EXISTS idx_task_run_stages_run ON task_run_stages(tenant_id, run_id, seq);
+
 	CREATE TABLE IF NOT EXISTS task_run_prs (
 		id              TEXT PRIMARY KEY,
 		tenant_id       TEXT NOT NULL,
