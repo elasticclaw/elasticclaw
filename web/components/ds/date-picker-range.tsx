@@ -73,6 +73,7 @@ export function DatePickerRange({ value, onChange, className }: DatePickerRangeP
   const [pendingRange, setPendingRange] = React.useState<DateRange>()
   const now = new Date(useNowMinuteTick(open))
   const resolvedValue = pendingRange ?? value ?? presetRange(PRESETS[1], now)
+  const normalizedRange = calendarRange(resolvedValue)
   const active = activePreset(resolvedValue, now)
 
   // Picking a start day keeps the popover open until an end day is chosen; a
@@ -122,10 +123,10 @@ export function DatePickerRange({ value, onChange, className }: DatePickerRangeP
         </div>
         <Calendar
           mode="range"
-          selected={calendarRange(resolvedValue)}
+          selected={normalizedRange}
           onSelect={selectRange}
           numberOfMonths={1}
-          defaultMonth={resolvedValue?.to ?? resolvedValue?.from}
+          defaultMonth={normalizedRange?.to ?? normalizedRange?.from}
           className="[&_[data-range-middle=true]]:!bg-[color-mix(in_srgb,var(--primary)_16%,transparent)] [&_[data-range-middle=true]]:!text-foreground"
         />
       </PopoverContent>

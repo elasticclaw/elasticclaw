@@ -234,12 +234,17 @@ export const Sidebar = memo(function Sidebar({
   // cross-pinned drop targets up front keeps the list from moving at all when the
   // drag can't succeed, so there's nothing to snap back from.
   const collisionDetectionForClaws: CollisionDetection = useCallback((args) => {
+    const activeClaw = [...pinnedClaws, ...claws].find((claw) => claw.id === args.active.id)
+    if (!activeClaw) return closestCenter(args)
     const activePinned = pinnedClaws.some((claw) => claw.id === args.active.id)
-    const allowed = args.droppableContainers.filter((container) =>
-      container.id === args.active.id || pinnedClaws.some((claw) => claw.id === container.id) === activePinned
-    )
+    const sectionFor = (candidate: Claw) => agentSections.get(candidate.id) ?? agentSection(candidate, { isWaitingOnYou: false })
+    const activeSection = sectionFor(activeClaw)
+    const allowed = args.droppableContainers.filter((container) => {
+      const overClaw = [...pinnedClaws, ...claws].find((claw) => claw.id === container.id)
+      return container.id === args.active.id || Boolean(overClaw && sectionFor(overClaw) === activeSection && pinnedClaws.some((claw) => claw.id === overClaw.id) === activePinned)
+    })
     return closestCenter({ ...args, droppableContainers: allowed })
-  }, [pinnedClaws])
+  }, [agentSections, claws, pinnedClaws])
 
   function handleDragEnd(event: DragEndEvent) {
     setActiveDragClaw(null)

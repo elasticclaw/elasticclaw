@@ -610,7 +610,7 @@ const ClawBoardCard = memo(function ClawBoardCard({
   const [copied, setCopied] = useState(false)
   const [prsOpen, setPrsOpen] = useState(false)
   const { prs, hasLoaded: hasLoadedPrs } = useClawPRs(claw.id, prsOpen)
-  const openPRCount = hasLoadedPrs ? prs.length : claw.openPrCount
+  const openPRCount = prsOpen && hasLoadedPrs ? prs.length : claw.openPrCount
   const hasUnread = claw.unreadCount > 0
   const isPending = claw.status === "provisioning" || claw.status === "error" || claw.status === "offline"
   const msgScrollRef = useRef<HTMLDivElement>(null)
@@ -1769,7 +1769,7 @@ export function ConversationView({
   const handleCardClick = useCallback((clawId: string) => onSelectClaw(clawId), [onSelectClaw])
   const handleCardSendMessage = useCallback((clawId: string, content: string) => onSendMessageToClaw(clawId, content), [onSendMessageToClaw])
   const handleCardKill = useCallback((clawId: string) => onKillClaw(clawId), [onKillClaw])
-  const boardSections = useMemo(() => {
+  const calculatedBoardSectionIds = useMemo(() => {
     const itemsBySection = new Map<AgentSectionName, Claw[]>([
       ["attention", []], ["working", []], ["offline", []],
     ])
@@ -1777,11 +1777,20 @@ export function ConversationView({
       const section = agentSection(candidate, { isWaitingOnYou: isWaitingOnYou(allMessages[candidate.id] ?? EMPTY_MESSAGES) })
       itemsBySection.get(section)!.push(candidate)
     }
-    return (["attention", "working", "offline"] as AgentSectionName[]).map((key) => ({ key, meta: AGENT_SECTION[key], items: itemsBySection.get(key)!.sort((a, b) => Number(b.pinned) - Number(a.pinned)) }))
-      // ids computed here so SortableContext gets a stable array — a fresh one
-      // per render re-renders every useSortable row through context.
-      .map((section) => ({ ...section, ids: section.items.map((candidate) => candidate.id) }))
+    return (["attention", "working", "offline"] as AgentSectionName[]).map((key) => itemsBySection.get(key)!.sort((a, b) => Number(b.pinned) - Number(a.pinned)).map((candidate) => candidate.id))
   }, [allClaws, allMessages])
+  const [boardSectionIds, setBoardSectionIds] = useState(calculatedBoardSectionIds)
+  if (boardSectionIds.some((ids, index) => ids.length !== calculatedBoardSectionIds[index].length || ids.some((id, idIndex) => id !== calculatedBoardSectionIds[index][idIndex]))) {
+    setBoardSectionIds(calculatedBoardSectionIds)
+  }
+  const boardSections = useMemo(() => {
+    const clawsById = new Map(allClaws.map((candidate) => [candidate.id, candidate]))
+    return (["attention", "working", "offline"] as AgentSectionName[]).map((key, index) => {
+      const ids = boardSectionIds[index]
+      const items = ids.map((id) => clawsById.get(id)!)
+      return { key, meta: AGENT_SECTION[key], items, ids }
+    })
+  }, [allClaws, boardSectionIds])
 
   const sensors = useSensors(
     useSensor(PointerSensor, {

@@ -209,16 +209,16 @@ function AnalyticsCommandCenterInner() {
   const yearCostsRef = useRef<CostOverview | undefined>(undefined)
   const optionsLoadedRef = useRef(false)
 
-  const effectiveFiltersFor = useCallback((freezeDefaultWindow = false) => {
+  const effectiveFiltersFor = useCallback(() => {
     const effectiveFilters = { ...filters }
     if (!effectiveFilters.from && !effectiveFilters.to) {
       let defaultWindow = defaultWindowRef.current
-      if (!freezeDefaultWindow || !defaultWindow || defaultWindow.filtersKey !== paramsKey) {
+      if (!defaultWindow || defaultWindow.filtersKey !== paramsKey) {
         const to = new Date()
         const from = new Date(to)
         from.setDate(to.getDate() - 30)
         defaultWindow = { filtersKey: paramsKey, from: from.toISOString(), to: to.toISOString() }
-        defaultWindowRef.current = freezeDefaultWindow ? defaultWindow : undefined
+        defaultWindowRef.current = defaultWindow
       }
       effectiveFilters.from = defaultWindow.from
       effectiveFilters.to = defaultWindow.to
@@ -288,7 +288,7 @@ function AnalyticsCommandCenterInner() {
         // Computed here (not in render) — reading the clock during render
         // suspends the prerender under Next's cacheComponents semantics.
         const requestedTicketCursor = loadOptions.ticketCursor
-        const effectiveFilters = effectiveFiltersFor(Boolean(ticketCursorStackRef.current[ticketCursorStackRef.current.length - 1]))
+        const effectiveFilters = effectiveFiltersFor()
         const runFilters = { ...effectiveFilters, cursor }
         const ticketFilters = { ...effectiveFilters, cursor: requestedTicketCursor }
         // The year heatmap always shows the trailing year, regardless of the
@@ -387,7 +387,7 @@ function AnalyticsCommandCenterInner() {
     ticketsAbortController.current = controller
     const requestId = ++ticketsRequestId.current
     try {
-      const effectiveFilters = effectiveFiltersFor(Boolean(ticketCursor))
+      const effectiveFilters = effectiveFiltersFor()
       const ticketsData = await fetchAnalyticsTickets({ ...effectiveFilters, cursor: ticketCursor }, { signal: controller.signal })
       if (controller.signal.aborted || requestId !== ticketsRequestId.current) return
       setTickets(ticketsData.tickets)
@@ -410,6 +410,7 @@ function AnalyticsCommandCenterInner() {
     let cancelled = false
     queueMicrotask(() => {
       if (cancelled) return
+      defaultWindowRef.current = undefined
       setTicketCursorStack([undefined])
       if (cancelled) return
       void load()
