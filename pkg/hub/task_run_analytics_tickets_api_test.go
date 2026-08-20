@@ -216,6 +216,9 @@ func TestDeriveTaskRunAnalyticsTicketStatusFixtureTickets(t *testing.T) {
 		// content landed outside the merge button (Faster NEXT-499 shape).
 		{issueID: "NEXT-499", runs: []taskRunAnalyticsTicketRunSummary{{RunID: "run_c1", Status: "clean"}}, prs: []taskRunAnalyticsTicketPRView{{taskRunAnalyticsPRView: taskRunAnalyticsPRView{ID: "pr10", State: "closed"}, RunID: "run_c1"}}, want: "delivered"},
 		{issueID: "NEXT-OPEN", runs: []taskRunAnalyticsTicketRunSummary{{RunID: "run_c2", Status: "running"}}, prs: []taskRunAnalyticsTicketPRView{{taskRunAnalyticsPRView: taskRunAnalyticsPRView{ID: "pr11", State: "open"}, RunID: "run_c2"}}, want: "pr_open"},
+		// A closed PR beats an open one, exactly as merged always has: one
+		// delivery on the ticket makes it delivered even mid-follow-up.
+		{issueID: "NEXT-MIXED", runs: []taskRunAnalyticsTicketRunSummary{{RunID: "run_c3", Status: "clean"}}, prs: []taskRunAnalyticsTicketPRView{{taskRunAnalyticsPRView: taskRunAnalyticsPRView{ID: "pr12", State: "closed"}, RunID: "run_c3"}, {taskRunAnalyticsPRView: taskRunAnalyticsPRView{ID: "pr13", State: "open"}, RunID: "run_c3"}}, want: "delivered"},
 	}
 	for _, test := range tests {
 		t.Run(test.issueID, func(t *testing.T) {
