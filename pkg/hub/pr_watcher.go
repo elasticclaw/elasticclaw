@@ -516,6 +516,7 @@ func (s *Server) loadClawPRsByNumber(repo string, prNumber int) []clawPR {
 		FROM claw_prs cp
 		JOIN claws cl ON cl.id = cp.claw_id
 		WHERE cp.repo = ? AND cp.pr_number = ? AND cl.status NOT IN ('deleted','error','offline')
+		  AND cp.state NOT IN ('merged','closed')
 		ORDER BY cp.created_at DESC
 	`, repo, prNumber)
 	if err != nil {
@@ -551,6 +552,7 @@ func (s *Server) pollAllPRs() {
 		FROM claw_prs cp
 		JOIN claws cl ON cl.id = cp.claw_id
 		WHERE cl.status NOT IN ('deleted','error','offline')
+		  AND cp.state NOT IN ('merged','closed')
 	`)
 	if err != nil {
 		if strings.Contains(err.Error(), "database is closed") {
@@ -1872,11 +1874,22 @@ func clawPRStoredState(githubState string, merged bool) string {
 	return githubState
 }
 
+// clawOpenPRCount returns how many PRs tracked for the claw are still
+// unresolved — neither merged nor closed. Teardown is gated on this being
+// zero so an agent that delivered several PRs keeps watching the rest.
+func (s *Server) clawOpenPRCount(clawID string) (int, error) {
+	var n int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM claw_prs WHERE claw_id=? AND state NOT IN ('merged','closed')`, clawID).Scan(&n)
+	return n, err
+}
+
 // checkPRMerged checks if a tracked PR is merged or closed.
 // It returns true when it terminates the claw, which happens in two cases:
-// the PR was merged, or the PR has been inaccessible (permanent API error:
-// 404/410/401/non-rate-limit 403) for prMergedPermanentFailureLimit
-// consecutive polls — repo/PR deleted or GitHub App uninstalled.
+// every tracked PR is now resolved and the last one merged, or the PR has
+// been inaccessible (permanent API error: 404/410/401/non-rate-limit 403)
+// for prMergedPermanentFailureLimit consecutive polls — repo/PR deleted or
+// GitHub App uninstalled. While at least one tracked PR is still open the
+// claw stays alive and keeps watching.
 func (s *Server) checkPRMerged(pr clawPR, token string) bool {
 	tokenForPR := s.resolveGitHubTokenForRepo(pr.repo)
 	if tokenForPR == "" {
@@ -1957,15 +1970,35 @@ func (s *Server) checkPRMerged(pr clawPR, token string) bool {
 		return false
 	}
 
-	// If the PR was closed without merging, notify the claw and let it decide — don't terminate.
+	// If the PR was closed without merging, mark the row resolved and decide
+	// whether the claw is finished: while other tracked PRs are still open the
+	// claw stays alive and keeps watching them.
 	if state == "closed" && !merged {
-		log.Printf("[pr-watcher] PR %s#%d closed without merge — stopping claw %s", pr.repo, pr.prNumber, clawID[:8])
-		_, _ = s.db.Exec(`DELETE FROM claw_prs WHERE id=?`, pr.id)
+		// The row must survive (not be deleted) so the all-PRs-resolved
+		// bookkeeping stays correct; the poll queries exclude resolved states.
+		if _, err := s.db.Exec(`UPDATE claw_prs SET state='closed' WHERE id=?`, pr.id); err != nil {
+			log.Printf("[pr-watcher] failed to mark PR %s closed for claw %s: %v", pr.prURL, shortID(clawID), err)
+			return false
+		}
 
 		pipelineCtx, hasPipelineCtx := s.findPipelineContextForClaw(clawID)
 		if hasPipelineCtx {
 			s.trackPRClosed(pipelineCtx.Name(), pipelineCtx.IssueID, clawID, pr.repo, pr.prNumber)
 		}
+
+		remaining, err := s.clawOpenPRCount(clawID)
+		if err != nil {
+			// Never tear a claw down on an unknown PR count — the next poll retries.
+			log.Printf("[pr-watcher] failed to count open PRs for claw %s: %v", shortID(clawID), err)
+			return false
+		}
+		if remaining > 0 {
+			log.Printf("[pr-watcher] PR %s#%d closed without merge — claw %s still has %d open PR(s), not stopping", pr.repo, pr.prNumber, clawID[:8], remaining)
+			s.injectHubMessageByID(clawID, fmt.Sprintf("[hub] PR %s was closed without being merged. Still watching %d other open PR(s).", pr.prURL, remaining))
+			return false
+		}
+
+		log.Printf("[pr-watcher] PR %s#%d closed without merge — stopping claw %s", pr.repo, pr.prNumber, clawID[:8])
 
 		// Check if the pipeline handles pr_closed (run on_enter before stopping)
 		pipelineHandled := false
@@ -1986,10 +2019,16 @@ func (s *Server) checkPRMerged(pr clawPR, token string) bool {
 		return false
 	}
 
-	// PR was merged — run pipeline on_enter if applicable, then terminate the claw.
-	log.Printf("[pr-watcher] PR %s#%d merged — terminating claw %s", pr.repo, pr.prNumber, clawID[:8])
+	// PR was merged — make the resolved state durable before gating on it. The
+	// general UPDATE earlier in this function is conditional and could be
+	// skipped; the all-PRs-resolved gate must not depend on it.
+	if _, err := s.db.Exec(`UPDATE claw_prs SET state='merged', merged=1 WHERE id=?`, pr.id); err != nil {
+		log.Printf("[pr-watcher] failed to mark PR %s merged for claw %s: %v", pr.prURL, shortID(clawID), err)
+		return false
+	}
 
-	// Track analytics for PR merge
+	// Track analytics for PR merge. These are per-PR facts and fire on every
+	// merge, regardless of whether the claw is finished yet.
 	mergeCtx, hasMergeCtx := s.findPipelineContextForClaw(clawID)
 	if hasMergeCtx {
 		s.trackPRMergedAt(mergeCtx.Name(), mergeCtx.IssueID, clawID, pr.repo, pr.prNumber, firstNonZeroTime(mergedAt, now()))
@@ -2006,6 +2045,21 @@ func (s *Server) checkPRMerged(pr clawPR, token string) bool {
 			log.Printf("[pr-watcher] failed to record merge for run %s: %v", runID, err)
 		}
 	}
+
+	// Finalize only when every tracked PR is resolved (merged or closed).
+	remaining, err := s.clawOpenPRCount(clawID)
+	if err != nil {
+		// Never tear a claw down on an unknown PR count — the next poll retries.
+		log.Printf("[pr-watcher] failed to count open PRs for claw %s: %v", shortID(clawID), err)
+		return false
+	}
+	if remaining > 0 {
+		log.Printf("[pr-watcher] PR %s#%d merged — claw %s still has %d open PR(s), not terminating", pr.repo, pr.prNumber, clawID[:8], remaining)
+		s.injectHubMessageByID(clawID, fmt.Sprintf("[hub] PR %s merged. Still watching %d other open PR(s) — will finish when they are all merged or closed.", pr.prURL, remaining))
+		return false
+	}
+
+	log.Printf("[pr-watcher] PR %s#%d merged — terminating claw %s", pr.repo, pr.prNumber, clawID[:8])
 
 	// Check if the pipeline handles pr_merged (run on_enter before terminating)
 	pipelineHandled := false

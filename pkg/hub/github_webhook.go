@@ -1292,19 +1292,48 @@ To check out this PR:
 	return b.String()
 }
 
-// mergePRForClaw finds the tracked PR for a claw and merges it via the GitHub API.
+// mergePRForClaw merges every unresolved PR tracked for a claw via the GitHub
+// API. Claw finalization is gated on all tracked PRs being resolved, so merging
+// only one of several open PRs would leave the claw alive forever.
 func (s *Server) mergePRForClaw(clawID string) {
-	var prURL, repo string
-	var prNumber int
-	err := s.db.QueryRow(
-		`SELECT pr_url, repo, pr_number FROM claw_prs WHERE claw_id=? ORDER BY created_at DESC LIMIT 1`,
+	rows, err := s.db.Query(
+		`SELECT pr_url, repo, pr_number FROM claw_prs WHERE claw_id=? AND state NOT IN ('merged','closed') ORDER BY created_at ASC`,
 		clawID,
-	).Scan(&prURL, &repo, &prNumber)
-	if err != nil || prURL == "" {
+	)
+	if err != nil {
+		log.Printf("[pipeline] merge_pr: failed to load tracked PRs for claw %s: %v", clawID[:8], err)
+		return
+	}
+	defer rows.Close()
+
+	type trackedPR struct {
+		prURL, repo string
+		prNumber    int
+	}
+	var prs []trackedPR
+	for rows.Next() {
+		var pr trackedPR
+		if err := rows.Scan(&pr.prURL, &pr.repo, &pr.prNumber); err != nil {
+			log.Printf("[pipeline] merge_pr: failed to scan tracked PR for claw %s: %v", clawID[:8], err)
+			continue
+		}
+		if pr.prURL != "" {
+			prs = append(prs, pr)
+		}
+	}
+	if len(prs) == 0 {
 		log.Printf("[pipeline] merge_pr: no tracked PR for claw %s", clawID[:8])
 		return
 	}
 
+	for _, pr := range prs {
+		s.mergeSinglePRForClaw(clawID, pr.repo, pr.prNumber)
+	}
+}
+
+// mergeSinglePRForClaw merges one tracked PR via the GitHub API, reporting the
+// outcome to the claw as a hub message.
+func (s *Server) mergeSinglePRForClaw(clawID, repo string, prNumber int) {
 	token := s.resolveGitHubTokenForRepo(repo)
 	if token == "" {
 		log.Printf("[pipeline] merge_pr: no GitHub token for repo %s", repo)
