@@ -1358,7 +1358,10 @@ func (s *Server) handleClaws(w http.ResponseWriter, r *http.Request) {
 				placeholders[i] = "?"
 				args[i] = claw.ID
 			}
-			prRows, err := s.db.Query(`SELECT cp.claw_id, COUNT(*) FROM claw_prs cp JOIN claws c ON c.id = cp.claw_id WHERE cp.claw_id IN (`+strings.Join(placeholders, ",")+`) AND cp.state = 'open' AND c.status NOT IN ('deleted','error','offline') GROUP BY cp.claw_id`, args...)
+			// Same predicate as clawOpenPRCount (unresolved AND delivered): the
+			// dashboard count must agree with the finalization gate, or a claw
+			// can show "1 open PR" while nothing blocks it from finalizing.
+			prRows, err := s.db.Query(`SELECT cp.claw_id, COUNT(*) FROM claw_prs cp JOIN claws c ON c.id = cp.claw_id WHERE cp.claw_id IN (`+strings.Join(placeholders, ",")+`) AND cp.state NOT IN ('merged','closed') AND cp.mention_only=0 AND c.status NOT IN ('deleted','error','offline') GROUP BY cp.claw_id`, args...)
 			if err != nil {
 				log.Printf("handleClaws open PR count query error: %v", err)
 				http.Error(w, fmt.Sprintf("db error: %v", err), http.StatusInternalServerError)
@@ -3129,7 +3132,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 				// A transport error can quote a repository URL (git and CI
 				// failures routinely do). Arming the PR watcher on text the
 				// agent never wrote would watch a PR nobody opened.
-				go s.scanMessageForPRs(clawID, turnContent)
+				go s.scanMessageForPRs(clawID, turnContent, true)
 			}
 			// Detect tool error loops and inject a corrective message
 			if !automaticContinuationPaused && detectToolLoop(hm.Content) {

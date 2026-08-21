@@ -953,7 +953,10 @@ func (s *Server) buildCheckpointManifest(checkpointID, clawID, rootSHA, msgSHA s
 }
 
 func (s *Server) checkpointPRs(clawID string) []checkpointPR {
-	rows, err := s.db.Query(`SELECT repo, pr_number, pr_url, last_ci_sha FROM claw_prs WHERE claw_id=? ORDER BY created_at ASC`, clawID)
+	// Resolved rows (merged/closed) survive in claw_prs until the claw is
+	// finalized, but a checkpoint lists tracked WORK — restoring one taken
+	// after a partial merge must not present already-merged PRs as open.
+	rows, err := s.db.Query(`SELECT repo, pr_number, pr_url, last_ci_sha FROM claw_prs WHERE claw_id=? AND state NOT IN ('merged','closed') ORDER BY created_at ASC`, clawID)
 	if err != nil {
 		return nil
 	}

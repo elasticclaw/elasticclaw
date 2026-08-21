@@ -212,6 +212,19 @@ func (s *Server) processGitHubPREvent(payload githubPRPayload) {
 		s.recordGitHubPRReadyForReview(payload)
 	}
 
+	// A reopened PR must reset its sticky resolved row no matter which factory
+	// kind created the claw: the loop below only reaches github/pull_request
+	// factories, but most claws tracking PRs come from Linear- or
+	// issue-triggered factories and their reopened PRs would otherwise stay
+	// state='closed' forever — never polled again, never gating finalization,
+	// so the claw could finish with a delivered PR sitting open. Reset here,
+	// before any factory filtering, regardless of claw readiness.
+	if payload.Action == "reopened" {
+		if reopenedClawID := s.findClawForGitHubPR(payload.PullRequest.HTMLURL); reopenedClawID != "" {
+			s.resetReopenedClawPR(reopenedClawID, payload.PullRequest.HTMLURL)
+		}
+	}
+
 	for _, factory := range factories {
 		if factory.Integration != "github" {
 			continue
@@ -286,14 +299,9 @@ func (s *Server) processGitHubPREvent(payload githubPRPayload) {
 					log.Printf("[factory:%s] github PR #%d synchronize from own app bot %q — skipping", factory.Name, payload.Number, payload.Sender.Login)
 					continue
 				}
-				if payload.Action == "reopened" {
-					// A closed row is sticky: the poller excludes resolved
-					// states and nothing else resets them, so without this the
-					// reopened PR would never be polled again and the claw
-					// could be finalized while it sits open. Reset before the
-					// inject, regardless of claw readiness.
-					s.resetReopenedClawPR(existingClawID, payload.PullRequest.HTMLURL)
-				}
+				// The reopened row reset already ran before the factory loop
+				// (it must not depend on factory kind or filters) — only the
+				// message inject is factory-scoped here.
 				// Only inject if the claw is connected and ready — otherwise the
 				// claw hasn't started yet and the update is redundant (claw gets
 				// full context from BOOTSTRAP on startup).
@@ -1322,7 +1330,12 @@ To check out this PR:
 // only one of several open PRs would leave the claw alive forever.
 func (s *Server) mergePRForClaw(clawID string) {
 	rows, err := s.db.Query(
-		`SELECT pr_url, repo, pr_number FROM claw_prs WHERE claw_id=? AND state NOT IN ('merged','closed') ORDER BY created_at ASC`,
+		// mention_only=0: a mention-only row is a polling target, never an
+		// action target. Merging every unresolved row would let a pipeline
+		// merge_pr action PUT .../merge on a third-party PR the agent merely
+		// linked — and silently merge someone else's PR wherever the App has
+		// write access.
+		`SELECT pr_url, repo, pr_number FROM claw_prs WHERE claw_id=? AND state NOT IN ('merged','closed') AND mention_only=0 ORDER BY created_at ASC`,
 		clawID,
 	)
 	if err != nil {
@@ -1369,23 +1382,30 @@ func (s *Server) mergePRForClaw(clawID string) {
 	// Aggregate outcome so the agent can act on a partial merge (e.g. rebase a
 	// PR whose merge 405ed because an earlier merge made its base out of date)
 	// instead of waiting indefinitely for a finalization that cannot happen.
-	if len(prs) > 1 {
+	// External inject: the whole point is acting instead of waiting, which is
+	// defeated when the claw sits in a no-progress pause — see the rationale
+	// at injectExternalHubMessageByID. Fires for a single PR too: a lone
+	// failure deserves its summary as much as a partial batch.
+	if len(prs) >= 1 {
 		if len(failures) == 0 {
-			s.injectHubMessageByID(clawID, fmt.Sprintf("[hub] merge_pr: merged %d/%d tracked PRs.", merged, len(prs)))
+			s.injectExternalHubMessageByID(clawID, fmt.Sprintf("[hub] merge_pr: merged %d/%d tracked PRs.", merged, len(prs)))
 		} else {
-			s.injectHubMessageByID(clawID, fmt.Sprintf("[hub] merge_pr: merged %d/%d tracked PRs — %s. Fix and merge the remaining PR(s) or the claw cannot finish.", merged, len(prs), strings.Join(failures, "; ")))
+			s.injectExternalHubMessageByID(clawID, fmt.Sprintf("[hub] merge_pr: merged %d/%d tracked PRs — %s. Fix and merge the remaining PR(s) or the claw cannot finish.", merged, len(prs), strings.Join(failures, "; ")))
 		}
 	}
 }
 
 // mergeSinglePRForClaw merges one tracked PR via the GitHub API, reporting the
-// outcome to the claw as a hub message. Returns "" on success, or a short
-// failure description (e.g. "PR #7 failed (HTTP 405)") for the aggregate.
+// outcome to the claw as a hub message. Failure reports use the external
+// inject so a paused (no-progress) claw is woken to act on them — a merge
+// failure the agent must fix (e.g. 405 base-out-of-date) is useless while the
+// claw sleeps. Returns "" on success, or a short failure description
+// (e.g. "PR #7 failed (HTTP 405)") for the aggregate.
 func (s *Server) mergeSinglePRForClaw(clawID, repo string, prNumber int) (failure string) {
 	token := s.resolveGitHubTokenForRepo(repo)
 	if token == "" {
 		log.Printf("[pipeline] merge_pr: no GitHub token for repo %s", repo)
-		s.injectHubMessageByID(clawID, fmt.Sprintf("[hub] merge_pr: no GitHub token available for %s — cannot auto-merge.", repo))
+		s.injectExternalHubMessageByID(clawID, fmt.Sprintf("[hub] merge_pr: no GitHub token available for %s — cannot auto-merge.", repo))
 		return fmt.Sprintf("PR #%d failed (no GitHub token for %s)", prNumber, repo)
 	}
 
@@ -1399,7 +1419,7 @@ func (s *Server) mergeSinglePRForClaw(clawID, repo string, prNumber int) (failur
 	)
 	if err != nil {
 		log.Printf("[pipeline] merge_pr: failed to build request for %s#%d: %v", repo, prNumber, err)
-		s.injectHubMessageByID(clawID, fmt.Sprintf("[hub] merge_pr: failed to prepare merge request for PR #%d: %v", prNumber, err))
+		s.injectExternalHubMessageByID(clawID, fmt.Sprintf("[hub] merge_pr: failed to prepare merge request for PR #%d: %v", prNumber, err))
 		return fmt.Sprintf("PR #%d failed (%v)", prNumber, err)
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
@@ -1410,7 +1430,7 @@ func (s *Server) mergeSinglePRForClaw(clawID, repo string, prNumber int) (failur
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		log.Printf("[pipeline] merge_pr: request failed for %s#%d: %v", repo, prNumber, err)
-		s.injectHubMessageByID(clawID, fmt.Sprintf("[hub] merge_pr: failed to merge PR #%d: %v", prNumber, err))
+		s.injectExternalHubMessageByID(clawID, fmt.Sprintf("[hub] merge_pr: failed to merge PR #%d: %v", prNumber, err))
 		return fmt.Sprintf("PR #%d failed (%v)", prNumber, err)
 	}
 	defer resp.Body.Close()
@@ -1422,6 +1442,6 @@ func (s *Server) mergeSinglePRForClaw(clawID, repo string, prNumber int) (failur
 		return ""
 	}
 	log.Printf("[pipeline] merge_pr: failed to merge %s#%d: HTTP %d: %s", repo, prNumber, resp.StatusCode, string(respBody))
-	s.injectHubMessageByID(clawID, fmt.Sprintf("[hub] merge_pr: failed to merge PR #%d (HTTP %d). Check CI status and review requirements.", prNumber, resp.StatusCode))
+	s.injectExternalHubMessageByID(clawID, fmt.Sprintf("[hub] merge_pr: failed to merge PR #%d (HTTP %d). Check CI status and review requirements.", prNumber, resp.StatusCode))
 	return fmt.Sprintf("PR #%d failed (HTTP %d)", prNumber, resp.StatusCode)
 }

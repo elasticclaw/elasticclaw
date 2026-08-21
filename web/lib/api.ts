@@ -273,6 +273,8 @@ export interface ClawPR {
   state: "open" | "merged" | "closed"
   merged: boolean
   mergedAt?: string
+  /** True for PR URLs the agent merely mentioned in a message; only delivered PRs (false) gate claw finalization. */
+  mentionOnly: boolean
 }
 
 export async function fetchClawPRs(clawId: string): Promise<ClawPR[]> {
