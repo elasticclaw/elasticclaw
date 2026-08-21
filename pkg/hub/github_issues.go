@@ -284,6 +284,13 @@ func githubIssuesWorkflowTriggerRepos(workflow *types.WorkflowConfig) []string {
 	return workflow.Repos
 }
 
+func githubIssuesWorkflowTriggerExcludeRepos(workflow *types.WorkflowConfig) []string {
+	if workflow.Trigger != nil && workflow.Trigger.GitHubIssues != nil {
+		return workflow.Trigger.GitHubIssues.ExcludeRepositories
+	}
+	return nil
+}
+
 func (s *Server) processGitHubIssuesFactoryEvent(payload githubIssuesWebhookPayload, issueID, currentStatus string, issueLabels map[string]bool, assignee string) bool {
 	matched := false
 	for _, factory := range s.resolveFactories() {
@@ -345,7 +352,7 @@ func (s *Server) processGitHubIssuesWorkflowEvent(workspaces []*types.WorkspaceC
 			if workflow.Enabled != nil && !*workflow.Enabled {
 				continue
 			}
-			if !githubRepoMatches(payload.Repository.FullName, githubIssuesWorkflowTriggerRepos(workflow)) {
+			if !githubRepoMatchesWithExclusions(payload.Repository.FullName, githubIssuesWorkflowTriggerRepos(workflow), githubIssuesWorkflowTriggerExcludeRepos(workflow)) {
 				continue
 			}
 			if workflow.AssignedTo != "" && !assignedToMatches(workflow.AssignedTo, assignee) {

@@ -46,6 +46,46 @@ stages:
 	}
 }
 
+func TestWorkflowV1GitHubIssuesTriggerExcludesRepositories(t *testing.T) {
+	data := []byte(`
+schema_version: v1
+name: github-issue
+trigger:
+  github_issues:
+    event: issue_labeled
+    repositories:
+      - someorg/*
+    exclude_repositories:
+      - someorg/skip-me
+    states:
+      - open
+    labels:
+      - agent-ready
+stages:
+  - id: working
+    entry: true
+    on_enter:
+      inject: start
+`)
+	var workflow WorkflowConfig
+	if err := yaml.Unmarshal(data, &workflow); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if err := NormalizeWorkflowConfig(&workflow); err != nil {
+		t.Fatalf("normalize: %v", err)
+	}
+	if err := workflow.Validate(); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	if workflow.Trigger == nil || workflow.Trigger.GitHubIssues == nil {
+		t.Fatalf("trigger.github_issues missing")
+	}
+	got := workflow.Trigger.GitHubIssues.ExcludeRepositories
+	if len(got) != 1 || got[0] != "someorg/skip-me" {
+		t.Fatalf("exclude_repositories = %#v, want [someorg/skip-me]", got)
+	}
+}
+
 func TestWorkflowV1JiraProjectsValidateAsProjectKeys(t *testing.T) {
 	data := []byte(`
 schema_version: v1
@@ -79,6 +119,41 @@ stages:
 	}
 	if err := workflow.Validate(); err != nil {
 		t.Fatalf("validate: %v", err)
+	}
+}
+
+func TestWorkflowV1GitHubIssuesTriggerRejectsInvalidExcludeRepositories(t *testing.T) {
+	data := []byte(`
+schema_version: v1
+name: github-issue
+trigger:
+  github_issues:
+    event: issue_labeled
+    repositories:
+      - someorg/*
+    exclude_repositories:
+      - not-a-valid-repo
+    states:
+      - open
+    labels:
+      - agent-ready
+stages:
+  - id: working
+    entry: true
+    on_enter:
+      inject: start
+`)
+	var workflow WorkflowConfig
+	if err := yaml.Unmarshal(data, &workflow); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if err := NormalizeWorkflowConfig(&workflow); err != nil {
+		t.Fatalf("normalize: %v", err)
+	}
+	if err := workflow.Validate(); err == nil {
+		t.Fatalf("expected validation error for invalid exclude_repositories, got nil")
+	} else if !strings.Contains(err.Error(), "exclude_repositories[0]") {
+		t.Fatalf("expected error to mention exclude_repositories[0], got %v", err)
 	}
 }
 

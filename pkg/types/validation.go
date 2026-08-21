@@ -403,6 +403,14 @@ func validateGitHubIssuesWorkflowTrigger(workflowName string, trigger *GitHubIss
 			return fmt.Errorf("workflow %q: trigger.github_issues.repositories[%d] invalid format %q (expected owner/repo or owner/*)", workflowName, i, repo)
 		}
 	}
+	for i, repo := range trigger.ExcludeRepositories {
+		if repo == "" {
+			return fmt.Errorf("workflow %q: trigger.github_issues.exclude_repositories[%d] cannot be empty", workflowName, i)
+		}
+		if !validRepoSelector(repo) {
+			return fmt.Errorf("workflow %q: trigger.github_issues.exclude_repositories[%d] invalid format %q (expected owner/repo or owner/*)", workflowName, i, repo)
+		}
+	}
 	if trigger.AgentStatusError != "" && strings.TrimSpace(trigger.AgentStatusError) == "" {
 		return fmt.Errorf("workflow %q: trigger.github_issues.agent_status_error cannot be blank", workflowName)
 	}
