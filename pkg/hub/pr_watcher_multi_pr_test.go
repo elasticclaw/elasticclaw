@@ -545,6 +545,72 @@ func TestMergePRForClawMergesOpenSkipsResolved(t *testing.T) {
 	}
 }
 
+// The merge aggregate's inject kind is deliberate: the ALL-SUCCESS summary
+// uses the plain inject (a deliberately no-progress-paused claw must NOT be
+// woken moments before the watcher finalizes it), while the FAILURE summary
+// uses the external inject (a 405 base-out-of-date needs the agent to act, so
+// the pause must lift). Reverting the success aggregate to the external
+// variant flips the first assertion here.
+func TestMergePRForClawAggregateInjectKindRespectsNoProgressPause(t *testing.T) {
+	oldTransport := http.DefaultTransport
+	var mints int64
+	http.DefaultTransport = githubAppAnyTokenTransport{base: oldTransport, mints: &mints}
+	t.Cleanup(func() { http.DefaultTransport = oldTransport })
+
+	// PR 1 merges cleanly; PR 2's merge is rejected (405 base out of date).
+	gh := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPut && strings.HasSuffix(r.URL.Path, "/merge") {
+			parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+			var n int
+			fmt.Sscanf(parts[len(parts)-2], "%d", &n)
+			w.Header().Set("Content-Type", "application/json")
+			if n == 1 {
+				fmt.Fprint(w, `{"merged":true}`)
+			} else {
+				w.WriteHeader(http.StatusMethodNotAllowed)
+				fmt.Fprint(w, `{"message":"Base branch was modified"}`)
+			}
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	t.Cleanup(gh.Close)
+
+	cfg := &types.HubConfig{GitHubApps: []*types.GitHubAppConfig{{AppID: 1, PrivateKeyPEM: testGitHubAppPEM(t)}}}
+	s, db := NewTestServerWithConfig(t, cfg, gh.URL, "", "")
+	for i, clawID := range []string{"claw-merge-paused-ok", "claw-merge-paused-fail"} {
+		if _, err := db.Exec(`INSERT INTO claws(id,tenant_id,name,template,status,no_progress_paused,created_at) VALUES(?,?,?,?,?,1,?)`, clawID, "test-tenant-id", clawID, "elasticclaw", "connected", now()); err != nil {
+			t.Fatal(err)
+		}
+		n := i + 1
+		if _, err := db.Exec(`INSERT INTO claw_prs(id,claw_id,repo,pr_number,pr_url,created_at) VALUES(?,?,?,?,?,?)`,
+			fmt.Sprintf("paused-pr-%d", n), clawID, "owner/repo", n, fmt.Sprintf("https://github.com/owner/repo/pull/%d", n), now()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	readPaused := func(clawID string) int {
+		t.Helper()
+		var paused int
+		if err := db.QueryRow(`SELECT no_progress_paused FROM claws WHERE id=?`, clawID).Scan(&paused); err != nil {
+			t.Fatal(err)
+		}
+		return paused
+	}
+
+	// All merges succeed: the success aggregate must leave the pause latched.
+	s.mergePRForClaw("claw-merge-paused-ok")
+	if got := readPaused("claw-merge-paused-ok"); got != 1 {
+		t.Fatalf("no_progress_paused after all-success merge aggregate = %d, want 1 (success summary must not wake a paused claw)", got)
+	}
+
+	// A merge fails: the failure aggregate must resume the pause so the agent
+	// can act on the 405.
+	s.mergePRForClaw("claw-merge-paused-fail")
+	if got := readPaused("claw-merge-paused-fail"); got != 0 {
+		t.Fatalf("no_progress_paused after failed merge aggregate = %d, want 0 (failure summary must wake the claw to act)", got)
+	}
+}
+
 // tokenMintOutageTransport serves the GitHub App endpoints like
 // githubAppAnyTokenTransport, but fails installation-token minting while fail
 // is set — simulating a token outage. Successful mints carry a near-immediate
@@ -705,6 +771,70 @@ func TestTokenMissClosedRowReArmedWhenTokenReturns(t *testing.T) {
 	s.mu.Unlock()
 	if tracked != 1 {
 		t.Fatalf("pollAllPRs visited %d row(s) after re-arm, want 1 (the row must be polled again)", tracked)
+	}
+}
+
+// The re-arm sweep runs before pollAllPRs's rate-limit gate, so it must carry
+// the gate itself: while defaultGitHubClient reports the quota exhausted, the
+// sweep's per-repo token mint is exactly the spend the gate exists to prevent,
+// and a row re-armed under the block would not be polled that pass anyway.
+// Reverting the early return re-arms the row while blocked and fails here.
+func TestTokenMissRearmSweepSkippedWhileRateLimitBlocked(t *testing.T) {
+	resetGitHubClientForTest(t)
+	fail := &atomic.Bool{}
+	fail.Store(true)
+	oldTransport := http.DefaultTransport
+	http.DefaultTransport = tokenMintOutageTransport{base: oldTransport, fail: fail}
+	t.Cleanup(func() { http.DefaultTransport = oldTransport })
+
+	stub := &multiPRGitHubStub{states: map[int]string{}}
+	gh := httptest.NewServer(stub.handler())
+	t.Cleanup(gh.Close)
+
+	cfg := &types.HubConfig{GitHubApps: []*types.GitHubAppConfig{{AppID: 1, PrivateKeyPEM: testGitHubAppPEM(t)}}}
+	s, db := NewTestServerWithConfig(t, cfg, gh.URL, "", "")
+	if _, err := db.Exec(`INSERT INTO claws(id,tenant_id,name,template,status,created_at) VALUES(?,?,?,?,?,?)`, "claw-rearm-blocked", "test-tenant-id", "claw-rearm-blocked", "elasticclaw", "connected", now()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO claw_prs(id,claw_id,repo,pr_number,pr_url,created_at) VALUES(?,?,?,?,?,?)`,
+		"pr-rearm-blocked", "claw-rearm-blocked", "owner/repo", 1, "https://github.com/owner/repo/pull/1", now()); err != nil {
+		t.Fatal(err)
+	}
+
+	// Token outage runs the row into the bound: closed, re-arm candidate.
+	for i := 0; i < prMergedPermanentFailureLimit; i++ {
+		s.pollAllPRs()
+	}
+	readState := func() string {
+		t.Helper()
+		var state string
+		if err := db.QueryRow(`SELECT state FROM claw_prs WHERE id='pr-rearm-blocked'`).Scan(&state); err != nil {
+			t.Fatal(err)
+		}
+		return state
+	}
+	if got := readState(); got != "closed" {
+		t.Fatalf("row state after token outage = %q, want closed", got)
+	}
+
+	// Token minting recovers, but GitHub reports the quota exhausted: the
+	// sweep must not mint per-repo tokens or re-arm the row under the block.
+	fail.Store(false)
+	defaultGitHubClient.mu.Lock()
+	defaultGitHubClient.blockedUntil = time.Now().Add(time.Hour)
+	defaultGitHubClient.mu.Unlock()
+	s.pollAllPRs()
+	if got := readState(); got != "closed" {
+		t.Fatalf("row state after blocked pass = %q, want closed (sweep must not re-arm while rate-limit blocked)", got)
+	}
+
+	// Block lifts: the next pass re-arms the row again.
+	defaultGitHubClient.mu.Lock()
+	defaultGitHubClient.blockedUntil = time.Time{}
+	defaultGitHubClient.mu.Unlock()
+	s.pollAllPRs()
+	if got := readState(); got != "open" {
+		t.Fatalf("row state after the block lifted = %q, want open (re-armed for polling)", got)
 	}
 }
 

@@ -633,6 +633,17 @@ func (s *Server) loadClawPRsByNumber(repo string, prNumber int) []clawPR {
 // attempted at all. Token resolution per distinct repo is the only external
 // work — no PR fetches happen here.
 func (s *Server) rearmTokenMissClosedPRs() {
+	// Mirror pollAllPRs's own gates. While GitHub reports the quota exhausted,
+	// or no GitHub App can mint installation tokens, the per-repo token
+	// resolution below is exactly the spend those gates exist to prevent —
+	// and any row re-armed now would not be polled in this pass anyway, so
+	// deferring the sweep to the first healthy pass loses nothing.
+	if _, blocked := defaultGitHubClient.blockedUntilTime(); blocked {
+		return
+	}
+	if len(s.githubAppConfigsForTokens()) == 0 {
+		return
+	}
 	rows, err := s.db.Query(`
 		SELECT DISTINCT cp.repo
 		FROM claw_prs cp
