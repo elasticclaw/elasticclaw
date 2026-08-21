@@ -5,12 +5,15 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/elasticclaw/elasticclaw/pkg/hub/pipeline"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 )
 
@@ -100,6 +103,50 @@ func clawStatusAndPRState(t *testing.T, db *sql.DB, clawID, prID string) (clawSt
 	return clawStatus, prState
 }
 
+// assertClawStatusStays asserts claws.status remains `want` for a short
+// window. The stop paths under test run via `go s.stopAgentWithReason(...)`,
+// so a single synchronous read right after the call under test proves nothing
+// — it can win the race against a stop that WAS fired. Polling the window
+// makes an erroneously fired stop actually flip the assertion.
+func assertClawStatusStays(t *testing.T, db *sql.DB, clawID, want string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		var status string
+		if err := db.QueryRow(`SELECT status FROM claws WHERE id=?`, clawID).Scan(&status); err != nil {
+			t.Fatal(err)
+		}
+		if status != want {
+			t.Fatalf("claw %s status = %q, want it to stay %q", clawID, status, want)
+		}
+		if time.Now().After(deadline) {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// waitForClawStatusLeaving polls claws.status until it differs from `from`,
+// failing if it never does. Counterpart of assertClawStatusStays for tests
+// that expect the asynchronous stop path to actually run. The generous
+// deadline covers stopAgentWithReason sleeping while the retry disposition is
+// indeterminate under DB contention.
+func waitForClawStatusLeaving(t *testing.T, db *sql.DB, clawID, from string) {
+	t.Helper()
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		var status string
+		_ = db.QueryRow(`SELECT status FROM claws WHERE id=?`, clawID).Scan(&status)
+		if status != from {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("claw %s status = %q, want it to leave %q", clawID, status, from)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 func TestCheckPRMergedKeepsClawAliveUntilAllPRsResolved(t *testing.T) {
 	s, db, stub, prs := multiPRFixture(t, "claw-multi-merge", 1, 2)
 	stub.set(1, "merged")
@@ -109,10 +156,8 @@ func TestCheckPRMergedKeepsClawAliveUntilAllPRsResolved(t *testing.T) {
 	if _, terminated := s.checkPRMerged(prs[0], "token"); terminated {
 		t.Fatal("checkPRMerged terminated the claw with another PR still open")
 	}
-	clawStatus, stateA := clawStatusAndPRState(t, db, "claw-multi-merge", prs[0].id)
-	if clawStatus != "connected" {
-		t.Fatalf("claw status = %q, want connected", clawStatus)
-	}
+	_, stateA := clawStatusAndPRState(t, db, "claw-multi-merge", prs[0].id)
+	assertClawStatusStays(t, db, "claw-multi-merge", "connected")
 	if stateA != "merged" {
 		t.Fatalf("PR 1 state = %q, want merged", stateA)
 	}
@@ -161,10 +206,8 @@ func TestCheckPRMergedClosedWithoutMergeKeepsClawWatching(t *testing.T) {
 	if _, terminated := s.checkPRMerged(prs[0], "token"); terminated {
 		t.Fatal("checkPRMerged terminated the claw on a closed PR with another still open")
 	}
-	clawStatus, stateA := clawStatusAndPRState(t, db, "claw-multi-close", prs[0].id)
-	if clawStatus != "connected" {
-		t.Fatalf("claw status = %q, want connected", clawStatus)
-	}
+	_, stateA := clawStatusAndPRState(t, db, "claw-multi-close", prs[0].id)
+	assertClawStatusStays(t, db, "claw-multi-close", "connected")
 	if stateA != "closed" {
 		t.Fatalf("PR 1 state = %q, want closed", stateA)
 	}
@@ -310,7 +353,9 @@ func TestDeliveryUpgradesMentionOnlyRow(t *testing.T) {
 // and it gates finalization again.
 func TestReopenedPRResetMakesRowPolledAgain(t *testing.T) {
 	s, db, _, prs := multiPRFixture(t, "claw-reopen", 1, 2)
-	if _, err := db.Exec(`UPDATE claw_prs SET state='closed', merged=1, merged_at='2026-01-02T03:04:05Z' WHERE id=?`, prs[0].id); err != nil {
+	// Tripped failure counters simulate a row that was administratively closed
+	// at one of the bounds: a reopen must grant fresh grace on both.
+	if _, err := db.Exec(`UPDATE claw_prs SET state='closed', merged=1, merged_at='2026-01-02T03:04:05Z', token_miss_count=5, permanent_failure_count=5 WHERE id=?`, prs[0].id); err != nil {
 		t.Fatal(err)
 	}
 
@@ -325,13 +370,16 @@ func TestReopenedPRResetMakesRowPolledAgain(t *testing.T) {
 	s.resetReopenedClawPR("claw-reopen", prs[0].prURL)
 
 	var state string
-	var merged int
+	var merged, tokenMisses, permFailures int
 	var mergedAt sql.NullString
-	if err := db.QueryRow(`SELECT state, merged, merged_at FROM claw_prs WHERE id=?`, prs[0].id).Scan(&state, &merged, &mergedAt); err != nil {
+	if err := db.QueryRow(`SELECT state, merged, merged_at, token_miss_count, permanent_failure_count FROM claw_prs WHERE id=?`, prs[0].id).Scan(&state, &merged, &mergedAt, &tokenMisses, &permFailures); err != nil {
 		t.Fatal(err)
 	}
 	if state != "open" || merged != 0 || mergedAt.Valid {
 		t.Fatalf("row after reopen = state=%q merged=%d merged_at=%v, want open/0/NULL", state, merged, mergedAt)
+	}
+	if tokenMisses != 0 || permFailures != 0 {
+		t.Fatalf("failure counters after reopen = token_miss=%d permanent=%d, want 0/0 (a reopened row gets fresh grace)", tokenMisses, permFailures)
 	}
 	if n, err := s.clawOpenPRCount("claw-reopen"); err != nil || n != 2 {
 		t.Fatalf("clawOpenPRCount = %d, %v; want 2 (reopened PR gates finalization again)", n, err)
@@ -371,13 +419,7 @@ func TestCheckPRMergedCountErrorDoesNotTerminate(t *testing.T) {
 	if _, terminated := s.checkPRMerged(prs[0], "token"); terminated {
 		t.Fatal("checkPRMerged terminated the claw on a failed open-PR count")
 	}
-	var clawStatus string
-	if err := db.QueryRow(`SELECT status FROM claws WHERE id=?`, "claw-count-err").Scan(&clawStatus); err != nil {
-		t.Fatal(err)
-	}
-	if clawStatus != "connected" {
-		t.Fatalf("claw status = %q, want connected (unchanged on count error)", clawStatus)
-	}
+	assertClawStatusStays(t, db, "claw-count-err", "connected")
 }
 
 // FIX 3: a single-PR claw whose PR is closed without merge is stopped AND its
@@ -397,20 +439,7 @@ func TestSinglePRClosedWithoutMergeDeletesRowsAndStopsClaw(t *testing.T) {
 	if rows != 0 {
 		t.Fatalf("claw_prs rows after closed-without-merge stop = %d, want 0", rows)
 	}
-	// stopAgentWithReason runs in a goroutine and may sleep several seconds
-	// when the retry disposition is indeterminate under DB contention.
-	deadline := time.Now().Add(15 * time.Second)
-	for {
-		var status string
-		_ = db.QueryRow(`SELECT status FROM claws WHERE id=?`, "claw-close-single").Scan(&status)
-		if status != "connected" {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("claw status = %q, want a stopped status", status)
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	waitForClawStatusLeaving(t, db, "claw-close-single", "connected")
 }
 
 // Per-PR analytics must fire on a NON-final merge: after PR A merges with B
@@ -600,23 +629,82 @@ func TestTokenMissBoundClosesRowWithoutTouchingClaw(t *testing.T) {
 		t.Fatalf("row state after recovered poll = %q, want open", state)
 	}
 
-	// A full run of consecutive misses closes the row — and only the row.
+	// A full run of consecutive misses closes the row — and only the row. The
+	// pre-fix escalation ran via `go stopAgentWithReason`, so the claw check
+	// must poll a window: a synchronous read right after pollAllPRs() wins the
+	// race against the goroutine and passes even with the escalation restored.
 	fail.Store(true)
 	for i := 0; i < prMergedPermanentFailureLimit; i++ {
 		s.pollAllPRs()
 	}
-	var clawStatus string
 	if err := db.QueryRow(`SELECT state FROM claw_prs WHERE id='pr-token-miss'`).Scan(&state); err != nil {
-		t.Fatal(err)
-	}
-	if err := db.QueryRow(`SELECT status FROM claws WHERE id='claw-token-miss'`).Scan(&clawStatus); err != nil {
 		t.Fatal(err)
 	}
 	if state != "closed" {
 		t.Fatalf("row state after token-miss bound = %q, want closed", state)
 	}
-	if clawStatus != "connected" {
-		t.Fatalf("claw status after token-miss bound = %q, want connected (the bound must never touch the claw)", clawStatus)
+	// The bound must never touch the claw.
+	assertClawStatusStays(t, db, "claw-token-miss", "connected")
+}
+
+// FIX 2 (round 3): the token-miss bound closes a row so it stops blocking
+// finalization, but a closed row is excluded from polling — so once the token
+// outage ends, something must put the row back or it stays closed forever
+// while the PR is genuinely open on GitHub (tracker never moves, workflow slot
+// never released, VM keeps running). rearmTokenMissClosedPRs reopens such rows
+// when their repo's token resolves again, and the next poll visits them.
+func TestTokenMissClosedRowReArmedWhenTokenReturns(t *testing.T) {
+	resetGitHubClientForTest(t)
+	fail := &atomic.Bool{}
+	fail.Store(true)
+	oldTransport := http.DefaultTransport
+	http.DefaultTransport = tokenMintOutageTransport{base: oldTransport, fail: fail}
+	t.Cleanup(func() { http.DefaultTransport = oldTransport })
+
+	stub := &multiPRGitHubStub{states: map[int]string{}}
+	gh := httptest.NewServer(stub.handler())
+	t.Cleanup(gh.Close)
+
+	cfg := &types.HubConfig{GitHubApps: []*types.GitHubAppConfig{{AppID: 1, PrivateKeyPEM: testGitHubAppPEM(t)}}}
+	s, db := NewTestServerWithConfig(t, cfg, gh.URL, "", "")
+	if _, err := db.Exec(`INSERT INTO claws(id,tenant_id,name,template,status,created_at) VALUES(?,?,?,?,?,?)`, "claw-rearm", "test-tenant-id", "claw-rearm", "elasticclaw", "connected", now()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO claw_prs(id,claw_id,repo,pr_number,pr_url,created_at) VALUES(?,?,?,?,?,?)`,
+		"pr-rearm", "claw-rearm", "owner/repo", 1, "https://github.com/owner/repo/pull/1", now()); err != nil {
+		t.Fatal(err)
+	}
+
+	// Token outage runs the row into the bound: closed, no longer polled.
+	for i := 0; i < prMergedPermanentFailureLimit; i++ {
+		s.pollAllPRs()
+	}
+	var state string
+	if err := db.QueryRow(`SELECT state FROM claw_prs WHERE id='pr-rearm'`).Scan(&state); err != nil {
+		t.Fatal(err)
+	}
+	if state != "closed" {
+		t.Fatalf("row state after token outage = %q, want closed", state)
+	}
+
+	// Token minting recovers: the next poll re-arms the row and visits it again.
+	fail.Store(false)
+	s.pollAllPRs()
+	var misses int
+	if err := db.QueryRow(`SELECT state, token_miss_count FROM claw_prs WHERE id='pr-rearm'`).Scan(&state, &misses); err != nil {
+		t.Fatal(err)
+	}
+	if state != "open" {
+		t.Fatalf("row state after token recovery = %q, want open (re-armed for polling)", state)
+	}
+	if misses != 0 {
+		t.Fatalf("token_miss_count after re-arm = %d, want 0", misses)
+	}
+	s.mu.Lock()
+	tracked := s.trackedPRCount
+	s.mu.Unlock()
+	if tracked != 1 {
+		t.Fatalf("pollAllPRs visited %d row(s) after re-arm, want 1 (the row must be polled again)", tracked)
 	}
 }
 
@@ -635,10 +723,9 @@ func TestMentionOnlyPRMergeDoesNotTerminateClaw(t *testing.T) {
 	if !resolved || terminated {
 		t.Fatalf("checkPRMerged = (resolved=%v, terminated=%v), want (true, false) for a mention-only merge", resolved, terminated)
 	}
-	clawStatus, state := clawStatusAndPRState(t, db, "claw-mention-merge", prs[0].id)
-	if clawStatus != "connected" {
-		t.Fatalf("claw status = %q, want connected (a stranger merging a mentioned PR must not destroy the sandbox)", clawStatus)
-	}
+	_, state := clawStatusAndPRState(t, db, "claw-mention-merge", prs[0].id)
+	// A stranger merging a mentioned PR must not destroy the sandbox.
+	assertClawStatusStays(t, db, "claw-mention-merge", "connected")
 	if state != "merged" {
 		t.Fatalf("PR state = %q, want merged (the resolution must persist)", state)
 	}
@@ -647,22 +734,34 @@ func TestMentionOnlyPRMergeDoesNotTerminateClaw(t *testing.T) {
 }
 
 // FIX C: the closed-without-merge variant of the same asymmetry — a stray
-// mentioned PR being closed must not stop the claw or delete its rows.
+// mentioned PR being closed must resolve SILENTLY: no stop, no row deletion,
+// no partial-resolution inject, no trackPRClosed analytics. The claw also has
+// a delivered open PR so this test does not lean on the clawHasDeliveredPR
+// backstop: without the mention-only early return the close would take the
+// remaining>0 branch and fire the "Still watching" inject and trackPRClosed.
 func TestMentionOnlyPRCloseDoesNotStopClaw(t *testing.T) {
-	s, db, stub, prs := multiPRFixture(t, "claw-mention-close", 1)
+	s, db, stub, prs := multiPRFixture(t, "claw-mention-close", 1, 2)
 	if _, err := db.Exec(`UPDATE claw_prs SET mention_only=1 WHERE id=?`, prs[0].id); err != nil {
 		t.Fatal(err)
 	}
+	// Give the claw a pipeline context and a task run so trackPRClosed would
+	// leave observable traces (a pr_closed_unmerged task-run event) if it fired.
+	if _, err := db.Exec(`UPDATE claws SET tags='["factory:mention-close-factory"]' WHERE id='claw-mention-close'`); err != nil {
+		t.Fatal(err)
+	}
+	s.mu.Lock()
+	s.hubCfg.Factories = []*types.FactoryConfig{{Name: "mention-close-factory", Integration: "github", Template: "elasticclaw"}}
+	s.mu.Unlock()
+	startTaskRunForTest(t, s, "claw-mention-close", "mention-close")
 	stub.set(1, "closed")
+	stub.set(2, "open")
 
 	resolved, terminated := s.checkPRMerged(prs[0], "token")
 	if !resolved || terminated {
 		t.Fatalf("checkPRMerged = (resolved=%v, terminated=%v), want (true, false) for a mention-only close", resolved, terminated)
 	}
-	clawStatus, state := clawStatusAndPRState(t, db, "claw-mention-close", prs[0].id)
-	if clawStatus != "connected" {
-		t.Fatalf("claw status = %q, want connected", clawStatus)
-	}
+	_, state := clawStatusAndPRState(t, db, "claw-mention-close", prs[0].id)
+	assertClawStatusStays(t, db, "claw-mention-close", "connected")
 	if state != "closed" {
 		t.Fatalf("PR state = %q, want closed", state)
 	}
@@ -670,8 +769,25 @@ func TestMentionOnlyPRCloseDoesNotStopClaw(t *testing.T) {
 	if err := db.QueryRow(`SELECT COUNT(*) FROM claw_prs WHERE claw_id='claw-mention-close'`).Scan(&rows); err != nil {
 		t.Fatal(err)
 	}
-	if rows != 1 {
-		t.Fatalf("claw_prs rows = %d, want 1 (mention-only close must not run the stop path that deletes rows)", rows)
+	if rows != 2 {
+		t.Fatalf("claw_prs rows = %d, want 2 (mention-only close must not run the stop path that deletes rows)", rows)
+	}
+	// No partial-resolution inject: the "Still watching" message is for a
+	// DELIVERED PR closing, not for a stranger closing a PR the agent linked.
+	var partialMsgs int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id='claw-mention-close' AND content LIKE '%closed without being merged%'`).Scan(&partialMsgs); err != nil {
+		t.Fatal(err)
+	}
+	if partialMsgs != 0 {
+		t.Fatalf("partial-resolution messages = %d, want 0 for a mention-only close", partialMsgs)
+	}
+	// trackPRClosed must not fire for the mentioned PR.
+	var closedEvents int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM task_run_events WHERE event_key='pr_closed_unmerged:owner/repo#1'`).Scan(&closedEvents); err != nil {
+		t.Fatal(err)
+	}
+	if closedEvents != 0 {
+		t.Fatalf("pr_closed_unmerged events = %d, want 0 (trackPRClosed fired for a mention-only PR)", closedEvents)
 	}
 }
 
@@ -689,10 +805,8 @@ func TestUnreachableMentionOnlyPRNeverStopsClaw(t *testing.T) {
 			t.Fatal("checkPRMerged terminated a claw off an unreachable mention-only PR")
 		}
 	}
-	clawStatus, state := clawStatusAndPRState(t, db, "claw-mention-unreachable", prs[0].id)
-	if clawStatus != "connected" {
-		t.Fatalf("claw status = %q, want connected", clawStatus)
-	}
+	_, state := clawStatusAndPRState(t, db, "claw-mention-unreachable", prs[0].id)
+	assertClawStatusStays(t, db, "claw-mention-unreachable", "connected")
 	if state != "closed" {
 		t.Fatalf("PR state = %q, want closed (unreachable row must stop blocking finalization)", state)
 	}
@@ -710,10 +824,8 @@ func TestPermanentFailureClosesRowButClawSurvivesWithOtherOpenPR(t *testing.T) {
 			t.Fatal("checkPRMerged terminated the claw while another delivered PR is open")
 		}
 	}
-	clawStatus, state := clawStatusAndPRState(t, db, "claw-perm-partial", prs[0].id)
-	if clawStatus != "connected" {
-		t.Fatalf("claw status = %q, want connected", clawStatus)
-	}
+	_, state := clawStatusAndPRState(t, db, "claw-perm-partial", prs[0].id)
+	assertClawStatusStays(t, db, "claw-perm-partial", "connected")
 	if state != "closed" {
 		t.Fatalf("unreachable PR state = %q, want closed", state)
 	}
@@ -809,5 +921,187 @@ func TestAgentIdleHasClawPRsIgnoresResolvedRows(t *testing.T) {
 	}
 	if s.agentIdleHasClawPRs("claw-idle-prs") {
 		t.Fatal("agentIdleHasClawPRs = true for a state='merged' row, want false")
+	}
+}
+
+// FIX 5 (round 3): a mention-only row must not read as "PR out, awaiting
+// humans" either. The watcher never finalizes a claw with zero delivered rows,
+// so counting a mention here would make a hung mention-only claw both
+// immortal (never torn down) and invisible (stuck alert suppressed).
+func TestAgentIdleHasClawPRsIgnoresMentionOnlyRows(t *testing.T) {
+	s, db, _, prs := multiPRFixture(t, "claw-idle-mention", 1)
+	if _, err := db.Exec(`UPDATE claw_prs SET mention_only=1 WHERE id=?`, prs[0].id); err != nil {
+		t.Fatal(err)
+	}
+	if s.agentIdleHasClawPRs("claw-idle-mention") {
+		t.Fatal("agentIdleHasClawPRs = true for a mention-only row, want false")
+	}
+}
+
+// prConditionsTransport serves the GitHub App token endpoints like
+// githubAppAnyTokenTransport plus empty comment/review lists: pollAllPRs
+// fetches those via githubAPIList against api.github.com (not the test
+// server's githubBaseURL), and an error there `continue`s past the
+// pr_conditions evaluation, making the tests below vacuous.
+type prConditionsTransport struct {
+	base http.RoundTripper
+}
+
+func (t prConditionsTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	if r.URL.Host != "api.github.com" {
+		return t.base.RoundTrip(r)
+	}
+	if r.Method == http.MethodGet && r.URL.Path == "/app/installations" {
+		return githubAppTokenResponse(http.StatusOK, `[{"id":1,"account":{"login":"owner"}}]`), nil
+	}
+	if r.Method == http.MethodPost && r.URL.Path == "/app/installations/1/access_tokens" {
+		return githubAppTokenResponse(http.StatusCreated, `{"token":"tok","expires_at":"2030-01-01T00:00:00Z"}`), nil
+	}
+	if strings.Contains(r.URL.Path, "/comments") || strings.Contains(r.URL.Path, "/reviews") {
+		return githubAppTokenResponse(http.StatusOK, `[]`), nil
+	}
+	return githubAppTokenResponse(http.StatusNotFound, `{"message":"not found"}`), nil
+}
+
+// prConditionsPollFixture wires a pipeline-driven claw (factory tag plus a
+// pipeline with a pr_conditions: ci: passing stage) tracking one MENTION-ONLY
+// PR row older than prConditionsMaxWait, against a GitHub stub with a fixed
+// check-runs response. Comment/review endpoints serve empty lists so
+// pollAllPRs reaches the pr_conditions evaluation at the end of its loop.
+func prConditionsPollFixture(t *testing.T, clawID, checkRunsJSON string) (*Server, *sql.DB, clawPR) {
+	t.Helper()
+	resetGitHubClientForTest(t)
+	oldTransport := http.DefaultTransport
+	http.DefaultTransport = prConditionsTransport{base: oldTransport}
+	t.Cleanup(func() { http.DefaultTransport = oldTransport })
+
+	gh := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.Contains(r.URL.Path, "/check-runs"):
+			fmt.Fprintf(w, `{"check_runs":%s}`, checkRunsJSON)
+		case strings.Contains(r.URL.Path, "/comments"), strings.Contains(r.URL.Path, "/reviews"):
+			fmt.Fprint(w, `[]`)
+		default:
+			fmt.Fprint(w, `{"state":"open","merged":false,"created_at":"2026-01-01T00:00:00Z","draft":false,"head":{"sha":"deadbeef"}}`)
+		}
+	}))
+	t.Cleanup(gh.Close)
+
+	cfg := &types.HubConfig{
+		GitHubApps: []*types.GitHubAppConfig{{AppID: 1, PrivateKeyPEM: testGitHubAppPEM(t)}},
+		Factories: []*types.FactoryConfig{{
+			Name:        "cond-factory",
+			Integration: "github",
+			Template:    "elasticclaw",
+			PipelineYAML: "stages:\n" +
+				"  - id: work\n" +
+				"    entry: true\n" +
+				"  - id: done\n" +
+				"    triggers:\n" +
+				"      - pr_conditions:\n" +
+				"          ci: passing\n",
+		}},
+	}
+	s, db := NewTestServerWithConfig(t, cfg, gh.URL, "", "")
+	if _, err := db.Exec(`INSERT INTO claws(id,tenant_id,name,template,status,pipeline_stage,tags,created_at) VALUES(?,?,?,?,?,?,?,?)`,
+		clawID, "test-tenant-id", clawID, "elasticclaw", "connected", "work", `["factory:cond-factory"]`, now()); err != nil {
+		t.Fatal(err)
+	}
+	// Older than the 2h default prConditionsMaxWait, so the stuck path would
+	// be eligible for the max-wait stop if the ownership guard were missing.
+	created := time.Now().Add(-3 * time.Hour).UTC().Format(time.RFC3339)
+	pr := clawPR{id: clawID + "-pr-12", clawID: clawID, repo: "owner/repo", prNumber: 12, prURL: "https://github.com/owner/repo/pull/12"}
+	if _, err := db.Exec(`INSERT INTO claw_prs(id,claw_id,repo,pr_number,pr_url,mention_only,created_at) VALUES(?,?,?,?,?,1,?)`,
+		pr.id, pr.clawID, pr.repo, pr.prNumber, pr.prURL, created); err != nil {
+		t.Fatal(err)
+	}
+	return s, db, pr
+}
+
+// FIX 1 (round 3): the pr_conditions trigger must never fire off a
+// mention-only row. Stuck half: a stale mentioned PR with no check runs, older
+// than prConditionsMaxWait, must not trip the max-wait stop — that would
+// destroy the sandbox mid-work with the agent's own PRs still open — and must
+// not move the pipeline.
+func TestMentionOnlyPRConditionsStuckDoesNotStopClaw(t *testing.T) {
+	s, db, _ := prConditionsPollFixture(t, "claw-cond-stuck", `[]`)
+
+	s.pollAllPRs()
+
+	assertClawStatusStays(t, db, "claw-cond-stuck", "connected")
+	var stage string
+	if err := db.QueryRow(`SELECT pipeline_stage FROM claws WHERE id='claw-cond-stuck'`).Scan(&stage); err != nil {
+		t.Fatal(err)
+	}
+	if stage != "work" {
+		t.Fatalf("pipeline_stage = %q, want work (a mention-only row must not move the pipeline)", stage)
+	}
+}
+
+// FIX 1 (round 3): green half — a stranger's green CI on a merely-mentioned PR
+// must not advance the claw's pipeline (and finalize it on a terminal stage)
+// or consume the one-shot pr_conditions trigger.
+func TestMentionOnlyGreenCIDoesNotAdvancePipeline(t *testing.T) {
+	s, db, pr := prConditionsPollFixture(t, "claw-cond-green", `[{"name":"ci","status":"completed","conclusion":"success"}]`)
+
+	s.pollAllPRs()
+
+	var stage string
+	if err := db.QueryRow(`SELECT pipeline_stage FROM claws WHERE id='claw-cond-green'`).Scan(&stage); err != nil {
+		t.Fatal(err)
+	}
+	if stage != "work" {
+		t.Fatalf("pipeline_stage = %q, want work (a stranger's green CI must not advance the pipeline)", stage)
+	}
+	var fired int
+	if err := db.QueryRow(`SELECT pr_conditions_fired FROM claw_prs WHERE id=?`, pr.id).Scan(&fired); err != nil {
+		t.Fatal(err)
+	}
+	if fired != 0 {
+		t.Fatalf("pr_conditions_fired = %d, want 0 for a mention-only row", fired)
+	}
+}
+
+// FIX 4 (round 3): the runOnEnter call site must register gate/run stdout PR
+// URLs as DELIVERED. For a pipeline-driven claw whose PRs arrive only via a
+// verify-github-pr-links style gate, this call site is the only registration
+// path — with mentionOnly=true there the finalization gate would be a
+// permanent no-op. TestPipelineGateRegisteredPRBlocksFinalization only covers
+// scanMessageForPRs itself; this test drives the real call site.
+func TestRunOnEnterRunStdoutRegistersDeliveredPR(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	t.Setenv("ELASTICCLAW_TESTEXEC_PROVIDER", "1")
+	if err := os.MkdirAll(filepath.Join(tmpHome, ".openclaw", "workspace"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{
+		Providers: map[string]types.ProviderConfig{"testexec": {Type: "testexec"}},
+	}, "", "", "")
+	const clawID = "claw-onenter-pr"
+	if _, err := db.Exec(`INSERT INTO claws(id,tenant_id,name,template,status,provider,provider_id,created_at) VALUES(?,?,?,?,?,?,?,?)`,
+		clawID, "test-tenant-id", clawID, "elasticclaw", "connected", "testexec", "local", now()); err != nil {
+		t.Fatal(err)
+	}
+
+	const url = "https://github.com/owner/repo/pull/31"
+	stage := pipeline.Stage{ID: "verify", OnEnter: pipeline.OnEnter{
+		Run: pipeline.RunAction{Command: `echo '{"prs":["` + url + `"]}'`},
+	}}
+	if _, err := s.runOnEnter(clawID, stage, pipelineContext{}); err != nil {
+		t.Fatalf("runOnEnter: %v", err)
+	}
+
+	var mentionOnly int
+	if err := db.QueryRow(`SELECT mention_only FROM claw_prs WHERE claw_id=? AND pr_url=?`, clawID, url).Scan(&mentionOnly); err != nil {
+		t.Fatalf("gate-run PR was not registered: %v", err)
+	}
+	if mentionOnly != 0 {
+		t.Fatalf("mention_only for a run-stdout-registered PR = %d, want 0 (run stdout is a delivery channel)", mentionOnly)
+	}
+	if n, err := s.clawOpenPRCount(clawID); err != nil || n != 1 {
+		t.Fatalf("clawOpenPRCount = %d, %v; want 1 (run-registered PR must block finalization)", n, err)
 	}
 }

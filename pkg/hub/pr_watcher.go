@@ -562,6 +562,13 @@ type clawPR struct {
 	state               string
 	merged              bool
 	mergedAt            *string
+	// mentionOnly mirrors claw_prs.mention_only at load time. A mention-only
+	// row is a POLLING target (CI, comments and reviews are still forwarded)
+	// but never an ACTION target and never a TRIGGER: it must not block
+	// finalization, drive a pipeline transition, move a tracker issue, be
+	// merged by the hub, or terminate a claw. Decision-time reads should still
+	// prefer clawPRIsMentionOnly (the flag can be upgraded mid-poll).
+	mentionOnly bool
 }
 
 // loadClawPRsByNumber hydrates every tracked-PR row for a (repo, number) pair
@@ -608,11 +615,76 @@ func (s *Server) loadClawPRsByNumber(repo string, prNumber int) []clawPR {
 	return prs
 }
 
+// rearmTokenMissClosedPRs reopens rows the token-miss bound closed once their
+// repo's installation token resolves again. The bound closes a row after
+// prMergedPermanentFailureLimit consecutive polls without a token so an
+// unpollable repo cannot pin the claw, but the cause is usually transient
+// (mint 5xx, network, JWT clock skew) — and a closed row is excluded from
+// polling, so without this sweep the row would stay closed forever after the
+// outage ends: the PR still open on GitHub, the tracker issue never moved, the
+// workflow slot never released, the VM still running.
+//
+// A closed unmerged row with token_miss_count at the bound is exactly "closed
+// by the token-miss bound": the closing path deliberately does NOT zero the
+// counter, and every other closing path (checkPRMerged, closeUnreachablePR) is
+// only reachable after a successful token resolve already reset it to 0.
+//
+// Kept cheap: one DB query; when nothing matches, no token resolution is
+// attempted at all. Token resolution per distinct repo is the only external
+// work — no PR fetches happen here.
+func (s *Server) rearmTokenMissClosedPRs() {
+	rows, err := s.db.Query(`
+		SELECT DISTINCT cp.repo
+		FROM claw_prs cp
+		JOIN claws cl ON cl.id = cp.claw_id
+		WHERE cl.status NOT IN ('deleted','error','offline')
+		  AND cp.state='closed' AND cp.merged=0
+		  AND cp.token_miss_count >= ?
+	`, prMergedPermanentFailureLimit)
+	if err != nil {
+		if !strings.Contains(err.Error(), "database is closed") {
+			log.Printf("[pr-watcher] token-miss re-arm query error: %v", err)
+		}
+		return
+	}
+	defer rows.Close()
+	var repos []string
+	for rows.Next() {
+		var repo string
+		if err := rows.Scan(&repo); err != nil {
+			continue
+		}
+		repos = append(repos, repo)
+	}
+	rows.Close()
+	for _, repo := range repos {
+		if s.tokenForRepo(repo) == "" {
+			continue // outage still ongoing for this repo
+		}
+		res, err := s.db.Exec(`
+			UPDATE claw_prs SET state='open', token_miss_count=0
+			WHERE repo=? AND state='closed' AND merged=0 AND token_miss_count >= ?
+			  AND claw_id IN (SELECT id FROM claws WHERE status NOT IN ('deleted','error','offline'))
+		`, repo, prMergedPermanentFailureLimit)
+		if err != nil {
+			log.Printf("[pr-watcher] failed to re-arm token-miss-closed PR rows for %s: %v", repo, err)
+			continue
+		}
+		if n, err := res.RowsAffected(); err == nil && n > 0 {
+			log.Printf("[pr-watcher] token for %s resolvable again — re-armed %d PR row(s) closed by the token-miss bound", repo, n)
+		}
+	}
+}
+
 func (s *Server) pollAllPRs() {
+	// Re-arm rows the token-miss bound closed, before the main query, so a
+	// recovered row is polled again in this same pass.
+	s.rearmTokenMissClosedPRs()
+
 	rows, err := s.db.Query(`
 		SELECT cp.id, cp.claw_id, cp.repo, cp.pr_number, cp.pr_url, cp.last_ci_sha, cp.last_ci_conclusion, cp.last_comment_id,
 		       cp.last_comment_at, cp.last_review_comment_id, cp.last_review_id, cp.pr_conditions_fired, cp.created_at,
-		       cl.status
+		       cp.mention_only, cl.status
 		FROM claw_prs cp
 		JOIN claws cl ON cl.id = cp.claw_id
 		WHERE cl.status NOT IN ('deleted','error','offline')
@@ -634,13 +706,14 @@ func (s *Server) pollAllPRs() {
 	var prs []row
 	for rows.Next() {
 		var r row
-		var prConditionsFiredInt int
+		var prConditionsFiredInt, mentionOnlyInt int
 		if err := rows.Scan(&r.pr.id, &r.pr.clawID, &r.pr.repo, &r.pr.prNumber, &r.pr.prURL,
 			&r.pr.lastCISHA, &r.pr.lastCIConclusion, &r.pr.lastCommentID, &r.pr.lastCommentAt, &r.pr.lastReviewCommentID, &r.pr.lastReviewID, &prConditionsFiredInt, &r.pr.createdAt,
-			&r.clawStatus); err != nil {
+			&mentionOnlyInt, &r.clawStatus); err != nil {
 			continue
 		}
 		r.pr.prConditionsFired = prConditionsFiredInt == 1
+		r.pr.mentionOnly = mentionOnlyInt == 1
 		prs = append(prs, r)
 	}
 	rows.Close()
@@ -724,6 +797,10 @@ func (s *Server) pollAllPRs() {
 				// delivered nothing yet, so escalating here would kill a
 				// healthy claw during a token outage. The teardown decision
 				// stays with checkPRMerged observing a real delivered row.
+				// token_miss_count is deliberately NOT zeroed here: a closed
+				// unmerged row with the counter at the bound is how
+				// rearmTokenMissClosedPRs recognises (and reopens) these rows
+				// once the token resolves again.
 				log.Printf("[pr-watcher] WARN: PR %s (%s#%d) unpollable for %d consecutive polls (no GitHub token resolvable for %s) — marking the row closed so it stops blocking finalization; claw %s left untouched",
 					r.pr.prURL, r.pr.repo, r.pr.prNumber, prMergedPermanentFailureLimit, r.pr.repo, shortID(r.pr.clawID))
 				if _, err := s.db.Exec(`UPDATE claw_prs SET state='closed' WHERE id=?`, r.pr.id); err != nil {
@@ -806,8 +883,13 @@ func (s *Server) pollAllPRs() {
 			s.updatePRReviewWatermark(r.pr, reviewsData)
 		}
 
-		// For pipeline-driven claws, evaluate pr_conditions trigger.
-		if isPipelineDriven && !r.pr.prConditionsFired {
+		// For pipeline-driven claws, evaluate pr_conditions trigger — but only
+		// off a DELIVERED row. A mention-only row is a polling target, never a
+		// TRIGGER: a stranger's green CI must not advance the claw's pipeline
+		// (and finalize it on a terminal stage), and a stale mentioned PR with
+		// no check runs must not trip the max-wait stop and destroy a sandbox
+		// mid-work.
+		if isPipelineDriven && !r.pr.prConditionsFired && !r.pr.mentionOnly {
 			stage, status := s.checkPRConditions(r.pr, token, pipelineCtx)
 			if stage != nil {
 				s.firePRConditions(r.pr, *stage, pipelineCtx)

@@ -665,13 +665,18 @@ func (s *Server) agentIdleRunPhase(taskRunID string) string {
 }
 
 // agentIdleHasClawPRs reports whether the claw currently tracks any
-// unresolved PR. Resolved rows (state merged/closed) survive until the claw
-// is finalized so the all-PRs-resolved gate can count them — a resolved row
-// must never read as "awaiting humans" here, or a retried claw carrying one
-// would have its stuck alert suppressed for life.
+// unresolved DELIVERED PR. Resolved rows (state merged/closed) survive until
+// the claw is finalized so the all-PRs-resolved gate can count them — a
+// resolved row must never read as "awaiting humans" here, or a retried claw
+// carrying one would have its stuck alert suppressed for life. Mention-only
+// rows are excluded for the same reason, matching clawOpenPRCount: a PR the
+// agent merely linked is not "PR out, awaiting humans", and since the watcher
+// never finalizes a claw with zero delivered rows, counting a mention here
+// would make a hung mention-only claw simultaneously immortal (never torn
+// down) and invisible (stuck alert suppressed).
 func (s *Server) agentIdleHasClawPRs(clawID string) bool {
 	var n int
-	if err := s.db.QueryRow(`SELECT COUNT(*) FROM claw_prs WHERE claw_id=? AND state NOT IN ('merged','closed')`, clawID).Scan(&n); err != nil {
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM claw_prs WHERE claw_id=? AND state NOT IN ('merged','closed') AND mention_only=0`, clawID).Scan(&n); err != nil {
 		log.Printf("[agent-idle] count claw prs for %s: %v", shortID(clawID), err)
 		return false
 	}

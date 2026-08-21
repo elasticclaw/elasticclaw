@@ -907,8 +907,13 @@ func (s *Server) isOwnAppBot(login string) bool {
 // when its PR is reopened on GitHub, so the watcher polls it again and it
 // gates claw finalization again. Idempotent: a row that is already open (or
 // unknown) is left untouched.
+//
+// Both failure counters are zeroed too: a reopen is the natural "this row is
+// live again" signal, and a row administratively closed at either bound
+// (token misses or permanent API errors) would otherwise come back with a
+// tripped counter and get no grace before being closed again.
 func (s *Server) resetReopenedClawPR(clawID, prURL string) {
-	res, err := s.db.Exec(`UPDATE claw_prs SET state='open', merged=0, merged_at=NULL WHERE claw_id=? AND pr_url=?`, clawID, prURL)
+	res, err := s.db.Exec(`UPDATE claw_prs SET state='open', merged=0, merged_at=NULL, token_miss_count=0, permanent_failure_count=0 WHERE claw_id=? AND pr_url=?`, clawID, prURL)
 	if err != nil {
 		log.Printf("[github-webhook] failed to reset reopened PR %s for claw %s: %v", prURL, clawID[:8], err)
 		return
@@ -1382,13 +1387,16 @@ func (s *Server) mergePRForClaw(clawID string) {
 	// Aggregate outcome so the agent can act on a partial merge (e.g. rebase a
 	// PR whose merge 405ed because an earlier merge made its base out of date)
 	// instead of waiting indefinitely for a finalization that cannot happen.
-	// External inject: the whole point is acting instead of waiting, which is
-	// defeated when the claw sits in a no-progress pause — see the rationale
-	// at injectExternalHubMessageByID. Fires for a single PR too: a lone
-	// failure deserves its summary as much as a partial batch.
+	// Only the FAILURE aggregate uses the external inject (which resumes a
+	// no-progress pause): a failure needs action even from a paused claw. The
+	// all-success aggregate needs no action — waking a deliberately paused
+	// claw for it would burn a turn moments before the watcher finalizes the
+	// claw anyway — so it uses the plain inject, consistent with
+	// mergeSinglePRForClaw's own success message. Fires for a single PR too: a
+	// lone failure deserves its summary as much as a partial batch.
 	if len(prs) >= 1 {
 		if len(failures) == 0 {
-			s.injectExternalHubMessageByID(clawID, fmt.Sprintf("[hub] merge_pr: merged %d/%d tracked PRs.", merged, len(prs)))
+			s.injectHubMessageByID(clawID, fmt.Sprintf("[hub] merge_pr: merged %d/%d tracked PRs.", merged, len(prs)))
 		} else {
 			s.injectExternalHubMessageByID(clawID, fmt.Sprintf("[hub] merge_pr: merged %d/%d tracked PRs — %s. Fix and merge the remaining PR(s) or the claw cannot finish.", merged, len(prs), strings.Join(failures, "; ")))
 		}
