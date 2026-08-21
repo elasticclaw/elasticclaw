@@ -1501,7 +1501,12 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, ctx pipelineCon
 	// only after a required gate (if any) has allowed the stage to continue, so
 	// a failed gate cannot leave the PR watcher armed on a blocked claw.
 	if strings.TrimSpace(runStdoutForPRScan) != "" {
-		s.scanMessageForPRs(clawID, runStdoutForPRScan)
+		// mentionOnly=false: this is a delivery channel, not a mention. Gate
+		// scripts like verify-github-pr-links emit the claw's OWN delivered PR
+		// URLs, and for pipeline-driven claws this is often the only
+		// registration path — mention-only rows here would leave the
+		// finalization gate permanently empty.
+		s.scanMessageForPRs(clawID, runStdoutForPRScan, false)
 	}
 
 	if stage.OnEnter.Inject != "" {

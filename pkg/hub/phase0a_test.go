@@ -255,7 +255,7 @@ func TestCheckPRMergedPersistsStateBeforeTerminating(t *testing.T) {
 	}
 
 	pr := clawPR{id: prID, clawID: clawID, repo: "acme/widgets", prNumber: 42, prURL: "https://github.com/acme/widgets/pull/42"}
-	terminated := s.checkPRMerged(pr, "gh-token")
+	_, terminated := s.checkPRMerged(pr, "gh-token")
 	if !terminated {
 		t.Fatal("checkPRMerged returned false, want true for a merged PR")
 	}

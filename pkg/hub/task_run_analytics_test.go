@@ -1229,7 +1229,7 @@ func TestTaskRunPRMentionInstrumentationAssociatesPROpenedEvent(t *testing.T) {
 	s, db := newTaskRunAnalyticsTestServer(t, "claw-pr-mention")
 	runID, _ := startTaskRunForTest(t, s, "claw-pr-mention", "mention")
 
-	s.storePRMention("claw-pr-mention", "elastic/claw", 71, "https://github.com/elastic/claw/pull/71")
+	s.storePRMention("claw-pr-mention", "elastic/claw", 71, "https://github.com/elastic/claw/pull/71", true)
 
 	assertTaskRunPR(t, db, runID, "elastic/claw", 71, taskRunPRStateOpen, false)
 	assertTaskRunEventExists(t, db, runID, taskRunEventPRAssociated, taskRunInteractionNeutral)
@@ -1243,7 +1243,7 @@ func TestTaskRunPRMentionAnalyticsFailureDoesNotRollbackPRTracking(t *testing.T)
 		t.Fatalf("drop task_run_prs: %v", err)
 	}
 
-	s.storePRMention("claw-pr-mention-failure", "elastic/claw", 76, "https://github.com/elastic/claw/pull/76")
+	s.storePRMention("claw-pr-mention-failure", "elastic/claw", 76, "https://github.com/elastic/claw/pull/76", true)
 
 	var count int
 	if err := db.QueryRow(`

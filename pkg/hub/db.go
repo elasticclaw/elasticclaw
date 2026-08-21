@@ -165,6 +165,22 @@ func migrate(db *sql.DB) error {
 	if err := addColumn(db, "claw_prs", "merged_at", `TEXT`); err != nil {
 		return err
 	}
+	// mention_only=1 marks rows created by the message scanner for PR URLs the
+	// agent merely mentioned, as opposed to PRs it delivered via [DONE]. Only
+	// delivered rows (mention_only=0) gate claw finalization. Default 0 keeps
+	// every pre-existing row blocking — fail safe, no backfill needed.
+	if err := addColumn(db, "claw_prs", "mention_only", `INTEGER NOT NULL DEFAULT 0`); err != nil {
+		return err
+	}
+	// token_miss_count bounds how long a row whose repo has NO resolvable
+	// GitHub App token keeps blocking finalization. It is deliberately separate
+	// from permanent_failure_count: that counter belongs to checkPRMerged's
+	// permanent-API-error handling and is reset there on every successful
+	// fetch — sharing one column would let each pollAllPRs token resolve reset
+	// the API-error count (or vice versa) and neither bound would ever fire.
+	if err := addColumn(db, "claw_prs", "token_miss_count", `INTEGER NOT NULL DEFAULT 0`); err != nil {
+		return err
+	}
 	// The PR watcher never polls claws in terminal/offline states. Legacy rows
 	// therefore cannot safely retain the historical default of "open". Preserve
 	// a known terminal task-run PR state when available; otherwise mark it unknown.
@@ -786,6 +802,8 @@ func migrate(db *sql.DB) error {
 		last_review_id INTEGER NOT NULL DEFAULT 0, -- last top-level PR review ID seen
 		pr_conditions_fired INTEGER NOT NULL DEFAULT 0,
 		permanent_failure_count INTEGER NOT NULL DEFAULT 0,
+		mention_only INTEGER NOT NULL DEFAULT 0, -- 1 = URL scanned from a message, not delivered via [DONE]; never gates finalization
+		token_miss_count INTEGER NOT NULL DEFAULT 0, -- consecutive polls with no resolvable GitHub token for the repo; separate from permanent_failure_count (see migrate)
 		created_at  DATETIME NOT NULL,
 		UNIQUE(claw_id, pr_url)
 	);

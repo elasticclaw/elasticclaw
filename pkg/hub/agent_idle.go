@@ -579,9 +579,11 @@ func agentIdleResumeMessage(idleFor time.Duration) string {
 //     (idle/completed/deleted — see isProtectedClawStatus) plus
 //     error/offline/provisioning are all either finished or covered by the
 //     failure notifications.
-//   - any claw_prs row excludes, run-backed or not. claw_prs rows exist only
-//     while a delivered PR is being tracked (they are deleted on close/merge/
-//     teardown), so a row means "PR out, awaiting CI/review/merge". For
+//   - any UNRESOLVED claw_prs row (state not merged/closed) excludes,
+//     run-backed or not. Rows are deleted only when the claw is finalized;
+//     until then resolved rows survive so the all-PRs-resolved teardown gate
+//     can count them, and only an unresolved row still means "PR out,
+//     awaiting CI/review/merge". For
 //     run-backed claws this is deliberately checked in ADDITION to the run
 //     phase: associateTaskRunPR can fail (and is never retried), leaving the
 //     phase at agent_running forever even though the PR was delivered.
@@ -662,10 +664,19 @@ func (s *Server) agentIdleRunPhase(taskRunID string) string {
 	return phase
 }
 
-// agentIdleHasClawPRs reports whether the claw currently tracks any delivered PR.
+// agentIdleHasClawPRs reports whether the claw currently tracks any
+// unresolved DELIVERED PR. Resolved rows (state merged/closed) survive until
+// the claw is finalized so the all-PRs-resolved gate can count them — a
+// resolved row must never read as "awaiting humans" here, or a retried claw
+// carrying one would have its stuck alert suppressed for life. Mention-only
+// rows are excluded for the same reason, matching clawOpenPRCount: a PR the
+// agent merely linked is not "PR out, awaiting humans", and since the watcher
+// never finalizes a claw with zero delivered rows, counting a mention here
+// would make a hung mention-only claw simultaneously immortal (never torn
+// down) and invisible (stuck alert suppressed).
 func (s *Server) agentIdleHasClawPRs(clawID string) bool {
 	var n int
-	if err := s.db.QueryRow(`SELECT COUNT(*) FROM claw_prs WHERE claw_id=?`, clawID).Scan(&n); err != nil {
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM claw_prs WHERE claw_id=? AND state NOT IN ('merged','closed') AND mention_only=0`, clawID).Scan(&n); err != nil {
 		log.Printf("[agent-idle] count claw prs for %s: %v", shortID(clawID), err)
 		return false
 	}

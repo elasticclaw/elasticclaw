@@ -590,3 +590,46 @@ func TestSlackTestEndpointRejectsRunIDAndClawIDTogether(t *testing.T) {
 		t.Fatalf("unexpected body: %s", rr.Body.String())
 	}
 }
+
+// The idle candidate query's ownership filter: only a DELIVERED unresolved PR
+// (mention_only=0) counts as "PR out, awaiting humans" and suppresses the
+// agent_idle notification. A mention-only row is a polling target the agent
+// merely linked — suppressing on it would hide a hung claw the watcher will
+// also never finalize. Removing `AND p.mention_only = 0` from the NOT EXISTS
+// clause in selectLifecycleClawIdleCandidates fails the first assertion here.
+func TestLifecycleClawIdleCandidatesIgnoreMentionOnlyPRs(t *testing.T) {
+	s, db := newSlackNotifierTestServer(t, "", nil)
+	setLifecycleClawBaseline(t, s)
+
+	insertSlackTestClaw(t, db, "claw-idle-mention", "connected", 1, "", oldEnough)
+	if _, err := db.Exec(`UPDATE claws SET pipeline_stage='work', idle_since=? WHERE id='claw-idle-mention'`,
+		time.Now().Add(-lifecycleClawAdhocGrace-time.Minute).UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+	insertSlackTestClawPR(t, db, "pr-idle-mention", "claw-idle-mention", "acme/app", 7, "https://github.com/acme/app/pull/7")
+
+	// Unresolved mention-only row: NOT an ownership signal — the claw must
+	// still be an idle candidate.
+	if _, err := db.Exec(`UPDATE claw_prs SET mention_only=1 WHERE id='pr-idle-mention'`); err != nil {
+		t.Fatal(err)
+	}
+	claws, _, err := s.selectLifecycleClawIdleCandidates()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(claws) != 1 || claws[0].ID != "claw-idle-mention" {
+		t.Fatalf("idle candidates with an unresolved MENTION-ONLY PR = %v, want exactly claw-idle-mention (a linked PR must not suppress the idle alert)", claws)
+	}
+
+	// Same row flipped to delivered: "PR out, awaiting humans" — suppressed.
+	if _, err := db.Exec(`UPDATE claw_prs SET mention_only=0 WHERE id='pr-idle-mention'`); err != nil {
+		t.Fatal(err)
+	}
+	claws, _, err = s.selectLifecycleClawIdleCandidates()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(claws) != 0 {
+		t.Fatalf("idle candidates with an unresolved DELIVERED PR = %v, want none (an owned open PR suppresses the idle alert)", claws)
+	}
+}
