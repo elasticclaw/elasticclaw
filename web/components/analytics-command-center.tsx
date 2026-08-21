@@ -482,7 +482,7 @@ function AnalyticsCommandCenterInner() {
         .then(([runData, attempts, events, prs]) => {
           if (!cancelled) {
             setSelectedRunCache({ runId: selectedRunId, run: runData.run })
-            setDetails({ attempts: attempts.attempts, events: events.events, prs: prs.prs })
+            setDetails({ attempts: attempts.attempts, events: events.events, prs: prs.prs, stages: runData.stages ?? [] })
           }
         })
         .catch((detailLoadError) => {

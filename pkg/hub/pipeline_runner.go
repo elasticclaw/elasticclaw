@@ -1816,16 +1816,19 @@ func (s *Server) transitionResolvedPipelineStageWithContext(clawID string, stage
 		log.Printf("[pipeline] claw %s already in stage %q (%s), skipping duplicate transition", clawID[:8], stage.ID, stage.Label)
 		return false, false
 	}
+	stageLabel := strings.TrimSpace(stage.Label)
+	if stageLabel == "" {
+		stageLabel = stage.ID
+	}
+	if err := s.recordTaskRunStageEntered(clawID, stage.ID, stageLabel); err != nil {
+		log.Printf("[pipeline] failed to record stage timing for claw %s stage %q: %v", clawID[:8], stage.ID, err)
+	}
 	// Record that this claw has visited this stage, so one-shot triggers
 	// (like output_matches) don't re-fire on subsequent messages.
 	s.recordPipelineStageVisit(clawID, stage.ID)
 	log.Printf("[pipeline] claw %s → stage %q (%s)", clawID[:8], stage.ID, stage.Label)
 	// User-visible stage progress in the transcript (dashboard only — does not
 	// queue a model turn). Makes workflow progress less of a black box.
-	stageLabel := strings.TrimSpace(stage.Label)
-	if stageLabel == "" {
-		stageLabel = stage.ID
-	}
 	s.publishHubNotice(clawID, fmt.Sprintf("[hub] ▶ Stage: %s", stageLabel))
 	injectDelivered, onEnterErr := s.runOnEnter(clawID, stage, ctx)
 	stageActionsSucceeded := onEnterErr == nil

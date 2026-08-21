@@ -1,9 +1,10 @@
-import type { TaskRunAnalyticsFilters, TaskRunAttempt, TaskRunEvent, TaskRunPR } from "@/lib/types"
+import type { TaskRunAnalyticsFilters, TaskRunAttempt, TaskRunEvent, TaskRunPR, TaskRunStage } from "@/lib/types"
 
 export type DetailState = {
   attempts: TaskRunAttempt[]
   events: TaskRunEvent[]
   prs: TaskRunPR[]
+  stages: TaskRunStage[]
 }
 
 export const urlFilterKeys = [

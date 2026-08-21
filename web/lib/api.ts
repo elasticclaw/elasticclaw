@@ -16,6 +16,7 @@ import type {
   TaskRunFilterOptions,
   TaskRunOutput,
   TaskRunPR,
+  TaskRunStage,
   TaskRunsResponse,
   TaskRunSummary,
   WorkflowRunsResponse,
@@ -467,8 +468,8 @@ export async function fetchAnalyticsTicket(ticketKey: string, filters?: TaskRunA
   return apiFetch<{ ticket: AnalyticsTicket }>(`/api/analytics/tickets${query}${query ? "&" : "?"}key=${encodeURIComponent(ticketKey)}`, options)
 }
 
-export async function fetchTaskRun(runId: string): Promise<{ run: TaskRunSummary }> {
-  return apiFetch<{ run: TaskRunSummary }>(`/api/analytics/runs/${encodeURIComponent(runId)}${appendViewerTimezone("")}`)
+export async function fetchTaskRun(runId: string): Promise<{ run: TaskRunSummary; stages?: TaskRunStage[] }> {
+  return apiFetch<{ run: TaskRunSummary; stages?: TaskRunStage[] }>(`/api/analytics/runs/${encodeURIComponent(runId)}${appendViewerTimezone("")}`)
 }
 
 export async function fetchTaskRunAttempts(runId: string): Promise<{ attempts: TaskRunAttempt[] }> {

@@ -6,6 +6,7 @@ import (
 	"log"
 	"strings"
 	"time"
+	"unicode"
 
 	workflowv2 "github.com/elasticclaw/elasticclaw/pkg/hub/workflowv2"
 
@@ -642,6 +643,19 @@ func migrate(db *sql.DB) error {
 	CREATE INDEX IF NOT EXISTS idx_task_run_events_source_event ON task_run_events(tenant_id, source, source_event_id);
 	CREATE INDEX IF NOT EXISTS idx_task_run_events_observed ON task_run_events(tenant_id, observed_at);
 
+	CREATE TABLE IF NOT EXISTS task_run_stages (
+		tenant_id  TEXT NOT NULL,
+		run_id     TEXT NOT NULL,
+		seq        INTEGER NOT NULL,
+		stage_id   TEXT NOT NULL,
+		label      TEXT NOT NULL DEFAULT '',
+		entered_at INTEGER NOT NULL,
+		exited_at  INTEGER,
+		source     TEXT NOT NULL DEFAULT 'live' CHECK(source IN ('live','backfill_messages','backfill_history','v2_transitions')),
+		PRIMARY KEY (tenant_id, run_id, seq)
+	);
+	CREATE INDEX IF NOT EXISTS idx_task_run_stages_run ON task_run_stages(tenant_id, run_id, seq);
+
 	CREATE TABLE IF NOT EXISTS task_run_prs (
 		id              TEXT PRIMARY KEY,
 		tenant_id       TEXT NOT NULL,
@@ -940,6 +954,9 @@ func migrate(db *sql.DB) error {
 		return err
 	}
 	if err := backfillTaskRunReadyAtV1(db); err != nil {
+		return err
+	}
+	if err := backfillTaskRunStagesV1(db); err != nil {
 		return err
 	}
 	if err := rebuildTaskRunSummariesTicketPageV3(db); err != nil {
@@ -1413,6 +1430,250 @@ func backfillTaskRunReadyAtV1(db *sql.DB) error {
 		return err
 	}
 	return tx.Commit()
+}
+
+// backfillTaskRunStagesV1 reconstructs the stage timeline that predates
+// task_run_stages. Message markers are preferred because they preserve repeat
+// visits; pipeline_stage_history records only each stage's first visit.
+func backfillTaskRunStagesV1(db *sql.DB) error {
+	const migration = "task_run_stages_v1"
+	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS hub_migrations (name TEXT PRIMARY KEY, applied_at INTEGER NOT NULL)`); err != nil {
+		return fmt.Errorf("create hub migrations: %w", err)
+	}
+	var applied int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM hub_migrations WHERE name=?`, migration).Scan(&applied); err != nil {
+		return fmt.Errorf("check task run stages backfill: %w", err)
+	}
+	if applied > 0 {
+		return nil
+	}
+
+	rows, err := db.Query(`
+		SELECT t.id, t.tenant_id, t.claw_id
+		  FROM task_runs t
+		 WHERE NOT EXISTS (SELECT 1 FROM task_run_stages s WHERE s.run_id = t.id)
+		 ORDER BY t.created_at, t.id`)
+	if err != nil {
+		return fmt.Errorf("list runs for task run stages backfill: %w", err)
+	}
+	type candidate struct{ runID, tenantID, clawID string }
+	var candidates []candidate
+	for rows.Next() {
+		var c candidate
+		if err := rows.Scan(&c.runID, &c.tenantID, &c.clawID); err != nil {
+			rows.Close()
+			return err
+		}
+		candidates = append(candidates, c)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+
+	skipped := 0
+	unprocessable := 0
+	for _, c := range candidates {
+		if c.clawID == "" {
+			// A missing claw_id can never self-heal, so it must not block the
+			// sentinel: counting it as skipped would re-run the full backfill
+			// on every startup forever.
+			unprocessable++
+			log.Printf("[task-run-analytics] task run stages backfill skipped run %s: no claw_id (will not retry)", c.runID)
+			continue
+		}
+		if err := backfillTaskRunStagesForRun(db, c.tenantID, c.runID, c.clawID); err != nil {
+			skipped++
+			log.Printf("[task-run-analytics] task run stages backfill skipped run %s: %v", c.runID, err)
+		}
+	}
+	log.Printf("[task-run-analytics] task run stages backfill: %d of %d run(s) processed", len(candidates)-skipped-unprocessable, len(candidates))
+	if skipped > 0 {
+		log.Printf("[task-run-analytics] task run stages backfill: %d run(s) skipped, will retry on next startup", skipped)
+		return nil
+	}
+	_, err = db.Exec(`INSERT INTO hub_migrations(name, applied_at) VALUES(?, ?) ON CONFLICT(name) DO NOTHING`, migration, now().UnixMilli())
+	return err
+}
+
+func backfillTaskRunStagesForRun(db *sql.DB, tenantID, runID, clawID string) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	type marker struct {
+		label string
+		at    time.Time
+	}
+	markerRows, err := tx.Query(`SELECT content, created_at FROM messages WHERE claw_id = ? AND role = 'hub' AND content LIKE '[hub] ▶ Stage: %' ORDER BY created_at ASC`, clawID)
+	if err != nil {
+		return fmt.Errorf("list stage markers: %w", err)
+	}
+	var markers []marker
+	for markerRows.Next() {
+		var content string
+		var at time.Time
+		if err := markerRows.Scan(&content, &at); err != nil {
+			markerRows.Close()
+			return fmt.Errorf("scan stage marker: %w", err)
+		}
+		markers = append(markers, marker{strings.TrimPrefix(content, "[hub] ▶ Stage: "), at})
+	}
+	if err := markerRows.Err(); err != nil {
+		markerRows.Close()
+		return fmt.Errorf("iterate stage markers: %w", err)
+	}
+	markerRows.Close()
+
+	type historyEntry struct {
+		stageID string
+		at      time.Time
+	}
+	readHistory := func() ([]historyEntry, error) {
+		rows, err := tx.Query(`SELECT stage_id, created_at FROM pipeline_stage_history WHERE claw_id = ? ORDER BY created_at ASC`, clawID)
+		if err != nil {
+			return nil, err
+		}
+		defer rows.Close()
+		var history []historyEntry
+		for rows.Next() {
+			var entry historyEntry
+			if err := rows.Scan(&entry.stageID, &entry.at); err != nil {
+				return nil, err
+			}
+			history = append(history, entry)
+		}
+		return history, rows.Err()
+	}
+
+	inserted := false
+	if len(markers) > 0 {
+		history, err := readHistory()
+		if err != nil {
+			return fmt.Errorf("list pipeline stage history: %w", err)
+		}
+		consumed := make([]bool, len(history))
+		stageIDByLabel := make(map[string]string)
+		for _, m := range markers {
+			// pipeline_stage_history records only each stage's first visit, so
+			// a revisit marker must reuse the stage id resolved for that
+			// label's first visit instead of consuming (and mislabeling)
+			// another stage's history entry.
+			stageID, seen := stageIDByLabel[m.label]
+			if !seen {
+				slug := slugTaskRunStageLabel(m.label)
+				// Pair the first visit with a history entry: prefer, within
+				// the window, an entry whose stage id matches the marker
+				// label; otherwise take the earliest unconsumed entry — both
+				// streams are in first-visit order, so the earliest candidate
+				// is right even when marker persistence lags the history
+				// write and a later entry happens to be nearer in time.
+				best := -1
+				for i, h := range history {
+					if consumed[i] {
+						continue
+					}
+					diff := m.at.Sub(h.at)
+					if diff < 0 {
+						diff = -diff
+					}
+					if diff > 10*time.Second {
+						continue
+					}
+					if best < 0 {
+						best = i
+					}
+					if stageIDMatchesLabelSlug(h.stageID, slug) {
+						best = i
+						break
+					}
+				}
+				stageID = slug
+				if best >= 0 {
+					stageID = history[best].stageID
+					consumed[best] = true
+				}
+				stageIDByLabel[m.label] = stageID
+			}
+			if err := recordTaskRunStageEnteredTx(tx, tenantID, runID, stageID, m.label, m.at.UnixMilli(), "backfill_messages"); err != nil {
+				return err
+			}
+			inserted = true
+		}
+	} else {
+		history, err := readHistory()
+		if err != nil {
+			return fmt.Errorf("list pipeline stage history: %w", err)
+		}
+		for _, h := range history {
+			if err := recordTaskRunStageEnteredTx(tx, tenantID, runID, h.stageID, h.stageID, h.at.UnixMilli(), "backfill_history"); err != nil {
+				return err
+			}
+			inserted = true
+		}
+		// workflow_v2_runs has no linkage to task_runs in the current schema or codebase, so there is no safe v2 fallback to apply yet.
+	}
+	if inserted {
+		var finishedAt, mergedAt int64
+		err := tx.QueryRow(`SELECT finished_at, merged_at FROM task_run_summaries WHERE run_id = ?`, runID).Scan(&finishedAt, &mergedAt)
+		if err != nil && err != sql.ErrNoRows {
+			return fmt.Errorf("read task run terminal time: %w", err)
+		}
+		closeAt := finishedAt
+		if closeAt == 0 {
+			closeAt = mergedAt
+		}
+		if closeAt > 0 {
+			if _, err := tx.Exec(`UPDATE task_run_stages SET exited_at = ? WHERE tenant_id = ? AND run_id = ? AND seq = (SELECT MAX(seq) FROM task_run_stages WHERE tenant_id = ? AND run_id = ?)`, closeAt, tenantID, runID, tenantID, runID); err != nil {
+				return fmt.Errorf("close final task run stage: %w", err)
+			}
+		}
+	}
+	return tx.Commit()
+}
+
+func slugTaskRunStageLabel(label string) string {
+	var b strings.Builder
+	previousSpace := false
+	for _, r := range strings.ToLower(strings.TrimSpace(label)) {
+		if unicode.IsSpace(r) || r == '-' {
+			if b.Len() > 0 {
+				previousSpace = true
+			}
+			continue
+		}
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_' {
+			if previousSpace && b.Len() > 0 && !strings.HasSuffix(b.String(), "_") {
+				b.WriteByte('_')
+			}
+			previousSpace = false
+			b.WriteRune(r)
+		}
+	}
+	result := strings.Trim(b.String(), "_")
+	if result == "" {
+		return "stage"
+	}
+	return result
+}
+
+// stageIDMatchesLabelSlug reports whether a pipeline stage id and a slugged
+// marker label refer to the same stage, ignoring separator differences
+// (e.g. "pre_commit" matches the slug of "Pre-commit").
+func stageIDMatchesLabelSlug(stageID, labelSlug string) bool {
+	norm := func(s string) string {
+		var b strings.Builder
+		for _, r := range strings.ToLower(s) {
+			if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+				b.WriteRune(r)
+			}
+		}
+		return b.String()
+	}
+	return norm(stageID) == norm(labelSlug)
 }
 
 // backfillTaskRunAgentStartedAt records an inferred agent_started event for a

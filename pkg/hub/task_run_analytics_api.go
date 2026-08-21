@@ -61,7 +61,8 @@ type taskRunAnalyticsRunsResponse struct {
 }
 
 type taskRunAnalyticsRunDetailResponse struct {
-	Run taskRunAnalyticsRunView `json:"run"`
+	Run    taskRunAnalyticsRunView     `json:"run"`
+	Stages []taskRunAnalyticsStageView `json:"stages,omitempty"`
 }
 
 type taskRunAnalyticsAttemptsResponse struct {
@@ -144,6 +145,15 @@ type taskRunAnalyticsRunView struct {
 	TotalTokens           *int64   `json:"totalTokens,omitempty"`
 	EstimatedCostUsd      *float64 `json:"estimatedCostUsd,omitempty"`
 	IssueTitle            string   `json:"issueTitle,omitempty"`
+}
+
+type taskRunAnalyticsStageView struct {
+	StageID    string `json:"stageId"`
+	Label      string `json:"label"`
+	EnteredAt  int64  `json:"enteredAt"`
+	ExitedAt   int64  `json:"exitedAt,omitempty"`
+	DurationMs int64  `json:"durationMs"`
+	Source     string `json:"source"`
 }
 
 type taskRunAnalyticsAttemptView struct {
@@ -411,6 +421,44 @@ func taskRunReadyToMergeMs(run taskRunAnalyticsRunView, bh BusinessHours) int64 
 	return bh.DurationMs(ready, run.MergedAt)
 }
 
+// taskRunAnalyticsStages builds per-stage timing views for a run's detail
+// response. Duration for each stage is wall-clock: it ends at its own
+// exited_at if set, else the next stage's entered_at, else the run's
+// finished_at, else time-now for the still-open stage of a running run.
+func taskRunAnalyticsStages(stages []taskRunStage, runFinishedAt int64) []taskRunAnalyticsStageView {
+	views := make([]taskRunAnalyticsStageView, 0, len(stages))
+	for i, stage := range stages {
+		var end int64
+		switch {
+		case stage.ExitedAt != nil:
+			end = *stage.ExitedAt
+		case i+1 < len(stages):
+			end = stages[i+1].EnteredAt
+		case runFinishedAt > 0:
+			end = runFinishedAt
+		default:
+			end = now().UnixMilli()
+		}
+		durationMs := end - stage.EnteredAt
+		if durationMs < 0 {
+			durationMs = 0
+		}
+		var exitedAt int64
+		if stage.ExitedAt != nil {
+			exitedAt = *stage.ExitedAt
+		}
+		views = append(views, taskRunAnalyticsStageView{
+			StageID:    stage.StageID,
+			Label:      stage.Label,
+			EnteredAt:  stage.EnteredAt,
+			ExitedAt:   exitedAt,
+			DurationMs: durationMs,
+			Source:     stage.Source,
+		})
+	}
+	return views
+}
+
 func (s *Server) handleTaskRunAnalyticsRunSubresource(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		jsonError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -438,7 +486,12 @@ func (s *Server) handleTaskRunAnalyticsRunSubresource(w http.ResponseWriter, r *
 	}
 	if len(parts) == 1 {
 		run.ReadyToMergeMs = taskRunReadyToMergeMs(run, BusinessHoursFromEnv(r.URL.Query().Get("tz")))
-		jsonOK(w, taskRunAnalyticsRunDetailResponse{Run: run})
+		stages, err := taskRunStagesForRun(s.db, tenantID, runID)
+		if err != nil {
+			jsonError(w, http.StatusInternalServerError, "db error")
+			return
+		}
+		jsonOK(w, taskRunAnalyticsRunDetailResponse{Run: run, Stages: taskRunAnalyticsStages(stages, run.FinishedAt)})
 		return
 	}
 	if len(parts) != 2 {
