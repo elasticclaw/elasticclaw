@@ -5841,27 +5841,41 @@ func (s *Server) pruneAnalytics() {
 	}
 }
 
-func (s *Server) petDaytonaSandboxes() {
-	rows, err := s.db.Query(`
+type daytonaKeepaliveClaw struct{ id, name, providerID string }
+
+// selectDaytonaKeepaliveClaws lists the Daytona sandboxes that must stay awake.
+// 'offline' is included on purpose: the gateway may have crashed while the
+// sandbox is still fine, and the bridge can only reconnect if we keep petting
+// it. The reaper bounds that window by flipping the claw to 'error' after the
+// offline grace, which this query excludes.
+func selectDaytonaKeepaliveClaws(db *sql.DB) ([]daytonaKeepaliveClaw, error) {
+	rows, err := db.Query(`
 		SELECT id, name, provider_id
 		FROM claws
 		WHERE provider = 'daytona'
 		  AND provider_id != ''
-		  AND status NOT IN ('idle','deleted','error','offline')
+		  AND status NOT IN ('idle','deleted','error')
 	`)
 	if err != nil {
-		log.Printf("keepAliveDaytonaSandboxes: query error: %v", err)
-		return
+		return nil, err
 	}
 	defer rows.Close()
 
-	type clawRow struct{ id, name, providerID string }
-	var claws []clawRow
+	var claws []daytonaKeepaliveClaw
 	for rows.Next() {
-		var c clawRow
+		var c daytonaKeepaliveClaw
 		if err := rows.Scan(&c.id, &c.name, &c.providerID); err == nil {
 			claws = append(claws, c)
 		}
+	}
+	return claws, rows.Err()
+}
+
+func (s *Server) petDaytonaSandboxes() {
+	claws, err := selectDaytonaKeepaliveClaws(s.db)
+	if err != nil {
+		log.Printf("keepAliveDaytonaSandboxes: query error: %v", err)
+		return
 	}
 	if len(claws) == 0 {
 		return
