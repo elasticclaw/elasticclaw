@@ -275,7 +275,7 @@ func TestCheckPRMergedResetsCounterBetweenPermanentFailures(t *testing.T) {
 	insertWatcherTestPR(t, db, "claw-mix", "pr-mix")
 	pr := clawPR{id: "pr-mix", clawID: "claw-mix", repo: "owner/repo", prNumber: 1, prURL: "https://github.com/owner/repo/pull/1"}
 	for i := 0; i < (prMergedPermanentFailureLimit+1)*2; i++ {
-		if s.checkPRMerged(pr, "token") {
+		if _, terminated := s.checkPRMerged(pr, "token"); terminated {
 			t.Fatalf("checkPRMerged terminated on non-consecutive failures")
 		}
 	}
@@ -429,7 +429,7 @@ func TestStorePRMentionConcurrentDuplicate(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			_, errs[i] = s.storePRMention("claw-dup", "owner/repo", 7, "https://github.com/owner/repo/pull/7")
+			_, errs[i] = s.storePRMention("claw-dup", "owner/repo", 7, "https://github.com/owner/repo/pull/7", true)
 		}(i)
 	}
 	wg.Wait()

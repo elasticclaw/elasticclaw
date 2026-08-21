@@ -295,7 +295,7 @@ func (s *Server) skipCurrentLifecycleClawIdle() error {
 
 // selectLifecycleClawIdleCandidates returns ad-hoc claws whose idle latch has
 // no delivery row yet. The exclusion conditions mirror agentIdleEligible for
-// the ad-hoc kind — status 'connected', no tracked PR, still driven by a
+// the ad-hoc kind — status 'connected', no unresolved tracked PR, still driven by a
 // pipeline stage or a live workflow run — so a claw that opened a PR, died,
 // or lost its automatic driver between latch and delivery is not alerted on
 // stale grounds.
@@ -305,7 +305,7 @@ func (s *Server) selectLifecycleClawIdleCandidates() ([]lifecycleClawRow, []int6
 		SELECT `+lifecycleClawSelectColumns+`, c.idle_since
 		  FROM claws c
 		 WHERE c.task_run_id = '' AND c.idle_since > 0 AND c.status = 'connected'
-		   AND NOT EXISTS (SELECT 1 FROM claw_prs p WHERE p.claw_id = c.id)
+		   AND NOT EXISTS (SELECT 1 FROM claw_prs p WHERE p.claw_id = c.id AND p.state NOT IN ('merged','closed'))
 		   AND (c.pipeline_stage != '' OR EXISTS (
 			SELECT 1 FROM workflow_runs w WHERE w.claw_id = c.id AND w.status IN ('pending','running')
 		   ))
