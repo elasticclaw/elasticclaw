@@ -109,6 +109,14 @@ func migrate(db *sql.DB) error {
 	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN trigger_actor_json TEXT NOT NULL DEFAULT '{}'`)
 	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN stop_comment_pending INTEGER NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN no_progress_paused INTEGER NOT NULL DEFAULT 0`)
+	// rebrief_pending is armed by [claw-retry] when a sandbox is replaced and
+	// consumed on reconnect to re-brief the fresh session. resetClawForRetry's
+	// UPDATE references it on the retry hot path, so a silently missing column
+	// would leave every retried claw without a successor — abort startup
+	// loudly instead.
+	if err := addColumn(db, "claws", "rebrief_pending", `INTEGER NOT NULL DEFAULT 0`); err != nil {
+		return err
+	}
 	// idle_since (epoch millis, 0 = not latched) is the durable once-per-idle-
 	// stretch latch for agent_idle notifications: the status watchdog sets it
 	// when it fires the notification for a stretch, and the claw-pass notifier
@@ -468,6 +476,7 @@ func migrate(db *sql.DB) error {
 		workflow_volumes TEXT NOT NULL DEFAULT '[]',
 		trigger_actor_json TEXT NOT NULL DEFAULT '{}',
 		stop_comment_pending INTEGER NOT NULL DEFAULT 0,
+		rebrief_pending INTEGER NOT NULL DEFAULT 0,
 		no_progress_paused INTEGER NOT NULL DEFAULT 0,
 		idle_since INTEGER NOT NULL DEFAULT 0,
 		idle_resume_at INTEGER NOT NULL DEFAULT 0,

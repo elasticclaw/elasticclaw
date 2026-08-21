@@ -395,11 +395,11 @@ func (s *Server) retryCheckpointID(tenantID, clawID string, attempt int) (string
 		  FROM task_run_attempts
 		 WHERE run_id=(SELECT task_run_id FROM claws WHERE id=?) AND attempt_number=?`, clawID, attempt-1).Scan(&previousCheckpointID)
 
-	var checkpointID string
+	var checkpointID, checkpointReason string
 	err := s.db.QueryRow(`
-		SELECT id FROM claw_checkpoints
+		SELECT id, COALESCE(reason,'') FROM claw_checkpoints
 		 WHERE tenant_id=? AND claw_id=? AND status='ready' AND manifest_path != ''
-		 ORDER BY created_at DESC LIMIT 1`, tenantID, clawID).Scan(&checkpointID)
+		 ORDER BY created_at DESC LIMIT 1`, tenantID, clawID).Scan(&checkpointID, &checkpointReason)
 	if err == sql.ErrNoRows {
 		return "", nil
 	}
@@ -409,14 +409,83 @@ func (s *Server) retryCheckpointID(tenantID, clawID string, attempt int) (string
 	if checkpointID == previousCheckpointID {
 		return "", nil
 	}
+	// A 'bootstrap' checkpoint captures state zero — it is taken seconds after
+	// provisioning, before the agent has done anything. Restoring it over a
+	// claw that has already made progress rolls the workspace back and
+	// discards real work (observed on NEXT-801/NEXT-790). Fall back to the
+	// newest non-bootstrap checkpoint instead — an earlier attempt's periodic
+	// checkpoint can hold hours of recoverable work even when a later
+	// attempt's bootstrap checkpoint sorted newest — and only when none exists
+	// provision the successor cleanly and let the reconnect re-brief point the
+	// fresh agent at the live PR/workspace state.
+	if checkpointReason == "bootstrap" && s.clawProgressedPastBootstrap(tenantID, clawID) {
+		err := s.db.QueryRow(`
+			SELECT id FROM claw_checkpoints
+			 WHERE tenant_id=? AND claw_id=? AND status='ready' AND manifest_path != ''
+			   AND COALESCE(reason,'') != 'bootstrap'
+			 ORDER BY created_at DESC LIMIT 1`, tenantID, clawID).Scan(&checkpointID)
+		if err == sql.ErrNoRows {
+			return "", nil
+		}
+		if err != nil {
+			return "", err
+		}
+		// Same guard as above: never restore the checkpoint the previous
+		// attempt already failed on.
+		if checkpointID == previousCheckpointID {
+			return "", nil
+		}
+	}
 	return checkpointID, nil
 }
 
+// clawProgressedPastBootstrap reports whether the claw shows any signal of
+// real work beyond the freshly-provisioned state a 'bootstrap' checkpoint
+// captures. Kept deliberately simple and readable: any one signal is enough.
+func (s *Server) clawProgressedPastBootstrap(tenantID, clawID string) bool {
+	// A registered PR is unambiguous progress.
+	var count int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM claw_prs WHERE claw_id=?`, clawID).Scan(&count); err == nil && count > 0 {
+		return true
+	}
+	// A non-bootstrap ready checkpoint means the agent worked long enough for
+	// a later checkpoint to exist, even if the bootstrap one sorted newest.
+	if err := s.db.QueryRow(`
+		SELECT COUNT(*) FROM claw_checkpoints
+		 WHERE tenant_id=? AND claw_id=? AND status='ready' AND reason != 'bootstrap'`,
+		tenantID, clawID).Scan(&count); err == nil && count > 0 {
+		return true
+	}
+	// The pipeline moved past its entry stage. The entry stage itself is set
+	// right after initialization, before any work happens, so it does not
+	// count as progress.
+	stageID := s.getPipelineStage(clawID)
+	if stageID == "" {
+		return false
+	}
+	ctx, ok := s.findPipelineContextForClaw(clawID)
+	if !ok {
+		return false
+	}
+	pl := parsePipelineForContext(ctx)
+	if pl == nil {
+		return false
+	}
+	entry := pl.EntryStage()
+	return entry != nil && entry.ID != stageID
+}
+
 func (s *Server) resetClawForRetry(tenantID, clawID, checkpointID, bootstrapStatus string) (bool, error) {
+	// rebrief_pending=1 marks that the successor sandbox starts with a brand-new
+	// OpenClaw session: the checkpoint restore brings back workspace files but
+	// not the conversation, so the reconnect path must re-brief the agent with
+	// its task context. This UPDATE is the only place that arms the flag — a
+	// normal reconnect/bridge flap must never set it.
 	res, err := s.db.Exec(`
 		UPDATE claws
 		   SET status='provisioning', bootstrap_ok=0, bootstrap_status=?, bootstrap_diagnostic='',
-		       provider_id='', ssh_host='', ssh_port=0, ssh_user='', restore_checkpoint_id=?
+		       provider_id='', ssh_host='', ssh_port=0, ssh_user='', restore_checkpoint_id=?,
+		       rebrief_pending=1
 		 WHERE id=? AND tenant_id=? AND status IN ('error','offline')`,
 		bootstrapStatus, checkpointID, clawID, tenantID)
 	if err != nil {
