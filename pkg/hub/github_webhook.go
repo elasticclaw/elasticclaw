@@ -879,6 +879,40 @@ func githubRepoMatches(fullName string, repos []string) bool {
 	return false
 }
 
+// githubRepoExcluded reports whether a repo matches an exclude pattern.
+// Supports exact owner/repo and owner/* globs.
+func githubRepoExcluded(fullName string, excludeRepos []string) bool {
+	if len(excludeRepos) == 0 {
+		return false
+	}
+	parts := strings.SplitN(fullName, "/", 2)
+	if len(parts) != 2 {
+		return false
+	}
+	owner := parts[0]
+	for _, pattern := range excludeRepos {
+		if strings.EqualFold(pattern, fullName) {
+			return true
+		}
+		if strings.HasSuffix(pattern, "/*") {
+			patternOwner := strings.TrimSuffix(pattern, "/*")
+			if strings.EqualFold(patternOwner, owner) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// githubRepoMatchesWithExclusions is like githubRepoMatches but also excludes
+// repos that match any pattern in excludeRepos.
+func githubRepoMatchesWithExclusions(fullName string, includeRepos, excludeRepos []string) bool {
+	if !githubRepoMatches(fullName, includeRepos) {
+		return false
+	}
+	return !githubRepoExcluded(fullName, excludeRepos)
+}
+
 // createClawForGitHubPR provisions a new claw for a GitHub PR event.
 // isOwnAppBot returns true if the given GitHub login is the bot account for one of
 // the configured GitHub Apps (hub-global or workspace-scoped). App bots have the

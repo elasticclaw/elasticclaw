@@ -118,14 +118,15 @@ type WorkflowRun struct {
 }
 
 type GitHubIssuesWorkflowTrigger struct {
-	Event            string   `yaml:"event,omitempty" json:"event,omitempty"`
-	Repositories     []string `yaml:"repositories,omitempty" json:"repositories,omitempty"`
-	States           []string `yaml:"states,omitempty" json:"states,omitempty"`
-	Labels           []string `yaml:"labels,omitempty" json:"labels,omitempty"`
-	ExcludeLabels    []string `yaml:"exclude_labels,omitempty" json:"exclude_labels,omitempty"`
-	Labelers         []string `yaml:"labelers,omitempty" json:"labelers,omitempty"`
-	AssignedTo       string   `yaml:"assigned_to,omitempty" json:"assigned_to,omitempty"`
-	AgentStatusError string   `yaml:"agent_status_error,omitempty" json:"agent_status_error,omitempty"`
+	Event                string   `yaml:"event,omitempty" json:"event,omitempty"`
+	Repositories         []string `yaml:"repositories,omitempty" json:"repositories,omitempty"`
+	ExcludeRepositories  []string `yaml:"exclude_repositories,omitempty" json:"exclude_repositories,omitempty"`
+	States               []string `yaml:"states,omitempty" json:"states,omitempty"`
+	Labels               []string `yaml:"labels,omitempty" json:"labels,omitempty"`
+	ExcludeLabels        []string `yaml:"exclude_labels,omitempty" json:"exclude_labels,omitempty"`
+	Labelers             []string `yaml:"labelers,omitempty" json:"labelers,omitempty"`
+	AssignedTo           string   `yaml:"assigned_to,omitempty" json:"assigned_to,omitempty"`
+	AgentStatusError     string   `yaml:"agent_status_error,omitempty" json:"agent_status_error,omitempty"`
 }
 
 type LinearWorkflowTrigger struct {
