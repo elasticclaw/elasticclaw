@@ -259,6 +259,112 @@ func TestRetryCheckpointSkipsCheckpointUsedByPreviousAttempt(t *testing.T) {
 	}
 }
 
+func TestRetryCheckpointSkipsBootstrapCheckpointAfterProgress(t *testing.T) {
+	insertBootstrapCheckpoint := func(t *testing.T, db *sql.DB) {
+		t.Helper()
+		if _, err := db.Exec(`
+			INSERT INTO claw_checkpoints(id,tenant_id,claw_id,status,reason,manifest_path,created_at)
+			VALUES('checkpoint-bootstrap','tenant','retry-claw','ready','bootstrap','manifest.json',?)`, now()); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	t.Run("registered PR forces clean provision", func(t *testing.T) {
+		s, db, _ := newClawRetryTestServer(t, "connected")
+		insertBootstrapCheckpoint(t, db)
+		if _, err := db.Exec(`
+			INSERT INTO claw_prs(id,claw_id,repo,pr_number,pr_url,created_at)
+			VALUES('pr-1','retry-claw','acme/widgets',42,'https://github.com/acme/widgets/pull/42',?)`, now()); err != nil {
+			t.Fatal(err)
+		}
+		checkpointID, err := s.retryCheckpointID("tenant", "retry-claw", 2)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if checkpointID != "" {
+			t.Fatalf("checkpoint=%q, want clean provision instead of bootstrap rollback", checkpointID)
+		}
+	})
+
+	t.Run("pipeline past entry stage forces clean provision", func(t *testing.T) {
+		s, db, _ := newClawRetryTestServer(t, "connected")
+		insertBootstrapCheckpoint(t, db)
+		s.hubCfg.Factories = []*types.FactoryConfig{{
+			Name:         "retry-factory",
+			PipelineYAML: "stages:\n  - id: plan\n    entry: true\n  - id: implement\n",
+		}}
+		if _, err := db.Exec(`UPDATE claws SET tags='["factory:retry-factory"]', pipeline_stage='implement' WHERE id='retry-claw'`); err != nil {
+			t.Fatal(err)
+		}
+		checkpointID, err := s.retryCheckpointID("tenant", "retry-claw", 2)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if checkpointID != "" {
+			t.Fatalf("checkpoint=%q, want clean provision instead of bootstrap rollback", checkpointID)
+		}
+	})
+
+	t.Run("older non-bootstrap checkpoint is restored instead of bootstrap", func(t *testing.T) {
+		s, db, _ := newClawRetryTestServer(t, "connected")
+		insertBootstrapCheckpoint(t, db)
+		// A periodic checkpoint from an earlier attempt sorts below the
+		// successor's bootstrap checkpoint but holds real work — it must win.
+		if _, err := db.Exec(`
+			INSERT INTO claw_checkpoints(id,tenant_id,claw_id,status,reason,manifest_path,created_at)
+			VALUES('checkpoint-periodic','tenant','retry-claw','ready','periodic','manifest.json',?)`, now().Add(-time.Hour)); err != nil {
+			t.Fatal(err)
+		}
+		checkpointID, err := s.retryCheckpointID("tenant", "retry-claw", 2)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if checkpointID != "checkpoint-periodic" {
+			t.Fatalf("checkpoint=%q, want checkpoint-periodic", checkpointID)
+		}
+	})
+
+	t.Run("fallback never re-restores the previous attempt's checkpoint", func(t *testing.T) {
+		s, db, runID := newClawRetryTestServer(t, "connected")
+		insertBootstrapCheckpoint(t, db)
+		if _, err := db.Exec(`
+			INSERT INTO claw_checkpoints(id,tenant_id,claw_id,status,reason,manifest_path,created_at)
+			VALUES('checkpoint-periodic','tenant','retry-claw','ready','periodic','manifest.json',?)`, now().Add(-time.Hour)); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(`UPDATE task_run_attempts SET restored_checkpoint_id='checkpoint-periodic' WHERE run_id=? AND attempt_number=1`, runID); err != nil {
+			t.Fatal(err)
+		}
+		checkpointID, err := s.retryCheckpointID("tenant", "retry-claw", 2)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if checkpointID != "" {
+			t.Fatalf("checkpoint=%q, want clean provision", checkpointID)
+		}
+	})
+
+	t.Run("no progress keeps bootstrap restore", func(t *testing.T) {
+		s, db, _ := newClawRetryTestServer(t, "connected")
+		insertBootstrapCheckpoint(t, db)
+		s.hubCfg.Factories = []*types.FactoryConfig{{
+			Name:         "retry-factory",
+			PipelineYAML: "stages:\n  - id: plan\n    entry: true\n  - id: implement\n",
+		}}
+		// Entry stage set right after initialization is not progress.
+		if _, err := db.Exec(`UPDATE claws SET tags='["factory:retry-factory"]', pipeline_stage='plan' WHERE id='retry-claw'`); err != nil {
+			t.Fatal(err)
+		}
+		checkpointID, err := s.retryCheckpointID("tenant", "retry-claw", 2)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if checkpointID != "checkpoint-bootstrap" {
+			t.Fatalf("checkpoint=%q, want checkpoint-bootstrap", checkpointID)
+		}
+	})
+}
+
 func TestRetryCheckpointChoicePrecedesTerminationCheckpoint(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	s, db, runID := newClawRetryTestServer(t, "error")

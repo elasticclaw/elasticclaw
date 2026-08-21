@@ -4985,7 +4985,16 @@ func (s *Server) startWorkflowAfterVolumes(ctx context.Context, cc *clawConn, cl
 		cc.mu.Unlock()
 
 		if s.initializePipelineEntryIfNeeded(clawID) {
+			// The entry inject just briefed this session with full task
+			// context (a retried claw can land here when it died before its
+			// first stage), so discard any armed re-brief: left in place it
+			// would fire on a later benign bridge flap and tell a live
+			// session its conversation is gone.
+			s.clearRebriefPending(clawID)
 			s.sendInitialPlanInstruction(cc, clawID)
+		} else if s.rebriefAfterRestoreIfNeeded(cc, clawID) {
+			// Retry replacement: the fresh session was re-briefed with its
+			// task context; nothing else to send.
 		} else if s.getPipelineStage(clawID) == "" && !s.clawHasMessages(clawID) {
 			s.sendWakeMessage(cc, clawID)
 		}
