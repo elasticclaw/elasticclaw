@@ -685,15 +685,19 @@ func canCollapseActivity(a, b agentActivity) bool {
 }
 
 type agentActivity struct {
-	Kind    string `json:"kind"`
-	Tool    string `json:"tool"`
-	Phase   string `json:"phase"`
-	Detail  string `json:"detail"`
-	Command string `json:"command"`
-	Path    string `json:"path"`
-	URL     string `json:"url"`
-	Message string `json:"message"`
-	Error   string `json:"error"`
+	Kind           string `json:"kind"`
+	Tool           string `json:"tool"`
+	Phase          string `json:"phase"`
+	Detail         string `json:"detail"`
+	Command        string `json:"command"`
+	Path           string `json:"path"`
+	URL            string `json:"url"`
+	Message        string `json:"message"`
+	Error          string `json:"error"`
+	SubagentName   string `json:"subagent_name,omitempty"`
+	SubagentType   string `json:"subagent_type,omitempty"`
+	SubagentModel  string `json:"subagent_model,omitempty"`
+	SubagentPrompt string `json:"subagent_prompt,omitempty"`
 }
 
 func printActivityMessage(msg types.HubMessage, collapsedSimilar int) {

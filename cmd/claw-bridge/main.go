@@ -809,20 +809,24 @@ type agentResult struct {
 }
 
 type agentActivity struct {
-	Kind       string `json:"kind"`
-	Stream     string `json:"stream,omitempty"`
-	Phase      string `json:"phase,omitempty"`
-	Tool       string `json:"tool,omitempty"`
-	Detail     string `json:"detail,omitempty"`
-	Command    string `json:"command,omitempty"`
-	Path       string `json:"path,omitempty"`
-	URL        string `json:"url,omitempty"`
-	Message    string `json:"message,omitempty"`
-	Error      string `json:"error,omitempty"`
-	CallID     string `json:"call_id,omitempty"`
-	DurationMs int64  `json:"duration_ms,omitempty"`
-	ExitCode   *int   `json:"exit_code,omitempty"`
-	Result     string `json:"result,omitempty"`
+	Kind           string `json:"kind"`
+	Stream         string `json:"stream,omitempty"`
+	Phase          string `json:"phase,omitempty"`
+	Tool           string `json:"tool,omitempty"`
+	Detail         string `json:"detail,omitempty"`
+	Command        string `json:"command,omitempty"`
+	Path           string `json:"path,omitempty"`
+	URL            string `json:"url,omitempty"`
+	Message        string `json:"message,omitempty"`
+	Error          string `json:"error,omitempty"`
+	CallID         string `json:"call_id,omitempty"`
+	DurationMs     int64  `json:"duration_ms,omitempty"`
+	ExitCode       *int   `json:"exit_code,omitempty"`
+	Result         string `json:"result,omitempty"`
+	SubagentName   string `json:"subagent_name,omitempty"`
+	SubagentType   string `json:"subagent_type,omitempty"`
+	SubagentModel  string `json:"subagent_model,omitempty"`
+	SubagentPrompt string `json:"subagent_prompt,omitempty"`
 }
 
 // inFlightToolCall is an unresolved tool start awaiting its terminal event.
@@ -1012,6 +1016,10 @@ func cleanAgentActivity(a agentActivity) agentActivity {
 	a.Message = sanitizeActivityText(a.Message)
 	a.Error = sanitizeActivityText(a.Error)
 	a.CallID = sanitizeActivityText(a.CallID)
+	a.SubagentName = sanitizeActivityText(a.SubagentName)
+	a.SubagentType = sanitizeActivityText(a.SubagentType)
+	a.SubagentModel = sanitizeActivityText(a.SubagentModel)
+	a.SubagentPrompt = sanitizeActivityTextLimit(truncateResult(a.SubagentPrompt, 500), 0)
 	// Truncate before redacting: results can be megabytes of tool output, and
 	// the redaction scan lowercases the remaining string once per replacer. A
 	// secret split by the cut still redacts — the prefix match runs to
@@ -1610,18 +1618,23 @@ func (gs *gatewaySession) readLoop(ctx context.Context) {
 				url := firstNonEmpty(agentPayload.Data.URL, agentPayload.Data.URI, nestedString(rawAgentPayload.Data, "url", "uri"))
 				meta := firstNonEmpty(agentPayload.Data.Meta, nestedString(rawAgentPayload.Data, "meta"))
 				command, path, url, detail := resolveToolActivityDetail(tool, command, path, url, meta, rawAgentPayload.Data)
+				subagentName, subagentType, subagentModel, subagentPrompt := resolveSubagentFields(tool, rawAgentPayload.Data)
 				activity := agentActivity{
-					Kind:    kind,
-					Stream:  agentPayload.Stream,
-					Phase:   agentPayload.Data.Phase,
-					Tool:    tool,
-					Detail:  detail,
-					Command: command,
-					Path:    path,
-					URL:     url,
-					Message: firstNonEmpty(agentPayload.Data.Message, agentPayload.Data.Status),
-					Error:   agentPayload.Data.Error,
-					CallID:  toolCallID(rawAgentPayload.Data),
+					Kind:           kind,
+					Stream:         agentPayload.Stream,
+					Phase:          agentPayload.Data.Phase,
+					Tool:           tool,
+					Detail:         detail,
+					Command:        command,
+					Path:           path,
+					URL:            url,
+					Message:        firstNonEmpty(agentPayload.Data.Message, agentPayload.Data.Status),
+					Error:          agentPayload.Data.Error,
+					CallID:         toolCallID(rawAgentPayload.Data),
+					SubagentName:   subagentName,
+					SubagentType:   subagentType,
+					SubagentModel:  subagentModel,
+					SubagentPrompt: subagentPrompt,
 				}
 				// Outcome fields exist only once the call finished. Scraping them
 				// from start events would surface tool *inputs* (e.g. a Write's
@@ -1693,6 +1706,20 @@ func isSubagentTool(tool string) bool {
 		return true
 	}
 	return false
+}
+
+func resolveSubagentFields(tool string, data map[string]interface{}) (name, subType, model, prompt string) {
+	if !isSubagentTool(tool) {
+		return "", "", "", ""
+	}
+	name = nestedString(data, "description", "title", "label", "name")
+	if strings.EqualFold(strings.TrimSpace(name), strings.TrimSpace(tool)) {
+		name = ""
+	}
+	prompt = nestedString(data, "prompt", "instructions", "task", "message")
+	subType = nestedString(data, "subagent_type", "subagentType", "agent_type", "agentType")
+	model = nestedString(data, "model", "model_id", "modelId")
+	return name, subType, model, prompt
 }
 
 func resolveToolActivityDetail(tool, command, path, url, meta string, data map[string]interface{}) (string, string, string, string) {
