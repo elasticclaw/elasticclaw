@@ -55,7 +55,13 @@ export function useNowTickUntil(active: boolean, untilMs: number): number {
       }
     }
   }, [ticking])
-  return now
+  // Past the deadline the derived *status* can no longer change, but the
+  // labels rendered from this clock are ages ("output 30s ago") that keep
+  // growing. Freezing here left a claw that died mid-Task reporting "30s"
+  // hours later, so fall back to the shared minute clock: cheap enough to run
+  // on an idle chat, accurate enough for a label counting in minutes.
+  const minuteNow = useNowMinuteTick(!ticking)
+  return ticking ? now : Math.max(now, minuteNow)
 }
 
 /** Returns a clock refreshed once per minute for age labels. */

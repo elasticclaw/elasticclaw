@@ -1447,6 +1447,13 @@ function ClawChatView({
     openSubagentOutputMs > 0 ? openSubagentOutputMs + SUBAGENT_STALE_MS : 0
   )
   const subagents = useMemo(() => collectSubagents(turns, subagentNow), [turns, subagentNow])
+  // Read through a ref, not a dependency: this list is re-derived once a
+  // second, and making the open handler depend on it would hand the whole
+  // timeline a new callback on every tick.
+  const subagentsRef = useRef(subagents)
+  useEffect(() => {
+    subagentsRef.current = subagents
+  }, [subagents])
   const [subagentView, setSubagentView] = useSubagentView()
   // Mobile has no room for a 300px rail or a lane strip above a phone-height
   // transcript — Task step rows remain the way in there.
@@ -1503,9 +1510,16 @@ function ClawChatView({
   // must go to the top of the new content and the bottom-pin must let go —
   // otherwise usePinnedAutoScroll would immediately drag the user to the end
   // of the subagent's result.
+  // The id may be a step id rather than a subagent id — a Task whose terminal
+  // event lands after an interleaved message is rendered as two rows, and only
+  // the first carries the merged subagent's id. Resolve before touching scroll
+  // state: an id that resolves to nothing must leave the transcript alone
+  // instead of yanking it to the top of loaded history with no panel to show.
   const handleOpenSubagent = useCallback(
     (id: string) => {
-      setOpenSubagentId(id)
+      const target = subagentsRef.current.find((sub) => sub.stepIds.includes(id))
+      if (!target) return
+      setOpenSubagentId(target.id)
       pinnedToBottom.current = false
       setShowScrollBtn(false)
       const el = scrollRef.current

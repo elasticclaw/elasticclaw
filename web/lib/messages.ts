@@ -159,6 +159,13 @@ export function pruneOldestLiveActivities(
   let dropped = 0
   let fromMs = Infinity
   let toMs = -Infinity
+  // Position of the *last* row folded into the marker, not the first: the
+  // marker is stamped with `toMs`, the newest time it covers, and the two must
+  // agree. Placed at the first dropped row instead, a marker that absorbed an
+  // earlier one could sit before the current turn's user message while
+  // covering activity rows from inside that turn — and currentTurnSubagents,
+  // which scans only from that user message on, would then miss it and publish
+  // an undercount as fact.
   let insertAt = -1
   const kept: Message[] = []
 
@@ -172,14 +179,14 @@ export function pruneOldestLiveActivities(
       dropped += message.activitySummary?.count ?? 0
       const meta = message.activitySummary
       cover(meta?.from ? Date.parse(meta.from) : messageTimeMs(message), meta?.to ? Date.parse(meta.to) : messageTimeMs(message))
-      if (insertAt === -1) insertAt = kept.length
+      insertAt = kept.length
       continue
     }
     if (message.role === "activity" && toDrop > 0) {
       toDrop -= 1
       dropped += 1
       cover(messageTimeMs(message), messageTimeMs(message))
-      if (insertAt === -1) insertAt = kept.length
+      insertAt = kept.length
       continue
     }
     kept.push(message)

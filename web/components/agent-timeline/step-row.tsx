@@ -15,6 +15,7 @@ import {
   Wrench,
 } from "lucide-react"
 import { cn } from "@/lib/utils"
+import { isSubagentStep } from "@/lib/subagents"
 import {
   formatDurationMs,
   type Step,
@@ -85,7 +86,11 @@ export function StepRow({
   const anchor = useToggleAnchor()
   const hasBody = Boolean(step.result || step.error)
   const isCard = density === "card"
-  const opensSubagent = Boolean(onOpenSubagent) && step.kind === "tool" && step.category === "task"
+  // isSubagentStep, not `category === "task"`: toolCategory maps Skill,
+  // TaskStop, spawn_task and anything matching /workflow|dispatch/ to "task"
+  // too, and those have no drill-down to open — they would trade their inline
+  // result for a chevron that does nothing.
+  const opensSubagent = Boolean(onOpenSubagent) && isSubagentStep(step)
   const expanded = !opensSubagent && (userToggled ?? (step.status === "failed" && !isCard)) && hasBody
 
   const running = step.status === "running"
