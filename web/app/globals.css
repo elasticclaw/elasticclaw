@@ -47,6 +47,11 @@
   --status-idle: #f59e0b;
   --status-offline: var(--muted-foreground);
   --status-error: #ef4444;
+  /* Step/subagent lifecycle — the running blue is the same one step-row uses
+     for its running accent; --step-done is the neutral "finished, nothing to
+     see here" grey that must not compete with the live colors. */
+  --step-running: #3b82f6;
+  --step-done: #a3a3a3;
   --text-error: #b91c1c;
   --text-warning: #92400e;
   /* Heatmap — one blue family, evenly stepped in lightness, calm chroma. */
@@ -100,6 +105,8 @@
   --status-idle: #f59e0b;
   --status-offline: var(--muted-foreground);
   --status-error: #ef4444;
+  --step-running: #3b82f6;
+  --step-done: #525252;
   --text-error: #f87171;
   --text-warning: #fbbf24;
   --heatmap-1: oklch(0.34 0.055 250);
@@ -198,4 +205,18 @@
 }
 .scrollbar-thin::-webkit-scrollbar-thumb:hover {
   background-color: var(--ring);
+}
+
+/* Subagent liveness pulse — a quiet subagent's dot breathes instead of blinking
+   so a rail full of them does not strobe. Lives here rather than in a <style>
+   tag so the keyframe is shared by the rail, the lanes and the drill-down. */
+@keyframes subagent-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.45; }
+}
+.animate-subagent-pulse {
+  animation: subagent-pulse 2s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .animate-subagent-pulse { animation: none; }
 }
