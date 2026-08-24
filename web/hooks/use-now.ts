@@ -20,12 +20,23 @@ const minuteListeners = new Set<() => void>()
  * drift is corrected client-side (render times with suppressHydrationWarning).
  */
 export function useNowTick(active: boolean): number {
+  return useNowTickUntil(active, 0)
+}
+
+/**
+ * Same clock, but it also keeps ticking until `untilMs` has passed — for a
+ * surface whose labels have one last scheduled change after the work it
+ * watches stops (a subagent that must age out of "running" once its claw
+ * dies). Ticking ends on its own at the deadline; pass 0 for no deadline.
+ */
+export function useNowTickUntil(active: boolean, untilMs: number): number {
   // With no timer running, `sharedNow` is as old as the last active
   // subscriber: mounting on it would compare fresh timestamps against a clock
   // from hours ago, so an inactive subscriber reads the real time instead.
   const [now, setNow] = useState(() => (sharedTimer ? sharedNow : Date.now()))
+  const ticking = active || now < untilMs
   useEffect(() => {
-    if (!active) return
+    if (!ticking) return
     const listener = () => setNow(sharedNow)
     listeners.add(listener)
     if (!sharedTimer) {
@@ -43,7 +54,7 @@ export function useNowTick(active: boolean): number {
         sharedTimer = null
       }
     }
-  }, [active])
+  }, [ticking])
   return now
 }
 

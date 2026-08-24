@@ -23,7 +23,7 @@ import { SubagentLanes } from "@/components/agent-timeline/subagent-lanes"
 import { SubagentDetail } from "@/components/agent-timeline/subagent-detail"
 import { useSubagentView, type SubagentView } from "@/components/agent-timeline/use-subagent-view"
 import { collectSubagents, latestOpenSubagentOutputMs, SUBAGENT_STALE_MS } from "@/lib/subagents"
-import { useNowTick } from "@/hooks/use-now"
+import { useNowTick, useNowTickUntil } from "@/hooks/use-now"
 import { CopyTranscriptButton } from "@/components/copy-transcript-button"
 import {
   DndContext,
@@ -1442,9 +1442,10 @@ function ClawChatView({
   // Once every open call is past SUBAGENT_STALE_MS nothing here can change
   // again, so an idle chat still stops re-deriving this list once a second.
   const openSubagentOutputMs = useMemo(() => latestOpenSubagentOutputMs(turns), [turns])
-  const subagentsCanChange =
-    isWorking || (openSubagentOutputMs > 0 && Date.now() - openSubagentOutputMs <= SUBAGENT_STALE_MS)
-  const subagentNow = useNowTick(subagentsCanChange)
+  const subagentNow = useNowTickUntil(
+    isWorking,
+    openSubagentOutputMs > 0 ? openSubagentOutputMs + SUBAGENT_STALE_MS : 0
+  )
   const subagents = useMemo(() => collectSubagents(turns, subagentNow), [turns, subagentNow])
   const [subagentView, setSubagentView] = useSubagentView()
   // Mobile has no room for a 300px rail or a lane strip above a phone-height
