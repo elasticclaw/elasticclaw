@@ -62,6 +62,12 @@ interface SidebarProps {
   onToggleCollapse: () => void
   /** Per-claw "current tool" one-liners for the second row line. */
   activityLines?: Record<string, string>
+  /**
+   * Per-claw subagent one-liners. Absent for any claw whose loaded message
+   * window cannot cover the current turn — the count would undercount, so the
+   * line is omitted rather than guessed (see lib/subagents.ts).
+   */
+  subagentLines?: Record<string, string>
   isAdmin?: boolean
   onSelectWorkflow?: (workflow: Workflow | null) => void
   view?: "agents" | "analytics"
@@ -81,12 +87,14 @@ const SortableClawCard = memo(function SortableClawCard({
   onSelectClaw,
   onTogglePin,
   activityLine,
+  subagentLine,
 }: {
   claw: Claw
   isSelected: boolean
   onSelectClaw: (id: string) => void
   onTogglePin: (id: string) => void
   activityLine?: string
+  subagentLine?: string
 }) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } =
     useSortable({ id: claw.id })
@@ -109,6 +117,7 @@ const SortableClawCard = memo(function SortableClawCard({
         onClick={handleClick}
         onTogglePin={handleTogglePin}
         activityLine={activityLine}
+        subagentLine={subagentLine}
         stateChip={stateChip}
       />
     </div>
@@ -134,6 +143,7 @@ export const Sidebar = memo(function Sidebar({
   isCollapsed,
   onToggleCollapse,
   activityLines,
+  subagentLines,
   isAdmin = true,
   onSelectWorkflow,
   view = "agents",
@@ -537,7 +547,7 @@ export const Sidebar = memo(function Sidebar({
                   <div className="space-y-1 px-2 py-2">
                     {items.length === 0 ? <p className="px-2 py-1 text-xs text-muted-foreground">{meta.empty}</p> :
                       <SortableContext items={ids} strategy={verticalListSortingStrategy}>
-                        {items.map((candidate) => <SortableClawCard key={candidate.id} claw={candidate} isSelected={candidate.id === selectedClawId} onSelectClaw={onSelectClaw} onTogglePin={onTogglePin} activityLine={activityLines?.[candidate.id]} />)}
+                        {items.map((candidate) => <SortableClawCard key={candidate.id} claw={candidate} isSelected={candidate.id === selectedClawId} onSelectClaw={onSelectClaw} onTogglePin={onTogglePin} activityLine={activityLines?.[candidate.id]} subagentLine={subagentLines?.[candidate.id]} />)}
                       </SortableContext>}
                   </div>
                 </section>

@@ -12,6 +12,8 @@ import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet"
 import { useIsMobile } from "@/hooks/use-mobile"
 import { useHub } from "@/hooks/use-hub"
 import { useBoardActivityPrefetch } from "@/hooks/use-board-activity-prefetch"
+import { currentTurnSubagentLine } from "@/lib/subagents"
+import { useNowMinuteTick } from "@/hooks/use-now"
 import { demoteStaleRunning, pairActivitySteps, trailingActivityRun } from "@/lib/turns"
 import { type Workflow } from "@/lib/api"
 import {
@@ -280,6 +282,30 @@ export function HomeShell() {
     setSidebarActivity(calculatedSidebarActivity)
   }
 
+  // Sidebar third line: how many subagents the current turn is running. The
+  // board's message map is a recent-activity *window*, so currentTurnSubagentLine
+  // returns null whenever that window cannot reach the start of the turn — a
+  // claw whose Task calls are still behind an unexpanded summary gets no line
+  // at all rather than an undercount. See lib/subagents.ts.
+  // A minute clock is plenty: the line counts running + quiet together, so the
+  // 30s running/quiet split never changes what it says.
+  const subagentNow = useNowMinuteTick(true)
+  const calculatedSidebarSubagents = useMemo(() => {
+    const lines: Record<string, string> = {}
+    const now = subagentNow
+    for (const claw of claws) {
+      const msgs = messages[claw.id]
+      if (!msgs || msgs.length === 0) continue
+      const line = currentTurnSubagentLine(msgs, now)
+      if (line) lines[claw.id] = line
+    }
+    return lines
+  }, [claws, messages, subagentNow])
+  const [sidebarSubagents, setSidebarSubagents] = useState(calculatedSidebarSubagents)
+  if (Object.keys(sidebarSubagents).length !== Object.keys(calculatedSidebarSubagents).length || Object.keys(sidebarSubagents).some((id) => sidebarSubagents[id] !== calculatedSidebarSubagents[id])) {
+    setSidebarSubagents(calculatedSidebarSubagents)
+  }
+
   // Mark messages as read when selecting a claw + lazy load history
   const handleSelectClaw = useCallback(
     (id: string) => {
@@ -390,6 +416,7 @@ export function HomeShell() {
       onToggleCollapse={handleToggleSidebarCollapse}
       onReorderClaws={reorderClaws}
       activityLines={sidebarActivity}
+      subagentLines={sidebarSubagents}
       isAdmin={isAdmin}
       onSelectWorkflow={setSelectedWorkflow}
       view={view}
