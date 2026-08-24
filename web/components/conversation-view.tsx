@@ -18,6 +18,11 @@ import { TimelineToolbar, useTimelineDensity } from "@/components/agent-timeline
 import { NowStrip } from "@/components/agent-timeline/now-strip"
 import { StepRow } from "@/components/agent-timeline/step-row"
 import { ActivitySummaryBlock } from "@/components/agent-timeline/activity-summary-block"
+import { SubagentRail } from "@/components/agent-timeline/subagent-rail"
+import { SubagentLanes } from "@/components/agent-timeline/subagent-lanes"
+import { SubagentDetail } from "@/components/agent-timeline/subagent-detail"
+import { useSubagentView, type SubagentView } from "@/components/agent-timeline/use-subagent-view"
+import { collectSubagents } from "@/lib/subagents"
 import { useNowTick } from "@/hooks/use-now"
 import { CopyTranscriptButton } from "@/components/copy-transcript-button"
 import {
@@ -1307,6 +1312,52 @@ const MessageBubble = memo(function MessageBubble({
     </div>
   )})
 
+/**
+ * Panel / Lanes segmented pair. "off" is reachable by clicking the active
+ * segment again — the pair reads as two choices, but a user who wants the
+ * transcript full-width should not have to hunt for a third button.
+ */
+function SubagentViewToggle({
+  view,
+  onChange,
+}: {
+  view: SubagentView
+  onChange: (v: SubagentView) => void
+}) {
+  const options: { value: Exclude<SubagentView, "off">; label: string }[] = [
+    { value: "rail", label: "Panel" },
+    { value: "lanes", label: "Lanes" },
+  ]
+  return (
+    <div
+      role="group"
+      aria-label="Subagent view"
+      className="flex items-center gap-0.5 rounded-md border border-border bg-muted/30 p-0.5"
+    >
+      {options.map((option) => {
+        const active = view === option.value
+        return (
+          <button
+            key={option.value}
+            type="button"
+            aria-pressed={active}
+            onClick={() => onChange(active ? "off" : option.value)}
+            title={active ? `Hide the subagent ${option.label.toLowerCase()}` : `Show subagents as ${option.label.toLowerCase()}`}
+            className={cn(
+              "rounded px-2 py-0.5 text-[10.5px] transition-colors",
+              active
+                ? "bg-accent font-medium text-accent-foreground"
+                : "text-muted-foreground hover:text-foreground"
+            )}
+          >
+            {option.label}
+          </button>
+        )
+      })}
+    </div>
+  )
+}
+
 // ─── ClawChatView ─────────────────────────────────────────────────────────────
 // Extracted so scroll refs are only live when this branch is mounted.
 
@@ -1383,6 +1434,33 @@ function ClawChatView({
   const runningStep = useMemo(() => latestRunningStep(turns), [turns])
   const isWorking = claw.isStreaming || Boolean(runningStep)
 
+  // Subagents. The clock only ticks while the claw is working: a finished
+  // transcript has no running subagent whose staleness could change, so an
+  // idle chat must not re-derive this list once a second.
+  const subagentNow = useNowTick(isWorking)
+  const subagents = useMemo(() => collectSubagents(turns, subagentNow), [turns, subagentNow])
+  const [subagentView, setSubagentView] = useSubagentView()
+  // Mobile has no room for a 300px rail or a lane strip above a phone-height
+  // transcript — Task step rows remain the way in there.
+  const effectiveSubagentView: SubagentView = isMobile ? "off" : subagentView
+  // Reset-on-prop-change during render (the same shape as turnsState above)
+  // rather than an effect: selecting another claw must not leave a stale
+  // drill-down mounted, and an effect would paint the wrong claw's subagent
+  // for one frame first.
+  const [openSubagentState, setOpenSubagentState] = useState<{ clawId: string; id: string | null }>({
+    clawId: claw.id,
+    id: null,
+  })
+  if (openSubagentState.clawId !== claw.id) setOpenSubagentState({ clawId: claw.id, id: null })
+  const openSubagentId = openSubagentState.clawId === claw.id ? openSubagentState.id : null
+  const setOpenSubagentId = useCallback(
+    (id: string | null) => setOpenSubagentState({ clawId: claw.id, id }),
+    [claw.id]
+  )
+  const openSubagent = openSubagentId
+    ? subagents.find((sub) => sub.id === openSubagentId) ?? null
+    : null
+
   // "Last output Xs ago" — the staleness signal. Live arrivals (chunks,
   // activities) are noted event-side in use-hub; the NowStrip subscribes to
   // them itself so per-chunk notifications do not re-render this panel.
@@ -1412,6 +1490,34 @@ function ClawChatView({
     setShowScrollBtn(!atBottom)
     onWindowScroll()
   }, [onWindowScroll, scrollRef, isProgrammaticScrollRef])
+
+  // Opening a drill-down replaces the transcript body, so the reading position
+  // must go to the top of the new content and the bottom-pin must let go —
+  // otherwise usePinnedAutoScroll would immediately drag the user to the end
+  // of the subagent's result.
+  const handleOpenSubagent = useCallback(
+    (id: string) => {
+      setOpenSubagentId(id)
+      pinnedToBottom.current = false
+      setShowScrollBtn(false)
+      const el = scrollRef.current
+      if (el) {
+        markProgrammaticScroll()
+        el.scrollTop = 0
+      }
+    },
+    [scrollRef, markProgrammaticScroll, setOpenSubagentId]
+  )
+
+  const handleCloseSubagent = useCallback(() => {
+    setOpenSubagentId(null)
+    const el = scrollRef.current
+    if (el) {
+      markProgrammaticScroll()
+      el.scrollTop = el.scrollHeight
+      pinnedToBottom.current = true
+    }
+  }, [scrollRef, markProgrammaticScroll, setOpenSubagentId])
 
   // Follow new rows and late content settling (markdown, images, streaming
   // growth) while pinned; never touch the scroll position otherwise.
@@ -1553,6 +1659,11 @@ function ClawChatView({
               <span className="text-sm text-muted-foreground font-mono">{formatUptime(claw.uptime)}</span>
             </div>
             <div className="flex items-center gap-2">
+              {/* Only offered when there is something to show — an agent that
+                  never spawned a subagent looks exactly as it did before. */}
+              {subagents.length > 0 && (
+                <SubagentViewToggle view={subagentView} onChange={setSubagentView} />
+              )}
               <CopyTranscriptButton
                 claw={claw}
                 messages={messages}
@@ -1576,8 +1687,14 @@ function ClawChatView({
         <NowStrip clawId={claw.id} step={runningStep} isStreaming={claw.isStreaming} lastMessageAt={lastMessageAt} />
       )}
       <TimelineToolbar density={density} onDensityChange={setDensity} stats={stats} />
+      {effectiveSubagentView === "lanes" && !openSubagent && (
+        <SubagentLanes subagents={subagents} now={subagentNow} onOpen={handleOpenSubagent} />
+      )}
 
-      <div ref={scrollRef} onScroll={handleScroll} className="flex-1 overflow-y-auto scrollbar-thin p-4 md:p-6 relative">
+      {/* The row wrapper owns the remaining height; scrollRef stays the one
+          scrolling element so the pin/anchor machinery is untouched. */}
+      <div className="flex min-h-0 flex-1">
+      <div ref={scrollRef} onScroll={handleScroll} className="min-w-0 flex-1 overflow-y-auto scrollbar-thin p-4 md:p-6 relative">
         <div ref={contentRef} className="space-y-4 max-w-3xl mx-auto">
           {loadingOlder && (
             <div className="flex justify-center py-2">
@@ -1589,7 +1706,19 @@ function ClawChatView({
               <div className="h-px w-full bg-border" />
             </div>
           )}
-          {messages.length === 0 && !streamingBuffer ? (
+          {openSubagent ? (
+            <>
+              <button
+                type="button"
+                onClick={handleCloseSubagent}
+                className="flex items-center gap-1 rounded-sm py-0.5 pr-2 text-[11px] text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-ring"
+              >
+                <ChevronLeft className="size-3.5 shrink-0" />
+                <span className="min-w-0 truncate font-mono">{claw.name}</span>
+              </button>
+              <SubagentDetail subagent={openSubagent} now={subagentNow} />
+            </>
+          ) : messages.length === 0 && !streamingBuffer ? (
             <p className="text-center text-muted-foreground py-12">No messages yet. Start the conversation below.</p>
           ) : (
             <AgentTimeline
@@ -1614,11 +1743,12 @@ function ClawChatView({
               unloadedToolCalls={unloadedActivityCount}
               loadingUnloaded={loadingActivity}
               onLoadUnloaded={loadAllActivity}
+              onOpenSubagent={subagents.length > 0 ? handleOpenSubagent : undefined}
             />
           )}
           <div ref={bottomRef} className="h-4" />
         </div>
-        {showScrollBtn && (
+        {showScrollBtn && !openSubagent && (
           <button
             onClick={scrollToBottom}
             className="absolute bottom-4 left-1/2 -translate-x-1/2 z-10 flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-secondary border border-border text-xs text-muted-foreground hover:text-foreground hover:bg-accent transition-colors shadow-md"
@@ -1626,6 +1756,10 @@ function ClawChatView({
             <ChevronDown className="size-3.5" />
             <span>Scroll to bottom</span>
           </button>
+        )}
+      </div>
+        {effectiveSubagentView === "rail" && subagents.length > 0 && (
+          <SubagentRail subagents={subagents} now={subagentNow} onOpen={handleOpenSubagent} />
         )}
       </div>
 
