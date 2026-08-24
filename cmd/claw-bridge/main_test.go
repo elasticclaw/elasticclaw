@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/base64"
@@ -8,6 +9,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"log"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -2862,5 +2864,114 @@ func TestReplayQueuedRunsTurnForInputs(t *testing.T) {
 	}
 	if len(ran) != 1 || ran[0] != "do the work" {
 		t.Fatalf("expected runTurn invoked with the input, got %v", ran)
+	}
+}
+
+// countActiveSubagents feeds the heartbeat's subagents_active fields, which
+// suppress the hub's "Agent stalled" notification — so it must count only
+// spawned subagent sessions with a run actually in flight, and any payload it
+// cannot understand must be an error (fields omitted from the heartbeat),
+// never a fabricated zero.
+func TestCountActiveSubagents(t *testing.T) {
+	payload := []byte(`{"sessions":[
+		{"key":"agent:main:subagent:abc","hasActiveRun":true},
+		{"key":"agent:main:subagent:def","hasActiveRun":false},
+		{"key":"agent:main:subagent:ghi"},
+		{"key":"agent:main","hasActiveRun":true},
+		{"key":"other:subagent:jkl","hasActiveRun":true,"activeRunIds":[]}
+	]}`)
+	count, err := countActiveSubagents(payload)
+	if err != nil {
+		t.Fatalf("countActiveSubagents: %v", err)
+	}
+	// abc and jkl only: the main session's own run is not subagent work, a
+	// missing hasActiveRun is "no information" rather than active, and an
+	// empty activeRunIds must not override an explicit hasActiveRun=true.
+	if count != 2 {
+		t.Fatalf("count = %d, want 2", count)
+	}
+
+	// An empty index is a successful "nothing running".
+	count, err = countActiveSubagents([]byte(`{"sessions":[]}`))
+	if err != nil || count != 0 {
+		t.Fatalf("empty index: count=%d err=%v, want 0, nil", count, err)
+	}
+
+	// No sessions index at all: this shape carries no information, so it must
+	// surface as an error, not as zero.
+	if _, err := countActiveSubagents([]byte(`{}`)); err == nil {
+		t.Fatal("missing sessions index did not error")
+	}
+	if _, err := countActiveSubagents([]byte(`{"sessions":null}`)); err == nil {
+		t.Fatal("null sessions index did not error")
+	}
+	if _, err := countActiveSubagents([]byte(`not json`)); err == nil {
+		t.Fatal("malformed payload did not error")
+	}
+
+	// A non-empty index whose rows do not carry the key field under the name
+	// we expect (cross-version shape drift) must be an error: matching zero
+	// rows out of an index we could not read would be a fabricated "nothing
+	// running", and the hub treats that as positive evidence.
+	if _, err := countActiveSubagents([]byte(`{"sessions":[
+		{"sessionKey":"agent:main:subagent:abc","hasActiveRun":true},
+		{"sessionKey":"agent:main","hasActiveRun":true}
+	]}`)); err == nil {
+		t.Fatal("keyless rows did not error")
+	}
+}
+
+// subagentHeartbeatFields decides whether the heartbeat carries the
+// subagents_active fields at all. The hub reads an explicit false as positive
+// "nothing running" evidence and clears its suppression state, so the fields
+// must appear only when the sessions.list poll actually succeeded — never on
+// a poll error or a not-ready gateway.
+func TestSubagentHeartbeatFields(t *testing.T) {
+	var logBuf bytes.Buffer
+	prevOut := log.Writer()
+	log.SetOutput(&logBuf)
+	defer log.SetOutput(prevOut)
+
+	// Not-ready gateway: no fields, and the poll must not even run.
+	failLogged := false
+	fields, suffix := subagentHeartbeatFields(false, func() (int, error) {
+		t.Fatal("poll ran while the gateway session was not ready")
+		return 0, nil
+	}, &failLogged)
+	if fields != nil || suffix != "" || failLogged {
+		t.Fatalf("not-ready gateway: fields=%v suffix=%q failLogged=%v, want none", fields, suffix, failLogged)
+	}
+
+	// Successful poll: both fields, matching values.
+	fields, suffix = subagentHeartbeatFields(true, func() (int, error) { return 2, nil }, &failLogged)
+	if fields["subagents_active"] != true || fields["subagent_active_count"] != 2 || len(fields) != 2 {
+		t.Fatalf("successful poll fields = %v, want subagents_active=true subagent_active_count=2", fields)
+	}
+	if !strings.Contains(suffix, "subagents_active=true") {
+		t.Fatalf("log suffix %q does not surface the activity", suffix)
+	}
+	fields, _ = subagentHeartbeatFields(true, func() (int, error) { return 0, nil }, &failLogged)
+	if fields["subagents_active"] != false || fields["subagent_active_count"] != 0 {
+		t.Fatalf("zero-count poll fields = %v, want explicit false/0", fields)
+	}
+
+	// Failing poll (e.g. older gateway without sessions.list): both fields
+	// omitted, and the failure is logged exactly once across repeats.
+	pollErr := func() (int, error) { return 0, errors.New("method not found") }
+	for i := 0; i < 3; i++ {
+		if fields, suffix = subagentHeartbeatFields(true, pollErr, &failLogged); fields != nil || suffix != "" {
+			t.Fatalf("failing poll %d produced fields=%v suffix=%q, want none", i, fields, suffix)
+		}
+	}
+	if !failLogged {
+		t.Fatal("failing poll did not arm the logged-once flag")
+	}
+	if got := strings.Count(logBuf.String(), "subagent activity poll failed"); got != 1 {
+		t.Fatalf("failure logged %d times across 3 failing polls, want 1", got)
+	}
+
+	// A recovery re-arms the log for the next outage.
+	if _, _ = subagentHeartbeatFields(true, func() (int, error) { return 1, nil }, &failLogged); failLogged {
+		t.Fatal("successful poll did not re-arm the failure log")
 	}
 }

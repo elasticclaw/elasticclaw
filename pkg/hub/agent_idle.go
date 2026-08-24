@@ -69,6 +69,24 @@ const agentIdleResumeBlindGrace = minBusyTurnMax
 const (
 	lifecycleDefaultIdleAfter = 5 * time.Minute
 
+	// bridgeHeartbeatInterval is the bridge's heartbeat period — the 15s
+	// ticker in startHubKeepalives (cmd/claw-bridge). Named here because the
+	// freshness window below must be expressed in heartbeats, not in an
+	// unrelated wall-clock guess; if the bridge's ticker changes, this must
+	// change with it (defaultGatewayUnhealthyMax's comment carries the same
+	// dependency).
+	bridgeHeartbeatInterval = 15 * time.Second
+
+	// subagentsActiveFreshFor bounds how long one "subagents active" report
+	// keeps suppressing the agent_idle alert without being renewed. A live
+	// bridge re-reports every bridgeHeartbeatInterval, so the state is
+	// normally refreshed long before this expires; three intervals tolerate a
+	// couple of dropped or delayed heartbeats without flapping, while a bridge
+	// that dies (or stops being able to poll the gateway) can silence the
+	// alert for at most ~45s past its last word — stale state must never
+	// suppress it indefinitely.
+	subagentsActiveFreshFor = 3 * bridgeHeartbeatInterval
+
 	// agentIdleStretchSlack absorbs clock drift in the stretch-start value
 	// across hub restarts: a reconnect seeds lastTurnFinishedAt from the last
 	// claw message's created_at, which can differ from the pre-restart
@@ -145,9 +163,15 @@ func (s *Server) agentIdleBaseline(nowAt time.Time, enabled bool) (baseline time
 type agentIdleSnapshot struct {
 	busy             bool
 	noProgressPaused bool
-	lastTurn         time.Time
-	notifiedAt       time.Time
-	connectedAt      time.Time
+	// subagentsActive is true while the bridge RECENTLY reported spawned
+	// subagent sessions with a run in flight (sessions.list, ridden on the
+	// heartbeat). Freshness matters: the report suppresses the alert, so a
+	// stale one — a bridge that died mid-spawn — must expire (see
+	// subagentsActiveFreshFor) rather than silence the alert forever.
+	subagentsActive bool
+	lastTurn        time.Time
+	notifiedAt      time.Time
+	connectedAt     time.Time
 	// turnBoundarySeen is false while the hub has never watched a turn end on
 	// this connection, which is exactly when it cannot tell an idle agent from
 	// one whose turn it simply cannot see.
@@ -177,6 +201,7 @@ func agentIdleSnapshotOf(cc *clawConn) agentIdleSnapshot {
 	snap := agentIdleSnapshot{
 		busy:             cc.isBusyLocked(),
 		noProgressPaused: cc.noProgressPaused,
+		subagentsActive:  !cc.subagentsActiveAt.IsZero() && time.Since(cc.subagentsActiveAt) < subagentsActiveFreshFor,
 		lastTurn:         cc.lastTurnFinishedAt,
 		notifiedAt:       cc.idleNotifiedAt,
 		connectedAt:      cc.connectedAt,
@@ -239,6 +264,21 @@ func (s *Server) checkAgentIdle(nowAt time.Time, clawID string, cc *clawConn) {
 	if snap.busy {
 		// A running turn ends the idle stretch.
 		s.clearAgentIdleLatch(clawID, cc)
+		return
+	}
+	if snap.subagentsActive {
+		// Spawned subagent sessions are still running on the gateway. An agent
+		// that calls sessions_yield after sessions_spawn ENDS ITS TURN on
+		// purpose — the spawned work's completion arrives as the next message —
+		// so by turn state alone it is indistinguishable from a stall, and
+		// notifying here pages a human about an agent that is working exactly
+		// as designed. This is NOT the busy case above: busy means a turn is in
+		// flight and legitimately clears the latch, whereas here the claw is
+		// neither confirmed idle nor confirmed to have run a turn. So leave
+		// every latch exactly as it is — idle_since untouched, idleNotifiedAt
+		// unstamped — and re-decide on the next tick, once the completion turn
+		// runs (clearing the latch through the busy path) or the activity
+		// report goes stale.
 		return
 	}
 	stretchStartAt := snap.stretchStartAt
@@ -449,6 +489,9 @@ func (s *Server) checkAgentIdleResume(nowAt time.Time, clawID string, cc *clawCo
 		return
 	}
 	snap := agentIdleSnapshotOf(cc)
+	// snap.subagentsActive is deliberately NOT consulted here: the auto-resume
+	// still fires for a claw parked on sessions_yield with spawned work
+	// running. Only the notification is suppressed by that signal.
 	if snap.busy {
 		// A turn is running: nothing to resume.
 		//
