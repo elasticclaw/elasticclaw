@@ -1723,14 +1723,25 @@ func resolveSubagentFields(tool, phase string, data map[string]interface{}) (nam
 		nameKeys = []string{"description"}
 		promptKeys = []string{"prompt", "instructions"}
 	}
-	name = nestedString(data, nameKeys...)
-	if strings.EqualFold(strings.TrimSpace(name), strings.TrimSpace(tool)) {
-		name = ""
-	}
+	name = resolveSubagentName(tool, data, nameKeys)
 	prompt = nestedString(data, promptKeys...)
 	subType = nestedString(data, "subagent_type", "subagentType", "agent_type", "agentType")
 	model = nestedString(data, "model", "model_id", "modelId")
 	return name, subType, model, prompt
+}
+
+// resolveSubagentName consults the candidate name keys one at a time so a key
+// holding only the generic tool name ("Task") is skipped instead of discarding
+// the real description carried by a later key or a nested container.
+func resolveSubagentName(tool string, data map[string]interface{}, keys []string) string {
+	for _, key := range keys {
+		candidate := nestedString(data, key)
+		if candidate == "" || strings.EqualFold(strings.TrimSpace(candidate), strings.TrimSpace(tool)) {
+			continue
+		}
+		return candidate
+	}
+	return ""
 }
 
 func resolveToolActivityDetail(tool, command, path, url, meta string, data map[string]interface{}) (string, string, string, string) {

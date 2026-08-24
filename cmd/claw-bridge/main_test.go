@@ -962,6 +962,13 @@ func TestResolveSubagentFields(t *testing.T) {
 			wantName: "useful subagent",
 		},
 		{
+			name:     "generic title falls through to nested description",
+			tool:     "Task",
+			phase:    "running",
+			data:     map[string]interface{}{"title": "Task", "input": map[string]interface{}{"description": "research auth flow", "prompt": "Inspect the auth flow."}},
+			wantName: "research auth flow", wantPrompt: "Inspect the auth flow.",
+		},
+		{
 			name: "non task tool is empty",
 			tool: "exec",
 			data: map[string]interface{}{"input": map[string]interface{}{
