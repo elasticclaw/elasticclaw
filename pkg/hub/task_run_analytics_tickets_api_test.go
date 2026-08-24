@@ -247,6 +247,85 @@ func TestCollapseTaskRunAnalyticsTicketStory(t *testing.T) {
 	}
 }
 
+func TestTriggerActorRequester(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		actor triggerActor
+		want  string
+	}{
+		{name: "name preferred", actor: triggerActor{Name: "Ada Lovelace", Email: "ada@example.com", Login: "ada"}, want: "Ada Lovelace"},
+		{name: "email falls back", actor: triggerActor{Email: "ada@example.com", Login: "ada"}, want: "ada@example.com"},
+		{name: "login falls back", actor: triggerActor{Login: "ada"}, want: "ada"},
+		{name: "whitespace fields ignored", actor: triggerActor{Name: "  ", Email: " \t ", Login: " ada "}, want: "ada"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := triggerActorRequester(test.actor); got != test.want {
+				t.Fatalf("triggerActorRequester(%#v) = %q, want %q", test.actor, got, test.want)
+			}
+		})
+	}
+}
+
+func TestBuildTaskRunAnalyticsTicketUsesFirstTriggerActor(t *testing.T) {
+	build := func(t *testing.T, actors map[string]string, runs []taskRunAnalyticsRunView, metadata taskRunAnalyticsTicketMetadata) taskRunAnalyticsTicketView {
+		t.Helper()
+		s, db := newTaskRunAnalyticsAPITestServer(t)
+		for clawID, actorJSON := range actors {
+			if _, err := db.Exec(`INSERT INTO claws(id,tenant_id,name,template,status,trigger_actor_json,created_at) VALUES(?,?,?,?,?,?,datetime('now'))`, clawID, "test-tenant-id", clawID, "base", "connected", actorJSON); err != nil {
+				t.Fatalf("insert claw %s: %v", clawID, err)
+			}
+		}
+		if metadata.updatedAt > 0 {
+			if _, err := db.Exec(`INSERT INTO ticket_metadata(tenant_id,integration,integration_workspace,issue_id,requester,updated_at) VALUES(?,?,?,?,?,?)`, "test-tenant-id", "external", "", "ENG-1", metadata.requester, metadata.updatedAt); err != nil {
+				t.Fatalf("insert cached metadata: %v", err)
+			}
+			cached, err := s.readTaskRunAnalyticsTicketMetadataPage(context.Background(), "test-tenant-id", []string{taskRunAnalyticsTicketKey("external", "", "ENG-1")})
+			if err != nil {
+				t.Fatalf("read cached metadata: %v", err)
+			}
+			metadata = cached[taskRunAnalyticsTicketKey("external", "", "ENG-1")]
+		}
+		clawIDs := make([]string, 0, len(runs))
+		for _, run := range runs {
+			clawIDs = append(clawIDs, run.ClawID)
+		}
+		actorsByClaw, err := s.readTaskRunAnalyticsTriggerActorsForClaws("test-tenant-id", clawIDs)
+		if err != nil {
+			t.Fatalf("read trigger actors: %v", err)
+		}
+		ticket, err := s.buildTaskRunAnalyticsTicket("test-tenant-id", "ENG-1", runs, nil, nil, nil, actorsByClaw, metadata, false)
+		if err != nil {
+			t.Fatalf("build ticket: %v", err)
+		}
+		return ticket
+	}
+	run := func(id, clawID string, startedAt int64) taskRunAnalyticsRunView {
+		return taskRunAnalyticsRunView{RunID: id, ClawID: clawID, Integration: "external", IssueID: "ENG-1", StartedAt: startedAt, Status: taskRunStatusClean}
+	}
+	freshMetadata := func(requester string) taskRunAnalyticsTicketMetadata {
+		return taskRunAnalyticsTicketMetadata{requester: requester, updatedAt: time.Now().UnixMilli()}
+	}
+	for _, test := range []struct {
+		name     string
+		actors   map[string]string
+		runs     []taskRunAnalyticsRunView
+		metadata taskRunAnalyticsTicketMetadata
+		want     string
+	}{
+		{name: "name", actors: map[string]string{"claw-name": `{"name":"Ada Lovelace","email":"ada@example.com","login":"ada"}`}, runs: []taskRunAnalyticsRunView{run("run-name", "claw-name", 1)}, metadata: freshMetadata("tracker creator"), want: "Ada Lovelace"},
+		{name: "email", actors: map[string]string{"claw-email": `{"email":"ada@example.com","login":"ada"}`}, runs: []taskRunAnalyticsRunView{run("run-email", "claw-email", 1)}, metadata: freshMetadata("tracker creator"), want: "ada@example.com"},
+		{name: "login", actors: map[string]string{"claw-login": `{"login":"octocat","type":"User"}`}, runs: []taskRunAnalyticsRunView{run("run-login", "claw-login", 1)}, metadata: freshMetadata("tracker creator"), want: "octocat"},
+		{name: "empty actor preserves cached requester", actors: map[string]string{"claw-empty": `{}`}, runs: []taskRunAnalyticsRunView{run("run-empty", "claw-empty", 1)}, metadata: freshMetadata("tracker creator"), want: "tracker creator"},
+		{name: "older run actor wins", actors: map[string]string{"claw-older": `{"name":"Older Trigger"}`, "claw-newer": `{"name":"Newer Trigger"}`}, runs: []taskRunAnalyticsRunView{run("run-newer", "claw-newer", 2), run("run-older", "claw-older", 1)}, metadata: freshMetadata("tracker creator"), want: "Older Trigger"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := build(t, test.actors, test.runs, test.metadata).Requester; got != test.want {
+				t.Fatalf("Requester = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
 func TestTaskRunAnalyticsTicketStoryUsesHubNativeEventTypes(t *testing.T) {
 	tests := []struct {
 		eventType string

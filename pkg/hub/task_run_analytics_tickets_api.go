@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -164,10 +165,13 @@ func (s *Server) handleTaskRunAnalyticsTickets(w http.ResponseWriter, r *http.Re
 	groups = nonEmptyTaskRunAnalyticsTicketGroups(groups)
 
 	// Keep these reads page-batched: query count must not grow with ticket count.
-	runIDs, issueIDs := []string{}, []string{}
+	runIDs, issueIDs, clawIDs := []string{}, []string{}, []string{}
 	for _, group := range groups {
 		for _, run := range group.runs {
 			runIDs = append(runIDs, run.RunID)
+			if run.ClawID != "" {
+				clawIDs = append(clawIDs, run.ClawID)
+			}
 		}
 		issueIDs = append(issueIDs, group.key)
 	}
@@ -191,9 +195,14 @@ func (s *Server) handleTaskRunAnalyticsTickets(w http.ResponseWriter, r *http.Re
 		jsonError(w, http.StatusInternalServerError, "db error")
 		return
 	}
+	actorsByClaw, err := s.readTaskRunAnalyticsTriggerActorsForClaws(filters.TenantID, clawIDs)
+	if err != nil {
+		jsonError(w, http.StatusInternalServerError, "db error")
+		return
+	}
 	tickets := make([]taskRunAnalyticsTicketView, 0, len(groups))
 	for _, group := range groups {
-		ticket, err := s.buildTaskRunAnalyticsTicket(filters.TenantID, group.issueID, group.runs, attemptsByRun, prsByRun, eventsByRun, metadataByIssue[group.key], false)
+		ticket, err := s.buildTaskRunAnalyticsTicket(filters.TenantID, group.issueID, group.runs, attemptsByRun, prsByRun, eventsByRun, actorsByClaw, metadataByIssue[group.key], false)
 		if err != nil {
 			jsonError(w, http.StatusInternalServerError, "db error")
 			return
@@ -372,8 +381,12 @@ func (s *Server) readTaskRunAnalyticsTicketByKey(ctx context.Context, filters ta
 		return nil, err
 	}
 	runIDs := make([]string, 0, len(runs))
+	clawIDs := make([]string, 0, len(runs))
 	for _, run := range runs {
 		runIDs = append(runIDs, run.RunID)
+		if run.ClawID != "" {
+			clawIDs = append(clawIDs, run.ClawID)
+		}
 	}
 	attempts, err := s.readTaskRunAnalyticsAttemptsForRuns(filters.TenantID, runIDs)
 	if err != nil {
@@ -391,7 +404,11 @@ func (s *Server) readTaskRunAnalyticsTicketByKey(ctx context.Context, filters ta
 	if err != nil {
 		return nil, err
 	}
-	ticket, err := s.buildTaskRunAnalyticsTicket(filters.TenantID, parts[2], runs, attempts, prs, events, metadata[key], true)
+	actorsByClaw, err := s.readTaskRunAnalyticsTriggerActorsForClaws(filters.TenantID, clawIDs)
+	if err != nil {
+		return nil, err
+	}
+	ticket, err := s.buildTaskRunAnalyticsTicket(filters.TenantID, parts[2], runs, attempts, prs, events, actorsByClaw, metadata[key], true)
 	if err != nil {
 		return nil, err
 	}
@@ -593,7 +610,7 @@ func (group taskRunAnalyticsTicketGroup) cursorAt() int64 {
 	return 1
 }
 
-func (s *Server) buildTaskRunAnalyticsTicket(tenantID, issueID string, runs []taskRunAnalyticsRunView, attemptsByRun map[string][]taskRunAnalyticsAttemptView, prsByRun map[string][]taskRunAnalyticsPRView, eventsByRun map[string][]taskRunAnalyticsEventView, metadata taskRunAnalyticsTicketMetadata, includeStory bool) (taskRunAnalyticsTicketView, error) {
+func (s *Server) buildTaskRunAnalyticsTicket(tenantID, issueID string, runs []taskRunAnalyticsRunView, attemptsByRun map[string][]taskRunAnalyticsAttemptView, prsByRun map[string][]taskRunAnalyticsPRView, eventsByRun map[string][]taskRunAnalyticsEventView, actorsByClaw map[string]triggerActor, metadata taskRunAnalyticsTicketMetadata, includeStory bool) (taskRunAnalyticsTicketView, error) {
 	sort.Slice(runs, func(i, j int) bool { return runs[i].StartedAt < runs[j].StartedAt })
 	ticket := taskRunAnalyticsTicketView{TicketKey: taskRunAnalyticsTicketKey(runs[0].Integration, runs[0].IntegrationWorkspace, issueID), IssueID: issueID, IssueTitle: runs[0].IssueTitle, Source: runs[0].Integration, Repo: runs[0].Repo, WorkflowName: runs[0].WorkflowName, WorkspaceName: runs[0].WorkspaceName, RunIDs: []string{}, Runs: []taskRunAnalyticsTicketRunSummary{}, PRs: []taskRunAnalyticsTicketPRView{}, Story: []taskRunAnalyticsTicketStoryEntry{}}
 	events := []taskRunAnalyticsTicketStoryEntry{}
@@ -635,6 +652,11 @@ func (s *Server) buildTaskRunAnalyticsTicket(tenantID, issueID string, runs []ta
 	ticket.Status = deriveTaskRunAnalyticsTicketStatus(ticket.Runs, ticket.PRs)
 	// Resolve fallback reported time before deriving ticket timing metrics.
 	s.applyOrScheduleTaskRunAnalyticsTicketMetadata(tenantID, &ticket, runs[0], metadata)
+	// The requester is whoever triggered the ticket, not whoever authored it in the tracker;
+	// the tracker creator stays the fallback for legacy runs with no recorded trigger actor.
+	if requester := triggerActorRequester(actorsByClaw[runs[0].ClawID]); requester != "" {
+		ticket.Requester = requester
+	}
 	sort.Slice(events, func(i, j int) bool {
 		if events[i].Time != events[j].Time {
 			return events[i].Time < events[j].Time
@@ -666,6 +688,67 @@ func (s *Server) buildTaskRunAnalyticsTicket(tenantID, issueID string, runs []ta
 		}
 	}
 	return ticket, nil
+}
+
+// readTaskRunAnalyticsTriggerActorsForClaws resolves the trigger actors for a whole
+// ticket page in one query, so the requester lookup does not add a query per ticket.
+func (s *Server) readTaskRunAnalyticsTriggerActorsForClaws(tenantID string, clawIDs []string) (map[string]triggerActor, error) {
+	actorsByClaw := map[string]triggerActor{}
+	if len(clawIDs) == 0 {
+		return actorsByClaw, nil
+	}
+	if len(clawIDs) > 500 {
+		for start := 0; start < len(clawIDs); start += 500 {
+			end := start + 500
+			if end > len(clawIDs) {
+				end = len(clawIDs)
+			}
+			chunk, err := s.readTaskRunAnalyticsTriggerActorsForClaws(tenantID, clawIDs[start:end])
+			if err != nil {
+				return nil, err
+			}
+			for id, actor := range chunk {
+				actorsByClaw[id] = actor
+			}
+		}
+		return actorsByClaw, nil
+	}
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(clawIDs)), ",")
+	args := make([]any, 0, len(clawIDs)+1)
+	args = append(args, tenantID)
+	for _, clawID := range clawIDs {
+		args = append(args, clawID)
+	}
+	rows, err := s.db.Query(`SELECT id, COALESCE(trigger_actor_json,'') FROM claws WHERE tenant_id=? AND id IN (`+placeholders+`)`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var clawID, actorJSON string
+		if err := rows.Scan(&clawID, &actorJSON); err != nil {
+			return nil, err
+		}
+		if strings.TrimSpace(actorJSON) == "" {
+			continue
+		}
+		var actor triggerActor
+		if err := json.Unmarshal([]byte(actorJSON), &actor); err != nil {
+			log.Printf("[task-run-analytics] failed to parse trigger actor for claw %s: %v", shortID(clawID), err)
+			continue
+		}
+		actorsByClaw[clawID] = actor
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return actorsByClaw, nil
+}
+
+// triggerActorRequester renders the person who triggered a ticket, preferring a
+// human-readable name over the email or handle the tracker webhook carried.
+func triggerActorRequester(actor triggerActor) string {
+	return strings.TrimSpace(firstNonEmpty(strings.TrimSpace(actor.Name), strings.TrimSpace(actor.Email), strings.TrimSpace(actor.Login)))
 }
 
 func taskRunTicketCostAndTokens(run taskRunAnalyticsRunView) (float64, int64) {
@@ -740,7 +823,7 @@ func (s *Server) enrichTaskRunAnalyticsTicket(ticket *taskRunAnalyticsTicketView
 		if _, workflow, ok, err := s.resolveWorkflowConfig(run.WorkspaceName, run.WorkflowName); err == nil && ok {
 			if token := s.resolveLinearTokenForWorkflow(run.WorkspaceName, workflow); token != "" {
 				if details, err := s.fetchLinearIssueDetails(token, ticket.IssueID); err == nil {
-					ticket.Requester, ticket.Priority, ticket.Ask, ticket.Team = details.Creator.Name, details.PriorityLabel, details.Description, details.Team.Name
+					ticket.Requester, ticket.Priority, ticket.Ask, ticket.Team = firstNonEmpty(details.Creator.Name, details.Creator.Email), details.PriorityLabel, details.Description, details.Team.Name
 					// Neither Linear nor GitHub exposes a reliable requester-role field for an issue.
 					if ticket.ReportedAt == 0 {
 						if parsed, err := parseTicketTimestamp(details.CreatedAt); err == nil {
