@@ -557,6 +557,10 @@ export function useHub(selectedClawId: string | null): HubState {
             duration_ms: payload.duration_ms,
             exit_code: payload.exit_code,
             result: payload.result,
+            subagent_name: payload.subagent_name,
+            subagent_type: payload.subagent_type,
+            subagent_model: payload.subagent_model,
+            subagent_prompt: payload.subagent_prompt,
           }
           if (isUnhelpfulActivity(activity)) return
           noteOutput(clawId)
