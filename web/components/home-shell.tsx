@@ -12,7 +12,7 @@ import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet"
 import { useIsMobile } from "@/hooks/use-mobile"
 import { useHub } from "@/hooks/use-hub"
 import { useBoardActivityPrefetch } from "@/hooks/use-board-activity-prefetch"
-import { currentTurnSubagentLine } from "@/lib/subagents"
+import { currentTurnSubagents, subagentCounts, subagentSummaryLine } from "@/lib/subagents"
 import { useNowMinuteTick } from "@/hooks/use-now"
 import { demoteStaleRunning, pairActivitySteps, trailingActivityRun } from "@/lib/turns"
 import { type Workflow } from "@/lib/api"
@@ -283,7 +283,7 @@ export function HomeShell() {
   }
 
   // Sidebar third line: how many subagents the current turn is running. The
-  // board's message map is a recent-activity *window*, so currentTurnSubagentLine
+  // board's message map is a recent-activity *window*, so currentTurnSubagents
   // returns null whenever that window cannot reach the start of the turn — a
   // claw whose Task calls are still behind an unexpanded summary gets no line
   // at all rather than an undercount. See lib/subagents.ts.
@@ -294,9 +294,20 @@ export function HomeShell() {
     const lines: Record<string, string> = {}
     const now = subagentNow
     for (const claw of claws) {
+      // Same liveness gate the activity line uses. statusForStep reads only
+      // `endedAt`, so a Task start whose terminal never arrived (claw reaped or
+      // killed mid-Task) stays "quiet" — i.e. counted as active — forever. And
+      // once a turn is over, its tally would stay pinned to an idle claw's row
+      // until the next user message, so the line only survives while the turn
+      // is still moving.
+      if (claw.status !== "connected" && !claw.isStreaming) continue
       const msgs = messages[claw.id]
       if (!msgs || msgs.length === 0) continue
-      const line = currentTurnSubagentLine(msgs, now)
+      const subs = currentTurnSubagents(msgs, now)
+      if (!subs || subs.length === 0) continue
+      const { running, quiet } = subagentCounts(subs)
+      if (!claw.isStreaming && running + quiet === 0) continue
+      const line = subagentSummaryLine(subs)
       if (line) lines[claw.id] = line
     }
     return lines

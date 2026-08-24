@@ -1540,6 +1540,10 @@ function ClawChatView({
 
   const handleCloseSubagent = useCallback(() => {
     setOpenSubagentId(null)
+    // Scrolling inside the drill-down still arms the pill (handleScroll keeps
+    // recomputing it); leaving re-pins to the bottom, so clear it here too or
+    // it floats over an already-pinned transcript.
+    setShowScrollBtn(false)
     const el = scrollRef.current
     if (el) {
       markProgrammaticScroll()
