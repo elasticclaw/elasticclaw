@@ -40,15 +40,24 @@ export function subagentColor(status: SubagentStatus): string {
   return STATUS_COLOR[status]
 }
 
-/** Left-border + surface wash for a card. Only "quiet" earns a tinted body. */
+/**
+ * Left-border + surface wash for a card. Only "quiet" earns a tinted body.
+ *
+ * The wash is published as `--subagent-wash` rather than as an inline
+ * `backgroundColor`: an inline declaration outranks every class, so it also beat
+ * the card's `hover:bg-muted/40` and left quiet cards — the ones a user is most
+ * likely to click — as the only cards in the rail and lanes with no hover
+ * feedback. Cards paint their background from this variable
+ * (`bg-[var(--subagent-wash)]`), which the hover utility can override normally.
+ */
 export function subagentCardStyle(status: SubagentStatus): React.CSSProperties {
   return {
     borderLeftColor: STATUS_COLOR[status],
-    backgroundColor:
+    "--subagent-wash":
       status === "quiet"
         ? "color-mix(in srgb, var(--status-idle) 7%, transparent)"
-        : undefined,
-  }
+        : "color-mix(in srgb, var(--card) 60%, transparent)",
+  } as React.CSSProperties
 }
 
 /** 5px status dot; pulses while the subagent is running or has gone quiet. */

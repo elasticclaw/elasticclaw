@@ -47,7 +47,7 @@ function RailCard({
       onClick={() => onOpen(sub.id)}
       style={subagentCardStyle(sub.status)}
       className={cn(
-        "block w-full min-w-0 rounded-md border-l-2 bg-card/60 px-2 py-1.5 text-left",
+        "block w-full min-w-0 rounded-md border-l-2 bg-[var(--subagent-wash)] px-2 py-1.5 text-left",
         "transition-colors hover:bg-muted/40",
         "focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-ring"
       )}

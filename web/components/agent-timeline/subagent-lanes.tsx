@@ -38,7 +38,7 @@ function LaneCard({
         // min-width:auto, so an unbreakable mono agent name would widen the
         // card past its 200px basis instead of truncating inside it.
         "flex h-[62px] w-[200px] min-w-0 shrink-0 grow-0 basis-[200px] flex-col justify-center gap-0.5 rounded-[10px] border-l-2",
-        "bg-card/60 px-2 py-1.5 text-left transition-colors hover:bg-muted/40",
+        "bg-[var(--subagent-wash)] px-2 py-1.5 text-left transition-colors hover:bg-muted/40",
         "focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-ring"
       )}
     >

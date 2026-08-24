@@ -145,9 +145,18 @@ export function isPrunedActivitySummary(message: Message): boolean {
  * the first claw to prune permanently blocked every other claw's marker from
  * ever being expanded, and a later, wider range on the same claw was skipped
  * as already handled.
+ *
+ * Only the *start* of the range enters the id. A marker grows forward — every
+ * prune folds newer rows into it and pushes `toMs` on — while `fromMs` is the
+ * oldest row it ever covered and never moves. Encoding `toMs` gave the marker a
+ * fresh React key on every activity event once a claw was over the cap, so the
+ * ActivitySummaryBlock rendering it was remounted about once per tool call:
+ * "Show N earlier tool calls" collapsed itself moments after the user expanded
+ * it, discarding the rows it had just fetched. Segments are separated by
+ * surviving rows, so their start timestamps stay distinct within a claw.
  */
-function prunedActivitySummaryId(clawId: string, fromMs: number, toMs: number): string {
-  return `${PRUNED_ACTIVITY_SUMMARY_PREFIX}${clawId}-${fromMs}-${toMs}`
+function prunedActivitySummaryId(clawId: string, fromMs: number): string {
+  return `${PRUNED_ACTIVITY_SUMMARY_PREFIX}${clawId}-${fromMs}`
 }
 
 /**
@@ -206,7 +215,7 @@ export function pruneOldestLiveActivities(
     if (dropped <= 0) return
     const from = Number.isFinite(fromMs) ? fromMs : toMs
     kept.push({
-      id: prunedActivitySummaryId(clawId, from, toMs),
+      id: prunedActivitySummaryId(clawId, from),
       role: "activity_summary",
       content: "",
       timestamp: new Date(toMs),

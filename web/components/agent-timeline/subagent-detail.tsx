@@ -41,7 +41,11 @@ export function SubagentDetail({
   if (sub.type) meta.push(sub.type)
   if (sub.model) meta.push(sub.model)
   meta.push(`started ${formatAge(sub.startedAt.getTime(), now)}`)
-  meta.push(`${sub.step.messages.length} call${sub.step.messages.length === 1 ? "" : "s"}`)
+  // No call count: `step.messages` holds the parent's own events for this one
+  // Task call (start, forwarded progress pulses, terminal), not the calls the
+  // subagent made — those never reach the hub. Rendering its length as
+  // "N calls" reported "2 calls" for a subagent that ran twenty tools, and moved
+  // with gateway pulse frequency rather than with anything the subagent did.
   if (live) {
     meta.push(`last output ${formatAge(sub.lastOutputAtMs, now)}`)
   } else if (sub.durationMs !== undefined) {
