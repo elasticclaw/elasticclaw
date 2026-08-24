@@ -394,13 +394,13 @@ func TestRetryCheckpointChoicePrecedesTerminationCheckpoint(t *testing.T) {
 }
 
 func TestHealthEscalationThresholds(t *testing.T) {
-	if heartbeatShouldEscalate(11, defaultGatewayUnhealthyMax, "connected", true) {
+	if heartbeatShouldEscalate(defaultGatewayUnhealthyMax-1, defaultGatewayUnhealthyMax, "connected", true) {
 		t.Fatal("heartbeat escalated before threshold")
 	}
-	if !heartbeatShouldEscalate(12, defaultGatewayUnhealthyMax, "connected", true) {
+	if !heartbeatShouldEscalate(defaultGatewayUnhealthyMax, defaultGatewayUnhealthyMax, "connected", true) {
 		t.Fatal("heartbeat did not escalate at threshold")
 	}
-	if heartbeatShouldEscalate(12, defaultGatewayUnhealthyMax, "provisioning", true) || heartbeatShouldEscalate(12, defaultGatewayUnhealthyMax, "connected", false) {
+	if heartbeatShouldEscalate(defaultGatewayUnhealthyMax, defaultGatewayUnhealthyMax, "provisioning", true) || heartbeatShouldEscalate(defaultGatewayUnhealthyMax, defaultGatewayUnhealthyMax, "connected", false) {
 		t.Fatal("heartbeat escalated an ineligible claw")
 	}
 

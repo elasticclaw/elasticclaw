@@ -275,7 +275,24 @@ type clawConn struct {
 }
 
 const (
-	defaultGatewayUnhealthyMax = 12
+	// defaultGatewayUnhealthyMax counts consecutive bridge heartbeats reporting
+	// gateway_healthy=false before the hub escalates and replaces the claw. The
+	// bridge heartbeats every 15s (startHubKeepalives in cmd/claw-bridge), so
+	// 40 checks is roughly 10 minutes of wall time.
+	//
+	// It is deliberately generous because the health probe cannot distinguish
+	// "dead" from "busy": checkGateway does GET /healthz against the gateway,
+	// and that endpoint is served by the same Node event loop the agent work
+	// blocks. In production (2026-08-21) heavy agent turns blocked the loop for
+	// 148-169s with cpuCoreRatio ~0.91 and the gateway still completing
+	// Anthropic API calls — genuinely busy, not wedged. The old default of 12
+	// (~3 minutes) sat barely above that stall, so healthy claws were destroyed
+	// mid-work, some without a usable checkpoint.
+	//
+	// A truly dead gateway is still caught: by this threshold at ~10 minutes,
+	// and sooner or independently by the offline reaper (the bridge stops
+	// heartbeating entirely) and the busy-turn watchdog.
+	defaultGatewayUnhealthyMax = 40
 	// minBusyTurnMax is the floor for the busy-turn watchdog. The watchdog is a
 	// backstop for a lost terminal message, not a turn cap: the bridge owns the
 	// cap (agentTurnTimeout, 1h) and always ends a turn with a message. So this

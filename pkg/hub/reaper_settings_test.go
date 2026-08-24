@@ -15,6 +15,25 @@ func TestLivenessSettingsWatchdogDefaults(t *testing.T) {
 	}
 }
 
+// TestLivenessSettingsGatewayUnhealthyDefault pins the escalation threshold to a
+// literal: at the bridge's 15s heartbeat cadence it must stay well clear of the
+// ~2.8 minute event-loop stalls a busy gateway produces, so a lower value would
+// silently reintroduce the mid-work replacements it was raised to stop.
+func TestLivenessSettingsGatewayUnhealthyDefault(t *testing.T) {
+	s := &Server{}
+	if got := s.livenessSettings().gatewayUnhealthyMax; got != 40 {
+		t.Fatalf("default gatewayUnhealthyMax = %d, want 40", got)
+	}
+
+	checks := 25
+	s = &Server{hubCfg: &types.HubConfig{Liveness: &types.LivenessConfig{
+		GatewayUnhealthyChecks: &checks,
+	}}}
+	if got := s.livenessSettings().gatewayUnhealthyMax; got != 25 {
+		t.Fatalf("configured gatewayUnhealthyMax = %d, want 25", got)
+	}
+}
+
 func TestLivenessSettingsWatchdogConfig(t *testing.T) {
 	tests := []struct {
 		name        string
