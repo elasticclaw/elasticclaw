@@ -160,12 +160,20 @@ function prunedActivitySummaryId(clawId: string, fromMs: number, toMs: number): 
  * counts derived from it (the sidebar's "N of M subagents") would undercount a
  * long turn and present the undercount as fact.
  *
- * One marker per turn, never one per prune: a marker is placed right after the
- * newest row it covers and is closed at every user message, so it never spans
- * a turn boundary. A single marker straddling one would re-insert pre-turn
- * activity rows *after* the user message when expanded (the board merges in
- * place without re-sorting), and those rows would then be counted as this
- * turn's Task calls — the overcount currentTurnSubagents exists to prevent.
+ * One marker per turn, never one per prune: a marker is closed (and inserted)
+ * as soon as the prune stops folding rows — right after the newest row it
+ * covers, before the first row that survives it — and also at every user
+ * message, so it never spans a turn boundary. A single marker straddling one
+ * would re-insert pre-turn activity rows *after* the user message when
+ * expanded (the board merges in place without re-sorting), and those rows
+ * would then be counted as this turn's Task calls — the overcount
+ * currentTurnSubagents exists to prevent.
+ *
+ * Closing the segment at the end of the array instead would append the marker
+ * *after* rows that are newer than its timestamp: the live-event call sites do
+ * not re-sort, and trailingActivityRun() stops at the first non-activity row,
+ * so the board card's running-step line and the sidebar's live activity line
+ * would go blank for exactly the claws that are busiest.
  */
 export function pruneOldestLiveActivities(
   messages: Message[],
@@ -231,9 +239,12 @@ export function pruneOldestLiveActivities(
       cover(1, messageTimeMs(message), messageTimeMs(message))
       continue
     }
-    // A turn boundary closes the open marker: it must not cover rows from the
-    // previous turn once it sits inside this one.
-    if (message.role === "user") flush()
+    // Close the open marker before the first row that survives it (`toDrop`
+    // exhausted), so it lands right after the newest row it covers instead of
+    // at the end of the array, out of chronological order.
+    // A turn boundary closes it too: it must not cover rows from the previous
+    // turn once it sits inside this one.
+    if (message.role === "user" || toDrop === 0) flush()
     kept.push(message)
   }
   flush()
