@@ -143,13 +143,6 @@ export function HomeShell() {
     return () => { cancelled = true; window.removeEventListener("focus", guardedLoadAdminStatus) }
   }, [loadAdminStatus])
 
-  // Non-admins never see analytics: deep links bounce back to the agents view.
-  useEffect(() => {
-    if (view === "analytics" && adminChecked && !isAdmin) {
-      window.history.replaceState(null, "", "/")
-    }
-  }, [view, adminChecked, isAdmin])
-
   const handleToggleView = useCallback(() => {
     if (view === "analytics") {
       analyticsSearchRef.current = window.location.search
@@ -416,14 +409,17 @@ export function HomeShell() {
       )}
       <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
         {view === "analytics" ? (
-          isAdmin ? (
+          // Everyone reads analytics; only admins see the cost widgets, so the
+          // view waits for the admin check instead of rendering a page whose
+          // cost sections would pop in (or wrongly stay hidden) afterwards.
+          adminChecked ? (
             <Suspense fallback={null}>
-              <AnalyticsCommandCenter />
+              <AnalyticsCommandCenter canViewCosts={isAdmin} />
             </Suspense>
           ) : adminCheckFailed ? (
             <div className="flex min-h-64 items-center justify-center p-6">
               <div className="max-w-sm rounded-lg border bg-card p-5 text-center">
-                <p className="font-medium">Unable to check analytics access.</p>
+                <p className="font-medium">Unable to check your access level.</p>
                 <p className="mt-1 text-sm text-muted-foreground">Check your connection and try again.</p>
                 <button type="button" className="mt-4 rounded-md bg-primary px-3 py-2 text-sm text-primary-foreground" onClick={() => void loadAdminStatus()}>Retry</button>
               </div>

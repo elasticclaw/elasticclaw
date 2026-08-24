@@ -365,34 +365,32 @@ export const Sidebar = memo(function Sidebar({
           ))}
         </div>
 
-        {/* Footer: view toggle + settings (admin) and sign out */}
+        {/* Footer: view toggle (everyone) + settings (admin) and sign out */}
         <div className="p-2 border-t border-border flex flex-col items-center gap-1">
+          <Button
+            variant="ghost"
+            size="icon"
+            className={cn(
+              "size-8 text-muted-foreground hover:text-foreground",
+              inAnalytics && "bg-muted text-foreground"
+            )}
+            title={viewToggleLabel}
+            onClick={onToggleView}
+          >
+            <ViewToggleIcon className="size-4" />
+          </Button>
           {isAdmin && (
-            <>
-              <Button
-                variant="ghost"
-                size="icon"
-                className={cn(
-                  "size-8 text-muted-foreground hover:text-foreground",
-                  inAnalytics && "bg-muted text-foreground"
-                )}
-                title={viewToggleLabel}
-                onClick={onToggleView}
-              >
-                <ViewToggleIcon className="size-4" />
-              </Button>
-              <Button
-                variant="ghost"
-                size="icon"
-                className="size-8 text-muted-foreground hover:text-foreground"
-                title="Settings"
-                onClick={() => { window.location.href = "/settings" }}
-              >
-                <Settings className="size-4" />
-              </Button>
-              <div className="my-0.5 w-6 border-t border-border" />
-            </>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="size-8 text-muted-foreground hover:text-foreground"
+              title="Settings"
+              onClick={() => { window.location.href = "/settings" }}
+            >
+              <Settings className="size-4" />
+            </Button>
           )}
+          <div className="my-0.5 w-6 border-t border-border" />
           <Button
             variant="ghost"
             size="icon"
@@ -562,33 +560,31 @@ export const Sidebar = memo(function Sidebar({
         </DragOverlay>
       </DndContext>
 
-      {/* Footer: view toggle + settings (admin) and sign out. Hidden in the
+      {/* Footer: view toggle (everyone) + settings (admin) and sign out. Hidden in the
           mobile drawer — the bottom tab bar and the board header menu own
           these destinations there. */}
       {!inDrawer && (
       <div className="p-2 border-t border-border">
+        <button
+          onClick={onToggleView}
+          className={cn(
+            "flex w-full min-h-9 items-center gap-[9px] rounded-lg px-2.5 text-[12.5px] text-muted-foreground transition-colors hover:bg-muted hover:text-foreground",
+            inAnalytics && "bg-muted text-foreground"
+          )}
+        >
+          <ViewToggleIcon className="size-4 flex-shrink-0" />
+          {viewToggleLabel}
+        </button>
         {isAdmin && (
-          <>
-            <button
-              onClick={onToggleView}
-              className={cn(
-                "flex w-full min-h-9 items-center gap-[9px] rounded-lg px-2.5 text-[12.5px] text-muted-foreground transition-colors hover:bg-muted hover:text-foreground",
-                inAnalytics && "bg-muted text-foreground"
-              )}
-            >
-              <ViewToggleIcon className="size-4 flex-shrink-0" />
-              {viewToggleLabel}
-            </button>
-            <button
-              onClick={() => { window.location.href = "/settings" }}
-              className="flex w-full min-h-9 items-center gap-[9px] rounded-lg px-2.5 text-[12.5px] text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-            >
-              <Settings className="size-4 flex-shrink-0" />
-              Settings
-            </button>
-            <div className="my-1 border-t border-border" />
-          </>
+          <button
+            onClick={() => { window.location.href = "/settings" }}
+            className="flex w-full min-h-9 items-center gap-[9px] rounded-lg px-2.5 text-[12.5px] text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+          >
+            <Settings className="size-4 flex-shrink-0" />
+            Settings
+          </button>
         )}
+        <div className="my-1 border-t border-border" />
         <button
           onClick={handleSignOut}
           className="flex w-full min-h-9 items-center gap-[9px] rounded-lg px-2.5 text-[12.5px] text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive"
