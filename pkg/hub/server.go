@@ -258,6 +258,8 @@ type clawConn struct {
 	connectedAt          time.Time       // when this connection registered; immutable after registration
 	idleNotifiedAt       time.Time       // when the agent_idle notification fired for the current idle stretch (zero = armed)
 	turnBoundarySeen     bool            // a turn actually ended on THIS connection, so turn tracking is known live (see agentIdleResumeBlindGrace)
+	subagentsActiveAt    time.Time       // when the last heartbeat that REPORTED active spawned subagent sessions arrived (zero = none known; see applySubagentHeartbeatLocked)
+	subagentActiveCount  int             // subagent sessions with a run in flight per that heartbeat
 
 	deliveryInFlight bool // serializes DB-backed delivery writes
 
@@ -329,6 +331,30 @@ func gatewayReadyBool(v *bool) bool {
 
 func (cc *clawConn) isBusyLocked() bool {
 	return cc.awaitingResponse || !cc.streamingStartedAt.IsZero() || cc.streamingMsgID != ""
+}
+
+// applySubagentHeartbeatLocked folds one heartbeat's subagent-activity report
+// into the connection state. The fields arrive as pointers because absence
+// carries meaning: an old bridge (or one whose sessions.list poll failed)
+// omits them, which is "no information" and must leave the state untouched —
+// only an explicit report of zero active subagents is positive evidence that
+// nothing is running, and clears it.
+func (cc *clawConn) applySubagentHeartbeatLocked(active *bool, count *int) {
+	if active == nil {
+		return
+	}
+	if !*active {
+		cc.subagentsActiveAt = time.Time{}
+		cc.subagentActiveCount = 0
+		return
+	}
+	cc.subagentsActiveAt = time.Now()
+	// The bridge always sends the count alongside the flag; the fallback of 1
+	// just keeps "active" internally consistent should they ever split.
+	cc.subagentActiveCount = 1
+	if count != nil {
+		cc.subagentActiveCount = *count
+	}
 }
 
 // finishTurnLocked ends a turn that actually ran (or was force-finished):
@@ -2751,6 +2777,11 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 				EstimatedCostUSD *float64 `json:"estimated_cost_usd"`
 				Model            string   `json:"model"`
 				ModelProvider    string   `json:"model_provider"`
+				// Pointers on purpose: an old bridge omits both, which must
+				// stay distinguishable from a bridge reporting "no subagents"
+				// (see applySubagentHeartbeatLocked).
+				SubagentsActive     *bool `json:"subagents_active"`
+				SubagentActiveCount *int  `json:"subagent_active_count"`
 			}
 			if err := json.Unmarshal(payload, &hb); err == nil {
 				gatewayUnhealthyMax := s.livenessSettings().gatewayUnhealthyMax
@@ -2774,6 +2805,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 					// Log only on status changes, not every heartbeat
 					prevUsage = activeCC.contextUsage
 					activeCC.contextUsage = hb.ContextUsage
+					activeCC.applySubagentHeartbeatLocked(hb.SubagentsActive, hb.SubagentActiveCount)
 					if s.gatewayRestartCounts == nil {
 						s.gatewayRestartCounts = make(map[string]int)
 					}

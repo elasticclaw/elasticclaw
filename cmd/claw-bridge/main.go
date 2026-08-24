@@ -1971,6 +1971,96 @@ func (gs *gatewaySession) refreshContextUsage(ctx context.Context) {
 	gs.ctxMu.Unlock()
 }
 
+// countActiveSubagents extracts, from a sessions.list response, how many
+// spawned subagent sessions currently have a run in flight. Subagent sessions
+// are recognised by the ":subagent:" marker in their key — the agent-id half
+// of the key varies across OpenClaw versions (there is an upstream issue about
+// exactly that), the marker does not. Only an explicit hasActiveRun=true
+// counts: a missing field is "no information", and activeRunIds is
+// deliberately not consulted at all — it may be absent or empty even while
+// hasActiveRun is true, so its absence must never be read as "idle".
+//
+// A payload without a sessions index at all is an error, not zero: zero is a
+// positive "nothing running" claim the hub acts on, and it must never be
+// fabricated from a response shape we did not understand.
+func countActiveSubagents(payload []byte) (int, error) {
+	var parsed struct {
+		Sessions *[]struct {
+			Key          string `json:"key"`
+			HasActiveRun *bool  `json:"hasActiveRun"`
+		} `json:"sessions"`
+	}
+	if err := json.Unmarshal(payload, &parsed); err != nil {
+		return 0, fmt.Errorf("unmarshal sessions.list response: %w", err)
+	}
+	if parsed.Sessions == nil {
+		return 0, fmt.Errorf("sessions.list response carries no sessions index")
+	}
+	count := 0
+	sawAnyKey := false
+	for _, row := range *parsed.Sessions {
+		if row.Key != "" {
+			sawAnyKey = true
+		}
+		if strings.Contains(row.Key, ":subagent:") && row.HasActiveRun != nil && *row.HasActiveRun {
+			count++
+		}
+	}
+	// A non-empty index in which no row carried a key is the row-level version
+	// of the shape problem above: the gateway is telling us about sessions in
+	// a vocabulary we do not speak (the upstream key-shape drift again), so
+	// zero here would be fabricated, not observed.
+	if len(*parsed.Sessions) > 0 && !sawAnyKey {
+		return 0, fmt.Errorf("sessions.list rows carry no recognisable key")
+	}
+	return count, nil
+}
+
+// subagentHeartbeatFields turns one subagent-activity poll into the optional
+// heartbeat fields and a log-line suffix. The contract the hub depends on:
+// both fields are present iff the poll actually succeeded — a not-ready
+// gateway or any poll error yields nil, so the hub sees "no information"
+// rather than a fabricated "nothing running" (which it would treat as
+// positive evidence and clear its suppression state). failLogged quiets the
+// error log after the first miss, since an older gateway without
+// sessions.list would otherwise fail every heartbeat forever; a success
+// re-arms it.
+func subagentHeartbeatFields(gatewayReady bool, poll func() (int, error), failLogged *bool) (map[string]interface{}, string) {
+	if !gatewayReady {
+		return nil, ""
+	}
+	count, err := poll()
+	if err != nil {
+		if !*failLogged {
+			log.Printf("[heartbeat] subagent activity poll failed (quieting until it recovers): %v", err)
+			*failLogged = true
+		}
+		return nil, ""
+	}
+	*failLogged = false
+	fields := map[string]interface{}{
+		"subagents_active":      count > 0,
+		"subagent_active_count": count,
+	}
+	return fields, fmt.Sprintf(" subagents_active=%v subagent_active_count=%d", count > 0, count)
+}
+
+// pollSubagentActivity polls sessions.list and reports how many spawned
+// subagent sessions have a run in flight. Best-effort, same shape as
+// refreshContextUsage: bounded per-call context, and the caller logs and moves
+// on. The hub uses the result to tell "parked on sessions_yield while spawned
+// work runs" apart from a genuine stall, which per-session turn state cannot
+// see (subagent activity does not make the parent session busy).
+func (gs *gatewaySession) pollSubagentActivity(ctx context.Context) (int, error) {
+	pollCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	resp, err := gs.sendReq(pollCtx, "sessions.list", map[string]interface{}{})
+	if err != nil {
+		return 0, err
+	}
+	return countActiveSubagents(resp.Payload)
+}
+
 // ContextUsage returns the last-known context window usage percentage (0-100).
 func (gs *gatewaySession) ContextUsage() int {
 	gs.ctxMu.RLock()
@@ -4589,6 +4679,11 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 	}
 	proxy.mu.Unlock()
 
+	// Heartbeats run on a single goroutine (the ticker in startHubKeepalives),
+	// so this needs no lock. It quiets the sessions.list failure log after the
+	// first miss: an older gateway without the method would otherwise fail
+	// every 15s forever.
+	subagentPollFailLogged := false
 	startHubKeepalives(connCtx, func(pingCtx context.Context) error {
 		pingCtx, cancel := context.WithTimeout(pingCtx, 10*time.Second)
 		defer cancel()
@@ -4612,8 +4707,19 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 		cu := gwSession.ContextUsage()
 		usage := gwSession.Usage()
 		restarts := gatewayRestartBase + gatewayRestartCount()
-		log.Printf("[heartbeat] sending: gateway_healthy=%v gateway_ready=%v context_usage=%d%% restart_count=%d", health, gwSession.IsReady(), cu, restarts)
+		// Best-effort subagent activity: subagentHeartbeatFields returns both
+		// fields only for a successful poll, so on any failure (RPC error,
+		// method not found on an older gateway, unparseable payload) the hub
+		// falls back to judging idleness without them, rather than being fed
+		// a fabricated "nothing running".
+		subagentFields, subagentLog := subagentHeartbeatFields(gwSession.IsReady(), func() (int, error) {
+			return gwSession.pollSubagentActivity(connCtx)
+		}, &subagentPollFailLogged)
+		log.Printf("[heartbeat] sending: gateway_healthy=%v gateway_ready=%v context_usage=%d%% restart_count=%d%s", health, gwSession.IsReady(), cu, restarts, subagentLog)
 		heartbeatPayload := map[string]interface{}{"gateway_healthy": health, "gateway_ready": gwSession.IsReady(), "context_usage": cu, "restart_count": restarts}
+		for k, v := range subagentFields {
+			heartbeatPayload[k] = v
+		}
 		if usage.sessionKey != "" {
 			heartbeatPayload["session_key"] = usage.sessionKey
 		}
