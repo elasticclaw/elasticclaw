@@ -191,9 +191,11 @@ export function latestOpenSubagentOutputMs(turns: Turn[]): number {
 export function collectSubagents(turns: Turn[], nowMs: number): Subagent[] {
   const byCall = new Map<string, { step: Step; turnIndex: number; stepIds: string[] }>()
   const order: string[] = []
-  // call key → map key of the newest still-unresolved subagent for that call.
-  // Only an orphan terminal is allowed to reach back through it across turns.
-  const openByCall = new Map<string, string>()
+  // call key → map key (plus its turn) of the newest still-unresolved subagent
+  // for that call. Only an orphan terminal is allowed to reach back through it,
+  // and only into the turn immediately before it.
+  const openByCall = new Map<string, { key: string; turnIndex: number }>()
+  let previousTurnIndex: number | null = null
 
   for (const turn of turns) {
     for (const step of turn.steps) {
@@ -209,7 +211,7 @@ export function collectSubagents(turns: Turn[], nowMs: number): Subagent[] {
         if (existing.step.endedAt === undefined) {
           existing.step = mergeSubagentSteps(existing.step, step)
           existing.stepIds.push(step.id)
-          if (existing.step.endedAt !== undefined && openByCall.get(callKey) === key) {
+          if (existing.step.endedAt !== undefined && openByCall.get(callKey)?.key === key) {
             openByCall.delete(callKey)
           }
           continue
@@ -222,8 +224,16 @@ export function collectSubagents(turns: Turn[], nowMs: number): Subagent[] {
         // forever plus a nameless "done" one. Only orphan terminals may cross
         // the turn boundary — a *start* carrying a reused synthesized id is
         // genuinely a new call, which is why the key stays turn-scoped.
-        const openKey = openByCall.get(callKey)
-        const open = openKey ? byCall.get(openKey) : undefined
+        //
+        // The reach-back is bounded to the turn immediately before this one for
+        // the same reason: a synthesized call id repeats every turn, so a Task
+        // that never reported a terminal (claw restarted, terminal row pruned)
+        // would otherwise stay open forever and swallow the first orphan
+        // terminal of any later turn — moving that turn's result onto a card
+        // hours older, with a duration spanning the gap.
+        const openEntry = openByCall.get(callKey)
+        const open =
+          openEntry && openEntry.turnIndex === previousTurnIndex ? byCall.get(openEntry.key) : undefined
         if (open && open.step.endedAt === undefined) {
           open.step = mergeSubagentSteps(open.step, step)
           open.stepIds.push(step.id)
@@ -233,9 +243,10 @@ export function collectSubagents(turns: Turn[], nowMs: number): Subagent[] {
       }
       byCall.set(key, { step, turnIndex: turn.index, stepIds: [step.id] })
       order.push(key)
-      if (step.endedAt === undefined) openByCall.set(callKey, key)
-      else if (openByCall.get(callKey) === key) openByCall.delete(callKey)
+      if (step.endedAt === undefined) openByCall.set(callKey, { key, turnIndex: turn.index })
+      else if (openByCall.get(callKey)?.key === key) openByCall.delete(callKey)
     }
+    previousTurnIndex = turn.index
   }
 
   return order
@@ -317,7 +328,13 @@ export function currentTurnSubagents(messages: Message[], nowMs: number): Subage
   // same rule the sidebar activity line uses.
   const steps = demoteStaleRunning(pairActivitySteps(window), true)
   return steps
-    .filter(isSubagentStep)
+    // A Task still in flight when the user sent this turn's message reports its
+    // terminal inside this window while its start sits before it, so the pairing
+    // yields a terminal-without-start fragment. It belongs to the previous turn:
+    // counting it here would report "1 of 2 subagents" for a turn that launched
+    // one. Unlike collectSubagents there is nothing to merge it into, so it is
+    // dropped.
+    .filter((step) => isSubagentStep(step) && !isOrphanTerminalStep(step))
     .map((step) => subagentFromStep(step, 0, nowMs))
 }
 

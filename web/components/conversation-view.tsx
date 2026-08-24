@@ -1475,6 +1475,7 @@ function ClawChatView({
   const openSubagent = openSubagentId
     ? subagents.find((sub) => sub.id === openSubagentId) ?? null
     : null
+  const subagentOpen = openSubagent !== null
 
   // "Last output Xs ago" — the staleness signal. Live arrivals (chunks,
   // activities) are noted event-side in use-hub; the NowStrip subscribes to
@@ -1503,8 +1504,14 @@ function ClawChatView({
     const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 60
     pinnedToBottom.current = atBottom
     setShowScrollBtn(!atBottom)
-    onWindowScroll()
-  }, [onWindowScroll, scrollRef, isProgrammaticScrollRef])
+    // The drill-down replaces the transcript body inside this same scroller, so
+    // what the user is scrolling is the subagent detail, not conversation
+    // history. Leaving the top-of-scroll pager armed would page the whole
+    // transcript backwards in the background — every scroll back to the top of
+    // a tall result prepends another page, and the restore delta is ~0 because
+    // the rendered content never changed height.
+    if (!subagentOpen) onWindowScroll()
+  }, [onWindowScroll, scrollRef, isProgrammaticScrollRef, subagentOpen])
 
   // Opening a drill-down replaces the transcript body, so the reading position
   // must go to the top of the new content and the bottom-pin must let go —
@@ -1718,12 +1725,15 @@ function ClawChatView({
       <div className="flex min-h-0 flex-1">
       <div ref={scrollRef} onScroll={handleScroll} className="min-w-0 flex-1 overflow-y-auto scrollbar-thin p-4 md:p-6 relative">
         <div ref={contentRef} className="space-y-4 max-w-3xl mx-auto">
-          {loadingOlder && (
+          {/* History chrome belongs to the transcript, not to the drill-down:
+              "Loading older messages..." above a subagent result reads as the
+              subagent loading something. */}
+          {!subagentOpen && loadingOlder && (
             <div className="flex justify-center py-2">
               <span className="text-xs text-muted-foreground animate-pulse">Loading older messages...</span>
             </div>
           )}
-          {hasOlder && !loadingOlder && (
+          {!subagentOpen && hasOlder && !loadingOlder && (
             <div className="flex justify-center py-1">
               <div className="h-px w-full bg-border" />
             </div>
