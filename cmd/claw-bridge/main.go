@@ -1723,17 +1723,19 @@ func resolveSubagentFields(tool, phase string, data map[string]interface{}) (nam
 		nameKeys = []string{"description"}
 		promptKeys = []string{"prompt", "instructions"}
 	}
-	name = resolveSubagentName(tool, data, nameKeys)
-	prompt = nestedString(data, promptKeys...)
+	name = resolveSubagentField(tool, data, nameKeys)
+	prompt = resolveSubagentField(tool, data, promptKeys)
 	subType = nestedString(data, "subagent_type", "subagentType", "agent_type", "agentType")
 	model = nestedString(data, "model", "model_id", "modelId")
 	return name, subType, model, prompt
 }
 
-// resolveSubagentName consults the candidate name keys one at a time so a key
+// resolveSubagentField consults the candidate keys one at a time so a key
 // holding only the generic tool name ("Task") is skipped instead of discarding
-// the real description carried by a later key or a nested container.
-func resolveSubagentName(tool string, data map[string]interface{}, keys []string) string {
+// the real value carried by a later key or a nested container. Passing all keys
+// to nestedString at once would let a generic top-level field (data.message)
+// shadow the real value nested in data.input.
+func resolveSubagentField(tool string, data map[string]interface{}, keys []string) string {
 	for _, key := range keys {
 		candidate := nestedString(data, key)
 		if candidate == "" || strings.EqualFold(strings.TrimSpace(candidate), strings.TrimSpace(tool)) {

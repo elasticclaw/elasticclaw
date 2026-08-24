@@ -969,6 +969,28 @@ func TestResolveSubagentFields(t *testing.T) {
 			wantName: "research auth flow", wantPrompt: "Inspect the auth flow.",
 		},
 		{
+			name:  "generic top-level message does not shadow nested prompt",
+			tool:  "Task",
+			phase: "running",
+			data: map[string]interface{}{
+				"message": "Running Task",
+				"input": map[string]interface{}{
+					"description": "research auth flow", "prompt": "Inspect the auth flow end to end.", "subagent_type": "research",
+				},
+			},
+			wantName: "research auth flow", wantType: "research", wantPrompt: "Inspect the auth flow end to end.",
+		},
+		{
+			name:  "generic task field equal to tool name is skipped as prompt",
+			tool:  "Task",
+			phase: "running",
+			data: map[string]interface{}{
+				"task":  "Task",
+				"input": map[string]interface{}{"prompt": "Real prompt."},
+			},
+			wantPrompt: "Real prompt.",
+		},
+		{
 			name: "non task tool is empty",
 			tool: "exec",
 			data: map[string]interface{}{"input": map[string]interface{}{
