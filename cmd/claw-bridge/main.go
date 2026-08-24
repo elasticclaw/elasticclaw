@@ -66,6 +66,10 @@ var (
 		session      *gatewaySession
 	}
 	gatewayRestartBase int
+	// These diagnostics fire once per dropped/event frame and must not flood the
+	// diagnostics log when a gateway emits a busy foreign or task stream.
+	foreignSessionDiagnosticCount atomic.Int64
+	taskPayloadDiagnosticCount    atomic.Int64
 )
 
 // agentTurnTimeout bounds one agent turn. A turn spans an entire injected hub
@@ -1549,13 +1553,27 @@ func (gs *gatewaySession) readLoop(ctx context.Context) {
 			if err := json.Unmarshal(frame.Payload, &agentPayload); err != nil {
 				continue
 			}
+			if agentPayload.SessionKey != gs.getSessionKey() {
+				// Avoid unmarshalling every foreign frame once the diagnostic cap is
+				// exhausted; this branch can be hit at high volume.
+				if takeDiagnosticSlot(&foreignSessionDiagnosticCount) {
+					var rawAgentPayload struct {
+						Data map[string]interface{} `json:"data"`
+					}
+					_ = json.Unmarshal(frame.Payload, &rawAgentPayload)
+					log.Printf("claw-bridge: foreign-session event key=%s stream=%s tool=%s phase=%s keys=%s",
+						sanitizeActivityText(agentPayload.SessionKey),
+						sanitizeActivityText(agentPayload.Stream),
+						sanitizeActivityText(firstNonEmpty(agentPayload.Data.Tool, agentPayload.Data.Name)),
+						sanitizeActivityText(agentPayload.Data.Phase),
+						strings.Join(sortedMapKeys(rawAgentPayload.Data), ","))
+				}
+				continue
+			}
 			var rawAgentPayload struct {
 				Data map[string]interface{} `json:"data"`
 			}
 			_ = json.Unmarshal(frame.Payload, &rawAgentPayload)
-			if agentPayload.SessionKey != gs.getSessionKey() {
-				continue
-			}
 
 			gs.infMu.RLock()
 			inf := gs.inFlight
@@ -1617,6 +1635,12 @@ func (gs *gatewaySession) readLoop(ctx context.Context) {
 				if kind == "tool" && activity.Command == "" && activity.Path == "" && activity.URL == "" && activity.Detail == "" {
 					logMissingToolActivityDetail(agentPayload.Stream, activity.Phase, activity.Tool, rawAgentPayload.Data)
 				}
+				if isSubagentTool(activity.Tool) && takeDiagnosticSlot(&taskPayloadDiagnosticCount) {
+					log.Printf("[agent-activity] task payload stream=%s phase=%s tool=%s keys=%s payload=%s",
+						sanitizeActivityText(agentPayload.Stream), sanitizeActivityText(activity.Phase),
+						sanitizeActivityText(activity.Tool), strings.Join(sortedMapKeys(rawAgentPayload.Data), ","),
+						summarizeActivityPayload(rawAgentPayload.Data))
+				}
 				inf.noteActivity(activity)
 				inf.emitActivity(activity)
 			}
@@ -1649,6 +1673,26 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func takeDiagnosticSlot(counter *atomic.Int64) bool {
+	for {
+		current := counter.Load()
+		if current >= 20 {
+			return false
+		}
+		if counter.CompareAndSwap(current, current+1) {
+			return true
+		}
+	}
+}
+
+func isSubagentTool(tool string) bool {
+	switch strings.ToLower(strings.TrimSpace(tool)) {
+	case "task", "agent", "subagent":
+		return true
+	}
+	return false
 }
 
 func resolveToolActivityDetail(tool, command, path, url, meta string, data map[string]interface{}) (string, string, string, string) {
