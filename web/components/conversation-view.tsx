@@ -1733,7 +1733,14 @@ function ClawChatView({
               <button
                 type="button"
                 onClick={handleCloseSubagent}
-                className="flex items-center gap-1 rounded-sm py-0.5 pr-2 text-[11px] text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-ring"
+                className={cn(
+                  "flex items-center gap-1 rounded-sm py-0.5 pr-2 text-[11px] text-muted-foreground",
+                  // On mobile the rail and lanes are hidden, so this is the only
+                  // way out of the drill-down: give it the same 44px tap target
+                  // the timeline's own rows carry.
+                  "max-md:min-h-11 max-md:pr-3",
+                  "transition-colors hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-ring"
+                )}
               >
                 <ChevronLeft className="size-3.5 shrink-0" />
                 <span className="min-w-0 truncate font-mono">{claw.name}</span>

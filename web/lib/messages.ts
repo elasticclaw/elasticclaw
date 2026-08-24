@@ -129,23 +129,48 @@ export function windowMessagesByDurableCount(
   return messages.slice(startIdx)
 }
 
-/** Id of the placeholder standing in for locally pruned activity rows. */
-export const PRUNED_ACTIVITY_SUMMARY_ID = "activity-summary-pruned"
+/** Id prefix of the placeholders standing in for locally pruned activity rows. */
+export const PRUNED_ACTIVITY_SUMMARY_PREFIX = "activity-summary-pruned-"
+
+/** True for a client-side pruned-activity marker (any claw, any range). */
+export function isPrunedActivitySummary(message: Message): boolean {
+  return message.role === "activity_summary" && message.id.startsWith(PRUNED_ACTIVITY_SUMMARY_PREFIX)
+}
+
+/**
+ * Marker id, scoped to claw *and* range like the server's summary ids.
+ *
+ * A single shared id made every marker look identical to consumers that dedupe
+ * by id: the board prefetch keeps one global Set of processed summary ids, so
+ * the first claw to prune permanently blocked every other claw's marker from
+ * ever being expanded, and a later, wider range on the same claw was skipped
+ * as already handled.
+ */
+function prunedActivitySummaryId(clawId: string, fromMs: number, toMs: number): string {
+  return `${PRUNED_ACTIVITY_SUMMARY_PREFIX}${clawId}-${fromMs}-${toMs}`
+}
 
 /**
  * Drop the oldest live activity rows once they exceed `maxActivities`,
  * without touching durable conversation messages or live text segments.
  *
- * The removed rows leave an `activity_summary` placeholder behind, covering
- * their time range so it can be expanded from the API like any other summary.
+ * The removed rows leave `activity_summary` placeholders behind, covering
+ * their time range so they can be expanded from the API like any other summary.
  * Deleting them outright made the window look complete while it was not:
  * counts derived from it (the sidebar's "N of M subagents") would undercount a
- * long turn and present the undercount as fact. One marker is kept — an
- * earlier one is folded into the new one.
+ * long turn and present the undercount as fact.
+ *
+ * One marker per turn, never one per prune: a marker is placed right after the
+ * newest row it covers and is closed at every user message, so it never spans
+ * a turn boundary. A single marker straddling one would re-insert pre-turn
+ * activity rows *after* the user message when expanded (the board merges in
+ * place without re-sorting), and those rows would then be counted as this
+ * turn's Task calls — the overcount currentTurnSubagents exists to prevent.
  */
 export function pruneOldestLiveActivities(
   messages: Message[],
-  maxActivities: number
+  maxActivities: number,
+  clawId: string
 ): Message[] {
   if (maxActivities < 0 || messages.length === 0) return messages
 
@@ -156,55 +181,62 @@ export function pruneOldestLiveActivities(
   if (activityCount <= maxActivities) return messages
 
   let toDrop = activityCount - maxActivities
+  const kept: Message[] = []
+
+  // Open segment: rows folded since the last turn boundary.
   let dropped = 0
   let fromMs = Infinity
   let toMs = -Infinity
-  // Position of the *last* row folded into the marker, not the first: the
-  // marker is stamped with `toMs`, the newest time it covers, and the two must
-  // agree. Placed at the first dropped row instead, a marker that absorbed an
-  // earlier one could sit before the current turn's user message while
-  // covering activity rows from inside that turn — and currentTurnSubagents,
-  // which scans only from that user message on, would then miss it and publish
-  // an undercount as fact.
-  let insertAt = -1
-  const kept: Message[] = []
 
-  const cover = (start: number, end: number) => {
+  const cover = (count: number, start: number, end: number) => {
+    dropped += count
     if (Number.isFinite(start)) fromMs = Math.min(fromMs, start)
     if (Number.isFinite(end)) toMs = Math.max(toMs, end)
   }
 
+  const flush = () => {
+    if (dropped <= 0) return
+    const from = Number.isFinite(fromMs) ? fromMs : toMs
+    kept.push({
+      id: prunedActivitySummaryId(clawId, from, toMs),
+      role: "activity_summary",
+      content: "",
+      timestamp: new Date(toMs),
+      activitySummary: {
+        count: dropped,
+        from: new Date(from).toISOString(),
+        to: new Date(toMs).toISOString(),
+      },
+    })
+    dropped = 0
+    fromMs = Infinity
+    toMs = -Infinity
+  }
+
   for (const message of messages) {
-    if (message.id === PRUNED_ACTIVITY_SUMMARY_ID) {
-      dropped += message.activitySummary?.count ?? 0
+    if (isPrunedActivitySummary(message)) {
       const meta = message.activitySummary
-      cover(meta?.from ? Date.parse(meta.from) : messageTimeMs(message), meta?.to ? Date.parse(meta.to) : messageTimeMs(message))
-      insertAt = kept.length
+      const count = meta?.count ?? 0
+      if (count > 0) {
+        cover(
+          count,
+          meta?.from ? Date.parse(meta.from) : messageTimeMs(message),
+          meta?.to ? Date.parse(meta.to) : messageTimeMs(message)
+        )
+      }
       continue
     }
     if (message.role === "activity" && toDrop > 0) {
       toDrop -= 1
-      dropped += 1
-      cover(messageTimeMs(message), messageTimeMs(message))
-      insertAt = kept.length
+      cover(1, messageTimeMs(message), messageTimeMs(message))
       continue
     }
+    // A turn boundary closes the open marker: it must not cover rows from the
+    // previous turn once it sits inside this one.
+    if (message.role === "user") flush()
     kept.push(message)
   }
+  flush()
 
-  if (dropped <= 0 || insertAt === -1) return kept
-
-  const marker: Message = {
-    id: PRUNED_ACTIVITY_SUMMARY_ID,
-    role: "activity_summary",
-    content: "",
-    timestamp: new Date(toMs),
-    activitySummary: {
-      count: dropped,
-      from: new Date(fromMs).toISOString(),
-      to: new Date(toMs).toISOString(),
-    },
-  }
-  kept.splice(insertAt, 0, marker)
   return kept
 }

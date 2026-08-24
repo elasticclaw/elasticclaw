@@ -393,7 +393,8 @@ export function useHub(selectedClawId: string | null): HubState {
             mergedSeen.add(m.id)
             return true
           }),
-          MAX_LIVE_ACTIVITIES_PER_CLAW
+          MAX_LIVE_ACTIVITIES_PER_CLAW,
+          clawId
         )
         // Timestamp sort with a role tie-break: a summary is stamped with the
         // newest activity it covers, so on equal times it must land AFTER the
@@ -589,7 +590,7 @@ export function useHub(selectedClawId: string | null): HubState {
               activity,
               timestamp: createdAt,
             })
-            const pruned = pruneOldestLiveActivities(nextMessages, MAX_LIVE_ACTIVITIES_PER_CLAW)
+            const pruned = pruneOldestLiveActivities(nextMessages, MAX_LIVE_ACTIVITIES_PER_CLAW, clawId)
             const next = { ...prev, [clawId]: pruned }
             persistMessages(next)
             return next
@@ -653,7 +654,8 @@ export function useHub(selectedClawId: string | null): HubState {
               }
               const pruned = pruneOldestLiveActivities(
                 nextMessages,
-                MAX_LIVE_ACTIVITIES_PER_CLAW
+                MAX_LIVE_ACTIVITIES_PER_CLAW,
+                clawId
               )
               const next = { ...prev, [clawId]: pruned }
               persistMessages(next)

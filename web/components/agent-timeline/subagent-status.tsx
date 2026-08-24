@@ -17,6 +17,18 @@ const STATUS_COLOR: Record<SubagentStatus, string> = {
   done: "var(--step-done)",
 }
 
+/**
+ * Text colors for the status word. Only "done" differs from STATUS_COLOR:
+ * --step-done is the neutral *border* accent of a finished card (#525252 in
+ * dark), ≈2.5:1 as 9.5px text on --card. The status word is the only state
+ * indicator a finished card renders, so it uses the meta-text token that was
+ * raised precisely to clear 4.5:1 at this size.
+ */
+const STATUS_TEXT_COLOR: Record<SubagentStatus, string> = {
+  ...STATUS_COLOR,
+  done: "var(--muted-foreground)",
+}
+
 const STATUS_LABEL: Record<SubagentStatus, string> = {
   running: "running",
   quiet: "quiet",
@@ -59,7 +71,7 @@ export function SubagentStatusLabel({ status }: { status: SubagentStatus }) {
   return (
     <span
       className="shrink-0 font-mono text-[9.5px] uppercase tracking-[0.06em]"
-      style={{ color: STATUS_COLOR[status] }}
+      style={{ color: STATUS_TEXT_COLOR[status] }}
     >
       {STATUS_LABEL[status]}
     </span>

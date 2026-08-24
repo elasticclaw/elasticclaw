@@ -107,7 +107,7 @@ function FinishedCard({ sub, onOpen }: { sub: Subagent; onOpen: (id: string) => 
       <span
         className={cn(
           "mt-0.5 block truncate font-mono text-[10px]",
-          sub.status === "failed" ? "text-[var(--text-error)]" : "text-muted-foreground/80"
+          sub.status === "failed" ? "text-[var(--text-error)]" : "text-muted-foreground"
         )}
         title={outcome}
       >
