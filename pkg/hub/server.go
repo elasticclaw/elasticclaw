@@ -655,15 +655,15 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/factories/{name}/analytics", s.withStrictAdminAuth(s.handleFactoryAnalytics))                 // GET factory analytics
 	mux.HandleFunc("/api/factories", s.withAdminForMethods(s.handleFactoriesCRUD, http.MethodPost, http.MethodDelete)) // factory CRUD (GET list, POST push)
 	mux.HandleFunc("/api/analytics/factories", s.withStrictAdminAuth(s.handleAllFactoriesAnalytics))                   // GET all factories analytics
-	mux.HandleFunc("/api/analytics/summary", s.withStrictAdminAuth(s.handleTaskRunAnalyticsSummary))
+	mux.HandleFunc("/api/analytics/summary", s.withAnalyticsViewAuth(s.handleTaskRunAnalyticsSummary))
 	mux.HandleFunc("/api/analytics/costs", s.withStrictAdminAuth(s.handleTaskRunAnalyticsCosts))
-	mux.HandleFunc("/api/analytics/effectiveness", s.withStrictAdminAuth(s.handleTaskRunAnalyticsEffectiveness))
+	mux.HandleFunc("/api/analytics/effectiveness", s.withAnalyticsViewAuth(s.handleTaskRunAnalyticsEffectiveness))
 	mux.HandleFunc("/api/analytics/cost-drivers", s.withStrictAdminAuth(s.handleTaskRunAnalyticsCostDrivers))
-	mux.HandleFunc("/api/analytics/general-stats", s.withStrictAdminAuth(s.handleTaskRunAnalyticsGeneralStats))
-	mux.HandleFunc("/api/analytics/filter-options", s.withStrictAdminAuth(s.handleTaskRunAnalyticsFilterOptions))
-	mux.HandleFunc("/api/analytics/runs", s.withStrictAdminAuth(s.handleTaskRunAnalyticsRuns))
-	mux.HandleFunc("/api/analytics/runs/", s.withStrictAdminAuth(s.handleTaskRunAnalyticsRuns))
-	mux.HandleFunc("/api/analytics/tickets", s.withStrictAdminAuth(s.handleTaskRunAnalyticsTickets))
+	mux.HandleFunc("/api/analytics/general-stats", s.withAnalyticsViewAuth(s.handleTaskRunAnalyticsGeneralStats))
+	mux.HandleFunc("/api/analytics/filter-options", s.withAnalyticsViewAuth(s.handleTaskRunAnalyticsFilterOptions))
+	mux.HandleFunc("/api/analytics/runs", s.withAnalyticsViewAuth(s.handleTaskRunAnalyticsRuns))
+	mux.HandleFunc("/api/analytics/runs/", s.withAnalyticsViewAuth(s.handleTaskRunAnalyticsRuns))
+	mux.HandleFunc("/api/analytics/tickets", s.withAnalyticsViewAuth(s.handleTaskRunAnalyticsTickets))
 	mux.HandleFunc("/api/dependencies/status", s.withAuth(s.handleDependencyStatus))
 	mux.HandleFunc("/api/v2/workflow-runs/{runId}", s.withAuth(s.handleWorkflowV2Run))
 	mux.HandleFunc("/api/workspaces", s.withAdminForMethods(s.handleWorkspacesCRUD, http.MethodPost, http.MethodDelete)) // workspace CRUD
@@ -808,6 +808,51 @@ func (s *Server) withStrictAdminAuth(next http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 		ctx := context.WithValue(r.Context(), ctxTenantKey{}, tenantID)
+		if githubLogin != "" {
+			ctx = context.WithValue(ctx, ctxGitHubLoginKey{}, githubLogin)
+		}
+		next(w, r.WithContext(ctx))
+	}
+}
+
+// ctxAnalyticsAdminKey marks a request whose caller may see cost figures.
+type ctxAnalyticsAdminKey struct{}
+
+// analyticsCostsVisible reports whether the caller of an analytics route is
+// allowed to see cost data. Everyone authenticated can read analytics; only
+// admins (and legacy tenant tokens) see money.
+func analyticsCostsVisible(r *http.Request) bool {
+	visible, _ := r.Context().Value(ctxAnalyticsAdminKey{}).(bool)
+	return visible
+}
+
+// withAnalyticsViewAuth permits any authenticated caller to read analytics and
+// records whether that caller is an admin so handlers can redact cost fields.
+// Query-string tokens stay rejected, matching withStrictAdminAuth.
+func (s *Server) withAnalyticsViewAuth(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+		if token == "" {
+			token = r.Header.Get(webSessionHeader)
+		}
+		if token == "" {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		tenantID, githubLogin, ok := s.resolveAuthToken(token)
+		if !ok {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		s.mu.RLock()
+		var accessCfg *types.AccessConfig
+		if s.hubCfg.Auth != nil {
+			accessCfg = s.hubCfg.Auth.Access
+		}
+		s.mu.RUnlock()
+		ctx := context.WithValue(r.Context(), ctxTenantKey{}, tenantID)
+		// A tenant token has no login: it is the legacy full-access path.
+		ctx = context.WithValue(ctx, ctxAnalyticsAdminKey{}, githubLogin == "" || isAccessAdmin(accessCfg, githubLogin))
 		if githubLogin != "" {
 			ctx = context.WithValue(ctx, ctxGitHubLoginKey{}, githubLogin)
 		}

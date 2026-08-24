@@ -93,6 +93,11 @@ func (s *Server) handleTaskRunAnalyticsEffectiveness(w http.ResponseWriter, r *h
 		UniqueTickets:     prior.UniqueTickets,
 		MergeRate:         prior.MergeRate,
 	}
+	if !analyticsCostsVisible(r) {
+		// Non-admins read effectiveness without the money slices.
+		out.CostPerMergedPr = taskRunAnalyticsCostPerMerged{Weekly: make([]taskRunAnalyticsWeeklyCost, 0)}
+		out.TopTicketsByCost = make([]taskRunAnalyticsTopTicket, 0)
+	}
 	jsonOK(w, out)
 }
 func (s *Server) readTaskRunAnalyticsEffectiveness(f taskRunAnalyticsFilters) (taskRunAnalyticsEffectivenessResponse, error) {

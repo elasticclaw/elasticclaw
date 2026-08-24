@@ -405,10 +405,20 @@ func (s *Server) handleTaskRunAnalyticsRuns(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	bh := BusinessHoursFromEnv(r.URL.Query().Get("tz"))
+	showCosts := analyticsCostsVisible(r)
 	for i := range runs {
 		runs[i].ReadyToMergeMs = taskRunReadyToMergeMs(runs[i], bh)
+		if !showCosts {
+			redactTaskRunAnalyticsRunCost(&runs[i])
+		}
 	}
 	jsonOK(w, taskRunAnalyticsRunsResponse{Runs: runs, NextCursor: nextCursor, Limit: limit})
+}
+
+// redactTaskRunAnalyticsRunCost drops the money figures of a run for callers
+// who may read analytics but are not allowed to see costs.
+func redactTaskRunAnalyticsRunCost(run *taskRunAnalyticsRunView) {
+	run.EstimatedCostUsd = nil
 }
 
 // taskRunReadyToMergeMs is the business-hours span from the PR becoming ready
@@ -486,6 +496,9 @@ func (s *Server) handleTaskRunAnalyticsRunSubresource(w http.ResponseWriter, r *
 	}
 	if len(parts) == 1 {
 		run.ReadyToMergeMs = taskRunReadyToMergeMs(run, BusinessHoursFromEnv(r.URL.Query().Get("tz")))
+		if !analyticsCostsVisible(r) {
+			redactTaskRunAnalyticsRunCost(&run)
+		}
 		stages, err := taskRunStagesForRun(s.db, tenantID, runID)
 		if err != nil {
 			jsonError(w, http.StatusInternalServerError, "db error")

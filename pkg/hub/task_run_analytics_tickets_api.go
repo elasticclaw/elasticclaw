@@ -139,6 +139,9 @@ func (s *Server) handleTaskRunAnalyticsTickets(w http.ResponseWriter, r *http.Re
 			jsonError(w, http.StatusNotFound, "ticket not found")
 			return
 		}
+		if !analyticsCostsVisible(r) {
+			redactTaskRunAnalyticsTicketCost(ticket)
+		}
 		jsonOK(w, struct {
 			Ticket taskRunAnalyticsTicketView `json:"ticket"`
 		}{Ticket: *ticket})
@@ -201,9 +204,21 @@ func (s *Server) handleTaskRunAnalyticsTickets(w http.ResponseWriter, r *http.Re
 		ticket.TicketKey = group.key
 		// The caption intentionally uses this cached total; accepted departures allow its 5-minute staleness.
 		ticket.Ask, ticket.Story = "", []taskRunAnalyticsTicketStoryEntry{}
+		if !analyticsCostsVisible(r) {
+			redactTaskRunAnalyticsTicketCost(&ticket)
+		}
 		tickets = append(tickets, ticket)
 	}
 	jsonOK(w, taskRunAnalyticsTicketsResponse{Tickets: tickets, NextCursor: nextCursor, Limit: limit, Total: total})
+}
+
+// redactTaskRunAnalyticsTicketCost zeroes the money figures of a ticket for
+// callers who may read analytics but are not allowed to see costs.
+func redactTaskRunAnalyticsTicketCost(ticket *taskRunAnalyticsTicketView) {
+	ticket.Cost = 0
+	for i := range ticket.Runs {
+		ticket.Runs[i].Cost = 0
+	}
 }
 
 // readTaskRunAnalyticsTicketTimingForRuns keeps list-row timing accurate without
