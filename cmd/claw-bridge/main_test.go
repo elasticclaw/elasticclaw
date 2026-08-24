@@ -934,6 +934,7 @@ func TestResolveSubagentFields(t *testing.T) {
 	tests := []struct {
 		name                                      string
 		tool                                      string
+		phase                                     string
 		data                                      map[string]interface{}
 		wantName, wantType, wantModel, wantPrompt string
 		cleanPrompt                               bool
@@ -976,10 +977,28 @@ func TestResolveSubagentFields(t *testing.T) {
 			wantPrompt:  longPrompt,
 			cleanPrompt: true,
 		},
+		{
+			name:  "terminal message is not the prompt",
+			tool:  "Task",
+			phase: "completed",
+			data:  map[string]interface{}{"message": "Task completed", "title": "Task completed"},
+		},
+		{
+			name:  "terminal explicit input fields still resolve",
+			tool:  "Task",
+			phase: "completed",
+			data: map[string]interface{}{
+				"message": "Task completed",
+				"input": map[string]interface{}{
+					"description": "research auth flow", "prompt": "Inspect the auth flow.", "subagent_type": "research", "model": "gpt-5",
+				},
+			},
+			wantName: "research auth flow", wantType: "research", wantModel: "gpt-5", wantPrompt: "Inspect the auth flow.",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			name, subType, model, prompt := resolveSubagentFields(tt.tool, tt.data)
+			name, subType, model, prompt := resolveSubagentFields(tt.tool, tt.phase, tt.data)
 			if name != tt.wantName || subType != tt.wantType || model != tt.wantModel || prompt != tt.wantPrompt {
 				t.Fatalf("resolveSubagentFields() = (%q, %q, %q, %q), want (%q, %q, %q, %q)", name, subType, model, prompt, tt.wantName, tt.wantType, tt.wantModel, tt.wantPrompt)
 			}

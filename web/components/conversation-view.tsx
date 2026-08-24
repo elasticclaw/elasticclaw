@@ -22,7 +22,7 @@ import { SubagentRail } from "@/components/agent-timeline/subagent-rail"
 import { SubagentLanes } from "@/components/agent-timeline/subagent-lanes"
 import { SubagentDetail } from "@/components/agent-timeline/subagent-detail"
 import { useSubagentView, type SubagentView } from "@/components/agent-timeline/use-subagent-view"
-import { collectSubagents } from "@/lib/subagents"
+import { collectSubagents, latestOpenSubagentOutputMs, SUBAGENT_STALE_MS } from "@/lib/subagents"
 import { useNowTick } from "@/hooks/use-now"
 import { CopyTranscriptButton } from "@/components/copy-transcript-button"
 import {
@@ -1434,10 +1434,17 @@ function ClawChatView({
   const runningStep = useMemo(() => latestRunningStep(turns), [turns])
   const isWorking = claw.isStreaming || Boolean(runningStep)
 
-  // Subagents. The clock only ticks while the claw is working: a finished
-  // transcript has no running subagent whose staleness could change, so an
-  // idle chat must not re-derive this list once a second.
-  const subagentNow = useNowTick(isWorking)
+  // Subagents. The clock ticks while the claw is working — and, for a claw
+  // that died mid-Task, long enough for its open subagents to age out of
+  // "running": `isWorking` goes false the moment the claw goes offline, and
+  // stopping the clock there would freeze the rail on "3 running · output 2s
+  // ago" forever, next to a transcript that already shows the claw offline.
+  // Once every open call is past SUBAGENT_STALE_MS nothing here can change
+  // again, so an idle chat still stops re-deriving this list once a second.
+  const openSubagentOutputMs = useMemo(() => latestOpenSubagentOutputMs(turns), [turns])
+  const subagentsCanChange =
+    isWorking || (openSubagentOutputMs > 0 && Date.now() - openSubagentOutputMs <= SUBAGENT_STALE_MS)
+  const subagentNow = useNowTick(subagentsCanChange)
   const subagents = useMemo(() => collectSubagents(turns, subagentNow), [turns, subagentNow])
   const [subagentView, setSubagentView] = useSubagentView()
   // Mobile has no room for a 300px rail or a lane strip above a phone-height

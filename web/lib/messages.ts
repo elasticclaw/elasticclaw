@@ -129,9 +129,19 @@ export function windowMessagesByDurableCount(
   return messages.slice(startIdx)
 }
 
+/** Id of the placeholder standing in for locally pruned activity rows. */
+export const PRUNED_ACTIVITY_SUMMARY_ID = "activity-summary-pruned"
+
 /**
  * Drop the oldest live activity rows once they exceed `maxActivities`,
  * without touching durable conversation messages or live text segments.
+ *
+ * The removed rows leave an `activity_summary` placeholder behind, covering
+ * their time range so it can be expanded from the API like any other summary.
+ * Deleting them outright made the window look complete while it was not:
+ * counts derived from it (the sidebar's "N of M subagents") would undercount a
+ * long turn and present the undercount as fact. One marker is kept — an
+ * earlier one is folded into the new one.
  */
 export function pruneOldestLiveActivities(
   messages: Message[],
@@ -146,9 +156,48 @@ export function pruneOldestLiveActivities(
   if (activityCount <= maxActivities) return messages
 
   let toDrop = activityCount - maxActivities
-  return messages.filter((message) => {
-    if (message.role !== "activity" || toDrop <= 0) return true
-    toDrop -= 1
-    return false
-  })
+  let dropped = 0
+  let fromMs = Infinity
+  let toMs = -Infinity
+  let insertAt = -1
+  const kept: Message[] = []
+
+  const cover = (start: number, end: number) => {
+    if (Number.isFinite(start)) fromMs = Math.min(fromMs, start)
+    if (Number.isFinite(end)) toMs = Math.max(toMs, end)
+  }
+
+  for (const message of messages) {
+    if (message.id === PRUNED_ACTIVITY_SUMMARY_ID) {
+      dropped += message.activitySummary?.count ?? 0
+      const meta = message.activitySummary
+      cover(meta?.from ? Date.parse(meta.from) : messageTimeMs(message), meta?.to ? Date.parse(meta.to) : messageTimeMs(message))
+      if (insertAt === -1) insertAt = kept.length
+      continue
+    }
+    if (message.role === "activity" && toDrop > 0) {
+      toDrop -= 1
+      dropped += 1
+      cover(messageTimeMs(message), messageTimeMs(message))
+      if (insertAt === -1) insertAt = kept.length
+      continue
+    }
+    kept.push(message)
+  }
+
+  if (dropped <= 0 || insertAt === -1) return kept
+
+  const marker: Message = {
+    id: PRUNED_ACTIVITY_SUMMARY_ID,
+    role: "activity_summary",
+    content: "",
+    timestamp: new Date(toMs),
+    activitySummary: {
+      count: dropped,
+      from: new Date(fromMs).toISOString(),
+      to: new Date(toMs).toISOString(),
+    },
+  }
+  kept.splice(insertAt, 0, marker)
+  return kept
 }

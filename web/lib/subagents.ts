@@ -89,22 +89,105 @@ function subagentFromStep(step: Step, turnIndex: number, nowMs: number): Subagen
   }
 }
 
+/**
+ * Tools that actually spawn a subagent — the same set the bridge uses to decide
+ * whether to attach `subagent_*` fields (isSubagentTool, cmd/claw-bridge/main.go).
+ *
+ * `step.category === "task"` is far too wide: toolCategory maps
+ * /task|agent|skill|workflow|dispatch/ to "task", so Skill, TaskStop and
+ * spawn_task calls would be rendered as nameless, promptless subagents in the
+ * rail, counted in every header, and turned into drill-down rows whose result
+ * no longer expands inline.
+ */
+const SUBAGENT_TOOLS = new Set(["task", "agent", "subagent"])
+
 function isSubagentStep(step: Step): boolean {
-  return step.kind === "tool" && step.category === "task"
+  if (step.kind !== "tool" || step.category !== "task") return false
+  for (const message of step.messages) {
+    const tool = message.activity?.tool?.trim().toLowerCase()
+    if (tool && SUBAGENT_TOOLS.has(tool)) return true
+  }
+  return false
+}
+
+/**
+ * Identity of the underlying tool call.
+ *
+ * A step run is flushed at every user/claw/hub message (buildTurn.flushRun),
+ * so a Task whose terminal event arrives after an interleaved message is
+ * paired as two steps: a start with no `endedAt` and an orphan terminal. Both
+ * describe one call, and `call_id` is what ties them together.
+ */
+function subagentCallKey(step: Step): string {
+  for (const message of step.messages) {
+    const callId = message.activity?.call_id?.trim()
+    if (callId) return `call:${callId}`
+  }
+  return `step:${step.id}`
+}
+
+/** Fold a later fragment of the same call into the earlier one. */
+function mergeSubagentSteps(base: Step, next: Step): Step {
+  const resolved = next.endedAt !== undefined
+  return {
+    ...base,
+    status: resolved || next.status === "failed" ? next.status : base.status,
+    tone: resolved ? next.tone : base.tone,
+    detail: base.detail || next.detail,
+    statusText: next.statusText || base.statusText,
+    endedAt: next.endedAt ?? base.endedAt,
+    durationMs: next.endedAt
+      ? next.durationMs ?? Math.max(0, next.endedAt.getTime() - base.startedAt.getTime())
+      : base.durationMs,
+    exitCode: next.exitCode ?? base.exitCode,
+    result: next.result ?? base.result,
+    error: next.error ?? base.error,
+    messages: [...base.messages, ...next.messages],
+  }
+}
+
+/**
+ * Newest output timestamp among subagent calls with no terminal event, or 0.
+ *
+ * The panel uses it to decide whether its clock still has to tick: a claw that
+ * dies mid-Task stops producing turns, so without this its open subagents
+ * would stay frozen on "running" forever. Once every open call is past
+ * SUBAGENT_STALE_MS nothing derived here can change again.
+ */
+export function latestOpenSubagentOutputMs(turns: Turn[]): number {
+  let latest = 0
+  for (const turn of turns) {
+    for (const step of turn.steps) {
+      if (!isSubagentStep(step) || step.endedAt !== undefined || step.status === "failed") continue
+      latest = Math.max(latest, lastOutputAtMs(step))
+    }
+  }
+  return latest
 }
 
 export function collectSubagents(turns: Turn[], nowMs: number): Subagent[] {
-  const subs: Subagent[] = []
+  const byCall = new Map<string, { step: Step; turnIndex: number }>()
+  const order: string[] = []
 
   for (const turn of turns) {
     for (const step of turn.steps) {
       if (!isSubagentStep(step)) continue
-      subs.push(subagentFromStep(step, turn.index, nowMs))
+      const key = subagentCallKey(step)
+      const existing = byCall.get(key)
+      if (existing) {
+        existing.step = mergeSubagentSteps(existing.step, step)
+        continue
+      }
+      byCall.set(key, { step, turnIndex: turn.index })
+      order.push(key)
     }
   }
 
-  return subs
-    .map((sub, index) => ({ sub, index }))
+  return order
+    .map((key, index) => {
+      const entry = byCall.get(key)!
+      return { sub: subagentFromStep(entry.step, entry.turnIndex, nowMs), index }
+    })
     .sort((a, b) => {
       const groupDifference = statusGroup(a.sub.status) - statusGroup(b.sub.status)
       if (groupDifference !== 0) return groupDifference
@@ -122,10 +205,19 @@ export function subagentCounts(subs: Subagent[]): { running: number; quiet: numb
 
 export function subagentSummaryLine(subs: Subagent[]): string | null {
   if (subs.length === 0) return null
-  const { running, quiet } = subagentCounts(subs)
+  const { running, quiet, failed } = subagentCounts(subs)
   const noun = subs.length === 1 ? "subagent" : "subagents"
   const active = running + quiet
-  return active > 0 ? `${active} of ${subs.length} ${noun}` : `${subs.length} ${noun} done`
+  // A failure is the one state a user scanning the board most needs to see, so
+  // it is never folded into "done".
+  if (active === 0) {
+    if (failed === subs.length) return `${failed} ${noun} failed`
+    if (failed > 0) return `${subs.length - failed} of ${subs.length} ${noun} done · ${failed} failed`
+    return `${subs.length} ${noun} done`
+  }
+  // "1 of 1 subagent" says nothing; when everything is still open, say so.
+  const line = active === subs.length ? `${active} ${noun} running` : `${active} of ${subs.length} ${noun}`
+  return failed > 0 ? `${line} · ${failed} failed` : line
 }
 
 // ─── Board/sidebar summary over a partial message window ─────────────────────
@@ -137,9 +229,12 @@ export function subagentSummaryLine(subs: Subagent[]): string | null {
  * The board keeps a *recent-activity window*, not the full history: the
  * timeline endpoint returns `activity_summary` placeholders, and the prefetch
  * expands only the trailing ones within a row budget, so a partially expanded
- * summary survives with `count > 0`. If such a remainder sits inside the
- * current turn, some Task calls of that turn are simply not loaded and any
- * count derived here would be an undercount presented as fact.
+ * summary survives with `count > 0`. The live cache truncates too — a long
+ * turn past MAX_LIVE_ACTIVITIES_PER_CLAW has its oldest activity rows pruned —
+ * which is why pruneOldestLiveActivities leaves an `activity_summary` marker
+ * for what it removed instead of deleting silently. If such a remainder sits
+ * inside the current turn, some Task calls of that turn are simply not loaded
+ * and any count derived here would be an undercount presented as fact.
  *
  * So this returns null — meaning "say nothing" — whenever either is true:
  *   - the window contains no user message, so it does not reach the start of

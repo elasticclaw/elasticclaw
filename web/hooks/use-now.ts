@@ -20,7 +20,10 @@ const minuteListeners = new Set<() => void>()
  * drift is corrected client-side (render times with suppressHydrationWarning).
  */
 export function useNowTick(active: boolean): number {
-  const [now, setNow] = useState(sharedNow)
+  // With no timer running, `sharedNow` is as old as the last active
+  // subscriber: mounting on it would compare fresh timestamps against a clock
+  // from hours ago, so an inactive subscriber reads the real time instead.
+  const [now, setNow] = useState(() => (sharedTimer ? sharedNow : Date.now()))
   useEffect(() => {
     if (!active) return
     const listener = () => setNow(sharedNow)

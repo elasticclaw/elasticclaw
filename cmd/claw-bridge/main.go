@@ -1618,7 +1618,7 @@ func (gs *gatewaySession) readLoop(ctx context.Context) {
 				url := firstNonEmpty(agentPayload.Data.URL, agentPayload.Data.URI, nestedString(rawAgentPayload.Data, "url", "uri"))
 				meta := firstNonEmpty(agentPayload.Data.Meta, nestedString(rawAgentPayload.Data, "meta"))
 				command, path, url, detail := resolveToolActivityDetail(tool, command, path, url, meta, rawAgentPayload.Data)
-				subagentName, subagentType, subagentModel, subagentPrompt := resolveSubagentFields(tool, rawAgentPayload.Data)
+				subagentName, subagentType, subagentModel, subagentPrompt := resolveSubagentFields(tool, agentPayload.Data.Phase, rawAgentPayload.Data)
 				activity := agentActivity{
 					Kind:           kind,
 					Stream:         agentPayload.Stream,
@@ -1708,15 +1708,26 @@ func isSubagentTool(tool string) bool {
 	return false
 }
 
-func resolveSubagentFields(tool string, data map[string]interface{}) (name, subType, model, prompt string) {
+// resolveSubagentFields extracts the subagent's *inputs* (name, type, model,
+// prompt). Terminal events carry the call's outcome in generic fields such as
+// data.message or data.title, so on those phases only keys that unambiguously
+// name an input are consulted — otherwise a status line like "Task completed"
+// would be stored and rendered as the prompt given to the subagent.
+func resolveSubagentFields(tool, phase string, data map[string]interface{}) (name, subType, model, prompt string) {
 	if !isSubagentTool(tool) {
 		return "", "", "", ""
 	}
-	name = nestedString(data, "description", "title", "label", "name")
+	nameKeys := []string{"description", "title", "label", "name"}
+	promptKeys := []string{"prompt", "instructions", "task", "message"}
+	if isToolTerminalPhase(phase) {
+		nameKeys = []string{"description"}
+		promptKeys = []string{"prompt", "instructions"}
+	}
+	name = nestedString(data, nameKeys...)
 	if strings.EqualFold(strings.TrimSpace(name), strings.TrimSpace(tool)) {
 		name = ""
 	}
-	prompt = nestedString(data, "prompt", "instructions", "task", "message")
+	prompt = nestedString(data, promptKeys...)
 	subType = nestedString(data, "subagent_type", "subagentType", "agent_type", "agentType")
 	model = nestedString(data, "model", "model_id", "modelId")
 	return name, subType, model, prompt
