@@ -11,6 +11,7 @@ import (
 
 	"github.com/elasticclaw/elasticclaw/pkg/cliversion"
 	"github.com/elasticclaw/elasticclaw/pkg/config"
+	"github.com/elasticclaw/elasticclaw/pkg/hub/notify"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 )
 
@@ -74,11 +75,37 @@ type SettingsView struct {
 	Secrets              []string                    `json:"secrets"`
 	MCPServers           []MCPView                   `json:"mcpServers,omitempty"`
 	Auth                 *AuthView                   `json:"auth,omitempty"`
+	Notifications        *NotificationsView          `json:"notifications"`
+	LifecycleEventTypes  []string                    `json:"lifecycleEventTypes"`
 	// ConcurrencyGroups limits simultaneously running claws per group. 0 = unlimited.
 	ConcurrencyGroups []ConcurrencyGroupView `json:"concurrencyGroups"`
 	// MaxConcurrentClaws limits simultaneously running claws. 0 = unlimited.
 	// DEPRECATED: Use ConcurrencyGroups instead.
 	MaxConcurrentClaws int `json:"maxConcurrentClaws"`
+}
+
+// NotificationsView is the settings-safe view of outbound notifications.
+// It intentionally exposes secret references, never secret values.
+type NotificationsView struct {
+	Notifiers map[string]NotifierView     `json:"notifiers"`
+	Lifecycle *LifecycleNotificationsView `json:"lifecycle,omitempty"`
+}
+
+type NotifierView struct {
+	Type            string `json:"type"`
+	Channel         string `json:"channel,omitempty"`
+	TokenSecret     string `json:"token_secret,omitempty"`
+	APIBase         string `json:"api_base,omitempty"`
+	MinSendInterval string `json:"min_send_interval,omitempty"`
+}
+
+type LifecycleNotificationsView struct {
+	Enabled      bool                         `json:"enabled"`
+	Via          string                       `json:"via,omitempty"`
+	Routes       []types.LifecycleRoute       `json:"routes"`
+	PollInterval string                       `json:"poll_interval,omitempty"`
+	IdleAfter    string                       `json:"idle_after,omitempty"`
+	Events       *types.LifecycleEventToggles `json:"events,omitempty"`
 }
 
 type AuthView struct {
@@ -252,6 +279,8 @@ type SettingsPatch struct {
 	// MaxConcurrentClaws limits simultaneously running claws. 0 or omitted = unlimited.
 	// DEPRECATED: Use ConcurrencyGroups instead.
 	MaxConcurrentClaws *int `json:"maxConcurrentClaws,omitempty"`
+	// Notifications replaces the complete notifications configuration.
+	Notifications *types.NotificationsConfig `json:"notifications,omitempty"`
 }
 
 // MCPPatch is a request to add/update an MCP server config.
@@ -466,6 +495,8 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	view.ModelAuthProfiles = []ModelAuthProfileView{}
+	view.LifecycleEventTypes = append([]string(nil), types.LifecycleEventTypes...)
+	view.Notifications = buildNotificationsView(s.hubCfg.Notifications)
 	for _, profile := range s.hubCfg.ModelAuthProfiles {
 		if profile == nil {
 			continue
@@ -668,6 +699,57 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, view)
 }
 
+func buildNotificationsView(cfg *types.NotificationsConfig) *NotificationsView {
+	if cfg == nil {
+		return &NotificationsView{Notifiers: map[string]NotifierView{}}
+	}
+	view := &NotificationsView{Notifiers: make(map[string]NotifierView, len(cfg.Notifiers))}
+	for name, notifier := range cfg.Notifiers {
+		view.Notifiers[name] = NotifierView{
+			Type:            notifier.Type,
+			Channel:         notifierSettingString(notifier, "channel"),
+			TokenSecret:     notifierSettingString(notifier, "token_secret"),
+			APIBase:         notifierSettingString(notifier, "api_base"),
+			MinSendInterval: notifierSettingString(notifier, "min_send_interval"),
+		}
+	}
+	if lc := cfg.Lifecycle; lc != nil {
+		lifecycle := &LifecycleNotificationsView{
+			Enabled:      lc.IsEnabled(),
+			Via:          lc.Via,
+			Routes:       make([]types.LifecycleRoute, len(lc.Routes)),
+			PollInterval: lc.PollInterval,
+			IdleAfter:    lc.IdleAfter,
+		}
+		for i, route := range lc.Routes {
+			lifecycle.Routes[i] = types.LifecycleRoute{Via: route.Via, Events: append([]string(nil), route.Events...)}
+		}
+		if lc.Events != nil {
+			events := *lc.Events
+			lifecycle.Events = &events
+		}
+		view.Lifecycle = lifecycle
+	}
+	return view
+}
+
+func notifierSettingString(notifier types.NotifierConfig, key string) string {
+	value, _ := notifier.Settings[key].(string)
+	return value
+}
+
+func validateSettingsNotifications(cfg *types.NotificationsConfig) error {
+	if err := types.ValidateNotificationsConfig(cfg); err != nil {
+		return err
+	}
+	for name, notifier := range cfg.Notifiers {
+		if !notify.Supported(notifier.Type) {
+			return fmt.Errorf("notifications.notifiers.%s: unsupported notifier type %q", name, notifier.Type)
+		}
+	}
+	return nil
+}
+
 // buildGitHubAppView builds a GitHubAppView for the settings page, including
 // a live permission check if the private key is set.
 func (s *Server) buildGitHubAppView(ctx context.Context, app *types.GitHubAppConfig) GitHubAppView {
@@ -764,6 +846,19 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 
 	// Shallow copy of config struct; maps and slices are deep-copied only when modified below
 	updatedCfg := *s.hubCfg
+
+	if patch.Notifications != nil {
+		// A settings patch is the migration point from legacy lifecycle.via
+		// to routes: a supplied route set always wins and is written alone.
+		if patch.Notifications.Lifecycle != nil && patch.Notifications.Lifecycle.Routes != nil {
+			patch.Notifications.Lifecycle.Via = ""
+		}
+		if err := validateSettingsNotifications(patch.Notifications); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		updatedCfg.Notifications = patch.Notifications
+	}
 
 	// LLM keys — upsert/delete by name
 	if len(patch.LLMKeys) > 0 {

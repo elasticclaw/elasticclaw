@@ -1313,6 +1313,7 @@ func settingsStaticSection(section string) bool {
 		"ai-config",
 		"mcp-servers",
 		"analytics",
+		"notifier",
 		"doctor",
 		"troubleshoot":
 		return true
