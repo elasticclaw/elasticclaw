@@ -261,10 +261,9 @@ func respondByChannel(fake *fakeSlackServer, fn func(channel string, w http.Resp
 func slackOK(w http.ResponseWriter) { fmt.Fprint(w, `{"ok":true,"ts":"1000.000001"}`) }
 
 // Regression: the claw pass has NO cursor — the delivery-row anti-join alone
-// decides what is new. With more than one route the legacy row stopped being
-// written, so every handled ad-hoc claw event was re-selected on every tick
-// forever and eventually ate the whole batch LIMIT, silently starving newer
-// claws of notifications.
+// decides what is new. With more than one route no row was written for the
+// handled claw, so it was re-selected on every tick forever and eventually ate
+// the whole batch LIMIT, silently starving newer claws of notifications.
 func TestLifecycleRoutesFanoutFencesClawEvents(t *testing.T) {
 	fake := newFakeSlackServer(t)
 	s, db := newSlackNotifierRoutesTestServer(t, fake.server.URL, []types.LifecycleRoute{{Via: "primary"}, {Via: "secondary"}})
@@ -276,12 +275,11 @@ func TestLifecycleRoutesFanoutFencesClawEvents(t *testing.T) {
 	if fake.count() != 2 {
 		t.Fatalf("fan-out sent %d messages, want 2", fake.count())
 	}
-	if _, ok := slackDeliveryStatus(t, db, lifecycleClawStartedKey("claw-adhoc")); !ok {
-		t.Fatal("handled claw event has no fence row; it would be re-selected on every tick forever")
-	}
-	claws, err := s.selectLifecycleClawStateCandidates(lifecycleClawKindStarted)
-	if err != nil || len(claws) != 0 {
-		t.Fatalf("handled claw still selected as a candidate: %d (err %v)", len(claws), err)
+	for _, notifier := range []string{"primary", "secondary"} {
+		claws, err := s.selectLifecycleClawStateCandidates(lifecycleClawKindStarted, notifier)
+		if err != nil || len(claws) != 0 {
+			t.Fatalf("handled claw still selected as a candidate for %s: %d (err %v)", notifier, len(claws), err)
+		}
 	}
 	s.lifecycleNotifierTick()
 	if fake.count() != 2 {
@@ -289,8 +287,8 @@ func TestLifecycleRoutesFanoutFencesClawEvents(t *testing.T) {
 	}
 }
 
-// Regression: an event type no route accepts is still "handled" and must be
-// fenced, or the claw pass re-selects it forever.
+// Regression: an event type a route does not accept must never be scanned for
+// that route, or those claws sit in its oldest-first batch forever.
 func TestLifecycleRoutesFenceClawEventNoRouteAccepts(t *testing.T) {
 	fake := newFakeSlackServer(t)
 	s, db := newSlackNotifierRoutesTestServer(t, fake.server.URL,
@@ -300,11 +298,137 @@ func TestLifecycleRoutesFenceClawEventNoRouteAccepts(t *testing.T) {
 	insertSlackTestClaw(t, db, "claw-adhoc", "connected", 1, "", oldEnough)
 
 	s.lifecycleNotifierTick()
+	s.lifecycleNotifierTick()
 	if fake.count() != 0 {
 		t.Fatalf("agent_started reached a pr_opened-only route: %d messages", fake.count())
 	}
-	if _, ok := slackDeliveryStatus(t, db, lifecycleClawStartedKey("claw-adhoc")); !ok {
-		t.Fatal("claw event no route accepts was not fenced; it would be re-selected forever")
+	route := lifecycleRouteDelivery{notifier: "prs-only", events: map[string]bool{taskRunEventPROpened: true}}
+	if lifecycleRouteAccepts(route, taskRunEventAgentStarted) {
+		t.Fatal("a pr_opened-only route must not scan agent_started claws; they would consume its batch forever")
+	}
+}
+
+// Regression: in the legacy single-`via` shape, a claw event whose route row
+// exists without the legacy row — the state a crash between the two writes
+// leaves, or a multi-route era where only this route ever delivered — was
+// re-selected on every tick forever: the dedupe read saw the route row and sent
+// nothing, so no legacy row was ever written and the event kept one slot of the
+// oldest-first batch for good.
+func TestLifecycleClawEventWithOnlyRouteDeliveryIsNotReselected(t *testing.T) {
+	fake := newFakeSlackServer(t)
+	s, db := newSlackNotifierTestServer(t, fake.server.URL, nil)
+	setLifecycleClawBaseline(t, s)
+	setSlackWatermark(t, s, 0)
+	insertSlackTestClaw(t, db, "claw-adhoc", "connected", 1, "", oldEnough)
+	if _, err := db.Exec(`INSERT INTO slack_notification_deliveries_v2(event_id, notifier, run_id, delivered_at, message_ts, status) VALUES(?,?,?,?,?,?)`,
+		lifecycleClawStartedKey("claw-adhoc"), testNotifierName, lifecycleClawRunKey("claw-adhoc"), 1, "", notificationDeliveryStatusSent); err != nil {
+		t.Fatalf("seed route delivery: %v", err)
+	}
+
+	for i := 0; i < 3; i++ {
+		s.lifecycleNotifierTick()
+	}
+	if fake.count() != 0 {
+		t.Fatalf("an already-delivered claw event was re-sent %d times", fake.count())
+	}
+	claws, err := s.selectLifecycleClawStateCandidates(lifecycleClawKindStarted, testNotifierName)
+	if err != nil || len(claws) != 0 {
+		t.Fatalf("delivered claw is still a candidate: %d (err %v)", len(claws), err)
+	}
+}
+
+// Regression: claws delivered to a healthy route kept no delivery row while
+// another route was broken, so they stayed in the shared, oldest-first
+// `LIMIT 200` candidate set forever and eventually locked newer claws out of
+// every route — the cross-route muting the per-route parking exists to prevent.
+// ErrorConfig (is_archived) is never burned by the transient cap, so the state
+// persisted for as long as the channel stayed archived.
+func TestLifecycleClawBrokenRouteDoesNotStarveHealthyRoute(t *testing.T) {
+	fake := newFakeSlackServer(t)
+	s, db := newSlackNotifierRoutesTestServer(t, fake.server.URL, []types.LifecycleRoute{{Via: "archived"}, {Via: "healthy"}})
+	respondByChannel(fake, func(channel string, w http.ResponseWriter) {
+		if channel == "C0ROUTE0001" { // the "archived" route
+			fmt.Fprint(w, `{"ok":false,"error":"is_archived"}`)
+			return
+		}
+		slackOK(w)
+	})
+	setLifecycleClawBaseline(t, s)
+	setSlackWatermark(t, s, 0)
+	for i := 0; i < 3; i++ {
+		insertSlackTestClaw(t, db, fmt.Sprintf("claw-%d", i), "connected", 1, "", oldEnough)
+	}
+
+	s.lifecycleNotifierTick()
+	s.lifecycleNotifierTick()
+
+	healthy, err := s.selectLifecycleClawStateCandidates(lifecycleClawKindStarted, "healthy")
+	if err != nil || len(healthy) != 0 {
+		t.Fatalf("claws already delivered to the healthy route still occupy its batch: %d (err %v)", len(healthy), err)
+	}
+	archived, err := s.selectLifecycleClawStateCandidates(lifecycleClawKindStarted, "archived")
+	if err != nil || len(archived) != 3 {
+		t.Fatalf("the broken route lost its backlog: %d candidates (err %v)", len(archived), err)
+	}
+}
+
+// Regression: a configured route that cannot be built at all (its token secret
+// no longer exists) marked every claw event incomplete — even event types its
+// own allow-list does not cover — so the routes that DID build never got a
+// fence row and replayed their candidate set on every tick until it filled the
+// batch. Pre-routing this was a loud total outage; here it was silent.
+func TestLifecycleClawUnbuildableRouteDoesNotStarveBuiltRoutes(t *testing.T) {
+	fake := newFakeSlackServer(t)
+	s, db := newSlackNotifierRoutesTestServer(t, fake.server.URL, []types.LifecycleRoute{
+		{Via: "primary", Events: []string{taskRunEventAgentStarted}},
+		{Via: "secondary", Events: []string{taskRunEventPROpened}},
+	})
+	s.mu.Lock()
+	s.hubCfg.Notifications.Notifiers["secondary"] = types.NotifierConfig{Type: "slack", Settings: map[string]any{
+		"token_secret": "secret-that-no-longer-exists", "channel": "C0SECOND",
+	}}
+	s.mu.Unlock()
+	setLifecycleClawBaseline(t, s)
+	setSlackWatermark(t, s, 0)
+	insertSlackTestClaw(t, db, "claw-adhoc", "connected", 1, "", oldEnough)
+
+	for i := 0; i < 3; i++ {
+		s.lifecycleNotifierTick()
+	}
+	if fake.count() != 1 {
+		t.Fatalf("agent_started sent %d times; an unbuildable route must not make a built one replay", fake.count())
+	}
+	claws, err := s.selectLifecycleClawStateCandidates(lifecycleClawKindStarted, "primary")
+	if err != nil || len(claws) != 0 {
+		t.Fatalf("an unbuildable route kept a delivered claw in the built route's batch: %d (err %v)", len(claws), err)
+	}
+}
+
+// A route added to an existing config must not replay every currently
+// connected claw into its new channel: the claw pass has no cursor, so the
+// route needs its own baseline the way a new task-run route inherits a cursor.
+func TestLifecycleClawRouteAddedLaterDoesNotReplayCurrentClaws(t *testing.T) {
+	fake := newFakeSlackServer(t)
+	s, db := newSlackNotifierRoutesTestServer(t, fake.server.URL, []types.LifecycleRoute{{Via: "primary"}, {Via: "secondary"}})
+	setLifecycleClawBaseline(t, s)
+	setSlackWatermark(t, s, 0)
+	insertSlackTestClaw(t, db, "claw-adhoc", "connected", 1, "", oldEnough)
+	s.lifecycleNotifierTick()
+	if fake.count() != 2 {
+		t.Fatalf("fan-out sent %d messages, want 2", fake.count())
+	}
+
+	s.mu.Lock()
+	s.hubCfg.Notifications.Notifiers["late"] = types.NotifierConfig{Type: "slack", Settings: map[string]any{
+		"token_secret": testNotifierToken, "channel": "C0LATEROUTE",
+	}}
+	s.hubCfg.Notifications.Lifecycle.Routes = append(s.hubCfg.Notifications.Lifecycle.Routes, types.LifecycleRoute{Via: "late"})
+	s.mu.Unlock()
+
+	s.lifecycleNotifierTick()
+	s.lifecycleNotifierTick()
+	if fake.count() != 2 {
+		t.Fatalf("a route added later replayed the current claw list: %d messages, want 2", fake.count())
 	}
 }
 
@@ -1667,13 +1791,16 @@ func TestLifecyclePostDoesNotWriteLegacyThreadRows(t *testing.T) {
 		RunID: "run-1", AttemptID: "attempt-run-1", ClawID: "claw-1", TenantID: "test-tenant-id", OwnerType: taskRunOwnerFactory,
 		Factory: "bugfix", StartedAt: base - 1000,
 	})
+	route := d.effectiveRoutes()[0]
 	ev := lifecycleEventRow{ID: "ev-1", RunID: "run-1", EventType: taskRunEventAgentStarted}
-	if err := s.postLifecycleEvent(d, ev, s.lifecycleRunContextFor("run-1"), "run-1", "ev-1"); err != nil {
+	msg := buildLifecycleMessage(ev, s.lifecycleRunContextFor("run-1"))
+	if err := s.postLifecycleEventRoute(d, route, msg, "run-1", "ev-1"); err != nil {
 		t.Fatalf("first post: %v", err)
 	}
 	// The second event must stay top-level and no legacy root row may be written.
 	ev2 := lifecycleEventRow{ID: "ev-2", RunID: "run-1", EventType: taskRunEventPROpened}
-	if err := s.postLifecycleEvent(d, ev2, s.lifecycleRunContextFor("run-1"), "run-1", "ev-2"); err != nil {
+	msg2 := buildLifecycleMessage(ev2, s.lifecycleRunContextFor("run-1"))
+	if err := s.postLifecycleEventRoute(d, route, msg2, "run-1", "ev-2"); err != nil {
 		t.Fatalf("second post: %v", err)
 	}
 	var n int

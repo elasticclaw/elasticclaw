@@ -324,9 +324,10 @@ type lifecycleDelivery struct {
 	lc       *types.LifecycleNotificationsConfig
 	// incomplete records that at least one CONFIGURED route could not be
 	// built this tick (unresolvable secret mid-rotation, bad settings). Its
-	// events are still owed to it, so nothing may write the shared legacy
-	// fence row — that row marks an event handled for every route and would
-	// turn a temporary outage into permanent per-route event loss.
+	// events are still owed to it, so the shared task-run watermark floor must
+	// not advance past them. It deliberately does NOT hold back the routes that
+	// did build: both passes dedupe per route, so an indefinitely broken
+	// channel cannot wedge a healthy one's delivery.
 	incomplete bool
 	// paused collects routes whose send failed in a way that must not be
 	// retried for the rest of this tick (a config error, or a transient error
@@ -370,16 +371,6 @@ func (d lifecycleDelivery) pauseRoute(notifier string) {
 }
 
 func (d lifecycleDelivery) routePaused(notifier string) bool { return d.paused[notifier] }
-
-// hasLiveRoutes reports whether any route is still deliverable this tick.
-func (d lifecycleDelivery) hasLiveRoutes() bool {
-	for _, route := range d.effectiveRoutes() {
-		if !d.routePaused(route.notifier) {
-			return true
-		}
-	}
-	return false
-}
 
 func (s *Server) lifecycleNotifierTick() {
 	// Drain delivery rows whose post-send write failed before anything can
@@ -564,7 +555,7 @@ func (s *Server) lifecycleTaskRunRoutePass(d lifecycleDelivery, cursor lifecycle
 		if d.routePaused(cursor.route.notifier) {
 			break
 		}
-		if len(cursor.route.events) != 0 && !cursor.route.events[ev.EventType] {
+		if !lifecycleRouteAccepts(cursor.route, ev.EventType) {
 			// Not this route's event type: handled by definition.
 			maxHandled = ev.RowID
 			continue
@@ -748,56 +739,6 @@ func (s *Server) lifecycleMaxEventRowID() (int64, error) {
 	return maxRow, err
 }
 
-// postLifecycleEvent renders one event, posts it top-level through every
-// configured route and records the deliveries under deliveryKey. It returns a
-// lifecycleRouteSendErrors carrying one entry per route that failed (nil when
-// every route is done), so no route's failure can be swallowed by another's.
-// The slack_run_threads table remains for legacy data, but lifecycle
-// notifications no longer read or write it.
-func (s *Server) postLifecycleEvent(d lifecycleDelivery, ev lifecycleEventRow, runCtx lifecycleRunContext, runKey, deliveryKey string) error {
-	msg := buildLifecycleMessage(ev, runCtx)
-	var errs lifecycleRouteSendErrors
-	// complete tracks whether every route this event is owed to has reached a
-	// terminal outcome. Only then may the legacy fence row be written.
-	complete := !d.incomplete
-	applicable, sentAny := 0, false
-	for _, route := range d.effectiveRoutes() {
-		if len(route.events) != 0 && !route.events[ev.EventType] {
-			continue
-		}
-		applicable++
-		if d.routePaused(route.notifier) {
-			complete = false
-			continue
-		}
-		sent, err := s.postLifecycleRoute(d, route, msg, runKey, deliveryKey)
-		if err != nil {
-			errs = append(errs, lifecycleRouteSendError{notifier: route.notifier, err: err})
-			complete = false
-			continue
-		}
-		sentAny = sentAny || sent
-	}
-	// The claw pass has no cursor: a handled event that ends up with no row in
-	// the legacy table is re-selected on every tick forever and eventually
-	// consumes the whole LIMIT, silently starving newer claws. The v2 rows are
-	// per-route and the pass cannot know the route set in SQL, so once every
-	// route is done a single legacy row fences the event for all of them.
-	// Skipped when one route already wrote it (the legacy single-`via` shape),
-	// so the real handle/status is never overwritten by a fence.
-	if complete && !(d.singleRoute() && applicable > 0) {
-		status := notificationDeliveryStatusSkipped
-		if sentAny {
-			status = notificationDeliveryStatusSent
-		}
-		s.recordNotificationDelivery(deliveryKey, runKey, "", status)
-	}
-	if len(errs) == 0 {
-		return nil
-	}
-	return errs
-}
-
 // postLifecycleRoute delivers one already-rendered message through one route
 // and records its delivery row. sent reports whether an external Send actually
 // happened (false when the route was already deduped).
@@ -840,32 +781,13 @@ func (s *Server) postLifecycleRoute(d lifecycleDelivery, route lifecycleRouteDel
 	return true, nil
 }
 
-// postLifecycleEventRoute is the single-route entry point used by the
-// per-route task-run pass.
+// postLifecycleEventRoute is the single-route entry point both passes use.
+// Every event is delivered per route — the task-run pass behind that route's
+// cursor, the claw pass behind that route's delivery rows — so no route's
+// failure can be swallowed by, or hold back, another's.
 func (s *Server) postLifecycleEventRoute(d lifecycleDelivery, route lifecycleRouteDelivery, msg notify.Message, runKey, deliveryKey string) error {
 	_, err := s.postLifecycleRoute(d, route, msg, runKey, deliveryKey)
 	return err
-}
-
-type lifecycleRouteSendError struct {
-	notifier string
-	err      error
-}
-
-func (e lifecycleRouteSendError) Error() string { return e.err.Error() }
-
-// lifecycleRouteSendErrors carries every failing route of one fan-out. Callers
-// must apply the send-failure policy to each entry: classifying only the first
-// one lets a later route's transient/config failure be mistaken for handled,
-// which advances the cursor past an event that route never received.
-type lifecycleRouteSendErrors []lifecycleRouteSendError
-
-func (e lifecycleRouteSendErrors) Error() string {
-	parts := make([]string, 0, len(e))
-	for _, routeErr := range e {
-		parts = append(parts, routeErr.notifier+": "+routeErr.err.Error())
-	}
-	return strings.Join(parts, "; ")
 }
 
 // lifecycleRouteDelivered reports whether this (event, route) pair already has

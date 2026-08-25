@@ -48,6 +48,14 @@ const (
 	// or claw_prs rows — the same rule the task-run watermark follows.
 	lifecycleStateClawBaselineKey = "claw_baseline_done"
 
+	// lifecycleClawRouteBaselinePrefix namespaces one route's own baseline.
+	// The claw pass has no cursor, so a route added to an existing config
+	// would otherwise find every currently connected claw (and every open
+	// claw_prs row) missing its delivery rows and replay the lot into the new
+	// channel. Seeding the route's history on first sight is the per-route
+	// analog of the task-run pass's first-run watermark.
+	lifecycleClawRouteBaselinePrefix = lifecycleStateClawBaselineKey + ":"
+
 	// lifecycleClawAdhocGrace is how old a claw must be before the claw pass will
 	// classify it as ad-hoc. See the race note above. Every ensureTaskRunForClaw
 	// caller attaches the run in the same request that inserts the claw row, so
@@ -154,6 +162,16 @@ func lifecycleClawKindsEnabled(cfg *types.LifecycleNotificationsConfig) (agentSt
 	return
 }
 
+func lifecycleClawRouteBaselineKey(notifier string) string {
+	return lifecycleClawRouteBaselinePrefix + notifier
+}
+
+// lifecycleRouteAccepts reports whether a route's allow-list covers an event
+// type. An empty allow-list means "every type".
+func lifecycleRouteAccepts(route lifecycleRouteDelivery, eventType string) bool {
+	return len(route.events) == 0 || route.events[eventType]
+}
+
 // lifecycleClawPass is the claw-level counterpart of slackTaskRunPass, covering
 // only claws with an empty task_run_id.
 func (s *Server) lifecycleClawPass(d lifecycleDelivery) {
@@ -169,6 +187,11 @@ func (s *Server) lifecycleClawPass(d lifecycleDelivery) {
 			return
 		}
 		s.setNotifierStateInt64(lifecycleStateClawBaselineKey, 1)
+		for _, route := range d.effectiveRoutes() {
+			// The shared baseline just recorded the current state for every
+			// route, so none of them needs its own seeding pass.
+			s.setNotifierStateInt64(lifecycleClawRouteBaselineKey(route.notifier), 1)
+		}
 		return
 	}
 
@@ -188,18 +211,105 @@ func (s *Server) lifecycleClawPass(d lifecycleDelivery) {
 		s.skipCurrentLifecycleClawPRs()
 	}
 
-	if startedOn && !s.sendLifecycleClawStateEvents(d, lifecycleClawKindStarted) {
+	// Every route selects and delivers on its own. The claw pass has no cursor,
+	// so a claw stays a candidate until it has a delivery row — and a shared
+	// candidate set means a route that cannot deliver (archived channel,
+	// unresolvable token secret) keeps its claws in that set forever and, at
+	// `ORDER BY created_at LIMIT 200`, eventually locks every newer claw out of
+	// the batch for the HEALTHY routes too. Per-route selection confines that
+	// debt to the route that owes it.
+	for _, route := range d.effectiveRoutes() {
+		if d.routePaused(route.notifier) {
+			continue
+		}
+		if !s.ensureLifecycleClawRouteBaseline(d, route) {
+			continue
+		}
+		s.lifecycleClawRoutePass(d, route, startedOn, prOn, failuresOn, idleOn)
+	}
+}
+
+// lifecycleClawRoutePass runs the four claw-sourced kinds for one route. A kind
+// the route's allow-list rejects is never scanned, so those claws cannot
+// consume the route's batch either.
+func (s *Server) lifecycleClawRoutePass(d lifecycleDelivery, route lifecycleRouteDelivery, startedOn, prOn, failuresOn, idleOn bool) {
+	if startedOn && lifecycleRouteAccepts(route, taskRunEventAgentStarted) &&
+		!s.sendLifecycleClawStateEvents(d, route, lifecycleClawKindStarted) {
 		return
 	}
-	if failuresOn && !s.sendLifecycleClawStateEvents(d, lifecycleClawKindFailure) {
+	if failuresOn && lifecycleRouteAccepts(route, taskRunEventAgentStopped) &&
+		!s.sendLifecycleClawStateEvents(d, route, lifecycleClawKindFailure) {
 		return
 	}
-	if idleOn && !s.sendLifecycleClawIdleEvents(d) {
+	if idleOn && lifecycleRouteAccepts(route, taskRunEventAgentIdle) &&
+		!s.sendLifecycleClawIdleEvents(d, route) {
 		return
 	}
-	if prOn {
-		s.lifecycleClawPRPass(d)
+	if prOn && lifecycleRouteAccepts(route, taskRunEventPROpened) {
+		s.lifecycleClawPRPass(d, route)
 	}
+}
+
+// ensureLifecycleClawRouteBaseline records a newly configured route's history
+// and reports whether the route may deliver this tick. The legacy single-`via`
+// shape needs none: it keeps writing the shared legacy rows, which already
+// fence every claw it has handled.
+func (s *Server) ensureLifecycleClawRouteBaseline(d lifecycleDelivery, route lifecycleRouteDelivery) bool {
+	if d.singleRoute() {
+		return true
+	}
+	key := lifecycleClawRouteBaselineKey(route.notifier)
+	_, found, err := s.notifierStateInt64(key)
+	if err != nil {
+		// Unreadable state must not be mistaken for "already baselined": that
+		// would replay the current claw list into the channel.
+		log.Printf("[notify] read claw baseline state for %q: %v", route.notifier, err)
+		return false
+	}
+	if found {
+		return true
+	}
+	if err := s.seedLifecycleClawRouteBaseline(route.notifier); err != nil {
+		log.Printf("[notify] seed claw baseline for %q: %v", route.notifier, err)
+		return false
+	}
+	s.setNotifierStateInt64(key, 1)
+	return false
+}
+
+// seedLifecycleClawRouteBaseline records the current claw/PR state as already
+// handled for one route, mirroring seedLifecycleClawBaseline into the per-route
+// table.
+func (s *Server) seedLifecycleClawRouteBaseline(notifier string) error {
+	startedCond, startedSuffix := lifecycleClawStateCondition(lifecycleClawKindStarted)
+	failureCond, failureSuffix := lifecycleClawStateCondition(lifecycleClawKindFailure)
+	at := epochMillis(now())
+	const insert = `INSERT INTO slack_notification_deliveries_v2(event_id, notifier, run_id, delivered_at, message_ts, status) `
+	stmts := []struct {
+		query string
+		args  []any
+	}{
+		{insert + `SELECT 'claw:' || c.id || ?, ?, 'claw:' || c.id, ?, '', ?
+			  FROM claws c WHERE c.task_run_id = '' AND ` + startedCond + `
+			ON CONFLICT(event_id, notifier) DO NOTHING`, []any{startedSuffix, notifier, at, notificationDeliveryStatusSkipped}},
+		{insert + `SELECT 'claw:' || c.id || ?, ?, 'claw:' || c.id, ?, '', ?
+			  FROM claws c WHERE c.task_run_id = '' AND ` + failureCond + `
+			ON CONFLICT(event_id, notifier) DO NOTHING`, []any{failureSuffix, notifier, at, notificationDeliveryStatusSkipped}},
+		{insert + `SELECT 'claw:' || c.id || ':idle:' || c.idle_since, ?, 'claw:' || c.id, ?, '', ?
+			  FROM claws c WHERE c.task_run_id = '' AND c.idle_since > 0
+			ON CONFLICT(event_id, notifier) DO NOTHING`, []any{notifier, at, notificationDeliveryStatusSkipped}},
+		// The WHERE clause is load-bearing: without it SQLite parses ON CONFLICT
+		// as the start of a join clause and rejects the statement.
+		{insert + `SELECT 'claw:' || p.claw_id || ':pr:' || p.pr_url, ?, 'claw:' || p.claw_id, ?, '', ?
+			  FROM claw_prs p WHERE true
+			ON CONFLICT(event_id, notifier) DO NOTHING`, []any{notifier, at, notificationDeliveryStatusSkipped}},
+	}
+	for _, stmt := range stmts {
+		if _, err := s.db.Exec(stmt.query, stmt.args...); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // seedLifecycleClawBaseline records the current claw/PR state as already handled.
@@ -294,7 +404,9 @@ func (s *Server) skipCurrentLifecycleClawIdle() error {
 }
 
 // selectLifecycleClawIdleCandidates returns ad-hoc claws whose idle latch has
-// no delivery row yet. The exclusion conditions mirror agentIdleEligible for
+// no delivery row yet for this route — the shared legacy row (baseline,
+// parking, or a legacy single-`via` send) fences every route, the v2 row only
+// its own. The exclusion conditions mirror agentIdleEligible for
 // the ad-hoc kind — status 'connected', no unresolved DELIVERED tracked PR,
 // still driven by a pipeline stage or a live workflow run — so a claw that
 // opened a PR, died, or lost its automatic driver between latch and delivery
@@ -302,7 +414,7 @@ func (s *Server) skipCurrentLifecycleClawIdle() error {
 // clawOpenPRCount and agentIdleHasClawPRs: a PR the agent merely linked is
 // not "PR out, awaiting humans", and suppressing the idle notification on it
 // would hide a hung claw the watcher will also never finalize.
-func (s *Server) selectLifecycleClawIdleCandidates() ([]lifecycleClawRow, []int64, error) {
+func (s *Server) selectLifecycleClawIdleCandidates(notifier string) ([]lifecycleClawRow, []int64, error) {
 	cutoff := now().Add(-lifecycleClawAdhocGrace).Unix()
 	rows, err := s.db.Query(`
 		SELECT `+lifecycleClawSelectColumns+`, c.idle_since
@@ -317,8 +429,12 @@ func (s *Server) selectLifecycleClawIdleCandidates() ([]lifecycleClawRow, []int6
 			SELECT 1 FROM slack_notification_deliveries d
 			 WHERE d.event_id = 'claw:' || c.id || ':idle:' || c.idle_since
 		   )
+		   AND NOT EXISTS (
+			SELECT 1 FROM slack_notification_deliveries_v2 v
+			 WHERE v.event_id = 'claw:' || c.id || ':idle:' || c.idle_since AND v.notifier = ?
+		   )
 		 ORDER BY c.created_at
-		 LIMIT `+strconv.Itoa(lifecycleBatchSize), cutoff)
+		 LIMIT `+strconv.Itoa(lifecycleBatchSize), cutoff, notifier)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -341,8 +457,8 @@ func (s *Server) selectLifecycleClawIdleCandidates() ([]lifecycleClawRow, []int6
 
 // sendLifecycleClawIdleEvents delivers the idle kind for ad-hoc claws. Returns
 // false when the claw pass must stop for this tick.
-func (s *Server) sendLifecycleClawIdleEvents(d lifecycleDelivery) bool {
-	claws, idleSinces, err := s.selectLifecycleClawIdleCandidates()
+func (s *Server) sendLifecycleClawIdleEvents(d lifecycleDelivery, route lifecycleRouteDelivery) bool {
+	claws, idleSinces, err := s.selectLifecycleClawIdleCandidates(route.notifier)
 	if err != nil {
 		log.Printf("[notify] select claw idle candidates: %v", err)
 		return false
@@ -354,7 +470,7 @@ func (s *Server) sendLifecycleClawIdleEvents(d lifecycleDelivery) bool {
 			detail["idleMinutes"] = minutes
 		}
 		ev := lifecycleEventRow{EventType: taskRunEventAgentIdle, Detail: detail}
-		if !s.deliverLifecycleClawEvent(d, claw, ev, lifecycleClawRunContext(claw), lifecycleClawIdleKey(claw.ID, idleSince)) {
+		if !s.deliverLifecycleClawEvent(d, route, claw, ev, lifecycleClawRunContext(claw), lifecycleClawIdleKey(claw.ID, idleSince)) {
 			return false
 		}
 	}
@@ -401,9 +517,11 @@ func lifecycleClawStateCondition(kind string) (cond, keySuffix string) {
 }
 
 // selectLifecycleClawStateCandidates returns ad-hoc claws currently in the kind's
-// state that have no delivery row yet. The dedupe happens in SQL (like the
-// task-run pass) so already-handled claws never consume the LIMIT.
-func (s *Server) selectLifecycleClawStateCandidates(kind string) ([]lifecycleClawRow, error) {
+// state that this route has no delivery row for. The dedupe happens in SQL (like
+// the task-run pass) so already-handled claws never consume the LIMIT — and it
+// is per route, so a route that cannot deliver keeps its debt to itself instead
+// of holding every other route's claws in a shared, oldest-first batch.
+func (s *Server) selectLifecycleClawStateCandidates(kind, notifier string) ([]lifecycleClawRow, error) {
 	cond, suffix := lifecycleClawStateCondition(kind)
 	cutoff := now().Add(-lifecycleClawAdhocGrace).Unix()
 	rows, err := s.db.Query(`
@@ -414,8 +532,12 @@ func (s *Server) selectLifecycleClawStateCandidates(kind string) ([]lifecycleCla
 		   AND NOT EXISTS (
 			SELECT 1 FROM slack_notification_deliveries d WHERE d.event_id = 'claw:' || c.id || ?
 		   )
+		   AND NOT EXISTS (
+			SELECT 1 FROM slack_notification_deliveries_v2 v
+			 WHERE v.event_id = 'claw:' || c.id || ? AND v.notifier = ?
+		   )
 		 ORDER BY c.created_at
-		 LIMIT `+strconv.Itoa(lifecycleBatchSize), cutoff, suffix)
+		 LIMIT `+strconv.Itoa(lifecycleBatchSize), cutoff, suffix, suffix, notifier)
 	if err != nil {
 		return nil, err
 	}
@@ -449,27 +571,27 @@ func lifecycleClawStateEvent(kind string, claw lifecycleClawRow) (lifecycleEvent
 
 // sendLifecycleClawStateEvents delivers one state kind. Returns false when the
 // claw pass must stop for this tick (config-level or transient Slack failure).
-func (s *Server) sendLifecycleClawStateEvents(d lifecycleDelivery, kind string) bool {
-	claws, err := s.selectLifecycleClawStateCandidates(kind)
+func (s *Server) sendLifecycleClawStateEvents(d lifecycleDelivery, route lifecycleRouteDelivery, kind string) bool {
+	claws, err := s.selectLifecycleClawStateCandidates(kind, route.notifier)
 	if err != nil {
 		log.Printf("[notify] select claw %s candidates: %v", kind, err)
 		return false
 	}
 	for _, claw := range claws {
 		ev, deliveryKey := lifecycleClawStateEvent(kind, claw)
-		if !s.deliverLifecycleClawEvent(d, claw, ev, lifecycleClawRunContext(claw), deliveryKey) {
+		if !s.deliverLifecycleClawEvent(d, route, claw, ev, lifecycleClawRunContext(claw), deliveryKey) {
 			return false
 		}
 	}
 	return true
 }
 
-// deliverLifecycleClawEvent posts one claw-sourced event with the shared error
-// policy: config errors pause everything, permanent errors are recorded as
-// failed (and count as handled), transient errors stop the pass for this
-// tick. Returns true when the event is handled (sent, permanently failed, or
-// ceded to the task-run path) and the caller may move past it.
-func (s *Server) deliverLifecycleClawEvent(d lifecycleDelivery, claw lifecycleClawRow, ev lifecycleEventRow, runCtx lifecycleRunContext, deliveryKey string) bool {
+// deliverLifecycleClawEvent posts one claw-sourced event through one route with
+// the shared error policy: config errors park the route, permanent errors are
+// recorded as failed (and count as handled), transient errors stop this route's
+// pass for the tick. Returns true when the event is handled (sent, permanently
+// failed, or ceded to the task-run path) and the caller may move past it.
+func (s *Server) deliverLifecycleClawEvent(d lifecycleDelivery, route lifecycleRouteDelivery, claw lifecycleClawRow, ev lifecycleEventRow, runCtx lifecycleRunContext, deliveryKey string) bool {
 	// Re-check ownership immediately before sending: task_run_id may have been
 	// populated after this claw was selected, and a claw that belongs to a
 	// task run must be notified exclusively by the task-run pass. Nothing is
@@ -484,27 +606,21 @@ func (s *Server) deliverLifecycleClawEvent(d lifecycleDelivery, claw lifecycleCl
 	}
 
 	runKey := lifecycleClawRunKey(claw.ID)
-	err := s.postLifecycleEvent(d, ev, runCtx, runKey, deliveryKey)
+	err := s.postLifecycleEventRoute(d, route, buildLifecycleMessage(ev, runCtx), runKey, deliveryKey)
 	if err == nil {
 		return true
 	}
-	// Same send-failure policy as the task-run pass, applied to EVERY failing
-	// route: config errors park the route, permanent errors are burned as
-	// failed, transient errors park the route until the next tick. Parking one
-	// destination instead of the whole pass is what keeps a single broken
-	// channel from muting the healthy ones; the claw keeps no delivery row for
-	// the parked route, so it is re-selected and retried later.
-	errs, ok := err.(lifecycleRouteSendErrors)
-	if !ok {
-		return false
+	// Same send-failure policy as the task-run pass: config errors park the
+	// route, permanent errors are burned as failed, transient errors park the
+	// route until the next tick. Parking one destination instead of the whole
+	// pass is what keeps a single broken channel from muting the healthy ones;
+	// the claw keeps no delivery row for the parked route, so it is re-selected
+	// and retried later — by that route's own pass only.
+	if handled, _ := s.handleLifecycleSendError(err, "claw event "+deliveryKey, deliveryKey, runKey, route.notifier, d.singleRoute()); handled {
+		return true
 	}
-	for _, routeErr := range errs {
-		if handled, _ := s.handleLifecycleSendError(routeErr.err, "claw event "+deliveryKey, deliveryKey, runKey, routeErr.notifier, d.singleRoute()); !handled {
-			d.pauseRoute(routeErr.notifier)
-		}
-	}
-	// Only stop the pass once nothing is left to deliver through.
-	return d.hasLiveRoutes()
+	d.pauseRoute(route.notifier)
+	return false
 }
 
 type lifecycleClawPRRow struct {
@@ -522,18 +638,22 @@ type lifecycleClawPRRow struct {
 // after deletes — see skipCurrentLifecycleClawPRs); the delivery-row anti-join
 // alone decides what is new, so every handled row must end up with a delivery
 // record or it would be re-selected forever and consume the LIMIT.
-func (s *Server) lifecycleClawPRPass(d lifecycleDelivery) {
+func (s *Server) lifecycleClawPRPass(d lifecycleDelivery, route lifecycleRouteDelivery) {
 	rows, err := s.db.Query(`
 		SELECT p.rowid, p.repo, p.pr_number, p.pr_url, c.task_run_id,
 		       CAST(strftime('%s', c.created_at) AS INTEGER),
-		       ` + lifecycleClawSelectColumns + `
+		       `+lifecycleClawSelectColumns+`
 		  FROM claw_prs p JOIN claws c ON c.id = p.claw_id
 		 WHERE NOT EXISTS (
 			SELECT 1 FROM slack_notification_deliveries d
 			 WHERE d.event_id = 'claw:' || p.claw_id || ':pr:' || p.pr_url
 		   )
+		   AND NOT EXISTS (
+			SELECT 1 FROM slack_notification_deliveries_v2 v
+			 WHERE v.event_id = 'claw:' || p.claw_id || ':pr:' || p.pr_url AND v.notifier = ?
+		   )
 		 ORDER BY p.rowid
-		 LIMIT ` + strconv.Itoa(lifecycleBatchSize))
+		 LIMIT `+strconv.Itoa(lifecycleBatchSize), route.notifier)
 	if err != nil {
 		log.Printf("[notify] select claw PR candidates: %v", err)
 		return
@@ -583,7 +703,7 @@ func (s *Server) lifecycleClawPRPass(d lifecycleDelivery) {
 		}
 		runCtx := lifecycleClawRunContext(pr.Claw)
 		runCtx.Repo = pr.Repo
-		if !s.deliverLifecycleClawEvent(d, pr.Claw, ev, runCtx, lifecycleClawPRKey(pr.Claw.ID, pr.PRURL)) {
+		if !s.deliverLifecycleClawEvent(d, route, pr.Claw, ev, runCtx, lifecycleClawPRKey(pr.Claw.ID, pr.PRURL)) {
 			break
 		}
 	}

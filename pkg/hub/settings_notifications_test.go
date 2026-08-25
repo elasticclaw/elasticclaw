@@ -83,6 +83,42 @@ func TestSettingsPatchNotificationsPersistsRoutesAndClearsLegacyVia(t *testing.T
 	}
 }
 
+// Regression: the settings view models only five notifier settings keys, so a
+// patch rebuilt from it used to erase everything else configured under
+// notifications.notifiers.<name> the first time the screen was saved.
+func TestSettingsPatchNotificationsKeepsUnmodelledNotifierSettings(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "hub.yaml")
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", path)
+	s, _ := NewTestServerWithConfig(t, &types.HubConfig{Notifications: &types.NotificationsConfig{
+		Notifiers: map[string]types.NotifierConfig{"ops": {Type: "slack", Settings: map[string]any{
+			"channel": "C123", "token_secret": "slack_token", "unexpected_secret": "keep-me",
+		}}},
+		Lifecycle: &types.LifecycleNotificationsConfig{Via: "ops"},
+	}}, "", "", "")
+	if err := config.SaveHubConfig(s.hubCfg); err != nil {
+		t.Fatal(err)
+	}
+
+	// Exactly what the Notifier screen sends: the projected keys only.
+	body := []byte(`{"notifications":{"notifiers":{"ops":{"type":"slack","channel":"C999","token_secret":"slack_token"}},"lifecycle":{"enabled":true,"routes":[{"via":"ops","events":[]}]}}}`)
+	rr := httptest.NewRecorder()
+	s.patchSettings(rr, httptest.NewRequest(http.MethodPatch, "/api/settings", bytes.NewReader(body)))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("PATCH status = %d: %s", rr.Code, rr.Body.String())
+	}
+	diskCfg, err := config.LoadHubConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings := diskCfg.Notifications.Notifiers["ops"].Settings
+	if got := settings["unexpected_secret"]; got != "keep-me" {
+		t.Fatalf("unmodelled setting = %v, want it preserved", got)
+	}
+	if got := settings["channel"]; got != "C999" {
+		t.Fatalf("patched setting = %v, want C999", got)
+	}
+}
+
 func TestSettingsPatchNotificationsRejectsInvalidConfigWithoutWriting(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "hub.yaml")
 	t.Setenv("ELASTICCLAW_HUB_CONFIG", path)

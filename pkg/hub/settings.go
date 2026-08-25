@@ -738,6 +738,33 @@ func notifierSettingString(notifier types.NotifierConfig, key string) string {
 	return value
 }
 
+// mergeNotifierSettings folds a patched notifier's settings over the ones
+// already in the config. GET /api/settings projects only a handful of settings
+// keys (see buildNotificationsView) and the settings screen rebuilds the whole
+// notifications block from that projection, so replacing the block outright
+// would silently drop every other key under notifications.notifiers.<name> the
+// first time an operator touches the screen.
+func mergeNotifierSettings(current, patch *types.NotificationsConfig) {
+	if current == nil || patch == nil {
+		return
+	}
+	for name, patched := range patch.Notifiers {
+		existing, ok := current.Notifiers[name]
+		if !ok || len(existing.Settings) == 0 {
+			continue
+		}
+		merged := make(map[string]any, len(existing.Settings)+len(patched.Settings))
+		for key, value := range existing.Settings {
+			merged[key] = value
+		}
+		for key, value := range patched.Settings {
+			merged[key] = value
+		}
+		patched.Settings = merged
+		patch.Notifiers[name] = patched
+	}
+}
+
 func validateSettingsNotifications(cfg *types.NotificationsConfig) error {
 	if err := types.ValidateNotificationsConfig(cfg); err != nil {
 		return err
@@ -853,6 +880,7 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 		if patch.Notifications.Lifecycle != nil && patch.Notifications.Lifecycle.Routes != nil {
 			patch.Notifications.Lifecycle.Via = ""
 		}
+		mergeNotifierSettings(s.hubCfg.Notifications, patch.Notifications)
 		if err := validateSettingsNotifications(patch.Notifications); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return

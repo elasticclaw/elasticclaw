@@ -370,6 +370,29 @@ export default function SettingsSectionPage() {
     }
   }
 
+  // save(), but handing the failure message back to the caller. The page-level
+  // banner lives inside <main>, which sits behind a modal overlay — a section
+  // that saves from its own dialog has to render the error there instead, or
+  // the button looks dead.
+  async function saveReportingError(patch: object): Promise<string | null> {
+    setSaving(true)
+    setError("")
+    setSuccess("")
+    try {
+      await patchSettings(patch)
+      setSuccess("Saved")
+      await load()
+      setTimeout(() => setSuccess(""), 2000)
+      return null
+    } catch (e) {
+      const message = e instanceof Error ? e.message : "Save failed"
+      setError(message)
+      return message
+    } finally {
+      setSaving(false)
+    }
+  }
+
   // Silent save: patches without the global 'Saved' banner (used for toggle-style updates)
   async function saveSilent(patch: object) {
     try {
@@ -526,7 +549,7 @@ export default function SettingsSectionPage() {
             <MCPServersSection settings={settings} onSave={save} saving={saving} />
           )}
           {settings && section === "notifier" && (
-            <NotifierSection settings={settings} onSave={save} saving={saving} />
+            <NotifierSection settings={settings} onSave={saveReportingError} saving={saving} />
           )}
           {section === "ai-config" && (
             <AIConfigSection />
@@ -4496,7 +4519,7 @@ async function sendTestNotification(eventType: string, via: string): Promise<voi
 
 type TestState = { status: "sending" | "ok" | "error"; message: string }
 
-function NotifierSection({ settings, onSave, saving }: { settings: SettingsData; onSave: (p: object) => Promise<boolean>; saving: boolean }) {
+function NotifierSection({ settings, onSave, saving }: { settings: SettingsData; onSave: (p: object) => Promise<string | null>; saving: boolean }) {
   const lifecycle = settings.notifications?.lifecycle
   const notifiers = settings.notifications?.notifiers || {}
   const names = Object.keys(notifiers).sort((a, b) => a.localeCompare(b))
@@ -4571,13 +4594,18 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
       if (notifier.min_send_interval) out.min_send_interval = notifier.min_send_interval
       outNotifiers[name] = out
     }
+    // Always an array: sending routes is what clears the legacy `via`.
+    const outRoutes = (next.routes ?? routes).map((route) => ({
+      via: route.via,
+      events: route.events?.length ? route.events : [],
+    }))
     const outLifecycle: Record<string, unknown> = {
-      enabled: next.enabled ?? enabled,
-      // Always an array: sending routes is what clears the legacy `via`.
-      routes: (next.routes ?? routes).map((route) => ({
-        via: route.via,
-        events: route.events?.length ? route.events : [],
-      })),
+      // The hub rejects an enabled lifecycle block with no routes ("via is
+      // required when enabled") and this screen never exposes `via`, so losing
+      // the last route pauses alerts instead of failing the save with a message
+      // about a field that is not on the page.
+      enabled: outRoutes.length > 0 && (next.enabled ?? enabled),
+      routes: outRoutes,
       events: next.events ?? categoryEnabled,
     }
     if (lifecycle?.poll_interval) outLifecycle.pollInterval = lifecycle.poll_interval
@@ -4616,22 +4644,23 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
     const nextRoutes = routes.filter((route) => route.via !== name)
     if (formRouted) nextRoutes.push({ via: name, events })
 
-    const ok = await onSave(buildPatch({ notifiers: nextNotifiers, routes: nextRoutes }))
-    if (ok) { setShowModal(false); resetForm() }
+    const failure = await onSave(buildPatch({ notifiers: nextNotifiers, routes: nextRoutes }))
+    if (failure) { setFormError(failure); return }
+    setShowModal(false)
+    resetForm()
   }
 
   async function removeChannel(name: string) {
     const nextNotifiers = { ...notifiers }
     delete nextNotifiers[name]
-    const ok = await onSave(buildPatch({
+    const failure = await onSave(buildPatch({
       notifiers: nextNotifiers,
       routes: routes.filter((route) => route.via !== name),
     }))
-    if (ok) {
-      setTests((current) => { const { [name]: _removed, ...rest } = current; return rest })
-      setShowModal(false)
-      resetForm()
-    }
+    if (failure) { setFormError(failure); return }
+    setTests((current) => { const { [name]: _removed, ...rest } = current; return rest })
+    setShowModal(false)
+    resetForm()
   }
 
   // The event a test send uses: something this channel is routed for and that
@@ -4664,7 +4693,13 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
   }
 
   const routedCount = routes.filter((route) => notifiers[route.via]).length
-  const formAllAlerts = formEvents.length === 0
+  // Same predicate saveChannel stores by: every type checked is persisted as
+  // the empty allow-list, so the summary must call it "all alerts" too — or it
+  // promises a filter the save is about to discard.
+  const formAllAlerts = formEvents.length === 0 || formEvents.length === eventTypes.length
+  // Routing this channel off (or removing it) pauses the hub when it is the
+  // last one left; buildPatch clears `enabled` rather than failing the save.
+  const otherRoutedCount = routes.filter((route) => route.via !== editName && notifiers[route.via]).length
 
   return (
     <div className="space-y-6">
@@ -4695,12 +4730,17 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
           <div>
             <div className="text-sm font-medium">Lifecycle alerts</div>
             <p className="text-xs text-muted-foreground mt-0.5">
-              The master switch. Turn it off to mute every channel without losing your routing.
+              {routedCount === 0
+                ? "Add a channel and route it before turning alerts on — there is nowhere to send them yet."
+                : "The master switch. Turn it off to mute every channel without losing your routing."}
             </p>
           </div>
           <Switch
             checked={enabled}
-            disabled={saving}
+            // Enabling with no routes is rejected by the hub, in the vocabulary
+            // of hub.yaml (`via`) rather than of this screen.
+            disabled={saving || routes.length === 0}
+            title={routes.length === 0 ? "Add a channel and route it to alerts first" : undefined}
             onCheckedChange={(checked) => onSave(buildPatch({ enabled: checked }))}
             aria-label="Enable lifecycle alerts"
           />
@@ -4890,6 +4930,12 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
                 />
               </div>
 
+              {modalMode === "edit" && enabled && otherRoutedCount === 0 && (
+                <p className="text-xs text-amber-400 rounded-md border border-amber-500/20 bg-amber-500/10 px-3 py-2">
+                  This is the only channel receiving alerts. Removing it — or turning routing off — pauses lifecycle alerts for the whole hub until another channel is routed.
+                </p>
+              )}
+
               {!formRouted ? (
                 <p className="text-xs text-muted-foreground rounded-md border border-border bg-muted/20 px-3 py-2">
                   This channel stays configured but receives no lifecycle alerts.
@@ -4912,7 +4958,7 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
                         </div>
                         <p className="text-xs text-muted-foreground">
                           {formAllAlerts
-                            ? "Nothing is checked, so this channel receives every alert type — including any new type added later."
+                            ? "This channel receives every alert type — including any new type added later."
                             : "Only the checked types reach this channel."}
                         </p>
                         {!formAllAlerts && (

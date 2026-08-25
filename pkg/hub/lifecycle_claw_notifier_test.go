@@ -42,6 +42,15 @@ func insertSlackTestClawPR(t *testing.T, db *sql.DB, id, clawID, repo string, pr
 func setLifecycleClawBaseline(t *testing.T, s *Server) {
 	t.Helper()
 	s.setNotifierStateInt64(lifecycleStateClawBaselineKey, 1)
+	// Multi-route configs also carry a per-route baseline (a route added later
+	// must not replay the current claw list into its channel); mark the
+	// configured routes as already baselined so the helper keeps meaning
+	// "enabled with empty history".
+	if cfg := s.notificationsConfig(); cfg != nil && cfg.Lifecycle != nil {
+		for _, route := range cfg.Lifecycle.EffectiveRoutes() {
+			s.setNotifierStateInt64(lifecycleClawRouteBaselineKey(strings.TrimSpace(route.Via)), 1)
+		}
+	}
 }
 
 // oldEnough is safely past the ad-hoc grace period.
@@ -218,7 +227,9 @@ func TestLifecycleClawNotifierPreSendRecheckCedesToTaskRunPath(t *testing.T) {
 	setLifecycleClawBaseline(t, s)
 
 	insertSlackTestClaw(t, db, "claw-x", "connected", 1, "", oldEnough)
-	claws, err := s.selectLifecycleClawStateCandidates(lifecycleClawKindStarted)
+	d := testLifecycleDelivery(t, s)
+	route := d.effectiveRoutes()[0]
+	claws, err := s.selectLifecycleClawStateCandidates(lifecycleClawKindStarted, route.notifier)
 	if err != nil || len(claws) != 1 {
 		t.Fatalf("candidates = %d, err %v; want 1 candidate", len(claws), err)
 	}
@@ -228,9 +239,8 @@ func TestLifecycleClawNotifierPreSendRecheckCedesToTaskRunPath(t *testing.T) {
 		t.Fatalf("attach task run: %v", err)
 	}
 
-	d := testLifecycleDelivery(t, s)
 	ev, deliveryKey := lifecycleClawStateEvent(lifecycleClawKindStarted, claws[0])
-	if !s.deliverLifecycleClawEvent(d, claws[0], ev, lifecycleClawRunContext(claws[0]), deliveryKey) {
+	if !s.deliverLifecycleClawEvent(d, route, claws[0], ev, lifecycleClawRunContext(claws[0]), deliveryKey) {
 		t.Fatal("ceding to the task-run path must count as handled")
 	}
 	if fake.count() != 0 {
@@ -613,7 +623,7 @@ func TestLifecycleClawIdleCandidatesIgnoreMentionOnlyPRs(t *testing.T) {
 	if _, err := db.Exec(`UPDATE claw_prs SET mention_only=1 WHERE id='pr-idle-mention'`); err != nil {
 		t.Fatal(err)
 	}
-	claws, _, err := s.selectLifecycleClawIdleCandidates()
+	claws, _, err := s.selectLifecycleClawIdleCandidates("")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -625,7 +635,7 @@ func TestLifecycleClawIdleCandidatesIgnoreMentionOnlyPRs(t *testing.T) {
 	if _, err := db.Exec(`UPDATE claw_prs SET mention_only=0 WHERE id='pr-idle-mention'`); err != nil {
 		t.Fatal(err)
 	}
-	claws, _, err = s.selectLifecycleClawIdleCandidates()
+	claws, _, err = s.selectLifecycleClawIdleCandidates("")
 	if err != nil {
 		t.Fatal(err)
 	}
