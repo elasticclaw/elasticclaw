@@ -4540,6 +4540,13 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
       ? [{ via: lifecycle.via, events: [] }]
       : []
   const routeFor = (name: string) => routes.find((r) => r.via === name)
+  // A route whose notifier is gone. The hub deliberately accepts this on disk
+  // while alerts are paused ("an operator who mutes alerts and then deletes the
+  // notifier must not be left with a hub that refuses to load"), but it rejects
+  // the same block the moment alerts are enabled — so the screen has to render
+  // the route and offer a way to drop it. Silently dropping it in buildPatch
+  // would delete config the operator never saw.
+  const orphanRoutes = routes.filter((route) => !notifiers[route.via])
   // Alerts off with nothing routed is never a deliberate choice: the master
   // switch is disabled in that state, so the only way to reach it is buildPatch
   // clamping `enabled` when the last route went away (or a hub that has never
@@ -4568,8 +4575,15 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
     setFormRouted(true); setFormEvents([]); setFormError(""); setEditName(null)
   }
 
-  const openAdd = () => { resetForm(); setModalMode("add"); setShowModal(true) }
+  // Identifies the dialog a save was started from. An in-flight PATCH must not
+  // close, reset, or drop its error into a dialog the operator has meanwhile
+  // reopened on another channel — that discards unsaved form state and blames
+  // the wrong channel.
+  const saveGeneration = useRef(0)
+
+  const openAdd = () => { saveGeneration.current++; resetForm(); setModalMode("add"); setShowModal(true) }
   const openEdit = (name: string) => {
+    saveGeneration.current++
     const notifier = notifiers[name]
     const route = routeFor(name)
     setFormName(name)
@@ -4655,23 +4669,37 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
     const nextRoutes = routes.filter((route) => route.via !== name)
     if (formRouted) nextRoutes.push({ via: name, events })
 
+    const generation = saveGeneration.current
     const failure = await onSave(buildPatch({ notifiers: nextNotifiers, routes: nextRoutes }))
+    // The channel's destination or routing just changed, so any test result
+    // sitting on its card is about a message that went somewhere else.
+    setTests((current) => { const { [name]: _stale, ...rest } = current; return rest })
+    if (generation !== saveGeneration.current) return
     if (failure) { setFormError(failure); return }
     setShowModal(false)
-    resetForm()
   }
 
   async function removeChannel(name: string) {
     const nextNotifiers = { ...notifiers }
     delete nextNotifiers[name]
+    const generation = saveGeneration.current
     const failure = await onSave(buildPatch({
       notifiers: nextNotifiers,
       routes: routes.filter((route) => route.via !== name),
     }))
-    if (failure) { setFormError(failure); return }
     setTests((current) => { const { [name]: _removed, ...rest } = current; return rest })
+    if (generation !== saveGeneration.current) return
+    if (failure) { setFormError(failure); return }
     setShowModal(false)
-    resetForm()
+  }
+
+  // Dropping a route whose notifier is gone. It has no card of its own, so this
+  // is the only way back to a hub that can turn lifecycle alerts on again.
+  async function removeOrphanRoute(via: string) {
+    setTests((current) => { const { [via]: _removed, ...rest } = current; return rest })
+    // The page-level banner reports a failure here: this save is not made from
+    // the dialog, so nothing covers the banner.
+    await onSave(buildPatch({ routes: routes.filter((route) => route.via !== via) }))
   }
 
   // The event a test send uses: something this channel is routed for and that
@@ -4743,16 +4771,26 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
             <p className="text-xs text-muted-foreground mt-0.5">
               {routedCount === 0
                 ? "Add a channel and route it before turning alerts on — there is nowhere to send them yet."
-                : "The master switch. Turn it off to mute every channel without losing your routing."}
+                : orphanRoutes.length > 0
+                  ? "Remove the routes pointing at deleted channels below — the hub refuses to enable alerts while one is left."
+                  : "The master switch. Turn it off to mute every channel without losing your routing."}
             </p>
           </div>
           <Switch
             checked={enabled}
-            // Enabling with no routes is rejected by the hub, in the vocabulary
-            // of hub.yaml (`via`) rather than of this screen.
-            disabled={saving || routes.length === 0}
-            title={routes.length === 0 ? "Add a channel and route it to alerts first" : undefined}
-            onCheckedChange={(checked) => onSave(buildPatch({ enabled: checked }))}
+            // Gated on routes that actually name a configured channel: the hub
+            // rejects both an enabled block with no routes and one routed at a
+            // notifier that no longer exists, in the vocabulary of hub.yaml
+            // (`via`) rather than of this screen.
+            disabled={saving || routedCount === 0 || orphanRoutes.length > 0}
+            title={
+              routedCount === 0
+                ? "Add a channel and route it to alerts first"
+                : orphanRoutes.length > 0
+                  ? "Remove the routes pointing at deleted channels first"
+                  : undefined
+            }
+            onCheckedChange={(checked) => { setTests({}); onSave(buildPatch({ enabled: checked })) }}
             aria-label="Enable lifecycle alerts"
           />
         </div>
@@ -4771,9 +4809,13 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
                   className="mt-0.5"
                   checked={categoryEnabled[category.id]}
                   disabled={saving || !enabled}
-                  onCheckedChange={(checked) =>
+                  onCheckedChange={(checked) => {
+                    // A muted category can change what (or whether) a channel
+                    // receives anything, so every test result on the page is
+                    // now about a configuration that no longer exists.
+                    setTests({})
                     onSave(buildPatch({ events: { ...categoryEnabled, [category.id]: checked } }))
-                  }
+                  }}
                   aria-label={`Toggle ${category.label} alerts`}
                 />
               </div>
@@ -4880,12 +4922,43 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
         )}
       </div>
 
+      {orphanRoutes.length > 0 && (
+        <div className="space-y-2">
+          <h3 className="text-sm font-medium">Routes without a channel</h3>
+          <p className="text-xs text-muted-foreground">
+            These alerts are routed to channels that no longer exist. The hub refuses to enable lifecycle alerts until they are removed.
+          </p>
+          {orphanRoutes.map((route) => (
+            <div key={route.via} className="border border-amber-500/20 bg-amber-500/5 rounded-lg p-4 flex items-center justify-between gap-3">
+              <div className="min-w-0">
+                <code className="text-sm font-mono font-medium">{route.via}</code>
+                <p className="text-xs text-amber-400 mt-1">No channel named {route.via} is configured.</p>
+              </div>
+              <Button
+                size="sm"
+                variant="ghost"
+                className="text-destructive hover:text-destructive shrink-0"
+                disabled={saving}
+                onClick={() => removeOrphanRoute(route.via)}
+              >
+                <Trash2 className="size-3.5 mr-1" /> Remove route
+              </Button>
+            </div>
+          ))}
+        </div>
+      )}
+
       <Button onClick={openAdd} className="gap-2">
         <span className="text-sm">+</span> Add Channel
       </Button>
 
       {/* Add / edit modal */}
-      <Dialog open={showModal} onOpenChange={(open) => { setShowModal(open); if (!open) resetForm() }}>
+      {/* Closing only closes: DialogContent stays mounted for its 200ms exit
+          animation, so clearing the form here would let the operator watch the
+          heading turn into "Edit null" and every field blank out on the way
+          out. openAdd/openEdit re-seed the whole form, so nothing needs
+          clearing on close. */}
+      <Dialog open={showModal} onOpenChange={setShowModal}>
         <DialogContent className="max-w-lg max-h-[90vh] overflow-y-auto p-0 gap-0">
           <DialogTitle className="sr-only">{modalMode === "add" ? "Add Channel" : `Edit ${editName}`}</DialogTitle>
           <div className="flex items-center justify-between px-5 py-4 border-b border-border">
@@ -5054,7 +5127,7 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
                 </Button>
               )}
               <div className="flex items-center gap-2 ml-auto">
-                <Button size="sm" variant="outline" onClick={() => { setShowModal(false); resetForm() }}>Cancel</Button>
+                <Button size="sm" variant="outline" onClick={() => setShowModal(false)}>Cancel</Button>
                 <Button size="sm" disabled={saving || !formName.trim() || !formChannel.trim() || !formTokenSecret} onClick={saveChannel}>
                   {modalMode === "add" ? "Add Channel" : "Save changes"}
                 </Button>

@@ -188,17 +188,7 @@ func (s *Server) lifecycleClawPass(d lifecycleDelivery) {
 			return
 		}
 		s.setNotifierStateInt64(lifecycleStateClawBaselineKey, 1)
-		for _, route := range d.lc.EffectiveRoutes() {
-			// The shared baseline just recorded the current state for every
-			// route, so none of them needs its own seeding pass. Stamp every
-			// CONFIGURED route, not only the ones that built this tick: a route
-			// whose notifier was unavailable here would otherwise arrive with no
-			// baseline key and be seeded on recovery, burying exactly the claw
-			// events the tick promises are "still pending for it".
-			if via := strings.TrimSpace(route.Via); via != "" {
-				s.setNotifierStateInt64(lifecycleClawRouteBaselineKey(via), 1)
-			}
-		}
+		s.stampLifecycleClawRouteBaselines(d.lc)
 		return
 	}
 
@@ -270,6 +260,21 @@ func (s *Server) lifecycleClawRoutePass(d lifecycleDelivery, route lifecycleRout
 			_ = s.skipCurrentLifecycleClawRoutePRs(route.notifier)
 		} else {
 			s.lifecycleClawPRPass(d, route)
+		}
+	}
+}
+
+// stampLifecycleClawRouteBaselines marks every CONFIGURED route as baselined
+// without seeding any rows. Callers use it where the shared baseline (or the
+// legacy delivery table it writes into) already fences the routes' history:
+// stamping every configured route — not only the ones that built this tick —
+// is what keeps a route whose notifier is unavailable from arriving with no
+// baseline key and being seeded on recovery, which would bury exactly the claw
+// events it is still owed.
+func (s *Server) stampLifecycleClawRouteBaselines(lc *types.LifecycleNotificationsConfig) {
+	for _, route := range lc.EffectiveRoutes() {
+		if via := strings.TrimSpace(route.Via); via != "" {
+			s.setNotifierStateInt64(lifecycleClawRouteBaselineKey(via), 1)
 		}
 	}
 }

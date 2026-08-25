@@ -216,11 +216,33 @@ func (s *Server) initLifecycleNotifierBaseline() {
 			log.Printf("[notify] init watermark baseline: %v", err)
 		}
 	}
-	if _, found, err := s.notifierStateInt64(lifecycleStateClawBaselineKey); err == nil && !found {
-		if err := s.seedLifecycleClawBaseline(); err == nil {
-			s.setNotifierStateInt64(lifecycleStateClawBaselineKey, 1)
-		} else {
-			log.Printf("[notify] init claw baseline: %v", err)
+	if _, found, err := s.notifierStateInt64(lifecycleStateClawBaselineKey); err == nil {
+		if !found {
+			if err := s.seedLifecycleClawBaseline(); err == nil {
+				s.setNotifierStateInt64(lifecycleStateClawBaselineKey, 1)
+				// The shared seeding just recorded the current claw state for
+				// every route, so none of them needs its own seeding pass. The
+				// in-tick first-enable branch stamps the same keys, but it can
+				// never run once this path created the shared flag — leaving
+				// every configured route to be treated as "newly added" on its
+				// first tick and have its pending claw events buried as
+				// "skipped" (a route whose notifier cannot even be built at
+				// boot is exactly the case the tick promises is "still pending
+				// for it").
+				s.stampLifecycleClawRouteBaselines(cfg.Lifecycle)
+			} else {
+				log.Printf("[notify] init claw baseline: %v", err)
+			}
+		} else if routed, err := s.lifecycleRouteStateExists(lifecycleClawRouteBaselinePrefix); err == nil && !routed {
+			// The shared flag predates the per-route scheme: this is the first
+			// boot after a single-`via` config was migrated to routes. Every
+			// claw the incumbent already handled is fenced by the legacy
+			// delivery table (lifecycleRouteDelivered reads it for every
+			// route), so stamping without seeding is enough — and it is what
+			// keeps the incumbent's undelivered backlog (claws that connected
+			// while its token secret was broken) from being buried the moment
+			// a second route makes it look newly added.
+			s.stampLifecycleClawRouteBaselines(cfg.Lifecycle)
 		}
 	}
 	// Stamp the agent_idle baseline at boot on the first enabled run so idle
@@ -390,6 +412,10 @@ func (s *Server) lifecycleNotifierTick() {
 		return
 	}
 	lc := cfg.Lifecycle
+	// Both run off the CONFIGURED routes, before any notifier is built, so a
+	// route that cannot be built this tick is still treated as configured.
+	s.pruneLifecycleRouteState(lc)
+	s.ensureLifecycleRouteWatermarks(lc)
 	var routes []lifecycleRouteDelivery
 	incomplete := false
 	for _, route := range lc.EffectiveRoutes() {
@@ -441,18 +467,122 @@ func (s *Server) lifecycleWatermarkKeyFor(d lifecycleDelivery, notifier string) 
 	return lifecycleRouteWatermarkKey(notifier)
 }
 
-// lifecycleRouteWatermark reads one route's cursor, falling back to the shared
-// cursor the first time a route runs. Without the fallback, migrating a
-// single-`via` config to routes would look like a first run and park the
-// pending backlog; the shared cursor is kept as a floor (see
-// advanceLifecycleWatermarkFloor) so the fallback stays close to "now" and a
-// route added years later does not replay the archive.
-func (s *Server) lifecycleRouteWatermark(key string) (int64, bool, error) {
-	value, found, err := s.notifierStateInt64(key)
-	if err != nil || found || key == lifecycleStateWatermarkKey {
-		return value, found, err
+// ensureLifecycleRouteWatermarks gives every CONFIGURED route a cursor of its
+// own before any delivery runs — including a route whose notifier cannot be
+// built this tick, which would otherwise still have none when it recovers.
+// Materialising the cursor here, rather than falling back lazily inside the
+// pass, is what lets a route added later be told apart from one that has simply
+// never delivered anything yet: the newcomer has no cursor because it was not
+// configured, and must start at the stream head.
+//
+// The routes present when a single-`via` config is migrated to routes inherit
+// the shared cursor — the incumbent's real position — so the migration does not
+// look like a first run and park the pending backlog. Once ANY route keeps a
+// cursor the per-route scheme is live, and a newcomer starts at the head
+// instead: from then on the shared key is a floor pinned to the SLOWEST route
+// (advanceLifecycleWatermarkFloor bails entirely while a configured route
+// cannot be built), so inheriting it would flood the new channel with
+// everything that piled up behind a paused or unbuildable sibling.
+func (s *Server) ensureLifecycleRouteWatermarks(lc *types.LifecycleNotificationsConfig) {
+	routes := lc.EffectiveRoutes()
+	if len(routes) < 2 {
+		// The legacy single-route shape keeps using the shared key
+		// (lifecycleWatermarkKeyFor), so it needs no cursor of its own.
+		return
 	}
-	return s.notifierStateInt64(lifecycleStateWatermarkKey)
+	routed, err := s.lifecycleRouteStateExists(lifecycleStateWatermarkKey + ":")
+	if err != nil {
+		// Unreadable state must not be mistaken for "nothing routed yet": that
+		// would hand a route added later the (possibly long-frozen) shared floor.
+		log.Printf("[notify] read route watermark state: %v", err)
+		return
+	}
+	shared, sharedFound, err := s.notifierStateInt64(lifecycleStateWatermarkKey)
+	if err != nil {
+		log.Printf("[notify] read watermark floor: %v", err)
+		return
+	}
+	head, err := s.lifecycleMaxEventRowID()
+	if err != nil {
+		log.Printf("[notify] read max event rowid: %v", err)
+		return
+	}
+	if !sharedFound {
+		// A config that is multi-route from its very first enable never gets
+		// the floor written by advanceLifecycleWatermarkFloor while a sibling
+		// route cannot be built (it bails on d.incomplete). Freeze it here so
+		// the floor exists from the start.
+		s.setNotifierStateInt64(lifecycleStateWatermarkKey, head)
+	}
+	for _, route := range routes {
+		via := strings.TrimSpace(route.Via)
+		if via == "" {
+			continue
+		}
+		key := lifecycleRouteWatermarkKey(via)
+		if _, found, err := s.notifierStateInt64(key); err != nil || found {
+			continue
+		}
+		if !routed && sharedFound {
+			s.setNotifierStateInt64(key, shared)
+			continue
+		}
+		s.setNotifierStateInt64(key, head)
+	}
+}
+
+// lifecycleRouteStateExists reports whether any per-route state key with the
+// given prefix is persisted. It is how both passes tell a legacy migration
+// (nothing per-route recorded yet, so the shared state is the routes' shared
+// history) from a route genuinely added later (the per-route scheme is already
+// live, so the newcomer must start clean).
+func (s *Server) lifecycleRouteStateExists(prefix string) (bool, error) {
+	var n int
+	if err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM slack_notifier_state WHERE key LIKE ?)`, prefix+"%").Scan(&n); err != nil {
+		return false, err
+	}
+	return n != 0, nil
+}
+
+// pruneLifecycleRouteState drops the cursor and claw baseline of notifiers that
+// are no longer routed. Nothing else clears them while lifecycle alerts stay
+// enabled (parkLifecycleWatermark only runs while they are off, and
+// advanceLifecycleWatermarkFloor only touches the shared key), so a route that
+// is removed and later re-added under the same name would resume from its stale
+// cursor and flush the entire removal window into its channel — the events of
+// that window carry no v2 delivery row for it, and no legacy row either
+// whenever two or more routes remained. Dropping the state makes a re-added
+// route behave exactly like a newly added one.
+func (s *Server) pruneLifecycleRouteState(lc *types.LifecycleNotificationsConfig) {
+	configured := map[string]bool{}
+	for _, route := range lc.EffectiveRoutes() {
+		if via := strings.TrimSpace(route.Via); via != "" {
+			configured[via] = true
+		}
+	}
+	rows, err := s.db.Query(`SELECT key FROM slack_notifier_state WHERE key LIKE ? OR key LIKE ?`,
+		lifecycleRouteWatermarkKey("%"), lifecycleClawRouteBaselinePrefix+"%")
+	if err != nil {
+		log.Printf("[notify] list route state: %v", err)
+		return
+	}
+	var stale []string
+	for rows.Next() {
+		var key string
+		if err := rows.Scan(&key); err != nil {
+			log.Printf("[notify] list route state: %v", err)
+			rows.Close()
+			return
+		}
+		notifier := key[strings.Index(key, ":")+1:]
+		if !configured[notifier] {
+			stale = append(stale, key)
+		}
+	}
+	rows.Close()
+	for _, key := range stale {
+		s.clearNotifierState(key)
+	}
 }
 
 // lifecycleRouteCursor pairs a route with its own position in the event stream.
@@ -469,7 +599,7 @@ func (s *Server) lifecycleTaskRunPass(d lifecycleDelivery) {
 	lowest := int64(-1)
 	for _, route := range d.effectiveRoutes() {
 		key := s.lifecycleWatermarkKeyFor(d, route.notifier)
-		watermark, found, err := s.lifecycleRouteWatermark(key)
+		watermark, found, err := s.notifierStateInt64(key)
 		if err != nil {
 			// A read failure must not be mistaken for a first run: resetting
 			// the cursor here would silently skip the pending backlog.
@@ -477,27 +607,17 @@ func (s *Server) lifecycleTaskRunPass(d lifecycleDelivery) {
 			continue
 		}
 		if !found {
-			// First run for this route: start at the current end of the event
-			// stream so enabling it does not replay history.
+			// First run for this cursor: start at the current end of the event
+			// stream so enabling it does not replay history. Route cursors are
+			// normally materialised by ensureLifecycleRouteWatermarks before the
+			// pass runs; this stays as the backstop for the legacy shared key
+			// (and for a state write that failed there).
 			maxRow, err := s.lifecycleMaxEventRowID()
 			if err != nil {
 				log.Printf("[notify] read max event rowid: %v", err)
 				continue
 			}
 			s.setNotifierStateInt64(key, maxRow)
-			if key != lifecycleStateWatermarkKey {
-				// Freeze the shared floor at the same point. A config that is
-				// multi-route from its very first enable never gets the floor
-				// written by advanceLifecycleWatermarkFloor while a sibling
-				// route cannot be built (it bails on d.incomplete), so without
-				// this the shared key would still be missing when that route
-				// recovers — and it would then first-run at the CURRENT stream
-				// head, losing every event produced during the outage. Only
-				// reached when the shared key is absent too (lifecycleRouteWatermark
-				// falls back to it), so this can never fast-forward a floor
-				// that already exists.
-				s.setNotifierStateInt64(lifecycleStateWatermarkKey, maxRow)
-			}
 			continue
 		}
 		cursors = append(cursors, lifecycleRouteCursor{route: route, stateKey: key, watermark: watermark})

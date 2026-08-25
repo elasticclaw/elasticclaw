@@ -883,7 +883,13 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 	if patch.Notifications != nil {
 		// A settings patch is the migration point from legacy lifecycle.via
 		// to routes: a supplied route set always wins and is written alone.
-		if patch.Notifications.Lifecycle != nil && patch.Notifications.Lifecycle.Routes != nil {
+		// Gated on a NON-EMPTY route set, never on a non-nil slice:
+		// LifecycleNotificationsView always emits `routes` (as `[]` for a
+		// via-only config), so a client that GETs the view and PATCHes it back
+		// verbatim — the round trip the view's doc comment invites — would
+		// otherwise decode to an empty-but-present slice and silently destroy
+		// the only channel binding the hub has.
+		if patch.Notifications.Lifecycle != nil && len(patch.Notifications.Lifecycle.Routes) > 0 {
 			patch.Notifications.Lifecycle.Via = ""
 		}
 		mergeNotifierSettings(s.hubCfg.Notifications, patch.Notifications)

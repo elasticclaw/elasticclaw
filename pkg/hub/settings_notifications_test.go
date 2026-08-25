@@ -83,6 +83,55 @@ func TestSettingsPatchNotificationsPersistsRoutesAndClearsLegacyVia(t *testing.T
 	}
 }
 
+// Regression: LifecycleNotificationsView always emits `routes` (as `[]` for a
+// legacy via-only config), and the via→routes migration was gated on the
+// decoded slice being non-nil. A client that GETs the view and PATCHes it back
+// verbatim therefore destroyed `via` and left the hub with no channel binding
+// at all — or, with alerts enabled, could not save ANY notifications change.
+func TestSettingsPatchLegacyViaOnlyViewRoundTripKeepsVia(t *testing.T) {
+	for _, enabled := range []bool{false, true} {
+		name := "enabled"
+		if !enabled {
+			name = "paused"
+		}
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "hub.yaml")
+			t.Setenv("ELASTICCLAW_HUB_CONFIG", path)
+			s, _ := NewTestServerWithConfig(t, &types.HubConfig{Notifications: &types.NotificationsConfig{
+				Notifiers: map[string]types.NotifierConfig{"eng": {Type: "slack", Settings: map[string]any{"channel": "C123", "token_secret": "slack_token"}}},
+				Lifecycle: &types.LifecycleNotificationsConfig{Enabled: &enabled, Via: "eng"},
+			}}, "", "", "")
+			if err := config.SaveHubConfig(s.hubCfg); err != nil {
+				t.Fatal(err)
+			}
+
+			rr := httptest.NewRecorder()
+			s.getSettings(rr, httptest.NewRequest(http.MethodGet, "/api/settings", nil))
+			var view SettingsView
+			if err := json.Unmarshal(rr.Body.Bytes(), &view); err != nil {
+				t.Fatal(err)
+			}
+			// Byte-for-byte what the view returned, PATCHed straight back.
+			body, err := json.Marshal(map[string]any{"notifications": view.Notifications})
+			if err != nil {
+				t.Fatal(err)
+			}
+			rr = httptest.NewRecorder()
+			s.patchSettings(rr, httptest.NewRequest(http.MethodPatch, "/api/settings", bytes.NewReader(body)))
+			if rr.Code != http.StatusOK {
+				t.Fatalf("round-tripping the view rejected the save: %d: %s", rr.Code, rr.Body.String())
+			}
+			diskCfg, err := config.LoadHubConfig()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := diskCfg.Notifications.Lifecycle.Via; got != "eng" {
+				t.Fatalf("disk via = %q, want it preserved (routes = %#v)", got, diskCfg.Notifications.Lifecycle.Routes)
+			}
+		})
+	}
+}
+
 // Regression: the settings view models only five notifier settings keys, so a
 // patch rebuilt from it used to erase everything else configured under
 // notifications.notifiers.<name> the first time the screen was saved.

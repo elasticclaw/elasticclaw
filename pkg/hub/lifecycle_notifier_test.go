@@ -1930,3 +1930,130 @@ func TestLifecycleClawRouteAllowListAdditionDoesNotReplay(t *testing.T) {
 		t.Fatalf("widening a route's allow-list replayed history: %d messages, want %d", fake.count(), delivered)
 	}
 }
+
+// Regression: per-route state survived the route's removal from an enabled
+// config (nothing parks it while alerts stay on), so re-adding the channel
+// resumed from its stale cursor and flushed the whole removal window — and its
+// stale claw baseline kept the claw pass from re-seeding, replaying every
+// still-connected ad-hoc claw on top.
+func TestLifecycleRemovedRouteStateIsDroppedSoReAddDoesNotReplay(t *testing.T) {
+	fake := newFakeSlackServer(t)
+	routes := []types.LifecycleRoute{{Via: "primary"}, {Via: "secondary"}, {Via: "third"}}
+	s, db := newSlackNotifierRoutesTestServer(t, fake.server.URL, routes)
+	setLifecycleClawBaseline(t, s)
+	setSlackWatermark(t, s, 0)
+	insertLifecycleRouteEvent(t, db, "before-removal", taskRunEventAgentStarted)
+	s.lifecycleNotifierTick()
+	if fake.count() != 3 {
+		t.Fatalf("three routes sent %d messages, want 3", fake.count())
+	}
+
+	// The operator un-routes "third". Two routes remain, so nothing is written
+	// to the legacy table that could fence the removal window later.
+	setRoutes := func(routes ...types.LifecycleRoute) {
+		s.mu.Lock()
+		s.hubCfg.Notifications.Lifecycle.Routes = routes
+		s.mu.Unlock()
+	}
+	setRoutes(types.LifecycleRoute{Via: "primary"}, types.LifecycleRoute{Via: "secondary"})
+	s.lifecycleNotifierTick()
+	for _, key := range []string{lifecycleRouteWatermarkKey("third"), lifecycleClawRouteBaselineKey("third")} {
+		if _, found, err := s.notifierStateInt64(key); err != nil || found {
+			t.Fatalf("state %q survived the route's removal (found=%v, err=%v)", key, found, err)
+		}
+	}
+
+	insertSlackTestEvent(t, db, "during-removal", "route-run", taskRunEventAgentStarted, 1760000000030, "", "", "")
+	insertSlackTestClaw(t, db, "claw-during-removal", "connected", 1, "", oldEnough)
+	s.lifecycleNotifierTick()
+	sent := fake.count()
+
+	// Re-adding it must behave exactly like a newly added route.
+	setRoutes(types.LifecycleRoute{Via: "primary"}, types.LifecycleRoute{Via: "secondary"}, types.LifecycleRoute{Via: "third"})
+	s.lifecycleNotifierTick()
+	s.lifecycleNotifierTick()
+	if fake.count() != sent {
+		t.Fatalf("a re-added route replayed the removal window: %d messages, want %d", fake.count(), sent)
+	}
+}
+
+// Regression: a new route inherited the shared floor, which
+// advanceLifecycleWatermarkFloor freezes while any configured route cannot be
+// built. Adding a channel while a sibling was broken therefore flooded it with
+// the broken route's entire backlog.
+func TestLifecycleRouteAddedWhileSiblingBrokenStartsAtHead(t *testing.T) {
+	fake := newFakeSlackServer(t)
+	s, db := newSlackNotifierRoutesTestServer(t, fake.server.URL, []types.LifecycleRoute{{Via: "healthy"}, {Via: "broken"}})
+	setSlackWatermark(t, s, 0)
+	s.mu.Lock()
+	s.hubCfg.Notifications.Notifiers["broken"] = types.NotifierConfig{Type: "slack", Settings: map[string]any{
+		"token_secret": "secret-that-does-not-exist", "channel": "C0BROKEN",
+	}}
+	s.mu.Unlock()
+
+	// The shared floor cannot advance past the broken route, so it stays at 0
+	// while the healthy route works through the backlog.
+	insertLifecycleRouteEvent(t, db, "backlog-0", taskRunEventAgentStarted)
+	for i, id := range []string{"backlog-1", "backlog-2", "backlog-3"} {
+		insertSlackTestEvent(t, db, id, "route-run", taskRunEventAgentStarted, 1760000000030+int64(i), "", "", "")
+	}
+	s.lifecycleNotifierTick()
+	sent := fake.count()
+	if sent == 0 {
+		t.Fatal("healthy route delivered nothing")
+	}
+	if floor, _ := slackWatermark(t, s); floor != 0 {
+		t.Fatalf("shared floor advanced past the broken route: %d, want 0", floor)
+	}
+
+	s.mu.Lock()
+	s.hubCfg.Notifications.Notifiers["late"] = types.NotifierConfig{Type: "slack", Settings: map[string]any{
+		"token_secret": testNotifierToken, "channel": "C0LATEROUTE",
+	}}
+	s.hubCfg.Notifications.Lifecycle.Routes = append(s.hubCfg.Notifications.Lifecycle.Routes, types.LifecycleRoute{Via: "late"})
+	s.mu.Unlock()
+
+	s.lifecycleNotifierTick()
+	if fake.count() != sent {
+		t.Fatalf("a route added behind a broken sibling replayed its backlog: %d messages, want %d", fake.count(), sent)
+	}
+}
+
+// Regression: initLifecycleNotifierBaseline created the shared claw baseline
+// itself, which makes the in-tick first-enable branch unreachable — so no route
+// was ever stamped at boot. A route that could not be built at boot was then
+// treated as newly added when it recovered, and the claw events it was owed in
+// the meantime were seeded as "skipped".
+func TestLifecycleBootBaselineStampsEveryConfiguredRoute(t *testing.T) {
+	fake := newFakeSlackServer(t)
+	s, db := newSlackNotifierRoutesTestServer(t, fake.server.URL, []types.LifecycleRoute{{Via: "healthy"}, {Via: "rotating"}})
+	s.mu.Lock()
+	s.hubCfg.Notifications.Notifiers["rotating"] = types.NotifierConfig{Type: "slack", Settings: map[string]any{
+		"token_secret": "secret-being-rotated", "channel": "C0ROTATING",
+	}}
+	s.mu.Unlock()
+
+	s.initLifecycleNotifierBaseline()
+	for _, via := range []string{"healthy", "rotating"} {
+		if _, found, err := s.notifierStateInt64(lifecycleClawRouteBaselineKey(via)); err != nil || !found {
+			t.Fatalf("boot baseline did not stamp route %q (found=%v, err=%v)", via, found, err)
+		}
+	}
+
+	// An ad-hoc claw connects while the rotating route is unavailable.
+	insertSlackTestClaw(t, db, "claw-during-outage", "connected", 1, "", oldEnough)
+	s.lifecycleNotifierTick()
+	if fake.count() != 1 {
+		t.Fatalf("healthy route sent %d messages during the outage, want 1", fake.count())
+	}
+
+	s.mu.Lock()
+	s.hubCfg.Notifications.Notifiers["rotating"] = types.NotifierConfig{Type: "slack", Settings: map[string]any{
+		"token_secret": testNotifierToken, "channel": "C0ROTATING",
+	}}
+	s.mu.Unlock()
+	s.lifecycleNotifierTick()
+	if status, ok := routeDeliveryStatus(t, db, lifecycleClawStartedKey("claw-during-outage"), "rotating"); !ok || status != notificationDeliveryStatusSent {
+		t.Fatalf("claw event owed to the recovered route was buried: %q, %v", status, ok)
+	}
+}
