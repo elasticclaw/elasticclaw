@@ -376,6 +376,39 @@ func TestTaskRunAnalyticsTicketLeadTimeWithoutEvents(t *testing.T) {
 	}
 }
 
+func TestTaskRunAnalyticsTicketLeadTimeStartsAtFirstRun(t *testing.T) {
+	s, db := newTaskRunAnalyticsAPITestServer(t)
+	insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{
+		RunID: "lead-time-run", AttemptID: "attempt-lead-time", ClawID: "claw-lead-time", TenantID: "test-tenant-id",
+		Status: taskRunStatusRunning, Phase: taskRunPhaseAgentRunning, OwnerType: taskRunOwnerWorkflow,
+		Workspace: "eng", Workflow: "tickets", Integration: "external", Repo: "elastic/claw",
+		StartedAt: 2_000, IssueCreatedAt: 1_000, IssueTitle: "Queued ticket",
+	})
+	if _, err := db.Exec("DELETE FROM task_run_events WHERE run_id=?", "lead-time-run"); err != nil {
+		t.Fatalf("delete fixture events: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO task_run_events(id, tenant_id, run_id, event_key, source, event_type, event_time, observed_at, created_at)
+		VALUES('opened-lead-time', 'test-tenant-id', 'lead-time-run', 'opened-lead-time', 'github', 'pr_opened', 6_000, 6_000, 6_000)`); err != nil {
+		t.Fatalf("insert event: %v", err)
+	}
+	for _, table := range []string{"task_runs", "task_run_summaries"} {
+		if _, err := db.Exec("UPDATE "+table+" SET issue_id=? WHERE "+map[string]string{"task_runs": "id", "task_run_summaries": "run_id"}[table]+"=?", "LEAD-1", "lead-time-run"); err != nil {
+			t.Fatalf("set issue ID for %s: %v", table, err)
+		}
+	}
+
+	rr := requestTaskRunAnalyticsAPI(t, s, http.MethodGet, "/api/analytics/tickets", "test-token")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("tickets status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+	var response taskRunAnalyticsTicketsResponse
+	decodeTaskRunAnalyticsAPI(t, rr, &response)
+	// Lead time skips the 1_000 spent queued before the first run started.
+	if len(response.Tickets) != 1 || response.Tickets[0].LeadTime != 4_000 || response.Tickets[0].TimeToFirstRun != 1_000 {
+		t.Fatalf("ticket lead time mismatch: %#v", response.Tickets)
+	}
+}
+
 func TestTaskRunAnalyticsTicketsHandlerAggregatesAndPaginates(t *testing.T) {
 	s, db := newTaskRunAnalyticsAPITestServer(t)
 	const reportedAt = int64(1_000)
@@ -426,7 +459,8 @@ func TestTaskRunAnalyticsTicketsHandlerAggregatesAndPaginates(t *testing.T) {
 	if ticket.MergedPRCount != 1 || ticket.OpenPRCount != 1 {
 		t.Fatalf("ticket PR counts mismatch: %#v", ticket)
 	}
-	if ticket.ReportedAt != reportedAt || ticket.TimeToFirstRun != 1_000 || ticket.LeadTime != 6_000 {
+	// Lead time counts from the first run start (2_000) to the merge event (7_000).
+	if ticket.ReportedAt != reportedAt || ticket.TimeToFirstRun != 1_000 || ticket.LeadTime != 5_000 {
 		t.Fatalf("ticket timing mismatch: %#v", ticket)
 	}
 }
