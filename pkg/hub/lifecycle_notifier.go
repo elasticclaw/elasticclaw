@@ -62,12 +62,8 @@ var lifecycleFailureEventTypes = map[string]bool{
 
 // lifecycleSupportedEventTypes is everything the notifier can render.
 func lifecycleSupportedEventTypes() map[string]bool {
-	supported := map[string]bool{
-		taskRunEventAgentStarted: true,
-		taskRunEventPROpened:     true,
-		taskRunEventAgentIdle:    true,
-	}
-	for t := range lifecycleFailureEventTypes {
+	supported := make(map[string]bool, len(types.LifecycleEventTypes))
+	for _, t := range types.LifecycleEventTypes {
 		supported[t] = true
 	}
 	return supported
@@ -322,8 +318,16 @@ type lifecycleRunContext struct {
 // lifecycleDelivery bundles what the two event passes need to deliver one
 // message: the notifier and lifecycle config.
 type lifecycleDelivery struct {
+	// notifier is kept for package-local test helpers; runtime uses routes.
 	notifier notify.Notifier
+	routes   []lifecycleRouteDelivery
 	lc       *types.LifecycleNotificationsConfig
+}
+
+type lifecycleRouteDelivery struct {
+	notifier string
+	send     notify.Notifier
+	events   map[string]bool
 }
 
 func (s *Server) lifecycleNotifierTick() {
@@ -344,23 +348,27 @@ func (s *Server) lifecycleNotifierTick() {
 		return
 	}
 	lc := cfg.Lifecycle
-	// Trimmed to match ValidateNotificationsConfig, which resolves the via
-	// after strings.TrimSpace: a hub.yaml with via: "eng-agents " passes
-	// validation, so looking it up raw here would yield a zero NotifierConfig
-	// and silently stop notifications while everything reports green.
-	via := strings.TrimSpace(lc.Via)
-	nc := cfg.Notifiers[via] // exists: validated above
-	notifier, err := s.notifierFor(via, nc, s.hubSecretResolver())
-	if err != nil {
-		// Unknown provider type, unresolvable secret, bad provider settings:
-		// pause (leaving all cursors) until the operator fixes the config.
-		s.logPollWarningOnce("notify-notifier", "[notify] notifier %q unavailable — notifications paused: %v", via, err)
+	var routes []lifecycleRouteDelivery
+	for _, route := range lc.EffectiveRoutes() {
+		via := strings.TrimSpace(route.Via)
+		n, err := s.notifierFor(via, cfg.Notifiers[via], s.hubSecretResolver())
+		if err != nil {
+			s.logPollWarningOnce("notify-notifier:"+via, "[notify] notifier %q unavailable: %v", via, err)
+			continue
+		}
+		events := map[string]bool{}
+		for _, event := range route.Events {
+			events[event] = true
+		}
+		routes = append(routes, lifecycleRouteDelivery{notifier: via, send: n, events: events})
+	}
+	if len(routes) == 0 {
 		return
 	}
 	s.clearPollWarning("notify-config")
 	s.clearPollWarning("notify-notifier")
 
-	d := lifecycleDelivery{notifier: notifier, lc: lc}
+	d := lifecycleDelivery{routes: routes, lc: lc}
 	// Two independent event sources share the notifier and dedupe table:
 	// task-run events for claws that belong to a task run, and the claw pass
 	// for ad-hoc claws (task_run_id=''). See lifecycle_claw_notifier.go for
@@ -418,7 +426,8 @@ func (s *Server) lifecycleTaskRunPass(d lifecycleDelivery) {
 	maxHandled := watermark
 	for _, ev := range events {
 		if err := s.sendLifecycleEvent(d, ev); err != nil {
-			if handled, stop := s.handleLifecycleSendError(err, "event "+ev.ID+" ("+ev.EventType+")", ev.ID, ev.RunID); handled {
+			routeErr := err.(lifecycleRouteSendError)
+			if handled, stop := s.handleLifecycleSendError(routeErr.err, "event "+ev.ID+" ("+ev.EventType+")", ev.ID, ev.RunID, routeErr.notifier, len(d.routes) == 1); handled {
 				maxHandled = ev.RowID
 				continue
 			} else if stop {
@@ -451,7 +460,7 @@ const lifecycleMaxTransientFailures = 60
 // lifecycleMaxTransientFailures times in a row, at which point it is recorded
 // failed so it cannot wedge the cursor forever. Returns handled=true when the
 // caller may move past the event; stop is informational for symmetry.
-func (s *Server) handleLifecycleSendError(err error, what, deliveryKey, runKey string) (handled, stop bool) {
+func (s *Server) handleLifecycleSendError(err error, what, deliveryKey, runKey, notifier string, singleRoute bool) (handled, stop bool) {
 	switch notify.Classify(err) {
 	case notify.ErrorConfig:
 		// Bad token / missing channel fails every message, not this one.
@@ -462,7 +471,10 @@ func (s *Server) handleLifecycleSendError(err error, what, deliveryKey, runKey s
 	case notify.ErrorPermanent:
 		// Never succeeds on retry — record it so we stop trying.
 		log.Printf("[notify] permanent failure for %s: %v", what, err)
-		s.recordNotificationDelivery(deliveryKey, runKey, "", notificationDeliveryStatusFailed)
+		s.recordNotificationDeliveryV2(deliveryKey, notifier, runKey, "", notificationDeliveryStatusFailed)
+		if singleRoute {
+			s.recordNotificationDelivery(deliveryKey, runKey, "", notificationDeliveryStatusFailed)
+		}
 		return true, false
 	default:
 		// The streak is persisted (not an in-memory counter) because the cap
@@ -470,7 +482,13 @@ func (s *Server) handleLifecycleSendError(err error, what, deliveryKey, runKey s
 		// more often than the cap window would reset an in-memory counter on
 		// every boot, so the poisoned event would never be burned and the
 		// cursor would stay wedged for as long as the restarts continued.
-		stateKey := lifecycleTransientFailureStateKey(deliveryKey)
+		stateKey := lifecycleTransientFailureStateKey(deliveryKey, notifier)
+		if singleRoute {
+			// Legacy single-`via` key shape: no per-notifier component, so
+			// pre-routing streak state (and its corruption-recovery
+			// semantics) keeps working unchanged.
+			stateKey = lifecycleTransientFailureStateKey(deliveryKey)
+		}
 		count, _, stateErr := s.notifierStateInt64(stateKey)
 		if stateErr != nil {
 			// Unreadable streak state: retry without counting rather than
@@ -482,7 +500,10 @@ func (s *Server) handleLifecycleSendError(err error, what, deliveryKey, runKey s
 		if count >= lifecycleMaxTransientFailures {
 			s.clearNotifierState(stateKey)
 			log.Printf("[notify] giving up on %s after %d consecutive transient failures: %v", what, count, err)
-			s.recordNotificationDelivery(deliveryKey, runKey, "", notificationDeliveryStatusFailed)
+			s.recordNotificationDeliveryV2(deliveryKey, notifier, runKey, "", notificationDeliveryStatusFailed)
+			if singleRoute {
+				s.recordNotificationDelivery(deliveryKey, runKey, "", notificationDeliveryStatusFailed)
+			}
 			return true, false
 		}
 		s.setNotifierStateInt64(stateKey, count)
@@ -495,8 +516,11 @@ func (s *Server) handleLifecycleSendError(err error, what, deliveryKey, runKey s
 // lifecycleTransientFailureStateKey keys one delivery key's consecutive
 // transient-failure streak in slack_notifier_state. Rows exist only while a
 // streak is live: they are cleared on success or when the cap burns the event.
-func lifecycleTransientFailureStateKey(deliveryKey string) string {
-	return "transient_failures:" + deliveryKey
+func lifecycleTransientFailureStateKey(deliveryKey string, notifier ...string) string {
+	if len(notifier) == 0 {
+		return "transient_failures:" + deliveryKey
+	} // legacy test/state compatibility
+	return "transient_failures:" + notifier[0] + ":" + deliveryKey
 }
 
 // skipLifecycleMutedEvents seeds "skipped" delivery rows for events of the
@@ -568,24 +592,71 @@ func (s *Server) sendLifecycleEvent(d lifecycleDelivery, ev lifecycleEventRow) e
 // delivery under deliveryKey. The slack_run_threads table remains for legacy
 // data, but lifecycle notifications no longer read or write it.
 func (s *Server) postLifecycleEvent(d lifecycleDelivery, ev lifecycleEventRow, runCtx lifecycleRunContext, runKey, deliveryKey string) error {
-	if s.lifecycleDeliveryPending(deliveryKey) {
-		// Already sent; only the delivery-row write is outstanding (see
-		// recordNotificationDelivery). Sending again would duplicate the
-		// external message.
-		return nil
-	}
 	msg := buildLifecycleMessage(ev, runCtx)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	handle, err := d.notifier.Send(ctx, msg)
-	if err != nil {
-		return err
+	routes := d.routes
+	if len(routes) == 0 && d.notifier != nil {
+		routes = []lifecycleRouteDelivery{{notifier: "", send: d.notifier}}
 	}
-	s.recordNotificationDelivery(deliveryKey, runKey, handle, notificationDeliveryStatusSent)
-	// A success ends any transient-failure streak for this delivery.
-	s.clearNotifierState(lifecycleTransientFailureStateKey(deliveryKey))
-	return nil
+	var firstErr error
+	for _, route := range routes {
+		if len(route.events) != 0 && !route.events[ev.EventType] {
+			continue
+		}
+		// Legacy rows are an upgrade fence: their single-key dedupe predates
+		// routing and therefore means this event was already handled.
+		if s.lifecycleRouteDelivered(deliveryKey, route.notifier) {
+			continue
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		handle, err := route.send.Send(ctx, msg)
+		cancel()
+		if err != nil {
+			// Permanent failures are terminal for this route. Record them here
+			// so a second broken route cannot be lost when the caller advances
+			// the shared watermark after handling the first error.
+			if notify.Classify(err) == notify.ErrorPermanent {
+				s.recordNotificationDeliveryV2(deliveryKey, route.notifier, runKey, "", notificationDeliveryStatusFailed)
+				if len(routes) == 1 {
+					s.recordNotificationDelivery(deliveryKey, runKey, "", notificationDeliveryStatusFailed)
+				}
+			}
+			if firstErr == nil {
+				firstErr = lifecycleRouteSendError{notifier: route.notifier, err: err}
+			}
+			continue
+		}
+		s.recordNotificationDeliveryV2(deliveryKey, route.notifier, runKey, handle, notificationDeliveryStatusSent)
+		if len(routes) == 1 {
+			// Exactly one configured route is the legacy single-`via` shape:
+			// keep writing the legacy table too so its dedupe/read behavior
+			// (and any external readers) stay identical to pre-routing.
+			s.recordNotificationDelivery(deliveryKey, runKey, handle, notificationDeliveryStatusSent)
+			s.clearNotifierState(lifecycleTransientFailureStateKey(deliveryKey))
+		}
+		s.clearNotifierState(lifecycleTransientFailureStateKey(deliveryKey, route.notifier))
+	}
+	return firstErr
+}
+
+type lifecycleRouteSendError struct {
+	notifier string
+	err      error
+}
+
+func (e lifecycleRouteSendError) Error() string { return e.err.Error() }
+
+func (s *Server) lifecycleRouteDelivered(eventID, notifier string) bool {
+	var n int
+	// The legacy read fallback is deliberately retained instead of a migration:
+	// it applies to every configured route, including routes added after upgrade.
+	err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM slack_notification_deliveries WHERE event_id=?) OR EXISTS(SELECT 1 FROM slack_notification_deliveries_v2 WHERE event_id=? AND notifier=?)`, eventID, eventID, notifier).Scan(&n)
+	return err == nil && n != 0
+}
+
+func (s *Server) recordNotificationDeliveryV2(eventID, notifier, runID, messageHandle, status string) {
+	if _, err := s.db.Exec(`INSERT INTO slack_notification_deliveries_v2(event_id, notifier, run_id, delivered_at, message_ts, status) VALUES(?,?,?,?,?,?) ON CONFLICT(event_id, notifier) DO NOTHING`, eventID, notifier, runID, epochMillis(now()), messageHandle, status); err != nil {
+		log.Printf("[notify] record route delivery for event %s via %s: %v", eventID, notifier, err)
+	}
 }
 
 // pendingNotificationDelivery is a delivery whose post-send bookkeeping write

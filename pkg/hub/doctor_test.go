@@ -66,11 +66,14 @@ func TestCheckNotificationsSurfacesMisconfiguration(t *testing.T) {
 		},
 	}
 	checks := s.checkNotifications(badVia)
-	if len(checks) != 1 || checks[0].OK || checks[0].Severity != "critical" {
-		t.Fatalf("bad lifecycle.via: got %#v, want one critical failing check", checks)
+	var routeFailure bool
+	for _, check := range checks {
+		if !check.OK && strings.Contains(check.Title, "Lifecycle route") && strings.Contains(check.Title, "eng-agent") {
+			routeFailure = true
+		}
 	}
-	if !strings.Contains(checks[0].Error, "eng-agent") {
-		t.Fatalf("check error %q does not name the bad via", checks[0].Error)
+	if !routeFailure {
+		t.Fatalf("bad lifecycle.via did not produce a route-specific failure: %#v", checks)
 	}
 
 	// Provider-level failures: unknown type, then a secret that does not resolve.
@@ -99,6 +102,37 @@ func TestCheckNotificationsSurfacesMisconfiguration(t *testing.T) {
 	}
 	if c, ok := byTitle[`Notifier "healthy" is configured`]; !ok || !c.OK {
 		t.Fatalf("healthy notifier not reported OK: %#v", byTitle)
+	}
+}
+
+func TestCheckNotificationsChecksEveryLifecycleRoute(t *testing.T) {
+	s := &Server{}
+	cfg := &types.HubConfig{Secrets: map[string]string{"token": "xoxb-test"}, Notifications: &types.NotificationsConfig{
+		Notifiers: map[string]types.NotifierConfig{
+			"healthy": {Type: "slack", Settings: map[string]any{"token_secret": "token", "channel": "C0123ABCD"}},
+			"empty":   {Type: "slack", Settings: map[string]any{"token_secret": "token"}},
+			"broken":  {Type: "carrier-pigeon", Settings: map[string]any{"channel": "C0123ABCD"}},
+		},
+		Lifecycle: &types.LifecycleNotificationsConfig{Routes: []types.LifecycleRoute{{Via: "healthy"}, {Via: "empty"}, {Via: "broken"}, {Via: "missing"}}},
+	}}
+	checks := s.checkNotifications(cfg)
+	seen := map[string]bool{}
+	for _, check := range checks {
+		if strings.Contains(check.Title, "Lifecycle route") && !check.OK {
+			seen[check.Title] = true
+		}
+	}
+	for _, want := range []string{"(\"empty\") has no channel", "(\"broken\") is not constructible", "(\"missing\") names an unknown notifier"} {
+		found := false
+		for title := range seen {
+			if strings.Contains(title, want) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("missing route check %q in %#v", want, checks)
+		}
 	}
 }
 

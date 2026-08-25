@@ -52,6 +52,24 @@ func newSlackNotifierTestServer(t *testing.T, slackURL string, mutate func(*type
 	return s, db
 }
 
+// newSlackNotifierRoutesTestServer configures named Slack destinations against
+// one capture server; distinct channels make route assertions unambiguous.
+func newSlackNotifierRoutesTestServer(t *testing.T, slackURL string, routes []types.LifecycleRoute) (*Server, *sql.DB) {
+	t.Helper()
+	cfg := &types.HubConfig{
+		Token: "test-token", Secrets: map[string]string{testNotifierToken: "xoxb-test-token"},
+		Notifications: &types.NotificationsConfig{Notifiers: map[string]types.NotifierConfig{}, Lifecycle: &types.LifecycleNotificationsConfig{Routes: routes}},
+	}
+	for i, route := range routes {
+		cfg.Notifications.Notifiers[route.Via] = types.NotifierConfig{Type: "slack", Settings: map[string]any{
+			"token_secret": testNotifierToken, "channel": fmt.Sprintf("C0ROUTE%04d", i+1),
+		}}
+	}
+	s, db := NewTestServerWithConfig(t, cfg, "", "", "")
+	s.notifierSettingOverrides = map[string]any{"api_base": slackURL, "min_send_interval": time.Nanosecond.String()}
+	return s, db
+}
+
 // testLifecycleDelivery builds the delivery bundle exactly as
 // lifecycleNotifierTick does, so tests that drive a single pass or a single
 // send exercise the real notifier instance (and therefore the real pacing)
@@ -120,6 +138,116 @@ func slackDeliveryStatus(t *testing.T, db *sql.DB, eventID string) (string, bool
 		t.Fatalf("query delivery %s: %v", eventID, err)
 	}
 	return status, true
+}
+
+func routeDeliveryStatus(t *testing.T, db *sql.DB, eventID, notifier string) (string, bool) {
+	t.Helper()
+	var status string
+	err := db.QueryRow(`SELECT status FROM slack_notification_deliveries_v2 WHERE event_id=? AND notifier=?`, eventID, notifier).Scan(&status)
+	if err == sql.ErrNoRows {
+		return "", false
+	}
+	if err != nil {
+		t.Fatalf("query route delivery %s via %s: %v", eventID, notifier, err)
+	}
+	return status, true
+}
+
+func insertLifecycleRouteEvent(t *testing.T, db *sql.DB, id, eventType string) {
+	t.Helper()
+	base := int64(1760000000000)
+	insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{RunID: "route-run", AttemptID: "attempt-route-run", ClawID: "route-claw", TenantID: "test-tenant-id", OwnerType: taskRunOwnerFactory, Factory: "bugfix", StartedAt: base - 1000})
+	insertSlackTestEvent(t, db, id, "route-run", eventType, base+10, "", "", "")
+}
+
+func TestLifecycleRoutesFanoutAndFiltering(t *testing.T) {
+	fake := newFakeSlackServer(t)
+	routes := []types.LifecycleRoute{{Via: "all"}, {Via: "started", Events: []string{taskRunEventAgentStarted}}}
+	s, db := newSlackNotifierRoutesTestServer(t, fake.server.URL, routes)
+	insertLifecycleRouteEvent(t, db, "route-started", taskRunEventAgentStarted)
+	setSlackWatermark(t, s, 0)
+	s.lifecycleNotifierTick()
+	if fake.count() != 2 {
+		t.Fatalf("fan-out sent %d messages, want 2", fake.count())
+	}
+	if fake.request(0).Channel == fake.request(1).Channel {
+		t.Fatalf("fan-out used one channel %q twice", fake.request(0).Channel)
+	}
+	if _, ok := routeDeliveryStatus(t, db, "route-started", "all"); !ok {
+		t.Fatal("empty allow-list route did not receive event")
+	}
+	if _, ok := routeDeliveryStatus(t, db, "route-started", "started"); !ok {
+		t.Fatal("matching allow-list route did not receive event")
+	}
+
+	insertSlackTestEvent(t, db, "route-pr", "route-run", taskRunEventPROpened, 1760000000020, "", "", "")
+	s.lifecycleNotifierTick()
+	if fake.count() != 3 {
+		t.Fatalf("filtered event sent %d messages, want 3", fake.count())
+	}
+	if _, ok := routeDeliveryStatus(t, db, "route-pr", "all"); !ok {
+		t.Fatal("empty allow-list route did not receive all event types")
+	}
+	if _, ok := routeDeliveryStatus(t, db, "route-pr", "started"); ok {
+		t.Fatal("non-matching allow-list route received pr_opened")
+	}
+}
+
+func TestLifecycleRoutesLegacyDeliveryAndUpgradeFence(t *testing.T) {
+	fake := newFakeSlackServer(t)
+	s, db := newSlackNotifierTestServer(t, fake.server.URL, nil)
+	insertLifecycleRouteEvent(t, db, "legacy-event", taskRunEventAgentStarted)
+	setSlackWatermark(t, s, 0)
+	s.lifecycleNotifierTick()
+	if fake.count() != 1 {
+		t.Fatalf("legacy via sent %d messages, want 1", fake.count())
+	}
+
+	// A pre-v2 delivery is a global fence, including for routes added later.
+	if _, err := db.Exec(`INSERT INTO slack_notification_deliveries(event_id, run_id, delivered_at, message_ts, status) VALUES(?,?,?,?,?)`, "upgraded-event", "route-run", 1, "", notificationDeliveryStatusSent); err != nil {
+		t.Fatalf("seed legacy delivery: %v", err)
+	}
+	insertSlackTestEvent(t, db, "upgraded-event", "route-run", taskRunEventPROpened, 1760000000030, "", "", "")
+	s.mu.Lock()
+	s.hubCfg.Notifications.Lifecycle.Via = ""
+	s.hubCfg.Notifications.Lifecycle.Routes = []types.LifecycleRoute{{Via: testNotifierName}, {Via: "new-route"}}
+	s.hubCfg.Notifications.Notifiers["new-route"] = types.NotifierConfig{Type: "slack", Settings: map[string]any{"token_secret": testNotifierToken, "channel": "C0NEWROUTE"}}
+	s.mu.Unlock()
+	s.lifecycleNotifierTick()
+	if fake.count() != 1 {
+		t.Fatalf("legacy delivery was resent after upgrade: %d sends", fake.count())
+	}
+}
+
+func TestLifecycleRoutesErrorDoesNotBlockOtherRouteAndRetriesPerRoute(t *testing.T) {
+	fake := newFakeSlackServer(t)
+	fake.setRespond(func(n int, w http.ResponseWriter) {
+		if n == 1 {
+			http.Error(w, "temporary", http.StatusInternalServerError)
+			return
+		}
+		fmt.Fprint(w, `{"ok":true,"ts":"1.000001"}`)
+	})
+	s, db := newSlackNotifierRoutesTestServer(t, fake.server.URL, []types.LifecycleRoute{{Via: "broken"}, {Via: "healthy"}})
+	insertLifecycleRouteEvent(t, db, "route-error", taskRunEventAgentStarted)
+	setSlackWatermark(t, s, 0)
+	s.lifecycleNotifierTick()
+	if fake.count() != 2 {
+		t.Fatalf("erroring route blocked fan-out: got %d sends, want 2", fake.count())
+	}
+	if status, ok := routeDeliveryStatus(t, db, "route-error", "healthy"); !ok || status != notificationDeliveryStatusSent {
+		t.Fatalf("healthy route = %q, %v; want sent", status, ok)
+	}
+	s.handleLifecycleSendError(fmt.Errorf("temporary"), "event", "retry-event", "run", "broken", false)
+	s.handleLifecycleSendError(fmt.Errorf("temporary"), "event", "retry-event", "run", "broken", false)
+	s.handleLifecycleSendError(fmt.Errorf("temporary"), "event", "retry-event", "run", "healthy", false)
+	var count int64
+	if err := db.QueryRow(`SELECT CAST(value AS INTEGER) FROM slack_notifier_state WHERE key=?`, lifecycleTransientFailureStateKey("retry-event", "broken")).Scan(&count); err != nil || count != 2 {
+		t.Fatalf("broken retry count = %d, err %v; want 2", count, err)
+	}
+	if err := db.QueryRow(`SELECT CAST(value AS INTEGER) FROM slack_notifier_state WHERE key=?`, lifecycleTransientFailureStateKey("retry-event", "healthy")).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("healthy retry count = %d, err %v; want independent 1", count, err)
+	}
 }
 
 func TestSlackNotifierDedupesOnCursorRescan(t *testing.T) {

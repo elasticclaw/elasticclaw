@@ -491,7 +491,11 @@ func (s *Server) deliverLifecycleClawEvent(d lifecycleDelivery, claw lifecycleCl
 	}
 	// Same send-failure policy as the task-run pass: config errors pause,
 	// permanent errors are burned as failed, transient errors stop the pass.
-	handled, _ := s.handleLifecycleSendError(err, "claw event "+deliveryKey, deliveryKey, runKey)
+	routeErr, ok := err.(lifecycleRouteSendError)
+	if !ok {
+		return false
+	}
+	handled, _ := s.handleLifecycleSendError(routeErr.err, "claw event "+deliveryKey, deliveryKey, runKey, routeErr.notifier, len(d.routes) == 1)
 	return handled
 }
 

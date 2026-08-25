@@ -948,6 +948,18 @@ func migrate(db *sql.DB) error {
 	CREATE INDEX IF NOT EXISTS idx_slack_deliveries_time
 		ON slack_notification_deliveries(delivered_at);
 
+	-- Route-aware lifecycle delivery dedupe.  The legacy table remains read as
+	-- a fallback by the notifier, so pre-upgrade events are never re-sent.
+	CREATE TABLE IF NOT EXISTS slack_notification_deliveries_v2 (
+		event_id     TEXT NOT NULL,
+		notifier     TEXT NOT NULL,
+		run_id       TEXT NOT NULL,
+		delivered_at INTEGER NOT NULL,
+		message_ts   TEXT NOT NULL DEFAULT '',
+		status       TEXT NOT NULL DEFAULT 'sent',
+		PRIMARY KEY (event_id, notifier)
+	);
+
 	-- Key/value state for the Slack notifier (the rowid watermark).
 	CREATE TABLE IF NOT EXISTS slack_notifier_state (
 		key   TEXT PRIMARY KEY,
