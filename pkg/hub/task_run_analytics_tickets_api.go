@@ -686,18 +686,21 @@ func (s *Server) buildTaskRunAnalyticsTicket(tenantID, issueID string, runs []ta
 		if event.Time > ticket.LastActivity {
 			ticket.LastActivity = event.Time
 		}
-		if event.EventType == "pr_merged" && ticket.LeadTime == 0 && ticket.ReportedAt > 0 {
-			ticket.LeadTime = event.Time - ticket.ReportedAt
+		// Lead time is measured from the first run, not from when the ticket was
+		// reported: the queue wait before an agent picks the ticket up is already
+		// reported on its own as time to first run.
+		if event.EventType == "pr_merged" && ticket.LeadTime == 0 && firstStart > 0 {
+			ticket.LeadTime = event.Time - firstStart
 		}
 	}
 	if ticket.LastActivity == 0 {
 		ticket.LastActivity = runs[len(runs)-1].StartedAt
 	}
+	if firstStart > 0 && ticket.LeadTime == 0 && len(events) > 0 {
+		ticket.LeadTime = ticket.LastActivity - firstStart
+	}
 	if ticket.ReportedAt > 0 {
 		ticket.TimeToFirstRun = firstStart - ticket.ReportedAt
-		if len(events) > 0 && ticket.LeadTime == 0 {
-			ticket.LeadTime = ticket.LastActivity - ticket.ReportedAt
-		}
 	}
 	return ticket, nil
 }
