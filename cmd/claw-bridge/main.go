@@ -3677,6 +3677,9 @@ func dockerGitHubCloneScript(workspaceDir string, repos []bootstrapRepoAccess) s
 	fmt.Fprintf(&b, "cd %s\n", shellQuote(workspaceDir))
 	b.WriteString("git config --global --get credential.helper >/dev/null\n")
 	for _, repo := range repos {
+		if isRepositoryPattern(repo.Repo) {
+			continue
+		}
 		dir := repoDirectoryName(repo.Repo)
 		cloneURL := "https://github.com/" + repo.Repo + ".git"
 		fmt.Fprintf(&b, "echo %s\n", shellQuote("[bootstrap] cloning "+repo.Repo+" into "+dir))
@@ -3685,6 +3688,10 @@ func dockerGitHubCloneScript(workspaceDir string, repos []bootstrapRepoAccess) s
 		fmt.Fprintf(&b, "test -d %s\n", shellQuote(filepath.Join(dir, ".git")))
 	}
 	return b.String()
+}
+
+func isRepositoryPattern(repo string) bool {
+	return strings.ContainsAny(repo, "*?[")
 }
 
 func cloneConfiguredGitHubRepos() error {

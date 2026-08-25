@@ -84,6 +84,50 @@ func TestHasRepositoryGlob(t *testing.T) {
 	}
 }
 
+func TestRepoAccessMatchesSelector(t *testing.T) {
+	cases := []struct {
+		repo     string
+		selector RepoAccess
+		want     bool
+	}{
+		{"acme/api", RepoAccess{Repo: "acme/api"}, true},
+		{"acme/api", RepoAccess{Repo: "ACME/API"}, true},
+		{"acme/api", RepoAccess{Repo: "other/api"}, false},
+		{"acme/icedq-kots", RepoAccess{Repo: "acme/*"}, true},
+		{"other/icedq-kots", RepoAccess{Repo: "acme/*"}, false},
+		{"acme/icedq-kots", RepoAccess{Repo: "*-kots"}, true},
+		{"acme/support-sandbox", RepoAccess{Repo: "*-kots"}, false},
+	}
+	for _, tc := range cases {
+		got := repoAccessMatchesSelector(tc.repo, tc.selector)
+		if got != tc.want {
+			t.Fatalf("repoAccessMatchesSelector(%q, %q) = %v, want %v", tc.repo, tc.selector.Repo, got, tc.want)
+		}
+	}
+}
+
+func TestEffectiveRepoAccess(t *testing.T) {
+	selectors := []RepoAccess{
+		{Repo: "replicated-collab/support-sandbox", Permissions: "write"},
+		{Repo: "replicated-collab/*", Permissions: "read"},
+	}
+
+	got := effectiveRepoAccess("replicated-collab/support-sandbox", selectors)
+	if got == nil || got.Permissions != "write" {
+		t.Fatalf("exact match should prefer write, got %#v", got)
+	}
+
+	got = effectiveRepoAccess("replicated-collab/icedq-kots", selectors)
+	if got == nil || got.Permissions != "read" {
+		t.Fatalf("glob match should return read, got %#v", got)
+	}
+
+	got = effectiveRepoAccess("other-org/icedq-kots", selectors)
+	if got != nil {
+		t.Fatalf("unmatched repo should return nil, got %#v", got)
+	}
+}
+
 func TestListInstallationRepositoriesPaginates(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
@@ -166,7 +210,7 @@ func newTestGitHubTokenProvider(t *testing.T, server *httptest.Server) *GitHubTo
 	}
 }
 
-func TestWorkflowCreationStoresExpandedRepositories(t *testing.T) {
+func TestWorkflowCreationStoresRepositorySelectors(t *testing.T) {
 	privateKey, err := rsa.GenerateKey(rand.Reader, 1024)
 	if err != nil {
 		t.Fatalf("generate private key: %v", err)
@@ -212,6 +256,7 @@ func TestWorkflowCreationStoresExpandedRepositories(t *testing.T) {
 		Name: "engineering",
 		Repositories: []types.GitHubRepoAccess{
 			{Repo: "*-infra-*", Permissions: "write"},
+			{Repo: "acme/website", Permissions: "read"},
 		},
 		Files: map[string]string{
 			"elasticclaw-config.yaml": "schema_version: v1\nname: engineering\nprovider: noop\n",
@@ -231,7 +276,10 @@ func TestWorkflowCreationStoresExpandedRepositories(t *testing.T) {
 	if err := json.Unmarshal([]byte(repositoriesJSON), &repositories); err != nil {
 		t.Fatalf("decode claw repositories: %v", err)
 	}
-	want := []types.GitHubRepoAccess{{Repo: "acme/api-infra-prod", Permissions: "write"}}
+	want := []types.GitHubRepoAccess{
+		{Repo: "*-infra-*", Permissions: "write"},
+		{Repo: "acme/website", Permissions: "read"},
+	}
 	if !reflect.DeepEqual(repositories, want) {
 		t.Fatalf("stored repositories = %#v, want %#v", repositories, want)
 	}

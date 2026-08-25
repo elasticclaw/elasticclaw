@@ -10,9 +10,67 @@ import (
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 )
 
+func isRepositoryPattern(repo string) bool {
+	return strings.ContainsAny(repo, "*?[")
+}
+
 func hasRepositoryGlob(repositories []types.GitHubRepoAccess) bool {
 	for _, repository := range repositories {
-		if strings.ContainsAny(repository.Repo, "*?[") {
+		if isRepositoryPattern(repository.Repo) {
+			return true
+		}
+	}
+	return false
+}
+
+// repoAccessMatchesSelector reports whether a canonical "owner/repo" matches a
+// repository selector. Exact selectors match the full name; selectors without a
+// slash match the repository name only; glob selectors use path.Match.
+func repoAccessMatchesSelector(repo string, selector RepoAccess) bool {
+	pattern := strings.ToLower(strings.TrimSpace(selector.Repo))
+	if pattern == "" {
+		return false
+	}
+	matchFullName := strings.Contains(pattern, "/")
+	target := strings.ToLower(repo)
+	if !matchFullName {
+		parts := strings.SplitN(repo, "/", 2)
+		if len(parts) == 2 {
+			target = strings.ToLower(parts[1])
+		}
+	}
+	if isRepositoryPattern(pattern) {
+		matched, _ := path.Match(pattern, target)
+		return matched
+	}
+	return pattern == target
+}
+
+// effectiveRepoAccess returns the highest-permission RepoAccess that matches
+// the requested repository, or nil if none of the selectors match.
+func effectiveRepoAccess(repo string, selectors []RepoAccess) *RepoAccess {
+	var result *RepoAccess
+	for _, sel := range selectors {
+		if !repoAccessMatchesSelector(repo, sel) {
+			continue
+		}
+		perm := sel.Permissions
+		if perm == "" {
+			perm = "read"
+		}
+		if result == nil || perm == "write" {
+			result = &RepoAccess{Repo: repo, Permissions: perm}
+		}
+		if result.Permissions == "write" {
+			break
+		}
+	}
+	return result
+}
+
+func hasRepositoryPattern(repos []RepoAccess) bool {
+	for _, r := range repos {
+		if isRepositoryPattern(r.Repo) {
 			return true
 		}
 	}
@@ -94,10 +152,13 @@ func expandRepositoryAccess(selectors []types.GitHubRepoAccess, available []gith
 	return expanded, nil
 }
 
-// expandWorkspaceRepositories selects the first configured GitHub App
-// installation that can satisfy every selector. Keeping the expansion within
-// one installation is required because each claw currently uses one GitHub
-// installation token for all repository operations.
+// expandWorkspaceRepositories validates repository selectors and returns the
+// original selectors. Exact selectors are kept as-is. Glob selectors are checked
+// against the accessible repositories of the first matching GitHub App
+// installation to ensure they are not typos, but they are not expanded into the
+// claw's repository list. This keeps the credential helper able to match
+// dynamically at token request time without expanding an entire org into the
+// repository list (which would also clone every matched repo).
 func (s *Server) expandWorkspaceRepositories(ctx context.Context, workspaceName string, selectors []types.GitHubRepoAccess) ([]types.GitHubRepoAccess, error) {
 	if !hasRepositoryGlob(selectors) {
 		return append([]types.GitHubRepoAccess(nil), selectors...), nil
@@ -143,9 +204,16 @@ func (s *Server) expandWorkspaceRepositories(ctx context.Context, workspaceName 
 				failures = append(failures, fmt.Sprintf("app %d installation %d: %v", appConfig.AppID, installation.ID, err))
 				continue
 			}
-			expanded, err := expandRepositoryAccess(selectors, available)
-			if err == nil {
-				return expanded, nil
+			// Validate only the glob selectors. We still return the original
+			// selector list so the credential helper can match it dynamically.
+			globSelectors := make([]types.GitHubRepoAccess, 0, len(selectors))
+			for _, sel := range selectors {
+				if isRepositoryPattern(sel.Repo) {
+					globSelectors = append(globSelectors, sel)
+				}
+			}
+			if _, err := expandRepositoryAccess(globSelectors, available); err == nil {
+				return append([]types.GitHubRepoAccess(nil), selectors...), nil
 			}
 			failures = append(failures, fmt.Sprintf("app %d installation %d: %v", appConfig.AppID, installation.ID, err))
 		}

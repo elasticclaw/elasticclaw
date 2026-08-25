@@ -288,8 +288,21 @@ func (p *GitHubTokenProvider) InstallationToken(ctx context.Context, installatio
 			"checks":        "read", // needed for gh pr checks / CI status
 			"statuses":      "read", // needed for commit status checks
 		}
-		if needsWrite && p.installationHasWorkflowsWrite(ctx, installationID) {
-			perms["workflows"] = "write"
+
+		// Query the installation's actual granted permissions once so we can add
+		// optional scopes (workflows, issues) only when the installation has been
+		// granted them. Requesting a scope the installation lacks makes the token
+		// mint fail, and we want gh to be able to read issues/comments in other
+		// configured repos when the App allows it.
+		instPerms, _ := p.installationPermissions(ctx, installationID)
+
+		if needsWrite {
+			if level := installationPermissionLevel(instPerms, "workflows"); level == "write" || level == "admin" {
+				perms["workflows"] = "write"
+			}
+		}
+		if level := installationPermissionLevel(instPerms, "issues"); level != "" {
+			perms["issues"] = level
 		}
 		body := map[string]interface{}{
 			"permissions": perms,
@@ -378,20 +391,18 @@ func (p *GitHubTokenProvider) CheckAppPermissions(ctx context.Context) (map[stri
 	return meta.Permissions, nil
 }
 
-// installationHasWorkflowsWrite reports whether this installation was granted
-// workflows write (or admin). App-level config is not enough: an org may still
-// be on an older permission set until they accept the App update. On lookup
-// failure, returns false so we omit the scope and still mint a working token.
-func (p *GitHubTokenProvider) installationHasWorkflowsWrite(ctx context.Context, installationID int64) bool {
-	if installationID == 0 {
-		return false
+// installationPermissionLevel returns the normalized permission level granted to
+// this installation for a named GitHub permission, or "" if it is not granted
+// or the lookup failed. It accepts "read", "write", or "admin".
+func installationPermissionLevel(perms map[string]string, name string) string {
+	if perms == nil {
+		return ""
 	}
-	perms, err := p.installationPermissions(ctx, installationID)
-	if err != nil || perms == nil {
-		return false
+	level := strings.ToLower(strings.TrimSpace(perms[name]))
+	if level == "read" || level == "write" || level == "admin" {
+		return level
 	}
-	level := strings.ToLower(strings.TrimSpace(perms["workflows"]))
-	return level == "write" || level == "admin"
+	return ""
 }
 
 // installationPermissions returns the scopes granted to a specific installation
