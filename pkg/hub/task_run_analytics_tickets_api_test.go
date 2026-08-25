@@ -352,6 +352,36 @@ func TestTaskRunAnalyticsTicketsHandlerAggregatesAndPaginates(t *testing.T) {
 	}
 }
 
+func TestTaskRunAnalyticsTicketsHandlerOrdersByFirstRunStart(t *testing.T) {
+	s, db := newTaskRunAnalyticsAPITestServer(t)
+	// issue_created_at is deliberately inverted against started_at so the two
+	// orderings cannot agree by accident.
+	for _, fixture := range []struct {
+		runID, issueID          string
+		startedAt, issueCreated int64
+	}{
+		{"order-early-run", "ORDER-EARLY", 1_000, 9_000},
+		{"order-late-run", "ORDER-LATE", 8_000, 2_000},
+	} {
+		insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{
+			RunID: fixture.runID, AttemptID: "attempt-" + fixture.runID, ClawID: "claw-" + fixture.runID,
+			TenantID: "test-tenant-id", Status: taskRunStatusClean, Phase: taskRunPhaseTerminal,
+			OwnerType: taskRunOwnerWorkflow, StartedAt: fixture.startedAt, IssueCreatedAt: fixture.issueCreated,
+			IssueTitle: fixture.issueID,
+		})
+		if _, err := db.Exec(`UPDATE task_run_summaries SET issue_id=? WHERE run_id=?`, fixture.issueID, fixture.runID); err != nil {
+			t.Fatalf("set fixture issue ID: %v", err)
+		}
+	}
+
+	rr := requestTaskRunAnalyticsAPI(t, s, http.MethodGet, "/api/analytics/tickets", "test-token")
+	var response taskRunAnalyticsTicketsResponse
+	decodeTaskRunAnalyticsAPI(t, rr, &response)
+	if len(response.Tickets) != 2 || response.Tickets[0].IssueID != "ORDER-LATE" || response.Tickets[1].IssueID != "ORDER-EARLY" {
+		t.Fatalf("tickets not ordered by first run start: %#v", response.Tickets)
+	}
+}
+
 func TestTaskRunAnalyticsTicketsHandlerHonorsMultiValueDimensionFilters(t *testing.T) {
 	s, db := newTaskRunAnalyticsAPITestServer(t)
 	for _, fixture := range []apiRunFixture{
