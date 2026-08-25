@@ -1281,7 +1281,12 @@ func (s *Server) checkNotifications(cfg *types.HubConfig) []DoctorCheck {
 	// so a bad secondary route is visible even when another route is healthy.
 	// This intentionally complements (rather than replaces) the full config
 	// validation above: malformed configs still get their structural error.
-	if nCfg.Lifecycle != nil {
+	// Gated on IsEnabled for the same reason ValidateNotificationsConfig is: a
+	// muted lifecycle block may legitimately point at a notifier the operator
+	// has since deleted ("an operator who mutes alerts and then deletes the
+	// notifier must not be left with a hub that refuses to load"), and nothing
+	// is delivered through those routes anyway.
+	if nCfg.Lifecycle.IsEnabled() {
 		for i, route := range nCfg.Lifecycle.EffectiveRoutes() {
 			via := strings.TrimSpace(route.Via)
 			label := fmt.Sprintf("Lifecycle route %d (%q)", i+1, via)

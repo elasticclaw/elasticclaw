@@ -279,6 +279,42 @@ func (s *Server) stampLifecycleClawRouteBaselines(lc *types.LifecycleNotificatio
 	}
 }
 
+// ensureLifecycleClawRouteBaselines fences the claw-pass history of every
+// CONFIGURED route at the moment the route appears in config — not at the first
+// tick its notifier happens to build. ensureLifecycleRouteWatermarks already
+// materialises the task-run cursor of a route whose notifier is unbuildable
+// (typo'd token secret), so seeding its claw baseline only on recovery would
+// bury exactly the claw events the tick promises are "held until it can be
+// built", while the task-run events of the same window are delivered.
+func (s *Server) ensureLifecycleClawRouteBaselines(lc *types.LifecycleNotificationsConfig) {
+	routes := lc.EffectiveRoutes()
+	if len(routes) < 2 {
+		// The legacy single-route shape is fenced by the legacy delivery table;
+		// ensureLifecycleClawRouteBaseline handles its one key.
+		return
+	}
+	if _, found, err := s.notifierStateInt64(lifecycleStateClawBaselineKey); err != nil || !found {
+		// Never baselined: the claw pass's own first-run seeding covers every
+		// route in one statement.
+		return
+	}
+	for _, route := range routes {
+		via := strings.TrimSpace(route.Via)
+		if via == "" {
+			continue
+		}
+		key := lifecycleClawRouteBaselineKey(via)
+		if _, found, err := s.notifierStateInt64(key); err != nil || found {
+			continue
+		}
+		if err := s.seedLifecycleClawRouteBaseline(via); err != nil {
+			log.Printf("[notify] seed claw baseline for %q: %v", via, err)
+			continue
+		}
+		s.setNotifierStateInt64(key, 1)
+	}
+}
+
 // ensureLifecycleClawRouteBaseline records a newly configured route's history
 // and reports whether the route may deliver this tick. The legacy single-`via`
 // shape needs no seeding: it keeps writing the shared legacy rows, which
@@ -296,6 +332,25 @@ func (s *Server) ensureLifecycleClawRouteBaseline(d lifecycleDelivery, route lif
 		// is stamped WITHOUT seeding any rows.
 		if route.notifier != "" {
 			if _, found, err := s.notifierStateInt64(key); err == nil && !found {
+				// ...but only the GENUINE legacy incumbent has history in that
+				// table. Collapsing a multi-route config to a single NEW route
+				// lands here too, and the multi-route era wrote v2 rows keyed by
+				// the OTHER notifiers only — so stamping would flood the new
+				// channel with every still-connected claw and open PR. Once the
+				// per-route scheme has been live, seed like any newcomer.
+				live, err := s.lifecycleRoutingSchemeLive()
+				if err != nil {
+					log.Printf("[notify] read routing scheme state for %q: %v", route.notifier, err)
+					return false
+				}
+				if live {
+					if err := s.seedLifecycleClawRouteBaseline(route.notifier); err != nil {
+						log.Printf("[notify] seed claw baseline for %q: %v", route.notifier, err)
+						return false
+					}
+					s.setNotifierStateInt64(key, 1)
+					return false
+				}
 				s.setNotifierStateInt64(key, 1)
 			}
 		}

@@ -136,6 +136,24 @@ func TestCheckNotificationsChecksEveryLifecycleRoute(t *testing.T) {
 	}
 }
 
+// Regression: the per-route checks ran even while lifecycle alerts were off, so
+// a deliberately muted config with a dangling via — a state
+// ValidateNotificationsConfig explicitly accepts, "an operator who mutes alerts
+// and then deletes the notifier must not be left with a hub that refuses to
+// load" — reported a permanent critical.
+func TestCheckNotificationsSkipsRoutesWhileAlertsDisabled(t *testing.T) {
+	s := &Server{}
+	disabled := false
+	cfg := &types.HubConfig{Notifications: &types.NotificationsConfig{
+		Lifecycle: &types.LifecycleNotificationsConfig{Enabled: &disabled, Via: "old-channel"},
+	}}
+	for _, check := range s.checkNotifications(cfg) {
+		if strings.Contains(check.Title, "Lifecycle route") {
+			t.Fatalf("muted lifecycle config produced a route check: %#v", check)
+		}
+	}
+}
+
 // Pipeline notify actions must be validated against the hub-level notifiers
 // the runner resolves them from, under the runtime's secret scope: a blank or
 // unknown "via" and a notifier that fails to construct (unsupported type,

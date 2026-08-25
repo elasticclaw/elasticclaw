@@ -39,6 +39,15 @@ const (
 	// past), so a timestamp watermark would silently skip backdated rows.
 	lifecycleStateWatermarkKey = "watermark_rowid"
 
+	// lifecycleStateRoutedKey records that the per-route state scheme has been
+	// live at least once. The per-route keys alone cannot answer that question:
+	// pruneLifecycleRouteState deletes the cursors of routes that are no longer
+	// configured, so replacing every route in one save erases the evidence in
+	// the same tick the newcomers are seeded — and they would then inherit the
+	// (long frozen) shared floor instead of the stream head. Nothing deletes
+	// this key: once routing is live it stays live for the hub's lifetime.
+	lifecycleStateRoutedKey = "routes_live"
+
 	// lifecycleSendWarningKey keys the log-once warning for
 	// configuration-level send failures (bad token, missing channel).
 	lifecycleSendWarningKey = "notify-send"
@@ -416,6 +425,7 @@ func (s *Server) lifecycleNotifierTick() {
 	// route that cannot be built this tick is still treated as configured.
 	s.pruneLifecycleRouteState(lc)
 	s.ensureLifecycleRouteWatermarks(lc)
+	s.ensureLifecycleClawRouteBaselines(lc)
 	var routes []lifecycleRouteDelivery
 	incomplete := false
 	for _, route := range lc.EffectiveRoutes() {
@@ -461,10 +471,27 @@ func lifecycleRouteWatermarkKey(notifier string) string {
 }
 
 func (s *Server) lifecycleWatermarkKeyFor(d lifecycleDelivery, notifier string) string {
-	if notifier == "" || d.singleRoute() {
+	if notifier == "" {
 		return lifecycleStateWatermarkKey
 	}
-	return lifecycleRouteWatermarkKey(notifier)
+	key := lifecycleRouteWatermarkKey(notifier)
+	if !d.singleRoute() {
+		return key
+	}
+	// Collapsing a multi-route config back to one route must not silently
+	// re-point the survivor at the shared key: that floor is pinned to the
+	// SLOWEST route of the multi-route era, and the events above it carry no
+	// legacy delivery row (multi-route writes v2 rows only, keyed by the OTHER
+	// notifiers), so the survivor would re-send every one of them. A route only
+	// has a cursor of its own because it was configured alongside a sibling, so
+	// keeping it whenever it exists is exactly the "no silent re-point" rule; a
+	// genuine legacy single-`via` never has one and still reads the shared key.
+	// A read error deliberately keeps the per-route key too: the pass's own read
+	// then fails and the route waits, rather than replaying from the floor.
+	if _, found, err := s.notifierStateInt64(key); err != nil || found {
+		return key
+	}
+	return lifecycleStateWatermarkKey
 }
 
 // ensureLifecycleRouteWatermarks gives every CONFIGURED route a cursor of its
@@ -490,7 +517,7 @@ func (s *Server) ensureLifecycleRouteWatermarks(lc *types.LifecycleNotifications
 		// (lifecycleWatermarkKeyFor), so it needs no cursor of its own.
 		return
 	}
-	routed, err := s.lifecycleRouteStateExists(lifecycleStateWatermarkKey + ":")
+	routed, err := s.lifecycleRoutingSchemeLive()
 	if err != nil {
 		// Unreadable state must not be mistaken for "nothing routed yet": that
 		// would hand a route added later the (possibly long-frozen) shared floor.
@@ -529,6 +556,27 @@ func (s *Server) ensureLifecycleRouteWatermarks(lc *types.LifecycleNotifications
 		}
 		s.setNotifierStateInt64(key, head)
 	}
+	if !routed {
+		// Latch the scheme so a later save that replaces every route at once
+		// cannot make the newcomers look like a fresh migration.
+		s.setNotifierStateInt64(lifecycleStateRoutedKey, 1)
+	}
+}
+
+// lifecycleRoutingSchemeLive reports whether the per-route state scheme has
+// already gone live for this hub. It is how both passes tell a legacy
+// single-`via` migration (nothing per-route recorded yet, so the shared state is
+// the routes' shared history) from routes genuinely added later (the scheme is
+// already live, so a newcomer must start clean). The persisted latch is the
+// authority; the per-route cursors are the fallback for hubs that went
+// multi-route before the latch existed.
+func (s *Server) lifecycleRoutingSchemeLive() (bool, error) {
+	if _, found, err := s.notifierStateInt64(lifecycleStateRoutedKey); err != nil {
+		return false, err
+	} else if found {
+		return true, nil
+	}
+	return s.lifecycleRouteStateExists(lifecycleStateWatermarkKey + ":")
 }
 
 // lifecycleRouteStateExists reports whether any per-route state key with the
@@ -567,6 +615,7 @@ func (s *Server) pruneLifecycleRouteState(lc *types.LifecycleNotificationsConfig
 		return
 	}
 	var stale []string
+	schemeLive := false
 	for rows.Next() {
 		var key string
 		if err := rows.Scan(&key); err != nil {
@@ -574,12 +623,25 @@ func (s *Server) pruneLifecycleRouteState(lc *types.LifecycleNotificationsConfig
 			rows.Close()
 			return
 		}
+		if strings.HasPrefix(key, lifecycleStateWatermarkKey+":") {
+			schemeLive = true
+		}
 		notifier := key[strings.Index(key, ":")+1:]
 		if !configured[notifier] {
 			stale = append(stale, key)
 		}
 	}
 	rows.Close()
+	if schemeLive {
+		// Latch before deleting: a save that replaces EVERY route removes the
+		// only per-route cursors, and ensureLifecycleRouteWatermarks (which runs
+		// straight after) would then read "nothing routed yet" and hand the
+		// brand-new channels the stale shared floor. This covers hubs that went
+		// multi-route before the latch existed.
+		if _, found, err := s.notifierStateInt64(lifecycleStateRoutedKey); err == nil && !found {
+			s.setNotifierStateInt64(lifecycleStateRoutedKey, 1)
+		}
+	}
 	for _, key := range stale {
 		s.clearNotifierState(key)
 	}

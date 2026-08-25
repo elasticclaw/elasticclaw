@@ -4547,12 +4547,17 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
   // the route and offer a way to drop it. Silently dropping it in buildPatch
   // would delete config the operator never saw.
   const orphanRoutes = routes.filter((route) => !notifiers[route.via])
-  // Alerts off with nothing routed is never a deliberate choice: the master
-  // switch is disabled in that state, so the only way to reach it is buildPatch
-  // clamping `enabled` when the last route went away (or a hub that has never
-  // been configured). Either way the next save that routes a channel may turn
-  // alerts back on.
-  const autoPaused = !enabled && routes.length === 0
+  // A hub that has never had a lifecycle block: routing its first channel turns
+  // alerts on. This is deliberately NOT inferred from (enabled=false, routes=[]),
+  // which an operator reaches by muting the master switch and then removing the
+  // last channel — see clampedPause.
+  const neverConfigured = !lifecycle
+  const secretNames = [...(settings.secrets || [])].sort((a, b) => a.localeCompare(b))
+  // A token_secret naming a hub secret that no longer exists. The <select> below
+  // would otherwise render blank while still holding the dangling name, so Save
+  // writes the broken reference back with nothing on screen saying why the
+  // channel never delivers.
+  const secretMissing = (name?: string) => Boolean(name) && !secretNames.includes(name as string)
 
   const isEventMuted = (eventType: string) => {
     const category = LIFECYCLE_EVENT_CATEGORY[eventType]
@@ -4580,6 +4585,18 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
   // reopened on another channel — that discards unsaved form state and blames
   // the wrong channel.
   const saveGeneration = useRef(0)
+
+  // Set only when buildPatch itself had to clear `enabled` because the route set
+  // went empty. Deriving that from the reloaded config instead (enabled=false
+  // with no routes) cannot tell our clamp from an operator who muted the master
+  // switch and then removed the last channel — and re-routing a channel would
+  // then silently un-mute a hub the operator deliberately paused.
+  const clampedPause = useRef(false)
+
+  // Invalidates in-flight test sends. A result that lands after the channel's
+  // destination or routing changed describes a message that went somewhere else
+  // — exactly the stale state every setTests() below clears.
+  const testGeneration = useRef(0)
 
   const openAdd = () => { saveGeneration.current++; resetForm(); setModalMode("add"); setShowModal(true) }
   const openEdit = (name: string) => {
@@ -4619,17 +4636,20 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
       via: route.via,
       events: route.events?.length ? route.events : [],
     }))
+    // The hub rejects an enabled lifecycle block with no routes ("via is
+    // required when enabled") and this screen never exposes `via`, so losing the
+    // last route pauses alerts instead of failing the save with a message about
+    // a field that is not on the page. That pause is ours, not the operator's,
+    // and `clampedPause` lifts it on the next save that routes a channel again.
+    // Without it the `false` we wrote latches — every later save re-sends the
+    // stale value read back from GET — and a plain channel swap silently mutes
+    // the hub forever, contradicting the dialog's "until another channel is
+    // routed". The flag is recorded here rather than inferred from the reloaded
+    // config so a deliberate master-switch OFF survives a channel swap.
+    const wantEnabled = next.enabled ?? (enabled || clampedPause.current || neverConfigured)
+    clampedPause.current = outRoutes.length === 0 && wantEnabled
     const outLifecycle: Record<string, unknown> = {
-      // The hub rejects an enabled lifecycle block with no routes ("via is
-      // required when enabled") and this screen never exposes `via`, so losing
-      // the last route pauses alerts instead of failing the save with a message
-      // about a field that is not on the page. That pause is ours, not the
-      // operator's: `autoPaused` lifts it on the next save that routes a
-      // channel again. Without it the `false` we wrote latches — every later
-      // save re-sends the stale value read back from GET — and a plain channel
-      // swap silently mutes the hub forever, contradicting the dialog's
-      // "until another channel is routed".
-      enabled: outRoutes.length > 0 && (next.enabled ?? (enabled || autoPaused)),
+      enabled: outRoutes.length > 0 && wantEnabled,
       routes: outRoutes,
       events: next.events ?? categoryEnabled,
     }
@@ -4673,6 +4693,7 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
     const failure = await onSave(buildPatch({ notifiers: nextNotifiers, routes: nextRoutes }))
     // The channel's destination or routing just changed, so any test result
     // sitting on its card is about a message that went somewhere else.
+    testGeneration.current++
     setTests((current) => { const { [name]: _stale, ...rest } = current; return rest })
     if (generation !== saveGeneration.current) return
     if (failure) { setFormError(failure); return }
@@ -4687,6 +4708,7 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
       notifiers: nextNotifiers,
       routes: routes.filter((route) => route.via !== name),
     }))
+    testGeneration.current++
     setTests((current) => { const { [name]: _removed, ...rest } = current; return rest })
     if (generation !== saveGeneration.current) return
     if (failure) { setFormError(failure); return }
@@ -4696,6 +4718,7 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
   // Dropping a route whose notifier is gone. It has no card of its own, so this
   // is the only way back to a hub that can turn lifecycle alerts on again.
   async function removeOrphanRoute(via: string) {
+    testGeneration.current++
     setTests((current) => { const { [via]: _removed, ...rest } = current; return rest })
     // The page-level banner reports a failure here: this save is not made from
     // the dialog, so nothing covers the banner.
@@ -4716,18 +4739,25 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
   async function sendTest(name: string) {
     const eventType = testEventFor(name)
     if (!eventType) return
+    // The hub bounds a test send at 30s, plenty of time for the operator to edit
+    // the channel meanwhile. Landing the result afterwards would show a green
+    // "sent" under a destination the message never reached.
+    const generation = testGeneration.current
     setTests((current) => ({ ...current, [name]: { status: "sending", message: "" } }))
+    const settle = (state: TestState) => {
+      setTests((current) => {
+        if (generation !== testGeneration.current) {
+          const { [name]: _stale, ...rest } = current
+          return rest
+        }
+        return { ...current, [name]: state }
+      })
+    }
     try {
       await sendTestNotification(eventType, name)
-      setTests((current) => ({
-        ...current,
-        [name]: { status: "ok", message: `Sent a "${lifecycleEventLabel(eventType)}" test alert.` },
-      }))
+      settle({ status: "ok", message: `Sent a "${lifecycleEventLabel(eventType)}" test alert.` })
     } catch (e) {
-      setTests((current) => ({
-        ...current,
-        [name]: { status: "error", message: e instanceof Error ? e.message : "Test send failed" },
-      }))
+      settle({ status: "error", message: e instanceof Error ? e.message : "Test send failed" })
     }
   }
 
@@ -4790,7 +4820,7 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
                   ? "Remove the routes pointing at deleted channels first"
                   : undefined
             }
-            onCheckedChange={(checked) => { setTests({}); onSave(buildPatch({ enabled: checked })) }}
+            onCheckedChange={(checked) => { testGeneration.current++; setTests({}); onSave(buildPatch({ enabled: checked })) }}
             aria-label="Enable lifecycle alerts"
           />
         </div>
@@ -4813,6 +4843,7 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
                     // A muted category can change what (or whether) a channel
                     // receives anything, so every test result on the page is
                     // now about a configuration that no longer exists.
+                    testGeneration.current++
                     setTests({})
                     onSave(buildPatch({ events: { ...categoryEnabled, [category.id]: checked } }))
                   }}
@@ -4863,7 +4894,12 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
                         <span className="font-mono">{notifier.channel || "no channel"}</span>
                         {" · "}
                         {notifier.token_secret
-                          ? <>token: <span className="font-mono">{notifier.token_secret}</span></>
+                          ? (
+                            <>
+                              token: <span className={cn("font-mono", secretMissing(notifier.token_secret) && "text-amber-400")}>{notifier.token_secret}</span>
+                              {secretMissing(notifier.token_secret) && <span className="text-amber-400"> — secret not found</span>}
+                            </>
+                          )
                           : <span className="text-amber-400">no token secret</span>}
                       </p>
                       <div className="mt-2">
@@ -4999,13 +5035,25 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
                 className="w-full h-8 text-sm rounded-md border border-input bg-background px-3"
               >
                 <option value="">Select secret…</option>
-                {[...(settings.secrets || [])].sort((a, b) => a.localeCompare(b)).map((secret) => (
+                {/* A dangling reference has no option of its own, so the
+                    controlled select would render blank while Save happily
+                    writes the broken name back. Give it one, flagged. */}
+                {secretMissing(formTokenSecret) && (
+                  <option value={formTokenSecret}>{formTokenSecret} (secret not found)</option>
+                )}
+                {secretNames.map((secret) => (
                   <option key={secret} value={secret}>{secret}</option>
                 ))}
               </select>
-              <p className="text-xs text-muted-foreground mt-1">
-                The hub secret holding the Slack bot token (<span className="font-mono">xoxb-…</span>). Add it under Secrets first.
-              </p>
+              {secretMissing(formTokenSecret) ? (
+                <p className="text-xs text-amber-400 mt-1">
+                  No hub secret named <span className="font-mono">{formTokenSecret}</span> exists, so sends through this channel fail. Add it under Secrets, or pick another.
+                </p>
+              ) : (
+                <p className="text-xs text-muted-foreground mt-1">
+                  The hub secret holding the Slack bot token (<span className="font-mono">xoxb-…</span>). Add it under Secrets first.
+                </p>
+              )}
             </div>
 
             {/* Routing */}
