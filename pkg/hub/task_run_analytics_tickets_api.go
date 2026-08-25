@@ -292,7 +292,7 @@ func (s *Server) readTaskRunAnalyticsTicketGroupsPage(filters taskRunAnalyticsFi
 	if err != nil {
 		return nil, 0, false, taskRunAnalyticsTicketGroup{}, err
 	}
-	orderAt := `MAX(COALESCE(NULLIF(MIN(NULLIF(issue_created_at,0)),0), MIN(started_at), 1), 1)`
+	orderAt := `MAX(MIN(started_at), 1)`
 	groupWhere := where + ` AND issue_id != ''`
 	groupArgs := append([]any{}, args...)
 	if cursorAt > 0 && cursorIssueID != "" {
@@ -316,7 +316,7 @@ func (s *Server) readTaskRunAnalyticsTicketGroupsPage(filters taskRunAnalyticsFi
 			return nil, 0, false, taskRunAnalyticsTicketGroup{}, err
 		}
 		ids = append(ids, id)
-		cursorGroups = append(cursorGroups, taskRunAnalyticsTicketGroup{key: id, reportedAt: ignored})
+		cursorGroups = append(cursorGroups, taskRunAnalyticsTicketGroup{key: id, firstStartedAt: ignored})
 	}
 	if err := rows.Err(); err != nil {
 		return nil, 0, false, taskRunAnalyticsTicketGroup{}, err
@@ -570,13 +570,11 @@ func taskRunAnalyticsTicketGroupsFromHydration(ids []string, runs []taskRunAnaly
 	for _, id := range ids {
 		rs := byID[id]
 		sort.Slice(rs, func(i, j int) bool { return rs[i].StartedAt < rs[j].StartedAt })
-		var reported int64
-		for _, run := range rs {
-			if run.IssueCreatedAt > 0 && (reported == 0 || run.IssueCreatedAt < reported) {
-				reported = run.IssueCreatedAt
-			}
+		var firstStartedAt int64
+		if len(rs) > 0 {
+			firstStartedAt = rs[0].StartedAt
 		}
-		if group, ok := taskRunAnalyticsTicketGroupWithRuns(id, rs, reported); ok {
+		if group, ok := taskRunAnalyticsTicketGroupWithRuns(id, rs, firstStartedAt); ok {
 			groups = append(groups, group)
 		}
 	}
@@ -584,10 +582,12 @@ func taskRunAnalyticsTicketGroupsFromHydration(ids []string, runs []taskRunAnaly
 }
 
 type taskRunAnalyticsTicketGroup struct {
-	key        string
-	issueID    string
-	runs       []taskRunAnalyticsRunView
-	reportedAt int64
+	key     string
+	issueID string
+	runs    []taskRunAnalyticsRunView
+	// firstStartedAt is the start of the ticket's first run, which is also the
+	// value the list is ordered and paginated by.
+	firstStartedAt int64
 }
 
 const taskRunAnalyticsTicketKeySeparator = "\x1f"
@@ -608,19 +608,16 @@ func nonEmptyTaskRunAnalyticsTicketGroups(groups []taskRunAnalyticsTicketGroup) 
 	return filtered
 }
 
-func taskRunAnalyticsTicketGroupWithRuns(issueID string, runs []taskRunAnalyticsRunView, reportedAt int64) (taskRunAnalyticsTicketGroup, bool) {
+func taskRunAnalyticsTicketGroupWithRuns(issueID string, runs []taskRunAnalyticsRunView, firstStartedAt int64) (taskRunAnalyticsTicketGroup, bool) {
 	if len(runs) == 0 {
 		return taskRunAnalyticsTicketGroup{}, false
 	}
-	return taskRunAnalyticsTicketGroup{key: issueID, issueID: runs[0].IssueID, runs: runs, reportedAt: reportedAt}, true
+	return taskRunAnalyticsTicketGroup{key: issueID, issueID: runs[0].IssueID, runs: runs, firstStartedAt: firstStartedAt}, true
 }
 
 func (group taskRunAnalyticsTicketGroup) cursorAt() int64 {
-	if group.reportedAt > 0 {
-		return group.reportedAt
-	}
-	if len(group.runs) > 0 && group.runs[0].StartedAt > 0 {
-		return group.runs[0].StartedAt
+	if group.firstStartedAt > 0 {
+		return group.firstStartedAt
 	}
 	return 1
 }
