@@ -2220,7 +2220,8 @@ type linearIssueDetails struct {
 	Description string `json:"description"`
 	CreatedAt   string `json:"createdAt"`
 	Creator     struct {
-		Name string `json:"name"`
+		Name  string `json:"name"`
+		Email string `json:"email"`
 	} `json:"creator"`
 	Team struct {
 		Name string `json:"name"`
@@ -2250,7 +2251,7 @@ func (s *Server) fetchLinearIssueDetails(token, issueIdentifier string) (*linear
 	// Linear's issue(id:) actually accepts the display identifier like "CAN-61"
 	// directly (not just UUID). This is documented in Linear's GraphQL examples.
 	queryBody := map[string]interface{}{
-		"query": "query($id: String!) { issue(id: $id) { identifier title url description createdAt creator { name } team { name } priorityLabel } }",
+		"query": "query($id: String!) { issue(id: $id) { identifier title url description createdAt creator { name email } team { name } priorityLabel } }",
 		"variables": map[string]string{
 			"id": issueIdentifier,
 		},
@@ -2293,7 +2294,12 @@ func (s *Server) fetchLinearIssueDetails(token, issueIdentifier string) (*linear
 		combined := strings.Join(errMsgs, "; ")
 		log.Printf("[linear] fetchLinearIssueDetails GraphQL errors for %s: %s", issueIdentifier, combined)
 		log.Printf("[linear] fetchLinearIssueDetails response body for %s: %s", issueIdentifier, string(bodyBytes))
-		return nil, fmt.Errorf("GraphQL error: %s", combined)
+		// GraphQL reports per-field failures (an unreadable creator email, say) alongside a
+		// usable issue. Dropping the whole response there would cost the caller the title,
+		// team and priority too, so keep the partial issue and only fail when it is missing.
+		if result.Data.Issue.Identifier == "" {
+			return nil, fmt.Errorf("GraphQL error: %s", combined)
+		}
 	}
 	if result.Data.Issue.Identifier == "" {
 		log.Printf("[linear] fetchLinearIssueDetails: empty issue returned for %s", issueIdentifier)
