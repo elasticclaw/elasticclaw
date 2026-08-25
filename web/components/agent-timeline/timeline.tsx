@@ -34,6 +34,7 @@ const TurnMessages = memo(function TurnMessages({
   now,
   forceRunning,
   onToggle,
+  onOpenSubagent,
 }: {
   turn: Turn
   showProse: boolean
@@ -47,6 +48,7 @@ const TurnMessages = memo(function TurnMessages({
   now?: number
   forceRunning: boolean
   onToggle: (key: string, current: boolean) => void
+  onOpenSubagent?: (stepId: string) => void
 }) {
   const stepWork = showStepWork ? (
     <TurnCard
@@ -58,6 +60,7 @@ const TurnMessages = memo(function TurnMessages({
       clawId={clawId}
       now={now}
       forceRunning={forceRunning}
+      onOpenSubagent={onOpenSubagent}
     />
   ) : null
 
@@ -120,6 +123,7 @@ export function AgentTimeline({
   unloadedToolCalls = 0,
   loadingUnloaded = false,
   onLoadUnloaded,
+  onOpenSubagent,
 }: {
   clawId: string
   /** Precomputed by the owner (which also derives stats/now-strip from them). */
@@ -138,6 +142,11 @@ export function AgentTimeline({
   unloadedToolCalls?: number
   loadingUnloaded?: boolean
   onLoadUnloaded?: () => void
+  /**
+   * Opt-in: routes Task step rows to the subagent drill-down instead of the
+   * inline expansion. Only the chat view has somewhere to drill to.
+   */
+  onOpenSubagent?: (stepId: string) => void
 }) {
   const [expandedOverrides, setExpandedOverrides] = useState<Record<string, boolean>>({})
   const hasLiveWork = isWorking || turns.some((t) => t.status === "running")
@@ -223,6 +232,7 @@ export function AgentTimeline({
                 now={hasLiveWork && isLast ? now : undefined}
                 forceRunning={isLast && isWorking}
                 onToggle={toggleTurn}
+                onOpenSubagent={onOpenSubagent}
               />
               {isLast && showProse ? streamingSlot : null}
             </Fragment>

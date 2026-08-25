@@ -48,17 +48,19 @@ const CollapsedStepList = memo(function CollapsedStepList({
   steps,
   problemsOnly,
   now,
+  onOpenSubagent,
 }: {
   steps: Step[]
   problemsOnly: boolean
   now?: number
+  onOpenSubagent?: (stepId: string) => void
 }) {
   const items = useMemo(() => {
     const visible = problemsOnly ? steps.filter(isProblemStep) : steps
     return collapseStepRuns(visible)
   }, [steps, problemsOnly])
   if (items.length === 0) return null
-  return <StepList items={items} now={now} />
+  return <StepList items={items} now={now} onOpenSubagent={onOpenSubagent} />
 })
 
 /**
@@ -80,6 +82,7 @@ export const TurnCard = memo(function TurnCard({
   clawId,
   now,
   forceRunning,
+  onOpenSubagent,
 }: {
   turn: Turn
   density: TimelineDensity
@@ -93,6 +96,8 @@ export const TurnCard = memo(function TurnCard({
   now?: number
   /** Claw is streaming — the last turn shows as running even between steps. */
   forceRunning?: boolean
+  /** Opt-in Task-step drill-down; see StepRow. */
+  onOpenSubagent?: (stepId: string) => void
 }) {
   const anchor = useToggleAnchor()
   const problemsOnly = density === "problems"
@@ -103,7 +108,7 @@ export const TurnCard = memo(function TurnCard({
   const duration = turn.durationMs >= 1000 ? formatDurationMs(turn.durationMs) : null
 
   const renderSteps = (id: string, steps: Step[]) => (
-    <CollapsedStepList key={id} steps={steps} problemsOnly={problemsOnly} now={now} />
+    <CollapsedStepList key={id} steps={steps} problemsOnly={problemsOnly} now={now} onOpenSubagent={onOpenSubagent} />
   )
 
   return (

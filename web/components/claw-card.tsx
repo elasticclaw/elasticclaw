@@ -3,7 +3,7 @@
 import { cn } from "@/lib/utils"
 import type { Claw, ClawStatus } from "@/lib/types"
 import { COLOR_CLASSES } from "@/lib/mappers"
-import { Loader2, Pin, AlertCircle } from "lucide-react"
+import { Loader2, Pin, AlertCircle, Bot } from "lucide-react"
 import { BootstrapProgress } from "@/components/bootstrap-progress"
 import { ClawTitle } from "@/components/claw-title"
 import { useNowMinuteTick } from "@/hooks/use-now"
@@ -17,6 +17,8 @@ interface ClawCardProps {
   showPinButton?: boolean
   /** One-line "what it is running right now" — shown under the name when set. */
   activityLine?: string
+  /** One-line subagent summary; omitted entirely when it cannot be trusted. */
+  subagentLine?: string
   stateChip?: React.ReactNode
 }
 
@@ -76,7 +78,7 @@ function rowAge(claw: Claw, now: number) {
    mono name, unread pill, hover-only pin; then one status line (state chip +
    detail + age) and up to three read-only tags. Renaming, tag editing and the
    color picker live in the board card's Agent details sheet. */
-export const ClawCard = memo(function ClawCard({ claw, isSelected, onClick, onTogglePin, showPinButton = true, activityLine, stateChip }: ClawCardProps) {
+export const ClawCard = memo(function ClawCard({ claw, isSelected, onClick, onTogglePin, showPinButton = true, activityLine, subagentLine, stateChip }: ClawCardProps) {
   const now = useNowMinuteTick(Boolean(claw.last_seen))
   const hasUnread = claw.unreadCount > 0
   const railStyle = claw.isStreaming
@@ -162,6 +164,14 @@ export const ClawCard = memo(function ClawCard({ claw, isSelected, onClick, onTo
         )}
         {age && <span className="ml-auto shrink-0 font-mono text-[10px] text-muted-foreground">{age}</span>}
       </div>
+      {subagentLine && (
+        <div className="mt-[3px] flex min-w-0 items-center gap-1 pl-5 pr-1">
+          <Bot className="size-3 shrink-0 text-muted-foreground" />
+          <span className="min-w-0 truncate font-mono text-[10.5px] leading-4 text-muted-foreground" title={subagentLine}>
+            {subagentLine}
+          </span>
+        </div>
+      )}
       <div className="min-w-0 max-w-[170px] overflow-hidden pl-5 pr-1">
         <BootstrapProgress claw={claw} variant="sidebar" />
       </div>

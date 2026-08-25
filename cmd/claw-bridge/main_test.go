@@ -931,6 +931,118 @@ func TestResolveToolActivityDetailUsesOpenClawMeta(t *testing.T) {
 	}
 }
 
+func TestResolveSubagentFields(t *testing.T) {
+	longPrompt := strings.Repeat("x", 501)
+	tests := []struct {
+		name                                      string
+		tool                                      string
+		phase                                     string
+		data                                      map[string]interface{}
+		wantName, wantType, wantModel, wantPrompt string
+		cleanPrompt                               bool
+	}{
+		{
+			name: "task input fields",
+			tool: "Task",
+			data: map[string]interface{}{"input": map[string]interface{}{
+				"description": "research auth flow", "prompt": "Inspect the auth flow.", "subagent_type": "research", "model": "gpt-5",
+			}},
+			wantName: "research auth flow", wantType: "research", wantModel: "gpt-5", wantPrompt: "Inspect the auth flow.",
+		},
+		{
+			name: "task raw params fields",
+			tool: "task",
+			data: map[string]interface{}{"raw_params": map[string]interface{}{
+				"description": "write tests", "prompt": "Add bridge tests.", "subagent_type": "coder", "model_id": "gpt-5-mini",
+			}},
+			wantName: "write tests", wantType: "coder", wantModel: "gpt-5-mini", wantPrompt: "Add bridge tests.",
+		},
+		{
+			name:     "name equal to tool is never subagent name",
+			tool:     "task",
+			data:     map[string]interface{}{"name": "task", "description": "useful subagent"},
+			wantName: "useful subagent",
+		},
+		{
+			name:     "generic title falls through to nested description",
+			tool:     "Task",
+			phase:    "running",
+			data:     map[string]interface{}{"title": "Task", "input": map[string]interface{}{"description": "research auth flow", "prompt": "Inspect the auth flow."}},
+			wantName: "research auth flow", wantPrompt: "Inspect the auth flow.",
+		},
+		{
+			name:  "generic top-level message does not shadow nested prompt",
+			tool:  "Task",
+			phase: "running",
+			data: map[string]interface{}{
+				"message": "Running Task",
+				"input": map[string]interface{}{
+					"description": "research auth flow", "prompt": "Inspect the auth flow end to end.", "subagent_type": "research",
+				},
+			},
+			wantName: "research auth flow", wantType: "research", wantPrompt: "Inspect the auth flow end to end.",
+		},
+		{
+			name:  "generic task field equal to tool name is skipped as prompt",
+			tool:  "Task",
+			phase: "running",
+			data: map[string]interface{}{
+				"task":  "Task",
+				"input": map[string]interface{}{"prompt": "Real prompt."},
+			},
+			wantPrompt: "Real prompt.",
+		},
+		{
+			name: "non task tool is empty",
+			tool: "exec",
+			data: map[string]interface{}{"input": map[string]interface{}{
+				"description": "not a subagent", "prompt": "echo hi", "subagent_type": "coder", "model": "gpt-5",
+			}},
+		},
+		{
+			name: "task prompt truncates during cleaning",
+			tool: "task",
+			data: map[string]interface{}{"input": map[string]interface{}{
+				"prompt": longPrompt,
+			}},
+			wantPrompt:  longPrompt,
+			cleanPrompt: true,
+		},
+		{
+			name:  "terminal message is not the prompt",
+			tool:  "Task",
+			phase: "completed",
+			data:  map[string]interface{}{"message": "Task completed", "title": "Task completed"},
+		},
+		{
+			name:  "terminal explicit input fields still resolve",
+			tool:  "Task",
+			phase: "completed",
+			data: map[string]interface{}{
+				"message": "Task completed",
+				"input": map[string]interface{}{
+					"description": "research auth flow", "prompt": "Inspect the auth flow.", "subagent_type": "research", "model": "gpt-5",
+				},
+			},
+			wantName: "research auth flow", wantType: "research", wantModel: "gpt-5", wantPrompt: "Inspect the auth flow.",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			name, subType, model, prompt := resolveSubagentFields(tt.tool, tt.phase, tt.data)
+			if name != tt.wantName || subType != tt.wantType || model != tt.wantModel || prompt != tt.wantPrompt {
+				t.Fatalf("resolveSubagentFields() = (%q, %q, %q, %q), want (%q, %q, %q, %q)", name, subType, model, prompt, tt.wantName, tt.wantType, tt.wantModel, tt.wantPrompt)
+			}
+			if tt.cleanPrompt {
+				activity := cleanAgentActivity(agentActivity{SubagentPrompt: prompt})
+				if activity.SubagentPrompt != truncateResult(longPrompt, 500) {
+					t.Fatalf("SubagentPrompt = %q, want %q", activity.SubagentPrompt, truncateResult(longPrompt, 500))
+				}
+			}
+		})
+	}
+}
+
 func TestPatchOllamaLocalDevCatalogSetsRuntimeLimits(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

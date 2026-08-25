@@ -66,6 +66,10 @@ var (
 		session      *gatewaySession
 	}
 	gatewayRestartBase int
+	// These diagnostics fire once per dropped/event frame and must not flood the
+	// diagnostics log when a gateway emits a busy foreign or task stream.
+	foreignSessionDiagnosticCount atomic.Int64
+	taskPayloadDiagnosticCount    atomic.Int64
 )
 
 // agentTurnTimeout bounds one agent turn. A turn spans an entire injected hub
@@ -805,20 +809,24 @@ type agentResult struct {
 }
 
 type agentActivity struct {
-	Kind       string `json:"kind"`
-	Stream     string `json:"stream,omitempty"`
-	Phase      string `json:"phase,omitempty"`
-	Tool       string `json:"tool,omitempty"`
-	Detail     string `json:"detail,omitempty"`
-	Command    string `json:"command,omitempty"`
-	Path       string `json:"path,omitempty"`
-	URL        string `json:"url,omitempty"`
-	Message    string `json:"message,omitempty"`
-	Error      string `json:"error,omitempty"`
-	CallID     string `json:"call_id,omitempty"`
-	DurationMs int64  `json:"duration_ms,omitempty"`
-	ExitCode   *int   `json:"exit_code,omitempty"`
-	Result     string `json:"result,omitempty"`
+	Kind           string `json:"kind"`
+	Stream         string `json:"stream,omitempty"`
+	Phase          string `json:"phase,omitempty"`
+	Tool           string `json:"tool,omitempty"`
+	Detail         string `json:"detail,omitempty"`
+	Command        string `json:"command,omitempty"`
+	Path           string `json:"path,omitempty"`
+	URL            string `json:"url,omitempty"`
+	Message        string `json:"message,omitempty"`
+	Error          string `json:"error,omitempty"`
+	CallID         string `json:"call_id,omitempty"`
+	DurationMs     int64  `json:"duration_ms,omitempty"`
+	ExitCode       *int   `json:"exit_code,omitempty"`
+	Result         string `json:"result,omitempty"`
+	SubagentName   string `json:"subagent_name,omitempty"`
+	SubagentType   string `json:"subagent_type,omitempty"`
+	SubagentModel  string `json:"subagent_model,omitempty"`
+	SubagentPrompt string `json:"subagent_prompt,omitempty"`
 }
 
 // inFlightToolCall is an unresolved tool start awaiting its terminal event.
@@ -1008,6 +1016,10 @@ func cleanAgentActivity(a agentActivity) agentActivity {
 	a.Message = sanitizeActivityText(a.Message)
 	a.Error = sanitizeActivityText(a.Error)
 	a.CallID = sanitizeActivityText(a.CallID)
+	a.SubagentName = sanitizeActivityText(a.SubagentName)
+	a.SubagentType = sanitizeActivityText(a.SubagentType)
+	a.SubagentModel = sanitizeActivityText(a.SubagentModel)
+	a.SubagentPrompt = sanitizeActivityTextLimit(truncateResult(a.SubagentPrompt, 500), 0)
 	// Truncate before redacting: results can be megabytes of tool output, and
 	// the redaction scan lowercases the remaining string once per replacer. A
 	// secret split by the cut still redacts — the prefix match runs to
@@ -1549,13 +1561,27 @@ func (gs *gatewaySession) readLoop(ctx context.Context) {
 			if err := json.Unmarshal(frame.Payload, &agentPayload); err != nil {
 				continue
 			}
+			if agentPayload.SessionKey != gs.getSessionKey() {
+				// Avoid unmarshalling every foreign frame once the diagnostic cap is
+				// exhausted; this branch can be hit at high volume.
+				if takeDiagnosticSlot(&foreignSessionDiagnosticCount) {
+					var rawAgentPayload struct {
+						Data map[string]interface{} `json:"data"`
+					}
+					_ = json.Unmarshal(frame.Payload, &rawAgentPayload)
+					log.Printf("claw-bridge: foreign-session event key=%s stream=%s tool=%s phase=%s keys=%s",
+						sanitizeActivityText(agentPayload.SessionKey),
+						sanitizeActivityText(agentPayload.Stream),
+						sanitizeActivityText(firstNonEmpty(agentPayload.Data.Tool, agentPayload.Data.Name)),
+						sanitizeActivityText(agentPayload.Data.Phase),
+						strings.Join(sortedMapKeys(rawAgentPayload.Data), ","))
+				}
+				continue
+			}
 			var rawAgentPayload struct {
 				Data map[string]interface{} `json:"data"`
 			}
 			_ = json.Unmarshal(frame.Payload, &rawAgentPayload)
-			if agentPayload.SessionKey != gs.getSessionKey() {
-				continue
-			}
 
 			gs.infMu.RLock()
 			inf := gs.inFlight
@@ -1592,18 +1618,23 @@ func (gs *gatewaySession) readLoop(ctx context.Context) {
 				url := firstNonEmpty(agentPayload.Data.URL, agentPayload.Data.URI, nestedString(rawAgentPayload.Data, "url", "uri"))
 				meta := firstNonEmpty(agentPayload.Data.Meta, nestedString(rawAgentPayload.Data, "meta"))
 				command, path, url, detail := resolveToolActivityDetail(tool, command, path, url, meta, rawAgentPayload.Data)
+				subagentName, subagentType, subagentModel, subagentPrompt := resolveSubagentFields(tool, agentPayload.Data.Phase, rawAgentPayload.Data)
 				activity := agentActivity{
-					Kind:    kind,
-					Stream:  agentPayload.Stream,
-					Phase:   agentPayload.Data.Phase,
-					Tool:    tool,
-					Detail:  detail,
-					Command: command,
-					Path:    path,
-					URL:     url,
-					Message: firstNonEmpty(agentPayload.Data.Message, agentPayload.Data.Status),
-					Error:   agentPayload.Data.Error,
-					CallID:  toolCallID(rawAgentPayload.Data),
+					Kind:           kind,
+					Stream:         agentPayload.Stream,
+					Phase:          agentPayload.Data.Phase,
+					Tool:           tool,
+					Detail:         detail,
+					Command:        command,
+					Path:           path,
+					URL:            url,
+					Message:        firstNonEmpty(agentPayload.Data.Message, agentPayload.Data.Status),
+					Error:          agentPayload.Data.Error,
+					CallID:         toolCallID(rawAgentPayload.Data),
+					SubagentName:   subagentName,
+					SubagentType:   subagentType,
+					SubagentModel:  subagentModel,
+					SubagentPrompt: subagentPrompt,
 				}
 				// Outcome fields exist only once the call finished. Scraping them
 				// from start events would surface tool *inputs* (e.g. a Write's
@@ -1616,6 +1647,12 @@ func (gs *gatewaySession) readLoop(ctx context.Context) {
 				activity = cleanAgentActivity(activity)
 				if kind == "tool" && activity.Command == "" && activity.Path == "" && activity.URL == "" && activity.Detail == "" {
 					logMissingToolActivityDetail(agentPayload.Stream, activity.Phase, activity.Tool, rawAgentPayload.Data)
+				}
+				if isSubagentTool(activity.Tool) && takeDiagnosticSlot(&taskPayloadDiagnosticCount) {
+					log.Printf("[agent-activity] task payload stream=%s phase=%s tool=%s keys=%s payload=%s",
+						sanitizeActivityText(agentPayload.Stream), sanitizeActivityText(activity.Phase),
+						sanitizeActivityText(activity.Tool), strings.Join(sortedMapKeys(rawAgentPayload.Data), ","),
+						summarizeActivityPayload(rawAgentPayload.Data))
 				}
 				inf.noteActivity(activity)
 				inf.emitActivity(activity)
@@ -1647,6 +1684,64 @@ func firstNonEmpty(values ...string) string {
 		if value != "" {
 			return value
 		}
+	}
+	return ""
+}
+
+func takeDiagnosticSlot(counter *atomic.Int64) bool {
+	for {
+		current := counter.Load()
+		if current >= 20 {
+			return false
+		}
+		if counter.CompareAndSwap(current, current+1) {
+			return true
+		}
+	}
+}
+
+func isSubagentTool(tool string) bool {
+	switch strings.ToLower(strings.TrimSpace(tool)) {
+	case "task", "agent", "subagent":
+		return true
+	}
+	return false
+}
+
+// resolveSubagentFields extracts the subagent's *inputs* (name, type, model,
+// prompt). Terminal events carry the call's outcome in generic fields such as
+// data.message or data.title, so on those phases only keys that unambiguously
+// name an input are consulted — otherwise a status line like "Task completed"
+// would be stored and rendered as the prompt given to the subagent.
+func resolveSubagentFields(tool, phase string, data map[string]interface{}) (name, subType, model, prompt string) {
+	if !isSubagentTool(tool) {
+		return "", "", "", ""
+	}
+	nameKeys := []string{"description", "title", "label", "name"}
+	promptKeys := []string{"prompt", "instructions", "task", "message"}
+	if isToolTerminalPhase(phase) {
+		nameKeys = []string{"description"}
+		promptKeys = []string{"prompt", "instructions"}
+	}
+	name = resolveSubagentField(tool, data, nameKeys)
+	prompt = resolveSubagentField(tool, data, promptKeys)
+	subType = nestedString(data, "subagent_type", "subagentType", "agent_type", "agentType")
+	model = nestedString(data, "model", "model_id", "modelId")
+	return name, subType, model, prompt
+}
+
+// resolveSubagentField consults the candidate keys one at a time so a key
+// holding only the generic tool name ("Task") is skipped instead of discarding
+// the real value carried by a later key or a nested container. Passing all keys
+// to nestedString at once would let a generic top-level field (data.message)
+// shadow the real value nested in data.input.
+func resolveSubagentField(tool string, data map[string]interface{}, keys []string) string {
+	for _, key := range keys {
+		candidate := nestedString(data, key)
+		if candidate == "" || strings.EqualFold(strings.TrimSpace(candidate), strings.TrimSpace(tool)) {
+			continue
+		}
+		return candidate
 	}
 	return ""
 }

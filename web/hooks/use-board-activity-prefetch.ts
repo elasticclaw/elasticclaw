@@ -1,6 +1,7 @@
 "use client"
 
 import { useEffect, useRef } from "react"
+import { isPrunedActivitySummary } from "@/lib/messages"
 import type { Claw, Message } from "@/lib/types"
 
 // Cap concurrent claw prefetches so a board full of agents does not stampede
@@ -94,6 +95,10 @@ export function useBoardActivityPrefetch({
           (m) =>
             m.role === "activity_summary" &&
             (m.activitySummary?.count ?? 0) > 0 &&
+            // Locally pruned markers are never expanded (see
+            // selectTrailingSummaries); claiming their ids would only grow
+            // processedRef by one entry per prune.
+            !isPrunedActivitySummary(m) &&
             !processedRef.current.has(m.id)
         )
         .map((m) => m.id)

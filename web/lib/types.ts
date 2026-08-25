@@ -64,6 +64,10 @@ export interface AgentActivity {
   duration_ms?: number
   exit_code?: number
   result?: string
+  subagent_name?: string
+  subagent_type?: string
+  subagent_model?: string
+  subagent_prompt?: string
 }
 
 // Raw API types
