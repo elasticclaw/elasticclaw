@@ -99,12 +99,18 @@ type NotifierView struct {
 	MinSendInterval string `json:"min_send_interval,omitempty"`
 }
 
+// LifecycleNotificationsView deliberately uses the SAME field names the PATCH
+// body is decoded under (types.LifecycleNotificationsConfig): a client that
+// GETs this view, edits it and PATCHes it back must not silently drop the two
+// durations. They were emitted as poll_interval/idle_after, which
+// encoding/json discards as unknown keys on the way back in — resetting a
+// deliberately raised idle_after to the 5m default and persisting the loss.
 type LifecycleNotificationsView struct {
 	Enabled      bool                         `json:"enabled"`
 	Via          string                       `json:"via,omitempty"`
 	Routes       []types.LifecycleRoute       `json:"routes"`
-	PollInterval string                       `json:"poll_interval,omitempty"`
-	IdleAfter    string                       `json:"idle_after,omitempty"`
+	PollInterval string                       `json:"pollInterval,omitempty"`
+	IdleAfter    string                       `json:"idleAfter,omitempty"`
 	Events       *types.LifecycleEventToggles `json:"events,omitempty"`
 }
 
@@ -882,6 +888,12 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 		}
 		mergeNotifierSettings(s.hubCfg.Notifications, patch.Notifications)
 		if err := validateSettingsNotifications(patch.Notifications); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		// s.hubCfg.Factories is read directly: resolveFactories takes the lock
+		// this handler already holds.
+		if err := validateNotifierRemovals(s.hubCfg.Notifications, patch.Notifications, s.hubCfg.Factories); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}

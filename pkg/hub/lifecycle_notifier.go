@@ -485,6 +485,19 @@ func (s *Server) lifecycleTaskRunPass(d lifecycleDelivery) {
 				continue
 			}
 			s.setNotifierStateInt64(key, maxRow)
+			if key != lifecycleStateWatermarkKey {
+				// Freeze the shared floor at the same point. A config that is
+				// multi-route from its very first enable never gets the floor
+				// written by advanceLifecycleWatermarkFloor while a sibling
+				// route cannot be built (it bails on d.incomplete), so without
+				// this the shared key would still be missing when that route
+				// recovers — and it would then first-run at the CURRENT stream
+				// head, losing every event produced during the outage. Only
+				// reached when the shared key is absent too (lifecycleRouteWatermark
+				// falls back to it), so this can never fast-forward a floor
+				// that already exists.
+				s.setNotifierStateInt64(lifecycleStateWatermarkKey, maxRow)
+			}
 			continue
 		}
 		cursors = append(cursors, lifecycleRouteCursor{route: route, stateKey: key, watermark: watermark})

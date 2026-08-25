@@ -152,3 +152,62 @@ func TestSettingsPatchNotificationsRejectsInvalidConfigWithoutWriting(t *testing
 		}
 	}
 }
+
+// Regression: the Notifier screen lists every hub notifier, including ones no
+// lifecycle route uses and only a pipeline notify action references, and its
+// Remove button PATCHes the whole notifiers map without the deleted key.
+// Nothing server-side looked at pipelines, so the save returned 200, the
+// notifier left hub.yaml, and every stage notification through it was then
+// dropped at runtime with only a warning in the claw conversation.
+func TestSettingsPatchRejectsRemovingNotifierUsedByPipeline(t *testing.T) {
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", filepath.Join(t.TempDir(), "hub.yaml"))
+	s, _ := NewTestServerWithConfig(t, &types.HubConfig{
+		Factories: []*types.FactoryConfig{{
+			Name:         "triage",
+			PipelineYAML: "stages:\n  - id: announce\n    on_enter:\n      notify:\n        via: releases\n        text: hi\n",
+		}},
+		Notifications: &types.NotificationsConfig{
+			Notifiers: map[string]types.NotifierConfig{
+				"releases": {Type: "slack", Settings: map[string]any{"channel": "C0123ABCD", "token_secret": "slack_tok"}},
+				"ops":      {Type: "slack", Settings: map[string]any{"channel": "C0456EFGH", "token_secret": "slack_tok"}},
+			},
+			Lifecycle: &types.LifecycleNotificationsConfig{Via: "ops"},
+		},
+	}, "", "", "")
+
+	body := []byte(`{"notifications":{"notifiers":{"ops":{"type":"slack","channel":"C0456EFGH","token_secret":"slack_tok"}},"lifecycle":{"enabled":true,"routes":[{"via":"ops"}]}}}`)
+	rr := httptest.NewRecorder()
+	s.patchSettings(rr, httptest.NewRequest(http.MethodPatch, "/api/settings", bytes.NewReader(body)))
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("PATCH status = %d, want 400; body = %s", rr.Code, rr.Body.String())
+	}
+	if got := rr.Body.String(); !strings.Contains(got, `"releases"`) || !strings.Contains(got, `stage "announce"`) {
+		t.Fatalf("error does not name the notifier and the stage that depends on it: %s", got)
+	}
+	if _, ok := s.hubCfg.Notifications.Notifiers["releases"]; !ok {
+		t.Fatal("a rejected patch must not have removed the notifier from the running config")
+	}
+}
+
+// Regression: the GET view emitted the two lifecycle durations as
+// poll_interval/idle_after while the PATCH body is decoded into
+// types.LifecycleNotificationsConfig, which reads pollInterval/idleAfter. A
+// client that GETs the settings, edits the routes and PATCHes the object back
+// therefore reset a deliberately raised idle_after to the 5m default, and
+// SaveHubConfig persisted the loss.
+func TestSettingsLifecycleViewRoundTripsThroughPatch(t *testing.T) {
+	encoded, err := json.Marshal(LifecycleNotificationsView{
+		Enabled: true, Routes: []types.LifecycleRoute{{Via: "ops"}},
+		PollInterval: "30s", IdleAfter: "30m",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var patched types.LifecycleNotificationsConfig
+	if err := json.Unmarshal(encoded, &patched); err != nil {
+		t.Fatal(err)
+	}
+	if patched.PollInterval != "30s" || patched.IdleAfter != "30m" {
+		t.Fatalf("GET→PATCH round trip dropped the durations: %#v (from %s)", patched, encoded)
+	}
+}

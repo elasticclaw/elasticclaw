@@ -811,6 +811,16 @@ func ValidateNotificationsConfig(cfg *NotificationsConfig) error {
 			return fmt.Errorf("notifications.lifecycle: idle_after must be at least 1m, got %q", lc.IdleAfter)
 		}
 	}
+	if !lc.IsEnabled() {
+		return nil
+	}
+	// Routes are validated only from here on, symmetrically with the legacy
+	// `via` below: a DISABLED lifecycle block with a dangling reference is
+	// accepted (an operator who mutes alerts and then deletes the notifier
+	// must not be left with a hub that refuses to load), and the settings
+	// screen derives its route list from that same `via`. Validating routes
+	// above the short-circuit made every save from that screen 400 on a route
+	// entry it never renders, with no way to drop it from the UI.
 	seenRoutes := make(map[string]struct{}, len(lc.Routes))
 	for i, route := range lc.Routes {
 		via := strings.TrimSpace(route.Via)
@@ -835,9 +845,6 @@ func ValidateNotificationsConfig(cfg *NotificationsConfig) error {
 			}
 			seenEvents[event] = struct{}{}
 		}
-	}
-	if !lc.IsEnabled() {
-		return nil
 	}
 	if len(lc.EffectiveRoutes()) == 0 {
 		return fmt.Errorf("notifications.lifecycle: via is required when enabled (the name of a notifier under notifications.notifiers)")

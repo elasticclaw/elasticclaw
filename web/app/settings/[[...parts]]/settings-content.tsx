@@ -173,8 +173,8 @@ interface ConcurrencyGroup {
 // Outbound notification config, as returned by GET /api/settings. Notifier
 // settings are provider-specific and inline next to the type, so they keep the
 // snake_case wire names the hub reads them under. The lifecycle block is the
-// redacted view: it uses poll_interval/idle_after, while the PATCH payload
-// (types.LifecycleNotificationsConfig) expects pollInterval/idleAfter.
+// redacted view, and every one of its fields round-trips under the same name
+// the PATCH payload (types.LifecycleNotificationsConfig) reads it under.
 interface NotifierView {
   type: string
   channel?: string
@@ -205,8 +205,8 @@ interface NotificationsView {
     // soon as a patch carries routes.
     via?: string
     routes?: LifecycleRouteView[]
-    poll_interval?: string
-    idle_after?: string
+    pollInterval?: string
+    idleAfter?: string
     events?: LifecycleEventToggles
   }
 }
@@ -4540,6 +4540,12 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
       ? [{ via: lifecycle.via, events: [] }]
       : []
   const routeFor = (name: string) => routes.find((r) => r.via === name)
+  // Alerts off with nothing routed is never a deliberate choice: the master
+  // switch is disabled in that state, so the only way to reach it is buildPatch
+  // clamping `enabled` when the last route went away (or a hub that has never
+  // been configured). Either way the next save that routes a channel may turn
+  // alerts back on.
+  const autoPaused = !enabled && routes.length === 0
 
   const isEventMuted = (eventType: string) => {
     const category = LIFECYCLE_EVENT_CATEGORY[eventType]
@@ -4603,13 +4609,18 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
       // The hub rejects an enabled lifecycle block with no routes ("via is
       // required when enabled") and this screen never exposes `via`, so losing
       // the last route pauses alerts instead of failing the save with a message
-      // about a field that is not on the page.
-      enabled: outRoutes.length > 0 && (next.enabled ?? enabled),
+      // about a field that is not on the page. That pause is ours, not the
+      // operator's: `autoPaused` lifts it on the next save that routes a
+      // channel again. Without it the `false` we wrote latches — every later
+      // save re-sends the stale value read back from GET — and a plain channel
+      // swap silently mutes the hub forever, contradicting the dialog's
+      // "until another channel is routed".
+      enabled: outRoutes.length > 0 && (next.enabled ?? (enabled || autoPaused)),
       routes: outRoutes,
       events: next.events ?? categoryEnabled,
     }
-    if (lifecycle?.poll_interval) outLifecycle.pollInterval = lifecycle.poll_interval
-    if (lifecycle?.idle_after) outLifecycle.idleAfter = lifecycle.idle_after
+    if (lifecycle?.pollInterval) outLifecycle.pollInterval = lifecycle.pollInterval
+    if (lifecycle?.idleAfter) outLifecycle.idleAfter = lifecycle.idleAfter
     return { notifications: { notifiers: outNotifiers, lifecycle: outLifecycle } }
   }
 
@@ -4786,6 +4797,18 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
               const test = tests[name]
               const testEvent = testEventFor(name)
               const canTest = enabled && Boolean(testEvent) && !saving
+              // Rendered as text, not as the disabled button's `title`: the
+              // Button base class sets `disabled:pointer-events-none`, so a
+              // native tooltip on it can never fire. The globally-muted case
+              // has no badge of its own, so this is the only place the screen
+              // says why nothing can reach this channel.
+              const testBlockedReason = !enabled
+                ? "Lifecycle alerts are turned off — this channel receives nothing."
+                : !route
+                  ? null // the "Not receiving alerts" badge above already says it
+                  : !testEvent
+                    ? "Every alert type routed here is muted by a switch above, so this channel receives nothing."
+                    : null
               return (
                 <div key={name} className="border border-border rounded-lg p-4">
                   <div className="flex items-start justify-between gap-3">
@@ -4816,19 +4839,16 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
                           </span>
                         )}
                       </div>
+                      {testBlockedReason && (
+                        <p className="text-xs text-muted-foreground mt-2">{testBlockedReason}</p>
+                      )}
                     </div>
                     <div className="flex items-center gap-2 shrink-0">
                       <Button
                         size="sm"
                         variant="outline"
                         disabled={!canTest || test?.status === "sending"}
-                        title={
-                          !enabled
-                            ? "Lifecycle alerts are turned off"
-                            : !testEvent
-                              ? "This channel is not routed to any alert type that is on"
-                              : `Posts a sample "${lifecycleEventLabel(testEvent)}" alert`
-                        }
+                        title={testEvent ? `Posts a sample "${lifecycleEventLabel(testEvent)}" alert` : undefined}
                         onClick={() => sendTest(name)}
                         className="gap-1.5"
                       >

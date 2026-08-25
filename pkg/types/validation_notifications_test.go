@@ -192,6 +192,31 @@ func TestValidateNotificationsConfig(t *testing.T) {
 			wantErr: true,
 			errMsg:  "invalid idle_after",
 		},
+		{
+			// Routes are validated symmetrically with the legacy `via`: both
+			// only while lifecycle is enabled. A disabled block whose `via`
+			// names a deleted notifier loads fine, and the settings screen
+			// derives its route list from that same `via` — so validating
+			// routes above the short-circuit made every save from that screen
+			// 400 on an entry the screen never renders and cannot drop.
+			name: "dangling route is accepted while lifecycle is disabled",
+			cfg: &NotificationsConfig{
+				Notifiers: slack(),
+				Lifecycle: &LifecycleNotificationsConfig{
+					Enabled: boolPtr(false),
+					Routes:  []LifecycleRoute{{Via: "gone"}},
+				},
+			},
+		},
+		{
+			name: "dangling route is rejected while lifecycle is enabled",
+			cfg: &NotificationsConfig{
+				Notifiers: slack(),
+				Lifecycle: &LifecycleNotificationsConfig{Routes: []LifecycleRoute{{Via: "gone"}}},
+			},
+			wantErr: true,
+			errMsg:  `via "gone" does not name a configured notifier`,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
