@@ -16,9 +16,13 @@ Deliberate divergences from the kit must be listed in this file under "Accepted 
   Agent details sheet carrying purpose/status/terminal/kill).
 - Charts: keep Recharts; move hardcoded hex series colors to `--chart-1..5` tokens; wrap in
   the new ChartCard anatomy (hairline header, body, mono stat line).
-- Analytics + tickets stay admin-only.
-- All `/api/analytics/*` routes (including summary, filter-options, runs, and tickets)
-  are strict admin-only; no tag-scoped analytics viewing exists.
+- Analytics + tickets are readable by every authenticated user; cost figures are
+  admin-only (superseded 2026-08-24 the earlier "analytics stays admin-only" decision).
+- `/api/analytics/costs` and `/api/analytics/cost-drivers` stay strict admin-only;
+  the other `/api/analytics/*` routes (summary, effectiveness, general-stats,
+  filter-options, runs, tickets) accept any authenticated caller and redact the
+  cost fields of their payloads for non-admins. There is still no tag-scoped
+  analytics viewing: aggregates are tenant-wide for everyone who can read them.
 - Kill dead code: `TaskRunAnalyticsView` (extract still-used exports first).
 - Login: light restyle to kit aesthetics.
 - Single PR, atomic commits per phase, draft, assignee AnaBerg, merge (never rebase/force-push).

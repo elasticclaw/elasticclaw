@@ -685,9 +685,8 @@ func TestTaskRunAnalyticsAPIAccessControl(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Analytics routes are strict admin-only (see IMPLEMENTATION.md "Approved
-	// decisions"): a non-admin OAuth session must be forbidden on every
-	// analytics route, tag-scoped or not — there is no per-row ACL carve-out.
+	// Analytics is readable by every authenticated user, tag-scoped or not:
+	// the run routes carry no per-row ACL, only cost fields are admin-gated.
 	for _, path := range []string{
 		"/api/analytics/runs",
 		"/api/analytics/runs/run-alice",
@@ -697,6 +696,14 @@ func TestTaskRunAnalyticsAPIAccessControl(t *testing.T) {
 		"/api/analytics/runs/run-alice/outputs",
 		"/api/analytics/runs/run-bob",
 	} {
+		rr := requestTaskRunAnalyticsAPI(t, s, http.MethodGet, path, bobSession)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("non-admin OAuth request %s status = %d, want 200, body = %s", path, rr.Code, rr.Body.String())
+		}
+	}
+
+	// Costs stay admin-only.
+	for _, path := range []string{"/api/analytics/costs", "/api/analytics/cost-drivers"} {
 		rr := requestTaskRunAnalyticsAPI(t, s, http.MethodGet, path, bobSession)
 		if rr.Code != http.StatusForbidden {
 			t.Fatalf("non-admin OAuth request %s status = %d, want 403, body = %s", path, rr.Code, rr.Body.String())
@@ -750,18 +757,19 @@ func TestTaskRunAnalyticsAPIAccessControlAggregates(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Analytics routes are strict admin-only: a non-admin OAuth session must
-	// be forbidden even though ViewRequiresTags is configured on the hub —
-	// there is no tag-scoped aggregates carve-out.
-	summaryRR := requestTaskRunAnalyticsAPI(t, s, http.MethodGet, "/api/analytics/summary", bobSession)
-	if summaryRR.Code != http.StatusForbidden {
-		t.Fatalf("non-admin OAuth summary status = %d, want 403, body = %s", summaryRR.Code, summaryRR.Body.String())
+	// Aggregates are tenant-wide for every authenticated user; ViewRequiresTags
+	// scopes the agent board, not analytics.
+	bobSummaryRR := requestTaskRunAnalyticsAPI(t, s, http.MethodGet, "/api/analytics/summary", bobSession)
+	var bobSummary taskRunAnalyticsSummaryResponse
+	decodeTaskRunAnalyticsAPI(t, bobSummaryRR, &bobSummary)
+	if bobSummary.TotalRuns != 2 {
+		t.Fatalf("non-admin OAuth summary should be tenant-wide: %#v", bobSummary)
 	}
 
-	optionsRR := requestTaskRunAnalyticsAPI(t, s, http.MethodGet, "/api/analytics/filter-options", bobSession)
-	if optionsRR.Code != http.StatusForbidden {
-		t.Fatalf("non-admin OAuth filter-options status = %d, want 403, body = %s", optionsRR.Code, optionsRR.Body.String())
-	}
+	bobOptionsRR := requestTaskRunAnalyticsAPI(t, s, http.MethodGet, "/api/analytics/filter-options", bobSession)
+	var bobOptions taskRunAnalyticsFilterOptionsResponse
+	decodeTaskRunAnalyticsAPI(t, bobOptionsRR, &bobOptions)
+	assertStringSliceEqual(t, bobOptions.Workspaces, []string{"alice-space", "bob-space"})
 
 	plainSummaryRR := requestTaskRunAnalyticsAPI(t, s, http.MethodGet, "/api/analytics/summary", "test-token")
 	var plainSummary taskRunAnalyticsSummaryResponse
@@ -778,12 +786,12 @@ func TestTaskRunAnalyticsAPIAccessControlAggregates(t *testing.T) {
 		t.Fatalf("delete claw: %v", err)
 	}
 	missingClawSummaryRR := requestTaskRunAnalyticsAPI(t, s, http.MethodGet, "/api/analytics/summary", bobSession)
-	if missingClawSummaryRR.Code != http.StatusForbidden {
-		t.Fatalf("non-admin OAuth summary status = %d, want 403, body = %s", missingClawSummaryRR.Code, missingClawSummaryRR.Body.String())
+	if missingClawSummaryRR.Code != http.StatusOK {
+		t.Fatalf("non-admin OAuth summary status = %d, want 200, body = %s", missingClawSummaryRR.Code, missingClawSummaryRR.Body.String())
 	}
 	missingClawOptionsRR := requestTaskRunAnalyticsAPI(t, s, http.MethodGet, "/api/analytics/filter-options", bobSession)
-	if missingClawOptionsRR.Code != http.StatusForbidden {
-		t.Fatalf("non-admin OAuth filter-options status = %d, want 403, body = %s", missingClawOptionsRR.Code, missingClawOptionsRR.Body.String())
+	if missingClawOptionsRR.Code != http.StatusOK {
+		t.Fatalf("non-admin OAuth filter-options status = %d, want 200, body = %s", missingClawOptionsRR.Code, missingClawOptionsRR.Body.String())
 	}
 }
 
