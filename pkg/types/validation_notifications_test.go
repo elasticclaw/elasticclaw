@@ -1,6 +1,7 @@
 package types
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 
@@ -43,6 +44,58 @@ func TestValidateNotificationsConfig(t *testing.T) {
 				Notifiers: slack(),
 				Lifecycle: &LifecycleNotificationsConfig{Via: "eng-agents"},
 			},
+		},
+		{
+			name: "valid lifecycle routes",
+			cfg: &NotificationsConfig{
+				Notifiers: map[string]NotifierConfig{
+					"eng-agents": {Type: "slack"},
+					"failures":   {Type: "slack"},
+				},
+				Lifecycle: &LifecycleNotificationsConfig{Routes: []LifecycleRoute{
+					{Via: "eng-agents", Events: []string{"agent_started", "pr_opened"}},
+					{Via: "failures"},
+				}},
+			},
+		},
+		{
+			name: "via and routes cannot both be set",
+			cfg: &NotificationsConfig{
+				Notifiers: slack(),
+				Lifecycle: &LifecycleNotificationsConfig{Via: "eng-agents", Routes: []LifecycleRoute{{Via: "eng-agents"}}},
+			},
+			wantErr: true,
+			errMsg:  "via and routes cannot both be set",
+		},
+		{
+			name:    "route without via",
+			cfg:     &NotificationsConfig{Notifiers: slack(), Lifecycle: &LifecycleNotificationsConfig{Routes: []LifecycleRoute{{}}}},
+			wantErr: true,
+			errMsg:  "routes[0]: via is required",
+		},
+		{
+			name:    "route via naming an undefined notifier",
+			cfg:     &NotificationsConfig{Notifiers: slack(), Lifecycle: &LifecycleNotificationsConfig{Routes: []LifecycleRoute{{Via: "typo"}}}},
+			wantErr: true,
+			errMsg:  "does not name a configured notifier",
+		},
+		{
+			name:    "route with unsupported event",
+			cfg:     &NotificationsConfig{Notifiers: slack(), Lifecycle: &LifecycleNotificationsConfig{Routes: []LifecycleRoute{{Via: "eng-agents", Events: []string{"not_an_event"}}}}},
+			wantErr: true,
+			errMsg:  "not a supported lifecycle event type",
+		},
+		{
+			name:    "route with duplicate event",
+			cfg:     &NotificationsConfig{Notifiers: slack(), Lifecycle: &LifecycleNotificationsConfig{Routes: []LifecycleRoute{{Via: "eng-agents", Events: []string{"agent_started", "agent_started"}}}}},
+			wantErr: true,
+			errMsg:  "event \"agent_started\" is duplicated",
+		},
+		{
+			name:    "duplicate route via",
+			cfg:     &NotificationsConfig{Notifiers: slack(), Lifecycle: &LifecycleNotificationsConfig{Routes: []LifecycleRoute{{Via: "eng-agents"}, {Via: "eng-agents"}}}},
+			wantErr: true,
+			errMsg:  "via \"eng-agents\" is duplicated",
 		},
 		{
 			name: "notifier without a type",
@@ -156,6 +209,66 @@ func TestValidateNotificationsConfig(t *testing.T) {
 				t.Fatalf("ValidateNotificationsConfig() error = %v", err)
 			}
 		})
+	}
+}
+
+func TestLifecycleNotificationsRoutesYAMLRoundTrip(t *testing.T) {
+	const source = "routes:\n  - via: eng-agents\n    events:\n      - agent_started\n      - pr_opened\n  - via: failures\n"
+	var lifecycle LifecycleNotificationsConfig
+	if err := yaml.Unmarshal([]byte(source), &lifecycle); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	want := []LifecycleRoute{
+		{Via: "eng-agents", Events: []string{"agent_started", "pr_opened"}},
+		{Via: "failures"},
+	}
+	if !reflect.DeepEqual(lifecycle.Routes, want) {
+		t.Fatalf("Routes = %#v, want %#v", lifecycle.Routes, want)
+	}
+	data, err := yaml.Marshal(&lifecycle)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var roundTripped LifecycleNotificationsConfig
+	if err := yaml.Unmarshal(data, &roundTripped); err != nil {
+		t.Fatalf("round-trip unmarshal: %v", err)
+	}
+	if !reflect.DeepEqual(roundTripped.Routes, want) {
+		t.Fatalf("round-trip Routes = %#v, want %#v", roundTripped.Routes, want)
+	}
+}
+
+func TestLifecycleNotificationsConfigEffectiveRoutes(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  *LifecycleNotificationsConfig
+		want []LifecycleRoute
+	}{
+		{name: "nil", cfg: nil},
+		{name: "empty", cfg: &LifecycleNotificationsConfig{}},
+		{name: "legacy via", cfg: &LifecycleNotificationsConfig{Via: "eng-agents"}, want: []LifecycleRoute{{Via: "eng-agents"}}},
+		{name: "routes", cfg: &LifecycleNotificationsConfig{Routes: []LifecycleRoute{{Via: "eng-agents", Events: []string{"agent_started"}}}}, want: []LifecycleRoute{{Via: "eng-agents", Events: []string{"agent_started"}}}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.cfg.EffectiveRoutes(); !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("EffectiveRoutes() = %#v, want %#v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestLifecycleEventTypes(t *testing.T) {
+	if len(LifecycleEventTypes) != 12 {
+		t.Fatalf("len(LifecycleEventTypes) = %d, want 12", len(LifecycleEventTypes))
+	}
+	for _, event := range LifecycleEventTypes {
+		if !IsLifecycleEventType(event) {
+			t.Errorf("IsLifecycleEventType(%q) = false, want true", event)
+		}
+	}
+	if IsLifecycleEventType("not_an_event") {
+		t.Fatal("IsLifecycleEventType(not_an_event) = true, want false")
 	}
 }
 

@@ -784,6 +784,9 @@ func ValidateNotificationsConfig(cfg *NotificationsConfig) error {
 	if lc == nil {
 		return nil
 	}
+	if lc.Via != "" && len(lc.Routes) != 0 {
+		return fmt.Errorf("notifications.lifecycle: via and routes cannot both be set")
+	}
 	// The poll interval is validated even when lifecycle is disabled, so a
 	// typo is caught before the operator flips the feature on.
 	if lc.PollInterval != "" {
@@ -808,13 +811,41 @@ func ValidateNotificationsConfig(cfg *NotificationsConfig) error {
 			return fmt.Errorf("notifications.lifecycle: idle_after must be at least 1m, got %q", lc.IdleAfter)
 		}
 	}
+	seenRoutes := make(map[string]struct{}, len(lc.Routes))
+	for i, route := range lc.Routes {
+		via := strings.TrimSpace(route.Via)
+		if via == "" {
+			return fmt.Errorf("notifications.lifecycle.routes[%d]: via is required (the name of a notifier under notifications.notifiers)", i)
+		}
+		if _, ok := cfg.Notifiers[via]; !ok {
+			return fmt.Errorf("notifications.lifecycle.routes[%d]: via %q does not name a configured notifier (defined: %s)", i, via, notifierNames(cfg.Notifiers))
+		}
+		if _, duplicate := seenRoutes[via]; duplicate {
+			return fmt.Errorf("notifications.lifecycle.routes[%d]: via %q is duplicated", i, via)
+		}
+		seenRoutes[via] = struct{}{}
+
+		seenEvents := make(map[string]struct{}, len(route.Events))
+		for _, event := range route.Events {
+			if !IsLifecycleEventType(event) {
+				return fmt.Errorf("notifications.lifecycle.routes[%d]: event %q is not a supported lifecycle event type", i, event)
+			}
+			if _, duplicate := seenEvents[event]; duplicate {
+				return fmt.Errorf("notifications.lifecycle.routes[%d]: event %q is duplicated", i, event)
+			}
+			seenEvents[event] = struct{}{}
+		}
+	}
 	if !lc.IsEnabled() {
 		return nil
 	}
-	via := strings.TrimSpace(lc.Via)
-	if via == "" {
+	if len(lc.EffectiveRoutes()) == 0 {
 		return fmt.Errorf("notifications.lifecycle: via is required when enabled (the name of a notifier under notifications.notifiers)")
 	}
+	if lc.Via == "" {
+		return nil
+	}
+	via := strings.TrimSpace(lc.Via)
 	if _, ok := cfg.Notifiers[via]; !ok {
 		return fmt.Errorf("notifications.lifecycle: via %q does not name a configured notifier (defined: %s)", via, notifierNames(cfg.Notifiers))
 	}
