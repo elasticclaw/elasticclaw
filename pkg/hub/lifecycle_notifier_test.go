@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -88,7 +89,7 @@ func testLifecycleDelivery(t *testing.T, s *Server) lifecycleDelivery {
 	if err != nil {
 		t.Fatalf("build notifier: %v", err)
 	}
-	return lifecycleDelivery{notifier: notifier, lc: cfg.Lifecycle}
+	return lifecycleDelivery{notifier: notifier, lc: cfg.Lifecycle, paused: map[string]bool{}}
 }
 
 func insertSlackTestEvent(t *testing.T, db *sql.DB, id, runID, eventType string, observedAt int64, targetURL, failureType, detail string) {
@@ -247,6 +248,240 @@ func TestLifecycleRoutesErrorDoesNotBlockOtherRouteAndRetriesPerRoute(t *testing
 	}
 	if err := db.QueryRow(`SELECT CAST(value AS INTEGER) FROM slack_notifier_state WHERE key=?`, lifecycleTransientFailureStateKey("retry-event", "healthy")).Scan(&count); err != nil || count != 1 {
 		t.Fatalf("healthy retry count = %d, err %v; want independent 1", count, err)
+	}
+}
+
+// respondByChannel scripts the fake Slack server per destination channel,
+// which is how route-level failures are simulated (each route posts to its own
+// channel; see newSlackNotifierRoutesTestServer).
+func respondByChannel(fake *fakeSlackServer, fn func(channel string, w http.ResponseWriter)) {
+	fake.setRespond(func(n int, w http.ResponseWriter) { fn(fake.request(n-1).Channel, w) })
+}
+
+func slackOK(w http.ResponseWriter) { fmt.Fprint(w, `{"ok":true,"ts":"1000.000001"}`) }
+
+// Regression: the claw pass has NO cursor — the delivery-row anti-join alone
+// decides what is new. With more than one route the legacy row stopped being
+// written, so every handled ad-hoc claw event was re-selected on every tick
+// forever and eventually ate the whole batch LIMIT, silently starving newer
+// claws of notifications.
+func TestLifecycleRoutesFanoutFencesClawEvents(t *testing.T) {
+	fake := newFakeSlackServer(t)
+	s, db := newSlackNotifierRoutesTestServer(t, fake.server.URL, []types.LifecycleRoute{{Via: "primary"}, {Via: "secondary"}})
+	setLifecycleClawBaseline(t, s)
+	setSlackWatermark(t, s, 0)
+	insertSlackTestClaw(t, db, "claw-adhoc", "connected", 1, "", oldEnough)
+
+	s.lifecycleNotifierTick()
+	if fake.count() != 2 {
+		t.Fatalf("fan-out sent %d messages, want 2", fake.count())
+	}
+	if _, ok := slackDeliveryStatus(t, db, lifecycleClawStartedKey("claw-adhoc")); !ok {
+		t.Fatal("handled claw event has no fence row; it would be re-selected on every tick forever")
+	}
+	claws, err := s.selectLifecycleClawStateCandidates(lifecycleClawKindStarted)
+	if err != nil || len(claws) != 0 {
+		t.Fatalf("handled claw still selected as a candidate: %d (err %v)", len(claws), err)
+	}
+	s.lifecycleNotifierTick()
+	if fake.count() != 2 {
+		t.Fatalf("handled claw was re-sent: %d messages", fake.count())
+	}
+}
+
+// Regression: an event type no route accepts is still "handled" and must be
+// fenced, or the claw pass re-selects it forever.
+func TestLifecycleRoutesFenceClawEventNoRouteAccepts(t *testing.T) {
+	fake := newFakeSlackServer(t)
+	s, db := newSlackNotifierRoutesTestServer(t, fake.server.URL,
+		[]types.LifecycleRoute{{Via: "prs-only", Events: []string{taskRunEventPROpened}}})
+	setLifecycleClawBaseline(t, s)
+	setSlackWatermark(t, s, 0)
+	insertSlackTestClaw(t, db, "claw-adhoc", "connected", 1, "", oldEnough)
+
+	s.lifecycleNotifierTick()
+	if fake.count() != 0 {
+		t.Fatalf("agent_started reached a pr_opened-only route: %d messages", fake.count())
+	}
+	if _, ok := slackDeliveryStatus(t, db, lifecycleClawStartedKey("claw-adhoc")); !ok {
+		t.Fatal("claw event no route accepts was not fenced; it would be re-selected forever")
+	}
+}
+
+// Regression: Slack classifies is_archived/channel_not_found/not_in_channel as
+// ErrorConfig, and the config branch used to pause the shared cursor for every
+// route. One archived secondary channel therefore muted every healthy channel
+// indefinitely — no transient cap applies to ErrorConfig.
+func TestLifecycleRoutesConfigErrorParksOnlyTheBrokenRoute(t *testing.T) {
+	fake := newFakeSlackServer(t)
+	s, db := newSlackNotifierRoutesTestServer(t, fake.server.URL, []types.LifecycleRoute{{Via: "archived"}, {Via: "healthy"}})
+	respondByChannel(fake, func(channel string, w http.ResponseWriter) {
+		if channel == "C0ROUTE0001" { // the "archived" route
+			fmt.Fprint(w, `{"ok":false,"error":"is_archived"}`)
+			return
+		}
+		slackOK(w)
+	})
+	insertLifecycleRouteEvent(t, db, "cfg-first", taskRunEventAgentStarted)
+	setSlackWatermark(t, s, 0)
+	s.lifecycleNotifierTick()
+
+	insertSlackTestEvent(t, db, "cfg-second", "route-run", taskRunEventAgentStarted, 1760000000030, "", "", "")
+	s.lifecycleNotifierTick()
+
+	if status, ok := routeDeliveryStatus(t, db, "cfg-second", "healthy"); !ok || status != notificationDeliveryStatusSent {
+		t.Fatalf("a broken route blocked the healthy one: cfg-second via healthy = %q, %v", status, ok)
+	}
+	if _, ok := routeDeliveryStatus(t, db, "cfg-first", "archived"); ok {
+		t.Fatal("a config-failed route must not record a delivery — its events stay pending until the config is fixed")
+	}
+}
+
+// Regression: postLifecycleEvent propagated only the FIRST route error, so a
+// permanent failure on an earlier route made the caller treat the event as
+// handled and advance past it — the later route's transient failure was
+// discarded and its copy of the event was lost forever.
+func TestLifecycleRoutesLaterRouteFailureIsNotSwallowed(t *testing.T) {
+	fake := newFakeSlackServer(t)
+	s, db := newSlackNotifierRoutesTestServer(t, fake.server.URL, []types.LifecycleRoute{{Via: "permanent"}, {Via: "flaky"}})
+	var flakyDown atomic.Bool
+	flakyDown.Store(true)
+	respondByChannel(fake, func(channel string, w http.ResponseWriter) {
+		if channel == "C0ROUTE0001" { // the "permanent" route
+			fmt.Fprint(w, `{"ok":false,"error":"msg_too_long"}`)
+			return
+		}
+		if flakyDown.Load() {
+			http.Error(w, "temporary", http.StatusInternalServerError)
+			return
+		}
+		slackOK(w)
+	})
+	insertLifecycleRouteEvent(t, db, "mixed-event", taskRunEventAgentStarted)
+	setSlackWatermark(t, s, 0)
+	s.lifecycleNotifierTick()
+
+	if status, ok := routeDeliveryStatus(t, db, "mixed-event", "permanent"); !ok || status != notificationDeliveryStatusFailed {
+		t.Fatalf("permanent route delivery = %q, %v; want failed", status, ok)
+	}
+	if _, ok := routeDeliveryStatus(t, db, "mixed-event", "flaky"); ok {
+		t.Fatal("a transient failure must not record a delivery row")
+	}
+
+	flakyDown.Store(false)
+	s.lifecycleNotifierTick()
+	if status, ok := routeDeliveryStatus(t, db, "mixed-event", "flaky"); !ok || status != notificationDeliveryStatusSent {
+		t.Fatalf("event lost for the route that failed after a permanent one: %q, %v", status, ok)
+	}
+}
+
+// Regression: a route whose notifier cannot be built (unresolvable secret
+// mid-rotation) used to be skipped while the healthy routes advanced the
+// SHARED watermark, so everything produced during the outage was permanently
+// lost for that route. Pre-routing behaviour paused instead and never lost an
+// event; per-route cursors restore that.
+func TestLifecycleRoutesUnbuildableRouteKeepsItsBacklog(t *testing.T) {
+	fake := newFakeSlackServer(t)
+	s, db := newSlackNotifierRoutesTestServer(t, fake.server.URL, []types.LifecycleRoute{{Via: "healthy"}, {Via: "rotating"}})
+	setNotifierSecret := func(secret string) {
+		s.mu.Lock()
+		s.hubCfg.Notifications.Notifiers["rotating"] = types.NotifierConfig{Type: "slack", Settings: map[string]any{
+			"token_secret": secret, "channel": "C0ROTATING",
+		}}
+		s.mu.Unlock()
+	}
+	setNotifierSecret("secret-being-rotated") // not in hubCfg.Secrets
+
+	insertLifecycleRouteEvent(t, db, "outage-event", taskRunEventAgentStarted)
+	setSlackWatermark(t, s, 0)
+	s.lifecycleNotifierTick()
+	if fake.count() != 1 {
+		t.Fatalf("healthy route sent %d messages during the outage, want 1", fake.count())
+	}
+	if _, ok := routeDeliveryStatus(t, db, "outage-event", "rotating"); ok {
+		t.Fatal("an unbuildable route must not be recorded as delivered")
+	}
+
+	setNotifierSecret(testNotifierToken)
+	s.lifecycleNotifierTick()
+	if status, ok := routeDeliveryStatus(t, db, "outage-event", "rotating"); !ok || status != notificationDeliveryStatusSent {
+		t.Fatalf("event produced during the outage was lost for the recovered route: %q, %v", status, ok)
+	}
+	if fake.count() != 2 {
+		t.Fatalf("sent %d messages, want 2 (one per route)", fake.count())
+	}
+}
+
+// Per-route cursors must not turn into a history replay: a route added to an
+// already-routed config inherits the shared cursor, so that cursor has to keep
+// tracking the slowest route instead of freezing where routing began.
+func TestLifecycleRouteAddedLaterDoesNotReplayHistory(t *testing.T) {
+	fake := newFakeSlackServer(t)
+	s, db := newSlackNotifierRoutesTestServer(t, fake.server.URL, []types.LifecycleRoute{{Via: "primary"}, {Via: "secondary"}})
+	insertLifecycleRouteEvent(t, db, "history-1", taskRunEventAgentStarted)
+	setSlackWatermark(t, s, 0)
+	s.lifecycleNotifierTick()
+	insertSlackTestEvent(t, db, "history-2", "route-run", taskRunEventAgentStarted, 1760000000030, "", "", "")
+	s.lifecycleNotifierTick()
+	if fake.count() != 4 {
+		t.Fatalf("two events over two routes sent %d messages, want 4", fake.count())
+	}
+
+	s.mu.Lock()
+	s.hubCfg.Notifications.Notifiers["late"] = types.NotifierConfig{Type: "slack", Settings: map[string]any{
+		"token_secret": testNotifierToken, "channel": "C0LATEROUTE",
+	}}
+	s.hubCfg.Notifications.Lifecycle.Routes = append(s.hubCfg.Notifications.Lifecycle.Routes, types.LifecycleRoute{Via: "late"})
+	s.mu.Unlock()
+
+	s.lifecycleNotifierTick()
+	if fake.count() != 4 {
+		t.Fatalf("a route added later replayed the backlog: %d messages, want 4", fake.count())
+	}
+}
+
+// Regression: the pending stash only covered the legacy table, so a v2 write
+// that failed after a successful Send was logged and forgotten. The next tick
+// re-selected the event (the claw pass has no cursor) and re-sent it
+// externally — every tick, until the database recovered.
+func TestLifecycleStashCoversRouteDeliveryWrites(t *testing.T) {
+	fake := newFakeSlackServer(t)
+	s, db := newSlackNotifierTestServer(t, fake.server.URL, nil)
+	setLifecycleClawBaseline(t, s)
+	setSlackWatermark(t, s, 0)
+	insertSlackTestClaw(t, db, "claw-adhoc", "connected", 1, "", oldEnough)
+
+	// A locked database rejects writes to BOTH delivery tables.
+	for _, table := range []string{"slack_notification_deliveries", "slack_notification_deliveries_v2"} {
+		if _, err := db.Exec(`CREATE TRIGGER fail_` + table + ` BEFORE INSERT ON ` + table +
+			` BEGIN SELECT RAISE(ABORT, 'simulated write failure'); END`); err != nil {
+			t.Fatalf("create failing trigger on %s: %v", table, err)
+		}
+	}
+
+	s.lifecycleNotifierTick()
+	if fake.count() != 1 {
+		t.Fatalf("first tick sent %d messages, want 1", fake.count())
+	}
+	s.lifecycleNotifierTick()
+	if fake.count() != 1 {
+		t.Fatalf("failed delivery writes caused a duplicate external send: %d messages", fake.count())
+	}
+
+	for _, table := range []string{"slack_notification_deliveries", "slack_notification_deliveries_v2"} {
+		if _, err := db.Exec(`DROP TRIGGER fail_` + table); err != nil {
+			t.Fatalf("drop trigger on %s: %v", table, err)
+		}
+	}
+	s.lifecycleNotifierTick()
+	if fake.count() != 1 {
+		t.Fatalf("stash drain re-sent the message: %d messages", fake.count())
+	}
+	if status, ok := routeDeliveryStatus(t, db, lifecycleClawStartedKey("claw-adhoc"), testNotifierName); !ok || status != notificationDeliveryStatusSent {
+		t.Fatalf("drained route delivery = %q, %v; want sent", status, ok)
+	}
+	if len(s.lifecyclePendingDeliveries) != 0 {
+		t.Fatalf("stash not drained: %d entries left", len(s.lifecyclePendingDeliveries))
 	}
 }
 
@@ -1066,6 +1301,39 @@ func postSlackTest(t *testing.T, s *Server, body string) *httptest.ResponseRecor
 	rr := httptest.NewRecorder()
 	s.Handler().ServeHTTP(rr, req)
 	return rr
+}
+
+// Regression: the endpoint resolved the notifier exclusively from
+// lifecycle.via. A routes-only config (everything the Notifier UI saves) has
+// an empty via, so the UI's own "Send test" button 400'd on every config it
+// produced — while already sending the notifier name in the request body.
+func TestSlackTestEndpointHonoursRequestedRoute(t *testing.T) {
+	fake := newFakeSlackServer(t)
+	s, _ := newSlackNotifierRoutesTestServer(t, fake.server.URL, []types.LifecycleRoute{{Via: "primary"}, {Via: "secondary"}})
+
+	rr := postSlackTest(t, s, `{"event_type":"agent_started"}`)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("routes-only default send = %d, body %s", rr.Code, rr.Body.String())
+	}
+	if got := fake.request(0).Channel; got != "C0ROUTE0001" {
+		t.Fatalf("default test send went to %q, want the first route's channel", got)
+	}
+
+	rr = postSlackTest(t, s, `{"event_type":"agent_started","via":"secondary"}`)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("explicit via send = %d, body %s", rr.Code, rr.Body.String())
+	}
+	if got := fake.request(1).Channel; got != "C0ROUTE0002" {
+		t.Fatalf("explicit via send went to %q, want the secondary route's channel", got)
+	}
+
+	rr = postSlackTest(t, s, `{"event_type":"agent_started","via":"nope"}`)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("unknown via = %d, want 400; body %s", rr.Code, rr.Body.String())
+	}
+	if fake.count() != 2 {
+		t.Fatalf("unknown via still sent a message: %d requests", fake.count())
+	}
 }
 
 func TestSlackTestEndpointDryRunReturnsPayloadWithoutCallingSlack(t *testing.T) {

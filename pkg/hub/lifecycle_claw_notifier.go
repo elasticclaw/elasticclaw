@@ -486,17 +486,25 @@ func (s *Server) deliverLifecycleClawEvent(d lifecycleDelivery, claw lifecycleCl
 	runKey := lifecycleClawRunKey(claw.ID)
 	err := s.postLifecycleEvent(d, ev, runCtx, runKey, deliveryKey)
 	if err == nil {
-		s.clearPollWarning(lifecycleSendWarningKey)
 		return true
 	}
-	// Same send-failure policy as the task-run pass: config errors pause,
-	// permanent errors are burned as failed, transient errors stop the pass.
-	routeErr, ok := err.(lifecycleRouteSendError)
+	// Same send-failure policy as the task-run pass, applied to EVERY failing
+	// route: config errors park the route, permanent errors are burned as
+	// failed, transient errors park the route until the next tick. Parking one
+	// destination instead of the whole pass is what keeps a single broken
+	// channel from muting the healthy ones; the claw keeps no delivery row for
+	// the parked route, so it is re-selected and retried later.
+	errs, ok := err.(lifecycleRouteSendErrors)
 	if !ok {
 		return false
 	}
-	handled, _ := s.handleLifecycleSendError(routeErr.err, "claw event "+deliveryKey, deliveryKey, runKey, routeErr.notifier, len(d.routes) == 1)
-	return handled
+	for _, routeErr := range errs {
+		if handled, _ := s.handleLifecycleSendError(routeErr.err, "claw event "+deliveryKey, deliveryKey, runKey, routeErr.notifier, d.singleRoute()); !handled {
+			d.pauseRoute(routeErr.notifier)
+		}
+	}
+	// Only stop the pass once nothing is left to deliver through.
+	return d.hasLiveRoutes()
 }
 
 type lifecycleClawPRRow struct {

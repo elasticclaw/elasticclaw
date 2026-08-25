@@ -4478,8 +4478,8 @@ async function sendTestNotification(eventType: string, via: string): Promise<voi
   const res = await fetch(`${hubUrl}/api/notifications/test`, {
     method: "POST",
     headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-    // via is forward-looking: the hub currently sends the test through the
-    // configured lifecycle notifier and ignores unknown fields.
+    // via picks which configured notifier to probe; the hub falls back to the
+    // first effective route when it is omitted.
     body: JSON.stringify({ event_type: eventType, dry_run: false, via }),
   })
   const raw = await res.text()
