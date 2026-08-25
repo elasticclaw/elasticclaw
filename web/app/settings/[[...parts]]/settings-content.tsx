@@ -4,7 +4,7 @@ import { useParams, usePathname, useRouter } from "next/navigation"
 import React, { useEffect, useState, useCallback, useRef } from "react"
 import { getHubUrl } from "@/lib/hub-url"
 import { getAuthToken } from "@/lib/auth-storage"
-import { Cpu, Key, Github, ChevronLeft, Shield, Zap, Copy, Check, LayoutTemplate, Trash2, Lock, Sparkles, Send, RotateCcw, Eye, EyeOff, ExternalLink, AlertTriangle, X, CheckCircle2, Webhook, Stethoscope, ArrowRight, Wrench, GitBranch, ChevronDown } from "lucide-react"
+import { Cpu, Key, Github, ChevronLeft, Shield, Zap, Copy, Check, LayoutTemplate, Trash2, Lock, Sparkles, Send, RotateCcw, Eye, EyeOff, ExternalLink, AlertTriangle, X, CheckCircle2, Webhook, Stethoscope, ArrowRight, Wrench, GitBranch, ChevronDown, Bell } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Switch } from "@/components/ui/switch"
@@ -159,6 +159,8 @@ interface SettingsData {
     }
     disablePasswordAuth?: boolean
   }
+  notifications?: NotificationsView | null
+  lifecycleEventTypes?: string[]
   concurrencyGroups?: ConcurrencyGroup[]
   maxConcurrentClaws?: number
 }
@@ -166,6 +168,47 @@ interface SettingsData {
 interface ConcurrencyGroup {
   name: string
   limit: number
+}
+
+// Outbound notification config, as returned by GET /api/settings. Notifier
+// settings are provider-specific and inline next to the type, so they keep the
+// snake_case wire names the hub reads them under. The lifecycle block is the
+// redacted view: it uses poll_interval/idle_after, while the PATCH payload
+// (types.LifecycleNotificationsConfig) expects pollInterval/idleAfter.
+interface NotifierView {
+  type: string
+  channel?: string
+  token_secret?: string
+  api_base?: string
+  min_send_interval?: string
+}
+
+interface LifecycleRouteView {
+  via: string
+  // An empty (or absent) event list is an allow-all: the channel receives
+  // every lifecycle alert type.
+  events?: string[]
+}
+
+interface LifecycleEventToggles {
+  agentStarted?: boolean
+  prOpened?: boolean
+  failures?: boolean
+  agentIdle?: boolean
+}
+
+interface NotificationsView {
+  notifiers?: Record<string, NotifierView>
+  lifecycle?: {
+    enabled: boolean
+    // Legacy single-channel field, superseded by routes. The hub clears it as
+    // soon as a patch carries routes.
+    via?: string
+    routes?: LifecycleRouteView[]
+    poll_interval?: string
+    idle_after?: string
+    events?: LifecycleEventToggles
+  }
 }
 
 async function fetchSettings(): Promise<SettingsData> {
@@ -355,6 +398,7 @@ export default function SettingsSectionPage() {
         { id: "runtimes", label: "Sandboxes", icon: Cpu },
         { id: "models", label: "Models", icon: Key },
         { id: "authentication", label: "Authentication", icon: Shield },
+        { id: "notifier", label: "Notifier", icon: Bell },
         { id: "ai-config", label: "Configure with AI", icon: Sparkles },
       ],
     },
@@ -480,6 +524,9 @@ export default function SettingsSectionPage() {
           )}
           {settings && section === "mcp-servers" && (
             <MCPServersSection settings={settings} onSave={save} saving={saving} />
+          )}
+          {settings && section === "notifier" && (
+            <NotifierSection settings={settings} onSave={save} saving={saving} />
           )}
           {section === "ai-config" && (
             <AIConfigSection />
@@ -4364,6 +4411,590 @@ function MCPServersSection({ settings, onSave, saving }: { settings: SettingsDat
                 </Button>
               </div>
             </div>
+        </DialogContent>
+      </Dialog>
+    </div>
+  )
+}
+
+// ── Notifier ─────────────────────────────────────────────────────────────────
+
+// Labels mirror the headlines the hub actually posts, so what an operator
+// checks here is what they will read in the channel.
+const LIFECYCLE_EVENT_LABELS: Record<string, string> = {
+  agent_started: "Agent started",
+  pr_opened: "PR opened",
+  agent_idle: "Agent stalled",
+  agent_stopped: "Agent died",
+  creation_failed: "Couldn't create the agent",
+  provision_failed: "Couldn't get a machine",
+  bootstrap_failed: "Agent crashed during startup",
+  permission_or_auth_failed: "Agent was denied access",
+  provider_lost: "Lost contact with the provider",
+  timeout: "Agent ran out of time",
+  done_without_pr: "Agent finished without a PR",
+  unknown_failure: "Agent failed",
+}
+
+type LifecycleCategory = keyof LifecycleEventToggles
+
+// Which global toggle mutes each event type. Anything the hub adds later that
+// is not listed here is treated as always-on rather than silently muted.
+const LIFECYCLE_EVENT_CATEGORY: Record<string, LifecycleCategory> = {
+  agent_started: "agentStarted",
+  pr_opened: "prOpened",
+  agent_idle: "agentIdle",
+  agent_stopped: "failures",
+  creation_failed: "failures",
+  provision_failed: "failures",
+  bootstrap_failed: "failures",
+  permission_or_auth_failed: "failures",
+  provider_lost: "failures",
+  timeout: "failures",
+  done_without_pr: "failures",
+  unknown_failure: "failures",
+}
+
+const LIFECYCLE_CATEGORIES: { id: LifecycleCategory; label: string; description: string }[] = [
+  { id: "agentStarted", label: "Agent started", description: "An agent picked up a ticket and started working" },
+  { id: "prOpened", label: "PR opened", description: "An agent opened a pull request" },
+  { id: "failures", label: "Failures", description: "Crashes, timeouts, lost machines, finished without a PR" },
+  { id: "agentIdle", label: "Agent stalled", description: "An agent stopped making progress" },
+]
+
+// Fallback only — the canonical list comes from settings.lifecycleEventTypes.
+const FALLBACK_LIFECYCLE_EVENT_TYPES = Object.keys(LIFECYCLE_EVENT_CATEGORY)
+
+// Slack conversation IDs: public channels (C…), private groups (G…), DMs (D…).
+const SLACK_CHANNEL_ID_RE = /^[CGD][A-Za-z0-9]+$/
+
+function lifecycleEventLabel(eventType: string): string {
+  return LIFECYCLE_EVENT_LABELS[eventType] || eventType.replace(/_/g, " ").replace(/^./, (c) => c.toUpperCase())
+}
+
+async function sendTestNotification(eventType: string, via: string): Promise<void> {
+  const hubUrl = getHubUrl()
+  const token = getAuthToken() || ""
+  const res = await fetch(`${hubUrl}/api/notifications/test`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    // via is forward-looking: the hub currently sends the test through the
+    // configured lifecycle notifier and ignores unknown fields.
+    body: JSON.stringify({ event_type: eventType, dry_run: false, via }),
+  })
+  const raw = await res.text()
+  if (res.ok) return
+  let message = raw
+  try {
+    const parsed = JSON.parse(raw) as { error?: string }
+    if (parsed.error) message = parsed.error
+  } catch {
+    // Not JSON — surface the raw body.
+  }
+  throw new Error(message || `Test send failed (${res.status})`)
+}
+
+type TestState = { status: "sending" | "ok" | "error"; message: string }
+
+function NotifierSection({ settings, onSave, saving }: { settings: SettingsData; onSave: (p: object) => Promise<boolean>; saving: boolean }) {
+  const lifecycle = settings.notifications?.lifecycle
+  const notifiers = settings.notifications?.notifiers || {}
+  const names = Object.keys(notifiers).sort((a, b) => a.localeCompare(b))
+  const eventTypes = settings.lifecycleEventTypes?.length ? settings.lifecycleEventTypes : FALLBACK_LIFECYCLE_EVENT_TYPES
+
+  const enabled = lifecycle?.enabled ?? false
+  const categoryEnabled: Record<LifecycleCategory, boolean> = {
+    agentStarted: lifecycle?.events?.agentStarted ?? true,
+    prOpened: lifecycle?.events?.prOpened ?? true,
+    failures: lifecycle?.events?.failures ?? true,
+    agentIdle: lifecycle?.events?.agentIdle ?? true,
+  }
+  // A legacy single-channel `via` reads as one route over every event; saving
+  // any change migrates it to routes.
+  const routes: LifecycleRouteView[] = lifecycle?.routes?.length
+    ? lifecycle.routes
+    : lifecycle?.via
+      ? [{ via: lifecycle.via, events: [] }]
+      : []
+  const routeFor = (name: string) => routes.find((r) => r.via === name)
+
+  const isEventMuted = (eventType: string) => {
+    const category = LIFECYCLE_EVENT_CATEGORY[eventType]
+    return category ? !categoryEnabled[category] : false
+  }
+
+  const [showModal, setShowModal] = useState(false)
+  const [modalMode, setModalMode] = useState<"add" | "edit">("add")
+  const [editName, setEditName] = useState<string | null>(null)
+  const [formName, setFormName] = useState("")
+  const [formChannel, setFormChannel] = useState("")
+  const [formTokenSecret, setFormTokenSecret] = useState("")
+  const [formRouted, setFormRouted] = useState(true)
+  const [formEvents, setFormEvents] = useState<string[]>([])
+  const [formError, setFormError] = useState("")
+  const [tests, setTests] = useState<Record<string, TestState>>({})
+
+  const resetForm = () => {
+    setFormName(""); setFormChannel(""); setFormTokenSecret("")
+    setFormRouted(true); setFormEvents([]); setFormError(""); setEditName(null)
+  }
+
+  const openAdd = () => { resetForm(); setModalMode("add"); setShowModal(true) }
+  const openEdit = (name: string) => {
+    const notifier = notifiers[name]
+    const route = routeFor(name)
+    setFormName(name)
+    setFormChannel(notifier.channel || "")
+    setFormTokenSecret(notifier.token_secret || "")
+    setFormRouted(Boolean(route))
+    setFormEvents(route?.events ? [...route.events] : [])
+    setFormError("")
+    setEditName(name)
+    setModalMode("edit")
+    setShowModal(true)
+  }
+
+  // PATCH /api/settings replaces the whole notifications block, so every save
+  // rebuilds it from the current view plus the change being made.
+  function buildPatch(next: {
+    notifiers?: Record<string, NotifierView>
+    enabled?: boolean
+    routes?: LifecycleRouteView[]
+    events?: Record<LifecycleCategory, boolean>
+  }): object {
+    const outNotifiers: Record<string, Record<string, string>> = {}
+    for (const [name, notifier] of Object.entries(next.notifiers ?? notifiers)) {
+      const out: Record<string, string> = { type: notifier.type || "slack" }
+      if (notifier.channel) out.channel = notifier.channel
+      if (notifier.token_secret) out.token_secret = notifier.token_secret
+      if (notifier.api_base) out.api_base = notifier.api_base
+      if (notifier.min_send_interval) out.min_send_interval = notifier.min_send_interval
+      outNotifiers[name] = out
+    }
+    const outLifecycle: Record<string, unknown> = {
+      enabled: next.enabled ?? enabled,
+      // Always an array: sending routes is what clears the legacy `via`.
+      routes: (next.routes ?? routes).map((route) => ({
+        via: route.via,
+        events: route.events?.length ? route.events : [],
+      })),
+      events: next.events ?? categoryEnabled,
+    }
+    if (lifecycle?.poll_interval) outLifecycle.pollInterval = lifecycle.poll_interval
+    if (lifecycle?.idle_after) outLifecycle.idleAfter = lifecycle.idle_after
+    return { notifications: { notifiers: outNotifiers, lifecycle: outLifecycle } }
+  }
+
+  async function saveChannel() {
+    const name = formName.trim()
+    const channel = formChannel.trim()
+    if (!name) { setFormError("Name is required."); return }
+    if (modalMode === "add" && notifiers[name]) { setFormError(`A channel named "${name}" already exists.`); return }
+    if (!channel) { setFormError("Channel ID is required."); return }
+    if (channel.startsWith("#") || !SLACK_CHANNEL_ID_RE.test(channel)) {
+      setFormError(
+        `"${channel}" is not a Slack channel ID. Use the ID (e.g. C0123ABCD), not the #name — you'll find it at the bottom of the channel's details dialog in Slack.`,
+      )
+      return
+    }
+    if (!formTokenSecret) { setFormError("Pick the hub secret holding the Slack bot token."); return }
+    setFormError("")
+
+    const existing = editName ? notifiers[editName] : undefined
+    const nextNotifiers: Record<string, NotifierView> = {
+      ...notifiers,
+      [name]: {
+        ...existing,
+        type: existing?.type || "slack",
+        channel,
+        token_secret: formTokenSecret,
+      },
+    }
+    // Every type checked is the same thing as no filter; store it as one so a
+    // later-added alert type keeps reaching the channel.
+    const events = formEvents.length === eventTypes.length ? [] : formEvents
+    const nextRoutes = routes.filter((route) => route.via !== name)
+    if (formRouted) nextRoutes.push({ via: name, events })
+
+    const ok = await onSave(buildPatch({ notifiers: nextNotifiers, routes: nextRoutes }))
+    if (ok) { setShowModal(false); resetForm() }
+  }
+
+  async function removeChannel(name: string) {
+    const nextNotifiers = { ...notifiers }
+    delete nextNotifiers[name]
+    const ok = await onSave(buildPatch({
+      notifiers: nextNotifiers,
+      routes: routes.filter((route) => route.via !== name),
+    }))
+    if (ok) {
+      setTests((current) => { const { [name]: _removed, ...rest } = current; return rest })
+      setShowModal(false)
+      resetForm()
+    }
+  }
+
+  // The event a test send uses: something this channel is routed for and that
+  // is not muted globally, preferring the friendliest one.
+  function testEventFor(name: string): string | null {
+    const route = routeFor(name)
+    if (!route) return null
+    const allowed = route.events?.length ? route.events : eventTypes
+    const candidates = allowed.filter((eventType) => !isEventMuted(eventType))
+    if (candidates.length === 0) return null
+    return candidates.includes("agent_started") ? "agent_started" : candidates[0]
+  }
+
+  async function sendTest(name: string) {
+    const eventType = testEventFor(name)
+    if (!eventType) return
+    setTests((current) => ({ ...current, [name]: { status: "sending", message: "" } }))
+    try {
+      await sendTestNotification(eventType, name)
+      setTests((current) => ({
+        ...current,
+        [name]: { status: "ok", message: `Sent a "${lifecycleEventLabel(eventType)}" test alert.` },
+      }))
+    } catch (e) {
+      setTests((current) => ({
+        ...current,
+        [name]: { status: "error", message: e instanceof Error ? e.message : "Test send failed" },
+      }))
+    }
+  }
+
+  const routedCount = routes.filter((route) => notifiers[route.via]).length
+  const formAllAlerts = formEvents.length === 0
+
+  return (
+    <div className="space-y-6">
+      <div>
+        <h2 className="text-base font-semibold mb-1">Notifier</h2>
+        <p className="text-sm text-muted-foreground mb-4">
+          Send agent lifecycle alerts — starts, pull requests, stalls and failures — to Slack. Channels are hub-wide and shared by every workspace.
+        </p>
+        <div className="flex items-center gap-2 mb-6">
+          <span className="text-xs bg-muted text-muted-foreground px-2 py-1 rounded font-medium">
+            {names.length} channel{names.length !== 1 ? "s" : ""} configured
+          </span>
+          {enabled ? (
+            <span className="text-xs bg-green-500/10 text-green-400 border border-green-500/20 px-2 py-1 rounded font-medium">
+              {routedCount} receiving alerts
+            </span>
+          ) : (
+            <span className="text-xs bg-amber-500/10 text-amber-400 border border-amber-500/20 px-2 py-1 rounded font-medium">
+              Alerts paused
+            </span>
+          )}
+        </div>
+      </div>
+
+      {/* Global switches: these mute an alert everywhere, before routing. */}
+      <div className="border border-border rounded-lg">
+        <div className="flex items-center justify-between gap-4 p-4">
+          <div>
+            <div className="text-sm font-medium">Lifecycle alerts</div>
+            <p className="text-xs text-muted-foreground mt-0.5">
+              The master switch. Turn it off to mute every channel without losing your routing.
+            </p>
+          </div>
+          <Switch
+            checked={enabled}
+            disabled={saving}
+            onCheckedChange={(checked) => onSave(buildPatch({ enabled: checked }))}
+            aria-label="Enable lifecycle alerts"
+          />
+        </div>
+        <div className={cn("border-t border-border p-4 space-y-3 transition-opacity", !enabled && "opacity-50")}>
+          <p className="text-xs text-muted-foreground">
+            Alert types muted here never reach any channel, whatever the per-channel routing says.
+          </p>
+          <div className="grid gap-2 sm:grid-cols-2">
+            {LIFECYCLE_CATEGORIES.map((category) => (
+              <div key={category.id} className="flex items-start justify-between gap-3 rounded-md border border-border/60 bg-muted/20 px-3 py-2">
+                <div className="min-w-0">
+                  <div className="text-sm">{category.label}</div>
+                  <p className="text-xs text-muted-foreground">{category.description}</p>
+                </div>
+                <Switch
+                  className="mt-0.5"
+                  checked={categoryEnabled[category.id]}
+                  disabled={saving || !enabled}
+                  onCheckedChange={(checked) =>
+                    onSave(buildPatch({ events: { ...categoryEnabled, [category.id]: checked } }))
+                  }
+                  aria-label={`Toggle ${category.label} alerts`}
+                />
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {/* Channels */}
+      <div className="space-y-2">
+        <h3 className="text-sm font-medium">Channels</h3>
+        {names.length === 0 ? (
+          <p className="text-sm text-muted-foreground px-4 py-6 text-center border border-border rounded-lg">
+            No channels configured. Add one to start receiving alerts in Slack.
+          </p>
+        ) : (
+          <div className="space-y-2">
+            {names.map((name) => {
+              const notifier = notifiers[name]
+              const route = routeFor(name)
+              const test = tests[name]
+              const testEvent = testEventFor(name)
+              const canTest = enabled && Boolean(testEvent) && !saving
+              return (
+                <div key={name} className="border border-border rounded-lg p-4">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-2">
+                        <code className="text-sm font-mono font-medium">{name}</code>
+                        <span className="text-xs text-muted-foreground capitalize">{notifier.type}</span>
+                      </div>
+                      <p className="text-xs text-muted-foreground mt-1">
+                        <span className="font-mono">{notifier.channel || "no channel"}</span>
+                        {" · "}
+                        {notifier.token_secret
+                          ? <>token: <span className="font-mono">{notifier.token_secret}</span></>
+                          : <span className="text-amber-400">no token secret</span>}
+                      </p>
+                      <div className="mt-2">
+                        {!route ? (
+                          <span className="text-xs bg-muted text-muted-foreground px-2 py-1 rounded font-medium">
+                            Not receiving alerts
+                          </span>
+                        ) : route.events?.length ? (
+                          <span className="text-xs bg-muted text-muted-foreground px-2 py-1 rounded font-medium">
+                            {route.events.length} of {eventTypes.length} alert types
+                          </span>
+                        ) : (
+                          <span className="text-xs bg-blue-500/10 text-blue-400 border border-blue-500/20 px-2 py-1 rounded font-medium">
+                            All alerts
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-2 shrink-0">
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        disabled={!canTest || test?.status === "sending"}
+                        title={
+                          !enabled
+                            ? "Lifecycle alerts are turned off"
+                            : !testEvent
+                              ? "This channel is not routed to any alert type that is on"
+                              : `Posts a sample "${lifecycleEventLabel(testEvent)}" alert`
+                        }
+                        onClick={() => sendTest(name)}
+                        className="gap-1.5"
+                      >
+                        <Send className="size-3.5" />
+                        {test?.status === "sending" ? "Sending…" : "Send test"}
+                      </Button>
+                      <Button size="sm" variant="ghost" onClick={() => openEdit(name)}>Edit</Button>
+                    </div>
+                  </div>
+                  {test && test.status !== "sending" && (
+                    <div
+                      className={cn(
+                        "mt-3 flex items-start gap-2 rounded-md border px-3 py-2 text-xs",
+                        test.status === "ok"
+                          ? "border-green-500/20 bg-green-500/10 text-green-400"
+                          : "border-destructive/30 bg-destructive/10 text-destructive",
+                      )}
+                    >
+                      {test.status === "ok"
+                        ? <CheckCircle2 className="size-3.5 mt-px shrink-0" />
+                        : <AlertTriangle className="size-3.5 mt-px shrink-0" />}
+                      <span className="break-words">{test.message}</span>
+                    </div>
+                  )}
+                </div>
+              )
+            })}
+          </div>
+        )}
+      </div>
+
+      <Button onClick={openAdd} className="gap-2">
+        <span className="text-sm">+</span> Add Channel
+      </Button>
+
+      {/* Add / edit modal */}
+      <Dialog open={showModal} onOpenChange={(open) => { setShowModal(open); if (!open) resetForm() }}>
+        <DialogContent className="max-w-lg max-h-[90vh] overflow-y-auto p-0 gap-0">
+          <DialogTitle className="sr-only">{modalMode === "add" ? "Add Channel" : `Edit ${editName}`}</DialogTitle>
+          <div className="flex items-center justify-between px-5 py-4 border-b border-border">
+            <h3 className="font-medium">{modalMode === "add" ? "Add Channel" : `Edit ${editName}`}</h3>
+          </div>
+
+          <div className="p-5 space-y-4">
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="text-xs text-muted-foreground mb-1 block">Name</label>
+                <Input
+                  placeholder="e.g. eng-agents"
+                  value={formName}
+                  onChange={(e) => setFormName(e.target.value)}
+                  className="font-mono text-sm h-8"
+                  disabled={modalMode === "edit"}
+                />
+              </div>
+              <div>
+                <label className="text-xs text-muted-foreground mb-1 block">Slack channel ID</label>
+                <Input
+                  placeholder="C0123ABCD"
+                  value={formChannel}
+                  onChange={(e) => setFormChannel(e.target.value)}
+                  className="font-mono text-sm h-8"
+                />
+              </div>
+            </div>
+            <p className="text-xs text-muted-foreground -mt-2">
+              Use the channel ID, not the #name — names break when a channel is renamed. In Slack, open the channel details and copy the ID at the bottom.
+            </p>
+
+            <div>
+              <label className="text-xs text-muted-foreground mb-1 block">Bot token secret</label>
+              <select
+                value={formTokenSecret}
+                onChange={(e) => setFormTokenSecret(e.target.value)}
+                className="w-full h-8 text-sm rounded-md border border-input bg-background px-3"
+              >
+                <option value="">Select secret…</option>
+                {[...(settings.secrets || [])].sort((a, b) => a.localeCompare(b)).map((secret) => (
+                  <option key={secret} value={secret}>{secret}</option>
+                ))}
+              </select>
+              <p className="text-xs text-muted-foreground mt-1">
+                The hub secret holding the Slack bot token (<span className="font-mono">xoxb-…</span>). Add it under Secrets first.
+              </p>
+            </div>
+
+            {/* Routing */}
+            <div className="space-y-3 border-t border-border pt-4">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <div className="text-sm font-medium">Alert routing</div>
+                  <p className="text-xs text-muted-foreground mt-0.5">Which lifecycle alerts land in this channel.</p>
+                </div>
+                <Switch
+                  className="mt-1"
+                  checked={formRouted}
+                  onCheckedChange={setFormRouted}
+                  aria-label="Send lifecycle alerts to this channel"
+                />
+              </div>
+
+              {!formRouted ? (
+                <p className="text-xs text-muted-foreground rounded-md border border-border bg-muted/20 px-3 py-2">
+                  This channel stays configured but receives no lifecycle alerts.
+                </p>
+              ) : (
+                <>
+                  <div
+                    className={cn(
+                      "rounded-md border px-3 py-2",
+                      formAllAlerts
+                        ? "border-blue-500/30 bg-blue-500/10"
+                        : "border-border bg-muted/20",
+                    )}
+                  >
+                    <div className="flex items-start gap-2">
+                      <Bell className={cn("size-4 mt-px shrink-0", formAllAlerts ? "text-blue-400" : "text-muted-foreground")} />
+                      <div className="min-w-0">
+                        <div className={cn("text-sm font-medium", formAllAlerts ? "text-blue-400" : "")}>
+                          {formAllAlerts ? "All alerts" : `${formEvents.length} of ${eventTypes.length} alert types`}
+                        </div>
+                        <p className="text-xs text-muted-foreground">
+                          {formAllAlerts
+                            ? "Nothing is checked, so this channel receives every alert type — including any new type added later."
+                            : "Only the checked types reach this channel."}
+                        </p>
+                        {!formAllAlerts && (
+                          <button
+                            type="button"
+                            className="text-xs text-blue-400 hover:underline mt-1"
+                            onClick={() => setFormEvents([])}
+                          >
+                            Clear selection to receive all alerts
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="space-y-1">
+                    {eventTypes.map((eventType) => {
+                      const checked = formEvents.includes(eventType)
+                      const muted = isEventMuted(eventType)
+                      return (
+                        <label
+                          key={eventType}
+                          className="flex items-center gap-2 text-sm cursor-pointer rounded px-2 py-1 hover:bg-muted/50"
+                        >
+                          <input
+                            type="checkbox"
+                            aria-label={`${lifecycleEventLabel(eventType)} (${eventType})`}
+                            checked={checked}
+                            onChange={(e) =>
+                              setFormEvents(
+                                e.target.checked
+                                  ? [...formEvents, eventType]
+                                  : formEvents.filter((t) => t !== eventType),
+                              )
+                            }
+                          />
+                          <span className={cn(!checked && !formAllAlerts && "text-muted-foreground")}>
+                            {lifecycleEventLabel(eventType)}
+                          </span>
+                          <code className="text-xs text-muted-foreground font-mono">{eventType}</code>
+                          {muted && (
+                            <span className="text-xs text-amber-400 ml-auto shrink-0">muted globally</span>
+                          )}
+                        </label>
+                      )
+                    })}
+                  </div>
+                </>
+              )}
+            </div>
+
+          </div>
+
+          <div className="border-t border-border">
+            {/* The error sits with the buttons, never below the fold of a long
+                scrolling form. */}
+            {formError && (
+              <div className="mx-5 mt-4 flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+                <AlertTriangle className="size-3.5 mt-px shrink-0" />
+                <span className="break-words">{formError}</span>
+              </div>
+            )}
+            <div className="flex items-center justify-between px-5 py-4">
+              {modalMode === "edit" && editName && (
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="text-destructive hover:text-destructive"
+                  disabled={saving}
+                  onClick={() => removeChannel(editName)}
+                >
+                  <Trash2 className="size-3.5 mr-1" /> Remove
+                </Button>
+              )}
+              <div className="flex items-center gap-2 ml-auto">
+                <Button size="sm" variant="outline" onClick={() => { setShowModal(false); resetForm() }}>Cancel</Button>
+                <Button size="sm" disabled={saving || !formName.trim() || !formChannel.trim() || !formTokenSecret} onClick={saveChannel}>
+                  {modalMode === "add" ? "Add Channel" : "Save changes"}
+                </Button>
+              </div>
+            </div>
+          </div>
         </DialogContent>
       </Dialog>
     </div>
