@@ -391,13 +391,13 @@ func TestGitHubTokenEndpointMatchesRepositoryPatterns(t *testing.T) {
 	github := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/app/installations":
-			_, _ = w.Write([]byte(`[{"id":99,"account":{"login":"replicated-collab"}}]`))
+			_, _ = w.Write([]byte(`[{"id":99,"account":{"login":"example-org"}}]`))
 		case r.Method == http.MethodGet && r.URL.Path == "/app/installations/99":
-			_, _ = w.Write([]byte(`{"id":99,"account":{"login":"replicated-collab"},"permissions":{"contents":"read","issues":"read"}}`))
-		case r.Method == http.MethodGet && r.URL.Path == "/repos/replicated-collab/support-sandbox/installation":
-			_, _ = w.Write([]byte(`{"id":99,"account":{"login":"replicated-collab"}}`))
-		case r.Method == http.MethodGet && r.URL.Path == "/repos/replicated-collab/icedq-kots/installation":
-			_, _ = w.Write([]byte(`{"id":99,"account":{"login":"replicated-collab"}}`))
+			_, _ = w.Write([]byte(`{"id":99,"account":{"login":"example-org"},"permissions":{"contents":"read","issues":"read"}}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/example-org/example-repo/installation":
+			_, _ = w.Write([]byte(`{"id":99,"account":{"login":"example-org"}}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/example-org/other-repo/installation":
+			_, _ = w.Write([]byte(`{"id":99,"account":{"login":"example-org"}}`))
 		case r.Method == http.MethodPost && r.URL.Path == "/app/installations/99/access_tokens":
 			body, _ := io.ReadAll(r.Body)
 			sawAccessTokenBody = string(body)
@@ -418,14 +418,14 @@ func TestGitHubTokenEndpointMatchesRepositoryPatterns(t *testing.T) {
 		}},
 	}, github.URL, "", "")
 
-	reposJSON := `[{"repo":"replicated-collab/support-sandbox","permissions":"write"},{"repo":"replicated-collab/*","permissions":"read"}]`
+	reposJSON := `[{"repo":"example-org/example-repo","permissions":"write"},{"repo":"example-org/*","permissions":"read"}]`
 	if _, err := db.Exec(`INSERT INTO claws(id, tenant_id, name, template, provider, default_model, template_files, github_repos, linear_workspace, nix, docker, llm_key, tags, status, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,datetime('now'))`,
 		"pattern-claw", "test-tenant-id", "pattern claw", "pattern-ws", "noop", "", "{}", reposJSON, "", 0, 0, "", `[]`, "provisioning"); err != nil {
 		t.Fatalf("insert claw: %v", err)
 	}
 
 	// Exact match from the glob pattern should mint a scoped token.
-	req := httptest.NewRequest(http.MethodGet, "/api/github/token/pattern-claw?claw_token=claw-token&repo=replicated-collab/icedq-kots", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/github/token/pattern-claw?claw_token=claw-token&repo=example-org/other-repo", nil)
 	rec := httptest.NewRecorder()
 	s.mux.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -434,12 +434,12 @@ func TestGitHubTokenEndpointMatchesRepositoryPatterns(t *testing.T) {
 	if !strings.Contains(sawAccessTokenBody, `"issues":"read"`) {
 		t.Fatalf("expected issues permission in access token request, got %s", sawAccessTokenBody)
 	}
-	if !strings.Contains(sawAccessTokenBody, `"repositories":["icedq-kots"]`) {
+	if !strings.Contains(sawAccessTokenBody, `"repositories":["other-repo"]`) {
 		t.Fatalf("expected single-repo scoping for pattern match, got %s", sawAccessTokenBody)
 	}
 
 	// A repo outside the configured selectors should be rejected without calling GitHub.
-	req = httptest.NewRequest(http.MethodGet, "/api/github/token/pattern-claw?claw_token=claw-token&repo=other-org/icedq-kots", nil)
+	req = httptest.NewRequest(http.MethodGet, "/api/github/token/pattern-claw?claw_token=claw-token&repo=other-org/other-repo", nil)
 	rec = httptest.NewRecorder()
 	s.mux.ServeHTTP(rec, req)
 	if rec.Code != http.StatusForbidden {
@@ -456,12 +456,12 @@ func TestGitHubTokenEndpointSelectsAppInstallationForRepo(t *testing.T) {
 		appID := jwtAppID(r.Header.Get("Authorization"))
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/app/installations/200":
-			_, _ = w.Write([]byte(`{"id":200,"account":{"login":"replicated-collab"},"permissions":{"contents":"read","issues":"read"}}`))
+			_, _ = w.Write([]byte(`{"id":200,"account":{"login":"example-org"},"permissions":{"contents":"read","issues":"read"}}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/app/installations/404":
-			_, _ = w.Write([]byte(`{"id":404,"account":{"login":"replicated-collab"},"permissions":{"contents":"read","issues":"read"}}`))
-		case r.Method == http.MethodGet && r.URL.Path == "/repos/replicated-collab/support-sandbox/installation":
+			_, _ = w.Write([]byte(`{"id":404,"account":{"login":"example-org"},"permissions":{"contents":"read","issues":"read"}}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/example-org/example-repo/installation":
 			if appID == "456" {
-				_, _ = w.Write([]byte(`{"id":200,"account":{"login":"replicated-collab"}}`))
+				_, _ = w.Write([]byte(`{"id":200,"account":{"login":"example-org"}}`))
 				return
 			}
 			http.NotFound(w, r)
@@ -488,13 +488,13 @@ func TestGitHubTokenEndpointSelectsAppInstallationForRepo(t *testing.T) {
 		},
 	}, github.URL, "", "")
 
-	reposJSON := `[{"repo":"replicated-collab/support-sandbox","permissions":"write"}]`
+	reposJSON := `[{"repo":"example-org/example-repo","permissions":"write"}]`
 	if _, err := db.Exec(`INSERT INTO claws(id, tenant_id, name, template, provider, default_model, template_files, github_repos, linear_workspace, nix, docker, llm_key, tags, status, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,datetime('now'))`,
 		"select-install-claw", "test-tenant-id", "select install claw", "select-ws", "noop", "", "{}", reposJSON, "", 0, 0, "", `[]`, "provisioning"); err != nil {
 		t.Fatalf("insert claw: %v", err)
 	}
 
-	req := httptest.NewRequest(http.MethodGet, "/api/github/token/select-install-claw?claw_token=claw-token&repo=replicated-collab/support-sandbox", nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/github/token/select-install-claw?claw_token=claw-token&repo=example-org/example-repo", nil)
 	rec := httptest.NewRecorder()
 	s.mux.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -503,8 +503,8 @@ func TestGitHubTokenEndpointSelectsAppInstallationForRepo(t *testing.T) {
 	if !strings.Contains(rec.Body.String(), "\"token\":\"tok-200\"") {
 		t.Fatalf("expected token from installation 200, got %s", rec.Body.String())
 	}
-	if !strings.Contains(sawTokenBody, `"repositories":["support-sandbox"]`) {
-		t.Fatalf("expected scoped token for support-sandbox, got %s", sawTokenBody)
+	if !strings.Contains(sawTokenBody, `"repositories":["example-repo"]`) {
+		t.Fatalf("expected scoped token for example-repo, got %s", sawTokenBody)
 	}
 }
 

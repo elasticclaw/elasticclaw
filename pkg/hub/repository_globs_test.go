@@ -93,10 +93,10 @@ func TestRepoAccessMatchesSelector(t *testing.T) {
 		{"acme/api", RepoAccess{Repo: "acme/api"}, true},
 		{"acme/api", RepoAccess{Repo: "ACME/API"}, true},
 		{"acme/api", RepoAccess{Repo: "other/api"}, false},
-		{"acme/icedq-kots", RepoAccess{Repo: "acme/*"}, true},
-		{"other/icedq-kots", RepoAccess{Repo: "acme/*"}, false},
-		{"acme/icedq-kots", RepoAccess{Repo: "*-kots"}, true},
-		{"acme/support-sandbox", RepoAccess{Repo: "*-kots"}, false},
+		{"acme/other-repo", RepoAccess{Repo: "acme/*"}, true},
+		{"other/other-repo", RepoAccess{Repo: "acme/*"}, false},
+		{"acme/other-repo", RepoAccess{Repo: "*-repo"}, true},
+		{"acme/example-app", RepoAccess{Repo: "*-repo"}, false},
 	}
 	for _, tc := range cases {
 		got := repoAccessMatchesSelector(tc.repo, tc.selector)
@@ -108,21 +108,21 @@ func TestRepoAccessMatchesSelector(t *testing.T) {
 
 func TestEffectiveRepoAccess(t *testing.T) {
 	selectors := []RepoAccess{
-		{Repo: "replicated-collab/support-sandbox", Permissions: "write"},
-		{Repo: "replicated-collab/*", Permissions: "read"},
+		{Repo: "example-org/example-repo", Permissions: "write"},
+		{Repo: "example-org/*", Permissions: "read"},
 	}
 
-	got := effectiveRepoAccess("replicated-collab/support-sandbox", selectors)
+	got := effectiveRepoAccess("example-org/example-repo", selectors)
 	if got == nil || got.Permissions != "write" {
 		t.Fatalf("exact match should prefer write, got %#v", got)
 	}
 
-	got = effectiveRepoAccess("replicated-collab/icedq-kots", selectors)
+	got = effectiveRepoAccess("example-org/other-repo", selectors)
 	if got == nil || got.Permissions != "read" {
 		t.Fatalf("glob match should return read, got %#v", got)
 	}
 
-	got = effectiveRepoAccess("other-org/icedq-kots", selectors)
+	got = effectiveRepoAccess("other-org/other-repo", selectors)
 	if got != nil {
 		t.Fatalf("unmatched repo should return nil, got %#v", got)
 	}
@@ -321,7 +321,7 @@ func TestWorkflowCreationKeepsCloneFalsePatterns(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(githubInstallationRepositoriesResponse{
 				TotalCount: 3,
 				Repositories: []githubRepository{
-					{Name: "support-sandbox", FullName: "acme/support-sandbox"},
+					{Name: "example-repo", FullName: "acme/example-repo"},
 					{Name: "website", FullName: "acme/website"},
 					{Name: "api", FullName: "acme/api"},
 				},
@@ -348,7 +348,7 @@ func TestWorkflowCreationKeepsCloneFalsePatterns(t *testing.T) {
 	workspace := &types.WorkspaceConfig{
 		Name: "engineering",
 		Repositories: []types.GitHubRepoAccess{
-			{Repo: "acme/support-sandbox", Permissions: "write"},
+			{Repo: "acme/example-repo", Permissions: "write"},
 			{Repo: "acme/*", Permissions: "read", Clone: &cloneFalse},
 		},
 		Files: map[string]string{
@@ -370,7 +370,7 @@ func TestWorkflowCreationKeepsCloneFalsePatterns(t *testing.T) {
 		t.Fatalf("decode claw repositories: %v", err)
 	}
 	want := []types.GitHubRepoAccess{
-		{Repo: "acme/support-sandbox", Permissions: "write"},
+		{Repo: "acme/example-repo", Permissions: "write"},
 		{Repo: "acme/*", Permissions: "read", Clone: &cloneFalse},
 	}
 	if !reflect.DeepEqual(repositories, want) {
