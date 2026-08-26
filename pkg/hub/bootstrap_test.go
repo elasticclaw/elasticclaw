@@ -576,6 +576,9 @@ db.close();
 	fakeOpenClaw := filepath.Join(fakeBin, "openclaw")
 	invocationsPath := filepath.Join(home, "openclaw-invocations")
 	fakeOpenClawScript := `#!/bin/sh
+# Consume stdin like the real openclaw does; exiting with the pipe unread
+# lets the writer die with SIGPIPE under pipefail.
+cat >/dev/null
 printf '%s\n' "$*" >> "$OPENCLAW_INVOCATIONS"
 if [ "$*" = "models auth list --provider xai --json" ]; then
   printf '%s\n' '{"profiles":[{"id":"xai:default","type":"oauth"}]}'
