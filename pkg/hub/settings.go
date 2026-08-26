@@ -6,11 +6,15 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
+	"strings"
 
 	"github.com/elasticclaw/elasticclaw/pkg/cliversion"
 	"github.com/elasticclaw/elasticclaw/pkg/config"
+	"github.com/elasticclaw/elasticclaw/pkg/hub/notify"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 )
 
@@ -74,11 +78,43 @@ type SettingsView struct {
 	Secrets              []string                    `json:"secrets"`
 	MCPServers           []MCPView                   `json:"mcpServers,omitempty"`
 	Auth                 *AuthView                   `json:"auth,omitempty"`
+	Notifications        *NotificationsView          `json:"notifications"`
+	LifecycleEventTypes  []string                    `json:"lifecycleEventTypes"`
 	// ConcurrencyGroups limits simultaneously running claws per group. 0 = unlimited.
 	ConcurrencyGroups []ConcurrencyGroupView `json:"concurrencyGroups"`
 	// MaxConcurrentClaws limits simultaneously running claws. 0 = unlimited.
 	// DEPRECATED: Use ConcurrencyGroups instead.
 	MaxConcurrentClaws int `json:"maxConcurrentClaws"`
+}
+
+// NotificationsView is the settings-safe view of outbound notifications.
+// It intentionally exposes secret references, never secret values.
+type NotificationsView struct {
+	Notifiers map[string]NotifierView     `json:"notifiers"`
+	Lifecycle *LifecycleNotificationsView `json:"lifecycle,omitempty"`
+}
+
+type NotifierView struct {
+	Type            string `json:"type"`
+	Channel         string `json:"channel,omitempty"`
+	TokenSecret     string `json:"token_secret,omitempty"`
+	APIBase         string `json:"api_base,omitempty"`
+	MinSendInterval string `json:"min_send_interval,omitempty"`
+}
+
+// LifecycleNotificationsView deliberately uses the SAME field names the PATCH
+// body is decoded under (types.LifecycleNotificationsConfig): a client that
+// GETs this view, edits it and PATCHes it back must not silently drop the two
+// durations. They were emitted as poll_interval/idle_after, which
+// encoding/json discards as unknown keys on the way back in — resetting a
+// deliberately raised idle_after to the 5m default and persisting the loss.
+type LifecycleNotificationsView struct {
+	Enabled      bool                         `json:"enabled"`
+	Via          string                       `json:"via,omitempty"`
+	Routes       []types.LifecycleRoute       `json:"routes"`
+	PollInterval string                       `json:"pollInterval,omitempty"`
+	IdleAfter    string                       `json:"idleAfter,omitempty"`
+	Events       *types.LifecycleEventToggles `json:"events,omitempty"`
 }
 
 type AuthView struct {
@@ -252,6 +288,8 @@ type SettingsPatch struct {
 	// MaxConcurrentClaws limits simultaneously running claws. 0 or omitted = unlimited.
 	// DEPRECATED: Use ConcurrencyGroups instead.
 	MaxConcurrentClaws *int `json:"maxConcurrentClaws,omitempty"`
+	// Notifications replaces the complete notifications configuration.
+	Notifications *types.NotificationsConfig `json:"notifications,omitempty"`
 }
 
 // MCPPatch is a request to add/update an MCP server config.
@@ -466,6 +504,8 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	view.ModelAuthProfiles = []ModelAuthProfileView{}
+	view.LifecycleEventTypes = append([]string(nil), types.LifecycleEventTypes...)
+	view.Notifications = buildNotificationsView(s.hubCfg.Notifications)
 	for _, profile := range s.hubCfg.ModelAuthProfiles {
 		if profile == nil {
 			continue
@@ -668,6 +708,222 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, view)
 }
 
+func buildNotificationsView(cfg *types.NotificationsConfig) *NotificationsView {
+	if cfg == nil {
+		return &NotificationsView{Notifiers: map[string]NotifierView{}}
+	}
+	view := &NotificationsView{Notifiers: make(map[string]NotifierView, len(cfg.Notifiers))}
+	for name, notifier := range cfg.Notifiers {
+		view.Notifiers[name] = NotifierView{
+			Type:            notifier.Type,
+			Channel:         notifierSettingString(notifier, "channel"),
+			TokenSecret:     notifierSettingString(notifier, "token_secret"),
+			APIBase:         notifierSettingString(notifier, "api_base"),
+			MinSendInterval: notifierSettingString(notifier, "min_send_interval"),
+		}
+	}
+	if lc := cfg.Lifecycle; lc != nil {
+		lifecycle := &LifecycleNotificationsView{
+			Enabled:      lc.IsEnabled(),
+			Via:          lc.Via,
+			Routes:       make([]types.LifecycleRoute, len(lc.Routes)),
+			PollInterval: lc.PollInterval,
+			IdleAfter:    lc.IdleAfter,
+		}
+		for i, route := range lc.Routes {
+			lifecycle.Routes[i] = types.LifecycleRoute{Via: route.Via, Events: append([]string(nil), route.Events...)}
+		}
+		if lc.Events != nil {
+			events := *lc.Events
+			lifecycle.Events = &events
+		}
+		view.Lifecycle = lifecycle
+	}
+	return view
+}
+
+func notifierSettingString(notifier types.NotifierConfig, key string) string {
+	value, _ := notifier.Settings[key].(string)
+	return value
+}
+
+// mergeNotifierSettings folds a patched notifier's settings over the ones
+// already in the config. GET /api/settings projects only a handful of settings
+// keys (see buildNotificationsView) and the settings screen rebuilds the whole
+// notifications block from that projection, so replacing the block outright
+// would silently drop every other key under notifications.notifiers.<name> the
+// first time an operator touches the screen.
+func mergeNotifierSettings(current, patch *types.NotificationsConfig) {
+	if current == nil || patch == nil {
+		return
+	}
+	for name, patched := range patch.Notifiers {
+		existing, ok := current.Notifiers[name]
+		if !ok || len(existing.Settings) == 0 {
+			continue
+		}
+		merged := make(map[string]any, len(existing.Settings)+len(patched.Settings))
+		for key, value := range existing.Settings {
+			merged[key] = value
+		}
+		for key, value := range patched.Settings {
+			merged[key] = value
+		}
+		patched.Settings = merged
+		patch.Notifiers[name] = patched
+	}
+}
+
+// validateSettingsNotifications checks the patched notifications block. The
+// provider-level "can this be built" check runs only on notifiers the patch
+// actually adds or changes: load-time validation (types.ValidateNotificationsConfig)
+// accepts a notifier this build refuses to construct, so a hub.yaml written by
+// hand — or by an older build — can hold one and run fine, logging "notifier
+// unavailable" per tick. The settings screen submits the whole notifier map on
+// every save, so failing the patch on such an entry would 400 every save from
+// the screen, including saves that touch an entirely different channel, with
+// no way to repair the offender from the UI. Whatever the operator does touch
+// is still checked, so this handler never persists a NEW broken notifier.
+func validateSettingsNotifications(current, cfg *types.NotificationsConfig) error {
+	if err := types.ValidateNotificationsConfig(cfg); err != nil {
+		return err
+	}
+	for name, notifier := range cfg.Notifiers {
+		// Checked before the unchanged short-circuit and against the stored
+		// value key by key, so editing a notifier that already carries an
+		// api_base stays possible while introducing or changing one does not.
+		if err := validateNotifierAPIBase(current, name, notifier); err != nil {
+			return err
+		}
+		if notifierUnchanged(current, name, notifier) {
+			continue
+		}
+		if !notify.Supported(notifier.Type) {
+			return fmt.Errorf("notifications.notifiers.%s: unsupported notifier type %q", name, notifier.Type)
+		}
+		// The type's own required fields, checked here rather than at the first
+		// send: a notifier that cannot be built delivers nothing and says so
+		// only in the hub log, so a PATCH that persists one silently mutes
+		// every route pointing at it.
+		if err := notify.ValidateConfig(notifier.Type, notifierSettingsForValidation(current, name, notifier)); err != nil {
+			return fmt.Errorf("notifications.notifiers.%s: %w", name, err)
+		}
+	}
+	return nil
+}
+
+// validateNotifierAPIBase refuses an api_base the patch introduces or changes
+// unless it addresses Slack over https. api_base decides where the notifier's
+// bot token is sent: a patch that keeps token_secret and repoints api_base at
+// an attacker-controlled host turns the next test send into token
+// exfiltration (and every send into an SSRF probe from the hub). The stored
+// value is exempt — an operator who wrote an internal Slack proxy into
+// hub.yaml keeps it, and the settings screen, which round-trips api_base
+// without rendering it, keeps saving — because hub.yaml is the operator's own
+// file while this handler is remote input. Repointing a live notifier is
+// therefore a hub.yaml edit, not an API call.
+func validateNotifierAPIBase(current *types.NotificationsConfig, name string, patched types.NotifierConfig) error {
+	apiBase := strings.TrimSpace(notifierSettingString(patched, "api_base"))
+	if apiBase == "" {
+		return nil
+	}
+	if current != nil {
+		if existing, ok := current.Notifiers[name]; ok && strings.TrimSpace(notifierSettingString(existing, "api_base")) == apiBase {
+			return nil
+		}
+	}
+	u, err := url.Parse(apiBase)
+	if err != nil {
+		return fmt.Errorf("notifications.notifiers.%s: api_base %q is not a valid URL", name, apiBase)
+	}
+	host := strings.ToLower(u.Hostname())
+	if u.Scheme != "https" || (host != "slack.com" && !strings.HasSuffix(host, ".slack.com")) {
+		return fmt.Errorf("notifications.notifiers.%s: api_base %q must be an https URL on slack.com — the notifier's bot token is sent to this host, so it cannot be repointed through the settings API", name, apiBase)
+	}
+	return nil
+}
+
+// notifierSettingsForValidation drops an api_base the patch merely carries over
+// from the stored config before the provider's own check runs on the merged
+// settings. validateNotifierAPIBase exempts the stored value deliberately — the
+// settings screen round-trips api_base without rendering it — but the provider
+// check judges it too, and a stored value this build refuses to construct (a
+// scheme-less host written by hand, or accepted by an older build) would then
+// reject every save that touches that channel, on a field the screen can
+// neither show nor clear: the same dead end the min_send_interval field exists
+// to prevent, with no way out but a hub.yaml edit. Dropping the key falls back
+// to the provider default, so only an api_base the patch itself introduces or
+// changes is judged — by validateNotifierAPIBase, which is the stricter check.
+func notifierSettingsForValidation(current *types.NotificationsConfig, name string, patched types.NotifierConfig) map[string]any {
+	apiBase := strings.TrimSpace(notifierSettingString(patched, "api_base"))
+	if apiBase == "" || current == nil {
+		return patched.Settings
+	}
+	existing, ok := current.Notifiers[name]
+	if !ok || strings.TrimSpace(notifierSettingString(existing, "api_base")) != apiBase {
+		return patched.Settings
+	}
+	settings := make(map[string]any, len(patched.Settings))
+	for key, value := range patched.Settings {
+		if key != "api_base" {
+			settings[key] = value
+		}
+	}
+	return settings
+}
+
+// dropRejectedLifecycleDurations clears a lifecycle poll_interval or
+// idle_after that the patch re-sends unchanged from the stored config and that
+// validation would reject anyway. Both are validated on every patch, floors
+// included and regardless of `enabled`, while the settings screen rebuilds the
+// whole notifications block from a view that renders neither field: a hub.yaml
+// holding "idle_after: 30s" would otherwise 400 every save made from that
+// screen — the master switch, a category toggle, adding a channel — on a value
+// the screen can neither show nor clear, leaving a hand edit of hub.yaml as the
+// only way out. The offender is dropped rather than preserved because it is
+// already inert: lifecycleNotifierTick refuses to run while the config fails
+// validation, so keeping it would trade an unusable screen for a healthy-
+// looking screen that still delivers nothing. A value the patch itself
+// introduces or edits is left alone and still fails the save.
+func dropRejectedLifecycleDurations(current, patch *types.NotificationsConfig) {
+	if patch == nil || patch.Lifecycle == nil || current == nil || current.Lifecycle == nil {
+		return
+	}
+	stored, lc := current.Lifecycle, patch.Lifecycle
+	if lc.PollInterval == stored.PollInterval && lifecycleDurationRejected(&types.LifecycleNotificationsConfig{PollInterval: lc.PollInterval}) {
+		lc.PollInterval = ""
+	}
+	if lc.IdleAfter == stored.IdleAfter && lifecycleDurationRejected(&types.LifecycleNotificationsConfig{IdleAfter: lc.IdleAfter}) {
+		lc.IdleAfter = ""
+	}
+}
+
+// lifecycleDurationRejected asks the real validator whether a lone duration
+// passes, so the floors live in exactly one place. The probe is disabled
+// explicitly: both durations are validated above the `if !lc.IsEnabled()`
+// short-circuit, while an ENABLED probe carries neither `via` nor routes and
+// would be rejected for that instead — reporting every value, valid ones
+// included, as rejected and silently erasing the stored durations on every save.
+func lifecycleDurationRejected(probe *types.LifecycleNotificationsConfig) bool {
+	probe.Enabled = new(bool)
+	return types.ValidateNotificationsConfig(&types.NotificationsConfig{Lifecycle: probe}) != nil
+}
+
+// notifierUnchanged reports whether the patched notifier is byte-identical to
+// the one already stored under that name — the patch is re-sending it, not
+// editing it. Compared after mergeNotifierSettings, so a patch that only omits
+// keys the settings view does not project still counts as unchanged.
+func notifierUnchanged(current *types.NotificationsConfig, name string, patched types.NotifierConfig) bool {
+	if current == nil {
+		return false
+	}
+	existing, ok := current.Notifiers[name]
+	if !ok {
+		return false
+	}
+	return existing.Type == patched.Type && reflect.DeepEqual(existing.Settings, patched.Settings)
+}
+
 // buildGitHubAppView builds a GitHubAppView for the settings page, including
 // a live permission check if the private key is set.
 func (s *Server) buildGitHubAppView(ctx context.Context, app *types.GitHubAppConfig) GitHubAppView {
@@ -764,6 +1020,33 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 
 	// Shallow copy of config struct; maps and slices are deep-copied only when modified below
 	updatedCfg := *s.hubCfg
+
+	if patch.Notifications != nil {
+		// A settings patch is the migration point from legacy lifecycle.via
+		// to routes: a supplied route set always wins and is written alone.
+		// Gated on a NON-EMPTY route set, never on a non-nil slice:
+		// LifecycleNotificationsView always emits `routes` (as `[]` for a
+		// via-only config), so a client that GETs the view and PATCHes it back
+		// verbatim — the round trip the view's doc comment invites — would
+		// otherwise decode to an empty-but-present slice and silently destroy
+		// the only channel binding the hub has.
+		if patch.Notifications.Lifecycle != nil && len(patch.Notifications.Lifecycle.Routes) > 0 {
+			patch.Notifications.Lifecycle.Via = ""
+		}
+		mergeNotifierSettings(s.hubCfg.Notifications, patch.Notifications)
+		dropRejectedLifecycleDurations(s.hubCfg.Notifications, patch.Notifications)
+		if err := validateSettingsNotifications(s.hubCfg.Notifications, patch.Notifications); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		// s.hubCfg.Factories is read directly: resolveFactories takes the lock
+		// this handler already holds.
+		if err := validateNotifierRemovals(s.hubCfg.Notifications, patch.Notifications, s.hubCfg.Factories); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		updatedCfg.Notifications = patch.Notifications
+	}
 
 	// LLM keys — upsert/delete by name
 	if len(patch.LLMKeys) > 0 {

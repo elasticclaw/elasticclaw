@@ -565,14 +565,58 @@ type NotificationsConfig struct {
 	Lifecycle *LifecycleNotificationsConfig `yaml:"lifecycle,omitempty" json:"lifecycle,omitempty"`
 }
 
+// LifecycleEventTypes is the canonical set of lifecycle event wire types: the
+// vocabulary a route's allow-list may name, and the one the settings screen
+// renders one checkbox per entry from.
+//
+// It holds ONLY values that are written as task_run_events.event_type, because
+// that is the column route matching compares against. The concrete failure
+// kinds (provision_failed, bootstrap_failed, provider_lost,
+// permission_or_auth_failed, timeout, creation_failed, unknown_failure) are
+// run-level classifications living in failure_type; no event ever carries them
+// as its type, so a route built from them would match nothing and receive no
+// message ever while the test-send endpoint happily reported success. Failures
+// route as agent_stopped — the event a dying agent produces, rendered with the
+// headline its failure_type earns — and done_without_pr.
+var LifecycleEventTypes = []string{
+	"agent_started",
+	"pr_opened",
+	"agent_stopped",
+	"agent_idle",
+	"done_without_pr",
+}
+
+// IsLifecycleEventType reports whether event is a supported lifecycle event
+// wire type.
+func IsLifecycleEventType(event string) bool {
+	for _, eventType := range LifecycleEventTypes {
+		if event == eventType {
+			return true
+		}
+	}
+	return false
+}
+
+// LifecycleRoute sends lifecycle events through a named notifier. An empty
+// Events list receives all lifecycle event types.
+type LifecycleRoute struct {
+	Via    string   `yaml:"via" json:"via"`
+	Events []string `yaml:"events,omitempty" json:"events,omitempty"`
+}
+
 // LifecycleNotificationsConfig configures outbound notifications for agent
-// lifecycle events, sent through a named hub-level notifier.
+// lifecycle events, sent through one or more named hub-level notifiers.
 type LifecycleNotificationsConfig struct {
 	// Enabled defaults to true when the lifecycle block is present; set it
 	// to false to mute lifecycle notifications without deleting the config.
 	Enabled *bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
 	// Via names the notifier (under notifications.notifiers) to send through.
+	// Deprecated: use Routes for per-channel routing. It remains for backward
+	// compatibility and cannot be set with Routes.
 	Via string `yaml:"via" json:"via"`
+	// Routes maps lifecycle events to named notifiers. A route with no Events
+	// receives all lifecycle event types.
+	Routes []LifecycleRoute `yaml:"routes,omitempty" json:"routes,omitempty"`
 	// PollInterval is how often the notifier scans for new events. Default "5s".
 	PollInterval string `yaml:"poll_interval,omitempty" json:"pollInterval,omitempty"`
 	// IdleAfter is how long an agent must sit idle (connected, no turn
@@ -588,6 +632,21 @@ type LifecycleNotificationsConfig struct {
 // be present and Enabled must be absent (the default) or true.
 func (c *LifecycleNotificationsConfig) IsEnabled() bool {
 	return c != nil && (c.Enabled == nil || *c.Enabled)
+}
+
+// EffectiveRoutes returns configured routes, translating the legacy Via field
+// to a single route that receives all events.
+func (c *LifecycleNotificationsConfig) EffectiveRoutes() []LifecycleRoute {
+	if c == nil {
+		return nil
+	}
+	if len(c.Routes) != 0 {
+		return c.Routes
+	}
+	if c.Via != "" {
+		return []LifecycleRoute{{Via: c.Via}}
+	}
+	return nil
 }
 
 // LifecycleEventToggles enables/disables individual lifecycle notification

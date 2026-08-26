@@ -141,6 +141,86 @@ func validateNotifyVias(notifiers map[string]types.NotifierConfig, label, pipeli
 	return fmt.Errorf("%s notify actions: %s (%s)", label, strings.Join(problems, "; "), definedDesc)
 }
 
+// notifierPipelineReferences maps a notifier name to the pipeline stages whose
+// notify actions route through it. It walks the same surface the doctor's
+// checkNotifyActions judges — every workspace workflow's effective pipeline
+// plus every factory's pipeline_yaml — so the two can never disagree about
+// which notifiers a pipeline depends on. Factories are passed in rather than
+// resolved here because callers already hold the server lock.
+func notifierPipelineReferences(factories []*types.FactoryConfig) map[string][]string {
+	out := map[string][]string{}
+	collect := func(kind, name, pipelineYAML string) {
+		for _, ref := range notifyActionRefs(pipelineYAML) {
+			if ref.Via == "" {
+				continue
+			}
+			out[ref.Via] = append(out[ref.Via], fmt.Sprintf("%s %q stage %q", kind, name, ref.StageID))
+		}
+	}
+	if workspaces, err := loadExternalWorkspaces(); err == nil {
+		for _, workspace := range workspaces {
+			if workspace == nil {
+				continue
+			}
+			for _, workflow := range workspace.Workflows {
+				if workflow == nil {
+					continue
+				}
+				pipelineYAML, err := effectiveWorkflowPipelineYAML(workflow)
+				if err != nil {
+					continue
+				}
+				collect("workflow", workflow.Name, pipelineYAML)
+			}
+		}
+	}
+	for _, factory := range factories {
+		if factory == nil {
+			continue
+		}
+		collect("factory", factory.Name, factory.PipelineYAML)
+	}
+	return out
+}
+
+// validateNotifierRemovals rejects a settings patch that drops a notifier a
+// pipeline notify action still routes through. The Notifier screen lists every
+// hub notifier — including ones no lifecycle route uses and only a pipeline
+// stage references — and its Remove button sends the whole notifiers map
+// without the deleted key. Without this the save returns 200, SaveHubConfig
+// writes the notifier out of hub.yaml, and executeNotifyAction then drops
+// every stage notification with nothing but a warning in the claw
+// conversation.
+func validateNotifierRemovals(current, patch *types.NotificationsConfig, factories []*types.FactoryConfig) error {
+	if current == nil || patch == nil {
+		return nil
+	}
+	var removed []string
+	for name := range current.Notifiers {
+		if _, kept := patch.Notifiers[name]; !kept {
+			removed = append(removed, name)
+		}
+	}
+	if len(removed) == 0 {
+		return nil
+	}
+	sort.Strings(removed)
+	references := notifierPipelineReferences(factories)
+	var problems []string
+	for _, name := range removed {
+		used := references[name]
+		if len(used) == 0 {
+			continue
+		}
+		sort.Strings(used)
+		problems = append(problems, fmt.Sprintf("%q is still used by %s", name, strings.Join(used, ", ")))
+	}
+	if len(problems) == 0 {
+		return nil
+	}
+	return fmt.Errorf("notifications.notifiers: cannot remove a notifier a pipeline still notifies through: %s", strings.Join(problems, "; "))
+}
+
 // configuredNotifiers returns the notifier set defined under
 // notifications.notifiers in hub.yaml. It takes the server lock; callers
 // already holding it must read s.hubCfg.Notifications directly instead.

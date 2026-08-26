@@ -192,7 +192,7 @@ type Server struct {
 	// while stashed, count as delivered so the message is never re-sent
 	// externally (see recordNotificationDelivery). Only touched from the
 	// lifecycle tick goroutine — ticks never overlap.
-	lifecyclePendingDeliveries map[string]pendingNotificationDelivery
+	lifecyclePendingDeliveries map[pendingDeliveryKey]pendingNotificationDelivery
 
 	// lifecycleNotifierStop/Done plumb graceful shutdown for the lifecycle
 	// notifier loop: run() stops the loop and waits for the in-flight tick
@@ -1313,6 +1313,7 @@ func settingsStaticSection(section string) bool {
 		"ai-config",
 		"mcp-servers",
 		"analytics",
+		"notifier",
 		"doctor",
 		"troubleshoot":
 		return true

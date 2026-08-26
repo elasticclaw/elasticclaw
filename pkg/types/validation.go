@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/robfig/cron/v3"
 )
@@ -776,6 +777,15 @@ func ValidateNotificationsConfig(cfg *NotificationsConfig) error {
 		if strings.TrimSpace(name) == "" {
 			return fmt.Errorf("notifications.notifiers: notifier name is required")
 		}
+		// TrimSpace does not strip NUL or other control characters, and both
+		// the settings PATCH and hub.yaml round-trip them. The hub keys its
+		// per-route delivery state by notifier name and reserves a NUL-prefixed
+		// sentinel for the legacy (un-routed) rows, so a name carrying one
+		// collides with it and fences an event for every other route; a name
+		// carrying a newline forges hub log lines.
+		if strings.ContainsFunc(name, unicode.IsControl) {
+			return fmt.Errorf("notifications.notifiers: notifier name %q cannot contain control characters", name)
+		}
 		if strings.TrimSpace(notifier.Type) == "" {
 			return fmt.Errorf("notifications.notifiers.%s: type is required", name)
 		}
@@ -783,6 +793,9 @@ func ValidateNotificationsConfig(cfg *NotificationsConfig) error {
 	lc := cfg.Lifecycle
 	if lc == nil {
 		return nil
+	}
+	if lc.Via != "" && len(lc.Routes) != 0 {
+		return fmt.Errorf("notifications.lifecycle: via and routes cannot both be set")
 	}
 	// The poll interval is validated even when lifecycle is disabled, so a
 	// typo is caught before the operator flips the feature on.
@@ -811,10 +824,45 @@ func ValidateNotificationsConfig(cfg *NotificationsConfig) error {
 	if !lc.IsEnabled() {
 		return nil
 	}
-	via := strings.TrimSpace(lc.Via)
-	if via == "" {
+	// Routes are validated only from here on, symmetrically with the legacy
+	// `via` below: a DISABLED lifecycle block with a dangling reference is
+	// accepted (an operator who mutes alerts and then deletes the notifier
+	// must not be left with a hub that refuses to load), and the settings
+	// screen derives its route list from that same `via`. Validating routes
+	// above the short-circuit made every save from that screen 400 on a route
+	// entry it never renders, with no way to drop it from the UI.
+	seenRoutes := make(map[string]struct{}, len(lc.Routes))
+	for i, route := range lc.Routes {
+		via := strings.TrimSpace(route.Via)
+		if via == "" {
+			return fmt.Errorf("notifications.lifecycle.routes[%d]: via is required (the name of a notifier under notifications.notifiers)", i)
+		}
+		if _, ok := cfg.Notifiers[via]; !ok {
+			return fmt.Errorf("notifications.lifecycle.routes[%d]: via %q does not name a configured notifier (defined: %s)", i, via, notifierNames(cfg.Notifiers))
+		}
+		if _, duplicate := seenRoutes[via]; duplicate {
+			return fmt.Errorf("notifications.lifecycle.routes[%d]: via %q is duplicated", i, via)
+		}
+		seenRoutes[via] = struct{}{}
+
+		seenEvents := make(map[string]struct{}, len(route.Events))
+		for _, event := range route.Events {
+			if !IsLifecycleEventType(event) {
+				return fmt.Errorf("notifications.lifecycle.routes[%d]: event %q is not a supported lifecycle event type", i, event)
+			}
+			if _, duplicate := seenEvents[event]; duplicate {
+				return fmt.Errorf("notifications.lifecycle.routes[%d]: event %q is duplicated", i, event)
+			}
+			seenEvents[event] = struct{}{}
+		}
+	}
+	if len(lc.EffectiveRoutes()) == 0 {
 		return fmt.Errorf("notifications.lifecycle: via is required when enabled (the name of a notifier under notifications.notifiers)")
 	}
+	if lc.Via == "" {
+		return nil
+	}
+	via := strings.TrimSpace(lc.Via)
 	if _, ok := cfg.Notifiers[via]; !ok {
 		return fmt.Errorf("notifications.lifecycle: via %q does not name a configured notifier (defined: %s)", via, notifierNames(cfg.Notifiers))
 	}
