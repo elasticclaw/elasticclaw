@@ -417,6 +417,50 @@ func TestHealthEscalationThresholds(t *testing.T) {
 	}
 }
 
+// TestEscalateIdleResumeFailureSchedulesRetry covers item 5's escalation: once
+// checkAgentIdleResume gives up on repeated failed resumes, escalating must
+// route through the exact same retryable-failure path a gateway-health
+// escalation already uses (stopAgentWithReason -> scheduleClawRetry), rather
+// than a bespoke tear-down.
+func TestEscalateIdleResumeFailureSchedulesRetry(t *testing.T) {
+	s, db, runID := newClawRetryTestServer(t, "connected")
+
+	s.escalateIdleResumeFailure("retry-claw", defaultIdleResumeEscalateAfter, 45*time.Minute)
+
+	var count int
+	if err := db.QueryRow(`SELECT attempt_count FROM task_runs WHERE id=?`, runID).Scan(&count); err != nil {
+		t.Fatalf("read run: %v", err)
+	}
+	if count != 2 {
+		t.Fatalf("attempt_count=%d, want 2 (escalation must schedule a retry)", count)
+	}
+	var status string
+	if err := db.QueryRow(`SELECT status FROM claws WHERE id=?`, "retry-claw").Scan(&status); err != nil {
+		t.Fatalf("read claw status: %v", err)
+	}
+	if status != "provisioning" && status != "error" {
+		t.Fatalf("claw status=%q after escalation, want provisioning or error", status)
+	}
+}
+
+// TestEscalateIdleResumeFailureIgnoresProtectedStatus mirrors
+// escalateGatewayHealthFailure's own guard: a claw already idle/completed/
+// deleted must never be torn down just because past resumes failed against a
+// stretch that has since ended.
+func TestEscalateIdleResumeFailureIgnoresProtectedStatus(t *testing.T) {
+	s, db, runID := newClawRetryTestServer(t, "idle")
+
+	s.escalateIdleResumeFailure("retry-claw", defaultIdleResumeEscalateAfter, 45*time.Minute)
+
+	var count int
+	if err := db.QueryRow(`SELECT attempt_count FROM task_runs WHERE id=?`, runID).Scan(&count); err != nil {
+		t.Fatalf("read run: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("attempt_count=%d, want unchanged 1 for a protected claw", count)
+	}
+}
+
 func TestProviderLostClassificationAndFailureType(t *testing.T) {
 	failure := classifyAgentFailure("Provider VM lost: replicated VM no longer exists")
 	if failure.Kind != agentFailureProviderLost {

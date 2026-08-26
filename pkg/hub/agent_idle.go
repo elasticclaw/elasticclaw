@@ -435,6 +435,17 @@ const (
 	// wake-do-nothing-idle loop cannot poke forever.
 	agentIdleResumeMaxAttempts = 10
 
+	// defaultIdleResumeEscalateAfter bounds how many failed auto-resumes a
+	// claw gets before checkAgentIdleResume stops leaving it for a human and
+	// escalates instead (see escalateIdleResumeFailure in claw_retry.go).
+	// Deliberately well below agentIdleResumeMaxAttempts: the lifetime cap
+	// exists to stop poking forever, but by the time several resumes in a row
+	// have produced no progress the claw is not "eventually going to recover
+	// on its own" — see agentIdleResumeBlindGrace's comment on the coverage
+	// gap this closes (a wedged agent behind a healthy gateway never reaches
+	// claw_retry's own escalation trigger).
+	defaultIdleResumeEscalateAfter = 3
+
 	agentIdleResumePrefix = "[hub] No turn has been running for"
 )
 
@@ -550,6 +561,18 @@ func (s *Server) checkAgentIdleResume(nowAt time.Time, clawID string, cc *clawCo
 		// the paths below that return without re-latching (cap reached,
 		// no longer eligible, parked).
 		s.clearAgentIdleResumeLatch(clawID)
+	}
+	// resumeCount failed resumes have already been sent into this claw with
+	// no progress to show for it (each one re-arms only on a real turn
+	// finishing, per the anchor check above). Past the configured threshold,
+	// another identical poke is not a plausible fix — escalate instead of
+	// spending the rest of the lifetime cap on prompts that keep not
+	// landing. This is the exact gap agentIdleResumeBlindGrace's comment
+	// documents: a wedged agent behind a healthy-heartbeating gateway never
+	// reaches claw_retry's own gateway-health escalation.
+	if resumeCount >= int64(cfg.idleResumeEscalateAfter) {
+		s.escalateIdleResumeFailure(clawID, int(resumeCount), idleFor)
+		return
 	}
 	if resumeCount >= agentIdleResumeMaxAttempts {
 		return // cap already reached and already logged (see below)

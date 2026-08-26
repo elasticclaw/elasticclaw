@@ -119,6 +119,25 @@ func (s *Server) escalateGatewayHealthFailure(clawID string) {
 	s.escalateClawHealthFailure(clawID, fmt.Sprintf("workspace unresponsive: gateway unhealthy for %d consecutive checks", unhealthyMax))
 }
 
+// escalateIdleResumeFailure is the escalation checkAgentIdleResume falls back
+// to once repeated auto-resume prompts have not unstuck a claw (see
+// defaultIdleResumeEscalateAfter / idle_resume_escalate_after). It shares the
+// exact tear-down-and-replace path escalateGatewayHealthFailure already uses
+// for a wedged gateway: stopAgentWithReason, which retries through
+// scheduleClawRetry when the failure is retryable and otherwise settles the
+// claw terminally, rather than leaving it parked for a human to notice.
+//
+// Safety: the caller (checkAgentIdleResume) only reaches here after
+// confirming isBusyLocked() is false AND that a turn boundary has actually
+// been observed on this connection (or the blind-resume grace has elapsed) —
+// the same boundary care agent_idle.go's comment block demands before any
+// resume is sent. This never fires against a live turn.
+func (s *Server) escalateIdleResumeFailure(clawID string, resumeCount int, idleFor time.Duration) {
+	reason := fmt.Sprintf("workspace unresponsive: agent unresponsive after %d auto-resume attempts (%d minutes idle) with no progress", resumeCount, int(idleFor.Minutes()))
+	log.Printf("[agent-idle] claw %s had %d failed auto-resumes; escalating instead of resuming again", shortID(clawID), resumeCount)
+	s.escalateClawHealthFailure(clawID, reason)
+}
+
 // prepareClawRetry atomically fails the current attempt and creates its
 // successor. Updating the claw to error in the same transaction keeps another
 // detector from consuming a second attempt while replacement is waiting.

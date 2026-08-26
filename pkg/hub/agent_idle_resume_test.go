@@ -230,7 +230,11 @@ func TestAgentIdleResumeExclusions(t *testing.T) {
 // stops the poking. (The primary backstop is the no-progress watchdog, which
 // pauses such a claw after three identical outcomes — see the exclusion test.)
 func TestAgentIdleResumeStopsAtLifetimeCap(t *testing.T) {
-	s, db := newIdleResumeTestServer(t, nil)
+	// Escalation is a distinct concern (TestAgentIdleResumeEscalatesAfterRepeatedFailures)
+	// and is disabled here by pushing its threshold past the lifetime cap, so
+	// this test can keep exercising the cap itself in isolation.
+	beyondCap := agentIdleResumeMaxAttempts + 100
+	s, db := newIdleResumeTestServer(t, &types.LivenessConfig{IdleResumeEscalateAfter: &beyondCap})
 	const clawID = "resume-cap"
 	insertSlackTestClaw(t, db, clawID, "connected", 0, "", oldEnough)
 	setClawPipelineStage(t, db, clawID, "implement")
@@ -250,6 +254,57 @@ func TestAgentIdleResumeStopsAtLifetimeCap(t *testing.T) {
 	}
 	if got := idleResumeMessages(t, db, clawID); got != agentIdleResumeMaxAttempts {
 		t.Fatalf("injected %d resume messages, want the cap %d", got, agentIdleResumeMaxAttempts)
+	}
+}
+
+// TestAgentIdleResumeEscalatesAfterRepeatedFailures covers item 5: once a
+// claw has burned through idle_resume_escalate_after failed resumes with no
+// progress, checkAgentIdleResume must stop injecting another identical prompt
+// and escalate instead — without ever bumping the resume counter or message
+// count past the escalation threshold.
+func TestAgentIdleResumeEscalatesAfterRepeatedFailures(t *testing.T) {
+	threshold := 2
+	s, db := newIdleResumeTestServer(t, &types.LivenessConfig{IdleResumeEscalateAfter: &threshold})
+	const clawID = "resume-escalate"
+	// bootstrap_ok=1 and a real provider/task-run so escalation's retry path
+	// (escalateClawHealthFailure -> stopAgentWithReason) can actually act,
+	// same prerequisites TestEscalateIdleResumeFailureSchedulesRetry uses.
+	insertSlackTestClaw(t, db, clawID, "connected", 1, "", oldEnough)
+	if _, err := db.Exec(`UPDATE claws SET provider='noop' WHERE id=?`, clawID); err != nil {
+		t.Fatalf("set provider: %v", err)
+	}
+	if _, _, err := s.ensureTaskRunForClaw(clawID, TaskRunStart{
+		RunKind: taskRunKindPRTask, OwnerType: taskRunOwnerFactory, AnalyticsEnabled: true, RequiresPR: true, Tags: []string{"resume-escalate"},
+	}); err != nil {
+		t.Fatalf("ensure task run: %v", err)
+	}
+	setClawPipelineStage(t, db, clawID, "implement")
+
+	for i := 0; i < threshold; i++ {
+		cc := idleTestConn(clawID, time.Hour-time.Duration(i)*2*time.Minute)
+		s.checkAgentIdleResume(time.Now(), clawID, cc)
+	}
+	if got := idleResumeMessages(t, db, clawID); got != threshold {
+		t.Fatalf("injected %d resume messages before escalation, want %d", got, threshold)
+	}
+
+	// One more distinct stretch: this tick must escalate instead of resuming
+	// again, leaving the resume counter and message count exactly as they
+	// were.
+	cc := idleTestConn(clawID, 40*time.Minute)
+	s.checkAgentIdleResume(time.Now(), clawID, cc)
+	if got := idleResumeMessages(t, db, clawID); got != threshold {
+		t.Fatalf("injected %d resume messages after escalation, want unchanged %d", got, threshold)
+	}
+	if _, count := clawIdleResumeState(t, db, clawID); count != int64(threshold) {
+		t.Fatalf("resume counter=%d after escalation, want unchanged %d", count, threshold)
+	}
+	var status string
+	if err := db.QueryRow(`SELECT status FROM claws WHERE id=?`, clawID).Scan(&status); err != nil {
+		t.Fatalf("read claw status: %v", err)
+	}
+	if status == "connected" {
+		t.Fatalf("claw status=%q, want escalation to have moved it off connected", status)
 	}
 }
 

@@ -635,6 +635,24 @@ type LivenessConfig struct {
 	// recovery budget — a threshold set too low can exhaust the budget on
 	// healthy waits and leave nothing for the stall it was added for.
 	IdleResumeAfter string `yaml:"idle_resume_after,omitempty" json:"idleResumeAfter,omitempty"`
+	// IdleResumeEscalateAfter bounds how many auto-resume attempts a single
+	// idle claw may burn through before the hub stops leaving it for a human
+	// and escalates instead: the claw is torn down and replaced through the
+	// same retryable-failure path as a gateway-health escalation
+	// (stopAgentWithReason), rather than injecting yet another resume prompt
+	// that has already failed to unstick it.
+	//
+	// This covers the gap documented in agent_idle.go above
+	// agentIdleResumeBlindGrace: a stalled agent behind a healthy-heartbeating
+	// gateway never reaches claw_retry's twelve-consecutive-unhealthy-
+	// heartbeat trigger, because the gateway itself is fine — only the agent
+	// is wedged. Repeated failed resumes are the signal that this is that
+	// case, not an agent legitimately taking its time.
+	//
+	// Must stay below the lifetime auto-resume cap (agentIdleResumeMaxAttempts)
+	// or it is never reached; a value <= 0 is invalid and falls back to the
+	// default, same as gateway_unhealthy_checks.
+	IdleResumeEscalateAfter *int `yaml:"idle_resume_escalate_after,omitempty" json:"idleResumeEscalateAfter,omitempty"`
 }
 
 // IntegrationsConfig holds configs for external integrations.

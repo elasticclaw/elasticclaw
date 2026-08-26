@@ -22,6 +22,7 @@ type livenessSettings struct {
 	prConditionsMaxWait                                  time.Duration
 	idleResumeEnabled                                    bool
 	idleResumeAfter                                      time.Duration
+	idleResumeEscalateAfter                              int
 }
 
 func (s *Server) livenessEnabled() bool {
@@ -36,16 +37,17 @@ func (s *Server) livenessEnabled() bool {
 
 func (s *Server) livenessSettings() livenessSettings {
 	cfg := livenessSettings{
-		offlineGrace:        10 * time.Minute,
-		provisioningMaxAge:  30 * time.Minute,
-		claimTTL:            15 * time.Minute,
-		interval:            time.Minute,
-		gatewayUnhealthyMax: defaultGatewayUnhealthyMax,
-		busyTurnMax:         defaultBusyTurnMax,
-		silentDeathMax:      defaultSilentDeathMax,
-		prConditionsMaxWait: 2 * time.Hour,
-		idleResumeEnabled:   true,
-		idleResumeAfter:     defaultIdleResumeAfter,
+		offlineGrace:            10 * time.Minute,
+		provisioningMaxAge:      30 * time.Minute,
+		claimTTL:                15 * time.Minute,
+		interval:                time.Minute,
+		gatewayUnhealthyMax:     defaultGatewayUnhealthyMax,
+		busyTurnMax:             defaultBusyTurnMax,
+		silentDeathMax:          defaultSilentDeathMax,
+		prConditionsMaxWait:     2 * time.Hour,
+		idleResumeEnabled:       true,
+		idleResumeAfter:         defaultIdleResumeAfter,
+		idleResumeEscalateAfter: defaultIdleResumeEscalateAfter,
 	}
 	s.mu.RLock()
 	l := livenessConfig(s.hubCfg)
@@ -90,6 +92,13 @@ func (s *Server) livenessSettings() livenessSettings {
 			log.Printf("[reaper] invalid gateway_unhealthy_checks %d; using %d", *l.GatewayUnhealthyChecks, cfg.gatewayUnhealthyMax)
 		} else {
 			cfg.gatewayUnhealthyMax = *l.GatewayUnhealthyChecks
+		}
+	}
+	if l.IdleResumeEscalateAfter != nil {
+		if *l.IdleResumeEscalateAfter <= 0 {
+			log.Printf("[reaper] invalid idle_resume_escalate_after %d; using %d", *l.IdleResumeEscalateAfter, cfg.idleResumeEscalateAfter)
+		} else {
+			cfg.idleResumeEscalateAfter = *l.IdleResumeEscalateAfter
 		}
 	}
 	return cfg
