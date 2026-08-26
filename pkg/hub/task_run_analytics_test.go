@@ -160,6 +160,23 @@ func TestTaskRunHumanWaitTimesNoSignalToPROpenWithoutTaskCompleted(t *testing.T)
 	}
 }
 
+func TestTaskRunHumanWaitTimesBoundsWaitBeforeHumanResponse(t *testing.T) {
+	summary := taskRunHumanWaitTimes([]taskRunEventProjection{
+		{eventType: taskRunEventAgentStarted, eventTime: 50},
+		{eventType: taskRunEventHumanDashboardMessage, eventTime: 100},
+		{eventType: taskRunEventAgentStarted, eventTime: 200},
+		{eventType: taskRunEventTaskCompleted, eventTime: 2500},
+		{eventType: taskRunEventPROpened, eventTime: 2600},
+	}, 0, 0)
+	if len(summary.intervals) != 1 {
+		t.Fatalf("intervals = %#v, want one bounded human-response wait", summary.intervals)
+	}
+	got := summary.intervals[0]
+	if got.startAt != 50 || got.endAt != 100 || got.durationMs != 50 {
+		t.Fatalf("interval = %#v, want [50,100] (50ms), not agent activity after the response", got)
+	}
+}
+
 func TestTaskRunMaterializationClassifiesCleanSuccess(t *testing.T) {
 	s, db := newTaskRunAnalyticsTestServer(t, "claw-clean")
 	runID, attemptID := startTaskRunForTest(t, s, "claw-clean", "clean")

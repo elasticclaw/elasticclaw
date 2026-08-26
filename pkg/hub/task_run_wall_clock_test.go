@@ -37,7 +37,7 @@ func TestTaskRunAnalyticsWallClock(t *testing.T) {
 		QueuedAt: 100, ProvisionStartedAt: 300, StartedAt: 500, FinishedAt: 2000, PROpenedAt: 1000, MergedAt: 1200,
 	}
 	humanWait := taskRunAnalyticsHumanWaitView{
-		SignalToPROpenMs: 999, // Deliberately excluded from the aggregate wait bucket.
+		SignalToPROpenMs: 999,
 		PROpenToMergeMs:  200,
 		Intervals:        []taskRunAnalyticsHumanWaitIntervalView{{StartAt: 600, EndAt: 700, DurationMs: 100}, {StartAt: 800, EndAt: 850, DurationMs: 50}},
 	}
@@ -47,8 +47,22 @@ func TestTaskRunAnalyticsWallClock(t *testing.T) {
 	})
 
 	got := taskRunAnalyticsWallClock(run, humanWait, activity)
-	if got.TotalMs != 1500 || got.QueueTimeMs != 200 || got.ToolTimeMs != 700 || got.HumanWaitMs != 350 || got.UnattributedTimeMs != 250 {
-		t.Fatalf("wall clock = %#v, want total=1500 queue=200 tool=700 human=350 unattributed=250", got)
+	// Signal-to-PR-open [1,1000] is clipped to the run [500,2000], then joins
+	// PR-open-to-merge [1000,1200], for 700ms total. 1500-200-700-700 < 0, so residual is clamped.
+	if got.TotalMs != 1500 || got.QueueTimeMs != 200 || got.ToolTimeMs != 700 || got.HumanWaitMs != 700 || got.UnattributedTimeMs != 0 {
+		t.Fatalf("wall clock = %#v, want total=1500 queue=200 tool=700 human=700 unattributed=0", got)
+	}
+}
+
+func TestTaskRunAnalyticsWallClockMergesOverlappingToolSpans(t *testing.T) {
+	run := taskRunAnalyticsRunView{StartedAt: 1, FinishedAt: 2000}
+	activity := []taskRunActivityRecord{
+		{Kind: "tool", Phase: "completed", CallID: "one", DurationMs: 500, CreatedAt: 1000},
+		{Kind: "tool", Phase: "completed", CallID: "two", DurationMs: 500, CreatedAt: 1200},
+	}
+	got := taskRunAnalyticsWallClock(run, taskRunAnalyticsHumanWaitView{}, activity)
+	if got.ToolTimeMs != 700 {
+		t.Fatalf("tool time = %d, want merged [500,1200] duration 700", got.ToolTimeMs)
 	}
 }
 
@@ -74,6 +88,30 @@ func TestTaskRunAnalyticsWallClockHumanWaitDoesNotDoubleCount(t *testing.T) {
 	}
 }
 
+func TestHumanWaitSpansIncludesSignalToPROpenForRunAndStage(t *testing.T) {
+	run := taskRunAnalyticsRunView{StartedAt: 1, FinishedAt: 2000, PROpenedAt: 1000}
+	humanWait := taskRunAnalyticsHumanWaitView{SignalToPROpenMs: 999}
+	spans := humanWaitSpans(run, humanWait)
+	wallClock := taskRunAnalyticsWallClock(run, humanWait, nil)
+	stageWait := overlapDurationMs(spans, 1, 1000)
+	if wallClock.HumanWaitMs != 999 || stageWait != wallClock.HumanWaitMs {
+		t.Fatalf("run human wait = %d, stage human wait = %d, want matching 999ms", wallClock.HumanWaitMs, stageWait)
+	}
+}
+
+func TestHumanWaitSpansClipsToRunWindow(t *testing.T) {
+	run := taskRunAnalyticsRunView{StartedAt: 100, FinishedAt: 200}
+	humanWait := taskRunAnalyticsHumanWaitView{Intervals: []taskRunAnalyticsHumanWaitIntervalView{{StartAt: 50, EndAt: 250, DurationMs: 200}}}
+	spans := humanWaitSpans(run, humanWait)
+	if len(spans) != 1 || spans[0] != (wallClockSpan{start: 100, end: 200}) {
+		t.Fatalf("spans = %#v, want clipped [100,200]", spans)
+	}
+	got := taskRunAnalyticsWallClock(run, humanWait, nil)
+	if got.HumanWaitMs != 100 || got.HumanWaitMs > got.TotalMs {
+		t.Fatalf("human wait = %d total = %d, want clipped 100ms within total", got.HumanWaitMs, got.TotalMs)
+	}
+}
+
 func TestReadTaskRunActivityRecordsUsesActivityFormat(t *testing.T) {
 	s, db := newTaskRunAnalyticsTestServer(t, "claw-activity-format")
 	defer db.Close()
@@ -86,7 +124,7 @@ func TestReadTaskRunActivityRecordsUsesActivityFormat(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read activity: %v", err)
 	}
-	if len(records) != 1 || records[0].DurationMs != 1500 {
-		t.Fatalf("records = %#v, want one 1500ms tool", records)
+	if len(records) != 1 || records[0].DurationMs != 1500 || records[0].CreatedAt != 1 {
+		t.Fatalf("records = %#v, want one 1500ms tool created at 1", records)
 	}
 }

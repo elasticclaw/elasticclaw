@@ -1500,11 +1500,11 @@ type taskRunHumanWaitSummary struct {
 // taskRunHumanWaitTimes reports intervals separately from stage timings. A
 // task_completed event is the clearest existing signal that the agent's work
 // has finished. Without that event, signal-to-PR-open is not reported because
-// no reliable completion anchor exists. A human-bounded interval starts at an
-// existing human-authored event and ends at the first later non-human event,
-// because that is the first recorded indication that work resumed after the
-// human interaction. Open-ended intervals are intentionally omitted: without
-// a subsequent event their duration is not yet bounded by recorded evidence.
+// no reliable completion anchor exists. A human-bounded interval starts at the
+// most recent preceding non-human event and ends at the human-authored event:
+// it measures the time the run was waiting for that response, rather than work
+// which may have continued after it. Events without a preceding machine anchor
+// are intentionally omitted because their start is not bounded by evidence.
 func taskRunHumanWaitTimes(events []taskRunEventProjection, prOpenedAt, mergedAt int64) taskRunHumanWaitSummary {
 	var summary taskRunHumanWaitSummary
 	if prOpenedAt > 0 {
@@ -1524,18 +1524,18 @@ func taskRunHumanWaitTimes(events []taskRunEventProjection, prOpenedAt, mergedAt
 	if prOpenedAt > 0 && mergedAt >= prOpenedAt {
 		summary.prOpenToMergeMs = mergedAt - prOpenedAt
 	}
-	for i, event := range events {
-		if !isHumanTaskRunEvent(event) || event.eventTime <= 0 {
+	var lastMachineEventTime int64
+	for _, event := range events {
+		if isHumanTaskRunEvent(event) {
+			if event.eventTime > 0 && lastMachineEventTime > 0 && lastMachineEventTime <= event.eventTime {
+				summary.intervals = append(summary.intervals, taskRunHumanWaitInterval{
+					startAt: lastMachineEventTime, endAt: event.eventTime, durationMs: event.eventTime - lastMachineEventTime,
+				})
+			}
 			continue
 		}
-		for _, next := range events[i+1:] {
-			if isHumanTaskRunEvent(next) || next.eventTime < event.eventTime {
-				continue
-			}
-			summary.intervals = append(summary.intervals, taskRunHumanWaitInterval{
-				startAt: event.eventTime, endAt: next.eventTime, durationMs: next.eventTime - event.eventTime,
-			})
-			break
+		if event.eventTime > 0 {
+			lastMachineEventTime = event.eventTime
 		}
 	}
 	return summary
