@@ -4677,6 +4677,14 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
   // went through.
   const [saveErrors, setSaveErrors] = useState<Record<string, string>>({})
 
+  // Reconcile the stored clamp against the config actually loaded: it records a
+  // pause this screen imposed for an empty route set, so a config that HAS
+  // routes has already been repaired — by this browser or any other — and the
+  // flag must go before it can lift an `enabled:false` the operator chose.
+  useEffect(() => {
+    if (routes.length > 0) writeClampedPause(false)
+  }, [routes.length])
+
   const resetForm = () => {
     setFormName(""); setFormChannel(""); setFormTokenSecret(""); setFormMinSendInterval("")
     setFormRouted(true); setFormEvents([]); setFormError(""); setEditName(null)
@@ -4760,7 +4768,13 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
     // the hub forever, contradicting the dialog's "until another channel is
     // routed". The flag is recorded here rather than inferred from the reloaded
     // config so a deliberate master-switch OFF survives a channel swap.
-    const wantEnabled = next.enabled ?? (enabled || readClampedPause() || neverConfigured)
+    // The clamp only carries meaning while the LOADED config still has no
+    // routes: once routing is restored anywhere else (hub.yaml, the CLI, a
+    // second operator, another device) the hub holds a pause the operator owns,
+    // and a stale flag here would flip alerts back on from the next unrelated
+    // save with nothing on screen announcing it.
+    const clampActive = routes.length === 0 && readClampedPause()
+    const wantEnabled = next.enabled ?? (enabled || clampActive || neverConfigured)
     const outLifecycle: Record<string, unknown> = {
       enabled: outRoutes.length > 0 && wantEnabled,
       routes: outRoutes,
@@ -4770,7 +4784,10 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
     if (lifecycle?.idleAfter) outLifecycle.idleAfter = lifecycle.idleAfter
     return {
       patch: { notifications: { notifiers: outNotifiers, lifecycle: outLifecycle } },
-      clamp: outRoutes.length === 0 && wantEnabled,
+      // A hub that never had a lifecycle block and is saved with routing off is
+      // pausing nothing — that is the operator's own choice, not a pause this
+      // screen imposed — so it must not leave a clamp behind to lift later.
+      clamp: outRoutes.length === 0 && wantEnabled && !neverConfigured,
     }
   }
 
@@ -4819,8 +4836,14 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
     // Every type checked is the same thing as no filter; store it as one so a
     // later-added alert type keeps reaching the channel.
     const events = formEvents.length === eventTypes.length ? [] : formEvents
-    const nextRoutes = routes.filter((route) => route.via !== name)
-    if (formRouted) nextRoutes.push({ via: name, events })
+    // Route ORDER is meaningful — a test send without an explicit `via` uses the
+    // first effective route — so editing an already-routed channel updates it in
+    // place instead of removing and re-appending it.
+    const routedIndex = routes.findIndex((route) => route.via === name)
+    const nextRoutes = formRouted && routedIndex >= 0
+      ? routes.map((route, i) => (i === routedIndex ? { via: name, events } : route))
+      : routes.filter((route) => route.via !== name)
+    if (formRouted && routedIndex < 0) nextRoutes.push({ via: name, events })
 
     const generation = saveGeneration.current
     const { persisted, message: failure } = await savePatch({ notifiers: nextNotifiers, routes: nextRoutes })
@@ -4912,6 +4935,15 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
   }
 
   const routedCount = routes.filter((route) => notifiers[route.via]).length
+  // What the header badge counts: a channel is only receiving alerts if some
+  // event type can actually reach it. The global category switches mute before
+  // routing, so a channel routed for nothing but muted types receives nothing —
+  // exactly what its own card already says, type by type.
+  const receivingCount = routes.filter(
+    (route) =>
+      notifiers[route.via] &&
+      (route.events?.length ? route.events : eventTypes).some((eventType) => !isEventMuted(eventType)),
+  ).length
   // Same predicate saveChannel stores by: every type checked is persisted as
   // the empty allow-list, so the summary must call it "all alerts" too — or it
   // promises a filter the save is about to discard.
@@ -4933,7 +4965,7 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
           </span>
           {enabled ? (
             <span className="text-xs bg-green-500/10 text-green-400 border border-green-500/20 px-2 py-1 rounded font-medium">
-              {routedCount} receiving alerts
+              {receivingCount} receiving alerts
             </span>
           ) : (
             <span className="text-xs bg-amber-500/10 text-amber-400 border border-amber-500/20 px-2 py-1 rounded font-medium">

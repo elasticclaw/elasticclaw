@@ -295,9 +295,30 @@ func (s *Server) ensureLifecycleClawRouteBaselines(lc *types.LifecycleNotificati
 		// ensureLifecycleClawRouteBaseline handles its one key.
 		return
 	}
-	if _, found, err := s.notifierStateInt64(lifecycleStateClawBaselineKey); err != nil || !found {
-		// Never baselined: the claw pass's own first-run seeding covers every
-		// route in one statement.
+	if _, found, err := s.notifierStateInt64(lifecycleStateClawBaselineKey); err != nil {
+		return
+	} else if !found {
+		// Never baselined. Leaving this to the claw pass's own first-run
+		// seeding is what buries the very window the tick promises is "held
+		// until it can be built": on a first-ever enable where NO route can be
+		// built, the tick returns before the claw pass runs, so the fence is
+		// written on the first BUILDABLE tick instead — marking every ad-hoc
+		// claw that connected during the outage as handled, while the task-run
+		// cursors stamped just above deliver that same window. Seed it here,
+		// at config time, exactly as initLifecycleNotifierBaseline does at boot.
+		if !s.lifecycleRouteWatermarksMaterialised(routes) {
+			// ensureLifecycleRouteWatermarks bailed on a state-read failure, so
+			// a route has no cursor yet; stamping its claw baseline now would
+			// make it read as the legacy incumbent (lifecycleSingleViaIncumbent)
+			// and hand it the shared floor. The next tick retries both in order.
+			return
+		}
+		if err := s.seedLifecycleClawBaseline(); err != nil {
+			log.Printf("[notify] seed claw baseline: %v", err)
+			return
+		}
+		s.setNotifierStateInt64(lifecycleStateClawBaselineKey, 1)
+		s.stampLifecycleClawRouteBaselines(lc)
 		return
 	}
 	for _, route := range routes {

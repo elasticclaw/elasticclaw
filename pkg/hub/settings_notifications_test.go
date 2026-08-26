@@ -470,6 +470,42 @@ func TestSettingsPatchClearsUnusableLifecycleDurations(t *testing.T) {
 	}
 }
 
+// Regression: the drop above must fire only on a duration validation actually
+// rejects. The probe it validates carries no `via` and no routes, so an ENABLED
+// probe is rejected for THAT — reporting every value as unusable and erasing a
+// perfectly valid poll_interval/idle_after from hub.yaml on every save made
+// from the Notifier screen, which re-sends both verbatim.
+func TestSettingsPatchKeepsValidLifecycleDurations(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "hub.yaml")
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", path)
+	s, _ := NewTestServerWithConfig(t, &types.HubConfig{Notifications: &types.NotificationsConfig{
+		Notifiers: map[string]types.NotifierConfig{"eng": {Type: "slack", Settings: map[string]any{
+			"channel": "C0123ABCD", "token_secret": "slack_token",
+		}}},
+		Lifecycle: &types.LifecycleNotificationsConfig{Via: "eng", PollInterval: "60s", IdleAfter: "30m"},
+	}}, "", "", "")
+	if err := config.SaveHubConfig(s.hubCfg); err != nil {
+		t.Fatal(err)
+	}
+
+	body := []byte(`{"notifications":{"notifiers":` +
+		`{"eng":{"type":"slack","channel":"C0123ABCD","token_secret":"slack_token"}},` +
+		`"lifecycle":{"enabled":true,"routes":[{"via":"eng"}],"pollInterval":"60s","idleAfter":"30m"}}}`)
+	rr := httptest.NewRecorder()
+	s.patchSettings(rr, httptest.NewRequest(http.MethodPatch, "/api/settings", bytes.NewReader(body)))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("PATCH status = %d, want 200; body = %s", rr.Code, rr.Body.String())
+	}
+	diskCfg, err := config.LoadHubConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	lc := diskCfg.Notifications.Lifecycle
+	if lc.PollInterval != "60s" || lc.IdleAfter != "30m" {
+		t.Fatalf("lifecycle durations = %q/%q, want them preserved", lc.PollInterval, lc.IdleAfter)
+	}
+}
+
 // Regression: api_base decides where the notifier's bot token is sent, and the
 // patch preserves token_secret, so repointing it through the settings API was
 // token exfiltration (and SSRF) in one PATCH.

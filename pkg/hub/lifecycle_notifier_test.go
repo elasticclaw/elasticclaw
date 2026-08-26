@@ -2557,6 +2557,43 @@ func TestLifecycleCollapseToOneUnbuildableRouteFencesAtConfigTime(t *testing.T) 
 	}
 }
 
+// Regression: on the FIRST-EVER enable of a multi-route config whose routes are
+// all unbuildable, the tick returns at `len(routes) == 0` before the claw pass
+// runs, so the shared claw baseline was written on the first BUILDABLE tick
+// instead — burying every ad-hoc claw event produced during the outage as
+// "skipped", while the task-run cursors stamped at enable time delivered that
+// same window.
+func TestLifecycleFirstEnableWithNoBuildableRouteFencesClawsAtConfigTime(t *testing.T) {
+	fake := newFakeSlackServer(t)
+	s, db := newSlackNotifierRoutesTestServer(t, fake.server.URL, []types.LifecycleRoute{{Via: "alerts-a"}, {Via: "alerts-b"}})
+	// Enabled for the first time with the token secret not created yet: no
+	// cursor, no claw baseline, and not one route that can be built.
+	addSlackTestNotifier(s, "alerts-a", "secret-that-does-not-exist", "C0AAA")
+	addSlackTestNotifier(s, "alerts-b", "secret-that-does-not-exist", "C0BBB")
+	s.lifecycleNotifierTick()
+
+	// Produced during the outage, so owed to both routes.
+	insertLifecycleRouteEvent(t, db, "during-outage", taskRunEventAgentStarted)
+	insertSlackTestClaw(t, db, "claw-during-outage", "connected", 1, "", oldEnough)
+	s.lifecycleNotifierTick()
+	if fake.count() != 0 {
+		t.Fatalf("an unbuildable route sent %d messages", fake.count())
+	}
+
+	addSlackTestNotifier(s, "alerts-a", testNotifierToken, "C0AAA")
+	addSlackTestNotifier(s, "alerts-b", testNotifierToken, "C0BBB")
+	s.lifecycleNotifierTick()
+	s.lifecycleNotifierTick()
+	for _, via := range []string{"alerts-a", "alerts-b"} {
+		if status, ok := routeDeliveryStatus(t, db, "during-outage", via); !ok || status != notificationDeliveryStatusSent {
+			t.Fatalf("the task-run event produced during the outage was never delivered to %s: %q (%v)", via, status, ok)
+		}
+		if status, ok := routeDeliveryStatus(t, db, lifecycleClawStartedKey("claw-during-outage"), via); !ok || status != notificationDeliveryStatusSent {
+			t.Fatalf("the claw that connected during the outage was buried for %s: %q (%v)", via, status, ok)
+		}
+	}
+}
+
 // Regression: a lone route with a restricted allow-list latches routes_live
 // (parking a rejected kind writes per-route rows) while still reading the
 // SHARED cursor. ensureLifecycleRouteWatermarks gated the "inherit the shared

@@ -714,6 +714,24 @@ func (s *Server) ensureLifecycleRouteWatermarks(lc *types.LifecycleNotifications
 	}
 }
 
+// lifecycleRouteWatermarksMaterialised reports whether every configured route
+// already carries a cursor of its own. It is the guard for writing per-route
+// claw baselines: a route stamped as baselined while it has no cursor reads as
+// the legacy incumbent (lifecycleSingleViaIncumbent) and would then be handed
+// the shared floor and replay everything piled up behind it.
+func (s *Server) lifecycleRouteWatermarksMaterialised(routes []types.LifecycleRoute) bool {
+	for _, route := range routes {
+		via := strings.TrimSpace(route.Via)
+		if via == "" {
+			continue
+		}
+		if _, found, err := s.notifierStateInt64(lifecycleRouteWatermarkKey(via)); err != nil || !found {
+			return false
+		}
+	}
+	return true
+}
+
 // lifecycleRoutingSchemeLive reports whether the per-route state scheme has
 // already gone live for this hub. It is how both passes tell a legacy
 // single-`via` migration (nothing per-route recorded yet, so the shared state is

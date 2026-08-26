@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/robfig/cron/v3"
 )
@@ -775,6 +776,15 @@ func ValidateNotificationsConfig(cfg *NotificationsConfig) error {
 	for name, notifier := range cfg.Notifiers {
 		if strings.TrimSpace(name) == "" {
 			return fmt.Errorf("notifications.notifiers: notifier name is required")
+		}
+		// TrimSpace does not strip NUL or other control characters, and both
+		// the settings PATCH and hub.yaml round-trip them. The hub keys its
+		// per-route delivery state by notifier name and reserves a NUL-prefixed
+		// sentinel for the legacy (un-routed) rows, so a name carrying one
+		// collides with it and fences an event for every other route; a name
+		// carrying a newline forges hub log lines.
+		if strings.ContainsFunc(name, unicode.IsControl) {
+			return fmt.Errorf("notifications.notifiers: notifier name %q cannot contain control characters", name)
 		}
 		if strings.TrimSpace(notifier.Type) == "" {
 			return fmt.Errorf("notifications.notifiers.%s: type is required", name)

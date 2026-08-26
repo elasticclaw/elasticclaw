@@ -870,8 +870,13 @@ func dropRejectedLifecycleDurations(current, patch *types.NotificationsConfig) {
 }
 
 // lifecycleDurationRejected asks the real validator whether a lone duration
-// passes, so the floors live in exactly one place.
+// passes, so the floors live in exactly one place. The probe is disabled
+// explicitly: both durations are validated above the `if !lc.IsEnabled()`
+// short-circuit, while an ENABLED probe carries neither `via` nor routes and
+// would be rejected for that instead — reporting every value, valid ones
+// included, as rejected and silently erasing the stored durations on every save.
 func lifecycleDurationRejected(probe *types.LifecycleNotificationsConfig) bool {
+	probe.Enabled = new(bool)
 	return types.ValidateNotificationsConfig(&types.NotificationsConfig{Lifecycle: probe}) != nil
 }
 

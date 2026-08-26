@@ -106,6 +106,26 @@ func TestValidateNotificationsConfig(t *testing.T) {
 			errMsg:  "type is required",
 		},
 		{
+			// The hub keys per-route delivery state by notifier name and
+			// reserves "\x00legacy" for the legacy un-routed rows: a name
+			// carrying a NUL forges that sentinel and fences an event for every
+			// other route. A name carrying a newline forges hub log lines.
+			name: "notifier name with a NUL",
+			cfg: &NotificationsConfig{
+				Notifiers: map[string]NotifierConfig{"\x00legacy": {Type: "slack"}},
+			},
+			wantErr: true,
+			errMsg:  "cannot contain control characters",
+		},
+		{
+			name: "notifier name with a newline",
+			cfg: &NotificationsConfig{
+				Notifiers: map[string]NotifierConfig{"eng\nagents": {Type: "slack"}},
+			},
+			wantErr: true,
+			errMsg:  "cannot contain control characters",
+		},
+		{
 			name: "lifecycle enabled without via",
 			cfg: &NotificationsConfig{
 				Notifiers: slack(),
