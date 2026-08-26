@@ -4395,6 +4395,9 @@ gh auth status`
 			if len(repositories) > 0 {
 				verifyCloneScript := "export HOME=/home/daytona; cd ~/.openclaw/workspace; "
 				for _, repo := range repositories {
+					if isRepositoryPattern(repo.Repo) || !shouldCloneRepo(repo) {
+						continue
+					}
 					verifyCloneScript += daytonaRepoReadinessSnippet(repo.Repo)
 				}
 				verifyCloneTimeout := githubBootstrapCloneVerifyTimeout(len(repositories))
@@ -4449,6 +4452,9 @@ gh auth status`
 		s.setBootstrapStatus(clawID, "Verifying workspace readiness")
 		verifyScript := "export HOME=/home/daytona; cd ~/.openclaw/workspace; "
 		for _, repo := range repositories {
+			if isRepositoryPattern(repo.Repo) || !shouldCloneRepo(repo) {
+				continue
+			}
 			verifyScript += daytonaRepoReadinessSnippet(repo.Repo)
 		}
 		verifyResult, verifyErr := p.ExecWithTimeout(ctx, instanceID, []string{"bash", "-c", verifyScript}, 20*time.Second)
@@ -7251,7 +7257,7 @@ func buildGitHubCloneScript(repos []types.GitHubRepoAccess) string {
 	}
 	var b strings.Builder
 	for _, r := range repos {
-		if isRepositoryPattern(r.Repo) {
+		if isRepositoryPattern(r.Repo) || !shouldCloneRepo(r) {
 			continue
 		}
 		parts := strings.SplitN(r.Repo, "/", 2)
@@ -7402,7 +7408,7 @@ func buildDaytonaGitHubCloneScript(repos []types.GitHubRepoAccess) string {
 	// before git uses it (helper still refreshes if git asks again).
 	b.WriteString(`. /etc/profile.d/elasticclaw-github.sh 2>/dev/null || true; `)
 	for _, repo := range repos {
-		if isRepositoryPattern(repo.Repo) {
+		if isRepositoryPattern(repo.Repo) || !shouldCloneRepo(repo) {
 			continue
 		}
 		repoName := repoDirectoryName(repo.Repo)
@@ -7455,7 +7461,7 @@ FOUND=0
   printf '%%s\n\n' 'ElasticClaw detected repository-owned agent instruction files. Read the relevant files before making changes in that repository.'
 `, shellDoubleQuote(workspaceDir))
 	for _, repo := range repos {
-		if isRepositoryPattern(repo.Repo) {
+		if isRepositoryPattern(repo.Repo) || !shouldCloneRepo(repo) {
 			continue
 		}
 		repoName := repoDirectoryName(repo.Repo)
@@ -7492,7 +7498,7 @@ ENV_FOUND=0
   printf '%%s\n\n' 'For a sequence of commands in one repository, use: cd <repo> && nix develop --accept-flake-config'
 `, repoInstructionsIndexName, repoInstructionsIndexName)
 	for _, repo := range repos {
-		if isRepositoryPattern(repo.Repo) {
+		if isRepositoryPattern(repo.Repo) || !shouldCloneRepo(repo) {
 			continue
 		}
 		repoName := repoDirectoryName(repo.Repo)

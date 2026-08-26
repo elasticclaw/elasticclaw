@@ -73,10 +73,12 @@ func TestDaytonaGitHubCloneScriptUsesCleanHTTPSRemote(t *testing.T) {
 	assertNotContains(t, script, "sed \"s/${GH_TOKEN}", "clone output redaction should not depend on token in URL")
 }
 
-func TestBuildGitHubCloneScriptSkipsPatterns(t *testing.T) {
+func TestBuildGitHubCloneScriptSkipsPatternsAndCloneFalse(t *testing.T) {
+	cloneFalse := false
 	script := buildGitHubCloneScript([]types.GitHubRepoAccess{
 		{Repo: "org/clone-me", Permissions: "write"},
 		{Repo: "org/*", Permissions: "read"},
+		{Repo: "org/access-only", Permissions: "read", Clone: &cloneFalse},
 	})
 	if !strings.Contains(script, "git clone https://github.com/org/clone-me") {
 		t.Fatalf("expected exact repo to be cloned, got:\n%s", script)
@@ -84,18 +86,26 @@ func TestBuildGitHubCloneScriptSkipsPatterns(t *testing.T) {
 	if strings.Contains(script, "org/*") {
 		t.Fatalf("glob pattern should not appear as a clone target, got:\n%s", script)
 	}
+	if strings.Contains(script, "org/access-only") {
+		t.Fatalf("clone:false repo should not be cloned, got:\n%s", script)
+	}
 }
 
-func TestBuildDaytonaGitHubCloneScriptSkipsPatterns(t *testing.T) {
+func TestBuildDaytonaGitHubCloneScriptSkipsPatternsAndCloneFalse(t *testing.T) {
+	cloneFalse := false
 	script := buildDaytonaGitHubCloneScript([]types.GitHubRepoAccess{
 		{Repo: "org/clone-me", Permissions: "write"},
 		{Repo: "org/*", Permissions: "read"},
+		{Repo: "org/access-only", Permissions: "read", Clone: &cloneFalse},
 	})
 	if !strings.Contains(script, "https://github.com/org/clone-me") {
 		t.Fatalf("expected exact repo to be cloned, got:\n%s", script)
 	}
 	if strings.Contains(script, "org/*") {
 		t.Fatalf("glob pattern should not appear as a clone target, got:\n%s", script)
+	}
+	if strings.Contains(script, "org/access-only") {
+		t.Fatalf("clone:false repo should not be cloned, got:\n%s", script)
 	}
 }
 

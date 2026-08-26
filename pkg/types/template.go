@@ -286,6 +286,7 @@ type GitHubAppConfig struct {
 type GitHubRepoAccess struct {
 	Repo        string `yaml:"repo"        json:"repo"`        // e.g. "owner/repo", "*-infra-*", or "owner/*"
 	Permissions string `yaml:"permissions" json:"permissions"` // "read" or "write" (default: "read")
+	Clone       *bool  `yaml:"clone"       json:"clone,omitempty"` // whether to clone the repo; nil/true means clone
 }
 
 // RepositoryAccessList accepts the current object form:

@@ -14,6 +14,42 @@ func isRepositoryPattern(repo string) bool {
 	return strings.ContainsAny(repo, "*?[")
 }
 
+// shouldCloneRepo reports whether a repository selector should be cloned.
+// nil or true means clone; explicit false means do not clone.
+func shouldCloneRepo(r types.GitHubRepoAccess) bool {
+	if r.Clone != nil && !*r.Clone {
+		return false
+	}
+	return true
+}
+
+// patternMatchesAnyRepo reports whether a glob pattern matches at least one
+// repository in the available list. It mirrors the matching rules used by
+// expandRepositoryAccess.
+func patternMatchesAnyRepo(pattern string, available []githubRepository) bool {
+	pattern = strings.ToLower(strings.TrimSpace(pattern))
+	if pattern == "" {
+		return false
+	}
+	matchFullName := strings.Contains(pattern, "/")
+	for _, repo := range available {
+		if repo.Name == "" {
+			continue
+		}
+		target := strings.ToLower(repo.Name)
+		if matchFullName {
+			if repo.FullName == "" {
+				continue
+			}
+			target = strings.ToLower(repo.FullName)
+		}
+		if matched, _ := path.Match(pattern, target); matched {
+			return true
+		}
+	}
+	return false
+}
+
 func hasRepositoryGlob(repositories []types.GitHubRepoAccess) bool {
 	for _, repository := range repositories {
 		if isRepositoryPattern(repository.Repo) {
@@ -152,13 +188,14 @@ func expandRepositoryAccess(selectors []types.GitHubRepoAccess, available []gith
 	return expanded, nil
 }
 
-// expandWorkspaceRepositories validates repository selectors and returns the
-// original selectors. Exact selectors are kept as-is. Glob selectors are checked
-// against the accessible repositories of the first matching GitHub App
-// installation to ensure they are not typos, but they are not expanded into the
-// claw's repository list. This keeps the credential helper able to match
-// dynamically at token request time without expanding an entire org into the
-// repository list (which would also clone every matched repo).
+// expandWorkspaceRepositories validates repository selectors and expands glob
+// patterns that should be cloned. Exact selectors are kept as-is. Glob selectors
+// with clone=true (or unspecified, which defaults to true) are expanded into the
+// matching repositories from the first GitHub App installation that can satisfy
+// them. Glob selectors with clone=false are kept as patterns and validated to
+// ensure they match at least one accessible repository. This lets a workspace
+// grant access to many repositories without cloning them all, while preserving
+// the original behavior of cloning every matching repository by default.
 func (s *Server) expandWorkspaceRepositories(ctx context.Context, workspaceName string, selectors []types.GitHubRepoAccess) ([]types.GitHubRepoAccess, error) {
 	if !hasRepositoryGlob(selectors) {
 		return append([]types.GitHubRepoAccess(nil), selectors...), nil
@@ -204,18 +241,39 @@ func (s *Server) expandWorkspaceRepositories(ctx context.Context, workspaceName 
 				failures = append(failures, fmt.Sprintf("app %d installation %d: %v", appConfig.AppID, installation.ID, err))
 				continue
 			}
-			// Validate only the glob selectors. We still return the original
-			// selector list so the credential helper can match it dynamically.
-			globSelectors := make([]types.GitHubRepoAccess, 0, len(selectors))
+			result := make([]types.GitHubRepoAccess, 0, len(selectors))
+			var toExpand []types.GitHubRepoAccess
+			valid := true
 			for _, sel := range selectors {
-				if isRepositoryPattern(sel.Repo) {
-					globSelectors = append(globSelectors, sel)
+				if !isRepositoryPattern(sel.Repo) {
+					result = append(result, sel)
+					continue
 				}
+				if !shouldCloneRepo(sel) {
+					if !patternMatchesAnyRepo(sel.Repo, available) {
+						valid = false
+						failures = append(failures, fmt.Sprintf("app %d installation %d: repository pattern %q matched no accessible repositories", appConfig.AppID, installation.ID, sel.Repo))
+						break
+					}
+					result = append(result, sel)
+					continue
+				}
+				toExpand = append(toExpand, sel)
 			}
-			if _, err := expandRepositoryAccess(globSelectors, available); err == nil {
-				return append([]types.GitHubRepoAccess(nil), selectors...), nil
+			if !valid {
+				continue
 			}
-			failures = append(failures, fmt.Sprintf("app %d installation %d: %v", appConfig.AppID, installation.ID, err))
+			expanded, err := expandRepositoryAccess(toExpand, available)
+			if err != nil {
+				failures = append(failures, fmt.Sprintf("app %d installation %d: %v", appConfig.AppID, installation.ID, err))
+				continue
+			}
+			cloneTrue := true
+			for _, r := range expanded {
+				r.Clone = &cloneTrue
+				result = append(result, r)
+			}
+			return result, nil
 		}
 	}
 

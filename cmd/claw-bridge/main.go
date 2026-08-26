@@ -3547,6 +3547,14 @@ func syncStagedWorkspaceToOpenClawWorkspace() error {
 type bootstrapRepoAccess struct {
 	Repo        string `json:"repo"`
 	Permissions string `json:"permissions"`
+	Clone       *bool  `json:"clone,omitempty"`
+}
+
+func shouldCloneRepo(repo bootstrapRepoAccess) bool {
+	if repo.Clone != nil && !*repo.Clone {
+		return false
+	}
+	return true
 }
 
 func configuredGitHubRepos() ([]bootstrapRepoAccess, error) {
@@ -3677,7 +3685,7 @@ func dockerGitHubCloneScript(workspaceDir string, repos []bootstrapRepoAccess) s
 	fmt.Fprintf(&b, "cd %s\n", shellQuote(workspaceDir))
 	b.WriteString("git config --global --get credential.helper >/dev/null\n")
 	for _, repo := range repos {
-		if isRepositoryPattern(repo.Repo) {
+		if isRepositoryPattern(repo.Repo) || !shouldCloneRepo(repo) {
 			continue
 		}
 		dir := repoDirectoryName(repo.Repo)

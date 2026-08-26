@@ -210,7 +210,7 @@ func newTestGitHubTokenProvider(t *testing.T, server *httptest.Server) *GitHubTo
 	}
 }
 
-func TestWorkflowCreationStoresRepositorySelectors(t *testing.T) {
+func TestWorkflowCreationExpandsRepositoryPatterns(t *testing.T) {
 	privateKey, err := rsa.GenerateKey(rand.Reader, 1024)
 	if err != nil {
 		t.Fatalf("generate private key: %v", err)
@@ -276,9 +276,10 @@ func TestWorkflowCreationStoresRepositorySelectors(t *testing.T) {
 	if err := json.Unmarshal([]byte(repositoriesJSON), &repositories); err != nil {
 		t.Fatalf("decode claw repositories: %v", err)
 	}
+	cloneTrue := true
 	want := []types.GitHubRepoAccess{
-		{Repo: "*-infra-*", Permissions: "write"},
 		{Repo: "acme/website", Permissions: "read"},
+		{Repo: "acme/api-infra-prod", Permissions: "write", Clone: &cloneTrue},
 	}
 	if !reflect.DeepEqual(repositories, want) {
 		t.Fatalf("stored repositories = %#v, want %#v", repositories, want)
@@ -296,5 +297,83 @@ func TestWorkflowCreationStoresRepositorySelectors(t *testing.T) {
 	}
 	if clawCount != 1 {
 		t.Fatalf("claw count after canceled expansion = %d, want 1", clawCount)
+	}
+}
+
+func TestWorkflowCreationKeepsCloneFalsePatterns(t *testing.T) {
+	privateKey, err := rsa.GenerateKey(rand.Reader, 1024)
+	if err != nil {
+		t.Fatalf("generate private key: %v", err)
+	}
+	privateKeyPEM := string(pem.EncodeToMemory(&pem.Block{
+		Type:  "RSA PRIVATE KEY",
+		Bytes: x509.MarshalPKCS1PrivateKey(privateKey),
+	}))
+
+	github := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/app/installations":
+			_, _ = w.Write([]byte(`[{"id":42,"account":{"login":"acme"}}]`))
+		case r.Method == http.MethodPost && r.URL.Path == "/app/installations/42/access_tokens":
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"token":"installation-token","expires_at":"2030-01-01T00:00:00Z"}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/installation/repositories":
+			_ = json.NewEncoder(w).Encode(githubInstallationRepositoriesResponse{
+				TotalCount: 3,
+				Repositories: []githubRepository{
+					{Name: "support-sandbox", FullName: "acme/support-sandbox"},
+					{Name: "website", FullName: "acme/website"},
+					{Name: "api", FullName: "acme/api"},
+				},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer github.Close()
+
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
+	t.Setenv("ELASTICCLAW_NOOP_PROVIDER", "1")
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{
+		Token:     "test-token",
+		ClawToken: "test-claw-token",
+		Providers: map[string]types.ProviderConfig{"noop": {Type: "noop"}},
+		GitHubApps: []*types.GitHubAppConfig{{
+			AppID:         123,
+			PrivateKeyPEM: privateKeyPEM,
+		}},
+	}, github.URL, "", "")
+
+	cloneFalse := false
+	workspace := &types.WorkspaceConfig{
+		Name: "engineering",
+		Repositories: []types.GitHubRepoAccess{
+			{Repo: "acme/support-sandbox", Permissions: "write"},
+			{Repo: "acme/*", Permissions: "read", Clone: &cloneFalse},
+		},
+		Files: map[string]string{
+			"elasticclaw-config.yaml": "schema_version: v1\nname: engineering\nprovider: noop\n",
+		},
+	}
+	workflow := &types.WorkflowConfig{Name: "infra-update", Provider: "noop"}
+
+	clawID, _, err := s.createClawFromWorkflowContext(context.Background(), workspace, workflow, nil, "test")
+	if err != nil {
+		t.Fatalf("createClawFromWorkflow: %v", err)
+	}
+	var repositoriesJSON string
+	if err := db.QueryRow(`SELECT github_repos FROM claws WHERE id=?`, clawID).Scan(&repositoriesJSON); err != nil {
+		t.Fatalf("read claw repositories: %v", err)
+	}
+	var repositories []types.GitHubRepoAccess
+	if err := json.Unmarshal([]byte(repositoriesJSON), &repositories); err != nil {
+		t.Fatalf("decode claw repositories: %v", err)
+	}
+	want := []types.GitHubRepoAccess{
+		{Repo: "acme/support-sandbox", Permissions: "write"},
+		{Repo: "acme/*", Permissions: "read", Clone: &cloneFalse},
+	}
+	if !reflect.DeepEqual(repositories, want) {
+		t.Fatalf("stored repositories = %#v, want %#v", repositories, want)
 	}
 }
