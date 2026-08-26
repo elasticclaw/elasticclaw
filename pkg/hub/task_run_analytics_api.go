@@ -64,6 +64,7 @@ type taskRunAnalyticsRunDetailResponse struct {
 	Run       taskRunAnalyticsRunView       `json:"run"`
 	Stages    []taskRunAnalyticsStageView   `json:"stages,omitempty"`
 	HumanWait taskRunAnalyticsHumanWaitView `json:"humanWait"`
+	WallClock taskRunAnalyticsWallClockView `json:"wallClock"`
 }
 
 type taskRunAnalyticsHumanWaitView struct {
@@ -544,9 +545,15 @@ func (s *Server) handleTaskRunAnalyticsRunSubresource(w http.ResponseWriter, r *
 			jsonError(w, http.StatusInternalServerError, "db error")
 			return
 		}
+		humanWait := taskRunAnalyticsHumanWait(events, run.PROpenedAt, run.MergedAt)
+		activity, err := s.readTaskRunWallClockActivity(tenantID, runID, run.ClawID)
+		if err != nil {
+			jsonError(w, http.StatusInternalServerError, "db error")
+			return
+		}
 		jsonOK(w, taskRunAnalyticsRunDetailResponse{
-			Run: run, Stages: taskRunAnalyticsStages(stages, run.FinishedAt),
-			HumanWait: taskRunAnalyticsHumanWait(events, run.PROpenedAt, run.MergedAt),
+			Run: run, Stages: taskRunAnalyticsStages(stages, run.FinishedAt), HumanWait: humanWait,
+			WallClock: taskRunAnalyticsWallClock(run, humanWait, activity),
 		})
 		return
 	}
