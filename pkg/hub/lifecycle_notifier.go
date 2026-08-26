@@ -484,14 +484,45 @@ func (s *Server) lifecycleWatermarkKeyFor(d lifecycleDelivery, notifier string) 
 	// legacy delivery row (multi-route writes v2 rows only, keyed by the OTHER
 	// notifiers), so the survivor would re-send every one of them. A route only
 	// has a cursor of its own because it was configured alongside a sibling, so
-	// keeping it whenever it exists is exactly the "no silent re-point" rule; a
-	// genuine legacy single-`via` never has one and still reads the shared key.
+	// keeping it whenever it exists is exactly the "no silent re-point" rule.
 	// A read error deliberately keeps the per-route key too: the pass's own read
 	// then fails and the route waits, rather than replaying from the floor.
 	if _, found, err := s.notifierStateInt64(key); err != nil || found {
 		return key
 	}
+	// The genuine legacy incumbent — the route that has already been running as
+	// the single `via` — reads the shared key: that IS its position, and its
+	// history lives in the legacy delivery table.
+	if s.lifecycleSingleViaIncumbent(notifier) {
+		return lifecycleStateWatermarkKey
+	}
+	// Anything else arriving here is a NEWCOMER that happens to be alone:
+	// collapsing a multi-route config to ONE brand-new route deletes the old
+	// cursors (pruneLifecycleRouteState) and leaves none of its own, so without
+	// this it would adopt the floor frozen at the stalled route's position and
+	// replay the whole multi-route-era backlog — none of which carries a legacy
+	// row, because that era wrote v2 rows keyed by the OLD notifiers only. Once
+	// the per-route scheme has been live, start it at the head like any other
+	// newcomer; the pass's first-run backstop materialises the cursor there.
+	if live, err := s.lifecycleRoutingSchemeLive(); err != nil || live {
+		return key
+	}
 	return lifecycleStateWatermarkKey
+}
+
+// lifecycleSingleViaIncumbent reports whether a route has already been
+// delivering as the legacy single-`via` incumbent. The single-route shape
+// stamps `claw_baseline_done:<via>` without seeding for exactly this purpose
+// (ensureLifecycleClawRouteBaseline), so the stamp — with no per-route cursor
+// beside it — is what tells the incumbent apart from a route that only just
+// appeared in config. An unreadable state is not an incumbent: the callers'
+// fallbacks (per-route key, stream head) are the safe side of that answer.
+func (s *Server) lifecycleSingleViaIncumbent(via string) bool {
+	if via == "" {
+		return false
+	}
+	_, found, err := s.notifierStateInt64(lifecycleClawRouteBaselineKey(via))
+	return err == nil && found
 }
 
 // ensureLifecycleRouteWatermarks gives every CONFIGURED route a cursor of its
@@ -541,6 +572,20 @@ func (s *Server) ensureLifecycleRouteWatermarks(lc *types.LifecycleNotifications
 		// the floor exists from the start.
 		s.setNotifierStateInt64(lifecycleStateWatermarkKey, head)
 	}
+	// At the migration tick only the incumbent may inherit the shared cursor.
+	// The shared key is the incumbent's real position, but for the channel being
+	// ADDED — the whole reason the migration runs through the settings screen —
+	// it is a cursor frozen wherever the incumbent stalled, and the events above
+	// it carry no delivery row of any kind that could fence them, so the
+	// newcomer would replay the incumbent's entire backlog. A config that was
+	// multi-route from its very first enable has no incumbent to tell apart, and
+	// there its routes do all share one starting position.
+	incumbents := map[string]bool{}
+	for _, route := range routes {
+		if via := strings.TrimSpace(route.Via); via != "" && s.lifecycleSingleViaIncumbent(via) {
+			incumbents[via] = true
+		}
+	}
 	for _, route := range routes {
 		via := strings.TrimSpace(route.Via)
 		if via == "" {
@@ -550,7 +595,7 @@ func (s *Server) ensureLifecycleRouteWatermarks(lc *types.LifecycleNotifications
 		if _, found, err := s.notifierStateInt64(key); err != nil || found {
 			continue
 		}
-		if !routed && sharedFound {
+		if !routed && sharedFound && (len(incumbents) == 0 || incumbents[via]) {
 			s.setNotifierStateInt64(key, shared)
 			continue
 		}

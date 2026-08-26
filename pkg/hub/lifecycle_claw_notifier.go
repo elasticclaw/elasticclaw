@@ -407,8 +407,20 @@ func (s *Server) lifecycleClawRouteSkip(notifier, what, selectSQL string, args .
 		ON CONFLICT(event_id, notifier) DO NOTHING`, args...)
 	if err != nil {
 		log.Printf("[notify] seed skipped claw %s deliveries for %q: %v", what, notifier, err)
+		return err
 	}
-	return err
+	// A route-level fence means this route's history no longer lives entirely in
+	// the legacy delivery table — the single-route shape reaches here too, via
+	// the per-tick parking of a kind its allow-list rejects. Latch the scheme so
+	// that swapping that route's name later cannot take the "stamp without
+	// seeding" path reserved for the genuine legacy incumbent and replay every
+	// still-connected, failed or idle claw into the new channel.
+	if notifier != "" {
+		if _, found, err := s.notifierStateInt64(lifecycleStateRoutedKey); err == nil && !found {
+			s.setNotifierStateInt64(lifecycleStateRoutedKey, 1)
+		}
+	}
+	return nil
 }
 
 func (s *Server) skipCurrentLifecycleClawRouteState(notifier, kind string) error {

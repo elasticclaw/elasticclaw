@@ -3329,11 +3329,20 @@ function SecretsSection({ settings, workspace }: { settings: SettingsData | null
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
 
+  // Two stores live behind this screen and only one of them was reachable: the
+  // workspace file, and hub.yaml's top-level `secrets`. Hub secrets are what
+  // notifier token_secret references resolve against, so without this scope a
+  // hub with any workspace has no way at all to create the secret the Notifier
+  // screen requires.
+  const [hubScope, setHubScope] = useState(!workspace)
+  const scoped = Boolean(workspace) && !hubScope
+
   const hubUrl = getHubUrl()
   const token = () => getAuthToken() || ""
-  const secretsPath = workspace ? `/api/workspaces/${encodeURIComponent(workspace)}/secrets` : "/api/secrets"
+  const secretsPath = scoped ? `/api/workspaces/${encodeURIComponent(workspace)}/secrets` : "/api/secrets"
 
   const refresh = useCallback(async () => {
+    setLoading(true)
     try {
       const res = await fetch(`${hubUrl}${secretsPath}`, { headers: { Authorization: `Bearer ${token()}` } })
       if (res.ok) {
@@ -3382,9 +3391,17 @@ function SecretsSection({ settings, workspace }: { settings: SettingsData | null
     <div className="space-y-6">
       <div>
         <h2 className="text-base font-semibold mb-1">Secrets</h2>
-        <p className="text-sm text-muted-foreground mb-6">
-          Named secrets for workspace <code className="bg-muted px-1 rounded text-xs">{workspace || "default"}</code>. Values are stored on the hub and referenced from workspace env or workflow secret refs.
+        <p className="text-sm text-muted-foreground mb-4">
+          {scoped
+            ? <>Named secrets for workspace <code className="bg-muted px-1 rounded text-xs">{workspace}</code>. Values are stored on the hub and referenced from workspace env or workflow secret refs.</>
+            : <>Hub-wide secrets, stored in the hub config. These are what hub-level references resolve against — notifier bot tokens (Settings → Notifier) among them.</>}
         </p>
+        {Boolean(workspace) && (
+          <div className="flex items-center gap-1 mb-6">
+            <Button size="sm" variant={scoped ? "secondary" : "ghost"} onClick={() => setHubScope(false)}>Workspace</Button>
+            <Button size="sm" variant={scoped ? "ghost" : "secondary"} onClick={() => setHubScope(true)}>Hub</Button>
+          </div>
+        )}
       </div>
 
       <div className="border border-border rounded-lg divide-y divide-border">
@@ -4519,6 +4536,34 @@ async function sendTestNotification(eventType: string, via: string): Promise<voi
 
 type TestState = { status: "sending" | "ok" | "error"; message: string }
 
+// Records that the Notifier screen itself cleared `enabled` because the route
+// set went empty — the pause is ours, not the operator's, and the next save
+// that routes a channel must lift it. It lives in sessionStorage rather than in
+// component state because NotifierSection unmounts on every navigation inside
+// Settings (and on reload): a clamp forgotten there latches the `enabled:false`
+// this screen wrote on its own initiative, so re-routing a channel would no
+// longer restore alerts — exactly what the edit dialog promises it does. The
+// stored value is the hub URL, so the clamp never leaks across hubs.
+const CLAMPED_PAUSE_STORAGE_KEY = "elasticclaw:notifier-clamped-pause"
+
+function readClampedPause(): boolean {
+  try {
+    return sessionStorage.getItem(CLAMPED_PAUSE_STORAGE_KEY) === getHubUrl()
+  } catch {
+    return false
+  }
+}
+
+function writeClampedPause(clamped: boolean): void {
+  try {
+    if (clamped) sessionStorage.setItem(CLAMPED_PAUSE_STORAGE_KEY, getHubUrl())
+    else sessionStorage.removeItem(CLAMPED_PAUSE_STORAGE_KEY)
+  } catch {
+    // Storage unavailable (private mode): the clamp degrades to not existing,
+    // which is what the screen did before it was persisted at all.
+  }
+}
+
 function NotifierSection({ settings, onSave, saving }: { settings: SettingsData; onSave: (p: object) => Promise<string | null>; saving: boolean }) {
   const lifecycle = settings.notifications?.lifecycle
   const notifiers = settings.notifications?.notifiers || {}
@@ -4533,12 +4578,18 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
     agentIdle: lifecycle?.events?.agentIdle ?? true,
   }
   // A legacy single-channel `via` reads as one route over every event; saving
-  // any change migrates it to routes.
-  const routes: LifecycleRouteView[] = lifecycle?.routes?.length
-    ? lifecycle.routes
-    : lifecycle?.via
-      ? [{ via: lifecycle.via, events: [] }]
-      : []
+  // any change migrates it to routes. `via` is trimmed exactly where the hub
+  // trims it (ValidateNotificationsConfig, lifecycleNotifierTick): a `via` with
+  // surrounding whitespace is valid on disk and delivers normally, so matching
+  // it raw here would render a working channel as an unroutable orphan whose
+  // only offered remedy — "Remove route" — silently pauses alerts hub-wide.
+  const routes: LifecycleRouteView[] = (
+    lifecycle?.routes?.length
+      ? lifecycle.routes
+      : lifecycle?.via
+        ? [{ via: lifecycle.via, events: [] }]
+        : []
+  ).map((route) => ({ ...route, via: (route.via || "").trim() }))
   const routeFor = (name: string) => routes.find((r) => r.via === name)
   // A route whose notifier is gone. The hub deliberately accepts this on disk
   // while alerts are paused ("an operator who mutes alerts and then deletes the
@@ -4574,6 +4625,12 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
   const [formEvents, setFormEvents] = useState<string[]>([])
   const [formError, setFormError] = useState("")
   const [tests, setTests] = useState<Record<string, TestState>>({})
+  // Save failures the dialog can no longer show, keyed by the channel the save
+  // was for. A rejected PATCH whose dialog has meanwhile been replaced has
+  // nowhere else to land: the page-level banner lives under the Radix overlay,
+  // so dropping the message leaves the operator believing a save that failed
+  // went through.
+  const [saveErrors, setSaveErrors] = useState<Record<string, string>>({})
 
   const resetForm = () => {
     setFormName(""); setFormChannel(""); setFormTokenSecret("")
@@ -4585,13 +4642,6 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
   // reopened on another channel — that discards unsaved form state and blames
   // the wrong channel.
   const saveGeneration = useRef(0)
-
-  // Set only when buildPatch itself had to clear `enabled` because the route set
-  // went empty. Deriving that from the reloaded config instead (enabled=false
-  // with no routes) cannot tell our clamp from an operator who muted the master
-  // switch and then removed the last channel — and re-routing a channel would
-  // then silently un-mute a hub the operator deliberately paused.
-  const clampedPause = useRef(false)
 
   // Invalidates in-flight test sends. A result that lands after the channel's
   // destination or routing changed describes a message that went somewhere else
@@ -4640,14 +4690,14 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
     // required when enabled") and this screen never exposes `via`, so losing the
     // last route pauses alerts instead of failing the save with a message about
     // a field that is not on the page. That pause is ours, not the operator's,
-    // and `clampedPause` lifts it on the next save that routes a channel again.
+    // and the clamp lifts it on the next save that routes a channel again.
     // Without it the `false` we wrote latches — every later save re-sends the
     // stale value read back from GET — and a plain channel swap silently mutes
     // the hub forever, contradicting the dialog's "until another channel is
     // routed". The flag is recorded here rather than inferred from the reloaded
     // config so a deliberate master-switch OFF survives a channel swap.
-    const wantEnabled = next.enabled ?? (enabled || clampedPause.current || neverConfigured)
-    clampedPause.current = outRoutes.length === 0 && wantEnabled
+    const wantEnabled = next.enabled ?? (enabled || readClampedPause() || neverConfigured)
+    writeClampedPause(outRoutes.length === 0 && wantEnabled)
     const outLifecycle: Record<string, unknown> = {
       enabled: outRoutes.length > 0 && wantEnabled,
       routes: outRoutes,
@@ -4695,7 +4745,11 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
     // sitting on its card is about a message that went somewhere else.
     testGeneration.current++
     setTests((current) => { const { [name]: _stale, ...rest } = current; return rest })
-    if (generation !== saveGeneration.current) return
+    setSaveErrors((current) => { const { [name]: _cleared, ...rest } = current; return rest })
+    if (generation !== saveGeneration.current) {
+      if (failure) setSaveErrors((current) => ({ ...current, [name]: failure }))
+      return
+    }
     if (failure) { setFormError(failure); return }
     setShowModal(false)
   }
@@ -4710,7 +4764,13 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
     }))
     testGeneration.current++
     setTests((current) => { const { [name]: _removed, ...rest } = current; return rest })
-    if (generation !== saveGeneration.current) return
+    setSaveErrors((current) => { const { [name]: _cleared, ...rest } = current; return rest })
+    if (generation !== saveGeneration.current) {
+      // The channel is still there — the remove was rejected — so its card can
+      // carry the reason.
+      if (failure) setSaveErrors((current) => ({ ...current, [name]: failure }))
+      return
+    }
     if (failure) { setFormError(failure); return }
     setShowModal(false)
   }
@@ -4951,6 +5011,12 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
                       <span className="break-words">{test.message}</span>
                     </div>
                   )}
+                  {saveErrors[name] && (
+                    <div className="mt-3 flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+                      <AlertTriangle className="size-3.5 mt-px shrink-0" />
+                      <span className="break-words">Last save failed: {saveErrors[name]}</span>
+                    </div>
+                  )}
                 </div>
               )
             })}
@@ -5047,11 +5113,14 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
               </select>
               {secretMissing(formTokenSecret) ? (
                 <p className="text-xs text-amber-400 mt-1">
-                  No hub secret named <span className="font-mono">{formTokenSecret}</span> exists, so sends through this channel fail. Add it under Secrets, or pick another.
+                  No hub secret named <span className="font-mono">{formTokenSecret}</span> exists, so sends through this channel fail. Add it under Settings → Secrets → Hub, or pick another.
                 </p>
               ) : (
                 <p className="text-xs text-muted-foreground mt-1">
-                  The hub secret holding the Slack bot token (<span className="font-mono">xoxb-…</span>). Add it under Secrets first.
+                  {/* Channels are hub-wide, so the token must be a HUB secret —
+                      a workspace secret of the same name is a different store
+                      and never resolves here. */}
+                  The <strong>hub</strong> secret holding the Slack bot token (<span className="font-mono">xoxb-…</span>). Add it under Settings → Secrets → Hub first — workspace secrets are a separate store and are never read here.
                 </p>
               )}
             </div>
