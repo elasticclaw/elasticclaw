@@ -101,6 +101,13 @@ func (s *Server) livenessSettings() livenessSettings {
 			cfg.idleResumeEscalateAfter = *l.IdleResumeEscalateAfter
 		}
 	}
+	if cfg.idleResumeEscalateAfter >= agentIdleResumeMaxAttempts {
+		// The stretch-failure counter can never reach a threshold at or above
+		// the lifetime resume cap: the lifetime cap always halts resumes
+		// first, so escalation would never fire. An operator raising this
+		// knob "to be safe" would silently disable the feature; say so.
+		log.Printf("[reaper] idle_resume_escalate_after %d is >= the lifetime auto-resume cap of %d; wedged-gateway escalation is effectively disabled", cfg.idleResumeEscalateAfter, agentIdleResumeMaxAttempts)
+	}
 	return cfg
 }
 

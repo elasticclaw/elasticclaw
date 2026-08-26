@@ -504,7 +504,7 @@ func (s *Server) resetClawForRetry(tenantID, clawID, checkpointID, bootstrapStat
 		UPDATE claws
 		   SET status='provisioning', bootstrap_ok=0, bootstrap_status=?, bootstrap_diagnostic='',
 		       provider_id='', ssh_host='', ssh_port=0, ssh_user='', restore_checkpoint_id=?,
-		       rebrief_pending=1
+		       rebrief_pending=1, idle_resume_stretch_failures=0, idle_resume_last_attempt_at=0
 		 WHERE id=? AND tenant_id=? AND status IN ('error','offline')`,
 		bootstrapStatus, checkpointID, clawID, tenantID)
 	if err != nil {

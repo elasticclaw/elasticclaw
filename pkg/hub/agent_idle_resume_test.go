@@ -1,7 +1,9 @@
 package hub
 
 import (
+	"bytes"
 	"database/sql"
+	"log"
 	"strings"
 	"testing"
 	"time"
@@ -304,12 +306,96 @@ func TestAgentIdleResumeEscalatesAfterRepeatedFailures(t *testing.T) {
 	if got := idleResumeMessages(t, db, clawID); got != threshold {
 		t.Fatalf("injected %d resume messages after escalation, want unchanged %d", got, threshold)
 	}
+	// Escalation runs off the watchdog goroutine (M5: it must not block the
+	// caller against a wedged checkpoint), so the status change lands
+	// asynchronously; poll for it instead of reading immediately.
+	status := waitForClawStatusChange(t, db, clawID, "connected")
+	if status == "connected" {
+		t.Fatalf("claw status=%q, want escalation to have moved it off connected", status)
+	}
+}
+
+// waitForClawStatusChange polls until the claw's status differs from
+// initial, or fails the test after a short deadline. Escalation paths that
+// run off a goroutine (see escalateIdleResumeFailure) need this instead of a
+// synchronous read.
+func waitForClawStatusChange(t *testing.T, db *sql.DB, clawID, initial string) string {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		var status string
+		if err := db.QueryRow(`SELECT status FROM claws WHERE id=?`, clawID).Scan(&status); err != nil {
+			t.Fatalf("read claw status: %v", err)
+		}
+		if status != initial || time.Now().After(deadline) {
+			return status
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// TestReplacementClawSurvivesInheritedStretchFailures is the regression for
+// M6: resetClawForRetry must clear idle_resume_stretch_failures and
+// idle_resume_last_attempt_at, or a replacement claw inherits its
+// predecessor's failure count and can be torn down on its very first
+// eligible tick having made zero resume attempts of its own -- exactly the
+// false-positive class the plan names as the risk of this feature. This test
+// would FAIL against the current branch tip, which never clears those
+// columns on reset.
+func TestReplacementClawSurvivesInheritedStretchFailures(t *testing.T) {
+	threshold := 2
+	idleAfter := "1m"
+	s, db := newIdleResumeTestServer(t, &types.LivenessConfig{IdleResumeEscalateAfter: &threshold, IdleResumeAfter: idleAfter})
+	const clawID = "resume-replace"
+	insertSlackTestClaw(t, db, clawID, "error", 1, "", oldEnough)
+	if _, err := db.Exec(`UPDATE claws SET provider='noop' WHERE id=?`, clawID); err != nil {
+		t.Fatalf("set provider: %v", err)
+	}
+	if _, _, err := s.ensureTaskRunForClaw(clawID, TaskRunStart{
+		RunKind: taskRunKindPRTask, OwnerType: taskRunOwnerFactory, AnalyticsEnabled: true, RequiresPR: true, Tags: []string{"resume-replace"},
+	}); err != nil {
+		t.Fatalf("ensure task run: %v", err)
+	}
+	setClawPipelineStage(t, db, clawID, "implement")
+
+	// Predecessor left the stretch counter at the escalation threshold, with
+	// a stale last-attempt timestamp, right before it was replaced.
+	if _, err := db.Exec(`UPDATE claws SET idle_resume_stretch_failures=?, idle_resume_last_attempt_at=? WHERE id=?`,
+		threshold, time.Now().Add(-time.Hour).UnixMilli(), clawID); err != nil {
+		t.Fatalf("seed inherited failures: %v", err)
+	}
+
+	reset, err := s.resetClawForRetry("test-tenant-id", clawID, "", "retrying")
+	if err != nil || !reset {
+		t.Fatalf("reset claw for retry: reset=%v err=%v", reset, err)
+	}
+	// The replacement reconnects.
+	if _, err := db.Exec(`UPDATE claws SET status='connected' WHERE id=?`, clawID); err != nil {
+		t.Fatalf("reconnect replacement: %v", err)
+	}
+
+	var stretchFailures, lastAttemptAt int64
+	if err := db.QueryRow(`SELECT idle_resume_stretch_failures, idle_resume_last_attempt_at FROM claws WHERE id=?`, clawID).
+		Scan(&stretchFailures, &lastAttemptAt); err != nil {
+		t.Fatalf("read reset claw: %v", err)
+	}
+	if stretchFailures != 0 || lastAttemptAt != 0 {
+		t.Fatalf("resetClawForRetry left stretch_failures=%d last_attempt_at=%d, want both cleared to 0", stretchFailures, lastAttemptAt)
+	}
+
+	// The replacement's first eligible tick, having made zero resume
+	// attempts of its own, must resume normally rather than escalate.
+	cc := idleTestConn(clawID, 15*time.Minute)
+	s.checkAgentIdleResume(time.Now(), clawID, cc)
 	var status string
 	if err := db.QueryRow(`SELECT status FROM claws WHERE id=?`, clawID).Scan(&status); err != nil {
 		t.Fatalf("read claw status: %v", err)
 	}
-	if status == "connected" {
-		t.Fatalf("claw status=%q, want escalation to have moved it off connected", status)
+	if status != "connected" {
+		t.Fatalf("replacement claw status=%q after its first tick, want it to survive as connected", status)
+	}
+	if got := idleResumeMessages(t, db, clawID); got != 1 {
+		t.Fatalf("replacement injected %d resume messages, want 1 normal resume", got)
 	}
 }
 
@@ -510,6 +596,28 @@ func TestLivenessIdleResumeSettings(t *testing.T) {
 	off := false
 	if got := settings(&types.LivenessConfig{IdleResume: &off}); got.idleResumeEnabled {
 		t.Fatal("idle_resume: false did not disable auto-resume")
+	}
+}
+
+// TestIdleResumeEscalateAfterAtOrAboveLifetimeCapWarns is the regression for
+// L3: setting idle_resume_escalate_after at or above the lifetime auto-resume
+// cap silently disables escalation (the lifetime cap always halts resumes
+// first, so the stretch-failure counter can never reach the threshold), and
+// an operator raising the knob "to be safe" deserves a startup warning rather
+// than silence. This test would FAIL against the current branch tip, which
+// accepts the value without any validation or log line.
+func TestIdleResumeEscalateAfterAtOrAboveLifetimeCapWarns(t *testing.T) {
+	var logs bytes.Buffer
+	previous := log.Writer()
+	log.SetOutput(&logs)
+	t.Cleanup(func() { log.SetOutput(previous) })
+
+	tooHigh := agentIdleResumeMaxAttempts
+	s, _ := newIdleResumeTestServer(t, &types.LivenessConfig{IdleResumeEscalateAfter: &tooHigh})
+	s.livenessSettings()
+
+	if !strings.Contains(logs.String(), "idle_resume_escalate_after") || !strings.Contains(logs.String(), "disabled") {
+		t.Fatalf("expected a warning about idle_resume_escalate_after effectively disabling escalation, got log: %q", logs.String())
 	}
 }
 

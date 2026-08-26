@@ -611,7 +611,13 @@ func (s *Server) checkAgentIdleResume(nowAt time.Time, clawID string, cc *clawCo
 	// accepts losing the claw's in-progress work rather than waiting
 	// indefinitely for a human to notice a wedged gateway.
 	if sameStretch && stretchFailures >= int64(cfg.idleResumeEscalateAfter) {
-		s.escalateIdleResumeFailure(clawID, int(stretchFailures), idleFor)
+		// Run off the watchdog goroutine via safeGo: stopAgentWithReason's
+		// checkpointBeforeTermination can block for up to ~90s against a
+		// wedged bridge, and this loop cannot afford that stall any more
+		// than the sibling escalations at server.go do.
+		s.safeGo("idle resume escalation", func() {
+			s.escalateIdleResumeFailure(clawID, int(stretchFailures), idleFor)
+		})
 		return
 	}
 	if resumeCount >= agentIdleResumeMaxAttempts {
