@@ -36,6 +36,9 @@ func TestGitHubCLIWrapperRefreshesTokenForEachInvocation(t *testing.T) {
 	assertContains(t, script, "elasticclaw-git-credentials get", "wrapper feeds git credential get protocol")
 	assertContains(t, script, "export GH_TOKEN=\"$token\"", "wrapper exports fresh token")
 	assertContains(t, script, "exec \"$REAL_GH\" \"$@\"", "wrapper delegates to real gh")
+	assertContains(t, script, "target_repo=\"$arg\"", "wrapper extracts target repo from --repo or positional argument")
+	assertContains(t, script, "printf 'protocol=https\\nhost=github.com\\npath=%s.git\\n\\n' \"$target_repo\"", "wrapper passes target repo to credential helper")
+	assertContains(t, script, "printf 'protocol=https\\nhost=github.com\\n\\n'", "wrapper falls back to unscoped token when no target repo")
 	assertNotContains(t, script, "gh auth login", "wrapper must not persist a short-lived token in hosts.yml")
 	assertNotContains(t, script, "ghp_static_test_token", "wrapper must not contain raw GitHub tokens")
 }

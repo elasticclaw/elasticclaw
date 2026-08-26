@@ -7316,11 +7316,37 @@ func buildGitHubCLIWrapperInstallScript() string {
 set +x
 REAL_GH="__ELASTICCLAW_REAL_GH__"
 if [ -x /usr/local/bin/elasticclaw-git-credentials ]; then
-  token="$(printf 'protocol=https\nhost=github.com\n\n' | /usr/local/bin/elasticclaw-git-credentials get 2>/dev/null | sed -n 's/^password=//p' | head -n1)"
+  # Try to figure out which repo this command targets so the hub can mint a
+  # token from the correct GitHub App installation.
+  target_repo=""
+  prev=""
+  for arg in "$@"; do
+    if [ "$prev" = "--repo" ] || [ "$prev" = "-R" ]; then
+      target_repo="$arg"
+      break
+    fi
+    case "$arg" in
+      -*) ;;
+      */*)
+        target_repo="$arg"
+        break
+        ;;
+    esac
+    prev="$arg"
+  done
+  if [ -n "$target_repo" ]; then
+    target_repo="${target_repo%.git}"
+    target_repo="${target_repo#/}"
+  fi
+  if [ -n "$target_repo" ]; then
+    token="$(printf 'protocol=https\nhost=github.com\npath=%s.git\n\n' "$target_repo" | /usr/local/bin/elasticclaw-git-credentials get 2>/dev/null | sed -n 's/^password=//p' | head -n1)"
+  else
+    token="$(printf 'protocol=https\nhost=github.com\n\n' | /usr/local/bin/elasticclaw-git-credentials get 2>/dev/null | sed -n 's/^password=//p' | head -n1)"
+  fi
   if [ -n "$token" ]; then
     export GH_TOKEN="$token"
   fi
-  unset token
+  unset token target_repo prev arg
 fi
 exec "$REAL_GH" "$@"
 GHEOF
