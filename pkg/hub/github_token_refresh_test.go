@@ -2,6 +2,7 @@ package hub
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -393,14 +394,10 @@ func TestGitHubTokenEndpointMatchesRepositoryPatterns(t *testing.T) {
 			_, _ = w.Write([]byte(`[{"id":99,"account":{"login":"replicated-collab"}}]`))
 		case r.Method == http.MethodGet && r.URL.Path == "/app/installations/99":
 			_, _ = w.Write([]byte(`{"id":99,"account":{"login":"replicated-collab"},"permissions":{"contents":"read","issues":"read"}}`))
-		case r.Method == http.MethodGet && r.URL.Path == "/installation/repositories":
-			_ = json.NewEncoder(w).Encode(githubInstallationRepositoriesResponse{
-				TotalCount: 2,
-				Repositories: []githubRepository{
-					{Name: "support-sandbox", FullName: "replicated-collab/support-sandbox"},
-					{Name: "icedq-kots", FullName: "replicated-collab/icedq-kots"},
-				},
-			})
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/replicated-collab/support-sandbox/installation":
+			_, _ = w.Write([]byte(`{"id":99,"account":{"login":"replicated-collab"}}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/replicated-collab/icedq-kots/installation":
+			_, _ = w.Write([]byte(`{"id":99,"account":{"login":"replicated-collab"}}`))
 		case r.Method == http.MethodPost && r.URL.Path == "/app/installations/99/access_tokens":
 			body, _ := io.ReadAll(r.Body)
 			sawAccessTokenBody = string(body)
@@ -450,46 +447,32 @@ func TestGitHubTokenEndpointMatchesRepositoryPatterns(t *testing.T) {
 	}
 }
 
-func TestGitHubTokenEndpointSelectsInstallationWithRepoAccess(t *testing.T) {
+func TestGitHubTokenEndpointSelectsAppInstallationForRepo(t *testing.T) {
 	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
 
-	installationIDFromPath := func(path string) string {
-		parts := strings.Split(path, "/")
-		if len(parts) >= 4 && parts[1] == "app" && parts[2] == "installations" {
-			return parts[3]
-		}
-		return ""
-	}
-
-	var sawAccessTokenBody string
+	pem := testGitHubAppPEM(t)
+	var sawTokenBody string
 	github := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		instID := installationIDFromPath(r.URL.Path)
+		appID := jwtAppID(r.Header.Get("Authorization"))
 		switch {
-		case r.Method == http.MethodGet && r.URL.Path == "/app/installations":
-			_, _ = w.Write([]byte(`[{"id":1,"account":{"login":"replicated-collab"}},{"id":2,"account":{"login":"replicated-collab"}}]`))
-		case r.Method == http.MethodGet && instID != "" && !strings.Contains(r.URL.Path, "access_tokens"):
-			_, _ = w.Write([]byte(`{"id":` + instID + `,"account":{"login":"replicated-collab"},"permissions":{"contents":"read","issues":"read"}}`))
-		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/access_tokens"):
-			body, _ := io.ReadAll(r.Body)
-			sawAccessTokenBody = string(body)
-			w.WriteHeader(http.StatusCreated)
-			_, _ = w.Write([]byte(`{"token":"inst-` + instID + `","expires_at":"2099-01-01T00:00:00Z"}`))
-		case r.Method == http.MethodGet && r.URL.Path == "/installation/repositories":
-			token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-			switch token {
-			case "inst-1":
-				_ = json.NewEncoder(w).Encode(githubInstallationRepositoriesResponse{
-					TotalCount: 1,
-					Repositories: []githubRepository{{Name: "other-repo", FullName: "replicated-collab/other-repo"}},
-				})
-			case "inst-2":
-				_ = json.NewEncoder(w).Encode(githubInstallationRepositoriesResponse{
-					TotalCount: 1,
-					Repositories: []githubRepository{{Name: "support-sandbox", FullName: "replicated-collab/support-sandbox"}},
-				})
-			default:
-				http.NotFound(w, r)
+		case r.Method == http.MethodGet && r.URL.Path == "/app/installations/200":
+			_, _ = w.Write([]byte(`{"id":200,"account":{"login":"replicated-collab"},"permissions":{"contents":"read","issues":"read"}}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/app/installations/404":
+			_, _ = w.Write([]byte(`{"id":404,"account":{"login":"replicated-collab"},"permissions":{"contents":"read","issues":"read"}}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/replicated-collab/support-sandbox/installation":
+			if appID == "456" {
+				_, _ = w.Write([]byte(`{"id":200,"account":{"login":"replicated-collab"}}`))
+				return
 			}
+			http.NotFound(w, r)
+		case r.Method == http.MethodPost && r.URL.Path == "/app/installations/200/access_tokens":
+			body, _ := io.ReadAll(r.Body)
+			sawTokenBody = string(body)
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"token":"tok-200","expires_at":"2099-01-01T00:00:00Z"}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/app/installations/404/access_tokens":
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"token":"tok-404","expires_at":"2099-01-01T00:00:00Z"}`))
 		default:
 			http.NotFound(w, r)
 		}
@@ -499,10 +482,10 @@ func TestGitHubTokenEndpointSelectsInstallationWithRepoAccess(t *testing.T) {
 	s, db := NewTestServerWithConfig(t, &types.HubConfig{
 		Token:     "hub-token",
 		ClawToken: "claw-token",
-		GitHubApps: []*types.GitHubAppConfig{{
-			AppID:         123,
-			PrivateKeyPEM: testGitHubAppPEM(t),
-		}},
+		GitHubApps: []*types.GitHubAppConfig{
+			{AppID: 123, PrivateKeyPEM: pem},
+			{AppID: 456, PrivateKeyPEM: pem},
+		},
 	}, github.URL, "", "")
 
 	reposJSON := `[{"repo":"replicated-collab/support-sandbox","permissions":"write"}]`
@@ -517,12 +500,37 @@ func TestGitHubTokenEndpointSelectsInstallationWithRepoAccess(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("token endpoint returned %d: %s", rec.Code, rec.Body.String())
 	}
-	if !strings.Contains(rec.Body.String(), "\"token\":\"inst-2\"") {
-		t.Fatalf("expected token from installation 2, got %s", rec.Body.String())
+	if !strings.Contains(rec.Body.String(), "\"token\":\"tok-200\"") {
+		t.Fatalf("expected token from installation 200, got %s", rec.Body.String())
 	}
-	if !strings.Contains(sawAccessTokenBody, `"repositories":["support-sandbox"]`) {
-		t.Fatalf("expected scoped token for support-sandbox, got %s", sawAccessTokenBody)
+	if !strings.Contains(sawTokenBody, `"repositories":["support-sandbox"]`) {
+		t.Fatalf("expected scoped token for support-sandbox, got %s", sawTokenBody)
 	}
+}
+
+// jwtAppID extracts the issuer (GitHub App ID) from a Bearer JWT without
+// verifying the signature. Used in tests that need to distinguish between
+// multiple configured GitHub Apps.
+func jwtAppID(auth string) string {
+	if !strings.HasPrefix(auth, "Bearer ") {
+		return ""
+	}
+	token := strings.TrimPrefix(auth, "Bearer ")
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		return ""
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return ""
+	}
+	var claims struct {
+		Iss string `json:"iss"`
+	}
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		return ""
+	}
+	return claims.Iss
 }
 
 func TestDaytonaCredentialHelperRequestsPerRepoTokens(t *testing.T) {

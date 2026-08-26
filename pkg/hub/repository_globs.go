@@ -50,6 +50,23 @@ func patternMatchesAnyRepo(pattern string, available []githubRepository) bool {
 	return false
 }
 
+// installationDiscoveryRepo returns a representative repo to use when asking
+// GitHub which app installation has access to it. For scoped requests it is the
+// requested repo; for unscoped requests it is the first exact repo in the
+// workspace selector list. If there is no exact repo (only patterns), it returns
+// empty and the caller falls back to owner-only installation discovery.
+func installationDiscoveryRepo(requestedRepos, allRepos []RepoAccess) string {
+	if len(requestedRepos) > 0 {
+		return requestedRepos[0].Repo
+	}
+	for _, r := range allRepos {
+		if !isRepositoryPattern(r.Repo) {
+			return r.Repo
+		}
+	}
+	return ""
+}
+
 func hasRepositoryGlob(repositories []types.GitHubRepoAccess) bool {
 	for _, repository := range repositories {
 		if isRepositoryPattern(repository.Repo) {

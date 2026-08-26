@@ -8387,11 +8387,18 @@ func (s *Server) handleGitHubToken(w http.ResponseWriter, r *http.Request) {
 	var lastErr error
 	for _, candidate := range providers {
 		provider := candidate.provider
-		installationID, err := provider.findInstallationWithRepoAccess(r.Context(), repos, allRepos)
+		var installationID int64
+		var err error
+		if repo := installationDiscoveryRepo(repos, allRepos); repo != "" {
+			parts := strings.SplitN(repo, "/", 2)
+			installationID, err = provider.FindInstallationForRepo(r.Context(), parts[0], parts[1])
+		} else {
+			installationID, err = provider.FindInstallationForRepos(r.Context(), nil)
+		}
 		if err != nil {
 			lastErr = err
 			// Debug-level only — expected when multiple apps configured and only one matches
-			log.Printf("[github] app[%d] app_id=%d: no installation can access repos (trying next): %v", candidate.index, candidate.appID, err)
+			log.Printf("[github] app[%d] app_id=%d: no installation for repo (trying next): %v", candidate.index, candidate.appID, err)
 			continue
 		}
 		token, expiresAt, err := provider.InstallationToken(r.Context(), installationID, repos)

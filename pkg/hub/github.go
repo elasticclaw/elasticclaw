@@ -441,86 +441,46 @@ func (p *GitHubTokenProvider) installationPermissions(ctx context.Context, insta
 	return inst.Permissions, nil
 }
 
-// findInstallationWithRepoAccess returns an installation ID whose accessible
-// repositories include all requestedRepos. If requestedRepos is empty (unscoped
-// token), it returns the first installation whose accessible repositories
-// include at least one repo matching the allowed selectors. If no selectors are
-// provided, it returns the first installation found. This lets a hub with
-// multiple GitHub Apps pick the App/installation that actually has access to the
-// repos a claw is allowed to use, instead of defaulting to the first app that
-// can mint any token.
-func (p *GitHubTokenProvider) findInstallationWithRepoAccess(ctx context.Context, requestedRepos []RepoAccess, allowedSelectors []RepoAccess) (int64, error) {
-	installations, err := p.ListInstallations(ctx)
+// FindInstallationForRepo returns the installation ID for the authenticated
+// GitHub App that has access to a specific repository. This is the cheapest way
+// to pick the right app/installation when the hub has multiple GitHub Apps:
+// the API directly returns the installation for the repo, so we don't need to
+// list every repository of every installation.
+func (p *GitHubTokenProvider) FindInstallationForRepo(ctx context.Context, owner, repo string) (int64, error) {
+	appJWT, err := p.appJWT()
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("sign app jwt: %w", err)
 	}
-	if len(installations) == 0 {
-		return 0, fmt.Errorf("no installations found")
-	}
-	for _, inst := range installations {
-		accessible, err := p.ListInstallationRepositories(ctx, inst.ID)
-		if err != nil {
-			continue
-		}
-		if len(requestedRepos) > 0 {
-			if reposAccessible(accessible, requestedRepos) {
-				return inst.ID, nil
-			}
-			continue
-		}
-		if len(allowedSelectors) == 0 {
-			return inst.ID, nil
-		}
-		if selectorsMatchAnyRepo(accessible, allowedSelectors) {
-			return inst.ID, nil
-		}
-	}
-	return 0, fmt.Errorf("no installation can access the requested repositories")
-}
 
-// reposAccessible reports whether every requested repo is in the accessible list.
-func reposAccessible(accessible []githubRepository, requested []RepoAccess) bool {
-	for _, req := range requested {
-		if !repoAccessible(accessible, req.Repo) {
-			return false
-		}
+	url := p.apiURL(fmt.Sprintf("/repos/%s/%s/installation", owner, repo))
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return 0, fmt.Errorf("build request: %w", err)
 	}
-	return true
-}
+	req.Header.Set("Authorization", "Bearer "+appJWT)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
 
-// repoAccessible reports whether a single repo name is in the accessible list.
-func repoAccessible(accessible []githubRepository, repo string) bool {
-	parts := strings.SplitN(repo, "/", 2)
-	repoName := repo
-	if len(parts) == 2 {
-		repoName = parts[1]
+	resp, err := p.httpClient.Do(req)
+	if err != nil {
+		return 0, fmt.Errorf("github find installation for repo: %w", err)
 	}
-	for _, r := range accessible {
-		if r.FullName != "" && strings.EqualFold(r.FullName, repo) {
-			return true
-		}
-		if r.Name != "" && strings.EqualFold(r.Name, repoName) {
-			return true
-		}
-	}
-	return false
-}
+	defer resp.Body.Close()
 
-// selectorsMatchAnyRepo reports whether any accessible repository matches the
-// allowed selectors. This is used for unscoped tokens (e.g. the gh wrapper) to
-// pick an installation that actually has access to repos the workspace permits.
-func selectorsMatchAnyRepo(accessible []githubRepository, selectors []RepoAccess) bool {
-	for _, r := range accessible {
-		repo := r.FullName
-		if repo == "" {
-			repo = r.Name
-		}
-		if repo == "" {
-			continue
-		}
-		if effectiveRepoAccess(repo, selectors) != nil {
-			return true
-		}
+	if resp.StatusCode != http.StatusOK {
+		var errBody map[string]interface{}
+		json.NewDecoder(resp.Body).Decode(&errBody)
+		return 0, fmt.Errorf("github find installation for repo %s/%s: status %d: %v", owner, repo, resp.StatusCode, errBody["message"])
 	}
-	return false
+
+	var inst struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&inst); err != nil {
+		return 0, fmt.Errorf("decode installation for repo: %w", err)
+	}
+	if inst.ID == 0 {
+		return 0, fmt.Errorf("github find installation for repo %s/%s returned no installation id", owner, repo)
+	}
+	return inst.ID, nil
 }
