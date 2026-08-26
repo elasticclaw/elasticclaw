@@ -805,7 +805,7 @@ func validateSettingsNotifications(current, cfg *types.NotificationsConfig) erro
 		// send: a notifier that cannot be built delivers nothing and says so
 		// only in the hub log, so a PATCH that persists one silently mutes
 		// every route pointing at it.
-		if err := notify.ValidateConfig(notifier.Type, notifier.Settings); err != nil {
+		if err := notify.ValidateConfig(notifier.Type, notifierSettingsForValidation(current, name, notifier)); err != nil {
 			return fmt.Errorf("notifications.notifiers.%s: %w", name, err)
 		}
 	}
@@ -841,6 +841,35 @@ func validateNotifierAPIBase(current *types.NotificationsConfig, name string, pa
 		return fmt.Errorf("notifications.notifiers.%s: api_base %q must be an https URL on slack.com — the notifier's bot token is sent to this host, so it cannot be repointed through the settings API", name, apiBase)
 	}
 	return nil
+}
+
+// notifierSettingsForValidation drops an api_base the patch merely carries over
+// from the stored config before the provider's own check runs on the merged
+// settings. validateNotifierAPIBase exempts the stored value deliberately — the
+// settings screen round-trips api_base without rendering it — but the provider
+// check judges it too, and a stored value this build refuses to construct (a
+// scheme-less host written by hand, or accepted by an older build) would then
+// reject every save that touches that channel, on a field the screen can
+// neither show nor clear: the same dead end the min_send_interval field exists
+// to prevent, with no way out but a hub.yaml edit. Dropping the key falls back
+// to the provider default, so only an api_base the patch itself introduces or
+// changes is judged — by validateNotifierAPIBase, which is the stricter check.
+func notifierSettingsForValidation(current *types.NotificationsConfig, name string, patched types.NotifierConfig) map[string]any {
+	apiBase := strings.TrimSpace(notifierSettingString(patched, "api_base"))
+	if apiBase == "" || current == nil {
+		return patched.Settings
+	}
+	existing, ok := current.Notifiers[name]
+	if !ok || strings.TrimSpace(notifierSettingString(existing, "api_base")) != apiBase {
+		return patched.Settings
+	}
+	settings := make(map[string]any, len(patched.Settings))
+	for key, value := range patched.Settings {
+		if key != "api_base" {
+			settings[key] = value
+		}
+	}
+	return settings
 }
 
 // dropRejectedLifecycleDurations clears a lifecycle poll_interval or

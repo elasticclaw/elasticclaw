@@ -279,6 +279,37 @@ func (s *Server) stampLifecycleClawRouteBaselines(lc *types.LifecycleNotificatio
 	}
 }
 
+// stampLifecycleLegacyIncumbent records the single-`via` incumbent's claw
+// baseline at CONFIG time, without seeding, for the shape that keeps reading
+// the shared state. The first tick on which the notifier BUILDS stamps the same
+// key (ensureLifecycleClawRouteBaseline), but a lone route whose notifier can
+// never be built delivers nothing and stamps nothing, so the hub keeps no
+// record that it was the incumbent at all: replacing it with a working channel
+// then finds no per-route state to prune, leaves the routes_live latch clear,
+// and hands the newcomer the incumbent's frozen shared cursor — replaying
+// everything that piled up during the outage into a brand-new channel. Only
+// meaningful once the shared claw baseline exists; before that the claw pass's
+// own first-run seeding is the fence, and it stamps every configured route.
+func (s *Server) stampLifecycleLegacyIncumbent(lc *types.LifecycleNotificationsConfig) {
+	via := lifecycleLegacyIncumbentVia(lc)
+	if via == "" {
+		return
+	}
+	if _, found, err := s.notifierStateInt64(lifecycleStateClawBaselineKey); err != nil || !found {
+		return
+	}
+	// Once the per-route scheme is live nothing reads a lone route as the
+	// incumbent, so the stamp would only mislabel a newcomer.
+	if live, err := s.lifecycleRoutingSchemeLive(); err != nil || live {
+		return
+	}
+	key := lifecycleClawRouteBaselineKey(via)
+	if _, found, err := s.notifierStateInt64(key); err != nil || found {
+		return
+	}
+	s.setNotifierStateInt64(key, 1)
+}
+
 // ensureLifecycleClawRouteBaselines fences the claw-pass history of every
 // CONFIGURED route at the moment the route appears in config — not at the first
 // tick its notifier happens to build. ensureLifecycleRouteWatermarks already
@@ -292,7 +323,9 @@ func (s *Server) ensureLifecycleClawRouteBaselines(lc *types.LifecycleNotificati
 	routes := lc.EffectiveRoutes()
 	if !s.lifecycleRoutesNeedOwnState(routes) {
 		// The legacy single-route shape is fenced by the legacy delivery table;
-		// ensureLifecycleClawRouteBaseline handles its one key.
+		// ensureLifecycleClawRouteBaseline handles its one key — but only on a
+		// tick where the notifier builds, so record the incumbent here too.
+		s.stampLifecycleLegacyIncumbent(lc)
 		return
 	}
 	if _, found, err := s.notifierStateInt64(lifecycleStateClawBaselineKey); err != nil {

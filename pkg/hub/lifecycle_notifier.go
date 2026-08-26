@@ -784,6 +784,7 @@ func (s *Server) pruneLifecycleRouteState(lc *types.LifecycleNotificationsConfig
 		return
 	}
 	var stale []string
+	gone := map[string]bool{}
 	schemeLive := false
 	for rows.Next() {
 		var key string
@@ -798,6 +799,7 @@ func (s *Server) pruneLifecycleRouteState(lc *types.LifecycleNotificationsConfig
 		notifier := key[strings.Index(key, ":")+1:]
 		if !configured[notifier] {
 			stale = append(stale, key)
+			gone[notifier] = true
 			// Deleting ANY per-route stamp counts as evidence too: a hub that
 			// never went past the legacy single-`via` shape records its
 			// incumbent only as a claw baseline stamp, so replacing that route
@@ -818,6 +820,48 @@ func (s *Server) pruneLifecycleRouteState(lc *types.LifecycleNotificationsConfig
 			s.setNotifierStateInt64(lifecycleStateRoutedKey, 1)
 		}
 	}
+	for _, key := range stale {
+		s.clearNotifierState(key)
+	}
+	s.clearLifecycleTransientFailures(gone)
+}
+
+// clearLifecycleTransientFailures drops the transient-failure streaks of
+// notifiers that are no longer routed. A streak row exists only while a streak
+// is live — a successful send clears its own key, the cap clears the key it
+// burns — so a route removed mid-streak leaves its counters behind with nothing
+// left to clear them. Re-adding the route under the same name would then hand
+// it a retry budget already spent for every delivery key that recurs (a
+// reopened PR re-uses claw:<id>:pr:<url>), burning the notification on the
+// first transient blip instead of after lifecycleMaxTransientFailures.
+func (s *Server) clearLifecycleTransientFailures(notifiers map[string]bool) {
+	if len(notifiers) == 0 {
+		return
+	}
+	prefix := lifecycleTransientFailureStateKey("")
+	rows, err := s.db.Query(`SELECT key FROM slack_notifier_state WHERE key LIKE ?`, prefix+"%")
+	if err != nil {
+		log.Printf("[notify] list transient-failure state: %v", err)
+		return
+	}
+	var stale []string
+	for rows.Next() {
+		var key string
+		if err := rows.Scan(&key); err != nil {
+			log.Printf("[notify] list transient-failure state: %v", err)
+			rows.Close()
+			return
+		}
+		// Only the per-notifier shape is namespaced; the legacy key is
+		// "transient_failures:<deliveryKey>" and belongs to no notifier.
+		rest := key[len(prefix):]
+		sep := strings.Index(rest, ":")
+		if sep < 0 || !notifiers[rest[:sep]] {
+			continue
+		}
+		stale = append(stale, key)
+	}
+	rows.Close()
 	for _, key := range stale {
 		s.clearNotifierState(key)
 	}

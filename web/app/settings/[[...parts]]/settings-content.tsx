@@ -216,6 +216,11 @@ interface NotificationsView {
 // for an accepted one whose follow-up re-read failed.
 type SaveOutcome = { persisted: boolean; message: string | null }
 
+// What every screen says once the loaded settings can no longer be trusted. A
+// reload is the only repair: the snapshot the patches are built from is stale,
+// and this page has no other way to re-read it than the one that just failed.
+const STALE_SETTINGS_MESSAGE = "Reload the page before editing again — until then every save is refused, because it would re-send the settings this screen last read and revert what the hub now holds."
+
 async function fetchSettings(): Promise<SettingsData> {
   const hubUrl = getHubUrl()
   const token = getAuthToken() || ""
@@ -299,6 +304,13 @@ export default function SettingsSectionPage() {
 
   const [settings, setSettings] = useState<SettingsData | null>(null)
   const [saving, setSaving] = useState(false)
+  // Latched when a save landed but its follow-up re-read did not: `settings`
+  // then describes a hub that has already moved on, and every section builds
+  // its next patch from that snapshot — the next save would re-send the values
+  // this one replaced, recreating a channel the operator just deleted under a
+  // green "Saved". A ref, not state: the gate has to hold for a save started
+  // from the same render as the one that failed.
+  const staleSettings = useRef(false)
   const [error, setError] = useState("")
   const [success, setSuccess] = useState("")
   const [version, setVersion] = useState("")
@@ -370,6 +382,12 @@ export default function SettingsSectionPage() {
   // a re-read that failed after an accepted PATCH loses the record of a value
   // this screen wrote on its own initiative.
   async function runSave(patch: object): Promise<SaveOutcome> {
+    if (staleSettings.current) {
+      // Reporting it again is all this can do: the snapshot every patch is
+      // built from is stale, so sending one would revert whatever the save
+      // whose re-read failed had persisted.
+      return { persisted: false, message: STALE_SETTINGS_MESSAGE }
+    }
     setSaving(true)
     setError("")
     setSuccess("")
@@ -383,9 +401,10 @@ export default function SettingsSectionPage() {
         await load()
       } catch (e) {
         const reason = e instanceof Error ? e.message : "the settings could not be re-read"
+        staleSettings.current = true
         return {
           persisted: true,
-          message: `Saved, but reloading the settings failed (${reason}). Reload the page before editing again.`,
+          message: `Saved, but reloading the settings failed (${reason}). ${STALE_SETTINGS_MESSAGE}`,
         }
       }
       setSuccess("Saved")
@@ -3346,7 +3365,8 @@ function SecretsSection({ settings, workspace }: { settings: SettingsData | null
   const [newValue, setNewValue] = useState("")
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [loading, setLoading] = useState(true)
+  const [reloading, setReloading] = useState(true)
+  const [loadedPath, setLoadedPath] = useState("")
 
   // Two stores live behind this screen and only one of them was reachable: the
   // workspace file, and hub.yaml's top-level `secrets`. Hub secrets are what
@@ -3364,6 +3384,12 @@ function SecretsSection({ settings, workspace }: { settings: SettingsData | null
   const hubUrl = getHubUrl()
   const token = () => getAuthToken() || ""
   const secretsPath = scoped ? `/api/workspaces/${encodeURIComponent(workspace)}/secrets` : "/api/secrets"
+  // Switching scope must not leave the other store's names on screen while the
+  // new one loads. Derived from the path the list was last loaded for rather
+  // than set at the head of `refresh`, which the mount effect calls straight
+  // from its body — a synchronous setState there is what
+  // react-hooks/set-state-in-effect rejects.
+  const loading = reloading || loadedPath !== secretsPath
 
   // The scope switch changes `secretsPath` within one mount, so two refreshes
   // can be in flight at once and resolve out of order. The loser would render
@@ -3373,7 +3399,6 @@ function SecretsSection({ settings, workspace }: { settings: SettingsData | null
 
   const refresh = useCallback(async () => {
     const generation = ++refreshGeneration.current
-    setLoading(true)
     try {
       const res = await fetch(`${hubUrl}${secretsPath}`, { headers: { Authorization: `Bearer ${token()}` } })
       if (res.ok) {
@@ -3391,7 +3416,10 @@ function SecretsSection({ settings, workspace }: { settings: SettingsData | null
         setSecrets([])
       }
     } finally {
-      if (generation === refreshGeneration.current) setLoading(false)
+      if (generation === refreshGeneration.current) {
+        setLoadedPath(secretsPath)
+        setReloading(false)
+      }
     }
   }, [hubUrl, secretsPath])
 
@@ -4649,6 +4677,12 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
   // the route and offer a way to drop it. Silently dropping it in buildPatch
   // would delete config the operator never saw.
   const orphanRoutes = routes.filter((route) => !notifiers[route.via])
+  // A route whose allow-list names alert types this hub does not support. The
+  // hub accepts it on disk while alerts are paused — routes are only validated
+  // once enabled — and rejects the whole block the moment they are turned on,
+  // exactly like an orphan route, so the master switch has to be gated on it
+  // too rather than offering a save that is certain to fail.
+  const unsupportedRoutes = routes.filter((route) => unknownEvents(route.events).length > 0)
   // A hub that has never had a lifecycle block: routing its first channel turns
   // alerts on. This is deliberately NOT inferred from (enabled=false, routes=[]),
   // which an operator reaches by muting the master switch and then removing the
@@ -4810,10 +4844,14 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
     if (lifecycle?.idleAfter) outLifecycle.idleAfter = lifecycle.idleAfter
     return {
       patch: { notifications: { notifiers: outNotifiers, lifecycle: outLifecycle } },
-      // A hub that never had a lifecycle block and is saved with routing off is
-      // pausing nothing — that is the operator's own choice, not a pause this
-      // screen imposed — so it must not leave a clamp behind to lift later.
-      clamp: outRoutes.length === 0 && wantEnabled && !neverConfigured,
+      // The never-configured hub is clamped too, and for the same reason: the
+      // block this save creates carries `enabled:false` only because it has no
+      // route to send to, which is this screen's own doing — the operator was
+      // adding a channel, not muting a hub that had nothing to mute. Without
+      // the flag, routing that channel later finds `enabled:false` in the
+      // loaded config, keeps it, and leaves the freshly routed channel paused
+      // until the master switch is found by hand.
+      clamp: outRoutes.length === 0 && wantEnabled,
     }
   }
 
@@ -5022,22 +5060,27 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
                 ? "Add a channel and route it before turning alerts on — there is nowhere to send them yet."
                 : orphanRoutes.length > 0
                   ? "Remove the routes pointing at deleted channels below — the hub refuses to enable alerts while one is left."
-                  : "The master switch. Turn it off to mute every channel without losing your routing."}
+                  : unsupportedRoutes.length > 0
+                    ? "Open Edit on the channels flagged below and save — the hub refuses to enable alerts while a route lists an unsupported alert type."
+                    : "The master switch. Turn it off to mute every channel without losing your routing."}
             </p>
           </div>
           <Switch
             checked={enabled}
-            // Gated on routes that actually name a configured channel: the hub
-            // rejects both an enabled block with no routes and one routed at a
-            // notifier that no longer exists, in the vocabulary of hub.yaml
-            // (`via`) rather than of this screen.
-            disabled={saving || routedCount === 0 || orphanRoutes.length > 0}
+            // Gated on every shape the hub rejects when a block is enabled: no
+            // routes, a route naming a notifier that no longer exists, and a
+            // route whose allow-list carries an alert type this hub does not
+            // support — all three in the vocabulary of hub.yaml (`via`,
+            // `events`) rather than of this screen.
+            disabled={saving || routedCount === 0 || orphanRoutes.length > 0 || unsupportedRoutes.length > 0}
             title={
               routedCount === 0
                 ? "Add a channel and route it to alerts first"
                 : orphanRoutes.length > 0
                   ? "Remove the routes pointing at deleted channels first"
-                  : undefined
+                  : unsupportedRoutes.length > 0
+                    ? "Drop the unsupported alert types from the flagged channels first — open Edit and save"
+                    : undefined
             }
             // Invalidated only once the hub has taken the change, exactly as
             // saveChannel/removeChannel do it: a rejected save leaves every
@@ -5262,16 +5305,22 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
                   value={formName}
                   onChange={(e) => setFormName(e.target.value)}
                   className="font-mono text-sm h-8"
-                  disabled={modalMode === "edit"}
+                  disabled={saving || modalMode === "edit"}
                 />
               </div>
               <div>
                 <label className="text-xs text-muted-foreground mb-1 block">Slack channel ID</label>
+                {/* Every control below is disabled while this dialog's own save
+                    is in flight: saveChannel snapshots the form at click time
+                    and closes the dialog on success, so an edit made during the
+                    round trip — seconds long, the re-read hits GitHub — would be
+                    discarded with nothing on screen saying so. */}
                 <Input
                   placeholder="C0123ABCD"
                   value={formChannel}
                   onChange={(e) => setFormChannel(e.target.value)}
                   className="font-mono text-sm h-8"
+                  disabled={saving}
                 />
               </div>
             </div>
@@ -5285,6 +5334,7 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
                 value={formTokenSecret}
                 onChange={(e) => setFormTokenSecret(e.target.value)}
                 className="w-full h-8 text-sm rounded-md border border-input bg-background px-3"
+                disabled={saving}
               >
                 <option value="">Select secret…</option>
                 {/* A dangling reference has no option of its own, so the
@@ -5321,6 +5371,7 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
                 value={formMinSendInterval}
                 onChange={(e) => setFormMinSendInterval(e.target.value)}
                 className="font-mono text-sm h-8"
+                disabled={saving}
               />
               <p className="text-xs text-muted-foreground mt-1">
                 Optional. How long this channel waits between messages, as a duration (<span className="font-mono">30s</span>, <span className="font-mono">5m</span>). Leave empty for the default.
@@ -5338,6 +5389,7 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
                   className="mt-1"
                   checked={formRouted}
                   onCheckedChange={setFormRouted}
+                  disabled={saving}
                   aria-label="Send lifecycle alerts to this channel"
                 />
               </div>
@@ -5376,7 +5428,8 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
                         {!formAllAlerts && (
                           <button
                             type="button"
-                            className="text-xs text-blue-400 hover:underline mt-1"
+                            className="text-xs text-blue-400 hover:underline mt-1 disabled:opacity-50"
+                            disabled={saving}
                             onClick={() => setFormEvents([])}
                           >
                             Clear selection to receive all alerts
@@ -5407,6 +5460,7 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
                             type="checkbox"
                             aria-label={`${lifecycleEventLabel(eventType)} (${eventType})`}
                             checked={checked}
+                            disabled={saving}
                             onChange={(e) =>
                               setFormEvents(
                                 e.target.checked
@@ -5464,7 +5518,7 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
                 </Button>
               )}
               <div className="flex items-center gap-2 ml-auto">
-                <Button size="sm" variant="outline" onClick={() => setShowModal(false)}>Cancel</Button>
+                <Button size="sm" variant="outline" disabled={saving} onClick={() => setShowModal(false)}>Cancel</Button>
                 <Button size="sm" disabled={saving || !formName.trim() || !formChannel.trim() || !formTokenSecret} onClick={saveChannel}>
                   {modalMode === "add" ? "Add Channel" : "Save changes"}
                 </Button>

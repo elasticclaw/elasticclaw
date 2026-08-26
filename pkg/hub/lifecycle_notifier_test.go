@@ -2735,3 +2735,75 @@ func TestLifecycleBootBaselineMaterialisesAddedRouteCursors(t *testing.T) {
 		}
 	}
 }
+
+// Regression: pruneLifecycleRouteState dropped a removed route's cursor and
+// claw baseline but not its transient-failure streaks, so a route re-added
+// under the same name inherited a retry budget already spent for every delivery
+// key that recurs — burning the notification on the first transient blip.
+func TestLifecycleRemovedRouteTransientStreakIsDropped(t *testing.T) {
+	fake := newFakeSlackServer(t)
+	s, db := newSlackNotifierRoutesTestServer(t, fake.server.URL, []types.LifecycleRoute{{Via: "primary"}, {Via: "secondary"}})
+	setLifecycleClawBaseline(t, s)
+	setSlackWatermark(t, s, 0)
+	insertLifecycleRouteEvent(t, db, "before-removal", taskRunEventAgentStarted)
+	s.lifecycleNotifierTick()
+
+	// "secondary" is mid-streak on a claw PR key when the operator un-routes it.
+	// That key recurs — a reopened PR re-uses claw:<id>:pr:<url> — so a surviving
+	// counter is a retry budget the re-added channel never spent.
+	prKey := lifecycleClawPRKey("claw-x", "https://github.com/acme/api/pull/7")
+	stale := lifecycleTransientFailureStateKey(prKey, "secondary")
+	s.setNotifierStateInt64(stale, lifecycleMaxTransientFailures-1)
+	kept := lifecycleTransientFailureStateKey(prKey, "primary")
+	s.setNotifierStateInt64(kept, 3)
+
+	s.mu.Lock()
+	s.hubCfg.Notifications.Lifecycle.Routes = []types.LifecycleRoute{{Via: "primary"}}
+	s.mu.Unlock()
+	s.lifecycleNotifierTick()
+
+	if _, found, err := s.notifierStateInt64(stale); err != nil || found {
+		t.Fatalf("the removed route's transient-failure streak survived (found=%v, err=%v)", found, err)
+	}
+	if _, found, err := s.notifierStateInt64(kept); err != nil || !found {
+		t.Fatalf("a configured route's streak was dropped (found=%v, err=%v)", found, err)
+	}
+}
+
+// Regression: a lone route whose notifier could never be built left no per-route
+// state at all, so nothing recorded that it had been the incumbent. Replacing it
+// with a working channel found nothing to prune, left the routes_live latch
+// clear, and handed the newcomer the incumbent's frozen shared cursor — plus a
+// claw baseline stamped without seeding — replaying the whole outage into a
+// brand-new channel.
+func TestLifecycleUnbuildableLoneRouteReplacementStartsAtHead(t *testing.T) {
+	fake := newFakeSlackServer(t)
+	s, db := newSlackNotifierRoutesTestServer(t, fake.server.URL, []types.LifecycleRoute{{Via: "broken"}})
+	// An upgraded hub: shared cursor and shared claw baseline, nothing per-route.
+	s.setNotifierStateInt64(lifecycleStateClawBaselineKey, 1)
+	setSlackWatermark(t, s, 0)
+	s.mu.Lock()
+	s.hubCfg.Notifications.Notifiers["broken"] = types.NotifierConfig{Type: "slack", Settings: map[string]any{
+		"token_secret": "secret-that-does-not-exist", "channel": "C0BROKEN",
+	}}
+	s.hubCfg.Notifications.Notifiers["healthy"] = types.NotifierConfig{Type: "slack", Settings: map[string]any{
+		"token_secret": testNotifierToken, "channel": "C0HEALTHY",
+	}}
+	s.mu.Unlock()
+
+	insertLifecycleRouteEvent(t, db, "during-outage", taskRunEventAgentStarted)
+	insertSlackTestClaw(t, db, "claw-during-outage", "connected", 1, "", oldEnough)
+	s.lifecycleNotifierTick()
+	if fake.count() != 0 {
+		t.Fatalf("an unbuildable route delivered %d messages, want 0", fake.count())
+	}
+
+	s.mu.Lock()
+	s.hubCfg.Notifications.Lifecycle.Routes = []types.LifecycleRoute{{Via: "healthy"}}
+	s.mu.Unlock()
+	s.lifecycleNotifierTick()
+	s.lifecycleNotifierTick()
+	if fake.count() != 0 {
+		t.Fatalf("the replacement route replayed the outage: %d messages, want 0", fake.count())
+	}
+}

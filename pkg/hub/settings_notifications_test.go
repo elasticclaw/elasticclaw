@@ -553,3 +553,57 @@ func TestSettingsPatchRejectsRepointedNotifierAPIBase(t *testing.T) {
 		t.Fatalf("unchanged api_base: status = %d, want 200; body = %s", rr.Code, rr.Body.String())
 	}
 }
+
+// Regression: a stored api_base this build refuses to construct (written by
+// hand, or accepted by an older build) is exempt from validateNotifierAPIBase,
+// but the provider check that follows judged the merged settings — stored
+// api_base included — so every save that touched the channel 400d on a field
+// the settings screen neither renders nor can clear, leaving a hub.yaml edit as
+// the only repair.
+func TestSettingsPatchEditsChannelWithUnbuildableStoredAPIBase(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "hub.yaml")
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", path)
+	s, _ := NewTestServerWithConfig(t, &types.HubConfig{Notifications: &types.NotificationsConfig{
+		Notifiers: map[string]types.NotifierConfig{"eng": {Type: "slack", Settings: map[string]any{
+			// Scheme-less: accepted at load, refused by newSlack.
+			"channel": "C0123ABCD", "token_secret": "slack_token", "api_base": "slack.example.com/api",
+		}}},
+		Lifecycle: &types.LifecycleNotificationsConfig{Via: "eng"},
+	}}, "", "", "")
+	if err := config.SaveHubConfig(s.hubCfg); err != nil {
+		t.Fatal(err)
+	}
+
+	patch := func(t *testing.T, apiBase string) *httptest.ResponseRecorder {
+		t.Helper()
+		body := []byte(`{"notifications":{"notifiers":` +
+			`{"eng":{"type":"slack","channel":"C0999NEW","token_secret":"slack_token","api_base":"` + apiBase + `"}},` +
+			`"lifecycle":{"enabled":true,"routes":[{"via":"eng"}]}}}`)
+		rr := httptest.NewRecorder()
+		s.patchSettings(rr, httptest.NewRequest(http.MethodPatch, "/api/settings", bytes.NewReader(body)))
+		return rr
+	}
+
+	// The repair the screen offers — a corrected channel ID, api_base
+	// round-tripped unchanged — must go through.
+	rr := patch(t, "slack.example.com/api")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("editing a channel with an unbuildable stored api_base: status = %d, want 200; body = %s", rr.Code, rr.Body.String())
+	}
+	diskCfg, err := config.LoadHubConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored := diskCfg.Notifications.Notifiers["eng"].Settings
+	if stored["channel"] != "C0999NEW" {
+		t.Fatalf("stored channel = %v, want the edit to have landed", stored["channel"])
+	}
+	if stored["api_base"] != "slack.example.com/api" {
+		t.Fatalf("stored api_base = %v, want it preserved", stored["api_base"])
+	}
+
+	// A value the patch itself introduces is still judged, exemption or not.
+	if rr = patch(t, "slack.other.example/api"); rr.Code != http.StatusBadRequest {
+		t.Fatalf("changed api_base: status = %d, want 400; body = %s", rr.Code, rr.Body.String())
+	}
+}
