@@ -332,6 +332,28 @@ func (s *Server) ensureTaskRunForClaw(clawID string, opts TaskRunStart) (string,
 	}); err != nil {
 		return "", "", err
 	}
+	// A task run is queued from the instant its claw/run record is created,
+	// regardless of whether the creator has already assigned the claw its next
+	// lifecycle status. Factory, workflow, and webhook creators normally insert
+	// the claw as "provisioning" before this function runs, which made queue
+	// timing depend on observing an implementation-detail transient "pending"
+	// status and left queued_at empty for ordinary runs. Record the request time
+	// explicitly, then retain the status-derived provision/agent phase event
+	// below so the existing lifecycle semantics remain unchanged.
+	if err := recordTaskRunEventTx(tx, TaskRunEvent{
+		TenantID:        opts.TenantID,
+		RunID:           runID,
+		AttemptID:       attemptID,
+		EventKey:        taskRunEventRunQueued + ":" + runID,
+		Source:          taskRunSourceHub,
+		EventType:       taskRunEventRunQueued,
+		EventTime:       opts.StartedAt,
+		ObservedAt:      opts.StartedAt,
+		ActorType:       taskRunActorSystem,
+		InteractionRole: taskRunInteractionNeutral,
+	}); err != nil {
+		return "", "", err
+	}
 	if err := recordTaskRunPhaseEventTx(tx, opts.TenantID, runID, attemptID, clawStatus, opts.StartedAt); err != nil {
 		return "", "", err
 	}
@@ -800,6 +822,46 @@ func (s *Server) recordClawAgentStarted(clawID string) {
 	}
 	if err := tx.Commit(); err != nil {
 		log.Printf("[analytics] commit agent_started for claw %s: %v", shortID(clawID), err)
+	}
+}
+
+// recordClawProvisionStarted marks the point at which a queued claw actually
+// leaves the queue. It is separate from ensureTaskRunForClaw because pending
+// claws can be promoted long after their run was created.
+func (s *Server) recordClawProvisionStarted(clawID string) {
+	if s == nil || s.db == nil || clawID == "" {
+		return
+	}
+	var tenantID, runID, attemptID string
+	err := s.db.QueryRow(`
+		SELECT t.tenant_id, t.id, t.current_attempt_id
+		  FROM claws c JOIN task_runs t ON t.id = c.task_run_id
+		 WHERE c.id = ?`, clawID).Scan(&tenantID, &runID, &attemptID)
+	if err != nil {
+		return
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return
+	}
+	defer tx.Rollback()
+	timestamp := now()
+	if err := recordTaskRunEventTx(tx, TaskRunEvent{
+		TenantID: tenantID, RunID: runID, AttemptID: attemptID,
+		EventKey: taskRunEventProvisionStarted + ":" + runID,
+		Source:   taskRunSourceHub, EventType: taskRunEventProvisionStarted,
+		EventTime: timestamp, ObservedAt: timestamp, ActorType: taskRunActorSystem,
+		InteractionRole: taskRunInteractionNeutral,
+	}); err != nil {
+		log.Printf("[analytics] record provision_started for claw %s: %v", shortID(clawID), err)
+		return
+	}
+	if err := materializeTaskRunTx(tx, runID); err != nil {
+		log.Printf("[analytics] materialize after provision_started for claw %s: %v", shortID(clawID), err)
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		log.Printf("[analytics] commit provision_started for claw %s: %v", shortID(clawID), err)
 	}
 }
 
@@ -1421,6 +1483,70 @@ type taskRunPhaseTimeSummary struct {
 	provisionStartedAt int64
 	agentStartedAt     int64
 	prOpenedAt         int64
+}
+
+type taskRunHumanWaitInterval struct {
+	startAt    int64
+	endAt      int64
+	durationMs int64
+}
+
+type taskRunHumanWaitSummary struct {
+	signalToPROpenMs int64
+	prOpenToMergeMs  int64
+	intervals        []taskRunHumanWaitInterval
+}
+
+// taskRunHumanWaitTimes reports intervals separately from stage timings. A
+// task_completed event is the clearest existing signal that the agent's work
+// has finished; older runs and integrations do not always emit it, so for
+// those runs the last non-human event before the PR opens is the best
+// available machine-attributed anchor. A human-bounded interval starts at an
+// existing human-authored event and ends at the first later non-human event,
+// because that is the first recorded indication that work resumed after the
+// human interaction. Open-ended intervals are intentionally omitted: without
+// a subsequent event their duration is not yet bounded by recorded evidence.
+func taskRunHumanWaitTimes(events []taskRunEventProjection, prOpenedAt, mergedAt int64) taskRunHumanWaitSummary {
+	var summary taskRunHumanWaitSummary
+	if prOpenedAt > 0 {
+		var completedAt, lastMachineAt int64
+		for _, event := range events {
+			if event.eventTime >= prOpenedAt || isHumanTaskRunEvent(event) {
+				continue
+			}
+			if event.eventType == taskRunEventTaskCompleted && event.eventTime > completedAt {
+				completedAt = event.eventTime
+			}
+			if event.eventTime > lastMachineAt {
+				lastMachineAt = event.eventTime
+			}
+		}
+		anchor := completedAt
+		if anchor == 0 {
+			anchor = lastMachineAt
+		}
+		if anchor > 0 {
+			summary.signalToPROpenMs = prOpenedAt - anchor
+		}
+	}
+	if prOpenedAt > 0 && mergedAt >= prOpenedAt {
+		summary.prOpenToMergeMs = mergedAt - prOpenedAt
+	}
+	for i, event := range events {
+		if !isHumanTaskRunEvent(event) || event.eventTime <= 0 {
+			continue
+		}
+		for _, next := range events[i+1:] {
+			if isHumanTaskRunEvent(next) || next.eventTime < event.eventTime {
+				continue
+			}
+			summary.intervals = append(summary.intervals, taskRunHumanWaitInterval{
+				startAt: event.eventTime, endAt: next.eventTime, durationMs: next.eventTime - event.eventTime,
+			})
+			break
+		}
+	}
+	return summary
 }
 
 func taskRunPhaseTimes(events []taskRunEventProjection) taskRunPhaseTimeSummary {

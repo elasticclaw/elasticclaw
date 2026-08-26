@@ -515,7 +515,17 @@ func TestTaskRunMaterializationUsesClawLifecyclePhase(t *testing.T) {
 		}
 		runID, _ := startTaskRunForTest(t, s, "claw-provision-phase", "provision-phase")
 
+		// Normal creation observes provisioning, not the transient pending state.
+		// Queue timing must nevertheless start when the run was created.
+		assertTaskRunEventExists(t, db, runID, taskRunEventRunQueued, taskRunInteractionNeutral)
 		assertTaskRunEventExists(t, db, runID, taskRunEventProvisionStarted, taskRunInteractionNeutral)
+		var queuedAt int64
+		if err := db.QueryRow(`SELECT queued_at FROM task_run_summaries WHERE run_id=?`, runID).Scan(&queuedAt); err != nil {
+			t.Fatalf("read queued_at: %v", err)
+		}
+		if queuedAt == 0 {
+			t.Fatal("expected queued_at for a normal provisioning run")
+		}
 		assertTaskRunSummary(t, db, runID, taskRunStatusRunning, taskRunPhaseProvisioning, "", "[]", 0, 0, 0, 0, 0)
 	})
 }

@@ -61,8 +61,21 @@ type taskRunAnalyticsRunsResponse struct {
 }
 
 type taskRunAnalyticsRunDetailResponse struct {
-	Run    taskRunAnalyticsRunView     `json:"run"`
-	Stages []taskRunAnalyticsStageView `json:"stages,omitempty"`
+	Run       taskRunAnalyticsRunView       `json:"run"`
+	Stages    []taskRunAnalyticsStageView   `json:"stages,omitempty"`
+	HumanWait taskRunAnalyticsHumanWaitView `json:"humanWait"`
+}
+
+type taskRunAnalyticsHumanWaitView struct {
+	SignalToPROpenMs int64                                   `json:"signalToPrOpenMs"`
+	PROpenToMergeMs  int64                                   `json:"prOpenToMergeMs"`
+	Intervals        []taskRunAnalyticsHumanWaitIntervalView `json:"intervals"`
+}
+
+type taskRunAnalyticsHumanWaitIntervalView struct {
+	StartAt    int64 `json:"startAt"`
+	EndAt      int64 `json:"endAt"`
+	DurationMs int64 `json:"durationMs"`
 }
 
 type taskRunAnalyticsAttemptsResponse struct {
@@ -469,6 +482,28 @@ func taskRunAnalyticsStages(stages []taskRunStage, runFinishedAt int64) []taskRu
 	return views
 }
 
+func taskRunAnalyticsHumanWait(events []taskRunAnalyticsEventView, prOpenedAt, mergedAt int64) taskRunAnalyticsHumanWaitView {
+	projections := make([]taskRunEventProjection, 0, len(events))
+	for _, event := range events {
+		projections = append(projections, taskRunEventProjection{
+			eventType: event.EventType, actorType: event.ActorType, warningType: event.WarningType,
+			failureType: event.FailureType, eventTime: event.EventTime,
+		})
+	}
+	summary := taskRunHumanWaitTimes(projections, prOpenedAt, mergedAt)
+	view := taskRunAnalyticsHumanWaitView{
+		SignalToPROpenMs: summary.signalToPROpenMs,
+		PROpenToMergeMs:  summary.prOpenToMergeMs,
+		Intervals:        []taskRunAnalyticsHumanWaitIntervalView{},
+	}
+	for _, interval := range summary.intervals {
+		view.Intervals = append(view.Intervals, taskRunAnalyticsHumanWaitIntervalView{
+			StartAt: interval.startAt, EndAt: interval.endAt, DurationMs: interval.durationMs,
+		})
+	}
+	return view
+}
+
 func (s *Server) handleTaskRunAnalyticsRunSubresource(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		jsonError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -504,7 +539,15 @@ func (s *Server) handleTaskRunAnalyticsRunSubresource(w http.ResponseWriter, r *
 			jsonError(w, http.StatusInternalServerError, "db error")
 			return
 		}
-		jsonOK(w, taskRunAnalyticsRunDetailResponse{Run: run, Stages: taskRunAnalyticsStages(stages, run.FinishedAt)})
+		events, err := s.readTaskRunAnalyticsEvents(tenantID, runID)
+		if err != nil {
+			jsonError(w, http.StatusInternalServerError, "db error")
+			return
+		}
+		jsonOK(w, taskRunAnalyticsRunDetailResponse{
+			Run: run, Stages: taskRunAnalyticsStages(stages, run.FinishedAt),
+			HumanWait: taskRunAnalyticsHumanWait(events, run.PROpenedAt, run.MergedAt),
+		})
 		return
 	}
 	if len(parts) != 2 {

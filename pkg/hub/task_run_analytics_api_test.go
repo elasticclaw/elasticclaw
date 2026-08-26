@@ -516,12 +516,28 @@ func TestTaskRunAnalyticsAPIRunDetailsAttemptsEventsAndPRs(t *testing.T) {
 		Workspace: "secret", Factory: "hidden", Integration: "github", Repo: "secret/repo", Model: "hidden",
 		StartedAt: ts,
 	})
+	if _, err := db.Exec(`UPDATE task_run_summaries SET pr_opened_at=?, merged_at=? WHERE run_id=?`, ts+500, ts+1100, "run-detail"); err != nil {
+		t.Fatalf("set detail PR timings: %v", err)
+	}
+	if _, err := db.Exec(`
+		INSERT INTO task_run_events(
+			id, tenant_id, run_id, attempt_id, event_key, source, event_type, event_time, observed_at,
+			actor_type, interaction_role, detail, created_at
+		) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		"event-completed-run-detail", "test-tenant-id", "run-detail", "attempt-detail", "completed-run-detail",
+		taskRunSourceHub, taskRunEventTaskCompleted, ts+200, ts+200, taskRunActorAgent, taskRunInteractionNeutral, "{}", ts+200,
+	); err != nil {
+		t.Fatalf("insert completion event: %v", err)
+	}
 
 	detailRR := requestTaskRunAnalyticsAPI(t, s, http.MethodGet, "/api/analytics/runs/run-detail", "test-token")
 	var detail taskRunAnalyticsRunDetailResponse
 	decodeTaskRunAnalyticsAPI(t, detailRR, &detail)
 	if detail.Run.RunID != "run-detail" || detail.Run.WarningTypes[0] != taskRunWarningHumanReviewComment {
 		t.Fatalf("unexpected detail response: %#v", detail)
+	}
+	if detail.HumanWait.SignalToPROpenMs != 300 || detail.HumanWait.PROpenToMergeMs != 600 || len(detail.HumanWait.Intervals) != 1 || detail.HumanWait.Intervals[0].DurationMs != 100 {
+		t.Fatalf("unexpected human wait response: %#v", detail.HumanWait)
 	}
 
 	attemptsRR := requestTaskRunAnalyticsAPI(t, s, http.MethodGet, "/api/analytics/runs/run-detail/attempts", "test-token")
@@ -534,7 +550,7 @@ func TestTaskRunAnalyticsAPIRunDetailsAttemptsEventsAndPRs(t *testing.T) {
 	eventsRR := requestTaskRunAnalyticsAPI(t, s, http.MethodGet, "/api/analytics/runs/run-detail/events", "test-token")
 	var events taskRunAnalyticsEventsResponse
 	decodeTaskRunAnalyticsAPI(t, eventsRR, &events)
-	if len(events.Events) != 2 || events.Events[1].EventType != taskRunEventHumanReviewComment || events.Events[1].Detail["path"] != "pkg/hub/server.go" {
+	if len(events.Events) != 3 || events.Events[1].EventType != taskRunEventHumanReviewComment || events.Events[1].Detail["path"] != "pkg/hub/server.go" {
 		t.Fatalf("unexpected events response: %#v", events)
 	}
 
@@ -548,6 +564,15 @@ func TestTaskRunAnalyticsAPIRunDetailsAttemptsEventsAndPRs(t *testing.T) {
 	notFoundRR := requestTaskRunAnalyticsAPI(t, s, http.MethodGet, "/api/analytics/runs/run-other-tenant", "test-token")
 	if notFoundRR.Code != http.StatusNotFound {
 		t.Fatalf("cross-tenant detail status = %d, body = %s", notFoundRR.Code, notFoundRR.Body.String())
+	}
+}
+
+func TestTaskRunAnalyticsHumanWaitIsZeroWithoutPRTimings(t *testing.T) {
+	view := taskRunAnalyticsHumanWait([]taskRunAnalyticsEventView{{
+		EventType: taskRunEventHumanDashboardMessage, ActorType: taskRunActorHuman, EventTime: 100,
+	}}, 0, 0)
+	if view.SignalToPROpenMs != 0 || view.PROpenToMergeMs != 0 || len(view.Intervals) != 0 {
+		t.Fatalf("human wait without PR timings = %#v", view)
 	}
 }
 

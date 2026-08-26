@@ -1003,6 +1003,7 @@ func (s *Server) promotePendingClaws() {
 			// Claw was deleted between SELECT and UPDATE; skip to next pending
 			continue
 		}
+		s.recordClawProvisionStarted(clawID)
 
 		// Broadcast so UI updates
 		s.broadcastToUsers(tenantID, types.WSMessage{
