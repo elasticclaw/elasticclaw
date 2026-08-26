@@ -779,6 +779,13 @@ func validateSettingsNotifications(cfg *types.NotificationsConfig) error {
 		if !notify.Supported(notifier.Type) {
 			return fmt.Errorf("notifications.notifiers.%s: unsupported notifier type %q", name, notifier.Type)
 		}
+		// The type's own required fields, checked here rather than at the first
+		// send: a notifier that cannot be built delivers nothing and says so
+		// only in the hub log, so a PATCH that persists one silently mutes
+		// every route pointing at it.
+		if err := notify.ValidateConfig(notifier.Type, notifier.Settings); err != nil {
+			return fmt.Errorf("notifications.notifiers.%s: %w", name, err)
+		}
 	}
 	return nil
 }

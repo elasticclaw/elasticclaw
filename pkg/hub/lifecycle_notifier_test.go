@@ -2332,3 +2332,94 @@ func TestLifecycleLegacyViaMigrationStartsTheNewRouteAtHead(t *testing.T) {
 		}
 	}
 }
+
+// Regression: replacing the legacy single-`via` incumbent with an all-new route
+// set in one save deleted the incumbent's claw baseline stamp — the ONLY
+// per-route state a hub that never went multi-route has — so
+// ensureLifecycleRouteWatermarks read "nothing routed yet" and seeded every
+// brand-new channel with the incumbent's stalled shared cursor, replaying its
+// whole undelivered backlog into each of them.
+func TestLifecycleReplacingTheLegacyIncumbentStartsNewcomersAtHead(t *testing.T) {
+	fake := newFakeSlackServer(t)
+	s, db := newSlackNotifierTestServer(t, fake.server.URL, nil)
+	setLifecycleClawBaseline(t, s)
+	setSlackWatermark(t, s, 0)
+	s.lifecycleNotifierTick() // records the incumbent; nothing pending yet
+
+	// The incumbent's channel is archived, so its cursor stays frozen while the
+	// event stream grows.
+	var down atomic.Bool
+	down.Store(true)
+	fake.setRespond(func(_ int, w http.ResponseWriter) {
+		if down.Load() {
+			http.Error(w, "temporary", http.StatusInternalServerError)
+			return
+		}
+		slackOK(w)
+	})
+	insertLifecycleRouteEvent(t, db, "stalled-0", taskRunEventAgentStarted)
+	for i, id := range []string{"stalled-1", "stalled-2"} {
+		insertSlackTestEvent(t, db, id, "route-run", taskRunEventAgentStarted, 1760000000030+int64(i), "", "", "")
+	}
+	s.lifecycleNotifierTick()
+	if wm, _ := slackWatermark(t, s); wm != 0 {
+		t.Fatalf("the incumbent's cursor advanced past the failed sends: %d, want 0", wm)
+	}
+
+	// The operator replaces the channel outright: one save drops the incumbent
+	// and routes two brand-new channels.
+	down.Store(false)
+	addSlackTestNotifier(s, "alerts-b", testNotifierToken, "C0ALERTSB")
+	addSlackTestNotifier(s, "alerts-c", testNotifierToken, "C0ALERTSC")
+	s.mu.Lock()
+	s.hubCfg.Notifications.Lifecycle.Via = ""
+	s.mu.Unlock()
+	setLifecycleRoutes(s, types.LifecycleRoute{Via: "alerts-b"}, types.LifecycleRoute{Via: "alerts-c"})
+	s.lifecycleNotifierTick()
+	s.lifecycleNotifierTick()
+
+	for _, via := range []string{"alerts-b", "alerts-c"} {
+		for _, id := range []string{"stalled-0", "stalled-1", "stalled-2"} {
+			if status, ok := routeDeliveryStatus(t, db, id, via); ok && status == notificationDeliveryStatusSent {
+				t.Fatalf("replacing the incumbent replayed its stalled backlog into %q (%s)", via, id)
+			}
+		}
+	}
+}
+
+// Regression: the first boot of the upgraded binary on a DB left by a legacy
+// single-`via` era stamped a claw baseline for EVERY configured route. The
+// stamp is what lifecycleSingleViaIncumbent reads, so a channel added in the
+// same maintenance window was reported as the legacy incumbent, inherited its
+// frozen shared cursor and replayed the stalled backlog into a channel that
+// should have started clean.
+func TestLifecycleLegacyBootWithRoutesStartsEveryRouteAtHead(t *testing.T) {
+	fake := newFakeSlackServer(t)
+	s, db := newSlackNotifierRoutesTestServer(t, fake.server.URL,
+		[]types.LifecycleRoute{{Via: "incumbent"}, {Via: "oncall"}})
+	// Exactly the state the OLD binary leaves: a shared cursor frozen where the
+	// single `via` stalled plus the shared claw baseline, nothing per-route.
+	s.setNotifierStateInt64(lifecycleStateClawBaselineKey, 1)
+	setSlackWatermark(t, s, 0)
+	insertLifecycleRouteEvent(t, db, "stalled-0", taskRunEventAgentStarted)
+	for i, id := range []string{"stalled-1", "stalled-2"} {
+		insertSlackTestEvent(t, db, id, "route-run", taskRunEventAgentStarted, 1760000000030+int64(i), "", "", "")
+	}
+	insertSlackTestClaw(t, db, "claw-during-outage", "connected", 1, "", oldEnough)
+
+	// The operator upgrades the binary and saves the routes in one window.
+	s.initLifecycleNotifierBaseline()
+	s.lifecycleNotifierTick()
+	s.lifecycleNotifierTick()
+
+	if fake.count() != 0 {
+		t.Fatalf("the upgrade replayed the legacy backlog: %d messages, want 0", fake.count())
+	}
+	for _, via := range []string{"incumbent", "oncall"} {
+		for _, id := range []string{"stalled-0", "stalled-1", "stalled-2", lifecycleClawStartedKey("claw-during-outage")} {
+			if status, ok := routeDeliveryStatus(t, db, id, via); ok && status == notificationDeliveryStatusSent {
+				t.Fatalf("%s was sent to %q on the first boot after the upgrade", id, via)
+			}
+		}
+	}
+}

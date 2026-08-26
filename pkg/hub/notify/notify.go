@@ -239,6 +239,22 @@ func New(typ string, cfg map[string]any, secrets SecretResolver) (Notifier, erro
 	return p.construct(cfg, secrets)
 }
 
+// ValidateConfig checks a notifier configuration the way New does, but without
+// resolving its secrets, so a writer (the settings PATCH) can reject a config
+// its own type would refuse to build — a missing token_secret, a #name where a
+// channel ID belongs, an unparseable min_send_interval — at write time instead
+// of silently delivering nothing on every later tick. Secret VALUES are
+// deliberately not checked: naming a secret that is created right afterwards is
+// a legitimate order of operations.
+func ValidateConfig(typ string, cfg map[string]any) error {
+	p, ok := registry[typ]
+	if !ok {
+		return fmt.Errorf("unknown notifier type %q (supported: %s)", typ, supportedTypes())
+	}
+	_, err := p.construct(cfg, func(string) (string, bool) { return "unchecked-secret-value", true })
+	return err
+}
+
 // SecretSettings returns the config keys of the given notifier type whose
 // values must reference an existing secret. Returns nil for unknown types.
 func SecretSettings(typ string) []string {

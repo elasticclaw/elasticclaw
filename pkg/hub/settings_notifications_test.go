@@ -260,3 +260,57 @@ func TestSettingsLifecycleViewRoundTripsThroughPatch(t *testing.T) {
 		t.Fatalf("GET→PATCH round trip dropped the durations: %#v (from %s)", patched, encoded)
 	}
 }
+
+// Regression: PATCH validated only that the notifier TYPE was supported, so a
+// Slack channel saved without token_secret — or with a #name where a channel ID
+// belongs — persisted with a 200. Every later lifecycle tick then failed to
+// build that notifier and delivered nothing, saying so in the hub log alone.
+func TestSettingsPatchRejectsNotifierMissingRequiredSettings(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "hub.yaml")
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", path)
+	s, _ := NewTestServerWithConfig(t, &types.HubConfig{Notifications: &types.NotificationsConfig{
+		Notifiers: map[string]types.NotifierConfig{"ops": {Type: "slack", Settings: map[string]any{
+			"channel": "C0123ABCD", "token_secret": "slack_token",
+		}}},
+		Lifecycle: &types.LifecycleNotificationsConfig{Via: "ops"},
+	}}, "", "", "")
+	if err := config.SaveHubConfig(s.hubCfg); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// A brand-new channel, exactly as the Notifier screen adds one — the
+	// settings merge cannot backfill anything for a name the config has never
+	// seen.
+	for name, notifier := range map[string]string{
+		"no token secret": `{"type":"slack","channel":"C0NEWCHAN"}`,
+		"channel name":    `{"type":"slack","channel":"#alerts","token_secret":"slack_token"}`,
+		"bad interval":    `{"type":"slack","channel":"C0NEWCHAN","token_secret":"slack_token","min_send_interval":"soon"}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			body := []byte(`{"notifications":{"notifiers":{"ops":{"type":"slack","channel":"C0123ABCD","token_secret":"slack_token"},"added":` +
+				notifier + `},"lifecycle":{"enabled":true,"routes":[{"via":"ops"},{"via":"added"}]}}}`)
+			rr := httptest.NewRecorder()
+			s.patchSettings(rr, httptest.NewRequest(http.MethodPatch, "/api/settings", bytes.NewReader(body)))
+			if rr.Code != http.StatusBadRequest {
+				t.Fatalf("PATCH status = %d, want 400; body = %s", rr.Code, rr.Body.String())
+			}
+			if got := rr.Body.String(); !strings.Contains(got, "notifications.notifiers.added") {
+				t.Fatalf("error does not name the offending notifier: %s", got)
+			}
+			if _, ok := s.hubCfg.Notifications.Notifiers["added"]; ok {
+				t.Fatal("a rejected patch must not have added the notifier to the running config")
+			}
+			after, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(after, before) {
+				t.Fatalf("rejected patch changed disk config:\n%s", after)
+			}
+		})
+	}
+}

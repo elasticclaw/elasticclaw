@@ -3334,8 +3334,13 @@ function SecretsSection({ settings, workspace }: { settings: SettingsData | null
   // notifier token_secret references resolve against, so without this scope a
   // hub with any workspace has no way at all to create the secret the Notifier
   // screen requires.
-  const [hubScope, setHubScope] = useState(!workspace)
-  const scoped = Boolean(workspace) && !hubScope
+  //
+  // The default tracks the operator's CHOICE, not the `workspace` prop: the
+  // workspace list is fetched after the first render, so seeding state from the
+  // prop would latch "Hub" on every direct load of /settings/secrets and write
+  // hub.yaml secrets while the screen still said Workspace was available.
+  const [scopeChoice, setScopeChoice] = useState<"workspace" | "hub" | null>(null)
+  const scoped = Boolean(workspace) && scopeChoice !== "hub"
 
   const hubUrl = getHubUrl()
   const token = () => getAuthToken() || ""
@@ -3398,8 +3403,8 @@ function SecretsSection({ settings, workspace }: { settings: SettingsData | null
         </p>
         {Boolean(workspace) && (
           <div className="flex items-center gap-1 mb-6">
-            <Button size="sm" variant={scoped ? "secondary" : "ghost"} onClick={() => setHubScope(false)}>Workspace</Button>
-            <Button size="sm" variant={scoped ? "ghost" : "secondary"} onClick={() => setHubScope(true)}>Hub</Button>
+            <Button size="sm" variant={scoped ? "secondary" : "ghost"} onClick={() => setScopeChoice("workspace")}>Workspace</Button>
+            <Button size="sm" variant={scoped ? "ghost" : "secondary"} onClick={() => setScopeChoice("hub")}>Hub</Button>
           </div>
         )}
       </div>
@@ -4665,13 +4670,14 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
   }
 
   // PATCH /api/settings replaces the whole notifications block, so every save
-  // rebuilds it from the current view plus the change being made.
+  // rebuilds it from the current view plus the change being made. The clamp the
+  // patch implies is returned, never written here: see savePatch.
   function buildPatch(next: {
     notifiers?: Record<string, NotifierView>
     enabled?: boolean
     routes?: LifecycleRouteView[]
     events?: Record<LifecycleCategory, boolean>
-  }): object {
+  }): { patch: object; clamp: boolean } {
     const outNotifiers: Record<string, Record<string, string>> = {}
     for (const [name, notifier] of Object.entries(next.notifiers ?? notifiers)) {
       const out: Record<string, string> = { type: notifier.type || "slack" }
@@ -4697,7 +4703,6 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
     // routed". The flag is recorded here rather than inferred from the reloaded
     // config so a deliberate master-switch OFF survives a channel swap.
     const wantEnabled = next.enabled ?? (enabled || readClampedPause() || neverConfigured)
-    writeClampedPause(outRoutes.length === 0 && wantEnabled)
     const outLifecycle: Record<string, unknown> = {
       enabled: outRoutes.length > 0 && wantEnabled,
       routes: outRoutes,
@@ -4705,7 +4710,22 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
     }
     if (lifecycle?.pollInterval) outLifecycle.pollInterval = lifecycle.pollInterval
     if (lifecycle?.idleAfter) outLifecycle.idleAfter = lifecycle.idleAfter
-    return { notifications: { notifiers: outNotifiers, lifecycle: outLifecycle } }
+    return {
+      patch: { notifications: { notifiers: outNotifiers, lifecycle: outLifecycle } },
+      clamp: outRoutes.length === 0 && wantEnabled,
+    }
+  }
+
+  // The clamp describes what the hub holds, so it is written only once the
+  // PATCH has actually landed. Recording it while building the body loses the
+  // flag on a save that fails — the hub keeps the `enabled:false` this screen
+  // wrote earlier, the retry no longer reads a clamp to lift it, and every
+  // later save re-sends that stale `false`, muting the hub for good.
+  async function savePatch(next: Parameters<typeof buildPatch>[0]): Promise<string | null> {
+    const { patch, clamp } = buildPatch(next)
+    const failure = await onSave(patch)
+    if (!failure) writeClampedPause(clamp)
+    return failure
   }
 
   async function saveChannel() {
@@ -4740,7 +4760,7 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
     if (formRouted) nextRoutes.push({ via: name, events })
 
     const generation = saveGeneration.current
-    const failure = await onSave(buildPatch({ notifiers: nextNotifiers, routes: nextRoutes }))
+    const failure = await savePatch({ notifiers: nextNotifiers, routes: nextRoutes })
     // The channel's destination or routing just changed, so any test result
     // sitting on its card is about a message that went somewhere else.
     testGeneration.current++
@@ -4758,10 +4778,10 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
     const nextNotifiers = { ...notifiers }
     delete nextNotifiers[name]
     const generation = saveGeneration.current
-    const failure = await onSave(buildPatch({
+    const failure = await savePatch({
       notifiers: nextNotifiers,
       routes: routes.filter((route) => route.via !== name),
-    }))
+    })
     testGeneration.current++
     setTests((current) => { const { [name]: _removed, ...rest } = current; return rest })
     setSaveErrors((current) => { const { [name]: _cleared, ...rest } = current; return rest })
@@ -4782,7 +4802,7 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
     setTests((current) => { const { [via]: _removed, ...rest } = current; return rest })
     // The page-level banner reports a failure here: this save is not made from
     // the dialog, so nothing covers the banner.
-    await onSave(buildPatch({ routes: routes.filter((route) => route.via !== via) }))
+    await savePatch({ routes: routes.filter((route) => route.via !== via) })
   }
 
   // The event a test send uses: something this channel is routed for and that
@@ -4880,7 +4900,7 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
                   ? "Remove the routes pointing at deleted channels first"
                   : undefined
             }
-            onCheckedChange={(checked) => { testGeneration.current++; setTests({}); onSave(buildPatch({ enabled: checked })) }}
+            onCheckedChange={(checked) => { testGeneration.current++; setTests({}); savePatch({ enabled: checked }) }}
             aria-label="Enable lifecycle alerts"
           />
         </div>
@@ -4905,7 +4925,7 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
                     // now about a configuration that no longer exists.
                     testGeneration.current++
                     setTests({})
-                    onSave(buildPatch({ events: { ...categoryEnabled, [category.id]: checked } }))
+                    savePatch({ events: { ...categoryEnabled, [category.id]: checked } })
                   }}
                   aria-label={`Toggle ${category.label} alerts`}
                 />

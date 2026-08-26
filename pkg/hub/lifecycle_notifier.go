@@ -251,7 +251,23 @@ func (s *Server) initLifecycleNotifierBaseline() {
 			// keeps the incumbent's undelivered backlog (claws that connected
 			// while its token secret was broken) from being buried the moment
 			// a second route makes it look newly added.
-			s.stampLifecycleClawRouteBaselines(cfg.Lifecycle)
+			//
+			// Only the INCUMBENT may be stamped. The stamp is also what
+			// lifecycleSingleViaIncumbent reads, so stamping every configured
+			// route would present a channel added in the same maintenance
+			// window as the legacy incumbent, hand it the incumbent's frozen
+			// shared cursor and replay the whole stalled backlog into it.
+			if via := lifecycleLegacyIncumbentVia(cfg.Lifecycle); via != "" {
+				s.setNotifierStateInt64(lifecycleClawRouteBaselineKey(via), 1)
+			} else {
+				// The config already carries several routes and no longer says
+				// which one was the single `via`, so no route can be verified
+				// as the incumbent. Latch the scheme instead: every route
+				// starts at the stream head and ensureLifecycleClawRouteBaselines
+				// seeds its claw fence, which loses the incumbent's undelivered
+				// backlog but never floods a brand-new channel with it.
+				s.setNotifierStateInt64(lifecycleStateRoutedKey, 1)
+			}
 		}
 	}
 	// Stamp the agent_idle baseline at boot on the first enabled run so idle
@@ -517,6 +533,27 @@ func (s *Server) lifecycleWatermarkKeyFor(d lifecycleDelivery, notifier string) 
 // beside it — is what tells the incumbent apart from a route that only just
 // appeared in config. An unreadable state is not an incumbent: the callers'
 // fallbacks (per-route key, stream head) are the safe side of that answer.
+// lifecycleLegacyIncumbentVia names the route that has been delivering as the
+// legacy single `via`, or "" when the config no longer says which one it was.
+// It is only meaningful against state written before the per-route scheme
+// existed, where the incumbent is not recorded anywhere else.
+func lifecycleLegacyIncumbentVia(lc *types.LifecycleNotificationsConfig) string {
+	routes := lc.EffectiveRoutes()
+	if len(routes) == 1 {
+		return strings.TrimSpace(routes[0].Via)
+	}
+	// A hand-written config can still carry the legacy `via` alongside routes
+	// (the settings screen clears it, hub.yaml does not have to); it names the
+	// incumbent as long as it is one of the routes.
+	via := strings.TrimSpace(lc.Via)
+	for _, route := range routes {
+		if via != "" && strings.TrimSpace(route.Via) == via {
+			return via
+		}
+	}
+	return ""
+}
+
 func (s *Server) lifecycleSingleViaIncumbent(via string) bool {
 	if via == "" {
 		return false
@@ -674,6 +711,13 @@ func (s *Server) pruneLifecycleRouteState(lc *types.LifecycleNotificationsConfig
 		notifier := key[strings.Index(key, ":")+1:]
 		if !configured[notifier] {
 			stale = append(stale, key)
+			// Deleting ANY per-route stamp counts as evidence too: a hub that
+			// never went past the legacy single-`via` shape records its
+			// incumbent only as a claw baseline stamp, so replacing that route
+			// with an all-new set would leave nothing per-route behind and let
+			// ensureLifecycleRouteWatermarks read "nothing routed yet" and hand
+			// each newcomer the incumbent's stalled shared cursor.
+			schemeLive = true
 		}
 	}
 	rows.Close()
