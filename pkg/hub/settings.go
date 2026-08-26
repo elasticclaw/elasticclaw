@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 
 	"github.com/elasticclaw/elasticclaw/pkg/cliversion"
 	"github.com/elasticclaw/elasticclaw/pkg/config"
@@ -771,11 +772,24 @@ func mergeNotifierSettings(current, patch *types.NotificationsConfig) {
 	}
 }
 
-func validateSettingsNotifications(cfg *types.NotificationsConfig) error {
+// validateSettingsNotifications checks the patched notifications block. The
+// provider-level "can this be built" check runs only on notifiers the patch
+// actually adds or changes: load-time validation (types.ValidateNotificationsConfig)
+// accepts a notifier this build refuses to construct, so a hub.yaml written by
+// hand — or by an older build — can hold one and run fine, logging "notifier
+// unavailable" per tick. The settings screen submits the whole notifier map on
+// every save, so failing the patch on such an entry would 400 every save from
+// the screen, including saves that touch an entirely different channel, with
+// no way to repair the offender from the UI. Whatever the operator does touch
+// is still checked, so this handler never persists a NEW broken notifier.
+func validateSettingsNotifications(current, cfg *types.NotificationsConfig) error {
 	if err := types.ValidateNotificationsConfig(cfg); err != nil {
 		return err
 	}
 	for name, notifier := range cfg.Notifiers {
+		if notifierUnchanged(current, name, notifier) {
+			continue
+		}
 		if !notify.Supported(notifier.Type) {
 			return fmt.Errorf("notifications.notifiers.%s: unsupported notifier type %q", name, notifier.Type)
 		}
@@ -788,6 +802,21 @@ func validateSettingsNotifications(cfg *types.NotificationsConfig) error {
 		}
 	}
 	return nil
+}
+
+// notifierUnchanged reports whether the patched notifier is byte-identical to
+// the one already stored under that name — the patch is re-sending it, not
+// editing it. Compared after mergeNotifierSettings, so a patch that only omits
+// keys the settings view does not project still counts as unchanged.
+func notifierUnchanged(current *types.NotificationsConfig, name string, patched types.NotifierConfig) bool {
+	if current == nil {
+		return false
+	}
+	existing, ok := current.Notifiers[name]
+	if !ok {
+		return false
+	}
+	return existing.Type == patched.Type && reflect.DeepEqual(existing.Settings, patched.Settings)
 }
 
 // buildGitHubAppView builds a GitHubAppView for the settings page, including
@@ -900,7 +929,7 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 			patch.Notifications.Lifecycle.Via = ""
 		}
 		mergeNotifierSettings(s.hubCfg.Notifications, patch.Notifications)
-		if err := validateSettingsNotifications(patch.Notifications); err != nil {
+		if err := validateSettingsNotifications(s.hubCfg.Notifications, patch.Notifications); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}

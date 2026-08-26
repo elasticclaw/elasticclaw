@@ -4623,6 +4623,10 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
         : []
   ).map((route) => ({ ...route, via: (route.via || "").trim() }))
   const routeFor = (name: string) => routes.find((r) => r.via === name)
+  // The predicate saveChannel stores by: an allow-list naming every type is no
+  // filter at all. Shared by the card badge and the dialog so the same route
+  // cannot read as filtered on one and unfiltered on the other.
+  const isAllAlerts = (events?: string[]) => !events?.length || events.length === eventTypes.length
   // A route whose notifier is gone. The hub deliberately accepts this on disk
   // while alerts are paused ("an operator who mutes alerts and then deletes the
   // notifier must not be left with a hub that refuses to load"), but it rejects
@@ -4875,10 +4879,11 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
     setTests((current) => ({ ...current, [name]: { status: "sending", message: "" } }))
     const settle = (state: TestState) => {
       setTests((current) => {
-        if (generation !== testStamp(name)) {
-          const { [name]: _stale, ...rest } = current
-          return rest
-        }
+        // A superseded result is dropped, not written — and it must leave the
+        // map alone: whatever sits under this name now belongs to the newer
+        // send that replaced this one (its "sending" indicator, or its real
+        // error), so deleting it would erase a live result.
+        if (generation !== testStamp(name)) return current
         return { ...current, [name]: state }
       })
     }
@@ -4894,7 +4899,7 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
   // Same predicate saveChannel stores by: every type checked is persisted as
   // the empty allow-list, so the summary must call it "all alerts" too — or it
   // promises a filter the save is about to discard.
-  const formAllAlerts = formEvents.length === 0 || formEvents.length === eventTypes.length
+  const formAllAlerts = isAllAlerts(formEvents)
   // Routing this channel off (or removing it) pauses the hub when it is the
   // last one left; buildPatch clears `enabled` rather than failing the save.
   const otherRoutedCount = routes.filter((route) => route.via !== editName && notifiers[route.via]).length
@@ -5036,13 +5041,13 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
                           <span className="text-xs bg-muted text-muted-foreground px-2 py-1 rounded font-medium">
                             Not receiving alerts
                           </span>
-                        ) : route.events?.length ? (
-                          <span className="text-xs bg-muted text-muted-foreground px-2 py-1 rounded font-medium">
-                            {route.events.length} of {eventTypes.length} alert types
-                          </span>
-                        ) : (
+                        ) : isAllAlerts(route.events) ? (
                           <span className="text-xs bg-blue-500/10 text-blue-400 border border-blue-500/20 px-2 py-1 rounded font-medium">
                             All alerts
+                          </span>
+                        ) : (
+                          <span className="text-xs bg-muted text-muted-foreground px-2 py-1 rounded font-medium">
+                            {route.events?.length} of {eventTypes.length} alert types
                           </span>
                         )}
                       </div>
@@ -5237,7 +5242,7 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
                         </div>
                         <p className="text-xs text-muted-foreground">
                           {formAllAlerts
-                            ? "This channel receives every alert type — including any new type added later."
+                            ? "Saved as receive-all: this channel gets every alert type, including any added later."
                             : "Only the checked types reach this channel."}
                         </p>
                         {!formAllAlerts && (

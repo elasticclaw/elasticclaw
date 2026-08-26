@@ -69,10 +69,17 @@ var lifecycleFailureEventTypes = map[string]bool{
 	taskRunEventDoneWithoutPR:      true,
 }
 
-// lifecycleSupportedEventTypes is everything the notifier can render.
+// lifecycleSupportedEventTypes is everything the notifier can render: the
+// wire types a route's allow-list may name (types.LifecycleEventTypes) plus
+// the concrete failure kinds, which never appear as task_run_events.event_type
+// but do carry their own rendering (see lifecycleEventStyles). Callers that
+// mean the narrower route vocabulary use types.IsLifecycleEventType instead.
 func lifecycleSupportedEventTypes() map[string]bool {
-	supported := make(map[string]bool, len(types.LifecycleEventTypes))
+	supported := make(map[string]bool, len(types.LifecycleEventTypes)+len(lifecycleFailureEventTypes))
 	for _, t := range types.LifecycleEventTypes {
+		supported[t] = true
+	}
+	for t := range lifecycleFailureEventTypes {
 		supported[t] = true
 	}
 	return supported
@@ -988,18 +995,30 @@ func (s *Server) handleLifecycleSendError(err error, what, deliveryKey, runKey, 
 		// every boot, so the poisoned event would never be burned and the
 		// cursor would stay wedged for as long as the restarts continued.
 		stateKey := lifecycleTransientFailureStateKey(deliveryKey, notifier)
+		priorKey := lifecycleTransientFailureStateKey(deliveryKey)
 		if singleRoute {
 			// Legacy single-`via` key shape: no per-notifier component, so
 			// pre-routing streak state (and its corruption-recovery
 			// semantics) keeps working unchanged.
-			stateKey = lifecycleTransientFailureStateKey(deliveryKey)
+			stateKey, priorKey = priorKey, stateKey
 		}
-		count, _, stateErr := s.notifierStateInt64(stateKey)
+		count, found, stateErr := s.notifierStateInt64(stateKey)
 		if stateErr != nil {
 			// Unreadable streak state: retry without counting rather than
 			// risk resetting (or double-counting) the streak.
 			log.Printf("[notify] read transient-failure streak for %s: %v", what, stateErr)
 			return false, true
+		}
+		if !found {
+			// Adding or removing a sibling route flips this notifier between
+			// the legacy and per-notifier key shapes. Carry a live streak
+			// across the move: re-keying it would hand a route that has
+			// nearly exhausted its retry budget a fresh one, and the cap
+			// exists to stop a poisoned event wedging the cursor forever.
+			if prior, priorFound, priorErr := s.notifierStateInt64(priorKey); priorErr == nil && priorFound {
+				count = prior
+				s.clearNotifierState(priorKey)
+			}
 		}
 		count++
 		if count >= lifecycleMaxTransientFailures {

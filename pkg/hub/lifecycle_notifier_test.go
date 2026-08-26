@@ -251,6 +251,47 @@ func TestLifecycleRoutesErrorDoesNotBlockOtherRouteAndRetriesPerRoute(t *testing
 	}
 }
 
+// Regression: the streak lives under a per-notifier key while more than one
+// route is configured and under the legacy key while exactly one is, so adding
+// or removing a sibling route re-keyed it and handed a nearly-exhausted route
+// a fresh retry budget — the cap exists so a poisoned event cannot wedge the
+// cursor forever.
+func TestLifecycleTransientStreakSurvivesRouteShapeChange(t *testing.T) {
+	fake := newFakeSlackServer(t)
+	s, db := newSlackNotifierRoutesTestServer(t, fake.server.URL, []types.LifecycleRoute{{Via: "broken"}, {Via: "healthy"}})
+	streak := func(key string) int64 {
+		t.Helper()
+		var count int64
+		if err := db.QueryRow(`SELECT CAST(value AS INTEGER) FROM slack_notifier_state WHERE key=?`, key).Scan(&count); err != nil {
+			return 0
+		}
+		return count
+	}
+
+	// Two failures under the multi-route (per-notifier) key.
+	s.handleLifecycleSendError(fmt.Errorf("temporary"), "event", "ev", "run", "broken", false)
+	s.handleLifecycleSendError(fmt.Errorf("temporary"), "event", "ev", "run", "broken", false)
+
+	// The sibling route is removed: the same route now counts under the legacy
+	// key, and must continue the streak rather than restart it.
+	s.handleLifecycleSendError(fmt.Errorf("temporary"), "event", "ev", "run", "broken", true)
+	if got := streak(lifecycleTransientFailureStateKey("ev")); got != 3 {
+		t.Fatalf("streak after single-route transition = %d, want 3", got)
+	}
+	if got := streak(lifecycleTransientFailureStateKey("ev", "broken")); got != 0 {
+		t.Fatalf("per-notifier key still holds %d, want it moved", got)
+	}
+
+	// And back again.
+	s.handleLifecycleSendError(fmt.Errorf("temporary"), "event", "ev", "run", "broken", false)
+	if got := streak(lifecycleTransientFailureStateKey("ev", "broken")); got != 4 {
+		t.Fatalf("streak after multi-route transition = %d, want 4", got)
+	}
+	if got := streak(lifecycleTransientFailureStateKey("ev")); got != 0 {
+		t.Fatalf("legacy key still holds %d, want it moved", got)
+	}
+}
+
 // respondByChannel scripts the fake Slack server per destination channel,
 // which is how route-level failures are simulated (each route posts to its own
 // channel; see newSlackNotifierRoutesTestServer).
@@ -1504,6 +1545,27 @@ func TestSlackTestEndpointDryRunReturnsPayloadWithoutCallingSlack(t *testing.T) 
 	}
 	if !strings.Contains(resp.Payload.Attachments[0].Fallback, "SAMPLE-123") {
 		t.Fatalf("synthetic sample should be clearly marked, got %q", resp.Payload.Attachments[0].Fallback)
+	}
+	if fake.count() != 0 {
+		t.Fatalf("dry_run hit Slack %d times", fake.count())
+	}
+}
+
+// Regression: the endpoint's allow-list was narrowed to the route vocabulary
+// (types.LifecycleEventTypes), which does not name the concrete failure kinds.
+// The renderer still gives each of them its own card, so an admin lost the
+// only way to preview what a provision_failed or timeout alert looks like.
+func TestSlackTestEndpointRendersConcreteFailureKinds(t *testing.T) {
+	fake := newFakeSlackServer(t)
+	s, _ := newSlackNotifierTestServer(t, fake.server.URL, nil)
+
+	for eventType := range lifecycleFailureEventTypes {
+		t.Run(eventType, func(t *testing.T) {
+			rr := postSlackTest(t, s, `{"event_type":"`+eventType+`","dry_run":true}`)
+			if rr.Code != http.StatusOK {
+				t.Fatalf("status = %d, body = %s", rr.Code, rr.Body.String())
+			}
+		})
 	}
 	if fake.count() != 0 {
 		t.Fatalf("dry_run hit Slack %d times", fake.count())

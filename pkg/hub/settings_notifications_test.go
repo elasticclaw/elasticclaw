@@ -314,3 +314,61 @@ func TestSettingsPatchRejectsNotifierMissingRequiredSettings(t *testing.T) {
 		})
 	}
 }
+
+// Regression: the provider-level "can this be built" check ran over every
+// notifier in the PATCH body, and the Notifier screen always submits the whole
+// map. A hub.yaml holding a notifier this build refuses to construct — load
+// validation accepts one, the hub just logs "notifier unavailable" each tick —
+// therefore 400'd every save from the screen, including saves that touch an
+// entirely different channel, and the screen has no control for the keys the
+// check rejects.
+func TestSettingsPatchAllowsUnchangedBrokenNotifier(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "hub.yaml")
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", path)
+	s, _ := NewTestServerWithConfig(t, &types.HubConfig{Notifications: &types.NotificationsConfig{
+		Notifiers: map[string]types.NotifierConfig{"ops": {Type: "slack", Settings: map[string]any{
+			"channel": "C0123ABCD", "token_secret": "slack_token", "min_send_interval": "5 minutes",
+		}}},
+		Lifecycle: &types.LifecycleNotificationsConfig{Via: "ops"},
+	}}, "", "", "")
+	if err := config.SaveHubConfig(s.hubCfg); err != nil {
+		t.Fatal(err)
+	}
+
+	// Adding an unrelated channel, exactly as the screen sends it: the whole
+	// notifiers map, with `ops` re-sent from the GET projection.
+	body := []byte(`{"notifications":{"notifiers":` +
+		`{"ops":{"type":"slack","channel":"C0123ABCD","token_secret":"slack_token"},` +
+		`"alerts":{"type":"slack","channel":"C0ALERTS","token_secret":"slack_token"}},` +
+		`"lifecycle":{"enabled":true,"routes":[{"via":"ops"},{"via":"alerts"}]}}}`)
+	rr := httptest.NewRecorder()
+	s.patchSettings(rr, httptest.NewRequest(http.MethodPatch, "/api/settings", bytes.NewReader(body)))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("PATCH status = %d, want 200; body = %s", rr.Code, rr.Body.String())
+	}
+	diskCfg, err := config.LoadHubConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := diskCfg.Notifications.Notifiers["alerts"]; !ok {
+		t.Fatal("the new channel was not persisted")
+	}
+	if got := diskCfg.Notifications.Notifiers["ops"].Settings["min_send_interval"]; got != "5 minutes" {
+		t.Fatalf("untouched notifier setting = %v, want it left alone", got)
+	}
+
+	// Touching the offender is still checked: the operator is editing it, so
+	// the patch may not persist a notifier the hub cannot build.
+	body = []byte(`{"notifications":{"notifiers":` +
+		`{"ops":{"type":"slack","channel":"C0999NEW","token_secret":"slack_token"},` +
+		`"alerts":{"type":"slack","channel":"C0ALERTS","token_secret":"slack_token"}},` +
+		`"lifecycle":{"enabled":true,"routes":[{"via":"ops"},{"via":"alerts"}]}}}`)
+	rr = httptest.NewRecorder()
+	s.patchSettings(rr, httptest.NewRequest(http.MethodPatch, "/api/settings", bytes.NewReader(body)))
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("editing the broken notifier: status = %d, want 400; body = %s", rr.Code, rr.Body.String())
+	}
+	if got := rr.Body.String(); !strings.Contains(got, "notifications.notifiers.ops") {
+		t.Fatalf("error does not name the edited notifier: %s", got)
+	}
+}
