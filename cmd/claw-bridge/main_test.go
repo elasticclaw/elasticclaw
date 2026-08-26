@@ -3115,6 +3115,33 @@ func TestNoEventAbortTimeoutDefaultsAndParses(t *testing.T) {
 	})
 }
 
+func TestNoEventAbortInFlightToolTimeoutDefaultsAndParses(t *testing.T) {
+	t.Run("unset uses default", func(t *testing.T) {
+		t.Setenv("ELASTICCLAW_NO_EVENT_ABORT_INFLIGHT_TOOL_TIMEOUT", "")
+		if got := noEventAbortInFlightToolTimeout(); got != noEventAbortInFlightToolTimeoutDefault {
+			t.Fatalf("noEventAbortInFlightToolTimeout() = %s, want default %s", got, noEventAbortInFlightToolTimeoutDefault)
+		}
+	})
+	t.Run("valid override", func(t *testing.T) {
+		t.Setenv("ELASTICCLAW_NO_EVENT_ABORT_INFLIGHT_TOOL_TIMEOUT", "45m")
+		if got := noEventAbortInFlightToolTimeout(); got != 45*time.Minute {
+			t.Fatalf("noEventAbortInFlightToolTimeout() = %s, want 45m", got)
+		}
+	})
+	t.Run("invalid falls back to default", func(t *testing.T) {
+		t.Setenv("ELASTICCLAW_NO_EVENT_ABORT_INFLIGHT_TOOL_TIMEOUT", "not-a-duration")
+		if got := noEventAbortInFlightToolTimeout(); got != noEventAbortInFlightToolTimeoutDefault {
+			t.Fatalf("noEventAbortInFlightToolTimeout() = %s, want default %s", got, noEventAbortInFlightToolTimeoutDefault)
+		}
+	})
+	t.Run("non-positive falls back to default", func(t *testing.T) {
+		t.Setenv("ELASTICCLAW_NO_EVENT_ABORT_INFLIGHT_TOOL_TIMEOUT", "-5m")
+		if got := noEventAbortInFlightToolTimeout(); got != noEventAbortInFlightToolTimeoutDefault {
+			t.Fatalf("noEventAbortInFlightToolTimeout() = %s, want default %s", got, noEventAbortInFlightToolTimeoutDefault)
+		}
+	})
+}
+
 func TestInFlightStateTracksLastEventAcrossChunkAndActivity(t *testing.T) {
 	inf := &inFlightState{}
 	t0 := time.Now()
@@ -3241,5 +3268,157 @@ func TestSendMessageAbortsStalledTurnAfterNoEventTimeout(t *testing.T) {
 	// forbids rotating on this path.
 	if got := gs.getSessionKey(); got != "session-1" {
 		t.Fatalf("session key = %q, want session-1 (no rotation)", got)
+	}
+}
+
+func TestSendMessageActivityEventsPreventNoEventAbort(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("ELASTICCLAW_NO_EVENT_ABORT_TIMEOUT", "50ms")
+	origInterval := progressPulseTickInterval
+	progressPulseTickInterval = 10 * time.Millisecond
+	defer func() { progressPulseTickInterval = origInterval }()
+
+	abortSeen := make(chan struct{}, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			t.Errorf("accept websocket: %v", err)
+			return
+		}
+		defer conn.CloseNow()
+
+		var sendReq gwFrame
+		if err := wsjson.Read(r.Context(), conn, &sendReq); err != nil {
+			t.Errorf("read sessions.send request: %v", err)
+			return
+		}
+		if err := wsjson.Write(r.Context(), conn, gwFrame{Type: "res", ID: sendReq.ID, OK: true}); err != nil {
+			t.Errorf("accept sessions.send: %v", err)
+			return
+		}
+		go func() {
+			for {
+				var req gwFrame
+				if err := wsjson.Read(r.Context(), conn, &req); err != nil {
+					return
+				}
+				if req.Method == "sessions.abort" {
+					abortSeen <- struct{}{}
+					_ = wsjson.Write(r.Context(), conn, gwFrame{Type: "res", ID: req.ID, OK: true})
+					return
+				}
+			}
+		}()
+
+		for i := 0; i < 5; i++ {
+			time.Sleep(30 * time.Millisecond)
+			payload := mustJSON(map[string]interface{}{
+				"stream": "diagnostic", "sessionKey": "session-1",
+				"data": map[string]string{"message": "still working"},
+			})
+			if err := wsjson.Write(r.Context(), conn, gwFrame{Type: "event", Event: "agent", Payload: payload}); err != nil {
+				return
+			}
+		}
+		endPayload := mustJSON(map[string]interface{}{
+			"stream": "lifecycle", "sessionKey": "session-1", "data": map[string]string{"phase": "end"},
+		})
+		_ = wsjson.Write(r.Context(), conn, gwFrame{Type: "event", Event: "agent", Payload: endPayload})
+	}))
+	defer srv.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	conn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(srv.URL, "http"), nil)
+	if err != nil {
+		t.Fatalf("dial websocket: %v", err)
+	}
+	defer conn.CloseNow()
+	gs := &gatewaySession{sessionKey: "session-1", conn: conn, pending: make(map[string]chan gwFrame)}
+	go gs.readLoop(ctx)
+
+	if _, err := gs.SendMessage(ctx, "continue the task", nil, nil); err != nil {
+		t.Fatalf("SendMessage() error = %v, want activity events to keep the turn alive", err)
+	}
+	select {
+	case <-abortSeen:
+		t.Fatal("sessions.abort was sent despite ongoing diagnostic activity")
+	default:
+	}
+}
+
+func TestSendMessageInFlightToolUsesExtendedNoEventAbortTimeout(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("ELASTICCLAW_NO_EVENT_ABORT_TIMEOUT", "50ms")
+	t.Setenv("ELASTICCLAW_NO_EVENT_ABORT_INFLIGHT_TOOL_TIMEOUT", "2s")
+	origInterval := progressPulseTickInterval
+	progressPulseTickInterval = 10 * time.Millisecond
+	defer func() { progressPulseTickInterval = origInterval }()
+
+	abortSeen := make(chan struct{}, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			t.Errorf("accept websocket: %v", err)
+			return
+		}
+		defer conn.CloseNow()
+
+		var sendReq gwFrame
+		if err := wsjson.Read(r.Context(), conn, &sendReq); err != nil {
+			t.Errorf("read sessions.send request: %v", err)
+			return
+		}
+		if err := wsjson.Write(r.Context(), conn, gwFrame{Type: "res", ID: sendReq.ID, OK: true}); err != nil {
+			t.Errorf("accept sessions.send: %v", err)
+			return
+		}
+		go func() {
+			for {
+				var req gwFrame
+				if err := wsjson.Read(r.Context(), conn, &req); err != nil {
+					return
+				}
+				if req.Method == "sessions.abort" {
+					abortSeen <- struct{}{}
+					_ = wsjson.Write(r.Context(), conn, gwFrame{Type: "res", ID: req.ID, OK: true})
+					return
+				}
+			}
+		}()
+
+		time.Sleep(20 * time.Millisecond)
+		toolPayload := mustJSON(map[string]interface{}{
+			"stream": "tool", "sessionKey": "session-1",
+			"data": map[string]string{"phase": "started", "tool": "exec", "command": "go test ./..."},
+		})
+		if err := wsjson.Write(r.Context(), conn, gwFrame{Type: "event", Event: "agent", Payload: toolPayload}); err != nil {
+			return
+		}
+		time.Sleep(180 * time.Millisecond)
+		endPayload := mustJSON(map[string]interface{}{
+			"stream": "lifecycle", "sessionKey": "session-1", "data": map[string]string{"phase": "end"},
+		})
+		_ = wsjson.Write(r.Context(), conn, gwFrame{Type: "event", Event: "agent", Payload: endPayload})
+	}))
+	defer srv.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	conn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(srv.URL, "http"), nil)
+	if err != nil {
+		t.Fatalf("dial websocket: %v", err)
+	}
+	defer conn.CloseNow()
+	gs := &gatewaySession{sessionKey: "session-1", conn: conn, pending: make(map[string]chan gwFrame)}
+	go gs.readLoop(ctx)
+
+	if _, err := gs.SendMessage(ctx, "continue the task", nil, nil); err != nil {
+		t.Fatalf("SendMessage() error = %v, want the in-flight tool deadline to apply", err)
+	}
+	select {
+	case <-abortSeen:
+		t.Fatal("sessions.abort was sent before the in-flight tool deadline")
+	default:
 	}
 }

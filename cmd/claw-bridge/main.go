@@ -97,6 +97,10 @@ var progressPulseTickInterval = 30 * time.Second
 // be tuned without a redeploy.
 const noEventAbortTimeoutDefault = 7 * time.Minute
 
+// noEventAbortInFlightToolTimeoutDefault bounds how long a known in-flight
+// tool call may be silent before the bridge treats the gateway as wedged.
+const noEventAbortInFlightToolTimeoutDefault = 45 * time.Minute
+
 // noEventAbortTimeout returns the configured no-event abort threshold, falling
 // back to noEventAbortTimeoutDefault when unset, empty, non-positive, or
 // unparseable.
@@ -109,6 +113,22 @@ func noEventAbortTimeout() time.Duration {
 	if err != nil || d <= 0 {
 		log.Printf("[bridge] invalid ELASTICCLAW_NO_EVENT_ABORT_TIMEOUT=%q, using default %s", raw, noEventAbortTimeoutDefault)
 		return noEventAbortTimeoutDefault
+	}
+	return d
+}
+
+// noEventAbortInFlightToolTimeout returns the configured no-event threshold
+// for a known in-flight tool call, falling back to its default when unset,
+// empty, non-positive, or unparseable.
+func noEventAbortInFlightToolTimeout() time.Duration {
+	raw := strings.TrimSpace(os.Getenv("ELASTICCLAW_NO_EVENT_ABORT_INFLIGHT_TOOL_TIMEOUT"))
+	if raw == "" {
+		return noEventAbortInFlightToolTimeoutDefault
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil || d <= 0 {
+		log.Printf("[bridge] invalid ELASTICCLAW_NO_EVENT_ABORT_INFLIGHT_TOOL_TIMEOUT=%q, using default %s", raw, noEventAbortInFlightToolTimeoutDefault)
+		return noEventAbortInFlightToolTimeoutDefault
 	}
 	return d
 }
@@ -912,6 +932,12 @@ func (inf *inFlightState) sinceLastEvent(now time.Time) time.Duration {
 	return now.Sub(last)
 }
 
+func (inf *inFlightState) hasInFlightTool() bool {
+	inf.mu.Lock()
+	defer inf.mu.Unlock()
+	return len(inf.inFlightCalls) > 0
+}
+
 func (inf *inFlightState) emitActivity(a agentActivity) {
 	if inf.onActivity != nil {
 		inf.onActivity(a)
@@ -1658,6 +1684,7 @@ func (gs *gatewaySession) readLoop(ctx context.Context) {
 					inf.onChunk(agentPayload.Data.Delta)
 				}
 			} else if agentPayload.Stream != "assistant" && agentPayload.Stream != "lifecycle" {
+				inf.noteEvent(time.Now())
 				tool := agentPayload.Data.Tool
 				if tool == "" {
 					tool = agentPayload.Data.Name
@@ -2639,6 +2666,7 @@ func (gs *gatewaySession) sendMessageOnce(ctx context.Context, message string, o
 	inf.emitActivity(agentActivity{Kind: "model_started", Message: "Waiting on model response"})
 
 	noEventTimeout := noEventAbortTimeout()
+	inFlightToolNoEventTimeout := noEventAbortInFlightToolTimeout()
 
 	// Wait for lifecycle/end from the read loop
 	ticker := time.NewTicker(progressPulseTickInterval)
@@ -2653,8 +2681,12 @@ func (gs *gatewaySession) sendMessageOnce(ctx context.Context, message string, o
 			go gs.refreshContextUsage(context.Background())
 			return result.text, nil
 		case <-ticker.C:
-			if idle := inf.sinceLastEvent(time.Now()); idle >= noEventTimeout {
-				log.Printf("[gateway] no event observed for %s (>= %s threshold) — aborting stalled turn on same session", idle.Round(time.Second), noEventTimeout)
+			watchdogTimeout := noEventTimeout
+			if inf.hasInFlightTool() {
+				watchdogTimeout = inFlightToolNoEventTimeout
+			}
+			if idle := inf.sinceLastEvent(time.Now()); idle >= watchdogTimeout {
+				log.Printf("[gateway] no event observed for %s (>= %s threshold) — aborting stalled turn on same session", idle.Round(time.Second), watchdogTimeout)
 				abortCtx, abortCancel := context.WithTimeout(context.Background(), 10*time.Second)
 				abortErr := gs.abortActiveSession(abortCtx)
 				abortCancel()
