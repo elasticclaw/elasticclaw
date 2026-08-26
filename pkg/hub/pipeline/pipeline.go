@@ -450,16 +450,18 @@ func (p *Pipeline) Validate() error {
 		return nil
 	}
 	stageIDs := make(map[string]bool, len(p.Stages))
+	terminalStages := make(map[string]bool, len(p.Stages))
 	for _, stage := range p.Stages {
 		if strings.TrimSpace(stage.ID) != "" {
 			stageIDs[stage.ID] = true
+			terminalStages[stage.ID] = stage.Terminal
 		}
 	}
 	skipEdges := make(map[string][]string)
 	for _, stage := range p.Stages {
 		for _, trigger := range stage.Triggers {
 			if trigger.StageTimeout != nil {
-				if err := validateStageTimeoutTrigger(stage.ID, trigger.StageTimeout, stageIDs); err != nil {
+				if err := validateStageTimeoutTrigger(stage.ID, trigger.StageTimeout, stageIDs, terminalStages); err != nil {
 					return err
 				}
 			}
@@ -486,7 +488,7 @@ func (p *Pipeline) Validate() error {
 	return nil
 }
 
-func validateStageTimeoutTrigger(stageID string, trigger *StageTimeoutTrigger, stageIDs map[string]bool) error {
+func validateStageTimeoutTrigger(stageID string, trigger *StageTimeoutTrigger, stageIDs, terminalStages map[string]bool) error {
 	after := strings.TrimSpace(trigger.After)
 	duration, err := time.ParseDuration(after)
 	if err != nil || duration <= 0 {
@@ -501,6 +503,9 @@ func validateStageTimeoutTrigger(stageID string, trigger *StageTimeoutTrigger, s
 	}
 	if !stageIDs[goTo] {
 		return fmt.Errorf("stage %q stage_timeout go_to %q does not reference an existing stage", stageID, goTo)
+	}
+	if terminalStages[goTo] {
+		return fmt.Errorf("stage %q stage_timeout go_to %q cannot target a terminal stage", stageID, goTo)
 	}
 	return nil
 }

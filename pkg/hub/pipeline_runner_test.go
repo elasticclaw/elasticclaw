@@ -619,8 +619,12 @@ func TestPlanGatePassWithRouteDoesNotInjectProceedTurn(t *testing.T) {
 	s, db := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
 	const clawID = "claw-plan-gate-routed"
 	_, err := db.Exec(
+		// The claw must already be recorded as being in "plan_validate" —
+		// autoTransitionAfterGate's transition is now conditioned on the claw
+		// still being in the gate's declared source stage (A4), so leaving
+		// this "" like before the fix would make the claim a no-op.
 		`INSERT INTO claws(id, tenant_id, name, template, status, pipeline_stage, created_at) VALUES(?,?,?,?,?,?,datetime('now'))`,
-		clawID, "test-tenant-id", "test-claw", "base", "connected", "",
+		clawID, "test-tenant-id", "test-claw", "base", "connected", "plan_validate",
 	)
 	if err != nil {
 		t.Fatalf("insert claw: %v", err)
@@ -1366,6 +1370,46 @@ func TestGateErrorRouteTransitions(t *testing.T) {
 	}
 }
 
+// TestAutoTransitionAfterGateDoesNotFireAfterClawLeftSourceStage is the A4
+// regression: a gate_result auto-transition must not apply if the claw has
+// already left the gate's declared source stage (e.g. a reaper-driven
+// stage_timeout won the race first). Before the A4 fix,
+// autoTransitionAfterGate claimed the new stage using whatever the claw's
+// *current* stage happened to be as "expected", which trivially always
+// matches and provides no protection — this test fails against that code.
+func TestAutoTransitionAfterGateDoesNotFireAfterClawLeftSourceStage(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
+	const clawID = "claw-gate-race"
+	if _, err := db.Exec(`INSERT INTO claws(id, tenant_id, name, template, status, pipeline_stage, created_at) VALUES(?,?,?,?,?,?,datetime('now'))`, clawID, "test-tenant-id", "workflow claw", "elasticclaw", "connected", "elsewhere"); err != nil {
+		t.Fatal(err)
+	}
+	factory := &types.FactoryConfig{Name: "gate-race", PipelineYAML: "stages:\n  - id: validate\n    entry: true\n  - id: elsewhere\n  - id: implement\n    triggers:\n      - gate_result:\n          stage: validate\n          verdict: pass\n"}
+	// The claw is no longer in "validate" (something else already moved it to
+	// "elsewhere") by the time this gate result is being applied.
+	s.autoTransitionAfterGate(clawID, "validate", "pass", pipelineContext{Factory: factory})
+	if got := s.getPipelineStage(clawID); got != "elsewhere" {
+		t.Fatalf("stage = %q, want elsewhere (stale gate result must not override a stage the claw already left)", got)
+	}
+}
+
+// TestAutoTransitionAfterJudgeDoesNotFireAfterClawLeftSourceStage mirrors the
+// gate case above for the judge_verdict path.
+func TestAutoTransitionAfterJudgeDoesNotFireAfterClawLeftSourceStage(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
+	const clawID = "claw-judge-race"
+	if _, err := db.Exec(`INSERT INTO claws(id, tenant_id, name, template, status, pipeline_stage, created_at) VALUES(?,?,?,?,?,?,datetime('now'))`, clawID, "test-tenant-id", "workflow claw", "elasticclaw", "connected", "elsewhere"); err != nil {
+		t.Fatal(err)
+	}
+	factory := &types.FactoryConfig{Name: "judge-race", PipelineYAML: "stages:\n  - id: review\n    entry: true\n  - id: elsewhere\n  - id: implement\n    triggers:\n      - judge_verdict: pass\n"}
+	// The judge ran while the claw was in "review", but the claw has since
+	// moved to "elsewhere" (e.g. a stage_timeout won the race) by the time the
+	// judge's async auto-transition is applied.
+	s.autoTransitionAfterJudge(clawID, "review", "pass", pipelineContext{Factory: factory})
+	if got := s.getPipelineStage(clawID); got != "elsewhere" {
+		t.Fatalf("stage = %q, want elsewhere (stale judge verdict must not override a stage the claw already left)", got)
+	}
+}
+
 func TestParseJudgeResponseValid(t *testing.T) {
 	raw := `{"verdict":"pass","summary":"Looks good","findings":[],"required_fixes":[]}`
 	result, err := parseJudgeResponse(raw)
@@ -1788,7 +1832,7 @@ func TestAutoTransitionAfterJudge(t *testing.T) {
 	}
 
 	// autoTransitionAfterJudge with no pipeline context should do nothing
-	s.autoTransitionAfterJudge(clawID, "pass", pipelineContext{})
+	s.autoTransitionAfterJudge(clawID, "review", "pass", pipelineContext{})
 
 	// Stage should remain "review" since no pipeline was configured
 	var stage string

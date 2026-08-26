@@ -3,6 +3,7 @@ package hub
 import (
 	"log"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/elasticclaw/elasticclaw/pkg/types"
@@ -22,6 +23,7 @@ type livenessSettings struct {
 	busyTurnMax, silentDeathMax                          time.Duration
 	prConditionsMaxWait                                  time.Duration
 	stageTimeoutEnabled                                  bool
+	stageTimeoutMinAfter, stageTimeoutMaxAfter           time.Duration
 	idleResumeEnabled                                    bool
 	idleResumeAfter                                      time.Duration
 }
@@ -78,6 +80,12 @@ func (s *Server) livenessSettings() livenessSettings {
 	}
 	cfg.silentDeathMax = parse(l.SilentDeathMax, cfg.silentDeathMax, "silent_death_max")
 	cfg.prConditionsMaxWait = parse(l.PRConditionsMaxWait, cfg.prConditionsMaxWait, "pr_conditions_max_wait")
+	cfg.stageTimeoutMinAfter = parse(l.StageTimeoutMinAfter, 0, "stage_timeout_min_after")
+	cfg.stageTimeoutMaxAfter = parse(l.StageTimeoutMaxAfter, 0, "stage_timeout_max_after")
+	if cfg.stageTimeoutMinAfter > 0 && cfg.stageTimeoutMaxAfter > 0 && cfg.stageTimeoutMinAfter > cfg.stageTimeoutMaxAfter {
+		log.Printf("[reaper] stage_timeout_min_after %s exceeds stage_timeout_max_after %s; ignoring maximum", cfg.stageTimeoutMinAfter, cfg.stageTimeoutMaxAfter)
+		cfg.stageTimeoutMaxAfter = 0
+	}
 	if l.StageTimeoutEnabled != nil {
 		cfg.stageTimeoutEnabled = *l.StageTimeoutEnabled
 	}
@@ -326,7 +334,7 @@ func (s *Server) reapOnce() {
 		}
 	}
 	if cfg.stageTimeoutEnabled {
-		s.reapPipelineStageTimeouts(n, take, seen)
+		s.reapPipelineStageTimeouts(n, take, seen, cfg.stageTimeoutMinAfter, cfg.stageTimeoutMaxAfter)
 	}
 	triggers, err := s.db.Query(`SELECT id, created_at FROM factory_triggers WHERE status='claimed' AND claw_id=''`)
 	if err == nil {
@@ -383,7 +391,12 @@ func (s *Server) reapOnce() {
 	}
 }
 
-func (s *Server) reapPipelineStageTimeouts(n time.Time, take func() bool, seen map[string]bool) {
+func (s *Server) reapPipelineStageTimeouts(n time.Time, take func() bool, seen map[string]bool, minAfter, maxAfter time.Duration) {
+	// Avoid parsing every claw's pipeline on every tick when no configured
+	// workflow/factory pipeline contains a timeout trigger.
+	if !s.anyPipelineStageTimeouts() {
+		return
+	}
 	rows, err := s.db.Query(`SELECT id, pipeline_stage, pipeline_stage_entered_at FROM claws WHERE status NOT IN ('error','deleted') AND pipeline_stage != '' AND pipeline_stage_entered_at > 0`)
 	if err != nil {
 		log.Printf("[reaper] pipeline stage timeout query: %v", err)
@@ -408,6 +421,12 @@ func (s *Server) reapPipelineStageTimeouts(n time.Time, take func() bool, seen m
 			continue
 		}
 		for _, timeout := range pl.StagesWithTimeouts() {
+			if minAfter > 0 && timeout.After < minAfter {
+				timeout.After = minAfter
+			}
+			if maxAfter > 0 && timeout.After > maxAfter {
+				timeout.After = maxAfter
+			}
 			if timeout.Stage.ID != c.stageID || n.Sub(time.UnixMilli(c.enteredAt)) < timeout.After {
 				continue
 			}
@@ -417,14 +436,35 @@ func (s *Server) reapPipelineStageTimeouts(n time.Time, take func() bool, seen m
 			if !take() {
 				return
 			}
-			if !s.transitionPipelineStageFromWithContext(c.id, *timeout.Target, c.stageID, ctx) {
-				continue
-			}
-			log.Printf("[reaper] claw %s timed out in pipeline stage %q after %s; transitioning to %q", c.id, c.stageID, timeout.After, timeout.TargetID)
-			s.recordStageTimeoutEvent(c.id, c.stageID, timeout.TargetID, timeout.After)
+			// The claim and on_enter work must not stall the global reaper tick.
+			s.safeGo("pipeline stage timeout", func() {
+				if !s.transitionPipelineStageFromWithContext(c.id, *timeout.Target, c.stageID, ctx) {
+					return
+				}
+				log.Printf("[reaper] claw %s timed out in pipeline stage %q after %s; transitioning to %q", c.id, c.stageID, timeout.After, timeout.TargetID)
+				s.recordStageTimeoutEvent(c.id, c.stageID, timeout.TargetID, timeout.After)
+			})
 			break
 		}
 	}
+}
+
+func (s *Server) anyPipelineStageTimeouts() bool {
+	rows, err := s.db.Query(`SELECT id FROM claws WHERE status NOT IN ('error','deleted') AND pipeline_stage != ''`)
+	if err != nil {
+		return false
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id string
+		if rows.Scan(&id) != nil {
+			continue
+		}
+		if ctx, ok := s.findPipelineContextForClaw(id); ok && strings.Contains(ctx.PipelineYAML(), "stage_timeout:") {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Server) recordStageTimeoutEvent(clawID, sourceStage, targetStage string, after time.Duration) {
@@ -448,6 +488,10 @@ func (s *Server) recordStageTimeoutEvent(clawID, sourceStage, targetStage string
 		return
 	}
 	if recorded {
+		if _, err := tx.Exec(`UPDATE task_run_summaries SET stage_timeout_count=stage_timeout_count+1 WHERE run_id=?`, runID); err != nil {
+			log.Printf("[reaper] update stage timeout disposition for claw %s: %v", clawID, err)
+			return
+		}
 		if err := materializeTaskRunTx(tx, runID); err != nil {
 			log.Printf("[reaper] materialize stage timeout event for claw %s: %v", clawID, err)
 			return

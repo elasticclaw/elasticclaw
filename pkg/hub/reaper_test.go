@@ -350,6 +350,24 @@ stages:
 		}
 		return got
 	}
+	// The A5 fix dispatches the stage-timeout transition and its on_enter work
+	// off the reaper tick (see reapPipelineStageTimeouts' safeGo call), so the
+	// stage change and event row are no longer visible synchronously right
+	// after reapOnce() returns. Poll briefly for the async effect instead of
+	// asserting immediately.
+	waitForStage := func(t *testing.T, db *sql.DB, want string) {
+		t.Helper()
+		deadline := time.Now().Add(2 * time.Second)
+		var got string
+		for time.Now().Before(deadline) {
+			got = stage(t, db)
+			if got == want {
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		t.Fatalf("stage = %q, want %q (timed out waiting)", got, want)
+	}
 	t.Run("transitions after timeout and does not refire", func(t *testing.T) {
 		s, db := newServer(t, -11*time.Minute, nil)
 		n := s.reaperNow().UnixMilli()
@@ -360,14 +378,15 @@ stages:
 			t.Fatal(err)
 		}
 		s.reapOnce()
-		if got := stage(t, db); got != "timed_out" {
-			t.Fatalf("stage = %q, want timed_out", got)
-		}
+		waitForStage(t, db, "timed_out")
 		var events int
 		if err := db.QueryRow(`SELECT COUNT(*) FROM task_run_events WHERE run_id='run-timeout' AND event_type=?`, taskRunEventStageTimeout).Scan(&events); err != nil || events != 1 {
 			t.Fatalf("stage timeout events = %d, err=%v; want 1", events, err)
 		}
 		s.reapOnce()
+		// The second tick must not re-fire; give any (incorrect) async
+		// re-transition a moment to land before asserting it didn't.
+		time.Sleep(50 * time.Millisecond)
 		if got := stage(t, db); got != "timed_out" {
 			t.Fatalf("stale timeout changed stage to %q", got)
 		}

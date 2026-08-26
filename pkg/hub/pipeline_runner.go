@@ -163,7 +163,7 @@ func (s *Server) nudgeUnanchoredSignal(clawID, message string) {
 // If sourceStageEnteredAt is zero (no timestamp available, e.g. immediately
 // after upgrading past item 2's migration) this records nothing rather than
 // guessing a window.
-func (s *Server) recordStageSignalContractOutcome(clawID, sourceStageID string, sourceStageEnteredAt time.Time) {
+func (s *Server) recordStageSignalContractOutcome(clawID, sourceStageID string, sourceStageEnteredAt time.Time, snapshots ...[]string) {
 	if sourceStageEnteredAt.IsZero() {
 		return
 	}
@@ -172,6 +172,9 @@ func (s *Server) recordStageSignalContractOutcome(clawID, sourceStageID string, 
 	// SQLite connection — holding an open *sql.Rows while issuing another
 	// query on the same connection deadlocks.
 	tokens := s.signalTokensForClaw(clawID)
+	if len(snapshots) > 0 {
+		tokens = snapshots[0]
+	}
 	nudgeTexts := make(map[string]bool, len(tokens))
 	for _, t := range tokens {
 		nudgeTexts[unanchoredSignalNudgeText(t)] = true
@@ -187,7 +190,7 @@ func (s *Server) recordStageSignalContractOutcome(clawID, sourceStageID string, 
 	}
 	defer rows.Close()
 
-	var sawNudge, sawHumanChat, sawAnyTokenMention bool
+	var sawNudge, sawHumanChat, sawAnyTokenMention, sawAnchoredToken bool
 	for rows.Next() {
 		var role, content, userLogin string
 		if err := rows.Scan(&role, &content, &userLogin); err != nil {
@@ -205,7 +208,12 @@ func (s *Server) recordStageSignalContractOutcome(clawID, sourceStageID string, 
 			}
 		case "claw":
 			for _, t := range tokens {
-				if pipeline.MessageSignals(content, t) || pipeline.MessageMentionsUnanchored(content, t) {
+				if pipeline.MessageSignals(content, t) {
+					sawAnchoredToken = true
+					sawAnyTokenMention = true
+					break
+				}
+				if pipeline.MessageMentionsUnanchored(content, t) {
 					sawAnyTokenMention = true
 					break
 				}
@@ -217,30 +225,39 @@ func (s *Server) recordStageSignalContractOutcome(clawID, sourceStageID string, 
 		return
 	}
 
-	var eventType string
-	switch {
-	case sawNudge:
-		eventType = taskRunEventSignalUnanchoredNudged
-	case sawHumanChat:
-		eventType = taskRunEventSignalHumanRescue
-	case !sawAnyTokenMention:
-		eventType = taskRunEventSignalMissed
-	default:
-		return // stage advanced cleanly on its own signal; nothing to count
+	cause := "self"
+	if sawNudge {
+		cause = "hub_nag"
+	} else if sawHumanChat {
+		cause = "human_message"
 	}
-
-	if err := s.recordTaskRunEventForClaw(clawID, TaskRunEvent{
-		EventKey:        eventType + ":" + clawID + ":" + sourceStageID + ":" + strconv.FormatInt(epochMillis(sourceStageEnteredAt), 10),
-		Source:          taskRunSourceHub,
-		EventType:       eventType,
-		ActorType:       taskRunActorSystem,
-		InteractionRole: taskRunInteractionNeutral,
-		TargetType:      "pipeline_stage",
-		TargetID:        sourceStageID,
-		Detail:          map[string]any{"sourceStage": sourceStageID},
-		OccurredAt:      now(),
-	}); err != nil {
-		log.Printf("[pipeline] failed to record signal contract event %s for claw %s stage %q: %v", eventType, shortID(clawID), sourceStageID, err)
+	emission := "absent"
+	if sawAnyTokenMention {
+		emission = "unanchored"
+	}
+	if sawAnchoredToken {
+		emission = "anchored"
+	}
+	for _, eventType := range []string{taskRunEventSignalAdvanceCause, taskRunEventSignalEmission} {
+		detail := map[string]any{"sourceStage": sourceStageID, "cause": cause, "emission": emission}
+		if eventType == taskRunEventSignalAdvanceCause {
+			detail = map[string]any{"sourceStage": sourceStageID, "cause": cause}
+		} else {
+			detail = map[string]any{"sourceStage": sourceStageID, "emission": emission}
+		}
+		if err := s.recordTaskRunEventForClaw(clawID, TaskRunEvent{
+			EventKey:        eventType + ":" + clawID + ":" + sourceStageID + ":" + strconv.FormatInt(epochMillis(sourceStageEnteredAt), 10),
+			Source:          taskRunSourceHub,
+			EventType:       eventType,
+			ActorType:       taskRunActorSystem,
+			InteractionRole: taskRunInteractionNeutral,
+			TargetType:      "pipeline_stage",
+			TargetID:        sourceStageID,
+			Detail:          detail,
+			OccurredAt:      now(),
+		}); err != nil {
+			log.Printf("[pipeline] failed to record signal contract event %s for claw %s stage %q: %v", eventType, shortID(clawID), sourceStageID, err)
+		}
 	}
 }
 
@@ -1468,7 +1485,7 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, ctx pipelineCon
 				s.injectHubMessageByID(clawID, findingsMsg)
 			}
 			// Auto-transition to next stage if a judge_verdict trigger matches
-			s.safeGo("pipeline judge auto-transition", func() { s.autoTransitionAfterJudge(clawID, judgeResult.Verdict, ctx) })
+			s.safeGo("pipeline judge auto-transition", func() { s.autoTransitionAfterJudge(clawID, stage.ID, judgeResult.Verdict, ctx) })
 			// Check required verdict
 			if stage.OnEnter.Judge.Require.Verdict != "" &&
 				!strings.EqualFold(judgeResult.Verdict, stage.OnEnter.Judge.Require.Verdict) {
@@ -1883,6 +1900,7 @@ func (s *Server) transitionPipelineStage(clawID string, stage pipeline.Stage, fa
 // checkPipelineMessageTriggers evaluates pipeline triggers against a claw message
 // and transitions to the matching stage if found. Returns true if a transition occurred.
 func (s *Server) checkPipelineMessageTriggers(clawID, message string) bool {
+	expectedStage := s.getPipelineStage(clawID)
 	ctx, stage, ok := s.pipelineStageForMessageContains(clawID, message)
 	if !ok {
 		ctx, ok = s.findPipelineContextForClaw(clawID)
@@ -1907,7 +1925,9 @@ func (s *Server) checkPipelineMessageTriggers(clawID, message string) bool {
 	if stage == nil {
 		return false
 	}
-	return s.transitionPipelineStageWithContext(clawID, *stage, ctx)
+	resolved := s.resolvePipelineStageSkips(clawID, *stage, ctx)
+	transitioned, _ := s.transitionResolvedPipelineStageWithContextFromKind(clawID, resolved, expectedStage, ctx, true)
+	return transitioned
 }
 
 func (s *Server) hasPipelineMessageContainsTrigger(clawID, message string) bool {
@@ -1932,8 +1952,17 @@ func (s *Server) pipelineStageForMessageContains(clawID, message string) (pipeli
 }
 
 func (s *Server) transitionPipelineStageWithContext(clawID string, stage pipeline.Stage, ctx pipelineContext) bool {
+	return s.transitionPipelineStageWithContextKind(clawID, stage, ctx, false)
+}
+
+func (s *Server) transitionPipelineStageWithContextSignal(clawID string, stage pipeline.Stage, ctx pipelineContext) bool {
+	return s.transitionPipelineStageWithContextKind(clawID, stage, ctx, true)
+}
+
+func (s *Server) transitionPipelineStageWithContextKind(clawID string, stage pipeline.Stage, ctx pipelineContext, signalDriven bool) bool {
 	stage = s.resolvePipelineStageSkips(clawID, stage, ctx)
-	transitioned, _ := s.transitionResolvedPipelineStageWithContextFrom(clawID, stage, "", ctx)
+	expected := s.getPipelineStage(clawID)
+	transitioned, _ := s.transitionResolvedPipelineStageWithContextFromKind(clawID, stage, expected, ctx, signalDriven)
 	return transitioned
 }
 
@@ -1941,15 +1970,19 @@ func (s *Server) transitionPipelineStageWithContext(clawID string, stage pipelin
 // in expectedStage. This protects reaper-driven transitions from stale timers.
 func (s *Server) transitionPipelineStageFromWithContext(clawID string, stage pipeline.Stage, expectedStage string, ctx pipelineContext) bool {
 	stage = s.resolvePipelineStageSkips(clawID, stage, ctx)
-	transitioned, _ := s.transitionResolvedPipelineStageWithContextFrom(clawID, stage, expectedStage, ctx)
+	transitioned, _ := s.transitionResolvedPipelineStageWithContextFromKind(clawID, stage, expectedStage, ctx, false)
 	return transitioned
 }
 
 func (s *Server) transitionResolvedPipelineStageWithContext(clawID string, stage pipeline.Stage, ctx pipelineContext) (transitioned, injectDelivered bool) {
-	return s.transitionResolvedPipelineStageWithContextFrom(clawID, stage, "", ctx)
+	return s.transitionResolvedPipelineStageWithContextFromKind(clawID, stage, s.getPipelineStage(clawID), ctx, false)
 }
 
 func (s *Server) transitionResolvedPipelineStageWithContextFrom(clawID string, stage pipeline.Stage, expectedStage string, ctx pipelineContext) (transitioned, injectDelivered bool) {
+	return s.transitionResolvedPipelineStageWithContextFromKind(clawID, stage, expectedStage, ctx, false)
+}
+
+func (s *Server) transitionResolvedPipelineStageWithContextFromKind(clawID string, stage pipeline.Stage, expectedStage string, ctx pipelineContext, signalDriven bool) (transitioned, injectDelivered bool) {
 	// Snapshot the stage being left BEFORE claiming the new one: the claim
 	// overwrites pipeline_stage_entered_at, and the signal-contract
 	// classification below needs the dwell window of the departing stage.
@@ -1965,9 +1998,13 @@ func (s *Server) transitionResolvedPipelineStageWithContextFrom(clawID string, s
 		log.Printf("[pipeline] claw %s already in stage %q (%s), skipping duplicate transition", clawID[:8], stage.ID, stage.Label)
 		return false, false
 	}
-	if sourceStageID != "" && sourceStageID != stage.ID {
+	var signalTokens []string
+	if signalDriven && sourceStageID != "" && sourceStageID != stage.ID {
+		// Snapshot before recording the target visit: token selection excludes
+		// already-visited stages.
+		signalTokens = s.signalTokensForClaw(clawID)
 		s.safeGo("signal contract measurement", func() {
-			s.recordStageSignalContractOutcome(clawID, sourceStageID, sourceStageEnteredAt)
+			s.recordStageSignalContractOutcome(clawID, sourceStageID, sourceStageEnteredAt, signalTokens)
 		})
 	}
 	stageLabel := strings.TrimSpace(stage.Label)
@@ -1993,6 +2030,12 @@ func (s *Server) transitionResolvedPipelineStageWithContextFrom(clawID string, s
 		return true, false
 	}
 	if onEnterErr != nil && !stage.Terminal {
+		// A competing transition may have claimed a newer stage while this
+		// stage's on_enter was running. Its result is abandoned work, not a claw
+		// failure.
+		if s.getPipelineStage(clawID) != stage.ID {
+			return true, false
+		}
 		s.stopAgentWithReason(clawID, fmt.Sprintf("pipeline stage %q on_enter failed: %v", stage.ID, onEnterErr), false)
 		return true, false
 	}
@@ -2138,7 +2181,12 @@ func normalizedIssueLabelSet(labels []string) map[string]bool {
 // autoTransitionAfterJudge checks the pipeline for a stage with a judge_verdict
 // trigger matching the given verdict and transitions to it. This enables
 // automated retry loops: judge fail → fix stage → retest → final judge.
-func (s *Server) autoTransitionAfterJudge(clawID, verdict string, ctx pipelineContext) {
+//
+// sourceStageID is the stage the claw was in when the judge ran; the claim is
+// conditioned on the claw still being in that stage so this can't race a
+// reaper-driven stage_timeout (or any other transition path) that already
+// moved the claw elsewhere.
+func (s *Server) autoTransitionAfterJudge(clawID, sourceStageID, verdict string, ctx pipelineContext) {
 	pl := parsePipelineForContext(ctx)
 	if pl == nil {
 		return
@@ -2149,7 +2197,7 @@ func (s *Server) autoTransitionAfterJudge(clawID, verdict string, ctx pipelineCo
 		return
 	}
 	log.Printf("[pipeline] claw %s: auto-transitioning to stage %q after judge verdict=%s", clawID[:8], stage.ID, verdict)
-	s.transitionPipelineStageWithContext(clawID, *stage, ctx)
+	s.transitionPipelineStageFromWithContext(clawID, *stage, sourceStageID, ctx)
 }
 
 // GateEvaluationResult is the outcome of evaluating a gate.
@@ -2290,7 +2338,10 @@ func (s *Server) autoTransitionAfterGate(clawID, stageID, verdict string, ctx pi
 		return
 	}
 	log.Printf("[pipeline] claw %s: auto-transitioning to stage %q after gate stage=%s verdict=%s", clawID[:8], stage.ID, stageID, verdict)
-	s.transitionPipelineStageWithContext(clawID, *stage, ctx)
+	// Conditioned on the claw still being in stageID (the gate's own source
+	// stage) so this can't race a reaper-driven stage_timeout, or any other
+	// transition path, that already moved the claw elsewhere.
+	s.transitionPipelineStageFromWithContext(clawID, *stage, stageID, ctx)
 }
 
 // initializePipelineEntryIfNeeded transitions a claw into its entry pipeline stage

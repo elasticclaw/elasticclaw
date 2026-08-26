@@ -614,6 +614,10 @@ type LivenessConfig struct {
 	PRConditionsMaxWait string `yaml:"pr_conditions_max_wait,omitempty" json:"prConditionsMaxWait,omitempty"`
 	// StageTimeoutEnabled controls pipeline stage_timeout recovery (default on).
 	StageTimeoutEnabled *bool `yaml:"stage_timeout_enabled,omitempty" json:"stageTimeoutEnabled,omitempty"`
+	// StageTimeoutMinAfter and StageTimeoutMaxAfter clamp pipeline stage_timeout
+	// durations fleet-wide without requiring a pipeline YAML deployment.
+	StageTimeoutMinAfter string `yaml:"stage_timeout_min_after,omitempty" json:"stageTimeoutMinAfter,omitempty"`
+	StageTimeoutMaxAfter string `yaml:"stage_timeout_max_after,omitempty" json:"stageTimeoutMaxAfter,omitempty"`
 	// IdleResume controls the idle auto-resume recovery (default on). It lives
 	// here and not under notifications because muting an alert channel must
 	// never disable recovery: an agent parked in a tool call that never

@@ -96,6 +96,7 @@ func migrate(db *sql.DB) error {
 	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN llm_key TEXT NOT NULL DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN pipeline_stage TEXT NOT NULL DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN pipeline_stage_entered_at INTEGER NOT NULL DEFAULT 0`)
+	_, _ = db.Exec(`UPDATE claws SET pipeline_stage_entered_at=? WHERE pipeline_stage != '' AND pipeline_stage_entered_at=0`, epochMillis(now()))
 	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN bootstrap_ok INTEGER NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN bootstrap_status TEXT NOT NULL DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN bootstrap_diagnostic TEXT NOT NULL DEFAULT ''`)
@@ -326,6 +327,7 @@ func migrate(db *sql.DB) error {
 	_, _ = db.Exec(`ALTER TABLE task_run_prs ADD COLUMN last_agent_head_sha TEXT NOT NULL DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE task_run_prs ADD COLUMN ready_at INTEGER NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE task_run_summaries ADD COLUMN ready_at INTEGER NOT NULL DEFAULT 0`)
+	_, _ = db.Exec(`ALTER TABLE task_run_summaries ADD COLUMN stage_timeout_count INTEGER NOT NULL DEFAULT 0`)
 
 	_, _ = db.Exec(`CREATE TABLE IF NOT EXISTS claw_checkpoints (
 		id                    TEXT PRIMARY KEY,
@@ -643,7 +645,7 @@ func migrate(db *sql.DB) error {
 			'human_manual_code_push','human_tracker_update','human_dashboard_message',
 			'human_manual_stop_or_resume','human_settings_or_status_change',
 			'unknown_human_interaction','pr_replaced','correction','retraction','ci_succeeded','ci_failed','stage_timeout',
-			'signal_unanchored_nudged','signal_missed','signal_human_rescue'
+			'signal_unanchored_nudged','signal_missed','signal_human_rescue','signal_advance_cause','signal_emission'
 		)),
 		event_time         INTEGER NOT NULL,
 		observed_at        INTEGER NOT NULL,
@@ -749,6 +751,7 @@ func migrate(db *sql.DB) error {
 		warning_types           TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(warning_types) AND json_type(warning_types) = 'array'),
 		failure_type            TEXT NOT NULL DEFAULT '' CHECK(failure_type IN ('','creation_failed','provision_failed','bootstrap_failed','agent_stopped','manual_stop_before_delivery','done_without_pr','no_pr','pr_closed_unmerged','timeout','provider_lost','permission_or_auth_failed','unknown')),
 		human_interaction_count INTEGER NOT NULL DEFAULT 0 CHECK(human_interaction_count >= 0),
+		stage_timeout_count     INTEGER NOT NULL DEFAULT 0 CHECK(stage_timeout_count >= 0),
 		started_at              INTEGER NOT NULL,
 		queued_at               INTEGER NOT NULL DEFAULT 0,
 		provision_started_at    INTEGER NOT NULL DEFAULT 0,
@@ -1235,7 +1238,7 @@ func rebuildTaskRunEventsSignalContractV1(db *sql.DB) error {
 			'human_manual_code_push','human_tracker_update','human_dashboard_message',
 			'human_manual_stop_or_resume','human_settings_or_status_change',
 			'unknown_human_interaction','pr_replaced','correction','retraction','ci_succeeded','ci_failed','stage_timeout',
-			'signal_unanchored_nudged','signal_missed','signal_human_rescue'
+			'signal_unanchored_nudged','signal_missed','signal_human_rescue','signal_advance_cause','signal_emission'
 		)),
 		event_time         INTEGER NOT NULL,
 		observed_at        INTEGER NOT NULL,

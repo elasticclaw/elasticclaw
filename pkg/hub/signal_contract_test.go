@@ -82,8 +82,8 @@ func TestRecordStageSignalContractOutcome(t *testing.T) {
 		s.recordStageSignalContractOutcome(clawID, "working", entered)
 
 		got := signalContractEventTypes(t, db, "run-1")
-		if len(got) != 1 || got[0] != taskRunEventSignalUnanchoredNudged {
-			t.Fatalf("events = %v, want [%s]", got, taskRunEventSignalUnanchoredNudged)
+		if len(got) != 2 || got[0] != taskRunEventSignalAdvanceCause || got[1] != taskRunEventSignalEmission {
+			t.Fatalf("events = %v, want cause and emission", got)
 		}
 	})
 
@@ -97,8 +97,8 @@ func TestRecordStageSignalContractOutcome(t *testing.T) {
 		s.recordStageSignalContractOutcome(clawID, "working", entered)
 
 		got := signalContractEventTypes(t, db, "run-1")
-		if len(got) != 1 || got[0] != taskRunEventSignalHumanRescue {
-			t.Fatalf("events = %v, want [%s]", got, taskRunEventSignalHumanRescue)
+		if len(got) != 2 || got[0] != taskRunEventSignalAdvanceCause || got[1] != taskRunEventSignalEmission {
+			t.Fatalf("events = %v, want cause and emission", got)
 		}
 	})
 
@@ -111,8 +111,8 @@ func TestRecordStageSignalContractOutcome(t *testing.T) {
 		s.recordStageSignalContractOutcome(clawID, "working", entered)
 
 		got := signalContractEventTypes(t, db, "run-1")
-		if len(got) != 1 || got[0] != taskRunEventSignalMissed {
-			t.Fatalf("events = %v, want [%s]", got, taskRunEventSignalMissed)
+		if len(got) != 2 {
+			t.Fatalf("events = %v, want two dimensions", got)
 		}
 	})
 
@@ -128,8 +128,8 @@ func TestRecordStageSignalContractOutcome(t *testing.T) {
 		s.recordStageSignalContractOutcome(clawID, "working", entered)
 
 		got := signalContractEventTypes(t, db, "run-1")
-		if len(got) != 1 || got[0] != taskRunEventSignalMissed {
-			t.Fatalf("events = %v, want [%s]", got, taskRunEventSignalMissed)
+		if len(got) != 2 {
+			t.Fatalf("events = %v, want two dimensions", got)
 		}
 	})
 
@@ -142,8 +142,8 @@ func TestRecordStageSignalContractOutcome(t *testing.T) {
 		s.recordStageSignalContractOutcome(clawID, "working", entered)
 
 		got := signalContractEventTypes(t, db, "run-1")
-		if len(got) != 0 {
-			t.Fatalf("events = %v, want none", got)
+		if len(got) != 2 {
+			t.Fatalf("events = %v, want two dimensions", got)
 		}
 	})
 

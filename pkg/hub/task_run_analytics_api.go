@@ -37,14 +37,16 @@ var allowedTaskRunAnalyticsJSONDistinctColumns = map[string]bool{
 }
 
 type taskRunAnalyticsSummaryResponse struct {
-	TotalRuns         int                              `json:"totalRuns"`
-	ByStatus          map[string]int                   `json:"byStatus"`
-	WarningBreakdown  map[string]int                   `json:"warningBreakdown"`
-	FailureBreakdown  map[string]int                   `json:"failureBreakdown"`
-	HumanInteractions int                              `json:"humanInteractions"`
-	PRCounts          taskRunAnalyticsPRKPI            `json:"prCounts"`
-	AppliedFilters    map[string]interface{}           `json:"appliedFilters,omitempty"`
-	Prior             *taskRunAnalyticsSummaryResponse `json:"prior,omitempty"`
+	TotalRuns          int                              `json:"totalRuns"`
+	ByStatus           map[string]int                   `json:"byStatus"`
+	WarningBreakdown   map[string]int                   `json:"warningBreakdown"`
+	FailureBreakdown   map[string]int                   `json:"failureBreakdown"`
+	HumanInteractions  int                              `json:"humanInteractions"`
+	PRCounts           taskRunAnalyticsPRKPI            `json:"prCounts"`
+	SignalAdvanceCause map[string]int                   `json:"signalAdvanceCause"`
+	SignalEmission     map[string]int                   `json:"signalEmission"`
+	AppliedFilters     map[string]interface{}           `json:"appliedFilters,omitempty"`
+	Prior              *taskRunAnalyticsSummaryResponse `json:"prior,omitempty"`
 }
 
 type taskRunAnalyticsPRKPI struct {
@@ -124,6 +126,7 @@ type taskRunAnalyticsRunView struct {
 	WarningTypes          []string `json:"warningTypes"`
 	FailureType           string   `json:"failureType"`
 	HumanInteractionCount int      `json:"humanInteractionCount"`
+	StageTimeoutCount     int      `json:"stageTimeoutCount"`
 	StartedAt             int64    `json:"startedAt"`
 	QueuedAt              int64    `json:"queuedAt"`
 	ProvisionStartedAt    int64    `json:"provisionStartedAt"`
@@ -664,9 +667,11 @@ func taskRunAnalyticsPriorFilters(filters taskRunAnalyticsFilters, now time.Time
 func (s *Server) readTaskRunAnalyticsSummary(filters taskRunAnalyticsFilters) (taskRunAnalyticsSummaryResponse, error) {
 	where, args := taskRunAnalyticsSummaryWhere(filters)
 	response := taskRunAnalyticsSummaryResponse{
-		ByStatus:         map[string]int{},
-		WarningBreakdown: map[string]int{},
-		FailureBreakdown: map[string]int{},
+		ByStatus:           map[string]int{},
+		WarningBreakdown:   map[string]int{},
+		FailureBreakdown:   map[string]int{},
+		SignalAdvanceCause: map[string]int{},
+		SignalEmission:     map[string]int{},
 	}
 	row := s.db.QueryRow(`
 		SELECT COUNT(*), COALESCE(SUM(human_interaction_count),0), COALESCE(SUM(pr_count),0),
@@ -681,6 +686,37 @@ func (s *Server) readTaskRunAnalyticsSummary(filters taskRunAnalyticsFilters) (t
 	}
 	if err := s.readTaskRunAnalyticsGroupedCounts(`failure_type`, where+` AND failure_type != ''`, args, response.FailureBreakdown); err != nil {
 		return response, err
+	}
+	for _, measure := range []struct {
+		eventType string
+		target    map[string]int
+	}{{taskRunEventSignalAdvanceCause, response.SignalAdvanceCause}, {taskRunEventSignalEmission, response.SignalEmission}} {
+		field := "emission"
+		if measure.eventType == taskRunEventSignalAdvanceCause {
+			field = "cause"
+		}
+		// task_run_events and task_run_summaries both have a tenant_id column
+		// (and could grow more overlapping names later), so the shared `where`
+		// clause is applied via a run_id subquery against task_run_summaries
+		// alone rather than a join — a join would make every unqualified
+		// column in `where` ambiguous.
+		queryArgs := append([]any{measure.eventType}, args...)
+		rows, err := s.db.Query(`SELECT json_extract(detail, '$.`+field+`'), COUNT(*) FROM task_run_events WHERE event_type=? AND run_id IN (SELECT run_id FROM task_run_summaries `+where+`) GROUP BY 1`, queryArgs...)
+		if err != nil {
+			return response, err
+		}
+		for rows.Next() {
+			var key string
+			var n int
+			if err := rows.Scan(&key, &n); err != nil {
+				rows.Close()
+				return response, err
+			}
+			measure.target[key] = n
+		}
+		if err := rows.Close(); err != nil {
+			return response, err
+		}
 	}
 	warnings, err := s.db.Query(`SELECT je.value, COUNT(*) FROM task_run_summaries s, json_each(s.warning_types) je `+where+` GROUP BY je.value`, args...)
 	if err != nil {
@@ -1321,7 +1357,7 @@ func taskRunAnalyticsRunColumns() string {
 		owner_type, workspace_name, workflow_name, factory_name, owner_id, owner_display_name,
 		run_kind, integration, integration_workspace, issue_id, issue_created_at, claw_id, model, llm_key, repo,
 		primary_pr_url, pr_count, open_pr_count, merged_pr_count, closed_pr_count, warning_types,
-		failure_type, human_interaction_count, started_at, queued_at, provision_started_at,
+		failure_type, human_interaction_count, started_at, queued_at, stage_timeout_count, provision_started_at,
 		agent_started_at, pr_opened_at, ready_at, merged_at, finished_at, timeout_at, last_event_at,
 		materialized_at, updated_at, analytics_enabled, requires_pr, excluded_reason,
 		input_tokens, output_tokens, total_tokens, estimated_cost_usd, usage_updated_at, issue_title`
@@ -1341,6 +1377,7 @@ func scanTaskRunAnalyticsRuns(rows *sql.Rows) ([]taskRunAnalyticsRunView, error)
 			&run.RunKind, &run.Integration, &run.IntegrationWorkspace, &run.IssueID, &run.IssueCreatedAt, &run.ClawID, &run.Model, &run.LLMKey,
 			&run.Repo, &run.PrimaryPRURL, &run.PRCount, &run.OpenPRCount, &run.MergedPRCount, &run.ClosedPRCount,
 			&warningsJSON, &run.FailureType, &run.HumanInteractionCount, &run.StartedAt, &run.QueuedAt,
+			&run.StageTimeoutCount,
 			&run.ProvisionStartedAt, &run.AgentStartedAt, &run.PROpenedAt, &run.ReadyAt, &run.MergedAt, &run.FinishedAt,
 			&run.TimeoutAt, &run.LastEventAt, &run.MaterializedAt, &run.UpdatedAt, &analyticsEnabled, &requiresPR,
 			&run.ExcludedReason, &inputTokens, &outputTokens, &totalTokens, &estimatedCostUSD, &usageUpdatedAt, &run.IssueTitle,

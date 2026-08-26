@@ -99,9 +99,8 @@ const (
 	//     unstuck it.
 	//   - signal_human_rescue: a real dashboard user (not a hub inject) sent
 	//     a chat message during the stage before it advanced.
-	taskRunEventSignalUnanchoredNudged = "signal_unanchored_nudged"
-	taskRunEventSignalMissed           = "signal_missed"
-	taskRunEventSignalHumanRescue      = "signal_human_rescue"
+	taskRunEventSignalAdvanceCause = "signal_advance_cause"
+	taskRunEventSignalEmission     = "signal_emission"
 
 	taskRunActorSystem  = "system"
 	taskRunActorHuman   = "human"
