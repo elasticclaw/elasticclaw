@@ -305,18 +305,17 @@ func (s *Server) ensureLifecycleClawRouteBaselines(lc *types.LifecycleNotificati
 		if via == "" {
 			continue
 		}
-		if len(routes) == 1 {
-			// The stamp written below is what lifecycleSingleViaIncumbent
-			// reads, so for a lone route it must never land ahead of the
-			// cursor ensureLifecycleRouteWatermarks materialises earlier in
-			// this same tick: a route carrying a claw stamp and no cursor of
-			// its own IS the legacy incumbent, and would be handed the shared
-			// floor and replay the whole multi-route-era backlog. If that
-			// write did not land (a transient state-read failure), wait for
-			// the next tick, which retries both in order.
-			if _, found, err := s.notifierStateInt64(lifecycleRouteWatermarkKey(via)); err != nil || !found {
-				continue
-			}
+		// The stamp written below is what lifecycleSingleViaIncumbent reads, so
+		// it must never land ahead of the cursor ensureLifecycleRouteWatermarks
+		// materialises earlier in this same tick: a route carrying a claw stamp
+		// and no cursor of its own reads as the legacy incumbent, and would then
+		// be handed the shared floor and replay the whole backlog piled up
+		// behind it. If that write did not land (a transient state-read failure
+		// made ensure bail), wait for the next tick, which retries both in
+		// order. Every configured route gets a cursor there, so in the healthy
+		// case this never skips anything.
+		if _, found, err := s.notifierStateInt64(lifecycleRouteWatermarkKey(via)); err != nil || !found {
+			continue
 		}
 		key := lifecycleClawRouteBaselineKey(via)
 		if _, found, err := s.notifierStateInt64(key); err != nil || found {
@@ -380,6 +379,16 @@ func (s *Server) ensureLifecycleClawRouteBaseline(d lifecycleDelivery, route lif
 	}
 	if found {
 		return true
+	}
+	if _, ok, err := s.notifierStateInt64(lifecycleRouteWatermarkKey(route.notifier)); err != nil || !ok {
+		// Same ordering rule as ensureLifecycleClawRouteBaselines: the stamp
+		// written below is what lifecycleSingleViaIncumbent reads, so it must
+		// never land ahead of the route's own cursor. ensureLifecycleRouteWatermarks
+		// gives every multi-route config's routes one; if it bailed on a
+		// transient state-read failure this tick, wait for the next one rather
+		// than leaving a stamp that reads as "legacy incumbent" and earns this
+		// route the incumbent's shared position.
+		return false
 	}
 	if err := s.seedLifecycleClawRouteBaseline(route.notifier); err != nil {
 		log.Printf("[notify] seed claw baseline for %q: %v", route.notifier, err)

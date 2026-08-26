@@ -285,6 +285,17 @@ func (s *Server) initLifecycleNotifierBaseline() {
 			}
 		}
 	}
+	// Give the CONFIGURED routes their own state here too, for the same reason
+	// the shared baseline is written synchronously: a route added while the hub
+	// was down (a `via` migrated to routes in hub.yaml) would otherwise be
+	// baselined by the first poll tick, one poll interval after the producers
+	// started, and silently miss whatever they produced in that window. Both
+	// helpers are idempotent, so the tick keeps covering runtime saves.
+	if err := types.ValidateNotificationsConfig(cfg); err == nil {
+		s.pruneLifecycleRouteState(cfg.Lifecycle)
+		s.ensureLifecycleRouteWatermarks(cfg.Lifecycle)
+		s.ensureLifecycleClawRouteBaselines(cfg.Lifecycle)
+	}
 	// Stamp the agent_idle baseline at boot on the first enabled run so idle
 	// stretches that predate the feature (or this deploy) are parked, not
 	// announced. Runtime enables are covered by the lazy stamp in
@@ -809,11 +820,22 @@ func (s *Server) lifecycleTaskRunPass(d lifecycleDelivery) {
 			continue
 		}
 		if !found {
+			if key != lifecycleStateWatermarkKey {
+				// A per-route cursor belongs to ensureLifecycleRouteWatermarks:
+				// it is the only place that knows whether this route inherits
+				// the incumbent's shared position or starts at the head. Its
+				// absence here means that write did not land (a transient
+				// state-read failure earlier in this same tick), so stamping the
+				// head would materialise the cursor from the WRONG source and
+				// bury the route's pending backlog for good — ensure sees the
+				// cursor as found on every later tick and never revisits it.
+				// Wait for the next tick, which retries both in order (the same
+				// guard ensureLifecycleClawRouteBaselines uses).
+				continue
+			}
 			// First run for this cursor: start at the current end of the event
-			// stream so enabling it does not replay history. Route cursors are
-			// normally materialised by ensureLifecycleRouteWatermarks before the
-			// pass runs; this stays as the backstop for the legacy shared key
-			// (and for a state write that failed there).
+			// stream so enabling it does not replay history. This is the
+			// backstop for the legacy shared key, which no ensure pass writes.
 			maxRow, err := s.lifecycleMaxEventRowID()
 			if err != nil {
 				log.Printf("[notify] read max event rowid: %v", err)

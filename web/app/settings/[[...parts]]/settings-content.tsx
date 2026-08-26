@@ -211,6 +211,11 @@ interface NotificationsView {
   }
 }
 
+// The outcome of one save. `persisted` says whether the hub accepted the PATCH;
+// `message` is what to show, which is non-null both for a rejected PATCH and
+// for an accepted one whose follow-up re-read failed.
+type SaveOutcome = { persisted: boolean; message: string | null }
+
 async function fetchSettings(): Promise<SettingsData> {
   const hubUrl = getHubUrl()
   const token = getAuthToken() || ""
@@ -358,7 +363,13 @@ export default function SettingsSectionPage() {
   // past, and the next save re-sends those stale values — reverting whatever
   // this one just persisted. Report it as a failed save so the dialog that
   // triggered it stays open instead of closing on data it can no longer trust.
-  async function runSave(patch: object): Promise<string | null> {
+  //
+  // `persisted` separates the two failures: the hub is unchanged only when the
+  // PATCH itself was rejected. A caller that records what the hub now holds —
+  // the notifier section's clamped-pause flag — has to write it either way, or
+  // a re-read that failed after an accepted PATCH loses the record of a value
+  // this screen wrote on its own initiative.
+  async function runSave(patch: object): Promise<SaveOutcome> {
     setSaving(true)
     setError("")
     setSuccess("")
@@ -366,24 +377,27 @@ export default function SettingsSectionPage() {
       try {
         await patchSettings(patch)
       } catch (e) {
-        return e instanceof Error ? e.message : "Save failed"
+        return { persisted: false, message: e instanceof Error ? e.message : "Save failed" }
       }
       try {
         await load()
       } catch (e) {
         const reason = e instanceof Error ? e.message : "the settings could not be re-read"
-        return `Saved, but reloading the settings failed (${reason}). Reload the page before editing again.`
+        return {
+          persisted: true,
+          message: `Saved, but reloading the settings failed (${reason}). Reload the page before editing again.`,
+        }
       }
       setSuccess("Saved")
       setTimeout(() => setSuccess(""), 2000)
-      return null
+      return { persisted: true, message: null }
     } finally {
       setSaving(false)
     }
   }
 
   async function save(patch: object): Promise<boolean> {
-    const message = await runSave(patch)
+    const { message } = await runSave(patch)
     if (message) setError(message)
     return message === null
   }
@@ -392,10 +406,10 @@ export default function SettingsSectionPage() {
   // banner lives inside <main>, which sits behind a modal overlay — a section
   // that saves from its own dialog has to render the error there instead, or
   // the button looks dead.
-  async function saveReportingError(patch: object): Promise<string | null> {
-    const message = await runSave(patch)
-    if (message) setError(message)
-    return message
+  async function saveReportingError(patch: object): Promise<SaveOutcome> {
+    const outcome = await runSave(patch)
+    if (outcome.message) setError(outcome.message)
+    return outcome
   }
 
   // Silent save: patches without the global 'Saved' banner (used for toggle-style updates)
@@ -3351,16 +3365,33 @@ function SecretsSection({ settings, workspace }: { settings: SettingsData | null
   const token = () => getAuthToken() || ""
   const secretsPath = scoped ? `/api/workspaces/${encodeURIComponent(workspace)}/secrets` : "/api/secrets"
 
+  // The scope switch changes `secretsPath` within one mount, so two refreshes
+  // can be in flight at once and resolve out of order. The loser would render
+  // one store's names under the other store's heading — and Delete, which uses
+  // the render-time path, would then aim at the wrong endpoint.
+  const refreshGeneration = useRef(0)
+
   const refresh = useCallback(async () => {
+    const generation = ++refreshGeneration.current
     setLoading(true)
     try {
       const res = await fetch(`${hubUrl}${secretsPath}`, { headers: { Authorization: `Bearer ${token()}` } })
       if (res.ok) {
         const data = await res.json()
+        if (generation !== refreshGeneration.current) return
         setSecrets(data.secrets || [])
+        setError(null)
+      } else {
+        const message = await res.text()
+        if (generation !== refreshGeneration.current) return
+        // Keeping the other store's names on screen is worse than an empty
+        // list: they read as this scope's secrets, and a workspace name picked
+        // as a notifier token_secret is one the hub can never resolve.
+        setError(message)
+        setSecrets([])
       }
     } finally {
-      setLoading(false)
+      if (generation === refreshGeneration.current) setLoading(false)
     }
   }, [hubUrl, secretsPath])
 
@@ -4565,7 +4596,7 @@ function writeClampedPause(clamped: boolean): void {
   }
 }
 
-function NotifierSection({ settings, onSave, saving }: { settings: SettingsData; onSave: (p: object) => Promise<string | null>; saving: boolean }) {
+function NotifierSection({ settings, onSave, saving }: { settings: SettingsData; onSave: (p: object) => Promise<SaveOutcome>; saving: boolean }) {
   const lifecycle = settings.notifications?.lifecycle
   const notifiers = settings.notifications?.notifiers || {}
   const names = Object.keys(notifiers).sort((a, b) => a.localeCompare(b))
@@ -4647,7 +4678,19 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
   // Invalidates in-flight test sends. A result that lands after the channel's
   // destination or routing changed describes a message that went somewhere else
   // — exactly the stale state every setTests() below clears.
-  const testGeneration = useRef(0)
+  //
+  // Saving ONE channel leaves every other channel's notifier and route
+  // byte-identical, so their in-flight results are still accurate: invalidating
+  // them would throw away a real failure ("channel_not_found") with nothing on
+  // the card to replace it. Per-channel bumps cover a single channel's save or
+  // removal; the hub-wide counter covers the master switch and the category
+  // toggles, which change what every channel receives.
+  const testGeneration = useRef<Record<string, number>>({})
+  const testGenerationAll = useRef(0)
+  const testStamp = (name: string) => `${testGenerationAll.current}:${testGeneration.current[name] ?? 0}`
+  const invalidateTest = (name: string) => {
+    testGeneration.current[name] = (testGeneration.current[name] ?? 0) + 1
+  }
 
   const openAdd = () => { saveGeneration.current++; resetForm(); setModalMode("add"); setShowModal(true) }
   const openEdit = (name: string) => {
@@ -4717,11 +4760,15 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
   // flag on a save that fails — the hub keeps the `enabled:false` this screen
   // wrote earlier, the retry no longer reads a clamp to lift it, and every
   // later save re-sends that stale `false`, muting the hub for good.
-  async function savePatch(next: Parameters<typeof buildPatch>[0]): Promise<string | null> {
+  // The flag describes what the HUB holds, so it follows the PATCH, not the
+  // re-read that comes after it: a save whose follow-up GET failed still left
+  // the hub with the `enabled:false` this screen wrote on its own initiative,
+  // and losing the clamp there latches that `false` for good.
+  async function savePatch(next: Parameters<typeof buildPatch>[0]): Promise<SaveOutcome> {
     const { patch, clamp } = buildPatch(next)
-    const failure = await onSave(patch)
-    if (!failure) writeClampedPause(clamp)
-    return failure
+    const outcome = await onSave(patch)
+    if (outcome.persisted) writeClampedPause(clamp)
+    return outcome
   }
 
   async function saveChannel() {
@@ -4756,11 +4803,15 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
     if (formRouted) nextRoutes.push({ via: name, events })
 
     const generation = saveGeneration.current
-    const failure = await savePatch({ notifiers: nextNotifiers, routes: nextRoutes })
-    // The channel's destination or routing just changed, so any test result
-    // sitting on its card is about a message that went somewhere else.
-    testGeneration.current++
-    setTests((current) => { const { [name]: _stale, ...rest } = current; return rest })
+    const { persisted, message: failure } = await savePatch({ notifiers: nextNotifiers, routes: nextRoutes })
+    // THIS channel's destination or routing just changed, so any test result
+    // sitting on its card is about a message that went somewhere else. A
+    // rejected PATCH changed nothing, and every OTHER channel's notifier and
+    // route went out byte-identical, so neither is invalidated.
+    if (persisted) {
+      invalidateTest(name)
+      setTests((current) => { const { [name]: _stale, ...rest } = current; return rest })
+    }
     setSaveErrors((current) => { const { [name]: _cleared, ...rest } = current; return rest })
     if (generation !== saveGeneration.current) {
       if (failure) setSaveErrors((current) => ({ ...current, [name]: failure }))
@@ -4774,12 +4825,14 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
     const nextNotifiers = { ...notifiers }
     delete nextNotifiers[name]
     const generation = saveGeneration.current
-    const failure = await savePatch({
+    const { persisted, message: failure } = await savePatch({
       notifiers: nextNotifiers,
       routes: routes.filter((route) => route.via !== name),
     })
-    testGeneration.current++
-    setTests((current) => { const { [name]: _removed, ...rest } = current; return rest })
+    if (persisted) {
+      invalidateTest(name)
+      setTests((current) => { const { [name]: _removed, ...rest } = current; return rest })
+    }
     setSaveErrors((current) => { const { [name]: _cleared, ...rest } = current; return rest })
     if (generation !== saveGeneration.current) {
       // The channel is still there — the remove was rejected — so its card can
@@ -4794,7 +4847,7 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
   // Dropping a route whose notifier is gone. It has no card of its own, so this
   // is the only way back to a hub that can turn lifecycle alerts on again.
   async function removeOrphanRoute(via: string) {
-    testGeneration.current++
+    invalidateTest(via)
     setTests((current) => { const { [via]: _removed, ...rest } = current; return rest })
     // The page-level banner reports a failure here: this save is not made from
     // the dialog, so nothing covers the banner.
@@ -4818,11 +4871,11 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
     // The hub bounds a test send at 30s, plenty of time for the operator to edit
     // the channel meanwhile. Landing the result afterwards would show a green
     // "sent" under a destination the message never reached.
-    const generation = testGeneration.current
+    const generation = testStamp(name)
     setTests((current) => ({ ...current, [name]: { status: "sending", message: "" } }))
     const settle = (state: TestState) => {
       setTests((current) => {
-        if (generation !== testGeneration.current) {
+        if (generation !== testStamp(name)) {
           const { [name]: _stale, ...rest } = current
           return rest
         }
@@ -4896,7 +4949,7 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
                   ? "Remove the routes pointing at deleted channels first"
                   : undefined
             }
-            onCheckedChange={(checked) => { testGeneration.current++; setTests({}); savePatch({ enabled: checked }) }}
+            onCheckedChange={(checked) => { testGenerationAll.current++; setTests({}); savePatch({ enabled: checked }) }}
             aria-label="Enable lifecycle alerts"
           />
         </div>
@@ -4919,7 +4972,7 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
                     // A muted category can change what (or whether) a channel
                     // receives anything, so every test result on the page is
                     // now about a configuration that no longer exists.
-                    testGeneration.current++
+                    testGenerationAll.current++
                     setTests({})
                     savePatch({ events: { ...categoryEnabled, [category.id]: checked } })
                   }}

@@ -2443,8 +2443,12 @@ func TestLifecycleBootBaselineHonoursTheRoutesLiveLatch(t *testing.T) {
 	insertSlackTestClaw(t, db, "claw-multi-route-era", "connected", 1, "", oldEnough)
 
 	s.initLifecycleNotifierBaseline()
-	if s.lifecycleSingleViaIncumbent("alerts-c") {
-		t.Fatal("a brand-new route was stamped as the legacy single-via incumbent at boot")
+	// Boot now materialises the route's own cursor as well, so the incumbent
+	// stamp alone no longer tells the two apart: what matters is that the route
+	// was not handed the legacy shared position (0) but the stream head.
+	wm, found, err := s.notifierStateInt64(lifecycleRouteWatermarkKey("alerts-c"))
+	if err != nil || !found || wm == 0 {
+		t.Fatalf("a brand-new route inherited the legacy incumbent's shared cursor at boot: %d, %v, %v", wm, found, err)
 	}
 
 	s.lifecycleNotifierTick()
@@ -2546,6 +2550,89 @@ func TestLifecycleRestrictedIncumbentKeepsItsBacklogWhenARouteIsAdded(t *testing
 		}
 		if status, ok := routeDeliveryStatus(t, db, id, "ops"); ok && status == notificationDeliveryStatusSent {
 			t.Fatalf("the newly added channel replayed the incumbent's backlog (%s)", id)
+		}
+	}
+}
+
+// Regression: at the via→routes migration tick a transient state-read failure
+// makes ensureLifecycleRouteWatermarks bail before it writes any per-route
+// cursor. lifecycleTaskRunPass then read the incumbent's absent per-route key,
+// mistook it for a first run and stamped it at the stream head, so everything
+// the incumbent had not yet delivered was skipped for good: ensure sees the
+// cursor as found on every later tick and never runs the inherit-the-shared-
+// cursor branch.
+func TestLifecycleMigrationStateFaultKeepsIncumbentBacklog(t *testing.T) {
+	fake := newFakeSlackServer(t)
+	s, db := newSlackNotifierRoutesTestServer(t, fake.server.URL, []types.LifecycleRoute{{Via: "slack"}})
+	setLifecycleClawBaseline(t, s)
+	setSlackWatermark(t, s, 0)
+	// The legacy single-`via` era: the tick stamps the incumbent's claw baseline
+	// and the route keeps reading the shared cursor.
+	s.lifecycleNotifierTick()
+	if !s.lifecycleSingleViaIncumbent("slack") {
+		t.Fatal("the legacy single-via route was never recorded as the incumbent")
+	}
+
+	// Its token secret breaks, so events pile up with no delivery row of any
+	// kind and the shared cursor freezes.
+	addSlackTestNotifier(s, "slack", "secret-that-does-not-exist", slackTestChannel)
+	insertLifecycleRouteEvent(t, db, "pending-0", taskRunEventAgentStarted)
+	s.lifecycleNotifierTick()
+	if wm, _ := slackWatermark(t, s); wm != 0 {
+		t.Fatalf("the incumbent's cursor advanced past an undelivered event: %d, want 0", wm)
+	}
+
+	// The operator repairs the secret and adds a second channel in the same
+	// save, but the migration tick hits an unreadable shared floor.
+	addSlackTestNotifier(s, "slack", testNotifierToken, slackTestChannel)
+	addSlackTestNotifier(s, "ops", testNotifierToken, "C0OPS")
+	setLifecycleRoutes(s, types.LifecycleRoute{Via: "slack"}, types.LifecycleRoute{Via: "ops"})
+	if _, err := db.Exec(`UPDATE slack_notifier_state SET value='boom' WHERE key=?`, lifecycleStateWatermarkKey); err != nil {
+		t.Fatalf("inject state read fault: %v", err)
+	}
+	s.lifecycleNotifierTick()
+	for _, via := range []string{"slack", "ops"} {
+		if _, found, err := s.notifierStateInt64(lifecycleRouteWatermarkKey(via)); err != nil || found {
+			t.Fatalf("route %q was given a cursor while the shared floor was unreadable: %v, %v", via, found, err)
+		}
+	}
+
+	// The contention clears; the next tick migrates properly.
+	setSlackWatermark(t, s, 0)
+	s.lifecycleNotifierTick()
+	s.lifecycleNotifierTick()
+	if status, ok := routeDeliveryStatus(t, db, "pending-0", "slack"); !ok || status != notificationDeliveryStatusSent {
+		t.Fatalf("the incumbent lost its pending backlog across the faulted migration tick: %q (%v)", status, ok)
+	}
+	if status, ok := routeDeliveryStatus(t, db, "pending-0", "ops"); ok && status == notificationDeliveryStatusSent {
+		t.Fatal("the newly added channel replayed the incumbent's backlog")
+	}
+}
+
+// Regression: a route added while the hub was down (a `via` migrated to routes
+// in hub.yaml) was baselined by the first poll tick instead of synchronously at
+// boot, so an event produced in the startup-to-first-tick window landed BELOW
+// the cursor the tick then stamped at the head — exactly the window
+// initLifecycleNotifierBaseline exists to close for the shared cursor.
+func TestLifecycleBootBaselineMaterialisesAddedRouteCursors(t *testing.T) {
+	fake := newFakeSlackServer(t)
+	s, db := newSlackNotifierRoutesTestServer(t, fake.server.URL,
+		[]types.LifecycleRoute{{Via: "slack"}, {Via: "ops"}})
+	// State from the single-`via` era: the incumbent's shared cursor and its
+	// claw stamp, with "ops" added to the config while the hub was down.
+	s.setNotifierStateInt64(lifecycleStateClawBaselineKey, 1)
+	s.setNotifierStateInt64(lifecycleClawRouteBaselineKey("slack"), 1)
+	setSlackWatermark(t, s, 0)
+
+	s.initLifecycleNotifierBaseline()
+
+	// An event produced by a producer that started right after the baseline,
+	// before the first poll tick.
+	insertLifecycleRouteEvent(t, db, "startup-window", taskRunEventAgentStarted)
+	s.lifecycleNotifierTick()
+	for _, via := range []string{"slack", "ops"} {
+		if status, ok := routeDeliveryStatus(t, db, "startup-window", via); !ok || status != notificationDeliveryStatusSent {
+			t.Fatalf("route %q missed the event produced in the startup window: %q (%v)", via, status, ok)
 		}
 	}
 }
