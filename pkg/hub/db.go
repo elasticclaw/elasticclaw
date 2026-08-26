@@ -328,6 +328,7 @@ func migrate(db *sql.DB) error {
 	_, _ = db.Exec(`ALTER TABLE task_run_prs ADD COLUMN ready_at INTEGER NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE task_run_summaries ADD COLUMN ready_at INTEGER NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE task_run_summaries ADD COLUMN stage_timeout_count INTEGER NOT NULL DEFAULT 0`)
+	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_claws_pipeline_stage_entered_at ON claws(pipeline_stage, pipeline_stage_entered_at)`)
 
 	_, _ = db.Exec(`CREATE TABLE IF NOT EXISTS claw_checkpoints (
 		id                    TEXT PRIMARY KEY,
@@ -645,7 +646,7 @@ func migrate(db *sql.DB) error {
 			'human_manual_code_push','human_tracker_update','human_dashboard_message',
 			'human_manual_stop_or_resume','human_settings_or_status_change',
 			'unknown_human_interaction','pr_replaced','correction','retraction','ci_succeeded','ci_failed','stage_timeout',
-			'signal_unanchored_nudged','signal_missed','signal_human_rescue','signal_advance_cause','signal_emission'
+			'signal_advance_cause','signal_emission'
 		)),
 		event_time         INTEGER NOT NULL,
 		observed_at        INTEGER NOT NULL,
@@ -1081,11 +1082,11 @@ func rebuildTaskRunSummariesStatusV3(db *sql.DB) error {
 		initial_attempt_id TEXT NOT NULL DEFAULT '', current_attempt_id TEXT NOT NULL DEFAULT '',
 		status TEXT NOT NULL CHECK(status IN ('running','clean','human_in_the_loop','warning','failed')),
 		phase TEXT NOT NULL CHECK(phase IN ('claimed','queued','provisioning','agent_running','pr_opened','waiting_for_merge','terminal')),
-		attempt_count INTEGER NOT NULL DEFAULT 0 CHECK(attempt_count >= 0), owner_type TEXT NOT NULL DEFAULT '', workspace_name TEXT NOT NULL DEFAULT '', workflow_name TEXT NOT NULL DEFAULT '', factory_name TEXT NOT NULL DEFAULT '', owner_id TEXT NOT NULL DEFAULT '', owner_display_name TEXT NOT NULL DEFAULT '', run_kind TEXT NOT NULL DEFAULT 'pr_task' CHECK(run_kind IN ('code_task','pr_task')), integration TEXT NOT NULL DEFAULT '', integration_workspace TEXT NOT NULL DEFAULT '', issue_id TEXT NOT NULL DEFAULT '', issue_title TEXT NOT NULL DEFAULT '', issue_created_at INTEGER NOT NULL DEFAULT 0, claw_id TEXT NOT NULL DEFAULT '', model TEXT NOT NULL DEFAULT '', input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0, total_tokens INTEGER NOT NULL DEFAULT 0, estimated_cost_usd REAL NOT NULL DEFAULT 0, usage_updated_at INTEGER NOT NULL DEFAULT 0, llm_key TEXT NOT NULL DEFAULT '', repo TEXT NOT NULL DEFAULT '', primary_pr_url TEXT NOT NULL DEFAULT '', pr_count INTEGER NOT NULL DEFAULT 0 CHECK(pr_count >= 0), open_pr_count INTEGER NOT NULL DEFAULT 0 CHECK(open_pr_count >= 0), merged_pr_count INTEGER NOT NULL DEFAULT 0 CHECK(merged_pr_count >= 0), closed_pr_count INTEGER NOT NULL DEFAULT 0 CHECK(closed_pr_count >= 0), warning_types TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(warning_types) AND json_type(warning_types) = 'array'), failure_type TEXT NOT NULL DEFAULT '' CHECK(failure_type IN ('','creation_failed','provision_failed','bootstrap_failed','agent_stopped','manual_stop_before_delivery','done_without_pr','no_pr','pr_closed_unmerged','timeout','provider_lost','permission_or_auth_failed','unknown')), human_interaction_count INTEGER NOT NULL DEFAULT 0 CHECK(human_interaction_count >= 0), started_at INTEGER NOT NULL, queued_at INTEGER NOT NULL DEFAULT 0, provision_started_at INTEGER NOT NULL DEFAULT 0, agent_started_at INTEGER NOT NULL DEFAULT 0, pr_opened_at INTEGER NOT NULL DEFAULT 0, ready_at INTEGER NOT NULL DEFAULT 0, merged_at INTEGER NOT NULL DEFAULT 0, finished_at INTEGER NOT NULL DEFAULT 0, timeout_at INTEGER NOT NULL DEFAULT 0, last_event_at INTEGER NOT NULL, materialized_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, analytics_enabled INTEGER NOT NULL DEFAULT 1 CHECK(analytics_enabled IN (0,1)), requires_pr INTEGER NOT NULL DEFAULT 1 CHECK(requires_pr IN (0,1)), excluded_reason TEXT NOT NULL DEFAULT '', UNIQUE(run_id), UNIQUE(tenant_id, run_id)
+		attempt_count INTEGER NOT NULL DEFAULT 0 CHECK(attempt_count >= 0), owner_type TEXT NOT NULL DEFAULT '', workspace_name TEXT NOT NULL DEFAULT '', workflow_name TEXT NOT NULL DEFAULT '', factory_name TEXT NOT NULL DEFAULT '', owner_id TEXT NOT NULL DEFAULT '', owner_display_name TEXT NOT NULL DEFAULT '', run_kind TEXT NOT NULL DEFAULT 'pr_task' CHECK(run_kind IN ('code_task','pr_task')), integration TEXT NOT NULL DEFAULT '', integration_workspace TEXT NOT NULL DEFAULT '', issue_id TEXT NOT NULL DEFAULT '', issue_title TEXT NOT NULL DEFAULT '', issue_created_at INTEGER NOT NULL DEFAULT 0, claw_id TEXT NOT NULL DEFAULT '', model TEXT NOT NULL DEFAULT '', input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0, total_tokens INTEGER NOT NULL DEFAULT 0, estimated_cost_usd REAL NOT NULL DEFAULT 0, usage_updated_at INTEGER NOT NULL DEFAULT 0, llm_key TEXT NOT NULL DEFAULT '', repo TEXT NOT NULL DEFAULT '', primary_pr_url TEXT NOT NULL DEFAULT '', pr_count INTEGER NOT NULL DEFAULT 0 CHECK(pr_count >= 0), open_pr_count INTEGER NOT NULL DEFAULT 0 CHECK(open_pr_count >= 0), merged_pr_count INTEGER NOT NULL DEFAULT 0 CHECK(merged_pr_count >= 0), closed_pr_count INTEGER NOT NULL DEFAULT 0 CHECK(closed_pr_count >= 0), warning_types TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(warning_types) AND json_type(warning_types) = 'array'), failure_type TEXT NOT NULL DEFAULT '' CHECK(failure_type IN ('','creation_failed','provision_failed','bootstrap_failed','agent_stopped','manual_stop_before_delivery','done_without_pr','no_pr','pr_closed_unmerged','timeout','provider_lost','permission_or_auth_failed','unknown')), human_interaction_count INTEGER NOT NULL DEFAULT 0 CHECK(human_interaction_count >= 0), started_at INTEGER NOT NULL, queued_at INTEGER NOT NULL DEFAULT 0, stage_timeout_count INTEGER NOT NULL DEFAULT 0, provision_started_at INTEGER NOT NULL DEFAULT 0, agent_started_at INTEGER NOT NULL DEFAULT 0, pr_opened_at INTEGER NOT NULL DEFAULT 0, ready_at INTEGER NOT NULL DEFAULT 0, merged_at INTEGER NOT NULL DEFAULT 0, finished_at INTEGER NOT NULL DEFAULT 0, timeout_at INTEGER NOT NULL DEFAULT 0, last_event_at INTEGER NOT NULL, materialized_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, analytics_enabled INTEGER NOT NULL DEFAULT 1 CHECK(analytics_enabled IN (0,1)), requires_pr INTEGER NOT NULL DEFAULT 1 CHECK(requires_pr IN (0,1)), excluded_reason TEXT NOT NULL DEFAULT '', UNIQUE(run_id), UNIQUE(tenant_id, run_id)
 	)`); err != nil {
 		return fmt.Errorf("create task run summaries v3: %w", err)
 	}
-	if _, err := tx.Exec(`INSERT INTO task_run_summaries_new SELECT id, tenant_id, run_id, initial_attempt_id, current_attempt_id, CASE status WHEN 'clean_success' THEN 'clean' WHEN 'warning_success' THEN 'warning' ELSE status END, phase, attempt_count, owner_type, workspace_name, workflow_name, factory_name, owner_id, owner_display_name, run_kind, integration, integration_workspace, issue_id, issue_title, issue_created_at, claw_id, model, input_tokens, output_tokens, total_tokens, estimated_cost_usd, usage_updated_at, llm_key, repo, primary_pr_url, pr_count, open_pr_count, merged_pr_count, closed_pr_count, warning_types, failure_type, human_interaction_count, started_at, queued_at, provision_started_at, agent_started_at, pr_opened_at, ready_at, merged_at, finished_at, timeout_at, last_event_at, materialized_at, updated_at, analytics_enabled, requires_pr, excluded_reason FROM task_run_summaries`); err != nil {
+	if _, err := tx.Exec(`INSERT INTO task_run_summaries_new SELECT id, tenant_id, run_id, initial_attempt_id, current_attempt_id, CASE status WHEN 'clean_success' THEN 'clean' WHEN 'warning_success' THEN 'warning' ELSE status END, phase, attempt_count, owner_type, workspace_name, workflow_name, factory_name, owner_id, owner_display_name, run_kind, integration, integration_workspace, issue_id, issue_title, issue_created_at, claw_id, model, input_tokens, output_tokens, total_tokens, estimated_cost_usd, usage_updated_at, llm_key, repo, primary_pr_url, pr_count, open_pr_count, merged_pr_count, closed_pr_count, warning_types, failure_type, human_interaction_count, started_at, queued_at, stage_timeout_count, provision_started_at, agent_started_at, pr_opened_at, ready_at, merged_at, finished_at, timeout_at, last_event_at, materialized_at, updated_at, analytics_enabled, requires_pr, excluded_reason FROM task_run_summaries`); err != nil {
 		return fmt.Errorf("copy task run summaries v3: %w", err)
 	}
 	if _, err := tx.Exec(`DROP TABLE task_run_summaries; ALTER TABLE task_run_summaries_new RENAME TO task_run_summaries;
@@ -1199,8 +1200,7 @@ func rebuildTaskRunEventsAgentIdleV1(db *sql.DB) error {
 
 // rebuildTaskRunEventsSignalContractV1 widens the task_run_events.event_type
 // CHECK to allow the signal-contract measurement event types (item 3 of the
-// wall-clock remediation plan: signal_unanchored_nudged, signal_missed,
-// signal_human_rescue). Same rebuild-and-copy treatment as
+// wall-clock remediation plan: signal_advance_cause, signal_emission). Same rebuild-and-copy treatment as
 // rebuildTaskRunEventsAgentIdleV1, since SQLite cannot alter a CHECK in
 // place. Fresh databases are created with these types already in the CHECK
 // and skip this entirely via the schema probe.
@@ -1212,7 +1212,7 @@ func rebuildTaskRunEventsSignalContractV1(db *sql.DB) error {
 		}
 		return fmt.Errorf("read task run events schema: %w", err)
 	}
-	if strings.Contains(schema, "'signal_human_rescue'") {
+	if strings.Contains(schema, "'signal_advance_cause'") && !strings.Contains(schema, "'signal_human_rescue'") {
 		return nil
 	}
 	tx, err := db.Begin()
@@ -1238,7 +1238,7 @@ func rebuildTaskRunEventsSignalContractV1(db *sql.DB) error {
 			'human_manual_code_push','human_tracker_update','human_dashboard_message',
 			'human_manual_stop_or_resume','human_settings_or_status_change',
 			'unknown_human_interaction','pr_replaced','correction','retraction','ci_succeeded','ci_failed','stage_timeout',
-			'signal_unanchored_nudged','signal_missed','signal_human_rescue','signal_advance_cause','signal_emission'
+			'signal_advance_cause','signal_emission'
 		)),
 		event_time         INTEGER NOT NULL,
 		observed_at        INTEGER NOT NULL,

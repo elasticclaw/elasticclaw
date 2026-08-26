@@ -3,6 +3,7 @@ package hub
 import (
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -10,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/elasticclaw/elasticclaw/pkg/hub/pipeline"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 )
 
@@ -417,6 +419,120 @@ stages:
 		s.reapOnce()
 		if got := stage(t, db); got != "work" {
 			t.Fatalf("stage = %q, want work", got)
+		}
+	})
+	t.Run("claim commits disposition atomically before on_enter", func(t *testing.T) {
+		s, db := newServer(t, -11*time.Minute, nil)
+		n := s.reaperNow().UnixMilli()
+		if _, err := db.Exec(`INSERT INTO task_runs(id,tenant_id,initial_attempt_id,current_attempt_id,run_kind,owner_type,claw_id,created_at,updated_at) VALUES('run-timeout','tenant','attempt-timeout','attempt-timeout','code_task','factory','timeout01',?,?)`, n, n); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(`UPDATE claws SET task_run_id='run-timeout' WHERE id='timeout01'`); err != nil {
+			t.Fatal(err)
+		}
+		if !s.claimPipelineStageTimeout("timeout01", "work", "timed_out", 10*time.Minute) {
+			t.Fatal("claimPipelineStageTimeout returned false")
+		}
+		if got := stage(t, db); got != "timed_out" {
+			t.Fatalf("stage=%q, want timed_out", got)
+		}
+		var events, count int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM task_run_events WHERE run_id='run-timeout' AND event_type=?`, taskRunEventStageTimeout).Scan(&events); err != nil {
+			t.Fatal(err)
+		}
+		if err := db.QueryRow(`SELECT stage_timeout_count FROM task_run_summaries WHERE run_id='run-timeout'`).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		if events != 1 || count != 1 {
+			t.Fatalf("events=%d count=%d, want 1/1", events, count)
+		}
+	})
+	t.Run("claim rolls back when no task run can receive disposition", func(t *testing.T) {
+		s, db := newServer(t, -11*time.Minute, nil)
+		if s.claimPipelineStageTimeout("timeout01", "work", "timed_out", 10*time.Minute) {
+			t.Fatal("claim succeeded without a task run")
+		}
+		if got := stage(t, db); got != "work" {
+			t.Fatalf("stage=%q, want rollback to work", got)
+		}
+	})
+	t.Run("timeout records absent signal contract", func(t *testing.T) {
+		s, db := newServer(t, -11*time.Minute, nil)
+		n := s.reaperNow().UnixMilli()
+		if _, err := db.Exec(`INSERT INTO task_runs(id,tenant_id,initial_attempt_id,current_attempt_id,run_kind,owner_type,claw_id,created_at,updated_at) VALUES('run-timeout','tenant','attempt-timeout','attempt-timeout','code_task','factory','timeout01',?,?)`, n, n); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(`UPDATE claws SET task_run_id='run-timeout' WHERE id='timeout01'`); err != nil {
+			t.Fatal(err)
+		}
+		s.reapOnce()
+		waitForStage(t, db, "timed_out")
+		for _, eventType := range []string{taskRunEventSignalAdvanceCause, taskRunEventSignalEmission} {
+			var raw string
+			if err := db.QueryRow(`SELECT detail FROM task_run_events WHERE run_id='run-timeout' AND event_type=?`, eventType).Scan(&raw); err != nil {
+				t.Fatalf("%s: %v", eventType, err)
+			}
+			var detail map[string]any
+			if err := json.Unmarshal([]byte(raw), &detail); err != nil {
+				t.Fatal(err)
+			}
+			if eventType == taskRunEventSignalEmission && detail["emission"] != "absent" {
+				t.Fatalf("emission=%v, want absent", detail["emission"])
+			}
+		}
+	})
+}
+
+func TestReaperPipelineStageTimeoutClampsAndCachesParsedPipelines(t *testing.T) {
+	const pipelineYAML = "stages:\n  - id: work\n    triggers:\n      - stage_timeout:\n          after: 10m\n          go_to: timed_out\n  - id: timed_out\n"
+	newServer := func(t *testing.T, enteredAt time.Duration) (*Server, *sql.DB) {
+		t.Helper()
+		s, db := newReaperTestServer(t, &types.HubConfig{Factories: []*types.FactoryConfig{{Name: "factory", Integration: "linear", Workspace: "workspace", PipelineYAML: pipelineYAML}}})
+		n := time.Now().UTC()
+		s.nowFunc = func() time.Time { return n }
+		for i := 0; i < 5; i++ {
+			if _, err := db.Exec(`INSERT INTO claws(id,tenant_id,name,status,pipeline_stage,pipeline_stage_entered_at,tags,created_at) VALUES(?,?,?,?,?,?,?,?)`, fmt.Sprintf("timeout-%d", i), "tenant", "timeout", "connected", "work", n.Add(enteredAt).UnixMilli(), `["factory:factory"]`, n); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return s, db
+	}
+	t.Run("min and max clamp effective timeout", func(t *testing.T) {
+		s, db := newServer(t, -2*time.Minute)
+		n := s.reaperNow().UnixMilli()
+		if _, err := db.Exec(`INSERT INTO task_runs(id,tenant_id,initial_attempt_id,current_attempt_id,run_kind,owner_type,claw_id,created_at,updated_at) VALUES('run-clamp','tenant','attempt-clamp','attempt-clamp','code_task','factory','timeout-0',?,?)`, n, n); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(`UPDATE claws SET task_run_id='run-clamp' WHERE id='timeout-0'`); err != nil {
+			t.Fatal(err)
+		}
+		s.reapPipelineStageTimeouts(s.reaperNow(), func() bool { return true }, map[string]bool{}, 5*time.Minute, 0)
+		time.Sleep(50 * time.Millisecond)
+		var stage string
+		if err := db.QueryRow(`SELECT pipeline_stage FROM claws WHERE id='timeout-0'`).Scan(&stage); err != nil {
+			t.Fatal(err)
+		}
+		if stage != "work" {
+			t.Fatalf("min clamp stage=%q, want work", stage)
+		}
+		s.reapPipelineStageTimeouts(s.reaperNow(), func() bool { return true }, map[string]bool{}, 0, time.Minute)
+		deadline := time.Now().Add(time.Second)
+		for time.Now().Before(deadline) {
+			_ = db.QueryRow(`SELECT pipeline_stage FROM claws WHERE id='timeout-0'`).Scan(&stage)
+			if stage == "timed_out" {
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		t.Fatalf("max clamp did not fire; stage=%q", stage)
+	})
+	t.Run("parses shared YAML once per tick", func(t *testing.T) {
+		s, _ := newServer(t, -2*time.Minute)
+		parses := 0
+		s.reaperPipelineParse = func(ctx pipelineContext) *pipeline.Pipeline { parses++; return parsePipelineForContext(ctx) }
+		s.reapPipelineStageTimeouts(s.reaperNow(), func() bool { return true }, map[string]bool{}, 5*time.Minute, 0)
+		if parses != 1 {
+			t.Fatalf("pipeline parses=%d, want 1 for five shared definitions", parses)
 		}
 	})
 }

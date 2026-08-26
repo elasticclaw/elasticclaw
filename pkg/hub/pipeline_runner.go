@@ -143,22 +143,9 @@ func (s *Server) nudgeUnanchoredSignal(clawID, message string) {
 // — no nudge, no inject, no signal-matching logic here is new or altered.
 //
 // It looks back over the messages sent while the claw dwelled in
-// sourceStageID and classifies the exit into one of three mutually exclusive
-// buckets, or none at all if the stage simply advanced on its own:
-//
-//   - signal_unanchored_nudged: the hub's existing nudgeUnanchoredSignal text
-//     for one of this claw's known tokens appears in the window. The nudge
-//     mechanism (case a) did its job.
-//   - signal_human_rescue: no nudge was recorded, but a real dashboard user
-//     (role='user' with a user_login, as opposed to the hub's own
-//     injectUserMessage which leaves user_login NULL) sent a chat message in
-//     the window. A person, not the pipeline, is what moved this stage.
-//   - signal_missed: neither of the above, but a known signal token was
-//     never mentioned anywhere in the window (anchored, unanchored, or
-//     nudged) even though the stage did eventually advance — the case a
-//     human eyeballing the dashboard and manually pushing the workflow along
-//     (e.g. "open the PR"), or output_matches picking it up with the agent
-//     never having typed the token at all.
+// sourceStageID and records two independent dimensions. Cause is hub_nag when
+// a hub nudge appears, human_message for a dashboard user message, or self;
+// emission is anchored, unanchored, or absent based on claw output.
 //
 // If sourceStageEnteredAt is zero (no timestamp available, e.g. immediately
 // after upgrading past item 2's migration) this records nothing rather than
@@ -1970,7 +1957,7 @@ func (s *Server) transitionPipelineStageWithContextKind(clawID string, stage pip
 // in expectedStage. This protects reaper-driven transitions from stale timers.
 func (s *Server) transitionPipelineStageFromWithContext(clawID string, stage pipeline.Stage, expectedStage string, ctx pipelineContext) bool {
 	stage = s.resolvePipelineStageSkips(clawID, stage, ctx)
-	transitioned, _ := s.transitionResolvedPipelineStageWithContextFromKind(clawID, stage, expectedStage, ctx, false)
+	transitioned, _ := s.transitionResolvedPipelineStageWithContextFromKind(clawID, stage, expectedStage, ctx, true)
 	return transitioned
 }
 
@@ -1982,16 +1969,16 @@ func (s *Server) transitionResolvedPipelineStageWithContextFrom(clawID string, s
 	return s.transitionResolvedPipelineStageWithContextFromKind(clawID, stage, expectedStage, ctx, false)
 }
 
-func (s *Server) transitionResolvedPipelineStageWithContextFromKind(clawID string, stage pipeline.Stage, expectedStage string, ctx pipelineContext, signalDriven bool) (transitioned, injectDelivered bool) {
+func (s *Server) transitionResolvedPipelineStageWithContextFromKind(clawID string, stage pipeline.Stage, expectedStage string, ctx pipelineContext, signalDriven bool, claimedAlready ...bool) (transitioned, injectDelivered bool) {
 	// Snapshot the stage being left BEFORE claiming the new one: the claim
 	// overwrites pipeline_stage_entered_at, and the signal-contract
 	// classification below needs the dwell window of the departing stage.
 	sourceStageID := s.getPipelineStage(clawID)
 	sourceStageEnteredAt := s.getPipelineStageEnteredAt(clawID)
-	claimed := false
-	if expectedStage != "" {
+	claimed := len(claimedAlready) > 0 && claimedAlready[0]
+	if !claimed && expectedStage != "" {
 		claimed = s.claimPipelineStageTransition(clawID, stage.ID, expectedStage)
-	} else {
+	} else if !claimed {
 		claimed = s.claimPipelineStageTransition(clawID, stage.ID)
 	}
 	if !claimed {

@@ -55,9 +55,23 @@ func TestRebuildTaskRunSummariesStatusV3MigratesOldSchema(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	// migrate() adds this column before rebuilding a clean_success-era table.
+	if _, err := db.Exec(`ALTER TABLE task_run_summaries ADD COLUMN stage_timeout_count INTEGER NOT NULL DEFAULT 0`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE task_run_summaries SET stage_timeout_count=7 WHERE run_id='run-clean_success'`); err != nil {
+		t.Fatal(err)
+	}
 
 	if err := rebuildTaskRunSummariesStatusV3(db); err != nil {
 		t.Fatalf("rebuild: %v", err)
+	}
+	var timeoutCount int
+	if err := db.QueryRow(`SELECT stage_timeout_count FROM task_run_summaries WHERE run_id='run-clean_success'`).Scan(&timeoutCount); err != nil || timeoutCount != 7 {
+		t.Fatalf("stage_timeout_count=%d err=%v, want 7", timeoutCount, err)
+	}
+	if _, err := db.Exec(`UPDATE task_run_summaries SET stage_timeout_count=stage_timeout_count+1 WHERE run_id='run-clean_success'`); err != nil {
+		t.Fatalf("reaper timeout increment: %v", err)
 	}
 	var schema string
 	if err := db.QueryRow(`SELECT sql FROM sqlite_master WHERE type='table' AND name='task_run_summaries'`).Scan(&schema); err != nil {

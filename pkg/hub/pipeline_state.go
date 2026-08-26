@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"database/sql"
 	"log"
 	"time"
 )
@@ -27,13 +28,21 @@ func (s *Server) getPipelineStageEnteredAt(clawID string) time.Time {
 // claw is not already in that stage. It returns true when the caller won the
 // transition and should run on_enter actions.
 func (s *Server) claimPipelineStageTransition(clawID, stageID string, expectedStage ...string) bool {
+	return s.claimPipelineStageTransitionTx(s.db, clawID, stageID, expectedStage...)
+}
+
+type pipelineStageExecer interface {
+	Exec(query string, args ...any) (sql.Result, error)
+}
+
+func (s *Server) claimPipelineStageTransitionTx(db pipelineStageExecer, clawID, stageID string, expectedStage ...string) bool {
 	query := `UPDATE claws SET pipeline_stage=?, pipeline_stage_entered_at=? WHERE id=? AND pipeline_stage<>?`
 	args := []any{stageID, epochMillis(now()), clawID, stageID}
 	if len(expectedStage) > 0 {
 		query += ` AND pipeline_stage=?`
 		args = append(args, expectedStage[0])
 	}
-	res, err := s.db.Exec(query, args...)
+	res, err := db.Exec(query, args...)
 	if err != nil {
 		log.Printf("[pipeline] failed to set stage %q for claw %s: %v", stageID, clawID[:8], err)
 		return false

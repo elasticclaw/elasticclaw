@@ -8,6 +8,20 @@ import (
 	"time"
 )
 
+func TestTaskRunEventsRejectsRemovedSignalMissedEventType(t *testing.T) {
+	db, err := openDB(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`INSERT INTO task_runs(id,tenant_id,initial_attempt_id,current_attempt_id,run_kind,owner_type,created_at,updated_at) VALUES('run-check','tenant','attempt','attempt','code_task','factory',1,1)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO task_run_events(id,tenant_id,run_id,event_key,event_type,event_time,observed_at,created_at) VALUES('event-check','tenant','run-check','signal-missed','signal_missed',1,1,1)`); err == nil {
+		t.Fatal("signal_missed insert succeeded; expected CHECK constraint rejection")
+	}
+}
+
 func TestOpenDBSetsBusyTimeout(t *testing.T) {
 	db, err := openDB(filepath.Join(t.TempDir(), "hub.db"))
 	if err != nil {

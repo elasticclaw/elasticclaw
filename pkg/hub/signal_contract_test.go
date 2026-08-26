@@ -2,6 +2,7 @@ package hub
 
 import (
 	"database/sql"
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -33,6 +34,29 @@ func newSignalContractTestServer(t *testing.T, clawID string, enteredAt time.Tim
 		t.Fatalf("attach task run: %v", err)
 	}
 	return s, db
+}
+
+func signalContractDetail(t *testing.T, db *sql.DB, eventType string) map[string]any {
+	t.Helper()
+	var raw string
+	if err := db.QueryRow(`SELECT detail FROM task_run_events WHERE run_id='run-1' AND event_type=?`, eventType).Scan(&raw); err != nil {
+		t.Fatal(err)
+	}
+	var detail map[string]any
+	if err := json.Unmarshal([]byte(raw), &detail); err != nil {
+		t.Fatal(err)
+	}
+	return detail
+}
+
+func assertSignalContract(t *testing.T, db *sql.DB, cause, emission string) {
+	t.Helper()
+	if got := signalContractDetail(t, db, taskRunEventSignalAdvanceCause)["cause"]; got != cause {
+		t.Fatalf("cause=%q, want %q", got, cause)
+	}
+	if got := signalContractDetail(t, db, taskRunEventSignalEmission)["emission"]; got != emission {
+		t.Fatalf("emission=%q, want %q", got, emission)
+	}
 }
 
 func insertSignalContractMessage(t *testing.T, db *sql.DB, clawID, role, content, userLogin string, createdAt time.Time) {
@@ -85,6 +109,7 @@ func TestRecordStageSignalContractOutcome(t *testing.T) {
 		if len(got) != 2 || got[0] != taskRunEventSignalAdvanceCause || got[1] != taskRunEventSignalEmission {
 			t.Fatalf("events = %v, want cause and emission", got)
 		}
+		assertSignalContract(t, db, "hub_nag", "anchored")
 	})
 
 	t.Run("human dashboard message resolved it: signal_human_rescue", func(t *testing.T) {
@@ -100,6 +125,7 @@ func TestRecordStageSignalContractOutcome(t *testing.T) {
 		if len(got) != 2 || got[0] != taskRunEventSignalAdvanceCause || got[1] != taskRunEventSignalEmission {
 			t.Fatalf("events = %v, want cause and emission", got)
 		}
+		assertSignalContract(t, db, "human_message", "absent")
 	})
 
 	t.Run("token never emitted at all: signal_missed", func(t *testing.T) {
@@ -114,6 +140,7 @@ func TestRecordStageSignalContractOutcome(t *testing.T) {
 		if len(got) != 2 {
 			t.Fatalf("events = %v, want two dimensions", got)
 		}
+		assertSignalContract(t, db, "self", "absent")
 	})
 
 	t.Run("system-injected user message does not count as a human rescue", func(t *testing.T) {
@@ -131,6 +158,7 @@ func TestRecordStageSignalContractOutcome(t *testing.T) {
 		if len(got) != 2 {
 			t.Fatalf("events = %v, want two dimensions", got)
 		}
+		assertSignalContract(t, db, "self", "absent")
 	})
 
 	t.Run("clean anchored signal with no intervention: nothing recorded", func(t *testing.T) {
@@ -145,6 +173,7 @@ func TestRecordStageSignalContractOutcome(t *testing.T) {
 		if len(got) != 2 {
 			t.Fatalf("events = %v, want two dimensions", got)
 		}
+		assertSignalContract(t, db, "self", "anchored")
 	})
 
 	t.Run("zero entered-at records nothing", func(t *testing.T) {

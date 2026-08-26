@@ -701,7 +701,7 @@ func (s *Server) readTaskRunAnalyticsSummary(filters taskRunAnalyticsFilters) (t
 		// alone rather than a join — a join would make every unqualified
 		// column in `where` ambiguous.
 		queryArgs := append([]any{measure.eventType}, args...)
-		rows, err := s.db.Query(`SELECT json_extract(detail, '$.`+field+`'), COUNT(*) FROM task_run_events WHERE event_type=? AND run_id IN (SELECT run_id FROM task_run_summaries `+where+`) GROUP BY 1`, queryArgs...)
+		rows, err := s.db.Query(`SELECT COALESCE(json_extract(detail, '$.`+field+`'), ''), COUNT(*) FROM task_run_events WHERE event_type=? AND run_id IN (SELECT run_id FROM task_run_summaries `+where+`) GROUP BY 1`, queryArgs...)
 		if err != nil {
 			return response, err
 		}

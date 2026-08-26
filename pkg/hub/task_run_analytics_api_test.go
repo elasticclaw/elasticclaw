@@ -47,6 +47,44 @@ func TestSplitTaskRunAnalyticsValuesDecodesClientEscapedValues(t *testing.T) {
 	}
 }
 
+func TestTaskRunAnalyticsSummarySignalContractAndStageTimeoutCounts(t *testing.T) {
+	s, db := newTaskRunAnalyticsAPITestServer(t)
+	fixture := apiRunFixture{RunID: "signals", AttemptID: "attempt-signals", ClawID: "claw-signals", TenantID: "test-tenant-id", OwnerType: taskRunOwnerFactory, StartedAt: 1760000000000}
+	insertTaskRunAnalyticsAPIRun(t, db, fixture)
+	if _, err := db.Exec(`UPDATE task_run_summaries SET stage_timeout_count=3 WHERE run_id='signals'`); err != nil {
+		t.Fatal(err)
+	}
+	for i, event := range []struct{ typ, detail string }{
+		{taskRunEventSignalAdvanceCause, `{"cause":"self"}`}, {taskRunEventSignalAdvanceCause, `{"cause":"hub_nag"}`},
+		{taskRunEventSignalEmission, `{"emission":"absent"}`}, {taskRunEventSignalEmission, `{"emission":"absent"}`}, {taskRunEventSignalEmission, `{}`},
+	} {
+		if _, err := db.Exec(`INSERT INTO task_run_events(id,tenant_id,run_id,event_key,source,event_type,event_time,observed_at,detail,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)`, fmt.Sprintf("signal-%d", i), "test-tenant-id", "signals", fmt.Sprintf("signal-key-%d", i), taskRunSourceHub, event.typ, fixture.StartedAt+int64(i), fixture.StartedAt+int64(i), event.detail, fixture.StartedAt+int64(i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	summary, err := s.readTaskRunAnalyticsSummary(taskRunAnalyticsFilters{TenantID: "test-tenant-id"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.SignalAdvanceCause["self"] != 1 || summary.SignalAdvanceCause["hub_nag"] != 1 {
+		t.Fatalf("cause counts=%v", summary.SignalAdvanceCause)
+	}
+	if summary.SignalEmission["absent"] != 2 || summary.SignalEmission[""] != 1 {
+		t.Fatalf("emission counts=%v", summary.SignalEmission)
+	}
+	runs, _, err := s.readTaskRunAnalyticsRuns(taskRunAnalyticsFilters{TenantID: "test-tenant-id"}, 10, 0, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runs) != 1 || runs[0].StageTimeoutCount != 3 {
+		t.Fatalf("runs=%+v, want stageTimeoutCount=3", runs)
+	}
+	empty, err := s.readTaskRunAnalyticsSummary(taskRunAnalyticsFilters{TenantID: "test-tenant-id", Repo: []string{"no-such-repo"}})
+	if err != nil || len(empty.SignalAdvanceCause) != 0 || len(empty.SignalEmission) != 0 {
+		t.Fatalf("empty summary=%+v err=%v", empty, err)
+	}
+}
+
 func TestSplitTaskRunAnalyticsValuesPreservesLiteralPlus(t *testing.T) {
 	request, err := http.NewRequest(http.MethodGet, "/api/analytics?model=build%2Btest", nil)
 	if err != nil {

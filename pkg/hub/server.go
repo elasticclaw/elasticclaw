@@ -166,8 +166,11 @@ type Server struct {
 
 	// Reaper state is deliberately in-memory: its conservative timers reset on
 	// a hub restart rather than treating an uncertain outage as an agent failure.
-	reaperMu            sync.Mutex
-	reaperFirstSeen     map[string]time.Time
+	reaperMu        sync.Mutex
+	reaperFirstSeen map[string]time.Time
+	// reaperPipelineParse is a test seam for the per-tick pipeline cache. A
+	// nil value uses parsePipelineForContext.
+	reaperPipelineParse func(pipelineContext) *pipeline.Pipeline
 	nowFunc             func() time.Time
 	terminateVMOverride func(provider, id string) error // test seam for terminal cleanup
 
