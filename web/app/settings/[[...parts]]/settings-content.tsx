@@ -4970,7 +4970,15 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
                   ? "Remove the routes pointing at deleted channels first"
                   : undefined
             }
-            onCheckedChange={(checked) => { testGenerationAll.current++; setTests({}); savePatch({ enabled: checked }) }}
+            // Invalidated only once the hub has taken the change, exactly as
+            // saveChannel/removeChannel do it: a rejected save leaves every
+            // card's result describing the configuration it was sent under, and
+            // wiping it here would destroy a real diagnosis (a
+            // channel_not_found banner) with nothing to replace it.
+            onCheckedChange={async (checked) => {
+              const { persisted } = await savePatch({ enabled: checked })
+              if (persisted) { testGenerationAll.current++; setTests({}) }
+            }}
             aria-label="Enable lifecycle alerts"
           />
         </div>
@@ -4989,13 +4997,18 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
                   className="mt-0.5"
                   checked={categoryEnabled[category.id]}
                   disabled={saving || !enabled}
-                  onCheckedChange={(checked) => {
+                  onCheckedChange={async (checked) => {
                     // A muted category can change what (or whether) a channel
                     // receives anything, so every test result on the page is
-                    // now about a configuration that no longer exists.
-                    testGenerationAll.current++
-                    setTests({})
-                    savePatch({ events: { ...categoryEnabled, [category.id]: checked } })
+                    // now about a configuration that no longer exists — but
+                    // only once the hub has actually taken the change. A
+                    // rejected save changed nothing, and clearing the results
+                    // anyway would erase a live failure diagnosis.
+                    const { persisted } = await savePatch({ events: { ...categoryEnabled, [category.id]: checked } })
+                    if (persisted) {
+                      testGenerationAll.current++
+                      setTests({})
+                    }
                   }}
                   aria-label={`Toggle ${category.label} alerts`}
                 />

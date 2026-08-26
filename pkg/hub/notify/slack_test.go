@@ -916,3 +916,28 @@ func TestSlackRenderPayloadMatchesSend(t *testing.T) {
 		t.Fatalf("dry-run payload differs from what Send posted:\n dry run: %s\n sent:    %s", rendered, sent)
 	}
 }
+
+// Every send addresses api_base with the bot token in an Authorization header,
+// so a value that is not a plain absolute http(s) URL is refused at
+// construction — where the settings PATCH reports it — instead of failing
+// silently on every send.
+func TestSlackRejectsMalformedAPIBase(t *testing.T) {
+	for _, apiBase := range []string{
+		"slack.example.com/api",
+		"ftp://slack.com/api",
+		"https://user:pass@slack.com/api",
+		"https://slack.com/api?token=leak",
+		"https:///api",
+	} {
+		cfg := map[string]any{"token_secret": "slack_bot_token", "channel": "C123", "api_base": apiBase}
+		if _, err := New("slack", cfg, testSecrets); err == nil {
+			t.Fatalf("New(slack) with api_base %q = nil error, want a rejection", apiBase)
+		}
+	}
+	// A trailing slash is a formatting difference, not a bad value.
+	if _, err := New("slack", map[string]any{
+		"token_secret": "slack_bot_token", "channel": "C123", "api_base": "https://slack.com/api/",
+	}, testSecrets); err != nil {
+		t.Fatalf("New(slack) with a trailing slash = %v, want it accepted", err)
+	}
+}

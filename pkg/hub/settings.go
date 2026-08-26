@@ -6,9 +6,11 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 
 	"github.com/elasticclaw/elasticclaw/pkg/cliversion"
 	"github.com/elasticclaw/elasticclaw/pkg/config"
@@ -787,6 +789,12 @@ func validateSettingsNotifications(current, cfg *types.NotificationsConfig) erro
 		return err
 	}
 	for name, notifier := range cfg.Notifiers {
+		// Checked before the unchanged short-circuit and against the stored
+		// value key by key, so editing a notifier that already carries an
+		// api_base stays possible while introducing or changing one does not.
+		if err := validateNotifierAPIBase(current, name, notifier); err != nil {
+			return err
+		}
 		if notifierUnchanged(current, name, notifier) {
 			continue
 		}
@@ -802,6 +810,69 @@ func validateSettingsNotifications(current, cfg *types.NotificationsConfig) erro
 		}
 	}
 	return nil
+}
+
+// validateNotifierAPIBase refuses an api_base the patch introduces or changes
+// unless it addresses Slack over https. api_base decides where the notifier's
+// bot token is sent: a patch that keeps token_secret and repoints api_base at
+// an attacker-controlled host turns the next test send into token
+// exfiltration (and every send into an SSRF probe from the hub). The stored
+// value is exempt — an operator who wrote an internal Slack proxy into
+// hub.yaml keeps it, and the settings screen, which round-trips api_base
+// without rendering it, keeps saving — because hub.yaml is the operator's own
+// file while this handler is remote input. Repointing a live notifier is
+// therefore a hub.yaml edit, not an API call.
+func validateNotifierAPIBase(current *types.NotificationsConfig, name string, patched types.NotifierConfig) error {
+	apiBase := strings.TrimSpace(notifierSettingString(patched, "api_base"))
+	if apiBase == "" {
+		return nil
+	}
+	if current != nil {
+		if existing, ok := current.Notifiers[name]; ok && strings.TrimSpace(notifierSettingString(existing, "api_base")) == apiBase {
+			return nil
+		}
+	}
+	u, err := url.Parse(apiBase)
+	if err != nil {
+		return fmt.Errorf("notifications.notifiers.%s: api_base %q is not a valid URL", name, apiBase)
+	}
+	host := strings.ToLower(u.Hostname())
+	if u.Scheme != "https" || (host != "slack.com" && !strings.HasSuffix(host, ".slack.com")) {
+		return fmt.Errorf("notifications.notifiers.%s: api_base %q must be an https URL on slack.com — the notifier's bot token is sent to this host, so it cannot be repointed through the settings API", name, apiBase)
+	}
+	return nil
+}
+
+// dropRejectedLifecycleDurations clears a lifecycle poll_interval or
+// idle_after that the patch re-sends unchanged from the stored config and that
+// validation would reject anyway. Both are validated on every patch, floors
+// included and regardless of `enabled`, while the settings screen rebuilds the
+// whole notifications block from a view that renders neither field: a hub.yaml
+// holding "idle_after: 30s" would otherwise 400 every save made from that
+// screen — the master switch, a category toggle, adding a channel — on a value
+// the screen can neither show nor clear, leaving a hand edit of hub.yaml as the
+// only way out. The offender is dropped rather than preserved because it is
+// already inert: lifecycleNotifierTick refuses to run while the config fails
+// validation, so keeping it would trade an unusable screen for a healthy-
+// looking screen that still delivers nothing. A value the patch itself
+// introduces or edits is left alone and still fails the save.
+func dropRejectedLifecycleDurations(current, patch *types.NotificationsConfig) {
+	if patch == nil || patch.Lifecycle == nil || current == nil || current.Lifecycle == nil {
+		return
+	}
+	stored, lc := current.Lifecycle, patch.Lifecycle
+	if lc.PollInterval == stored.PollInterval && lifecycleDurationRejected(&types.LifecycleNotificationsConfig{PollInterval: lc.PollInterval}) {
+		lc.PollInterval = ""
+	}
+	if lc.IdleAfter == stored.IdleAfter && lifecycleDurationRejected(&types.LifecycleNotificationsConfig{IdleAfter: lc.IdleAfter}) {
+		lc.IdleAfter = ""
+	}
+}
+
+// lifecycleDurationRejected asks the real validator whether a lone duration
+// passes, so the floors live in exactly one place.
+func lifecycleDurationRejected(probe *types.LifecycleNotificationsConfig) bool {
+	return types.ValidateNotificationsConfig(&types.NotificationsConfig{Lifecycle: probe}) != nil
 }
 
 // notifierUnchanged reports whether the patched notifier is byte-identical to
@@ -929,6 +1000,7 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 			patch.Notifications.Lifecycle.Via = ""
 		}
 		mergeNotifierSettings(s.hubCfg.Notifications, patch.Notifications)
+		dropRejectedLifecycleDurations(s.hubCfg.Notifications, patch.Notifications)
 		if err := validateSettingsNotifications(s.hubCfg.Notifications, patch.Notifications); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return

@@ -62,7 +62,7 @@ func TestSettingsPatchNotificationsPersistsRoutesAndClearsLegacyVia(t *testing.T
 		t.Fatal(err)
 	}
 
-	body := []byte(`{"notifications":{"notifiers":{"ops":{"type":"slack","channel":"C123","token_secret":"slack_token","api_base":"https://slack.example","min_send_interval":"2s"}},"lifecycle":{"enabled":true,"via":"old","routes":[{"via":"ops","events":["agent_started"]}],"idleAfter":"5m","events":{"agentStarted":true}}}}`)
+	body := []byte(`{"notifications":{"notifiers":{"ops":{"type":"slack","channel":"C123","token_secret":"slack_token","api_base":"https://slack.com/api","min_send_interval":"2s"}},"lifecycle":{"enabled":true,"via":"old","routes":[{"via":"ops","events":["agent_started"]}],"idleAfter":"5m","events":{"agentStarted":true}}}}`)
 	rr := httptest.NewRecorder()
 	s.patchSettings(rr, httptest.NewRequest(http.MethodPatch, "/api/settings", bytes.NewReader(body)))
 	if rr.Code != http.StatusOK {
@@ -420,5 +420,100 @@ func TestSettingsPatchRepairsBrokenMinSendInterval(t *testing.T) {
 	patch(t, "")
 	if got := stored(t); got != "" {
 		t.Fatalf("min_send_interval = %v, want it cleared", got)
+	}
+}
+
+// Regression: lifecycle poll_interval and idle_after are validated on every
+// patch, floors included, and the Notifier screen renders neither — so a
+// hub.yaml holding a sub-floor value made EVERY save from that screen 400 on a
+// field the operator could not see, let alone repair.
+func TestSettingsPatchClearsUnusableLifecycleDurations(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "hub.yaml")
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", path)
+	s, _ := NewTestServerWithConfig(t, &types.HubConfig{Notifications: &types.NotificationsConfig{
+		Notifiers: map[string]types.NotifierConfig{"eng": {Type: "slack", Settings: map[string]any{
+			"channel": "C0123ABCD", "token_secret": "slack_token",
+		}}},
+		Lifecycle: &types.LifecycleNotificationsConfig{Via: "eng", PollInterval: "500ms", IdleAfter: "30s"},
+	}}, "", "", "")
+	if err := config.SaveHubConfig(s.hubCfg); err != nil {
+		t.Fatal(err)
+	}
+
+	// The master switch, as the screen sends it: the whole block rebuilt from
+	// the GET projection, both durations re-sent verbatim.
+	body := []byte(`{"notifications":{"notifiers":` +
+		`{"eng":{"type":"slack","channel":"C0123ABCD","token_secret":"slack_token"}},` +
+		`"lifecycle":{"enabled":false,"routes":[{"via":"eng"}],"pollInterval":"500ms","idleAfter":"30s"}}}`)
+	rr := httptest.NewRecorder()
+	s.patchSettings(rr, httptest.NewRequest(http.MethodPatch, "/api/settings", bytes.NewReader(body)))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("PATCH status = %d, want 200; body = %s", rr.Code, rr.Body.String())
+	}
+	diskCfg, err := config.LoadHubConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	lc := diskCfg.Notifications.Lifecycle
+	if lc.PollInterval != "" || lc.IdleAfter != "" {
+		t.Fatalf("lifecycle durations = %q/%q, want both cleared", lc.PollInterval, lc.IdleAfter)
+	}
+
+	// A value the patch itself introduces is still a typo worth reporting.
+	body = []byte(`{"notifications":{"notifiers":` +
+		`{"eng":{"type":"slack","channel":"C0123ABCD","token_secret":"slack_token"}},` +
+		`"lifecycle":{"enabled":false,"routes":[{"via":"eng"}],"idleAfter":"10s"}}}`)
+	rr = httptest.NewRecorder()
+	s.patchSettings(rr, httptest.NewRequest(http.MethodPatch, "/api/settings", bytes.NewReader(body)))
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("introducing a sub-floor idle_after: status = %d, want 400; body = %s", rr.Code, rr.Body.String())
+	}
+}
+
+// Regression: api_base decides where the notifier's bot token is sent, and the
+// patch preserves token_secret, so repointing it through the settings API was
+// token exfiltration (and SSRF) in one PATCH.
+func TestSettingsPatchRejectsRepointedNotifierAPIBase(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "hub.yaml")
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", path)
+	s, _ := NewTestServerWithConfig(t, &types.HubConfig{Notifications: &types.NotificationsConfig{
+		Notifiers: map[string]types.NotifierConfig{"eng": {Type: "slack", Settings: map[string]any{
+			"channel": "C0123ABCD", "token_secret": "slack_token", "api_base": "https://slack-proxy.internal",
+		}}},
+		Lifecycle: &types.LifecycleNotificationsConfig{Via: "eng"},
+	}}, "", "", "")
+	if err := config.SaveHubConfig(s.hubCfg); err != nil {
+		t.Fatal(err)
+	}
+
+	patch := func(t *testing.T, apiBase string) *httptest.ResponseRecorder {
+		t.Helper()
+		body := []byte(`{"notifications":{"notifiers":` +
+			`{"eng":{"type":"slack","channel":"C0999NEW","token_secret":"slack_token","api_base":"` + apiBase + `"}},` +
+			`"lifecycle":{"enabled":true,"routes":[{"via":"eng"}]}}}`)
+		rr := httptest.NewRecorder()
+		s.patchSettings(rr, httptest.NewRequest(http.MethodPatch, "/api/settings", bytes.NewReader(body)))
+		return rr
+	}
+
+	rr := patch(t, "https://attacker.example")
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("repointed api_base: status = %d, want 400; body = %s", rr.Code, rr.Body.String())
+	}
+	if got := rr.Body.String(); !strings.Contains(got, "api_base") {
+		t.Fatalf("error does not name the offending setting: %s", got)
+	}
+	diskCfg, err := config.LoadHubConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := diskCfg.Notifications.Notifiers["eng"].Settings["api_base"]; got != "https://slack-proxy.internal" {
+		t.Fatalf("stored api_base = %v, want the rejected patch to have written nothing", got)
+	}
+
+	// The operator's own hub.yaml value is exempt: re-sending it unchanged —
+	// what the settings screen does on every save — still edits the channel.
+	if rr = patch(t, "https://slack-proxy.internal"); rr.Code != http.StatusOK {
+		t.Fatalf("unchanged api_base: status = %d, want 200; body = %s", rr.Code, rr.Body.String())
 	}
 }
