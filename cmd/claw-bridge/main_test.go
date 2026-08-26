@@ -3087,3 +3087,159 @@ func TestSubagentHeartbeatFields(t *testing.T) {
 		t.Fatal("successful poll did not re-arm the failure log")
 	}
 }
+
+func TestNoEventAbortTimeoutDefaultsAndParses(t *testing.T) {
+	t.Run("unset uses default", func(t *testing.T) {
+		t.Setenv("ELASTICCLAW_NO_EVENT_ABORT_TIMEOUT", "")
+		if got := noEventAbortTimeout(); got != noEventAbortTimeoutDefault {
+			t.Fatalf("noEventAbortTimeout() = %s, want default %s", got, noEventAbortTimeoutDefault)
+		}
+	})
+	t.Run("valid override", func(t *testing.T) {
+		t.Setenv("ELASTICCLAW_NO_EVENT_ABORT_TIMEOUT", "8m")
+		if got := noEventAbortTimeout(); got != 8*time.Minute {
+			t.Fatalf("noEventAbortTimeout() = %s, want 8m", got)
+		}
+	})
+	t.Run("invalid falls back to default", func(t *testing.T) {
+		t.Setenv("ELASTICCLAW_NO_EVENT_ABORT_TIMEOUT", "not-a-duration")
+		if got := noEventAbortTimeout(); got != noEventAbortTimeoutDefault {
+			t.Fatalf("noEventAbortTimeout() = %s, want default %s", got, noEventAbortTimeoutDefault)
+		}
+	})
+	t.Run("non-positive falls back to default", func(t *testing.T) {
+		t.Setenv("ELASTICCLAW_NO_EVENT_ABORT_TIMEOUT", "-5m")
+		if got := noEventAbortTimeout(); got != noEventAbortTimeoutDefault {
+			t.Fatalf("noEventAbortTimeout() = %s, want default %s", got, noEventAbortTimeoutDefault)
+		}
+	})
+}
+
+func TestInFlightStateTracksLastEventAcrossChunkAndActivity(t *testing.T) {
+	inf := &inFlightState{}
+	t0 := time.Now()
+	inf.lastEventAt = t0
+
+	// A tool start/terminal cycle updates lastEventAt.
+	at := t0.Add(time.Minute)
+	started := agentActivity{Kind: "tool", Phase: "started", Tool: "exec", CallID: "call-1"}
+	inf.resolveToolCall(&started, at)
+	inf.noteActivity(started)
+	if got := inf.sinceLastEvent(time.Now()); got > 5*time.Second {
+		t.Fatalf("sinceLastEvent right after activity = %s, want near zero", got)
+	}
+
+	// Bug this guards against: noteAssistantChunk used to zero
+	// modelWaitStartedAt permanently, making a post-chunk stall invisible to
+	// the model pulse. lastEventAt must still move forward on a chunk even
+	// though modelWaitStartedAt stays zero.
+	inf.noteAssistantChunk()
+	if !inf.modelWaitStartedAt.IsZero() {
+		t.Fatal("modelWaitStartedAt should be zeroed after an assistant chunk")
+	}
+	if since := inf.sinceLastEvent(time.Now()); since > 5*time.Second {
+		t.Fatalf("sinceLastEvent after chunk = %s, want near zero (noteAssistantChunk should refresh lastEventAt)", since)
+	}
+}
+
+func TestSendMessageAbortsStalledTurnAfterNoEventTimeout(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("ELASTICCLAW_NO_EVENT_ABORT_TIMEOUT", "50ms")
+	origInterval := progressPulseTickInterval
+	progressPulseTickInterval = 20 * time.Millisecond
+	defer func() { progressPulseTickInterval = origInterval }()
+
+	testDone := make(chan struct{})
+	abortSeen := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			t.Errorf("accept websocket: %v", err)
+			return
+		}
+		defer conn.CloseNow()
+
+		readRequest := func(wantMethod string) (gwFrame, bool) {
+			var req gwFrame
+			if err := wsjson.Read(r.Context(), conn, &req); err != nil {
+				t.Errorf("read %s request: %v", wantMethod, err)
+				return gwFrame{}, false
+			}
+			if req.Method != wantMethod {
+				t.Errorf("request method = %q, want %q", req.Method, wantMethod)
+				return gwFrame{}, false
+			}
+			return req, true
+		}
+
+		sendReq, ok := readRequest("sessions.send")
+		if !ok {
+			return
+		}
+		if err := wsjson.Write(r.Context(), conn, gwFrame{Type: "res", ID: sendReq.ID, OK: true}); err != nil {
+			t.Errorf("accept sessions.send: %v", err)
+			return
+		}
+
+		// Deliberately send nothing else: no chunk, no lifecycle end. The
+		// no-event watchdog must fire and abort the same session.
+		abortReq, ok := readRequest("sessions.abort")
+		if !ok {
+			return
+		}
+		var abortParams map[string]string
+		if err := json.Unmarshal(abortReq.Params, &abortParams); err != nil {
+			t.Errorf("decode sessions.abort params: %v", err)
+			return
+		}
+		if abortParams["key"] != "session-1" {
+			t.Errorf("sessions.abort key = %q, want session-1 (same session, no rotation)", abortParams["key"])
+			return
+		}
+		close(abortSeen)
+		if err := wsjson.Write(r.Context(), conn, gwFrame{Type: "res", ID: abortReq.ID, OK: true}); err != nil {
+			t.Errorf("respond to sessions.abort: %v", err)
+			return
+		}
+
+		<-testDone
+	}))
+	defer srv.Close()
+	defer close(testDone)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http")
+	conn, _, err := websocket.Dial(ctx, wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial websocket: %v", err)
+	}
+	defer conn.CloseNow()
+
+	gs := &gatewaySession{
+		sessionKey: "session-1",
+		conn:       conn,
+		pending:    make(map[string]chan gwFrame),
+	}
+	go gs.readLoop(ctx)
+
+	_, err = gs.SendMessage(ctx, "continue the task", nil, nil)
+	if err == nil {
+		t.Fatal("SendMessage returned nil error, want no-event watchdog error")
+	}
+	if !strings.Contains(err.Error(), "no-event watchdog") {
+		t.Fatalf("SendMessage error = %q, want it to mention the no-event watchdog", err)
+	}
+
+	select {
+	case <-abortSeen:
+	case <-time.After(2 * time.Second):
+		t.Fatal("sessions.abort was never sent")
+	}
+
+	// No rotation: the session key must remain unchanged since the plan
+	// forbids rotating on this path.
+	if got := gs.getSessionKey(); got != "session-1" {
+		t.Fatalf("session key = %q, want session-1 (no rotation)", got)
+	}
+}

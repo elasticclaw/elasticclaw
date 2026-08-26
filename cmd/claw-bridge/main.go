@@ -83,6 +83,36 @@ var (
 // force-finish healthy long turns, so the two must move together.
 const agentTurnTimeout = time.Hour
 
+// progressPulseTickInterval controls how often sendMessageOnce checks for tool
+// and model progress pulses and evaluates the no-event abort watchdog. A
+// variable so tests can shrink it instead of waiting on the real 30s cadence.
+var progressPulseTickInterval = 30 * time.Second
+
+// noEventAbortTimeoutDefault bounds how long a turn may go without ANY
+// observed event (assistant chunk, tool start/progress/terminal, or model
+// pulse) before the bridge treats the gateway as wedged and aborts the turn.
+// It is deliberately conservative: item 1's human/machine split will supply
+// real stall data to recalibrate this once it lands. Configurable via
+// ELASTICCLAW_NO_EVENT_ABORT_TIMEOUT (Go duration syntax, e.g. "8m") so it can
+// be tuned without a redeploy.
+const noEventAbortTimeoutDefault = 7 * time.Minute
+
+// noEventAbortTimeout returns the configured no-event abort threshold, falling
+// back to noEventAbortTimeoutDefault when unset, empty, non-positive, or
+// unparseable.
+func noEventAbortTimeout() time.Duration {
+	raw := strings.TrimSpace(os.Getenv("ELASTICCLAW_NO_EVENT_ABORT_TIMEOUT"))
+	if raw == "" {
+		return noEventAbortTimeoutDefault
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil || d <= 0 {
+		log.Printf("[bridge] invalid ELASTICCLAW_NO_EVENT_ABORT_TIMEOUT=%q, using default %s", raw, noEventAbortTimeoutDefault)
+		return noEventAbortTimeoutDefault
+	}
+	return d
+}
+
 // ─── hub wire types ─────────────────────────────────────────────────────────
 
 type hubMsg struct {
@@ -852,6 +882,34 @@ type inFlightState struct {
 	lastModelPulseAt    time.Time
 	inFlightCalls       map[string]inFlightToolCall
 	callOccurrences     map[string]int
+
+	// lastEventAt tracks the most recent time ANY chunk or activity was
+	// observed for this turn (assistant text, tool start/progress/terminal).
+	// Unlike modelWaitStartedAt, it is never zeroed once the turn starts, so a
+	// stall after the first chunk (which noteAssistantChunk clears
+	// modelWaitStartedAt for) remains visible. Guards the no-event abort
+	// watchdog in sendMessageOnce.
+	lastEventAt time.Time
+}
+
+// noteEvent records that some event was just observed for this turn.
+func (inf *inFlightState) noteEvent(now time.Time) {
+	inf.mu.Lock()
+	inf.lastEventAt = now
+	inf.mu.Unlock()
+}
+
+// sinceLastEvent reports how long it has been since any event was observed
+// for this turn. If no event has been recorded yet, it reports zero (the
+// caller is expected to have seeded lastEventAt at turn start).
+func (inf *inFlightState) sinceLastEvent(now time.Time) time.Duration {
+	inf.mu.Lock()
+	last := inf.lastEventAt
+	inf.mu.Unlock()
+	if last.IsZero() {
+		return 0
+	}
+	return now.Sub(last)
 }
 
 func (inf *inFlightState) emitActivity(a agentActivity) {
@@ -867,6 +925,7 @@ func (inf *inFlightState) noteActivity(a agentActivity) {
 	phase := strings.ToLower(strings.TrimSpace(a.Phase))
 	inf.mu.Lock()
 	defer inf.mu.Unlock()
+	inf.lastEventAt = time.Now()
 	switch phase {
 	case "running", "start", "started", "in_progress":
 		copy := a
@@ -915,6 +974,7 @@ func (inf *inFlightState) resolveToolCall(a *agentActivity, now time.Time) {
 	}
 	inf.mu.Lock()
 	defer inf.mu.Unlock()
+	inf.lastEventAt = now
 	if inf.inFlightCalls == nil {
 		inf.inFlightCalls = make(map[string]inFlightToolCall)
 	}
@@ -963,6 +1023,7 @@ func (inf *inFlightState) noteAssistantChunk() {
 	defer inf.mu.Unlock()
 	inf.modelWaitStartedAt = time.Time{}
 	inf.lastModelPulseAt = time.Time{}
+	inf.lastEventAt = time.Now()
 }
 
 func (inf *inFlightState) toolProgressPulse() (agentActivity, bool) {
@@ -2569,14 +2630,18 @@ func (gs *gatewaySession) sendMessageOnce(ctx context.Context, message string, o
 		return "", &sessionSendRequestError{err: err}
 	}
 	log.Printf("[gateway] message sent, streaming response...")
+	now := time.Now()
 	inf.mu.Lock()
-	inf.modelWaitStartedAt = time.Now()
+	inf.modelWaitStartedAt = now
 	inf.lastModelPulseAt = time.Time{}
+	inf.lastEventAt = now
 	inf.mu.Unlock()
 	inf.emitActivity(agentActivity{Kind: "model_started", Message: "Waiting on model response"})
 
+	noEventTimeout := noEventAbortTimeout()
+
 	// Wait for lifecycle/end from the read loop
-	ticker := time.NewTicker(30 * time.Second)
+	ticker := time.NewTicker(progressPulseTickInterval)
 	defer ticker.Stop()
 	for {
 		select {
@@ -2588,6 +2653,16 @@ func (gs *gatewaySession) sendMessageOnce(ctx context.Context, message string, o
 			go gs.refreshContextUsage(context.Background())
 			return result.text, nil
 		case <-ticker.C:
+			if idle := inf.sinceLastEvent(time.Now()); idle >= noEventTimeout {
+				log.Printf("[gateway] no event observed for %s (>= %s threshold) — aborting stalled turn on same session", idle.Round(time.Second), noEventTimeout)
+				abortCtx, abortCancel := context.WithTimeout(context.Background(), 10*time.Second)
+				abortErr := gs.abortActiveSession(abortCtx)
+				abortCancel()
+				if abortErr != nil {
+					log.Printf("[gateway] sessions.abort failed after no-event watchdog fired: %v", abortErr)
+				}
+				return "", fmt.Errorf("no-event watchdog: no activity for %s, turn aborted", idle.Round(time.Second))
+			}
 			if pulse, ok := inf.toolProgressPulse(); ok {
 				inf.emitActivity(cleanAgentActivity(pulse))
 			} else if pulse, ok := inf.modelProgressPulse(); ok {
