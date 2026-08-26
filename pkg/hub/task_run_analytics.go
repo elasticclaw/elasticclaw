@@ -86,6 +86,23 @@ const (
 	taskRunEventManualRetry              = "human_manual_stop_or_resume"
 	taskRunEventSettingsChanged          = "human_settings_or_status_change"
 
+	// Signal-contract measurement events (plan item 3, phase one: counting
+	// only, no behaviour change). Recorded when a pipeline stage that only
+	// advances on an explicit message_contains/[DONE] signal was, in fact,
+	// left only after an intervention. The three types are mutually
+	// exclusive per stage-exit and classify WHY the stage was stuck:
+	//   - signal_unanchored_nudged: the agent wrote a known token
+	//     mid-sentence, the hub's existing nudge (nudgeUnanchoredSignal) told
+	//     it to resend anchored, and it did.
+	//   - signal_missed: no known token was ever written in the stage at
+	//     all — anchored, unanchored, or nudged — before something else
+	//     unstuck it.
+	//   - signal_human_rescue: a real dashboard user (not a hub inject) sent
+	//     a chat message during the stage before it advanced.
+	taskRunEventSignalUnanchoredNudged = "signal_unanchored_nudged"
+	taskRunEventSignalMissed           = "signal_missed"
+	taskRunEventSignalHumanRescue      = "signal_human_rescue"
+
 	taskRunActorSystem  = "system"
 	taskRunActorHuman   = "human"
 	taskRunActorAgent   = "agent"

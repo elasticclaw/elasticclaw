@@ -642,7 +642,8 @@ func migrate(db *sql.DB) error {
 			'approval_only_pr_review','human_requested_changes','human_review_comment','human_pr_comment',
 			'human_manual_code_push','human_tracker_update','human_dashboard_message',
 			'human_manual_stop_or_resume','human_settings_or_status_change',
-			'unknown_human_interaction','pr_replaced','correction','retraction','ci_succeeded','ci_failed','stage_timeout'
+			'unknown_human_interaction','pr_replaced','correction','retraction','ci_succeeded','ci_failed','stage_timeout',
+			'signal_unanchored_nudged','signal_missed','signal_human_rescue'
 		)),
 		event_time         INTEGER NOT NULL,
 		observed_at        INTEGER NOT NULL,
@@ -968,6 +969,9 @@ func migrate(db *sql.DB) error {
 	if err := rebuildTaskRunEventsAgentIdleV1(db); err != nil {
 		return err
 	}
+	if err := rebuildTaskRunEventsSignalContractV1(db); err != nil {
+		return err
+	}
 	// Backfill rows that predate the usage_day column so cost corrections land
 	// on the day the run's usage was last applied, not on the correction's day.
 	if _, err := db.Exec(`UPDATE task_run_usage SET usage_day = strftime('%Y-%m-%d', updated_at/1000, 'unixepoch') WHERE usage_day = '' AND updated_at > 0`); err != nil {
@@ -1186,6 +1190,94 @@ func rebuildTaskRunEventsAgentIdleV1(db *sql.DB) error {
 		CREATE INDEX idx_task_run_events_source_event ON task_run_events(tenant_id, source, source_event_id);
 		CREATE INDEX idx_task_run_events_observed ON task_run_events(tenant_id, observed_at)`); err != nil {
 		return fmt.Errorf("replace task run events agent_idle v1: %w", err)
+	}
+	return tx.Commit()
+}
+
+// rebuildTaskRunEventsSignalContractV1 widens the task_run_events.event_type
+// CHECK to allow the signal-contract measurement event types (item 3 of the
+// wall-clock remediation plan: signal_unanchored_nudged, signal_missed,
+// signal_human_rescue). Same rebuild-and-copy treatment as
+// rebuildTaskRunEventsAgentIdleV1, since SQLite cannot alter a CHECK in
+// place. Fresh databases are created with these types already in the CHECK
+// and skip this entirely via the schema probe.
+func rebuildTaskRunEventsSignalContractV1(db *sql.DB) error {
+	var schema string
+	if err := db.QueryRow(`SELECT sql FROM sqlite_master WHERE type='table' AND name='task_run_events'`).Scan(&schema); err != nil {
+		if err == sql.ErrNoRows {
+			return nil // no table yet; the CREATE above builds it with the new CHECK
+		}
+		return fmt.Errorf("read task run events schema: %w", err)
+	}
+	if strings.Contains(schema, "'signal_human_rescue'") {
+		return nil
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`CREATE TABLE task_run_events_new (
+		id                 TEXT PRIMARY KEY,
+		tenant_id          TEXT NOT NULL,
+		run_id             TEXT NOT NULL REFERENCES task_runs(id) ON DELETE CASCADE,
+		attempt_id         TEXT NOT NULL DEFAULT '',
+		event_key          TEXT NOT NULL,
+		source             TEXT NOT NULL DEFAULT 'hub' CHECK(source IN ('github','linear','shortcut','elasticclaw','hub','provider','agent','unknown')),
+		source_event_id    TEXT NOT NULL DEFAULT '',
+		source_delivery_id TEXT NOT NULL DEFAULT '',
+		event_type         TEXT NOT NULL CHECK(event_type IN (
+			'task_start','task_completed','run_claimed','run_queued','provision_started','claw_created','agent_started',
+			'creation_failed','provision_failed','bootstrap_failed','model_selected','agent_stopped',
+			'manual_stop_before_delivery','provider_lost','done_without_pr','permission_or_auth_failed',
+			'timeout','unknown_failure','agent_idle','pr_associated','pr_opened','pr_closed_unmerged','pr_merged',
+			'approval_only_pr_review','human_requested_changes','human_review_comment','human_pr_comment',
+			'human_manual_code_push','human_tracker_update','human_dashboard_message',
+			'human_manual_stop_or_resume','human_settings_or_status_change',
+			'unknown_human_interaction','pr_replaced','correction','retraction','ci_succeeded','ci_failed','stage_timeout',
+			'signal_unanchored_nudged','signal_missed','signal_human_rescue'
+		)),
+		event_time         INTEGER NOT NULL,
+		observed_at        INTEGER NOT NULL,
+		actor_type         TEXT NOT NULL DEFAULT 'unknown' CHECK(actor_type IN ('agent','human','bot','system','unknown')),
+		actor_source       TEXT NOT NULL DEFAULT '',
+		actor_id           TEXT NOT NULL DEFAULT '',
+		actor_login        TEXT NOT NULL DEFAULT '',
+		actor_display_name TEXT NOT NULL DEFAULT '',
+		actor_classification_reason TEXT NOT NULL DEFAULT '',
+		interaction_role   TEXT NOT NULL DEFAULT '' CHECK(interaction_role IN ('','allowed_start','allowed_approval','allowed_merge','warning','neutral','terminal')),
+		target_type        TEXT NOT NULL DEFAULT '',
+		target_id          TEXT NOT NULL DEFAULT '',
+		target_url         TEXT NOT NULL DEFAULT '',
+		target_label       TEXT NOT NULL DEFAULT '',
+		warning_type       TEXT NOT NULL DEFAULT '',
+		failure_type       TEXT NOT NULL DEFAULT '' CHECK(failure_type IN ('','creation_failed','provision_failed','bootstrap_failed','agent_stopped','manual_stop_before_delivery','done_without_pr','no_pr','pr_closed_unmerged','timeout','provider_lost','permission_or_auth_failed','unknown')),
+		detail             TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(detail) AND json_type(detail) = 'object'),
+		created_at         INTEGER NOT NULL
+	)`); err != nil {
+		return fmt.Errorf("create task run events signal contract v1: %w", err)
+	}
+	if _, err := tx.Exec(`INSERT INTO task_run_events_new(rowid,
+		id, tenant_id, run_id, attempt_id, event_key, source, source_event_id, source_delivery_id,
+		event_type, event_time, observed_at, actor_type, actor_source, actor_id, actor_login,
+		actor_display_name, actor_classification_reason, interaction_role, target_type, target_id,
+		target_url, target_label, warning_type, failure_type, detail, created_at)
+		SELECT rowid,
+		id, tenant_id, run_id, attempt_id, event_key, source, source_event_id, source_delivery_id,
+		event_type, event_time, observed_at, actor_type, actor_source, actor_id, actor_login,
+		actor_display_name, actor_classification_reason, interaction_role, target_type, target_id,
+		target_url, target_label, warning_type, failure_type, detail, created_at
+		FROM task_run_events`); err != nil {
+		return fmt.Errorf("copy task run events signal contract v1: %w", err)
+	}
+	if _, err := tx.Exec(`DROP TABLE task_run_events; ALTER TABLE task_run_events_new RENAME TO task_run_events;
+		CREATE UNIQUE INDEX idx_task_run_events_tenant_key ON task_run_events(tenant_id, run_id, event_key);
+		CREATE INDEX idx_task_run_events_run_time ON task_run_events(run_id, event_time, id);
+		CREATE INDEX idx_task_run_events_type_time ON task_run_events(event_type, event_time);
+		CREATE INDEX idx_task_run_events_tenant_run_time ON task_run_events(tenant_id, run_id, event_time, observed_at, event_key);
+		CREATE INDEX idx_task_run_events_source_event ON task_run_events(tenant_id, source, source_event_id);
+		CREATE INDEX idx_task_run_events_observed ON task_run_events(tenant_id, observed_at)`); err != nil {
+		return fmt.Errorf("replace task run events signal contract v1: %w", err)
 	}
 	return tx.Commit()
 }
