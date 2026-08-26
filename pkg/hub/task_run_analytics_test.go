@@ -153,6 +153,13 @@ func TestTaskRunSchemaCreatesIssue350TablesColumnsConstraintsAndIndexes(t *testi
 	}
 }
 
+func TestTaskRunHumanWaitTimesNoSignalToPROpenWithoutTaskCompleted(t *testing.T) {
+	summary := taskRunHumanWaitTimes([]taskRunEventProjection{{eventType: taskRunEventAgentStarted, eventTime: 100}}, 1000, 0)
+	if summary.signalToPROpenMs != 0 {
+		t.Fatalf("signal-to-PR-open = %d, want 0 without task_completed anchor", summary.signalToPROpenMs)
+	}
+}
+
 func TestTaskRunMaterializationClassifiesCleanSuccess(t *testing.T) {
 	s, db := newTaskRunAnalyticsTestServer(t, "claw-clean")
 	runID, attemptID := startTaskRunForTest(t, s, "claw-clean", "clean")

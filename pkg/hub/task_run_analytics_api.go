@@ -162,12 +162,14 @@ type taskRunAnalyticsRunView struct {
 }
 
 type taskRunAnalyticsStageView struct {
-	StageID    string `json:"stageId"`
-	Label      string `json:"label"`
-	EnteredAt  int64  `json:"enteredAt"`
-	ExitedAt   int64  `json:"exitedAt,omitempty"`
-	DurationMs int64  `json:"durationMs"`
-	Source     string `json:"source"`
+	StageID       string `json:"stageId"`
+	Label         string `json:"label"`
+	EnteredAt     int64  `json:"enteredAt"`
+	ExitedAt      int64  `json:"exitedAt,omitempty"`
+	DurationMs    int64  `json:"durationMs"`
+	HumanWaitMs   int64  `json:"humanWaitMs"`
+	MachineTimeMs int64  `json:"machineTimeMs"`
+	Source        string `json:"source"`
 }
 
 type taskRunAnalyticsAttemptView struct {
@@ -449,7 +451,7 @@ func taskRunReadyToMergeMs(run taskRunAnalyticsRunView, bh BusinessHours) int64 
 // response. Duration for each stage is wall-clock: it ends at its own
 // exited_at if set, else the next stage's entered_at, else the run's
 // finished_at, else time-now for the still-open stage of a running run.
-func taskRunAnalyticsStages(stages []taskRunStage, runFinishedAt int64) []taskRunAnalyticsStageView {
+func taskRunAnalyticsStages(stages []taskRunStage, runFinishedAt int64, humanSpans []wallClockSpan) []taskRunAnalyticsStageView {
 	views := make([]taskRunAnalyticsStageView, 0, len(stages))
 	for i, stage := range stages {
 		var end int64
@@ -467,17 +469,25 @@ func taskRunAnalyticsStages(stages []taskRunStage, runFinishedAt int64) []taskRu
 		if durationMs < 0 {
 			durationMs = 0
 		}
+		humanWaitMs := overlapDurationMs(humanSpans, stage.EnteredAt, end)
+		machineTimeMs := durationMs - humanWaitMs
+		if machineTimeMs < 0 {
+			log.Printf("[task_run_stages] human wait %dms exceeded stage duration %dms, clamping machine time to 0", humanWaitMs, durationMs)
+			machineTimeMs = 0
+		}
 		var exitedAt int64
 		if stage.ExitedAt != nil {
 			exitedAt = *stage.ExitedAt
 		}
 		views = append(views, taskRunAnalyticsStageView{
-			StageID:    stage.StageID,
-			Label:      stage.Label,
-			EnteredAt:  stage.EnteredAt,
-			ExitedAt:   exitedAt,
-			DurationMs: durationMs,
-			Source:     stage.Source,
+			StageID:       stage.StageID,
+			Label:         stage.Label,
+			EnteredAt:     stage.EnteredAt,
+			ExitedAt:      exitedAt,
+			DurationMs:    durationMs,
+			HumanWaitMs:   humanWaitMs,
+			MachineTimeMs: machineTimeMs,
+			Source:        stage.Source,
 		})
 	}
 	return views
@@ -551,8 +561,9 @@ func (s *Server) handleTaskRunAnalyticsRunSubresource(w http.ResponseWriter, r *
 			jsonError(w, http.StatusInternalServerError, "db error")
 			return
 		}
+		humanSpans := humanWaitSpans(run, humanWait)
 		jsonOK(w, taskRunAnalyticsRunDetailResponse{
-			Run: run, Stages: taskRunAnalyticsStages(stages, run.FinishedAt), HumanWait: humanWait,
+			Run: run, Stages: taskRunAnalyticsStages(stages, run.FinishedAt, humanSpans), HumanWait: humanWait,
 			WallClock: taskRunAnalyticsWallClock(run, humanWait, activity),
 		})
 		return

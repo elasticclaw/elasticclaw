@@ -576,6 +576,25 @@ func TestTaskRunAnalyticsHumanWaitIsZeroWithoutPRTimings(t *testing.T) {
 	}
 }
 
+func TestTaskRunAnalyticsStagesSplitsHumanWait(t *testing.T) {
+	exited := int64(200)
+	stages := []taskRunStage{
+		{StageID: "one", EnteredAt: 100, ExitedAt: &exited},
+		{StageID: "two", EnteredAt: 200},
+		{StageID: "three", EnteredAt: 400},
+	}
+	got := taskRunAnalyticsStages(stages, 500, []wallClockSpan{{start: 150, end: 250}})
+	if got[0].DurationMs != 100 || got[0].HumanWaitMs != 50 || got[0].MachineTimeMs != 50 {
+		t.Fatalf("first stage = %#v, want duration/human/machine 100/50/50", got[0])
+	}
+	if got[1].DurationMs != 200 || got[1].HumanWaitMs != 50 || got[1].MachineTimeMs != 150 {
+		t.Fatalf("second stage = %#v, want duration/human/machine 200/50/150", got[1])
+	}
+	if got[2].DurationMs != 100 || got[2].HumanWaitMs != 0 || got[2].MachineTimeMs != 100 {
+		t.Fatalf("third stage = %#v, want duration/human/machine 100/0/100", got[2])
+	}
+}
+
 func TestTaskRunAnalyticsAPIUsageDistinguishesRecordedZeroFromMissing(t *testing.T) {
 	s, db := newTaskRunAnalyticsAPITestServer(t)
 	ts := int64(1760000000000)

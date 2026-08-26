@@ -1499,9 +1499,8 @@ type taskRunHumanWaitSummary struct {
 
 // taskRunHumanWaitTimes reports intervals separately from stage timings. A
 // task_completed event is the clearest existing signal that the agent's work
-// has finished; older runs and integrations do not always emit it, so for
-// those runs the last non-human event before the PR opens is the best
-// available machine-attributed anchor. A human-bounded interval starts at an
+// has finished. Without that event, signal-to-PR-open is not reported because
+// no reliable completion anchor exists. A human-bounded interval starts at an
 // existing human-authored event and ends at the first later non-human event,
 // because that is the first recorded indication that work resumed after the
 // human interaction. Open-ended intervals are intentionally omitted: without
@@ -1509,7 +1508,7 @@ type taskRunHumanWaitSummary struct {
 func taskRunHumanWaitTimes(events []taskRunEventProjection, prOpenedAt, mergedAt int64) taskRunHumanWaitSummary {
 	var summary taskRunHumanWaitSummary
 	if prOpenedAt > 0 {
-		var completedAt, lastMachineAt int64
+		var completedAt int64
 		for _, event := range events {
 			if event.eventTime >= prOpenedAt || isHumanTaskRunEvent(event) {
 				continue
@@ -1517,16 +1516,9 @@ func taskRunHumanWaitTimes(events []taskRunEventProjection, prOpenedAt, mergedAt
 			if event.eventType == taskRunEventTaskCompleted && event.eventTime > completedAt {
 				completedAt = event.eventTime
 			}
-			if event.eventTime > lastMachineAt {
-				lastMachineAt = event.eventTime
-			}
 		}
-		anchor := completedAt
-		if anchor == 0 {
-			anchor = lastMachineAt
-		}
-		if anchor > 0 {
-			summary.signalToPROpenMs = prOpenedAt - anchor
+		if completedAt > 0 {
+			summary.signalToPROpenMs = prOpenedAt - completedAt
 		}
 	}
 	if prOpenedAt > 0 && mergedAt >= prOpenedAt {
