@@ -95,6 +95,7 @@ func migrate(db *sql.DB) error {
 	_, _ = db.Exec(`UPDATE claws SET shortcut_story_id = linear_issue_id WHERE linear_issue_id LIKE 'sc-%' AND shortcut_story_id = ''`)
 	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN llm_key TEXT NOT NULL DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN pipeline_stage TEXT NOT NULL DEFAULT ''`)
+	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN pipeline_stage_entered_at INTEGER NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN bootstrap_ok INTEGER NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN bootstrap_status TEXT NOT NULL DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN bootstrap_diagnostic TEXT NOT NULL DEFAULT ''`)
@@ -480,6 +481,7 @@ func migrate(db *sql.DB) error {
 		issue_title      TEXT NOT NULL DEFAULT '',
 		llm_key          TEXT NOT NULL DEFAULT '',
 		pipeline_stage   TEXT NOT NULL DEFAULT '',
+		pipeline_stage_entered_at INTEGER NOT NULL DEFAULT 0,
 		bootstrap_ok        INTEGER NOT NULL DEFAULT 0,
 		bootstrap_status    TEXT NOT NULL DEFAULT '',
 		bootstrap_diagnostic TEXT NOT NULL DEFAULT '',
@@ -640,7 +642,7 @@ func migrate(db *sql.DB) error {
 			'approval_only_pr_review','human_requested_changes','human_review_comment','human_pr_comment',
 			'human_manual_code_push','human_tracker_update','human_dashboard_message',
 			'human_manual_stop_or_resume','human_settings_or_status_change',
-			'unknown_human_interaction','pr_replaced','correction','retraction','ci_succeeded','ci_failed'
+			'unknown_human_interaction','pr_replaced','correction','retraction','ci_succeeded','ci_failed','stage_timeout'
 		)),
 		event_time         INTEGER NOT NULL,
 		observed_at        INTEGER NOT NULL,
@@ -1112,7 +1114,7 @@ func rebuildTaskRunEventsAgentIdleV1(db *sql.DB) error {
 		}
 		return fmt.Errorf("read task run events schema: %w", err)
 	}
-	if strings.Contains(schema, "'ci_succeeded'") && strings.Contains(schema, "'ci_failed'") {
+	if strings.Contains(schema, "'stage_timeout'") {
 		return nil
 	}
 	tx, err := db.Begin()
@@ -1137,7 +1139,7 @@ func rebuildTaskRunEventsAgentIdleV1(db *sql.DB) error {
 			'approval_only_pr_review','human_requested_changes','human_review_comment','human_pr_comment',
 			'human_manual_code_push','human_tracker_update','human_dashboard_message',
 			'human_manual_stop_or_resume','human_settings_or_status_change',
-			'unknown_human_interaction','pr_replaced','correction','retraction','ci_succeeded','ci_failed'
+			'unknown_human_interaction','pr_replaced','correction','retraction','ci_succeeded','ci_failed','stage_timeout'
 		)),
 		event_time         INTEGER NOT NULL,
 		observed_at        INTEGER NOT NULL,

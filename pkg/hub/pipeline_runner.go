@@ -1826,12 +1826,30 @@ func (s *Server) pipelineStageForMessageContains(clawID, message string) (pipeli
 
 func (s *Server) transitionPipelineStageWithContext(clawID string, stage pipeline.Stage, ctx pipelineContext) bool {
 	stage = s.resolvePipelineStageSkips(clawID, stage, ctx)
-	transitioned, _ := s.transitionResolvedPipelineStageWithContext(clawID, stage, ctx)
+	transitioned, _ := s.transitionResolvedPipelineStageWithContextFrom(clawID, stage, "", ctx)
+	return transitioned
+}
+
+// transitionPipelineStageFromWithContext transitions only if the claw is still
+// in expectedStage. This protects reaper-driven transitions from stale timers.
+func (s *Server) transitionPipelineStageFromWithContext(clawID string, stage pipeline.Stage, expectedStage string, ctx pipelineContext) bool {
+	stage = s.resolvePipelineStageSkips(clawID, stage, ctx)
+	transitioned, _ := s.transitionResolvedPipelineStageWithContextFrom(clawID, stage, expectedStage, ctx)
 	return transitioned
 }
 
 func (s *Server) transitionResolvedPipelineStageWithContext(clawID string, stage pipeline.Stage, ctx pipelineContext) (transitioned, injectDelivered bool) {
-	if !s.claimPipelineStageTransition(clawID, stage.ID) {
+	return s.transitionResolvedPipelineStageWithContextFrom(clawID, stage, "", ctx)
+}
+
+func (s *Server) transitionResolvedPipelineStageWithContextFrom(clawID string, stage pipeline.Stage, expectedStage string, ctx pipelineContext) (transitioned, injectDelivered bool) {
+	claimed := false
+	if expectedStage != "" {
+		claimed = s.claimPipelineStageTransition(clawID, stage.ID, expectedStage)
+	} else {
+		claimed = s.claimPipelineStageTransition(clawID, stage.ID)
+	}
+	if !claimed {
 		log.Printf("[pipeline] claw %s already in stage %q (%s), skipping duplicate transition", clawID[:8], stage.ID, stage.Label)
 		return false, false
 	}

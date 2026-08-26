@@ -321,6 +321,87 @@ func TestReaperRedrivesStopComment(t *testing.T) {
 	})
 }
 
+func TestReaperPipelineStageTimeout(t *testing.T) {
+	const pipelineYAML = `
+stages:
+  - id: work
+    triggers:
+      - stage_timeout:
+          after: 10m
+          go_to: timed_out
+  - id: timed_out
+  - id: ordinary
+`
+	newServer := func(t *testing.T, enteredAt time.Duration, enabled *bool) (*Server, *sql.DB) {
+		t.Helper()
+		s, db := newReaperTestServer(t, &types.HubConfig{Liveness: &types.LivenessConfig{StageTimeoutEnabled: enabled}, Factories: []*types.FactoryConfig{{Name: "factory", Integration: "linear", Workspace: "workspace", PipelineYAML: pipelineYAML}}})
+		n := time.Now().UTC()
+		s.nowFunc = func() time.Time { return n }
+		if _, err := db.Exec(`INSERT INTO claws(id,tenant_id,name,status,pipeline_stage,pipeline_stage_entered_at,tags,created_at) VALUES('timeout01','tenant','timeout','connected','work',?,?,?)`, n.Add(enteredAt).UnixMilli(), `["factory:factory"]`, n); err != nil {
+			t.Fatal(err)
+		}
+		return s, db
+	}
+	stage := func(t *testing.T, db *sql.DB) string {
+		t.Helper()
+		var got string
+		if err := db.QueryRow(`SELECT pipeline_stage FROM claws WHERE id='timeout01'`).Scan(&got); err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+	t.Run("transitions after timeout and does not refire", func(t *testing.T) {
+		s, db := newServer(t, -11*time.Minute, nil)
+		n := s.reaperNow().UnixMilli()
+		if _, err := db.Exec(`INSERT INTO task_runs(id,tenant_id,initial_attempt_id,current_attempt_id,run_kind,owner_type,claw_id,created_at,updated_at) VALUES('run-timeout','tenant','attempt-timeout','attempt-timeout','code_task','factory','timeout01',?,?)`, n, n); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(`UPDATE claws SET task_run_id='run-timeout' WHERE id='timeout01'`); err != nil {
+			t.Fatal(err)
+		}
+		s.reapOnce()
+		if got := stage(t, db); got != "timed_out" {
+			t.Fatalf("stage = %q, want timed_out", got)
+		}
+		var events int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM task_run_events WHERE run_id='run-timeout' AND event_type=?`, taskRunEventStageTimeout).Scan(&events); err != nil || events != 1 {
+			t.Fatalf("stage timeout events = %d, err=%v; want 1", events, err)
+		}
+		s.reapOnce()
+		if got := stage(t, db); got != "timed_out" {
+			t.Fatalf("stale timeout changed stage to %q", got)
+		}
+		if err := db.QueryRow(`SELECT COUNT(*) FROM task_run_events WHERE run_id='run-timeout' AND event_type=?`, taskRunEventStageTimeout).Scan(&events); err != nil || events != 1 {
+			t.Fatalf("stage timeout events after stale tick = %d, err=%v; want 1", events, err)
+		}
+	})
+	t.Run("does not transition within window", func(t *testing.T) {
+		s, db := newServer(t, -9*time.Minute, nil)
+		s.reapOnce()
+		if got := stage(t, db); got != "work" {
+			t.Fatalf("stage = %q, want work", got)
+		}
+	})
+	t.Run("does not redirect a claw that already advanced", func(t *testing.T) {
+		s, db := newServer(t, -11*time.Minute, nil)
+		if _, err := db.Exec(`UPDATE claws SET pipeline_stage='ordinary' WHERE id='timeout01'`); err != nil {
+			t.Fatal(err)
+		}
+		s.reapOnce()
+		if got := stage(t, db); got != "ordinary" {
+			t.Fatalf("stale timeout changed stage to %q, want ordinary", got)
+		}
+	})
+	t.Run("respects liveness kill switch", func(t *testing.T) {
+		disabled := false
+		s, db := newServer(t, -11*time.Minute, &disabled)
+		s.reapOnce()
+		if got := stage(t, db); got != "work" {
+			t.Fatalf("stage = %q, want work", got)
+		}
+	})
+}
+
 func TestReaperRecoversStrandedTerminalPipelineStage(t *testing.T) {
 	const pipelineYAML = `
 stages:

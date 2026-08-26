@@ -612,6 +612,8 @@ type LivenessConfig struct {
 	SilentDeathMax         string `yaml:"silent_death_max,omitempty" json:"silentDeathMax,omitempty"`
 	// PRConditionsMaxWait is the maximum time a PR may wait for pr_conditions before the run errors.
 	PRConditionsMaxWait string `yaml:"pr_conditions_max_wait,omitempty" json:"prConditionsMaxWait,omitempty"`
+	// StageTimeoutEnabled controls pipeline stage_timeout recovery (default on).
+	StageTimeoutEnabled *bool `yaml:"stage_timeout_enabled,omitempty" json:"stageTimeoutEnabled,omitempty"`
 	// IdleResume controls the idle auto-resume recovery (default on). It lives
 	// here and not under notifications because muting an alert channel must
 	// never disable recovery: an agent parked in a tool call that never

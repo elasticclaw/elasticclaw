@@ -3,6 +3,7 @@ package pipeline_test
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/elasticclaw/elasticclaw/pkg/hub/pipeline"
 )
@@ -47,6 +48,35 @@ func TestParse(t *testing.T) {
 	}
 	if len(p.Stages) != 4 {
 		t.Fatalf("expected 4 stages, got %d", len(p.Stages))
+	}
+}
+
+func TestStageTimeoutValidationAndQuery(t *testing.T) {
+	p, err := pipeline.Parse([]byte(`
+stages:
+  - id: work
+    triggers:
+      - stage_timeout:
+          after: 90m
+          go_to: timed_out
+  - id: ordinary
+  - id: timed_out
+`))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	timeouts := p.StagesWithTimeouts()
+	if len(timeouts) != 1 || timeouts[0].Stage.ID != "work" || timeouts[0].After != 90*time.Minute || timeouts[0].TargetID != "timed_out" || timeouts[0].Target.ID != "timed_out" {
+		t.Fatalf("StagesWithTimeouts() = %#v", timeouts)
+	}
+	for name, source := range map[string]string{
+		"invalid after":  `stages: [{id: work, triggers: [{stage_timeout: {after: nope, go_to: done}}]}, {id: done}]`,
+		"missing target": `stages: [{id: work, triggers: [{stage_timeout: {after: 1m, go_to: missing}}]}, {id: done}]`,
+		"self target":    `stages: [{id: work, triggers: [{stage_timeout: {after: 1m, go_to: work}}]}]`,
+	} {
+		if _, err := pipeline.Parse([]byte(source)); err == nil {
+			t.Errorf("%s: Parse succeeded, want validation error", name)
+		}
 	}
 }
 

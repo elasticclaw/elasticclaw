@@ -3,6 +3,7 @@ package pipeline
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -70,6 +71,17 @@ type Trigger struct {
 	// any of the expected values. This is a general primitive for inspecting
 	// structured pipeline outputs without gate semantics.
 	OutputMatches *OutputMatchesTrigger `yaml:"output_matches,omitempty"`
+	// StageTimeout transitions when the claw has been in this stage for at least
+	// the given duration without another trigger firing first. Evaluated by the
+	// reaper, not by per-message trigger evaluation.
+	StageTimeout *StageTimeoutTrigger `yaml:"stage_timeout,omitempty"`
+}
+
+// StageTimeoutTrigger fires a transition after a stage has been entered for
+// at least After, moving the claw to GoTo.
+type StageTimeoutTrigger struct {
+	After string `yaml:"after"`
+	GoTo  string `yaml:"go_to"`
 }
 
 // PRConditionsTrigger specifies compound PR state conditions that must all pass.
@@ -194,6 +206,19 @@ func (t *Trigger) UnmarshalYAML(value *yaml.Node) error {
 				}
 			}
 			t.OutputMatches = &om
+		case "stage_timeout":
+			var timeout StageTimeoutTrigger
+			if val.Kind == yaml.MappingNode {
+				for j := 0; j+1 < len(val.Content); j += 2 {
+					switch val.Content[j].Value {
+					case "after":
+						timeout.After = val.Content[j+1].Value
+					case "go_to":
+						timeout.GoTo = val.Content[j+1].Value
+					}
+				}
+			}
+			t.StageTimeout = &timeout
 		}
 	}
 	return nil
@@ -432,6 +457,13 @@ func (p *Pipeline) Validate() error {
 	}
 	skipEdges := make(map[string][]string)
 	for _, stage := range p.Stages {
+		for _, trigger := range stage.Triggers {
+			if trigger.StageTimeout != nil {
+				if err := validateStageTimeoutTrigger(stage.ID, trigger.StageTimeout, stageIDs); err != nil {
+					return err
+				}
+			}
+		}
 		for _, skip := range []struct {
 			name string
 			rule *StageSkip
@@ -450,6 +482,25 @@ func (p *Pipeline) Validate() error {
 	}
 	if cycle := firstSkipCycle(skipEdges); len(cycle) > 0 {
 		return fmt.Errorf("pipeline skip cycle detected: %s", strings.Join(cycle, " -> "))
+	}
+	return nil
+}
+
+func validateStageTimeoutTrigger(stageID string, trigger *StageTimeoutTrigger, stageIDs map[string]bool) error {
+	after := strings.TrimSpace(trigger.After)
+	duration, err := time.ParseDuration(after)
+	if err != nil || duration <= 0 {
+		return fmt.Errorf("stage %q stage_timeout after must be a positive duration", stageID)
+	}
+	goTo := strings.TrimSpace(trigger.GoTo)
+	if goTo == "" {
+		return fmt.Errorf("stage %q stage_timeout go_to is required", stageID)
+	}
+	if goTo == stageID {
+		return fmt.Errorf("stage %q stage_timeout go_to cannot point to itself", stageID)
+	}
+	if !stageIDs[goTo] {
+		return fmt.Errorf("stage %q stage_timeout go_to %q does not reference an existing stage", stageID, goTo)
 	}
 	return nil
 }
@@ -553,6 +604,36 @@ func (p *Pipeline) StageByID(id string) *Stage {
 		}
 	}
 	return nil
+}
+
+// StageTimeout is a resolved stage_timeout trigger.
+type StageTimeout struct {
+	Stage    *Stage
+	After    time.Duration
+	TargetID string
+	Target   *Stage
+}
+
+// StagesWithTimeouts returns every stage with a valid stage_timeout trigger.
+func (p *Pipeline) StagesWithTimeouts() []StageTimeout {
+	if p == nil {
+		return nil
+	}
+	var timeouts []StageTimeout
+	for i := range p.Stages {
+		for _, trigger := range p.Stages[i].Triggers {
+			if trigger.StageTimeout == nil {
+				continue
+			}
+			after, err := time.ParseDuration(strings.TrimSpace(trigger.StageTimeout.After))
+			target := p.StageByID(strings.TrimSpace(trigger.StageTimeout.GoTo))
+			if err != nil || after <= 0 || target == nil {
+				continue
+			}
+			timeouts = append(timeouts, StageTimeout{Stage: &p.Stages[i], After: after, TargetID: target.ID, Target: target})
+		}
+	}
+	return timeouts
 }
 
 // StageForMessageContains returns the first stage whose message_contains

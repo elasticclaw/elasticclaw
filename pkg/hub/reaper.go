@@ -2,6 +2,7 @@ package hub
 
 import (
 	"log"
+	"strconv"
 	"time"
 
 	"github.com/elasticclaw/elasticclaw/pkg/types"
@@ -20,6 +21,7 @@ type livenessSettings struct {
 	gatewayUnhealthyMax                                  int
 	busyTurnMax, silentDeathMax                          time.Duration
 	prConditionsMaxWait                                  time.Duration
+	stageTimeoutEnabled                                  bool
 	idleResumeEnabled                                    bool
 	idleResumeAfter                                      time.Duration
 }
@@ -44,6 +46,7 @@ func (s *Server) livenessSettings() livenessSettings {
 		busyTurnMax:         defaultBusyTurnMax,
 		silentDeathMax:      defaultSilentDeathMax,
 		prConditionsMaxWait: 2 * time.Hour,
+		stageTimeoutEnabled: true,
 		idleResumeEnabled:   true,
 		idleResumeAfter:     defaultIdleResumeAfter,
 	}
@@ -75,6 +78,9 @@ func (s *Server) livenessSettings() livenessSettings {
 	}
 	cfg.silentDeathMax = parse(l.SilentDeathMax, cfg.silentDeathMax, "silent_death_max")
 	cfg.prConditionsMaxWait = parse(l.PRConditionsMaxWait, cfg.prConditionsMaxWait, "pr_conditions_max_wait")
+	if l.StageTimeoutEnabled != nil {
+		cfg.stageTimeoutEnabled = *l.StageTimeoutEnabled
+	}
 	if l.IdleResume != nil {
 		cfg.idleResumeEnabled = *l.IdleResume
 	}
@@ -319,6 +325,9 @@ func (s *Server) reapOnce() {
 			}
 		}
 	}
+	if cfg.stageTimeoutEnabled {
+		s.reapPipelineStageTimeouts(n, take, seen)
+	}
 	triggers, err := s.db.Query(`SELECT id, created_at FROM factory_triggers WHERE status='claimed' AND claw_id=''`)
 	if err == nil {
 		var triggerIDs []string
@@ -371,5 +380,80 @@ func (s *Server) reapOnce() {
 	s.reaperMu.Unlock()
 	if actions > 0 {
 		s.promotePendingClaws()
+	}
+}
+
+func (s *Server) reapPipelineStageTimeouts(n time.Time, take func() bool, seen map[string]bool) {
+	rows, err := s.db.Query(`SELECT id, pipeline_stage, pipeline_stage_entered_at FROM claws WHERE status NOT IN ('error','deleted') AND pipeline_stage != '' AND pipeline_stage_entered_at > 0`)
+	if err != nil {
+		log.Printf("[reaper] pipeline stage timeout query: %v", err)
+		return
+	}
+	type candidate struct {
+		id, stageID string
+		enteredAt   int64
+	}
+	var candidates []candidate
+	for rows.Next() {
+		var c candidate
+		if rows.Scan(&c.id, &c.stageID, &c.enteredAt) == nil {
+			candidates = append(candidates, c)
+		}
+	}
+	rows.Close()
+	for _, c := range candidates {
+		ctx, ok := s.findPipelineContextForClaw(c.id)
+		pl := parsePipelineForContext(ctx)
+		if !ok || pl == nil {
+			continue
+		}
+		for _, timeout := range pl.StagesWithTimeouts() {
+			if timeout.Stage.ID != c.stageID || n.Sub(time.UnixMilli(c.enteredAt)) < timeout.After {
+				continue
+			}
+			key := "stage_timeout:" + c.id + ":" + c.stageID
+			seen[key] = true
+			s.firstSeen(key, true, n)
+			if !take() {
+				return
+			}
+			if !s.transitionPipelineStageFromWithContext(c.id, *timeout.Target, c.stageID, ctx) {
+				continue
+			}
+			log.Printf("[reaper] claw %s timed out in pipeline stage %q after %s; transitioning to %q", c.id, c.stageID, timeout.After, timeout.TargetID)
+			s.recordStageTimeoutEvent(c.id, c.stageID, timeout.TargetID, timeout.After)
+			break
+		}
+	}
+}
+
+func (s *Server) recordStageTimeoutEvent(clawID, sourceStage, targetStage string, after time.Duration) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		log.Printf("[reaper] begin stage timeout event for claw %s: %v", clawID, err)
+		return
+	}
+	defer tx.Rollback()
+	tenantID, runID, attemptID, hasRun, err := s.taskRunContextForClawTx(tx, clawID)
+	if err != nil || !hasRun {
+		if err != nil {
+			log.Printf("[reaper] find stage timeout task run for claw %s: %v", clawID, err)
+		}
+		return
+	}
+	event := TaskRunEvent{EventKey: "stage_timeout:" + clawID + ":" + sourceStage + ":" + targetStage + ":" + strconv.FormatInt(epochMillis(s.reaperNow()), 10), TenantID: tenantID, RunID: runID, AttemptID: attemptID, Source: taskRunSourceHub, EventType: taskRunEventStageTimeout, ActorType: taskRunActorSystem, Detail: map[string]any{"sourceStage": sourceStage, "targetStage": targetStage, "after": after.String()}, OccurredAt: s.reaperNow()}
+	recorded, err := recordTaskRunEventIfNewTx(tx, event)
+	if err != nil {
+		log.Printf("[reaper] record stage timeout event for claw %s: %v", clawID, err)
+		return
+	}
+	if recorded {
+		if err := materializeTaskRunTx(tx, runID); err != nil {
+			log.Printf("[reaper] materialize stage timeout event for claw %s: %v", clawID, err)
+			return
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		log.Printf("[reaper] commit stage timeout event for claw %s: %v", clawID, err)
 	}
 }

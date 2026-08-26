@@ -1,6 +1,9 @@
 package hub
 
-import "log"
+import (
+	"log"
+	"time"
+)
 
 // getPipelineStage returns the current pipeline stage ID for a claw.
 // Returns "" if the claw has no pipeline stage set.
@@ -10,11 +13,27 @@ func (s *Server) getPipelineStage(clawID string) string {
 	return stage
 }
 
+// getPipelineStageEnteredAt returns when the claw most recently entered its
+// current pipeline stage. A zero time means the timestamp is unavailable.
+func (s *Server) getPipelineStageEnteredAt(clawID string) time.Time {
+	var enteredAt int64
+	if err := s.db.QueryRow(`SELECT pipeline_stage_entered_at FROM claws WHERE id=?`, clawID).Scan(&enteredAt); err != nil || enteredAt <= 0 {
+		return time.Time{}
+	}
+	return time.UnixMilli(enteredAt).UTC()
+}
+
 // claimPipelineStageTransition atomically updates the pipeline stage only if the
 // claw is not already in that stage. It returns true when the caller won the
 // transition and should run on_enter actions.
-func (s *Server) claimPipelineStageTransition(clawID, stageID string) bool {
-	res, err := s.db.Exec(`UPDATE claws SET pipeline_stage=? WHERE id=? AND pipeline_stage<>?`, stageID, clawID, stageID)
+func (s *Server) claimPipelineStageTransition(clawID, stageID string, expectedStage ...string) bool {
+	query := `UPDATE claws SET pipeline_stage=?, pipeline_stage_entered_at=? WHERE id=? AND pipeline_stage<>?`
+	args := []any{stageID, epochMillis(now()), clawID, stageID}
+	if len(expectedStage) > 0 {
+		query += ` AND pipeline_stage=?`
+		args = append(args, expectedStage[0])
+	}
+	res, err := s.db.Exec(query, args...)
 	if err != nil {
 		log.Printf("[pipeline] failed to set stage %q for claw %s: %v", stageID, clawID[:8], err)
 		return false
