@@ -536,9 +536,9 @@ func (s *Server) checkAgentIdleResume(nowAt time.Time, clawID string, cc *clawCo
 	}
 
 	var status, taskRunID, pipelineStage string
-	var resumeAt, resumeCount, createdAtSec int64
-	err := s.db.QueryRow(`SELECT status, COALESCE(task_run_id,''), COALESCE(pipeline_stage,''), idle_resume_at, idle_resume_count, CAST(strftime('%s', created_at) AS INTEGER) FROM claws WHERE id=?`, clawID).
-		Scan(&status, &taskRunID, &pipelineStage, &resumeAt, &resumeCount, &createdAtSec)
+	var resumeAt, resumeCount, stretchFailures, lastAttemptAt, createdAtSec int64
+	err := s.db.QueryRow(`SELECT status, COALESCE(task_run_id,''), COALESCE(pipeline_stage,''), idle_resume_at, idle_resume_count, idle_resume_stretch_failures, idle_resume_last_attempt_at, CAST(strftime('%s', created_at) AS INTEGER) FROM claws WHERE id=?`, clawID).
+		Scan(&status, &taskRunID, &pipelineStage, &resumeAt, &resumeCount, &stretchFailures, &lastAttemptAt, &createdAtSec)
 	if err != nil {
 		if err != sql.ErrNoRows {
 			log.Printf("[agent-idle] read claw %s for resume: %v", shortID(clawID), err)
@@ -549,34 +549,36 @@ func (s *Server) checkAgentIdleResume(nowAt time.Time, clawID string, cc *clawCo
 	// floored start, so a hub restart or bridge reconnect cannot re-poke a
 	// stretch that was already resumed or parked.
 	anchor := agentIdleStretchAnchor(snap.lastTurn, createdAtSec)
-	if resumeAt != 0 {
-		if anchor.UnixMilli() <= resumeAt+agentIdleStretchSlack.Milliseconds() {
-			return // this stretch was already handled
-		}
+	sameStretch := resumeAt != 0 && anchor.UnixMilli() <= resumeAt+agentIdleStretchSlack.Milliseconds()
+	if resumeAt != 0 && !sameStretch {
 		// lastTurnFinishedAt has moved past the latched stretch, so a turn
 		// genuinely ran and finished (an aborted reservation cannot produce
-		// this — it never stamps lastTurnFinishedAt). This is a new stretch:
-		// re-arm the durable latch. The comparison above would already let
-		// this tick through, but clearing keeps the stored state honest for
-		// the paths below that return without re-latching (cap reached,
-		// no longer eligible, parked).
+		// this — it never stamps lastTurnFinishedAt). This is a new stretch,
+		// and the previous one was resolved by a real resume: re-arm the
+		// durable latch AND reset the per-stretch consecutive-failure
+		// counter. Resetting here — not on a fixed schedule — is what makes
+		// the counter "consecutive within one wedge" rather than lifetime:
+		// three separate, successfully-resolved stalls over a claw's life
+		// must never accumulate toward escalation.
 		s.clearAgentIdleResumeLatch(clawID)
+		stretchFailures = 0
 	}
-	// resumeCount failed resumes have already been sent into this claw with
-	// no progress to show for it (each one re-arms only on a real turn
-	// finishing, per the anchor check above). Past the configured threshold,
-	// another identical poke is not a plausible fix — escalate instead of
-	// spending the rest of the lifetime cap on prompts that keep not
-	// landing. This is the exact gap agentIdleResumeBlindGrace's comment
-	// documents: a wedged agent behind a healthy-heartbeating gateway never
-	// reaches claw_retry's own gateway-health escalation.
-	if resumeCount >= int64(cfg.idleResumeEscalateAfter) {
-		s.escalateIdleResumeFailure(clawID, int(resumeCount), idleFor)
-		return
+	if sameStretch {
+		// Already latched at least once for this exact stretch. Retrying is
+		// the whole point of the escalation counter (a fully wedged claw
+		// never closes its stretch, so waiting for a "new" stretch would
+		// never let this counter move — see agentIdleResumeEscalateAfter's
+		// comment) but it must not fire on every reaper tick: space repeat
+		// attempts out at the same cadence as the initial resume.
+		if lastAttemptAt != 0 && nowAt.Sub(time.UnixMilli(lastAttemptAt)) < cfg.idleResumeAfter {
+			return
+		}
 	}
-	if resumeCount >= agentIdleResumeMaxAttempts {
-		return // cap already reached and already logged (see below)
-	}
+	// Eligibility and baseline parking are checked BEFORE any escalation
+	// decision. A claw that is no longer eligible — parked on a human via
+	// pr_opened/waiting-for-merge, no longer connected, etc. — must never be
+	// escalated on the strength of a historical failure count: escalation is
+	// for a claw that is STILL plausibly stuck right now, not a ledger entry.
 	if !agentIdleEligible(status, taskRunID, s.agentIdleRunPhase(taskRunID), s.agentIdleHasClawPRs(clawID), s.agentIdleAutoDriven(clawID, taskRunID, pipelineStage)) {
 		return
 	}
@@ -594,14 +596,38 @@ func (s *Server) checkAgentIdleResume(nowAt time.Time, clawID string, cc *clawCo
 		return
 	}
 
+	// stretchFailures consecutive failed resumes have already been sent into
+	// THIS SAME still-open stretch with no progress to show for it (the
+	// counter is reset above the moment a stretch actually closes). Past the
+	// configured threshold, another identical poke is not a plausible fix —
+	// escalate instead of spending the rest of the lifetime cap on prompts
+	// that keep not landing. This is the exact gap agentIdleResumeBlindGrace's
+	// comment documents: a wedged agent behind a healthy-heartbeating gateway
+	// never reaches claw_retry's own gateway-health escalation.
+	//
+	// TEARDOWN-ONLY: escalateIdleResumeFailure goes straight to
+	// stopAgentWithReason / claw_retry. There is no hub-to-bridge
+	// gateway-restart control message, and building one is out of scope; this
+	// accepts losing the claw's in-progress work rather than waiting
+	// indefinitely for a human to notice a wedged gateway.
+	if sameStretch && stretchFailures >= int64(cfg.idleResumeEscalateAfter) {
+		s.escalateIdleResumeFailure(clawID, int(stretchFailures), idleFor)
+		return
+	}
+	if resumeCount >= agentIdleResumeMaxAttempts {
+		return // lifetime cap already reached and already logged (see below)
+	}
+
 	// Latch before injecting: if the UPDATE fails we send nothing and retry on
 	// the next tick, whereas injecting first would risk a second poke for the
 	// same stretch on every tick until the write finally succeeded.
-	if _, err := s.db.Exec(`UPDATE claws SET idle_resume_at=?, idle_resume_count=idle_resume_count+1 WHERE id=?`, stretchStart, clawID); err != nil {
+	nextStretchFailures := stretchFailures + 1
+	if _, err := s.db.Exec(`UPDATE claws SET idle_resume_at=?, idle_resume_count=idle_resume_count+1, idle_resume_stretch_failures=?, idle_resume_last_attempt_at=? WHERE id=?`,
+		stretchStart, nextStretchFailures, nowAt.UnixMilli(), clawID); err != nil {
 		log.Printf("[agent-idle] latch resume for claw %s: %v", shortID(clawID), err)
 		return
 	}
-	log.Printf("[agent-idle] auto-resuming claw %s after %d minutes idle (attempt %d/%d)", shortID(clawID), int(idleFor.Minutes()), resumeCount+1, agentIdleResumeMaxAttempts)
+	log.Printf("[agent-idle] auto-resuming claw %s after %d minutes idle (attempt %d/%d, stretch failure %d/%d)", shortID(clawID), int(idleFor.Minutes()), resumeCount+1, agentIdleResumeMaxAttempts, nextStretchFailures, cfg.idleResumeEscalateAfter)
 	if resumeCount+1 >= agentIdleResumeMaxAttempts {
 		log.Printf("[agent-idle] claw %s reached the lifetime auto-resume cap of %d; no further resumes will be sent", shortID(clawID), agentIdleResumeMaxAttempts)
 	}
@@ -776,8 +802,16 @@ func (s *Server) clearAgentIdleLatch(clawID string, cc *clawConn) {
 // turn still ends the stretch, so resetting the counter on every turn would
 // make the lifetime cap unreachable in precisely the runaway case it exists to
 // bound (wake, do nothing, idle, repeat).
+//
+// idle_resume_stretch_failures IS reset here, unlike idle_resume_count: this
+// is the one place the caller has confirmed a turn actually ran and closed
+// the stretch that was latched, which is exactly the "successful resume"
+// event the per-stretch escalation counter resets on (see
+// checkAgentIdleResume). idle_resume_last_attempt_at is cleared alongside it
+// so the next stretch's first attempt is not rate-limited against a
+// timestamp that belongs to the stretch that just closed.
 func (s *Server) clearAgentIdleResumeLatch(clawID string) {
-	if _, err := s.db.Exec(`UPDATE claws SET idle_resume_at=0 WHERE id=? AND idle_resume_at != 0`, clawID); err != nil {
+	if _, err := s.db.Exec(`UPDATE claws SET idle_resume_at=0, idle_resume_stretch_failures=0, idle_resume_last_attempt_at=0 WHERE id=? AND idle_resume_at != 0`, clawID); err != nil {
 		log.Printf("[agent-idle] clear resume latch for claw %s: %v", shortID(clawID), err)
 	}
 }

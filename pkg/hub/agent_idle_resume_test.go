@@ -257,14 +257,19 @@ func TestAgentIdleResumeStopsAtLifetimeCap(t *testing.T) {
 	}
 }
 
-// TestAgentIdleResumeEscalatesAfterRepeatedFailures covers item 5: once a
-// claw has burned through idle_resume_escalate_after failed resumes with no
-// progress, checkAgentIdleResume must stop injecting another identical prompt
-// and escalate instead — without ever bumping the resume counter or message
-// count past the escalation threshold.
+// TestAgentIdleResumeEscalatesAfterRepeatedFailures covers item 5 / finding
+// A2: escalation must count CONSECUTIVE failed resumes inside ONE still-open
+// stretch (a claw that never runs another turn after being poked), not a
+// lifetime total. The claw connection is deliberately reused unchanged across
+// every tick — lastTurnFinishedAt never moves — so this models exactly the
+// NEXT-769 shape the plan describes: a fresh claw gets one resume, stays
+// wedged, and (unlike the original, inverted implementation) must still be
+// able to reach the threshold from repeat attempts against that same open
+// stretch.
 func TestAgentIdleResumeEscalatesAfterRepeatedFailures(t *testing.T) {
 	threshold := 2
-	s, db := newIdleResumeTestServer(t, &types.LivenessConfig{IdleResumeEscalateAfter: &threshold})
+	idleAfter := "1m"
+	s, db := newIdleResumeTestServer(t, &types.LivenessConfig{IdleResumeEscalateAfter: &threshold, IdleResumeAfter: idleAfter})
 	const clawID = "resume-escalate"
 	// bootstrap_ok=1 and a real provider/task-run so escalation's retry path
 	// (escalateClawHealthFailure -> stopAgentWithReason) can actually act,
@@ -280,24 +285,24 @@ func TestAgentIdleResumeEscalatesAfterRepeatedFailures(t *testing.T) {
 	}
 	setClawPipelineStage(t, db, clawID, "implement")
 
+	// The SAME connection, the SAME stretch, on every tick: no turn ever
+	// finishes, so this is one continuous wedge, not threshold-many distinct
+	// stalls.
+	cc := idleTestConn(clawID, 15*time.Minute)
+	nowAt := time.Now()
 	for i := 0; i < threshold; i++ {
-		cc := idleTestConn(clawID, time.Hour-time.Duration(i)*2*time.Minute)
-		s.checkAgentIdleResume(time.Now(), clawID, cc)
+		s.checkAgentIdleResume(nowAt, clawID, cc)
+		nowAt = nowAt.Add(time.Minute)
 	}
 	if got := idleResumeMessages(t, db, clawID); got != threshold {
 		t.Fatalf("injected %d resume messages before escalation, want %d", got, threshold)
 	}
 
-	// One more distinct stretch: this tick must escalate instead of resuming
-	// again, leaving the resume counter and message count exactly as they
-	// were.
-	cc := idleTestConn(clawID, 40*time.Minute)
-	s.checkAgentIdleResume(time.Now(), clawID, cc)
+	// One more tick against the SAME unresolved stretch: this must escalate
+	// instead of resuming again, leaving the message count exactly as it was.
+	s.checkAgentIdleResume(nowAt, clawID, cc)
 	if got := idleResumeMessages(t, db, clawID); got != threshold {
 		t.Fatalf("injected %d resume messages after escalation, want unchanged %d", got, threshold)
-	}
-	if _, count := clawIdleResumeState(t, db, clawID); count != int64(threshold) {
-		t.Fatalf("resume counter=%d after escalation, want unchanged %d", count, threshold)
 	}
 	var status string
 	if err := db.QueryRow(`SELECT status FROM claws WHERE id=?`, clawID).Scan(&status); err != nil {
@@ -305,6 +310,92 @@ func TestAgentIdleResumeEscalatesAfterRepeatedFailures(t *testing.T) {
 	}
 	if status == "connected" {
 		t.Fatalf("claw status=%q, want escalation to have moved it off connected", status)
+	}
+}
+
+// TestAgentIdleResumeDoesNotEscalateAcrossHealthySeparateStalls is the
+// regression for finding A2(a): idle_resume_count is a LIFETIME counter that
+// is deliberately never reset (TestAgentIdleResumeStopsAtLifetimeCap), but the
+// escalation counter must be per-stretch. Three (or more) separate stalls,
+// each one actually resolved by its resume before the next begins, must never
+// tear the claw down — only a single stretch that keeps failing to close may
+// escalate. This test would FAIL against a lifetime-scoped counter (it would
+// escalate on the threshold-th distinct, successful stall).
+func TestAgentIdleResumeDoesNotEscalateAcrossHealthySeparateStalls(t *testing.T) {
+	threshold := 2
+	s, db := newIdleResumeTestServer(t, &types.LivenessConfig{IdleResumeEscalateAfter: &threshold})
+	const clawID = "resume-healthy-repeats"
+	insertSlackTestClaw(t, db, clawID, "connected", 1, "", oldEnough)
+	if _, err := db.Exec(`UPDATE claws SET provider='noop' WHERE id=?`, clawID); err != nil {
+		t.Fatalf("set provider: %v", err)
+	}
+	setClawPipelineStage(t, db, clawID, "implement")
+
+	// Five genuinely distinct stretches, each with lastTurnFinishedAt moved
+	// forward — i.e. a real turn ran and closed the previous stretch — well
+	// past the escalation threshold in count, and well past
+	// agentIdleResumeMaxAttempts too so the lifetime cap cannot be the reason
+	// nothing extra happens here.
+	for i := 0; i < threshold+3; i++ {
+		cc := idleTestConn(clawID, time.Hour-time.Duration(i)*2*time.Minute)
+		s.checkAgentIdleResume(time.Now(), clawID, cc)
+	}
+	if got := idleResumeMessages(t, db, clawID); got != threshold+3 {
+		t.Fatalf("injected %d resume messages across healthy stalls, want %d", got, threshold+3)
+	}
+	var status string
+	if err := db.QueryRow(`SELECT status FROM claws WHERE id=?`, clawID).Scan(&status); err != nil {
+		t.Fatalf("read claw status: %v", err)
+	}
+	if status != "connected" {
+		t.Fatalf("claw status=%q, want still connected: healthy separate stalls must never escalate", status)
+	}
+}
+
+// TestAgentIdleResumeNeverEscalatesAnIneligibleClaw is the regression for
+// finding A3: escalation must be gated behind agentIdleEligible, not run
+// before it. A claw parked in pr_opened awaiting a human merge is idle by
+// design (see agentIdleEligible's own doc comment) and must never be torn
+// down, no matter how large its per-stretch failure count already is — which
+// covers both a claw that legitimately parked after failed resumes, and the
+// "first tick after deploy" mass-escalation risk of a stale count left over
+// from before this fix.
+func TestAgentIdleResumeNeverEscalatesAnIneligibleClaw(t *testing.T) {
+	threshold := 1
+	s, db := newIdleResumeTestServer(t, &types.LivenessConfig{IdleResumeEscalateAfter: &threshold})
+	const clawID = "resume-parked-pr"
+	const runID = "run-parked-pr"
+	insertSlackTestClaw(t, db, clawID, "connected", 1, runID, oldEnough)
+	if _, err := db.Exec(`UPDATE claws SET provider='noop' WHERE id=?`, clawID); err != nil {
+		t.Fatalf("set provider: %v", err)
+	}
+	insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{
+		RunID: runID, AttemptID: "attempt-" + runID, ClawID: clawID, TenantID: "test-tenant-id",
+		OwnerType: taskRunOwnerFactory, Factory: "bugfix", Phase: taskRunPhasePROpened, StartedAt: 1760000000000,
+	})
+
+	cc := idleTestConn(clawID, 20*time.Minute)
+	// Simulate a failure count already at (or past) the escalation threshold
+	// for the CURRENT stretch, as if this claw had racked up failed resumes
+	// before it ever reached pr_opened, or as a stale value from before this
+	// fix landed.
+	anchor := agentIdleStretchAnchor(cc.lastTurnFinishedAt, 0).UnixMilli()
+	if _, err := db.Exec(`UPDATE claws SET idle_resume_at=?, idle_resume_stretch_failures=?, idle_resume_last_attempt_at=? WHERE id=?`,
+		anchor, threshold+5, anchor, clawID); err != nil {
+		t.Fatalf("seed stretch failure count: %v", err)
+	}
+
+	s.checkAgentIdleResume(time.Now(), clawID, cc)
+
+	var status string
+	if err := db.QueryRow(`SELECT status FROM claws WHERE id=?`, clawID).Scan(&status); err != nil {
+		t.Fatalf("read claw status: %v", err)
+	}
+	if status != "connected" {
+		t.Fatalf("claw status=%q, want unchanged: a pr_opened claw parked on a human must never be escalated", status)
+	}
+	if got := idleResumeMessages(t, db, clawID); got != 0 {
+		t.Fatalf("injected %d resume messages into an ineligible claw, want 0", got)
 	}
 }
 

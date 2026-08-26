@@ -142,6 +142,26 @@ func migrate(db *sql.DB) error {
 	if err := addColumn(db, "claws", "idle_resume_count", `INTEGER NOT NULL DEFAULT 0`); err != nil {
 		return err
 	}
+	// idle_resume_stretch_failures is the PER-STRETCH consecutive-failure
+	// counter behind the wedged-gateway escalation (idle_resume_escalate_after):
+	// it counts resume attempts sent into the CURRENT, still-open stretch and
+	// resets to 0 the moment that stretch actually closes (clearAgentIdleResumeLatch).
+	// This is deliberately separate from idle_resume_count, which is a lifetime
+	// counter that is never reset: a claw that has had three healthy, separate
+	// stalls over its life (each resolved by its resume) must not be torn down,
+	// while a claw stuck in one unbroken wedge must be able to reach the
+	// threshold even though only ever one resume is latched per stretch at a
+	// time.
+	if err := addColumn(db, "claws", "idle_resume_stretch_failures", `INTEGER NOT NULL DEFAULT 0`); err != nil {
+		return err
+	}
+	// idle_resume_last_attempt_at (epoch millis) is when the most recent resume
+	// attempt was sent for the current stretch. It lets checkAgentIdleResume
+	// retry a still-open, unresolved stretch at the same idleResumeAfter cadence
+	// instead of latching a single attempt forever (see idle_resume_at).
+	if err := addColumn(db, "claws", "idle_resume_last_attempt_at", `INTEGER NOT NULL DEFAULT 0`); err != nil {
+		return err
+	}
 	_, _ = db.Exec(`ALTER TABLE claw_prs ADD COLUMN last_comment_at TEXT NOT NULL DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE claw_prs ADD COLUMN pr_conditions_fired INTEGER NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE claw_prs ADD COLUMN permanent_failure_count INTEGER NOT NULL DEFAULT 0`)
@@ -496,7 +516,9 @@ func migrate(db *sql.DB) error {
 		no_progress_paused INTEGER NOT NULL DEFAULT 0,
 		idle_since INTEGER NOT NULL DEFAULT 0,
 		idle_resume_at INTEGER NOT NULL DEFAULT 0,
-		idle_resume_count INTEGER NOT NULL DEFAULT 0
+		idle_resume_count INTEGER NOT NULL DEFAULT 0,
+		idle_resume_stretch_failures INTEGER NOT NULL DEFAULT 0,
+		idle_resume_last_attempt_at INTEGER NOT NULL DEFAULT 0
 	);
 
 
