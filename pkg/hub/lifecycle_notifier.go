@@ -257,12 +257,27 @@ func (s *Server) initLifecycleNotifierBaseline() {
 			// route would present a channel added in the same maintenance
 			// window as the legacy incumbent, hand it the incumbent's frozen
 			// shared cursor and replay the whole stalled backlog into it.
-			if via := lifecycleLegacyIncumbentVia(cfg.Lifecycle); via != "" {
+			//
+			// An absent stamp is NOT proof the scheme never went live:
+			// pruneLifecycleRouteState deletes the stamps of routes that left
+			// the config and deliberately keeps the routes_live latch for
+			// exactly this reason. Consult the latch first, or a restart taken
+			// while a config was collapsed onto one brand-new route would
+			// present that route as the legacy incumbent.
+			var via string
+			live, liveErr := s.lifecycleRoutingSchemeLive()
+			if liveErr != nil {
+				log.Printf("[notify] read routing scheme state: %v", liveErr)
+			} else if !live {
+				via = lifecycleLegacyIncumbentVia(cfg.Lifecycle)
+			}
+			if via != "" {
 				s.setNotifierStateInt64(lifecycleClawRouteBaselineKey(via), 1)
-			} else {
-				// The config already carries several routes and no longer says
-				// which one was the single `via`, so no route can be verified
-				// as the incumbent. Latch the scheme instead: every route
+			} else if liveErr == nil {
+				// Either the scheme has already been live, or the config
+				// carries several routes and no longer says which one was the
+				// single `via`: no route can be verified as the incumbent.
+				// Latch the scheme instead: every route
 				// starts at the stream head and ensureLifecycleClawRouteBaselines
 				// seeds its claw fence, which loses the incumbent's undelivered
 				// backlog but never floods a brand-new channel with it.
@@ -554,6 +569,31 @@ func lifecycleLegacyIncumbentVia(lc *types.LifecycleNotificationsConfig) string 
 	return ""
 }
 
+// lifecycleRoutesNeedOwnState reports whether the configured routes must be
+// given per-route state (cursor and claw fence) at CONFIG time rather than at
+// the first tick their notifier happens to build. Multi-route configs always
+// do. A LONE route does too once the per-route scheme has gone live and that
+// route is not the legacy incumbent: collapsing a config onto one brand-new
+// channel leaves it as the hub's only route, and materialising its state only
+// on recovery would bury everything produced while its notifier could not be
+// built — the very window each tick logs as "held until it can be built".
+// The genuine legacy single-`via` shape keeps using the shared state and gets
+// no per-route keys, so pre-routing behaviour is byte-for-byte unchanged.
+func (s *Server) lifecycleRoutesNeedOwnState(routes []types.LifecycleRoute) bool {
+	if len(routes) >= 2 {
+		return true
+	}
+	if len(routes) == 0 {
+		return false
+	}
+	via := strings.TrimSpace(routes[0].Via)
+	if via == "" || s.lifecycleSingleViaIncumbent(via) {
+		return false
+	}
+	live, err := s.lifecycleRoutingSchemeLive()
+	return err == nil && live
+}
+
 func (s *Server) lifecycleSingleViaIncumbent(via string) bool {
 	if via == "" {
 		return false
@@ -580,7 +620,7 @@ func (s *Server) lifecycleSingleViaIncumbent(via string) bool {
 // everything that piled up behind a paused or unbuildable sibling.
 func (s *Server) ensureLifecycleRouteWatermarks(lc *types.LifecycleNotificationsConfig) {
 	routes := lc.EffectiveRoutes()
-	if len(routes) < 2 {
+	if !s.lifecycleRoutesNeedOwnState(routes) {
 		// The legacy single-route shape keeps using the shared key
 		// (lifecycleWatermarkKeyFor), so it needs no cursor of its own.
 		return
@@ -632,7 +672,18 @@ func (s *Server) ensureLifecycleRouteWatermarks(lc *types.LifecycleNotifications
 		if _, found, err := s.notifierStateInt64(key); err != nil || found {
 			continue
 		}
-		if !routed && sharedFound && (len(incumbents) == 0 || incumbents[via]) {
+		if sharedFound && incumbents[via] {
+			// The incumbent is read off the SHARED key precisely because it
+			// never got one of its own (lifecycleWatermarkKeyFor), so that is
+			// its real position no matter how the routes_live latch came to be
+			// set — a restricted single route latches it on its very first tick
+			// (lifecycleClawRouteSkip) without ever leaving the shared key.
+			// Stamping the head here instead would drop everything the
+			// incumbent had not yet delivered, silently and for good.
+			s.setNotifierStateInt64(key, shared)
+			continue
+		}
+		if !routed && sharedFound && len(incumbents) == 0 {
 			s.setNotifierStateInt64(key, shared)
 			continue
 		}

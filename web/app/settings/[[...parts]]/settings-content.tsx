@@ -303,14 +303,13 @@ export default function SettingsSectionPage() {
   const selectedWorkspaceLabel = selectedWorkspace || "No workspaces"
   const selectedWorkspaceInitial = selectedWorkspace ? selectedWorkspace.trim()[0].toUpperCase() : "-"
 
-  const load = useCallback(
-    () => fetchSettings()
-      .then((data) => setSettings(data))
-      .catch((e) => setError(e instanceof Error ? e.message : "Failed to load")),
-    [],
-  )
+  // Rejects on failure: the re-fetch that follows a save is part of the save,
+  // not bookkeeping after it (see runSave), so its caller has to see the error.
+  const load = useCallback(() => fetchSettings().then((data) => setSettings(data)), [])
 
-  useEffect(() => { load() }, [load])
+  useEffect(() => {
+    load().catch((e) => setError(e instanceof Error ? e.message : "Failed to load"))
+  }, [load])
 
   useEffect(() => {
     const hubUrl = getHubUrl()
@@ -352,22 +351,41 @@ export default function SettingsSectionPage() {
     }
   }, [firstPartIsPlaceholder, routeHasOverviewSlug, routeWorkspace, router, section, selectedWorkspace, workspaces])
 
-  async function save(patch: object): Promise<boolean> {
+  // runSave patches the settings and re-fetches them, returning null on success
+  // or the message to show. The re-fetch is not optional bookkeeping: every
+  // section builds its next patch from `settings`, so a swallowed reload
+  // failure leaves the screen editing a snapshot the hub has already moved
+  // past, and the next save re-sends those stale values — reverting whatever
+  // this one just persisted. Report it as a failed save so the dialog that
+  // triggered it stays open instead of closing on data it can no longer trust.
+  async function runSave(patch: object): Promise<string | null> {
     setSaving(true)
     setError("")
     setSuccess("")
     try {
-      await patchSettings(patch)
+      try {
+        await patchSettings(patch)
+      } catch (e) {
+        return e instanceof Error ? e.message : "Save failed"
+      }
+      try {
+        await load()
+      } catch (e) {
+        const reason = e instanceof Error ? e.message : "the settings could not be re-read"
+        return `Saved, but reloading the settings failed (${reason}). Reload the page before editing again.`
+      }
       setSuccess("Saved")
-      await load()
       setTimeout(() => setSuccess(""), 2000)
-      return true
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Save failed")
-      return false
+      return null
     } finally {
       setSaving(false)
     }
+  }
+
+  async function save(patch: object): Promise<boolean> {
+    const message = await runSave(patch)
+    if (message) setError(message)
+    return message === null
   }
 
   // save(), but handing the failure message back to the caller. The page-level
@@ -375,22 +393,9 @@ export default function SettingsSectionPage() {
   // that saves from its own dialog has to render the error there instead, or
   // the button looks dead.
   async function saveReportingError(patch: object): Promise<string | null> {
-    setSaving(true)
-    setError("")
-    setSuccess("")
-    try {
-      await patchSettings(patch)
-      setSuccess("Saved")
-      await load()
-      setTimeout(() => setSuccess(""), 2000)
-      return null
-    } catch (e) {
-      const message = e instanceof Error ? e.message : "Save failed"
-      setError(message)
-      return message
-    } finally {
-      setSaving(false)
-    }
+    const message = await runSave(patch)
+    if (message) setError(message)
+    return message
   }
 
   // Silent save: patches without the global 'Saved' banner (used for toggle-style updates)
@@ -4465,20 +4470,18 @@ function MCPServersSection({ settings, onSave, saving }: { settings: SettingsDat
 // ── Notifier ─────────────────────────────────────────────────────────────────
 
 // Labels mirror the headlines the hub actually posts, so what an operator
-// checks here is what they will read in the channel.
+// checks here is what they will read in the channel. The list is deliberately
+// the hub's routable vocabulary (types.LifecycleEventTypes) and nothing more:
+// the concrete failure kinds ("Couldn't get a machine", "Agent ran out of
+// time", ...) are how ONE agent_stopped event is titled, never event types of
+// their own, so offering them as separate checkboxes built routes that could
+// never fire.
 const LIFECYCLE_EVENT_LABELS: Record<string, string> = {
   agent_started: "Agent started",
   pr_opened: "PR opened",
   agent_idle: "Agent stalled",
-  agent_stopped: "Agent died",
-  creation_failed: "Couldn't create the agent",
-  provision_failed: "Couldn't get a machine",
-  bootstrap_failed: "Agent crashed during startup",
-  permission_or_auth_failed: "Agent was denied access",
-  provider_lost: "Lost contact with the provider",
-  timeout: "Agent ran out of time",
+  agent_stopped: "Agent died or failed",
   done_without_pr: "Agent finished without a PR",
-  unknown_failure: "Agent failed",
 }
 
 type LifecycleCategory = keyof LifecycleEventToggles
@@ -4490,14 +4493,7 @@ const LIFECYCLE_EVENT_CATEGORY: Record<string, LifecycleCategory> = {
   pr_opened: "prOpened",
   agent_idle: "agentIdle",
   agent_stopped: "failures",
-  creation_failed: "failures",
-  provision_failed: "failures",
-  bootstrap_failed: "failures",
-  permission_or_auth_failed: "failures",
-  provider_lost: "failures",
-  timeout: "failures",
   done_without_pr: "failures",
-  unknown_failure: "failures",
 }
 
 const LIFECYCLE_CATEGORIES: { id: LifecycleCategory; label: string; description: string }[] = [

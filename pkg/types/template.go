@@ -565,20 +565,25 @@ type NotificationsConfig struct {
 	Lifecycle *LifecycleNotificationsConfig `yaml:"lifecycle,omitempty" json:"lifecycle,omitempty"`
 }
 
-// LifecycleEventTypes is the canonical set of lifecycle event wire types.
+// LifecycleEventTypes is the canonical set of lifecycle event wire types: the
+// vocabulary a route's allow-list may name, and the one the settings screen
+// renders one checkbox per entry from.
+//
+// It holds ONLY values that are written as task_run_events.event_type, because
+// that is the column route matching compares against. The concrete failure
+// kinds (provision_failed, bootstrap_failed, provider_lost,
+// permission_or_auth_failed, timeout, creation_failed, unknown_failure) are
+// run-level classifications living in failure_type; no event ever carries them
+// as its type, so a route built from them would match nothing and receive no
+// message ever while the test-send endpoint happily reported success. Failures
+// route as agent_stopped — the event a dying agent produces, rendered with the
+// headline its failure_type earns — and done_without_pr.
 var LifecycleEventTypes = []string{
 	"agent_started",
 	"pr_opened",
 	"agent_stopped",
-	"creation_failed",
-	"provision_failed",
-	"bootstrap_failed",
-	"permission_or_auth_failed",
-	"provider_lost",
-	"timeout",
 	"agent_idle",
 	"done_without_pr",
-	"unknown_failure",
 }
 
 // IsLifecycleEventType reports whether event is a supported lifecycle event

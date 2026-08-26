@@ -284,16 +284,23 @@ func TestLifecycleNotificationsConfigEffectiveRoutes(t *testing.T) {
 }
 
 func TestLifecycleEventTypes(t *testing.T) {
-	if len(LifecycleEventTypes) != 12 {
-		t.Fatalf("len(LifecycleEventTypes) = %d, want 12", len(LifecycleEventTypes))
+	// Regression: the vocabulary also listed the concrete failure kinds, which
+	// exist only as task_run_events.failure_type. Route matching compares
+	// against event_type, so a checkbox for one of them built a route that
+	// could never fire while the test-send endpoint reported success.
+	want := []string{"agent_started", "pr_opened", "agent_stopped", "agent_idle", "done_without_pr"}
+	if !reflect.DeepEqual(LifecycleEventTypes, want) {
+		t.Fatalf("LifecycleEventTypes = %v, want %v", LifecycleEventTypes, want)
 	}
 	for _, event := range LifecycleEventTypes {
 		if !IsLifecycleEventType(event) {
 			t.Errorf("IsLifecycleEventType(%q) = false, want true", event)
 		}
 	}
-	if IsLifecycleEventType("not_an_event") {
-		t.Fatal("IsLifecycleEventType(not_an_event) = true, want false")
+	for _, event := range []string{"not_an_event", "provision_failed", "timeout", "unknown_failure"} {
+		if IsLifecycleEventType(event) {
+			t.Errorf("IsLifecycleEventType(%q) = true, want false", event)
+		}
 	}
 }
 

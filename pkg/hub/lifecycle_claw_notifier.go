@@ -285,10 +285,12 @@ func (s *Server) stampLifecycleClawRouteBaselines(lc *types.LifecycleNotificatio
 // materialises the task-run cursor of a route whose notifier is unbuildable
 // (typo'd token secret), so seeding its claw baseline only on recovery would
 // bury exactly the claw events the tick promises are "held until it can be
-// built", while the task-run events of the same window are delivered.
+// built", while the task-run events of the same window are delivered. A config
+// collapsed onto ONE brand-new route is covered too (lifecycleRoutesNeedOwnState):
+// being the hub's only route does not make its outage any less of an outage.
 func (s *Server) ensureLifecycleClawRouteBaselines(lc *types.LifecycleNotificationsConfig) {
 	routes := lc.EffectiveRoutes()
-	if len(routes) < 2 {
+	if !s.lifecycleRoutesNeedOwnState(routes) {
 		// The legacy single-route shape is fenced by the legacy delivery table;
 		// ensureLifecycleClawRouteBaseline handles its one key.
 		return
@@ -302,6 +304,19 @@ func (s *Server) ensureLifecycleClawRouteBaselines(lc *types.LifecycleNotificati
 		via := strings.TrimSpace(route.Via)
 		if via == "" {
 			continue
+		}
+		if len(routes) == 1 {
+			// The stamp written below is what lifecycleSingleViaIncumbent
+			// reads, so for a lone route it must never land ahead of the
+			// cursor ensureLifecycleRouteWatermarks materialises earlier in
+			// this same tick: a route carrying a claw stamp and no cursor of
+			// its own IS the legacy incumbent, and would be handed the shared
+			// floor and replay the whole multi-route-era backlog. If that
+			// write did not land (a transient state-read failure), wait for
+			// the next tick, which retries both in order.
+			if _, found, err := s.notifierStateInt64(lifecycleRouteWatermarkKey(via)); err != nil || !found {
+				continue
+			}
 		}
 		key := lifecycleClawRouteBaselineKey(via)
 		if _, found, err := s.notifierStateInt64(key); err != nil || found {
