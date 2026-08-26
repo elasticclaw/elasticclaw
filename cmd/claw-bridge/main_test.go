@@ -670,8 +670,8 @@ func TestDockerGitHubCredentialHelperScriptDoesNotPersistClawToken(t *testing.T)
 	if !strings.Contains(script, `credential.helper "!$helper_path"`) {
 		t.Fatalf("helper script should register helper as an explicit shell command:\n%s", script)
 	}
-	if !strings.Contains(script, `helper_check="$("$helper_path" 2>&1)"`) {
-		t.Fatalf("helper script should execute helper directly for diagnostics:\n%s", script)
+	if !strings.Contains(script, `printf 'protocol=https\nhost=github.com\n\n' | "$helper_path"`) {
+		t.Fatalf("helper script should execute helper with a minimal credential request for diagnostics:\n%s", script)
 	}
 	if !strings.Contains(script, `GitHub credential helper did not output 'username=x-access-token'`) {
 		t.Fatalf("helper script should diagnose missing helper username:\n%s", script)
@@ -690,6 +690,51 @@ func TestDockerGitHubCredentialHelperScriptDoesNotPersistClawToken(t *testing.T)
 	}
 	if !strings.Contains(script, `--data-urlencode "claw_token=$claw_token"`) {
 		t.Fatalf("helper script should URL-encode claw token at runtime:\n%s", script)
+	}
+	if !strings.Contains(script, `path=*`) {
+		t.Fatalf("helper script should parse the repo path from git credential input:\n%s", script)
+	}
+	if !strings.Contains(script, `${repo:+--data-urlencode "repo=$repo"}`) {
+		t.Fatalf("helper script should pass the repo to the hub when a path is provided:\n%s", script)
+	}
+}
+
+func TestDockerGitHubCredentialHelperBinaryPassesRepoFromPath(t *testing.T) {
+	var gotRepo, gotClawToken string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/github/token/claw-1" {
+			t.Errorf("path = %s, want /api/github/token/claw-1", r.URL.Path)
+		}
+		gotClawToken = r.URL.Query().Get("claw_token")
+		gotRepo = r.URL.Query().Get("repo")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"token":"ghs_example","expires_at":"2099-01-01T00:00:00Z"}`))
+	}))
+	defer srv.Close()
+
+	tmp := t.TempDir()
+	helperPath := filepath.Join(tmp, "elasticclaw-git-credentials")
+	if err := os.WriteFile(helperPath, []byte(dockerGitHubCredentialHelperBinary(srv.URL+"/api/github/token/claw-1")), 0700); err != nil {
+		t.Fatalf("write helper: %v", err)
+	}
+
+	cmd := exec.Command(helperPath)
+	cmd.Stdin = strings.NewReader("protocol=https\nhost=github.com\npath=example-org/example-repo.git\n\n")
+	cmd.Env = append(os.Environ(), "ELASTICCLAW_CLAW_TOKEN=secret-token")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("helper failed: %v\n%s", err, out)
+	}
+	if gotClawToken != "secret-token" {
+		t.Fatalf("claw_token = %q, want secret-token", gotClawToken)
+	}
+	if gotRepo != "example-org/example-repo" {
+		t.Fatalf("repo = %q, want example-org/example-repo", gotRepo)
+	}
+	wantOutput := "password=ghs_example"
+	if !strings.Contains(string(out), wantOutput) {
+		t.Fatalf("helper output missing password line:\n%s", out)
 	}
 }
 
