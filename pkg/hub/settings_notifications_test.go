@@ -372,3 +372,53 @@ func TestSettingsPatchAllowsUnchangedBrokenNotifier(t *testing.T) {
 		t.Fatalf("error does not name the edited notifier: %s", got)
 	}
 }
+
+// Regression: the only key the provider check rejects that the screen does not
+// model was min_send_interval, so a notifier holding an unparseable one could
+// be neither edited (every save 400'd on it) nor removed (a pipeline notifies
+// through it). The Notifier dialog now edits the key, so both repairs — fixing
+// the value and clearing it back to the default — must land.
+func TestSettingsPatchRepairsBrokenMinSendInterval(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "hub.yaml")
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", path)
+	s, _ := NewTestServerWithConfig(t, &types.HubConfig{Notifications: &types.NotificationsConfig{
+		Notifiers: map[string]types.NotifierConfig{"ops": {Type: "slack", Settings: map[string]any{
+			"channel": "C0123ABCD", "token_secret": "slack_token", "min_send_interval": "5 minutes",
+		}}},
+		Lifecycle: &types.LifecycleNotificationsConfig{Via: "ops"},
+	}}, "", "", "")
+	if err := config.SaveHubConfig(s.hubCfg); err != nil {
+		t.Fatal(err)
+	}
+
+	patch := func(t *testing.T, interval string) {
+		t.Helper()
+		body := []byte(`{"notifications":{"notifiers":` +
+			`{"ops":{"type":"slack","channel":"C0123ABCD","token_secret":"slack_token","min_send_interval":"` + interval + `"}},` +
+			`"lifecycle":{"enabled":true,"routes":[{"via":"ops"}]}}}`)
+		rr := httptest.NewRecorder()
+		s.patchSettings(rr, httptest.NewRequest(http.MethodPatch, "/api/settings", bytes.NewReader(body)))
+		if rr.Code != http.StatusOK {
+			t.Fatalf("PATCH min_send_interval %q: status = %d, want 200; body = %s", interval, rr.Code, rr.Body.String())
+		}
+	}
+	stored := func(t *testing.T) any {
+		t.Helper()
+		diskCfg, err := config.LoadHubConfig()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return diskCfg.Notifications.Notifiers["ops"].Settings["min_send_interval"]
+	}
+
+	patch(t, "5m")
+	if got := stored(t); got != "5m" {
+		t.Fatalf("min_send_interval = %v, want the repaired value", got)
+	}
+	// Emptied, not omitted: the patch is folded over the settings on disk, so
+	// only an explicit empty value clears the key.
+	patch(t, "")
+	if got := stored(t); got != "" {
+		t.Fatalf("min_send_interval = %v, want it cleared", got)
+	}
+}

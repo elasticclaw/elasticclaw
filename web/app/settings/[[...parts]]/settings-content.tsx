@@ -4570,17 +4570,20 @@ type TestState = { status: "sending" | "ok" | "error"; message: string }
 
 // Records that the Notifier screen itself cleared `enabled` because the route
 // set went empty — the pause is ours, not the operator's, and the next save
-// that routes a channel must lift it. It lives in sessionStorage rather than in
+// that routes a channel must lift it. It lives in localStorage rather than in
 // component state because NotifierSection unmounts on every navigation inside
 // Settings (and on reload): a clamp forgotten there latches the `enabled:false`
 // this screen wrote on its own initiative, so re-routing a channel would no
-// longer restore alerts — exactly what the edit dialog promises it does. The
-// stored value is the hub URL, so the clamp never leaks across hubs.
+// longer restore alerts — exactly what the edit dialog promises it does.
+// localStorage rather than sessionStorage because the clamp outlives the
+// browsing context that wrote it: the repair is routinely finished in another
+// tab, or after a browser restart, and a per-tab clamp would be gone by then.
+// The stored value is the hub URL, so the clamp never leaks across hubs.
 const CLAMPED_PAUSE_STORAGE_KEY = "elasticclaw:notifier-clamped-pause"
 
 function readClampedPause(): boolean {
   try {
-    return sessionStorage.getItem(CLAMPED_PAUSE_STORAGE_KEY) === getHubUrl()
+    return localStorage.getItem(CLAMPED_PAUSE_STORAGE_KEY) === getHubUrl()
   } catch {
     return false
   }
@@ -4588,8 +4591,8 @@ function readClampedPause(): boolean {
 
 function writeClampedPause(clamped: boolean): void {
   try {
-    if (clamped) sessionStorage.setItem(CLAMPED_PAUSE_STORAGE_KEY, getHubUrl())
-    else sessionStorage.removeItem(CLAMPED_PAUSE_STORAGE_KEY)
+    if (clamped) localStorage.setItem(CLAMPED_PAUSE_STORAGE_KEY, getHubUrl())
+    else localStorage.removeItem(CLAMPED_PAUSE_STORAGE_KEY)
   } catch {
     // Storage unavailable (private mode): the clamp degrades to not existing,
     // which is what the screen did before it was persisted at all.
@@ -4657,6 +4660,12 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
   const [formName, setFormName] = useState("")
   const [formChannel, setFormChannel] = useState("")
   const [formTokenSecret, setFormTokenSecret] = useState("")
+  // The hub refuses to build a slack notifier whose min_send_interval it cannot
+  // parse, and re-checks it on every save that touches the channel. A hub.yaml
+  // written by hand can hold such a value, so the screen must offer a way to
+  // repair it: without this field the save can never be made to pass, and a
+  // notifier a pipeline notifies through cannot be removed either.
+  const [formMinSendInterval, setFormMinSendInterval] = useState("")
   const [formRouted, setFormRouted] = useState(true)
   const [formEvents, setFormEvents] = useState<string[]>([])
   const [formError, setFormError] = useState("")
@@ -4669,7 +4678,7 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
   const [saveErrors, setSaveErrors] = useState<Record<string, string>>({})
 
   const resetForm = () => {
-    setFormName(""); setFormChannel(""); setFormTokenSecret("")
+    setFormName(""); setFormChannel(""); setFormTokenSecret(""); setFormMinSendInterval("")
     setFormRouted(true); setFormEvents([]); setFormError(""); setEditName(null)
   }
 
@@ -4704,6 +4713,7 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
     setFormName(name)
     setFormChannel(notifier.channel || "")
     setFormTokenSecret(notifier.token_secret || "")
+    setFormMinSendInterval(notifier.min_send_interval || "")
     setFormRouted(Boolean(route))
     setFormEvents(route?.events ? [...route.events] : [])
     setFormError("")
@@ -4727,7 +4737,12 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
       if (notifier.channel) out.channel = notifier.channel
       if (notifier.token_secret) out.token_secret = notifier.token_secret
       if (notifier.api_base) out.api_base = notifier.api_base
-      if (notifier.min_send_interval) out.min_send_interval = notifier.min_send_interval
+      // An emptied interval is sent as "" rather than omitted when the stored
+      // notifier has one: the hub folds a patch over the settings already on
+      // disk, so omitting the key would keep the value the operator just
+      // cleared — and keep rejecting the save if that value is unparseable.
+      const interval = notifier.min_send_interval ?? ""
+      if (interval || notifiers[name]?.min_send_interval) out.min_send_interval = interval
       outNotifiers[name] = out
     }
     // Always an array: sending routes is what clears the legacy `via`.
@@ -4798,6 +4813,7 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
         type: existing?.type || "slack",
         channel,
         token_secret: formTokenSecret,
+        min_send_interval: formMinSendInterval.trim(),
       },
     }
     // Every type checked is the same thing as no filter; store it as one so a
@@ -5197,6 +5213,22 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
                   The <strong>hub</strong> secret holding the Slack bot token (<span className="font-mono">xoxb-…</span>). Add it under Settings → Secrets → Hub first — workspace secrets are a separate store and are never read here.
                 </p>
               )}
+            </div>
+
+            {/* The hub rejects a channel whose interval it cannot parse, on
+                every save that touches it. Editable here so a value written by
+                hand can be repaired from the screen instead of hub.yaml. */}
+            <div>
+              <label className="text-xs text-muted-foreground mb-1 block">Minimum send interval</label>
+              <Input
+                placeholder="30s"
+                value={formMinSendInterval}
+                onChange={(e) => setFormMinSendInterval(e.target.value)}
+                className="font-mono text-sm h-8"
+              />
+              <p className="text-xs text-muted-foreground mt-1">
+                Optional. How long this channel waits between messages, as a duration (<span className="font-mono">30s</span>, <span className="font-mono">5m</span>). Leave empty for the default.
+              </p>
             </div>
 
             {/* Routing */}
