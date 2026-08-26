@@ -4303,6 +4303,7 @@ echo "password=$token"
 CREDEOF
 sudo chmod +x /usr/local/bin/elasticclaw-git-credentials
 git config --global credential.helper /usr/local/bin/elasticclaw-git-credentials
+git config --global credential.useHttpPath true
 echo 'credential helper installed'`, tokenURL)
 		if err := exec("install git credential helper", 20*time.Second, credHelperScript); err != nil {
 			return fmt.Errorf("install git credential helper: %w", err)
@@ -7675,6 +7676,7 @@ fi
 
 # Configure git to use the credential helper
 git config --global credential.helper /usr/local/bin/elasticclaw-git-credentials
+git config --global credential.useHttpPath true
 git config --global --get-all credential.helper | grep -Fx /usr/local/bin/elasticclaw-git-credentials >/dev/null
 git config --show-origin --global --get-all credential.helper
 

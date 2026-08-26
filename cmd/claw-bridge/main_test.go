@@ -670,6 +670,9 @@ func TestDockerGitHubCredentialHelperScriptDoesNotPersistClawToken(t *testing.T)
 	if !strings.Contains(script, `credential.helper "!$helper_path"`) {
 		t.Fatalf("helper script should register helper as an explicit shell command:\n%s", script)
 	}
+	if !strings.Contains(script, `git config --global credential.useHttpPath true`) {
+		t.Fatalf("helper script should include repo path in credential cache key:\n%s", script)
+	}
 	if !strings.Contains(script, `printf 'protocol=https\nhost=github.com\n\n' | "$helper_path"`) {
 		t.Fatalf("helper script should execute helper with a minimal credential request for diagnostics:\n%s", script)
 	}

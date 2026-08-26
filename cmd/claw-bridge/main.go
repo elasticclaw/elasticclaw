@@ -3645,6 +3645,7 @@ umask "$old_umask"
 chmod 0700 "$helper_path"
 git config --global --unset-all credential.helper >/dev/null 2>&1 || true
 git config --global credential.helper "!$helper_path"
+git config --global credential.useHttpPath true
 git config --global --get-all credential.helper | grep -Fx "!$helper_path" >/dev/null
 # Feed the helper a minimal credential request so it reads stdin and exits cleanly.
 helper_check="$(printf 'protocol=https\nhost=github.com\n\n' | "$helper_path" 2>&1)" || {
