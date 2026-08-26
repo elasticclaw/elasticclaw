@@ -440,3 +440,87 @@ func (p *GitHubTokenProvider) installationPermissions(ctx context.Context, insta
 	}
 	return inst.Permissions, nil
 }
+
+// findInstallationWithRepoAccess returns an installation ID whose accessible
+// repositories include all requestedRepos. If requestedRepos is empty (unscoped
+// token), it returns the first installation whose accessible repositories
+// include at least one repo matching the allowed selectors. If no selectors are
+// provided, it returns the first installation found. This lets a hub with
+// multiple GitHub Apps pick the App/installation that actually has access to the
+// repos a claw is allowed to use, instead of defaulting to the first app that
+// can mint any token.
+func (p *GitHubTokenProvider) findInstallationWithRepoAccess(ctx context.Context, requestedRepos []RepoAccess, allowedSelectors []RepoAccess) (int64, error) {
+	installations, err := p.ListInstallations(ctx)
+	if err != nil {
+		return 0, err
+	}
+	if len(installations) == 0 {
+		return 0, fmt.Errorf("no installations found")
+	}
+	for _, inst := range installations {
+		accessible, err := p.ListInstallationRepositories(ctx, inst.ID)
+		if err != nil {
+			continue
+		}
+		if len(requestedRepos) > 0 {
+			if reposAccessible(accessible, requestedRepos) {
+				return inst.ID, nil
+			}
+			continue
+		}
+		if len(allowedSelectors) == 0 {
+			return inst.ID, nil
+		}
+		if selectorsMatchAnyRepo(accessible, allowedSelectors) {
+			return inst.ID, nil
+		}
+	}
+	return 0, fmt.Errorf("no installation can access the requested repositories")
+}
+
+// reposAccessible reports whether every requested repo is in the accessible list.
+func reposAccessible(accessible []githubRepository, requested []RepoAccess) bool {
+	for _, req := range requested {
+		if !repoAccessible(accessible, req.Repo) {
+			return false
+		}
+	}
+	return true
+}
+
+// repoAccessible reports whether a single repo name is in the accessible list.
+func repoAccessible(accessible []githubRepository, repo string) bool {
+	parts := strings.SplitN(repo, "/", 2)
+	repoName := repo
+	if len(parts) == 2 {
+		repoName = parts[1]
+	}
+	for _, r := range accessible {
+		if r.FullName != "" && strings.EqualFold(r.FullName, repo) {
+			return true
+		}
+		if r.Name != "" && strings.EqualFold(r.Name, repoName) {
+			return true
+		}
+	}
+	return false
+}
+
+// selectorsMatchAnyRepo reports whether any accessible repository matches the
+// allowed selectors. This is used for unscoped tokens (e.g. the gh wrapper) to
+// pick an installation that actually has access to repos the workspace permits.
+func selectorsMatchAnyRepo(accessible []githubRepository, selectors []RepoAccess) bool {
+	for _, r := range accessible {
+		repo := r.FullName
+		if repo == "" {
+			repo = r.Name
+		}
+		if repo == "" {
+			continue
+		}
+		if effectiveRepoAccess(repo, selectors) != nil {
+			return true
+		}
+	}
+	return false
+}

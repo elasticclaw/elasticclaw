@@ -8302,6 +8302,12 @@ func (s *Server) handleGitHubToken(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Keep the original workspace selectors so we can choose the right GitHub
+	// App installation later. repos may be narrowed to a single requested repo
+	// or set to nil for an unscoped token, but we still need the full selector
+	// list for app/installation selection.
+	allRepos := repos
+
 	// Optional single-repo scope from the git credential helper (path=owner/repo.git).
 	// Preferred for large workspaces: each clone mints a least-privilege token
 	// for one allowlisted repo (scales past GitHub's 50-name list limit).
@@ -8312,24 +8318,24 @@ func (s *Server) handleGitHubToken(w http.ResponseWriter, r *http.Request) {
 	if want := strings.TrimSpace(r.URL.Query().Get("repo")); want != "" {
 		want = strings.TrimPrefix(want, "/")
 		want = strings.TrimSuffix(want, ".git")
-		matched := effectiveRepoAccess(want, repos)
+		matched := effectiveRepoAccess(want, allRepos)
 		if matched == nil {
 			http.Error(w, "requested repo is not configured on this claw", http.StatusForbidden)
 			return
 		}
 		repos = []RepoAccess{*matched}
-	} else if hasRepositoryPattern(repos) {
+	} else if hasRepositoryPattern(allRepos) {
 		// A glob selector grants dynamic access to many repos (e.g. an org).
 		// The gh wrapper requests a token without a target repo, so it must be
 		// usable for any repo matching a pattern. Request an unscoped
 		// installation token (default permissions) by passing an empty repo list.
 		repos = nil
-	} else if len(repos) > maxScopedInstallationRepos {
+	} else if len(allRepos) > maxScopedInstallationRepos {
 		// Multi-repo mint without ?repo=: GitHub cannot name-scope >50 repos.
 		// InstallationToken will request permission levels without a repositories
 		// array. Git clone still prefers ?repo= (credential helper). Log so
 		// operators know the install is the access boundary for unscoped mints.
-		log.Printf("[github] claw %s multi-repo token for %d repos exceeds GitHub name-scope limit %d; minting permission-restricted installation token (git clones should use ?repo=)", clawID[:8], len(repos), maxScopedInstallationRepos)
+		log.Printf("[github] claw %s multi-repo token for %d repos exceeds GitHub name-scope limit %d; minting permission-restricted installation token (git clones should use ?repo=)", clawID[:8], len(allRepos), maxScopedInstallationRepos)
 	}
 
 	// Try each configured GitHub App in order; use the first that finds an installation
@@ -8381,11 +8387,18 @@ func (s *Server) handleGitHubToken(w http.ResponseWriter, r *http.Request) {
 	var lastErr error
 	for _, candidate := range providers {
 		provider := candidate.provider
-		token, expiresAt, err := provider.InstallationToken(r.Context(), 0, repos)
+		installationID, err := provider.findInstallationWithRepoAccess(r.Context(), repos, allRepos)
 		if err != nil {
 			lastErr = err
 			// Debug-level only — expected when multiple apps configured and only one matches
-			log.Printf("[github] app[%d] app_id=%d: no match for repos (trying next): %v", candidate.index, candidate.appID, err)
+			log.Printf("[github] app[%d] app_id=%d: no installation can access repos (trying next): %v", candidate.index, candidate.appID, err)
+			continue
+		}
+		token, expiresAt, err := provider.InstallationToken(r.Context(), installationID, repos)
+		if err != nil {
+			lastErr = err
+			// Debug-level only — expected when multiple apps configured and only one matches
+			log.Printf("[github] app[%d] app_id=%d installation=%d: token mint failed (trying next): %v", candidate.index, candidate.appID, installationID, err)
 			continue
 		}
 		s.ghTokenMu.Lock()
