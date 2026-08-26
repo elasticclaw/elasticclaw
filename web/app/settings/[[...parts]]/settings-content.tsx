@@ -4676,13 +4676,27 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
   // the same block the moment alerts are enabled — so the screen has to render
   // the route and offer a way to drop it. Silently dropping it in buildPatch
   // would delete config the operator never saw.
-  const orphanRoutes = routes.filter((route) => !notifiers[route.via])
+  // One entry per via: "Remove route" drops every route naming it, and a
+  // hand-written block can name the same missing notifier twice.
+  const orphanRoutes = routes.filter(
+    (route, i) => !notifiers[route.via] && routes.findIndex((other) => other.via === route.via) === i,
+  )
   // A route whose allow-list names alert types this hub does not support. The
   // hub accepts it on disk while alerts are paused — routes are only validated
   // once enabled — and rejects the whole block the moment they are turned on,
   // exactly like an orphan route, so the master switch has to be gated on it
   // too rather than offering a save that is certain to fail.
   const unsupportedRoutes = routes.filter((route) => unknownEvents(route.events).length > 0)
+  // A `via` routed twice, or an allow-list naming the same alert type twice.
+  // Both are rejected only once alerts are enabled, so a hand-written block can
+  // hold them while paused — and the screen renders one card per notifier
+  // showing only the FIRST matching route, so the hub's error names a routes[]
+  // index that is nowhere on the page. Gated like the orphan and unsupported
+  // cases; saveChannel collapses both so "open Edit and save" actually clears it.
+  const duplicatedVias = new Set(routes.map((route) => route.via).filter((via, i, all) => all.indexOf(via) !== i))
+  const hasDuplicateEvents = (events?: string[]) => new Set(events || []).size !== (events || []).length
+  const isDuplicated = (name: string) => duplicatedVias.has(name) || hasDuplicateEvents(routeFor(name)?.events)
+  const duplicateRoutes = routes.filter((route) => duplicatedVias.has(route.via) || hasDuplicateEvents(route.events))
   // A hub that has never had a lifecycle block: routing its first channel turns
   // alerts on. This is deliberately NOT inferred from (enabled=false, routes=[]),
   // which an operator reaches by muting the master switch and then removing the
@@ -4782,7 +4796,10 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
     setFormRouted(Boolean(route))
     // Only supported types can be checked, so only those are seeded; the rest
     // are surfaced separately rather than carried invisibly back out on save.
-    setFormEvents(knownEvents(route?.events))
+    // De-duplicated because a checkbox can only be on or off: a type listed
+    // twice on disk would otherwise be counted twice in the dialog summary and
+    // re-sent verbatim by a save that changed nothing.
+    setFormEvents([...new Set(knownEvents(route?.events))])
     setFormDroppedEvents(unknownEvents(route?.events))
     setFormError("")
     setEditName(name)
@@ -4901,13 +4918,21 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
     // later-added alert type keeps reaching the channel. formEvents holds only
     // supported types, so any unsupported entry the route arrived with is
     // dropped here — the dialog says so before the operator saves.
-    const events = isAllAlerts(formEvents) ? [] : formEvents
+    // De-duplicated for the same reason the dialog seeds a Set: the hub rejects
+    // a repeated event once alerts are enabled, and the checkboxes have no way
+    // to express — or clear — a type listed twice.
+    const events = isAllAlerts(formEvents) ? [] : [...new Set(formEvents)]
     // Route ORDER is meaningful — a test send without an explicit `via` uses the
     // first effective route — so editing an already-routed channel updates it in
-    // place instead of removing and re-appending it.
+    // place instead of removing and re-appending it. Every OTHER entry naming
+    // the same via collapses into that one: a hand-written block can route a
+    // via twice, and rewriting only the first match would leave behind the
+    // duplicate the hub rejects, with no way to reach it from this screen.
     const routedIndex = routes.findIndex((route) => route.via === name)
     const nextRoutes = formRouted && routedIndex >= 0
-      ? routes.map((route, i) => (i === routedIndex ? { via: name, events } : route))
+      ? routes
+        .filter((route, i) => route.via !== name || i === routedIndex)
+        .map((route) => (route.via === name ? { via: name, events } : route))
       : routes.filter((route) => route.via !== name)
     if (formRouted && routedIndex < 0) nextRoutes.push({ via: name, events })
 
@@ -5062,17 +5087,20 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
                   ? "Remove the routes pointing at deleted channels below — the hub refuses to enable alerts while one is left."
                   : unsupportedRoutes.length > 0
                     ? "Open Edit on the channels flagged below and save — the hub refuses to enable alerts while a route lists an unsupported alert type."
-                    : "The master switch. Turn it off to mute every channel without losing your routing."}
+                    : duplicateRoutes.length > 0
+                      ? "Open Edit on the channels flagged below and save — the hub refuses to enable alerts while a channel or an alert type is routed twice."
+                      : "The master switch. Turn it off to mute every channel without losing your routing."}
             </p>
           </div>
           <Switch
             checked={enabled}
             // Gated on every shape the hub rejects when a block is enabled: no
-            // routes, a route naming a notifier that no longer exists, and a
-            // route whose allow-list carries an alert type this hub does not
-            // support — all three in the vocabulary of hub.yaml (`via`,
-            // `events`) rather than of this screen.
-            disabled={saving || routedCount === 0 || orphanRoutes.length > 0 || unsupportedRoutes.length > 0}
+            // routes, a route naming a notifier that no longer exists, a route
+            // whose allow-list carries an alert type this hub does not support,
+            // and the same `via` or the same event listed twice — all in the
+            // vocabulary of hub.yaml (`via`, `events`) rather than of this
+            // screen.
+            disabled={saving || routedCount === 0 || orphanRoutes.length > 0 || unsupportedRoutes.length > 0 || duplicateRoutes.length > 0}
             title={
               routedCount === 0
                 ? "Add a channel and route it to alerts first"
@@ -5080,7 +5108,9 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
                   ? "Remove the routes pointing at deleted channels first"
                   : unsupportedRoutes.length > 0
                     ? "Drop the unsupported alert types from the flagged channels first — open Edit and save"
-                    : undefined
+                    : duplicateRoutes.length > 0
+                      ? "Collapse the duplicated routing on the flagged channels first — open Edit and save"
+                      : undefined
             }
             // Invalidated only once the hub has taken the change, exactly as
             // saveChannel/removeChannel do it: a rejected save leaves every
@@ -5150,6 +5180,7 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
               const route = routeFor(name)
               const test = tests[name]
               const routeUnknownEvents = unknownEvents(route?.events)
+              const routeDuplicated = isDuplicated(name)
               const testEvent = testEventFor(name)
               const canTest = enabled && Boolean(testEvent) && !saving
               // Rendered as text, not as the disabled button's `title`: the
@@ -5195,7 +5226,7 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
                           </span>
                         ) : (
                           <span className="text-xs bg-muted text-muted-foreground px-2 py-1 rounded font-medium">
-                            {knownEvents(route.events).length} of {eventTypes.length} alert types
+                            {new Set(knownEvents(route.events)).size} of {eventTypes.length} alert types
                           </span>
                         )}
                       </div>
@@ -5204,6 +5235,14 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
                           This route also lists {routeUnknownEvents.length === 1 ? "an alert type" : "alert types"} this hub does not support (
                           <span className="font-mono">{routeUnknownEvents.join(", ")}</span>
                           ). Lifecycle alerts cannot be turned on until {routeUnknownEvents.length === 1 ? "it is" : "they are"} gone — open Edit and save to drop {routeUnknownEvents.length === 1 ? "it" : "them"}.
+                        </p>
+                      )}
+                      {routeDuplicated && (
+                        <p className="text-xs text-amber-400 mt-2">
+                          {duplicatedVias.has(name)
+                            ? "This channel is routed more than once on disk — the card shows only the first entry."
+                            : "This route lists the same alert type more than once on disk."}{" "}
+                          Lifecycle alerts cannot be turned on until the duplicate is gone — open Edit and save to collapse it.
                         </p>
                       )}
                       {testBlockedReason && (
