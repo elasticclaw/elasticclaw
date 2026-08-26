@@ -4626,10 +4626,22 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
         : []
   ).map((route) => ({ ...route, via: (route.via || "").trim() }))
   const routeFor = (name: string) => routes.find((r) => r.via === name)
+  // The types a route names that this hub actually supports, and the rest.
+  // ValidateNotificationsConfig checks routes[].events against
+  // IsLifecycleEventType only AFTER the disabled-lifecycle short-circuit, so a
+  // hand-written hub.yaml with alerts paused can legitimately hold names the
+  // hub no longer knows. The dialog can only ever render supported types, so
+  // counting the others would make the card badge disagree with the checkboxes
+  // and let a test send pick an event the hub rejects.
+  const knownEvents = (events?: string[]) => (events || []).filter((eventType) => eventTypes.includes(eventType))
+  const unknownEvents = (events?: string[]) => (events || []).filter((eventType) => !eventTypes.includes(eventType))
   // The predicate saveChannel stores by: an allow-list naming every type is no
   // filter at all. Shared by the card badge and the dialog so the same route
-  // cannot read as filtered on one and unfiltered on the other.
-  const isAllAlerts = (events?: string[]) => !events?.length || events.length === eventTypes.length
+  // cannot read as filtered on one and unfiltered on the other. Membership, not
+  // length: a hand-written list of five names the hub no longer knows is not
+  // "all alerts", and reading it as one would rewrite the route to receive-all
+  // on the next save instead of dropping just the stale entries.
+  const isAllAlerts = (events?: string[]) => !events?.length || eventTypes.every((eventType) => events.includes(eventType))
   // A route whose notifier is gone. The hub deliberately accepts this on disk
   // while alerts are paused ("an operator who mutes alerts and then deletes the
   // notifier must not be left with a hub that refuses to load"), but it rejects
@@ -4668,6 +4680,12 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
   const [formMinSendInterval, setFormMinSendInterval] = useState("")
   const [formRouted, setFormRouted] = useState(true)
   const [formEvents, setFormEvents] = useState<string[]>([])
+  // Allow-list entries the edited route holds that this hub does not support.
+  // They are kept out of formEvents — no checkbox can ever represent them — so
+  // the dialog has to name them itself, or saving drops config the operator
+  // never saw and the master switch later 400s on a value the screen never
+  // showed.
+  const [formDroppedEvents, setFormDroppedEvents] = useState<string[]>([])
   const [formError, setFormError] = useState("")
   const [tests, setTests] = useState<Record<string, TestState>>({})
   // Save failures the dialog can no longer show, keyed by the channel the save
@@ -4676,6 +4694,11 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
   // so dropping the message leaves the operator believing a save that failed
   // went through.
   const [saveErrors, setSaveErrors] = useState<Record<string, string>>({})
+  // The same failure for a channel that has no card to land on: a rejected Add
+  // created no notifier, so keying it into saveErrors above would render it
+  // nowhere at all. Painted both inside the dialog and above the channel list,
+  // since the operator may close the dialog that replaced the failed one.
+  const [detachedSaveError, setDetachedSaveError] = useState("")
 
   // Reconcile the stored clamp against the config actually loaded: it records a
   // pause this screen imposed for an empty route set, so a config that HAS
@@ -4687,7 +4710,7 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
 
   const resetForm = () => {
     setFormName(""); setFormChannel(""); setFormTokenSecret(""); setFormMinSendInterval("")
-    setFormRouted(true); setFormEvents([]); setFormError(""); setEditName(null)
+    setFormRouted(true); setFormEvents([]); setFormDroppedEvents([]); setFormError(""); setEditName(null)
   }
 
   // Identifies the dialog a save was started from. An in-flight PATCH must not
@@ -4723,7 +4746,10 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
     setFormTokenSecret(notifier.token_secret || "")
     setFormMinSendInterval(notifier.min_send_interval || "")
     setFormRouted(Boolean(route))
-    setFormEvents(route?.events ? [...route.events] : [])
+    // Only supported types can be checked, so only those are seeded; the rest
+    // are surfaced separately rather than carried invisibly back out on save.
+    setFormEvents(knownEvents(route?.events))
+    setFormDroppedEvents(unknownEvents(route?.events))
     setFormError("")
     setEditName(name)
     setModalMode("edit")
@@ -4834,8 +4860,10 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
       },
     }
     // Every type checked is the same thing as no filter; store it as one so a
-    // later-added alert type keeps reaching the channel.
-    const events = formEvents.length === eventTypes.length ? [] : formEvents
+    // later-added alert type keeps reaching the channel. formEvents holds only
+    // supported types, so any unsupported entry the route arrived with is
+    // dropped here — the dialog says so before the operator saves.
+    const events = isAllAlerts(formEvents) ? [] : formEvents
     // Route ORDER is meaningful — a test send without an explicit `via` uses the
     // first effective route — so editing an already-routed channel updates it in
     // place instead of removing and re-appending it.
@@ -4856,8 +4884,17 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
       setTests((current) => { const { [name]: _stale, ...rest } = current; return rest })
     }
     setSaveErrors((current) => { const { [name]: _cleared, ...rest } = current; return rest })
+    setDetachedSaveError("")
     if (generation !== saveGeneration.current) {
-      if (failure) setSaveErrors((current) => ({ ...current, [name]: failure }))
+      // The dialog this save was started from is gone, so the failure has to
+      // land somewhere else. A rejected edit leaves the channel in place and
+      // its card carries the reason; a rejected ADD created no notifier, so
+      // there is no card and keying it by name would render the message
+      // nowhere — the operator would read a silently failed add as a success.
+      if (failure) {
+        if (notifiers[name]) setSaveErrors((current) => ({ ...current, [name]: failure }))
+        else setDetachedSaveError(`Adding channel "${name}" failed: ${failure}`)
+      }
       return
     }
     if (failure) { setFormError(failure); return }
@@ -4902,7 +4939,7 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
   function testEventFor(name: string): string | null {
     const route = routeFor(name)
     if (!route) return null
-    const allowed = route.events?.length ? route.events : eventTypes
+    const allowed = route.events?.length ? knownEvents(route.events) : eventTypes
     const candidates = allowed.filter((eventType) => !isEventMuted(eventType))
     if (candidates.length === 0) return null
     return candidates.includes("agent_started") ? "agent_started" : candidates[0]
@@ -4942,7 +4979,7 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
   const receivingCount = routes.filter(
     (route) =>
       notifiers[route.via] &&
-      (route.events?.length ? route.events : eventTypes).some((eventType) => !isEventMuted(eventType)),
+      (route.events?.length ? knownEvents(route.events) : eventTypes).some((eventType) => !isEventMuted(eventType)),
   ).length
   // Same predicate saveChannel stores by: every type checked is persisted as
   // the empty allow-list, so the summary must call it "all alerts" too — or it
@@ -5053,6 +5090,12 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
       {/* Channels */}
       <div className="space-y-2">
         <h3 className="text-sm font-medium">Channels</h3>
+        {detachedSaveError && (
+          <div className="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+            <AlertTriangle className="size-3.5 mt-px shrink-0" />
+            <span className="break-words">{detachedSaveError}</span>
+          </div>
+        )}
         {names.length === 0 ? (
           <p className="text-sm text-muted-foreground px-4 py-6 text-center border border-border rounded-lg">
             No channels configured. Add one to start receiving alerts in Slack.
@@ -5063,6 +5106,7 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
               const notifier = notifiers[name]
               const route = routeFor(name)
               const test = tests[name]
+              const routeUnknownEvents = unknownEvents(route?.events)
               const testEvent = testEventFor(name)
               const canTest = enabled && Boolean(testEvent) && !saving
               // Rendered as text, not as the disabled button's `title`: the
@@ -5108,10 +5152,17 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
                           </span>
                         ) : (
                           <span className="text-xs bg-muted text-muted-foreground px-2 py-1 rounded font-medium">
-                            {route.events?.length} of {eventTypes.length} alert types
+                            {knownEvents(route.events).length} of {eventTypes.length} alert types
                           </span>
                         )}
                       </div>
+                      {routeUnknownEvents.length > 0 && (
+                        <p className="text-xs text-amber-400 mt-2">
+                          This route also lists {routeUnknownEvents.length === 1 ? "an alert type" : "alert types"} this hub does not support (
+                          <span className="font-mono">{routeUnknownEvents.join(", ")}</span>
+                          ). Lifecycle alerts cannot be turned on until {routeUnknownEvents.length === 1 ? "it is" : "they are"} gone — open Edit and save to drop {routeUnknownEvents.length === 1 ? "it" : "them"}.
+                        </p>
+                      )}
                       {testBlockedReason && (
                         <p className="text-xs text-muted-foreground mt-2">{testBlockedReason}</p>
                       )}
@@ -5335,6 +5386,14 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
                     </div>
                   </div>
 
+                  {formDroppedEvents.length > 0 && (
+                    <p className="text-xs text-amber-400 rounded-md border border-amber-500/20 bg-amber-500/10 px-3 py-2">
+                      This route also lists {formDroppedEvents.length === 1 ? "an alert type" : "alert types"} this hub does not support (
+                      <span className="font-mono">{formDroppedEvents.join(", ")}</span>
+                      ), so {formDroppedEvents.length === 1 ? "it has" : "they have"} no checkbox below and nothing is ever delivered for {formDroppedEvents.length === 1 ? "it" : "them"}. Saving drops {formDroppedEvents.length === 1 ? "it" : "them"} — the hub refuses to enable lifecycle alerts until then.
+                    </p>
+                  )}
+
                   <div className="space-y-1">
                     {eventTypes.map((eventType) => {
                       const checked = formEvents.includes(eventType)
@@ -5376,6 +5435,16 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
           <div className="border-t border-border">
             {/* The error sits with the buttons, never below the fold of a long
                 scrolling form. */}
+            {/* A failure from the save that THIS dialog replaced. The channel
+                list behind the overlay carries it too, but the operator is
+                looking at the dialog — and its message names the channel, so
+                it cannot be mistaken for a rejection of the form on screen. */}
+            {detachedSaveError && (
+              <div className="mx-5 mt-4 flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+                <AlertTriangle className="size-3.5 mt-px shrink-0" />
+                <span className="break-words">{detachedSaveError}</span>
+              </div>
+            )}
             {formError && (
               <div className="mx-5 mt-4 flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
                 <AlertTriangle className="size-3.5 mt-px shrink-0" />
