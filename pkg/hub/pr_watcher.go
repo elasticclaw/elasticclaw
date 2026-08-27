@@ -1512,6 +1512,7 @@ func (s *Server) updateWatermarkGuarded(query string, args []interface{}, clawID
 		if err == nil || !isSQLiteBusy(err) {
 			break
 		}
+		time.Sleep(time.Duration(attempt+1) * 10 * time.Millisecond)
 	}
 	if err != nil {
 		log.Printf("[pr-watcher] watermark update failed for claw %s pr #%d: %v", clawID[:8], prNumber, err)

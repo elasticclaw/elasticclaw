@@ -1491,5 +1491,10 @@ func (s *Server) mergeSinglePRForClaw(clawID, repo string, prNumber int) (failur
 		s.injectHubMessageByID(clawID, fmt.Sprintf("[hub] PR #%d merged successfully.", prNumber))
 		return ""
 	}
-	return ""
+	// do() only errors for >= 300, so this is an unexpected 2xx (202/204/...):
+	// GitHub did not confirm the merge, and counting it as merged would silently
+	// drop the PR from tracking.
+	log.Printf("[pipeline] merge_pr: unexpected status %d for %s#%d", resp.StatusCode, repo, prNumber)
+	s.injectExternalHubMessageByID(clawID, fmt.Sprintf("[hub] merge_pr: failed to merge PR #%d (HTTP %d). Check CI status and review requirements.", prNumber, resp.StatusCode))
+	return fmt.Sprintf("PR #%d failed (HTTP %d)", prNumber, resp.StatusCode)
 }
