@@ -2,6 +2,7 @@ package hub
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -106,6 +107,7 @@ func (s *Server) storePRMention(clawID, repo string, prNumber int, prURL string,
 	var lastCommentTime time.Time
 	var headSHA string
 	var title string
+	var mergeableState string
 	if token != "" {
 		commentsData, err := githubAPIList(fmt.Sprintf("repos/%s/issues/%d/comments", repo, prNumber), token)
 		if err == nil {
@@ -137,6 +139,7 @@ func (s *Server) storePRMention(clawID, repo string, prNumber int, prURL string,
 				headSHA, _ = headObj["sha"].(string)
 			}
 			title, _ = prData["title"].(string)
+			mergeableState, _ = prData["mergeable_state"].(string)
 		}
 		reviewsData, err := githubAPIList(fmt.Sprintf("repos/%s/pulls/%d/reviews", repo, prNumber), token)
 		if err == nil {
@@ -150,8 +153,8 @@ func (s *Server) storePRMention(clawID, repo string, prNumber int, prURL string,
 	// hitting the (claw_id, pr_url) unique index means the PR is already
 	// tracked — idempotent success, not a persistence failure.
 	res, err := s.db.Exec(
-		`INSERT OR IGNORE INTO claw_prs(id,claw_id,repo,pr_number,pr_url,title,last_comment_id,last_comment_at,last_review_id,last_ci_sha,mention_only,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
-		prID, clawID, repo, prNumber, prURL, title, maxCommentID, lastCommentAt, maxReviewID, headSHA, boolInt(mentionOnly), now(),
+		`INSERT OR IGNORE INTO claw_prs(id,claw_id,repo,pr_number,pr_url,title,last_comment_id,last_comment_at,last_review_id,last_ci_sha,mention_only,last_mergeable_state,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		prID, clawID, repo, prNumber, prURL, title, maxCommentID, lastCommentAt, maxReviewID, headSHA, boolInt(mentionOnly), mergeableState, now(),
 	)
 	if err != nil {
 		log.Printf("[pr-watcher] failed to persist PR %s#%d for claw %s: %v", repo, prNumber, clawID[:8], err)
@@ -225,14 +228,15 @@ func (s *Server) upgradeMentionOnlyPR(clawID, prURL string) error {
 
 // prMentionCandidate is a PR URL pending claw_prs registration.
 type prMentionCandidate struct {
-	repo      string
-	number    int
-	url       string
-	comment   int64
-	review    int64
-	commentAt string
-	headSHA   string
-	title     string
+	repo             string
+	number           int
+	url              string
+	comment          int64
+	review           int64
+	commentAt        string
+	headSHA          string
+	title            string
+	mergeableState   string
 }
 
 // preparePRMention loads GitHub watermarks for a PR insert. alreadyTracked is
@@ -286,6 +290,7 @@ func (s *Server) preparePRMention(clawID, repo string, prNumber int, prURL strin
 			row.headSHA, _ = headObj["sha"].(string)
 		}
 		row.title, _ = prData["title"].(string)
+		row.mergeableState, _ = prData["mergeable_state"].(string)
 	}
 	reviewsData, err := githubAPIList(fmt.Sprintf("repos/%s/pulls/%d/reviews", repo, prNumber), token)
 	if err == nil {
@@ -334,8 +339,8 @@ func (s *Server) insertClawPRsAtomic(clawID string, rows []prMentionCandidate, m
 		}
 		prID := uuid.New().String()
 		res, err := tx.Exec(
-			`INSERT OR IGNORE INTO claw_prs(id,claw_id,repo,pr_number,pr_url,title,last_comment_id,last_comment_at,last_review_id,last_ci_sha,mention_only,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
-			prID, clawID, row.repo, row.number, row.url, row.title, row.comment, row.commentAt, row.review, row.headSHA, boolInt(mentionOnly), now(),
+			`INSERT OR IGNORE INTO claw_prs(id,claw_id,repo,pr_number,pr_url,title,last_comment_id,last_comment_at,last_review_id,last_ci_sha,mention_only,last_mergeable_state,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			prID, clawID, row.repo, row.number, row.url, row.title, row.comment, row.commentAt, row.review, row.headSHA, boolInt(mentionOnly), row.mergeableState, now(),
 		)
 		if err != nil {
 			log.Printf("[pr-watcher] failed to persist PR %s#%d for claw %s: %v", row.repo, row.number, shortID(clawID), err)
@@ -562,6 +567,7 @@ type clawPR struct {
 	state               string
 	merged              bool
 	mergedAt            *string
+	lastMergeableState  string
 	// mentionOnly mirrors claw_prs.mention_only at load time. A mention-only
 	// row is a POLLING target (CI, comments and reviews are still forwarded)
 	// but never an ACTION target and never a TRIGGER: it must not block
@@ -583,7 +589,8 @@ type clawPR struct {
 func (s *Server) loadClawPRsByNumber(repo string, prNumber int) []clawPR {
 	rows, err := s.db.Query(`
 		SELECT cp.id, cp.claw_id, cp.repo, cp.pr_number, cp.pr_url, cp.last_ci_sha, cp.last_ci_conclusion, cp.last_comment_id,
-		       cp.last_comment_at, cp.last_review_comment_id, cp.last_review_id, cp.pr_conditions_fired, cp.created_at
+		       cp.last_comment_at, cp.last_review_comment_id, cp.last_review_id, cp.pr_conditions_fired, cp.created_at,
+		       cp.last_mergeable_state
 		FROM claw_prs cp
 		JOIN claws cl ON cl.id = cp.claw_id
 		WHERE cp.repo = ? AND cp.pr_number = ? AND cl.status NOT IN ('deleted','error','offline')
@@ -602,7 +609,8 @@ func (s *Server) loadClawPRsByNumber(repo string, prNumber int) []clawPR {
 		var prConditionsFiredInt int
 		if err := rows.Scan(&pr.id, &pr.clawID, &pr.repo, &pr.prNumber, &pr.prURL,
 			&pr.lastCISHA, &pr.lastCIConclusion, &pr.lastCommentID, &pr.lastCommentAt,
-			&pr.lastReviewCommentID, &pr.lastReviewID, &prConditionsFiredInt, &pr.createdAt); err != nil {
+			&pr.lastReviewCommentID, &pr.lastReviewID, &prConditionsFiredInt, &pr.createdAt,
+			&pr.lastMergeableState); err != nil {
 			log.Printf("[pr-watcher] failed to scan tracked PR %s#%d: %v", repo, prNumber, err)
 			return prs
 		}
@@ -695,7 +703,7 @@ func (s *Server) pollAllPRs() {
 	rows, err := s.db.Query(`
 		SELECT cp.id, cp.claw_id, cp.repo, cp.pr_number, cp.pr_url, cp.last_ci_sha, cp.last_ci_conclusion, cp.last_comment_id,
 		       cp.last_comment_at, cp.last_review_comment_id, cp.last_review_id, cp.pr_conditions_fired, cp.created_at,
-		       cp.mention_only, cl.status
+		       cp.mention_only, cp.last_mergeable_state, cl.status
 		FROM claw_prs cp
 		JOIN claws cl ON cl.id = cp.claw_id
 		WHERE cl.status NOT IN ('deleted','error','offline')
@@ -720,7 +728,7 @@ func (s *Server) pollAllPRs() {
 		var prConditionsFiredInt, mentionOnlyInt int
 		if err := rows.Scan(&r.pr.id, &r.pr.clawID, &r.pr.repo, &r.pr.prNumber, &r.pr.prURL,
 			&r.pr.lastCISHA, &r.pr.lastCIConclusion, &r.pr.lastCommentID, &r.pr.lastCommentAt, &r.pr.lastReviewCommentID, &r.pr.lastReviewID, &prConditionsFiredInt, &r.pr.createdAt,
-			&mentionOnlyInt, &r.clawStatus); err != nil {
+			&mentionOnlyInt, &r.pr.lastMergeableState, &r.clawStatus); err != nil {
 			continue
 		}
 		r.pr.prConditionsFired = prConditionsFiredInt == 1
@@ -2256,6 +2264,8 @@ func (s *Server) checkPRMerged(pr clawPR, token string) (resolved, terminated bo
 	log.Printf("[pr-watcher] checkPRMerged: claw=%s pr=%s state=%s merged=%v", pr.clawID[:8], pr.prURL, state, merged)
 
 	if state != "closed" && !merged {
+		// While the PR is still open, surface merge conflicts once per episode.
+		s.checkPRMergeConflict(pr, data)
 		return false, false // still open
 	}
 
@@ -2501,6 +2511,53 @@ func (s *Server) checkPRMerged(pr clawPR, token string) (resolved, terminated bo
 	go s.promotePendingClaws()
 
 	return true, true
+}
+
+// checkPRMergeConflict watches the mergeable_state field on an open PR and
+// notifies the agent once when the PR becomes "dirty" (merge conflict). It is
+// called from checkPRMerged while the PR is still open, so it never runs for
+// closed or merged PRs. Mention-only rows are ignored: a conflict on a PR the
+// agent merely mentioned must not interrupt the agent's own work.
+func (s *Server) checkPRMergeConflict(pr clawPR, data map[string]interface{}) {
+	if pr.mentionOnly {
+		return
+	}
+	mergeableState, _ := data["mergeable_state"].(string)
+	if mergeableState == "" {
+		return
+	}
+
+	// Read the persisted watermark so a stale in-memory clawPR or a concurrent
+	// poll cannot cause duplicate notifications.
+	var oldState string
+	if err := s.db.QueryRow(`SELECT last_mergeable_state FROM claw_prs WHERE id=?`, pr.id).Scan(&oldState); err != nil {
+		if !errors.Is(err, sql.ErrNoRows) {
+			log.Printf("[pr-watcher] failed to read mergeable state for %s: %v", pr.prURL, err)
+		}
+		return
+	}
+	if mergeableState == oldState {
+		return
+	}
+
+	// Notify only on a genuine transition to dirty from a known non-dirty state.
+	shouldNotify := mergeableState == "dirty" && oldState != "dirty" && oldState != ""
+
+	// Use a conditional update so only the poll that actually changes the
+	// watermark delivers the notification.
+	res, err := s.db.Exec(`UPDATE claw_prs SET last_mergeable_state=? WHERE id=? AND last_mergeable_state != ?`, mergeableState, pr.id, mergeableState)
+	if err != nil {
+		log.Printf("[pr-watcher] failed to update mergeable state for %s: %v", pr.prURL, err)
+		return
+	}
+	if affected, _ := res.RowsAffected(); affected == 0 {
+		return
+	}
+	if shouldNotify {
+		msg := fmt.Sprintf("PR #%d ([%s](%s)) is now in a merge conflict. Please resolve the conflicts on the same branch.",
+			pr.prNumber, pr.repo, pr.prURL)
+		s.injectUserMessage(pr.clawID, msg)
+	}
 }
 
 // prConditionsStatus explains why checkPRConditions did or didn't fire, so the

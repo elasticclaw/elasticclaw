@@ -715,6 +715,119 @@ func TestCheckCIStatusNeutralAndSkippedAreGreen(t *testing.T) {
 	}
 }
 
+// mergeConflictFixture creates a server with a stub GitHub that reports a
+// configurable mergeable_state for PR #1. The returned atomic value can be
+// flipped mid-test.
+func mergeConflictFixture(t *testing.T, clawID, initialState string) (*Server, *sql.DB, clawPR, *atomic.Value) {
+	t.Helper()
+	state := &atomic.Value{}
+	state.Store(initialState)
+	gh := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/pulls/1") {
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"state":           "open",
+				"merged":          false,
+				"mergeable_state": state.Load(),
+				"head":            map[string]interface{}{"sha": "abc123"},
+				"created_at":      "2026-01-01T00:00:00Z",
+				"draft":           false,
+			})
+			return
+		}
+		http.Error(w, "not found", http.StatusNotFound)
+	}))
+	t.Cleanup(gh.Close)
+
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{}, gh.URL, "", "")
+	insertWatcherTestPR(t, db, clawID, "pr-"+clawID)
+	if _, err := db.Exec(`UPDATE claw_prs SET last_mergeable_state=? WHERE id=?`, initialState, "pr-"+clawID); err != nil {
+		t.Fatal(err)
+	}
+	pr := clawPR{id: "pr-" + clawID, clawID: clawID, repo: "owner/repo", prNumber: 1, prURL: "https://github.com/owner/repo/pull/1", lastMergeableState: initialState}
+	return s, db, pr, state
+}
+
+func TestCheckPRMergeConflictNotifiesOnTransition(t *testing.T) {
+	const clawID = "claw-conflict-transition"
+	s, db, pr, state := mergeConflictFixture(t, clawID, "clean")
+
+	state.Store("dirty")
+	s.checkPRMerged(pr, "token")
+
+	msgs := ciMessages(t, db, clawID)
+	if len(msgs) != 1 || !strings.Contains(msgs[0], "merge conflict") {
+		t.Fatalf("messages = %v, want one merge conflict message", msgs)
+	}
+	if !strings.Contains(msgs[0], "PR #1") {
+		t.Fatalf("message missing PR number: %q", msgs[0])
+	}
+
+	var got string
+	if err := db.QueryRow(`SELECT last_mergeable_state FROM claw_prs WHERE id=?`, pr.id).Scan(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got != "dirty" {
+		t.Fatalf("last_mergeable_state = %q, want dirty", got)
+	}
+}
+
+func TestCheckPRMergeConflictDoesNotDuplicate(t *testing.T) {
+	const clawID = "claw-conflict-dedupe"
+	s, db, pr, _ := mergeConflictFixture(t, clawID, "dirty")
+
+	// Poll twice with the same stale pr value; the DB watermark blocks the duplicate.
+	s.checkPRMerged(pr, "token")
+	s.checkPRMerged(pr, "token")
+
+	if msgs := ciMessages(t, db, clawID); len(msgs) != 0 {
+		t.Fatalf("messages = %v, want none when already dirty", msgs)
+	}
+}
+
+func TestCheckPRMergeConflictResetsWhenClean(t *testing.T) {
+	const clawID = "claw-conflict-reset"
+	s, db, pr, state := mergeConflictFixture(t, clawID, "dirty")
+
+	state.Store("clean")
+	s.checkPRMerged(pr, "token")
+
+	if msgs := ciMessages(t, db, clawID); len(msgs) != 0 {
+		t.Fatalf("messages = %v, want none when becoming clean", msgs)
+	}
+	var got string
+	if err := db.QueryRow(`SELECT last_mergeable_state FROM claw_prs WHERE id=?`, pr.id).Scan(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got != "clean" {
+		t.Fatalf("last_mergeable_state = %q, want clean", got)
+	}
+
+	state.Store("dirty")
+	// The in-memory pr is stale, but the DB was updated to clean above.
+	s.checkPRMerged(pr, "token")
+
+	msgs := ciMessages(t, db, clawID)
+	if len(msgs) != 1 || !strings.Contains(msgs[0], "merge conflict") {
+		t.Fatalf("messages = %v, want one merge conflict message after re-dirtying", msgs)
+	}
+}
+
+func TestCheckPRMergeConflictSkippedForMentionOnly(t *testing.T) {
+	const clawID = "claw-conflict-mention"
+	s, db, pr, state := mergeConflictFixture(t, clawID, "clean")
+	if _, err := db.Exec(`UPDATE claw_prs SET mention_only=1 WHERE id=?`, pr.id); err != nil {
+		t.Fatal(err)
+	}
+	pr.mentionOnly = true
+
+	state.Store("dirty")
+	s.checkPRMerged(pr, "token")
+
+	if msgs := ciMessages(t, db, clawID); len(msgs) != 0 {
+		t.Fatalf("messages = %v, want none for mention-only PR", msgs)
+	}
+}
+
 func TestInjectMessageSkipsIdenticalPendingRow(t *testing.T) {
 	s, db := NewTestServerWithConfig(t, &types.HubConfig{ClawToken: "claw-token"}, "", "", "")
 	const clawID = "inject-message-dedupe"

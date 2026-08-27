@@ -181,6 +181,12 @@ func migrate(db *sql.DB) error {
 	if err := addColumn(db, "claw_prs", "token_miss_count", `INTEGER NOT NULL DEFAULT 0`); err != nil {
 		return err
 	}
+	// last_mergeable_state stores the last GitHub mergeable_state observed for
+	// the PR (e.g. "clean", "dirty", "blocked", "unknown"). It is used to
+	// surface a merge conflict to the agent only once per conflict episode.
+	if err := addColumn(db, "claw_prs", "last_mergeable_state", `TEXT NOT NULL DEFAULT ''`); err != nil {
+		return err
+	}
 	// The PR watcher never polls claws in terminal/offline states. Legacy rows
 	// therefore cannot safely retain the historical default of "open". Preserve
 	// a known terminal task-run PR state when available; otherwise mark it unknown.
@@ -804,6 +810,7 @@ func migrate(db *sql.DB) error {
 		permanent_failure_count INTEGER NOT NULL DEFAULT 0,
 		mention_only INTEGER NOT NULL DEFAULT 0, -- 1 = URL scanned from a message, not delivered via [DONE]; never gates finalization
 		token_miss_count INTEGER NOT NULL DEFAULT 0, -- consecutive polls with no resolvable GitHub token for the repo; separate from permanent_failure_count (see migrate)
+		last_mergeable_state TEXT NOT NULL DEFAULT '', -- last GitHub mergeable_state observed (e.g. "dirty"); used for one-shot conflict notifications
 		created_at  DATETIME NOT NULL,
 		UNIQUE(claw_id, pr_url)
 	);
