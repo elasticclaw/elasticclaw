@@ -211,6 +211,62 @@ func insertWatcherTestPR(t *testing.T, db *sql.DB, clawID, prID string) {
 	}
 }
 
+func TestPRCommentWatermarkOnlyAdvances(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{}, "", "", "")
+	insertWatcherTestPR(t, db, "claw-watermark", "pr-watermark")
+
+	pr := clawPR{id: "pr-watermark", clawID: "claw-watermark", prNumber: 1, lastCommentID: 10}
+	s.updatePRCommentWatermark(pr, []interface{}{map[string]interface{}{
+		"id":         float64(20),
+		"created_at": "2026-01-01T00:00:00Z",
+	}})
+	var got int64
+	if err := db.QueryRow(`SELECT last_comment_id FROM claw_prs WHERE id=?`, pr.id).Scan(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got != 20 {
+		t.Fatalf("last_comment_id = %d, want 20", got)
+	}
+
+	if _, err := db.Exec(`UPDATE claw_prs SET last_comment_id=30 WHERE id=?`, pr.id); err != nil {
+		t.Fatal(err)
+	}
+	// pr retains a stale in-memory watermark, as can happen with concurrent polls.
+	s.updatePRCommentWatermark(pr, []interface{}{map[string]interface{}{"id": float64(25)}})
+	if err := db.QueryRow(`SELECT last_comment_id FROM claw_prs WHERE id=?`, pr.id).Scan(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got != 30 {
+		t.Fatalf("last_comment_id regressed to %d, want 30", got)
+	}
+}
+
+func TestReviewCommentWatermarkOnlyAdvances(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{}, "", "", "")
+	insertWatcherTestPR(t, db, "claw-review-watermark", "pr-review-watermark")
+
+	pr := clawPR{id: "pr-review-watermark", clawID: "claw-review-watermark", prNumber: 1, lastReviewCommentID: 10}
+	s.updateReviewCommentWatermark(pr, []interface{}{map[string]interface{}{"id": float64(20)}})
+	var got int64
+	if err := db.QueryRow(`SELECT last_review_comment_id FROM claw_prs WHERE id=?`, pr.id).Scan(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got != 20 {
+		t.Fatalf("last_review_comment_id = %d, want 20", got)
+	}
+
+	if _, err := db.Exec(`UPDATE claw_prs SET last_review_comment_id=30 WHERE id=?`, pr.id); err != nil {
+		t.Fatal(err)
+	}
+	s.updateReviewCommentWatermark(pr, []interface{}{map[string]interface{}{"id": float64(25)}})
+	if err := db.QueryRow(`SELECT last_review_comment_id FROM claw_prs WHERE id=?`, pr.id).Scan(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got != 30 {
+		t.Fatalf("last_review_comment_id regressed to %d, want 30", got)
+	}
+}
+
 func TestCheckPRMergedStopsAfterPermanentFailures(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"message":"Not Found"}`, http.StatusNotFound)

@@ -869,6 +869,9 @@ func (s *Server) pollAllPRs() {
 		s.checkBugbotComments(r.pr, commentsData)
 		s.checkGreptileComments(r.pr, commentsData)
 		log.Printf("[pr-watcher] checking %d comment(s) for claw %s (watermark=%d, forward=%v)", len(commentsData), r.pr.clawID[:8], r.pr.lastCommentID, isPipelineDriven)
+		if !isPipelineDriven && hasNewComments(commentsData, r.pr.lastCommentID) {
+			log.Printf("[pr-watcher] claw=%s pr #%d has new comment(s) above watermark but forward=false (no pipeline context) — not delivering", r.pr.clawID[:8], r.pr.prNumber)
+		}
 		s.checkPRComments(r.pr, commentsData, prCommentOptions{
 			skipBugbot:   true,
 			skipGreptile: true,
@@ -1463,12 +1466,42 @@ func (s *Server) updatePRCommentWatermark(pr clawPR, commentsData []interface{})
 	}
 	if maxID > pr.lastCommentID {
 		if latestCommentAt != "" {
-			_, _ = s.db.Exec(`UPDATE claw_prs SET last_comment_id=?, last_comment_at=? WHERE id=?`,
-				maxID, latestCommentAt, pr.id)
+			s.updateWatermarkGuarded(`UPDATE claw_prs SET last_comment_id=?, last_comment_at=? WHERE id=? AND last_comment_id < ?`,
+				[]interface{}{maxID, latestCommentAt, pr.id, maxID}, pr.clawID, pr.prNumber)
 		} else {
-			_, _ = s.db.Exec(`UPDATE claw_prs SET last_comment_id=? WHERE id=?`, maxID, pr.id)
+			s.updateWatermarkGuarded(`UPDATE claw_prs SET last_comment_id=? WHERE id=? AND last_comment_id < ?`,
+				[]interface{}{maxID, pr.id, maxID}, pr.clawID, pr.prNumber)
 		}
 	}
+}
+
+// hasNewComments reports whether commentsData has an ID above watermark.
+func hasNewComments(commentsData []interface{}, watermark int64) bool {
+	for _, c := range commentsData {
+		comment, _ := c.(map[string]interface{})
+		idF, _ := comment["id"].(float64)
+		if int64(idF) > watermark {
+			return true
+		}
+	}
+	return false
+}
+
+// updateWatermarkGuarded advances a monotonic watermark, retrying once on a
+// SQLite busy error. Zero rows affected means another writer already advanced
+// the watermark at or past the requested value, which is not an error.
+func (s *Server) updateWatermarkGuarded(query string, args []interface{}, clawID string, prNumber int) error {
+	var err error
+	for attempt := 0; attempt < 2; attempt++ {
+		_, err = s.db.Exec(query, args...)
+		if err == nil || !isSQLiteBusy(err) {
+			break
+		}
+	}
+	if err != nil {
+		log.Printf("[pr-watcher] watermark update failed for claw %s pr #%d: %v", clawID[:8], prNumber, err)
+	}
+	return err
 }
 
 // checkGreptileReviewComments polls PR review comments (pulls/{n}/comments) for
@@ -1792,7 +1825,8 @@ func (s *Server) updateReviewCommentWatermark(pr clawPR, reviewCommentsData []in
 		}
 	}
 	if maxID > pr.lastReviewCommentID {
-		_, _ = s.db.Exec(`UPDATE claw_prs SET last_review_comment_id=? WHERE id=?`, maxID, pr.id)
+		s.updateWatermarkGuarded(`UPDATE claw_prs SET last_review_comment_id=? WHERE id=? AND last_review_comment_id < ?`,
+			[]interface{}{maxID, pr.id, maxID}, pr.clawID, pr.prNumber)
 	}
 }
 
