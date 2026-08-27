@@ -478,6 +478,9 @@ func (s *Server) seedLifecycleClawRouteBaseline(notifier string) error {
 	if err := s.skipCurrentLifecycleClawRouteIdle(notifier); err != nil {
 		return err
 	}
+	if err := s.skipCurrentLifecycleClawRouteStageStalled(notifier); err != nil {
+		return err
+	}
 	return s.skipCurrentLifecycleClawRoutePRs(notifier)
 }
 
