@@ -303,13 +303,13 @@ func (s *Server) scheduleClawRetry(clawID, reason string) clawRetryDisposition {
 }
 
 // replaceClawInstance tears down the corrupted provider instance and starts a
-// fresh one. It restores the newest ready checkpoint unless the previous failed
-// attempt used that exact checkpoint, in which case it provisions cleanly.
+// fresh one. It restores the newest eligible ready checkpoint, walking older
+// checkpoints when newer ones are unsafe to reuse or restore no files.
 func (s *Server) replaceClawInstance(ctx context.Context, tenantID, clawID, reason string, attempt int) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	checkpointID, err := s.retryCheckpointBeforeTermination(tenantID, clawID, attempt)
+	checkpointID, readyCheckpointCount, err := s.retryCheckpointBeforeTermination(tenantID, clawID, attempt)
 	if err != nil {
 		return err
 	}
@@ -337,7 +337,11 @@ func (s *Server) replaceClawInstance(ctx context.Context, tenantID, clawID, reas
 	}
 
 	bootstrapStatus := fmt.Sprintf("retrying (attempt %d/%d)", attempt, maxClawAttempts)
-	reset, err := s.resetClawForRetry(tenantID, clawID, checkpointID, bootstrapStatus)
+	bootstrapDiagnostic := ""
+	if checkpointID == "" {
+		bootstrapDiagnostic = bootstrapStatus + "; retry checkpoint=none"
+	}
+	reset, err := s.resetClawForRetry(tenantID, clawID, checkpointID, bootstrapStatus, bootstrapDiagnostic)
 	if err != nil {
 		return err
 	}
@@ -371,7 +375,11 @@ func (s *Server) replaceClawInstance(ctx context.Context, tenantID, clawID, reas
 			"claw_id": clawID, "status": "provisioning", "bootstrap_status": bootstrapStatus,
 		},
 	})
-	log.Printf("[claw-retry] replacing %s after %s (attempt %d/%d, checkpoint=%q)", shortID(clawID), sanitizeFailureDetails(reason), attempt, maxClawAttempts, checkpointID)
+	if checkpointID == "" {
+		log.Printf("[claw-retry] replacing %s after %s (attempt %d/%d, checkpoint=%q (0 eligible of %d ready))", shortID(clawID), sanitizeFailureDetails(reason), attempt, maxClawAttempts, checkpointID, readyCheckpointCount)
+	} else {
+		log.Printf("[claw-retry] replacing %s after %s (attempt %d/%d, checkpoint=%q)", shortID(clawID), sanitizeFailureDetails(reason), attempt, maxClawAttempts, checkpointID)
+	}
 	go s.provisionStoredClaw(clawID)
 	return nil
 }
@@ -379,64 +387,67 @@ func (s *Server) replaceClawInstance(ctx context.Context, tenantID, clawID, reas
 // retryCheckpointBeforeTermination fixes the restore choice at the failure
 // boundary. A best-effort termination checkpoint is retained for diagnostics,
 // but is never selected as the state used to recover that same failure.
-func (s *Server) retryCheckpointBeforeTermination(tenantID, clawID string, attempt int) (string, error) {
-	checkpointID, err := s.retryCheckpointID(tenantID, clawID, attempt)
+func (s *Server) retryCheckpointBeforeTermination(tenantID, clawID string, attempt int) (string, int, error) {
+	checkpointID, readyCheckpointCount, err := s.retryCheckpointIDWithCount(tenantID, clawID, attempt)
 	if err != nil {
-		return "", err
+		return "", 0, err
 	}
 	s.checkpointBeforeTermination(clawID, "automatic-retry")
-	return checkpointID, nil
+	return checkpointID, readyCheckpointCount, nil
 }
 
 func (s *Server) retryCheckpointID(tenantID, clawID string, attempt int) (string, error) {
+	checkpointID, _, err := s.retryCheckpointIDWithCount(tenantID, clawID, attempt)
+	return checkpointID, err
+}
+
+type retryCheckpointCandidate struct {
+	id       string
+	reason   string
+	rootTree string
+}
+
+func (s *Server) retryCheckpointIDWithCount(tenantID, clawID string, attempt int) (string, int, error) {
 	var previousCheckpointID string
 	_ = s.db.QueryRow(`
 		SELECT COALESCE(restored_checkpoint_id,'')
 		  FROM task_run_attempts
 		 WHERE run_id=(SELECT task_run_id FROM claws WHERE id=?) AND attempt_number=?`, clawID, attempt-1).Scan(&previousCheckpointID)
 
-	var checkpointID, checkpointReason string
-	err := s.db.QueryRow(`
-		SELECT id, COALESCE(reason,'') FROM claw_checkpoints
+	rows, err := s.db.Query(`
+		SELECT id, COALESCE(reason,''), COALESCE(root_tree_sha256,'') FROM claw_checkpoints
 		 WHERE tenant_id=? AND claw_id=? AND status='ready' AND manifest_path != ''
-		 ORDER BY created_at DESC LIMIT 1`, tenantID, clawID).Scan(&checkpointID, &checkpointReason)
-	if err == sql.ErrNoRows {
-		return "", nil
-	}
+		 ORDER BY created_at DESC`, tenantID, clawID)
 	if err != nil {
-		return "", err
+		return "", 0, err
 	}
-	if checkpointID == previousCheckpointID {
-		return "", nil
+	defer rows.Close()
+
+	var candidates []retryCheckpointCandidate
+	for rows.Next() {
+		var candidate retryCheckpointCandidate
+		if err := rows.Scan(&candidate.id, &candidate.reason, &candidate.rootTree); err != nil {
+			return "", 0, err
+		}
+		candidates = append(candidates, candidate)
 	}
-	// A 'bootstrap' checkpoint captures state zero — it is taken seconds after
-	// provisioning, before the agent has done anything. Restoring it over a
-	// claw that has already made progress rolls the workspace back and
-	// discards real work (observed on NEXT-801/NEXT-790). Fall back to the
-	// newest non-bootstrap checkpoint instead — an earlier attempt's periodic
-	// checkpoint can hold hours of recoverable work even when a later
-	// attempt's bootstrap checkpoint sorted newest — and only when none exists
-	// provision the successor cleanly and let the reconnect re-brief point the
-	// fresh agent at the live PR/workspace state.
-	if checkpointReason == "bootstrap" && s.clawProgressedPastBootstrap(tenantID, clawID) {
-		err := s.db.QueryRow(`
-			SELECT id FROM claw_checkpoints
-			 WHERE tenant_id=? AND claw_id=? AND status='ready' AND manifest_path != ''
-			   AND COALESCE(reason,'') != 'bootstrap'
-			 ORDER BY created_at DESC LIMIT 1`, tenantID, clawID).Scan(&checkpointID)
-		if err == sql.ErrNoRows {
-			return "", nil
-		}
-		if err != nil {
-			return "", err
-		}
-		// Same guard as above: never restore the checkpoint the previous
-		// attempt already failed on.
-		if checkpointID == previousCheckpointID {
-			return "", nil
-		}
+	if err := rows.Err(); err != nil {
+		return "", 0, err
 	}
-	return checkpointID, nil
+
+	// A 'bootstrap' checkpoint captures state zero. Once work has progressed,
+	// walk past it to older usable checkpoints instead of rolling real work
+	// back or giving up when the newest candidate is blocked.
+	progressedPastBootstrap := s.clawProgressedPastBootstrap(tenantID, clawID)
+	for _, candidate := range candidates {
+		if candidate.id == previousCheckpointID ||
+			(candidate.reason == "bootstrap" && progressedPastBootstrap) ||
+			candidate.rootTree == "" {
+			continue
+		}
+		return candidate.id, len(candidates), nil
+	}
+	return "", len(candidates), nil
 }
 
 // clawProgressedPastBootstrap reports whether the claw shows any signal of
@@ -475,7 +486,7 @@ func (s *Server) clawProgressedPastBootstrap(tenantID, clawID string) bool {
 	return entry != nil && entry.ID != stageID
 }
 
-func (s *Server) resetClawForRetry(tenantID, clawID, checkpointID, bootstrapStatus string) (bool, error) {
+func (s *Server) resetClawForRetry(tenantID, clawID, checkpointID, bootstrapStatus, bootstrapDiagnostic string) (bool, error) {
 	// rebrief_pending=1 marks that the successor sandbox starts with a brand-new
 	// OpenClaw session: the checkpoint restore brings back workspace files but
 	// not the conversation, so the reconnect path must re-brief the agent with
@@ -483,11 +494,11 @@ func (s *Server) resetClawForRetry(tenantID, clawID, checkpointID, bootstrapStat
 	// normal reconnect/bridge flap must never set it.
 	res, err := s.db.Exec(`
 		UPDATE claws
-		   SET status='provisioning', bootstrap_ok=0, bootstrap_status=?, bootstrap_diagnostic='',
+		   SET status='provisioning', bootstrap_ok=0, bootstrap_status=?, bootstrap_diagnostic=?,
 		       provider_id='', ssh_host='', ssh_port=0, ssh_user='', restore_checkpoint_id=?,
 		       rebrief_pending=1
 		 WHERE id=? AND tenant_id=? AND status IN ('error','offline')`,
-		bootstrapStatus, checkpointID, clawID, tenantID)
+		bootstrapStatus, bootstrapDiagnostic, checkpointID, clawID, tenantID)
 	if err != nil {
 		return false, err
 	}

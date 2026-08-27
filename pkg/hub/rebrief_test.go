@@ -60,7 +60,7 @@ func TestRebriefPendingArmedByRetryAndConsumedOnce(t *testing.T) {
 		t.Fatalf("insert claw_prs: %v", err)
 	}
 
-	reset, err := s.resetClawForRetry("test-tenant-id", clawID, "", "retrying (attempt 2/3)")
+	reset, err := s.resetClawForRetry("test-tenant-id", clawID, "", "retrying (attempt 2/3)", "")
 	if err != nil {
 		t.Fatalf("resetClawForRetry: %v", err)
 	}
@@ -162,7 +162,7 @@ func TestClearRebriefPendingDiscardsArmedFlag(t *testing.T) {
 	const clawID = "claw-rebrief-clear"
 	s, db := newRebriefTestServer(t, clawID, "error", "")
 
-	if _, err := s.resetClawForRetry("test-tenant-id", clawID, "", "retrying (attempt 2/3)"); err != nil {
+	if _, err := s.resetClawForRetry("test-tenant-id", clawID, "", "retrying (attempt 2/3)", ""); err != nil {
 		t.Fatalf("resetClawForRetry: %v", err)
 	}
 	if pending := clawRebriefPending(t, db, clawID); pending != 1 {
