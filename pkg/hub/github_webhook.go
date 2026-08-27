@@ -1474,9 +1474,13 @@ func (s *Server) mergeSinglePRForClaw(clawID, repo string, prNumber int) (failur
 	if err != nil {
 		log.Printf("[pipeline] merge_pr: request failed for %s#%d: %v", repo, prNumber, err)
 		var apiErr *githubAPIError
-		if errors.As(err, &apiErr) && apiErr.RateLimited {
-			s.injectExternalHubMessageByID(clawID, fmt.Sprintf("[hub] merge_pr: GitHub rate limit; retry later (PR #%d).", prNumber))
-			return fmt.Sprintf("PR #%d failed (GitHub rate limit)", prNumber)
+		if errors.As(err, &apiErr) {
+			if apiErr.RateLimited {
+				s.injectExternalHubMessageByID(clawID, fmt.Sprintf("[hub] merge_pr: GitHub rate limit; retry later (PR #%d).", prNumber))
+				return fmt.Sprintf("PR #%d failed (GitHub rate limit)", prNumber)
+			}
+			s.injectExternalHubMessageByID(clawID, fmt.Sprintf("[hub] merge_pr: failed to merge PR #%d (HTTP %d). Check CI status and review requirements.", prNumber, apiErr.StatusCode))
+			return fmt.Sprintf("PR #%d failed (HTTP %d)", prNumber, apiErr.StatusCode)
 		}
 		s.injectExternalHubMessageByID(clawID, fmt.Sprintf("[hub] merge_pr: failed to merge PR #%d: %v", prNumber, err))
 		return fmt.Sprintf("PR #%d failed (%v)", prNumber, err)
@@ -1487,7 +1491,5 @@ func (s *Server) mergeSinglePRForClaw(clawID, repo string, prNumber int) (failur
 		s.injectHubMessageByID(clawID, fmt.Sprintf("[hub] PR #%d merged successfully.", prNumber))
 		return ""
 	}
-	log.Printf("[pipeline] merge_pr: failed to merge %s#%d: HTTP %d: %s", repo, prNumber, resp.StatusCode, string(resp.Body))
-	s.injectExternalHubMessageByID(clawID, fmt.Sprintf("[hub] merge_pr: failed to merge PR #%d (HTTP %d). Check CI status and review requirements.", prNumber, resp.StatusCode))
-	return fmt.Sprintf("PR #%d failed (HTTP %d)", prNumber, resp.StatusCode)
+	return ""
 }
