@@ -87,16 +87,20 @@ func (s *Server) pollTick() {
 	}
 
 	// === GITHUB ISSUES ===
-	ghIssuesSince := s.pollSince("github-issues", now).Format(time.RFC3339)
-	ghIssuesOK := true
-	if integrations != nil && len(integrations.GitHubIssues) > 0 {
-		ghIssuesOK = s.pollGitHubIssues(factories, integrations.GitHubIssues, ghIssuesSince)
-	}
-	if len(githubIssueWorkflowWorkspaces) > 0 {
-		ghIssuesOK = s.pollGitHubIssueWorkflows(githubIssueWorkflowWorkspaces, ghIssuesSince) && ghIssuesOK
-	}
-	if ((integrations != nil && len(integrations.GitHubIssues) > 0) || len(githubIssueWorkflowWorkspaces) > 0) && ghIssuesOK {
-		s.setPollHighWaterMark("github-issues", now)
+	if !defaultGitHubClient.allowLowPriority() {
+		log.Printf("[poll] tick: GitHub polling skipped; rate-limit reserve active")
+	} else {
+		ghIssuesSince := s.pollSince("github-issues", now).Format(time.RFC3339)
+		ghIssuesOK := true
+		if integrations != nil && len(integrations.GitHubIssues) > 0 {
+			ghIssuesOK = s.pollGitHubIssues(factories, integrations.GitHubIssues, ghIssuesSince)
+		}
+		if len(githubIssueWorkflowWorkspaces) > 0 {
+			ghIssuesOK = s.pollGitHubIssueWorkflows(githubIssueWorkflowWorkspaces, ghIssuesSince) && ghIssuesOK
+		}
+		if ((integrations != nil && len(integrations.GitHubIssues) > 0) || len(githubIssueWorkflowWorkspaces) > 0) && ghIssuesOK {
+			s.setPollHighWaterMark("github-issues", now)
+		}
 	}
 
 	// === JIRA ===
@@ -114,7 +118,7 @@ func (s *Server) pollTick() {
 
 	// === GITHUB PRs ===
 	// Use factories with integration=="github" to discover repos
-	if len(factories) > 0 {
+	if len(factories) > 0 && defaultGitHubClient.allowLowPriority() {
 		if s.pollGitHubPRs(factories, s.pollSince("github", now).Format(time.RFC3339)) {
 			s.setPollHighWaterMark("github", now)
 		}

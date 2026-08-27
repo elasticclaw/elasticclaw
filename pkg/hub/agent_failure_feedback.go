@@ -300,14 +300,9 @@ func commentGitHubIssueWithBase(base, token, repo string, issueNumber int, body 
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := issueTrackerHTTPClient.Do(req)
+	_, err = defaultGitHubClient.do(req)
 	if err != nil {
 		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 400 {
-		respBody, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("github API error %d: %s", resp.StatusCode, string(respBody))
 	}
 	return nil
 }

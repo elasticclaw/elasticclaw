@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
 	"net/url"
@@ -152,21 +151,11 @@ func (s *Server) fetchGitHubIssueDetails(token, repo string, issueNumber int, ba
 		baseURL = "https://api.github.com"
 	}
 	url := fmt.Sprintf("%s/repos/%s/issues/%d", baseURL, repo, issueNumber)
-	req, err := http.NewRequest("GET", url, nil)
+	resp, err := defaultGitHubClient.get(url, token)
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
-
-	resp, err := issueTrackerHTTPClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	body, _ := io.ReadAll(resp.Body)
+	body := resp.Body
 	if resp.StatusCode != 200 {
 		return nil, fmt.Errorf("github API GET %s: %d %s", url, resp.StatusCode, string(body))
 	}
@@ -258,14 +247,9 @@ func githubAPIAddLabel(baseURL, repo string, issueNumber int, label, token strin
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := issueTrackerHTTPClient.Do(req)
+	_, err = defaultGitHubClient.do(req)
 	if err != nil {
 		return err
-	}
-	defer resp.Body.Close()
-	respBody, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode >= 300 {
-		return fmt.Errorf("github API POST %s: %d %s", path, resp.StatusCode, string(respBody))
 	}
 	return nil
 }
@@ -285,17 +269,13 @@ func githubAPIDeleteLabel(baseURL, repo string, issueNumber int, label, token st
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
-	resp, err := issueTrackerHTTPClient.Do(req)
+	_, err = defaultGitHubClient.do(req)
 	if err != nil {
+		var apiErr *githubAPIError
+		if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound && strings.Contains(apiErr.Body, "Label does not exist") {
+			return nil
+		}
 		return err
-	}
-	defer resp.Body.Close()
-	respBody, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode == http.StatusNotFound && strings.Contains(string(respBody), "Label does not exist") {
-		return nil
-	}
-	if resp.StatusCode >= 300 {
-		return fmt.Errorf("github API DELETE %s: %d %s", path, resp.StatusCode, string(respBody))
 	}
 	return nil
 }

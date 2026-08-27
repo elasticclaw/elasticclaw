@@ -1049,6 +1049,21 @@ func (s *Server) resolveGitHubTokenWithRepos(repoAccess []RepoAccess) string {
 	if lastErr != nil {
 		log.Printf("[pr-watcher] CRITICAL: GitHub token resolution failed after trying %d app(s): %v", len(appCfgs), lastErr)
 	}
+	// Only negatively cache rate-limit failures: those are the ones that
+	// recur on every poll of every PR until the window passes, and the
+	// shared client's blockedUntil already tells us when that is. Other
+	// mint failures (outages, bad config) must be retried on the very next
+	// poll — token_miss_count and the re-arm sweep depend on that.
+	if apiErr, ok := lastErr.(*githubAPIError); ok && apiErr.RateLimited {
+		if s.ghTokenCache == nil {
+			s.ghTokenCache = map[string]cachedGitHubToken{}
+		}
+		until := time.Now().Add(time.Minute)
+		if blockedUntil, blocked := defaultGitHubClient.blockedUntilTime(); blocked && blockedUntil.After(until) {
+			until = blockedUntil
+		}
+		s.ghTokenCache[cacheKey] = cachedGitHubToken{expiresAt: until}
+	}
 	return ""
 }
 
