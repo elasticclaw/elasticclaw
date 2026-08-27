@@ -659,12 +659,14 @@ func (s *Server) skipCurrentLifecycleClawRouteStageStalled(notifier string) erro
 // same single-writer sqlite connection — iterating an open *Rows cursor while
 // writing through it deadlocks.
 func (s *Server) selectLifecycleClawStageStalledCandidates(notifier string) ([]lifecycleClawRow, []int64, []string, []sql.NullInt64, error) {
+	cutoff := lifecycleClawAdhocCutoff()
 	rows, err := s.db.Query(`SELECT `+lifecycleClawSelectColumns+`, c.stage_stalled_since, c.pipeline_stage, c.stage_entered_at FROM claws c
 		WHERE c.task_run_id='' AND c.status='connected' AND c.pipeline_stage<>'' AND c.stage_stalled_since>0
+		AND CAST(strftime('%s', c.created_at) AS INTEGER) <= ?
 		AND NOT EXISTS (SELECT 1 FROM claw_prs p WHERE p.claw_id=c.id AND p.state NOT IN ('merged','closed') AND p.mention_only=0)
 		AND NOT EXISTS (SELECT 1 FROM slack_notification_deliveries d WHERE d.event_id='claw:' || c.id || ':stage_stalled:' || c.stage_stalled_since)
 		AND NOT EXISTS (SELECT 1 FROM slack_notification_deliveries_v2 v WHERE v.event_id='claw:' || c.id || ':stage_stalled:' || c.stage_stalled_since AND v.notifier=?)
-		ORDER BY c.created_at LIMIT `+strconv.Itoa(lifecycleBatchSize), notifier)
+		ORDER BY c.created_at LIMIT `+strconv.Itoa(lifecycleBatchSize), cutoff, notifier)
 	if err != nil {
 		return nil, nil, nil, nil, err
 	}

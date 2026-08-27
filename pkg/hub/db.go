@@ -557,6 +557,7 @@ func migrate(db *sql.DB) error {
 	CREATE INDEX IF NOT EXISTS idx_messages_claw ON messages(claw_id, created_at);
 	CREATE INDEX IF NOT EXISTS idx_messages_pending ON messages(claw_id, created_at) WHERE delivered_at IS NULL;
 	CREATE INDEX IF NOT EXISTS idx_claws_tenant  ON claws(tenant_id);
+	CREATE INDEX IF NOT EXISTS idx_claws_stage_stalled ON claws(stage_stalled_since) WHERE stage_stalled_since > 0;
 
 	CREATE TABLE IF NOT EXISTS task_runs (
 		id                    TEXT PRIMARY KEY,
