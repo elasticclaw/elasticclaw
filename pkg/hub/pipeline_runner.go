@@ -2266,6 +2266,7 @@ func (s *Server) stopAgentTerminalWithReason(clawID, reason string, skipVMTermin
 		delete(s.claws, clawID)
 	}
 	delete(s.gatewayUnhealthyCounts, clawID)
+	delete(s.gatewayEscalatedAt, clawID)
 	s.mu.Unlock()
 
 	// 4. Write issue-tracker comment without delaying agent shutdown.

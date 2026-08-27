@@ -67,6 +67,9 @@ type Server struct {
 	gatewayRestartCounts map[string]int
 	// gatewayUnhealthyCounts survives WebSocket reconnects so flapping gateways still escalate.
 	gatewayUnhealthyCounts map[string]int
+	// gatewayEscalatedAt records the last gateway-health escalation dispatch per claw,
+	// preventing retries from piling up while a replacement is pending or in flight. Guarded by s.mu.
+	gatewayEscalatedAt map[string]time.Time
 	// autoResumeRestartCounts records restart counts already handled per claw. Guarded by s.mu.
 	autoResumeRestartCounts map[string]int
 	lastTokenFailureLog     time.Time
@@ -473,6 +476,7 @@ func NewServer(addr, dbPath, identityDir string, hubCfg *types.HubConfig) (*Serv
 		users:                    make(map[string]*userConn),
 		gatewayRestartCounts:     make(map[string]int),
 		gatewayUnhealthyCounts:   make(map[string]int),
+		gatewayEscalatedAt:       make(map[string]time.Time),
 		autoResumeRestartCounts:  make(map[string]int),
 		dependencyStatus:         newDependencyStatusService(hubCfg),
 		fileAckWaiters:           make(map[string]chan types.FileAck),
@@ -1913,6 +1917,7 @@ func (s *Server) handleClawDetail(w http.ResponseWriter, r *http.Request) {
 			delete(s.claws, clawID)
 		}
 		delete(s.gatewayUnhealthyCounts, clawID)
+		delete(s.gatewayEscalatedAt, clawID)
 		s.mu.Unlock()
 		go func() {
 			s.checkpointBeforeTermination(clawID, "manual-kill")
@@ -2911,7 +2916,19 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 						// that reconnects no longer reset the counter, a single declined
 						// attempt would otherwise be the last one this claw ever gets.
 						if unhealthyCount >= gatewayUnhealthyMax && unhealthyCount%gatewayUnhealthyMax == 0 {
-							shouldEscalateGateway = true
+							cooldown := 2 * time.Duration(gatewayUnhealthyMax) * bridgeHeartbeatInterval
+							if cooldown < 10*time.Minute {
+								cooldown = 10 * time.Minute
+							}
+							nowAt := now()
+							escalatedAt := s.gatewayEscalatedAt[clawID]
+							if unhealthyCount == gatewayUnhealthyMax || nowAt.Sub(escalatedAt) >= cooldown {
+								shouldEscalateGateway = true
+								if s.gatewayEscalatedAt == nil {
+									s.gatewayEscalatedAt = make(map[string]time.Time)
+								}
+								s.gatewayEscalatedAt[clawID] = nowAt
+							}
 						}
 					}
 					// Log context usage on every heartbeat when it crosses the 80% threshold,
@@ -2922,6 +2939,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 					if hb.GatewayHealthy && s.gatewayUnhealthyCounts[clawID] > 0 {
 						log.Printf("[heartbeat] %s (%s): gateway recovered after %d unhealthy checks", rp.Name, clawID[:8], s.gatewayUnhealthyCounts[clawID])
 						s.gatewayUnhealthyCounts[clawID] = 0
+						delete(s.gatewayEscalatedAt, clawID)
 					}
 					// Inject context warning once per streaming turn when usage is >=95%
 					if !activeCC.streamingStartedAt.IsZero() &&
