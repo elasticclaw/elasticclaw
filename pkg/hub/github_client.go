@@ -66,7 +66,7 @@ type githubClient struct {
 }
 
 func newGitHubClient() *githubClient {
-	return &githubClient{httpClient: http.DefaultClient, etags: map[string]*githubETagEntry{}}
+	return &githubClient{httpClient: &http.Client{Timeout: 30 * time.Second}, etags: map[string]*githubETagEntry{}}
 }
 
 // defaultGitHubClient backs the githubAPI* helpers, so every GitHub consumer in
