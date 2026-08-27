@@ -267,6 +267,32 @@ func TestReviewCommentWatermarkOnlyAdvances(t *testing.T) {
 	}
 }
 
+func TestPRReviewWatermarkOnlyAdvances(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{}, "", "", "")
+	insertWatcherTestPR(t, db, "claw-review-watermark", "pr-review-watermark")
+
+	pr := clawPR{id: "pr-review-watermark", clawID: "claw-review-watermark", prNumber: 1, lastReviewID: 10}
+	s.updatePRReviewWatermark(pr, []interface{}{map[string]interface{}{"id": float64(20)}})
+	var got int64
+	if err := db.QueryRow(`SELECT last_review_id FROM claw_prs WHERE id=?`, pr.id).Scan(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got != 20 {
+		t.Fatalf("last_review_id = %d, want 20", got)
+	}
+
+	if _, err := db.Exec(`UPDATE claw_prs SET last_review_id=30 WHERE id=?`, pr.id); err != nil {
+		t.Fatal(err)
+	}
+	s.updatePRReviewWatermark(pr, []interface{}{map[string]interface{}{"id": float64(25)}})
+	if err := db.QueryRow(`SELECT last_review_id FROM claw_prs WHERE id=?`, pr.id).Scan(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got != 30 {
+		t.Fatalf("last_review_id regressed to %d, want 30", got)
+	}
+}
+
 func TestCheckPRMergedStopsAfterPermanentFailures(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"message":"Not Found"}`, http.StatusNotFound)

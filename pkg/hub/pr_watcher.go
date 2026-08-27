@@ -1811,7 +1811,8 @@ func (s *Server) claimPRFeedbackDelivery(clawID, feedbackType string, id int64) 
 func (s *Server) updatePRReviewWatermark(pr clawPR, reviewsData []interface{}) {
 	maxID := maxPRReviewID(reviewsData, pr.lastReviewID)
 	if maxID > pr.lastReviewID {
-		_, _ = s.db.Exec(`UPDATE claw_prs SET last_review_id=? WHERE id=?`, maxID, pr.id)
+		s.updateWatermarkGuarded(`UPDATE claw_prs SET last_review_id=? WHERE id=? AND last_review_id < ?`,
+			[]interface{}{maxID, pr.id, maxID}, pr.clawID, pr.prNumber)
 	}
 }
 
