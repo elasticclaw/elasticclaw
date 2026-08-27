@@ -1,6 +1,9 @@
 package hub
 
-import "log"
+import (
+	"log"
+	"time"
+)
 
 // getPipelineStage returns the current pipeline stage ID for a claw.
 // Returns "" if the claw has no pipeline stage set.
@@ -14,7 +17,7 @@ func (s *Server) getPipelineStage(clawID string) string {
 // claw is not already in that stage. It returns true when the caller won the
 // transition and should run on_enter actions.
 func (s *Server) claimPipelineStageTransition(clawID, stageID string) bool {
-	res, err := s.db.Exec(`UPDATE claws SET pipeline_stage=? WHERE id=? AND pipeline_stage<>?`, stageID, clawID, stageID)
+	res, err := s.db.Exec(`UPDATE claws SET pipeline_stage=?, stage_entered_at=? WHERE id=? AND pipeline_stage<>?`, stageID, time.Now().UnixMilli(), clawID, stageID)
 	if err != nil {
 		log.Printf("[pipeline] failed to set stage %q for claw %s: %v", stageID, clawID[:8], err)
 		return false

@@ -195,6 +195,7 @@ interface LifecycleEventToggles {
   prOpened?: boolean
   failures?: boolean
   agentIdle?: boolean
+  stageStalled?: boolean
 }
 
 interface NotificationsView {
@@ -207,6 +208,7 @@ interface NotificationsView {
     routes?: LifecycleRouteView[]
     pollInterval?: string
     idleAfter?: string
+    stageProgressAfter?: string
     events?: LifecycleEventToggles
   }
 }
@@ -4539,6 +4541,7 @@ const LIFECYCLE_EVENT_LABELS: Record<string, string> = {
   agent_started: "Agent started",
   pr_opened: "PR opened",
   agent_idle: "Agent stalled",
+  stage_stalled: "Pipeline stage stalled",
   agent_stopped: "Agent died or failed",
   done_without_pr: "Agent finished without a PR",
 }
@@ -4551,6 +4554,7 @@ const LIFECYCLE_EVENT_CATEGORY: Record<string, LifecycleCategory> = {
   agent_started: "agentStarted",
   pr_opened: "prOpened",
   agent_idle: "agentIdle",
+  stage_stalled: "stageStalled",
   agent_stopped: "failures",
   done_without_pr: "failures",
 }
@@ -4560,6 +4564,7 @@ const LIFECYCLE_CATEGORIES: { id: LifecycleCategory; label: string; description:
   { id: "prOpened", label: "PR opened", description: "An agent opened a pull request" },
   { id: "failures", label: "Failures", description: "Crashes, timeouts, lost machines, finished without a PR" },
   { id: "agentIdle", label: "Agent stalled", description: "An agent stopped making progress" },
+  { id: "stageStalled", label: "Pipeline stage stalled", description: "A pipeline stage stopped making meaningful progress" },
 ]
 
 // Fallback only — the canonical list comes from settings.lifecycleEventTypes.
@@ -4639,6 +4644,7 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
     prOpened: lifecycle?.events?.prOpened ?? true,
     failures: lifecycle?.events?.failures ?? true,
     agentIdle: lifecycle?.events?.agentIdle ?? true,
+    stageStalled: lifecycle?.events?.stageStalled ?? true,
   }
   // A legacy single-channel `via` reads as one route over every event; saving
   // any change migrates it to routes. `via` is trimmed exactly where the hub
@@ -4859,6 +4865,7 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
     }
     if (lifecycle?.pollInterval) outLifecycle.pollInterval = lifecycle.pollInterval
     if (lifecycle?.idleAfter) outLifecycle.idleAfter = lifecycle.idleAfter
+    if (lifecycle?.stageProgressAfter) outLifecycle.stageProgressAfter = lifecycle.stageProgressAfter
     return {
       patch: { notifications: { notifiers: outNotifiers, lifecycle: outLifecycle } },
       // The never-configured hub is clamped too, and for the same reason: the

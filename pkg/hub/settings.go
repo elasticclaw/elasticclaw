@@ -109,12 +109,13 @@ type NotifierView struct {
 // encoding/json discards as unknown keys on the way back in — resetting a
 // deliberately raised idle_after to the 5m default and persisting the loss.
 type LifecycleNotificationsView struct {
-	Enabled      bool                         `json:"enabled"`
-	Via          string                       `json:"via,omitempty"`
-	Routes       []types.LifecycleRoute       `json:"routes"`
-	PollInterval string                       `json:"pollInterval,omitempty"`
-	IdleAfter    string                       `json:"idleAfter,omitempty"`
-	Events       *types.LifecycleEventToggles `json:"events,omitempty"`
+	Enabled            bool                         `json:"enabled"`
+	Via                string                       `json:"via,omitempty"`
+	Routes             []types.LifecycleRoute       `json:"routes"`
+	PollInterval       string                       `json:"pollInterval,omitempty"`
+	IdleAfter          string                       `json:"idleAfter,omitempty"`
+	StageProgressAfter string                       `json:"stageProgressAfter,omitempty"`
+	Events             *types.LifecycleEventToggles `json:"events,omitempty"`
 }
 
 type AuthView struct {
@@ -724,11 +725,12 @@ func buildNotificationsView(cfg *types.NotificationsConfig) *NotificationsView {
 	}
 	if lc := cfg.Lifecycle; lc != nil {
 		lifecycle := &LifecycleNotificationsView{
-			Enabled:      lc.IsEnabled(),
-			Via:          lc.Via,
-			Routes:       make([]types.LifecycleRoute, len(lc.Routes)),
-			PollInterval: lc.PollInterval,
-			IdleAfter:    lc.IdleAfter,
+			Enabled:            lc.IsEnabled(),
+			Via:                lc.Via,
+			Routes:             make([]types.LifecycleRoute, len(lc.Routes)),
+			PollInterval:       lc.PollInterval,
+			IdleAfter:          lc.IdleAfter,
+			StageProgressAfter: lc.StageProgressAfter,
 		}
 		for i, route := range lc.Routes {
 			lifecycle.Routes[i] = types.LifecycleRoute{Via: route.Via, Events: append([]string(nil), route.Events...)}
@@ -895,6 +897,9 @@ func dropRejectedLifecycleDurations(current, patch *types.NotificationsConfig) {
 	}
 	if lc.IdleAfter == stored.IdleAfter && lifecycleDurationRejected(&types.LifecycleNotificationsConfig{IdleAfter: lc.IdleAfter}) {
 		lc.IdleAfter = ""
+	}
+	if lc.StageProgressAfter == stored.StageProgressAfter && lifecycleDurationRejected(&types.LifecycleNotificationsConfig{StageProgressAfter: lc.StageProgressAfter}) {
+		lc.StageProgressAfter = ""
 	}
 }
 

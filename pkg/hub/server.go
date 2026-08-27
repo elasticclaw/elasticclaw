@@ -120,6 +120,10 @@ type Server struct {
 	agentIdleBaselineAt      time.Time
 	agentIdleBaselineCleared bool
 
+	stageProgressBaselineMu      sync.Mutex
+	stageProgressBaselineAt      time.Time
+	stageProgressBaselineCleared bool
+
 	// agentIdleResumeBaselineAt caches the persisted idle AUTO-RESUME baseline
 	// (see agentIdleResumeBaseline in agent_idle.go). Deliberately separate
 	// state from the alert baseline above: the resume never reads the
@@ -6157,6 +6161,7 @@ func (s *Server) checkClawStatus() {
 		// of whether anyone is being notified (NEXT-713: an agent parked in a
 		// tool call that never returns is only unstuck by a prompt).
 		s.checkAgentIdleResume(now, id, cc)
+		s.checkStageProgress(now, id, cc)
 
 		// If user sent a message in the last 2 minutes, skip status broadcast
 		if now.Sub(lastUserMessageAt) < 2*time.Minute {

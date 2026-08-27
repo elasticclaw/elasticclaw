@@ -126,6 +126,12 @@ func migrate(db *sql.DB) error {
 	if err := addColumn(db, "claws", "idle_since", `INTEGER NOT NULL DEFAULT 0`); err != nil {
 		return err
 	}
+	if err := addColumn(db, "claws", "stage_entered_at", `INTEGER`); err != nil {
+		return err
+	}
+	if err := addColumn(db, "claws", "stage_stalled_since", `INTEGER NOT NULL DEFAULT 0`); err != nil {
+		return err
+	}
 	// idle_resume_at (epoch millis, 0 = not resumed) is the durable
 	// once-per-idle-stretch latch for the idle AUTO-RESUME recovery, kept
 	// separate from idle_since because the two fire at different thresholds
@@ -495,6 +501,8 @@ func migrate(db *sql.DB) error {
 		rebrief_pending INTEGER NOT NULL DEFAULT 0,
 		no_progress_paused INTEGER NOT NULL DEFAULT 0,
 		idle_since INTEGER NOT NULL DEFAULT 0,
+		stage_entered_at INTEGER,
+		stage_stalled_since INTEGER NOT NULL DEFAULT 0,
 		idle_resume_at INTEGER NOT NULL DEFAULT 0,
 		idle_resume_count INTEGER NOT NULL DEFAULT 0
 	);
@@ -636,7 +644,7 @@ func migrate(db *sql.DB) error {
 			'task_start','task_completed','run_claimed','run_queued','provision_started','claw_created','agent_started',
 			'creation_failed','provision_failed','bootstrap_failed','model_selected','agent_stopped',
 			'manual_stop_before_delivery','provider_lost','done_without_pr','permission_or_auth_failed',
-			'timeout','unknown_failure','agent_idle','pr_associated','pr_opened','pr_closed_unmerged','pr_merged',
+			'timeout','unknown_failure','agent_idle','stage_stalled','pr_associated','pr_opened','pr_closed_unmerged','pr_merged',
 			'approval_only_pr_review','human_requested_changes','human_review_comment','human_pr_comment',
 			'human_manual_code_push','human_tracker_update','human_dashboard_message',
 			'human_manual_stop_or_resume','human_settings_or_status_change',
@@ -1124,7 +1132,7 @@ func rebuildTaskRunEventsAgentIdleV1(db *sql.DB) error {
 		}
 		return fmt.Errorf("read task run events schema: %w", err)
 	}
-	if strings.Contains(schema, "'ci_succeeded'") && strings.Contains(schema, "'ci_failed'") {
+	if strings.Contains(schema, "'stage_stalled'") {
 		return nil
 	}
 	tx, err := db.Begin()
@@ -1145,7 +1153,7 @@ func rebuildTaskRunEventsAgentIdleV1(db *sql.DB) error {
 			'task_start','task_completed','run_claimed','run_queued','provision_started','claw_created','agent_started',
 			'creation_failed','provision_failed','bootstrap_failed','model_selected','agent_stopped',
 			'manual_stop_before_delivery','provider_lost','done_without_pr','permission_or_auth_failed',
-			'timeout','unknown_failure','agent_idle','pr_associated','pr_opened','pr_closed_unmerged','pr_merged',
+			'timeout','unknown_failure','agent_idle','stage_stalled','pr_associated','pr_opened','pr_closed_unmerged','pr_merged',
 			'approval_only_pr_review','human_requested_changes','human_review_comment','human_pr_comment',
 			'human_manual_code_push','human_tracker_update','human_dashboard_message',
 			'human_manual_stop_or_resume','human_settings_or_status_change',

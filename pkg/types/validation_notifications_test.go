@@ -308,7 +308,7 @@ func TestLifecycleEventTypes(t *testing.T) {
 	// exist only as task_run_events.failure_type. Route matching compares
 	// against event_type, so a checkbox for one of them built a route that
 	// could never fire while the test-send endpoint reported success.
-	want := []string{"agent_started", "pr_opened", "agent_stopped", "agent_idle", "done_without_pr"}
+	want := []string{"agent_started", "pr_opened", "agent_stopped", "agent_idle", "stage_stalled", "done_without_pr"}
 	if !reflect.DeepEqual(LifecycleEventTypes, want) {
 		t.Fatalf("LifecycleEventTypes = %v, want %v", LifecycleEventTypes, want)
 	}
