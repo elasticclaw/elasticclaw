@@ -1692,6 +1692,166 @@ func TestRunHubLoopDoesNotLeakKeepaliveGoroutinesAcrossReconnects(t *testing.T) 
 	}
 }
 
+// TestRunHubLoopReportsMidTurnLockConflictRecovery proves the live hub-message
+// path reports the recovery edge before closing the claw turn. Without that
+// edge, a preserved session has no hub-side continuation and can stall forever.
+func TestRunHubLoopReportsMidTurnLockConflictRecovery(t *testing.T) {
+	oldDelays := sessionLockConflictRetryDelays
+	sessionLockConflictRetryDelays = []time.Duration{time.Millisecond}
+	t.Cleanup(func() { sessionLockConflictRetryDelays = oldDelays })
+
+	const lockConflict = "error: session file changed while embedded prompt lock was released"
+	for _, tt := range []struct {
+		name      string
+		rotateKey bool
+		wantEdge  string
+	}{
+		{name: "preserved", wantEdge: "session_preserved"},
+		{name: "rotated", rotateKey: true, wantEdge: "session_rotated"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var gs *gatewaySession
+			gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				conn, err := websocket.Accept(w, r, nil)
+				if err != nil {
+					t.Errorf("accept gateway websocket: %v", err)
+					return
+				}
+				defer conn.CloseNow()
+				read := func(want string) (gwFrame, bool) {
+					var req gwFrame
+					if err := wsjson.Read(r.Context(), conn, &req); err != nil {
+						t.Errorf("read %s request: %v", want, err)
+						return req, false
+					}
+					if req.Method != want {
+						t.Errorf("gateway request method = %q, want %q", req.Method, want)
+						return req, false
+					}
+					return req, true
+				}
+				send, ok := read("sessions.send")
+				if !ok {
+					return
+				}
+				if err := wsjson.Write(r.Context(), conn, gwFrame{Type: "res", ID: send.ID, OK: true}); err != nil {
+					t.Errorf("accept sessions.send: %v", err)
+					return
+				}
+				if err := wsjson.Write(r.Context(), conn, gwFrame{Type: "event", Event: "agent", Payload: mustJSON(map[string]interface{}{
+					"stream": "lifecycle", "sessionKey": "session-1", "data": map[string]string{"phase": "error", "error": lockConflict},
+				})}); err != nil {
+					t.Errorf("write lifecycle error: %v", err)
+					return
+				}
+				abort, ok := read("sessions.abort")
+				if !ok {
+					return
+				}
+				if err := wsjson.Write(r.Context(), conn, gwFrame{Type: "res", ID: abort.ID, OK: true}); err != nil {
+					t.Errorf("accept sessions.abort: %v", err)
+					return
+				}
+				probe, ok := read("sessions.describe")
+				if !ok {
+					return
+				}
+				if tt.rotateKey {
+					gs.setSessionKey("session-2")
+				}
+				if err := wsjson.Write(r.Context(), conn, gwFrame{Type: "res", ID: probe.ID, OK: true}); err != nil {
+					t.Errorf("accept sessions.describe: %v", err)
+				}
+			}))
+			defer gateway.Close()
+
+			received := make(chan []hubMsg, 1)
+			hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				conn, err := websocket.Accept(w, r, nil)
+				if err != nil {
+					t.Errorf("accept hub websocket: %v", err)
+					return
+				}
+				defer conn.CloseNow()
+				var registration hubMsg
+				if err := wsjson.Read(r.Context(), conn, &registration); err != nil {
+					t.Errorf("read registration: %v", err)
+					return
+				}
+				if err := wsjson.Write(r.Context(), conn, hubMsg{Type: "registered"}); err != nil {
+					t.Errorf("write registration acknowledgement: %v", err)
+					return
+				}
+				if err := wsjson.Write(r.Context(), conn, hubMsg{Type: "message", Payload: mustJSON(map[string]interface{}{"id": "turn-1", "content": "continue the task"})}); err != nil {
+					t.Errorf("write hub turn: %v", err)
+					return
+				}
+				var messages []hubMsg
+				for {
+					var msg hubMsg
+					if err := wsjson.Read(r.Context(), conn, &msg); err != nil {
+						return
+					}
+					messages = append(messages, msg)
+					if msg.Type == "message" {
+						received <- messages
+						return
+					}
+				}
+			}))
+			defer hub.Close()
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			gatewayCtx, gatewayCancel := context.WithCancel(ctx)
+			defer gatewayCancel()
+			conn, _, err := websocket.Dial(gatewayCtx, "ws"+strings.TrimPrefix(gateway.URL, "http"), nil)
+			if err != nil {
+				t.Fatalf("dial gateway: %v", err)
+			}
+			defer conn.CloseNow()
+			gs = &gatewaySession{sessionKey: "session-1", ready: true, conn: conn, pending: make(map[string]chan gwFrame)}
+			go gs.readLoop(gatewayCtx)
+
+			loopDone := make(chan error, 1)
+			go func() {
+				loopDone <- runHubLoop(ctx, "ws"+strings.TrimPrefix(hub.URL, "http"), "claw-test", "test-claw", "test-template", "tok", "",
+					bridgeRegistration(false), nil, &gatewayClient{addr: "127.0.0.1:0"}, gs, newHTTPProxy(nil), &msgQueue{}, newMessageDeduper())
+			}()
+
+			select {
+			case messages := <-received:
+				var gotEdge string
+				for _, msg := range messages {
+					if msg.Type == "session_preserved" || msg.Type == "session_rotated" {
+						gotEdge = msg.Type
+					}
+					if msg.Type == "message" {
+						var payload map[string]string
+						if err := json.Unmarshal(msg.Payload, &payload); err != nil {
+							t.Fatalf("decode claw message: %v", err)
+						}
+						if payload["content"] != "" {
+							t.Fatalf("claw message content = %q, want empty", payload["content"])
+						}
+					}
+				}
+				if gotEdge != tt.wantEdge {
+					t.Fatalf("recovery edge = %q, want %q (messages: %#v)", gotEdge, tt.wantEdge, messages)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("hub did not receive recovery edge and empty claw reply")
+			}
+			cancel()
+			select {
+			case <-loopDone:
+			case <-time.After(time.Second):
+				t.Fatal("runHubLoop did not stop after cancellation")
+			}
+		})
+	}
+}
+
 func TestIsRecoverableSessionSendError(t *testing.T) {
 	tests := []struct {
 		name string
