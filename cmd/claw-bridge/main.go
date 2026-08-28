@@ -149,14 +149,16 @@ const (
 type queuedKind int
 
 const (
-	queuedInput  queuedKind = iota // user message not yet processed
-	queuedReply                    // completed agent reply awaiting delivery
-	queuedNotice                   // error notice to surface to the hub
+	queuedInput   queuedKind = iota // user message not yet processed
+	queuedReply                     // completed agent reply awaiting delivery
+	queuedNotice                    // error notice to surface to the hub
+	queuedControl                   // recovery edge awaiting delivery to the hub
 )
 
 type queuedMsg struct {
 	kind     queuedKind
 	content  string
+	control  hubMsg
 	queuedAt time.Time
 }
 
@@ -235,6 +237,15 @@ func (q *msgQueue) pushReply(content string) {
 	q.enqueueLocked(queuedMsg{kind: queuedReply, content: content, queuedAt: time.Now()})
 }
 
+// pushControl queues a recovery edge that could not be written. It must be
+// replayed before its empty reply: the hub only continues a preserved session
+// after seeing this edge, while the reply alone is intentionally discarded.
+func (q *msgQueue) pushControl(msg hubMsg) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.enqueueLocked(queuedMsg{kind: queuedControl, control: msg, queuedAt: time.Now()})
+}
+
 // requeue re-inserts an entry preserving its original queuedAt (used when a
 // queued reply/notice fails to deliver again).
 func (q *msgQueue) requeue(m queuedMsg) {
@@ -273,14 +284,20 @@ func (q *msgQueue) drain() []queuedMsg {
 	return out
 }
 
-// replayQueued delivers queued entries after reconnect. Completed replies and
-// notices are written directly to the hub; only unprocessed inputs re-run a turn.
-func replayQueued(queue *msgQueue, deliver func(role, content string) error, runTurn func(content string)) {
+// replayQueued delivers queued entries after reconnect. Completed replies,
+// notices, and recovery edges are written directly to the hub; only unprocessed
+// inputs re-run a turn.
+func replayQueued(queue *msgQueue, deliver func(role, content string) error, deliverControl func(hubMsg) error, runTurn func(content string)) {
 	for _, m := range queue.drain() {
 		switch m.kind {
 		case queuedReply, queuedNotice:
 			if err := deliver("claw", m.content); err != nil {
 				log.Printf("[bridge] replay deliver failed, re-queuing: %v", err)
+				queue.requeue(m)
+			}
+		case queuedControl:
+			if err := deliverControl(m.control); err != nil {
+				log.Printf("[bridge] replay recovery edge failed, re-queuing: %v", err)
 				queue.requeue(m)
 			}
 		default: // queuedInput
@@ -2501,11 +2518,7 @@ func sessionRecoveryOutcome(agentErr error, currentKey string) string {
 	return ""
 }
 
-func notifySessionPreserved(writeHub func(hubMsg) error) {
-	_ = writeHub(hubMsg{Type: "session_preserved"})
-}
-
-func reportSessionRecovery(agentErr error, reply *string, gwSession *gatewaySession, writeActivity func(agentActivity), writeHub func(hubMsg) error) bool {
+func reportSessionRecovery(agentErr error, reply *string, gwSession *gatewaySession, writeActivity func(agentActivity), writeHub func(hubMsg) error, queue *msgQueue) bool {
 	currentKey := gwSession.getSessionKey()
 	outcome := sessionRecoveryOutcome(agentErr, currentKey)
 	if outcome == "preserved" {
@@ -2515,7 +2528,11 @@ func reportSessionRecovery(agentErr error, reply *string, gwSession *gatewaySess
 		// lock across a network write. A reconnect can still replace the session in
 		// this tiny gap; that is acceptable because continuation prompts require git
 		// status before repeating work, while locking during I/O would be riskier.
-		notifySessionPreserved(writeHub)
+		edge := hubMsg{Type: "session_preserved"}
+		if err := writeHub(edge); err != nil {
+			log.Printf("[bridge] recovery edge write failed, queuing for replay: %v", err)
+			queue.pushControl(edge)
+		}
 	} else if outcome == "rotated" {
 		activityMessage := fmt.Sprintf("OpenClaw session rotated to recover from lock conflict; waiting for next message (%v)", agentErr)
 		if preservedKey, ok := preservedSessionKey(agentErr); ok && preservedKey != currentKey {
@@ -2523,7 +2540,11 @@ func reportSessionRecovery(agentErr error, reply *string, gwSession *gatewaySess
 		}
 		writeActivity(agentActivity{Kind: "session_rotated", Message: activityMessage})
 		*reply = ""
-		_ = writeHub(hubMsg{Type: "session_rotated"})
+		edge := hubMsg{Type: "session_rotated"}
+		if err := writeHub(edge); err != nil {
+			log.Printf("[bridge] recovery edge write failed, queuing for replay: %v", err)
+			queue.pushControl(edge)
+		}
 	}
 	return outcome != ""
 }
@@ -4906,7 +4927,7 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 				writeActivity(activity)
 			})
 			if agentErr != nil {
-				if !reportSessionRecovery(agentErr, &reply, gwSession, writeActivity, writeHub) {
+				if !reportSessionRecovery(agentErr, &reply, gwSession, writeActivity, writeHub, queue) {
 					reply = fmt.Sprintf("%s %v", types.BridgeReplayErrorPrefix, agentErr)
 				}
 			}
@@ -4918,7 +4939,7 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 			}
 		}(content)
 	}
-	replayQueued(queue, deliver, runTurn)
+	replayQueued(queue, deliver, writeHub, runTurn)
 
 	// Wire up the HTTP proxy send function for this connection
 	proxy.mu.Lock()
@@ -5044,7 +5065,7 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 				})
 				if agentErr != nil {
 					log.Printf("[bridge] ✗ agent error: %v", agentErr)
-					if !reportSessionRecovery(agentErr, &reply, gwSession, writeActivity, writeHub) {
+					if !reportSessionRecovery(agentErr, &reply, gwSession, writeActivity, writeHub, queue) {
 						reply = fmt.Sprintf("%s %v", types.BridgeErrorPrefix, agentErr)
 					}
 				} else {

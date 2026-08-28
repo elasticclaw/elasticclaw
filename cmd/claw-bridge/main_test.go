@@ -1968,17 +1968,6 @@ func TestSessionRecoveryOutcome(t *testing.T) {
 	}
 }
 
-func TestNotifySessionPreservedWritesHubMessage(t *testing.T) {
-	var got hubMsg
-	notifySessionPreserved(func(msg hubMsg) error {
-		got = msg
-		return nil
-	})
-	if got.Type != "session_preserved" {
-		t.Fatalf("hub message type = %q, want session_preserved", got.Type)
-	}
-}
-
 func TestReportSessionRecoveryEmitsHubEdgeAndClearsReply(t *testing.T) {
 	preserved := &sessionPreservedError{err: errString("lock conflict"), key: "session-1"}
 	for _, tt := range []struct {
@@ -1991,12 +1980,13 @@ func TestReportSessionRecoveryEmitsHubEdgeAndClearsReply(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			gs := &gatewaySession{sessionKey: tt.currentKey}
+			queue := &msgQueue{}
 			reply := "partially completed reply"
 			var messages []hubMsg
 			handled := reportSessionRecovery(preserved, &reply, gs, func(agentActivity) {}, func(msg hubMsg) error {
 				messages = append(messages, msg)
 				return nil
-			})
+			}, queue)
 			if !handled {
 				t.Fatal("preserved recovery was not handled")
 			}
@@ -2006,7 +1996,57 @@ func TestReportSessionRecoveryEmitsHubEdgeAndClearsReply(t *testing.T) {
 			if len(messages) != 1 || messages[0].Type != tt.wantType {
 				t.Fatalf("hub messages = %#v, want one %q message", messages, tt.wantType)
 			}
+			// A successful live write is authoritative; replaying it would duplicate
+			// a continuation edge.
+			if len(queue.msgs) != 0 {
+				t.Fatalf("successful recovery edge was queued: %#v", queue.msgs)
+			}
 		})
+	}
+}
+
+func TestReportSessionRecoveryQueuesFailedEdgeForReplay(t *testing.T) {
+	for _, wantType := range []string{"session_preserved", "session_rotated"} {
+		t.Run(wantType, func(t *testing.T) {
+			queue := &msgQueue{}
+			gs := &gatewaySession{sessionKey: "session-1"}
+			err := error(&sessionPreservedError{err: errString("lock conflict"), key: "session-1"})
+			if wantType == "session_rotated" {
+				gs.sessionKey = "session-2"
+			}
+			reply := "partial"
+			if !reportSessionRecovery(err, &reply, gs, func(agentActivity) {}, func(hubMsg) error { return errString("hub disconnected") }, queue) {
+				t.Fatal("recovery was not handled")
+			}
+			if len(queue.msgs) != 1 || queue.msgs[0].kind != queuedControl || queue.msgs[0].control.Type != wantType {
+				t.Fatalf("queued recovery edge = %#v, want one %s control", queue.msgs, wantType)
+			}
+			var replayed []hubMsg
+			replayQueued(queue, func(string, string) error { return nil }, func(msg hubMsg) error {
+				replayed = append(replayed, msg)
+				return nil
+			}, func(string) { t.Fatal("replay must not rerun the user turn") })
+			if len(replayed) != 1 || replayed[0].Type != wantType {
+				t.Fatalf("replayed edges = %#v, want one %s edge", replayed, wantType)
+			}
+		})
+	}
+}
+
+func TestReplayQueuedDeliversRecoveryEdgeBeforeEmptyReply(t *testing.T) {
+	queue := &msgQueue{}
+	queue.pushControl(hubMsg{Type: "session_preserved"})
+	queue.pushReply("")
+	var deliveries []string
+	replayQueued(queue, func(_ string, content string) error {
+		deliveries = append(deliveries, "reply:"+content)
+		return nil
+	}, func(msg hubMsg) error {
+		deliveries = append(deliveries, "edge:"+msg.Type)
+		return nil
+	}, func(string) { t.Fatal("replay must not rerun the user turn") })
+	if got, want := strings.Join(deliveries, ","), "edge:session_preserved,reply:"; got != want {
+		t.Fatalf("replay order = %q, want %q", got, want)
 	}
 }
 
@@ -3595,7 +3635,7 @@ func TestReplayQueuedDeliversReplyWithoutRerun(t *testing.T) {
 		t.Fatalf("runTurn must not be called for a completed reply (content=%q)", content)
 	}
 
-	replayQueued(q, deliver, runTurn)
+	replayQueued(q, deliver, func(hubMsg) error { return nil }, runTurn)
 
 	if len(delivered) != 1 || delivered[0] != "finished reply" {
 		t.Fatalf("expected reply delivered exactly once, got %v", delivered)
@@ -3614,7 +3654,7 @@ func TestReplayQueuedRequeuesReplyOnDeliverFailure(t *testing.T) {
 		t.Fatalf("runTurn must not be called")
 	}
 
-	replayQueued(q, deliver, runTurn)
+	replayQueued(q, deliver, func(hubMsg) error { return nil }, runTurn)
 
 	if len(q.msgs) != 1 {
 		t.Fatalf("expected reply re-queued, got %d entries", len(q.msgs))
@@ -3641,7 +3681,7 @@ func TestReplayQueuedRunsTurnForInputs(t *testing.T) {
 		ran = append(ran, content)
 	}
 
-	replayQueued(q, deliver, runTurn)
+	replayQueued(q, deliver, func(hubMsg) error { return nil }, runTurn)
 
 	if deliverCalled {
 		t.Fatalf("deliver must not be called for a queued input")
