@@ -3,7 +3,9 @@ package hub
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -68,6 +70,126 @@ func newScheduledNotifierTestServer(t *testing.T, slackURL string, schedules []t
 		"min_send_interval": time.Nanosecond.String(),
 	}
 	return s, db
+}
+
+// ── Manual trigger endpoint ───────────────────────────────────────────────────
+
+// The test endpoint builds the report through the same registry the scheduler
+// uses, so what an operator previews is what the next due slot posts. A dry
+// run must render the real wire payload without touching Slack, and must not
+// advance the scheduler's dedupe state — suppressing the delivery it tests.
+func TestScheduledReportTestEndpointDryRunRendersWithoutSending(t *testing.T) {
+	registerScheduledReport("endpoint-test-report", func(context.Context, *Server) (*notify.Message, bool, error) {
+		return &notify.Message{Title: "Pull requests waiting", Body: "3 open"}, true, nil
+	})
+	fake := newFakeSlackServer(t)
+	schedule := types.ScheduledNotificationConfig{ID: "probe", Report: "endpoint-test-report", Via: []string{testNotifierName}, At: "09:00"}
+	s, _ := newScheduledNotifierTestServer(t, fake.server.URL, []types.ScheduledNotificationConfig{schedule})
+
+	rr := postSlackTest(t, s, `{"report":"endpoint-test-report","via":"`+testNotifierName+`","dry_run":true}`)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+	var resp struct {
+		DryRun  bool   `json:"dry_run"`
+		Report  string `json:"report"`
+		Via     string `json:"via"`
+		Payload struct {
+			Channel     string `json:"channel"`
+			Attachments []struct {
+				Fallback string           `json:"fallback"`
+				Blocks   []map[string]any `json:"blocks"`
+			} `json:"attachments"`
+		} `json:"payload"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !resp.DryRun || resp.Report != "endpoint-test-report" || resp.Via != testNotifierName {
+		t.Fatalf("unexpected dry-run response: %s", rr.Body.String())
+	}
+	if resp.Payload.Channel != slackTestChannel || len(resp.Payload.Attachments) != 1 || len(resp.Payload.Attachments[0].Blocks) == 0 {
+		t.Fatalf("dry run did not render the real wire payload: %s", rr.Body.String())
+	}
+	if !strings.Contains(resp.Payload.Attachments[0].Fallback, "Pull requests waiting") {
+		t.Fatalf("payload does not carry the report title: %s", rr.Body.String())
+	}
+	if fake.count() != 0 {
+		t.Fatalf("dry run posted %d messages to Slack, want 0", fake.count())
+	}
+	if _, found, _ := s.scheduledLastFired("probe", testNotifierName); found {
+		t.Fatal("dry run advanced the scheduler's dedupe state")
+	}
+
+	// A real send posts, and still leaves the schedule's own slot untouched.
+	rr = postSlackTest(t, s, `{"report":"endpoint-test-report","via":"`+testNotifierName+`"}`)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("real send status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+	if fake.count() != 1 {
+		t.Fatalf("real send posted %d messages, want 1", fake.count())
+	}
+	if _, found, _ := s.scheduledLastFired("probe", testNotifierName); found {
+		t.Fatal("test send advanced the scheduler's dedupe state")
+	}
+}
+
+// A report with nothing to say is a normal outcome, not a failure: the
+// endpoint answers 200 with empty:true so the screen can say "nothing to
+// report" instead of painting a red error.
+func TestScheduledReportTestEndpointEmptyReportReportsItWithoutSending(t *testing.T) {
+	registerScheduledReport("endpoint-empty-report", func(context.Context, *Server) (*notify.Message, bool, error) {
+		return nil, false, nil
+	})
+	fake := newFakeSlackServer(t)
+	s, _ := newScheduledNotifierTestServer(t, fake.server.URL, nil)
+
+	rr := postSlackTest(t, s, `{"report":"endpoint-empty-report","via":"`+testNotifierName+`"}`)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+	var resp struct {
+		OK    bool `json:"ok"`
+		Empty bool `json:"empty"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !resp.OK || !resp.Empty {
+		t.Fatalf("empty report response = %s", rr.Body.String())
+	}
+	if fake.count() != 0 {
+		t.Fatalf("empty report posted %d messages, want 0", fake.count())
+	}
+}
+
+func TestScheduledReportTestEndpointRejectsUnknownReportAndVia(t *testing.T) {
+	fake := newFakeSlackServer(t)
+	s, _ := newScheduledNotifierTestServer(t, fake.server.URL, nil)
+
+	rr := postSlackTest(t, s, `{"report":"no-such-report","via":"`+testNotifierName+`"}`)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("unknown report = %d, want 400; body = %s", rr.Code, rr.Body.String())
+	}
+	// The 400 has to list what IS available, or the operator has nowhere to go.
+	if !strings.Contains(rr.Body.String(), "supported reports") {
+		t.Fatalf("unknown-report error does not list the supported names: %s", rr.Body.String())
+	}
+
+	registerScheduledReport("endpoint-via-report", func(context.Context, *Server) (*notify.Message, bool, error) {
+		return &notify.Message{Title: "report"}, true, nil
+	})
+	rr = postSlackTest(t, s, `{"report":"endpoint-via-report","via":"nope"}`)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("unknown via = %d, want 400; body = %s", rr.Code, rr.Body.String())
+	}
+	rr = postSlackTest(t, s, `{"report":"endpoint-via-report"}`)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("missing via = %d, want 400; body = %s", rr.Code, rr.Body.String())
+	}
+	if fake.count() != 0 {
+		t.Fatalf("a rejected probe still posted %d messages", fake.count())
+	}
 }
 
 func TestScheduledNotifierEmptyReportMarksFiredWithoutSending(t *testing.T) {

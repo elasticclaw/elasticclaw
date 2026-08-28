@@ -4,7 +4,7 @@ import { useParams, usePathname, useRouter } from "next/navigation"
 import React, { useEffect, useState, useCallback, useRef } from "react"
 import { getHubUrl } from "@/lib/hub-url"
 import { getAuthToken } from "@/lib/auth-storage"
-import { Cpu, Key, Github, ChevronLeft, Shield, Zap, Copy, Check, LayoutTemplate, Trash2, Lock, Sparkles, Send, RotateCcw, Eye, EyeOff, ExternalLink, AlertTriangle, X, CheckCircle2, Webhook, Stethoscope, ArrowRight, Wrench, GitBranch, ChevronDown, Bell } from "lucide-react"
+import { Cpu, Key, Github, ChevronLeft, Shield, Zap, Copy, Check, LayoutTemplate, Trash2, Lock, Sparkles, Send, RotateCcw, Eye, EyeOff, ExternalLink, AlertTriangle, X, CheckCircle2, Webhook, Stethoscope, ArrowRight, Wrench, GitBranch, ChevronDown, Bell, Clock } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Switch } from "@/components/ui/switch"
@@ -198,8 +198,24 @@ interface LifecycleEventToggles {
   stageStalled?: boolean
 }
 
+// One recurring report, as returned by GET /api/settings and read back by
+// PATCH. Every field round-trips under the name the hub decodes it under
+// (types.ScheduledNotificationConfig), and the hub resolves both defaults it
+// carries before sending it here: `enabled` is always a real boolean, and
+// `weekdays` is always an array — empty meaning every day.
+interface ScheduledNotificationView {
+  id: string
+  report: string
+  via: string[]
+  at: string
+  timezone?: string
+  weekdays: string[]
+  enabled: boolean
+}
+
 interface NotificationsView {
   notifiers?: Record<string, NotifierView>
+  scheduled?: ScheduledNotificationView[]
   lifecycle?: {
     enabled: boolean
     // Legacy single-channel field, superseded by routes. The hub clears it as
@@ -4599,6 +4615,109 @@ async function sendTestNotification(eventType: string, via: string): Promise<voi
   throw new Error(message || `Test send failed (${res.status})`)
 }
 
+// The reports this hub can schedule. Kept as a const list rather than read
+// from the config: a schedule naming a report the hub does not carry is
+// rejected on save, so offering only what exists is what keeps the editor from
+// producing one.
+const SCHEDULED_REPORTS: { id: string; label: string; description: string }[] = [
+  {
+    id: "pending_prs",
+    label: "Pull requests waiting for review",
+    description: "Every open pull request an agent has left waiting, grouped by ticket.",
+  },
+]
+
+function scheduledReportLabel(report: string): string {
+  return SCHEDULED_REPORTS.find((r) => r.id === report)?.label || report
+}
+
+// An empty weekday list is the hub's "every day", never "never".
+function weekdaysLabel(weekdays: string[]): string {
+  if (weekdays.length === 0) return "Every day"
+  return WEEKDAYS.filter((day) => weekdays.includes(day.id)).map((day) => day.label).join(", ")
+}
+
+// Wire values are the three-letter names the hub validates against; the labels
+// are what the chips show.
+const WEEKDAYS: { id: string; label: string }[] = [
+  { id: "mon", label: "Mon" },
+  { id: "tue", label: "Tue" },
+  { id: "wed", label: "Wed" },
+  { id: "thu", label: "Thu" },
+  { id: "fri", label: "Fri" },
+  { id: "sat", label: "Sat" },
+  { id: "sun", label: "Sun" },
+]
+
+// Every IANA zone the browser knows. Intl.supportedValuesOf is recent enough
+// that a hub opened in an older browser must still get a usable list, so the
+// fallback carries the viewer's own zone and UTC — the two a schedule is
+// realistically written in.
+function timezoneOptions(): string[] {
+  try {
+    const supported = (Intl as { supportedValuesOf?: (key: string) => string[] }).supportedValuesOf
+    if (supported) return supported.call(Intl, "timeZone")
+  } catch {
+    // Fall through to the minimal list.
+  }
+  return [...new Set([browserTimezone(), "UTC"])]
+}
+
+function browserTimezone(): string {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC"
+  } catch {
+    return "UTC"
+  }
+}
+
+// The result of probing one scheduled report. `payload` is set only by a dry
+// run — the rendered message the hub would post, shown instead of sending it.
+type ReportTestState = {
+  status: "sending" | "ok" | "error"
+  message: string
+  payload?: unknown
+}
+
+async function sendScheduledReportTest(
+  report: string,
+  via: string,
+  dryRun: boolean,
+): Promise<{ empty: boolean; payload?: unknown }> {
+  const hubUrl = getHubUrl()
+  const token = getAuthToken() || ""
+  const res = await fetch(`${hubUrl}/api/notifications/test`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ report, via, dry_run: dryRun }),
+  })
+  const raw = await res.text()
+  let parsed: { error?: string; empty?: boolean; payload?: unknown } = {}
+  try {
+    parsed = JSON.parse(raw)
+  } catch {
+    // Not JSON — the raw body is the only thing to report.
+  }
+  if (!res.ok) throw new Error(parsed.error || raw || `Test send failed (${res.status})`)
+  return { empty: Boolean(parsed.empty), payload: parsed.payload }
+}
+
+// Turns a Slack payload into the lines an operator reads, so a preview shows
+// the message rather than its wire encoding. Anything this cannot walk falls
+// back to the raw JSON, which is still the honest answer.
+function previewLines(payload: unknown): string[] {
+  const attachments = (payload as { attachments?: { blocks?: { text?: { text?: string } }[] }[] })?.attachments
+  const lines: string[] = []
+  for (const attachment of attachments || []) {
+    for (const block of attachment.blocks || []) {
+      const text = block.text?.text
+      if (text) lines.push(text)
+    }
+  }
+  if (lines.length > 0) return lines
+  return [JSON.stringify(payload, null, 2)]
+}
+
 type TestState = { status: "sending" | "ok" | "error"; message: string }
 
 // Records that the Notifier screen itself cleared `enabled` because the route
@@ -4635,6 +4754,7 @@ function writeClampedPause(clamped: boolean): void {
 function NotifierSection({ settings, onSave, saving }: { settings: SettingsData; onSave: (p: object) => Promise<SaveOutcome>; saving: boolean }) {
   const lifecycle = settings.notifications?.lifecycle
   const notifiers = settings.notifications?.notifiers || {}
+  const schedules = settings.notifications?.scheduled || []
   const names = Object.keys(notifiers).sort((a, b) => a.localeCompare(b))
   const eventTypes = settings.lifecycleEventTypes?.length ? settings.lifecycleEventTypes : FALLBACK_LIFECYCLE_EVENT_TYPES
 
@@ -4821,6 +4941,7 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
     enabled?: boolean
     routes?: LifecycleRouteView[]
     events?: Record<LifecycleCategory, boolean>
+    scheduled?: ScheduledNotificationView[]
   }): { patch: object; clamp: boolean } {
     const outNotifiers: Record<string, Record<string, string>> = {}
     for (const [name, notifier] of Object.entries(next.notifiers ?? notifiers)) {
@@ -4866,8 +4987,20 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
     if (lifecycle?.pollInterval) outLifecycle.pollInterval = lifecycle.pollInterval
     if (lifecycle?.idleAfter) outLifecycle.idleAfter = lifecycle.idleAfter
     if (lifecycle?.stageProgressAfter) outLifecycle.stageProgressAfter = lifecycle.stageProgressAfter
+    // Always sent, even by a save that only touches a channel: PATCH replaces
+    // the whole notifications block, so omitting it would delete every
+    // scheduled report the first time anyone edits a Slack channel.
+    const outScheduled = (next.scheduled ?? schedules).map((schedule) => ({
+      id: schedule.id,
+      report: schedule.report,
+      via: schedule.via,
+      at: schedule.at,
+      timezone: schedule.timezone || "",
+      weekdays: schedule.weekdays,
+      enabled: schedule.enabled,
+    }))
     return {
-      patch: { notifications: { notifiers: outNotifiers, lifecycle: outLifecycle } },
+      patch: { notifications: { notifiers: outNotifiers, lifecycle: outLifecycle, scheduled: outScheduled } },
       // The never-configured hub is clamped too, and for the same reason: the
       // block this save creates carries `enabled:false` only because it has no
       // route to send to, which is this screen's own doing — the operator was
@@ -5036,6 +5169,164 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
     try {
       await sendTestNotification(eventType, name)
       settle({ status: "ok", message: `Sent a "${lifecycleEventLabel(eventType)}" test alert.` })
+    } catch (e) {
+      settle({ status: "error", message: e instanceof Error ? e.message : "Test send failed" })
+    }
+  }
+
+  // ── Scheduled reports ──────────────────────────────────────────────────────
+
+  const [showSchedule, setShowSchedule] = useState(false)
+  const [scheduleMode, setScheduleMode] = useState<"add" | "edit">("add")
+  const [editScheduleId, setEditScheduleId] = useState<string | null>(null)
+  const [formScheduleId, setFormScheduleId] = useState("")
+  const [formReport, setFormReport] = useState(SCHEDULED_REPORTS[0].id)
+  const [formVia, setFormVia] = useState<string[]>([])
+  const [formAt, setFormAt] = useState("09:00")
+  const [formTimezone, setFormTimezone] = useState("UTC")
+  const [formWeekdays, setFormWeekdays] = useState<string[]>([])
+  const [formScheduleEnabled, setFormScheduleEnabled] = useState(true)
+  const [scheduleError, setScheduleError] = useState("")
+  const [reportTests, setReportTests] = useState<Record<string, ReportTestState>>({})
+  // Invalidates an in-flight probe whose schedule has meanwhile been edited or
+  // deleted: its result describes a report that went somewhere else.
+  const reportTestGeneration = useRef<Record<string, number>>({})
+  // Filled when the editor first opens, never during the initial render: the
+  // zone list is derived from the browser, and reading it while Next is
+  // prerendering would make the server and client markup disagree.
+  const [zoneOptions, setZoneOptions] = useState<string[]>([])
+  const loadZones = () => setZoneOptions((current) => (current.length ? current : timezoneOptions()))
+
+  // A name the operator can leave as-is: derived from the report, and suffixed
+  // only when it would collide with a schedule that already exists.
+  function suggestScheduleId(report: string): string {
+    const base = report.replace(/_/g, "-")
+    if (!schedules.some((schedule) => schedule.id === base)) return base
+    for (let i = 2; ; i++) {
+      const candidate = `${base}-${i}`
+      if (!schedules.some((schedule) => schedule.id === candidate)) return candidate
+    }
+  }
+
+  const openAddSchedule = () => {
+    loadZones()
+    const report = SCHEDULED_REPORTS[0].id
+    setScheduleMode("add")
+    setEditScheduleId(null)
+    setFormReport(report)
+    setFormScheduleId(suggestScheduleId(report))
+    // One channel is an unambiguous default; more than one is a choice.
+    setFormVia(names.length === 1 ? [names[0]] : [])
+    setFormAt("09:00")
+    setFormTimezone(browserTimezone())
+    setFormWeekdays([])
+    setFormScheduleEnabled(true)
+    setScheduleError("")
+    setShowSchedule(true)
+  }
+
+  const openEditSchedule = (schedule: ScheduledNotificationView) => {
+    loadZones()
+    setScheduleMode("edit")
+    setEditScheduleId(schedule.id)
+    setFormScheduleId(schedule.id)
+    setFormReport(schedule.report)
+    setFormVia([...schedule.via])
+    setFormAt(schedule.at)
+    setFormTimezone(schedule.timezone || "UTC")
+    setFormWeekdays([...schedule.weekdays])
+    setFormScheduleEnabled(schedule.enabled)
+    setScheduleError("")
+    setShowSchedule(true)
+  }
+
+  const invalidateReportTest = (id: string) => {
+    reportTestGeneration.current[id] = (reportTestGeneration.current[id] ?? 0) + 1
+    setReportTests((current) => { const { [id]: _stale, ...rest } = current; return rest })
+  }
+
+  async function saveSchedule() {
+    const id = formScheduleId.trim()
+    if (!id) { setScheduleError("Name is required."); return }
+    if (scheduleMode === "add" && schedules.some((schedule) => schedule.id === id)) {
+      setScheduleError(`A report named "${id}" already exists.`)
+      return
+    }
+    if (formVia.length === 0) { setScheduleError("Pick at least one channel to post the report to."); return }
+    if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(formAt)) {
+      setScheduleError("Time must be a 24-hour HH:MM value, e.g. 09:30.")
+      return
+    }
+    setScheduleError("")
+
+    const entry: ScheduledNotificationView = {
+      id,
+      report: formReport,
+      via: formVia,
+      at: formAt,
+      timezone: formTimezone,
+      weekdays: formWeekdays,
+      enabled: formScheduleEnabled,
+    }
+    const next = editScheduleId
+      ? schedules.map((schedule) => (schedule.id === editScheduleId ? entry : schedule))
+      : [...schedules, entry]
+    const { persisted, message } = await savePatch({ scheduled: next })
+    // The schedule now posts something else, somewhere else, so any probe
+    // result on its card is about a message that no longer describes it. A
+    // rejected save changed nothing and keeps its result.
+    if (persisted) invalidateReportTest(id)
+    if (message) { setScheduleError(message); return }
+    setShowSchedule(false)
+  }
+
+  async function removeSchedule(id: string) {
+    const { persisted, message } = await savePatch({ scheduled: schedules.filter((schedule) => schedule.id !== id) })
+    if (persisted) invalidateReportTest(id)
+    if (message) { setScheduleError(message); return }
+    setShowSchedule(false)
+  }
+
+  async function toggleSchedule(schedule: ScheduledNotificationView, value: boolean) {
+    await savePatch({
+      scheduled: schedules.map((other) => (other.id === schedule.id ? { ...other, enabled: value } : other)),
+    })
+  }
+
+  // Probes one schedule. A dry run renders the message the next due slot would
+  // post without sending it; a real run posts to every channel the schedule
+  // names, which is the only way to prove the whole path works. Neither
+  // touches the scheduler's own state, so the real delivery still happens.
+  async function runReportTest(schedule: ScheduledNotificationView, dryRun: boolean) {
+    const targets = schedule.via.filter((via) => notifiers[via])
+    if (targets.length === 0) return
+    const generation = reportTestGeneration.current[schedule.id] ?? 0
+    const settle = (state: ReportTestState) =>
+      setReportTests((current) => {
+        // A superseded result is dropped rather than written: whatever sits
+        // under this id now belongs to the probe that replaced this one.
+        if (generation !== (reportTestGeneration.current[schedule.id] ?? 0)) return current
+        return { ...current, [schedule.id]: state }
+      })
+    setReportTests((current) => ({ ...current, [schedule.id]: { status: "sending", message: "" } }))
+    try {
+      if (dryRun) {
+        const { empty, payload } = await sendScheduledReportTest(schedule.report, targets[0], true)
+        settle(empty
+          ? { status: "ok", message: "Nothing to report right now — a real run would post nothing." }
+          : { status: "ok", message: `This is what would be posted to ${targets[0]}.`, payload })
+        return
+      }
+      let empty = false
+      for (const via of targets) {
+        empty = (await sendScheduledReportTest(schedule.report, via, false)).empty
+      }
+      settle({
+        status: "ok",
+        message: empty
+          ? "Nothing to report right now — no message was posted."
+          : `Posted to ${targets.join(", ")}.`,
+      })
     } catch (e) {
       settle({ status: "error", message: e instanceof Error ? e.message : "Test send failed" })
     }
@@ -5329,6 +5620,147 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
         <span className="text-sm">+</span> Add Channel
       </Button>
 
+      {/* Scheduled reports — time-driven digests, independent of the lifecycle
+          alerts above: they are not routed by event type and the master switch
+          does not mute them. */}
+      <div className="space-y-2 border-t border-border pt-6">
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <h3 className="text-sm font-medium">Scheduled reports</h3>
+            <p className="text-xs text-muted-foreground mt-0.5">
+              Recurring digests posted at a fixed time. They run on their own schedule — the lifecycle switches above do not mute them.
+            </p>
+          </div>
+          <Button
+            size="sm"
+            variant="outline"
+            className="shrink-0"
+            disabled={saving || names.length === 0}
+            title={names.length === 0 ? "Add a channel first — a report needs somewhere to post" : undefined}
+            onClick={openAddSchedule}
+          >
+            <span className="mr-1 text-sm">+</span> Add report
+          </Button>
+        </div>
+
+        {schedules.length === 0 ? (
+          <p className="text-sm text-muted-foreground px-4 py-6 text-center border border-border rounded-lg">
+            {names.length === 0
+              ? "No scheduled reports. Add a channel first, then schedule a report to post into it."
+              : "No scheduled reports. Add one to get a recurring digest in Slack."}
+          </p>
+        ) : (
+          <div className="space-y-2">
+            {schedules.map((schedule) => {
+              const test = reportTests[schedule.id]
+              const missingVia = schedule.via.filter((via) => !notifiers[via])
+              const targets = schedule.via.filter((via) => notifiers[via])
+              const canTest = targets.length > 0 && !saving && test?.status !== "sending"
+              return (
+                <div key={schedule.id} className="border border-border rounded-lg p-4">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="text-sm font-medium">{scheduledReportLabel(schedule.report)}</span>
+                        <code className="text-xs text-muted-foreground font-mono">{schedule.id}</code>
+                        {!schedule.enabled && (
+                          <span className="text-xs bg-amber-500/10 text-amber-400 border border-amber-500/20 px-2 py-0.5 rounded font-medium">
+                            Paused
+                          </span>
+                        )}
+                      </div>
+                      <p className="text-xs text-muted-foreground mt-1 flex items-center gap-1.5">
+                        <Clock className="size-3 shrink-0" />
+                        <span className="font-mono">{schedule.at}</span>
+                        <span>{schedule.timezone || "UTC"}</span>
+                        <span>·</span>
+                        <span>{weekdaysLabel(schedule.weekdays)}</span>
+                      </p>
+                      <p className="text-xs text-muted-foreground mt-1">
+                        Posts to{" "}
+                        {schedule.via.map((via, i) => (
+                          <React.Fragment key={via}>
+                            {i > 0 && ", "}
+                            <span className={cn("font-mono", !notifiers[via] && "text-amber-400")}>{via}</span>
+                          </React.Fragment>
+                        ))}
+                      </p>
+                      {missingVia.length > 0 && (
+                        <p className="text-xs text-amber-400 mt-2">
+                          {missingVia.length === 1 ? "Channel" : "Channels"}{" "}
+                          <span className="font-mono">{missingVia.join(", ")}</span>{" "}
+                          {missingVia.length === 1 ? "is" : "are"} no longer configured, so nothing is delivered there — open Edit and pick another.
+                        </p>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-2 shrink-0">
+                      <Switch
+                        checked={schedule.enabled}
+                        disabled={saving}
+                        onCheckedChange={(checked) => toggleSchedule(schedule, checked)}
+                        aria-label={`Enable the ${schedule.id} report`}
+                      />
+                      <Button size="sm" variant="ghost" onClick={() => openEditSchedule(schedule)}>Edit</Button>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2 mt-3">
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="gap-1.5"
+                      disabled={!canTest}
+                      title="Renders the report without posting it"
+                      onClick={() => runReportTest(schedule, true)}
+                    >
+                      <Eye className="size-3.5" />
+                      Preview
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="gap-1.5"
+                      disabled={!canTest}
+                      title={targets.length > 0 ? `Posts the report now to ${targets.join(", ")}` : undefined}
+                      onClick={() => runReportTest(schedule, false)}
+                    >
+                      <Send className="size-3.5" />
+                      {test?.status === "sending" ? "Working…" : "Send now"}
+                    </Button>
+                    {targets.length === 0 && (
+                      <span className="text-xs text-muted-foreground">
+                        No configured channel to post to.
+                      </span>
+                    )}
+                  </div>
+                  {test && test.status !== "sending" && (
+                    <div
+                      className={cn(
+                        "mt-3 rounded-md border px-3 py-2 text-xs",
+                        test.status === "ok"
+                          ? "border-green-500/20 bg-green-500/10 text-green-400"
+                          : "border-destructive/30 bg-destructive/10 text-destructive",
+                      )}
+                    >
+                      <div className="flex items-start gap-2">
+                        {test.status === "ok"
+                          ? <CheckCircle2 className="size-3.5 mt-px shrink-0" />
+                          : <AlertTriangle className="size-3.5 mt-px shrink-0" />}
+                        <span className="break-words">{test.message}</span>
+                      </div>
+                      {test.payload !== undefined && (
+                        <pre className="mt-2 max-h-64 overflow-auto rounded bg-background/60 p-2 text-xs text-foreground whitespace-pre-wrap break-words">
+                          {previewLines(test.payload).join("\n\n")}
+                        </pre>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )
+            })}
+          </div>
+        )}
+      </div>
+
       {/* Add / edit modal */}
       {/* Closing only closes: DialogContent stays mounted for its 200ms exit
           animation, so clearing the form here would let the operator watch the
@@ -5567,6 +5999,223 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
                 <Button size="sm" variant="outline" disabled={saving} onClick={() => setShowModal(false)}>Cancel</Button>
                 <Button size="sm" disabled={saving || !formName.trim() || !formChannel.trim() || !formTokenSecret} onClick={saveChannel}>
                   {modalMode === "add" ? "Add Channel" : "Save changes"}
+                </Button>
+              </div>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* Add / edit scheduled report. Like the channel dialog, closing only
+          closes: openAddSchedule/openEditSchedule re-seed every field. */}
+      <Dialog open={showSchedule} onOpenChange={setShowSchedule}>
+        <DialogContent className="max-w-lg max-h-[90vh] overflow-y-auto p-0 gap-0">
+          <DialogTitle className="sr-only">
+            {scheduleMode === "add" ? "Add scheduled report" : `Edit ${editScheduleId}`}
+          </DialogTitle>
+          <div className="flex items-center justify-between px-5 py-4 border-b border-border">
+            <h3 className="font-medium">{scheduleMode === "add" ? "Add scheduled report" : `Edit ${editScheduleId}`}</h3>
+          </div>
+
+          <div className="p-5 space-y-4">
+            <div>
+              <label className="text-xs text-muted-foreground mb-1 block">Report</label>
+              <select
+                value={formReport}
+                onChange={(e) => setFormReport(e.target.value)}
+                className="w-full h-8 text-sm rounded-md border border-input bg-background px-3"
+                disabled={saving}
+              >
+                {/* A report this build does not know can only come from a
+                    hand-written hub.yaml. It gets an option of its own, flagged,
+                    so the controlled select cannot render blank while Save
+                    writes the unknown name straight back. */}
+                {!SCHEDULED_REPORTS.some((report) => report.id === formReport) && (
+                  <option value={formReport}>{formReport} (not supported by this hub)</option>
+                )}
+                {SCHEDULED_REPORTS.map((report) => (
+                  <option key={report.id} value={report.id}>{report.label}</option>
+                ))}
+              </select>
+              <p className="text-xs text-muted-foreground mt-1">
+                {SCHEDULED_REPORTS.find((report) => report.id === formReport)?.description
+                  || "This hub does not carry this report, so the schedule delivers nothing."}
+              </p>
+            </div>
+
+            <div>
+              <label className="text-xs text-muted-foreground mb-1 block">Name</label>
+              <Input
+                placeholder="e.g. pending-prs"
+                value={formScheduleId}
+                onChange={(e) => setFormScheduleId(e.target.value)}
+                className="font-mono text-sm h-8"
+                disabled={saving || scheduleMode === "edit"}
+              />
+              <p className="text-xs text-muted-foreground mt-1">
+                How this schedule is identified in <span className="font-mono">hub.yaml</span> and in the hub log. It cannot be changed later.
+              </p>
+            </div>
+
+            <div>
+              <label className="text-xs text-muted-foreground mb-1 block">Channels</label>
+              {names.length === 0 && formVia.length === 0 ? (
+                <p className="text-xs text-amber-400">No channels are configured yet.</p>
+              ) : (
+                <div className="space-y-1">
+                  {/* Deleted channels the schedule still names get a checkbox
+                      of their own, flagged: the hub refuses to save a schedule
+                      pointing at one, so unticking it has to be possible from
+                      here — otherwise the only repair is a hub.yaml edit. */}
+                  {[...names, ...formVia.filter((via) => !notifiers[via])].map((name) => {
+                    const missing = !notifiers[name]
+                    return (
+                      <label
+                        key={name}
+                        className="flex items-center gap-2 text-sm cursor-pointer rounded px-2 py-1 hover:bg-muted/50"
+                      >
+                        <input
+                          type="checkbox"
+                          aria-label={`Post the report to ${name}`}
+                          checked={formVia.includes(name)}
+                          disabled={saving}
+                          onChange={(e) =>
+                            setFormVia(
+                              e.target.checked
+                                ? [...formVia, name]
+                                : formVia.filter((via) => via !== name),
+                            )
+                          }
+                        />
+                        <code className={cn("font-mono", missing && "text-amber-400")}>{name}</code>
+                        <span className={cn("text-xs", missing ? "text-amber-400" : "text-muted-foreground")}>
+                          {missing ? "channel no longer configured" : notifiers[name]?.channel}
+                        </span>
+                      </label>
+                    )
+                  })}
+                </div>
+              )}
+              {formVia.some((via) => !notifiers[via]) && (
+                <p className="text-xs text-amber-400 mt-1">
+                  The hub refuses to save a report that posts to a channel it does not have. Untick the flagged one, or add the channel back first.
+                </p>
+              )}
+            </div>
+
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="text-xs text-muted-foreground mb-1 block">Time</label>
+                <Input
+                  type="time"
+                  value={formAt}
+                  onChange={(e) => setFormAt(e.target.value)}
+                  className="font-mono text-sm h-8"
+                  disabled={saving}
+                />
+              </div>
+              <div>
+                <label className="text-xs text-muted-foreground mb-1 block">Timezone</label>
+                <select
+                  value={formTimezone}
+                  onChange={(e) => setFormTimezone(e.target.value)}
+                  className="w-full h-8 text-sm rounded-md border border-input bg-background px-3"
+                  disabled={saving}
+                >
+                  {/* A zone this browser does not list — an older browser, or a
+                      name written by hand — still needs an option, or the
+                      select renders blank and Save rewrites it. */}
+                  {formTimezone && !zoneOptions.includes(formTimezone) && (
+                    <option value={formTimezone}>{formTimezone}</option>
+                  )}
+                  {zoneOptions.map((zone) => (
+                    <option key={zone} value={zone}>{zone}</option>
+                  ))}
+                </select>
+              </div>
+            </div>
+
+            <div>
+              <label className="text-xs text-muted-foreground mb-1 block">Days</label>
+              <div className="flex flex-wrap gap-1.5">
+                {WEEKDAYS.map((day) => {
+                  const selected = formWeekdays.includes(day.id)
+                  return (
+                    <button
+                      key={day.id}
+                      type="button"
+                      aria-pressed={selected}
+                      disabled={saving}
+                      onClick={() =>
+                        setFormWeekdays(
+                          selected
+                            ? formWeekdays.filter((weekday) => weekday !== day.id)
+                            : [...formWeekdays, day.id],
+                        )
+                      }
+                      className={cn(
+                        "px-2.5 py-1 text-xs rounded-md border transition-colors disabled:opacity-50",
+                        selected
+                          ? "border-blue-500/30 bg-blue-500/10 text-blue-400"
+                          : "border-border bg-muted/20 text-muted-foreground hover:bg-muted/50",
+                      )}
+                    >
+                      {day.label}
+                    </button>
+                  )
+                })}
+              </div>
+              <p className="text-xs text-muted-foreground mt-1">
+                {formWeekdays.length === 0
+                  ? "No days selected — runs every day."
+                  : `Runs on ${weekdaysLabel(formWeekdays)}.`}
+              </p>
+            </div>
+
+            <div className="flex items-start justify-between gap-3 border-t border-border pt-4">
+              <div>
+                <div className="text-sm font-medium">Enabled</div>
+                <p className="text-xs text-muted-foreground mt-0.5">
+                  Turn it off to keep the schedule without posting anything.
+                </p>
+              </div>
+              <Switch
+                className="mt-1"
+                checked={formScheduleEnabled}
+                onCheckedChange={setFormScheduleEnabled}
+                disabled={saving}
+                aria-label="Enable this scheduled report"
+              />
+            </div>
+          </div>
+
+          <div className="border-t border-border">
+            {scheduleError && (
+              <div className="mx-5 mt-4 flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+                <AlertTriangle className="size-3.5 mt-px shrink-0" />
+                <span className="break-words">{scheduleError}</span>
+              </div>
+            )}
+            <div className="flex items-center justify-between px-5 py-4">
+              {scheduleMode === "edit" && editScheduleId && (
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="text-destructive hover:text-destructive"
+                  disabled={saving}
+                  onClick={() => removeSchedule(editScheduleId)}
+                >
+                  <Trash2 className="size-3.5 mr-1" /> Remove
+                </Button>
+              )}
+              <div className="flex items-center gap-2 ml-auto">
+                <Button size="sm" variant="outline" disabled={saving} onClick={() => setShowSchedule(false)}>Cancel</Button>
+                <Button
+                  size="sm"
+                  disabled={saving || !formScheduleId.trim() || formVia.length === 0 || !formAt}
+                  onClick={saveSchedule}
+                >
+                  {scheduleMode === "add" ? "Add report" : "Save changes"}
                 </Button>
               </div>
             </div>

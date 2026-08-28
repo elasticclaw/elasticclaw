@@ -1324,7 +1324,60 @@ func (s *Server) checkNotifications(cfg *types.HubConfig) []DoctorCheck {
 			})
 		}
 	}
+
+	// Scheduled reports. Only enabled schedules are checked: a disabled one
+	// delivers nothing, and an operator who pauses a schedule before deleting
+	// the notifier (or before upgrading to a build that carries the report)
+	// must not be nagged about a slot that never fires.
+	for i, scheduled := range nCfg.Scheduled {
+		if scheduled.Enabled != nil && !*scheduled.Enabled {
+			continue
+		}
+		label := fmt.Sprintf("Scheduled report %d (%q)", i+1, scheduled.ID)
+		if !ScheduledReportSupported(scheduled.Report) {
+			checks = append(checks, DoctorCheck{
+				Category: "notifications", Severity: "critical", OK: false,
+				Title: label + " names an unknown report",
+				Description: fmt.Sprintf("This hub has no report named %q, so nothing is ever sent for this schedule. Supported reports: %s.",
+					scheduled.Report, scheduledReportNamesText()),
+			})
+			continue
+		}
+		unknownVia := false
+		for _, via := range scheduled.Via {
+			if _, ok := nCfg.Notifiers[strings.TrimSpace(via)]; !ok {
+				checks = append(checks, DoctorCheck{
+					Category: "notifications", Severity: "critical", OK: false,
+					Title:       label + " sends to an unknown notifier",
+					Description: fmt.Sprintf("Destination %q is not a configured notifier, so this schedule delivers nothing there.", via),
+				})
+				unknownVia = true
+			}
+		}
+		if unknownVia {
+			continue
+		}
+		checks = append(checks, DoctorCheck{
+			Category: "notifications", Severity: "info", OK: true,
+			Title: label + " is configured",
+			Description: fmt.Sprintf("Report %s is sent to %s at %s.",
+				scheduled.Report, strings.Join(scheduled.Via, ", "), scheduledSlotDescription(scheduled)),
+		})
+	}
 	return checks
+}
+
+// scheduledSlotDescription renders a schedule's slot for doctor output.
+func scheduledSlotDescription(scheduled types.ScheduledNotificationConfig) string {
+	timezone := scheduled.Timezone
+	if timezone == "" {
+		timezone = "UTC"
+	}
+	days := "every day"
+	if len(scheduled.Weekdays) > 0 {
+		days = strings.Join(scheduled.Weekdays, ", ")
+	}
+	return fmt.Sprintf("%s %s, %s", scheduled.At, timezone, days)
 }
 
 // checkNotifyActions validates every pipeline notify action the way the

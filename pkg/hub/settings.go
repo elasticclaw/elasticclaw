@@ -92,6 +92,29 @@ type SettingsView struct {
 type NotificationsView struct {
 	Notifiers map[string]NotifierView     `json:"notifiers"`
 	Lifecycle *LifecycleNotificationsView `json:"lifecycle,omitempty"`
+	// Scheduled mirrors notifications.scheduled. It holds no secret — a
+	// schedule only names notifiers, a report and a wall-clock slot.
+	Scheduled []ScheduledNotificationView `json:"scheduled"`
+}
+
+// ScheduledNotificationView is the settings view of one scheduled report. Like
+// LifecycleNotificationsView it uses the SAME field names the PATCH body is
+// decoded under (types.ScheduledNotificationConfig), so a client that GETs the
+// view, edits it and PATCHes it back cannot silently drop a field.
+type ScheduledNotificationView struct {
+	ID     string   `json:"id"`
+	Report string   `json:"report"`
+	Via    []string `json:"via"`
+	At     string   `json:"at"`
+	// Timezone is an IANA name; empty means UTC, exactly as the scheduler
+	// reads it.
+	Timezone string `json:"timezone,omitempty"`
+	// Weekdays is always emitted, as [] for "every day", so the settings
+	// screen never has to distinguish absent from empty.
+	Weekdays []string `json:"weekdays"`
+	// Enabled is resolved (the config defaults it to true when omitted) so
+	// the screen renders a real toggle rather than a tri-state.
+	Enabled bool `json:"enabled"`
 }
 
 type NotifierView struct {
@@ -711,9 +734,12 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 
 func buildNotificationsView(cfg *types.NotificationsConfig) *NotificationsView {
 	if cfg == nil {
-		return &NotificationsView{Notifiers: map[string]NotifierView{}}
+		return &NotificationsView{Notifiers: map[string]NotifierView{}, Scheduled: []ScheduledNotificationView{}}
 	}
-	view := &NotificationsView{Notifiers: make(map[string]NotifierView, len(cfg.Notifiers))}
+	view := &NotificationsView{
+		Notifiers: make(map[string]NotifierView, len(cfg.Notifiers)),
+		Scheduled: make([]ScheduledNotificationView, 0, len(cfg.Scheduled)),
+	}
 	for name, notifier := range cfg.Notifiers {
 		view.Notifiers[name] = NotifierView{
 			Type:            notifier.Type,
@@ -741,7 +767,28 @@ func buildNotificationsView(cfg *types.NotificationsConfig) *NotificationsView {
 		}
 		view.Lifecycle = lifecycle
 	}
+	for _, scheduled := range cfg.Scheduled {
+		view.Scheduled = append(view.Scheduled, scheduledNotificationViewOf(scheduled))
+	}
 	return view
+}
+
+// scheduledNotificationViewOf projects one schedule into its settings view,
+// resolving the two defaults the screen cannot represent: an omitted `enabled`
+// is true, and an omitted `weekdays` is "every day", rendered as [].
+func scheduledNotificationViewOf(scheduled types.ScheduledNotificationConfig) ScheduledNotificationView {
+	return ScheduledNotificationView{
+		ID:     scheduled.ID,
+		Report: scheduled.Report,
+		// Never the config's own slice header: the settings screen PATCHes
+		// this view straight back, and aliasing would let a rejected save
+		// mutate the live config.
+		Via:      append([]string{}, scheduled.Via...),
+		At:       scheduled.At,
+		Timezone: scheduled.Timezone,
+		Weekdays: append([]string{}, scheduled.Weekdays...),
+		Enabled:  scheduled.Enabled == nil || *scheduled.Enabled,
+	}
 }
 
 func notifierSettingString(notifier types.NotifierConfig, key string) string {
@@ -811,7 +858,54 @@ func validateSettingsNotifications(current, cfg *types.NotificationsConfig) erro
 			return fmt.Errorf("notifications.notifiers.%s: %w", name, err)
 		}
 	}
+	// Report names are checked only on schedules the patch adds or changes,
+	// for the same reason notifier construction is: the report registry is a
+	// property of THIS build, so a hub.yaml naming a report an older or newer
+	// binary carries is legitimate on disk (the scheduler logs "not
+	// registered" per tick and delivers nothing). The screen submits the whole
+	// scheduled list on every save, so failing on a stored entry would 400
+	// every save — including the one that deletes the offender.
+	for i, scheduled := range cfg.Scheduled {
+		if scheduledNotificationUnchanged(current, scheduled) {
+			continue
+		}
+		if !ScheduledReportSupported(scheduled.Report) {
+			return fmt.Errorf("notifications.scheduled[%d]: unknown report %q (supported: %s)",
+				i, scheduled.Report, scheduledReportNamesText())
+		}
+	}
 	return nil
+}
+
+// scheduledNotificationUnchanged reports whether the patched schedule matches
+// the one already stored under the same id.
+//
+// Compared through the settings view rather than field by field: the view is
+// what the screen round-trips, and it normalises exactly the shapes that make
+// a byte comparison lie — an absent `enabled` (which means true) coming back
+// as an explicit `true`, and an absent `weekdays` (every day) coming back as
+// []. Without that normalisation an untouched schedule reads as changed on
+// every save, which is precisely the case this function exists to exempt.
+func scheduledNotificationUnchanged(current *types.NotificationsConfig, patched types.ScheduledNotificationConfig) bool {
+	if current == nil {
+		return false
+	}
+	for _, stored := range current.Scheduled {
+		if stored.ID != patched.ID {
+			continue
+		}
+		return reflect.DeepEqual(scheduledNotificationViewOf(stored), scheduledNotificationViewOf(patched))
+	}
+	return false
+}
+
+// scheduledReportNamesText lists the registered reports for error text.
+func scheduledReportNamesText() string {
+	names := scheduledReportNames()
+	if len(names) == 0 {
+		return "none"
+	}
+	return strings.Join(names, ", ")
 }
 
 // validateNotifierAPIBase refuses an api_base the patch introduces or changes

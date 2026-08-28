@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"runtime/debug"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -33,6 +34,20 @@ func ScheduledReportSupported(name string) bool {
 	defer scheduledReportRegistry.RUnlock()
 	_, ok := scheduledReportRegistry.builders[name]
 	return ok
+}
+
+// scheduledReportNames lists every registered report, sorted. It backs the
+// error text a rejected report name gets and the doctor check for a schedule
+// naming a report this build does not carry.
+func scheduledReportNames() []string {
+	scheduledReportRegistry.RLock()
+	defer scheduledReportRegistry.RUnlock()
+	names := make([]string, 0, len(scheduledReportRegistry.builders))
+	for name := range scheduledReportRegistry.builders {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
 
 func scheduledReport(name string) (scheduledReportBuilder, bool) {
