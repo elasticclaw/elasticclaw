@@ -2184,6 +2184,81 @@ func TestGatewaySessionPreservesSessionAfterMidTurnLockConflictProbe(t *testing.
 	}
 }
 
+func TestGatewaySessionProbeRechecksConcurrentRotationAfterSuccess(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	oldDelays := sessionLockConflictRetryDelays
+	sessionLockConflictRetryDelays = []time.Duration{time.Millisecond}
+	t.Cleanup(func() { sessionLockConflictRetryDelays = oldDelays })
+
+	const sessionErr = "error: session file changed while embedded prompt lock was released"
+	var gs *gatewaySession
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			t.Errorf("accept websocket: %v", err)
+			return
+		}
+		defer conn.CloseNow()
+		read := func(want string) (gwFrame, bool) {
+			var req gwFrame
+			if err := wsjson.Read(r.Context(), conn, &req); err != nil {
+				t.Errorf("read %s: %v", want, err)
+				return req, false
+			}
+			if req.Method != want {
+				t.Errorf("method = %q, want %q", req.Method, want)
+				return req, false
+			}
+			return req, true
+		}
+		send, ok := read("sessions.send")
+		if !ok {
+			return
+		}
+		if err := wsjson.Write(r.Context(), conn, gwFrame{Type: "res", ID: send.ID, OK: true}); err != nil {
+			t.Error(err)
+			return
+		}
+		if err := wsjson.Write(r.Context(), conn, gwFrame{Type: "event", Event: "agent", Payload: mustJSON(map[string]interface{}{"stream": "lifecycle", "sessionKey": "session-1", "data": map[string]string{"phase": "error", "error": sessionErr}})}); err != nil {
+			t.Error(err)
+			return
+		}
+		abort, ok := read("sessions.abort")
+		if !ok {
+			return
+		}
+		if err := wsjson.Write(r.Context(), conn, gwFrame{Type: "res", ID: abort.ID, OK: true}); err != nil {
+			t.Error(err)
+			return
+		}
+		probe, ok := read("sessions.describe")
+		if !ok {
+			return
+		}
+		// Rotate after the read-only probe succeeds to exercise the defensive
+		// re-check immediately before reporting the session as preserved.
+		gs.setSessionKey("session-2")
+		if err := wsjson.Write(r.Context(), conn, gwFrame{Type: "res", ID: probe.ID, OK: true}); err != nil {
+			t.Error(err)
+		}
+	}))
+	defer srv.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(srv.URL, "http"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.CloseNow()
+	gs = &gatewaySession{sessionKey: "session-1", conn: conn, pending: make(map[string]chan gwFrame)}
+	go gs.readLoop(ctx)
+	_, err = gs.SendMessage(ctx, "continue the task", nil, nil)
+	if err == nil || !isSessionRotatedError(err) || isSessionPreservedError(err) {
+		t.Fatalf("SendMessage error = %v, want rotation only", err)
+	}
+}
+
 func TestGatewaySessionProbeDetectsConcurrentRotation(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	oldDelays := sessionLockConflictRetryDelays
