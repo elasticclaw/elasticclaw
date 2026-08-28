@@ -1749,7 +1749,7 @@ func TestIsSessionRotatedError(t *testing.T) {
 		want bool
 	}{
 		{name: "nil", err: nil, want: false},
-		{name: "session reset", err: errString("session file changed while embedded prompt lock was released; OpenClaw session reset so the next message can continue"), want: true},
+		{name: "session reset", err: errString("session file changed while embedded prompt lock was released; " + sessionRotatedErrorSuffix), want: true},
 		{name: "other error", err: errString("some other error"), want: false},
 		{name: "send error", err: &sessionSendRequestError{err: errString("session file changed while embedded prompt lock was released")}, want: false},
 	}
@@ -1759,6 +1759,24 @@ func TestIsSessionRotatedError(t *testing.T) {
 				t.Fatalf("isSessionRotatedError(%v) = %v, want %v", tt.err, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestSessionRecoverySentinelsAreMutuallyExclusive(t *testing.T) {
+	if strings.Contains(sessionPreservedErrorSuffix, sessionRotatedErrorSuffix) || strings.Contains(sessionRotatedErrorSuffix, sessionPreservedErrorSuffix) {
+		t.Fatalf("recovery sentinel strings must remain mutually exclusive")
+	}
+	rotated := errString("lock conflict; " + sessionRotatedErrorSuffix)
+	preserved := errString("lock conflict; " + sessionPreservedErrorSuffix)
+	if !isSessionRotatedError(rotated) || isSessionPreservedError(rotated) {
+		t.Fatalf("rotated error classification is not exclusive")
+	}
+	if !isSessionPreservedError(preserved) || isSessionRotatedError(preserved) {
+		t.Fatalf("preserved error classification is not exclusive")
+	}
+	both := errString(sessionRotatedErrorSuffix + "; " + sessionPreservedErrorSuffix)
+	if isSessionRotatedError(both) || isSessionPreservedError(both) {
+		t.Fatalf("an ambiguous error must not match either recovery protocol")
 	}
 }
 
@@ -2121,7 +2139,7 @@ func TestGatewaySessionPreservesSessionAfterMidTurnLockConflictProbe(t *testing.
 	if err == nil || !strings.Contains(err.Error(), sessionErr) {
 		t.Fatalf("SendMessage error = %v, want original lock conflict", err)
 	}
-	if isSessionRotatedError(err) {
+	if !isSessionPreservedError(err) || isSessionRotatedError(err) {
 		t.Fatalf("preserved session error must not be recognized as a rotation: %v", err)
 	}
 	if got := gs.getSessionKey(); got != "session-1" {

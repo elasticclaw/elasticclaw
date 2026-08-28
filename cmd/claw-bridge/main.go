@@ -2361,8 +2361,7 @@ func (gs *gatewaySession) abortActiveSession(ctx context.Context) error {
 // without sending another turn. It is deliberately read-only: a lifecycle
 // failure can happen after OpenClaw accepted the original message, so replaying
 // it could duplicate tool side effects.
-func (gs *gatewaySession) probeSession(ctx context.Context) error {
-	key := gs.getSessionKey()
+func (gs *gatewaySession) probeSession(ctx context.Context, key string) error {
 	if key == "" {
 		return fmt.Errorf("cannot probe session without a session key")
 	}
@@ -2376,6 +2375,11 @@ func (gs *gatewaySession) probeSession(ctx context.Context) error {
 // rejects the assembled request schema or tool payload. Session recovery
 // depends on this upstream compatibility string, so keep the coupling explicit.
 const providerRequestFormatErrorFragment = "provider rejected the request schema or tool payload"
+
+const (
+	sessionRotatedErrorSuffix   = "OpenClaw session reset so the next message can continue"
+	sessionPreservedErrorSuffix = "OpenClaw session preserved; the turn was aborted but its history is intact"
+)
 
 func isRecoverableSessionSendError(err error) bool {
 	var sendErr *sessionSendRequestError
@@ -2443,10 +2447,24 @@ var sessionLockConflictRetryDelays = []time.Duration{500 * time.Millisecond, tim
 // workflow pipeline), but it should still close the turn so the hub drains the
 // next queued message.
 func isSessionRotatedError(err error) bool {
-	if err == nil {
-		return false
+	return err != nil && strings.Contains(err.Error(), sessionRotatedErrorSuffix) && !strings.Contains(err.Error(), sessionPreservedErrorSuffix)
+}
+
+// isSessionPreservedError reports a read-only probe confirmed that a mid-turn
+// lock conflict did not discard the persistent transcript.
+func isSessionPreservedError(err error) bool {
+	return err != nil && strings.Contains(err.Error(), sessionPreservedErrorSuffix) && !strings.Contains(err.Error(), sessionRotatedErrorSuffix)
+}
+
+func sessionLockConflictProbeBudget() time.Duration {
+	var budget time.Duration
+	for range sessionLockConflictRetryDelays {
+		budget += 5 * time.Second
 	}
-	return strings.Contains(err.Error(), "OpenClaw session reset so the next message can continue")
+	for _, delay := range sessionLockConflictRetryDelays {
+		budget += delay
+	}
+	return budget + 5*time.Second
 }
 
 // SendMessage sends a user message to the persistent session, streams chunks
@@ -2523,20 +2541,38 @@ func (gs *gatewaySession) SendMessage(ctx context.Context, message string, onChu
 				log.Printf("[session] failed to abort poisoned session before recovery: %v", abortErr)
 			}
 			if isSessionFileLockConflictError(err) {
+				origKey := gs.getSessionKey()
+				// Recovery must finish even when the accepted turn's deadline has
+				// elapsed: it only performs read-only probes, then establishes a
+				// continuation edge without replaying that turn.
+				probeCtx, probeCancel := context.WithTimeout(context.Background(), sessionLockConflictProbeBudget())
 				for probeAttempt, delay := range sessionLockConflictRetryDelays {
 					log.Printf("[gateway] mid-turn session file lock conflict; probing same session after %s (attempt %d/%d): %v", delay, probeAttempt+1, len(sessionLockConflictRetryDelays), err)
 					select {
 					case <-time.After(delay):
-					case <-ctx.Done():
-						return "", ctx.Err()
+					case <-probeCtx.Done():
+						break
 					}
-					if probeErr := gs.probeSession(ctx); probeErr == nil {
+					if probeCtx.Err() != nil {
+						break
+					}
+					if gs.getSessionKey() != origKey {
+						probeCancel()
+						return reply, fmt.Errorf("%w; %s", err, sessionRotatedErrorSuffix)
+					}
+					if probeErr := gs.probeSession(probeCtx, origKey); probeErr == nil {
+						if gs.getSessionKey() != origKey {
+							probeCancel()
+							return reply, fmt.Errorf("%w; %s", err, sessionRotatedErrorSuffix)
+						}
+						probeCancel()
 						log.Printf("[session] preserved session after mid-turn lock conflict")
-						return reply, err
+						return reply, fmt.Errorf("%w; %s", err, sessionPreservedErrorSuffix)
 					} else {
 						log.Printf("[session] probe after mid-turn lock conflict failed: %v", probeErr)
 					}
 				}
+				probeCancel()
 			}
 			recoveryCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			resetErr := gs.createFreshSession(recoveryCtx, err.Error())
@@ -2544,7 +2580,7 @@ func (gs *gatewaySession) SendMessage(ctx context.Context, message string, onChu
 			if resetErr != nil {
 				return reply, fmt.Errorf("%w; session recovery failed: %v", err, resetErr)
 			}
-			return reply, fmt.Errorf("%w; OpenClaw session reset so the next message can continue", err)
+			return reply, fmt.Errorf("%w; %s", err, sessionRotatedErrorSuffix)
 		}
 		// Same-session retries exhausted: rotate as a last resort and surface
 		// the reset error instead of silently replaying, so the hub injects a
@@ -2562,7 +2598,7 @@ func (gs *gatewaySession) SendMessage(ctx context.Context, message string, onChu
 			if resetErr != nil {
 				return "", fmt.Errorf("%w; session recovery failed: %v", err, resetErr)
 			}
-			return "", fmt.Errorf("%w; OpenClaw session reset so the next message can continue", err)
+			return "", fmt.Errorf("%w; %s", err, sessionRotatedErrorSuffix)
 		}
 		if !isRecoverableSessionSendError(err) {
 			return reply, err
@@ -4786,7 +4822,11 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 				writeActivity(activity)
 			})
 			if agentErr != nil {
-				if isSessionRotatedError(agentErr) {
+				if isSessionPreservedError(agentErr) {
+					writeActivity(agentActivity{Kind: "session_preserved", Message: fmt.Sprintf("OpenClaw session preserved after lock conflict; continuing from intact history (%v)", agentErr)})
+					reply = ""
+					_ = writeHub(hubMsg{Type: "session_preserved"})
+				} else if isSessionRotatedError(agentErr) {
 					writeActivity(agentActivity{Kind: "session_rotated", Message: fmt.Sprintf("OpenClaw session rotated to recover from lock conflict; waiting for next message (%v)", agentErr)})
 					reply = ""
 					// Notify the hub so it can inject a resume prompt with context.
@@ -4929,7 +4969,11 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 				})
 				if agentErr != nil {
 					log.Printf("[bridge] ✗ agent error: %v", agentErr)
-					if isSessionRotatedError(agentErr) {
+					if isSessionPreservedError(agentErr) {
+						writeActivity(agentActivity{Kind: "session_preserved", Message: fmt.Sprintf("OpenClaw session preserved after lock conflict; continuing from intact history (%v)", agentErr)})
+						reply = ""
+						_ = writeHub(hubMsg{Type: "session_preserved"})
+					} else if isSessionRotatedError(agentErr) {
 						writeActivity(agentActivity{Kind: "session_rotated", Message: fmt.Sprintf("OpenClaw session rotated to recover from lock conflict; waiting for next message (%v)", agentErr)})
 						reply = ""
 						// Notify the hub so it can inject a resume prompt with context.
