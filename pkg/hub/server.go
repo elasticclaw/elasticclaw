@@ -526,6 +526,7 @@ func NewServer(addr, dbPath, identityDir string, hubCfg *types.HubConfig) (*Serv
 	}
 	srv.startIntegrationPoller()
 	srv.startLifecycleNotifier()
+	srv.startScheduledNotifier()
 
 	return srv, nil
 }

@@ -39,6 +39,36 @@ func TestValidateNotificationsConfig(t *testing.T) {
 			cfg:  &NotificationsConfig{Notifiers: slack()},
 		},
 		{
+			name: "valid scheduled notification",
+			cfg: &NotificationsConfig{Notifiers: slack(), Scheduled: []ScheduledNotificationConfig{{
+				ID: "morning-prs", Report: "pending_prs", Via: []string{"eng-agents"}, At: "09:30", Timezone: "America/Sao_Paulo", Weekdays: []string{"mon", "tue"},
+			}}},
+		},
+		{
+			name:    "scheduled notification requires unique id",
+			cfg:     &NotificationsConfig{Notifiers: slack(), Scheduled: []ScheduledNotificationConfig{{ID: "daily", Report: "x", Via: []string{"eng-agents"}, At: "09:00"}, {ID: "daily", Report: "x", Via: []string{"eng-agents"}, At: "10:00"}}},
+			wantErr: true,
+			errMsg:  "id \"daily\" is duplicated",
+		},
+		{
+			name:    "scheduled notification validates fields",
+			cfg:     &NotificationsConfig{Notifiers: slack(), Scheduled: []ScheduledNotificationConfig{{ID: "daily", Via: []string{"eng-agents"}, At: "09:00"}}},
+			wantErr: true,
+			errMsg:  "report is required",
+		},
+		{
+			name:    "scheduled notification validates notifier and clock",
+			cfg:     &NotificationsConfig{Notifiers: slack(), Scheduled: []ScheduledNotificationConfig{{ID: "daily", Report: "x", Via: []string{"missing"}, At: "9:00"}}},
+			wantErr: true,
+			errMsg:  "does not name a configured notifier",
+		},
+		{
+			name:    "scheduled notification validates timezone and weekdays",
+			cfg:     &NotificationsConfig{Notifiers: slack(), Scheduled: []ScheduledNotificationConfig{{ID: "daily", Report: "x", Via: []string{"eng-agents"}, At: "09:00", Timezone: "not/a-zone"}}},
+			wantErr: true,
+			errMsg:  "invalid timezone",
+		},
+		{
 			name: "valid lifecycle wiring",
 			cfg: &NotificationsConfig{
 				Notifiers: slack(),

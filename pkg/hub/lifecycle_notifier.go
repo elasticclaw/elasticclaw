@@ -106,6 +106,13 @@ func (s *Server) notificationsConfig() *types.NotificationsConfig {
 		lc := *src.Lifecycle
 		cfg.Lifecycle = &lc
 	}
+	if src.Scheduled != nil {
+		cfg.Scheduled = append([]types.ScheduledNotificationConfig(nil), src.Scheduled...)
+		for i := range cfg.Scheduled {
+			cfg.Scheduled[i].Via = append([]string(nil), src.Scheduled[i].Via...)
+			cfg.Scheduled[i].Weekdays = append([]string(nil), src.Scheduled[i].Weekdays...)
+		}
+	}
 	return cfg
 }
 

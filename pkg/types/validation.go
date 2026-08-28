@@ -790,6 +790,47 @@ func ValidateNotificationsConfig(cfg *NotificationsConfig) error {
 			return fmt.Errorf("notifications.notifiers.%s: type is required", name)
 		}
 	}
+	seenScheduled := make(map[string]struct{}, len(cfg.Scheduled))
+	validWeekdays := map[string]struct{}{"mon": {}, "tue": {}, "wed": {}, "thu": {}, "fri": {}, "sat": {}, "sun": {}}
+	for i, scheduled := range cfg.Scheduled {
+		prefix := fmt.Sprintf("notifications.scheduled[%d]", i)
+		if strings.TrimSpace(scheduled.ID) == "" {
+			return fmt.Errorf("%s: id is required", prefix)
+		}
+		if _, duplicate := seenScheduled[scheduled.ID]; duplicate {
+			return fmt.Errorf("%s: id %q is duplicated", prefix, scheduled.ID)
+		}
+		seenScheduled[scheduled.ID] = struct{}{}
+		if strings.TrimSpace(scheduled.Report) == "" {
+			return fmt.Errorf("%s: report is required", prefix)
+		}
+		if len(scheduled.Via) == 0 {
+			return fmt.Errorf("%s: via is required", prefix)
+		}
+		for _, via := range scheduled.Via {
+			if _, ok := cfg.Notifiers[via]; !ok {
+				return fmt.Errorf("%s: via %q does not name a configured notifier (defined: %s)", prefix, via, notifierNames(cfg.Notifiers))
+			}
+		}
+		if _, err := time.Parse("15:04", scheduled.At); err != nil {
+			return fmt.Errorf("%s: invalid at %q: %w", prefix, scheduled.At, err)
+		}
+		if scheduled.Timezone != "" {
+			if _, err := time.LoadLocation(scheduled.Timezone); err != nil {
+				return fmt.Errorf("%s: invalid timezone %q: %w", prefix, scheduled.Timezone, err)
+			}
+		}
+		seenWeekdays := make(map[string]struct{}, len(scheduled.Weekdays))
+		for _, weekday := range scheduled.Weekdays {
+			if _, ok := validWeekdays[weekday]; !ok {
+				return fmt.Errorf("%s: weekday %q is invalid", prefix, weekday)
+			}
+			if _, duplicate := seenWeekdays[weekday]; duplicate {
+				return fmt.Errorf("%s: weekday %q is duplicated", prefix, weekday)
+			}
+			seenWeekdays[weekday] = struct{}{}
+		}
+	}
 	lc := cfg.Lifecycle
 	if lc == nil {
 		return nil
