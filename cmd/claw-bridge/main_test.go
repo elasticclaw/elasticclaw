@@ -2092,6 +2092,17 @@ func TestGatewaySessionPreservesSessionAfterMidTurnLockConflictProbe(t *testing.
 			t.Errorf("accept session probe: %v", err)
 			return
 		}
+		// A successful probe must end the recovery: nothing else may reach the
+		// gateway. A rotation would send sessions.create and a replay would send
+		// a second sessions.send, and the accepted turn may already have run
+		// tool side effects. Without this read the test would still pass while
+		// silently blocking on an unanswered sessions.create.
+		idleCtx, idleCancel := context.WithTimeout(r.Context(), 2*time.Second)
+		defer idleCancel()
+		var extra gwFrame
+		if err := wsjson.Read(idleCtx, conn, &extra); err == nil {
+			t.Errorf("unexpected %q request after a successful probe; the session must be preserved", extra.Method)
+		}
 		<-testDone
 	}))
 	defer srv.Close()

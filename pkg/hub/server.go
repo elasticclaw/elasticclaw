@@ -8600,7 +8600,12 @@ func (s *Server) enqueueSessionLostResume(clawID, prefix, marker string) {
 		ORDER BY created_at DESC, rowid DESC LIMIT 1`,
 		clawID, types.BridgeErrorPrefix+"%", types.BridgeReplayErrorPrefix+"%").Scan(&lastProgress)
 	if err == nil {
+		// SQLite TRIM strips spaces but not newlines or tabs, so a message that
+		// is only whitespace still satisfies the query. Re-check after Go-side
+		// trimming rather than emitting the header above an empty body.
 		lastProgress = strings.TrimSpace(lastProgress)
+	}
+	if err == nil && lastProgress != "" {
 		const lastProgressLimit = 2000
 		if runeLen(lastProgress) > lastProgressLimit {
 			lastProgress = truncateRunes(lastProgress, lastProgressLimit) + "…(truncated)"
