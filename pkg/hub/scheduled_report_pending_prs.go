@@ -44,7 +44,11 @@ type scheduledPendingPRTicket struct {
 // hold a stranded (open, merged=0) row for a PR another run's row already
 // records as merged or closed — and with no time window (correctly, per the
 // report's contract) such a zombie row would otherwise surface the ticket
-// forever, oldest-first, permanently occupying the cap.
+// forever, oldest-first, permanently occupying the cap. merged=1 is terminal
+// and vetoes unconditionally; state='closed' is reversible on GitHub (a retry
+// run can reopen the PR and record a fresh open row), so a closed row vetoes
+// only when it is not older than the open row — otherwise the pre-reopen
+// close latched by a dead run would hide the reopened PR forever.
 const scheduledPendingPRsTicketsSQL = `
 	SELECT s.integration, s.integration_workspace, s.issue_id,
 	       MIN(CASE WHEN p.opened_at > 0 THEN p.opened_at END) AS oldest_open_at
@@ -55,7 +59,7 @@ const scheduledPendingPRsTicketsSQL = `
 	   AND NOT EXISTS (
 	       SELECT 1 FROM task_run_prs done
 	        WHERE done.tenant_id=p.tenant_id AND done.repo=p.repo AND done.pr_number=p.pr_number
-	          AND (done.merged=1 OR done.state='closed'))
+	          AND (done.merged=1 OR (done.state='closed' AND done.updated_at >= p.updated_at)))
 	 GROUP BY s.integration, s.integration_workspace, s.issue_id`
 
 func buildPendingPRsScheduledReport(ctx context.Context, s *Server) (*notify.Message, bool, error) {
@@ -136,7 +140,7 @@ func buildPendingPRsScheduledReport(ctx context.Context, s *Server) (*notify.Mes
 				key := fmt.Sprintf("%s#%d", pr.Repo, pr.PRNumber)
 				// Same cross-row resolution as the ticket query: a stranded
 				// open row must not render a PR any other row for the tenant
-				// records as merged or closed.
+				// records as merged, or closed no earlier than the open row.
 				if resolved[key] {
 					continue
 				}
@@ -202,33 +206,52 @@ func buildPendingPRsScheduledReport(ctx context.Context, s *Server) (*notify.Mes
 
 // scheduledPendingPRsResolvedElsewhere returns, keyed "repo#number", the PRs
 // among prsByRun's open rows that ANY task_run_prs row for the tenant marks
-// merged or closed. The rows of the capped tickets alone cannot answer this: a
-// zombie open row's resolving row may belong to a run of a ticket outside the
-// cap, so resolution is read tenant-wide — mirroring the ticket query's
-// NOT EXISTS, which alone cannot cover a ticket that qualifies via another,
-// genuinely open PR.
+// merged — or closed no earlier than the newest open row, the same recency
+// rule as the ticket query's NOT EXISTS (a reopened PR's fresh open row must
+// win over the pre-reopen close). The rows of the capped tickets alone cannot
+// answer this: a zombie open row's resolving row may belong to a run of a
+// ticket outside the cap, so resolution is read tenant-wide — mirroring the
+// ticket query's NOT EXISTS, which alone cannot cover a ticket that qualifies
+// via another, genuinely open PR.
 func (s *Server) scheduledPendingPRsResolvedElsewhere(ctx context.Context, tenantID string, prsByRun map[string][]taskRunAnalyticsPRView) (map[string]bool, error) {
-	conds := make([]string, 0, 8)
-	args := []any{tenantID}
-	seen := map[string]bool{}
+	type openPR struct {
+		repo      string
+		number    int
+		updatedAt int64
+	}
+	// Keep the NEWEST open row per PR: if any open row postdates the close,
+	// the PR is open again and must not be resolved away.
+	newest := map[string]openPR{}
+	var keys []string
 	for _, prs := range prsByRun {
 		for _, pr := range prs {
-			key := fmt.Sprintf("%s#%d", pr.Repo, pr.PRNumber)
-			if pr.State != "open" || pr.Merged || seen[key] {
+			if pr.State != "open" || pr.Merged {
 				continue
 			}
-			seen[key] = true
-			conds = append(conds, "(repo=? AND pr_number=?)")
-			args = append(args, pr.Repo, pr.PRNumber)
+			key := fmt.Sprintf("%s#%d", pr.Repo, pr.PRNumber)
+			cur, ok := newest[key]
+			if !ok {
+				keys = append(keys, key)
+			}
+			if !ok || pr.UpdatedAt > cur.updatedAt {
+				newest[key] = openPR{pr.Repo, pr.PRNumber, pr.UpdatedAt}
+			}
 		}
 	}
 	resolved := map[string]bool{}
-	if len(conds) == 0 {
+	if len(keys) == 0 {
 		return resolved, nil
+	}
+	conds := make([]string, 0, len(keys))
+	args := []any{tenantID}
+	for _, key := range keys {
+		pr := newest[key]
+		conds = append(conds, "(repo=? AND pr_number=? AND (merged=1 OR (state='closed' AND updated_at >= ?)))")
+		args = append(args, pr.repo, pr.number, pr.updatedAt)
 	}
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT DISTINCT repo, pr_number FROM task_run_prs
-		 WHERE tenant_id=? AND (merged=1 OR state='closed') AND (`+strings.Join(conds, " OR ")+`)`, args...)
+		 WHERE tenant_id=? AND (`+strings.Join(conds, " OR ")+`)`, args...)
 	if err != nil {
 		return nil, err
 	}

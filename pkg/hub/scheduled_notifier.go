@@ -3,7 +3,6 @@ package hub
 import (
 	"context"
 	"database/sql"
-	"fmt"
 	"log"
 	"runtime/debug"
 	"sort"
@@ -198,9 +197,14 @@ func (s *Server) runScheduledDelivery(ctx context.Context, nowAt time.Time, cfg 
 		via := strings.TrimSpace(via)
 		fired, firedDigest, found, err := s.scheduledLastFired(schedule.ID, via)
 		if err != nil {
-			log.Printf("[notify] read scheduled state for %s via %s: %v", schedule.ID, via, err)
+			// A persistently erroring read (a wedged DB) re-runs this branch
+			// every minute; warn once per (schedule, via) — cleared on the
+			// next successful read — like the unregistered-report branch below.
+			s.logPollWarningOnce(scheduledStateWarningKey(schedule.ID, via),
+				"[notify] read scheduled state for %s via %s: %v", schedule.ID, via, err)
 			continue
 		}
+		s.clearPollWarning(scheduledStateWarningKey(schedule.ID, via))
 		// A destination with no state row is one this hub has never
 		// delivered to — a schedule (or via) just created or first seen.
 		// The slot search reaches up to 8 days back, so firing here would
@@ -397,6 +401,25 @@ func (s *Server) pruneScheduledState(scheduled []types.ScheduledNotificationConf
 		}
 	}
 	s.scheduledFailureMu.Unlock()
+	// The once-per-process warning keys get the same hygiene: clearPollWarning
+	// for them only runs inside runScheduledDelivery's branches, which never
+	// execute again once the schedule (or the whole block) is removed — the
+	// entries would leak for the process lifetime, and a schedule later
+	// re-added with the same (id, report) would log nothing at all.
+	configuredWarnings := map[string]bool{}
+	for _, schedule := range scheduled {
+		configuredWarnings[scheduledReportWarningKey(schedule)] = true
+		for _, via := range schedule.Via {
+			configuredWarnings[scheduledStateWarningKey(schedule.ID, strings.TrimSpace(via))] = true
+		}
+	}
+	s.pollWarningMu.Lock()
+	for key := range s.pollWarnings {
+		if (strings.HasPrefix(key, scheduledReportWarningKeyPrefix) || strings.HasPrefix(key, scheduledStateWarningKeyPrefix)) && !configuredWarnings[key] {
+			delete(s.pollWarnings, key)
+		}
+	}
+	s.pollWarningMu.Unlock()
 }
 
 func scheduledNotificationSlot(nowAt time.Time, schedule types.ScheduledNotificationConfig) (time.Time, bool) {
@@ -456,11 +479,21 @@ func scheduledNotificationSlot(nowAt time.Time, schedule types.ScheduledNotifica
 	return time.Time{}, false
 }
 
+const scheduledReportWarningKeyPrefix = "scheduled-report:"
+const scheduledStateWarningKeyPrefix = "scheduled-state:"
+
 // scheduledReportWarningKey keys the once-per-process "not registered" warning
 // for a schedule's report. The report name is part of the key so editing a
 // schedule from one unregistered report to another still logs the new name.
 func scheduledReportWarningKey(schedule types.ScheduledNotificationConfig) string {
-	return "scheduled-report:" + schedule.ID + "\x00" + schedule.Report
+	return scheduledReportWarningKeyPrefix + schedule.ID + "\x00" + schedule.Report
+}
+
+// scheduledStateWarningKey keys the once-per-process warning for a
+// (schedule, destination) whose dedupe-state read keeps failing. The NUL
+// joiner is the same state-key hygiene as scheduledStateKey.
+func scheduledStateWarningKey(id, via string) string {
+	return scheduledStateWarningKeyPrefix + id + "\x00" + via
 }
 
 const scheduledStateKeyPrefix = "scheduled:last_fired:"
@@ -518,7 +551,15 @@ func (s *Server) scheduledLastFired(id, via string) (time.Time, string, bool, er
 	stamp, digest, _ := strings.Cut(raw, "\n")
 	value, err := time.Parse(time.RFC3339, stamp)
 	if err != nil {
-		return time.Time{}, "", false, fmt.Errorf("parse scheduled state %q: %w", raw, err)
+		// A value that does not parse (a partial write, external tampering) is
+		// permanently unreadable: surfacing it as an error would log an
+		// identical line every minute for the life of the process while the
+		// destination never fires. Report the row as absent instead — the
+		// caller reseeds it like a first sight, matching the digest-mismatch
+		// path, so this logs once per corruption (the reseeded row parses) and
+		// the destination delivers from its next slot on.
+		log.Printf("[notify] scheduled state for %s via %s is corrupt (%q) — reseeding from the current slot", id, via, raw)
+		return time.Time{}, "", false, nil
 	}
 	return value, digest, true, nil
 }

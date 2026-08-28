@@ -721,6 +721,78 @@ func TestScheduledNotifierUnregisteredReportWarnsOnceAndRecovers(t *testing.T) {
 	}
 }
 
+// A state row whose value does not parse as RFC3339 (a partial write, external
+// tampering) is permanently unreadable: instead of logging an identical error
+// every minute forever while the destination silently never fires, the row is
+// reseeded like a first sight and the destination delivers from its next slot.
+func TestScheduledNotifierCorruptStateRowReseedsInsteadOfWedging(t *testing.T) {
+	registerScheduledReport("corrupt-state-report", func(context.Context, *Server) (*notify.Message, bool, error) {
+		return &notify.Message{Title: "report", Body: "body"}, true, nil
+	})
+	fake := newFakeSlackServer(t)
+	schedule := types.ScheduledNotificationConfig{ID: "corrupt", Report: "corrupt-state-report", Via: []string{testNotifierName}, At: "09:00"}
+	s, db := newScheduledNotifierTestServer(t, fake.server.URL, []types.ScheduledNotificationConfig{schedule})
+	if _, err := db.Exec(`INSERT INTO slack_notifier_state(key, value) VALUES(?,?)`,
+		scheduledStateKey("corrupt", testNotifierName), "not-a-timestamp"); err != nil {
+		t.Fatal(err)
+	}
+
+	// The corrupt row reads as absent: the tick reseeds to the current slot
+	// without firing (seed-on-first-sight, not a replay).
+	s.scheduledNotifierTick(context.Background(), time.Date(2025, 1, 6, 9, 30, 0, 0, time.UTC))
+	if fake.count() != 0 {
+		t.Fatalf("corrupt row fired %d sends, want 0", fake.count())
+	}
+	fired, _, found, err := s.scheduledLastFired("corrupt", testNotifierName)
+	if err != nil || !found {
+		t.Fatalf("scheduledLastFired after reseed: %v, found=%v — the corrupt row must self-heal", err, found)
+	}
+	if !fired.Equal(time.Date(2025, 1, 6, 9, 0, 0, 0, time.UTC)) {
+		t.Fatalf("reseeded slot = %v, want today's 09:00", fired)
+	}
+
+	// The next slot delivers normally: the destination is not dead forever.
+	s.scheduledNotifierTick(context.Background(), time.Date(2025, 1, 7, 9, 0, 30, 0, time.UTC))
+	if fake.count() != 1 {
+		t.Fatalf("slot after the reseed sent %d messages, want 1", fake.count())
+	}
+}
+
+// The warn-once keys of removed schedules are pruned with the rest of their
+// state: clearPollWarning for them only runs inside runScheduledDelivery's
+// branches, which never execute after the removal, so the entries would leak —
+// and a schedule later re-added with the same (id, report) would log nothing.
+func TestPruneScheduledStateClearsRemovedWarningKeys(t *testing.T) {
+	fake := newFakeSlackServer(t)
+	schedule := types.ScheduledNotificationConfig{ID: "future", Report: "never-a-registered-report", Via: []string{testNotifierName}, At: "09:00"}
+	s, _ := newScheduledNotifierTestServer(t, fake.server.URL, []types.ScheduledNotificationConfig{schedule})
+
+	// Seed, then hit the unregistered-report branch to record the warn key.
+	s.scheduledNotifierTick(context.Background(), time.Date(2025, 1, 6, 8, 30, 0, 0, time.UTC))
+	s.scheduledNotifierTick(context.Background(), time.Date(2025, 1, 6, 9, 30, 0, 0, time.UTC))
+	s.pollWarningMu.Lock()
+	_, warned := s.pollWarnings[scheduledReportWarningKey(schedule)]
+	s.pollWarningMu.Unlock()
+	if !warned {
+		t.Fatal("fixture did not record the unregistered-report warn key")
+	}
+	// A state-read warn key of the same schedule is pruned by the same rule.
+	s.logPollWarningOnce(scheduledStateWarningKey("gone", testNotifierName), "fixture state-read warning")
+
+	s.hubCfg.Notifications.Scheduled = nil
+	s.scheduledNotifierTick(context.Background(), time.Date(2025, 1, 6, 9, 31, 0, 0, time.UTC))
+	s.pollWarningMu.Lock()
+	_, warned = s.pollWarnings[scheduledReportWarningKey(schedule)]
+	_, stateWarned := s.pollWarnings[scheduledStateWarningKey("gone", testNotifierName)]
+	s.pollWarningMu.Unlock()
+	if warned {
+		t.Fatal("removed schedule's report warn key survived the prune; a re-added schedule would log nothing")
+	}
+	if stateWarned {
+		t.Fatal("removed schedule's state-read warn key survived the prune")
+	}
+}
+
 // Semantically identical slot definitions must produce identical digests:
 // normalizeScheduledTimes zero-pads a hand-written "9:00" on any settings
 // save, and the edit dialog seeds an absent timezone as "UTC" — neither

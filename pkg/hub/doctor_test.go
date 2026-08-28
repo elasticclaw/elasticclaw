@@ -212,6 +212,71 @@ func TestCheckNotificationsFlagsInvalidScheduledSlotFields(t *testing.T) {
 	}
 }
 
+// The tick's whole-block gate validates every entry regardless of Enabled, so
+// a defective DISABLED schedule pauses every other schedule: the disabled
+// offender must get its own critical row (not be skipped as paused), and the
+// healthy victim must not get a green "is configured" row while nothing is
+// delivered.
+func TestCheckNotificationsFlagsDisabledOffenderAndDowngradesVictims(t *testing.T) {
+	s := &Server{}
+	disabled := false
+	cfg := &types.HubConfig{Secrets: map[string]string{"token": "xoxb-test"}, Notifications: &types.NotificationsConfig{
+		Notifiers: map[string]types.NotifierConfig{
+			"healthy": {Type: "slack", Settings: map[string]any{"token_secret": "token", "channel": "C0123ABCD"}},
+		},
+		Scheduled: []types.ScheduledNotificationConfig{
+			{ID: "victim", Report: "pending_prs", Via: []string{"healthy"}, At: "09:00"},
+			{ID: "offender", Report: "pending_prs", Via: []string{"healthy"}, At: "09:00", Weekdays: []string{"monday"}, Enabled: &disabled},
+		},
+	}}
+	var offenderRow, victimPausedRow bool
+	for _, check := range s.checkNotifications(cfg) {
+		if strings.Contains(check.Title, "Scheduled report") && check.OK {
+			t.Fatalf("green per-schedule row while the whole block is paused: %#v", check)
+		}
+		if strings.Contains(check.Title, `Scheduled report 2 ("offender") is invalid`) && strings.Contains(check.Error, `weekday "monday" is invalid`) {
+			offenderRow = true
+		}
+		if strings.Contains(check.Title, `Scheduled report 1 ("victim") is paused while the scheduled block is invalid`) {
+			victimPausedRow = true
+		}
+	}
+	if !offenderRow {
+		t.Fatal("the disabled entry causing the pause got no critical row of its own")
+	}
+	if !victimPausedRow {
+		t.Fatal("the healthy entry got no row explaining it is paused by the invalid block")
+	}
+}
+
+// Two schedules sharing an id fail only the cross-entry rule the per-entry
+// validator excludes: the duplicate must get its own critical row instead of
+// both entries showing green while the tick delivers nothing.
+func TestCheckNotificationsFlagsDuplicateScheduleIDs(t *testing.T) {
+	s := &Server{}
+	cfg := &types.HubConfig{Secrets: map[string]string{"token": "xoxb-test"}, Notifications: &types.NotificationsConfig{
+		Notifiers: map[string]types.NotifierConfig{
+			"healthy": {Type: "slack", Settings: map[string]any{"token_secret": "token", "channel": "C0123ABCD"}},
+		},
+		Scheduled: []types.ScheduledNotificationConfig{
+			{ID: "digest", Report: "pending_prs", Via: []string{"healthy"}, At: "09:00"},
+			{ID: "digest", Report: "pending_prs", Via: []string{"healthy"}, At: "17:00"},
+		},
+	}}
+	var duplicateRow bool
+	for _, check := range s.checkNotifications(cfg) {
+		if strings.Contains(check.Title, "Scheduled report") && check.OK {
+			t.Fatalf("green per-schedule row despite the duplicated id: %#v", check)
+		}
+		if strings.Contains(check.Title, `Scheduled report 2 ("digest") duplicates another schedule's id`) {
+			duplicateRow = true
+		}
+	}
+	if !duplicateRow {
+		t.Fatal("the duplicated id got no per-schedule row")
+	}
+}
+
 // The section-level validity rows mirror the per-feature tick gates: a defect
 // confined to one feature's block pauses only that feature, so the doctor must
 // not announce total notification failure — or stay silent about the feature

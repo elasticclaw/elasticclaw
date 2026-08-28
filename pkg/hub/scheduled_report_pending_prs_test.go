@@ -218,6 +218,66 @@ func TestPendingPRsScheduledReportRenderSkipsPRResolvedOnAnotherTicket(t *testin
 	}
 }
 
+// merged=1 is terminal, but state='closed' is reversible on GitHub: a PR
+// closed unmerged under run A and reopened under a retry run B (whose open row
+// is newer) must reappear in the digest — A's latched close must not veto the
+// ticket forever.
+func TestPendingPRsScheduledReportReopenedPRReappears(t *testing.T) {
+	s, db := newTaskRunAnalyticsAPITestServer(t)
+	nowAt := time.Now()
+	insertPendingPRReportRun(t, db, "run-a", "ENG-1", "eng", "Reopened ticket", nowAt.Add(-72*time.Hour), 0)
+	insertPendingPRReportRun(t, db, "run-b", "ENG-1", "eng", "Reopened ticket", nowAt.Add(-24*time.Hour), 1)
+	insertPendingPRReportPR(t, db, "run-a", 7, "closed", false, nowAt.Add(-72*time.Hour))
+	insertPendingPRReportPR(t, db, "run-b", 7, "open", false, nowAt.Add(-24*time.Hour))
+
+	message, ok, err := buildPendingPRsScheduledReport(context.Background(), s)
+	if err != nil || !ok {
+		t.Fatalf("build report = %v, %v, want the reopened ticket reported", ok, err)
+	}
+	if !strings.Contains(message.Body, "#7 ") {
+		t.Fatalf("body = %q, want the reopened #7 rendered", message.Body)
+	}
+}
+
+// The inverse preserves the zombie-row resolution: an open row OLDER than the
+// row recording the close is a stranded snapshot, not a reopen, and stays
+// suppressed even when the close is unmerged.
+func TestPendingPRsScheduledReportOlderOpenRowStaysSuppressed(t *testing.T) {
+	s, db := newTaskRunAnalyticsAPITestServer(t)
+	nowAt := time.Now()
+	insertPendingPRReportRun(t, db, "run-a", "ENG-1", "eng", "Closed ticket", nowAt.Add(-72*time.Hour), 1)
+	insertPendingPRReportRun(t, db, "run-b", "ENG-1", "eng", "Closed ticket", nowAt.Add(-24*time.Hour), 0)
+	insertPendingPRReportPR(t, db, "run-a", 7, "open", false, nowAt.Add(-72*time.Hour))
+	insertPendingPRReportPR(t, db, "run-b", 7, "closed", false, nowAt.Add(-24*time.Hour))
+
+	message, ok, err := buildPendingPRsScheduledReport(context.Background(), s)
+	if err != nil || ok || message != nil {
+		t.Fatalf("build report = %#v, %v, %v, want nil, false, nil — the stranded open row predates the close", message, ok, err)
+	}
+}
+
+// The render filter applies the same recency rule tenant-wide: a reopened PR
+// whose pre-reopen close was recorded by ANOTHER ticket's run must still
+// render alongside the ticket's other open PRs.
+func TestPendingPRsScheduledReportRenderKeepsPRReopenedAfterCloseElsewhere(t *testing.T) {
+	s, db := newTaskRunAnalyticsAPITestServer(t)
+	nowAt := time.Now()
+	insertPendingPRReportRun(t, db, "run-a", "ENG-1", "eng", "Reopened ticket", nowAt.Add(-24*time.Hour), 2)
+	insertPendingPRReportPR(t, db, "run-a", 7, "open", false, nowAt.Add(-24*time.Hour))
+	insertPendingPRReportPR(t, db, "run-a", 8, "open", false, nowAt.Add(-24*time.Hour))
+	// A run of a DIFFERENT ticket recorded #7 closed unmerged BEFORE the reopen.
+	insertPendingPRReportRun(t, db, "run-other", "ENG-2", "eng", "Other ticket", nowAt.Add(-72*time.Hour), 0)
+	insertPendingPRReportPR(t, db, "run-other", 7, "closed", false, nowAt.Add(-72*time.Hour))
+
+	message, ok, err := buildPendingPRsScheduledReport(context.Background(), s)
+	if err != nil || !ok {
+		t.Fatalf("build report = %v, %v, want report", ok, err)
+	}
+	if !strings.Contains(message.Body, "#7 ") || !strings.Contains(message.Body, "#8 ") {
+		t.Fatalf("body = %q, want both the reopened #7 and #8 rendered", message.Body)
+	}
+}
+
 func insertPendingPRReportExcludedRun(t *testing.T, db *sql.DB, runID, issueID string, requiresPR, analyticsEnabled *bool, startedAt time.Time) {
 	t.Helper()
 	insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{

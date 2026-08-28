@@ -1342,15 +1342,38 @@ func (s *Server) checkNotifications(cfg *types.HubConfig) []DoctorCheck {
 		}
 	}
 
-	// Scheduled reports. Only enabled schedules are checked: a disabled one
-	// delivers nothing, and an operator who pauses a schedule before deleting
-	// the notifier (or before upgrading to a build that carries the report)
-	// must not be nagged about a slot that never fires.
+	// Scheduled reports. A disabled schedule delivers nothing, so its report
+	// and destination checks are skipped: an operator who pauses a schedule
+	// before deleting the notifier (or before upgrading to a build that
+	// carries the report) must not be nagged about a slot that never fires.
+	// But the tick's whole-block gate (ValidateScheduledNotificationsConfig)
+	// judges EVERY entry regardless of Enabled, plus the cross-entry
+	// duplicate-id rule ValidateScheduledNotification excludes — so entry
+	// validity and id uniqueness are checked on disabled entries too (the very
+	// entry pausing every schedule must get its own critical row), and no
+	// entry may show a green row while the block is rejected and the tick
+	// delivers nothing.
+	scheduledBlockErr := types.ValidateScheduledNotificationsConfig(nCfg)
+	seenScheduledIDs := make(map[string]int, len(nCfg.Scheduled))
 	for i, scheduled := range nCfg.Scheduled {
+		label := fmt.Sprintf("Scheduled report %d (%q)", i+1, scheduled.ID)
+		duplicateOf, duplicate := seenScheduledIDs[scheduled.ID]
+		if !duplicate {
+			seenScheduledIDs[scheduled.ID] = i + 1
+		}
 		if scheduled.Enabled != nil && !*scheduled.Enabled {
+			if err := types.ValidateScheduledNotification(nCfg, i); err != nil {
+				checks = append(checks, DoctorCheck{
+					Category: "notifications", Severity: "critical", OK: false,
+					Title:       label + " is invalid",
+					Description: "The scheduled notifier pauses every schedule while any entry fails validation, even a disabled one; fix or remove this entry.",
+					Error:       err.Error(),
+				})
+			} else if duplicate {
+				checks = append(checks, scheduledDuplicateIDCheck(label, duplicateOf))
+			}
 			continue
 		}
-		label := fmt.Sprintf("Scheduled report %d (%q)", i+1, scheduled.ID)
 		if !ScheduledReportSupported(scheduled.Report) {
 			checks = append(checks, DoctorCheck{
 				Category: "notifications", Severity: "critical", OK: false,
@@ -1413,6 +1436,21 @@ func (s *Server) checkNotifications(cfg *types.HubConfig) []DoctorCheck {
 			})
 			continue
 		}
+		if duplicate {
+			checks = append(checks, scheduledDuplicateIDCheck(label, duplicateOf))
+			continue
+		}
+		if scheduledBlockErr != nil {
+			// This entry is healthy, but the tick's gate rejects the whole
+			// block: a green "is configured" row would contradict the
+			// section-level critical row while nothing is delivered.
+			checks = append(checks, DoctorCheck{
+				Category: "notifications", Severity: "warning", OK: false,
+				Title:       label + " is paused while the scheduled block is invalid",
+				Description: "This entry is configured correctly, but the scheduled notifier pauses every schedule until the invalid entry flagged above is fixed.",
+			})
+			continue
+		}
 		checks = append(checks, DoctorCheck{
 			Category: "notifications", Severity: "info", OK: true,
 			Title: label + " is configured",
@@ -1421,6 +1459,18 @@ func (s *Server) checkNotifications(cfg *types.HubConfig) []DoctorCheck {
 		})
 	}
 	return checks
+}
+
+// scheduledDuplicateIDCheck is the per-entry row for a schedule reusing an
+// earlier entry's id — the one rule ValidateScheduledNotification excludes
+// (it needs the whole list), yet one the tick's whole-block gate enforces.
+func scheduledDuplicateIDCheck(label string, duplicateOf int) DoctorCheck {
+	return DoctorCheck{
+		Category: "notifications", Severity: "critical", OK: false,
+		Title: label + " duplicates another schedule's id",
+		Description: fmt.Sprintf("Schedule ids key delivery state, and the scheduled notifier pauses every schedule while two entries share one (here with scheduled report %d). Give this entry a unique id.",
+			duplicateOf),
+	}
 }
 
 // scheduledSlotDescription renders a schedule's slot for doctor output.
