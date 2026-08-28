@@ -54,7 +54,7 @@ Leave `NEXT_PUBLIC_HUB_URL` unset and the app shows a setup screen on first load
 
 ## Releases
 
-Docker images are published to `ghcr.io/elasticclaw/elasticclaw-web` on every semver tag. Stable releases also get a `latest` tag. Pre-release tags (e.g. `v0.1.0-beta.1`) are marked as pre-release and don't move `latest`.
+Docker images are published to `ghcr.io/elasticclaw/elasticclaw-web` on every CalVer tag (`YYYY.M.D`). Stable releases also get a `latest` tag. Prerelease tags (e.g. `2026.7.7-rc1`) are marked as pre-release and don't move `latest`.
 
 ## Stack
 
