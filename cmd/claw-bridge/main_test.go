@@ -3488,3 +3488,83 @@ func TestSubagentHeartbeatFields(t *testing.T) {
 		t.Fatal("successful poll did not re-arm the failure log")
 	}
 }
+
+// A lifecycle error that is not a lock conflict skips the mismatch early
+// return, so it reaches abortSession while a concurrent readLoop rotation may
+// already have replaced the current key. The abort must still target the key
+// the turn actually ran on: aborting the new session leaves the orphaned turn
+// running and writing the old session file, which is the condition that
+// produces the next lock conflict.
+func TestGatewaySessionAbortsTurnKeyAfterConcurrentRotation(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	const lifecycleErr = "error: provider rejected the request schema or tool payload"
+	var gs *gatewaySession
+	oldHook := sessionMismatchCheckHook
+	t.Cleanup(func() { sessionMismatchCheckHook = oldHook })
+	sessionMismatchCheckHook = func() {
+		gs.sessionMu.Lock()
+		gs.sessionKey = "session-2"
+		gs.sessionMu.Unlock()
+	}
+	abortKey := make(chan string, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		defer conn.CloseNow()
+		var send gwFrame
+		if err := wsjson.Read(r.Context(), conn, &send); err != nil || send.Method != "sessions.send" {
+			t.Errorf("read sessions.send: method=%q err=%v", send.Method, err)
+			return
+		}
+		if err := wsjson.Write(r.Context(), conn, gwFrame{Type: "res", ID: send.ID, OK: true}); err != nil {
+			t.Error(err)
+			return
+		}
+		if err := wsjson.Write(r.Context(), conn, gwFrame{Type: "event", Event: "agent", Payload: mustJSON(map[string]interface{}{"stream": "lifecycle", "sessionKey": "session-1", "data": map[string]string{"phase": "error", "error": lifecycleErr}})}); err != nil {
+			t.Error(err)
+			return
+		}
+		var abort gwFrame
+		if err := wsjson.Read(r.Context(), conn, &abort); err != nil || abort.Method != "sessions.abort" {
+			t.Errorf("read sessions.abort: method=%q err=%v", abort.Method, err)
+			return
+		}
+		var params struct {
+			Key string `json:"key"`
+		}
+		_ = json.Unmarshal(abort.Params, &params)
+		abortKey <- params.Key
+		if err := wsjson.Write(r.Context(), conn, gwFrame{Type: "res", ID: abort.ID, OK: true}); err != nil {
+			t.Error(err)
+			return
+		}
+		// Answer the rotation's sessions.create so SendMessage can finish.
+		var create gwFrame
+		if err := wsjson.Read(r.Context(), conn, &create); err == nil && create.Method == "sessions.create" {
+			_ = wsjson.Write(r.Context(), conn, gwFrame{Type: "res", ID: create.ID, OK: true, Payload: mustJSON(map[string]string{"key": "session-3"})})
+		}
+		<-r.Context().Done()
+	}))
+	defer srv.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(srv.URL, "http"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.CloseNow()
+	gs = &gatewaySession{sessionKey: "session-1", conn: conn, pending: make(map[string]chan gwFrame)}
+	go gs.readLoop(ctx)
+	go func() { _, _ = gs.SendMessage(ctx, "continue the task", nil, nil) }()
+	select {
+	case got := <-abortKey:
+		if got != "session-1" {
+			t.Fatalf("sessions.abort key = %q, want session-1 (the turn's key, not the rotated one)", got)
+		}
+	case <-time.After(4 * time.Second):
+		t.Fatal("no sessions.abort observed")
+	}
+}
