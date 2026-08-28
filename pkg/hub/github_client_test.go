@@ -131,6 +131,28 @@ func TestGitHubRetryAfterBlocksSubsequentCalls(t *testing.T) {
 	}
 }
 
+func TestGitHubWriteRateLimitBlocksTierTwoHelpers(t *testing.T) {
+	resetGitHubClientForTest(t)
+	var calls int64
+	gh := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt64(&calls, 1)
+		w.Header().Set("Retry-After", "60")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"message":"rate limit"}`))
+	}))
+	defer gh.Close()
+
+	if _, err := githubAPIPostWithBase(gh.URL, "repos/o/r/issues/1", "tok", http.MethodPatch, map[string]string{"title": "x"}); err == nil {
+		t.Fatal("expected write rate-limit error")
+	}
+	if err := commentGitHubIssueWithBase(gh.URL, "tok", "o/r", 1, "later"); err == nil {
+		t.Fatal("expected blocked tier-two helper error")
+	}
+	if got := atomic.LoadInt64(&calls); got != 1 {
+		t.Fatalf("requests=%d, want 1 after shared block", got)
+	}
+}
+
 func TestGitHubRateLimitBlockIsClamped(t *testing.T) {
 	resetGitHubClientForTest(t)
 
@@ -268,7 +290,6 @@ func TestPollAllPRsStopsCallingGitHubWhileRateLimited(t *testing.T) {
 	}
 }
 
-
 func TestInstallationTokensAreCachedAcrossCalls(t *testing.T) {
 	var mints int64
 	oldTransport := http.DefaultTransport
@@ -289,6 +310,47 @@ func TestInstallationTokensAreCachedAcrossCalls(t *testing.T) {
 	if got := atomic.LoadInt64(&mints); got != 2 {
 		t.Fatalf("installation tokens minted=%d, want 2 (one per distinct scope)", got)
 	}
+}
+
+func TestInstallationTokenFailuresAreNegativelyCached(t *testing.T) {
+	resetGitHubClientForTest(t)
+	var mints int64
+	oldTransport := http.DefaultTransport
+	http.DefaultTransport = githubAppAnyTokenTransport{base: oldTransport, mints: &mints}
+	t.Cleanup(func() { http.DefaultTransport = oldTransport })
+
+	// Return a rate limit for the mint endpoint while retaining the normal app
+	// installation discovery response supplied by the test transport.
+	http.DefaultTransport = githubAppRateLimitedTokenTransport{base: http.DefaultTransport, mints: &mints}
+	s, _ := NewTestServerWithConfig(t, &types.HubConfig{GitHubApps: []*types.GitHubAppConfig{{AppID: 1, PrivateKeyPEM: testGitHubAppPEM(t)}}}, "", "", "")
+	if got := s.resolveGitHubTokenForRepo("owner/repo"); got != "" {
+		t.Fatalf("token = %q, want empty after mint failure", got)
+	}
+	firstAttempts := atomic.LoadInt64(&mints)
+	if firstAttempts == 0 {
+		t.Fatal("expected at least one mint attempt")
+	}
+	if got := s.resolveGitHubTokenForRepo("owner/repo"); got != "" {
+		t.Fatalf("token = %q, want cached empty failure", got)
+	}
+	if got := atomic.LoadInt64(&mints); got != firstAttempts {
+		t.Fatalf("mint attempts=%d, want %d while negative cache is live", got, firstAttempts)
+	}
+}
+
+type githubAppRateLimitedTokenTransport struct {
+	base  http.RoundTripper
+	mints *int64
+}
+
+func (t githubAppRateLimitedTokenTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	if r.URL.Host == "api.github.com" && r.Method == http.MethodPost && r.URL.Path == "/app/installations/1/access_tokens" {
+		atomic.AddInt64(t.mints, 1)
+		resp := githubAppTokenResponse(http.StatusTooManyRequests, `{"message":"rate limit"}`)
+		resp.Header.Set("Retry-After", "60")
+		return resp, nil
+	}
+	return t.base.RoundTrip(r)
 }
 
 // Factories often configure GitHub Apps only on the workspace (no hub-global

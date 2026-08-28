@@ -202,11 +202,11 @@ func TestConcurrentPrepareClawRetryHasSingleWinner(t *testing.T) {
 
 func TestResetClawForRetryRaceGuard(t *testing.T) {
 	s, _, _ := newClawRetryTestServer(t, "error")
-	reset, err := s.resetClawForRetry("tenant", "retry-claw", "", "retrying")
+	reset, err := s.resetClawForRetry("tenant", "retry-claw", "", "retrying", "")
 	if err != nil || !reset {
 		t.Fatalf("first reset: reset=%v err=%v", reset, err)
 	}
-	reset, err = s.resetClawForRetry("tenant", "retry-claw", "", "retrying")
+	reset, err = s.resetClawForRetry("tenant", "retry-claw", "", "retrying", "")
 	if err != nil || reset {
 		t.Fatalf("second reset: reset=%v err=%v, want no-op", reset, err)
 	}
@@ -243,8 +243,8 @@ func TestReplaceClawInstanceFailsDanglingAttemptWhenClawChangedState(t *testing.
 func TestRetryCheckpointSkipsCheckpointUsedByPreviousAttempt(t *testing.T) {
 	s, db, runID := newClawRetryTestServer(t, "connected")
 	if _, err := db.Exec(`
-		INSERT INTO claw_checkpoints(id,tenant_id,claw_id,status,manifest_path,created_at)
-		VALUES('checkpoint-x','tenant','retry-claw','ready','manifest.json',?)`, now()); err != nil {
+		INSERT INTO claw_checkpoints(id,tenant_id,claw_id,status,manifest_path,root_tree_sha256,created_at)
+		VALUES('checkpoint-x','tenant','retry-claw','ready','manifest.json','root-x',?)`, now()); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.Exec(`UPDATE task_run_attempts SET restored_checkpoint_id='checkpoint-x' WHERE run_id=? AND attempt_number=1`, runID); err != nil {
@@ -263,8 +263,8 @@ func TestRetryCheckpointSkipsBootstrapCheckpointAfterProgress(t *testing.T) {
 	insertBootstrapCheckpoint := func(t *testing.T, db *sql.DB) {
 		t.Helper()
 		if _, err := db.Exec(`
-			INSERT INTO claw_checkpoints(id,tenant_id,claw_id,status,reason,manifest_path,created_at)
-			VALUES('checkpoint-bootstrap','tenant','retry-claw','ready','bootstrap','manifest.json',?)`, now()); err != nil {
+			INSERT INTO claw_checkpoints(id,tenant_id,claw_id,status,reason,manifest_path,root_tree_sha256,created_at)
+			VALUES('checkpoint-bootstrap','tenant','retry-claw','ready','bootstrap','manifest.json','root-bootstrap',?)`, now()); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -311,8 +311,8 @@ func TestRetryCheckpointSkipsBootstrapCheckpointAfterProgress(t *testing.T) {
 		// A periodic checkpoint from an earlier attempt sorts below the
 		// successor's bootstrap checkpoint but holds real work — it must win.
 		if _, err := db.Exec(`
-			INSERT INTO claw_checkpoints(id,tenant_id,claw_id,status,reason,manifest_path,created_at)
-			VALUES('checkpoint-periodic','tenant','retry-claw','ready','periodic','manifest.json',?)`, now().Add(-time.Hour)); err != nil {
+			INSERT INTO claw_checkpoints(id,tenant_id,claw_id,status,reason,manifest_path,root_tree_sha256,created_at)
+			VALUES('checkpoint-periodic','tenant','retry-claw','ready','periodic','manifest.json','root-periodic',?)`, now().Add(-time.Hour)); err != nil {
 			t.Fatal(err)
 		}
 		checkpointID, err := s.retryCheckpointID("tenant", "retry-claw", 2)
@@ -328,8 +328,8 @@ func TestRetryCheckpointSkipsBootstrapCheckpointAfterProgress(t *testing.T) {
 		s, db, runID := newClawRetryTestServer(t, "connected")
 		insertBootstrapCheckpoint(t, db)
 		if _, err := db.Exec(`
-			INSERT INTO claw_checkpoints(id,tenant_id,claw_id,status,reason,manifest_path,created_at)
-			VALUES('checkpoint-periodic','tenant','retry-claw','ready','periodic','manifest.json',?)`, now().Add(-time.Hour)); err != nil {
+			INSERT INTO claw_checkpoints(id,tenant_id,claw_id,status,reason,manifest_path,root_tree_sha256,created_at)
+			VALUES('checkpoint-periodic','tenant','retry-claw','ready','periodic','manifest.json','root-periodic',?)`, now().Add(-time.Hour)); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := db.Exec(`UPDATE task_run_attempts SET restored_checkpoint_id='checkpoint-periodic' WHERE run_id=? AND attempt_number=1`, runID); err != nil {
@@ -365,19 +365,96 @@ func TestRetryCheckpointSkipsBootstrapCheckpointAfterProgress(t *testing.T) {
 	})
 }
 
+func TestRetryCheckpointFallsBackPastBlockedNewest(t *testing.T) {
+	s, db, runID := newClawRetryTestServer(t, "connected")
+	createdAt := now()
+	for _, checkpoint := range []struct {
+		id        string
+		createdAt time.Time
+	}{
+		{"checkpoint-newest", createdAt},
+		{"checkpoint-mid", createdAt.Add(-time.Hour)},
+		{"checkpoint-old", createdAt.Add(-2 * time.Hour)},
+	} {
+		if _, err := db.Exec(`
+			INSERT INTO claw_checkpoints(id,tenant_id,claw_id,status,manifest_path,root_tree_sha256,created_at)
+			VALUES(?,?,?,'ready','manifest.json',?,?)`, checkpoint.id, "tenant", "retry-claw", "root-"+checkpoint.id, checkpoint.createdAt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := db.Exec(`UPDATE task_run_attempts SET restored_checkpoint_id='checkpoint-newest' WHERE run_id=? AND attempt_number=1`, runID); err != nil {
+		t.Fatal(err)
+	}
+
+	checkpointID, err := s.retryCheckpointID("tenant", "retry-claw", 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if checkpointID != "checkpoint-mid" {
+		t.Fatalf("checkpoint=%q, want checkpoint-mid", checkpointID)
+	}
+}
+
+func TestRetryCheckpointOnlyMetadataOnlyCheckpointsYieldsScratch(t *testing.T) {
+	s, db, _ := newClawRetryTestServer(t, "connected")
+	for _, checkpoint := range []struct {
+		id        string
+		createdAt time.Time
+	}{
+		{"checkpoint-newest", now()},
+		{"checkpoint-old", now().Add(-time.Hour)},
+	} {
+		if _, err := db.Exec(`
+			INSERT INTO claw_checkpoints(id,tenant_id,claw_id,status,manifest_path,root_tree_sha256,created_at)
+			VALUES(?,?,?,'ready','manifest.json','',?)`, checkpoint.id, "tenant", "retry-claw", checkpoint.createdAt); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	checkpointID, err := s.retryCheckpointID("tenant", "retry-claw", 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if checkpointID != "" {
+		t.Fatalf("checkpoint=%q, want clean provision", checkpointID)
+	}
+}
+
+func TestRetryCheckpointSkipsMetadataOnlyCheckpointForOlderRealCheckpoint(t *testing.T) {
+	s, db, _ := newClawRetryTestServer(t, "connected")
+	if _, err := db.Exec(`
+		INSERT INTO claw_checkpoints(id,tenant_id,claw_id,status,manifest_path,root_tree_sha256,created_at)
+		VALUES('checkpoint-metadata','tenant','retry-claw','ready','manifest.json','',?)`, now()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`
+		INSERT INTO claw_checkpoints(id,tenant_id,claw_id,status,manifest_path,root_tree_sha256,created_at)
+		VALUES('checkpoint-real','tenant','retry-claw','ready','manifest.json','root-real',?)`, now().Add(-time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+
+	checkpointID, err := s.retryCheckpointID("tenant", "retry-claw", 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if checkpointID != "checkpoint-real" {
+		t.Fatalf("checkpoint=%q, want checkpoint-real", checkpointID)
+	}
+}
+
 func TestRetryCheckpointChoicePrecedesTerminationCheckpoint(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	s, db, runID := newClawRetryTestServer(t, "error")
 	if _, err := db.Exec(`
-		INSERT INTO claw_checkpoints(id,tenant_id,claw_id,status,manifest_path,created_at)
-		VALUES('checkpoint-x','tenant','retry-claw','ready','manifest.json',?)`, now().Add(-time.Minute)); err != nil {
+		INSERT INTO claw_checkpoints(id,tenant_id,claw_id,status,manifest_path,root_tree_sha256,created_at)
+		VALUES('checkpoint-x','tenant','retry-claw','ready','manifest.json','root-x',?)`, now().Add(-time.Minute)); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.Exec(`UPDATE task_run_attempts SET attempt_number=2, restored_checkpoint_id='checkpoint-x' WHERE run_id=?`, runID); err != nil {
 		t.Fatal(err)
 	}
 
-	checkpointID, err := s.retryCheckpointBeforeTermination("tenant", "retry-claw", 3)
+	checkpointID, _, err := s.retryCheckpointBeforeTermination("tenant", "retry-claw", 3)
 	if err != nil {
 		t.Fatal(err)
 	}

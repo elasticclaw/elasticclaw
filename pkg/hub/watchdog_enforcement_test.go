@@ -112,6 +112,64 @@ func TestWatchdogUnhealthyHeartbeatsScheduleClawRetry(t *testing.T) {
 	}, "replacement attempt scheduled for unhealthy claw")
 }
 
+func TestWatchdogUnhealthyHeartbeatsCooldownPreventsOverlappingRetries(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{ClawToken: "claw-token"}, "", "", "")
+	const clawID = "watchdog-unhealthy-cooldown"
+	conn := watchdogClaw(t, s, clawID)
+	if _, err := db.Exec(`UPDATE claws SET status='error', bootstrap_ok=1 WHERE id=?`, clawID); err != nil {
+		t.Fatal(err)
+	}
+
+	writeUnhealthy := func() {
+		t.Helper()
+		if err := wsjson.Write(context.Background(), conn, types.WSMessage{Type: "heartbeat", Payload: map[string]any{"gateway_healthy": false}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	escalatedAt := func() time.Time {
+		s.mu.RLock()
+		defer s.mu.RUnlock()
+		return s.gatewayEscalatedAt[clawID]
+	}
+
+	// The first crossing must dispatch regardless of an empty cooldown record.
+	for i := 0; i < defaultGatewayUnhealthyMax; i++ {
+		writeUnhealthy()
+	}
+	eventuallyWatchdog(t, func() bool {
+		return s.gatewayUnhealthyCount(clawID) == defaultGatewayUnhealthyMax && !escalatedAt().IsZero()
+	}, "first unhealthy escalation dispatch")
+	firstEscalatedAt := escalatedAt()
+
+	// Match the interval after retry preparation: its successor is pending while
+	// the original claw remains unhealthy, but is no longer eligible to stop.
+	for i := 0; i < defaultGatewayUnhealthyMax; i++ {
+		writeUnhealthy()
+	}
+	eventuallyWatchdog(t, func() bool {
+		return s.gatewayUnhealthyCount(clawID) == 2*defaultGatewayUnhealthyMax
+	}, "second unhealthy threshold")
+	if got := escalatedAt(); !got.Equal(firstEscalatedAt) {
+		t.Fatalf("second threshold dispatched during cooldown: first=%v got=%v", firstEscalatedAt, got)
+	}
+
+	// Once the replacement has had time to settle, a continued unhealthy episode
+	// may be dispatched again.
+	cooldown := 2 * time.Duration(defaultGatewayUnhealthyMax) * bridgeHeartbeatInterval
+	if cooldown < 10*time.Minute {
+		cooldown = 10 * time.Minute
+	}
+	s.mu.Lock()
+	s.gatewayEscalatedAt[clawID] = now().Add(-cooldown)
+	s.mu.Unlock()
+	for i := 0; i < defaultGatewayUnhealthyMax; i++ {
+		writeUnhealthy()
+	}
+	eventuallyWatchdog(t, func() bool {
+		return s.gatewayUnhealthyCount(clawID) == 3*defaultGatewayUnhealthyMax && escalatedAt().After(firstEscalatedAt)
+	}, "post-cooldown unhealthy escalation dispatch")
+}
+
 func TestWatchdogHealthyHeartbeatResetsUnhealthyCounter(t *testing.T) {
 	s, _ := NewTestServerWithConfig(t, &types.HubConfig{ClawToken: "claw-token"}, "", "", "")
 	const clawID = "watchdog-heartbeat-reset"
@@ -128,8 +186,15 @@ func TestWatchdogHealthyHeartbeatResetsUnhealthyCounter(t *testing.T) {
 	eventuallyWatchdog(t, func() bool {
 		return s.gatewayUnhealthyCount(clawID) == defaultGatewayUnhealthyMax-1
 	}, "unhealthy heartbeat count")
+	s.mu.Lock()
+	s.gatewayEscalatedAt[clawID] = now()
+	s.mu.Unlock()
 	writeHeartbeat(true)
-	eventuallyWatchdog(t, func() bool { return s.gatewayUnhealthyCount(clawID) == 0 }, "healthy reset")
+	eventuallyWatchdog(t, func() bool {
+		s.mu.RLock()
+		defer s.mu.RUnlock()
+		return s.gatewayUnhealthyCounts[clawID] == 0 && s.gatewayEscalatedAt[clawID].IsZero()
+	}, "healthy reset")
 	for i := 0; i < defaultGatewayUnhealthyMax-1; i++ {
 		writeHeartbeat(false)
 	}

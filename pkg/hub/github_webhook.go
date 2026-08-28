@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -1469,21 +1470,31 @@ func (s *Server) mergeSinglePRForClaw(clawID, repo string, prNumber int) (failur
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := defaultGitHubClient.do(req)
 	if err != nil {
 		log.Printf("[pipeline] merge_pr: request failed for %s#%d: %v", repo, prNumber, err)
+		var apiErr *githubAPIError
+		if errors.As(err, &apiErr) {
+			if apiErr.RateLimited {
+				s.injectExternalHubMessageByID(clawID, fmt.Sprintf("[hub] merge_pr: GitHub rate limit; retry later (PR #%d).", prNumber))
+				return fmt.Sprintf("PR #%d failed (GitHub rate limit)", prNumber)
+			}
+			s.injectExternalHubMessageByID(clawID, fmt.Sprintf("[hub] merge_pr: failed to merge PR #%d (HTTP %d). Check CI status and review requirements.", prNumber, apiErr.StatusCode))
+			return fmt.Sprintf("PR #%d failed (HTTP %d)", prNumber, apiErr.StatusCode)
+		}
 		s.injectExternalHubMessageByID(clawID, fmt.Sprintf("[hub] merge_pr: failed to merge PR #%d: %v", prNumber, err))
 		return fmt.Sprintf("PR #%d failed (%v)", prNumber, err)
 	}
-	defer resp.Body.Close()
-	respBody, _ := io.ReadAll(resp.Body)
 
 	if resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusCreated {
 		log.Printf("[pipeline] merge_pr: merged %s#%d successfully", repo, prNumber)
 		s.injectHubMessageByID(clawID, fmt.Sprintf("[hub] PR #%d merged successfully.", prNumber))
 		return ""
 	}
-	log.Printf("[pipeline] merge_pr: failed to merge %s#%d: HTTP %d: %s", repo, prNumber, resp.StatusCode, string(respBody))
+	// do() only errors for >= 300, so this is an unexpected 2xx (202/204/...):
+	// GitHub did not confirm the merge, and counting it as merged would silently
+	// drop the PR from tracking.
+	log.Printf("[pipeline] merge_pr: unexpected status %d for %s#%d", resp.StatusCode, repo, prNumber)
 	s.injectExternalHubMessageByID(clawID, fmt.Sprintf("[hub] merge_pr: failed to merge PR #%d (HTTP %d). Check CI status and review requirements.", prNumber, resp.StatusCode))
 	return fmt.Sprintf("PR #%d failed (HTTP %d)", prNumber, resp.StatusCode)
 }

@@ -1143,18 +1143,11 @@ func fetchGitHubIssueCommentsPage(ctx context.Context, baseURL, path, token stri
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
-	resp, err := issueTrackerHTTPClient.Do(req)
+	resp, err := defaultGitHubClient.do(req)
 	if err != nil {
 		return nil, "", err
 	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, "", fmt.Errorf("github comments response read error: %w", err)
-	}
-	if resp.StatusCode >= 400 {
-		return nil, "", fmt.Errorf("github comments API returned status %d: %s", resp.StatusCode, string(body))
-	}
+	body := resp.Body
 	var comments []githubIssueComment
 	if err := json.Unmarshal(body, &comments); err != nil {
 		return nil, "", fmt.Errorf("github comments parse error: %w", err)
@@ -1215,15 +1208,11 @@ func githubAPIPostWithBase(baseURL, path, token, method string, body interface{}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	resp, err := issueTrackerHTTPClient.Do(req)
+	resp, err := defaultGitHubClient.do(req)
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
-	respBody, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("github API %s %s: %d %s", method, path, resp.StatusCode, string(respBody))
-	}
+	respBody := resp.Body
 	var result map[string]interface{}
 	if err := json.Unmarshal(respBody, &result); err != nil {
 		return nil, fmt.Errorf("github API parse error: %w", err)

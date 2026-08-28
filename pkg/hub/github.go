@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -67,7 +68,7 @@ func NewGitHubTokenProvider(cfg *types.GitHubAppConfig) (*GitHubTokenProvider, e
 		cfg:        cfg,
 		privateKey: key,
 		apiBaseURL: "https://api.github.com",
-		httpClient: http.DefaultClient,
+		httpClient: &http.Client{Timeout: 30 * time.Second},
 	}, nil
 }
 
@@ -158,6 +159,7 @@ func (p *GitHubTokenProvider) ListInstallations(ctx context.Context) ([]githubIn
 		return nil, fmt.Errorf("github list installations: %w", err)
 	}
 	defer resp.Body.Close()
+	defaultGitHubClient.observe(resp.StatusCode, resp.Header, nil)
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("github list installations: status %d", resp.StatusCode)
@@ -195,6 +197,7 @@ func (p *GitHubTokenProvider) ListInstallationRepositories(ctx context.Context, 
 		if err != nil {
 			return nil, fmt.Errorf("github list installation repositories: %w", err)
 		}
+		defaultGitHubClient.observe(resp.StatusCode, resp.Header, nil)
 		if resp.StatusCode != http.StatusOK {
 			var errBody map[string]interface{}
 			_ = json.NewDecoder(resp.Body).Decode(&errBody)
@@ -328,11 +331,12 @@ func (p *GitHubTokenProvider) InstallationToken(ctx context.Context, installatio
 		return "", time.Time{}, fmt.Errorf("github api: %w", err)
 	}
 	defer resp.Body.Close()
+	defaultGitHubClient.observe(resp.StatusCode, resp.Header, nil)
 
 	if resp.StatusCode != http.StatusCreated {
-		var errBody map[string]interface{}
-		json.NewDecoder(resp.Body).Decode(&errBody)
-		return "", time.Time{}, fmt.Errorf("github api %d: %v", resp.StatusCode, errBody["message"])
+		body, _ := io.ReadAll(resp.Body)
+		defaultGitHubClient.observe(resp.StatusCode, resp.Header, body)
+		return "", time.Time{}, &githubAPIError{StatusCode: resp.StatusCode, Body: string(body), RateLimited: githubIsRateLimited(resp.StatusCode, resp.Header, body)}
 	}
 
 	var result githubTokenResponse
@@ -364,6 +368,7 @@ func (p *GitHubTokenProvider) CheckAppPermissions(ctx context.Context) (map[stri
 		return nil, fmt.Errorf("github get app: %w", err)
 	}
 	defer resp.Body.Close()
+	defaultGitHubClient.observe(resp.StatusCode, resp.Header, nil)
 
 	if resp.StatusCode != http.StatusOK {
 		var errBody map[string]interface{}
@@ -416,6 +421,7 @@ func (p *GitHubTokenProvider) installationPermissions(ctx context.Context, insta
 		return nil, fmt.Errorf("github get installation: %w", err)
 	}
 	defer resp.Body.Close()
+	defaultGitHubClient.observe(resp.StatusCode, resp.Header, nil)
 
 	if resp.StatusCode != http.StatusOK {
 		var errBody map[string]interface{}

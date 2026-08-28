@@ -211,6 +211,88 @@ func insertWatcherTestPR(t *testing.T, db *sql.DB, clawID, prID string) {
 	}
 }
 
+func TestPRCommentWatermarkOnlyAdvances(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{}, "", "", "")
+	insertWatcherTestPR(t, db, "claw-watermark", "pr-watermark")
+
+	pr := clawPR{id: "pr-watermark", clawID: "claw-watermark", prNumber: 1, lastCommentID: 10}
+	s.updatePRCommentWatermark(pr, []interface{}{map[string]interface{}{
+		"id":         float64(20),
+		"created_at": "2026-01-01T00:00:00Z",
+	}})
+	var got int64
+	if err := db.QueryRow(`SELECT last_comment_id FROM claw_prs WHERE id=?`, pr.id).Scan(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got != 20 {
+		t.Fatalf("last_comment_id = %d, want 20", got)
+	}
+
+	if _, err := db.Exec(`UPDATE claw_prs SET last_comment_id=30 WHERE id=?`, pr.id); err != nil {
+		t.Fatal(err)
+	}
+	// pr retains a stale in-memory watermark, as can happen with concurrent polls.
+	s.updatePRCommentWatermark(pr, []interface{}{map[string]interface{}{"id": float64(25)}})
+	if err := db.QueryRow(`SELECT last_comment_id FROM claw_prs WHERE id=?`, pr.id).Scan(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got != 30 {
+		t.Fatalf("last_comment_id regressed to %d, want 30", got)
+	}
+}
+
+func TestReviewCommentWatermarkOnlyAdvances(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{}, "", "", "")
+	insertWatcherTestPR(t, db, "claw-review-watermark", "pr-review-watermark")
+
+	pr := clawPR{id: "pr-review-watermark", clawID: "claw-review-watermark", prNumber: 1, lastReviewCommentID: 10}
+	s.updateReviewCommentWatermark(pr, []interface{}{map[string]interface{}{"id": float64(20)}})
+	var got int64
+	if err := db.QueryRow(`SELECT last_review_comment_id FROM claw_prs WHERE id=?`, pr.id).Scan(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got != 20 {
+		t.Fatalf("last_review_comment_id = %d, want 20", got)
+	}
+
+	if _, err := db.Exec(`UPDATE claw_prs SET last_review_comment_id=30 WHERE id=?`, pr.id); err != nil {
+		t.Fatal(err)
+	}
+	s.updateReviewCommentWatermark(pr, []interface{}{map[string]interface{}{"id": float64(25)}})
+	if err := db.QueryRow(`SELECT last_review_comment_id FROM claw_prs WHERE id=?`, pr.id).Scan(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got != 30 {
+		t.Fatalf("last_review_comment_id regressed to %d, want 30", got)
+	}
+}
+
+func TestPRReviewWatermarkOnlyAdvances(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{}, "", "", "")
+	insertWatcherTestPR(t, db, "claw-review-watermark", "pr-review-watermark")
+
+	pr := clawPR{id: "pr-review-watermark", clawID: "claw-review-watermark", prNumber: 1, lastReviewID: 10}
+	s.updatePRReviewWatermark(pr, []interface{}{map[string]interface{}{"id": float64(20)}})
+	var got int64
+	if err := db.QueryRow(`SELECT last_review_id FROM claw_prs WHERE id=?`, pr.id).Scan(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got != 20 {
+		t.Fatalf("last_review_id = %d, want 20", got)
+	}
+
+	if _, err := db.Exec(`UPDATE claw_prs SET last_review_id=30 WHERE id=?`, pr.id); err != nil {
+		t.Fatal(err)
+	}
+	s.updatePRReviewWatermark(pr, []interface{}{map[string]interface{}{"id": float64(25)}})
+	if err := db.QueryRow(`SELECT last_review_id FROM claw_prs WHERE id=?`, pr.id).Scan(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got != 30 {
+		t.Fatalf("last_review_id regressed to %d, want 30", got)
+	}
+}
+
 func TestCheckPRMergedStopsAfterPermanentFailures(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"message":"Not Found"}`, http.StatusNotFound)
@@ -740,3 +822,121 @@ func TestInjectMessageSkipsIdenticalPendingRow(t *testing.T) {
 		t.Fatalf("same text rows=%d err=%v, want 2", pending, err)
 	}
 }
+
+// countingGitHubAppTransport is like githubAppTokenTransport but counts every
+// request reaching api.github.com so tests can assert a blocked gate mints
+// zero tokens.
+type countingGitHubAppTransport struct {
+	base     http.RoundTripper
+	requests *atomic.Int64
+}
+
+func (t countingGitHubAppTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	if r.URL.Host != "api.github.com" {
+		return t.base.RoundTrip(r)
+	}
+	t.requests.Add(1)
+	if r.Method == http.MethodGet && r.URL.Path == "/app/installations" {
+		return githubAppTokenResponse(http.StatusOK, `[{"id":1,"account":{"login":"owner"}}]`), nil
+	}
+	if r.Method == http.MethodPost && r.URL.Path == "/app/installations/1/access_tokens" {
+		return githubAppTokenResponse(http.StatusCreated, `{"token":"repo-token","expires_at":"2030-01-01T00:00:00Z"}`), nil
+	}
+	return githubAppTokenResponse(http.StatusNotFound, `{"message":"not found"}`), nil
+}
+
+// TestResolveGitHubTokenWithReposGatedDuringBlockMintsNothing verifies that
+// resolveGitHubTokenWithRepos refuses to mint (and reaches GitHub zero
+// times) while defaultGitHubClient is already rate-limit blocked.
+func TestResolveGitHubTokenWithReposGatedDuringBlockMintsNothing(t *testing.T) {
+	oldTransport := http.DefaultTransport
+	oldClient := defaultGitHubClient
+	var requests atomic.Int64
+	http.DefaultTransport = countingGitHubAppTransport{base: oldTransport, requests: &requests}
+	defaultGitHubClient = newGitHubClient()
+	t.Cleanup(func() {
+		http.DefaultTransport = oldTransport
+		defaultGitHubClient = oldClient
+	})
+
+	// Arm the shared client's rate-limit gate.
+	defaultGitHubClient.observe(http.StatusForbidden, http.Header{"Retry-After": []string{"60"}}, nil)
+	if _, blocked := defaultGitHubClient.blockedUntilTime(); !blocked {
+		t.Fatal("expected defaultGitHubClient to be blocked after observe(403, Retry-After)")
+	}
+
+	s, _ := NewTestServerWithConfig(t, &types.HubConfig{GitHubApps: []*types.GitHubAppConfig{{AppID: 1, PrivateKeyPEM: testGitHubAppPEM(t)}}}, "", "", "")
+
+	got := s.resolveGitHubTokenForRepo("org/uncached-repo")
+	if got != "" {
+		t.Fatalf("resolveGitHubTokenForRepo = %q, want empty while gate is blocked", got)
+	}
+	if n := requests.Load(); n != 0 {
+		t.Fatalf("GitHub requests during blocked gate = %d, want 0", n)
+	}
+}
+
+// TestPollAllPRsStopsMintingAfterMidPassRateLimit verifies that once one
+// repo's poll trips the shared rate-limit gate, later repos in the same
+// pollAllPRs pass make no further token-mint attempts.
+func TestPollAllPRsStopsMintingAfterMidPassRateLimit(t *testing.T) {
+	oldTransport := http.DefaultTransport
+	oldClient := defaultGitHubClient
+	var mintRequests atomic.Int64
+	rateLimitedOnce := &atomic.Bool{}
+
+	transport := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Host != "api.github.com" {
+			return oldTransport.RoundTrip(r)
+		}
+		if r.URL.Path == "/app/installations" {
+			return githubAppTokenResponse(http.StatusOK, `[{"id":1,"account":{"login":"owner"}}]`), nil
+		}
+		if r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/app/installations/") {
+			mintRequests.Add(1)
+			return githubAppTokenResponse(http.StatusCreated, `{"token":"repo-token","expires_at":"2030-01-01T00:00:00Z"}`), nil
+		}
+		if strings.HasSuffix(r.URL.Path, "/pulls/1") {
+			if r.URL.Path == "/repos/owner/repo-a/pulls/1" && rateLimitedOnce.CompareAndSwap(false, true) {
+				h := http.Header{}
+				h.Set("Retry-After", "60")
+				return &http.Response{StatusCode: http.StatusForbidden, Body: io.NopCloser(strings.NewReader(`{"message":"rate limit exceeded"}`)), Header: h}, nil
+			}
+			return githubAppTokenResponse(http.StatusOK, `{"state":"open"}`), nil
+		}
+		return githubAppTokenResponse(http.StatusOK, `{"state":"open"}`), nil
+	})
+	http.DefaultTransport = transport
+	defaultGitHubClient = newGitHubClient()
+	t.Cleanup(func() {
+		http.DefaultTransport = oldTransport
+		defaultGitHubClient = oldClient
+	})
+
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{GitHubApps: []*types.GitHubAppConfig{{AppID: 1, PrivateKeyPEM: testGitHubAppPEM(t)}}}, "https://api.github.com", "", "")
+
+	if _, err := db.Exec(`INSERT INTO claws(id,tenant_id,name,template,status,created_at) VALUES(?,?,?,?,?,?)`, "claw-aaaa", "test-tenant-id", "claw-aaaa", "elasticclaw", "connected", now()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO claws(id,tenant_id,name,template,status,created_at) VALUES(?,?,?,?,?,?)`, "claw-bbbb", "test-tenant-id", "claw-bbbb", "elasticclaw", "connected", now()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO claw_prs(id,claw_id,repo,pr_number,pr_url,created_at) VALUES(?,?,?,?,?,?)`, "pr-a", "claw-aaaa", "owner/repo-a", 1, "https://github.com/owner/repo-a/pull/1", now()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO claw_prs(id,claw_id,repo,pr_number,pr_url,created_at) VALUES(?,?,?,?,?,?)`, "pr-b", "claw-bbbb", "owner/repo-b", 1, "https://github.com/owner/repo-b/pull/1", now()); err != nil {
+		t.Fatal(err)
+	}
+
+	s.pollAllPRs()
+
+	// repo-a mints once, trips the gate on its pulls/1 call; repo-b must not
+	// mint at all in this same pass.
+	if n := mintRequests.Load(); n != 1 {
+		t.Fatalf("token mint requests in pass = %d, want 1 (repo-b must be gated)", n)
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }

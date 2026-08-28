@@ -821,6 +821,15 @@ func ValidateNotificationsConfig(cfg *NotificationsConfig) error {
 			return fmt.Errorf("notifications.lifecycle: idle_after must be at least 1m, got %q", lc.IdleAfter)
 		}
 	}
+	if lc.StageProgressAfter != "" {
+		d, err := time.ParseDuration(lc.StageProgressAfter)
+		if err != nil {
+			return fmt.Errorf("notifications.lifecycle: invalid stage_progress_after %q: %w", lc.StageProgressAfter, err)
+		}
+		if d < time.Minute {
+			return fmt.Errorf("notifications.lifecycle: stage_progress_after must be at least 1m, got %q", lc.StageProgressAfter)
+		}
+	}
 	if !lc.IsEnabled() {
 		return nil
 	}

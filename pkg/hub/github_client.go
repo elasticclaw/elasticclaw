@@ -66,7 +66,7 @@ type githubClient struct {
 }
 
 func newGitHubClient() *githubClient {
-	return &githubClient{httpClient: http.DefaultClient, etags: map[string]*githubETagEntry{}}
+	return &githubClient{httpClient: &http.Client{Timeout: 30 * time.Second}, etags: map[string]*githubETagEntry{}}
 }
 
 // defaultGitHubClient backs the githubAPI* helpers, so every GitHub consumer in
@@ -94,6 +94,29 @@ func (c *githubClient) get(url, token string) (*githubResponse, error) {
 
 func (c *githubClient) getContext(ctx context.Context, url, token string) (*githubResponse, error) {
 	return c.doGetContext(ctx, url, token, true)
+}
+
+// do sends a GitHub request through the shared rate-limit gate. Callers build
+// the request when they need a non-GET method or custom body.
+func (c *githubClient) do(req *http.Request) (*githubResponse, error) {
+	if until, blocked := c.blockedUntilTime(); blocked {
+		return nil, &githubAPIError{StatusCode: http.StatusForbidden, RateLimited: true,
+			Body: fmt.Sprintf("github rate limit exhausted; not retrying until %s", until.UTC().Format(time.RFC3339))}
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("github API response read error: %w", err)
+	}
+	c.observe(resp.StatusCode, resp.Header, body)
+	if resp.StatusCode >= http.StatusMultipleChoices {
+		return nil, &githubAPIError{StatusCode: resp.StatusCode, Body: string(body), RateLimited: githubIsRateLimited(resp.StatusCode, resp.Header, body)}
+	}
+	return &githubResponse{StatusCode: resp.StatusCode, Body: body, Header: resp.Header}, nil
 }
 
 func (c *githubClient) doGet(url, token string, conditional bool) (*githubResponse, error) {

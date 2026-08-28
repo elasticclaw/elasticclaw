@@ -156,6 +156,9 @@ func TestRebuildTaskRunEventsAgentIdleV1MigratesPopulatedDatabase(t *testing.T) 
 	if !strings.Contains(schema, "'agent_idle'") {
 		t.Fatalf("rebuilt schema lacks agent_idle: %s", schema)
 	}
+	if !strings.Contains(schema, "'stage_stalled'") {
+		t.Fatalf("rebuilt schema lacks stage_stalled: %s", schema)
+	}
 
 	rows, err := db.Query(`SELECT rowid, id, event_type FROM task_run_events ORDER BY rowid`)
 	if err != nil {
@@ -259,7 +262,7 @@ func TestRebuildTaskRunEventsAgentIdleV1AddsCIEventsAfterAgentIdle(t *testing.T)
 	if err := db.QueryRow(`SELECT event_type FROM task_run_events WHERE id='ev-idle'`).Scan(&eventType); err != nil || eventType != "agent_idle" {
 		t.Fatalf("pre-existing agent_idle row = %q, %v; want agent_idle", eventType, err)
 	}
-	for _, eventType := range []string{"ci_succeeded", "ci_failed"} {
+	for _, eventType := range []string{"ci_succeeded", "ci_failed", "stage_stalled"} {
 		if _, err := db.Exec(`INSERT INTO task_run_events(id, tenant_id, run_id, event_key, event_type, event_time, observed_at, created_at) VALUES(?,?,?,?,?,?,?,?)`, "ev-"+eventType, "tenant", "run-1", "key-"+eventType, eventType, 200, 200, 200); err != nil {
 			t.Fatalf("rebuilt schema rejects %s: %v", eventType, err)
 		}
@@ -281,11 +284,11 @@ func TestRebuildTaskRunEventsAgentIdleV1AddsCIEventsAfterAgentIdle(t *testing.T)
 		t.Fatal("second rebuild did not skip the current schema")
 	}
 	var count int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM task_run_events WHERE event_type IN ('agent_idle','ci_succeeded','ci_failed')`).Scan(&count); err != nil {
+	if err := db.QueryRow(`SELECT COUNT(*) FROM task_run_events WHERE event_type IN ('agent_idle','ci_succeeded','ci_failed','stage_stalled')`).Scan(&count); err != nil {
 		t.Fatal(err)
 	}
-	if count != 3 {
-		t.Fatalf("rows after skipped second rebuild = %d, want 3", count)
+	if count != 4 {
+		t.Fatalf("rows after skipped second rebuild = %d, want 4", count)
 	}
 }
 

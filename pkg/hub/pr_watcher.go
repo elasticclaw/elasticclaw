@@ -869,6 +869,9 @@ func (s *Server) pollAllPRs() {
 		s.checkBugbotComments(r.pr, commentsData)
 		s.checkGreptileComments(r.pr, commentsData)
 		log.Printf("[pr-watcher] checking %d comment(s) for claw %s (watermark=%d, forward=%v)", len(commentsData), r.pr.clawID[:8], r.pr.lastCommentID, isPipelineDriven)
+		if !isPipelineDriven && hasNewComments(commentsData, r.pr.lastCommentID) {
+			log.Printf("[pr-watcher] claw=%s pr #%d has new comment(s) above watermark but forward=false (no pipeline context) — not delivering", r.pr.clawID[:8], r.pr.prNumber)
+		}
 		s.checkPRComments(r.pr, commentsData, prCommentOptions{
 			skipBugbot:   true,
 			skipGreptile: true,
@@ -1020,6 +1023,16 @@ func (s *Server) resolveGitHubTokenWithRepos(repoAccess []RepoAccess) string {
 	if cached, ok := s.ghTokenCache[cacheKey]; ok && time.Now().Before(cached.expiresAt) {
 		return cached.token
 	}
+	// If the shared client is already rate-limit blocked, don't mint: a
+	// mid-pass 429 on one repo must stop token mints for the rest of the
+	// pass, not just the repo that hit it.
+	if blockedUntil, blocked := defaultGitHubClient.blockedUntilTime(); blocked {
+		if s.ghTokenCache == nil {
+			s.ghTokenCache = map[string]cachedGitHubToken{}
+		}
+		s.ghTokenCache[cacheKey] = cachedGitHubToken{expiresAt: blockedUntil}
+		return ""
+	}
 	var lastErr error
 	for _, appCfg := range appCfgs {
 		provider, err := NewGitHubTokenProvider(appCfg)
@@ -1045,6 +1058,21 @@ func (s *Server) resolveGitHubTokenWithRepos(repoAccess []RepoAccess) string {
 	}
 	if lastErr != nil {
 		log.Printf("[pr-watcher] CRITICAL: GitHub token resolution failed after trying %d app(s): %v", len(appCfgs), lastErr)
+	}
+	// Only negatively cache rate-limit failures: those are the ones that
+	// recur on every poll of every PR until the window passes, and the
+	// shared client's blockedUntil already tells us when that is. Other
+	// mint failures (outages, bad config) must be retried on the very next
+	// poll — token_miss_count and the re-arm sweep depend on that.
+	if apiErr, ok := lastErr.(*githubAPIError); ok && apiErr.RateLimited {
+		if s.ghTokenCache == nil {
+			s.ghTokenCache = map[string]cachedGitHubToken{}
+		}
+		until := time.Now().Add(time.Minute)
+		if blockedUntil, blocked := defaultGitHubClient.blockedUntilTime(); blocked && blockedUntil.After(until) {
+			until = blockedUntil
+		}
+		s.ghTokenCache[cacheKey] = cachedGitHubToken{expiresAt: until}
 	}
 	return ""
 }
@@ -1463,12 +1491,43 @@ func (s *Server) updatePRCommentWatermark(pr clawPR, commentsData []interface{})
 	}
 	if maxID > pr.lastCommentID {
 		if latestCommentAt != "" {
-			_, _ = s.db.Exec(`UPDATE claw_prs SET last_comment_id=?, last_comment_at=? WHERE id=?`,
-				maxID, latestCommentAt, pr.id)
+			s.updateWatermarkGuarded(`UPDATE claw_prs SET last_comment_id=?, last_comment_at=? WHERE id=? AND last_comment_id < ?`,
+				[]interface{}{maxID, latestCommentAt, pr.id, maxID}, pr.clawID, pr.prNumber)
 		} else {
-			_, _ = s.db.Exec(`UPDATE claw_prs SET last_comment_id=? WHERE id=?`, maxID, pr.id)
+			s.updateWatermarkGuarded(`UPDATE claw_prs SET last_comment_id=? WHERE id=? AND last_comment_id < ?`,
+				[]interface{}{maxID, pr.id, maxID}, pr.clawID, pr.prNumber)
 		}
 	}
+}
+
+// hasNewComments reports whether commentsData has an ID above watermark.
+func hasNewComments(commentsData []interface{}, watermark int64) bool {
+	for _, c := range commentsData {
+		comment, _ := c.(map[string]interface{})
+		idF, _ := comment["id"].(float64)
+		if int64(idF) > watermark {
+			return true
+		}
+	}
+	return false
+}
+
+// updateWatermarkGuarded advances a monotonic watermark, retrying once on a
+// SQLite busy error. Zero rows affected means another writer already advanced
+// the watermark at or past the requested value, which is not an error.
+func (s *Server) updateWatermarkGuarded(query string, args []interface{}, clawID string, prNumber int) error {
+	var err error
+	for attempt := 0; attempt < 2; attempt++ {
+		_, err = s.db.Exec(query, args...)
+		if err == nil || !isSQLiteBusy(err) {
+			break
+		}
+		time.Sleep(time.Duration(attempt+1) * 10 * time.Millisecond)
+	}
+	if err != nil {
+		log.Printf("[pr-watcher] watermark update failed for claw %s pr #%d: %v", clawID[:8], prNumber, err)
+	}
+	return err
 }
 
 // checkGreptileReviewComments polls PR review comments (pulls/{n}/comments) for
@@ -1763,7 +1822,8 @@ func (s *Server) claimPRFeedbackDelivery(clawID, feedbackType string, id int64) 
 func (s *Server) updatePRReviewWatermark(pr clawPR, reviewsData []interface{}) {
 	maxID := maxPRReviewID(reviewsData, pr.lastReviewID)
 	if maxID > pr.lastReviewID {
-		_, _ = s.db.Exec(`UPDATE claw_prs SET last_review_id=? WHERE id=?`, maxID, pr.id)
+		s.updateWatermarkGuarded(`UPDATE claw_prs SET last_review_id=? WHERE id=? AND last_review_id < ?`,
+			[]interface{}{maxID, pr.id, maxID}, pr.clawID, pr.prNumber)
 	}
 }
 
@@ -1792,7 +1852,8 @@ func (s *Server) updateReviewCommentWatermark(pr clawPR, reviewCommentsData []in
 		}
 	}
 	if maxID > pr.lastReviewCommentID {
-		_, _ = s.db.Exec(`UPDATE claw_prs SET last_review_comment_id=? WHERE id=?`, maxID, pr.id)
+		s.updateWatermarkGuarded(`UPDATE claw_prs SET last_review_comment_id=? WHERE id=? AND last_review_comment_id < ?`,
+			[]interface{}{maxID, pr.id, maxID}, pr.clawID, pr.prNumber)
 	}
 }
 

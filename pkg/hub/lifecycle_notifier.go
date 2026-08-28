@@ -183,7 +183,7 @@ func notifierCacheKey(name string, nc types.NotifierConfig, secrets notify.Secre
 // enabledLifecycleEventTypes maps the config toggles onto concrete event
 // types. All categories default to enabled when the toggles block is absent.
 func enabledLifecycleEventTypes(lc *types.LifecycleNotificationsConfig) map[string]bool {
-	agentStarted, prOpened, failures, agentIdle := lifecycleClawKindsEnabled(lc)
+	agentStarted, prOpened, failures, agentIdle, stageStalled := lifecycleClawKindsEnabled(lc)
 	enabled := map[string]bool{}
 	if agentStarted {
 		enabled[taskRunEventAgentStarted] = true
@@ -193,6 +193,9 @@ func enabledLifecycleEventTypes(lc *types.LifecycleNotificationsConfig) map[stri
 	}
 	if agentIdle {
 		enabled[taskRunEventAgentIdle] = true
+	}
+	if stageStalled {
+		enabled[taskRunEventStageStalled] = true
 	}
 	if failures {
 		for t := range lifecycleFailureEventTypes {
@@ -1536,6 +1539,7 @@ var lifecycleEventStyles = map[string]lifecycleEventStyle{
 	taskRunFailureProviderLost:     {":satellite_antenna:", "Lost contact with the provider", notify.SeverityError},
 	taskRunFailureTimeout:          {":hourglass_flowing_sand:", "Agent ran out of time", notify.SeverityWarning},
 	taskRunEventAgentIdle:          {":zzz:", "Agent stalled", notify.SeverityWarning},
+	taskRunEventStageStalled:       {":warning:", "Pipeline stage stalled", notify.SeverityWarning},
 	taskRunEventDoneWithoutPR:      {":mailbox_with_no_mail:", "Agent finished without a PR", notify.SeverityWarning},
 	"unknown_failure":              {":question:", "Agent failed", notify.SeverityError},
 }
@@ -1545,7 +1549,7 @@ var lifecycleEventStyles = map[string]lifecycleEventStyle{
 // still gets a readable humanized headline, never a raw snake_case string.
 func lifecycleEventStyleFor(ev lifecycleEventRow) lifecycleEventStyle {
 	key := ev.EventType
-	if key != taskRunEventAgentStarted && key != taskRunEventPROpened && key != taskRunEventAgentIdle {
+	if key != taskRunEventAgentStarted && key != taskRunEventPROpened && key != taskRunEventAgentIdle && key != taskRunEventStageStalled {
 		key = firstNonEmpty(ev.FailureType, ev.EventType)
 	}
 	if key == taskRunFailureUnknown {
@@ -1594,6 +1598,8 @@ func buildLifecycleMessage(ev lifecycleEventRow, runCtx lifecycleRunContext) not
 		return buildPROpenedMessage(ev, runCtx)
 	case taskRunEventAgentIdle:
 		return buildAgentIdleMessage(ev, runCtx)
+	case taskRunEventStageStalled:
+		return buildStageStalledMessage(ev, runCtx)
 	default:
 		return buildFailureMessage(ev, runCtx)
 	}
@@ -1717,6 +1723,28 @@ func buildAgentIdleMessage(ev lifecycleEventRow, runCtx lifecycleRunContext) not
 		Fields:   lifecycleMetaFields(runCtx, true, false),
 		Summary:  []string{runCtx.Repo, subject, summaryIdle},
 	}
+}
+
+func buildStageStalledMessage(ev lifecycleEventRow, runCtx lifecycleRunContext) notify.Message {
+	style := lifecycleEventStyleFor(ev)
+	subject := lifecycleIssueRef(runCtx)
+	if subject == "" {
+		subject = "task"
+	}
+	stage := detailString(ev.Detail, "stage")
+	if stage == "" {
+		stage = "current stage"
+	}
+	stageAge, progressAge := stageProgressDurationLabel(ev.Detail, "stageAgeMinutes"), stageProgressDurationLabel(ev.Detail, "lastProgressMinutes")
+	body := fmt.Sprintf("Stage %q has not made meaningful progress", stage)
+	if progressAge != "" {
+		body += " for " + progressAge
+	}
+	if stageAge != "" {
+		body += " (stage age: " + stageAge + ")"
+	}
+	body += "."
+	return notify.Message{Title: style.title, Emoji: style.emoji, Severity: style.severity, Subject: subject, Body: body, Fields: lifecycleMetaFields(runCtx, true, false), Summary: []string{runCtx.Repo, subject, "stage stalled: " + stage}}
 }
 
 func buildFailureMessage(ev lifecycleEventRow, runCtx lifecycleRunContext) notify.Message {

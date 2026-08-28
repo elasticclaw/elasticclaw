@@ -144,8 +144,8 @@ func lifecycleClawRunContext(claw lifecycleClawRow) lifecycleRunContext {
 // lifecycleClawKindsEnabled maps the existing config toggles onto the claw-pass
 // kinds. The claw pass intentionally shares the task-run toggles: an operator
 // muting pr_opened mutes it for both sources.
-func lifecycleClawKindsEnabled(cfg *types.LifecycleNotificationsConfig) (agentStarted, prOpened, failures, agentIdle bool) {
-	agentStarted, prOpened, failures, agentIdle = true, true, true, true
+func lifecycleClawKindsEnabled(cfg *types.LifecycleNotificationsConfig) (agentStarted, prOpened, failures, agentIdle, stageStalled bool) {
+	agentStarted, prOpened, failures, agentIdle, stageStalled = true, true, true, true, true
 	if cfg != nil && cfg.Events != nil {
 		if cfg.Events.AgentStarted != nil {
 			agentStarted = *cfg.Events.AgentStarted
@@ -158,6 +158,9 @@ func lifecycleClawKindsEnabled(cfg *types.LifecycleNotificationsConfig) (agentSt
 		}
 		if cfg.Events.AgentIdle != nil {
 			agentIdle = *cfg.Events.AgentIdle
+		}
+		if cfg.Events.StageStalled != nil {
+			stageStalled = *cfg.Events.StageStalled
 		}
 	}
 	return
@@ -192,7 +195,7 @@ func (s *Server) lifecycleClawPass(d lifecycleDelivery) {
 		return
 	}
 
-	startedOn, prOn, failuresOn, idleOn := lifecycleClawKindsEnabled(d.lc)
+	startedOn, prOn, failuresOn, idleOn, stalledOn := lifecycleClawKindsEnabled(d.lc)
 	// Park disabled kinds so re-enabling a toggle behaves like a fresh enable
 	// instead of flushing every transition from the muted window.
 	if !startedOn {
@@ -203,6 +206,9 @@ func (s *Server) lifecycleClawPass(d lifecycleDelivery) {
 	}
 	if !idleOn {
 		s.skipCurrentLifecycleClawIdle()
+	}
+	if !stalledOn {
+		s.skipCurrentLifecycleClawStageStalled()
 	}
 	if !prOn {
 		s.skipCurrentLifecycleClawPRs()
@@ -222,7 +228,7 @@ func (s *Server) lifecycleClawPass(d lifecycleDelivery) {
 		if !s.ensureLifecycleClawRouteBaseline(d, route) {
 			continue
 		}
-		s.lifecycleClawRoutePass(d, route, startedOn, prOn, failuresOn, idleOn)
+		s.lifecycleClawRoutePass(d, route, startedOn, prOn, failuresOn, idleOn, stalledOn)
 	}
 }
 
@@ -233,7 +239,7 @@ func (s *Server) lifecycleClawPass(d lifecycleDelivery) {
 // delivery row every claw still connected (and every claw_prs row still open)
 // since the route's baseline would be replayed into the channel the moment the
 // operator adds that event type to the route's allow-list.
-func (s *Server) lifecycleClawRoutePass(d lifecycleDelivery, route lifecycleRouteDelivery, startedOn, prOn, failuresOn, idleOn bool) {
+func (s *Server) lifecycleClawRoutePass(d lifecycleDelivery, route lifecycleRouteDelivery, startedOn, prOn, failuresOn, idleOn, stalledOn bool) {
 	if startedOn {
 		if !lifecycleRouteAccepts(route, taskRunEventAgentStarted) {
 			_ = s.skipCurrentLifecycleClawRouteState(route.notifier, lifecycleClawKindStarted)
@@ -252,6 +258,13 @@ func (s *Server) lifecycleClawRoutePass(d lifecycleDelivery, route lifecycleRout
 		if !lifecycleRouteAccepts(route, taskRunEventAgentIdle) {
 			_ = s.skipCurrentLifecycleClawRouteIdle(route.notifier)
 		} else if !s.sendLifecycleClawIdleEvents(d, route) {
+			return
+		}
+	}
+	if stalledOn {
+		if !lifecycleRouteAccepts(route, taskRunEventStageStalled) {
+			_ = s.skipCurrentLifecycleClawRouteStageStalled(route.notifier)
+		} else if !s.sendLifecycleClawStageStalledEvents(d, route) {
 			return
 		}
 	}
@@ -465,6 +478,9 @@ func (s *Server) seedLifecycleClawRouteBaseline(notifier string) error {
 	if err := s.skipCurrentLifecycleClawRouteIdle(notifier); err != nil {
 		return err
 	}
+	if err := s.skipCurrentLifecycleClawRouteStageStalled(notifier); err != nil {
+		return err
+	}
 	return s.skipCurrentLifecycleClawRoutePRs(notifier)
 }
 
@@ -539,6 +555,9 @@ func (s *Server) seedLifecycleClawBaseline() error {
 	if err := s.skipCurrentLifecycleClawIdle(); err != nil {
 		return err
 	}
+	if err := s.skipCurrentLifecycleClawStageStalled(); err != nil {
+		return err
+	}
 	return s.skipCurrentLifecycleClawPRs()
 }
 
@@ -554,6 +573,7 @@ func (s *Server) parkLifecycleClawState() {
 	_ = s.skipCurrentLifecycleClawState(lifecycleClawKindStarted)
 	_ = s.skipCurrentLifecycleClawState(lifecycleClawKindFailure)
 	_ = s.skipCurrentLifecycleClawIdle()
+	_ = s.skipCurrentLifecycleClawStageStalled()
 	_ = s.skipCurrentLifecycleClawPRs()
 }
 
@@ -617,6 +637,77 @@ func (s *Server) skipCurrentLifecycleClawIdle() error {
 		log.Printf("[notify] seed skipped claw idle deliveries: %v", err)
 	}
 	return err
+}
+
+func lifecycleClawStageStalledKey(id string, since int64) string {
+	return "claw:" + id + ":stage_stalled:" + strconv.FormatInt(since, 10)
+}
+
+func (s *Server) skipCurrentLifecycleClawStageStalled() error {
+	_, err := s.db.Exec(`INSERT INTO slack_notification_deliveries(event_id,run_id,delivered_at,message_ts,status)
+		SELECT 'claw:' || c.id || ':stage_stalled:' || c.stage_stalled_since, 'claw:' || c.id, ?, '', ? FROM claws c
+		WHERE c.task_run_id='' AND c.stage_stalled_since>0 ON CONFLICT(event_id) DO NOTHING`, epochMillis(now()), notificationDeliveryStatusSkipped)
+	return err
+}
+func (s *Server) skipCurrentLifecycleClawRouteStageStalled(notifier string) error {
+	return s.lifecycleClawRouteSkip(notifier, "stage_stalled", `SELECT 'claw:' || c.id || ':stage_stalled:' || c.stage_stalled_since, ?, 'claw:' || c.id, ?, '', ? FROM claws c WHERE c.task_run_id='' AND c.stage_stalled_since>0 AND CAST(strftime('%s',c.created_at) AS INTEGER)<=?`, notifier, epochMillis(now()), notificationDeliveryStatusSkipped, lifecycleClawAdhocCutoff())
+}
+
+// selectLifecycleClawStageStalledCandidates mirrors
+// selectLifecycleClawIdleCandidates: the full result set is materialized
+// before any row is delivered, because delivery issues further writes on the
+// same single-writer sqlite connection — iterating an open *Rows cursor while
+// writing through it deadlocks.
+func (s *Server) selectLifecycleClawStageStalledCandidates(notifier string) ([]lifecycleClawRow, []int64, []string, []sql.NullInt64, error) {
+	cutoff := lifecycleClawAdhocCutoff()
+	rows, err := s.db.Query(`SELECT `+lifecycleClawSelectColumns+`, c.stage_stalled_since, c.pipeline_stage, c.stage_entered_at FROM claws c
+		WHERE c.task_run_id='' AND c.status='connected' AND c.pipeline_stage<>'' AND c.stage_stalled_since>0
+		AND CAST(strftime('%s', c.created_at) AS INTEGER) <= ?
+		AND NOT EXISTS (SELECT 1 FROM claw_prs p WHERE p.claw_id=c.id AND p.state NOT IN ('merged','closed') AND p.mention_only=0)
+		AND NOT EXISTS (SELECT 1 FROM slack_notification_deliveries d WHERE d.event_id='claw:' || c.id || ':stage_stalled:' || c.stage_stalled_since)
+		AND NOT EXISTS (SELECT 1 FROM slack_notification_deliveries_v2 v WHERE v.event_id='claw:' || c.id || ':stage_stalled:' || c.stage_stalled_since AND v.notifier=?)
+		ORDER BY c.created_at LIMIT `+strconv.Itoa(lifecycleBatchSize), cutoff, notifier)
+	if err != nil {
+		return nil, nil, nil, nil, err
+	}
+	defer rows.Close()
+	var claws []lifecycleClawRow
+	var stalledSinces []int64
+	var stages []string
+	var entereds []sql.NullInt64
+	for rows.Next() {
+		var claw lifecycleClawRow
+		var stalled int64
+		var entered sql.NullInt64
+		var stage string
+		if err := scanLifecycleClawRow(func(dest ...any) error { return rows.Scan(append(dest, &stalled, &stage, &entered)...) }, &claw); err != nil {
+			return nil, nil, nil, nil, err
+		}
+		claws = append(claws, claw)
+		stalledSinces = append(stalledSinces, stalled)
+		stages = append(stages, stage)
+		entereds = append(entereds, entered)
+	}
+	return claws, stalledSinces, stages, entereds, rows.Err()
+}
+
+func (s *Server) sendLifecycleClawStageStalledEvents(d lifecycleDelivery, route lifecycleRouteDelivery) bool {
+	claws, stalledSinces, stages, entereds, err := s.selectLifecycleClawStageStalledCandidates(route.notifier)
+	if err != nil {
+		log.Printf("[notify] select stalled stages: %v", err)
+		return false
+	}
+	for i, claw := range claws {
+		stalled, stage, entered := stalledSinces[i], stages[i], entereds[i]
+		detail := map[string]any{"stage": stage, "lastProgressMinutes": int(now().Sub(time.UnixMilli(stalled)).Minutes())}
+		if entered.Valid && entered.Int64 > 0 {
+			detail["stageAgeMinutes"] = int(now().Sub(time.UnixMilli(entered.Int64)).Minutes())
+		}
+		if !s.deliverLifecycleClawEvent(d, route, claw, lifecycleEventRow{EventType: taskRunEventStageStalled, Detail: detail}, lifecycleClawRunContext(claw), lifecycleClawStageStalledKey(claw.ID, stalled)) {
+			return false
+		}
+	}
+	return true
 }
 
 // selectLifecycleClawIdleCandidates returns ad-hoc claws whose idle latch has

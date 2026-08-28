@@ -643,3 +643,23 @@ func TestLifecycleClawIdleCandidatesIgnoreMentionOnlyPRs(t *testing.T) {
 		t.Fatalf("idle candidates with an unresolved DELIVERED PR = %v, want none (an owned open PR suppresses the idle alert)", claws)
 	}
 }
+
+func TestLifecycleClawStageStalledCandidatesExcludeYoungClaws(t *testing.T) {
+	s, db := newSlackNotifierTestServer(t, "", nil)
+	setLifecycleClawBaseline(t, s)
+
+	insertSlackTestClaw(t, db, "claw-stage-stalled-old", "connected", 1, "", oldEnough)
+	insertSlackTestClaw(t, db, "claw-stage-stalled-young", "connected", 1, "", lifecycleClawAdhocGrace-time.Minute)
+	if _, err := db.Exec(`UPDATE claws SET pipeline_stage='work', stage_stalled_since=? WHERE id IN (?, ?)`,
+		time.Now().Add(-time.Minute).UnixMilli(), "claw-stage-stalled-old", "claw-stage-stalled-young"); err != nil {
+		t.Fatal(err)
+	}
+
+	claws, _, _, _, err := s.selectLifecycleClawStageStalledCandidates("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(claws) != 1 || claws[0].ID != "claw-stage-stalled-old" {
+		t.Fatalf("stage-stalled candidates = %v, want exactly claw-stage-stalled-old", claws)
+	}
+}

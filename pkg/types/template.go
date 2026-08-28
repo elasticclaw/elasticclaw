@@ -583,6 +583,7 @@ var LifecycleEventTypes = []string{
 	"pr_opened",
 	"agent_stopped",
 	"agent_idle",
+	"stage_stalled",
 	"done_without_pr",
 }
 
@@ -624,6 +625,9 @@ type LifecycleNotificationsConfig struct {
 	// fires. Default "5m", minimum "1m". Detection rides the 2-minute status
 	// watchdog tick, so the alert lands between IdleAfter and IdleAfter+2m.
 	IdleAfter string `yaml:"idle_after,omitempty" json:"idleAfter,omitempty"`
+	// StageProgressAfter alerts when a pipeline stage receives no meaningful
+	// progress for this duration. Empty disables this opt-in alert.
+	StageProgressAfter string `yaml:"stage_progress_after,omitempty" json:"stageProgressAfter,omitempty"`
 	// Events toggles individual event categories. All default true when absent.
 	Events *LifecycleEventToggles `yaml:"events,omitempty" json:"events,omitempty"`
 }
@@ -656,6 +660,7 @@ type LifecycleEventToggles struct {
 	PROpened     *bool `yaml:"pr_opened,omitempty" json:"prOpened,omitempty"`
 	Failures     *bool `yaml:"failures,omitempty" json:"failures,omitempty"`
 	AgentIdle    *bool `yaml:"agent_idle,omitempty" json:"agentIdle,omitempty"`
+	StageStalled *bool `yaml:"stage_stalled,omitempty" json:"stageStalled,omitempty"`
 }
 
 // LivenessConfig controls boot reconciliation and the periodic safety-net reaper.
