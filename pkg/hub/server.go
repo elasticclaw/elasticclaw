@@ -8547,6 +8547,11 @@ const sessionRotatedResumeThrottle = 10 * time.Minute
 
 const sessionPreservedContinuationThrottle = 10 * time.Minute
 
+// sessionPreservedContinuationMaxInWindow is the continuation budget before a
+// run of preserved lock conflicts is treated as no progress rather than left
+// silently idle.
+const sessionPreservedContinuationMaxInWindow = 3
+
 func (s *Server) enqueueSessionRotatedResume(clawID string) {
 	var recent int
 	err := s.db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND role='hub' AND content LIKE ? AND created_at > ?`,
@@ -8562,8 +8567,10 @@ func (s *Server) enqueueSessionPreservedContinuation(clawID string) {
 	var recent int
 	err := s.db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND role='hub' AND content LIKE ? AND created_at > ?`,
 		clawID, sessionPreservedContinuationPrefix+"%", now().Add(-sessionPreservedContinuationThrottle)).Scan(&recent)
-	if err == nil && recent > 0 {
-		log.Printf("[watchdog] skipping session-preserved continuation for %s: already continued within %s", shortID(clawID), sessionPreservedContinuationThrottle)
+	if err == nil && recent >= sessionPreservedContinuationMaxInWindow {
+		notice := fmt.Sprintf("[hub] Automatic continuation paused: %d preserved session-file lock conflicts occurred without progress within %s. This claw is paused awaiting intervention.", recent, sessionPreservedContinuationThrottle)
+		log.Printf("[watchdog] pausing session-preserved continuation for %s: %d continuations within %s without progress", shortID(clawID), recent, sessionPreservedContinuationThrottle)
+		s.pauseAutomaticContinuation(clawID, notice)
 		return
 	}
 	var status string
@@ -8624,11 +8631,12 @@ func (s *Server) enqueueSessionLostResume(clawID, prefix, marker string) {
 	// Bridge transport errors are stored as claw messages too, but replaying one
 	// into a fresh session would replace useful progress with outage noise. Keep
 	// this filter in SQL so error bursts do not consume the candidate window.
-	// The prefixes contain neither % nor _, so plain LIKE is safe; add ESCAPE if
-	// a future prefix can contain a wildcard. Go rechecks after TrimSpace because
-	// SQLite TRIM does not remove every whitespace character.
+	// GLOB is case-sensitive like Go's HasPrefix. The prefixes contain no *, ?,
+	// or [, so they need no escaping; escape any future prefix with a GLOB
+	// metacharacter. Go rechecks after TrimSpace because SQLite TRIM does not
+	// remove every whitespace character.
 	var lastProgress string
-	rows, progressErr := s.db.Query(`SELECT content FROM messages WHERE claw_id=? AND role='claw' AND content NOT LIKE ? AND content NOT LIKE ? ORDER BY created_at DESC, rowid DESC LIMIT 5`, clawID, types.BridgeErrorPrefix+"%", types.BridgeReplayErrorPrefix+"%")
+	rows, progressErr := s.db.Query(`SELECT content FROM messages WHERE claw_id=? AND role='claw' AND content NOT GLOB ? AND content NOT GLOB ? ORDER BY created_at DESC, rowid DESC LIMIT 5`, clawID, types.BridgeErrorPrefix+"*", types.BridgeReplayErrorPrefix+"*")
 	if progressErr == nil {
 		for rows.Next() {
 			var candidate string
