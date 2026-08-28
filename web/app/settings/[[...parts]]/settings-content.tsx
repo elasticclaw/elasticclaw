@@ -5099,6 +5099,13 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
     if (persisted) {
       invalidateTest(name)
       setTests((current) => { const { [name]: _stale, ...rest } = current; return rest })
+      // Re-adding the channel a schedule was paused for answers the pause note:
+      // the paused schedule still names it — removeChannel keeps the dangling
+      // name so the repair stays visible — so the via resolves again and the
+      // note's "pick another channel" no longer describes anything.
+      if (schedules.some((schedule) => !schedule.enabled && schedule.via.includes(name))) {
+        setSchedulePauseNotice("")
+      }
     }
     setSaveErrors((current) => { const { [name]: _cleared, ...rest } = current; return rest })
     setDetachedSaveError("")
@@ -5130,8 +5137,10 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
     // also rejects an empty `via`. Pausing keeps the dangling name visible so
     // the card's "no longer configured" warning still points at the repair.
     const pausedIds: string[] = []
+    const touchedIds: string[] = []
     const nextScheduled = schedules.map((schedule) => {
       if (!schedule.via.includes(name)) return schedule
+      touchedIds.push(schedule.id)
       const via = schedule.via.filter((entry) => entry !== name)
       if (via.length === 0) {
         if (schedule.enabled) pausedIds.push(schedule.id)
@@ -5149,6 +5158,12 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
     if (persisted) {
       invalidateTest(name)
       setTests((current) => { const { [name]: _removed, ...rest } = current; return rest })
+      // Every schedule that posted here now posts somewhere else — or nowhere,
+      // paused — so a probe result on its card describes a delivery that can no
+      // longer happen: a green "Posted to eng, ops." above a card that reads
+      // "Posts to eng". saveSchedule/removeSchedule invalidate for the same
+      // reason; this is the third way a schedule's destinations change.
+      touchedIds.forEach(invalidateReportTest)
       if (pausedIds.length > 0) {
         setSchedulePauseNotice(
           `Paused ${pausedIds.join(", ")} — "${name}" was the only channel ${pausedIds.length === 1 ? "it posts" : "they post"} to. Open Edit, pick another channel and turn the report back on.`,
@@ -5221,6 +5236,11 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
   const [formScheduleId, setFormScheduleId] = useState("")
   const [formReport, setFormReport] = useState(SCHEDULED_REPORTS[0].id)
   const [formVia, setFormVia] = useState<string[]>([])
+  // The channels the schedule named that no longer exist, snapshotted when the
+  // dialog opens. Deriving the rows from formVia instead would delete the
+  // flagged checkbox the moment it is unticked, and the only way back would be
+  // Cancel — discarding every other edit made in the same session.
+  const [formDanglingVia, setFormDanglingVia] = useState<string[]>([])
   const [formAt, setFormAt] = useState("09:00")
   const [formTimezone, setFormTimezone] = useState("UTC")
   const [formWeekdays, setFormWeekdays] = useState<string[]>([])
@@ -5270,6 +5290,7 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
     setFormScheduleId(suggestScheduleId(report))
     // One channel is an unambiguous default; more than one is a choice.
     setFormVia(names.length === 1 ? [names[0]] : [])
+    setFormDanglingVia([])
     setFormAt("09:00")
     setFormTimezone(browserTimezone())
     setFormWeekdays([])
@@ -5286,6 +5307,7 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
     setFormScheduleId(schedule.id)
     setFormReport(schedule.report)
     setFormVia([...schedule.via])
+    setFormDanglingVia(schedule.via.filter((via) => !notifiers[via]))
     setFormAt(normalizeAt(schedule.at))
     setFormTimezone(schedule.timezone || "UTC")
     setFormWeekdays([...schedule.weekdays])
@@ -5370,19 +5392,27 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
   }
 
   async function toggleSchedule(schedule: ScheduledNotificationView, value: boolean) {
-    const { message } = await savePatch({
+    const { persisted, message } = await savePatch({
       scheduled: schedules.map((other) => (other.id === schedule.id ? { ...other, enabled: value } : other)),
     })
-    // A rejected toggle snaps the switch back with nothing else on screen —
-    // the dialog that carries scheduleError is closed — so the failure has to
-    // land on the schedule's own card.
-    if (message) setScheduleSaveErrors((current) => ({ ...current, [schedule.id]: message }))
-    else {
+    // The cleanup follows `persisted`, not `message`, exactly as saveSchedule
+    // and removeSchedule do: a PATCH the hub accepted whose follow-up re-read
+    // failed still toggled the report, and calling that "Last save failed"
+    // under a switch snapped back to its old position tells the operator the
+    // opposite of what the hub holds. The reload failure is real, so it goes
+    // to the banner, which states it verbatim instead of blaming the save.
+    if (persisted) {
       clearScheduleSaveError(schedule.id)
       // The operator has answered the pause note by hand; leaving it up would
       // report a state that no longer exists.
       setSchedulePauseNotice("")
+      setDetachedScheduleError(message ?? "")
+      return
     }
+    // A rejected toggle snaps the switch back with nothing else on screen —
+    // the dialog that carries scheduleError is closed — so the failure has to
+    // land on the schedule's own card.
+    if (message) setScheduleSaveErrors((current) => ({ ...current, [schedule.id]: message }))
   }
 
   // Probes one schedule. A dry run renders the message the next due slot would
@@ -6195,15 +6225,17 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
                   carries its own aria-label, so the container is what the
                   screen reader announces the set by. */}
               <div className="text-xs text-muted-foreground mb-1">Channels</div>
-              {names.length === 0 && formVia.length === 0 ? (
+              {names.length === 0 && formDanglingVia.length === 0 ? (
                 <p className="text-xs text-amber-400">No channels are configured yet.</p>
               ) : (
                 <div className="space-y-1" role="group" aria-label="Channels">
                   {/* Deleted channels the schedule still names get a checkbox
                       of their own, flagged: the hub refuses to save a schedule
                       pointing at one, so unticking it has to be possible from
-                      here — otherwise the only repair is a hub.yaml edit. */}
-                  {[...names, ...formVia.filter((via) => !notifiers[via])].map((name) => {
+                      here — otherwise the only repair is a hub.yaml edit. The
+                      list comes from the open-time snapshot, so unticking one
+                      leaves its row in place to be re-ticked. */}
+                  {[...names, ...formDanglingVia.filter((via) => !notifiers[via])].map((name) => {
                     const missing = !notifiers[name]
                     return (
                       <label
@@ -6212,7 +6244,13 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
                       >
                         <input
                           type="checkbox"
-                          aria-label={`Post the report to ${name}`}
+                          // The flag is the only thing telling the operator
+                          // WHICH box the warning above means, and colour alone
+                          // does not reach a screen reader — so the accessible
+                          // name has to carry it too.
+                          aria-label={missing
+                            ? `Post the report to ${name} (channel no longer configured)`
+                            : `Post the report to ${name}`}
                           checked={formVia.includes(name)}
                           disabled={saving}
                           onChange={(e) =>
