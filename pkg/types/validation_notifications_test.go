@@ -63,6 +63,27 @@ func TestValidateNotificationsConfig(t *testing.T) {
 			errMsg:  "does not name a configured notifier",
 		},
 		{
+			// The scheduler sends once per pending via entry, so a repeated
+			// name would post the same report twice in the same tick.
+			name:    "scheduled notification rejects duplicate via",
+			cfg:     &NotificationsConfig{Notifiers: slack(), Scheduled: []ScheduledNotificationConfig{{ID: "daily", Report: "x", Via: []string{"eng-agents", "eng-agents"}, At: "09:00"}}},
+			wantErr: true,
+			errMsg:  `via "eng-agents" is duplicated`,
+		},
+		{
+			// Symmetric with the disabled lifecycle block: an operator who
+			// pauses a schedule and then deletes its notifier must not be left
+			// with a hub that refuses to load.
+			name: "paused scheduled notification accepts a dangling via",
+			cfg:  &NotificationsConfig{Notifiers: slack(), Scheduled: []ScheduledNotificationConfig{{ID: "daily", Report: "x", Via: []string{"gone"}, At: "09:00", Enabled: boolPtr(false)}}},
+		},
+		{
+			name:    "paused scheduled notification still rejects duplicate via",
+			cfg:     &NotificationsConfig{Notifiers: slack(), Scheduled: []ScheduledNotificationConfig{{ID: "daily", Report: "x", Via: []string{"gone", "gone"}, At: "09:00", Enabled: boolPtr(false)}}},
+			wantErr: true,
+			errMsg:  `via "gone" is duplicated`,
+		},
+		{
 			name:    "scheduled notification validates timezone and weekdays",
 			cfg:     &NotificationsConfig{Notifiers: slack(), Scheduled: []ScheduledNotificationConfig{{ID: "daily", Report: "x", Via: []string{"eng-agents"}, At: "09:00", Timezone: "not/a-zone"}}},
 			wantErr: true,

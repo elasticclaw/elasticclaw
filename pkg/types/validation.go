@@ -807,7 +807,25 @@ func ValidateNotificationsConfig(cfg *NotificationsConfig) error {
 		if len(scheduled.Via) == 0 {
 			return fmt.Errorf("%s: via is required", prefix)
 		}
+		scheduledEnabled := scheduled.Enabled == nil || *scheduled.Enabled
+		seenVia := make(map[string]struct{}, len(scheduled.Via))
 		for _, via := range scheduled.Via {
+			// The scheduler sends once per pending via entry, so a repeated
+			// name would post the same report twice in the same tick — exactly
+			// as a repeated lifecycle route would, and rejected the same way.
+			if _, duplicate := seenVia[via]; duplicate {
+				return fmt.Errorf("%s: via %q is duplicated", prefix, via)
+			}
+			seenVia[via] = struct{}{}
+			// The notifier reference is checked only while the schedule is
+			// enabled, symmetrically with the disabled lifecycle block below:
+			// an operator who pauses a schedule and then deletes its notifier
+			// must not be left with a hub that refuses to load, or a settings
+			// screen whose every save 400s on an entry it renders with a
+			// "no longer configured" warning instead.
+			if !scheduledEnabled {
+				continue
+			}
 			if _, ok := cfg.Notifiers[via]; !ok {
 				return fmt.Errorf("%s: via %q does not name a configured notifier (defined: %s)", prefix, via, notifierNames(cfg.Notifiers))
 			}

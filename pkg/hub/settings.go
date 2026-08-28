@@ -858,15 +858,18 @@ func validateSettingsNotifications(current, cfg *types.NotificationsConfig) erro
 			return fmt.Errorf("notifications.notifiers.%s: %w", name, err)
 		}
 	}
-	// Report names are checked only on schedules the patch adds or changes,
-	// for the same reason notifier construction is: the report registry is a
-	// property of THIS build, so a hub.yaml naming a report an older or newer
-	// binary carries is legitimate on disk (the scheduler logs "not
-	// registered" per tick and delivers nothing). The screen submits the whole
-	// scheduled list on every save, so failing on a stored entry would 400
-	// every save — including the one that deletes the offender.
+	// Report names are checked only on schedules the patch adds or whose
+	// report it changes, for the same reason notifier construction is: the
+	// report registry is a property of THIS build, so a hub.yaml naming a
+	// report an older or newer binary carries is legitimate on disk (the
+	// scheduler logs "not registered" per tick and delivers nothing). The
+	// screen submits the whole scheduled list on every save, so failing on a
+	// stored entry would 400 every save — including the one that deletes the
+	// offender, and every other edit to the entry itself: pausing it (which
+	// the doctor's "pause before upgrading" guidance depends on), re-routing
+	// it, or moving its slot.
 	for i, scheduled := range cfg.Scheduled {
-		if scheduledNotificationUnchanged(current, scheduled) {
+		if scheduledReportUnchanged(current, scheduled) {
 			continue
 		}
 		if !ScheduledReportSupported(scheduled.Report) {
@@ -877,24 +880,22 @@ func validateSettingsNotifications(current, cfg *types.NotificationsConfig) erro
 	return nil
 }
 
-// scheduledNotificationUnchanged reports whether the patched schedule matches
-// the one already stored under the same id.
+// scheduledReportUnchanged reports whether a stored schedule under the same id
+// already names the patched schedule's report.
 //
-// Compared through the settings view rather than field by field: the view is
-// what the screen round-trips, and it normalises exactly the shapes that make
-// a byte comparison lie — an absent `enabled` (which means true) coming back
-// as an explicit `true`, and an absent `weekdays` (every day) coming back as
-// []. Without that normalisation an untouched schedule reads as changed on
-// every save, which is precisely the case this function exists to exempt.
-func scheduledNotificationUnchanged(current *types.NotificationsConfig, patched types.ScheduledNotificationConfig) bool {
+// Only the report field is compared: the check this gates is against the
+// report registry of THIS build, so every other edit to a stored schedule —
+// pausing it, re-routing it, moving its slot — must stay possible even when
+// the stored report is one this binary does not carry. Comparing the whole
+// schedule here once made exactly those edits 400 with "unknown report".
+func scheduledReportUnchanged(current *types.NotificationsConfig, patched types.ScheduledNotificationConfig) bool {
 	if current == nil {
 		return false
 	}
 	for _, stored := range current.Scheduled {
-		if stored.ID != patched.ID {
-			continue
+		if stored.ID == patched.ID {
+			return stored.Report == patched.Report
 		}
-		return reflect.DeepEqual(scheduledNotificationViewOf(stored), scheduledNotificationViewOf(patched))
 	}
 	return false
 }
@@ -1131,6 +1132,15 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 		// the only channel binding the hub has.
 		if patch.Notifications.Lifecycle != nil && len(patch.Notifications.Lifecycle.Routes) > 0 {
 			patch.Notifications.Lifecycle.Via = ""
+		}
+		// An ABSENT scheduled list carries the stored schedules forward. The
+		// settings view always emits `scheduled` (as [] when there are none),
+		// so a patch without the key comes from a client that never saw the
+		// field — an older screen, or a hand-written PATCH that only meant to
+		// touch notifiers — not from one asking to delete every schedule.
+		// Deleting is expressed as a present, shorter (possibly empty) list.
+		if patch.Notifications.Scheduled == nil && s.hubCfg.Notifications != nil {
+			patch.Notifications.Scheduled = append([]types.ScheduledNotificationConfig(nil), s.hubCfg.Notifications.Scheduled...)
 		}
 		mergeNotifierSettings(s.hubCfg.Notifications, patch.Notifications)
 		dropRejectedLifecycleDurations(s.hubCfg.Notifications, patch.Notifications)

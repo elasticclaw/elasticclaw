@@ -57,30 +57,55 @@ func scheduledReport(name string) (scheduledReportBuilder, bool) {
 	return builder, ok
 }
 
+// startScheduledNotifier launches the background loop that fires scheduled
+// reports. It stops when stopScheduledNotifier is called (graceful shutdown,
+// before the DB closes).
 func (s *Server) startScheduledNotifier() {
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	s.scheduledNotifierStop, s.scheduledNotifierDone = stop, done
 	s.safeGo("scheduled notifier", func() {
+		defer close(done)
 		for {
+			timer := time.NewTimer(time.Minute)
+			select {
+			case <-stop:
+				timer.Stop()
+				return
+			case <-timer.C:
+			}
+			// Run the tick inline (not via safeGo) so ticks never overlap and
+			// shutdown can wait for the one in flight. A panic is contained to
+			// this iteration.
 			func() {
 				defer func() {
 					if r := recover(); r != nil {
-						log.Printf("[notify] scheduled notifier loop panic, restarting: %v\n%s", r, debug.Stack())
+						log.Printf("[notify] scheduled notifier tick panic: %v\n%s", r, debug.Stack())
 					}
 				}()
-				ticker := time.NewTicker(time.Minute)
-				defer ticker.Stop()
-				for range ticker.C {
-					func() {
-						defer func() {
-							if r := recover(); r != nil {
-								log.Printf("[notify] scheduled notifier tick panic: %v\n%s", r, debug.Stack())
-							}
-						}()
-						s.scheduledNotifierTick(s.nowFunc())
-					}()
-				}
+				s.scheduledNotifierTick(s.nowFunc())
 			}()
 		}
 	})
+}
+
+// stopScheduledNotifier stops the tick loop and waits (bounded) for an
+// in-flight tick to finish, for the same reason stopLifecycleNotifier does:
+// a tick in flight at shutdown can complete an external Slack send and then
+// fail the dedupe-state upsert against a closed DB, re-sending the same slot
+// after restart. The timeout keeps a pathologically slow tick from wedging
+// shutdown, accepting the duplicate-send window in that case.
+func (s *Server) stopScheduledNotifier(timeout time.Duration) {
+	if s.scheduledNotifierStop == nil {
+		return
+	}
+	close(s.scheduledNotifierStop)
+	s.scheduledNotifierStop = nil
+	select {
+	case <-s.scheduledNotifierDone:
+	case <-time.After(timeout):
+		log.Printf("[notify] scheduled notifier tick still running after %v; shutting down anyway", timeout)
+	}
 }
 
 func (s *Server) scheduledNotifierTick(nowAt time.Time) {
@@ -89,13 +114,11 @@ func (s *Server) scheduledNotifierTick(nowAt time.Time) {
 		return
 	}
 	for _, schedule := range cfg.Scheduled {
-		if schedule.Enabled != nil && !*schedule.Enabled {
-			continue
-		}
 		slot, ok := scheduledNotificationSlot(nowAt, schedule)
 		if !ok {
 			continue
 		}
+		paused := schedule.Enabled != nil && !*schedule.Enabled
 		pending := make([]string, 0, len(schedule.Via))
 		for _, via := range schedule.Via {
 			fired, found, err := s.scheduledLastFired(schedule.ID, via)
@@ -103,7 +126,20 @@ func (s *Server) scheduledNotifierTick(nowAt time.Time) {
 				log.Printf("[notify] read scheduled state for %s via %s: %v", schedule.ID, via, err)
 				continue
 			}
-			if !found || fired.Before(slot) {
+			// A destination with no state row is one this hub has never
+			// delivered to — a schedule (or via) just created or first seen.
+			// The slot search reaches up to 8 days back, so firing here would
+			// replay a slot from before the schedule existed; seed the row to
+			// the current slot instead and deliver from the next one on. A
+			// paused schedule advances the same way: slots that pass while it
+			// is paused are skipped, not queued up for the re-enable.
+			if !found || paused {
+				if !found || fired.Before(slot) {
+					s.setScheduledLastFired(schedule.ID, via, slot)
+				}
+				continue
+			}
+			if fired.Before(slot) {
 				pending = append(pending, via)
 			}
 		}

@@ -5187,6 +5187,10 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
   const [formWeekdays, setFormWeekdays] = useState<string[]>([])
   const [formScheduleEnabled, setFormScheduleEnabled] = useState(true)
   const [scheduleError, setScheduleError] = useState("")
+  // A save made from a schedule's CARD (the enable switch) has no dialog to
+  // report into — scheduleError renders inside the closed dialog — so its
+  // failure lands on the card itself, keyed by schedule id.
+  const [scheduleSaveErrors, setScheduleSaveErrors] = useState<Record<string, string>>({})
   const [reportTests, setReportTests] = useState<Record<string, ReportTestState>>({})
   // Invalidates an in-flight probe whose schedule has meanwhile been edited or
   // deleted: its result describes a report that went somewhere else.
@@ -5275,22 +5279,37 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
     // The schedule now posts something else, somewhere else, so any probe
     // result on its card is about a message that no longer describes it. A
     // rejected save changed nothing and keeps its result.
-    if (persisted) invalidateReportTest(id)
+    if (persisted) {
+      invalidateReportTest(id)
+      clearScheduleSaveError(id)
+    }
     if (message) { setScheduleError(message); return }
     setShowSchedule(false)
   }
 
+  function clearScheduleSaveError(id: string) {
+    setScheduleSaveErrors((current) => { const { [id]: _cleared, ...rest } = current; return rest })
+  }
+
   async function removeSchedule(id: string) {
     const { persisted, message } = await savePatch({ scheduled: schedules.filter((schedule) => schedule.id !== id) })
-    if (persisted) invalidateReportTest(id)
+    if (persisted) {
+      invalidateReportTest(id)
+      clearScheduleSaveError(id)
+    }
     if (message) { setScheduleError(message); return }
     setShowSchedule(false)
   }
 
   async function toggleSchedule(schedule: ScheduledNotificationView, value: boolean) {
-    await savePatch({
+    const { message } = await savePatch({
       scheduled: schedules.map((other) => (other.id === schedule.id ? { ...other, enabled: value } : other)),
     })
+    // A rejected toggle snaps the switch back with nothing else on screen —
+    // the dialog that carries scheduleError is closed — so the failure has to
+    // land on the schedule's own card.
+    if (message) setScheduleSaveErrors((current) => ({ ...current, [schedule.id]: message }))
+    else clearScheduleSaveError(schedule.id)
   }
 
   // Probes one schedule. A dry run renders the message the next due slot would
@@ -5752,6 +5771,12 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
                           {previewLines(test.payload).join("\n\n")}
                         </pre>
                       )}
+                    </div>
+                  )}
+                  {scheduleSaveErrors[schedule.id] && (
+                    <div className="mt-3 flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+                      <AlertTriangle className="size-3.5 mt-px shrink-0" />
+                      <span className="break-words">Last save failed: {scheduleSaveErrors[schedule.id]}</span>
                     </div>
                   )}
                 </div>

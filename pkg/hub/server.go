@@ -207,6 +207,12 @@ type Server struct {
 	// its delivery row (see stopLifecycleNotifier).
 	lifecycleNotifierStop chan struct{}
 	lifecycleNotifierDone chan struct{}
+
+	// scheduledNotifierStop/Done plumb the same graceful shutdown for the
+	// scheduled-report loop: its dedupe-state upsert after a completed Slack
+	// send must land before the DB closes, or the slot re-sends after restart.
+	scheduledNotifierStop chan struct{}
+	scheduledNotifierDone chan struct{}
 }
 
 // cachedNotifier is one constructed notifier plus the config/secret digest it
@@ -598,11 +604,13 @@ func (s *Server) run(ctx context.Context, opts ...RunOptions) error {
 		// ListenAndServe returns as soon as Shutdown starts. Wait for it to
 		// finish draining active requests before closing their database.
 		<-shutdownDone
-		// Stop the lifecycle notifier before the DB closes: a tick in flight
+		// Stop both notifier loops before the DB closes: a tick in flight
 		// could otherwise complete an external Slack send and then fail the
-		// delivery-row insert against the closed DB, re-sending the event
-		// after restart (the in-memory retry stash dies with the process).
+		// delivery-row insert (or scheduled dedupe-state upsert) against the
+		// closed DB, re-sending the event after restart (the in-memory retry
+		// stash dies with the process).
 		s.stopLifecycleNotifier(10 * time.Second)
+		s.stopScheduledNotifier(10 * time.Second)
 		if closeErr := s.db.Close(); closeErr != nil {
 			return fmt.Errorf("close database: %w", closeErr)
 		}

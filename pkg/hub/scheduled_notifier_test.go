@@ -200,6 +200,10 @@ func TestScheduledNotifierEmptyReportMarksFiredWithoutSending(t *testing.T) {
 	schedule := types.ScheduledNotificationConfig{ID: "empty", Report: "empty-test-report", Via: []string{testNotifierName}, At: "09:00"}
 	s, _ := newScheduledNotifierTestServer(t, fake.server.URL, []types.ScheduledNotificationConfig{schedule})
 
+	// Arm the schedule with a pre-slot tick, as the minutely production loop
+	// would: the first tick a schedule is ever seen on only seeds its state.
+	s.scheduledNotifierTick(time.Date(2025, 1, 6, 8, 30, 0, 0, time.UTC))
+
 	nowAt := time.Date(2025, 1, 6, 9, 30, 0, 0, time.UTC)
 	s.scheduledNotifierTick(nowAt)
 	if fake.count() != 0 {
@@ -227,6 +231,10 @@ func TestScheduledNotifierDedupeAcrossSimulatedRestart(t *testing.T) {
 	fake := newFakeSlackServer(t)
 	schedule := types.ScheduledNotificationConfig{ID: "dedupe", Report: "dedupe-test-report", Via: []string{testNotifierName}, At: "09:00"}
 	s, db := newScheduledNotifierTestServer(t, fake.server.URL, []types.ScheduledNotificationConfig{schedule})
+
+	// Arm the schedule with a pre-slot tick (production ticks every minute,
+	// so a schedule created before its slot is always seen before it).
+	s.scheduledNotifierTick(time.Date(2025, 1, 6, 8, 30, 0, 0, time.UTC))
 
 	slotTime := time.Date(2025, 1, 6, 9, 30, 0, 0, time.UTC)
 	s.scheduledNotifierTick(slotTime)
@@ -272,16 +280,21 @@ func TestScheduledNotifierPerNotifierPartialFailureRetries(t *testing.T) {
 	}
 	s, _ := newScheduledNotifierTestServer(t, fake.server.URL, []types.ScheduledNotificationConfig{schedule})
 
+	// Arm both destinations before the slot: the first tick a schedule is
+	// ever seen on only seeds its state, posting nothing to Slack.
+	s.scheduledNotifierTick(time.Date(2025, 1, 6, 8, 30, 0, 0, time.UTC))
+
 	slotTime := time.Date(2025, 1, 6, 9, 30, 0, 0, time.UTC)
+	slot := time.Date(2025, 1, 6, 9, 0, 0, 0, time.UTC)
 	s.scheduledNotifierTick(slotTime)
 	if fake.count() != 2 {
 		t.Fatalf("tick sent %d messages, want 2 (one failed, one ok)", fake.count())
 	}
-	if _, found, _ := s.scheduledLastFired("partial", testNotifierName); found {
+	if fired, _, _ := s.scheduledLastFired("partial", testNotifierName); fired.Equal(slot) {
 		t.Fatal("failed notifier state was advanced despite a transient error")
 	}
-	if _, found, _ := s.scheduledLastFired("partial", "second-notifier"); !found {
-		t.Fatal("succeeding notifier state was not recorded")
+	if fired, _, _ := s.scheduledLastFired("partial", "second-notifier"); !fired.Equal(slot) {
+		t.Fatalf("succeeding notifier state = %v, want the slot recorded", fired)
 	}
 
 	// Next tick, same slot: only the previously-failed destination retries.
@@ -290,7 +303,79 @@ func TestScheduledNotifierPerNotifierPartialFailureRetries(t *testing.T) {
 	if fake.count() != 3 {
 		t.Fatalf("retry tick sent %d messages, want 3 (1 retry)", fake.count())
 	}
-	if _, found, _ := s.scheduledLastFired("partial", testNotifierName); !found {
-		t.Fatal("retried notifier state was not recorded after success")
+	if fired, _, _ := s.scheduledLastFired("partial", testNotifierName); !fired.Equal(slot) {
+		t.Fatalf("retried notifier state = %v, want the slot recorded after success", fired)
+	}
+}
+
+// A schedule seen for the first time AFTER its slot passed must wait for the
+// next occurrence: the slot search reaches up to 8 days back, so a newly
+// created (or newly re-routed) schedule would otherwise replay a stale slot
+// the moment it is saved.
+func TestScheduledNotifierNewScheduleDoesNotReplayPastSlot(t *testing.T) {
+	registerScheduledReport("no-replay-report", func(context.Context, *Server) (*notify.Message, bool, error) {
+		return &notify.Message{Title: "report", Body: "body"}, true, nil
+	})
+	fake := newFakeSlackServer(t)
+	schedule := types.ScheduledNotificationConfig{ID: "fresh", Report: "no-replay-report", Via: []string{testNotifierName}, At: "09:00"}
+	s, _ := newScheduledNotifierTestServer(t, fake.server.URL, []types.ScheduledNotificationConfig{schedule})
+
+	// First tick, hours after today's slot: seed, don't send.
+	nowAt := time.Date(2025, 1, 6, 15, 0, 0, 0, time.UTC)
+	s.scheduledNotifierTick(nowAt)
+	if fake.count() != 0 {
+		t.Fatalf("first sight of the schedule replayed a past slot: %d sends, want 0", fake.count())
+	}
+	fired, found, err := s.scheduledLastFired("fresh", testNotifierName)
+	if err != nil || !found {
+		t.Fatalf("scheduledLastFired: %v, found=%v — first sight must seed the state row", err, found)
+	}
+	if !fired.Equal(time.Date(2025, 1, 6, 9, 0, 0, 0, time.UTC)) {
+		t.Fatalf("seeded slot = %v, want today's 09:00", fired)
+	}
+
+	// The next occurrence fires normally.
+	s.scheduledNotifierTick(time.Date(2025, 1, 7, 9, 0, 30, 0, time.UTC))
+	if fake.count() != 1 {
+		t.Fatalf("next day's slot sent %d messages, want 1", fake.count())
+	}
+}
+
+// Slots that pass while a schedule is paused are skipped, not queued: the
+// re-enable must wait for its next occurrence instead of replaying whatever
+// slot last passed during the pause.
+func TestScheduledNotifierPausedScheduleSkipsSlotsUntilReEnabled(t *testing.T) {
+	registerScheduledReport("pause-skip-report", func(context.Context, *Server) (*notify.Message, bool, error) {
+		return &notify.Message{Title: "report", Body: "body"}, true, nil
+	})
+	fake := newFakeSlackServer(t)
+	schedule := types.ScheduledNotificationConfig{ID: "paused", Report: "pause-skip-report", Via: []string{testNotifierName}, At: "09:00"}
+	s, _ := newScheduledNotifierTestServer(t, fake.server.URL, []types.ScheduledNotificationConfig{schedule})
+
+	// Arm and fire once while enabled.
+	s.scheduledNotifierTick(time.Date(2025, 1, 6, 8, 30, 0, 0, time.UTC))
+	s.scheduledNotifierTick(time.Date(2025, 1, 6, 9, 30, 0, 0, time.UTC))
+	if fake.count() != 1 {
+		t.Fatalf("enabled slot sent %d messages, want 1", fake.count())
+	}
+
+	// Pause; the next day's slot passes silently but advances the state.
+	disabled := false
+	s.hubCfg.Notifications.Scheduled[0].Enabled = &disabled
+	s.scheduledNotifierTick(time.Date(2025, 1, 7, 9, 30, 0, 0, time.UTC))
+	if fake.count() != 1 {
+		t.Fatalf("paused slot sent %d messages, want still 1", fake.count())
+	}
+
+	// Re-enable after the slot: nothing to replay, next occurrence fires.
+	enabled := true
+	s.hubCfg.Notifications.Scheduled[0].Enabled = &enabled
+	s.scheduledNotifierTick(time.Date(2025, 1, 7, 15, 0, 0, 0, time.UTC))
+	if fake.count() != 1 {
+		t.Fatalf("re-enable replayed the slot that passed while paused: %d sends, want 1", fake.count())
+	}
+	s.scheduledNotifierTick(time.Date(2025, 1, 8, 9, 0, 30, 0, time.UTC))
+	if fake.count() != 2 {
+		t.Fatalf("next slot after re-enable sent %d messages, want 2", fake.count())
 	}
 }

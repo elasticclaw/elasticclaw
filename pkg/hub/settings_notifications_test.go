@@ -748,6 +748,21 @@ func TestSettingsPatchAllowsUnchangedUnknownScheduledReport(t *testing.T) {
 		t.Fatalf("re-saving the stored schedule = %d, want 200; body = %s", rr.Code, rr.Body.String())
 	}
 
+	// Pausing it goes through: only the report name is pinned to the stored
+	// value, every other edit to the entry — the pause the doctor's "pause
+	// before upgrading" guidance depends on, a re-route, a new slot — is the
+	// operator's to make.
+	paused := []byte(`{"notifications":{"notifiers":` + notifiers +
+		`,"scheduled":[{"id":"legacy","report":"report-from-another-build","via":["eng"],"at":"09:00","weekdays":[],"enabled":false}]}}`)
+	rr = httptest.NewRecorder()
+	s.patchSettings(rr, httptest.NewRequest(http.MethodPatch, "/api/settings", bytes.NewReader(paused)))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("pausing the stored schedule = %d, want 200; body = %s", rr.Code, rr.Body.String())
+	}
+	if sched := s.hubCfg.Notifications.Scheduled; len(sched) != 1 || sched[0].Enabled == nil || *sched[0].Enabled {
+		t.Fatalf("pause did not persist: %#v", sched)
+	}
+
 	// And the repair — deleting it — goes through too.
 	removed := []byte(`{"notifications":{"notifiers":` + notifiers + `,"scheduled":[]}}`)
 	rr = httptest.NewRecorder()
@@ -761,5 +776,46 @@ func TestSettingsPatchAllowsUnchangedUnknownScheduledReport(t *testing.T) {
 	}
 	if len(diskCfg.Notifications.Scheduled) != 0 {
 		t.Fatalf("disk scheduled = %#v, want it deleted", diskCfg.Notifications.Scheduled)
+	}
+}
+
+// A PATCH that omits the `scheduled` key entirely comes from a client that
+// never saw the field (an older screen, a hand-written notifiers-only PATCH),
+// not from one asking to delete every schedule: the stored schedules must be
+// carried forward, exactly as the empty-routes guard preserves the lifecycle
+// channel binding. Deleting is expressed as a present, empty list.
+func TestSettingsPatchWithoutScheduledKeyKeepsStoredSchedules(t *testing.T) {
+	registerScheduledReport("carry-forward-report", func(context.Context, *Server) (*notify.Message, bool, error) {
+		return nil, false, nil
+	})
+	path := filepath.Join(t.TempDir(), "hub.yaml")
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", path)
+	s, _ := NewTestServerWithConfig(t, &types.HubConfig{Notifications: &types.NotificationsConfig{
+		Notifiers: map[string]types.NotifierConfig{
+			"eng": {Type: "slack", Settings: map[string]any{"channel": "C0123ABCD", "token_secret": "slack_token"}},
+		},
+		Scheduled: []types.ScheduledNotificationConfig{
+			{ID: "morning", Report: "carry-forward-report", Via: []string{"eng"}, At: "09:00"},
+		},
+	}}, "", "", "")
+	if err := config.SaveHubConfig(s.hubCfg); err != nil {
+		t.Fatal(err)
+	}
+
+	body := []byte(`{"notifications":{"notifiers":{"eng":{"type":"slack","channel":"C0999NEW","token_secret":"slack_token"}}}}`)
+	rr := httptest.NewRecorder()
+	s.patchSettings(rr, httptest.NewRequest(http.MethodPatch, "/api/settings", bytes.NewReader(body)))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body = %s", rr.Code, rr.Body.String())
+	}
+	diskCfg, err := config.LoadHubConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(diskCfg.Notifications.Scheduled) != 1 || diskCfg.Notifications.Scheduled[0].ID != "morning" {
+		t.Fatalf("a scheduled-less patch wiped the stored schedules: %#v", diskCfg.Notifications.Scheduled)
+	}
+	if got, _ := diskCfg.Notifications.Notifiers["eng"].Settings["channel"].(string); got != "C0999NEW" {
+		t.Fatalf("the notifier edit itself did not land: channel = %q", got)
 	}
 }
