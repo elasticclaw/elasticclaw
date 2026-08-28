@@ -4697,8 +4697,12 @@ function browserTimezone(): string {
 
 // The result of probing one scheduled report. `payload` is set only by a dry
 // run — the rendered message the hub would post, shown instead of sending it.
+// `mode` records WHICH probe this state belongs to: Preview and Send now share
+// one slot per schedule, so the busy label has to land on the button that was
+// actually clicked rather than on whichever one renders it.
 type ReportTestState = {
   status: "sending" | "ok" | "error"
+  mode: "preview" | "send"
   message: string
   payload?: unknown
 }
@@ -5112,7 +5116,7 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
       // The pause notice is deliberately NOT cleared by re-adding the channel:
       // the schedule it names is still disabled, and only the operator turning
       // it back on makes it fire again. The notice rewords itself once the via
-      // resolves — see schedulePauseText.
+      // resolves — see schedulePauseNotices.
     }
     setSaveErrors((current) => { const { [name]: _cleared, ...rest } = current; return rest })
     setDetachedSaveError("")
@@ -5159,7 +5163,6 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
       }
       return { ...schedule, via }
     })
-    setSchedulePause(null)
     const generation = saveGeneration.current
     const { persisted, message: failure } = await savePatch({
       notifiers: nextNotifiers,
@@ -5175,7 +5178,16 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
       // "Posts to eng". saveSchedule/removeSchedule invalidate for the same
       // reason; this is the third way a schedule's destinations change.
       touchedIds.forEach(invalidateReportTest)
-      if (pausedIds.length > 0) setSchedulePause({ ids: pausedIds, channel: name })
+      // Merged into whatever is already on screen rather than replacing it: a
+      // notice about the reports the LAST removal paused is still the only
+      // record of why they are off, and this delete did not answer it. Only a
+      // second removal of the same channel name supersedes its own notice.
+      if (pausedIds.length > 0) {
+        setSchedulePauses((current) => [
+          ...current.filter((pause) => pause.channel !== name),
+          { ids: pausedIds, channel: name },
+        ])
+      }
     }
     setSaveErrors((current) => { const { [name]: _cleared, ...rest } = current; return rest })
     if (generation !== saveGeneration.current) {
@@ -5240,6 +5252,13 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
   const [showSchedule, setShowSchedule] = useState(false)
   const [scheduleMode, setScheduleMode] = useState<"add" | "edit">("add")
   const [editScheduleId, setEditScheduleId] = useState<string | null>(null)
+  // Which ROW the editor is on. The hub tolerates a hand-written config that
+  // stores the same id twice, so an id is not an address: matching on it would
+  // edit, toggle or delete both rows at once — and a toggle that flips both is
+  // then rejected by the hub's own duplicate-id check, leaving the screen with
+  // no way to reach either row. Every card action carries its index instead;
+  // `editScheduleId` stays for the heading, which only has to name the report.
+  const [editScheduleIndex, setEditScheduleIndex] = useState<number | null>(null)
   const [formScheduleId, setFormScheduleId] = useState("")
   const [formReport, setFormReport] = useState(SCHEDULED_REPORTS[0].id)
   const [formVia, setFormVia] = useState<string[]>([])
@@ -5267,7 +5286,11 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
   // must not erase a notice about reports that are still paused, and re-adding
   // a channel by the same name answers only half the instruction — the report
   // still has to be turned back on by hand.
-  const [schedulePause, setSchedulePause] = useState<{ ids: string[]; channel: string } | null>(null)
+  // One entry PER REMOVED CHANNEL, because each notice names the channel that
+  // caused it: deleting `ops` while the notice about `eng` is still on screen
+  // has to add a second notice, not replace the only record of why the first
+  // batch of reports is off.
+  const [schedulePauses, setSchedulePauses] = useState<{ ids: string[]; channel: string }[]>([])
   const [reportTests, setReportTests] = useState<Record<string, ReportTestState>>({})
   // Invalidates an in-flight probe whose schedule has meanwhile been edited or
   // deleted: its result describes a report that went somewhere else.
@@ -5298,6 +5321,7 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
     const report = SCHEDULED_REPORTS[0].id
     setScheduleMode("add")
     setEditScheduleId(null)
+    setEditScheduleIndex(null)
     setFormReport(report)
     setFormScheduleId(suggestScheduleId(report))
     // One channel is an unambiguous default; more than one is a choice.
@@ -5311,11 +5335,12 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
     setShowSchedule(true)
   }
 
-  const openEditSchedule = (schedule: ScheduledNotificationView) => {
+  const openEditSchedule = (schedule: ScheduledNotificationView, index: number) => {
     loadZones()
     saveGeneration.current++
     setScheduleMode("edit")
     setEditScheduleId(schedule.id)
+    setEditScheduleIndex(index)
     setFormScheduleId(schedule.id)
     setFormReport(schedule.report)
     // Seeded on the resolved names, the same ones the checkboxes are keyed by:
@@ -5359,8 +5384,8 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
       weekdays: formWeekdays,
       enabled: formScheduleEnabled,
     }
-    const next = editScheduleId
-      ? schedules.map((schedule) => (schedule.id === editScheduleId ? entry : schedule))
+    const next = editScheduleIndex !== null
+      ? schedules.map((schedule, i) => (i === editScheduleIndex ? entry : schedule))
       : [...schedules, entry]
     const generation = saveGeneration.current
     const { persisted, message } = await savePatch({ scheduled: next })
@@ -5378,6 +5403,12 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
       // land elsewhere. A rejected EDIT left the schedule in place and its card
       // carries the reason; a rejected ADD created no schedule, so there is no
       // card to key it by and it goes to the banner above the list.
+      // Keyed on `persisted`, not `message`, for the reason toggleSchedule
+      // spells out: a PATCH the hub accepted whose follow-up re-read failed
+      // saved the report, and calling that `Adding report "x" failed` invites a
+      // re-add that collides on the id. The reload failure goes to the banner
+      // verbatim instead of blaming the save.
+      if (persisted) { setDetachedScheduleError(message ?? ""); return }
       if (message) {
         if (schedules.some((schedule) => schedule.id === id)) {
           setScheduleSaveErrors((current) => ({ ...current, [id]: message }))
@@ -5395,25 +5426,25 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
     setScheduleSaveErrors((current) => { const { [id]: _cleared, ...rest } = current; return rest })
   }
 
-  // Drops ONE schedule from the pause notice: re-enabling, editing or deleting
+  // Drops ONE schedule from the pause notices: re-enabling, editing or deleting
   // it answers the pause for that report. Every other id stays — a save on an
   // unrelated schedule is not an answer to theirs, and the notice is the only
-  // record that this screen turned them off.
+  // record that this screen turned them off. A notice left with no ids is gone.
   function forgetSchedulePause(id: string) {
-    setSchedulePause((current) => {
-      if (!current) return null
-      const ids = current.ids.filter((other) => other !== id)
-      return ids.length > 0 ? { ...current, ids } : null
-    })
+    setSchedulePauses((current) =>
+      current
+        .map((pause) => ({ ...pause, ids: pause.ids.filter((other) => other !== id) }))
+        .filter((pause) => pause.ids.length > 0),
+    )
   }
 
-  async function removeSchedule(id: string) {
+  async function removeSchedule(id: string, index: number) {
     // Snapshotted for the same reason saveSchedule and removeChannel do it: a
     // rejected delete whose dialog has meanwhile been replaced has to report
     // onto the surviving schedule's card, since scheduleError renders only
     // inside the dialog that is no longer there.
     const generation = saveGeneration.current
-    const { persisted, message } = await savePatch({ scheduled: schedules.filter((schedule) => schedule.id !== id) })
+    const { persisted, message } = await savePatch({ scheduled: schedules.filter((_, i) => i !== index) })
     if (persisted) {
       invalidateReportTest(id)
       clearScheduleSaveError(id)
@@ -5422,7 +5453,10 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
     setDetachedScheduleError("")
     if (generation !== saveGeneration.current) {
       // A rejected delete left the schedule in place, so its card carries the
-      // reason; a successful one has no card and needs none.
+      // reason; a successful one has no card and needs none — so a reload
+      // failure after a delete the hub accepted goes to the banner verbatim
+      // rather than writing "Last save failed" onto a card that is gone.
+      if (persisted) { setDetachedScheduleError(message ?? ""); return }
       if (message) setScheduleSaveErrors((current) => ({ ...current, [id]: message }))
       return
     }
@@ -5430,9 +5464,9 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
     setShowSchedule(false)
   }
 
-  async function toggleSchedule(schedule: ScheduledNotificationView, value: boolean) {
+  async function toggleSchedule(schedule: ScheduledNotificationView, index: number, value: boolean) {
     const { persisted, message } = await savePatch({
-      scheduled: schedules.map((other) => (other.id === schedule.id ? { ...other, enabled: value } : other)),
+      scheduled: schedules.map((other, i) => (i === index ? { ...other, enabled: value } : other)),
     })
     // The cleanup follows `persisted`, not `message`, exactly as saveSchedule
     // and removeSchedule do: a PATCH the hub accepted whose follow-up re-read
@@ -5462,14 +5496,15 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
     const targets = schedule.via.map(viaName).filter((via) => notifiers[via])
     if (targets.length === 0) return
     const generation = reportTestGeneration.current[schedule.id] ?? 0
-    const settle = (state: ReportTestState) =>
+    const mode = dryRun ? "preview" : "send"
+    const settle = (state: Omit<ReportTestState, "mode">) =>
       setReportTests((current) => {
         // A superseded result is dropped rather than written: whatever sits
         // under this id now belongs to the probe that replaced this one.
         if (generation !== (reportTestGeneration.current[schedule.id] ?? 0)) return current
-        return { ...current, [schedule.id]: state }
+        return { ...current, [schedule.id]: { ...state, mode } }
       })
-    setReportTests((current) => ({ ...current, [schedule.id]: { status: "sending", message: "" } }))
+    setReportTests((current) => ({ ...current, [schedule.id]: { status: "sending", mode, message: "" } }))
     if (dryRun) {
       try {
         const { empty, payload } = await sendScheduledReportTest(schedule.report, targets[0], true)
@@ -5526,20 +5561,25 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
   // last one left; buildPatch clears `enabled` rather than failing the save.
   const otherRoutedCount = routes.filter((route) => route.via !== editName && notifiers[route.via]).length
 
-  // The pause notice, derived from the config as it stands now. A report the
+  // The pause notices, derived from the config as it stands now. A report a
   // notice named that is enabled again — or gone — has answered it, and a
   // channel re-added under the same name resolves the via without un-pausing
-  // anything, so only the second half of the instruction still holds.
-  const pausedByRemoval = schedulePause
-    ? schedules.filter((schedule) => !schedule.enabled && schedulePause.ids.includes(schedule.id))
-    : []
-  const schedulePauseText = schedulePause && pausedByRemoval.length > 0
-    ? `Paused ${pausedByRemoval.map((schedule) => schedule.id).join(", ")} — "${schedulePause.channel}" was the only channel ${pausedByRemoval.length === 1 ? "it posts" : "they post"} to. ${
-      notifiers[schedulePause.channel]
-        ? "A channel by that name exists again: open Edit and turn the report back on."
-        : "Open Edit, pick another channel and turn the report back on."
-    }`
-    : ""
+  // anything, so only the second half of the instruction still holds. A notice
+  // whose reports have all answered it renders nothing.
+  const schedulePauseNotices = schedulePauses
+    .map((pause) => ({
+      channel: pause.channel,
+      paused: schedules.filter((schedule) => !schedule.enabled && pause.ids.includes(schedule.id)),
+    }))
+    .filter((notice) => notice.paused.length > 0)
+    .map((notice) => ({
+      channel: notice.channel,
+      text: `Paused ${notice.paused.map((schedule) => schedule.id).join(", ")} — "${notice.channel}" was the only channel ${notice.paused.length === 1 ? "it posts" : "they post"} to. ${
+        notifiers[notice.channel]
+          ? "A channel by that name exists again: open Edit and turn the report back on."
+          : "Open Edit, pick another channel and turn the report back on."
+      }`,
+    }))
 
   return (
     <div className="space-y-6">
@@ -5844,12 +5884,15 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
           </div>
         </div>
 
-        {schedulePauseText && (
-          <div className="flex items-start gap-2 rounded-md border border-amber-500/20 bg-amber-500/10 px-3 py-2 text-xs text-amber-400">
+        {schedulePauseNotices.map((notice) => (
+          <div
+            key={notice.channel}
+            className="flex items-start gap-2 rounded-md border border-amber-500/20 bg-amber-500/10 px-3 py-2 text-xs text-amber-400"
+          >
             <AlertTriangle className="size-3.5 mt-px shrink-0" />
-            <span className="break-words">{schedulePauseText}</span>
+            <span className="break-words">{notice.text}</span>
           </div>
-        )}
+        ))}
         {detachedScheduleError && (
           <div className="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
             <AlertTriangle className="size-3.5 mt-px shrink-0" />
@@ -5865,7 +5908,9 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
           </p>
         ) : (
           <div className="space-y-2">
-            {schedules.map((schedule) => {
+            {/* Keyed by position, not id: the hub tolerates a stored duplicate
+                id, and two cards sharing a React key collapse into one. */}
+            {schedules.map((schedule, index) => {
               const test = reportTests[schedule.id]
               // Resolved names, matching the hub: " eng " is delivered to the
               // channel `eng`, so the card must not flag it as missing — and
@@ -5873,8 +5918,11 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
               const missingVia = schedule.via.map(viaName).filter((via) => !notifiers[via])
               const targets = schedule.via.map(viaName).filter((via) => notifiers[via])
               const canTest = targets.length > 0 && !saving && test?.status !== "sending"
+              // Which probe is in flight, so "Working…" replaces the label of
+              // the button that was clicked and not the other one's.
+              const running = test?.status === "sending" ? test.mode : null
               return (
-                <div key={schedule.id} className="border border-border rounded-lg p-4">
+                <div key={`${index}-${schedule.id}`} className="border border-border rounded-lg p-4">
                   <div className="flex items-start justify-between gap-3">
                     <div className="min-w-0">
                       <div className="flex items-center gap-2 flex-wrap">
@@ -5914,7 +5962,7 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
                       <Switch
                         checked={schedule.enabled}
                         disabled={saving}
-                        onCheckedChange={(checked) => toggleSchedule(schedule, checked)}
+                        onCheckedChange={(checked) => toggleSchedule(schedule, index, checked)}
                         aria-label={`Enable the ${schedule.id} report`}
                       />
                       {/* Disabled while a save is in flight for the same reason
@@ -5922,7 +5970,7 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
                           the pre-save snapshot, so opening it mid-save would
                           hand the next save a stale copy of the change that is
                           still landing. */}
-                      <Button size="sm" variant="ghost" disabled={saving} onClick={() => openEditSchedule(schedule)}>Edit</Button>
+                      <Button size="sm" variant="ghost" disabled={saving} onClick={() => openEditSchedule(schedule, index)}>Edit</Button>
                     </div>
                   </div>
                   <div className="flex items-center gap-2 mt-3">
@@ -5935,7 +5983,7 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
                       onClick={() => runReportTest(schedule, true)}
                     >
                       <Eye className="size-3.5" />
-                      Preview
+                      {running === "preview" ? "Working…" : "Preview"}
                     </Button>
                     <Button
                       size="sm"
@@ -5946,7 +5994,7 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
                       onClick={() => runReportTest(schedule, false)}
                     >
                       <Send className="size-3.5" />
-                      {test?.status === "sending" ? "Working…" : "Send now"}
+                      {running === "send" ? "Working…" : "Send now"}
                     </Button>
                     {targets.length === 0 && (
                       <span className="text-xs text-muted-foreground">
@@ -6466,13 +6514,13 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
               </div>
             )}
             <div className="flex items-center justify-between px-5 py-4">
-              {scheduleMode === "edit" && editScheduleId && (
+              {scheduleMode === "edit" && editScheduleId && editScheduleIndex !== null && (
                 <Button
                   size="sm"
                   variant="ghost"
                   className="text-destructive hover:text-destructive"
                   disabled={saving}
-                  onClick={() => removeSchedule(editScheduleId)}
+                  onClick={() => removeSchedule(editScheduleId, editScheduleIndex)}
                 >
                   <Trash2 className="size-3.5 mr-1" /> Remove
                 </Button>
