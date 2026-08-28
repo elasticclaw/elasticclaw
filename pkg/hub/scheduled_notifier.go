@@ -229,9 +229,18 @@ func (s *Server) runScheduledDelivery(ctx context.Context, nowAt time.Time, cfg 
 	}
 	builder, found := scheduledReport(schedule.Report)
 	if !found {
-		log.Printf("[notify] scheduled report %q is not registered", schedule.Report)
+		// A report this build does not carry is a state validation deliberately
+		// keeps saveable (scheduledReportUnchanged): fired never advances, so
+		// this branch re-runs every minute for the life of the process. Warn
+		// once per (schedule, report) — the NUL joiner is the same state-key
+		// hygiene as scheduledStateKey — instead of the unbounded per-minute
+		// repetition the build-failure branch below is explicitly capped to
+		// avoid; the key clears the moment the report becomes registered.
+		s.logPollWarningOnce(scheduledReportWarningKey(schedule),
+			"[notify] scheduled report %q is not registered", schedule.Report)
 		return
 	}
+	s.clearPollWarning(scheduledReportWarningKey(schedule))
 	buildCtx, cancelBuild := context.WithTimeout(ctx, scheduledSendTimeout)
 	message, hasReport, err := builder(buildCtx, s)
 	cancelBuild()
@@ -445,6 +454,13 @@ func scheduledNotificationSlot(nowAt time.Time, schedule types.ScheduledNotifica
 		}
 	}
 	return time.Time{}, false
+}
+
+// scheduledReportWarningKey keys the once-per-process "not registered" warning
+// for a schedule's report. The report name is part of the key so editing a
+// schedule from one unregistered report to another still logs the new name.
+func scheduledReportWarningKey(schedule types.ScheduledNotificationConfig) string {
+	return "scheduled-report:" + schedule.ID + "\x00" + schedule.Report
 }
 
 const scheduledStateKeyPrefix = "scheduled:last_fired:"

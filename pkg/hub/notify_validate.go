@@ -191,6 +191,17 @@ func notifierPipelineReferences(factories []*types.FactoryConfig) map[string][]s
 // writes the notifier out of hub.yaml, and executeNotifyAction then drops
 // every stage notification with nothing but a warning in the claw
 // conversation.
+//
+// Enabled scheduled reports are guarded the same way: persisting a patch that
+// removes a notifier an ENABLED schedule's via still names (the schedule
+// carried forward, or re-sent verbatim, so scheduledEntryUnchanged exempts it
+// from validation) yields exactly the config the scheduler tick's validity
+// gate rejects — pausing EVERY scheduled report hub-wide with one log line as
+// the only signal. Only patch-introduced dangling is charged: the via must
+// have resolved in `current`, so a hand-written hub.yaml that already carries
+// a dangling via never bricks unrelated saves, and the screen's removeChannel
+// — which rewrites or pauses affected schedules in the same patch — keeps
+// working.
 func validateNotifierRemovals(current, patch *types.NotificationsConfig, factories []*types.FactoryConfig) error {
 	if current == nil || patch == nil {
 		return nil
@@ -206,6 +217,17 @@ func validateNotifierRemovals(current, patch *types.NotificationsConfig, factori
 	}
 	sort.Strings(removed)
 	references := notifierPipelineReferences(factories)
+	for _, scheduled := range patch.Scheduled {
+		if scheduled.Enabled != nil && !*scheduled.Enabled {
+			continue
+		}
+		for _, via := range scheduled.Via {
+			// TrimSpace matches how the scheduler and its validity gate
+			// resolve the via.
+			trimmed := strings.TrimSpace(via)
+			references[trimmed] = append(references[trimmed], fmt.Sprintf("scheduled report %q", scheduled.ID))
+		}
+	}
 	var problems []string
 	for _, name := range removed {
 		used := references[name]
@@ -218,7 +240,7 @@ func validateNotifierRemovals(current, patch *types.NotificationsConfig, factori
 	if len(problems) == 0 {
 		return nil
 	}
-	return fmt.Errorf("notifications.notifiers: cannot remove a notifier a pipeline still notifies through: %s", strings.Join(problems, "; "))
+	return fmt.Errorf("notifications.notifiers: cannot remove a notifier still in use: %s", strings.Join(problems, "; "))
 }
 
 // configuredNotifiers returns the notifier set defined under

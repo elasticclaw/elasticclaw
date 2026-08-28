@@ -173,6 +173,51 @@ func TestPendingPRsScheduledReportDeduplicatesPRSharedAcrossRuns(t *testing.T) {
 	}
 }
 
+// PR state is resolved across rows per (repo, pr_number): pr_watcher only
+// visits live claws, so a run can strand an (open, merged=0) row for a PR
+// another run's row already records as merged or closed. Such a zombie row
+// must not surface the ticket — with no time window it would occupy the
+// oldest-first cap forever.
+func TestPendingPRsScheduledReportResolvesPRStateAcrossRuns(t *testing.T) {
+	s, db := newTaskRunAnalyticsAPITestServer(t)
+	nowAt := time.Now()
+	insertPendingPRReportRun(t, db, "run-a", "ENG-1", "eng", "Merged ticket", nowAt.Add(-48*time.Hour), 1)
+	insertPendingPRReportRun(t, db, "run-b", "ENG-1", "eng", "Merged ticket", nowAt.Add(-24*time.Hour), 0)
+	// run-a's row is stranded open; run-b knows the same PR merged.
+	insertPendingPRReportPR(t, db, "run-a", 7, "open", false, nowAt.Add(-48*time.Hour))
+	insertPendingPRReportPR(t, db, "run-b", 7, "closed", true, nowAt.Add(-48*time.Hour))
+
+	message, ok, err := buildPendingPRsScheduledReport(context.Background(), s)
+	if err != nil || ok || message != nil {
+		t.Fatalf("build report = %#v, %v, %v, want nil, false, nil — the only 'open' PR is recorded merged elsewhere", message, ok, err)
+	}
+}
+
+// The render filter applies the same cross-row resolution tenant-wide: a
+// ticket that qualifies via a genuinely open PR must not also render a zombie
+// row whose resolving row belongs to another ticket's run.
+func TestPendingPRsScheduledReportRenderSkipsPRResolvedOnAnotherTicket(t *testing.T) {
+	s, db := newTaskRunAnalyticsAPITestServer(t)
+	nowAt := time.Now()
+	insertPendingPRReportRun(t, db, "run-a", "ENG-1", "eng", "Half zombie", nowAt.Add(-48*time.Hour), 2)
+	insertPendingPRReportPR(t, db, "run-a", 7, "open", false, nowAt.Add(-48*time.Hour))
+	insertPendingPRReportPR(t, db, "run-a", 8, "open", false, nowAt.Add(-24*time.Hour))
+	// A run of a DIFFERENT ticket records #7 merged.
+	insertPendingPRReportRun(t, db, "run-other", "ENG-2", "eng", "Other ticket", nowAt.Add(-12*time.Hour), 0)
+	insertPendingPRReportPR(t, db, "run-other", 7, "closed", true, nowAt.Add(-12*time.Hour))
+
+	message, ok, err := buildPendingPRsScheduledReport(context.Background(), s)
+	if err != nil || !ok {
+		t.Fatalf("build report = %v, %v, want report", ok, err)
+	}
+	if message.Summary[0] != "1 tickets with open PRs" {
+		t.Fatalf("summary = %q, want only the genuinely pending ticket counted", message.Summary[0])
+	}
+	if !strings.Contains(message.Body, "#8 ") || strings.Contains(message.Body, "#7 ") {
+		t.Fatalf("body = %q, want #8 rendered and the resolved #7 skipped", message.Body)
+	}
+}
+
 func insertPendingPRReportExcludedRun(t *testing.T, db *sql.DB, runID, issueID string, requiresPR, analyticsEnabled *bool, startedAt time.Time) {
 	t.Helper()
 	insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{

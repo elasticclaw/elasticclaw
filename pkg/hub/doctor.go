@@ -1223,12 +1223,29 @@ func (s *Server) checkNotifications(cfg *types.HubConfig) []DoctorCheck {
 		return nil
 	}
 	var checks []DoctorCheck
-	if err := types.ValidateNotificationsConfig(nCfg); err != nil {
+	// The two per-feature validators, not the composed one: each minute tick
+	// gates on the validity of its own feature's config only, so a defect
+	// confined to the lifecycle block pauses lifecycle alerts while scheduled
+	// reports keep delivering, and vice versa. One composed "no notifications
+	// will be delivered" row would be wrong in both directions; these two rows
+	// each describe exactly what its tick's gate actually pauses, mirroring
+	// the two tick log lines.
+	if err := types.ValidateLifecycleNotificationsConfig(nCfg); err != nil {
 		checks = append(checks, DoctorCheck{
 			Category:    "notifications",
 			Severity:    "critical",
-			Title:       "Notifications config invalid",
-			Description: "No notifications will be delivered until this is fixed in hub.yaml.",
+			Title:       "Lifecycle notifications config invalid",
+			Description: "No lifecycle notifications will be delivered until this is fixed in hub.yaml.",
+			OK:          false,
+			Error:       err.Error(),
+		})
+	}
+	if err := types.ValidateScheduledNotificationsConfig(nCfg); err != nil {
+		checks = append(checks, DoctorCheck{
+			Category:    "notifications",
+			Severity:    "critical",
+			Title:       "Scheduled reports config invalid",
+			Description: "No scheduled reports will be delivered until this is fixed in hub.yaml.",
 			OK:          false,
 			Error:       err.Error(),
 		})
@@ -1380,6 +1397,20 @@ func (s *Server) checkNotifications(cfg *types.HubConfig) []DoctorCheck {
 			}
 		}
 		if badVia {
+			continue
+		}
+		// The slot fields (at/timezone/weekdays) the destination checks above
+		// never touch: an invalid one fails the scheduled tick's validity gate
+		// — pausing EVERY schedule, not just this one — so the very entry
+		// causing the pause must not get the green row below. Runs after the
+		// via checks so their more specific rows keep precedence.
+		if err := types.ValidateScheduledNotification(nCfg, i); err != nil {
+			checks = append(checks, DoctorCheck{
+				Category: "notifications", Severity: "critical", OK: false,
+				Title:       label + " is invalid",
+				Description: "The scheduled notifier pauses every schedule while any entry fails validation; fix or remove this one.",
+				Error:       err.Error(),
+			})
 			continue
 		}
 		checks = append(checks, DoctorCheck{

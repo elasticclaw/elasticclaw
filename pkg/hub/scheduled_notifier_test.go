@@ -680,6 +680,47 @@ func TestScheduledNotifierBuildFailureRetriesThenBurnsSlot(t *testing.T) {
 	}
 }
 
+// A schedule naming a report this build does not carry (a hub.yaml written
+// against a newer or older binary — a state validation deliberately keeps
+// saveable) never advances its dedupe state, so the branch re-runs every
+// minute: the "not registered" line must be logged once, not per tick, and
+// must clear the moment the report becomes registered.
+func TestScheduledNotifierUnregisteredReportWarnsOnceAndRecovers(t *testing.T) {
+	fake := newFakeSlackServer(t)
+	schedule := types.ScheduledNotificationConfig{ID: "future", Report: "report-from-a-newer-build", Via: []string{testNotifierName}, At: "09:00"}
+	s, _ := newScheduledNotifierTestServer(t, fake.server.URL, []types.ScheduledNotificationConfig{schedule})
+
+	s.scheduledNotifierTick(context.Background(), time.Date(2025, 1, 6, 8, 30, 0, 0, time.UTC))
+	for i := 0; i < 3; i++ {
+		s.scheduledNotifierTick(context.Background(), time.Date(2025, 1, 6, 9, 30+i, 0, 0, time.UTC))
+	}
+	if fake.count() != 0 {
+		t.Fatalf("unregistered report sent %d messages, want 0", fake.count())
+	}
+	s.pollWarningMu.Lock()
+	_, warned := s.pollWarnings[scheduledReportWarningKey(schedule)]
+	s.pollWarningMu.Unlock()
+	if !warned {
+		t.Fatal("unregistered report did not record its warn-once key; the line would repeat every minute")
+	}
+
+	// The upgrade lands: the report registers, the pending slot delivers, and
+	// the warning key clears so a later disappearance logs again.
+	registerScheduledReport("report-from-a-newer-build", func(context.Context, *Server) (*notify.Message, bool, error) {
+		return &notify.Message{Title: "report", Body: "body"}, true, nil
+	})
+	s.scheduledNotifierTick(context.Background(), time.Date(2025, 1, 6, 9, 34, 0, 0, time.UTC))
+	if fake.count() != 1 {
+		t.Fatalf("registered report sent %d messages, want the pending slot delivered", fake.count())
+	}
+	s.pollWarningMu.Lock()
+	_, warned = s.pollWarnings[scheduledReportWarningKey(schedule)]
+	s.pollWarningMu.Unlock()
+	if warned {
+		t.Fatal("warning key survived the report becoming registered")
+	}
+}
+
 // Semantically identical slot definitions must produce identical digests:
 // normalizeScheduledTimes zero-pads a hand-written "9:00" on any settings
 // save, and the edit dialog seeds an absent timezone as "UTC" — neither

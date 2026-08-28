@@ -39,6 +39,12 @@ type scheduledPendingPRTicket struct {
 // unknown, not 1970 — such rows are excluded from MIN so a ticket carrying
 // only unknowns gets a NULL oldest_open_at and sorts last, never displacing a
 // genuinely old ticket from the cap.
+// PR state is resolved ACROSS rows per (repo, pr_number), mirroring the
+// claw_prs backfill in db.go: pr_watcher only visits live claws, so a run can
+// hold a stranded (open, merged=0) row for a PR another run's row already
+// records as merged or closed — and with no time window (correctly, per the
+// report's contract) such a zombie row would otherwise surface the ticket
+// forever, oldest-first, permanently occupying the cap.
 const scheduledPendingPRsTicketsSQL = `
 	SELECT s.integration, s.integration_workspace, s.issue_id,
 	       MIN(CASE WHEN p.opened_at > 0 THEN p.opened_at END) AS oldest_open_at
@@ -46,6 +52,10 @@ const scheduledPendingPRsTicketsSQL = `
 	  JOIN task_run_prs p ON p.tenant_id=s.tenant_id AND p.run_id=s.run_id
 	 WHERE s.tenant_id=? AND s.issue_id != '' AND s.requires_pr=1 AND s.analytics_enabled=1
 	   AND p.state='open' AND p.merged=0
+	   AND NOT EXISTS (
+	       SELECT 1 FROM task_run_prs done
+	        WHERE done.tenant_id=p.tenant_id AND done.repo=p.repo AND done.pr_number=p.pr_number
+	          AND (done.merged=1 OR done.state='closed'))
 	 GROUP BY s.integration, s.integration_workspace, s.issue_id`
 
 func buildPendingPRsScheduledReport(ctx context.Context, s *Server) (*notify.Message, bool, error) {
@@ -107,6 +117,10 @@ func buildPendingPRsScheduledReport(ctx context.Context, s *Server) (*notify.Mes
 	if err != nil {
 		return nil, false, err
 	}
+	resolved, err := s.scheduledPendingPRsResolvedElsewhere(ctx, tenantID, prsByRun)
+	if err != nil {
+		return nil, false, err
+	}
 	var tickets []*scheduledPendingPRTicket
 	for _, ticket := range ticketsByKey {
 		// task_run_prs is unique per (run, repo, pr_number), so a PR carried
@@ -120,6 +134,12 @@ func buildPendingPRsScheduledReport(ctx context.Context, s *Server) (*notify.Mes
 					continue
 				}
 				key := fmt.Sprintf("%s#%d", pr.Repo, pr.PRNumber)
+				// Same cross-row resolution as the ticket query: a stranded
+				// open row must not render a PR any other row for the tenant
+				// records as merged or closed.
+				if resolved[key] {
+					continue
+				}
 				if at, ok := seen[key]; ok {
 					if pr.OpenedAt > 0 && (ticket.prs[at].OpenedAt == 0 || pr.OpenedAt < ticket.prs[at].OpenedAt) {
 						ticket.prs[at] = pr
@@ -178,6 +198,50 @@ func buildPendingPRsScheduledReport(ctx context.Context, s *Server) (*notify.Mes
 		message.Link = notify.Link{URL: hubURL + "/analytics", Label: "View tickets"}
 	}
 	return message, true, nil
+}
+
+// scheduledPendingPRsResolvedElsewhere returns, keyed "repo#number", the PRs
+// among prsByRun's open rows that ANY task_run_prs row for the tenant marks
+// merged or closed. The rows of the capped tickets alone cannot answer this: a
+// zombie open row's resolving row may belong to a run of a ticket outside the
+// cap, so resolution is read tenant-wide — mirroring the ticket query's
+// NOT EXISTS, which alone cannot cover a ticket that qualifies via another,
+// genuinely open PR.
+func (s *Server) scheduledPendingPRsResolvedElsewhere(ctx context.Context, tenantID string, prsByRun map[string][]taskRunAnalyticsPRView) (map[string]bool, error) {
+	conds := make([]string, 0, 8)
+	args := []any{tenantID}
+	seen := map[string]bool{}
+	for _, prs := range prsByRun {
+		for _, pr := range prs {
+			key := fmt.Sprintf("%s#%d", pr.Repo, pr.PRNumber)
+			if pr.State != "open" || pr.Merged || seen[key] {
+				continue
+			}
+			seen[key] = true
+			conds = append(conds, "(repo=? AND pr_number=?)")
+			args = append(args, pr.Repo, pr.PRNumber)
+		}
+	}
+	resolved := map[string]bool{}
+	if len(conds) == 0 {
+		return resolved, nil
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT DISTINCT repo, pr_number FROM task_run_prs
+		 WHERE tenant_id=? AND (merged=1 OR state='closed') AND (`+strings.Join(conds, " OR ")+`)`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var repo string
+		var number int
+		if err := rows.Scan(&repo, &number); err != nil {
+			return nil, err
+		}
+		resolved[fmt.Sprintf("%s#%d", repo, number)] = true
+	}
+	return resolved, rows.Err()
 }
 
 // scheduledPendingPRsBody fits the ticket lines into the body limit by

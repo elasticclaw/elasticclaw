@@ -882,17 +882,28 @@ func validateSettingsNotifications(current, cfg *types.NotificationsConfig) erro
 	for _, scheduled := range cfg.Scheduled {
 		ids[scheduled.ID]++
 	}
+	storedIDs := map[string]int{}
+	if current != nil {
+		for _, scheduled := range current.Scheduled {
+			storedIDs[scheduled.ID]++
+		}
+	}
 	for i, scheduled := range cfg.Scheduled {
+		// A duplicate id the PATCH introduces is charged even when every copy
+		// individually reads as unchanged — two byte-identical re-sends of one
+		// stored entry (a client retry, a double-submit) satisfy
+		// scheduledEntryUnchanged and would otherwise persist the exact
+		// dedupe-row collision the scheduler tick's validity gate pauses every
+		// schedule over. Only patch-introduced duplication is charged (more
+		// copies of an id than the stored list holds): a stored hand-written
+		// duplicate is unrepairable from the screen (the id field is disabled
+		// in edit mode) and must not block unrelated saves.
+		if ids[scheduled.ID] > 1 && ids[scheduled.ID] > storedIDs[scheduled.ID] {
+			return fmt.Errorf("notifications.scheduled[%d]: id %q is duplicated", i, scheduled.ID)
+		}
 		if !scheduledEntryUnchanged(current, scheduled) {
 			if err := types.ValidateScheduledNotification(cfg, i); err != nil {
 				return err
-			}
-			// The duplicate-id check runs against the whole patched list, but
-			// only an entry the patch adds or edits can be charged with it: a
-			// stored duplicate is unrepairable from the screen (the id field
-			// is disabled in edit mode) and must not block unrelated saves.
-			if ids[scheduled.ID] > 1 {
-				return fmt.Errorf("notifications.scheduled[%d]: id %q is duplicated", i, scheduled.ID)
 			}
 		}
 		if scheduledReportUnchanged(current, scheduled) {
@@ -933,6 +944,12 @@ func scheduledEntryUnchanged(current *types.NotificationsConfig, patched types.S
 // list carried forward above) repairs such an entry on the first save from any
 // client, rather than leaving it permanently uneditable from the screen. An
 // unparseable value is left alone for validation to reject by its real text.
+//
+// Runs AFTER validateSettingsNotifications: scheduledEntryUnchanged compares
+// the patch's text against the stored text, so normalizing first would turn a
+// carried-forward "9:00" into an apparent edit and subject an entry the
+// operator never touched to full validation. The dedupe digest is unaffected
+// either way — scheduledSlotDigest normalizes `at` itself.
 func normalizeScheduledTimes(cfg *types.NotificationsConfig) {
 	if cfg == nil {
 		return
@@ -1219,7 +1236,6 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 		if patch.Notifications.Scheduled == nil && s.hubCfg.Notifications != nil {
 			patch.Notifications.Scheduled = append([]types.ScheduledNotificationConfig(nil), s.hubCfg.Notifications.Scheduled...)
 		}
-		normalizeScheduledTimes(patch.Notifications)
 		mergeNotifierSettings(s.hubCfg.Notifications, patch.Notifications)
 		dropRejectedLifecycleDurations(s.hubCfg.Notifications, patch.Notifications)
 		if err := validateSettingsNotifications(s.hubCfg.Notifications, patch.Notifications); err != nil {
@@ -1232,6 +1248,12 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+		// AFTER validation on purpose: normalizing first rewrites the patch's
+		// `at` before scheduledEntryUnchanged compares it against the stored
+		// text, so a stored unpadded "9:00" plus any other structural defect
+		// would read as an edit and 400 every notifications save — the exact
+		// brick the unchanged-entry exemption exists to prevent.
+		normalizeScheduledTimes(patch.Notifications)
 		updatedCfg.Notifications = patch.Notifications
 	}
 
