@@ -8589,6 +8589,25 @@ func (s *Server) enqueueSessionLostResume(clawID, prefix, marker string) {
 		}
 		b.WriteString(".")
 	}
+	// Bridge transport errors are stored as claw messages too, but replaying one
+	// into a fresh session would replace useful progress with outage noise.
+	// Read only the latest substantive agent output; a resume must still proceed
+	// when this best-effort lookup is unavailable.
+	var lastProgress string
+	err = s.db.QueryRow(`SELECT content FROM messages
+		WHERE claw_id=? AND role='claw' AND TRIM(content) != ''
+		AND TRIM(content) NOT LIKE ? AND TRIM(content) NOT LIKE ?
+		ORDER BY created_at DESC, rowid DESC LIMIT 1`,
+		clawID, types.BridgeErrorPrefix+"%", types.BridgeReplayErrorPrefix+"%").Scan(&lastProgress)
+	if err == nil {
+		lastProgress = strings.TrimSpace(lastProgress)
+		const lastProgressLimit = 2000
+		if runeLen(lastProgress) > lastProgressLimit {
+			lastProgress = truncateRunes(lastProgress, lastProgressLimit) + "…(truncated)"
+		}
+		b.WriteString("\n\nYour last reported progress before the reset (for context; it may be incomplete):\n\n")
+		b.WriteString(lastProgress)
+	}
 	b.WriteString("\n\nBefore anything else, recover your state from the workspace: run git status and git log --oneline -15, check which branch you are on and whether there are uncommitted changes or an open PR for it. Then resume the task from where the workspace shows it stopped. Do not start over and do not discard existing work.")
 	// Append a zero-width marker so that two resume prompts for two different
 	// incidents are never treated as the identical pending message by

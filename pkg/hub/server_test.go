@@ -41,6 +41,62 @@ func TestSanitizeBootstrapOutputTruncatesLongOutput(t *testing.T) {
 	}
 }
 
+func TestEnqueueSessionLostResumeIncludesLastSubstantiveClawProgress(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, nil, "", "", "")
+	const clawID = "claw-resume-progress"
+	if _, err := db.Exec(`INSERT INTO claws(id, tenant_id, name, status, bootstrap_ok, issue_title, created_at) VALUES(?,?,?,?,?,?,datetime('now'))`,
+		clawID, "test-tenant-id", "resume progress", "connected", 1, "Fix the gateway"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO messages(id, claw_id, tenant_id, role, content, created_at) VALUES(?,?,?,?,?,datetime('now','-2 seconds'))`,
+		"progress", clawID, "test-tenant-id", "claw", "Completed the reproduction and posted the bug report."); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO messages(id, claw_id, tenant_id, role, content, created_at) VALUES(?,?,?,?,?,datetime('now','-1 seconds'))`,
+		"bridge-error", clawID, "test-tenant-id", "claw", types.BridgeErrorPrefix+" gateway disconnected"); err != nil {
+		t.Fatal(err)
+	}
+
+	s.enqueueSessionLostResume(clawID, restartResumePrefix, "test-marker")
+	var prompt string
+	if err := db.QueryRow(`SELECT content FROM messages WHERE claw_id=? AND role='hub'`, clawID).Scan(&prompt); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(prompt, "Your last reported progress before the reset") || !strings.Contains(prompt, "Completed the reproduction and posted the bug report.") {
+		t.Fatalf("resume prompt omitted substantive progress: %q", prompt)
+	}
+	if !strings.HasSuffix(prompt, "<!-- test-marker -->") {
+		t.Fatalf("resume marker must remain last: %q", prompt)
+	}
+}
+
+func TestEnqueueSessionLostResumeOmitsBridgeErrors(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, nil, "", "", "")
+	const clawID = "claw-resume-errors"
+	if _, err := db.Exec(`INSERT INTO claws(id, tenant_id, name, status, bootstrap_ok, created_at) VALUES(?,?,?,?,?,datetime('now'))`,
+		clawID, "test-tenant-id", "resume errors", "connected", 1); err != nil {
+		t.Fatal(err)
+	}
+	for i, content := range []string{types.BridgeErrorPrefix + " gateway disconnected", types.BridgeReplayErrorPrefix + " gateway disconnected", "   "} {
+		if _, err := db.Exec(`INSERT INTO messages(id, claw_id, tenant_id, role, content, created_at) VALUES(?,?,?,?,?,datetime('now'))`,
+			fmt.Sprintf("bridge-error-%d", i), clawID, "test-tenant-id", "claw", content); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	s.enqueueSessionLostResume(clawID, restartResumePrefix, "errors-marker")
+	var prompt string
+	if err := db.QueryRow(`SELECT content FROM messages WHERE claw_id=? AND role='hub'`, clawID).Scan(&prompt); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(prompt, "Your last reported progress before the reset") {
+		t.Fatalf("resume prompt must omit bridge errors: %q", prompt)
+	}
+	if !strings.HasSuffix(prompt, "<!-- errors-marker -->") {
+		t.Fatalf("resume marker must remain last: %q", prompt)
+	}
+}
+
 func TestCleanWorkspaceFilePath(t *testing.T) {
 	tests := []struct {
 		name    string
