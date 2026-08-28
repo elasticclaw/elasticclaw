@@ -2357,6 +2357,21 @@ func (gs *gatewaySession) abortActiveSession(ctx context.Context) error {
 	return nil
 }
 
+// probeSession verifies that the existing persistent session remains usable
+// without sending another turn. It is deliberately read-only: a lifecycle
+// failure can happen after OpenClaw accepted the original message, so replaying
+// it could duplicate tool side effects.
+func (gs *gatewaySession) probeSession(ctx context.Context) error {
+	key := gs.getSessionKey()
+	if key == "" {
+		return fmt.Errorf("cannot probe session without a session key")
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	_, err := gs.sendReq(probeCtx, "sessions.describe", map[string]string{"key": key})
+	return err
+}
+
 // providerRequestFormatErrorFragment is emitted by OpenClaw when a provider
 // rejects the assembled request schema or tool payload. Session recovery
 // depends on this upstream compatibility string, so keep the coupling explicit.
@@ -2401,8 +2416,8 @@ func isRecoverableSessionLifecycleError(err error) bool {
 
 // isSessionFileLockConflictError detects OpenClaw's "session file changed while
 // embedded prompt lock was released" error. That error indicates the on-disk
-// session transcript was modified unexpectedly, leaving the persistent session
-// in an inconsistent state. Rotating to a fresh session is the only recovery.
+// session transcript was modified unexpectedly. A read-only probe determines
+// whether the persistent session survived before recovery discards it.
 func isSessionFileLockConflictError(err error) bool {
 	if err == nil {
 		return false
@@ -2485,8 +2500,9 @@ func (gs *gatewaySession) SendMessage(ctx context.Context, message string, onChu
 		// was never accepted, so replaying the same message on the same session
 		// is safe. The previous turn is likely still flushing its session file;
 		// back off and retry before considering rotation, which would discard
-		// the transcript. Mid-turn lifecycle lock conflicts are excluded above:
-		// those turns may already have side effects and must not be retried.
+		// the transcript. Mid-turn lifecycle lock conflicts are handled below
+		// with read-only probes only: those turns may already have side effects
+		// and must not be retried.
 		var sendReqErr *sessionSendRequestError
 		if errors.As(err, &sendReqErr) && isSessionFileLockConflictError(err) && lockConflictRetries < len(sessionLockConflictRetryDelays) {
 			delay := sessionLockConflictRetryDelays[lockConflictRetries]
@@ -2505,6 +2521,22 @@ func (gs *gatewaySession) SendMessage(ctx context.Context, message string, onChu
 			abortCancel()
 			if abortErr != nil {
 				log.Printf("[session] failed to abort poisoned session before recovery: %v", abortErr)
+			}
+			if isSessionFileLockConflictError(err) {
+				for probeAttempt, delay := range sessionLockConflictRetryDelays {
+					log.Printf("[gateway] mid-turn session file lock conflict; probing same session after %s (attempt %d/%d): %v", delay, probeAttempt+1, len(sessionLockConflictRetryDelays), err)
+					select {
+					case <-time.After(delay):
+					case <-ctx.Done():
+						return "", ctx.Err()
+					}
+					if probeErr := gs.probeSession(ctx); probeErr == nil {
+						log.Printf("[session] preserved session after mid-turn lock conflict")
+						return reply, err
+					} else {
+						log.Printf("[session] probe after mid-turn lock conflict failed: %v", probeErr)
+					}
+				}
 			}
 			recoveryCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			resetErr := gs.createFreshSession(recoveryCtx, err.Error())
