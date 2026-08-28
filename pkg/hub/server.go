@@ -8570,7 +8570,7 @@ func (s *Server) enqueueSessionRotatedResume(clawID string) {
 func (s *Server) enqueueSessionPreservedContinuation(clawID string) {
 	var recent int
 	windowStart := now().Add(-sessionPreservedContinuationThrottle)
-	_, lastProgressAt := s.lastSubstantiveClawProgress(clawID)
+	lastProgressAt := s.lastCompletedClawProgressAt(clawID)
 	if lastProgressAt.After(windowStart) {
 		windowStart = lastProgressAt
 	}
@@ -8597,12 +8597,23 @@ func (s *Server) enqueueSessionPreservedContinuation(clawID string) {
 	s.injectHubMessageByID(clawID, prompt)
 }
 
+// lastCompletedClawProgressAt returns the newest normal completed-turn
+// observation. Streamed chunks alone are not progress: a lock-conflicted turn
+// can persist chunks before it is preserved, but never reaches this table.
+func (s *Server) lastCompletedClawProgressAt(clawID string) time.Time {
+	var createdAt time.Time
+	if err := s.db.QueryRow(`SELECT created_at FROM claw_turn_observations WHERE claw_id=? ORDER BY created_at DESC, rowid DESC LIMIT 1`, clawID).Scan(&createdAt); err != nil {
+		return time.Time{}
+	}
+	return createdAt
+}
+
 // lastSubstantiveClawProgress returns the newest meaningful claw output and
-// its timestamp. Keep the SQL and Go filters aligned: SQLite's default TRIM
-// only removes spaces, so explicitly include the transport whitespace that
-// bridge messages can carry before their prefix.
+// its timestamp. Keep semantic filtering solely in Go: four attempts to mirror
+// it in SQLite diverged on LIKE case-sensitivity, TRIM semantics, or Unicode
+// whitespace. Fetch a generous candidate window and choose the first valid one.
 func (s *Server) lastSubstantiveClawProgress(clawID string) (string, time.Time) {
-	rows, err := s.db.Query(`SELECT content, created_at FROM messages WHERE claw_id=? AND role='claw' AND TRIM(content, char(9) || char(10) || char(13) || ' ') != '' AND TRIM(content, char(9) || char(10) || char(13) || ' ') NOT GLOB ? AND TRIM(content, char(9) || char(10) || char(13) || ' ') NOT GLOB ? ORDER BY created_at DESC, rowid DESC LIMIT 5`, clawID, types.BridgeErrorPrefix+"*", types.BridgeReplayErrorPrefix+"*")
+	rows, err := s.db.Query(`SELECT content, created_at FROM messages WHERE claw_id=? AND role='claw' ORDER BY created_at DESC, rowid DESC LIMIT 50`, clawID)
 	if err != nil {
 		return "", time.Time{}
 	}
