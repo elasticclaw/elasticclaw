@@ -89,8 +89,11 @@ func TestEnqueueSessionLostResumeOmitsBridgeErrors(t *testing.T) {
 	if err := db.QueryRow(`SELECT content FROM messages WHERE claw_id=? AND role='hub'`, clawID).Scan(&prompt); err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(prompt, "Your last reported progress before the reset") {
-		t.Fatalf("resume prompt must omit bridge errors: %q", prompt)
+	if strings.Contains(prompt, types.BridgeErrorPrefix) || strings.Contains(prompt, types.BridgeReplayErrorPrefix) {
+		t.Fatalf("resume prompt must omit bridge error text: %q", prompt)
+	}
+	if strings.Contains(prompt, "<<<PREVIOUS_AGENT_OUTPUT") {
+		t.Fatalf("resume prompt must omit the previous-output fence when only bridge errors exist: %q", prompt)
 	}
 	if !strings.HasSuffix(prompt, "<!-- errors-marker -->") {
 		t.Fatalf("resume marker must remain last: %q", prompt)
