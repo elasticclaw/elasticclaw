@@ -1695,6 +1695,11 @@ func TestRunHubLoopDoesNotLeakKeepaliveGoroutinesAcrossReconnects(t *testing.T) 
 // TestRunHubLoopReportsMidTurnLockConflictRecovery proves the live hub-message
 // path reports the recovery edge before closing the claw turn. Without that
 // edge, a preserved session has no hub-side continuation and can stall forever.
+// Coverage boundary: this exercises the LIVE turn call site only. The replay
+// path after a hub reconnect calls the same reportSessionRecovery helper with
+// the same arguments, but reaching it needs a different harness, so replacing
+// that one call with `if true` still passes. The risk is bounded because both
+// call sites now delegate to one helper rather than duplicating the block.
 func TestRunHubLoopReportsMidTurnLockConflictRecovery(t *testing.T) {
 	oldDelays := sessionLockConflictRetryDelays
 	sessionLockConflictRetryDelays = []time.Duration{time.Millisecond}
