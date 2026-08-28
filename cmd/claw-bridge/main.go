@@ -2505,6 +2505,29 @@ func notifySessionPreserved(writeHub func(hubMsg) error) {
 	_ = writeHub(hubMsg{Type: "session_preserved"})
 }
 
+func reportSessionRecovery(agentErr error, reply *string, gwSession *gatewaySession, writeActivity func(agentActivity), writeHub func(hubMsg) error) bool {
+	currentKey := gwSession.getSessionKey()
+	outcome := sessionRecoveryOutcome(agentErr, currentKey)
+	if outcome == "preserved" {
+		writeActivity(agentActivity{Kind: "session_preserved", Message: fmt.Sprintf("OpenClaw session preserved after lock conflict; continuing from intact history (%v)", agentErr)})
+		*reply = ""
+		// This check and notification cannot be atomic without holding the session
+		// lock across a network write. A reconnect can still replace the session in
+		// this tiny gap; that is acceptable because continuation prompts require git
+		// status before repeating work, while locking during I/O would be riskier.
+		notifySessionPreserved(writeHub)
+	} else if outcome == "rotated" {
+		activityMessage := fmt.Sprintf("OpenClaw session rotated to recover from lock conflict; waiting for next message (%v)", agentErr)
+		if preservedKey, ok := preservedSessionKey(agentErr); ok && preservedKey != currentKey {
+			activityMessage = fmt.Sprintf("OpenClaw session was replaced by a concurrent reconnect after lock conflict; waiting for next message (%v)", agentErr)
+		}
+		writeActivity(agentActivity{Kind: "session_rotated", Message: activityMessage})
+		*reply = ""
+		_ = writeHub(hubMsg{Type: "session_rotated"})
+	}
+	return outcome != ""
+}
+
 func sessionLockConflictProbeBudget() time.Duration {
 	var budget time.Duration
 	for range sessionLockConflictRetryDelays {
@@ -4883,22 +4906,7 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 				writeActivity(activity)
 			})
 			if agentErr != nil {
-				currentKey := gwSession.getSessionKey()
-				outcome := sessionRecoveryOutcome(agentErr, currentKey)
-				if outcome == "preserved" {
-					writeActivity(agentActivity{Kind: "session_preserved", Message: fmt.Sprintf("OpenClaw session preserved after lock conflict; continuing from intact history (%v)", agentErr)})
-					reply = ""
-					notifySessionPreserved(writeHub)
-				} else if outcome == "rotated" {
-					activityMessage := fmt.Sprintf("OpenClaw session rotated to recover from lock conflict; waiting for next message (%v)", agentErr)
-					if preservedKey, ok := preservedSessionKey(agentErr); ok && preservedKey != currentKey {
-						activityMessage = fmt.Sprintf("OpenClaw session was replaced by a concurrent reconnect after lock conflict; waiting for next message (%v)", agentErr)
-					}
-					writeActivity(agentActivity{Kind: "session_rotated", Message: activityMessage})
-					reply = ""
-					// Notify the hub so it can inject a resume prompt with context.
-					_ = writeHub(hubMsg{Type: "session_rotated"})
-				} else {
+				if !reportSessionRecovery(agentErr, &reply, gwSession, writeActivity, writeHub) {
 					reply = fmt.Sprintf("%s %v", types.BridgeReplayErrorPrefix, agentErr)
 				}
 			}
@@ -5036,22 +5044,7 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 				})
 				if agentErr != nil {
 					log.Printf("[bridge] ✗ agent error: %v", agentErr)
-					currentKey := gwSession.getSessionKey()
-					outcome := sessionRecoveryOutcome(agentErr, currentKey)
-					if outcome == "preserved" {
-						writeActivity(agentActivity{Kind: "session_preserved", Message: fmt.Sprintf("OpenClaw session preserved after lock conflict; continuing from intact history (%v)", agentErr)})
-						reply = ""
-						notifySessionPreserved(writeHub)
-					} else if outcome == "rotated" {
-						activityMessage := fmt.Sprintf("OpenClaw session rotated to recover from lock conflict; waiting for next message (%v)", agentErr)
-						if preservedKey, ok := preservedSessionKey(agentErr); ok && preservedKey != currentKey {
-							activityMessage = fmt.Sprintf("OpenClaw session was replaced by a concurrent reconnect after lock conflict; waiting for next message (%v)", agentErr)
-						}
-						writeActivity(agentActivity{Kind: "session_rotated", Message: activityMessage})
-						reply = ""
-						// Notify the hub so it can inject a resume prompt with context.
-						_ = writeHub(hubMsg{Type: "session_rotated"})
-					} else {
+					if !reportSessionRecovery(agentErr, &reply, gwSession, writeActivity, writeHub) {
 						reply = fmt.Sprintf("%s %v", types.BridgeErrorPrefix, agentErr)
 					}
 				} else {

@@ -1814,6 +1814,37 @@ func TestNotifySessionPreservedWritesHubMessage(t *testing.T) {
 	}
 }
 
+func TestReportSessionRecoveryEmitsHubEdgeAndClearsReply(t *testing.T) {
+	preserved := &sessionPreservedError{err: errString("lock conflict"), key: "session-1"}
+	for _, tt := range []struct {
+		name       string
+		currentKey string
+		wantType   string
+	}{
+		{name: "matching key preserves session", currentKey: "session-1", wantType: "session_preserved"},
+		{name: "divergent key rotates session", currentKey: "session-2", wantType: "session_rotated"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			gs := &gatewaySession{sessionKey: tt.currentKey}
+			reply := "partially completed reply"
+			var messages []hubMsg
+			handled := reportSessionRecovery(preserved, &reply, gs, func(agentActivity) {}, func(msg hubMsg) error {
+				messages = append(messages, msg)
+				return nil
+			})
+			if !handled {
+				t.Fatal("preserved recovery was not handled")
+			}
+			if reply != "" {
+				t.Fatalf("reply = %q, want empty after recovery", reply)
+			}
+			if len(messages) != 1 || messages[0].Type != tt.wantType {
+				t.Fatalf("hub messages = %#v, want one %q message", messages, tt.wantType)
+			}
+		})
+	}
+}
+
 func TestGatewaySessionResetsAfterProviderFormatLifecycleError(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 
