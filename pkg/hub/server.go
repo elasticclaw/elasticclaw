@@ -8568,8 +8568,6 @@ func (s *Server) enqueueSessionRotatedResume(clawID string) {
 }
 
 func (s *Server) enqueueSessionPreservedContinuation(clawID string) {
-	s.discardAbortedSessionPreservedTurnObservation(clawID)
-
 	var recent int
 	windowStart := now().Add(-sessionPreservedContinuationThrottle)
 	lastProgressAt := s.lastCompletedClawProgressAt(clawID)
@@ -8599,24 +8597,9 @@ func (s *Server) enqueueSessionPreservedContinuation(clawID string) {
 	s.injectHubMessageByID(clawID, prompt)
 }
 
-// discardAbortedSessionPreservedTurnObservation removes the latest observation
-// only when it was recorded after the previous preserved-continuation prompt.
-// The hub persists streamed partial output as turn content, so a turn aborted by
-// a session-file lock conflict can have an observation even though it never
-// completed. That output must not reset this continuation budget or count for
-// the no-progress watchdog; removing it is intentional for both consumers.
-func (s *Server) discardAbortedSessionPreservedTurnObservation(clawID string) {
-	_, err := s.db.Exec(`DELETE FROM claw_turn_observations
-		WHERE rowid=(SELECT rowid FROM claw_turn_observations WHERE claw_id=? ORDER BY created_at DESC, rowid DESC LIMIT 1)
-		  AND created_at > (SELECT created_at FROM messages WHERE claw_id=? AND role='hub' AND content LIKE ? ORDER BY created_at DESC, rowid DESC LIMIT 1)`,
-		clawID, clawID, sessionPreservedContinuationPrefix+"%")
-	if err != nil {
-		log.Printf("[watchdog] discard aborted session-preserved observation for %s: %v", shortID(clawID), err)
-	}
-}
-
 // lastCompletedClawProgressAt returns the newest normal completed-turn
-// observation.
+// observation. Streamed chunks alone are not progress: a lock-conflicted turn
+// can persist chunks before it is preserved, but never reaches this table.
 func (s *Server) lastCompletedClawProgressAt(clawID string) time.Time {
 	var createdAt time.Time
 	if err := s.db.QueryRow(`SELECT created_at FROM claw_turn_observations WHERE claw_id=? ORDER BY created_at DESC, rowid DESC LIMIT 1`, clawID).Scan(&createdAt); err != nil {

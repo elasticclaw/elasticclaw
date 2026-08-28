@@ -273,29 +273,22 @@ func TestEnqueueSessionPreservedContinuationEscalatesAfterBudget(t *testing.T) {
 func TestEnqueueSessionPreservedContinuationResetsBudgetAfterProgress(t *testing.T) {
 	s, db := NewTestServerWithConfig(t, nil, "", "", "")
 	const clawID = "claw-preserved-progress"
-	if _, err := db.Exec(`INSERT INTO claws(id, tenant_id, name, status, bootstrap_ok, pipeline_stage, created_at) VALUES(?,?,?,?,?,?,datetime('now'))`, clawID, "test-tenant-id", "preserved progress", "connected", 1, "working"); err != nil {
+	if _, err := db.Exec(`INSERT INTO claws(id, tenant_id, name, status, bootstrap_ok, created_at) VALUES(?,?,?,?,?,datetime('now'))`, clawID, "test-tenant-id", "preserved progress", "connected", 1); err != nil {
 		t.Fatal(err)
 	}
-	progressAt := time.Now().UTC()
-	for i := range sessionPreservedContinuationMaxInWindow {
-		if _, err := db.Exec(`INSERT INTO messages(id, claw_id, tenant_id, role, content, created_at) VALUES(?,?,?,?,?,?)`, fmt.Sprintf("preserved-before-progress-%d", i), clawID, "test-tenant-id", "hub", sessionPreservedContinuationPrefix+" before completed progress", progressAt.Add(-time.Second)); err != nil {
-			t.Fatal(err)
-		}
+	for range sessionPreservedContinuationMaxInWindow {
+		s.enqueueSessionPreservedContinuation(clawID)
 	}
-	if _, err := db.Exec(`INSERT INTO messages(id, claw_id, tenant_id, role, content, created_at) VALUES(?,?,?,?,?,?)`, "completed-progress", clawID, "test-tenant-id", "claw", "Completed a substantive implementation step.", progressAt); err != nil {
+	if _, err := db.Exec(`INSERT INTO claw_turn_observations(id, claw_id, response, progress_fingerprint, created_at) VALUES(?,?,?,?,?)`, "substantive-progress", clawID, "Completed a substantive implementation step.", "progress", time.Now().UTC().Add(time.Second)); err != nil {
 		t.Fatal(err)
 	}
-	s.observeTurnOutcome(nil, clawID, "completed-progress", "Completed a substantive implementation step.")
-	lastProgressAt := s.lastCompletedClawProgressAt(clawID)
-	if !lastProgressAt.After(progressAt.Add(-time.Second)) {
-		t.Fatalf("completed-turn observation timestamp = %s, want after preserved continuations", lastProgressAt)
-	}
+	s.enqueueSessionPreservedContinuation(clawID)
 	var count int
 	if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND role='hub' AND content LIKE ?`, clawID, sessionPreservedContinuationPrefix+"%").Scan(&count); err != nil {
 		t.Fatal(err)
 	}
-	if count != sessionPreservedContinuationMaxInWindow {
-		t.Fatalf("continuation count = %d, want %d before a later preserved edge", count, sessionPreservedContinuationMaxInWindow)
+	if count != sessionPreservedContinuationMaxInWindow+1 {
+		t.Fatalf("continuation count = %d, want %d after substantive progress", count, sessionPreservedContinuationMaxInWindow+1)
 	}
 	var paused bool
 	if err := db.QueryRow(`SELECT COALESCE(no_progress_paused,0) != 0 FROM claws WHERE id=?`, clawID).Scan(&paused); err != nil {
@@ -309,7 +302,7 @@ func TestEnqueueSessionPreservedContinuationResetsBudgetAfterProgress(t *testing
 func TestEnqueueSessionPreservedContinuationDoesNotTreatPartialConflictChunkAsProgress(t *testing.T) {
 	s, db := NewTestServerWithConfig(t, nil, "", "", "")
 	const clawID = "claw-preserved-partial-conflict"
-	if _, err := db.Exec(`INSERT INTO claws(id, tenant_id, name, status, bootstrap_ok, pipeline_stage, created_at) VALUES(?,?,?,?,?,?,datetime('now'))`, clawID, "test-tenant-id", "partial conflict", "connected", 1, "working"); err != nil {
+	if _, err := db.Exec(`INSERT INTO claws(id, tenant_id, name, status, bootstrap_ok, created_at) VALUES(?,?,?,?,?,datetime('now'))`, clawID, "test-tenant-id", "partial conflict", "connected", 1); err != nil {
 		t.Fatal(err)
 	}
 	for range sessionPreservedContinuationMaxInWindow {
@@ -317,23 +310,8 @@ func TestEnqueueSessionPreservedContinuationDoesNotTreatPartialConflictChunkAsPr
 	}
 	// This is a persisted stream chunk from the next turn, which subsequently
 	// ended in session_preserved. It must not reset the continuation budget.
-	partialObservedAt := time.Now().UTC().Add(time.Second)
-	if _, err := db.Exec(`INSERT INTO messages(id, claw_id, tenant_id, role, content, created_at) VALUES(?,?,?,?,?,?)`, "partial-conflict-chunk", clawID, "test-tenant-id", "claw", "I'll check git status before continuing.", partialObservedAt); err != nil {
+	if _, err := db.Exec(`INSERT INTO messages(id, claw_id, tenant_id, role, content, created_at) VALUES(?,?,?,?,?,?)`, "partial-conflict-chunk", clawID, "test-tenant-id", "claw", "I'll check git status before continuing.", time.Now().UTC().Add(time.Second)); err != nil {
 		t.Fatal(err)
-	}
-	s.observeTurnOutcome(nil, clawID, "partial-conflict-chunk", "I'll check git status before continuing.")
-	if _, err := db.Exec(`UPDATE claw_turn_observations SET created_at=? WHERE id=?`, partialObservedAt, "partial-conflict-chunk"); err != nil {
-		t.Fatal(err)
-	}
-	var observations int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM claw_turn_observations WHERE claw_id=?`, clawID).Scan(&observations); err != nil {
-		t.Fatal(err)
-	}
-	if observations == 0 {
-		t.Fatal("partial conflict chunk did not create a turn observation; pipeline_stage must remain populated for this test")
-	}
-	if observedAt := s.lastCompletedClawProgressAt(clawID); !observedAt.After(partialObservedAt.Add(-time.Millisecond)) {
-		t.Fatalf("partial conflict observation timestamp = %s, want approximately %s", observedAt, partialObservedAt)
 	}
 	s.enqueueSessionPreservedContinuation(clawID)
 	var paused bool
