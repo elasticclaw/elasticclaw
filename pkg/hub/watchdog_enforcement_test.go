@@ -592,6 +592,32 @@ func TestSessionRotatedEnqueuesResume(t *testing.T) {
 	eventuallyWatchdog(t, func() bool { return count() == 1 }, "session rotated resume")
 }
 
+func TestSessionPreservedEnqueuesContinuationAndResetsBridgeErrorStreak(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{ClawToken: "claw-token"}, "", "", "")
+	const clawID = "watchdog-session-preserved"
+	conn := watchdogClaw(t, s, clawID)
+	cc := watchdogClawConn(t, s, clawID)
+	if _, err := db.Exec(`UPDATE claws SET status='connected', bootstrap_ok=1 WHERE id=?`, clawID); err != nil {
+		t.Fatal(err)
+	}
+	cc.mu.Lock()
+	cc.bridgeErrorStreak = 1
+	cc.mu.Unlock()
+	if err := wsjson.Write(context.Background(), conn, types.WSMessage{Type: "session_preserved"}); err != nil {
+		t.Fatalf("write session_preserved: %v", err)
+	}
+	eventuallyWatchdog(t, func() bool {
+		var n int
+		_ = db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND role='hub' AND content LIKE ?`, clawID, sessionPreservedContinuationPrefix+"%").Scan(&n)
+		return n == 1
+	}, "session preserved continuation")
+	cc.mu.RLock()
+	defer cc.mu.RUnlock()
+	if cc.bridgeErrorStreak != 0 {
+		t.Fatalf("bridge error streak = %d, want 0 after session_preserved", cc.bridgeErrorStreak)
+	}
+}
+
 func TestSessionRotatedResumeThrottled(t *testing.T) {
 	s, db := NewTestServerWithConfig(t, &types.HubConfig{ClawToken: "claw-token"}, "", "", "")
 	const clawID = "watchdog-session-rotated-throttled"

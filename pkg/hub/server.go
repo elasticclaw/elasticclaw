@@ -3330,6 +3330,11 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 		} else if msg.Type == "session_rotated" {
 			go s.enqueueSessionRotatedResume(clawID)
 		} else if msg.Type == "session_preserved" {
+			// A preserved turn positively proves the transport reached the agent,
+			// even though it has no reply body to reach observeTurnOutcome.
+			cc.mu.Lock()
+			cc.bridgeErrorStreak = 0
+			cc.mu.Unlock()
 			go s.enqueueSessionPreservedContinuation(clawID)
 		} else if msg.Type == "model_auth_sync" {
 			if !modelAuthAuthorized {
