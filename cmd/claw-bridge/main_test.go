@@ -1803,6 +1803,17 @@ func TestSessionRecoveryOutcome(t *testing.T) {
 	}
 }
 
+func TestNotifySessionPreservedWritesHubMessage(t *testing.T) {
+	var got hubMsg
+	notifySessionPreserved(func(msg hubMsg) error {
+		got = msg
+		return nil
+	})
+	if got.Type != "session_preserved" {
+		t.Fatalf("hub message type = %q, want session_preserved", got.Type)
+	}
+}
+
 func TestGatewaySessionResetsAfterProviderFormatLifecycleError(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 
@@ -2215,20 +2226,85 @@ func TestGatewaySessionProbeDetectsConcurrentRotation(t *testing.T) {
 		if !ok {
 			return
 		}
+		// The reconnect races recovery after it has chosen the turn key but
+		// before the gateway receives the abort frame.
+		gs.setSessionKey("session-2")
+		var abortParams map[string]string
+		if err := json.Unmarshal(abort.Params, &abortParams); err != nil {
+			t.Errorf("decode sessions.abort params: %v", err)
+			return
+		}
+		if abortParams["key"] != "session-1" {
+			t.Errorf("sessions.abort key = %q, want turn session-1", abortParams["key"])
+			return
+		}
 		if err := wsjson.Write(r.Context(), conn, gwFrame{Type: "res", ID: abort.ID, OK: true}); err != nil {
 			t.Error(err)
 			return
 		}
-		probe, ok := read("sessions.describe")
-		if !ok {
-			return
+		idleCtx, cancel := context.WithTimeout(r.Context(), 100*time.Millisecond)
+		defer cancel()
+		var extra gwFrame
+		if err := wsjson.Read(idleCtx, conn, &extra); err == nil {
+			t.Errorf("unexpected %q after concurrent rotation", extra.Method)
 		}
-		gs.setSessionKey("session-2") // Simulate a readLoop reconnect while the probe is in flight.
-		if err := wsjson.Write(r.Context(), conn, gwFrame{Type: "res", ID: probe.ID, OK: true}); err != nil {
+	}))
+	defer srv.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(srv.URL, "http"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.CloseNow()
+	gs = &gatewaySession{sessionKey: "session-1", conn: conn, pending: make(map[string]chan gwFrame)}
+	go gs.readLoop(ctx)
+	_, err = gs.SendMessage(ctx, "continue the task", nil, nil)
+	if err == nil || !isSessionRotatedError(err) || isSessionPreservedError(err) {
+		t.Fatalf("SendMessage error = %v, want rotation only", err)
+	}
+}
+
+func TestGatewaySessionLockConflictAlreadyRotatedSkipsAbortAndProbe(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	const sessionErr = "error: session file changed while embedded prompt lock was released"
+	var gs *gatewaySession
+	// The mismatch-check window inside SendMessage's recovery path (right
+	// after the lifecycle error is delivered, right before it compares the
+	// turn's key to the current key) is too narrow to land a concurrent
+	// rotation into by timing alone. Use the sessionMismatchCheckHook test
+	// seam to rotate the key deterministically at that exact point, exactly
+	// as readLoop would do concurrently without holding sendMu.
+	oldHook := sessionMismatchCheckHook
+	t.Cleanup(func() { sessionMismatchCheckHook = oldHook })
+	sessionMismatchCheckHook = func() {
+		gs.sessionMu.Lock()
+		gs.sessionKey = "session-2"
+		gs.sessionMu.Unlock()
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
 			t.Error(err)
 			return
 		}
-		idleCtx, cancel := context.WithTimeout(r.Context(), 100*time.Millisecond)
+		defer conn.CloseNow()
+		var send gwFrame
+		if err := wsjson.Read(r.Context(), conn, &send); err != nil || send.Method != "sessions.send" {
+			t.Fatalf("read sessions.send: method=%q err=%v", send.Method, err)
+			return
+		}
+		if err := wsjson.Write(r.Context(), conn, gwFrame{Type: "res", ID: send.ID, OK: true}); err != nil {
+			t.Error(err)
+			return
+		}
+		// Tag the event with the still-current key so readLoop's foreign-session
+		// filter dispatches it to the in-flight turn instead of dropping it.
+		if err := wsjson.Write(r.Context(), conn, gwFrame{Type: "event", Event: "agent", Payload: mustJSON(map[string]interface{}{"stream": "lifecycle", "sessionKey": "session-1", "data": map[string]string{"phase": "error", "error": sessionErr}})}); err != nil {
+			t.Error(err)
+			return
+		}
+		idleCtx, cancel := context.WithTimeout(r.Context(), 150*time.Millisecond)
 		defer cancel()
 		var extra gwFrame
 		if err := wsjson.Read(idleCtx, conn, &extra); err == nil {

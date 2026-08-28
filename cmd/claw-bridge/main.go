@@ -2346,8 +2346,7 @@ func (gs *gatewaySession) createFreshSession(ctx context.Context, reason string)
 	return nil
 }
 
-func (gs *gatewaySession) abortActiveSession(ctx context.Context) error {
-	key := gs.getSessionKey()
+func (gs *gatewaySession) abortSession(ctx context.Context, key string) error {
 	if key == "" {
 		return nil
 	}
@@ -2454,6 +2453,12 @@ func isSessionFileLockConflictError(err error) bool {
 // would discard. A variable so tests can shorten it.
 var sessionLockConflictRetryDelays = []time.Duration{500 * time.Millisecond, time.Second, 2 * time.Second, 4 * time.Second}
 
+// sessionMismatchCheckHook is a test seam invoked right before SendMessage
+// checks the turn key against the current session key in its lock-conflict
+// recovery path. Tests can override it to land a concurrent rotation exactly
+// inside that otherwise-unhittable-by-timing window. A no-op in production.
+var sessionMismatchCheckHook = func() {}
+
 // isSessionRotatedError reports whether SendMessage recovered from a session
 // lock conflict by rotating to a fresh session. In that case the original turn
 // cannot be completed, but the next hub message can continue. The bridge should
@@ -2496,6 +2501,10 @@ func sessionRecoveryOutcome(agentErr error, currentKey string) string {
 	return ""
 }
 
+func notifySessionPreserved(writeHub func(hubMsg) error) {
+	_ = writeHub(hubMsg{Type: "session_preserved"})
+}
+
 func sessionLockConflictProbeBudget() time.Duration {
 	var budget time.Duration
 	for range sessionLockConflictRetryDelays {
@@ -2519,7 +2528,11 @@ func (gs *gatewaySession) SendMessage(ctx context.Context, message string, onChu
 	lockConflictRetries := 0
 	for attempt := 0; ; attempt++ {
 		conn := gs.currentConn()
-		reply, err := gs.sendMessageOnce(ctx, message, onChunk, onActivity)
+		// Anchor the session to the turn when it is sent. readLoop can replace
+		// the session without sendMu; announcing intact history for a different
+		// session would tell the agent to continue work it cannot see.
+		turnKey := gs.getSessionKey()
+		reply, err := gs.sendMessageOnce(ctx, turnKey, message, onChunk, onActivity)
 		// Retry only failures from the initial sessions.send request. Once the
 		// request is accepted, chunks may already be visible to the UI, so stream
 		// or lifecycle errors must not replay the turn.
@@ -2574,14 +2587,22 @@ func (gs *gatewaySession) SendMessage(ctx context.Context, message string, onChu
 			continue
 		}
 		if isRecoverableSessionLifecycleError(err) {
+			// Test seam: lets tests land a concurrent rotation exactly between
+			// the turn's lifecycle error and this mismatch check, which is
+			// otherwise a window too narrow to hit reliably by timing alone.
+			// No-op in production.
+			sessionMismatchCheckHook()
+			if isSessionFileLockConflictError(err) && gs.getSessionKey() != turnKey {
+				return reply, fmt.Errorf("%w; %s", err, sessionRotatedErrorSuffix)
+			}
 			abortCtx, abortCancel := context.WithTimeout(context.Background(), 5*time.Second)
-			abortErr := gs.abortActiveSession(abortCtx)
+			abortErr := gs.abortSession(abortCtx, turnKey)
 			abortCancel()
 			if abortErr != nil {
 				log.Printf("[session] failed to abort poisoned session before recovery: %v", abortErr)
 			}
 			if isSessionFileLockConflictError(err) {
-				origKey := gs.getSessionKey()
+				origKey := turnKey
 				// Recovery must finish even when the accepted turn's deadline has
 				// elapsed: it only performs read-only probes, then establishes a
 				// continuation edge without replaying that turn.
@@ -2627,7 +2648,7 @@ func (gs *gatewaySession) SendMessage(ctx context.Context, message string, onChu
 		// resume prompt with task context into the fresh session.
 		if errors.As(err, &sendReqErr) && isSessionFileLockConflictError(err) {
 			abortCtx, abortCancel := context.WithTimeout(context.Background(), 5*time.Second)
-			abortErr := gs.abortActiveSession(abortCtx)
+			abortErr := gs.abortSession(abortCtx, turnKey)
 			abortCancel()
 			if abortErr != nil {
 				log.Printf("[session] failed to abort session before recovery after exhausted retries: %v", abortErr)
@@ -2655,11 +2676,11 @@ func (gs *gatewaySession) SendMessage(ctx context.Context, message string, onChu
 		}
 
 		log.Printf("[session] retrying message in fresh session after recoverable error")
-		return gs.sendMessageOnce(ctx, message, onChunk, onActivity)
+		return gs.sendMessageOnce(ctx, gs.getSessionKey(), message, onChunk, onActivity)
 	}
 }
 
-func (gs *gatewaySession) sendMessageOnce(ctx context.Context, message string, onChunk func(string), onActivity func(agentActivity)) (string, error) {
+func (gs *gatewaySession) sendMessageOnce(ctx context.Context, turnKey, message string, onChunk func(string), onActivity func(agentActivity)) (string, error) {
 	inf := &inFlightState{
 		onChunk:    onChunk,
 		onActivity: onActivity,
@@ -2676,7 +2697,7 @@ func (gs *gatewaySession) sendMessageOnce(ctx context.Context, message string, o
 
 	// Send the message
 	_, err := gs.sendReq(ctx, "sessions.send", map[string]string{
-		"key":     gs.getSessionKey(),
+		"key":     turnKey,
 		"message": message,
 	})
 	if err != nil {
@@ -4867,7 +4888,7 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 				if outcome == "preserved" {
 					writeActivity(agentActivity{Kind: "session_preserved", Message: fmt.Sprintf("OpenClaw session preserved after lock conflict; continuing from intact history (%v)", agentErr)})
 					reply = ""
-					_ = writeHub(hubMsg{Type: "session_preserved"})
+					notifySessionPreserved(writeHub)
 				} else if outcome == "rotated" {
 					activityMessage := fmt.Sprintf("OpenClaw session rotated to recover from lock conflict; waiting for next message (%v)", agentErr)
 					if preservedKey, ok := preservedSessionKey(agentErr); ok && preservedKey != currentKey {
@@ -5020,7 +5041,7 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 					if outcome == "preserved" {
 						writeActivity(agentActivity{Kind: "session_preserved", Message: fmt.Sprintf("OpenClaw session preserved after lock conflict; continuing from intact history (%v)", agentErr)})
 						reply = ""
-						_ = writeHub(hubMsg{Type: "session_preserved"})
+						notifySessionPreserved(writeHub)
 					} else if outcome == "rotated" {
 						activityMessage := fmt.Sprintf("OpenClaw session rotated to recover from lock conflict; waiting for next message (%v)", agentErr)
 						if preservedKey, ok := preservedSessionKey(agentErr); ok && preservedKey != currentKey {
