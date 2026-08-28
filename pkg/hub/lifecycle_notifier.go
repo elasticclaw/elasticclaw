@@ -308,7 +308,7 @@ func (s *Server) initLifecycleNotifierBaseline() {
 	// baselined by the first poll tick, one poll interval after the producers
 	// started, and silently miss whatever they produced in that window. Both
 	// helpers are idempotent, so the tick keeps covering runtime saves.
-	if err := types.ValidateNotificationsConfig(cfg); err == nil {
+	if err := types.ValidateLifecycleNotificationsConfig(cfg); err == nil {
 		s.pruneLifecycleRouteState(cfg.Lifecycle)
 		s.ensureLifecycleRouteWatermarks(cfg.Lifecycle)
 		s.ensureLifecycleClawRouteBaselines(cfg.Lifecycle)
@@ -475,8 +475,11 @@ func (s *Server) lifecycleNotifierTick() {
 		s.parkLifecycleClawState()
 		return
 	}
-	if err := types.ValidateNotificationsConfig(cfg); err != nil {
-		s.logPollWarningOnce("notify-config", "[notify] invalid notifications config — notifications paused: %v", err)
+	// Only the config this tick consumes is judged (notifiers plus the
+	// lifecycle block): a defect in the scheduled block pauses scheduled
+	// reports, never lifecycle alerts.
+	if err := types.ValidateLifecycleNotificationsConfig(cfg); err != nil {
+		s.logPollWarningOnce("notify-config", "[notify] invalid notifications config — lifecycle notifications paused: %v", err)
 		return
 	}
 	lc := cfg.Lifecycle
@@ -1833,7 +1836,7 @@ func (s *Server) handleNotificationTest(w http.ResponseWriter, r *http.Request) 
 		jsonError(w, http.StatusBadRequest, "lifecycle notifications are not configured or not enabled (set notifications.lifecycle in hub.yaml)")
 		return
 	}
-	if err := types.ValidateNotificationsConfig(cfg); err != nil {
+	if err := types.ValidateLifecycleNotificationsConfig(cfg); err != nil {
 		jsonError(w, http.StatusBadRequest, "notifications config invalid: "+err.Error())
 		return
 	}

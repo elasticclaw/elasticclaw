@@ -835,7 +835,16 @@ func mergeNotifierSettings(current, patch *types.NotificationsConfig) {
 // no way to repair the offender from the UI. Whatever the operator does touch
 // is still checked, so this handler never persists a NEW broken notifier.
 func validateSettingsNotifications(current, cfg *types.NotificationsConfig) error {
-	if err := types.ValidateNotificationsConfig(cfg); err != nil {
+	// Notifier and lifecycle structure is validated on the whole patched
+	// block; the scheduled entries get the same structural checks per entry
+	// below, exempting stored ones the patch merely re-sends. A hand-written
+	// hub.yaml can hold a schedule the structural validator rejects (a
+	// "monday" weekday, a duplicated id) that the hub boots with and the
+	// screen re-sends verbatim on every save — and cannot repair: the edit
+	// dialog renders no chip for an invalid weekday and disables the id
+	// field, so validating stored entries here would 400 every save from the
+	// screen, including ones touching an unrelated channel.
+	if err := types.ValidateLifecycleNotificationsConfig(cfg); err != nil {
 		return err
 	}
 	for name, notifier := range cfg.Notifiers {
@@ -869,7 +878,23 @@ func validateSettingsNotifications(current, cfg *types.NotificationsConfig) erro
 	// offender, and every other edit to the entry itself: pausing it (which
 	// the doctor's "pause before upgrading" guidance depends on), re-routing
 	// it, or moving its slot.
+	ids := make(map[string]int, len(cfg.Scheduled))
+	for _, scheduled := range cfg.Scheduled {
+		ids[scheduled.ID]++
+	}
 	for i, scheduled := range cfg.Scheduled {
+		if !scheduledEntryUnchanged(current, scheduled) {
+			if err := types.ValidateScheduledNotification(cfg, i); err != nil {
+				return err
+			}
+			// The duplicate-id check runs against the whole patched list, but
+			// only an entry the patch adds or edits can be charged with it: a
+			// stored duplicate is unrepairable from the screen (the id field
+			// is disabled in edit mode) and must not block unrelated saves.
+			if ids[scheduled.ID] > 1 {
+				return fmt.Errorf("notifications.scheduled[%d]: id %q is duplicated", i, scheduled.ID)
+			}
+		}
 		if scheduledReportUnchanged(current, scheduled) {
 			continue
 		}
@@ -879,6 +904,24 @@ func validateSettingsNotifications(current, cfg *types.NotificationsConfig) erro
 		}
 	}
 	return nil
+}
+
+// scheduledEntryUnchanged reports whether the patch re-sends a schedule
+// identical to one already stored under its id — the patch carries it, not
+// edits it — mirroring notifierUnchanged above. Both sides are compared
+// through their settings view so the two defaults the screen cannot express
+// (an omitted `enabled`, a nil weekday list) do not read back as edits.
+func scheduledEntryUnchanged(current *types.NotificationsConfig, patched types.ScheduledNotificationConfig) bool {
+	if current == nil {
+		return false
+	}
+	view := scheduledNotificationViewOf(patched)
+	for _, stored := range current.Scheduled {
+		if stored.ID == patched.ID && reflect.DeepEqual(scheduledNotificationViewOf(stored), view) {
+			return true
+		}
+	}
+	return false
 }
 
 // normalizeScheduledTimes rewrites each schedule's `at` in zero-padded HH:MM.

@@ -813,6 +813,66 @@ func TestSettingsPatchAllowsUnchangedUnknownScheduledReport(t *testing.T) {
 	}
 }
 
+// A stored schedule the structural validator rejects (a hand-written hub.yaml
+// with an invalid weekday) must not 400 every notifications save: the hub
+// boots with it, the screen re-sends it verbatim on every save and cannot
+// repair it (the weekday chips cannot render "monday" and the id field is
+// disabled in edit mode). Entries the patch merely re-sends are exempt, while
+// anything it adds or edits is still fully validated.
+func TestSettingsPatchAllowsUnchangedStructurallyInvalidSchedule(t *testing.T) {
+	registerScheduledReport("stored-invalid-report", func(context.Context, *Server) (*notify.Message, bool, error) {
+		return nil, false, nil
+	})
+	path := filepath.Join(t.TempDir(), "hub.yaml")
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", path)
+	s, _ := NewTestServerWithConfig(t, &types.HubConfig{Notifications: &types.NotificationsConfig{
+		Notifiers: map[string]types.NotifierConfig{
+			"eng": {Type: "slack", Settings: map[string]any{"channel": "C0123ABCD", "token_secret": "slack_token"}},
+		},
+		Scheduled: []types.ScheduledNotificationConfig{
+			{ID: "legacy", Report: "stored-invalid-report", Via: []string{"eng"}, At: "09:00", Weekdays: []string{"monday"}},
+		},
+	}}, "", "", "")
+	if err := config.SaveHubConfig(s.hubCfg); err != nil {
+		t.Fatal(err)
+	}
+
+	// A save touching only an unrelated channel carries the entry verbatim.
+	legacy := `{"id":"legacy","report":"stored-invalid-report","via":["eng"],"at":"09:00","weekdays":["monday"],"enabled":true}`
+	body := []byte(`{"notifications":{"notifiers":{"eng":{"type":"slack","channel":"C0999NEW","token_secret":"slack_token"}},"scheduled":[` + legacy + `]}}`)
+	rr := httptest.NewRecorder()
+	s.patchSettings(rr, httptest.NewRequest(http.MethodPatch, "/api/settings", bytes.NewReader(body)))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("re-saving the stored schedule = %d, want 200; body = %s", rr.Code, rr.Body.String())
+	}
+
+	// An entry the patch ADDS is still fully validated.
+	added := `{"id":"fresh","report":"stored-invalid-report","via":["eng"],"at":"10:00","weekdays":["monday"],"enabled":true}`
+	body = []byte(`{"notifications":{"notifiers":{"eng":{"type":"slack","channel":"C0999NEW","token_secret":"slack_token"}},"scheduled":[` + legacy + `,` + added + `]}}`)
+	rr = httptest.NewRecorder()
+	s.patchSettings(rr, httptest.NewRequest(http.MethodPatch, "/api/settings", bytes.NewReader(body)))
+	if rr.Code != http.StatusBadRequest || !strings.Contains(rr.Body.String(), `weekday "monday" is invalid`) {
+		t.Fatalf("adding an invalid entry = %d (%s), want 400 on the weekday", rr.Code, rr.Body.String())
+	}
+
+	// So is one that duplicates a stored id.
+	duplicate := `{"id":"legacy","report":"stored-invalid-report","via":["eng"],"at":"10:00","weekdays":[],"enabled":true}`
+	body = []byte(`{"notifications":{"notifiers":{"eng":{"type":"slack","channel":"C0999NEW","token_secret":"slack_token"}},"scheduled":[` + legacy + `,` + duplicate + `]}}`)
+	rr = httptest.NewRecorder()
+	s.patchSettings(rr, httptest.NewRequest(http.MethodPatch, "/api/settings", bytes.NewReader(body)))
+	if rr.Code != http.StatusBadRequest || !strings.Contains(rr.Body.String(), "is duplicated") {
+		t.Fatalf("adding a duplicate id = %d (%s), want 400 on the duplicate", rr.Code, rr.Body.String())
+	}
+
+	// And the repair — deleting the stored offender — goes through.
+	body = []byte(`{"notifications":{"notifiers":{"eng":{"type":"slack","channel":"C0999NEW","token_secret":"slack_token"}},"scheduled":[]}}`)
+	rr = httptest.NewRecorder()
+	s.patchSettings(rr, httptest.NewRequest(http.MethodPatch, "/api/settings", bytes.NewReader(body)))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("deleting the stored schedule = %d, want 200; body = %s", rr.Code, rr.Body.String())
+	}
+}
+
 // A PATCH that omits the `scheduled` key entirely comes from a client that
 // never saw the field (an older screen, a hand-written notifiers-only PATCH),
 // not from one asking to delete every schedule: the stored schedules must be

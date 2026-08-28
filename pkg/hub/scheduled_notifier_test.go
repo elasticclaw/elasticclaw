@@ -31,6 +31,16 @@ func TestScheduledNotificationSlot(t *testing.T) {
 		// a sun-only 02:30 schedule silently drop a full weekly cycle.
 		{"dst spring forward uses the normalized post-gap instant", "2025-03-09T12:00:00Z", types.ScheduledNotificationConfig{At: "02:30", Timezone: "America/New_York"}, "2025-03-09T07:30:00Z"},
 		{"dst spring forward on the only allowed weekday still yields that day", "2025-03-09T12:00:00Z", types.ScheduledNotificationConfig{At: "02:30", Timezone: "America/New_York", Weekdays: []string{"sun"}}, "2025-03-09T07:30:00Z"},
+		// America/Santiago springs forward at MIDNIGHT (Sun 2026-09-06 00:00
+		// -04 -> 01:00 -03), so the lookback walk itself crosses a gap:
+		// AddDate from localNow would normalize day-2 onto Saturday twice and
+		// never visit the transition Sunday. The civil-date walk must still
+		// find Sunday's (gap-shifted) slot...
+		{"dst midnight gap does not skip the transition day in the walk", "2026-09-08T03:10:00Z", types.ScheduledNotificationConfig{At: "00:30", Timezone: "America/Santiago", Weekdays: []string{"sun"}}, "2026-09-06T04:30:00Z"},
+		// ...and restart catch-up must return the LATEST slot (Sunday's), not
+		// Saturday's — firing an older slot as catch-up would double-deliver
+		// once the current day's slot arrives.
+		{"dst midnight gap catch-up returns the latest slot not an older day's", "2026-09-07T03:10:00Z", types.ScheduledNotificationConfig{At: "00:30", Timezone: "America/Santiago"}, "2026-09-06T04:30:00Z"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -689,6 +699,17 @@ func TestScheduledSlotDigestNormalizesEquivalentRepresentations(t *testing.T) {
 	if scheduledSlotDigest(types.ScheduledNotificationConfig{At: "09:00", Timezone: "UTC", Weekdays: []string{"mon"}}) == base {
 		t.Fatal("a weekday edit must change the digest")
 	}
+	// Weekdays are an unordered set (the settings screen's chips append in
+	// click order): un-ticking and re-ticking a day is not an edit, and a
+	// digest mismatch here would reseed every (id, via) row and silently skip
+	// the pending slot.
+	ordered := scheduledSlotDigest(types.ScheduledNotificationConfig{At: "09:00", Weekdays: []string{"mon", "tue", "wed", "thu", "fri"}})
+	if got := scheduledSlotDigest(types.ScheduledNotificationConfig{At: "09:00", Weekdays: []string{"mon", "tue", "thu", "fri", "wed"}}); got != ordered {
+		t.Fatalf("a weekday reorder changed the digest: %q vs %q", got, ordered)
+	}
+	if scheduledSlotDigest(types.ScheduledNotificationConfig{At: "09:00", Weekdays: []string{"mon", "tue", "wed", "thu"}}) == ordered {
+		t.Fatal("a real weekday-set edit must change the digest")
+	}
 }
 
 // pruneScheduledState clears the in-memory failure streaks of removed pairs
@@ -714,5 +735,74 @@ func TestPruneScheduledStateClearsRemovedStreaks(t *testing.T) {
 	}
 	if _, ok := s.scheduledTransientFailures[scheduledStateKey("kept", scheduledBuildFailureVia)]; !ok {
 		t.Fatal("configured schedule's build streak was pruned")
+	}
+}
+
+// Removing the ENTIRE notifications block prunes the dedupe rows the same way
+// removing every schedule does: the rows would otherwise survive indefinitely,
+// and a block re-added days later with an identical schedule would inherit the
+// stale row and replay a slot from the removal window instead of seeding on
+// first sight.
+func TestScheduledNotifierPrunesStateWhenNotificationsBlockRemoved(t *testing.T) {
+	registerScheduledReport("block-removed-report", func(context.Context, *Server) (*notify.Message, bool, error) {
+		return &notify.Message{Title: "report", Body: "body"}, true, nil
+	})
+	fake := newFakeSlackServer(t)
+	schedule := types.ScheduledNotificationConfig{ID: "survivor", Report: "block-removed-report", Via: []string{testNotifierName}, At: "09:00"}
+	s, db := newScheduledNotifierTestServer(t, fake.server.URL, []types.ScheduledNotificationConfig{schedule})
+
+	// Arm and fire once.
+	s.scheduledNotifierTick(context.Background(), time.Date(2025, 1, 6, 8, 30, 0, 0, time.UTC))
+	s.scheduledNotifierTick(context.Background(), time.Date(2025, 1, 6, 9, 30, 0, 0, time.UTC))
+	if fake.count() != 1 {
+		t.Fatalf("armed slot sent %d messages, want 1", fake.count())
+	}
+
+	// The operator deletes the whole notifications block and restarts.
+	saved := s.hubCfg.Notifications
+	s.hubCfg.Notifications = nil
+	s.scheduledNotifierTick(context.Background(), time.Date(2025, 1, 6, 9, 31, 0, 0, time.UTC))
+	var n int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM slack_notifier_state WHERE key LIKE 'scheduled:last_fired:%'`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatalf("%d scheduled state rows survive the block's removal, want 0", n)
+	}
+
+	// Re-added days later with the same schedule: first sight seeds — the
+	// slots that passed while the block did not exist are not replayed.
+	s.hubCfg.Notifications = saved
+	s.scheduledNotifierTick(context.Background(), time.Date(2025, 1, 8, 9, 30, 0, 0, time.UTC))
+	if fake.count() != 1 {
+		t.Fatalf("re-added block replayed a removal-window slot: %d sends, want 1", fake.count())
+	}
+	s.scheduledNotifierTick(context.Background(), time.Date(2025, 1, 9, 9, 0, 30, 0, time.UTC))
+	if fake.count() != 2 {
+		t.Fatalf("next slot after the re-add sent %d messages, want 2", fake.count())
+	}
+}
+
+// A DISABLED lifecycle block carrying a duration the composed validator
+// rejects — a state the lifecycle tick itself tolerates by returning before
+// it validates — must not pause scheduled reports: the scheduled tick gates
+// only on the config it consumes (notifiers plus the scheduled block).
+func TestScheduledNotifierRunsDespiteDefectiveDisabledLifecycleBlock(t *testing.T) {
+	registerScheduledReport("lifecycle-defect-report", func(context.Context, *Server) (*notify.Message, bool, error) {
+		return &notify.Message{Title: "report", Body: "body"}, true, nil
+	})
+	fake := newFakeSlackServer(t)
+	schedule := types.ScheduledNotificationConfig{ID: "unaffected", Report: "lifecycle-defect-report", Via: []string{testNotifierName}, At: "09:00"}
+	s, _ := newScheduledNotifierTestServer(t, fake.server.URL, []types.ScheduledNotificationConfig{schedule})
+	disabled := false
+	s.hubCfg.Notifications.Lifecycle = &types.LifecycleNotificationsConfig{Enabled: &disabled, IdleAfter: "30s"}
+	if types.ValidateNotificationsConfig(s.hubCfg.Notifications) == nil {
+		t.Fatal("fixture is supposed to fail the composed validator")
+	}
+
+	s.scheduledNotifierTick(context.Background(), time.Date(2025, 1, 6, 8, 30, 0, 0, time.UTC))
+	s.scheduledNotifierTick(context.Background(), time.Date(2025, 1, 6, 9, 30, 0, 0, time.UTC))
+	if fake.count() != 1 {
+		t.Fatalf("scheduled report was paused by the defective disabled lifecycle block: %d sends, want 1", fake.count())
 	}
 }

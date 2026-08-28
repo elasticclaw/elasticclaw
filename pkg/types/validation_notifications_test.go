@@ -84,6 +84,16 @@ func TestValidateNotificationsConfig(t *testing.T) {
 			errMsg:  `via "gone" is duplicated`,
 		},
 		{
+			// A whitespace-only via can never name a notifier and would key the
+			// schedule's state rows by an empty via segment, surfacing only as a
+			// confusing error on a later re-enable — so it is rejected even
+			// while the schedule is disabled, like the control-character ban.
+			name:    "paused scheduled notification rejects a blank via",
+			cfg:     &NotificationsConfig{Notifiers: slack(), Scheduled: []ScheduledNotificationConfig{{ID: "daily", Report: "x", Via: []string{" "}, At: "09:00", Enabled: boolPtr(false)}}},
+			wantErr: true,
+			errMsg:  "via entries cannot be blank",
+		},
+		{
 			name:    "scheduled notification validates timezone and weekdays",
 			cfg:     &NotificationsConfig{Notifiers: slack(), Scheduled: []ScheduledNotificationConfig{{ID: "daily", Report: "x", Via: []string{"eng-agents"}, At: "09:00", Timezone: "not/a-zone"}}},
 			wantErr: true,
@@ -305,6 +315,55 @@ func TestValidateNotificationsConfig(t *testing.T) {
 				t.Fatalf("ValidateNotificationsConfig() error = %v", err)
 			}
 		})
+	}
+}
+
+// Each minute tick gates on the validity of its own feature's config: a
+// defect in a hand-written scheduled block must pause scheduled reports
+// without pausing lifecycle alerts, and a DISABLED lifecycle block carrying an
+// invalid duration — which the lifecycle tick itself tolerates by returning
+// before it validates — must not kill every scheduled report. The composed
+// ValidateNotificationsConfig still rejects both, so the settings PATCH and
+// hub.yaml validation never accept a new defect.
+func TestPerFeatureNotificationValidatorsAreScoped(t *testing.T) {
+	notifiers := map[string]NotifierConfig{"eng": {Type: "slack"}}
+	badScheduled := &NotificationsConfig{
+		Notifiers: notifiers,
+		Scheduled: []ScheduledNotificationConfig{{ID: "daily", Report: "x", Via: []string{"eng"}, At: "09:00", Weekdays: []string{"monday"}}},
+		Lifecycle: &LifecycleNotificationsConfig{Via: "eng"},
+	}
+	if err := ValidateLifecycleNotificationsConfig(badScheduled); err != nil {
+		t.Fatalf("lifecycle validator judged the scheduled block: %v", err)
+	}
+	if err := ValidateScheduledNotificationsConfig(badScheduled); err == nil {
+		t.Fatal("scheduled validator missed the invalid weekday")
+	}
+	if err := ValidateNotificationsConfig(badScheduled); err == nil {
+		t.Fatal("composed validator missed the invalid weekday")
+	}
+
+	badLifecycle := &NotificationsConfig{
+		Notifiers: notifiers,
+		Scheduled: []ScheduledNotificationConfig{{ID: "daily", Report: "x", Via: []string{"eng"}, At: "09:00"}},
+		Lifecycle: &LifecycleNotificationsConfig{Enabled: boolPtr(false), IdleAfter: "30s"},
+	}
+	if err := ValidateScheduledNotificationsConfig(badLifecycle); err != nil {
+		t.Fatalf("scheduled validator judged the disabled lifecycle block's durations: %v", err)
+	}
+	if err := ValidateLifecycleNotificationsConfig(badLifecycle); err == nil {
+		t.Fatal("lifecycle validator missed the sub-floor idle_after")
+	}
+	if err := ValidateNotificationsConfig(badLifecycle); err == nil {
+		t.Fatal("composed validator missed the sub-floor idle_after")
+	}
+
+	// A bad notifier name pauses both ticks: each consumes the notifier map.
+	badNotifiers := &NotificationsConfig{Notifiers: map[string]NotifierConfig{"eng\n": {Type: "slack"}}}
+	if err := ValidateScheduledNotificationsConfig(badNotifiers); err == nil {
+		t.Fatal("scheduled validator missed the control-character notifier name")
+	}
+	if err := ValidateLifecycleNotificationsConfig(badNotifiers); err == nil {
+		t.Fatal("lifecycle validator missed the control-character notifier name")
 	}
 }
 

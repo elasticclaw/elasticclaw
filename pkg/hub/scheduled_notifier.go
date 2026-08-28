@@ -134,19 +134,26 @@ func (s *Server) stopScheduledNotifier(timeout time.Duration) {
 func (s *Server) scheduledNotifierTick(ctx context.Context, nowAt time.Time) {
 	cfg := s.notificationsConfig()
 	if cfg == nil {
+		// A removed notifications block must still clear the scheduled dedupe
+		// rows, exactly as removing every schedule does: nothing else prunes
+		// them, and a block re-added days later with an identical schedule
+		// would otherwise inherit the stale row and replay a slot from the
+		// removal window instead of seeding on first sight.
+		s.pruneScheduledState(nil)
 		return
 	}
 	// Gate on validity like the lifecycle tick does: nothing in the load path
 	// validates a hand-written hub.yaml, and an invalid scheduled block can
 	// misbehave without any error surfacing — two schedules sharing an id map
 	// to one dedupe row and mutually reseed each other every tick, delivering
-	// nothing. The shared "notify-config" key keeps the warning to one line
-	// across both ticks.
-	if err := types.ValidateNotificationsConfig(cfg); err != nil {
-		s.logPollWarningOnce("notify-config", "[notify] invalid notifications config — notifications paused: %v", err)
+	// nothing. Only the config this tick consumes is judged (notifiers plus
+	// the scheduled block, under this tick's own warning key): a defect in the
+	// lifecycle block pauses lifecycle alerts, never scheduled reports.
+	if err := types.ValidateScheduledNotificationsConfig(cfg); err != nil {
+		s.logPollWarningOnce("scheduled-config", "[notify] invalid notifications config — scheduled reports paused: %v", err)
 		return
 	}
-	s.clearPollWarning("notify-config")
+	s.clearPollWarning("scheduled-config")
 	s.pruneScheduledState(cfg.Scheduled)
 	for _, schedule := range cfg.Scheduled {
 		s.runScheduledDelivery(ctx, nowAt, cfg, schedule)
@@ -401,8 +408,15 @@ func scheduledNotificationSlot(nowAt time.Time, schedule types.ScheduledNotifica
 	for _, weekday := range schedule.Weekdays {
 		allowed[weekday] = true
 	}
+	year, month, dayOfMonth := localNow.Date()
 	for daysAgo := 0; daysAgo < 8; daysAgo++ {
-		day := localNow.AddDate(0, 0, -daysAgo)
+		// Civil-date arithmetic (in UTC, where no gaps exist): AddDate on
+		// localNow would carry its wall time along, and when that lands in a
+		// midnight DST spring-forward gap Go normalizes it onto the previous
+		// date — the walk then visits that date twice and never the
+		// transition day, so restart catch-up could return an older slot
+		// than the latest (a double delivery) or transiently none at all.
+		day := time.Date(year, month, dayOfMonth-daysAgo, 12, 0, 0, 0, time.UTC)
 		weekday := strings.ToLower(day.Weekday().String()[:3])
 		if len(allowed) != 0 && !allowed[weekday] {
 			continue
@@ -465,7 +479,13 @@ func scheduledSlotDigest(schedule types.ScheduledNotificationConfig) string {
 	if timezone == "" {
 		timezone = "UTC"
 	}
-	return at + "\x1f" + timezone + "\x1f" + strings.Join(schedule.Weekdays, ",")
+	// Weekdays are an unordered set everywhere else (scheduledNotificationSlot,
+	// validation), and the settings screen's chips append in click order: a
+	// semantically identical reorder must not read back as an edit — it would
+	// reseed every (id, via) row and silently skip the pending slot.
+	weekdays := append([]string(nil), schedule.Weekdays...)
+	sort.Strings(weekdays)
+	return at + "\x1f" + timezone + "\x1f" + strings.Join(weekdays, ",")
 }
 
 func (s *Server) scheduledLastFired(id, via string) (time.Time, string, bool, error) {
