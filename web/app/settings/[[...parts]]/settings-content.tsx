@@ -4655,10 +4655,39 @@ function viaName(via: string): string {
   return via.trim()
 }
 
+// How a schedule's per-row UI state — probe result, probe generation, save
+// failure — is addressed. The hub tolerates a stored duplicate schedule id, so
+// the actions (toggle, edit, remove) already address rows by position; keying
+// the state by id alone left the two cards of a duplicate sharing a probe
+// result, a "Last save failed" and a "Working…".
+function scheduleKey(index: number, id: string): string {
+  return `${index}-${id}`
+}
+
+// The position half of a scheduleKey. Only removeSchedule needs it: deleting a
+// row renumbers every row after it, so their state no longer addresses the
+// schedule it was recorded for.
+function scheduleKeyIndex(key: string): number {
+  return Number(key.slice(0, key.indexOf("-")))
+}
+
 // An empty weekday list is the hub's "every day", never "never".
 function weekdaysLabel(weekdays: string[]): string {
   if (weekdays.length === 0) return "Every day"
-  return WEEKDAYS.filter((day) => weekdays.includes(day.id)).map((day) => day.label).join(", ")
+  const known = WEEKDAYS.filter((day) => weekdays.includes(day.id)).map((day) => day.label)
+  // A day this build does not know can only come from a hand-written hub.yaml.
+  // Filtering it out left the card showing an empty day field — or a shorter
+  // week than the schedule actually carries — for a value the operator then
+  // has to find in the editor to clear.
+  const flagged = unknownWeekdays(weekdays).map((weekday) => `${weekday} (invalid)`)
+  return [...known, ...flagged].join(", ")
+}
+
+// The days the hub does not accept. The editor flags them so they can be
+// cleared from here; leaving them invisible made every edit to the schedule
+// 400 on a control that was not on the screen.
+function unknownWeekdays(weekdays: string[]): string[] {
+  return weekdays.filter((weekday) => !WEEKDAYS.some((day) => day.id === weekday))
 }
 
 // Wire values are the three-letter names the hub validates against; the labels
@@ -5144,22 +5173,30 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
     // filtered the lifecycle routes would 400 on the schedule and leave the
     // channel undeletable from this screen. Dropping the channel from every
     // schedule's `via` keeps the rest of its destinations running; a schedule
-    // left with nothing else is PAUSED rather than emptied, because the hub
-    // also rejects an empty `via`. Pausing keeps the dangling name visible so
-    // the card's "no longer configured" warning still points at the repair.
+    // left with no channel this hub actually has is PAUSED rather than emptied,
+    // because the hub also rejects an empty `via`. Pausing keeps the dangling
+    // name visible so the card's "no longer configured" warning still points
+    // at the repair.
     const pausedIds: string[] = []
-    const touchedIds: string[] = []
+    const touchedKeys: string[] = []
     // Entries are matched on their resolved name: the hub trims before looking
     // the notifier up, so a hand-written " eng " points at the channel being
     // deleted just as `eng` does — and leaving it behind makes the delete
     // unsaveable.
-    const nextScheduled = schedules.map((schedule) => {
+    const nextScheduled = schedules.map((schedule, index) => {
       if (!schedule.via.some((entry) => viaName(entry) === name)) return schedule
-      touchedIds.push(schedule.id)
+      touchedKeys.push(scheduleKey(index, schedule.id))
       const via = schedule.via.filter((entry) => viaName(entry) !== name)
-      if (via.length === 0) {
+      // Paused when nothing LEFT resolves to a configured channel, not only
+      // when the list is emptied: the hub rejects an enabled schedule whose
+      // via names no notifier it has, so a schedule already carrying a
+      // dangling second name would 400 this delete on a channel the operator
+      // is not touching, with nothing on screen pointing at the repair.
+      if (!via.some((entry) => notifiers[viaName(entry)])) {
         if (schedule.enabled) pausedIds.push(schedule.id)
-        return { ...schedule, enabled: false }
+        // An empty `via` is rejected outright, so a schedule left with nothing
+        // keeps its list — paused, with the dangling name still on the card.
+        return { ...schedule, enabled: false, via: via.length > 0 ? via : schedule.via }
       }
       return { ...schedule, via }
     })
@@ -5177,7 +5214,7 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
       // longer happen: a green "Posted to eng, ops." above a card that reads
       // "Posts to eng". saveSchedule/removeSchedule invalidate for the same
       // reason; this is the third way a schedule's destinations change.
-      touchedIds.forEach(invalidateReportTest)
+      touchedKeys.forEach(invalidateReportTest)
       // Merged into whatever is already on screen rather than replacing it: a
       // notice about the reports the LAST removal paused is still the only
       // record of why they are off, and this delete did not answer it. Only a
@@ -5270,11 +5307,16 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
   const [formAt, setFormAt] = useState("09:00")
   const [formTimezone, setFormTimezone] = useState("UTC")
   const [formWeekdays, setFormWeekdays] = useState<string[]>([])
+  // The stored days this build does not know, snapshotted when the dialog
+  // opens — the same reason formDanglingVia is snapshotted: deriving the chips
+  // from formWeekdays would delete the flagged chip the moment it is unticked,
+  // and the only way back would be Cancel.
+  const [formUnknownWeekdays, setFormUnknownWeekdays] = useState<string[]>([])
   const [formScheduleEnabled, setFormScheduleEnabled] = useState(true)
   const [scheduleError, setScheduleError] = useState("")
   // A save made from a schedule's CARD (the enable switch) has no dialog to
   // report into — scheduleError renders inside the closed dialog — so its
-  // failure lands on the card itself, keyed by schedule id.
+  // failure lands on the card itself, keyed by row — see scheduleKey.
   const [scheduleSaveErrors, setScheduleSaveErrors] = useState<Record<string, string>>({})
   // A rejected ADD created no schedule, so keying its failure by id would render
   // it nowhere — the same reason detachedSaveError exists for channels.
@@ -5330,6 +5372,7 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
     setFormAt("09:00")
     setFormTimezone(browserTimezone())
     setFormWeekdays([])
+    setFormUnknownWeekdays([])
     setFormScheduleEnabled(true)
     setScheduleError("")
     setShowSchedule(true)
@@ -5351,14 +5394,31 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
     setFormAt(normalizeAt(schedule.at))
     setFormTimezone(schedule.timezone || "UTC")
     setFormWeekdays([...schedule.weekdays])
+    setFormUnknownWeekdays(unknownWeekdays(schedule.weekdays))
     setFormScheduleEnabled(schedule.enabled)
     setScheduleError("")
     setShowSchedule(true)
   }
 
-  const invalidateReportTest = (id: string) => {
-    reportTestGeneration.current[id] = (reportTestGeneration.current[id] ?? 0) + 1
-    setReportTests((current) => { const { [id]: _stale, ...rest } = current; return rest })
+  const invalidateReportTest = (key: string) => {
+    reportTestGeneration.current[key] = (reportTestGeneration.current[key] ?? 0) + 1
+    setReportTests((current) => { const { [key]: _stale, ...rest } = current; return rest })
+  }
+
+  // Deleting a row renumbers every row after it, so their probe results and
+  // save failures now name a schedule they were never recorded for. Dropping
+  // them is the only honest option: a green "Posted to eng, ops." rendered
+  // against the wrong card describes a delivery that card never made.
+  const dropScheduleRowState = (from: number) => {
+    for (const key of Object.keys(reportTestGeneration.current)) {
+      if (scheduleKeyIndex(key) >= from) {
+        reportTestGeneration.current[key] = (reportTestGeneration.current[key] ?? 0) + 1
+      }
+    }
+    const keepBefore = (current: Record<string, unknown>) =>
+      Object.fromEntries(Object.entries(current).filter(([key]) => scheduleKeyIndex(key) < from))
+    setReportTests((current) => keepBefore(current) as Record<string, ReportTestState>)
+    setScheduleSaveErrors((current) => keepBefore(current) as Record<string, string>)
   }
 
   async function saveSchedule() {
@@ -5387,15 +5447,19 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
     const next = editScheduleIndex !== null
       ? schedules.map((schedule, i) => (i === editScheduleIndex ? entry : schedule))
       : [...schedules, entry]
+    // An add lands at the end of the list, so that is the row its state is
+    // addressed by once the save is through.
+    const index = editScheduleIndex ?? schedules.length
+    const key = scheduleKey(index, id)
     const generation = saveGeneration.current
     const { persisted, message } = await savePatch({ scheduled: next })
     // The schedule now posts something else, somewhere else, so any probe
     // result on its card is about a message that no longer describes it. A
     // rejected save changed nothing and keeps its result.
     if (persisted) {
-      invalidateReportTest(id)
-      clearScheduleSaveError(id)
-      forgetSchedulePause(id)
+      invalidateReportTest(key)
+      clearScheduleSaveError(key)
+      forgetSchedulePause(id, index)
     }
     setDetachedScheduleError("")
     if (generation !== saveGeneration.current) {
@@ -5410,8 +5474,8 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
       // verbatim instead of blaming the save.
       if (persisted) { setDetachedScheduleError(message ?? ""); return }
       if (message) {
-        if (schedules.some((schedule) => schedule.id === id)) {
-          setScheduleSaveErrors((current) => ({ ...current, [id]: message }))
+        if (editScheduleIndex !== null) {
+          setScheduleSaveErrors((current) => ({ ...current, [key]: message }))
         } else {
           setDetachedScheduleError(`Adding report "${id}" failed: ${message}`)
         }
@@ -5422,15 +5486,22 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
     setShowSchedule(false)
   }
 
-  function clearScheduleSaveError(id: string) {
-    setScheduleSaveErrors((current) => { const { [id]: _cleared, ...rest } = current; return rest })
+  function clearScheduleSaveError(key: string) {
+    setScheduleSaveErrors((current) => { const { [key]: _cleared, ...rest } = current; return rest })
   }
 
   // Drops ONE schedule from the pause notices: re-enabling, editing or deleting
   // it answers the pause for that report. Every other id stays — a save on an
   // unrelated schedule is not an answer to theirs, and the notice is the only
   // record that this screen turned them off. A notice left with no ids is gone.
-  function forgetSchedulePause(id: string) {
+  //
+  // The notices name reports, not rows, so a stored duplicate id has to keep
+  // its name in the list while the OTHER row is still paused: answering row 1
+  // is not an answer for row 2, and dropping the id would erase the only
+  // record of why row 2 is off. schedulePauseNotices re-derives from the live
+  // config, so a name left behind cannot outlive the pause itself.
+  function forgetSchedulePause(id: string, index: number) {
+    if (schedules.some((schedule, i) => i !== index && schedule.id === id)) return
     setSchedulePauses((current) =>
       current
         .map((pause) => ({ ...pause, ids: pause.ids.filter((other) => other !== id) }))
@@ -5446,9 +5517,8 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
     const generation = saveGeneration.current
     const { persisted, message } = await savePatch({ scheduled: schedules.filter((_, i) => i !== index) })
     if (persisted) {
-      invalidateReportTest(id)
-      clearScheduleSaveError(id)
-      forgetSchedulePause(id)
+      dropScheduleRowState(index)
+      forgetSchedulePause(id, index)
     }
     setDetachedScheduleError("")
     if (generation !== saveGeneration.current) {
@@ -5457,7 +5527,7 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
       // failure after a delete the hub accepted goes to the banner verbatim
       // rather than writing "Last save failed" onto a card that is gone.
       if (persisted) { setDetachedScheduleError(message ?? ""); return }
-      if (message) setScheduleSaveErrors((current) => ({ ...current, [id]: message }))
+      if (message) setScheduleSaveErrors((current) => ({ ...current, [scheduleKey(index, id)]: message }))
       return
     }
     if (message) { setScheduleError(message); return }
@@ -5475,36 +5545,37 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
     // opposite of what the hub holds. The reload failure is real, so it goes
     // to the banner, which states it verbatim instead of blaming the save.
     if (persisted) {
-      clearScheduleSaveError(schedule.id)
+      clearScheduleSaveError(scheduleKey(index, schedule.id))
       // The operator has answered the pause note for THIS report by hand;
       // leaving it named there would report a state that no longer exists.
-      forgetSchedulePause(schedule.id)
+      forgetSchedulePause(schedule.id, index)
       setDetachedScheduleError(message ?? "")
       return
     }
     // A rejected toggle snaps the switch back with nothing else on screen —
     // the dialog that carries scheduleError is closed — so the failure has to
     // land on the schedule's own card.
-    if (message) setScheduleSaveErrors((current) => ({ ...current, [schedule.id]: message }))
+    if (message) setScheduleSaveErrors((current) => ({ ...current, [scheduleKey(index, schedule.id)]: message }))
   }
 
   // Probes one schedule. A dry run renders the message the next due slot would
   // post without sending it; a real run posts to every channel the schedule
   // names, which is the only way to prove the whole path works. Neither
   // touches the scheduler's own state, so the real delivery still happens.
-  async function runReportTest(schedule: ScheduledNotificationView, dryRun: boolean) {
+  async function runReportTest(schedule: ScheduledNotificationView, index: number, dryRun: boolean) {
     const targets = schedule.via.map(viaName).filter((via) => notifiers[via])
     if (targets.length === 0) return
-    const generation = reportTestGeneration.current[schedule.id] ?? 0
+    const key = scheduleKey(index, schedule.id)
+    const generation = reportTestGeneration.current[key] ?? 0
     const mode = dryRun ? "preview" : "send"
     const settle = (state: Omit<ReportTestState, "mode">) =>
       setReportTests((current) => {
         // A superseded result is dropped rather than written: whatever sits
-        // under this id now belongs to the probe that replaced this one.
-        if (generation !== (reportTestGeneration.current[schedule.id] ?? 0)) return current
-        return { ...current, [schedule.id]: { ...state, mode } }
+        // under this row now belongs to the probe that replaced this one.
+        if (generation !== (reportTestGeneration.current[key] ?? 0)) return current
+        return { ...current, [key]: { ...state, mode } }
       })
-    setReportTests((current) => ({ ...current, [schedule.id]: { status: "sending", mode, message: "" } }))
+    setReportTests((current) => ({ ...current, [key]: { status: "sending", mode, message: "" } }))
     if (dryRun) {
       try {
         const { empty, payload } = await sendScheduledReportTest(schedule.report, targets[0], true)
@@ -5560,6 +5631,16 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
   // Routing this channel off (or removing it) pauses the hub when it is the
   // last one left; buildPatch clears `enabled` rather than failing the save.
   const otherRoutedCount = routes.filter((route) => route.via !== editName && notifiers[route.via]).length
+  // Deleting a channel rewrites the `via` of every schedule that posts to it
+  // and invalidates their probe results — including one that is still posting,
+  // whose loop would then be left mid-send with nothing recording what it had
+  // already delivered. Held until it settles, exactly as the schedule card's
+  // own Edit and switch are.
+  const probingRemoveTarget = schedules.some(
+    (schedule, index) =>
+      schedule.via.some((entry) => viaName(entry) === editName) &&
+      reportTests[scheduleKey(index, schedule.id)]?.status === "sending",
+  )
 
   // The pause notices, derived from the config as it stands now. A report a
   // notice named that is enabled again — or gone — has answered it, and a
@@ -5790,7 +5871,12 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
                         <Send className="size-3.5" />
                         {test?.status === "sending" ? "Sending…" : "Send test"}
                       </Button>
-                      <Button size="sm" variant="ghost" onClick={() => openEdit(name)}>Edit</Button>
+                      {/* Held while a save is in flight for the reason the
+                          schedule cards' Edit is: the dialog seeds from the
+                          pre-save snapshot, so opening it mid-save would hand
+                          the next save a stale copy of the change still
+                          landing — and Remove inside it reaches the schedules. */}
+                      <Button size="sm" variant="ghost" disabled={saving} onClick={() => openEdit(name)}>Edit</Button>
                     </div>
                   </div>
                   {test && test.status !== "sending" && (
@@ -5911,18 +5997,26 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
             {/* Keyed by position, not id: the hub tolerates a stored duplicate
                 id, and two cards sharing a React key collapse into one. */}
             {schedules.map((schedule, index) => {
-              const test = reportTests[schedule.id]
+              const key = scheduleKey(index, schedule.id)
+              const test = reportTests[key]
               // Resolved names, matching the hub: " eng " is delivered to the
               // channel `eng`, so the card must not flag it as missing — and
               // the trimmed name is what a probe has to be sent to.
               const missingVia = schedule.via.map(viaName).filter((via) => !notifiers[via])
               const targets = schedule.via.map(viaName).filter((via) => notifiers[via])
-              const canTest = targets.length > 0 && !saving && test?.status !== "sending"
+              // A probe holds this row the way a save does. "Send now" POSTs to
+              // each channel in turn and settles only once the loop is done, so
+              // a save landing mid-loop would invalidate the probe and drop the
+              // aggregate result — leaving real Slack messages sent with
+              // nothing on screen recording them, and both probe buttons
+              // re-enabled to send them a second time.
+              const probing = test?.status === "sending"
+              const canTest = targets.length > 0 && !saving && !probing
               // Which probe is in flight, so "Working…" replaces the label of
               // the button that was clicked and not the other one's.
-              const running = test?.status === "sending" ? test.mode : null
+              const running = probing ? test.mode : null
               return (
-                <div key={`${index}-${schedule.id}`} className="border border-border rounded-lg p-4">
+                <div key={key} className="border border-border rounded-lg p-4">
                   <div className="flex items-start justify-between gap-3">
                     <div className="min-w-0">
                       <div className="flex items-center gap-2 flex-wrap">
@@ -5961,16 +6055,19 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
                     <div className="flex items-center gap-2 shrink-0">
                       <Switch
                         checked={schedule.enabled}
-                        disabled={saving}
+                        disabled={saving || probing}
                         onCheckedChange={(checked) => toggleSchedule(schedule, index, checked)}
-                        aria-label={`Enable the ${schedule.id} report`}
+                        // The id alone is not a name when the hub carries a
+                        // stored duplicate of it: both switches would announce
+                        // themselves identically.
+                        aria-label={`Enable the ${schedule.id} report (${scheduledReportLabel(schedule.report)}, row ${index + 1})`}
                       />
                       {/* Disabled while a save is in flight for the same reason
                           the dialog's own controls are: the editor seeds from
                           the pre-save snapshot, so opening it mid-save would
                           hand the next save a stale copy of the change that is
-                          still landing. */}
-                      <Button size="sm" variant="ghost" disabled={saving} onClick={() => openEditSchedule(schedule, index)}>Edit</Button>
+                          still landing. A probe holds it too — see `probing`. */}
+                      <Button size="sm" variant="ghost" disabled={saving || probing} onClick={() => openEditSchedule(schedule, index)}>Edit</Button>
                     </div>
                   </div>
                   <div className="flex items-center gap-2 mt-3">
@@ -5980,7 +6077,7 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
                       className="gap-1.5"
                       disabled={!canTest}
                       title="Renders the report without posting it"
-                      onClick={() => runReportTest(schedule, true)}
+                      onClick={() => runReportTest(schedule, index, true)}
                     >
                       <Eye className="size-3.5" />
                       {running === "preview" ? "Working…" : "Preview"}
@@ -5991,7 +6088,7 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
                       className="gap-1.5"
                       disabled={!canTest}
                       title={targets.length > 0 ? `Posts the report now to ${targets.join(", ")}` : undefined}
-                      onClick={() => runReportTest(schedule, false)}
+                      onClick={() => runReportTest(schedule, index, false)}
                     >
                       <Send className="size-3.5" />
                       {running === "send" ? "Working…" : "Send now"}
@@ -6024,10 +6121,10 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
                       )}
                     </div>
                   )}
-                  {scheduleSaveErrors[schedule.id] && (
+                  {scheduleSaveErrors[key] && (
                     <div className="mt-3 flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
                       <AlertTriangle className="size-3.5 mt-px shrink-0" />
-                      <span className="break-words">Last save failed: {scheduleSaveErrors[schedule.id]}</span>
+                      <span className="break-words">Last save failed: {scheduleSaveErrors[key]}</span>
                     </div>
                   )}
                 </div>
@@ -6276,7 +6373,8 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
                   size="sm"
                   variant="ghost"
                   className="text-destructive hover:text-destructive"
-                  disabled={saving}
+                  disabled={saving || probingRemoveTarget}
+                  title={probingRemoveTarget ? "A scheduled report is posting to this channel right now." : undefined}
                   onClick={() => removeChannel(editName)}
                 >
                   <Trash2 className="size-3.5 mr-1" /> Remove
@@ -6471,7 +6569,48 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
                     </button>
                   )
                 })}
+                {/* A stored day this hub does not accept gets a chip of its
+                    own, flagged: the hub rejects the schedule the moment any
+                    other field is edited, so unticking it has to be possible
+                    from here — otherwise the only repair is Remove and re-add.
+                    Like the dangling channels, the list is the open-time
+                    snapshot, so unticking one leaves its chip to be re-ticked. */}
+                {formUnknownWeekdays.map((weekday) => {
+                  const selected = formWeekdays.includes(weekday)
+                  return (
+                    <button
+                      key={weekday}
+                      type="button"
+                      aria-pressed={selected}
+                      aria-label={`${weekday} (not a day this hub accepts)`}
+                      disabled={saving}
+                      onClick={() =>
+                        setFormWeekdays(
+                          selected
+                            ? formWeekdays.filter((day) => day !== weekday)
+                            : [...formWeekdays, weekday],
+                        )
+                      }
+                      className={cn(
+                        "px-2.5 py-1 text-xs rounded-md border transition-colors disabled:opacity-50",
+                        selected
+                          ? "border-amber-500/30 bg-amber-500/10 text-amber-400"
+                          : "border-border bg-muted/20 text-muted-foreground hover:bg-muted/50",
+                      )}
+                    >
+                      {weekday}
+                    </button>
+                  )
+                })}
               </div>
+              {unknownWeekdays(formWeekdays).length > 0 && (
+                <p className="text-xs text-amber-400 mt-1">
+                  The hub does not accept{" "}
+                  <span className="font-mono">{unknownWeekdays(formWeekdays).join(", ")}</span>{" "}
+                  as {unknownWeekdays(formWeekdays).length === 1 ? "a day" : "days"} — this report cannot be saved until the flagged{" "}
+                  {unknownWeekdays(formWeekdays).length === 1 ? "chip is" : "chips are"} unticked.
+                </p>
+              )}
               <p className="text-xs text-muted-foreground mt-1">
                 {formWeekdays.length === 0
                   ? "No days selected — runs every day."
