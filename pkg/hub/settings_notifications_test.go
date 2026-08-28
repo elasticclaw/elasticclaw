@@ -819,3 +819,43 @@ func TestSettingsPatchWithoutScheduledKeyKeepsStoredSchedules(t *testing.T) {
 		t.Fatalf("the notifier edit itself did not land: channel = %q", got)
 	}
 }
+
+// A stored `at` that time.Parse accepts but <input type="time"> cannot render
+// ("9:00") leaves the schedule uneditable from the settings screen, so any
+// patch that touches this hub repairs it — including one that never mentions
+// the schedule and only carries it forward.
+func TestSettingsPatchZeroPadsScheduledAt(t *testing.T) {
+	registerScheduledReport("unpadded-at-report", func(context.Context, *Server) (*notify.Message, bool, error) {
+		return nil, false, nil
+	})
+	path := filepath.Join(t.TempDir(), "hub.yaml")
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", path)
+	s, _ := NewTestServerWithConfig(t, &types.HubConfig{Notifications: &types.NotificationsConfig{
+		Notifiers: map[string]types.NotifierConfig{
+			"eng": {Type: "slack", Settings: map[string]any{"channel": "C0123ABCD", "token_secret": "slack_token"}},
+		},
+		Scheduled: []types.ScheduledNotificationConfig{
+			{ID: "morning", Report: "unpadded-at-report", Via: []string{"eng"}, At: "9:00"},
+		},
+	}}, "", "", "")
+	if err := config.SaveHubConfig(s.hubCfg); err != nil {
+		t.Fatal(err)
+	}
+
+	body := []byte(`{"notifications":{"notifiers":{"eng":{"type":"slack","channel":"C0123ABCD","token_secret":"slack_token"}}}}`)
+	rr := httptest.NewRecorder()
+	s.patchSettings(rr, httptest.NewRequest(http.MethodPatch, "/api/settings", bytes.NewReader(body)))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body = %s", rr.Code, rr.Body.String())
+	}
+	diskCfg, err := config.LoadHubConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(diskCfg.Notifications.Scheduled) != 1 {
+		t.Fatalf("schedules = %#v, want 1", diskCfg.Notifications.Scheduled)
+	}
+	if got := diskCfg.Notifications.Scheduled[0].At; got != "09:00" {
+		t.Fatalf("at = %q, want %q", got, "09:00")
+	}
+}

@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"time"
 
 	"github.com/elasticclaw/elasticclaw/pkg/cliversion"
 	"github.com/elasticclaw/elasticclaw/pkg/config"
@@ -880,6 +881,28 @@ func validateSettingsNotifications(current, cfg *types.NotificationsConfig) erro
 	return nil
 }
 
+// normalizeScheduledTimes rewrites each schedule's `at` in zero-padded HH:MM.
+//
+// time.Parse("15:04") accepts an unpadded "9:00", so a hand-written hub.yaml
+// can carry one and the scheduler runs it correctly — but the settings screen
+// binds `at` to an <input type="time">, which renders anything that is not
+// HH:MM as blank. Normalizing whatever a patch carries (including the stored
+// list carried forward above) repairs such an entry on the first save from any
+// client, rather than leaving it permanently uneditable from the screen. An
+// unparseable value is left alone for validation to reject by its real text.
+func normalizeScheduledTimes(cfg *types.NotificationsConfig) {
+	if cfg == nil {
+		return
+	}
+	for i, scheduled := range cfg.Scheduled {
+		parsed, err := time.Parse("15:04", strings.TrimSpace(scheduled.At))
+		if err != nil {
+			continue
+		}
+		cfg.Scheduled[i].At = parsed.Format("15:04")
+	}
+}
+
 // scheduledReportUnchanged reports whether a stored schedule under the same id
 // already names the patched schedule's report.
 //
@@ -1153,6 +1176,7 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 		if patch.Notifications.Scheduled == nil && s.hubCfg.Notifications != nil {
 			patch.Notifications.Scheduled = append([]types.ScheduledNotificationConfig(nil), s.hubCfg.Notifications.Scheduled...)
 		}
+		normalizeScheduledTimes(patch.Notifications)
 		mergeNotifierSettings(s.hubCfg.Notifications, patch.Notifications)
 		dropRejectedLifecycleDurations(s.hubCfg.Notifications, patch.Notifications)
 		if err := validateSettingsNotifications(s.hubCfg.Notifications, patch.Notifications); err != nil {
