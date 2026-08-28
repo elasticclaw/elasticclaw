@@ -68,7 +68,7 @@ func NewGitHubTokenProvider(cfg *types.GitHubAppConfig) (*GitHubTokenProvider, e
 		cfg:        cfg,
 		privateKey: key,
 		apiBaseURL: "https://api.github.com",
-		httpClient: http.DefaultClient,
+		httpClient: &http.Client{Timeout: 30 * time.Second},
 	}, nil
 }
 

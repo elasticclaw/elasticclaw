@@ -1023,6 +1023,16 @@ func (s *Server) resolveGitHubTokenWithRepos(repoAccess []RepoAccess) string {
 	if cached, ok := s.ghTokenCache[cacheKey]; ok && time.Now().Before(cached.expiresAt) {
 		return cached.token
 	}
+	// If the shared client is already rate-limit blocked, don't mint: a
+	// mid-pass 429 on one repo must stop token mints for the rest of the
+	// pass, not just the repo that hit it.
+	if blockedUntil, blocked := defaultGitHubClient.blockedUntilTime(); blocked {
+		if s.ghTokenCache == nil {
+			s.ghTokenCache = map[string]cachedGitHubToken{}
+		}
+		s.ghTokenCache[cacheKey] = cachedGitHubToken{expiresAt: blockedUntil}
+		return ""
+	}
 	var lastErr error
 	for _, appCfg := range appCfgs {
 		provider, err := NewGitHubTokenProvider(appCfg)
