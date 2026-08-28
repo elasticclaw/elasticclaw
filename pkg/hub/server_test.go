@@ -149,6 +149,34 @@ func TestEnqueueSessionLostResumeFindsProgressBelowFiveBridgeErrors(t *testing.T
 	}
 }
 
+func TestEnqueueSessionLostResumeFindsProgressBelowWhitespacePrefixedBridgeErrors(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, nil, "", "", "")
+	const clawID = "claw-resume-whitespace-error-burst"
+	if _, err := db.Exec(`INSERT INTO claws(id, tenant_id, name, status, bootstrap_ok, created_at) VALUES(?,?,?,?,?,datetime('now'))`, clawID, "test-tenant-id", "resume whitespace errors", "connected", 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO messages(id, claw_id, tenant_id, role, content, created_at) VALUES(?,?,?,?,?,datetime('now','-10 seconds'))`, "progress", clawID, "test-tenant-id", "claw", "Completed the migration safely."); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 5; i++ {
+		prefix := types.BridgeErrorPrefix
+		if i%2 == 1 {
+			prefix = types.BridgeReplayErrorPrefix
+		}
+		if _, err := db.Exec(`INSERT INTO messages(id, claw_id, tenant_id, role, content, created_at) VALUES(?,?,?,?,?,datetime('now',?))`, fmt.Sprintf("whitespace-bridge-error-%d", i), clawID, "test-tenant-id", "claw", " \n\t"+prefix+" gateway disconnected", fmt.Sprintf("-%d seconds", 5-i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s.enqueueSessionLostResume(clawID, restartResumePrefix, "whitespace-error-burst-marker")
+	var prompt string
+	if err := db.QueryRow(`SELECT content FROM messages WHERE claw_id=? AND role='hub'`, clawID).Scan(&prompt); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(prompt, "Completed the migration safely.") {
+		t.Fatalf("resume prompt omitted progress below whitespace-prefixed bridge-error burst: %q", prompt)
+	}
+}
+
 func TestEnqueueSessionLostResumeSkipsWhitespaceAndFencesProgress(t *testing.T) {
 	s, db := NewTestServerWithConfig(t, nil, "", "", "")
 	const clawID = "claw-resume-fenced"
@@ -235,6 +263,39 @@ func TestEnqueueSessionPreservedContinuationEscalatesAfterBudget(t *testing.T) {
 	}
 	if !paused {
 		t.Fatal("preserved continuation budget did not pause the claw")
+	}
+	notice := sessionPreservedContinuationPauseNotice(sessionPreservedContinuationMaxInWindow + 1)
+	if !strings.Contains(notice, "4 preserved session-file lock conflicts") {
+		t.Fatalf("pause notice must include the triggering conflict: %q", notice)
+	}
+}
+
+func TestEnqueueSessionPreservedContinuationResetsBudgetAfterProgress(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, nil, "", "", "")
+	const clawID = "claw-preserved-progress"
+	if _, err := db.Exec(`INSERT INTO claws(id, tenant_id, name, status, bootstrap_ok, created_at) VALUES(?,?,?,?,?,datetime('now'))`, clawID, "test-tenant-id", "preserved progress", "connected", 1); err != nil {
+		t.Fatal(err)
+	}
+	for range sessionPreservedContinuationMaxInWindow {
+		s.enqueueSessionPreservedContinuation(clawID)
+	}
+	if _, err := db.Exec(`INSERT INTO messages(id, claw_id, tenant_id, role, content, created_at) VALUES(?,?,?,?,?,?)`, "substantive-progress", clawID, "test-tenant-id", "claw", "Completed a substantive implementation step.", time.Now().UTC().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	s.enqueueSessionPreservedContinuation(clawID)
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND role='hub' AND content LIKE ?`, clawID, sessionPreservedContinuationPrefix+"%").Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != sessionPreservedContinuationMaxInWindow+1 {
+		t.Fatalf("continuation count = %d, want %d after substantive progress", count, sessionPreservedContinuationMaxInWindow+1)
+	}
+	var paused bool
+	if err := db.QueryRow(`SELECT COALESCE(no_progress_paused,0) != 0 FROM claws WHERE id=?`, clawID).Scan(&paused); err != nil {
+		t.Fatal(err)
+	}
+	if paused {
+		t.Fatal("substantive progress must reset the preserved-continuation budget")
 	}
 }
 

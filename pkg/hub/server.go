@@ -8552,6 +8552,10 @@ const sessionPreservedContinuationThrottle = 10 * time.Minute
 // silently idle.
 const sessionPreservedContinuationMaxInWindow = 3
 
+func sessionPreservedContinuationPauseNotice(conflicts int) string {
+	return fmt.Sprintf("[hub] Automatic continuation paused: %d preserved session-file lock conflicts occurred without progress within %s. This claw is paused awaiting intervention.", conflicts, sessionPreservedContinuationThrottle)
+}
+
 func (s *Server) enqueueSessionRotatedResume(clawID string) {
 	var recent int
 	err := s.db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND role='hub' AND content LIKE ? AND created_at > ?`,
@@ -8565,10 +8569,16 @@ func (s *Server) enqueueSessionRotatedResume(clawID string) {
 
 func (s *Server) enqueueSessionPreservedContinuation(clawID string) {
 	var recent int
+	windowStart := now().Add(-sessionPreservedContinuationThrottle)
+	_, lastProgressAt := s.lastSubstantiveClawProgress(clawID)
+	if lastProgressAt.After(windowStart) {
+		windowStart = lastProgressAt
+	}
 	err := s.db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND role='hub' AND content LIKE ? AND created_at > ?`,
-		clawID, sessionPreservedContinuationPrefix+"%", now().Add(-sessionPreservedContinuationThrottle)).Scan(&recent)
+		clawID, sessionPreservedContinuationPrefix+"%", windowStart).Scan(&recent)
 	if err == nil && recent >= sessionPreservedContinuationMaxInWindow {
-		notice := fmt.Sprintf("[hub] Automatic continuation paused: %d preserved session-file lock conflicts occurred without progress within %s. This claw is paused awaiting intervention.", recent, sessionPreservedContinuationThrottle)
+		conflicts := recent + 1 // Include the conflict whose continuation would exceed the budget.
+		notice := sessionPreservedContinuationPauseNotice(conflicts)
 		log.Printf("[watchdog] pausing session-preserved continuation for %s: %d continuations within %s without progress", shortID(clawID), recent, sessionPreservedContinuationThrottle)
 		s.pauseAutomaticContinuation(clawID, notice)
 		return
@@ -8585,6 +8595,30 @@ func (s *Server) enqueueSessionPreservedContinuation(clawID string) {
 	prompt := sessionPreservedContinuationPrefix + " The previous turn was interrupted by a session-file lock conflict and aborted mid-turn. Your session and its history are intact, so do not start over. The turn may have partially completed before it was aborted, including writing files, committing, or commenting on a PR; check the workspace with git status before repeating anything. Continue from where you stopped.\n\n<!-- " + marker + " -->"
 	log.Printf("[watchdog] enqueueing %s continuation for %s", marker, shortID(clawID))
 	s.injectHubMessageByID(clawID, prompt)
+}
+
+// lastSubstantiveClawProgress returns the newest meaningful claw output and
+// its timestamp. Keep the SQL and Go filters aligned: SQLite's default TRIM
+// only removes spaces, so explicitly include the transport whitespace that
+// bridge messages can carry before their prefix.
+func (s *Server) lastSubstantiveClawProgress(clawID string) (string, time.Time) {
+	rows, err := s.db.Query(`SELECT content, created_at FROM messages WHERE claw_id=? AND role='claw' AND TRIM(content, char(9) || char(10) || char(13) || ' ') != '' AND TRIM(content, char(9) || char(10) || char(13) || ' ') NOT GLOB ? AND TRIM(content, char(9) || char(10) || char(13) || ' ') NOT GLOB ? ORDER BY created_at DESC, rowid DESC LIMIT 5`, clawID, types.BridgeErrorPrefix+"*", types.BridgeReplayErrorPrefix+"*")
+	if err != nil {
+		return "", time.Time{}
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var candidate string
+		var createdAt time.Time
+		if err := rows.Scan(&candidate, &createdAt); err != nil {
+			continue
+		}
+		candidate = strings.TrimSpace(candidate)
+		if candidate != "" && !strings.HasPrefix(candidate, types.BridgeErrorPrefix) && !strings.HasPrefix(candidate, types.BridgeReplayErrorPrefix) {
+			return candidate, createdAt
+		}
+	}
+	return "", time.Time{}
 }
 
 func (s *Server) enqueueSessionLostResume(clawID, prefix, marker string) {
@@ -8628,29 +8662,7 @@ func (s *Server) enqueueSessionLostResume(clawID, prefix, marker string) {
 		}
 		b.WriteString(".")
 	}
-	// Bridge transport errors are stored as claw messages too, but replaying one
-	// into a fresh session would replace useful progress with outage noise. Keep
-	// this filter in SQL so error bursts do not consume the candidate window.
-	// GLOB is case-sensitive like Go's HasPrefix. The prefixes contain no *, ?,
-	// or [, so they need no escaping; escape any future prefix with a GLOB
-	// metacharacter. Go rechecks after TrimSpace because SQLite TRIM does not
-	// remove every whitespace character.
-	var lastProgress string
-	rows, progressErr := s.db.Query(`SELECT content FROM messages WHERE claw_id=? AND role='claw' AND content NOT GLOB ? AND content NOT GLOB ? ORDER BY created_at DESC, rowid DESC LIMIT 5`, clawID, types.BridgeErrorPrefix+"*", types.BridgeReplayErrorPrefix+"*")
-	if progressErr == nil {
-		for rows.Next() {
-			var candidate string
-			if err := rows.Scan(&candidate); err != nil {
-				continue
-			}
-			candidate = strings.TrimSpace(candidate)
-			if candidate != "" && !strings.HasPrefix(candidate, types.BridgeErrorPrefix) && !strings.HasPrefix(candidate, types.BridgeReplayErrorPrefix) {
-				lastProgress = candidate
-				break
-			}
-		}
-		_ = rows.Close()
-	}
+	lastProgress, _ := s.lastSubstantiveClawProgress(clawID)
 	if lastProgress != "" {
 		const lastProgressLimit = 2000
 		if runeLen(lastProgress) > lastProgressLimit {
