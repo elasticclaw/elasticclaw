@@ -136,6 +136,46 @@ func TestCheckNotificationsChecksEveryLifecycleRoute(t *testing.T) {
 	}
 }
 
+// Scheduled destinations get the same per-destination checks lifecycle routes
+// get: a schedule pointed at a channel-less (or non-constructible) notifier
+// fails every runtime send permanently and silently burns its slot, so doctor
+// must not report it green.
+func TestCheckNotificationsChecksEveryScheduledDestination(t *testing.T) {
+	s := &Server{}
+	cfg := &types.HubConfig{Secrets: map[string]string{"token": "xoxb-test"}, Notifications: &types.NotificationsConfig{
+		Notifiers: map[string]types.NotifierConfig{
+			"healthy": {Type: "slack", Settings: map[string]any{"token_secret": "token", "channel": "C0123ABCD"}},
+			"empty":   {Type: "slack", Settings: map[string]any{"token_secret": "token"}},
+			"broken":  {Type: "carrier-pigeon", Settings: map[string]any{"channel": "C0123ABCD"}},
+		},
+		Scheduled: []types.ScheduledNotificationConfig{
+			{ID: "digest", Report: "pending_prs", Via: []string{"healthy", "empty", "broken", "missing"}, At: "09:00"},
+		},
+	}}
+	checks := s.checkNotifications(cfg)
+	seen := map[string]bool{}
+	for _, check := range checks {
+		if strings.Contains(check.Title, "Scheduled report") {
+			if check.OK {
+				t.Fatalf("schedule with broken destinations reported green: %#v", check)
+			}
+			seen[check.Title] = true
+		}
+	}
+	for _, want := range []string{`destination "empty" has no channel`, `destination "broken" is not constructible`, "sends to an unknown notifier"} {
+		found := false
+		for title := range seen {
+			if strings.Contains(title, want) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("missing scheduled destination check %q in %#v", want, checks)
+		}
+	}
+}
+
 // Regression: the per-route checks ran even while lifecycle alerts were off, so
 // a deliberately muted config with a dangling via — a state
 // ValidateNotificationsConfig explicitly accepts, "an operator who mutes alerts

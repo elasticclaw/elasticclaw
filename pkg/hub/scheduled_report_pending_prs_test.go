@@ -68,6 +68,74 @@ func TestPendingPRsScheduledReportReturnsFalseWithoutOpenTickets(t *testing.T) {
 	}
 }
 
+// The report applies the requires_pr=1 AND analytics_enabled=1 defaults every
+// analytics view applies, so the digest never names a ticket the linked
+// /analytics page hides (and its count matches the dashboard's).
+func TestPendingPRsScheduledReportAppliesAnalyticsDefaults(t *testing.T) {
+	s, db := newTaskRunAnalyticsAPITestServer(t)
+	nowAt := time.Now()
+	insertPendingPRReportRun(t, db, "visible", "ENG-1", "eng", "Visible", nowAt.Add(-24*time.Hour), 1)
+	insertPendingPRReportPR(t, db, "visible", 1, "open", false, nowAt.Add(-24*time.Hour))
+	insertPendingPRReportExcludedRun(t, db, "not-pr-task", "ENG-2", boolPtr(false), nil, nowAt.Add(-24*time.Hour))
+	insertPendingPRReportPR(t, db, "not-pr-task", 2, "open", false, nowAt.Add(-24*time.Hour))
+	insertPendingPRReportExcludedRun(t, db, "analytics-off", "ENG-3", nil, boolPtr(false), nowAt.Add(-24*time.Hour))
+	insertPendingPRReportPR(t, db, "analytics-off", 3, "open", false, nowAt.Add(-24*time.Hour))
+
+	message, ok, err := buildPendingPRsScheduledReport(context.Background(), s)
+	if err != nil || !ok {
+		t.Fatalf("build report = %v, %v, want report", ok, err)
+	}
+	if message.Summary[0] != "1 tickets with open PRs" {
+		t.Fatalf("summary = %q — excluded runs leaked into the count", message.Summary[0])
+	}
+	if strings.Contains(message.Body, "ENG-2") || strings.Contains(message.Body, "ENG-3") {
+		t.Fatalf("body names tickets the analytics views hide: %q", message.Body)
+	}
+}
+
+// The overflow line is appended AFTER the body is fitted into the rune limit,
+// so "…and N more" survives instead of being the first thing truncated, and N
+// counts the dropped lines too.
+func TestPendingPRsScheduledReportTruncatesTicketLinesBeforeOverflowLine(t *testing.T) {
+	s, db := newTaskRunAnalyticsAPITestServer(t)
+	nowAt := time.Now()
+	longTitle := strings.Repeat("very long ticket title ", 20)
+	for i := 0; i < 21; i++ {
+		runID := fmt.Sprintf("trunc-%d", i)
+		insertPendingPRReportRun(t, db, runID, fmt.Sprintf("ENG-%d", i), "eng", longTitle, nowAt.Add(-time.Duration(i+1)*time.Hour), 1)
+		insertPendingPRReportPR(t, db, runID, i+1, "open", false, nowAt.Add(-time.Duration(i+1)*time.Hour))
+	}
+
+	message, ok, err := buildPendingPRsScheduledReport(context.Background(), s)
+	if err != nil || !ok {
+		t.Fatalf("build report = %v, %v, want report", ok, err)
+	}
+	if runeLen(message.Body) > scheduledPendingPRsBodyLimit {
+		t.Fatalf("body is %d runes, over the %d limit", runeLen(message.Body), scheduledPendingPRsBodyLimit)
+	}
+	shown := strings.Count(message.Body, " days)")
+	if shown == 0 || shown >= 21 {
+		t.Fatalf("expected some but not all ticket lines to survive, got %d", shown)
+	}
+	if !strings.HasSuffix(message.Body, fmt.Sprintf("…and %d more", 21-shown)) {
+		t.Fatalf("overflow line missing or miscounted (shown=%d): %q", shown, message.Body)
+	}
+}
+
+func insertPendingPRReportExcludedRun(t *testing.T, db *sql.DB, runID, issueID string, requiresPR, analyticsEnabled *bool, startedAt time.Time) {
+	t.Helper()
+	insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{
+		RunID: runID, AttemptID: "attempt-" + runID, ClawID: "claw-" + runID, TenantID: "test-tenant-id",
+		Status: taskRunStatusClean, Phase: taskRunPhaseTerminal, OwnerType: taskRunOwnerWorkflow,
+		Integration: "linear", StartedAt: startedAt.UnixMilli(), IssueTitle: "Excluded",
+		RequiresPR: requiresPR, AnalyticsEnabled: analyticsEnabled, ExcludedReason: "excluded",
+		OpenPRCount: 1,
+	})
+	if _, err := db.Exec(`UPDATE task_run_summaries SET issue_id=?, integration_workspace='eng' WHERE run_id=?`, issueID, runID); err != nil {
+		t.Fatalf("set excluded pending PR report ticket: %v", err)
+	}
+}
+
 func insertPendingPRReportRun(t *testing.T, db *sql.DB, runID, issueID, workspace, title string, startedAt time.Time, openPRCount int) {
 	t.Helper()
 	startedAtMillis := startedAt.UnixMilli()

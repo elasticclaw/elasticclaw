@@ -1139,6 +1139,17 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 		// field — an older screen, or a hand-written PATCH that only meant to
 		// touch notifiers — not from one asking to delete every schedule.
 		// Deleting is expressed as a present, shorter (possibly empty) list.
+		//
+		// This carry-forward is deliberately asymmetric: `notifiers` and
+		// `lifecycle` keep the block's pre-existing whole-replacement
+		// semantics (a patch with only `scheduled` still replaces them with
+		// whatever it carries, i.e. nothing). Every shipped client sends the
+		// whole notifications block, so nothing observable depends on
+		// carry-forward there yet — `scheduled` gets it only because it was
+		// added AFTER such clients existed, making an absent key genuinely
+		// mean "never saw the field". Extending carry-forward to the older
+		// keys would silently change what existing PATCHes do and belongs in
+		// its own change.
 		if patch.Notifications.Scheduled == nil && s.hubCfg.Notifications != nil {
 			patch.Notifications.Scheduled = append([]types.ScheduledNotificationConfig(nil), s.hubCfg.Notifications.Scheduled...)
 		}

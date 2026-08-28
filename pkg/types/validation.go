@@ -797,6 +797,14 @@ func ValidateNotificationsConfig(cfg *NotificationsConfig) error {
 		if strings.TrimSpace(scheduled.ID) == "" {
 			return fmt.Errorf("%s: id is required", prefix)
 		}
+		// Same ban as notifier names above: the hub keys each destination's
+		// dedupe row by the schedule id and via joined with a NUL sentinel,
+		// so an id (or a not-yet-checked via on a disabled schedule) carrying
+		// control characters could collide with another pair's row or forge
+		// hub log lines.
+		if strings.ContainsFunc(scheduled.ID, unicode.IsControl) {
+			return fmt.Errorf("%s: id %q cannot contain control characters", prefix, scheduled.ID)
+		}
 		if _, duplicate := seenScheduled[scheduled.ID]; duplicate {
 			return fmt.Errorf("%s: id %q is duplicated", prefix, scheduled.ID)
 		}
@@ -817,6 +825,13 @@ func ValidateNotificationsConfig(cfg *NotificationsConfig) error {
 				return fmt.Errorf("%s: via %q is duplicated", prefix, via)
 			}
 			seenVia[via] = struct{}{}
+			// An enabled schedule's via must name a notifier (whose name is
+			// already control-character-free); a disabled one skips that
+			// check, so ban control characters here too — a paused schedule
+			// still writes state rows keyed by its via.
+			if strings.ContainsFunc(via, unicode.IsControl) {
+				return fmt.Errorf("%s: via %q cannot contain control characters", prefix, via)
+			}
 			// The notifier reference is checked only while the schedule is
 			// enabled, symmetrically with the disabled lifecycle block below:
 			// an operator who pauses a schedule and then deletes its notifier

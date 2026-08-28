@@ -57,6 +57,23 @@ func scheduledReport(name string) (scheduledReportBuilder, bool) {
 	return builder, ok
 }
 
+// scheduledSendTimeout bounds each report build and each destination send,
+// mirroring the lifecycle notifier's 30s send cap: one slow destination must
+// not delay every schedule behind it in the tick, and a hanging send would
+// otherwise sit in stopScheduledNotifier's bounded wait, widening the
+// shutdown duplicate-send window.
+const scheduledSendTimeout = 30 * time.Second
+
+// scheduledMaxTransientFailures bounds consecutive transient send failures
+// for one (schedule, destination) slot, analogous to
+// lifecycleMaxTransientFailures. Unclassified errors default to transient, so
+// a permanently-undeliverable report a provider failed to classify would
+// otherwise re-post the identical message every minute until the next slot.
+// Unlike the lifecycle streak this one lives in memory (ticks are serial):
+// losing it to a restart costs at most one fresh retry budget for the same
+// slot, never a wedged cursor.
+const scheduledMaxTransientFailures = 60
+
 // startScheduledNotifier launches the background loop that fires scheduled
 // reports. It stops when stopScheduledNotifier is called (graceful shutdown,
 // before the DB closes).
@@ -64,8 +81,14 @@ func (s *Server) startScheduledNotifier() {
 	stop := make(chan struct{})
 	done := make(chan struct{})
 	s.scheduledNotifierStop, s.scheduledNotifierDone = stop, done
+	// tickCtx mirrors the stop channel as a context so the builds and sends
+	// of a tick in flight at shutdown are cancelled instead of running out
+	// stopScheduledNotifier's bounded wait.
+	tickCtx, cancelTicks := context.WithCancel(context.Background())
 	s.safeGo("scheduled notifier", func() {
 		defer close(done)
+		defer cancelTicks()
+		go func() { <-stop; cancelTicks() }()
 		for {
 			timer := time.NewTimer(time.Minute)
 			select {
@@ -83,7 +106,7 @@ func (s *Server) startScheduledNotifier() {
 						log.Printf("[notify] scheduled notifier tick panic: %v\n%s", r, debug.Stack())
 					}
 				}()
-				s.scheduledNotifierTick(s.nowFunc())
+				s.scheduledNotifierTick(tickCtx, s.nowFunc())
 			}()
 		}
 	})
@@ -108,20 +131,22 @@ func (s *Server) stopScheduledNotifier(timeout time.Duration) {
 	}
 }
 
-func (s *Server) scheduledNotifierTick(nowAt time.Time) {
+func (s *Server) scheduledNotifierTick(ctx context.Context, nowAt time.Time) {
 	cfg := s.notificationsConfig()
 	if cfg == nil {
 		return
 	}
+	s.pruneScheduledState(cfg.Scheduled)
 	for _, schedule := range cfg.Scheduled {
 		slot, ok := scheduledNotificationSlot(nowAt, schedule)
 		if !ok {
 			continue
 		}
 		paused := schedule.Enabled != nil && !*schedule.Enabled
+		digest := scheduledSlotDigest(schedule)
 		pending := make([]string, 0, len(schedule.Via))
 		for _, via := range schedule.Via {
-			fired, found, err := s.scheduledLastFired(schedule.ID, via)
+			fired, firedDigest, found, err := s.scheduledLastFired(schedule.ID, via)
 			if err != nil {
 				log.Printf("[notify] read scheduled state for %s via %s: %v", schedule.ID, via, err)
 				continue
@@ -131,11 +156,17 @@ func (s *Server) scheduledNotifierTick(nowAt time.Time) {
 			// The slot search reaches up to 8 days back, so firing here would
 			// replay a slot from before the schedule existed; seed the row to
 			// the current slot instead and deliver from the next one on. A
-			// paused schedule advances the same way: slots that pass while it
-			// is paused are skipped, not queued up for the re-enable.
-			if !found || paused {
-				if !found || fired.Before(slot) {
-					s.setScheduledLastFired(schedule.ID, via, slot)
+			// row whose slot digest no longer matches was written under a
+			// pre-edit at/timezone/weekdays definition: firing against it
+			// would post an off-schedule send the moment the edit is saved,
+			// so it is reseeded like a first sight and the edited schedule
+			// delivers from its next slot on. A paused schedule advances the
+			// same way: slots that pass while it is paused are skipped, not
+			// queued up for the re-enable.
+			edited := firedDigest != digest
+			if !found || edited || paused {
+				if !found || edited || fired.Before(slot) {
+					s.setScheduledLastFired(schedule.ID, via, slot, digest)
 				}
 				continue
 			}
@@ -151,14 +182,16 @@ func (s *Server) scheduledNotifierTick(nowAt time.Time) {
 			log.Printf("[notify] scheduled report %q is not registered", schedule.Report)
 			continue
 		}
-		message, hasReport, err := builder(context.Background(), s)
+		buildCtx, cancelBuild := context.WithTimeout(ctx, scheduledSendTimeout)
+		message, hasReport, err := builder(buildCtx, s)
+		cancelBuild()
 		if err != nil {
 			log.Printf("[notify] build scheduled report %q: %v", schedule.Report, err)
 			continue
 		}
 		if !hasReport {
 			for _, via := range pending {
-				s.setScheduledLastFired(schedule.ID, via, slot)
+				s.setScheduledLastFired(schedule.ID, via, slot, digest)
 			}
 			continue
 		}
@@ -166,18 +199,92 @@ func (s *Server) scheduledNotifierTick(nowAt time.Time) {
 			notifier, err := s.notifierFor(via, cfg.Notifiers[via], s.hubSecretResolver())
 			constructionFailed := err != nil
 			if err == nil {
-				_, err = notifier.Send(context.Background(), *message)
+				sendCtx, cancelSend := context.WithTimeout(ctx, scheduledSendTimeout)
+				_, err = notifier.Send(sendCtx, *message)
+				cancelSend()
 			}
 			if err == nil {
-				s.setScheduledLastFired(schedule.ID, via, slot)
+				s.clearScheduledTransientFailures(schedule.ID, via)
+				s.setScheduledLastFired(schedule.ID, via, slot, digest)
 				continue
 			}
 			if !constructionFailed && notify.Classify(err) == notify.ErrorTransient {
-				log.Printf("[notify] send scheduled report %q via %s: %v", schedule.Report, via, err)
-				continue
+				if count := s.noteScheduledTransientFailure(schedule.ID, via, slot); count < scheduledMaxTransientFailures {
+					log.Printf("[notify] send scheduled report %q via %s (failure %d/%d, will retry): %v", schedule.Report, via, count, scheduledMaxTransientFailures, err)
+					continue
+				}
+				log.Printf("[notify] giving up on scheduled report %q via %s after %d consecutive transient failures: %v", schedule.Report, via, scheduledMaxTransientFailures, err)
+			} else {
+				log.Printf("[notify] permanently failed scheduled report %q via %s: %v", schedule.Report, via, err)
 			}
-			log.Printf("[notify] permanently failed scheduled report %q via %s: %v", schedule.Report, via, err)
-			s.setScheduledLastFired(schedule.ID, via, slot)
+			s.clearScheduledTransientFailures(schedule.ID, via)
+			s.setScheduledLastFired(schedule.ID, via, slot, digest)
+		}
+	}
+}
+
+type scheduledFailureStreak struct {
+	slot  time.Time
+	count int
+}
+
+// noteScheduledTransientFailure records one more consecutive transient send
+// failure for the destination's current slot and returns the streak length.
+// Ticks run serially in one goroutine, so the map needs no lock; a slot
+// change resets the streak, so stale entries can never charge a later slot.
+func (s *Server) noteScheduledTransientFailure(id, via string, slot time.Time) int {
+	if s.scheduledTransientFailures == nil {
+		s.scheduledTransientFailures = map[string]scheduledFailureStreak{}
+	}
+	key := scheduledStateKey(id, via)
+	streak := s.scheduledTransientFailures[key]
+	if !streak.slot.Equal(slot) {
+		streak = scheduledFailureStreak{slot: slot}
+	}
+	streak.count++
+	s.scheduledTransientFailures[key] = streak
+	return streak.count
+}
+
+func (s *Server) clearScheduledTransientFailures(id, via string) {
+	delete(s.scheduledTransientFailures, scheduledStateKey(id, via))
+}
+
+// pruneScheduledState drops the dedupe rows of (schedule, destination) pairs
+// that are no longer configured, for the same reason pruneLifecycleRouteState
+// drops route cursors: nothing else clears them, so a schedule id deleted and
+// later re-created would resume from its stale row and replay a slot that
+// belongs to the removal window, and orphaned rows would otherwise accumulate
+// forever. Rows in a superseded key format fall out here too, as keys no
+// configured pair produces.
+func (s *Server) pruneScheduledState(scheduled []types.ScheduledNotificationConfig) {
+	configured := map[string]bool{}
+	for _, schedule := range scheduled {
+		for _, via := range schedule.Via {
+			configured[scheduledStateKey(schedule.ID, via)] = true
+		}
+	}
+	rows, err := s.db.Query(`SELECT key FROM slack_notifier_state WHERE key LIKE ?`, scheduledStateKeyPrefix+"%")
+	if err != nil {
+		log.Printf("[notify] list scheduled state: %v", err)
+		return
+	}
+	var stale []string
+	for rows.Next() {
+		var key string
+		if err := rows.Scan(&key); err != nil {
+			log.Printf("[notify] list scheduled state: %v", err)
+			rows.Close()
+			return
+		}
+		if !configured[key] {
+			stale = append(stale, key)
+		}
+	}
+	rows.Close()
+	for _, key := range stale {
+		if _, err := s.db.Exec(`DELETE FROM slack_notifier_state WHERE key=?`, key); err != nil {
+			log.Printf("[notify] prune scheduled state %q: %v", key, err)
 		}
 	}
 }
@@ -206,9 +313,24 @@ func scheduledNotificationSlot(nowAt time.Time, schedule types.ScheduledNotifica
 		if len(allowed) != 0 && !allowed[weekday] {
 			continue
 		}
+		// A spring-forward DST gap can swallow the configured wall time;
+		// time.Date then normalizes it to a real instant on one side of the
+		// gap (which side is not guaranteed). Keep a normalized instant —
+		// the post-gap one, e.g. 02:30 -> 03:30 — rather than skipping the
+		// day: a weekday-restricted schedule whose only allowed day lands in
+		// the gap would otherwise silently drop a full weekly cycle.
 		candidate := time.Date(day.Year(), day.Month(), day.Day(), at.Hour(), at.Minute(), 0, 0, location)
-		if candidate.Hour() != at.Hour() || candidate.Minute() != at.Minute() {
-			continue
+		if got := candidate.Hour()*60 + candidate.Minute(); got != at.Hour()*60+at.Minute() {
+			diff := at.Hour()*60 + at.Minute() - got
+			if diff < -12*60 {
+				diff += 24 * 60
+			} else if diff > 12*60 {
+				diff -= 24 * 60
+			}
+			// Both instants sit next to the gap; the later one is past it.
+			if shifted := candidate.Add(time.Duration(diff) * time.Minute); shifted.After(candidate) {
+				candidate = shifted
+			}
 		}
 		if !candidate.After(localNow) {
 			return candidate, true
@@ -217,31 +339,50 @@ func scheduledNotificationSlot(nowAt time.Time, schedule types.ScheduledNotifica
 	return time.Time{}, false
 }
 
+const scheduledStateKeyPrefix = "scheduled:last_fired:"
+
+// scheduledStateKey joins the schedule id and destination with a NUL: both
+// halves are free text that may contain any printable separator (a ':' most
+// plausibly), so distinct (id, via) pairs could otherwise collide on one
+// dedupe row. Control characters are banned in schedule ids and notifier
+// names (types.ValidateNotificationsConfig), so NUL cannot occur in either.
 func scheduledStateKey(id, via string) string {
-	return "scheduled:last_fired:" + id + ":" + via
+	return scheduledStateKeyPrefix + id + "\x00" + via
 }
 
-func (s *Server) scheduledLastFired(id, via string) (time.Time, bool, error) {
+// scheduledSlotDigest identifies the slot definition a dedupe row was written
+// under. It is stored alongside the last-fired instant so an edit to at,
+// timezone, or weekdays reads back as a digest mismatch and the row is
+// reseeded like a first sight, instead of the pre-edit history counting as
+// the new definition's own and firing an off-schedule send.
+func scheduledSlotDigest(schedule types.ScheduledNotificationConfig) string {
+	return schedule.At + "\x1f" + schedule.Timezone + "\x1f" + strings.Join(schedule.Weekdays, ",")
+}
+
+func (s *Server) scheduledLastFired(id, via string) (time.Time, string, bool, error) {
 	var raw string
 	err := s.db.QueryRow(`SELECT value FROM slack_notifier_state WHERE key=?`, scheduledStateKey(id, via)).Scan(&raw)
 	if err == sql.ErrNoRows {
-		return time.Time{}, false, nil
+		return time.Time{}, "", false, nil
 	}
 	if err != nil {
-		return time.Time{}, false, err
+		return time.Time{}, "", false, err
 	}
-	value, err := time.Parse(time.RFC3339, raw)
+	// The value is "<RFC3339 slot>\n<slot digest>". A row written before the
+	// digest existed parses as an empty digest and is reseeded on next sight.
+	stamp, digest, _ := strings.Cut(raw, "\n")
+	value, err := time.Parse(time.RFC3339, stamp)
 	if err != nil {
-		return time.Time{}, false, fmt.Errorf("parse scheduled state %q: %w", raw, err)
+		return time.Time{}, "", false, fmt.Errorf("parse scheduled state %q: %w", raw, err)
 	}
-	return value, true, nil
+	return value, digest, true, nil
 }
 
-func (s *Server) setScheduledLastFired(id, via string, slot time.Time) {
+func (s *Server) setScheduledLastFired(id, via string, slot time.Time, digest string) {
 	if _, err := s.db.Exec(`
 		INSERT INTO slack_notifier_state(key, value) VALUES(?,?)
 		ON CONFLICT(key) DO UPDATE SET value=excluded.value`,
-		scheduledStateKey(id, via), slot.Format(time.RFC3339)); err != nil {
+		scheduledStateKey(id, via), slot.Format(time.RFC3339)+"\n"+digest); err != nil {
 		log.Printf("[notify] persist scheduled state for %s via %s: %v", id, via, err)
 	}
 }

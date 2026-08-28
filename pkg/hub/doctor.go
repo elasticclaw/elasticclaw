@@ -1343,18 +1343,43 @@ func (s *Server) checkNotifications(cfg *types.HubConfig) []DoctorCheck {
 			})
 			continue
 		}
-		unknownVia := false
+		// Each destination gets the same per-destination checks a lifecycle
+		// route gets (channel presence, notifier constructibility): a runtime
+		// send through a channel-less notifier fails permanently and silently
+		// burns the slot, so doctor must not report the schedule green.
+		badVia := false
 		for _, via := range scheduled.Via {
-			if _, ok := nCfg.Notifiers[strings.TrimSpace(via)]; !ok {
+			nc, ok := nCfg.Notifiers[strings.TrimSpace(via)]
+			if !ok {
 				checks = append(checks, DoctorCheck{
 					Category: "notifications", Severity: "critical", OK: false,
 					Title:       label + " sends to an unknown notifier",
 					Description: fmt.Sprintf("Destination %q is not a configured notifier, so this schedule delivers nothing there.", via),
 				})
-				unknownVia = true
+				badVia = true
+				continue
+			}
+			channel, _ := s.notifierSettings(nc)["channel"].(string)
+			if strings.TrimSpace(channel) == "" {
+				checks = append(checks, DoctorCheck{
+					Category: "notifications", Severity: "critical", OK: false,
+					Title:       fmt.Sprintf("%s destination %q has no channel", label, via),
+					Description: fmt.Sprintf("Notifier %q needs a channel for this schedule's reports to be delivered.", via),
+				})
+				badVia = true
+				continue
+			}
+			if _, err := notify.New(nc.Type, s.notifierSettings(nc), secrets); err != nil {
+				checks = append(checks, DoctorCheck{
+					Category: "notifications", Severity: "critical", OK: false,
+					Title:       fmt.Sprintf("%s destination %q is not constructible", label, via),
+					Description: fmt.Sprintf("Reports for this schedule through notifier %q will not be delivered.", via),
+					Error:       err.Error(),
+				})
+				badVia = true
 			}
 		}
-		if unknownVia {
+		if badVia {
 			continue
 		}
 		checks = append(checks, DoctorCheck{

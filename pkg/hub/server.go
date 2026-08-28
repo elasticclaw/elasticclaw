@@ -213,6 +213,12 @@ type Server struct {
 	// send must land before the DB closes, or the slot re-sends after restart.
 	scheduledNotifierStop chan struct{}
 	scheduledNotifierDone chan struct{}
+
+	// scheduledTransientFailures tracks consecutive transient send failures
+	// per scheduled (id, via) state key, bounding minutely retries of one
+	// slot (see scheduledMaxTransientFailures). Only the serially-run
+	// scheduled notifier tick touches it, so it needs no lock.
+	scheduledTransientFailures map[string]scheduledFailureStreak
 }
 
 // cachedNotifier is one constructed notifier plus the config/secret digest it
