@@ -1780,6 +1780,29 @@ func TestSessionRecoverySentinelsAreMutuallyExclusive(t *testing.T) {
 	}
 }
 
+func TestSessionRecoveryOutcome(t *testing.T) {
+	preserved := &sessionPreservedError{err: errString("lock conflict"), key: "session-1"}
+	rotated := errString("lock conflict; " + sessionRotatedErrorSuffix)
+	tests := []struct {
+		name       string
+		err        error
+		currentKey string
+		want       string
+	}{
+		{name: "preserved matching key", err: preserved, currentKey: "session-1", want: "preserved"},
+		{name: "preserved replaced key", err: preserved, currentKey: "session-2", want: "rotated"},
+		{name: "rotated error", err: rotated, currentKey: "session-2", want: "rotated"},
+		{name: "ordinary error", err: errString("ordinary failure"), currentKey: "session-1", want: ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := sessionRecoveryOutcome(tt.err, tt.currentKey); got != tt.want {
+				t.Fatalf("sessionRecoveryOutcome(%v, %q) = %q, want %q", tt.err, tt.currentKey, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestGatewaySessionResetsAfterProviderFormatLifecycleError(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 
@@ -2147,6 +2170,165 @@ func TestGatewaySessionPreservesSessionAfterMidTurnLockConflictProbe(t *testing.
 	}
 	if got := loadBridgeSession(); got != "" {
 		t.Fatalf("persisted session key = %q, want empty (no rotation)", got)
+	}
+}
+
+func TestGatewaySessionProbeDetectsConcurrentRotation(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	oldDelays := sessionLockConflictRetryDelays
+	sessionLockConflictRetryDelays = []time.Duration{time.Millisecond}
+	t.Cleanup(func() { sessionLockConflictRetryDelays = oldDelays })
+	const sessionErr = "error: session file changed while embedded prompt lock was released"
+	var gs *gatewaySession
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			t.Errorf("accept websocket: %v", err)
+			return
+		}
+		defer conn.CloseNow()
+		read := func(want string) (gwFrame, bool) {
+			var req gwFrame
+			if err := wsjson.Read(r.Context(), conn, &req); err != nil {
+				t.Errorf("read %s: %v", want, err)
+				return req, false
+			}
+			if req.Method != want {
+				t.Errorf("method = %q, want %q", req.Method, want)
+				return req, false
+			}
+			return req, true
+		}
+		send, ok := read("sessions.send")
+		if !ok {
+			return
+		}
+		if err := wsjson.Write(r.Context(), conn, gwFrame{Type: "res", ID: send.ID, OK: true}); err != nil {
+			t.Error(err)
+			return
+		}
+		if err := wsjson.Write(r.Context(), conn, gwFrame{Type: "event", Event: "agent", Payload: mustJSON(map[string]interface{}{"stream": "lifecycle", "sessionKey": "session-1", "data": map[string]string{"phase": "error", "error": sessionErr}})}); err != nil {
+			t.Error(err)
+			return
+		}
+		abort, ok := read("sessions.abort")
+		if !ok {
+			return
+		}
+		if err := wsjson.Write(r.Context(), conn, gwFrame{Type: "res", ID: abort.ID, OK: true}); err != nil {
+			t.Error(err)
+			return
+		}
+		probe, ok := read("sessions.describe")
+		if !ok {
+			return
+		}
+		gs.setSessionKey("session-2") // Simulate a readLoop reconnect while the probe is in flight.
+		if err := wsjson.Write(r.Context(), conn, gwFrame{Type: "res", ID: probe.ID, OK: true}); err != nil {
+			t.Error(err)
+			return
+		}
+		idleCtx, cancel := context.WithTimeout(r.Context(), 100*time.Millisecond)
+		defer cancel()
+		var extra gwFrame
+		if err := wsjson.Read(idleCtx, conn, &extra); err == nil {
+			t.Errorf("unexpected %q after concurrent rotation", extra.Method)
+		}
+	}))
+	defer srv.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(srv.URL, "http"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.CloseNow()
+	gs = &gatewaySession{sessionKey: "session-1", conn: conn, pending: make(map[string]chan gwFrame)}
+	go gs.readLoop(ctx)
+	_, err = gs.SendMessage(ctx, "continue the task", nil, nil)
+	if err == nil || !isSessionRotatedError(err) || isSessionPreservedError(err) {
+		t.Fatalf("SendMessage error = %v, want rotation only", err)
+	}
+}
+
+func TestGatewaySessionProbesAfterTurnContextExpires(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	oldDelays := sessionLockConflictRetryDelays
+	sessionLockConflictRetryDelays = []time.Duration{time.Millisecond}
+	t.Cleanup(func() { sessionLockConflictRetryDelays = oldDelays })
+	const sessionErr = "error: session file changed while embedded prompt lock was released"
+	turnCtx, turnCancel := context.WithCancel(context.Background())
+	defer turnCancel()
+	probed := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		defer conn.CloseNow()
+		read := func(want string) (gwFrame, bool) {
+			var req gwFrame
+			if err := wsjson.Read(r.Context(), conn, &req); err != nil {
+				t.Errorf("read %s: %v", want, err)
+				return req, false
+			}
+			if req.Method != want {
+				t.Errorf("method = %q, want %q", req.Method, want)
+				return req, false
+			}
+			return req, true
+		}
+		send, ok := read("sessions.send")
+		if !ok {
+			return
+		}
+		if err := wsjson.Write(r.Context(), conn, gwFrame{Type: "res", ID: send.ID, OK: true}); err != nil {
+			t.Error(err)
+			return
+		}
+		if err := wsjson.Write(r.Context(), conn, gwFrame{Type: "event", Event: "agent", Payload: mustJSON(map[string]interface{}{"stream": "lifecycle", "sessionKey": "session-1", "data": map[string]string{"phase": "error", "error": sessionErr}})}); err != nil {
+			t.Error(err)
+			return
+		}
+		abort, ok := read("sessions.abort")
+		if !ok {
+			return
+		}
+		if err := wsjson.Write(r.Context(), conn, gwFrame{Type: "res", ID: abort.ID, OK: true}); err != nil {
+			t.Error(err)
+			return
+		}
+		// The accepted turn's context has expired, but recovery must use its
+		// background probe context rather than abandon the decision here.
+		turnCancel()
+		probe, ok := read("sessions.describe")
+		if !ok {
+			return
+		}
+		close(probed)
+		if err := wsjson.Write(r.Context(), conn, gwFrame{Type: "res", ID: probe.ID, OK: true}); err != nil {
+			t.Error(err)
+		}
+	}))
+	defer srv.Close()
+	connCtx, connCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer connCancel()
+	conn, _, err := websocket.Dial(connCtx, "ws"+strings.TrimPrefix(srv.URL, "http"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.CloseNow()
+	gs := &gatewaySession{sessionKey: "session-1", conn: conn, pending: make(map[string]chan gwFrame)}
+	go gs.readLoop(connCtx)
+	_, err = gs.SendMessage(turnCtx, "continue the task", nil, nil)
+	select {
+	case <-probed:
+	default:
+		t.Fatal("SendMessage did not run a background probe after turn context expired")
+	}
+	if err == nil || (!isSessionPreservedError(err) && !isSessionRotatedError(err)) {
+		t.Fatalf("SendMessage error = %v, want recovery sentinel", err)
 	}
 }
 

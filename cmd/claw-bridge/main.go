@@ -2381,6 +2381,20 @@ const (
 	sessionPreservedErrorSuffix = "OpenClaw session preserved; the turn was aborted but its history is intact"
 )
 
+// sessionPreservedError records the session that a read-only probe verified.
+// The key is checked again immediately before notifying the hub because a
+// concurrent reconnect may replace the session after SendMessage returns.
+type sessionPreservedError struct {
+	err error
+	key string
+}
+
+func (e *sessionPreservedError) Error() string {
+	return fmt.Sprintf("%v; %s", e.err, sessionPreservedErrorSuffix)
+}
+
+func (e *sessionPreservedError) Unwrap() error { return e.err }
+
 func isRecoverableSessionSendError(err error) bool {
 	var sendErr *sessionSendRequestError
 	if !errors.As(err, &sendErr) {
@@ -2454,6 +2468,32 @@ func isSessionRotatedError(err error) bool {
 // lock conflict did not discard the persistent transcript.
 func isSessionPreservedError(err error) bool {
 	return err != nil && strings.Contains(err.Error(), sessionPreservedErrorSuffix) && !strings.Contains(err.Error(), sessionRotatedErrorSuffix)
+}
+
+func preservedSessionKey(err error) (string, bool) {
+	var preserved *sessionPreservedError
+	if errors.As(err, &preserved) {
+		return preserved.key, true
+	}
+	return "", false
+}
+
+// sessionRecoveryOutcome decides which hub edge a finished turn's error maps
+// to. currentKey is read at emit time: a readLoop reconnect can rotate the
+// session after SendMessage decided the session survived, and announcing
+// "history intact" into a fresh empty session would tell the agent to
+// continue work it cannot see.
+func sessionRecoveryOutcome(agentErr error, currentKey string) string {
+	if preservedKey, ok := preservedSessionKey(agentErr); ok {
+		if preservedKey == currentKey {
+			return "preserved"
+		}
+		return "rotated"
+	}
+	if isSessionRotatedError(agentErr) {
+		return "rotated"
+	}
+	return ""
 }
 
 func sessionLockConflictProbeBudget() time.Duration {
@@ -2567,7 +2607,7 @@ func (gs *gatewaySession) SendMessage(ctx context.Context, message string, onChu
 						}
 						probeCancel()
 						log.Printf("[session] preserved session after mid-turn lock conflict")
-						return reply, fmt.Errorf("%w; %s", err, sessionPreservedErrorSuffix)
+						return reply, &sessionPreservedError{err: err, key: origKey}
 					} else {
 						log.Printf("[session] probe after mid-turn lock conflict failed: %v", probeErr)
 					}
@@ -4822,12 +4862,18 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 				writeActivity(activity)
 			})
 			if agentErr != nil {
-				if isSessionPreservedError(agentErr) {
+				currentKey := gwSession.getSessionKey()
+				outcome := sessionRecoveryOutcome(agentErr, currentKey)
+				if outcome == "preserved" {
 					writeActivity(agentActivity{Kind: "session_preserved", Message: fmt.Sprintf("OpenClaw session preserved after lock conflict; continuing from intact history (%v)", agentErr)})
 					reply = ""
 					_ = writeHub(hubMsg{Type: "session_preserved"})
-				} else if isSessionRotatedError(agentErr) {
-					writeActivity(agentActivity{Kind: "session_rotated", Message: fmt.Sprintf("OpenClaw session rotated to recover from lock conflict; waiting for next message (%v)", agentErr)})
+				} else if outcome == "rotated" {
+					activityMessage := fmt.Sprintf("OpenClaw session rotated to recover from lock conflict; waiting for next message (%v)", agentErr)
+					if preservedKey, ok := preservedSessionKey(agentErr); ok && preservedKey != currentKey {
+						activityMessage = fmt.Sprintf("OpenClaw session was replaced by a concurrent reconnect after lock conflict; waiting for next message (%v)", agentErr)
+					}
+					writeActivity(agentActivity{Kind: "session_rotated", Message: activityMessage})
 					reply = ""
 					// Notify the hub so it can inject a resume prompt with context.
 					_ = writeHub(hubMsg{Type: "session_rotated"})
@@ -4969,12 +5015,18 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 				})
 				if agentErr != nil {
 					log.Printf("[bridge] ✗ agent error: %v", agentErr)
-					if isSessionPreservedError(agentErr) {
+					currentKey := gwSession.getSessionKey()
+					outcome := sessionRecoveryOutcome(agentErr, currentKey)
+					if outcome == "preserved" {
 						writeActivity(agentActivity{Kind: "session_preserved", Message: fmt.Sprintf("OpenClaw session preserved after lock conflict; continuing from intact history (%v)", agentErr)})
 						reply = ""
 						_ = writeHub(hubMsg{Type: "session_preserved"})
-					} else if isSessionRotatedError(agentErr) {
-						writeActivity(agentActivity{Kind: "session_rotated", Message: fmt.Sprintf("OpenClaw session rotated to recover from lock conflict; waiting for next message (%v)", agentErr)})
+					} else if outcome == "rotated" {
+						activityMessage := fmt.Sprintf("OpenClaw session rotated to recover from lock conflict; waiting for next message (%v)", agentErr)
+						if preservedKey, ok := preservedSessionKey(agentErr); ok && preservedKey != currentKey {
+							activityMessage = fmt.Sprintf("OpenClaw session was replaced by a concurrent reconnect after lock conflict; waiting for next message (%v)", agentErr)
+						}
+						writeActivity(agentActivity{Kind: "session_rotated", Message: activityMessage})
 						reply = ""
 						// Notify the hub so it can inject a resume prompt with context.
 						_ = writeHub(hubMsg{Type: "session_rotated"})
