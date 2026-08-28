@@ -2550,6 +2550,12 @@ func (gs *gatewaySession) SendMessage(ctx context.Context, message string, onChu
 		// the reset error instead of silently replaying, so the hub injects a
 		// resume prompt with task context into the fresh session.
 		if errors.As(err, &sendReqErr) && isSessionFileLockConflictError(err) {
+			abortCtx, abortCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			abortErr := gs.abortActiveSession(abortCtx)
+			abortCancel()
+			if abortErr != nil {
+				log.Printf("[session] failed to abort session before recovery after exhausted retries: %v", abortErr)
+			}
 			recoveryCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			resetErr := gs.createFreshSession(recoveryCtx, err.Error())
 			cancel()
