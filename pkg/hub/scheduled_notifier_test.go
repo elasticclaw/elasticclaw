@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 	"testing"
@@ -501,5 +502,217 @@ func TestScheduledNotifierPrunesRemovedScheduleState(t *testing.T) {
 	s.scheduledNotifierTick(context.Background(), time.Date(2025, 1, 6, 15, 2, 0, 0, time.UTC))
 	if fake.count() != 0 {
 		t.Fatalf("re-created schedule replayed a stale slot: %d sends, want 0", fake.count())
+	}
+}
+
+// A deterministic panic in one schedule's report builder must be contained to
+// that schedule: the tick-level recover alone unwinds the whole loop and
+// permanently starves every schedule after the panicking one in config order.
+// The panicking schedule's slot is burned so it does not also log a stack
+// trace every minute.
+func TestScheduledNotifierPanickingBuilderDoesNotStarveLaterSchedules(t *testing.T) {
+	panics := 0
+	registerScheduledReport("panicking-report", func(context.Context, *Server) (*notify.Message, bool, error) {
+		panics++
+		panic("builder bug")
+	})
+	registerScheduledReport("healthy-report", func(context.Context, *Server) (*notify.Message, bool, error) {
+		return &notify.Message{Title: "report", Body: "body"}, true, nil
+	})
+	fake := newFakeSlackServer(t)
+	schedules := []types.ScheduledNotificationConfig{
+		{ID: "bad", Report: "panicking-report", Via: []string{testNotifierName}, At: "09:00"},
+		{ID: "good", Report: "healthy-report", Via: []string{testNotifierName}, At: "09:00"},
+	}
+	s, _ := newScheduledNotifierTestServer(t, fake.server.URL, schedules)
+
+	s.scheduledNotifierTick(context.Background(), time.Date(2025, 1, 6, 8, 30, 0, 0, time.UTC))
+	s.scheduledNotifierTick(context.Background(), time.Date(2025, 1, 6, 9, 30, 0, 0, time.UTC))
+	if fake.count() != 1 {
+		t.Fatalf("schedule after the panicking one sent %d messages, want 1", fake.count())
+	}
+	slot := time.Date(2025, 1, 6, 9, 0, 0, 0, time.UTC)
+	if fired, _, _, _ := s.scheduledLastFired("bad", testNotifierName); !fired.Equal(slot) {
+		t.Fatalf("panicking schedule's slot = %v, want it burned to %v", fired, slot)
+	}
+
+	// The burned slot stops the minutely re-panic for the rest of the day.
+	s.scheduledNotifierTick(context.Background(), time.Date(2025, 1, 6, 9, 31, 0, 0, time.UTC))
+	if panics != 1 {
+		t.Fatalf("builder panicked %d times, want 1 (slot burned after the first)", panics)
+	}
+}
+
+// An invalid scheduled block (here: two schedules sharing an id, which would
+// map to one dedupe row and mutually reseed each other forever) pauses the
+// tick with a warning instead of running live, mirroring the lifecycle tick's
+// ValidateNotificationsConfig gate.
+func TestScheduledNotifierInvalidConfigPausesDeliveries(t *testing.T) {
+	registerScheduledReport("invalid-config-report", func(context.Context, *Server) (*notify.Message, bool, error) {
+		return &notify.Message{Title: "report", Body: "body"}, true, nil
+	})
+	fake := newFakeSlackServer(t)
+	schedules := []types.ScheduledNotificationConfig{
+		{ID: "daily", Report: "invalid-config-report", Via: []string{testNotifierName}, At: "09:00"},
+		{ID: "daily", Report: "invalid-config-report", Via: []string{testNotifierName}, At: "17:00"},
+	}
+	s, _ := newScheduledNotifierTestServer(t, fake.server.URL, schedules)
+
+	s.scheduledNotifierTick(context.Background(), time.Date(2025, 1, 6, 8, 30, 0, 0, time.UTC))
+	if _, _, found, _ := s.scheduledLastFired("daily", testNotifierName); found {
+		t.Fatal("invalid config still seeded dedupe state")
+	}
+	s.scheduledNotifierTick(context.Background(), time.Date(2025, 1, 6, 9, 30, 0, 0, time.UTC))
+	if fake.count() != 0 {
+		t.Fatalf("invalid config still delivered %d messages, want 0", fake.count())
+	}
+
+	// Repairing the config resumes the tick (the first sight seeds, as ever).
+	s.hubCfg.Notifications.Scheduled[1].ID = "evening"
+	s.scheduledNotifierTick(context.Background(), time.Date(2025, 1, 6, 9, 31, 0, 0, time.UTC))
+	if _, _, found, _ := s.scheduledLastFired("daily", testNotifierName); !found {
+		t.Fatal("repaired config did not resume seeding")
+	}
+}
+
+// A via with surrounding whitespace resolves and keys state by its trimmed
+// name, matching the lifecycle runtime and doctor: the raw name would miss the
+// notifier map and burn one slot per day as "permanently failed" while doctor
+// reports the schedule green.
+func TestScheduledNotifierTrimsViaWhitespace(t *testing.T) {
+	registerScheduledReport("trim-via-report", func(context.Context, *Server) (*notify.Message, bool, error) {
+		return &notify.Message{Title: "report", Body: "body"}, true, nil
+	})
+	fake := newFakeSlackServer(t)
+	schedule := types.ScheduledNotificationConfig{ID: "trimmed", Report: "trim-via-report", Via: []string{"  " + testNotifierName + " "}, At: "09:00"}
+	s, _ := newScheduledNotifierTestServer(t, fake.server.URL, []types.ScheduledNotificationConfig{schedule})
+
+	s.scheduledNotifierTick(context.Background(), time.Date(2025, 1, 6, 8, 30, 0, 0, time.UTC))
+	if _, _, found, _ := s.scheduledLastFired("trimmed", testNotifierName); !found {
+		t.Fatal("state row is not keyed by the trimmed via")
+	}
+	s.scheduledNotifierTick(context.Background(), time.Date(2025, 1, 6, 9, 30, 0, 0, time.UTC))
+	if fake.count() != 1 {
+		t.Fatalf("untrimmed via sent %d messages, want 1", fake.count())
+	}
+}
+
+// A notifier that cannot be constructed at the slot minute (a secret briefly
+// absent during rotation) retries on the transient budget instead of burning
+// the slot on the first miss, mirroring the lifecycle notifier's
+// hold-until-buildable — but still bounded by the cap.
+func TestScheduledNotifierConstructionFailureRetriesInsteadOfBurningSlot(t *testing.T) {
+	registerScheduledReport("construction-fail-report", func(context.Context, *Server) (*notify.Message, bool, error) {
+		return &notify.Message{Title: "report", Body: "body"}, true, nil
+	})
+	fake := newFakeSlackServer(t)
+	schedule := types.ScheduledNotificationConfig{ID: "rotating", Report: "construction-fail-report", Via: []string{testNotifierName}, At: "09:00"}
+	s, _ := newScheduledNotifierTestServer(t, fake.server.URL, []types.ScheduledNotificationConfig{schedule})
+
+	s.scheduledNotifierTick(context.Background(), time.Date(2025, 1, 6, 8, 30, 0, 0, time.UTC))
+
+	// The bot-token secret vanishes mid-rotation: construction fails.
+	secrets := s.hubCfg.Secrets
+	s.hubCfg.Secrets = map[string]string{}
+	slot := time.Date(2025, 1, 6, 9, 0, 0, 0, time.UTC)
+	s.scheduledNotifierTick(context.Background(), slot.Add(30*time.Minute))
+	if fake.count() != 0 {
+		t.Fatalf("unbuildable notifier sent %d messages, want 0", fake.count())
+	}
+	if fired, _, _, _ := s.scheduledLastFired("rotating", testNotifierName); fired.Equal(slot) {
+		t.Fatal("construction failure burned the slot instead of retrying")
+	}
+
+	// The secret is restored one minute later — well inside the retry budget.
+	s.hubCfg.Secrets = secrets
+	s.scheduledNotifierTick(context.Background(), slot.Add(31*time.Minute))
+	if fake.count() != 1 {
+		t.Fatalf("restored notifier sent %d messages, want 1", fake.count())
+	}
+	if fired, _, _, _ := s.scheduledLastFired("rotating", testNotifierName); !fired.Equal(slot) {
+		t.Fatalf("state = %v, want the slot recorded after the retried send", fired)
+	}
+}
+
+// A persistently erroring report builder gets the same bounded retry budget as
+// a failing send: without it, fired never advances and the builder re-runs and
+// logs the identical line every minute for the life of the process.
+func TestScheduledNotifierBuildFailureRetriesThenBurnsSlot(t *testing.T) {
+	builds := 0
+	registerScheduledReport("build-fail-report", func(context.Context, *Server) (*notify.Message, bool, error) {
+		builds++
+		return nil, false, errors.New("tenants table is empty")
+	})
+	fake := newFakeSlackServer(t)
+	schedule := types.ScheduledNotificationConfig{ID: "broken-build", Report: "build-fail-report", Via: []string{testNotifierName}, At: "09:00"}
+	s, _ := newScheduledNotifierTestServer(t, fake.server.URL, []types.ScheduledNotificationConfig{schedule})
+
+	s.scheduledNotifierTick(context.Background(), time.Date(2025, 1, 6, 8, 30, 0, 0, time.UTC))
+	slot := time.Date(2025, 1, 6, 9, 0, 0, 0, time.UTC)
+	for i := 0; i < scheduledMaxTransientFailures; i++ {
+		s.scheduledNotifierTick(context.Background(), slot.Add(time.Duration(30+i)*time.Minute))
+		fired, _, _, _ := s.scheduledLastFired("broken-build", testNotifierName)
+		if advanced := fired.Equal(slot); advanced != (i == scheduledMaxTransientFailures-1) {
+			t.Fatalf("after build failure %d state advanced=%v, want advance only on the %dth", i+1, advanced, scheduledMaxTransientFailures)
+		}
+	}
+	if builds != scheduledMaxTransientFailures {
+		t.Fatalf("builder ran %d times, want %d", builds, scheduledMaxTransientFailures)
+	}
+
+	// The slot is burned: later ticks in the same slot rebuild nothing.
+	s.scheduledNotifierTick(context.Background(), slot.Add(3*time.Hour))
+	if builds != scheduledMaxTransientFailures {
+		t.Fatalf("burned slot still rebuilt: %d builds", builds)
+	}
+	if fake.count() != 0 {
+		t.Fatalf("failing builds still sent %d messages", fake.count())
+	}
+}
+
+// Semantically identical slot definitions must produce identical digests:
+// normalizeScheduledTimes zero-pads a hand-written "9:00" on any settings
+// save, and the edit dialog seeds an absent timezone as "UTC" — neither
+// rewrite is an edit, and reading one back as a digest mismatch would reseed
+// the row and silently skip a pending or mid-retry slot.
+func TestScheduledSlotDigestNormalizesEquivalentRepresentations(t *testing.T) {
+	base := scheduledSlotDigest(types.ScheduledNotificationConfig{At: "09:00", Timezone: "UTC"})
+	if got := scheduledSlotDigest(types.ScheduledNotificationConfig{At: "9:00"}); got != base {
+		t.Fatalf("unpadded at / empty timezone digest = %q, want %q", got, base)
+	}
+	if scheduledSlotDigest(types.ScheduledNotificationConfig{At: "10:00", Timezone: "UTC"}) == base {
+		t.Fatal("a real at edit must change the digest")
+	}
+	if scheduledSlotDigest(types.ScheduledNotificationConfig{At: "09:00", Timezone: "America/Sao_Paulo"}) == base {
+		t.Fatal("a real timezone edit must change the digest")
+	}
+	if scheduledSlotDigest(types.ScheduledNotificationConfig{At: "09:00", Timezone: "UTC", Weekdays: []string{"mon"}}) == base {
+		t.Fatal("a weekday edit must change the digest")
+	}
+}
+
+// pruneScheduledState clears the in-memory failure streaks of removed pairs
+// too, mirroring clearLifecycleTransientFailures: a pair removed mid-streak
+// would otherwise leak its entry for the process lifetime and hand a same-slot
+// re-add a retry budget already spent.
+func TestPruneScheduledStateClearsRemovedStreaks(t *testing.T) {
+	fake := newFakeSlackServer(t)
+	kept := types.ScheduledNotificationConfig{ID: "kept", Report: "prune-streak-report", Via: []string{testNotifierName}, At: "09:00"}
+	s, _ := newScheduledNotifierTestServer(t, fake.server.URL, []types.ScheduledNotificationConfig{kept})
+
+	slot := time.Date(2025, 1, 6, 9, 0, 0, 0, time.UTC)
+	s.noteScheduledTransientFailure("kept", testNotifierName, slot)
+	s.noteScheduledTransientFailure("kept", scheduledBuildFailureVia, slot)
+	s.noteScheduledTransientFailure("gone", testNotifierName, slot)
+
+	s.pruneScheduledState([]types.ScheduledNotificationConfig{kept})
+	if _, ok := s.scheduledTransientFailures[scheduledStateKey("gone", testNotifierName)]; ok {
+		t.Fatal("removed pair's streak survived the prune")
+	}
+	if _, ok := s.scheduledTransientFailures[scheduledStateKey("kept", testNotifierName)]; !ok {
+		t.Fatal("configured pair's send streak was pruned")
+	}
+	if _, ok := s.scheduledTransientFailures[scheduledStateKey("kept", scheduledBuildFailureVia)]; !ok {
+		t.Fatal("configured schedule's build streak was pruned")
 	}
 }

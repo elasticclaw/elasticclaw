@@ -122,6 +122,57 @@ func TestPendingPRsScheduledReportTruncatesTicketLinesBeforeOverflowLine(t *test
 	}
 }
 
+// opened_at=0 on an open PR means the opening time is unknown, not 1970: such
+// a ticket must not render a ~20000-day age, and must sort behind tickets
+// whose age is known instead of displacing them from the cap.
+func TestPendingPRsScheduledReportTreatsZeroOpenedAtAsUnknown(t *testing.T) {
+	s, db := newTaskRunAnalyticsAPITestServer(t)
+	nowAt := time.Now()
+	insertPendingPRReportRun(t, db, "known", "ENG-1", "eng", "Known age", nowAt.Add(-20*24*time.Hour), 1)
+	insertPendingPRReportPR(t, db, "known", 1, "open", false, nowAt.Add(-20*24*time.Hour))
+	insertPendingPRReportRun(t, db, "unknown", "ENG-2", "eng", "Unknown age", nowAt.Add(-time.Hour), 1)
+	insertPendingPRReportPR(t, db, "unknown", 2, "open", false, time.UnixMilli(0))
+
+	message, ok, err := buildPendingPRsScheduledReport(context.Background(), s)
+	if err != nil || !ok {
+		t.Fatalf("build report = %v, %v, want report", ok, err)
+	}
+	if !strings.Contains(message.Body, "(20 days)") {
+		t.Fatalf("known-age ticket lost its age: %q", message.Body)
+	}
+	if strings.Index(message.Body, "ENG-1") > strings.Index(message.Body, "ENG-2") {
+		t.Fatalf("unknown-age ticket sorted ahead of a genuinely old one: %q", message.Body)
+	}
+	for _, line := range strings.Split(message.Body, "\n") {
+		if strings.Contains(line, "ENG-2") && strings.Contains(line, " days)") {
+			t.Fatalf("unknown opened_at rendered as an age: %q", line)
+		}
+	}
+}
+
+// A PR linked to multiple runs of the same ticket (a retry continuing the same
+// branch) renders once per ticket line, with the earliest known opened_at
+// backing the age.
+func TestPendingPRsScheduledReportDeduplicatesPRSharedAcrossRuns(t *testing.T) {
+	s, db := newTaskRunAnalyticsAPITestServer(t)
+	nowAt := time.Now()
+	insertPendingPRReportRun(t, db, "run-a", "ENG-1", "eng", "Retried ticket", nowAt.Add(-48*time.Hour), 1)
+	insertPendingPRReportRun(t, db, "run-b", "ENG-1", "eng", "Retried ticket", nowAt.Add(-24*time.Hour), 1)
+	insertPendingPRReportPR(t, db, "run-a", 7, "open", false, nowAt.Add(-48*time.Hour))
+	insertPendingPRReportPR(t, db, "run-b", 7, "open", false, nowAt.Add(-24*time.Hour))
+
+	message, ok, err := buildPendingPRsScheduledReport(context.Background(), s)
+	if err != nil || !ok {
+		t.Fatalf("build report = %v, %v, want report", ok, err)
+	}
+	if got := strings.Count(message.Body, "#7 "); got != 1 {
+		t.Fatalf("shared PR rendered %d times, want 1: %q", got, message.Body)
+	}
+	if !strings.Contains(message.Body, "(2 days)") {
+		t.Fatalf("age is not backed by the earliest opened_at: %q", message.Body)
+	}
+}
+
 func insertPendingPRReportExcludedRun(t *testing.T, db *sql.DB, runID, issueID string, requiresPR, analyticsEnabled *bool, startedAt time.Time) {
 	t.Helper()
 	insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{

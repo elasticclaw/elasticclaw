@@ -11,6 +11,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/elasticclaw/elasticclaw/pkg/config"
 	"github.com/elasticclaw/elasticclaw/pkg/hub/notify"
@@ -717,6 +718,39 @@ func TestSettingsPatchRejectsUnknownScheduledReport(t *testing.T) {
 	}
 	if len(s.hubCfg.Notifications.Scheduled) != 0 {
 		t.Fatalf("rejected patch still wrote %#v", s.hubCfg.Notifications.Scheduled)
+	}
+}
+
+// Deleting a schedule via the settings PATCH prunes its dedupe row on the save
+// itself, not on the next minute tick: deleting and re-adding the same id
+// within one tick interval would otherwise inherit the stale row and replay a
+// slot from before the new schedule existed.
+func TestSettingsPatchPrunesDeletedScheduleStateImmediately(t *testing.T) {
+	registerScheduledReport("patch-prune-report", func(context.Context, *Server) (*notify.Message, bool, error) {
+		return nil, false, nil
+	})
+	path := filepath.Join(t.TempDir(), "hub.yaml")
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", path)
+	schedule := types.ScheduledNotificationConfig{ID: "daily", Report: "patch-prune-report", Via: []string{"eng"}, At: "09:00"}
+	s, _ := NewTestServerWithConfig(t, &types.HubConfig{Notifications: &types.NotificationsConfig{
+		Notifiers: map[string]types.NotifierConfig{
+			"eng": {Type: "slack", Settings: map[string]any{"channel": "C0123ABCD", "token_secret": "slack_token"}},
+		},
+		Scheduled: []types.ScheduledNotificationConfig{schedule},
+	}}, "", "", "")
+	if err := config.SaveHubConfig(s.hubCfg); err != nil {
+		t.Fatal(err)
+	}
+	s.setScheduledLastFired("daily", "eng", time.Date(2025, 1, 6, 9, 0, 0, 0, time.UTC), scheduledSlotDigest(schedule))
+
+	body := []byte(`{"notifications":{"notifiers":{"eng":{"type":"slack","channel":"C0123ABCD","token_secret":"slack_token"}},"scheduled":[]}}`)
+	rr := httptest.NewRecorder()
+	s.patchSettings(rr, httptest.NewRequest(http.MethodPatch, "/api/settings", bytes.NewReader(body)))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", rr.Code, rr.Body.String())
+	}
+	if _, _, found, _ := s.scheduledLastFired("daily", "eng"); found {
+		t.Fatal("deleted schedule's dedupe row survived the save; a same-id re-add before the next tick would replay a stale slot")
 	}
 }
 

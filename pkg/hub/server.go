@@ -216,8 +216,10 @@ type Server struct {
 
 	// scheduledTransientFailures tracks consecutive transient send failures
 	// per scheduled (id, via) state key, bounding minutely retries of one
-	// slot (see scheduledMaxTransientFailures). Only the serially-run
-	// scheduled notifier tick touches it, so it needs no lock.
+	// slot (see scheduledMaxTransientFailures). Shared between the
+	// serially-run scheduled notifier tick and the settings PATCH handler
+	// (which prunes it via pruneScheduledState), hence the lock.
+	scheduledFailureMu         sync.Mutex
 	scheduledTransientFailures map[string]scheduledFailureStreak
 }
 
@@ -993,22 +995,34 @@ func (s *Server) resolveAuthToken(token string) (tenantID, githubLogin string, o
 
 // githubTenantID resolves the tenant backing GitHub OAuth sessions.
 func (s *Server) githubTenantID() (string, error) {
+	return s.githubTenantIDContext(context.Background())
+}
+
+// githubTenantIDContext is the ctx-bounded variant for callers whose queries
+// must honour a deadline or shutdown cancellation (the scheduled pending_prs
+// report builds under a 30s context and is cancelled at shutdown; a ctx-less
+// query would escape both).
+func (s *Server) githubTenantIDContext(ctx context.Context) (string, error) {
 	s.mu.RLock()
 	hubToken := s.hubCfg.Token
 	s.mu.RUnlock()
 	if hubToken != "" {
-		if tenantID, err := s.tenantByToken(hubToken); err == nil {
+		if tenantID, err := s.tenantByTokenContext(ctx, hubToken); err == nil {
 			return tenantID, nil
 		}
 	}
 	var tenantID string
-	err := s.db.QueryRow(`SELECT id FROM tenants ORDER BY created_at ASC LIMIT 1`).Scan(&tenantID)
+	err := s.db.QueryRowContext(ctx, `SELECT id FROM tenants ORDER BY created_at ASC LIMIT 1`).Scan(&tenantID)
 	return tenantID, err
 }
 
 func (s *Server) tenantByToken(token string) (string, error) {
+	return s.tenantByTokenContext(context.Background(), token)
+}
+
+func (s *Server) tenantByTokenContext(ctx context.Context, token string) (string, error) {
 	var id string
-	err := s.db.QueryRow(`SELECT id FROM tenants WHERE token = ?`, token).Scan(&id)
+	err := s.db.QueryRowContext(ctx, `SELECT id FROM tenants WHERE token = ?`, token).Scan(&id)
 	return id, err
 }
 

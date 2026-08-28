@@ -818,13 +818,17 @@ func ValidateNotificationsConfig(cfg *NotificationsConfig) error {
 		scheduledEnabled := scheduled.Enabled == nil || *scheduled.Enabled
 		seenVia := make(map[string]struct{}, len(scheduled.Via))
 		for _, via := range scheduled.Via {
+			// The scheduler resolves and keys state by the TrimSpace'd via —
+			// matching the lifecycle routes above — so dedupe and the
+			// notifier lookup run on the trimmed name too.
+			trimmedVia := strings.TrimSpace(via)
 			// The scheduler sends once per pending via entry, so a repeated
 			// name would post the same report twice in the same tick — exactly
 			// as a repeated lifecycle route would, and rejected the same way.
-			if _, duplicate := seenVia[via]; duplicate {
+			if _, duplicate := seenVia[trimmedVia]; duplicate {
 				return fmt.Errorf("%s: via %q is duplicated", prefix, via)
 			}
-			seenVia[via] = struct{}{}
+			seenVia[trimmedVia] = struct{}{}
 			// An enabled schedule's via must name a notifier (whose name is
 			// already control-character-free); a disabled one skips that
 			// check, so ban control characters here too — a paused schedule
@@ -841,7 +845,7 @@ func ValidateNotificationsConfig(cfg *NotificationsConfig) error {
 			if !scheduledEnabled {
 				continue
 			}
-			if _, ok := cfg.Notifiers[via]; !ok {
+			if _, ok := cfg.Notifiers[trimmedVia]; !ok {
 				return fmt.Errorf("%s: via %q does not name a configured notifier (defined: %s)", prefix, via, notifierNames(cfg.Notifiers))
 			}
 		}

@@ -1824,6 +1824,14 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 	// Only update in-memory config after successful disk write
 	s.hubCfg = &updatedCfg
 
+	// A deleted schedule's dedupe row must go NOW, not on the next minute
+	// tick: deleting and re-adding an id within one tick interval would
+	// otherwise inherit the stale row and replay a slot from before the new
+	// schedule existed (see pruneScheduledState).
+	if patch.Notifications != nil {
+		s.pruneScheduledState(updatedCfg.Notifications.Scheduled)
+	}
+
 	// If the concurrency limit was raised or removed, try to promote pending claws.
 	// This must run AFTER s.hubCfg is updated so promotePendingClaws reads the new limit.
 	if patch.MaxConcurrentClaws != nil {
