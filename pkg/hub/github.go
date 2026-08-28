@@ -291,8 +291,21 @@ func (p *GitHubTokenProvider) InstallationToken(ctx context.Context, installatio
 			"checks":        "read", // needed for gh pr checks / CI status
 			"statuses":      "read", // needed for commit status checks
 		}
-		if needsWrite && p.installationHasWorkflowsWrite(ctx, installationID) {
-			perms["workflows"] = "write"
+
+		// Query the installation's actual granted permissions once so we can add
+		// optional scopes (workflows, issues) only when the installation has been
+		// granted them. Requesting a scope the installation lacks makes the token
+		// mint fail, and we want gh to be able to read issues/comments in other
+		// configured repos when the App allows it.
+		instPerms, _ := p.installationPermissions(ctx, installationID)
+
+		if needsWrite {
+			if level := installationPermissionLevel(instPerms, "workflows"); level == "write" || level == "admin" {
+				perms["workflows"] = "write"
+			}
+		}
+		if level := installationPermissionLevel(instPerms, "issues"); level != "" {
+			perms["issues"] = level
 		}
 		body := map[string]interface{}{
 			"permissions": perms,
@@ -383,20 +396,18 @@ func (p *GitHubTokenProvider) CheckAppPermissions(ctx context.Context) (map[stri
 	return meta.Permissions, nil
 }
 
-// installationHasWorkflowsWrite reports whether this installation was granted
-// workflows write (or admin). App-level config is not enough: an org may still
-// be on an older permission set until they accept the App update. On lookup
-// failure, returns false so we omit the scope and still mint a working token.
-func (p *GitHubTokenProvider) installationHasWorkflowsWrite(ctx context.Context, installationID int64) bool {
-	if installationID == 0 {
-		return false
+// installationPermissionLevel returns the normalized permission level granted to
+// this installation for a named GitHub permission, or "" if it is not granted
+// or the lookup failed. It accepts "read", "write", or "admin".
+func installationPermissionLevel(perms map[string]string, name string) string {
+	if perms == nil {
+		return ""
 	}
-	perms, err := p.installationPermissions(ctx, installationID)
-	if err != nil || perms == nil {
-		return false
+	level := strings.ToLower(strings.TrimSpace(perms[name]))
+	if level == "read" || level == "write" || level == "admin" {
+		return level
 	}
-	level := strings.ToLower(strings.TrimSpace(perms["workflows"]))
-	return level == "write" || level == "admin"
+	return ""
 }
 
 // installationPermissions returns the scopes granted to a specific installation
@@ -434,4 +445,48 @@ func (p *GitHubTokenProvider) installationPermissions(ctx context.Context, insta
 		return nil, fmt.Errorf("decode installation: %w", err)
 	}
 	return inst.Permissions, nil
+}
+
+// FindInstallationForRepo returns the installation ID for the authenticated
+// GitHub App that has access to a specific repository. This is the cheapest way
+// to pick the right app/installation when the hub has multiple GitHub Apps:
+// the API directly returns the installation for the repo, so we don't need to
+// list every repository of every installation.
+func (p *GitHubTokenProvider) FindInstallationForRepo(ctx context.Context, owner, repo string) (int64, error) {
+	appJWT, err := p.appJWT()
+	if err != nil {
+		return 0, fmt.Errorf("sign app jwt: %w", err)
+	}
+
+	url := p.apiURL(fmt.Sprintf("/repos/%s/%s/installation", owner, repo))
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return 0, fmt.Errorf("build request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+appJWT)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+
+	resp, err := p.httpClient.Do(req)
+	if err != nil {
+		return 0, fmt.Errorf("github find installation for repo: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		var errBody map[string]interface{}
+		json.NewDecoder(resp.Body).Decode(&errBody)
+		return 0, fmt.Errorf("github find installation for repo %s/%s: status %d: %v", owner, repo, resp.StatusCode, errBody["message"])
+	}
+
+	var inst struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&inst); err != nil {
+		return 0, fmt.Errorf("decode installation for repo: %w", err)
+	}
+	if inst.ID == 0 {
+		return 0, fmt.Errorf("github find installation for repo %s/%s returned no installation id", owner, repo)
+	}
+	return inst.ID, nil
 }

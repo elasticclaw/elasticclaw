@@ -2,6 +2,8 @@ package hub
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -34,6 +36,9 @@ func TestGitHubCLIWrapperRefreshesTokenForEachInvocation(t *testing.T) {
 	assertContains(t, script, "elasticclaw-git-credentials get", "wrapper feeds git credential get protocol")
 	assertContains(t, script, "export GH_TOKEN=\"$token\"", "wrapper exports fresh token")
 	assertContains(t, script, "exec \"$REAL_GH\" \"$@\"", "wrapper delegates to real gh")
+	assertContains(t, script, "target_repo=\"$arg\"", "wrapper extracts target repo from --repo or positional argument")
+	assertContains(t, script, "printf 'protocol=https\\nhost=github.com\\npath=%s.git\\n\\n' \"$target_repo\"", "wrapper passes target repo to credential helper")
+	assertContains(t, script, "printf 'protocol=https\\nhost=github.com\\n\\n'", "wrapper falls back to unscoped token when no target repo")
 	assertNotContains(t, script, "gh auth login", "wrapper must not persist a short-lived token in hosts.yml")
 	assertNotContains(t, script, "ghp_static_test_token", "wrapper must not contain raw GitHub tokens")
 }
@@ -71,6 +76,55 @@ func TestDaytonaGitHubCloneScriptUsesCleanHTTPSRemote(t *testing.T) {
 	assertNotContains(t, script, "x-access-token", "clone must not embed token username in remote URL")
 	assertNotContains(t, script, "${GH_TOKEN}", "clone must not embed GH_TOKEN in remote URL")
 	assertNotContains(t, script, "sed \"s/${GH_TOKEN}", "clone output redaction should not depend on token in URL")
+}
+
+func TestBuildGitHubCloneScriptSkipsPatternsAndCloneFalse(t *testing.T) {
+	cloneFalse := false
+	script := buildGitHubCloneScript([]types.GitHubRepoAccess{
+		{Repo: "org/clone-me", Permissions: "write"},
+		{Repo: "org/*", Permissions: "read"},
+		{Repo: "org/access-only", Permissions: "read", Clone: &cloneFalse},
+	})
+	if !strings.Contains(script, "git clone https://github.com/org/clone-me") {
+		t.Fatalf("expected exact repo to be cloned, got:\n%s", script)
+	}
+	if strings.Contains(script, "org/*") {
+		t.Fatalf("glob pattern should not appear as a clone target, got:\n%s", script)
+	}
+	if strings.Contains(script, "org/access-only") {
+		t.Fatalf("clone:false repo should not be cloned, got:\n%s", script)
+	}
+}
+
+func TestBuildDaytonaGitHubCloneScriptSkipsPatternsAndCloneFalse(t *testing.T) {
+	cloneFalse := false
+	script := buildDaytonaGitHubCloneScript([]types.GitHubRepoAccess{
+		{Repo: "org/clone-me", Permissions: "write"},
+		{Repo: "org/*", Permissions: "read"},
+		{Repo: "org/access-only", Permissions: "read", Clone: &cloneFalse},
+	})
+	if !strings.Contains(script, "https://github.com/org/clone-me") {
+		t.Fatalf("expected exact repo to be cloned, got:\n%s", script)
+	}
+	if strings.Contains(script, "org/*") {
+		t.Fatalf("glob pattern should not appear as a clone target, got:\n%s", script)
+	}
+	if strings.Contains(script, "org/access-only") {
+		t.Fatalf("clone:false repo should not be cloned, got:\n%s", script)
+	}
+}
+
+func TestBuildDaytonaGitHubAccessSmokeScriptSkipsPatterns(t *testing.T) {
+	script := buildDaytonaGitHubAccessSmokeScript([]types.GitHubRepoAccess{
+		{Repo: "org/*", Permissions: "read"},
+		{Repo: "org/clone-me", Permissions: "read"},
+	})
+	if !strings.Contains(script, "gh repo view 'org/clone-me'") {
+		t.Fatalf("expected smoke to sample the first exact repo, got:\n%s", script)
+	}
+	if strings.Contains(script, "org/*") {
+		t.Fatalf("glob pattern should not be used as smoke sample, got:\n%s", script)
+	}
 }
 
 func TestDaytonaGitHubAccessSmokeScriptIsConstantTimeInRepoCount(t *testing.T) {
@@ -206,6 +260,72 @@ func TestInstallationTokenScopesRepositoryAllowlist(t *testing.T) {
 	}
 }
 
+func TestInstallationTokenRequestsIssuesPermissionWhenGranted(t *testing.T) {
+	var sawBody string
+	srv := githubInstallationTokenTestServer(t, `{"contents":"write","issues":"read"}`, func(body string) {
+		sawBody = body
+	})
+
+	provider, err := NewGitHubTokenProvider(&types.GitHubAppConfig{AppID: 1, PrivateKeyPEM: testGitHubAppPEM(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider.apiBaseURL = srv.URL
+	provider.httpClient = srv.Client()
+
+	if _, _, err := provider.InstallationToken(context.Background(), 99, []RepoAccess{{Repo: "org/a", Permissions: "read"}}); err != nil {
+		t.Fatalf("InstallationToken: %v", err)
+	}
+	if !strings.Contains(sawBody, `"issues":"read"`) {
+		t.Fatalf("expected issues read permission when installation grants it, body=%s", sawBody)
+	}
+	if strings.Contains(sawBody, `"workflows"`) {
+		t.Fatalf("must not request workflows when installation lacks it, body=%s", sawBody)
+	}
+}
+
+func TestInstallationTokenRequestsIssuesWriteWhenGranted(t *testing.T) {
+	var sawBody string
+	srv := githubInstallationTokenTestServer(t, `{"contents":"write","issues":"write"}`, func(body string) {
+		sawBody = body
+	})
+
+	provider, err := NewGitHubTokenProvider(&types.GitHubAppConfig{AppID: 1, PrivateKeyPEM: testGitHubAppPEM(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider.apiBaseURL = srv.URL
+	provider.httpClient = srv.Client()
+
+	if _, _, err := provider.InstallationToken(context.Background(), 99, []RepoAccess{{Repo: "org/a", Permissions: "read"}}); err != nil {
+		t.Fatalf("InstallationToken: %v", err)
+	}
+	if !strings.Contains(sawBody, `"issues":"write"`) {
+		t.Fatalf("expected issues write permission when installation grants it, body=%s", sawBody)
+	}
+}
+
+func TestInstallationTokenOmitsIssuesPermissionWhenNotGranted(t *testing.T) {
+	var sawBody string
+	srv := githubInstallationTokenTestServer(t, `{"contents":"write"}`, func(body string) {
+		sawBody = body
+	})
+
+	provider, err := NewGitHubTokenProvider(&types.GitHubAppConfig{AppID: 1, PrivateKeyPEM: testGitHubAppPEM(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider.apiBaseURL = srv.URL
+	provider.httpClient = srv.Client()
+
+	if _, _, err := provider.InstallationToken(context.Background(), 99, []RepoAccess{{Repo: "org/a", Permissions: "write"}}); err != nil {
+		t.Fatalf("InstallationToken: %v", err)
+	}
+	if strings.Contains(sawBody, `"issues"`) {
+		t.Fatalf("must not request issues when installation lacks it, body=%s", sawBody)
+	}
+}
+
 func TestInstallationTokenOmitsWorkflowsWhenInstallLacksPermission(t *testing.T) {
 	var sawBody string
 	// Installation has contents write but no workflows — requesting workflows would fail mint.
@@ -262,6 +382,158 @@ func TestInstallationTokenOmitsWorkflowsWhenInstallLookupFails(t *testing.T) {
 	if strings.Contains(sawBody, `"workflows"`) {
 		t.Fatalf("must omit workflows when installation permission lookup fails, body=%s", sawBody)
 	}
+	if strings.Contains(sawBody, `"issues"`) {
+		t.Fatalf("must omit issues when installation permission lookup fails, body=%s", sawBody)
+	}
+}
+
+func TestGitHubTokenEndpointMatchesRepositoryPatterns(t *testing.T) {
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
+
+	var sawAccessTokenBody string
+	github := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/app/installations":
+			_, _ = w.Write([]byte(`[{"id":99,"account":{"login":"example-org"}}]`))
+		case r.Method == http.MethodGet && r.URL.Path == "/app/installations/99":
+			_, _ = w.Write([]byte(`{"id":99,"account":{"login":"example-org"},"permissions":{"contents":"read","issues":"read"}}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/example-org/example-repo/installation":
+			_, _ = w.Write([]byte(`{"id":99,"account":{"login":"example-org"}}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/example-org/other-repo/installation":
+			_, _ = w.Write([]byte(`{"id":99,"account":{"login":"example-org"}}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/app/installations/99/access_tokens":
+			body, _ := io.ReadAll(r.Body)
+			sawAccessTokenBody = string(body)
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"token":"tok","expires_at":"2099-01-01T00:00:00Z"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer github.Close()
+
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{
+		Token:     "hub-token",
+		ClawToken: "claw-token",
+		GitHubApps: []*types.GitHubAppConfig{{
+			AppID:         123,
+			PrivateKeyPEM: testGitHubAppPEM(t),
+		}},
+	}, github.URL, "", "")
+
+	reposJSON := `[{"repo":"example-org/example-repo","permissions":"write"},{"repo":"example-org/*","permissions":"read"}]`
+	if _, err := db.Exec(`INSERT INTO claws(id, tenant_id, name, template, provider, default_model, template_files, github_repos, linear_workspace, nix, docker, llm_key, tags, status, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,datetime('now'))`,
+		"pattern-claw", "test-tenant-id", "pattern claw", "pattern-ws", "noop", "", "{}", reposJSON, "", 0, 0, "", `[]`, "provisioning"); err != nil {
+		t.Fatalf("insert claw: %v", err)
+	}
+
+	// Exact match from the glob pattern should mint a scoped token.
+	req := httptest.NewRequest(http.MethodGet, "/api/github/token/pattern-claw?claw_token=claw-token&repo=example-org/other-repo", nil)
+	rec := httptest.NewRecorder()
+	s.mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("token endpoint for pattern match returned %d: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(sawAccessTokenBody, `"issues":"read"`) {
+		t.Fatalf("expected issues permission in access token request, got %s", sawAccessTokenBody)
+	}
+	if !strings.Contains(sawAccessTokenBody, `"repositories":["other-repo"]`) {
+		t.Fatalf("expected single-repo scoping for pattern match, got %s", sawAccessTokenBody)
+	}
+
+	// A repo outside the configured selectors should be rejected without calling GitHub.
+	req = httptest.NewRequest(http.MethodGet, "/api/github/token/pattern-claw?claw_token=claw-token&repo=other-org/other-repo", nil)
+	rec = httptest.NewRecorder()
+	s.mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("token endpoint for non-matching repo returned %d, want 403: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestGitHubTokenEndpointSelectsAppInstallationForRepo(t *testing.T) {
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
+
+	pem := testGitHubAppPEM(t)
+	var sawTokenBody string
+	github := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		appID := jwtAppID(r.Header.Get("Authorization"))
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/app/installations/200":
+			_, _ = w.Write([]byte(`{"id":200,"account":{"login":"example-org"},"permissions":{"contents":"read","issues":"read"}}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/app/installations/404":
+			_, _ = w.Write([]byte(`{"id":404,"account":{"login":"example-org"},"permissions":{"contents":"read","issues":"read"}}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/example-org/example-repo/installation":
+			if appID == "456" {
+				_, _ = w.Write([]byte(`{"id":200,"account":{"login":"example-org"}}`))
+				return
+			}
+			http.NotFound(w, r)
+		case r.Method == http.MethodPost && r.URL.Path == "/app/installations/200/access_tokens":
+			body, _ := io.ReadAll(r.Body)
+			sawTokenBody = string(body)
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"token":"tok-200","expires_at":"2099-01-01T00:00:00Z"}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/app/installations/404/access_tokens":
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"token":"tok-404","expires_at":"2099-01-01T00:00:00Z"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer github.Close()
+
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{
+		Token:     "hub-token",
+		ClawToken: "claw-token",
+		GitHubApps: []*types.GitHubAppConfig{
+			{AppID: 123, PrivateKeyPEM: pem},
+			{AppID: 456, PrivateKeyPEM: pem},
+		},
+	}, github.URL, "", "")
+
+	reposJSON := `[{"repo":"example-org/example-repo","permissions":"write"}]`
+	if _, err := db.Exec(`INSERT INTO claws(id, tenant_id, name, template, provider, default_model, template_files, github_repos, linear_workspace, nix, docker, llm_key, tags, status, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,datetime('now'))`,
+		"select-install-claw", "test-tenant-id", "select install claw", "select-ws", "noop", "", "{}", reposJSON, "", 0, 0, "", `[]`, "provisioning"); err != nil {
+		t.Fatalf("insert claw: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/github/token/select-install-claw?claw_token=claw-token&repo=example-org/example-repo", nil)
+	rec := httptest.NewRecorder()
+	s.mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("token endpoint returned %d: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "\"token\":\"tok-200\"") {
+		t.Fatalf("expected token from installation 200, got %s", rec.Body.String())
+	}
+	if !strings.Contains(sawTokenBody, `"repositories":["example-repo"]`) {
+		t.Fatalf("expected scoped token for example-repo, got %s", sawTokenBody)
+	}
+}
+
+// jwtAppID extracts the issuer (GitHub App ID) from a Bearer JWT without
+// verifying the signature. Used in tests that need to distinguish between
+// multiple configured GitHub Apps.
+func jwtAppID(auth string) string {
+	if !strings.HasPrefix(auth, "Bearer ") {
+		return ""
+	}
+	token := strings.TrimPrefix(auth, "Bearer ")
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		return ""
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return ""
+	}
+	var claims struct {
+		Iss string `json:"iss"`
+	}
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		return ""
+	}
+	return claims.Iss
 }
 
 func TestDaytonaCredentialHelperRequestsPerRepoTokens(t *testing.T) {

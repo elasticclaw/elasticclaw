@@ -4326,6 +4326,7 @@ echo "password=$token"
 CREDEOF
 sudo chmod +x /usr/local/bin/elasticclaw-git-credentials
 git config --global credential.helper /usr/local/bin/elasticclaw-git-credentials
+git config --global credential.useHttpPath true
 echo 'credential helper installed'`, tokenURL)
 		if err := exec("install git credential helper", 20*time.Second, credHelperScript); err != nil {
 			return fmt.Errorf("install git credential helper: %w", err)
@@ -4418,6 +4419,9 @@ gh auth status`
 			if len(repositories) > 0 {
 				verifyCloneScript := "export HOME=/home/daytona; cd ~/.openclaw/workspace; "
 				for _, repo := range repositories {
+					if isRepositoryPattern(repo.Repo) || !shouldCloneRepo(repo) {
+						continue
+					}
 					verifyCloneScript += daytonaRepoReadinessSnippet(repo.Repo)
 				}
 				verifyCloneTimeout := githubBootstrapCloneVerifyTimeout(len(repositories))
@@ -4472,6 +4476,9 @@ gh auth status`
 		s.setBootstrapStatus(clawID, "Verifying workspace readiness")
 		verifyScript := "export HOME=/home/daytona; cd ~/.openclaw/workspace; "
 		for _, repo := range repositories {
+			if isRepositoryPattern(repo.Repo) || !shouldCloneRepo(repo) {
+				continue
+			}
 			verifyScript += daytonaRepoReadinessSnippet(repo.Repo)
 		}
 		verifyResult, verifyErr := p.ExecWithTimeout(ctx, instanceID, []string{"bash", "-c", verifyScript}, 20*time.Second)
@@ -7275,6 +7282,9 @@ func buildGitHubCloneScript(repos []types.GitHubRepoAccess) string {
 	}
 	var b strings.Builder
 	for _, r := range repos {
+		if isRepositoryPattern(r.Repo) || !shouldCloneRepo(r) {
+			continue
+		}
 		parts := strings.SplitN(r.Repo, "/", 2)
 		repoName := r.Repo
 		if len(parts) == 2 {
@@ -7331,11 +7341,37 @@ func buildGitHubCLIWrapperInstallScript() string {
 set +x
 REAL_GH="__ELASTICCLAW_REAL_GH__"
 if [ -x /usr/local/bin/elasticclaw-git-credentials ]; then
-  token="$(printf 'protocol=https\nhost=github.com\n\n' | /usr/local/bin/elasticclaw-git-credentials get 2>/dev/null | sed -n 's/^password=//p' | head -n1)"
+  # Try to figure out which repo this command targets so the hub can mint a
+  # token from the correct GitHub App installation.
+  target_repo=""
+  prev=""
+  for arg in "$@"; do
+    if [ "$prev" = "--repo" ] || [ "$prev" = "-R" ]; then
+      target_repo="$arg"
+      break
+    fi
+    case "$arg" in
+      -*) ;;
+      */*)
+        target_repo="$arg"
+        break
+        ;;
+    esac
+    prev="$arg"
+  done
+  if [ -n "$target_repo" ]; then
+    target_repo="${target_repo%.git}"
+    target_repo="${target_repo#/}"
+  fi
+  if [ -n "$target_repo" ]; then
+    token="$(printf 'protocol=https\nhost=github.com\npath=%s.git\n\n' "$target_repo" | /usr/local/bin/elasticclaw-git-credentials get 2>/dev/null | sed -n 's/^password=//p' | head -n1)"
+  else
+    token="$(printf 'protocol=https\nhost=github.com\n\n' | /usr/local/bin/elasticclaw-git-credentials get 2>/dev/null | sed -n 's/^password=//p' | head -n1)"
+  fi
   if [ -n "$token" ]; then
     export GH_TOKEN="$token"
   fi
-  unset token
+  unset token target_repo prev arg
 fi
 exec "$REAL_GH" "$@"
 GHEOF
@@ -7367,11 +7403,18 @@ func buildDaytonaGitHubAccessSmokeScript(repos []types.GitHubRepoAccess) string 
 	b.WriteString(`[ -n "${GH_TOKEN:-}" ] || { echo "[daytona] github access smoke: empty GH_TOKEN"; exit 1; }; `)
 	// Installation-token-safe authenticated call (works without a repo list).
 	b.WriteString(`gh api rate_limit >/dev/null || { echo "[daytona] github access smoke: gh api rate_limit failed"; exit 1; }; `)
-	if len(repos) > 0 && strings.TrimSpace(repos[0].Repo) != "" {
+	var sample string
+	for _, r := range repos {
+		if !isRepositoryPattern(r.Repo) && strings.TrimSpace(r.Repo) != "" {
+			sample = r.Repo
+			break
+		}
+	}
+	if sample != "" {
 		// Single sample proves installation scope for at least one configured repo.
 		fmt.Fprintf(&b, "gh repo view %s >/dev/null || { echo %s; exit 1; }; ",
-			shellQuote(repos[0].Repo),
-			shellQuote("[daytona] github access smoke: cannot view "+repos[0].Repo),
+			shellQuote(sample),
+			shellQuote("[daytona] github access smoke: cannot view "+sample),
 		)
 	}
 	b.WriteString(`echo "[daytona] github access smoke OK"; `)
@@ -7416,6 +7459,9 @@ func buildDaytonaGitHubCloneScript(repos []types.GitHubRepoAccess) string {
 	// before git uses it (helper still refreshes if git asks again).
 	b.WriteString(`. /etc/profile.d/elasticclaw-github.sh 2>/dev/null || true; `)
 	for _, repo := range repos {
+		if isRepositoryPattern(repo.Repo) || !shouldCloneRepo(repo) {
+			continue
+		}
 		repoName := repoDirectoryName(repo.Repo)
 		cloneURL := "https://github.com/" + repo.Repo + ".git"
 		fmt.Fprintf(&b, "echo %s; if [ ! -d %s ]; then git clone %s %s || { echo %s; exit 1; }; echo %s; else git -C %s remote set-url origin %s || true; git -C %s pull --ff-only || { echo %s; exit 1; }; echo %s; fi; ",
@@ -7466,6 +7512,9 @@ FOUND=0
   printf '%%s\n\n' 'ElasticClaw detected repository-owned agent instruction files. Read the relevant files before making changes in that repository.'
 `, shellDoubleQuote(workspaceDir))
 	for _, repo := range repos {
+		if isRepositoryPattern(repo.Repo) || !shouldCloneRepo(repo) {
+			continue
+		}
 		repoName := repoDirectoryName(repo.Repo)
 		fmt.Fprintf(&b, `  REPO_DIR=%s
   REPO_FOUND=0
@@ -7500,6 +7549,9 @@ ENV_FOUND=0
   printf '%%s\n\n' 'For a sequence of commands in one repository, use: cd <repo> && nix develop --accept-flake-config'
 `, repoInstructionsIndexName, repoInstructionsIndexName)
 	for _, repo := range repos {
+		if isRepositoryPattern(repo.Repo) || !shouldCloneRepo(repo) {
+			continue
+		}
 		repoName := repoDirectoryName(repo.Repo)
 		fmt.Fprintf(&b, `  REPO_DIR=%s
   if [ -f "$REPO_DIR/flake.nix" ]; then
@@ -7648,6 +7700,7 @@ fi
 
 # Configure git to use the credential helper
 git config --global credential.helper /usr/local/bin/elasticclaw-git-credentials
+git config --global credential.useHttpPath true
 git config --global --get-all credential.helper | grep -Fx /usr/local/bin/elasticclaw-git-credentials >/dev/null
 git config --show-origin --global --get-all credential.helper
 
@@ -8301,30 +8354,40 @@ func (s *Server) handleGitHubToken(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Keep the original workspace selectors so we can choose the right GitHub
+	// App installation later. repos may be narrowed to a single requested repo
+	// or set to nil for an unscoped token, but we still need the full selector
+	// list for app/installation selection.
+	allRepos := repos
+
 	// Optional single-repo scope from the git credential helper (path=owner/repo.git).
 	// Preferred for large workspaces: each clone mints a least-privilege token
 	// for one allowlisted repo (scales past GitHub's 50-name list limit).
+	//
+	// Selectors may also be glob patterns (e.g. "owner/*"). Exact matches are
+	// preferred; otherwise the requested repo is matched against the configured
+	// selectors, and the highest permission among matches is used.
 	if want := strings.TrimSpace(r.URL.Query().Get("repo")); want != "" {
 		want = strings.TrimPrefix(want, "/")
 		want = strings.TrimSuffix(want, ".git")
-		scoped := make([]RepoAccess, 0, 1)
-		for _, repo := range repos {
-			if strings.EqualFold(repo.Repo, want) {
-				scoped = append(scoped, repo)
-				break
-			}
-		}
-		if len(scoped) == 0 {
+		matched := effectiveRepoAccess(want, allRepos)
+		if matched == nil {
 			http.Error(w, "requested repo is not configured on this claw", http.StatusForbidden)
 			return
 		}
-		repos = scoped
-	} else if len(repos) > maxScopedInstallationRepos {
+		repos = []RepoAccess{*matched}
+	} else if hasRepositoryPattern(allRepos) {
+		// A glob selector grants dynamic access to many repos (e.g. an org).
+		// The gh wrapper requests a token without a target repo, so it must be
+		// usable for any repo matching a pattern. Request an unscoped
+		// installation token (default permissions) by passing an empty repo list.
+		repos = nil
+	} else if len(allRepos) > maxScopedInstallationRepos {
 		// Multi-repo mint without ?repo=: GitHub cannot name-scope >50 repos.
 		// InstallationToken will request permission levels without a repositories
 		// array. Git clone still prefers ?repo= (credential helper). Log so
 		// operators know the install is the access boundary for unscoped mints.
-		log.Printf("[github] claw %s multi-repo token for %d repos exceeds GitHub name-scope limit %d; minting permission-restricted installation token (git clones should use ?repo=)", clawID[:8], len(repos), maxScopedInstallationRepos)
+		log.Printf("[github] claw %s multi-repo token for %d repos exceeds GitHub name-scope limit %d; minting permission-restricted installation token (git clones should use ?repo=)", clawID[:8], len(allRepos), maxScopedInstallationRepos)
 	}
 
 	// Try each configured GitHub App in order; use the first that finds an installation
@@ -8344,6 +8407,9 @@ func (s *Server) handleGitHubToken(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			log.Printf("github app[%d] (app_id=%d url=%s) config error: %v", i, appCfg.AppID, appCfg.URL, err)
 			continue
+		}
+		if s.githubBaseURL != "" {
+			provider.apiBaseURL = s.githubBaseURL
 		}
 		providers = append(providers, githubTokenProviderCandidate{
 			index:    i,
@@ -8373,11 +8439,25 @@ func (s *Server) handleGitHubToken(w http.ResponseWriter, r *http.Request) {
 	var lastErr error
 	for _, candidate := range providers {
 		provider := candidate.provider
-		token, expiresAt, err := provider.InstallationToken(r.Context(), 0, repos)
+		var installationID int64
+		var err error
+		if repo := installationDiscoveryRepo(repos, allRepos); repo != "" {
+			parts := strings.SplitN(repo, "/", 2)
+			installationID, err = provider.FindInstallationForRepo(r.Context(), parts[0], parts[1])
+		} else {
+			installationID, err = provider.FindInstallationForRepos(r.Context(), nil)
+		}
 		if err != nil {
 			lastErr = err
 			// Debug-level only — expected when multiple apps configured and only one matches
-			log.Printf("[github] app[%d] app_id=%d: no match for repos (trying next): %v", candidate.index, candidate.appID, err)
+			log.Printf("[github] app[%d] app_id=%d: no installation for repo (trying next): %v", candidate.index, candidate.appID, err)
+			continue
+		}
+		token, expiresAt, err := provider.InstallationToken(r.Context(), installationID, repos)
+		if err != nil {
+			lastErr = err
+			// Debug-level only — expected when multiple apps configured and only one matches
+			log.Printf("[github] app[%d] app_id=%d installation=%d: token mint failed (trying next): %v", candidate.index, candidate.appID, installationID, err)
 			continue
 		}
 		s.ghTokenMu.Lock()
@@ -8454,18 +8534,17 @@ func diagnoseGitHubRepoAccess(ctx context.Context, providers []githubTokenProvid
 	}
 	inaccessible := make(map[string]bool, len(repos))
 	for _, repo := range repos {
-		if strings.TrimSpace(repo.Repo) != "" {
+		if strings.TrimSpace(repo.Repo) != "" && !isRepositoryPattern(repo.Repo) {
 			inaccessible[repo.Repo] = true
 		}
 	}
 	for _, candidate := range providers {
 		provider := candidate.provider
 		for _, repo := range repos {
-			if !inaccessible[repo.Repo] {
-				continue
-			}
-			if _, _, err := provider.InstallationToken(ctx, 0, []RepoAccess{repo}); err == nil {
-				delete(inaccessible, repo.Repo)
+			if inaccessible[repo.Repo] {
+				if _, _, err := provider.InstallationToken(ctx, 0, []RepoAccess{repo}); err == nil {
+					delete(inaccessible, repo.Repo)
+				}
 			}
 		}
 	}

@@ -3547,6 +3547,14 @@ func syncStagedWorkspaceToOpenClawWorkspace() error {
 type bootstrapRepoAccess struct {
 	Repo        string `json:"repo"`
 	Permissions string `json:"permissions"`
+	Clone       *bool  `json:"clone,omitempty"`
+}
+
+func shouldCloneRepo(repo bootstrapRepoAccess) bool {
+	if repo.Clone != nil && !*repo.Clone {
+		return false
+	}
+	return true
 }
 
 func configuredGitHubRepos() ([]bootstrapRepoAccess, error) {
@@ -3577,6 +3585,40 @@ func repoDirectoryName(repo string) string {
 	return strings.TrimSuffix(name, ".git")
 }
 
+func dockerGitHubCredentialHelperBinary(tokenEndpoint string) string {
+	return strings.ReplaceAll(`#!/bin/sh
+set -eu
+claw_token="${ELASTICCLAW_CLAW_TOKEN:-}"
+if [ -z "$claw_token" ]; then
+  echo "ELASTICCLAW_CLAW_TOKEN is required for GitHub credentials" >&2
+  exit 1
+fi
+# Git credential helpers receive the target URL as key=value lines on stdin.
+# Extract the path so we can ask the hub for a token scoped to this repo.
+repo=""
+while IFS= read -r line && [ -n "$line" ]; do
+  case "$line" in
+    path=*)
+      repo="${line#path=}"
+      repo="${repo%.git}"
+      repo="${repo#/}"
+      ;;
+  esac
+done
+response="$(curl -sS --max-time 35 --get --data-urlencode "claw_token=$claw_token" ${repo:+--data-urlencode "repo=$repo"} __TOKEN_ENDPOINT__)"
+token="$(printf '%s' "$response" | sed -n 's/.*"token"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
+if [ -z "$token" ]; then
+  echo "GitHub token response did not include token" >&2
+  printf '%s\n' "$response" >&2
+  exit 1
+fi
+printf 'protocol=https\n'
+printf 'host=github.com\n'
+printf 'username=x-access-token\n'
+printf 'password=%s\n' "$token"
+`, "__TOKEN_ENDPOINT__", shellQuote(tokenEndpoint))
+}
+
 func dockerGitHubCredentialHelperScript(tokenEndpoint string) string {
 	return fmt.Sprintf(`set -euo pipefail
 if ! command -v git >/dev/null 2>&1; then
@@ -3597,31 +3639,16 @@ mkdir -p "$helper_dir"
 old_umask="$(umask)"
 umask 0077
 cat > "$helper_path" << 'CREDEOF'
-#!/bin/sh
-set -eu
-claw_token="${ELASTICCLAW_CLAW_TOKEN:-}"
-if [ -z "$claw_token" ]; then
-  echo "ELASTICCLAW_CLAW_TOKEN is required for GitHub credentials" >&2
-  exit 1
-fi
-response="$(curl -sS --max-time 35 --get --data-urlencode "claw_token=$claw_token" %s)"
-token="$(printf '%%s' "$response" | sed -n 's/.*"token"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
-if [ -z "$token" ]; then
-  echo "GitHub token response did not include token" >&2
-  printf '%%s\n' "$response" >&2
-  exit 1
-fi
-printf 'protocol=https\n'
-printf 'host=github.com\n'
-printf 'username=x-access-token\n'
-printf 'password=%%s\n' "$token"
+%s
 CREDEOF
 umask "$old_umask"
 chmod 0700 "$helper_path"
 git config --global --unset-all credential.helper >/dev/null 2>&1 || true
 git config --global credential.helper "!$helper_path"
+git config --global credential.useHttpPath true
 git config --global --get-all credential.helper | grep -Fx "!$helper_path" >/dev/null
-helper_check="$("$helper_path" 2>&1)" || {
+# Feed the helper a minimal credential request so it reads stdin and exits cleanly.
+helper_check="$(printf 'protocol=https\nhost=github.com\n\n' | "$helper_path" 2>&1)" || {
   echo "GitHub credential helper failed during bootstrap:" >&2
   printf '%%s\n' "$helper_check" >&2
   exit 1
@@ -3642,7 +3669,7 @@ credential_check="$(printf 'protocol=https\nhost=github.com\n\n' | GIT_TERMINAL_
 }
 printf '%%s\n' "$credential_check" | grep -Fx 'username=x-access-token' >/dev/null
 printf '%%s\n' "$credential_check" | grep -E '^password=.' >/dev/null
-`, shellQuote(tokenEndpoint))
+`, dockerGitHubCredentialHelperBinary(tokenEndpoint))
 }
 
 func installDockerGitHubCredentialHelper() error {
@@ -3677,6 +3704,9 @@ func dockerGitHubCloneScript(workspaceDir string, repos []bootstrapRepoAccess) s
 	fmt.Fprintf(&b, "cd %s\n", shellQuote(workspaceDir))
 	b.WriteString("git config --global --get credential.helper >/dev/null\n")
 	for _, repo := range repos {
+		if isRepositoryPattern(repo.Repo) || !shouldCloneRepo(repo) {
+			continue
+		}
 		dir := repoDirectoryName(repo.Repo)
 		cloneURL := "https://github.com/" + repo.Repo + ".git"
 		fmt.Fprintf(&b, "echo %s\n", shellQuote("[bootstrap] cloning "+repo.Repo+" into "+dir))
@@ -3685,6 +3715,10 @@ func dockerGitHubCloneScript(workspaceDir string, repos []bootstrapRepoAccess) s
 		fmt.Fprintf(&b, "test -d %s\n", shellQuote(filepath.Join(dir, ".git")))
 	}
 	return b.String()
+}
+
+func isRepositoryPattern(repo string) bool {
+	return strings.ContainsAny(repo, "*?[")
 }
 
 func cloneConfiguredGitHubRepos() error {

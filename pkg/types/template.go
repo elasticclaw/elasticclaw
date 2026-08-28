@@ -286,6 +286,7 @@ type GitHubAppConfig struct {
 type GitHubRepoAccess struct {
 	Repo        string `yaml:"repo"        json:"repo"`        // e.g. "owner/repo", "*-infra-*", or "owner/*"
 	Permissions string `yaml:"permissions" json:"permissions"` // "read" or "write" (default: "read")
+	Clone       *bool  `yaml:"clone"       json:"clone,omitempty"` // whether to clone the repo; nil/true means clone
 }
 
 // RepositoryAccessList accepts the current object form:
@@ -344,13 +345,32 @@ func (l *RepositoryAccessList) UnmarshalJSON(data []byte) error {
 			if permissions == "" {
 				permissions = "read"
 			}
-			out = append(out, GitHubRepoAccess{Repo: strings.TrimSpace(repo), Permissions: permissions})
+			entry := GitHubRepoAccess{Repo: strings.TrimSpace(repo), Permissions: permissions}
+			if cloneVal, ok := v["clone"]; ok {
+				clone := parseBoolish(cloneVal)
+				entry.Clone = &clone
+			}
+			out = append(out, entry)
 		default:
 			return fmt.Errorf("repositories[%d]: expected repo string or {repo, permissions}", i)
 		}
 	}
 	*l = out
 	return nil
+}
+
+// parseBoolish converts JSON values that may represent booleans. It accepts
+// bools and the strings "true"/"false" (case-insensitive). Anything else
+// defaults to false so legacy or malformed entries do not break parsing.
+func parseBoolish(v interface{}) bool {
+	switch b := v.(type) {
+	case bool:
+		return b
+	case string:
+		return strings.EqualFold(b, "true") || strings.EqualFold(b, "yes") || strings.EqualFold(b, "on") || strings.EqualFold(b, "1")
+	default:
+		return false
+	}
 }
 
 // WorkspaceEnv maps environment variable names to either inline values or hub
