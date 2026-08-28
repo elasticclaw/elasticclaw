@@ -8617,11 +8617,13 @@ func (s *Server) enqueueSessionLostResume(clawID, prefix, marker string) {
 		b.WriteString(".")
 	}
 	// Bridge transport errors are stored as claw messages too, but replaying one
-	// into a fresh session would replace useful progress with outage noise. Read
-	// several candidates because SQLite TRIM does not remove every whitespace
-	// character; a resume must still proceed when this best-effort lookup fails.
+	// into a fresh session would replace useful progress with outage noise. Keep
+	// this filter in SQL so error bursts do not consume the candidate window.
+	// The prefixes contain neither % nor _, so plain LIKE is safe; add ESCAPE if
+	// a future prefix can contain a wildcard. Go rechecks after TrimSpace because
+	// SQLite TRIM does not remove every whitespace character.
 	var lastProgress string
-	rows, progressErr := s.db.Query(`SELECT content FROM messages WHERE claw_id=? AND role='claw' ORDER BY created_at DESC, rowid DESC LIMIT 5`, clawID)
+	rows, progressErr := s.db.Query(`SELECT content FROM messages WHERE claw_id=? AND role='claw' AND content NOT LIKE ? AND content NOT LIKE ? ORDER BY created_at DESC, rowid DESC LIMIT 5`, clawID, types.BridgeErrorPrefix+"%", types.BridgeReplayErrorPrefix+"%")
 	if progressErr == nil {
 		for rows.Next() {
 			var candidate string

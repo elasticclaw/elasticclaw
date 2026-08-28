@@ -97,6 +97,35 @@ func TestEnqueueSessionLostResumeOmitsBridgeErrors(t *testing.T) {
 	}
 }
 
+func TestEnqueueSessionLostResumeFindsProgressBelowFiveBridgeErrors(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, nil, "", "", "")
+	const clawID = "claw-resume-error-burst"
+	if _, err := db.Exec(`INSERT INTO claws(id, tenant_id, name, status, bootstrap_ok, created_at) VALUES(?,?,?,?,?,datetime('now'))`, clawID, "test-tenant-id", "resume error burst", "connected", 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO messages(id, claw_id, tenant_id, role, content, created_at) VALUES(?,?,?,?,?,datetime('now','-10 seconds'))`, "progress", clawID, "test-tenant-id", "claw", "Completed the migration safely."); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 5; i++ {
+		prefix := types.BridgeErrorPrefix
+		if i%2 == 1 {
+			prefix = types.BridgeReplayErrorPrefix
+		}
+		if _, err := db.Exec(`INSERT INTO messages(id, claw_id, tenant_id, role, content, created_at) VALUES(?,?,?,?,?,datetime('now',?))`, fmt.Sprintf("bridge-error-burst-%d", i), clawID, "test-tenant-id", "claw", prefix+" gateway disconnected", fmt.Sprintf("-%d seconds", 5-i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	s.enqueueSessionLostResume(clawID, restartResumePrefix, "error-burst-marker")
+	var prompt string
+	if err := db.QueryRow(`SELECT content FROM messages WHERE claw_id=? AND role='hub'`, clawID).Scan(&prompt); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(prompt, "Completed the migration safely.") {
+		t.Fatalf("resume prompt omitted progress below bridge-error burst: %q", prompt)
+	}
+}
+
 func TestEnqueueSessionLostResumeSkipsWhitespaceAndFencesProgress(t *testing.T) {
 	s, db := NewTestServerWithConfig(t, nil, "", "", "")
 	const clawID = "claw-resume-fenced"
