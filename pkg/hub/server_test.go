@@ -100,6 +100,26 @@ func TestEnqueueSessionLostResumeOmitsBridgeErrors(t *testing.T) {
 	}
 }
 
+func TestEnqueueSessionLostResumeKeepsUppercaseErrorPrefixAsProgress(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, nil, "", "", "")
+	const clawID = "claw-resume-uppercase-error"
+	if _, err := db.Exec(`INSERT INTO claws(id, tenant_id, name, status, bootstrap_ok, created_at) VALUES(?,?,?,?,?,datetime('now'))`, clawID, "test-tenant-id", "resume uppercase error", "connected", 1); err != nil {
+		t.Fatal(err)
+	}
+	const progress = "⚠️ ERROR: build failed; fixing it now"
+	if _, err := db.Exec(`INSERT INTO messages(id, claw_id, tenant_id, role, content, created_at) VALUES(?,?,?,?,?,datetime('now'))`, "uppercase-progress", clawID, "test-tenant-id", "claw", progress); err != nil {
+		t.Fatal(err)
+	}
+	s.enqueueSessionLostResume(clawID, restartResumePrefix, "uppercase-marker")
+	var prompt string
+	if err := db.QueryRow(`SELECT content FROM messages WHERE claw_id=? AND role='hub'`, clawID).Scan(&prompt); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(prompt, progress) {
+		t.Fatalf("resume prompt omitted case-distinct progress: %q", prompt)
+	}
+}
+
 func TestEnqueueSessionLostResumeFindsProgressBelowFiveBridgeErrors(t *testing.T) {
 	s, db := NewTestServerWithConfig(t, nil, "", "", "")
 	const clawID = "claw-resume-error-burst"
@@ -169,13 +189,22 @@ func TestEnqueueSessionLostResumeTruncatesProgressAt2000Runes(t *testing.T) {
 	}
 }
 
-func TestEnqueueSessionPreservedContinuationThrottlesAndLeavesMarkerLast(t *testing.T) {
+func TestEnqueueSessionPreservedContinuationEscalatesAfterBudget(t *testing.T) {
 	s, db := NewTestServerWithConfig(t, nil, "", "", "")
 	const clawID = "claw-preserved"
 	if _, err := db.Exec(`INSERT INTO claws(id, tenant_id, name, status, bootstrap_ok, created_at) VALUES(?,?,?,?,?,datetime('now'))`, clawID, "test-tenant-id", "preserved", "connected", 1); err != nil {
 		t.Fatal(err)
 	}
-	s.enqueueSessionPreservedContinuation(clawID)
+	for range sessionPreservedContinuationMaxInWindow - 1 {
+		s.enqueueSessionPreservedContinuation(clawID)
+	}
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND role='hub' AND content LIKE ?`, clawID, sessionPreservedContinuationPrefix+"%").Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 2 {
+		t.Fatalf("first two continuations count = %d, want 2", count)
+	}
 	s.enqueueSessionPreservedContinuation(clawID)
 	var prompts []string
 	rows, err := db.Query(`SELECT content FROM messages WHERE claw_id=? AND role='hub'`, clawID)
@@ -190,8 +219,68 @@ func TestEnqueueSessionPreservedContinuationThrottlesAndLeavesMarkerLast(t *test
 		}
 		prompts = append(prompts, p)
 	}
-	if len(prompts) != 1 || !strings.Contains(prompts[0], "history are intact") || !strings.HasSuffix(prompts[0], "-->") {
+	if len(prompts) != sessionPreservedContinuationMaxInWindow || !strings.Contains(prompts[0], "history are intact") || !strings.HasSuffix(prompts[0], "-->") {
 		t.Fatalf("unexpected preserved continuation: %#v", prompts)
+	}
+	s.enqueueSessionPreservedContinuation(clawID)
+	if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND role='hub' AND content LIKE ?`, clawID, sessionPreservedContinuationPrefix+"%").Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != sessionPreservedContinuationMaxInWindow {
+		t.Fatalf("continuation count = %d, want %d", count, sessionPreservedContinuationMaxInWindow)
+	}
+	var paused bool
+	if err := db.QueryRow(`SELECT COALESCE(no_progress_paused,0) != 0 FROM claws WHERE id=?`, clawID).Scan(&paused); err != nil {
+		t.Fatal(err)
+	}
+	if !paused {
+		t.Fatal("preserved continuation budget did not pause the claw")
+	}
+}
+
+func TestEnqueueSessionPreservedContinuationSkipsDisconnectedOrUnbootstrappedClaw(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		status      string
+		bootstrapOK int
+	}{
+		{name: "stopped", status: "stopped", bootstrapOK: 1},
+		{name: "not bootstrapped", status: "connected", bootstrapOK: 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, db := NewTestServerWithConfig(t, nil, "", "", "")
+			clawID := "claw-preserved-" + strings.ReplaceAll(tc.name, " ", "-")
+			if _, err := db.Exec(`INSERT INTO claws(id, tenant_id, name, status, bootstrap_ok, created_at) VALUES(?,?,?,?,?,datetime('now'))`, clawID, "test-tenant-id", tc.name, tc.status, tc.bootstrapOK); err != nil {
+				t.Fatal(err)
+			}
+			s.enqueueSessionPreservedContinuation(clawID)
+			var count int
+			if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND role='hub'`, clawID).Scan(&count); err != nil {
+				t.Fatal(err)
+			}
+			if count != 0 {
+				t.Fatalf("hub messages = %d, want 0", count)
+			}
+		})
+	}
+}
+
+func TestEnqueueSessionPreservedContinuationAllowsNewWindow(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, nil, "", "", "")
+	const clawID = "claw-preserved-new-window"
+	if _, err := db.Exec(`INSERT INTO claws(id, tenant_id, name, status, bootstrap_ok, created_at) VALUES(?,?,?,?,?,datetime('now'))`, clawID, "test-tenant-id", "preserved", "connected", 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO messages(id, claw_id, tenant_id, role, content, created_at) VALUES(?,?,?,?,?,?)`, "old-preserved", clawID, "test-tenant-id", "hub", sessionPreservedContinuationPrefix+" old", time.Now().Add(-sessionPreservedContinuationThrottle-time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	s.enqueueSessionPreservedContinuation(clawID)
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND role='hub' AND content LIKE ?`, clawID, sessionPreservedContinuationPrefix+"%").Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 2 {
+		t.Fatalf("continuation count = %d, want 2", count)
 	}
 }
 
