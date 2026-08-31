@@ -37,8 +37,13 @@ type DependencyStatus struct {
 	// us this and never will: it is a fact about the account, not the service.
 	// It exists so the badge can say "back at 00:00 UTC" instead of leaving an
 	// operator to guess whether to wait or to go fix something.
-	RegainAt  time.Time `json:"regainAt,omitempty"`
-	CheckedAt time.Time `json:"checkedAt"`
+	//
+	// A pointer because omitempty does not skip a zero time.Time: every other
+	// dependency would ship regainAt "0001-01-01T00:00:00Z", which parses
+	// perfectly well in the browser and would render an outage as ending in
+	// the year 1.
+	RegainAt  *time.Time `json:"regainAt,omitempty"`
+	CheckedAt time.Time  `json:"checkedAt"`
 }
 
 type DependencyStatusResponse struct {
@@ -157,7 +162,7 @@ func (s *dependencyStatusService) applyLLMUsageLimits(resp DependencyStatusRespo
 			Status:    dependencyStatusDowntime,
 			Message:   llmLimitDependencyMessage(record),
 			Source:    "hub",
-			RegainAt:  record.RetryAt,
+			RegainAt:  optionalRegainAt(record.RetryAt),
 			CheckedAt: time.Now().UTC(),
 		}
 		replaced := false
@@ -173,6 +178,14 @@ func (s *dependencyStatusService) applyLLMUsageLimits(resp DependencyStatusRespo
 		}
 	}
 	return buildDependencyStatusResponse(resp.Dependencies)
+}
+
+func optionalRegainAt(at time.Time) *time.Time {
+	if at.IsZero() {
+		return nil
+	}
+	utc := at.UTC()
+	return &utc
 }
 
 func llmLimitDependencyName(keyID string) string {

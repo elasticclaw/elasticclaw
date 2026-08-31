@@ -2,6 +2,7 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -341,7 +342,7 @@ func TestLLMUsageLimitRaisesTheDowntimeBadge(t *testing.T) {
 		t.Errorf("status = %q, want %q", found.Status, dependencyStatusDowntime)
 	}
 	// Requirement 4: the badge itself carries the renewal instant.
-	if !found.RegainAt.Equal(regain) {
+	if found.RegainAt == nil || !found.RegainAt.Equal(regain) {
 		t.Errorf("regainAt = %v, want %v", found.RegainAt, regain)
 	}
 	if !strings.Contains(found.Message, formatLLMLimitDeadline(regain)) {
@@ -353,5 +354,28 @@ func TestLLMUsageLimitRaisesTheDowntimeBadge(t *testing.T) {
 	cleared := service.snapshot(context.Background())
 	if cleared.DowntimeCount != 0 {
 		t.Errorf("downtimeCount = %d after release, want 0", cleared.DowntimeCount)
+	}
+}
+
+// omitempty does not skip a zero time.Time, so a pointer is the only thing
+// keeping every healthy dependency from claiming it recovers in the year 1.
+func TestDependencyStatusOmitsRegainAtWhenUnknown(t *testing.T) {
+	s, _ := NewTestServerWithConfig(t, nil, "", "", "")
+	s.dependencyStatus.mu.Lock()
+	s.dependencyStatus.cache = &DependencyStatusResponse{
+		Dependencies: []DependencyStatus{{
+			ID: "sandbox:daytona", Name: "Daytona", Kind: dependencyKindSandbox,
+			Status: dependencyStatusDowntime, CheckedAt: now(),
+		}},
+		CheckedAt: now(),
+	}
+	s.dependencyStatus.mu.Unlock()
+
+	encoded, err := json.Marshal(s.dependencyStatus.snapshot(context.Background()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), "regainAt") {
+		t.Errorf("snapshot ships a regainAt for a dependency with no known deadline: %s", encoded)
 	}
 }
