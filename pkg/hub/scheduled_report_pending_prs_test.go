@@ -1,0 +1,317 @@
+package hub
+
+import (
+	"context"
+	"database/sql"
+	"fmt"
+	"strings"
+	"testing"
+	"time"
+)
+
+func TestPendingPRsScheduledReport(t *testing.T) {
+	s, db := newTaskRunAnalyticsAPITestServer(t)
+	nowAt := time.Now()
+	insertPendingPRReportRun(t, db, "first", "ENG-1", "eng", "Older title", nowAt.Add(-72*time.Hour), 1)
+	insertPendingPRReportRun(t, db, "second", "ENG-1", "eng", "Latest title", nowAt.Add(-24*time.Hour), 1)
+	insertPendingPRReportRun(t, db, "other-workspace", "ENG-1", "product", "Other workspace", nowAt.Add(-48*time.Hour), 1)
+	insertPendingPRReportRun(t, db, "empty", "", "eng", "Ignored", nowAt.Add(-96*time.Hour), 1)
+	insertPendingPRReportPR(t, db, "first", 1, "open", false, nowAt.Add(-72*time.Hour))
+	insertPendingPRReportPR(t, db, "first", 2, "closed", false, nowAt.Add(-72*time.Hour))
+	insertPendingPRReportPR(t, db, "second", 3, "open", true, nowAt.Add(-24*time.Hour))
+	insertPendingPRReportPR(t, db, "second", 4, "open", false, nowAt.Add(-48*time.Hour))
+	insertPendingPRReportPR(t, db, "other-workspace", 5, "open", false, nowAt.Add(-48*time.Hour))
+
+	message, ok, err := buildPendingPRsScheduledReport(context.Background(), s)
+	if err != nil || !ok {
+		t.Fatalf("build report = %v, %v, want report", ok, err)
+	}
+	if message.Title != "Pending PRs" || message.Summary[0] != "2 tickets with open PRs" {
+		t.Fatalf("message = %#v", message)
+	}
+	if !strings.Contains(message.Body, "ENG-1 — Latest title") || !strings.Contains(message.Body, "#1 https://example.test/first/1") || !strings.Contains(message.Body, "#4 https://example.test/second/4") {
+		t.Fatalf("body = %q", message.Body)
+	}
+	if strings.Contains(message.Body, "#2") || strings.Contains(message.Body, "#3") || strings.Contains(message.Body, "Ignored") {
+		t.Fatalf("body includes closed, merged, or empty-ticket PR: %q", message.Body)
+	}
+}
+
+func TestPendingPRsScheduledReportCapsTickets(t *testing.T) {
+	s, db := newTaskRunAnalyticsAPITestServer(t)
+	nowAt := time.Now()
+	for i := 0; i < 21; i++ {
+		runID := fmt.Sprintf("cap-%d", i)
+		insertPendingPRReportRun(t, db, runID, fmt.Sprintf("ENG-%d", i), "eng", fmt.Sprintf("Ticket %d", i), nowAt.Add(-time.Duration(i+1)*time.Hour), 1)
+		insertPendingPRReportPR(t, db, runID, i+1, "open", false, nowAt.Add(-time.Duration(i+1)*time.Hour))
+	}
+
+	message, ok, err := buildPendingPRsScheduledReport(context.Background(), s)
+	if err != nil || !ok {
+		t.Fatalf("build report = %v, %v, want report", ok, err)
+	}
+	if got := strings.Count(message.Body, " days)"); got != scheduledPendingPRsTicketLimit {
+		t.Fatalf("ticket lines = %d, want %d: %q", got, scheduledPendingPRsTicketLimit, message.Body)
+	}
+	if !strings.HasSuffix(message.Body, "…and 1 more") {
+		t.Fatalf("body = %q", message.Body)
+	}
+}
+
+func TestPendingPRsScheduledReportReturnsFalseWithoutOpenTickets(t *testing.T) {
+	s, db := newTaskRunAnalyticsAPITestServer(t)
+	insertPendingPRReportRun(t, db, "closed", "ENG-1", "eng", "Closed", time.Now(), 0)
+
+	message, ok, err := buildPendingPRsScheduledReport(context.Background(), s)
+	if err != nil || ok || message != nil {
+		t.Fatalf("build report = %#v, %v, %v, want nil, false, nil", message, ok, err)
+	}
+}
+
+// The report applies the requires_pr=1 AND analytics_enabled=1 defaults every
+// analytics view applies, so the digest never names a ticket the linked
+// /analytics page hides (and its count matches the dashboard's).
+func TestPendingPRsScheduledReportAppliesAnalyticsDefaults(t *testing.T) {
+	s, db := newTaskRunAnalyticsAPITestServer(t)
+	nowAt := time.Now()
+	insertPendingPRReportRun(t, db, "visible", "ENG-1", "eng", "Visible", nowAt.Add(-24*time.Hour), 1)
+	insertPendingPRReportPR(t, db, "visible", 1, "open", false, nowAt.Add(-24*time.Hour))
+	insertPendingPRReportExcludedRun(t, db, "not-pr-task", "ENG-2", boolPtr(false), nil, nowAt.Add(-24*time.Hour))
+	insertPendingPRReportPR(t, db, "not-pr-task", 2, "open", false, nowAt.Add(-24*time.Hour))
+	insertPendingPRReportExcludedRun(t, db, "analytics-off", "ENG-3", nil, boolPtr(false), nowAt.Add(-24*time.Hour))
+	insertPendingPRReportPR(t, db, "analytics-off", 3, "open", false, nowAt.Add(-24*time.Hour))
+
+	message, ok, err := buildPendingPRsScheduledReport(context.Background(), s)
+	if err != nil || !ok {
+		t.Fatalf("build report = %v, %v, want report", ok, err)
+	}
+	if message.Summary[0] != "1 tickets with open PRs" {
+		t.Fatalf("summary = %q — excluded runs leaked into the count", message.Summary[0])
+	}
+	if strings.Contains(message.Body, "ENG-2") || strings.Contains(message.Body, "ENG-3") {
+		t.Fatalf("body names tickets the analytics views hide: %q", message.Body)
+	}
+}
+
+// The overflow line is appended AFTER the body is fitted into the rune limit,
+// so "…and N more" survives instead of being the first thing truncated, and N
+// counts the dropped lines too.
+func TestPendingPRsScheduledReportTruncatesTicketLinesBeforeOverflowLine(t *testing.T) {
+	s, db := newTaskRunAnalyticsAPITestServer(t)
+	nowAt := time.Now()
+	longTitle := strings.Repeat("very long ticket title ", 20)
+	for i := 0; i < 21; i++ {
+		runID := fmt.Sprintf("trunc-%d", i)
+		insertPendingPRReportRun(t, db, runID, fmt.Sprintf("ENG-%d", i), "eng", longTitle, nowAt.Add(-time.Duration(i+1)*time.Hour), 1)
+		insertPendingPRReportPR(t, db, runID, i+1, "open", false, nowAt.Add(-time.Duration(i+1)*time.Hour))
+	}
+
+	message, ok, err := buildPendingPRsScheduledReport(context.Background(), s)
+	if err != nil || !ok {
+		t.Fatalf("build report = %v, %v, want report", ok, err)
+	}
+	if runeLen(message.Body) > scheduledPendingPRsBodyLimit {
+		t.Fatalf("body is %d runes, over the %d limit", runeLen(message.Body), scheduledPendingPRsBodyLimit)
+	}
+	shown := strings.Count(message.Body, " days)")
+	if shown == 0 || shown >= 21 {
+		t.Fatalf("expected some but not all ticket lines to survive, got %d", shown)
+	}
+	if !strings.HasSuffix(message.Body, fmt.Sprintf("…and %d more", 21-shown)) {
+		t.Fatalf("overflow line missing or miscounted (shown=%d): %q", shown, message.Body)
+	}
+}
+
+// opened_at=0 on an open PR means the opening time is unknown, not 1970: such
+// a ticket must not render a ~20000-day age, and must sort behind tickets
+// whose age is known instead of displacing them from the cap.
+func TestPendingPRsScheduledReportTreatsZeroOpenedAtAsUnknown(t *testing.T) {
+	s, db := newTaskRunAnalyticsAPITestServer(t)
+	nowAt := time.Now()
+	insertPendingPRReportRun(t, db, "known", "ENG-1", "eng", "Known age", nowAt.Add(-20*24*time.Hour), 1)
+	insertPendingPRReportPR(t, db, "known", 1, "open", false, nowAt.Add(-20*24*time.Hour))
+	insertPendingPRReportRun(t, db, "unknown", "ENG-2", "eng", "Unknown age", nowAt.Add(-time.Hour), 1)
+	insertPendingPRReportPR(t, db, "unknown", 2, "open", false, time.UnixMilli(0))
+
+	message, ok, err := buildPendingPRsScheduledReport(context.Background(), s)
+	if err != nil || !ok {
+		t.Fatalf("build report = %v, %v, want report", ok, err)
+	}
+	if !strings.Contains(message.Body, "(20 days)") {
+		t.Fatalf("known-age ticket lost its age: %q", message.Body)
+	}
+	if strings.Index(message.Body, "ENG-1") > strings.Index(message.Body, "ENG-2") {
+		t.Fatalf("unknown-age ticket sorted ahead of a genuinely old one: %q", message.Body)
+	}
+	for _, line := range strings.Split(message.Body, "\n") {
+		if strings.Contains(line, "ENG-2") && strings.Contains(line, " days)") {
+			t.Fatalf("unknown opened_at rendered as an age: %q", line)
+		}
+	}
+}
+
+// A PR linked to multiple runs of the same ticket (a retry continuing the same
+// branch) renders once per ticket line, with the earliest known opened_at
+// backing the age.
+func TestPendingPRsScheduledReportDeduplicatesPRSharedAcrossRuns(t *testing.T) {
+	s, db := newTaskRunAnalyticsAPITestServer(t)
+	nowAt := time.Now()
+	insertPendingPRReportRun(t, db, "run-a", "ENG-1", "eng", "Retried ticket", nowAt.Add(-48*time.Hour), 1)
+	insertPendingPRReportRun(t, db, "run-b", "ENG-1", "eng", "Retried ticket", nowAt.Add(-24*time.Hour), 1)
+	insertPendingPRReportPR(t, db, "run-a", 7, "open", false, nowAt.Add(-48*time.Hour))
+	insertPendingPRReportPR(t, db, "run-b", 7, "open", false, nowAt.Add(-24*time.Hour))
+
+	message, ok, err := buildPendingPRsScheduledReport(context.Background(), s)
+	if err != nil || !ok {
+		t.Fatalf("build report = %v, %v, want report", ok, err)
+	}
+	if got := strings.Count(message.Body, "#7 "); got != 1 {
+		t.Fatalf("shared PR rendered %d times, want 1: %q", got, message.Body)
+	}
+	if !strings.Contains(message.Body, "(2 days)") {
+		t.Fatalf("age is not backed by the earliest opened_at: %q", message.Body)
+	}
+}
+
+// PR state is resolved across rows per (repo, pr_number): pr_watcher only
+// visits live claws, so a run can strand an (open, merged=0) row for a PR
+// another run's row already records as merged or closed. Such a zombie row
+// must not surface the ticket — with no time window it would occupy the
+// oldest-first cap forever.
+func TestPendingPRsScheduledReportResolvesPRStateAcrossRuns(t *testing.T) {
+	s, db := newTaskRunAnalyticsAPITestServer(t)
+	nowAt := time.Now()
+	insertPendingPRReportRun(t, db, "run-a", "ENG-1", "eng", "Merged ticket", nowAt.Add(-48*time.Hour), 1)
+	insertPendingPRReportRun(t, db, "run-b", "ENG-1", "eng", "Merged ticket", nowAt.Add(-24*time.Hour), 0)
+	// run-a's row is stranded open; run-b knows the same PR merged.
+	insertPendingPRReportPR(t, db, "run-a", 7, "open", false, nowAt.Add(-48*time.Hour))
+	insertPendingPRReportPR(t, db, "run-b", 7, "closed", true, nowAt.Add(-48*time.Hour))
+
+	message, ok, err := buildPendingPRsScheduledReport(context.Background(), s)
+	if err != nil || ok || message != nil {
+		t.Fatalf("build report = %#v, %v, %v, want nil, false, nil — the only 'open' PR is recorded merged elsewhere", message, ok, err)
+	}
+}
+
+// The render filter applies the same cross-row resolution tenant-wide: a
+// ticket that qualifies via a genuinely open PR must not also render a zombie
+// row whose resolving row belongs to another ticket's run.
+func TestPendingPRsScheduledReportRenderSkipsPRResolvedOnAnotherTicket(t *testing.T) {
+	s, db := newTaskRunAnalyticsAPITestServer(t)
+	nowAt := time.Now()
+	insertPendingPRReportRun(t, db, "run-a", "ENG-1", "eng", "Half zombie", nowAt.Add(-48*time.Hour), 2)
+	insertPendingPRReportPR(t, db, "run-a", 7, "open", false, nowAt.Add(-48*time.Hour))
+	insertPendingPRReportPR(t, db, "run-a", 8, "open", false, nowAt.Add(-24*time.Hour))
+	// A run of a DIFFERENT ticket records #7 merged.
+	insertPendingPRReportRun(t, db, "run-other", "ENG-2", "eng", "Other ticket", nowAt.Add(-12*time.Hour), 0)
+	insertPendingPRReportPR(t, db, "run-other", 7, "closed", true, nowAt.Add(-12*time.Hour))
+
+	message, ok, err := buildPendingPRsScheduledReport(context.Background(), s)
+	if err != nil || !ok {
+		t.Fatalf("build report = %v, %v, want report", ok, err)
+	}
+	if message.Summary[0] != "1 tickets with open PRs" {
+		t.Fatalf("summary = %q, want only the genuinely pending ticket counted", message.Summary[0])
+	}
+	if !strings.Contains(message.Body, "#8 ") || strings.Contains(message.Body, "#7 ") {
+		t.Fatalf("body = %q, want #8 rendered and the resolved #7 skipped", message.Body)
+	}
+}
+
+// merged=1 is terminal, but state='closed' is reversible on GitHub: a PR
+// closed unmerged under run A and reopened under a retry run B (whose open row
+// is newer) must reappear in the digest — A's latched close must not veto the
+// ticket forever.
+func TestPendingPRsScheduledReportReopenedPRReappears(t *testing.T) {
+	s, db := newTaskRunAnalyticsAPITestServer(t)
+	nowAt := time.Now()
+	insertPendingPRReportRun(t, db, "run-a", "ENG-1", "eng", "Reopened ticket", nowAt.Add(-72*time.Hour), 0)
+	insertPendingPRReportRun(t, db, "run-b", "ENG-1", "eng", "Reopened ticket", nowAt.Add(-24*time.Hour), 1)
+	insertPendingPRReportPR(t, db, "run-a", 7, "closed", false, nowAt.Add(-72*time.Hour))
+	insertPendingPRReportPR(t, db, "run-b", 7, "open", false, nowAt.Add(-24*time.Hour))
+
+	message, ok, err := buildPendingPRsScheduledReport(context.Background(), s)
+	if err != nil || !ok {
+		t.Fatalf("build report = %v, %v, want the reopened ticket reported", ok, err)
+	}
+	if !strings.Contains(message.Body, "#7 ") {
+		t.Fatalf("body = %q, want the reopened #7 rendered", message.Body)
+	}
+}
+
+// The inverse preserves the zombie-row resolution: an open row OLDER than the
+// row recording the close is a stranded snapshot, not a reopen, and stays
+// suppressed even when the close is unmerged.
+func TestPendingPRsScheduledReportOlderOpenRowStaysSuppressed(t *testing.T) {
+	s, db := newTaskRunAnalyticsAPITestServer(t)
+	nowAt := time.Now()
+	insertPendingPRReportRun(t, db, "run-a", "ENG-1", "eng", "Closed ticket", nowAt.Add(-72*time.Hour), 1)
+	insertPendingPRReportRun(t, db, "run-b", "ENG-1", "eng", "Closed ticket", nowAt.Add(-24*time.Hour), 0)
+	insertPendingPRReportPR(t, db, "run-a", 7, "open", false, nowAt.Add(-72*time.Hour))
+	insertPendingPRReportPR(t, db, "run-b", 7, "closed", false, nowAt.Add(-24*time.Hour))
+
+	message, ok, err := buildPendingPRsScheduledReport(context.Background(), s)
+	if err != nil || ok || message != nil {
+		t.Fatalf("build report = %#v, %v, %v, want nil, false, nil — the stranded open row predates the close", message, ok, err)
+	}
+}
+
+// The render filter applies the same recency rule tenant-wide: a reopened PR
+// whose pre-reopen close was recorded by ANOTHER ticket's run must still
+// render alongside the ticket's other open PRs.
+func TestPendingPRsScheduledReportRenderKeepsPRReopenedAfterCloseElsewhere(t *testing.T) {
+	s, db := newTaskRunAnalyticsAPITestServer(t)
+	nowAt := time.Now()
+	insertPendingPRReportRun(t, db, "run-a", "ENG-1", "eng", "Reopened ticket", nowAt.Add(-24*time.Hour), 2)
+	insertPendingPRReportPR(t, db, "run-a", 7, "open", false, nowAt.Add(-24*time.Hour))
+	insertPendingPRReportPR(t, db, "run-a", 8, "open", false, nowAt.Add(-24*time.Hour))
+	// A run of a DIFFERENT ticket recorded #7 closed unmerged BEFORE the reopen.
+	insertPendingPRReportRun(t, db, "run-other", "ENG-2", "eng", "Other ticket", nowAt.Add(-72*time.Hour), 0)
+	insertPendingPRReportPR(t, db, "run-other", 7, "closed", false, nowAt.Add(-72*time.Hour))
+
+	message, ok, err := buildPendingPRsScheduledReport(context.Background(), s)
+	if err != nil || !ok {
+		t.Fatalf("build report = %v, %v, want report", ok, err)
+	}
+	if !strings.Contains(message.Body, "#7 ") || !strings.Contains(message.Body, "#8 ") {
+		t.Fatalf("body = %q, want both the reopened #7 and #8 rendered", message.Body)
+	}
+}
+
+func insertPendingPRReportExcludedRun(t *testing.T, db *sql.DB, runID, issueID string, requiresPR, analyticsEnabled *bool, startedAt time.Time) {
+	t.Helper()
+	insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{
+		RunID: runID, AttemptID: "attempt-" + runID, ClawID: "claw-" + runID, TenantID: "test-tenant-id",
+		Status: taskRunStatusClean, Phase: taskRunPhaseTerminal, OwnerType: taskRunOwnerWorkflow,
+		Integration: "linear", StartedAt: startedAt.UnixMilli(), IssueTitle: "Excluded",
+		RequiresPR: requiresPR, AnalyticsEnabled: analyticsEnabled, ExcludedReason: "excluded",
+		OpenPRCount: 1,
+	})
+	if _, err := db.Exec(`UPDATE task_run_summaries SET issue_id=?, integration_workspace='eng' WHERE run_id=?`, issueID, runID); err != nil {
+		t.Fatalf("set excluded pending PR report ticket: %v", err)
+	}
+}
+
+func insertPendingPRReportRun(t *testing.T, db *sql.DB, runID, issueID, workspace, title string, startedAt time.Time, openPRCount int) {
+	t.Helper()
+	startedAtMillis := startedAt.UnixMilli()
+	insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{
+		RunID: runID, AttemptID: "attempt-" + runID, ClawID: "claw-" + runID, TenantID: "test-tenant-id",
+		Status: taskRunStatusClean, Phase: taskRunPhaseTerminal, OwnerType: taskRunOwnerWorkflow,
+		Integration: "linear", StartedAt: startedAtMillis, IssueTitle: title, OpenPRCount: openPRCount,
+	})
+	if _, err := db.Exec(`UPDATE task_run_summaries SET issue_id=?, integration_workspace=? WHERE run_id=?`, issueID, workspace, runID); err != nil {
+		t.Fatalf("set pending PR report ticket: %v", err)
+	}
+}
+
+func insertPendingPRReportPR(t *testing.T, db *sql.DB, runID string, number int, state string, merged bool, openedAt time.Time) {
+	t.Helper()
+	if _, err := db.Exec(`
+		INSERT INTO task_run_prs(id,tenant_id,run_id,repo,pr_number,pr_url,state,merged,opened_at,created_at,updated_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
+		fmt.Sprintf("pr-%s-%d", runID, number), "test-tenant-id", runID, "acme/app", number,
+		fmt.Sprintf("https://example.test/%s/%d", runID, number), state, boolInt(merged), openedAt.UnixMilli(), openedAt.UnixMilli(), openedAt.UnixMilli()); err != nil {
+		t.Fatalf("insert PR: %v", err)
+	}
+}

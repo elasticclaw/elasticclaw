@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"time"
 
 	"github.com/elasticclaw/elasticclaw/pkg/cliversion"
 	"github.com/elasticclaw/elasticclaw/pkg/config"
@@ -92,6 +93,29 @@ type SettingsView struct {
 type NotificationsView struct {
 	Notifiers map[string]NotifierView     `json:"notifiers"`
 	Lifecycle *LifecycleNotificationsView `json:"lifecycle,omitempty"`
+	// Scheduled mirrors notifications.scheduled. It holds no secret — a
+	// schedule only names notifiers, a report and a wall-clock slot.
+	Scheduled []ScheduledNotificationView `json:"scheduled"`
+}
+
+// ScheduledNotificationView is the settings view of one scheduled report. Like
+// LifecycleNotificationsView it uses the SAME field names the PATCH body is
+// decoded under (types.ScheduledNotificationConfig), so a client that GETs the
+// view, edits it and PATCHes it back cannot silently drop a field.
+type ScheduledNotificationView struct {
+	ID     string   `json:"id"`
+	Report string   `json:"report"`
+	Via    []string `json:"via"`
+	At     string   `json:"at"`
+	// Timezone is an IANA name; empty means UTC, exactly as the scheduler
+	// reads it.
+	Timezone string `json:"timezone,omitempty"`
+	// Weekdays is always emitted, as [] for "every day", so the settings
+	// screen never has to distinguish absent from empty.
+	Weekdays []string `json:"weekdays"`
+	// Enabled is resolved (the config defaults it to true when omitted) so
+	// the screen renders a real toggle rather than a tri-state.
+	Enabled bool `json:"enabled"`
 }
 
 type NotifierView struct {
@@ -711,9 +735,12 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 
 func buildNotificationsView(cfg *types.NotificationsConfig) *NotificationsView {
 	if cfg == nil {
-		return &NotificationsView{Notifiers: map[string]NotifierView{}}
+		return &NotificationsView{Notifiers: map[string]NotifierView{}, Scheduled: []ScheduledNotificationView{}}
 	}
-	view := &NotificationsView{Notifiers: make(map[string]NotifierView, len(cfg.Notifiers))}
+	view := &NotificationsView{
+		Notifiers: make(map[string]NotifierView, len(cfg.Notifiers)),
+		Scheduled: make([]ScheduledNotificationView, 0, len(cfg.Scheduled)),
+	}
 	for name, notifier := range cfg.Notifiers {
 		view.Notifiers[name] = NotifierView{
 			Type:            notifier.Type,
@@ -741,7 +768,28 @@ func buildNotificationsView(cfg *types.NotificationsConfig) *NotificationsView {
 		}
 		view.Lifecycle = lifecycle
 	}
+	for _, scheduled := range cfg.Scheduled {
+		view.Scheduled = append(view.Scheduled, scheduledNotificationViewOf(scheduled))
+	}
 	return view
+}
+
+// scheduledNotificationViewOf projects one schedule into its settings view,
+// resolving the two defaults the screen cannot represent: an omitted `enabled`
+// is true, and an omitted `weekdays` is "every day", rendered as [].
+func scheduledNotificationViewOf(scheduled types.ScheduledNotificationConfig) ScheduledNotificationView {
+	return ScheduledNotificationView{
+		ID:     scheduled.ID,
+		Report: scheduled.Report,
+		// Never the config's own slice header: the settings screen PATCHes
+		// this view straight back, and aliasing would let a rejected save
+		// mutate the live config.
+		Via:      append([]string{}, scheduled.Via...),
+		At:       scheduled.At,
+		Timezone: scheduled.Timezone,
+		Weekdays: append([]string{}, scheduled.Weekdays...),
+		Enabled:  scheduled.Enabled == nil || *scheduled.Enabled,
+	}
 }
 
 func notifierSettingString(notifier types.NotifierConfig, key string) string {
@@ -787,7 +835,16 @@ func mergeNotifierSettings(current, patch *types.NotificationsConfig) {
 // no way to repair the offender from the UI. Whatever the operator does touch
 // is still checked, so this handler never persists a NEW broken notifier.
 func validateSettingsNotifications(current, cfg *types.NotificationsConfig) error {
-	if err := types.ValidateNotificationsConfig(cfg); err != nil {
+	// Notifier and lifecycle structure is validated on the whole patched
+	// block; the scheduled entries get the same structural checks per entry
+	// below, exempting stored ones the patch merely re-sends. A hand-written
+	// hub.yaml can hold a schedule the structural validator rejects (a
+	// "monday" weekday, a duplicated id) that the hub boots with and the
+	// screen re-sends verbatim on every save — and cannot repair: the edit
+	// dialog renders no chip for an invalid weekday and disables the id
+	// field, so validating stored entries here would 400 every save from the
+	// screen, including ones touching an unrelated channel.
+	if err := types.ValidateLifecycleNotificationsConfig(cfg); err != nil {
 		return err
 	}
 	for name, notifier := range cfg.Notifiers {
@@ -811,7 +868,128 @@ func validateSettingsNotifications(current, cfg *types.NotificationsConfig) erro
 			return fmt.Errorf("notifications.notifiers.%s: %w", name, err)
 		}
 	}
+	// Report names are checked only on schedules the patch adds or whose
+	// report it changes, for the same reason notifier construction is: the
+	// report registry is a property of THIS build, so a hub.yaml naming a
+	// report an older or newer binary carries is legitimate on disk (the
+	// scheduler logs "not registered" per tick and delivers nothing). The
+	// screen submits the whole scheduled list on every save, so failing on a
+	// stored entry would 400 every save — including the one that deletes the
+	// offender, and every other edit to the entry itself: pausing it (which
+	// the doctor's "pause before upgrading" guidance depends on), re-routing
+	// it, or moving its slot.
+	ids := make(map[string]int, len(cfg.Scheduled))
+	for _, scheduled := range cfg.Scheduled {
+		ids[scheduled.ID]++
+	}
+	storedIDs := map[string]int{}
+	if current != nil {
+		for _, scheduled := range current.Scheduled {
+			storedIDs[scheduled.ID]++
+		}
+	}
+	for i, scheduled := range cfg.Scheduled {
+		// A duplicate id the PATCH introduces is charged even when every copy
+		// individually reads as unchanged — two byte-identical re-sends of one
+		// stored entry (a client retry, a double-submit) satisfy
+		// scheduledEntryUnchanged and would otherwise persist the exact
+		// dedupe-row collision the scheduler tick's validity gate pauses every
+		// schedule over. Only patch-introduced duplication is charged (more
+		// copies of an id than the stored list holds): a stored hand-written
+		// duplicate is unrepairable from the screen (the id field is disabled
+		// in edit mode) and must not block unrelated saves.
+		if ids[scheduled.ID] > 1 && ids[scheduled.ID] > storedIDs[scheduled.ID] {
+			return fmt.Errorf("notifications.scheduled[%d]: id %q is duplicated", i, scheduled.ID)
+		}
+		if !scheduledEntryUnchanged(current, scheduled) {
+			if err := types.ValidateScheduledNotification(cfg, i); err != nil {
+				return err
+			}
+		}
+		if scheduledReportUnchanged(current, scheduled) {
+			continue
+		}
+		if !ScheduledReportSupported(scheduled.Report) {
+			return fmt.Errorf("notifications.scheduled[%d]: unknown report %q (supported: %s)",
+				i, scheduled.Report, scheduledReportNamesText())
+		}
+	}
 	return nil
+}
+
+// scheduledEntryUnchanged reports whether the patch re-sends a schedule
+// identical to one already stored under its id — the patch carries it, not
+// edits it — mirroring notifierUnchanged above. Both sides are compared
+// through their settings view so the two defaults the screen cannot express
+// (an omitted `enabled`, a nil weekday list) do not read back as edits.
+func scheduledEntryUnchanged(current *types.NotificationsConfig, patched types.ScheduledNotificationConfig) bool {
+	if current == nil {
+		return false
+	}
+	view := scheduledNotificationViewOf(patched)
+	for _, stored := range current.Scheduled {
+		if stored.ID == patched.ID && reflect.DeepEqual(scheduledNotificationViewOf(stored), view) {
+			return true
+		}
+	}
+	return false
+}
+
+// normalizeScheduledTimes rewrites each schedule's `at` in zero-padded HH:MM.
+//
+// time.Parse("15:04") accepts an unpadded "9:00", so a hand-written hub.yaml
+// can carry one and the scheduler runs it correctly — but the settings screen
+// binds `at` to an <input type="time">, which renders anything that is not
+// HH:MM as blank. Normalizing whatever a patch carries (including the stored
+// list carried forward above) repairs such an entry on the first save from any
+// client, rather than leaving it permanently uneditable from the screen. An
+// unparseable value is left alone for validation to reject by its real text.
+//
+// Runs AFTER validateSettingsNotifications: scheduledEntryUnchanged compares
+// the patch's text against the stored text, so normalizing first would turn a
+// carried-forward "9:00" into an apparent edit and subject an entry the
+// operator never touched to full validation. The dedupe digest is unaffected
+// either way — scheduledSlotDigest normalizes `at` itself.
+func normalizeScheduledTimes(cfg *types.NotificationsConfig) {
+	if cfg == nil {
+		return
+	}
+	for i, scheduled := range cfg.Scheduled {
+		parsed, err := time.Parse("15:04", strings.TrimSpace(scheduled.At))
+		if err != nil {
+			continue
+		}
+		cfg.Scheduled[i].At = parsed.Format("15:04")
+	}
+}
+
+// scheduledReportUnchanged reports whether a stored schedule under the same id
+// already names the patched schedule's report.
+//
+// Only the report field is compared: the check this gates is against the
+// report registry of THIS build, so every other edit to a stored schedule —
+// pausing it, re-routing it, moving its slot — must stay possible even when
+// the stored report is one this binary does not carry. Comparing the whole
+// schedule here once made exactly those edits 400 with "unknown report".
+func scheduledReportUnchanged(current *types.NotificationsConfig, patched types.ScheduledNotificationConfig) bool {
+	if current == nil {
+		return false
+	}
+	for _, stored := range current.Scheduled {
+		if stored.ID == patched.ID {
+			return stored.Report == patched.Report
+		}
+	}
+	return false
+}
+
+// scheduledReportNamesText lists the registered reports for error text.
+func scheduledReportNamesText() string {
+	names := scheduledReportNames()
+	if len(names) == 0 {
+		return "none"
+	}
+	return strings.Join(names, ", ")
 }
 
 // validateNotifierAPIBase refuses an api_base the patch introduces or changes
@@ -1038,6 +1216,26 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 		if patch.Notifications.Lifecycle != nil && len(patch.Notifications.Lifecycle.Routes) > 0 {
 			patch.Notifications.Lifecycle.Via = ""
 		}
+		// An ABSENT scheduled list carries the stored schedules forward. The
+		// settings view always emits `scheduled` (as [] when there are none),
+		// so a patch without the key comes from a client that never saw the
+		// field — an older screen, or a hand-written PATCH that only meant to
+		// touch notifiers — not from one asking to delete every schedule.
+		// Deleting is expressed as a present, shorter (possibly empty) list.
+		//
+		// This carry-forward is deliberately asymmetric: `notifiers` and
+		// `lifecycle` keep the block's pre-existing whole-replacement
+		// semantics (a patch with only `scheduled` still replaces them with
+		// whatever it carries, i.e. nothing). Every shipped client sends the
+		// whole notifications block, so nothing observable depends on
+		// carry-forward there yet — `scheduled` gets it only because it was
+		// added AFTER such clients existed, making an absent key genuinely
+		// mean "never saw the field". Extending carry-forward to the older
+		// keys would silently change what existing PATCHes do and belongs in
+		// its own change.
+		if patch.Notifications.Scheduled == nil && s.hubCfg.Notifications != nil {
+			patch.Notifications.Scheduled = append([]types.ScheduledNotificationConfig(nil), s.hubCfg.Notifications.Scheduled...)
+		}
 		mergeNotifierSettings(s.hubCfg.Notifications, patch.Notifications)
 		dropRejectedLifecycleDurations(s.hubCfg.Notifications, patch.Notifications)
 		if err := validateSettingsNotifications(s.hubCfg.Notifications, patch.Notifications); err != nil {
@@ -1050,6 +1248,12 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+		// AFTER validation on purpose: normalizing first rewrites the patch's
+		// `at` before scheduledEntryUnchanged compares it against the stored
+		// text, so a stored unpadded "9:00" plus any other structural defect
+		// would read as an edit and 400 every notifications save — the exact
+		// brick the unchanged-entry exemption exists to prevent.
+		normalizeScheduledTimes(patch.Notifications)
 		updatedCfg.Notifications = patch.Notifications
 	}
 
@@ -1684,6 +1888,14 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 
 	// Only update in-memory config after successful disk write
 	s.hubCfg = &updatedCfg
+
+	// A deleted schedule's dedupe row must go NOW, not on the next minute
+	// tick: deleting and re-adding an id within one tick interval would
+	// otherwise inherit the stale row and replay a slot from before the new
+	// schedule existed (see pruneScheduledState).
+	if patch.Notifications != nil {
+		s.pruneScheduledState(updatedCfg.Notifications.Scheduled)
+	}
 
 	// If the concurrency limit was raised or removed, try to promote pending claws.
 	// This must run AFTER s.hubCfg is updated so promotePendingClaws reads the new limit.

@@ -205,6 +205,20 @@ type Server struct {
 	// its delivery row (see stopLifecycleNotifier).
 	lifecycleNotifierStop chan struct{}
 	lifecycleNotifierDone chan struct{}
+
+	// scheduledNotifierStop/Done plumb the same graceful shutdown for the
+	// scheduled-report loop: its dedupe-state upsert after a completed Slack
+	// send must land before the DB closes, or the slot re-sends after restart.
+	scheduledNotifierStop chan struct{}
+	scheduledNotifierDone chan struct{}
+
+	// scheduledTransientFailures tracks consecutive transient send failures
+	// per scheduled (id, via) state key, bounding minutely retries of one
+	// slot (see scheduledMaxTransientFailures). Shared between the
+	// serially-run scheduled notifier tick and the settings PATCH handler
+	// (which prunes it via pruneScheduledState), hence the lock.
+	scheduledFailureMu         sync.Mutex
+	scheduledTransientFailures map[string]scheduledFailureStreak
 }
 
 // cachedNotifier is one constructed notifier plus the config/secret digest it
@@ -526,6 +540,7 @@ func NewServer(addr, dbPath, identityDir string, hubCfg *types.HubConfig) (*Serv
 	}
 	srv.startIntegrationPoller()
 	srv.startLifecycleNotifier()
+	srv.startScheduledNotifier()
 
 	return srv, nil
 }
@@ -597,11 +612,13 @@ func (s *Server) run(ctx context.Context, opts ...RunOptions) error {
 		// ListenAndServe returns as soon as Shutdown starts. Wait for it to
 		// finish draining active requests before closing their database.
 		<-shutdownDone
-		// Stop the lifecycle notifier before the DB closes: a tick in flight
+		// Stop both notifier loops before the DB closes: a tick in flight
 		// could otherwise complete an external Slack send and then fail the
-		// delivery-row insert against the closed DB, re-sending the event
-		// after restart (the in-memory retry stash dies with the process).
+		// delivery-row insert (or scheduled dedupe-state upsert) against the
+		// closed DB, re-sending the event after restart (the in-memory retry
+		// stash dies with the process).
 		s.stopLifecycleNotifier(10 * time.Second)
+		s.stopScheduledNotifier(10 * time.Second)
 		if closeErr := s.db.Close(); closeErr != nil {
 			return fmt.Errorf("close database: %w", closeErr)
 		}
@@ -978,22 +995,34 @@ func (s *Server) resolveAuthToken(token string) (tenantID, githubLogin string, o
 
 // githubTenantID resolves the tenant backing GitHub OAuth sessions.
 func (s *Server) githubTenantID() (string, error) {
+	return s.githubTenantIDContext(context.Background())
+}
+
+// githubTenantIDContext is the ctx-bounded variant for callers whose queries
+// must honour a deadline or shutdown cancellation (the scheduled pending_prs
+// report builds under a 30s context and is cancelled at shutdown; a ctx-less
+// query would escape both).
+func (s *Server) githubTenantIDContext(ctx context.Context) (string, error) {
 	s.mu.RLock()
 	hubToken := s.hubCfg.Token
 	s.mu.RUnlock()
 	if hubToken != "" {
-		if tenantID, err := s.tenantByToken(hubToken); err == nil {
+		if tenantID, err := s.tenantByTokenContext(ctx, hubToken); err == nil {
 			return tenantID, nil
 		}
 	}
 	var tenantID string
-	err := s.db.QueryRow(`SELECT id FROM tenants ORDER BY created_at ASC LIMIT 1`).Scan(&tenantID)
+	err := s.db.QueryRowContext(ctx, `SELECT id FROM tenants ORDER BY created_at ASC LIMIT 1`).Scan(&tenantID)
 	return tenantID, err
 }
 
 func (s *Server) tenantByToken(token string) (string, error) {
+	return s.tenantByTokenContext(context.Background(), token)
+}
+
+func (s *Server) tenantByTokenContext(ctx context.Context, token string) (string, error) {
 	var id string
-	err := s.db.QueryRow(`SELECT id FROM tenants WHERE token = ?`, token).Scan(&id)
+	err := s.db.QueryRowContext(ctx, `SELECT id FROM tenants WHERE token = ?`, token).Scan(&id)
 	return id, err
 }
 

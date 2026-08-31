@@ -764,15 +764,57 @@ func ValidateProviderConfig(name string, cfg *ProviderConfig) error {
 }
 
 // ValidateNotificationsConfig validates the structural invariants of a
-// NotificationsConfig: notifier entries are named and typed, and the
-// lifecycle block references a defined notifier. Provider-level checks
-// (supported type, secret resolution, provider settings) happen in the hub,
-// which owns the provider registry and the secrets.
+// NotificationsConfig: notifier entries are named and typed, the scheduled
+// block is well-formed, and the lifecycle block references a defined notifier.
+// Provider-level checks (supported type, secret resolution, provider settings)
+// happen in the hub, which owns the provider registry and the secrets.
 // A nil config is valid (feature absent).
 func ValidateNotificationsConfig(cfg *NotificationsConfig) error {
 	if cfg == nil {
 		return nil
 	}
+	if err := validateNotifiersBlock(cfg); err != nil {
+		return err
+	}
+	if err := validateScheduledBlock(cfg); err != nil {
+		return err
+	}
+	return validateLifecycleBlock(cfg)
+}
+
+// ValidateScheduledNotificationsConfig validates only what the scheduled
+// notifier tick consumes: the notifier map and the scheduled block. Each
+// minute tick gates on the validity of its own feature's config, so a defect
+// in the lifecycle block — say, an idle_after typo in a DISABLED block, which
+// the lifecycle tick itself tolerates by returning before it validates — must
+// not pause every scheduled report, and vice versa.
+// ValidateNotificationsConfig composes both for the paths that judge the
+// whole block (the settings PATCH, hub.yaml validation, the doctor).
+func ValidateScheduledNotificationsConfig(cfg *NotificationsConfig) error {
+	if cfg == nil {
+		return nil
+	}
+	if err := validateNotifiersBlock(cfg); err != nil {
+		return err
+	}
+	return validateScheduledBlock(cfg)
+}
+
+// ValidateLifecycleNotificationsConfig validates only what the lifecycle
+// notifier tick consumes: the notifier map and the lifecycle block. See
+// ValidateScheduledNotificationsConfig for why the two features gate
+// separately.
+func ValidateLifecycleNotificationsConfig(cfg *NotificationsConfig) error {
+	if cfg == nil {
+		return nil
+	}
+	if err := validateNotifiersBlock(cfg); err != nil {
+		return err
+	}
+	return validateLifecycleBlock(cfg)
+}
+
+func validateNotifiersBlock(cfg *NotificationsConfig) error {
 	for name, notifier := range cfg.Notifiers {
 		if strings.TrimSpace(name) == "" {
 			return fmt.Errorf("notifications.notifiers: notifier name is required")
@@ -790,6 +832,113 @@ func ValidateNotificationsConfig(cfg *NotificationsConfig) error {
 			return fmt.Errorf("notifications.notifiers.%s: type is required", name)
 		}
 	}
+	return nil
+}
+
+func validateScheduledBlock(cfg *NotificationsConfig) error {
+	seenScheduled := make(map[string]struct{}, len(cfg.Scheduled))
+	for i, scheduled := range cfg.Scheduled {
+		if err := ValidateScheduledNotification(cfg, i); err != nil {
+			return err
+		}
+		if _, duplicate := seenScheduled[scheduled.ID]; duplicate {
+			return fmt.Errorf("notifications.scheduled[%d]: id %q is duplicated", i, scheduled.ID)
+		}
+		seenScheduled[scheduled.ID] = struct{}{}
+	}
+	return nil
+}
+
+// ValidateScheduledNotification validates one scheduled entry's own fields
+// against cfg's notifier map — everything except the cross-entry duplicate-id
+// check, which needs the whole list. Exported so the settings PATCH handler
+// can validate only the entries a patch adds or edits, exempting stored ones
+// it merely re-sends.
+func ValidateScheduledNotification(cfg *NotificationsConfig, i int) error {
+	scheduled := cfg.Scheduled[i]
+	prefix := fmt.Sprintf("notifications.scheduled[%d]", i)
+	if strings.TrimSpace(scheduled.ID) == "" {
+		return fmt.Errorf("%s: id is required", prefix)
+	}
+	// Same ban as notifier names: the hub keys each destination's
+	// dedupe row by the schedule id and via joined with a NUL sentinel,
+	// so an id (or a not-yet-checked via on a disabled schedule) carrying
+	// control characters could collide with another pair's row or forge
+	// hub log lines.
+	if strings.ContainsFunc(scheduled.ID, unicode.IsControl) {
+		return fmt.Errorf("%s: id %q cannot contain control characters", prefix, scheduled.ID)
+	}
+	if strings.TrimSpace(scheduled.Report) == "" {
+		return fmt.Errorf("%s: report is required", prefix)
+	}
+	if len(scheduled.Via) == 0 {
+		return fmt.Errorf("%s: via is required", prefix)
+	}
+	scheduledEnabled := scheduled.Enabled == nil || *scheduled.Enabled
+	seenVia := make(map[string]struct{}, len(scheduled.Via))
+	for _, via := range scheduled.Via {
+		// The scheduler resolves and keys state by the TrimSpace'd via —
+		// matching the lifecycle routes — so dedupe and the
+		// notifier lookup run on the trimmed name too.
+		trimmedVia := strings.TrimSpace(via)
+		// A via that trims to nothing can never name a notifier and would key
+		// the schedule's state rows by an empty via segment; rejected even on
+		// a disabled schedule — like the control-character ban below — so a
+		// pause-then-re-enable cannot round-trip one into a confusing
+		// "does not name a configured notifier" error later.
+		if trimmedVia == "" {
+			return fmt.Errorf("%s: via entries cannot be blank", prefix)
+		}
+		// The scheduler sends once per pending via entry, so a repeated
+		// name would post the same report twice in the same tick — exactly
+		// as a repeated lifecycle route would, and rejected the same way.
+		if _, duplicate := seenVia[trimmedVia]; duplicate {
+			return fmt.Errorf("%s: via %q is duplicated", prefix, via)
+		}
+		seenVia[trimmedVia] = struct{}{}
+		// An enabled schedule's via must name a notifier (whose name is
+		// already control-character-free); a disabled one skips that
+		// check, so ban control characters here too — a paused schedule
+		// still writes state rows keyed by its via.
+		if strings.ContainsFunc(via, unicode.IsControl) {
+			return fmt.Errorf("%s: via %q cannot contain control characters", prefix, via)
+		}
+		// The notifier reference is checked only while the schedule is
+		// enabled, symmetrically with the disabled lifecycle block:
+		// an operator who pauses a schedule and then deletes its notifier
+		// must not be left with a hub that refuses to load, or a settings
+		// screen whose every save 400s on an entry it renders with a
+		// "no longer configured" warning instead.
+		if !scheduledEnabled {
+			continue
+		}
+		if _, ok := cfg.Notifiers[trimmedVia]; !ok {
+			return fmt.Errorf("%s: via %q does not name a configured notifier (defined: %s)", prefix, via, notifierNames(cfg.Notifiers))
+		}
+	}
+	if _, err := time.Parse("15:04", scheduled.At); err != nil {
+		return fmt.Errorf("%s: invalid at %q: %w", prefix, scheduled.At, err)
+	}
+	if scheduled.Timezone != "" {
+		if _, err := time.LoadLocation(scheduled.Timezone); err != nil {
+			return fmt.Errorf("%s: invalid timezone %q: %w", prefix, scheduled.Timezone, err)
+		}
+	}
+	validWeekdays := map[string]struct{}{"mon": {}, "tue": {}, "wed": {}, "thu": {}, "fri": {}, "sat": {}, "sun": {}}
+	seenWeekdays := make(map[string]struct{}, len(scheduled.Weekdays))
+	for _, weekday := range scheduled.Weekdays {
+		if _, ok := validWeekdays[weekday]; !ok {
+			return fmt.Errorf("%s: weekday %q is invalid", prefix, weekday)
+		}
+		if _, duplicate := seenWeekdays[weekday]; duplicate {
+			return fmt.Errorf("%s: weekday %q is duplicated", prefix, weekday)
+		}
+		seenWeekdays[weekday] = struct{}{}
+	}
+	return nil
+}
+
+func validateLifecycleBlock(cfg *NotificationsConfig) error {
 	lc := cfg.Lifecycle
 	if lc == nil {
 		return nil

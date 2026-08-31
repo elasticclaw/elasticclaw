@@ -136,6 +136,201 @@ func TestCheckNotificationsChecksEveryLifecycleRoute(t *testing.T) {
 	}
 }
 
+// Scheduled destinations get the same per-destination checks lifecycle routes
+// get: a schedule pointed at a channel-less (or non-constructible) notifier
+// fails every runtime send permanently and silently burns its slot, so doctor
+// must not report it green.
+func TestCheckNotificationsChecksEveryScheduledDestination(t *testing.T) {
+	s := &Server{}
+	cfg := &types.HubConfig{Secrets: map[string]string{"token": "xoxb-test"}, Notifications: &types.NotificationsConfig{
+		Notifiers: map[string]types.NotifierConfig{
+			"healthy": {Type: "slack", Settings: map[string]any{"token_secret": "token", "channel": "C0123ABCD"}},
+			"empty":   {Type: "slack", Settings: map[string]any{"token_secret": "token"}},
+			"broken":  {Type: "carrier-pigeon", Settings: map[string]any{"channel": "C0123ABCD"}},
+		},
+		Scheduled: []types.ScheduledNotificationConfig{
+			{ID: "digest", Report: "pending_prs", Via: []string{"healthy", "empty", "broken", "missing"}, At: "09:00"},
+		},
+	}}
+	checks := s.checkNotifications(cfg)
+	seen := map[string]bool{}
+	for _, check := range checks {
+		if strings.Contains(check.Title, "Scheduled report") {
+			if check.OK {
+				t.Fatalf("schedule with broken destinations reported green: %#v", check)
+			}
+			seen[check.Title] = true
+		}
+	}
+	for _, want := range []string{`destination "empty" has no channel`, `destination "broken" is not constructible`, "sends to an unknown notifier"} {
+		found := false
+		for title := range seen {
+			if strings.Contains(title, want) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("missing scheduled destination check %q in %#v", want, checks)
+		}
+	}
+}
+
+// The per-schedule rows must also judge the slot fields (at/timezone/weekdays)
+// the destination checks never touch: an invalid one fails the scheduled
+// tick's validity gate — pausing EVERY schedule — so the very entry causing
+// the pause must not get a green "is configured" row.
+func TestCheckNotificationsFlagsInvalidScheduledSlotFields(t *testing.T) {
+	s := &Server{}
+	cfg := &types.HubConfig{Secrets: map[string]string{"token": "xoxb-test"}, Notifications: &types.NotificationsConfig{
+		Notifiers: map[string]types.NotifierConfig{
+			"healthy": {Type: "slack", Settings: map[string]any{"token_secret": "token", "channel": "C0123ABCD"}},
+		},
+		Scheduled: []types.ScheduledNotificationConfig{
+			{ID: "digest", Report: "pending_prs", Via: []string{"healthy"}, At: "09:00", Weekdays: []string{"monday"}},
+		},
+	}}
+	var invalidRow, sectionRow bool
+	for _, check := range s.checkNotifications(cfg) {
+		if strings.Contains(check.Title, `Scheduled report 1 ("digest")`) {
+			if check.OK {
+				t.Fatalf("schedule with an invalid weekday reported green: %#v", check)
+			}
+			if strings.Contains(check.Title, "is invalid") && strings.Contains(check.Error, `weekday "monday" is invalid`) {
+				invalidRow = true
+			}
+		}
+		if check.Title == "Scheduled reports config invalid" && !check.OK {
+			sectionRow = true
+		}
+	}
+	if !invalidRow {
+		t.Fatal("invalid weekday did not produce a critical per-schedule row")
+	}
+	if !sectionRow {
+		t.Fatal("invalid scheduled block did not produce the scheduled-reports section row")
+	}
+}
+
+// The tick's whole-block gate validates every entry regardless of Enabled, so
+// a defective DISABLED schedule pauses every other schedule: the disabled
+// offender must get its own critical row (not be skipped as paused), and the
+// healthy victim must not get a green "is configured" row while nothing is
+// delivered.
+func TestCheckNotificationsFlagsDisabledOffenderAndDowngradesVictims(t *testing.T) {
+	s := &Server{}
+	disabled := false
+	cfg := &types.HubConfig{Secrets: map[string]string{"token": "xoxb-test"}, Notifications: &types.NotificationsConfig{
+		Notifiers: map[string]types.NotifierConfig{
+			"healthy": {Type: "slack", Settings: map[string]any{"token_secret": "token", "channel": "C0123ABCD"}},
+		},
+		Scheduled: []types.ScheduledNotificationConfig{
+			{ID: "victim", Report: "pending_prs", Via: []string{"healthy"}, At: "09:00"},
+			{ID: "offender", Report: "pending_prs", Via: []string{"healthy"}, At: "09:00", Weekdays: []string{"monday"}, Enabled: &disabled},
+		},
+	}}
+	var offenderRow, victimPausedRow bool
+	for _, check := range s.checkNotifications(cfg) {
+		if strings.Contains(check.Title, "Scheduled report") && check.OK {
+			t.Fatalf("green per-schedule row while the whole block is paused: %#v", check)
+		}
+		if strings.Contains(check.Title, `Scheduled report 2 ("offender") is invalid`) && strings.Contains(check.Error, `weekday "monday" is invalid`) {
+			offenderRow = true
+		}
+		if strings.Contains(check.Title, `Scheduled report 1 ("victim") is paused while the scheduled block is invalid`) {
+			victimPausedRow = true
+		}
+	}
+	if !offenderRow {
+		t.Fatal("the disabled entry causing the pause got no critical row of its own")
+	}
+	if !victimPausedRow {
+		t.Fatal("the healthy entry got no row explaining it is paused by the invalid block")
+	}
+}
+
+// Two schedules sharing an id fail only the cross-entry rule the per-entry
+// validator excludes: the duplicate must get its own critical row instead of
+// both entries showing green while the tick delivers nothing.
+func TestCheckNotificationsFlagsDuplicateScheduleIDs(t *testing.T) {
+	s := &Server{}
+	cfg := &types.HubConfig{Secrets: map[string]string{"token": "xoxb-test"}, Notifications: &types.NotificationsConfig{
+		Notifiers: map[string]types.NotifierConfig{
+			"healthy": {Type: "slack", Settings: map[string]any{"token_secret": "token", "channel": "C0123ABCD"}},
+		},
+		Scheduled: []types.ScheduledNotificationConfig{
+			{ID: "digest", Report: "pending_prs", Via: []string{"healthy"}, At: "09:00"},
+			{ID: "digest", Report: "pending_prs", Via: []string{"healthy"}, At: "17:00"},
+		},
+	}}
+	var duplicateRow bool
+	for _, check := range s.checkNotifications(cfg) {
+		if strings.Contains(check.Title, "Scheduled report") && check.OK {
+			t.Fatalf("green per-schedule row despite the duplicated id: %#v", check)
+		}
+		if strings.Contains(check.Title, `Scheduled report 2 ("digest") duplicates another schedule's id`) {
+			duplicateRow = true
+		}
+	}
+	if !duplicateRow {
+		t.Fatal("the duplicated id got no per-schedule row")
+	}
+}
+
+// The section-level validity rows mirror the per-feature tick gates: a defect
+// confined to one feature's block pauses only that feature, so the doctor must
+// not announce total notification failure — or stay silent about the feature
+// that IS paused.
+func TestCheckNotificationsSplitsSectionValidityPerFeature(t *testing.T) {
+	s := &Server{}
+	notifiers := map[string]types.NotifierConfig{
+		"healthy": {Type: "slack", Settings: map[string]any{"token_secret": "token", "channel": "C0123ABCD"}},
+	}
+
+	titles := func(cfg *types.HubConfig) map[string]bool {
+		out := map[string]bool{}
+		for _, check := range s.checkNotifications(cfg) {
+			if !check.OK {
+				out[check.Title] = true
+			}
+		}
+		return out
+	}
+
+	// Defect confined to the (even disabled) lifecycle block: scheduled
+	// reports keep delivering, and the doctor must say so.
+	disabled := false
+	lifecycleBroken := titles(&types.HubConfig{Secrets: map[string]string{"token": "xoxb-test"}, Notifications: &types.NotificationsConfig{
+		Notifiers: notifiers,
+		Lifecycle: &types.LifecycleNotificationsConfig{Enabled: &disabled, PollInterval: "soon"},
+		Scheduled: []types.ScheduledNotificationConfig{
+			{ID: "digest", Report: "pending_prs", Via: []string{"healthy"}, At: "09:00"},
+		},
+	}})
+	if !lifecycleBroken["Lifecycle notifications config invalid"] {
+		t.Fatalf("lifecycle defect not surfaced: %#v", lifecycleBroken)
+	}
+	if lifecycleBroken["Scheduled reports config invalid"] {
+		t.Fatalf("lifecycle defect blamed on scheduled reports: %#v", lifecycleBroken)
+	}
+
+	// Defect confined to the scheduled block (a duplicated id): lifecycle
+	// alerts keep delivering.
+	scheduledBroken := titles(&types.HubConfig{Secrets: map[string]string{"token": "xoxb-test"}, Notifications: &types.NotificationsConfig{
+		Notifiers: notifiers,
+		Scheduled: []types.ScheduledNotificationConfig{
+			{ID: "digest", Report: "pending_prs", Via: []string{"healthy"}, At: "09:00"},
+			{ID: "digest", Report: "pending_prs", Via: []string{"healthy"}, At: "17:00"},
+		},
+	}})
+	if !scheduledBroken["Scheduled reports config invalid"] {
+		t.Fatalf("scheduled defect not surfaced: %#v", scheduledBroken)
+	}
+	if scheduledBroken["Lifecycle notifications config invalid"] {
+		t.Fatalf("scheduled defect blamed on lifecycle notifications: %#v", scheduledBroken)
+	}
+}
+
 // Regression: the per-route checks ran even while lifecycle alerts were off, so
 // a deliberately muted config with a dangling via — a state
 // ValidateNotificationsConfig explicitly accepts, "an operator who mutes alerts

@@ -2,6 +2,7 @@ package hub
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -10,8 +11,10 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/elasticclaw/elasticclaw/pkg/config"
+	"github.com/elasticclaw/elasticclaw/pkg/hub/notify"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 )
 
@@ -605,5 +608,551 @@ func TestSettingsPatchEditsChannelWithUnbuildableStoredAPIBase(t *testing.T) {
 	// A value the patch itself introduces is still judged, exemption or not.
 	if rr = patch(t, "slack.other.example/api"); rr.Code != http.StatusBadRequest {
 		t.Fatalf("changed api_base: status = %d, want 400; body = %s", rr.Code, rr.Body.String())
+	}
+}
+
+// ── Scheduled reports ─────────────────────────────────────────────────────────
+
+// The settings screen rebuilds the whole notifications block from the view it
+// GETs, so every scheduled-report field has to survive a GET → PATCH → disk
+// round trip. A field the view drops is a field the first save from the screen
+// silently deletes from hub.yaml.
+func TestSettingsScheduledNotificationsRoundTripThroughPatch(t *testing.T) {
+	registerScheduledReport("settings-round-trip-report", func(context.Context, *Server) (*notify.Message, bool, error) {
+		return nil, false, nil
+	})
+	path := filepath.Join(t.TempDir(), "hub.yaml")
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", path)
+	disabled := false
+	s, _ := NewTestServerWithConfig(t, &types.HubConfig{Notifications: &types.NotificationsConfig{
+		Notifiers: map[string]types.NotifierConfig{
+			"eng": {Type: "slack", Settings: map[string]any{"channel": "C0123ABCD", "token_secret": "slack_token"}},
+			"ops": {Type: "slack", Settings: map[string]any{"channel": "C0456EFGH", "token_secret": "slack_token"}},
+		},
+		Scheduled: []types.ScheduledNotificationConfig{
+			{
+				ID: "morning-prs", Report: "settings-round-trip-report",
+				Via: []string{"eng", "ops"}, At: "09:30",
+				Timezone: "America/Sao_Paulo", Weekdays: []string{"mon", "fri"},
+			},
+			// Every-day, UTC, paused: the shapes whose zero values are easiest
+			// to lose on the way through the view.
+			{ID: "nightly", Report: "settings-round-trip-report", Via: []string{"ops"}, At: "23:00", Enabled: &disabled},
+		},
+	}}, "", "", "")
+	if err := config.SaveHubConfig(s.hubCfg); err != nil {
+		t.Fatal(err)
+	}
+
+	rr := httptest.NewRecorder()
+	s.getSettings(rr, httptest.NewRequest(http.MethodGet, "/api/settings", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("GET status = %d: %s", rr.Code, rr.Body.String())
+	}
+	var view SettingsView
+	if err := json.Unmarshal(rr.Body.Bytes(), &view); err != nil {
+		t.Fatal(err)
+	}
+	want := []ScheduledNotificationView{
+		{
+			ID: "morning-prs", Report: "settings-round-trip-report", Via: []string{"eng", "ops"},
+			At: "09:30", Timezone: "America/Sao_Paulo", Weekdays: []string{"mon", "fri"}, Enabled: true,
+		},
+		{ID: "nightly", Report: "settings-round-trip-report", Via: []string{"ops"}, At: "23:00", Weekdays: []string{}, Enabled: false},
+	}
+	if !reflect.DeepEqual(view.Notifications.Scheduled, want) {
+		t.Fatalf("scheduled view = %#v, want %#v", view.Notifications.Scheduled, want)
+	}
+
+	// Byte-for-byte what the view returned, PATCHed straight back.
+	body, err := json.Marshal(map[string]any{"notifications": view.Notifications})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rr = httptest.NewRecorder()
+	s.patchSettings(rr, httptest.NewRequest(http.MethodPatch, "/api/settings", bytes.NewReader(body)))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("round-tripping the view rejected the save: %d: %s", rr.Code, rr.Body.String())
+	}
+	diskCfg, err := config.LoadHubConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(diskCfg.Notifications.Scheduled) != 2 {
+		t.Fatalf("disk scheduled = %#v, want both schedules", diskCfg.Notifications.Scheduled)
+	}
+	first := diskCfg.Notifications.Scheduled[0]
+	if first.ID != "morning-prs" || first.At != "09:30" || first.Timezone != "America/Sao_Paulo" ||
+		!reflect.DeepEqual(first.Via, []string{"eng", "ops"}) || !reflect.DeepEqual(first.Weekdays, []string{"mon", "fri"}) {
+		t.Fatalf("disk schedule = %#v, want every field preserved", first)
+	}
+	if second := diskCfg.Notifications.Scheduled[1]; second.Enabled == nil || *second.Enabled {
+		t.Fatalf("disk schedule %#v lost its paused state", second)
+	}
+}
+
+// A schedule the patch ADDS must name a report this build carries: persisting
+// one it does not would leave a schedule that logs "not registered" every
+// minute and delivers nothing, with the settings screen reporting success.
+func TestSettingsPatchRejectsUnknownScheduledReport(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "hub.yaml")
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", path)
+	s, _ := NewTestServerWithConfig(t, &types.HubConfig{Notifications: &types.NotificationsConfig{
+		Notifiers: map[string]types.NotifierConfig{
+			"eng": {Type: "slack", Settings: map[string]any{"channel": "C0123ABCD", "token_secret": "slack_token"}},
+		},
+	}}, "", "", "")
+	if err := config.SaveHubConfig(s.hubCfg); err != nil {
+		t.Fatal(err)
+	}
+
+	body := []byte(`{"notifications":{"notifiers":{"eng":{"type":"slack","channel":"C0123ABCD","token_secret":"slack_token"}},` +
+		`"scheduled":[{"id":"x","report":"no-such-report","via":["eng"],"at":"09:00","weekdays":[],"enabled":true}]}}`)
+	rr := httptest.NewRecorder()
+	s.patchSettings(rr, httptest.NewRequest(http.MethodPatch, "/api/settings", bytes.NewReader(body)))
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body = %s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "unknown report") {
+		t.Fatalf("error does not name the problem: %s", rr.Body.String())
+	}
+	if len(s.hubCfg.Notifications.Scheduled) != 0 {
+		t.Fatalf("rejected patch still wrote %#v", s.hubCfg.Notifications.Scheduled)
+	}
+}
+
+// Deleting a schedule via the settings PATCH prunes its dedupe row on the save
+// itself, not on the next minute tick: deleting and re-adding the same id
+// within one tick interval would otherwise inherit the stale row and replay a
+// slot from before the new schedule existed.
+func TestSettingsPatchPrunesDeletedScheduleStateImmediately(t *testing.T) {
+	registerScheduledReport("patch-prune-report", func(context.Context, *Server) (*notify.Message, bool, error) {
+		return nil, false, nil
+	})
+	path := filepath.Join(t.TempDir(), "hub.yaml")
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", path)
+	schedule := types.ScheduledNotificationConfig{ID: "daily", Report: "patch-prune-report", Via: []string{"eng"}, At: "09:00"}
+	s, _ := NewTestServerWithConfig(t, &types.HubConfig{Notifications: &types.NotificationsConfig{
+		Notifiers: map[string]types.NotifierConfig{
+			"eng": {Type: "slack", Settings: map[string]any{"channel": "C0123ABCD", "token_secret": "slack_token"}},
+		},
+		Scheduled: []types.ScheduledNotificationConfig{schedule},
+	}}, "", "", "")
+	if err := config.SaveHubConfig(s.hubCfg); err != nil {
+		t.Fatal(err)
+	}
+	s.setScheduledLastFired("daily", "eng", time.Date(2025, 1, 6, 9, 0, 0, 0, time.UTC), scheduledSlotDigest(schedule))
+
+	body := []byte(`{"notifications":{"notifiers":{"eng":{"type":"slack","channel":"C0123ABCD","token_secret":"slack_token"}},"scheduled":[]}}`)
+	rr := httptest.NewRecorder()
+	s.patchSettings(rr, httptest.NewRequest(http.MethodPatch, "/api/settings", bytes.NewReader(body)))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", rr.Code, rr.Body.String())
+	}
+	if _, _, found, _ := s.scheduledLastFired("daily", "eng"); found {
+		t.Fatal("deleted schedule's dedupe row survived the save; a same-id re-add before the next tick would replay a stale slot")
+	}
+}
+
+// A stored schedule naming a report THIS build does not carry (an older or
+// newer binary's, a hand-written hub.yaml) must not 400 every save from the
+// screen — including the save that deletes it. Only entries the patch adds or
+// changes are judged, exactly as unbuildable notifiers are.
+func TestSettingsPatchAllowsUnchangedUnknownScheduledReport(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "hub.yaml")
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", path)
+	s, _ := NewTestServerWithConfig(t, &types.HubConfig{Notifications: &types.NotificationsConfig{
+		Notifiers: map[string]types.NotifierConfig{
+			"eng": {Type: "slack", Settings: map[string]any{"channel": "C0123ABCD", "token_secret": "slack_token"}},
+		},
+		Scheduled: []types.ScheduledNotificationConfig{
+			{ID: "legacy", Report: "report-from-another-build", Via: []string{"eng"}, At: "09:00"},
+		},
+	}}, "", "", "")
+	if err := config.SaveHubConfig(s.hubCfg); err != nil {
+		t.Fatal(err)
+	}
+
+	notifiers := `{"eng":{"type":"slack","channel":"C0123ABCD","token_secret":"slack_token"}}`
+	unchanged := []byte(`{"notifications":{"notifiers":` + notifiers +
+		`,"scheduled":[{"id":"legacy","report":"report-from-another-build","via":["eng"],"at":"09:00","weekdays":[],"enabled":true}]}}`)
+	rr := httptest.NewRecorder()
+	s.patchSettings(rr, httptest.NewRequest(http.MethodPatch, "/api/settings", bytes.NewReader(unchanged)))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("re-saving the stored schedule = %d, want 200; body = %s", rr.Code, rr.Body.String())
+	}
+
+	// Pausing it goes through: only the report name is pinned to the stored
+	// value, every other edit to the entry — the pause the doctor's "pause
+	// before upgrading" guidance depends on, a re-route, a new slot — is the
+	// operator's to make.
+	paused := []byte(`{"notifications":{"notifiers":` + notifiers +
+		`,"scheduled":[{"id":"legacy","report":"report-from-another-build","via":["eng"],"at":"09:00","weekdays":[],"enabled":false}]}}`)
+	rr = httptest.NewRecorder()
+	s.patchSettings(rr, httptest.NewRequest(http.MethodPatch, "/api/settings", bytes.NewReader(paused)))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("pausing the stored schedule = %d, want 200; body = %s", rr.Code, rr.Body.String())
+	}
+	if sched := s.hubCfg.Notifications.Scheduled; len(sched) != 1 || sched[0].Enabled == nil || *sched[0].Enabled {
+		t.Fatalf("pause did not persist: %#v", sched)
+	}
+
+	// And the repair — deleting it — goes through too.
+	removed := []byte(`{"notifications":{"notifiers":` + notifiers + `,"scheduled":[]}}`)
+	rr = httptest.NewRecorder()
+	s.patchSettings(rr, httptest.NewRequest(http.MethodPatch, "/api/settings", bytes.NewReader(removed)))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("deleting the stored schedule = %d, want 200; body = %s", rr.Code, rr.Body.String())
+	}
+	diskCfg, err := config.LoadHubConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(diskCfg.Notifications.Scheduled) != 0 {
+		t.Fatalf("disk scheduled = %#v, want it deleted", diskCfg.Notifications.Scheduled)
+	}
+}
+
+// A stored schedule the structural validator rejects (a hand-written hub.yaml
+// with an invalid weekday) must not 400 every notifications save: the hub
+// boots with it, the screen re-sends it verbatim on every save and cannot
+// repair it (the weekday chips cannot render "monday" and the id field is
+// disabled in edit mode). Entries the patch merely re-sends are exempt, while
+// anything it adds or edits is still fully validated.
+func TestSettingsPatchAllowsUnchangedStructurallyInvalidSchedule(t *testing.T) {
+	registerScheduledReport("stored-invalid-report", func(context.Context, *Server) (*notify.Message, bool, error) {
+		return nil, false, nil
+	})
+	path := filepath.Join(t.TempDir(), "hub.yaml")
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", path)
+	s, _ := NewTestServerWithConfig(t, &types.HubConfig{Notifications: &types.NotificationsConfig{
+		Notifiers: map[string]types.NotifierConfig{
+			"eng": {Type: "slack", Settings: map[string]any{"channel": "C0123ABCD", "token_secret": "slack_token"}},
+		},
+		Scheduled: []types.ScheduledNotificationConfig{
+			{ID: "legacy", Report: "stored-invalid-report", Via: []string{"eng"}, At: "09:00", Weekdays: []string{"monday"}},
+		},
+	}}, "", "", "")
+	if err := config.SaveHubConfig(s.hubCfg); err != nil {
+		t.Fatal(err)
+	}
+
+	// A save touching only an unrelated channel carries the entry verbatim.
+	legacy := `{"id":"legacy","report":"stored-invalid-report","via":["eng"],"at":"09:00","weekdays":["monday"],"enabled":true}`
+	body := []byte(`{"notifications":{"notifiers":{"eng":{"type":"slack","channel":"C0999NEW","token_secret":"slack_token"}},"scheduled":[` + legacy + `]}}`)
+	rr := httptest.NewRecorder()
+	s.patchSettings(rr, httptest.NewRequest(http.MethodPatch, "/api/settings", bytes.NewReader(body)))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("re-saving the stored schedule = %d, want 200; body = %s", rr.Code, rr.Body.String())
+	}
+
+	// An entry the patch ADDS is still fully validated.
+	added := `{"id":"fresh","report":"stored-invalid-report","via":["eng"],"at":"10:00","weekdays":["monday"],"enabled":true}`
+	body = []byte(`{"notifications":{"notifiers":{"eng":{"type":"slack","channel":"C0999NEW","token_secret":"slack_token"}},"scheduled":[` + legacy + `,` + added + `]}}`)
+	rr = httptest.NewRecorder()
+	s.patchSettings(rr, httptest.NewRequest(http.MethodPatch, "/api/settings", bytes.NewReader(body)))
+	if rr.Code != http.StatusBadRequest || !strings.Contains(rr.Body.String(), `weekday "monday" is invalid`) {
+		t.Fatalf("adding an invalid entry = %d (%s), want 400 on the weekday", rr.Code, rr.Body.String())
+	}
+
+	// So is one that duplicates a stored id.
+	duplicate := `{"id":"legacy","report":"stored-invalid-report","via":["eng"],"at":"10:00","weekdays":[],"enabled":true}`
+	body = []byte(`{"notifications":{"notifiers":{"eng":{"type":"slack","channel":"C0999NEW","token_secret":"slack_token"}},"scheduled":[` + legacy + `,` + duplicate + `]}}`)
+	rr = httptest.NewRecorder()
+	s.patchSettings(rr, httptest.NewRequest(http.MethodPatch, "/api/settings", bytes.NewReader(body)))
+	if rr.Code != http.StatusBadRequest || !strings.Contains(rr.Body.String(), "is duplicated") {
+		t.Fatalf("adding a duplicate id = %d (%s), want 400 on the duplicate", rr.Code, rr.Body.String())
+	}
+
+	// And the repair — deleting the stored offender — goes through.
+	body = []byte(`{"notifications":{"notifiers":{"eng":{"type":"slack","channel":"C0999NEW","token_secret":"slack_token"}},"scheduled":[]}}`)
+	rr = httptest.NewRecorder()
+	s.patchSettings(rr, httptest.NewRequest(http.MethodPatch, "/api/settings", bytes.NewReader(body)))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("deleting the stored schedule = %d, want 200; body = %s", rr.Code, rr.Body.String())
+	}
+}
+
+// A PATCH that omits the `scheduled` key entirely comes from a client that
+// never saw the field (an older screen, a hand-written notifiers-only PATCH),
+// not from one asking to delete every schedule: the stored schedules must be
+// carried forward, exactly as the empty-routes guard preserves the lifecycle
+// channel binding. Deleting is expressed as a present, empty list.
+func TestSettingsPatchWithoutScheduledKeyKeepsStoredSchedules(t *testing.T) {
+	registerScheduledReport("carry-forward-report", func(context.Context, *Server) (*notify.Message, bool, error) {
+		return nil, false, nil
+	})
+	path := filepath.Join(t.TempDir(), "hub.yaml")
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", path)
+	s, _ := NewTestServerWithConfig(t, &types.HubConfig{Notifications: &types.NotificationsConfig{
+		Notifiers: map[string]types.NotifierConfig{
+			"eng": {Type: "slack", Settings: map[string]any{"channel": "C0123ABCD", "token_secret": "slack_token"}},
+		},
+		Scheduled: []types.ScheduledNotificationConfig{
+			{ID: "morning", Report: "carry-forward-report", Via: []string{"eng"}, At: "09:00"},
+		},
+	}}, "", "", "")
+	if err := config.SaveHubConfig(s.hubCfg); err != nil {
+		t.Fatal(err)
+	}
+
+	body := []byte(`{"notifications":{"notifiers":{"eng":{"type":"slack","channel":"C0999NEW","token_secret":"slack_token"}}}}`)
+	rr := httptest.NewRecorder()
+	s.patchSettings(rr, httptest.NewRequest(http.MethodPatch, "/api/settings", bytes.NewReader(body)))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body = %s", rr.Code, rr.Body.String())
+	}
+	diskCfg, err := config.LoadHubConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(diskCfg.Notifications.Scheduled) != 1 || diskCfg.Notifications.Scheduled[0].ID != "morning" {
+		t.Fatalf("a scheduled-less patch wiped the stored schedules: %#v", diskCfg.Notifications.Scheduled)
+	}
+	if got, _ := diskCfg.Notifications.Notifiers["eng"].Settings["channel"].(string); got != "C0999NEW" {
+		t.Fatalf("the notifier edit itself did not land: channel = %q", got)
+	}
+}
+
+// A stored `at` that time.Parse accepts but <input type="time"> cannot render
+// ("9:00") leaves the schedule uneditable from the settings screen, so any
+// patch that touches this hub repairs it — including one that never mentions
+// the schedule and only carries it forward.
+func TestSettingsPatchZeroPadsScheduledAt(t *testing.T) {
+	registerScheduledReport("unpadded-at-report", func(context.Context, *Server) (*notify.Message, bool, error) {
+		return nil, false, nil
+	})
+	path := filepath.Join(t.TempDir(), "hub.yaml")
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", path)
+	s, _ := NewTestServerWithConfig(t, &types.HubConfig{Notifications: &types.NotificationsConfig{
+		Notifiers: map[string]types.NotifierConfig{
+			"eng": {Type: "slack", Settings: map[string]any{"channel": "C0123ABCD", "token_secret": "slack_token"}},
+		},
+		Scheduled: []types.ScheduledNotificationConfig{
+			{ID: "morning", Report: "unpadded-at-report", Via: []string{"eng"}, At: "9:00"},
+		},
+	}}, "", "", "")
+	if err := config.SaveHubConfig(s.hubCfg); err != nil {
+		t.Fatal(err)
+	}
+
+	body := []byte(`{"notifications":{"notifiers":{"eng":{"type":"slack","channel":"C0123ABCD","token_secret":"slack_token"}}}}`)
+	rr := httptest.NewRecorder()
+	s.patchSettings(rr, httptest.NewRequest(http.MethodPatch, "/api/settings", bytes.NewReader(body)))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body = %s", rr.Code, rr.Body.String())
+	}
+	diskCfg, err := config.LoadHubConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(diskCfg.Notifications.Scheduled) != 1 {
+		t.Fatalf("schedules = %#v, want 1", diskCfg.Notifications.Scheduled)
+	}
+	if got := diskCfg.Notifications.Scheduled[0].At; got != "09:00" {
+		t.Fatalf("at = %q, want %q", got, "09:00")
+	}
+}
+
+// Removing a notifier an ENABLED schedule still routes through must 400: the
+// persisted config would be exactly what the scheduler tick's validity gate
+// rejects, silently pausing EVERY scheduled report hub-wide. Only the
+// carry-forward/verbatim paths need the guard — a patch that also edits the
+// schedule is fully validated — and a patch that pauses or re-routes the
+// schedule in the same save (the screen's removeChannel) must keep working.
+func TestSettingsPatchRejectsRemovingNotifierUsedByEnabledSchedule(t *testing.T) {
+	registerScheduledReport("removal-guard-report", func(context.Context, *Server) (*notify.Message, bool, error) {
+		return nil, false, nil
+	})
+	path := filepath.Join(t.TempDir(), "hub.yaml")
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", path)
+	s, _ := NewTestServerWithConfig(t, &types.HubConfig{Notifications: &types.NotificationsConfig{
+		Notifiers: map[string]types.NotifierConfig{
+			"eng": {Type: "slack", Settings: map[string]any{"channel": "C0123ABCD", "token_secret": "slack_token"}},
+			"ops": {Type: "slack", Settings: map[string]any{"channel": "C0456EFGH", "token_secret": "slack_token"}},
+		},
+		Scheduled: []types.ScheduledNotificationConfig{
+			{ID: "daily", Report: "removal-guard-report", Via: []string{"eng"}, At: "09:00"},
+		},
+	}}, "", "", "")
+	if err := config.SaveHubConfig(s.hubCfg); err != nil {
+		t.Fatal(err)
+	}
+
+	ops := `"ops":{"type":"slack","channel":"C0456EFGH","token_secret":"slack_token"}`
+	// The carry-forward client: no `scheduled` key at all.
+	body := []byte(`{"notifications":{"notifiers":{` + ops + `}}}`)
+	rr := httptest.NewRecorder()
+	s.patchSettings(rr, httptest.NewRequest(http.MethodPatch, "/api/settings", bytes.NewReader(body)))
+	if rr.Code != http.StatusBadRequest || !strings.Contains(rr.Body.String(), "still in use") {
+		t.Fatalf("carry-forward removal = %d (%s), want 400 naming the schedule", rr.Code, rr.Body.String())
+	}
+	if _, kept := s.hubCfg.Notifications.Notifiers["eng"]; !kept {
+		t.Fatal("rejected removal still persisted")
+	}
+
+	// The schedule re-sent verbatim (an older screen) is the same dangle.
+	verbatim := `{"id":"daily","report":"removal-guard-report","via":["eng"],"at":"09:00","weekdays":[],"enabled":true}`
+	body = []byte(`{"notifications":{"notifiers":{` + ops + `},"scheduled":[` + verbatim + `]}}`)
+	rr = httptest.NewRecorder()
+	s.patchSettings(rr, httptest.NewRequest(http.MethodPatch, "/api/settings", bytes.NewReader(body)))
+	if rr.Code != http.StatusBadRequest || !strings.Contains(rr.Body.String(), "still in use") {
+		t.Fatalf("verbatim removal = %d (%s), want 400", rr.Code, rr.Body.String())
+	}
+
+	// Pausing the schedule in the same patch — the screen's removeChannel —
+	// releases the notifier.
+	paused := `{"id":"daily","report":"removal-guard-report","via":["eng"],"at":"09:00","weekdays":[],"enabled":false}`
+	body = []byte(`{"notifications":{"notifiers":{` + ops + `},"scheduled":[` + paused + `]}}`)
+	rr = httptest.NewRecorder()
+	s.patchSettings(rr, httptest.NewRequest(http.MethodPatch, "/api/settings", bytes.NewReader(body)))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("removal alongside a pause = %d, want 200; body = %s", rr.Code, rr.Body.String())
+	}
+	if _, kept := s.hubCfg.Notifications.Notifiers["eng"]; kept {
+		t.Fatal("allowed removal did not persist")
+	}
+}
+
+// A via that was ALREADY dangling in the stored config (a hand-written
+// hub.yaml) must not brick unrelated saves: only patch-introduced dangling —
+// a removed notifier the schedule's via resolved against — is charged.
+func TestSettingsPatchAllowsSaveWithStoredDanglingScheduleVia(t *testing.T) {
+	registerScheduledReport("stored-dangling-report", func(context.Context, *Server) (*notify.Message, bool, error) {
+		return nil, false, nil
+	})
+	path := filepath.Join(t.TempDir(), "hub.yaml")
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", path)
+	s, _ := NewTestServerWithConfig(t, &types.HubConfig{Notifications: &types.NotificationsConfig{
+		Notifiers: map[string]types.NotifierConfig{
+			"eng": {Type: "slack", Settings: map[string]any{"channel": "C0123ABCD", "token_secret": "slack_token"}},
+		},
+		Scheduled: []types.ScheduledNotificationConfig{
+			{ID: "daily", Report: "stored-dangling-report", Via: []string{"ghost"}, At: "09:00"},
+		},
+	}}, "", "", "")
+	if err := config.SaveHubConfig(s.hubCfg); err != nil {
+		t.Fatal(err)
+	}
+
+	body := []byte(`{"notifications":{"notifiers":{"eng":{"type":"slack","channel":"C0999NEW","token_secret":"slack_token"}}}}`)
+	rr := httptest.NewRecorder()
+	s.patchSettings(rr, httptest.NewRequest(http.MethodPatch, "/api/settings", bytes.NewReader(body)))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("save with stored-dangling via = %d, want 200; body = %s", rr.Code, rr.Body.String())
+	}
+}
+
+// Two byte-identical copies of a stored schedule both satisfy the
+// unchanged-entry exemption, so the duplicate-id check must charge
+// patch-introduced duplication by COUNT (more copies than stored), not by
+// which copy reads as changed: persisting the duplicate is the dedupe-row
+// collision the scheduler tick's validity gate pauses every schedule over.
+func TestSettingsPatchRejectsPatchIntroducedDuplicateScheduleID(t *testing.T) {
+	registerScheduledReport("dup-count-report", func(context.Context, *Server) (*notify.Message, bool, error) {
+		return nil, false, nil
+	})
+	path := filepath.Join(t.TempDir(), "hub.yaml")
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", path)
+	s, _ := NewTestServerWithConfig(t, &types.HubConfig{Notifications: &types.NotificationsConfig{
+		Notifiers: map[string]types.NotifierConfig{
+			"eng": {Type: "slack", Settings: map[string]any{"channel": "C0123ABCD", "token_secret": "slack_token"}},
+		},
+		Scheduled: []types.ScheduledNotificationConfig{
+			{ID: "daily", Report: "dup-count-report", Via: []string{"eng"}, At: "09:00"},
+		},
+	}}, "", "", "")
+	if err := config.SaveHubConfig(s.hubCfg); err != nil {
+		t.Fatal(err)
+	}
+
+	entry := `{"id":"daily","report":"dup-count-report","via":["eng"],"at":"09:00","weekdays":[],"enabled":true}`
+	body := []byte(`{"notifications":{"notifiers":{"eng":{"type":"slack","channel":"C0123ABCD","token_secret":"slack_token"}},"scheduled":[` + entry + `,` + entry + `]}}`)
+	rr := httptest.NewRecorder()
+	s.patchSettings(rr, httptest.NewRequest(http.MethodPatch, "/api/settings", bytes.NewReader(body)))
+	if rr.Code != http.StatusBadRequest || !strings.Contains(rr.Body.String(), "is duplicated") {
+		t.Fatalf("byte-identical duplicate = %d (%s), want 400 on the duplicate", rr.Code, rr.Body.String())
+	}
+	if len(s.hubCfg.Notifications.Scheduled) != 1 {
+		t.Fatalf("rejected duplicate still persisted: %#v", s.hubCfg.Notifications.Scheduled)
+	}
+}
+
+// A duplicate that already exists in the STORED list (hand-written hub.yaml)
+// stays exempt — it is unrepairable from the screen and must not block
+// unrelated saves that merely re-send it.
+func TestSettingsPatchAllowsStoredDuplicateScheduleID(t *testing.T) {
+	registerScheduledReport("stored-dup-report", func(context.Context, *Server) (*notify.Message, bool, error) {
+		return nil, false, nil
+	})
+	path := filepath.Join(t.TempDir(), "hub.yaml")
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", path)
+	entry := types.ScheduledNotificationConfig{ID: "daily", Report: "stored-dup-report", Via: []string{"eng"}, At: "09:00"}
+	s, _ := NewTestServerWithConfig(t, &types.HubConfig{Notifications: &types.NotificationsConfig{
+		Notifiers: map[string]types.NotifierConfig{
+			"eng": {Type: "slack", Settings: map[string]any{"channel": "C0123ABCD", "token_secret": "slack_token"}},
+		},
+		Scheduled: []types.ScheduledNotificationConfig{entry, entry},
+	}}, "", "", "")
+	if err := config.SaveHubConfig(s.hubCfg); err != nil {
+		t.Fatal(err)
+	}
+
+	resent := `{"id":"daily","report":"stored-dup-report","via":["eng"],"at":"09:00","weekdays":[],"enabled":true}`
+	body := []byte(`{"notifications":{"notifiers":{"eng":{"type":"slack","channel":"C0999NEW","token_secret":"slack_token"}},"scheduled":[` + resent + `,` + resent + `]}}`)
+	rr := httptest.NewRecorder()
+	s.patchSettings(rr, httptest.NewRequest(http.MethodPatch, "/api/settings", bytes.NewReader(body)))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("re-sending a stored duplicate = %d, want 200; body = %s", rr.Code, rr.Body.String())
+	}
+}
+
+// A stored entry that combines an unpadded at ("9:00") with another structural
+// defect must keep its unchanged-entry exemption: normalization used to run
+// BEFORE the unchanged comparison, so the padded copy read as an edit and the
+// untouched entry 400'd every notifications save — carry-forward and verbatim
+// alike. Normalization now runs after validation, and still repairs the at.
+func TestSettingsPatchNormalizationDoesNotDefeatUnchangedExemption(t *testing.T) {
+	registerScheduledReport("unpadded-invalid-report", func(context.Context, *Server) (*notify.Message, bool, error) {
+		return nil, false, nil
+	})
+	path := filepath.Join(t.TempDir(), "hub.yaml")
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", path)
+	s, _ := NewTestServerWithConfig(t, &types.HubConfig{Notifications: &types.NotificationsConfig{
+		Notifiers: map[string]types.NotifierConfig{
+			"eng": {Type: "slack", Settings: map[string]any{"channel": "C0123ABCD", "token_secret": "slack_token"}},
+		},
+		Scheduled: []types.ScheduledNotificationConfig{
+			{ID: "legacy", Report: "unpadded-invalid-report", Via: []string{"eng"}, At: "9:00", Weekdays: []string{"monday"}},
+		},
+	}}, "", "", "")
+	if err := config.SaveHubConfig(s.hubCfg); err != nil {
+		t.Fatal(err)
+	}
+
+	// Re-sent verbatim, unpadded at and all, alongside a notifier edit.
+	verbatim := `{"id":"legacy","report":"unpadded-invalid-report","via":["eng"],"at":"9:00","weekdays":["monday"],"enabled":true}`
+	body := []byte(`{"notifications":{"notifiers":{"eng":{"type":"slack","channel":"C0999NEW","token_secret":"slack_token"}},"scheduled":[` + verbatim + `]}}`)
+	rr := httptest.NewRecorder()
+	s.patchSettings(rr, httptest.NewRequest(http.MethodPatch, "/api/settings", bytes.NewReader(body)))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("verbatim re-send of the stored entry = %d, want 200; body = %s", rr.Code, rr.Body.String())
+	}
+
+	// The carry-forward client, against the (now zero-padded) stored entry.
+	body = []byte(`{"notifications":{"notifiers":{"eng":{"type":"slack","channel":"C0AAABBBB","token_secret":"slack_token"}}}}`)
+	rr = httptest.NewRecorder()
+	s.patchSettings(rr, httptest.NewRequest(http.MethodPatch, "/api/settings", bytes.NewReader(body)))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("carry-forward save = %d, want 200; body = %s", rr.Code, rr.Body.String())
+	}
+
+	// The repair the normalization exists for still happened.
+	diskCfg, err := config.LoadHubConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := diskCfg.Notifications.Scheduled[0].At; got != "09:00" {
+		t.Fatalf("at = %q, want the normalized %q", got, "09:00")
 	}
 }
