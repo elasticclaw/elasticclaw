@@ -3,6 +3,8 @@ package hub
 import (
 	"errors"
 	"testing"
+
+	"github.com/elasticclaw/elasticclaw/pkg/types"
 )
 
 func TestAccessSeed(t *testing.T) {
@@ -182,22 +184,46 @@ func TestUpdateRoleWithUnknownPermissionReturnsErrUnknownPermission(t *testing.T
 }
 
 func TestPrincipalAllows(t *testing.T) {
+	ownTags := []string{"owner={user}"}
 	t.Run("all grants", func(t *testing.T) {
-		p := &Principal{Login: "alice", perms: map[Permission]struct{}{PermClawInteractAll: {}}}
+		p := &Principal{Login: "alice", perms: map[Permission]struct{}{PermClawInteractAll: {}}, ownTags: ownTags}
 		if !p.Allows(PermClawInteractAll, []string{"owner=bob"}) {
 			t.Fatal("all permission was denied")
 		}
 	})
-	t.Run("own grants matching owner case insensitively", func(t *testing.T) {
-		p := &Principal{Login: "Alice", perms: map[Permission]struct{}{PermClawInteractOwn: {}}}
-		if !p.Allows(PermClawInteractAll, []string{" OWNER=alice "}) {
+	t.Run("own grants matching owner", func(t *testing.T) {
+		p := &Principal{Login: "alice", perms: map[Permission]struct{}{PermClawInteractOwn: {}}, ownTags: ownTags}
+		if !p.Allows(PermClawInteractAll, []string{"owner=alice"}) {
 			t.Fatal("own permission was denied for matching owner")
 		}
 	})
 	t.Run("own denies another owner", func(t *testing.T) {
-		p := &Principal{Login: "alice", perms: map[Permission]struct{}{PermClawInteractOwn: {}}}
+		p := &Principal{Login: "alice", perms: map[Permission]struct{}{PermClawInteractOwn: {}}, ownTags: ownTags}
 		if p.Allows(PermClawInteractAll, []string{"owner=bob"}) {
 			t.Fatal("own permission was granted for another owner")
+		}
+	})
+	t.Run("own denies untagged claw", func(t *testing.T) {
+		p := &Principal{Login: "alice", perms: map[Permission]struct{}{PermClawViewOwn: {}}, ownTags: ownTags}
+		for _, tags := range [][]string{nil, {}} {
+			if p.Allows(PermClawViewAll, tags) {
+				t.Fatalf("own permission was granted for a claw with tags %v", tags)
+			}
+		}
+	})
+	t.Run("own key passed directly still checks ownership", func(t *testing.T) {
+		p := &Principal{Login: "alice", perms: map[Permission]struct{}{PermClawModifyOwn: {}}, ownTags: ownTags}
+		if p.Allows(PermClawModifyOwn, []string{"owner=bob"}) {
+			t.Fatal("own permission was granted for another owner when queried directly")
+		}
+		if !p.Allows(PermClawModifyOwn, []string{"owner=alice"}) {
+			t.Fatal("own permission was denied for own claw when queried directly")
+		}
+	})
+	t.Run("own denies when no ownership pattern is configured", func(t *testing.T) {
+		p := &Principal{Login: "alice", perms: map[Permission]struct{}{PermClawViewOwn: {}}}
+		if p.Allows(PermClawViewAll, []string{"owner=alice"}) {
+			t.Fatal("ownership was inferred without a configured pattern")
 		}
 	})
 	t.Run("empty login grants all", func(t *testing.T) {
@@ -205,10 +231,39 @@ func TestPrincipalAllows(t *testing.T) {
 			t.Fatal("empty login was denied")
 		}
 	})
-	t.Run("nil tags retain direct permission", func(t *testing.T) {
-		p := &Principal{Login: "alice", perms: map[Permission]struct{}{PermClawMessagesRead: {}}}
-		if !p.Allows(PermClawMessagesRead, nil) {
-			t.Fatal("direct permission was denied with nil tags")
+	t.Run("tag scoped claw permissions follow the view scope", func(t *testing.T) {
+		p := &Principal{Login: "alice", perms: map[Permission]struct{}{PermClawViewOwn: {}, PermClawMessagesRead: {}, PermClawTerminal: {}, PermClawFiles: {}, PermClawCheckpoint: {}}, ownTags: ownTags}
+		for _, perm := range []Permission{PermClawMessagesRead, PermClawTerminal, PermClawFiles, PermClawCheckpoint} {
+			if p.Allows(perm, []string{"owner=bob"}) {
+				t.Fatalf("%s was granted on another user's claw", perm)
+			}
+			if !p.Allows(perm, []string{"owner=alice"}) {
+				t.Fatalf("%s was denied on own claw", perm)
+			}
 		}
 	})
+	t.Run("tag scoped claw permissions still need the permission itself", func(t *testing.T) {
+		p := &Principal{Login: "alice", perms: map[Permission]struct{}{PermClawViewAll: {}}, ownTags: ownTags}
+		if p.Allows(PermClawTerminal, []string{"owner=alice"}) {
+			t.Fatal("terminal was granted without claw:terminal")
+		}
+	})
+}
+
+func TestOwnershipTagPatternsKeepsOnlyUserPatterns(t *testing.T) {
+	s, _ := NewTestServerWithConfig(t, nil, "", "", "")
+	s.hubCfg = &types.HubConfig{Auth: &types.AuthConfig{Access: &types.AccessConfig{
+		ViewRequiresTags:     []string{"assignee={user}", "team=core"},
+		InteractRequiresTags: []string{"assignee={user}", "owner={user}"},
+	}}}
+	got := s.ownershipTagPatterns()
+	want := []string{"assignee={user}", "owner={user}"}
+	if len(got) != len(want) {
+		t.Fatalf("patterns = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("patterns = %v, want %v", got, want)
+		}
+	}
 }

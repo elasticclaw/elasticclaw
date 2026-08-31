@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -44,6 +45,9 @@ const (
 	PermSecretsManage    Permission = "secrets:manage"
 	PermAccessManage     Permission = "access:manage"
 	PermDoctorRun        Permission = "doctor:run"
+	PermTemplateView     Permission = "template:view"
+	PermTemplateEdit     Permission = "template:edit"
+	PermMCPManage        Permission = "mcp:manage"
 )
 
 type PermissionMeta struct {
@@ -54,6 +58,7 @@ type PermissionMeta struct {
 var AllPermissions = []PermissionMeta{
 	{PermAuthLogin, "auth", "Enter the UI", ""}, {PermClawViewAll, "claw", "View all agents", ""}, {PermClawViewOwn, "claw", "View own agents", ""}, {PermClawMessagesRead, "claw", "Read agent conversations and transcripts", ""}, {PermClawCreate, "claw", "Create agent", "Provisions a VM and consumes LLM usage"}, {PermClawInteractAll, "claw", "Message any agent", ""}, {PermClawInteractOwn, "claw", "Message own agents", ""}, {PermClawModifyAll, "claw", "Modify any agent", ""}, {PermClawModifyOwn, "claw", "Modify own agents", ""}, {PermClawDeleteAll, "claw", "Delete any agent", ""}, {PermClawDeleteOwn, "claw", "Delete own agents", ""}, {PermClawCheckpoint, "claw", "Create and restore checkpoints", ""}, {PermClawTerminal, "claw", "Open sandbox terminal", ""}, {PermClawFiles, "claw", "Transfer agent files", ""},
 	{PermWorkflowView, "workflow", "View workflows, runs, and cron history", ""}, {PermWorkflowTrigger, "workflow", "Trigger workflows", ""}, {PermWorkflowEdit, "workflow", "Edit workflows", ""}, {PermWorkspaceView, "workspace", "View workspaces", ""}, {PermWorkspaceEdit, "workspace", "Edit workspaces", ""}, {PermWorkspaceSecrets, "workspace", "Manage workspace secrets and integrations", ""}, {PermFactoryView, "factory", "View factories and events", ""}, {PermFactoryTrigger, "factory", "Trigger factories", ""}, {PermFactoryEdit, "factory", "Edit factories", ""}, {PermAnalyticsView, "analytics", "View cost-free dashboard", ""}, {PermAnalyticsCosts, "analytics", "View costs and factory analytics", ""}, {PermSettingsView, "admin", "View settings", ""}, {PermSettingsEdit, "admin", "Edit hub configuration", ""}, {PermSecretsManage, "admin", "Manage global secrets and model credentials", ""}, {PermAccessManage, "admin", "Manage users, roles, and permissions", ""}, {PermDoctorRun, "admin", "Run doctor and troubleshoot", ""},
+	{PermTemplateView, "template", "View agent templates", ""}, {PermTemplateEdit, "template", "Push and remove agent templates", "Templates decide the repo, tags, and env of new agents"}, {PermMCPManage, "admin", "Manage MCP servers", ""},
 }
 
 var (
@@ -67,33 +72,88 @@ var (
 type Principal struct {
 	TenantID, Login, RoleName string
 	perms                     map[Permission]struct{}
+	// ownTags are the tag patterns that prove a claw belongs to this
+	// principal. They come from the hub AccessConfig (the same
+	// view_requires_tags / interact_requires_tags patterns canViewClaw
+	// already honours) so that the :own scopes match whatever ownership
+	// convention the deployment actually writes onto its claws. Only
+	// patterns containing {user} qualify: a static pattern such as
+	// "team=core" grants access to a group, it does not prove ownership.
+	// When the list is empty ownership cannot be proven and every :own
+	// scope denies.
+	ownTags []string
 }
 
+// clawTagScopedPerms are claw permissions that have no :own/:all axis of their
+// own. Each is evaluated together with the view scope of the same claw, so a
+// principal holding only claw:view:own cannot read the transcript, open the
+// terminal, pull files, or checkpoint somebody else's claw.
+var clawTagScopedPerms = map[Permission]struct{}{
+	PermClawMessagesRead: {}, PermClawTerminal: {}, PermClawFiles: {}, PermClawCheckpoint: {},
+}
+
+// Allows reports whether the principal may act on a claw carrying tags.
+//
+// tags must be the claw's complete tag list. An empty or nil slice means "this
+// claw carries no tag that proves ownership", so it denies every :own scope —
+// callers that do not know the tags must not pretend they do.
 func (p *Principal) Allows(perm Permission, tags []string) bool {
 	if p == nil || p.Login == "" {
 		return true
 	}
-	if _, ok := p.perms[perm]; ok {
-		return true
+	if _, ok := clawTagScopedPerms[perm]; ok {
+		return p.holds(perm) && p.scopedAllows(PermClawViewAll, tags)
 	}
+	return p.scopedAllows(perm, tags)
+}
+
+func (p *Principal) holds(perm Permission) bool {
+	_, ok := p.perms[perm]
+	return ok
+}
+
+func (p *Principal) scopedAllows(perm Permission, tags []string) bool {
 	key := string(perm)
-	if !strings.HasSuffix(key, ":all") {
-		return false
+	// A :own key handed in directly is evaluated as the scoped check the
+	// caller naturally expects: holding the permission is not enough, the
+	// claw has to be owned.
+	if base := strings.TrimSuffix(key, ":own"); base != key {
+		return p.holds(perm) && p.ownsTags(tags)
 	}
-	own := Permission(strings.TrimSuffix(key, ":all") + ":own")
-	if _, ok := p.perms[own]; !ok {
-		return false
-	}
-	if tags == nil {
+	if p.holds(perm) {
 		return true
 	}
-	want := "owner=" + strings.ToLower(p.Login)
-	for _, tag := range tags {
-		if strings.EqualFold(strings.TrimSpace(tag), want) {
-			return true
-		}
+	if base := strings.TrimSuffix(key, ":all"); base != key {
+		return p.holds(Permission(base+":own")) && p.ownsTags(tags)
 	}
 	return false
+}
+
+func (p *Principal) ownsTags(tags []string) bool {
+	if len(p.ownTags) == 0 || len(tags) == 0 {
+		return false
+	}
+	return matchesTags(p.ownTags, p.Login, tags)
+}
+
+// ownershipTagPatterns keeps the RBAC :own scopes in sync with the tag rules
+// the hub is already configured with, instead of inventing a convention no
+// producer emits.
+func (s *Server) ownershipTagPatterns() []string {
+	if s.hubCfg == nil || s.hubCfg.Auth == nil || s.hubCfg.Auth.Access == nil {
+		return nil
+	}
+	cfg := s.hubCfg.Auth.Access
+	var out []string
+	seen := map[string]bool{}
+	for _, pattern := range append(append([]string{}, cfg.ViewRequiresTags...), cfg.InteractRequiresTags...) {
+		if !strings.Contains(pattern, "{user}") || seen[pattern] {
+			continue
+		}
+		seen[pattern] = true
+		out = append(out, pattern)
+	}
+	return out
 }
 
 type Role struct {
@@ -213,7 +273,7 @@ func (s *Server) principalFor(tenantID, login string) (*Principal, error) {
 		return c.principal, nil
 	}
 	a.mu.Unlock()
-	p := &Principal{TenantID: tenantID, Login: login, perms: map[Permission]struct{}{}}
+	p := &Principal{TenantID: tenantID, Login: login, perms: map[Permission]struct{}{}, ownTags: s.ownershipTagPatterns()}
 	rows, e := s.db.Query(`SELECT r.name,rp.permission_key FROM users u JOIN roles r ON r.id=u.role_id LEFT JOIN role_permissions rp ON rp.role_id=r.id WHERE u.tenant_id=? AND u.login=? AND u.active=1`, tenantID, login)
 	if e != nil {
 		return nil, e
@@ -375,18 +435,27 @@ func (s *Server) setUserActive(tenant, login string, active bool) error {
 	}
 	return s.changeUser(tenant, login, `active=?`, v)
 }
+
+// changeUser reads, checks the last-active-admin invariant, and writes inside a
+// single transaction. openDB uses _txlock=immediate, so concurrent demotions
+// serialize on the write lock instead of both observing the same admin count
+// and leaving the tenant with nobody holding access:manage.
 func (s *Server) changeUser(tenant, login, field string, value any) error {
 	login = normalizeLogin(login)
+	tx, e := s.db.Begin()
+	if e != nil {
+		return e
+	}
+	defer tx.Rollback()
 	var oldRole string
 	var active int
-	e := s.db.QueryRow(`SELECT r.name,u.active FROM users u JOIN roles r ON r.id=u.role_id WHERE u.tenant_id=? AND u.login=?`, tenant, login).Scan(&oldRole, &active)
-	if e != nil {
+	if e = tx.QueryRow(`SELECT r.name,u.active FROM users u JOIN roles r ON r.id=u.role_id WHERE u.tenant_id=? AND u.login=?`, tenant, login).Scan(&oldRole, &active); e != nil {
 		return e
 	}
 	nextAdmin := oldRole == "admin"
 	if field == "role_id=?" {
 		var name string
-		if e = s.db.QueryRow(`SELECT name FROM roles WHERE id=?`, value).Scan(&name); e != nil {
+		if e = tx.QueryRow(`SELECT name FROM roles WHERE id=?`, value).Scan(&name); e != nil {
 			return e
 		}
 		nextAdmin = name == "admin"
@@ -397,22 +466,28 @@ func (s *Server) changeUser(tenant, login, field string, value any) error {
 	}
 	if oldRole == "admin" && active != 0 && (!nextAdmin || !nextActive) {
 		var n int
-		if e = s.db.QueryRow(`SELECT COUNT(*) FROM users u JOIN roles r ON r.id=u.role_id WHERE u.tenant_id=? AND r.name='admin' AND u.active=1`, tenant).Scan(&n); e != nil {
+		if e = tx.QueryRow(`SELECT COUNT(*) FROM users u JOIN roles r ON r.id=u.role_id WHERE u.tenant_id=? AND r.name='admin' AND u.active=1`, tenant).Scan(&n); e != nil {
 			return e
 		}
 		if n <= 1 {
 			return ErrLastAdmin
 		}
 	}
-	_, e = s.db.Exec(`UPDATE users SET `+field+` WHERE tenant_id=? AND login=?`, value, tenant, login)
-	if e == nil {
+	if _, e = tx.Exec(`UPDATE users SET `+field+` WHERE tenant_id=? AND login=?`, value, tenant, login); e != nil {
+		return e
+	}
+	if e = tx.Commit(); e == nil {
 		s.invalidateAccess()
 	}
 	return e
 }
 
-type AccessBackfillRow struct{ Login, Role, Action string }
+type AccessBackfillRow struct{ Tenant, Login, Role, Action string }
 
+// BackfillAccess seeds the users table from the configured administrators and
+// from historical message authors. It runs once per tenant: the admin list is
+// hub-wide, and every tenant needs at least one active admin of its own, so a
+// tenant that only shows up in the messages table must not be left without one.
 func BackfillAccess(dbPath string, admins []string, dryRun bool) ([]AccessBackfillRow, error) {
 	if len(admins) == 0 {
 		return nil, errors.New("auth.access.admins is empty; refusing backfill without an administrator")
@@ -442,53 +517,32 @@ func BackfillAccess(dbPath string, admins []string, dryRun bool) ([]AccessBackfi
 	if len(adminSet) == 0 {
 		return nil, errors.New("auth.access.admins is empty; refusing backfill without an administrator")
 	}
-	var tenant string
-	if err = tx.QueryRow(`SELECT id FROM tenants ORDER BY created_at LIMIT 1`).Scan(&tenant); err != nil {
-		return nil, fmt.Errorf("find tenant: %w", err)
-	}
-	logins := make([]string, 0, len(adminSet))
+	adminLogins := make([]string, 0, len(adminSet))
 	for login := range adminSet {
-		logins = append(logins, login)
+		adminLogins = append(adminLogins, login)
 	}
-	rows, err := tx.Query(`SELECT DISTINCT lower(trim(user_login)) FROM messages WHERE user_login <> '' ORDER BY 1`)
+	sort.Strings(adminLogins)
+	tenants, err := backfillTenants(tx)
 	if err != nil {
 		return nil, err
 	}
-	for rows.Next() {
-		var l string
-		if err = rows.Scan(&l); err != nil {
-			rows.Close()
-			return nil, err
-		}
-		if !adminSet[l] {
-			logins = append(logins, l)
-		}
-	}
-	if err = rows.Err(); err != nil {
-		rows.Close()
-		return nil, err
-	}
-	rows.Close()
 	var out []AccessBackfillRow
-	for _, login := range logins {
-		role := "reader"
-		if adminSet[login] {
-			role = "admin"
-		}
-		var existingRole string
-		e := tx.QueryRow(`SELECT r.name FROM users u JOIN roles r ON r.id=u.role_id WHERE u.tenant_id=? AND u.login=?`, tenant, login).Scan(&existingRole)
-		action := "unchanged"
-		if e == sql.ErrNoRows {
-			action = "created"
-			_, e = tx.Exec(`INSERT INTO users(id,tenant_id,login,role_id,created_at,last_login_at) VALUES(?,?,?,?,?,0)`, uuid.NewString(), tenant, login, role, now().UnixMilli())
-		} else if e == nil && role == "admin" && existingRole != "admin" {
-			action = "updated"
-			_, e = tx.Exec(`UPDATE users SET role_id='admin' WHERE tenant_id=? AND login=?`, tenant, login)
-		}
+	for _, tenant := range tenants {
+		logins, e := backfillTenantLogins(tx, tenant, adminSet, adminLogins)
 		if e != nil {
 			return nil, e
 		}
-		out = append(out, AccessBackfillRow{login, role, action})
+		for _, login := range logins {
+			role := "reader"
+			if adminSet[login] {
+				role = "admin"
+			}
+			action, e := backfillUser(tx, tenant, login, role)
+			if e != nil {
+				return nil, e
+			}
+			out = append(out, AccessBackfillRow{tenant, login, role, action})
+		}
 	}
 	if dryRun {
 		return out, nil
@@ -497,4 +551,68 @@ func BackfillAccess(dbPath string, admins []string, dryRun bool) ([]AccessBackfi
 		return nil, err
 	}
 	return out, nil
+}
+
+func backfillTenants(tx *sql.Tx) ([]string, error) {
+	rows, err := tx.Query(`SELECT id FROM tenants ORDER BY created_at`)
+	if err != nil {
+		return nil, fmt.Errorf("find tenant: %w", err)
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var id string
+		if err = rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("find tenant: %w", err)
+		}
+		out = append(out, id)
+	}
+	if err = rows.Err(); err != nil {
+		return nil, fmt.Errorf("find tenant: %w", err)
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("find tenant: %w", sql.ErrNoRows)
+	}
+	return out, nil
+}
+
+// backfillTenantLogins returns the administrators plus the message authors that
+// belong to this tenant. Message authors are filtered by tenant_id so that a
+// login only seen in another tenant does not get an account here.
+func backfillTenantLogins(tx *sql.Tx, tenant string, adminSet map[string]bool, adminLogins []string) ([]string, error) {
+	logins := append([]string{}, adminLogins...)
+	rows, err := tx.Query(`SELECT DISTINCT lower(trim(user_login)) FROM messages WHERE tenant_id=? AND user_login <> '' ORDER BY 1`, tenant)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var l string
+		if err = rows.Scan(&l); err != nil {
+			return nil, err
+		}
+		if l != "" && !adminSet[l] {
+			logins = append(logins, l)
+		}
+	}
+	return logins, rows.Err()
+}
+
+func backfillUser(tx *sql.Tx, tenant, login, role string) (string, error) {
+	var existingRole string
+	var existingActive int
+	e := tx.QueryRow(`SELECT r.name,u.active FROM users u JOIN roles r ON r.id=u.role_id WHERE u.tenant_id=? AND u.login=?`, tenant, login).Scan(&existingRole, &existingActive)
+	switch {
+	case e == sql.ErrNoRows:
+		_, e = tx.Exec(`INSERT INTO users(id,tenant_id,login,role_id,created_at,last_login_at) VALUES(?,?,?,?,?,0)`, uuid.NewString(), tenant, login, role, now().UnixMilli())
+		return "created", e
+	case e != nil:
+		return "", e
+	case role == "admin" && (existingRole != "admin" || existingActive == 0):
+		// Promoting without reactivating would satisfy "the tenant has an
+		// admin" with an admin that cannot log in, so do both at once.
+		_, e = tx.Exec(`UPDATE users SET role_id='admin',active=1 WHERE tenant_id=? AND login=?`, tenant, login)
+		return "updated", e
+	}
+	return "unchanged", nil
 }

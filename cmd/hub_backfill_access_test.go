@@ -54,6 +54,50 @@ func TestHubBackfillAccessCommand(t *testing.T) {
 		}
 	})
 
+	t.Run("reactivates an existing user promoted to admin", func(t *testing.T) {
+		dbPath, configPath := newBackfillAccessFixture(t, []string{"admin@example.com"}, []string{"reader@example.com"})
+		if _, err := runBackfillAccessCommand(t, dbPath, configPath, false); err != nil {
+			t.Fatal(err)
+		}
+		execBackfillSQL(t, dbPath, `UPDATE users SET role_id='reader', active=0 WHERE login='admin@example.com'`)
+		output, err := runBackfillAccessCommand(t, dbPath, configPath, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(output, "1 updated") {
+			t.Fatalf("unexpected output: %q", output)
+		}
+		assertBackfillRoles(t, dbPath, map[string]string{"admin@example.com": "admin"})
+		if got := backfillScalar(t, dbPath, `SELECT active FROM users WHERE login='admin@example.com'`); got != 1 {
+			t.Fatalf("promoted admin active = %d, want 1", got)
+		}
+	})
+
+	t.Run("backfills every tenant and scopes message users to their tenant", func(t *testing.T) {
+		dbPath, configPath := newBackfillAccessFixture(t, []string{"admin@example.com"}, []string{"reader@example.com"})
+		execBackfillSQL(t, dbPath, `INSERT INTO tenants(id,name,token,claw_token,created_at) VALUES('tenant-2','second','token-2','claw-token-2',datetime('now'));
+			INSERT INTO messages(id,claw_id,tenant_id,role,content,user_login,created_at) VALUES('z','claw','tenant-2','user','message','other@example.com',datetime('now'))`)
+		if _, err := runBackfillAccessCommand(t, dbPath, configPath, false); err != nil {
+			t.Fatal(err)
+		}
+		// Every tenant gets its own active admin, and a message author only
+		// gets an account in the tenant it actually wrote in.
+		for _, tenant := range []string{"tenant", "tenant-2"} {
+			if got := backfillScalar(t, dbPath, `SELECT COUNT(*) FROM users u JOIN roles r ON r.id=u.role_id WHERE u.tenant_id='`+tenant+`' AND r.name='admin' AND u.active=1`); got != 1 {
+				t.Fatalf("active admins in %s = %d, want 1", tenant, got)
+			}
+		}
+		if got := backfillScalar(t, dbPath, `SELECT COUNT(*) FROM users WHERE login='other@example.com'`); got != 1 {
+			t.Fatalf("other@example.com rows = %d, want 1", got)
+		}
+		if got := backfillScalar(t, dbPath, `SELECT COUNT(*) FROM users WHERE login='other@example.com' AND tenant_id='tenant-2'`); got != 1 {
+			t.Fatalf("other@example.com was not created in tenant-2")
+		}
+		if got := backfillScalar(t, dbPath, `SELECT COUNT(*) FROM users WHERE login='reader@example.com' AND tenant_id='tenant-2'`); got != 0 {
+			t.Fatalf("reader@example.com leaked into tenant-2")
+		}
+	})
+
 	t.Run("missing admins warns and writes nothing", func(t *testing.T) {
 		dbPath, configPath := newBackfillAccessFixture(t, nil, []string{"reader@example.com"})
 		_, err := runBackfillAccessCommand(t, dbPath, configPath, false)
@@ -172,4 +216,30 @@ func backfillTableExists(t *testing.T, dbPath, table string) bool {
 		t.Fatal(err)
 	}
 	return count != 0
+}
+
+func execBackfillSQL(t *testing.T, dbPath, query string) {
+	t.Helper()
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(query); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func backfillScalar(t *testing.T, dbPath, query string) int {
+	t.Helper()
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var value int
+	if err := db.QueryRow(query).Scan(&value); err != nil {
+		t.Fatal(err)
+	}
+	return value
 }

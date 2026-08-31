@@ -41,10 +41,10 @@ func runHubBackfillAccess(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Fprintln(cmd.OutOrStdout(), "login\tcargo\tação")
+	fmt.Fprintln(cmd.OutOrStdout(), "tenant\tlogin\tcargo\tação")
 	created, updated := 0, 0
 	for _, r := range rows {
-		fmt.Fprintf(cmd.OutOrStdout(), "%s\t%s\t%s\n", r.Login, r.Role, r.Action)
+		fmt.Fprintf(cmd.OutOrStdout(), "%s\t%s\t%s\t%s\n", r.Tenant, r.Login, r.Role, r.Action)
 		if r.Action == "created" {
 			created++
 		}
