@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
@@ -283,5 +284,74 @@ func TestLLMUsageLimitBacksOffAndThenStopsRetrying(t *testing.T) {
 	}
 	if notices := hubNotices(t, s, "claw-limit-relatch", "%stopped retrying%"); len(notices) == 0 {
 		t.Error("operator was never told the hub gave up retrying")
+	}
+}
+
+// Requirement 1: a capped account raises the SAME downtime badge as a provider
+// outage. The status page will keep saying "operational" throughout — the
+// service is fine, our account is not — so the overlay has to win.
+func TestLLMUsageLimitRaisesTheDowntimeBadge(t *testing.T) {
+	s, _ := NewTestServerWithConfig(t, nil, "", "", "")
+	limitClaw(t, s, "claw-limit-badge", "faster", false)
+	// The key's provider is what maps the limit onto a dependency row.
+	if _, err := s.db.Exec(`UPDATE claws SET default_model='anthropic/claude-opus-5' WHERE id=?`, "claw-limit-badge"); err != nil {
+		t.Fatalf("set default model: %v", err)
+	}
+
+	service := s.dependencyStatus
+	service.mu.Lock()
+	service.cache = &DependencyStatusResponse{
+		Dependencies: []DependencyStatus{{
+			ID:        "model:anthropic",
+			Name:      "Anthropic",
+			Kind:      dependencyKindModel,
+			Status:    dependencyStatusOperational,
+			CheckedAt: now(),
+		}},
+		CheckedAt: now(),
+	}
+	service.mu.Unlock()
+
+	before := service.snapshot(context.Background())
+	if before.DowntimeCount != 0 {
+		t.Fatalf("downtimeCount = %d before any limit, want 0", before.DowntimeCount)
+	}
+
+	regain := now().Add(4 * time.Hour).Truncate(time.Minute)
+	s.noteLLMUsageLimit("claw-limit-badge", types.LLMUsageLimit{
+		Reason:   types.LLMLimitUsage,
+		RegainAt: regain,
+		Message:  "You have reached your specified API usage limits.",
+	})
+
+	after := service.snapshot(context.Background())
+	if after.DowntimeCount != 1 {
+		t.Fatalf("downtimeCount = %d, want 1: the badge must fire for a capped account", after.DowntimeCount)
+	}
+	var found *DependencyStatus
+	for i := range after.Dependencies {
+		if after.Dependencies[i].ID == "model:anthropic" {
+			found = &after.Dependencies[i]
+		}
+	}
+	if found == nil {
+		t.Fatal("anthropic dependency missing from the snapshot")
+	}
+	if found.Status != dependencyStatusDowntime {
+		t.Errorf("status = %q, want %q", found.Status, dependencyStatusDowntime)
+	}
+	// Requirement 4: the badge itself carries the renewal instant.
+	if !found.RegainAt.Equal(regain) {
+		t.Errorf("regainAt = %v, want %v", found.RegainAt, regain)
+	}
+	if !strings.Contains(found.Message, formatLLMLimitDeadline(regain)) {
+		t.Errorf("message %q does not state the deadline", found.Message)
+	}
+
+	// And it clears with the limit, without waiting out the status cache.
+	s.releaseLLMUsageLimit("faster", "test release", false)
+	cleared := service.snapshot(context.Background())
+	if cleared.DowntimeCount != 0 {
+		t.Errorf("downtimeCount = %d after release, want 0", cleared.DowntimeCount)
 	}
 }

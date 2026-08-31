@@ -530,6 +530,7 @@ func NewServer(addr, dbPath, identityDir string, hubCfg *types.HubConfig) (*Serv
 	srv.startIntegrationPoller()
 	srv.startLifecycleNotifier()
 	srv.startLLMUsageLimitScheduler()
+	srv.attachLLMUsageLimitsToDependencyStatus(srv.dependencyStatus)
 
 	return srv, nil
 }

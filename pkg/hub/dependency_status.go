@@ -26,12 +26,18 @@ const (
 )
 
 type DependencyStatus struct {
-	ID        string    `json:"id"`
-	Name      string    `json:"name"`
-	Kind      string    `json:"kind"`
-	Status    string    `json:"status"`
-	Message   string    `json:"message,omitempty"`
-	Source    string    `json:"source,omitempty"`
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	Kind    string `json:"kind"`
+	Status  string `json:"status"`
+	Message string `json:"message,omitempty"`
+	Source  string `json:"source,omitempty"`
+	// RegainAt is set only for a dependency that is down for a KNOWN period —
+	// today, a provider account out of allowance. The status page cannot tell
+	// us this and never will: it is a fact about the account, not the service.
+	// It exists so the badge can say "back at 00:00 UTC" instead of leaving an
+	// operator to guess whether to wait or to go fix something.
+	RegainAt  time.Time `json:"regainAt,omitempty"`
 	CheckedAt time.Time `json:"checkedAt"`
 }
 
@@ -59,9 +65,13 @@ type dependencyStatusService struct {
 	hubCfg         *types.HubConfig
 	checkers       map[string]dependencyStatusChecker
 	targetProvider dependencyStatusTargetProvider
-	cache          *DependencyStatusResponse
-	cacheTTL       time.Duration
-	refresh        singleflight.Group
+	// limitProvider surfaces provider accounts that are out of allowance.
+	// Kept as a hook rather than a direct Server reference so the service
+	// stays constructible (and testable) on its own.
+	limitProvider func() []llmUsageLimitRecord
+	cache         *DependencyStatusResponse
+	cacheTTL      time.Duration
+	refresh       singleflight.Group
 }
 
 func newDependencyStatusService(cfg *types.HubConfig) *dependencyStatusService {
@@ -88,7 +98,7 @@ func newDependencyStatusService(cfg *types.HubConfig) *dependencyStatusService {
 
 func (s *dependencyStatusService) snapshot(ctx context.Context) DependencyStatusResponse {
 	if resp, ok := s.freshSnapshot(); ok {
-		return resp
+		return s.applyLLMUsageLimits(resp)
 	}
 
 	value, _, _ := s.refresh.Do("snapshot", func() (interface{}, error) {
@@ -99,10 +109,84 @@ func (s *dependencyStatusService) snapshot(ctx context.Context) DependencyStatus
 		return s.refreshSnapshot(context.Background()), nil
 	})
 	if resp, ok := value.(DependencyStatusResponse); ok {
-		return cloneDependencyStatusResponse(resp)
+		return s.applyLLMUsageLimits(cloneDependencyStatusResponse(resp))
 	}
 
-	return DependencyStatusResponse{Dependencies: []DependencyStatus{}, CheckedAt: time.Now().UTC()}
+	return s.applyLLMUsageLimits(DependencyStatusResponse{Dependencies: []DependencyStatus{}, CheckedAt: time.Now().UTC()})
+}
+
+// applyLLMUsageLimits overlays capped provider accounts onto a status
+// snapshot.
+//
+// It runs on the way OUT, over the cached response, rather than inside the
+// refresh. Two reasons, and both matter. The status page reports the service,
+// which is genuinely operational while our own account is capped — folding the
+// limit in earlier would just be overwritten by the next check. And a limit
+// latches the instant a turn hits it, which must not have to wait out the
+// five-minute status cache to reach the dashboard.
+//
+// The result is deliberately plain "downtime": the badge, its count, and every
+// consumer of this response then treat a capped account exactly like a
+// provider outage, because for the fleet it is one.
+func (s *dependencyStatusService) applyLLMUsageLimits(resp DependencyStatusResponse) DependencyStatusResponse {
+	s.mu.Lock()
+	provider := s.limitProvider
+	s.mu.Unlock()
+	if provider == nil {
+		return resp
+	}
+	records := provider()
+	if len(records) == 0 {
+		return resp
+	}
+
+	for _, record := range records {
+		if !record.Active() {
+			continue
+		}
+		id, name, ok := modelDependency(record.Provider)
+		if !ok {
+			// An unresolvable provider still deserves a badge — the fleet is
+			// just as stopped — so fall back to naming the key.
+			id, name = "model:"+record.KeyID, llmLimitDependencyName(record.KeyID)
+		}
+		status := DependencyStatus{
+			ID:        id,
+			Name:      name,
+			Kind:      dependencyKindModel,
+			Status:    dependencyStatusDowntime,
+			Message:   llmLimitDependencyMessage(record),
+			Source:    "hub",
+			RegainAt:  record.RetryAt,
+			CheckedAt: time.Now().UTC(),
+		}
+		replaced := false
+		for i := range resp.Dependencies {
+			if resp.Dependencies[i].ID == id {
+				resp.Dependencies[i] = status
+				replaced = true
+				break
+			}
+		}
+		if !replaced {
+			resp.Dependencies = append(resp.Dependencies, status)
+		}
+	}
+	return buildDependencyStatusResponse(resp.Dependencies)
+}
+
+func llmLimitDependencyName(keyID string) string {
+	if keyID == "" {
+		return "Model provider"
+	}
+	return "Model provider (" + keyID + ")"
+}
+
+func llmLimitDependencyMessage(record llmUsageLimitRecord) string {
+	if record.Exhausted() {
+		return "Account out of allowance; automatic retries exhausted. " + record.Message
+	}
+	return "Account out of allowance until " + formatLLMLimitDeadline(record.RetryAt) + ". " + record.Message
 }
 
 func (s *dependencyStatusService) freshSnapshot() (DependencyStatusResponse, bool) {
@@ -299,6 +383,7 @@ func (s *Server) handleDependencyStatus(w http.ResponseWriter, r *http.Request) 
 	s.mu.RUnlock()
 	if service == nil {
 		service = newDependencyStatusService(cfg)
+		s.attachLLMUsageLimitsToDependencyStatus(service)
 		s.mu.Lock()
 		if s.dependencyStatus == nil {
 			s.dependencyStatus = service
@@ -308,6 +393,16 @@ func (s *Server) handleDependencyStatus(w http.ResponseWriter, r *http.Request) 
 		s.mu.Unlock()
 	}
 	jsonOK(w, service.snapshot(r.Context()))
+}
+
+// attachLLMUsageLimitsToDependencyStatus lets the badge see capped accounts.
+func (s *Server) attachLLMUsageLimitsToDependencyStatus(service *dependencyStatusService) {
+	if service == nil {
+		return
+	}
+	service.mu.Lock()
+	service.limitProvider = s.llmUsageLimitRecords
+	service.mu.Unlock()
 }
 
 func buildDependencyStatusResponse(dependencies []DependencyStatus) DependencyStatusResponse {
