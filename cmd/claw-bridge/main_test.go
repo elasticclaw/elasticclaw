@@ -4022,19 +4022,29 @@ func TestSendMessageAnnouncesSessionReplacementOnReconnect(t *testing.T) {
 	replaced := make(chan struct{}, 1)
 	gs.setOnSessionReplaced(func() { replaced <- struct{}{} })
 
-	// reconnectGateway (subscribe/create/resubscribe) reads its own
-	// responses synchronously off the wire and needs no read pump. Only the
-	// retried sessions.send after that goes through the normal pending-map
-	// path, which readLoop services. Starting readLoop only once the
-	// synchronous reconnect is done keeps this test pinned to the
-	// SendMessage call site instead of racing readLoop's own reconnect.
+	// reconnectGateway (subscribe/create/resubscribe) reads its own responses
+	// synchronously. Only the retried sessions.send needs readLoop. Wait for
+	// the connection swap, rather than the re-subscribe response: the latter
+	// can arrive before reconnectGateway installs the new connection.
 	go func() {
 		select {
 		case <-resubscribeDone:
 		case <-ctx.Done():
 			return
 		}
-		gs.readLoop(ctx)
+		ticker := time.NewTicker(time.Millisecond)
+		defer ticker.Stop()
+		for {
+			if gs.currentConn() != conn {
+				gs.readLoop(ctx)
+				return
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
+		}
 	}()
 
 	type sendResult struct {
