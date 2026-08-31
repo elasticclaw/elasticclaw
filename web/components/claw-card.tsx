@@ -170,7 +170,7 @@ export const ClawCard = memo(function ClawCard({ claw, isSelected, onClick, onTo
           is the only thing on the row that explains the silence. */}
       {claw.llm_limited_until && (
         <div className="mt-[3px] flex min-w-0 pl-5 pr-1">
-          <LLMLimitChip limitedUntil={claw.llm_limited_until} className="max-w-full" />
+          <LLMLimitChip limitedUntil={claw.llm_limited_until} compact className="max-w-full" />
         </div>
       )}
       {subagentLine && (

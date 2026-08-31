@@ -24,18 +24,31 @@ export function formatLLMLimitDeadline(iso: string): string {
   return `${date} ${clock} UTC`
 }
 
+/**
+ * The sidebar row is ~170px wide, where the full deadline truncates to
+ * uselessness — a cut-off "back 2026-09-01 …" is worse than no time at all.
+ * Compact keeps the day and the clock, which is what an operator reads to
+ * decide whether to wait, and leaves the year and the reasoning to the tooltip.
+ */
+function shortDeadline(iso: string): string {
+  const at = new Date(iso)
+  if (Number.isNaN(at.getTime())) return "an unknown time"
+  const month = at.toLocaleString("en-US", { month: "short", timeZone: "UTC" })
+  return `${month} ${at.getUTCDate()}, ${at.toISOString().slice(11, 16)} UTC`
+}
+
 interface LLMLimitChipProps {
   /** ISO instant when access returns; omit or pass undefined when not limited. */
   limitedUntil?: string
   className?: string
-  /** Compact drops the label and keeps only the deadline, for dense rows. */
+  /** Compact trades the full date for one that fits a dense row. */
   compact?: boolean
 }
 
 export function LLMLimitChip({ limitedUntil, className, compact = false }: LLMLimitChipProps) {
   if (!limitedUntil) return null
   const deadline = formatLLMLimitDeadline(limitedUntil)
-  const label = compact ? deadline : `API limit · back ${deadline}`
+  const label = compact ? `API limit · ${shortDeadline(limitedUntil)}` : `API limit · back ${deadline}`
 
   return (
     <Tooltip>
