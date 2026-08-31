@@ -3248,12 +3248,15 @@ func TestReconnectGatewayReportsStaleConnectionNoop(t *testing.T) {
 	stale := &websocket.Conn{}
 	gs := &gatewaySession{conn: current}
 
-	reconnected, err := gs.reconnectGateway(context.Background(), stale)
+	reconnected, replacedSession, err := gs.reconnectGateway(context.Background(), stale)
 	if err != nil {
 		t.Fatalf("reconnectGateway returned error: %v", err)
 	}
 	if reconnected {
 		t.Fatal("reconnectGateway reported reconnect for stale expected connection")
+	}
+	if replacedSession {
+		t.Fatal("reconnectGateway reported replacement for stale expected connection")
 	}
 	if got := gs.currentConn(); got != current {
 		t.Fatalf("current connection changed on stale reconnect: got %p, want %p", got, current)
@@ -3286,12 +3289,255 @@ func TestReconnectGatewayWithTimeoutWhenChallengeNeverArrives(t *testing.T) {
 		pending: make(map[string]chan gwFrame),
 	}
 	started := time.Now()
-	_, err = gs.reconnectGatewayWithTimeout(context.Background(), current, 100*time.Millisecond)
+	_, _, err = gs.reconnectGatewayWithTimeout(context.Background(), current, 100*time.Millisecond)
 	if err == nil {
 		t.Fatal("reconnectGatewayWithTimeout error = nil, want timeout")
 	}
 	if elapsed := time.Since(started); elapsed > time.Second {
 		t.Fatalf("reconnect returned after %s, want roughly the timeout", elapsed)
+	}
+}
+
+// TestReconnectGatewayReportsReplacementWhenSessionMissing covers the loss
+// path: the gateway forgot the session, so reconnectGateway must fall back
+// to sessions.create and report replacedSession=true so callers can announce
+// the loss to the hub. Without this signal, readLoop and SendMessage would
+// silently keep going on an empty transcript.
+func TestReconnectGatewayReportsReplacementWhenSessionMissing(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			t.Errorf("accept websocket: %v", err)
+			return
+		}
+		defer conn.CloseNow()
+		ctx := r.Context()
+
+		challengePayload, _ := json.Marshal(map[string]string{"nonce": "nonce"})
+		if err := wsjson.Write(ctx, conn, gwFrame{Type: "event", Event: "connect.challenge", Payload: challengePayload}); err != nil {
+			t.Errorf("write challenge: %v", err)
+			return
+		}
+		var connectReq gwFrame
+		if err := wsjson.Read(ctx, conn, &connectReq); err != nil {
+			t.Errorf("read connect request: %v", err)
+			return
+		}
+		if err := wsjson.Write(ctx, conn, gwFrame{Type: "res", ID: connectReq.ID, OK: true}); err != nil {
+			t.Errorf("write connect response: %v", err)
+			return
+		}
+
+		var subReq gwFrame
+		if err := wsjson.Read(ctx, conn, &subReq); err != nil {
+			t.Errorf("read subscribe request: %v", err)
+			return
+		}
+		if subReq.Method != "sessions.subscribe" {
+			t.Errorf("request method = %q, want sessions.subscribe", subReq.Method)
+			return
+		}
+		if err := wsjson.Write(ctx, conn, gwFrame{Type: "res", ID: subReq.ID, OK: false, Error: &gwError{Code: "not_found", Message: "session not found"}}); err != nil {
+			t.Errorf("write subscribe error: %v", err)
+			return
+		}
+
+		var createReq gwFrame
+		if err := wsjson.Read(ctx, conn, &createReq); err != nil {
+			t.Errorf("read create request: %v", err)
+			return
+		}
+		if createReq.Method != "sessions.create" {
+			t.Errorf("request method = %q, want sessions.create", createReq.Method)
+			return
+		}
+		createPayload, _ := json.Marshal(map[string]string{"key": "session-2"})
+		if err := wsjson.Write(ctx, conn, gwFrame{Type: "res", ID: createReq.ID, OK: true, Payload: createPayload}); err != nil {
+			t.Errorf("write create response: %v", err)
+			return
+		}
+
+		var resubReq gwFrame
+		if err := wsjson.Read(ctx, conn, &resubReq); err != nil {
+			t.Errorf("read resubscribe request: %v", err)
+			return
+		}
+		if resubReq.Method != "sessions.subscribe" {
+			t.Errorf("request method = %q, want sessions.subscribe", resubReq.Method)
+			return
+		}
+		if err := wsjson.Write(ctx, conn, gwFrame{Type: "res", ID: resubReq.ID, OK: true}); err != nil {
+			t.Errorf("write resubscribe response: %v", err)
+			return
+		}
+		<-ctx.Done()
+	}))
+	defer srv.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http")
+	client := &gatewayClient{
+		addr:  strings.TrimPrefix(wsURL, "ws://"),
+		token: "token",
+		device: &deviceIdentity{
+			DeviceID:      "device-1",
+			PublicKeyPem:  testPEM("PUBLIC KEY"),
+			PrivateKeyPem: testPEM("PRIVATE KEY"),
+		},
+		home: t.TempDir(),
+	}
+	gs := &gatewaySession{
+		client:     client,
+		sessionKey: "session-1",
+		pending:    make(map[string]chan gwFrame),
+	}
+
+	reconnected, replacedSession, err := gs.reconnectGateway(ctx, nil)
+	if err != nil {
+		t.Fatalf("reconnectGateway returned error: %v", err)
+	}
+	if !reconnected {
+		t.Fatal("reconnectGateway reported reconnected=false, want true")
+	}
+	if !replacedSession {
+		t.Fatal("reconnectGateway reported replacedSession=false, want true after a missing-session error")
+	}
+	if got := gs.getSessionKey(); got != "session-2" {
+		t.Fatalf("session key = %q, want session-2 (fresh session)", got)
+	}
+}
+
+// TestReadLoopAnnouncesSessionReplacementOnBackgroundReconnect covers the
+// readLoop call site specifically (as opposed to reconnectGateway directly):
+// a background reconnect after a dropped read must still fire
+// onSessionReplaced when the gateway had forgotten the session, or the hub
+// never learns the transcript was lost.
+func TestReadLoopAnnouncesSessionReplacementOnBackgroundReconnect(t *testing.T) {
+	var connections atomic.Int32
+	firstHandshakeDone := make(chan struct{})
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			t.Errorf("accept websocket: %v", err)
+			return
+		}
+		defer conn.CloseNow()
+		ctx := r.Context()
+
+		connID := connections.Add(1)
+		challengePayload, _ := json.Marshal(map[string]string{"nonce": "nonce"})
+		if err := wsjson.Write(ctx, conn, gwFrame{Type: "event", Event: "connect.challenge", Payload: challengePayload}); err != nil {
+			t.Errorf("write challenge: %v", err)
+			return
+		}
+		var connectReq gwFrame
+		if err := wsjson.Read(ctx, conn, &connectReq); err != nil {
+			t.Errorf("read connect request: %v", err)
+			return
+		}
+		if err := wsjson.Write(ctx, conn, gwFrame{Type: "res", ID: connectReq.ID, OK: true}); err != nil {
+			t.Errorf("write connect response: %v", err)
+			return
+		}
+
+		if connID == 1 {
+			// First connection: let readLoop start reading, then drop it so
+			// readLoop's background reconnect kicks in.
+			close(firstHandshakeDone)
+			conn.CloseNow()
+			return
+		}
+
+		var subReq gwFrame
+		if err := wsjson.Read(ctx, conn, &subReq); err != nil {
+			t.Errorf("read subscribe request: %v", err)
+			return
+		}
+		if subReq.Method != "sessions.subscribe" {
+			t.Errorf("request method = %q, want sessions.subscribe", subReq.Method)
+			return
+		}
+		if err := wsjson.Write(ctx, conn, gwFrame{Type: "res", ID: subReq.ID, OK: false, Error: &gwError{Code: "not_found", Message: "session not found"}}); err != nil {
+			t.Errorf("write subscribe error: %v", err)
+			return
+		}
+
+		var createReq gwFrame
+		if err := wsjson.Read(ctx, conn, &createReq); err != nil {
+			t.Errorf("read create request: %v", err)
+			return
+		}
+		if createReq.Method != "sessions.create" {
+			t.Errorf("request method = %q, want sessions.create", createReq.Method)
+			return
+		}
+		createPayload, _ := json.Marshal(map[string]string{"key": "session-2"})
+		if err := wsjson.Write(ctx, conn, gwFrame{Type: "res", ID: createReq.ID, OK: true, Payload: createPayload}); err != nil {
+			t.Errorf("write create response: %v", err)
+			return
+		}
+
+		var resubReq gwFrame
+		if err := wsjson.Read(ctx, conn, &resubReq); err != nil {
+			t.Errorf("read resubscribe request: %v", err)
+			return
+		}
+		if resubReq.Method != "sessions.subscribe" {
+			t.Errorf("request method = %q, want sessions.subscribe", resubReq.Method)
+			return
+		}
+		if err := wsjson.Write(ctx, conn, gwFrame{Type: "res", ID: resubReq.ID, OK: true}); err != nil {
+			t.Errorf("write resubscribe response: %v", err)
+			return
+		}
+		<-ctx.Done()
+	}))
+	defer srv.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http")
+	client := &gatewayClient{
+		addr:  strings.TrimPrefix(wsURL, "ws://"),
+		token: "token",
+		device: &deviceIdentity{
+			DeviceID:      "device-1",
+			PublicKeyPem:  testPEM("PUBLIC KEY"),
+			PrivateKeyPem: testPEM("PRIVATE KEY"),
+		},
+		home: t.TempDir(),
+	}
+	conn, err := client.connectToGateway(ctx)
+	if err != nil {
+		t.Fatalf("connect to gateway: %v", err)
+	}
+	select {
+	case <-firstHandshakeDone:
+	case <-time.After(time.Second):
+		t.Fatal("first gateway handshake did not complete")
+	}
+
+	gs := &gatewaySession{
+		client:     client,
+		sessionKey: "session-1",
+		conn:       conn,
+		pending:    make(map[string]chan gwFrame),
+	}
+	replaced := make(chan struct{}, 1)
+	gs.setOnSessionReplaced(func() { replaced <- struct{}{} })
+	go gs.readLoop(ctx)
+
+	select {
+	case <-replaced:
+	case <-time.After(3 * time.Second):
+		t.Fatal("readLoop's background reconnect did not announce a session replacement")
+	}
+	if got := gs.getSessionKey(); got != "session-2" {
+		t.Fatalf("session key = %q, want session-2 (fresh session)", got)
 	}
 }
 
@@ -3555,6 +3801,8 @@ func TestGatewaySessionRetriesSendAfterClosedGatewayWrite(t *testing.T) {
 		conn:       conn,
 		pending:    make(map[string]chan gwFrame),
 	}
+	replaced := make(chan struct{}, 1)
+	gs.setOnSessionReplaced(func() { replaced <- struct{}{} })
 	go gs.readLoop(ctx)
 
 	var chunks []string
@@ -3579,6 +3827,246 @@ func TestGatewaySessionRetriesSendAfterClosedGatewayWrite(t *testing.T) {
 	}
 	if got := connections.Load(); got != 2 {
 		t.Fatalf("connections = %d, want 2", got)
+	}
+	select {
+	case <-replaced:
+		t.Fatal("successful re-subscribe announced a session replacement")
+	default:
+	}
+}
+
+// TestSendMessageAnnouncesSessionReplacementOnReconnect covers the
+// SendMessage call site specifically: a retryable send-write failure forces
+// a reconnect, and when that reconnect finds the session gone it must still
+// announce the replacement even though the retried send itself succeeds.
+func TestSendMessageAnnouncesSessionReplacementOnReconnect(t *testing.T) {
+	var connections atomic.Int32
+	firstHandshakeDone := make(chan struct{})
+	resubscribeDone := make(chan struct{})
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			t.Errorf("accept websocket: %v", err)
+			return
+		}
+		defer conn.CloseNow()
+		ctx := r.Context()
+
+		connID := connections.Add(1)
+		challengePayload, _ := json.Marshal(map[string]string{"nonce": "nonce"})
+		if err := wsjson.Write(ctx, conn, gwFrame{Type: "event", Event: "connect.challenge", Payload: challengePayload}); err != nil {
+			t.Errorf("write challenge: %v", err)
+			return
+		}
+		var connectReq gwFrame
+		if err := wsjson.Read(ctx, conn, &connectReq); err != nil {
+			t.Errorf("read connect request: %v", err)
+			return
+		}
+		if err := wsjson.Write(ctx, conn, gwFrame{Type: "res", ID: connectReq.ID, OK: true}); err != nil {
+			t.Errorf("write connect response: %v", err)
+			return
+		}
+
+		if connID == 1 {
+			// First connection: handshake only, then get closed by the test
+			// so the first sessions.send write fails.
+			close(firstHandshakeDone)
+			<-ctx.Done()
+			return
+		}
+
+		var subReq gwFrame
+		if err := wsjson.Read(ctx, conn, &subReq); err != nil {
+			t.Errorf("read subscribe request: %v", err)
+			return
+		}
+		if subReq.Method != "sessions.subscribe" {
+			t.Errorf("request method = %q, want sessions.subscribe", subReq.Method)
+			return
+		}
+		if err := wsjson.Write(ctx, conn, gwFrame{Type: "res", ID: subReq.ID, OK: false, Error: &gwError{Code: "not_found", Message: "session not found"}}); err != nil {
+			t.Errorf("write subscribe error: %v", err)
+			return
+		}
+
+		var createReq gwFrame
+		if err := wsjson.Read(ctx, conn, &createReq); err != nil {
+			t.Errorf("read create request: %v", err)
+			return
+		}
+		if createReq.Method != "sessions.create" {
+			t.Errorf("request method = %q, want sessions.create", createReq.Method)
+			return
+		}
+		createPayload, _ := json.Marshal(map[string]string{"key": "session-2"})
+		if err := wsjson.Write(ctx, conn, gwFrame{Type: "res", ID: createReq.ID, OK: true, Payload: createPayload}); err != nil {
+			t.Errorf("write create response: %v", err)
+			return
+		}
+
+		var resubReq gwFrame
+		if err := wsjson.Read(ctx, conn, &resubReq); err != nil {
+			t.Errorf("read resubscribe request: %v", err)
+			return
+		}
+		if resubReq.Method != "sessions.subscribe" {
+			t.Errorf("request method = %q, want sessions.subscribe", resubReq.Method)
+			return
+		}
+		if err := wsjson.Write(ctx, conn, gwFrame{Type: "res", ID: resubReq.ID, OK: true}); err != nil {
+			t.Errorf("write resubscribe response: %v", err)
+			return
+		}
+		close(resubscribeDone)
+
+		// Creating a fresh session makes gatewaySession.setReady() kick off an
+		// unrelated background sessions.describe (context-usage refresh) on
+		// the same connection; it can arrive before or after the retried
+		// sessions.send, so answer whichever request shows up first.
+		var sendReq gwFrame
+		for {
+			var req gwFrame
+			if err := wsjson.Read(ctx, conn, &req); err != nil {
+				t.Errorf("read request after resubscribe: %v", err)
+				return
+			}
+			if req.Method == "sessions.describe" {
+				describePayload, _ := json.Marshal(map[string]interface{}{"session": map[string]interface{}{}})
+				if err := wsjson.Write(ctx, conn, gwFrame{Type: "res", ID: req.ID, OK: true, Payload: describePayload}); err != nil {
+					t.Errorf("write sessions.describe response: %v", err)
+					return
+				}
+				continue
+			}
+			sendReq = req
+			break
+		}
+		if sendReq.Method != "sessions.send" {
+			t.Errorf("retry request method = %q, want sessions.send", sendReq.Method)
+			return
+		}
+		if err := wsjson.Write(ctx, conn, gwFrame{Type: "res", ID: sendReq.ID, OK: true}); err != nil {
+			t.Errorf("write sessions.send response: %v", err)
+			return
+		}
+		assistantPayload, _ := json.Marshal(map[string]interface{}{
+			"stream":     "assistant",
+			"sessionKey": "session-2",
+			"data":       map[string]string{"delta": "hello"},
+		})
+		if err := wsjson.Write(ctx, conn, gwFrame{Type: "event", Event: "agent", Payload: assistantPayload}); err != nil {
+			t.Errorf("write assistant event: %v", err)
+			return
+		}
+		endPayload, _ := json.Marshal(map[string]interface{}{
+			"stream":     "lifecycle",
+			"sessionKey": "session-2",
+			"data":       map[string]string{"phase": "end"},
+		})
+		if err := wsjson.Write(ctx, conn, gwFrame{Type: "event", Event: "agent", Payload: endPayload}); err != nil {
+			t.Errorf("write lifecycle event: %v", err)
+			return
+		}
+		// Drain and answer any further requests (e.g. a still-pending
+		// context-usage sessions.describe) instead of leaving them unread,
+		// which would otherwise surface as a goroutine panic once the test
+		// itself has already returned.
+		for {
+			var req gwFrame
+			if err := wsjson.Read(ctx, conn, &req); err != nil {
+				return
+			}
+			if req.Method == "sessions.describe" {
+				describePayload, _ := json.Marshal(map[string]interface{}{"session": map[string]interface{}{}})
+				_ = wsjson.Write(ctx, conn, gwFrame{Type: "res", ID: req.ID, OK: true, Payload: describePayload})
+			}
+		}
+	}))
+	defer srv.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http")
+	client := &gatewayClient{
+		addr:  strings.TrimPrefix(wsURL, "ws://"),
+		token: "token",
+		device: &deviceIdentity{
+			DeviceID:      "device-1",
+			PublicKeyPem:  testPEM("PUBLIC KEY"),
+			PrivateKeyPem: testPEM("PRIVATE KEY"),
+		},
+		home: t.TempDir(),
+	}
+	conn, err := client.connectToGateway(ctx)
+	if err != nil {
+		t.Fatalf("connect to gateway: %v", err)
+	}
+	select {
+	case <-firstHandshakeDone:
+	case <-time.After(time.Second):
+		t.Fatal("first gateway handshake did not complete")
+	}
+	// Close from the client side so the first sessions.send write fails
+	// immediately, without relying on readLoop to notice the drop first.
+	conn.CloseNow()
+
+	gs := &gatewaySession{
+		client:     client,
+		sessionKey: "session-1",
+		conn:       conn,
+		pending:    make(map[string]chan gwFrame),
+	}
+	replaced := make(chan struct{}, 1)
+	gs.setOnSessionReplaced(func() { replaced <- struct{}{} })
+
+	// reconnectGateway (subscribe/create/resubscribe) reads its own
+	// responses synchronously off the wire and needs no read pump. Only the
+	// retried sessions.send after that goes through the normal pending-map
+	// path, which readLoop services. Starting readLoop only once the
+	// synchronous reconnect is done keeps this test pinned to the
+	// SendMessage call site instead of racing readLoop's own reconnect.
+	go func() {
+		select {
+		case <-resubscribeDone:
+		case <-ctx.Done():
+			return
+		}
+		gs.readLoop(ctx)
+	}()
+
+	type sendResult struct {
+		reply string
+		err   error
+	}
+	resultCh := make(chan sendResult, 1)
+	go func() {
+		reply, err := gs.SendMessage(ctx, "hi", func(string) {}, nil)
+		resultCh <- sendResult{reply, err}
+	}()
+
+	select {
+	case <-replaced:
+	case <-time.After(2 * time.Second):
+		t.Fatal("SendMessage's reconnect did not announce a session replacement")
+	}
+
+	var result sendResult
+	select {
+	case result = <-resultCh:
+	case <-time.After(3 * time.Second):
+		t.Fatal("SendMessage did not return after reconnect")
+	}
+	if result.err != nil {
+		t.Fatalf("SendMessage returned error: %v", result.err)
+	}
+	if result.reply != "hello" {
+		t.Fatalf("reply = %q, want hello", result.reply)
+	}
+	if got := gs.getSessionKey(); got != "session-2" {
+		t.Fatalf("session key = %q, want session-2 (fresh session)", got)
 	}
 }
 
