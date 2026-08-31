@@ -5063,9 +5063,7 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 		for k, v := range subagentFields {
 			heartbeatPayload[k] = v
 		}
-		if usage.sessionKey != "" {
-			heartbeatPayload["session_key"] = usage.sessionKey
-		}
+		addHeartbeatSessionKeys(heartbeatPayload, usage.sessionKey, gwSession.getSessionKey())
 		if usage.inputTokens != nil {
 			heartbeatPayload["input_tokens"] = usage.inputTokens
 		}
@@ -5191,6 +5189,18 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 		default:
 			// ignore unknown message types
 		}
+	}
+}
+
+// addHeartbeatSessionKeys keeps the usage snapshot and the live gateway
+// identity separate. The hub uses only gateway_session_key for session-loss
+// detection, since sessions.describe may be stale while a gateway recovers.
+func addHeartbeatSessionKeys(payload map[string]interface{}, snapshotKey, gatewayKey string) {
+	if snapshotKey != "" {
+		payload["session_key"] = snapshotKey
+	}
+	if gatewayKey != "" {
+		payload["gateway_session_key"] = gatewayKey
 	}
 }
 

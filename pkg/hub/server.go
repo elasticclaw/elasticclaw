@@ -242,31 +242,33 @@ func (s *Server) gatewayUnhealthyCount(clawID string) int {
 type clawConn struct {
 	mu sync.RWMutex // protects mutable fields below
 
-	id                   string
-	tenantID             string
-	conn                 *websocket.Conn
-	tags                 []string        // cached from DB at registration time for access-control checks
-	contextUsage         int             // 0-100, updated from heartbeats
-	gatewayReady         bool            // true once bridge reports gateway session established
-	gatewayRestartCount  int             // cumulative bridge restarts reported by heartbeats
-	forcedFinishCount    int             // consecutive watchdog-forced streaming turn finishes
-	workflowStartPending bool            // true while initial volume attach / wake is in flight
-	workflowStartDone    bool            // true once initial volume attach / wake has completed
-	streamingBuf         strings.Builder // accumulates chunks for current in-flight response
-	streamingMsgID       string          // pre-assigned message ID for the current stream
-	streamingSplit       bool            // true once activity has split this turn into multiple persisted segments
-	streamingStartedAt   time.Time       // when the current streaming turn started (zero if not streaming)
-	streamingTimeoutSent bool            // true once the 12-min timeout message has been injected this turn
-	contextWarningSent   bool            // true once the context-nearly-full warning has been injected this turn
-	awaitingResponse     bool            // true as soon as a prompt is delivered, before the first chunk/activity
-	noProgressPaused     bool            // automatic delivery is paused after repeated turns with unchanged progress
-	bridgeErrorStreak    int             // consecutive turns that came back as a claw-bridge transport error (NEXT-725)
-	lastTurnFinishedAt   time.Time       // when the last streaming turn ended (for post-restart resume window)
-	connectedAt          time.Time       // when this connection registered; immutable after registration
-	idleNotifiedAt       time.Time       // when the agent_idle notification fired for the current idle stretch (zero = armed)
-	turnBoundarySeen     bool            // a turn actually ended on THIS connection, so turn tracking is known live (see agentIdleResumeBlindGrace)
-	subagentsActiveAt    time.Time       // when the last heartbeat that REPORTED active spawned subagent sessions arrived (zero = none known; see applySubagentHeartbeatLocked)
-	subagentActiveCount  int             // subagent sessions with a run in flight per that heartbeat
+	id                    string
+	tenantID              string
+	conn                  *websocket.Conn
+	tags                  []string        // cached from DB at registration time for access-control checks
+	contextUsage          int             // 0-100, updated from heartbeats
+	gatewayReady          bool            // true once bridge reports gateway session established
+	gatewayRestartCount   int             // cumulative bridge restarts reported by heartbeats
+	gatewaySessionKey     string          // last live gateway session key reported by heartbeat
+	gatewaySessionKeySeen bool            // distinguishes the first live-key heartbeat from a loss
+	forcedFinishCount     int             // consecutive watchdog-forced streaming turn finishes
+	workflowStartPending  bool            // true while initial volume attach / wake is in flight
+	workflowStartDone     bool            // true once initial volume attach / wake has completed
+	streamingBuf          strings.Builder // accumulates chunks for current in-flight response
+	streamingMsgID        string          // pre-assigned message ID for the current stream
+	streamingSplit        bool            // true once activity has split this turn into multiple persisted segments
+	streamingStartedAt    time.Time       // when the current streaming turn started (zero if not streaming)
+	streamingTimeoutSent  bool            // true once the 12-min timeout message has been injected this turn
+	contextWarningSent    bool            // true once the context-nearly-full warning has been injected this turn
+	awaitingResponse      bool            // true as soon as a prompt is delivered, before the first chunk/activity
+	noProgressPaused      bool            // automatic delivery is paused after repeated turns with unchanged progress
+	bridgeErrorStreak     int             // consecutive turns that came back as a claw-bridge transport error (NEXT-725)
+	lastTurnFinishedAt    time.Time       // when the last streaming turn ended (for post-restart resume window)
+	connectedAt           time.Time       // when this connection registered; immutable after registration
+	idleNotifiedAt        time.Time       // when the agent_idle notification fired for the current idle stretch (zero = armed)
+	turnBoundarySeen      bool            // a turn actually ended on THIS connection, so turn tracking is known live (see agentIdleResumeBlindGrace)
+	subagentsActiveAt     time.Time       // when the last heartbeat that REPORTED active spawned subagent sessions arrived (zero = none known; see applySubagentHeartbeatLocked)
+	subagentActiveCount   int             // subagent sessions with a run in flight per that heartbeat
 
 	deliveryInFlight bool // serializes DB-backed delivery writes
 
@@ -2821,17 +2823,21 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 		if msg.Type == "heartbeat" {
 			payload, _ := json.Marshal(msg.Payload)
 			var hb struct {
-				GatewayHealthy   bool     `json:"gateway_healthy"`
-				GatewayReady     *bool    `json:"gateway_ready,omitempty"`
-				ContextUsage     int      `json:"context_usage"`
-				RestartCount     int      `json:"restart_count"`
-				SessionKey       string   `json:"session_key"`
-				InputTokens      *int     `json:"input_tokens"`
-				OutputTokens     *int     `json:"output_tokens"`
-				TotalTokens      *int     `json:"total_tokens"`
-				EstimatedCostUSD *float64 `json:"estimated_cost_usd"`
-				Model            string   `json:"model"`
-				ModelProvider    string   `json:"model_provider"`
+				GatewayHealthy bool  `json:"gateway_healthy"`
+				GatewayReady   *bool `json:"gateway_ready,omitempty"`
+				ContextUsage   int   `json:"context_usage"`
+				RestartCount   int   `json:"restart_count"`
+				// SessionKey is the usage snapshot from sessions.describe. GatewaySessionKey
+				// is the live session identity used for loss detection; they must remain
+				// distinct because a degraded describe call can leave the snapshot stale.
+				SessionKey        string   `json:"session_key"`
+				GatewaySessionKey *string  `json:"gateway_session_key"`
+				InputTokens       *int     `json:"input_tokens"`
+				OutputTokens      *int     `json:"output_tokens"`
+				TotalTokens       *int     `json:"total_tokens"`
+				EstimatedCostUSD  *float64 `json:"estimated_cost_usd"`
+				Model             string   `json:"model"`
+				ModelProvider     string   `json:"model_provider"`
 				// Pointers on purpose: an old bridge omits both, which must
 				// stay distinguishable from a bridge reporting "no subagents"
 				// (see applySubagentHeartbeatLocked).
@@ -2891,6 +2897,12 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 							s.autoResumeRestartCounts[clawID] = hb.RestartCount
 							shouldAutoResume = true
 						}
+					}
+					if hb.GatewaySessionKey != nil {
+						// The first live-key observation is a baseline, just like restart_count:
+						// it may describe a session established before this hub connected.
+						activeCC.gatewaySessionKey = *hb.GatewaySessionKey
+						activeCC.gatewaySessionKeySeen = true
 					}
 					activeCC.gatewayRestartCount = s.gatewayRestartCounts[clawID]
 					// nil means field absent (old bridge) — treat as ready. The

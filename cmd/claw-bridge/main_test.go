@@ -4346,6 +4346,23 @@ func TestSubagentHeartbeatFields(t *testing.T) {
 	}
 }
 
+func TestAddHeartbeatSessionKeysKeepsSnapshotAndLiveKeysSeparate(t *testing.T) {
+	payload := map[string]interface{}{}
+	addHeartbeatSessionKeys(payload, "stale-snapshot", "live-gateway-session")
+	if got := payload["session_key"]; got != "stale-snapshot" {
+		t.Fatalf("session_key = %v, want usage snapshot", got)
+	}
+	if got := payload["gateway_session_key"]; got != "live-gateway-session" {
+		t.Fatalf("gateway_session_key = %v, want live gateway key", got)
+	}
+
+	payload = map[string]interface{}{}
+	addHeartbeatSessionKeys(payload, "old-snapshot", "")
+	if _, ok := payload["gateway_session_key"]; ok {
+		t.Fatalf("gateway_session_key = %v, want omitted without a live key", payload["gateway_session_key"])
+	}
+}
+
 // A lifecycle error that is not a lock conflict skips the mismatch early
 // return, so it reaches abortSession while a concurrent readLoop rotation may
 // already have replaced the current key. The abort must still target the key
