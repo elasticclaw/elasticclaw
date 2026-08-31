@@ -6,6 +6,7 @@ import { COLOR_CLASSES } from "@/lib/mappers"
 import { Loader2, Pin, AlertCircle, Bot } from "lucide-react"
 import { BootstrapProgress } from "@/components/bootstrap-progress"
 import { ClawTitle } from "@/components/claw-title"
+import { LLMLimitChip } from "@/components/llm-limit-chip"
 import { useNowMinuteTick } from "@/hooks/use-now"
 import { memo } from "react"
 
@@ -164,6 +165,14 @@ export const ClawCard = memo(function ClawCard({ claw, isSelected, onClick, onTo
         )}
         {age && <span className="ml-auto shrink-0 font-mono text-[10px] text-muted-foreground">{age}</span>}
       </div>
+      {/* The provider block gets its own row rather than sharing the status
+          line: a capped agent still reads "connected" everywhere else, so this
+          is the only thing on the row that explains the silence. */}
+      {claw.llm_limited_until && (
+        <div className="mt-[3px] flex min-w-0 pl-5 pr-1">
+          <LLMLimitChip limitedUntil={claw.llm_limited_until} className="max-w-full" />
+        </div>
+      )}
       {subagentLine && (
         <div className="mt-[3px] flex min-w-0 items-center gap-1 pl-5 pr-1">
           <Bot className="size-3 shrink-0 text-muted-foreground" />

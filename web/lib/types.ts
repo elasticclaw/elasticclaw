@@ -26,6 +26,8 @@ export interface Claw {
   last_seen?: string
   created_at?: string
   tenant_id?: string
+  /** ISO instant when the model provider's allowance returns; absent = not limited. */
+  llm_limited_until?: string
 }
 
 export interface Message {
@@ -89,6 +91,7 @@ export interface ApiClaw {
   bootstrap_status?: string
   github_issue_id?: string
   github_issue_url?: string
+  llm_limited_until?: string
 }
 
 export interface ApiMessage {
@@ -464,6 +467,8 @@ export interface DependencyStatus {
   status: DependencyStatusValue
   message?: string
   source?: string
+  /** Set only when the downtime ends at a known time (a capped provider account). */
+  regainAt?: string
   checkedAt: string
 }
 

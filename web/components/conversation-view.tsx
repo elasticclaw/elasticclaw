@@ -77,6 +77,7 @@ import { CardAction } from "@/components/ds/card-action"
 import { ClawTitle } from "@/components/claw-title"
 import { windowMessagesByDurableCount } from "@/lib/messages"
 import { DependencyDowntimeBanner } from "@/components/dependency-downtime-banner"
+import { LLMLimitChip } from "@/components/llm-limit-chip"
 import type { TypewriterState } from "@/hooks/use-typewriter"
 import { extractQuestion, isWaitingOnYou } from "@/lib/waiting-on-you"
 import { messageAuthor } from "@/lib/message-author"
@@ -1644,6 +1645,7 @@ function ClawChatView({
             {/* Uptime is intentionally dropped here: at 320-375px it does not
                 fit next to the badge and the menu (it stays visible on the
                 board card and desktop header). The badge never shrinks. */}
+            <LLMLimitChip limitedUntil={claw.llm_limited_until} compact className="shrink-0" />
             <StatusBadge status={claw.status} className="shrink-0" />
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
@@ -1689,6 +1691,7 @@ function ClawChatView({
                 className="flex-1 font-mono text-xl font-semibold text-foreground"
               />
               <StatusBadge status={claw.status} />
+              <LLMLimitChip limitedUntil={claw.llm_limited_until} />
               <span className="text-sm text-muted-foreground font-mono">{formatUptime(claw.uptime)}</span>
             </div>
             <div className="flex items-center gap-2">

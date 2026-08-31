@@ -590,3 +590,14 @@ func (s *Server) handleClawLLMLimit(w http.ResponseWriter, r *http.Request, claw
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
 }
+
+// optionalTime turns a stored epoch-millis latch into the pointer the API
+// exposes, so "not limited" is an absent field rather than a zero timestamp a
+// client would have to know to ignore.
+func optionalTime(ms int64) *time.Time {
+	if ms == 0 {
+		return nil
+	}
+	at := time.UnixMilli(ms).UTC()
+	return &at
+}
