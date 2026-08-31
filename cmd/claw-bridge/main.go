@@ -2564,7 +2564,8 @@ func reportSessionRecovery(agentErr error, reply *string, gwSession *gatewaySess
 		}
 		writeActivity(agentActivity{Kind: "session_rotated", Message: activityMessage})
 		*reply = ""
-		edge := hubMsg{Type: "session_rotated"}
+		keyPayload, _ := json.Marshal(map[string]string{"session_key": gwSession.getSessionKey()})
+		edge := hubMsg{Type: "session_rotated", Payload: keyPayload}
 		if err := writeHub(edge); err != nil {
 			log.Printf("[bridge] recovery edge write failed, queuing for replay: %v", err)
 			queue.pushControl(edge)
@@ -5015,7 +5016,8 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 	gwSession.setOnSessionReplaced(func() {
 		activityMessage := "OpenClaw session was replaced after gateway reconnect; waiting for the hub to resume the task"
 		writeActivity(agentActivity{Kind: "session_rotated", Message: activityMessage})
-		edge := hubMsg{Type: "session_rotated"}
+		keyPayload, _ := json.Marshal(map[string]string{"session_key": gwSession.getSessionKey()})
+		edge := hubMsg{Type: "session_rotated", Payload: keyPayload}
 		if err := writeHub(edge); err != nil {
 			log.Printf("[bridge] session replacement edge write failed, queuing for replay: %v", err)
 			queue.pushControl(edge)

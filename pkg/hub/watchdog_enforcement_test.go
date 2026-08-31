@@ -621,6 +621,102 @@ func TestSessionRotatedWhileIdleDoesNotEnqueueResume(t *testing.T) {
 	}
 }
 
+func TestHeartbeatUsesOnlyGatewaySessionKeyForSessionLoss(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{ClawToken: "claw-token"}, "", "", "")
+	const clawID = "watchdog-gateway-session-key"
+	conn := watchdogClaw(t, s, clawID)
+	cc := watchdogClawConn(t, s, clawID)
+	if _, err := db.Exec(`UPDATE claws SET status='connected', bootstrap_ok=1 WHERE id=?`, clawID); err != nil {
+		t.Fatal(err)
+	}
+	cc.mu.Lock()
+	cc.streamingStartedAt = time.Now()
+	cc.mu.Unlock()
+	beat := func(payload map[string]any) {
+		t.Helper()
+		payload["gateway_healthy"] = true
+		if err := wsjson.Write(context.Background(), conn, types.WSMessage{Type: "heartbeat", Payload: payload}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	count := func() int {
+		var n int
+		_ = db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND role='hub' AND content LIKE ?`, clawID, restartResumePrefix+"%").Scan(&n)
+		return n
+	}
+
+	beat(map[string]any{"restart_count": 0, "session_key": "snapshot-old", "gateway_session_key": "live-old"})
+	eventuallyWatchdog(t, func() bool {
+		cc.mu.RLock()
+		defer cc.mu.RUnlock()
+		return cc.gatewaySessionKeySeen && cc.gatewaySessionKey == "live-old"
+	}, "live gateway session baseline")
+	// A stale sessions.describe snapshot changes, but no live key is reported.
+	// It must not be interpreted as a lost session.
+	beat(map[string]any{"restart_count": 0, "session_key": "snapshot-stale"})
+	time.Sleep(100 * time.Millisecond)
+	if got := count(); got != 0 {
+		t.Fatalf("resume count after snapshot-only heartbeat = %d, want 0", got)
+	}
+	beat(map[string]any{"restart_count": 0, "session_key": "snapshot-stale", "gateway_session_key": "live-new"})
+	eventuallyWatchdog(t, func() bool { return count() == 1 }, "resume after live gateway key change")
+}
+
+func TestSessionLossDeduplicatesAllDetectionPathsByNewKey(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{ClawToken: "claw-token"}, "", "", "")
+	const clawID = "watchdog-session-loss-dedup"
+	_ = watchdogClaw(t, s, clawID)
+	cc := watchdogClawConn(t, s, clawID)
+	if _, err := db.Exec(`UPDATE claws SET status='connected', bootstrap_ok=1 WHERE id=?`, clawID); err != nil {
+		t.Fatal(err)
+	}
+	cc.mu.Lock()
+	cc.streamingStartedAt = time.Now()
+	cc.mu.Unlock()
+	// These calls represent restart_count, gateway_session_key, and the
+	// session_rotated bridge edge reporting the same replacement session.
+	s.noteSessionLoss(cc, clawID, "replacement-key", "restart_count")
+	s.noteSessionLoss(cc, clawID, "replacement-key", "gateway_session_key")
+	s.noteSessionLoss(cc, clawID, "replacement-key", "session_rotated")
+	var n int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND role='hub' AND (content LIKE ? OR content LIKE ?)`, clawID, restartResumePrefix+"%", sessionRotatedResumePrefix+"%").Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("resume count for one incident reported three ways = %d, want 1", n)
+	}
+}
+
+func TestSessionLossDifferentKeysAndMissingKeysDoNotDeduplicate(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{ClawToken: "claw-token"}, "", "", "")
+	const clawID = "watchdog-session-loss-distinct"
+	_ = watchdogClaw(t, s, clawID)
+	cc := watchdogClawConn(t, s, clawID)
+	if _, err := db.Exec(`UPDATE claws SET status='connected', bootstrap_ok=1 WHERE id=?`, clawID); err != nil {
+		t.Fatal(err)
+	}
+	cc.mu.Lock()
+	cc.streamingStartedAt = time.Now()
+	cc.mu.Unlock()
+	count := func() int {
+		var n int
+		_ = db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND role='hub' AND content LIKE ?`, clawID, restartResumePrefix+"%").Scan(&n)
+		return n
+	}
+	s.noteSessionLoss(cc, clawID, "replacement-one", "restart_count")
+	s.noteSessionLoss(cc, clawID, "replacement-two", "restart_count")
+	if got := count(); got != 2 {
+		t.Fatalf("resume count for two replacement keys = %d, want 2", got)
+	}
+	// Old bridges omit the key. Preserve the pre-key behavior: each report is
+	// an independent incident rather than being collapsed by an empty key.
+	s.noteSessionLoss(cc, clawID, "", "restart_count")
+	s.noteSessionLoss(cc, clawID, "", "restart_count")
+	if got := count(); got != 4 {
+		t.Fatalf("resume count after two keyless reports = %d, want 4", got)
+	}
+}
+
 func TestSessionPreservedEnqueuesContinuationAndResetsBridgeErrorStreak(t *testing.T) {
 	s, db := NewTestServerWithConfig(t, &types.HubConfig{ClawToken: "claw-token"}, "", "", "")
 	const clawID = "watchdog-session-preserved"

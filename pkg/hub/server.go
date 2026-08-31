@@ -69,10 +69,8 @@ type Server struct {
 	gatewayUnhealthyCounts map[string]int
 	// gatewayEscalatedAt records the last gateway-health escalation dispatch per claw,
 	// preventing retries from piling up while a replacement is pending or in flight. Guarded by s.mu.
-	gatewayEscalatedAt map[string]time.Time
-	// autoResumeRestartCounts records restart counts already handled per claw. Guarded by s.mu.
-	autoResumeRestartCounts map[string]int
-	lastTokenFailureLog     time.Time
+	gatewayEscalatedAt  map[string]time.Time
+	lastTokenFailureLog time.Time
 	// trackedPRCount is the PR count observed by the last poll; it drives the
 	// PR watcher's adaptive interval. Guarded by s.mu.
 	trackedPRCount int
@@ -242,33 +240,34 @@ func (s *Server) gatewayUnhealthyCount(clawID string) int {
 type clawConn struct {
 	mu sync.RWMutex // protects mutable fields below
 
-	id                    string
-	tenantID              string
-	conn                  *websocket.Conn
-	tags                  []string        // cached from DB at registration time for access-control checks
-	contextUsage          int             // 0-100, updated from heartbeats
-	gatewayReady          bool            // true once bridge reports gateway session established
-	gatewayRestartCount   int             // cumulative bridge restarts reported by heartbeats
-	gatewaySessionKey     string          // last live gateway session key reported by heartbeat
-	gatewaySessionKeySeen bool            // distinguishes the first live-key heartbeat from a loss
-	forcedFinishCount     int             // consecutive watchdog-forced streaming turn finishes
-	workflowStartPending  bool            // true while initial volume attach / wake is in flight
-	workflowStartDone     bool            // true once initial volume attach / wake has completed
-	streamingBuf          strings.Builder // accumulates chunks for current in-flight response
-	streamingMsgID        string          // pre-assigned message ID for the current stream
-	streamingSplit        bool            // true once activity has split this turn into multiple persisted segments
-	streamingStartedAt    time.Time       // when the current streaming turn started (zero if not streaming)
-	streamingTimeoutSent  bool            // true once the 12-min timeout message has been injected this turn
-	contextWarningSent    bool            // true once the context-nearly-full warning has been injected this turn
-	awaitingResponse      bool            // true as soon as a prompt is delivered, before the first chunk/activity
-	noProgressPaused      bool            // automatic delivery is paused after repeated turns with unchanged progress
-	bridgeErrorStreak     int             // consecutive turns that came back as a claw-bridge transport error (NEXT-725)
-	lastTurnFinishedAt    time.Time       // when the last streaming turn ended (for post-restart resume window)
-	connectedAt           time.Time       // when this connection registered; immutable after registration
-	idleNotifiedAt        time.Time       // when the agent_idle notification fired for the current idle stretch (zero = armed)
-	turnBoundarySeen      bool            // a turn actually ended on THIS connection, so turn tracking is known live (see agentIdleResumeBlindGrace)
-	subagentsActiveAt     time.Time       // when the last heartbeat that REPORTED active spawned subagent sessions arrived (zero = none known; see applySubagentHeartbeatLocked)
-	subagentActiveCount   int             // subagent sessions with a run in flight per that heartbeat
+	id                      string
+	tenantID                string
+	conn                    *websocket.Conn
+	tags                    []string        // cached from DB at registration time for access-control checks
+	contextUsage            int             // 0-100, updated from heartbeats
+	gatewayReady            bool            // true once bridge reports gateway session established
+	gatewayRestartCount     int             // cumulative bridge restarts reported by heartbeats
+	gatewaySessionKey       string          // last live gateway session key reported by heartbeat
+	gatewaySessionKeySeen   bool            // distinguishes the first live-key heartbeat from a loss
+	announcedSessionLossKey string          // newest loss identity already announced; guarded by mu
+	forcedFinishCount       int             // consecutive watchdog-forced streaming turn finishes
+	workflowStartPending    bool            // true while initial volume attach / wake is in flight
+	workflowStartDone       bool            // true once initial volume attach / wake has completed
+	streamingBuf            strings.Builder // accumulates chunks for current in-flight response
+	streamingMsgID          string          // pre-assigned message ID for the current stream
+	streamingSplit          bool            // true once activity has split this turn into multiple persisted segments
+	streamingStartedAt      time.Time       // when the current streaming turn started (zero if not streaming)
+	streamingTimeoutSent    bool            // true once the 12-min timeout message has been injected this turn
+	contextWarningSent      bool            // true once the context-nearly-full warning has been injected this turn
+	awaitingResponse        bool            // true as soon as a prompt is delivered, before the first chunk/activity
+	noProgressPaused        bool            // automatic delivery is paused after repeated turns with unchanged progress
+	bridgeErrorStreak       int             // consecutive turns that came back as a claw-bridge transport error (NEXT-725)
+	lastTurnFinishedAt      time.Time       // when the last streaming turn ended (for post-restart resume window)
+	connectedAt             time.Time       // when this connection registered; immutable after registration
+	idleNotifiedAt          time.Time       // when the agent_idle notification fired for the current idle stretch (zero = armed)
+	turnBoundarySeen        bool            // a turn actually ended on THIS connection, so turn tracking is known live (see agentIdleResumeBlindGrace)
+	subagentsActiveAt       time.Time       // when the last heartbeat that REPORTED active spawned subagent sessions arrived (zero = none known; see applySubagentHeartbeatLocked)
+	subagentActiveCount     int             // subagent sessions with a run in flight per that heartbeat
 
 	deliveryInFlight bool // serializes DB-backed delivery writes
 
@@ -483,7 +482,6 @@ func NewServer(addr, dbPath, identityDir string, hubCfg *types.HubConfig) (*Serv
 		gatewayRestartCounts:     make(map[string]int),
 		gatewayUnhealthyCounts:   make(map[string]int),
 		gatewayEscalatedAt:       make(map[string]time.Time),
-		autoResumeRestartCounts:  make(map[string]int),
 		dependencyStatus:         newDependencyStatusService(hubCfg),
 		fileAckWaiters:           make(map[string]chan types.FileAck),
 		fileReadWaiters:          make(map[string]chan types.FileReadResp),
@@ -2850,7 +2848,8 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 				var shouldWake bool
 				var shouldWarnContext bool
 				var shouldEscalateGateway bool
-				var shouldAutoResume bool
+				var shouldNoteSessionLoss bool
+				var sessionLossKey, sessionLossSource string
 				var prevUsage int
 				var revived bool
 				var current bool
@@ -2884,21 +2883,18 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 						// was relaunched and its counter reset.
 						log.Printf("[heartbeat] %s (%s): agent process restarted (restart_count=%d)", rp.Name, clawID[:8], hb.RestartCount)
 						s.gatewayRestartCounts[clawID] = hb.RestartCount
-						if s.autoResumeRestartCounts == nil {
-							s.autoResumeRestartCounts = make(map[string]int)
-						}
-						turnOpenOrRecent := !activeCC.streamingStartedAt.IsZero() || activeCC.awaitingResponse ||
-							(!activeCC.lastTurnFinishedAt.IsZero() && time.Since(activeCC.lastTurnFinishedAt) < autoResumeRecentTurnWindow)
-						// Existence-aware lookup: a bridge relaunch resets its counter
-						// to 0, which equals the zero value of an absent map entry — a
-						// plain read would skip the resume for that first relaunch.
-						lastResumedCount, resumeRecorded := s.autoResumeRestartCounts[clawID]
-						if turnOpenOrRecent && (!resumeRecorded || lastResumedCount != hb.RestartCount) {
-							s.autoResumeRestartCounts[clawID] = hb.RestartCount
-							shouldAutoResume = true
+						shouldNoteSessionLoss = true
+						sessionLossSource = "restart_count"
+						if hb.GatewaySessionKey != nil {
+							sessionLossKey = *hb.GatewaySessionKey
 						}
 					}
 					if hb.GatewaySessionKey != nil {
+						if activeCC.gatewaySessionKeySeen && *hb.GatewaySessionKey != activeCC.gatewaySessionKey {
+							shouldNoteSessionLoss = true
+							sessionLossKey = *hb.GatewaySessionKey
+							sessionLossSource = "gateway_session_key"
+						}
 						// The first live-key observation is a baseline, just like restart_count:
 						// it may describe a session established before this hub connected.
 						activeCC.gatewaySessionKey = *hb.GatewaySessionKey
@@ -3004,8 +3000,8 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 					}
 				}
 				s.heartbeatWorkflowVolumeLeases(clawID)
-				if shouldAutoResume {
-					go s.enqueueRestartResume(clawID, hb.RestartCount)
+				if shouldNoteSessionLoss {
+					go s.noteSessionLoss(cc, clawID, sessionLossKey, sessionLossSource)
 				}
 				if shouldEscalateGateway {
 					// Re-read the claw state before escalating: idle/completed claws
@@ -3340,7 +3336,12 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		} else if msg.Type == "session_rotated" {
-			go s.enqueueSessionRotatedResume(clawID)
+			var edge struct {
+				SessionKey string `json:"session_key"`
+			}
+			raw, _ := json.Marshal(msg.Payload)
+			_ = json.Unmarshal(raw, &edge)
+			go s.noteSessionLoss(cc, clawID, edge.SessionKey, "session_rotated")
 		} else if msg.Type == "session_preserved" {
 			// A preserved turn positively proves the transport reached the agent,
 			// even though it has no reply body to reach observeTurnOutcome.
@@ -8623,10 +8624,48 @@ const (
 	restartResumePrefix                = "[hub] Agent process restart detected."
 	sessionRotatedResumePrefix         = "[hub] OpenClaw session reset detected."
 	sessionPreservedContinuationPrefix = "[hub] OpenClaw session preserved after lock conflict."
+	sessionLossPendingNotice           = "[hub] Your previous session was lost, so you have no memory of the earlier conversation. Your workspace on disk is intact. Before continuing, recover the current state from the workspace (including git status); do not start over from scratch.\n\n"
 )
 
-func (s *Server) enqueueRestartResume(clawID string, restartCount int) {
-	s.enqueueSessionLostResume(clawID, restartResumePrefix, fmt.Sprintf("restart:%d", restartCount))
+// noteSessionLoss records one session-loss incident, identified by the key of
+// the session that replaced the lost one. The same incident is detected up to
+// three ways (the bridge edge, the live-key change, the restart-count change);
+// keying on the new session key collapses them into one prompt without
+// collapsing two genuinely separate losses, which a time-based throttle could
+// not distinguish.
+func (s *Server) noteSessionLoss(cc *clawConn, clawID, newKey, source string) {
+	cc.mu.Lock()
+	if newKey != "" && newKey == cc.announcedSessionLossKey {
+		cc.mu.Unlock()
+		log.Printf("[watchdog] skipping duplicate session loss for %s: session=%s source=%s", shortID(clawID), shortID(newKey), source)
+		return
+	}
+	if newKey != "" {
+		cc.announcedSessionLossKey = newKey
+	}
+	turnOpenOrRecent := !cc.streamingStartedAt.IsZero() || cc.awaitingResponse ||
+		(!cc.lastTurnFinishedAt.IsZero() && time.Since(cc.lastTurnFinishedAt) < autoResumeRecentTurnWindow)
+	cc.mu.Unlock()
+	if !turnOpenOrRecent {
+		// A lost transcript for an idle claw does not justify making it act on
+		// its own. The next real message will use the new session. This leaves
+		// a known gap: an idle claw is not told that its transcript was lost.
+		log.Printf("[watchdog] skipping session-loss resume for %s: claw is idle (source=%s)", shortID(clawID), source)
+		return
+	}
+	if source == "session_rotated" {
+		s.enqueueSessionRotatedResume(clawID)
+		return
+	}
+	// A live session key makes the marker stable across all reports of this
+	// incident, while still distinguishing a later loss. Old bridges do not
+	// send a key; preserve their historical no-dedup behavior with a fresh
+	// marker for every report.
+	marker := "restart:" + newKey
+	if newKey == "" {
+		marker = "restart:" + uuid.NewString()
+	}
+	s.enqueueSessionLostResume(clawID, restartResumePrefix, marker)
 }
 
 // sessionRotatedResumeThrottle bounds the rotation → resume → rotation loop:
@@ -8658,17 +8697,6 @@ func (s *Server) enqueueSessionRotatedResume(clawID string) {
 	cc := s.claws[clawID]
 	s.mu.RUnlock()
 	if cc == nil {
-		return
-	}
-	cc.mu.RLock()
-	turnOpenOrRecent := !cc.streamingStartedAt.IsZero() || cc.awaitingResponse ||
-		(!cc.lastTurnFinishedAt.IsZero() && time.Since(cc.lastTurnFinishedAt) < autoResumeRecentTurnWindow)
-	cc.mu.RUnlock()
-	if !turnOpenOrRecent {
-		// A lost transcript for an idle claw does not justify making it act on
-		// its own. The next real message will use the new session. This leaves
-		// a known gap: an idle claw is not told that its transcript was lost.
-		log.Printf("[watchdog] skipping session-rotated resume for %s: claw is idle", shortID(clawID))
 		return
 	}
 	var recent int
