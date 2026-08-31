@@ -149,14 +149,16 @@ const (
 type queuedKind int
 
 const (
-	queuedInput  queuedKind = iota // user message not yet processed
-	queuedReply                    // completed agent reply awaiting delivery
-	queuedNotice                   // error notice to surface to the hub
+	queuedInput   queuedKind = iota // user message not yet processed
+	queuedReply                     // completed agent reply awaiting delivery
+	queuedNotice                    // error notice to surface to the hub
+	queuedControl                   // recovery edge awaiting delivery to the hub
 )
 
 type queuedMsg struct {
 	kind     queuedKind
 	content  string
+	control  hubMsg
 	queuedAt time.Time
 }
 
@@ -235,6 +237,15 @@ func (q *msgQueue) pushReply(content string) {
 	q.enqueueLocked(queuedMsg{kind: queuedReply, content: content, queuedAt: time.Now()})
 }
 
+// pushControl queues a recovery edge that could not be written. It must be
+// replayed before its empty reply: the hub only continues a preserved session
+// after seeing this edge, while the reply alone is intentionally discarded.
+func (q *msgQueue) pushControl(msg hubMsg) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.enqueueLocked(queuedMsg{kind: queuedControl, control: msg, queuedAt: time.Now()})
+}
+
 // requeue re-inserts an entry preserving its original queuedAt (used when a
 // queued reply/notice fails to deliver again).
 func (q *msgQueue) requeue(m queuedMsg) {
@@ -273,14 +284,20 @@ func (q *msgQueue) drain() []queuedMsg {
 	return out
 }
 
-// replayQueued delivers queued entries after reconnect. Completed replies and
-// notices are written directly to the hub; only unprocessed inputs re-run a turn.
-func replayQueued(queue *msgQueue, deliver func(role, content string) error, runTurn func(content string)) {
+// replayQueued delivers queued entries after reconnect. Completed replies,
+// notices, and recovery edges are written directly to the hub; only unprocessed
+// inputs re-run a turn.
+func replayQueued(queue *msgQueue, deliver func(role, content string) error, deliverControl func(hubMsg) error, runTurn func(content string)) {
 	for _, m := range queue.drain() {
 		switch m.kind {
 		case queuedReply, queuedNotice:
 			if err := deliver("claw", m.content); err != nil {
 				log.Printf("[bridge] replay deliver failed, re-queuing: %v", err)
+				queue.requeue(m)
+			}
+		case queuedControl:
+			if err := deliverControl(m.control); err != nil {
+				log.Printf("[bridge] replay recovery edge failed, re-queuing: %v", err)
 				queue.requeue(m)
 			}
 		default: // queuedInput
@@ -2346,8 +2363,7 @@ func (gs *gatewaySession) createFreshSession(ctx context.Context, reason string)
 	return nil
 }
 
-func (gs *gatewaySession) abortActiveSession(ctx context.Context) error {
-	key := gs.getSessionKey()
+func (gs *gatewaySession) abortSession(ctx context.Context, key string) error {
 	if key == "" {
 		return nil
 	}
@@ -2357,10 +2373,43 @@ func (gs *gatewaySession) abortActiveSession(ctx context.Context) error {
 	return nil
 }
 
+// probeSession verifies that the existing persistent session remains usable
+// without sending another turn. It is deliberately read-only: a lifecycle
+// failure can happen after OpenClaw accepted the original message, so replaying
+// it could duplicate tool side effects.
+func (gs *gatewaySession) probeSession(ctx context.Context, key string) error {
+	if key == "" {
+		return fmt.Errorf("cannot probe session without a session key")
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	_, err := gs.sendReq(probeCtx, "sessions.describe", map[string]string{"key": key})
+	return err
+}
+
 // providerRequestFormatErrorFragment is emitted by OpenClaw when a provider
 // rejects the assembled request schema or tool payload. Session recovery
 // depends on this upstream compatibility string, so keep the coupling explicit.
 const providerRequestFormatErrorFragment = "provider rejected the request schema or tool payload"
+
+const (
+	sessionRotatedErrorSuffix   = "OpenClaw session reset so the next message can continue"
+	sessionPreservedErrorSuffix = "OpenClaw session preserved; the turn was aborted but its history is intact"
+)
+
+// sessionPreservedError records the session that a read-only probe verified.
+// The key is checked again immediately before notifying the hub because a
+// concurrent reconnect may replace the session after SendMessage returns.
+type sessionPreservedError struct {
+	err error
+	key string
+}
+
+func (e *sessionPreservedError) Error() string {
+	return fmt.Sprintf("%v; %s", e.err, sessionPreservedErrorSuffix)
+}
+
+func (e *sessionPreservedError) Unwrap() error { return e.err }
 
 func isRecoverableSessionSendError(err error) bool {
 	var sendErr *sessionSendRequestError
@@ -2401,8 +2450,8 @@ func isRecoverableSessionLifecycleError(err error) bool {
 
 // isSessionFileLockConflictError detects OpenClaw's "session file changed while
 // embedded prompt lock was released" error. That error indicates the on-disk
-// session transcript was modified unexpectedly, leaving the persistent session
-// in an inconsistent state. Rotating to a fresh session is the only recovery.
+// session transcript was modified unexpectedly. A read-only probe determines
+// whether the persistent session survived before recovery discards it.
 func isSessionFileLockConflictError(err error) bool {
 	if err == nil {
 		return false
@@ -2421,6 +2470,12 @@ func isSessionFileLockConflictError(err error) bool {
 // would discard. A variable so tests can shorten it.
 var sessionLockConflictRetryDelays = []time.Duration{500 * time.Millisecond, time.Second, 2 * time.Second, 4 * time.Second}
 
+// sessionMismatchCheckHook is a test seam invoked right before SendMessage
+// checks the turn key against the current session key in its lock-conflict
+// recovery path. Tests can override it to land a concurrent rotation exactly
+// inside that otherwise-unhittable-by-timing window. A no-op in production.
+var sessionMismatchCheckHook = func() {}
+
 // isSessionRotatedError reports whether SendMessage recovered from a session
 // lock conflict by rotating to a fresh session. In that case the original turn
 // cannot be completed, but the next hub message can continue. The bridge should
@@ -2428,10 +2483,81 @@ var sessionLockConflictRetryDelays = []time.Duration{500 * time.Millisecond, tim
 // workflow pipeline), but it should still close the turn so the hub drains the
 // next queued message.
 func isSessionRotatedError(err error) bool {
-	if err == nil {
-		return false
+	return err != nil && strings.Contains(err.Error(), sessionRotatedErrorSuffix) && !strings.Contains(err.Error(), sessionPreservedErrorSuffix)
+}
+
+// isSessionPreservedError reports a read-only probe confirmed that a mid-turn
+// lock conflict did not discard the persistent transcript.
+func isSessionPreservedError(err error) bool {
+	return err != nil && strings.Contains(err.Error(), sessionPreservedErrorSuffix) && !strings.Contains(err.Error(), sessionRotatedErrorSuffix)
+}
+
+func preservedSessionKey(err error) (string, bool) {
+	var preserved *sessionPreservedError
+	if errors.As(err, &preserved) {
+		return preserved.key, true
 	}
-	return strings.Contains(err.Error(), "OpenClaw session reset so the next message can continue")
+	return "", false
+}
+
+// sessionRecoveryOutcome decides which hub edge a finished turn's error maps
+// to. currentKey is read at emit time: a readLoop reconnect can rotate the
+// session after SendMessage decided the session survived, and announcing
+// "history intact" into a fresh empty session would tell the agent to
+// continue work it cannot see.
+func sessionRecoveryOutcome(agentErr error, currentKey string) string {
+	if preservedKey, ok := preservedSessionKey(agentErr); ok {
+		if preservedKey == currentKey {
+			return "preserved"
+		}
+		return "rotated"
+	}
+	if isSessionRotatedError(agentErr) {
+		return "rotated"
+	}
+	return ""
+}
+
+func reportSessionRecovery(agentErr error, reply *string, gwSession *gatewaySession, writeActivity func(agentActivity), writeHub func(hubMsg) error, queue *msgQueue) bool {
+	currentKey := gwSession.getSessionKey()
+	outcome := sessionRecoveryOutcome(agentErr, currentKey)
+	if outcome == "preserved" {
+		writeActivity(agentActivity{Kind: "session_preserved", Message: fmt.Sprintf("OpenClaw session preserved after lock conflict; continuing from intact history (%v)", agentErr)})
+		*reply = ""
+		// This check and notification cannot be atomic without holding the session
+		// lock across a network write. A reconnect can still replace the session in
+		// this tiny gap; that is acceptable because continuation prompts require git
+		// status before repeating work, while locking during I/O would be riskier.
+		edge := hubMsg{Type: "session_preserved"}
+		if err := writeHub(edge); err != nil {
+			log.Printf("[bridge] recovery edge write failed, queuing for replay: %v", err)
+			queue.pushControl(edge)
+		}
+	} else if outcome == "rotated" {
+		activityMessage := fmt.Sprintf("OpenClaw session rotated to recover from lock conflict; waiting for next message (%v)", agentErr)
+		if preservedKey, ok := preservedSessionKey(agentErr); ok && preservedKey != currentKey {
+			activityMessage = fmt.Sprintf("OpenClaw session was replaced by a concurrent reconnect after lock conflict; waiting for next message (%v)", agentErr)
+		}
+		writeActivity(agentActivity{Kind: "session_rotated", Message: activityMessage})
+		*reply = ""
+		edge := hubMsg{Type: "session_rotated"}
+		if err := writeHub(edge); err != nil {
+			log.Printf("[bridge] recovery edge write failed, queuing for replay: %v", err)
+			queue.pushControl(edge)
+		}
+	}
+	return outcome != ""
+}
+
+func sessionLockConflictProbeBudget() time.Duration {
+	var budget time.Duration
+	for range sessionLockConflictRetryDelays {
+		budget += 5 * time.Second
+	}
+	for _, delay := range sessionLockConflictRetryDelays {
+		budget += delay
+	}
+	return budget + 5*time.Second
 }
 
 // SendMessage sends a user message to the persistent session, streams chunks
@@ -2446,7 +2572,11 @@ func (gs *gatewaySession) SendMessage(ctx context.Context, message string, onChu
 	lockConflictRetries := 0
 	for attempt := 0; ; attempt++ {
 		conn := gs.currentConn()
-		reply, err := gs.sendMessageOnce(ctx, message, onChunk, onActivity)
+		// Anchor the session to the turn when it is sent. readLoop can replace
+		// the session without sendMu; announcing intact history for a different
+		// session would tell the agent to continue work it cannot see.
+		turnKey := gs.getSessionKey()
+		reply, err := gs.sendMessageOnce(ctx, turnKey, message, onChunk, onActivity)
 		// Retry only failures from the initial sessions.send request. Once the
 		// request is accepted, chunks may already be visible to the UI, so stream
 		// or lifecycle errors must not replay the turn.
@@ -2485,8 +2615,9 @@ func (gs *gatewaySession) SendMessage(ctx context.Context, message string, onChu
 		// was never accepted, so replaying the same message on the same session
 		// is safe. The previous turn is likely still flushing its session file;
 		// back off and retry before considering rotation, which would discard
-		// the transcript. Mid-turn lifecycle lock conflicts are excluded above:
-		// those turns may already have side effects and must not be retried.
+		// the transcript. Mid-turn lifecycle lock conflicts are handled below
+		// with read-only probes only: those turns may already have side effects
+		// and must not be retried.
 		var sendReqErr *sessionSendRequestError
 		if errors.As(err, &sendReqErr) && isSessionFileLockConflictError(err) && lockConflictRetries < len(sessionLockConflictRetryDelays) {
 			delay := sessionLockConflictRetryDelays[lockConflictRetries]
@@ -2500,11 +2631,53 @@ func (gs *gatewaySession) SendMessage(ctx context.Context, message string, onChu
 			continue
 		}
 		if isRecoverableSessionLifecycleError(err) {
+			// Test seam: lets tests land a concurrent rotation exactly between
+			// the turn's lifecycle error and this mismatch check, which is
+			// otherwise a window too narrow to hit reliably by timing alone.
+			// No-op in production.
+			sessionMismatchCheckHook()
+			if isSessionFileLockConflictError(err) && gs.getSessionKey() != turnKey {
+				return reply, fmt.Errorf("%w; %s", err, sessionRotatedErrorSuffix)
+			}
 			abortCtx, abortCancel := context.WithTimeout(context.Background(), 5*time.Second)
-			abortErr := gs.abortActiveSession(abortCtx)
+			abortErr := gs.abortSession(abortCtx, turnKey)
 			abortCancel()
 			if abortErr != nil {
 				log.Printf("[session] failed to abort poisoned session before recovery: %v", abortErr)
+			}
+			if isSessionFileLockConflictError(err) {
+				origKey := turnKey
+				// Recovery must finish even when the accepted turn's deadline has
+				// elapsed: it only performs read-only probes, then establishes a
+				// continuation edge without replaying that turn.
+				probeCtx, probeCancel := context.WithTimeout(context.Background(), sessionLockConflictProbeBudget())
+				for probeAttempt, delay := range sessionLockConflictRetryDelays {
+					log.Printf("[gateway] mid-turn session file lock conflict; probing same session after %s (attempt %d/%d): %v", delay, probeAttempt+1, len(sessionLockConflictRetryDelays), err)
+					select {
+					case <-time.After(delay):
+					case <-probeCtx.Done():
+						break
+					}
+					if probeCtx.Err() != nil {
+						break
+					}
+					if gs.getSessionKey() != origKey {
+						probeCancel()
+						return reply, fmt.Errorf("%w; %s", err, sessionRotatedErrorSuffix)
+					}
+					if probeErr := gs.probeSession(probeCtx, origKey); probeErr == nil {
+						if gs.getSessionKey() != origKey {
+							probeCancel()
+							return reply, fmt.Errorf("%w; %s", err, sessionRotatedErrorSuffix)
+						}
+						probeCancel()
+						log.Printf("[session] preserved session after mid-turn lock conflict")
+						return reply, &sessionPreservedError{err: err, key: origKey}
+					} else {
+						log.Printf("[session] probe after mid-turn lock conflict failed: %v", probeErr)
+					}
+				}
+				probeCancel()
 			}
 			recoveryCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			resetErr := gs.createFreshSession(recoveryCtx, err.Error())
@@ -2512,19 +2685,25 @@ func (gs *gatewaySession) SendMessage(ctx context.Context, message string, onChu
 			if resetErr != nil {
 				return reply, fmt.Errorf("%w; session recovery failed: %v", err, resetErr)
 			}
-			return reply, fmt.Errorf("%w; OpenClaw session reset so the next message can continue", err)
+			return reply, fmt.Errorf("%w; %s", err, sessionRotatedErrorSuffix)
 		}
 		// Same-session retries exhausted: rotate as a last resort and surface
 		// the reset error instead of silently replaying, so the hub injects a
 		// resume prompt with task context into the fresh session.
 		if errors.As(err, &sendReqErr) && isSessionFileLockConflictError(err) {
+			abortCtx, abortCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			abortErr := gs.abortSession(abortCtx, turnKey)
+			abortCancel()
+			if abortErr != nil {
+				log.Printf("[session] failed to abort session before recovery after exhausted retries: %v", abortErr)
+			}
 			recoveryCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			resetErr := gs.createFreshSession(recoveryCtx, err.Error())
 			cancel()
 			if resetErr != nil {
 				return "", fmt.Errorf("%w; session recovery failed: %v", err, resetErr)
 			}
-			return "", fmt.Errorf("%w; OpenClaw session reset so the next message can continue", err)
+			return "", fmt.Errorf("%w; %s", err, sessionRotatedErrorSuffix)
 		}
 		if !isRecoverableSessionSendError(err) {
 			return reply, err
@@ -2541,11 +2720,11 @@ func (gs *gatewaySession) SendMessage(ctx context.Context, message string, onChu
 		}
 
 		log.Printf("[session] retrying message in fresh session after recoverable error")
-		return gs.sendMessageOnce(ctx, message, onChunk, onActivity)
+		return gs.sendMessageOnce(ctx, gs.getSessionKey(), message, onChunk, onActivity)
 	}
 }
 
-func (gs *gatewaySession) sendMessageOnce(ctx context.Context, message string, onChunk func(string), onActivity func(agentActivity)) (string, error) {
+func (gs *gatewaySession) sendMessageOnce(ctx context.Context, turnKey, message string, onChunk func(string), onActivity func(agentActivity)) (string, error) {
 	inf := &inFlightState{
 		onChunk:    onChunk,
 		onActivity: onActivity,
@@ -2562,7 +2741,7 @@ func (gs *gatewaySession) sendMessageOnce(ctx context.Context, message string, o
 
 	// Send the message
 	_, err := gs.sendReq(ctx, "sessions.send", map[string]string{
-		"key":     gs.getSessionKey(),
+		"key":     turnKey,
 		"message": message,
 	})
 	if err != nil {
@@ -4782,12 +4961,7 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 				writeActivity(activity)
 			})
 			if agentErr != nil {
-				if isSessionRotatedError(agentErr) {
-					writeActivity(agentActivity{Kind: "session_rotated", Message: fmt.Sprintf("OpenClaw session rotated to recover from lock conflict; waiting for next message (%v)", agentErr)})
-					reply = ""
-					// Notify the hub so it can inject a resume prompt with context.
-					_ = writeHub(hubMsg{Type: "session_rotated"})
-				} else {
+				if !reportSessionRecovery(agentErr, &reply, gwSession, writeActivity, writeHub, queue) {
 					reply = fmt.Sprintf("%s %v", types.BridgeReplayErrorPrefix, agentErr)
 				}
 			}
@@ -4799,7 +4973,7 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 			}
 		}(content)
 	}
-	replayQueued(queue, deliver, runTurn)
+	replayQueued(queue, deliver, writeHub, runTurn)
 
 	// Wire up the HTTP proxy send function for this connection
 	proxy.mu.Lock()
@@ -4925,12 +5099,7 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 				})
 				if agentErr != nil {
 					log.Printf("[bridge] ✗ agent error: %v", agentErr)
-					if isSessionRotatedError(agentErr) {
-						writeActivity(agentActivity{Kind: "session_rotated", Message: fmt.Sprintf("OpenClaw session rotated to recover from lock conflict; waiting for next message (%v)", agentErr)})
-						reply = ""
-						// Notify the hub so it can inject a resume prompt with context.
-						_ = writeHub(hubMsg{Type: "session_rotated"})
-					} else {
+					if !reportSessionRecovery(agentErr, &reply, gwSession, writeActivity, writeHub, queue) {
 						reply = fmt.Sprintf("%s %v", types.BridgeErrorPrefix, agentErr)
 					}
 				} else {
