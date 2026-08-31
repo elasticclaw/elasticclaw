@@ -63,8 +63,6 @@ type Server struct {
 	mu    sync.RWMutex
 	claws map[string]*clawConn // claw_id -> conn
 	users map[string]*userConn // tenant_id -> []conn (broadcast)
-	// sessionLostResumeMu makes the shared throttle check and enqueue atomic.
-	sessionLostResumeMu sync.Mutex
 	// gatewayRestartCounts retains the heartbeat counter across WebSocket reconnects.
 	gatewayRestartCounts map[string]int
 	// gatewayUnhealthyCounts survives WebSocket reconnects so flapping gateways still escalate.
@@ -8619,13 +8617,21 @@ func (s *Server) enqueueRestartResume(clawID string, restartCount int) {
 	s.enqueueSessionLostResume(clawID, restartResumePrefix, fmt.Sprintf("restart:%d", restartCount))
 }
 
-// sessionLostResumeThrottle bounds repeated session-loss recovery prompts.
-// Two real incidents inside this window collapse into one prompt because a
-// duplicate recovery is more harmful than a delayed second recovery.
-const sessionLostResumeThrottle = 10 * time.Minute
+// sessionRotatedResumeThrottle bounds the rotation → resume → rotation loop:
+// if lock conflicts persist across fresh sessions (e.g. another process keeps
+// touching the session files), each rotation would otherwise enqueue another
+// resume prompt indefinitely — rotation turns complete with an empty reply,
+// so the no-progress watchdog never observes them.
+//
+// It is deliberately scoped to the rotation prefix. A shared throttle across
+// rotation and restart was tried to stop one incident producing two prompts,
+// and reverted: it also swallowed the announcement of a genuinely separate
+// restart, which is the silent session loss this work exists to end. The
+// duplicate is truthful and costs one turn; the collapse costs correctness.
+const sessionRotatedResumeThrottle = 10 * time.Minute
 
 // sessionPreservedContinuationThrottle bounds the conflict -> continuation ->
-// conflict loop, the same way sessionLostResumeThrottle does for session loss.
+// conflict loop, the same way sessionRotatedResumeThrottle does for rotation.
 //
 // Known limitation: unlike a rotation, the same session can legitimately need a
 // second continuation inside the window, and this throttle drops it silently —
@@ -8651,6 +8657,13 @@ func (s *Server) enqueueSessionRotatedResume(clawID string) {
 		// its own. The next real message will use the new session. This leaves
 		// a known gap: an idle claw is not told that its transcript was lost.
 		log.Printf("[watchdog] skipping session-rotated resume for %s: claw is idle", shortID(clawID))
+		return
+	}
+	var recent int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND role='hub' AND content LIKE ? AND created_at > ?`,
+		clawID, sessionRotatedResumePrefix+"%", now().Add(-sessionRotatedResumeThrottle)).Scan(&recent)
+	if err == nil && recent > 0 {
+		log.Printf("[watchdog] skipping session-rotated resume for %s: already resumed within %s", shortID(clawID), sessionRotatedResumeThrottle)
 		return
 	}
 	s.enqueueSessionLostResume(clawID, sessionRotatedResumePrefix, fmt.Sprintf("session_rotated:%s", uuid.NewString()))
@@ -8703,19 +8716,9 @@ func (s *Server) lastSubstantiveClawProgress(clawID string) (string, time.Time) 
 }
 
 func (s *Server) enqueueSessionLostResume(clawID, prefix, marker string) {
-	s.sessionLostResumeMu.Lock()
-	defer s.sessionLostResumeMu.Unlock()
-
-	var recent int
-	err := s.db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND role='hub' AND (content LIKE ? OR content LIKE ?) AND created_at > ?`,
-		clawID, restartResumePrefix+"%", sessionRotatedResumePrefix+"%", now().Add(-sessionLostResumeThrottle)).Scan(&recent)
-	if err == nil && recent > 0 {
-		log.Printf("[watchdog] skipping session-loss resume for %s: already resumed within %s", shortID(clawID), sessionLostResumeThrottle)
-		return
-	}
 	var status, issueTitle, linearID, githubID, shortcutID, jiraID string
 	var bootstrapOK int
-	err = s.db.QueryRow(`SELECT status, COALESCE(bootstrap_ok,0), COALESCE(issue_title,''), COALESCE(linear_issue_id,''), COALESCE(github_issue_id,''), COALESCE(shortcut_story_id,''), COALESCE(jira_issue_id,'') FROM claws WHERE id=?`, clawID).Scan(&status, &bootstrapOK, &issueTitle, &linearID, &githubID, &shortcutID, &jiraID)
+	err := s.db.QueryRow(`SELECT status, COALESCE(bootstrap_ok,0), COALESCE(issue_title,''), COALESCE(linear_issue_id,''), COALESCE(github_issue_id,''), COALESCE(shortcut_story_id,''), COALESCE(jira_issue_id,'') FROM claws WHERE id=?`, clawID).Scan(&status, &bootstrapOK, &issueTitle, &linearID, &githubID, &shortcutID, &jiraID)
 	if err != nil {
 		return
 	}
