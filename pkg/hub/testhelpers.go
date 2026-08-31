@@ -163,3 +163,15 @@ func (s *Server) ClearWebhookDedupForTest() {
 		delete(s.webhookDedup, k)
 	}
 }
+
+// InitDBForTest creates and migrates a hub database at path, then closes it.
+// Commands such as backfill-access no longer migrate on their own, so tests
+// outside this package need a way to produce a database the hub would have
+// created. Only call from tests.
+func InitDBForTest(path string) error {
+	db, err := openDB(path)
+	if err != nil {
+		return err
+	}
+	return db.Close()
+}

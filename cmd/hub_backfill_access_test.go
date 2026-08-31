@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/elasticclaw/elasticclaw/pkg/hub"
 	_ "modernc.org/sqlite"
 )
 
@@ -98,14 +99,84 @@ func TestHubBackfillAccessCommand(t *testing.T) {
 		}
 	})
 
+	t.Run("missing database is an error and creates no file", func(t *testing.T) {
+		dir := t.TempDir()
+		dbPath := filepath.Join(dir, "typo.db")
+		configPath := writeBackfillAccessConfig(t, dir, []string{"admin@example.com"})
+		_, err := runBackfillAccessCommand(t, dbPath, configPath, false)
+		if err == nil || !strings.Contains(err.Error(), dbPath) {
+			t.Fatalf("error = %v, want a failure naming %s", err, dbPath)
+		}
+		if _, statErr := os.Stat(dbPath); !os.IsNotExist(statErr) {
+			t.Fatalf("stat %s = %v, want the file to be absent", dbPath, statErr)
+		}
+	})
+
+	t.Run("database without access tables is an error", func(t *testing.T) {
+		dir := t.TempDir()
+		dbPath := filepath.Join(dir, "hub.db")
+		db, err := sql.Open("sqlite", dbPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(`CREATE TABLE tenants (id TEXT PRIMARY KEY)`); err != nil {
+			t.Fatal(err)
+		}
+		if err := db.Close(); err != nil {
+			t.Fatal(err)
+		}
+		configPath := writeBackfillAccessConfig(t, dir, []string{"admin@example.com"})
+		_, err = runBackfillAccessCommand(t, dbPath, configPath, false)
+		if err == nil || !strings.Contains(err.Error(), "start the hub once") {
+			t.Fatalf("error = %v, want a hint to start the hub first", err)
+		}
+	})
+
+	t.Run("dry run reports the same rows as the real run", func(t *testing.T) {
+		admins, logins := []string{"admin@example.com"}, []string{"reader@example.com"}
+		// Two identical databases: one previewed, one written. Comparing their
+		// output pins the dry run to the write path's decisions.
+		previewDB, previewConfig := newBackfillAccessFixture(t, admins, logins)
+		writeDB, writeConfig := newBackfillAccessFixture(t, admins, logins)
+		preview, err := runBackfillAccessCommand(t, previewDB, previewConfig, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		written, err := runBackfillAccessCommand(t, writeDB, writeConfig, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if preview != written {
+			t.Fatalf("dry run output %q != real run output %q", preview, written)
+		}
+		// Repeat over a mixed state so "updated" and "unchanged" are compared too.
+		for _, dbPath := range []string{previewDB, writeDB} {
+			if _, err := runBackfillAccessCommand(t, dbPath, writeConfig, false); err != nil {
+				t.Fatal(err)
+			}
+			execBackfillSQL(t, dbPath, `UPDATE users SET role_id='reader', active=0 WHERE login='admin@example.com'`)
+		}
+		preview, err = runBackfillAccessCommand(t, previewDB, previewConfig, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		written, err = runBackfillAccessCommand(t, writeDB, writeConfig, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if preview != written {
+			t.Fatalf("dry run output %q != real run output %q on mixed state", preview, written)
+		}
+	})
+
 	t.Run("missing admins warns and writes nothing", func(t *testing.T) {
 		dbPath, configPath := newBackfillAccessFixture(t, nil, []string{"reader@example.com"})
 		_, err := runBackfillAccessCommand(t, dbPath, configPath, false)
 		if err == nil || !strings.Contains(err.Error(), "auth.access.admins is empty") {
 			t.Fatalf("error = %v, want missing administrators warning", err)
 		}
-		if backfillTableExists(t, dbPath, "users") {
-			t.Fatal("missing-admin invocation created the users table")
+		if got := backfillUserCount(t, dbPath); got != 0 {
+			t.Fatalf("missing-admin invocation wrote %d users", got)
 		}
 	})
 }
@@ -114,13 +185,16 @@ func newBackfillAccessFixture(t *testing.T, admins, messageLogins []string) (str
 	t.Helper()
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "hub.db")
+	// The command no longer migrates, so the fixture builds the schema the same
+	// way a hub start would.
+	if err := hub.InitDBForTest(dbPath); err != nil {
+		t.Fatal(err)
+	}
 	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = db.Exec(`CREATE TABLE tenants (id TEXT PRIMARY KEY, name TEXT NOT NULL, token TEXT NOT NULL UNIQUE, claw_token TEXT NOT NULL UNIQUE, created_at DATETIME NOT NULL);
-		CREATE TABLE messages (id TEXT PRIMARY KEY, claw_id TEXT NOT NULL, tenant_id TEXT NOT NULL, role TEXT NOT NULL, content TEXT NOT NULL, format TEXT NOT NULL DEFAULT '', user_login TEXT, created_at DATETIME NOT NULL, delivered_at DATETIME);
-		INSERT INTO tenants(id,name,token,claw_token,created_at) VALUES('tenant','test','token','claw-token',datetime('now'))`)
+	_, err = db.Exec(`INSERT INTO tenants(id,name,token,claw_token,created_at) VALUES('tenant','test','token','claw-token',datetime('now'))`)
 	if err != nil {
 		db.Close()
 		t.Fatal(err)
@@ -134,6 +208,11 @@ func newBackfillAccessFixture(t *testing.T, admins, messageLogins []string) (str
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
+	return dbPath, writeBackfillAccessConfig(t, dir, admins)
+}
+
+func writeBackfillAccessConfig(t *testing.T, dir string, admins []string) string {
+	t.Helper()
 	configPath := filepath.Join(dir, "hub.yaml")
 	config := "auth:\n  access:\n"
 	if admins != nil {
@@ -145,7 +224,7 @@ func newBackfillAccessFixture(t *testing.T, admins, messageLogins []string) (str
 	if err := os.WriteFile(configPath, []byte(config), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	return dbPath, configPath
+	return configPath
 }
 
 func runBackfillAccessCommand(t *testing.T, dbPath, configPath string, dryRun bool) (string, error) {
@@ -202,20 +281,6 @@ func backfillTableCount(t *testing.T, dbPath, table string) int {
 		t.Fatal(err)
 	}
 	return count
-}
-
-func backfillTableExists(t *testing.T, dbPath, table string) bool {
-	t.Helper()
-	db, err := sql.Open("sqlite", dbPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	var count int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?`, table).Scan(&count); err != nil {
-		t.Fatal(err)
-	}
-	return count != 0
 }
 
 func execBackfillSQL(t *testing.T, dbPath, query string) {

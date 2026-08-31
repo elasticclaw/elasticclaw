@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -484,30 +485,56 @@ func (s *Server) changeUser(tenant, login, field string, value any) error {
 
 type AccessBackfillRow struct{ Tenant, Login, Role, Action string }
 
+// backfillQuerier is the read surface shared by *sql.DB and *sql.Tx, so the
+// dry run can reuse the real run's queries without holding a transaction.
+type backfillQuerier interface {
+	Query(query string, args ...any) (*sql.Rows, error)
+	QueryRow(query string, args ...any) *sql.Row
+}
+
+// openBackfillDB opens an existing hub database without migrating it.
+//
+// This command runs against the live hub's database, so it must not be a second
+// migrator: migrate() applies write-heavy rebuilds that abort halfway (or, for
+// the legacy steps that discard their error, half-apply in silence) when the hub
+// holds a write transaction. It also must not let SQLite create the file, or a
+// typo in --db would leave an empty database behind for a later hub start to
+// migrate into a blank hub. The DSN mirrors openDB's, _txlock=immediate
+// included: without it Begin() opens DEFERRED, and the read-then-write order of
+// the backfill turns a concurrent hub commit into SQLITE_BUSY_SNAPSHOT, which
+// the busy handler does not retry.
+func openBackfillDB(dbPath string) (*sql.DB, error) {
+	if _, err := os.Stat(dbPath); err != nil {
+		return nil, fmt.Errorf("hub database %s: %w", dbPath, err)
+	}
+	db, err := sql.Open("sqlite", dbPath+"?_time_format=sqlite&_txlock=immediate&_pragma=journal_mode(WAL)&_pragma=foreign_keys(on)&_pragma=busy_timeout(5000)")
+	if err != nil {
+		return nil, fmt.Errorf("open db: %w", err)
+	}
+	if err = requireAccessTables(db); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	return db, nil
+}
+
+func requireAccessTables(db *sql.DB) error {
+	var found int
+	err := db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type='table' AND name IN ('users','roles','permissions','role_permissions')`).Scan(&found)
+	if err != nil {
+		return fmt.Errorf("inspect access control tables: %w", err)
+	}
+	if found != 4 {
+		return errors.New("access control tables are missing; start the hub once on this version to create and seed them before running the backfill")
+	}
+	return nil
+}
+
 // BackfillAccess seeds the users table from the configured administrators and
 // from historical message authors. It runs once per tenant: the admin list is
 // hub-wide, and every tenant needs at least one active admin of its own, so a
 // tenant that only shows up in the messages table must not be left without one.
 func BackfillAccess(dbPath string, admins []string, dryRun bool) ([]AccessBackfillRow, error) {
-	if len(admins) == 0 {
-		return nil, errors.New("auth.access.admins is empty; refusing backfill without an administrator")
-	}
-	var db *sql.DB
-	var err error
-	if dryRun {
-		db, err = sql.Open("sqlite", dbPath+"?_time_format=sqlite&_pragma=foreign_keys(on)&_pragma=busy_timeout(5000)")
-	} else {
-		db, err = openDB(dbPath)
-	}
-	if err != nil {
-		return nil, err
-	}
-	defer db.Close()
-	tx, err := db.Begin()
-	if err != nil {
-		return nil, err
-	}
-	defer tx.Rollback()
 	adminSet := map[string]bool{}
 	for _, login := range admins {
 		if login = normalizeLogin(login); login != "" {
@@ -522,13 +549,42 @@ func BackfillAccess(dbPath string, admins []string, dryRun bool) ([]AccessBackfi
 		adminLogins = append(adminLogins, login)
 	}
 	sort.Strings(adminLogins)
-	tenants, err := backfillTenants(tx)
+	db, err := openBackfillDB(dbPath)
+	if err != nil {
+		return nil, err
+	}
+	defer db.Close()
+	if dryRun {
+		// Purely read-only: simulating with a transaction that is rolled back
+		// would still take a write lock on the production database.
+		return backfillRows(db, nil, adminSet, adminLogins)
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	out, err := backfillRows(tx, tx, adminSet, adminLogins)
+	if err != nil {
+		return nil, err
+	}
+	if err = tx.Commit(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// backfillRows walks every tenant and reports the action for each login. It
+// applies those actions when apply is non-nil and only reads when it is nil, so
+// the dry run and the real run cannot decide differently.
+func backfillRows(q backfillQuerier, apply *sql.Tx, adminSet map[string]bool, adminLogins []string) ([]AccessBackfillRow, error) {
+	tenants, err := backfillTenants(q)
 	if err != nil {
 		return nil, err
 	}
 	var out []AccessBackfillRow
 	for _, tenant := range tenants {
-		logins, e := backfillTenantLogins(tx, tenant, adminSet, adminLogins)
+		logins, e := backfillTenantLogins(q, tenant, adminSet, adminLogins)
 		if e != nil {
 			return nil, e
 		}
@@ -537,24 +593,23 @@ func BackfillAccess(dbPath string, admins []string, dryRun bool) ([]AccessBackfi
 			if adminSet[login] {
 				role = "admin"
 			}
-			action, e := backfillUser(tx, tenant, login, role)
+			var action string
+			if apply != nil {
+				action, e = backfillUser(apply, tenant, login, role)
+			} else {
+				action, e = backfillAction(q, tenant, login, role)
+			}
 			if e != nil {
 				return nil, e
 			}
 			out = append(out, AccessBackfillRow{tenant, login, role, action})
 		}
 	}
-	if dryRun {
-		return out, nil
-	}
-	if err = tx.Commit(); err != nil {
-		return nil, err
-	}
 	return out, nil
 }
 
-func backfillTenants(tx *sql.Tx) ([]string, error) {
-	rows, err := tx.Query(`SELECT id FROM tenants ORDER BY created_at`)
+func backfillTenants(q backfillQuerier) ([]string, error) {
+	rows, err := q.Query(`SELECT id FROM tenants ORDER BY created_at`)
 	if err != nil {
 		return nil, fmt.Errorf("find tenant: %w", err)
 	}
@@ -579,9 +634,9 @@ func backfillTenants(tx *sql.Tx) ([]string, error) {
 // backfillTenantLogins returns the administrators plus the message authors that
 // belong to this tenant. Message authors are filtered by tenant_id so that a
 // login only seen in another tenant does not get an account here.
-func backfillTenantLogins(tx *sql.Tx, tenant string, adminSet map[string]bool, adminLogins []string) ([]string, error) {
+func backfillTenantLogins(q backfillQuerier, tenant string, adminSet map[string]bool, adminLogins []string) ([]string, error) {
 	logins := append([]string{}, adminLogins...)
-	rows, err := tx.Query(`SELECT DISTINCT lower(trim(user_login)) FROM messages WHERE tenant_id=? AND user_login <> '' ORDER BY 1`, tenant)
+	rows, err := q.Query(`SELECT DISTINCT lower(trim(user_login)) FROM messages WHERE tenant_id=? AND user_login <> '' ORDER BY 1`, tenant)
 	if err != nil {
 		return nil, err
 	}
@@ -598,21 +653,35 @@ func backfillTenantLogins(tx *sql.Tx, tenant string, adminSet map[string]bool, a
 	return logins, rows.Err()
 }
 
-func backfillUser(tx *sql.Tx, tenant, login, role string) (string, error) {
+// backfillAction is the single decision rule behind both the dry run and the
+// real run.
+func backfillAction(q backfillQuerier, tenant, login, role string) (string, error) {
 	var existingRole string
 	var existingActive int
-	e := tx.QueryRow(`SELECT r.name,u.active FROM users u JOIN roles r ON r.id=u.role_id WHERE u.tenant_id=? AND u.login=?`, tenant, login).Scan(&existingRole, &existingActive)
+	e := q.QueryRow(`SELECT r.name,u.active FROM users u JOIN roles r ON r.id=u.role_id WHERE u.tenant_id=? AND u.login=?`, tenant, login).Scan(&existingRole, &existingActive)
 	switch {
 	case e == sql.ErrNoRows:
-		_, e = tx.Exec(`INSERT INTO users(id,tenant_id,login,role_id,created_at,last_login_at) VALUES(?,?,?,?,?,0)`, uuid.NewString(), tenant, login, role, now().UnixMilli())
-		return "created", e
+		return "created", nil
 	case e != nil:
 		return "", e
 	case role == "admin" && (existingRole != "admin" || existingActive == 0):
+		return "updated", nil
+	}
+	return "unchanged", nil
+}
+
+func backfillUser(tx *sql.Tx, tenant, login, role string) (string, error) {
+	action, e := backfillAction(tx, tenant, login, role)
+	if e != nil {
+		return "", e
+	}
+	switch action {
+	case "created":
+		_, e = tx.Exec(`INSERT INTO users(id,tenant_id,login,role_id,created_at,last_login_at) VALUES(?,?,?,?,?,0)`, uuid.NewString(), tenant, login, role, now().UnixMilli())
+	case "updated":
 		// Promoting without reactivating would satisfy "the tenant has an
 		// admin" with an admin that cannot log in, so do both at once.
 		_, e = tx.Exec(`UPDATE users SET role_id='admin',active=1 WHERE tenant_id=? AND login=?`, tenant, login)
-		return "updated", e
 	}
-	return "unchanged", nil
+	return action, e
 }
