@@ -2,6 +2,7 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http/httptest"
 	"strings"
@@ -714,6 +715,69 @@ func TestSessionLossDifferentKeysAndMissingKeysDoNotDeduplicate(t *testing.T) {
 	s.noteSessionLoss(cc, clawID, "", "restart_count")
 	if got := count(); got != 4 {
 		t.Fatalf("resume count after two keyless reports = %d, want 4", got)
+	}
+}
+
+func TestIdleSessionLossNoticePrefixesNextMessageAndKeepsFirstNotice(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{ClawToken: "claw-token"}, "", "", "")
+	const clawID = "watchdog-idle-session-loss-notice"
+	conn := watchdogClaw(t, s, clawID)
+	cc := watchdogClawConn(t, s, clawID)
+	if _, err := db.Exec(`UPDATE claws SET status='connected', bootstrap_ok=1 WHERE id=?`, clawID); err != nil {
+		t.Fatal(err)
+	}
+	cc.mu.Lock()
+	cc.streamingStartedAt = time.Time{}
+	cc.awaitingResponse = false
+	cc.lastTurnFinishedAt = now().Add(-autoResumeRecentTurnWindow - time.Second)
+	cc.mu.Unlock()
+	s.noteSessionLoss(cc, clawID, "idle-one", "gateway_session_key")
+	s.noteSessionLoss(cc, clawID, "idle-two", "restart_count")
+	var notice string
+	if err := db.QueryRow(`SELECT pending_session_loss_notice FROM claws WHERE id=?`, clawID).Scan(&notice); err != nil {
+		t.Fatal(err)
+	}
+	if notice != sessionLossPendingNotice {
+		t.Fatalf("pending notice = %q, want first session-loss notice", notice)
+	}
+	var resumes int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND role='hub' AND content LIKE ?`, clawID, restartResumePrefix+"%").Scan(&resumes); err != nil || resumes != 0 {
+		t.Fatalf("idle resume rows=%d err=%v, want 0", resumes, err)
+	}
+	if _, err := db.Exec(`INSERT INTO messages(id,claw_id,tenant_id,role,content,created_at) VALUES(?,?,?,?,?,?)`, uuid.NewString(), clawID, "test-tenant-id", "user", "continue the task", now()); err != nil {
+		t.Fatal(err)
+	}
+	s.sendNextQueuedMessage(cc)
+	readCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	// The connection may carry unrelated async frames (e.g. a checkpoint_create
+	// request) ahead of the queued message; skip those, matching the pattern
+	// used elsewhere in this file.
+	var delivered types.WSMessage
+	for {
+		if err := wsjson.Read(readCtx, conn, &delivered); err != nil {
+			t.Fatal(err)
+		}
+		if delivered.Type == "message" {
+			break
+		}
+	}
+	payload, err := json.Marshal(delivered.Payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var message types.HubMessage
+	if err := json.Unmarshal(payload, &message); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := message.Content, sessionLossPendingNotice+"continue the task"; got != want {
+		t.Fatalf("delivered content = %q, want %q", got, want)
+	}
+	if err := db.QueryRow(`SELECT pending_session_loss_notice FROM claws WHERE id=?`, clawID).Scan(&notice); err != nil {
+		t.Fatal(err)
+	}
+	if notice != "" {
+		t.Fatalf("pending notice after delivery = %q, want empty", notice)
 	}
 }
 

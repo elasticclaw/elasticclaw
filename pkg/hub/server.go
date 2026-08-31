@@ -8647,10 +8647,15 @@ func (s *Server) noteSessionLoss(cc *clawConn, clawID, newKey, source string) {
 		(!cc.lastTurnFinishedAt.IsZero() && time.Since(cc.lastTurnFinishedAt) < autoResumeRecentTurnWindow)
 	cc.mu.Unlock()
 	if !turnOpenOrRecent {
-		// A lost transcript for an idle claw does not justify making it act on
-		// its own. The next real message will use the new session. This leaves
-		// a known gap: an idle claw is not told that its transcript was lost.
-		log.Printf("[watchdog] skipping session-loss resume for %s: claw is idle (source=%s)", shortID(clawID), source)
+		// An idle claw must not be awakened into autonomous work, but the next
+		// real prompt needs this context so it does not mistake a lost transcript
+		// for an empty workspace. Keep the first notice: more losses add no useful
+		// instruction and would make the eventual prompt noisy.
+		if res, err := s.db.Exec(`UPDATE claws SET pending_session_loss_notice=? WHERE id=? AND pending_session_loss_notice=''`, sessionLossPendingNotice, clawID); err != nil {
+			log.Printf("[watchdog] persist session-loss notice for %s: %v", shortID(clawID), err)
+		} else if n, _ := res.RowsAffected(); n > 0 {
+			log.Printf("[watchdog] recorded session-loss notice for idle claw %s (source=%s)", shortID(clawID), source)
+		}
 		return
 	}
 	if source == "session_rotated" {
@@ -8901,6 +8906,16 @@ func (s *Server) sendNextQueuedMessage(cc *clawConn) {
 	defer cancel()
 	clawMsg := msg
 	clawMsg.UserLogin = nil
+	var notice string
+	if err := s.db.QueryRow(`SELECT pending_session_loss_notice FROM claws WHERE id=?`, clawID).Scan(&notice); err != nil {
+		log.Printf("[hub] read pending session-loss notice for %s: %v", shortID(clawID), err)
+	} else if notice != "" {
+		msg.Content = notice + msg.Content
+		clawMsg.Content = msg.Content
+	}
+	// The notice is read before delivery and only cleared with the delivered
+	// transition after a successful socket write. A failed write therefore leaves
+	// it durable for the next delivery attempt.
 	err = wsjson.Write(ctx, conn, types.WSMessage{Type: "message", Payload: clawMsg})
 	if err != nil {
 		cc.mu.Lock()
@@ -8909,8 +8924,24 @@ func (s *Server) sendNextQueuedMessage(cc *clawConn) {
 		log.Printf("[hub] failed to deliver pending message to %s: %v", shortID(clawID), err)
 		return
 	}
-	if _, err := s.db.Exec(`UPDATE messages SET delivered_at=? WHERE id=? AND delivered_at IS NULL`, now(), msg.ID); err != nil {
+	tx, err := s.db.Begin()
+	if err != nil {
+		log.Printf("[hub] begin delivered-message transition %s: %v", msg.ID, err)
+		return
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`UPDATE messages SET delivered_at=? WHERE id=? AND delivered_at IS NULL`, now(), msg.ID); err != nil {
 		log.Printf("[hub] mark delivered message %s: %v", msg.ID, err)
+		return
+	}
+	if notice != "" {
+		if _, err := tx.Exec(`UPDATE claws SET pending_session_loss_notice='' WHERE id=? AND pending_session_loss_notice=?`, clawID, notice); err != nil {
+			log.Printf("[hub] clear pending session-loss notice for %s: %v", shortID(clawID), err)
+			return
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		log.Printf("[hub] commit delivered-message transition %s: %v", msg.ID, err)
 		return
 	}
 	cc.mu.Lock()
