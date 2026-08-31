@@ -2037,7 +2037,8 @@ func githubAPIList(path, token string) ([]interface{}, error) {
 	return githubAPIListWithBase("https://api.github.com", path+"?sort=created&direction=desc", token)
 }
 
-// handleClawSubresource routes /api/claws/:id/prs and /api/claws/:id/checkpoints.
+// handleClawSubresource routes /api/claws/:id/prs, /api/claws/:id/checkpoints
+// and /api/claws/:id/llm-limit.
 func (s *Server) handleClawSubresource(w http.ResponseWriter, r *http.Request) {
 	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/api/claws/"), "/")
 	if len(parts) < 2 {
@@ -2047,7 +2048,7 @@ func (s *Server) handleClawSubresource(w http.ResponseWriter, r *http.Request) {
 	clawID := parts[0]
 	sub := parts[1]
 
-	if sub != "prs" && sub != "checkpoints" {
+	if sub != "prs" && sub != "checkpoints" && sub != "llm-limit" {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
@@ -2080,6 +2081,10 @@ func (s *Server) handleClawSubresource(w http.ResponseWriter, r *http.Request) {
 	}
 	if sub == "checkpoints" {
 		s.handleClawCheckpoints(w, r, clawID)
+		return
+	}
+	if sub == "llm-limit" {
+		s.handleClawLLMLimit(w, r, clawID)
 		return
 	}
 }

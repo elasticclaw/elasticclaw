@@ -158,6 +158,7 @@ type Server struct {
 	pollWarningMu             sync.Mutex
 	pollWarnings              map[string]struct{}
 	noProgressMu              sync.Mutex // serializes pause/resume state across the DB and active connection
+	llmLimitMu                sync.Mutex // serializes provider usage-limit records (see llm_usage_limit.go)
 
 	// webhookDedup prevents duplicate Linear webhook deliveries from creating
 	// duplicate claws. Keyed by issue transition fingerprint; entries expire after 30s.
@@ -261,6 +262,8 @@ type clawConn struct {
 	awaitingResponse     bool            // true as soon as a prompt is delivered, before the first chunk/activity
 	noProgressPaused     bool            // automatic delivery is paused after repeated turns with unchanged progress
 	bridgeErrorStreak    int             // consecutive turns that came back as a claw-bridge transport error (NEXT-725)
+	llmLimitedUntil      time.Time       // provider is out of allowance until this instant; zero = not limited (see llm_usage_limit.go)
+	llmLimitNoticedAt    time.Time       // the llmLimitedUntil value the user has already been told about, so one block yields one notice
 	lastTurnFinishedAt   time.Time       // when the last streaming turn ended (for post-restart resume window)
 	connectedAt          time.Time       // when this connection registered; immutable after registration
 	idleNotifiedAt       time.Time       // when the agent_idle notification fired for the current idle stretch (zero = armed)
@@ -526,6 +529,7 @@ func NewServer(addr, dbPath, identityDir string, hubCfg *types.HubConfig) (*Serv
 	}
 	srv.startIntegrationPoller()
 	srv.startLifecycleNotifier()
+	srv.startLLMUsageLimitScheduler()
 
 	return srv, nil
 }
@@ -2052,6 +2056,12 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "db error", http.StatusInternalServerError)
 			return
 		}
+		// The message is stored and queued either way; this only decides
+		// whether it can go out now. resumeNoProgressAfterUserInput above
+		// cannot clear a provider limit — no amount of human attention adds
+		// allowance to the account — so tell the sender instead of letting the
+		// delivery gate swallow the message without explanation.
+		s.noticeLLMLimitToUser(clawID)
 		s.recordTaskRunDashboardMessage(clawID, ghLoginMsg, msg.ID)
 		// Deliver oldest pending message if connected and idle.
 		s.mu.RLock()
@@ -2651,6 +2661,11 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 
 	var noProgressPaused bool
 	_ = s.db.QueryRow(`SELECT COALESCE(no_progress_paused, 0) != 0 FROM claws WHERE id=?`, clawID).Scan(&noProgressPaused)
+	// A provider limit outlives the bridge that discovered it: the account is
+	// capped whether or not this sandbox restarted, so a fresh connection must
+	// come back parked rather than immediately spending another turn on the
+	// same wall.
+	llmLimitedUntil, _ := s.clawLLMLimitBlock(clawID)
 	// A bridge-process restart tears down the main channel, so the old clawConn
 	// (and its lastTurnFinishedAt) is usually gone by the time the new bridge
 	// registers. Seed the post-restart resume window from the last claw
@@ -2659,7 +2674,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 	// turn end closely enough for autoResumeRecentTurnWindow.
 	var lastClawMsgAt time.Time
 	_ = s.db.QueryRow(`SELECT created_at FROM messages WHERE claw_id=? AND role='claw' ORDER BY created_at DESC LIMIT 1`, clawID).Scan(&lastClawMsgAt)
-	cc := &clawConn{id: clawID, tenantID: tenantID, conn: conn, gatewayReady: gatewayReadyBool(rp.GatewayReady), tags: registrationTags, lastUserMessageAt: time.Now(), lastStatusAt: time.Now(), connectedAt: time.Now(), noProgressPaused: noProgressPaused}
+	cc := &clawConn{id: clawID, tenantID: tenantID, conn: conn, gatewayReady: gatewayReadyBool(rp.GatewayReady), tags: registrationTags, lastUserMessageAt: time.Now(), lastStatusAt: time.Now(), connectedAt: time.Now(), noProgressPaused: noProgressPaused, llmLimitedUntil: llmLimitedUntil}
 	var old *clawConn
 	s.mu.Lock()
 	if s.gatewayRestartCounts != nil {
@@ -3567,6 +3582,7 @@ func (s *Server) handleUserWS(w http.ResponseWriter, r *http.Request) {
 				hm.UserLogin = nil
 			}
 			s.resumeNoProgressAfterUserInput(hm.ClawID)
+			s.noticeLLMLimitToUser(hm.ClawID)
 			if _, err := s.db.Exec(
 				`INSERT INTO messages(id,claw_id,tenant_id,role,content,user_login,created_at,delivered_at) VALUES(?,?,?,?,?,?,?,NULL)`,
 				hm.ID, hm.ClawID, hm.TenantID, hm.Role, hm.Content, hm.UserLogin, hm.CreatedAt,
@@ -6524,12 +6540,25 @@ func planGateAcceptedMarker(stageID string) string {
 	return planGateAcceptedMarkerPrefix + stageID
 }
 
+// deliveryBlockedLocked reports whether the hub must not start a turn on this
+// claw right now, for a reason other than it already being busy.
+//
+// The two reasons are deliberately answered in one place. They arrive from
+// different subsystems and hold for different lengths of time, but every
+// caller wants the same answer, and the previous shape — each delivery path
+// reading cc.noProgressPaused for itself — meant a second reason had to be
+// taught to four call sites that are easy to miss and impossible to test for
+// absence. Callers must hold cc.mu.
+func (cc *clawConn) deliveryBlockedLocked() bool {
+	return cc.noProgressPaused || !cc.llmLimitedUntil.IsZero()
+}
+
 // sendWakeMessage sends a silent system message to wake the agent.
 // For factory claws, it sends a task-specific prompt.
 // A marker is stored in DB so reconnects after hub restart don't re-introduce.
 func (s *Server) sendWakeMessage(cc *clawConn, clawID string) {
 	cc.mu.Lock()
-	if cc.isBusyLocked() || cc.noProgressPaused {
+	if cc.isBusyLocked() || cc.deliveryBlockedLocked() {
 		cc.mu.Unlock()
 		return
 	}
@@ -6574,7 +6603,7 @@ func (s *Server) sendInitialPlanInstruction(cc *clawConn, clawID string) {
 		return
 	}
 	cc.mu.Lock()
-	if cc.isBusyLocked() || cc.noProgressPaused {
+	if cc.isBusyLocked() || cc.deliveryBlockedLocked() {
 		cc.mu.Unlock()
 		return
 	}
@@ -8781,7 +8810,7 @@ func (s *Server) sendStreamingNudge(cc *clawConn, text string) {
 // sendNextQueuedMessage delivers the oldest pending message if the claw is idle.
 func (s *Server) sendNextQueuedMessage(cc *clawConn) {
 	cc.mu.Lock()
-	if cc.isBusyLocked() || cc.deliveryInFlight || cc.noProgressPaused {
+	if cc.isBusyLocked() || cc.deliveryInFlight || cc.deliveryBlockedLocked() {
 		cc.mu.Unlock()
 		return
 	}
@@ -8820,7 +8849,7 @@ func (s *Server) sendNextQueuedMessage(cc *clawConn) {
 	// allocates a fresh clawConn, so cc.conn cannot change under us; a write
 	// to a dead socket fails and leaves the row pending for the new connection.
 	cc.mu.Lock()
-	if cc.isBusyLocked() || cc.noProgressPaused {
+	if cc.isBusyLocked() || cc.deliveryBlockedLocked() {
 		cc.mu.Unlock()
 		return
 	}
