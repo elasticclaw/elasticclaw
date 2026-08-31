@@ -267,6 +267,7 @@ type clawConn struct {
 	forcedFinishCount       int             // consecutive watchdog-forced streaming turn finishes
 	workflowStartPending    bool            // true while initial volume attach / wake is in flight
 	workflowStartDone       bool            // true once initial volume attach / wake has completed
+	workflowV2Controlled    bool            // typed control owns execution; conversation text is display-only
 	streamingBuf            strings.Builder // accumulates chunks for current in-flight response
 	streamingMsgID          string          // pre-assigned message ID for the current stream
 	streamingSplit          bool            // true once activity has split this turn into multiple persisted segments
@@ -296,6 +297,38 @@ type clawConn struct {
 	lastUserMessageAt     time.Time       // when the user last sent a message (for idle detection)
 	lastStatusBroadcastAt time.Time       // when we last broadcast status to user
 	unresponsiveWarnedAt  time.Time       // when the silent-death warning was first broadcast
+}
+
+// workflowV2OwnsExecution refreshes the durable ownership boundary instead of
+// relying only on the registration-time snapshot. A claw may be connected
+// before a V2 attempt is assigned to it; once that happens, conversation text
+// must immediately become display-only for the lifetime of the claw.
+//
+// Ownership lookup failures fail closed. Running an untyped legacy turn while
+// durable ownership is temporarily unavailable is more dangerous than leaving
+// a conversation row pending until the next delivery attempt.
+func (s *Server) workflowV2OwnsExecution(cc *clawConn) bool {
+	if cc == nil {
+		return false
+	}
+	cc.mu.RLock()
+	owned := cc.workflowV2Controlled
+	clawID, tenantID := cc.id, cc.tenantID
+	cc.mu.RUnlock()
+	if owned {
+		return true
+	}
+	owned, err := workflowv2.NewStore(s.db).OwnsClawExecution(context.Background(), tenantID, clawID)
+	if err != nil {
+		log.Printf("[workflow-v2] ownership lookup for %s failed; blocking legacy execution: %v", shortID(clawID), err)
+		return true
+	}
+	if owned {
+		cc.mu.Lock()
+		cc.workflowV2Controlled = true
+		cc.mu.Unlock()
+	}
+	return owned
 }
 
 const (
@@ -2579,8 +2612,16 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 	// so initialStatus would incorrectly overwrite 'starting'/'bootstrap_needed').
 	isStatusChannel := rp.Channel == "status"
 	var workflowControl *workflowV2ControlBinding
+	workflowV2Controlled := false
 	if !isStatusChannel {
-		binding, found, bindingErr := workflowv2.NewStore(s.db).ActiveControlBinding(ctx, tenantID, clawID)
+		workflowStore := workflowv2.NewStore(s.db)
+		var ownershipErr error
+		workflowV2Controlled, ownershipErr = workflowStore.OwnsClawExecution(ctx, tenantID, clawID)
+		if ownershipErr != nil {
+			conn.Close(websocket.StatusInternalError, "workflow control ownership unavailable")
+			return
+		}
+		binding, found, bindingErr := workflowStore.ActiveControlBinding(ctx, tenantID, clawID)
 		if bindingErr != nil {
 			conn.Close(websocket.StatusInternalError, "workflow control binding unavailable")
 			return
@@ -2688,7 +2729,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 	// turn end closely enough for autoResumeRecentTurnWindow.
 	var lastClawMsgAt time.Time
 	_ = s.db.QueryRow(`SELECT created_at FROM messages WHERE claw_id=? AND role='claw' ORDER BY created_at DESC LIMIT 1`, clawID).Scan(&lastClawMsgAt)
-	cc := &clawConn{id: clawID, tenantID: tenantID, conn: conn, gatewayReady: gatewayReadyBool(rp.GatewayReady), tags: registrationTags, lastUserMessageAt: time.Now(), lastStatusAt: time.Now(), connectedAt: time.Now(), noProgressPaused: noProgressPaused}
+	cc := &clawConn{id: clawID, tenantID: tenantID, conn: conn, gatewayReady: gatewayReadyBool(rp.GatewayReady), tags: registrationTags, lastUserMessageAt: time.Now(), lastStatusAt: time.Now(), connectedAt: time.Now(), noProgressPaused: noProgressPaused, workflowV2Controlled: workflowV2Controlled}
 	var old *clawConn
 	s.mu.Lock()
 	if s.gatewayRestartCounts != nil {
@@ -2747,10 +2788,11 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 
 	// Initialize entry pipeline stage only after bridge connects so on_enter inject
 	// can be delivered over WS.
-	if allowWake && cc.gatewayReady && currentStatus == "connected" {
+	workflowV2Controlled = s.workflowV2OwnsExecution(cc)
+	if !workflowV2Controlled && allowWake && cc.gatewayReady && currentStatus == "connected" {
 		s.startWorkflowAfterVolumes(ctx, cc, clawID)
 	}
-	if allowWake && cc.gatewayReady && currentStatus == "connected" && !s.hasRecentCheckpoint(clawID, time.Hour) {
+	if !workflowV2Controlled && allowWake && cc.gatewayReady && currentStatus == "connected" && !s.hasRecentCheckpoint(clawID, time.Hour) {
 		go s.requestBootstrapCheckpoint(clawID)
 	}
 
@@ -3025,7 +3067,6 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 						go s.recordClawAgentStarted(clawID)
 						shouldWake = true
 						wakeConn = cc
-						go s.requestBootstrapCheckpoint(clawID)
 					}
 				}
 				s.heartbeatWorkflowVolumeLeases(clawID)
@@ -3047,7 +3088,10 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 					}
 				}
 				if shouldWake {
-					s.startWorkflowAfterVolumes(ctx, wakeConn, clawID)
+					if !s.workflowV2OwnsExecution(wakeConn) {
+						go s.requestBootstrapCheckpoint(clawID)
+						s.startWorkflowAfterVolumes(ctx, wakeConn, clawID)
+					}
 				}
 				// Check for streaming turn timeout (12 minutes)
 				s.mu.RLock()
@@ -3191,9 +3235,14 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 				)
 				s.broadcastToUsers(tenantID, types.WSMessage{Type: "message", Payload: hm})
 			}
-			automaticContinuationPaused, bridgeErrTurn := s.observeTurnOutcome(cc, clawID, hm.ID, turnContent)
-			if !automaticContinuationPaused {
-				s.handleInitialPlanResponse(clawID, tenantID, turnContent)
+			workflowV2Controlled := s.workflowV2OwnsExecution(cc)
+			automaticContinuationPaused := false
+			bridgeErrTurn := false
+			if !workflowV2Controlled {
+				automaticContinuationPaused, bridgeErrTurn = s.observeTurnOutcome(cc, clawID, hm.ID, turnContent)
+				if !automaticContinuationPaused {
+					s.handleInitialPlanResponse(clawID, tenantID, turnContent)
+				}
 			}
 			// Every [DONE]/[TERMINATE] gate below asks pipeline.MessageSignals,
 			// never strings.Contains. They used to disagree: the pipeline
@@ -3201,15 +3250,18 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 			// so pipelineHandledDone stayed false and the legacy handler ran on
 			// exactly the text the pipeline had just rejected — the NEXT-707
 			// outcome, reached by the code that was supposed to prevent it.
-			doneSignalled := turnMaySignal(turnContent, doneSignalToken, bridgeErrTurn)
+			doneSignalled := false
 			// Evaluate pipeline triggers. If a pipeline explicitly owns a
 			// [DONE] trigger, let it handle that signal instead of the
 			// legacy factory PR-URL completion path below.
 			pipelineHandledDone := false
 			var pipelineDoneCtx pipelineContext
 			var pipelineDoneStage *pipeline.Stage
-			if doneSignalled {
-				pipelineDoneCtx, pipelineDoneStage, pipelineHandledDone = s.pipelineStageForMessageContains(clawID, turnContent)
+			if !workflowV2Controlled && !bridgeErrTurn {
+				doneSignalled = turnMaySignal(turnContent, doneSignalToken, bridgeErrTurn)
+				if doneSignalled {
+					pipelineDoneCtx, pipelineDoneStage, pipelineHandledDone = s.pipelineStageForMessageContains(clawID, turnContent)
+				}
 			}
 			if automaticContinuationPaused {
 				pipelineHandledDone = false
@@ -3234,14 +3286,14 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 						})
 					}
 				}
-			} else if !doneSignalled && !bridgeErrTurn {
+			} else if !workflowV2Controlled && !doneSignalled && !bridgeErrTurn {
 				s.safeGo("pipeline message triggers", func() { s.checkPipelineMessageTriggers(clawID, turnContent) })
 			}
 			// A known token written mid-sentence no longer transitions
 			// anything. Tell the agent so, or the run freezes with nobody
 			// aware the signal was dropped. Skipped while continuation is
 			// paused: that claw is already being held, not waiting on us.
-			if !automaticContinuationPaused && !bridgeErrTurn {
+			if !workflowV2Controlled && !automaticContinuationPaused && !bridgeErrTurn {
 				s.safeGo("unanchored signal nudge", func() { s.nudgeUnanchoredSignal(clawID, turnContent) })
 			}
 			// Clear typing indicator now that response is complete
@@ -3253,7 +3305,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 				},
 			})
 			// Check for [DONE] signal from a factory-created claw
-			if doneSignalled {
+			if !workflowV2Controlled && doneSignalled {
 				s.safeGo("done checkpoint", func() {
 					if _, err := s.requestCheckpoint(context.Background(), clawID, "done", "hub", false, checkpointRequestTimeout); err != nil {
 						log.Printf("[checkpoint] done request for %s failed: %v", shortID(clawID), err)
@@ -3267,7 +3319,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 			// lifecycle. Anchored for the same reason as [DONE], with a worse
 			// blast radius: under substring matching an agent writing "I will
 			// not send [TERMINATE] yet" tore down its own claw.
-			if turnMaySignal(turnContent, terminateSignalToken, bridgeErrTurn) {
+			if !workflowV2Controlled && turnMaySignal(turnContent, terminateSignalToken, bridgeErrTurn) {
 				go s.handleClawTerminateSignal(clawID, turnContent)
 			}
 			// Detect and store PR URLs mentioned mid-work. [DONE] turns are
@@ -3280,16 +3332,18 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 			// Gated on doneSignalled, not on the token appearing: a turn that
 			// merely mentions [DONE] registers nothing, so skipping the scan
 			// there would silently drop PR URLs the agent did post.
-			if doneSignalled {
-				log.Printf("[pr-watcher] skipping PR scan for claw %s: [DONE] registration is handled explicitly", shortID(clawID))
-			} else if !bridgeErrTurn {
-				// A transport error can quote a repository URL (git and CI
-				// failures routinely do). Arming the PR watcher on text the
-				// agent never wrote would watch a PR nobody opened.
-				go s.scanMessageForPRs(clawID, turnContent, true)
+			if !workflowV2Controlled {
+				if doneSignalled {
+					log.Printf("[pr-watcher] skipping PR scan for claw %s: [DONE] registration is handled explicitly", shortID(clawID))
+				} else if !bridgeErrTurn {
+					// A transport error can quote a repository URL (git and CI
+					// failures routinely do). Arming the PR watcher on text the
+					// agent never wrote would watch a PR nobody opened.
+					go s.scanMessageForPRs(clawID, turnContent, true)
+				}
 			}
 			// Detect tool error loops and inject a corrective message
-			if !automaticContinuationPaused && detectToolLoop(hm.Content) {
+			if !workflowV2Controlled && !automaticContinuationPaused && detectToolLoop(hm.Content) {
 				s.mu.RLock()
 				loopCC := s.claws[clawID]
 				s.mu.RUnlock()
@@ -5127,13 +5181,15 @@ func (s *Server) promoteBootstrapReadyClaw(clawID string) bool {
 	})
 	go s.recordClawAgentStarted(clawID)
 	log.Printf("[bridge] ✓ ready after bootstrap: %s", clawID[:8])
-	go s.requestBootstrapCheckpoint(clawID)
-	s.startWorkflowAfterVolumes(context.Background(), cc, clawID)
+	if !s.workflowV2OwnsExecution(cc) {
+		go s.requestBootstrapCheckpoint(clawID)
+		s.startWorkflowAfterVolumes(context.Background(), cc, clawID)
+	}
 	return true
 }
 
 func (s *Server) startWorkflowAfterVolumes(ctx context.Context, cc *clawConn, clawID string) {
-	if cc == nil {
+	if cc == nil || s.workflowV2OwnsExecution(cc) {
 		return
 	}
 	cc.mu.Lock()
@@ -5160,6 +5216,11 @@ func (s *Server) startWorkflowAfterVolumes(ctx context.Context, cc *clawConn, cl
 		cc.workflowStartDone = true
 		cc.mu.Unlock()
 
+		// Ownership can change while volume attachment is in flight. Crossing
+		// this boundary would start an untyped legacy turn for a V2 claw.
+		if s.workflowV2OwnsExecution(cc) {
+			return
+		}
 		if s.initializePipelineEntryIfNeeded(clawID) {
 			// The entry inject just briefed this session with full task
 			// context (a retried claw can land here when it died before its
@@ -6570,6 +6631,9 @@ func planGateAcceptedMarker(stageID string) string {
 // For factory claws, it sends a task-specific prompt.
 // A marker is stored in DB so reconnects after hub restart don't re-introduce.
 func (s *Server) sendWakeMessage(cc *clawConn, clawID string) {
+	if s.workflowV2OwnsExecution(cc) {
+		return
+	}
 	cc.mu.Lock()
 	if cc.isBusyLocked() || cc.noProgressPaused {
 		cc.mu.Unlock()
@@ -6580,6 +6644,12 @@ func (s *Server) sendWakeMessage(cc *clawConn, clawID string) {
 	cc.streamingTimeoutSent = false
 	cc.contextWarningSent = false
 	cc.mu.Unlock()
+	if s.workflowV2OwnsExecution(cc) {
+		cc.mu.Lock()
+		cc.abortTurnLocked()
+		cc.mu.Unlock()
+		return
+	}
 
 	wakeContent := defaultWakeContent
 	if s.clawNeedsInitialPlan(clawID) {
@@ -6612,7 +6682,7 @@ func (s *Server) sendWakeMessage(cc *clawConn, clawID string) {
 }
 
 func (s *Server) sendInitialPlanInstruction(cc *clawConn, clawID string) {
-	if cc == nil || !s.clawNeedsInitialPlan(clawID) || s.hasSystemMarker(clawID, initialPlanAcceptedMarker) {
+	if cc == nil || s.workflowV2OwnsExecution(cc) || !s.clawNeedsInitialPlan(clawID) || s.hasSystemMarker(clawID, initialPlanAcceptedMarker) {
 		return
 	}
 	cc.mu.Lock()
@@ -6625,6 +6695,12 @@ func (s *Server) sendInitialPlanInstruction(cc *clawConn, clawID string) {
 	cc.streamingTimeoutSent = false
 	cc.contextWarningSent = false
 	cc.mu.Unlock()
+	if s.workflowV2OwnsExecution(cc) {
+		cc.mu.Lock()
+		cc.abortTurnLocked()
+		cc.mu.Unlock()
+		return
+	}
 	if !s.insertSystemMarker(clawID, cc.tenantID, initialPlanRequiredMarker) {
 		cc.mu.Lock()
 		cc.abortTurnLocked()
@@ -8856,7 +8932,15 @@ func (s *Server) enqueueSessionLostResume(clawID, prefix, marker string) {
 // (cliversion.OpenClawVersion) treats it as session takeover and aborts the
 // in-flight turn with EmbeddedAttemptSessionTakeoverError without upstream
 // support.
+// Queue streaming watchdog nudges for delivery after the active turn. Do not
+// reintroduce mid-turn status-channel injection: pinned OpenClaw
+// (cliversion.OpenClawVersion) treats it as session takeover and aborts the
+// in-flight turn with EmbeddedAttemptSessionTakeoverError without upstream
+// support.
 func (s *Server) sendStreamingNudge(cc *clawConn, text string) {
+	if s.workflowV2OwnsExecution(cc) {
+		return
+	}
 	cc.mu.RLock()
 	clawID := cc.id
 	turnOpen := cc.isBusyLocked()
@@ -8877,6 +8961,20 @@ func (s *Server) sendStreamingNudge(cc *clawConn, text string) {
 
 // sendNextQueuedMessage delivers the oldest pending message if the claw is idle.
 func (s *Server) sendNextQueuedMessage(cc *clawConn) {
+	if s.workflowV2OwnsExecution(cc) {
+		cc.mu.RLock()
+		clawID, tenantID := cc.id, cc.tenantID
+		cc.mu.RUnlock()
+		// Conversation rows remain visible in the transcript, but they are
+		// never inputs to a V2-owned execution. Settle any old or newly queued
+		// rows so reconnects cannot repeatedly reconsider them for delivery.
+		if _, err := s.db.Exec(`UPDATE messages SET delivered_at=created_at,
+			format=CASE WHEN format='' THEN 'workflow_v2_display_only' ELSE format END
+			WHERE claw_id=? AND tenant_id=? AND delivered_at IS NULL`, clawID, tenantID); err != nil {
+			log.Printf("[workflow-v2] settle display-only messages for %s: %v", shortID(clawID), err)
+		}
+		return
+	}
 	cc.mu.Lock()
 	if cc.isBusyLocked() || cc.deliveryInFlight || cc.noProgressPaused {
 		cc.mu.Unlock()
@@ -8910,6 +9008,16 @@ func (s *Server) sendNextQueuedMessage(cc *clawConn) {
 	}
 	if err != nil {
 		log.Printf("[hub] find pending message for %s: %v", shortID(clawID), err)
+		return
+	}
+	// Ownership may have changed after this delivery attempt began. Refresh it
+	// again at the final execution boundary before reserving a legacy turn.
+	if s.workflowV2OwnsExecution(cc) {
+		if _, err := s.db.Exec(`UPDATE messages SET delivered_at=created_at,
+			format=CASE WHEN format='' THEN 'workflow_v2_display_only' ELSE format END
+			WHERE claw_id=? AND tenant_id=? AND delivered_at IS NULL`, clawID, tenantID); err != nil {
+			log.Printf("[workflow-v2] settle display-only messages for %s: %v", shortID(clawID), err)
+		}
 		return
 	}
 

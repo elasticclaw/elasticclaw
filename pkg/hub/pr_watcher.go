@@ -1943,8 +1943,10 @@ func (s *Server) injectMessage(clawID, content, role string) {
 		cc.lastUserMessageAt = time.Now()
 		busy := cc.isBusyLocked()
 		cc.mu.Unlock()
-		acceptedForAgent = true
+		workflowV2Controlled := s.workflowV2OwnsExecution(cc)
+		acceptedForAgent = !workflowV2Controlled
 		if !busy {
+			// V1 delivers the row; V2 settles it as display-only.
 			s.sendNextQueuedMessage(cc)
 		}
 	}

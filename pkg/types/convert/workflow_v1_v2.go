@@ -222,10 +222,13 @@ func mapV1Trigger(path string, trig map[string]interface{}) (*mappedTrigger, []s
 	}
 	if _, ok := trig["pr_opened"]; ok {
 		return &mappedTrigger{
-			on:   "pull_request.verified_open",
+			// V2 learns the claw's dynamic PR set when the authenticated
+			// delivery manifest is verified. The GitHub opened webhook normally
+			// predates that registration and is therefore not a reliable edge.
+			on:   "delivery.verified",
 			slug: "pr_opened",
 			when: map[string]interface{}{
-				"pull_request": map[string]interface{}{"state": "open"},
+				"delivery": map[string]interface{}{"open": map[string]interface{}{"not_equals": 0}},
 			},
 		}, warnings
 	}
