@@ -433,8 +433,16 @@ func TestRestartMidTurnEnqueuesExactlyOneResume(t *testing.T) {
 		return n
 	}
 	eventuallyWatchdog(t, func() bool { return count() == 1 }, "one restart resume")
+	// A second genuine restart moments later falls inside the shared
+	// session-loss throttle window (unified across rotation and restart by
+	// enqueueSessionLostResume), so it does not get its own resume — two
+	// real incidents this close together collapse into one prompt rather
+	// than risking a duplicate.
 	beat(2)
-	eventuallyWatchdog(t, func() bool { return count() == 2 }, "second restart resume")
+	time.Sleep(50 * time.Millisecond)
+	if got := count(); got != 1 {
+		t.Fatalf("resume count after second restart inside throttle window = %d, want 1", got)
+	}
 }
 
 // A bridge-process relaunch resets restart_count to 0 — equal to the zero
@@ -577,10 +585,13 @@ func TestSessionRotatedEnqueuesResume(t *testing.T) {
 	s, db := NewTestServerWithConfig(t, &types.HubConfig{ClawToken: "claw-token"}, "", "", "")
 	const clawID = "watchdog-session-rotated"
 	conn := watchdogClaw(t, s, clawID)
-	_ = watchdogClawConn(t, s, clawID)
+	cc := watchdogClawConn(t, s, clawID)
 	if _, err := db.Exec(`UPDATE claws SET status='connected', bootstrap_ok=1, issue_title='Fix session', github_issue_id='owner/repo#42' WHERE id=?`, clawID); err != nil {
 		t.Fatal(err)
 	}
+	cc.mu.Lock()
+	cc.streamingStartedAt = time.Now()
+	cc.mu.Unlock()
 	if err := wsjson.Write(context.Background(), conn, types.WSMessage{Type: "session_rotated"}); err != nil {
 		t.Fatalf("write session_rotated: %v", err)
 	}
@@ -590,6 +601,86 @@ func TestSessionRotatedEnqueuesResume(t *testing.T) {
 		return n
 	}
 	eventuallyWatchdog(t, func() bool { return count() == 1 }, "session rotated resume")
+}
+
+// A lost transcript on an otherwise idle claw must not wake it: the next
+// real message will run in the new session regardless, and nothing beyond
+// the idle claw itself needs to know the transcript was lost.
+func TestSessionRotatedWhileIdleDoesNotEnqueueResume(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{ClawToken: "claw-token"}, "", "", "")
+	const clawID = "watchdog-idle-session-rotated"
+	conn := watchdogClaw(t, s, clawID)
+	cc := watchdogClawConn(t, s, clawID)
+	if _, err := db.Exec(`UPDATE claws SET status='connected', bootstrap_ok=1 WHERE id=?`, clawID); err != nil {
+		t.Fatal(err)
+	}
+	cc.mu.Lock()
+	cc.streamingStartedAt = time.Time{}
+	cc.awaitingResponse = false
+	cc.lastTurnFinishedAt = now().Add(-autoResumeRecentTurnWindow - time.Second)
+	cc.mu.Unlock()
+	if err := wsjson.Write(context.Background(), conn, types.WSMessage{Type: "session_rotated"}); err != nil {
+		t.Fatalf("write session_rotated: %v", err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	var n int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND role='hub' AND content LIKE ?`, clawID, sessionRotatedResumePrefix+"%").Scan(&n); err != nil || n != 0 {
+		t.Fatalf("resume rows=%d err=%v, want 0", n, err)
+	}
+}
+
+// A rotation resume and a restart resume for the same incident must not both
+// go out: enqueueSessionLostResume throttles across both prefixes.
+func TestSessionLostResumeThrottleCoversRotationAndRestart(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{ClawToken: "claw-token"}, "", "", "")
+	const clawID = "watchdog-session-loss-throttle"
+	conn := watchdogClaw(t, s, clawID)
+	cc := watchdogClawConn(t, s, clawID)
+	if _, err := db.Exec(`UPDATE claws SET status='connected', bootstrap_ok=1 WHERE id=?`, clawID); err != nil {
+		t.Fatal(err)
+	}
+	cc.mu.Lock()
+	cc.streamingStartedAt = time.Now()
+	cc.mu.Unlock()
+	if err := wsjson.Write(context.Background(), conn, types.WSMessage{Type: "heartbeat", Payload: map[string]any{"gateway_healthy": true, "restart_count": 0}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := wsjson.Write(context.Background(), conn, types.WSMessage{Type: "session_rotated"}); err != nil {
+		t.Fatal(err)
+	}
+	count := func() int {
+		var n int
+		_ = db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND role='hub' AND (content LIKE ? OR content LIKE ?)`, clawID, sessionRotatedResumePrefix+"%", restartResumePrefix+"%").Scan(&n)
+		return n
+	}
+	eventuallyWatchdog(t, func() bool { return count() == 1 }, "rotation resume")
+	if err := wsjson.Write(context.Background(), conn, types.WSMessage{Type: "heartbeat", Payload: map[string]any{"gateway_healthy": true, "restart_count": 1}}); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	if got := count(); got != 1 {
+		t.Fatalf("session-loss resumes=%d, want 1", got)
+	}
+}
+
+// enqueueRestartResume previously had no throttle of its own; centralizing it
+// through enqueueSessionLostResume must still let a genuinely later restart
+// through once the shared window has expired.
+func TestSessionLostResumeThrottleExpires(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{ClawToken: "claw-token"}, "", "", "")
+	const clawID = "watchdog-session-loss-throttle-expiry"
+	_ = watchdogClaw(t, s, clawID)
+	if _, err := db.Exec(`UPDATE claws SET status='connected', bootstrap_ok=1 WHERE id=?`, clawID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO messages(id,claw_id,tenant_id,role,content,created_at) VALUES(?,?,?,?,?,?)`, uuid.NewString(), clawID, "test-tenant-id", "hub", sessionRotatedResumePrefix+" earlier resume", now().Add(-sessionLostResumeThrottle-time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	s.enqueueRestartResume(clawID, 1)
+	var n int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND role='hub' AND (content LIKE ? OR content LIKE ?)`, clawID, sessionRotatedResumePrefix+"%", restartResumePrefix+"%").Scan(&n); err != nil || n != 2 {
+		t.Fatalf("session-loss resumes=%d err=%v, want 2", n, err)
+	}
 }
 
 func TestSessionPreservedEnqueuesContinuationAndResetsBridgeErrorStreak(t *testing.T) {
@@ -622,10 +713,13 @@ func TestSessionRotatedResumeThrottled(t *testing.T) {
 	s, db := NewTestServerWithConfig(t, &types.HubConfig{ClawToken: "claw-token"}, "", "", "")
 	const clawID = "watchdog-session-rotated-throttled"
 	conn := watchdogClaw(t, s, clawID)
-	_ = watchdogClawConn(t, s, clawID)
+	cc := watchdogClawConn(t, s, clawID)
 	if _, err := db.Exec(`UPDATE claws SET status='connected', bootstrap_ok=1, issue_title='Fix session' WHERE id=?`, clawID); err != nil {
 		t.Fatal(err)
 	}
+	cc.mu.Lock()
+	cc.streamingStartedAt = time.Now()
+	cc.mu.Unlock()
 	// A resume prompt already went out moments ago — a second rotation inside
 	// the throttle window must not enqueue another one.
 	if _, err := db.Exec(`INSERT INTO messages(id,claw_id,tenant_id,role,content,created_at) VALUES(?,?,?,?,?,?)`,
@@ -646,14 +740,17 @@ func TestSessionRotatedResumeThrottleWindowExpires(t *testing.T) {
 	s, db := NewTestServerWithConfig(t, &types.HubConfig{ClawToken: "claw-token"}, "", "", "")
 	const clawID = "watchdog-session-rotated-throttle-expired"
 	conn := watchdogClaw(t, s, clawID)
-	_ = watchdogClawConn(t, s, clawID)
+	cc := watchdogClawConn(t, s, clawID)
 	if _, err := db.Exec(`UPDATE claws SET status='connected', bootstrap_ok=1, issue_title='Fix session' WHERE id=?`, clawID); err != nil {
 		t.Fatal(err)
 	}
+	cc.mu.Lock()
+	cc.streamingStartedAt = time.Now()
+	cc.mu.Unlock()
 	// The previous resume is older than the throttle window, so a new
 	// rotation must enqueue a fresh resume prompt.
 	if _, err := db.Exec(`INSERT INTO messages(id,claw_id,tenant_id,role,content,created_at) VALUES(?,?,?,?,?,?)`,
-		uuid.NewString(), clawID, "test-tenant-id", "hub", sessionRotatedResumePrefix+" earlier resume", now().Add(-sessionRotatedResumeThrottle-time.Minute)); err != nil {
+		uuid.NewString(), clawID, "test-tenant-id", "hub", sessionRotatedResumePrefix+" earlier resume", now().Add(-sessionLostResumeThrottle-time.Minute)); err != nil {
 		t.Fatal(err)
 	}
 	if err := wsjson.Write(context.Background(), conn, types.WSMessage{Type: "session_rotated"}); err != nil {
