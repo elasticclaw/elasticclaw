@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/elasticclaw/elasticclaw/pkg/hub/workflowv2"
+	typesv2 "github.com/elasticclaw/elasticclaw/pkg/types/v2"
 	"github.com/google/uuid"
 )
 
@@ -71,6 +72,15 @@ func (s *Server) executeWorkflowV2Effect(ctx context.Context, store *workflowv2.
 				Status: workflowv2.EffectRetryableFailed, Error: err.Error(), RetryAfter: workflowV2EffectRetry,
 			})
 		}
+	case typesv2.EffectExecRun, typesv2.EffectDependencyUpdate:
+		_, err := store.MaterializeCommandTask(ctx, claim.Effect.ID, claim.AttemptID, worker)
+		if err == nil {
+			return nil
+		}
+		return store.CompleteEffect(ctx, workflowv2.CompleteEffectRequest{
+			EffectID: claim.Effect.ID, AttemptID: claim.AttemptID, Worker: worker,
+			Status: workflowv2.EffectPermanentFailed, Error: err.Error(),
+		})
 	default:
 		err := fmt.Errorf("hub has no workflow v2 executor for effect kind %q", claim.Effect.Kind)
 		return store.CompleteEffect(ctx, workflowv2.CompleteEffectRequest{

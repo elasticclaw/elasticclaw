@@ -623,3 +623,130 @@ events:
 		t.Fatalf("disjoint clauses should validate: %v", err)
 	}
 }
+
+func TestWorkflowV2ExecRunEffectAccepted(t *testing.T) {
+	wf := `
+schema_version: 2
+name: exec-run
+enabled: true
+initial_state: build
+states:
+  build:
+    phase: build
+    on_enter:
+      effects:
+        - exec.run:
+            command: echo hello
+            timeout: 1m
+  done:
+    phase: done
+    terminal: true
+`
+	if _, _, err := v2.ParseAndValidateWorkflowPair([]byte(wf), []byte(validWorkspaceYAML)); err != nil {
+		t.Fatalf("valid exec.run effect should validate: %v", err)
+	}
+}
+
+func TestWorkflowV2DependencyUpdateEffectAccepted(t *testing.T) {
+	wf := `
+schema_version: 2
+name: dependency-update
+enabled: true
+initial_state: build
+states:
+  build:
+    phase: build
+    on_enter:
+      effects:
+        - dependency.update:
+            ecosystems: [go]
+            timeout: 1m
+  done:
+    phase: done
+    terminal: true
+`
+	if _, _, err := v2.ParseAndValidateWorkflowPair([]byte(wf), []byte(validWorkspaceYAML)); err != nil {
+		t.Fatalf("valid dependency.update effect should validate: %v", err)
+	}
+}
+
+func TestWorkflowV2ExecRunRejectsMissingCommand(t *testing.T) {
+	wf := `
+schema_version: 2
+name: bad-exec
+enabled: true
+initial_state: build
+states:
+  build:
+    phase: build
+    on_enter:
+      effects:
+        - exec.run:
+            timeout: 1m
+  done:
+    phase: done
+    terminal: true
+`
+	_, _, err := v2.ParseAndValidateWorkflowPair([]byte(wf), []byte(validWorkspaceYAML))
+	if err == nil || !strings.Contains(err.Error(), "command") {
+		t.Fatalf("error = %v, want command missing", err)
+	}
+}
+
+func TestWorkflowV2DependencyUpdateRejectsMissingEcosystems(t *testing.T) {
+	wf := `
+schema_version: 2
+name: bad-dep
+enabled: true
+initial_state: build
+states:
+  build:
+    phase: build
+    on_enter:
+      effects:
+        - dependency.update:
+            grouping: all
+  done:
+    phase: done
+    terminal: true
+`
+	_, _, err := v2.ParseAndValidateWorkflowPair([]byte(wf), []byte(validWorkspaceYAML))
+	if err == nil || !strings.Contains(err.Error(), "ecosystems") {
+		t.Fatalf("error = %v, want ecosystems missing", err)
+	}
+}
+
+func TestWorkflowV2ExecRunRejectsMissingCapability(t *testing.T) {
+	ws := `
+schema_version: 2
+name: restricted
+repositories:
+  primary:
+    provider: github
+    repository: org/repo
+execution:
+  provider: daytona
+  capability_restrictions:
+    execute_command: false
+`
+	wf := `
+schema_version: 2
+name: restricted-wf
+enabled: true
+initial_state: build
+states:
+  build:
+    phase: build
+    on_enter:
+      effects:
+        - exec.run:
+            command: echo hi
+  done:
+    phase: done
+    terminal: true
+`
+	_, _, err := v2.ParseAndValidateWorkflowPair([]byte(wf), []byte(ws))
+	if err == nil || !strings.Contains(err.Error(), "execute_command") {
+		t.Fatalf("error = %v, want execute_command capability missing", err)
+	}
+}

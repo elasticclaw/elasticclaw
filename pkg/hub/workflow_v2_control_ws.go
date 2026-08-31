@@ -152,6 +152,11 @@ func (s *Server) applyWorkflowV2ClawControl(ctx context.Context, store *workflow
 	if envelope.Kind == typesv2.MessageDeliverySubmitted || envelope.Kind == typesv2.MessagePullRequestClaimed {
 		return store.ApplyDeliveryControl(ctx, envelope, s.workflowV2PullRequestVerifier())
 	}
+	switch envelope.Kind {
+	case typesv2.MessageExecRunCompleted, typesv2.MessageExecRunFailed,
+		typesv2.MessageDependencyUpdateCompleted, typesv2.MessageDependencyUpdateFailed:
+		return store.ApplyCommandReceipt(ctx, envelope)
+	}
 	return store.ApplyAgentControl(ctx, envelope)
 }
 

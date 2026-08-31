@@ -16,6 +16,7 @@ var protectedNamespaces = []string{
 	"effects.",
 	"workflow.",
 	"operator.",
+	"exec.",
 }
 
 // Writable namespaces for workflow-authored facts.
@@ -658,6 +659,38 @@ func validateEffectsAgainstWorkspace(path string, effects []map[string]interface
 						}
 						seen[fact] = true
 					}
+				}
+			case EffectExecRun:
+				command, _ := cfg["command"].(string)
+				if strings.TrimSpace(command) == "" {
+					return fmt.Errorf("%s: command is required", epath)
+				}
+				if ws.Execution == nil {
+					return fmt.Errorf("%s: workspace has no execution block", epath)
+				}
+				capNeeded, ok := CapabilityForEffect(op)
+				if !ok {
+					continue
+				}
+				if !rws.ResolvedExecCaps[capNeeded] {
+					return fmt.Errorf("%s: effect %q is unsupported by execution provider %q (lacks capability %s)",
+						epath, op, ws.Execution.Provider, capNeeded)
+				}
+			case EffectDependencyUpdate:
+				ecosystems, ok := cfg["ecosystems"].([]interface{})
+				if !ok || len(ecosystems) == 0 {
+					return fmt.Errorf("%s: ecosystems must be a non-empty list", epath)
+				}
+				if ws.Execution == nil {
+					return fmt.Errorf("%s: workspace has no execution block", epath)
+				}
+				capNeeded, ok := CapabilityForEffect(op)
+				if !ok {
+					continue
+				}
+				if !rws.ResolvedExecCaps[capNeeded] {
+					return fmt.Errorf("%s: effect %q is unsupported by execution provider %q (lacks capability %s)",
+						epath, op, ws.Execution.Provider, capNeeded)
 				}
 			default:
 				// Unknown effect ops: reject at pair validation so they fail closed.

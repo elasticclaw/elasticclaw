@@ -279,13 +279,16 @@ func convertStageOnEnter(stageID string, onEnter map[string]interface{}) (*v2.St
 		appendWarning(&warnings, "states.%s.on_enter.remove_labels: not auto-converted — express as an issue-tracker effect with an explicit connection after review", stageID)
 	}
 	if _, ok := onEnter["run"]; ok {
-		appendWarning(&warnings, "states.%s.on_enter.run: shell/CI run hooks are not auto-converted — model as CI pipeline effects or agent.task after review", stageID)
+		appendWarning(&warnings, "states.%s.on_enter.run: mapped to exec.run effect after review; command output becomes exec.last_run.* facts, not arbitrary trusted data", stageID)
+	}
+	if _, ok := onEnter["dependency_updates"]; ok {
+		appendWarning(&warnings, "states.%s.on_enter.dependency_updates: mapped to dependency.update effect after review; results become exec.dependency_update.* facts", stageID)
 	}
 
 	// Surface other keys.
 	for k := range onEnter {
 		switch k {
-		case "inject", "add_labels", "remove_labels", "run":
+		case "inject", "add_labels", "remove_labels", "run", "dependency_updates":
 			continue
 		default:
 			appendWarning(&warnings, "states.%s.on_enter.%s: not auto-converted", stageID, k)

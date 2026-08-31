@@ -642,7 +642,7 @@ func producerMaySupplyPayload(producer Producer, namespace string) bool {
 	case ProducerCustom:
 		return namespace == "custom"
 	case ProducerHub, ProducerEngine:
-		return namespace == "workflow" || namespace == "run" || namespace == "setup" || namespace == "task"
+		return namespace == "workflow" || namespace == "run" || namespace == "setup" || namespace == "task" || namespace == "exec"
 	default:
 		return false
 	}
@@ -668,7 +668,7 @@ func producerMayEmit(producer Producer, kind string) bool {
 	case ProducerCustom:
 		return prefix == "custom"
 	case ProducerHub, ProducerEngine:
-		return prefix == "workflow" || prefix == "run" || prefix == "setup" || prefix == "task"
+		return prefix == "workflow" || prefix == "run" || prefix == "setup" || prefix == "task" || prefix == "exec"
 	default:
 		return false
 	}
@@ -693,6 +693,8 @@ func producerOwnsFact(producer Producer, key string) bool {
 		return producer == ProducerEngine
 	case "context":
 		return producer == ProducerContext
+	case "exec":
+		return producer == ProducerEngine || producer == ProducerHub
 	case "work", "custom":
 		return producer == ProducerEngine || producer == ProducerCustom
 	default:
