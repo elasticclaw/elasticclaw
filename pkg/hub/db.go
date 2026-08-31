@@ -109,6 +109,7 @@ func migrate(db *sql.DB) error {
 	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN trigger_actor_json TEXT NOT NULL DEFAULT '{}'`)
 	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN stop_comment_pending INTEGER NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN no_progress_paused INTEGER NOT NULL DEFAULT 0`)
+	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN pending_session_loss_notice TEXT NOT NULL DEFAULT ''`)
 	// rebrief_pending is armed by [claw-retry] when a sandbox is replaced and
 	// consumed on reconnect to re-brief the fresh session. resetClawForRetry's
 	// UPDATE references it on the retry hot path, so a silently missing column
@@ -510,7 +511,8 @@ func migrate(db *sql.DB) error {
 		stage_entered_at INTEGER,
 		stage_stalled_since INTEGER NOT NULL DEFAULT 0,
 		idle_resume_at INTEGER NOT NULL DEFAULT 0,
-		idle_resume_count INTEGER NOT NULL DEFAULT 0
+		idle_resume_count INTEGER NOT NULL DEFAULT 0,
+		pending_session_loss_notice TEXT NOT NULL DEFAULT ''
 	);
 
 
