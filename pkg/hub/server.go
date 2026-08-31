@@ -8545,16 +8545,16 @@ func (s *Server) enqueueRestartResume(clawID string, restartCount int) {
 // so the no-progress watchdog never observes them.
 const sessionRotatedResumeThrottle = 10 * time.Minute
 
+// sessionPreservedContinuationThrottle bounds the conflict -> continuation ->
+// conflict loop, the same way sessionRotatedResumeThrottle does for rotation.
+//
+// Known limitation: unlike a rotation, the same session can legitimately need a
+// second continuation inside the window, and this throttle drops it silently —
+// the claw then waits for the idle auto-resume instead of continuing. Telling
+// those two cases apart needs turn identity, which the hub does not carry
+// today; a budget keyed on turn observations was tried and reverted for
+// deleting genuine progress. Tracked in elasticclaw/elasticclaw#667.
 const sessionPreservedContinuationThrottle = 10 * time.Minute
-
-// sessionPreservedContinuationMaxInWindow is the continuation budget before a
-// run of preserved lock conflicts is treated as no progress rather than left
-// silently idle.
-const sessionPreservedContinuationMaxInWindow = 3
-
-func sessionPreservedContinuationPauseNotice(conflicts int) string {
-	return fmt.Sprintf("[hub] Automatic continuation paused: %d preserved session-file lock conflicts occurred without progress within %s. This claw is paused awaiting intervention.", conflicts, sessionPreservedContinuationThrottle)
-}
 
 func (s *Server) enqueueSessionRotatedResume(clawID string) {
 	var recent int
@@ -8569,18 +8569,10 @@ func (s *Server) enqueueSessionRotatedResume(clawID string) {
 
 func (s *Server) enqueueSessionPreservedContinuation(clawID string) {
 	var recent int
-	windowStart := now().Add(-sessionPreservedContinuationThrottle)
-	lastProgressAt := s.lastCompletedClawProgressAt(clawID)
-	if lastProgressAt.After(windowStart) {
-		windowStart = lastProgressAt
-	}
 	err := s.db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND role='hub' AND content LIKE ? AND created_at > ?`,
-		clawID, sessionPreservedContinuationPrefix+"%", windowStart).Scan(&recent)
-	if err == nil && recent >= sessionPreservedContinuationMaxInWindow {
-		conflicts := recent + 1 // Include the conflict whose continuation would exceed the budget.
-		notice := sessionPreservedContinuationPauseNotice(conflicts)
-		log.Printf("[watchdog] pausing session-preserved continuation for %s: %d continuations within %s without progress", shortID(clawID), recent, sessionPreservedContinuationThrottle)
-		s.pauseAutomaticContinuation(clawID, notice)
+		clawID, sessionPreservedContinuationPrefix+"%", now().Add(-sessionPreservedContinuationThrottle)).Scan(&recent)
+	if err == nil && recent > 0 {
+		log.Printf("[watchdog] skipping session-preserved continuation for %s: already continued within %s", shortID(clawID), sessionPreservedContinuationThrottle)
 		return
 	}
 	var status string
@@ -8595,17 +8587,6 @@ func (s *Server) enqueueSessionPreservedContinuation(clawID string) {
 	prompt := sessionPreservedContinuationPrefix + " The previous turn was interrupted by a session-file lock conflict and aborted mid-turn. Your session and its history are intact, so do not start over. The turn may have partially completed before it was aborted, including writing files, committing, or commenting on a PR; check the workspace with git status before repeating anything. Continue from where you stopped.\n\n<!-- " + marker + " -->"
 	log.Printf("[watchdog] enqueueing %s continuation for %s", marker, shortID(clawID))
 	s.injectHubMessageByID(clawID, prompt)
-}
-
-// lastCompletedClawProgressAt returns the newest normal completed-turn
-// observation. Streamed chunks alone are not progress: a lock-conflicted turn
-// can persist chunks before it is preserved, but never reaches this table.
-func (s *Server) lastCompletedClawProgressAt(clawID string) time.Time {
-	var createdAt time.Time
-	if err := s.db.QueryRow(`SELECT created_at FROM claw_turn_observations WHERE claw_id=? ORDER BY created_at DESC, rowid DESC LIMIT 1`, clawID).Scan(&createdAt); err != nil {
-		return time.Time{}
-	}
-	return createdAt
 }
 
 // lastSubstantiveClawProgress returns the newest meaningful claw output and
