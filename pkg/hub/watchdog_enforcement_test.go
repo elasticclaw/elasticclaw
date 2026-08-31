@@ -592,59 +592,6 @@ func TestSessionRotatedEnqueuesResume(t *testing.T) {
 	eventuallyWatchdog(t, func() bool { return count() == 1 }, "session rotated resume")
 }
 
-func TestHeartbeatSessionKeyChangeEnqueuesRotatedResume(t *testing.T) {
-	s, db := NewTestServerWithConfig(t, &types.HubConfig{ClawToken: "claw-token"}, "", "", "")
-	const clawID = "watchdog-heartbeat-session-key"
-	conn := watchdogClaw(t, s, clawID)
-	_ = watchdogClawConn(t, s, clawID)
-	if _, err := db.Exec(`UPDATE claws SET status='connected', bootstrap_ok=1, issue_title='Fix session' WHERE id=?`, clawID); err != nil {
-		t.Fatal(err)
-	}
-	beat := func(key string) {
-		if err := wsjson.Write(context.Background(), conn, types.WSMessage{Type: "heartbeat", Payload: map[string]any{"gateway_healthy": true, "restart_count": 0, "session_key": key}}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	count := func() int {
-		var n int
-		_ = db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND role='hub' AND content LIKE ?`, clawID, sessionRotatedResumePrefix+"%").Scan(&n)
-		return n
-	}
-	// The first key is a post-hub-start baseline, and an unchanged key is not
-	// a rotation. Only the later replacement must resume the task.
-	beat("session-old")
-	beat("session-old")
-	time.Sleep(100 * time.Millisecond)
-	if got := count(); got != 0 {
-		t.Fatalf("resume rows after baseline and same key = %d, want 0", got)
-	}
-	beat("session-new")
-	eventuallyWatchdog(t, func() bool { return count() == 1 }, "resume after heartbeat session-key change")
-}
-
-func TestHeartbeatSessionKeyChangeRespectsRotatedResumeThrottle(t *testing.T) {
-	s, db := NewTestServerWithConfig(t, &types.HubConfig{ClawToken: "claw-token"}, "", "", "")
-	const clawID = "watchdog-heartbeat-session-key-throttled"
-	conn := watchdogClaw(t, s, clawID)
-	_ = watchdogClawConn(t, s, clawID)
-	if _, err := db.Exec(`UPDATE claws SET status='connected', bootstrap_ok=1, issue_title='Fix session' WHERE id=?`, clawID); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.Exec(`INSERT INTO messages(id,claw_id,tenant_id,role,content,created_at) VALUES(?,?,?,?,?,?)`, uuid.NewString(), clawID, "test-tenant-id", "hub", sessionRotatedResumePrefix+" earlier resume", now().Add(-time.Minute)); err != nil {
-		t.Fatal(err)
-	}
-	for _, key := range []string{"session-old", "session-new"} {
-		if err := wsjson.Write(context.Background(), conn, types.WSMessage{Type: "heartbeat", Payload: map[string]any{"gateway_healthy": true, "restart_count": 0, "session_key": key}}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	time.Sleep(100 * time.Millisecond)
-	var n int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND role='hub' AND content LIKE ?`, clawID, sessionRotatedResumePrefix+"%").Scan(&n); err != nil || n != 1 {
-		t.Fatalf("resume rows=%d err=%v, want 1 (throttled)", n, err)
-	}
-}
-
 func TestSessionPreservedEnqueuesContinuationAndResetsBridgeErrorStreak(t *testing.T) {
 	s, db := NewTestServerWithConfig(t, &types.HubConfig{ClawToken: "claw-token"}, "", "", "")
 	const clawID = "watchdog-session-preserved"
