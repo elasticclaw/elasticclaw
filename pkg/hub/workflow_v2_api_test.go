@@ -165,8 +165,21 @@ func TestWorkflowV2RunLogsAPIReturnsActivityMessages(t *testing.T) {
 	if err := json.NewDecoder(rr.Body).Decode(&messages); err != nil {
 		t.Fatal(err)
 	}
-	if len(messages) != 2 {
-		t.Fatalf("messages = %d", len(messages))
+	activityCount := 0
+	stateCount := 0
+	for _, m := range messages {
+		switch m.Role {
+		case "activity":
+			activityCount++
+		case "state":
+			stateCount++
+		}
+	}
+	if activityCount != 2 {
+		t.Fatalf("activity messages = %d, want 2", activityCount)
+	}
+	if stateCount == 0 {
+		t.Fatalf("expected state transition messages, got none")
 	}
 }
 
@@ -201,8 +214,21 @@ func TestWorkflowV2AttemptLogsAPIReturnsActivityMessages(t *testing.T) {
 	if err := json.NewDecoder(rr.Body).Decode(&messages); err != nil {
 		t.Fatal(err)
 	}
-	if len(messages) != 1 {
-		t.Fatalf("messages = %d", len(messages))
+	activityCount := 0
+	stateCount := 0
+	for _, m := range messages {
+		switch m.Role {
+		case "activity":
+			activityCount++
+		case "state":
+			stateCount++
+		}
+	}
+	if activityCount != 1 {
+		t.Fatalf("activity messages = %d, want 1", activityCount)
+	}
+	if stateCount == 0 {
+		t.Fatalf("expected state transition messages, got none")
 	}
 }
 

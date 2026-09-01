@@ -4,9 +4,12 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/elasticclaw/elasticclaw/pkg/hub/workflowv2"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
@@ -111,11 +114,11 @@ func (s *Server) handleWorkflowV2RunLogs(w http.ResponseWriter, r *http.Request)
 	if !ok {
 		return
 	}
-	s.queryActivityMessages(w, r, clawID)
+	s.queryWorkflowRunLogs(w, r, runID, clawID)
 }
 
 // handleWorkflowV2AttemptLogs handles GET /api/v2/workflow-runs/{runId}/attempts/{attemptId}/logs
-// and returns agent activity logs for the specified attempt.
+// and returns agent activity logs and state transitions for the specified attempt.
 func (s *Server) handleWorkflowV2AttemptLogs(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		w.Header().Set("Allow", http.MethodGet)
@@ -132,7 +135,7 @@ func (s *Server) handleWorkflowV2AttemptLogs(w http.ResponseWriter, r *http.Requ
 	if !ok {
 		return
 	}
-	s.queryActivityMessages(w, r, clawID)
+	s.queryWorkflowRunLogs(w, r, runID, clawID)
 }
 
 // lookupV2RunClawID returns the current attempt's claw_id for a v2 run, or
@@ -246,5 +249,117 @@ func (s *Server) queryActivityMessages(w http.ResponseWriter, r *http.Request, c
 	if msgs == nil {
 		msgs = []types.HubMessage{}
 	}
+	jsonOK(w, msgs)
+}
+
+// queryWorkflowRunLogs returns agent activity messages merged with workflow state
+// transition entries for a v2 run. This lets the UI logs view show when the run
+// entered each state, not just agent.task messages.
+func (s *Server) queryWorkflowRunLogs(w http.ResponseWriter, r *http.Request, runID, clawID string) {
+	if !s.canViewMessages(w, r, tenantFromCtx(r), clawID) {
+		return
+	}
+
+	from := r.URL.Query().Get("from")
+	to := r.URL.Query().Get("to")
+	before := r.URL.Query().Get("before")
+	limit := parsePositiveLimit(r, 200, 500)
+	order := strings.ToLower(r.URL.Query().Get("order"))
+	if order != "desc" {
+		order = "asc"
+	}
+
+	query := `SELECT id, claw_id, tenant_id, role, content, COALESCE(format,''), COALESCE(user_login,''), created_at
+		FROM messages
+		WHERE claw_id = ? AND tenant_id = ? AND role = 'activity'`
+	args := []interface{}{clawID, tenantFromCtx(r)}
+	if from != "" {
+		query += ` AND created_at > ?`
+		if parsed := parseTimeCursor(from); parsed != nil {
+			args = append(args, *parsed)
+		} else {
+			args = append(args, from)
+		}
+	}
+	if to != "" {
+		query += ` AND created_at < ?`
+		if parsed := parseTimeCursor(to); parsed != nil {
+			args = append(args, *parsed)
+		} else {
+			args = append(args, to)
+		}
+	}
+	if before != "" {
+		query += ` AND created_at < ?`
+		if parsed := parseTimeCursor(before); parsed != nil {
+			args = append(args, *parsed)
+		} else {
+			args = append(args, before)
+		}
+	}
+	if order == "desc" {
+		query += ` ORDER BY created_at DESC LIMIT ?`
+	} else {
+		query += ` ORDER BY created_at ASC LIMIT ?`
+	}
+	args = append(args, limit)
+
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		jsonError(w, http.StatusInternalServerError, "fetch activity logs")
+		return
+	}
+	defer rows.Close()
+	msgs, err := scanHubMessages(rows)
+	if err != nil {
+		jsonError(w, http.StatusInternalServerError, "fetch activity logs")
+		return
+	}
+	if msgs == nil {
+		msgs = []types.HubMessage{}
+	}
+
+	// Merge in state transition markers so the UI can show when each state was entered.
+	transRows, err := s.db.Query(`
+		SELECT id, from_state, to_state, created_at
+		FROM workflow_v2_transitions
+		WHERE run_id = ?
+		ORDER BY created_at ASC`, runID)
+	if err != nil {
+		jsonError(w, http.StatusInternalServerError, "fetch state transitions")
+		return
+	}
+	defer transRows.Close()
+	for transRows.Next() {
+		var id, fromState, toState string
+		var createdAtMs int64
+		if err := transRows.Scan(&id, &fromState, &toState, &createdAtMs); err != nil {
+			jsonError(w, http.StatusInternalServerError, "fetch state transitions")
+			return
+		}
+		msgs = append(msgs, types.HubMessage{
+			ID:        "transition-" + id,
+			ClawID:    clawID,
+			TenantID:  tenantFromCtx(r),
+			Role:      "state",
+			Content:   fmt.Sprintf("Entered state: %s (from %s)", toState, fromState),
+			Format:    "workflow:state",
+			CreatedAt: time.UnixMilli(createdAtMs).UTC(),
+		})
+	}
+	if err := transRows.Err(); err != nil {
+		jsonError(w, http.StatusInternalServerError, "fetch state transitions")
+		return
+	}
+
+	if order == "desc" {
+		sort.Slice(msgs, func(i, j int) bool { return msgs[i].CreatedAt.After(msgs[j].CreatedAt) })
+	} else {
+		sort.Slice(msgs, func(i, j int) bool { return msgs[i].CreatedAt.Before(msgs[j].CreatedAt) })
+	}
+	if len(msgs) > limit {
+		msgs = msgs[:limit]
+	}
+
 	jsonOK(w, msgs)
 }

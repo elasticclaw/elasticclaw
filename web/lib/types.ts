@@ -55,7 +55,7 @@ export interface Claw {
 
 export interface Message {
   id: string
-  role: "user" | "claw" | "system" | "hub" | "activity" | "activity_summary"
+  role: "user" | "claw" | "system" | "hub" | "activity" | "activity_summary" | "state"
   content: string
   format?: string // "pre" = preserve whitespace
   timestamp: Date
@@ -121,7 +121,7 @@ export interface ApiMessage {
   id: string
   claw_id: string
   tenant_id: string
-  role: "user" | "claw" | "hub" | "activity" | "activity_summary"
+  role: "user" | "claw" | "hub" | "activity" | "activity_summary" | "state"
   content: string
   format?: string
   created_at: string

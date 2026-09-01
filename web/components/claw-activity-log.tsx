@@ -73,10 +73,10 @@ export function ClawActivityLog({ clawId, fetcher }: { clawId?: string; fetcher?
     }
   }
 
-  if (loading) return <LoadingState label="Loading agent activity..." />
-  if (accessDenied) return <Notice>You don&apos;t have access to this agent&apos;s logs.</Notice>
+  if (loading) return <LoadingState label="Loading run activity..." />
+  if (accessDenied) return <Notice>You don&apos;t have access to this run&apos;s logs.</Notice>
   if (error && messages.length === 0) return <Notice destructive>{error}</Notice>
-  if (messages.length === 0) return <EmptyState>No agent actions were recorded for this attempt.</EmptyState>
+  if (messages.length === 0) return <EmptyState>No activity or state transitions were recorded for this attempt.</EmptyState>
 
   return (
     <div className="flex h-full min-h-0 flex-col rounded-md border">
@@ -98,7 +98,8 @@ export function ClawActivityLog({ clawId, fetcher }: { clawId?: string; fetcher?
 
 function ActivityLine({ message }: { message: ApiMessage }) {
   const activity = parseActivity(message)
-  const label = activity?.tool || activity?.kind || "activity"
+  const isState = message.role === "state"
+  const label = activity?.tool || activity?.kind || (isState ? "state" : "activity")
   const detailItems = activity ? [
     activity.command && { kind: "command", value: activity.command },
     activity.path && { kind: "path", value: activity.path },
@@ -112,7 +113,8 @@ function ActivityLine({ message }: { message: ApiMessage }) {
     <div className="grid gap-2 px-3 py-3 text-sm sm:grid-cols-[8rem_10rem_minmax(0,1fr)]">
       <time className="text-xs text-muted-foreground">{formatTimestamp(message.created_at)}</time>
       <div className="flex min-w-0 items-start gap-2">
-        <span className="truncate font-medium">{label}</span>
+        <span className={cn("truncate font-medium", isState && "text-primary")}>{label}</span>
+        {isState && <Badge variant="outline" className="shrink-0 text-[10px]">state</Badge>}
         {activity?.phase && <Badge variant="outline" className="shrink-0 text-[10px]">{activity.phase}</Badge>}
       </div>
       <div className="min-w-0 space-y-1">

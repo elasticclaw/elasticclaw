@@ -45,7 +45,7 @@ export function WorkflowRunLogsDialog({ target }: { target: WorkflowRunLogTarget
           <span className="inline-flex" tabIndex={disabled ? 0 : undefined}>
             <Button variant="outline" size="sm" disabled={disabled} onClick={() => setOpen(true)}>
               <FileTerminal className="size-4" />
-              Agent logs
+              Run logs
             </Button>
           </span>
         </TooltipTrigger>
@@ -54,9 +54,9 @@ export function WorkflowRunLogsDialog({ target }: { target: WorkflowRunLogTarget
       <Dialog open={open} onOpenChange={setOpen}>
         <DialogContent className="flex h-[min(85vh,800px)] flex-col gap-3 overflow-hidden p-0 sm:max-w-5xl">
           <DialogHeader className="shrink-0 border-b px-6 py-5 pr-12">
-            <DialogTitle>Agent logs</DialogTitle>
+            <DialogTitle>Run logs</DialogTitle>
             <DialogDescription>
-              Agent activity for run {shortId(runId)} of <WorkflowName name={workflowName} /> in {workspaceName}.
+              Activity and state transitions for run {shortId(runId)} of <WorkflowName name={workflowName} /> in {workspaceName}.
             </DialogDescription>
           </DialogHeader>
           <div className="min-h-0 flex-1 px-6 pb-6">
