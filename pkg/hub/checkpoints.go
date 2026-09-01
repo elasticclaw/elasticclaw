@@ -15,6 +15,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/elasticclaw/elasticclaw/pkg/config"
@@ -23,6 +25,7 @@ import (
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 	"github.com/google/uuid"
 	gossh "golang.org/x/crypto/ssh"
+	"golang.org/x/sync/errgroup"
 	"nhooyr.io/websocket/wsjson"
 )
 
@@ -32,7 +35,15 @@ const (
 	checkpointRequestTimeout     = 2 * time.Minute
 	checkpointTerminationTimeout = 90 * time.Second
 	maxCheckpointBlobBytes       = 256 << 20
+
+	defaultCheckpointRestoreParallelism = 8
+	checkpointRestoreFileTimeout        = 2 * time.Minute
+	checkpointRestoreProgressInterval   = 10 * time.Second
 )
+
+type checkpointFileWriter func(ctx context.Context, remotePath string, data []byte) error
+
+var checkpointRestoreNow = time.Now
 
 type checkpointSummary struct {
 	ID              string     `json:"id"`
@@ -1008,6 +1019,64 @@ func restoreRemotePath(path, home, workspace string) string {
 	}
 }
 
+func (s *Server) restoreCheckpointFilesTo(ctx context.Context, clawID, checkpointID string, files []types.CheckpointFile, remotePathFor func(path string) string, parallelism int, write checkpointFileWriter) error {
+	totalBytes := int64(0)
+	for _, f := range files {
+		totalBytes += f.Size
+	}
+	total := len(files)
+	log.Printf("[checkpoint] restoring %d files (%d bytes) into claw %s", total, totalBytes, clawID)
+
+	group, groupCtx := errgroup.WithContext(ctx)
+	group.SetLimit(parallelism)
+	var done atomic.Int64
+	var progressMu sync.Mutex
+	lastProgress := checkpointRestoreNow()
+	reportProgress := func() {
+		progressMu.Lock()
+		defer progressMu.Unlock()
+		now := checkpointRestoreNow()
+		if now.Sub(lastProgress) < checkpointRestoreProgressInterval {
+			return
+		}
+		lastProgress = now
+		completed := done.Load()
+		log.Printf("[checkpoint] claw %s: restored %d/%d files", clawID, completed, total)
+		s.setBootstrapStatus(clawID, fmt.Sprintf("Restoring checkpoint files (%d/%d)", completed, total))
+	}
+
+	for _, f := range files {
+		f := f
+		group.Go(func() error {
+			// errgroup still runs every submitted worker after the first
+			// failure. The SSH writer ignores its context, so without this
+			// check a failed restore would keep uploading the whole manifest
+			// before returning the error.
+			if err := groupCtx.Err(); err != nil {
+				return err
+			}
+			data, err := os.ReadFile(checkpointBlobPath(f.SHA256))
+			if err != nil {
+				return fmt.Errorf("read checkpoint blob %s: %w", f.SHA256, err)
+			}
+			writeCtx, cancel := context.WithTimeout(groupCtx, checkpointRestoreFileTimeout)
+			err = write(writeCtx, remotePathFor(f.Path), data)
+			cancel()
+			if err != nil {
+				return fmt.Errorf("restore %s: %w", f.Path, err)
+			}
+			done.Add(1)
+			reportProgress()
+			return nil
+		})
+	}
+	if err := group.Wait(); err != nil {
+		return err
+	}
+	log.Printf("[checkpoint] claw %s: restore complete (%d files)", clawID, total)
+	return nil
+}
+
 func (s *Server) restoreCheckpointToDaytona(ctx context.Context, clawID, instanceID string, p *daytonaProvider.Provider) error {
 	checkpointID := s.pendingRestoreCheckpoint(clawID)
 	if checkpointID == "" {
@@ -1018,15 +1087,12 @@ func (s *Server) restoreCheckpointToDaytona(ctx context.Context, clawID, instanc
 	if err != nil {
 		return err
 	}
-	for _, f := range files {
-		data, err := os.ReadFile(checkpointBlobPath(f.SHA256))
-		if err != nil {
-			return fmt.Errorf("read checkpoint blob %s: %w", f.SHA256, err)
-		}
-		remote := restoreRemotePath(f.Path, "/home/daytona", "/home/daytona/.openclaw/workspace")
-		if err := p.WriteFile(ctx, instanceID, remote, data); err != nil {
-			return fmt.Errorf("restore %s: %w", f.Path, err)
-		}
+	if err := s.restoreCheckpointFilesTo(ctx, clawID, checkpointID, files, func(path string) string {
+		return restoreRemotePath(path, "/home/daytona", "/home/daytona/.openclaw/workspace")
+	}, defaultCheckpointRestoreParallelism, func(ctx context.Context, remote string, data []byte) error {
+		return p.WriteFile(ctx, instanceID, remote, data)
+	}); err != nil {
+		return err
 	}
 	s.markRestoreApplied(clawID, checkpointID)
 	return nil
@@ -1042,15 +1108,12 @@ func (s *Server) restoreCheckpointToExedev(ctx context.Context, clawID, vmName s
 	if err != nil {
 		return err
 	}
-	for _, f := range files {
-		data, err := os.ReadFile(checkpointBlobPath(f.SHA256))
-		if err != nil {
-			return fmt.Errorf("read checkpoint blob %s: %w", f.SHA256, err)
-		}
-		remote := restoreRemotePath(f.Path, ".", ".openclaw/workspace")
-		if err := p.WriteFile(ctx, vmName, remote, data); err != nil {
-			return fmt.Errorf("restore %s: %w", f.Path, err)
-		}
+	if err := s.restoreCheckpointFilesTo(ctx, clawID, checkpointID, files, func(path string) string {
+		return restoreRemotePath(path, ".", ".openclaw/workspace")
+	}, 1, func(ctx context.Context, remote string, data []byte) error {
+		return p.WriteFile(ctx, vmName, remote, data)
+	}); err != nil {
+		return err
 	}
 	s.markRestoreApplied(clawID, checkpointID)
 	return nil
@@ -1077,15 +1140,12 @@ func (s *Server) restoreCheckpointToSSH(clawID, user, host string) error {
 		return fmt.Errorf("ssh dial: %w", err)
 	}
 	defer client.Close()
-	for _, f := range files {
-		data, err := os.ReadFile(checkpointBlobPath(f.SHA256))
-		if err != nil {
-			return fmt.Errorf("read checkpoint blob %s: %w", f.SHA256, err)
-		}
-		remote := restoreRemotePath(f.Path, ".", ".openclaw/workspace")
-		if err := sshWriteBytes(client, remote, data); err != nil {
-			return fmt.Errorf("restore %s: %w", f.Path, err)
-		}
+	if err := s.restoreCheckpointFilesTo(context.Background(), clawID, checkpointID, files, func(path string) string {
+		return restoreRemotePath(path, ".", ".openclaw/workspace")
+	}, 1, func(_ context.Context, remote string, data []byte) error {
+		return sshWriteBytes(client, remote, data)
+	}); err != nil {
+		return err
 	}
 	s.markRestoreApplied(clawID, checkpointID)
 	return nil
