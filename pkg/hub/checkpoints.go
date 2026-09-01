@@ -1049,9 +1049,8 @@ func (s *Server) restoreCheckpointFilesTo(ctx context.Context, clawID, checkpoin
 		f := f
 		group.Go(func() error {
 			// errgroup still runs every submitted worker after the first
-			// failure. The SSH writer ignores its context, so without this
-			// check a failed restore would keep uploading the whole manifest
-			// before returning the error.
+			// failure, so do not begin any more uploads once the group is
+			// cancelled.
 			if err := groupCtx.Err(); err != nil {
 				return err
 			}
@@ -1142,8 +1141,8 @@ func (s *Server) restoreCheckpointToSSH(clawID, user, host string) error {
 	defer client.Close()
 	if err := s.restoreCheckpointFilesTo(context.Background(), clawID, checkpointID, files, func(path string) string {
 		return restoreRemotePath(path, ".", ".openclaw/workspace")
-	}, 1, func(_ context.Context, remote string, data []byte) error {
-		return sshWriteBytes(client, remote, data)
+	}, 1, func(ctx context.Context, remote string, data []byte) error {
+		return sshWriteBytes(ctx, client, remote, data)
 	}); err != nil {
 		return err
 	}
@@ -1151,19 +1150,69 @@ func (s *Server) restoreCheckpointToSSH(clawID, user, host string) error {
 	return nil
 }
 
-func sshWriteBytes(client *gossh.Client, remote string, data []byte) error {
-	sess, err := client.NewSession()
-	if err != nil {
-		return err
-	}
-	defer sess.Close()
-	sess.Stdin = bytes.NewReader(data)
+func sshWriteBytes(ctx context.Context, client *gossh.Client, remote string, data []byte) error {
 	cmd := fmt.Sprintf("mkdir -p %s && cat > %s", checkpointShellQuote(filepath.Dir(remote)), checkpointShellQuote(remote))
-	out, err := sess.CombinedOutput(cmd)
-	if err != nil {
-		return fmt.Errorf("%w: %s", err, string(out))
+	return sshWriteSessionWithNewSession(ctx, cmd, func() (checkpointSSHSession, error) {
+		sess, err := client.NewSession()
+		if err != nil {
+			return nil, err
+		}
+		sess.Stdin = bytes.NewReader(data)
+		return sess, nil
+	}, client.Close)
+}
+
+type checkpointSSHSession interface {
+	CombinedOutput(string) ([]byte, error)
+	Close() error
+}
+
+func sshWriteSessionWithNewSession(ctx context.Context, cmd string, newSession func() (checkpointSSHSession, error), closeClient func() error) error {
+	type result struct {
+		err  error
+		sess checkpointSSHSession
 	}
-	return nil
+	completed := make(chan result, 1)
+	go func() {
+		sess, err := newSession()
+		completed <- result{sess: sess, err: err}
+	}()
+	select {
+	case result := <-completed:
+		if result.err != nil {
+			return result.err
+		}
+		return sshWriteSession(ctx, result.sess, cmd, closeClient)
+	case <-ctx.Done():
+		go func() { _ = closeClient() }()
+		return ctx.Err()
+	}
+}
+
+func sshWriteSession(ctx context.Context, sess checkpointSSHSession, cmd string, closeClient func() error) error {
+	type result struct {
+		out []byte
+		err error
+	}
+	completed := make(chan result, 1)
+	go func() {
+		out, err := sess.CombinedOutput(cmd)
+		completed <- result{out: out, err: err}
+	}()
+	select {
+	case result := <-completed:
+		_ = sess.Close()
+		if result.err != nil {
+			return fmt.Errorf("%w: %s", result.err, string(result.out))
+		}
+		return nil
+	case <-ctx.Done():
+		go func() {
+			_ = closeClient()
+			_ = sess.Close()
+		}()
+		return ctx.Err()
+	}
 }
 
 func checkpointShellQuote(s string) string {

@@ -226,8 +226,8 @@ func TestRestoreCheckpointFilesToReturnsWriteError(t *testing.T) {
 		t.Fatalf("restore error = %v, want wrapped path", err)
 	}
 	// The remaining files must not be uploaded after the first failure: the
-	// SSH writer ignores its context, so only the cancellation check inside
-	// the worker stops the rest of the manifest from being sent.
+	// worker's cancellation check must stop the rest of the manifest from
+	// being sent once the group is cancelled.
 	for _, remote := range written {
 		if strings.HasSuffix(remote, "file-c") {
 			t.Fatalf("kept restoring after failure: wrote %q", remote)
@@ -256,6 +256,65 @@ func TestRestoreCheckpointFilesToReportsProgress(t *testing.T) {
 	}
 	if !strings.Contains(status, "Restoring checkpoint files (") {
 		t.Fatalf("bootstrap status = %q, want restore progress", status)
+	}
+}
+
+type blockingCheckpointSSHSession struct {
+	closeStarted chan struct{}
+	neverClose   chan struct{}
+	once         sync.Once
+}
+
+func (s *blockingCheckpointSSHSession) CombinedOutput(string) ([]byte, error) {
+	<-s.neverClose
+	return nil, nil
+}
+
+func (s *blockingCheckpointSSHSession) Close() error {
+	s.once.Do(func() { close(s.closeStarted) })
+	<-s.neverClose
+	return nil
+}
+
+func TestSSHWriteSessionHonorsContextDeadline(t *testing.T) {
+	sess := &blockingCheckpointSSHSession{closeStarted: make(chan struct{}), neverClose: make(chan struct{})}
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+	defer cancel()
+	err := sshWriteSession(ctx, sess, "cat > file", func() error { return nil })
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("write error = %v, want deadline exceeded", err)
+	}
+	select {
+	case <-sess.closeStarted:
+	case <-time.After(time.Second):
+		t.Fatal("session close was not started after context expiry")
+	}
+}
+
+func TestSSHWriteSessionWithNewSessionHonorsContextDeadline(t *testing.T) {
+	newSessionStarted := make(chan struct{})
+	clientClosed := make(chan struct{})
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+	defer cancel()
+	err := sshWriteSessionWithNewSession(ctx, "cat > file", func() (checkpointSSHSession, error) {
+		close(newSessionStarted)
+		select {}
+	}, func() error {
+		close(clientClosed)
+		return nil
+	})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("write error = %v, want deadline exceeded", err)
+	}
+	select {
+	case <-newSessionStarted:
+	case <-time.After(time.Second):
+		t.Fatal("new session was not started")
+	}
+	select {
+	case <-clientClosed:
+	case <-time.After(time.Second):
+		t.Fatal("client was not closed after context expiry")
 	}
 }
 
