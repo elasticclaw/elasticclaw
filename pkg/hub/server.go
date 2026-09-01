@@ -216,6 +216,12 @@ type Server struct {
 	infraNotifierStop chan struct{}
 	infraNotifierDone chan struct{}
 
+	// infraPendingDeliveries mirrors lifecyclePendingDeliveries for the infra
+	// loop: a delivery row whose insert failed after a successful send is
+	// stashed and retried, never re-sent. Only touched from the infra tick
+	// goroutine — ticks never overlap.
+	infraPendingDeliveries map[infraDeliveryKey]infraPendingDelivery
+
 	// dependencyWatcherStop/Done give the status poll the same shutdown
 	// guarantee as notifiers: its DB write must finish before the DB closes.
 	dependencyWatcherStop chan struct{}
@@ -573,6 +579,11 @@ func NewServer(addr, dbPath, identityDir string, hubCfg *types.HubConfig) (*Serv
 	// emitted in that window would be stamped as pre-existing history and
 	// silently dropped.
 	srv.initLifecycleNotifierBaseline()
+	// The infra baseline needs the same ordering guarantee: the dependency
+	// watcher and the LLM limit latch below produce infra events whether or
+	// not any route is configured, and a route must never replay the history
+	// recorded before it existed.
+	srv.initInfraNotifierBaseline()
 
 	srv.startPRWatcher()
 

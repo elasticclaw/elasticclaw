@@ -39,12 +39,23 @@ func mustRecordInfraEvent(t *testing.T, s *Server, key, eventType string, detail
 	}
 }
 
+// establishInfraRoute stamps the route's watermark at the current head of
+// infra_events, the way NewServer's baseline (or the route's own first tick)
+// does before any event under test is recorded.
+func establishInfraRoute(t *testing.T, s *Server, via string) {
+	t.Helper()
+	if err := s.deliverInfraRoute(context.Background(), time.Unix(0, 0), via, types.InfraRoute{Via: via}, &recordingNotifier{}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // Regression: a route with a non-empty Events allowlist must skip events not
 // in that list (and still advance its watermark past them) while delivering
 // the ones it does subscribe to.
 func TestDeliverInfraRouteFiltersByEvent(t *testing.T) {
 	s, _ := NewTestServerWithConfig(t, nil, "", "", "")
 	base := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	establishInfraRoute(t, s, "ops")
 	mustRecordInfraEvent(t, s, "ev-down", "dependency_down", map[string]any{"name": "Anthropic"}, base)
 	mustRecordInfraEvent(t, s, "ev-capped", "provider_limit_opened", map[string]any{"name": "OpenAI"}, base.Add(time.Second))
 
@@ -74,6 +85,7 @@ func TestDeliverInfraRouteFiltersByEvent(t *testing.T) {
 func TestDeliverInfraRouteEmptyAllowlistDeliversEverything(t *testing.T) {
 	s, _ := NewTestServerWithConfig(t, nil, "", "", "")
 	base := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	establishInfraRoute(t, s, "ops")
 	mustRecordInfraEvent(t, s, "ev-down", "dependency_down", map[string]any{"name": "Anthropic"}, base)
 	mustRecordInfraEvent(t, s, "ev-capped", "provider_limit_opened", map[string]any{"name": "OpenAI"}, base.Add(time.Second))
 
@@ -93,6 +105,8 @@ func TestDeliverInfraRouteEmptyAllowlistDeliversEverything(t *testing.T) {
 func TestDeliverInfraRouteDedupePerRoute(t *testing.T) {
 	s, _ := NewTestServerWithConfig(t, nil, "", "", "")
 	base := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	establishInfraRoute(t, s, "ops")
+	establishInfraRoute(t, s, "sre")
 	mustRecordInfraEvent(t, s, "ev-down", "dependency_down", map[string]any{"name": "Anthropic"}, base)
 
 	nOps, nSre := &recordingNotifier{}, &recordingNotifier{}
@@ -121,6 +135,7 @@ func TestDeliverInfraRouteDedupePerRoute(t *testing.T) {
 func TestDeliverInfraRouteTransientFailureCapUnwedgesRoute(t *testing.T) {
 	s, _ := NewTestServerWithConfig(t, nil, "", "", "")
 	base := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	establishInfraRoute(t, s, "ops")
 	mustRecordInfraEvent(t, s, "ev-poison", "dependency_down", map[string]any{"name": "Anthropic"}, base)
 	mustRecordInfraEvent(t, s, "ev-behind", "dependency_recovered", map[string]any{"name": "Anthropic"}, base.Add(time.Second))
 
@@ -162,6 +177,7 @@ func TestDeliverInfraRouteTransientFailureCapUnwedgesRoute(t *testing.T) {
 func TestDeliverInfraRouteConfigErrorPausesRoute(t *testing.T) {
 	s, _ := NewTestServerWithConfig(t, nil, "", "", "")
 	base := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	establishInfraRoute(t, s, "ops")
 	mustRecordInfraEvent(t, s, "ev-down", "dependency_down", map[string]any{"name": "Anthropic"}, base)
 
 	n := &recordingNotifier{failN: 1, failErr: notify.ConfigError(errors.New("bad token"))}
@@ -238,5 +254,133 @@ func TestBuildInfraMessageUnknownEventTypeDoesNotPanic(t *testing.T) {
 	msg := buildInfraMessage(infraEventRow{EventType: "something_new", Subject: "x"}, time.Now())
 	if msg.Title == "" {
 		t.Fatal("unknown event type produced an empty title")
+	}
+}
+
+// Regression: a route seen for the first time — added at runtime, or enabled
+// months after the producers started recording — must baseline at the head of
+// infra_events instead of replaying the whole history as fresh alerts.
+func TestDeliverInfraRouteNewRouteDoesNotReplayHistory(t *testing.T) {
+	s, _ := NewTestServerWithConfig(t, nil, "", "", "")
+	base := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	mustRecordInfraEvent(t, s, "ev-old-down", "dependency_down", map[string]any{"name": "Anthropic"}, base)
+	mustRecordInfraEvent(t, s, "ev-old-recovered", "dependency_recovered", map[string]any{"name": "Anthropic"}, base.Add(time.Second))
+
+	n := &recordingNotifier{}
+	route := types.InfraRoute{Via: "ops"}
+	if err := s.deliverInfraRoute(context.Background(), base, "ops", route, n); err != nil {
+		t.Fatal(err)
+	}
+	if len(n.sent) != 0 {
+		t.Fatalf("brand-new route replayed %d historical events", len(n.sent))
+	}
+	mustRecordInfraEvent(t, s, "ev-new", "provider_limit_opened", map[string]any{"name": "OpenAI"}, base.Add(time.Minute))
+	if err := s.deliverInfraRoute(context.Background(), base.Add(time.Minute), "ops", route, n); err != nil {
+		t.Fatal(err)
+	}
+	if len(n.sent) != 1 || n.sent[0].Subject != "OpenAI" {
+		t.Fatalf("route missed the first post-baseline event: sent=%v", n.sent)
+	}
+}
+
+// initInfraNotifierBaseline stamps every configured route synchronously at
+// boot, so events produced before the notifier's first tick are history, not
+// a backlog.
+func TestInitInfraNotifierBaselineStampsConfiguredRoutes(t *testing.T) {
+	s, _ := NewTestServerWithConfig(t, &types.HubConfig{Notifications: &types.NotificationsConfig{
+		Infra: &types.InfraNotificationsConfig{Routes: []types.InfraRoute{{Via: "ops"}}},
+	}}, "", "", "")
+	base := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	mustRecordInfraEvent(t, s, "ev-historical", "dependency_down", map[string]any{"name": "Anthropic"}, base)
+	s.initInfraNotifierBaseline()
+	watermark, found, err := s.notifierStateInt64(infraWatermarkKey("ops"))
+	if err != nil || !found {
+		t.Fatalf("baseline missing: found=%v err=%v", found, err)
+	}
+	maxRow, err := s.infraMaxEventRowID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if watermark != maxRow {
+		t.Fatalf("baseline watermark = %d, want head %d", watermark, maxRow)
+	}
+}
+
+// Regression: a delivery whose bookkeeping write fails after a successful
+// send must be fenced in memory — never re-sent — and its row landed once the
+// database accepts writes again.
+func TestDeliverInfraRoutePendingDeliveryPreventsResend(t *testing.T) {
+	s, _ := NewTestServerWithConfig(t, nil, "", "", "")
+	base := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	establishInfraRoute(t, s, "ops")
+	mustRecordInfraEvent(t, s, "ev-down", "dependency_down", map[string]any{"name": "Anthropic"}, base)
+	var rowid int64
+	if err := s.db.QueryRow(`SELECT rowid FROM infra_events WHERE event_key='ev-down'`).Scan(&rowid); err != nil {
+		t.Fatal(err)
+	}
+	// Block only the bookkeeping insert; reads and the send stay healthy.
+	if _, err := s.db.Exec(`CREATE TRIGGER block_infra_delivery BEFORE INSERT ON infra_notification_deliveries BEGIN SELECT RAISE(ABORT, 'synthetic bookkeeping failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+	n := &recordingNotifier{}
+	route := types.InfraRoute{Via: "ops"}
+	if err := s.deliverInfraRoute(context.Background(), base, "ops", route, n); err != nil {
+		t.Fatal(err)
+	}
+	if len(n.sent) != 1 {
+		t.Fatalf("sent %d messages, want 1", len(n.sent))
+	}
+	if !s.infraDeliveryPending(rowid, "ops") {
+		t.Fatal("failed bookkeeping write was not stashed as pending")
+	}
+	// Even with the cursor rewound (as if the watermark write had failed
+	// too), the stash alone must fence the resend.
+	s.setNotifierStateInt64(infraWatermarkKey("ops"), 0)
+	if err := s.deliverInfraRoute(context.Background(), base, "ops", route, n); err != nil {
+		t.Fatal(err)
+	}
+	if len(n.sent) != 1 {
+		t.Fatalf("stashed delivery was re-sent: sent=%d", len(n.sent))
+	}
+	// Once the DB accepts writes again the flush lands the row and drains the stash.
+	if _, err := s.db.Exec(`DROP TRIGGER block_infra_delivery`); err != nil {
+		t.Fatal(err)
+	}
+	s.flushPendingInfraDeliveries()
+	if s.infraDeliveryPending(rowid, "ops") {
+		t.Fatal("stash did not drain after the database recovered")
+	}
+	var status string
+	if err := s.db.QueryRow(`SELECT status FROM infra_notification_deliveries WHERE event_rowid=? AND notifier='ops'`, rowid).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != notificationDeliveryStatusSent {
+		t.Fatalf("flushed delivery status = %q, want sent", status)
+	}
+}
+
+// Regression: the producer stores the parked-claw count under "parked_claws";
+// the renderer must read the same key, and must render both the Go int the
+// test-send path stores and the float64 a JSON round-trip produces.
+func TestBuildInfraMessageRendersParkedClaws(t *testing.T) {
+	for name, count := range map[string]any{"int": int(4), "float64": float64(4)} {
+		t.Run(name, func(t *testing.T) {
+			e := infraEventRow{
+				EventType:  "provider_limit_opened",
+				Subject:    "openai",
+				Detail:     map[string]any{"provider": "openai", "key_id": "key_abc123", "parked_claws": count, "deadline": "2026-09-02 00:00 UTC"},
+				OccurredAt: time.Now(),
+			}
+			msg := buildInfraMessage(e, time.Now())
+			got := ""
+			for _, f := range msg.Fields {
+				if f.Label == "Claws parked" {
+					got = f.Value
+				}
+			}
+			if got != "4" {
+				t.Fatalf("Claws parked field = %q, want \"4\" (fields: %+v)", got, msg.Fields)
+			}
+		})
 	}
 }

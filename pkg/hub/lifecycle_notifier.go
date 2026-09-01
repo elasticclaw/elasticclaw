@@ -2066,7 +2066,7 @@ func sampleInfraEvent(eventType string) infraEventRow {
 		detail["name"] = subject
 		detail["provider"] = "openai"
 		detail["key_id"] = "sk-...ab12"
-		detail["claws_parked"] = 3
+		detail["parked_claws"] = 3
 		detail["deadline"] = "2026-09-02T00:00:00Z"
 	}
 	return infraEventRow{EventType: eventType, Subject: subject, Detail: detail, OccurredAt: now()}

@@ -34,6 +34,39 @@ type infraEventRow struct {
 	OccurredAt         time.Time
 }
 
+// initInfraNotifierBaseline stamps every configured route's watermark at the
+// head of infra_events before any event producer starts, for the same reason
+// initLifecycleNotifierBaseline does: the producers (dependency watcher, LLM
+// limit latch) run unconditionally from boot, so a route whose cursor were
+// left at zero would replay the entire recorded history — weeks of resolved
+// outages — into its channel the first time it delivered. Only a missing
+// watermark is written; persisted cursors stay authoritative.
+func (s *Server) initInfraNotifierBaseline() {
+	cfg := s.notificationsConfig()
+	if cfg == nil || !cfg.Infra.IsEnabled() {
+		return
+	}
+	for _, route := range cfg.Infra.Routes {
+		via := strings.TrimSpace(route.Via)
+		if via == "" {
+			continue
+		}
+		if _, found, err := s.notifierStateInt64(infraWatermarkKey(via)); err == nil && !found {
+			if maxRow, err := s.infraMaxEventRowID(); err == nil {
+				s.setNotifierStateInt64(infraWatermarkKey(via), maxRow)
+			} else {
+				log.Printf("[notify] init infra watermark baseline for %q: %v", via, err)
+			}
+		}
+	}
+}
+
+func (s *Server) infraMaxEventRowID() (int64, error) {
+	var maxRow int64
+	err := s.db.QueryRow(`SELECT COALESCE(MAX(rowid),0) FROM infra_events`).Scan(&maxRow)
+	return maxRow, err
+}
+
 func (s *Server) startInfraNotifier() {
 	stop, done := make(chan struct{}), make(chan struct{})
 	s.infraNotifierStop, s.infraNotifierDone = stop, done
@@ -92,6 +125,7 @@ func (s *Server) infraNotifierTick(ctx context.Context, nowAt time.Time) {
 		return
 	}
 	s.clearPollWarning("infra-config")
+	s.flushPendingInfraDeliveries()
 	for _, route := range cfg.Infra.Routes {
 		via := strings.TrimSpace(route.Via)
 		n, err := s.notifierFor(via, cfg.Notifiers[via], s.hubSecretResolver())
@@ -107,9 +141,22 @@ func (s *Server) infraNotifierTick(ctx context.Context, nowAt time.Time) {
 }
 
 func (s *Server) deliverInfraRoute(ctx context.Context, nowAt time.Time, via string, route types.InfraRoute, n notify.Notifier) error {
-	watermark, _, err := s.notifierStateInt64(infraWatermarkKey(via))
+	watermark, found, err := s.notifierStateInt64(infraWatermarkKey(via))
 	if err != nil {
 		return err
+	}
+	if !found {
+		// A route seen for the first time (added at runtime, or enabled after
+		// the hub had already been recording events) starts at the head of the
+		// stream: everything before it existed is history, not news. The boot
+		// path stamps configured routes synchronously (initInfraNotifierBaseline);
+		// this is the backstop for runtime config changes.
+		maxRow, err := s.infraMaxEventRowID()
+		if err != nil {
+			return err
+		}
+		s.setNotifierStateInt64(infraWatermarkKey(via), maxRow)
+		return nil
 	}
 	// Collect the whole batch before issuing any further query on this
 	// connection: the test harness (and a modest deployment) runs SQLite
@@ -148,6 +195,12 @@ func (s *Server) deliverInfraRoute(ctx context.Context, nowAt time.Time, via str
 			s.setNotifierStateInt64(infraWatermarkKey(via), e.RowID)
 			continue
 		}
+		// A delivery whose bookkeeping row is still stashed in memory counts
+		// as delivered: the send already happened, only its record is owed.
+		if s.infraDeliveryPending(e.RowID, via) {
+			s.setNotifierStateInt64(infraWatermarkKey(via), e.RowID)
+			continue
+		}
 		var exists int
 		if err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM infra_notification_deliveries WHERE event_rowid=? AND notifier=?)`, e.RowID, via).Scan(&exists); err != nil {
 			return err
@@ -175,18 +228,65 @@ func (s *Server) deliverInfraRoute(ctx context.Context, nowAt time.Time, via str
 				}
 				s.clearNotifierState(infraFailureKey(e.RowID, via))
 			}
-			if _, err := s.db.Exec(`INSERT INTO infra_notification_deliveries(event_rowid,notifier,delivered_at,status) VALUES(?,?,?,?)`, e.RowID, via, epochMillis(nowAt), notificationDeliveryStatusFailed); err != nil {
-				return err
-			}
+			s.recordInfraDelivery(e.RowID, via, notificationDeliveryStatusFailed, nowAt)
 		} else {
 			s.clearNotifierState(infraFailureKey(e.RowID, via))
-			if _, err := s.db.Exec(`INSERT INTO infra_notification_deliveries(event_rowid,notifier,delivered_at,status) VALUES(?,?,?,?)`, e.RowID, via, epochMillis(nowAt), notificationDeliveryStatusSent); err != nil {
-				return err
-			}
+			s.recordInfraDelivery(e.RowID, via, notificationDeliveryStatusSent, nowAt)
 		}
 		s.setNotifierStateInt64(infraWatermarkKey(via), e.RowID)
 	}
 	return nil
+}
+
+// infraDeliveryKey identifies one stashed infra delivery row.
+type infraDeliveryKey struct {
+	rowid int64
+	via   string
+}
+
+// infraPendingDelivery is a delivery whose post-send bookkeeping write failed;
+// flushPendingInfraDeliveries retries it. While stashed, the (event, route)
+// pair still counts as delivered (see deliverInfraRoute): the send already
+// reached the channel, so retrying the SEND on a sick database would page the
+// same alert every tick — the lesson recordNotificationDelivery learned.
+type infraPendingDelivery struct {
+	status      string
+	deliveredAt time.Time
+}
+
+func (s *Server) infraDeliveryPending(rowid int64, via string) bool {
+	_, ok := s.infraPendingDeliveries[infraDeliveryKey{rowid: rowid, via: via}]
+	return ok
+}
+
+func (s *Server) recordInfraDelivery(rowid int64, via, status string, at time.Time) {
+	if err := s.execInfraDelivery(rowid, via, status, at); err != nil {
+		log.Printf("[notify] record infra delivery for event %d via %s (will retry): %v", rowid, via, err)
+		if s.infraPendingDeliveries == nil {
+			s.infraPendingDeliveries = make(map[infraDeliveryKey]infraPendingDelivery)
+		}
+		s.infraPendingDeliveries[infraDeliveryKey{rowid: rowid, via: via}] = infraPendingDelivery{status: status, deliveredAt: at}
+	}
+}
+
+func (s *Server) execInfraDelivery(rowid int64, via, status string, at time.Time) error {
+	_, err := s.db.Exec(`INSERT INTO infra_notification_deliveries(event_rowid,notifier,delivered_at,status) VALUES(?,?,?,?) ON CONFLICT(event_rowid,notifier) DO NOTHING`, rowid, via, epochMillis(at), status)
+	return err
+}
+
+// flushPendingInfraDeliveries retries delivery rows whose insert failed after
+// a successful send. Runs at the top of every tick so the stash drains as
+// soon as the database accepts writes again. Like the lifecycle stash, it
+// only closes the dedupe gap within one process lifetime — see
+// flushPendingNotificationDeliveries for why that window is accepted.
+func (s *Server) flushPendingInfraDeliveries() {
+	for key, p := range s.infraPendingDeliveries {
+		if err := s.execInfraDelivery(key.rowid, key.via, p.status, p.deliveredAt); err != nil {
+			log.Printf("[notify] retry infra delivery for event %d via %s: %v", key.rowid, key.via, err)
+			continue
+		}
+		delete(s.infraPendingDeliveries, key)
+	}
 }
 
 type infraEventStyle struct {
@@ -224,7 +324,7 @@ func buildInfraMessage(e infraEventRow, _ time.Time) notify.Message {
 			fields = append(fields, notify.Field{Label: "Status page", Value: statusPage})
 		}
 	} else if strings.HasPrefix(e.EventType, "provider_limit_") {
-		for _, field := range []struct{ label, key string }{{"Provider", "provider"}, {"Key", "key_id"}, {"Claws parked", "claws_parked"}, {"Deadline", "deadline"}} {
+		for _, field := range []struct{ label, key string }{{"Provider", "provider"}, {"Key", "key_id"}, {"Claws parked", "parked_claws"}, {"Deadline", "deadline"}} {
 			if value := stringValue(e.Detail, field.key); value != "" {
 				fields = append(fields, notify.Field{Label: field.label, Value: value})
 			}
@@ -245,6 +345,13 @@ func stringValue(m map[string]any, key string) string {
 		return v.String()
 	case float64:
 		return strconv.FormatFloat(v, 'f', -1, 64)
+	// Details straight from a producer (the test-send path) carry Go ints;
+	// details read back from the store arrive as float64 via json.Unmarshal.
+	// Both spellings of the same count must render.
+	case int:
+		return strconv.Itoa(v)
+	case int64:
+		return strconv.FormatInt(v, 10)
 	default:
 		return ""
 	}
