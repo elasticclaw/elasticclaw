@@ -676,8 +676,12 @@ type InfraRoute struct {
 }
 
 // InfraNotificationsConfig configures edge-triggered infrastructure alerts.
-// RepeatAfter is deliberately opt-in: an outage does not become more actionable
-// because it repeats in a channel every hour.
+// RepeatAfter re-alerts about a dependency that is still degraded or down once
+// the interval elapses after the previous alert. It is deliberately opt-in: an
+// outage does not become more actionable because it repeats in a channel every
+// hour. Provider caps are not repeated by it — the usage-limit latch already
+// re-emits on its own cadence (opened, exhausted when retries run out,
+// released), each with a stated deadline.
 type InfraNotificationsConfig struct {
 	Enabled      *bool        `yaml:"enabled,omitempty" json:"enabled,omitempty"`
 	Routes       []InfraRoute `yaml:"routes,omitempty" json:"routes,omitempty"`

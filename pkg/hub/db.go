@@ -588,6 +588,13 @@ func migrate(db *sql.DB) error {
 		message         TEXT NOT NULL DEFAULT '',
 		since           INTEGER NOT NULL DEFAULT 0,
 		notified_status TEXT NOT NULL DEFAULT '',
+		-- The CheckedAt of the last snapshot that counted as an observation.
+		-- The status cache outlives the watcher tick, so a re-served snapshot
+		-- must not count as a second consecutive check toward the debounce.
+		last_checked_at INTEGER NOT NULL DEFAULT 0,
+		-- When the last degraded/down alert for this dependency was recorded,
+		-- so the opt-in repeat_after can re-alert during a long outage.
+		last_alert_at   INTEGER NOT NULL DEFAULT 0,
 		updated_at      INTEGER NOT NULL DEFAULT 0
 	);
 
