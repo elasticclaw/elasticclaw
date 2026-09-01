@@ -583,6 +583,26 @@ type NotificationsConfig struct {
 	// Lifecycle configures agent lifecycle notifications (agent started,
 	// PR opened, failures).
 	Lifecycle *LifecycleNotificationsConfig `yaml:"lifecycle,omitempty" json:"lifecycle,omitempty"`
+	// Scheduled configures time-driven reports sent through named notifiers.
+	Scheduled []ScheduledNotificationConfig `yaml:"scheduled,omitempty" json:"scheduled,omitempty"`
+}
+
+// ScheduledNotificationConfig configures a report sent at a wall-clock time.
+type ScheduledNotificationConfig struct {
+	// ID uniquely identifies this schedule.
+	ID string `yaml:"id" json:"id"`
+	// Report is the report type name, for example "pending_prs".
+	Report string `yaml:"report" json:"report"`
+	// Via names one or more notifiers from notifications.notifiers.
+	Via []string `yaml:"via" json:"via"`
+	// At is a 24-hour wall-clock time in "HH:MM" format.
+	At string `yaml:"at" json:"at"`
+	// Timezone is an IANA name; UTC is used when it is empty.
+	Timezone string `yaml:"timezone,omitempty" json:"timezone,omitempty"`
+	// Weekdays limits delivery to mon through sun; an empty list means every day.
+	Weekdays []string `yaml:"weekdays,omitempty" json:"weekdays,omitempty"`
+	// Enabled defaults to true when omitted.
+	Enabled *bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
 }
 
 // LifecycleEventTypes is the canonical set of lifecycle event wire types: the

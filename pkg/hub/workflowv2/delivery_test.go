@@ -24,6 +24,27 @@ repositories:
     repository: org/web
 `
 
+const deliveryTransitionWorkflowYAML = `
+schema_version: 2
+name: delivery-transition
+enabled: true
+initial_state: awaiting_delivery
+states:
+  awaiting_delivery:
+    phase: build
+  reviewing:
+    phase: review
+transitions:
+  submitted:
+    from: awaiting_delivery
+    on: delivery.verified
+    when:
+      delivery:
+        open:
+          not_equals: 0
+    to: reviewing
+`
+
 func createDeliveryRun(t *testing.T, store *workflowv2.Store, id string) workflowv2.Attempt {
 	t.Helper()
 	if _, err := store.CreateRun(context.Background(), workflowv2.CreateRunRequest{
@@ -85,6 +106,39 @@ func TestSubmitDeliveryVerifiesMultipleWorkspaceRepositories(t *testing.T) {
 	deliveryFacts, ok := inspection.Facts["delivery"].(map[string]interface{})
 	if !ok || deliveryFacts["count"] != float64(2) || deliveryFacts["all_merged"] != false {
 		t.Fatalf("delivery facts = %#v", inspection.Facts["delivery"])
+	}
+}
+
+func TestVerifiedDeliveryAdvancesToPRLifecycleWithoutOpenedWebhook(t *testing.T) {
+	db := openRuntimeDB(t)
+	store := workflowv2.NewStore(db)
+	run, err := store.CreateRun(context.Background(), workflowv2.CreateRunRequest{
+		ID: "run-delivery-transition", TenantID: "tenant-1", InitialClawID: "claw-delivery-transition",
+		WorkspaceYAML: []byte(deliveryWorkspaceYAML), WorkflowYAML: []byte(deliveryTransitionWorkflowYAML),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	apiURL := "https://github.example/org/api/pull/10"
+	if _, err := store.SubmitDelivery(context.Background(), run.ID, run.CurrentAttemptID,
+		typesv2.DeliveryManifest{PullRequests: []typesv2.PullRequestClaim{{URL: apiURL}}},
+		deliveryVerifier(map[string]string{apiURL: "api-head"})); err != nil {
+		t.Fatal(err)
+	}
+	updated, err := store.GetRun(context.Background(), run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.State != "reviewing" || updated.DisplayPhase != typesv2.PhaseReview || updated.StateVersion != 2 {
+		t.Fatalf("run after verified delivery = %#v", updated)
+	}
+	var openedEvents int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM workflow_v2_events
+		WHERE run_id=? AND kind='pull_request.verified_open'`, run.ID).Scan(&openedEvents); err != nil {
+		t.Fatal(err)
+	}
+	if openedEvents != 0 {
+		t.Fatalf("transition unexpectedly depended on %d opened webhook events", openedEvents)
 	}
 }
 

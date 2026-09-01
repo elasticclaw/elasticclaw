@@ -161,6 +161,26 @@ func insertLifecycleRouteEvent(t *testing.T, db *sql.DB, id, eventType string) {
 	insertSlackTestEvent(t, db, id, "route-run", eventType, base+10, "", "", "")
 }
 
+// A defective scheduled block in a hand-written hub.yaml pauses scheduled
+// reports, never lifecycle alerts: the lifecycle tick gates only on the
+// config it consumes (notifiers plus the lifecycle block).
+func TestLifecycleTickRunsDespiteDefectiveScheduledBlock(t *testing.T) {
+	fake := newFakeSlackServer(t)
+	s, db := newSlackNotifierTestServer(t, fake.server.URL, nil)
+	s.hubCfg.Notifications.Scheduled = []types.ScheduledNotificationConfig{
+		{ID: "broken", Report: "x", Via: []string{testNotifierName}, At: "09:00", Weekdays: []string{"monday"}},
+	}
+	if types.ValidateNotificationsConfig(s.hubCfg.Notifications) == nil {
+		t.Fatal("fixture is supposed to fail the composed validator")
+	}
+	insertLifecycleRouteEvent(t, db, "lifecycle-despite-scheduled", taskRunEventAgentStarted)
+	setSlackWatermark(t, s, 0)
+	s.lifecycleNotifierTick()
+	if fake.count() != 1 {
+		t.Fatalf("lifecycle alert was paused by the defective scheduled block: %d sends, want 1", fake.count())
+	}
+}
+
 func TestLifecycleRoutesFanoutAndFiltering(t *testing.T) {
 	fake := newFakeSlackServer(t)
 	routes := []types.LifecycleRoute{{Via: "all"}, {Via: "started", Events: []string{taskRunEventAgentStarted}}}

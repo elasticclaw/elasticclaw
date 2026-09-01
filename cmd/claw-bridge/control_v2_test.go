@@ -160,6 +160,13 @@ func TestBridgeRegistrationOnlyAdvertisesControlWhenDurableStoreIsAvailable(t *t
 	}
 }
 
+func TestTaskLifecyclePayloadUsesAgentOwnedNamespace(t *testing.T) {
+	payload := taskLifecyclePayload(map[string]interface{}{"gateway_turn_completed": true})
+	if payload["task"] == nil || payload["execution"] != nil || len(payload) != 1 {
+		t.Fatalf("task lifecycle payload = %#v", payload)
+	}
+}
+
 func TestOldTaskCleanupCannotRemoveReplacementCancellation(t *testing.T) {
 	supervisor := newControlSupervisor(context.Background(), "ws://invalid", "claw", "token",
 		bridgeRegistration(true), openTestBridgeControlStore(t))

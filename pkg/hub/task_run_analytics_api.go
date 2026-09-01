@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -1001,6 +1002,13 @@ func (s *Server) readTaskRunAnalyticsPRs(tenantID, runID string) ([]taskRunAnaly
 }
 
 func (s *Server) readTaskRunAnalyticsPRsForRuns(tenantID string, runIDs []string) (map[string][]taskRunAnalyticsPRView, error) {
+	return s.readTaskRunAnalyticsPRsForRunsContext(context.Background(), tenantID, runIDs)
+}
+
+// readTaskRunAnalyticsPRsForRunsContext is the ctx-bounded variant for callers
+// whose queries must honour a deadline or shutdown cancellation (the scheduled
+// pending_prs report builds under a 30s context and is cancelled at shutdown).
+func (s *Server) readTaskRunAnalyticsPRsForRunsContext(ctx context.Context, tenantID string, runIDs []string) (map[string][]taskRunAnalyticsPRView, error) {
 	prsByRun := map[string][]taskRunAnalyticsPRView{}
 	if len(runIDs) == 0 {
 		return prsByRun, nil
@@ -1011,7 +1019,7 @@ func (s *Server) readTaskRunAnalyticsPRsForRuns(tenantID string, runIDs []string
 			if end > len(runIDs) {
 				end = len(runIDs)
 			}
-			chunk, err := s.readTaskRunAnalyticsPRsForRuns(tenantID, runIDs[start:end])
+			chunk, err := s.readTaskRunAnalyticsPRsForRunsContext(ctx, tenantID, runIDs[start:end])
 			if err != nil {
 				return nil, err
 			}
@@ -1027,7 +1035,7 @@ func (s *Server) readTaskRunAnalyticsPRsForRuns(tenantID string, runIDs []string
 	for _, runID := range runIDs {
 		args = append(args, runID)
 	}
-	rows, err := s.db.Query(`
+	rows, err := s.db.QueryContext(ctx, `
 		SELECT run_id, id, repo, pr_number, pr_url, head_sha, head_branch, last_agent_head_sha, base_branch,
 		       state, merged, opened_at, closed_at, merged_at, merged_by_login, created_at, updated_at
 		  FROM task_run_prs

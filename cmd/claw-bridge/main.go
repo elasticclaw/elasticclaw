@@ -1130,6 +1130,12 @@ type gatewaySession struct {
 
 	reconnectMu sync.Mutex
 
+	// onSessionReplaced reports a reconnect that had to create a fresh session
+	// and therefore lost the transcript. runHubLoop installs it for the active
+	// hub connection; it is nil during startup and in focused tests.
+	onSessionReplacedMu sync.Mutex
+	onSessionReplaced   func()
+
 	// pending req/res tracking (reqID → response channel)
 	pendMu  sync.Mutex
 	pending map[string]chan gwFrame
@@ -1230,6 +1236,21 @@ func (gs *gatewaySession) setSessionKey(key string) {
 	gs.infMu.RUnlock()
 	if inf != nil {
 		deliverInFlight(inf, agentResult{err: fmt.Errorf("gateway session key rotated")})
+	}
+}
+
+func (gs *gatewaySession) setOnSessionReplaced(fn func()) {
+	gs.onSessionReplacedMu.Lock()
+	gs.onSessionReplaced = fn
+	gs.onSessionReplacedMu.Unlock()
+}
+
+func (gs *gatewaySession) notifySessionReplaced() {
+	gs.onSessionReplacedMu.Lock()
+	fn := gs.onSessionReplaced
+	gs.onSessionReplacedMu.Unlock()
+	if fn != nil {
+		fn()
 	}
 }
 
@@ -1422,17 +1443,17 @@ func (gs *gatewaySession) createFreshSessionOnConn(ctx context.Context, conn *we
 	return nil
 }
 
-func (gs *gatewaySession) reconnectGateway(ctx context.Context, expectedOld *websocket.Conn) (bool, error) {
+func (gs *gatewaySession) reconnectGateway(ctx context.Context, expectedOld *websocket.Conn) (reconnected bool, replacedSession bool, err error) {
 	gs.reconnectMu.Lock()
 	defer gs.reconnectMu.Unlock()
 
 	if expectedOld != nil && !gs.isCurrentConn(expectedOld) {
-		return false, nil
+		return false, false, nil
 	}
 
 	conn, err := gs.client.connectToGateway(ctx)
 	if err != nil {
-		return false, err
+		return false, false, err
 	}
 	installed := false
 	defer func() {
@@ -1448,22 +1469,22 @@ func (gs *gatewaySession) reconnectGateway(ctx context.Context, expectedOld *web
 		} else {
 			log.Printf("[gateway] re-subscribe failed after reconnect: %v", err)
 			if !isMissingGatewaySessionError(err) {
-				return false, err
+				return false, false, err
 			}
 			if err := gs.createFreshSessionOnConn(ctx, conn, "gateway reconnect"); err != nil {
-				return false, err
+				return false, false, err
 			}
 			createdFresh = true
 		}
 	} else {
 		if err := gs.createFreshSessionOnConn(ctx, conn, "gateway reconnect"); err != nil {
-			return false, err
+			return false, false, err
 		}
 		createdFresh = true
 	}
 
 	if expectedOld != nil && !gs.isCurrentConn(expectedOld) {
-		return false, nil
+		return false, false, nil
 	}
 	gs.failPendingRequests(fmt.Errorf("gateway disconnected"))
 	gs.connMu.Lock()
@@ -1477,14 +1498,14 @@ func (gs *gatewaySession) reconnectGateway(ctx context.Context, expectedOld *web
 	if createdFresh {
 		gs.setReady()
 	}
-	return true, nil
+	return true, createdFresh, nil
 }
 
-func (gs *gatewaySession) reconnectGatewayWithTimeout(ctx context.Context, expectedOld *websocket.Conn, timeout time.Duration) (bool, error) {
+func (gs *gatewaySession) reconnectGatewayWithTimeout(ctx context.Context, expectedOld *websocket.Conn, timeout time.Duration) (reconnected bool, replacedSession bool, err error) {
 	reconnectCtx, cancel := context.WithTimeout(ctx, timeout)
-	reconnected, err := gs.reconnectGateway(reconnectCtx, expectedOld)
+	reconnected, replacedSession, err = gs.reconnectGateway(reconnectCtx, expectedOld)
 	cancel()
-	return reconnected, err
+	return reconnected, replacedSession, err
 }
 
 // readLoop reads frames from the gateway forever, dispatching responses to
@@ -1526,7 +1547,7 @@ func (gs *gatewaySession) readLoop(ctx context.Context) {
 				if !gs.isCurrentConn(conn) {
 					break
 				}
-				_, err := gs.reconnectGatewayWithTimeout(ctx, conn, gatewayReconnectTimeout)
+				_, replacedSession, err := gs.reconnectGatewayWithTimeout(ctx, conn, gatewayReconnectTimeout)
 				if err != nil {
 					if !gs.isCurrentConn(conn) {
 						break
@@ -1534,6 +1555,9 @@ func (gs *gatewaySession) readLoop(ctx context.Context) {
 					log.Printf("[gateway] reconnect failed: %v — retrying in 5s", err)
 					time.Sleep(5 * time.Second)
 					continue
+				}
+				if replacedSession {
+					gs.notifySessionReplaced()
 				}
 				log.Printf("[gateway] reconnected and re-subscribed")
 				break
@@ -2540,7 +2564,8 @@ func reportSessionRecovery(agentErr error, reply *string, gwSession *gatewaySess
 		}
 		writeActivity(agentActivity{Kind: "session_rotated", Message: activityMessage})
 		*reply = ""
-		edge := hubMsg{Type: "session_rotated"}
+		keyPayload, _ := json.Marshal(map[string]string{"session_key": gwSession.getSessionKey()})
+		edge := hubMsg{Type: "session_rotated", Payload: keyPayload}
 		if err := writeHub(edge); err != nil {
 			log.Printf("[bridge] recovery edge write failed, queuing for replay: %v", err)
 			queue.pushControl(edge)
@@ -2598,12 +2623,15 @@ func (gs *gatewaySession) SendMessage(ctx context.Context, message string, onChu
 				return "", ctxErr
 			}
 			reconnectCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-			reconnected, reconnectErr := gs.reconnectGateway(reconnectCtx, conn)
+			reconnected, replacedSession, reconnectErr := gs.reconnectGateway(reconnectCtx, conn)
 			cancel()
 			if reconnectErr != nil {
 				return "", fmt.Errorf("%w; gateway reconnect failed: %v", err, reconnectErr)
 			}
 			if reconnected {
+				if replacedSession {
+					gs.notifySessionReplaced()
+				}
 				gatewayRetried = true
 				log.Printf("[gateway] retrying message after reconnecting closed gateway connection")
 			} else {
@@ -4982,6 +5010,20 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 	}
 	proxy.mu.Unlock()
 
+	// Capture this connection's writer. If this hub connection has died by the
+	// time a gateway reconnect replaces the session, the callback queues the
+	// edge for replay instead of writing through a newer connection implicitly.
+	gwSession.setOnSessionReplaced(func() {
+		activityMessage := "OpenClaw session was replaced after gateway reconnect; waiting for the hub to resume the task"
+		writeActivity(agentActivity{Kind: "session_rotated", Message: activityMessage})
+		keyPayload, _ := json.Marshal(map[string]string{"session_key": gwSession.getSessionKey()})
+		edge := hubMsg{Type: "session_rotated", Payload: keyPayload}
+		if err := writeHub(edge); err != nil {
+			log.Printf("[bridge] session replacement edge write failed, queuing for replay: %v", err)
+			queue.pushControl(edge)
+		}
+	})
+
 	// Heartbeats run on a single goroutine (the ticker in startHubKeepalives),
 	// so this needs no lock. It quiets the sessions.list failure log after the
 	// first miss: an older gateway without the method would otherwise fail
@@ -5023,9 +5065,7 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 		for k, v := range subagentFields {
 			heartbeatPayload[k] = v
 		}
-		if usage.sessionKey != "" {
-			heartbeatPayload["session_key"] = usage.sessionKey
-		}
+		addHeartbeatSessionKeys(heartbeatPayload, usage.sessionKey, gwSession.getSessionKey())
 		if usage.inputTokens != nil {
 			heartbeatPayload["input_tokens"] = usage.inputTokens
 		}
@@ -5151,6 +5191,18 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 		default:
 			// ignore unknown message types
 		}
+	}
+}
+
+// addHeartbeatSessionKeys keeps the usage snapshot and the live gateway
+// identity separate. The hub uses only gateway_session_key for session-loss
+// detection, since sessions.describe may be stale while a gateway recovers.
+func addHeartbeatSessionKeys(payload map[string]interface{}, snapshotKey, gatewayKey string) {
+	if snapshotKey != "" {
+		payload["session_key"] = snapshotKey
+	}
+	if gatewayKey != "" {
+		payload["gateway_session_key"] = gatewayKey
 	}
 }
 

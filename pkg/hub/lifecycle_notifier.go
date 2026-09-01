@@ -106,6 +106,13 @@ func (s *Server) notificationsConfig() *types.NotificationsConfig {
 		lc := *src.Lifecycle
 		cfg.Lifecycle = &lc
 	}
+	if src.Scheduled != nil {
+		cfg.Scheduled = append([]types.ScheduledNotificationConfig(nil), src.Scheduled...)
+		for i := range cfg.Scheduled {
+			cfg.Scheduled[i].Via = append([]string(nil), src.Scheduled[i].Via...)
+			cfg.Scheduled[i].Weekdays = append([]string(nil), src.Scheduled[i].Weekdays...)
+		}
+	}
 	return cfg
 }
 
@@ -301,7 +308,7 @@ func (s *Server) initLifecycleNotifierBaseline() {
 	// baselined by the first poll tick, one poll interval after the producers
 	// started, and silently miss whatever they produced in that window. Both
 	// helpers are idempotent, so the tick keeps covering runtime saves.
-	if err := types.ValidateNotificationsConfig(cfg); err == nil {
+	if err := types.ValidateLifecycleNotificationsConfig(cfg); err == nil {
 		s.pruneLifecycleRouteState(cfg.Lifecycle)
 		s.ensureLifecycleRouteWatermarks(cfg.Lifecycle)
 		s.ensureLifecycleClawRouteBaselines(cfg.Lifecycle)
@@ -468,8 +475,11 @@ func (s *Server) lifecycleNotifierTick() {
 		s.parkLifecycleClawState()
 		return
 	}
-	if err := types.ValidateNotificationsConfig(cfg); err != nil {
-		s.logPollWarningOnce("notify-config", "[notify] invalid notifications config — notifications paused: %v", err)
+	// Only the config this tick consumes is judged (notifiers plus the
+	// lifecycle block): a defect in the scheduled block pauses scheduled
+	// reports, never lifecycle alerts.
+	if err := types.ValidateLifecycleNotificationsConfig(cfg); err != nil {
+		s.logPollWarningOnce("notify-config", "[notify] invalid notifications config — lifecycle notifications paused: %v", err)
 		return
 	}
 	lc := cfg.Lifecycle
@@ -1789,6 +1799,11 @@ func (s *Server) handleNotificationTest(w http.ResponseWriter, r *http.Request) 
 		EventType string `json:"event_type"`
 		RunID     string `json:"run_id"`
 		ClawID    string `json:"claw_id"`
+		// Report probes a scheduled report instead of a lifecycle event. It is
+		// mutually exclusive with event_type and takes the scheduled-report
+		// branch below, which shares only the notifier resolution and the
+		// dry-run rendering with the lifecycle path.
+		Report string `json:"report"`
 		// Via names which configured notifier to probe. Empty means the first
 		// effective route — lifecycle.via for a legacy single-channel config.
 		Via    string `json:"via"`
@@ -1796,6 +1811,14 @@ func (s *Server) handleNotificationTest(w http.ResponseWriter, r *http.Request) 
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		jsonError(w, http.StatusBadRequest, "invalid request body: "+err.Error())
+		return
+	}
+	if report := strings.TrimSpace(body.Report); report != "" {
+		if strings.TrimSpace(body.EventType) != "" {
+			jsonError(w, http.StatusBadRequest, "report and event_type are mutually exclusive")
+			return
+		}
+		s.handleScheduledReportTest(w, r, report, strings.TrimSpace(body.Via), body.DryRun)
 		return
 	}
 	supported := lifecycleSupportedEventTypes()
@@ -1813,7 +1836,7 @@ func (s *Server) handleNotificationTest(w http.ResponseWriter, r *http.Request) 
 		jsonError(w, http.StatusBadRequest, "lifecycle notifications are not configured or not enabled (set notifications.lifecycle in hub.yaml)")
 		return
 	}
-	if err := types.ValidateNotificationsConfig(cfg); err != nil {
+	if err := types.ValidateLifecycleNotificationsConfig(cfg); err != nil {
 		jsonError(w, http.StatusBadRequest, "notifications config invalid: "+err.Error())
 		return
 	}
@@ -1955,6 +1978,92 @@ func (s *Server) handleNotificationTest(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	jsonOK(w, map[string]any{"ok": true, "message_id": handle, "via": via, "payload": payload})
+}
+
+// handleScheduledReportTest probes one scheduled report on demand: it builds
+// the report through the same registry the scheduler uses, so what the
+// operator previews or receives is byte-identical to what the next due slot
+// would post. It never touches the scheduler's dedupe state — a test send must
+// not suppress the real delivery it is testing.
+//
+// A report with nothing to say answers 200 with empty:true rather than an
+// error: "no pull requests are waiting" is a legitimate, and common, result.
+func (s *Server) handleScheduledReportTest(w http.ResponseWriter, r *http.Request, report, via string, dryRun bool) {
+	builder, ok := scheduledReport(report)
+	if !ok {
+		jsonError(w, http.StatusBadRequest, "unknown report "+strconv.Quote(report)+"; supported reports: "+scheduledReportNamesText())
+		return
+	}
+	cfg := s.notificationsConfig()
+	if cfg == nil {
+		jsonError(w, http.StatusBadRequest, "no notifiers are configured (set notifications.notifiers in hub.yaml)")
+		return
+	}
+	// Unlike the lifecycle probe there is no default destination to fall back
+	// to: a schedule names its own notifiers and nothing else in the config
+	// implies one.
+	if via == "" {
+		jsonError(w, http.StatusBadRequest, "via is required: name the notifier to send the report through (defined: "+configuredNotifierNames(cfg.Notifiers)+")")
+		return
+	}
+	nc, ok := cfg.Notifiers[via]
+	if !ok {
+		jsonError(w, http.StatusBadRequest, "via "+strconv.Quote(via)+" does not name a configured notifier (defined: "+configuredNotifierNames(cfg.Notifiers)+")")
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+	msg, hasReport, err := builder(ctx, s)
+	if err != nil {
+		jsonError(w, http.StatusInternalServerError, "build report "+strconv.Quote(report)+": "+err.Error())
+		return
+	}
+	if !hasReport {
+		jsonOK(w, map[string]any{"ok": true, "empty": true, "report": report, "via": via, "dry_run": dryRun})
+		return
+	}
+
+	secrets := s.hubSecretResolver()
+	if dryRun {
+		// Same fallback the lifecycle dry run uses: a preview must work while
+		// the token secret is still missing, and the payload never carries it.
+		dryResolver := func(name string) (string, bool) {
+			if v, ok := secrets(name); ok && v != "" {
+				return v, true
+			}
+			return "dry-run-placeholder", true
+		}
+		n, err := notify.New(nc.Type, s.notifierSettings(nc), dryResolver)
+		if err != nil {
+			jsonError(w, http.StatusBadRequest, "notifier "+strconv.Quote(via)+" invalid: "+err.Error())
+			return
+		}
+		payload, err := renderNotifierPayload(n, *msg)
+		if err != nil {
+			jsonError(w, http.StatusBadRequest, "render payload: "+err.Error())
+			return
+		}
+		jsonOK(w, map[string]any{"dry_run": true, "report": report, "via": via, "payload": payload})
+		return
+	}
+
+	n, err := s.notifierFor(via, nc, secrets)
+	if err != nil {
+		jsonError(w, http.StatusBadRequest, "notifier "+strconv.Quote(via)+" unavailable: "+err.Error())
+		return
+	}
+	payload, err := renderNotifierPayload(n, *msg)
+	if err != nil {
+		jsonError(w, http.StatusBadRequest, "render payload: "+err.Error())
+		return
+	}
+	handle, err := n.Send(ctx, *msg)
+	if err != nil {
+		jsonError(w, http.StatusBadGateway, "notification send failed: "+err.Error())
+		return
+	}
+	jsonOK(w, map[string]any{"ok": true, "message_id": handle, "report": report, "via": via, "payload": payload})
 }
 
 // configuredNotifierNames lists the configured notifier names for error text.

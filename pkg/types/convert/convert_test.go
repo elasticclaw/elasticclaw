@@ -154,6 +154,48 @@ func TestConvertWorkflowV1ToV2(t *testing.T) {
 	}
 }
 
+func TestConvertWorkflowPRStartedUsesVerifiedDeliveryEdge(t *testing.T) {
+	input := []byte(`
+schema_version: v1
+name: pr-lifecycle
+stages:
+  - id: build
+    entry: true
+  - id: review
+    triggers:
+      - pr_opened: {}
+`)
+	res, err := convert.Convert(convert.KindWorkflow, input, convert.Options{To: "2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := v2.ParseAndValidateWorkflow(res.Output)
+	if err != nil {
+		t.Fatalf("validate converted workflow: %v\n%s", err, res.Output)
+	}
+	found := false
+	for _, transition := range resolved.Workflow.Transitions {
+		if transition.To != "review" {
+			continue
+		}
+		found = true
+		if transition.On != "delivery.verified" {
+			t.Fatalf("PR-start transition event = %q, want delivery.verified", transition.On)
+		}
+		delivery, ok := transition.When["delivery"].(map[string]interface{})
+		if !ok {
+			t.Fatalf("PR-start transition predicate = %#v", transition.When)
+		}
+		open, ok := delivery["open"].(map[string]interface{})
+		if !ok || open["not_equals"] == nil {
+			t.Fatalf("PR-start transition predicate = %#v", transition.When)
+		}
+	}
+	if !found {
+		t.Fatalf("converted workflow has no transition to review:\n%s", res.Output)
+	}
+}
+
 func TestConvertWorkflowPairWithConvertedWorkspace(t *testing.T) {
 	ws, err := convert.Convert(convert.KindWorkspace, []byte(sampleWorkspaceV1), convert.Options{To: "2"})
 	if err != nil {

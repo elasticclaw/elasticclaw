@@ -72,6 +72,30 @@ func TestAttemptSnapshotAndControlOutbox(t *testing.T) {
 	}
 }
 
+func TestWorkflowV2ClawOwnershipSurvivesTerminalRun(t *testing.T) {
+	db := openRuntimeDB(t)
+	store := workflowv2.NewStore(db)
+	createRuntimeRun(t, store, "run-owned-claw")
+	if _, err := store.StartAttempt(context.Background(), "run-owned-claw", "claw-owned-v2"); err != nil {
+		t.Fatal(err)
+	}
+	owned, err := store.OwnsClawExecution(context.Background(), "tenant-1", "claw-owned-v2")
+	if err != nil || !owned {
+		t.Fatalf("active ownership = %v, %v", owned, err)
+	}
+	if _, err := db.Exec(`UPDATE workflow_v2_runs SET status='completed' WHERE id='run-owned-claw'`); err != nil {
+		t.Fatal(err)
+	}
+	owned, err = store.OwnsClawExecution(context.Background(), "tenant-1", "claw-owned-v2")
+	if err != nil || !owned {
+		t.Fatalf("terminal ownership = %v, %v", owned, err)
+	}
+	owned, err = store.OwnsClawExecution(context.Background(), "tenant-1", "ordinary-v1-claw")
+	if err != nil || owned {
+		t.Fatalf("ordinary claw ownership = %v, %v", owned, err)
+	}
+}
+
 func TestRejectedHubControlSuspendsRunInsteadOfDroppingCommand(t *testing.T) {
 	db := openRuntimeDB(t)
 	store := workflowv2.NewStore(db)
