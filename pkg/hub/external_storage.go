@@ -589,9 +589,13 @@ func projectV2RepositoriesForAccess(ws *v2.Workspace) types.RepositoryAccessList
 	out := make(types.RepositoryAccessList, 0, len(names))
 	for _, name := range names {
 		repo := ws.Repositories[name]
+		perm := strings.TrimSpace(strings.ToLower(repo.Permissions))
+		if perm != "read" && perm != "write" {
+			perm = "read"
+		}
 		out = append(out, types.GitHubRepoAccess{
 			Repo:        strings.TrimSpace(repo.Repository),
-			Permissions: "read", // v2 does not model per-repo permissions on the resource
+			Permissions: perm,
 		})
 	}
 	return out

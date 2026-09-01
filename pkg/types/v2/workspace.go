@@ -21,6 +21,7 @@ type Repository struct {
 	Repository    string    `yaml:"repository" json:"repository"`
 	SourceControl string    `yaml:"source_control,omitempty" json:"source_control,omitempty"`
 	Checkout      *Checkout `yaml:"checkout,omitempty" json:"checkout,omitempty"`
+	Permissions   string    `yaml:"permissions,omitempty" json:"permissions,omitempty"`
 }
 
 // Checkout configures clone depth/ref.
