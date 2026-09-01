@@ -452,7 +452,7 @@ export interface TaskRunFilterOptions {
   failureTypes: string[]
 }
 
-export type DependencyStatusValue = "operational" | "degraded" | "downtime" | "unknown"
+export type DependencyStatusValue = "operational" | "degraded" | "downtime" | "limited" | "unknown"
 
 export enum DependencyKind {
   Model = "model",
@@ -475,6 +475,8 @@ export interface DependencyStatus {
 export interface DependencyStatusResponse {
   dependencies: DependencyStatus[]
   downtimeCount: number
+  /** Accounts out of allowance — counted apart from outages, they are not the same problem. */
+  limitedCount: number
   checkedAt: string
 }
 

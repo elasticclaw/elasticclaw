@@ -4,11 +4,16 @@ import type * as React from 'react'
 import type { ClawStatus } from '@/lib/types'
 import { cn } from '@/lib/utils'
 
-export type AgentStateStatus = ClawStatus | 'streaming'
+export type AgentStateStatus = ClawStatus | 'streaming' | 'paused'
 
 const AGENT_STATE = {
   streaming: { label: 'RUNNING', color: 'var(--status-streaming)' },
   connected: { label: 'READY', color: 'var(--status-connected)' },
+  // A claw whose provider has no allowance left is connected, healthy, and
+  // going nowhere. READY was the worst thing the row could say about it: the
+  // socket is up, so every other signal agreed with READY while nothing ran.
+  // Amber matches the limit chip that supplies the reason beside it.
+  paused: { label: 'PAUSED', color: 'var(--status-idle)' },
   provisioning: { label: 'STARTING', color: 'var(--status-provisioning)' },
   idle: { label: 'IDLE', color: 'var(--status-idle)' },
   offline: { label: 'OFFLINE', color: 'var(--status-offline)' },

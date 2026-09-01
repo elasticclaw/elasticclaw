@@ -23,7 +23,13 @@ interface ClawCardProps {
   stateChip?: React.ReactNode
 }
 
-function StatusIndicator({ status, isStreaming }: { status: ClawStatus; isStreaming: boolean }) {
+function StatusIndicator({ status, isStreaming, paused }: { status: ClawStatus; isStreaming: boolean; paused?: boolean }) {
+  // Paused wins over every live signal, including a spinner: the socket is up
+  // and the agent is going nowhere, and a green dot beside PAUSED just
+  // reopens the question the chip is there to close.
+  if (paused) {
+    return <span className="size-2 rounded-full shrink-0" style={{ backgroundColor: "var(--status-idle)" }} />
+  }
   if (isStreaming) {
     return <Loader2 className="size-3.5 animate-spin shrink-0" style={{ color: "var(--status-streaming)" }} />
   }
@@ -82,7 +88,9 @@ function rowAge(claw: Claw, now: number) {
 export const ClawCard = memo(function ClawCard({ claw, isSelected, onClick, onTogglePin, showPinButton = true, activityLine, subagentLine, stateChip }: ClawCardProps) {
   const now = useNowMinuteTick(Boolean(claw.last_seen))
   const hasUnread = claw.unreadCount > 0
-  const railStyle = claw.isStreaming
+  const railStyle = claw.llm_limited_until
+    ? { borderLeftColor: "var(--status-idle)" }
+    : claw.isStreaming
     ? { borderLeftColor: "var(--status-streaming)" }
     : claw.status === "provisioning"
       ? { borderLeftColor: "var(--status-provisioning)" }
@@ -118,7 +126,7 @@ export const ClawCard = memo(function ClawCard({ claw, isSelected, onClick, onTo
       style={railStyle}
     >
       <div className="flex items-center gap-2">
-        <StatusIndicator status={claw.status} isStreaming={claw.isStreaming} />
+        <StatusIndicator status={claw.status} isStreaming={claw.isStreaming} paused={Boolean(claw.llm_limited_until)} />
         <span
           className={cn(
             "font-mono text-sm min-w-0 flex-1",
