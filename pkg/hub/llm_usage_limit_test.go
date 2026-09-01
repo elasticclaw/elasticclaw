@@ -603,3 +603,33 @@ func TestLLMUsageLimitIgnoresTheGenericReplayPrefix(t *testing.T) {
 		t.Error("a non-definite bridge body created a usage-limit record for the whole key")
 	}
 }
+
+// redactLLMLimitEventMessage must catch credential-shaped substrings a
+// provider error quotes back, not merely the literal configured key id —
+// which is often an alias that never appears in the provider's text at all.
+func TestRedactLLMLimitEventMessageRedactsTokenShapes(t *testing.T) {
+	cases := []struct {
+		name    string
+		message string
+		secret  string
+	}{
+		{"sk token with unrelated alias key", "invalid key sk-ant-api03-AAAA1111BBBB2222", "sk-ant-api03-AAAA1111BBBB2222"},
+		{"long opaque credential", "token ghp_a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4 rejected", "ghp_a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4"},
+		{"configured key id itself", "key anthropic-prod is over its cap", "anthropic-prod"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			out := redactLLMLimitEventMessage(tc.message, "anthropic-prod")
+			if strings.Contains(out, tc.secret) {
+				t.Fatalf("secret survived redaction: %q", out)
+			}
+			if !strings.Contains(out, "[redacted]") {
+				t.Fatalf("nothing was redacted from %q -> %q", tc.message, out)
+			}
+		})
+	}
+	const prose = "monthly allowance reached, resets at midnight UTC"
+	if out := redactLLMLimitEventMessage(prose, "anthropic-prod"); out != prose {
+		t.Fatalf("plain prose was mangled: %q", out)
+	}
+}
