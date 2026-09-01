@@ -663,8 +663,10 @@ func TestBuildOpenClawOAuthAuthSyncShellDiscoversCodexOAuth(t *testing.T) {
 	shell := buildOpenClawOAuthAuthSyncShell(types.LLMKeysList{
 		{Name: "codex-main", Provider: "codex", AuthProfile: "codex-oauth", Default: true},
 	}, "codex-main")
+	assertContains(t, shell, "migrate apply codex", "imports Codex OAuth through the supported migration provider")
+	assertContains(t, shell, "--include-secrets", "selects the restored Codex credential for import")
 	assertContains(t, shell, "models auth list --provider openai --json", "discovers Codex OAuth through OpenClaw")
-	assertContains(t, shell, `auth.profiles["openai:default"]`, "sets canonical OpenAI profile metadata")
+	assertNotContains(t, shell, `auth.profiles["openai:default"]`, "does not assume a legacy fixed profile ID")
 	assertNotContains(t, shell, "auth_profile_store", "does not manipulate the OpenClaw auth database directly")
 
 	home := t.TempDir()
@@ -683,7 +685,7 @@ func TestBuildOpenClawOAuthAuthSyncShellDiscoversCodexOAuth(t *testing.T) {
 	fakeOpenClawScript := `#!/bin/sh
 printf '%s\n' "$*" >> "$OPENCLAW_INVOCATIONS"
 if [ "$*" = "models auth list --provider openai --json" ]; then
-  printf '%s\n' '{"profiles":[{"id":"openai:default","type":"oauth"}]}'
+  printf '%s\n' '{"profiles":[{"id":"openai:account-test","type":"oauth","provider":"openai"}]}'
 fi
 `
 	if err := os.WriteFile(fakeOpenClaw, []byte(fakeOpenClawScript), 0755); err != nil {
@@ -703,8 +705,8 @@ fi
 		t.Fatalf("read fake OpenClaw invocations: %v", err)
 	}
 	invocationLog := string(invocations)
+	assertContains(t, invocationLog, "migrate apply codex --from "+filepath.Join(home, ".codex")+" --include-secrets --yes --no-backup --force --json", "imports the restored Codex profile")
 	assertContains(t, invocationLog, "models auth list --provider openai --json", "verifies the discovered profile")
-	assertContains(t, invocationLog, `config set auth.profiles["openai:default"] {"provider":"openai","mode":"oauth"} --strict-json`, "configures profile metadata")
 }
 
 func TestBuildOpenClawOAuthAuthSyncShellRejectsIncompleteCodexOAuth(t *testing.T) {

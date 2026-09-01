@@ -1,0 +1,19 @@
+providers:
+  lambda-microvms:
+    type: lambda-microvms
+    aws_region: us-east-1
+    # Omit aws_profile when the Hub uses environment credentials or an IAM role.
+    # aws_profile: elasticclaw-dev
+    image_identifier: arn:aws:lambda:us-east-1:123456789012:microvm-image:elasticclaw-agent
+    # Pin a version in production. Omit to use the latest active image version.
+    # image_version: "1.0"
+    ingress_network_connectors:
+      - arn:aws:lambda:us-east-1:aws:network-connector:aws-network-connector:ALL_INGRESS
+    egress_network_connectors:
+      - arn:aws:lambda:us-east-1:aws:network-connector:aws-network-connector:INTERNET_EGRESS
+    idle_max_duration_seconds: 900
+    suspended_duration_seconds: 300
+    auto_resume: true
+    maximum_duration_seconds: 28800
+    bridge_port: 8080
+    auth_token_expiration_minutes: 30

@@ -3733,6 +3733,16 @@ func syncStagedWorkspaceToOpenClawWorkspace() error {
 	if err != nil {
 		return err
 	}
+	// OpenClaw attests the workspace created by `openclaw onboard`. ElasticClaw
+	// intentionally replaces the managed files in that workspace immediately
+	// afterwards, so the attestation no longer describes the on-disk contents.
+	// Leaving it behind makes OpenClaw treat the intentional sync as workspace
+	// loss and refuse the first agent turn. Removing the per-container
+	// attestation lets OpenClaw attest the staged workspace on first use.
+	attestationsDir := filepath.Join(home, ".openclaw", "workspace-attestations")
+	if err := os.RemoveAll(attestationsDir); err != nil {
+		return fmt.Errorf("remove stale OpenClaw workspace attestations: %w", err)
+	}
 	log.Printf("[bootstrap] synced %d staged workspace files into %s", copied, activeDir)
 
 	// Nix flakes require flake.nix/flake.lock to be tracked by git when the

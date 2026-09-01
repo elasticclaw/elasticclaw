@@ -630,6 +630,23 @@ const SANDBOX_PROVIDER_OPTIONS = [
   { value: "lambda-microvms", label: "AWS Lambda MicroVMs", description: "Serverless Firecracker MicroVM provider", alpha: true },
 ]
 
+const LAMBDA_MICROVM_DEFAULT_REGION = "us-east-1"
+const LAMBDA_MICROVM_DEFAULTS = {
+  idleMaxDuration: "900",
+  suspendedDuration: "300",
+  maximumDuration: "28800",
+  bridgePort: "8080",
+  authTokenExpiration: "30",
+}
+
+function lambdaMicroVMConnectors(region: string) {
+  const resolvedRegion = region.trim() || LAMBDA_MICROVM_DEFAULT_REGION
+  return {
+    ingress: `arn:aws:lambda:${resolvedRegion}:aws:network-connector:aws-network-connector:ALL_INGRESS`,
+    egress: `arn:aws:lambda:${resolvedRegion}:aws:network-connector:aws-network-connector:INTERNET_EGRESS`,
+  }
+}
+
 interface SandboxProviderView {
   name: string
   type: string
@@ -710,6 +727,7 @@ function RuntimesSection({ settings, onSave, saving }: { settings: SettingsData;
   const [formMaximumDuration, setFormMaximumDuration] = useState("")
   const [formBridgePort, setFormBridgePort] = useState("")
   const [formAuthTokenExpiration, setFormAuthTokenExpiration] = useState("")
+  const [showLambdaAdvanced, setShowLambdaAdvanced] = useState(false)
 
   const resetForm = () => {
     setFormProvider("replicated")
@@ -731,13 +749,53 @@ function RuntimesSection({ settings, onSave, saving }: { settings: SettingsData;
     setFormExecutionRoleArn("")
     setFormIngressConnectors("")
     setFormEgressConnectors("")
-    setFormIdleMaxDuration("900")
-    setFormSuspendedDuration("300")
+    setFormIdleMaxDuration(LAMBDA_MICROVM_DEFAULTS.idleMaxDuration)
+    setFormSuspendedDuration(LAMBDA_MICROVM_DEFAULTS.suspendedDuration)
     setFormAutoResume(true)
-    setFormMaximumDuration("28800")
-    setFormBridgePort("8080")
-    setFormAuthTokenExpiration("30")
+    setFormMaximumDuration(LAMBDA_MICROVM_DEFAULTS.maximumDuration)
+    setFormBridgePort(LAMBDA_MICROVM_DEFAULTS.bridgePort)
+    setFormAuthTokenExpiration(LAMBDA_MICROVM_DEFAULTS.authTokenExpiration)
+    setShowLambdaAdvanced(false)
     setEditName(null)
+  }
+
+  const applySuggestedLambdaNetwork = (region = formAwsRegion) => {
+    const connectors = lambdaMicroVMConnectors(region)
+    setFormIngressConnectors(connectors.ingress)
+    setFormEgressConnectors(connectors.egress)
+  }
+
+  const applySuggestedLambdaLifecycle = () => {
+    setFormIdleMaxDuration(LAMBDA_MICROVM_DEFAULTS.idleMaxDuration)
+    setFormSuspendedDuration(LAMBDA_MICROVM_DEFAULTS.suspendedDuration)
+    setFormMaximumDuration(LAMBDA_MICROVM_DEFAULTS.maximumDuration)
+    setFormBridgePort(LAMBDA_MICROVM_DEFAULTS.bridgePort)
+    setFormAuthTokenExpiration(LAMBDA_MICROVM_DEFAULTS.authTokenExpiration)
+    setFormAutoResume(true)
+  }
+
+  const applySuggestedLambdaSetup = () => {
+    const region = formAwsRegion.trim() || LAMBDA_MICROVM_DEFAULT_REGION
+    setFormAwsRegion(region)
+    setFormAwsProfile("")
+    applySuggestedLambdaNetwork(region)
+    applySuggestedLambdaLifecycle()
+  }
+
+  const selectProvider = (provider: string) => {
+    setFormProvider(provider)
+    if (provider === "lambda-microvms" && modalMode === "add") {
+      applySuggestedLambdaSetup()
+    }
+  }
+
+  const updateLambdaImageIdentifier = (value: string) => {
+    setFormImageIdentifier(value)
+    const arnRegion = value.trim().match(/^arn:[^:]+:lambda:([^:]+):/)?.[1]
+    if (arnRegion && arnRegion !== formAwsRegion) {
+      setFormAwsRegion(arnRegion)
+      applySuggestedLambdaNetwork(arnRegion)
+    }
   }
 
   const openAdd = () => {
@@ -749,6 +807,11 @@ function RuntimesSection({ settings, onSave, saving }: { settings: SettingsData;
         setFormDefaultCpu("2")
         setFormDefaultMemory("4")
         setFormDefaultDisk("10")
+      } else if (firstAvailable.value === "lambda-microvms") {
+        const connectors = lambdaMicroVMConnectors(LAMBDA_MICROVM_DEFAULT_REGION)
+        setFormAwsRegion(LAMBDA_MICROVM_DEFAULT_REGION)
+        setFormIngressConnectors(connectors.ingress)
+        setFormEgressConnectors(connectors.egress)
       }
     }
     setModalMode("add")
@@ -782,12 +845,22 @@ function RuntimesSection({ settings, onSave, saving }: { settings: SettingsData;
     setFormMaximumDuration(p?.maximumDurationSeconds?.toString() || "28800")
     setFormBridgePort(p?.bridgePort?.toString() || "8080")
     setFormAuthTokenExpiration(p?.authTokenExpirationMinutes?.toString() || "30")
+    setShowLambdaAdvanced(false)
     setEditName(name)
     setModalMode("edit")
     setShowModal(true)
   }
 
   const availableProviders = SANDBOX_PROVIDER_OPTIONS.filter(o => !providers[o.value])
+  const suggestedLambdaConnectors = lambdaMicroVMConnectors(formAwsRegion)
+  const usingSuggestedLambdaNetwork = formIngressConnectors.trim() === suggestedLambdaConnectors.ingress
+    && formEgressConnectors.trim() === suggestedLambdaConnectors.egress
+  const usingSuggestedLambdaLifecycle = formIdleMaxDuration === LAMBDA_MICROVM_DEFAULTS.idleMaxDuration
+    && formSuspendedDuration === LAMBDA_MICROVM_DEFAULTS.suspendedDuration
+    && formMaximumDuration === LAMBDA_MICROVM_DEFAULTS.maximumDuration
+    && formBridgePort === LAMBDA_MICROVM_DEFAULTS.bridgePort
+    && formAuthTokenExpiration === LAMBDA_MICROVM_DEFAULTS.authTokenExpiration
+    && formAutoResume
 
   function splitConnectorList(value: string) {
     return value
@@ -965,7 +1038,7 @@ function RuntimesSection({ settings, onSave, saving }: { settings: SettingsData;
                 <label className="text-xs text-muted-foreground mb-1 block">Provider</label>
                 <select
                   value={formProvider}
-                  onChange={e => setFormProvider(e.target.value)}
+                  onChange={e => selectProvider(e.target.value)}
                   className="w-full h-8 rounded-md border border-border bg-background px-2 text-sm"
                 >
                   {availableProviders.map(o => <option key={o.value} value={o.value}>{o.label}{o.alpha ? " (alpha)" : ""}</option>)}
@@ -1130,98 +1203,143 @@ function RuntimesSection({ settings, onSave, saving }: { settings: SettingsData;
 
             {formProvider === "lambda-microvms" && (
               <>
-                <div className="bg-amber-500/10 border border-amber-500/20 rounded-lg p-3">
-                  <div className="flex items-center gap-2 mb-1">
-                    <span className="text-xs bg-amber-500/20 text-amber-300 px-1.5 py-0.5 rounded">Alpha</span>
-                    <p className="text-xs font-medium">AWS Lambda MicroVMs</p>
-                  </div>
-                  <p className="text-xs text-muted-foreground">
-                    Requires an image that starts the Elastic Claw bridge from the MicroVM run hook payload.
-                  </p>
+                <div className="flex items-center justify-between rounded-lg border border-amber-500/20 bg-amber-500/10 px-3 py-2">
+                  <p className="text-xs font-medium">AWS Lambda MicroVMs</p>
+                  <span className="rounded bg-amber-500/20 px-1.5 py-0.5 text-[10px] text-amber-300">Alpha</span>
                 </div>
                 <div>
                   <label className="text-xs text-muted-foreground mb-1 block">Image identifier</label>
                   <Input
                     value={formImageIdentifier}
-                    onChange={e => setFormImageIdentifier(e.target.value)}
+                    onChange={e => updateLambdaImageIdentifier(e.target.value)}
                     className="h-8 text-sm font-mono"
-                    placeholder="arn:aws:lambda:us-east-1:123456789012:microvm-image/elasticclaw"
+                    placeholder="arn:aws:lambda:us-east-1:123456789012:microvm-image:elasticclaw-agent"
                   />
+                  <p className="mt-1 text-[11px] text-muted-foreground">Paste the ARN from the AWS setup command. Region is detected automatically.</p>
                 </div>
-                <div className="grid grid-cols-2 gap-3">
-                  <div>
-                    <label className="text-xs text-muted-foreground mb-1 block">AWS Region</label>
-                    <Input value={formAwsRegion} onChange={e => setFormAwsRegion(e.target.value)} className="h-8 text-sm" placeholder="us-east-1" />
+
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between rounded-lg border border-border px-3 py-2.5">
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-2">
+                        <p className="text-xs font-medium">AWS access</p>
+                        {!formAwsProfile.trim() && <span className="rounded bg-primary/10 px-1.5 py-0.5 text-[10px] text-primary">Suggested</span>}
+                      </div>
+                      <p className="mt-0.5 truncate text-[11px] text-muted-foreground">
+                        {formAwsProfile.trim() ? `Named profile: ${formAwsProfile.trim()}` : "Use the Hub IAM role"}
+                      </p>
+                    </div>
+                    {formAwsProfile.trim() ? (
+                      <Button type="button" size="sm" variant="ghost" className="h-7 text-xs" onClick={() => setFormAwsProfile("")}>Use suggestion</Button>
+                    ) : (
+                      <div className="flex items-center gap-1">
+                        <span className="flex items-center gap-1 text-[10px] text-muted-foreground"><Check className="size-3" /> Using suggestion</span>
+                        <Button type="button" size="sm" variant="ghost" className="h-7 text-xs" onClick={() => setShowLambdaAdvanced(true)}>Modify</Button>
+                      </div>
+                    )}
                   </div>
-                  <div>
-                    <label className="text-xs text-muted-foreground mb-1 block">AWS Profile</label>
-                    <Input value={formAwsProfile} onChange={e => setFormAwsProfile(e.target.value)} className="h-8 text-sm" placeholder="default" />
+
+                  <div className="flex items-center justify-between rounded-lg border border-border px-3 py-2.5">
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-2">
+                        <p className="text-xs font-medium">Network</p>
+                        {usingSuggestedLambdaNetwork && <span className="rounded bg-primary/10 px-1.5 py-0.5 text-[10px] text-primary">Suggested</span>}
+                      </div>
+                      <p className="mt-0.5 text-[11px] text-muted-foreground">Public HTTPS + internet egress</p>
+                    </div>
+                    {usingSuggestedLambdaNetwork ? (
+                      <Button type="button" size="sm" variant="ghost" className="h-7 text-xs" onClick={() => setShowLambdaAdvanced(true)}>Modify</Button>
+                    ) : (
+                      <Button type="button" size="sm" variant="ghost" className="h-7 text-xs" onClick={() => applySuggestedLambdaNetwork()}>Use suggestion</Button>
+                    )}
                   </div>
-                </div>
-                <div>
-                  <label className="text-xs text-muted-foreground mb-1 block">Image version</label>
-                  <Input value={formImageVersion} onChange={e => setFormImageVersion(e.target.value)} className="h-8 text-sm" placeholder="latest" />
-                </div>
-                <div>
-                  <label className="text-xs text-muted-foreground mb-1 block">Execution role ARN</label>
-                  <Input
-                    value={formExecutionRoleArn}
-                    onChange={e => setFormExecutionRoleArn(e.target.value)}
-                    className="h-8 text-sm font-mono"
-                    placeholder="arn:aws:iam::123456789012:role/elasticclaw-microvm"
-                  />
-                </div>
-                <div>
-                  <label className="text-xs text-muted-foreground mb-1 block">Ingress network connectors</label>
-                  <textarea
-                    value={formIngressConnectors}
-                    onChange={e => setFormIngressConnectors(e.target.value)}
-                    className="min-h-16 w-full rounded-md border border-border bg-background px-2 py-1.5 text-sm font-mono"
-                    placeholder="One ARN per line"
-                  />
-                </div>
-                <div>
-                  <label className="text-xs text-muted-foreground mb-1 block">Egress network connectors</label>
-                  <textarea
-                    value={formEgressConnectors}
-                    onChange={e => setFormEgressConnectors(e.target.value)}
-                    className="min-h-16 w-full rounded-md border border-border bg-background px-2 py-1.5 text-sm font-mono"
-                    placeholder="One ARN per line"
-                  />
-                </div>
-                <div className="grid grid-cols-2 gap-3">
-                  <div>
-                    <label className="text-xs text-muted-foreground mb-1 block">Idle max seconds</label>
-                    <Input type="number" min={1} value={formIdleMaxDuration} onChange={e => setFormIdleMaxDuration(e.target.value)} className="h-8 text-sm" placeholder="900" />
-                  </div>
-                  <div>
-                    <label className="text-xs text-muted-foreground mb-1 block">Suspended seconds</label>
-                    <Input type="number" min={1} value={formSuspendedDuration} onChange={e => setFormSuspendedDuration(e.target.value)} className="h-8 text-sm" placeholder="300" />
-                  </div>
-                </div>
-                <div className="grid grid-cols-3 gap-3">
-                  <div>
-                    <label className="text-xs text-muted-foreground mb-1 block">Max seconds</label>
-                    <Input type="number" min={1} value={formMaximumDuration} onChange={e => setFormMaximumDuration(e.target.value)} className="h-8 text-sm" placeholder="28800" />
-                  </div>
-                  <div>
-                    <label className="text-xs text-muted-foreground mb-1 block">Bridge port</label>
-                    <Input type="number" min={1} value={formBridgePort} onChange={e => setFormBridgePort(e.target.value)} className="h-8 text-sm" placeholder="8080" />
-                  </div>
-                  <div>
-                    <label className="text-xs text-muted-foreground mb-1 block">Token minutes</label>
-                    <Input type="number" min={1} value={formAuthTokenExpiration} onChange={e => setFormAuthTokenExpiration(e.target.value)} className="h-8 text-sm" placeholder="30" />
+
+                  <div className="flex items-center justify-between rounded-lg border border-border px-3 py-2.5">
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-2">
+                        <p className="text-xs font-medium">Lifecycle</p>
+                        {usingSuggestedLambdaLifecycle && <span className="rounded bg-primary/10 px-1.5 py-0.5 text-[10px] text-primary">Suggested</span>}
+                      </div>
+                      <p className="mt-0.5 text-[11px] text-muted-foreground">Suspend after 15m · resume automatically · stop after 8h</p>
+                    </div>
+                    {usingSuggestedLambdaLifecycle ? (
+                      <Button type="button" size="sm" variant="ghost" className="h-7 text-xs" onClick={() => setShowLambdaAdvanced(true)}>Modify</Button>
+                    ) : (
+                      <Button type="button" size="sm" variant="ghost" className="h-7 text-xs" onClick={applySuggestedLambdaLifecycle}>Use suggestion</Button>
+                    )}
                   </div>
                 </div>
-                <label className="flex items-center gap-2 text-sm">
-                  <input
-                    type="checkbox"
-                    checked={formAutoResume}
-                    onChange={e => setFormAutoResume(e.target.checked)}
-                    className="size-4 rounded border-border"
-                  />
-                  Auto resume suspended MicroVMs
-                </label>
+
+                <button
+                  type="button"
+                  onClick={() => setShowLambdaAdvanced(value => !value)}
+                  className="flex w-full items-center justify-between rounded-md px-1 py-1 text-xs text-muted-foreground hover:text-foreground"
+                  aria-expanded={showLambdaAdvanced}
+                >
+                  <span>Advanced settings</span>
+                  <ChevronDown className={cn("size-3.5 transition-transform", showLambdaAdvanced && "rotate-180")} />
+                </button>
+
+                {showLambdaAdvanced && (
+                  <div className="space-y-3 rounded-lg border border-border bg-muted/20 p-3">
+                    <div className="grid grid-cols-2 gap-3">
+                      <div>
+                        <label className="text-xs text-muted-foreground mb-1 block">AWS region</label>
+                        <Input value={formAwsRegion} onChange={e => setFormAwsRegion(e.target.value)} className="h-8 text-sm" placeholder="us-east-1" />
+                      </div>
+                      <div>
+                        <label className="text-xs text-muted-foreground mb-1 block">Local AWS profile</label>
+                        <Input value={formAwsProfile} onChange={e => setFormAwsProfile(e.target.value)} className="h-8 text-sm" placeholder="Optional" />
+                      </div>
+                    </div>
+                    <div className="grid grid-cols-2 gap-3">
+                      <div>
+                        <label className="text-xs text-muted-foreground mb-1 block">Image version</label>
+                        <Input value={formImageVersion} onChange={e => setFormImageVersion(e.target.value)} className="h-8 text-sm" placeholder="Latest" />
+                      </div>
+                      <div>
+                        <label className="text-xs text-muted-foreground mb-1 block">Execution role ARN</label>
+                        <Input value={formExecutionRoleArn} onChange={e => setFormExecutionRoleArn(e.target.value)} className="h-8 text-sm font-mono" placeholder="Optional" />
+                      </div>
+                    </div>
+                    <div>
+                      <label className="text-xs text-muted-foreground mb-1 block">Ingress connectors</label>
+                      <textarea value={formIngressConnectors} onChange={e => setFormIngressConnectors(e.target.value)} className="min-h-14 w-full rounded-md border border-border bg-background px-2 py-1.5 text-xs font-mono" />
+                    </div>
+                    <div>
+                      <label className="text-xs text-muted-foreground mb-1 block">Egress connectors</label>
+                      <textarea value={formEgressConnectors} onChange={e => setFormEgressConnectors(e.target.value)} className="min-h-14 w-full rounded-md border border-border bg-background px-2 py-1.5 text-xs font-mono" />
+                    </div>
+                    <div className="grid grid-cols-3 gap-3">
+                      <div>
+                        <label className="text-xs text-muted-foreground mb-1 block">Idle (sec)</label>
+                        <Input type="number" min={1} value={formIdleMaxDuration} onChange={e => setFormIdleMaxDuration(e.target.value)} className="h-8 text-sm" />
+                      </div>
+                      <div>
+                        <label className="text-xs text-muted-foreground mb-1 block">Suspended (sec)</label>
+                        <Input type="number" min={1} value={formSuspendedDuration} onChange={e => setFormSuspendedDuration(e.target.value)} className="h-8 text-sm" />
+                      </div>
+                      <div>
+                        <label className="text-xs text-muted-foreground mb-1 block">Maximum (sec)</label>
+                        <Input type="number" min={1} value={formMaximumDuration} onChange={e => setFormMaximumDuration(e.target.value)} className="h-8 text-sm" />
+                      </div>
+                    </div>
+                    <div className="grid grid-cols-2 gap-3">
+                      <div>
+                        <label className="text-xs text-muted-foreground mb-1 block">Bridge port</label>
+                        <Input type="number" min={1} value={formBridgePort} onChange={e => setFormBridgePort(e.target.value)} className="h-8 text-sm" />
+                      </div>
+                      <div>
+                        <label className="text-xs text-muted-foreground mb-1 block">Token minutes</label>
+                        <Input type="number" min={1} value={formAuthTokenExpiration} onChange={e => setFormAuthTokenExpiration(e.target.value)} className="h-8 text-sm" />
+                      </div>
+                    </div>
+                    <label className="flex items-center gap-2 text-xs">
+                      <input type="checkbox" checked={formAutoResume} onChange={e => setFormAutoResume(e.target.checked)} className="size-4 rounded border-border" />
+                      Resume suspended MicroVMs automatically
+                    </label>
+                  </div>
+                )}
               </>
             )}
           </div>
