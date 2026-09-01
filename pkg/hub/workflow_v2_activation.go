@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"sort"
 	"strings"
@@ -26,6 +27,10 @@ func (s *Server) triggerWorkflowV2Config(w http.ResponseWriter, r *http.Request,
 	workspace *types.WorkspaceConfig, workflow *types.WorkflowConfig) {
 	if workflow.Enabled == nil || !*workflow.Enabled {
 		jsonError(w, http.StatusForbidden, "workflow is disabled")
+		return
+	}
+	if !workflow.EnableManualTrigger {
+		jsonError(w, http.StatusForbidden, "workflow does not support manual triggers")
 		return
 	}
 	var req FactoryTriggerRequest
@@ -85,7 +90,43 @@ func (s *Server) triggerWorkflowV2Config(w http.ResponseWriter, r *http.Request,
 		jsonError(w, http.StatusInternalServerError, "failed to create workflow v2 run: "+err.Error())
 		return
 	}
+	if startCommand := v2WorkflowStartCommand(workflow.RawConfig); startCommand != "" {
+		store := workflowv2.NewStore(s.db)
+		if _, err := store.ApplyCommand(r.Context(), runID, startCommand, workflowv2.CommandInput{
+			ID:        uuid.NewString(),
+			MessageID: runID + "/manual-start",
+			Reason:    "manual workflow v2 trigger",
+			Provenance: typesv2.EvidenceProvenance{
+				Producer:   string(workflowv2.ProducerOperator),
+				ObservedAt: time.Now().UTC(),
+			},
+		}); err != nil {
+			log.Printf("[workflow-v2] manual trigger start command for run %s: %v", runID, err)
+		}
+	}
 	jsonOK(w, map[string]string{"run_id": runID, "claw_id": clawID, "status": "created"})
+}
+
+func v2WorkflowStartCommand(rawConfig string) string {
+	resolved, err := typesv2.ParseAndValidateWorkflow([]byte(rawConfig))
+	if err != nil {
+		return ""
+	}
+	wf := resolved.Workflow
+	cmd, ok := wf.Commands["start"]
+	if !ok {
+		return ""
+	}
+	fromStates, err := typesv2.FromStates(cmd.From)
+	if err != nil {
+		return ""
+	}
+	for _, state := range fromStates {
+		if state == wf.InitialState {
+			return "start"
+		}
+	}
+	return ""
 }
 
 func workspaceFileKnowledgeResolver(files map[string]string) workflowv2.KnowledgeResolver {

@@ -10,6 +10,7 @@ type Workflow struct {
 	SchemaVersion interface{}                `yaml:"schema_version" json:"schema_version"`
 	Name          string                     `yaml:"name" json:"name"`
 	Enabled       bool                       `yaml:"enabled" json:"enabled"`
+	ManualTrigger bool                       `yaml:"manual_trigger,omitempty" json:"manual_trigger,omitempty"`
 	InitialState  string                     `yaml:"initial_state" json:"initial_state"`
 	States        map[string]State           `yaml:"states" json:"states"`
 	Transitions   map[string]Transition      `yaml:"transitions,omitempty" json:"transitions,omitempty"`

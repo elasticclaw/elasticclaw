@@ -451,9 +451,11 @@ func loadExternalWorkflowDocument(fileName string, data []byte) (*types.Workflow
 		// Prefer name from validated v2 doc; do not force v1 stage/trigger normalize.
 		name := strings.TrimSuffix(fileName, ".yaml")
 		enabled := false // missing/invalid v2 documents are always fail-closed
+		manualTrigger := false
 		if resolved, err := v2.ParseAndValidateWorkflow(data); err == nil && resolved.Workflow.Name != "" {
 			name = resolved.Workflow.Name
 			enabled = resolved.Workflow.Enabled
+			manualTrigger = resolved.Workflow.ManualTrigger
 		} else {
 			var probe struct {
 				Name string `yaml:"name"`
@@ -467,10 +469,11 @@ func loadExternalWorkflowDocument(fileName string, data []byte) (*types.Workflow
 			}
 		}
 		return &types.WorkflowConfig{
-			SchemaVersion: "2",
-			Name:          name,
-			Enabled:       &enabled,
-			RawConfig:     string(data),
+			SchemaVersion:       "2",
+			Name:                name,
+			Enabled:             &enabled,
+			EnableManualTrigger: manualTrigger,
+			RawConfig:           string(data),
 		}, nil
 	}
 

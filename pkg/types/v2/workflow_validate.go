@@ -26,17 +26,18 @@ var writableNamespaces = []string{
 }
 
 var knownWorkflowKeys = map[string]bool{
-	"schema_version": true,
-	"name":           true,
-	"enabled":        true,
-	"initial_state":  true,
-	"states":         true,
-	"transitions":    true,
-	"commands":       true,
-	"ci":             true,
-	"review":         true,
-	"delivery":       true,
-	"events":         true,
+	"schema_version":  true,
+	"name":            true,
+	"enabled":         true,
+	"manual_trigger":  true,
+	"initial_state":   true,
+	"states":          true,
+	"transitions":     true,
+	"commands":        true,
+	"ci":              true,
+	"review":          true,
+	"delivery":        true,
+	"events":          true,
 }
 
 // ParseWorkflow unmarshals workflow v2 YAML. It does not validate.
