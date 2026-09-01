@@ -66,6 +66,16 @@ states:
   done:
     phase: done
     terminal: true
+transitions:
+  finish:
+    from: run
+    on: dependency.update.completed
+    when:
+      exec:
+        dependency_update:
+          succeeded:
+            equals: true
+    to: done
 `
 
 func TestMaterializeExecRunEffect(t *testing.T) {
@@ -293,6 +303,62 @@ func TestCommandReceiptDuplicateRejected(t *testing.T) {
 	}
 	if duplicate.Disposition != typesv2.DispositionDuplicate {
 		t.Fatalf("duplicate = %q", duplicate.Disposition)
+	}
+}
+
+func TestApplyCommandReceiptDependencyUpdateTransitions(t *testing.T) {
+	db := openRuntimeDB(t)
+	store := workflowv2.NewStore(db)
+
+	run, err := store.CreateRun(context.Background(), workflowv2.CreateRunRequest{
+		ID: "run-dep-update", TenantID: "tenant-1", InitialClawID: "claw-dep-update",
+		WorkspaceYAML: []byte(execWorkspaceYAML),
+		WorkflowYAML:  []byte(dependencyUpdateWorkflowYAML),
+	})
+	if err != nil {
+		t.Fatalf("create run: %v", err)
+	}
+	claim, err := store.ClaimEffect(context.Background(), "dep-update-worker", time.Minute)
+	if err != nil || claim == nil {
+		t.Fatalf("claim = %#v, %v", claim, err)
+	}
+	envelope, err := store.MaterializeCommandTask(context.Background(), claim.Effect.ID, claim.AttemptID, "dep-update-worker")
+	if err != nil {
+		t.Fatalf("materialize: %v", err)
+	}
+
+	receipt := map[string]interface{}{
+		"succeeded":    true,
+		"ecosystems":   []string{"go"},
+		"files_changed": []string{"go.mod"},
+	}
+	receiptJSON, _ := json.Marshal(receipt)
+	result, err := store.ApplyCommandReceipt(context.Background(), typesv2.ControlEnvelope{
+		ProtocolVersion:      typesv2.ControlProtocolVersion,
+		MessageID:            "dep-update-receipt-1",
+		Kind:                 typesv2.MessageDependencyUpdateCompleted,
+		RunID:                run.ID,
+		AttemptID:            run.CurrentAttemptID,
+		TaskID:               envelope.TaskID,
+		ExpectedStateVersion: &run.StateVersion,
+		Payload:              receiptJSON,
+	})
+	if err != nil {
+		t.Fatalf("apply command receipt: %v", err)
+	}
+	if result.Disposition != typesv2.DispositionAccepted {
+		t.Fatalf("disposition = %q reason=%s", result.Disposition, result.Reason)
+	}
+
+	updated, err := store.GetRun(context.Background(), run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.State != "done" {
+		t.Fatalf("state = %q", updated.State)
+	}
+	if updated.StateVersion != 2 {
+		t.Fatalf("state version = %d", updated.StateVersion)
 	}
 }
 

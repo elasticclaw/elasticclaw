@@ -781,7 +781,7 @@ func producerMayEmit(producer Producer, kind string) bool {
 	case ProducerCustom:
 		return prefix == "custom"
 	case ProducerHub, ProducerEngine:
-		return prefix == "workflow" || prefix == "run" || prefix == "setup" || prefix == "task" || prefix == "exec"
+		return prefix == "workflow" || prefix == "run" || prefix == "setup" || prefix == "task" || prefix == "exec" || prefix == "dependency"
 	default:
 		return false
 	}
