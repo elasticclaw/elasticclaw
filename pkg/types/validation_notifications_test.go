@@ -107,6 +107,20 @@ func TestValidateNotificationsConfig(t *testing.T) {
 			},
 		},
 		{
+			name: "valid infrastructure routes",
+			cfg:  &NotificationsConfig{Notifiers: slack(), Infra: &InfraNotificationsConfig{PollInterval: "1m", Routes: []InfraRoute{{Via: "eng-agents", Events: []string{"dependency_down", "provider_limit_exhausted"}}}}},
+		},
+		{
+			name:    "infrastructure route rejects unknown event",
+			cfg:     &NotificationsConfig{Notifiers: slack(), Infra: &InfraNotificationsConfig{Routes: []InfraRoute{{Via: "eng-agents", Events: []string{"agent_started"}}}}},
+			wantErr: true, errMsg: "not a supported infrastructure event type",
+		},
+		{
+			name:    "infrastructure validates durations",
+			cfg:     &NotificationsConfig{Notifiers: slack(), Infra: &InfraNotificationsConfig{PollInterval: "tomorrow", Routes: []InfraRoute{{Via: "eng-agents"}}}},
+			wantErr: true, errMsg: "invalid poll_interval",
+		},
+		{
 			name: "valid lifecycle routes",
 			cfg: &NotificationsConfig{
 				Notifiers: map[string]NotifierConfig{

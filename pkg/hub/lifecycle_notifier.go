@@ -1821,6 +1821,10 @@ func (s *Server) handleNotificationTest(w http.ResponseWriter, r *http.Request) 
 		s.handleScheduledReportTest(w, r, report, strings.TrimSpace(body.Via), body.DryRun)
 		return
 	}
+	if types.IsInfraEventType(body.EventType) {
+		s.handleInfraNotificationTest(w, r, body.EventType, strings.TrimSpace(body.Via), body.DryRun)
+		return
+	}
 	supported := lifecycleSupportedEventTypes()
 	if !supported[body.EventType] {
 		valid := make([]string, 0, len(supported))
@@ -1978,6 +1982,78 @@ func (s *Server) handleNotificationTest(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	jsonOK(w, map[string]any{"ok": true, "message_id": handle, "via": via, "payload": payload})
+}
+
+// handleInfraNotificationTest uses the same provider path as delivery while
+// keeping the probe out of the durable infra stream and its route cursor.
+func (s *Server) handleInfraNotificationTest(w http.ResponseWriter, r *http.Request, eventType, requestedVia string, dryRun bool) {
+	cfg := s.notificationsConfig()
+	if cfg == nil || !cfg.Infra.IsEnabled() {
+		jsonError(w, http.StatusBadRequest, "infrastructure notifications are not configured or not enabled (set notifications.infra in hub.yaml)")
+		return
+	}
+	if err := types.ValidateInfraNotificationsConfig(cfg); err != nil {
+		jsonError(w, http.StatusBadRequest, "notifications config invalid: "+err.Error())
+		return
+	}
+	via := requestedVia
+	if via == "" {
+		via = strings.TrimSpace(cfg.Infra.Routes[0].Via)
+	}
+	nc, ok := cfg.Notifiers[via]
+	if !ok {
+		jsonError(w, http.StatusBadRequest, "via "+strconv.Quote(via)+" does not name a configured notifier (defined: "+configuredNotifierNames(cfg.Notifiers)+")")
+		return
+	}
+	msg := buildInfraMessage(sampleInfraEvent(eventType), s.nowFunc())
+	secrets := s.hubSecretResolver()
+	if dryRun {
+		dry := func(name string) (string, bool) {
+			if v, ok := secrets(name); ok && v != "" {
+				return v, true
+			}
+			return "dry-run-placeholder", true
+		}
+		n, err := notify.New(nc.Type, s.notifierSettings(nc), dry)
+		if err != nil {
+			jsonError(w, http.StatusBadRequest, "notifier "+strconv.Quote(via)+" invalid: "+err.Error())
+			return
+		}
+		payload, err := renderNotifierPayload(n, msg)
+		if err != nil {
+			jsonError(w, http.StatusBadRequest, "render payload: "+err.Error())
+			return
+		}
+		jsonOK(w, map[string]any{"dry_run": true, "via": via, "payload": payload})
+		return
+	}
+	n, err := s.notifierFor(via, nc, secrets)
+	if err != nil {
+		jsonError(w, http.StatusBadRequest, "notifier "+strconv.Quote(via)+" unavailable: "+err.Error())
+		return
+	}
+	payload, err := renderNotifierPayload(n, msg)
+	if err != nil {
+		jsonError(w, http.StatusBadRequest, "render payload: "+err.Error())
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+	handle, err := n.Send(ctx, msg)
+	if err != nil {
+		jsonError(w, http.StatusBadGateway, "notification send failed: "+err.Error())
+		return
+	}
+	jsonOK(w, map[string]any{"ok": true, "message_id": handle, "via": via, "payload": payload})
+}
+
+func sampleInfraEvent(eventType string) infraEventRow {
+	detail := map[string]any{"name": "Sample provider", "message": "Synthetic sample event for notification test"}
+	if strings.HasPrefix(eventType, "provider_limit_") {
+		detail["provider"] = "sample"
+		detail["deadline"] = "tomorrow at 00:00 UTC"
+	}
+	return infraEventRow{EventType: eventType, Subject: "sample-provider", Detail: detail, OccurredAt: now()}
 }
 
 // handleScheduledReportTest probes one scheduled report on demand: it builds

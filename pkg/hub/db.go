@@ -569,6 +569,13 @@ func migrate(db *sql.DB) error {
 		detail      TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(detail) AND json_type(detail) = 'object'),
 		occurred_at INTEGER NOT NULL
 	);
+	CREATE TABLE IF NOT EXISTS infra_notification_deliveries (
+		event_rowid INTEGER NOT NULL,
+		notifier TEXT NOT NULL,
+		delivered_at INTEGER NOT NULL,
+		status TEXT NOT NULL,
+		PRIMARY KEY(event_rowid, notifier)
+	);
 	-- rowid, rather than occurred_at, is the future delivery watermark: an
 	-- event recorded late must never disappear behind a newer wall-clock value.
 	-- SQLite already indexes its implicit rowid, so no secondary index is needed.

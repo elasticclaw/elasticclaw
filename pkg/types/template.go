@@ -585,6 +585,8 @@ type NotificationsConfig struct {
 	Lifecycle *LifecycleNotificationsConfig `yaml:"lifecycle,omitempty" json:"lifecycle,omitempty"`
 	// Scheduled configures time-driven reports sent through named notifiers.
 	Scheduled []ScheduledNotificationConfig `yaml:"scheduled,omitempty" json:"scheduled,omitempty"`
+	// Infra configures fleet-wide dependency and provider-limit notifications.
+	Infra *InfraNotificationsConfig `yaml:"infra,omitempty" json:"infra,omitempty"`
 }
 
 // ScheduledNotificationConfig configures a report sent at a wall-clock time.
@@ -664,6 +666,27 @@ func IsInfraEventType(event string) bool {
 type LifecycleRoute struct {
 	Via    string   `yaml:"via" json:"via"`
 	Events []string `yaml:"events,omitempty" json:"events,omitempty"`
+}
+
+// InfraRoute sends selected infrastructure events through a named notifier.
+// An empty Events list receives every infrastructure event type.
+type InfraRoute struct {
+	Via    string   `yaml:"via" json:"via"`
+	Events []string `yaml:"events,omitempty" json:"events,omitempty"`
+}
+
+// InfraNotificationsConfig configures edge-triggered infrastructure alerts.
+// RepeatAfter is deliberately opt-in: an outage does not become more actionable
+// because it repeats in a channel every hour.
+type InfraNotificationsConfig struct {
+	Enabled      *bool        `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	Routes       []InfraRoute `yaml:"routes,omitempty" json:"routes,omitempty"`
+	PollInterval string       `yaml:"poll_interval,omitempty" json:"pollInterval,omitempty"`
+	RepeatAfter  string       `yaml:"repeat_after,omitempty" json:"repeatAfter,omitempty"`
+}
+
+func (c *InfraNotificationsConfig) IsEnabled() bool {
+	return c != nil && (c.Enabled == nil || *c.Enabled)
 }
 
 // LifecycleNotificationsConfig configures outbound notifications for agent

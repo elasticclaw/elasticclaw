@@ -779,7 +779,10 @@ func ValidateNotificationsConfig(cfg *NotificationsConfig) error {
 	if err := validateScheduledBlock(cfg); err != nil {
 		return err
 	}
-	return validateLifecycleBlock(cfg)
+	if err := validateLifecycleBlock(cfg); err != nil {
+		return err
+	}
+	return validateInfraBlock(cfg)
 }
 
 // ValidateScheduledNotificationsConfig validates only what the scheduled
@@ -812,6 +815,19 @@ func ValidateLifecycleNotificationsConfig(cfg *NotificationsConfig) error {
 		return err
 	}
 	return validateLifecycleBlock(cfg)
+}
+
+// ValidateInfraNotificationsConfig validates only the config consumed by the
+// infrastructure notifier, so an unrelated scheduled or lifecycle typo never
+// silences an outage alert.
+func ValidateInfraNotificationsConfig(cfg *NotificationsConfig) error {
+	if cfg == nil {
+		return nil
+	}
+	if err := validateNotifiersBlock(cfg); err != nil {
+		return err
+	}
+	return validateInfraBlock(cfg)
 }
 
 func validateNotifiersBlock(cfg *NotificationsConfig) error {
@@ -1023,6 +1039,52 @@ func validateLifecycleBlock(cfg *NotificationsConfig) error {
 	via := strings.TrimSpace(lc.Via)
 	if _, ok := cfg.Notifiers[via]; !ok {
 		return fmt.Errorf("notifications.lifecycle: via %q does not name a configured notifier (defined: %s)", via, notifierNames(cfg.Notifiers))
+	}
+	return nil
+}
+
+func validateInfraBlock(cfg *NotificationsConfig) error {
+	ic := cfg.Infra
+	if ic == nil {
+		return nil
+	}
+	for _, field := range []struct{ name, value string }{{"poll_interval", ic.PollInterval}, {"repeat_after", ic.RepeatAfter}} {
+		if field.value == "" {
+			continue
+		}
+		if _, err := time.ParseDuration(field.value); err != nil {
+			return fmt.Errorf("notifications.infra: invalid %s %q: %w", field.name, field.value, err)
+		}
+	}
+	if !ic.IsEnabled() {
+		return nil
+	}
+	if len(ic.Routes) == 0 {
+		return fmt.Errorf("notifications.infra: routes are required when enabled")
+	}
+	seenRoutes := map[string]struct{}{}
+	for i, route := range ic.Routes {
+		via := strings.TrimSpace(route.Via)
+		if via == "" {
+			return fmt.Errorf("notifications.infra.routes[%d]: via is required (the name of a notifier under notifications.notifiers)", i)
+		}
+		if _, ok := cfg.Notifiers[via]; !ok {
+			return fmt.Errorf("notifications.infra.routes[%d]: via %q does not name a configured notifier (defined: %s)", i, via, notifierNames(cfg.Notifiers))
+		}
+		if _, ok := seenRoutes[via]; ok {
+			return fmt.Errorf("notifications.infra.routes[%d]: via %q is duplicated", i, via)
+		}
+		seenRoutes[via] = struct{}{}
+		seenEvents := map[string]struct{}{}
+		for _, event := range route.Events {
+			if !IsInfraEventType(event) {
+				return fmt.Errorf("notifications.infra.routes[%d]: event %q is not a supported infrastructure event type", i, event)
+			}
+			if _, ok := seenEvents[event]; ok {
+				return fmt.Errorf("notifications.infra.routes[%d]: event %q is duplicated", i, event)
+			}
+			seenEvents[event] = struct{}{}
+		}
 	}
 	return nil
 }

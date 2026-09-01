@@ -213,6 +213,9 @@ type Server struct {
 	scheduledNotifierStop chan struct{}
 	scheduledNotifierDone chan struct{}
 
+	infraNotifierStop chan struct{}
+	infraNotifierDone chan struct{}
+
 	// dependencyWatcherStop/Done give the status poll the same shutdown
 	// guarantee as notifiers: its DB write must finish before the DB closes.
 	dependencyWatcherStop chan struct{}
@@ -581,6 +584,7 @@ func NewServer(addr, dbPath, identityDir string, hubCfg *types.HubConfig) (*Serv
 	srv.startIntegrationPoller()
 	srv.startLifecycleNotifier()
 	srv.startScheduledNotifier()
+	srv.startInfraNotifier()
 	srv.startLLMUsageLimitScheduler()
 	srv.attachLLMUsageLimitsToDependencyStatus(srv.dependencyStatus)
 	srv.startDependencyWatcher()
@@ -662,6 +666,7 @@ func (s *Server) run(ctx context.Context, opts ...RunOptions) error {
 		// stash dies with the process).
 		s.stopLifecycleNotifier(10 * time.Second)
 		s.stopScheduledNotifier(10 * time.Second)
+		s.stopInfraNotifier(10 * time.Second)
 		s.stopDependencyWatcher(10 * time.Second)
 		if closeErr := s.db.Close(); closeErr != nil {
 			return fmt.Errorf("close database: %w", closeErr)

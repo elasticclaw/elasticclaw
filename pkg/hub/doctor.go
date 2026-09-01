@@ -1250,6 +1250,9 @@ func (s *Server) checkNotifications(cfg *types.HubConfig) []DoctorCheck {
 			Error:       err.Error(),
 		})
 	}
+	if err := types.ValidateInfraNotificationsConfig(nCfg); err != nil {
+		checks = append(checks, DoctorCheck{Category: "notifications", Severity: "critical", Title: "Infrastructure notifications config invalid", Description: "No infrastructure notifications will be delivered until this is fixed in hub.yaml.", OK: false, Error: err.Error()})
+	}
 
 	secrets := func(name string) (string, bool) {
 		v, ok := cfg.Secrets[name]
@@ -1339,6 +1342,31 @@ func (s *Server) checkNotifications(cfg *types.HubConfig) []DoctorCheck {
 				Title:       label + " is configured",
 				Description: fmt.Sprintf("Notifier %q constructed successfully and has a channel.", via),
 			})
+		}
+	}
+
+	// Infrastructure routes are global hub alerts, so their secrets resolve in
+	// the hub scope just like lifecycle routes. Check each destination here:
+	// passing structural validation alone cannot prove a real outage can post.
+	if nCfg.Infra.IsEnabled() {
+		for i, route := range nCfg.Infra.Routes {
+			via := strings.TrimSpace(route.Via)
+			label := fmt.Sprintf("Infrastructure route %d (%q)", i+1, via)
+			nc, ok := nCfg.Notifiers[via]
+			if via == "" || !ok {
+				checks = append(checks, DoctorCheck{Category: "notifications", Severity: "critical", OK: false, Title: label + " names an unknown notifier", Description: "This infrastructure route will not deliver messages until its via names a configured notifier."})
+				continue
+			}
+			channel, _ := s.notifierSettings(nc)["channel"].(string)
+			if strings.TrimSpace(channel) == "" {
+				checks = append(checks, DoctorCheck{Category: "notifications", Severity: "critical", OK: false, Title: label + " has no channel", Description: fmt.Sprintf("Notifier %q needs a channel for this infrastructure route.", via)})
+				continue
+			}
+			if _, err := notify.New(nc.Type, s.notifierSettings(nc), secrets); err != nil {
+				checks = append(checks, DoctorCheck{Category: "notifications", Severity: "critical", OK: false, Title: label + " is not constructible", Description: fmt.Sprintf("Infrastructure alerts through notifier %q will not be delivered.", via), Error: err.Error()})
+				continue
+			}
+			checks = append(checks, DoctorCheck{Category: "notifications", Severity: "info", OK: true, Title: label + " is configured", Description: fmt.Sprintf("Notifier %q constructed successfully and has a channel.", via)})
 		}
 	}
 
