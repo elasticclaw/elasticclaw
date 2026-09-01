@@ -165,7 +165,13 @@ func (s *Server) observeTurnOutcome(cc *clawConn, clawID, messageID, content str
 		// the gateway is failing) would hand them a diagnosis that is simply
 		// untrue and no way to act on the real one. Route it to the limit
 		// handler, which knows the block ends on a schedule.
-		if limit, ok := types.ParseLLMUsageLimit(errText); ok {
+		//
+		// Only the bridge's OWN label counts, for the reason
+		// BridgeTransportErrorIsDefinite exists: the generic "⚠️ error:" prefix
+		// is short enough for an agent to open a turn with while REPORTING a
+		// provider message it saw, and this branch parks every claw on the key.
+		// A claw talking about a cap must not be able to declare one.
+		if limit, ok := types.ParseLLMUsageLimit(errText); ok && definite {
 			s.handleLLMUsageLimit(cc, clawID, limit)
 			return true, true
 		}
