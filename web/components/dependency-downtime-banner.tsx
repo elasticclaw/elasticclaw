@@ -4,6 +4,7 @@ import { AlertTriangle } from "lucide-react"
 import { DependencyKind, type DependencyStatus } from "@/lib/types"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { cn } from "@/lib/utils"
+import { formatLLMLimitDeadline } from "@/components/llm-limit-chip"
 
 interface DependencyDowntimeBannerProps {
   dependencies: DependencyStatus[]
@@ -36,7 +37,11 @@ export function DependencyDowntimeBanner({ dependencies, className }: Dependency
   })
   const text = bannerText(sorted.length)
   const names = sorted.map((dependency) => dependency.name).join(", ")
-  const title = sorted.map((dependency) => `${dependency.name} - ${dependencyKindLabel(dependency.kind)}`).join("\n")
+  // A dependency that comes back at a known time says so. It is the difference
+  // between "go find out what broke" and "wait, it resumes on its own".
+  const detail = (dependency: DependencyStatus) =>
+    dependency.regainAt ? `until ${formatLLMLimitDeadline(dependency.regainAt)}` : dependencyKindLabel(dependency.kind)
+  const title = sorted.map((dependency) => `${dependency.name} - ${detail(dependency)}`).join("\n")
 
   return (
     <Tooltip>
@@ -59,7 +64,7 @@ export function DependencyDowntimeBanner({ dependencies, className }: Dependency
           {sorted.map((dependency) => (
             <div key={dependency.id} className="flex min-w-0 items-center justify-between gap-3">
               <span className="truncate font-medium">{dependency.name}</span>
-              <span className="shrink-0 text-background/70">{dependencyKindLabel(dependency.kind)}</span>
+              <span className="shrink-0 text-background/70">{detail(dependency)}</span>
             </div>
           ))}
         </div>

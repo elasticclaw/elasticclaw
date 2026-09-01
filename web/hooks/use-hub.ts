@@ -28,6 +28,7 @@ import { noteOutput } from "@/hooks/use-last-output"
 export interface HubState {
   claws: Claw[]
   dependencies: DependencyStatus[]
+  limitedDependencies: DependencyStatus[]
   downtimeDependencies: DependencyStatus[]
   messages: Record<string, Message[]>
   streamingBuffers: Record<string, TypewriterState>
@@ -805,11 +806,13 @@ export function useHub(selectedClawId: string | null): HubState {
   }, [persistMessages])
 
   const downtimeDependencies = dependencies.filter((dependency) => dependency.status === "downtime")
+  const limitedDependencies = dependencies.filter((dependency) => dependency.status === "limited")
 
   return {
     claws,
     dependencies,
     downtimeDependencies,
+    limitedDependencies,
     messages,
     streamingBuffers,
     connected,

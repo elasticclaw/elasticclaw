@@ -24,6 +24,12 @@ type Claw struct {
 	SSHHost             string         `json:"ssh_host,omitempty"`
 	SSHPort             int            `json:"ssh_port,omitempty"`
 	SSHUser             string         `json:"ssh_user,omitempty"`
+	// LLMLimitedUntil is set while this agent's model provider is out of
+	// allowance, and carries the instant access returns. The dashboard shows
+	// it on the agent itself: a fleet-wide badge tells an operator something
+	// is wrong somewhere, but the question they actually have is "why is THIS
+	// agent silent", and it has to be answerable without opening the chat.
+	LLMLimitedUntil *time.Time `json:"llm_limited_until,omitempty"`
 }
 
 // HubMessage is a message exchanged between a claw and a user.

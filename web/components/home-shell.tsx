@@ -159,6 +159,7 @@ export function HomeShell() {
   const {
     claws: rawClaws,
     downtimeDependencies,
+    limitedDependencies,
     messages,
     streamingBuffers,
     loading,
@@ -468,6 +469,7 @@ export function HomeShell() {
             claw={selectedClaw}
             allClaws={claws}
             downtimeDependencies={downtimeDependencies}
+            limitedDependencies={limitedDependencies}
             messages={selectedClaw ? messages[selectedClaw.id] || [] : []}
             allMessages={messages}
             streamingBuffers={streamingBuffers}

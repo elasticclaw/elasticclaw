@@ -107,7 +107,15 @@ const SortableClawCard = memo(function SortableClawCard({
   }
   const handleClick = useCallback(() => onSelectClaw(claw.id), [claw.id, onSelectClaw])
   const handleTogglePin = useCallback((event: React.MouseEvent) => { event.stopPropagation(); onTogglePin(claw.id) }, [claw.id, onTogglePin])
-  const stateChip = useMemo(() => <AgentStateChip status={claw.status} isStreaming={claw.isStreaming} />, [claw.status, claw.isStreaming])
+  const stateChip = useMemo(
+    () => (
+      <AgentStateChip
+        status={claw.llm_limited_until ? "paused" : claw.status}
+        isStreaming={claw.llm_limited_until ? false : claw.isStreaming}
+      />
+    ),
+    [claw.status, claw.isStreaming, claw.llm_limited_until]
+  )
 
   return (
     <div ref={setNodeRef} style={style} {...attributes} {...listeners} className="w-full min-w-0">

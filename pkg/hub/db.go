@@ -149,6 +149,25 @@ func migrate(db *sql.DB) error {
 	if err := addColumn(db, "claws", "idle_resume_count", `INTEGER NOT NULL DEFAULT 0`); err != nil {
 		return err
 	}
+	// llm_limited_until (epoch millis, 0 = not limited) parks a claw whose
+	// provider account is out of allowance. It is deliberately NOT the
+	// no_progress_paused latch: that one is lifted by any user message, and a
+	// human typing during a billing block would only spend another failed
+	// turn. This one outlives user input and is cleared by the clock or by an
+	// explicit operator override. A provider that names no deadline still gets
+	// a concrete one here (now + llmLimitFallbackRetry): the column answers
+	// "when do we try again", and "never" is not a useful answer to that.
+	if err := addColumn(db, "claws", "llm_limited_until", `INTEGER NOT NULL DEFAULT 0`); err != nil {
+		return err
+	}
+	// llm_limit_noticed_until is the deadline the user has already been told
+	// about, so one block yields one notice however many messages they send.
+	// It is a column rather than a field on the connection because the claw is
+	// frequently NOT connected while blocked: an in-memory marker re-announced
+	// on every message for a disconnected claw, and reset on every reconnect.
+	if err := addColumn(db, "claws", "llm_limit_noticed_until", `INTEGER NOT NULL DEFAULT 0`); err != nil {
+		return err
+	}
 	_, _ = db.Exec(`ALTER TABLE claw_prs ADD COLUMN last_comment_at TEXT NOT NULL DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE claw_prs ADD COLUMN pr_conditions_fired INTEGER NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE claw_prs ADD COLUMN permanent_failure_count INTEGER NOT NULL DEFAULT 0`)
@@ -512,7 +531,33 @@ func migrate(db *sql.DB) error {
 		stage_stalled_since INTEGER NOT NULL DEFAULT 0,
 		idle_resume_at INTEGER NOT NULL DEFAULT 0,
 		idle_resume_count INTEGER NOT NULL DEFAULT 0,
+		llm_limited_until INTEGER NOT NULL DEFAULT 0,
+		llm_limit_noticed_until INTEGER NOT NULL DEFAULT 0,
 		pending_session_loss_notice TEXT NOT NULL DEFAULT ''
+	);
+
+	-- One row per LLM key that is currently out of allowance.
+	--
+	-- Keyed on the key, not the claw, because that is the shape of the real
+	-- failure: on 2026-08-31 four Faster claws stopped within seconds of each
+	-- other because they share one Anthropic key. Recording it per claw would
+	-- have meant four separate discoveries, four notifications, and three
+	-- claws still burning turns against a wall the hub already knew about.
+	CREATE TABLE IF NOT EXISTS llm_usage_limits (
+		key_id           TEXT PRIMARY KEY,
+		provider         TEXT NOT NULL DEFAULT '',
+		reason           TEXT NOT NULL DEFAULT '',
+		message          TEXT NOT NULL DEFAULT '',
+		regain_at        INTEGER NOT NULL DEFAULT 0,
+		retry_at         INTEGER NOT NULL DEFAULT 0,
+		retries          INTEGER NOT NULL DEFAULT 0,
+		detected_at      INTEGER NOT NULL DEFAULT 0,
+		detected_claw_id TEXT NOT NULL DEFAULT '',
+		-- A released row is kept, not deleted, so the retry counter survives
+		-- the release. Without it a limit that lifts and immediately returns
+		-- looks like a brand-new episode every time and the backoff never
+		-- climbs. Rows are pruned once the episode is comfortably over.
+		released_at      INTEGER NOT NULL DEFAULT 0
 	);
 
 

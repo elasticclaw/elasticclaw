@@ -159,6 +159,22 @@ func (s *Server) recordBridgeErrorEvent(clawID string, streak int, errText strin
 func (s *Server) observeTurnOutcome(cc *clawConn, clawID, messageID, content string) (paused bool, bridgeErrTurn bool) {
 	errText, definite, bridgeErrTurn := types.BridgeTransportErrorIsDefinite(content)
 	if bridgeErrTurn {
+		// A provider usage limit arrives on this path but is not this path's
+		// problem. The transport worked — it delivered the rejection — and the
+		// bridge-error response (pause, then tell the operator the sandbox or
+		// the gateway is failing) would hand them a diagnosis that is simply
+		// untrue and no way to act on the real one. Route it to the limit
+		// handler, which knows the block ends on a schedule.
+		//
+		// Only the bridge's OWN label counts, for the reason
+		// BridgeTransportErrorIsDefinite exists: the generic "⚠️ error:" prefix
+		// is short enough for an agent to open a turn with while REPORTING a
+		// provider message it saw, and this branch parks every claw on the key.
+		// A claw talking about a cap must not be able to declare one.
+		if limit, ok := types.ParseLLMUsageLimit(errText); ok && definite {
+			s.handleLLMUsageLimit(cc, clawID, limit)
+			return true, true
+		}
 		return s.observeBridgeErrorTurn(cc, clawID, errText, definite), true
 	}
 	if cc != nil {

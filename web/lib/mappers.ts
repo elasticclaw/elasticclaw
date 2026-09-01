@@ -118,6 +118,7 @@ export function mapApiClaw(
     last_seen: apiClaw.last_seen,
     created_at: apiClaw.created_at,
     tenant_id: apiClaw.tenant_id,
+    llm_limited_until: overrides.llm_limited_until ?? apiClaw.llm_limited_until,
   }
 }
 

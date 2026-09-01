@@ -156,6 +156,7 @@ type Server struct {
 	pollWarningMu             sync.Mutex
 	pollWarnings              map[string]struct{}
 	noProgressMu              sync.Mutex // serializes pause/resume state across the DB and active connection
+	llmLimitMu                sync.Mutex // serializes provider usage-limit records (see llm_usage_limit.go)
 
 	// webhookDedup prevents duplicate Linear webhook deliveries from creating
 	// duplicate claws. Keyed by issue transition fingerprint; entries expire after 30s.
@@ -277,6 +278,7 @@ type clawConn struct {
 	awaitingResponse        bool            // true as soon as a prompt is delivered, before the first chunk/activity
 	noProgressPaused        bool            // automatic delivery is paused after repeated turns with unchanged progress
 	bridgeErrorStreak       int             // consecutive turns that came back as a claw-bridge transport error (NEXT-725)
+	llmLimitedUntil         time.Time       // provider is out of allowance until this instant; zero = not limited (see llm_usage_limit.go)
 	lastTurnFinishedAt      time.Time       // when the last streaming turn ended (for post-restart resume window)
 	connectedAt             time.Time       // when this connection registered; immutable after registration
 	idleNotifiedAt          time.Time       // when the agent_idle notification fired for the current idle stretch (zero = armed)
@@ -574,6 +576,8 @@ func NewServer(addr, dbPath, identityDir string, hubCfg *types.HubConfig) (*Serv
 	srv.startIntegrationPoller()
 	srv.startLifecycleNotifier()
 	srv.startScheduledNotifier()
+	srv.startLLMUsageLimitScheduler()
+	srv.attachLLMUsageLimitsToDependencyStatus(srv.dependencyStatus)
 
 	return srv, nil
 }
@@ -1446,7 +1450,7 @@ func (s *Server) handleClaws(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rows, err := s.db.Query(
-		`SELECT id, name, template, COALESCE(provider,''), COALESCE(provider_id,''), status, last_seen, created_at, ssh_host, ssh_port, ssh_user, COALESCE(tags,'[]'), COALESCE(color,''), COALESCE(bootstrap_status,''), COALESCE(bootstrap_diagnostic,''), COALESCE(github_issue_id,'') FROM claws WHERE tenant_id = ? AND status != 'deleted' ORDER BY created_at DESC`,
+		`SELECT id, name, template, COALESCE(provider,''), COALESCE(provider_id,''), status, last_seen, created_at, ssh_host, ssh_port, ssh_user, COALESCE(tags,'[]'), COALESCE(color,''), COALESCE(bootstrap_status,''), COALESCE(bootstrap_diagnostic,''), COALESCE(github_issue_id,''), COALESCE(llm_limited_until,0) FROM claws WHERE tenant_id = ? AND status != 'deleted' ORDER BY created_at DESC`,
 		tenantID,
 	)
 	if err != nil {
@@ -1470,9 +1474,11 @@ func (s *Server) handleClaws(w http.ResponseWriter, r *http.Request) {
 		var c types.Claw
 		var lastSeen sql.NullTime
 		var tagsJSON string
-		if err := rows.Scan(&c.ID, &c.Name, &c.Template, &c.Provider, &c.ProviderID, &c.Status, &lastSeen, &c.CreatedAt, &c.SSHHost, &c.SSHPort, &c.SSHUser, &tagsJSON, &c.Color, &c.BootstrapStatus, &c.BootstrapDiagnostic, &c.GitHubIssueID); err != nil {
+		var llmLimitedUntil int64
+		if err := rows.Scan(&c.ID, &c.Name, &c.Template, &c.Provider, &c.ProviderID, &c.Status, &lastSeen, &c.CreatedAt, &c.SSHHost, &c.SSHPort, &c.SSHUser, &tagsJSON, &c.Color, &c.BootstrapStatus, &c.BootstrapDiagnostic, &c.GitHubIssueID, &llmLimitedUntil); err != nil {
 			continue
 		}
+		c.LLMLimitedUntil = optionalTime(llmLimitedUntil)
 		c.GitHubIssueURL = githubIssueURL(c.GitHubIssueID)
 		_ = json.Unmarshal([]byte(tagsJSON), &c.Tags)
 		c.TenantID = tenantID
@@ -2002,10 +2008,11 @@ func (s *Server) handleClawDetail(w http.ResponseWriter, r *http.Request) {
 	var c types.Claw
 	var lastSeen sql.NullTime
 	var tagsJSON string
+	var llmLimitedUntil int64
 	err := s.db.QueryRow(
-		`SELECT id, name, template, COALESCE(provider,''), COALESCE(provider_id,''), status, last_seen, created_at, ssh_host, ssh_port, ssh_user, COALESCE(tags,'[]'), COALESCE(color,''), COALESCE(bootstrap_status,''), COALESCE(bootstrap_diagnostic,''), COALESCE(github_issue_id,'') FROM claws WHERE id = ? AND tenant_id = ? AND status != 'deleted'`,
+		`SELECT id, name, template, COALESCE(provider,''), COALESCE(provider_id,''), status, last_seen, created_at, ssh_host, ssh_port, ssh_user, COALESCE(tags,'[]'), COALESCE(color,''), COALESCE(bootstrap_status,''), COALESCE(bootstrap_diagnostic,''), COALESCE(github_issue_id,''), COALESCE(llm_limited_until,0) FROM claws WHERE id = ? AND tenant_id = ? AND status != 'deleted'`,
 		clawID, tenantID,
-	).Scan(&c.ID, &c.Name, &c.Template, &c.Provider, &c.ProviderID, &c.Status, &lastSeen, &c.CreatedAt, &c.SSHHost, &c.SSHPort, &c.SSHUser, &tagsJSON, &c.Color, &c.BootstrapStatus, &c.BootstrapDiagnostic, &c.GitHubIssueID)
+	).Scan(&c.ID, &c.Name, &c.Template, &c.Provider, &c.ProviderID, &c.Status, &lastSeen, &c.CreatedAt, &c.SSHHost, &c.SSHPort, &c.SSHUser, &tagsJSON, &c.Color, &c.BootstrapStatus, &c.BootstrapDiagnostic, &c.GitHubIssueID, &llmLimitedUntil)
 	_ = json.Unmarshal([]byte(tagsJSON), &c.Tags)
 	if err == sql.ErrNoRows {
 		http.Error(w, "not found", http.StatusNotFound)
@@ -2021,6 +2028,7 @@ func (s *Server) handleClawDetail(w http.ResponseWriter, r *http.Request) {
 	}
 	c.TenantID = tenantID
 	c.GitHubIssueURL = githubIssueURL(c.GitHubIssueID)
+	c.LLMLimitedUntil = optionalTime(llmLimitedUntil)
 	if lastSeen.Valid {
 		c.LastSeen = lastSeen.Time
 	}
@@ -2114,6 +2122,12 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "db error", http.StatusInternalServerError)
 			return
 		}
+		// The message is stored and queued either way; this only decides
+		// whether it can go out now. resumeNoProgressAfterUserInput above
+		// cannot clear a provider limit — no amount of human attention adds
+		// allowance to the account — so tell the sender instead of letting the
+		// delivery gate swallow the message without explanation.
+		s.noticeLLMLimitToUser(clawID)
 		s.recordTaskRunDashboardMessage(clawID, ghLoginMsg, msg.ID)
 		// Deliver oldest pending message if connected and idle.
 		s.mu.RLock()
@@ -2756,6 +2770,13 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 	}
 	s.claws[clawID] = cc
 	s.mu.Unlock()
+	// A provider limit outlives the bridge that discovered it: the account is
+	// capped whether or not this sandbox restarted, so a fresh connection must
+	// come back parked rather than spend another turn on the same wall. Settled
+	// from the KEY's record, not from this claw's column, so a claw created
+	// after the cap was found is parked too. Deliberately after s.mu is
+	// released — the latch and release paths take llmLimitMu and then s.mu.
+	s.seedLLMLimitForConnection(cc, clawID)
 	if old != nil {
 		go old.conn.Close(websocket.StatusNormalClosure, "superseded by new registration")
 	}
@@ -3663,6 +3684,7 @@ func (s *Server) handleUserWS(w http.ResponseWriter, r *http.Request) {
 				hm.UserLogin = nil
 			}
 			s.resumeNoProgressAfterUserInput(hm.ClawID)
+			s.noticeLLMLimitToUser(hm.ClawID)
 			if _, err := s.db.Exec(
 				`INSERT INTO messages(id,claw_id,tenant_id,role,content,user_login,created_at,delivered_at) VALUES(?,?,?,?,?,?,?,NULL)`,
 				hm.ID, hm.ClawID, hm.TenantID, hm.Role, hm.Content, hm.UserLogin, hm.CreatedAt,
@@ -6627,6 +6649,19 @@ func planGateAcceptedMarker(stageID string) string {
 	return planGateAcceptedMarkerPrefix + stageID
 }
 
+// deliveryBlockedLocked reports whether the hub must not start a turn on this
+// claw right now, for a reason other than it already being busy.
+//
+// The two reasons are deliberately answered in one place. They arrive from
+// different subsystems and hold for different lengths of time, but every
+// caller wants the same answer, and the previous shape — each delivery path
+// reading cc.noProgressPaused for itself — meant a second reason had to be
+// taught to four call sites that are easy to miss and impossible to test for
+// absence. Callers must hold cc.mu.
+func (cc *clawConn) deliveryBlockedLocked() bool {
+	return cc.noProgressPaused || !cc.llmLimitedUntil.IsZero()
+}
+
 // sendWakeMessage sends a silent system message to wake the agent.
 // For factory claws, it sends a task-specific prompt.
 // A marker is stored in DB so reconnects after hub restart don't re-introduce.
@@ -6635,7 +6670,7 @@ func (s *Server) sendWakeMessage(cc *clawConn, clawID string) {
 		return
 	}
 	cc.mu.Lock()
-	if cc.isBusyLocked() || cc.noProgressPaused {
+	if cc.isBusyLocked() || cc.deliveryBlockedLocked() {
 		cc.mu.Unlock()
 		return
 	}
@@ -6686,7 +6721,7 @@ func (s *Server) sendInitialPlanInstruction(cc *clawConn, clawID string) {
 		return
 	}
 	cc.mu.Lock()
-	if cc.isBusyLocked() || cc.noProgressPaused {
+	if cc.isBusyLocked() || cc.deliveryBlockedLocked() {
 		cc.mu.Unlock()
 		return
 	}
@@ -8976,7 +9011,7 @@ func (s *Server) sendNextQueuedMessage(cc *clawConn) {
 		return
 	}
 	cc.mu.Lock()
-	if cc.isBusyLocked() || cc.deliveryInFlight || cc.noProgressPaused {
+	if cc.isBusyLocked() || cc.deliveryInFlight || cc.deliveryBlockedLocked() {
 		cc.mu.Unlock()
 		return
 	}
@@ -9025,7 +9060,7 @@ func (s *Server) sendNextQueuedMessage(cc *clawConn) {
 	// allocates a fresh clawConn, so cc.conn cannot change under us; a write
 	// to a dead socket fails and leaves the row pending for the new connection.
 	cc.mu.Lock()
-	if cc.isBusyLocked() || cc.noProgressPaused {
+	if cc.isBusyLocked() || cc.deliveryBlockedLocked() {
 		cc.mu.Unlock()
 		return
 	}

@@ -66,6 +66,7 @@ func NewTestServerWithConfig(t interface {
 		ticketMetadataEnrichment: make(chan struct{}, 32),
 		ticketCursorKey:          randomTicketCursorKey(),
 	}
+	s.attachLLMUsageLimitsToDependencyStatus(s.dependencyStatus)
 	// Register routes (same as Run but without serving web UI or starting relay)
 	mux := http.NewServeMux()
 	s.registerRoutes(mux)

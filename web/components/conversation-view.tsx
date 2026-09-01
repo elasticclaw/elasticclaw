@@ -77,6 +77,8 @@ import { CardAction } from "@/components/ds/card-action"
 import { ClawTitle } from "@/components/claw-title"
 import { windowMessagesByDurableCount } from "@/lib/messages"
 import { DependencyDowntimeBanner } from "@/components/dependency-downtime-banner"
+import { LLMLimitChip } from "@/components/llm-limit-chip"
+import { ApiLimitBanner } from "@/components/api-limit-banner"
 import type { TypewriterState } from "@/hooks/use-typewriter"
 import { extractQuestion, isWaitingOnYou } from "@/lib/waiting-on-you"
 import { messageAuthor } from "@/lib/message-author"
@@ -93,6 +95,7 @@ interface ConversationViewProps {
   claw: Claw | null
   allClaws: Claw[]
   downtimeDependencies: DependencyStatus[]
+  limitedDependencies: DependencyStatus[]
   messages: Message[]
   allMessages: Record<string, Message[]>
   streamingBuffers: Record<string, TypewriterState>
@@ -346,20 +349,26 @@ function formatUptime(seconds: number): string {
   return mins > 0 ? `${hours}h ${mins}m` : `${hours}h`
 }
 
-function StatusBadge({ status, className }: { status: ClawStatus; className?: string }) {
-  const color = status === "connected" ? "var(--status-connected)" : status === "idle" ? "var(--status-idle)" : status === "provisioning" ? "var(--status-provisioning)" : status === "error" ? "var(--status-error)" : "var(--status-offline)"
+/* `paused` is not a claw status the hub reports — the socket really is
+   connected. It is what the header must SAY when the provider has no allowance
+   left, because "connected" next to an agent that cannot take a turn is the
+   sentence that sent an operator looking for a broken sandbox for two hours. */
+function StatusBadge({ status, paused, className }: { status: ClawStatus; paused?: boolean; className?: string }) {
+  const label = paused ? "paused" : status
+  const color = paused ? "var(--status-idle)" : status === "connected" ? "var(--status-connected)" : status === "idle" ? "var(--status-idle)" : status === "provisioning" ? "var(--status-provisioning)" : status === "error" ? "var(--status-error)" : "var(--status-offline)"
   return (
     <Badge
       variant="outline"
       className={cn("text-xs font-medium", className)}
       style={{ color, borderColor: `color-mix(in srgb, ${color} 50%, transparent)` }}
     >
-      {status}
+      {label}
     </Badge>
   )
 }
 
-function StatusDot({ status, isStreaming }: { status: ClawStatus; isStreaming: boolean }) {
+function StatusDot({ status, isStreaming, paused }: { status: ClawStatus; isStreaming: boolean; paused?: boolean }) {
+  if (paused) return <span className="size-2 rounded-full shrink-0" style={{ backgroundColor: "var(--status-idle)" }} />
   if (isStreaming) return <Loader2 className="size-3.5 animate-spin" style={{ color: "var(--status-streaming)" }} />
   if (status === "provisioning") return <Loader2 className="size-3.5 animate-spin" style={{ color: "var(--status-provisioning)" }} />
   if (status === "error") return <AlertCircle className="size-3.5" style={{ color: "var(--status-error)" }} />
@@ -795,13 +804,18 @@ const ClawBoardCard = memo(function ClawBoardCard({
               )}
               <div className="min-w-0 flex-1">
                 <div className="flex min-w-0 items-center gap-2">
-                  <StatusDot status={claw.status} isStreaming={isStreaming} />
+                  <StatusDot status={claw.status} isStreaming={isStreaming} paused={Boolean(claw.llm_limited_until)} />
                   <button onClick={isPending ? undefined : () => onClick(claw.id)} className="min-w-0 flex-1 text-left font-mono text-sm font-medium text-foreground hover:underline">
                     <ClawTitle name={claw.name} githubIssueId={claw.githubIssueId} githubIssueUrl={claw.githubIssueUrl} className="block" />
                   </button>
                   {hasUnread && <span className="rounded-full bg-blue-500 px-1.5 py-0.5 text-[10px] font-medium text-white">{claw.unreadCount > 99 ? "99+" : claw.unreadCount}</span>}
                 </div>
                 <div className="mt-1 flex items-center gap-1 text-xs text-muted-foreground"><span className="truncate">{claw.template}</span><span>·</span><span className={cn("font-mono shrink-0", claw.status === "provisioning" && "text-[var(--status-provisioning)]", claw.status === "error" && "text-[var(--status-error)]")}>{claw.status === "provisioning" ? "starting..." : claw.status === "error" ? "error" : formatUptime(claw.uptime)}</span></div>
+                {claw.llm_limited_until && (
+                  <div className="mt-1.5 flex min-w-0">
+                    <LLMLimitChip limitedUntil={claw.llm_limited_until} className="max-w-full" />
+                  </div>
+                )}
               </div>
               <div className="flex shrink-0 items-center gap-1 border-l border-border pl-2">
                 {(openPRCount > 0 || prsOpen) && <Popover open={prsOpen} onOpenChange={setPrsOpen}><PopoverTrigger asChild><CardAction icon={GitPullRequest} label={`Open ${openPRCount} pull request${openPRCount === 1 ? "" : "s"}`} count={openPRCount} tone="var(--chart-1)" onClick={(event) => event.stopPropagation()} /></PopoverTrigger><PopoverContent className="w-72 p-2" align="end"><span className="block px-2 py-1 text-[10px] font-medium uppercase tracking-[0.08em] text-muted-foreground">Open pull requests</span>{prs.length > 0 ? prs.map((pr) => <a key={pr.id} href={pr.url} target="_blank" rel="noopener noreferrer" onClick={(event) => event.stopPropagation()} className="block rounded px-2 py-1 hover:bg-accent" aria-label={`Open ${pr.repo} pull request #${pr.prNumber}: ${pr.title}`} title={`${pr.repo}#${pr.prNumber}: ${pr.title}`}><div className="font-mono text-xs text-[var(--chart-1)]">{pr.repo}#{pr.prNumber}</div><div className="truncate text-xs text-muted-foreground">{pr.title}</div></a>) : <p className="px-2 py-1 text-xs text-muted-foreground">No open pull requests.</p>}</PopoverContent></Popover>}
@@ -1644,7 +1658,8 @@ function ClawChatView({
             {/* Uptime is intentionally dropped here: at 320-375px it does not
                 fit next to the badge and the menu (it stays visible on the
                 board card and desktop header). The badge never shrinks. */}
-            <StatusBadge status={claw.status} className="shrink-0" />
+            <LLMLimitChip limitedUntil={claw.llm_limited_until} compact className="shrink-0" />
+            <StatusBadge status={claw.status} paused={Boolean(claw.llm_limited_until)} className="shrink-0" />
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
                 <Button variant="ghost" size="icon" className="size-11 shrink-0" title="More actions">
@@ -1688,7 +1703,8 @@ function ClawChatView({
                 githubIssueUrl={claw.githubIssueUrl}
                 className="flex-1 font-mono text-xl font-semibold text-foreground"
               />
-              <StatusBadge status={claw.status} />
+              <StatusBadge status={claw.status} paused={Boolean(claw.llm_limited_until)} />
+              <LLMLimitChip limitedUntil={claw.llm_limited_until} compact />
               <span className="text-sm text-muted-foreground font-mono">{formatUptime(claw.uptime)}</span>
             </div>
             <div className="flex items-center gap-2">
@@ -1923,6 +1939,7 @@ export function ConversationView({
   claw,
   allClaws,
   downtimeDependencies,
+  limitedDependencies,
   loading = false,
   hubError = null,
   messages,
@@ -2067,6 +2084,7 @@ export function ConversationView({
           <span className="shrink-0 text-sm font-medium">Agents</span>
           <span className="min-w-0 truncate font-mono text-[10.5px] text-muted-foreground">{loading ? "Loading agents" : sectionSummary}</span>
           <div className="ml-auto flex min-w-0 items-center gap-2">
+            <ApiLimitBanner dependencies={limitedDependencies} />
             <DependencyDowntimeBanner dependencies={downtimeDependencies} />
             {/* Sign out lives here on mobile — the tab bar has no room for it */}
             <DropdownMenu>

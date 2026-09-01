@@ -22,23 +22,45 @@ const (
 	dependencyStatusOperational = "operational"
 	dependencyStatusDegraded    = "degraded"
 	dependencyStatusDowntime    = "downtime"
-	dependencyStatusUnknown     = "unknown"
+	// dependencyStatusLimited is our account being out of allowance, which is
+	// deliberately NOT downtime. The service is up; we cannot spend on it. The
+	// two need different words because they need different responses — one is
+	// "wait and watch a status page", the other is "raise the cap, or wait for
+	// a reset we can name" — and folding the second into the first tells an
+	// operator to go look for an outage that does not exist.
+	dependencyStatusLimited = "limited"
+	dependencyStatusUnknown = "unknown"
 )
 
 type DependencyStatus struct {
-	ID        string    `json:"id"`
-	Name      string    `json:"name"`
-	Kind      string    `json:"kind"`
-	Status    string    `json:"status"`
-	Message   string    `json:"message,omitempty"`
-	Source    string    `json:"source,omitempty"`
-	CheckedAt time.Time `json:"checkedAt"`
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	Kind    string `json:"kind"`
+	Status  string `json:"status"`
+	Message string `json:"message,omitempty"`
+	Source  string `json:"source,omitempty"`
+	// RegainAt is set only for a dependency that is down for a KNOWN period —
+	// today, a provider account out of allowance. The status page cannot tell
+	// us this and never will: it is a fact about the account, not the service.
+	// It exists so the badge can say "back at 00:00 UTC" instead of leaving an
+	// operator to guess whether to wait or to go fix something.
+	//
+	// A pointer because omitempty does not skip a zero time.Time: every other
+	// dependency would ship regainAt "0001-01-01T00:00:00Z", which parses
+	// perfectly well in the browser and would render an outage as ending in
+	// the year 1.
+	RegainAt  *time.Time `json:"regainAt,omitempty"`
+	CheckedAt time.Time  `json:"checkedAt"`
 }
 
 type DependencyStatusResponse struct {
-	Dependencies  []DependencyStatus `json:"dependencies"`
-	DowntimeCount int                `json:"downtimeCount"`
-	CheckedAt     time.Time          `json:"checkedAt"`
+	Dependencies []DependencyStatus `json:"dependencies"`
+	// DowntimeCount and LimitedCount are counted separately so the dashboard
+	// can say which of the two is happening. A capped account never inflates
+	// the outage count.
+	DowntimeCount int       `json:"downtimeCount"`
+	LimitedCount  int       `json:"limitedCount"`
+	CheckedAt     time.Time `json:"checkedAt"`
 }
 
 type dependencyStatusTarget struct {
@@ -59,9 +81,13 @@ type dependencyStatusService struct {
 	hubCfg         *types.HubConfig
 	checkers       map[string]dependencyStatusChecker
 	targetProvider dependencyStatusTargetProvider
-	cache          *DependencyStatusResponse
-	cacheTTL       time.Duration
-	refresh        singleflight.Group
+	// limitProvider surfaces provider accounts that are out of allowance.
+	// Kept as a hook rather than a direct Server reference so the service
+	// stays constructible (and testable) on its own.
+	limitProvider func() []llmUsageLimitRecord
+	cache         *DependencyStatusResponse
+	cacheTTL      time.Duration
+	refresh       singleflight.Group
 }
 
 func newDependencyStatusService(cfg *types.HubConfig) *dependencyStatusService {
@@ -88,7 +114,7 @@ func newDependencyStatusService(cfg *types.HubConfig) *dependencyStatusService {
 
 func (s *dependencyStatusService) snapshot(ctx context.Context) DependencyStatusResponse {
 	if resp, ok := s.freshSnapshot(); ok {
-		return resp
+		return s.applyLLMUsageLimits(resp)
 	}
 
 	value, _, _ := s.refresh.Do("snapshot", func() (interface{}, error) {
@@ -99,10 +125,94 @@ func (s *dependencyStatusService) snapshot(ctx context.Context) DependencyStatus
 		return s.refreshSnapshot(context.Background()), nil
 	})
 	if resp, ok := value.(DependencyStatusResponse); ok {
-		return cloneDependencyStatusResponse(resp)
+		return s.applyLLMUsageLimits(cloneDependencyStatusResponse(resp))
 	}
 
-	return DependencyStatusResponse{Dependencies: []DependencyStatus{}, CheckedAt: time.Now().UTC()}
+	return s.applyLLMUsageLimits(DependencyStatusResponse{Dependencies: []DependencyStatus{}, CheckedAt: time.Now().UTC()})
+}
+
+// applyLLMUsageLimits overlays capped provider accounts onto a status
+// snapshot.
+//
+// It runs on the way OUT, over the cached response, rather than inside the
+// refresh. Two reasons, and both matter. The status page reports the service,
+// which is genuinely operational while our own account is capped — folding the
+// limit in earlier would just be overwritten by the next check. And a limit
+// latches the instant a turn hits it, which must not have to wait out the
+// five-minute status cache to reach the dashboard.
+//
+// The result carries its own status, "limited", rather than "downtime". The
+// fleet is equally stopped either way, but the operator's next move is not:
+// an outage is waited out and watched on a status page, while a cap is raised
+// in a billing console or waited out to a stated instant. The dashboard says
+// which one it is.
+func (s *dependencyStatusService) applyLLMUsageLimits(resp DependencyStatusResponse) DependencyStatusResponse {
+	s.mu.Lock()
+	provider := s.limitProvider
+	s.mu.Unlock()
+	if provider == nil {
+		return resp
+	}
+	records := provider()
+	if len(records) == 0 {
+		return resp
+	}
+
+	for _, record := range records {
+		if !record.Active() {
+			continue
+		}
+		id, name, ok := modelDependency(record.Provider)
+		if !ok {
+			// An unresolvable provider still deserves a badge — the fleet is
+			// just as stopped — so fall back to naming the key.
+			id, name = "model:"+record.KeyID, llmLimitDependencyName(record.KeyID)
+		}
+		status := DependencyStatus{
+			ID:        id,
+			Name:      name,
+			Kind:      dependencyKindModel,
+			Status:    dependencyStatusLimited,
+			Message:   llmLimitDependencyMessage(record),
+			Source:    "hub",
+			RegainAt:  optionalRegainAt(record.RetryAt),
+			CheckedAt: time.Now().UTC(),
+		}
+		replaced := false
+		for i := range resp.Dependencies {
+			if resp.Dependencies[i].ID == id {
+				resp.Dependencies[i] = status
+				replaced = true
+				break
+			}
+		}
+		if !replaced {
+			resp.Dependencies = append(resp.Dependencies, status)
+		}
+	}
+	return buildDependencyStatusResponse(resp.Dependencies)
+}
+
+func optionalRegainAt(at time.Time) *time.Time {
+	if at.IsZero() {
+		return nil
+	}
+	utc := at.UTC()
+	return &utc
+}
+
+func llmLimitDependencyName(keyID string) string {
+	if keyID == "" {
+		return "Model provider"
+	}
+	return "Model provider (" + keyID + ")"
+}
+
+func llmLimitDependencyMessage(record llmUsageLimitRecord) string {
+	if record.Exhausted() {
+		return "No allowance left; automatic retries exhausted, raise the account limit to resume. " + record.Message
+	}
+	return "No allowance left until " + formatLLMLimitDeadline(record.RetryAt) + ". " + record.Message
 }
 
 func (s *dependencyStatusService) freshSnapshot() (DependencyStatusResponse, bool) {
@@ -299,6 +409,7 @@ func (s *Server) handleDependencyStatus(w http.ResponseWriter, r *http.Request) 
 	s.mu.RUnlock()
 	if service == nil {
 		service = newDependencyStatusService(cfg)
+		s.attachLLMUsageLimitsToDependencyStatus(service)
 		s.mu.Lock()
 		if s.dependencyStatus == nil {
 			s.dependencyStatus = service
@@ -310,20 +421,33 @@ func (s *Server) handleDependencyStatus(w http.ResponseWriter, r *http.Request) 
 	jsonOK(w, service.snapshot(r.Context()))
 }
 
+// attachLLMUsageLimitsToDependencyStatus lets the badge see capped accounts.
+func (s *Server) attachLLMUsageLimitsToDependencyStatus(service *dependencyStatusService) {
+	if service == nil {
+		return
+	}
+	service.mu.Lock()
+	service.limitProvider = s.llmUsageLimitRecords
+	service.mu.Unlock()
+}
+
 func buildDependencyStatusResponse(dependencies []DependencyStatus) DependencyStatusResponse {
 	now := time.Now().UTC()
 	out := make([]DependencyStatus, len(dependencies))
 	copy(out, dependencies)
-	count := 0
+	downtime, limited := 0, 0
 	for i := range out {
 		if out[i].CheckedAt.IsZero() {
 			out[i].CheckedAt = now
 		}
-		if out[i].Status == dependencyStatusDowntime {
-			count++
+		switch out[i].Status {
+		case dependencyStatusDowntime:
+			downtime++
+		case dependencyStatusLimited:
+			limited++
 		}
 	}
-	return DependencyStatusResponse{Dependencies: out, DowntimeCount: count, CheckedAt: now}
+	return DependencyStatusResponse{Dependencies: out, DowntimeCount: downtime, LimitedCount: limited, CheckedAt: now}
 }
 
 func cloneDependencyStatusResponse(resp DependencyStatusResponse) DependencyStatusResponse {
