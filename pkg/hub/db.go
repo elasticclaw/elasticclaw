@@ -160,6 +160,14 @@ func migrate(db *sql.DB) error {
 	if err := addColumn(db, "claws", "llm_limited_until", `INTEGER NOT NULL DEFAULT 0`); err != nil {
 		return err
 	}
+	// llm_limit_noticed_until is the deadline the user has already been told
+	// about, so one block yields one notice however many messages they send.
+	// It is a column rather than a field on the connection because the claw is
+	// frequently NOT connected while blocked: an in-memory marker re-announced
+	// on every message for a disconnected claw, and reset on every reconnect.
+	if err := addColumn(db, "claws", "llm_limit_noticed_until", `INTEGER NOT NULL DEFAULT 0`); err != nil {
+		return err
+	}
 	_, _ = db.Exec(`ALTER TABLE claw_prs ADD COLUMN last_comment_at TEXT NOT NULL DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE claw_prs ADD COLUMN pr_conditions_fired INTEGER NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE claw_prs ADD COLUMN permanent_failure_count INTEGER NOT NULL DEFAULT 0`)
@@ -524,6 +532,7 @@ func migrate(db *sql.DB) error {
 		idle_resume_at INTEGER NOT NULL DEFAULT 0,
 		idle_resume_count INTEGER NOT NULL DEFAULT 0,
 		llm_limited_until INTEGER NOT NULL DEFAULT 0,
+		llm_limit_noticed_until INTEGER NOT NULL DEFAULT 0,
 		pending_session_loss_notice TEXT NOT NULL DEFAULT ''
 	);
 

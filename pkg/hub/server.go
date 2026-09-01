@@ -279,7 +279,6 @@ type clawConn struct {
 	noProgressPaused        bool            // automatic delivery is paused after repeated turns with unchanged progress
 	bridgeErrorStreak       int             // consecutive turns that came back as a claw-bridge transport error (NEXT-725)
 	llmLimitedUntil         time.Time       // provider is out of allowance until this instant; zero = not limited (see llm_usage_limit.go)
-	llmLimitNoticedAt       time.Time       // the llmLimitedUntil value the user has already been told about, so one block yields one notice
 	lastTurnFinishedAt      time.Time       // when the last streaming turn ended (for post-restart resume window)
 	connectedAt             time.Time       // when this connection registered; immutable after registration
 	idleNotifiedAt          time.Time       // when the agent_idle notification fired for the current idle stretch (zero = armed)
@@ -2736,11 +2735,6 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 
 	var noProgressPaused bool
 	_ = s.db.QueryRow(`SELECT COALESCE(no_progress_paused, 0) != 0 FROM claws WHERE id=?`, clawID).Scan(&noProgressPaused)
-	// A provider limit outlives the bridge that discovered it: the account is
-	// capped whether or not this sandbox restarted, so a fresh connection must
-	// come back parked rather than immediately spending another turn on the
-	// same wall.
-	llmLimitedUntil, _ := s.clawLLMLimitBlock(clawID)
 	// A bridge-process restart tears down the main channel, so the old clawConn
 	// (and its lastTurnFinishedAt) is usually gone by the time the new bridge
 	// registers. Seed the post-restart resume window from the last claw
@@ -2749,7 +2743,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 	// turn end closely enough for autoResumeRecentTurnWindow.
 	var lastClawMsgAt time.Time
 	_ = s.db.QueryRow(`SELECT created_at FROM messages WHERE claw_id=? AND role='claw' ORDER BY created_at DESC LIMIT 1`, clawID).Scan(&lastClawMsgAt)
-	cc := &clawConn{id: clawID, tenantID: tenantID, conn: conn, gatewayReady: gatewayReadyBool(rp.GatewayReady), tags: registrationTags, lastUserMessageAt: time.Now(), lastStatusAt: time.Now(), connectedAt: time.Now(), noProgressPaused: noProgressPaused, workflowV2Controlled: workflowV2Controlled, llmLimitedUntil: llmLimitedUntil}
+	cc := &clawConn{id: clawID, tenantID: tenantID, conn: conn, gatewayReady: gatewayReadyBool(rp.GatewayReady), tags: registrationTags, lastUserMessageAt: time.Now(), lastStatusAt: time.Now(), connectedAt: time.Now(), noProgressPaused: noProgressPaused, workflowV2Controlled: workflowV2Controlled}
 	var old *clawConn
 	s.mu.Lock()
 	if s.gatewayRestartCounts != nil {
@@ -2776,6 +2770,13 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 	}
 	s.claws[clawID] = cc
 	s.mu.Unlock()
+	// A provider limit outlives the bridge that discovered it: the account is
+	// capped whether or not this sandbox restarted, so a fresh connection must
+	// come back parked rather than spend another turn on the same wall. Settled
+	// from the KEY's record, not from this claw's column, so a claw created
+	// after the cap was found is parked too. Deliberately after s.mu is
+	// released — the latch and release paths take llmLimitMu and then s.mu.
+	s.seedLLMLimitForConnection(cc, clawID)
 	if old != nil {
 		go old.conn.Close(websocket.StatusNormalClosure, "superseded by new registration")
 	}

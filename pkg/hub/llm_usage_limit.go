@@ -91,57 +91,97 @@ func (r llmUsageLimitRecord) Active() bool { return r.ReleasedAt.IsZero() }
 // Exhausted reports whether the automatic release cycle has given up.
 func (r llmUsageLimitRecord) Exhausted() bool { return r.Retries >= llmLimitMaxAutoRetries }
 
-// noteLLMUsageLimit records a provider limit discovered on one claw and parks
-// every claw sharing its key until the limit lifts.
+// handleLLMUsageLimit routes one provider-limit turn.
 //
-// It reports whether this call opened a NEW episode. A limit that is already
-// latched returns false so a second claw hitting the same wall does not
-// re-notify: the operator has one problem, not four.
-func (s *Server) noteLLMUsageLimit(clawID string, limit types.LLMUsageLimit) bool {
+// A limit deliberately does NOT touch the bridge-error streak — it clears it.
+// The transport carried the rejection perfectly; counting it as a transport
+// failure would pause the claw with a notice blaming the sandbox, which is the
+// exact wrong thing to hand an operator whose real problem is a billing cap.
+//
+// The decision (new episode? same episode, second claw? released and hit
+// again?) and the write that acts on it happen under ONE hold of llmLimitMu.
+// They used to be split, and the gap was wide enough to matter: claws sharing
+// a key are woken together at release, so their rejections arrive together,
+// and every one of them read "released" before any of them wrote. Four claws
+// then spent four retries on a single episode and the hub gave up after
+// effectively one, each claw collecting a different deadline notice on the way.
+func (s *Server) handleLLMUsageLimit(cc *clawConn, clawID string, limit types.LLMUsageLimit) {
+	if cc != nil {
+		cc.mu.Lock()
+		cc.bridgeErrorStreak = 0
+		cc.mu.Unlock()
+	}
 	keyID, provider := s.resolveClawLLMKey(clawID)
 	nowAt := now()
 
-	retryAt := limit.RegainAt
-	if retryAt.IsZero() {
-		retryAt = nowAt.Add(llmLimitFallbackRetry)
-	}
-
 	s.llmLimitMu.Lock()
-	existing, had := s.loadLLMUsageLimit(keyID)
-	if had && existing.Active() {
-		// Same episode, second claw. Keep the original detection and retry
-		// schedule — in particular do NOT let a re-report reset a backoff that
-		// a failed release already earned.
-		s.llmLimitMu.Unlock()
-		s.latchClawsForLLMLimit(keyID, existing)
-		return false
+	record, had := s.loadLLMUsageLimit(keyID)
+	opened, relatched := false, false
+	switch {
+	case had && record.Active():
+		// Same episode, another claw. Keep the schedule exactly as it is: a
+		// re-report must not reset a backoff an earlier failed release earned,
+		// and must not spend a retry that belongs to the episode, not to the
+		// claw.
+	case had:
+		// Released, and the wall is still there. Same episode: back off.
+		record.ReleasedAt = time.Time{}
+		record.Retries++
+		record.Provider, record.Message, record.RegainAt = provider, limit.Message, limit.RegainAt
+		base := limit.RegainAt
+		if base.IsZero() || !base.After(nowAt) {
+			base = nowAt
+		}
+		record.RetryAt = base.Add(time.Duration(record.Retries) * llmLimitRelatchBackoff)
+		relatched = true
+	default:
+		record = llmUsageLimitRecord{
+			KeyID:          keyID,
+			Provider:       provider,
+			Reason:         limit.Reason,
+			Message:        limit.Message,
+			RegainAt:       limit.RegainAt,
+			RetryAt:        limit.RegainAt,
+			DetectedAt:     nowAt,
+			DetectedClawID: clawID,
+		}
+		if record.RetryAt.IsZero() {
+			record.RetryAt = nowAt.Add(llmLimitFallbackRetry)
+		}
+		opened = true
 	}
-	record := llmUsageLimitRecord{
-		KeyID:          keyID,
-		Provider:       provider,
-		Reason:         limit.Reason,
-		Message:        limit.Message,
-		RegainAt:       limit.RegainAt,
-		RetryAt:        retryAt,
-		DetectedAt:     nowAt,
-		DetectedClawID: clawID,
+	if opened || relatched {
+		if err := s.storeLLMUsageLimit(record); err != nil {
+			s.llmLimitMu.Unlock()
+			log.Printf("[llm-limit] store limit for key %q: %v", keyID, err)
+			return
+		}
 	}
-	if err := s.storeLLMUsageLimit(record); err != nil {
-		s.llmLimitMu.Unlock()
-		log.Printf("[llm-limit] store limit for key %q: %v", keyID, err)
-		return false
-	}
+	latched := s.latchClawsForLLMLimitLocked(keyID, record)
 	s.llmLimitMu.Unlock()
 
-	latched := s.latchClawsForLLMLimit(keyID, record)
-	log.Printf("[llm-limit] key %q capped (%s), %d claw(s) parked until %s: %s",
-		keyID, record.Reason, len(latched), formatLLMLimitDeadline(record.RetryAt), record.Message)
-	s.recordLLMLimitEvent(clawID, record, true)
-	return true
+	switch {
+	case opened:
+		log.Printf("[llm-limit] key %q capped (%s), %d claw(s) parked until %s: %s",
+			keyID, record.Reason, len(latched), formatLLMLimitDeadline(record.RetryAt), record.Message)
+		s.recordLLMLimitEvent(clawID, record, true)
+	case relatched && record.Exhausted():
+		log.Printf("[llm-limit] key %q still capped after %d automatic retries, leaving it for an operator: %s",
+			keyID, record.Retries, record.Message)
+		for _, id := range latched {
+			s.publishHubNotice(id, fmt.Sprintf("[hub] The provider still reports a usage limit after %d automatic retries, so the hub stopped retrying. Raise the account limit and clear the block to resume. Last provider message: %s", record.Retries, record.Message))
+		}
+		s.recordLLMLimitEvent(clawID, record, false)
+	case relatched:
+		log.Printf("[llm-limit] key %q still capped, retry %d scheduled for %s",
+			keyID, record.Retries, formatLLMLimitDeadline(record.RetryAt))
+	}
 }
 
-// latchClawsForLLMLimit parks every claw on the key and returns their IDs.
-func (s *Server) latchClawsForLLMLimit(keyID string, record llmUsageLimitRecord) []string {
+// latchClawsForLLMLimitLocked parks every claw on the key and returns their
+// IDs. Callers must hold s.llmLimitMu: the record write and this walk are one
+// unit, or a concurrent release can unpark a claw the caller is still parking.
+func (s *Server) latchClawsForLLMLimitLocked(keyID string, record llmUsageLimitRecord) []string {
 	clawIDs := s.clawsForLLMKey(keyID)
 	if len(clawIDs) == 0 {
 		return nil
@@ -154,15 +194,7 @@ func (s *Server) latchClawsForLLMLimit(keyID string, record llmUsageLimitRecord)
 			log.Printf("[llm-limit] latch claw %s: %v", shortID(clawID), err)
 			continue
 		}
-		s.mu.RLock()
-		cc := s.claws[clawID]
-		s.mu.RUnlock()
-		if cc != nil {
-			cc.mu.Lock()
-			cc.llmLimitedUntil = record.RetryAt
-			cc.llmLimitNoticedAt = time.Time{}
-			cc.mu.Unlock()
-		}
+		s.setClawLLMLimitMirror(clawID, record.RetryAt)
 		if changed, _ := res.RowsAffected(); changed > 0 {
 			s.publishHubNotice(clawID, notice)
 		}
@@ -170,42 +202,58 @@ func (s *Server) latchClawsForLLMLimit(keyID string, record llmUsageLimitRecord)
 	return clawIDs
 }
 
+// setClawLLMLimitMirror updates the in-memory copy a live connection reads in
+// its delivery gate. The DB column is the truth; this only spares every gate a
+// query.
+func (s *Server) setClawLLMLimitMirror(clawID string, until time.Time) {
+	s.mu.RLock()
+	cc := s.claws[clawID]
+	s.mu.RUnlock()
+	if cc == nil {
+		return
+	}
+	cc.mu.Lock()
+	cc.llmLimitedUntil = until
+	cc.mu.Unlock()
+}
+
 // releaseLLMUsageLimit lifts the latch for a key.
 //
-// reason is logged and, when announce is set, told to each claw's operator.
-// The claws are woken through the ordinary delivery path so a message that
-// queued during the block goes out first, exactly as it would have without
-// the block.
+// The claws are unparked BEFORE the record is marked released, and that order
+// is the crash-safety. A hub that dies half way through leaves the record
+// active, so the next scheduler tick simply runs the release again; the
+// reverse order left claws parked against a record nobody would ever look at
+// again, and nothing in the system re-examined a stored deadline.
+//
+// The unlatch is a single UPDATE across every claw on the key, not a walk of
+// the live ones: a claw that errored while parked is still parked, and
+// claw_retry can revive it later on the same row.
 func (s *Server) releaseLLMUsageLimit(keyID, reason string, announce bool) {
 	s.llmLimitMu.Lock()
+	if _, err := s.db.Exec(
+		`UPDATE claws SET llm_limited_until=0 WHERE COALESCE(llm_key,'')=? AND COALESCE(llm_limited_until,0)<>0 AND status<>'deleted'`,
+		keyID); err != nil {
+		s.llmLimitMu.Unlock()
+		log.Printf("[llm-limit] release claws for key %q: %v", keyID, err)
+		return
+	}
+	clawIDs := s.clawsForLLMKey(keyID)
+	for _, clawID := range clawIDs {
+		s.setClawLLMLimitMirror(clawID, time.Time{})
+	}
 	if _, err := s.db.Exec(`UPDATE llm_usage_limits SET released_at=? WHERE key_id=?`, epochMillis(now()), keyID); err != nil {
 		s.llmLimitMu.Unlock()
-		log.Printf("[llm-limit] clear limit for key %q: %v", keyID, err)
+		log.Printf("[llm-limit] mark limit released for key %q: %v", keyID, err)
 		return
 	}
 	s.llmLimitMu.Unlock()
 
-	clawIDs := s.clawsForLLMKey(keyID)
+	// Notices and wakes touch sockets, so they happen outside the lock.
 	for _, clawID := range clawIDs {
-		if _, err := s.db.Exec(`UPDATE claws SET llm_limited_until=0 WHERE id=?`, clawID); err != nil {
-			log.Printf("[llm-limit] release claw %s: %v", shortID(clawID), err)
-			continue
-		}
-		s.mu.RLock()
-		cc := s.claws[clawID]
-		s.mu.RUnlock()
-		if cc != nil {
-			cc.mu.Lock()
-			cc.llmLimitedUntil = time.Time{}
-			cc.llmLimitNoticedAt = time.Time{}
-			cc.mu.Unlock()
-		}
 		if announce {
 			s.publishHubNotice(clawID, "[hub] "+reason+" Automatic continuation resumed.")
 		}
-		if cc != nil {
-			s.resumeClawAfterLLMLimit(cc, clawID)
-		}
+		s.resumeClawAfterLLMLimit(clawID)
 	}
 	log.Printf("[llm-limit] key %q released (%s), %d claw(s) resumed", keyID, reason, len(clawIDs))
 }
@@ -216,26 +264,45 @@ func (s *Server) releaseLLMUsageLimit(keyID, reason string, announce bool) {
 // it also ends the turn-less stretch. With nothing queued the claw needs a
 // push of its own — the block swallowed the turn it was going to take, and
 // nothing else will offer another.
-func (s *Server) resumeClawAfterLLMLimit(cc *clawConn, clawID string) {
-	if cc == nil || cc.conn == nil {
-		// No live socket to push into. The claw is between connections, and
-		// the ordinary post-registration drain delivers anything queued; a
-		// write here would only reserve a turn and then abort it.
-		return
-	}
+//
+// A claw with no live socket gets that push as a QUEUED hub message rather
+// than a dropped one. The block outlives a disconnect, so the release has to
+// as well: a claw that was offline at midnight and reconnects at nine would
+// otherwise come back unparked and silent, waiting for a turn nobody will ever
+// start.
+func (s *Server) resumeClawAfterLLMLimit(clawID string) {
 	var pending int
 	if err := s.db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND delivered_at IS NULL`, clawID).Scan(&pending); err != nil {
 		log.Printf("[llm-limit] count pending for claw %s: %v", shortID(clawID), err)
 		return
 	}
+	s.mu.RLock()
+	cc := s.claws[clawID]
+	s.mu.RUnlock()
+	live := cc != nil && cc.conn != nil
+
 	if pending > 0 {
-		s.sendNextQueuedMessage(cc)
+		if live {
+			s.sendNextQueuedMessage(cc)
+		}
+		// Not live: the post-registration drain delivers it on reconnect.
 		return
 	}
-	s.sendWakeMessage(cc, clawID)
+	if live {
+		s.sendWakeMessage(cc, clawID)
+		return
+	}
+	s.injectHubMessageByID(clawID, llmLimitResumeWake)
 }
 
-// startLLMUsageLimitScheduler releases limits whose deadline has passed.
+// llmLimitResumeWake is the durable form of the release wake. It is a hub
+// message because a hub message survives the disconnect: it queues, the
+// dashboard shows it, and the ordinary drain hands it to the bridge whenever
+// the claw comes back.
+const llmLimitResumeWake = "[hub] The model provider's allowance is back. Continue where you left off."
+
+// startLLMUsageLimitScheduler releases limits whose deadline has passed and
+// reconciles stored latches against the record table.
 func (s *Server) startLLMUsageLimitScheduler() {
 	go func() {
 		ticker := time.NewTicker(llmLimitScheduleInterval)
@@ -248,6 +315,7 @@ func (s *Server) startLLMUsageLimitScheduler() {
 					}
 				}()
 				s.releaseDueLLMUsageLimits()
+				s.reconcileLLMUsageLimitLatches()
 			}()
 		}
 	}()
@@ -273,67 +341,92 @@ func (s *Server) releaseDueLLMUsageLimits() {
 	}
 }
 
-// handleLLMUsageLimit routes one provider-limit turn.
+// reconcileLLMUsageLimitLatches unparks any claw whose key has no active
+// limit.
 //
-// A limit deliberately does NOT touch the bridge-error streak — it clears it.
-// The transport carried the rejection perfectly; counting it as a transport
-// failure would pause the claw with a notice blaming the sandbox, which is the
-// exact wrong thing to hand an operator whose real problem is a billing cap.
-func (s *Server) handleLLMUsageLimit(cc *clawConn, clawID string, limit types.LLMUsageLimit) {
-	if cc != nil {
-		cc.mu.Lock()
-		cc.bridgeErrorStreak = 0
-		cc.mu.Unlock()
+// The per-claw column and the per-key record are two writes, and every way of
+// splitting them leaves a window: a hub that dies mid-release, a claw revived
+// by claw_retry on a row nobody re-examined, a row updated by hand. Without a
+// reconciler, "parked" is a state only one code path can ever leave, and a
+// claw that misses that path is parked forever — a permanently silent agent
+// whose UI still promises it resumes on its own.
+func (s *Server) reconcileLLMUsageLimitLatches() {
+	active := map[string]bool{}
+	for _, record := range s.llmUsageLimitRecords() {
+		if record.Active() {
+			active[record.KeyID] = true
+		}
 	}
-	keyID, _ := s.resolveClawLLMKey(clawID)
-	if record, had := s.loadLLMUsageLimit(keyID); had && !record.Active() {
-		// We released this key and the wall is still up.
-		s.relatchLLMUsageLimit(clawID, limit)
+	rows, err := s.db.Query(`SELECT id, COALESCE(llm_key,'') FROM claws WHERE COALESCE(llm_limited_until,0)<>0 AND status<>'deleted'`)
+	if err != nil {
+		log.Printf("[llm-limit] reconcile query: %v", err)
 		return
 	}
-	s.noteLLMUsageLimit(clawID, limit)
+	type stale struct{ id, key string }
+	var orphans []stale
+	for rows.Next() {
+		var row stale
+		if err := rows.Scan(&row.id, &row.key); err != nil {
+			continue
+		}
+		if !active[row.key] {
+			orphans = append(orphans, row)
+		}
+	}
+	rows.Close()
+
+	for _, orphan := range orphans {
+		s.llmLimitMu.Lock()
+		res, err := s.db.Exec(`UPDATE claws SET llm_limited_until=0 WHERE id=? AND COALESCE(llm_limited_until,0)<>0`, orphan.id)
+		if err == nil {
+			s.setClawLLMLimitMirror(orphan.id, time.Time{})
+		}
+		s.llmLimitMu.Unlock()
+		if err != nil {
+			log.Printf("[llm-limit] reconcile claw %s: %v", shortID(orphan.id), err)
+			continue
+		}
+		if changed, _ := res.RowsAffected(); changed == 0 {
+			continue
+		}
+		log.Printf("[llm-limit] reconciled stale block on claw %s (key %q has no active limit)", shortID(orphan.id), orphan.key)
+		s.resumeClawAfterLLMLimit(orphan.id)
+	}
 }
 
-// relatchLLMUsageLimit is the answer to "we released, and the wall is still
-// there": back off and try once more, up to the cap.
-func (s *Server) relatchLLMUsageLimit(clawID string, limit types.LLMUsageLimit) {
-	keyID, provider := s.resolveClawLLMKey(clawID)
+// seedLLMLimitForConnection settles whether a freshly registered claw is
+// parked, and is the ONLY thing that decides it.
+//
+// The latch used to be a one-shot sweep over the claws that existed when the
+// cap was found, which quietly meant a claw created afterwards on the same
+// capped key started unparked and spent a turn discovering the wall for
+// itself. Reading the key's record here instead makes the record authoritative
+// at the moment it is consulted, so joining late, being revived by claw_retry,
+// and reconnecting mid-block all land in the same place.
+//
+// It must run AFTER the connection is in s.claws and s.mu is released: latch
+// and release take s.llmLimitMu and then s.mu, so taking them in the other
+// order here would invert the lock order.
+func (s *Server) seedLLMLimitForConnection(cc *clawConn, clawID string) {
+	keyID, _ := s.resolveClawLLMKey(clawID)
+
 	s.llmLimitMu.Lock()
 	record, had := s.loadLLMUsageLimit(keyID)
-	if !had {
-		s.llmLimitMu.Unlock()
-		s.noteLLMUsageLimit(clawID, limit)
-		return
+	until := time.Time{}
+	if had && record.Active() {
+		until = record.RetryAt
+		if _, err := s.db.Exec(`UPDATE claws SET llm_limited_until=? WHERE id=?`, epochMillis(until), clawID); err != nil {
+			log.Printf("[llm-limit] park registering claw %s: %v", shortID(clawID), err)
+		}
+	} else if _, err := s.db.Exec(`UPDATE claws SET llm_limited_until=0 WHERE id=? AND COALESCE(llm_limited_until,0)<>0`, clawID); err != nil {
+		log.Printf("[llm-limit] clear stale block on registering claw %s: %v", shortID(clawID), err)
 	}
-	record.ReleasedAt = time.Time{}
-	record.Retries++
-	record.Message = limit.Message
-	record.Provider = provider
-	record.RegainAt = limit.RegainAt
-	base := limit.RegainAt
-	if base.IsZero() || !base.After(now()) {
-		base = now()
-	}
-	record.RetryAt = base.Add(time.Duration(record.Retries) * llmLimitRelatchBackoff)
-	if err := s.storeLLMUsageLimit(record); err != nil {
-		s.llmLimitMu.Unlock()
-		log.Printf("[llm-limit] re-latch key %q: %v", keyID, err)
-		return
+	if cc != nil {
+		cc.mu.Lock()
+		cc.llmLimitedUntil = until
+		cc.mu.Unlock()
 	}
 	s.llmLimitMu.Unlock()
-
-	s.latchClawsForLLMLimit(keyID, record)
-	if record.Exhausted() {
-		log.Printf("[llm-limit] key %q still capped after %d automatic retries, leaving it for an operator: %s",
-			keyID, record.Retries, record.Message)
-		for _, id := range s.clawsForLLMKey(keyID) {
-			s.publishHubNotice(id, fmt.Sprintf("[hub] The provider still reports a usage limit after %d automatic retries, so the hub stopped retrying. Raise the account limit and clear the block to resume. Last provider message: %s", record.Retries, record.Message))
-		}
-		s.recordLLMLimitEvent(clawID, record, false)
-		return
-	}
-	log.Printf("[llm-limit] key %q still capped, retry %d scheduled for %s",
-		keyID, record.Retries, formatLLMLimitDeadline(record.RetryAt))
 }
 
 // clawLLMLimitBlock reports the deadline a claw is parked until, if it is.
@@ -350,30 +443,32 @@ func (s *Server) clawLLMLimitBlock(clawID string) (time.Time, bool) {
 // This is the "validate before continuing" half of the block: the message is
 // still persisted and still queued, so nothing is lost, but the person is told
 // now — rather than an hour later via a failed turn — that it will not be read
-// until the account has allowance again. Once per episode, so a conversation
-// does not turn into a wall of identical notices.
+// until the account has allowance again.
+//
+// Once per block, and the marker is a column rather than a field on the
+// connection. In memory it was wrong in three ways at once: a claw with no
+// live connection had no marker at all and re-announced on every single
+// message, a bridge reconnect reset it, and every latch pass cleared it.
 func (s *Server) noticeLLMLimitToUser(clawID string) bool {
 	until, limited := s.clawLLMLimitBlock(clawID)
 	if !limited {
 		return false
 	}
-	s.mu.RLock()
-	cc := s.claws[clawID]
-	s.mu.RUnlock()
-	if cc != nil {
-		cc.mu.Lock()
-		already := cc.llmLimitNoticedAt.Equal(until)
-		cc.llmLimitNoticedAt = until
-		cc.mu.Unlock()
-		if already {
-			return true
-		}
+	res, err := s.db.Exec(
+		`UPDATE claws SET llm_limit_noticed_until=? WHERE id=? AND COALESCE(llm_limit_noticed_until,0)<>?`,
+		epochMillis(until), clawID, epochMillis(until))
+	if err != nil {
+		log.Printf("[llm-limit] mark notice for claw %s: %v", shortID(clawID), err)
+		return true
+	}
+	if changed, _ := res.RowsAffected(); changed == 0 {
+		return true
 	}
 	s.publishHubNotice(clawID, fmt.Sprintf("[hub] This agent's model provider is out of allowance, so your message was queued instead of delivered. It goes out automatically when access returns on %s.", formatLLMLimitDeadline(until)))
 	return true
 }
 
-// llmUsageLimitRecords returns every active limit.
+// llmUsageLimitRecords returns every limit, released ones included.
 func (s *Server) llmUsageLimitRecords() []llmUsageLimitRecord {
 	rows, err := s.db.Query(`SELECT key_id, provider, reason, message, regain_at, retry_at, retries, detected_at, detected_claw_id, released_at FROM llm_usage_limits`)
 	if err != nil {
@@ -445,10 +540,12 @@ func timeFromEpochMillis(ms int64) time.Time {
 
 // clawsForLLMKey lists the claws that would hit the same wall.
 //
-// Deleted and errored claws are excluded — parking a claw nobody will run
-// again only adds noise to the dashboard.
+// Only deleted claws are excluded. An errored claw is deliberately included:
+// claw_retry revives one on the same row, and skipping it at release left the
+// revived claw parked against a deadline that had already passed, with nothing
+// left to clear it.
 func (s *Server) clawsForLLMKey(keyID string) []string {
-	rows, err := s.db.Query(`SELECT id FROM claws WHERE COALESCE(llm_key,'')=? AND status NOT IN ('deleted','error')`, keyID)
+	rows, err := s.db.Query(`SELECT id FROM claws WHERE COALESCE(llm_key,'')=? AND status<>'deleted'`, keyID)
 	if err != nil {
 		log.Printf("[llm-limit] list claws for key %q: %v", keyID, err)
 		return nil

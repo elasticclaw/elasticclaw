@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -194,13 +195,11 @@ func TestLLMUsageLimitReleasesAtTheDeadline(t *testing.T) {
 	// Offline claws: the release path is being tested, not the socket write.
 	limitClaw(t, s, "claw-limit-due-a", "faster", false)
 	limitClaw(t, s, "claw-limit-due-b", "faster", false)
-	if !s.noteLLMUsageLimit("claw-limit-due-a", types.LLMUsageLimit{
+	s.handleLLMUsageLimit(nil, "claw-limit-due-a", types.LLMUsageLimit{
 		Reason:   types.LLMLimitUsage,
 		RegainAt: now().Add(-time.Minute),
 		Message:  "You have reached your specified API usage limits.",
-	}) {
-		t.Fatal("noteLLMUsageLimit did not open an episode")
-	}
+	})
 	if got := limitedUntil(t, s, "claw-limit-due-b"); got == 0 {
 		t.Fatal("sibling claw was not parked")
 	}
@@ -222,7 +221,7 @@ func TestLLMUsageLimitReleasesAtTheDeadline(t *testing.T) {
 func TestLLMUsageLimitWithoutDeadlineWaitsForTheFallback(t *testing.T) {
 	s, _ := NewTestServerWithConfig(t, nil, "", "", "")
 	limitClaw(t, s, "claw-limit-no-deadline", "faster", false)
-	s.noteLLMUsageLimit("claw-limit-no-deadline", types.LLMUsageLimit{
+	s.handleLLMUsageLimit(nil, "claw-limit-no-deadline", types.LLMUsageLimit{
 		Reason:  types.LLMLimitCredit,
 		Message: "Your credit balance is too low to access the Anthropic API.",
 	})
@@ -251,7 +250,7 @@ func TestLLMUsageLimitBacksOffAndThenStopsRetrying(t *testing.T) {
 		RegainAt: now().Add(-time.Minute),
 		Message:  "You have reached your specified API usage limits.",
 	}
-	s.noteLLMUsageLimit("claw-limit-relatch", limit)
+	s.handleLLMUsageLimit(nil, "claw-limit-relatch", limit)
 
 	var lastRetryAt time.Time
 	for attempt := 1; attempt <= llmLimitMaxAutoRetries; attempt++ {
@@ -320,7 +319,7 @@ func TestLLMUsageLimitRaisesItsOwnBadge(t *testing.T) {
 	}
 
 	regain := now().Add(4 * time.Hour).Truncate(time.Minute)
-	s.noteLLMUsageLimit("claw-limit-badge", types.LLMUsageLimit{
+	s.handleLLMUsageLimit(nil, "claw-limit-badge", types.LLMUsageLimit{
 		Reason:   types.LLMLimitUsage,
 		RegainAt: regain,
 		Message:  "You have reached your specified API usage limits.",
@@ -383,5 +382,224 @@ func TestDependencyStatusOmitsRegainAtWhenUnknown(t *testing.T) {
 	}
 	if strings.Contains(string(encoded), "regainAt") {
 		t.Errorf("snapshot ships a regainAt for a dependency with no known deadline: %s", encoded)
+	}
+}
+
+// One release episode costs ONE retry, however many claws share the key.
+//
+// The claws on a key are woken together at release, so their rejections arrive
+// together. With the note-vs-relatch decision read outside the lock, all four
+// saw "released" before any of them wrote, each spent a retry, and the hub
+// declared the episode exhausted after effectively one attempt — with four
+// different deadlines announced to each claw on the way.
+func TestLLMUsageLimitSpendsOneRetryPerEpisodeNotPerClaw(t *testing.T) {
+	s, _ := NewTestServerWithConfig(t, nil, "", "", "")
+	ids := []string{"claw-race-a", "claw-race-b", "claw-race-c", "claw-race-d"}
+	for _, id := range ids {
+		limitClaw(t, s, id, "faster", false)
+	}
+	limit := types.LLMUsageLimit{
+		Reason:   types.LLMLimitUsage,
+		RegainAt: now().Add(-time.Minute),
+		Message:  "You have reached your specified API usage limits.",
+	}
+	s.handleLLMUsageLimit(nil, ids[0], limit)
+	s.releaseLLMUsageLimit("faster", "test release", false)
+
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for _, id := range ids {
+		wg.Add(1)
+		go func(clawID string) {
+			defer wg.Done()
+			<-start
+			s.handleLLMUsageLimit(nil, clawID, limit)
+		}(id)
+	}
+	close(start)
+	wg.Wait()
+
+	record, ok := s.loadLLMUsageLimit("faster")
+	if !ok {
+		t.Fatal("limit record missing")
+	}
+	if record.Retries != 1 {
+		t.Errorf("retries = %d after one release episode, want 1: the budget belongs to the episode, not to each claw", record.Retries)
+	}
+	if record.Exhausted() {
+		t.Error("episode declared exhausted after a single release")
+	}
+	for _, id := range ids {
+		if got := limitedUntil(t, s, id); got == 0 {
+			t.Errorf("claw %s not re-parked by the relatch", id)
+		}
+	}
+}
+
+// A claw that errored while parked must still be unparked. claw_retry revives
+// one on the same row, and the release used to skip it — leaving it blocked
+// against a deadline already in the past, with nothing left to clear it.
+func TestLLMUsageLimitReleasesErroredClaws(t *testing.T) {
+	s, _ := NewTestServerWithConfig(t, nil, "", "", "")
+	limitClaw(t, s, "claw-errored", "faster", false)
+	limitClaw(t, s, "claw-healthy", "faster", false)
+	s.handleLLMUsageLimit(nil, "claw-errored", types.LLMUsageLimit{
+		Reason: types.LLMLimitUsage, RegainAt: now().Add(time.Hour), Message: "capped",
+	})
+	if _, err := s.db.Exec(`UPDATE claws SET status='error' WHERE id=?`, "claw-errored"); err != nil {
+		t.Fatal(err)
+	}
+
+	s.releaseLLMUsageLimit("faster", "test release", false)
+
+	if got := limitedUntil(t, s, "claw-errored"); got != 0 {
+		t.Errorf("errored claw still parked (until %d); claw_retry would revive it blocked forever", got)
+	}
+	if got := limitedUntil(t, s, "claw-healthy"); got != 0 {
+		t.Errorf("healthy claw still parked (until %d)", got)
+	}
+}
+
+// A claw created after the cap was found shares the wall, so it must share the
+// block. The latch is a one-shot sweep; the KEY's record is what registration
+// consults.
+func TestLLMUsageLimitParksAClawThatJoinsLater(t *testing.T) {
+	s, _ := NewTestServerWithConfig(t, nil, "", "", "")
+	limitClaw(t, s, "claw-first", "faster", false)
+	s.handleLLMUsageLimit(nil, "claw-first", types.LLMUsageLimit{
+		Reason: types.LLMLimitUsage, RegainAt: now().Add(time.Hour), Message: "capped",
+	})
+
+	latecomer := limitClaw(t, s, "claw-latecomer", "faster", true)
+	if got := limitedUntil(t, s, "claw-latecomer"); got != 0 {
+		t.Fatalf("test setup: latecomer should start unparked, got %d", got)
+	}
+	s.seedLLMLimitForConnection(latecomer, "claw-latecomer")
+
+	if got := limitedUntil(t, s, "claw-latecomer"); got == 0 {
+		t.Error("a claw registering on a capped key was not parked; it will spend a turn on the same wall")
+	}
+	latecomer.mu.Lock()
+	blocked := latecomer.deliveryBlockedLocked()
+	latecomer.mu.Unlock()
+	if !blocked {
+		t.Error("latecomer accepts hub-initiated delivery on a capped key")
+	}
+}
+
+// Registration is also where a stale block dies: if the key has no active
+// limit, whatever the column says is history.
+func TestLLMUsageLimitRegistrationClearsAStaleBlock(t *testing.T) {
+	s, _ := NewTestServerWithConfig(t, nil, "", "", "")
+	cc := limitClaw(t, s, "claw-stale", "faster", true)
+	if _, err := s.db.Exec(`UPDATE claws SET llm_limited_until=? WHERE id=?`, epochMillis(now().Add(-time.Hour)), "claw-stale"); err != nil {
+		t.Fatal(err)
+	}
+
+	s.seedLLMLimitForConnection(cc, "claw-stale")
+
+	if got := limitedUntil(t, s, "claw-stale"); got != 0 {
+		t.Errorf("stale block survived registration (until %d) with no active limit for the key", got)
+	}
+	cc.mu.Lock()
+	blocked := cc.deliveryBlockedLocked()
+	cc.mu.Unlock()
+	if blocked {
+		t.Error("claw still blocked in memory after a stale block was cleared")
+	}
+}
+
+// An interrupted release leaves the column set and the record gone. Nothing
+// else in the system re-reads a stored deadline, so without reconciliation a
+// claw in that state is silent forever while its UI promises a resume.
+func TestLLMUsageLimitReconcilesOrphanedBlocks(t *testing.T) {
+	s, _ := NewTestServerWithConfig(t, nil, "", "", "")
+	limitClaw(t, s, "claw-orphan", "faster", false)
+	if _, err := s.db.Exec(`UPDATE claws SET llm_limited_until=? WHERE id=?`, epochMillis(now().Add(time.Hour)), "claw-orphan"); err != nil {
+		t.Fatal(err)
+	}
+
+	s.reconcileLLMUsageLimitLatches()
+
+	if got := limitedUntil(t, s, "claw-orphan"); got != 0 {
+		t.Errorf("orphaned block survived reconciliation (until %d)", got)
+	}
+}
+
+// ...and reconciliation must not touch a claw whose key is genuinely capped.
+func TestLLMUsageLimitReconciliationSparesLiveBlocks(t *testing.T) {
+	s, _ := NewTestServerWithConfig(t, nil, "", "", "")
+	limitClaw(t, s, "claw-live-block", "faster", false)
+	s.handleLLMUsageLimit(nil, "claw-live-block", types.LLMUsageLimit{
+		Reason: types.LLMLimitUsage, RegainAt: now().Add(time.Hour), Message: "capped",
+	})
+
+	s.reconcileLLMUsageLimitLatches()
+
+	if got := limitedUntil(t, s, "claw-live-block"); got == 0 {
+		t.Error("reconciliation unparked a claw whose key is still capped")
+	}
+}
+
+// "Told once" has to survive not having a connection at all — the claw is
+// frequently offline while blocked, and that is exactly when the in-memory
+// marker announced on every single message.
+func TestLLMUsageLimitNoticeIsOncePerBlockWithoutAConnection(t *testing.T) {
+	s, _ := NewTestServerWithConfig(t, nil, "", "", "")
+	limitClaw(t, s, "claw-no-conn", "faster", false)
+	s.handleLLMUsageLimit(nil, "claw-no-conn", types.LLMUsageLimit{
+		Reason: types.LLMLimitUsage, RegainAt: now().Add(time.Hour), Message: "capped",
+	})
+
+	for i := 0; i < 4; i++ {
+		if !s.noticeLLMLimitToUser("claw-no-conn") {
+			t.Fatal("noticeLLMLimitToUser reported no limit while one is latched")
+		}
+	}
+
+	notices := hubNotices(t, s, "claw-no-conn", "%queued instead of delivered%")
+	if len(notices) != 1 {
+		t.Fatalf("got %d queue notices for a disconnected claw, want exactly 1: %v", len(notices), notices)
+	}
+}
+
+// A claw offline at release must still be resumed. The block outlives a
+// disconnect, so the release has to as well, or a claw that was down at
+// midnight comes back unparked and silent with nothing to start its next turn.
+func TestLLMUsageLimitReleaseQueuesAWakeForADisconnectedClaw(t *testing.T) {
+	s, _ := NewTestServerWithConfig(t, nil, "", "", "")
+	limitClaw(t, s, "claw-offline-release", "faster", false)
+	s.handleLLMUsageLimit(nil, "claw-offline-release", types.LLMUsageLimit{
+		Reason: types.LLMLimitUsage, RegainAt: now().Add(-time.Minute), Message: "capped",
+	})
+
+	s.releaseDueLLMUsageLimits()
+
+	var pending int
+	if err := s.db.QueryRow(
+		`SELECT COUNT(*) FROM messages WHERE claw_id=? AND delivered_at IS NULL AND content=?`,
+		"claw-offline-release", llmLimitResumeWake).Scan(&pending); err != nil {
+		t.Fatal(err)
+	}
+	if pending != 1 {
+		t.Errorf("queued resume wakes = %d, want 1: a claw offline at release gets no push otherwise", pending)
+	}
+}
+
+// An agent REPORTING a provider message must not be able to park the fleet.
+// The generic replay prefix is short enough to open a real turn with, which is
+// why only the bridge's own label may declare a cap.
+func TestLLMUsageLimitIgnoresTheGenericReplayPrefix(t *testing.T) {
+	s, _ := NewTestServerWithConfig(t, nil, "", "", "")
+	cc := limitClaw(t, s, "claw-agent-quoting", "faster", true)
+
+	s.observeTurnOutcome(cc, "claw-agent-quoting", "msg-1",
+		types.BridgeReplayErrorPrefix+" the provider told me: You have reached your specified API usage limits. You will regain access on 2026-09-02 at 00:00 UTC.")
+
+	if got := limitedUntil(t, s, "claw-agent-quoting"); got != 0 {
+		t.Errorf("a turn opening with the generic error prefix parked the key (until %d)", got)
+	}
+	if _, ok := s.loadLLMUsageLimit("faster"); ok {
+		t.Error("a non-definite bridge body created a usage-limit record for the whole key")
 	}
 }
