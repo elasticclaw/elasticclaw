@@ -560,6 +560,30 @@ func migrate(db *sql.DB) error {
 		released_at      INTEGER NOT NULL DEFAULT 0
 	);
 
+	-- Infra events are deliberately outside task_run_events: an account limit or
+	-- vendor outage is a fleet fact, not four independent agent failures.
+	CREATE TABLE IF NOT EXISTS infra_events (
+		event_key   TEXT UNIQUE NOT NULL,
+		event_type  TEXT NOT NULL,
+		subject     TEXT NOT NULL,
+		detail      TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(detail) AND json_type(detail) = 'object'),
+		occurred_at INTEGER NOT NULL
+	);
+	-- rowid, rather than occurred_at, is the future delivery watermark: an
+	-- event recorded late must never disappear behind a newer wall-clock value.
+	-- SQLite already indexes its implicit rowid, so no secondary index is needed.
+
+	-- This durable state makes the dependency watcher edge-triggered across a
+	-- hub restart; an outage must not page again merely because the process did.
+	CREATE TABLE IF NOT EXISTS dependency_status_state (
+		id              TEXT PRIMARY KEY,
+		status          TEXT NOT NULL DEFAULT '',
+		message         TEXT NOT NULL DEFAULT '',
+		since           INTEGER NOT NULL DEFAULT 0,
+		notified_status TEXT NOT NULL DEFAULT '',
+		updated_at      INTEGER NOT NULL DEFAULT 0
+	);
+
 
 
 	CREATE TABLE IF NOT EXISTS messages (

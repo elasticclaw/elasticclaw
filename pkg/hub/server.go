@@ -213,6 +213,11 @@ type Server struct {
 	scheduledNotifierStop chan struct{}
 	scheduledNotifierDone chan struct{}
 
+	// dependencyWatcherStop/Done give the status poll the same shutdown
+	// guarantee as notifiers: its DB write must finish before the DB closes.
+	dependencyWatcherStop chan struct{}
+	dependencyWatcherDone chan struct{}
+
 	// scheduledTransientFailures tracks consecutive transient send failures
 	// per scheduled (id, via) state key, bounding minutely retries of one
 	// slot (see scheduledMaxTransientFailures). Shared between the
@@ -578,6 +583,7 @@ func NewServer(addr, dbPath, identityDir string, hubCfg *types.HubConfig) (*Serv
 	srv.startScheduledNotifier()
 	srv.startLLMUsageLimitScheduler()
 	srv.attachLLMUsageLimitsToDependencyStatus(srv.dependencyStatus)
+	srv.startDependencyWatcher()
 
 	return srv, nil
 }
@@ -649,13 +655,14 @@ func (s *Server) run(ctx context.Context, opts ...RunOptions) error {
 		// ListenAndServe returns as soon as Shutdown starts. Wait for it to
 		// finish draining active requests before closing their database.
 		<-shutdownDone
-		// Stop both notifier loops before the DB closes: a tick in flight
+		// Stop the notifier loops and dependency watcher before the DB closes: a tick in flight
 		// could otherwise complete an external Slack send and then fail the
 		// delivery-row insert (or scheduled dedupe-state upsert) against the
 		// closed DB, re-sending the event after restart (the in-memory retry
 		// stash dies with the process).
 		s.stopLifecycleNotifier(10 * time.Second)
 		s.stopScheduledNotifier(10 * time.Second)
+		s.stopDependencyWatcher(10 * time.Second)
 		if closeErr := s.db.Close(); closeErr != nil {
 			return fmt.Errorf("close database: %w", closeErr)
 		}

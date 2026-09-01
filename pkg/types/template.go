@@ -284,8 +284,8 @@ type GitHubAppConfig struct {
 // GitHubRepoAccess specifies a repo and the permissions needed. Workspace
 // repository lists may also use glob patterns.
 type GitHubRepoAccess struct {
-	Repo        string `yaml:"repo"        json:"repo"`        // e.g. "owner/repo", "*-infra-*", or "owner/*"
-	Permissions string `yaml:"permissions" json:"permissions"` // "read" or "write" (default: "read")
+	Repo        string `yaml:"repo"        json:"repo"`            // e.g. "owner/repo", "*-infra-*", or "owner/*"
+	Permissions string `yaml:"permissions" json:"permissions"`     // "read" or "write" (default: "read")
 	Clone       *bool  `yaml:"clone"       json:"clone,omitempty"` // whether to clone the repo; nil/true means clone
 }
 
@@ -631,6 +631,27 @@ var LifecycleEventTypes = []string{
 // wire type.
 func IsLifecycleEventType(event string) bool {
 	for _, eventType := range LifecycleEventTypes {
+		if event == eventType {
+			return true
+		}
+	}
+	return false
+}
+
+// InfraEventTypes is the vocabulary persisted for fleet-wide infrastructure
+// changes. It intentionally does not share lifecycle's per-task-run stream.
+var InfraEventTypes = []string{
+	"dependency_down",
+	"dependency_degraded",
+	"dependency_recovered",
+	"provider_limit_opened",
+	"provider_limit_exhausted",
+	"provider_limit_released",
+}
+
+// IsInfraEventType reports whether event is a supported infrastructure event.
+func IsInfraEventType(event string) bool {
+	for _, eventType := range InfraEventTypes {
 		if event == eventType {
 			return true
 		}

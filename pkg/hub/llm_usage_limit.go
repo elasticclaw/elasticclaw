@@ -1,11 +1,12 @@
 package hub
 
 import (
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"fmt"
 	"log"
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 
@@ -164,14 +165,14 @@ func (s *Server) handleLLMUsageLimit(cc *clawConn, clawID string, limit types.LL
 	case opened:
 		log.Printf("[llm-limit] key %q capped (%s), %d claw(s) parked until %s: %s",
 			keyID, record.Reason, len(latched), formatLLMLimitDeadline(record.RetryAt), record.Message)
-		s.recordLLMLimitEvent(clawID, record, true)
+		s.recordLLMLimitEvent(record, len(latched), "provider_limit_opened")
 	case relatched && record.Exhausted():
 		log.Printf("[llm-limit] key %q still capped after %d automatic retries, leaving it for an operator: %s",
 			keyID, record.Retries, record.Message)
 		for _, id := range latched {
 			s.publishHubNotice(id, fmt.Sprintf("[hub] The provider still reports a usage limit after %d automatic retries, so the hub stopped retrying. Raise the account limit and clear the block to resume. Last provider message: %s", record.Retries, record.Message))
 		}
-		s.recordLLMLimitEvent(clawID, record, false)
+		s.recordLLMLimitEvent(record, len(latched), "provider_limit_exhausted")
 	case relatched:
 		log.Printf("[llm-limit] key %q still capped, retry %d scheduled for %s",
 			keyID, record.Retries, formatLLMLimitDeadline(record.RetryAt))
@@ -230,6 +231,11 @@ func (s *Server) setClawLLMLimitMirror(clawID string, until time.Time) {
 // claw_retry can revive it later on the same row.
 func (s *Server) releaseLLMUsageLimit(keyID, reason string, announce bool) {
 	s.llmLimitMu.Lock()
+	record, had := s.loadLLMUsageLimit(keyID)
+	if !had || !record.Active() {
+		s.llmLimitMu.Unlock()
+		return
+	}
 	if _, err := s.db.Exec(
 		`UPDATE claws SET llm_limited_until=0 WHERE COALESCE(llm_key,'')=? AND COALESCE(llm_limited_until,0)<>0 AND status<>'deleted'`,
 		keyID); err != nil {
@@ -247,6 +253,7 @@ func (s *Server) releaseLLMUsageLimit(keyID, reason string, announce bool) {
 		return
 	}
 	s.llmLimitMu.Unlock()
+	s.recordLLMLimitEvent(record, len(clawIDs), "provider_limit_released")
 
 	// Notices and wakes touch sockets, so they happen outside the lock.
 	for _, clawID := range clawIDs {
@@ -616,33 +623,37 @@ func formatLLMLimitDeadline(at time.Time) string {
 	return at.UTC().Format("2006-01-02 15:04 UTC")
 }
 
-// recordLLMLimitEvent tells the operator, reusing agent_idle for the same
-// reason notifyBridgeErrorPause does: the operator-visible fact is "this agent
-// is not moving", and that event already carries the toggle, the severity and
-// the delivery passes.
-func (s *Server) recordLLMLimitEvent(clawID string, record llmUsageLimitRecord, opening bool) {
-	kind := "exhausted"
-	if opening {
-		kind = "opened"
-	}
-	if err := s.recordTaskRunEventForClaw(clawID, TaskRunEvent{
-		EventKey:        taskRunEventAgentIdle + ":llm-limit:" + kind + ":" + strconv.FormatInt(epochMillis(record.DetectedAt), 10),
-		Source:          taskRunSourceHub,
-		EventType:       taskRunEventAgentIdle,
-		ActorType:       taskRunActorSystem,
-		InteractionRole: taskRunInteractionNeutral,
+// recordLLMLimitEvent records the fleet-wide account fact once per key. Four
+// claws sharing a key formerly produced four "Agent stalled" reports, which
+// sent operators looking for four agent bugs instead of one billing cap.
+func (s *Server) recordLLMLimitEvent(record llmUsageLimitRecord, parked int, eventType string) {
+	maskedKey := maskLLMLimitKeyID(record.KeyID)
+	eventKey := fmt.Sprintf("%s:%s:%d:%d", eventType, maskedKey, epochMillis(record.DetectedAt), record.Retries)
+	if err := s.recordInfraEvent(infraEvent{
+		EventKey: eventKey, EventType: eventType, Subject: record.Provider,
 		Detail: map[string]any{
-			"llmUsageLimit":         record.Message,
-			"llmUsageLimitReason":   record.Reason,
-			"llmUsageLimitRetryAt":  formatLLMLimitDeadline(record.RetryAt),
-			"llmUsageLimitRetries":  record.Retries,
-			"llmUsageLimitProvider": record.Provider,
-			"noProgressPaused":      true,
-		},
-		OccurredAt: now(),
+			"provider": record.Provider, "key_id": maskedKey, "parked_claws": parked,
+			"deadline": formatLLMLimitDeadline(record.RetryAt), "retry_count": record.Retries,
+			"message": redactLLMLimitEventMessage(record.Message, record.KeyID),
+		}, OccurredAt: now(),
 	}); err != nil {
-		log.Printf("[llm-limit] record notification event for claw %s: %v", shortID(clawID), err)
+		log.Printf("[llm-limit] record %s event: %v", eventType, err)
 	}
+}
+
+func maskLLMLimitKeyID(keyID string) string {
+	if keyID == "" {
+		return "default"
+	}
+	sum := sha256.Sum256([]byte(keyID))
+	return "key_" + hex.EncodeToString(sum[:6])
+}
+
+func redactLLMLimitEventMessage(message, keyID string) string {
+	if keyID == "" {
+		return message
+	}
+	return strings.ReplaceAll(message, keyID, "[redacted]")
 }
 
 // handleClawLLMLimit exposes the block on a claw, and clears it.
