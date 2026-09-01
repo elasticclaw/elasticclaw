@@ -288,10 +288,11 @@ func TestLLMUsageLimitBacksOffAndThenStopsRetrying(t *testing.T) {
 	}
 }
 
-// Requirement 1: a capped account raises the SAME downtime badge as a provider
-// outage. The status page will keep saying "operational" throughout — the
-// service is fine, our account is not — so the overlay has to win.
-func TestLLMUsageLimitRaisesTheDowntimeBadge(t *testing.T) {
+// A capped account raises its own badge, NOT the outage badge. The status page
+// says "operational" throughout — the service is fine, our account is not — so
+// the overlay has to win, and it has to win with a word that sends the operator
+// to the billing console rather than to a status page.
+func TestLLMUsageLimitRaisesItsOwnBadge(t *testing.T) {
 	s, _ := NewTestServerWithConfig(t, nil, "", "", "")
 	limitClaw(t, s, "claw-limit-badge", "faster", false)
 	// The key's provider is what maps the limit onto a dependency row.
@@ -314,8 +315,8 @@ func TestLLMUsageLimitRaisesTheDowntimeBadge(t *testing.T) {
 	service.mu.Unlock()
 
 	before := service.snapshot(context.Background())
-	if before.DowntimeCount != 0 {
-		t.Fatalf("downtimeCount = %d before any limit, want 0", before.DowntimeCount)
+	if before.DowntimeCount != 0 || before.LimitedCount != 0 {
+		t.Fatalf("counts before any limit = (%d downtime, %d limited), want (0, 0)", before.DowntimeCount, before.LimitedCount)
 	}
 
 	regain := now().Add(4 * time.Hour).Truncate(time.Minute)
@@ -326,8 +327,13 @@ func TestLLMUsageLimitRaisesTheDowntimeBadge(t *testing.T) {
 	})
 
 	after := service.snapshot(context.Background())
-	if after.DowntimeCount != 1 {
-		t.Fatalf("downtimeCount = %d, want 1: the badge must fire for a capped account", after.DowntimeCount)
+	if after.LimitedCount != 1 {
+		t.Fatalf("limitedCount = %d, want 1: the badge must fire for a capped account", after.LimitedCount)
+	}
+	// The distinction is the point: a cap is not an outage, and an operator
+	// reading "downtime" would go looking for one that does not exist.
+	if after.DowntimeCount != 0 {
+		t.Errorf("downtimeCount = %d, want 0: a capped account is not a provider outage", after.DowntimeCount)
 	}
 	var found *DependencyStatus
 	for i := range after.Dependencies {
@@ -338,8 +344,8 @@ func TestLLMUsageLimitRaisesTheDowntimeBadge(t *testing.T) {
 	if found == nil {
 		t.Fatal("anthropic dependency missing from the snapshot")
 	}
-	if found.Status != dependencyStatusDowntime {
-		t.Errorf("status = %q, want %q", found.Status, dependencyStatusDowntime)
+	if found.Status != dependencyStatusLimited {
+		t.Errorf("status = %q, want %q", found.Status, dependencyStatusLimited)
 	}
 	// Requirement 4: the badge itself carries the renewal instant.
 	if found.RegainAt == nil || !found.RegainAt.Equal(regain) {
@@ -352,8 +358,8 @@ func TestLLMUsageLimitRaisesTheDowntimeBadge(t *testing.T) {
 	// And it clears with the limit, without waiting out the status cache.
 	s.releaseLLMUsageLimit("faster", "test release", false)
 	cleared := service.snapshot(context.Background())
-	if cleared.DowntimeCount != 0 {
-		t.Errorf("downtimeCount = %d after release, want 0", cleared.DowntimeCount)
+	if cleared.LimitedCount != 0 {
+		t.Errorf("limitedCount = %d after release, want 0", cleared.LimitedCount)
 	}
 }
 

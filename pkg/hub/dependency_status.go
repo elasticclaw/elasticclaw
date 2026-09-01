@@ -22,7 +22,14 @@ const (
 	dependencyStatusOperational = "operational"
 	dependencyStatusDegraded    = "degraded"
 	dependencyStatusDowntime    = "downtime"
-	dependencyStatusUnknown     = "unknown"
+	// dependencyStatusLimited is our account being out of allowance, which is
+	// deliberately NOT downtime. The service is up; we cannot spend on it. The
+	// two need different words because they need different responses — one is
+	// "wait and watch a status page", the other is "raise the cap, or wait for
+	// a reset we can name" — and folding the second into the first tells an
+	// operator to go look for an outage that does not exist.
+	dependencyStatusLimited = "limited"
+	dependencyStatusUnknown = "unknown"
 )
 
 type DependencyStatus struct {
@@ -47,9 +54,13 @@ type DependencyStatus struct {
 }
 
 type DependencyStatusResponse struct {
-	Dependencies  []DependencyStatus `json:"dependencies"`
-	DowntimeCount int                `json:"downtimeCount"`
-	CheckedAt     time.Time          `json:"checkedAt"`
+	Dependencies []DependencyStatus `json:"dependencies"`
+	// DowntimeCount and LimitedCount are counted separately so the dashboard
+	// can say which of the two is happening. A capped account never inflates
+	// the outage count.
+	DowntimeCount int       `json:"downtimeCount"`
+	LimitedCount  int       `json:"limitedCount"`
+	CheckedAt     time.Time `json:"checkedAt"`
 }
 
 type dependencyStatusTarget struct {
@@ -130,9 +141,11 @@ func (s *dependencyStatusService) snapshot(ctx context.Context) DependencyStatus
 // latches the instant a turn hits it, which must not have to wait out the
 // five-minute status cache to reach the dashboard.
 //
-// The result is deliberately plain "downtime": the badge, its count, and every
-// consumer of this response then treat a capped account exactly like a
-// provider outage, because for the fleet it is one.
+// The result carries its own status, "limited", rather than "downtime". The
+// fleet is equally stopped either way, but the operator's next move is not:
+// an outage is waited out and watched on a status page, while a cap is raised
+// in a billing console or waited out to a stated instant. The dashboard says
+// which one it is.
 func (s *dependencyStatusService) applyLLMUsageLimits(resp DependencyStatusResponse) DependencyStatusResponse {
 	s.mu.Lock()
 	provider := s.limitProvider
@@ -159,7 +172,7 @@ func (s *dependencyStatusService) applyLLMUsageLimits(resp DependencyStatusRespo
 			ID:        id,
 			Name:      name,
 			Kind:      dependencyKindModel,
-			Status:    dependencyStatusDowntime,
+			Status:    dependencyStatusLimited,
 			Message:   llmLimitDependencyMessage(record),
 			Source:    "hub",
 			RegainAt:  optionalRegainAt(record.RetryAt),
@@ -197,9 +210,9 @@ func llmLimitDependencyName(keyID string) string {
 
 func llmLimitDependencyMessage(record llmUsageLimitRecord) string {
 	if record.Exhausted() {
-		return "Account out of allowance; automatic retries exhausted. " + record.Message
+		return "No allowance left; automatic retries exhausted, raise the account limit to resume. " + record.Message
 	}
-	return "Account out of allowance until " + formatLLMLimitDeadline(record.RetryAt) + ". " + record.Message
+	return "No allowance left until " + formatLLMLimitDeadline(record.RetryAt) + ". " + record.Message
 }
 
 func (s *dependencyStatusService) freshSnapshot() (DependencyStatusResponse, bool) {
@@ -422,16 +435,19 @@ func buildDependencyStatusResponse(dependencies []DependencyStatus) DependencySt
 	now := time.Now().UTC()
 	out := make([]DependencyStatus, len(dependencies))
 	copy(out, dependencies)
-	count := 0
+	downtime, limited := 0, 0
 	for i := range out {
 		if out[i].CheckedAt.IsZero() {
 			out[i].CheckedAt = now
 		}
-		if out[i].Status == dependencyStatusDowntime {
-			count++
+		switch out[i].Status {
+		case dependencyStatusDowntime:
+			downtime++
+		case dependencyStatusLimited:
+			limited++
 		}
 	}
-	return DependencyStatusResponse{Dependencies: out, DowntimeCount: count, CheckedAt: now}
+	return DependencyStatusResponse{Dependencies: out, DowntimeCount: downtime, LimitedCount: limited, CheckedAt: now}
 }
 
 func cloneDependencyStatusResponse(resp DependencyStatusResponse) DependencyStatusResponse {
