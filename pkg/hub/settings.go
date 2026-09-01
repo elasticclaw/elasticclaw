@@ -81,6 +81,7 @@ type SettingsView struct {
 	Auth                 *AuthView                   `json:"auth,omitempty"`
 	Notifications        *NotificationsView          `json:"notifications"`
 	LifecycleEventTypes  []string                    `json:"lifecycleEventTypes"`
+	InfraEventTypes      []string                    `json:"infraEventTypes"`
 	// ConcurrencyGroups limits simultaneously running claws per group. 0 = unlimited.
 	ConcurrencyGroups []ConcurrencyGroupView `json:"concurrencyGroups"`
 	// MaxConcurrentClaws limits simultaneously running claws. 0 = unlimited.
@@ -93,6 +94,7 @@ type SettingsView struct {
 type NotificationsView struct {
 	Notifiers map[string]NotifierView     `json:"notifiers"`
 	Lifecycle *LifecycleNotificationsView `json:"lifecycle,omitempty"`
+	Infra     *InfraNotificationsView     `json:"infra,omitempty"`
 	// Scheduled mirrors notifications.scheduled. It holds no secret — a
 	// schedule only names notifiers, a report and a wall-clock slot.
 	Scheduled []ScheduledNotificationView `json:"scheduled"`
@@ -140,6 +142,15 @@ type LifecycleNotificationsView struct {
 	IdleAfter          string                       `json:"idleAfter,omitempty"`
 	StageProgressAfter string                       `json:"stageProgressAfter,omitempty"`
 	Events             *types.LifecycleEventToggles `json:"events,omitempty"`
+}
+
+// InfraNotificationsView uses the same names as types.InfraNotificationsConfig
+// so the settings screen can safely send the redacted view back in a PATCH.
+type InfraNotificationsView struct {
+	Enabled      bool               `json:"enabled"`
+	Routes       []types.InfraRoute `json:"routes"`
+	PollInterval string             `json:"pollInterval,omitempty"`
+	RepeatAfter  string             `json:"repeatAfter,omitempty"`
 }
 
 type AuthView struct {
@@ -530,6 +541,7 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	view.ModelAuthProfiles = []ModelAuthProfileView{}
 	view.LifecycleEventTypes = append([]string(nil), types.LifecycleEventTypes...)
+	view.InfraEventTypes = append([]string(nil), types.InfraEventTypes...)
 	view.Notifications = buildNotificationsView(s.hubCfg.Notifications)
 	for _, profile := range s.hubCfg.ModelAuthProfiles {
 		if profile == nil {
@@ -767,6 +779,16 @@ func buildNotificationsView(cfg *types.NotificationsConfig) *NotificationsView {
 			lifecycle.Events = &events
 		}
 		view.Lifecycle = lifecycle
+	}
+	if ic := cfg.Infra; ic != nil {
+		infra := &InfraNotificationsView{
+			Enabled: ic.IsEnabled(), Routes: make([]types.InfraRoute, len(ic.Routes)),
+			PollInterval: ic.PollInterval, RepeatAfter: ic.RepeatAfter,
+		}
+		for i, route := range ic.Routes {
+			infra.Routes[i] = types.InfraRoute{Via: route.Via, Events: append([]string(nil), route.Events...)}
+		}
+		view.Infra = infra
 	}
 	for _, scheduled := range cfg.Scheduled {
 		view.Scheduled = append(view.Scheduled, scheduledNotificationViewOf(scheduled))
@@ -1235,6 +1257,14 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 		// its own change.
 		if patch.Notifications.Scheduled == nil && s.hubCfg.Notifications != nil {
 			patch.Notifications.Scheduled = append([]types.ScheduledNotificationConfig(nil), s.hubCfg.Notifications.Scheduled...)
+		}
+		if patch.Notifications.Infra == nil && s.hubCfg.Notifications != nil && s.hubCfg.Notifications.Infra != nil {
+			infra := *s.hubCfg.Notifications.Infra
+			infra.Routes = append([]types.InfraRoute(nil), infra.Routes...)
+			for i := range infra.Routes {
+				infra.Routes[i].Events = append([]string(nil), infra.Routes[i].Events...)
+			}
+			patch.Notifications.Infra = &infra
 		}
 		mergeNotifierSettings(s.hubCfg.Notifications, patch.Notifications)
 		dropRejectedLifecycleDurations(s.hubCfg.Notifications, patch.Notifications)

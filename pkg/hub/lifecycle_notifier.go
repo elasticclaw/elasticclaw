@@ -113,6 +113,14 @@ func (s *Server) notificationsConfig() *types.NotificationsConfig {
 			cfg.Scheduled[i].Weekdays = append([]string(nil), src.Scheduled[i].Weekdays...)
 		}
 	}
+	if src.Infra != nil {
+		infra := *src.Infra
+		infra.Routes = append([]types.InfraRoute(nil), src.Infra.Routes...)
+		for i := range infra.Routes {
+			infra.Routes[i].Events = append([]string(nil), src.Infra.Routes[i].Events...)
+		}
+		cfg.Infra = &infra
+	}
 	return cfg
 }
 
@@ -2048,12 +2056,20 @@ func (s *Server) handleInfraNotificationTest(w http.ResponseWriter, r *http.Requ
 }
 
 func sampleInfraEvent(eventType string) infraEventRow {
-	detail := map[string]any{"name": "Sample provider", "message": "Synthetic sample event for notification test"}
-	if strings.HasPrefix(eventType, "provider_limit_") {
-		detail["provider"] = "sample"
-		detail["deadline"] = "tomorrow at 00:00 UTC"
+	detail := map[string]any{"message": "Synthetic sample event for notification test"}
+	subject := "Anthropic"
+	if strings.HasPrefix(eventType, "dependency_") {
+		detail["name"] = subject
+		detail["status_page"] = "https://status.anthropic.com"
+	} else {
+		subject = "OpenAI"
+		detail["name"] = subject
+		detail["provider"] = "openai"
+		detail["key_id"] = "sk-...ab12"
+		detail["claws_parked"] = 3
+		detail["deadline"] = "2026-09-02T00:00:00Z"
 	}
-	return infraEventRow{EventType: eventType, Subject: "sample-provider", Detail: detail, OccurredAt: now()}
+	return infraEventRow{EventType: eventType, Subject: subject, Detail: detail, OccurredAt: now()}
 }
 
 // handleScheduledReportTest probes one scheduled report on demand: it builds

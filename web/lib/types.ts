@@ -1,5 +1,28 @@
 export type ClawStatus = "connected" | "idle" | "offline" | "provisioning" | "error"
 
+export const INFRA_EVENT_TYPES = [
+  "dependency_down",
+  "dependency_degraded",
+  "dependency_recovered",
+  "provider_limit_opened",
+  "provider_limit_exhausted",
+  "provider_limit_released",
+] as const
+
+export type InfraEventType = (typeof INFRA_EVENT_TYPES)[number]
+
+export interface InfraRoute {
+  via: string
+  events?: InfraEventType[]
+}
+
+export interface InfraNotificationsConfig {
+  enabled?: boolean
+  routes?: InfraRoute[]
+  pollInterval?: string
+  repeatAfter?: string
+}
+
 export interface Claw {
   id: string
   name: string

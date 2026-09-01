@@ -16,6 +16,7 @@ import { fetchWorkspaces, updateWorkflowControls, type RepositoryAccess, type Wo
 import { useBranding } from "@/hooks/use-branding"
 import { WorkflowName } from "@/components/workflow-name"
 import { WorkflowRunsDialog } from "@/components/workflow-runs-dialog"
+import { INFRA_EVENT_TYPES, type InfraEventType, type InfraNotificationsConfig, type InfraRoute } from "@/lib/types"
 
 function isValidSection(s: string): s is Section {
   return VALID_SECTIONS.includes(s as Section)
@@ -161,6 +162,7 @@ interface SettingsData {
   }
   notifications?: NotificationsView | null
   lifecycleEventTypes?: string[]
+  infraEventTypes?: InfraEventType[]
   concurrencyGroups?: ConcurrencyGroup[]
   maxConcurrentClaws?: number
 }
@@ -227,6 +229,7 @@ interface NotificationsView {
     stageProgressAfter?: string
     events?: LifecycleEventToggles
   }
+  infra?: InfraNotificationsConfig
 }
 
 // The outcome of one save. `persisted` says whether the hub accepted the PATCH;
@@ -4810,6 +4813,7 @@ function writeClampedPause(clamped: boolean): void {
 
 function NotifierSection({ settings, onSave, saving }: { settings: SettingsData; onSave: (p: object) => Promise<SaveOutcome>; saving: boolean }) {
   const lifecycle = settings.notifications?.lifecycle
+  const infra = settings.notifications?.infra
   const notifiers = settings.notifications?.notifiers || {}
   const schedules = settings.notifications?.scheduled || []
   const names = Object.keys(notifiers).sort((a, b) => a.localeCompare(b))
@@ -4999,6 +5003,7 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
     routes?: LifecycleRouteView[]
     events?: Record<LifecycleCategory, boolean>
     scheduled?: ScheduledNotificationView[]
+    infra?: InfraNotificationsConfig
   }): { patch: object; clamp: boolean } {
     const outNotifiers: Record<string, Record<string, string>> = {}
     for (const [name, notifier] of Object.entries(next.notifiers ?? notifiers)) {
@@ -5057,7 +5062,7 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
       enabled: schedule.enabled,
     }))
     return {
-      patch: { notifications: { notifiers: outNotifiers, lifecycle: outLifecycle, scheduled: outScheduled } },
+      patch: { notifications: { notifiers: outNotifiers, lifecycle: outLifecycle, scheduled: outScheduled, infra: next.infra ?? infra } },
       // The never-configured hub is clamped too, and for the same reason: the
       // block this save creates carries `enabled:false` only because it has no
       // route to send to, which is this screen's own doing — the operator was
@@ -5200,11 +5205,18 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
       }
       return { ...schedule, via }
     })
+    const nextInfraRoutes = (infra?.routes || []).filter((route) => route.via.trim() !== name)
+    const nextInfra = infra && {
+      ...infra,
+      enabled: nextInfraRoutes.length > 0 && infra.enabled,
+      routes: nextInfraRoutes,
+    }
     const generation = saveGeneration.current
     const { persisted, message: failure } = await savePatch({
       notifiers: nextNotifiers,
       routes: routes.filter((route) => route.via !== name),
       scheduled: nextScheduled,
+      infra: nextInfra,
     })
     if (persisted) {
       invalidateTest(name)
@@ -6134,6 +6146,8 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
         )}
       </div>
 
+      <InfraNotificationsSection settings={settings} onSave={onSave} saving={saving} />
+
       {/* Add / edit modal */}
       {/* Closing only closes: DialogContent stays mounted for its 200ms exit
           animation, so clearing the form here would let the operator watch the
@@ -6683,6 +6697,141 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
 }
 
 // linkifyText converts URLs in text into clickable <a> elements.
+const INFRA_EVENT_LABELS: Record<InfraEventType, string> = {
+  dependency_down: "Dependency down",
+  dependency_degraded: "Dependency degraded",
+  dependency_recovered: "Dependency recovered",
+  provider_limit_opened: "Provider account capped",
+  provider_limit_exhausted: "Provider cap needs attention",
+  provider_limit_released: "Provider cap lifted",
+}
+
+function InfraNotificationsSection({ settings, onSave, saving }: { settings: SettingsData; onSave: (p: object) => Promise<SaveOutcome>; saving: boolean }) {
+  const notifications = settings.notifications
+  const notifiers = notifications?.notifiers || {}
+  const names = Object.keys(notifiers).sort((a, b) => a.localeCompare(b))
+  const infra = notifications?.infra
+  const routes = (infra?.routes || []).map((route) => ({ ...route, via: route.via.trim(), events: route.events || [] }))
+  const eventTypes = settings.infraEventTypes?.length ? settings.infraEventTypes : INFRA_EVENT_TYPES
+  const [tests, setTests] = useState<Record<string, TestState>>({})
+
+  const saveInfra = async (next: InfraNotificationsConfig) => {
+    // PATCH replaces the notifications block, so carry the sibling sections
+    // through unchanged when this compact editor changes only infra routing.
+    await onSave({
+      notifications: {
+        notifiers,
+        lifecycle: notifications?.lifecycle,
+        scheduled: notifications?.scheduled || [],
+        infra: next,
+      },
+    })
+  }
+
+  const updateRoute = async (index: number, route: InfraRoute) => {
+    const nextRoutes = routes.map((current, i) => i === index ? route : current)
+    await saveInfra({ ...infra, enabled: infra?.enabled ?? false, routes: nextRoutes })
+  }
+
+  const sendTest = async (route: InfraRoute, index: number) => {
+    const eventType = route.events?.[0] || eventTypes[0]
+    if (!eventType) return
+    const key = `${index}:${route.via}`
+    setTests((current) => ({ ...current, [key]: { status: "sending", message: "" } }))
+    try {
+      await sendTestNotification(eventType, route.via)
+      setTests((current) => ({ ...current, [key]: { status: "ok", message: `Sent a \"${INFRA_EVENT_LABELS[eventType]}\" test alert.` } }))
+    } catch (e) {
+      setTests((current) => ({ ...current, [key]: { status: "error", message: e instanceof Error ? e.message : "Test send failed" } }))
+    }
+  }
+
+  return (
+    <div className="space-y-3 border-t border-border pt-6">
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <h3 className="text-sm font-medium">Infrastructure alerts</h3>
+          <p className="text-xs text-muted-foreground mt-0.5">Dependency outages and provider usage limits, routed independently from lifecycle alerts.</p>
+        </div>
+        <Switch
+          checked={infra?.enabled ?? false}
+          disabled={saving || routes.length === 0}
+          onCheckedChange={(enabled) => saveInfra({ ...infra, enabled, routes })}
+          aria-label="Enable infrastructure alerts"
+        />
+      </div>
+
+      {routes.length === 0 ? (
+        <p className="text-sm text-muted-foreground px-4 py-4 text-center border border-border rounded-lg">Add a channel route before turning infrastructure alerts on.</p>
+      ) : (
+        <div className={cn("space-y-2", !(infra?.enabled ?? false) && "opacity-50")}>
+          {routes.map((route, index) => {
+            const key = `${index}:${route.via}`
+            const test = tests[key]
+            const allEvents = route.events.length === 0
+            return (
+              <div key={key} className="border border-border rounded-lg p-4 space-y-3">
+                <div className="flex items-center gap-2">
+                  <select
+                    value={route.via}
+                    disabled={saving}
+                    onChange={(e) => updateRoute(index, { ...route, via: e.target.value })}
+                    className="h-8 min-w-0 flex-1 text-sm rounded-md border border-input bg-background px-3"
+                    aria-label="Notifier for infrastructure alerts"
+                  >
+                    {names.map((name) => <option key={name} value={name}>{name}</option>)}
+                  </select>
+                  <Button size="sm" variant="ghost" disabled={saving} onClick={() => saveInfra({ ...infra, enabled: infra?.enabled ?? false, routes: routes.filter((_, i) => i !== index) })}>
+                    <Trash2 className="size-3.5 mr-1" /> Remove
+                  </Button>
+                </div>
+                <div className="grid gap-1 sm:grid-cols-2">
+                  {eventTypes.map((eventType) => {
+                    const checked = allEvents || route.events.includes(eventType)
+                    return (
+                      <label key={eventType} className="flex items-center gap-2 text-sm cursor-pointer rounded px-2 py-1 hover:bg-muted/50">
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          disabled={saving}
+                          onChange={(e) => {
+                            const current = allEvents ? [...eventTypes] : route.events
+                            const events = e.target.checked ? [...new Set([...current, eventType])] : current.filter((type) => type !== eventType)
+                            updateRoute(index, { ...route, events })
+                          }}
+                        />
+                        <span>{INFRA_EVENT_LABELS[eventType]}</span>
+                      </label>
+                    )
+                  })}
+                </div>
+                <div className="flex items-center gap-2">
+                  <Button size="sm" variant="outline" className="gap-1.5" disabled={saving || !(infra?.enabled ?? false) || test?.status === "sending"} onClick={() => sendTest(route, index)}>
+                    <Send className="size-3.5" />
+                    {test?.status === "sending" ? "Sending…" : "Send test"}
+                  </Button>
+                  {test && test.status !== "sending" && <span className={cn("text-xs", test.status === "ok" ? "text-green-400" : "text-destructive")}>{test.message}</span>}
+                </div>
+              </div>
+            )
+          })}
+        </div>
+      )}
+      <Button
+        size="sm"
+        variant="outline"
+        disabled={saving || names.length === 0 || names.every((name) => routes.some((route) => route.via === name))}
+        onClick={() => {
+          const via = names.find((name) => !routes.some((route) => route.via === name))
+          if (via) saveInfra({ ...infra, enabled: infra?.enabled ?? false, routes: [...routes, { via, events: [] }] })
+        }}
+      >
+        <span className="mr-1 text-sm">+</span> Add route
+      </Button>
+    </div>
+  )
+}
+
 function linkifyText(text: string): React.ReactNode {
   const urlRegex = /(https?:\/\/[^\s]+)/g
   const parts = text.split(urlRegex)

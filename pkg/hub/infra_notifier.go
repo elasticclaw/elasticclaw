@@ -218,7 +218,20 @@ func buildInfraMessage(e infraEventRow, _ time.Time) notify.Message {
 	if msg := strings.TrimSpace(stringValue(e.Detail, "message")); msg != "" {
 		body += "\n" + msg
 	}
-	return notify.Message{Emoji: style.emoji, Title: style.title, Severity: style.severity, Subject: subject, Body: body, Fields: []notify.Field{{Label: "Event", Value: strings.ReplaceAll(e.EventType, "_", " ")}, {Label: "Occurred", Value: e.OccurredAt.UTC().Format(time.RFC3339)}}, Summary: []string{style.title, subject}}
+	fields := []notify.Field{{Label: "Event", Value: strings.ReplaceAll(e.EventType, "_", " ")}}
+	if strings.HasPrefix(e.EventType, "dependency_") {
+		if statusPage := stringValue(e.Detail, "status_page"); statusPage != "" {
+			fields = append(fields, notify.Field{Label: "Status page", Value: statusPage})
+		}
+	} else if strings.HasPrefix(e.EventType, "provider_limit_") {
+		for _, field := range []struct{ label, key string }{{"Provider", "provider"}, {"Key", "key_id"}, {"Claws parked", "claws_parked"}, {"Deadline", "deadline"}} {
+			if value := stringValue(e.Detail, field.key); value != "" {
+				fields = append(fields, notify.Field{Label: field.label, Value: value})
+			}
+		}
+	}
+	fields = append(fields, notify.Field{Label: "Occurred", Value: e.OccurredAt.UTC().Format(time.RFC3339)})
+	return notify.Message{Emoji: style.emoji, Title: style.title, Severity: style.severity, Subject: subject, Body: body, Fields: fields, Summary: []string{style.title, subject}}
 }
 
 func stringValue(m map[string]any, key string) string {
