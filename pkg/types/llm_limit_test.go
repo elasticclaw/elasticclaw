@@ -132,3 +132,21 @@ func TestLLMUsageLimitExpired(t *testing.T) {
 		t.Error("a limit with no deadline is never expired")
 	}
 }
+
+// "UTC+3" is not UTC. The offset used to be dropped on the floor, yielding a
+// deadline three hours wrong that the hub then treated as exact — strictly
+// worse than the no-deadline fallback the UTC-only rule promises.
+func TestParseLLMUsageLimitRejectsOffsetZones(t *testing.T) {
+	for _, zone := range []string{"UTC+3", "UTC-5", "GMT+2", "GMT-05:30", "UTC+0530"} {
+		text := "You have reached your specified API usage limits. You will regain access on 2026-09-02 at 00:00 " + zone
+		limit, ok := ParseLLMUsageLimit(text)
+		if !ok {
+			t.Errorf("%s: limit not recognised at all", zone)
+			continue
+		}
+		if !limit.RegainAt.IsZero() {
+			t.Errorf("%s: regainAt = %v, want zero — an offset zone must fall back to no deadline, not be read as UTC",
+				zone, limit.RegainAt)
+		}
+	}
+}

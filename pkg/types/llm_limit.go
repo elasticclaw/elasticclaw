@@ -57,12 +57,18 @@ func (l LLMUsageLimit) Expired(now time.Time) bool {
 
 // regainAtPattern captures the deadline the provider volunteers.
 //
-// Only UTC is accepted. A named zone would have to be resolved against the
-// hub's tzdata to become a real instant, and getting that wrong means either
-// waking the fleet hours early (and re-latching on the same rejection) or
-// leaving it parked past the reset. An unrecognised zone falls back to "no
+// Only bare UTC is accepted. A named zone would have to be resolved against
+// the hub's tzdata to become a real instant, and getting that wrong means
+// either waking the fleet hours early (and re-latching on the same rejection)
+// or leaving it parked past the reset. An unrecognised zone falls back to "no
 // deadline", which is honest and still retries.
-var regainAtPattern = regexp.MustCompile(`(?i)regain access on (\d{4}-\d{2}-\d{2})(?: at )?(\d{2}:\d{2}(?::\d{2})?)? *(UTC|GMT)`)
+//
+// The trailing offset group exists only to be REJECTED. Without it "00:00
+// UTC+3" matched the bare-UTC branch and the "+3" was silently dropped — a
+// deadline three hours wrong, read as exact, which is worse than the fallback
+// this comment promises. Go's RE2 has no lookahead, so the offset has to be
+// captured to be noticed.
+var regainAtPattern = regexp.MustCompile(`(?i)regain access on (\d{4}-\d{2}-\d{2})(?: at )?(\d{2}:\d{2}(?::\d{2})?)? *(?:UTC|GMT)([+-]\d{1,2}(?::?\d{2})?)?`)
 
 // limitPhrases are matched as substrings, not prefixes.
 //
@@ -103,7 +109,7 @@ func ParseLLMUsageLimit(errText string) (LLMUsageLimit, bool) {
 	}
 
 	limit := LLMUsageLimit{Reason: reason, Message: trimmed}
-	if m := regainAtPattern.FindStringSubmatch(trimmed); m != nil {
+	if m := regainAtPattern.FindStringSubmatch(trimmed); m != nil && m[3] == "" {
 		clock := m[2]
 		if clock == "" {
 			clock = "00:00:00"

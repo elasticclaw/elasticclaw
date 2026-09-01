@@ -61,6 +61,10 @@ function shortDeadline(iso: string): string {
     hour: "2-digit",
     minute: "2-digit",
     hour12: false,
+    // The zone survives the shortening. Dropping the year saves room; dropping
+    // the zone would leave a bare time that a reader in another timezone — or
+    // comparing against the provider console, which speaks UTC — reads wrong.
+    timeZoneName: "short",
   }).format(at)
 }
 
