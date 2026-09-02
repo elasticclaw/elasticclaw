@@ -392,13 +392,17 @@ export async function fetchV2WorkflowRunAttempts(runId: string): Promise<{ attem
   return apiFetch<{ attempts: WorkflowV2RunAttempt[]; count: number }>(`/api/v2/workflow-runs/${encodeURIComponent(runId)}/attempts`)
 }
 
-export async function fetchV2WorkflowRunLogs(runId: string): Promise<ApiMessage[]> {
-  return apiFetch<ApiMessage[]>(`/api/v2/workflow-runs/${encodeURIComponent(runId)}/logs?limit=500`)
+export async function fetchV2WorkflowRunLogs(runId: string, before?: string): Promise<ApiMessage[]> {
+  const qs = new URLSearchParams({ limit: "100", order: "desc" })
+  if (before) qs.set("before", before)
+  return apiFetch<ApiMessage[]>(`/api/v2/workflow-runs/${encodeURIComponent(runId)}/logs?${qs.toString()}`)
 }
 
-export async function fetchV2WorkflowAttemptLogs(runId: string, attemptId: string): Promise<ApiMessage[]> {
+export async function fetchV2WorkflowAttemptLogs(runId: string, attemptId: string, before?: string): Promise<ApiMessage[]> {
+  const qs = new URLSearchParams({ limit: "100", order: "desc" })
+  if (before) qs.set("before", before)
   return apiFetch<ApiMessage[]>(
-    `/api/v2/workflow-runs/${encodeURIComponent(runId)}/attempts/${encodeURIComponent(attemptId)}/logs?limit=500`
+    `/api/v2/workflow-runs/${encodeURIComponent(runId)}/attempts/${encodeURIComponent(attemptId)}/logs?${qs.toString()}`
   )
 }
 
