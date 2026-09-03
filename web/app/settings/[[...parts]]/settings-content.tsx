@@ -6772,13 +6772,21 @@ function InfraNotificationsSection({ settings, onSave, saving, pause }: { settin
   // the hub until Save.
   const [showDialog, setShowDialog] = useState(false)
   const [dialogMode, setDialogMode] = useState<"add" | "edit">("add")
-  // The ROW being edited. Routes have no id, so position is the only address.
-  const [editIndex, setEditIndex] = useState<number | null>(null)
+  // The ROUTE being edited, addressed by the channel it posted to when the
+  // dialog opened — null while adding. Identity, not position: the hub allows
+  // exactly one infrastructure route per channel, so `via` is a key, whereas an
+  // index is only a key for as long as the list holds still. It does not have
+  // to hold still. Every save on this page re-fetches the whole config, and the
+  // routes that come back are whatever the hub now holds — reordered, or short
+  // one entry another writer dropped. An index captured before that round trip
+  // would then address a DIFFERENT route, and the save would quietly overwrite
+  // a route the operator never opened.
+  //
+  // It doubles as the name the heading shows, which is why it is frozen at open
+  // time rather than read from draftVia: reading the draft would rename the
+  // dialog under the operator the moment they picked another channel.
+  const [editKey, setEditKey] = useState<string | null>(null)
   const [draftVia, setDraftVia] = useState("")
-  // The name the heading uses, frozen when the dialog opens: reading draftVia
-  // there would rename the dialog under the operator as soon as they picked
-  // another channel in the select.
-  const [editVia, setEditVia] = useState("")
   // The receive-all choice, made explicitly rather than inferred from an empty
   // checkbox set. The hub reads `events: []` as "every alert type, including
   // any added in a later version", so an operator who unticks their way down
@@ -6796,13 +6804,13 @@ function InfraNotificationsSection({ settings, onSave, saving, pause }: { settin
   // The hub rejects two routes through one notifier, so a name another route
   // already uses is not on offer — the route being edited keeps its own.
   const viaOptions = names.filter(
-    (name) => name === draftVia || !routes.some((route, i) => i !== editIndex && route.via === name),
+    (name) => name === draftVia || name === editKey || !routes.some((route) => route.via === name),
   )
   const unroutedName = names.find((name) => !routes.some((route) => route.via === name))
 
   const openAddRoute = () => {
     setDialogMode("add")
-    setEditIndex(null)
+    setEditKey(null)
     setDraftVia(unroutedName || "")
     setDraftAll(true)
     setDraftEvents([])
@@ -6810,11 +6818,10 @@ function InfraNotificationsSection({ settings, onSave, saving, pause }: { settin
     setShowDialog(true)
   }
 
-  const openEditRoute = (route: InfraRoute, index: number) => {
+  const openEditRoute = (route: InfraRoute) => {
     setDialogMode("edit")
-    setEditIndex(index)
+    setEditKey(viaName(route.via))
     setDraftVia(viaName(route.via))
-    setEditVia(viaName(route.via))
     setDraftAll((route.events || []).length === 0)
     // De-duplicated because a checkbox can only be on or off: a type stored
     // twice would otherwise be counted twice in the dialog and re-sent
@@ -6847,7 +6854,7 @@ function InfraNotificationsSection({ settings, onSave, saving, pause }: { settin
     // tab between opening this dialog and saving it could still be sitting in
     // the select, and the hub answers a duplicated via with a routes[n] index
     // that names nothing on screen.
-    if (routes.some((route, i) => i !== editIndex && route.via === via)) {
+    if (routes.some((route) => route.via === via && route.via !== editKey)) {
       setDraftError(`"${via}" already carries an infrastructure route. A channel can only have one.`)
       return
     }
@@ -6860,9 +6867,23 @@ function InfraNotificationsSection({ settings, onSave, saving, pause }: { settin
     // "every type, including any added later". A narrowed route stores its own
     // types, de-duplicated for the reason the dialog seeds a Set.
     const entry: InfraRoute = { via, events: draftAll ? [] : [...new Set(draftEvents)] }
-    const nextRoutes = editIndex !== null
-      ? routes.map((route, i) => (i === editIndex ? entry : route))
-      : [...routes, entry]
+    // The row this draft belongs to is located NOW, in the list the hub last
+    // handed back, rather than trusted from where it sat when the dialog
+    // opened. If it is gone, the edit is refused outright: writing the draft
+    // into whatever occupies that position instead would silently repoint a
+    // route the operator never looked at, and an operator told nothing would
+    // assume their edit landed.
+    let nextRoutes: InfraRoute[]
+    if (editKey === null) {
+      nextRoutes = [...routes, entry]
+    } else {
+      const at = routes.findIndex((route) => route.via === editKey)
+      if (at === -1) {
+        setDraftError(`The route through "${editKey}" is no longer there — it was removed while this was open. Close this and add it again.`)
+        return
+      }
+      nextRoutes = routes.map((route, i) => (i === at ? entry : route))
+    }
     const { persisted, message } = await saveInfra({ ...infra, enabled, routes: nextRoutes })
     // Closed on `persisted`, not on the absence of a message: a PATCH the hub
     // took whose follow-up re-read failed already changed the routing, and
@@ -6872,13 +6893,20 @@ function InfraNotificationsSection({ settings, onSave, saving, pause }: { settin
     setShowDialog(false)
   }
 
-  async function removeRoute(index: number) {
+  async function removeRoute(key: string) {
+    // Removed by identity, for the reason saveRoute resolves one: "the row at
+    // index 1" and "the route through ops" stop meaning the same thing the
+    // moment anything else edits the list.
+    const at = routes.findIndex((route) => route.via === key)
+    if (at === -1) {
+      setDraftError(`The route through "${key}" is already gone.`)
+      return
+    }
     // The hub rejects an enabled block with no routes ("via is required when
     // enabled"), so dropping the last route pauses infrastructure alerts
     // instead of failing the save — the same clamp deleteNotifier applies when
     // it removes the channel a route pointed at.
-    const removed = routes[index]
-    const nextRoutes = routes.filter((_, i) => i !== index)
+    const nextRoutes = routes.filter((_, i) => i !== at)
     const clamped = enabled && nextRoutes.length === 0
     const { persisted, message } = await saveInfra({ ...infra, enabled: nextRoutes.length > 0 && enabled, routes: nextRoutes })
     // Recorded on `persisted` rather than on a clean save, and before the
@@ -6886,7 +6914,7 @@ function InfraNotificationsSection({ settings, onSave, saving, pause }: { settin
     // turned the alerts off, and this notice is the only record on the screen
     // that the switch moved without the operator touching it. Losing it there
     // is exactly the case that leaves someone believing their alerts are on.
-    if (persisted && clamped && removed) setRemovalPause(removed.via)
+    if (persisted && clamped) setRemovalPause(key)
     if (!persisted) { setDraftError(message || "The hub refused the change."); return }
     setShowDialog(false)
   }
@@ -7099,7 +7127,7 @@ function InfraNotificationsSection({ settings, onSave, saving, pause }: { settin
                       variant="ghost"
                       disabled={saving}
                       aria-label={`Edit the ${route.via} route`}
-                      onClick={() => openEditRoute(route, index)}
+                      onClick={() => openEditRoute(route)}
                     >
                       Edit
                     </Button>
@@ -7173,10 +7201,10 @@ function InfraNotificationsSection({ settings, onSave, saving, pause }: { settin
       <Dialog open={showDialog} onOpenChange={setShowDialog}>
         <DialogContent className="max-w-lg max-h-[90vh] overflow-y-auto p-0 gap-0">
           <DialogTitle className="sr-only">
-            {dialogMode === "add" ? "Add infrastructure route" : `Edit the ${editVia} route`}
+            {dialogMode === "add" ? "Add infrastructure route" : `Edit the ${editKey} route`}
           </DialogTitle>
           <div className="flex items-center justify-between px-5 py-4 border-b border-border">
-            <h3 className="font-medium">{dialogMode === "add" ? "Add infrastructure route" : `Edit the ${editVia} route`}</h3>
+            <h3 className="font-medium">{dialogMode === "add" ? "Add infrastructure route" : `Edit the ${editKey} route`}</h3>
           </div>
 
           <div className="p-5 space-y-4">
@@ -7314,13 +7342,13 @@ function InfraNotificationsSection({ settings, onSave, saving, pause }: { settin
               </div>
             )}
             <div className="flex items-center justify-between px-5 py-4">
-              {dialogMode === "edit" && editIndex !== null && (
+              {dialogMode === "edit" && editKey !== null && (
                 <Button
                   size="sm"
                   variant="ghost"
                   className="text-destructive hover:text-destructive"
                   disabled={saving}
-                  onClick={() => removeRoute(editIndex)}
+                  onClick={() => removeRoute(editKey)}
                 >
                   <Trash2 className="size-3.5 mr-1" /> Remove route
                 </Button>
