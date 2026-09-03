@@ -63,18 +63,31 @@ type checkpointSummary struct {
 	CompletedAt     *time.Time `json:"completed_at,omitempty"`
 }
 
+// checkpointManifestSchema is the manifest format version.
+//
+// Schema 1 inlined the complete file list in Files. Nothing ever read it back
+// — restore resolves the file list from the root tree blob via filesForTree —
+// so the field was pure duplication of content-addressed data, at roughly
+// 700 KB per manifest. Schema 2 keeps only the aggregates.
+const checkpointManifestSchema = 2
+
 type checkpointManifest struct {
-	Schema       int                    `json:"schema"`
-	CheckpointID string                 `json:"checkpoint_id"`
-	ClawID       string                 `json:"claw_id"`
-	CreatedAt    time.Time              `json:"created_at"`
-	Reason       string                 `json:"reason"`
-	Hub          checkpointHubManifest  `json:"hub"`
-	Provider     checkpointProvider     `json:"provider"`
-	Messages     checkpointMessages     `json:"messages"`
-	Workspace    checkpointWorkspace    `json:"workspace"`
-	PRs          []checkpointPR         `json:"prs"`
-	Files        []types.CheckpointFile `json:"files"`
+	Schema       int                   `json:"schema"`
+	CheckpointID string                `json:"checkpoint_id"`
+	ClawID       string                `json:"claw_id"`
+	CreatedAt    time.Time             `json:"created_at"`
+	Reason       string                `json:"reason"`
+	Hub          checkpointHubManifest `json:"hub"`
+	Provider     checkpointProvider    `json:"provider"`
+	Messages     checkpointMessages    `json:"messages"`
+	Workspace    checkpointWorkspace   `json:"workspace"`
+	PRs          []checkpointPR        `json:"prs"`
+
+	// FilesCount and FilesBytes summarise the workspace captured by this
+	// checkpoint. The list itself lives in the root tree blob addressed by
+	// Workspace.TreeSHA256, deduplicated across every checkpoint sharing it.
+	FilesCount int   `json:"files_count"`
+	FilesBytes int64 `json:"files_bytes"`
 }
 
 type checkpointHubManifest struct {
@@ -819,7 +832,7 @@ func (s *Server) finalizeCheckpoint(checkpointID, tenantID, clawID, rootSHA stri
 	if err != nil {
 		return err
 	}
-	data, err := json.MarshalIndent(manifest, "", "  ")
+	data, err := json.Marshal(manifest)
 	if err != nil {
 		return err
 	}
@@ -850,7 +863,7 @@ func (s *Server) completeMetadataOnlyCheckpoint(checkpointID, clawID, reason, de
 		return err
 	}
 	manifest.Workspace.TreeSHA256 = ""
-	data, _ := json.MarshalIndent(manifest, "", "  ")
+	data, _ := json.Marshal(manifest)
 	manifestSHA := shaBytes(data)
 	path := checkpointManifestPath(checkpointID)
 	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
@@ -935,7 +948,7 @@ func (s *Server) buildCheckpointManifest(checkpointID, clawID, rootSHA, msgSHA s
 	_ = s.db.QueryRow(`SELECT reason, created_at FROM claw_checkpoints WHERE id=?`, checkpointID).Scan(&reason, &createdAt)
 	prs := s.checkpointPRs(clawID)
 	return &checkpointManifest{
-		Schema:       1,
+		Schema:       checkpointManifestSchema,
 		CheckpointID: checkpointID,
 		ClawID:       clawID,
 		CreatedAt:    createdAt,
@@ -955,12 +968,23 @@ func (s *Server) buildCheckpointManifest(checkpointID, clawID, rootSHA, msgSHA s
 			ExternalTriggerID: row.ExternalTriggerID,
 			PipelineStage:     row.PipelineStage,
 		},
-		Provider:  checkpointProvider{Name: row.Provider, ProviderID: row.ProviderID},
-		Messages:  checkpointMessages{BlobSHA256: msgSHA, Count: msgCount, CutoffAt: cutoff},
-		Workspace: checkpointWorkspace{TreeSHA256: rootSHA},
-		PRs:       prs,
-		Files:     files,
+		Provider:   checkpointProvider{Name: row.Provider, ProviderID: row.ProviderID},
+		Messages:   checkpointMessages{BlobSHA256: msgSHA, Count: msgCount, CutoffAt: cutoff},
+		Workspace:  checkpointWorkspace{TreeSHA256: rootSHA},
+		PRs:        prs,
+		FilesCount: len(files),
+		FilesBytes: filesTotalBytes(files),
 	}, nil
+}
+
+// filesTotalBytes sums the captured size of a checkpoint's file list. Only the
+// total is kept in the manifest; the list itself is addressed by the root tree.
+func filesTotalBytes(files []types.CheckpointFile) int64 {
+	var total int64
+	for _, f := range files {
+		total += f.Size
+	}
+	return total
 }
 
 func (s *Server) checkpointPRs(clawID string) []checkpointPR {
