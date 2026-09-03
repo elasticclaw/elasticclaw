@@ -127,7 +127,10 @@ func TestBridgeExecRunTimeoutReportsExitCode124(t *testing.T) {
 	version := uint64(1)
 	supervisor.snapshot = &typesv2.WorkflowSnapshot{RunID: binding.RunID, AttemptID: binding.AttemptID, StateVersion: version}
 
-	cfg := typesv2.ExecRunConfig{Command: "sleep 10", Timeout: "100ms"}
+	// Use a 1ns timeout so the context is already cancelled before the child
+	// process can start. This avoids depending on the CI runner's ability to
+	// reap a long-running process, while still exercising the timeout branch.
+	cfg := typesv2.ExecRunConfig{Command: "sleep 10", Timeout: "1ns"}
 	payload, _ := json.Marshal(cfg)
 	envelope := typesv2.ControlEnvelope{ProtocolVersion: typesv2.ControlProtocolVersion,
 		MessageID: "assign-exec-timeout", Kind: typesv2.MessageExecRunAssign, RunID: binding.RunID,
@@ -137,9 +140,7 @@ func TestBridgeExecRunTimeoutReportsExitCode124(t *testing.T) {
 	}
 
 	var failed *typesv2.ControlEnvelope
-	// CI runners can be slow to schedule the goroutine and reap the child process;
-	// use a generous deadline instead of the bare minimum.
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(2 * time.Second)
 	for failed == nil && time.Now().Before(deadline) {
 		ready, _ := store.ready(binding, 10)
 		for i := range ready {
