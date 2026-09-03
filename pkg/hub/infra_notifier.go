@@ -436,6 +436,7 @@ func buildInfraMessage(e infraEventRow, _ time.Time) notify.Message {
 		subject = e.Subject
 	}
 	retry := stringValue(e.Detail, "retry_count")
+	quoteMessage := true
 	var body string
 	switch e.EventType {
 	case "dependency_recovered":
@@ -452,10 +453,15 @@ func buildInfraMessage(e infraEventRow, _ time.Time) notify.Message {
 		body = "Automatic retries are exhausted; the hub will not retry on its own. Raise the cap in the provider's billing console, then clear the block (a parked claw's page, or DELETE /api/claws/{id}/llm-limit) to resume."
 	case "provider_limit_released":
 		body = "Provider access has recovered; the parked claws resumed on their own."
+		// Deliberately no provider message below: the only text the record
+		// carries is the rejection that opened the episode, and quoting "you
+		// have reached your usage limits" under "cap lifted" reads as a
+		// contradiction rather than as context.
+		quoteMessage = false
 	default:
 		body = "Wait for recovery and watch the dependency's status page."
 	}
-	if msg := strings.TrimSpace(stringValue(e.Detail, "message")); msg != "" {
+	if msg := strings.TrimSpace(stringValue(e.Detail, "message")); msg != "" && quoteMessage {
 		body += "\n" + msg
 	}
 	fields := []notify.Field{{Label: "Event", Value: strings.ReplaceAll(e.EventType, "_", " ")}}
@@ -465,6 +471,13 @@ func buildInfraMessage(e infraEventRow, _ time.Time) notify.Message {
 		fields = append(fields, notify.Field{Label: "Opening alert", Value: "not delivered"})
 	}
 	if strings.HasPrefix(e.EventType, "dependency_") {
+		// How long it was down is the first thing asked about a recovery, and
+		// the watcher has always recorded it — it just never reached anyone.
+		if e.EventType == "dependency_recovered" {
+			if down := formatOutageDuration(e.Detail); down != "" {
+				fields = append(fields, notify.Field{Label: "Down for", Value: down})
+			}
+		}
 		if statusPage := stringValue(e.Detail, "status_page"); statusPage != "" {
 			fields = append(fields, notify.Field{Label: "Status page", Value: statusPage})
 		}
@@ -492,6 +505,33 @@ func buildInfraMessage(e infraEventRow, _ time.Time) notify.Message {
 	}
 	fields = append(fields, notify.Field{Label: "Occurred", Value: e.OccurredAt.UTC().Format(time.RFC3339)})
 	return notify.Message{Emoji: style.emoji, Title: style.title, Severity: style.severity, Subject: subject, Body: body, Fields: fields, Summary: []string{style.title, subject}}
+}
+
+// formatOutageDuration renders duration_ms as the coarse, readable span an
+// operator reads at a glance ("1h 24m"), not a precise one: nobody acts on the
+// seconds of an outage, and the watcher's own resolution is a minute anyway.
+func formatOutageDuration(detail map[string]any) string {
+	ms := stringValue(detail, "duration_ms")
+	if ms == "" {
+		return ""
+	}
+	millis, err := strconv.ParseInt(ms, 10, 64)
+	if err != nil || millis <= 0 {
+		return ""
+	}
+	d := time.Duration(millis) * time.Millisecond
+	if d < time.Minute {
+		return "under a minute"
+	}
+	hours, minutes := int(d/time.Hour), int((d%time.Hour)/time.Minute)
+	switch {
+	case hours == 0:
+		return fmt.Sprintf("%dm", minutes)
+	case minutes == 0:
+		return fmt.Sprintf("%dh", hours)
+	default:
+		return fmt.Sprintf("%dh %dm", hours, minutes)
+	}
 }
 
 func stringValue(m map[string]any, key string) string {

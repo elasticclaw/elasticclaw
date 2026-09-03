@@ -580,3 +580,64 @@ func hasField(msg notify.Message, label, value string) bool {
 	}
 	return false
 }
+
+// TestBuildInfraMessageRecoveryShowsHowLongItWasDown covers the two things the
+// first live run of this feature showed a reader: a recovery that never said how
+// long the outage lasted although the watcher had recorded it, and a "cap lifted"
+// message that quoted the original rejection underneath it.
+func TestBuildInfraMessageRecoveryShowsHowLongItWasDown(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		event      infraEventRow
+		wantField  string
+		wantValue  string
+		absentBody string
+	}{
+		{
+			name: "recovery renders the outage duration",
+			event: infraEventRow{
+				EventType: "dependency_recovered", Subject: "Anthropic",
+				Detail: map[string]any{"name": "Anthropic", "duration_ms": int64(2820000), "message": "All Systems Operational"},
+			},
+			wantField: "Down for", wantValue: "47m",
+		},
+		{
+			name: "a lift does not quote the rejection that opened the episode",
+			event: infraEventRow{
+				EventType: "provider_limit_released", Subject: "anthropic",
+				Detail: map[string]any{"provider": "anthropic", "key_id": "key_abc", "parked_claws": 2,
+					"message": "LLM request rejected: You have reached your specified API usage limits."},
+			},
+			absentBody: "You have reached your specified API usage limits",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			msg := buildInfraMessage(tc.event, time.Now())
+			if tc.wantField != "" {
+				var got string
+				for _, f := range msg.Fields {
+					if f.Label == tc.wantField {
+						got = f.Value
+					}
+				}
+				if got != tc.wantValue {
+					t.Fatalf("field %q = %q, want %q (fields: %+v)", tc.wantField, got, tc.wantValue, msg.Fields)
+				}
+			}
+			if tc.absentBody != "" && strings.Contains(msg.Body, tc.absentBody) {
+				t.Fatalf("body must not quote the opening rejection, got:\n%s", msg.Body)
+			}
+		})
+	}
+}
+
+func TestFormatOutageDuration(t *testing.T) {
+	for _, tc := range []struct{ ms, want string }{
+		{"", ""}, {"0", ""}, {"-5", ""}, {"not-a-number", ""},
+		{"30000", "under a minute"}, {"2820000", "47m"}, {"3600000", "1h"}, {"5040000", "1h 24m"},
+	} {
+		if got := formatOutageDuration(map[string]any{"duration_ms": tc.ms}); got != tc.want {
+			t.Errorf("formatOutageDuration(%q) = %q, want %q", tc.ms, got, tc.want)
+		}
+	}
+}
