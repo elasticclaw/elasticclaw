@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"testing"
 
 	"github.com/elasticclaw/elasticclaw/pkg/hub/workflowv2"
@@ -333,3 +334,45 @@ transitions:
     on: agent.task.completed
     to: done
 `
+
+func TestMessageTimelineIncludesV2WorkflowStateTransitions(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
+	store := workflowv2.NewStore(db)
+	if _, err := store.CreateRun(context.Background(), workflowv2.CreateRunRequest{
+		ID:            "run-timeline-state",
+		TenantID:      "test-tenant-id",
+		WorkspaceYAML: []byte(workflowV2APIWorkspace),
+		WorkflowYAML:  []byte(workflowV2APIWorkflow),
+		InitialClawID: "claw-timeline-state",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	insertTestClaw(t, db, "claw-timeline-state")
+	if _, err := db.Exec(
+		`INSERT INTO messages(id,claw_id,tenant_id,role,content,created_at) VALUES(?,?,?,?,?,datetime('now'))`,
+		"msg-timeline-state", "claw-timeline-state", "test-tenant-id", "user", "hello"); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/messages/claw-timeline-state/timeline", nil)
+	req.Header.Set("Authorization", "Bearer test-token")
+	rr := httptest.NewRecorder()
+	s.mux.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+	var messages []types.HubMessage
+	if err := json.NewDecoder(rr.Body).Decode(&messages); err != nil {
+		t.Fatal(err)
+	}
+	roles := make([]string, 0, len(messages))
+	for _, m := range messages {
+		roles = append(roles, m.Role)
+	}
+	if !slices.Contains(roles, "state") {
+		t.Fatalf("expected state transition in timeline, got roles %v", roles)
+	}
+	if !slices.Contains(roles, "user") {
+		t.Fatalf("expected user message in timeline, got roles %v", roles)
+	}
+}
