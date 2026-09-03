@@ -832,8 +832,12 @@ func TestIdleSessionLossNoticeDeliveryRearmsIdleResumeBudget(t *testing.T) {
 	if count != 0 {
 		t.Fatalf("notice delivery left idle_resume_count=%d, want 0", count)
 	}
-	if at != 0 {
-		t.Fatalf("notice delivery left idle_resume_at=%d, want 0", at)
+	// The latch stays. This path keeps the same connection, so there is no dead
+	// session's anchor to collide with — and the message carrying the notice is
+	// often the idle auto-resume prompt itself, so clearing the latch here would
+	// refund that attempt and let the next tick poke the same stretch again.
+	if at != latch {
+		t.Fatalf("notice delivery moved idle_resume_at to %d, want %d", at, latch)
 	}
 }
 

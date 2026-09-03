@@ -9143,7 +9143,18 @@ func (s *Server) sendNextQueuedMessage(cc *clawConn) {
 		// notice and marks the message delivered, after a successful socket
 		// write, so a failed write re-arms nothing and the notice stays durable
 		// for the next attempt.
-		if _, err := tx.Exec(`UPDATE claws SET pending_session_loss_notice='', idle_resume_count=0, idle_resume_at=0 WHERE id=? AND pending_session_loss_notice=?`, clawID, notice); err != nil {
+		//
+		// Only the count. idle_resume_at is cleared on the two paths where the
+		// connection itself is replaced, because a successor's stretch anchor
+		// can collide with a latch the dead session earned; here the connection
+		// never went away, lastTurnFinishedAt is the same live value, and there
+		// is no such collision to break. Clearing it would instead cause the
+		// duplicate poke the latch exists to prevent: the message carrying this
+		// notice is very often the idle auto-resume prompt itself, so the same
+		// statement would refund the attempt checkAgentIdleResume just latched
+		// AND drop its latch, letting the next tick poke the identical stretch
+		// a second time.
+		if _, err := tx.Exec(`UPDATE claws SET pending_session_loss_notice='', idle_resume_count=0 WHERE id=? AND pending_session_loss_notice=?`, clawID, notice); err != nil {
 			log.Printf("[hub] clear pending session-loss notice for %s: %v", shortID(clawID), err)
 			return
 		}
