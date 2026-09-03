@@ -6722,14 +6722,20 @@ function InfraNotificationsSection({ settings, onSave, saving, pause }: { settin
   const names = Object.keys(notifiers).sort((a, b) => a.localeCompare(b))
   const infra = notifications?.infra
   const enabled = infra?.enabled ?? false
-  const routes = (infra?.routes || []).map((route) => ({ ...route, via: route.via.trim(), events: route.events || [] }))
+  // `via` is trimmed exactly where the hub trims it before looking the notifier
+  // up, so a hand-written " eng " names the channel `eng` rather than reading
+  // as an orphan whose only offered remedy — Remove — silently pauses alerts.
+  const routes = (infra?.routes || []).map((route) => ({ ...route, via: viaName(route.via), events: route.events || [] }))
   const eventTypes = settings.infraEventTypes?.length ? settings.infraEventTypes : INFRA_EVENT_TYPES
   const [tests, setTests] = useState<Record<string, TestState>>({})
-  // The last save the hub refused, rendered in the section. The page-level
+  // The outcome of the last save, rendered in the section. The page-level
   // banner is the only other place it goes, and this section sits at the
-  // bottom of a long page: a checkbox that snaps back with the reason
-  // scrolled a screen or more above it just looks dead.
-  const [saveError, setSaveError] = useState("")
+  // bottom of a long page: a switch that snaps back with the reason scrolled a
+  // screen or more above it just looks dead. Kept as the whole SaveOutcome
+  // because a PATCH the hub ACCEPTED whose follow-up re-read failed still
+  // changed the config — calling that "Last save failed" would tell the
+  // operator the opposite of what the hub now holds.
+  const [saveOutcome, setSaveOutcome] = useState<SaveOutcome | null>(null)
   // Routes whose notifier is gone. The hub keeps them on disk while alerts
   // are off but rejects the whole notifications block the moment they are
   // on — and PATCH replaces the whole block, so one dangling route under an
@@ -6742,10 +6748,71 @@ function InfraNotificationsSection({ settings, onSave, saving, pause }: { settin
   // alerts back on answers it.
   const pauseNotice = pause && !enabled ? pause : null
 
-  const saveInfra = async (next: InfraNotificationsConfig) => {
-    // PATCH replaces the notifications block, so carry the sibling sections
-    // through unchanged when this compact editor changes only infra routing.
-    const { message } = await onSave({
+  // ── The route editor ───────────────────────────────────────────────────────
+  // A dialog with its own draft, like the channel and schedule editors beside
+  // it. The section used to save on every keystroke — each checkbox was a
+  // PATCH of the whole notifications block — so a half-made change was already
+  // on disk and there was nothing for Cancel to discard. Nothing here reaches
+  // the hub until Save.
+  const [showDialog, setShowDialog] = useState(false)
+  const [dialogMode, setDialogMode] = useState<"add" | "edit">("add")
+  // The ROW being edited. Routes have no id, so position is the only address.
+  const [editIndex, setEditIndex] = useState<number | null>(null)
+  const [draftVia, setDraftVia] = useState("")
+  // The name the heading uses, frozen when the dialog opens: reading draftVia
+  // there would rename the dialog under the operator as soon as they picked
+  // another channel in the select.
+  const [editVia, setEditVia] = useState("")
+  // The receive-all choice, made explicitly rather than inferred from an empty
+  // checkbox set. The hub reads `events: []` as "every alert type, including
+  // any added in a later version", so an operator who unticks their way down
+  // to nothing would silently get the firehose — the opposite of what the
+  // unticking meant. Splitting the two apart makes receive-all reachable ON
+  // PURPOSE (it is what keeps a route picking up alert types this hub does not
+  // have yet) and unreachable by accident: an empty "Only these" list is a
+  // save the dialog refuses, in text, rather than a save that quietly widens
+  // the route.
+  const [draftAll, setDraftAll] = useState(true)
+  const [draftEvents, setDraftEvents] = useState<InfraEventType[]>([])
+  const [draftError, setDraftError] = useState("")
+
+  const draftMissing = Boolean(draftVia) && !names.includes(draftVia)
+  // The hub rejects two routes through one notifier, so a name another route
+  // already uses is not on offer — the route being edited keeps its own.
+  const viaOptions = names.filter(
+    (name) => name === draftVia || !routes.some((route, i) => i !== editIndex && route.via === name),
+  )
+  const unroutedName = names.find((name) => !routes.some((route) => route.via === name))
+
+  const openAddRoute = () => {
+    setDialogMode("add")
+    setEditIndex(null)
+    setDraftVia(unroutedName || "")
+    setDraftAll(true)
+    setDraftEvents([])
+    setDraftError("")
+    setShowDialog(true)
+  }
+
+  const openEditRoute = (route: InfraRoute, index: number) => {
+    setDialogMode("edit")
+    setEditIndex(index)
+    setDraftVia(viaName(route.via))
+    setEditVia(viaName(route.via))
+    setDraftAll((route.events || []).length === 0)
+    // De-duplicated because a checkbox can only be on or off: a type stored
+    // twice would otherwise be counted twice in the dialog and re-sent
+    // verbatim by a save that changed nothing.
+    setDraftEvents([...new Set(route.events || [])])
+    setDraftError("")
+    setShowDialog(true)
+  }
+
+  // PATCH replaces the whole notifications block, so every save carries the
+  // sibling sections through byte for byte: omitting `scheduled` here would
+  // delete every scheduled report the first time anyone touches infra routing.
+  const saveInfra = async (next: InfraNotificationsConfig): Promise<SaveOutcome> => {
+    const outcome = await onSave({
       notifications: {
         notifiers,
         lifecycle: notifications?.lifecycle,
@@ -6753,25 +6820,80 @@ function InfraNotificationsSection({ settings, onSave, saving, pause }: { settin
         infra: next,
       },
     })
-    setSaveError(message || "")
+    setSaveOutcome(outcome)
+    return outcome
   }
 
-  const updateRoute = async (index: number, route: InfraRoute) => {
-    const nextRoutes = routes.map((current, i) => i === index ? route : current)
-    await saveInfra({ ...infra, enabled, routes: nextRoutes })
+  async function saveRoute() {
+    const via = viaName(draftVia)
+    if (!via) { setDraftError("Pick the channel this route posts to."); return }
+    // Belt and braces over the filtered picker: a channel deleted in another
+    // tab between opening this dialog and saving it could still be sitting in
+    // the select, and the hub answers a duplicated via with a routes[n] index
+    // that names nothing on screen.
+    if (routes.some((route, i) => i !== editIndex && route.via === via)) {
+      setDraftError(`"${via}" already carries an infrastructure route. A channel can only have one.`)
+      return
+    }
+    if (!draftAll && draftEvents.length === 0) {
+      setDraftError("Pick at least one alert type, or choose “All alert types”.")
+      return
+    }
+    setDraftError("")
+    // Receive-all is stored as the empty list — the shape the hub reads as
+    // "every type, including any added later". A narrowed route stores its own
+    // types, de-duplicated for the reason the dialog seeds a Set.
+    const entry: InfraRoute = { via, events: draftAll ? [] : [...new Set(draftEvents)] }
+    const nextRoutes = editIndex !== null
+      ? routes.map((route, i) => (i === editIndex ? entry : route))
+      : [...routes, entry]
+    const { persisted, message } = await saveInfra({ ...infra, enabled, routes: nextRoutes })
+    // Closed on `persisted`, not on the absence of a message: a PATCH the hub
+    // took whose follow-up re-read failed already changed the routing, and
+    // holding the dialog open invites a second save of a change that landed.
+    // The re-read failure is real, so the section banner states it verbatim.
+    if (!persisted) { setDraftError(message || "The hub refused the change."); return }
+    setShowDialog(false)
+  }
+
+  async function removeRoute(index: number) {
+    // The hub rejects an enabled block with no routes ("via is required when
+    // enabled"), so dropping the last route pauses infrastructure alerts
+    // instead of failing the save — the same clamp deleteNotifier applies when
+    // it removes the channel a route pointed at.
+    const nextRoutes = routes.filter((_, i) => i !== index)
+    const { persisted, message } = await saveInfra({ ...infra, enabled: nextRoutes.length > 0 && enabled, routes: nextRoutes })
+    if (!persisted) { setDraftError(message || "The hub refused the change."); return }
+    setShowDialog(false)
   }
 
   const sendTest = async (route: InfraRoute, index: number) => {
     const eventType = route.events?.[0] || eventTypes[0]
     if (!eventType) return
+    // The via is part of the key on purpose: a route repointed at another
+    // channel gets a fresh slot rather than inheriting a green "Sent" that
+    // describes a message delivered somewhere else. Removing a row renumbers
+    // the ones after it, which re-keys them the same way — their results
+    // disappear instead of landing on a route that never made them.
     const key = `${index}:${route.via}`
     setTests((current) => ({ ...current, [key]: { status: "sending", message: "" } }))
     try {
       await sendTestNotification(eventType, route.via)
-      setTests((current) => ({ ...current, [key]: { status: "ok", message: `Sent a \"${INFRA_EVENT_LABELS[eventType]}\" test alert.` } }))
+      setTests((current) => ({ ...current, [key]: { status: "ok", message: `Sent a "${INFRA_EVENT_LABELS[eventType]}" test alert.` } }))
     } catch (e) {
       setTests((current) => ({ ...current, [key]: { status: "error", message: e instanceof Error ? e.message : "Test send failed" } }))
     }
+  }
+
+  // What a card says the route receives, without opening anything. An empty
+  // list is receive-all, so it is named as such rather than rendered as "0
+  // alert types"; a long list is cut short because a card is a summary, and
+  // the badge beside it already carries the exact count.
+  const receivesLine = (events: InfraEventType[]): string => {
+    if (events.length === 0) return "Every alert type, including any added in a later hub version."
+    const labels = [...new Set(events)].map((eventType) => INFRA_EVENT_LABELS[eventType])
+    if (labels.length <= 3) return `${labels.join(", ")}.`
+    return `${labels.slice(0, 3).join(", ")} and ${labels.length - 3} more.`
   }
 
   return (
@@ -6790,7 +6912,10 @@ function InfraNotificationsSection({ settings, onSave, saving, pause }: { settin
         <Switch
           checked={enabled}
           // Gated on the shapes the hub rejects once the block is enabled: no
-          // routes, and a route naming a notifier that no longer exists.
+          // routes, and a route naming a notifier that no longer exists. The
+          // reason is in the paragraph on the left, not only in the tooltip: a
+          // disabled switch leaves the tab order, so a `title` on it reaches
+          // nobody.
           disabled={saving || routes.length === 0 || orphan}
           title={routes.length === 0 ? "Add a channel route first" : orphan ? "Remove the routes pointing at deleted channels first" : undefined}
           onCheckedChange={(next) => saveInfra({ ...infra, enabled: next, routes })}
@@ -6827,141 +6952,330 @@ function InfraNotificationsSection({ settings, onSave, saving, pause }: { settin
           </span>
         </div>
       )}
-      {saveError && (
+      {saveOutcome?.message && (
         <div className="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
           <AlertTriangle className="size-3.5 mt-px shrink-0" />
-          <span className="break-words">Last save failed: {saveError}</span>
+          {/* A message that came back with `persisted` describes the re-read,
+              not the save: the change is on disk, so it is stated verbatim
+              rather than blamed on a save that went through. */}
+          <span className="break-words">
+            {saveOutcome.persisted ? saveOutcome.message : `Last save failed: ${saveOutcome.message}`}
+          </span>
         </div>
       )}
 
       {routes.length === 0 ? (
-        <p className="text-sm text-muted-foreground px-4 py-4 text-center border border-border rounded-lg">Add a channel route before turning infrastructure alerts on.</p>
+        <p className="text-sm text-muted-foreground px-4 py-6 text-center border border-border rounded-lg">
+          {names.length === 0
+            ? "No infrastructure routes. Add a channel first, then route dependency and provider-limit alerts into it."
+            : "No infrastructure routes. Add one to get dependency outages and provider caps in Slack."}
+        </p>
       ) : (
+        // Dimmed while the alerts are off, as the lifecycle categories are.
+        // Nothing that gates a save hides in here: the banners above are at
+        // full opacity and name every broken route by channel.
         <div className={cn("space-y-2", !enabled && "opacity-50")}>
           {routes.map((route, index) => {
             const key = `${index}:${route.via}`
             const test = tests[key]
             // The hub reads an empty list as "every event type, including any
             // added later" — the same receive-all semantics the lifecycle
-            // dialog spells out — so the card has to say so.
+            // section spells out — so the card has to say so rather than
+            // render the route as receiving nothing.
             const allEvents = route.events.length === 0
             const missing = !names.includes(route.via)
-            // Unchecking the last box would save an empty list, which the hub
-            // reads as receive-all — the opposite of what the operator meant.
-            // Removing the route is how to stop it. Said in the description
-            // below, which every checkbox is described by: a disabled input
-            // leaves the tab order, so a tooltip on it is never reached.
-            const lastOne = !allEvents && route.events.length === 1
-            const hintId = `infra-route-${index}-events-hint`
-            // The hub rejects two routes through one notifier, so a name
-            // another route already uses is not on offer here.
-            const options = names.filter((name) => name === route.via || !routes.some((other, i) => i !== index && other.via === name))
+            // Rendered as text, not as the disabled button's `title`: the
+            // Button base class sets `disabled:pointer-events-none`, so a
+            // native tooltip on it can never fire. The orphan case has its own
+            // amber line below, which carries the same answer.
+            const testBlockedReason = !enabled
+              ? "Infrastructure alerts are turned off — this channel receives nothing."
+              : null
             return (
-              <div key={key} className="border border-border rounded-lg p-4 space-y-3">
-                <div className="flex items-center gap-2">
-                  <select
-                    value={route.via}
-                    disabled={saving}
-                    onChange={(e) => updateRoute(index, { ...route, via: e.target.value })}
-                    className={cn("h-8 min-w-0 flex-1 text-sm rounded-md border bg-background px-3", missing ? "border-amber-500/50" : "border-input")}
-                    // Every card carries the same controls, so each name says
-                    // which route it belongs to — as the scheduled rows do.
-                    aria-label={`Notifier for infrastructure alerts (route ${index + 1}: ${route.via})`}
-                  >
-                    {missing && <option value={route.via} disabled>{route.via} — missing notifier</option>}
-                    {options.map((name) => <option key={name} value={name}>{name}</option>)}
-                  </select>
-                  <span className={cn("shrink-0 text-xs px-2 py-1 rounded font-medium", allEvents ? "bg-blue-500/10 text-blue-400 border border-blue-500/20" : "bg-muted text-muted-foreground")}>
-                    {allEvents ? "All alerts" : `${route.events.length} of ${eventTypes.length} alert types`}
-                  </span>
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    disabled={saving}
-                    aria-label={`Remove the ${route.via} route`}
-                    onClick={() => {
-                      // The hub rejects an enabled block with no routes, so
-                      // losing the last route pauses alerts instead of failing
-                      // the save — the same clamp deleteNotifier applies.
-                      const nextRoutes = routes.filter((_, i) => i !== index)
-                      saveInfra({ ...infra, enabled: nextRoutes.length > 0 && enabled, routes: nextRoutes })
-                    }}
-                  >
-                    <Trash2 className="size-3.5 mr-1" /> Remove
-                  </Button>
+              <div key={key} className="border border-border rounded-lg p-4">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <code className="text-sm font-mono font-medium">{route.via}</code>
+                      {allEvents ? (
+                        <span className="text-xs bg-blue-500/10 text-blue-400 border border-blue-500/20 px-2 py-0.5 rounded font-medium">
+                          All alerts
+                        </span>
+                      ) : (
+                        <span className="text-xs bg-muted text-muted-foreground px-2 py-0.5 rounded font-medium">
+                          {new Set(route.events).size} of {eventTypes.length} alert types
+                        </span>
+                      )}
+                    </div>
+                    <p className="text-xs text-muted-foreground mt-1">Receives {receivesLine(route.events)}</p>
+                    {!missing && (
+                      <p className="text-xs text-muted-foreground mt-1">
+                        Posts to <span className="font-mono">{notifiers[route.via]?.channel || "no channel"}</span> in Slack.
+                      </p>
+                    )}
+                    {missing && (
+                      <p className="text-xs text-amber-400 mt-2">
+                        No channel named <span className="font-mono">{route.via}</span> is configured, so this route delivers nothing — open Edit and pick another channel, or remove the route.
+                      </p>
+                    )}
+                    {testBlockedReason && <p className="text-xs text-muted-foreground mt-2">{testBlockedReason}</p>}
+                  </div>
+                  <div className="flex items-center gap-2 shrink-0">
+                    {/* Every card carries the same two controls, so each is
+                        named by its route: two buttons announcing "Edit" tell
+                        a screen reader nothing about which channel they open.
+                        Held while a save is in flight for the reason the
+                        channel and schedule cards' Edit is — the dialog seeds
+                        from the pre-save snapshot, so opening it mid-save
+                        would hand the next save a stale copy of the change
+                        still landing. */}
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      disabled={saving}
+                      aria-label={`Edit the ${route.via} route`}
+                      onClick={() => openEditRoute(route, index)}
+                    >
+                      Edit
+                    </Button>
+                  </div>
                 </div>
-                {missing && (
-                  <p className="text-xs text-amber-400">
-                    Notifier <span className="font-mono">{route.via}</span> no longer exists, so this route delivers nothing. Pick another channel or remove the route.
-                  </p>
-                )}
-                <div className="grid gap-1 sm:grid-cols-2">
-                  {eventTypes.map((eventType) => {
-                    const checked = allEvents || route.events.includes(eventType)
-                    const lastChecked = checked && lastOne
-                    return (
-                      <label
-                        key={eventType}
-                        className={cn("flex items-center gap-2 text-sm rounded px-2 py-1", lastChecked ? "cursor-not-allowed" : "cursor-pointer hover:bg-muted/50")}
-                      >
-                        <input
-                          type="checkbox"
-                          aria-label={`${INFRA_EVENT_LABELS[eventType]} (${eventType}) for ${route.via}`}
-                          aria-describedby={hintId}
-                          checked={checked}
-                          disabled={saving || lastChecked}
-                          onChange={(e) => {
-                            const current = allEvents ? [...eventTypes] : route.events
-                            const events = e.target.checked ? [...new Set([...current, eventType])] : current.filter((type) => type !== eventType)
-                            if (events.length === 0) return
-                            updateRoute(index, { ...route, events })
-                          }}
-                        />
-                        <span>{INFRA_EVENT_LABELS[eventType]}</span>
-                      </label>
-                    )
-                  })}
-                </div>
-                <p id={hintId} className="text-xs text-muted-foreground">
-                  {allEvents
-                    ? "Saved as receive-all: this channel gets every alert type, including any added later. Uncheck a type to narrow it."
-                    : lastOne
-                      ? `Only "${INFRA_EVENT_LABELS[route.events[0]]}" reaches this channel, and it stays checked: at least one alert type must. Remove the route to stop it entirely.`
-                      : "Only the checked types reach this channel. Remove the route to stop it entirely."}
-                </p>
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-2 mt-3">
+                  {/* Kept on the row rather than inside the dialog: a test send
+                      is something you do to a route that already exists, and
+                      burying it behind Edit puts it a click away from every
+                      unsaved draft. Dead on an orphan route — a test through a
+                      notifier the hub does not have can only come back as the
+                      hub's routes[n] message, which names nothing on screen. */}
                   <Button
                     size="sm"
                     variant="outline"
                     className="gap-1.5"
-                    // A missing notifier is already explained above the grid;
-                    // a test through it could only fail with the hub's
-                    // routes[n] message, which names nothing on this card.
                     disabled={saving || !enabled || missing || test?.status === "sending"}
-                    aria-label={`Send a test through ${route.via}`}
+                    aria-label={`Send a test alert through ${route.via}`}
                     onClick={() => sendTest(route, index)}
                   >
                     <Send className="size-3.5" />
                     {test?.status === "sending" ? "Sending…" : "Send test"}
                   </Button>
-                  {test && test.status !== "sending" && <span className={cn("text-xs", test.status === "ok" ? "text-green-400" : "text-destructive")}>{test.message}</span>}
                 </div>
+                {test && test.status !== "sending" && (
+                  <div
+                    className={cn(
+                      "mt-3 flex items-start gap-2 rounded-md border px-3 py-2 text-xs",
+                      test.status === "ok"
+                        ? "border-green-500/20 bg-green-500/10 text-green-400"
+                        : "border-destructive/30 bg-destructive/10 text-destructive",
+                    )}
+                  >
+                    {test.status === "ok"
+                      ? <CheckCircle2 className="size-3.5 mt-px shrink-0" />
+                      : <AlertTriangle className="size-3.5 mt-px shrink-0" />}
+                    <span className="break-words">{test.message}</span>
+                  </div>
+                )}
               </div>
             )
           })}
         </div>
       )}
-      <Button
-        size="sm"
-        variant="outline"
-        disabled={saving || names.length === 0 || names.every((name) => routes.some((route) => route.via === name))}
-        onClick={() => {
-          const via = names.find((name) => !routes.some((route) => route.via === name))
-          if (via) saveInfra({ ...infra, enabled, routes: [...routes, { via, events: [] }] })
-        }}
-      >
-        <span className="mr-1 text-sm">+</span> Add route
-      </Button>
+
+      <div className="flex flex-col items-start gap-1">
+        <Button
+          size="sm"
+          variant="outline"
+          disabled={saving || !unroutedName}
+          onClick={openAddRoute}
+        >
+          <span className="mr-1 text-sm">+</span> Add route
+        </Button>
+        {/* Text, not the disabled button's `title`: a disabled Button sets
+            `disabled:pointer-events-none`, so its tooltip never fires — and
+            once a route exists the empty state that carries the same hint is
+            gone, leaving a greyed-out button with nothing explaining it. */}
+        {!unroutedName && (
+          <p className="text-xs text-muted-foreground">
+            {names.length === 0
+              ? "Add a channel first — an infrastructure route needs somewhere to post."
+              : "Every channel already carries a route. The hub allows one infrastructure route per channel."}
+          </p>
+        )}
+      </div>
+
+      {/* Add / edit route. Like its siblings, closing only closes: the openers
+          re-seed every field, so nothing is cleared on the way out and the
+          heading does not blank during the dialog's 200ms exit animation. */}
+      <Dialog open={showDialog} onOpenChange={setShowDialog}>
+        <DialogContent className="max-w-lg max-h-[90vh] overflow-y-auto p-0 gap-0">
+          <DialogTitle className="sr-only">
+            {dialogMode === "add" ? "Add infrastructure route" : `Edit the ${editVia} route`}
+          </DialogTitle>
+          <div className="flex items-center justify-between px-5 py-4 border-b border-border">
+            <h3 className="font-medium">{dialogMode === "add" ? "Add infrastructure route" : `Edit the ${editVia} route`}</h3>
+          </div>
+
+          <div className="p-5 space-y-4">
+            <div>
+              <label htmlFor="infra-route-via" className="text-xs text-muted-foreground mb-1 block">Channel</label>
+              {/* Every control below is disabled while this dialog's own save
+                  is in flight: saveRoute snapshots the draft at click time and
+                  closes on success, so an edit made during the round trip
+                  would be discarded with nothing on screen saying so. */}
+              <select
+                id="infra-route-via"
+                value={draftVia}
+                disabled={saving}
+                onChange={(e) => setDraftVia(e.target.value)}
+                className="w-full h-8 text-sm rounded-md border border-input bg-background px-3"
+              >
+                {/* A channel that no longer exists has no option of its own, so
+                    the controlled select would render blank while Save writes
+                    the dangling name straight back. Give it one, flagged. */}
+                {draftMissing && <option value={draftVia}>{draftVia} (channel no longer configured)</option>}
+                {viaOptions.map((name) => <option key={name} value={name}>{name}</option>)}
+              </select>
+              {draftMissing ? (
+                <p className="text-xs text-amber-400 mt-1">
+                  No channel named <span className="font-mono">{draftVia}</span> is configured, so nothing is delivered here — and the hub refuses to turn infrastructure alerts on while this route is left. Pick another channel, or remove the route below.
+                </p>
+              ) : (
+                <p className="text-xs text-muted-foreground mt-1">
+                  Infrastructure alerts land in this channel. A channel carries one infrastructure route, so the ones already routed are not listed.
+                </p>
+              )}
+            </div>
+
+            <div className="space-y-3 border-t border-border pt-4">
+              <div>
+                <div className="text-sm font-medium">What lands here</div>
+                <p className="text-xs text-muted-foreground mt-0.5">
+                  Dependency outages and provider usage limits are checked on the hub&apos;s own poll — the lifecycle switches above do not mute them.
+                </p>
+              </div>
+
+              {/* Receive-all is a choice, not the shape you fall into by
+                  unticking. The hub stores it as an empty list and reads that
+                  as "every alert type, including any added in a later
+                  version", so this pair is what keeps a narrowed route from
+                  silently becoming the firehose — and keeps the firehose
+                  reachable on purpose for an operator who wants the route to
+                  pick up types this hub does not have yet. */}
+              <div className="space-y-1" role="radiogroup" aria-label="Which alerts this route receives">
+                <label className="flex items-start gap-2 text-sm cursor-pointer rounded px-2 py-1 hover:bg-muted/50">
+                  <input
+                    type="radio"
+                    name="infra-route-scope"
+                    className="mt-1"
+                    checked={draftAll}
+                    disabled={saving}
+                    onChange={() => setDraftAll(true)}
+                  />
+                  <span className="min-w-0">
+                    All alert types
+                    <span className="block text-xs text-muted-foreground">
+                      Including any this hub adds in a later version.
+                    </span>
+                  </span>
+                </label>
+                <label className="flex items-start gap-2 text-sm cursor-pointer rounded px-2 py-1 hover:bg-muted/50">
+                  <input
+                    type="radio"
+                    name="infra-route-scope"
+                    className="mt-1"
+                    checked={!draftAll}
+                    disabled={saving}
+                    onChange={() => setDraftAll(false)}
+                  />
+                  <span className="min-w-0">
+                    Only the types you pick
+                    <span className="block text-xs text-muted-foreground">
+                      Anything you add to this hub later stays out until you come back and tick it.
+                    </span>
+                  </span>
+                </label>
+              </div>
+
+              {!draftAll && (
+                <>
+                  <div className="space-y-1">
+                    {eventTypes.map((eventType) => {
+                      const checked = draftEvents.includes(eventType)
+                      return (
+                        <label
+                          key={eventType}
+                          className="flex items-center gap-2 text-sm cursor-pointer rounded px-2 py-1 hover:bg-muted/50"
+                        >
+                          <input
+                            type="checkbox"
+                            aria-label={`${INFRA_EVENT_LABELS[eventType]} (${eventType})`}
+                            checked={checked}
+                            disabled={saving}
+                            onChange={(e) =>
+                              setDraftEvents(
+                                e.target.checked
+                                  ? [...draftEvents, eventType]
+                                  : draftEvents.filter((type) => type !== eventType),
+                              )
+                            }
+                          />
+                          <span className={cn(!checked && "text-muted-foreground")}>{INFRA_EVENT_LABELS[eventType]}</span>
+                          <code className="text-xs text-muted-foreground font-mono">{eventType}</code>
+                        </label>
+                      )
+                    })}
+                  </div>
+                  {/* The empty selection is refused here rather than saved: an
+                      empty list is exactly how the hub stores receive-all, so
+                      saving one would widen the route the operator was
+                      narrowing. Said in text beside the Save button it
+                      disables, since a disabled button carries no tooltip. */}
+                  {draftEvents.length === 0 && (
+                    <p className="text-xs text-amber-400 rounded-md border border-amber-500/20 bg-amber-500/10 px-3 py-2">
+                      Tick at least one alert type. The hub reads a route with nothing ticked as every alert type — if that is what you want, choose &quot;All alert types&quot; above.
+                    </p>
+                  )}
+                </>
+              )}
+            </div>
+          </div>
+
+          <div className="border-t border-border">
+            {/* The error sits with the buttons, never below the fold of a long
+                scrolling form. */}
+            {draftError && (
+              <div className="mx-5 mt-4 flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+                <AlertTriangle className="size-3.5 mt-px shrink-0" />
+                <span className="break-words">{draftError}</span>
+              </div>
+            )}
+            <div className="flex items-center justify-between px-5 py-4">
+              {dialogMode === "edit" && editIndex !== null && (
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="text-destructive hover:text-destructive"
+                  disabled={saving}
+                  onClick={() => removeRoute(editIndex)}
+                >
+                  <Trash2 className="size-3.5 mr-1" /> Remove route
+                </Button>
+              )}
+              <div className="flex items-center gap-2 ml-auto">
+                {/* Cancel throws the draft away: nothing here has reached the
+                    hub yet. */}
+                <Button size="sm" variant="outline" disabled={saving} onClick={() => setShowDialog(false)}>Cancel</Button>
+                <Button
+                  size="sm"
+                  disabled={saving || !draftVia || (!draftAll && draftEvents.length === 0)}
+                  onClick={saveRoute}
+                >
+                  {dialogMode === "add" ? "Add route" : "Save changes"}
+                </Button>
+              </div>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }
