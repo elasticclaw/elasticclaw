@@ -11,6 +11,12 @@ jobs:
   generate-release-notes:
     runs-on: ubuntu-latest
     if: ${{ !contains(github.ref_name, '-') }}  # skip prereleases
+    outputs:
+      title: ${{ steps.parsed.outputs.title }}
+      summary: ${{ steps.parsed.outputs.summary }}
+      whatsNew: ${{ steps.parsed.outputs.whatsNew }}
+      improvements: ${{ steps.parsed.outputs.improvements }}
+      fixes: ${{ steps.parsed.outputs.fixes }}
     steps:
       - name: Validate release tag
         run: |
@@ -333,3 +339,44 @@ jobs:
             - Summary: ${{ steps.parsed.outputs.summary }}
           commit-message: "docs: release notes for ${{ github.ref_name }}"
           delete-branch: true
+
+  notify-discord:
+    name: Announce on Discord
+    runs-on: ubuntu-latest
+    needs: generate-release-notes
+    permissions:
+      contents: read
+    env:
+      DISCORD_WEBHOOK: ${{ secrets.DISCORD_RELEASE_WEBHOOK }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Wait for the GitHub Release
+        if: env.DISCORD_WEBHOOK != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # The Release workflow fires off the same tag but runs in parallel, and
+          # it has to build binaries for five platforms first. Announcing before
+          # it finishes would link people to a release page with no downloads.
+          for _ in $(seq 1 60); do
+            if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+              exit 0
+            fi
+            sleep 30
+          done
+          echo "GitHub Release ${GITHUB_REF_NAME} did not appear within 30 minutes" >&2
+          exit 1
+
+      - name: Post changelog to Discord
+        if: env.DISCORD_WEBHOOK != ''
+        env:
+          TAG: ${{ github.ref_name }}
+          DISCORD_MODE: changelog
+          NOTES_TITLE: ${{ needs.generate-release-notes.outputs.title }}
+          NOTES_SUMMARY: ${{ needs.generate-release-notes.outputs.summary }}
+          NOTES_WHATS_NEW: ${{ needs.generate-release-notes.outputs.whatsNew }}
+          NOTES_IMPROVEMENTS: ${{ needs.generate-release-notes.outputs.improvements }}
+          NOTES_FIXES: ${{ needs.generate-release-notes.outputs.fixes }}
+        run: ./hack/discord-release-notify.sh

@@ -16,6 +16,8 @@ jobs:
     runs-on: depot-ubuntu-24.04
     permissions:
       contents: write
+    outputs:
+      prerelease: ${{ steps.semver.outputs.prerelease }}
 
     steps:
       - name: Validate release tag
@@ -205,3 +207,31 @@ jobs:
           git add "Formula/${FORMULA_FILE}"
           git diff --staged --quiet || git commit -m "${COMMIT_MSG}"
           git push
+
+  notify-discord:
+    name: Announce prerelease on Discord
+    runs-on: depot-ubuntu-24.04
+    needs: release
+    # Stable tags are announced by the release-notes workflow, which has the
+    # curated changelog. Only prereleases are announced from here.
+    if: needs.release.outputs.prerelease == 'true'
+    permissions:
+      contents: read
+    env:
+      DISCORD_WEBHOOK: ${{ secrets.DISCORD_RELEASE_WEBHOOK }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Post pull request list to Discord
+        if: env.DISCORD_WEBHOOK != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          DISCORD_MODE: prs
+        run: |
+          set -euo pipefail
+          # No curated notes exist for a prerelease, so reuse the pull request
+          # list that "generate_release_notes" already wrote into the release.
+          RELEASE_BODY="$(gh release view "$TAG" --json body --jq .body)"
+          export RELEASE_BODY
+          ./hack/discord-release-notify.sh
