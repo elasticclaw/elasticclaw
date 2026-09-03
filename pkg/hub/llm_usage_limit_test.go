@@ -789,3 +789,41 @@ func TestLLMUsageLimitLiftConfirmationIsAtomicWithRelatch(t *testing.T) {
 		}
 	}
 }
+
+// A released episode is forgotten after llmLimitEpisodeMemory — unless its
+// lift is still unproven. The record is what the proving turn confirms
+// against and what a restart re-derives the probe from; pruning it first
+// left the channel's "account capped" alert without a recovery forever (the
+// only claw on the key was offline through the release and turned hours
+// later), and a reseed after that had nothing to find.
+func TestLLMUsageLimitUnprovenReleaseOutlivesEpisodeMemory(t *testing.T) {
+	s, _ := NewTestServerWithConfig(t, nil, "", "", "")
+	limitClaw(t, s, "claw-limit-late", "faster", false)
+	s.handleLLMUsageLimit(nil, "claw-limit-late", types.LLMUsageLimit{Reason: types.LLMLimitUsage, RegainAt: now().Add(-time.Minute), Message: "capped"})
+	s.releaseLLMUsageLimit("faster", "test release", false)
+	if _, err := s.db.Exec(`UPDATE llm_usage_limits SET released_at=? WHERE key_id='faster'`, epochMillis(now().Add(-llmLimitEpisodeMemory-time.Hour))); err != nil {
+		t.Fatal(err)
+	}
+	s.releaseDueLLMUsageLimits()
+	if _, had := s.loadLLMUsageLimit("faster"); !had {
+		t.Fatal("the scheduler pruned a released record whose lift was never proven")
+	}
+
+	// The same restart-shaped gap: the probe set is gone, the durable state
+	// still has to be enough to re-arm it.
+	s.llmLimitMu.Lock()
+	s.llmLimitProbing = nil
+	s.llmLimitMu.Unlock()
+	s.seedLLMLimitProbes()
+	s.releaseDueLLMUsageLimits()
+	s.observeTurnOutcome(nil, "claw-limit-late", "msg-1", "Back to work.")
+	if got := strings.Join(infraEventTypes(t, s), ","); got != "provider_limit_opened,provider_limit_released" {
+		t.Fatalf("events after the late proving turn = %s, want the lift announced", got)
+	}
+
+	// Proven, and older than the memory window: now it is history.
+	s.releaseDueLLMUsageLimits()
+	if _, had := s.loadLLMUsageLimit("faster"); had {
+		t.Fatal("a proven, expired episode was kept")
+	}
+}

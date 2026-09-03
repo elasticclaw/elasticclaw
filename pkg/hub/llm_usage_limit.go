@@ -422,11 +422,7 @@ func (s *Server) releaseDueLLMUsageLimits() {
 	nowAt := now()
 	for _, record := range s.llmUsageLimitRecords() {
 		if !record.Active() {
-			if nowAt.Sub(record.ReleasedAt) > llmLimitEpisodeMemory {
-				if _, err := s.db.Exec(`DELETE FROM llm_usage_limits WHERE key_id=? AND released_at<>0`, record.KeyID); err != nil {
-					log.Printf("[llm-limit] prune released limit for key %q: %v", record.KeyID, err)
-				}
-			}
+			s.pruneReleasedLLMUsageLimit(record, nowAt)
 			continue
 		}
 		// Exhausted limits stay latched on purpose: the block is real, the hub
@@ -435,6 +431,29 @@ func (s *Server) releaseDueLLMUsageLimits() {
 			continue
 		}
 		s.releaseLLMUsageLimit(record.KeyID, llmLimitReleaseReason(record), true)
+	}
+}
+
+// pruneReleasedLLMUsageLimit forgets a released episode once it is old
+// enough (llmLimitEpisodeMemory) — but not while its lift is still unproven.
+// The released record is the only durable trace of a pending probe: the
+// proving turn reads it (confirmLLMLimitLift) and a restart re-derives the
+// probe from it (seedLLMLimitProbes). Pruning it first left the operator's
+// channel with an "account capped" alert whose recovery could never arrive:
+// the claw that was offline through the release wakes hours later, authors
+// its turn, and finds nothing to confirm. An unproven release is not an
+// episode that ended, so it keeps its memory until a turn says otherwise.
+func (s *Server) pruneReleasedLLMUsageLimit(record llmUsageLimitRecord, nowAt time.Time) {
+	if nowAt.Sub(record.ReleasedAt) <= llmLimitEpisodeMemory {
+		return
+	}
+	s.llmLimitMu.Lock()
+	defer s.llmLimitMu.Unlock()
+	if s.llmLimitProbing[record.KeyID] {
+		return
+	}
+	if _, err := s.db.Exec(`DELETE FROM llm_usage_limits WHERE key_id=? AND released_at<>0`, record.KeyID); err != nil {
+		log.Printf("[llm-limit] prune released limit for key %q: %v", record.KeyID, err)
 	}
 }
 
