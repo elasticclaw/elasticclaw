@@ -22,9 +22,14 @@ const (
 // Infra uses its own cursor because these events describe the fleet, not a
 // task run. A route that is temporarily broken must not make a healthy route
 // skip an outage it never received.
-func infraWatermarkKey(via string) string { return "infra_watermark_rowid:" + via }
+const (
+	infraWatermarkKeyPrefix = "infra_watermark_rowid:"
+	infraTransientKeyPrefix = "infra_transient:"
+)
+
+func infraWatermarkKey(via string) string { return infraWatermarkKeyPrefix + via }
 func infraFailureKey(rowid int64, via string) string {
-	return fmt.Sprintf("infra_transient:%s:%d", via, rowid)
+	return fmt.Sprintf("%s%s:%d", infraTransientKeyPrefix, via, rowid)
 }
 
 type infraEventRow struct {
@@ -118,6 +123,10 @@ func (s *Server) stopInfraNotifier(timeout time.Duration) {
 func (s *Server) infraNotifierTick(ctx context.Context, nowAt time.Time) {
 	cfg := s.notificationsConfig()
 	if cfg == nil || !cfg.Infra.IsEnabled() {
+		// Off means no route is configured: drop every cursor so a later
+		// re-enable behaves like a fresh enable instead of flushing the
+		// disabled window into the channel.
+		s.pruneInfraRouteState(nil)
 		return
 	}
 	if err := types.ValidateInfraNotificationsConfig(cfg); err != nil {
@@ -125,6 +134,7 @@ func (s *Server) infraNotifierTick(ctx context.Context, nowAt time.Time) {
 		return
 	}
 	s.clearPollWarning("infra-config")
+	s.pruneInfraRouteState(infraConfiguredRoutes(cfg.Infra))
 	s.flushPendingInfraDeliveries()
 	for _, route := range cfg.Infra.Routes {
 		via := strings.TrimSpace(route.Via)
@@ -236,6 +246,63 @@ func (s *Server) deliverInfraRoute(ctx context.Context, nowAt time.Time, via str
 		s.setNotifierStateInt64(infraWatermarkKey(via), e.RowID)
 	}
 	return nil
+}
+
+func infraConfiguredRoutes(ic *types.InfraNotificationsConfig) map[string]bool {
+	configured := map[string]bool{}
+	if ic == nil {
+		return configured
+	}
+	for _, route := range ic.Routes {
+		if via := strings.TrimSpace(route.Via); via != "" {
+			configured[via] = true
+		}
+	}
+	return configured
+}
+
+// infraStateVia recovers the route name from either per-route state key.
+func infraStateVia(key string) string {
+	if strings.HasPrefix(key, infraTransientKeyPrefix) {
+		rest := strings.TrimPrefix(key, infraTransientKeyPrefix)
+		if i := strings.LastIndex(rest, ":"); i >= 0 {
+			return rest[:i]
+		}
+		return rest
+	}
+	return strings.TrimPrefix(key, infraWatermarkKeyPrefix)
+}
+
+// pruneInfraRouteState drops the cursor and transient-failure counters of
+// routes that are not configured right now, for the reason
+// pruneLifecycleRouteState does: nothing else clears them, so a route removed
+// from notifications.infra.routes — or the whole block disabled — and later
+// re-added under the same via would resume from its stale cursor and replay
+// the entire absence window into its channel as live outages. Dropping the
+// state makes a re-added route behave exactly like a newly added one: it
+// baselines at the head of the stream on its first delivery.
+func (s *Server) pruneInfraRouteState(configured map[string]bool) {
+	rows, err := s.db.Query(`SELECT key FROM slack_notifier_state WHERE key LIKE ? OR key LIKE ?`, infraWatermarkKeyPrefix+"%", infraTransientKeyPrefix+"%")
+	if err != nil {
+		log.Printf("[notify] list infra route state: %v", err)
+		return
+	}
+	var stale []string
+	for rows.Next() {
+		var key string
+		if err := rows.Scan(&key); err != nil {
+			log.Printf("[notify] list infra route state: %v", err)
+			rows.Close()
+			return
+		}
+		if !configured[infraStateVia(key)] {
+			stale = append(stale, key)
+		}
+	}
+	rows.Close()
+	for _, key := range stale {
+		s.clearNotifierState(key)
+	}
 }
 
 // infraDeliveryKey identifies one stashed infra delivery row.

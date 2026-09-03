@@ -384,3 +384,69 @@ func TestBuildInfraMessageRendersParkedClaws(t *testing.T) {
 		})
 	}
 }
+
+// Regression: a route removed from notifications.infra.routes and later
+// re-added under the same via must be re-baselined at the head of the stream,
+// not resume from the cursor it left behind and replay the absence window.
+func TestPruneInfraRouteStateReAddedRouteDoesNotReplayAbsenceWindow(t *testing.T) {
+	s, _ := NewTestServerWithConfig(t, nil, "", "", "")
+	base := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	establishInfraRoute(t, s, "ops")
+	s.setNotifierStateInt64(infraFailureKey(1, "ops"), 3)
+
+	// Route removed: the absence window records an incident start to finish.
+	s.pruneInfraRouteState(map[string]bool{"eng": true})
+	mustRecordInfraEvent(t, s, "ev-absent-down", "dependency_down", map[string]any{"name": "Anthropic"}, base)
+	mustRecordInfraEvent(t, s, "ev-absent-recovered", "dependency_recovered", map[string]any{"name": "Anthropic"}, base.Add(time.Minute))
+	if _, found, _ := s.notifierStateInt64(infraFailureKey(1, "ops")); found {
+		t.Fatal("transient-failure counter of the removed route survived the prune")
+	}
+
+	// Route re-added.
+	n := &recordingNotifier{}
+	route := types.InfraRoute{Via: "ops"}
+	if err := s.deliverInfraRoute(context.Background(), base.Add(2*time.Minute), "ops", route, n); err != nil {
+		t.Fatal(err)
+	}
+	if len(n.sent) != 0 {
+		t.Fatalf("re-added route replayed %d events from its absence window", len(n.sent))
+	}
+	mustRecordInfraEvent(t, s, "ev-live", "provider_limit_opened", map[string]any{"name": "OpenAI"}, base.Add(3*time.Minute))
+	if err := s.deliverInfraRoute(context.Background(), base.Add(3*time.Minute), "ops", route, n); err != nil {
+		t.Fatal(err)
+	}
+	if len(n.sent) != 1 || n.sent[0].Subject != "OpenAI" {
+		t.Fatalf("re-added route missed its first live event: sent=%v", n.sent)
+	}
+	// A configured route keeps its cursor across ticks.
+	s.pruneInfraRouteState(map[string]bool{"ops": true})
+	if _, found, _ := s.notifierStateInt64(infraWatermarkKey("ops")); !found {
+		t.Fatal("prune dropped the cursor of a configured route")
+	}
+}
+
+// Regression: disabling infrastructure alerts and re-enabling them a week
+// later must not flush the disabled window into the channel as live outages.
+func TestInfraNotifierTickDisabledWindowIsNotReplayed(t *testing.T) {
+	disabled := false
+	s, _ := NewTestServerWithConfig(t, &types.HubConfig{Notifications: &types.NotificationsConfig{
+		Notifiers: map[string]types.NotifierConfig{"ops": {Type: "slack", Settings: map[string]any{"channel": "C0123ABCD", "token_secret": "slack_token"}}},
+		Infra:     &types.InfraNotificationsConfig{Enabled: &disabled, Routes: []types.InfraRoute{{Via: "ops"}}},
+	}}, "", "", "")
+	base := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	establishInfraRoute(t, s, "ops")
+
+	s.infraNotifierTick(context.Background(), base)
+	mustRecordInfraEvent(t, s, "ev-while-off", "dependency_down", map[string]any{"name": "Anthropic"}, base.Add(time.Minute))
+	s.infraNotifierTick(context.Background(), base.Add(2*time.Minute))
+
+	// Re-enabled: the route's first delivery must see nothing from the window.
+	n := &recordingNotifier{}
+	if err := s.deliverInfraRoute(context.Background(), base.Add(3*time.Minute), "ops", types.InfraRoute{Via: "ops"}, n); err != nil {
+		t.Fatal(err)
+	}
+	if len(n.sent) != 0 {
+		t.Fatalf("re-enabled route replayed %d events from the disabled window", len(n.sent))
+	}
+}
+
