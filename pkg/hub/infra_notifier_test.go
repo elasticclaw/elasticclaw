@@ -487,3 +487,96 @@ func TestBuildInfraMessageProviderLimitFieldsMatchTheLatch(t *testing.T) {
 		t.Fatalf("re-latch body reads like a first sighting: %q", retry.Body)
 	}
 }
+
+// A recovery whose opening alert this route discarded at the transient cap
+// must not read as good news about an incident the channel never heard of:
+// it is delivered, but relabelled as a missed alert.
+func TestDeliverInfraRouteRecoveryAfterDroppedOpeningSaysSo(t *testing.T) {
+	s, _ := NewTestServerWithConfig(t, nil, "", "", "")
+	base := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	establishInfraRoute(t, s, "ops")
+	mustRecordInfraEvent(t, s, "dependency_down:anthropic:100", "dependency_down", map[string]any{"name": "Anthropic"}, base)
+	mustRecordInfraEvent(t, s, "dependency_recovered:anthropic:100", "dependency_recovered", map[string]any{"name": "Anthropic"}, base.Add(time.Second))
+
+	n := &recordingNotifier{failN: infraMaxTransientFailures}
+	route := types.InfraRoute{Via: "ops"}
+	for i := 0; i < infraMaxTransientFailures; i++ {
+		if err := s.deliverInfraRoute(context.Background(), base, "ops", route, n); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(n.sent) != 1 {
+		t.Fatalf("sent %d messages, want the recovery alone", len(n.sent))
+	}
+	got := n.sent[0]
+	if got.Severity != notify.SeverityWarning || !strings.Contains(got.Body, "never received the alert that opened this incident") {
+		t.Fatalf("recovery after a dropped opening was not relabelled: severity=%v body=%q", got.Severity, got.Body)
+	}
+	if !hasField(got, "Opening alert", "not delivered") {
+		t.Fatalf("recovery after a dropped opening lacks the field: %#v", got.Fields)
+	}
+
+	// A different route that delivered the opening gets the plain recovery.
+	establishInfraRoute(t, s, "oncall")
+	mustRecordInfraEvent(t, s, "dependency_down:openai:200", "dependency_down", map[string]any{"name": "OpenAI"}, base.Add(2*time.Second))
+	mustRecordInfraEvent(t, s, "dependency_recovered:openai:200", "dependency_recovered", map[string]any{"name": "OpenAI"}, base.Add(3*time.Second))
+	healthy := &recordingNotifier{}
+	if err := s.deliverInfraRoute(context.Background(), base, "oncall", types.InfraRoute{Via: "oncall"}, healthy); err != nil {
+		t.Fatal(err)
+	}
+	if len(healthy.sent) != 2 || healthy.sent[1].Severity != notify.SeveritySuccess || strings.Contains(healthy.sent[1].Body, "never received") {
+		t.Fatalf("a recovery whose opening was delivered was relabelled: %#v", healthy.sent)
+	}
+}
+
+// The episode pairing for provider caps spans every retry of the episode: a
+// cap whose first "capped" alert reached the channel is a known incident even
+// when a later re-latch alert was dropped.
+func TestInfraOpeningKeyPatternsPairRecoveriesWithTheirEpisode(t *testing.T) {
+	s, _ := NewTestServerWithConfig(t, nil, "", "", "")
+	base := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	establishInfraRoute(t, s, "ops")
+	mustRecordInfraEvent(t, s, "provider_limit_opened:key_ab:500:0", "provider_limit_opened", map[string]any{"provider": "anthropic"}, base)
+	mustRecordInfraEvent(t, s, "provider_limit_opened:key_ab:500:1", "provider_limit_opened", map[string]any{"provider": "anthropic"}, base.Add(time.Second))
+	mustRecordInfraEvent(t, s, "provider_limit_released:key_ab:500:1", "provider_limit_released", map[string]any{"provider": "anthropic"}, base.Add(2*time.Second))
+	route := types.InfraRoute{Via: "ops"}
+	first := &recordingNotifier{}
+	if err := s.deliverInfraRoute(context.Background(), base, "ops", route, first); err != nil {
+		t.Fatal(err)
+	}
+	if len(first.sent) != 3 {
+		t.Fatalf("sent %d, want 3", len(first.sent))
+	}
+	if first.sent[2].Severity != notify.SeveritySuccess {
+		t.Fatalf("released after delivered openings was relabelled: %#v", first.sent[2])
+	}
+
+	// Mark the retry-1 alert as dropped after the fact: the retry-0 alert
+	// still reached the channel, so the episode is known.
+	if _, err := s.db.Exec(`UPDATE infra_notification_deliveries SET status=? WHERE event_rowid=(SELECT rowid FROM infra_events WHERE event_key='provider_limit_opened:key_ab:500:1')`, notificationDeliveryStatusFailed); err != nil {
+		t.Fatal(err)
+	}
+	row := infraEventRow{EventKey: "provider_limit_released:key_ab:500:1", EventType: "provider_limit_released", RowID: 1 << 40}
+	if missed, err := s.infraRouteMissedOpening(row, "ops"); err != nil || missed {
+		t.Fatalf("episode with one delivered opening reported missed=%v err=%v", missed, err)
+	}
+	if _, err := s.db.Exec(`UPDATE infra_notification_deliveries SET status=? WHERE notifier='ops'`, notificationDeliveryStatusFailed); err != nil {
+		t.Fatal(err)
+	}
+	if missed, err := s.infraRouteMissedOpening(row, "ops"); err != nil || !missed {
+		t.Fatalf("episode with every opening dropped reported missed=%v err=%v", missed, err)
+	}
+	// An opening this route never saw (baselined past it) is not a drop.
+	if missed, err := s.infraRouteMissedOpening(row, "newcomer"); err != nil || missed {
+		t.Fatalf("route without any delivery reported missed=%v err=%v", missed, err)
+	}
+}
+
+func hasField(msg notify.Message, label, value string) bool {
+	for _, field := range msg.Fields {
+		if field.Label == label && field.Value == value {
+			return true
+		}
+	}
+	return false
+}

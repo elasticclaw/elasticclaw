@@ -33,10 +33,14 @@ func infraFailureKey(rowid int64, via string) string {
 }
 
 type infraEventRow struct {
-	RowID              int64
-	EventType, Subject string
-	Detail             map[string]any
-	OccurredAt         time.Time
+	RowID                        int64
+	EventKey, EventType, Subject string
+	Detail                       map[string]any
+	OccurredAt                   time.Time
+	// MissedOpening marks a recovery whose opening alert this route
+	// discarded (see infraRouteMissedOpening); the message says so instead
+	// of celebrating the end of an incident the channel never heard of.
+	MissedOpening bool
 }
 
 // initInfraNotifierBaseline stamps every configured route's watermark at the
@@ -173,7 +177,7 @@ func (s *Server) deliverInfraRoute(ctx context.Context, nowAt time.Time, via str
 	// with a single pooled connection, so a query/exec nested inside these
 	// still-open rows would block forever waiting for a connection that
 	// only this same in-flight Query holds.
-	rows, err := s.db.Query(`SELECT rowid,event_type,subject,detail,occurred_at FROM infra_events WHERE rowid>? ORDER BY rowid LIMIT 200`, watermark)
+	rows, err := s.db.Query(`SELECT rowid,event_key,event_type,subject,detail,occurred_at FROM infra_events WHERE rowid>? ORDER BY rowid LIMIT 200`, watermark)
 	if err != nil {
 		return err
 	}
@@ -182,7 +186,7 @@ func (s *Server) deliverInfraRoute(ctx context.Context, nowAt time.Time, via str
 		var e infraEventRow
 		var raw string
 		var occurred int64
-		if err := rows.Scan(&e.RowID, &e.EventType, &e.Subject, &raw, &occurred); err != nil {
+		if err := rows.Scan(&e.RowID, &e.EventKey, &e.EventType, &e.Subject, &raw, &occurred); err != nil {
 			rows.Close()
 			return err
 		}
@@ -219,6 +223,11 @@ func (s *Server) deliverInfraRoute(ctx context.Context, nowAt time.Time, via str
 			s.setNotifierStateInt64(infraWatermarkKey(via), e.RowID)
 			continue
 		}
+		missed, err := s.infraRouteMissedOpening(e, via)
+		if err != nil {
+			return err
+		}
+		e.MissedOpening = missed
 		sendCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 		_, sendErr := n.Send(sendCtx, buildInfraMessage(e, nowAt))
 		cancel()
@@ -246,6 +255,57 @@ func (s *Server) deliverInfraRoute(ctx context.Context, nowAt time.Time, via str
 		s.setNotifierStateInt64(infraWatermarkKey(via), e.RowID)
 	}
 	return nil
+}
+
+// infraOpeningKeyPatterns names the events that opened the incident a
+// recovery closes, as SQL LIKE patterns. The producers build recovery keys
+// from the same suffix as their openings — dependency_recovered:<id>:<since>
+// against dependency_down/degraded:<id>:<since> (plus their ":repeat:" keys),
+// provider_limit_released:<key>:<detected>:<retry> against every opened or
+// exhausted event of that episode — so the pairing needs no extra bookkeeping.
+func infraOpeningKeyPatterns(e infraEventRow) []string {
+	switch e.EventType {
+	case "dependency_recovered":
+		suffix := strings.TrimPrefix(e.EventKey, "dependency_recovered:")
+		return []string{"dependency_down:" + suffix, "dependency_down:" + suffix + ":%", "dependency_degraded:" + suffix, "dependency_degraded:" + suffix + ":%"}
+	case "provider_limit_released":
+		episode := strings.TrimPrefix(e.EventKey, "provider_limit_released:")
+		if i := strings.LastIndex(episode, ":"); i >= 0 {
+			episode = episode[:i]
+		}
+		return []string{"provider_limit_opened:" + episode + ":%", "provider_limit_exhausted:" + episode + ":%"}
+	}
+	return nil
+}
+
+// infraRouteMissedOpening reports whether this route discarded every opening
+// alert of the incident e closes. The transient-failure cap has to give up on
+// an alert eventually, or one poisoned send wedges the route forever; but
+// the recovery that follows must not then read as good news about an outage
+// the channel was never told of. An opening the route never saw at all (a
+// route baselined mid-incident) is history, not a dropped alert, and the
+// recovery stands on its own.
+func (s *Server) infraRouteMissedOpening(e infraEventRow, via string) (bool, error) {
+	patterns := infraOpeningKeyPatterns(e)
+	if len(patterns) == 0 {
+		return false, nil
+	}
+	clauses := make([]string, 0, len(patterns))
+	args := []any{via, e.RowID}
+	for _, pattern := range patterns {
+		clauses = append(clauses, "ev.event_key LIKE ?")
+		args = append(args, pattern)
+	}
+	var failed, sent int
+	err := s.db.QueryRow(`SELECT
+			COALESCE(SUM(d.status=?),0), COALESCE(SUM(d.status=?),0)
+		FROM infra_events ev JOIN infra_notification_deliveries d ON d.event_rowid=ev.rowid AND d.notifier=?
+		WHERE ev.rowid<? AND (`+strings.Join(clauses, " OR ")+`)`,
+		append([]any{notificationDeliveryStatusFailed, notificationDeliveryStatusSent}, args...)...).Scan(&failed, &sent)
+	if err != nil {
+		return false, err
+	}
+	return failed > 0 && sent == 0, nil
 }
 
 func infraConfiguredRoutes(ic *types.InfraNotificationsConfig) map[string]bool {
@@ -399,6 +459,11 @@ func buildInfraMessage(e infraEventRow, _ time.Time) notify.Message {
 		body += "\n" + msg
 	}
 	fields := []notify.Field{{Label: "Event", Value: strings.ReplaceAll(e.EventType, "_", " ")}}
+	if e.MissedOpening {
+		style.severity = notify.SeverityWarning
+		body = fmt.Sprintf("This channel never received the alert that opened this incident: the hub gave up delivering it after %d failed attempts. Check the notifier and the hub log for [notify] errors.\n%s", infraMaxTransientFailures, body)
+		fields = append(fields, notify.Field{Label: "Opening alert", Value: "not delivered"})
+	}
 	if strings.HasPrefix(e.EventType, "dependency_") {
 		if statusPage := stringValue(e.Detail, "status_page"); statusPage != "" {
 			fields = append(fields, notify.Field{Label: "Status page", Value: statusPage})

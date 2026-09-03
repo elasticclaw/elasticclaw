@@ -127,6 +127,7 @@ func (s *Server) runDoctorChecks(ctx context.Context) DoctorResponse {
 	// --- Notifications ---
 	checks = append(checks, s.checkNotifications(hubCfg)...)
 	checks = append(checks, s.checkNotifyActions(hubCfg)...)
+	checks = append(checks, s.checkInfraDeliveries(ctx)...)
 
 	// --- Hub Settings ---
 	checks = append(checks, s.checkHubSettings(hubCfg)...)
