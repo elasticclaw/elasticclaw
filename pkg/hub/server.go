@@ -8959,6 +8959,26 @@ func (s *Server) enqueueSessionLostResume(clawID, prefix, marker string) {
 	// incident even when the rest of the wording is unchanged.
 	b.WriteString(fmt.Sprintf("\n\n<!-- %s -->", marker))
 	log.Printf("[watchdog] enqueueing %s resume for %s", marker, shortID(clawID))
+	// A lost session is a new unit of work, so it re-arms the idle auto-resume
+	// budget for the same reason resetClawForRetry does: what the previous
+	// session spent of the per-work-unit cap (agentIdleResumeMaxAttempts) says
+	// nothing about how the agent that replaces it behaves, and carrying the
+	// count over hands an amnesiac agent a spent budget and no idle recovery.
+	// This funnel covers both callers that produce one — the process restart
+	// and the session rotation — and it sits after the connected/bootstrap_ok
+	// guard above so a claw that is not actually getting a resume is untouched.
+	//
+	// idle_resume_at goes with it here, unlike the stage transition: the latch
+	// keys on the idle stretch's anchor, and lastTurnFinishedAt is seeded on
+	// reconnect from the last claw message, which can land within
+	// agentIdleStretchSlack of a latch the DEAD session earned. Leaving it
+	// would then read as "this stretch was already handled" on every tick and
+	// veto the resume permanently. Nothing is lost by clearing it: what
+	// protects a connection whose turn state is invisible is
+	// agentIdleResumeBlindGrace, not this latch.
+	if _, err := s.db.Exec(`UPDATE claws SET idle_resume_count=0, idle_resume_at=0 WHERE id=?`, clawID); err != nil {
+		log.Printf("[watchdog] re-arm idle resume budget for %s: %v", shortID(clawID), err)
+	}
 	s.injectHubMessageByID(clawID, b.String())
 }
 

@@ -231,8 +231,14 @@ func TestResetClawForRetryResetsIdleResumeBudget(t *testing.T) {
 	if count != 0 {
 		t.Fatalf("resetClawForRetry left idle_resume_count=%d, want 0", count)
 	}
-	if at != latch {
-		t.Fatalf("resetClawForRetry moved idle_resume_at to %d, want %d", at, latch)
+	// The latch goes too, and this is the half that is easy to get wrong. The
+	// successor is a different session; on reconnect its lastTurnFinishedAt is
+	// seeded from the last claw message, so its first idle stretch can anchor
+	// within agentIdleStretchSlack of a latch the DEAD session earned. Leave
+	// the latch and checkAgentIdleResume reads "already handled" forever — a
+	// budget that was just zeroed and can never be spent.
+	if at != 0 {
+		t.Fatalf("resetClawForRetry left idle_resume_at=%d, want 0", at)
 	}
 }
 

@@ -146,8 +146,9 @@ func migrate(db *sql.DB) error {
 	// runaway cap (agentIdleResumeMaxAttempts): a claw that wakes, replies
 	// nothing, and idles again would otherwise be poked forever, since each
 	// wake clears the per-stretch latch. It is zeroed on a won pipeline stage
-	// transition and on sandbox replacement — a lifetime count let pokes spent
-	// harmlessly in one stage leave the claw with no recovery in the next.
+	// transition, on sandbox replacement, and on a lost/re-briefed session — a
+	// lifetime count let pokes spent harmlessly in one stage leave the claw
+	// with no recovery in the next.
 	if err := addColumn(db, "claws", "idle_resume_count", `INTEGER NOT NULL DEFAULT 0`); err != nil {
 		return err
 	}

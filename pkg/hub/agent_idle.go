@@ -429,8 +429,13 @@ const (
 	// agentIdleResumeMaxAttempts bounds the resumes a claw can receive within
 	// ONE unit of work. The counter (claws.idle_resume_count) is reset when the
 	// unit changes: on a won pipeline stage transition
-	// (claimPipelineStageTransition) and when the sandbox is replaced with a
-	// new session (resetClawForRetry). It is NOT reset per stretch, see
+	// (claimPipelineStageTransition), when the sandbox is replaced with a new
+	// session (resetClawForRetry), and when the session itself is lost and
+	// re-briefed (enqueueSessionLostResume, which covers both the process
+	// restart and the session rotation). The last two are the same idea as the
+	// first — an agent with no memory of the earlier conversation is starting
+	// its unit of work over — and missing either of them leaves the identical
+	// hole this cap-scoping exists to close. It is NOT reset per stretch, see
 	// clearAgentIdleResumeLatch.
 	//
 	// The PRIMARY backstop is the existing no-progress watchdog: a resume that

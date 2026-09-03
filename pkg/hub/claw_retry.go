@@ -500,17 +500,27 @@ func (s *Server) resetClawForRetry(tenantID, clawID, checkpointID, bootstrapStat
 	// sandbox a spent budget and no idle recovery. It lives in this statement
 	// rather than a second one so the reset is bound to the same status guard
 	// and cannot apply to a claw that was not actually replaced.
-	// idle_resume_at is NOT cleared: it keys on the stretch anchor, and the
-	// successor's first finished turn (the re-brief) moves that anchor past it,
-	// which is when checkAgentIdleResume re-arms the latch itself. Clearing it
-	// here would only ever matter for a successor that never finishes a turn,
-	// and a never-turned connection is exactly the state the resume must not
-	// poke on the strength of a stale latch (see the reconnect tests).
+	//
+	// idle_resume_at is cleared with it. It is the once-per-stretch dedupe
+	// latch, and unlike a stage transition — where the claw keeps its session
+	// and clearing the latch would let the SAME idle stretch be poked twice —
+	// the successor here is a different session whose stretch anchor is not
+	// comparable to the predecessor's. Worse, it can collide with it:
+	// lastTurnFinishedAt is seeded on reconnect from the last claw message
+	// (server.go), so a successor whose re-brief delivery aborts before any
+	// turn finishes can anchor within agentIdleStretchSlack of a latch the
+	// dead session earned, and checkAgentIdleResume would then read "this
+	// stretch was already handled" on every tick and veto the resume forever —
+	// a zeroed budget that cannot be spent. Clearing costs nothing: the state
+	// this latch is sometimes credited with protecting, a connection whose
+	// in-flight turn is invisible, is protected by agentIdleResumeBlindGrace,
+	// which is an upper bound rather than a permanent veto (see
+	// TestAgentIdleResumeFiresAfterTheBlindWindowElapses).
 	res, err := s.db.Exec(`
 		UPDATE claws
 		   SET status='provisioning', bootstrap_ok=0, bootstrap_status=?, bootstrap_diagnostic=?,
 		       provider_id='', ssh_host='', ssh_port=0, ssh_user='', restore_checkpoint_id=?,
-		       rebrief_pending=1, idle_resume_count=0
+		       rebrief_pending=1, idle_resume_count=0, idle_resume_at=0
 		 WHERE id=? AND tenant_id=? AND status IN ('error','offline')`,
 		bootstrapStatus, bootstrapDiagnostic, checkpointID, clawID, tenantID)
 	if err != nil {

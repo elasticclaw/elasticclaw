@@ -526,3 +526,55 @@ func TestAgentIdleResumeBudgetRearmsOnStageTransition(t *testing.T) {
 		t.Fatalf("after the second transition: idle_resume_at=%d count=%d, want latch %d kept and count 0", at2, count, at)
 	}
 }
+
+// A lost session re-arms the resume budget, for both callers that produce one.
+// Without this, the NEXT-647 shape reappears with a different trigger: the cap
+// is spent inside a stage, a lock conflict rotates the session, and the
+// amnesiac agent that takes over inherits a spent budget while its stage never
+// changes — so nothing at all can wake it.
+func TestEnqueueSessionLostResumeRearmsIdleResumeBudget(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		prefix string
+	}{
+		{"process restart", restartResumePrefix},
+		{"session rotation", sessionRotatedResumePrefix},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, db := NewTestServerWithConfig(t, nil, "", "", "")
+			const clawID = "claw-session-lost-budget"
+			if _, err := db.Exec(`INSERT INTO claws(id, tenant_id, name, status, bootstrap_ok, pipeline_stage, idle_resume_at, idle_resume_count, created_at) VALUES(?,?,?,?,?,?,?,?,datetime('now'))`,
+				clawID, "test-tenant-id", "session lost", "connected", 1, "review_loop", int64(1_700_000_000_000), agentIdleResumeMaxAttempts); err != nil {
+				t.Fatalf("seed claw: %v", err)
+			}
+
+			s.enqueueSessionLostResume(clawID, tc.prefix, "marker-"+tc.name)
+
+			at, count := clawIdleResumeState(t, db, clawID)
+			if count != 0 {
+				t.Fatalf("session-lost resume left idle_resume_count=%d, want 0", count)
+			}
+			if at != 0 {
+				t.Fatalf("session-lost resume left idle_resume_at=%d, want 0", at)
+			}
+		})
+	}
+}
+
+// The re-arm sits behind the same guard as the resume itself: a claw that is
+// not getting a resume prompt must not have its budget silently refilled.
+func TestEnqueueSessionLostResumeLeavesBudgetWhenClawIneligible(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, nil, "", "", "")
+	const clawID = "claw-session-lost-ineligible"
+	if _, err := db.Exec(`INSERT INTO claws(id, tenant_id, name, status, bootstrap_ok, pipeline_stage, idle_resume_at, idle_resume_count, created_at) VALUES(?,?,?,?,?,?,?,?,datetime('now'))`,
+		clawID, "test-tenant-id", "not connected", "offline", 1, "review_loop", int64(1_700_000_000_000), agentIdleResumeMaxAttempts); err != nil {
+		t.Fatalf("seed claw: %v", err)
+	}
+
+	s.enqueueSessionLostResume(clawID, restartResumePrefix, "ineligible-marker")
+
+	_, count := clawIdleResumeState(t, db, clawID)
+	if count != agentIdleResumeMaxAttempts {
+		t.Fatalf("budget was re-armed for an ineligible claw: idle_resume_count=%d, want %d", count, agentIdleResumeMaxAttempts)
+	}
+}
