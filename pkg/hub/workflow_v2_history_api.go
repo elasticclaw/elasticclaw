@@ -184,6 +184,43 @@ func (s *Server) lookupV2AttemptClawID(ctx context.Context, w http.ResponseWrite
 	return clawID, true
 }
 
+// queryWorkflowV2TransitionsForClaw returns synthetic state-transition messages
+// for any v2 workflow run whose attempt uses the given claw. The messages have
+// role "state" so they can be rendered in the main chat timeline alongside
+// user/claw messages.
+func (s *Server) queryWorkflowV2TransitionsForClaw(ctx context.Context, tenantID, clawID string) ([]types.HubMessage, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT t.id, t.from_state, t.to_state, t.created_at
+		FROM workflow_v2_transitions t
+		JOIN workflow_v2_attempts a ON a.run_id = t.run_id
+		JOIN workflow_v2_runs r ON r.id = a.run_id
+		WHERE a.claw_id = ? AND r.tenant_id = ?
+		ORDER BY t.created_at ASC`, clawID, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var msgs []types.HubMessage
+	for rows.Next() {
+		var id, fromState, toState string
+		var createdAtMs int64
+		if err := rows.Scan(&id, &fromState, &toState, &createdAtMs); err != nil {
+			return nil, err
+		}
+		msgs = append(msgs, types.HubMessage{
+			ID:        "transition-" + id,
+			ClawID:    clawID,
+			TenantID:  tenantID,
+			Role:      "state",
+			Content:   fmt.Sprintf("Entered state: %s (from %s)", toState, fromState),
+			Format:    "workflow:state",
+			CreatedAt: time.UnixMilli(createdAtMs).UTC(),
+		})
+	}
+	return msgs, rows.Err()
+}
+
 // queryActivityMessages returns activity messages for a claw, applying the same
 // filtering and authorization used by /api/messages/{clawID}/activity.
 func (s *Server) queryActivityMessages(w http.ResponseWriter, r *http.Request, clawID string) {

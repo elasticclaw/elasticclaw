@@ -2321,7 +2321,13 @@ func (s *Server) handleMessageTimeline(w http.ResponseWriter, r *http.Request, t
 		return
 	}
 
-	if len(rows) == 0 {
+	stateMsgs, err := s.queryWorkflowV2TransitionsForClaw(r.Context(), tenantID, clawID)
+	if err != nil {
+		http.Error(w, "db error", http.StatusInternalServerError)
+		return
+	}
+
+	if len(rows) == 0 && len(stateMsgs) == 0 {
 		summary, err := s.activitySummary(clawID, tenantID, nil, parseTimeCursor(before), "", before)
 		if err != nil {
 			http.Error(w, "db error", http.StatusInternalServerError)
@@ -2335,8 +2341,35 @@ func (s *Server) handleMessageTimeline(w http.ResponseWriter, r *http.Request, t
 		return
 	}
 
-	timeline := make([]types.HubMessage, 0, len(rows)*2)
-	firstCreated := rows[0].CreatedAt
+	if len(rows) == 0 {
+		firstCreated := stateMsgs[0].CreatedAt
+		hasOlderConversation, err := s.hasConversationBefore(clawID, tenantID, firstCreated)
+		if err != nil {
+			http.Error(w, "db error", http.StatusInternalServerError)
+			return
+		}
+		if !hasOlderConversation {
+			firstCursor := firstCreated.Format(time.RFC3339Nano)
+			summary, err := s.activitySummary(clawID, tenantID, nil, &firstCreated, "", firstCursor)
+			if err != nil {
+				http.Error(w, "db error", http.StatusInternalServerError)
+				return
+			}
+			if summary != nil {
+				stateMsgs = append([]types.HubMessage{*summary}, stateMsgs...)
+			}
+		}
+		jsonOK(w, stateMsgs)
+		return
+	}
+
+	// Merge v2 state transitions into the conversation timeline so they appear
+	// in the main chat window alongside user/claw messages.
+	merged := append(rows, stateMsgs...)
+	sort.Slice(merged, func(i, j int) bool { return merged[i].CreatedAt.Before(merged[j].CreatedAt) })
+
+	timeline := make([]types.HubMessage, 0, len(merged)*2)
+	firstCreated := merged[0].CreatedAt
 	hasOlderConversation, err := s.hasConversationBefore(clawID, tenantID, firstCreated)
 	if err != nil {
 		http.Error(w, "db error", http.StatusInternalServerError)
@@ -2353,14 +2386,14 @@ func (s *Server) handleMessageTimeline(w http.ResponseWriter, r *http.Request, t
 			timeline = append(timeline, *summary)
 		}
 	}
-	for i, msg := range rows {
+	for i, msg := range merged {
 		timeline = append(timeline, msg)
 		lower := msg.CreatedAt
 		lowerCursor := lower.Format(time.RFC3339Nano)
 		var upper *time.Time
 		upperCursor := ""
-		if i+1 < len(rows) {
-			nextCreated := rows[i+1].CreatedAt
+		if i+1 < len(merged) {
+			nextCreated := merged[i+1].CreatedAt
 			upper = &nextCreated
 			upperCursor = nextCreated.Format(time.RFC3339Nano)
 		} else if before != "" {
