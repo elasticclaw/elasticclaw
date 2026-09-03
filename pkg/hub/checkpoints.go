@@ -190,7 +190,7 @@ func (s *Server) requestIdleCheckpoints() {
 
 func (s *Server) hasRecentCheckpoint(clawID string, minAge time.Duration) bool {
 	var completedAt time.Time
-	err := s.db.QueryRow(`SELECT completed_at FROM claw_checkpoints WHERE claw_id=? AND status='ready' ORDER BY completed_at DESC LIMIT 1`, clawID).Scan(&completedAt)
+	err := s.db.QueryRow(`SELECT completed_at FROM claw_checkpoints WHERE claw_id=? AND status IN ('ready','skipped') ORDER BY completed_at DESC LIMIT 1`, clawID).Scan(&completedAt)
 	return err == nil && time.Since(completedAt) < minAge
 }
 
@@ -198,6 +198,35 @@ func (s *Server) hasRecentCheckpointReason(clawID, reason string, minAge time.Du
 	var createdAt time.Time
 	err := s.db.QueryRow(`SELECT created_at FROM claw_checkpoints WHERE claw_id=? AND reason=? AND status IN ('creating','ready') ORDER BY created_at DESC LIMIT 1`, clawID, reason).Scan(&createdAt)
 	return err == nil && time.Since(createdAt) < minAge
+}
+
+// checkpointDuplicatesPrevious reports whether an idle checkpoint captured the
+// same workspace tree as the claw's last recorded checkpoint. Only idle-timer
+// checkpoints are eligible: a checkpoint taken at a lifecycle boundary is worth
+// keeping even when nothing changed on disk, because it marks the transition.
+func (s *Server) checkpointDuplicatesPrevious(checkpointID, clawID, rootSHA string) bool {
+	if rootSHA == "" {
+		return false
+	}
+	var reason string
+	if err := s.db.QueryRow(`SELECT reason FROM claw_checkpoints WHERE id=?`, checkpointID).Scan(&reason); err != nil || reason != "idle-timer" {
+		return false
+	}
+	var prev string
+	err := s.db.QueryRow(
+		`SELECT root_tree_sha256 FROM claw_checkpoints
+		  WHERE claw_id=? AND id<>? AND status IN ('ready','skipped') AND root_tree_sha256<>''
+		  ORDER BY created_at DESC LIMIT 1`, clawID, checkpointID).Scan(&prev)
+	return err == nil && prev == rootSHA
+}
+
+// markCheckpointSkipped records the checkpoint without a manifest. The row is
+// kept so the timeline still shows the claw was idle at that moment.
+func (s *Server) markCheckpointSkipped(checkpointID, rootSHA string) error {
+	_, err := s.db.Exec(
+		`UPDATE claw_checkpoints SET status='skipped', root_tree_sha256=?, workspace_tree_sha256=?, completed_at=? WHERE id=?`,
+		rootSHA, rootSHA, now(), checkpointID)
+	return err
 }
 
 func (s *Server) requestBootstrapCheckpoint(clawID string) {
@@ -820,6 +849,14 @@ func (s *Server) authenticateCheckpointClaw(w http.ResponseWriter, r *http.Reque
 }
 
 func (s *Server) finalizeCheckpoint(checkpointID, tenantID, clawID, rootSHA string) error {
+	// An idle checkpoint whose workspace tree is byte-identical to the previous
+	// one records that the agent did nothing. On the Faster hub 96% of
+	// idle-timer checkpoints were in that state. Recording them as 'ready' work
+	// buries the real checkpoints and inflates every count derived from them,
+	// so mark the duplicate and stop before writing a manifest.
+	if s.checkpointDuplicatesPrevious(checkpointID, clawID, rootSHA) {
+		return s.markCheckpointSkipped(checkpointID, rootSHA)
+	}
 	files, err := s.filesForTree(rootSHA)
 	if err != nil {
 		return err
