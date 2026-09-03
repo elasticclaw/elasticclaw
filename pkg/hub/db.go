@@ -1032,6 +1032,9 @@ func migrate(db *sql.DB) error {
 	if err != nil {
 		return err
 	}
+	if err := migrateAccessControl(db); err != nil {
+		return fmt.Errorf("migrate access control: %w", err)
+	}
 	if err := workflowv2.Migrate(db); err != nil {
 		return err
 	}

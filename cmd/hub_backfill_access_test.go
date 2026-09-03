@@ -1,0 +1,310 @@
+package cmd
+
+import (
+	"bytes"
+	"database/sql"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/elasticclaw/elasticclaw/pkg/hub"
+	_ "modernc.org/sqlite"
+)
+
+func TestHubBackfillAccessCommand(t *testing.T) {
+	t.Run("backfills configured admins and message users", func(t *testing.T) {
+		dbPath, configPath := newBackfillAccessFixture(t, []string{" Admin@Example.com "}, []string{"reader@example.com", "ADMIN@example.com"})
+		output, err := runBackfillAccessCommand(t, dbPath, configPath, false)
+		if err != nil {
+			t.Fatalf("run backfill: %v", err)
+		}
+		if !strings.Contains(output, "2 users: 2 created") {
+			t.Fatalf("unexpected output: %q", output)
+		}
+		assertBackfillRoles(t, dbPath, map[string]string{"admin@example.com": "admin", "reader@example.com": "reader"})
+	})
+
+	t.Run("is idempotent and does not demote admins", func(t *testing.T) {
+		dbPath, configPath := newBackfillAccessFixture(t, []string{"admin@example.com"}, []string{"reader@example.com"})
+		if _, err := runBackfillAccessCommand(t, dbPath, configPath, false); err != nil {
+			t.Fatal(err)
+		}
+		output, err := runBackfillAccessCommand(t, dbPath, configPath, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(output, "2 users: 0 created, 0 updated, 2 unchanged") {
+			t.Fatalf("second output: %q", output)
+		}
+		assertBackfillRoles(t, dbPath, map[string]string{"admin@example.com": "admin", "reader@example.com": "reader"})
+		assertBackfillUserCount(t, dbPath, 2)
+	})
+
+	t.Run("dry run writes no users", func(t *testing.T) {
+		dbPath, configPath := newBackfillAccessFixture(t, []string{"admin@example.com"}, []string{"reader@example.com"})
+		if _, err := runBackfillAccessCommand(t, dbPath, configPath, false); err != nil {
+			t.Fatal(err)
+		}
+		before := backfillUserCount(t, dbPath)
+		if _, err := runBackfillAccessCommand(t, dbPath, configPath, true); err != nil {
+			t.Fatal(err)
+		}
+		if after := backfillUserCount(t, dbPath); after != before {
+			t.Fatalf("user count after dry run = %d, want %d", after, before)
+		}
+	})
+
+	t.Run("reactivates an existing user promoted to admin", func(t *testing.T) {
+		dbPath, configPath := newBackfillAccessFixture(t, []string{"admin@example.com"}, []string{"reader@example.com"})
+		if _, err := runBackfillAccessCommand(t, dbPath, configPath, false); err != nil {
+			t.Fatal(err)
+		}
+		execBackfillSQL(t, dbPath, `UPDATE users SET role_id='reader', active=0 WHERE login='admin@example.com'`)
+		output, err := runBackfillAccessCommand(t, dbPath, configPath, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(output, "1 updated") {
+			t.Fatalf("unexpected output: %q", output)
+		}
+		assertBackfillRoles(t, dbPath, map[string]string{"admin@example.com": "admin"})
+		if got := backfillScalar(t, dbPath, `SELECT active FROM users WHERE login='admin@example.com'`); got != 1 {
+			t.Fatalf("promoted admin active = %d, want 1", got)
+		}
+	})
+
+	t.Run("backfills every tenant and scopes message users to their tenant", func(t *testing.T) {
+		dbPath, configPath := newBackfillAccessFixture(t, []string{"admin@example.com"}, []string{"reader@example.com"})
+		execBackfillSQL(t, dbPath, `INSERT INTO tenants(id,name,token,claw_token,created_at) VALUES('tenant-2','second','token-2','claw-token-2',datetime('now'));
+			INSERT INTO messages(id,claw_id,tenant_id,role,content,user_login,created_at) VALUES('z','claw','tenant-2','user','message','other@example.com',datetime('now'))`)
+		if _, err := runBackfillAccessCommand(t, dbPath, configPath, false); err != nil {
+			t.Fatal(err)
+		}
+		// Every tenant gets its own active admin, and a message author only
+		// gets an account in the tenant it actually wrote in.
+		for _, tenant := range []string{"tenant", "tenant-2"} {
+			if got := backfillScalar(t, dbPath, `SELECT COUNT(*) FROM users u JOIN roles r ON r.id=u.role_id WHERE u.tenant_id='`+tenant+`' AND r.name='admin' AND u.active=1`); got != 1 {
+				t.Fatalf("active admins in %s = %d, want 1", tenant, got)
+			}
+		}
+		if got := backfillScalar(t, dbPath, `SELECT COUNT(*) FROM users WHERE login='other@example.com'`); got != 1 {
+			t.Fatalf("other@example.com rows = %d, want 1", got)
+		}
+		if got := backfillScalar(t, dbPath, `SELECT COUNT(*) FROM users WHERE login='other@example.com' AND tenant_id='tenant-2'`); got != 1 {
+			t.Fatalf("other@example.com was not created in tenant-2")
+		}
+		if got := backfillScalar(t, dbPath, `SELECT COUNT(*) FROM users WHERE login='reader@example.com' AND tenant_id='tenant-2'`); got != 0 {
+			t.Fatalf("reader@example.com leaked into tenant-2")
+		}
+	})
+
+	t.Run("missing database is an error and creates no file", func(t *testing.T) {
+		dir := t.TempDir()
+		dbPath := filepath.Join(dir, "typo.db")
+		configPath := writeBackfillAccessConfig(t, dir, []string{"admin@example.com"})
+		_, err := runBackfillAccessCommand(t, dbPath, configPath, false)
+		if err == nil || !strings.Contains(err.Error(), dbPath) {
+			t.Fatalf("error = %v, want a failure naming %s", err, dbPath)
+		}
+		if _, statErr := os.Stat(dbPath); !os.IsNotExist(statErr) {
+			t.Fatalf("stat %s = %v, want the file to be absent", dbPath, statErr)
+		}
+	})
+
+	t.Run("database without access tables is an error", func(t *testing.T) {
+		dir := t.TempDir()
+		dbPath := filepath.Join(dir, "hub.db")
+		db, err := sql.Open("sqlite", dbPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(`CREATE TABLE tenants (id TEXT PRIMARY KEY)`); err != nil {
+			t.Fatal(err)
+		}
+		if err := db.Close(); err != nil {
+			t.Fatal(err)
+		}
+		configPath := writeBackfillAccessConfig(t, dir, []string{"admin@example.com"})
+		_, err = runBackfillAccessCommand(t, dbPath, configPath, false)
+		if err == nil || !strings.Contains(err.Error(), "start the hub once") {
+			t.Fatalf("error = %v, want a hint to start the hub first", err)
+		}
+	})
+
+	t.Run("dry run reports the same rows as the real run", func(t *testing.T) {
+		admins, logins := []string{"admin@example.com"}, []string{"reader@example.com"}
+		// Two identical databases: one previewed, one written. Comparing their
+		// output pins the dry run to the write path's decisions.
+		previewDB, previewConfig := newBackfillAccessFixture(t, admins, logins)
+		writeDB, writeConfig := newBackfillAccessFixture(t, admins, logins)
+		preview, err := runBackfillAccessCommand(t, previewDB, previewConfig, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		written, err := runBackfillAccessCommand(t, writeDB, writeConfig, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if preview != written {
+			t.Fatalf("dry run output %q != real run output %q", preview, written)
+		}
+		// Repeat over a mixed state so "updated" and "unchanged" are compared too.
+		for _, dbPath := range []string{previewDB, writeDB} {
+			if _, err := runBackfillAccessCommand(t, dbPath, writeConfig, false); err != nil {
+				t.Fatal(err)
+			}
+			execBackfillSQL(t, dbPath, `UPDATE users SET role_id='reader', active=0 WHERE login='admin@example.com'`)
+		}
+		preview, err = runBackfillAccessCommand(t, previewDB, previewConfig, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		written, err = runBackfillAccessCommand(t, writeDB, writeConfig, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if preview != written {
+			t.Fatalf("dry run output %q != real run output %q on mixed state", preview, written)
+		}
+	})
+
+	t.Run("missing admins warns and writes nothing", func(t *testing.T) {
+		dbPath, configPath := newBackfillAccessFixture(t, nil, []string{"reader@example.com"})
+		_, err := runBackfillAccessCommand(t, dbPath, configPath, false)
+		if err == nil || !strings.Contains(err.Error(), "auth.access.admins is empty") {
+			t.Fatalf("error = %v, want missing administrators warning", err)
+		}
+		if got := backfillUserCount(t, dbPath); got != 0 {
+			t.Fatalf("missing-admin invocation wrote %d users", got)
+		}
+	})
+}
+
+func newBackfillAccessFixture(t *testing.T, admins, messageLogins []string) (string, string) {
+	t.Helper()
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "hub.db")
+	// The command no longer migrates, so the fixture builds the schema the same
+	// way a hub start would.
+	if err := hub.InitDBForTest(dbPath); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec(`INSERT INTO tenants(id,name,token,claw_token,created_at) VALUES('tenant','test','token','claw-token',datetime('now'))`)
+	if err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	for i, login := range messageLogins {
+		if _, err := db.Exec(`INSERT INTO messages(id,claw_id,tenant_id,role,content,user_login,created_at) VALUES(?,?,?,'user','message',?,datetime('now'))`, string(rune('a'+i)), "claw", "tenant", login); err != nil {
+			db.Close()
+			t.Fatal(err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return dbPath, writeBackfillAccessConfig(t, dir, admins)
+}
+
+func writeBackfillAccessConfig(t *testing.T, dir string, admins []string) string {
+	t.Helper()
+	configPath := filepath.Join(dir, "hub.yaml")
+	config := "auth:\n  access:\n"
+	if admins != nil {
+		config += "    admins:\n"
+		for _, admin := range admins {
+			config += "      - " + admin + "\n"
+		}
+	}
+	if err := os.WriteFile(configPath, []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return configPath
+}
+
+func runBackfillAccessCommand(t *testing.T, dbPath, configPath string, dryRun bool) (string, error) {
+	t.Helper()
+	oldDB, oldConfig, oldDryRun := backfillAccessDB, backfillAccessConfig, backfillAccessDryRun
+	t.Cleanup(func() { backfillAccessDB, backfillAccessConfig, backfillAccessDryRun = oldDB, oldConfig, oldDryRun })
+	backfillAccessDB, backfillAccessConfig, backfillAccessDryRun = dbPath, configPath, dryRun
+	var output bytes.Buffer
+	command := hubBackfillAccessCmd
+	command.SetOut(&output)
+	t.Cleanup(func() { command.SetOut(nil) })
+	err := runHubBackfillAccess(command, nil)
+	return output.String(), err
+}
+
+func assertBackfillRoles(t *testing.T, dbPath string, want map[string]string) {
+	t.Helper()
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	for login, role := range want {
+		var got string
+		if err := db.QueryRow(`SELECT r.name FROM users u JOIN roles r ON r.id=u.role_id WHERE u.login=?`, login).Scan(&got); err != nil {
+			t.Fatalf("role for %s: %v", login, err)
+		}
+		if got != role {
+			t.Errorf("role for %s = %q, want %q", login, got, role)
+		}
+	}
+}
+
+func assertBackfillUserCount(t *testing.T, dbPath string, want int) {
+	t.Helper()
+	if got := backfillUserCount(t, dbPath); got != want {
+		t.Fatalf("user count = %d, want %d", got, want)
+	}
+}
+
+func backfillUserCount(t *testing.T, dbPath string) int {
+	return backfillTableCount(t, dbPath, "users")
+}
+
+func backfillTableCount(t *testing.T, dbPath, table string) int {
+	t.Helper()
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM ` + table).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	return count
+}
+
+func execBackfillSQL(t *testing.T, dbPath, query string) {
+	t.Helper()
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(query); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func backfillScalar(t *testing.T, dbPath, query string) int {
+	t.Helper()
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var value int
+	if err := db.QueryRow(query).Scan(&value); err != nil {
+		t.Fatal(err)
+	}
+	return value
+}
