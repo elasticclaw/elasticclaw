@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useState, type ReactNode } from "react"
+import { useEffect, useMemo, useState, type ReactNode } from "react"
 import { AlertCircle, Loader2 } from "lucide-react"
 import { ApiError, fetchActivityMessages } from "@/lib/api"
 import type { AgentActivity, ApiMessage } from "@/lib/types"
@@ -10,7 +10,12 @@ import { cn } from "@/lib/utils"
 
 const activityPageSize = 100
 
-export function ClawActivityLog({ clawId }: { clawId: string }) {
+interface ActivityLogFetcher {
+  fetchInitial: () => Promise<ApiMessage[]>
+  fetchOlder: (before: string) => Promise<ApiMessage[]>
+}
+
+export function ClawActivityLog({ clawId, fetcher }: { clawId?: string; fetcher?: ActivityLogFetcher }) {
   const [messages, setMessages] = useState<ApiMessage[]>([])
   const [loading, setLoading] = useState(false)
   const [loadingOlder, setLoadingOlder] = useState(false)
@@ -18,8 +23,15 @@ export function ClawActivityLog({ clawId }: { clawId: string }) {
   const [accessDenied, setAccessDenied] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
+  const activeFetcher: ActivityLogFetcher | null = useMemo(() => {
+    return fetcher || (clawId ? {
+      fetchInitial: () => fetchActivityMessages(clawId, { limit: activityPageSize, order: "desc" }),
+      fetchOlder: (before: string) => fetchActivityMessages(clawId, { before, limit: activityPageSize, order: "desc" }),
+    } : null)
+  }, [fetcher, clawId])
+
   useEffect(() => {
-    if (!clawId) return
+    if (!activeFetcher) return
     let cancelled = false
     queueMicrotask(() => {
       if (cancelled) return
@@ -27,7 +39,7 @@ export function ClawActivityLog({ clawId }: { clawId: string }) {
       setMessages([])
       setAccessDenied(false)
       setError(null)
-      fetchActivityMessages(clawId, { limit: activityPageSize, order: "desc" })
+      activeFetcher.fetchInitial()
         .then((page) => {
           if (cancelled) return
           setMessages(page.reverse())
@@ -41,15 +53,16 @@ export function ClawActivityLog({ clawId }: { clawId: string }) {
         .finally(() => { if (!cancelled) setLoading(false) })
     })
     return () => { cancelled = true }
-  }, [clawId])
+  }, [activeFetcher])
 
   const loadOlder = async () => {
+    if (!activeFetcher) return
     const before = messages[0]?.created_at
     if (!before || loadingOlder) return
     setLoadingOlder(true)
     setError(null)
     try {
-      const page = await fetchActivityMessages(clawId, { before, limit: activityPageSize, order: "desc" })
+      const page = await activeFetcher.fetchOlder(before)
       setMessages((current) => [...page.reverse(), ...current])
       setHasOlder(page.length === activityPageSize)
     } catch (err) {
@@ -60,10 +73,10 @@ export function ClawActivityLog({ clawId }: { clawId: string }) {
     }
   }
 
-  if (loading) return <LoadingState label="Loading agent activity..." />
-  if (accessDenied) return <Notice>You don&apos;t have access to this agent&apos;s logs.</Notice>
+  if (loading) return <LoadingState label="Loading run activity..." />
+  if (accessDenied) return <Notice>You don&apos;t have access to this run&apos;s logs.</Notice>
   if (error && messages.length === 0) return <Notice destructive>{error}</Notice>
-  if (messages.length === 0) return <EmptyState>No agent actions were recorded for this attempt.</EmptyState>
+  if (messages.length === 0) return <EmptyState>No activity or state transitions were recorded for this attempt.</EmptyState>
 
   return (
     <div className="flex h-full min-h-0 flex-col rounded-md border">
@@ -85,7 +98,8 @@ export function ClawActivityLog({ clawId }: { clawId: string }) {
 
 function ActivityLine({ message }: { message: ApiMessage }) {
   const activity = parseActivity(message)
-  const label = activity?.tool || activity?.kind || "activity"
+  const isState = message.role === "state"
+  const label = activity?.tool || activity?.kind || (isState ? "state" : "activity")
   const detailItems = activity ? [
     activity.command && { kind: "command", value: activity.command },
     activity.path && { kind: "path", value: activity.path },
@@ -99,7 +113,8 @@ function ActivityLine({ message }: { message: ApiMessage }) {
     <div className="grid gap-2 px-3 py-3 text-sm sm:grid-cols-[8rem_10rem_minmax(0,1fr)]">
       <time className="text-xs text-muted-foreground">{formatTimestamp(message.created_at)}</time>
       <div className="flex min-w-0 items-start gap-2">
-        <span className="truncate font-medium">{label}</span>
+        <span className={cn("truncate font-medium", isState && "text-primary")}>{label}</span>
+        {isState && <Badge variant="outline" className="shrink-0 text-[10px]">state</Badge>}
         {activity?.phase && <Badge variant="outline" className="shrink-0 text-[10px]">{activity.phase}</Badge>}
       </div>
       <div className="min-w-0 space-y-1">

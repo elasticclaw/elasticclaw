@@ -55,6 +55,8 @@ type Run struct {
 	CurrentAttemptID  string               `json:"current_attempt_id,omitempty"`
 	CurrentTaskID     string               `json:"current_task_id,omitempty"`
 	ContextBundleID   string               `json:"context_bundle_id,omitempty"`
+	TaskRunID         string               `json:"task_run_id,omitempty"`
+	TriggerType       string               `json:"trigger_type"`
 	CreatedAt         time.Time            `json:"created_at"`
 	UpdatedAt         time.Time            `json:"updated_at"`
 	FinishedAt        *time.Time           `json:"finished_at,omitempty"`
@@ -65,6 +67,7 @@ type CreateRunRequest struct {
 	TenantID      string
 	WorkspaceYAML []byte
 	WorkflowYAML  []byte
+	TriggerType   string
 	// InitialClawID atomically binds the first execution attempt while the run
 	// is created. Production activation uses this so a newly provisioned bridge
 	// cannot connect before its control-plane binding exists.
@@ -72,6 +75,9 @@ type CreateRunRequest struct {
 	// ActivationPending keeps effects unclaimable until organization context
 	// has been assembled and CompleteActivation has released the run.
 	ActivationPending bool
+	// TaskRunID links the v2 run to its parent v1 task run so the hub can
+	// finish the parent and disconnect the claw when the v2 run terminates.
+	TaskRunID string
 }
 
 type EventInput struct {
@@ -151,6 +157,10 @@ func (s *Store) CreateRun(ctx context.Context, req CreateRunRequest) (Run, error
 	status := RunActive
 	waitingReason := ""
 	finishedAt := int64(0)
+	triggerType := strings.TrimSpace(req.TriggerType)
+	if triggerType == "" {
+		triggerType = "manual"
+	}
 	if initial.Terminal {
 		status = terminalRunStatus(rwf.Workflow.InitialState)
 		finishedAt = now.UnixMilli()
@@ -173,10 +183,11 @@ func (s *Store) CreateRun(ctx context.Context, req CreateRunRequest) (Run, error
 	}
 	_, err = tx.ExecContext(ctx, `INSERT INTO workflow_v2_runs(
 		id,tenant_id,workspace_name,workflow_name,workspace_revision,workflow_revision,
-		workspace_yaml,workflow_yaml,state,display_phase,state_version,status,waiting_reason,current_attempt_id,created_at,updated_at,finished_at
-	) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		workspace_yaml,workflow_yaml,state,display_phase,state_version,status,waiting_reason,current_attempt_id,task_run_id,trigger_type,created_at,updated_at,finished_at
+	) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		runID, req.TenantID, rws.Workspace.Name, rwf.Workflow.Name, string(rws.Revision), string(rwf.Revision),
 		string(req.WorkspaceYAML), string(req.WorkflowYAML), rwf.Workflow.InitialState, string(initial.Phase), 1, string(status), waitingReason, currentAttemptID,
+		strings.TrimSpace(req.TaskRunID), triggerType,
 		now.UnixMilli(), now.UnixMilli(), finishedAt)
 	if err != nil {
 		return Run{}, fmt.Errorf("create workflow v2 run: %w", err)
@@ -313,7 +324,7 @@ func (s *Store) GetRun(ctx context.Context, runID string) (Run, error) {
 	}
 	return scanRun(s.db.QueryRowContext(ctx, `SELECT id,tenant_id,workspace_name,workflow_name,
 		workspace_revision,workflow_revision,state,display_phase,state_version,status,waiting_reason,
-		current_attempt_id,current_task_id,context_bundle_id,created_at,updated_at,finished_at
+		current_attempt_id,current_task_id,context_bundle_id,task_run_id,trigger_type,created_at,updated_at,finished_at
 		FROM workflow_v2_runs WHERE id=?`, runID))
 }
 
@@ -490,7 +501,13 @@ func (s *Store) ApplyEvent(ctx context.Context, runID string, input EventInput) 
 		return EventResult{EventID: input.ID, Disposition: typesv2.DispositionAccepted, Run: updated}, err
 	}
 
-	destination := workflow.Workflow.States[transitionDef.To]
+	return s.applyTransition(ctx, tx, runID, stored, workflow.Workflow, input, name, transitionDef, clause, clauseName, clauseWrites, facts, now)
+}
+
+func (s *Store) applyTransition(ctx context.Context, tx *sql.Tx, runID string, stored Run,
+	workflow *typesv2.Workflow, input EventInput, name string, transitionDef *typesv2.Transition,
+	clause *typesv2.EventClause, clauseName string, clauseWrites, facts map[string]interface{}, now time.Time) (EventResult, error) {
+	destination := workflow.States[transitionDef.To]
 	writes := mergeWrites(clauseWrites, transitionDef.Assert, transitionDef.Set)
 	if destination.OnEnter != nil {
 		writes = mergeWrites(writes, mergeWrites(destination.OnEnter.Assert, destination.OnEnter.Set))
@@ -501,7 +518,7 @@ func (s *Store) ApplyEvent(ctx context.Context, runID string, input EventInput) 
 		return EventResult{}, err
 	}
 	if !valid {
-		reason = fmt.Sprintf("destination invariant does not hold for state %s", transitionDef.To)
+		reason := fmt.Sprintf("destination invariant does not hold for state %s", transitionDef.To)
 		return s.rejectAndSuspend(ctx, tx, stored, input, reason, now)
 	}
 
@@ -543,19 +560,23 @@ func (s *Store) ApplyEvent(ctx context.Context, runID string, input EventInput) 
 	if err := writeFacts(ctx, tx, runID, input.ID, ProducerEngine, input.Provenance, writes, now); err != nil {
 		return EventResult{}, err
 	}
-	if clause != nil && !clause.Ignore {
-		if err := scheduleEffects(ctx, tx, runID, "event_clause", input.ID,
-			"events."+input.Kind+".clauses["+clauseName+"].effects", clause.Effects, now); err != nil {
+	// Terminal states end the run; do not schedule additional effects that would
+	// need to be materialized against a non-active run.
+	if !destination.Terminal {
+		if clause != nil && !clause.Ignore {
+			if err := scheduleEffects(ctx, tx, runID, "event_clause", input.ID,
+				"events."+input.Kind+".clauses["+clauseName+"].effects", clause.Effects, now); err != nil {
+				return EventResult{}, err
+			}
+		}
+		if err := scheduleEffects(ctx, tx, runID, "transition", transitionID, "transitions."+name+".effects", transitionDef.Effects, now); err != nil {
 			return EventResult{}, err
 		}
-	}
-	if err := scheduleEffects(ctx, tx, runID, "transition", transitionID, "transitions."+name+".effects", transitionDef.Effects, now); err != nil {
-		return EventResult{}, err
-	}
-	if destination.OnEnter != nil {
-		if err := scheduleEffects(ctx, tx, runID, "transition", transitionID,
-			"states."+transitionDef.To+".on_enter.effects", destination.OnEnter.Effects, now); err != nil {
-			return EventResult{}, err
+		if destination.OnEnter != nil {
+			if err := scheduleEffects(ctx, tx, runID, "transition", transitionID,
+				"states."+transitionDef.To+".on_enter.effects", destination.OnEnter.Effects, now); err != nil {
+				return EventResult{}, err
+			}
 		}
 	}
 	if err := updateBoundTask(ctx, tx, runID, input, now); err != nil {
@@ -577,6 +598,106 @@ func (s *Store) ApplyEvent(ctx context.Context, runID string, input EventInput) 
 			FromState: stored.State, ToState: transitionDef.To, FromVersion: stored.StateVersion,
 			ToVersion: toVersion, CreatedAt: now},
 	}, nil
+}
+
+// CommandInput is the operator-provoked request to advance a v2 run via a named command.
+type CommandInput struct {
+	ID                   string
+	MessageID            string
+	Reason               string
+	ExpectedStateVersion  *uint64
+	Provenance           typesv2.EvidenceProvenance
+}
+
+// ApplyCommand executes an authenticated operator command against the current
+// run state. It is the v2 equivalent of a legacy manual workflow trigger: the
+// operator names a command edge defined in the workflow, and the state machine
+// advances deterministically to the command's destination state.
+func (s *Store) ApplyCommand(ctx context.Context, runID string, commandName string, input CommandInput) (EventResult, error) {
+	if s == nil || s.db == nil {
+		return EventResult{}, fmt.Errorf("workflow v2 store is not configured")
+	}
+	if strings.TrimSpace(runID) == "" {
+		return EventResult{}, fmt.Errorf("run id is required")
+	}
+	if strings.TrimSpace(commandName) == "" {
+		return EventResult{}, fmt.Errorf("command name is required")
+	}
+	if strings.TrimSpace(input.ID) == "" {
+		return EventResult{}, fmt.Errorf("command event id is required")
+	}
+	now := s.now().UTC()
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+	if err != nil {
+		return EventResult{}, err
+	}
+	defer tx.Rollback()
+
+	stored, workflowYAML, err := getRunForUpdate(ctx, tx, runID)
+	if err != nil {
+		return EventResult{}, err
+	}
+	workflow, err := typesv2.ParseAndValidateWorkflow([]byte(workflowYAML))
+	if err != nil {
+		return EventResult{}, fmt.Errorf("load pinned workflow: %w", err)
+	}
+	if string(workflow.Revision) != stored.WorkflowRevision {
+		return EventResult{}, fmt.Errorf("pinned workflow revision mismatch: stored %s decoded %s", stored.WorkflowRevision, workflow.Revision)
+	}
+	cmd, ok := workflow.Workflow.Commands[commandName]
+	if !ok {
+		return EventResult{}, fmt.Errorf("command %q not defined in workflow", commandName)
+	}
+	fromStates, err := typesv2.FromStates(cmd.From)
+	if err != nil {
+		return EventResult{}, fmt.Errorf("command %q: %w", commandName, err)
+	}
+	if !contains(fromStates, stored.State) {
+		return EventResult{}, fmt.Errorf("command %q cannot be applied from state %q", commandName, stored.State)
+	}
+	if cmd.RequireReason && strings.TrimSpace(input.Reason) == "" {
+		return EventResult{}, fmt.Errorf("command %q requires a reason", commandName)
+	}
+	if input.ExpectedStateVersion != nil && *input.ExpectedStateVersion != stored.StateVersion {
+		reason := fmt.Sprintf("expected state version %d, current version is %d", *input.ExpectedStateVersion, stored.StateVersion)
+		if err := insertCommandEvent(ctx, tx, runID, input, commandName, stored.StateVersion, typesv2.DispositionStaleState, reason, now); err != nil {
+			return EventResult{}, err
+		}
+		if err := insertEventReceipt(ctx, tx, runID, input.ID, input.MessageID, typesv2.DispositionStaleState, stored.StateVersion, reason, now); err != nil {
+			return EventResult{}, err
+		}
+		if err := tx.Commit(); err != nil {
+			return EventResult{}, err
+		}
+		return EventResult{EventID: input.ID, Disposition: typesv2.DispositionStaleState, Reason: reason, Run: stored}, nil
+	}
+
+	if err := insertCommandEvent(ctx, tx, runID, input, commandName, stored.StateVersion, typesv2.DispositionAccepted, "", now); err != nil {
+		return EventResult{}, err
+	}
+	facts, err := loadFacts(ctx, tx, runID)
+	if err != nil {
+		return EventResult{}, err
+	}
+
+	// Treat the command as a named transition with no event payload or clause.
+	eventInput := EventInput{
+		ID:                   input.ID,
+		MessageID:            input.MessageID,
+		Kind:                 "operator.command." + commandName,
+		Producer:             ProducerOperator,
+		Provenance:           input.Provenance,
+		ExpectedStateVersion: input.ExpectedStateVersion,
+	}
+	return s.applyTransition(ctx, tx, runID, stored, workflow.Workflow, eventInput, commandName,
+		&typesv2.Transition{From: cmd.From, To: cmd.To}, nil, "", nil, facts, now)
+}
+
+func insertCommandEvent(ctx context.Context, tx *sql.Tx, runID string, input CommandInput,
+	commandName string, observedVersion uint64, disposition typesv2.ControlDisposition, reason string, now time.Time) error {
+	return insertEvent(ctx, tx, input.ID, runID, input.MessageID, "operator.command."+commandName,
+		input.ExpectedStateVersion, observedVersion, disposition, reason, ProducerOperator, input.Provenance,
+		nil, nil, now)
 }
 
 func (s *Store) applyEventWithMutation(ctx context.Context, runID string, input EventInput,
@@ -642,7 +763,7 @@ func producerMaySupplyPayload(producer Producer, namespace string) bool {
 	case ProducerCustom:
 		return namespace == "custom"
 	case ProducerHub, ProducerEngine:
-		return namespace == "workflow" || namespace == "run" || namespace == "setup" || namespace == "task"
+		return namespace == "workflow" || namespace == "run" || namespace == "setup" || namespace == "task" || namespace == "exec"
 	default:
 		return false
 	}
@@ -668,7 +789,7 @@ func producerMayEmit(producer Producer, kind string) bool {
 	case ProducerCustom:
 		return prefix == "custom"
 	case ProducerHub, ProducerEngine:
-		return prefix == "workflow" || prefix == "run" || prefix == "setup" || prefix == "task"
+		return prefix == "workflow" || prefix == "run" || prefix == "setup" || prefix == "task" || prefix == "exec" || prefix == "dependency"
 	default:
 		return false
 	}
@@ -693,6 +814,8 @@ func producerOwnsFact(producer Producer, key string) bool {
 		return producer == ProducerEngine
 	case "context":
 		return producer == ProducerContext
+	case "exec":
+		return producer == ProducerEngine || producer == ProducerHub
 	case "work", "custom":
 		return producer == ProducerEngine || producer == ProducerCustom
 	default:
@@ -964,7 +1087,7 @@ func getRunForUpdate(ctx context.Context, tx *sql.Tx, runID string) (Run, string
 	var workflowYAML string
 	row := tx.QueryRowContext(ctx, `SELECT id,tenant_id,workspace_name,workflow_name,
 		workspace_revision,workflow_revision,state,display_phase,state_version,status,waiting_reason,
-		current_attempt_id,current_task_id,context_bundle_id,created_at,updated_at,finished_at,workflow_yaml
+		current_attempt_id,current_task_id,context_bundle_id,task_run_id,trigger_type,created_at,updated_at,finished_at,workflow_yaml
 		FROM workflow_v2_runs WHERE id=?`, runID)
 	run, err := scanRunWithWorkflow(row, &workflowYAML)
 	return run, workflowYAML, err
@@ -978,7 +1101,7 @@ func scanRun(row scanner) (Run, error) {
 	var created, updated, finished int64
 	err := row.Scan(&run.ID, &run.TenantID, &run.WorkspaceName, &run.WorkflowName,
 		&run.WorkspaceRevision, &run.WorkflowRevision, &run.State, &phase, &run.StateVersion, &status, &run.WaitingReason,
-		&run.CurrentAttemptID, &run.CurrentTaskID, &run.ContextBundleID, &created, &updated, &finished)
+		&run.CurrentAttemptID, &run.CurrentTaskID, &run.ContextBundleID, &run.TaskRunID, &run.TriggerType, &created, &updated, &finished)
 	if err != nil {
 		return Run{}, err
 	}
@@ -992,7 +1115,7 @@ func scanRunWithWorkflow(row scanner, workflowYAML *string) (Run, error) {
 	var created, updated, finished int64
 	err := row.Scan(&run.ID, &run.TenantID, &run.WorkspaceName, &run.WorkflowName,
 		&run.WorkspaceRevision, &run.WorkflowRevision, &run.State, &phase, &run.StateVersion, &status, &run.WaitingReason,
-		&run.CurrentAttemptID, &run.CurrentTaskID, &run.ContextBundleID, &created, &updated, &finished, workflowYAML)
+		&run.CurrentAttemptID, &run.CurrentTaskID, &run.ContextBundleID, &run.TaskRunID, &run.TriggerType, &created, &updated, &finished, workflowYAML)
 	if err != nil {
 		return Run{}, err
 	}

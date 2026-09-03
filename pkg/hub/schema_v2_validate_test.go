@@ -48,6 +48,7 @@ const testWorkflowV2YAML = `
 schema_version: 2
 name: delivery
 enabled: true
+manual_trigger: true
 initial_state: implementing
 states:
   implementing:

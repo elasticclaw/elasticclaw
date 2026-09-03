@@ -1,18 +1,22 @@
 package v2
 
+import "strings"
+
 // ConnectionCapability names operational capabilities a connection may expose.
 // Workspace YAML may only restrict (set false); it cannot invent or enable
 // capabilities beyond the provider capability model.
 type ConnectionCapability string
 
 const (
-	CapObserveRuns   ConnectionCapability = "observe_runs"
-	CapObserveChecks ConnectionCapability = "observe_checks"
-	CapTriggerRun    ConnectionCapability = "trigger_run"
-	CapRetryRun      ConnectionCapability = "retry_run"
-	CapCancelRun     ConnectionCapability = "cancel_run"
-	CapFetchLogs     ConnectionCapability = "fetch_logs"
-	CapReconcile     ConnectionCapability = "reconcile"
+	CapObserveRuns       ConnectionCapability = "observe_runs"
+	CapObserveChecks     ConnectionCapability = "observe_checks"
+	CapTriggerRun        ConnectionCapability = "trigger_run"
+	CapRetryRun          ConnectionCapability = "retry_run"
+	CapCancelRun         ConnectionCapability = "cancel_run"
+	CapFetchLogs         ConnectionCapability = "fetch_logs"
+	CapReconcile         ConnectionCapability = "reconcile"
+	CapExecuteCommand    ConnectionCapability = "execute_command"
+	CapDependencyUpdate  ConnectionCapability = "dependency_update"
 )
 
 // AllConnectionCapabilities is the full set used by CI-style connections.
@@ -24,13 +28,17 @@ var AllConnectionCapabilities = []ConnectionCapability{
 	CapCancelRun,
 	CapFetchLogs,
 	CapReconcile,
+	CapExecuteCommand,
+	CapDependencyUpdate,
 }
 
 // Effect operations that require a resolved connection capability.
 const (
-	EffectCITrigger = "ci.trigger"
-	EffectCIRetry   = "ci.retry"
-	EffectCICancel  = "ci.cancel"
+	EffectCITrigger        = "ci.trigger"
+	EffectCIRetry          = "ci.retry"
+	EffectCICancel         = "ci.cancel"
+	EffectExecRun          = "exec.run"
+	EffectDependencyUpdate = "dependency.update"
 )
 
 // ProviderCapabilities returns the default capability set for a provider type.
@@ -52,10 +60,25 @@ func ProviderCapabilities(provider string) map[ConnectionCapability]bool {
 		out[CapObserveRuns] = true
 		out[CapReconcile] = true
 	default:
-		// Unknown: empty; server may grant later; workspace cannot invent.
+		if isExecutionProvider(provider) {
+			// Execution providers grant deterministic command and dependency-update
+			// effects. The workspace may narrow these via capability_restrictions.
+			out[CapExecuteCommand] = true
+			out[CapDependencyUpdate] = true
+		}
 	}
 	return out
 }
+
+func isExecutionProvider(provider string) bool {
+	for _, prefix := range []string{"daytona", "replicated", "exedev", "docker", "lambda-microvms"} {
+		if strings.HasPrefix(provider, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
 
 // ResolveCapabilities intersects provider defaults with workspace restrictions.
 // Restrictions may only set a capability to false; setting true when the
@@ -90,6 +113,10 @@ func CapabilityForEffect(op string) (ConnectionCapability, bool) {
 		return CapRetryRun, true
 	case EffectCICancel:
 		return CapCancelRun, true
+	case EffectExecRun:
+		return CapExecuteCommand, true
+	case EffectDependencyUpdate:
+		return CapDependencyUpdate, true
 	default:
 		return "", false
 	}
