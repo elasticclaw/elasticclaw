@@ -1,6 +1,5 @@
 .PHONY: build build-bridge build-bridge-linux test test-bootstrap test-container e2e e2e-github e2e-linear e2e-jira e2e-replicated-github e2e-replicated-linear e2e-replicated-jira e2e-exedev-github e2e-docker e2e-run clean install lint tidy clawpatch-init clawpatch-review clawpatch-report clawpatch-show clawpatch-triage clawpatch-pr dev dev-up dev-up-d dev-down dev-reset dev-logs dev-restart dev-sh-hub dev-sh-web dev-agent-build dev-claw _dev-config-check
 
-
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "none")
 BUILD_DATE ?= $(shell date -u +"%Y-%m-%dT%H:%M:%SZ")
