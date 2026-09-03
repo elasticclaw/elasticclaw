@@ -1370,6 +1370,20 @@ func (s *Server) checkNotifications(cfg *types.HubConfig) []DoctorCheck {
 		}
 	}
 
+	// Provider caps used to page through the lifecycle agent_idle event. They
+	// are infrastructure events now, and a hub configured before that change
+	// routes agent_idle somewhere but provider caps nowhere: the claws park,
+	// the dashboard shows the badge, and nobody is paged. That is exactly the
+	// silence the old route existed to break, so it is said here rather than
+	// discovered during the next cap.
+	if lifecycleRoutesAgentIdle(nCfg.Lifecycle) && !infraRoutesProviderLimits(nCfg.Infra) {
+		checks = append(checks, DoctorCheck{
+			Category: "notifications", Severity: "critical", OK: false,
+			Title:       "Provider cap alerts have no route",
+			Description: "Lifecycle alerts route agent_idle, but a provider usage limit no longer fires it: caps are infrastructure events (provider_limit_opened, provider_limit_exhausted, provider_limit_released) and no infrastructure route receives them. A capped provider account parks its claws without paging anyone until notifications.infra has a route for those events.",
+		})
+	}
+
 	// Scheduled reports. A disabled schedule delivers nothing, so its report
 	// and destination checks are skipped: an operator who pauses a schedule
 	// before deleting the notifier (or before upgrading to a build that
@@ -1681,4 +1695,46 @@ func (s *Server) checkHubSettings(cfg *types.HubConfig) []DoctorCheck {
 	}
 
 	return checks
+}
+
+// lifecycleRoutesAgentIdle reports whether an enabled lifecycle block would
+// deliver agent_idle: some route carries it (or receives everything) and the
+// per-event toggle has not muted it.
+func lifecycleRoutesAgentIdle(lc *types.LifecycleNotificationsConfig) bool {
+	if !lc.IsEnabled() {
+		return false
+	}
+	if lc.Events != nil && lc.Events.AgentIdle != nil && !*lc.Events.AgentIdle {
+		return false
+	}
+	for _, route := range lc.EffectiveRoutes() {
+		if len(route.Events) == 0 {
+			return true
+		}
+		for _, event := range route.Events {
+			if event == taskRunEventAgentIdle {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// infraRoutesProviderLimits reports whether an enabled infra block delivers
+// at least one provider_limit_* event somewhere.
+func infraRoutesProviderLimits(ic *types.InfraNotificationsConfig) bool {
+	if !ic.IsEnabled() {
+		return false
+	}
+	for _, route := range ic.Routes {
+		if len(route.Events) == 0 {
+			return true
+		}
+		for _, event := range route.Events {
+			if strings.HasPrefix(event, "provider_limit_") {
+				return true
+			}
+		}
+	}
+	return false
 }

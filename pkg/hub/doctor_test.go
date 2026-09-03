@@ -483,3 +483,61 @@ func TestCheckNotifyActionsAllValid(t *testing.T) {
 		t.Fatalf("got %#v, want one passing summary check", checks)
 	}
 }
+
+// Provider caps moved from the lifecycle agent_idle event to infra events. A
+// lifecycle-only configuration that used to page on a cap now pages nobody,
+// and Doctor has to say so; any infra route carrying provider_limit_* (or
+// receiving everything) closes the gap, and a muted agent_idle never had it.
+func TestCheckNotificationsFlagsUnroutedProviderCaps(t *testing.T) {
+	s := &Server{}
+	const title = "Provider cap alerts have no route"
+	has := func(cfg *types.HubConfig) bool {
+		for _, check := range s.checkNotifications(cfg) {
+			if check.Title == title {
+				if check.OK || check.Severity != "critical" {
+					t.Fatalf("unrouted provider caps must be a failing critical check: %#v", check)
+				}
+				return true
+			}
+		}
+		return false
+	}
+	notifiers := map[string]types.NotifierConfig{"ops": {Type: "slack", Settings: map[string]any{"token_secret": "token", "channel": "C0123ABCD"}}}
+	lifecycle := func(events []string) *types.LifecycleNotificationsConfig {
+		return &types.LifecycleNotificationsConfig{Routes: []types.LifecycleRoute{{Via: "ops", Events: events}}}
+	}
+	hub := func(lc *types.LifecycleNotificationsConfig, ic *types.InfraNotificationsConfig) *types.HubConfig {
+		return &types.HubConfig{Secrets: map[string]string{"token": "xoxb-test"}, Notifications: &types.NotificationsConfig{Notifiers: notifiers, Lifecycle: lc, Infra: ic}}
+	}
+	off := false
+
+	if !has(hub(lifecycle(nil), nil)) {
+		t.Fatal("lifecycle receive-all with no infra block was not flagged")
+	}
+	if !has(hub(lifecycle([]string{"agent_idle"}), &types.InfraNotificationsConfig{Enabled: &off, Routes: []types.InfraRoute{{Via: "ops"}}})) {
+		t.Fatal("agent_idle route with a disabled infra block was not flagged")
+	}
+	if !has(hub(lifecycle([]string{"agent_idle"}), &types.InfraNotificationsConfig{Routes: []types.InfraRoute{{Via: "ops", Events: []string{"dependency_down"}}}})) {
+		t.Fatal("infra route without provider_limit_* events was not flagged")
+	}
+	if has(hub(lifecycle([]string{"agent_idle"}), &types.InfraNotificationsConfig{Routes: []types.InfraRoute{{Via: "ops", Events: []string{"provider_limit_opened"}}}})) {
+		t.Fatal("a provider_limit_* infra route was flagged")
+	}
+	if has(hub(lifecycle([]string{"agent_idle"}), &types.InfraNotificationsConfig{Routes: []types.InfraRoute{{Via: "ops"}}})) {
+		t.Fatal("a receive-all infra route was flagged")
+	}
+	if has(hub(lifecycle([]string{"pr_opened"}), nil)) {
+		t.Fatal("a lifecycle route that never carried agent_idle was flagged")
+	}
+	muted := lifecycle(nil)
+	muted.Events = &types.LifecycleEventToggles{AgentIdle: &off}
+	if has(hub(muted, nil)) {
+		t.Fatal("a muted agent_idle was flagged")
+	}
+	if has(hub(&types.LifecycleNotificationsConfig{Enabled: &off, Via: "ops"}, nil)) {
+		t.Fatal("a disabled lifecycle block was flagged")
+	}
+	if has(hub(nil, nil)) {
+		t.Fatal("no lifecycle block was flagged")
+	}
+}
