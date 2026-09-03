@@ -375,12 +375,25 @@ func buildInfraMessage(e infraEventRow, _ time.Time) notify.Message {
 	if subject == "" {
 		subject = e.Subject
 	}
-	body := "Wait for recovery and watch the dependency's status page."
-	if strings.HasPrefix(e.EventType, "provider_limit_") {
-		body = "Raise the provider account cap in its billing console, or wait until the stated reset time."
-	}
-	if e.EventType == "dependency_recovered" || e.EventType == "provider_limit_released" {
+	retry := stringValue(e.Detail, "retry_count")
+	var body string
+	switch e.EventType {
+	case "dependency_recovered":
 		body = "Service has recovered; resume watching normal work."
+	case "provider_limit_opened":
+		body = "Raise the provider account cap in its billing console, or wait until the stated reset time."
+		if retry != "" && retry != "0" {
+			body = "The provider still reports the cap after automatic retry " + retry + "; the hub retries again at the stated time. Raise the cap in the billing console to end it sooner."
+		}
+	case "provider_limit_exhausted":
+		// The latch never auto-releases an exhausted limit
+		// (releaseDueLLMUsageLimits skips it), so "wait for the reset" would
+		// park the fleet indefinitely.
+		body = "Automatic retries are exhausted; the hub will not retry on its own. Raise the cap in the provider's billing console, then clear the block (a parked claw's page, or DELETE /api/claws/{id}/llm-limit) to resume."
+	case "provider_limit_released":
+		body = "Provider access has recovered; the parked claws resumed on their own."
+	default:
+		body = "Wait for recovery and watch the dependency's status page."
 	}
 	if msg := strings.TrimSpace(stringValue(e.Detail, "message")); msg != "" {
 		body += "\n" + msg
@@ -391,7 +404,19 @@ func buildInfraMessage(e infraEventRow, _ time.Time) notify.Message {
 			fields = append(fields, notify.Field{Label: "Status page", Value: statusPage})
 		}
 	} else if strings.HasPrefix(e.EventType, "provider_limit_") {
-		for _, field := range []struct{ label, key string }{{"Provider", "provider"}, {"Key", "key_id"}, {"Claws parked", "parked_claws"}, {"Deadline", "deadline"}} {
+		labelled := []struct{ label, key string }{{"Provider", "provider"}, {"Key", "key_id"}}
+		switch e.EventType {
+		case "provider_limit_released":
+			labelled = append(labelled, struct{ label, key string }{"Claws resumed", "parked_claws"})
+		case "provider_limit_exhausted":
+			labelled = append(labelled, struct{ label, key string }{"Claws parked", "parked_claws"}, struct{ label, key string }{"Last retry", "deadline"})
+		default:
+			labelled = append(labelled, struct{ label, key string }{"Claws parked", "parked_claws"}, struct{ label, key string }{"Deadline", "deadline"})
+			if retry != "" && retry != "0" {
+				labelled = append(labelled, struct{ label, key string }{"Retry", "retry_count"})
+			}
+		}
+		for _, field := range labelled {
 			if value := stringValue(e.Detail, field.key); value != "" {
 				fields = append(fields, notify.Field{Label: field.label, Value: value})
 			}

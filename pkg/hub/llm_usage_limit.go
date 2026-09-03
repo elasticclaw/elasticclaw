@@ -118,6 +118,9 @@ func (s *Server) handleLLMUsageLimit(cc *clawConn, clawID string, limit types.LL
 
 	s.llmLimitMu.Lock()
 	record, had := s.loadLLMUsageLimit(keyID)
+	// Whatever this turn decides, the key is capped now: a release that was
+	// still awaiting proof has just been disproved.
+	delete(s.llmLimitProbing, keyID)
 	opened, relatched := false, false
 	switch {
 	case had && record.Active():
@@ -177,6 +180,10 @@ func (s *Server) handleLLMUsageLimit(cc *clawConn, clawID string, limit types.LL
 	case relatched:
 		log.Printf("[llm-limit] key %q still capped, retry %d scheduled for %s",
 			keyID, record.Retries, formatLLMLimitDeadline(record.RetryAt))
+		// Said out loud: the operator watched the release and must not read
+		// silence as recovery. The event key carries the retry number, so
+		// each re-latch is its own message.
+		s.recordLLMLimitEvent(record, len(latched), "provider_limit_opened")
 	}
 }
 
@@ -253,8 +260,18 @@ func (s *Server) releaseLLMUsageLimit(keyID, reason string, announce bool) {
 		log.Printf("[llm-limit] mark limit released for key %q: %v", keyID, err)
 		return
 	}
+	// A release is a probe until a turn goes through: the cap may well still
+	// be there (clock skew, a late reset, a balance nobody topped up), and
+	// the re-latch a minute later would make "Provider cap lifted" a lie the
+	// operator reads three times per episode. The lift is announced by
+	// confirmLLMLimitLift once proven — an authored turn on the key, or an
+	// operator clearing the block. A hub restart forgets the probe, in which
+	// case the lift goes unannounced rather than misannounced.
+	if s.llmLimitProbing == nil {
+		s.llmLimitProbing = map[string]bool{}
+	}
+	s.llmLimitProbing[keyID] = true
 	s.llmLimitMu.Unlock()
-	s.recordLLMLimitEvent(record, len(clawIDs), "provider_limit_released")
 
 	// Notices and wakes touch sockets, so they happen outside the lock.
 	for _, clawID := range clawIDs {
@@ -264,6 +281,40 @@ func (s *Server) releaseLLMUsageLimit(keyID, reason string, announce bool) {
 		s.resumeClawAfterLLMLimit(clawID)
 	}
 	log.Printf("[llm-limit] key %q released (%s), %d claw(s) resumed", keyID, reason, len(clawIDs))
+}
+
+// confirmLLMLimitLift announces a proven release of the key's latch. See
+// releaseLLMUsageLimit for why the release itself stays quiet. Idempotent:
+// the event key is fixed while the record stays released, so a second proof
+// is absorbed by the event store's dedupe.
+func (s *Server) confirmLLMLimitLift(keyID string) {
+	s.llmLimitMu.Lock()
+	record, had := s.loadLLMUsageLimit(keyID)
+	delete(s.llmLimitProbing, keyID)
+	s.llmLimitMu.Unlock()
+	if !had || record.Active() {
+		return
+	}
+	s.recordLLMLimitEvent(record, len(s.clawsForLLMKey(keyID)), "provider_limit_released")
+}
+
+// observeAuthoredTurnForLLMLimit is the proof a scheduled release waits for:
+// a claw on the key got an answer from the provider. Free when nothing is
+// probing, which is nearly always.
+func (s *Server) observeAuthoredTurnForLLMLimit(clawID string) {
+	s.llmLimitMu.Lock()
+	probing := len(s.llmLimitProbing) != 0
+	s.llmLimitMu.Unlock()
+	if !probing {
+		return
+	}
+	keyID, _ := s.resolveClawLLMKey(clawID)
+	s.llmLimitMu.Lock()
+	waiting := s.llmLimitProbing[keyID]
+	s.llmLimitMu.Unlock()
+	if waiting {
+		s.confirmLLMLimitLift(keyID)
+	}
 }
 
 // resumeClawAfterLLMLimit restarts a parked claw.
@@ -710,6 +761,8 @@ func (s *Server) handleClawLLMLimit(w http.ResponseWriter, r *http.Request, claw
 	case http.MethodDelete:
 		keyID, _ := s.resolveClawLLMKey(clawID)
 		s.releaseLLMUsageLimit(keyID, "An operator cleared the provider usage limit.", true)
+		// The operator says the cap is gone; that is the proof.
+		s.confirmLLMLimitLift(keyID)
 		jsonOK(w, map[string]any{"limited": false})
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)

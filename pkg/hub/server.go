@@ -157,6 +157,10 @@ type Server struct {
 	pollWarnings              map[string]struct{}
 	noProgressMu              sync.Mutex // serializes pause/resume state across the DB and active connection
 	llmLimitMu                sync.Mutex // serializes provider usage-limit records (see llm_usage_limit.go)
+	// llmLimitProbing holds keys whose latch was released on a deadline and
+	// whose lift is not yet proven by a turn (see releaseLLMUsageLimit).
+	// Guarded by llmLimitMu.
+	llmLimitProbing map[string]bool
 
 	// webhookDedup prevents duplicate Linear webhook deliveries from creating
 	// duplicate claws. Keyed by issue transition fingerprint; entries expire after 30s.

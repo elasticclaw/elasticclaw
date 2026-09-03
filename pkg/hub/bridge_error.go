@@ -182,6 +182,9 @@ func (s *Server) observeTurnOutcome(cc *clawConn, clawID, messageID, content str
 		cc.bridgeErrorStreak = 0
 		cc.mu.Unlock()
 	}
+	// An authored turn also proves the provider answered, which is what a
+	// released usage limit is waiting to hear.
+	s.observeAuthoredTurnForLLMLimit(clawID)
 	return s.observeCompletedTurn(clawID, messageID, content), false
 }
 

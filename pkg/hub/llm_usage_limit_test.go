@@ -3,6 +3,8 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
@@ -633,3 +635,63 @@ func TestRedactLLMLimitEventMessageRedactsTokenShapes(t *testing.T) {
 		t.Fatalf("plain prose was mangled: %q", out)
 	}
 }
+
+// A scheduled release is a probe, not a recovery: "Provider cap lifted" must
+// only be said once a turn proves the wall is gone, and every re-latch must
+// tell the operator the hub is still capped instead of staying silent.
+func TestLLMUsageLimitReleaseIsAnnouncedOnlyOnceProven(t *testing.T) {
+	s, _ := NewTestServerWithConfig(t, nil, "", "", "")
+	limitClaw(t, s, "claw-limit-probe", "faster", false)
+	limit := types.LLMUsageLimit{Reason: types.LLMLimitUsage, RegainAt: now().Add(-time.Minute), Message: "capped"}
+	s.handleLLMUsageLimit(nil, "claw-limit-probe", limit)
+
+	for attempt := 1; attempt <= llmLimitMaxAutoRetries; attempt++ {
+		s.releaseLLMUsageLimit("faster", "test release", false)
+		s.handleLLMUsageLimit(nil, "claw-limit-probe", limit)
+	}
+	want := "provider_limit_opened,provider_limit_opened,provider_limit_opened,provider_limit_exhausted"
+	if got := strings.Join(infraEventTypes(t, s), ","); got != want {
+		t.Fatalf("events = %s, want %s", got, want)
+	}
+}
+
+// Once a claw on the key authors a turn after a scheduled release, the lift
+// is real and is announced exactly once.
+func TestLLMUsageLimitAuthoredTurnConfirmsTheLift(t *testing.T) {
+	s, _ := NewTestServerWithConfig(t, nil, "", "", "")
+	limitClaw(t, s, "claw-limit-proof", "faster", false)
+	limitClaw(t, s, "claw-limit-other-key", "other", false)
+	s.handleLLMUsageLimit(nil, "claw-limit-proof", types.LLMUsageLimit{Reason: types.LLMLimitUsage, RegainAt: now().Add(-time.Minute), Message: "capped"})
+	s.releaseLLMUsageLimit("faster", "test release", false)
+	if got := strings.Join(infraEventTypes(t, s), ","); got != "provider_limit_opened" {
+		t.Fatalf("events after a scheduled release = %s, want the release to stay unannounced", got)
+	}
+
+	s.observeTurnOutcome(nil, "claw-limit-other-key", "msg-other", "Working on the other key.")
+	if got := strings.Join(infraEventTypes(t, s), ","); got != "provider_limit_opened" {
+		t.Fatalf("a turn on an unrelated key confirmed the lift: %s", got)
+	}
+	s.observeTurnOutcome(nil, "claw-limit-proof", "msg-1", "Back to work.")
+	s.observeTurnOutcome(nil, "claw-limit-proof", "msg-2", "Still working.")
+	if got := strings.Join(infraEventTypes(t, s), ","); got != "provider_limit_opened,provider_limit_released" {
+		t.Fatalf("events = %s, want exactly one released after the proving turn", got)
+	}
+}
+
+// An operator clearing the block is a confirmed lift in itself.
+func TestLLMUsageLimitOperatorClearAnnouncesTheLift(t *testing.T) {
+	s, _ := NewTestServerWithConfig(t, nil, "", "", "")
+	limitClaw(t, s, "claw-limit-clear", "faster", false)
+	s.handleLLMUsageLimit(nil, "claw-limit-clear", types.LLMUsageLimit{Reason: types.LLMLimitUsage, RegainAt: now().Add(time.Hour), Message: "capped"})
+	req := httptest.NewRequest(http.MethodDelete, "/api/claws/claw-limit-clear/llm-limit", nil)
+	req = req.WithContext(context.WithValue(req.Context(), ctxTenantKey{}, "test-tenant-id"))
+	rr := httptest.NewRecorder()
+	s.handleClawLLMLimit(rr, req, "claw-limit-clear")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("DELETE = %d: %s", rr.Code, rr.Body.String())
+	}
+	if got := strings.Join(infraEventTypes(t, s), ","); got != "provider_limit_opened,provider_limit_released" {
+		t.Fatalf("events = %s, want the operator clear announced", got)
+	}
+}
+

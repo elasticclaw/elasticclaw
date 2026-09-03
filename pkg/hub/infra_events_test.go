@@ -205,9 +205,15 @@ func TestLLMUsageLimitInfraEventsArePerKeyAndSecretSafe(t *testing.T) {
 	if payload["parked_claws"] != float64(4) {
 		t.Fatalf("parked_claws = %v, want 4", payload["parked_claws"])
 	}
+	// A scheduled release is a probe; the lift is announced once a claw on
+	// the key proves it with an authored turn.
 	s.releaseLLMUsageLimit(key, "test release", false)
+	if got := infraEventTypes(t, s); strings.Join(got, ",") != "provider_limit_opened" {
+		t.Fatalf("events after an unproven release = %v", got)
+	}
+	s.observeTurnOutcome(nil, "shared-key-0", "msg-proof", "Back to work.")
 	if got := infraEventTypes(t, s); strings.Join(got, ",") != "provider_limit_opened,provider_limit_released" {
-		t.Fatalf("events after release = %v", got)
+		t.Fatalf("events after the proving turn = %v", got)
 	}
 	record, _ := s.loadLLMUsageLimit(key)
 	record.ReleasedAt, record.Retries = now(), llmLimitMaxAutoRetries-1

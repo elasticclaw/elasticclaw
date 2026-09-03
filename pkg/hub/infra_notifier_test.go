@@ -450,3 +450,40 @@ func TestInfraNotifierTickDisabledWindowIsNotReplayed(t *testing.T) {
 	}
 }
 
+// provider_limit_exhausted is never auto-released, so its message must send
+// the operator to clear the block rather than promise a reset that will not
+// come; provider_limit_released describes claws that resumed, not parked.
+func TestBuildInfraMessageProviderLimitFieldsMatchTheLatch(t *testing.T) {
+	detail := map[string]any{"name": "Anthropic", "parked_claws": 4, "deadline": "2026-09-02 00:45 UTC", "retry_count": 3}
+	labels := func(msg notify.Message) map[string]string {
+		out := map[string]string{}
+		for _, f := range msg.Fields {
+			out[f.Label] = f.Value
+		}
+		return out
+	}
+
+	exhausted := buildInfraMessage(infraEventRow{EventType: "provider_limit_exhausted", Subject: "anthropic", Detail: detail, OccurredAt: time.Now()}, time.Now())
+	if strings.Contains(strings.ToLower(exhausted.Body), "wait until") {
+		t.Fatalf("exhausted body still tells the operator to wait: %q", exhausted.Body)
+	}
+	if !strings.Contains(strings.ToLower(exhausted.Body), "clear the block") {
+		t.Fatalf("exhausted body does not name the required action: %q", exhausted.Body)
+	}
+	if got := labels(exhausted); got["Deadline"] != "" || got["Last retry"] != "2026-09-02 00:45 UTC" {
+		t.Fatalf("exhausted fields = %v, want the deadline relabelled as the last retry", got)
+	}
+
+	released := buildInfraMessage(infraEventRow{EventType: "provider_limit_released", Subject: "anthropic", Detail: detail, OccurredAt: time.Now()}, time.Now())
+	if got := labels(released); got["Claws parked"] != "" || got["Deadline"] != "" || got["Claws resumed"] != "4" {
+		t.Fatalf("released fields = %v, want resumed claws and no deadline", got)
+	}
+
+	retry := buildInfraMessage(infraEventRow{EventType: "provider_limit_opened", Subject: "anthropic", Detail: map[string]any{"name": "Anthropic", "retry_count": 2, "deadline": "2026-09-02 00:30 UTC"}, OccurredAt: time.Now()}, time.Now())
+	if got := labels(retry); got["Retry"] != "2" {
+		t.Fatalf("re-latch fields = %v, want the retry number", got)
+	}
+	if !strings.Contains(strings.ToLower(retry.Body), "still") {
+		t.Fatalf("re-latch body reads like a first sighting: %q", retry.Body)
+	}
+}
