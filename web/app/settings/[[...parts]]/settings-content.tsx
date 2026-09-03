@@ -5211,6 +5211,11 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
       enabled: nextInfraRoutes.length > 0 && infra.enabled,
       routes: nextInfraRoutes,
     }
+    // The clamp above turns infrastructure alerts off when this channel was
+    // their last route. Recorded for the same reason pausedIds is: after the
+    // delete the infra section shows a neutral empty state that reads as
+    // never-configured, and a notice is the only record of why they are off.
+    const infraPausedByDelete = Boolean(infra?.enabled) && nextInfraRoutes.length === 0 && nextInfraRoutes.length < (infra?.routes || []).length
     const generation = saveGeneration.current
     const { persisted, message: failure } = await savePatch({
       notifiers: nextNotifiers,
@@ -5237,6 +5242,7 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
           { ids: pausedIds, channel: name },
         ])
       }
+      if (infraPausedByDelete) setInfraPause({ channel: name })
     }
     setSaveErrors((current) => { const { [name]: _cleared, ...rest } = current; return rest })
     if (generation !== saveGeneration.current) {
@@ -5345,6 +5351,10 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
   // has to add a second notice, not replace the only record of why the first
   // batch of reports is off.
   const [schedulePauses, setSchedulePauses] = useState<{ ids: string[]; channel: string }[]>([])
+  // The channel whose deletion paused infrastructure alerts (see
+  // deleteNotifier). One entry, not a list: infra has a single master switch,
+  // so a later pause by another delete supersedes rather than accumulates.
+  const [infraPause, setInfraPause] = useState<{ channel: string } | null>(null)
   const [reportTests, setReportTests] = useState<Record<string, ReportTestState>>({})
   // Invalidates an in-flight probe whose schedule has meanwhile been edited or
   // deleted: its result describes a report that went somewhere else.
@@ -6146,7 +6156,7 @@ function NotifierSection({ settings, onSave, saving }: { settings: SettingsData;
         )}
       </div>
 
-      <InfraNotificationsSection settings={settings} onSave={onSave} saving={saving} />
+      <InfraNotificationsSection settings={settings} onSave={onSave} saving={saving} pause={infraPause} />
 
       {/* Add / edit modal */}
       {/* Closing only closes: DialogContent stays mounted for its 200ms exit
@@ -6706,19 +6716,36 @@ const INFRA_EVENT_LABELS: Record<InfraEventType, string> = {
   provider_limit_released: "Provider cap lifted",
 }
 
-function InfraNotificationsSection({ settings, onSave, saving }: { settings: SettingsData; onSave: (p: object) => Promise<SaveOutcome>; saving: boolean }) {
+function InfraNotificationsSection({ settings, onSave, saving, pause }: { settings: SettingsData; onSave: (p: object) => Promise<SaveOutcome>; saving: boolean; pause: { channel: string } | null }) {
   const notifications = settings.notifications
   const notifiers = notifications?.notifiers || {}
   const names = Object.keys(notifiers).sort((a, b) => a.localeCompare(b))
   const infra = notifications?.infra
+  const enabled = infra?.enabled ?? false
   const routes = (infra?.routes || []).map((route) => ({ ...route, via: route.via.trim(), events: route.events || [] }))
   const eventTypes = settings.infraEventTypes?.length ? settings.infraEventTypes : INFRA_EVENT_TYPES
   const [tests, setTests] = useState<Record<string, TestState>>({})
+  // The last save the hub refused, rendered in the section. The page-level
+  // banner is the only other place it goes, and this section sits at the
+  // bottom of a long page: a checkbox that snaps back with the reason
+  // scrolled a screen or more above it just looks dead.
+  const [saveError, setSaveError] = useState("")
+  // Routes whose notifier is gone. The hub keeps them on disk while alerts
+  // are off but rejects the whole notifications block the moment they are
+  // on — and PATCH replaces the whole block, so one dangling route under an
+  // enabled switch fails every save on this screen, the channel and report
+  // sections included, until it is removed. The master switch is gated on
+  // it the way the lifecycle switch is, and the banner below says why.
+  const orphanRoutes = routes.filter((route) => !names.includes(route.via))
+  const orphan = orphanRoutes.length > 0
+  // Shown while the pause deleteNotifier recorded still stands; turning the
+  // alerts back on answers it.
+  const pauseNotice = pause && !enabled ? pause : null
 
   const saveInfra = async (next: InfraNotificationsConfig) => {
     // PATCH replaces the notifications block, so carry the sibling sections
     // through unchanged when this compact editor changes only infra routing.
-    await onSave({
+    const { message } = await onSave({
       notifications: {
         notifiers,
         lifecycle: notifications?.lifecycle,
@@ -6726,11 +6753,12 @@ function InfraNotificationsSection({ settings, onSave, saving }: { settings: Set
         infra: next,
       },
     })
+    setSaveError(message || "")
   }
 
   const updateRoute = async (index: number, route: InfraRoute) => {
     const nextRoutes = routes.map((current, i) => i === index ? route : current)
-    await saveInfra({ ...infra, enabled: infra?.enabled ?? false, routes: nextRoutes })
+    await saveInfra({ ...infra, enabled, routes: nextRoutes })
   }
 
   const sendTest = async (route: InfraRoute, index: number) => {
@@ -6751,20 +6779,65 @@ function InfraNotificationsSection({ settings, onSave, saving }: { settings: Set
       <div className="flex items-start justify-between gap-4">
         <div>
           <h3 className="text-sm font-medium">Infrastructure alerts</h3>
-          <p className="text-xs text-muted-foreground mt-0.5">Dependency outages and provider usage limits, routed independently from lifecycle alerts.</p>
+          <p className="text-xs text-muted-foreground mt-0.5">
+            {routes.length === 0
+              ? "Dependency outages and provider usage limits, routed independently from lifecycle alerts. Add a channel route before turning them on."
+              : orphan
+                ? "Remove the routes pointing at deleted channels below — the hub refuses to enable alerts while one is left."
+                : "Dependency outages and provider usage limits, routed independently from lifecycle alerts."}
+          </p>
         </div>
         <Switch
-          checked={infra?.enabled ?? false}
-          disabled={saving || routes.length === 0}
-          onCheckedChange={(enabled) => saveInfra({ ...infra, enabled, routes })}
+          checked={enabled}
+          // Gated on the shapes the hub rejects once the block is enabled: no
+          // routes, and a route naming a notifier that no longer exists.
+          disabled={saving || routes.length === 0 || orphan}
+          title={routes.length === 0 ? "Add a channel route first" : orphan ? "Remove the routes pointing at deleted channels first" : undefined}
+          onCheckedChange={(next) => saveInfra({ ...infra, enabled: next, routes })}
           aria-label="Enable infrastructure alerts"
         />
       </div>
 
+      {pauseNotice && (
+        <div className="flex items-start gap-2 rounded-md border border-amber-500/20 bg-amber-500/10 px-3 py-2 text-xs text-amber-400">
+          <AlertTriangle className="size-3.5 mt-px shrink-0" />
+          <span className="break-words">
+            Infrastructure alerts paused — &quot;{pauseNotice.channel}&quot; was the only channel they were routed to.{" "}
+            {notifiers[pauseNotice.channel]
+              ? "A channel by that name exists again: add a route through it and turn the alerts back on."
+              : "Add a route through another channel and turn them back on."}
+          </span>
+        </div>
+      )}
+      {orphan && (
+        <div className="flex items-start gap-2 rounded-md border border-amber-500/20 bg-amber-500/10 px-3 py-2 text-xs text-amber-400">
+          <AlertTriangle className="size-3.5 mt-px shrink-0" />
+          <span className="break-words">
+            {orphanRoutes.length === 1 ? "The route through " : "The routes through "}
+            {orphanRoutes.map((route, i) => (
+              <React.Fragment key={route.via}>
+                {i > 0 && ", "}
+                <span className="font-mono">{route.via}</span>
+              </React.Fragment>
+            ))}
+            {orphanRoutes.length === 1 ? " points at a channel that no longer exists. " : " point at channels that no longer exist. "}
+            {enabled
+              ? "While infrastructure alerts are on, the hub refuses every save on this screen — channels, scheduled reports and test sends included — until the route is removed or pointed at another channel."
+              : "The hub refuses to turn infrastructure alerts on until the route is removed or pointed at another channel."}
+          </span>
+        </div>
+      )}
+      {saveError && (
+        <div className="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+          <AlertTriangle className="size-3.5 mt-px shrink-0" />
+          <span className="break-words">Last save failed: {saveError}</span>
+        </div>
+      )}
+
       {routes.length === 0 ? (
         <p className="text-sm text-muted-foreground px-4 py-4 text-center border border-border rounded-lg">Add a channel route before turning infrastructure alerts on.</p>
       ) : (
-        <div className={cn("space-y-2", !(infra?.enabled ?? false) && "opacity-50")}>
+        <div className={cn("space-y-2", !enabled && "opacity-50")}>
           {routes.map((route, index) => {
             const key = `${index}:${route.via}`
             const test = tests[key]
@@ -6772,7 +6845,14 @@ function InfraNotificationsSection({ settings, onSave, saving }: { settings: Set
             // added later" — the same receive-all semantics the lifecycle
             // dialog spells out — so the card has to say so.
             const allEvents = route.events.length === 0
-            const orphan = !names.includes(route.via)
+            const missing = !names.includes(route.via)
+            // Unchecking the last box would save an empty list, which the hub
+            // reads as receive-all — the opposite of what the operator meant.
+            // Removing the route is how to stop it. Said in the description
+            // below, which every checkbox is described by: a disabled input
+            // leaves the tab order, so a tooltip on it is never reached.
+            const lastOne = !allEvents && route.events.length === 1
+            const hintId = `infra-route-${index}-events-hint`
             // The hub rejects two routes through one notifier, so a name
             // another route already uses is not on offer here.
             const options = names.filter((name) => name === route.via || !routes.some((other, i) => i !== index && other.via === name))
@@ -6783,10 +6863,12 @@ function InfraNotificationsSection({ settings, onSave, saving }: { settings: Set
                     value={route.via}
                     disabled={saving}
                     onChange={(e) => updateRoute(index, { ...route, via: e.target.value })}
-                    className={cn("h-8 min-w-0 flex-1 text-sm rounded-md border bg-background px-3", orphan ? "border-amber-500/50" : "border-input")}
-                    aria-label="Notifier for infrastructure alerts"
+                    className={cn("h-8 min-w-0 flex-1 text-sm rounded-md border bg-background px-3", missing ? "border-amber-500/50" : "border-input")}
+                    // Every card carries the same controls, so each name says
+                    // which route it belongs to — as the scheduled rows do.
+                    aria-label={`Notifier for infrastructure alerts (route ${index + 1}: ${route.via})`}
                   >
-                    {orphan && <option value={route.via} disabled>{route.via} — missing notifier</option>}
+                    {missing && <option value={route.via} disabled>{route.via} — missing notifier</option>}
                     {options.map((name) => <option key={name} value={name}>{name}</option>)}
                   </select>
                   <span className={cn("shrink-0 text-xs px-2 py-1 rounded font-medium", allEvents ? "bg-blue-500/10 text-blue-400 border border-blue-500/20" : "bg-muted text-muted-foreground")}>
@@ -6796,18 +6878,19 @@ function InfraNotificationsSection({ settings, onSave, saving }: { settings: Set
                     size="sm"
                     variant="ghost"
                     disabled={saving}
+                    aria-label={`Remove the ${route.via} route`}
                     onClick={() => {
                       // The hub rejects an enabled block with no routes, so
                       // losing the last route pauses alerts instead of failing
                       // the save — the same clamp deleteNotifier applies.
                       const nextRoutes = routes.filter((_, i) => i !== index)
-                      saveInfra({ ...infra, enabled: nextRoutes.length > 0 && (infra?.enabled ?? false), routes: nextRoutes })
+                      saveInfra({ ...infra, enabled: nextRoutes.length > 0 && enabled, routes: nextRoutes })
                     }}
                   >
                     <Trash2 className="size-3.5 mr-1" /> Remove
                   </Button>
                 </div>
-                {orphan && (
+                {missing && (
                   <p className="text-xs text-amber-400">
                     Notifier <span className="font-mono">{route.via}</span> no longer exists, so this route delivers nothing. Pick another channel or remove the route.
                   </p>
@@ -6815,18 +6898,16 @@ function InfraNotificationsSection({ settings, onSave, saving }: { settings: Set
                 <div className="grid gap-1 sm:grid-cols-2">
                   {eventTypes.map((eventType) => {
                     const checked = allEvents || route.events.includes(eventType)
-                    // Unchecking the last box would save an empty list, which
-                    // the hub reads as receive-all — the opposite of what the
-                    // operator meant. Removing the route is how to stop it.
-                    const lastChecked = checked && !allEvents && route.events.length === 1
+                    const lastChecked = checked && lastOne
                     return (
                       <label
                         key={eventType}
                         className={cn("flex items-center gap-2 text-sm rounded px-2 py-1", lastChecked ? "cursor-not-allowed" : "cursor-pointer hover:bg-muted/50")}
-                        title={lastChecked ? "At least one alert type must stay checked. Remove the route to stop it." : undefined}
                       >
                         <input
                           type="checkbox"
+                          aria-label={`${INFRA_EVENT_LABELS[eventType]} (${eventType}) for ${route.via}`}
+                          aria-describedby={hintId}
                           checked={checked}
                           disabled={saving || lastChecked}
                           onChange={(e) => {
@@ -6841,13 +6922,25 @@ function InfraNotificationsSection({ settings, onSave, saving }: { settings: Set
                     )
                   })}
                 </div>
-                <p className="text-xs text-muted-foreground">
+                <p id={hintId} className="text-xs text-muted-foreground">
                   {allEvents
                     ? "Saved as receive-all: this channel gets every alert type, including any added later. Uncheck a type to narrow it."
-                    : "Only the checked types reach this channel. Remove the route to stop it entirely."}
+                    : lastOne
+                      ? `Only "${INFRA_EVENT_LABELS[route.events[0]]}" reaches this channel, and it stays checked: at least one alert type must. Remove the route to stop it entirely.`
+                      : "Only the checked types reach this channel. Remove the route to stop it entirely."}
                 </p>
                 <div className="flex items-center gap-2">
-                  <Button size="sm" variant="outline" className="gap-1.5" disabled={saving || !(infra?.enabled ?? false) || test?.status === "sending"} onClick={() => sendTest(route, index)}>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="gap-1.5"
+                    // A missing notifier is already explained above the grid;
+                    // a test through it could only fail with the hub's
+                    // routes[n] message, which names nothing on this card.
+                    disabled={saving || !enabled || missing || test?.status === "sending"}
+                    aria-label={`Send a test through ${route.via}`}
+                    onClick={() => sendTest(route, index)}
+                  >
                     <Send className="size-3.5" />
                     {test?.status === "sending" ? "Sending…" : "Send test"}
                   </Button>
@@ -6864,7 +6957,7 @@ function InfraNotificationsSection({ settings, onSave, saving }: { settings: Set
         disabled={saving || names.length === 0 || names.every((name) => routes.some((route) => route.via === name))}
         onClick={() => {
           const via = names.find((name) => !routes.some((route) => route.via === name))
-          if (via) saveInfra({ ...infra, enabled: infra?.enabled ?? false, routes: [...routes, { via, events: [] }] })
+          if (via) saveInfra({ ...infra, enabled, routes: [...routes, { via, events: [] }] })
         }}
       >
         <span className="mr-1 text-sm">+</span> Add route
