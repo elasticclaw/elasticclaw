@@ -705,6 +705,21 @@ func TestRedactLLMLimitEventMessageRedactsBearerEchoes(t *testing.T) {
 	if !strings.Contains(out, "org_abc123") {
 		t.Fatalf("account identifier needed to act on the message was mangled: %q", out)
 	}
+	// A quoted token is one token, delimiters and all; a header block's next
+	// line is a different header, not the credential.
+	for _, tc := range []struct{ message, secret, keep string }{
+		{`429: Authorization: Bearer "tok;part2" rejected`, "tok;part2", "rejected"},
+		{"429: Authorization: Bearer 'a,b c' rejected", "a,b", "rejected"},
+		{"Authorization: Bearer\nRetry-After: 120", "", "Retry-After: 120"},
+	} {
+		out := redactLLMLimitEventMessage(tc.message, "prod-openai")
+		if tc.secret != "" && strings.Contains(out, tc.secret) {
+			t.Fatalf("bearer token survived redaction: %q -> %q", tc.message, out)
+		}
+		if !strings.Contains(out, tc.keep) {
+			t.Fatalf("redaction swallowed adjacent text: %q -> %q", tc.message, out)
+		}
+	}
 }
 
 // A restart between the scheduled release and its proving turn must not lose

@@ -269,3 +269,41 @@ func TestDependencyWatcherEventsCarryTheStatusPage(t *testing.T) {
 		t.Fatalf("non-URL source produced a status page %q", got)
 	}
 }
+
+// Redaction is a property of the event store, not of one producer: a vendor
+// status page that echoes a credential reaches infra_events through the
+// dependency watcher, which never knew about the LLM-limit patterns.
+func TestRecordInfraEventRedactsSecretsFromEveryProducer(t *testing.T) {
+	s, _ := NewTestServerWithConfig(t, nil, "", "", "")
+	base := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	const token = "sk-ant-api03-Fak3Tok3nFak3Tok3nFak3"
+	bad := DependencyStatus{ID: "model:anthropic", Name: "Anthropic", Status: dependencyStatusDowntime,
+		Message: "gateway rejected Authorization: Bearer " + token + " during the incident", Source: "https://status.anthropic.com/api/v2/status.json"}
+	for i := 0; i < 2; i++ {
+		if err := s.observeDependencyStatus(bad, base.Add(time.Duration(i)*time.Minute), 0); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var raw string
+	if err := s.db.QueryRow(`SELECT detail FROM infra_events WHERE event_type='dependency_down'`).Scan(&raw); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(raw, token) {
+		t.Fatalf("status-page text carried a credential into infra_events: %s", raw)
+	}
+	var detail map[string]any
+	if err := json.Unmarshal([]byte(raw), &detail); err != nil {
+		t.Fatal(err)
+	}
+	if msg, _ := detail["message"].(string); !strings.Contains(msg, "during the incident") {
+		t.Fatalf("redaction mangled the prose around the credential: %q", msg)
+	}
+	// The producer's own map is left alone.
+	original := map[string]any{"message": "Bearer " + token}
+	if err := s.recordInfraEvent(infraEvent{EventKey: "redact-copy", EventType: "dependency_down", Subject: "x", Detail: original, OccurredAt: base}); err != nil {
+		t.Fatal(err)
+	}
+	if original["message"] != "Bearer "+token {
+		t.Fatalf("recordInfraEvent mutated the caller's detail map: %v", original)
+	}
+}

@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"regexp"
 	"strings"
 	"time"
 
@@ -763,30 +762,15 @@ func maskLLMLimitKeyID(keyID string) string {
 	return "key_" + hex.EncodeToString(sum[:6])
 }
 
-// llmLimitTokenPatterns match credential-shaped substrings a provider error
-// body may quote back at us. The configured key ID is often an alias
-// ("anthropic-prod"), so replacing only the literal ID would wave the raw
-// token straight through into infra_events and Slack. Over-redaction is the
-// safe failure mode here: nothing in a billing-cap message needs a 28-char
-// opaque string to be actionable.
-var llmLimitTokenPatterns = []*regexp.Regexp{
-	// Provider API keys: sk-..., sk-ant-..., sk-proj-... and friends.
-	regexp.MustCompile(`\bsk-[A-Za-z0-9_-]{8,}`),
-	// An echoed Authorization header: whatever follows "Bearer" is the
-	// credential, however short or oddly spelled.
-	regexp.MustCompile(`(?i)\bbearer\s+[^\s;,'"]+`),
-	// Any long opaque run that reads as a credential, not prose.
-	regexp.MustCompile(`[A-Za-z0-9_-]{28,}`),
-}
-
+// redactLLMLimitEventMessage strips the configured key ID from a provider
+// message on top of the credential shapes recordInfraEvent strips from every
+// event. The ID is often an alias ("anthropic-prod") that no pattern would
+// catch, and it is the one string only this producer knows.
 func redactLLMLimitEventMessage(message, keyID string) string {
 	if keyID != "" {
 		message = strings.ReplaceAll(message, keyID, "[redacted]")
 	}
-	for _, pattern := range llmLimitTokenPatterns {
-		message = pattern.ReplaceAllString(message, "[redacted]")
-	}
-	return message
+	return redactInfraEventMessage(message)
 }
 
 // handleClawLLMLimit exposes the block on a claw, and clears it.
