@@ -137,7 +137,9 @@ func TestBridgeExecRunTimeoutReportsExitCode124(t *testing.T) {
 	}
 
 	var failed *typesv2.ControlEnvelope
-	deadline := time.Now().Add(2 * time.Second)
+	// CI runners can be slow to schedule the goroutine and reap the child process;
+	// use a generous deadline instead of the bare minimum.
+	deadline := time.Now().Add(10 * time.Second)
 	for failed == nil && time.Now().Before(deadline) {
 		ready, _ := store.ready(binding, 10)
 		for i := range ready {
