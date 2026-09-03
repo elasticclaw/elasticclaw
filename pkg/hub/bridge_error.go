@@ -76,7 +76,7 @@ func (s *Server) observeBridgeErrorTurn(cc *clawConn, clawID, errText string, de
 	// threshold needs a SECOND turn, and nothing here guarantees one: with the
 	// plan gate no longer answering, the next turn only exists if the idle
 	// auto-resume fires — which is off when liveness.idle_resume is disabled,
-	// when the claw is ineligible, or once its lifetime resume cap is spent. Tie
+	// when the claw is ineligible, or once its per-work-unit resume cap is spent. Tie
 	// the alarm to that and a claw whose transport is dead can sit silent
 	// forever, which is the failure this whole change exists to end. So: tell
 	// the operator on the first one, stop the loop on the second.
