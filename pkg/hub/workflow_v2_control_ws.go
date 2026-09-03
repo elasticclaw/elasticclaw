@@ -118,6 +118,9 @@ func (s *Server) handleWorkflowV2ControlWS(w http.ResponseWriter, r *http.Reques
 				return
 			}
 			receipt, applyErr := s.applyWorkflowV2ClawControl(ctx, store, envelope)
+			// The claw control may have moved the v2 run to a terminal state. If so,
+			// finish the parent v1 task run and disconnect the claw.
+			go s.maybeFinishWorkflowV2Parent(context.Background(), envelope.RunID)
 			if applyErr != nil {
 				if strings.TrimSpace(envelope.MessageID) == "" {
 					_ = conn.Close(websocket.StatusPolicyViolation, "control message id is required")

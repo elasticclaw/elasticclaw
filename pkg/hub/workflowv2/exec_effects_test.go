@@ -362,6 +362,74 @@ func TestApplyCommandReceiptDependencyUpdateTransitions(t *testing.T) {
 	}
 }
 
+func TestApplyCommandReceiptDependencyUpdateDoesNotPolluteExecNamespace(t *testing.T) {
+	db := openRuntimeDB(t)
+	store := workflowv2.NewStore(db)
+
+	run, err := store.CreateRun(context.Background(), workflowv2.CreateRunRequest{
+		ID: "run-dep-ns", TenantID: "tenant-1", InitialClawID: "claw-dep-ns",
+		WorkspaceYAML: []byte(execWorkspaceYAML),
+		WorkflowYAML:  []byte(dependencyUpdateWorkflowYAML),
+	})
+	if err != nil {
+		t.Fatalf("create run: %v", err)
+	}
+	claim, err := store.ClaimEffect(context.Background(), "dep-ns-worker", time.Minute)
+	if err != nil || claim == nil {
+		t.Fatalf("claim = %#v, %v", claim, err)
+	}
+	envelope, err := store.MaterializeCommandTask(context.Background(), claim.Effect.ID, claim.AttemptID, "dep-ns-worker")
+	if err != nil {
+		t.Fatalf("materialize: %v", err)
+	}
+
+	receipt := map[string]interface{}{
+		"succeeded":    true,
+		"ecosystems":   []string{"go"},
+		"files_changed": []string{"go.mod"},
+	}
+	receiptJSON, _ := json.Marshal(receipt)
+	result, err := store.ApplyCommandReceipt(context.Background(), typesv2.ControlEnvelope{
+		ProtocolVersion:      typesv2.ControlProtocolVersion,
+		MessageID:            "dep-ns-receipt-1",
+		Kind:                 typesv2.MessageDependencyUpdateCompleted,
+		RunID:                run.ID,
+		AttemptID:            run.CurrentAttemptID,
+		TaskID:               envelope.TaskID,
+		ExpectedStateVersion: &run.StateVersion,
+		Payload:              receiptJSON,
+	})
+	if err != nil {
+		t.Fatalf("apply command receipt: %v", err)
+	}
+	if result.Disposition != typesv2.DispositionAccepted {
+		t.Fatalf("disposition = %q reason=%s", result.Disposition, result.Reason)
+	}
+
+	rows, err := db.Query(`SELECT fact_key FROM workflow_v2_facts WHERE run_id=?`, run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var key string
+		if err := rows.Scan(&key); err != nil {
+			t.Fatal(err)
+		}
+		if key == "exec.succeeded" || key == "exec.files_changed" || key == "exec.ecosystems" {
+			t.Fatalf("dependency update polluted exec.* namespace with %q", key)
+		}
+	}
+
+	updated, err := store.GetRun(context.Background(), run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.State != "done" {
+		t.Fatalf("state = %q", updated.State)
+	}
+}
+
 func TestExecRunEffectMissingCapabilityRejected(t *testing.T) {
 	ws := `
 schema_version: 2

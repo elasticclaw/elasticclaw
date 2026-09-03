@@ -271,6 +271,9 @@ func Migrate(db *sql.DB) error {
 	if err := addColumnIfMissing(db, "workflow_v2_runs", "trigger_type", "TEXT NOT NULL DEFAULT 'manual'"); err != nil {
 		return fmt.Errorf("workflow v2 migrate: %w", err)
 	}
+	if err := addColumnIfMissing(db, "workflow_v2_runs", "task_run_id", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return fmt.Errorf("workflow v2 migrate: %w", err)
+	}
 	return nil
 }
 

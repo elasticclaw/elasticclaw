@@ -100,11 +100,11 @@ func (s *controlSupervisor) runExecCommand(ctx context.Context, binding workflow
 	errorMsg := ""
 	if err != nil {
 		succeeded = false
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			exitCode = exitErr.ExitCode()
-		} else if ctx.Err() == context.DeadlineExceeded {
+		if ctx.Err() == context.DeadlineExceeded {
 			exitCode = 124
 			errorMsg = fmt.Sprintf("command timed out after %s", timeout)
+		} else if exitErr, ok := err.(*exec.ExitError); ok {
+			exitCode = exitErr.ExitCode()
 		} else {
 			exitCode = 1
 			errorMsg = err.Error()
@@ -159,11 +159,11 @@ func (s *controlSupervisor) runDependencyUpdateCommand(ctx context.Context, bind
 	errorMsg := ""
 	if err != nil {
 		succeeded = false
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			exitCode = exitErr.ExitCode()
-		} else if ctx.Err() == context.DeadlineExceeded {
+		if ctx.Err() == context.DeadlineExceeded {
 			exitCode = 124
 			errorMsg = fmt.Sprintf("dependency update timed out after %s", timeout)
+		} else if exitErr, ok := err.(*exec.ExitError); ok {
+			exitCode = exitErr.ExitCode()
 		} else {
 			exitCode = 1
 			errorMsg = err.Error()

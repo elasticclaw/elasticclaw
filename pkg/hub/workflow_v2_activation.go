@@ -3,6 +3,7 @@ package hub
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -63,9 +64,15 @@ func (s *Server) triggerWorkflowV2Config(w http.ResponseWriter, r *http.Request,
 	clawID, _, err := s.createClawFromWorkflowWithOptions(workspace, workflow, workflowCreateOptions{
 		ctx: r.Context(), inputs: inputs, reason: "manual workflow v2 trigger",
 		beforeProvision: func(ctx context.Context, clawID, tenantID string) error {
+			// Link the v2 run to its parent v1 task run so the hub can finish
+			// the parent when the v2 run reaches a terminal state.
+			var taskRunID string
+			if err := s.db.QueryRow(`SELECT id FROM task_runs WHERE claw_id=? ORDER BY created_at DESC LIMIT 1`, clawID).Scan(&taskRunID); err != nil && !errors.Is(err, sql.ErrNoRows) {
+				return fmt.Errorf("lookup parent task run for claw %s: %w", clawID, err)
+			}
 			store := workflowv2.NewStore(s.db)
 			run, err := store.CreateRun(ctx, workflowv2.CreateRunRequest{
-				ID: runID, TenantID: tenantID, InitialClawID: clawID,
+				ID: runID, TenantID: tenantID, InitialClawID: clawID, TaskRunID: taskRunID,
 				WorkspaceYAML: workspaceYAML, WorkflowYAML: workflowYAML, ActivationPending: true,
 				TriggerType: "manual",
 			})
@@ -104,6 +111,8 @@ func (s *Server) triggerWorkflowV2Config(w http.ResponseWriter, r *http.Request,
 		}); err != nil {
 			log.Printf("[workflow-v2] manual trigger start command for run %s: %v", runID, err)
 		}
+		// The start command may have transitioned straight to a terminal state.
+		go s.maybeFinishWorkflowV2Parent(context.Background(), runID)
 	}
 	jsonOK(w, map[string]string{"run_id": runID, "claw_id": clawID, "status": "created"})
 }

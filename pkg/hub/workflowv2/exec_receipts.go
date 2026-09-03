@@ -86,29 +86,13 @@ func commandReceiptFacts(kind typesv2.ControlMessageKind, receipt map[string]int
 			delete(facts, "exec.error")
 		}
 	case typesv2.MessageDependencyUpdateCompleted, typesv2.MessageDependencyUpdateFailed:
+		// Project dependency-update receipts under the protected
+		// exec.dependency_update.* namespace so they never collide with the
+		// exec.last_run.* keys produced by exec.run.
 		for _, key := range []string{"ecosystems", "manifests", "updates", "commands", "files_changed", "succeeded", "error"} {
-			setIfPresent(key)
-		}
-		if v, ok := receipt["succeeded"]; ok {
-			facts["exec.dependency_update.succeeded"] = v
-		}
-		if v, ok := receipt["error"]; ok {
-			facts["exec.dependency_update.error"] = v
-		}
-		if v, ok := receipt["files_changed"]; ok {
-			facts["exec.dependency_update.files_changed"] = v
-		}
-		if v, ok := receipt["ecosystems"]; ok {
-			facts["exec.dependency_update.ecosystems"] = v
-		}
-		if v, ok := receipt["manifests"]; ok {
-			facts["exec.dependency_update.manifests"] = v
-		}
-		if v, ok := receipt["updates"]; ok {
-			facts["exec.dependency_update.updates"] = v
-		}
-		if v, ok := receipt["commands"]; ok {
-			facts["exec.dependency_update.commands"] = v
+			if v, ok := receipt[key]; ok {
+				facts["exec.dependency_update."+key] = v
+			}
 		}
 	default:
 		// Unknown command receipt kinds should not reach this helper.

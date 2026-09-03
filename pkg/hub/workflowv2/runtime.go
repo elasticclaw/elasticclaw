@@ -55,6 +55,7 @@ type Run struct {
 	CurrentAttemptID  string               `json:"current_attempt_id,omitempty"`
 	CurrentTaskID     string               `json:"current_task_id,omitempty"`
 	ContextBundleID   string               `json:"context_bundle_id,omitempty"`
+	TaskRunID         string               `json:"task_run_id,omitempty"`
 	TriggerType       string               `json:"trigger_type"`
 	CreatedAt         time.Time            `json:"created_at"`
 	UpdatedAt         time.Time            `json:"updated_at"`
@@ -74,6 +75,9 @@ type CreateRunRequest struct {
 	// ActivationPending keeps effects unclaimable until organization context
 	// has been assembled and CompleteActivation has released the run.
 	ActivationPending bool
+	// TaskRunID links the v2 run to its parent v1 task run so the hub can
+	// finish the parent and disconnect the claw when the v2 run terminates.
+	TaskRunID string
 }
 
 type EventInput struct {
@@ -179,11 +183,11 @@ func (s *Store) CreateRun(ctx context.Context, req CreateRunRequest) (Run, error
 	}
 	_, err = tx.ExecContext(ctx, `INSERT INTO workflow_v2_runs(
 		id,tenant_id,workspace_name,workflow_name,workspace_revision,workflow_revision,
-		workspace_yaml,workflow_yaml,state,display_phase,state_version,status,waiting_reason,current_attempt_id,trigger_type,created_at,updated_at,finished_at
-	) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		workspace_yaml,workflow_yaml,state,display_phase,state_version,status,waiting_reason,current_attempt_id,task_run_id,trigger_type,created_at,updated_at,finished_at
+	) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		runID, req.TenantID, rws.Workspace.Name, rwf.Workflow.Name, string(rws.Revision), string(rwf.Revision),
 		string(req.WorkspaceYAML), string(req.WorkflowYAML), rwf.Workflow.InitialState, string(initial.Phase), 1, string(status), waitingReason, currentAttemptID,
-		triggerType,
+		strings.TrimSpace(req.TaskRunID), triggerType,
 		now.UnixMilli(), now.UnixMilli(), finishedAt)
 	if err != nil {
 		return Run{}, fmt.Errorf("create workflow v2 run: %w", err)
@@ -320,7 +324,7 @@ func (s *Store) GetRun(ctx context.Context, runID string) (Run, error) {
 	}
 	return scanRun(s.db.QueryRowContext(ctx, `SELECT id,tenant_id,workspace_name,workflow_name,
 		workspace_revision,workflow_revision,state,display_phase,state_version,status,waiting_reason,
-		current_attempt_id,current_task_id,context_bundle_id,trigger_type,created_at,updated_at,finished_at
+		current_attempt_id,current_task_id,context_bundle_id,task_run_id,trigger_type,created_at,updated_at,finished_at
 		FROM workflow_v2_runs WHERE id=?`, runID))
 }
 
@@ -556,19 +560,23 @@ func (s *Store) applyTransition(ctx context.Context, tx *sql.Tx, runID string, s
 	if err := writeFacts(ctx, tx, runID, input.ID, ProducerEngine, input.Provenance, writes, now); err != nil {
 		return EventResult{}, err
 	}
-	if clause != nil && !clause.Ignore {
-		if err := scheduleEffects(ctx, tx, runID, "event_clause", input.ID,
-			"events."+input.Kind+".clauses["+clauseName+"].effects", clause.Effects, now); err != nil {
+	// Terminal states end the run; do not schedule additional effects that would
+	// need to be materialized against a non-active run.
+	if !destination.Terminal {
+		if clause != nil && !clause.Ignore {
+			if err := scheduleEffects(ctx, tx, runID, "event_clause", input.ID,
+				"events."+input.Kind+".clauses["+clauseName+"].effects", clause.Effects, now); err != nil {
+				return EventResult{}, err
+			}
+		}
+		if err := scheduleEffects(ctx, tx, runID, "transition", transitionID, "transitions."+name+".effects", transitionDef.Effects, now); err != nil {
 			return EventResult{}, err
 		}
-	}
-	if err := scheduleEffects(ctx, tx, runID, "transition", transitionID, "transitions."+name+".effects", transitionDef.Effects, now); err != nil {
-		return EventResult{}, err
-	}
-	if destination.OnEnter != nil {
-		if err := scheduleEffects(ctx, tx, runID, "transition", transitionID,
-			"states."+transitionDef.To+".on_enter.effects", destination.OnEnter.Effects, now); err != nil {
-			return EventResult{}, err
+		if destination.OnEnter != nil {
+			if err := scheduleEffects(ctx, tx, runID, "transition", transitionID,
+				"states."+transitionDef.To+".on_enter.effects", destination.OnEnter.Effects, now); err != nil {
+				return EventResult{}, err
+			}
 		}
 	}
 	if err := updateBoundTask(ctx, tx, runID, input, now); err != nil {
@@ -1079,7 +1087,7 @@ func getRunForUpdate(ctx context.Context, tx *sql.Tx, runID string) (Run, string
 	var workflowYAML string
 	row := tx.QueryRowContext(ctx, `SELECT id,tenant_id,workspace_name,workflow_name,
 		workspace_revision,workflow_revision,state,display_phase,state_version,status,waiting_reason,
-		current_attempt_id,current_task_id,context_bundle_id,trigger_type,created_at,updated_at,finished_at,workflow_yaml
+		current_attempt_id,current_task_id,context_bundle_id,task_run_id,trigger_type,created_at,updated_at,finished_at,workflow_yaml
 		FROM workflow_v2_runs WHERE id=?`, runID)
 	run, err := scanRunWithWorkflow(row, &workflowYAML)
 	return run, workflowYAML, err
@@ -1093,7 +1101,7 @@ func scanRun(row scanner) (Run, error) {
 	var created, updated, finished int64
 	err := row.Scan(&run.ID, &run.TenantID, &run.WorkspaceName, &run.WorkflowName,
 		&run.WorkspaceRevision, &run.WorkflowRevision, &run.State, &phase, &run.StateVersion, &status, &run.WaitingReason,
-		&run.CurrentAttemptID, &run.CurrentTaskID, &run.ContextBundleID, &run.TriggerType, &created, &updated, &finished)
+		&run.CurrentAttemptID, &run.CurrentTaskID, &run.ContextBundleID, &run.TaskRunID, &run.TriggerType, &created, &updated, &finished)
 	if err != nil {
 		return Run{}, err
 	}
@@ -1107,7 +1115,7 @@ func scanRunWithWorkflow(row scanner, workflowYAML *string) (Run, error) {
 	var created, updated, finished int64
 	err := row.Scan(&run.ID, &run.TenantID, &run.WorkspaceName, &run.WorkflowName,
 		&run.WorkspaceRevision, &run.WorkflowRevision, &run.State, &phase, &run.StateVersion, &status, &run.WaitingReason,
-		&run.CurrentAttemptID, &run.CurrentTaskID, &run.ContextBundleID, &run.TriggerType, &created, &updated, &finished, workflowYAML)
+		&run.CurrentAttemptID, &run.CurrentTaskID, &run.ContextBundleID, &run.TaskRunID, &run.TriggerType, &created, &updated, &finished, workflowYAML)
 	if err != nil {
 		return Run{}, err
 	}

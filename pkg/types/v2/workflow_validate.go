@@ -103,6 +103,9 @@ func ValidateWorkflow(wf *Workflow) (*ResolvedWorkflow, error) {
 			if err := validateEffectsShape(fmt.Sprintf("states.%s.on_enter.effects", name), st.OnEnter.Effects); err != nil {
 				return nil, fmt.Errorf("workflow %q: %w", wf.Name, err)
 			}
+			if st.Terminal && len(st.OnEnter.Effects) > 0 {
+				return nil, fmt.Errorf("workflow %q: states.%s.on_enter: terminal states cannot have effects", wf.Name, name)
+			}
 		}
 		if st.Phase != "" && !IsDisplayPhase(st.Phase) {
 			return nil, fmt.Errorf("workflow %q: states.%s.phase %q is unsupported", wf.Name, name, st.Phase)
@@ -138,6 +141,9 @@ func ValidateWorkflow(wf *Workflow) (*ResolvedWorkflow, error) {
 		}
 		if _, ok := wf.States[tr.To]; !ok {
 			return nil, fmt.Errorf("workflow %q: transitions.%s.to %q: unknown state", wf.Name, name, tr.To)
+		}
+		if wf.States[tr.To].Terminal && len(tr.Effects) > 0 {
+			return nil, fmt.Errorf("workflow %q: transitions.%s: transitions to terminal state %q cannot have effects", wf.Name, name, tr.To)
 		}
 		if isTranscriptEvent(tr.On) {
 			return nil, fmt.Errorf("workflow %q: transitions.%s.on %q: conversation/transcript events cannot control workflow v2", wf.Name, name, tr.On)

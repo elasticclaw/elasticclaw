@@ -552,6 +552,49 @@ states:
 	}
 }
 
+func TestWorkflowRejectsTerminalStateOnEnterEffects(t *testing.T) {
+	yaml := `
+schema_version: 2
+name: terminal-effects
+initial_state: s
+states:
+  s: {}
+  done:
+    terminal: true
+    on_enter:
+      effects:
+        - agent.task:
+            prompt: "done"
+`
+	_, err := v2.ParseAndValidateWorkflow([]byte(yaml))
+	if err == nil || !strings.Contains(err.Error(), "terminal states cannot have effects") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestWorkflowRejectsTransitionToTerminalWithEffects(t *testing.T) {
+	yaml := `
+schema_version: 2
+name: terminal-transition-effects
+initial_state: s
+states:
+  s: {}
+  done:
+    terminal: true
+transitions:
+  bad:
+    from: s
+    to: done
+    effects:
+      - agent.task:
+          prompt: "done"
+`
+	_, err := v2.ParseAndValidateWorkflow([]byte(yaml))
+	if err == nil || !strings.Contains(err.Error(), "transitions to terminal state") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
 func TestWorkflowRejectsTerminalOutgoingTransition(t *testing.T) {
 	yaml := `
 schema_version: 2

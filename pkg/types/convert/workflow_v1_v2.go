@@ -46,7 +46,13 @@ func convertWorkflowV1ToV2(data []byte, opts Options) (Result, error) {
 			Terminal:    st.Terminal,
 		}
 		// Convert on_enter inject → agent.task effect; label mutations → warnings.
+		// Terminal states cannot have effects in v2 because the run is marked
+		// finished before the on_enter effects would be scheduled.
 		actions, onEnterWarns := convertStageOnEnter(id, st.OnEnter)
+		if st.Terminal && actions != nil && len(actions.Effects) > 0 {
+			appendWarning(&warnings, "states.%s.on_enter: terminal state effects are not supported in v2 and were dropped", id)
+			actions = nil
+		}
 		if actions != nil {
 			state.OnEnter = actions
 		}
