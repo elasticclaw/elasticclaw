@@ -33,6 +33,7 @@ func Migrate(db *sql.DB) error {
 		current_task_id    TEXT NOT NULL DEFAULT '',
 		context_bundle_id  TEXT NOT NULL DEFAULT '',
 		trigger_type       TEXT NOT NULL DEFAULT 'manual',
+		task_run_id        TEXT NOT NULL DEFAULT '',
 		created_at         INTEGER NOT NULL,
 		updated_at         INTEGER NOT NULL,
 		finished_at        INTEGER NOT NULL DEFAULT 0
