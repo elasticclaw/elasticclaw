@@ -361,6 +361,20 @@ func migrate(db *sql.DB) error {
 	_, _ = db.Exec(`ALTER TABLE task_run_prs ADD COLUMN ready_at INTEGER NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE task_run_summaries ADD COLUMN ready_at INTEGER NOT NULL DEFAULT 0`)
 
+	// Checkpoint telemetry: these three describe what the claw was doing when
+	// the checkpoint was taken and lived only inside the manifest JSON, so
+	// pruning manifests used to destroy the record. As columns they cost ~40
+	// bytes a row and survive any retention policy.
+	for _, col := range []struct{ name, def string }{
+		{"pipeline_stage", `TEXT NOT NULL DEFAULT ''`},
+		{"hub_version", `TEXT NOT NULL DEFAULT ''`},
+		{"files_count", `INTEGER NOT NULL DEFAULT 0`},
+		{"files_bytes", `INTEGER NOT NULL DEFAULT 0`},
+	} {
+		if err := addColumn(db, "claw_checkpoints", col.name, col.def); err != nil {
+			return err
+		}
+	}
 	_, _ = db.Exec(`CREATE TABLE IF NOT EXISTS claw_checkpoints (
 		id                    TEXT PRIMARY KEY,
 		tenant_id             TEXT NOT NULL,
@@ -378,6 +392,10 @@ func migrate(db *sql.DB) error {
 		message_count         INTEGER NOT NULL DEFAULT 0,
 		pr_count              INTEGER NOT NULL DEFAULT 0,
 		repo_count            INTEGER NOT NULL DEFAULT 0,
+		pipeline_stage        TEXT NOT NULL DEFAULT '',
+		hub_version           TEXT NOT NULL DEFAULT '',
+		files_count           INTEGER NOT NULL DEFAULT 0,
+		files_bytes           INTEGER NOT NULL DEFAULT 0,
 		error                 TEXT NOT NULL DEFAULT '',
 		created_at            DATETIME NOT NULL,
 		completed_at          DATETIME
@@ -937,6 +955,10 @@ func migrate(db *sql.DB) error {
 		message_count         INTEGER NOT NULL DEFAULT 0,
 		pr_count              INTEGER NOT NULL DEFAULT 0,
 		repo_count            INTEGER NOT NULL DEFAULT 0,
+		pipeline_stage        TEXT NOT NULL DEFAULT '',
+		hub_version           TEXT NOT NULL DEFAULT '',
+		files_count           INTEGER NOT NULL DEFAULT 0,
+		files_bytes           INTEGER NOT NULL DEFAULT 0,
 		error                 TEXT NOT NULL DEFAULT '',
 		created_at            DATETIME NOT NULL,
 		completed_at          DATETIME
