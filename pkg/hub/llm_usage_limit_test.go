@@ -842,3 +842,43 @@ func TestLLMUsageLimitUnprovenReleaseOutlivesEpisodeMemory(t *testing.T) {
 		t.Fatal("a proven, expired episode was kept")
 	}
 }
+
+// An exhausted cap reports the last attempt the hub actually made. The
+// record's deadline is bumped on every re-latch, exhausted or not, but
+// releaseDueLLMUsageLimits never acts on an exhausted one, so rendering it
+// as "Last retry" named a future instant nothing would honour.
+func TestLLMUsageLimitExhaustedEventReportsTheLastRealRetry(t *testing.T) {
+	s, _ := NewTestServerWithConfig(t, nil, "", "", "")
+	limitClaw(t, s, "claw-limit-final", "faster", false)
+	limit := types.LLMUsageLimit{Reason: types.LLMLimitUsage, RegainAt: now().Add(-time.Minute), Message: "capped"}
+	s.handleLLMUsageLimit(nil, "claw-limit-final", limit)
+	var lastRelease time.Time
+	for attempt := 1; attempt <= llmLimitMaxAutoRetries; attempt++ {
+		s.releaseLLMUsageLimit("faster", "test release", false)
+		record, _ := s.loadLLMUsageLimit("faster")
+		lastRelease = record.ReleasedAt
+		s.handleLLMUsageLimit(nil, "claw-limit-final", limit)
+	}
+	var raw string
+	if err := s.db.QueryRow(`SELECT detail FROM infra_events WHERE event_type='provider_limit_exhausted'`).Scan(&raw); err != nil {
+		t.Fatal(err)
+	}
+	var detail map[string]any
+	if err := json.Unmarshal([]byte(raw), &detail); err != nil {
+		t.Fatal(err)
+	}
+	if got := detail["last_retry"]; got != formatLLMLimitDeadline(lastRelease) {
+		t.Fatalf("last_retry = %v, want the release at %s", got, formatLLMLimitDeadline(lastRelease))
+	}
+	if _, has := detail["deadline"]; has {
+		t.Fatalf("exhausted event still carries a deadline nothing will honour: %v", detail["deadline"])
+	}
+	msg := buildInfraMessage(infraEventRow{EventType: "provider_limit_exhausted", Subject: "anthropic", Detail: detail, OccurredAt: now()}, now())
+	fields := map[string]string{}
+	for _, f := range msg.Fields {
+		fields[f.Label] = f.Value
+	}
+	if fields["Last retry"] != formatLLMLimitDeadline(lastRelease) || fields["Deadline"] != "" {
+		t.Fatalf("exhausted fields = %v, want only the last real retry", fields)
+	}
+}

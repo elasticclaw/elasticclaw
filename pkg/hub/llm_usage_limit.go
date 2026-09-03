@@ -121,6 +121,11 @@ func (s *Server) handleLLMUsageLimit(cc *clawConn, clawID string, limit types.LL
 	// still awaiting proof has just been disproved.
 	delete(s.llmLimitProbing, keyID)
 	opened, relatched := false, false
+	// The release this turn disproves. It is the last time the hub actually
+	// tried, which is what an exhausted alert reports: the schedule below is
+	// bumped as usual, but releaseDueLLMUsageLimits never acts on an
+	// exhausted record, so that deadline is not a retry anyone will see.
+	var lastRetryAt time.Time
 	switch {
 	case had && record.Active():
 		// Same episode, another claw. Keep the schedule exactly as it is: a
@@ -129,6 +134,7 @@ func (s *Server) handleLLMUsageLimit(cc *clawConn, clawID string, limit types.LL
 		// claw.
 	case had:
 		// Released, and the wall is still there. Same episode: back off.
+		lastRetryAt = record.ReleasedAt
 		record.ReleasedAt = time.Time{}
 		record.Retries++
 		record.Provider, record.Message, record.RegainAt = provider, limit.Message, limit.RegainAt
@@ -168,21 +174,21 @@ func (s *Server) handleLLMUsageLimit(cc *clawConn, clawID string, limit types.LL
 	case opened:
 		log.Printf("[llm-limit] key %q capped (%s), %d claw(s) parked until %s: %s",
 			keyID, record.Reason, len(latched), formatLLMLimitDeadline(record.RetryAt), record.Message)
-		s.recordLLMLimitEvent(record, len(latched), "provider_limit_opened")
+		s.recordLLMLimitEvent(record, len(latched), "provider_limit_opened", nil)
 	case relatched && record.Exhausted():
 		log.Printf("[llm-limit] key %q still capped after %d automatic retries, leaving it for an operator: %s",
 			keyID, record.Retries, record.Message)
 		for _, id := range latched {
 			s.publishHubNotice(id, fmt.Sprintf("[hub] The provider still reports a usage limit after %d automatic retries, so the hub stopped retrying. Raise the account limit and clear the block to resume. Last provider message: %s", record.Retries, record.Message))
 		}
-		s.recordLLMLimitEvent(record, len(latched), "provider_limit_exhausted")
+		s.recordLLMLimitEvent(record, len(latched), "provider_limit_exhausted", map[string]any{"last_retry": formatLLMLimitDeadline(lastRetryAt)})
 	case relatched:
 		log.Printf("[llm-limit] key %q still capped, retry %d scheduled for %s",
 			keyID, record.Retries, formatLLMLimitDeadline(record.RetryAt))
 		// Said out loud: the operator watched the release and must not read
 		// silence as recovery. The event key carries the retry number, so
 		// each re-latch is its own message.
-		s.recordLLMLimitEvent(record, len(latched), "provider_limit_opened")
+		s.recordLLMLimitEvent(record, len(latched), "provider_limit_opened", nil)
 	}
 }
 
@@ -301,7 +307,7 @@ func (s *Server) confirmLLMLimitLift(keyID string) {
 	if !had || record.Active() {
 		return
 	}
-	s.recordLLMLimitEvent(record, len(s.clawsForLLMKey(keyID)), "provider_limit_released")
+	s.recordLLMLimitEvent(record, len(s.clawsForLLMKey(keyID)), "provider_limit_released", nil)
 }
 
 // observeAuthoredTurnForLLMLimit is the proof a scheduled release waits for:
@@ -734,14 +740,25 @@ func formatLLMLimitDeadline(at time.Time) string {
 // recordLLMLimitEvent records the fleet-wide account fact once per key. Four
 // claws sharing a key formerly produced four "Agent stalled" reports, which
 // sent operators looking for four agent bugs instead of one billing cap.
-func (s *Server) recordLLMLimitEvent(record llmUsageLimitRecord, parked int, eventType string) {
+//
+// The deadline is left off an exhausted event on purpose: the record still
+// carries one (the latch column needs a non-zero instant), but nothing acts
+// on it, and a message that names it promises a retry that never comes. The
+// caller passes the time of the last real attempt in extra instead.
+func (s *Server) recordLLMLimitEvent(record llmUsageLimitRecord, parked int, eventType string, extra map[string]any) {
+	detail := map[string]any{
+		"provider": record.Provider, "key_id": maskLLMLimitKeyID(record.KeyID), "parked_claws": parked,
+		"retry_count": record.Retries, "message": redactLLMLimitEventMessage(record.Message, record.KeyID),
+	}
+	if eventType != "provider_limit_exhausted" {
+		detail["deadline"] = formatLLMLimitDeadline(record.RetryAt)
+	}
+	for key, value := range extra {
+		detail[key] = value
+	}
 	if err := s.recordInfraEvent(infraEvent{
 		EventKey: llmLimitEventKey(record, eventType), EventType: eventType, Subject: record.Provider,
-		Detail: map[string]any{
-			"provider": record.Provider, "key_id": maskLLMLimitKeyID(record.KeyID), "parked_claws": parked,
-			"deadline": formatLLMLimitDeadline(record.RetryAt), "retry_count": record.Retries,
-			"message": redactLLMLimitEventMessage(record.Message, record.KeyID),
-		}, OccurredAt: now(),
+		Detail: detail, OccurredAt: now(),
 	}); err != nil {
 		log.Printf("[llm-limit] record %s event: %v", eventType, err)
 	}

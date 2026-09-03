@@ -454,7 +454,7 @@ func TestInfraNotifierTickDisabledWindowIsNotReplayed(t *testing.T) {
 // the operator to clear the block rather than promise a reset that will not
 // come; provider_limit_released describes claws that resumed, not parked.
 func TestBuildInfraMessageProviderLimitFieldsMatchTheLatch(t *testing.T) {
-	detail := map[string]any{"name": "Anthropic", "parked_claws": 4, "deadline": "2026-09-02 00:45 UTC", "retry_count": 3}
+	detail := map[string]any{"name": "Anthropic", "parked_claws": 4, "deadline": "2026-09-02 01:30 UTC", "last_retry": "2026-09-02 00:45 UTC", "retry_count": 3}
 	labels := func(msg notify.Message) map[string]string {
 		out := map[string]string{}
 		for _, f := range msg.Fields {
@@ -471,7 +471,7 @@ func TestBuildInfraMessageProviderLimitFieldsMatchTheLatch(t *testing.T) {
 		t.Fatalf("exhausted body does not name the required action: %q", exhausted.Body)
 	}
 	if got := labels(exhausted); got["Deadline"] != "" || got["Last retry"] != "2026-09-02 00:45 UTC" {
-		t.Fatalf("exhausted fields = %v, want the deadline relabelled as the last retry", got)
+		t.Fatalf("exhausted fields = %v, want the last real retry and no deadline", got)
 	}
 
 	released := buildInfraMessage(infraEventRow{EventType: "provider_limit_released", Subject: "anthropic", Detail: detail, OccurredAt: time.Now()}, time.Now())

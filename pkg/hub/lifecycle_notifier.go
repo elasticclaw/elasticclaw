@@ -2068,6 +2068,9 @@ func sampleInfraEvent(eventType string) infraEventRow {
 		detail["key_id"] = "sk-...ab12"
 		detail["parked_claws"] = 3
 		detail["deadline"] = "2026-09-02T00:00:00Z"
+		// What an exhausted event carries instead of a deadline (see
+		// recordLLMLimitEvent), so its sample renders the same fields.
+		detail["last_retry"] = "2026-09-02T00:45:00Z"
 	}
 	return infraEventRow{EventType: eventType, Subject: subject, Detail: detail, OccurredAt: now()}
 }

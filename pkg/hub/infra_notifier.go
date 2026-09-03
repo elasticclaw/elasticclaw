@@ -474,7 +474,10 @@ func buildInfraMessage(e infraEventRow, _ time.Time) notify.Message {
 		case "provider_limit_released":
 			labelled = append(labelled, struct{ label, key string }{"Claws resumed", "parked_claws"})
 		case "provider_limit_exhausted":
-			labelled = append(labelled, struct{ label, key string }{"Claws parked", "parked_claws"}, struct{ label, key string }{"Last retry", "deadline"})
+			// The last attempt the hub made, not the record's deadline: an
+			// exhausted latch is never auto-released, so its deadline is an
+			// instant nothing honours.
+			labelled = append(labelled, struct{ label, key string }{"Claws parked", "parked_claws"}, struct{ label, key string }{"Last retry", "last_retry"})
 		default:
 			labelled = append(labelled, struct{ label, key string }{"Claws parked", "parked_claws"}, struct{ label, key string }{"Deadline", "deadline"})
 			if retry != "" && retry != "0" {
