@@ -6792,7 +6792,18 @@ function InfraNotificationsSection({ settings, onSave, saving }: { settings: Set
                   <span className={cn("shrink-0 text-xs px-2 py-1 rounded font-medium", allEvents ? "bg-blue-500/10 text-blue-400 border border-blue-500/20" : "bg-muted text-muted-foreground")}>
                     {allEvents ? "All alerts" : `${route.events.length} of ${eventTypes.length} alert types`}
                   </span>
-                  <Button size="sm" variant="ghost" disabled={saving} onClick={() => saveInfra({ ...infra, enabled: infra?.enabled ?? false, routes: routes.filter((_, i) => i !== index) })}>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    disabled={saving}
+                    onClick={() => {
+                      // The hub rejects an enabled block with no routes, so
+                      // losing the last route pauses alerts instead of failing
+                      // the save — the same clamp deleteNotifier applies.
+                      const nextRoutes = routes.filter((_, i) => i !== index)
+                      saveInfra({ ...infra, enabled: nextRoutes.length > 0 && (infra?.enabled ?? false), routes: nextRoutes })
+                    }}
+                  >
                     <Trash2 className="size-3.5 mr-1" /> Remove
                   </Button>
                 </div>
