@@ -695,3 +695,14 @@ func TestLLMUsageLimitOperatorClearAnnouncesTheLift(t *testing.T) {
 	}
 }
 
+// A short bearer token echoed in an Authorization header is a credential too,
+// whatever its length or alphabet.
+func TestRedactLLMLimitEventMessageRedactsBearerEchoes(t *testing.T) {
+	out := redactLLMLimitEventMessage("429: Authorization: Bearer dG9rZW4tdGVzdA==; org org_abc123 over quota", "prod-openai")
+	if strings.Contains(out, "dG9rZW4tdGVzdA==") {
+		t.Fatalf("bearer token survived redaction: %q", out)
+	}
+	if !strings.Contains(out, "org_abc123") {
+		t.Fatalf("account identifier needed to act on the message was mangled: %q", out)
+	}
+}

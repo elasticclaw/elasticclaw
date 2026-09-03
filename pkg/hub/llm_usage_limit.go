@@ -710,6 +710,9 @@ func maskLLMLimitKeyID(keyID string) string {
 var llmLimitTokenPatterns = []*regexp.Regexp{
 	// Provider API keys: sk-..., sk-ant-..., sk-proj-... and friends.
 	regexp.MustCompile(`\bsk-[A-Za-z0-9_-]{8,}`),
+	// An echoed Authorization header: whatever follows "Bearer" is the
+	// credential, however short or oddly spelled.
+	regexp.MustCompile(`(?i)\bbearer\s+[^\s;,'"]+`),
 	// Any long opaque run that reads as a credential, not prose.
 	regexp.MustCompile(`[A-Za-z0-9_-]{28,}`),
 }
