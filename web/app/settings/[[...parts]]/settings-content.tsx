@@ -6768,7 +6768,14 @@ function InfraNotificationsSection({ settings, onSave, saving }: { settings: Set
           {routes.map((route, index) => {
             const key = `${index}:${route.via}`
             const test = tests[key]
+            // The hub reads an empty list as "every event type, including any
+            // added later" — the same receive-all semantics the lifecycle
+            // dialog spells out — so the card has to say so.
             const allEvents = route.events.length === 0
+            const orphan = !names.includes(route.via)
+            // The hub rejects two routes through one notifier, so a name
+            // another route already uses is not on offer here.
+            const options = names.filter((name) => name === route.via || !routes.some((other, i) => i !== index && other.via === name))
             return (
               <div key={key} className="border border-border rounded-lg p-4 space-y-3">
                 <div className="flex items-center gap-2">
@@ -6776,27 +6783,45 @@ function InfraNotificationsSection({ settings, onSave, saving }: { settings: Set
                     value={route.via}
                     disabled={saving}
                     onChange={(e) => updateRoute(index, { ...route, via: e.target.value })}
-                    className="h-8 min-w-0 flex-1 text-sm rounded-md border border-input bg-background px-3"
+                    className={cn("h-8 min-w-0 flex-1 text-sm rounded-md border bg-background px-3", orphan ? "border-amber-500/50" : "border-input")}
                     aria-label="Notifier for infrastructure alerts"
                   >
-                    {names.map((name) => <option key={name} value={name}>{name}</option>)}
+                    {orphan && <option value={route.via} disabled>{route.via} — missing notifier</option>}
+                    {options.map((name) => <option key={name} value={name}>{name}</option>)}
                   </select>
+                  <span className={cn("shrink-0 text-xs px-2 py-1 rounded font-medium", allEvents ? "bg-blue-500/10 text-blue-400 border border-blue-500/20" : "bg-muted text-muted-foreground")}>
+                    {allEvents ? "All alerts" : `${route.events.length} of ${eventTypes.length} alert types`}
+                  </span>
                   <Button size="sm" variant="ghost" disabled={saving} onClick={() => saveInfra({ ...infra, enabled: infra?.enabled ?? false, routes: routes.filter((_, i) => i !== index) })}>
                     <Trash2 className="size-3.5 mr-1" /> Remove
                   </Button>
                 </div>
+                {orphan && (
+                  <p className="text-xs text-amber-400">
+                    Notifier <span className="font-mono">{route.via}</span> no longer exists, so this route delivers nothing. Pick another channel or remove the route.
+                  </p>
+                )}
                 <div className="grid gap-1 sm:grid-cols-2">
                   {eventTypes.map((eventType) => {
                     const checked = allEvents || route.events.includes(eventType)
+                    // Unchecking the last box would save an empty list, which
+                    // the hub reads as receive-all — the opposite of what the
+                    // operator meant. Removing the route is how to stop it.
+                    const lastChecked = checked && !allEvents && route.events.length === 1
                     return (
-                      <label key={eventType} className="flex items-center gap-2 text-sm cursor-pointer rounded px-2 py-1 hover:bg-muted/50">
+                      <label
+                        key={eventType}
+                        className={cn("flex items-center gap-2 text-sm rounded px-2 py-1", lastChecked ? "cursor-not-allowed" : "cursor-pointer hover:bg-muted/50")}
+                        title={lastChecked ? "At least one alert type must stay checked. Remove the route to stop it." : undefined}
+                      >
                         <input
                           type="checkbox"
                           checked={checked}
-                          disabled={saving}
+                          disabled={saving || lastChecked}
                           onChange={(e) => {
                             const current = allEvents ? [...eventTypes] : route.events
                             const events = e.target.checked ? [...new Set([...current, eventType])] : current.filter((type) => type !== eventType)
+                            if (events.length === 0) return
                             updateRoute(index, { ...route, events })
                           }}
                         />
@@ -6805,6 +6830,11 @@ function InfraNotificationsSection({ settings, onSave, saving }: { settings: Set
                     )
                   })}
                 </div>
+                <p className="text-xs text-muted-foreground">
+                  {allEvents
+                    ? "Saved as receive-all: this channel gets every alert type, including any added later. Uncheck a type to narrow it."
+                    : "Only the checked types reach this channel. Remove the route to stop it entirely."}
+                </p>
                 <div className="flex items-center gap-2">
                   <Button size="sm" variant="outline" className="gap-1.5" disabled={saving || !(infra?.enabled ?? false) || test?.status === "sending"} onClick={() => sendTest(route, index)}>
                     <Send className="size-3.5" />
