@@ -212,6 +212,30 @@ func TestResetClawForRetryRaceGuard(t *testing.T) {
 	}
 }
 
+// A replacement sandbox runs a brand-new session, so the predecessor's spent
+// auto-resume budget must not follow it: resetClawForRetry zeroes
+// idle_resume_count in the same guarded UPDATE that arms rebrief_pending.
+// idle_resume_at is left as is — the successor's first finished turn moves the
+// stretch anchor past it and re-arms the latch on its own.
+func TestResetClawForRetryResetsIdleResumeBudget(t *testing.T) {
+	s, db, _ := newClawRetryTestServer(t, "error")
+	const latch = int64(1_700_000_000_000)
+	if _, err := db.Exec(`UPDATE claws SET idle_resume_at=?, idle_resume_count=? WHERE id=?`, latch, agentIdleResumeMaxAttempts, "retry-claw"); err != nil {
+		t.Fatalf("seed idle_resume state: %v", err)
+	}
+	reset, err := s.resetClawForRetry("tenant", "retry-claw", "", "retrying", "")
+	if err != nil || !reset {
+		t.Fatalf("reset: reset=%v err=%v", reset, err)
+	}
+	at, count := clawIdleResumeState(t, db, "retry-claw")
+	if count != 0 {
+		t.Fatalf("resetClawForRetry left idle_resume_count=%d, want 0", count)
+	}
+	if at != latch {
+		t.Fatalf("resetClawForRetry moved idle_resume_at to %d, want %d", at, latch)
+	}
+}
+
 func TestReplaceClawInstanceFailsDanglingAttemptWhenClawChangedState(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	s, db, runID := newClawRetryTestServer(t, "connected")
