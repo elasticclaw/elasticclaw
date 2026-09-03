@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"log"
 	"strings"
+	"time"
 
 	"github.com/elasticclaw/elasticclaw/pkg/hub/workflowv2"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
@@ -54,6 +55,19 @@ func (s *Server) maybeFinishWorkflowV2Parent(ctx context.Context, runID string) 
 	if !applied {
 		// Already finished; avoid duplicate events.
 		return
+	}
+	// Eagerly update the task-run summary so the dashboard reflects the
+	// terminal state without waiting for the analytics materializer.
+	status, failureType := taskRunStatusClean, ""
+	if run.Status == workflowv2.RunCancelled || run.State == "prepare_failed" {
+		status, failureType = taskRunStatusFailed, run.State
+	}
+	finishedAt := time.Now().UTC().UnixMilli()
+	if _, err := s.db.ExecContext(ctx, `
+		UPDATE task_run_summaries
+		SET status=?, phase=?, failure_type=?, finished_at=?, updated_at=?
+		WHERE run_id=?`, status, taskRunPhaseTerminal, failureType, finishedAt, finishedAt, run.TaskRunID); err != nil {
+		log.Printf("[workflow-v2] failed to update task run summary %s for terminal run %s: %v", run.TaskRunID, runID, err)
 	}
 	s.syncWorkflowVolumes(clawID)
 	if s.cronScheduler != nil {
