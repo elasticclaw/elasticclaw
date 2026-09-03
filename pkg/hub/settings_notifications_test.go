@@ -1156,3 +1156,66 @@ func TestSettingsPatchNormalizationDoesNotDefeatUnchangedExemption(t *testing.T)
 		t.Fatalf("at = %q, want the normalized %q", got, "09:00")
 	}
 }
+
+// PATCH /api/settings must judge the infra block the way the notifier tick
+// does: a persisted defect there pauses every outage and provider-cap alert
+// hub-wide with one log line as the only signal.
+func TestSettingsPatchRejectsInvalidInfraBlock(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "hub.yaml")
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", path)
+	s, _ := NewTestServerWithConfig(t, &types.HubConfig{Notifications: &types.NotificationsConfig{
+		Notifiers: map[string]types.NotifierConfig{
+			"ops": {Type: "slack", Settings: map[string]any{"channel": "C0123ABCD", "token_secret": "slack_token"}},
+			"eng": {Type: "slack", Settings: map[string]any{"channel": "C0456EFGH", "token_secret": "slack_token"}},
+		},
+		Infra: &types.InfraNotificationsConfig{Routes: []types.InfraRoute{{Via: "ops"}}},
+	}}, "", "", "")
+	if err := config.SaveHubConfig(s.hubCfg); err != nil {
+		t.Fatal(err)
+	}
+	notifiers := `"notifiers":{"ops":{"type":"slack","channel":"C0123ABCD","token_secret":"slack_token"},"eng":{"type":"slack","channel":"C0456EFGH","token_secret":"slack_token"}}`
+	cases := []struct{ name, infra, want string }{
+		{"enabled without routes", `{"enabled":true,"routes":[]}`, "routes are required"},
+		{"duplicated via", `{"enabled":true,"routes":[{"via":"ops"},{"via":"ops","events":["dependency_down"]}]}`, "duplicated"},
+		{"unknown event", `{"enabled":true,"routes":[{"via":"ops","events":["agent_started"]}]}`, "not a supported infrastructure event"},
+		{"bad repeat_after", `{"enabled":true,"routes":[{"via":"ops"}],"repeatAfter":"tomorrow"}`, "invalid repeat_after"},
+		{"dangling via", `{"enabled":true,"routes":[{"via":"oncall"}]}`, "does not name a configured notifier"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			body := []byte(`{"notifications":{` + notifiers + `,"infra":` + tc.infra + `}}`)
+			rr := httptest.NewRecorder()
+			s.patchSettings(rr, httptest.NewRequest(http.MethodPatch, "/api/settings", bytes.NewReader(body)))
+			if rr.Code != http.StatusBadRequest || !strings.Contains(rr.Body.String(), tc.want) {
+				t.Fatalf("PATCH = %d (%s), want 400 mentioning %q", rr.Code, rr.Body.String(), tc.want)
+			}
+			if got := s.hubCfg.Notifications.Infra.Routes; len(got) != 1 || got[0].Via != "ops" {
+				t.Fatalf("rejected infra block was persisted: %#v", got)
+			}
+		})
+	}
+
+	// Removing the notifier an enabled infra route still names — from a client
+	// that never saw the infra key, so the stored route is carried forward —
+	// is the same dangle and must be rejected, not persisted.
+	body := []byte(`{"notifications":{"notifiers":{"eng":{"type":"slack","channel":"C0456EFGH","token_secret":"slack_token"}}}}`)
+	rr := httptest.NewRecorder()
+	s.patchSettings(rr, httptest.NewRequest(http.MethodPatch, "/api/settings", bytes.NewReader(body)))
+	if rr.Code != http.StatusBadRequest || !strings.Contains(rr.Body.String(), "still in use") {
+		t.Fatalf("carry-forward removal = %d (%s), want 400 naming the infrastructure route", rr.Code, rr.Body.String())
+	}
+	if _, kept := s.hubCfg.Notifications.Notifiers["ops"]; !kept {
+		t.Fatal("rejected removal still persisted")
+	}
+
+	// A valid block still saves.
+	body = []byte(`{"notifications":{` + notifiers + `,"infra":{"enabled":true,"routes":[{"via":"ops"},{"via":"eng","events":["provider_limit_exhausted"]}],"repeatAfter":"2h"}}}`)
+	rr = httptest.NewRecorder()
+	s.patchSettings(rr, httptest.NewRequest(http.MethodPatch, "/api/settings", bytes.NewReader(body)))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("valid infra PATCH = %d: %s", rr.Code, rr.Body.String())
+	}
+	if got := s.hubCfg.Notifications.Infra.Routes; len(got) != 2 || got[1].Via != "eng" {
+		t.Fatalf("valid infra block not persisted: %#v", got)
+	}
+}

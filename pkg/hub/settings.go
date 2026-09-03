@@ -869,6 +869,13 @@ func validateSettingsNotifications(current, cfg *types.NotificationsConfig) erro
 	if err := types.ValidateLifecycleNotificationsConfig(cfg); err != nil {
 		return err
 	}
+	// The infra block gets the same whole-block judgement: the infra tick
+	// gates on ValidateInfraNotificationsConfig and pauses every outage and
+	// provider-cap alert when it fails, with one log line as the only
+	// signal, so a defect must be refused here where the screen can show it.
+	if err := types.ValidateInfraNotificationsConfig(cfg); err != nil {
+		return err
+	}
 	for name, notifier := range cfg.Notifiers {
 		// Checked before the unchanged short-circuit and against the stored
 		// value key by key, so editing a notifier that already carries an
@@ -1268,13 +1275,17 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 		}
 		mergeNotifierSettings(s.hubCfg.Notifications, patch.Notifications)
 		dropRejectedLifecycleDurations(s.hubCfg.Notifications, patch.Notifications)
-		if err := validateSettingsNotifications(s.hubCfg.Notifications, patch.Notifications); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
+		// Removals are judged first so a notifier an enabled infra route still
+		// names is refused as "still in use" — the message the screen shows
+		// for pipelines and schedules — rather than as the dangling-via
+		// structural error the same patch would also trip below.
 		// s.hubCfg.Factories is read directly: resolveFactories takes the lock
 		// this handler already holds.
 		if err := validateNotifierRemovals(s.hubCfg.Notifications, patch.Notifications, s.hubCfg.Factories); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if err := validateSettingsNotifications(s.hubCfg.Notifications, patch.Notifications); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}

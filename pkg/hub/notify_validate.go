@@ -228,6 +228,18 @@ func validateNotifierRemovals(current, patch *types.NotificationsConfig, factori
 			references[trimmed] = append(references[trimmed], fmt.Sprintf("scheduled report %q", scheduled.ID))
 		}
 	}
+	// Enabled infrastructure routes are guarded the same way as schedules:
+	// the patch carries an absent infra block forward, so a client that
+	// never saw the key can drop a notifier the stored route still names.
+	if patch.Infra.IsEnabled() {
+		for _, route := range patch.Infra.Routes {
+			trimmed := strings.TrimSpace(route.Via)
+			if trimmed == "" {
+				continue
+			}
+			references[trimmed] = append(references[trimmed], "infrastructure route")
+		}
+	}
 	var problems []string
 	for _, name := range removed {
 		used := references[name]
