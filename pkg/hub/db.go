@@ -142,10 +142,13 @@ func migrate(db *sql.DB) error {
 	if err := addColumn(db, "claws", "idle_resume_at", `INTEGER NOT NULL DEFAULT 0`); err != nil {
 		return err
 	}
-	// idle_resume_count is the lifetime attempt counter behind the runaway cap
-	// (agentIdleResumeMaxAttempts): a claw that wakes, replies nothing, and
-	// idles again would otherwise be poked forever, since each wake clears the
-	// per-stretch latch.
+	// idle_resume_count is the per-work-unit attempt counter behind the
+	// runaway cap (agentIdleResumeMaxAttempts): a claw that wakes, replies
+	// nothing, and idles again would otherwise be poked forever, since each
+	// wake clears the per-stretch latch. It is zeroed on a won pipeline stage
+	// transition, on sandbox replacement, and on a lost/re-briefed session — a
+	// lifetime count let pokes spent harmlessly in one stage leave the claw
+	// with no recovery in the next.
 	if err := addColumn(db, "claws", "idle_resume_count", `INTEGER NOT NULL DEFAULT 0`); err != nil {
 		return err
 	}

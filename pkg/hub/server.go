@@ -8986,6 +8986,26 @@ func (s *Server) enqueueSessionLostResume(clawID, prefix, marker string) {
 	// incident even when the rest of the wording is unchanged.
 	b.WriteString(fmt.Sprintf("\n\n<!-- %s -->", marker))
 	log.Printf("[watchdog] enqueueing %s resume for %s", marker, shortID(clawID))
+	// A lost session is a new unit of work, so it re-arms the idle auto-resume
+	// budget for the same reason resetClawForRetry does: what the previous
+	// session spent of the per-work-unit cap (agentIdleResumeMaxAttempts) says
+	// nothing about how the agent that replaces it behaves, and carrying the
+	// count over hands an amnesiac agent a spent budget and no idle recovery.
+	// This funnel covers both callers that produce one — the process restart
+	// and the session rotation — and it sits after the connected/bootstrap_ok
+	// guard above so a claw that is not actually getting a resume is untouched.
+	//
+	// idle_resume_at goes with it here, unlike the stage transition: the latch
+	// keys on the idle stretch's anchor, and lastTurnFinishedAt is seeded on
+	// reconnect from the last claw message, which can land within
+	// agentIdleStretchSlack of a latch the DEAD session earned. Leaving it
+	// would then read as "this stretch was already handled" on every tick and
+	// veto the resume permanently. Nothing is lost by clearing it: what
+	// protects a connection whose turn state is invisible is
+	// agentIdleResumeBlindGrace, not this latch.
+	if _, err := s.db.Exec(`UPDATE claws SET idle_resume_count=0, idle_resume_at=0 WHERE id=?`, clawID); err != nil {
+		log.Printf("[watchdog] re-arm idle resume budget for %s: %v", shortID(clawID), err)
+	}
 	s.injectHubMessageByID(clawID, b.String())
 }
 
@@ -9134,7 +9154,34 @@ func (s *Server) sendNextQueuedMessage(cc *clawConn) {
 		return
 	}
 	if notice != "" {
-		if _, err := tx.Exec(`UPDATE claws SET pending_session_loss_notice='' WHERE id=? AND pending_session_loss_notice=?`, clawID, notice); err != nil {
+		// Delivering the notice re-arms the idle auto-resume budget, and this is
+		// the only place it can happen for a loss detected while the claw was
+		// idle. noteSessionLoss takes a different branch there: it must not wake
+		// an idle claw into autonomous work, so it only parks the notice and
+		// returns, never reaching enqueueSessionLostResume where the other
+		// session-loss reset lives. The amnesiac session is real either way —
+		// it just learns about itself here, attached to the next genuine prompt
+		// — and without this it would start its unit of work with the previous
+		// session's spent budget and no idle recovery of its own.
+		//
+		// Resetting on delivery rather than on detection is also what keeps the
+		// idle-claw policy intact: nothing is injected here, a prompt was
+		// already on its way. It rides the same transaction that clears the
+		// notice and marks the message delivered, after a successful socket
+		// write, so a failed write re-arms nothing and the notice stays durable
+		// for the next attempt.
+		//
+		// Only the count. idle_resume_at is cleared on the two paths where the
+		// connection itself is replaced, because a successor's stretch anchor
+		// can collide with a latch the dead session earned; here the connection
+		// never went away, lastTurnFinishedAt is the same live value, and there
+		// is no such collision to break. Clearing it would instead cause the
+		// duplicate poke the latch exists to prevent: the message carrying this
+		// notice is very often the idle auto-resume prompt itself, so the same
+		// statement would refund the attempt checkAgentIdleResume just latched
+		// AND drop its latch, letting the next tick poke the identical stretch
+		// a second time.
+		if _, err := tx.Exec(`UPDATE claws SET pending_session_loss_notice='', idle_resume_count=0 WHERE id=? AND pending_session_loss_notice=?`, clawID, notice); err != nil {
 			log.Printf("[hub] clear pending session-loss notice for %s: %v", shortID(clawID), err)
 			return
 		}

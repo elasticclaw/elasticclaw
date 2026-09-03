@@ -418,7 +418,7 @@ func TestPauseAutomaticContinuationLatchesOnce(t *testing.T) {
 // turn, and nothing guarantees one once the plan gate stops answering: the next
 // turn only exists if the idle auto-resume fires, which is off when
 // liveness.idle_resume is disabled, when the claw is ineligible, or once its
-// lifetime resume cap is spent. Tied to that, a dead transport could sit silent
+// per-work-unit resume cap is spent. Tied to that, a dead transport could sit silent
 // forever — the exact failure this change exists to end.
 func TestFirstBridgeErrorNotifiesWithoutPausing(t *testing.T) {
 	s, db := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")

@@ -426,13 +426,39 @@ const (
 	// the notification config at all, by design.
 	agentIdleResumeBaselineKey = "agent_idle_resume_baseline"
 
-	// agentIdleResumeMaxAttempts bounds the resumes a single claw can ever
-	// receive. The PRIMARY backstop is the existing no-progress watchdog: a
-	// resume that produces the same empty outcome three times sets
-	// no_progress_paused, which this check honours (see below). The cap covers
-	// the pathological case that watchdog cannot see — turns whose outcomes
-	// keep differing just enough to reset its observation window — so a
-	// wake-do-nothing-idle loop cannot poke forever.
+	// agentIdleResumeMaxAttempts bounds the resumes a claw can receive within
+	// ONE unit of work. The counter (claws.idle_resume_count) is reset when the
+	// unit changes: on a won pipeline stage transition
+	// (claimPipelineStageTransition), when the sandbox is replaced with a new
+	// session (resetClawForRetry), and when the session itself is lost — either
+	// at the re-brief (enqueueSessionLostResume, the funnel for a loss detected
+	// with a turn open or recent) or, for a loss detected while the claw was
+	// idle, when the parked notice is finally delivered with the next real
+	// prompt (server.go). Both session paths are needed: noteSessionLoss splits
+	// on turnOpenOrRecent and only one side re-briefs immediately. All of these
+	// are the same idea as the stage transition — an agent with no memory of the
+	// earlier conversation is starting its unit of work over — and missing any
+	// one of them leaves the identical hole this cap-scoping exists to close.
+	// It is NOT reset per stretch, see
+	// clearAgentIdleResumeLatch.
+	//
+	// The PRIMARY backstop is the existing no-progress watchdog: a resume that
+	// produces the same empty outcome three times sets no_progress_paused,
+	// which this check honours (see below). The cap covers the pathological
+	// case that watchdog cannot see — turns whose outcomes keep differing just
+	// enough to reset its observation window — so a wake-do-nothing-idle loop
+	// cannot poke forever.
+	//
+	// The cap used to be lifetime, and that is what stranded NEXT-647: ten
+	// pokes over two days, eight of them in a stage whose work was already
+	// merged (each resume woke the claw, it correctly found nothing to do and
+	// slept again — the mechanism working), spent the whole budget. When a
+	// replacement sandbox later parked on sessions_yield in review_loop, the
+	// no-progress watchdog did not latch (the outcomes differed) and the cap
+	// had nothing left, so the claw sat silent for 8h16m until a human typed.
+	// Ten pokes inside one stage is still the runaway this exists to stop; ten
+	// spread across unrelated units of work is not, and must not disarm the
+	// recovery for the next one.
 	agentIdleResumeMaxAttempts = 10
 
 	agentIdleResumePrefix = "[hub] No turn has been running for"
@@ -562,7 +588,7 @@ func (s *Server) checkAgentIdleResume(nowAt time.Time, clawID string, cc *clawCo
 	if snap.stretchStartAt.Before(baseline) {
 		// The stretch began before the resume could have observed it (first
 		// deploy or first enable, or during a disabled window): park it —
-		// latch without injecting, without consuming the lifetime cap — so
+		// latch without injecting, without consuming the per-work-unit cap — so
 		// turning the feature on never replays history. This is what keeps
 		// the first tick against an existing database from poking every
 		// long-idle claw on it at once. A real turn re-arms the claw
@@ -580,7 +606,7 @@ func (s *Server) checkAgentIdleResume(nowAt time.Time, clawID string, cc *clawCo
 	}
 	log.Printf("[agent-idle] auto-resuming claw %s after %d minutes idle (attempt %d/%d)", shortID(clawID), int(idleFor.Minutes()), resumeCount+1, agentIdleResumeMaxAttempts)
 	if resumeCount+1 >= agentIdleResumeMaxAttempts {
-		log.Printf("[agent-idle] claw %s reached the lifetime auto-resume cap of %d; no further resumes will be sent", shortID(clawID), agentIdleResumeMaxAttempts)
+		log.Printf("[agent-idle] claw %s reached the auto-resume cap of %d for its current unit of work; no further resumes until the stage changes or the sandbox is replaced", shortID(clawID), agentIdleResumeMaxAttempts)
 	}
 	// What makes the resume once-per-stretch is the idle_resume_at latch
 	// written just above, NOT injectMessage's dedupe: the message embeds the
@@ -593,7 +619,7 @@ func (s *Server) checkAgentIdleResume(nowAt time.Time, clawID string, cc *clawCo
 }
 
 // parkAgentIdleResumeStretch latches a stretch as handled WITHOUT injecting a
-// prompt and without consuming an attempt from the lifetime cap: nothing is
+// prompt and without consuming an attempt from the per-work-unit cap: nothing is
 // delivered, so nothing was spent. The latch alone dedupes every future
 // re-detection of the stretch, including across hub restarts.
 func (s *Server) parkAgentIdleResumeStretch(clawID string, stretchStart int64) {
@@ -749,10 +775,13 @@ func (s *Server) clearAgentIdleLatch(clawID string, cc *clawConn) {
 // checkAgentIdleResume; see clearAgentIdleLatch for why observing busy is not
 // good enough.
 //
-// idle_resume_count is deliberately NOT reset. A resume that produces an empty
-// turn still ends the stretch, so resetting the counter on every turn would
-// make the lifetime cap unreachable in precisely the runaway case it exists to
-// bound (wake, do nothing, idle, repeat).
+// idle_resume_count is deliberately NOT reset here. A resume that produces an
+// empty turn still ends the stretch, so resetting the counter on every turn
+// would make the per-work-unit cap unreachable in precisely the runaway case
+// it exists to bound (wake, do nothing, idle, repeat). The counter only resets
+// when the unit of work itself changes (claimPipelineStageTransition,
+// resetClawForRetry, enqueueSessionLostResume, and the session-loss notice
+// delivery in server.go).
 func (s *Server) clearAgentIdleResumeLatch(clawID string) {
 	if _, err := s.db.Exec(`UPDATE claws SET idle_resume_at=0 WHERE id=? AND idle_resume_at != 0`, clawID); err != nil {
 		log.Printf("[agent-idle] clear resume latch for claw %s: %v", shortID(clawID), err)
