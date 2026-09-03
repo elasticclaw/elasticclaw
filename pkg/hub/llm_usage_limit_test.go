@@ -706,3 +706,37 @@ func TestRedactLLMLimitEventMessageRedactsBearerEchoes(t *testing.T) {
 		t.Fatalf("account identifier needed to act on the message was mangled: %q", out)
 	}
 }
+
+// A restart between the scheduled release and its proving turn must not lose
+// the recovery alert: the probe is re-derived from the record and the event
+// log, so the first authored turn after boot still announces the lift once.
+func TestLLMUsageLimitProbeSurvivesRestart(t *testing.T) {
+	s, _ := NewTestServerWithConfig(t, nil, "", "", "")
+	limitClaw(t, s, "claw-limit-reboot", "faster", false)
+	s.handleLLMUsageLimit(nil, "claw-limit-reboot", types.LLMUsageLimit{Reason: types.LLMLimitUsage, RegainAt: now().Add(-time.Minute), Message: "capped"})
+	s.releaseLLMUsageLimit("faster", "test release", false)
+
+	// The restart: in-memory probes are gone, durable state is what it was.
+	s.llmLimitMu.Lock()
+	s.llmLimitProbing = nil
+	s.llmLimitMu.Unlock()
+	s.observeTurnOutcome(nil, "claw-limit-reboot", "msg-0", "Nobody re-armed me.")
+	if got := strings.Join(infraEventTypes(t, s), ","); got != "provider_limit_opened" {
+		t.Fatalf("events without a reseed = %s, want the lift still pending", got)
+	}
+
+	s.seedLLMLimitProbes()
+	s.observeTurnOutcome(nil, "claw-limit-reboot", "msg-1", "Back to work.")
+	if got := strings.Join(infraEventTypes(t, s), ","); got != "provider_limit_opened,provider_limit_released" {
+		t.Fatalf("events after reseed = %s, want exactly one released", got)
+	}
+
+	// An already-announced lift is not re-armed by a later restart.
+	s.seedLLMLimitProbes()
+	s.llmLimitMu.Lock()
+	probing := s.llmLimitProbing["faster"]
+	s.llmLimitMu.Unlock()
+	if probing {
+		t.Fatal("reseed re-armed a probe for a lift that was already announced")
+	}
+}
