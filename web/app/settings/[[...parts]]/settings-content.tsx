@@ -6971,10 +6971,13 @@ function InfraNotificationsSection({ settings, onSave, saving, pause }: { settin
             : "No infrastructure routes. Add one to get dependency outages and provider caps in Slack."}
         </p>
       ) : (
-        // Dimmed while the alerts are off, as the lifecycle categories are.
-        // Nothing that gates a save hides in here: the banners above are at
-        // full opacity and name every broken route by channel.
-        <div className={cn("space-y-2", !enabled && "opacity-50")}>
+        // Dimmed while the alerts are off, as the lifecycle categories are —
+        // but PER CARD, so a broken route can opt out below. Dimming the whole
+        // list would put the one line that names the remedy ("open Edit and
+        // pick another channel") at 50% while the amber banner repeating the
+        // problem sits above it at full strength: the screen would shout the
+        // symptom and mumble the cure.
+        <div className="space-y-2">
           {routes.map((route, index) => {
             const key = `${index}:${route.via}`
             const test = tests[key]
@@ -6992,17 +6995,38 @@ function InfraNotificationsSection({ settings, onSave, saving, pause }: { settin
               ? "Infrastructure alerts are turned off — this channel receives nothing."
               : null
             return (
-              <div key={key} className="border border-border rounded-lg p-4">
+              <div
+                key={key}
+                className={cn(
+                  "rounded-lg border p-4",
+                  // A route pointing at a deleted channel gets the amber
+                  // framing the Channels section gives its own orphans, so the
+                  // two sections flag one condition one way. It is also the
+                  // card exempted from the dimming above: this is the route
+                  // that fails EVERY save on the screen while the alerts are
+                  // on, and greying out the only card that explains that hides
+                  // the way out of the state the operator is stuck in.
+                  missing ? "border-amber-500/20 bg-amber-500/5" : cn("border-border", !enabled && "opacity-50"),
+                )}
+              >
                 <div className="flex items-start justify-between gap-3">
                   <div className="min-w-0">
                     <div className="flex items-center gap-2 flex-wrap">
                       <code className="text-sm font-mono font-medium">{route.via}</code>
+                      {/* Sized like the Channels badges above, not like the
+                          "Paused" pill on a report card, because these two
+                          carry the CHANNELS wording verbatim — "All alerts"
+                          and "N of 6 alert types" are the same strings that
+                          section uses. Two sizes for one sentence read as one
+                          component rendered twice by accident rather than as
+                          two sections agreeing, so the padding here follows
+                          the words. */}
                       {allEvents ? (
-                        <span className="text-xs bg-blue-500/10 text-blue-400 border border-blue-500/20 px-2 py-0.5 rounded font-medium">
+                        <span className="text-xs bg-blue-500/10 text-blue-400 border border-blue-500/20 px-2 py-1 rounded font-medium">
                           All alerts
                         </span>
                       ) : (
-                        <span className="text-xs bg-muted text-muted-foreground px-2 py-0.5 rounded font-medium">
+                        <span className="text-xs bg-muted text-muted-foreground px-2 py-1 rounded font-medium">
                           {new Set(route.events).size} of {eventTypes.length} alert types
                         </span>
                       )}
