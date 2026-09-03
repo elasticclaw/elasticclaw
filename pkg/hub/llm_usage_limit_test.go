@@ -3,6 +3,8 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
@@ -601,5 +603,282 @@ func TestLLMUsageLimitIgnoresTheGenericReplayPrefix(t *testing.T) {
 	}
 	if _, ok := s.loadLLMUsageLimit("faster"); ok {
 		t.Error("a non-definite bridge body created a usage-limit record for the whole key")
+	}
+}
+
+// redactLLMLimitEventMessage must catch credential-shaped substrings a
+// provider error quotes back, not merely the literal configured key id —
+// which is often an alias that never appears in the provider's text at all.
+func TestRedactLLMLimitEventMessageRedactsTokenShapes(t *testing.T) {
+	cases := []struct {
+		name    string
+		message string
+		secret  string
+	}{
+		{"sk token with unrelated alias key", "invalid key sk-ant-api03-AAAA1111BBBB2222", "sk-ant-api03-AAAA1111BBBB2222"},
+		{"long opaque credential", "token ghp_a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4 rejected", "ghp_a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4"},
+		{"configured key id itself", "key anthropic-prod is over its cap", "anthropic-prod"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			out := redactLLMLimitEventMessage(tc.message, "anthropic-prod")
+			if strings.Contains(out, tc.secret) {
+				t.Fatalf("secret survived redaction: %q", out)
+			}
+			if !strings.Contains(out, "[redacted]") {
+				t.Fatalf("nothing was redacted from %q -> %q", tc.message, out)
+			}
+		})
+	}
+	const prose = "monthly allowance reached, resets at midnight UTC"
+	if out := redactLLMLimitEventMessage(prose, "anthropic-prod"); out != prose {
+		t.Fatalf("plain prose was mangled: %q", out)
+	}
+}
+
+// A scheduled release is a probe, not a recovery: "Provider cap lifted" must
+// only be said once a turn proves the wall is gone, and every re-latch must
+// tell the operator the hub is still capped instead of staying silent.
+func TestLLMUsageLimitReleaseIsAnnouncedOnlyOnceProven(t *testing.T) {
+	s, _ := NewTestServerWithConfig(t, nil, "", "", "")
+	limitClaw(t, s, "claw-limit-probe", "faster", false)
+	limit := types.LLMUsageLimit{Reason: types.LLMLimitUsage, RegainAt: now().Add(-time.Minute), Message: "capped"}
+	s.handleLLMUsageLimit(nil, "claw-limit-probe", limit)
+
+	for attempt := 1; attempt <= llmLimitMaxAutoRetries; attempt++ {
+		s.releaseLLMUsageLimit("faster", "test release", false)
+		s.handleLLMUsageLimit(nil, "claw-limit-probe", limit)
+	}
+	want := "provider_limit_opened,provider_limit_opened,provider_limit_opened,provider_limit_exhausted"
+	if got := strings.Join(infraEventTypes(t, s), ","); got != want {
+		t.Fatalf("events = %s, want %s", got, want)
+	}
+}
+
+// Once a claw on the key authors a turn after a scheduled release, the lift
+// is real and is announced exactly once.
+func TestLLMUsageLimitAuthoredTurnConfirmsTheLift(t *testing.T) {
+	s, _ := NewTestServerWithConfig(t, nil, "", "", "")
+	limitClaw(t, s, "claw-limit-proof", "faster", false)
+	limitClaw(t, s, "claw-limit-other-key", "other", false)
+	s.handleLLMUsageLimit(nil, "claw-limit-proof", types.LLMUsageLimit{Reason: types.LLMLimitUsage, RegainAt: now().Add(-time.Minute), Message: "capped"})
+	s.releaseLLMUsageLimit("faster", "test release", false)
+	if got := strings.Join(infraEventTypes(t, s), ","); got != "provider_limit_opened" {
+		t.Fatalf("events after a scheduled release = %s, want the release to stay unannounced", got)
+	}
+
+	s.observeTurnOutcome(nil, "claw-limit-other-key", "msg-other", "Working on the other key.")
+	if got := strings.Join(infraEventTypes(t, s), ","); got != "provider_limit_opened" {
+		t.Fatalf("a turn on an unrelated key confirmed the lift: %s", got)
+	}
+	s.observeTurnOutcome(nil, "claw-limit-proof", "msg-1", "Back to work.")
+	s.observeTurnOutcome(nil, "claw-limit-proof", "msg-2", "Still working.")
+	if got := strings.Join(infraEventTypes(t, s), ","); got != "provider_limit_opened,provider_limit_released" {
+		t.Fatalf("events = %s, want exactly one released after the proving turn", got)
+	}
+}
+
+// An operator clearing the block is a confirmed lift in itself.
+func TestLLMUsageLimitOperatorClearAnnouncesTheLift(t *testing.T) {
+	s, _ := NewTestServerWithConfig(t, nil, "", "", "")
+	limitClaw(t, s, "claw-limit-clear", "faster", false)
+	s.handleLLMUsageLimit(nil, "claw-limit-clear", types.LLMUsageLimit{Reason: types.LLMLimitUsage, RegainAt: now().Add(time.Hour), Message: "capped"})
+	req := httptest.NewRequest(http.MethodDelete, "/api/claws/claw-limit-clear/llm-limit", nil)
+	req = req.WithContext(context.WithValue(req.Context(), ctxTenantKey{}, "test-tenant-id"))
+	rr := httptest.NewRecorder()
+	s.handleClawLLMLimit(rr, req, "claw-limit-clear")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("DELETE = %d: %s", rr.Code, rr.Body.String())
+	}
+	if got := strings.Join(infraEventTypes(t, s), ","); got != "provider_limit_opened,provider_limit_released" {
+		t.Fatalf("events = %s, want the operator clear announced", got)
+	}
+}
+
+// A short bearer token echoed in an Authorization header is a credential too,
+// whatever its length or alphabet.
+func TestRedactLLMLimitEventMessageRedactsBearerEchoes(t *testing.T) {
+	out := redactLLMLimitEventMessage("429: Authorization: Bearer dG9rZW4tdGVzdA==; org org_abc123 over quota", "prod-openai")
+	if strings.Contains(out, "dG9rZW4tdGVzdA==") {
+		t.Fatalf("bearer token survived redaction: %q", out)
+	}
+	if !strings.Contains(out, "org_abc123") {
+		t.Fatalf("account identifier needed to act on the message was mangled: %q", out)
+	}
+	// A quoted token is one token, delimiters and all; a header block's next
+	// line is a different header, not the credential.
+	for _, tc := range []struct{ message, secret, keep string }{
+		{`429: Authorization: Bearer "tok;part2" rejected`, "tok;part2", "rejected"},
+		{"429: Authorization: Bearer 'a,b c' rejected", "a,b", "rejected"},
+		{"Authorization: Bearer\nRetry-After: 120", "", "Retry-After: 120"},
+	} {
+		out := redactLLMLimitEventMessage(tc.message, "prod-openai")
+		if tc.secret != "" && strings.Contains(out, tc.secret) {
+			t.Fatalf("bearer token survived redaction: %q -> %q", tc.message, out)
+		}
+		if !strings.Contains(out, tc.keep) {
+			t.Fatalf("redaction swallowed adjacent text: %q -> %q", tc.message, out)
+		}
+	}
+}
+
+// A restart between the scheduled release and its proving turn must not lose
+// the recovery alert: the probe is re-derived from the record and the event
+// log, so the first authored turn after boot still announces the lift once.
+func TestLLMUsageLimitProbeSurvivesRestart(t *testing.T) {
+	s, _ := NewTestServerWithConfig(t, nil, "", "", "")
+	limitClaw(t, s, "claw-limit-reboot", "faster", false)
+	s.handleLLMUsageLimit(nil, "claw-limit-reboot", types.LLMUsageLimit{Reason: types.LLMLimitUsage, RegainAt: now().Add(-time.Minute), Message: "capped"})
+	s.releaseLLMUsageLimit("faster", "test release", false)
+
+	// The restart: in-memory probes are gone, durable state is what it was.
+	s.llmLimitMu.Lock()
+	s.llmLimitProbing = nil
+	s.llmLimitMu.Unlock()
+	s.observeTurnOutcome(nil, "claw-limit-reboot", "msg-0", "Nobody re-armed me.")
+	if got := strings.Join(infraEventTypes(t, s), ","); got != "provider_limit_opened" {
+		t.Fatalf("events without a reseed = %s, want the lift still pending", got)
+	}
+
+	s.seedLLMLimitProbes()
+	s.observeTurnOutcome(nil, "claw-limit-reboot", "msg-1", "Back to work.")
+	if got := strings.Join(infraEventTypes(t, s), ","); got != "provider_limit_opened,provider_limit_released" {
+		t.Fatalf("events after reseed = %s, want exactly one released", got)
+	}
+
+	// An already-announced lift is not re-armed by a later restart.
+	s.seedLLMLimitProbes()
+	s.llmLimitMu.Lock()
+	probing := s.llmLimitProbing["faster"]
+	s.llmLimitMu.Unlock()
+	if probing {
+		t.Fatal("reseed re-armed a probe for a lift that was already announced")
+	}
+}
+
+// The proving turn and a fresh rejection arrive together (claws sharing a
+// key are resumed together), so confirming the lift must be atomic with the
+// re-latch: whichever wins, the log never says "lifted" after "capped again".
+func TestLLMUsageLimitLiftConfirmationIsAtomicWithRelatch(t *testing.T) {
+	s, _ := NewTestServerWithConfig(t, nil, "", "", "")
+	limitClaw(t, s, "claw-limit-race-a", "faster", false)
+	limitClaw(t, s, "claw-limit-race-b", "faster", false)
+	limit := types.LLMUsageLimit{Reason: types.LLMLimitUsage, RegainAt: now().Add(-time.Minute), Message: "capped"}
+	eventKeys := func() []string {
+		rows, err := s.db.Query(`SELECT event_key FROM infra_events ORDER BY rowid`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer rows.Close()
+		var out []string
+		for rows.Next() {
+			var key string
+			if err := rows.Scan(&key); err != nil {
+				t.Fatal(err)
+			}
+			out = append(out, key)
+		}
+		return out
+	}
+	for i := 0; i < 100; i++ {
+		for _, table := range []string{"llm_usage_limits", "infra_events"} {
+			if _, err := s.db.Exec(`DELETE FROM ` + table); err != nil {
+				t.Fatal(err)
+			}
+		}
+		s.handleLLMUsageLimit(nil, "claw-limit-race-a", limit)
+		s.releaseLLMUsageLimit("faster", "test release", false)
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() { defer wg.Done(); s.observeTurnOutcome(nil, "claw-limit-race-a", "msg-proof", "Back to work.") }()
+		go func() { defer wg.Done(); s.handleLLMUsageLimit(nil, "claw-limit-race-b", limit) }()
+		wg.Wait()
+		relatched := false
+		for _, key := range eventKeys() {
+			if strings.HasPrefix(key, "provider_limit_opened:") && strings.HasSuffix(key, ":1") {
+				relatched = true
+			}
+			if strings.HasPrefix(key, "provider_limit_released:") && relatched {
+				t.Fatalf("run %d announced the lift after the re-latch: %v", i, eventKeys())
+			}
+		}
+	}
+}
+
+// A released episode is forgotten after llmLimitEpisodeMemory — unless its
+// lift is still unproven. The record is what the proving turn confirms
+// against and what a restart re-derives the probe from; pruning it first
+// left the channel's "account capped" alert without a recovery forever (the
+// only claw on the key was offline through the release and turned hours
+// later), and a reseed after that had nothing to find.
+func TestLLMUsageLimitUnprovenReleaseOutlivesEpisodeMemory(t *testing.T) {
+	s, _ := NewTestServerWithConfig(t, nil, "", "", "")
+	limitClaw(t, s, "claw-limit-late", "faster", false)
+	s.handleLLMUsageLimit(nil, "claw-limit-late", types.LLMUsageLimit{Reason: types.LLMLimitUsage, RegainAt: now().Add(-time.Minute), Message: "capped"})
+	s.releaseLLMUsageLimit("faster", "test release", false)
+	if _, err := s.db.Exec(`UPDATE llm_usage_limits SET released_at=? WHERE key_id='faster'`, epochMillis(now().Add(-llmLimitEpisodeMemory-time.Hour))); err != nil {
+		t.Fatal(err)
+	}
+	s.releaseDueLLMUsageLimits()
+	if _, had := s.loadLLMUsageLimit("faster"); !had {
+		t.Fatal("the scheduler pruned a released record whose lift was never proven")
+	}
+
+	// The same restart-shaped gap: the probe set is gone, the durable state
+	// still has to be enough to re-arm it.
+	s.llmLimitMu.Lock()
+	s.llmLimitProbing = nil
+	s.llmLimitMu.Unlock()
+	s.seedLLMLimitProbes()
+	s.releaseDueLLMUsageLimits()
+	s.observeTurnOutcome(nil, "claw-limit-late", "msg-1", "Back to work.")
+	if got := strings.Join(infraEventTypes(t, s), ","); got != "provider_limit_opened,provider_limit_released" {
+		t.Fatalf("events after the late proving turn = %s, want the lift announced", got)
+	}
+
+	// Proven, and older than the memory window: now it is history.
+	s.releaseDueLLMUsageLimits()
+	if _, had := s.loadLLMUsageLimit("faster"); had {
+		t.Fatal("a proven, expired episode was kept")
+	}
+}
+
+// An exhausted cap reports the last attempt the hub actually made. The
+// record's deadline is bumped on every re-latch, exhausted or not, but
+// releaseDueLLMUsageLimits never acts on an exhausted one, so rendering it
+// as "Last retry" named a future instant nothing would honour.
+func TestLLMUsageLimitExhaustedEventReportsTheLastRealRetry(t *testing.T) {
+	s, _ := NewTestServerWithConfig(t, nil, "", "", "")
+	limitClaw(t, s, "claw-limit-final", "faster", false)
+	limit := types.LLMUsageLimit{Reason: types.LLMLimitUsage, RegainAt: now().Add(-time.Minute), Message: "capped"}
+	s.handleLLMUsageLimit(nil, "claw-limit-final", limit)
+	var lastRelease time.Time
+	for attempt := 1; attempt <= llmLimitMaxAutoRetries; attempt++ {
+		s.releaseLLMUsageLimit("faster", "test release", false)
+		record, _ := s.loadLLMUsageLimit("faster")
+		lastRelease = record.ReleasedAt
+		s.handleLLMUsageLimit(nil, "claw-limit-final", limit)
+	}
+	var raw string
+	if err := s.db.QueryRow(`SELECT detail FROM infra_events WHERE event_type='provider_limit_exhausted'`).Scan(&raw); err != nil {
+		t.Fatal(err)
+	}
+	var detail map[string]any
+	if err := json.Unmarshal([]byte(raw), &detail); err != nil {
+		t.Fatal(err)
+	}
+	if got := detail["last_retry"]; got != formatLLMLimitDeadline(lastRelease) {
+		t.Fatalf("last_retry = %v, want the release at %s", got, formatLLMLimitDeadline(lastRelease))
+	}
+	if _, has := detail["deadline"]; has {
+		t.Fatalf("exhausted event still carries a deadline nothing will honour: %v", detail["deadline"])
+	}
+	msg := buildInfraMessage(infraEventRow{EventType: "provider_limit_exhausted", Subject: "anthropic", Detail: detail, OccurredAt: now()}, now())
+	fields := map[string]string{}
+	for _, f := range msg.Fields {
+		fields[f.Label] = f.Value
+	}
+	if fields["Last retry"] != formatLLMLimitDeadline(lastRelease) || fields["Deadline"] != "" {
+		t.Fatalf("exhausted fields = %v, want only the last real retry", fields)
 	}
 }

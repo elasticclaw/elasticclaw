@@ -87,3 +87,37 @@ func hasFailedRuntimeCheck(checks []DoctorCheck, title string) bool {
 	}
 	return false
 }
+
+// Alerts a route discarded at the transient-failure cap have no other
+// operator-visible trace, so Doctor lists them per route for a week.
+func TestCheckInfraDeliveriesSurfacesDroppedAlerts(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{}, "", "", "")
+	current := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
+	s.nowFunc = func() time.Time { return current }
+	if checks := s.checkInfraDeliveries(context.Background()); len(checks) != 0 {
+		t.Fatalf("clean table produced checks: %#v", checks)
+	}
+	for _, row := range []struct {
+		rowid  int64
+		via    string
+		status string
+		at     time.Time
+	}{
+		{1, "ops", notificationDeliveryStatusFailed, current.Add(-time.Hour)},
+		{2, "ops", notificationDeliveryStatusFailed, current.Add(-2 * time.Hour)},
+		{3, "ops", notificationDeliveryStatusSent, current.Add(-time.Hour)},
+		{4, "oncall", notificationDeliveryStatusFailed, current.Add(-8 * 24 * time.Hour)},
+	} {
+		if _, err := db.Exec(`INSERT INTO infra_notification_deliveries(event_rowid,notifier,delivered_at,status) VALUES(?,?,?,?)`, row.rowid, row.via, epochMillis(row.at), row.status); err != nil {
+			t.Fatal(err)
+		}
+	}
+	checks := s.checkInfraDeliveries(context.Background())
+	if len(checks) != 1 {
+		t.Fatalf("checks = %#v, want one for ops only (oncall's drop is older than the window)", checks)
+	}
+	c := checks[0]
+	if c.OK || c.Severity != "warning" || c.Title != `Infrastructure route "ops" dropped 2 alert(s) in the last 7 days` || !strings.Contains(c.Description, current.Add(-time.Hour).Format(time.RFC3339)) {
+		t.Fatalf("unexpected check: %#v", c)
+	}
+}

@@ -284,8 +284,8 @@ type GitHubAppConfig struct {
 // GitHubRepoAccess specifies a repo and the permissions needed. Workspace
 // repository lists may also use glob patterns.
 type GitHubRepoAccess struct {
-	Repo        string `yaml:"repo"        json:"repo"`        // e.g. "owner/repo", "*-infra-*", or "owner/*"
-	Permissions string `yaml:"permissions" json:"permissions"` // "read" or "write" (default: "read")
+	Repo        string `yaml:"repo"        json:"repo"`            // e.g. "owner/repo", "*-infra-*", or "owner/*"
+	Permissions string `yaml:"permissions" json:"permissions"`     // "read" or "write" (default: "read")
 	Clone       *bool  `yaml:"clone"       json:"clone,omitempty"` // whether to clone the repo; nil/true means clone
 }
 
@@ -585,6 +585,8 @@ type NotificationsConfig struct {
 	Lifecycle *LifecycleNotificationsConfig `yaml:"lifecycle,omitempty" json:"lifecycle,omitempty"`
 	// Scheduled configures time-driven reports sent through named notifiers.
 	Scheduled []ScheduledNotificationConfig `yaml:"scheduled,omitempty" json:"scheduled,omitempty"`
+	// Infra configures fleet-wide dependency and provider-limit notifications.
+	Infra *InfraNotificationsConfig `yaml:"infra,omitempty" json:"infra,omitempty"`
 }
 
 // ScheduledNotificationConfig configures a report sent at a wall-clock time.
@@ -638,11 +640,57 @@ func IsLifecycleEventType(event string) bool {
 	return false
 }
 
+// InfraEventTypes is the vocabulary persisted for fleet-wide infrastructure
+// changes. It intentionally does not share lifecycle's per-task-run stream.
+var InfraEventTypes = []string{
+	"dependency_down",
+	"dependency_degraded",
+	"dependency_recovered",
+	"provider_limit_opened",
+	"provider_limit_exhausted",
+	"provider_limit_released",
+}
+
+// IsInfraEventType reports whether event is a supported infrastructure event.
+func IsInfraEventType(event string) bool {
+	for _, eventType := range InfraEventTypes {
+		if event == eventType {
+			return true
+		}
+	}
+	return false
+}
+
 // LifecycleRoute sends lifecycle events through a named notifier. An empty
 // Events list receives all lifecycle event types.
 type LifecycleRoute struct {
 	Via    string   `yaml:"via" json:"via"`
 	Events []string `yaml:"events,omitempty" json:"events,omitempty"`
+}
+
+// InfraRoute sends selected infrastructure events through a named notifier.
+// An empty Events list receives every infrastructure event type.
+type InfraRoute struct {
+	Via    string   `yaml:"via" json:"via"`
+	Events []string `yaml:"events,omitempty" json:"events,omitempty"`
+}
+
+// InfraNotificationsConfig configures edge-triggered infrastructure alerts.
+// RepeatAfter re-alerts about a dependency that is still degraded or down once
+// the interval elapses after the previous alert. It is deliberately opt-in: an
+// outage does not become more actionable because it repeats in a channel every
+// hour. Provider caps are not repeated by it — the usage-limit latch already
+// re-emits on its own cadence (opened, exhausted when retries run out,
+// released), each with a stated deadline.
+type InfraNotificationsConfig struct {
+	Enabled      *bool        `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	Routes       []InfraRoute `yaml:"routes,omitempty" json:"routes,omitempty"`
+	PollInterval string       `yaml:"poll_interval,omitempty" json:"pollInterval,omitempty"`
+	RepeatAfter  string       `yaml:"repeat_after,omitempty" json:"repeatAfter,omitempty"`
+}
+
+func (c *InfraNotificationsConfig) IsEnabled() bool {
+	return c != nil && (c.Enabled == nil || *c.Enabled)
 }
 
 // LifecycleNotificationsConfig configures outbound notifications for agent

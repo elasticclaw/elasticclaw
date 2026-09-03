@@ -127,6 +127,7 @@ func (s *Server) runDoctorChecks(ctx context.Context) DoctorResponse {
 	// --- Notifications ---
 	checks = append(checks, s.checkNotifications(hubCfg)...)
 	checks = append(checks, s.checkNotifyActions(hubCfg)...)
+	checks = append(checks, s.checkInfraDeliveries(ctx)...)
 
 	// --- Hub Settings ---
 	checks = append(checks, s.checkHubSettings(hubCfg)...)
@@ -1250,6 +1251,9 @@ func (s *Server) checkNotifications(cfg *types.HubConfig) []DoctorCheck {
 			Error:       err.Error(),
 		})
 	}
+	if err := types.ValidateInfraNotificationsConfig(nCfg); err != nil {
+		checks = append(checks, DoctorCheck{Category: "notifications", Severity: "critical", Title: "Infrastructure notifications config invalid", Description: "No infrastructure notifications will be delivered until this is fixed in hub.yaml.", OK: false, Error: err.Error()})
+	}
 
 	secrets := func(name string) (string, bool) {
 		v, ok := cfg.Secrets[name]
@@ -1340,6 +1344,45 @@ func (s *Server) checkNotifications(cfg *types.HubConfig) []DoctorCheck {
 				Description: fmt.Sprintf("Notifier %q constructed successfully and has a channel.", via),
 			})
 		}
+	}
+
+	// Infrastructure routes are global hub alerts, so their secrets resolve in
+	// the hub scope just like lifecycle routes. Check each destination here:
+	// passing structural validation alone cannot prove a real outage can post.
+	if nCfg.Infra.IsEnabled() {
+		for i, route := range nCfg.Infra.Routes {
+			via := strings.TrimSpace(route.Via)
+			label := fmt.Sprintf("Infrastructure route %d (%q)", i+1, via)
+			nc, ok := nCfg.Notifiers[via]
+			if via == "" || !ok {
+				checks = append(checks, DoctorCheck{Category: "notifications", Severity: "critical", OK: false, Title: label + " names an unknown notifier", Description: "This infrastructure route will not deliver messages until its via names a configured notifier."})
+				continue
+			}
+			channel, _ := s.notifierSettings(nc)["channel"].(string)
+			if strings.TrimSpace(channel) == "" {
+				checks = append(checks, DoctorCheck{Category: "notifications", Severity: "critical", OK: false, Title: label + " has no channel", Description: fmt.Sprintf("Notifier %q needs a channel for this infrastructure route.", via)})
+				continue
+			}
+			if _, err := notify.New(nc.Type, s.notifierSettings(nc), secrets); err != nil {
+				checks = append(checks, DoctorCheck{Category: "notifications", Severity: "critical", OK: false, Title: label + " is not constructible", Description: fmt.Sprintf("Infrastructure alerts through notifier %q will not be delivered.", via), Error: err.Error()})
+				continue
+			}
+			checks = append(checks, DoctorCheck{Category: "notifications", Severity: "info", OK: true, Title: label + " is configured", Description: fmt.Sprintf("Notifier %q constructed successfully and has a channel.", via)})
+		}
+	}
+
+	// Provider caps used to page through the lifecycle agent_idle event. They
+	// are infrastructure events now, and a hub configured before that change
+	// routes agent_idle somewhere but provider caps nowhere: the claws park,
+	// the dashboard shows the badge, and nobody is paged. That is exactly the
+	// silence the old route existed to break, so it is said here rather than
+	// discovered during the next cap.
+	if lifecycleRoutesAgentIdle(nCfg.Lifecycle) && !infraRoutesProviderLimits(nCfg.Infra) {
+		checks = append(checks, DoctorCheck{
+			Category: "notifications", Severity: "critical", OK: false,
+			Title:       "Provider cap alerts have no route",
+			Description: "Lifecycle alerts route agent_idle, but a provider usage limit no longer fires it: caps are infrastructure events (provider_limit_opened, provider_limit_exhausted, provider_limit_released) and no infrastructure route receives them. A capped provider account parks its claws without paging anyone until notifications.infra has a route for those events.",
+		})
 	}
 
 	// Scheduled reports. A disabled schedule delivers nothing, so its report
@@ -1653,4 +1696,46 @@ func (s *Server) checkHubSettings(cfg *types.HubConfig) []DoctorCheck {
 	}
 
 	return checks
+}
+
+// lifecycleRoutesAgentIdle reports whether an enabled lifecycle block would
+// deliver agent_idle: some route carries it (or receives everything) and the
+// per-event toggle has not muted it.
+func lifecycleRoutesAgentIdle(lc *types.LifecycleNotificationsConfig) bool {
+	if !lc.IsEnabled() {
+		return false
+	}
+	if lc.Events != nil && lc.Events.AgentIdle != nil && !*lc.Events.AgentIdle {
+		return false
+	}
+	for _, route := range lc.EffectiveRoutes() {
+		if len(route.Events) == 0 {
+			return true
+		}
+		for _, event := range route.Events {
+			if event == taskRunEventAgentIdle {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// infraRoutesProviderLimits reports whether an enabled infra block delivers
+// at least one provider_limit_* event somewhere.
+func infraRoutesProviderLimits(ic *types.InfraNotificationsConfig) bool {
+	if !ic.IsEnabled() {
+		return false
+	}
+	for _, route := range ic.Routes {
+		if len(route.Events) == 0 {
+			return true
+		}
+		for _, event := range route.Events {
+			if strings.HasPrefix(event, "provider_limit_") {
+				return true
+			}
+		}
+	}
+	return false
 }

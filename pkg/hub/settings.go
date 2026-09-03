@@ -81,6 +81,7 @@ type SettingsView struct {
 	Auth                 *AuthView                   `json:"auth,omitempty"`
 	Notifications        *NotificationsView          `json:"notifications"`
 	LifecycleEventTypes  []string                    `json:"lifecycleEventTypes"`
+	InfraEventTypes      []string                    `json:"infraEventTypes"`
 	// ConcurrencyGroups limits simultaneously running claws per group. 0 = unlimited.
 	ConcurrencyGroups []ConcurrencyGroupView `json:"concurrencyGroups"`
 	// MaxConcurrentClaws limits simultaneously running claws. 0 = unlimited.
@@ -93,6 +94,7 @@ type SettingsView struct {
 type NotificationsView struct {
 	Notifiers map[string]NotifierView     `json:"notifiers"`
 	Lifecycle *LifecycleNotificationsView `json:"lifecycle,omitempty"`
+	Infra     *InfraNotificationsView     `json:"infra,omitempty"`
 	// Scheduled mirrors notifications.scheduled. It holds no secret — a
 	// schedule only names notifiers, a report and a wall-clock slot.
 	Scheduled []ScheduledNotificationView `json:"scheduled"`
@@ -140,6 +142,15 @@ type LifecycleNotificationsView struct {
 	IdleAfter          string                       `json:"idleAfter,omitempty"`
 	StageProgressAfter string                       `json:"stageProgressAfter,omitempty"`
 	Events             *types.LifecycleEventToggles `json:"events,omitempty"`
+}
+
+// InfraNotificationsView uses the same names as types.InfraNotificationsConfig
+// so the settings screen can safely send the redacted view back in a PATCH.
+type InfraNotificationsView struct {
+	Enabled      bool               `json:"enabled"`
+	Routes       []types.InfraRoute `json:"routes"`
+	PollInterval string             `json:"pollInterval,omitempty"`
+	RepeatAfter  string             `json:"repeatAfter,omitempty"`
 }
 
 type AuthView struct {
@@ -530,6 +541,7 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	view.ModelAuthProfiles = []ModelAuthProfileView{}
 	view.LifecycleEventTypes = append([]string(nil), types.LifecycleEventTypes...)
+	view.InfraEventTypes = append([]string(nil), types.InfraEventTypes...)
 	view.Notifications = buildNotificationsView(s.hubCfg.Notifications)
 	for _, profile := range s.hubCfg.ModelAuthProfiles {
 		if profile == nil {
@@ -768,6 +780,16 @@ func buildNotificationsView(cfg *types.NotificationsConfig) *NotificationsView {
 		}
 		view.Lifecycle = lifecycle
 	}
+	if ic := cfg.Infra; ic != nil {
+		infra := &InfraNotificationsView{
+			Enabled: ic.IsEnabled(), Routes: make([]types.InfraRoute, len(ic.Routes)),
+			PollInterval: ic.PollInterval, RepeatAfter: ic.RepeatAfter,
+		}
+		for i, route := range ic.Routes {
+			infra.Routes[i] = types.InfraRoute{Via: route.Via, Events: append([]string(nil), route.Events...)}
+		}
+		view.Infra = infra
+	}
 	for _, scheduled := range cfg.Scheduled {
 		view.Scheduled = append(view.Scheduled, scheduledNotificationViewOf(scheduled))
 	}
@@ -845,6 +867,13 @@ func validateSettingsNotifications(current, cfg *types.NotificationsConfig) erro
 	// field, so validating stored entries here would 400 every save from the
 	// screen, including ones touching an unrelated channel.
 	if err := types.ValidateLifecycleNotificationsConfig(cfg); err != nil {
+		return err
+	}
+	// The infra block gets the same whole-block judgement: the infra tick
+	// gates on ValidateInfraNotificationsConfig and pauses every outage and
+	// provider-cap alert when it fails, with one log line as the only
+	// signal, so a defect must be refused here where the screen can show it.
+	if err := types.ValidateInfraNotificationsConfig(cfg); err != nil {
 		return err
 	}
 	for name, notifier := range cfg.Notifiers {
@@ -1236,15 +1265,27 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 		if patch.Notifications.Scheduled == nil && s.hubCfg.Notifications != nil {
 			patch.Notifications.Scheduled = append([]types.ScheduledNotificationConfig(nil), s.hubCfg.Notifications.Scheduled...)
 		}
+		if patch.Notifications.Infra == nil && s.hubCfg.Notifications != nil && s.hubCfg.Notifications.Infra != nil {
+			infra := *s.hubCfg.Notifications.Infra
+			infra.Routes = append([]types.InfraRoute(nil), infra.Routes...)
+			for i := range infra.Routes {
+				infra.Routes[i].Events = append([]string(nil), infra.Routes[i].Events...)
+			}
+			patch.Notifications.Infra = &infra
+		}
 		mergeNotifierSettings(s.hubCfg.Notifications, patch.Notifications)
 		dropRejectedLifecycleDurations(s.hubCfg.Notifications, patch.Notifications)
-		if err := validateSettingsNotifications(s.hubCfg.Notifications, patch.Notifications); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
+		// Removals are judged first so a notifier an enabled infra route still
+		// names is refused as "still in use" — the message the screen shows
+		// for pipelines and schedules — rather than as the dangling-via
+		// structural error the same patch would also trip below.
 		// s.hubCfg.Factories is read directly: resolveFactories takes the lock
 		// this handler already holds.
 		if err := validateNotifierRemovals(s.hubCfg.Notifications, patch.Notifications, s.hubCfg.Factories); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if err := validateSettingsNotifications(s.hubCfg.Notifications, patch.Notifications); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}

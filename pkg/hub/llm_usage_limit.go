@@ -1,11 +1,12 @@
 package hub
 
 import (
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"fmt"
 	"log"
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 
@@ -116,7 +117,15 @@ func (s *Server) handleLLMUsageLimit(cc *clawConn, clawID string, limit types.LL
 
 	s.llmLimitMu.Lock()
 	record, had := s.loadLLMUsageLimit(keyID)
+	// Whatever this turn decides, the key is capped now: a release that was
+	// still awaiting proof has just been disproved.
+	delete(s.llmLimitProbing, keyID)
 	opened, relatched := false, false
+	// The release this turn disproves. It is the last time the hub actually
+	// tried, which is what an exhausted alert reports: the schedule below is
+	// bumped as usual, but releaseDueLLMUsageLimits never acts on an
+	// exhausted record, so that deadline is not a retry anyone will see.
+	var lastRetryAt time.Time
 	switch {
 	case had && record.Active():
 		// Same episode, another claw. Keep the schedule exactly as it is: a
@@ -125,6 +134,7 @@ func (s *Server) handleLLMUsageLimit(cc *clawConn, clawID string, limit types.LL
 		// claw.
 	case had:
 		// Released, and the wall is still there. Same episode: back off.
+		lastRetryAt = record.ReleasedAt
 		record.ReleasedAt = time.Time{}
 		record.Retries++
 		record.Provider, record.Message, record.RegainAt = provider, limit.Message, limit.RegainAt
@@ -164,17 +174,21 @@ func (s *Server) handleLLMUsageLimit(cc *clawConn, clawID string, limit types.LL
 	case opened:
 		log.Printf("[llm-limit] key %q capped (%s), %d claw(s) parked until %s: %s",
 			keyID, record.Reason, len(latched), formatLLMLimitDeadline(record.RetryAt), record.Message)
-		s.recordLLMLimitEvent(clawID, record, true)
+		s.recordLLMLimitEvent(record, len(latched), "provider_limit_opened", nil)
 	case relatched && record.Exhausted():
 		log.Printf("[llm-limit] key %q still capped after %d automatic retries, leaving it for an operator: %s",
 			keyID, record.Retries, record.Message)
 		for _, id := range latched {
 			s.publishHubNotice(id, fmt.Sprintf("[hub] The provider still reports a usage limit after %d automatic retries, so the hub stopped retrying. Raise the account limit and clear the block to resume. Last provider message: %s", record.Retries, record.Message))
 		}
-		s.recordLLMLimitEvent(clawID, record, false)
+		s.recordLLMLimitEvent(record, len(latched), "provider_limit_exhausted", map[string]any{"last_retry": formatLLMLimitDeadline(lastRetryAt)})
 	case relatched:
 		log.Printf("[llm-limit] key %q still capped, retry %d scheduled for %s",
 			keyID, record.Retries, formatLLMLimitDeadline(record.RetryAt))
+		// Said out loud: the operator watched the release and must not read
+		// silence as recovery. The event key carries the retry number, so
+		// each re-latch is its own message.
+		s.recordLLMLimitEvent(record, len(latched), "provider_limit_opened", nil)
 	}
 }
 
@@ -230,6 +244,11 @@ func (s *Server) setClawLLMLimitMirror(clawID string, until time.Time) {
 // claw_retry can revive it later on the same row.
 func (s *Server) releaseLLMUsageLimit(keyID, reason string, announce bool) {
 	s.llmLimitMu.Lock()
+	record, had := s.loadLLMUsageLimit(keyID)
+	if !had || !record.Active() {
+		s.llmLimitMu.Unlock()
+		return
+	}
 	if _, err := s.db.Exec(
 		`UPDATE claws SET llm_limited_until=0 WHERE COALESCE(llm_key,'')=? AND COALESCE(llm_limited_until,0)<>0 AND status<>'deleted'`,
 		keyID); err != nil {
@@ -246,6 +265,18 @@ func (s *Server) releaseLLMUsageLimit(keyID, reason string, announce bool) {
 		log.Printf("[llm-limit] mark limit released for key %q: %v", keyID, err)
 		return
 	}
+	// A release is a probe until a turn goes through: the cap may well still
+	// be there (clock skew, a late reset, a balance nobody topped up), and
+	// the re-latch a minute later would make "Provider cap lifted" a lie the
+	// operator reads three times per episode. The lift is announced by
+	// confirmLLMLimitLift once proven — an authored turn on the key, or an
+	// operator clearing the block. The probe itself is derivable from durable
+	// state — a released record with no released event yet — so a restart
+	// re-arms it (seedLLMLimitProbes) instead of forgetting it.
+	if s.llmLimitProbing == nil {
+		s.llmLimitProbing = map[string]bool{}
+	}
+	s.llmLimitProbing[keyID] = true
 	s.llmLimitMu.Unlock()
 
 	// Notices and wakes touch sockets, so they happen outside the lock.
@@ -256,6 +287,46 @@ func (s *Server) releaseLLMUsageLimit(keyID, reason string, announce bool) {
 		s.resumeClawAfterLLMLimit(clawID)
 	}
 	log.Printf("[llm-limit] key %q released (%s), %d claw(s) resumed", keyID, reason, len(clawIDs))
+}
+
+// confirmLLMLimitLift announces a proven release of the key's latch. See
+// releaseLLMUsageLimit for why the release itself stays quiet. Idempotent:
+// the event key is fixed while the record stays released, so a second proof
+// is absorbed by the event store's dedupe.
+//
+// The read and the event write happen under ONE hold of llmLimitMu. Claws on
+// a key are resumed together, so one claw's proving turn and another claw's
+// fresh rejection arrive together too; with the write outside the lock, the
+// re-latch could land between them and the record this read as released was
+// announced as lifted while the key was already capped again.
+func (s *Server) confirmLLMLimitLift(keyID string) {
+	s.llmLimitMu.Lock()
+	defer s.llmLimitMu.Unlock()
+	record, had := s.loadLLMUsageLimit(keyID)
+	delete(s.llmLimitProbing, keyID)
+	if !had || record.Active() {
+		return
+	}
+	s.recordLLMLimitEvent(record, len(s.clawsForLLMKey(keyID)), "provider_limit_released", nil)
+}
+
+// observeAuthoredTurnForLLMLimit is the proof a scheduled release waits for:
+// a claw on the key got an answer from the provider. Free when nothing is
+// probing, which is nearly always.
+func (s *Server) observeAuthoredTurnForLLMLimit(clawID string) {
+	s.llmLimitMu.Lock()
+	probing := len(s.llmLimitProbing) != 0
+	s.llmLimitMu.Unlock()
+	if !probing {
+		return
+	}
+	keyID, _ := s.resolveClawLLMKey(clawID)
+	s.llmLimitMu.Lock()
+	waiting := s.llmLimitProbing[keyID]
+	s.llmLimitMu.Unlock()
+	if waiting {
+		s.confirmLLMLimitLift(keyID)
+	}
 }
 
 // resumeClawAfterLLMLimit restarts a parked claw.
@@ -301,9 +372,40 @@ func (s *Server) resumeClawAfterLLMLimit(clawID string) {
 // the claw comes back.
 const llmLimitResumeWake = "[hub] The model provider's allowance is back. Continue where you left off."
 
+// seedLLMLimitProbes re-arms, after a restart, every release that is still
+// waiting for its proof. The probe set lives in memory, and losing it between
+// the release and the first successful turn would leave the operator with an
+// "account capped" alert whose recovery never arrives: the record says
+// released, no turn can confirm it, and nothing else looks again. Durable
+// state answers the question on its own — a released record whose released
+// event has not been recorded is exactly a pending probe.
+func (s *Server) seedLLMLimitProbes() {
+	for _, record := range s.llmUsageLimitRecords() {
+		if record.Active() {
+			continue
+		}
+		var announced int
+		if err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM infra_events WHERE event_key=?)`,
+			llmLimitEventKey(record, "provider_limit_released")).Scan(&announced); err != nil {
+			log.Printf("[llm-limit] check released event for key %q: %v", record.KeyID, err)
+			continue
+		}
+		if announced != 0 {
+			continue
+		}
+		s.llmLimitMu.Lock()
+		if s.llmLimitProbing == nil {
+			s.llmLimitProbing = map[string]bool{}
+		}
+		s.llmLimitProbing[record.KeyID] = true
+		s.llmLimitMu.Unlock()
+	}
+}
+
 // startLLMUsageLimitScheduler releases limits whose deadline has passed and
 // reconciles stored latches against the record table.
 func (s *Server) startLLMUsageLimitScheduler() {
+	s.seedLLMLimitProbes()
 	go func() {
 		ticker := time.NewTicker(llmLimitScheduleInterval)
 		defer ticker.Stop()
@@ -325,11 +427,7 @@ func (s *Server) releaseDueLLMUsageLimits() {
 	nowAt := now()
 	for _, record := range s.llmUsageLimitRecords() {
 		if !record.Active() {
-			if nowAt.Sub(record.ReleasedAt) > llmLimitEpisodeMemory {
-				if _, err := s.db.Exec(`DELETE FROM llm_usage_limits WHERE key_id=? AND released_at<>0`, record.KeyID); err != nil {
-					log.Printf("[llm-limit] prune released limit for key %q: %v", record.KeyID, err)
-				}
-			}
+			s.pruneReleasedLLMUsageLimit(record, nowAt)
 			continue
 		}
 		// Exhausted limits stay latched on purpose: the block is real, the hub
@@ -338,6 +436,29 @@ func (s *Server) releaseDueLLMUsageLimits() {
 			continue
 		}
 		s.releaseLLMUsageLimit(record.KeyID, llmLimitReleaseReason(record), true)
+	}
+}
+
+// pruneReleasedLLMUsageLimit forgets a released episode once it is old
+// enough (llmLimitEpisodeMemory) — but not while its lift is still unproven.
+// The released record is the only durable trace of a pending probe: the
+// proving turn reads it (confirmLLMLimitLift) and a restart re-derives the
+// probe from it (seedLLMLimitProbes). Pruning it first left the operator's
+// channel with an "account capped" alert whose recovery could never arrive:
+// the claw that was offline through the release wakes hours later, authors
+// its turn, and finds nothing to confirm. An unproven release is not an
+// episode that ended, so it keeps its memory until a turn says otherwise.
+func (s *Server) pruneReleasedLLMUsageLimit(record llmUsageLimitRecord, nowAt time.Time) {
+	if nowAt.Sub(record.ReleasedAt) <= llmLimitEpisodeMemory {
+		return
+	}
+	s.llmLimitMu.Lock()
+	defer s.llmLimitMu.Unlock()
+	if s.llmLimitProbing[record.KeyID] {
+		return
+	}
+	if _, err := s.db.Exec(`DELETE FROM llm_usage_limits WHERE key_id=? AND released_at<>0`, record.KeyID); err != nil {
+		log.Printf("[llm-limit] prune released limit for key %q: %v", record.KeyID, err)
 	}
 }
 
@@ -616,33 +737,57 @@ func formatLLMLimitDeadline(at time.Time) string {
 	return at.UTC().Format("2006-01-02 15:04 UTC")
 }
 
-// recordLLMLimitEvent tells the operator, reusing agent_idle for the same
-// reason notifyBridgeErrorPause does: the operator-visible fact is "this agent
-// is not moving", and that event already carries the toggle, the severity and
-// the delivery passes.
-func (s *Server) recordLLMLimitEvent(clawID string, record llmUsageLimitRecord, opening bool) {
-	kind := "exhausted"
-	if opening {
-		kind = "opened"
+// recordLLMLimitEvent records the fleet-wide account fact once per key. Four
+// claws sharing a key formerly produced four "Agent stalled" reports, which
+// sent operators looking for four agent bugs instead of one billing cap.
+//
+// The deadline is left off an exhausted event on purpose: the record still
+// carries one (the latch column needs a non-zero instant), but nothing acts
+// on it, and a message that names it promises a retry that never comes. The
+// caller passes the time of the last real attempt in extra instead.
+func (s *Server) recordLLMLimitEvent(record llmUsageLimitRecord, parked int, eventType string, extra map[string]any) {
+	detail := map[string]any{
+		"provider": record.Provider, "key_id": maskLLMLimitKeyID(record.KeyID), "parked_claws": parked,
+		"retry_count": record.Retries, "message": redactLLMLimitEventMessage(record.Message, record.KeyID),
 	}
-	if err := s.recordTaskRunEventForClaw(clawID, TaskRunEvent{
-		EventKey:        taskRunEventAgentIdle + ":llm-limit:" + kind + ":" + strconv.FormatInt(epochMillis(record.DetectedAt), 10),
-		Source:          taskRunSourceHub,
-		EventType:       taskRunEventAgentIdle,
-		ActorType:       taskRunActorSystem,
-		InteractionRole: taskRunInteractionNeutral,
-		Detail: map[string]any{
-			"llmUsageLimit":         record.Message,
-			"llmUsageLimitReason":   record.Reason,
-			"llmUsageLimitRetryAt":  formatLLMLimitDeadline(record.RetryAt),
-			"llmUsageLimitRetries":  record.Retries,
-			"llmUsageLimitProvider": record.Provider,
-			"noProgressPaused":      true,
-		},
-		OccurredAt: now(),
+	if eventType != "provider_limit_exhausted" {
+		detail["deadline"] = formatLLMLimitDeadline(record.RetryAt)
+	}
+	for key, value := range extra {
+		detail[key] = value
+	}
+	if err := s.recordInfraEvent(infraEvent{
+		EventKey: llmLimitEventKey(record, eventType), EventType: eventType, Subject: record.Provider,
+		Detail: detail, OccurredAt: now(),
 	}); err != nil {
-		log.Printf("[llm-limit] record notification event for claw %s: %v", shortID(clawID), err)
+		log.Printf("[llm-limit] record %s event: %v", eventType, err)
 	}
+}
+
+// llmLimitEventKey names one edge of one episode: the retry number keeps each
+// re-latch its own message, and the same key derived at seed time is how a
+// restarted hub tells an announced lift from a pending one.
+func llmLimitEventKey(record llmUsageLimitRecord, eventType string) string {
+	return fmt.Sprintf("%s:%s:%d:%d", eventType, maskLLMLimitKeyID(record.KeyID), epochMillis(record.DetectedAt), record.Retries)
+}
+
+func maskLLMLimitKeyID(keyID string) string {
+	if keyID == "" {
+		return "default"
+	}
+	sum := sha256.Sum256([]byte(keyID))
+	return "key_" + hex.EncodeToString(sum[:6])
+}
+
+// redactLLMLimitEventMessage strips the configured key ID from a provider
+// message on top of the credential shapes recordInfraEvent strips from every
+// event. The ID is often an alias ("anthropic-prod") that no pattern would
+// catch, and it is the one string only this producer knows.
+func redactLLMLimitEventMessage(message, keyID string) string {
+	if keyID != "" {
+		message = strings.ReplaceAll(message, keyID, "[redacted]")
+	}
+	return redactInfraEventMessage(message)
 }
 
 // handleClawLLMLimit exposes the block on a claw, and clears it.
@@ -682,6 +827,8 @@ func (s *Server) handleClawLLMLimit(w http.ResponseWriter, r *http.Request, claw
 	case http.MethodDelete:
 		keyID, _ := s.resolveClawLLMKey(clawID)
 		s.releaseLLMUsageLimit(keyID, "An operator cleared the provider usage limit.", true)
+		// The operator says the cap is gone; that is the proof.
+		s.confirmLLMLimitLift(keyID)
 		jsonOK(w, map[string]any{"limited": false})
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)

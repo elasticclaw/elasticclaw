@@ -113,6 +113,18 @@ func newDependencyStatusService(cfg *types.HubConfig) *dependencyStatusService {
 }
 
 func (s *dependencyStatusService) snapshot(ctx context.Context) DependencyStatusResponse {
+	// A dashboard request is only an observer: cancelling it must not abandon
+	// the shared refresh another observer is already waiting on.
+	return s.snapshotWithRefreshContext(ctx, context.Background())
+}
+
+// snapshotForWatcher lets shutdown cancel the watcher-owned status request.
+// The background watcher has no user request to outlive, unlike snapshot.
+func (s *dependencyStatusService) snapshotForWatcher(ctx context.Context) DependencyStatusResponse {
+	return s.snapshotWithRefreshContext(ctx, ctx)
+}
+
+func (s *dependencyStatusService) snapshotWithRefreshContext(ctx, refreshCtx context.Context) DependencyStatusResponse {
 	if resp, ok := s.freshSnapshot(); ok {
 		return s.applyLLMUsageLimits(resp)
 	}
@@ -122,7 +134,7 @@ func (s *dependencyStatusService) snapshot(ctx context.Context) DependencyStatus
 			return resp, nil
 		}
 
-		return s.refreshSnapshot(context.Background()), nil
+		return s.refreshSnapshot(refreshCtx), nil
 	})
 	if resp, ok := value.(DependencyStatusResponse); ok {
 		return s.applyLLMUsageLimits(cloneDependencyStatusResponse(resp))

@@ -560,6 +560,44 @@ func migrate(db *sql.DB) error {
 		released_at      INTEGER NOT NULL DEFAULT 0
 	);
 
+	-- Infra events are deliberately outside task_run_events: an account limit or
+	-- vendor outage is a fleet fact, not four independent agent failures.
+	CREATE TABLE IF NOT EXISTS infra_events (
+		event_key   TEXT UNIQUE NOT NULL,
+		event_type  TEXT NOT NULL,
+		subject     TEXT NOT NULL,
+		detail      TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(detail) AND json_type(detail) = 'object'),
+		occurred_at INTEGER NOT NULL
+	);
+	CREATE TABLE IF NOT EXISTS infra_notification_deliveries (
+		event_rowid INTEGER NOT NULL,
+		notifier TEXT NOT NULL,
+		delivered_at INTEGER NOT NULL,
+		status TEXT NOT NULL,
+		PRIMARY KEY(event_rowid, notifier)
+	);
+	-- rowid, rather than occurred_at, is the future delivery watermark: an
+	-- event recorded late must never disappear behind a newer wall-clock value.
+	-- SQLite already indexes its implicit rowid, so no secondary index is needed.
+
+	-- This durable state makes the dependency watcher edge-triggered across a
+	-- hub restart; an outage must not page again merely because the process did.
+	CREATE TABLE IF NOT EXISTS dependency_status_state (
+		id              TEXT PRIMARY KEY,
+		status          TEXT NOT NULL DEFAULT '',
+		message         TEXT NOT NULL DEFAULT '',
+		since           INTEGER NOT NULL DEFAULT 0,
+		notified_status TEXT NOT NULL DEFAULT '',
+		-- The CheckedAt of the last snapshot that counted as an observation.
+		-- The status cache outlives the watcher tick, so a re-served snapshot
+		-- must not count as a second consecutive check toward the debounce.
+		last_checked_at INTEGER NOT NULL DEFAULT 0,
+		-- When the last degraded/down alert for this dependency was recorded,
+		-- so the opt-in repeat_after can re-alert during a long outage.
+		last_alert_at   INTEGER NOT NULL DEFAULT 0,
+		updated_at      INTEGER NOT NULL DEFAULT 0
+	);
+
 
 
 	CREATE TABLE IF NOT EXISTS messages (

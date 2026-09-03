@@ -157,6 +157,10 @@ type Server struct {
 	pollWarnings              map[string]struct{}
 	noProgressMu              sync.Mutex // serializes pause/resume state across the DB and active connection
 	llmLimitMu                sync.Mutex // serializes provider usage-limit records (see llm_usage_limit.go)
+	// llmLimitProbing holds keys whose latch was released on a deadline and
+	// whose lift is not yet proven by a turn (see releaseLLMUsageLimit).
+	// Guarded by llmLimitMu.
+	llmLimitProbing map[string]bool
 
 	// webhookDedup prevents duplicate Linear webhook deliveries from creating
 	// duplicate claws. Keyed by issue transition fingerprint; entries expire after 30s.
@@ -212,6 +216,20 @@ type Server struct {
 	// send must land before the DB closes, or the slot re-sends after restart.
 	scheduledNotifierStop chan struct{}
 	scheduledNotifierDone chan struct{}
+
+	infraNotifierStop chan struct{}
+	infraNotifierDone chan struct{}
+
+	// infraPendingDeliveries mirrors lifecyclePendingDeliveries for the infra
+	// loop: a delivery row whose insert failed after a successful send is
+	// stashed and retried, never re-sent. Only touched from the infra tick
+	// goroutine — ticks never overlap.
+	infraPendingDeliveries map[infraDeliveryKey]infraPendingDelivery
+
+	// dependencyWatcherStop/Done give the status poll the same shutdown
+	// guarantee as notifiers: its DB write must finish before the DB closes.
+	dependencyWatcherStop chan struct{}
+	dependencyWatcherDone chan struct{}
 
 	// scheduledTransientFailures tracks consecutive transient send failures
 	// per scheduled (id, via) state key, bounding minutely retries of one
@@ -565,6 +583,11 @@ func NewServer(addr, dbPath, identityDir string, hubCfg *types.HubConfig) (*Serv
 	// emitted in that window would be stamped as pre-existing history and
 	// silently dropped.
 	srv.initLifecycleNotifierBaseline()
+	// The infra baseline needs the same ordering guarantee: the dependency
+	// watcher and the LLM limit latch below produce infra events whether or
+	// not any route is configured, and a route must never replay the history
+	// recorded before it existed.
+	srv.initInfraNotifierBaseline()
 
 	srv.startPRWatcher()
 
@@ -576,8 +599,10 @@ func NewServer(addr, dbPath, identityDir string, hubCfg *types.HubConfig) (*Serv
 	srv.startIntegrationPoller()
 	srv.startLifecycleNotifier()
 	srv.startScheduledNotifier()
+	srv.startInfraNotifier()
 	srv.startLLMUsageLimitScheduler()
 	srv.attachLLMUsageLimitsToDependencyStatus(srv.dependencyStatus)
+	srv.startDependencyWatcher()
 
 	return srv, nil
 }
@@ -649,13 +674,15 @@ func (s *Server) run(ctx context.Context, opts ...RunOptions) error {
 		// ListenAndServe returns as soon as Shutdown starts. Wait for it to
 		// finish draining active requests before closing their database.
 		<-shutdownDone
-		// Stop both notifier loops before the DB closes: a tick in flight
+		// Stop the notifier loops and dependency watcher before the DB closes: a tick in flight
 		// could otherwise complete an external Slack send and then fail the
 		// delivery-row insert (or scheduled dedupe-state upsert) against the
 		// closed DB, re-sending the event after restart (the in-memory retry
 		// stash dies with the process).
 		s.stopLifecycleNotifier(10 * time.Second)
 		s.stopScheduledNotifier(10 * time.Second)
+		s.stopInfraNotifier(10 * time.Second)
+		s.stopDependencyWatcher(10 * time.Second)
 		if closeErr := s.db.Close(); closeErr != nil {
 			return fmt.Errorf("close database: %w", closeErr)
 		}
