@@ -6940,9 +6940,11 @@ function InfraNotificationsSection({ settings, onSave, saving, pause }: { settin
   // What a card says the route receives, without opening anything. An empty
   // list is receive-all, so it is named as such rather than rendered as "0
   // alert types"; a long list is cut short because a card is a summary, and
-  // the badge beside it already carries the exact count.
+  // the badge beside it already carries the exact count. The strings continue
+  // the card's "Receives …" sentence, so this one starts lower case while the
+  // event labels, which are proper names of alert types, keep their capital.
   const receivesLine = (events: InfraEventType[]): string => {
-    if (events.length === 0) return "Every alert type, including any added in a later hub version."
+    if (events.length === 0) return "every alert type, including any added in a later hub version."
     const labels = [...new Set(events)].map((eventType) => INFRA_EVENT_LABELS[eventType])
     if (labels.length <= 3) return `${labels.join(", ")}.`
     return `${labels.slice(0, 3).join(", ")} and ${labels.length - 3} more.`
