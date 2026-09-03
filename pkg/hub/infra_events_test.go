@@ -219,3 +219,47 @@ func TestLLMUsageLimitInfraEventsArePerKeyAndSecretSafe(t *testing.T) {
 		t.Fatalf("events after exhaustion = %v", got)
 	}
 }
+
+// A real outage alert must carry the human status page the message tells the
+// reader to watch, derived from the endpoint the checker polled.
+func TestDependencyWatcherEventsCarryTheStatusPage(t *testing.T) {
+	s, _ := NewTestServerWithConfig(t, nil, "", "", "")
+	base := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	bad := DependencyStatus{ID: "model:anthropic", Name: "Anthropic", Status: dependencyStatusDowntime, Message: "down", Source: "https://status.anthropic.com/api/v2/status.json"}
+	for i := 0; i < 2; i++ {
+		if err := s.observeDependencyStatus(bad, base.Add(time.Duration(i)*time.Minute), 0); err != nil {
+			t.Fatal(err)
+		}
+	}
+	good := bad
+	good.Status, good.Message = dependencyStatusOperational, "ok"
+	if err := s.observeDependencyStatus(good, base.Add(2*time.Minute), 0); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := s.db.Query(`SELECT event_type, detail FROM infra_events ORDER BY rowid`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var seen int
+	for rows.Next() {
+		var eventType, raw string
+		if err := rows.Scan(&eventType, &raw); err != nil {
+			t.Fatal(err)
+		}
+		var detail map[string]any
+		if err := json.Unmarshal([]byte(raw), &detail); err != nil {
+			t.Fatal(err)
+		}
+		if detail["status_page"] != "https://status.anthropic.com" {
+			t.Fatalf("%s status_page = %v, want the vendor page", eventType, detail["status_page"])
+		}
+		seen++
+	}
+	if seen != 2 {
+		t.Fatalf("recorded %d events, want down + recovered", seen)
+	}
+	if got := dependencyStatusPage("hub"); got != "" {
+		t.Fatalf("non-URL source produced a status page %q", got)
+	}
+}

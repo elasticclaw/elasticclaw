@@ -5,7 +5,9 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
+	"net/url"
 	"runtime/debug"
+	"strings"
 	"time"
 )
 
@@ -141,7 +143,7 @@ func (s *Server) observeDependencyStatus(dependency DependencyStatus, nowAt time
 			if err := s.recordInfraEvent(infraEvent{
 				EventKey:  fmt.Sprintf("dependency_recovered:%s:%d", dependency.ID, epochMillis(state.Since)),
 				EventType: "dependency_recovered", Subject: dependency.ID,
-				Detail:     map[string]any{"id": dependency.ID, "name": dependency.Name, "message": dependency.Message, "duration_ms": duration.Milliseconds()},
+				Detail:     map[string]any{"id": dependency.ID, "name": dependency.Name, "message": dependency.Message, "duration_ms": duration.Milliseconds(), "status_page": dependencyStatusPage(dependency.Source)},
 				OccurredAt: nowAt,
 			}); err != nil {
 				return err
@@ -179,7 +181,7 @@ func (s *Server) observeDependencyStatus(dependency DependencyStatus, nowAt time
 			if err := s.recordInfraEvent(infraEvent{
 				EventKey:  fmt.Sprintf("%s:%s:%d", eventType, dependency.ID, epochMillis(state.Since)),
 				EventType: eventType, Subject: dependency.ID,
-				Detail:     map[string]any{"id": dependency.ID, "name": dependency.Name, "message": dependency.Message, "status": dependency.Status},
+				Detail:     map[string]any{"id": dependency.ID, "name": dependency.Name, "message": dependency.Message, "status": dependency.Status, "status_page": dependencyStatusPage(dependency.Source)},
 				OccurredAt: nowAt,
 			}); err != nil {
 				return err
@@ -198,7 +200,7 @@ func (s *Server) observeDependencyStatus(dependency DependencyStatus, nowAt time
 		if err := s.recordInfraEvent(infraEvent{
 			EventKey:  fmt.Sprintf("%s:%s:%d:repeat:%d", eventType, dependency.ID, epochMillis(state.Since), epochMillis(nowAt)),
 			EventType: eventType, Subject: dependency.ID,
-			Detail:     map[string]any{"id": dependency.ID, "name": dependency.Name, "message": dependency.Message, "status": dependency.Status, "repeat": true},
+			Detail:     map[string]any{"id": dependency.ID, "name": dependency.Name, "message": dependency.Message, "status": dependency.Status, "repeat": true, "status_page": dependencyStatusPage(dependency.Source)},
 			OccurredAt: nowAt,
 		}); err != nil {
 			return err
@@ -206,6 +208,18 @@ func (s *Server) observeDependencyStatus(dependency DependencyStatus, nowAt time
 		state.LastAlertAt = nowAt
 	}
 	return s.storeDependencyStatusState(state, nowAt)
+}
+
+// dependencyStatusPage turns the endpoint a checker polled
+// (https://status.vendor.com/api/v2/status.json) into the page a human opens,
+// so an alert that says "watch the status page" also says where it is.
+// Non-URL sources ("hub") have no page.
+func dependencyStatusPage(source string) string {
+	u, err := url.Parse(strings.TrimSpace(source))
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return ""
+	}
+	return u.Scheme + "://" + u.Host
 }
 
 func (s *Server) loadDependencyStatusState(id string) (dependencyStatusState, bool, error) {
