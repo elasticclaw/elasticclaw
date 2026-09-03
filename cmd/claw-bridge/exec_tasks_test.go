@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	typesv2 "github.com/elasticclaw/elasticclaw/pkg/types/v2"
 )
@@ -187,5 +188,20 @@ func TestBridgeExecRunDuplicateAssignmentIsRejected(t *testing.T) {
 	duplicate, _, err := supervisor.acceptHubEnvelope(context.Background(), binding, envelope)
 	if err != nil || duplicate.Disposition != typesv2.DispositionDuplicate {
 		t.Fatalf("duplicate = %v, %v", duplicate, err)
+	}
+}
+
+func TestTruncateOutputPreservesUTF8(t *testing.T) {
+	// 100 emoji (multi-byte runes) followed by ASCII marker.
+	value := strings.Repeat("🚀", 100) + "END"
+	out := truncateOutput(value, 20)
+	if !strings.Contains(out, "[truncated]") {
+		t.Fatalf("expected truncation marker, got %q", out)
+	}
+	if !utf8.ValidString(out) {
+		t.Fatalf("truncated output is not valid UTF-8: %q", out)
+	}
+	if utf8.RuneCountInString(out) >= utf8.RuneCountInString(value) {
+		t.Fatalf("truncated output should be shorter than original")
 	}
 }

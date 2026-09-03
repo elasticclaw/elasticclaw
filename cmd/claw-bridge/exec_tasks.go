@@ -173,12 +173,7 @@ func (s *controlSupervisor) runDependencyUpdateCommand(ctx context.Context, bind
 		errorMsg = fmt.Sprintf("exit code %d", exitCode)
 	}
 
-	result := map[string]interface{}{
-		"succeeded": succeeded,
-	}
-	if errorMsg != "" {
-		result["error"] = errorMsg
-	}
+	result := map[string]interface{}{}
 	if doc := lastJSONObject(stdout.String()); doc != nil {
 		var parsed map[string]interface{}
 		if err := json.Unmarshal(doc, &parsed); err == nil {
@@ -186,6 +181,12 @@ func (s *controlSupervisor) runDependencyUpdateCommand(ctx context.Context, bind
 				result[k] = v
 			}
 		}
+	}
+	// The bridge, not the script, owns the outcome. Set succeeded/error after
+	// merging script output so a malformed/non-zero script cannot overwrite them.
+	result["succeeded"] = succeeded
+	if errorMsg != "" {
+		result["error"] = errorMsg
 	}
 	if succeeded {
 		return result, typesv2.MessageDependencyUpdateCompleted
@@ -220,10 +221,12 @@ func (s *controlSupervisor) enqueueCommandEvent(binding workflowControlBinding, 
 
 func truncateOutput(value string, max int) string {
 	value = strings.TrimSpace(value)
-	if len(value) <= max {
+	runes := []rune(value)
+	if len(runes) <= max {
 		return value
 	}
-	return value[:max/2] + "\n...[truncated]\n" + value[len(value)-max/2:]
+	half := max / 2
+	return string(runes[:half]) + "\n...[truncated]\n" + string(runes[len(runes)-half:])
 }
 
 func lastJSONObject(s string) []byte {

@@ -237,33 +237,34 @@ func (s *Server) queryActivityMessages(w http.ResponseWriter, r *http.Request, c
 		order = "asc"
 	}
 
-	query := `SELECT id, claw_id, tenant_id, role, content, COALESCE(format,''), created_at
+	fromParsed, ok := requireTimeCursor(w, from)
+	if !ok {
+		return
+	}
+	toParsed, ok := requireTimeCursor(w, to)
+	if !ok {
+		return
+	}
+	beforeParsed, ok := requireTimeCursor(w, before)
+	if !ok {
+		return
+	}
+
+	query := `SELECT id, claw_id, tenant_id, role, content, COALESCE(format,''), COALESCE(user_login,''), created_at
 		FROM messages
 		WHERE claw_id = ? AND tenant_id = ? AND role = 'activity'`
 	args := []interface{}{clawID, tenantFromCtx(r)}
-	if from != "" {
+	if fromParsed != nil {
 		query += ` AND created_at > ?`
-		if parsed := parseTimeCursor(from); parsed != nil {
-			args = append(args, *parsed)
-		} else {
-			args = append(args, from)
-		}
+		args = append(args, *fromParsed)
 	}
-	if to != "" {
+	if toParsed != nil {
 		query += ` AND created_at < ?`
-		if parsed := parseTimeCursor(to); parsed != nil {
-			args = append(args, *parsed)
-		} else {
-			args = append(args, to)
-		}
+		args = append(args, *toParsed)
 	}
-	if before != "" {
+	if beforeParsed != nil {
 		query += ` AND created_at < ?`
-		if parsed := parseTimeCursor(before); parsed != nil {
-			args = append(args, *parsed)
-		} else {
-			args = append(args, before)
-		}
+		args = append(args, *beforeParsed)
 	}
 	if order == "desc" {
 		query += ` ORDER BY created_at DESC LIMIT ?`
@@ -306,33 +307,34 @@ func (s *Server) queryWorkflowRunLogs(w http.ResponseWriter, r *http.Request, ru
 		order = "asc"
 	}
 
+	fromParsed, ok := requireTimeCursor(w, from)
+	if !ok {
+		return
+	}
+	toParsed, ok := requireTimeCursor(w, to)
+	if !ok {
+		return
+	}
+	beforeParsed, ok := requireTimeCursor(w, before)
+	if !ok {
+		return
+	}
+
 	query := `SELECT id, claw_id, tenant_id, role, content, COALESCE(format,''), COALESCE(user_login,''), created_at
 		FROM messages
 		WHERE claw_id = ? AND tenant_id = ? AND role = 'activity'`
 	args := []interface{}{clawID, tenantFromCtx(r)}
-	if from != "" {
+	if fromParsed != nil {
 		query += ` AND created_at > ?`
-		if parsed := parseTimeCursor(from); parsed != nil {
-			args = append(args, *parsed)
-		} else {
-			args = append(args, from)
-		}
+		args = append(args, *fromParsed)
 	}
-	if to != "" {
+	if toParsed != nil {
 		query += ` AND created_at < ?`
-		if parsed := parseTimeCursor(to); parsed != nil {
-			args = append(args, *parsed)
-		} else {
-			args = append(args, to)
-		}
+		args = append(args, *toParsed)
 	}
-	if before != "" {
+	if beforeParsed != nil {
 		query += ` AND created_at < ?`
-		if parsed := parseTimeCursor(before); parsed != nil {
-			args = append(args, *parsed)
-		} else {
-			args = append(args, before)
-		}
+		args = append(args, *beforeParsed)
 	}
 	if order == "desc" {
 		query += ` ORDER BY created_at DESC LIMIT ?`
@@ -399,4 +401,19 @@ func (s *Server) queryWorkflowRunLogs(w http.ResponseWriter, r *http.Request, ru
 	}
 
 	jsonOK(w, msgs)
+}
+
+// requireTimeCursor parses a non-empty cursor and returns a 400 response if it
+// cannot be parsed as an RFC3339/RFC3339Nano time. An empty cursor returns
+// (nil, true).
+func requireTimeCursor(w http.ResponseWriter, raw string) (*time.Time, bool) {
+	if raw == "" {
+		return nil, true
+	}
+	parsed := parseTimeCursor(raw)
+	if parsed == nil {
+		jsonError(w, http.StatusBadRequest, "invalid cursor: "+raw)
+		return nil, false
+	}
+	return parsed, true
 }
