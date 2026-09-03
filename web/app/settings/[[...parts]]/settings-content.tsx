@@ -6744,9 +6744,25 @@ function InfraNotificationsSection({ settings, onSave, saving, pause }: { settin
   // it the way the lifecycle switch is, and the banner below says why.
   const orphanRoutes = routes.filter((route) => !names.includes(route.via))
   const orphan = orphanRoutes.length > 0
-  // Shown while the pause deleteNotifier recorded still stands; turning the
-  // alerts back on answers it.
-  const pauseNotice = pause && !enabled ? pause : null
+  // The channel whose route was the last one, recorded when removing it forced
+  // the clamp in removeRoute to turn the alerts off. Without this the switch
+  // moves on its own with nothing on screen saying so: the operator reshuffling
+  // their routing removes one route, adds another, and walks away believing
+  // infrastructure alerts are still on when the hub has them off. Held in this
+  // section rather than passed down like `pause`, because this section is the
+  // one that moved the switch.
+  const [removalPause, setRemovalPause] = useState<string | null>(null)
+  // Shown while a pause THIS SCREEN caused still stands; turning the alerts
+  // back on answers it either way. A removal supersedes a channel deletion —
+  // both leave the alerts off, and the last thing the operator did is the one
+  // that explains the switch they are looking at now.
+  const pauseNotice = enabled
+    ? null
+    : removalPause
+      ? { kind: "route" as const, channel: removalPause }
+      : pause
+        ? { kind: "channel" as const, channel: pause.channel }
+        : null
 
   // ── The route editor ───────────────────────────────────────────────────────
   // A dialog with its own draft, like the channel and schedule editors beside
@@ -6861,8 +6877,16 @@ function InfraNotificationsSection({ settings, onSave, saving, pause }: { settin
     // enabled"), so dropping the last route pauses infrastructure alerts
     // instead of failing the save — the same clamp deleteNotifier applies when
     // it removes the channel a route pointed at.
+    const removed = routes[index]
     const nextRoutes = routes.filter((_, i) => i !== index)
+    const clamped = enabled && nextRoutes.length === 0
     const { persisted, message } = await saveInfra({ ...infra, enabled: nextRoutes.length > 0 && enabled, routes: nextRoutes })
+    // Recorded on `persisted` rather than on a clean save, and before the
+    // early return: a PATCH the hub took whose follow-up re-read failed still
+    // turned the alerts off, and this notice is the only record on the screen
+    // that the switch moved without the operator touching it. Losing it there
+    // is exactly the case that leaves someone believing their alerts are on.
+    if (persisted && clamped && removed) setRemovalPause(removed.via)
     if (!persisted) { setDraftError(message || "The hub refused the change."); return }
     setShowDialog(false)
   }
@@ -6918,7 +6942,15 @@ function InfraNotificationsSection({ settings, onSave, saving, pause }: { settin
           // nobody.
           disabled={saving || routes.length === 0 || orphan}
           title={routes.length === 0 ? "Add a channel route first" : orphan ? "Remove the routes pointing at deleted channels first" : undefined}
-          onCheckedChange={(next) => saveInfra({ ...infra, enabled: next, routes })}
+          onCheckedChange={async (next) => {
+            const outcome = await saveInfra({ ...infra, enabled: next, routes })
+            // The notice answers "why is this off?". Turning the alerts back on
+            // answers it for good, so it is retired here rather than merely
+            // hidden — otherwise the next deliberate turn-off, weeks later,
+            // would resurface a stale explanation blaming a route removal the
+            // operator has already dealt with.
+            if (next && outcome.persisted) setRemovalPause(null)
+          }}
           aria-label="Enable infrastructure alerts"
         />
       </div>
@@ -6927,10 +6959,19 @@ function InfraNotificationsSection({ settings, onSave, saving, pause }: { settin
         <div className="flex items-start gap-2 rounded-md border border-amber-500/20 bg-amber-500/10 px-3 py-2 text-xs text-amber-400">
           <AlertTriangle className="size-3.5 mt-px shrink-0" />
           <span className="break-words">
-            Infrastructure alerts paused — &quot;{pauseNotice.channel}&quot; was the only channel they were routed to.{" "}
-            {notifiers[pauseNotice.channel]
-              ? "A channel by that name exists again: add a route through it and turn the alerts back on."
-              : "Add a route through another channel and turn them back on."}
+            {pauseNotice.kind === "channel" ? (
+              <>
+                Infrastructure alerts paused — &quot;{pauseNotice.channel}&quot; was the only channel they were routed to.{" "}
+                {notifiers[pauseNotice.channel]
+                  ? "A channel by that name exists again: add a route through it and turn the alerts back on."
+                  : "Add a route through another channel and turn them back on."}
+              </>
+            ) : (
+              <>
+                Infrastructure alerts paused — the route through &quot;{pauseNotice.channel}&quot; was the last one, and the hub
+                will not keep them on with nowhere to send them. Add another route and turn them back on.
+              </>
+            )}
           </span>
         </div>
       )}
