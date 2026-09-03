@@ -781,6 +781,62 @@ func TestIdleSessionLossNoticePrefixesNextMessageAndKeepsFirstNotice(t *testing.
 	}
 }
 
+// A session lost while the claw was idle never reaches enqueueSessionLostResume
+// — noteSessionLoss parks a notice instead, so as not to wake an idle claw —
+// and the amnesiac session only learns about itself when that notice rides the
+// next real prompt. That delivery is therefore the only place its idle
+// auto-resume budget can be re-armed; without it the new session starts on the
+// predecessor's spent count and has no idle recovery of its own.
+func TestIdleSessionLossNoticeDeliveryRearmsIdleResumeBudget(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{ClawToken: "claw-token"}, "", "", "")
+	const clawID = "watchdog-idle-session-loss-budget"
+	conn := watchdogClaw(t, s, clawID)
+	cc := watchdogClawConn(t, s, clawID)
+	const latch = int64(1_700_000_000_000)
+	if _, err := db.Exec(`UPDATE claws SET status='connected', bootstrap_ok=1, pipeline_stage='review_loop', idle_resume_at=?, idle_resume_count=? WHERE id=?`,
+		latch, agentIdleResumeMaxAttempts, clawID); err != nil {
+		t.Fatal(err)
+	}
+	cc.mu.Lock()
+	cc.streamingStartedAt = time.Time{}
+	cc.awaitingResponse = false
+	cc.lastTurnFinishedAt = now().Add(-autoResumeRecentTurnWindow - time.Second)
+	cc.mu.Unlock()
+
+	s.noteSessionLoss(cc, clawID, "idle-budget-one", "restart_count")
+
+	// The parking branch itself must not re-arm: no prompt went out, and the
+	// idle-claw policy says nothing wakes it here.
+	if at, count := clawIdleResumeState(t, db, clawID); count != agentIdleResumeMaxAttempts || at != latch {
+		t.Fatalf("parking the notice changed idle_resume state: at=%d count=%d, want %d/%d", at, count, latch, agentIdleResumeMaxAttempts)
+	}
+
+	if _, err := db.Exec(`INSERT INTO messages(id,claw_id,tenant_id,role,content,created_at) VALUES(?,?,?,?,?,?)`,
+		uuid.NewString(), clawID, "test-tenant-id", "user", "continue the task", now()); err != nil {
+		t.Fatal(err)
+	}
+	s.sendNextQueuedMessage(cc)
+	readCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	var delivered types.WSMessage
+	for {
+		if err := wsjson.Read(readCtx, conn, &delivered); err != nil {
+			t.Fatal(err)
+		}
+		if delivered.Type == "message" {
+			break
+		}
+	}
+
+	at, count := clawIdleResumeState(t, db, clawID)
+	if count != 0 {
+		t.Fatalf("notice delivery left idle_resume_count=%d, want 0", count)
+	}
+	if at != 0 {
+		t.Fatalf("notice delivery left idle_resume_at=%d, want 0", at)
+	}
+}
+
 func TestSessionPreservedEnqueuesContinuationAndResetsBridgeErrorStreak(t *testing.T) {
 	s, db := NewTestServerWithConfig(t, &types.HubConfig{ClawToken: "claw-token"}, "", "", "")
 	const clawID = "watchdog-session-preserved"

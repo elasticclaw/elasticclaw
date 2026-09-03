@@ -9127,7 +9127,23 @@ func (s *Server) sendNextQueuedMessage(cc *clawConn) {
 		return
 	}
 	if notice != "" {
-		if _, err := tx.Exec(`UPDATE claws SET pending_session_loss_notice='' WHERE id=? AND pending_session_loss_notice=?`, clawID, notice); err != nil {
+		// Delivering the notice re-arms the idle auto-resume budget, and this is
+		// the only place it can happen for a loss detected while the claw was
+		// idle. noteSessionLoss takes a different branch there: it must not wake
+		// an idle claw into autonomous work, so it only parks the notice and
+		// returns, never reaching enqueueSessionLostResume where the other
+		// session-loss reset lives. The amnesiac session is real either way —
+		// it just learns about itself here, attached to the next genuine prompt
+		// — and without this it would start its unit of work with the previous
+		// session's spent budget and no idle recovery of its own.
+		//
+		// Resetting on delivery rather than on detection is also what keeps the
+		// idle-claw policy intact: nothing is injected here, a prompt was
+		// already on its way. It rides the same transaction that clears the
+		// notice and marks the message delivered, after a successful socket
+		// write, so a failed write re-arms nothing and the notice stays durable
+		// for the next attempt.
+		if _, err := tx.Exec(`UPDATE claws SET pending_session_loss_notice='', idle_resume_count=0, idle_resume_at=0 WHERE id=? AND pending_session_loss_notice=?`, clawID, notice); err != nil {
 			log.Printf("[hub] clear pending session-loss notice for %s: %v", shortID(clawID), err)
 			return
 		}

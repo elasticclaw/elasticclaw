@@ -430,12 +430,16 @@ const (
 	// ONE unit of work. The counter (claws.idle_resume_count) is reset when the
 	// unit changes: on a won pipeline stage transition
 	// (claimPipelineStageTransition), when the sandbox is replaced with a new
-	// session (resetClawForRetry), and when the session itself is lost and
-	// re-briefed (enqueueSessionLostResume, which covers both the process
-	// restart and the session rotation). The last two are the same idea as the
-	// first — an agent with no memory of the earlier conversation is starting
-	// its unit of work over — and missing either of them leaves the identical
-	// hole this cap-scoping exists to close. It is NOT reset per stretch, see
+	// session (resetClawForRetry), and when the session itself is lost — either
+	// at the re-brief (enqueueSessionLostResume, the funnel for a loss detected
+	// with a turn open or recent) or, for a loss detected while the claw was
+	// idle, when the parked notice is finally delivered with the next real
+	// prompt (server.go). Both session paths are needed: noteSessionLoss splits
+	// on turnOpenOrRecent and only one side re-briefs immediately. All of these
+	// are the same idea as the stage transition — an agent with no memory of the
+	// earlier conversation is starting its unit of work over — and missing any
+	// one of them leaves the identical hole this cap-scoping exists to close.
+	// It is NOT reset per stretch, see
 	// clearAgentIdleResumeLatch.
 	//
 	// The PRIMARY backstop is the existing no-progress watchdog: a resume that
@@ -776,7 +780,8 @@ func (s *Server) clearAgentIdleLatch(clawID string, cc *clawConn) {
 // would make the per-work-unit cap unreachable in precisely the runaway case
 // it exists to bound (wake, do nothing, idle, repeat). The counter only resets
 // when the unit of work itself changes (claimPipelineStageTransition,
-// resetClawForRetry).
+// resetClawForRetry, enqueueSessionLostResume, and the session-loss notice
+// delivery in server.go).
 func (s *Server) clearAgentIdleResumeLatch(clawID string) {
 	if _, err := s.db.Exec(`UPDATE claws SET idle_resume_at=0 WHERE id=? AND idle_resume_at != 0`, clawID); err != nil {
 		log.Printf("[agent-idle] clear resume latch for claw %s: %v", shortID(clawID), err)

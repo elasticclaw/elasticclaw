@@ -215,8 +215,9 @@ func TestResetClawForRetryRaceGuard(t *testing.T) {
 // A replacement sandbox runs a brand-new session, so the predecessor's spent
 // auto-resume budget must not follow it: resetClawForRetry zeroes
 // idle_resume_count in the same guarded UPDATE that arms rebrief_pending.
-// idle_resume_at is left as is — the successor's first finished turn moves the
-// stretch anchor past it and re-arms the latch on its own.
+// idle_resume_at goes with it: the successor is a different session, and a
+// latch the dead session earned can otherwise veto the freshly zeroed budget
+// forever (see the assertion below).
 func TestResetClawForRetryResetsIdleResumeBudget(t *testing.T) {
 	s, db, _ := newClawRetryTestServer(t, "error")
 	const latch = int64(1_700_000_000_000)
