@@ -207,6 +207,18 @@ type MoveIssueAction struct {
 	IssueID string `yaml:"issue_id,omitempty"`
 }
 
+// CommentIssueAction posts a comment to the workflow's associated issue on
+// stage entry. Body is required and is rendered with the same template data
+// as OnEnter.Inject ({{.Issue.*}}, {{.Inputs.*}}, {{.Outputs.*}}, and
+// {{.PullRequest.*}} where available). IssueID is optional and overrides the
+// trigger issue when set; it accepts the same template syntax as
+// MoveIssueAction.IssueID.
+type CommentIssueAction struct {
+	Body            string `yaml:"body"`
+	IssueID         string `yaml:"issue_id,omitempty"`
+	ContinueOnError bool   `yaml:"continue_on_error,omitempty"`
+}
+
 // RunAction executes a shell command in the agent workspace before the
 // remaining on_enter actions continue.
 type RunAction struct {
@@ -330,6 +342,12 @@ type OnEnter struct {
 	Inject string `yaml:"inject"`
 	// MoveIssue moves the associated Linear/Shortcut issue to this status name.
 	MoveIssue MoveIssueAction `yaml:"move_issue"`
+	// CommentIssue posts a comment to the associated tracker issue.
+	CommentIssue CommentIssueAction `yaml:"comment_issue"`
+	// commentIssueRawPresent records whether the comment_issue key was
+	// present in the source YAML (with non-empty content) so Validate can
+	// distinguish an explicit blank body from an absent block.
+	commentIssueRawPresent bool `yaml:"-"`
 	// MergePR triggers the GitHub merge API for the tracked PR (stub — not yet implemented).
 	MergePR bool `yaml:"merge_pr,omitempty"`
 	// CloseIssue closes the associated GitHub issue when entering this stage.
@@ -352,6 +370,7 @@ func (oe *OnEnter) UnmarshalYAML(value *yaml.Node) error {
 		Judge                JudgeAction `yaml:"judge,omitempty"`
 		Inject               string      `yaml:"inject"`
 		MoveIssueRaw         yaml.Node   `yaml:"move_issue"`
+		CommentIssueRaw      yaml.Node   `yaml:"comment_issue"`
 		MergePR              bool        `yaml:"merge_pr,omitempty"`
 		CloseIssue           bool        `yaml:"close_issue,omitempty"`
 		AddLabels            []string    `yaml:"add_labels,omitempty"`
@@ -389,20 +408,37 @@ func (oe *OnEnter) UnmarshalYAML(value *yaml.Node) error {
 		oe.Notify = na
 	}
 
-	if raw.MoveIssueRaw.Kind == 0 {
-		// move_issue not present
-		return nil
+	if raw.MoveIssueRaw.Kind != 0 {
+		if raw.MoveIssueRaw.Kind == yaml.ScalarNode {
+			// Bare string: treat as status, no explicit issue_id
+			oe.MoveIssue = MoveIssueAction{Status: raw.MoveIssueRaw.Value}
+		} else if raw.MoveIssueRaw.Kind == yaml.MappingNode {
+			var mia MoveIssueAction
+			if err := raw.MoveIssueRaw.Decode(&mia); err != nil {
+				return err
+			}
+			oe.MoveIssue = mia
+		}
 	}
 
-	if raw.MoveIssueRaw.Kind == yaml.ScalarNode {
-		// Bare string: treat as status, no explicit issue_id
-		oe.MoveIssue = MoveIssueAction{Status: raw.MoveIssueRaw.Value}
-	} else if raw.MoveIssueRaw.Kind == yaml.MappingNode {
-		var mia MoveIssueAction
-		if err := raw.MoveIssueRaw.Decode(&mia); err != nil {
+	switch raw.CommentIssueRaw.Kind {
+	case 0:
+		// comment_issue not present.
+	case yaml.ScalarNode:
+		// Bare string: treat as body, no explicit issue_id or continue_on_error.
+		oe.CommentIssue = CommentIssueAction{Body: raw.CommentIssueRaw.Value}
+		oe.commentIssueRawPresent = true
+	case yaml.MappingNode:
+		if len(raw.CommentIssueRaw.Content) == 0 {
+			// Empty mapping — treat as absent so `comment_issue: {}` is a no-op.
+			break
+		}
+		var cia CommentIssueAction
+		if err := raw.CommentIssueRaw.Decode(&cia); err != nil {
 			return err
 		}
-		oe.MoveIssue = mia
+		oe.CommentIssue = cia
+		oe.commentIssueRawPresent = true
 	}
 	return nil
 }
@@ -428,6 +464,11 @@ func (p *Pipeline) Validate() error {
 	for _, stage := range p.Stages {
 		if strings.TrimSpace(stage.ID) != "" {
 			stageIDs[stage.ID] = true
+		}
+	}
+	for _, stage := range p.Stages {
+		if stage.OnEnter.commentIssueRawPresent && strings.TrimSpace(stage.OnEnter.CommentIssue.Body) == "" {
+			return fmt.Errorf("stage %q: comment_issue.body must be a non-empty string", stage.ID)
 		}
 	}
 	skipEdges := make(map[string][]string)
