@@ -288,11 +288,17 @@ func (s *Server) releaseLLMUsageLimit(keyID, reason string, announce bool) {
 // releaseLLMUsageLimit for why the release itself stays quiet. Idempotent:
 // the event key is fixed while the record stays released, so a second proof
 // is absorbed by the event store's dedupe.
+//
+// The read and the event write happen under ONE hold of llmLimitMu. Claws on
+// a key are resumed together, so one claw's proving turn and another claw's
+// fresh rejection arrive together too; with the write outside the lock, the
+// re-latch could land between them and the record this read as released was
+// announced as lifted while the key was already capped again.
 func (s *Server) confirmLLMLimitLift(keyID string) {
 	s.llmLimitMu.Lock()
+	defer s.llmLimitMu.Unlock()
 	record, had := s.loadLLMUsageLimit(keyID)
 	delete(s.llmLimitProbing, keyID)
-	s.llmLimitMu.Unlock()
 	if !had || record.Active() {
 		return
 	}

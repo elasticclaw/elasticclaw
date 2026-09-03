@@ -740,3 +740,52 @@ func TestLLMUsageLimitProbeSurvivesRestart(t *testing.T) {
 		t.Fatal("reseed re-armed a probe for a lift that was already announced")
 	}
 }
+
+// The proving turn and a fresh rejection arrive together (claws sharing a
+// key are resumed together), so confirming the lift must be atomic with the
+// re-latch: whichever wins, the log never says "lifted" after "capped again".
+func TestLLMUsageLimitLiftConfirmationIsAtomicWithRelatch(t *testing.T) {
+	s, _ := NewTestServerWithConfig(t, nil, "", "", "")
+	limitClaw(t, s, "claw-limit-race-a", "faster", false)
+	limitClaw(t, s, "claw-limit-race-b", "faster", false)
+	limit := types.LLMUsageLimit{Reason: types.LLMLimitUsage, RegainAt: now().Add(-time.Minute), Message: "capped"}
+	eventKeys := func() []string {
+		rows, err := s.db.Query(`SELECT event_key FROM infra_events ORDER BY rowid`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer rows.Close()
+		var out []string
+		for rows.Next() {
+			var key string
+			if err := rows.Scan(&key); err != nil {
+				t.Fatal(err)
+			}
+			out = append(out, key)
+		}
+		return out
+	}
+	for i := 0; i < 100; i++ {
+		for _, table := range []string{"llm_usage_limits", "infra_events"} {
+			if _, err := s.db.Exec(`DELETE FROM ` + table); err != nil {
+				t.Fatal(err)
+			}
+		}
+		s.handleLLMUsageLimit(nil, "claw-limit-race-a", limit)
+		s.releaseLLMUsageLimit("faster", "test release", false)
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() { defer wg.Done(); s.observeTurnOutcome(nil, "claw-limit-race-a", "msg-proof", "Back to work.") }()
+		go func() { defer wg.Done(); s.handleLLMUsageLimit(nil, "claw-limit-race-b", limit) }()
+		wg.Wait()
+		relatched := false
+		for _, key := range eventKeys() {
+			if strings.HasPrefix(key, "provider_limit_opened:") && strings.HasSuffix(key, ":1") {
+				relatched = true
+			}
+			if strings.HasPrefix(key, "provider_limit_released:") && relatched {
+				t.Fatalf("run %d announced the lift after the re-latch: %v", i, eventKeys())
+			}
+		}
+	}
+}
