@@ -9,7 +9,7 @@ import (
 )
 
 // An existing hub database predates last_ci_conclusion. The additive migration
-// must backfill it as '' so previously observed SHAs are re-evaluated once and
+// must backfill it as ” so previously observed SHAs are re-evaluated once and
 // the poller's SELECT keeps working.
 func TestMigrateAddsLastCIConclusionToExistingClawPRs(t *testing.T) {
 	db, err := sql.Open("sqlite", ":memory:")
@@ -61,7 +61,7 @@ func TestMigrateAddsLastCIConclusionToExistingClawPRs(t *testing.T) {
 }
 
 // A fresh database gets claw_prs from CREATE TABLE, already carrying the
-// column; the default must still be '' so a newly tracked PR is unevaluated.
+// column; the default must still be ” so a newly tracked PR is unevaluated.
 func TestMigrateFreshDBHasLastCIConclusionDefault(t *testing.T) {
 	db, err := sql.Open("sqlite", ":memory:")
 	if err != nil {

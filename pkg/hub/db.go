@@ -361,6 +361,20 @@ func migrate(db *sql.DB) error {
 	_, _ = db.Exec(`ALTER TABLE task_run_prs ADD COLUMN ready_at INTEGER NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE task_run_summaries ADD COLUMN ready_at INTEGER NOT NULL DEFAULT 0`)
 
+	// Checkpoint telemetry: these three describe what the claw was doing when
+	// the checkpoint was taken and lived only inside the manifest JSON, so
+	// pruning manifests used to destroy the record. As columns they cost ~40
+	// bytes a row and survive any retention policy.
+	for _, col := range []struct{ name, def string }{
+		{"pipeline_stage", `TEXT NOT NULL DEFAULT ''`},
+		{"hub_version", `TEXT NOT NULL DEFAULT ''`},
+		{"files_count", `INTEGER NOT NULL DEFAULT 0`},
+		{"files_bytes", `INTEGER NOT NULL DEFAULT 0`},
+	} {
+		if err := addColumn(db, "claw_checkpoints", col.name, col.def); err != nil {
+			return err
+		}
+	}
 	_, _ = db.Exec(`CREATE TABLE IF NOT EXISTS claw_checkpoints (
 		id                    TEXT PRIMARY KEY,
 		tenant_id             TEXT NOT NULL,
@@ -378,6 +392,10 @@ func migrate(db *sql.DB) error {
 		message_count         INTEGER NOT NULL DEFAULT 0,
 		pr_count              INTEGER NOT NULL DEFAULT 0,
 		repo_count            INTEGER NOT NULL DEFAULT 0,
+		pipeline_stage        TEXT NOT NULL DEFAULT '',
+		hub_version           TEXT NOT NULL DEFAULT '',
+		files_count           INTEGER NOT NULL DEFAULT 0,
+		files_bytes           INTEGER NOT NULL DEFAULT 0,
 		error                 TEXT NOT NULL DEFAULT '',
 		created_at            DATETIME NOT NULL,
 		completed_at          DATETIME
@@ -715,7 +733,7 @@ func migrate(db *sql.DB) error {
 		trigger_id     TEXT NOT NULL DEFAULT '',
 		claw_id        TEXT NOT NULL DEFAULT '',
 		status         TEXT NOT NULL DEFAULT 'running' CHECK(status IN ('running','succeeded','failed')),
-		failure_type   TEXT NOT NULL DEFAULT '' CHECK(failure_type IN ('','creation_failed','provision_failed','bootstrap_failed','agent_stopped','manual_stop_before_delivery','done_without_pr','no_pr','pr_closed_unmerged','timeout','provider_lost','permission_or_auth_failed','unknown')),
+		failure_type   TEXT NOT NULL DEFAULT '' CHECK(failure_type IN ('','creation_failed','provision_failed','bootstrap_failed','agent_stopped','manual_stop_before_delivery','done_without_pr','no_pr','pr_closed_unmerged','timeout','provider_lost','permission_or_auth_failed','workspace_unresponsive','unknown')),
 		restored_checkpoint_id TEXT,
 		started_at     INTEGER NOT NULL,
 		finished_at    INTEGER NOT NULL DEFAULT 0,
@@ -759,7 +777,7 @@ func migrate(db *sql.DB) error {
 		target_url         TEXT NOT NULL DEFAULT '',
 		target_label       TEXT NOT NULL DEFAULT '',
 		warning_type       TEXT NOT NULL DEFAULT '',
-		failure_type       TEXT NOT NULL DEFAULT '' CHECK(failure_type IN ('','creation_failed','provision_failed','bootstrap_failed','agent_stopped','manual_stop_before_delivery','done_without_pr','no_pr','pr_closed_unmerged','timeout','provider_lost','permission_or_auth_failed','unknown')),
+		failure_type       TEXT NOT NULL DEFAULT '' CHECK(failure_type IN ('','creation_failed','provision_failed','bootstrap_failed','agent_stopped','manual_stop_before_delivery','done_without_pr','no_pr','pr_closed_unmerged','timeout','provider_lost','permission_or_auth_failed','workspace_unresponsive','unknown')),
 		detail             TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(detail) AND json_type(detail) = 'object'),
 		created_at         INTEGER NOT NULL
 	);
@@ -847,7 +865,7 @@ func migrate(db *sql.DB) error {
 		merged_pr_count         INTEGER NOT NULL DEFAULT 0 CHECK(merged_pr_count >= 0),
 		closed_pr_count         INTEGER NOT NULL DEFAULT 0 CHECK(closed_pr_count >= 0),
 		warning_types           TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(warning_types) AND json_type(warning_types) = 'array'),
-		failure_type            TEXT NOT NULL DEFAULT '' CHECK(failure_type IN ('','creation_failed','provision_failed','bootstrap_failed','agent_stopped','manual_stop_before_delivery','done_without_pr','no_pr','pr_closed_unmerged','timeout','provider_lost','permission_or_auth_failed','unknown')),
+		failure_type            TEXT NOT NULL DEFAULT '' CHECK(failure_type IN ('','creation_failed','provision_failed','bootstrap_failed','agent_stopped','manual_stop_before_delivery','done_without_pr','no_pr','pr_closed_unmerged','timeout','provider_lost','permission_or_auth_failed','workspace_unresponsive','unknown')),
 		human_interaction_count INTEGER NOT NULL DEFAULT 0 CHECK(human_interaction_count >= 0),
 		started_at              INTEGER NOT NULL,
 		queued_at               INTEGER NOT NULL DEFAULT 0,
@@ -937,6 +955,10 @@ func migrate(db *sql.DB) error {
 		message_count         INTEGER NOT NULL DEFAULT 0,
 		pr_count              INTEGER NOT NULL DEFAULT 0,
 		repo_count            INTEGER NOT NULL DEFAULT 0,
+		pipeline_stage        TEXT NOT NULL DEFAULT '',
+		hub_version           TEXT NOT NULL DEFAULT '',
+		files_count           INTEGER NOT NULL DEFAULT 0,
+		files_bytes           INTEGER NOT NULL DEFAULT 0,
 		error                 TEXT NOT NULL DEFAULT '',
 		created_at            DATETIME NOT NULL,
 		completed_at          DATETIME
@@ -1082,6 +1104,14 @@ func migrate(db *sql.DB) error {
 	if err := rebuildTaskRunEventsAgentIdleV1(db); err != nil {
 		return err
 	}
+	// Widen the failure_type CHECK so workspace_unresponsive can be recorded.
+	// Runs after the rebuilds above, which recreate two of these tables from
+	// their own pasted DDL and would otherwise reinstate the narrow CHECK.
+	for _, table := range []string{"task_run_attempts", "task_run_summaries", "task_run_events"} {
+		if err := widenFailureTypeCheckV1(db, table); err != nil {
+			return err
+		}
+	}
 	// Backfill rows that predate the usage_day column so cost corrections land
 	// on the day the run's usage was last applied, not on the correction's day.
 	if _, err := db.Exec(`UPDATE task_run_usage SET usage_day = strftime('%Y-%m-%d', updated_at/1000, 'unixepoch') WHERE usage_day = '' AND updated_at > 0`); err != nil {
@@ -1170,6 +1200,105 @@ func migrateTicketMetadataKey(db *sql.DB) error {
 	return tx.Commit()
 }
 
+// widenFailureTypeCheckV1 adds 'workspace_unresponsive' to the failure_type
+// CHECK on databases created before that value existed. SQLite cannot alter a
+// CHECK in place, so the table gets the rebuild-and-copy treatment (the same
+// pattern as rebuildTaskRunEventsAgentIdleV1). Fresh databases are created with
+// the value already present and skip this via the schema probe.
+//
+// Unlike the older rebuilds, the replacement DDL is derived from the live
+// schema rather than pasted in: these three tables carry ~50 columns each, and
+// a pasted copy silently drifts from the base schema the next time a column is
+// added. Indexes are read back from sqlite_master for the same reason.
+func widenFailureTypeCheckV1(db *sql.DB, table string) error {
+	var schema string
+	err := db.QueryRow(`SELECT sql FROM sqlite_master WHERE type='table' AND name=?`, table).Scan(&schema)
+	if err == sql.ErrNoRows {
+		return nil // no table yet; the base schema creates it with the new CHECK
+	}
+	if err != nil {
+		return fmt.Errorf("read %s schema: %w", table, err)
+	}
+	if !strings.Contains(schema, "failure_type") || strings.Contains(schema, "workspace_unresponsive") {
+		return nil
+	}
+	const oldCheck = "'timeout','provider_lost','permission_or_auth_failed','unknown')"
+	const newCheck = "'timeout','provider_lost','permission_or_auth_failed','workspace_unresponsive','unknown')"
+	if !strings.Contains(schema, oldCheck) {
+		// An unrecognised shape: leave it alone rather than rewrite it blind.
+		log.Printf("[db] %s failure_type CHECK not in the expected shape; skipping widen", table)
+		return nil
+	}
+
+	indexes := []string{}
+	rows, err := db.Query(`SELECT sql FROM sqlite_master WHERE type='index' AND tbl_name=? AND sql IS NOT NULL`, table)
+	if err != nil {
+		return fmt.Errorf("read %s indexes: %w", table, err)
+	}
+	for rows.Next() {
+		var stmt string
+		if err := rows.Scan(&stmt); err != nil {
+			rows.Close()
+			return err
+		}
+		indexes = append(indexes, stmt)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	columns := []string{}
+	colRows, err := db.Query(fmt.Sprintf(`SELECT name FROM pragma_table_info(%q)`, table))
+	if err != nil {
+		return fmt.Errorf("read %s columns: %w", table, err)
+	}
+	for colRows.Next() {
+		var name string
+		if err := colRows.Scan(&name); err != nil {
+			colRows.Close()
+			return err
+		}
+		columns = append(columns, fmt.Sprintf("%q", name))
+	}
+	colRows.Close()
+	if err := colRows.Err(); err != nil {
+		return err
+	}
+	if len(columns) == 0 {
+		return fmt.Errorf("%s reported no columns", table)
+	}
+	colList := strings.Join(columns, ", ")
+
+	tmp := table + "_widen_tmp"
+	createTmp := strings.Replace(schema, oldCheck, newCheck, 1)
+	createTmp = strings.Replace(createTmp, table, tmp, 1)
+
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(createTmp); err != nil {
+		return fmt.Errorf("create %s: %w", tmp, err)
+	}
+	if _, err := tx.Exec(fmt.Sprintf(`INSERT INTO %q (%s) SELECT %s FROM %q`, tmp, colList, colList, table)); err != nil {
+		return fmt.Errorf("copy %s: %w", table, err)
+	}
+	if _, err := tx.Exec(fmt.Sprintf(`DROP TABLE %q`, table)); err != nil {
+		return fmt.Errorf("drop %s: %w", table, err)
+	}
+	if _, err := tx.Exec(fmt.Sprintf(`ALTER TABLE %q RENAME TO %q`, tmp, table)); err != nil {
+		return fmt.Errorf("rename %s: %w", tmp, err)
+	}
+	for _, stmt := range indexes {
+		if _, err := tx.Exec(stmt); err != nil {
+			return fmt.Errorf("recreate index on %s: %w", table, err)
+		}
+	}
+	return tx.Commit()
+}
+
 func rebuildTaskRunSummariesStatusV3(db *sql.DB) error {
 	var schema string
 	if err := db.QueryRow(`SELECT sql FROM sqlite_master WHERE type='table' AND name='task_run_summaries'`).Scan(&schema); err != nil {
@@ -1188,7 +1317,7 @@ func rebuildTaskRunSummariesStatusV3(db *sql.DB) error {
 		initial_attempt_id TEXT NOT NULL DEFAULT '', current_attempt_id TEXT NOT NULL DEFAULT '',
 		status TEXT NOT NULL CHECK(status IN ('running','clean','human_in_the_loop','warning','failed')),
 		phase TEXT NOT NULL CHECK(phase IN ('claimed','queued','provisioning','agent_running','pr_opened','waiting_for_merge','terminal')),
-		attempt_count INTEGER NOT NULL DEFAULT 0 CHECK(attempt_count >= 0), owner_type TEXT NOT NULL DEFAULT '', workspace_name TEXT NOT NULL DEFAULT '', workflow_name TEXT NOT NULL DEFAULT '', factory_name TEXT NOT NULL DEFAULT '', owner_id TEXT NOT NULL DEFAULT '', owner_display_name TEXT NOT NULL DEFAULT '', run_kind TEXT NOT NULL DEFAULT 'pr_task' CHECK(run_kind IN ('code_task','pr_task')), integration TEXT NOT NULL DEFAULT '', integration_workspace TEXT NOT NULL DEFAULT '', issue_id TEXT NOT NULL DEFAULT '', issue_title TEXT NOT NULL DEFAULT '', issue_created_at INTEGER NOT NULL DEFAULT 0, claw_id TEXT NOT NULL DEFAULT '', model TEXT NOT NULL DEFAULT '', input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0, total_tokens INTEGER NOT NULL DEFAULT 0, estimated_cost_usd REAL NOT NULL DEFAULT 0, usage_updated_at INTEGER NOT NULL DEFAULT 0, llm_key TEXT NOT NULL DEFAULT '', repo TEXT NOT NULL DEFAULT '', primary_pr_url TEXT NOT NULL DEFAULT '', pr_count INTEGER NOT NULL DEFAULT 0 CHECK(pr_count >= 0), open_pr_count INTEGER NOT NULL DEFAULT 0 CHECK(open_pr_count >= 0), merged_pr_count INTEGER NOT NULL DEFAULT 0 CHECK(merged_pr_count >= 0), closed_pr_count INTEGER NOT NULL DEFAULT 0 CHECK(closed_pr_count >= 0), warning_types TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(warning_types) AND json_type(warning_types) = 'array'), failure_type TEXT NOT NULL DEFAULT '' CHECK(failure_type IN ('','creation_failed','provision_failed','bootstrap_failed','agent_stopped','manual_stop_before_delivery','done_without_pr','no_pr','pr_closed_unmerged','timeout','provider_lost','permission_or_auth_failed','unknown')), human_interaction_count INTEGER NOT NULL DEFAULT 0 CHECK(human_interaction_count >= 0), started_at INTEGER NOT NULL, queued_at INTEGER NOT NULL DEFAULT 0, provision_started_at INTEGER NOT NULL DEFAULT 0, agent_started_at INTEGER NOT NULL DEFAULT 0, pr_opened_at INTEGER NOT NULL DEFAULT 0, ready_at INTEGER NOT NULL DEFAULT 0, merged_at INTEGER NOT NULL DEFAULT 0, finished_at INTEGER NOT NULL DEFAULT 0, timeout_at INTEGER NOT NULL DEFAULT 0, last_event_at INTEGER NOT NULL, materialized_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, analytics_enabled INTEGER NOT NULL DEFAULT 1 CHECK(analytics_enabled IN (0,1)), requires_pr INTEGER NOT NULL DEFAULT 1 CHECK(requires_pr IN (0,1)), excluded_reason TEXT NOT NULL DEFAULT '', UNIQUE(run_id), UNIQUE(tenant_id, run_id)
+		attempt_count INTEGER NOT NULL DEFAULT 0 CHECK(attempt_count >= 0), owner_type TEXT NOT NULL DEFAULT '', workspace_name TEXT NOT NULL DEFAULT '', workflow_name TEXT NOT NULL DEFAULT '', factory_name TEXT NOT NULL DEFAULT '', owner_id TEXT NOT NULL DEFAULT '', owner_display_name TEXT NOT NULL DEFAULT '', run_kind TEXT NOT NULL DEFAULT 'pr_task' CHECK(run_kind IN ('code_task','pr_task')), integration TEXT NOT NULL DEFAULT '', integration_workspace TEXT NOT NULL DEFAULT '', issue_id TEXT NOT NULL DEFAULT '', issue_title TEXT NOT NULL DEFAULT '', issue_created_at INTEGER NOT NULL DEFAULT 0, claw_id TEXT NOT NULL DEFAULT '', model TEXT NOT NULL DEFAULT '', input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0, total_tokens INTEGER NOT NULL DEFAULT 0, estimated_cost_usd REAL NOT NULL DEFAULT 0, usage_updated_at INTEGER NOT NULL DEFAULT 0, llm_key TEXT NOT NULL DEFAULT '', repo TEXT NOT NULL DEFAULT '', primary_pr_url TEXT NOT NULL DEFAULT '', pr_count INTEGER NOT NULL DEFAULT 0 CHECK(pr_count >= 0), open_pr_count INTEGER NOT NULL DEFAULT 0 CHECK(open_pr_count >= 0), merged_pr_count INTEGER NOT NULL DEFAULT 0 CHECK(merged_pr_count >= 0), closed_pr_count INTEGER NOT NULL DEFAULT 0 CHECK(closed_pr_count >= 0), warning_types TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(warning_types) AND json_type(warning_types) = 'array'), failure_type TEXT NOT NULL DEFAULT '' CHECK(failure_type IN ('','creation_failed','provision_failed','bootstrap_failed','agent_stopped','manual_stop_before_delivery','done_without_pr','no_pr','pr_closed_unmerged','timeout','provider_lost','permission_or_auth_failed','workspace_unresponsive','unknown')), human_interaction_count INTEGER NOT NULL DEFAULT 0 CHECK(human_interaction_count >= 0), started_at INTEGER NOT NULL, queued_at INTEGER NOT NULL DEFAULT 0, provision_started_at INTEGER NOT NULL DEFAULT 0, agent_started_at INTEGER NOT NULL DEFAULT 0, pr_opened_at INTEGER NOT NULL DEFAULT 0, ready_at INTEGER NOT NULL DEFAULT 0, merged_at INTEGER NOT NULL DEFAULT 0, finished_at INTEGER NOT NULL DEFAULT 0, timeout_at INTEGER NOT NULL DEFAULT 0, last_event_at INTEGER NOT NULL, materialized_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, analytics_enabled INTEGER NOT NULL DEFAULT 1 CHECK(analytics_enabled IN (0,1)), requires_pr INTEGER NOT NULL DEFAULT 1 CHECK(requires_pr IN (0,1)), excluded_reason TEXT NOT NULL DEFAULT '', UNIQUE(run_id), UNIQUE(tenant_id, run_id)
 	)`); err != nil {
 		return fmt.Errorf("create task run summaries v3: %w", err)
 	}
@@ -1269,7 +1398,7 @@ func rebuildTaskRunEventsAgentIdleV1(db *sql.DB) error {
 		target_url         TEXT NOT NULL DEFAULT '',
 		target_label       TEXT NOT NULL DEFAULT '',
 		warning_type       TEXT NOT NULL DEFAULT '',
-		failure_type       TEXT NOT NULL DEFAULT '' CHECK(failure_type IN ('','creation_failed','provision_failed','bootstrap_failed','agent_stopped','manual_stop_before_delivery','done_without_pr','no_pr','pr_closed_unmerged','timeout','provider_lost','permission_or_auth_failed','unknown')),
+		failure_type       TEXT NOT NULL DEFAULT '' CHECK(failure_type IN ('','creation_failed','provision_failed','bootstrap_failed','agent_stopped','manual_stop_before_delivery','done_without_pr','no_pr','pr_closed_unmerged','timeout','provider_lost','permission_or_auth_failed','workspace_unresponsive','unknown')),
 		detail             TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(detail) AND json_type(detail) = 'object'),
 		created_at         INTEGER NOT NULL
 	)`); err != nil {

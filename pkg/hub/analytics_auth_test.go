@@ -166,7 +166,7 @@ func TestAnalyticsCostFieldsAreAdminOnly(t *testing.T) {
 			Access:        &types.AccessConfig{Admins: []string{"alice"}},
 		},
 	}, "", "", "")
-	ts := time.Now().UTC().Add(-24*time.Hour).UnixMilli()
+	ts := time.Now().UTC().Add(-24 * time.Hour).UnixMilli()
 	insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{
 		RunID: "run-cost", AttemptID: "attempt-cost", ClawID: "claw-cost", TenantID: "test-tenant-id",
 		Status: taskRunStatusClean, Phase: taskRunPhaseTerminal, OwnerType: taskRunOwnerFactory, Factory: "bugfix",

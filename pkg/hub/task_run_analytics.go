@@ -57,8 +57,14 @@ const (
 	taskRunFailureBootstrapFailed    = "bootstrap_failed"
 	taskRunFailureProviderLost       = "provider_lost"
 	taskRunFailurePermissionOrAuth   = "permission_or_auth_failed"
-	taskRunFailureTimeout            = "timeout"
-	taskRunFailureUnknown            = "unknown"
+	// taskRunFailureWorkspaceUnresponsive covers a workspace the hub stopped
+	// because it went unresponsive -- an agent that stalled mid-turn, a gateway
+	// that failed its health checks, a claw that stopped reporting status. These
+	// used to be recorded as bootstrap_failed, which put a failure that happens
+	// hours into a run under the label for one that happens before it starts.
+	taskRunFailureWorkspaceUnresponsive = "workspace_unresponsive"
+	taskRunFailureTimeout               = "timeout"
+	taskRunFailureUnknown               = "unknown"
 
 	taskRunEventTaskStart                = "task_start"
 	taskRunEventTaskCompleted            = "task_completed"
