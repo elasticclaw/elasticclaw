@@ -53,7 +53,13 @@ func taskRunFailureTypeForAgentFailure(kind agentFailureKind) string {
 		return taskRunFailureProvisionFailed
 	case agentFailureSandboxTerminated, agentFailureProviderLost:
 		return taskRunFailureProviderLost
-	case agentFailureBootstrap, agentFailureRestore, agentFailureWorkspaceReadiness, agentFailureWorkspaceFiles:
+	case agentFailureWorkspaceReadiness:
+		// Readiness failures are the watchdog stopping a workspace that stopped
+		// responding, which happens while the agent is working -- not while it
+		// is starting. Folding them into bootstrap_failed made the two
+		// indistinguishable in analytics.
+		return taskRunFailureWorkspaceUnresponsive
+	case agentFailureBootstrap, agentFailureRestore, agentFailureWorkspaceFiles:
 		return taskRunFailureBootstrapFailed
 	case agentFailureGitHubCredentials:
 		return taskRunFailurePermissionOrAuth
