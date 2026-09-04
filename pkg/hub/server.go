@@ -67,6 +67,10 @@ type Server struct {
 	gatewayRestartCounts map[string]int
 	// gatewayUnhealthyCounts survives WebSocket reconnects so flapping gateways still escalate.
 	gatewayUnhealthyCounts map[string]int
+	// gatewayGraceGrantedAt records when a claw last received the reconnect
+	// grace, so a bridge reconnecting faster than the grace cannot renew it
+	// indefinitely and stall escalation forever.
+	gatewayGraceGrantedAt map[string]time.Time
 	// gatewayEscalatedAt records the last gateway-health escalation dispatch per claw,
 	// preventing retries from piling up while a replacement is pending or in flight. Guarded by s.mu.
 	gatewayEscalatedAt  map[string]time.Time
@@ -264,6 +268,43 @@ func (s *Server) validModelAuthToken(clawID, token string) bool {
 	return want != "" && hmac.Equal([]byte(want), []byte(strings.TrimSpace(token)))
 }
 
+// gatewayUnhealthyInReconnectGrace reports whether an unhealthy heartbeat should
+// be ignored because the gateway is still starting after the bridge registered.
+//
+// The unhealthy counter never decays on its own: only a heartbeat reporting the
+// gateway healthy clears it, and no heartbeat arrives at all while the bridge is
+// disconnected. Without a grace, a claw that reconnects repeatedly accumulates
+// checks ACROSS reconnects and is replaced without ever having been unhealthy
+// for gateway_unhealthy_checks consecutive heartbeats -- which is the thing the
+// threshold is calibrated for and what its log line claims to describe.
+//
+// The grace applies only while the counter sits at zero. That is what keeps it
+// from re-opening the hole it narrows: a gateway dying in a restart loop carries
+// a non-zero counter into its next reconnect, gets no grace, and escalates on
+// schedule. A grace of zero disables the behaviour entirely.
+func gatewayUnhealthyInReconnectGrace(count int, connectedAt, lastGrantedAt time.Time, grace time.Duration, now time.Time) bool {
+	if grace <= 0 || count != 0 || connectedAt.IsZero() {
+		return false
+	}
+	if now.Sub(connectedAt) >= grace {
+		return false
+	}
+	if lastGrantedAt.IsZero() {
+		return true
+	}
+	// A grace already granted to THIS connection means the window is open and
+	// every heartbeat inside it is covered.
+	if !lastGrantedAt.Before(connectedAt) {
+		return true
+	}
+	// Otherwise the previous connection used it. Spacing successive grants at a
+	// multiple of the grace keeps an isolated reconnect protected while denying
+	// a gateway dying in a restart loop, which reconnects faster than that and
+	// would otherwise renew the grace forever and hold the counter at zero --
+	// the exact stall that making the counter survive reconnects fixed.
+	return now.Sub(lastGrantedAt) >= grace*gatewayGraceRenewalFactor
+}
+
 func (s *Server) gatewayUnhealthyCount(clawID string) int {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -370,6 +411,16 @@ const (
 	// and sooner or independently by the offline reaper (the bridge stops
 	// heartbeating entirely) and the busy-turn watchdog.
 	defaultGatewayUnhealthyMax = 40
+	// defaultGatewayUnhealthyReconnectGrace covers a gateway that is still
+	// starting after the bridge registers. Provisioning a sandbox takes about
+	// 1.5 minutes at the median, and the gateway reports unhealthy for part of
+	// that; two minutes clears a normal startup while leaving a genuinely dead
+	// gateway only one grace period per reconnect before it starts counting.
+	defaultGatewayUnhealthyReconnectGrace = 2 * time.Minute
+	// gatewayGraceRenewalFactor spaces successive graces at this multiple of the
+	// grace itself, so the protection covers an isolated reconnect but cannot be
+	// renewed by a bridge that keeps flapping.
+	gatewayGraceRenewalFactor = 4
 	// minBusyTurnMax is the floor for the busy-turn watchdog. The watchdog is a
 	// backstop for a lost terminal message, not a turn cap: the bridge owns the
 	// cap (agentTurnTimeout, 1h) and always ends a turn with a message. So this
@@ -548,6 +599,7 @@ func NewServer(addr, dbPath, identityDir string, hubCfg *types.HubConfig) (*Serv
 		users:                    make(map[string]*userConn),
 		gatewayRestartCounts:     make(map[string]int),
 		gatewayUnhealthyCounts:   make(map[string]int),
+		gatewayGraceGrantedAt:    make(map[string]time.Time),
 		gatewayEscalatedAt:       make(map[string]time.Time),
 		dependencyStatus:         newDependencyStatusService(hubCfg),
 		fileAckWaiters:           make(map[string]chan types.FileAck),
@@ -2017,6 +2069,7 @@ func (s *Server) handleClawDetail(w http.ResponseWriter, r *http.Request) {
 		}
 		delete(s.gatewayUnhealthyCounts, clawID)
 		delete(s.gatewayEscalatedAt, clawID)
+		delete(s.gatewayGraceGrantedAt, clawID)
 		s.mu.Unlock()
 		go func() {
 			s.checkpointBeforeTermination(clawID, "manual-kill")
@@ -2962,7 +3015,9 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 				SubagentActiveCount *int  `json:"subagent_active_count"`
 			}
 			if err := json.Unmarshal(payload, &hb); err == nil {
-				gatewayUnhealthyMax := s.livenessSettings().gatewayUnhealthyMax
+				liveness := s.livenessSettings()
+				gatewayUnhealthyMax := liveness.gatewayUnhealthyMax
+				gatewayUnhealthyGrace := liveness.gatewayUnhealthyReconnectGrace
 				var wakeConn *clawConn
 				var shouldWake bool
 				var shouldWarnContext bool
@@ -3027,7 +3082,34 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 						activeCC.gatewayReady = true
 						gatewayReadyReported = true
 					}
-					if !hb.GatewayHealthy {
+					// A gateway that is still starting is not a failing one. The
+					// counter never resets on its own -- only a healthy heartbeat
+					// clears it, and none arrives while the bridge is disconnected
+					// -- so without this grace a claw that reconnects repeatedly
+					// accumulates checks across reconnects and is replaced without
+					// ever having been unhealthy for gatewayUnhealthyMax
+					// CONSECUTIVE heartbeats, which is what the threshold means.
+					//
+					// The grace applies only from zero, so it protects a normal
+					// startup without shielding a gateway that is already failing:
+					// one dying in a restart loop keeps a non-zero counter, gets
+					// no grace on its later reconnects, and escalates as before.
+					graceNow := time.Now()
+					inGatewayGrace := !hb.GatewayHealthy && gatewayUnhealthyInReconnectGrace(
+						s.gatewayUnhealthyCounts[clawID], activeCC.connectedAt,
+						s.gatewayGraceGrantedAt[clawID], gatewayUnhealthyGrace, graceNow)
+					if inGatewayGrace {
+						if s.gatewayGraceGrantedAt == nil {
+							s.gatewayGraceGrantedAt = make(map[string]time.Time)
+						}
+						// Stamp once per connection: the window is anchored to the
+						// registration, and re-stamping on every heartbeat would
+						// push the renewal check forward indefinitely.
+						if s.gatewayGraceGrantedAt[clawID].Before(activeCC.connectedAt) {
+							s.gatewayGraceGrantedAt[clawID] = graceNow
+						}
+					}
+					if !hb.GatewayHealthy && !inGatewayGrace {
 						if s.gatewayUnhealthyCounts == nil {
 							s.gatewayUnhealthyCounts = make(map[string]int)
 						}
@@ -3066,6 +3148,9 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 					// regardless of gateway health — don't silence diagnostics during outages.
 					if hb.ContextUsage != prevUsage && (hb.ContextUsage >= 80 || prevUsage >= 80) {
 						log.Printf("[heartbeat] %s (%s): context_usage=%d%%", rp.Name, clawID[:8], hb.ContextUsage)
+					}
+					if hb.GatewayHealthy {
+						delete(s.gatewayGraceGrantedAt, clawID)
 					}
 					if hb.GatewayHealthy && s.gatewayUnhealthyCounts[clawID] > 0 {
 						log.Printf("[heartbeat] %s (%s): gateway recovered after %d unhealthy checks", rp.Name, clawID[:8], s.gatewayUnhealthyCounts[clawID])

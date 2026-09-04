@@ -57,6 +57,7 @@ func NewTestServerWithConfig(t interface {
 		claws:                    make(map[string]*clawConn),
 		users:                    make(map[string]*userConn),
 		gatewayUnhealthyCounts:   make(map[string]int),
+		gatewayGraceGrantedAt:    make(map[string]time.Time),
 		gatewayEscalatedAt:       make(map[string]time.Time),
 		dependencyStatus:         newDependencyStatusService(cfg),
 		webhookDedup:             make(map[string]time.Time),

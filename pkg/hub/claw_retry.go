@@ -547,6 +547,7 @@ func (s *Server) resetClawForRetry(tenantID, clawID, checkpointID, bootstrapStat
 		s.mu.Lock()
 		delete(s.gatewayUnhealthyCounts, clawID)
 		delete(s.gatewayEscalatedAt, clawID)
+		delete(s.gatewayGraceGrantedAt, clawID)
 		s.mu.Unlock()
 	}
 	return rows > 0, nil

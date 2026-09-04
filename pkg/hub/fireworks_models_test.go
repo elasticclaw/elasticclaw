@@ -186,7 +186,7 @@ func TestHumanizeFireworksModelNameOnlyReplacesVersionSeparator(t *testing.T) {
 		"fireworks/accounts/fireworks/models/deepseek-v4-pro": "Deepseek V4 Pro",
 		"fireworks/accounts/fireworks/models/qwen3p6-plus":    "Qwen3.6 Plus",
 		"fireworks/accounts/fireworks/models/gpt-oss-120b":    "Gpt Oss 120b",
-		"fireworks/accounts/fireworks/models/kimi-k2p7-code": "Kimi K2.7 Code",
+		"fireworks/accounts/fireworks/models/kimi-k2p7-code":  "Kimi K2.7 Code",
 	}
 	for id, want := range tests {
 		if got := humanizeFireworksModelName(id); got != want {
