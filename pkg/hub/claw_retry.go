@@ -527,6 +527,22 @@ func (s *Server) resetClawForRetry(tenantID, clawID, checkpointID, bootstrapStat
 		return false, err
 	}
 	rows, _ := res.RowsAffected()
+	if rows > 0 {
+		// The gateway health counters are keyed by claw ID, and a retry reuses
+		// the ID while replacing the sandbox behind it. They must be cleared for
+		// the same reason idle_resume_count is cleared above: the successor is a
+		// brand-new gateway whose health says nothing about the predecessor's,
+		// and handing it an already-spent budget means the first unhealthy
+		// heartbeat of its boot re-crosses the escalation threshold and replaces
+		// a sandbox that never had a chance to report healthy.
+		//
+		// Before this, the counters were only cleared on manual kill and on
+		// terminal pipeline teardown -- never on the retry path itself.
+		s.mu.Lock()
+		delete(s.gatewayUnhealthyCounts, clawID)
+		delete(s.gatewayEscalatedAt, clawID)
+		s.mu.Unlock()
+	}
 	return rows > 0, nil
 }
 
