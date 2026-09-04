@@ -305,6 +305,26 @@ func gatewayUnhealthyInReconnectGrace(count int, connectedAt, lastGrantedAt time
 	return now.Sub(lastGrantedAt) >= grace*gatewayGraceRenewalFactor
 }
 
+// clearStatusConnIfOwned drops the claw's status channel only if it is still
+// the given connection.
+//
+// The bridge reconnects its status channel within seconds, so a dropped channel
+// is routinely replaced before its own read loop wakes up to clean up after
+// itself. Clearing unconditionally then discards the live replacement: the hub
+// sends no further status_ping, lastStatusAt freezes at the last pong, and
+// about eleven minutes later the silent-death watchdog replaces a claw whose
+// bridge is still sending healthy heartbeats every fifteen seconds. The main
+// channel has always made the equivalent identity check (activeCC == cc).
+//
+// Caller holds s.mu.
+func clearStatusConnIfOwned(cc *clawConn, conn *websocket.Conn) {
+	cc.mu.Lock()
+	defer cc.mu.Unlock()
+	if cc.statusConn == conn {
+		cc.statusConn = nil
+	}
+}
+
 func (s *Server) gatewayUnhealthyCount(clawID string) int {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -355,6 +375,7 @@ type clawConn struct {
 	// Status channel for watchdog / progress reporting (second session on bridge)
 	statusConn            *websocket.Conn // separate WS for lightweight status queries
 	lastStatusAt          time.Time       // when we last got a status response
+	lastHeartbeatAt       time.Time       // when the bridge last sent a heartbeat (proof of life independent of the status channel)
 	lastUserMessageAt     time.Time       // when the user last sent a message (for idle detection)
 	lastStatusBroadcastAt time.Time       // when we last broadcast status to user
 	unresponsiveWarnedAt  time.Time       // when the silent-death warning was first broadcast
@@ -2789,9 +2810,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 				if err := wsjson.Read(ctx, conn, &msg); err != nil {
 					s.mu.Lock()
 					if existing2, ok2 := s.claws[clawID]; ok2 {
-						existing2.mu.Lock()
-						existing2.statusConn = nil
-						existing2.mu.Unlock()
+						clearStatusConnIfOwned(existing2, conn)
 					}
 					s.mu.Unlock()
 					return
@@ -2834,6 +2853,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 		old.mu.RLock()
 		cc.statusConn = old.statusConn
 		cc.lastStatusAt = old.lastStatusAt
+		cc.lastHeartbeatAt = old.lastHeartbeatAt
 		cc.lastTurnFinishedAt = old.lastTurnFinishedAt
 		// Carry the turn-visibility flag across an ordinary bridge reconnect,
 		// but only from a connection that had no turn reservation open. The
@@ -3036,6 +3056,12 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 				if activeCC, ok := s.claws[clawID]; ok && activeCC == cc {
 					current = true
 					activeCC.mu.Lock()
+					// A heartbeat is the strongest and most frequent evidence
+					// the bridge is alive (every 15s, against the status
+					// channel's 2-minute ping). The silent-death watchdog reads
+					// it so that losing the status channel alone can no longer
+					// condemn a claw that is plainly reporting in.
+					activeCC.lastHeartbeatAt = time.Now()
 					// Log only on status changes, not every heartbeat
 					prevUsage = activeCC.contextUsage
 					activeCC.contextUsage = hb.ContextUsage
@@ -6347,6 +6373,7 @@ func (s *Server) checkClawStatus() {
 		cc.mu.RLock()
 		lastUserMessageAt := cc.lastUserMessageAt
 		lastStatusAt := cc.lastStatusAt
+		lastHeartbeatAt := cc.lastHeartbeatAt
 		lastStatusBroadcastAt := cc.lastStatusBroadcastAt
 		unresponsiveWarnedAt := cc.unresponsiveWarnedAt
 		streamingStartedAt := cc.streamingStartedAt
@@ -6441,7 +6468,7 @@ func (s *Server) checkClawStatus() {
 
 		// Detect silent death while the claw is fully bootstrapped. Warn after five
 		// minutes, then escalate through the common failure funnel after ten.
-		healthAction := watchdogAction(now, status, bootstrapOK != 0, gatewayReady, lastStatusAt, lastUserMessageAt, unresponsiveWarnedAt, cfg.silentDeathMax)
+		healthAction := watchdogAction(now, status, bootstrapOK != 0, gatewayReady, lastStatusAt, lastHeartbeatAt, lastUserMessageAt, unresponsiveWarnedAt, cfg.silentDeathMax)
 		if healthAction == watchdogHealthWarn && now.Sub(lastStatusBroadcastAt) > 5*time.Minute {
 			msg := fmt.Sprintf("🚨 Agent %s appears unresponsive (no status in 5m). It may have crashed.", name)
 			log.Printf("[watchdog] %s", msg)

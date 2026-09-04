@@ -57,7 +57,7 @@ func TestGatewayUnhealthyInReconnectGrace(t *testing.T) {
 			name: "same connection keeps its open window", count: 0, connectedAt: connected,
 			lastGrantedAt: connected.Add(time.Second), grace: grace, now: connected.Add(30 * time.Second),
 			want: true,
-			why: "the grace is a window on the connection, not a single heartbeat",
+			why:  "the grace is a window on the connection, not a single heartbeat",
 		},
 		{
 			name: "flapping bridge cannot renew the grace", count: 0, connectedAt: connected,

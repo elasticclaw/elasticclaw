@@ -84,11 +84,19 @@ func heartbeatShouldEscalate(unhealthyCount, gatewayUnhealthyMax int, status str
 	return unhealthyCount == gatewayUnhealthyMax && status == "connected" && bootstrapOK
 }
 
-func watchdogAction(nowAt time.Time, status string, bootstrapOK, gatewayReady bool, lastStatusAt, lastUserMessageAt, warnedAt time.Time, silentDeathMax time.Duration) watchdogHealthAction {
+func watchdogAction(nowAt time.Time, status string, bootstrapOK, gatewayReady bool, lastStatusAt, lastHeartbeatAt, lastUserMessageAt, warnedAt time.Time, silentDeathMax time.Duration) watchdogHealthAction {
 	if status != "connected" || !bootstrapOK || !gatewayReady {
 		return watchdogHealthNone
 	}
-	silentFor := nowAt.Sub(lastStatusAt)
+	// The most recent proof of life wins. lastStatusAt is fed by status_pong on
+	// a second WebSocket; lastHeartbeatAt by the bridge's 15-second heartbeat on
+	// the main one. Taking only the former let a lost status channel condemn a
+	// claw whose bridge was reporting in continuously.
+	liveAt := lastStatusAt
+	if lastHeartbeatAt.After(liveAt) {
+		liveAt = lastHeartbeatAt
+	}
+	silentFor := nowAt.Sub(liveAt)
 	if userSilentFor := nowAt.Sub(lastUserMessageAt); userSilentFor < silentFor {
 		silentFor = userSilentFor
 	}
