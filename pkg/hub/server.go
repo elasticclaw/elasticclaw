@@ -4069,7 +4069,6 @@ echo "openclaw package_version=$PACKAGE_VERSION"; \
 case "$OPENCLAW_VERSION" in *%s*) ;; *) echo "expected openclaw %s"; exit 1 ;; esac`, daytonaOpenClawVersion, daytonaOpenClawVersion)); err != nil {
 		return err
 	}
-
 	// Step 1b: Install Nix (Determinate Systems) if requested.
 	var nixEnabled int
 	_ = s.db.QueryRow(`SELECT nix FROM claws WHERE id=?`, clawID).Scan(&nixEnabled)

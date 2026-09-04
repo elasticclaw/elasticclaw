@@ -1304,7 +1304,7 @@ func (s *Server) checkCIStatus(pr clawPR, token string) {
 	}
 
 	if conclusion == ciConclusionFailure {
-		msg := fmt.Sprintf("CI failed on PR #%d ([%s](%s)):\n\n%s\n\nPlease fix these failures on the same branch.",
+		msg := fmt.Sprintf("CI failed on PR #%d ([%s](%s)):\n\n%s\n\nPlease fix these failures on the same branch. Preserve completed task outputs and reviewer evidence; do not delete or weaken them merely to make CI pass. Diagnose the actual failing check.",
 			pr.prNumber, pr.repo, pr.prURL, strings.Join(failures, "\n"))
 		s.injectUserMessage(pr.clawID, msg)
 		return
