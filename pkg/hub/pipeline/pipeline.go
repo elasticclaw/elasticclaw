@@ -206,14 +206,17 @@ type MoveIssueAction struct {
 
 // CommentIssueAction posts a comment to the workflow's associated issue on
 // stage entry. Body is required and is rendered with the same template data
-// as OnEnter.Inject ({{.Issue.*}}, {{.Inputs.*}}, {{.Outputs.*}}, and
-// {{.PullRequest.*}} where available). IssueID is optional and overrides the
-// trigger issue when set; it accepts the same template syntax as
-// MoveIssueAction.IssueID.
+// as OnEnter.Inject ({{.Inputs.*}}, {{.Outputs.*}}, and {{.PullRequest.*}}
+// where available). IssueID is optional and overrides the trigger issue when
+// set; it accepts the same template syntax as MoveIssueAction.IssueID.
+//
+// Note: {{.Issue.*}} template fields are only fully populated for GitHub
+// Issues and Linear. Jira and Shortcut expose only {{.Issue.Identifier}} —
+// {{.Issue.Title}} and {{.Issue.URL}} render as empty strings for those
+// trackers because comment_issue does not fetch the issue for them.
 type CommentIssueAction struct {
-	Body            string `yaml:"body"`
-	IssueID         string `yaml:"issue_id,omitempty"`
-	ContinueOnError bool   `yaml:"continue_on_error,omitempty"`
+	Body    string `yaml:"body"`
+	IssueID string `yaml:"issue_id,omitempty"`
 }
 
 // RunAction executes a shell command in the agent workspace before the
@@ -417,14 +420,13 @@ func (oe *OnEnter) UnmarshalYAML(value *yaml.Node) error {
 	case 0:
 		// comment_issue not present.
 	case yaml.ScalarNode:
-		// Bare string: treat as body, no explicit issue_id or continue_on_error.
+		// Bare string: treat as body, no explicit issue_id.
 		oe.CommentIssue = CommentIssueAction{Body: raw.CommentIssueRaw.Value}
 		oe.commentIssueRawPresent = true
 	case yaml.MappingNode:
-		if len(raw.CommentIssueRaw.Content) == 0 {
-			// Empty mapping — treat as absent so `comment_issue: {}` is a no-op.
-			break
-		}
+		// Any mapping (including `{}`) is treated as present so Validate can
+		// reject empty bodies uniformly. Rule: if the key is present in any
+		// form, `body` must be non-empty.
 		var cia CommentIssueAction
 		if err := raw.CommentIssueRaw.Decode(&cia); err != nil {
 			return err

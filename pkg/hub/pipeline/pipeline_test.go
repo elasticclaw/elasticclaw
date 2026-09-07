@@ -218,9 +218,6 @@ stages:
 	if action.IssueID != "" {
 		t.Fatalf("issue_id = %q, want empty", action.IssueID)
 	}
-	if action.ContinueOnError {
-		t.Fatal("continue_on_error should default to false")
-	}
 }
 
 func TestParseCommentIssueMapping(t *testing.T) {
@@ -232,7 +229,6 @@ stages:
       comment_issue:
         body: "Ticket: {{.Issue.Identifier}}"
         issue_id: "{{.Inputs.issue_id}}"
-        continue_on_error: true
 `))
 	if err != nil {
 		t.Fatalf("Parse error: %v", err)
@@ -243,9 +239,6 @@ stages:
 	}
 	if action.IssueID != "{{.Inputs.issue_id}}" {
 		t.Fatalf("issue_id = %q", action.IssueID)
-	}
-	if !action.ContinueOnError {
-		t.Fatal("expected continue_on_error=true")
 	}
 }
 
@@ -282,19 +275,19 @@ stages:
 	}
 }
 
-func TestParseCommentIssueEmptyMappingTreatedAsAbsent(t *testing.T) {
-	p, err := pipeline.Parse([]byte(`
+func TestParseCommentIssueEmptyMappingRejected(t *testing.T) {
+	_, err := pipeline.Parse([]byte(`
 stages:
   - id: notify
     entry: true
     on_enter:
       comment_issue: {}
 `))
-	if err != nil {
-		t.Fatalf("Parse error: %v", err)
+	if err == nil {
+		t.Fatal("expected parse error for empty comment_issue mapping")
 	}
-	if p.Stages[0].OnEnter.CommentIssue != (pipeline.CommentIssueAction{}) {
-		t.Fatal("empty mapping should be treated as absent")
+	if !strings.Contains(err.Error(), "body must be a non-empty string") {
+		t.Fatalf("error = %v, want mention of body must be a non-empty string", err)
 	}
 }
 

@@ -1331,7 +1331,7 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, ctx pipelineCon
 
 	{
 		// If pipeline specifies an explicit issue_id, resolve it from templates or use directly
-		resolvedIssueID, _ := s.resolveIssueID(clawID, ctx, stage.OnEnter.MoveIssue.IssueID, issueID)
+		resolvedIssueID := s.resolveIssueID(clawID, ctx, stage.OnEnter.MoveIssue.IssueID, issueID)
 		if resolvedIssueID == "" {
 			goto commentIssue
 		}
@@ -1449,10 +1449,11 @@ func (s *Server) loadPipelinePullRequest(clawID string) *pipelinePullRequest {
 // support) against the fallback trigger issue. When explicit is empty, the
 // fallback is returned unchanged. Template rendering follows the same
 // semantics as the on_enter.inject path — {{.Inputs.*}} for manual triggers
-// and {{.Issue.*}} for automatic triggers.
-func (s *Server) resolveIssueID(clawID string, ctx pipelineContext, explicit, fallback string) (string, error) {
+// and {{.Issue.*}} for automatic triggers. Template parse/execute failures
+// fall back silently to the unrendered value (matching the inject path).
+func (s *Server) resolveIssueID(clawID string, ctx pipelineContext, explicit, fallback string) string {
 	if explicit == "" {
-		return fallback, nil
+		return fallback
 	}
 	resolved := explicit
 	if strings.Contains(resolved, "{{.Inputs.") {
@@ -1503,7 +1504,7 @@ func (s *Server) resolveIssueID(clawID string, ctx pipelineContext, explicit, fa
 									resolved = buf.String()
 								}
 							}
-							return resolved, nil
+							return resolved
 						}
 					}
 				}
@@ -1522,7 +1523,7 @@ func (s *Server) resolveIssueID(clawID string, ctx pipelineContext, explicit, fa
 			}
 		}
 	}
-	return resolved, nil
+	return resolved
 }
 
 // runCommentIssueOnStage posts a rendered comment_issue body to the workflow's
@@ -1535,7 +1536,7 @@ func (s *Server) runCommentIssueOnStage(clawID string, stage pipeline.Stage, ctx
 		return nil
 	}
 
-	resolvedIssueID, _ := s.resolveIssueID(clawID, ctx, stage.OnEnter.CommentIssue.IssueID, issueID)
+	resolvedIssueID := s.resolveIssueID(clawID, ctx, stage.OnEnter.CommentIssue.IssueID, issueID)
 	if resolvedIssueID == "" {
 		return nil
 	}
@@ -1616,9 +1617,10 @@ func (s *Server) runCommentIssueOnStage(clawID string, stage pipeline.Stage, ctx
 			return nil
 		}
 		s.publishHubNotice(clawID, fmt.Sprintf("[hub] ▶ Posting comment_issue for stage %q", stage.ID))
-		if err := s.retryTrackerMove("comment jira issue", func() error {
-			return s.commentJiraIssue(tracker, resolvedIssueID, renderedBody)
-		}); err != nil {
+		// Comment creation is not idempotent — a single POST attempt avoids
+		// duplicate comments when a 502/timeout arrives after the tracker
+		// already persisted the comment.
+		if err := s.commentJiraIssue(tracker, resolvedIssueID, renderedBody); err != nil {
 			return handleErr("jira", err)
 		}
 		log.Printf("[pipeline] commented jira issue %s", resolvedIssueID)
@@ -1635,9 +1637,7 @@ func (s *Server) runCommentIssueOnStage(clawID string, stage pipeline.Stage, ctx
 			return nil
 		}
 		s.publishHubNotice(clawID, fmt.Sprintf("[hub] ▶ Posting comment_issue for stage %q", stage.ID))
-		if err := s.retryTrackerMove("comment shortcut issue", func() error {
-			return commentShortcutIssue(s.resolveShortcutBaseURL(), scToken, scID, renderedBody)
-		}); err != nil {
+		if err := commentShortcutIssue(s.resolveShortcutBaseURL(), scToken, scID, renderedBody); err != nil {
 			return handleErr("shortcut", err)
 		}
 		log.Printf("[pipeline] commented shortcut issue %s", scID)
@@ -1662,13 +1662,14 @@ func (s *Server) runCommentIssueOnStage(clawID string, stage pipeline.Stage, ctx
 		}
 		s.publishHubNotice(clawID, fmt.Sprintf("[hub] ▶ Posting comment_issue for stage %q", stage.ID))
 		base := s.githubBaseURL
-		if err := s.retryTrackerMove("comment github issue", func() error {
-			if base == "" {
-				return commentGitHubIssue(ghToken, repo, issueNum, renderedBody)
-			}
-			return commentGitHubIssueWithBase(base, ghToken, repo, issueNum, renderedBody)
-		}); err != nil {
-			return handleErr("github", err)
+		var postErr error
+		if base == "" {
+			postErr = commentGitHubIssue(ghToken, repo, issueNum, renderedBody)
+		} else {
+			postErr = commentGitHubIssueWithBase(base, ghToken, repo, issueNum, renderedBody)
+		}
+		if postErr != nil {
+			return handleErr("github", postErr)
 		}
 		log.Printf("[pipeline] commented github issue %s", resolvedIssueID)
 		return nil
@@ -1681,9 +1682,7 @@ func (s *Server) runCommentIssueOnStage(clawID string, stage pipeline.Stage, ctx
 		return nil
 	}
 	s.publishHubNotice(clawID, fmt.Sprintf("[hub] ▶ Posting comment_issue for stage %q", stage.ID))
-	if err := s.retryTrackerMove("comment linear issue", func() error {
-		return s.commentLinearIssue(linearToken, resolvedIssueID, renderedBody)
-	}); err != nil {
+	if err := s.commentLinearIssue(linearToken, resolvedIssueID, renderedBody); err != nil {
 		return handleErr("linear", err)
 	}
 	log.Printf("[pipeline] commented linear issue %s", resolvedIssueID)
