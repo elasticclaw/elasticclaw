@@ -1527,9 +1527,9 @@ func (s *Server) resolveIssueID(clawID string, ctx pipelineContext, explicit, fa
 
 // runCommentIssueOnStage posts a rendered comment_issue body to the workflow's
 // tracker issue. Failures are always logged and surfaced as an in-transcript
-// warning; they only propagate as an error when ContinueOnError is false and
-// the stage is not terminal, so a failed comment on a terminal stage never
-// blocks completion.
+// warning, then swallowed — mirroring the other tracker-touching on_enter
+// actions (move_issue, add_labels, remove_labels, close_issue) so a transient
+// tracker error never aborts the workflow run.
 func (s *Server) runCommentIssueOnStage(clawID string, stage pipeline.Stage, ctx pipelineContext, issueID string) error {
 	if strings.TrimSpace(stage.OnEnter.CommentIssue.Body) == "" {
 		return nil
@@ -1606,13 +1606,7 @@ func (s *Server) runCommentIssueOnStage(clawID string, stage pipeline.Stage, ctx
 	handleErr := func(integration string, err error) error {
 		log.Printf("[pipeline] failed to comment %s issue %s: %v", integration, resolvedIssueID, err)
 		s.injectHubMessageByID(clawID, "[hub] Warning: comment_issue failed: "+err.Error())
-		if stage.Terminal {
-			return nil
-		}
-		if stage.OnEnter.CommentIssue.ContinueOnError {
-			return nil
-		}
-		return err
+		return nil
 	}
 
 	if isJira {

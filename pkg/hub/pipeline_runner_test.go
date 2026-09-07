@@ -2679,7 +2679,7 @@ func TestRunOnEnterCommentIssueShortcutBareNumberGetsPrefix(t *testing.T) {
 	}
 }
 
-func TestRunOnEnterCommentIssueContinueOnErrorSwallowsFailure(t *testing.T) {
+func TestRunOnEnterCommentIssueNonTerminalSwallowsError(t *testing.T) {
 	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
 	mock := newCommentIssueMock(t, http.StatusInternalServerError)
 	s, db := NewTestServerWithConfig(t, &types.HubConfig{}, "", "", "")
@@ -2691,7 +2691,7 @@ func TestRunOnEnterCommentIssueContinueOnErrorSwallowsFailure(t *testing.T) {
 	SaveWorkspaceForTest(t, workspace, []*types.WorkflowConfig{workflow})
 	SaveWorkspaceIssueTrackerWithBaseForTest(t, "workspace", "jira", "default", mock.URL, "u", "t", "")
 
-	const clawID = "claw-comment-continue"
+	const clawID = "claw-comment-nonterm-swallow"
 	if _, err := db.Exec(
 		`INSERT INTO claws(id, tenant_id, name, template, status, created_at) VALUES(?,?,?,?,?,datetime('now'))`,
 		clawID, "test-tenant-id", "claw", "base", "connected",
@@ -2699,48 +2699,20 @@ func TestRunOnEnterCommentIssueContinueOnErrorSwallowsFailure(t *testing.T) {
 		t.Fatalf("insert claw: %v", err)
 	}
 
-	stage := pipeline.Stage{
-		ID: "notify",
-		OnEnter: pipeline.OnEnter{
-			CommentIssue: pipeline.CommentIssueAction{Body: "hi", ContinueOnError: true},
-		},
-	}
-	if _, err := s.runOnEnter(clawID, stage, pipelineContext{Workspace: workspace, Workflow: workflow, IssueID: "PROJ-1"}); err != nil {
-		t.Fatalf("runOnEnter returned error with ContinueOnError=true: %v", err)
-	}
-	if !clawHasHubMessage(t, db, clawID, "comment_issue failed") {
-		t.Fatal("expected warning message injected on failure")
-	}
-}
-
-func TestRunOnEnterCommentIssueNonTerminalReturnsError(t *testing.T) {
-	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
-	mock := newCommentIssueMock(t, http.StatusInternalServerError)
-	s, db := NewTestServerWithConfig(t, &types.HubConfig{}, "", "", "")
-	s.jiraBaseURL = mock.URL
-	s.trackerMoveBackoff = func(int) time.Duration { return 0 }
-
-	workspace := &types.WorkspaceConfig{Name: "workspace"}
-	workflow := &types.WorkflowConfig{Name: "wf", Integration: "jira", Workspace: "default"}
-	SaveWorkspaceForTest(t, workspace, []*types.WorkflowConfig{workflow})
-	SaveWorkspaceIssueTrackerWithBaseForTest(t, "workspace", "jira", "default", mock.URL, "u", "t", "")
-
-	const clawID = "claw-comment-nonterm-err"
-	if _, err := db.Exec(
-		`INSERT INTO claws(id, tenant_id, name, template, status, created_at) VALUES(?,?,?,?,?,datetime('now'))`,
-		clawID, "test-tenant-id", "claw", "base", "connected",
-	); err != nil {
-		t.Fatalf("insert claw: %v", err)
-	}
-
+	// Non-terminal stage with a failing comment must not return an error —
+	// tracker comment failures are logged + injected as warnings only,
+	// matching move_issue/add_labels/close_issue.
 	stage := pipeline.Stage{
 		ID: "notify",
 		OnEnter: pipeline.OnEnter{
 			CommentIssue: pipeline.CommentIssueAction{Body: "hi"},
 		},
 	}
-	if _, err := s.runOnEnter(clawID, stage, pipelineContext{Workspace: workspace, Workflow: workflow, IssueID: "PROJ-1"}); err == nil {
-		t.Fatal("expected runOnEnter to return error on non-terminal stage with ContinueOnError=false")
+	if _, err := s.runOnEnter(clawID, stage, pipelineContext{Workspace: workspace, Workflow: workflow, IssueID: "PROJ-1"}); err != nil {
+		t.Fatalf("runOnEnter returned error on non-terminal stage with failing comment: %v", err)
+	}
+	if !clawHasHubMessage(t, db, clawID, "comment_issue failed") {
+		t.Fatal("expected warning message injected on failure")
 	}
 }
 

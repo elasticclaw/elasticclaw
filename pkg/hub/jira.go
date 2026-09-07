@@ -740,7 +740,7 @@ func (s *Server) queryJiraIssues(tracker workspaceIssueTracker, since time.Time,
 		requestBody := map[string]any{
 			"jql":        jql,
 			"maxResults": 100,
-			"fields":     []string{"*all"},
+			"fields":     []string{"summary", "description", "status", "labels", "assignee", "project", "updated"},
 		}
 		if nextPageToken != "" {
 			requestBody["nextPageToken"] = nextPageToken
