@@ -40,7 +40,7 @@ func (s *Server) handleCronWorkflowTrigger(w http.ResponseWriter, r *http.Reques
 			http.Error(w, "Cron scheduler not available", http.StatusServiceUnavailable)
 			return
 		}
-		key, err = s.cronSchedulerV2.manualTrigger(workspace, workflow)
+		key, err = s.cronSchedulerV2.manualTrigger(workspace, workflow, tenantFromCtx(r))
 	} else {
 		if s.cronScheduler == nil {
 			http.Error(w, "Cron scheduler not available", http.StatusServiceUnavailable)
@@ -103,7 +103,7 @@ func (s *Server) handleCronWorkflowRuns(w http.ResponseWriter, r *http.Request) 
 		runs = append(runs, v1Runs...)
 	}
 	if s.cronSchedulerV2 != nil {
-		v2Runs, err := s.cronSchedulerV2.getRunHistory(workspace, workflow, limit)
+		v2Runs, err := s.cronSchedulerV2.getRunHistory(workspace, workflow, tenantFromCtx(r), limit)
 		if err != nil {
 			http.Error(w, fmt.Sprintf("Failed to get run history: %v", err), http.StatusInternalServerError)
 			return
@@ -152,7 +152,7 @@ func (s *Server) handleCronWorkflowRun(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if run == nil && s.cronSchedulerV2 != nil {
-		run, err = s.cronSchedulerV2.getRunByID(workspace, workflow, runID)
+		run, err = s.cronSchedulerV2.getRunByID(workspace, workflow, runID, tenantFromCtx(r))
 		if err != nil {
 			http.Error(w, fmt.Sprintf("Failed to get run: %v", err), http.StatusInternalServerError)
 			return

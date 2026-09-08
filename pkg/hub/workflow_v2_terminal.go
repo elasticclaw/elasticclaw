@@ -30,6 +30,7 @@ func (s *Server) maybeFinishWorkflowV2Parent(ctx context.Context, runID string) 
 	}
 	if s.cronSchedulerV2 != nil {
 		s.cronSchedulerV2.finishRunByV2RunID(run.ID, run.Status)
+		s.cronSchedulerV2.decrementRunning(run.WorkspaceName + "/" + run.WorkflowName)
 	}
 	if strings.TrimSpace(run.TaskRunID) == "" {
 		// No parent task run; nothing to finish.

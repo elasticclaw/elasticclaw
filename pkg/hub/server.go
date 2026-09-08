@@ -681,11 +681,17 @@ func (s *Server) run(ctx context.Context, opts ...RunOptions) error {
 		// ListenAndServe returns as soon as Shutdown starts. Wait for it to
 		// finish draining active requests before closing their database.
 		<-shutdownDone
-		// Stop the notifier loops and dependency watcher before the DB closes: a tick in flight
-		// could otherwise complete an external Slack send and then fail the
-		// delivery-row insert (or scheduled dedupe-state upsert) against the
-		// closed DB, re-sending the event after restart (the in-memory retry
-		// stash dies with the process).
+		// Stop the notifier loops, cron schedulers, and dependency watcher
+		// before the DB closes: a tick in flight could otherwise complete an
+		// external send and then fail the delivery-row insert (or scheduled
+		// dedupe-state upsert) against the closed DB, re-sending the event
+		// after restart (the in-memory retry stash dies with the process).
+		if s.cronScheduler != nil {
+			s.cronScheduler.stop()
+		}
+		if s.cronSchedulerV2 != nil {
+			s.cronSchedulerV2.stop()
+		}
 		s.stopLifecycleNotifier(10 * time.Second)
 		s.stopScheduledNotifier(10 * time.Second)
 		s.stopInfraNotifier(10 * time.Second)

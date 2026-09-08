@@ -25,6 +25,11 @@ type cronSchedulerV2 struct {
 	cron      *cron.Cron
 	entries   map[string]cron.EntryID         // workflow key -> cron entry ID
 	workflows map[string]*scheduledWorkflowV2 // workflow key -> workflow
+
+	// running tracks in-flight runs per workflow key to serialize overlap
+	// checks and admissions within a single process, matching the v1 scheduler.
+	runningMu sync.Mutex
+	running   map[string]int // workflow key -> in-flight run count
 }
 
 type scheduledWorkflowV2 struct {
@@ -39,6 +44,7 @@ func newCronSchedulerV2(srv *Server) *cronSchedulerV2 {
 		srv:       srv,
 		entries:   make(map[string]cron.EntryID),
 		workflows: make(map[string]*scheduledWorkflowV2),
+		running:   make(map[string]int),
 	}
 }
 
@@ -132,11 +138,14 @@ func (cs *cronSchedulerV2) reloadWorkflows() error {
 		}
 	}
 
-	// Add or update entries
+	// Add or update entries. Always refresh the stored workflow snapshot so a
+	// reload picks up body/policy changes even when the cron expression is
+	// unchanged.
 	for key, sw := range newWorkflows {
 		if _, ok := cs.entries[key]; ok {
 			old := cs.workflows[key]
 			if old != nil && old.trigger.Schedule == sw.trigger.Schedule && old.trigger.Timezone == sw.trigger.Timezone {
+				cs.workflows[key] = sw
 				continue
 			}
 			cs.cron.Remove(cs.entries[key])
@@ -186,50 +195,55 @@ type cronJobV2 struct {
 }
 
 func (j *cronJobV2) Run() {
-	_, _ = j.scheduler.runWorkflow(j.workflow)
+	_, _ = j.scheduler.runWorkflow(j.workflow, "")
 }
 
-func (cs *cronSchedulerV2) runWorkflow(sw *scheduledWorkflowV2) (workflowRunStartStatus, error) {
+func (cs *cronSchedulerV2) runWorkflow(sw *scheduledWorkflowV2, tenantID string) (workflowRunStartStatus, error) {
 	key := sw.key
-	tenantID, err := cs.firstTenantID()
-	if err != nil {
-		log.Printf("[cron-v2] no tenant for %s: %v", key, err)
-		return workflowRunFailed, err
+	if strings.TrimSpace(tenantID) == "" {
+		var err error
+		tenantID, err = cs.firstTenantID()
+		if err != nil {
+			log.Printf("[cron-v2] no tenant for %s: %v", key, err)
+			return workflowRunFailed, err
+		}
 	}
 
 	store := workflowv2.NewStore(cs.srv.db)
 	now := time.Now().UTC()
 
-	active, err := cs.countActiveV2Runs(store, sw.workspace.Name, sw.workflow.Name)
-	if err != nil {
-		log.Printf("[cron-v2] failed to count active runs for %s: %v", key, err)
-		return workflowRunFailed, err
-	}
-
 	overlapPolicy := strings.ToLower(strings.TrimSpace(sw.trigger.OverlapPolicy))
 	if overlapPolicy == "" {
 		overlapPolicy = "skip"
 	}
-	if active > 0 {
-		switch overlapPolicy {
-		case "skip":
-			reason := fmt.Sprintf("%d run(s) still active", active)
-			_, _ = store.RecordCronRunSkipped(context.Background(), tenantID, sw.workspace.Name, sw.workflow.Name, "cron", map[string]interface{}{
-				"reason": reason,
-			})
-			log.Printf("[cron-v2] skipping %s (%s)", key, reason)
-			return workflowRunSkipped, nil
-		case "parallel":
-			// allow parallel execution
-		default:
-			reason := fmt.Sprintf("unknown overlap policy %q", sw.trigger.OverlapPolicy)
-			_, _ = store.RecordCronRunSkipped(context.Background(), tenantID, sw.workspace.Name, sw.workflow.Name, "cron", map[string]interface{}{
-				"reason": reason,
-			})
-			log.Printf("[cron-v2] skipping %s (%s)", key, reason)
-			return workflowRunSkipped, nil
-		}
+
+	// Serialize overlap admission. The in-memory lock prevents concurrent ticks
+	// and manual triggers from racing; the DB count catches runs that were active
+	// before a restart.
+	cs.runningMu.Lock()
+	inMemActive := cs.running[key]
+	var dbActive int
+	var dbErr error
+	if inMemActive == 0 || overlapPolicy == "parallel" {
+		dbActive, dbErr = cs.countActiveV2Runs(store, sw.workspace.Name, sw.workflow.Name)
 	}
+	if dbErr != nil {
+		cs.runningMu.Unlock()
+		log.Printf("[cron-v2] failed to count active runs for %s: %v", key, dbErr)
+		return workflowRunFailed, dbErr
+	}
+	active := inMemActive + dbActive
+	if active > 0 && overlapPolicy != "parallel" {
+		cs.runningMu.Unlock()
+		reason := fmt.Sprintf("%d run(s) still active", active)
+		_, _ = store.RecordCronRunSkipped(context.Background(), tenantID, sw.workspace.Name, sw.workflow.Name, "cron", map[string]interface{}{
+			"reason": reason,
+		})
+		log.Printf("[cron-v2] skipping %s (%s)", key, reason)
+		return workflowRunSkipped, nil
+	}
+	cs.running[key]++
+	cs.runningMu.Unlock()
 
 	// Record the cron history row before provisioning so a failure is still visible.
 	cronRunID, err := store.RecordCronRunStarted(context.Background(), tenantID, sw.workspace.Name, sw.workflow.Name, "cron", map[string]interface{}{
@@ -246,10 +260,12 @@ func (cs *cronSchedulerV2) runWorkflow(sw *scheduledWorkflowV2) (workflowRunStar
 	workspaceYAML := []byte(sw.workspace.Files["elasticclaw-config.yaml"])
 	workflowYAML := []byte(sw.workflow.RawConfig)
 
+	createdV2Run := false
 	clawID, _, err := cs.srv.createClawFromWorkflowWithOptions(
 		sw.workspace,
 		sw.workflow,
 		workflowCreateOptions{
+			tenantID: tenantID,
 			reason:   fmt.Sprintf("cron run %s at %s", cronRunID, now.Format(time.RFC3339)),
 			clawName: fmt.Sprintf("%s-%s", sw.workflow.Name, now.Format("20060102-150405")),
 			beforeProvision: func(ctx context.Context, clawID, provisionTenantID string) error {
@@ -265,6 +281,7 @@ func (cs *cronSchedulerV2) runWorkflow(sw *scheduledWorkflowV2) (workflowRunStar
 				if err != nil {
 					return err
 				}
+				createdV2Run = true
 				if err := store.UpdateCronRunForV2Run(ctx, cronRunID, run.ID, clawID); err != nil {
 					return err
 				}
@@ -289,6 +306,11 @@ func (cs *cronSchedulerV2) runWorkflow(sw *scheduledWorkflowV2) (workflowRunStar
 		if failErr := store.FailCronRun(context.Background(), cronRunID, err.Error()); failErr != nil {
 			log.Printf("[cron-v2] failed to mark run %s as failed: %v", cronRunID, failErr)
 		}
+		if !createdV2Run {
+			// A v2 run was never created, so the terminal cleanup hook will not
+			// run to release our admission slot.
+			cs.decrementRunning(key)
+		}
 		return workflowRunFailed, err
 	}
 
@@ -296,9 +318,17 @@ func (cs *cronSchedulerV2) runWorkflow(sw *scheduledWorkflowV2) (workflowRunStar
 	return workflowRunStarted, nil
 }
 
+func (cs *cronSchedulerV2) decrementRunning(key string) {
+	cs.runningMu.Lock()
+	defer cs.runningMu.Unlock()
+	if cs.running[key] > 0 {
+		cs.running[key]--
+	}
+}
+
 // manualTrigger triggers a v2 cron workflow run manually. It matches v1
 // cronScheduler.manualTrigger: any enabled cron workflow can be triggered.
-func (cs *cronSchedulerV2) manualTrigger(workspaceName, workflowName string) (string, error) {
+func (cs *cronSchedulerV2) manualTrigger(workspaceName, workflowName, tenantID string) (string, error) {
 	workspaces, err := cs.srv.loadAllWorkspaces()
 	if err != nil {
 		return "", err
@@ -324,7 +354,7 @@ func (cs *cronSchedulerV2) manualTrigger(workspaceName, workflowName string) (st
 				trigger:   trigger,
 				key:       workspaceName + "/" + workflowName,
 			}
-			status, err := cs.runWorkflow(sw)
+			status, err := cs.runWorkflow(sw, tenantID)
 			if status == workflowRunSkipped {
 				return "", &cronTriggerSkippedError{msg: fmt.Sprintf("workflow %s/%s: run skipped due to overlap policy", workspaceName, workflowName)}
 			}
@@ -375,14 +405,18 @@ func (cs *cronSchedulerV2) getNextRuns() map[string]time.Time {
 	return result
 }
 
-// getRunHistory returns the cron run history for a v2 workflow.
-func (cs *cronSchedulerV2) getRunHistory(workspaceName, workflowName string, limit int) ([]types.WorkflowRun, error) {
+// getRunHistory returns the cron run history for a v2 workflow in the given
+// tenant. An empty tenantID falls back to the first tenant for unattended ticks.
+func (cs *cronSchedulerV2) getRunHistory(workspaceName, workflowName, tenantID string, limit int) ([]types.WorkflowRun, error) {
 	if limit <= 0 {
 		limit = 50
 	}
-	tenantID, err := cs.firstTenantID()
-	if err != nil {
-		return nil, err
+	if strings.TrimSpace(tenantID) == "" {
+		var err error
+		tenantID, err = cs.firstTenantID()
+		if err != nil {
+			return nil, err
+		}
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -397,11 +431,15 @@ func (cs *cronSchedulerV2) getRunHistory(workspaceName, workflowName string, lim
 	return runs, nil
 }
 
-// getRunByID returns a single v2 cron run by ID.
-func (cs *cronSchedulerV2) getRunByID(workspaceName, workflowName, runID string) (*types.WorkflowRun, error) {
-	tenantID, err := cs.firstTenantID()
-	if err != nil {
-		return nil, err
+// getRunByID returns a single v2 cron run by ID in the given tenant. An empty
+// tenantID falls back to the first tenant for unattended ticks.
+func (cs *cronSchedulerV2) getRunByID(workspaceName, workflowName, runID, tenantID string) (*types.WorkflowRun, error) {
+	if strings.TrimSpace(tenantID) == "" {
+		var err error
+		tenantID, err = cs.firstTenantID()
+		if err != nil {
+			return nil, err
+		}
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

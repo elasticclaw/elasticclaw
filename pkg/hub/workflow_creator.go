@@ -29,6 +29,9 @@ type workflowCreateOptions struct {
 	issueCreatedAt       time.Time
 	reason               string
 	triggerActor         *triggerActor
+	// tenantID, if set, overrides the default first-tenant fallback for the
+	// claw/task-run creation. Empty values keep the existing behavior.
+	tenantID string
 	// beforeProvision runs after the claw and analytics row exist but before
 	// provider work begins. Workflow v2 uses it to atomically create the run and
 	// initial attempt, closing the bridge-registration race.
@@ -100,9 +103,11 @@ func (s *Server) createClawFromWorkflowWithOptions(workspace *types.WorkspaceCon
 		}
 	}
 
-	var tenantID string
-	if err := s.db.QueryRow(`SELECT id FROM tenants LIMIT 1`).Scan(&tenantID); err != nil {
-		return "", false, fmt.Errorf("no tenant: %w", err)
+	tenantID := opts.tenantID
+	if strings.TrimSpace(tenantID) == "" {
+		if err := s.db.QueryRow(`SELECT id FROM tenants LIMIT 1`).Scan(&tenantID); err != nil {
+			return "", false, fmt.Errorf("no tenant: %w", err)
+		}
 	}
 
 	provider := workflow.Provider

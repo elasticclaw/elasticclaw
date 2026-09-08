@@ -150,12 +150,18 @@ func convertWorkflowV1ToV2(data []byte, opts Options) (Result, error) {
 		out.Transitions = transitions
 	}
 	if wf.Trigger != nil && wf.Trigger.Cron != nil {
+		ct := wf.Trigger.Cron
+		overlapPolicy := ct.OverlapPolicy
+		if strings.EqualFold(overlapPolicy, "queue") {
+			overlapPolicy = "skip"
+			appendWarning(&warnings, "trigger.cron.overlap_policy %q is not supported in workflow v2; converted to %q", ct.OverlapPolicy, overlapPolicy)
+		}
 		out.Trigger = &v2.WorkflowTrigger{
 			Cron: &v2.CronTrigger{
-				Schedule:      wf.Trigger.Cron.Schedule,
-				Timezone:      wf.Trigger.Cron.Timezone,
-				OverlapPolicy: wf.Trigger.Cron.OverlapPolicy,
-				Timeout:       wf.Trigger.Cron.Timeout,
+				Schedule:      ct.Schedule,
+				Timezone:      ct.Timezone,
+				OverlapPolicy: overlapPolicy,
+				Timeout:       ct.Timeout,
 			},
 		}
 	} else if wf.Trigger != nil {
