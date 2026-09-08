@@ -928,6 +928,16 @@ const ClawBoardCard = memo(function ClawBoardCard({
                   const step = demoteStaleRunning(pairActivitySteps([message]), false)[0]
                   return step ? <StepRow key={message.id} step={step} density="card" /> : null
                 }
+                if (message.role === "state") {
+                  return (
+                    <div key={message.id} className="flex items-center gap-2 py-1">
+                      <div className="flex-1 h-px bg-border/50" />
+                      <span className="text-[9px] text-muted-foreground/50 uppercase tracking-[0.08em]">state</span>
+                      <span className="text-[9px] text-muted-foreground">{message.content}</span>
+                      <div className="flex-1 h-px bg-border/50" />
+                    </div>
+                  )
+                }
                 const author = messageAuthor(message, currentUserLogin, currentUserResolved)
                 const { body: cardBody, attachments: cardAttachments } = author.kind === "self" || author.kind === "teammate" || author.kind === "unknown"
                   ? splitAttachmentsFooter(message.content)
@@ -1243,6 +1253,19 @@ const MessageBubble = memo(function MessageBubble({
     // fallback for stray rows reaching the bubble path.
     const step = demoteStaleRunning(pairActivitySteps([message]), false)[0]
     return step ? <StepRow step={step} /> : null
+  }
+
+  if (message.role === "state") {
+    return (
+      <div className="flex items-center gap-2 py-2">
+        <div className="flex-1 h-px bg-border/50" />
+        <div className="flex items-center gap-1.5 text-muted-foreground/50">
+          <span className="text-[10px] uppercase tracking-[0.08em]">state</span>
+          <span className="text-[10px] text-muted-foreground">{message.content}</span>
+        </div>
+        <div className="flex-1 h-px bg-border/50" />
+      </div>
+    )
   }
 
   // Thinking indicator

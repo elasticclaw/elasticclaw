@@ -44,6 +44,7 @@ knowledge:
 schema_version: 2
 name: context-delivery
 enabled: true
+manual_trigger: true
 initial_state: gathering
 states:
   gathering:
@@ -169,6 +170,7 @@ knowledge:
 schema_version: 2
 name: guarded-context
 enabled: true
+manual_trigger: true
 initial_state: gathering
 states:
   gathering:

@@ -429,7 +429,7 @@ func (s *controlSupervisor) runConnection(ctx context.Context, binding workflowC
 			if frame.Envelope == nil {
 				return fmt.Errorf("missing control envelope")
 			}
-			receipt, startTask, err := s.acceptHubEnvelope(binding, *frame.Envelope)
+			receipt, startTask, err := s.acceptHubEnvelope(ctx, binding, *frame.Envelope)
 			if err != nil {
 				receipt = typesv2.ControlReceipt{MessageID: frame.Envelope.MessageID,
 					Disposition: typesv2.DispositionRejected, Reason: err.Error()}
@@ -483,7 +483,7 @@ func (s *controlSupervisor) sendOutbox(ctx context.Context, binding workflowCont
 	}
 }
 
-func (s *controlSupervisor) acceptHubEnvelope(binding workflowControlBinding,
+func (s *controlSupervisor) acceptHubEnvelope(ctx context.Context, binding workflowControlBinding,
 	envelope typesv2.ControlEnvelope) (typesv2.ControlReceipt, *typesv2.AgentTask, error) {
 	if envelope.RunID != binding.RunID || envelope.AttemptID != binding.AttemptID {
 		return typesv2.ControlReceipt{}, nil, fmt.Errorf("control envelope identity mismatch")
@@ -524,6 +524,8 @@ func (s *controlSupervisor) acceptHubEnvelope(binding workflowControlBinding,
 			return typesv2.ControlReceipt{}, nil, err
 		}
 		s.setSnapshot(binding, snapshot)
+	case typesv2.MessageExecRunAssign, typesv2.MessageDependencyUpdateAssign:
+		// Command tasks are started after the durable receipt is returned.
 	case typesv2.MessageRunResume:
 	default:
 		return typesv2.ControlReceipt{}, nil, fmt.Errorf("bridge does not support control kind %q", envelope.Kind)
@@ -544,6 +546,9 @@ func (s *controlSupervisor) acceptHubEnvelope(binding workflowControlBinding,
 	}
 	if envelope.Kind == typesv2.MessageRunSuspend || envelope.Kind == typesv2.MessageRunTerminate {
 		s.cancelAllTasks()
+	}
+	if envelope.Kind == typesv2.MessageExecRunAssign || envelope.Kind == typesv2.MessageDependencyUpdateAssign {
+		s.startCommandTask(ctx, binding, envelope.MessageID, envelope.Kind, envelope.TaskID, envelope.Payload)
 	}
 	return typesv2.ControlReceipt{MessageID: envelope.MessageID,
 		Disposition: typesv2.DispositionAccepted, StateVersion: s.stateVersion(binding)}, task, nil

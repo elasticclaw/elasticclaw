@@ -14,12 +14,14 @@ import (
 )
 
 type Attempt struct {
-	ID        string    `json:"id"`
-	RunID     string    `json:"run_id"`
-	ClawID    string    `json:"claw_id"`
-	Number    int       `json:"number"`
-	Status    string    `json:"status"`
-	StartedAt time.Time `json:"started_at"`
+	ID          string    `json:"id"`
+	RunID       string    `json:"run_id"`
+	ClawID      string    `json:"claw_id"`
+	Number      int       `json:"number"`
+	Status      string    `json:"status"`
+	StartedAt   time.Time `json:"started_at"`
+	HeartbeatAt time.Time `json:"heartbeat_at,omitempty"`
+	FinishedAt  time.Time `json:"finished_at,omitempty"`
 }
 
 type ControlBinding struct {

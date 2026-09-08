@@ -157,6 +157,12 @@ func TestRunWorkflowLogsFetchesRunAndActivityMessages(t *testing.T) {
 	started := time.Date(2026, 7, 24, 9, 0, 0, 0, time.UTC)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
+		case "/api/workspaces/default/workflows/dependency-update":
+			_ = json.NewEncoder(w).Encode(workflowCLIView{
+				Name:          "dependency-update",
+				WorkspaceName: "default",
+				SchemaVersion: "v1",
+			})
 		case "/api/workspaces/default/workflows/dependency-update/cron/runs/run-1":
 			_ = json.NewEncoder(w).Encode(types.WorkflowRun{
 				ID:            "run-1",
@@ -196,7 +202,7 @@ func TestRunWorkflowLogsFetchesRunAndActivityMessages(t *testing.T) {
 	t.Setenv("ELASTICCLAW_CLAW_TOKEN", "test-token")
 
 	out, err := captureStdout(func() error {
-		return runWorkflowLogs("default", "dependency-update", "run-1")
+		return runWorkflowLogs("default", "dependency-update", "run-1", "")
 	})
 	if err != nil {
 		t.Fatalf("runWorkflowLogs returned error: %v", err)
@@ -354,6 +360,15 @@ func TestRunWorkflowRunsListsRunsAndShortAgentID(t *testing.T) {
 	finished := started.Add(5 * time.Minute)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		expectedPath := "/api/workspaces/default/workflows/dependency-update/cron/runs"
+		viewPath := "/api/workspaces/default/workflows/dependency-update"
+		if r.URL.Path == viewPath {
+			_ = json.NewEncoder(w).Encode(workflowCLIView{
+				Name:          "dependency-update",
+				WorkspaceName: "default",
+				SchemaVersion: "v1",
+			})
+			return
+		}
 		if r.URL.Path != expectedPath {
 			http.NotFound(w, r)
 			return
@@ -391,6 +406,98 @@ func TestRunWorkflowRunsListsRunsAndShortAgentID(t *testing.T) {
 		t.Fatalf("runWorkflowRuns returned error: %v", err)
 	}
 	for _, want := range []string{"RUN ID", "run-1", "failed", "cron", "claw-123", "provisioning timed out", "Showing 1 run"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("output missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestRunWorkflowV2RunsListsAttempts(t *testing.T) {
+	started := time.Date(2026, 7, 24, 9, 0, 0, 0, time.UTC)
+	finished := started.Add(5 * time.Minute)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/workspaces/default/workflows/delivery":
+			_ = json.NewEncoder(w).Encode(workflowCLIView{
+				Name:          "delivery",
+				WorkspaceName: "default",
+				SchemaVersion: "2",
+			})
+		case "/api/v2/workspaces/default/workflows/delivery/runs":
+			if r.URL.Query().Get("limit") != "10" {
+				http.Error(w, "unexpected limit", http.StatusBadRequest)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"runs": []workflowV2RunHistoryRow{{
+					RunID:         "run-v2-1",
+					AttemptNumber: 1,
+					RunStatus:     "active",
+					AttemptStatus: "active",
+					DisplayPhase:  "plan",
+					TriggerType:   "manual",
+					ClawID:        "claw-1234567890",
+					StartedAt:     started,
+					FinishedAt:    &finished,
+				}},
+				"count": 1,
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	t.Setenv("ELASTICCLAW_HUB_URL", server.URL)
+	t.Setenv("ELASTICCLAW_CLAW_TOKEN", "test-token")
+
+	out, err := captureStdout(func() error {
+		return runWorkflowRuns("default", "delivery", 10)
+	})
+	if err != nil {
+		t.Fatalf("runWorkflowRuns returned error: %v", err)
+	}
+	for _, want := range []string{"RUN ID", "run-v2-1", "1", "active", "manual", "claw-123", "plan", "Showing 1 run"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("output missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestRunWorkflowV2LogsFetchesAttemptLogs(t *testing.T) {
+	started := time.Date(2026, 7, 24, 9, 0, 0, 0, time.UTC)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/workspaces/default/workflows/delivery":
+			_ = json.NewEncoder(w).Encode(workflowCLIView{
+				Name:          "delivery",
+				WorkspaceName: "default",
+				SchemaVersion: "2",
+			})
+		case "/api/v2/workflow-runs/run-v2-1/logs":
+			_ = json.NewEncoder(w).Encode([]types.HubMessage{{
+				ID:        "msg-1",
+				ClawID:    "claw-1234567890",
+				Role:      "activity",
+				Format:    `activity:{"kind":"tool","tool":"bash","command":"ls -la"}`,
+				CreatedAt: started,
+			}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	t.Setenv("ELASTICCLAW_HUB_URL", server.URL)
+	t.Setenv("ELASTICCLAW_CLAW_TOKEN", "test-token")
+
+	out, err := captureStdout(func() error {
+		return runWorkflowLogs("default", "delivery", "run-v2-1", "")
+	})
+	if err != nil {
+		t.Fatalf("runWorkflowLogs returned error: %v", err)
+	}
+	for _, want := range []string{"Agent logs for run run-v2-1", "[bash]", "cmd: ls -la"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("output missing %q:\n%s", want, out)
 		}
