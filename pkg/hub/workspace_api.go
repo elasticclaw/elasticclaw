@@ -255,11 +255,7 @@ func (s *Server) handleWorkspaceWorkflowsPush(w http.ResponseWriter, r *http.Req
 		http.Error(w, "save workflows: "+err.Error(), status)
 		return
 	}
-	if s.cronScheduler != nil {
-		if err := s.cronScheduler.reload(); err != nil {
-			log.Printf("[cron] failed to reload workflows after workflow push for workspace %s: %v", name, err)
-		}
-	}
+	s.reloadCronSchedulers("workflow push", name, "")
 	workflows := make([]WorkflowView, 0, len(req.Workflows))
 	for _, workflow := range req.Workflows {
 		workflows = append(workflows, workflowToView(name, workflow))
@@ -359,11 +355,7 @@ func (s *Server) handleWorkspaceWorkflowPatch(w http.ResponseWriter, r *http.Req
 		http.Error(w, "save workflow: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if s.cronScheduler != nil {
-		if err := s.cronScheduler.reload(); err != nil {
-			log.Printf("[cron] failed to reload workflows after workflow patch for workspace %s workflow %s: %v", workspace.Name, workflow.Name, err)
-		}
-	}
+	s.reloadCronSchedulers("workflow patch", workspace.Name, workflow.Name)
 	jsonOK(w, workflowToView(workspace.Name, workflow))
 }
 
@@ -400,10 +392,11 @@ func (s *Server) handleWorkspaceWorkflowDelete(w http.ResponseWriter, r *http.Re
 	}
 	if s.cronScheduler != nil {
 		s.cronScheduler.removeWorkflow(deletedWorkspaceName, deletedWorkflowName)
-		if err := s.cronScheduler.reload(); err != nil {
-			log.Printf("[cron] failed to reload workflows after workflow delete for workspace %s workflow %s: %v", deletedWorkspaceName, deletedWorkflowName, err)
-		}
 	}
+	if s.cronSchedulerV2 != nil {
+		s.cronSchedulerV2.removeWorkflow(deletedWorkspaceName, deletedWorkflowName)
+	}
+	s.reloadCronSchedulers("workflow delete", deletedWorkspaceName, deletedWorkflowName)
 	jsonOK(w, map[string]string{"deleted": deletedWorkflowName})
 }
 
@@ -676,6 +669,19 @@ func (s *Server) resolveWorkflowConfig(workspaceName, workflowName string) (*typ
 		}
 	}
 	return nil, nil, false, nil
+}
+
+func (s *Server) reloadCronSchedulers(reason, workspaceName, workflowName string) {
+	if s.cronScheduler != nil {
+		if err := s.cronScheduler.reload(); err != nil {
+			log.Printf("[cron] failed to reload workflows after %s for workspace %s workflow %s: %v", reason, workspaceName, workflowName, err)
+		}
+	}
+	if s.cronSchedulerV2 != nil {
+		if err := s.cronSchedulerV2.reload(); err != nil {
+			log.Printf("[cron-v2] failed to reload workflows after %s for workspace %s workflow %s: %v", reason, workspaceName, workflowName, err)
+		}
+	}
 }
 
 func cloneStringMap(values map[string]string) map[string]string {

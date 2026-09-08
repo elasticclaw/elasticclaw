@@ -265,11 +265,36 @@ func Migrate(db *sql.DB) error {
 		acknowledged_at  INTEGER NOT NULL DEFAULT 0
 	);
 	CREATE INDEX IF NOT EXISTS idx_workflow_v2_control_ready ON workflow_v2_control_outbox(status, next_attempt_at);
+
+	CREATE TABLE IF NOT EXISTS workflow_v2_cron_runs (
+		id             TEXT PRIMARY KEY,
+		tenant_id      TEXT NOT NULL,
+		workspace_name TEXT NOT NULL,
+		workflow_name  TEXT NOT NULL,
+		trigger_type   TEXT NOT NULL DEFAULT 'cron',
+		status         TEXT NOT NULL DEFAULT 'pending',  -- 'pending','running','completed','failed','skipped','canceled'
+		result         TEXT NOT NULL DEFAULT '',           -- 'success','failure','skipped','canceled'
+		claw_id        TEXT NOT NULL DEFAULT '',
+		v2_run_id      TEXT NOT NULL DEFAULT '',
+		run_context    TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(run_context) AND json_type(run_context)='object'),
+		created_at     INTEGER NOT NULL,
+		updated_at     INTEGER NOT NULL DEFAULT 0,
+		finished_at    INTEGER NOT NULL DEFAULT 0
+	);
+	CREATE INDEX IF NOT EXISTS idx_workflow_v2_cron_runs_tenant ON workflow_v2_cron_runs(tenant_id, created_at);
+	CREATE INDEX IF NOT EXISTS idx_workflow_v2_cron_runs_workflow ON workflow_v2_cron_runs(tenant_id, workspace_name, workflow_name, created_at);
+	CREATE INDEX IF NOT EXISTS idx_workflow_v2_cron_runs_status ON workflow_v2_cron_runs(tenant_id, status, created_at);
+	CREATE INDEX IF NOT EXISTS idx_workflow_v2_cron_runs_claw ON workflow_v2_cron_runs(claw_id);
+	CREATE INDEX IF NOT EXISTS idx_workflow_v2_cron_runs_v2_run ON workflow_v2_cron_runs(v2_run_id);
+
 	`)
 	if err != nil {
 		return fmt.Errorf("workflow v2 migrate: %w", err)
 	}
 	if err := addColumnIfMissing(db, "workflow_v2_runs", "trigger_type", "TEXT NOT NULL DEFAULT 'manual'"); err != nil {
+		return fmt.Errorf("workflow v2 migrate: %w", err)
+	}
+	if err := addColumnIfMissing(db, "workflow_v2_cron_runs", "updated_at", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return fmt.Errorf("workflow v2 migrate: %w", err)
 	}
 	if err := addColumnIfMissing(db, "workflow_v2_runs", "task_run_id", "TEXT NOT NULL DEFAULT ''"); err != nil {

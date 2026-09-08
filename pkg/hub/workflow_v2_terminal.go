@@ -28,6 +28,9 @@ func (s *Server) maybeFinishWorkflowV2Parent(ctx context.Context, runID string) 
 	if run.Status != workflowv2.RunCompleted && run.Status != workflowv2.RunCancelled {
 		return
 	}
+	if s.cronSchedulerV2 != nil {
+		s.cronSchedulerV2.finishRunByV2RunID(run.ID, run.Status)
+	}
 	if strings.TrimSpace(run.TaskRunID) == "" {
 		// No parent task run; nothing to finish.
 		return

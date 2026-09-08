@@ -7,7 +7,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/elasticclaw/elasticclaw/pkg/hub/workflowv2"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
+	v2types "github.com/elasticclaw/elasticclaw/pkg/types/v2"
 	"github.com/robfig/cron/v3"
 )
 
@@ -322,6 +324,194 @@ func mustLoadLocation(name string) *time.Location {
 		panic(err)
 	}
 	return loc
+}
+
+const cronWorkspaceV2YAML = `
+schema_version: 2
+name: engineering
+execution:
+  provider: noop
+`
+
+const cronWorkflowV2YAML = `
+schema_version: 2
+name: delivery
+enabled: true
+initial_state: s
+states:
+  s:
+    phase: build
+  done:
+    phase: done
+    terminal: true
+trigger:
+  cron:
+    schedule: "0 9 * * *"
+`
+
+const cronWorkflowV2SkipYAML = `
+schema_version: 2
+name: delivery
+enabled: true
+initial_state: s
+states:
+  s:
+    phase: build
+  done:
+    phase: done
+    terminal: true
+trigger:
+  cron:
+    schedule: "0 9 * * *"
+    overlap_policy: skip
+`
+
+func TestCronSchedulerV2StartLoadsWorkflow(t *testing.T) {
+	configDir := t.TempDir()
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", configDir+"/hub.yaml")
+	s, _ := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
+
+	SaveWorkspaceForTest(t, &types.WorkspaceConfig{
+		Name: "engineering",
+		Files: map[string]string{
+			"elasticclaw-config.yaml": cronWorkspaceV2YAML,
+		},
+	}, []*types.WorkflowConfig{{Name: "delivery", RawConfig: cronWorkflowV2YAML}})
+
+	s.cronSchedulerV2 = newCronSchedulerV2(s)
+	s.cronSchedulerV2.cron = cron.New(cron.WithSeconds())
+	if err := s.cronSchedulerV2.reloadWorkflows(); err != nil {
+		t.Fatalf("reload v2 workflows: %v", err)
+	}
+
+	next := s.cronSchedulerV2.getNextRuns()
+	if _, ok := next["engineering/delivery"]; !ok {
+		t.Fatalf("expected engineering/delivery scheduled, got %v", next)
+	}
+}
+
+func TestCronSchedulerV2ManualTriggerAndHistory(t *testing.T) {
+	configDir := t.TempDir()
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", configDir+"/hub.yaml")
+	t.Setenv("ELASTICCLAW_NOOP_PROVIDER", "1")
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{
+		Token: "test-token", ClawToken: "claw-token",
+		Providers: map[string]types.ProviderConfig{"noop": {Type: "noop"}},
+	}, "", "", "")
+
+	SaveWorkspaceForTest(t, &types.WorkspaceConfig{
+		Name: "engineering",
+		Files: map[string]string{
+			"elasticclaw-config.yaml": cronWorkspaceV2YAML,
+		},
+	}, []*types.WorkflowConfig{{Name: "delivery", RawConfig: cronWorkflowV2YAML}})
+
+	s.cronSchedulerV2 = newCronSchedulerV2(s)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/workspaces/engineering/workflows/delivery/cron/trigger", nil)
+	req.Header.Set("Authorization", "Bearer test-token")
+	rr := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("trigger status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+
+	var triggered map[string]string
+	if err := json.Unmarshal(rr.Body.Bytes(), &triggered); err != nil {
+		t.Fatalf("decode trigger: %v", err)
+	}
+	if triggered["workflow"] != "engineering/delivery" {
+		t.Fatalf("unexpected trigger response: %#v", triggered)
+	}
+
+	var cronStatus, v2RunID string
+	if err := db.QueryRow(`SELECT status, v2_run_id FROM workflow_v2_cron_runs WHERE workspace_name=? AND workflow_name=?`,
+		"engineering", "delivery").Scan(&cronStatus, &v2RunID); err != nil {
+		t.Fatalf("lookup cron history: %v", err)
+	}
+	if cronStatus != "running" {
+		t.Fatalf("cron history status = %q, want running", cronStatus)
+	}
+	if v2RunID == "" {
+		t.Fatalf("cron history missing v2_run_id")
+	}
+	var v2Count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM workflow_v2_runs WHERE id=?`, v2RunID).Scan(&v2Count); err != nil {
+		t.Fatalf("lookup v2 run: %v", err)
+	}
+	if v2Count != 1 {
+		t.Fatalf("expected one v2 run, got %d", v2Count)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/workspaces/engineering/workflows/delivery/cron/runs", nil)
+	req.Header.Set("Authorization", "Bearer test-token")
+	rr = httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("runs status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+	var history struct {
+		Runs  []types.WorkflowRun `json:"runs"`
+		Count int                 `json:"count"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &history); err != nil {
+		t.Fatalf("decode history: %v", err)
+	}
+	if history.Count != 1 || len(history.Runs) != 1 || history.Runs[0].ID == "" {
+		t.Fatalf("unexpected history: %#v", history)
+	}
+}
+
+func TestCronSchedulerV2SkipOverlap(t *testing.T) {
+	configDir := t.TempDir()
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", configDir+"/hub.yaml")
+	t.Setenv("ELASTICCLAW_NOOP_PROVIDER", "1")
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{
+		Token: "test-token", ClawToken: "claw-token",
+		Providers: map[string]types.ProviderConfig{"noop": {Type: "noop"}},
+	}, "", "", "")
+
+	SaveWorkspaceForTest(t, &types.WorkspaceConfig{
+		Name: "engineering",
+		Files: map[string]string{
+			"elasticclaw-config.yaml": cronWorkspaceV2YAML,
+		},
+	}, []*types.WorkflowConfig{{Name: "delivery", RawConfig: cronWorkflowV2SkipYAML}})
+
+	s.cronSchedulerV2 = newCronSchedulerV2(s)
+
+	// Seed an active v2 run for the same workflow so the next manual tick is skipped.
+	now := time.Now().UTC()
+	v2RunID := "run-active"
+	if _, err := db.Exec(`INSERT INTO workflow_v2_runs(
+			id,tenant_id,workspace_name,workflow_name,workspace_revision,workflow_revision,
+			workspace_yaml,workflow_yaml,state,display_phase,state_version,status,
+			waiting_reason,current_attempt_id,current_task_id,context_bundle_id,trigger_type,task_run_id,
+			created_at,updated_at,finished_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		v2RunID, "test-tenant-id", "engineering", "delivery", "rev-1", "rev-1",
+		"ws", "wf", "s", v2types.PhaseBuild, 1, string(workflowv2.RunActive),
+		"", "attempt-1", "", "", "cron", "",
+		now, now, 0); err != nil {
+		t.Fatalf("seed active run: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/workspaces/engineering/workflows/delivery/cron/trigger", nil)
+	req.Header.Set("Authorization", "Bearer test-token")
+	rr := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("expected 409 conflict, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var skipped int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM workflow_v2_cron_runs WHERE workspace_name=? AND workflow_name=? AND status='skipped'`,
+		"engineering", "delivery").Scan(&skipped); err != nil {
+		t.Fatalf("lookup skipped run: %v", err)
+	}
+	if skipped != 1 {
+		t.Fatalf("expected 1 skipped cron run, got %d", skipped)
+	}
 }
 
 // Ensure cron.Schedule interface is satisfied

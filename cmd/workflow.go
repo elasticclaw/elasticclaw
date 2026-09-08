@@ -203,16 +203,23 @@ func runWorkflowShow(workspace, name string) error {
 func workflowTriggerCmd() *cobra.Command {
 	var workspace string
 	var inputs []string
+	var cron bool
 	cmd := &cobra.Command{
 		Use:   "trigger <name>",
 		Short: "Manually trigger a workflow with inputs",
-		Args:  cobra.ExactArgs(1),
+		Long: `Manually trigger a workflow.
+
+By default the generic workflow trigger endpoint is used. For cron-scheduled
+workflows, use --cron to trigger via the cron endpoint; this works even when
+the workflow does not have manual_trigger: true.`,
+		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runWorkflowTrigger(workspace, args[0], inputs)
+			return runWorkflowTrigger(workspace, args[0], inputs, cron)
 		},
 	}
 	cmd.Flags().StringVar(&workspace, "workspace", "default", "workspace name")
 	cmd.Flags().StringArrayVar(&inputs, "input", nil, "input values as key=value (can be repeated)")
+	cmd.Flags().BoolVar(&cron, "cron", false, "trigger through the cron endpoint (for cron-scheduled workflows)")
 	return cmd
 }
 
@@ -233,17 +240,24 @@ func workflowPushCmd() *cobra.Command {
 func workflowRunsCmd() *cobra.Command {
 	var workspace string
 	var limit int
+	var cron bool
 	cmd := &cobra.Command{
 		Use:   "runs <name>",
 		Short: "Show recent runs for a workflow",
-		Long:  "List recent execution history for a workflow, including cron and manual triggers.",
-		Args:  cobra.ExactArgs(1),
+		Long: `List recent execution history for a workflow.
+
+For v1 workflows the default view uses the cron run history endpoint. For v2
+workflows the default view uses the v2 durable state machine history. Use
+--cron to force the cron history view, which includes skipped cron ticks and
+works for both v1 and v2 workflows.`,
+		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runWorkflowRuns(workspace, args[0], limit)
+			return runWorkflowRuns(workspace, args[0], limit, cron)
 		},
 	}
 	cmd.Flags().StringVar(&workspace, "workspace", "default", "workspace name")
 	cmd.Flags().IntVar(&limit, "limit", 50, "maximum number of runs to show")
+	cmd.Flags().BoolVar(&cron, "cron", false, "use the cron run history endpoint (includes skipped ticks)")
 	return cmd
 }
 
@@ -404,7 +418,10 @@ func readWorkflowFiles(paths []string) ([]*types.WorkflowConfig, error) {
 	return workflows, nil
 }
 
-func runWorkflowTrigger(workspace, name string, inputs []string) error {
+func runWorkflowTrigger(workspace, name string, inputs []string, cron bool) error {
+	if cron {
+		return runWorkflowCronTrigger(workspace, name)
+	}
 	hubURL, clawToken, err := resolveHubConn()
 	if err != nil {
 		return err
@@ -442,12 +459,47 @@ func runWorkflowTrigger(workspace, name string, inputs []string) error {
 	return nil
 }
 
-func runWorkflowRuns(workspace, name string, limit int) error {
+func runWorkflowCronTrigger(workspace, name string) error {
+	hubURL, clawToken, err := resolveHubConn()
+	if err != nil {
+		return err
+	}
+
+	path := fmt.Sprintf("/api/workspaces/%s/workflows/%s/cron/trigger", url.PathEscape(workspace), url.PathEscape(name))
+	req, _ := http.NewRequest(http.MethodPost, hubURL+path, nil)
+	req.Header.Set("Authorization", "Bearer "+clawToken)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("trigger workflow cron run failed: %w", err)
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("hub returned %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
+	}
+
+	var result struct {
+		Status   string `json:"status"`
+		Workflow string `json:"workflow"`
+	}
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return fmt.Errorf("decode response: %w", err)
+	}
+
+	fmt.Printf("Triggered cron workflow %q in workspace %q (%s)\n", name, workspace, result.Status)
+	return nil
+}
+
+func runWorkflowRuns(workspace, name string, limit int, cron bool) error {
 	if limit <= 0 {
 		limit = 50
 	}
 	if limit > 200 {
 		limit = 200
+	}
+	if cron {
+		return runWorkflowCronRuns(workspace, name, limit)
 	}
 
 	view, err := fetchWorkflowView(workspace, name)
@@ -457,10 +509,10 @@ func runWorkflowRuns(workspace, name string, limit int) error {
 	if v2.IsV2(view.SchemaVersion) {
 		return runWorkflowV2Runs(workspace, name, limit)
 	}
-	return runWorkflowV1Runs(workspace, name, limit)
+	return runWorkflowCronRuns(workspace, name, limit)
 }
 
-func runWorkflowV1Runs(workspace, name string, limit int) error {
+func runWorkflowCronRuns(workspace, name string, limit int) error {
 	hubURL, clawToken, err := resolveHubConn()
 	if err != nil {
 		return err

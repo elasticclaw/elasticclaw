@@ -759,6 +759,95 @@ states:
 	}
 }
 
+func TestWorkflowV2CronTriggerValidation(t *testing.T) {
+	base := `
+schema_version: 2
+name: cron-wf
+enabled: true
+initial_state: s
+states:
+  s:
+    phase: build
+  done:
+    phase: done
+    terminal: true
+`
+	tests := []struct {
+		name    string
+		trigger string
+		wantErr string
+	}{
+		{
+			name: "valid skip",
+			trigger: `trigger:
+  cron:
+    schedule: "0 9 * * *"
+    timezone: "America/New_York"
+    overlap_policy: skip
+    timeout: 30m`,
+		},
+		{
+			name: "valid parallel without timezone",
+			trigger: `trigger:
+  cron:
+    schedule: "0 9 * * *"
+    overlap_policy: parallel`,
+		},
+		{
+			name: "missing schedule",
+			trigger: `trigger:
+  cron:
+    overlap_policy: skip`,
+			wantErr: "schedule is required",
+		},
+		{
+			name: "invalid schedule",
+			trigger: `trigger:
+  cron:
+    schedule: "not-a-cron"`,
+			wantErr: "schedule",
+		},
+		{
+			name: "invalid overlap policy",
+			trigger: `trigger:
+  cron:
+    schedule: "0 9 * * *"
+    overlap_policy: queue`,
+			wantErr: "overlap_policy",
+		},
+		{
+			name: "invalid timezone",
+			trigger: `trigger:
+  cron:
+    schedule: "0 9 * * *"
+    timezone: "Mars/Phobos"`,
+			wantErr: "timezone",
+		},
+		{
+			name: "invalid timeout",
+			trigger: `trigger:
+  cron:
+    schedule: "0 9 * * *"
+    timeout: "forever"`,
+			wantErr: "timeout",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := v2.ParseAndValidateWorkflow([]byte(base + "\n" + tt.trigger))
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("expected no error, got %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("error = %v, want %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
 func TestWorkflowV2ExecRunRejectsMissingCapability(t *testing.T) {
 	ws := `
 schema_version: 2

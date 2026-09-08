@@ -174,6 +174,9 @@ type Server struct {
 	// cronScheduler manages scheduled workflow runs
 	cronScheduler *cronScheduler
 
+	// cronSchedulerV2 manages scheduled workflow v2 runs
+	cronSchedulerV2 *cronSchedulerV2
+
 	// Reaper state is deliberately in-memory: its conservative timers reset on
 	// a hub restart rather than treating an uncertain outage as an agent failure.
 	reaperMu            sync.Mutex
@@ -595,6 +598,10 @@ func NewServer(addr, dbPath, identityDir string, hubCfg *types.HubConfig) (*Serv
 	srv.cronScheduler = newCronScheduler(srv)
 	if err := srv.cronScheduler.start(); err != nil {
 		log.Printf("[cron] failed to start scheduler: %v", err)
+	}
+	srv.cronSchedulerV2 = newCronSchedulerV2(srv)
+	if err := srv.cronSchedulerV2.start(); err != nil {
+		log.Printf("[cron-v2] failed to start scheduler: %v", err)
 	}
 	srv.startIntegrationPoller()
 	srv.startLifecycleNotifier()
