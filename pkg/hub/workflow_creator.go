@@ -288,6 +288,7 @@ func (s *Server) createClawFromWorkflowWithOptions(workspace *types.WorkspaceCon
 		if err := opts.beforeProvision(callbackCtx, clawID, tenantID); err != nil {
 			_, _ = s.finishClawTerminalTx(clawID, "deleted", "", "failed",
 				"workflow v2 activation failed: "+err.Error(), terminalTxOpts{})
+			s.cancelWorkflowV2RunForClaw(callbackCtx, clawID, "workflow v2 activation failed")
 			go s.promotePendingClaws()
 			return "", false, fmt.Errorf("activate workflow v2 run: %w", err)
 		}
@@ -352,6 +353,7 @@ func (s *Server) createClawFromWorkflowWithOptions(workspace *types.WorkspaceCon
 		if provErr != nil {
 			log.Printf("[workflow] provision failed for %s: %v", clawID, provErr)
 			s.stopAgentWithReason(clawID, fmt.Sprintf("Workflow provision failed: %v", provErr), false)
+			s.cancelWorkflowV2RunForClaw(context.Background(), clawID, "claw provision failed")
 		}
 	}()
 

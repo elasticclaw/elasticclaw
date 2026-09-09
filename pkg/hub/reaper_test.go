@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"net/http"
@@ -465,5 +466,34 @@ func insertWorkflowV2Run(t *testing.T, db *sql.DB, runID, attemptID string, time
 		VALUES(?,?,?,?,?,?,?)`,
 		attemptID, runID, "claw-"+runID, 1, "active", createdAt.UnixMilli(), createdAt.UnixMilli()); err != nil {
 		t.Fatalf("insert attempt: %v", err)
+	}
+}
+
+func TestCancelWorkflowV2RunForClawCancelsActiveRun(t *testing.T) {
+	s, db := newReaperTestServer(t, &types.HubConfig{})
+	now := time.Now().UTC()
+	if _, err := db.Exec(`INSERT INTO claws(id,tenant_id,name,template,provider,status,created_at) VALUES(?,?,?,?,?,?,?)`,
+		"claw-dead", "tenant", "dead", "ws", "replicated", "deleted", now); err != nil {
+		t.Fatal(err)
+	}
+	insertWorkflowV2Run(t, db, "run-dead", "att-dead", now.Add(time.Hour), now)
+	if _, err := db.Exec(`UPDATE workflow_v2_attempts SET claw_id=? WHERE id=?`, "claw-dead", "att-dead"); err != nil {
+		t.Fatal(err)
+	}
+
+	s.cancelWorkflowV2RunForClaw(context.Background(), "claw-dead", "claw deleted")
+
+	var status, attemptStatus string
+	if err := db.QueryRow(`SELECT status FROM workflow_v2_runs WHERE id='run-dead'`).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != "cancelled" {
+		t.Fatalf("run status = %q, want cancelled", status)
+	}
+	if err := db.QueryRow(`SELECT status FROM workflow_v2_attempts WHERE id='att-dead'`).Scan(&attemptStatus); err != nil {
+		t.Fatal(err)
+	}
+	if attemptStatus != "lost" {
+		t.Fatalf("attempt status = %q, want lost", attemptStatus)
 	}
 }

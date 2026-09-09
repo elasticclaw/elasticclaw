@@ -3,6 +3,7 @@ package hub
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"log"
 	"strings"
 	"time"
@@ -97,4 +98,31 @@ func (s *Server) maybeFinishWorkflowV2Parent(ctx context.Context, runID string) 
 		delete(s.claws, clawID)
 	}
 	s.mu.Unlock()
+}
+
+// cancelWorkflowV2RunForClaw cancels the active/suspended workflow v2 run bound
+// to the given claw. It is used when a claw fails before the v2 run can reach a
+// terminal state on its own (e.g. provisioning failed).
+func (s *Server) cancelWorkflowV2RunForClaw(ctx context.Context, clawID, reason string) {
+	if s == nil || s.db == nil {
+		return
+	}
+	var runID string
+	err := s.db.QueryRowContext(ctx, `
+		SELECT a.run_id FROM workflow_v2_attempts a
+		JOIN workflow_v2_runs r ON r.id=a.run_id
+		WHERE a.claw_id=? AND a.status='active' AND r.status IN ('active','suspended')
+		LIMIT 1`, clawID).Scan(&runID)
+	if err != nil {
+		if !errors.Is(err, sql.ErrNoRows) {
+			log.Printf("[workflow-v2] failed to find active run for claw %s: %v", clawID[:8], err)
+		}
+		return
+	}
+	if err := s.cancelWorkflowV2RunByID(ctx, now().UTC(), runID, reason); err != nil {
+		log.Printf("[workflow-v2] failed to cancel run %s for claw %s: %v", runID[:8], clawID[:8], err)
+		return
+	}
+	log.Printf("[workflow-v2] cancelled run %s because claw %s %s", runID[:8], clawID[:8], reason)
+	s.maybeFinishWorkflowV2Parent(ctx, runID)
 }
