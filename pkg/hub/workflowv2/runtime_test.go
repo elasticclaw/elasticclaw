@@ -180,6 +180,30 @@ func TestCreateRunAtomicallyBindsInitialAttempt(t *testing.T) {
 	}
 }
 
+func TestCreateRunStoresTimeoutAt(t *testing.T) {
+	db := openRuntimeDB(t)
+	store := workflowv2.NewStore(db)
+	fixed := time.Date(2026, 8, 8, 12, 0, 0, 0, time.UTC)
+	store.SetClock(func() time.Time { return fixed })
+
+	run, err := store.CreateRun(context.Background(), workflowv2.CreateRunRequest{
+		ID: "run-timeout", TenantID: "tenant-1", InitialClawID: "claw-timeout",
+		WorkspaceYAML: []byte(runtimeWorkspaceYAML), WorkflowYAML: []byte(runtimeWorkflowYAML),
+		Timeout: 90 * time.Minute,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var timeoutAt int64
+	if err := db.QueryRow(`SELECT timeout_at FROM workflow_v2_runs WHERE id=?`, run.ID).Scan(&timeoutAt); err != nil {
+		t.Fatal(err)
+	}
+	want := fixed.Add(90 * time.Minute).UnixMilli()
+	if timeoutAt != want {
+		t.Fatalf("timeout_at = %d, want %d", timeoutAt, want)
+	}
+}
+
 func TestActivationPendingBlocksEffectsUntilContextIsPinned(t *testing.T) {
 	db := openRuntimeDB(t)
 	store := workflowv2.NewStore(db)

@@ -277,6 +277,7 @@ func (cs *cronSchedulerV2) runWorkflow(sw *scheduledWorkflowV2, tenantID string)
 					ID: uuid.NewString(), TenantID: provisionTenantID, InitialClawID: clawID, TaskRunID: taskRunID,
 					WorkspaceYAML: workspaceYAML, WorkflowYAML: workflowYAML, ActivationPending: true,
 					TriggerType: "cron",
+					Timeout:     workflowV2RunTimeout(sw.workflow.RawConfig),
 				})
 				if err != nil {
 					return err

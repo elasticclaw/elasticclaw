@@ -75,6 +75,7 @@ func (s *Server) triggerWorkflowV2Config(w http.ResponseWriter, r *http.Request,
 				ID: runID, TenantID: tenantID, InitialClawID: clawID, TaskRunID: taskRunID,
 				WorkspaceYAML: workspaceYAML, WorkflowYAML: workflowYAML, ActivationPending: true,
 				TriggerType: "manual",
+				Timeout:     workflowV2RunTimeout(workflow.RawConfig),
 			})
 			if err != nil {
 				return err

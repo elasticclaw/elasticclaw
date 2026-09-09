@@ -385,3 +385,85 @@ stages:
 		}
 	})
 }
+
+func TestReaperCancelsTimedOutWorkflowV2Run(t *testing.T) {
+	s, db := newReaperTestServer(t, &types.HubConfig{})
+	tm := time.Now().UTC()
+	s.nowFunc = func() time.Time { return tm }
+
+	insertWorkflowV2Run(t, db, "run-timeout", "att-timeout", tm.Add(-time.Hour), tm.Add(-time.Hour))
+
+	s.reapOnce()
+
+	var status, attemptStatus string
+	if err := db.QueryRow(`SELECT status FROM workflow_v2_runs WHERE id='run-timeout'`).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != "cancelled" {
+		t.Fatalf("run status = %q, want cancelled", status)
+	}
+	if err := db.QueryRow(`SELECT status FROM workflow_v2_attempts WHERE id='att-timeout'`).Scan(&attemptStatus); err != nil {
+		t.Fatal(err)
+	}
+	if attemptStatus != "lost" {
+		t.Fatalf("attempt status = %q, want lost", attemptStatus)
+	}
+}
+
+func TestReaperCancelsLegacyWorkflowV2RunWithoutTimeout(t *testing.T) {
+	s, db := newReaperTestServer(t, &types.HubConfig{})
+	tm := time.Now().UTC()
+	s.nowFunc = func() time.Time { return tm }
+
+	insertWorkflowV2Run(t, db, "run-legacy", "att-legacy", time.Time{}, tm.Add(-workflowV2DefaultRunTimeout-time.Hour))
+
+	s.reapOnce()
+
+	var status string
+	if err := db.QueryRow(`SELECT status FROM workflow_v2_runs WHERE id='run-legacy'`).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != "cancelled" {
+		t.Fatalf("run status = %q, want cancelled", status)
+	}
+}
+
+func TestReaperLeavesWorkflowV2RunWithinTimeout(t *testing.T) {
+	s, db := newReaperTestServer(t, &types.HubConfig{})
+	tm := time.Now().UTC()
+	s.nowFunc = func() time.Time { return tm }
+
+	insertWorkflowV2Run(t, db, "run-fresh", "att-fresh", tm.Add(time.Hour), tm)
+
+	s.reapOnce()
+
+	var status string
+	if err := db.QueryRow(`SELECT status FROM workflow_v2_runs WHERE id='run-fresh'`).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != "active" {
+		t.Fatalf("run status = %q, want active", status)
+	}
+}
+
+func insertWorkflowV2Run(t *testing.T, db *sql.DB, runID, attemptID string, timeoutAt, createdAt time.Time) {
+	t.Helper()
+	timeoutMillis := int64(0)
+	if !timeoutAt.IsZero() {
+		timeoutMillis = timeoutAt.UnixMilli()
+	}
+	if _, err := db.Exec(`INSERT INTO workflow_v2_runs(
+		id,tenant_id,workspace_name,workflow_name,workspace_revision,workflow_revision,
+		workspace_yaml,workflow_yaml,state,display_phase,state_version,status,waiting_reason,
+		current_attempt_id,task_run_id,trigger_type,timeout_at,created_at,updated_at,finished_at
+	) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		runID, "tenant", "ws", "wf", "rev", "rev", "", "", "building", "build", 1, "active", "",
+		attemptID, "", "manual", timeoutMillis, createdAt.UnixMilli(), createdAt.UnixMilli(), 0); err != nil {
+		t.Fatalf("insert run: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO workflow_v2_attempts(id,run_id,claw_id,number,status,started_at,heartbeat_at)
+		VALUES(?,?,?,?,?,?,?)`,
+		attemptID, runID, "claw-"+runID, 1, "active", createdAt.UnixMilli(), createdAt.UnixMilli()); err != nil {
+		t.Fatalf("insert attempt: %v", err)
+	}
+}
