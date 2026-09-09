@@ -129,7 +129,8 @@ func (s *Store) FinishCronRunByClawID(ctx context.Context, clawID string, runSta
 	return nil
 }
 
-// FailCronRun marks a running cron history row as failed.
+// FailCronRun marks a running cron history row as failed and records the
+// failure reason in its run_context.
 func (s *Store) FailCronRun(ctx context.Context, cronRunID, reason string) error {
 	if s == nil || s.db == nil {
 		return fmt.Errorf("workflow v2 store is not configured")
@@ -138,13 +139,34 @@ func (s *Store) FailCronRun(ctx context.Context, cronRunID, reason string) error
 		return fmt.Errorf("cron run id is required")
 	}
 	now := s.now().UTC().UnixMilli()
-	_, err := s.db.ExecContext(ctx, `
-		UPDATE workflow_v2_cron_runs SET status='failed', result='failure', finished_at=?
-		WHERE id=? AND status='running'`, now, cronRunID)
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
 	if err != nil {
 		return fmt.Errorf("fail cron run: %w", err)
 	}
-	return nil
+	defer tx.Rollback()
+	var runContextJSON string
+	if err := tx.QueryRowContext(ctx, `SELECT run_context FROM workflow_v2_cron_runs WHERE id=? AND status='running'`, cronRunID).Scan(&runContextJSON); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return tx.Commit()
+		}
+		return fmt.Errorf("fail cron run: %w", err)
+	}
+	runContext, err := unmarshalRunContext(runContextJSON)
+	if err != nil {
+		return fmt.Errorf("fail cron run: %w", err)
+	}
+	runContext["failure_reason"] = reason
+	updatedRunContextJSON, err := marshalRunContext(runContext)
+	if err != nil {
+		return fmt.Errorf("fail cron run: %w", err)
+	}
+	_, err = tx.ExecContext(ctx, `
+		UPDATE workflow_v2_cron_runs SET status='failed', result='failure', finished_at=?, run_context=?
+		WHERE id=? AND status='running'`, now, updatedRunContextJSON, cronRunID)
+	if err != nil {
+		return fmt.Errorf("fail cron run: %w", err)
+	}
+	return tx.Commit()
 }
 
 // ListCronRunHistory returns cron history rows for a workflow, newest first.
@@ -241,4 +263,18 @@ func marshalRunContext(runContext map[string]interface{}) (string, error) {
 		return "{}", fmt.Errorf("marshal run context: %w", err)
 	}
 	return string(b), nil
+}
+
+func unmarshalRunContext(runContextJSON string) (map[string]interface{}, error) {
+	if strings.TrimSpace(runContextJSON) == "" || runContextJSON == "{}" {
+		return map[string]interface{}{}, nil
+	}
+	var runContext map[string]interface{}
+	if err := json.Unmarshal([]byte(runContextJSON), &runContext); err != nil {
+		return nil, fmt.Errorf("unmarshal run context: %w", err)
+	}
+	if runContext == nil {
+		return map[string]interface{}{}, nil
+	}
+	return runContext, nil
 }

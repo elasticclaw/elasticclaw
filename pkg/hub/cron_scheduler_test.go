@@ -367,6 +367,29 @@ trigger:
     overlap_policy: skip
 `
 
+const cronWorkflowV2ActivationFailureYAML = `
+schema_version: 2
+name: delivery
+enabled: true
+initial_state: start
+states:
+  start:
+    phase: build
+  bad:
+    phase: build
+    invariant:
+      impossible:
+        equals: true
+trigger:
+  cron:
+    schedule: "0 9 * * *"
+transitions:
+  ready:
+    from: [start]
+    on: context.bundle.ready
+    to: bad
+`
+
 func TestCronSchedulerV2StartLoadsWorkflow(t *testing.T) {
 	configDir := t.TempDir()
 	t.Setenv("ELASTICCLAW_HUB_CONFIG", configDir+"/hub.yaml")
@@ -512,6 +535,60 @@ func TestCronSchedulerV2SkipOverlap(t *testing.T) {
 	}
 	if skipped != 1 {
 		t.Fatalf("expected 1 skipped cron run, got %d", skipped)
+	}
+}
+
+func TestCronSchedulerV2ActivationFailureReleasesOverlapSlot(t *testing.T) {
+	configDir := t.TempDir()
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", configDir+"/hub.yaml")
+	t.Setenv("ELASTICCLAW_NOOP_PROVIDER", "1")
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{
+		Token: "test-token", ClawToken: "claw-token",
+		Providers: map[string]types.ProviderConfig{"noop": {Type: "noop"}},
+	}, "", "", "")
+
+	SaveWorkspaceForTest(t, &types.WorkspaceConfig{
+		Name: "engineering",
+		Files: map[string]string{
+			"elasticclaw-config.yaml": cronWorkspaceV2YAML,
+		},
+	}, []*types.WorkflowConfig{{Name: "delivery", RawConfig: cronWorkflowV2ActivationFailureYAML}})
+
+	s.cronSchedulerV2 = newCronSchedulerV2(s)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/workspaces/engineering/workflows/delivery/cron/trigger", nil)
+	req.Header.Set("Authorization", "Bearer test-token")
+	rr := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500 activation failure, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var v2RunID, cronStatus, cronRunContext string
+	if err := db.QueryRow(`SELECT v2_run_id, status, run_context FROM workflow_v2_cron_runs WHERE workspace_name=? AND workflow_name=?`,
+		"engineering", "delivery").Scan(&v2RunID, &cronStatus, &cronRunContext); err != nil {
+		t.Fatalf("lookup cron history: %v", err)
+	}
+	if cronStatus != "failed" {
+		t.Fatalf("cron history status = %q, want failed", cronStatus)
+	}
+	if !strings.Contains(cronRunContext, "failure_reason") {
+		t.Fatalf("cron history missing failure_reason in run_context: %s", cronRunContext)
+	}
+
+	var runStatus string
+	if err := db.QueryRow(`SELECT status FROM workflow_v2_runs WHERE id=?`, v2RunID).Scan(&runStatus); err != nil {
+		t.Fatalf("lookup v2 run: %v", err)
+	}
+	if runStatus != string(workflowv2.RunCancelled) {
+		t.Fatalf("v2 run status = %q, want cancelled", runStatus)
+	}
+
+	s.cronSchedulerV2.runningMu.Lock()
+	inMem := s.cronSchedulerV2.running["engineering/delivery"]
+	s.cronSchedulerV2.runningMu.Unlock()
+	if inMem != 0 {
+		t.Fatalf("overlap slot not released: running=%d", inMem)
 	}
 }
 

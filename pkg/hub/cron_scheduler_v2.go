@@ -316,6 +316,10 @@ func (cs *cronSchedulerV2) runWorkflow(sw *scheduledWorkflowV2, tenantID string)
 					if cleanupErr := store.CancelActivation(cleanupCtx, run.ID, err.Error()); cleanupErr != nil {
 						return errors.Join(err, fmt.Errorf("cancel failed workflow v2 activation: %w", cleanupErr))
 					}
+					// The v2 run is now cancelled. Release the cron overlap slot
+					// immediately; the terminal cleanup hook will not run because
+					// cancelWorkflowV2RunForClaw only looks for active/suspended runs.
+					cs.srv.releaseWorkflowV2CronSlot(cleanupCtx, run.ID)
 					return err
 				}
 				return nil

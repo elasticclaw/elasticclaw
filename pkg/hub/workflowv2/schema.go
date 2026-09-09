@@ -43,6 +43,7 @@ func Migrate(db *sql.DB) error {
 	CREATE INDEX IF NOT EXISTS idx_workflow_v2_runs_tenant_updated ON workflow_v2_runs(tenant_id, updated_at DESC, id);
 	CREATE INDEX IF NOT EXISTS idx_workflow_v2_runs_workflow ON workflow_v2_runs(tenant_id, workspace_name, workflow_name, updated_at DESC);
 	CREATE INDEX IF NOT EXISTS idx_workflow_v2_runs_status ON workflow_v2_runs(tenant_id, status, updated_at DESC);
+	CREATE INDEX IF NOT EXISTS idx_workflow_v2_runs_timeout ON workflow_v2_runs(status, timeout_at, created_at);
 
 	CREATE TABLE IF NOT EXISTS workflow_v2_attempts (
 		id          TEXT PRIMARY KEY,
