@@ -108,14 +108,9 @@ func (s *Server) releaseWorkflowV2CronSlot(ctx context.Context, runID string) {
 	if s == nil || s.db == nil || s.cronSchedulerV2 == nil || runID == "" {
 		return
 	}
-	res, err := s.db.ExecContext(ctx, `UPDATE workflow_v2_runs SET cron_slot_released=1 WHERE id=? AND cron_slot_released=0`, runID)
-	if err != nil {
-		log.Printf("[workflow-v2] failed to mark cron slot released for run %s: %v", runID, err)
-		return
-	}
-	if changed, _ := res.RowsAffected(); changed != 1 {
-		return
-	}
+	// Load and validate the run before consuming the idempotency marker. If the
+	// read fails, a retry can still finish the release because the marker has not
+	// been flipped.
 	run, err := workflowv2.NewStore(s.db).GetRun(ctx, runID)
 	if err != nil {
 		log.Printf("[workflow-v2] cannot load run %s for slot release: %v", runID, err)
@@ -125,6 +120,14 @@ func (s *Server) releaseWorkflowV2CronSlot(ctx context.Context, runID string) {
 		return
 	}
 	if run.Status != workflowv2.RunCompleted && run.Status != workflowv2.RunCancelled {
+		return
+	}
+	res, err := s.db.ExecContext(ctx, `UPDATE workflow_v2_runs SET cron_slot_released=1 WHERE id=? AND cron_slot_released=0`, runID)
+	if err != nil {
+		log.Printf("[workflow-v2] failed to mark cron slot released for run %s: %v", runID, err)
+		return
+	}
+	if changed, _ := res.RowsAffected(); changed != 1 {
 		return
 	}
 	s.cronSchedulerV2.decrementRunning(run.WorkspaceName + "/" + run.WorkflowName)

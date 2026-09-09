@@ -497,3 +497,56 @@ func TestCancelWorkflowV2RunForClawCancelsActiveRun(t *testing.T) {
 		t.Fatalf("attempt status = %q, want cancelled", attemptStatus)
 	}
 }
+
+func TestReleaseWorkflowV2CronSlotLoadsBeforeMarker(t *testing.T) {
+	s, db := newReaperTestServer(t, &types.HubConfig{})
+	s.cronSchedulerV2 = newCronSchedulerV2(s)
+	s.cronSchedulerV2.running["ws/wf"] = 1
+	now := time.Now().UTC()
+
+	if _, err := db.Exec(`INSERT INTO workflow_v2_runs(
+		id,tenant_id,workspace_name,workflow_name,workspace_revision,workflow_revision,
+		workspace_yaml,workflow_yaml,state,display_phase,state_version,status,waiting_reason,
+		current_attempt_id,task_run_id,trigger_type,timeout_at,created_at,updated_at,finished_at,
+		cron_slot_released
+	) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		"run-cron", "tenant", "ws", "wf", "rev", "rev", "", "", "done", "done", 1, "cancelled", "",
+		"att-cron", "", "cron", 0, now.UnixMilli(), now.UnixMilli(), now.UnixMilli(), 0); err != nil {
+		t.Fatal(err)
+	}
+
+	// A cancelled context should fail the run load before the marker is flipped,
+	// so the slot can still be released on retry.
+	cancelledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	s.releaseWorkflowV2CronSlot(cancelledCtx, "run-cron")
+
+	var marker int
+	if err := db.QueryRow(`SELECT cron_slot_released FROM workflow_v2_runs WHERE id='run-cron'`).Scan(&marker); err != nil {
+		t.Fatal(err)
+	}
+	if marker != 0 {
+		t.Fatalf("cron_slot_released = %d, want 0 (marker consumed before load succeeded)", marker)
+	}
+	if s.cronSchedulerV2.running["ws/wf"] != 1 {
+		t.Fatalf("running counter was decremented despite load failure")
+	}
+
+	// On a valid context the slot is released exactly once.
+	s.releaseWorkflowV2CronSlot(context.Background(), "run-cron")
+	if err := db.QueryRow(`SELECT cron_slot_released FROM workflow_v2_runs WHERE id='run-cron'`).Scan(&marker); err != nil {
+		t.Fatal(err)
+	}
+	if marker != 1 {
+		t.Fatalf("cron_slot_released = %d, want 1", marker)
+	}
+	if s.cronSchedulerV2.running["ws/wf"] != 0 {
+		t.Fatalf("running counter = %d, want 0", s.cronSchedulerV2.running["ws/wf"])
+	}
+
+	// Idempotent: a second call does not decrement below zero.
+	s.releaseWorkflowV2CronSlot(context.Background(), "run-cron")
+	if s.cronSchedulerV2.running["ws/wf"] != 0 {
+		t.Fatalf("running counter decremented twice, got %d", s.cronSchedulerV2.running["ws/wf"])
+	}
+}
