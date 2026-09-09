@@ -406,12 +406,12 @@ func TestReaperCancelsTimedOutWorkflowV2Run(t *testing.T) {
 	if err := db.QueryRow(`SELECT status FROM workflow_v2_attempts WHERE id='att-timeout'`).Scan(&attemptStatus); err != nil {
 		t.Fatal(err)
 	}
-	if attemptStatus != "lost" {
-		t.Fatalf("attempt status = %q, want lost", attemptStatus)
+	if attemptStatus != "cancelled" {
+		t.Fatalf("attempt status = %q, want cancelled", attemptStatus)
 	}
 }
 
-func TestReaperCancelsLegacyWorkflowV2RunWithoutTimeout(t *testing.T) {
+func TestReaperLeavesLegacyWorkflowV2RunWithoutTimeout(t *testing.T) {
 	s, db := newReaperTestServer(t, &types.HubConfig{})
 	tm := time.Now().UTC()
 	s.nowFunc = func() time.Time { return tm }
@@ -424,8 +424,8 @@ func TestReaperCancelsLegacyWorkflowV2RunWithoutTimeout(t *testing.T) {
 	if err := db.QueryRow(`SELECT status FROM workflow_v2_runs WHERE id='run-legacy'`).Scan(&status); err != nil {
 		t.Fatal(err)
 	}
-	if status != "cancelled" {
-		t.Fatalf("run status = %q, want cancelled", status)
+	if status != "active" {
+		t.Fatalf("run status = %q, want active (legacy rows without timeout_at must not be auto-cancelled)", status)
 	}
 }
 
@@ -493,7 +493,7 @@ func TestCancelWorkflowV2RunForClawCancelsActiveRun(t *testing.T) {
 	if err := db.QueryRow(`SELECT status FROM workflow_v2_attempts WHERE id='att-dead'`).Scan(&attemptStatus); err != nil {
 		t.Fatal(err)
 	}
-	if attemptStatus != "lost" {
-		t.Fatalf("attempt status = %q, want lost", attemptStatus)
+	if attemptStatus != "cancelled" {
+		t.Fatalf("attempt status = %q, want cancelled", attemptStatus)
 	}
 }

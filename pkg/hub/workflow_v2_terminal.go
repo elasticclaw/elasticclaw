@@ -29,9 +29,17 @@ func (s *Server) maybeFinishWorkflowV2Parent(ctx context.Context, runID string) 
 	if run.Status != workflowv2.RunCompleted && run.Status != workflowv2.RunCancelled {
 		return
 	}
-	if s.cronSchedulerV2 != nil {
+	if s.cronSchedulerV2 != nil && run.TriggerType == "cron" {
 		s.cronSchedulerV2.finishRunByV2RunID(run.ID, run.Status)
-		s.cronSchedulerV2.decrementRunning(run.WorkspaceName + "/" + run.WorkflowName)
+		// Only release the in-memory overlap slot once. A run observed as
+		// terminal multiple times must not decrement the counter for another
+		// active cron execution of the same workflow.
+		res, err := s.db.ExecContext(ctx, `UPDATE workflow_v2_runs SET cron_slot_released=1 WHERE id=? AND cron_slot_released=0`, run.ID)
+		if err != nil {
+			log.Printf("[workflow-v2] failed to mark cron slot released for run %s: %v", runID, err)
+		} else if changed, _ := res.RowsAffected(); changed == 1 {
+			s.cronSchedulerV2.decrementRunning(run.WorkspaceName + "/" + run.WorkflowName)
+		}
 	}
 	if strings.TrimSpace(run.TaskRunID) == "" {
 		// No parent task run; nothing to finish.
@@ -101,8 +109,9 @@ func (s *Server) maybeFinishWorkflowV2Parent(ctx context.Context, runID string) 
 }
 
 // cancelWorkflowV2RunForClaw cancels the active/suspended workflow v2 run bound
-// to the given claw. It is used when a claw fails before the v2 run can reach a
-// terminal state on its own (e.g. provisioning failed).
+// to the given claw, including all child effects/tasks so nothing remains
+// assigned to the dead claw. It is used when a claw fails before the v2 run
+// can reach a terminal state on its own (e.g. provisioning failed).
 func (s *Server) cancelWorkflowV2RunForClaw(ctx context.Context, clawID, reason string) {
 	if s == nil || s.db == nil {
 		return
@@ -119,7 +128,7 @@ func (s *Server) cancelWorkflowV2RunForClaw(ctx context.Context, clawID, reason 
 		}
 		return
 	}
-	if err := s.cancelWorkflowV2RunByID(ctx, now().UTC(), runID, reason); err != nil {
+	if err := workflowv2.NewStore(s.db).CancelActivation(ctx, runID, reason); err != nil {
 		log.Printf("[workflow-v2] failed to cancel run %s for claw %s: %v", runID[:8], clawID[:8], err)
 		return
 	}

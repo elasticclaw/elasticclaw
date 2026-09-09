@@ -32,10 +32,11 @@ func Migrate(db *sql.DB) error {
 		current_attempt_id TEXT NOT NULL DEFAULT '',
 		current_task_id    TEXT NOT NULL DEFAULT '',
 		context_bundle_id  TEXT NOT NULL DEFAULT '',
-		trigger_type       TEXT NOT NULL DEFAULT 'manual',
-		task_run_id        TEXT NOT NULL DEFAULT '',
-		timeout_at         INTEGER NOT NULL DEFAULT 0,
-		created_at         INTEGER NOT NULL,
+		trigger_type          TEXT NOT NULL DEFAULT 'manual',
+		task_run_id           TEXT NOT NULL DEFAULT '',
+		timeout_at            INTEGER NOT NULL DEFAULT 0,
+		cron_slot_released    INTEGER NOT NULL DEFAULT 0,
+		created_at            INTEGER NOT NULL,
 		updated_at         INTEGER NOT NULL,
 		finished_at        INTEGER NOT NULL DEFAULT 0
 	);
@@ -302,6 +303,9 @@ func Migrate(db *sql.DB) error {
 		return fmt.Errorf("workflow v2 migrate: %w", err)
 	}
 	if err := addColumnIfMissing(db, "workflow_v2_runs", "timeout_at", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return fmt.Errorf("workflow v2 migrate: %w", err)
+	}
+	if err := addColumnIfMissing(db, "workflow_v2_runs", "cron_slot_released", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return fmt.Errorf("workflow v2 migrate: %w", err)
 	}
 	return nil

@@ -144,10 +144,17 @@ func (cs *cronSchedulerV2) reloadWorkflows() error {
 	for key, sw := range newWorkflows {
 		if _, ok := cs.entries[key]; ok {
 			old := cs.workflows[key]
-			if old != nil && old.trigger.Schedule == sw.trigger.Schedule && old.trigger.Timezone == sw.trigger.Timezone {
-				cs.workflows[key] = sw
-				continue
+		if old != nil && old.trigger.Schedule == sw.trigger.Schedule && old.trigger.Timezone == sw.trigger.Timezone {
+			// Refresh the snapshot held by the existing cron job, not just the map,
+			// so scheduled runs pick up workflow body/policy edits without a restart.
+			cs.workflows[key] = sw
+			if entry := cs.cron.Entry(cs.entries[key]); entry.Valid() {
+				if job, ok := entry.Job.(*cronJobV2); ok {
+					job.workflow = sw
+				}
 			}
+			continue
+		}
 			cs.cron.Remove(cs.entries[key])
 			delete(cs.entries, key)
 		}
@@ -202,7 +209,7 @@ func (cs *cronSchedulerV2) runWorkflow(sw *scheduledWorkflowV2, tenantID string)
 	key := sw.key
 	if strings.TrimSpace(tenantID) == "" {
 		var err error
-		tenantID, err = cs.firstTenantID()
+		tenantID, err = cs.tenantIDForWorkspace(sw.workspace.Name)
 		if err != nil {
 			log.Printf("[cron-v2] no tenant for %s: %v", key, err)
 			return workflowRunFailed, err
@@ -253,6 +260,7 @@ func (cs *cronSchedulerV2) runWorkflow(sw *scheduledWorkflowV2, tenantID string)
 		"trigger_type":   "cron",
 	})
 	if err != nil {
+		cs.decrementRunning(key)
 		log.Printf("[cron-v2] failed to record start for %s: %v", key, err)
 		return workflowRunFailed, err
 	}
@@ -374,6 +382,30 @@ func (cs *cronSchedulerV2) firstTenantID() (string, error) {
 		return "", err
 	}
 	return tenantID, nil
+}
+
+// tenantIDForWorkspace resolves the tenant that owns a workspace for unattended
+// cron ticks. It prefers any prior claw or task_run association for the workspace,
+// so scheduled runs stay attributed to the same tenant as manual triggers and
+// webhooks. Only workspaces with no recorded activity fall back to the first
+// tenant (matching v1 behavior for single-tenant deployments).
+func (cs *cronSchedulerV2) tenantIDForWorkspace(workspaceName string) (string, error) {
+	var tenantID string
+	err := cs.srv.db.QueryRow(`
+		SELECT tenant_id FROM (
+			SELECT tenant_id, created_at FROM claws WHERE template=? AND tenant_id != ''
+			UNION ALL
+			SELECT tenant_id, created_at FROM task_runs WHERE workspace_name=? AND tenant_id != ''
+		)
+		ORDER BY created_at DESC
+		LIMIT 1`, workspaceName, workspaceName).Scan(&tenantID)
+	if err == nil {
+		return tenantID, nil
+	}
+	if errors.Is(err, sql.ErrNoRows) {
+		return cs.firstTenantID()
+	}
+	return "", err
 }
 
 func (cs *cronSchedulerV2) countActiveV2Runs(store *workflowv2.Store, workspaceName, workflowName string) (int, error) {

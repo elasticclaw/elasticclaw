@@ -2,10 +2,10 @@ package hub
 
 import (
 	"context"
-	"database/sql"
 	"log"
 	"time"
 
+	"github.com/elasticclaw/elasticclaw/pkg/hub/workflowv2"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 )
 
@@ -379,16 +379,16 @@ func (s *Server) reapOnce() {
 	}
 }
 
-// reapWorkflowV2RunTimeouts cancels v2 workflow runs that exceeded their
-// timeout_at (or, for legacy rows without one, their created_at plus the default
-// run timeout). A cancelled run then triggers the normal parent-cleanup path.
+// reapWorkflowV2RunTimeouts cancels v2 workflow runs whose explicit timeout_at
+// has passed. Rows without a timeout_at are intentionally left alone so an
+// operator can recover legacy runs instead of having the reaper cancel them
+// automatically.
 func (s *Server) reapWorkflowV2RunTimeouts(n time.Time, take func() bool) {
-	defaultDeadline := n.Add(-workflowV2DefaultRunTimeout).UnixMilli()
 	rows, err := s.db.Query(`
 		SELECT r.id FROM workflow_v2_runs r
 		WHERE r.status IN ('active','suspended')
-		AND ((r.timeout_at > 0 AND r.timeout_at < ?) OR (r.timeout_at = 0 AND r.created_at < ?))
-		ORDER BY r.created_at`, n.UnixMilli(), defaultDeadline)
+		AND r.timeout_at > 0 AND r.timeout_at < ?
+		ORDER BY r.created_at`, n.UnixMilli())
 	if err != nil {
 		log.Printf("[reaper] workflow v2 timeout query: %v", err)
 		return
@@ -408,41 +408,14 @@ func (s *Server) reapWorkflowV2RunTimeouts(n time.Time, take func() bool) {
 		if !take() {
 			return
 		}
-		if err := s.cancelWorkflowV2RunByID(context.Background(), n, r.id, "run timed out"); err != nil {
+		// Use the existing activation-cancellation path so child effects,
+		// effect attempts, control messages, and agent tasks are all cancelled
+		// transactionally with the parent run.
+		if err := workflowv2.NewStore(s.db).CancelActivation(context.Background(), r.id, "run timed out"); err != nil {
 			log.Printf("[reaper] failed to cancel timed-out workflow v2 run %s: %v", r.id, err)
 			continue
 		}
 		log.Printf("[reaper] cancelled timed-out workflow v2 run %s", r.id)
 		s.maybeFinishWorkflowV2Parent(context.Background(), r.id)
 	}
-}
-
-// cancelWorkflowV2RunByID marks a run and its active attempt as cancelled/lost.
-// It is idempotent when the run is already terminal.
-func (s *Server) cancelWorkflowV2RunByID(ctx context.Context, n time.Time, runID, reason string) error {
-	now := n.UnixMilli()
-	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-
-	res, err := tx.ExecContext(ctx, `
-		UPDATE workflow_v2_runs
-		SET status='cancelled', state='cancelled', display_phase='done', waiting_reason=?, finished_at=?, updated_at=?
-		WHERE id=? AND status IN ('active','suspended')`, reason, now, now, runID)
-	if err != nil {
-		return err
-	}
-	if changed, _ := res.RowsAffected(); changed == 0 {
-		return nil
-	}
-	_, err = tx.ExecContext(ctx, `
-		UPDATE workflow_v2_attempts
-		SET status='lost', finished_at=?, reason=?
-		WHERE run_id=? AND status='active'`, now, reason, runID)
-	if err != nil {
-		return err
-	}
-	return tx.Commit()
 }
