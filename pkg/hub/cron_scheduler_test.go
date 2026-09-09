@@ -582,19 +582,41 @@ func TestCronSchedulerV2ReloadRefreshesJobWorkflowSnapshot(t *testing.T) {
 	if !ok {
 		t.Fatal("engineering/delivery not scheduled after reload")
 	}
-	// Replacing the entry avoids mutating the live job and removes the old entry.
-	if newEntryID == entryID {
-		t.Fatal("cron entry was not replaced after reload")
+	// The schedule/timezone are unchanged, so the entry must be preserved to
+	// avoid missing ticks or double-scheduling parallel runs.
+	if newEntryID != entryID {
+		t.Fatal("cron entry was replaced even though schedule/timezone are unchanged")
 	}
 	job, ok := s.cronSchedulerV2.cron.Entry(newEntryID).Job.(*cronJobV2)
 	if !ok {
 		t.Fatalf("scheduled job is not a cronJobV2: %T", s.cronSchedulerV2.cron.Entry(newEntryID).Job)
 	}
-	if job.workflow.trigger.Timeout != "30m" {
-		t.Fatalf("cron job holds stale workflow snapshot: timeout=%q, want 30m", job.workflow.trigger.Timeout)
+	if job.workflowSnapshot().trigger.Timeout != "30m" {
+		t.Fatalf("cron job holds stale workflow snapshot: timeout=%q, want 30m", job.workflowSnapshot().trigger.Timeout)
 	}
 	if s.cronSchedulerV2.workflows["engineering/delivery"].trigger.Timeout != "30m" {
 		t.Fatalf("workflow map not refreshed: timeout=%q, want 30m", s.cronSchedulerV2.workflows["engineering/delivery"].trigger.Timeout)
+	}
+
+	// A schedule change should replace the entry.
+	updatedYAMLSchedule := strings.ReplaceAll(cronWorkflowV2YAML, `schedule: "0 9 * * *"`, "schedule: \"0 10 * * *\"")
+	SaveWorkspaceForTest(t, &types.WorkspaceConfig{
+		Name: "engineering",
+		Files: map[string]string{
+			"elasticclaw-config.yaml": cronWorkspaceV2YAML,
+		},
+	}, []*types.WorkflowConfig{{Name: "delivery", RawConfig: updatedYAMLSchedule}})
+
+	if err := s.cronSchedulerV2.reloadWorkflows(); err != nil {
+		t.Fatalf("reload v2 workflows with schedule change: %v", err)
+	}
+
+	scheduleChangedID, ok := s.cronSchedulerV2.entries["engineering/delivery"]
+	if !ok {
+		t.Fatal("engineering/delivery not scheduled after schedule change")
+	}
+	if scheduleChangedID == entryID {
+		t.Fatal("cron entry was not replaced after schedule change")
 	}
 }
 

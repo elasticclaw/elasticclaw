@@ -8,6 +8,7 @@ import (
 	"log"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/elasticclaw/elasticclaw/pkg/hub/workflowv2"
@@ -138,13 +139,24 @@ func (cs *cronSchedulerV2) reloadWorkflows() error {
 		}
 	}
 
-	// Add or update entries. Always replace the existing cron entry so a reload
-	// picks up body/policy edits without mutating a live job (which would race
-	// with a concurrently executing tick). Re-adding with the same schedule
-	// recomputes the next run time from the current moment, which is acceptable
-	// because reloads are infrequent.
+	// Add or update entries. Preserve the cron entry and its next execution time
+	// for workflows whose schedule/timezone have not changed; only replace the
+	// entry when the schedule changes. The workflow snapshot is updated atomically
+	// inside the existing job, so body/policy edits are picked up without
+	// rescheduling and without racing a concurrently executing tick.
 	for key, sw := range newWorkflows {
 		if entryID, ok := cs.entries[key]; ok {
+			old := cs.workflows[key]
+			if old != nil && old.trigger.Schedule == sw.trigger.Schedule && old.trigger.Timezone == sw.trigger.Timezone {
+				entry := cs.cron.Entry(entryID)
+				if entry.Valid() {
+					if job, ok := entry.Job.(*cronJobV2); ok {
+						job.workflow.Store(sw)
+						cs.workflows[key] = sw
+						continue
+					}
+				}
+			}
 			cs.cron.Remove(entryID)
 			delete(cs.entries, key)
 		}
@@ -163,7 +175,7 @@ func (cs *cronSchedulerV2) reloadWorkflows() error {
 			log.Printf("[cron-v2] invalid schedule %q for %s: %v", sw.trigger.Schedule, key, err)
 			continue
 		}
-		entryID := cs.cron.Schedule(schedule, &cronJobV2{scheduler: cs, workflow: sw})
+		entryID := cs.cron.Schedule(schedule, newCronJobV2(cs, sw))
 		cs.entries[key] = entryID
 		cs.workflows[key] = sw
 		log.Printf("[cron-v2] scheduled %s with %q (timezone: %s)", key, sw.trigger.Schedule, sw.trigger.Timezone)
@@ -188,11 +200,21 @@ func cronTriggerFromV2Workflow(wf *types.WorkflowConfig) (*v2.CronTrigger, bool)
 
 type cronJobV2 struct {
 	scheduler *cronSchedulerV2
-	workflow  *scheduledWorkflowV2
+	workflow  atomic.Value // *scheduledWorkflowV2
+}
+
+func newCronJobV2(cs *cronSchedulerV2, sw *scheduledWorkflowV2) *cronJobV2 {
+	j := &cronJobV2{scheduler: cs}
+	j.workflow.Store(sw)
+	return j
+}
+
+func (j *cronJobV2) workflowSnapshot() *scheduledWorkflowV2 {
+	return j.workflow.Load().(*scheduledWorkflowV2)
 }
 
 func (j *cronJobV2) Run() {
-	_, _ = j.scheduler.runWorkflow(j.workflow, "")
+	_, _ = j.scheduler.runWorkflow(j.workflowSnapshot(), "")
 }
 
 func (cs *cronSchedulerV2) runWorkflow(sw *scheduledWorkflowV2, tenantID string) (workflowRunStartStatus, error) {
