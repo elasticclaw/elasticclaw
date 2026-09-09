@@ -138,24 +138,14 @@ func (cs *cronSchedulerV2) reloadWorkflows() error {
 		}
 	}
 
-	// Add or update entries. Always refresh the stored workflow snapshot so a
-	// reload picks up body/policy changes even when the cron expression is
-	// unchanged.
+	// Add or update entries. Always replace the existing cron entry so a reload
+	// picks up body/policy edits without mutating a live job (which would race
+	// with a concurrently executing tick). Re-adding with the same schedule
+	// recomputes the next run time from the current moment, which is acceptable
+	// because reloads are infrequent.
 	for key, sw := range newWorkflows {
-		if _, ok := cs.entries[key]; ok {
-			old := cs.workflows[key]
-		if old != nil && old.trigger.Schedule == sw.trigger.Schedule && old.trigger.Timezone == sw.trigger.Timezone {
-			// Refresh the snapshot held by the existing cron job, not just the map,
-			// so scheduled runs pick up workflow body/policy edits without a restart.
-			cs.workflows[key] = sw
-			if entry := cs.cron.Entry(cs.entries[key]); entry.Valid() {
-				if job, ok := entry.Job.(*cronJobV2); ok {
-					job.workflow = sw
-				}
-			}
-			continue
-		}
-			cs.cron.Remove(cs.entries[key])
+		if entryID, ok := cs.entries[key]; ok {
+			cs.cron.Remove(entryID)
 			delete(cs.entries, key)
 		}
 

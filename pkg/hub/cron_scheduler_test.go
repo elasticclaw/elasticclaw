@@ -565,11 +565,6 @@ func TestCronSchedulerV2ReloadRefreshesJobWorkflowSnapshot(t *testing.T) {
 	if !ok {
 		t.Fatal("engineering/delivery not scheduled")
 	}
-	job, ok := s.cronSchedulerV2.cron.Entry(entryID).Job.(*cronJobV2)
-	if !ok {
-		t.Fatalf("scheduled job is not a cronJobV2: %T", s.cronSchedulerV2.cron.Entry(entryID).Job)
-	}
-	firstTimeout := job.workflow.trigger.Timeout
 
 	updatedYAML := strings.ReplaceAll(cronWorkflowV2YAML, `schedule: "0 9 * * *"`, "schedule: \"0 9 * * *\"\n    timeout: \"30m\"")
 	SaveWorkspaceForTest(t, &types.WorkspaceConfig{
@@ -583,14 +578,23 @@ func TestCronSchedulerV2ReloadRefreshesJobWorkflowSnapshot(t *testing.T) {
 		t.Fatalf("reload v2 workflows again: %v", err)
 	}
 
+	newEntryID, ok := s.cronSchedulerV2.entries["engineering/delivery"]
+	if !ok {
+		t.Fatal("engineering/delivery not scheduled after reload")
+	}
+	// Replacing the entry avoids mutating the live job and removes the old entry.
+	if newEntryID == entryID {
+		t.Fatal("cron entry was not replaced after reload")
+	}
+	job, ok := s.cronSchedulerV2.cron.Entry(newEntryID).Job.(*cronJobV2)
+	if !ok {
+		t.Fatalf("scheduled job is not a cronJobV2: %T", s.cronSchedulerV2.cron.Entry(newEntryID).Job)
+	}
 	if job.workflow.trigger.Timeout != "30m" {
-		t.Fatalf("cron job still holds stale workflow snapshot: timeout=%q, want 30m", job.workflow.trigger.Timeout)
+		t.Fatalf("cron job holds stale workflow snapshot: timeout=%q, want 30m", job.workflow.trigger.Timeout)
 	}
 	if s.cronSchedulerV2.workflows["engineering/delivery"].trigger.Timeout != "30m" {
 		t.Fatalf("workflow map not refreshed: timeout=%q, want 30m", s.cronSchedulerV2.workflows["engineering/delivery"].trigger.Timeout)
-	}
-	if firstTimeout == job.workflow.trigger.Timeout {
-		t.Fatal("timeout did not change after reload")
 	}
 }
 
