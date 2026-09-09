@@ -303,13 +303,13 @@ func (s *Server) scheduleClawRetry(clawID, reason string) clawRetryDisposition {
 }
 
 // replaceClawInstance tears down the corrupted provider instance and starts a
-// fresh one. It restores the newest ready checkpoint unless the previous failed
-// attempt used that exact checkpoint, in which case it provisions cleanly.
+// fresh one. It restores the newest eligible ready checkpoint, walking older
+// checkpoints when newer ones are unsafe to reuse or restore no files.
 func (s *Server) replaceClawInstance(ctx context.Context, tenantID, clawID, reason string, attempt int) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	checkpointID, err := s.retryCheckpointBeforeTermination(tenantID, clawID, attempt)
+	checkpointID, readyCheckpointCount, err := s.retryCheckpointBeforeTermination(tenantID, clawID, attempt)
 	if err != nil {
 		return err
 	}
@@ -337,7 +337,11 @@ func (s *Server) replaceClawInstance(ctx context.Context, tenantID, clawID, reas
 	}
 
 	bootstrapStatus := fmt.Sprintf("retrying (attempt %d/%d)", attempt, maxClawAttempts)
-	reset, err := s.resetClawForRetry(tenantID, clawID, checkpointID, bootstrapStatus)
+	bootstrapDiagnostic := ""
+	if checkpointID == "" {
+		bootstrapDiagnostic = bootstrapStatus + "; retry checkpoint=none"
+	}
+	reset, err := s.resetClawForRetry(tenantID, clawID, checkpointID, bootstrapStatus, bootstrapDiagnostic)
 	if err != nil {
 		return err
 	}
@@ -371,7 +375,11 @@ func (s *Server) replaceClawInstance(ctx context.Context, tenantID, clawID, reas
 			"claw_id": clawID, "status": "provisioning", "bootstrap_status": bootstrapStatus,
 		},
 	})
-	log.Printf("[claw-retry] replacing %s after %s (attempt %d/%d, checkpoint=%q)", shortID(clawID), sanitizeFailureDetails(reason), attempt, maxClawAttempts, checkpointID)
+	if checkpointID == "" {
+		log.Printf("[claw-retry] replacing %s after %s (attempt %d/%d, checkpoint=%q (0 eligible of %d ready))", shortID(clawID), sanitizeFailureDetails(reason), attempt, maxClawAttempts, checkpointID, readyCheckpointCount)
+	} else {
+		log.Printf("[claw-retry] replacing %s after %s (attempt %d/%d, checkpoint=%q)", shortID(clawID), sanitizeFailureDetails(reason), attempt, maxClawAttempts, checkpointID)
+	}
 	go s.provisionStoredClaw(clawID)
 	return nil
 }
@@ -379,46 +387,142 @@ func (s *Server) replaceClawInstance(ctx context.Context, tenantID, clawID, reas
 // retryCheckpointBeforeTermination fixes the restore choice at the failure
 // boundary. A best-effort termination checkpoint is retained for diagnostics,
 // but is never selected as the state used to recover that same failure.
-func (s *Server) retryCheckpointBeforeTermination(tenantID, clawID string, attempt int) (string, error) {
-	checkpointID, err := s.retryCheckpointID(tenantID, clawID, attempt)
+func (s *Server) retryCheckpointBeforeTermination(tenantID, clawID string, attempt int) (string, int, error) {
+	checkpointID, readyCheckpointCount, err := s.retryCheckpointIDWithCount(tenantID, clawID, attempt)
 	if err != nil {
-		return "", err
+		return "", 0, err
 	}
 	s.checkpointBeforeTermination(clawID, "automatic-retry")
-	return checkpointID, nil
+	return checkpointID, readyCheckpointCount, nil
 }
 
 func (s *Server) retryCheckpointID(tenantID, clawID string, attempt int) (string, error) {
+	checkpointID, _, err := s.retryCheckpointIDWithCount(tenantID, clawID, attempt)
+	return checkpointID, err
+}
+
+type retryCheckpointCandidate struct {
+	id       string
+	reason   string
+	rootTree string
+}
+
+func (s *Server) retryCheckpointIDWithCount(tenantID, clawID string, attempt int) (string, int, error) {
 	var previousCheckpointID string
 	_ = s.db.QueryRow(`
 		SELECT COALESCE(restored_checkpoint_id,'')
 		  FROM task_run_attempts
 		 WHERE run_id=(SELECT task_run_id FROM claws WHERE id=?) AND attempt_number=?`, clawID, attempt-1).Scan(&previousCheckpointID)
 
-	var checkpointID string
-	err := s.db.QueryRow(`
-		SELECT id FROM claw_checkpoints
+	rows, err := s.db.Query(`
+		SELECT id, COALESCE(reason,''), COALESCE(root_tree_sha256,'') FROM claw_checkpoints
 		 WHERE tenant_id=? AND claw_id=? AND status='ready' AND manifest_path != ''
-		 ORDER BY created_at DESC LIMIT 1`, tenantID, clawID).Scan(&checkpointID)
-	if err == sql.ErrNoRows {
-		return "", nil
-	}
+		 ORDER BY created_at DESC`, tenantID, clawID)
 	if err != nil {
-		return "", err
+		return "", 0, err
 	}
-	if checkpointID == previousCheckpointID {
-		return "", nil
+	defer rows.Close()
+
+	var candidates []retryCheckpointCandidate
+	for rows.Next() {
+		var candidate retryCheckpointCandidate
+		if err := rows.Scan(&candidate.id, &candidate.reason, &candidate.rootTree); err != nil {
+			return "", 0, err
+		}
+		candidates = append(candidates, candidate)
 	}
-	return checkpointID, nil
+	if err := rows.Err(); err != nil {
+		return "", 0, err
+	}
+
+	// A 'bootstrap' checkpoint captures state zero. Once work has progressed,
+	// walk past it to older usable checkpoints instead of rolling real work
+	// back or giving up when the newest candidate is blocked.
+	progressedPastBootstrap := s.clawProgressedPastBootstrap(tenantID, clawID)
+	for _, candidate := range candidates {
+		if candidate.id == previousCheckpointID ||
+			(candidate.reason == "bootstrap" && progressedPastBootstrap) ||
+			candidate.rootTree == "" {
+			continue
+		}
+		return candidate.id, len(candidates), nil
+	}
+	return "", len(candidates), nil
 }
 
-func (s *Server) resetClawForRetry(tenantID, clawID, checkpointID, bootstrapStatus string) (bool, error) {
+// clawProgressedPastBootstrap reports whether the claw shows any signal of
+// real work beyond the freshly-provisioned state a 'bootstrap' checkpoint
+// captures. Kept deliberately simple and readable: any one signal is enough.
+func (s *Server) clawProgressedPastBootstrap(tenantID, clawID string) bool {
+	// A registered PR is unambiguous progress.
+	var count int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM claw_prs WHERE claw_id=?`, clawID).Scan(&count); err == nil && count > 0 {
+		return true
+	}
+	// A non-bootstrap ready checkpoint means the agent worked long enough for
+	// a later checkpoint to exist, even if the bootstrap one sorted newest.
+	if err := s.db.QueryRow(`
+		SELECT COUNT(*) FROM claw_checkpoints
+		 WHERE tenant_id=? AND claw_id=? AND status='ready' AND reason != 'bootstrap'`,
+		tenantID, clawID).Scan(&count); err == nil && count > 0 {
+		return true
+	}
+	// The pipeline moved past its entry stage. The entry stage itself is set
+	// right after initialization, before any work happens, so it does not
+	// count as progress.
+	stageID := s.getPipelineStage(clawID)
+	if stageID == "" {
+		return false
+	}
+	ctx, ok := s.findPipelineContextForClaw(clawID)
+	if !ok {
+		return false
+	}
+	pl := parsePipelineForContext(ctx)
+	if pl == nil {
+		return false
+	}
+	entry := pl.EntryStage()
+	return entry != nil && entry.ID != stageID
+}
+
+func (s *Server) resetClawForRetry(tenantID, clawID, checkpointID, bootstrapStatus, bootstrapDiagnostic string) (bool, error) {
+	// rebrief_pending=1 marks that the successor sandbox starts with a brand-new
+	// OpenClaw session: the checkpoint restore brings back workspace files but
+	// not the conversation, so the reconnect path must re-brief the agent with
+	// its task context. This UPDATE is the only place that arms the flag — a
+	// normal reconnect/bridge flap must never set it.
+	//
+	// The same UPDATE re-arms the idle auto-resume budget (idle_resume_count):
+	// the successor runs a brand-new session, so whatever the predecessor
+	// spent of its per-work-unit cap (agentIdleResumeMaxAttempts) says nothing
+	// about the successor's behaviour, and carrying it over would hand a fresh
+	// sandbox a spent budget and no idle recovery. It lives in this statement
+	// rather than a second one so the reset is bound to the same status guard
+	// and cannot apply to a claw that was not actually replaced.
+	//
+	// idle_resume_at is cleared with it. It is the once-per-stretch dedupe
+	// latch, and unlike a stage transition — where the claw keeps its session
+	// and clearing the latch would let the SAME idle stretch be poked twice —
+	// the successor here is a different session whose stretch anchor is not
+	// comparable to the predecessor's. Worse, it can collide with it:
+	// lastTurnFinishedAt is seeded on reconnect from the last claw message
+	// (server.go), so a successor whose re-brief delivery aborts before any
+	// turn finishes can anchor within agentIdleStretchSlack of a latch the
+	// dead session earned, and checkAgentIdleResume would then read "this
+	// stretch was already handled" on every tick and veto the resume forever —
+	// a zeroed budget that cannot be spent. Clearing costs nothing: the state
+	// this latch is sometimes credited with protecting, a connection whose
+	// in-flight turn is invisible, is protected by agentIdleResumeBlindGrace,
+	// which is an upper bound rather than a permanent veto (see
+	// TestAgentIdleResumeFiresAfterTheBlindWindowElapses).
 	res, err := s.db.Exec(`
 		UPDATE claws
-		   SET status='provisioning', bootstrap_ok=0, bootstrap_status=?, bootstrap_diagnostic='',
-		       provider_id='', ssh_host='', ssh_port=0, ssh_user='', restore_checkpoint_id=?
+		   SET status='provisioning', bootstrap_ok=0, bootstrap_status=?, bootstrap_diagnostic=?,
+		       provider_id='', ssh_host='', ssh_port=0, ssh_user='', restore_checkpoint_id=?,
+		       rebrief_pending=1, idle_resume_count=0, idle_resume_at=0
 		 WHERE id=? AND tenant_id=? AND status IN ('error','offline')`,
-		bootstrapStatus, checkpointID, clawID, tenantID)
+		bootstrapStatus, bootstrapDiagnostic, checkpointID, clawID, tenantID)
 	if err != nil {
 		return false, err
 	}

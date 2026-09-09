@@ -82,10 +82,10 @@ func TestTaskRunAnalyticsEffectivenessTicketAggregates(t *testing.T) {
 		t.Fatalf("runs per ticket = %#v, want %#v", out.RunsPerTicket, wantBuckets)
 	}
 	wantTop := []taskRunAnalyticsTopTicket{
-		{IssueID: "D", IssueTitle: "D title", CostUsd: 40, Runs: 4, Outcome: "delivered"},
-		{IssueID: "B", IssueTitle: "B title", CostUsd: 30, Runs: 1, Outcome: "in_progress"},
-		{IssueID: "C", IssueTitle: "C title", CostUsd: 20, Runs: 3, Outcome: "failed"},
-		{IssueID: "A", IssueTitle: "latest A", CostUsd: 15, Runs: 2, Outcome: "delivered"},
+		{TicketKey: taskRunAnalyticsTicketKey("", "", "D"), IssueID: "D", IssueTitle: "D title", CostUsd: 40, Runs: 4, Outcome: "delivered"},
+		{TicketKey: taskRunAnalyticsTicketKey("", "", "B"), IssueID: "B", IssueTitle: "B title", CostUsd: 30, Runs: 1, Outcome: "in_progress"},
+		{TicketKey: taskRunAnalyticsTicketKey("", "", "C"), IssueID: "C", IssueTitle: "C title", CostUsd: 20, Runs: 3, Outcome: "failed"},
+		{TicketKey: taskRunAnalyticsTicketKey("", "", "A"), IssueID: "A", IssueTitle: "latest A", CostUsd: 15, Runs: 2, Outcome: "delivered"},
 	}
 	if !reflect.DeepEqual(out.TopTicketsByCost, wantTop) {
 		t.Fatalf("top tickets = %#v, want %#v", out.TopTicketsByCost, wantTop)

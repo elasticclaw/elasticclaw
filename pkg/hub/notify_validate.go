@@ -11,11 +11,12 @@ import (
 )
 
 // notifyActionRef locates one enabled notify action inside a pipeline: the
-// stage that declares it and its trimmed "via" notifier name (empty when the
-// action has no usable via).
+// stage that declares it, its trimmed "via" notifier name (empty when the
+// action has no usable via) and its raw "severity" value.
 type notifyActionRef struct {
-	StageID string
-	Via     string
+	StageID  string
+	Via      string
+	Severity string
 }
 
 // notifyActionRefs parses pipelineYAML and returns a ref for every enabled
@@ -36,8 +37,9 @@ func notifyActionRefs(pipelineYAML string) []notifyActionRef {
 			continue
 		}
 		refs = append(refs, notifyActionRef{
-			StageID: stage.ID,
-			Via:     strings.TrimSpace(stage.OnEnter.Notify.Via),
+			StageID:  stage.ID,
+			Via:      strings.TrimSpace(stage.OnEnter.Notify.Via),
+			Severity: stage.OnEnter.Notify.Severity,
 		})
 	}
 	return refs
@@ -62,7 +64,8 @@ func effectiveWorkflowPipelineYAML(workflow *types.WorkflowConfig) (string, erro
 
 // validateNotifyVias rejects a pipeline at save time when it contains a
 // notify action whose "via" is blank or names no notifier in notifiers (the
-// set under notifications.notifiers in hub.yaml). Every offending action is
+// set under notifications.notifiers in hub.yaml), or whose "severity" is not
+// one of the four known values. Every offending action is
 // reported in one error, prefixed with label — `workflow "release"`,
 // `factory "triage"` — naming its stage and listing the defined notifier
 // names so a typo is obvious. It is a free function taking the notifier set
@@ -92,6 +95,14 @@ func validateNotifyVias(notifiers map[string]types.NotifierConfig, label, pipeli
 	}
 	var problems []string
 	for _, ref := range notifyActionRefs(pipelineYAML) {
+		// Severity is checked here rather than in pipeline.Validate so a
+		// typo is rejected while the author is still saving: failing
+		// pipeline.Parse instead would let the save through and then kill
+		// every stage action of a running pipeline, notify or not.
+		if _, ok := notifySeverity(ref.Severity); !ok {
+			problems = append(problems, fmt.Sprintf(
+				"stage %q has notify severity %q, which must be info, success, warning or error", ref.StageID, ref.Severity))
+		}
 		if ref.Via == "" {
 			problems = append(problems, fmt.Sprintf(
 				"stage %q has a notify action without a \"via\" (the name of a notifier under notifications.notifiers)", ref.StageID))
@@ -128,6 +139,120 @@ func validateNotifyVias(notifiers map[string]types.NotifierConfig, label, pipeli
 		definedDesc = "defined notifiers: " + strings.Join(defined, ", ")
 	}
 	return fmt.Errorf("%s notify actions: %s (%s)", label, strings.Join(problems, "; "), definedDesc)
+}
+
+// notifierPipelineReferences maps a notifier name to the pipeline stages whose
+// notify actions route through it. It walks the same surface the doctor's
+// checkNotifyActions judges — every workspace workflow's effective pipeline
+// plus every factory's pipeline_yaml — so the two can never disagree about
+// which notifiers a pipeline depends on. Factories are passed in rather than
+// resolved here because callers already hold the server lock.
+func notifierPipelineReferences(factories []*types.FactoryConfig) map[string][]string {
+	out := map[string][]string{}
+	collect := func(kind, name, pipelineYAML string) {
+		for _, ref := range notifyActionRefs(pipelineYAML) {
+			if ref.Via == "" {
+				continue
+			}
+			out[ref.Via] = append(out[ref.Via], fmt.Sprintf("%s %q stage %q", kind, name, ref.StageID))
+		}
+	}
+	if workspaces, err := loadExternalWorkspaces(); err == nil {
+		for _, workspace := range workspaces {
+			if workspace == nil {
+				continue
+			}
+			for _, workflow := range workspace.Workflows {
+				if workflow == nil {
+					continue
+				}
+				pipelineYAML, err := effectiveWorkflowPipelineYAML(workflow)
+				if err != nil {
+					continue
+				}
+				collect("workflow", workflow.Name, pipelineYAML)
+			}
+		}
+	}
+	for _, factory := range factories {
+		if factory == nil {
+			continue
+		}
+		collect("factory", factory.Name, factory.PipelineYAML)
+	}
+	return out
+}
+
+// validateNotifierRemovals rejects a settings patch that drops a notifier a
+// pipeline notify action still routes through. The Notifier screen lists every
+// hub notifier — including ones no lifecycle route uses and only a pipeline
+// stage references — and its Remove button sends the whole notifiers map
+// without the deleted key. Without this the save returns 200, SaveHubConfig
+// writes the notifier out of hub.yaml, and executeNotifyAction then drops
+// every stage notification with nothing but a warning in the claw
+// conversation.
+//
+// Enabled scheduled reports are guarded the same way: persisting a patch that
+// removes a notifier an ENABLED schedule's via still names (the schedule
+// carried forward, or re-sent verbatim, so scheduledEntryUnchanged exempts it
+// from validation) yields exactly the config the scheduler tick's validity
+// gate rejects — pausing EVERY scheduled report hub-wide with one log line as
+// the only signal. Only patch-introduced dangling is charged: the via must
+// have resolved in `current`, so a hand-written hub.yaml that already carries
+// a dangling via never bricks unrelated saves, and the screen's removeChannel
+// — which rewrites or pauses affected schedules in the same patch — keeps
+// working.
+func validateNotifierRemovals(current, patch *types.NotificationsConfig, factories []*types.FactoryConfig) error {
+	if current == nil || patch == nil {
+		return nil
+	}
+	var removed []string
+	for name := range current.Notifiers {
+		if _, kept := patch.Notifiers[name]; !kept {
+			removed = append(removed, name)
+		}
+	}
+	if len(removed) == 0 {
+		return nil
+	}
+	sort.Strings(removed)
+	references := notifierPipelineReferences(factories)
+	for _, scheduled := range patch.Scheduled {
+		if scheduled.Enabled != nil && !*scheduled.Enabled {
+			continue
+		}
+		for _, via := range scheduled.Via {
+			// TrimSpace matches how the scheduler and its validity gate
+			// resolve the via.
+			trimmed := strings.TrimSpace(via)
+			references[trimmed] = append(references[trimmed], fmt.Sprintf("scheduled report %q", scheduled.ID))
+		}
+	}
+	// Enabled infrastructure routes are guarded the same way as schedules:
+	// the patch carries an absent infra block forward, so a client that
+	// never saw the key can drop a notifier the stored route still names.
+	if patch.Infra.IsEnabled() {
+		for _, route := range patch.Infra.Routes {
+			trimmed := strings.TrimSpace(route.Via)
+			if trimmed == "" {
+				continue
+			}
+			references[trimmed] = append(references[trimmed], "infrastructure route")
+		}
+	}
+	var problems []string
+	for _, name := range removed {
+		used := references[name]
+		if len(used) == 0 {
+			continue
+		}
+		sort.Strings(used)
+		problems = append(problems, fmt.Sprintf("%q is still used by %s", name, strings.Join(used, ", ")))
+	}
+	if len(problems) == 0 {
+		return nil
+	}
+	return fmt.Errorf("notifications.notifiers: cannot remove a notifier still in use: %s", strings.Join(problems, "; "))
 }
 
 // configuredNotifiers returns the notifier set defined under

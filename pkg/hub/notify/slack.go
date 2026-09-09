@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
@@ -163,6 +164,35 @@ type slackNotifier struct {
 	minSendInterval time.Duration
 }
 
+// validateSlackAPIBase checks the shape of an api_base override. Every send
+// puts the bot token in an Authorization header addressed to this host, so a
+// value that is not an absolute http(s) URL must never reach the wire: a
+// relative or scheme-less value would make http.NewRequest fail on every send
+// (silent, log-only), and embedded credentials, a query or a fragment can only
+// be an attempt to smuggle something into the request line. WHICH host is
+// allowed is decided by the writer, not here — the settings API restricts what
+// a remote caller may point a token at (see validateNotifierAPIBase), while
+// hub.yaml and tests stay free to name an internal proxy or a fake server.
+func validateSlackAPIBase(apiBase string) error {
+	u, err := url.Parse(apiBase)
+	if err != nil {
+		return fmt.Errorf("slack notifier api_base %q is not a valid URL: %w", apiBase, err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Errorf("slack notifier api_base %q must be an absolute http(s) URL (e.g. %s)", apiBase, defaultSlackAPIBase)
+	}
+	if u.Host == "" {
+		return fmt.Errorf("slack notifier api_base %q has no host", apiBase)
+	}
+	if u.User != nil {
+		return fmt.Errorf("slack notifier api_base %q must not embed credentials", apiBase)
+	}
+	if u.RawQuery != "" || u.Fragment != "" {
+		return fmt.Errorf("slack notifier api_base %q must not carry a query or fragment", apiBase)
+	}
+	return nil
+}
+
 func newSlack(cfg map[string]any, secrets SecretResolver) (Notifier, error) {
 	secretName := stringOption(cfg, "token_secret")
 	if secretName == "" {
@@ -179,9 +209,12 @@ func newSlack(cfg map[string]any, secrets SecretResolver) (Notifier, error) {
 	if channel != "" && !slackChannelIDRegex.MatchString(channel) {
 		return nil, fmt.Errorf("slack notifier channel %q does not look like a Slack channel ID (expected C/G/D followed by alphanumerics, e.g. C0123ABCD)", channel)
 	}
-	apiBase := stringOption(cfg, "api_base")
+	apiBase := strings.TrimRight(strings.TrimSpace(stringOption(cfg, "api_base")), "/")
 	if apiBase == "" {
 		apiBase = defaultSlackAPIBase
+	}
+	if err := validateSlackAPIBase(apiBase); err != nil {
+		return nil, err
 	}
 	interval := slackMinSendInterval
 	if raw := stringOption(cfg, "min_send_interval"); raw != "" {

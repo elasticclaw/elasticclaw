@@ -576,6 +576,9 @@ db.close();
 	fakeOpenClaw := filepath.Join(fakeBin, "openclaw")
 	invocationsPath := filepath.Join(home, "openclaw-invocations")
 	fakeOpenClawScript := `#!/bin/sh
+# Consume stdin like the real openclaw does; exiting with the pipe unread
+# lets the writer die with SIGPIPE under pipefail.
+cat >/dev/null
 printf '%s\n' "$*" >> "$OPENCLAW_INVOCATIONS"
 if [ "$*" = "models auth list --provider xai --json" ]; then
   printf '%s\n' '{"profiles":[{"id":"xai:default","type":"oauth"}]}'
@@ -1421,6 +1424,7 @@ func TestGitHubCredentialHelper_RequiresAndVerifiesGitRegistration(t *testing.T)
 	assertContains(t, script, "Configuring GitHub credential helper for user=$(whoami) home=$HOME", "user and HOME log")
 	assertContains(t, script, "sudo apt-get install -y git", "mandatory git install")
 	assertContains(t, script, "git config --global credential.helper /usr/local/bin/elasticclaw-git-credentials", "git helper registration")
+	assertContains(t, script, "git config --global credential.useHttpPath true", "git credential cache key must include repo path")
 	assertContains(t, script, "git config --global --get-all credential.helper | grep -Fx /usr/local/bin/elasticclaw-git-credentials >/dev/null", "git helper verification")
 	assertContains(t, script, "git config --show-origin --global --get-all credential.helper", "git helper origin log")
 	assertContains(t, script, "url.https://github.com/.insteadOf", "force HTTPS for github.com remotes")

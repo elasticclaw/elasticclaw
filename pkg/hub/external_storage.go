@@ -117,21 +117,33 @@ var reservedWorkspaceNames = map[string]bool{
 	"secrets":             true,
 	"ai-config":           true,
 	"mcp-servers":         true,
+	"notifier":            true,
 	"analytics":           true,
 	"doctor":              true,
 	"troubleshoot":        true,
 }
 
-// validateWorkspaceName rejects names that are unsafe for filesystem use or
-// reserved by the settings UI routes.
-func validateWorkspaceName(name string) error {
+// validateWorkspaceNameForSave rejects names that are unsafe for filesystem use
+// or reserved by the settings UI routes.
+//
+// The reservation applies to NEW workspaces only. The reserved list grows every
+// time a settings section is added, so a workspace can predate its own name
+// becoming reserved — and nothing on the load path checks the list, so the hub
+// keeps serving it. Refusing every push for it would strand it as permanently
+// read-only with no in-product way to rename it (a rename is a push under the
+// new name), which is strictly worse than the URL collision the reservation
+// exists to prevent.
+func validateWorkspaceNameForSave(name string) error {
 	if err := validateName(name); err != nil {
 		return err
 	}
-	if reservedWorkspaceNames[name] {
-		return fmt.Errorf("workspace name %q is reserved", name)
+	if !reservedWorkspaceNames[name] {
+		return nil
 	}
-	return nil
+	if info, err := os.Stat(filepath.Join(workspacesDir(), name)); err == nil && info.IsDir() {
+		return nil
+	}
+	return fmt.Errorf("workspace name %q is reserved", name)
 }
 
 // saveExternalTemplate writes a template to the external templates directory.
@@ -439,9 +451,11 @@ func loadExternalWorkflowDocument(fileName string, data []byte) (*types.Workflow
 		// Prefer name from validated v2 doc; do not force v1 stage/trigger normalize.
 		name := strings.TrimSuffix(fileName, ".yaml")
 		enabled := false // missing/invalid v2 documents are always fail-closed
+		manualTrigger := false
 		if resolved, err := v2.ParseAndValidateWorkflow(data); err == nil && resolved.Workflow.Name != "" {
 			name = resolved.Workflow.Name
 			enabled = resolved.Workflow.Enabled
+			manualTrigger = resolved.Workflow.ManualTrigger
 		} else {
 			var probe struct {
 				Name string `yaml:"name"`
@@ -455,10 +469,11 @@ func loadExternalWorkflowDocument(fileName string, data []byte) (*types.Workflow
 			}
 		}
 		return &types.WorkflowConfig{
-			SchemaVersion: "2",
-			Name:          name,
-			Enabled:       &enabled,
-			RawConfig:     string(data),
+			SchemaVersion:       "2",
+			Name:                name,
+			Enabled:             &enabled,
+			EnableManualTrigger: manualTrigger,
+			RawConfig:           string(data),
 		}, nil
 	}
 
@@ -574,9 +589,13 @@ func projectV2RepositoriesForAccess(ws *v2.Workspace) types.RepositoryAccessList
 	out := make(types.RepositoryAccessList, 0, len(names))
 	for _, name := range names {
 		repo := ws.Repositories[name]
+		perm := strings.TrimSpace(strings.ToLower(repo.Permissions))
+		if perm != "read" && perm != "write" {
+			perm = "read"
+		}
 		out = append(out, types.GitHubRepoAccess{
 			Repo:        strings.TrimSpace(repo.Repository),
-			Permissions: "read", // v2 does not model per-repo permissions on the resource
+			Permissions: perm,
 		})
 	}
 	return out
@@ -646,7 +665,7 @@ func saveExternalWorkspace(workspace *types.WorkspaceConfig) error {
 	if workspace == nil || workspace.Name == "" {
 		return fmt.Errorf("workspace name required")
 	}
-	if err := validateWorkspaceName(workspace.Name); err != nil {
+	if err := validateWorkspaceNameForSave(workspace.Name); err != nil {
 		return err
 	}
 	if err := workspace.Validate(); err != nil {

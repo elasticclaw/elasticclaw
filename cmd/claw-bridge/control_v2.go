@@ -429,7 +429,7 @@ func (s *controlSupervisor) runConnection(ctx context.Context, binding workflowC
 			if frame.Envelope == nil {
 				return fmt.Errorf("missing control envelope")
 			}
-			receipt, startTask, err := s.acceptHubEnvelope(binding, *frame.Envelope)
+			receipt, startTask, err := s.acceptHubEnvelope(ctx, binding, *frame.Envelope)
 			if err != nil {
 				receipt = typesv2.ControlReceipt{MessageID: frame.Envelope.MessageID,
 					Disposition: typesv2.DispositionRejected, Reason: err.Error()}
@@ -483,7 +483,7 @@ func (s *controlSupervisor) sendOutbox(ctx context.Context, binding workflowCont
 	}
 }
 
-func (s *controlSupervisor) acceptHubEnvelope(binding workflowControlBinding,
+func (s *controlSupervisor) acceptHubEnvelope(ctx context.Context, binding workflowControlBinding,
 	envelope typesv2.ControlEnvelope) (typesv2.ControlReceipt, *typesv2.AgentTask, error) {
 	if envelope.RunID != binding.RunID || envelope.AttemptID != binding.AttemptID {
 		return typesv2.ControlReceipt{}, nil, fmt.Errorf("control envelope identity mismatch")
@@ -524,6 +524,8 @@ func (s *controlSupervisor) acceptHubEnvelope(binding workflowControlBinding,
 			return typesv2.ControlReceipt{}, nil, err
 		}
 		s.setSnapshot(binding, snapshot)
+	case typesv2.MessageExecRunAssign, typesv2.MessageDependencyUpdateAssign:
+		// Command tasks are started after the durable receipt is returned.
 	case typesv2.MessageRunResume:
 	default:
 		return typesv2.ControlReceipt{}, nil, fmt.Errorf("bridge does not support control kind %q", envelope.Kind)
@@ -544,6 +546,9 @@ func (s *controlSupervisor) acceptHubEnvelope(binding workflowControlBinding,
 	}
 	if envelope.Kind == typesv2.MessageRunSuspend || envelope.Kind == typesv2.MessageRunTerminate {
 		s.cancelAllTasks()
+	}
+	if envelope.Kind == typesv2.MessageExecRunAssign || envelope.Kind == typesv2.MessageDependencyUpdateAssign {
+		s.startCommandTask(ctx, binding, envelope.MessageID, envelope.Kind, envelope.TaskID, envelope.Payload)
 	}
 	return typesv2.ControlReceipt{MessageID: envelope.MessageID,
 		Disposition: typesv2.DispositionAccepted, StateVersion: s.stateVersion(binding)}, task, nil
@@ -590,9 +595,8 @@ func (s *controlSupervisor) executeTask(taskCtx context.Context, binding workflo
 		s.finishTask(binding, assignmentMessageID, task, typesv2.MessageAgentTaskFailed, "gateway is not ready")
 		return
 	}
-	if err := s.enqueueTaskEvent(binding, task, typesv2.MessageAgentTaskStarted, map[string]interface{}{
-		"execution": map[string]interface{}{"bridge_started_at": time.Now().UTC()},
-	}); err != nil {
+	if err := s.enqueueTaskEvent(binding, task, typesv2.MessageAgentTaskStarted,
+		taskLifecyclePayload(map[string]interface{}{"bridge_started_at": time.Now().UTC()})); err != nil {
 		s.finishTask(binding, assignmentMessageID, task, typesv2.MessageAgentTaskFailed, err.Error())
 		return
 	}
@@ -608,7 +612,7 @@ func (s *controlSupervisor) executeTask(taskCtx context.Context, binding workflo
 				return
 			case <-ticker.C:
 				_ = s.enqueueTaskEvent(binding, task, typesv2.MessageAgentTaskHeartbeat,
-					map[string]interface{}{"execution": map[string]interface{}{"heartbeat_at": time.Now().UTC()}})
+					taskLifecyclePayload(map[string]interface{}{"heartbeat_at": time.Now().UTC()}))
 			}
 		}
 	}()
@@ -620,9 +624,9 @@ func (s *controlSupervisor) executeTask(taskCtx context.Context, binding workflo
 		return
 	}
 	digest := sha256.Sum256([]byte(response))
-	payload := map[string]interface{}{"execution": map[string]interface{}{
+	payload := taskLifecyclePayload(map[string]interface{}{
 		"gateway_turn_completed": true, "response_bytes": len(response), "response_sha256": hex.EncodeToString(digest[:]),
-	}}
+	})
 	if err := s.enqueueTaskEvent(binding, task, typesv2.MessageAgentTaskCompleted, payload); err != nil {
 		log.Printf("[control-v2] queue completion for task %s: %v", task.ID, err)
 		return
@@ -632,12 +636,15 @@ func (s *controlSupervisor) executeTask(taskCtx context.Context, binding workflo
 
 func (s *controlSupervisor) finishTask(binding workflowControlBinding, assignmentMessageID string,
 	task typesv2.AgentTask, kind typesv2.ControlMessageKind, reason string) {
-	if err := s.enqueueTaskEvent(binding, task, kind,
-		map[string]interface{}{"execution": map[string]interface{}{"error": reason}}); err != nil {
+	if err := s.enqueueTaskEvent(binding, task, kind, taskLifecyclePayload(map[string]interface{}{"error": reason})); err != nil {
 		log.Printf("[control-v2] queue terminal event for task %s: %v", task.ID, err)
 		return
 	}
 	_, _ = s.store.setIncomingStatus(assignmentMessageID, "running", "failed")
+}
+
+func taskLifecyclePayload(values map[string]interface{}) map[string]interface{} {
+	return map[string]interface{}{"task": values}
 }
 
 func (s *controlSupervisor) enqueueTaskEvent(binding workflowControlBinding, task typesv2.AgentTask,

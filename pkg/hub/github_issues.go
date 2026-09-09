@@ -284,6 +284,13 @@ func githubIssuesWorkflowTriggerRepos(workflow *types.WorkflowConfig) []string {
 	return workflow.Repos
 }
 
+func githubIssuesWorkflowTriggerExcludeRepos(workflow *types.WorkflowConfig) []string {
+	if workflow.Trigger != nil && workflow.Trigger.GitHubIssues != nil {
+		return workflow.Trigger.GitHubIssues.ExcludeRepositories
+	}
+	return nil
+}
+
 func (s *Server) processGitHubIssuesFactoryEvent(payload githubIssuesWebhookPayload, issueID, currentStatus string, issueLabels map[string]bool, assignee string) bool {
 	matched := false
 	for _, factory := range s.resolveFactories() {
@@ -345,7 +352,7 @@ func (s *Server) processGitHubIssuesWorkflowEvent(workspaces []*types.WorkspaceC
 			if workflow.Enabled != nil && !*workflow.Enabled {
 				continue
 			}
-			if !githubRepoMatches(payload.Repository.FullName, githubIssuesWorkflowTriggerRepos(workflow)) {
+			if !githubRepoMatchesWithExclusions(payload.Repository.FullName, githubIssuesWorkflowTriggerRepos(workflow), githubIssuesWorkflowTriggerExcludeRepos(workflow)) {
 				continue
 			}
 			if workflow.AssignedTo != "" && !assignedToMatches(workflow.AssignedTo, assignee) {
@@ -1136,18 +1143,11 @@ func fetchGitHubIssueCommentsPage(ctx context.Context, baseURL, path, token stri
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
-	resp, err := issueTrackerHTTPClient.Do(req)
+	resp, err := defaultGitHubClient.do(req)
 	if err != nil {
 		return nil, "", err
 	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, "", fmt.Errorf("github comments response read error: %w", err)
-	}
-	if resp.StatusCode >= 400 {
-		return nil, "", fmt.Errorf("github comments API returned status %d: %s", resp.StatusCode, string(body))
-	}
+	body := resp.Body
 	var comments []githubIssueComment
 	if err := json.Unmarshal(body, &comments); err != nil {
 		return nil, "", fmt.Errorf("github comments parse error: %w", err)
@@ -1208,15 +1208,11 @@ func githubAPIPostWithBase(baseURL, path, token, method string, body interface{}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	resp, err := issueTrackerHTTPClient.Do(req)
+	resp, err := defaultGitHubClient.do(req)
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
-	respBody, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("github API %s %s: %d %s", method, path, resp.StatusCode, string(respBody))
-	}
+	respBody := resp.Body
 	var result map[string]interface{}
 	if err := json.Unmarshal(respBody, &result); err != nil {
 		return nil, fmt.Errorf("github API parse error: %w", err)

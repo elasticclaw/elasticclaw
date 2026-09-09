@@ -487,7 +487,7 @@ func (s *Server) triggerWorkflowConfig(w http.ResponseWriter, r *http.Request, w
 		return
 	}
 
-	clawID, _, err := s.createClawFromWorkflowContext(r.Context(), workspace, workflow, validatedInputs, "manual workflow trigger")
+	clawID, _, err := s.createClawFromWorkflowContext(r.Context(), workspace, workflow, validatedInputs, manualWorkflowTriggerSource)
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, "failed to create claw: "+err.Error())
 		return
@@ -552,11 +552,15 @@ func (s *Server) createClawForManualGitHubIssueWorkflow(ctx context.Context, wor
 	}
 
 	payload := buildGitHubIssuesPollPayloadForAction(issue, repo, "manual")
-	return s.createClawForGitHubIssueWorkflowContext(ctx, workspace, workflow, payload, "manual workflow trigger")
+	return s.createClawForGitHubIssueWorkflowContext(ctx, workspace, workflow, payload, manualWorkflowTriggerSource)
 }
 
 func (s *Server) queryGitHubIssue(repo, token, base string, issueNumber int) (githubIssuesPollItem, error) {
-	item, err := githubAPIWithBase(base, fmt.Sprintf("repos/%s/issues/%d", repo, issueNumber), token)
+	return s.queryGitHubIssueContext(context.Background(), repo, token, base, issueNumber)
+}
+
+func (s *Server) queryGitHubIssueContext(ctx context.Context, repo, token, base string, issueNumber int) (githubIssuesPollItem, error) {
+	item, err := githubAPIWithBaseContext(ctx, base, fmt.Sprintf("repos/%s/issues/%d", repo, issueNumber), token)
 	if err != nil {
 		return githubIssuesPollItem{}, err
 	}

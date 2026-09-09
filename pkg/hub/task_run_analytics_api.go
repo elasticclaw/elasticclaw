@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -11,8 +12,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	"github.com/elasticclaw/elasticclaw/pkg/types"
 )
 
 const taskRunAnalyticsDefaultLimit = 50
@@ -63,7 +62,8 @@ type taskRunAnalyticsRunsResponse struct {
 }
 
 type taskRunAnalyticsRunDetailResponse struct {
-	Run taskRunAnalyticsRunView `json:"run"`
+	Run    taskRunAnalyticsRunView     `json:"run"`
+	Stages []taskRunAnalyticsStageView `json:"stages,omitempty"`
 }
 
 type taskRunAnalyticsAttemptsResponse struct {
@@ -80,6 +80,7 @@ type taskRunAnalyticsPRsResponse struct {
 
 type taskRunAnalyticsOutputsResponse struct {
 	Outputs []taskRunAnalyticsOutputView `json:"outputs"`
+	TraceID string                       `json:"traceId,omitempty"`
 }
 
 type taskRunAnalyticsFilterOptionsResponse struct {
@@ -111,6 +112,7 @@ type taskRunAnalyticsRunView struct {
 	Integration           string   `json:"integration"`
 	IntegrationWorkspace  string   `json:"integrationWorkspace"`
 	IssueID               string   `json:"issueId"`
+	IssueCreatedAt        int64    `json:"issueCreatedAt"`
 	ClawID                string   `json:"clawId"`
 	Model                 string   `json:"model"`
 	LLMKey                string   `json:"llmKey"`
@@ -144,6 +146,15 @@ type taskRunAnalyticsRunView struct {
 	TotalTokens           *int64   `json:"totalTokens,omitempty"`
 	EstimatedCostUsd      *float64 `json:"estimatedCostUsd,omitempty"`
 	IssueTitle            string   `json:"issueTitle,omitempty"`
+}
+
+type taskRunAnalyticsStageView struct {
+	StageID    string `json:"stageId"`
+	Label      string `json:"label"`
+	EnteredAt  int64  `json:"enteredAt"`
+	ExitedAt   int64  `json:"exitedAt,omitempty"`
+	DurationMs int64  `json:"durationMs"`
+	Source     string `json:"source"`
 }
 
 type taskRunAnalyticsAttemptView struct {
@@ -204,14 +215,19 @@ type taskRunAnalyticsPRView struct {
 }
 
 type taskRunAnalyticsOutputView struct {
-	ClawID     string `json:"clawId"`
-	AttemptID  string `json:"attemptId,omitempty"`
-	StageID    string `json:"stageId"`
-	OutputName string `json:"outputName"`
-	Stdout     string `json:"stdout"`
-	Stderr     string `json:"stderr"`
-	ExitCode   int    `json:"exitCode"`
-	CreatedAt  int64  `json:"createdAt"`
+	ClawID     string              `json:"clawId"`
+	AttemptID  string              `json:"attemptId,omitempty"`
+	StageID    string              `json:"stageId"`
+	OutputName string              `json:"outputName"`
+	Stdout     string              `json:"stdout"`
+	Stderr     string              `json:"stderr"`
+	ExitCode   int                 `json:"exitCode"`
+	SpanID     string              `json:"spanId"`
+	SpanKind   string              `json:"spanKind"`
+	DurationMs int64               `json:"durationMs"`
+	Status     string              `json:"status"`
+	Records    []pipelineLogRecord `json:"records"`
+	CreatedAt  int64               `json:"createdAt"`
 }
 
 type taskRunAnalyticsFilters struct {
@@ -350,12 +366,12 @@ func (s *Server) handleTaskRunAnalyticsSummary(w http.ResponseWriter, r *http.Re
 		jsonError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	response, err := s.readTaskRunAnalyticsSummaryForRequest(filters, githubLoginFromContext(r.Context()))
+	response, err := s.readTaskRunAnalyticsSummary(filters)
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, "db error")
 		return
 	}
-	prior, err := s.readTaskRunAnalyticsSummaryForRequest(taskRunAnalyticsPriorFilters(filters, time.Now().UTC()), githubLoginFromContext(r.Context()))
+	prior, err := s.readTaskRunAnalyticsSummary(taskRunAnalyticsPriorFilters(filters, time.Now().UTC()))
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, "db error")
 		return
@@ -384,16 +400,26 @@ func (s *Server) handleTaskRunAnalyticsRuns(w http.ResponseWriter, r *http.Reque
 		jsonError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	runs, nextCursor, err := s.readTaskRunAnalyticsRunsForRequest(filters, limit, cursorStartedAt, cursorRunID, githubLoginFromContext(r.Context()))
+	runs, nextCursor, err := s.readTaskRunAnalyticsRuns(filters, limit, cursorStartedAt, cursorRunID)
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, "db error")
 		return
 	}
 	bh := BusinessHoursFromEnv(r.URL.Query().Get("tz"))
+	showCosts := analyticsCostsVisible(r)
 	for i := range runs {
 		runs[i].ReadyToMergeMs = taskRunReadyToMergeMs(runs[i], bh)
+		if !showCosts {
+			redactTaskRunAnalyticsRunCost(&runs[i])
+		}
 	}
 	jsonOK(w, taskRunAnalyticsRunsResponse{Runs: runs, NextCursor: nextCursor, Limit: limit})
+}
+
+// redactTaskRunAnalyticsRunCost drops the money figures of a run for callers
+// who may read analytics but are not allowed to see costs.
+func redactTaskRunAnalyticsRunCost(run *taskRunAnalyticsRunView) {
+	run.EstimatedCostUsd = nil
 }
 
 // taskRunReadyToMergeMs is the business-hours span from the PR becoming ready
@@ -404,6 +430,44 @@ func taskRunReadyToMergeMs(run taskRunAnalyticsRunView, bh BusinessHours) int64 
 		ready = run.PROpenedAt
 	}
 	return bh.DurationMs(ready, run.MergedAt)
+}
+
+// taskRunAnalyticsStages builds per-stage timing views for a run's detail
+// response. Duration for each stage is wall-clock: it ends at its own
+// exited_at if set, else the next stage's entered_at, else the run's
+// finished_at, else time-now for the still-open stage of a running run.
+func taskRunAnalyticsStages(stages []taskRunStage, runFinishedAt int64) []taskRunAnalyticsStageView {
+	views := make([]taskRunAnalyticsStageView, 0, len(stages))
+	for i, stage := range stages {
+		var end int64
+		switch {
+		case stage.ExitedAt != nil:
+			end = *stage.ExitedAt
+		case i+1 < len(stages):
+			end = stages[i+1].EnteredAt
+		case runFinishedAt > 0:
+			end = runFinishedAt
+		default:
+			end = now().UnixMilli()
+		}
+		durationMs := end - stage.EnteredAt
+		if durationMs < 0 {
+			durationMs = 0
+		}
+		var exitedAt int64
+		if stage.ExitedAt != nil {
+			exitedAt = *stage.ExitedAt
+		}
+		views = append(views, taskRunAnalyticsStageView{
+			StageID:    stage.StageID,
+			Label:      stage.Label,
+			EnteredAt:  stage.EnteredAt,
+			ExitedAt:   exitedAt,
+			DurationMs: durationMs,
+			Source:     stage.Source,
+		})
+	}
+	return views
 }
 
 func (s *Server) handleTaskRunAnalyticsRunSubresource(w http.ResponseWriter, r *http.Request) {
@@ -431,12 +495,17 @@ func (s *Server) handleTaskRunAnalyticsRunSubresource(w http.ResponseWriter, r *
 		jsonError(w, http.StatusNotFound, "not found")
 		return
 	}
-	if !s.canViewTaskRunAnalyticsRun(w, r, tenantID, run.ClawID) {
-		return
-	}
 	if len(parts) == 1 {
 		run.ReadyToMergeMs = taskRunReadyToMergeMs(run, BusinessHoursFromEnv(r.URL.Query().Get("tz")))
-		jsonOK(w, taskRunAnalyticsRunDetailResponse{Run: run})
+		if !analyticsCostsVisible(r) {
+			redactTaskRunAnalyticsRunCost(&run)
+		}
+		stages, err := taskRunStagesForRun(s.db, tenantID, runID)
+		if err != nil {
+			jsonError(w, http.StatusInternalServerError, "db error")
+			return
+		}
+		jsonOK(w, taskRunAnalyticsRunDetailResponse{Run: run, Stages: taskRunAnalyticsStages(stages, run.FinishedAt)})
 		return
 	}
 	if len(parts) != 2 {
@@ -471,7 +540,9 @@ func (s *Server) handleTaskRunAnalyticsRunSubresource(w http.ResponseWriter, r *
 			jsonError(w, http.StatusInternalServerError, "db error")
 			return
 		}
-		jsonOK(w, taskRunAnalyticsOutputsResponse{Outputs: outputs})
+		// run_id is already the durable identifier shared by all attempts, so it
+		// is the run-level trace ID rather than introducing another synthetic ID.
+		jsonOK(w, taskRunAnalyticsOutputsResponse{Outputs: outputs, TraceID: runID})
 	default:
 		jsonError(w, http.StatusNotFound, "not found")
 	}
@@ -482,7 +553,7 @@ func (s *Server) handleTaskRunAnalyticsFilterOptions(w http.ResponseWriter, r *h
 		jsonError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	response, err := s.readTaskRunAnalyticsFilterOptionsForRequest(tenantFromCtx(r), githubLoginFromContext(r.Context()))
+	response, err := s.readTaskRunAnalyticsFilterOptions(tenantFromCtx(r))
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, "db error")
 		return
@@ -492,21 +563,67 @@ func (s *Server) handleTaskRunAnalyticsFilterOptions(w http.ResponseWriter, r *h
 
 func parseTaskRunAnalyticsFilters(r *http.Request) (taskRunAnalyticsFilters, error) {
 	q := r.URL.Query()
+	read := func(key string, aliases ...string) ([]string, error) {
+		return splitTaskRunAnalyticsValues(q, append([]string{key}, aliases...)...)
+	}
+	status, err := read("status")
+	if err != nil {
+		return taskRunAnalyticsFilters{}, err
+	}
+	owner, err := read("owner", "owner_id", "ownerId", "owner_display_name", "ownerDisplayName")
+	if err != nil {
+		return taskRunAnalyticsFilters{}, err
+	}
+	ownerType, err := read("owner_type", "ownerType")
+	if err != nil {
+		return taskRunAnalyticsFilters{}, err
+	}
+	workspace, err := read("workspace", "workspace_name", "workspaceName")
+	if err != nil {
+		return taskRunAnalyticsFilters{}, err
+	}
+	workflow, err := read("workflow", "workflow_name", "workflowName")
+	if err != nil {
+		return taskRunAnalyticsFilters{}, err
+	}
+	factory, err := read("factory", "factory_name", "factoryName")
+	if err != nil {
+		return taskRunAnalyticsFilters{}, err
+	}
+	integration, err := read("integration")
+	if err != nil {
+		return taskRunAnalyticsFilters{}, err
+	}
+	repo, err := read("repo")
+	if err != nil {
+		return taskRunAnalyticsFilters{}, err
+	}
+	model, err := read("model")
+	if err != nil {
+		return taskRunAnalyticsFilters{}, err
+	}
+	warningType, err := read("warning_type", "warningType")
+	if err != nil {
+		return taskRunAnalyticsFilters{}, err
+	}
+	failureType, err := read("failure_type", "failureType")
+	if err != nil {
+		return taskRunAnalyticsFilters{}, err
+	}
 	filters := taskRunAnalyticsFilters{
 		TenantID:    tenantFromCtx(r),
-		Status:      splitTaskRunAnalyticsValues(q, "status"),
-		Owner:       splitTaskRunAnalyticsValues(q, "owner", "owner_id", "ownerId", "owner_display_name", "ownerDisplayName"),
-		OwnerType:   splitTaskRunAnalyticsValues(q, "owner_type", "ownerType"),
-		Workspace:   splitTaskRunAnalyticsValues(q, "workspace", "workspace_name", "workspaceName"),
-		Workflow:    splitTaskRunAnalyticsValues(q, "workflow", "workflow_name", "workflowName"),
-		Factory:     splitTaskRunAnalyticsValues(q, "factory", "factory_name", "factoryName"),
-		Integration: splitTaskRunAnalyticsValues(q, "integration"),
-		Repo:        splitTaskRunAnalyticsValues(q, "repo"),
-		Model:       splitTaskRunAnalyticsValues(q, "model"),
-		WarningType: splitTaskRunAnalyticsValues(q, "warning_type", "warningType"),
-		FailureType: splitTaskRunAnalyticsValues(q, "failure_type", "failureType"),
+		Status:      status,
+		Owner:       owner,
+		OwnerType:   ownerType,
+		Workspace:   workspace,
+		Workflow:    workflow,
+		Factory:     factory,
+		Integration: integration,
+		Repo:        repo,
+		Model:       model,
+		WarningType: warningType,
+		FailureType: failureType,
 	}
-	var err error
 	if filters.FromStartedAt, err = parseTaskRunAnalyticsTime(q, "from", "start", "started_after", "startedAfter"); err != nil {
 		return filters, err
 	}
@@ -638,216 +755,6 @@ func (s *Server) readTaskRunAnalyticsRuns(filters taskRunAnalyticsFilters, limit
 	return runs, nextCursor, nil
 }
 
-func (s *Server) readTaskRunAnalyticsRunsForRequest(filters taskRunAnalyticsFilters, limit int, cursorStartedAt int64, cursorRunID, githubLogin string) ([]taskRunAnalyticsRunView, string, error) {
-	accessCfg := s.taskRunAnalyticsViewACL(githubLogin)
-	if accessCfg == nil {
-		return s.readTaskRunAnalyticsRuns(filters, limit, cursorStartedAt, cursorRunID)
-	}
-
-	visible := make([]taskRunAnalyticsRunView, 0, limit+1)
-	nextCursor := ""
-	err := s.forEachViewableTaskRunAnalyticsRun(filters, cursorStartedAt, cursorRunID, githubLogin, accessCfg, func(run taskRunAnalyticsRunView) bool {
-		visible = append(visible, run)
-		if len(visible) == limit+1 {
-			last := visible[limit-1]
-			visible = visible[:limit]
-			nextCursor = encodeTaskRunAnalyticsCursor(last.StartedAt, last.RunID)
-			return false
-		}
-		return true
-	})
-	if err != nil {
-		return nil, "", err
-	}
-	return visible, nextCursor, nil
-}
-
-// taskRunAnalyticsViewACL returns the access config when the request is subject
-// to tag-based view filtering, or nil when the caller sees all tenant runs
-// (token auth, or no ViewRequiresTags configured).
-func (s *Server) taskRunAnalyticsViewACL(githubLogin string) *types.AccessConfig {
-	if githubLogin == "" {
-		return nil
-	}
-	accessCfg := s.taskRunAnalyticsAccessConfig()
-	if accessCfg == nil || len(accessCfg.ViewRequiresTags) == 0 {
-		return nil
-	}
-	return accessCfg
-}
-
-// forEachViewableTaskRunAnalyticsRun streams matching runs in batches, resolves
-// claw tags per batch, and invokes visit for each run the user can view.
-// visit returns false to stop early.
-func (s *Server) forEachViewableTaskRunAnalyticsRun(filters taskRunAnalyticsFilters, cursorStartedAt int64, cursorRunID, githubLogin string, accessCfg *types.AccessConfig, visit func(taskRunAnalyticsRunView) bool) error {
-	const batchSize = taskRunAnalyticsMaxLimit
-	batchStartedAt, batchRunID := cursorStartedAt, cursorRunID
-	for {
-		batch, batchNextCursor, err := s.readTaskRunAnalyticsRuns(filters, batchSize, batchStartedAt, batchRunID)
-		if err != nil {
-			return err
-		}
-		clawTags, err := s.readTaskRunAnalyticsClawTags(filters.TenantID, batch)
-		if err != nil {
-			return err
-		}
-		for _, run := range batch {
-			tags, found := clawTags[run.ClawID]
-			if !found || !canViewClaw(accessCfg, githubLogin, tags) {
-				continue
-			}
-			if !visit(run) {
-				return nil
-			}
-		}
-		if batchNextCursor == "" {
-			return nil
-		}
-		batchStartedAt, batchRunID, err = decodeTaskRunAnalyticsCursor(batchNextCursor)
-		if err != nil {
-			return err
-		}
-	}
-}
-
-// readTaskRunAnalyticsSummaryForRequest aggregates only over runs the caller can
-// view: for GitHub-OAuth callers under a tag ACL the totals, breakdowns, and PR
-// KPIs are computed from the ACL-filtered run stream instead of tenant-wide SQL.
-func (s *Server) readTaskRunAnalyticsSummaryForRequest(filters taskRunAnalyticsFilters, githubLogin string) (taskRunAnalyticsSummaryResponse, error) {
-	accessCfg := s.taskRunAnalyticsViewACL(githubLogin)
-	if accessCfg == nil {
-		return s.readTaskRunAnalyticsSummary(filters)
-	}
-	response := taskRunAnalyticsSummaryResponse{
-		ByStatus:         map[string]int{},
-		WarningBreakdown: map[string]int{},
-		FailureBreakdown: map[string]int{},
-	}
-	err := s.forEachViewableTaskRunAnalyticsRun(filters, 0, "", githubLogin, accessCfg, func(run taskRunAnalyticsRunView) bool {
-		response.TotalRuns++
-		response.HumanInteractions += run.HumanInteractionCount
-		response.PRCounts.Total += run.PRCount
-		response.PRCounts.Open += run.OpenPRCount
-		response.PRCounts.Merged += run.MergedPRCount
-		response.PRCounts.Closed += run.ClosedPRCount
-		if run.Status != "" {
-			response.ByStatus[run.Status]++
-		}
-		if run.FailureType != "" {
-			response.FailureBreakdown[run.FailureType]++
-		}
-		for _, warningType := range run.WarningTypes {
-			if warningType != "" {
-				response.WarningBreakdown[warningType]++
-			}
-		}
-		return true
-	})
-	return response, err
-}
-
-// readTaskRunAnalyticsFilterOptionsForRequest returns distinct filter values
-// computed only from runs the caller can view, so a restricted OAuth user does
-// not learn workspace/factory/repo/model names from runs hidden by the ACL.
-func (s *Server) readTaskRunAnalyticsFilterOptionsForRequest(tenantID, githubLogin string) (taskRunAnalyticsFilterOptionsResponse, error) {
-	accessCfg := s.taskRunAnalyticsViewACL(githubLogin)
-	if accessCfg == nil {
-		return s.readTaskRunAnalyticsFilterOptions(tenantID)
-	}
-	sets := map[string]map[string]bool{}
-	add := func(set string, value string) {
-		if value == "" {
-			return
-		}
-		if sets[set] == nil {
-			sets[set] = map[string]bool{}
-		}
-		sets[set][value] = true
-	}
-	// Same eligibility clause as the SQL variant
-	// (analytics_enabled=1 AND requires_pr=1).
-	eligible := true
-	filters := taskRunAnalyticsFilters{TenantID: tenantID, RequiresPR: &eligible, AnalyticsEnabled: &eligible}
-	err := s.forEachViewableTaskRunAnalyticsRun(filters, 0, "", githubLogin, accessCfg, func(run taskRunAnalyticsRunView) bool {
-		add("workspaces", run.WorkspaceName)
-		add("workflows", run.WorkflowName)
-		add("factories", run.FactoryName)
-		add("integrations", run.Integration)
-		add("repos", run.Repo)
-		add("models", run.Model)
-		add("statuses", run.Status)
-		add("failureTypes", run.FailureType)
-		for _, warningType := range run.WarningTypes {
-			add("warningTypes", warningType)
-		}
-		return true
-	})
-	if err != nil {
-		return taskRunAnalyticsFilterOptionsResponse{}, err
-	}
-	return taskRunAnalyticsFilterOptionsResponse{
-		Workspaces:   sortedTaskRunAnalyticsValues(sets["workspaces"]),
-		Workflows:    sortedTaskRunAnalyticsValues(sets["workflows"]),
-		Factories:    sortedTaskRunAnalyticsValues(sets["factories"]),
-		Integrations: sortedTaskRunAnalyticsValues(sets["integrations"]),
-		Repos:        sortedTaskRunAnalyticsValues(sets["repos"]),
-		Models:       sortedTaskRunAnalyticsValues(sets["models"]),
-		Statuses:     sortedTaskRunAnalyticsValues(sets["statuses"]),
-		WarningTypes: sortedTaskRunAnalyticsValues(sets["warningTypes"]),
-		FailureTypes: sortedTaskRunAnalyticsValues(sets["failureTypes"]),
-	}, nil
-}
-
-func sortedTaskRunAnalyticsValues(set map[string]bool) []string {
-	values := make([]string, 0, len(set))
-	for value := range set {
-		values = append(values, value)
-	}
-	sort.Strings(values)
-	return values
-}
-
-func (s *Server) readTaskRunAnalyticsClawTags(tenantID string, runs []taskRunAnalyticsRunView) (map[string][]string, error) {
-	clawIDs := make([]string, 0, len(runs))
-	seen := make(map[string]bool, len(runs))
-	for _, run := range runs {
-		if run.ClawID == "" || seen[run.ClawID] {
-			continue
-		}
-		seen[run.ClawID] = true
-		clawIDs = append(clawIDs, run.ClawID)
-	}
-	tagsByClawID := make(map[string][]string, len(clawIDs))
-	if len(clawIDs) == 0 {
-		return tagsByClawID, nil
-	}
-
-	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(clawIDs)), ",")
-	args := make([]any, 0, len(clawIDs)+1)
-	args = append(args, tenantID)
-	for _, clawID := range clawIDs {
-		args = append(args, clawID)
-	}
-	rows, err := s.db.Query(`
-		SELECT id, COALESCE(tags,'[]')
-		  FROM claws
-		 WHERE tenant_id=? AND id IN (`+placeholders+`)`, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var clawID, tagsJSON string
-		if err := rows.Scan(&clawID, &tagsJSON); err != nil {
-			return nil, err
-		}
-		var tags []string
-		_ = json.Unmarshal([]byte(tagsJSON), &tags)
-		tagsByClawID[clawID] = tags
-	}
-	return tagsByClawID, rows.Err()
-}
-
 func (s *Server) readTaskRunAnalyticsRun(tenantID, runID string) (taskRunAnalyticsRunView, bool, error) {
 	rows, err := s.db.Query(`
 		SELECT `+taskRunAnalyticsRunColumns()+`
@@ -889,6 +796,59 @@ func (s *Server) readTaskRunAnalyticsAttempts(tenantID, runID string) ([]taskRun
 	return attempts, rows.Err()
 }
 
+func (s *Server) readTaskRunAnalyticsAttemptsForRuns(tenantID string, runIDs []string) (map[string][]taskRunAnalyticsAttemptView, error) {
+	attemptsByRun := map[string][]taskRunAnalyticsAttemptView{}
+	if len(runIDs) == 0 {
+		return attemptsByRun, nil
+	}
+	if len(runIDs) > 500 {
+		for start := 0; start < len(runIDs); start += 500 {
+			end := start + 500
+			if end > len(runIDs) {
+				end = len(runIDs)
+			}
+			chunk, err := s.readTaskRunAnalyticsAttemptsForRuns(tenantID, runIDs[start:end])
+			if err != nil {
+				return nil, err
+			}
+			for id, values := range chunk {
+				attemptsByRun[id] = append(attemptsByRun[id], values...)
+			}
+		}
+		return attemptsByRun, nil
+	}
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(runIDs)), ",")
+	args := make([]any, 0, len(runIDs)+1)
+	args = append(args, tenantID)
+	for _, runID := range runIDs {
+		args = append(args, runID)
+	}
+	rows, err := s.db.Query(`
+		SELECT run_id, id, attempt_id, attempt_number, trigger_id, claw_id, status, failure_type,
+		       started_at, finished_at, created_at, updated_at
+		  FROM task_run_attempts
+		 WHERE tenant_id=? AND run_id IN (`+placeholders+`)`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var runID string
+		var attempt taskRunAnalyticsAttemptView
+		if err := rows.Scan(&runID, &attempt.ID, &attempt.AttemptID, &attempt.AttemptNumber, &attempt.TriggerID, &attempt.ClawID, &attempt.Status, &attempt.FailureType, &attempt.StartedAt, &attempt.FinishedAt, &attempt.CreatedAt, &attempt.UpdatedAt); err != nil {
+			return nil, err
+		}
+		attemptsByRun[runID] = append(attemptsByRun[runID], attempt)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for _, attempts := range attemptsByRun {
+		sort.Slice(attempts, func(i, j int) bool { return attempts[i].AttemptNumber < attempts[j].AttemptNumber })
+	}
+	return attemptsByRun, nil
+}
+
 func (s *Server) readTaskRunAnalyticsEvents(tenantID, runID string) ([]taskRunAnalyticsEventView, error) {
 	rows, err := s.db.Query(`
 		SELECT id, attempt_id, event_key, source, source_event_id, source_delivery_id, event_type,
@@ -920,6 +880,103 @@ func (s *Server) readTaskRunAnalyticsEvents(tenantID, runID string) ([]taskRunAn
 	return events, rows.Err()
 }
 
+func (s *Server) readTaskRunAnalyticsEventsForRuns(tenantID string, runIDs []string) (map[string][]taskRunAnalyticsEventView, error) {
+	return s.readTaskRunAnalyticsEventsForRunsWithDetail(tenantID, runIDs, true)
+}
+
+// readTaskRunAnalyticsEventsForRunsForTickets avoids loading event detail JSON:
+// ticket story and timing use only event identity, type, time, and actor fields.
+func (s *Server) readTaskRunAnalyticsEventsForRunsForTickets(tenantID string, runIDs []string) (map[string][]taskRunAnalyticsEventView, error) {
+	return s.readTaskRunAnalyticsEventsForRunsWithDetail(tenantID, runIDs, false)
+}
+
+func (s *Server) readTaskRunAnalyticsEventsForRunsWithDetail(tenantID string, runIDs []string, includeDetail bool) (map[string][]taskRunAnalyticsEventView, error) {
+	eventsByRun := map[string][]taskRunAnalyticsEventView{}
+	if len(runIDs) == 0 {
+		return eventsByRun, nil
+	}
+	if len(runIDs) > 500 {
+		for start := 0; start < len(runIDs); start += 500 {
+			end := start + 500
+			if end > len(runIDs) {
+				end = len(runIDs)
+			}
+			chunk, err := s.readTaskRunAnalyticsEventsForRunsWithDetail(tenantID, runIDs[start:end], includeDetail)
+			if err != nil {
+				return nil, err
+			}
+			for id, values := range chunk {
+				eventsByRun[id] = append(eventsByRun[id], values...)
+			}
+		}
+		return eventsByRun, nil
+	}
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(runIDs)), ",")
+	args := make([]any, 0, len(runIDs)+1)
+	args = append(args, tenantID)
+	for _, runID := range runIDs {
+		args = append(args, runID)
+	}
+	// Ticket timing uses every event, not only events with a story label. In
+	// particular, ci_failed, agent_idle, pr_replaced, and human_* events can
+	// be the most recent activity for a ticket.
+	columns := `run_id, id, event_type, event_time, actor_login, actor_display_name`
+	if includeDetail {
+		columns = `run_id, id, attempt_id, event_key, source, source_event_id, source_delivery_id, event_type,
+	       event_time, observed_at, actor_type, actor_id, actor_login, actor_display_name,
+	       interaction_role, target_type, target_id, target_url, warning_type, failure_type, detail, created_at`
+	}
+	rows, err := s.db.Query(`
+		SELECT `+columns+`
+		  FROM task_run_events
+		 WHERE tenant_id=? AND run_id IN (`+placeholders+`)`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var runID, detailJSON string
+		var event taskRunAnalyticsEventView
+		if includeDetail {
+			scanArgs := []any{&runID, &event.ID, &event.AttemptID, &event.EventKey, &event.Source, &event.SourceEventID, &event.SourceDeliveryID, &event.EventType, &event.EventTime, &event.ObservedAt, &event.ActorType, &event.ActorID, &event.ActorLogin, &event.ActorDisplayName, &event.InteractionRole, &event.TargetType, &event.TargetID, &event.TargetURL, &event.WarningType, &event.FailureType}
+			scanArgs = append(scanArgs, &detailJSON)
+			scanArgs = append(scanArgs, &event.CreatedAt)
+			if err := rows.Scan(scanArgs...); err != nil {
+				return nil, err
+			}
+		} else if err := rows.Scan(&runID, &event.ID, &event.EventType, &event.EventTime, &event.ActorLogin, &event.ActorDisplayName); err != nil {
+			return nil, err
+		}
+		if includeDetail {
+			event.Detail = map[string]any{}
+		}
+		if includeDetail && detailJSON != "" {
+			if err := json.Unmarshal([]byte(detailJSON), &event.Detail); err != nil {
+				log.Printf("[task-run-analytics] failed to unmarshal event detail for %s: %v", event.ID, err)
+			}
+		}
+		eventsByRun[runID] = append(eventsByRun[runID], event)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for _, events := range eventsByRun {
+		sort.Slice(events, func(i, j int) bool {
+			if events[i].EventTime != events[j].EventTime {
+				return events[i].EventTime < events[j].EventTime
+			}
+			if includeDetail && events[i].ObservedAt != events[j].ObservedAt {
+				return events[i].ObservedAt < events[j].ObservedAt
+			}
+			if includeDetail {
+				return events[i].EventKey < events[j].EventKey
+			}
+			return events[i].ID < events[j].ID
+		})
+	}
+	return eventsByRun, nil
+}
+
 func (s *Server) readTaskRunAnalyticsPRs(tenantID, runID string) ([]taskRunAnalyticsPRView, error) {
 	rows, err := s.db.Query(`
 		SELECT id, repo, pr_number, pr_url, head_sha, head_branch, last_agent_head_sha, base_branch,
@@ -942,6 +999,73 @@ func (s *Server) readTaskRunAnalyticsPRs(tenantID, runID string) ([]taskRunAnaly
 		prs = append(prs, pr)
 	}
 	return prs, rows.Err()
+}
+
+func (s *Server) readTaskRunAnalyticsPRsForRuns(tenantID string, runIDs []string) (map[string][]taskRunAnalyticsPRView, error) {
+	return s.readTaskRunAnalyticsPRsForRunsContext(context.Background(), tenantID, runIDs)
+}
+
+// readTaskRunAnalyticsPRsForRunsContext is the ctx-bounded variant for callers
+// whose queries must honour a deadline or shutdown cancellation (the scheduled
+// pending_prs report builds under a 30s context and is cancelled at shutdown).
+func (s *Server) readTaskRunAnalyticsPRsForRunsContext(ctx context.Context, tenantID string, runIDs []string) (map[string][]taskRunAnalyticsPRView, error) {
+	prsByRun := map[string][]taskRunAnalyticsPRView{}
+	if len(runIDs) == 0 {
+		return prsByRun, nil
+	}
+	if len(runIDs) > 500 {
+		for start := 0; start < len(runIDs); start += 500 {
+			end := start + 500
+			if end > len(runIDs) {
+				end = len(runIDs)
+			}
+			chunk, err := s.readTaskRunAnalyticsPRsForRunsContext(ctx, tenantID, runIDs[start:end])
+			if err != nil {
+				return nil, err
+			}
+			for id, values := range chunk {
+				prsByRun[id] = append(prsByRun[id], values...)
+			}
+		}
+		return prsByRun, nil
+	}
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(runIDs)), ",")
+	args := make([]any, 0, len(runIDs)+1)
+	args = append(args, tenantID)
+	for _, runID := range runIDs {
+		args = append(args, runID)
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT run_id, id, repo, pr_number, pr_url, head_sha, head_branch, last_agent_head_sha, base_branch,
+		       state, merged, opened_at, closed_at, merged_at, merged_by_login, created_at, updated_at
+		  FROM task_run_prs
+		 WHERE tenant_id=? AND run_id IN (`+placeholders+`)`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var runID string
+		var pr taskRunAnalyticsPRView
+		var merged int
+		if err := rows.Scan(&runID, &pr.ID, &pr.Repo, &pr.PRNumber, &pr.URL, &pr.HeadSHA, &pr.HeadBranch, &pr.LastAgentHeadSHA, &pr.BaseBranch, &pr.State, &merged, &pr.OpenedAt, &pr.ClosedAt, &pr.MergedAt, &pr.MergedByLogin, &pr.CreatedAt, &pr.UpdatedAt); err != nil {
+			return nil, err
+		}
+		pr.Merged = merged == 1
+		prsByRun[runID] = append(prsByRun[runID], pr)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for _, prs := range prsByRun {
+		sort.Slice(prs, func(i, j int) bool {
+			if prs[i].OpenedAt != prs[j].OpenedAt {
+				return prs[i].OpenedAt < prs[j].OpenedAt
+			}
+			return prs[i].PRNumber < prs[j].PRNumber
+		})
+	}
+	return prsByRun, nil
 }
 
 func (s *Server) readTaskRunAnalyticsOutputs(tenantID, runID, runClawID string) ([]taskRunAnalyticsOutputView, error) {
@@ -990,7 +1114,7 @@ func (s *Server) readTaskRunAnalyticsOutputs(tenantID, runID, runClawID string) 
 		args = append(args, clawID)
 	}
 	rows, err := s.db.Query(`
-		SELECT claw_id, stage_id, output_name, stdout, stderr, exit_code, created_at
+		SELECT claw_id, stage_id, output_name, stdout, stderr, exit_code, span_id, span_kind, duration_ms, status, records, created_at
 		  FROM pipeline_outputs
 		 WHERE claw_id IN (`+placeholders+`)
 		 ORDER BY created_at ASC, claw_id ASC, output_name ASC`, args...)
@@ -1002,8 +1126,15 @@ func (s *Server) readTaskRunAnalyticsOutputs(tenantID, runID, runClawID string) 
 	for rows.Next() {
 		var output taskRunAnalyticsOutputView
 		var createdAt time.Time
-		if err := rows.Scan(&output.ClawID, &output.StageID, &output.OutputName, &output.Stdout, &output.Stderr, &output.ExitCode, &createdAt); err != nil {
+		var recordsJSON string
+		if err := rows.Scan(&output.ClawID, &output.StageID, &output.OutputName, &output.Stdout, &output.Stderr, &output.ExitCode, &output.SpanID, &output.SpanKind, &output.DurationMs, &output.Status, &recordsJSON, &createdAt); err != nil {
 			return nil, err
+		}
+		if err := json.Unmarshal([]byte(recordsJSON), &output.Records); err != nil {
+			return nil, fmt.Errorf("decode pipeline output records: %w", err)
+		}
+		if output.Records == nil {
+			output.Records = []pipelineLogRecord{}
 		}
 		output.AttemptID = attemptByClaw[output.ClawID]
 		output.CreatedAt = epochMillis(createdAt)
@@ -1012,57 +1143,12 @@ func (s *Server) readTaskRunAnalyticsOutputs(tenantID, runID, runClawID string) 
 	return outputs, rows.Err()
 }
 
-func (s *Server) canViewTaskRunAnalyticsRun(w http.ResponseWriter, r *http.Request, tenantID, clawID string) bool {
-	githubLogin := githubLoginFromContext(r.Context())
-	if githubLogin == "" {
-		return true
-	}
-	allowed, found, err := s.taskRunAnalyticsClawAccess(tenantID, clawID, githubLogin)
-	if err != nil {
-		jsonError(w, http.StatusInternalServerError, "db error")
-		return false
-	}
-	if !found {
-		jsonError(w, http.StatusNotFound, "not found")
-		return false
-	}
-	if !allowed {
-		jsonError(w, http.StatusForbidden, "forbidden")
-		return false
-	}
-	return true
-}
-
-func (s *Server) taskRunAnalyticsClawAccess(tenantID, clawID, githubLogin string) (allowed, found bool, err error) {
-	accessCfg := s.taskRunAnalyticsAccessConfig()
-	if accessCfg == nil || len(accessCfg.ViewRequiresTags) == 0 {
-		return true, true, nil
-	}
-
-	var tagsJSON string
-	err = s.db.QueryRow(`SELECT COALESCE(tags,'[]') FROM claws WHERE id=? AND tenant_id=?`, clawID, tenantID).Scan(&tagsJSON)
-	if err == sql.ErrNoRows {
-		return false, false, nil
-	}
-	if err != nil {
-		return false, false, err
-	}
-	var clawTags []string
-	_ = json.Unmarshal([]byte(tagsJSON), &clawTags)
-	return canViewClaw(accessCfg, githubLogin, clawTags), true, nil
-}
-
-func (s *Server) taskRunAnalyticsAccessConfig() *types.AccessConfig {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	if s.hubCfg.Auth != nil {
-		return s.hubCfg.Auth.Access
-	}
-	return nil
-}
-
 func (s *Server) readTaskRunAnalyticsFilterOptions(tenantID string) (taskRunAnalyticsFilterOptionsResponse, error) {
-	response := taskRunAnalyticsFilterOptionsResponse{}
+	response := taskRunAnalyticsFilterOptionsResponse{
+		Workspaces: make([]string, 0), Workflows: make([]string, 0), Factories: make([]string, 0),
+		Integrations: make([]string, 0), Repos: make([]string, 0), Models: make([]string, 0),
+		Statuses: make([]string, 0), WarningTypes: make([]string, 0), FailureTypes: make([]string, 0),
+	}
 	var err error
 	response.Workspaces, err = s.readDistinctTaskRunAnalyticsValues(tenantID, "workspace_name")
 	if err != nil {
@@ -1241,7 +1327,7 @@ func addTaskRunAnalyticsOwnerFilter(where *[]string, args *[]any, values []strin
 func taskRunAnalyticsRunColumns() string {
 	return `run_id, initial_attempt_id, current_attempt_id, status, phase, attempt_count,
 		owner_type, workspace_name, workflow_name, factory_name, owner_id, owner_display_name,
-		run_kind, integration, integration_workspace, issue_id, claw_id, model, llm_key, repo,
+		run_kind, integration, integration_workspace, issue_id, issue_created_at, claw_id, model, llm_key, repo,
 		primary_pr_url, pr_count, open_pr_count, merged_pr_count, closed_pr_count, warning_types,
 		failure_type, human_interaction_count, started_at, queued_at, provision_started_at,
 		agent_started_at, pr_opened_at, ready_at, merged_at, finished_at, timeout_at, last_event_at,
@@ -1260,7 +1346,7 @@ func scanTaskRunAnalyticsRuns(rows *sql.Rows) ([]taskRunAnalyticsRunView, error)
 		if err := rows.Scan(
 			&run.RunID, &run.InitialAttemptID, &run.CurrentAttemptID, &run.Status, &run.Phase, &run.AttemptCount,
 			&run.OwnerType, &run.WorkspaceName, &run.WorkflowName, &run.FactoryName, &run.OwnerID, &run.OwnerDisplayName,
-			&run.RunKind, &run.Integration, &run.IntegrationWorkspace, &run.IssueID, &run.ClawID, &run.Model, &run.LLMKey,
+			&run.RunKind, &run.Integration, &run.IntegrationWorkspace, &run.IssueID, &run.IssueCreatedAt, &run.ClawID, &run.Model, &run.LLMKey,
 			&run.Repo, &run.PrimaryPRURL, &run.PRCount, &run.OpenPRCount, &run.MergedPRCount, &run.ClosedPRCount,
 			&warningsJSON, &run.FailureType, &run.HumanInteractionCount, &run.StartedAt, &run.QueuedAt,
 			&run.ProvisionStartedAt, &run.AgentStartedAt, &run.PROpenedAt, &run.ReadyAt, &run.MergedAt, &run.FinishedAt,
@@ -1288,22 +1374,31 @@ func scanTaskRunAnalyticsRuns(rows *sql.Rows) ([]taskRunAnalyticsRunView, error)
 	return runs, rows.Err()
 }
 
-func splitTaskRunAnalyticsValues(q url.Values, keys ...string) []string {
+const taskRunAnalyticsFilterValueLimit = 100
+
+func splitTaskRunAnalyticsValues(q url.Values, keys ...string) ([]string, error) {
 	seen := map[string]bool{}
 	values := []string{}
 	for _, key := range keys {
 		for _, raw := range q[key] {
 			for _, part := range strings.Split(raw, ",") {
+				part, err := url.PathUnescape(part)
+				if err != nil {
+					return nil, fmt.Errorf("invalid value for filter %s: %w", key, err)
+				}
 				part = strings.TrimSpace(part)
 				if part == "" || seen[part] {
 					continue
 				}
 				seen[part] = true
 				values = append(values, part)
+				if len(values) > taskRunAnalyticsFilterValueLimit {
+					return nil, fmt.Errorf("too many values for filter %s, max %d", keys[0], taskRunAnalyticsFilterValueLimit)
+				}
 			}
 		}
 	}
-	return values
+	return values, nil
 }
 
 func parseTaskRunAnalyticsTime(q url.Values, keys ...string) (int64, error) {

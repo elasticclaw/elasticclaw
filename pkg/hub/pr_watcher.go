@@ -2,6 +2,7 @@ package hub
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -74,10 +75,20 @@ func extractPRs(content string) []struct {
 // storePRMention persists a detected PR reference for a claw (idempotent by URL).
 // Also tracks analytics for the first detection of a PR open.
 // inserted is true only when this call created the claw_prs row.
-func (s *Server) storePRMention(clawID, repo string, prNumber int, prURL string) (inserted bool, err error) {
+//
+// mentionOnly marks rows created from PR URLs the agent merely mentioned in a
+// message; only delivered rows (mentionOnly=false) gate claw finalization. A
+// delivered call for an already-tracked URL upgrades a mention-only row to
+// delivered, so a PR mentioned mid-work and then listed in [DONE] blocks.
+func (s *Server) storePRMention(clawID, repo string, prNumber int, prURL string, mentionOnly bool) (inserted bool, err error) {
 	var existing string
 	_ = s.db.QueryRow(`SELECT id FROM claw_prs WHERE claw_id=? AND pr_url=?`, clawID, prURL).Scan(&existing)
 	if existing != "" {
+		if !mentionOnly {
+			if err := s.upgradeMentionOnlyPR(clawID, prURL); err != nil {
+				return false, err
+			}
+		}
 		return false, nil
 	}
 
@@ -95,6 +106,8 @@ func (s *Server) storePRMention(clawID, repo string, prNumber int, prURL string)
 	var lastCommentAt string
 	var lastCommentTime time.Time
 	var headSHA string
+	var title string
+	var mergeableState string
 	if token != "" {
 		commentsData, err := githubAPIList(fmt.Sprintf("repos/%s/issues/%d/comments", repo, prNumber), token)
 		if err == nil {
@@ -125,6 +138,8 @@ func (s *Server) storePRMention(clawID, repo string, prNumber int, prURL string)
 			if headObj, ok := prData["head"].(map[string]interface{}); ok {
 				headSHA, _ = headObj["sha"].(string)
 			}
+			title, _ = prData["title"].(string)
+			mergeableState, _ = prData["mergeable_state"].(string)
 		}
 		reviewsData, err := githubAPIList(fmt.Sprintf("repos/%s/pulls/%d/reviews", repo, prNumber), token)
 		if err == nil {
@@ -138,15 +153,22 @@ func (s *Server) storePRMention(clawID, repo string, prNumber int, prURL string)
 	// hitting the (claw_id, pr_url) unique index means the PR is already
 	// tracked — idempotent success, not a persistence failure.
 	res, err := s.db.Exec(
-		`INSERT OR IGNORE INTO claw_prs(id,claw_id,repo,pr_number,pr_url,last_comment_id,last_comment_at,last_review_id,last_ci_sha,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)`,
-		prID, clawID, repo, prNumber, prURL, maxCommentID, lastCommentAt, maxReviewID, headSHA, now(),
+		`INSERT OR IGNORE INTO claw_prs(id,claw_id,repo,pr_number,pr_url,title,last_comment_id,last_comment_at,last_review_id,last_ci_sha,mention_only,last_mergeable_state,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		prID, clawID, repo, prNumber, prURL, title, maxCommentID, lastCommentAt, maxReviewID, headSHA, boolInt(mentionOnly), mergeableState, now(),
 	)
 	if err != nil {
 		log.Printf("[pr-watcher] failed to persist PR %s#%d for claw %s: %v", repo, prNumber, clawID[:8], err)
 		return false, err
 	}
 	if affected, err := res.RowsAffected(); err == nil && affected == 0 {
-		return false, nil // concurrent writer already registered this PR
+		// A concurrent writer already registered this PR. If it was the message
+		// scanner, its row may be mention-only while this call is a delivery.
+		if !mentionOnly {
+			if err := s.upgradeMentionOnlyPR(clawID, prURL); err != nil {
+				return false, err
+			}
+		}
+		return false, nil
 	}
 	if _, runID, _, ok, err := s.taskRunContextForClaw(clawID); err != nil {
 		log.Printf("[task-run-analytics] failed to resolve task run for PR mention claw %s: %v", clawID, err)
@@ -171,31 +193,65 @@ func (s *Server) storePRMention(clawID, repo string, prNumber int, prURL string)
 }
 
 // scanMessageForPRs extracts and stores any PR URLs found in a message.
-func (s *Server) scanMessageForPRs(clawID, content string) {
+//
+// mentionOnly must reflect what the content IS, not where the URLs end up:
+//   - true for arbitrary agent turn text: the agent can mention any PR in
+//     passing ("depends on .../pull/12"), so those rows keep being polled
+//     (CI, comments and reviews are still forwarded) but never gate claw
+//     finalization and are never action targets.
+//   - false for content that is a delivery channel — e.g. the stdout of a
+//     pipeline gate script such as verify-github-pr-links, whose whole job is
+//     to emit the claw's OWN delivered PR URLs. Those rows must block
+//     finalization exactly like PRs registered via [DONE].
+func (s *Server) scanMessageForPRs(clawID, content string, mentionOnly bool) {
 	for _, pr := range extractPRs(content) {
-		if _, err := s.storePRMention(clawID, pr.repo, pr.number, pr.url); err != nil {
+		if _, err := s.storePRMention(clawID, pr.repo, pr.number, pr.url, mentionOnly); err != nil {
 			log.Printf("[pr-watcher] failed to store PR mention: %v", err)
 		}
 	}
 }
 
+// upgradeMentionOnlyPR promotes a mention-only claw_prs row to delivered, so a
+// PR the agent mentioned mid-work and then delivered via [DONE] starts gating
+// finalization. No-op when the row is already delivered or does not exist.
+func (s *Server) upgradeMentionOnlyPR(clawID, prURL string) error {
+	res, err := s.db.Exec(`UPDATE claw_prs SET mention_only=0 WHERE claw_id=? AND pr_url=? AND mention_only=1`, clawID, prURL)
+	if err != nil {
+		log.Printf("[pr-watcher] failed to upgrade mention-only PR %s for claw %s: %v", prURL, shortID(clawID), err)
+		return err
+	}
+	if affected, err := res.RowsAffected(); err == nil && affected > 0 {
+		log.Printf("[pr-watcher] PR %s upgraded from mention-only to delivered for claw %s", prURL, shortID(clawID))
+	}
+	return nil
+}
+
 // prMentionCandidate is a PR URL pending claw_prs registration.
 type prMentionCandidate struct {
-	repo     string
-	number   int
-	url      string
-	comment  int64
-	review   int64
-	commentAt string
-	headSHA  string
+	repo             string
+	number           int
+	url              string
+	comment          int64
+	review           int64
+	commentAt        string
+	headSHA          string
+	title            string
+	mergeableState   string
 }
 
 // preparePRMention loads GitHub watermarks for a PR insert. alreadyTracked is
-// true when claw_prs already has this URL (no write needed).
-func (s *Server) preparePRMention(clawID, repo string, prNumber int, prURL string) (alreadyTracked bool, row prMentionCandidate, err error) {
+// true when claw_prs already has this URL (no insert needed) — though a
+// delivered (mentionOnly=false) call still upgrades a mention-only row so the
+// PR starts gating finalization.
+func (s *Server) preparePRMention(clawID, repo string, prNumber int, prURL string, mentionOnly bool) (alreadyTracked bool, row prMentionCandidate, err error) {
 	var existing string
 	_ = s.db.QueryRow(`SELECT id FROM claw_prs WHERE claw_id=? AND pr_url=?`, clawID, prURL).Scan(&existing)
 	if existing != "" {
+		if !mentionOnly {
+			if err := s.upgradeMentionOnlyPR(clawID, prURL); err != nil {
+				return true, prMentionCandidate{}, err
+			}
+		}
 		return true, prMentionCandidate{}, nil
 	}
 
@@ -233,6 +289,8 @@ func (s *Server) preparePRMention(clawID, repo string, prNumber int, prURL strin
 		if headObj, ok := prData["head"].(map[string]interface{}); ok {
 			row.headSHA, _ = headObj["sha"].(string)
 		}
+		row.title, _ = prData["title"].(string)
+		row.mergeableState, _ = prData["mergeable_state"].(string)
 	}
 	reviewsData, err := githubAPIList(fmt.Sprintf("repos/%s/pulls/%d/reviews", repo, prNumber), token)
 	if err == nil {
@@ -245,7 +303,8 @@ func (s *Server) preparePRMention(clawID, repo string, prNumber int, prURL strin
 // transaction. Either every new row is committed, or none are — so callers
 // never leave the PR watcher partially armed when one URL fails.
 // Returns the URL that failed, or "" on full success.
-func (s *Server) insertClawPRsAtomic(clawID string, rows []prMentionCandidate) string {
+// mentionOnly is stamped onto every inserted row; see storePRMention.
+func (s *Server) insertClawPRsAtomic(clawID string, rows []prMentionCandidate, mentionOnly bool) string {
 	if len(rows) == 0 {
 		return ""
 	}
@@ -268,18 +327,32 @@ func (s *Server) insertClawPRsAtomic(clawID string, rows []prMentionCandidate) s
 		var existing string
 		_ = tx.QueryRow(`SELECT id FROM claw_prs WHERE claw_id=? AND pr_url=?`, clawID, row.url).Scan(&existing)
 		if existing != "" {
+			// A concurrent writer (possibly the message scanner) got here first.
+			// A delivered call must still upgrade a mention-only row.
+			if !mentionOnly {
+				if _, err := tx.Exec(`UPDATE claw_prs SET mention_only=0 WHERE claw_id=? AND pr_url=? AND mention_only=1`, clawID, row.url); err != nil {
+					log.Printf("[pr-watcher] failed to upgrade mention-only PR %s for claw %s: %v", row.url, shortID(clawID), err)
+					return row.url
+				}
+			}
 			continue
 		}
 		prID := uuid.New().String()
 		res, err := tx.Exec(
-			`INSERT OR IGNORE INTO claw_prs(id,claw_id,repo,pr_number,pr_url,last_comment_id,last_comment_at,last_review_id,last_ci_sha,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)`,
-			prID, clawID, row.repo, row.number, row.url, row.comment, row.commentAt, row.review, row.headSHA, now(),
+			`INSERT OR IGNORE INTO claw_prs(id,claw_id,repo,pr_number,pr_url,title,last_comment_id,last_comment_at,last_review_id,last_ci_sha,mention_only,last_mergeable_state,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			prID, clawID, row.repo, row.number, row.url, row.title, row.comment, row.commentAt, row.review, row.headSHA, boolInt(mentionOnly), row.mergeableState, now(),
 		)
 		if err != nil {
 			log.Printf("[pr-watcher] failed to persist PR %s#%d for claw %s: %v", row.repo, row.number, shortID(clawID), err)
 			return row.url
 		}
 		if affected, err := res.RowsAffected(); err == nil && affected == 0 {
+			if !mentionOnly {
+				if _, err := tx.Exec(`UPDATE claw_prs SET mention_only=0 WHERE claw_id=? AND pr_url=? AND mention_only=1`, clawID, row.url); err != nil {
+					log.Printf("[pr-watcher] failed to upgrade mention-only PR %s for claw %s: %v", row.url, shortID(clawID), err)
+					return row.url
+				}
+			}
 			continue // concurrent insert won the race
 		}
 		inserted = append(inserted, row)
@@ -491,6 +564,17 @@ type clawPR struct {
 	lastReviewID        int64
 	prConditionsFired   bool
 	createdAt           string
+	state               string
+	merged              bool
+	mergedAt            *string
+	lastMergeableState  string
+	// mentionOnly mirrors claw_prs.mention_only at load time. A mention-only
+	// row is a POLLING target (CI, comments and reviews are still forwarded)
+	// but never an ACTION target and never a TRIGGER: it must not block
+	// finalization, drive a pipeline transition, move a tracker issue, be
+	// merged by the hub, or terminate a claw. Decision-time reads should still
+	// prefer clawPRIsMentionOnly (the flag can be upgraded mid-poll).
+	mentionOnly bool
 }
 
 // loadClawPRsByNumber hydrates every tracked-PR row for a (repo, number) pair
@@ -505,10 +589,12 @@ type clawPR struct {
 func (s *Server) loadClawPRsByNumber(repo string, prNumber int) []clawPR {
 	rows, err := s.db.Query(`
 		SELECT cp.id, cp.claw_id, cp.repo, cp.pr_number, cp.pr_url, cp.last_ci_sha, cp.last_ci_conclusion, cp.last_comment_id,
-		       cp.last_comment_at, cp.last_review_comment_id, cp.last_review_id, cp.pr_conditions_fired, cp.created_at
+		       cp.last_comment_at, cp.last_review_comment_id, cp.last_review_id, cp.pr_conditions_fired, cp.created_at,
+		       cp.last_mergeable_state
 		FROM claw_prs cp
 		JOIN claws cl ON cl.id = cp.claw_id
 		WHERE cp.repo = ? AND cp.pr_number = ? AND cl.status NOT IN ('deleted','error','offline')
+		  AND cp.state NOT IN ('merged','closed')
 		ORDER BY cp.created_at DESC
 	`, repo, prNumber)
 	if err != nil {
@@ -523,7 +609,8 @@ func (s *Server) loadClawPRsByNumber(repo string, prNumber int) []clawPR {
 		var prConditionsFiredInt int
 		if err := rows.Scan(&pr.id, &pr.clawID, &pr.repo, &pr.prNumber, &pr.prURL,
 			&pr.lastCISHA, &pr.lastCIConclusion, &pr.lastCommentID, &pr.lastCommentAt,
-			&pr.lastReviewCommentID, &pr.lastReviewID, &prConditionsFiredInt, &pr.createdAt); err != nil {
+			&pr.lastReviewCommentID, &pr.lastReviewID, &prConditionsFiredInt, &pr.createdAt,
+			&pr.lastMergeableState); err != nil {
 			log.Printf("[pr-watcher] failed to scan tracked PR %s#%d: %v", repo, prNumber, err)
 			return prs
 		}
@@ -536,14 +623,91 @@ func (s *Server) loadClawPRsByNumber(repo string, prNumber int) []clawPR {
 	return prs
 }
 
-func (s *Server) pollAllPRs() {
+// rearmTokenMissClosedPRs reopens rows the token-miss bound closed once their
+// repo's installation token resolves again. The bound closes a row after
+// prMergedPermanentFailureLimit consecutive polls without a token so an
+// unpollable repo cannot pin the claw, but the cause is usually transient
+// (mint 5xx, network, JWT clock skew) — and a closed row is excluded from
+// polling, so without this sweep the row would stay closed forever after the
+// outage ends: the PR still open on GitHub, the tracker issue never moved, the
+// workflow slot never released, the VM still running.
+//
+// A closed unmerged row with token_miss_count at the bound is exactly "closed
+// by the token-miss bound": the closing path deliberately does NOT zero the
+// counter, and every other closing path (checkPRMerged, closeUnreachablePR) is
+// only reachable after a successful token resolve already reset it to 0.
+//
+// Kept cheap: one DB query; when nothing matches, no token resolution is
+// attempted at all. Token resolution per distinct repo is the only external
+// work — no PR fetches happen here.
+func (s *Server) rearmTokenMissClosedPRs() {
+	// Mirror pollAllPRs's own gates. While GitHub reports the quota exhausted,
+	// or no GitHub App can mint installation tokens, the per-repo token
+	// resolution below is exactly the spend those gates exist to prevent —
+	// and any row re-armed now would not be polled in this pass anyway, so
+	// deferring the sweep to the first healthy pass loses nothing.
+	if _, blocked := defaultGitHubClient.blockedUntilTime(); blocked {
+		return
+	}
+	if len(s.githubAppConfigsForTokens()) == 0 {
+		return
+	}
 	rows, err := s.db.Query(`
-		SELECT cp.id, cp.claw_id, cp.repo, cp.pr_number, cp.pr_url, cp.last_ci_sha, cp.last_ci_conclusion, cp.last_comment_id,
-		       cp.last_comment_at, cp.last_review_comment_id, cp.last_review_id, cp.pr_conditions_fired, cp.created_at,
-		       cl.status
+		SELECT DISTINCT cp.repo
 		FROM claw_prs cp
 		JOIN claws cl ON cl.id = cp.claw_id
 		WHERE cl.status NOT IN ('deleted','error','offline')
+		  AND cp.state='closed' AND cp.merged=0
+		  AND cp.token_miss_count >= ?
+	`, prMergedPermanentFailureLimit)
+	if err != nil {
+		if !strings.Contains(err.Error(), "database is closed") {
+			log.Printf("[pr-watcher] token-miss re-arm query error: %v", err)
+		}
+		return
+	}
+	defer rows.Close()
+	var repos []string
+	for rows.Next() {
+		var repo string
+		if err := rows.Scan(&repo); err != nil {
+			continue
+		}
+		repos = append(repos, repo)
+	}
+	rows.Close()
+	for _, repo := range repos {
+		if s.tokenForRepo(repo) == "" {
+			continue // outage still ongoing for this repo
+		}
+		res, err := s.db.Exec(`
+			UPDATE claw_prs SET state='open', token_miss_count=0
+			WHERE repo=? AND state='closed' AND merged=0 AND token_miss_count >= ?
+			  AND claw_id IN (SELECT id FROM claws WHERE status NOT IN ('deleted','error','offline'))
+		`, repo, prMergedPermanentFailureLimit)
+		if err != nil {
+			log.Printf("[pr-watcher] failed to re-arm token-miss-closed PR rows for %s: %v", repo, err)
+			continue
+		}
+		if n, err := res.RowsAffected(); err == nil && n > 0 {
+			log.Printf("[pr-watcher] token for %s resolvable again — re-armed %d PR row(s) closed by the token-miss bound", repo, n)
+		}
+	}
+}
+
+func (s *Server) pollAllPRs() {
+	// Re-arm rows the token-miss bound closed, before the main query, so a
+	// recovered row is polled again in this same pass.
+	s.rearmTokenMissClosedPRs()
+
+	rows, err := s.db.Query(`
+		SELECT cp.id, cp.claw_id, cp.repo, cp.pr_number, cp.pr_url, cp.last_ci_sha, cp.last_ci_conclusion, cp.last_comment_id,
+		       cp.last_comment_at, cp.last_review_comment_id, cp.last_review_id, cp.pr_conditions_fired, cp.created_at,
+		       cp.mention_only, cp.last_mergeable_state, cl.status
+		FROM claw_prs cp
+		JOIN claws cl ON cl.id = cp.claw_id
+		WHERE cl.status NOT IN ('deleted','error','offline')
+		  AND cp.state NOT IN ('merged','closed')
 	`)
 	if err != nil {
 		if strings.Contains(err.Error(), "database is closed") {
@@ -561,13 +725,14 @@ func (s *Server) pollAllPRs() {
 	var prs []row
 	for rows.Next() {
 		var r row
-		var prConditionsFiredInt int
+		var prConditionsFiredInt, mentionOnlyInt int
 		if err := rows.Scan(&r.pr.id, &r.pr.clawID, &r.pr.repo, &r.pr.prNumber, &r.pr.prURL,
 			&r.pr.lastCISHA, &r.pr.lastCIConclusion, &r.pr.lastCommentID, &r.pr.lastCommentAt, &r.pr.lastReviewCommentID, &r.pr.lastReviewID, &prConditionsFiredInt, &r.pr.createdAt,
-			&r.clawStatus); err != nil {
+			&mentionOnlyInt, &r.pr.lastMergeableState, &r.clawStatus); err != nil {
 			continue
 		}
 		r.pr.prConditionsFired = prConditionsFiredInt == 1
+		r.pr.mentionOnly = mentionOnlyInt == 1
 		prs = append(prs, r)
 	}
 	rows.Close()
@@ -629,7 +794,44 @@ func (s *Server) pollAllPRs() {
 		if token == "" {
 			tokenMisses++
 			log.Printf("[pr-watcher] no token for %s (claw %s); skipping this PR", r.pr.repo, shortID(r.pr.clawID))
+			// A row skipped here never reaches checkPRMerged, so nothing else
+			// can ever move it to a resolved state — bound the misses so an
+			// unreachable repo cannot pin the claw forever. Tracked in
+			// token_miss_count, NOT permanent_failure_count: that counter
+			// belongs to checkPRMerged's permanent-API-error handling and
+			// resetting one from the other's path would break both bounds.
+			if _, err := s.db.Exec(`UPDATE claw_prs SET token_miss_count=token_miss_count+1 WHERE id=?`, r.pr.id); err != nil {
+				log.Printf("[pr-watcher] failed to count token miss for PR %s: %v", r.pr.prURL, err)
+				continue
+			}
+			var misses int
+			if err := s.db.QueryRow(`SELECT token_miss_count FROM claw_prs WHERE id=?`, r.pr.id).Scan(&misses); err != nil {
+				log.Printf("[pr-watcher] failed to read token miss count for PR %s: %v", r.pr.prURL, err)
+				continue
+			}
+			if misses >= prMergedPermanentFailureLimit {
+				// Close ONLY the row — never the claw. A token miss has
+				// transient causes (installation-token mint 5xx, network
+				// errors, JWT clock skew), and a mid-work agent may have
+				// delivered nothing yet, so escalating here would kill a
+				// healthy claw during a token outage. The teardown decision
+				// stays with checkPRMerged observing a real delivered row.
+				// token_miss_count is deliberately NOT zeroed here: a closed
+				// unmerged row with the counter at the bound is how
+				// rearmTokenMissClosedPRs recognises (and reopens) these rows
+				// once the token resolves again.
+				log.Printf("[pr-watcher] WARN: PR %s (%s#%d) unpollable for %d consecutive polls (no GitHub token resolvable for %s) — marking the row closed so it stops blocking finalization; claw %s left untouched",
+					r.pr.prURL, r.pr.repo, r.pr.prNumber, prMergedPermanentFailureLimit, r.pr.repo, shortID(r.pr.clawID))
+				if _, err := s.db.Exec(`UPDATE claw_prs SET state='closed' WHERE id=?`, r.pr.id); err != nil {
+					log.Printf("[pr-watcher] failed to mark unpollable PR %s closed for claw %s: %v", r.pr.prURL, shortID(r.pr.clawID), err)
+				}
+			}
 			continue
+		}
+		// The token resolved: only genuinely consecutive misses may accumulate
+		// toward the bound above.
+		if _, err := s.db.Exec(`UPDATE claw_prs SET token_miss_count=0 WHERE id=? AND token_miss_count != 0`, r.pr.id); err != nil {
+			log.Printf("[pr-watcher] failed to reset token miss count for PR %s: %v", r.pr.prURL, err)
 		}
 
 		pipelineCtx, hasPipelineCtx := s.findPipelineContextForClaw(r.pr.clawID)
@@ -639,21 +841,33 @@ func (s *Server) pollAllPRs() {
 		// Check if PR is merged/closed for any non-terminal claw status.
 		// checkPRMerged also runs human code push detection off the same PR
 		// fetch, before any termination handling.
-		if s.checkPRMerged(r.pr, token) {
+		resolved, terminated := s.checkPRMerged(r.pr, token)
+		if lowPriorityOK || terminated {
+			// Record a terminal CI result even when merge handling removed the PR row
+			// earlier in this poll. The bypass is gated on terminated ("the claw
+			// is being torn down — one last CI record on the way out"), NOT on
+			// resolved: a row can resolve while the claw survives (a PR closed
+			// with others open, or administratively closed as unreachable), and
+			// firing below the budget reserve there would burn the headroom the
+			// reserve protects and inject a misleading CI verdict for a PR that
+			// was just closed.
+			s.checkCIStatus(r.pr, token)
+		}
+		if terminated {
 			terminatedClaws[r.pr.clawID] = true
 			continue // claw is being terminated, skip other checks
 		}
-		if !lowPriorityOK {
-			// Merge detection above is the only call worth the remaining budget.
-			// NOTE: this also suppresses the green-CI wake-up below, so a claw
-			// waiting on CI stays idle until the budget recovers. The webhook
-			// path is the fix for that; polling alone cannot be both cheap and
-			// prompt.
+		if resolved {
+			// The row reached a terminal state (merged/closed) but the claw
+			// stays alive for its other PRs. Skip the low-priority pipeline —
+			// comments, reviews and pr_conditions must not fire off a PR that
+			// is already resolved.
 			continue
 		}
-		// Always check CI status (failures and, just as importantly, green)
-		s.checkCIStatus(r.pr, token)
-
+		if !lowPriorityOK {
+			// Merge detection above is the only call worth the remaining budget.
+			continue
+		}
 		commentsData, err := githubAPIList(fmt.Sprintf("repos/%s/issues/%d/comments", r.pr.repo, r.pr.prNumber), token)
 		if err != nil {
 			log.Printf("[pr-watcher] error fetching comments for %s: %v", r.pr.prURL, err)
@@ -663,6 +877,9 @@ func (s *Server) pollAllPRs() {
 		s.checkBugbotComments(r.pr, commentsData)
 		s.checkGreptileComments(r.pr, commentsData)
 		log.Printf("[pr-watcher] checking %d comment(s) for claw %s (watermark=%d, forward=%v)", len(commentsData), r.pr.clawID[:8], r.pr.lastCommentID, isPipelineDriven)
+		if !isPipelineDriven && hasNewComments(commentsData, r.pr.lastCommentID) {
+			log.Printf("[pr-watcher] claw=%s pr #%d has new comment(s) above watermark but forward=false (no pipeline context) — not delivering", r.pr.clawID[:8], r.pr.prNumber)
+		}
 		s.checkPRComments(r.pr, commentsData, prCommentOptions{
 			skipBugbot:   true,
 			skipGreptile: true,
@@ -688,8 +905,13 @@ func (s *Server) pollAllPRs() {
 			s.updatePRReviewWatermark(r.pr, reviewsData)
 		}
 
-		// For pipeline-driven claws, evaluate pr_conditions trigger.
-		if isPipelineDriven && !r.pr.prConditionsFired {
+		// For pipeline-driven claws, evaluate pr_conditions trigger — but only
+		// off a DELIVERED row. A mention-only row is a polling target, never a
+		// TRIGGER: a stranger's green CI must not advance the claw's pipeline
+		// (and finalize it on a terminal stage), and a stale mentioned PR with
+		// no check runs must not trip the max-wait stop and destroy a sandbox
+		// mid-work.
+		if isPipelineDriven && !r.pr.prConditionsFired && !r.pr.mentionOnly {
 			stage, status := s.checkPRConditions(r.pr, token, pipelineCtx)
 			if stage != nil {
 				s.firePRConditions(r.pr, *stage, pipelineCtx)
@@ -809,6 +1031,16 @@ func (s *Server) resolveGitHubTokenWithRepos(repoAccess []RepoAccess) string {
 	if cached, ok := s.ghTokenCache[cacheKey]; ok && time.Now().Before(cached.expiresAt) {
 		return cached.token
 	}
+	// If the shared client is already rate-limit blocked, don't mint: a
+	// mid-pass 429 on one repo must stop token mints for the rest of the
+	// pass, not just the repo that hit it.
+	if blockedUntil, blocked := defaultGitHubClient.blockedUntilTime(); blocked {
+		if s.ghTokenCache == nil {
+			s.ghTokenCache = map[string]cachedGitHubToken{}
+		}
+		s.ghTokenCache[cacheKey] = cachedGitHubToken{expiresAt: blockedUntil}
+		return ""
+	}
 	var lastErr error
 	for _, appCfg := range appCfgs {
 		provider, err := NewGitHubTokenProvider(appCfg)
@@ -834,6 +1066,21 @@ func (s *Server) resolveGitHubTokenWithRepos(repoAccess []RepoAccess) string {
 	}
 	if lastErr != nil {
 		log.Printf("[pr-watcher] CRITICAL: GitHub token resolution failed after trying %d app(s): %v", len(appCfgs), lastErr)
+	}
+	// Only negatively cache rate-limit failures: those are the ones that
+	// recur on every poll of every PR until the window passes, and the
+	// shared client's blockedUntil already tells us when that is. Other
+	// mint failures (outages, bad config) must be retried on the very next
+	// poll — token_miss_count and the re-arm sweep depend on that.
+	if apiErr, ok := lastErr.(*githubAPIError); ok && apiErr.RateLimited {
+		if s.ghTokenCache == nil {
+			s.ghTokenCache = map[string]cachedGitHubToken{}
+		}
+		until := time.Now().Add(time.Minute)
+		if blockedUntil, blocked := defaultGitHubClient.blockedUntilTime(); blocked && blockedUntil.After(until) {
+			until = blockedUntil
+		}
+		s.ghTokenCache[cacheKey] = cachedGitHubToken{expiresAt: until}
 	}
 	return ""
 }
@@ -963,17 +1210,96 @@ func (s *Server) checkCIStatus(pr clawPR, token string) {
 		conclusion = ciConclusionFailure
 	}
 
+	// Avoid BEGIN/ROLLBACK on settled polls. The conditional claim below remains
+	// authoritative because another watcher can update the watermark after this
+	// pre-read.
+	var alreadyClaimed int
+	if err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM claw_prs WHERE id=? AND last_ci_sha=? AND last_ci_conclusion=?)`, pr.id, headSHA, conclusion).Scan(&alreadyClaimed); err != nil {
+		log.Printf("[pr-watcher] read CI watermark for %s: %v", pr.prURL, err)
+		return
+	}
+	if alreadyClaimed != 0 {
+		return
+	}
+
+	// Intentionally keep task-run lookup, watermark claim, and event write in one
+	// transaction: a rolled-back event write must not permanently consume the CI
+	// watermark. The pre-read above only avoids this cost for settled polls.
+	tx, err := s.db.Begin()
+	if err != nil {
+		log.Printf("[pr-watcher] begin CI event for %s: %v", pr.prURL, err)
+		return
+	}
+	defer tx.Rollback()
+	tenantID, runID, attemptID, hasRun, err := s.taskRunContextForClawTx(tx, pr.clawID)
+	if err != nil {
+		log.Printf("[pr-watcher] find CI task run for %s: %v", pr.prURL, err)
+		return
+	}
+
 	// Conditional UPDATE = claim, same idiom as claimPipelineStageTransition.
-	// Exactly one poll (and exactly one hub process) observes a given
-	// (sha, conclusion) pair, so the injection below cannot double-fire.
-	res, err := s.db.Exec(
+	// A merged PR may have removed its row earlier in this poll; in that case
+	// the task-run event key becomes the durable claim instead.
+	res, err := tx.Exec(
 		`UPDATE claw_prs SET last_ci_sha=?, last_ci_conclusion=? WHERE id=? AND NOT (last_ci_sha=? AND last_ci_conclusion=?)`,
 		headSHA, conclusion, pr.id, headSHA, conclusion)
 	if err != nil {
 		log.Printf("[pr-watcher] failed to claim CI status for %s: %v", pr.prURL, err)
 		return
 	}
-	if claimed, err := res.RowsAffected(); err != nil || claimed == 0 {
+	claimed, err := res.RowsAffected()
+	if err != nil {
+		return
+	}
+	rowRemoved := false
+	if claimed == 0 {
+		var rowExists int
+		if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM claw_prs WHERE id=?)`, pr.id).Scan(&rowExists); err != nil {
+			log.Printf("[pr-watcher] check CI claim for %s: %v", pr.prURL, err)
+			return
+		}
+		if rowExists != 0 {
+			return
+		}
+		rowRemoved = true
+		if !hasRun {
+			return
+		}
+	}
+
+	ciEventType := taskRunEventCISucceeded
+	if conclusion == ciConclusionFailure {
+		ciEventType = taskRunEventCIFailed
+	}
+	recordedEvent := !hasRun
+	if hasRun {
+		event := TaskRunEvent{
+			EventKey: "ci:" + pr.id + ":" + headSHA + ":" + conclusion,
+			TenantID: tenantID, RunID: runID, AttemptID: attemptID, Source: taskRunSourcePRWatcher, EventType: ciEventType, ActorType: taskRunActorSystem,
+			TargetType: "pull_request", TargetURL: pr.prURL,
+			Detail: map[string]any{"repo": pr.repo, "prNumber": pr.prNumber, "headSha": headSHA, "conclusion": conclusion}, OccurredAt: now(),
+		}
+		var err error
+		recordedEvent, err = recordTaskRunEventIfNewTx(tx, event)
+		if err != nil {
+			log.Printf("[pr-watcher] record CI event for %s: %v", pr.prURL, err)
+			return
+		}
+		if recordedEvent {
+			if err := materializeTaskRunTx(tx, runID); err != nil {
+				log.Printf("[pr-watcher] materialize CI event for %s: %v", pr.prURL, err)
+				return
+			}
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		log.Printf("[pr-watcher] commit CI claim for %s: %v", pr.prURL, err)
+		return
+	}
+	if !recordedEvent {
+		return
+	}
+	if rowRemoved {
 		return
 	}
 
@@ -1173,12 +1499,43 @@ func (s *Server) updatePRCommentWatermark(pr clawPR, commentsData []interface{})
 	}
 	if maxID > pr.lastCommentID {
 		if latestCommentAt != "" {
-			_, _ = s.db.Exec(`UPDATE claw_prs SET last_comment_id=?, last_comment_at=? WHERE id=?`,
-				maxID, latestCommentAt, pr.id)
+			s.updateWatermarkGuarded(`UPDATE claw_prs SET last_comment_id=?, last_comment_at=? WHERE id=? AND last_comment_id < ?`,
+				[]interface{}{maxID, latestCommentAt, pr.id, maxID}, pr.clawID, pr.prNumber)
 		} else {
-			_, _ = s.db.Exec(`UPDATE claw_prs SET last_comment_id=? WHERE id=?`, maxID, pr.id)
+			s.updateWatermarkGuarded(`UPDATE claw_prs SET last_comment_id=? WHERE id=? AND last_comment_id < ?`,
+				[]interface{}{maxID, pr.id, maxID}, pr.clawID, pr.prNumber)
 		}
 	}
+}
+
+// hasNewComments reports whether commentsData has an ID above watermark.
+func hasNewComments(commentsData []interface{}, watermark int64) bool {
+	for _, c := range commentsData {
+		comment, _ := c.(map[string]interface{})
+		idF, _ := comment["id"].(float64)
+		if int64(idF) > watermark {
+			return true
+		}
+	}
+	return false
+}
+
+// updateWatermarkGuarded advances a monotonic watermark, retrying once on a
+// SQLite busy error. Zero rows affected means another writer already advanced
+// the watermark at or past the requested value, which is not an error.
+func (s *Server) updateWatermarkGuarded(query string, args []interface{}, clawID string, prNumber int) error {
+	var err error
+	for attempt := 0; attempt < 2; attempt++ {
+		_, err = s.db.Exec(query, args...)
+		if err == nil || !isSQLiteBusy(err) {
+			break
+		}
+		time.Sleep(time.Duration(attempt+1) * 10 * time.Millisecond)
+	}
+	if err != nil {
+		log.Printf("[pr-watcher] watermark update failed for claw %s pr #%d: %v", clawID[:8], prNumber, err)
+	}
+	return err
 }
 
 // checkGreptileReviewComments polls PR review comments (pulls/{n}/comments) for
@@ -1473,7 +1830,8 @@ func (s *Server) claimPRFeedbackDelivery(clawID, feedbackType string, id int64) 
 func (s *Server) updatePRReviewWatermark(pr clawPR, reviewsData []interface{}) {
 	maxID := maxPRReviewID(reviewsData, pr.lastReviewID)
 	if maxID > pr.lastReviewID {
-		_, _ = s.db.Exec(`UPDATE claw_prs SET last_review_id=? WHERE id=?`, maxID, pr.id)
+		s.updateWatermarkGuarded(`UPDATE claw_prs SET last_review_id=? WHERE id=? AND last_review_id < ?`,
+			[]interface{}{maxID, pr.id, maxID}, pr.clawID, pr.prNumber)
 	}
 }
 
@@ -1502,7 +1860,8 @@ func (s *Server) updateReviewCommentWatermark(pr clawPR, reviewCommentsData []in
 		}
 	}
 	if maxID > pr.lastReviewCommentID {
-		_, _ = s.db.Exec(`UPDATE claw_prs SET last_review_comment_id=? WHERE id=?`, maxID, pr.id)
+		s.updateWatermarkGuarded(`UPDATE claw_prs SET last_review_comment_id=? WHERE id=? AND last_review_comment_id < ?`,
+			[]interface{}{maxID, pr.id, maxID}, pr.clawID, pr.prNumber)
 	}
 }
 
@@ -1584,8 +1943,10 @@ func (s *Server) injectMessage(clawID, content, role string) {
 		cc.lastUserMessageAt = time.Now()
 		busy := cc.isBusyLocked()
 		cc.mu.Unlock()
-		acceptedForAgent = true
+		workflowV2Controlled := s.workflowV2OwnsExecution(cc)
+		acceptedForAgent = !workflowV2Controlled
 		if !busy {
+			// V1 delivers the row; V2 settles it as display-only.
 			s.sendNextQueuedMessage(cc)
 		}
 	}
@@ -1678,7 +2039,8 @@ func githubAPIList(path, token string) ([]interface{}, error) {
 	return githubAPIListWithBase("https://api.github.com", path+"?sort=created&direction=desc", token)
 }
 
-// handleClawSubresource routes /api/claws/:id/prs and /api/claws/:id/checkpoints.
+// handleClawSubresource routes /api/claws/:id/prs, /api/claws/:id/checkpoints
+// and /api/claws/:id/llm-limit.
 func (s *Server) handleClawSubresource(w http.ResponseWriter, r *http.Request) {
 	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/api/claws/"), "/")
 	if len(parts) < 2 {
@@ -1688,7 +2050,7 @@ func (s *Server) handleClawSubresource(w http.ResponseWriter, r *http.Request) {
 	clawID := parts[0]
 	sub := parts[1]
 
-	if sub != "prs" && sub != "checkpoints" {
+	if sub != "prs" && sub != "checkpoints" && sub != "llm-limit" {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
@@ -1723,6 +2085,10 @@ func (s *Server) handleClawSubresource(w http.ResponseWriter, r *http.Request) {
 		s.handleClawCheckpoints(w, r, clawID)
 		return
 	}
+	if sub == "llm-limit" {
+		s.handleClawLLMLimit(w, r, clawID)
+		return
+	}
 }
 
 // handleClawPRs returns the list of PRs detected for a claw.
@@ -1740,8 +2106,12 @@ func (s *Server) handleClawPRs(w http.ResponseWriter, r *http.Request, clawID st
 		return
 	}
 
+	// Every row is returned — resolved and mention-only included — with the
+	// state and the mention_only flag exposed, so the UI can distinguish
+	// delivered work from merely-mentioned PRs the same way the finalization
+	// gate (clawOpenPRCount) does.
 	rows, err := s.db.Query(
-		`SELECT id, repo, pr_number, pr_url, created_at FROM claw_prs WHERE claw_id=? ORDER BY created_at ASC`,
+		`SELECT id, repo, pr_number, pr_url, title, state, merged, merged_at, mention_only, created_at FROM claw_prs WHERE claw_id=? ORDER BY created_at ASC`,
 		clawID,
 	)
 	if err != nil {
@@ -1750,16 +2120,21 @@ func (s *Server) handleClawPRs(w http.ResponseWriter, r *http.Request, clawID st
 	}
 	defer rows.Close()
 	type PR struct {
-		ID        string `json:"id"`
-		Repo      string `json:"repo"`
-		PRNumber  int    `json:"prNumber"`
-		URL       string `json:"url"`
-		CreatedAt string `json:"createdAt"`
+		ID          string  `json:"id"`
+		Repo        string  `json:"repo"`
+		PRNumber    int     `json:"prNumber"`
+		URL         string  `json:"url"`
+		Title       string  `json:"title"`
+		State       string  `json:"state"`
+		Merged      bool    `json:"merged"`
+		MergedAt    *string `json:"mergedAt,omitempty"`
+		MentionOnly bool    `json:"mentionOnly"`
+		CreatedAt   string  `json:"createdAt"`
 	}
 	var prs []PR
 	for rows.Next() {
 		var p PR
-		if err := rows.Scan(&p.ID, &p.Repo, &p.PRNumber, &p.URL, &p.CreatedAt); err != nil {
+		if err := rows.Scan(&p.ID, &p.Repo, &p.PRNumber, &p.URL, &p.Title, &p.State, &p.Merged, &p.MergedAt, &p.MentionOnly, &p.CreatedAt); err != nil {
 			continue
 		}
 		prs = append(prs, p)
@@ -1770,12 +2145,120 @@ func (s *Server) handleClawPRs(w http.ResponseWriter, r *http.Request, clawID st
 	jsonOK(w, prs)
 }
 
+// clawPRStoredState folds GitHub's two-way `state` (open|closed) and its
+// separate `merged` flag into the three-way open|merged|closed value the
+// dashboard's claw_prs.state column and /api/claws/:id/prs expose. GitHub
+// reports state=="closed" for merged PRs too, so `merged` must be checked
+// first or a merged PR would be indistinguishable from a rejected one.
+func clawPRStoredState(githubState string, merged bool) string {
+	if merged {
+		return "merged"
+	}
+	return githubState
+}
+
+// clawOpenPRCount returns how many DELIVERED PRs tracked for the claw are
+// still unresolved — neither merged nor closed. Teardown is gated on this
+// being zero so an agent that delivered several PRs keeps watching the rest.
+// Mention-only rows (PR URLs the agent merely mentioned in a message) are
+// excluded: they keep being polled — CI, comments and reviews are still
+// forwarded — but they never block finalization.
+func (s *Server) clawOpenPRCount(clawID string) (int, error) {
+	var n int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM claw_prs WHERE claw_id=? AND state NOT IN ('merged','closed') AND mention_only=0`, clawID).Scan(&n)
+	return n, err
+}
+
+// clawPRIsMentionOnly reports whether a claw_prs row is mention-only. The read
+// happens at decision time (not from a possibly stale clawPR loaded at the top
+// of a poll) because a mention row can be upgraded to delivered mid-poll by a
+// concurrent [DONE] registration. ok is false when the row cannot be read —
+// callers must then never run terminal handling off the row.
+func (s *Server) clawPRIsMentionOnly(prID string) (mentionOnly, ok bool) {
+	var v int
+	if err := s.db.QueryRow(`SELECT mention_only FROM claw_prs WHERE id=?`, prID).Scan(&v); err != nil {
+		log.Printf("[pr-watcher] failed to read mention_only for PR row %s: %v", prID, err)
+		return false, false
+	}
+	return v == 1, true
+}
+
+// clawHasDeliveredPR reports whether the claw tracks at least one DELIVERED
+// (mention_only=0) row, in any state. The PR watcher may finalize a claw only
+// when this is true: a claw whose rows are all mention-only has delivered
+// nothing, so nothing it is watching can mean "the claw's work is done" — a
+// stranger merging or closing a merely-mentioned PR must never destroy the
+// sandbox or move the tracker issue. This is an explicit guard, not an
+// emergent property of the mention-only early returns, so a future refactor
+// of those returns cannot silently reintroduce the teardown.
+func (s *Server) clawHasDeliveredPR(clawID string) (bool, error) {
+	var n int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM claw_prs WHERE claw_id=? AND mention_only=0`, clawID).Scan(&n)
+	return n > 0, err
+}
+
+// closeUnreachablePR marks a tracked PR row closed after checkPRMerged saw
+// permanent API errors for prMergedPermanentFailureLimit consecutive polls,
+// so an unreachable repo stops blocking claw finalization instead of pinning
+// the claw forever. (Token-resolution misses are bounded separately in
+// pollAllPRs and only ever close the row — they must never reach this
+// escalating path.)
+//
+// The claw is stopped only for a delivered row, and only when no unresolved
+// delivered PR remains and the claw has delivered at least one PR; otherwise
+// it keeps watching the rest. Returns (resolved, terminated) with checkPRMerged
+// semantics: resolved reports whether this row reached a terminal state.
+func (s *Server) closeUnreachablePR(pr clawPR, cause string) (resolved, terminated bool) {
+	log.Printf("[pr-watcher] WARN: PR %s (%s#%d) %s — marking it closed so it stops blocking finalization of claw %s", pr.prURL, pr.repo, pr.prNumber, cause, shortID(pr.clawID))
+	if _, err := s.db.Exec(`UPDATE claw_prs SET state='closed' WHERE id=?`, pr.id); err != nil {
+		log.Printf("[pr-watcher] failed to mark unreachable PR %s closed for claw %s: %v", pr.prURL, shortID(pr.clawID), err)
+		return false, false
+	}
+	// A mention-only row must never TRIGGER finalization: it is a polling
+	// target only, and its unreachability says nothing about the claw's own
+	// delivered work. (An unreadable flag also never triggers — fail alive.)
+	if mentionOnly, ok := s.clawPRIsMentionOnly(pr.id); !ok || mentionOnly {
+		return true, false
+	}
+	remaining, err := s.clawOpenPRCount(pr.clawID)
+	if err != nil {
+		// Never tear a claw down on an unknown PR count — the next poll retries.
+		log.Printf("[pr-watcher] failed to count open PRs for claw %s: %v", shortID(pr.clawID), err)
+		return true, false
+	}
+	if remaining > 0 {
+		log.Printf("[pr-watcher] claw %s still has %d unresolved delivered PR(s) — keeping it alive", shortID(pr.clawID), remaining)
+		return true, false
+	}
+	if delivered, err := s.clawHasDeliveredPR(pr.clawID); err != nil || !delivered {
+		// See clawHasDeliveredPR: zero delivered rows means the watcher has no
+		// authority to stop this claw, whatever happened to mentioned PRs.
+		if err != nil {
+			log.Printf("[pr-watcher] failed to count delivered PRs for claw %s: %v", shortID(pr.clawID), err)
+		}
+		return true, false
+	}
+	go s.stopAgentWithReason(pr.clawID, fmt.Sprintf("PR %s has been %s", pr.prURL, cause), false)
+	return true, true
+}
+
 // checkPRMerged checks if a tracked PR is merged or closed.
-// It returns true when it terminates the claw, which happens in two cases:
-// the PR was merged, or the PR has been inaccessible (permanent API error:
-// 404/410/401/non-rate-limit 403) for prMergedPermanentFailureLimit
-// consecutive polls — repo/PR deleted or GitHub App uninstalled.
-func (s *Server) checkPRMerged(pr clawPR, token string) bool {
+//
+// resolved is true when THIS row reached a terminal state (merged, closed, or
+// closed administratively after prMergedPermanentFailureLimit consecutive
+// permanent API errors: 404/410/401/non-rate-limit 403 — repo/PR deleted or
+// GitHub App uninstalled). Callers must skip further polling work for a
+// resolved row.
+//
+// terminated is true when the claw itself is being torn down, which happens
+// only once every delivered tracked PR is resolved. While at least one
+// delivered PR is still open the claw stays alive and keeps watching.
+//
+// A mention-only row resolves silently: its state is persisted and nothing
+// else runs — no per-PR analytics, no pipeline transition, no tracker move,
+// no teardown. A claw with zero delivered rows is never finalized here at all
+// (see clawHasDeliveredPR).
+func (s *Server) checkPRMerged(pr clawPR, token string) (resolved, terminated bool) {
 	tokenForPR := s.resolveGitHubTokenForRepo(pr.repo)
 	if tokenForPR == "" {
 		tokenForPR = token
@@ -1793,15 +2276,18 @@ func (s *Server) checkPRMerged(pr clawPR, token string) bool {
 			if failures >= prMergedPermanentFailureLimit {
 				var apiErr *githubAPIError
 				_ = errors.As(err, &apiErr)
-				go s.stopAgentWithReason(pr.clawID, fmt.Sprintf("PR %s has been inaccessible (HTTP %d) for %d consecutive polls — repo or PR deleted, or GitHub App uninstalled", pr.prURL, apiErr.StatusCode, prMergedPermanentFailureLimit), false)
-				return true
+				// One inaccessible PR must not kill a claw whose other PRs are
+				// fine: close this row so it stops blocking finalization, and
+				// stop the claw only when no delivered PR remains unresolved.
+				return s.closeUnreachablePR(pr,
+					fmt.Sprintf("inaccessible (HTTP %d) for %d consecutive polls — repo or PR deleted, or GitHub App uninstalled", apiErr.StatusCode, prMergedPermanentFailureLimit))
 			}
-			return false
+			return false, false
 		}
 		// Transient error (5xx, network): reset the counter so only genuinely
 		// consecutive permanent failures accumulate toward the limit.
 		_, _ = s.db.Exec(`UPDATE claw_prs SET permanent_failure_count=0 WHERE id=? AND permanent_failure_count != 0`, pr.id)
-		return false
+		return false, false
 	}
 	_, _ = s.db.Exec(`UPDATE claw_prs SET permanent_failure_count=0 WHERE id=? AND permanent_failure_count != 0`, pr.id)
 	// Detect human pushes off this same PR fetch, before any merge handling,
@@ -1813,11 +2299,20 @@ func (s *Server) checkPRMerged(pr clawPR, token string) bool {
 		s.detectHumanCodePush(pr.clawID, runID, pr.repo, pr.prNumber, pr.prURL, headSHA, token)
 	}
 	state, _ := data["state"].(string)
+	title, _ := data["title"].(string)
 	merged, _ := data["merged"].(bool)
 	draft, _ := data["draft"].(bool)
 	mergedAtValue, _ := data["merged_at"].(string)
 	createdAtValue, _ := data["created_at"].(string)
 	mergedAt := parseRFC3339Timestamp(mergedAtValue)
+	var mergedAtDB any
+	if mergedAtValue != "" {
+		mergedAtDB = mergedAtValue
+	}
+	storedState := clawPRStoredState(state, merged)
+	if _, err := s.db.Exec(`UPDATE claw_prs SET title=?, state=?, merged=?, merged_at=? WHERE id=? AND NOT (title=? AND state=? AND merged=? AND merged_at IS ?)`, title, storedState, merged, mergedAtDB, pr.id, title, storedState, merged, mergedAtDB); err != nil {
+		log.Printf("[pr-watcher] update PR state for %s: %v", pr.prURL, err)
+	}
 	createdAt := parseRFC3339Timestamp(createdAtValue)
 	// Detection time is only a sound approximation of ready_at while the PR is
 	// still open. On the poll that first observes a merged or closed PR, now()
@@ -1837,24 +2332,65 @@ func (s *Server) checkPRMerged(pr clawPR, token string) bool {
 	log.Printf("[pr-watcher] checkPRMerged: claw=%s pr=%s state=%s merged=%v", pr.clawID[:8], pr.prURL, state, merged)
 
 	if state != "closed" && !merged {
-		return false // still open
+		// While the PR is still open, surface merge conflicts once per episode.
+		s.checkPRMergeConflict(pr, data)
+		return false, false // still open
 	}
 
 	clawID := pr.clawID
 	var tenantID string
 	if err := s.db.QueryRow(`SELECT tenant_id FROM claws WHERE id=?`, clawID).Scan(&tenantID); err != nil {
-		return false
+		return false, false
 	}
 
-	// If the PR was closed without merging, notify the claw and let it decide — don't terminate.
+	// If the PR was closed without merging, mark the row resolved and decide
+	// whether the claw is finished: while other tracked PRs are still open the
+	// claw stays alive and keeps watching them.
 	if state == "closed" && !merged {
-		log.Printf("[pr-watcher] PR %s#%d closed without merge — stopping claw %s", pr.repo, pr.prNumber, clawID[:8])
-		_, _ = s.db.Exec(`DELETE FROM claw_prs WHERE id=?`, pr.id)
+		// The row must survive (not be deleted) so the all-PRs-resolved
+		// bookkeeping stays correct; the poll queries exclude resolved states.
+		if _, err := s.db.Exec(`UPDATE claw_prs SET state='closed' WHERE id=?`, pr.id); err != nil {
+			log.Printf("[pr-watcher] failed to mark PR %s closed for claw %s: %v", pr.prURL, shortID(clawID), err)
+			return false, false
+		}
+
+		// A mention-only row resolves silently: persist the state (done above)
+		// and stop. A stranger closing a PR the agent merely linked must not
+		// fire per-PR analytics, pipeline transitions, or any stop path.
+		// (Unreadable flag: fail alive, run no terminal handling.)
+		if mentionOnly, ok := s.clawPRIsMentionOnly(pr.id); !ok || mentionOnly {
+			return true, false
+		}
 
 		pipelineCtx, hasPipelineCtx := s.findPipelineContextForClaw(clawID)
 		if hasPipelineCtx {
 			s.trackPRClosed(pipelineCtx.Name(), pipelineCtx.IssueID, clawID, pr.repo, pr.prNumber)
 		}
+
+		remaining, err := s.clawOpenPRCount(clawID)
+		if err != nil {
+			// Never tear a claw down on an unknown PR count — the next poll retries.
+			log.Printf("[pr-watcher] failed to count open PRs for claw %s: %v", shortID(clawID), err)
+			return true, false
+		}
+		if remaining > 0 {
+			log.Printf("[pr-watcher] PR %s#%d closed without merge — claw %s still has %d open PR(s), not stopping", pr.repo, pr.prNumber, clawID[:8], remaining)
+			// External inject: a paused (no-progress) claw must be woken so it
+			// can react to the close instead of sitting on the remaining PRs.
+			s.injectExternalHubMessageByID(clawID, fmt.Sprintf("[hub] PR %s was closed without being merged. Still watching %d other open PR(s).", pr.prURL, remaining))
+			return true, false
+		}
+
+		if delivered, err := s.clawHasDeliveredPR(clawID); err != nil || !delivered {
+			// See clawHasDeliveredPR: never finalize a claw with zero
+			// delivered rows, whatever happened to mentioned PRs.
+			if err != nil {
+				log.Printf("[pr-watcher] failed to count delivered PRs for claw %s: %v", shortID(clawID), err)
+			}
+			return true, false
+		}
+
+		log.Printf("[pr-watcher] PR %s#%d closed without merge — stopping claw %s", pr.repo, pr.prNumber, clawID[:8])
 
 		// Check if the pipeline handles pr_closed (run on_enter before stopping)
 		pipelineHandled := false
@@ -1870,15 +2406,35 @@ func (s *Server) checkPRMerged(pr clawPR, token string) bool {
 			}
 		}
 		if !pipelineHandled {
+			// Mirror the merged teardown: stopAgentWithReason can end in a claw
+			// retry that reuses this claw id, and surviving resolved rows would
+			// permanently suppress the agent-idle stuck alert for the retried
+			// claw (its consumers read "row exists" as "awaiting humans").
+			_, _ = s.db.Exec(`DELETE FROM claw_prs WHERE claw_id=?`, clawID)
 			go s.stopAgentWithReason(clawID, fmt.Sprintf("PR %s was closed without being merged", pr.prURL), false)
 		}
-		return false
+		return true, true
 	}
 
-	// PR was merged — run pipeline on_enter if applicable, then terminate the claw.
-	log.Printf("[pr-watcher] PR %s#%d merged — terminating claw %s", pr.repo, pr.prNumber, clawID[:8])
+	// PR was merged — make the resolved state durable before gating on it. The
+	// general UPDATE earlier in this function is conditional and could be
+	// skipped; the all-PRs-resolved gate must not depend on it.
+	if _, err := s.db.Exec(`UPDATE claw_prs SET state='merged', merged=1 WHERE id=?`, pr.id); err != nil {
+		log.Printf("[pr-watcher] failed to mark PR %s merged for claw %s: %v", pr.prURL, shortID(clawID), err)
+		return false, false
+	}
 
-	// Track analytics for PR merge
+	// A mention-only row resolves silently: persist the state (done above) and
+	// stop. A stranger merging a PR the agent merely linked must not fire
+	// per-PR analytics, the pipeline stage transition, the DoneStatus tracker
+	// move, or any teardown. (Unreadable flag: fail alive, run no terminal
+	// handling.)
+	if mentionOnly, ok := s.clawPRIsMentionOnly(pr.id); !ok || mentionOnly {
+		return true, false
+	}
+
+	// Track analytics for PR merge. These are per-PR facts and fire on every
+	// merge, regardless of whether the claw is finished yet.
 	mergeCtx, hasMergeCtx := s.findPipelineContextForClaw(clawID)
 	if hasMergeCtx {
 		s.trackPRMergedAt(mergeCtx.Name(), mergeCtx.IssueID, clawID, pr.repo, pr.prNumber, firstNonZeroTime(mergedAt, now()))
@@ -1895,6 +2451,32 @@ func (s *Server) checkPRMerged(pr clawPR, token string) bool {
 			log.Printf("[pr-watcher] failed to record merge for run %s: %v", runID, err)
 		}
 	}
+
+	// Finalize only when every delivered tracked PR is resolved (merged or closed).
+	remaining, err := s.clawOpenPRCount(clawID)
+	if err != nil {
+		// Never tear a claw down on an unknown PR count — the next poll retries.
+		log.Printf("[pr-watcher] failed to count open PRs for claw %s: %v", shortID(clawID), err)
+		return true, false
+	}
+	if remaining > 0 {
+		log.Printf("[pr-watcher] PR %s#%d merged — claw %s still has %d open PR(s), not terminating", pr.repo, pr.prNumber, clawID[:8], remaining)
+		// External inject: a paused (no-progress) claw must be woken so it can
+		// act on the partial merge instead of staying paused with PRs open.
+		s.injectExternalHubMessageByID(clawID, fmt.Sprintf("[hub] PR %s merged. Still watching %d other open PR(s) — will finish when they are all merged or closed.", pr.prURL, remaining))
+		return true, false
+	}
+
+	if delivered, err := s.clawHasDeliveredPR(clawID); err != nil || !delivered {
+		// See clawHasDeliveredPR: never finalize a claw with zero delivered
+		// rows, whatever happened to mentioned PRs.
+		if err != nil {
+			log.Printf("[pr-watcher] failed to count delivered PRs for claw %s: %v", shortID(clawID), err)
+		}
+		return true, false
+	}
+
+	log.Printf("[pr-watcher] PR %s#%d merged — terminating claw %s", pr.repo, pr.prNumber, clawID[:8])
 
 	// Check if the pipeline handles pr_merged (run on_enter before terminating)
 	pipelineHandled := false
@@ -1960,7 +2542,7 @@ func (s *Server) checkPRMerged(pr clawPR, token string) bool {
 	// If the pipeline handled termination (terminal stage), we're done.
 	if pipelineHandled {
 		_, _ = s.db.Exec(`DELETE FROM claw_prs WHERE claw_id=?`, clawID)
-		return true
+		return true, true
 	}
 
 	var providerID, provider string
@@ -1971,7 +2553,7 @@ func (s *Server) checkPRMerged(pr clawPR, token string) bool {
 	_, _ = s.db.Exec(`DELETE FROM claw_prs WHERE claw_id=?`, clawID)
 	applied, err := s.finishClawTerminalTx(clawID, "deleted", "", "completed", "PR merged", terminalTxOpts{})
 	if err != nil || !applied {
-		return false
+		return true, false
 	}
 	if s.cronScheduler != nil {
 		s.cronScheduler.releaseClawWorkflowSlot(clawID)
@@ -1996,7 +2578,54 @@ func (s *Server) checkPRMerged(pr clawPR, token string) bool {
 	// Promote any pending claws now that a slot is free
 	go s.promotePendingClaws()
 
-	return true
+	return true, true
+}
+
+// checkPRMergeConflict watches the mergeable_state field on an open PR and
+// notifies the agent once when the PR becomes "dirty" (merge conflict). It is
+// called from checkPRMerged while the PR is still open, so it never runs for
+// closed or merged PRs. Mention-only rows are ignored: a conflict on a PR the
+// agent merely mentioned must not interrupt the agent's own work.
+func (s *Server) checkPRMergeConflict(pr clawPR, data map[string]interface{}) {
+	if pr.mentionOnly {
+		return
+	}
+	mergeableState, _ := data["mergeable_state"].(string)
+	if mergeableState == "" {
+		return
+	}
+
+	// Read the persisted watermark so a stale in-memory clawPR or a concurrent
+	// poll cannot cause duplicate notifications.
+	var oldState string
+	if err := s.db.QueryRow(`SELECT last_mergeable_state FROM claw_prs WHERE id=?`, pr.id).Scan(&oldState); err != nil {
+		if !errors.Is(err, sql.ErrNoRows) {
+			log.Printf("[pr-watcher] failed to read mergeable state for %s: %v", pr.prURL, err)
+		}
+		return
+	}
+	if mergeableState == oldState {
+		return
+	}
+
+	// Notify only on a genuine transition to dirty from a known non-dirty state.
+	shouldNotify := mergeableState == "dirty" && oldState != "dirty" && oldState != ""
+
+	// Use a conditional update so only the poll that actually changes the
+	// watermark delivers the notification.
+	res, err := s.db.Exec(`UPDATE claw_prs SET last_mergeable_state=? WHERE id=? AND last_mergeable_state != ?`, mergeableState, pr.id, mergeableState)
+	if err != nil {
+		log.Printf("[pr-watcher] failed to update mergeable state for %s: %v", pr.prURL, err)
+		return
+	}
+	if affected, _ := res.RowsAffected(); affected == 0 {
+		return
+	}
+	if shouldNotify {
+		msg := fmt.Sprintf("PR #%d ([%s](%s)) is now in a merge conflict. Please resolve the conflicts on the same branch.",
+			pr.prNumber, pr.repo, pr.prURL)
+		s.injectUserMessage(pr.clawID, msg)
+	}
 }
 
 // prConditionsStatus explains why checkPRConditions did or didn't fire, so the

@@ -202,13 +202,44 @@ func TestConcurrentPrepareClawRetryHasSingleWinner(t *testing.T) {
 
 func TestResetClawForRetryRaceGuard(t *testing.T) {
 	s, _, _ := newClawRetryTestServer(t, "error")
-	reset, err := s.resetClawForRetry("tenant", "retry-claw", "", "retrying")
+	reset, err := s.resetClawForRetry("tenant", "retry-claw", "", "retrying", "")
 	if err != nil || !reset {
 		t.Fatalf("first reset: reset=%v err=%v", reset, err)
 	}
-	reset, err = s.resetClawForRetry("tenant", "retry-claw", "", "retrying")
+	reset, err = s.resetClawForRetry("tenant", "retry-claw", "", "retrying", "")
 	if err != nil || reset {
 		t.Fatalf("second reset: reset=%v err=%v, want no-op", reset, err)
+	}
+}
+
+// A replacement sandbox runs a brand-new session, so the predecessor's spent
+// auto-resume budget must not follow it: resetClawForRetry zeroes
+// idle_resume_count in the same guarded UPDATE that arms rebrief_pending.
+// idle_resume_at goes with it: the successor is a different session, and a
+// latch the dead session earned can otherwise veto the freshly zeroed budget
+// forever (see the assertion below).
+func TestResetClawForRetryResetsIdleResumeBudget(t *testing.T) {
+	s, db, _ := newClawRetryTestServer(t, "error")
+	const latch = int64(1_700_000_000_000)
+	if _, err := db.Exec(`UPDATE claws SET idle_resume_at=?, idle_resume_count=? WHERE id=?`, latch, agentIdleResumeMaxAttempts, "retry-claw"); err != nil {
+		t.Fatalf("seed idle_resume state: %v", err)
+	}
+	reset, err := s.resetClawForRetry("tenant", "retry-claw", "", "retrying", "")
+	if err != nil || !reset {
+		t.Fatalf("reset: reset=%v err=%v", reset, err)
+	}
+	at, count := clawIdleResumeState(t, db, "retry-claw")
+	if count != 0 {
+		t.Fatalf("resetClawForRetry left idle_resume_count=%d, want 0", count)
+	}
+	// The latch goes too, and this is the half that is easy to get wrong. The
+	// successor is a different session; on reconnect its lastTurnFinishedAt is
+	// seeded from the last claw message, so its first idle stretch can anchor
+	// within agentIdleStretchSlack of a latch the DEAD session earned. Leave
+	// the latch and checkAgentIdleResume reads "already handled" forever — a
+	// budget that was just zeroed and can never be spent.
+	if at != 0 {
+		t.Fatalf("resetClawForRetry left idle_resume_at=%d, want 0", at)
 	}
 }
 
@@ -243,8 +274,8 @@ func TestReplaceClawInstanceFailsDanglingAttemptWhenClawChangedState(t *testing.
 func TestRetryCheckpointSkipsCheckpointUsedByPreviousAttempt(t *testing.T) {
 	s, db, runID := newClawRetryTestServer(t, "connected")
 	if _, err := db.Exec(`
-		INSERT INTO claw_checkpoints(id,tenant_id,claw_id,status,manifest_path,created_at)
-		VALUES('checkpoint-x','tenant','retry-claw','ready','manifest.json',?)`, now()); err != nil {
+		INSERT INTO claw_checkpoints(id,tenant_id,claw_id,status,manifest_path,root_tree_sha256,created_at)
+		VALUES('checkpoint-x','tenant','retry-claw','ready','manifest.json','root-x',?)`, now()); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.Exec(`UPDATE task_run_attempts SET restored_checkpoint_id='checkpoint-x' WHERE run_id=? AND attempt_number=1`, runID); err != nil {
@@ -259,19 +290,202 @@ func TestRetryCheckpointSkipsCheckpointUsedByPreviousAttempt(t *testing.T) {
 	}
 }
 
+func TestRetryCheckpointSkipsBootstrapCheckpointAfterProgress(t *testing.T) {
+	insertBootstrapCheckpoint := func(t *testing.T, db *sql.DB) {
+		t.Helper()
+		if _, err := db.Exec(`
+			INSERT INTO claw_checkpoints(id,tenant_id,claw_id,status,reason,manifest_path,root_tree_sha256,created_at)
+			VALUES('checkpoint-bootstrap','tenant','retry-claw','ready','bootstrap','manifest.json','root-bootstrap',?)`, now()); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	t.Run("registered PR forces clean provision", func(t *testing.T) {
+		s, db, _ := newClawRetryTestServer(t, "connected")
+		insertBootstrapCheckpoint(t, db)
+		if _, err := db.Exec(`
+			INSERT INTO claw_prs(id,claw_id,repo,pr_number,pr_url,created_at)
+			VALUES('pr-1','retry-claw','acme/widgets',42,'https://github.com/acme/widgets/pull/42',?)`, now()); err != nil {
+			t.Fatal(err)
+		}
+		checkpointID, err := s.retryCheckpointID("tenant", "retry-claw", 2)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if checkpointID != "" {
+			t.Fatalf("checkpoint=%q, want clean provision instead of bootstrap rollback", checkpointID)
+		}
+	})
+
+	t.Run("pipeline past entry stage forces clean provision", func(t *testing.T) {
+		s, db, _ := newClawRetryTestServer(t, "connected")
+		insertBootstrapCheckpoint(t, db)
+		s.hubCfg.Factories = []*types.FactoryConfig{{
+			Name:         "retry-factory",
+			PipelineYAML: "stages:\n  - id: plan\n    entry: true\n  - id: implement\n",
+		}}
+		if _, err := db.Exec(`UPDATE claws SET tags='["factory:retry-factory"]', pipeline_stage='implement' WHERE id='retry-claw'`); err != nil {
+			t.Fatal(err)
+		}
+		checkpointID, err := s.retryCheckpointID("tenant", "retry-claw", 2)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if checkpointID != "" {
+			t.Fatalf("checkpoint=%q, want clean provision instead of bootstrap rollback", checkpointID)
+		}
+	})
+
+	t.Run("older non-bootstrap checkpoint is restored instead of bootstrap", func(t *testing.T) {
+		s, db, _ := newClawRetryTestServer(t, "connected")
+		insertBootstrapCheckpoint(t, db)
+		// A periodic checkpoint from an earlier attempt sorts below the
+		// successor's bootstrap checkpoint but holds real work — it must win.
+		if _, err := db.Exec(`
+			INSERT INTO claw_checkpoints(id,tenant_id,claw_id,status,reason,manifest_path,root_tree_sha256,created_at)
+			VALUES('checkpoint-periodic','tenant','retry-claw','ready','periodic','manifest.json','root-periodic',?)`, now().Add(-time.Hour)); err != nil {
+			t.Fatal(err)
+		}
+		checkpointID, err := s.retryCheckpointID("tenant", "retry-claw", 2)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if checkpointID != "checkpoint-periodic" {
+			t.Fatalf("checkpoint=%q, want checkpoint-periodic", checkpointID)
+		}
+	})
+
+	t.Run("fallback never re-restores the previous attempt's checkpoint", func(t *testing.T) {
+		s, db, runID := newClawRetryTestServer(t, "connected")
+		insertBootstrapCheckpoint(t, db)
+		if _, err := db.Exec(`
+			INSERT INTO claw_checkpoints(id,tenant_id,claw_id,status,reason,manifest_path,root_tree_sha256,created_at)
+			VALUES('checkpoint-periodic','tenant','retry-claw','ready','periodic','manifest.json','root-periodic',?)`, now().Add(-time.Hour)); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(`UPDATE task_run_attempts SET restored_checkpoint_id='checkpoint-periodic' WHERE run_id=? AND attempt_number=1`, runID); err != nil {
+			t.Fatal(err)
+		}
+		checkpointID, err := s.retryCheckpointID("tenant", "retry-claw", 2)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if checkpointID != "" {
+			t.Fatalf("checkpoint=%q, want clean provision", checkpointID)
+		}
+	})
+
+	t.Run("no progress keeps bootstrap restore", func(t *testing.T) {
+		s, db, _ := newClawRetryTestServer(t, "connected")
+		insertBootstrapCheckpoint(t, db)
+		s.hubCfg.Factories = []*types.FactoryConfig{{
+			Name:         "retry-factory",
+			PipelineYAML: "stages:\n  - id: plan\n    entry: true\n  - id: implement\n",
+		}}
+		// Entry stage set right after initialization is not progress.
+		if _, err := db.Exec(`UPDATE claws SET tags='["factory:retry-factory"]', pipeline_stage='plan' WHERE id='retry-claw'`); err != nil {
+			t.Fatal(err)
+		}
+		checkpointID, err := s.retryCheckpointID("tenant", "retry-claw", 2)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if checkpointID != "checkpoint-bootstrap" {
+			t.Fatalf("checkpoint=%q, want checkpoint-bootstrap", checkpointID)
+		}
+	})
+}
+
+func TestRetryCheckpointFallsBackPastBlockedNewest(t *testing.T) {
+	s, db, runID := newClawRetryTestServer(t, "connected")
+	createdAt := now()
+	for _, checkpoint := range []struct {
+		id        string
+		createdAt time.Time
+	}{
+		{"checkpoint-newest", createdAt},
+		{"checkpoint-mid", createdAt.Add(-time.Hour)},
+		{"checkpoint-old", createdAt.Add(-2 * time.Hour)},
+	} {
+		if _, err := db.Exec(`
+			INSERT INTO claw_checkpoints(id,tenant_id,claw_id,status,manifest_path,root_tree_sha256,created_at)
+			VALUES(?,?,?,'ready','manifest.json',?,?)`, checkpoint.id, "tenant", "retry-claw", "root-"+checkpoint.id, checkpoint.createdAt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := db.Exec(`UPDATE task_run_attempts SET restored_checkpoint_id='checkpoint-newest' WHERE run_id=? AND attempt_number=1`, runID); err != nil {
+		t.Fatal(err)
+	}
+
+	checkpointID, err := s.retryCheckpointID("tenant", "retry-claw", 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if checkpointID != "checkpoint-mid" {
+		t.Fatalf("checkpoint=%q, want checkpoint-mid", checkpointID)
+	}
+}
+
+func TestRetryCheckpointOnlyMetadataOnlyCheckpointsYieldsScratch(t *testing.T) {
+	s, db, _ := newClawRetryTestServer(t, "connected")
+	for _, checkpoint := range []struct {
+		id        string
+		createdAt time.Time
+	}{
+		{"checkpoint-newest", now()},
+		{"checkpoint-old", now().Add(-time.Hour)},
+	} {
+		if _, err := db.Exec(`
+			INSERT INTO claw_checkpoints(id,tenant_id,claw_id,status,manifest_path,root_tree_sha256,created_at)
+			VALUES(?,?,?,'ready','manifest.json','',?)`, checkpoint.id, "tenant", "retry-claw", checkpoint.createdAt); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	checkpointID, err := s.retryCheckpointID("tenant", "retry-claw", 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if checkpointID != "" {
+		t.Fatalf("checkpoint=%q, want clean provision", checkpointID)
+	}
+}
+
+func TestRetryCheckpointSkipsMetadataOnlyCheckpointForOlderRealCheckpoint(t *testing.T) {
+	s, db, _ := newClawRetryTestServer(t, "connected")
+	if _, err := db.Exec(`
+		INSERT INTO claw_checkpoints(id,tenant_id,claw_id,status,manifest_path,root_tree_sha256,created_at)
+		VALUES('checkpoint-metadata','tenant','retry-claw','ready','manifest.json','',?)`, now()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`
+		INSERT INTO claw_checkpoints(id,tenant_id,claw_id,status,manifest_path,root_tree_sha256,created_at)
+		VALUES('checkpoint-real','tenant','retry-claw','ready','manifest.json','root-real',?)`, now().Add(-time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+
+	checkpointID, err := s.retryCheckpointID("tenant", "retry-claw", 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if checkpointID != "checkpoint-real" {
+		t.Fatalf("checkpoint=%q, want checkpoint-real", checkpointID)
+	}
+}
+
 func TestRetryCheckpointChoicePrecedesTerminationCheckpoint(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	s, db, runID := newClawRetryTestServer(t, "error")
 	if _, err := db.Exec(`
-		INSERT INTO claw_checkpoints(id,tenant_id,claw_id,status,manifest_path,created_at)
-		VALUES('checkpoint-x','tenant','retry-claw','ready','manifest.json',?)`, now().Add(-time.Minute)); err != nil {
+		INSERT INTO claw_checkpoints(id,tenant_id,claw_id,status,manifest_path,root_tree_sha256,created_at)
+		VALUES('checkpoint-x','tenant','retry-claw','ready','manifest.json','root-x',?)`, now().Add(-time.Minute)); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.Exec(`UPDATE task_run_attempts SET attempt_number=2, restored_checkpoint_id='checkpoint-x' WHERE run_id=?`, runID); err != nil {
 		t.Fatal(err)
 	}
 
-	checkpointID, err := s.retryCheckpointBeforeTermination("tenant", "retry-claw", 3)
+	checkpointID, _, err := s.retryCheckpointBeforeTermination("tenant", "retry-claw", 3)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -288,13 +502,13 @@ func TestRetryCheckpointChoicePrecedesTerminationCheckpoint(t *testing.T) {
 }
 
 func TestHealthEscalationThresholds(t *testing.T) {
-	if heartbeatShouldEscalate(11, defaultGatewayUnhealthyMax, "connected", true) {
+	if heartbeatShouldEscalate(defaultGatewayUnhealthyMax-1, defaultGatewayUnhealthyMax, "connected", true) {
 		t.Fatal("heartbeat escalated before threshold")
 	}
-	if !heartbeatShouldEscalate(12, defaultGatewayUnhealthyMax, "connected", true) {
+	if !heartbeatShouldEscalate(defaultGatewayUnhealthyMax, defaultGatewayUnhealthyMax, "connected", true) {
 		t.Fatal("heartbeat did not escalate at threshold")
 	}
-	if heartbeatShouldEscalate(12, defaultGatewayUnhealthyMax, "provisioning", true) || heartbeatShouldEscalate(12, defaultGatewayUnhealthyMax, "connected", false) {
+	if heartbeatShouldEscalate(defaultGatewayUnhealthyMax, defaultGatewayUnhealthyMax, "provisioning", true) || heartbeatShouldEscalate(defaultGatewayUnhealthyMax, defaultGatewayUnhealthyMax, "connected", false) {
 		t.Fatal("heartbeat escalated an ineligible claw")
 	}
 

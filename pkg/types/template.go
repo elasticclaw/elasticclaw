@@ -284,8 +284,9 @@ type GitHubAppConfig struct {
 // GitHubRepoAccess specifies a repo and the permissions needed. Workspace
 // repository lists may also use glob patterns.
 type GitHubRepoAccess struct {
-	Repo        string `yaml:"repo"        json:"repo"`        // e.g. "owner/repo", "*-infra-*", or "owner/*"
-	Permissions string `yaml:"permissions" json:"permissions"` // "read" or "write" (default: "read")
+	Repo        string `yaml:"repo"        json:"repo"`            // e.g. "owner/repo", "*-infra-*", or "owner/*"
+	Permissions string `yaml:"permissions" json:"permissions"`     // "read" or "write" (default: "read")
+	Clone       *bool  `yaml:"clone"       json:"clone,omitempty"` // whether to clone the repo; nil/true means clone
 }
 
 // RepositoryAccessList accepts the current object form:
@@ -344,13 +345,32 @@ func (l *RepositoryAccessList) UnmarshalJSON(data []byte) error {
 			if permissions == "" {
 				permissions = "read"
 			}
-			out = append(out, GitHubRepoAccess{Repo: strings.TrimSpace(repo), Permissions: permissions})
+			entry := GitHubRepoAccess{Repo: strings.TrimSpace(repo), Permissions: permissions}
+			if cloneVal, ok := v["clone"]; ok {
+				clone := parseBoolish(cloneVal)
+				entry.Clone = &clone
+			}
+			out = append(out, entry)
 		default:
 			return fmt.Errorf("repositories[%d]: expected repo string or {repo, permissions}", i)
 		}
 	}
 	*l = out
 	return nil
+}
+
+// parseBoolish converts JSON values that may represent booleans. It accepts
+// bools and the strings "true"/"false" (case-insensitive). Anything else
+// defaults to false so legacy or malformed entries do not break parsing.
+func parseBoolish(v interface{}) bool {
+	switch b := v.(type) {
+	case bool:
+		return b
+	case string:
+		return strings.EqualFold(b, "true") || strings.EqualFold(b, "yes") || strings.EqualFold(b, "on") || strings.EqualFold(b, "1")
+	default:
+		return false
+	}
 }
 
 // WorkspaceEnv maps environment variable names to either inline values or hub
@@ -563,19 +583,129 @@ type NotificationsConfig struct {
 	// Lifecycle configures agent lifecycle notifications (agent started,
 	// PR opened, failures).
 	Lifecycle *LifecycleNotificationsConfig `yaml:"lifecycle,omitempty" json:"lifecycle,omitempty"`
+	// Scheduled configures time-driven reports sent through named notifiers.
+	Scheduled []ScheduledNotificationConfig `yaml:"scheduled,omitempty" json:"scheduled,omitempty"`
+	// Infra configures fleet-wide dependency and provider-limit notifications.
+	Infra *InfraNotificationsConfig `yaml:"infra,omitempty" json:"infra,omitempty"`
+}
+
+// ScheduledNotificationConfig configures a report sent at a wall-clock time.
+type ScheduledNotificationConfig struct {
+	// ID uniquely identifies this schedule.
+	ID string `yaml:"id" json:"id"`
+	// Report is the report type name, for example "pending_prs".
+	Report string `yaml:"report" json:"report"`
+	// Via names one or more notifiers from notifications.notifiers.
+	Via []string `yaml:"via" json:"via"`
+	// At is a 24-hour wall-clock time in "HH:MM" format.
+	At string `yaml:"at" json:"at"`
+	// Timezone is an IANA name; UTC is used when it is empty.
+	Timezone string `yaml:"timezone,omitempty" json:"timezone,omitempty"`
+	// Weekdays limits delivery to mon through sun; an empty list means every day.
+	Weekdays []string `yaml:"weekdays,omitempty" json:"weekdays,omitempty"`
+	// Enabled defaults to true when omitted.
+	Enabled *bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+}
+
+// LifecycleEventTypes is the canonical set of lifecycle event wire types: the
+// vocabulary a route's allow-list may name, and the one the settings screen
+// renders one checkbox per entry from.
+//
+// It holds ONLY values that are written as task_run_events.event_type, because
+// that is the column route matching compares against. The concrete failure
+// kinds (provision_failed, bootstrap_failed, provider_lost,
+// permission_or_auth_failed, timeout, creation_failed, unknown_failure) are
+// run-level classifications living in failure_type; no event ever carries them
+// as its type, so a route built from them would match nothing and receive no
+// message ever while the test-send endpoint happily reported success. Failures
+// route as agent_stopped — the event a dying agent produces, rendered with the
+// headline its failure_type earns — and done_without_pr.
+var LifecycleEventTypes = []string{
+	"agent_started",
+	"pr_opened",
+	"agent_stopped",
+	"agent_idle",
+	"stage_stalled",
+	"done_without_pr",
+}
+
+// IsLifecycleEventType reports whether event is a supported lifecycle event
+// wire type.
+func IsLifecycleEventType(event string) bool {
+	for _, eventType := range LifecycleEventTypes {
+		if event == eventType {
+			return true
+		}
+	}
+	return false
+}
+
+// InfraEventTypes is the vocabulary persisted for fleet-wide infrastructure
+// changes. It intentionally does not share lifecycle's per-task-run stream.
+var InfraEventTypes = []string{
+	"dependency_down",
+	"dependency_degraded",
+	"dependency_recovered",
+	"provider_limit_opened",
+	"provider_limit_exhausted",
+	"provider_limit_released",
+}
+
+// IsInfraEventType reports whether event is a supported infrastructure event.
+func IsInfraEventType(event string) bool {
+	for _, eventType := range InfraEventTypes {
+		if event == eventType {
+			return true
+		}
+	}
+	return false
+}
+
+// LifecycleRoute sends lifecycle events through a named notifier. An empty
+// Events list receives all lifecycle event types.
+type LifecycleRoute struct {
+	Via    string   `yaml:"via" json:"via"`
+	Events []string `yaml:"events,omitempty" json:"events,omitempty"`
+}
+
+// InfraRoute sends selected infrastructure events through a named notifier.
+// An empty Events list receives every infrastructure event type.
+type InfraRoute struct {
+	Via    string   `yaml:"via" json:"via"`
+	Events []string `yaml:"events,omitempty" json:"events,omitempty"`
+}
+
+// InfraNotificationsConfig configures edge-triggered infrastructure alerts.
+// RepeatAfter re-alerts about a dependency that is still degraded or down once
+// the interval elapses after the previous alert. It is deliberately opt-in: an
+// outage does not become more actionable because it repeats in a channel every
+// hour. Provider caps are not repeated by it — the usage-limit latch already
+// re-emits on its own cadence (opened, exhausted when retries run out,
+// released), each with a stated deadline.
+type InfraNotificationsConfig struct {
+	Enabled      *bool        `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	Routes       []InfraRoute `yaml:"routes,omitempty" json:"routes,omitempty"`
+	PollInterval string       `yaml:"poll_interval,omitempty" json:"pollInterval,omitempty"`
+	RepeatAfter  string       `yaml:"repeat_after,omitempty" json:"repeatAfter,omitempty"`
+}
+
+func (c *InfraNotificationsConfig) IsEnabled() bool {
+	return c != nil && (c.Enabled == nil || *c.Enabled)
 }
 
 // LifecycleNotificationsConfig configures outbound notifications for agent
-// lifecycle events, sent through a named hub-level notifier.
+// lifecycle events, sent through one or more named hub-level notifiers.
 type LifecycleNotificationsConfig struct {
 	// Enabled defaults to true when the lifecycle block is present; set it
 	// to false to mute lifecycle notifications without deleting the config.
 	Enabled *bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
 	// Via names the notifier (under notifications.notifiers) to send through.
+	// Deprecated: use Routes for per-channel routing. It remains for backward
+	// compatibility and cannot be set with Routes.
 	Via string `yaml:"via" json:"via"`
-	// ThreadByRun groups all messages for a run into one thread on providers
-	// that support threading. Default true.
-	ThreadByRun *bool `yaml:"thread_by_run,omitempty" json:"threadByRun,omitempty"`
+	// Routes maps lifecycle events to named notifiers. A route with no Events
+	// receives all lifecycle event types.
+	Routes []LifecycleRoute `yaml:"routes,omitempty" json:"routes,omitempty"`
 	// PollInterval is how often the notifier scans for new events. Default "5s".
 	PollInterval string `yaml:"poll_interval,omitempty" json:"pollInterval,omitempty"`
 	// IdleAfter is how long an agent must sit idle (connected, no turn
@@ -583,6 +713,9 @@ type LifecycleNotificationsConfig struct {
 	// fires. Default "5m", minimum "1m". Detection rides the 2-minute status
 	// watchdog tick, so the alert lands between IdleAfter and IdleAfter+2m.
 	IdleAfter string `yaml:"idle_after,omitempty" json:"idleAfter,omitempty"`
+	// StageProgressAfter alerts when a pipeline stage receives no meaningful
+	// progress for this duration. Empty disables this opt-in alert.
+	StageProgressAfter string `yaml:"stage_progress_after,omitempty" json:"stageProgressAfter,omitempty"`
 	// Events toggles individual event categories. All default true when absent.
 	Events *LifecycleEventToggles `yaml:"events,omitempty" json:"events,omitempty"`
 }
@@ -593,6 +726,21 @@ func (c *LifecycleNotificationsConfig) IsEnabled() bool {
 	return c != nil && (c.Enabled == nil || *c.Enabled)
 }
 
+// EffectiveRoutes returns configured routes, translating the legacy Via field
+// to a single route that receives all events.
+func (c *LifecycleNotificationsConfig) EffectiveRoutes() []LifecycleRoute {
+	if c == nil {
+		return nil
+	}
+	if len(c.Routes) != 0 {
+		return c.Routes
+	}
+	if c.Via != "" {
+		return []LifecycleRoute{{Via: c.Via}}
+	}
+	return nil
+}
+
 // LifecycleEventToggles enables/disables individual lifecycle notification
 // categories. All default true when the block is absent.
 type LifecycleEventToggles struct {
@@ -600,6 +748,7 @@ type LifecycleEventToggles struct {
 	PROpened     *bool `yaml:"pr_opened,omitempty" json:"prOpened,omitempty"`
 	Failures     *bool `yaml:"failures,omitempty" json:"failures,omitempty"`
 	AgentIdle    *bool `yaml:"agent_idle,omitempty" json:"agentIdle,omitempty"`
+	StageStalled *bool `yaml:"stage_stalled,omitempty" json:"stageStalled,omitempty"`
 }
 
 // LivenessConfig controls boot reconciliation and the periodic safety-net reaper.

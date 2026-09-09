@@ -39,7 +39,9 @@ stages:
 
         Read the issue and CONTEXT.md and start working on the issue.
         Narrate your progress as you go. Keep me updated.
-        When implementation is complete and before committing, say [READY_TO_COMMIT].
+        When implementation is complete and before committing, reply with `[READY_TO_COMMIT]`
+        alone on the first line of your message. The hub only reads the signal when the
+        token opens a line; written inside a sentence it is ignored and the run stalls.
 
   - id: pre_commit
     label: Pre-Commit Checks
@@ -54,7 +56,8 @@ stages:
         Review the clawpatch report at .elasticclaw/clawpatch/report.json.
         Fix issues you agree with.
         Do not commit .elasticclaw/clawpatch files.
-        When fixes are complete, create the final commit and PR, then say [DONE].
+        When fixes are complete, create the final commit and PR, then reply with `[DONE]` on
+        the first line and list the PR URL after it. `[DONE]` must open that line.
 
   - id: pr_opened
     label: PR Opened

@@ -32,8 +32,60 @@ import (
 // idle_since. Exactly one of the two ever fires for a claw (the same
 // task_run_id ownership rule the other lifecycle kinds follow).
 
+// agentIdleResumeBlindGrace bounds the window in which the hub must not
+// auto-resume a claw because it cannot see whether a turn is running.
+//
+// A clawConn carries no in-flight turn state across a fresh registration —
+// neither a hub restart nor a bridge reconnect hands it over — while the
+// gateway on the sandbox keeps running the turn it already had. In that window
+// isBusyLocked() reports false for a claw that is genuinely mid-turn, and
+// injecting into it is not a nudge: pinned OpenClaw treats a mid-turn injection
+// as a session takeover and aborts the turn with
+// EmbeddedAttemptSessionTakeoverError. NEXT-724 lost a 16-minute turn exactly
+// this way, 46 seconds after an auto-resume that fired 6 minutes into a fresh
+// connection following a hub restart.
+//
+// The grace tracks minBusyTurnMax rather than the bridge cap it is derived
+// from. The bridge's cap (agentTurnTimeout, 1h) ends the WAIT, but teardown —
+// abortActiveSession, then createFreshSession — still runs before the error
+// reply reaches the hub, so a turn that began just before a reconnect can be
+// unwinding past connectedAt+1h. minBusyTurnMax already encodes exactly this
+// slack for the busy-turn watchdog; the three constants move together.
+//
+// It is an upper bound, not a wait: the guard lifts the moment a turn ends
+// where this connection can see it, which any working agent does within a turn
+// or two.
+//
+// Two limits worth stating rather than implying. The cap is a timer inside the
+// bridge PROCESS — if that process dies mid-turn the timer dies with it, and
+// whether the gateway-side run also stops depends on OpenClaw, which is
+// upstream and not verifiable here. And a claw that never produces a boundary
+// is NOT covered by claw_retry: that escalates on 12 consecutive
+// gateway_healthy=false heartbeats, while a stalled agent behind a healthy
+// gateway heartbeats healthy forever — the exact shape of NEXT-713. Between
+// the two mechanisms sits a gap where only the human agent_idle alert fires.
+const agentIdleResumeBlindGrace = minBusyTurnMax
+
 const (
 	lifecycleDefaultIdleAfter = 5 * time.Minute
+
+	// bridgeHeartbeatInterval is the bridge's heartbeat period — the 15s
+	// ticker in startHubKeepalives (cmd/claw-bridge). Named here because the
+	// freshness window below must be expressed in heartbeats, not in an
+	// unrelated wall-clock guess; if the bridge's ticker changes, this must
+	// change with it (defaultGatewayUnhealthyMax's comment carries the same
+	// dependency).
+	bridgeHeartbeatInterval = 15 * time.Second
+
+	// subagentsActiveFreshFor bounds how long one "subagents active" report
+	// keeps suppressing the agent_idle alert without being renewed. A live
+	// bridge re-reports every bridgeHeartbeatInterval, so the state is
+	// normally refreshed long before this expires; three intervals tolerate a
+	// couple of dropped or delayed heartbeats without flapping, while a bridge
+	// that dies (or stops being able to poll the gateway) can silence the
+	// alert for at most ~45s past its last word — stale state must never
+	// suppress it indefinitely.
+	subagentsActiveFreshFor = 3 * bridgeHeartbeatInterval
 
 	// agentIdleStretchSlack absorbs clock drift in the stretch-start value
 	// across hub restarts: a reconnect seeds lastTurnFinishedAt from the last
@@ -111,8 +163,19 @@ func (s *Server) agentIdleBaseline(nowAt time.Time, enabled bool) (baseline time
 type agentIdleSnapshot struct {
 	busy             bool
 	noProgressPaused bool
-	lastTurn         time.Time
-	notifiedAt       time.Time
+	// subagentsActive is true while the bridge RECENTLY reported spawned
+	// subagent sessions with a run in flight (sessions.list, ridden on the
+	// heartbeat). Freshness matters: the report suppresses the alert, so a
+	// stale one — a bridge that died mid-spawn — must expire (see
+	// subagentsActiveFreshFor) rather than silence the alert forever.
+	subagentsActive bool
+	lastTurn        time.Time
+	notifiedAt      time.Time
+	connectedAt     time.Time
+	// turnBoundarySeen is false while the hub has never watched a turn end on
+	// this connection, which is exactly when it cannot tell an idle agent from
+	// one whose turn it simply cannot see.
+	turnBoundarySeen bool
 	// stretchStartAt is zero when the connection carries no usable clock at
 	// all (registration always stamps connectedAt, so this is unreachable in
 	// production and simply means "do not judge this claw").
@@ -138,8 +201,11 @@ func agentIdleSnapshotOf(cc *clawConn) agentIdleSnapshot {
 	snap := agentIdleSnapshot{
 		busy:             cc.isBusyLocked(),
 		noProgressPaused: cc.noProgressPaused,
+		subagentsActive:  !cc.subagentsActiveAt.IsZero() && time.Since(cc.subagentsActiveAt) < subagentsActiveFreshFor,
 		lastTurn:         cc.lastTurnFinishedAt,
 		notifiedAt:       cc.idleNotifiedAt,
+		connectedAt:      cc.connectedAt,
+		turnBoundarySeen: cc.turnBoundarySeen,
 	}
 	start := cc.lastTurnFinishedAt
 	if start.IsZero() {
@@ -198,6 +264,21 @@ func (s *Server) checkAgentIdle(nowAt time.Time, clawID string, cc *clawConn) {
 	if snap.busy {
 		// A running turn ends the idle stretch.
 		s.clearAgentIdleLatch(clawID, cc)
+		return
+	}
+	if snap.subagentsActive {
+		// Spawned subagent sessions are still running on the gateway. An agent
+		// that calls sessions_yield after sessions_spawn ENDS ITS TURN on
+		// purpose — the spawned work's completion arrives as the next message —
+		// so by turn state alone it is indistinguishable from a stall, and
+		// notifying here pages a human about an agent that is working exactly
+		// as designed. This is NOT the busy case above: busy means a turn is in
+		// flight and legitimately clears the latch, whereas here the claw is
+		// neither confirmed idle nor confirmed to have run a turn. So leave
+		// every latch exactly as it is — idle_since untouched, idleNotifiedAt
+		// unstamped — and re-decide on the next tick, once the completion turn
+		// runs (clearing the latch through the busy path) or the activity
+		// report goes stale.
 		return
 	}
 	stretchStartAt := snap.stretchStartAt
@@ -345,13 +426,39 @@ const (
 	// the notification config at all, by design.
 	agentIdleResumeBaselineKey = "agent_idle_resume_baseline"
 
-	// agentIdleResumeMaxAttempts bounds the resumes a single claw can ever
-	// receive. The PRIMARY backstop is the existing no-progress watchdog: a
-	// resume that produces the same empty outcome three times sets
-	// no_progress_paused, which this check honours (see below). The cap covers
-	// the pathological case that watchdog cannot see — turns whose outcomes
-	// keep differing just enough to reset its observation window — so a
-	// wake-do-nothing-idle loop cannot poke forever.
+	// agentIdleResumeMaxAttempts bounds the resumes a claw can receive within
+	// ONE unit of work. The counter (claws.idle_resume_count) is reset when the
+	// unit changes: on a won pipeline stage transition
+	// (claimPipelineStageTransition), when the sandbox is replaced with a new
+	// session (resetClawForRetry), and when the session itself is lost — either
+	// at the re-brief (enqueueSessionLostResume, the funnel for a loss detected
+	// with a turn open or recent) or, for a loss detected while the claw was
+	// idle, when the parked notice is finally delivered with the next real
+	// prompt (server.go). Both session paths are needed: noteSessionLoss splits
+	// on turnOpenOrRecent and only one side re-briefs immediately. All of these
+	// are the same idea as the stage transition — an agent with no memory of the
+	// earlier conversation is starting its unit of work over — and missing any
+	// one of them leaves the identical hole this cap-scoping exists to close.
+	// It is NOT reset per stretch, see
+	// clearAgentIdleResumeLatch.
+	//
+	// The PRIMARY backstop is the existing no-progress watchdog: a resume that
+	// produces the same empty outcome three times sets no_progress_paused,
+	// which this check honours (see below). The cap covers the pathological
+	// case that watchdog cannot see — turns whose outcomes keep differing just
+	// enough to reset its observation window — so a wake-do-nothing-idle loop
+	// cannot poke forever.
+	//
+	// The cap used to be lifetime, and that is what stranded NEXT-647: ten
+	// pokes over two days, eight of them in a stage whose work was already
+	// merged (each resume woke the claw, it correctly found nothing to do and
+	// slept again — the mechanism working), spent the whole budget. When a
+	// replacement sandbox later parked on sessions_yield in review_loop, the
+	// no-progress watchdog did not latch (the outcomes differed) and the cap
+	// had nothing left, so the claw sat silent for 8h16m until a human typed.
+	// Ten pokes inside one stage is still the runaway this exists to stop; ten
+	// spread across unrelated units of work is not, and must not disarm the
+	// recovery for the next one.
 	agentIdleResumeMaxAttempts = 10
 
 	agentIdleResumePrefix = "[hub] No turn has been running for"
@@ -408,6 +515,9 @@ func (s *Server) checkAgentIdleResume(nowAt time.Time, clawID string, cc *clawCo
 		return
 	}
 	snap := agentIdleSnapshotOf(cc)
+	// snap.subagentsActive is deliberately NOT consulted here: the auto-resume
+	// still fires for a claw parked on sessions_yield with spawned work
+	// running. Only the notification is suppressed by that signal.
 	if snap.busy {
 		// A turn is running: nothing to resume.
 		//
@@ -419,6 +529,11 @@ func (s *Server) checkAgentIdleResume(nowAt time.Time, clawID string, cc *clawCo
 		// unchanged — and the same stretch would be resumed twice. Re-arming
 		// is driven by lastTurnFinishedAt actually moving past the latched
 		// stretch instead (see below).
+		return
+	}
+	if !snap.turnBoundarySeen && nowAt.Sub(snap.connectedAt) < agentIdleResumeBlindGrace {
+		// No turn has ended where this connection could see it, so "idle" here
+		// may mean "mid-turn and invisible". Injecting would abort that turn.
 		return
 	}
 	if snap.noProgressPaused {
@@ -473,7 +588,7 @@ func (s *Server) checkAgentIdleResume(nowAt time.Time, clawID string, cc *clawCo
 	if snap.stretchStartAt.Before(baseline) {
 		// The stretch began before the resume could have observed it (first
 		// deploy or first enable, or during a disabled window): park it —
-		// latch without injecting, without consuming the lifetime cap — so
+		// latch without injecting, without consuming the per-work-unit cap — so
 		// turning the feature on never replays history. This is what keeps
 		// the first tick against an existing database from poking every
 		// long-idle claw on it at once. A real turn re-arms the claw
@@ -491,7 +606,7 @@ func (s *Server) checkAgentIdleResume(nowAt time.Time, clawID string, cc *clawCo
 	}
 	log.Printf("[agent-idle] auto-resuming claw %s after %d minutes idle (attempt %d/%d)", shortID(clawID), int(idleFor.Minutes()), resumeCount+1, agentIdleResumeMaxAttempts)
 	if resumeCount+1 >= agentIdleResumeMaxAttempts {
-		log.Printf("[agent-idle] claw %s reached the lifetime auto-resume cap of %d; no further resumes will be sent", shortID(clawID), agentIdleResumeMaxAttempts)
+		log.Printf("[agent-idle] claw %s reached the auto-resume cap of %d for its current unit of work; no further resumes until the stage changes or the sandbox is replaced", shortID(clawID), agentIdleResumeMaxAttempts)
 	}
 	// What makes the resume once-per-stretch is the idle_resume_at latch
 	// written just above, NOT injectMessage's dedupe: the message embeds the
@@ -504,7 +619,7 @@ func (s *Server) checkAgentIdleResume(nowAt time.Time, clawID string, cc *clawCo
 }
 
 // parkAgentIdleResumeStretch latches a stretch as handled WITHOUT injecting a
-// prompt and without consuming an attempt from the lifetime cap: nothing is
+// prompt and without consuming an attempt from the per-work-unit cap: nothing is
 // delivered, so nothing was spent. The latch alone dedupes every future
 // re-detection of the stretch, including across hub restarts.
 func (s *Server) parkAgentIdleResumeStretch(clawID string, stretchStart int64) {
@@ -533,9 +648,11 @@ func agentIdleResumeMessage(idleFor time.Duration) string {
 //     (idle/completed/deleted — see isProtectedClawStatus) plus
 //     error/offline/provisioning are all either finished or covered by the
 //     failure notifications.
-//   - any claw_prs row excludes, run-backed or not. claw_prs rows exist only
-//     while a delivered PR is being tracked (they are deleted on close/merge/
-//     teardown), so a row means "PR out, awaiting CI/review/merge". For
+//   - any UNRESOLVED claw_prs row (state not merged/closed) excludes,
+//     run-backed or not. Rows are deleted only when the claw is finalized;
+//     until then resolved rows survive so the all-PRs-resolved teardown gate
+//     can count them, and only an unresolved row still means "PR out,
+//     awaiting CI/review/merge". For
 //     run-backed claws this is deliberately checked in ADDITION to the run
 //     phase: associateTaskRunPR can fail (and is never retried), leaving the
 //     phase at agent_running forever even though the PR was delivered.
@@ -587,7 +704,7 @@ func (s *Server) parkAgentIdleStretch(nowAt time.Time, clawID string, cc *clawCo
 		if _, err := s.db.Exec(`
 			INSERT INTO slack_notification_deliveries(event_id, run_id, delivered_at, message_ts, status)
 			VALUES(?,?,?,?,?) ON CONFLICT(event_id) DO NOTHING`,
-			lifecycleClawIdleKey(clawID, stretchStart), lifecycleClawThreadKey(clawID),
+			lifecycleClawIdleKey(clawID, stretchStart), lifecycleClawRunKey(clawID),
 			epochMillis(nowAt), "", notificationDeliveryStatusSkipped); err != nil {
 			log.Printf("[agent-idle] park claw %s: %v", shortID(clawID), err)
 			return // retry next tick; nothing latched yet
@@ -616,10 +733,19 @@ func (s *Server) agentIdleRunPhase(taskRunID string) string {
 	return phase
 }
 
-// agentIdleHasClawPRs reports whether the claw currently tracks any delivered PR.
+// agentIdleHasClawPRs reports whether the claw currently tracks any
+// unresolved DELIVERED PR. Resolved rows (state merged/closed) survive until
+// the claw is finalized so the all-PRs-resolved gate can count them — a
+// resolved row must never read as "awaiting humans" here, or a retried claw
+// carrying one would have its stuck alert suppressed for life. Mention-only
+// rows are excluded for the same reason, matching clawOpenPRCount: a PR the
+// agent merely linked is not "PR out, awaiting humans", and since the watcher
+// never finalizes a claw with zero delivered rows, counting a mention here
+// would make a hung mention-only claw simultaneously immortal (never torn
+// down) and invisible (stuck alert suppressed).
 func (s *Server) agentIdleHasClawPRs(clawID string) bool {
 	var n int
-	if err := s.db.QueryRow(`SELECT COUNT(*) FROM claw_prs WHERE claw_id=?`, clawID).Scan(&n); err != nil {
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM claw_prs WHERE claw_id=? AND state NOT IN ('merged','closed') AND mention_only=0`, clawID).Scan(&n); err != nil {
 		log.Printf("[agent-idle] count claw prs for %s: %v", shortID(clawID), err)
 		return false
 	}
@@ -649,10 +775,13 @@ func (s *Server) clearAgentIdleLatch(clawID string, cc *clawConn) {
 // checkAgentIdleResume; see clearAgentIdleLatch for why observing busy is not
 // good enough.
 //
-// idle_resume_count is deliberately NOT reset. A resume that produces an empty
-// turn still ends the stretch, so resetting the counter on every turn would
-// make the lifetime cap unreachable in precisely the runaway case it exists to
-// bound (wake, do nothing, idle, repeat).
+// idle_resume_count is deliberately NOT reset here. A resume that produces an
+// empty turn still ends the stretch, so resetting the counter on every turn
+// would make the per-work-unit cap unreachable in precisely the runaway case
+// it exists to bound (wake, do nothing, idle, repeat). The counter only resets
+// when the unit of work itself changes (claimPipelineStageTransition,
+// resetClawForRetry, enqueueSessionLostResume, and the session-loss notice
+// delivery in server.go).
 func (s *Server) clearAgentIdleResumeLatch(clawID string) {
 	if _, err := s.db.Exec(`UPDATE claws SET idle_resume_at=0 WHERE id=? AND idle_resume_at != 0`, clawID); err != nil {
 		log.Printf("[agent-idle] clear resume latch for claw %s: %v", shortID(clawID), err)

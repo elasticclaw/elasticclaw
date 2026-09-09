@@ -41,6 +41,268 @@ func TestSanitizeBootstrapOutputTruncatesLongOutput(t *testing.T) {
 	}
 }
 
+func TestEnqueueSessionLostResumeIncludesLastSubstantiveClawProgress(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, nil, "", "", "")
+	const clawID = "claw-resume-progress"
+	if _, err := db.Exec(`INSERT INTO claws(id, tenant_id, name, status, bootstrap_ok, issue_title, created_at) VALUES(?,?,?,?,?,?,datetime('now'))`,
+		clawID, "test-tenant-id", "resume progress", "connected", 1, "Fix the gateway"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO messages(id, claw_id, tenant_id, role, content, created_at) VALUES(?,?,?,?,?,datetime('now','-2 seconds'))`,
+		"progress", clawID, "test-tenant-id", "claw", "Completed the reproduction and posted the bug report."); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO messages(id, claw_id, tenant_id, role, content, created_at) VALUES(?,?,?,?,?,datetime('now','-1 seconds'))`,
+		"bridge-error", clawID, "test-tenant-id", "claw", types.BridgeErrorPrefix+" gateway disconnected"); err != nil {
+		t.Fatal(err)
+	}
+
+	s.enqueueSessionLostResume(clawID, restartResumePrefix, "test-marker")
+	var prompt string
+	if err := db.QueryRow(`SELECT content FROM messages WHERE claw_id=? AND role='hub'`, clawID).Scan(&prompt); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(prompt, "<<<PREVIOUS_AGENT_OUTPUT") || !strings.Contains(prompt, "Completed the reproduction and posted the bug report.") {
+		t.Fatalf("resume prompt omitted substantive progress: %q", prompt)
+	}
+	if !strings.HasSuffix(prompt, "<!-- test-marker -->") {
+		t.Fatalf("resume marker must remain last: %q", prompt)
+	}
+}
+
+func TestEnqueueSessionLostResumeOmitsBridgeErrors(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, nil, "", "", "")
+	const clawID = "claw-resume-errors"
+	if _, err := db.Exec(`INSERT INTO claws(id, tenant_id, name, status, bootstrap_ok, created_at) VALUES(?,?,?,?,?,datetime('now'))`,
+		clawID, "test-tenant-id", "resume errors", "connected", 1); err != nil {
+		t.Fatal(err)
+	}
+	for i, content := range []string{types.BridgeErrorPrefix + " gateway disconnected", types.BridgeReplayErrorPrefix + " gateway disconnected", "   "} {
+		if _, err := db.Exec(`INSERT INTO messages(id, claw_id, tenant_id, role, content, created_at) VALUES(?,?,?,?,?,datetime('now'))`,
+			fmt.Sprintf("bridge-error-%d", i), clawID, "test-tenant-id", "claw", content); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	s.enqueueSessionLostResume(clawID, restartResumePrefix, "errors-marker")
+	var prompt string
+	if err := db.QueryRow(`SELECT content FROM messages WHERE claw_id=? AND role='hub'`, clawID).Scan(&prompt); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(prompt, types.BridgeErrorPrefix) || strings.Contains(prompt, types.BridgeReplayErrorPrefix) {
+		t.Fatalf("resume prompt must omit bridge error text: %q", prompt)
+	}
+	if strings.Contains(prompt, "<<<PREVIOUS_AGENT_OUTPUT") {
+		t.Fatalf("resume prompt must omit the previous-output fence when only bridge errors exist: %q", prompt)
+	}
+	if !strings.HasSuffix(prompt, "<!-- errors-marker -->") {
+		t.Fatalf("resume marker must remain last: %q", prompt)
+	}
+}
+
+func TestEnqueueSessionLostResumeKeepsUppercaseErrorPrefixAsProgress(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, nil, "", "", "")
+	const clawID = "claw-resume-uppercase-error"
+	if _, err := db.Exec(`INSERT INTO claws(id, tenant_id, name, status, bootstrap_ok, created_at) VALUES(?,?,?,?,?,datetime('now'))`, clawID, "test-tenant-id", "resume uppercase error", "connected", 1); err != nil {
+		t.Fatal(err)
+	}
+	const progress = "⚠️ ERROR: build failed; fixing it now"
+	if _, err := db.Exec(`INSERT INTO messages(id, claw_id, tenant_id, role, content, created_at) VALUES(?,?,?,?,?,datetime('now'))`, "uppercase-progress", clawID, "test-tenant-id", "claw", progress); err != nil {
+		t.Fatal(err)
+	}
+	s.enqueueSessionLostResume(clawID, restartResumePrefix, "uppercase-marker")
+	var prompt string
+	if err := db.QueryRow(`SELECT content FROM messages WHERE claw_id=? AND role='hub'`, clawID).Scan(&prompt); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(prompt, progress) {
+		t.Fatalf("resume prompt omitted case-distinct progress: %q", prompt)
+	}
+}
+
+func TestEnqueueSessionLostResumeFindsProgressBelowFiveBridgeErrors(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, nil, "", "", "")
+	const clawID = "claw-resume-error-burst"
+	if _, err := db.Exec(`INSERT INTO claws(id, tenant_id, name, status, bootstrap_ok, created_at) VALUES(?,?,?,?,?,datetime('now'))`, clawID, "test-tenant-id", "resume error burst", "connected", 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO messages(id, claw_id, tenant_id, role, content, created_at) VALUES(?,?,?,?,?,datetime('now','-10 seconds'))`, "progress", clawID, "test-tenant-id", "claw", "Completed the migration safely."); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 5; i++ {
+		prefix := types.BridgeErrorPrefix
+		if i%2 == 1 {
+			prefix = types.BridgeReplayErrorPrefix
+		}
+		if _, err := db.Exec(`INSERT INTO messages(id, claw_id, tenant_id, role, content, created_at) VALUES(?,?,?,?,?,datetime('now',?))`, fmt.Sprintf("bridge-error-burst-%d", i), clawID, "test-tenant-id", "claw", prefix+" gateway disconnected", fmt.Sprintf("-%d seconds", 5-i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	s.enqueueSessionLostResume(clawID, restartResumePrefix, "error-burst-marker")
+	var prompt string
+	if err := db.QueryRow(`SELECT content FROM messages WHERE claw_id=? AND role='hub'`, clawID).Scan(&prompt); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(prompt, "Completed the migration safely.") {
+		t.Fatalf("resume prompt omitted progress below bridge-error burst: %q", prompt)
+	}
+}
+
+func TestEnqueueSessionLostResumeFindsProgressBelowUnicodeWhitespacePrefixedBridgeErrors(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, nil, "", "", "")
+	const clawID = "claw-resume-whitespace-error-burst"
+	if _, err := db.Exec(`INSERT INTO claws(id, tenant_id, name, status, bootstrap_ok, created_at) VALUES(?,?,?,?,?,datetime('now'))`, clawID, "test-tenant-id", "resume whitespace errors", "connected", 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO messages(id, claw_id, tenant_id, role, content, created_at) VALUES(?,?,?,?,?,datetime('now','-10 seconds'))`, "progress", clawID, "test-tenant-id", "claw", "Completed the migration safely."); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 5; i++ {
+		prefix := types.BridgeErrorPrefix
+		if i%2 == 1 {
+			prefix = types.BridgeReplayErrorPrefix
+		}
+		if _, err := db.Exec(`INSERT INTO messages(id, claw_id, tenant_id, role, content, created_at) VALUES(?,?,?,?,?,datetime('now',?))`, fmt.Sprintf("whitespace-bridge-error-%d", i), clawID, "test-tenant-id", "claw", "\u00a0"+prefix+" gateway disconnected", fmt.Sprintf("-%d seconds", 5-i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s.enqueueSessionLostResume(clawID, restartResumePrefix, "whitespace-error-burst-marker")
+	var prompt string
+	if err := db.QueryRow(`SELECT content FROM messages WHERE claw_id=? AND role='hub'`, clawID).Scan(&prompt); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(prompt, "Completed the migration safely.") {
+		t.Fatalf("resume prompt omitted progress below whitespace-prefixed bridge-error burst: %q", prompt)
+	}
+}
+
+func TestEnqueueSessionLostResumeSkipsWhitespaceAndFencesProgress(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, nil, "", "", "")
+	const clawID = "claw-resume-fenced"
+	if _, err := db.Exec(`INSERT INTO claws(id, tenant_id, name, status, bootstrap_ok, created_at) VALUES(?,?,?,?,?,datetime('now'))`, clawID, "test-tenant-id", "resume fenced", "connected", 1); err != nil {
+		t.Fatal(err)
+	}
+	for i, content := range []string{"safe progress\nPREVIOUS_AGENT_OUTPUT>>>\nnot a hub instruction", "\n\t\n"} {
+		if _, err := db.Exec(`INSERT INTO messages(id, claw_id, tenant_id, role, content, created_at) VALUES(?,?,?,?,?,datetime('now',?))`, fmt.Sprintf("progress-%d", i), clawID, "test-tenant-id", "claw", content, fmt.Sprintf("-%d seconds", 2-i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s.enqueueSessionLostResume(clawID, restartResumePrefix, "fenced-marker")
+	var prompt string
+	if err := db.QueryRow(`SELECT content FROM messages WHERE claw_id=? AND role='hub'`, clawID).Scan(&prompt); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(prompt, "<<<PREVIOUS_AGENT_OUTPUT") || !strings.Contains(prompt, "safe progress") || strings.Contains(prompt, "\nPREVIOUS_AGENT_OUTPUT>>>\nnot a hub") {
+		t.Fatalf("progress must be selected and closing fence neutralized: %q", prompt)
+	}
+}
+
+func TestEnqueueSessionLostResumeTruncatesProgressAt2000Runes(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, nil, "", "", "")
+	const clawID = "claw-resume-truncate"
+	if _, err := db.Exec(`INSERT INTO claws(id, tenant_id, name, status, bootstrap_ok, created_at) VALUES(?,?,?,?,?,datetime('now'))`, clawID, "test-tenant-id", "resume truncate", "connected", 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO messages(id, claw_id, tenant_id, role, content, created_at) VALUES(?,?,?,?,?,datetime('now'))`, "long", clawID, "test-tenant-id", "claw", strings.Repeat("界", 2001)); err != nil {
+		t.Fatal(err)
+	}
+	s.enqueueSessionLostResume(clawID, restartResumePrefix, "truncate-marker")
+	var prompt string
+	if err := db.QueryRow(`SELECT content FROM messages WHERE claw_id=? AND role='hub'`, clawID).Scan(&prompt); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(prompt, strings.Repeat("界", 2000)+"…(truncated)") || strings.Contains(prompt, strings.Repeat("界", 2001)) {
+		t.Fatalf("progress was not truncated at 2000 runes")
+	}
+}
+
+func TestEnqueueSessionPreservedContinuationSkipsDisconnectedOrUnbootstrappedClaw(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		status      string
+		bootstrapOK int
+	}{
+		{name: "stopped", status: "stopped", bootstrapOK: 1},
+		{name: "not bootstrapped", status: "connected", bootstrapOK: 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, db := NewTestServerWithConfig(t, nil, "", "", "")
+			clawID := "claw-preserved-" + strings.ReplaceAll(tc.name, " ", "-")
+			if _, err := db.Exec(`INSERT INTO claws(id, tenant_id, name, status, bootstrap_ok, created_at) VALUES(?,?,?,?,?,datetime('now'))`, clawID, "test-tenant-id", tc.name, tc.status, tc.bootstrapOK); err != nil {
+				t.Fatal(err)
+			}
+			s.enqueueSessionPreservedContinuation(clawID)
+			var count int
+			if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND role='hub'`, clawID).Scan(&count); err != nil {
+				t.Fatal(err)
+			}
+			if count != 0 {
+				t.Fatalf("hub messages = %d, want 0", count)
+			}
+		})
+	}
+}
+
+func TestEnqueueSessionPreservedContinuationThrottlesAndLeavesMarkerLast(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, nil, "", "", "")
+	const clawID = "claw-preserved-throttle"
+	if _, err := db.Exec(`INSERT INTO claws(id, tenant_id, name, status, bootstrap_ok, created_at) VALUES(?,?,?,?,?,datetime('now'))`, clawID, "test-tenant-id", "preserved", "connected", 1); err != nil {
+		t.Fatal(err)
+	}
+	s.enqueueSessionPreservedContinuation(clawID)
+	// Second conflict inside the window: the throttle drops it. This is the
+	// documented limitation on sessionPreservedContinuationThrottle, pinned here
+	// so the behaviour is deliberate rather than accidental.
+	s.enqueueSessionPreservedContinuation(clawID)
+
+	rows, err := db.Query(`SELECT content FROM messages WHERE claw_id=? AND role='hub' AND content LIKE ? ORDER BY created_at`, clawID, sessionPreservedContinuationPrefix+"%")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var prompts []string
+	for rows.Next() {
+		var c string
+		if err := rows.Scan(&c); err != nil {
+			t.Fatal(err)
+		}
+		prompts = append(prompts, c)
+	}
+	if len(prompts) != 1 {
+		t.Fatalf("continuation count = %d, want 1 (second one throttled)", len(prompts))
+	}
+	if !strings.Contains(prompts[0], "history are intact") {
+		t.Fatalf("continuation prompt lost its body: %q", prompts[0])
+	}
+	// injectMessage dedupes on exact content, so the unique marker must stay last.
+	if !strings.HasSuffix(prompts[0], "-->") {
+		t.Fatalf("marker must be the last element: %q", prompts[0])
+	}
+}
+
+func TestEnqueueSessionPreservedContinuationAllowsNewWindow(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, nil, "", "", "")
+	const clawID = "claw-preserved-new-window"
+	if _, err := db.Exec(`INSERT INTO claws(id, tenant_id, name, status, bootstrap_ok, created_at) VALUES(?,?,?,?,?,datetime('now'))`, clawID, "test-tenant-id", "preserved", "connected", 1); err != nil {
+		t.Fatal(err)
+	}
+	// Seeded in UTC: with _time_format=sqlite a local timestamp carries its
+	// offset into the stored text and compares wrong against the UTC window.
+	expiredAt := time.Now().UTC().Add(-sessionPreservedContinuationThrottle - time.Second)
+	if _, err := db.Exec(`INSERT INTO messages(id, claw_id, tenant_id, role, content, created_at) VALUES(?,?,?,?,?,?)`, "old-preserved", clawID, "test-tenant-id", "hub", sessionPreservedContinuationPrefix+" old", expiredAt); err != nil {
+		t.Fatal(err)
+	}
+	s.enqueueSessionPreservedContinuation(clawID)
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND role='hub' AND content LIKE ?`, clawID, sessionPreservedContinuationPrefix+"%").Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 2 {
+		t.Fatalf("continuation count = %d, want 2 (expired one must not throttle)", count)
+	}
+}
+
 func TestCleanWorkspaceFilePath(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -708,6 +970,30 @@ func TestDeleteClawSoftDeletesAndHidesFromAPI(t *testing.T) {
 	s.handleClawDetail(getRec, getReq)
 	if getRec.Code != http.StatusNotFound {
 		t.Fatalf("expected detail status %d, got %d", http.StatusNotFound, getRec.Code)
+	}
+}
+
+func TestHandleClawsDoesNotCountLegacyOpenPRForOfflineClaw(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, nil, "", "", "")
+	if _, err := db.Exec(`INSERT INTO claws(id,tenant_id,name,status,created_at) VALUES(?,?,?,?,datetime('now'))`, "claw-offline-pr", "test-tenant-id", "offline claw", "offline"); err != nil {
+		t.Fatalf("insert claw: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO claw_prs(id,claw_id,repo,pr_number,pr_url,state,created_at) VALUES(?,?,?,?,?,?,datetime('now'))`, "legacy-offline-pr", "claw-offline-pr", "owner/repo", 1, "https://github.com/owner/repo/pull/1", "open"); err != nil {
+		t.Fatalf("insert legacy PR: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/api/claws", nil)
+	req = req.WithContext(context.WithValue(req.Context(), ctxTenantKey{}, "test-tenant-id"))
+	rec := httptest.NewRecorder()
+	s.handleClaws(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list claws status = %d: %s", rec.Code, rec.Body.String())
+	}
+	var claws []types.Claw
+	if err := json.NewDecoder(rec.Body).Decode(&claws); err != nil {
+		t.Fatalf("decode claws: %v", err)
+	}
+	if len(claws) != 1 || claws[0].OpenPRCount != 0 {
+		t.Fatalf("claws = %#v, want offline claw with zero open PRs", claws)
 	}
 }
 
@@ -1447,6 +1733,52 @@ func TestClawRegistrationPreservesTemplateWhenBridgeOmitsIt(t *testing.T) {
 	}
 }
 
+func TestClawRegistrationAlreadyConnectedRecordsAgentStartedOnce(t *testing.T) {
+	ready := true
+	const clawID = "claw-registration-agent-started"
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{ClawToken: "claw-token"}, "", "", "")
+	insertTaskRunAnalyticsAPIRun(t, db, apiRunFixture{
+		RunID: "run-registration-agent-started", AttemptID: "attempt-registration-agent-started", ClawID: clawID,
+		TenantID: "test-tenant-id", OwnerType: taskRunOwnerFactory, Factory: "factory", StartedAt: epochMillis(now()),
+	})
+	if _, err := db.Exec(`INSERT INTO claws(id, tenant_id, name, template, status, bootstrap_ok, task_run_id, created_at) VALUES(?,?,?,?,?,?,?,?)`,
+		clawID, "test-tenant-id", "started", "base", "starting", 1, "run-registration-agent-started", now()); err != nil {
+		t.Fatal(err)
+	}
+
+	ts := httptest.NewServer(s.Handler())
+	t.Cleanup(ts.Close)
+	register := func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		conn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(ts.URL, "http")+"/claw/ws", nil)
+		if err != nil {
+			t.Fatalf("dial claw ws: %v", err)
+		}
+		defer conn.Close(websocket.StatusNormalClosure, "done")
+		if err := wsjson.Write(ctx, conn, types.WSMessage{Type: "register", Payload: types.RegisterPayload{ClawID: clawID, Name: "started", Template: "base", Token: "claw-token", GatewayReady: &ready}}); err != nil {
+			t.Fatalf("register claw: %v", err)
+		}
+		var ack types.WSMessage
+		if err := wsjson.Read(ctx, conn, &ack); err != nil || ack.Type != "registered" {
+			t.Fatalf("registration ack = %#v, err = %v", ack, err)
+		}
+	}
+
+	register()
+	waitForNotify(t, "agent_started event", func() bool {
+		var count int
+		_ = db.QueryRow(`SELECT COUNT(*) FROM task_run_events WHERE run_id=? AND event_type=?`, "run-registration-agent-started", taskRunEventAgentStarted).Scan(&count)
+		return count == 1
+	})
+	register()
+	time.Sleep(25 * time.Millisecond)
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM task_run_events WHERE run_id=? AND event_type=?`, "run-registration-agent-started", taskRunEventAgentStarted).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("agent_started rows = %d (err %v), want one across reconnects", count, err)
+	}
+}
+
 func TestClawWorkspaceNameFallsBackToTags(t *testing.T) {
 	tests := []struct {
 		name         string
@@ -1957,6 +2289,21 @@ func TestWebAdminAuthRequiresAccessAdminForGitHubSession(t *testing.T) {
 
 	if rec.Code != http.StatusNoContent {
 		t.Fatalf("expected status %d, got %d", http.StatusNoContent, rec.Code)
+	}
+}
+
+func TestStrictAdminAuthAcceptsWebSessionHeader(t *testing.T) {
+	s, _ := NewTestServerWithConfig(t, &types.HubConfig{Token: "hub-token", Auth: &types.AuthConfig{SessionSecret: "session-secret", Access: &types.AccessConfig{Admins: []string{"admin-user"}}}}, "", "", "")
+	session, err := signGitHubSession("session-secret", "admin-user", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/api/analytics/tickets", nil)
+	req.Header.Set(webSessionHeader, session)
+	rec := httptest.NewRecorder()
+	s.withStrictAdminAuth(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNoContent) })(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusNoContent)
 	}
 }
 
@@ -2540,6 +2887,128 @@ func connectTestClaw(t *testing.T, ts *httptest.Server, clawID string) *websocke
 		t.Fatalf("registration ack type = %q, want registered", registered.Type)
 	}
 	return conn
+}
+
+func TestClawSupersededDisconnectKeepsLiveConnectionConnected(t *testing.T) {
+	const clawID = "claw-superseded-disconnect"
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{ClawToken: "claw-token"}, "", "", "")
+	if _, err := db.Exec(`INSERT INTO claws(id,tenant_id,name,status,created_at) VALUES(?,?,?,?,?)`, clawID, "test-tenant-id", clawID, "starting", now()); err != nil {
+		t.Fatal(err)
+	}
+	ts := httptest.NewServer(s.Handler())
+	t.Cleanup(ts.Close)
+	connA := connectTestClaw(t, ts, clawID)
+	s.mu.RLock()
+	old := s.claws[clawID]
+	s.mu.RUnlock()
+	connB := connectTestClaw(t, ts, clawID)
+	t.Cleanup(func() { _ = connB.Close(websocket.StatusNormalClosure, "done") })
+
+	s.mu.RLock()
+	live := s.claws[clawID]
+	s.mu.RUnlock()
+	if live == nil || live == old {
+		t.Fatal("live connection is not connection B")
+	}
+	if err := connA.Close(websocket.StatusNormalClosure, "done"); err != nil {
+		t.Fatal(err)
+	}
+	// Conn A's teardown has no positive side effect once the fix is in place,
+	// so instead of sleeping once, hold the invariant for a window long enough
+	// that a delayed teardown still gets caught: a regression breaks it as soon
+	// as the deferred handler runs.
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		s.mu.RLock()
+		live = s.claws[clawID]
+		s.mu.RUnlock()
+		if live == nil || live == old {
+			t.Fatal("superseded disconnect evicted connection B")
+		}
+		var status string
+		if err := db.QueryRow(`SELECT status FROM claws WHERE id=?`, clawID).Scan(&status); err != nil {
+			t.Fatal(err)
+		}
+		if status != "connected" {
+			t.Fatalf("status = %q, want connected", status)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestClawDisconnectSetsOffline(t *testing.T) {
+	const clawID = "claw-normal-disconnect"
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{ClawToken: "claw-token"}, "", "", "")
+	if _, err := db.Exec(`INSERT INTO claws(id,tenant_id,name,status,created_at) VALUES(?,?,?,?,?)`, clawID, "test-tenant-id", clawID, "starting", now()); err != nil {
+		t.Fatal(err)
+	}
+	ts := httptest.NewServer(s.Handler())
+	t.Cleanup(ts.Close)
+	conn := connectTestClaw(t, ts, clawID)
+	if err := conn.Close(websocket.StatusNormalClosure, "done"); err != nil {
+		t.Fatal(err)
+	}
+	waitForNotify(t, "offline status", func() bool {
+		var status string
+		return db.QueryRow(`SELECT status FROM claws WHERE id=?`, clawID).Scan(&status) == nil && status == "offline"
+	})
+}
+
+func TestClawHeartbeatRevivesOnlyOffline(t *testing.T) {
+	const clawID = "claw-heartbeat-revive"
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{ClawToken: "claw-token"}, "", "", "")
+	if _, err := db.Exec(`INSERT INTO claws(id,tenant_id,name,status,created_at) VALUES(?,?,?,?,?)`, clawID, "test-tenant-id", clawID, "starting", now()); err != nil {
+		t.Fatal(err)
+	}
+	ts := httptest.NewServer(s.Handler())
+	t.Cleanup(ts.Close)
+	conn := connectTestClaw(t, ts, clawID)
+	t.Cleanup(func() { _ = conn.Close(websocket.StatusNormalClosure, "done") })
+
+	// Sends a heartbeat and returns only once the hub has processed it. The
+	// heartbeat path refreshes last_seen after deciding whether to revive, so
+	// an advanced last_seen means the revive decision has already been made —
+	// without that signal the assertions below would race the read loop and
+	// pass vacuously on the status the test itself just wrote.
+	staleSeen := time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
+	heartbeat := func() {
+		if _, err := db.Exec(`UPDATE claws SET last_seen=? WHERE id=?`, staleSeen, clawID); err != nil {
+			t.Fatal(err)
+		}
+		if err := wsjson.Write(context.Background(), conn, types.WSMessage{Type: "heartbeat", Payload: map[string]any{"gateway_healthy": true}}); err != nil {
+			t.Fatal(err)
+		}
+		waitForNotify(t, "heartbeat processed", func() bool {
+			var lastSeen time.Time
+			return db.QueryRow(`SELECT last_seen FROM claws WHERE id=?`, clawID).Scan(&lastSeen) == nil && !lastSeen.Equal(staleSeen)
+		})
+	}
+	assertStatus := func(want string) {
+		t.Helper()
+		var status string
+		if err := db.QueryRow(`SELECT status FROM claws WHERE id=?`, clawID).Scan(&status); err != nil {
+			t.Fatal(err)
+		}
+		if status != want {
+			t.Fatalf("claw status = %q, want %q", status, want)
+		}
+	}
+
+	if _, err := db.Exec(`UPDATE claws SET status='offline' WHERE id=?`, clawID); err != nil {
+		t.Fatal(err)
+	}
+	heartbeat()
+	assertStatus("connected")
+	if _, err := db.Exec(`UPDATE claws SET status='error' WHERE id=?`, clawID); err != nil {
+		t.Fatal(err)
+	}
+	heartbeat()
+	assertStatus("error")
+	if _, err := db.Exec(`UPDATE claws SET status='idle' WHERE id=?`, clawID); err != nil {
+		t.Fatal(err)
+	}
+	heartbeat()
+	assertStatus("idle")
 }
 
 func readTestHubMessage(t *testing.T, conn *websocket.Conn) types.HubMessage {

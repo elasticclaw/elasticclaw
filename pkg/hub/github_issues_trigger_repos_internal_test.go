@@ -42,6 +42,29 @@ func TestResolveGitHubIssuesTokenForRepoUsesTriggerRepos(t *testing.T) {
 	}
 }
 
+func TestGitHubRepoMatchesWithExclusions(t *testing.T) {
+	cases := []struct {
+		fullName string
+		include  []string
+		exclude  []string
+		want     bool
+	}{
+		{"org/a", []string{"org/*"}, []string{"org/b"}, true},
+		{"org/b", []string{"org/*"}, []string{"org/b"}, false},
+		{"org/c", []string{"org/*"}, []string{"org/b"}, true},
+		{"org/a", []string{"org/a", "org/b"}, []string{"org/a"}, false},
+		{"org/a", nil, []string{"org/a"}, false},
+		{"org/a", []string{"org/*"}, []string{"other/*"}, true},
+		{"org/sub/a", []string{"org/*"}, []string{"org/b"}, true}, // nested path still matches org/* include
+	}
+	for _, c := range cases {
+		got := githubRepoMatchesWithExclusions(c.fullName, c.include, c.exclude)
+		if got != c.want {
+			t.Errorf("githubRepoMatchesWithExclusions(%q, %v, %v) = %v, want %v", c.fullName, c.include, c.exclude, got, c.want)
+		}
+	}
+}
+
 func TestResolveGitHubIssuesTokenForRepoFallsBackToLegacyRepos(t *testing.T) {
 	cfg := &types.HubConfig{
 		ClawToken: "test-claw-token",

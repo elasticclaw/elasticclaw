@@ -48,6 +48,7 @@ const testWorkflowV2YAML = `
 schema_version: 2
 name: delivery
 enabled: true
+manual_trigger: true
 initial_state: implementing
 states:
   implementing:
@@ -60,7 +61,11 @@ states:
 transitions:
   open:
     from: implementing
-    on: pull_request.verified_open
+    on: delivery.verified
+    when:
+      delivery:
+        open:
+          not_equals: 0
     to: awaiting_ci
   done:
     from: awaiting_ci

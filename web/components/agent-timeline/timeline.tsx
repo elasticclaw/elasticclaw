@@ -1,6 +1,6 @@
 "use client"
 
-import { useCallback, useState, type ReactNode } from "react"
+import { Fragment, memo, useCallback, useState, type ReactNode } from "react"
 import type { Message } from "@/lib/types"
 import type { Turn } from "@/lib/turns"
 import { useNowTick } from "@/hooks/use-now"
@@ -13,6 +13,68 @@ function turnDefaultExpanded(turn: Turn, isLast: boolean, density: TimelineDensi
   if (density === "problems") return turn.hasProblems || turn.failedCount > 0
   return isLast
 }
+
+function hasStepWork(turn: Turn): boolean {
+  return turn.toolCallCount > 0 ||
+    turn.items.some((item) => item.type === "summary") ||
+    turn.hasProblems ||
+    turn.steps.some((step) => step.status === "running" || step.status === "failed" || step.tone !== "normal")
+}
+
+const TurnMessages = memo(function TurnMessages({
+  turn,
+  showProse,
+  firstClawMessageIndex,
+  renderMessage,
+  showStepWork,
+  density,
+  expanded,
+  toggleKey,
+  clawId,
+  now,
+  forceRunning,
+  onToggle,
+  onOpenSubagent,
+}: {
+  turn: Turn
+  showProse: boolean
+  firstClawMessageIndex: number
+  renderMessage: (message: Message) => ReactNode
+  showStepWork: boolean
+  density: TimelineDensity
+  expanded: boolean
+  toggleKey: string
+  clawId: string
+  now?: number
+  forceRunning: boolean
+  onToggle: (key: string, current: boolean) => void
+  onOpenSubagent?: (stepId: string) => void
+}) {
+  const stepWork = showStepWork ? (
+    <TurnCard
+      turn={turn}
+      density={density}
+      expanded={expanded}
+      toggleKey={toggleKey}
+      onToggle={onToggle}
+      clawId={clawId}
+      now={now}
+      forceRunning={forceRunning}
+      onOpenSubagent={onOpenSubagent}
+    />
+  ) : null
+
+  return <>
+    {showProse && turn.userMessage && renderMessage(turn.userMessage)}
+    {firstClawMessageIndex === -1 && stepWork}
+    {turn.items.map((item, index) => item.type === "message" ? (
+      <Fragment key={item.message.id}>
+        {showProse && renderMessage(item.message)}
+        {index === firstClawMessageIndex && stepWork}
+      </Fragment>
+    ) : null)}
+  </>
+})
 
 /**
  * The Problems filter can only judge loaded tool calls — when activity_summary
@@ -61,6 +123,7 @@ export function AgentTimeline({
   unloadedToolCalls = 0,
   loadingUnloaded = false,
   onLoadUnloaded,
+  onOpenSubagent,
 }: {
   clawId: string
   /** Precomputed by the owner (which also derives stats/now-strip from them). */
@@ -79,6 +142,11 @@ export function AgentTimeline({
   unloadedToolCalls?: number
   loadingUnloaded?: boolean
   onLoadUnloaded?: () => void
+  /**
+   * Opt-in: routes Task step rows to the subagent drill-down instead of the
+   * inline expansion. Only the chat view has somewhere to drill to.
+   */
+  onOpenSubagent?: (stepId: string) => void
 }) {
   const [expandedOverrides, setExpandedOverrides] = useState<Record<string, boolean>>({})
   const hasLiveWork = isWorking || turns.some((t) => t.status === "running")
@@ -144,21 +212,30 @@ export function AgentTimeline({
           const isLast = turn === turns[turns.length - 1]
           const toggleKey = `${density}:${turn.id}`
           const expanded = expandedOverrides[toggleKey] ?? turnDefaultExpanded(turn, isLast, density)
+          const showProse = density === "conversation" || density === "all"
+          const showStepWork = hasStepWork(turn)
+          const firstClawMessageIndex = turn.items.findIndex(
+            (item) => item.type === "message" && item.message.role === "claw"
+          )
           return (
-            <TurnCard
-              key={turn.id}
-              turn={turn}
-              density={density}
-              expanded={expanded}
-              toggleKey={toggleKey}
-              onToggle={toggleTurn}
-              clawId={clawId}
-              renderMessage={renderMessage}
-              now={hasLiveWork && isLast ? now : undefined}
-              forceRunning={isLast && isWorking}
-            >
-              {isLast && (density === "conversation" || density === "all") ? streamingSlot : null}
-            </TurnCard>
+            <Fragment key={turn.id}>
+              <TurnMessages
+                turn={turn}
+                showProse={showProse}
+                firstClawMessageIndex={firstClawMessageIndex}
+                renderMessage={renderMessage}
+                showStepWork={showStepWork}
+                density={density}
+                expanded={expanded}
+                toggleKey={toggleKey}
+                clawId={clawId}
+                now={hasLiveWork && isLast ? now : undefined}
+                forceRunning={isLast && isWorking}
+                onToggle={toggleTurn}
+                onOpenSubagent={onOpenSubagent}
+              />
+              {isLast && showProse ? streamingSlot : null}
+            </Fragment>
           )
         })}
         {turns.length === 0 && (density === "conversation" || density === "all") && streamingSlot}

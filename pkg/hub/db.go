@@ -6,6 +6,7 @@ import (
 	"log"
 	"strings"
 	"time"
+	"unicode"
 
 	workflowv2 "github.com/elasticclaw/elasticclaw/pkg/hub/workflowv2"
 
@@ -108,6 +109,15 @@ func migrate(db *sql.DB) error {
 	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN trigger_actor_json TEXT NOT NULL DEFAULT '{}'`)
 	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN stop_comment_pending INTEGER NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN no_progress_paused INTEGER NOT NULL DEFAULT 0`)
+	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN pending_session_loss_notice TEXT NOT NULL DEFAULT ''`)
+	// rebrief_pending is armed by [claw-retry] when a sandbox is replaced and
+	// consumed on reconnect to re-brief the fresh session. resetClawForRetry's
+	// UPDATE references it on the retry hot path, so a silently missing column
+	// would leave every retried claw without a successor — abort startup
+	// loudly instead.
+	if err := addColumn(db, "claws", "rebrief_pending", `INTEGER NOT NULL DEFAULT 0`); err != nil {
+		return err
+	}
 	// idle_since (epoch millis, 0 = not latched) is the durable once-per-idle-
 	// stretch latch for agent_idle notifications: the status watchdog sets it
 	// when it fires the notification for a stretch, and the claw-pass notifier
@@ -115,6 +125,12 @@ func migrate(db *sql.DB) error {
 	// claws table because idleness otherwise lives only in clawConn memory and
 	// would not survive a hub restart.
 	if err := addColumn(db, "claws", "idle_since", `INTEGER NOT NULL DEFAULT 0`); err != nil {
+		return err
+	}
+	if err := addColumn(db, "claws", "stage_entered_at", `INTEGER`); err != nil {
+		return err
+	}
+	if err := addColumn(db, "claws", "stage_stalled_since", `INTEGER NOT NULL DEFAULT 0`); err != nil {
 		return err
 	}
 	// idle_resume_at (epoch millis, 0 = not resumed) is the durable
@@ -126,11 +142,33 @@ func migrate(db *sql.DB) error {
 	if err := addColumn(db, "claws", "idle_resume_at", `INTEGER NOT NULL DEFAULT 0`); err != nil {
 		return err
 	}
-	// idle_resume_count is the lifetime attempt counter behind the runaway cap
-	// (agentIdleResumeMaxAttempts): a claw that wakes, replies nothing, and
-	// idles again would otherwise be poked forever, since each wake clears the
-	// per-stretch latch.
+	// idle_resume_count is the per-work-unit attempt counter behind the
+	// runaway cap (agentIdleResumeMaxAttempts): a claw that wakes, replies
+	// nothing, and idles again would otherwise be poked forever, since each
+	// wake clears the per-stretch latch. It is zeroed on a won pipeline stage
+	// transition, on sandbox replacement, and on a lost/re-briefed session — a
+	// lifetime count let pokes spent harmlessly in one stage leave the claw
+	// with no recovery in the next.
 	if err := addColumn(db, "claws", "idle_resume_count", `INTEGER NOT NULL DEFAULT 0`); err != nil {
+		return err
+	}
+	// llm_limited_until (epoch millis, 0 = not limited) parks a claw whose
+	// provider account is out of allowance. It is deliberately NOT the
+	// no_progress_paused latch: that one is lifted by any user message, and a
+	// human typing during a billing block would only spend another failed
+	// turn. This one outlives user input and is cleared by the clock or by an
+	// explicit operator override. A provider that names no deadline still gets
+	// a concrete one here (now + llmLimitFallbackRetry): the column answers
+	// "when do we try again", and "never" is not a useful answer to that.
+	if err := addColumn(db, "claws", "llm_limited_until", `INTEGER NOT NULL DEFAULT 0`); err != nil {
+		return err
+	}
+	// llm_limit_noticed_until is the deadline the user has already been told
+	// about, so one block yields one notice however many messages they send.
+	// It is a column rather than a field on the connection because the claw is
+	// frequently NOT connected while blocked: an in-memory marker re-announced
+	// on every message for a disconnected claw, and reset on every reconnect.
+	if err := addColumn(db, "claws", "llm_limit_noticed_until", `INTEGER NOT NULL DEFAULT 0`); err != nil {
 		return err
 	}
 	_, _ = db.Exec(`ALTER TABLE claw_prs ADD COLUMN last_comment_at TEXT NOT NULL DEFAULT ''`)
@@ -138,7 +176,160 @@ func migrate(db *sql.DB) error {
 	_, _ = db.Exec(`ALTER TABLE claw_prs ADD COLUMN permanent_failure_count INTEGER NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE claw_prs ADD COLUMN last_review_comment_id INTEGER NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE claw_prs ADD COLUMN last_review_id INTEGER NOT NULL DEFAULT 0`)
+	if err := addColumn(db, "claw_prs", "title", `TEXT NOT NULL DEFAULT ''`); err != nil {
+		return err
+	}
+	// Existing PR titles and provider state cannot be reconstructed locally: the
+	// authoritative values live in the provider API, which migrations must not call.
+	// Consumers already treat these fields as optional until the next watcher poll.
 	if err := addColumn(db, "claw_prs", "last_ci_conclusion", `TEXT NOT NULL DEFAULT ''`); err != nil {
+		return err
+	}
+	if err := addColumn(db, "claw_prs", "state", `TEXT NOT NULL DEFAULT 'open'`); err != nil {
+		return err
+	}
+	if err := addColumn(db, "claw_prs", "merged", `INTEGER NOT NULL DEFAULT 0`); err != nil {
+		return err
+	}
+	if err := addColumn(db, "claw_prs", "merged_at", `TEXT`); err != nil {
+		return err
+	}
+	// mention_only=1 marks rows created by the message scanner for PR URLs the
+	// agent merely mentioned, as opposed to PRs it delivered via [DONE]. Only
+	// delivered rows (mention_only=0) gate claw finalization. Default 0 keeps
+	// every pre-existing row blocking — fail safe, no backfill needed.
+	if err := addColumn(db, "claw_prs", "mention_only", `INTEGER NOT NULL DEFAULT 0`); err != nil {
+		return err
+	}
+	// token_miss_count bounds how long a row whose repo has NO resolvable
+	// GitHub App token keeps blocking finalization. It is deliberately separate
+	// from permanent_failure_count: that counter belongs to checkPRMerged's
+	// permanent-API-error handling and is reset there on every successful
+	// fetch — sharing one column would let each pollAllPRs token resolve reset
+	// the API-error count (or vice versa) and neither bound would ever fire.
+	if err := addColumn(db, "claw_prs", "token_miss_count", `INTEGER NOT NULL DEFAULT 0`); err != nil {
+		return err
+	}
+	// last_mergeable_state stores the last GitHub mergeable_state observed for
+	// the PR (e.g. "clean", "dirty", "blocked", "unknown"). It is used to
+	// surface a merge conflict to the agent only once per conflict episode.
+	if err := addColumn(db, "claw_prs", "last_mergeable_state", `TEXT NOT NULL DEFAULT ''`); err != nil {
+		return err
+	}
+	// The PR watcher never polls claws in terminal/offline states. Legacy rows
+	// therefore cannot safely retain the historical default of "open". Preserve
+	// a known terminal task-run PR state when available; otherwise mark it unknown.
+	// This backfill applies only to rows predating the state column, so record its
+	// completion transactionally and never rewrite PRs created after migration.
+	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS hub_migrations (name TEXT PRIMARY KEY, applied_at INTEGER NOT NULL)`); err != nil {
+		return fmt.Errorf("create migration markers: %w", err)
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin claw PR state backfill: %w", err)
+	}
+	defer tx.Rollback()
+	result, err := tx.Exec(`INSERT OR IGNORE INTO hub_migrations(name, applied_at) VALUES('claw_prs_state_backfill_v1', ?)`, now().UnixMilli())
+	if err != nil {
+		return fmt.Errorf("mark claw PR state backfill: %w", err)
+	}
+	if changed, err := result.RowsAffected(); err != nil {
+		return fmt.Errorf("inspect claw PR state backfill marker: %w", err)
+	} else if changed == 1 {
+		if _, err := tx.Exec(`
+		UPDATE claw_prs
+		SET state = COALESCE((
+			SELECT CASE WHEN trp.merged = 1 THEN 'merged' WHEN trp.state = 'closed' THEN 'closed' END
+			FROM task_run_prs trp
+			JOIN task_runs tr ON tr.id = trp.run_id
+			WHERE tr.claw_id = claw_prs.claw_id
+			  AND trp.repo = claw_prs.repo
+			  AND trp.pr_number = claw_prs.pr_number
+			  AND (trp.merged = 1 OR trp.state = 'closed')
+			ORDER BY trp.updated_at DESC
+			LIMIT 1
+		), 'unknown'),
+			merged = COALESCE((
+			SELECT trp.merged
+			FROM task_run_prs trp
+			JOIN task_runs tr ON tr.id = trp.run_id
+			WHERE tr.claw_id = claw_prs.claw_id
+			  AND trp.repo = claw_prs.repo
+			  AND trp.pr_number = claw_prs.pr_number
+			  AND (trp.merged = 1 OR trp.state = 'closed')
+			ORDER BY trp.updated_at DESC
+			LIMIT 1
+		), 0)
+		WHERE state = 'open'
+		  AND EXISTS (SELECT 1 FROM claws c WHERE c.id = claw_prs.claw_id AND c.status IN ('deleted','error','offline'))`); err != nil && !isBenignAddColumnErr(err) {
+			return fmt.Errorf("backfill claw PR state: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit claw PR state backfill: %w", err)
+	}
+	// v2 corrects merged rows that v1 recorded as closed. Keep this one-shot so
+	// normal startup never rewrites current PR state.
+	tx, err = db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin claw PR state backfill v2: %w", err)
+	}
+	defer tx.Rollback()
+	result, err = tx.Exec(`INSERT OR IGNORE INTO hub_migrations(name, applied_at) VALUES('claw_prs_state_backfill_v2', ?)`, now().UnixMilli())
+	if err != nil {
+		return fmt.Errorf("mark claw PR state backfill v2: %w", err)
+	}
+	if changed, err := result.RowsAffected(); err != nil {
+		return fmt.Errorf("inspect claw PR state backfill v2 marker: %w", err)
+	} else if changed == 1 {
+		if _, err := tx.Exec(`
+		UPDATE claw_prs SET state = 'merged'
+		WHERE state = 'closed' AND merged = 1
+		  AND EXISTS (
+			SELECT 1 FROM task_run_prs trp JOIN task_runs tr ON tr.id = trp.run_id
+			WHERE tr.claw_id = claw_prs.claw_id AND trp.repo = claw_prs.repo
+			  AND trp.pr_number = claw_prs.pr_number AND trp.merged = 1
+		  )`); err != nil && !isBenignAddColumnErr(err) {
+			return fmt.Errorf("correct claw PR state backfill v2: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit claw PR state backfill v2: %w", err)
+	}
+	if err := addColumn(db, "messages", "user_login", `TEXT`); err != nil {
+		return err
+	}
+	// v13: structured pipeline spans and their hub-observed log records.
+	if err := addColumn(db, "pipeline_outputs", "span_id", `TEXT NOT NULL DEFAULT ''`); err != nil {
+		return err
+	}
+	if err := addColumn(db, "pipeline_outputs", "span_kind", `TEXT NOT NULL DEFAULT 'INTERNAL'`); err != nil {
+		return err
+	}
+	if err := addColumn(db, "pipeline_outputs", "duration_ms", `INTEGER NOT NULL DEFAULT 0`); err != nil {
+		return err
+	}
+	if err := addColumn(db, "pipeline_outputs", "status", `TEXT NOT NULL DEFAULT 'OK'`); err != nil {
+		return err
+	}
+	if err := addColumn(db, "pipeline_outputs", "records", `TEXT NOT NULL DEFAULT '[]'`); err != nil {
+		return err
+	}
+	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS ticket_metadata (
+		tenant_id TEXT NOT NULL, integration TEXT NOT NULL DEFAULT '', integration_workspace TEXT NOT NULL DEFAULT '', issue_id TEXT NOT NULL, requester TEXT NOT NULL DEFAULT '',
+		requester_role TEXT NOT NULL DEFAULT '', team TEXT NOT NULL DEFAULT '', priority TEXT NOT NULL DEFAULT '',
+		ask TEXT NOT NULL DEFAULT '', reported_at INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL, last_attempt_at INTEGER NOT NULL DEFAULT 0, consecutive_failures INTEGER NOT NULL DEFAULT 0,
+		PRIMARY KEY (tenant_id, integration, integration_workspace, issue_id)
+	)`); err != nil {
+		return err
+	}
+	if err := migrateTicketMetadataKey(db); err != nil {
+		return err
+	}
+	if err := addColumn(db, "ticket_metadata", "last_attempt_at", `INTEGER NOT NULL DEFAULT 0`); err != nil {
+		return err
+	}
+	if err := addColumn(db, "ticket_metadata", "consecutive_failures", `INTEGER NOT NULL DEFAULT 0`); err != nil {
 		return err
 	}
 	_, _ = db.Exec(`ALTER TABLE messages ADD COLUMN format TEXT NOT NULL DEFAULT ''`)
@@ -286,7 +477,7 @@ func migrate(db *sql.DB) error {
 	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_volume_leases_volume_active ON volume_leases(volume_id, released_at, expires_at)`)
 	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_volume_leases_claw ON volume_leases(claw_id, released_at)`)
 
-	_, err := db.Exec(`
+	_, err = db.Exec(`
 	CREATE TABLE IF NOT EXISTS tenants (
 		id        TEXT PRIMARY KEY,
 		name      TEXT NOT NULL,
@@ -336,10 +527,78 @@ func migrate(db *sql.DB) error {
 		workflow_volumes TEXT NOT NULL DEFAULT '[]',
 		trigger_actor_json TEXT NOT NULL DEFAULT '{}',
 		stop_comment_pending INTEGER NOT NULL DEFAULT 0,
+		rebrief_pending INTEGER NOT NULL DEFAULT 0,
 		no_progress_paused INTEGER NOT NULL DEFAULT 0,
 		idle_since INTEGER NOT NULL DEFAULT 0,
+		stage_entered_at INTEGER,
+		stage_stalled_since INTEGER NOT NULL DEFAULT 0,
 		idle_resume_at INTEGER NOT NULL DEFAULT 0,
-		idle_resume_count INTEGER NOT NULL DEFAULT 0
+		idle_resume_count INTEGER NOT NULL DEFAULT 0,
+		llm_limited_until INTEGER NOT NULL DEFAULT 0,
+		llm_limit_noticed_until INTEGER NOT NULL DEFAULT 0,
+		pending_session_loss_notice TEXT NOT NULL DEFAULT ''
+	);
+
+	-- One row per LLM key that is currently out of allowance.
+	--
+	-- Keyed on the key, not the claw, because that is the shape of the real
+	-- failure: on 2026-08-31 four Faster claws stopped within seconds of each
+	-- other because they share one Anthropic key. Recording it per claw would
+	-- have meant four separate discoveries, four notifications, and three
+	-- claws still burning turns against a wall the hub already knew about.
+	CREATE TABLE IF NOT EXISTS llm_usage_limits (
+		key_id           TEXT PRIMARY KEY,
+		provider         TEXT NOT NULL DEFAULT '',
+		reason           TEXT NOT NULL DEFAULT '',
+		message          TEXT NOT NULL DEFAULT '',
+		regain_at        INTEGER NOT NULL DEFAULT 0,
+		retry_at         INTEGER NOT NULL DEFAULT 0,
+		retries          INTEGER NOT NULL DEFAULT 0,
+		detected_at      INTEGER NOT NULL DEFAULT 0,
+		detected_claw_id TEXT NOT NULL DEFAULT '',
+		-- A released row is kept, not deleted, so the retry counter survives
+		-- the release. Without it a limit that lifts and immediately returns
+		-- looks like a brand-new episode every time and the backoff never
+		-- climbs. Rows are pruned once the episode is comfortably over.
+		released_at      INTEGER NOT NULL DEFAULT 0
+	);
+
+	-- Infra events are deliberately outside task_run_events: an account limit or
+	-- vendor outage is a fleet fact, not four independent agent failures.
+	CREATE TABLE IF NOT EXISTS infra_events (
+		event_key   TEXT UNIQUE NOT NULL,
+		event_type  TEXT NOT NULL,
+		subject     TEXT NOT NULL,
+		detail      TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(detail) AND json_type(detail) = 'object'),
+		occurred_at INTEGER NOT NULL
+	);
+	CREATE TABLE IF NOT EXISTS infra_notification_deliveries (
+		event_rowid INTEGER NOT NULL,
+		notifier TEXT NOT NULL,
+		delivered_at INTEGER NOT NULL,
+		status TEXT NOT NULL,
+		PRIMARY KEY(event_rowid, notifier)
+	);
+	-- rowid, rather than occurred_at, is the future delivery watermark: an
+	-- event recorded late must never disappear behind a newer wall-clock value.
+	-- SQLite already indexes its implicit rowid, so no secondary index is needed.
+
+	-- This durable state makes the dependency watcher edge-triggered across a
+	-- hub restart; an outage must not page again merely because the process did.
+	CREATE TABLE IF NOT EXISTS dependency_status_state (
+		id              TEXT PRIMARY KEY,
+		status          TEXT NOT NULL DEFAULT '',
+		message         TEXT NOT NULL DEFAULT '',
+		since           INTEGER NOT NULL DEFAULT 0,
+		notified_status TEXT NOT NULL DEFAULT '',
+		-- The CheckedAt of the last snapshot that counted as an observation.
+		-- The status cache outlives the watcher tick, so a re-served snapshot
+		-- must not count as a second consecutive check toward the debounce.
+		last_checked_at INTEGER NOT NULL DEFAULT 0,
+		-- When the last degraded/down alert for this dependency was recorded,
+		-- so the opt-in repeat_after can re-alert during a long outage.
+		last_alert_at   INTEGER NOT NULL DEFAULT 0,
+		updated_at      INTEGER NOT NULL DEFAULT 0
 	);
 
 
@@ -351,6 +610,7 @@ func migrate(db *sql.DB) error {
 		role       TEXT NOT NULL,
 		content    TEXT NOT NULL,
 		format     TEXT NOT NULL DEFAULT '',
+		user_login TEXT,
 		created_at DATETIME NOT NULL,
 		delivered_at DATETIME
 	);
@@ -391,6 +651,7 @@ func migrate(db *sql.DB) error {
 	CREATE INDEX IF NOT EXISTS idx_messages_claw ON messages(claw_id, created_at);
 	CREATE INDEX IF NOT EXISTS idx_messages_pending ON messages(claw_id, created_at) WHERE delivered_at IS NULL;
 	CREATE INDEX IF NOT EXISTS idx_claws_tenant  ON claws(tenant_id);
+	CREATE INDEX IF NOT EXISTS idx_claws_stage_stalled ON claws(stage_stalled_since) WHERE stage_stalled_since > 0;
 
 	CREATE TABLE IF NOT EXISTS task_runs (
 		id                    TEXT PRIMARY KEY,
@@ -478,11 +739,11 @@ func migrate(db *sql.DB) error {
 			'task_start','task_completed','run_claimed','run_queued','provision_started','claw_created','agent_started',
 			'creation_failed','provision_failed','bootstrap_failed','model_selected','agent_stopped',
 			'manual_stop_before_delivery','provider_lost','done_without_pr','permission_or_auth_failed',
-			'timeout','unknown_failure','agent_idle','pr_associated','pr_opened','pr_closed_unmerged','pr_merged',
+			'timeout','unknown_failure','agent_idle','stage_stalled','pr_associated','pr_opened','pr_closed_unmerged','pr_merged',
 			'approval_only_pr_review','human_requested_changes','human_review_comment','human_pr_comment',
 			'human_manual_code_push','human_tracker_update','human_dashboard_message',
 			'human_manual_stop_or_resume','human_settings_or_status_change',
-			'unknown_human_interaction','pr_replaced','correction','retraction'
+			'unknown_human_interaction','pr_replaced','correction','retraction','ci_succeeded','ci_failed'
 		)),
 		event_time         INTEGER NOT NULL,
 		observed_at        INTEGER NOT NULL,
@@ -509,6 +770,19 @@ func migrate(db *sql.DB) error {
 	CREATE INDEX IF NOT EXISTS idx_task_run_events_tenant_run_time ON task_run_events(tenant_id, run_id, event_time, observed_at, event_key);
 	CREATE INDEX IF NOT EXISTS idx_task_run_events_source_event ON task_run_events(tenant_id, source, source_event_id);
 	CREATE INDEX IF NOT EXISTS idx_task_run_events_observed ON task_run_events(tenant_id, observed_at);
+
+	CREATE TABLE IF NOT EXISTS task_run_stages (
+		tenant_id  TEXT NOT NULL,
+		run_id     TEXT NOT NULL,
+		seq        INTEGER NOT NULL,
+		stage_id   TEXT NOT NULL,
+		label      TEXT NOT NULL DEFAULT '',
+		entered_at INTEGER NOT NULL,
+		exited_at  INTEGER,
+		source     TEXT NOT NULL DEFAULT 'live' CHECK(source IN ('live','backfill_messages','backfill_history','v2_transitions')),
+		PRIMARY KEY (tenant_id, run_id, seq)
+	);
+	CREATE INDEX IF NOT EXISTS idx_task_run_stages_run ON task_run_stages(tenant_id, run_id, seq);
 
 	CREATE TABLE IF NOT EXISTS task_run_prs (
 		id              TEXT PRIMARY KEY,
@@ -603,6 +877,8 @@ func migrate(db *sql.DB) error {
 	CREATE INDEX IF NOT EXISTS idx_task_run_summaries_model ON task_run_summaries(tenant_id, model, started_at DESC);
 	CREATE INDEX IF NOT EXISTS idx_task_run_summaries_repo ON task_run_summaries(tenant_id, repo, started_at DESC);
 	CREATE INDEX IF NOT EXISTS idx_task_run_summaries_timeout ON task_run_summaries(tenant_id, timeout_at);
+	CREATE INDEX IF NOT EXISTS idx_task_run_summaries_ticket_page ON task_run_summaries(tenant_id, requires_pr, analytics_enabled, started_at DESC, integration, integration_workspace, issue_id, issue_created_at DESC, status);
+	CREATE INDEX IF NOT EXISTS idx_task_run_summaries_ticket_detail ON task_run_summaries(tenant_id, integration, integration_workspace, issue_id, started_at);
 
 	CREATE TABLE IF NOT EXISTS hub_templates (
 		name       TEXT PRIMARY KEY,
@@ -617,14 +893,21 @@ func migrate(db *sql.DB) error {
 		repo        TEXT NOT NULL,  -- e.g. "owner/repo"
 		pr_number   INTEGER NOT NULL,
 		pr_url      TEXT NOT NULL,
+		title       TEXT NOT NULL DEFAULT '',
 		last_ci_sha TEXT NOT NULL DEFAULT '',   -- last SHA we checked CI on
 		last_ci_conclusion TEXT NOT NULL DEFAULT '', -- terminal CI verdict already delivered for last_ci_sha: '' | 'success' | 'failure'
+		state       TEXT NOT NULL DEFAULT 'open',
+		merged      INTEGER NOT NULL DEFAULT 0,
+		merged_at   TEXT,
 		last_comment_id INTEGER NOT NULL DEFAULT 0, -- last bugbot/pipeline comment ID seen
 		last_comment_at TEXT NOT NULL DEFAULT '', -- timestamp of last seen comment
 		last_review_comment_id INTEGER NOT NULL DEFAULT 0, -- last PR review comment ID seen
 		last_review_id INTEGER NOT NULL DEFAULT 0, -- last top-level PR review ID seen
 		pr_conditions_fired INTEGER NOT NULL DEFAULT 0,
 		permanent_failure_count INTEGER NOT NULL DEFAULT 0,
+		mention_only INTEGER NOT NULL DEFAULT 0, -- 1 = URL scanned from a message, not delivered via [DONE]; never gates finalization
+		token_miss_count INTEGER NOT NULL DEFAULT 0, -- consecutive polls with no resolvable GitHub token for the repo; separate from permanent_failure_count (see migrate)
+		last_mergeable_state TEXT NOT NULL DEFAULT '', -- last GitHub mergeable_state observed (e.g. "dirty"); used for one-shot conflict notifications
 		created_at  DATETIME NOT NULL,
 		UNIQUE(claw_id, pr_url)
 	);
@@ -692,6 +975,11 @@ func migrate(db *sql.DB) error {
 		stdout       TEXT NOT NULL DEFAULT '',
 		stderr       TEXT NOT NULL DEFAULT '',
 		parsed_json  TEXT NOT NULL DEFAULT '{}',
+		span_id      TEXT NOT NULL DEFAULT '',
+		span_kind    TEXT NOT NULL DEFAULT 'INTERNAL',
+		duration_ms  INTEGER NOT NULL DEFAULT 0,
+		status       TEXT NOT NULL DEFAULT 'OK',
+		records      TEXT NOT NULL DEFAULT '[]',
 		created_at   DATETIME NOT NULL,
 		PRIMARY KEY (claw_id, output_name)
 	);
@@ -764,6 +1052,18 @@ func migrate(db *sql.DB) error {
 	CREATE INDEX IF NOT EXISTS idx_slack_deliveries_time
 		ON slack_notification_deliveries(delivered_at);
 
+	-- Route-aware lifecycle delivery dedupe.  The legacy table remains read as
+	-- a fallback by the notifier, so pre-upgrade events are never re-sent.
+	CREATE TABLE IF NOT EXISTS slack_notification_deliveries_v2 (
+		event_id     TEXT NOT NULL,
+		notifier     TEXT NOT NULL,
+		run_id       TEXT NOT NULL,
+		delivered_at INTEGER NOT NULL,
+		message_ts   TEXT NOT NULL DEFAULT '',
+		status       TEXT NOT NULL DEFAULT 'sent',
+		PRIMARY KEY (event_id, notifier)
+	);
+
 	-- Key/value state for the Slack notifier (the rowid watermark).
 	CREATE TABLE IF NOT EXISTS slack_notifier_state (
 		key   TEXT PRIMARY KEY,
@@ -799,6 +1099,12 @@ func migrate(db *sql.DB) error {
 	if err := backfillTaskRunReadyAtV1(db); err != nil {
 		return err
 	}
+	if err := backfillTaskRunStagesV1(db); err != nil {
+		return err
+	}
+	if err := rebuildTaskRunSummariesTicketPageV3(db); err != nil {
+		return err
+	}
 	for _, p := range []struct {
 		model                          string
 		in, out, cacheRead, cacheWrite float64
@@ -820,6 +1126,48 @@ func migrate(db *sql.DB) error {
 		}
 	}
 	return nil
+}
+
+func migrateTicketMetadataKey(db *sql.DB) error {
+	rows, err := db.Query(`PRAGMA table_info(ticket_metadata)`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	hasIntegration := false
+	for rows.Next() {
+		var cid, pk int
+		var name, typ string
+		var notNull int
+		var def any
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &def, &pk); err != nil {
+			return err
+		}
+		if name == "integration" {
+			hasIntegration = true
+		}
+	}
+	if err := rows.Err(); err != nil || hasIntegration {
+		return err
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err = tx.Exec(`ALTER TABLE ticket_metadata RENAME TO ticket_metadata_legacy`); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(`CREATE TABLE ticket_metadata (tenant_id TEXT NOT NULL, integration TEXT NOT NULL DEFAULT '', integration_workspace TEXT NOT NULL DEFAULT '', issue_id TEXT NOT NULL, requester TEXT NOT NULL DEFAULT '', requester_role TEXT NOT NULL DEFAULT '', team TEXT NOT NULL DEFAULT '', priority TEXT NOT NULL DEFAULT '', ask TEXT NOT NULL DEFAULT '', reported_at INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL, last_attempt_at INTEGER NOT NULL DEFAULT 0, consecutive_failures INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (tenant_id, integration, integration_workspace, issue_id))`); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(`INSERT INTO ticket_metadata(tenant_id,issue_id,requester,requester_role,team,priority,ask,reported_at,updated_at) SELECT tenant_id,issue_id,requester,requester_role,team,priority,ask,reported_at,updated_at FROM ticket_metadata_legacy`); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(`DROP TABLE ticket_metadata_legacy`); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func rebuildTaskRunSummariesStatusV3(db *sql.DB) error {
@@ -857,14 +1205,16 @@ func rebuildTaskRunSummariesStatusV3(db *sql.DB) error {
 		CREATE INDEX idx_task_run_summaries_factory ON task_run_summaries(tenant_id, factory_name, started_at DESC);
 		CREATE INDEX idx_task_run_summaries_model ON task_run_summaries(tenant_id, model, started_at DESC);
 		CREATE INDEX idx_task_run_summaries_repo ON task_run_summaries(tenant_id, repo, started_at DESC);
-		CREATE INDEX idx_task_run_summaries_timeout ON task_run_summaries(tenant_id, timeout_at)`); err != nil {
+		CREATE INDEX idx_task_run_summaries_timeout ON task_run_summaries(tenant_id, timeout_at);
+		CREATE INDEX idx_task_run_summaries_ticket_page ON task_run_summaries(tenant_id, requires_pr, analytics_enabled, started_at DESC, integration, integration_workspace, issue_id, issue_created_at DESC, status);
+		CREATE INDEX idx_task_run_summaries_ticket_detail ON task_run_summaries(tenant_id, integration, integration_workspace, issue_id, started_at)`); err != nil {
 		return fmt.Errorf("replace task run summaries v3: %w", err)
 	}
 	return tx.Commit()
 }
 
 // rebuildTaskRunEventsAgentIdleV1 widens the task_run_events.event_type CHECK
-// to allow 'agent_idle'. SQLite cannot alter a CHECK in place, so databases
+// to allow the latest event types. SQLite cannot alter a CHECK in place, so databases
 // created before the type existed get the rebuild-and-copy treatment (the
 // same pattern as rebuildTaskRunSummariesStatusV3): create the table with the
 // current schema, copy every row, swap, and recreate the indexes. Fresh
@@ -878,7 +1228,7 @@ func rebuildTaskRunEventsAgentIdleV1(db *sql.DB) error {
 		}
 		return fmt.Errorf("read task run events schema: %w", err)
 	}
-	if strings.Contains(schema, "'agent_idle'") {
+	if strings.Contains(schema, "'stage_stalled'") {
 		return nil
 	}
 	tx, err := db.Begin()
@@ -899,11 +1249,11 @@ func rebuildTaskRunEventsAgentIdleV1(db *sql.DB) error {
 			'task_start','task_completed','run_claimed','run_queued','provision_started','claw_created','agent_started',
 			'creation_failed','provision_failed','bootstrap_failed','model_selected','agent_stopped',
 			'manual_stop_before_delivery','provider_lost','done_without_pr','permission_or_auth_failed',
-			'timeout','unknown_failure','agent_idle','pr_associated','pr_opened','pr_closed_unmerged','pr_merged',
+			'timeout','unknown_failure','agent_idle','stage_stalled','pr_associated','pr_opened','pr_closed_unmerged','pr_merged',
 			'approval_only_pr_review','human_requested_changes','human_review_comment','human_pr_comment',
 			'human_manual_code_push','human_tracker_update','human_dashboard_message',
 			'human_manual_stop_or_resume','human_settings_or_status_change',
-			'unknown_human_interaction','pr_replaced','correction','retraction'
+			'unknown_human_interaction','pr_replaced','correction','retraction','ci_succeeded','ci_failed'
 		)),
 		event_time         INTEGER NOT NULL,
 		observed_at        INTEGER NOT NULL,
@@ -1046,6 +1396,31 @@ func backfillTaskRunAnalyticsStatusV3(db *sql.DB) error {
 		log.Printf("[task-run-analytics] status v3 backfill skipped %d of %d run(s)", skipped, len(runIDs))
 	}
 	_, err = db.Exec(`INSERT INTO hub_migrations(name, applied_at) VALUES(?, ?) ON CONFLICT(name) DO NOTHING`, migration, now().UnixMilli())
+	return err
+}
+
+// rebuildTaskRunSummariesTicketPageV3 rebuilds idx_task_run_summaries_ticket_page
+// with a started-at window adjacent to tenant_id so SQLite can seek it before
+// grouping tickets. This is a one-time rebuild: the definition already lives
+// in the CREATE INDEX IF NOT EXISTS above, so without the hub_migrations
+// gate every hub start would re-sort the (potentially large) index for no
+// reason.
+func rebuildTaskRunSummariesTicketPageV3(db *sql.DB) error {
+	const migration = "task_run_summaries_ticket_page_v3"
+	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS hub_migrations (name TEXT PRIMARY KEY, applied_at INTEGER NOT NULL)`); err != nil {
+		return fmt.Errorf("create hub migrations: %w", err)
+	}
+	var applied int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM hub_migrations WHERE name=?`, migration).Scan(&applied); err != nil {
+		return fmt.Errorf("check ticket page index rebuild: %w", err)
+	}
+	if applied > 0 {
+		return nil
+	}
+	if _, err := db.Exec(`DROP INDEX IF EXISTS idx_task_run_summaries_ticket_page; CREATE INDEX idx_task_run_summaries_ticket_page ON task_run_summaries(tenant_id, requires_pr, analytics_enabled, started_at DESC, integration, integration_workspace, issue_id, issue_created_at DESC, status)`); err != nil {
+		return fmt.Errorf("create ticket page index: %w", err)
+	}
+	_, err := db.Exec(`INSERT INTO hub_migrations(name, applied_at) VALUES(?, ?) ON CONFLICT(name) DO NOTHING`, migration, now().UnixMilli())
 	return err
 }
 
@@ -1198,6 +1573,250 @@ func backfillTaskRunReadyAtV1(db *sql.DB) error {
 		return err
 	}
 	return tx.Commit()
+}
+
+// backfillTaskRunStagesV1 reconstructs the stage timeline that predates
+// task_run_stages. Message markers are preferred because they preserve repeat
+// visits; pipeline_stage_history records only each stage's first visit.
+func backfillTaskRunStagesV1(db *sql.DB) error {
+	const migration = "task_run_stages_v1"
+	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS hub_migrations (name TEXT PRIMARY KEY, applied_at INTEGER NOT NULL)`); err != nil {
+		return fmt.Errorf("create hub migrations: %w", err)
+	}
+	var applied int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM hub_migrations WHERE name=?`, migration).Scan(&applied); err != nil {
+		return fmt.Errorf("check task run stages backfill: %w", err)
+	}
+	if applied > 0 {
+		return nil
+	}
+
+	rows, err := db.Query(`
+		SELECT t.id, t.tenant_id, t.claw_id
+		  FROM task_runs t
+		 WHERE NOT EXISTS (SELECT 1 FROM task_run_stages s WHERE s.run_id = t.id)
+		 ORDER BY t.created_at, t.id`)
+	if err != nil {
+		return fmt.Errorf("list runs for task run stages backfill: %w", err)
+	}
+	type candidate struct{ runID, tenantID, clawID string }
+	var candidates []candidate
+	for rows.Next() {
+		var c candidate
+		if err := rows.Scan(&c.runID, &c.tenantID, &c.clawID); err != nil {
+			rows.Close()
+			return err
+		}
+		candidates = append(candidates, c)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+
+	skipped := 0
+	unprocessable := 0
+	for _, c := range candidates {
+		if c.clawID == "" {
+			// A missing claw_id can never self-heal, so it must not block the
+			// sentinel: counting it as skipped would re-run the full backfill
+			// on every startup forever.
+			unprocessable++
+			log.Printf("[task-run-analytics] task run stages backfill skipped run %s: no claw_id (will not retry)", c.runID)
+			continue
+		}
+		if err := backfillTaskRunStagesForRun(db, c.tenantID, c.runID, c.clawID); err != nil {
+			skipped++
+			log.Printf("[task-run-analytics] task run stages backfill skipped run %s: %v", c.runID, err)
+		}
+	}
+	log.Printf("[task-run-analytics] task run stages backfill: %d of %d run(s) processed", len(candidates)-skipped-unprocessable, len(candidates))
+	if skipped > 0 {
+		log.Printf("[task-run-analytics] task run stages backfill: %d run(s) skipped, will retry on next startup", skipped)
+		return nil
+	}
+	_, err = db.Exec(`INSERT INTO hub_migrations(name, applied_at) VALUES(?, ?) ON CONFLICT(name) DO NOTHING`, migration, now().UnixMilli())
+	return err
+}
+
+func backfillTaskRunStagesForRun(db *sql.DB, tenantID, runID, clawID string) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	type marker struct {
+		label string
+		at    time.Time
+	}
+	markerRows, err := tx.Query(`SELECT content, created_at FROM messages WHERE claw_id = ? AND role = 'hub' AND content LIKE '[hub] ▶ Stage: %' ORDER BY created_at ASC`, clawID)
+	if err != nil {
+		return fmt.Errorf("list stage markers: %w", err)
+	}
+	var markers []marker
+	for markerRows.Next() {
+		var content string
+		var at time.Time
+		if err := markerRows.Scan(&content, &at); err != nil {
+			markerRows.Close()
+			return fmt.Errorf("scan stage marker: %w", err)
+		}
+		markers = append(markers, marker{strings.TrimPrefix(content, "[hub] ▶ Stage: "), at})
+	}
+	if err := markerRows.Err(); err != nil {
+		markerRows.Close()
+		return fmt.Errorf("iterate stage markers: %w", err)
+	}
+	markerRows.Close()
+
+	type historyEntry struct {
+		stageID string
+		at      time.Time
+	}
+	readHistory := func() ([]historyEntry, error) {
+		rows, err := tx.Query(`SELECT stage_id, created_at FROM pipeline_stage_history WHERE claw_id = ? ORDER BY created_at ASC`, clawID)
+		if err != nil {
+			return nil, err
+		}
+		defer rows.Close()
+		var history []historyEntry
+		for rows.Next() {
+			var entry historyEntry
+			if err := rows.Scan(&entry.stageID, &entry.at); err != nil {
+				return nil, err
+			}
+			history = append(history, entry)
+		}
+		return history, rows.Err()
+	}
+
+	inserted := false
+	if len(markers) > 0 {
+		history, err := readHistory()
+		if err != nil {
+			return fmt.Errorf("list pipeline stage history: %w", err)
+		}
+		consumed := make([]bool, len(history))
+		stageIDByLabel := make(map[string]string)
+		for _, m := range markers {
+			// pipeline_stage_history records only each stage's first visit, so
+			// a revisit marker must reuse the stage id resolved for that
+			// label's first visit instead of consuming (and mislabeling)
+			// another stage's history entry.
+			stageID, seen := stageIDByLabel[m.label]
+			if !seen {
+				slug := slugTaskRunStageLabel(m.label)
+				// Pair the first visit with a history entry: prefer, within
+				// the window, an entry whose stage id matches the marker
+				// label; otherwise take the earliest unconsumed entry — both
+				// streams are in first-visit order, so the earliest candidate
+				// is right even when marker persistence lags the history
+				// write and a later entry happens to be nearer in time.
+				best := -1
+				for i, h := range history {
+					if consumed[i] {
+						continue
+					}
+					diff := m.at.Sub(h.at)
+					if diff < 0 {
+						diff = -diff
+					}
+					if diff > 10*time.Second {
+						continue
+					}
+					if best < 0 {
+						best = i
+					}
+					if stageIDMatchesLabelSlug(h.stageID, slug) {
+						best = i
+						break
+					}
+				}
+				stageID = slug
+				if best >= 0 {
+					stageID = history[best].stageID
+					consumed[best] = true
+				}
+				stageIDByLabel[m.label] = stageID
+			}
+			if err := recordTaskRunStageEnteredTx(tx, tenantID, runID, stageID, m.label, m.at.UnixMilli(), "backfill_messages"); err != nil {
+				return err
+			}
+			inserted = true
+		}
+	} else {
+		history, err := readHistory()
+		if err != nil {
+			return fmt.Errorf("list pipeline stage history: %w", err)
+		}
+		for _, h := range history {
+			if err := recordTaskRunStageEnteredTx(tx, tenantID, runID, h.stageID, h.stageID, h.at.UnixMilli(), "backfill_history"); err != nil {
+				return err
+			}
+			inserted = true
+		}
+		// workflow_v2_runs has no linkage to task_runs in the current schema or codebase, so there is no safe v2 fallback to apply yet.
+	}
+	if inserted {
+		var finishedAt, mergedAt int64
+		err := tx.QueryRow(`SELECT finished_at, merged_at FROM task_run_summaries WHERE run_id = ?`, runID).Scan(&finishedAt, &mergedAt)
+		if err != nil && err != sql.ErrNoRows {
+			return fmt.Errorf("read task run terminal time: %w", err)
+		}
+		closeAt := finishedAt
+		if closeAt == 0 {
+			closeAt = mergedAt
+		}
+		if closeAt > 0 {
+			if _, err := tx.Exec(`UPDATE task_run_stages SET exited_at = ? WHERE tenant_id = ? AND run_id = ? AND seq = (SELECT MAX(seq) FROM task_run_stages WHERE tenant_id = ? AND run_id = ?)`, closeAt, tenantID, runID, tenantID, runID); err != nil {
+				return fmt.Errorf("close final task run stage: %w", err)
+			}
+		}
+	}
+	return tx.Commit()
+}
+
+func slugTaskRunStageLabel(label string) string {
+	var b strings.Builder
+	previousSpace := false
+	for _, r := range strings.ToLower(strings.TrimSpace(label)) {
+		if unicode.IsSpace(r) || r == '-' {
+			if b.Len() > 0 {
+				previousSpace = true
+			}
+			continue
+		}
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_' {
+			if previousSpace && b.Len() > 0 && !strings.HasSuffix(b.String(), "_") {
+				b.WriteByte('_')
+			}
+			previousSpace = false
+			b.WriteRune(r)
+		}
+	}
+	result := strings.Trim(b.String(), "_")
+	if result == "" {
+		return "stage"
+	}
+	return result
+}
+
+// stageIDMatchesLabelSlug reports whether a pipeline stage id and a slugged
+// marker label refer to the same stage, ignoring separator differences
+// (e.g. "pre_commit" matches the slug of "Pre-commit").
+func stageIDMatchesLabelSlug(stageID, labelSlug string) bool {
+	norm := func(s string) string {
+		var b strings.Builder
+		for _, r := range strings.ToLower(s) {
+			if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+				b.WriteRune(r)
+			}
+		}
+		return b.String()
+	}
+	return norm(stageID) == norm(labelSlug)
 }
 
 // backfillTaskRunAgentStartedAt records an inferred agent_started event for a

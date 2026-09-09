@@ -14,17 +14,39 @@ import (
 )
 
 type Attempt struct {
-	ID        string    `json:"id"`
-	RunID     string    `json:"run_id"`
-	ClawID    string    `json:"claw_id"`
-	Number    int       `json:"number"`
-	Status    string    `json:"status"`
-	StartedAt time.Time `json:"started_at"`
+	ID          string    `json:"id"`
+	RunID       string    `json:"run_id"`
+	ClawID      string    `json:"claw_id"`
+	Number      int       `json:"number"`
+	Status      string    `json:"status"`
+	StartedAt   time.Time `json:"started_at"`
+	HeartbeatAt time.Time `json:"heartbeat_at,omitempty"`
+	FinishedAt  time.Time `json:"finished_at,omitempty"`
 }
 
 type ControlBinding struct {
 	RunID     string `json:"run_id"`
 	AttemptID string `json:"attempt_id"`
+}
+
+// OwnsClawExecution reports whether a claw has ever been assigned to a
+// workflow v2 attempt. Claw IDs are unique execution identities, so a
+// historical assignment permanently reserves execution control for the typed
+// v2 channel even after the run becomes terminal. This prevents a late
+// conversation message from falling through to legacy transcript controls.
+func (s *Store) OwnsClawExecution(ctx context.Context, tenantID, clawID string) (bool, error) {
+	if s == nil || s.db == nil {
+		return false, fmt.Errorf("workflow v2 store is not configured")
+	}
+	if strings.TrimSpace(tenantID) == "" || strings.TrimSpace(clawID) == "" {
+		return false, fmt.Errorf("tenant id and claw id are required")
+	}
+	var owned bool
+	err := s.db.QueryRowContext(ctx, `SELECT EXISTS(
+		SELECT 1 FROM workflow_v2_attempts a
+		JOIN workflow_v2_runs r ON r.id=a.run_id
+		WHERE r.tenant_id=? AND a.claw_id=?)`, tenantID, clawID).Scan(&owned)
+	return owned, err
 }
 
 // ActiveControlBinding returns the single active workflow v2 attempt assigned

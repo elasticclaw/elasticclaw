@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
 	"net/url"
@@ -14,12 +13,128 @@ import (
 	osexec "os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"text/template"
 	"time"
 
 	"github.com/elasticclaw/elasticclaw/pkg/hub/pipeline"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
+	"github.com/google/uuid"
 )
+
+// Pipeline output records use a JSON read-modify-write; serialize only matching
+// claw/output pairs to avoid lost appends without blocking unrelated outputs.
+var pipelineLogRecordMu sync.Map
+
+func pipelineLogRecordMutex(clawID, outputName string) *sync.Mutex {
+	key := clawID + "\x00" + outputName
+	mu, _ := pipelineLogRecordMu.LoadOrStore(key, &sync.Mutex{})
+	return mu.(*sync.Mutex)
+}
+
+// The two lifecycle tokens the hub understands on its own, independent of any
+// pipeline's message_contains triggers. Both are matched with
+// pipeline.MessageSignals — never strings.Contains.
+const (
+	doneSignalToken      = "[DONE]"
+	terminateSignalToken = "[TERMINATE]"
+)
+
+// signalTokensForClaw lists the tokens that mean something to this claw: the two
+// built-in lifecycle tokens plus whatever its pipeline declares. Used only to
+// decide what an unanchored mention should be nudged about.
+func (s *Server) signalTokensForClaw(clawID string) []string {
+	tokens := []string{doneSignalToken, terminateSignalToken}
+	seen := map[string]bool{doneSignalToken: true, terminateSignalToken: true}
+	ctx, ok := s.findPipelineContextForClaw(clawID)
+	if !ok {
+		return tokens
+	}
+	pl := parsePipelineForContext(ctx)
+	if pl == nil {
+		return tokens
+	}
+	for _, t := range pl.MessageContainsTokens() {
+		key := strings.ToUpper(t)
+		if seen[key] {
+			continue
+		}
+		// Never nudge about a token whose stage is already behind us. The inject
+		// that leaves such a stage often tells the agent NOT to emit it again,
+		// so "resend it at the start of a line" would be talking it into a
+		// backwards transition — message_contains triggers have no visited-stage
+		// guard of their own.
+		if stageID := pl.StageIDForMessageContainsToken(t); stageID != "" && s.hasVisitedPipelineStage(clawID, stageID) {
+			continue
+		}
+		seen[key] = true
+		tokens = append(tokens, t)
+	}
+	return tokens
+}
+
+// unanchoredSignalNudgeText is a pure function of the token on purpose: an
+// identical string is what lets both dedup layers below recognise a repeat.
+func unanchoredSignalNudgeText(token string) string {
+	return fmt.Sprintf(
+		"[hub] I saw %s in your last message, but not at the start of a line, so it was not read as a signal and nothing advanced. "+
+			"A signal only counts when the token opens its own line (a leading backtick, *, _ or # is fine; prose before it is not). "+
+			"If you meant to send it, resend it now with %s opening the first line. "+
+			"If you were only referring to the token, ignore this — you will not be told about %s again.",
+		token, token, token)
+}
+
+// nudgeUnanchoredSignal tells an agent that wrote a known signal token
+// mid-sentence to resend it anchored.
+//
+// Anchoring trades a spurious transition for a missed one, and a missed signal
+// is a run that hangs until a human notices — the worst failure mode the hub
+// has. This is what keeps it recoverable: the agent is told, in the same
+// channel, that the hub saw the token and did not act on it.
+//
+// Three things keep it from becoming spam:
+//
+//  1. If ANY known token is properly anchored in this message, we say nothing.
+//     The agent signalled correctly; a stray mention alongside it is commentary.
+//  2. At most one nudge per turn, even if several tokens were quoted loosely.
+//  3. At most one nudge per token per claw, ever. The text is a constant per
+//     token, so the check below is an exact-match lookup over this claw's
+//     messages — an agent that quotes [DONE] in twenty consecutive turns gets
+//     exactly one nudge. injectMessage's pending-duplicate check is a second
+//     layer underneath, covering races between concurrent turns.
+//
+// No new queue: this rides the existing hub message injection.
+func (s *Server) nudgeUnanchoredSignal(clawID, message string) {
+	tokens := s.signalTokensForClaw(clawID)
+	var stray []string
+	for _, token := range tokens {
+		if pipeline.MessageSignals(message, token) {
+			return // rule 1
+		}
+		if pipeline.MessageMentionsUnanchored(message, token) {
+			stray = append(stray, token)
+		}
+	}
+	for _, token := range stray {
+		text := unanchoredSignalNudgeText(token)
+		var alreadyNudged bool
+		if err := s.db.QueryRow(
+			`SELECT EXISTS(SELECT 1 FROM messages WHERE claw_id=? AND role='hub' AND content=?)`,
+			clawID, text,
+		).Scan(&alreadyNudged); err != nil {
+			// Fail closed. Unlike a watchdog nudge, a duplicate here is pure
+			// noise in the agent's context, and the next turn retries anyway.
+			log.Printf("[pipeline] unanchored-signal nudge dedup check for claw %s failed, skipping: %v", shortID(clawID), err)
+			return
+		}
+		if alreadyNudged {
+			continue
+		}
+		log.Printf("[pipeline] claw %s wrote %s unanchored; nudging to resend on its own line", shortID(clawID), token)
+		s.injectHubMessageByID(clawID, text)
+		return // rule 2
+	}
+}
 
 // githubIssueDetails holds the fields we fetch for pipeline template rendering.
 type githubIssueDetails struct {
@@ -36,21 +151,11 @@ func (s *Server) fetchGitHubIssueDetails(token, repo string, issueNumber int, ba
 		baseURL = "https://api.github.com"
 	}
 	url := fmt.Sprintf("%s/repos/%s/issues/%d", baseURL, repo, issueNumber)
-	req, err := http.NewRequest("GET", url, nil)
+	resp, err := defaultGitHubClient.get(url, token)
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
-
-	resp, err := issueTrackerHTTPClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	body, _ := io.ReadAll(resp.Body)
+	body := resp.Body
 	if resp.StatusCode != 200 {
 		return nil, fmt.Errorf("github API GET %s: %d %s", url, resp.StatusCode, string(body))
 	}
@@ -142,14 +247,9 @@ func githubAPIAddLabel(baseURL, repo string, issueNumber int, label, token strin
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := issueTrackerHTTPClient.Do(req)
+	_, err = defaultGitHubClient.do(req)
 	if err != nil {
 		return err
-	}
-	defer resp.Body.Close()
-	respBody, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode >= 300 {
-		return fmt.Errorf("github API POST %s: %d %s", path, resp.StatusCode, string(respBody))
 	}
 	return nil
 }
@@ -169,17 +269,13 @@ func githubAPIDeleteLabel(baseURL, repo string, issueNumber int, label, token st
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
-	resp, err := issueTrackerHTTPClient.Do(req)
+	_, err = defaultGitHubClient.do(req)
 	if err != nil {
+		var apiErr *githubAPIError
+		if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound && strings.Contains(apiErr.Body, "Label does not exist") {
+			return nil
+		}
 		return err
-	}
-	defer resp.Body.Close()
-	respBody, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode == http.StatusNotFound && strings.Contains(string(respBody), "Label does not exist") {
-		return nil
-	}
-	if resp.StatusCode >= 300 {
-		return fmt.Errorf("github API DELETE %s: %d %s", path, resp.StatusCode, string(respBody))
 	}
 	return nil
 }
@@ -369,9 +465,44 @@ func (s *Server) resolveJiraTrackerForPipeline(ctx pipelineContext) (workspaceIs
 const defaultPipelineRunTimeout = 10 * time.Minute
 
 type pipelineRunResult struct {
-	ExitCode int
-	Stdout   string
-	Stderr   string
+	ExitCode   int
+	Stdout     string
+	Stderr     string
+	Command    string
+	StartedAt  time.Time
+	DurationMs int64
+}
+
+// pipelineLogRecord is deliberately limited to facts observed by the hub; agent
+// stdout/stderr remains available separately because it is not structured OTEL data.
+type pipelineLogRecord struct {
+	TS             int64                  `json:"ts"`
+	Sev            string                 `json:"sev"`
+	SeverityNumber int                    `json:"severityNumber"`
+	Body           string                 `json:"body"`
+	Attrs          map[string]interface{} `json:"attrs"`
+}
+
+func pipelineSeverityNumber(severity string) int {
+	switch severity {
+	case "TRACE":
+		return 1
+	case "DEBUG":
+		return 5
+	case "INFO":
+		return 9
+	case "WARN":
+		return 13
+	case "ERROR":
+		return 17
+	case "FATAL":
+		return 21
+	}
+	return 9
+}
+
+func newPipelineLogRecord(at time.Time, severity, body string, attrs map[string]interface{}) pipelineLogRecord {
+	return pipelineLogRecord{TS: at.UnixMilli(), Sev: severity, SeverityNumber: pipelineSeverityNumber(severity), Body: body, Attrs: attrs}
 }
 
 func (s *Server) executePipelineRunAction(clawID string, action pipeline.RunAction) (*pipelineRunResult, error) {
@@ -390,7 +521,12 @@ func (s *Server) executePipelineRunAction(clawID string, action pipeline.RunActi
 		}
 		timeout = parsed
 	}
-	return s.executePipelineCommand(clawID, command, timeout)
+	started := time.Now()
+	result, err := s.executePipelineCommand(clawID, command, timeout)
+	if result != nil {
+		result.Command, result.StartedAt, result.DurationMs = command, started, time.Since(started).Milliseconds()
+	}
+	return result, err
 }
 
 func (s *Server) executePipelineCommand(clawID, command string, timeout time.Duration) (*pipelineRunResult, error) {
@@ -523,22 +659,86 @@ func (s *Server) persistPipelineOutput(clawID, stageID, outputName string, resul
 	if parsedJSON == "" {
 		parsedJSON = "{}"
 	}
+	createdAt := now()
+	status := "OK"
+	if result.ExitCode != 0 {
+		status = "ERROR"
+	}
+	records := []pipelineLogRecord{}
+	if !result.StartedAt.IsZero() {
+		startedAttrs := map[string]interface{}{"stage.id": stageID}
+		finishedAttrs := map[string]interface{}{"process.exit_code": result.ExitCode}
+		if result.Command != "" {
+			command := result.Command
+			if len(command) > 500 {
+				command = command[:500] + "…"
+			}
+			startedAttrs["process.command"] = command
+			finishedAttrs["process.command"] = command
+		}
+		records = append(records, newPipelineLogRecord(result.StartedAt, "INFO", "stage started", startedAttrs))
+		severity := "INFO"
+		if result.ExitCode != 0 {
+			severity = "ERROR"
+		}
+		records = append(records, newPipelineLogRecord(result.StartedAt.Add(time.Duration(result.DurationMs)*time.Millisecond), severity, "stage finished", finishedAttrs))
+	}
+	recordsJSON, _ := json.Marshal(records)
+	spanID := uuid.NewString()
+	// Serialize only the matching row with appendPipelineLogRecord, which performs
+	// a read-modify-write of records.
+	mu := pipelineLogRecordMutex(clawID, outputName)
+	mu.Lock()
+	defer mu.Unlock()
 	_, err := s.db.Exec(`
-		INSERT INTO pipeline_outputs(claw_id, stage_id, output_name, exit_code, stdout, stderr, parsed_json, created_at)
-		VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO pipeline_outputs(claw_id, stage_id, output_name, exit_code, stdout, stderr, parsed_json, span_id, span_kind, duration_ms, status, records, created_at)
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(claw_id, output_name) DO UPDATE SET
 			stage_id=excluded.stage_id,
 			exit_code=excluded.exit_code,
 			stdout=excluded.stdout,
 			stderr=excluded.stderr,
 			parsed_json=excluded.parsed_json,
+			span_id=excluded.span_id, span_kind=excluded.span_kind, duration_ms=excluded.duration_ms,
+			status=excluded.status, records=excluded.records,
 			created_at=excluded.created_at`,
-		clawID, stageID, outputName, result.ExitCode, result.Stdout, result.Stderr, parsedJSON, now())
+		clawID, stageID, outputName, result.ExitCode, result.Stdout, result.Stderr, parsedJSON, spanID, "INTERNAL", result.DurationMs, status, string(recordsJSON), createdAt)
 	if err != nil {
 		log.Printf("[pipeline] failed to persist output %q for claw %s: %v", outputName, clawID[:8], err)
 	} else {
 		log.Printf("[pipeline] persisted output %q for claw %s stage %s exit=%d", outputName, clawID[:8], stageID, result.ExitCode)
 	}
+}
+
+func (s *Server) appendPipelineLogRecord(clawID, outputName string, record pipelineLogRecord) {
+	mu := pipelineLogRecordMutex(clawID, outputName)
+	mu.Lock()
+	defer mu.Unlock()
+	var raw string
+	if err := s.db.QueryRow(`SELECT records FROM pipeline_outputs WHERE claw_id=? AND output_name=?`, clawID, outputName).Scan(&raw); err != nil {
+		return
+	}
+	var records []pipelineLogRecord
+	if json.Unmarshal([]byte(raw), &records) != nil {
+		records = []pipelineLogRecord{}
+	}
+	records = append(records, record)
+	b, _ := json.Marshal(records)
+	status := "OK"
+	if record.Sev == "ERROR" || record.Sev == "FATAL" {
+		status = "ERROR"
+	}
+	if _, err := s.db.Exec(`UPDATE pipeline_outputs SET records=?, status=CASE WHEN ?='ERROR' THEN 'ERROR' ELSE status END WHERE claw_id=? AND output_name=?`, string(b), status, clawID, outputName); err != nil {
+		log.Printf("[pipeline] append log record: %v", err)
+	}
+}
+
+// recordPipelineFailureRecord gives provisioning failures a synthetic output so
+// analytics can show the failure even though no pipeline command was started.
+func (s *Server) recordPipelineFailureRecord(clawID, stageID, outputName, severity, body string, attrs map[string]interface{}) {
+	result := &pipelineRunResult{ExitCode: 1, Stderr: body}
+	s.persistPipelineOutput(clawID, stageID, outputName, result)
+	s.appendPipelineLogRecord(clawID, outputName, newPipelineLogRecord(now(), severity, body, attrs))
 }
 
 func parsePipelineOutputJSON(stdout string) (map[string]interface{}, bool) {
@@ -907,6 +1107,93 @@ func (e *routedRequiredGateError) Error() string {
 	return fmt.Sprintf("required gate %q %s", e.stageID, e.verdict)
 }
 
+// renderStageInject renders a stage's on_enter inject template with the
+// claw's issue context, manual trigger inputs, and persisted outputs.
+// Delivery of the rendered inject, the initial-plan marker, and every other
+// on_enter side effect (run/gate/judge/move_issue/labels/notify) stay with
+// the caller, so the re-brief path can reuse the exact task context without
+// re-running side effects. Note it is not fully side-effect free: tracker
+// fetch failures still surface as warnPipelineRender hub messages and the
+// GitHub fetch retries with backoff, identical to the runOnEnter path.
+func (s *Server) renderStageInject(clawID string, stage pipeline.Stage, ctx pipelineContext) string {
+	issueID := ctx.IssueID
+	injectMsg := stage.OnEnter.Inject
+	manualInputs := s.loadManualTriggerInputs(clawID)
+
+	// Build base template data from issue context, manual inputs, and persisted outputs.
+	baseData := map[string]interface{}{}
+
+	// Render {{.Issue.Identifier}}, {{.Issue.Title}}, {{.Issue.URL}} when this
+	// claw is backed by a Linear or GitHub issue. Shortcut IDs (sc-...) are
+	// intentionally excluded from the Issue namespace.
+	if issueID != "" && !strings.HasPrefix(issueID, "sc-") {
+		if !strings.Contains(issueID, "/") {
+			// Linear issue
+			log.Printf("[pipeline] attempting to render template for claw %s issue %s", clawID[:8], issueID)
+			linearToken := s.resolveLinearTokenForPipeline(ctx)
+			details := &linearIssueDetails{Identifier: issueID}
+			if linearToken == "" {
+				s.warnPipelineRender(clawID, "%s: no Linear issue tracker token configured; rendering inject with fallback issue context", ctx.Name())
+			} else {
+				var err error
+				details, err = s.fetchLinearIssueDetails(linearToken, issueID)
+				if err != nil {
+					s.warnPipelineRender(clawID, "%s: failed to fetch Linear issue details for %s: %v", ctx.Name(), issueID, err)
+					details = &linearIssueDetails{Identifier: issueID}
+				}
+				if details == nil {
+					s.warnPipelineRender(clawID, "%s: Linear issue %s returned no details", ctx.Name(), issueID)
+					details = &linearIssueDetails{Identifier: issueID}
+				}
+			}
+			baseData["Issue"] = details
+		} else {
+			// GitHub issue — fetch details and render with same {{.Issue.*}} variables
+			ghToken := s.resolveGitHubIssuesTokenForPipeline(ctx)
+			details := fallbackGitHubIssueDetails(issueID)
+			if ghToken != "" {
+				parts := strings.Split(issueID, "/")
+				if len(parts) == 3 {
+					repo := parts[0] + "/" + parts[1]
+					var issueNum int
+					if _, err := fmt.Sscanf(parts[2], "%d", &issueNum); err == nil {
+						base := s.githubBaseURL
+						if base == "" {
+							base = "https://api.github.com"
+						}
+						fetchedDetails, err := s.fetchGitHubIssueDetailsWithRetry(clawID, ghToken, repo, issueNum, base)
+						if err != nil || fetchedDetails == nil {
+							s.warnPipelineRender(clawID, "%s: failed to fetch GitHub issue details for %s: %v", ctx.Name(), issueID, err)
+						} else {
+							details = fetchedDetails
+						}
+					} else {
+						s.warnPipelineRender(clawID, "%s: invalid GitHub issue number in %q: %v", ctx.Name(), issueID, err)
+					}
+				} else {
+					s.warnPipelineRender(clawID, "%s: invalid GitHub issue ID format %q", ctx.Name(), issueID)
+				}
+				log.Printf("[pipeline] fetched GitHub issue %s: #%s title=%s", issueID, details.Identifier, details.Title)
+			} else {
+				s.warnPipelineRender(clawID, "%s: no GitHub Issues token configured; rendering inject with fallback issue context", ctx.Name())
+			}
+			baseData["Issue"] = details
+		}
+	}
+
+	if manualInputs != nil {
+		baseData["Inputs"] = manualInputs
+	}
+
+	// Always render with persisted outputs so cron and manual workflows can use {{.Outputs.*}}.
+	injectMsg = renderInjectWithData(clawID, injectMsg, s.injectTemplateData(clawID, baseData))
+
+	if inputContext := formatManualTriggerInputs(manualInputs); inputContext != "" {
+		injectMsg = inputContext + "\n\n" + injectMsg
+	}
+	return injectMsg
+}
+
 // runOnEnter executes the on_enter actions for a given stage.
 //
 // - stage.OnEnter.Run: executes a command in the agent workspace
@@ -1017,6 +1304,7 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, ctx pipelineCon
 	if stage.OnEnter.Judge.Instructions != "" {
 		s.publishHubNotice(clawID, fmt.Sprintf("[hub] ▶ Running judge for stage %q", stage.ID))
 		log.Printf("[pipeline] running judge for claw %s stage %q", clawID[:8], stage.ID)
+		started := time.Now()
 		judgeResult, err := s.executeJudgeAction(clawID, stage.OnEnter.Judge, ctx)
 		if err != nil {
 			msg := fmt.Sprintf("Judge stage failed: %v", err)
@@ -1030,9 +1318,11 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, ctx pipelineCon
 			// Persist judge output so later stages can reference it
 			if stage.OnEnter.Judge.Output != "" {
 				result := &pipelineRunResult{
-					ExitCode: 0,
-					Stdout:   judgeResult.RawJSON,
-					Stderr:   "",
+					ExitCode:   0,
+					Stdout:     judgeResult.RawJSON,
+					Stderr:     "",
+					StartedAt:  started,
+					DurationMs: time.Since(started).Milliseconds(),
 				}
 				s.persistPipelineOutput(clawID, stage.ID, stage.OnEnter.Judge.Output, result)
 			}
@@ -1193,84 +1483,16 @@ func (s *Server) runOnEnter(clawID string, stage pipeline.Stage, ctx pipelineCon
 	// only after a required gate (if any) has allowed the stage to continue, so
 	// a failed gate cannot leave the PR watcher armed on a blocked claw.
 	if strings.TrimSpace(runStdoutForPRScan) != "" {
-		s.scanMessageForPRs(clawID, runStdoutForPRScan)
+		// mentionOnly=false: this is a delivery channel, not a mention. Gate
+		// scripts like verify-github-pr-links emit the claw's OWN delivered PR
+		// URLs, and for pipeline-driven claws this is often the only
+		// registration path — mention-only rows here would leave the
+		// finalization gate permanently empty.
+		s.scanMessageForPRs(clawID, runStdoutForPRScan, false)
 	}
 
 	if stage.OnEnter.Inject != "" {
-		injectMsg := stage.OnEnter.Inject
-		manualInputs := s.loadManualTriggerInputs(clawID)
-
-		// Build base template data from issue context, manual inputs, and persisted outputs.
-		baseData := map[string]interface{}{}
-
-		// Render {{.Issue.Identifier}}, {{.Issue.Title}}, {{.Issue.URL}} when this
-		// claw is backed by a Linear or GitHub issue. Shortcut IDs (sc-...) are
-		// intentionally excluded from the Issue namespace.
-		if issueID != "" && !strings.HasPrefix(issueID, "sc-") {
-			if !strings.Contains(issueID, "/") {
-				// Linear issue
-				log.Printf("[pipeline] attempting to render template for claw %s issue %s", clawID[:8], issueID)
-				linearToken := s.resolveLinearTokenForPipeline(ctx)
-				details := &linearIssueDetails{Identifier: issueID}
-				if linearToken == "" {
-					s.warnPipelineRender(clawID, "%s: no Linear issue tracker token configured; rendering inject with fallback issue context", ctx.Name())
-				} else {
-					var err error
-					details, err = s.fetchLinearIssueDetails(linearToken, issueID)
-					if err != nil {
-						s.warnPipelineRender(clawID, "%s: failed to fetch Linear issue details for %s: %v", ctx.Name(), issueID, err)
-						details = &linearIssueDetails{Identifier: issueID}
-					}
-					if details == nil {
-						s.warnPipelineRender(clawID, "%s: Linear issue %s returned no details", ctx.Name(), issueID)
-						details = &linearIssueDetails{Identifier: issueID}
-					}
-				}
-				baseData["Issue"] = details
-			} else {
-				// GitHub issue — fetch details and render with same {{.Issue.*}} variables
-				ghToken := s.resolveGitHubIssuesTokenForPipeline(ctx)
-				details := fallbackGitHubIssueDetails(issueID)
-				if ghToken != "" {
-					parts := strings.Split(issueID, "/")
-					if len(parts) == 3 {
-						repo := parts[0] + "/" + parts[1]
-						var issueNum int
-						if _, err := fmt.Sscanf(parts[2], "%d", &issueNum); err == nil {
-							base := s.githubBaseURL
-							if base == "" {
-								base = "https://api.github.com"
-							}
-							fetchedDetails, err := s.fetchGitHubIssueDetailsWithRetry(clawID, ghToken, repo, issueNum, base)
-							if err != nil || fetchedDetails == nil {
-								s.warnPipelineRender(clawID, "%s: failed to fetch GitHub issue details for %s: %v", ctx.Name(), issueID, err)
-							} else {
-								details = fetchedDetails
-							}
-						} else {
-							s.warnPipelineRender(clawID, "%s: invalid GitHub issue number in %q: %v", ctx.Name(), issueID, err)
-						}
-					} else {
-						s.warnPipelineRender(clawID, "%s: invalid GitHub issue ID format %q", ctx.Name(), issueID)
-					}
-					log.Printf("[pipeline] fetched GitHub issue %s: #%s title=%s", issueID, details.Identifier, details.Title)
-				} else {
-					s.warnPipelineRender(clawID, "%s: no GitHub Issues token configured; rendering inject with fallback issue context", ctx.Name())
-				}
-				baseData["Issue"] = details
-			}
-		}
-
-		if manualInputs != nil {
-			baseData["Inputs"] = manualInputs
-		}
-
-		// Always render with persisted outputs so cron and manual workflows can use {{.Outputs.*}}.
-		injectMsg = renderInjectWithData(clawID, injectMsg, s.injectTemplateData(clawID, baseData))
-
-		if inputContext := formatManualTriggerInputs(manualInputs); inputContext != "" {
-			injectMsg = inputContext + "\n\n" + injectMsg
-		}
+		injectMsg := s.renderStageInject(clawID, stage, ctx)
 		if s.clawNeedsInitialPlan(clawID) && s.insertSystemMarker(clawID, s.tenantIDForClaw(clawID), initialPlanRequiredMarker) {
 			injectMsg = initialPlanWakeContent + "\n\nTask context:\n" + injectMsg
 		}
@@ -1793,16 +2015,19 @@ func (s *Server) transitionResolvedPipelineStageWithContext(clawID string, stage
 		log.Printf("[pipeline] claw %s already in stage %q (%s), skipping duplicate transition", clawID[:8], stage.ID, stage.Label)
 		return false, false
 	}
+	stageLabel := strings.TrimSpace(stage.Label)
+	if stageLabel == "" {
+		stageLabel = stage.ID
+	}
+	if err := s.recordTaskRunStageEntered(clawID, stage.ID, stageLabel); err != nil {
+		log.Printf("[pipeline] failed to record stage timing for claw %s stage %q: %v", clawID[:8], stage.ID, err)
+	}
 	// Record that this claw has visited this stage, so one-shot triggers
 	// (like output_matches) don't re-fire on subsequent messages.
 	s.recordPipelineStageVisit(clawID, stage.ID)
 	log.Printf("[pipeline] claw %s → stage %q (%s)", clawID[:8], stage.ID, stage.Label)
 	// User-visible stage progress in the transcript (dashboard only — does not
 	// queue a model turn). Makes workflow progress less of a black box.
-	stageLabel := strings.TrimSpace(stage.Label)
-	if stageLabel == "" {
-		stageLabel = stage.ID
-	}
 	s.publishHubNotice(clawID, fmt.Sprintf("[hub] ▶ Stage: %s", stageLabel))
 	injectDelivered, onEnterErr := s.runOnEnter(clawID, stage, ctx)
 	stageActionsSucceeded := onEnterErr == nil
@@ -2027,6 +2252,7 @@ func (s *Server) evaluateGate(clawID, stageID string, gate *pipeline.Gate) *Gate
 				result.MatchedValue = strVal
 				log.Printf("[pipeline] gate %q for claw %s: fail matched path=%s value=%s", stageID, clawID[:8], gate.Fail.Path, strVal)
 				s.persistGateResult(clawID, stageID, gate, result)
+				s.appendPipelineLogRecord(clawID, gate.Output, newPipelineLogRecord(now(), "ERROR", "gate failed", map[string]interface{}{"gate.stage_id": stageID, "gate.verdict": "fail", "matched_path": result.MatchedPath, "matched_value": result.MatchedValue}))
 				return result
 			}
 		}
@@ -2220,6 +2446,7 @@ func (s *Server) stopAgentTerminalWithReason(clawID, reason string, skipVMTermin
 		delete(s.claws, clawID)
 	}
 	delete(s.gatewayUnhealthyCounts, clawID)
+	delete(s.gatewayEscalatedAt, clawID)
 	s.mu.Unlock()
 
 	// 4. Write issue-tracker comment without delaying agent shutdown.

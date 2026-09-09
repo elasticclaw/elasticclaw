@@ -704,6 +704,7 @@ func (s *Server) createClawForExternalEvent(factory *types.FactoryConfig, payloa
 		}
 		if provErr != nil {
 			log.Printf("[factory] provision failed for %s: %v", clawID, provErr)
+			s.recordPipelineFailureRecord(clawID, "provision", "provision", "FATAL", provErr.Error(), map[string]interface{}{"error.type": "provision_failed"})
 			s.stopAgentWithReason(clawID, fmt.Sprintf("Factory provision failed: %v", provErr), false)
 		}
 	}()

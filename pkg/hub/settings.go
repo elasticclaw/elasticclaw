@@ -6,11 +6,16 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
+	"strings"
+	"time"
 
 	"github.com/elasticclaw/elasticclaw/pkg/cliversion"
 	"github.com/elasticclaw/elasticclaw/pkg/config"
+	"github.com/elasticclaw/elasticclaw/pkg/hub/notify"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 )
 
@@ -74,11 +79,78 @@ type SettingsView struct {
 	Secrets              []string                    `json:"secrets"`
 	MCPServers           []MCPView                   `json:"mcpServers,omitempty"`
 	Auth                 *AuthView                   `json:"auth,omitempty"`
+	Notifications        *NotificationsView          `json:"notifications"`
+	LifecycleEventTypes  []string                    `json:"lifecycleEventTypes"`
+	InfraEventTypes      []string                    `json:"infraEventTypes"`
 	// ConcurrencyGroups limits simultaneously running claws per group. 0 = unlimited.
 	ConcurrencyGroups []ConcurrencyGroupView `json:"concurrencyGroups"`
 	// MaxConcurrentClaws limits simultaneously running claws. 0 = unlimited.
 	// DEPRECATED: Use ConcurrencyGroups instead.
 	MaxConcurrentClaws int `json:"maxConcurrentClaws"`
+}
+
+// NotificationsView is the settings-safe view of outbound notifications.
+// It intentionally exposes secret references, never secret values.
+type NotificationsView struct {
+	Notifiers map[string]NotifierView     `json:"notifiers"`
+	Lifecycle *LifecycleNotificationsView `json:"lifecycle,omitempty"`
+	Infra     *InfraNotificationsView     `json:"infra,omitempty"`
+	// Scheduled mirrors notifications.scheduled. It holds no secret — a
+	// schedule only names notifiers, a report and a wall-clock slot.
+	Scheduled []ScheduledNotificationView `json:"scheduled"`
+}
+
+// ScheduledNotificationView is the settings view of one scheduled report. Like
+// LifecycleNotificationsView it uses the SAME field names the PATCH body is
+// decoded under (types.ScheduledNotificationConfig), so a client that GETs the
+// view, edits it and PATCHes it back cannot silently drop a field.
+type ScheduledNotificationView struct {
+	ID     string   `json:"id"`
+	Report string   `json:"report"`
+	Via    []string `json:"via"`
+	At     string   `json:"at"`
+	// Timezone is an IANA name; empty means UTC, exactly as the scheduler
+	// reads it.
+	Timezone string `json:"timezone,omitempty"`
+	// Weekdays is always emitted, as [] for "every day", so the settings
+	// screen never has to distinguish absent from empty.
+	Weekdays []string `json:"weekdays"`
+	// Enabled is resolved (the config defaults it to true when omitted) so
+	// the screen renders a real toggle rather than a tri-state.
+	Enabled bool `json:"enabled"`
+}
+
+type NotifierView struct {
+	Type            string `json:"type"`
+	Channel         string `json:"channel,omitempty"`
+	TokenSecret     string `json:"token_secret,omitempty"`
+	APIBase         string `json:"api_base,omitempty"`
+	MinSendInterval string `json:"min_send_interval,omitempty"`
+}
+
+// LifecycleNotificationsView deliberately uses the SAME field names the PATCH
+// body is decoded under (types.LifecycleNotificationsConfig): a client that
+// GETs this view, edits it and PATCHes it back must not silently drop the two
+// durations. They were emitted as poll_interval/idle_after, which
+// encoding/json discards as unknown keys on the way back in — resetting a
+// deliberately raised idle_after to the 5m default and persisting the loss.
+type LifecycleNotificationsView struct {
+	Enabled            bool                         `json:"enabled"`
+	Via                string                       `json:"via,omitempty"`
+	Routes             []types.LifecycleRoute       `json:"routes"`
+	PollInterval       string                       `json:"pollInterval,omitempty"`
+	IdleAfter          string                       `json:"idleAfter,omitempty"`
+	StageProgressAfter string                       `json:"stageProgressAfter,omitempty"`
+	Events             *types.LifecycleEventToggles `json:"events,omitempty"`
+}
+
+// InfraNotificationsView uses the same names as types.InfraNotificationsConfig
+// so the settings screen can safely send the redacted view back in a PATCH.
+type InfraNotificationsView struct {
+	Enabled      bool               `json:"enabled"`
+	Routes       []types.InfraRoute `json:"routes"`
+	PollInterval string             `json:"pollInterval,omitempty"`
+	RepeatAfter  string             `json:"repeatAfter,omitempty"`
 }
 
 type AuthView struct {
@@ -252,6 +324,8 @@ type SettingsPatch struct {
 	// MaxConcurrentClaws limits simultaneously running claws. 0 or omitted = unlimited.
 	// DEPRECATED: Use ConcurrencyGroups instead.
 	MaxConcurrentClaws *int `json:"maxConcurrentClaws,omitempty"`
+	// Notifications replaces the complete notifications configuration.
+	Notifications *types.NotificationsConfig `json:"notifications,omitempty"`
 }
 
 // MCPPatch is a request to add/update an MCP server config.
@@ -466,6 +540,9 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	view.ModelAuthProfiles = []ModelAuthProfileView{}
+	view.LifecycleEventTypes = append([]string(nil), types.LifecycleEventTypes...)
+	view.InfraEventTypes = append([]string(nil), types.InfraEventTypes...)
+	view.Notifications = buildNotificationsView(s.hubCfg.Notifications)
 	for _, profile := range s.hubCfg.ModelAuthProfiles {
 		if profile == nil {
 			continue
@@ -668,6 +745,397 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, view)
 }
 
+func buildNotificationsView(cfg *types.NotificationsConfig) *NotificationsView {
+	if cfg == nil {
+		return &NotificationsView{Notifiers: map[string]NotifierView{}, Scheduled: []ScheduledNotificationView{}}
+	}
+	view := &NotificationsView{
+		Notifiers: make(map[string]NotifierView, len(cfg.Notifiers)),
+		Scheduled: make([]ScheduledNotificationView, 0, len(cfg.Scheduled)),
+	}
+	for name, notifier := range cfg.Notifiers {
+		view.Notifiers[name] = NotifierView{
+			Type:            notifier.Type,
+			Channel:         notifierSettingString(notifier, "channel"),
+			TokenSecret:     notifierSettingString(notifier, "token_secret"),
+			APIBase:         notifierSettingString(notifier, "api_base"),
+			MinSendInterval: notifierSettingString(notifier, "min_send_interval"),
+		}
+	}
+	if lc := cfg.Lifecycle; lc != nil {
+		lifecycle := &LifecycleNotificationsView{
+			Enabled:            lc.IsEnabled(),
+			Via:                lc.Via,
+			Routes:             make([]types.LifecycleRoute, len(lc.Routes)),
+			PollInterval:       lc.PollInterval,
+			IdleAfter:          lc.IdleAfter,
+			StageProgressAfter: lc.StageProgressAfter,
+		}
+		for i, route := range lc.Routes {
+			lifecycle.Routes[i] = types.LifecycleRoute{Via: route.Via, Events: append([]string(nil), route.Events...)}
+		}
+		if lc.Events != nil {
+			events := *lc.Events
+			lifecycle.Events = &events
+		}
+		view.Lifecycle = lifecycle
+	}
+	if ic := cfg.Infra; ic != nil {
+		infra := &InfraNotificationsView{
+			Enabled: ic.IsEnabled(), Routes: make([]types.InfraRoute, len(ic.Routes)),
+			PollInterval: ic.PollInterval, RepeatAfter: ic.RepeatAfter,
+		}
+		for i, route := range ic.Routes {
+			infra.Routes[i] = types.InfraRoute{Via: route.Via, Events: append([]string(nil), route.Events...)}
+		}
+		view.Infra = infra
+	}
+	for _, scheduled := range cfg.Scheduled {
+		view.Scheduled = append(view.Scheduled, scheduledNotificationViewOf(scheduled))
+	}
+	return view
+}
+
+// scheduledNotificationViewOf projects one schedule into its settings view,
+// resolving the two defaults the screen cannot represent: an omitted `enabled`
+// is true, and an omitted `weekdays` is "every day", rendered as [].
+func scheduledNotificationViewOf(scheduled types.ScheduledNotificationConfig) ScheduledNotificationView {
+	return ScheduledNotificationView{
+		ID:     scheduled.ID,
+		Report: scheduled.Report,
+		// Never the config's own slice header: the settings screen PATCHes
+		// this view straight back, and aliasing would let a rejected save
+		// mutate the live config.
+		Via:      append([]string{}, scheduled.Via...),
+		At:       scheduled.At,
+		Timezone: scheduled.Timezone,
+		Weekdays: append([]string{}, scheduled.Weekdays...),
+		Enabled:  scheduled.Enabled == nil || *scheduled.Enabled,
+	}
+}
+
+func notifierSettingString(notifier types.NotifierConfig, key string) string {
+	value, _ := notifier.Settings[key].(string)
+	return value
+}
+
+// mergeNotifierSettings folds a patched notifier's settings over the ones
+// already in the config. GET /api/settings projects only a handful of settings
+// keys (see buildNotificationsView) and the settings screen rebuilds the whole
+// notifications block from that projection, so replacing the block outright
+// would silently drop every other key under notifications.notifiers.<name> the
+// first time an operator touches the screen.
+func mergeNotifierSettings(current, patch *types.NotificationsConfig) {
+	if current == nil || patch == nil {
+		return
+	}
+	for name, patched := range patch.Notifiers {
+		existing, ok := current.Notifiers[name]
+		if !ok || len(existing.Settings) == 0 {
+			continue
+		}
+		merged := make(map[string]any, len(existing.Settings)+len(patched.Settings))
+		for key, value := range existing.Settings {
+			merged[key] = value
+		}
+		for key, value := range patched.Settings {
+			merged[key] = value
+		}
+		patched.Settings = merged
+		patch.Notifiers[name] = patched
+	}
+}
+
+// validateSettingsNotifications checks the patched notifications block. The
+// provider-level "can this be built" check runs only on notifiers the patch
+// actually adds or changes: load-time validation (types.ValidateNotificationsConfig)
+// accepts a notifier this build refuses to construct, so a hub.yaml written by
+// hand — or by an older build — can hold one and run fine, logging "notifier
+// unavailable" per tick. The settings screen submits the whole notifier map on
+// every save, so failing the patch on such an entry would 400 every save from
+// the screen, including saves that touch an entirely different channel, with
+// no way to repair the offender from the UI. Whatever the operator does touch
+// is still checked, so this handler never persists a NEW broken notifier.
+func validateSettingsNotifications(current, cfg *types.NotificationsConfig) error {
+	// Notifier and lifecycle structure is validated on the whole patched
+	// block; the scheduled entries get the same structural checks per entry
+	// below, exempting stored ones the patch merely re-sends. A hand-written
+	// hub.yaml can hold a schedule the structural validator rejects (a
+	// "monday" weekday, a duplicated id) that the hub boots with and the
+	// screen re-sends verbatim on every save — and cannot repair: the edit
+	// dialog renders no chip for an invalid weekday and disables the id
+	// field, so validating stored entries here would 400 every save from the
+	// screen, including ones touching an unrelated channel.
+	if err := types.ValidateLifecycleNotificationsConfig(cfg); err != nil {
+		return err
+	}
+	// The infra block gets the same whole-block judgement: the infra tick
+	// gates on ValidateInfraNotificationsConfig and pauses every outage and
+	// provider-cap alert when it fails, with one log line as the only
+	// signal, so a defect must be refused here where the screen can show it.
+	if err := types.ValidateInfraNotificationsConfig(cfg); err != nil {
+		return err
+	}
+	for name, notifier := range cfg.Notifiers {
+		// Checked before the unchanged short-circuit and against the stored
+		// value key by key, so editing a notifier that already carries an
+		// api_base stays possible while introducing or changing one does not.
+		if err := validateNotifierAPIBase(current, name, notifier); err != nil {
+			return err
+		}
+		if notifierUnchanged(current, name, notifier) {
+			continue
+		}
+		if !notify.Supported(notifier.Type) {
+			return fmt.Errorf("notifications.notifiers.%s: unsupported notifier type %q", name, notifier.Type)
+		}
+		// The type's own required fields, checked here rather than at the first
+		// send: a notifier that cannot be built delivers nothing and says so
+		// only in the hub log, so a PATCH that persists one silently mutes
+		// every route pointing at it.
+		if err := notify.ValidateConfig(notifier.Type, notifierSettingsForValidation(current, name, notifier)); err != nil {
+			return fmt.Errorf("notifications.notifiers.%s: %w", name, err)
+		}
+	}
+	// Report names are checked only on schedules the patch adds or whose
+	// report it changes, for the same reason notifier construction is: the
+	// report registry is a property of THIS build, so a hub.yaml naming a
+	// report an older or newer binary carries is legitimate on disk (the
+	// scheduler logs "not registered" per tick and delivers nothing). The
+	// screen submits the whole scheduled list on every save, so failing on a
+	// stored entry would 400 every save — including the one that deletes the
+	// offender, and every other edit to the entry itself: pausing it (which
+	// the doctor's "pause before upgrading" guidance depends on), re-routing
+	// it, or moving its slot.
+	ids := make(map[string]int, len(cfg.Scheduled))
+	for _, scheduled := range cfg.Scheduled {
+		ids[scheduled.ID]++
+	}
+	storedIDs := map[string]int{}
+	if current != nil {
+		for _, scheduled := range current.Scheduled {
+			storedIDs[scheduled.ID]++
+		}
+	}
+	for i, scheduled := range cfg.Scheduled {
+		// A duplicate id the PATCH introduces is charged even when every copy
+		// individually reads as unchanged — two byte-identical re-sends of one
+		// stored entry (a client retry, a double-submit) satisfy
+		// scheduledEntryUnchanged and would otherwise persist the exact
+		// dedupe-row collision the scheduler tick's validity gate pauses every
+		// schedule over. Only patch-introduced duplication is charged (more
+		// copies of an id than the stored list holds): a stored hand-written
+		// duplicate is unrepairable from the screen (the id field is disabled
+		// in edit mode) and must not block unrelated saves.
+		if ids[scheduled.ID] > 1 && ids[scheduled.ID] > storedIDs[scheduled.ID] {
+			return fmt.Errorf("notifications.scheduled[%d]: id %q is duplicated", i, scheduled.ID)
+		}
+		if !scheduledEntryUnchanged(current, scheduled) {
+			if err := types.ValidateScheduledNotification(cfg, i); err != nil {
+				return err
+			}
+		}
+		if scheduledReportUnchanged(current, scheduled) {
+			continue
+		}
+		if !ScheduledReportSupported(scheduled.Report) {
+			return fmt.Errorf("notifications.scheduled[%d]: unknown report %q (supported: %s)",
+				i, scheduled.Report, scheduledReportNamesText())
+		}
+	}
+	return nil
+}
+
+// scheduledEntryUnchanged reports whether the patch re-sends a schedule
+// identical to one already stored under its id — the patch carries it, not
+// edits it — mirroring notifierUnchanged above. Both sides are compared
+// through their settings view so the two defaults the screen cannot express
+// (an omitted `enabled`, a nil weekday list) do not read back as edits.
+func scheduledEntryUnchanged(current *types.NotificationsConfig, patched types.ScheduledNotificationConfig) bool {
+	if current == nil {
+		return false
+	}
+	view := scheduledNotificationViewOf(patched)
+	for _, stored := range current.Scheduled {
+		if stored.ID == patched.ID && reflect.DeepEqual(scheduledNotificationViewOf(stored), view) {
+			return true
+		}
+	}
+	return false
+}
+
+// normalizeScheduledTimes rewrites each schedule's `at` in zero-padded HH:MM.
+//
+// time.Parse("15:04") accepts an unpadded "9:00", so a hand-written hub.yaml
+// can carry one and the scheduler runs it correctly — but the settings screen
+// binds `at` to an <input type="time">, which renders anything that is not
+// HH:MM as blank. Normalizing whatever a patch carries (including the stored
+// list carried forward above) repairs such an entry on the first save from any
+// client, rather than leaving it permanently uneditable from the screen. An
+// unparseable value is left alone for validation to reject by its real text.
+//
+// Runs AFTER validateSettingsNotifications: scheduledEntryUnchanged compares
+// the patch's text against the stored text, so normalizing first would turn a
+// carried-forward "9:00" into an apparent edit and subject an entry the
+// operator never touched to full validation. The dedupe digest is unaffected
+// either way — scheduledSlotDigest normalizes `at` itself.
+func normalizeScheduledTimes(cfg *types.NotificationsConfig) {
+	if cfg == nil {
+		return
+	}
+	for i, scheduled := range cfg.Scheduled {
+		parsed, err := time.Parse("15:04", strings.TrimSpace(scheduled.At))
+		if err != nil {
+			continue
+		}
+		cfg.Scheduled[i].At = parsed.Format("15:04")
+	}
+}
+
+// scheduledReportUnchanged reports whether a stored schedule under the same id
+// already names the patched schedule's report.
+//
+// Only the report field is compared: the check this gates is against the
+// report registry of THIS build, so every other edit to a stored schedule —
+// pausing it, re-routing it, moving its slot — must stay possible even when
+// the stored report is one this binary does not carry. Comparing the whole
+// schedule here once made exactly those edits 400 with "unknown report".
+func scheduledReportUnchanged(current *types.NotificationsConfig, patched types.ScheduledNotificationConfig) bool {
+	if current == nil {
+		return false
+	}
+	for _, stored := range current.Scheduled {
+		if stored.ID == patched.ID {
+			return stored.Report == patched.Report
+		}
+	}
+	return false
+}
+
+// scheduledReportNamesText lists the registered reports for error text.
+func scheduledReportNamesText() string {
+	names := scheduledReportNames()
+	if len(names) == 0 {
+		return "none"
+	}
+	return strings.Join(names, ", ")
+}
+
+// validateNotifierAPIBase refuses an api_base the patch introduces or changes
+// unless it addresses Slack over https. api_base decides where the notifier's
+// bot token is sent: a patch that keeps token_secret and repoints api_base at
+// an attacker-controlled host turns the next test send into token
+// exfiltration (and every send into an SSRF probe from the hub). The stored
+// value is exempt — an operator who wrote an internal Slack proxy into
+// hub.yaml keeps it, and the settings screen, which round-trips api_base
+// without rendering it, keeps saving — because hub.yaml is the operator's own
+// file while this handler is remote input. Repointing a live notifier is
+// therefore a hub.yaml edit, not an API call.
+func validateNotifierAPIBase(current *types.NotificationsConfig, name string, patched types.NotifierConfig) error {
+	apiBase := strings.TrimSpace(notifierSettingString(patched, "api_base"))
+	if apiBase == "" {
+		return nil
+	}
+	if current != nil {
+		if existing, ok := current.Notifiers[name]; ok && strings.TrimSpace(notifierSettingString(existing, "api_base")) == apiBase {
+			return nil
+		}
+	}
+	u, err := url.Parse(apiBase)
+	if err != nil {
+		return fmt.Errorf("notifications.notifiers.%s: api_base %q is not a valid URL", name, apiBase)
+	}
+	host := strings.ToLower(u.Hostname())
+	if u.Scheme != "https" || (host != "slack.com" && !strings.HasSuffix(host, ".slack.com")) {
+		return fmt.Errorf("notifications.notifiers.%s: api_base %q must be an https URL on slack.com — the notifier's bot token is sent to this host, so it cannot be repointed through the settings API", name, apiBase)
+	}
+	return nil
+}
+
+// notifierSettingsForValidation drops an api_base the patch merely carries over
+// from the stored config before the provider's own check runs on the merged
+// settings. validateNotifierAPIBase exempts the stored value deliberately — the
+// settings screen round-trips api_base without rendering it — but the provider
+// check judges it too, and a stored value this build refuses to construct (a
+// scheme-less host written by hand, or accepted by an older build) would then
+// reject every save that touches that channel, on a field the screen can
+// neither show nor clear: the same dead end the min_send_interval field exists
+// to prevent, with no way out but a hub.yaml edit. Dropping the key falls back
+// to the provider default, so only an api_base the patch itself introduces or
+// changes is judged — by validateNotifierAPIBase, which is the stricter check.
+func notifierSettingsForValidation(current *types.NotificationsConfig, name string, patched types.NotifierConfig) map[string]any {
+	apiBase := strings.TrimSpace(notifierSettingString(patched, "api_base"))
+	if apiBase == "" || current == nil {
+		return patched.Settings
+	}
+	existing, ok := current.Notifiers[name]
+	if !ok || strings.TrimSpace(notifierSettingString(existing, "api_base")) != apiBase {
+		return patched.Settings
+	}
+	settings := make(map[string]any, len(patched.Settings))
+	for key, value := range patched.Settings {
+		if key != "api_base" {
+			settings[key] = value
+		}
+	}
+	return settings
+}
+
+// dropRejectedLifecycleDurations clears a lifecycle poll_interval or
+// idle_after that the patch re-sends unchanged from the stored config and that
+// validation would reject anyway. Both are validated on every patch, floors
+// included and regardless of `enabled`, while the settings screen rebuilds the
+// whole notifications block from a view that renders neither field: a hub.yaml
+// holding "idle_after: 30s" would otherwise 400 every save made from that
+// screen — the master switch, a category toggle, adding a channel — on a value
+// the screen can neither show nor clear, leaving a hand edit of hub.yaml as the
+// only way out. The offender is dropped rather than preserved because it is
+// already inert: lifecycleNotifierTick refuses to run while the config fails
+// validation, so keeping it would trade an unusable screen for a healthy-
+// looking screen that still delivers nothing. A value the patch itself
+// introduces or edits is left alone and still fails the save.
+func dropRejectedLifecycleDurations(current, patch *types.NotificationsConfig) {
+	if patch == nil || patch.Lifecycle == nil || current == nil || current.Lifecycle == nil {
+		return
+	}
+	stored, lc := current.Lifecycle, patch.Lifecycle
+	if lc.PollInterval == stored.PollInterval && lifecycleDurationRejected(&types.LifecycleNotificationsConfig{PollInterval: lc.PollInterval}) {
+		lc.PollInterval = ""
+	}
+	if lc.IdleAfter == stored.IdleAfter && lifecycleDurationRejected(&types.LifecycleNotificationsConfig{IdleAfter: lc.IdleAfter}) {
+		lc.IdleAfter = ""
+	}
+	if lc.StageProgressAfter == stored.StageProgressAfter && lifecycleDurationRejected(&types.LifecycleNotificationsConfig{StageProgressAfter: lc.StageProgressAfter}) {
+		lc.StageProgressAfter = ""
+	}
+}
+
+// lifecycleDurationRejected asks the real validator whether a lone duration
+// passes, so the floors live in exactly one place. The probe is disabled
+// explicitly: both durations are validated above the `if !lc.IsEnabled()`
+// short-circuit, while an ENABLED probe carries neither `via` nor routes and
+// would be rejected for that instead — reporting every value, valid ones
+// included, as rejected and silently erasing the stored durations on every save.
+func lifecycleDurationRejected(probe *types.LifecycleNotificationsConfig) bool {
+	probe.Enabled = new(bool)
+	return types.ValidateNotificationsConfig(&types.NotificationsConfig{Lifecycle: probe}) != nil
+}
+
+// notifierUnchanged reports whether the patched notifier is byte-identical to
+// the one already stored under that name — the patch is re-sending it, not
+// editing it. Compared after mergeNotifierSettings, so a patch that only omits
+// keys the settings view does not project still counts as unchanged.
+func notifierUnchanged(current *types.NotificationsConfig, name string, patched types.NotifierConfig) bool {
+	if current == nil {
+		return false
+	}
+	existing, ok := current.Notifiers[name]
+	if !ok {
+		return false
+	}
+	return existing.Type == patched.Type && reflect.DeepEqual(existing.Settings, patched.Settings)
+}
+
 // buildGitHubAppView builds a GitHubAppView for the settings page, including
 // a live permission check if the private key is set.
 func (s *Server) buildGitHubAppView(ctx context.Context, app *types.GitHubAppConfig) GitHubAppView {
@@ -764,6 +1232,71 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 
 	// Shallow copy of config struct; maps and slices are deep-copied only when modified below
 	updatedCfg := *s.hubCfg
+
+	if patch.Notifications != nil {
+		// A settings patch is the migration point from legacy lifecycle.via
+		// to routes: a supplied route set always wins and is written alone.
+		// Gated on a NON-EMPTY route set, never on a non-nil slice:
+		// LifecycleNotificationsView always emits `routes` (as `[]` for a
+		// via-only config), so a client that GETs the view and PATCHes it back
+		// verbatim — the round trip the view's doc comment invites — would
+		// otherwise decode to an empty-but-present slice and silently destroy
+		// the only channel binding the hub has.
+		if patch.Notifications.Lifecycle != nil && len(patch.Notifications.Lifecycle.Routes) > 0 {
+			patch.Notifications.Lifecycle.Via = ""
+		}
+		// An ABSENT scheduled list carries the stored schedules forward. The
+		// settings view always emits `scheduled` (as [] when there are none),
+		// so a patch without the key comes from a client that never saw the
+		// field — an older screen, or a hand-written PATCH that only meant to
+		// touch notifiers — not from one asking to delete every schedule.
+		// Deleting is expressed as a present, shorter (possibly empty) list.
+		//
+		// This carry-forward is deliberately asymmetric: `notifiers` and
+		// `lifecycle` keep the block's pre-existing whole-replacement
+		// semantics (a patch with only `scheduled` still replaces them with
+		// whatever it carries, i.e. nothing). Every shipped client sends the
+		// whole notifications block, so nothing observable depends on
+		// carry-forward there yet — `scheduled` gets it only because it was
+		// added AFTER such clients existed, making an absent key genuinely
+		// mean "never saw the field". Extending carry-forward to the older
+		// keys would silently change what existing PATCHes do and belongs in
+		// its own change.
+		if patch.Notifications.Scheduled == nil && s.hubCfg.Notifications != nil {
+			patch.Notifications.Scheduled = append([]types.ScheduledNotificationConfig(nil), s.hubCfg.Notifications.Scheduled...)
+		}
+		if patch.Notifications.Infra == nil && s.hubCfg.Notifications != nil && s.hubCfg.Notifications.Infra != nil {
+			infra := *s.hubCfg.Notifications.Infra
+			infra.Routes = append([]types.InfraRoute(nil), infra.Routes...)
+			for i := range infra.Routes {
+				infra.Routes[i].Events = append([]string(nil), infra.Routes[i].Events...)
+			}
+			patch.Notifications.Infra = &infra
+		}
+		mergeNotifierSettings(s.hubCfg.Notifications, patch.Notifications)
+		dropRejectedLifecycleDurations(s.hubCfg.Notifications, patch.Notifications)
+		// Removals are judged first so a notifier an enabled infra route still
+		// names is refused as "still in use" — the message the screen shows
+		// for pipelines and schedules — rather than as the dangling-via
+		// structural error the same patch would also trip below.
+		// s.hubCfg.Factories is read directly: resolveFactories takes the lock
+		// this handler already holds.
+		if err := validateNotifierRemovals(s.hubCfg.Notifications, patch.Notifications, s.hubCfg.Factories); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if err := validateSettingsNotifications(s.hubCfg.Notifications, patch.Notifications); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		// AFTER validation on purpose: normalizing first rewrites the patch's
+		// `at` before scheduledEntryUnchanged compares it against the stored
+		// text, so a stored unpadded "9:00" plus any other structural defect
+		// would read as an edit and 400 every notifications save — the exact
+		// brick the unchanged-entry exemption exists to prevent.
+		normalizeScheduledTimes(patch.Notifications)
+		updatedCfg.Notifications = patch.Notifications
+	}
 
 	// LLM keys — upsert/delete by name
 	if len(patch.LLMKeys) > 0 {
@@ -1396,6 +1929,14 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 
 	// Only update in-memory config after successful disk write
 	s.hubCfg = &updatedCfg
+
+	// A deleted schedule's dedupe row must go NOW, not on the next minute
+	// tick: deleting and re-adding an id within one tick interval would
+	// otherwise inherit the stale row and replay a slot from before the new
+	// schedule existed (see pruneScheduledState).
+	if patch.Notifications != nil {
+		s.pruneScheduledState(updatedCfg.Notifications.Scheduled)
+	}
 
 	// If the concurrency limit was raised or removed, try to promote pending claws.
 	// This must run AFTER s.hubCfg is updated so promotePendingClaws reads the new limit.

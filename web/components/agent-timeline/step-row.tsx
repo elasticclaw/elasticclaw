@@ -15,6 +15,7 @@ import {
   Wrench,
 } from "lucide-react"
 import { cn } from "@/lib/utils"
+import { isSubagentStep } from "@/lib/subagents"
 import {
   formatDurationMs,
   type Step,
@@ -64,11 +65,19 @@ export function StepRow({
   step,
   density = "full",
   now,
+  onOpenSubagent,
 }: {
   step: Step
   density?: StepDensity
   /** Live clock (ms) — pass while the step is running so elapsed time ticks. */
   now?: number
+  /**
+   * Opt-in: when provided, a Task step becomes a link into the subagent
+   * drill-down instead of expanding its result inline. Only the chat view
+   * passes it — board cards and the run-logs dialog have nowhere to drill to,
+   * and keep the inline expansion untouched.
+   */
+  onOpenSubagent?: (stepId: string) => void
 }) {
   // Failed steps auto-expand until the user explicitly toggles them — full
   // density only: a board card cannot afford an error dump eating its height,
@@ -77,33 +86,45 @@ export function StepRow({
   const anchor = useToggleAnchor()
   const hasBody = Boolean(step.result || step.error)
   const isCard = density === "card"
-  const expanded = (userToggled ?? (step.status === "failed" && !isCard)) && hasBody
+  // isSubagentStep, not `category === "task"`: toolCategory maps Skill,
+  // TaskStop, spawn_task and anything matching /workflow|dispatch/ to "task"
+  // too, and those have no drill-down to open — they would trade their inline
+  // result for a chevron that does nothing.
+  const opensSubagent = Boolean(onOpenSubagent) && isSubagentStep(step)
+  const expanded = !opensSubagent && (userToggled ?? (step.status === "failed" && !isCard)) && hasBody
 
   const running = step.status === "running"
   const liveElapsed = running && now ? Math.max(0, now - step.startedAt.getTime()) : null
   const duration = liveElapsed ?? step.durationMs
   const showExit = typeof step.exitCode === "number" && step.exitCode !== 0
 
+  const activate: ((el: HTMLElement) => void) | null = opensSubagent
+    ? () => onOpenSubagent!(step.id)
+    : hasBody
+      ? (el) => {
+          anchor(el)
+          setUserToggled(!expanded)
+        }
+      : null
+  const interactive = opensSubagent || hasBody
+
   return (
     <div className={cn("border-l-2 pl-2", stepAccent(step))}>
       <div
-        role={hasBody ? "button" : undefined}
-        tabIndex={hasBody ? 0 : undefined}
+        role={interactive ? "button" : undefined}
+        tabIndex={interactive ? 0 : undefined}
+        aria-label={opensSubagent ? `Open subagent ${step.detail || step.title}` : undefined}
         onClick={
-          hasBody
-            ? (e) => {
-                anchor(e.currentTarget as HTMLElement)
-                setUserToggled(!expanded)
-              }
+          activate
+            ? (e) => activate(e.currentTarget as HTMLElement)
             : undefined
         }
         onKeyDown={
-          hasBody
+          activate
             ? (e) => {
                 if (e.key === "Enter" || e.key === " ") {
                   e.preventDefault()
-                  anchor(e.currentTarget as HTMLElement)
-                  setUserToggled(!expanded)
+                  activate(e.currentTarget as HTMLElement)
                 }
               }
             : undefined
@@ -112,7 +133,8 @@ export function StepRow({
           "grid grid-cols-[auto_1fr_auto] items-baseline gap-x-2",
           isCard ? "py-0.5" : "py-1",
           // 44px tap target for expandable rows on touch screens
-          hasBody && "cursor-pointer rounded-sm hover:bg-muted/30 max-md:min-h-11 max-md:items-center"
+          interactive && "cursor-pointer rounded-sm hover:bg-muted/30 max-md:min-h-11 max-md:items-center",
+          opensSubagent && "focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-ring"
         )}
       >
         <span className="self-center">
@@ -157,7 +179,7 @@ export function StepRow({
               {formatDurationMs(duration)}
             </span>
           )}
-          {hasBody && (
+          {interactive && (
             <ChevronRight className={cn("size-3 text-muted-foreground/50 transition-transform", expanded && "rotate-90")} />
           )}
         </span>
@@ -194,18 +216,21 @@ export function StepList({
   items,
   density = "full",
   now,
+  onOpenSubagent,
 }: {
   items: StepListItem[]
   density?: StepDensity
   now?: number
+  /** Opt-in Task-step drill-down; see StepRow. */
+  onOpenSubagent?: (stepId: string) => void
 }) {
   return (
     <div className={cn(density === "card" ? "space-y-0" : "space-y-0.5")}>
       {items.map((item) =>
         item.type === "step" ? (
-          <StepRow key={item.step.id} step={item.step} density={density} now={now} />
+          <StepRow key={item.step.id} step={item.step} density={density} now={now} onOpenSubagent={onOpenSubagent} />
         ) : (
-          <StepGroupRow key={item.id} id={item.id} label={item.label} steps={item.steps} density={density} now={now} />
+          <StepGroupRow key={item.id} id={item.id} label={item.label} steps={item.steps} density={density} now={now} onOpenSubagent={onOpenSubagent} />
         )
       )}
     </div>
@@ -218,12 +243,14 @@ function StepGroupRow({
   steps,
   density,
   now,
+  onOpenSubagent,
 }: {
   id: string
   label: string
   steps: Step[]
   density: StepDensity
   now?: number
+  onOpenSubagent?: (stepId: string) => void
 }) {
   const [expanded, setExpanded] = useState(false)
   const anchor = useToggleAnchor()
@@ -258,7 +285,7 @@ function StepGroupRow({
       {expanded && (
         <div className={cn(density === "card" ? "space-y-0" : "space-y-0.5")}>
           {steps.map((step) => (
-            <StepRow key={step.id} step={step} density={density} now={now} />
+            <StepRow key={step.id} step={step} density={density} now={now} onOpenSubagent={onOpenSubagent} />
           ))}
         </div>
       )}

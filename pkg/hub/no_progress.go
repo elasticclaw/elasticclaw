@@ -13,6 +13,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/elasticclaw/elasticclaw/pkg/hub/pipeline"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 )
 
@@ -25,7 +26,11 @@ var commitMarkerPattern = regexp.MustCompile(`(?i)\b[0-9a-f]{7,40}\b`)
 // latest outcomes are substantially the same and that state has not changed.
 // This is deliberately progress-based rather than a lifetime or turn limit.
 func (s *Server) observeCompletedTurn(clawID, messageID, content string) bool {
-	if strings.Contains(content, "[DONE]") || strings.Contains(content, "[TERMINATE]") {
+	// Anchored, like every other signal test in the hub. A turn that merely
+	// mentions a token has not signalled anything and must not buy itself
+	// immunity from the no-progress check — an agent repeating "I can't send
+	// [DONE] yet" every turn is the exact shape this watchdog exists to catch.
+	if pipeline.MessageSignals(content, doneSignalToken) || pipeline.MessageSignals(content, terminateSignalToken) {
 		return false
 	}
 	s.noProgressMu.Lock()
@@ -125,6 +130,9 @@ func (s *Server) resumeNoProgressAfterUserInput(clawID string) {
 	if cc != nil {
 		cc.mu.Lock()
 		cc.noProgressPaused = false
+		// A human intervened, so the bridge-error streak starts over too: the
+		// next pause should again cost bridgeErrorPauseThreshold turns, not one.
+		cc.bridgeErrorStreak = 0
 		cc.mu.Unlock()
 	}
 	if changed, _ := res.RowsAffected(); changed > 0 {
@@ -202,18 +210,21 @@ func (s *Server) turnProgressFingerprint(clawID, response string) (string, error
 	}
 	parts = append(parts, "stage="+stage)
 
-	rows, err := s.db.Query(`SELECT repo, pr_number, last_ci_sha, last_ci_conclusion, last_comment_id, last_comment_at, last_review_comment_id, last_review_id, pr_conditions_fired FROM claw_prs WHERE claw_id=? ORDER BY repo, pr_number`, clawID)
+	// state/merged are part of the fingerprint: resolved rows survive in
+	// claw_prs until the claw is finalized, so a merge or close no longer
+	// changes the row set — only these columns make it visible as progress.
+	rows, err := s.db.Query(`SELECT repo, pr_number, state, merged, last_ci_sha, last_ci_conclusion, last_comment_id, last_comment_at, last_review_comment_id, last_review_id, pr_conditions_fired, last_mergeable_state FROM claw_prs WHERE claw_id=? ORDER BY repo, pr_number`, clawID)
 	if err != nil {
 		return "", fmt.Errorf("query tracked pull requests: %w", err)
 	}
 	for rows.Next() {
-		var repo, ciSHA, ciConclusion, commentAt string
-		var number, commentID, reviewCommentID, reviewID, conditions int
-		if err := rows.Scan(&repo, &number, &ciSHA, &ciConclusion, &commentID, &commentAt, &reviewCommentID, &reviewID, &conditions); err != nil {
+		var repo, prState, ciSHA, ciConclusion, commentAt, mergeableState string
+		var number, prMerged, commentID, reviewCommentID, reviewID, conditions int
+		if err := rows.Scan(&repo, &number, &prState, &prMerged, &ciSHA, &ciConclusion, &commentID, &commentAt, &reviewCommentID, &reviewID, &conditions, &mergeableState); err != nil {
 			rows.Close()
 			return "", fmt.Errorf("scan tracked pull request: %w", err)
 		}
-		parts = append(parts, fmt.Sprintf("pr=%s#%d:%s:%s:%d:%s:%d:%d:%d", repo, number, ciSHA, ciConclusion, commentID, commentAt, reviewCommentID, reviewID, conditions))
+		parts = append(parts, fmt.Sprintf("pr=%s#%d:%s:%d:%s:%s:%d:%s:%d:%d:%d:%s", repo, number, prState, prMerged, ciSHA, ciConclusion, commentID, commentAt, reviewCommentID, reviewID, conditions, mergeableState))
 	}
 	if err := rows.Err(); err != nil {
 		rows.Close()
@@ -278,4 +289,43 @@ func responseProgressMarkers(content string) []string {
 	}
 	sort.Strings(markers)
 	return markers
+}
+
+// pauseAutomaticContinuation latches the SAME no_progress_paused stop that
+// observeCompletedTurn uses, for a caller that already knows the claw must
+// stop. It exists so a second stop reason (bridge transport errors, NEXT-725)
+// reuses the existing latch — column, in-memory flag, every
+// `cc.noProgressPaused` delivery gate, and resumeNoProgressAfterUserInput —
+// instead of adding a second pause mechanism that those gates would have to
+// learn about one by one.
+//
+// It reports whether THIS call performed the pause: an already-paused claw
+// returns false so the caller does not notify a human twice about a claw that
+// is already stopped. Both writers take noProgressMu, so an observation tick
+// and a bridge error cannot both think they were the one to latch.
+func (s *Server) pauseAutomaticContinuation(clawID, notice string) bool {
+	s.noProgressMu.Lock()
+	defer s.noProgressMu.Unlock()
+
+	res, err := s.db.Exec(`UPDATE claws SET no_progress_paused=1 WHERE id=? AND COALESCE(no_progress_paused,0)=0`, clawID)
+	if err != nil {
+		log.Printf("[no-progress] pause claw %s: %v", shortID(clawID), err)
+		return false
+	}
+	changed, _ := res.RowsAffected()
+	if changed == 0 {
+		return false
+	}
+	s.mu.RLock()
+	cc := s.claws[clawID]
+	s.mu.RUnlock()
+	if cc != nil {
+		cc.mu.Lock()
+		cc.noProgressPaused = true
+		cc.mu.Unlock()
+	}
+	if notice != "" {
+		s.publishHubNotice(clawID, notice)
+	}
+	return true
 }

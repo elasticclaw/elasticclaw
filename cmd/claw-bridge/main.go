@@ -51,6 +51,7 @@ import (
 	"nhooyr.io/websocket/wsjson"
 
 	"github.com/elasticclaw/elasticclaw/pkg/cliversion"
+	"github.com/elasticclaw/elasticclaw/pkg/types"
 	_ "modernc.org/sqlite"
 )
 
@@ -65,6 +66,10 @@ var (
 		session      *gatewaySession
 	}
 	gatewayRestartBase int
+	// These diagnostics fire once per dropped/event frame and must not flood the
+	// diagnostics log when a gateway emits a busy foreign or task stream.
+	foreignSessionDiagnosticCount atomic.Int64
+	taskPayloadDiagnosticCount    atomic.Int64
 )
 
 // agentTurnTimeout bounds one agent turn. A turn spans an entire injected hub
@@ -144,14 +149,16 @@ const (
 type queuedKind int
 
 const (
-	queuedInput  queuedKind = iota // user message not yet processed
-	queuedReply                    // completed agent reply awaiting delivery
-	queuedNotice                   // error notice to surface to the hub
+	queuedInput   queuedKind = iota // user message not yet processed
+	queuedReply                     // completed agent reply awaiting delivery
+	queuedNotice                    // error notice to surface to the hub
+	queuedControl                   // recovery edge awaiting delivery to the hub
 )
 
 type queuedMsg struct {
 	kind     queuedKind
 	content  string
+	control  hubMsg
 	queuedAt time.Time
 }
 
@@ -230,6 +237,15 @@ func (q *msgQueue) pushReply(content string) {
 	q.enqueueLocked(queuedMsg{kind: queuedReply, content: content, queuedAt: time.Now()})
 }
 
+// pushControl queues a recovery edge that could not be written. It must be
+// replayed before its empty reply: the hub only continues a preserved session
+// after seeing this edge, while the reply alone is intentionally discarded.
+func (q *msgQueue) pushControl(msg hubMsg) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.enqueueLocked(queuedMsg{kind: queuedControl, control: msg, queuedAt: time.Now()})
+}
+
 // requeue re-inserts an entry preserving its original queuedAt (used when a
 // queued reply/notice fails to deliver again).
 func (q *msgQueue) requeue(m queuedMsg) {
@@ -268,14 +284,20 @@ func (q *msgQueue) drain() []queuedMsg {
 	return out
 }
 
-// replayQueued delivers queued entries after reconnect. Completed replies and
-// notices are written directly to the hub; only unprocessed inputs re-run a turn.
-func replayQueued(queue *msgQueue, deliver func(role, content string) error, runTurn func(content string)) {
+// replayQueued delivers queued entries after reconnect. Completed replies,
+// notices, and recovery edges are written directly to the hub; only unprocessed
+// inputs re-run a turn.
+func replayQueued(queue *msgQueue, deliver func(role, content string) error, deliverControl func(hubMsg) error, runTurn func(content string)) {
 	for _, m := range queue.drain() {
 		switch m.kind {
 		case queuedReply, queuedNotice:
 			if err := deliver("claw", m.content); err != nil {
 				log.Printf("[bridge] replay deliver failed, re-queuing: %v", err)
+				queue.requeue(m)
+			}
+		case queuedControl:
+			if err := deliverControl(m.control); err != nil {
+				log.Printf("[bridge] replay recovery edge failed, re-queuing: %v", err)
 				queue.requeue(m)
 			}
 		default: // queuedInput
@@ -804,20 +826,24 @@ type agentResult struct {
 }
 
 type agentActivity struct {
-	Kind       string `json:"kind"`
-	Stream     string `json:"stream,omitempty"`
-	Phase      string `json:"phase,omitempty"`
-	Tool       string `json:"tool,omitempty"`
-	Detail     string `json:"detail,omitempty"`
-	Command    string `json:"command,omitempty"`
-	Path       string `json:"path,omitempty"`
-	URL        string `json:"url,omitempty"`
-	Message    string `json:"message,omitempty"`
-	Error      string `json:"error,omitempty"`
-	CallID     string `json:"call_id,omitempty"`
-	DurationMs int64  `json:"duration_ms,omitempty"`
-	ExitCode   *int   `json:"exit_code,omitempty"`
-	Result     string `json:"result,omitempty"`
+	Kind           string `json:"kind"`
+	Stream         string `json:"stream,omitempty"`
+	Phase          string `json:"phase,omitempty"`
+	Tool           string `json:"tool,omitempty"`
+	Detail         string `json:"detail,omitempty"`
+	Command        string `json:"command,omitempty"`
+	Path           string `json:"path,omitempty"`
+	URL            string `json:"url,omitempty"`
+	Message        string `json:"message,omitempty"`
+	Error          string `json:"error,omitempty"`
+	CallID         string `json:"call_id,omitempty"`
+	DurationMs     int64  `json:"duration_ms,omitempty"`
+	ExitCode       *int   `json:"exit_code,omitempty"`
+	Result         string `json:"result,omitempty"`
+	SubagentName   string `json:"subagent_name,omitempty"`
+	SubagentType   string `json:"subagent_type,omitempty"`
+	SubagentModel  string `json:"subagent_model,omitempty"`
+	SubagentPrompt string `json:"subagent_prompt,omitempty"`
 }
 
 // inFlightToolCall is an unresolved tool start awaiting its terminal event.
@@ -1007,6 +1033,10 @@ func cleanAgentActivity(a agentActivity) agentActivity {
 	a.Message = sanitizeActivityText(a.Message)
 	a.Error = sanitizeActivityText(a.Error)
 	a.CallID = sanitizeActivityText(a.CallID)
+	a.SubagentName = sanitizeActivityText(a.SubagentName)
+	a.SubagentType = sanitizeActivityText(a.SubagentType)
+	a.SubagentModel = sanitizeActivityText(a.SubagentModel)
+	a.SubagentPrompt = sanitizeActivityTextLimit(truncateResult(a.SubagentPrompt, 500), 0)
 	// Truncate before redacting: results can be megabytes of tool output, and
 	// the redaction scan lowercases the remaining string once per replacer. A
 	// secret split by the cut still redacts — the prefix match runs to
@@ -1099,6 +1129,12 @@ type gatewaySession struct {
 	sessionCancel context.CancelFunc
 
 	reconnectMu sync.Mutex
+
+	// onSessionReplaced reports a reconnect that had to create a fresh session
+	// and therefore lost the transcript. runHubLoop installs it for the active
+	// hub connection; it is nil during startup and in focused tests.
+	onSessionReplacedMu sync.Mutex
+	onSessionReplaced   func()
 
 	// pending req/res tracking (reqID → response channel)
 	pendMu  sync.Mutex
@@ -1200,6 +1236,21 @@ func (gs *gatewaySession) setSessionKey(key string) {
 	gs.infMu.RUnlock()
 	if inf != nil {
 		deliverInFlight(inf, agentResult{err: fmt.Errorf("gateway session key rotated")})
+	}
+}
+
+func (gs *gatewaySession) setOnSessionReplaced(fn func()) {
+	gs.onSessionReplacedMu.Lock()
+	gs.onSessionReplaced = fn
+	gs.onSessionReplacedMu.Unlock()
+}
+
+func (gs *gatewaySession) notifySessionReplaced() {
+	gs.onSessionReplacedMu.Lock()
+	fn := gs.onSessionReplaced
+	gs.onSessionReplacedMu.Unlock()
+	if fn != nil {
+		fn()
 	}
 }
 
@@ -1392,17 +1443,17 @@ func (gs *gatewaySession) createFreshSessionOnConn(ctx context.Context, conn *we
 	return nil
 }
 
-func (gs *gatewaySession) reconnectGateway(ctx context.Context, expectedOld *websocket.Conn) (bool, error) {
+func (gs *gatewaySession) reconnectGateway(ctx context.Context, expectedOld *websocket.Conn) (reconnected bool, replacedSession bool, err error) {
 	gs.reconnectMu.Lock()
 	defer gs.reconnectMu.Unlock()
 
 	if expectedOld != nil && !gs.isCurrentConn(expectedOld) {
-		return false, nil
+		return false, false, nil
 	}
 
 	conn, err := gs.client.connectToGateway(ctx)
 	if err != nil {
-		return false, err
+		return false, false, err
 	}
 	installed := false
 	defer func() {
@@ -1418,22 +1469,22 @@ func (gs *gatewaySession) reconnectGateway(ctx context.Context, expectedOld *web
 		} else {
 			log.Printf("[gateway] re-subscribe failed after reconnect: %v", err)
 			if !isMissingGatewaySessionError(err) {
-				return false, err
+				return false, false, err
 			}
 			if err := gs.createFreshSessionOnConn(ctx, conn, "gateway reconnect"); err != nil {
-				return false, err
+				return false, false, err
 			}
 			createdFresh = true
 		}
 	} else {
 		if err := gs.createFreshSessionOnConn(ctx, conn, "gateway reconnect"); err != nil {
-			return false, err
+			return false, false, err
 		}
 		createdFresh = true
 	}
 
 	if expectedOld != nil && !gs.isCurrentConn(expectedOld) {
-		return false, nil
+		return false, false, nil
 	}
 	gs.failPendingRequests(fmt.Errorf("gateway disconnected"))
 	gs.connMu.Lock()
@@ -1447,14 +1498,14 @@ func (gs *gatewaySession) reconnectGateway(ctx context.Context, expectedOld *web
 	if createdFresh {
 		gs.setReady()
 	}
-	return true, nil
+	return true, createdFresh, nil
 }
 
-func (gs *gatewaySession) reconnectGatewayWithTimeout(ctx context.Context, expectedOld *websocket.Conn, timeout time.Duration) (bool, error) {
+func (gs *gatewaySession) reconnectGatewayWithTimeout(ctx context.Context, expectedOld *websocket.Conn, timeout time.Duration) (reconnected bool, replacedSession bool, err error) {
 	reconnectCtx, cancel := context.WithTimeout(ctx, timeout)
-	reconnected, err := gs.reconnectGateway(reconnectCtx, expectedOld)
+	reconnected, replacedSession, err = gs.reconnectGateway(reconnectCtx, expectedOld)
 	cancel()
-	return reconnected, err
+	return reconnected, replacedSession, err
 }
 
 // readLoop reads frames from the gateway forever, dispatching responses to
@@ -1496,7 +1547,7 @@ func (gs *gatewaySession) readLoop(ctx context.Context) {
 				if !gs.isCurrentConn(conn) {
 					break
 				}
-				_, err := gs.reconnectGatewayWithTimeout(ctx, conn, gatewayReconnectTimeout)
+				_, replacedSession, err := gs.reconnectGatewayWithTimeout(ctx, conn, gatewayReconnectTimeout)
 				if err != nil {
 					if !gs.isCurrentConn(conn) {
 						break
@@ -1504,6 +1555,9 @@ func (gs *gatewaySession) readLoop(ctx context.Context) {
 					log.Printf("[gateway] reconnect failed: %v — retrying in 5s", err)
 					time.Sleep(5 * time.Second)
 					continue
+				}
+				if replacedSession {
+					gs.notifySessionReplaced()
 				}
 				log.Printf("[gateway] reconnected and re-subscribed")
 				break
@@ -1548,13 +1602,27 @@ func (gs *gatewaySession) readLoop(ctx context.Context) {
 			if err := json.Unmarshal(frame.Payload, &agentPayload); err != nil {
 				continue
 			}
+			if agentPayload.SessionKey != gs.getSessionKey() {
+				// Avoid unmarshalling every foreign frame once the diagnostic cap is
+				// exhausted; this branch can be hit at high volume.
+				if takeDiagnosticSlot(&foreignSessionDiagnosticCount) {
+					var rawAgentPayload struct {
+						Data map[string]interface{} `json:"data"`
+					}
+					_ = json.Unmarshal(frame.Payload, &rawAgentPayload)
+					log.Printf("claw-bridge: foreign-session event key=%s stream=%s tool=%s phase=%s keys=%s",
+						sanitizeActivityText(agentPayload.SessionKey),
+						sanitizeActivityText(agentPayload.Stream),
+						sanitizeActivityText(firstNonEmpty(agentPayload.Data.Tool, agentPayload.Data.Name)),
+						sanitizeActivityText(agentPayload.Data.Phase),
+						strings.Join(sortedMapKeys(rawAgentPayload.Data), ","))
+				}
+				continue
+			}
 			var rawAgentPayload struct {
 				Data map[string]interface{} `json:"data"`
 			}
 			_ = json.Unmarshal(frame.Payload, &rawAgentPayload)
-			if agentPayload.SessionKey != gs.getSessionKey() {
-				continue
-			}
 
 			gs.infMu.RLock()
 			inf := gs.inFlight
@@ -1591,18 +1659,23 @@ func (gs *gatewaySession) readLoop(ctx context.Context) {
 				url := firstNonEmpty(agentPayload.Data.URL, agentPayload.Data.URI, nestedString(rawAgentPayload.Data, "url", "uri"))
 				meta := firstNonEmpty(agentPayload.Data.Meta, nestedString(rawAgentPayload.Data, "meta"))
 				command, path, url, detail := resolveToolActivityDetail(tool, command, path, url, meta, rawAgentPayload.Data)
+				subagentName, subagentType, subagentModel, subagentPrompt := resolveSubagentFields(tool, agentPayload.Data.Phase, rawAgentPayload.Data)
 				activity := agentActivity{
-					Kind:    kind,
-					Stream:  agentPayload.Stream,
-					Phase:   agentPayload.Data.Phase,
-					Tool:    tool,
-					Detail:  detail,
-					Command: command,
-					Path:    path,
-					URL:     url,
-					Message: firstNonEmpty(agentPayload.Data.Message, agentPayload.Data.Status),
-					Error:   agentPayload.Data.Error,
-					CallID:  toolCallID(rawAgentPayload.Data),
+					Kind:           kind,
+					Stream:         agentPayload.Stream,
+					Phase:          agentPayload.Data.Phase,
+					Tool:           tool,
+					Detail:         detail,
+					Command:        command,
+					Path:           path,
+					URL:            url,
+					Message:        firstNonEmpty(agentPayload.Data.Message, agentPayload.Data.Status),
+					Error:          agentPayload.Data.Error,
+					CallID:         toolCallID(rawAgentPayload.Data),
+					SubagentName:   subagentName,
+					SubagentType:   subagentType,
+					SubagentModel:  subagentModel,
+					SubagentPrompt: subagentPrompt,
 				}
 				// Outcome fields exist only once the call finished. Scraping them
 				// from start events would surface tool *inputs* (e.g. a Write's
@@ -1615,6 +1688,12 @@ func (gs *gatewaySession) readLoop(ctx context.Context) {
 				activity = cleanAgentActivity(activity)
 				if kind == "tool" && activity.Command == "" && activity.Path == "" && activity.URL == "" && activity.Detail == "" {
 					logMissingToolActivityDetail(agentPayload.Stream, activity.Phase, activity.Tool, rawAgentPayload.Data)
+				}
+				if isSubagentTool(activity.Tool) && takeDiagnosticSlot(&taskPayloadDiagnosticCount) {
+					log.Printf("[agent-activity] task payload stream=%s phase=%s tool=%s keys=%s payload=%s",
+						sanitizeActivityText(agentPayload.Stream), sanitizeActivityText(activity.Phase),
+						sanitizeActivityText(activity.Tool), strings.Join(sortedMapKeys(rawAgentPayload.Data), ","),
+						summarizeActivityPayload(rawAgentPayload.Data))
 				}
 				inf.noteActivity(activity)
 				inf.emitActivity(activity)
@@ -1646,6 +1725,64 @@ func firstNonEmpty(values ...string) string {
 		if value != "" {
 			return value
 		}
+	}
+	return ""
+}
+
+func takeDiagnosticSlot(counter *atomic.Int64) bool {
+	for {
+		current := counter.Load()
+		if current >= 20 {
+			return false
+		}
+		if counter.CompareAndSwap(current, current+1) {
+			return true
+		}
+	}
+}
+
+func isSubagentTool(tool string) bool {
+	switch strings.ToLower(strings.TrimSpace(tool)) {
+	case "task", "agent", "subagent":
+		return true
+	}
+	return false
+}
+
+// resolveSubagentFields extracts the subagent's *inputs* (name, type, model,
+// prompt). Terminal events carry the call's outcome in generic fields such as
+// data.message or data.title, so on those phases only keys that unambiguously
+// name an input are consulted — otherwise a status line like "Task completed"
+// would be stored and rendered as the prompt given to the subagent.
+func resolveSubagentFields(tool, phase string, data map[string]interface{}) (name, subType, model, prompt string) {
+	if !isSubagentTool(tool) {
+		return "", "", "", ""
+	}
+	nameKeys := []string{"description", "title", "label", "name"}
+	promptKeys := []string{"prompt", "instructions", "task", "message"}
+	if isToolTerminalPhase(phase) {
+		nameKeys = []string{"description"}
+		promptKeys = []string{"prompt", "instructions"}
+	}
+	name = resolveSubagentField(tool, data, nameKeys)
+	prompt = resolveSubagentField(tool, data, promptKeys)
+	subType = nestedString(data, "subagent_type", "subagentType", "agent_type", "agentType")
+	model = nestedString(data, "model", "model_id", "modelId")
+	return name, subType, model, prompt
+}
+
+// resolveSubagentField consults the candidate keys one at a time so a key
+// holding only the generic tool name ("Task") is skipped instead of discarding
+// the real value carried by a later key or a nested container. Passing all keys
+// to nestedString at once would let a generic top-level field (data.message)
+// shadow the real value nested in data.input.
+func resolveSubagentField(tool string, data map[string]interface{}, keys []string) string {
+	for _, key := range keys {
+		candidate := nestedString(data, key)
+		if candidate == "" || strings.EqualFold(strings.TrimSpace(candidate), strings.TrimSpace(tool)) {
+			continue
+		}
+		return candidate
 	}
 	return ""
 }
@@ -1970,6 +2107,96 @@ func (gs *gatewaySession) refreshContextUsage(ctx context.Context) {
 	gs.ctxMu.Unlock()
 }
 
+// countActiveSubagents extracts, from a sessions.list response, how many
+// spawned subagent sessions currently have a run in flight. Subagent sessions
+// are recognised by the ":subagent:" marker in their key — the agent-id half
+// of the key varies across OpenClaw versions (there is an upstream issue about
+// exactly that), the marker does not. Only an explicit hasActiveRun=true
+// counts: a missing field is "no information", and activeRunIds is
+// deliberately not consulted at all — it may be absent or empty even while
+// hasActiveRun is true, so its absence must never be read as "idle".
+//
+// A payload without a sessions index at all is an error, not zero: zero is a
+// positive "nothing running" claim the hub acts on, and it must never be
+// fabricated from a response shape we did not understand.
+func countActiveSubagents(payload []byte) (int, error) {
+	var parsed struct {
+		Sessions *[]struct {
+			Key          string `json:"key"`
+			HasActiveRun *bool  `json:"hasActiveRun"`
+		} `json:"sessions"`
+	}
+	if err := json.Unmarshal(payload, &parsed); err != nil {
+		return 0, fmt.Errorf("unmarshal sessions.list response: %w", err)
+	}
+	if parsed.Sessions == nil {
+		return 0, fmt.Errorf("sessions.list response carries no sessions index")
+	}
+	count := 0
+	sawAnyKey := false
+	for _, row := range *parsed.Sessions {
+		if row.Key != "" {
+			sawAnyKey = true
+		}
+		if strings.Contains(row.Key, ":subagent:") && row.HasActiveRun != nil && *row.HasActiveRun {
+			count++
+		}
+	}
+	// A non-empty index in which no row carried a key is the row-level version
+	// of the shape problem above: the gateway is telling us about sessions in
+	// a vocabulary we do not speak (the upstream key-shape drift again), so
+	// zero here would be fabricated, not observed.
+	if len(*parsed.Sessions) > 0 && !sawAnyKey {
+		return 0, fmt.Errorf("sessions.list rows carry no recognisable key")
+	}
+	return count, nil
+}
+
+// subagentHeartbeatFields turns one subagent-activity poll into the optional
+// heartbeat fields and a log-line suffix. The contract the hub depends on:
+// both fields are present iff the poll actually succeeded — a not-ready
+// gateway or any poll error yields nil, so the hub sees "no information"
+// rather than a fabricated "nothing running" (which it would treat as
+// positive evidence and clear its suppression state). failLogged quiets the
+// error log after the first miss, since an older gateway without
+// sessions.list would otherwise fail every heartbeat forever; a success
+// re-arms it.
+func subagentHeartbeatFields(gatewayReady bool, poll func() (int, error), failLogged *bool) (map[string]interface{}, string) {
+	if !gatewayReady {
+		return nil, ""
+	}
+	count, err := poll()
+	if err != nil {
+		if !*failLogged {
+			log.Printf("[heartbeat] subagent activity poll failed (quieting until it recovers): %v", err)
+			*failLogged = true
+		}
+		return nil, ""
+	}
+	*failLogged = false
+	fields := map[string]interface{}{
+		"subagents_active":      count > 0,
+		"subagent_active_count": count,
+	}
+	return fields, fmt.Sprintf(" subagents_active=%v subagent_active_count=%d", count > 0, count)
+}
+
+// pollSubagentActivity polls sessions.list and reports how many spawned
+// subagent sessions have a run in flight. Best-effort, same shape as
+// refreshContextUsage: bounded per-call context, and the caller logs and moves
+// on. The hub uses the result to tell "parked on sessions_yield while spawned
+// work runs" apart from a genuine stall, which per-session turn state cannot
+// see (subagent activity does not make the parent session busy).
+func (gs *gatewaySession) pollSubagentActivity(ctx context.Context) (int, error) {
+	pollCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	resp, err := gs.sendReq(pollCtx, "sessions.list", map[string]interface{}{})
+	if err != nil {
+		return 0, err
+	}
+	return countActiveSubagents(resp.Payload)
+}
+
 // ContextUsage returns the last-known context window usage percentage (0-100).
 func (gs *gatewaySession) ContextUsage() int {
 	gs.ctxMu.RLock()
@@ -2160,8 +2387,7 @@ func (gs *gatewaySession) createFreshSession(ctx context.Context, reason string)
 	return nil
 }
 
-func (gs *gatewaySession) abortActiveSession(ctx context.Context) error {
-	key := gs.getSessionKey()
+func (gs *gatewaySession) abortSession(ctx context.Context, key string) error {
 	if key == "" {
 		return nil
 	}
@@ -2171,10 +2397,43 @@ func (gs *gatewaySession) abortActiveSession(ctx context.Context) error {
 	return nil
 }
 
+// probeSession verifies that the existing persistent session remains usable
+// without sending another turn. It is deliberately read-only: a lifecycle
+// failure can happen after OpenClaw accepted the original message, so replaying
+// it could duplicate tool side effects.
+func (gs *gatewaySession) probeSession(ctx context.Context, key string) error {
+	if key == "" {
+		return fmt.Errorf("cannot probe session without a session key")
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	_, err := gs.sendReq(probeCtx, "sessions.describe", map[string]string{"key": key})
+	return err
+}
+
 // providerRequestFormatErrorFragment is emitted by OpenClaw when a provider
 // rejects the assembled request schema or tool payload. Session recovery
 // depends on this upstream compatibility string, so keep the coupling explicit.
 const providerRequestFormatErrorFragment = "provider rejected the request schema or tool payload"
+
+const (
+	sessionRotatedErrorSuffix   = "OpenClaw session reset so the next message can continue"
+	sessionPreservedErrorSuffix = "OpenClaw session preserved; the turn was aborted but its history is intact"
+)
+
+// sessionPreservedError records the session that a read-only probe verified.
+// The key is checked again immediately before notifying the hub because a
+// concurrent reconnect may replace the session after SendMessage returns.
+type sessionPreservedError struct {
+	err error
+	key string
+}
+
+func (e *sessionPreservedError) Error() string {
+	return fmt.Sprintf("%v; %s", e.err, sessionPreservedErrorSuffix)
+}
+
+func (e *sessionPreservedError) Unwrap() error { return e.err }
 
 func isRecoverableSessionSendError(err error) bool {
 	var sendErr *sessionSendRequestError
@@ -2215,8 +2474,8 @@ func isRecoverableSessionLifecycleError(err error) bool {
 
 // isSessionFileLockConflictError detects OpenClaw's "session file changed while
 // embedded prompt lock was released" error. That error indicates the on-disk
-// session transcript was modified unexpectedly, leaving the persistent session
-// in an inconsistent state. Rotating to a fresh session is the only recovery.
+// session transcript was modified unexpectedly. A read-only probe determines
+// whether the persistent session survived before recovery discards it.
 func isSessionFileLockConflictError(err error) bool {
 	if err == nil {
 		return false
@@ -2235,6 +2494,12 @@ func isSessionFileLockConflictError(err error) bool {
 // would discard. A variable so tests can shorten it.
 var sessionLockConflictRetryDelays = []time.Duration{500 * time.Millisecond, time.Second, 2 * time.Second, 4 * time.Second}
 
+// sessionMismatchCheckHook is a test seam invoked right before SendMessage
+// checks the turn key against the current session key in its lock-conflict
+// recovery path. Tests can override it to land a concurrent rotation exactly
+// inside that otherwise-unhittable-by-timing window. A no-op in production.
+var sessionMismatchCheckHook = func() {}
+
 // isSessionRotatedError reports whether SendMessage recovered from a session
 // lock conflict by rotating to a fresh session. In that case the original turn
 // cannot be completed, but the next hub message can continue. The bridge should
@@ -2242,10 +2507,82 @@ var sessionLockConflictRetryDelays = []time.Duration{500 * time.Millisecond, tim
 // workflow pipeline), but it should still close the turn so the hub drains the
 // next queued message.
 func isSessionRotatedError(err error) bool {
-	if err == nil {
-		return false
+	return err != nil && strings.Contains(err.Error(), sessionRotatedErrorSuffix) && !strings.Contains(err.Error(), sessionPreservedErrorSuffix)
+}
+
+// isSessionPreservedError reports a read-only probe confirmed that a mid-turn
+// lock conflict did not discard the persistent transcript.
+func isSessionPreservedError(err error) bool {
+	return err != nil && strings.Contains(err.Error(), sessionPreservedErrorSuffix) && !strings.Contains(err.Error(), sessionRotatedErrorSuffix)
+}
+
+func preservedSessionKey(err error) (string, bool) {
+	var preserved *sessionPreservedError
+	if errors.As(err, &preserved) {
+		return preserved.key, true
 	}
-	return strings.Contains(err.Error(), "OpenClaw session reset so the next message can continue")
+	return "", false
+}
+
+// sessionRecoveryOutcome decides which hub edge a finished turn's error maps
+// to. currentKey is read at emit time: a readLoop reconnect can rotate the
+// session after SendMessage decided the session survived, and announcing
+// "history intact" into a fresh empty session would tell the agent to
+// continue work it cannot see.
+func sessionRecoveryOutcome(agentErr error, currentKey string) string {
+	if preservedKey, ok := preservedSessionKey(agentErr); ok {
+		if preservedKey == currentKey {
+			return "preserved"
+		}
+		return "rotated"
+	}
+	if isSessionRotatedError(agentErr) {
+		return "rotated"
+	}
+	return ""
+}
+
+func reportSessionRecovery(agentErr error, reply *string, gwSession *gatewaySession, writeActivity func(agentActivity), writeHub func(hubMsg) error, queue *msgQueue) bool {
+	currentKey := gwSession.getSessionKey()
+	outcome := sessionRecoveryOutcome(agentErr, currentKey)
+	if outcome == "preserved" {
+		writeActivity(agentActivity{Kind: "session_preserved", Message: fmt.Sprintf("OpenClaw session preserved after lock conflict; continuing from intact history (%v)", agentErr)})
+		*reply = ""
+		// This check and notification cannot be atomic without holding the session
+		// lock across a network write. A reconnect can still replace the session in
+		// this tiny gap; that is acceptable because continuation prompts require git
+		// status before repeating work, while locking during I/O would be riskier.
+		edge := hubMsg{Type: "session_preserved"}
+		if err := writeHub(edge); err != nil {
+			log.Printf("[bridge] recovery edge write failed, queuing for replay: %v", err)
+			queue.pushControl(edge)
+		}
+	} else if outcome == "rotated" {
+		activityMessage := fmt.Sprintf("OpenClaw session rotated to recover from lock conflict; waiting for next message (%v)", agentErr)
+		if preservedKey, ok := preservedSessionKey(agentErr); ok && preservedKey != currentKey {
+			activityMessage = fmt.Sprintf("OpenClaw session was replaced by a concurrent reconnect after lock conflict; waiting for next message (%v)", agentErr)
+		}
+		writeActivity(agentActivity{Kind: "session_rotated", Message: activityMessage})
+		*reply = ""
+		keyPayload, _ := json.Marshal(map[string]string{"session_key": gwSession.getSessionKey()})
+		edge := hubMsg{Type: "session_rotated", Payload: keyPayload}
+		if err := writeHub(edge); err != nil {
+			log.Printf("[bridge] recovery edge write failed, queuing for replay: %v", err)
+			queue.pushControl(edge)
+		}
+	}
+	return outcome != ""
+}
+
+func sessionLockConflictProbeBudget() time.Duration {
+	var budget time.Duration
+	for range sessionLockConflictRetryDelays {
+		budget += 5 * time.Second
+	}
+	for _, delay := range sessionLockConflictRetryDelays {
+		budget += delay
+	}
+	return budget + 5*time.Second
 }
 
 // SendMessage sends a user message to the persistent session, streams chunks
@@ -2260,7 +2597,11 @@ func (gs *gatewaySession) SendMessage(ctx context.Context, message string, onChu
 	lockConflictRetries := 0
 	for attempt := 0; ; attempt++ {
 		conn := gs.currentConn()
-		reply, err := gs.sendMessageOnce(ctx, message, onChunk, onActivity)
+		// Anchor the session to the turn when it is sent. readLoop can replace
+		// the session without sendMu; announcing intact history for a different
+		// session would tell the agent to continue work it cannot see.
+		turnKey := gs.getSessionKey()
+		reply, err := gs.sendMessageOnce(ctx, turnKey, message, onChunk, onActivity)
 		// Retry only failures from the initial sessions.send request. Once the
 		// request is accepted, chunks may already be visible to the UI, so stream
 		// or lifecycle errors must not replay the turn.
@@ -2282,12 +2623,15 @@ func (gs *gatewaySession) SendMessage(ctx context.Context, message string, onChu
 				return "", ctxErr
 			}
 			reconnectCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-			reconnected, reconnectErr := gs.reconnectGateway(reconnectCtx, conn)
+			reconnected, replacedSession, reconnectErr := gs.reconnectGateway(reconnectCtx, conn)
 			cancel()
 			if reconnectErr != nil {
 				return "", fmt.Errorf("%w; gateway reconnect failed: %v", err, reconnectErr)
 			}
 			if reconnected {
+				if replacedSession {
+					gs.notifySessionReplaced()
+				}
 				gatewayRetried = true
 				log.Printf("[gateway] retrying message after reconnecting closed gateway connection")
 			} else {
@@ -2299,8 +2643,9 @@ func (gs *gatewaySession) SendMessage(ctx context.Context, message string, onChu
 		// was never accepted, so replaying the same message on the same session
 		// is safe. The previous turn is likely still flushing its session file;
 		// back off and retry before considering rotation, which would discard
-		// the transcript. Mid-turn lifecycle lock conflicts are excluded above:
-		// those turns may already have side effects and must not be retried.
+		// the transcript. Mid-turn lifecycle lock conflicts are handled below
+		// with read-only probes only: those turns may already have side effects
+		// and must not be retried.
 		var sendReqErr *sessionSendRequestError
 		if errors.As(err, &sendReqErr) && isSessionFileLockConflictError(err) && lockConflictRetries < len(sessionLockConflictRetryDelays) {
 			delay := sessionLockConflictRetryDelays[lockConflictRetries]
@@ -2314,11 +2659,53 @@ func (gs *gatewaySession) SendMessage(ctx context.Context, message string, onChu
 			continue
 		}
 		if isRecoverableSessionLifecycleError(err) {
+			// Test seam: lets tests land a concurrent rotation exactly between
+			// the turn's lifecycle error and this mismatch check, which is
+			// otherwise a window too narrow to hit reliably by timing alone.
+			// No-op in production.
+			sessionMismatchCheckHook()
+			if isSessionFileLockConflictError(err) && gs.getSessionKey() != turnKey {
+				return reply, fmt.Errorf("%w; %s", err, sessionRotatedErrorSuffix)
+			}
 			abortCtx, abortCancel := context.WithTimeout(context.Background(), 5*time.Second)
-			abortErr := gs.abortActiveSession(abortCtx)
+			abortErr := gs.abortSession(abortCtx, turnKey)
 			abortCancel()
 			if abortErr != nil {
 				log.Printf("[session] failed to abort poisoned session before recovery: %v", abortErr)
+			}
+			if isSessionFileLockConflictError(err) {
+				origKey := turnKey
+				// Recovery must finish even when the accepted turn's deadline has
+				// elapsed: it only performs read-only probes, then establishes a
+				// continuation edge without replaying that turn.
+				probeCtx, probeCancel := context.WithTimeout(context.Background(), sessionLockConflictProbeBudget())
+				for probeAttempt, delay := range sessionLockConflictRetryDelays {
+					log.Printf("[gateway] mid-turn session file lock conflict; probing same session after %s (attempt %d/%d): %v", delay, probeAttempt+1, len(sessionLockConflictRetryDelays), err)
+					select {
+					case <-time.After(delay):
+					case <-probeCtx.Done():
+						break
+					}
+					if probeCtx.Err() != nil {
+						break
+					}
+					if gs.getSessionKey() != origKey {
+						probeCancel()
+						return reply, fmt.Errorf("%w; %s", err, sessionRotatedErrorSuffix)
+					}
+					if probeErr := gs.probeSession(probeCtx, origKey); probeErr == nil {
+						if gs.getSessionKey() != origKey {
+							probeCancel()
+							return reply, fmt.Errorf("%w; %s", err, sessionRotatedErrorSuffix)
+						}
+						probeCancel()
+						log.Printf("[session] preserved session after mid-turn lock conflict")
+						return reply, &sessionPreservedError{err: err, key: origKey}
+					} else {
+						log.Printf("[session] probe after mid-turn lock conflict failed: %v", probeErr)
+					}
+				}
+				probeCancel()
 			}
 			recoveryCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			resetErr := gs.createFreshSession(recoveryCtx, err.Error())
@@ -2326,19 +2713,25 @@ func (gs *gatewaySession) SendMessage(ctx context.Context, message string, onChu
 			if resetErr != nil {
 				return reply, fmt.Errorf("%w; session recovery failed: %v", err, resetErr)
 			}
-			return reply, fmt.Errorf("%w; OpenClaw session reset so the next message can continue", err)
+			return reply, fmt.Errorf("%w; %s", err, sessionRotatedErrorSuffix)
 		}
 		// Same-session retries exhausted: rotate as a last resort and surface
 		// the reset error instead of silently replaying, so the hub injects a
 		// resume prompt with task context into the fresh session.
 		if errors.As(err, &sendReqErr) && isSessionFileLockConflictError(err) {
+			abortCtx, abortCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			abortErr := gs.abortSession(abortCtx, turnKey)
+			abortCancel()
+			if abortErr != nil {
+				log.Printf("[session] failed to abort session before recovery after exhausted retries: %v", abortErr)
+			}
 			recoveryCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			resetErr := gs.createFreshSession(recoveryCtx, err.Error())
 			cancel()
 			if resetErr != nil {
 				return "", fmt.Errorf("%w; session recovery failed: %v", err, resetErr)
 			}
-			return "", fmt.Errorf("%w; OpenClaw session reset so the next message can continue", err)
+			return "", fmt.Errorf("%w; %s", err, sessionRotatedErrorSuffix)
 		}
 		if !isRecoverableSessionSendError(err) {
 			return reply, err
@@ -2355,11 +2748,11 @@ func (gs *gatewaySession) SendMessage(ctx context.Context, message string, onChu
 		}
 
 		log.Printf("[session] retrying message in fresh session after recoverable error")
-		return gs.sendMessageOnce(ctx, message, onChunk, onActivity)
+		return gs.sendMessageOnce(ctx, gs.getSessionKey(), message, onChunk, onActivity)
 	}
 }
 
-func (gs *gatewaySession) sendMessageOnce(ctx context.Context, message string, onChunk func(string), onActivity func(agentActivity)) (string, error) {
+func (gs *gatewaySession) sendMessageOnce(ctx context.Context, turnKey, message string, onChunk func(string), onActivity func(agentActivity)) (string, error) {
 	inf := &inFlightState{
 		onChunk:    onChunk,
 		onActivity: onActivity,
@@ -2376,7 +2769,7 @@ func (gs *gatewaySession) sendMessageOnce(ctx context.Context, message string, o
 
 	// Send the message
 	_, err := gs.sendReq(ctx, "sessions.send", map[string]string{
-		"key":     gs.getSessionKey(),
+		"key":     turnKey,
 		"message": message,
 	})
 	if err != nil {
@@ -3361,6 +3754,14 @@ func syncStagedWorkspaceToOpenClawWorkspace() error {
 type bootstrapRepoAccess struct {
 	Repo        string `json:"repo"`
 	Permissions string `json:"permissions"`
+	Clone       *bool  `json:"clone,omitempty"`
+}
+
+func shouldCloneRepo(repo bootstrapRepoAccess) bool {
+	if repo.Clone != nil && !*repo.Clone {
+		return false
+	}
+	return true
 }
 
 func configuredGitHubRepos() ([]bootstrapRepoAccess, error) {
@@ -3391,6 +3792,40 @@ func repoDirectoryName(repo string) string {
 	return strings.TrimSuffix(name, ".git")
 }
 
+func dockerGitHubCredentialHelperBinary(tokenEndpoint string) string {
+	return strings.ReplaceAll(`#!/bin/sh
+set -eu
+claw_token="${ELASTICCLAW_CLAW_TOKEN:-}"
+if [ -z "$claw_token" ]; then
+  echo "ELASTICCLAW_CLAW_TOKEN is required for GitHub credentials" >&2
+  exit 1
+fi
+# Git credential helpers receive the target URL as key=value lines on stdin.
+# Extract the path so we can ask the hub for a token scoped to this repo.
+repo=""
+while IFS= read -r line && [ -n "$line" ]; do
+  case "$line" in
+    path=*)
+      repo="${line#path=}"
+      repo="${repo%.git}"
+      repo="${repo#/}"
+      ;;
+  esac
+done
+response="$(curl -sS --max-time 35 --get --data-urlencode "claw_token=$claw_token" ${repo:+--data-urlencode "repo=$repo"} __TOKEN_ENDPOINT__)"
+token="$(printf '%s' "$response" | sed -n 's/.*"token"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
+if [ -z "$token" ]; then
+  echo "GitHub token response did not include token" >&2
+  printf '%s\n' "$response" >&2
+  exit 1
+fi
+printf 'protocol=https\n'
+printf 'host=github.com\n'
+printf 'username=x-access-token\n'
+printf 'password=%s\n' "$token"
+`, "__TOKEN_ENDPOINT__", shellQuote(tokenEndpoint))
+}
+
 func dockerGitHubCredentialHelperScript(tokenEndpoint string) string {
 	return fmt.Sprintf(`set -euo pipefail
 if ! command -v git >/dev/null 2>&1; then
@@ -3411,31 +3846,16 @@ mkdir -p "$helper_dir"
 old_umask="$(umask)"
 umask 0077
 cat > "$helper_path" << 'CREDEOF'
-#!/bin/sh
-set -eu
-claw_token="${ELASTICCLAW_CLAW_TOKEN:-}"
-if [ -z "$claw_token" ]; then
-  echo "ELASTICCLAW_CLAW_TOKEN is required for GitHub credentials" >&2
-  exit 1
-fi
-response="$(curl -sS --max-time 35 --get --data-urlencode "claw_token=$claw_token" %s)"
-token="$(printf '%%s' "$response" | sed -n 's/.*"token"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
-if [ -z "$token" ]; then
-  echo "GitHub token response did not include token" >&2
-  printf '%%s\n' "$response" >&2
-  exit 1
-fi
-printf 'protocol=https\n'
-printf 'host=github.com\n'
-printf 'username=x-access-token\n'
-printf 'password=%%s\n' "$token"
+%s
 CREDEOF
 umask "$old_umask"
 chmod 0700 "$helper_path"
 git config --global --unset-all credential.helper >/dev/null 2>&1 || true
 git config --global credential.helper "!$helper_path"
+git config --global credential.useHttpPath true
 git config --global --get-all credential.helper | grep -Fx "!$helper_path" >/dev/null
-helper_check="$("$helper_path" 2>&1)" || {
+# Feed the helper a minimal credential request so it reads stdin and exits cleanly.
+helper_check="$(printf 'protocol=https\nhost=github.com\n\n' | "$helper_path" 2>&1)" || {
   echo "GitHub credential helper failed during bootstrap:" >&2
   printf '%%s\n' "$helper_check" >&2
   exit 1
@@ -3456,7 +3876,7 @@ credential_check="$(printf 'protocol=https\nhost=github.com\n\n' | GIT_TERMINAL_
 }
 printf '%%s\n' "$credential_check" | grep -Fx 'username=x-access-token' >/dev/null
 printf '%%s\n' "$credential_check" | grep -E '^password=.' >/dev/null
-`, shellQuote(tokenEndpoint))
+`, dockerGitHubCredentialHelperBinary(tokenEndpoint))
 }
 
 func installDockerGitHubCredentialHelper() error {
@@ -3491,6 +3911,9 @@ func dockerGitHubCloneScript(workspaceDir string, repos []bootstrapRepoAccess) s
 	fmt.Fprintf(&b, "cd %s\n", shellQuote(workspaceDir))
 	b.WriteString("git config --global --get credential.helper >/dev/null\n")
 	for _, repo := range repos {
+		if isRepositoryPattern(repo.Repo) || !shouldCloneRepo(repo) {
+			continue
+		}
 		dir := repoDirectoryName(repo.Repo)
 		cloneURL := "https://github.com/" + repo.Repo + ".git"
 		fmt.Fprintf(&b, "echo %s\n", shellQuote("[bootstrap] cloning "+repo.Repo+" into "+dir))
@@ -3499,6 +3922,10 @@ func dockerGitHubCloneScript(workspaceDir string, repos []bootstrapRepoAccess) s
 		fmt.Fprintf(&b, "test -d %s\n", shellQuote(filepath.Join(dir, ".git")))
 	}
 	return b.String()
+}
+
+func isRepositoryPattern(repo string) bool {
+	return strings.ContainsAny(repo, "*?[")
 }
 
 func cloneConfiguredGitHubRepos() error {
@@ -4562,13 +4989,8 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 				writeActivity(activity)
 			})
 			if agentErr != nil {
-				if isSessionRotatedError(agentErr) {
-					writeActivity(agentActivity{Kind: "session_rotated", Message: fmt.Sprintf("OpenClaw session rotated to recover from lock conflict; waiting for next message (%v)", agentErr)})
-					reply = ""
-					// Notify the hub so it can inject a resume prompt with context.
-					_ = writeHub(hubMsg{Type: "session_rotated"})
-				} else {
-					reply = fmt.Sprintf("⚠️ error: %v", agentErr)
+				if !reportSessionRecovery(agentErr, &reply, gwSession, writeActivity, writeHub, queue) {
+					reply = fmt.Sprintf("%s %v", types.BridgeReplayErrorPrefix, agentErr)
 				}
 			}
 			if writeErr := deliver("claw", reply); writeErr != nil {
@@ -4579,7 +5001,7 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 			}
 		}(content)
 	}
-	replayQueued(queue, deliver, runTurn)
+	replayQueued(queue, deliver, writeHub, runTurn)
 
 	// Wire up the HTTP proxy send function for this connection
 	proxy.mu.Lock()
@@ -4588,6 +5010,25 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 	}
 	proxy.mu.Unlock()
 
+	// Capture this connection's writer. If this hub connection has died by the
+	// time a gateway reconnect replaces the session, the callback queues the
+	// edge for replay instead of writing through a newer connection implicitly.
+	gwSession.setOnSessionReplaced(func() {
+		activityMessage := "OpenClaw session was replaced after gateway reconnect; waiting for the hub to resume the task"
+		writeActivity(agentActivity{Kind: "session_rotated", Message: activityMessage})
+		keyPayload, _ := json.Marshal(map[string]string{"session_key": gwSession.getSessionKey()})
+		edge := hubMsg{Type: "session_rotated", Payload: keyPayload}
+		if err := writeHub(edge); err != nil {
+			log.Printf("[bridge] session replacement edge write failed, queuing for replay: %v", err)
+			queue.pushControl(edge)
+		}
+	})
+
+	// Heartbeats run on a single goroutine (the ticker in startHubKeepalives),
+	// so this needs no lock. It quiets the sessions.list failure log after the
+	// first miss: an older gateway without the method would otherwise fail
+	// every 15s forever.
+	subagentPollFailLogged := false
 	startHubKeepalives(connCtx, func(pingCtx context.Context) error {
 		pingCtx, cancel := context.WithTimeout(pingCtx, 10*time.Second)
 		defer cancel()
@@ -4611,11 +5052,20 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 		cu := gwSession.ContextUsage()
 		usage := gwSession.Usage()
 		restarts := gatewayRestartBase + gatewayRestartCount()
-		log.Printf("[heartbeat] sending: gateway_healthy=%v gateway_ready=%v context_usage=%d%% restart_count=%d", health, gwSession.IsReady(), cu, restarts)
+		// Best-effort subagent activity: subagentHeartbeatFields returns both
+		// fields only for a successful poll, so on any failure (RPC error,
+		// method not found on an older gateway, unparseable payload) the hub
+		// falls back to judging idleness without them, rather than being fed
+		// a fabricated "nothing running".
+		subagentFields, subagentLog := subagentHeartbeatFields(gwSession.IsReady(), func() (int, error) {
+			return gwSession.pollSubagentActivity(connCtx)
+		}, &subagentPollFailLogged)
+		log.Printf("[heartbeat] sending: gateway_healthy=%v gateway_ready=%v context_usage=%d%% restart_count=%d%s", health, gwSession.IsReady(), cu, restarts, subagentLog)
 		heartbeatPayload := map[string]interface{}{"gateway_healthy": health, "gateway_ready": gwSession.IsReady(), "context_usage": cu, "restart_count": restarts}
-		if usage.sessionKey != "" {
-			heartbeatPayload["session_key"] = usage.sessionKey
+		for k, v := range subagentFields {
+			heartbeatPayload[k] = v
 		}
+		addHeartbeatSessionKeys(heartbeatPayload, usage.sessionKey, gwSession.getSessionKey())
 		if usage.inputTokens != nil {
 			heartbeatPayload["input_tokens"] = usage.inputTokens
 		}
@@ -4689,13 +5139,8 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 				})
 				if agentErr != nil {
 					log.Printf("[bridge] ✗ agent error: %v", agentErr)
-					if isSessionRotatedError(agentErr) {
-						writeActivity(agentActivity{Kind: "session_rotated", Message: fmt.Sprintf("OpenClaw session rotated to recover from lock conflict; waiting for next message (%v)", agentErr)})
-						reply = ""
-						// Notify the hub so it can inject a resume prompt with context.
-						_ = writeHub(hubMsg{Type: "session_rotated"})
-					} else {
-						reply = fmt.Sprintf("⚠️ claw-bridge error: %v", agentErr)
+					if !reportSessionRecovery(agentErr, &reply, gwSession, writeActivity, writeHub, queue) {
+						reply = fmt.Sprintf("%s %v", types.BridgeErrorPrefix, agentErr)
 					}
 				} else {
 					log.Printf("[bridge] ← openclaw: %q", reply[:min(len(reply), 120)])
@@ -4746,6 +5191,18 @@ func runHubLoop(ctx context.Context, wsURL, clawID, clawName, templateName, toke
 		default:
 			// ignore unknown message types
 		}
+	}
+}
+
+// addHeartbeatSessionKeys keeps the usage snapshot and the live gateway
+// identity separate. The hub uses only gateway_session_key for session-loss
+// detection, since sessions.describe may be stale while a gateway recovers.
+func addHeartbeatSessionKeys(payload map[string]interface{}, snapshotKey, gatewayKey string) {
+	if snapshotKey != "" {
+		payload["session_key"] = snapshotKey
+	}
+	if gatewayKey != "" {
+		payload["gateway_session_key"] = gatewayKey
 	}
 }
 

@@ -30,7 +30,8 @@ stages:
 
         Read the issue and README.md, then start working on the issue.
         Narrate your progress as you go. Keep me updated.
-        When implementation is complete and before committing, say [READY_TO_COMMIT].
+        When implementation is complete and before committing, reply with `[READY_TO_COMMIT]`
+        on the first line. The hub reads the signal only when the token opens a line.
 
   - id: pre_commit
     label: Pre-Commit Checks
@@ -44,7 +45,8 @@ stages:
       inject: |
         Review the pre-commit check output.
         Fix issues you agree with.
-        When fixes are complete, create the final commit and PR, then say [DONE].
+        When fixes are complete, create the final commit and PR, then reply with `[DONE]` on
+        the first line and list the PR URL after it.
 
   - id: pr_opened
     label: PR Opened

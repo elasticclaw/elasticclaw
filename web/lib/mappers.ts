@@ -106,6 +106,7 @@ export function mapApiClaw(
     tags: overrides.tags ?? (apiClaw.tags ?? []),
     color: overrides.color ?? (apiClaw.color || autoColor(apiClaw.name)),
     contextUsage: overrides.contextUsage ?? apiClaw.context_usage ?? 0,
+    openPrCount: overrides.openPrCount ?? apiClaw.open_pr_count ?? 0,
     description: overrides.description,
     reason: overrides.reason,
     bootstrap_status: overrides.bootstrap_status ?? apiClaw.bootstrap_status,
@@ -117,6 +118,7 @@ export function mapApiClaw(
     last_seen: apiClaw.last_seen,
     created_at: apiClaw.created_at,
     tenant_id: apiClaw.tenant_id,
+    llm_limited_until: overrides.llm_limited_until ?? apiClaw.llm_limited_until,
   }
 }
 
@@ -143,5 +145,6 @@ export function mapApiMessage(apiMsg: ApiMessage): Message {
     timestamp: new Date(apiMsg.created_at),
     claw_id: apiMsg.claw_id,
     tenant_id: apiMsg.tenant_id,
+    userLogin: apiMsg.user_login,
   }
 }

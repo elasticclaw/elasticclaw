@@ -186,7 +186,7 @@ func TestWorkflowHarness_GitHubIssuePrecommit(t *testing.T) {
 	bridge.WaitForMessage(t, "[READY_TO_COMMIT]", 5*time.Second)
 
 	// Fake agent: ready to commit
-	bridge.SendMessage("I've implemented the feature. [READY_TO_COMMIT]")
+	bridge.SendMessage("I've implemented the feature.\n\n[READY_TO_COMMIT]")
 
 	// Wait for pre-commit stage inject (after run command)
 	bridge.WaitForMessage(t, "Pre-commit checks passed", 5*time.Second)
@@ -224,7 +224,7 @@ func TestWorkflowHarness_RunFailsStop(t *testing.T) {
 	bridge.WaitForMessage(t, "Starting workflow", 5*time.Second)
 
 	// Fake agent: proceed to run-fail stage
-	bridge.SendMessage("Proceeding. [PROCEED]")
+	bridge.SendMessage("Proceeding.\n\n[PROCEED]")
 
 	// The run action fails (failing provider), so the inject message should NOT appear.
 	// Wait briefly to ensure the inject is NOT sent.
@@ -257,7 +257,7 @@ func TestWorkflowHarness_DeterministicGatePass(t *testing.T) {
 	bridge.WaitForMessage(t, "Initial plan required", 5*time.Second)
 	bridge.WaitForMessage(t, "Starting deterministic validation", 5*time.Second)
 
-	bridge.SendMessage("Ready for validation. [DONE]")
+	bridge.SendMessage("Ready for validation.\n\n[DONE]")
 
 	bridge.WaitForMessage(t, "Gate passed: Validation", 5*time.Second)
 	bridge.WaitForMessage(t, "No issues found. Workflow complete.", 5*time.Second)
@@ -279,14 +279,14 @@ func TestWorkflowHarness_DeterministicGateRetryLoop(t *testing.T) {
 	bridge.WaitForMessage(t, "Initial plan required", 5*time.Second)
 	bridge.WaitForMessage(t, "Starting deterministic validation", 5*time.Second)
 
-	bridge.SendMessage("Ready for validation. [DONE]")
+	bridge.SendMessage("Ready for validation.\n\n[DONE]")
 
 	bridge.WaitForMessage(t, "Gate failed: Validation", 5*time.Second)
 	bridge.WaitForMessage(t, "1 issue found. Apply the deterministic fix and say [RETRY].", 5*time.Second)
 	assertGateVerdict(t, ts, clawID, "validation", "fail")
 	assertPipelineStage(t, ts, clawID, "fix")
 
-	bridge.SendMessage("Retrying after deterministic fix. [RETRY]")
+	bridge.SendMessage("Retrying after deterministic fix.\n\n[RETRY]")
 
 	bridge.WaitForMessage(t, "Gate passed: Validation", 5*time.Second)
 	bridge.WaitForMessage(t, "No issues found. Workflow complete.", 5*time.Second)
@@ -311,7 +311,7 @@ func TestWorkflowHarness_RunFailsContinue(t *testing.T) {
 	bridge.WaitForMessage(t, "Starting workflow", 5*time.Second)
 
 	// Fake agent: proceed to run-fail-continue stage
-	bridge.SendMessage("Proceeding. [PROCEED]")
+	bridge.SendMessage("Proceeding.\n\n[PROCEED]")
 
 	// Wait for the warning message about the failed run
 	bridge.WaitForMessage(t, "Workflow command failed", 5*time.Second)
@@ -348,7 +348,7 @@ func TestWorkflowHarness_LinearMoveIssue(t *testing.T) {
 	bridge.WaitForMessage(t, "[READY_FOR_REVIEW]", 5*time.Second)
 
 	// Fake agent: ready for review
-	bridge.SendMessage("Ready for review. [READY_FOR_REVIEW]")
+	bridge.SendMessage("Ready for review.\n\n[READY_FOR_REVIEW]")
 
 	// Wait for terminal inject
 	bridge.WaitForMessage(t, "Issue moved to In Review", 5*time.Second)

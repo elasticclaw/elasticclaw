@@ -28,6 +28,7 @@ import { noteOutput } from "@/hooks/use-last-output"
 export interface HubState {
   claws: Claw[]
   dependencies: DependencyStatus[]
+  limitedDependencies: DependencyStatus[]
   downtimeDependencies: DependencyStatus[]
   messages: Record<string, Message[]>
   streamingBuffers: Record<string, TypewriterState>
@@ -393,7 +394,8 @@ export function useHub(selectedClawId: string | null): HubState {
             mergedSeen.add(m.id)
             return true
           }),
-          MAX_LIVE_ACTIVITIES_PER_CLAW
+          MAX_LIVE_ACTIVITIES_PER_CLAW,
+          clawId
         )
         // Timestamp sort with a role tie-break: a summary is stamped with the
         // newest activity it covers, so on equal times it must land AFTER the
@@ -531,11 +533,14 @@ export function useHub(selectedClawId: string | null): HubState {
           const { claw_id, content } = payload
           noteOutput(claw_id)
           pushChunk(claw_id, content)
-          setClaws((prev) =>
-            prev.map((c) =>
-                c.id === claw_id ? { ...c, isStreaming: true } : c
+          setClaws((prev) => {
+            const claw = prev.find((c) => c.id === claw_id)
+            if (!claw || claw.isStreaming) return prev
+
+            return prev.map((c) =>
+              c.id === claw_id ? { ...c, isStreaming: true } : c
             )
-          )
+          })
         } else if (type === "agent_activity") {
           const clawId = payload.claw_id
           if (!clawId) return
@@ -554,6 +559,10 @@ export function useHub(selectedClawId: string | null): HubState {
             duration_ms: payload.duration_ms,
             exit_code: payload.exit_code,
             result: payload.result,
+            subagent_name: payload.subagent_name,
+            subagent_type: payload.subagent_type,
+            subagent_model: payload.subagent_model,
+            subagent_prompt: payload.subagent_prompt,
           }
           if (isUnhelpfulActivity(activity)) return
           noteOutput(clawId)
@@ -582,16 +591,18 @@ export function useHub(selectedClawId: string | null): HubState {
               activity,
               timestamp: createdAt,
             })
-            const pruned = pruneOldestLiveActivities(nextMessages, MAX_LIVE_ACTIVITIES_PER_CLAW)
+            const pruned = pruneOldestLiveActivities(nextMessages, MAX_LIVE_ACTIVITIES_PER_CLAW, clawId)
             const next = { ...prev, [clawId]: pruned }
             persistMessages(next)
             return next
           })
-          setClaws((prev) =>
-            prev.map((c) =>
-              c.id === clawId ? { ...c, isStreaming: true } : c
-            )
-          )
+          // Bail when already streaming — this fires per chunk, and a fresh
+          // claws array per chunk re-renders the whole shell.
+          setClaws((prev) => {
+            const target = prev.find((c) => c.id === clawId)
+            if (!target || target.isStreaming) return prev
+            return prev.map((c) => (c.id === clawId ? { ...c, isStreaming: true } : c))
+          })
         } else if (type === "message") {
           // Final message — hold until typewriter drains, then commit
           const msg = mapApiMessage(payload)
@@ -644,7 +655,8 @@ export function useHub(selectedClawId: string | null): HubState {
               }
               const pruned = pruneOldestLiveActivities(
                 nextMessages,
-                MAX_LIVE_ACTIVITIES_PER_CLAW
+                MAX_LIVE_ACTIVITIES_PER_CLAW,
+                clawId
               )
               const next = { ...prev, [clawId]: pruned }
               persistMessages(next)
@@ -736,6 +748,7 @@ export function useHub(selectedClawId: string | null): HubState {
       role: "user",
       content: content.trim(),
       timestamp: new Date(),
+      optimisticSelf: true,
     }
     setMessages((prev) => {
       const next = { ...prev, [clawId]: [...(prev[clawId] || []), optimistic] }
@@ -753,7 +766,7 @@ export function useHub(selectedClawId: string | null): HubState {
       const sent = await apiSendMessage(clawId, content.trim())
       // Replace the optimistic message with the real one from the DB
       // so it survives cache persistence (opt- IDs are filtered out)
-      const realMsg = mapApiMessage(sent)
+      const realMsg = { ...mapApiMessage(sent), optimisticSelf: true }
       setMessages((prev) => {
         const msgs = prev[clawId] || []
         const replaced = msgs.map((m) => m.id === optimistic.id ? realMsg : m)
@@ -793,11 +806,13 @@ export function useHub(selectedClawId: string | null): HubState {
   }, [persistMessages])
 
   const downtimeDependencies = dependencies.filter((dependency) => dependency.status === "downtime")
+  const limitedDependencies = dependencies.filter((dependency) => dependency.status === "limited")
 
   return {
     claws,
     dependencies,
     downtimeDependencies,
+    limitedDependencies,
     messages,
     streamingBuffers,
     connected,

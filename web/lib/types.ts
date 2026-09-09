@@ -1,5 +1,28 @@
 export type ClawStatus = "connected" | "idle" | "offline" | "provisioning" | "error"
 
+export const INFRA_EVENT_TYPES = [
+  "dependency_down",
+  "dependency_degraded",
+  "dependency_recovered",
+  "provider_limit_opened",
+  "provider_limit_exhausted",
+  "provider_limit_released",
+] as const
+
+export type InfraEventType = (typeof INFRA_EVENT_TYPES)[number]
+
+export interface InfraRoute {
+  via: string
+  events?: InfraEventType[]
+}
+
+export interface InfraNotificationsConfig {
+  enabled?: boolean
+  routes?: InfraRoute[]
+  pollInterval?: string
+  repeatAfter?: string
+}
+
 export interface Claw {
   id: string
   name: string
@@ -12,6 +35,7 @@ export interface Claw {
   tags: string[]
   color: string // accent color name, e.g. "blue", "emerald"
   contextUsage: number // 0-100 percentage, hardcoded 0 for now
+  openPrCount: number
   description?: string
   reason?: string // stop reason when status is error
   bootstrap_status?: string
@@ -25,11 +49,13 @@ export interface Claw {
   last_seen?: string
   created_at?: string
   tenant_id?: string
+  /** ISO instant when the model provider's allowance returns; absent = not limited. */
+  llm_limited_until?: string
 }
 
 export interface Message {
   id: string
-  role: "user" | "claw" | "system" | "hub" | "activity" | "activity_summary"
+  role: "user" | "claw" | "system" | "hub" | "activity" | "activity_summary" | "state"
   content: string
   format?: string // "pre" = preserve whitespace
   timestamp: Date
@@ -38,6 +64,8 @@ export interface Message {
   // API fields
   claw_id?: string
   tenant_id?: string
+  userLogin?: string
+  optimisticSelf?: boolean
 }
 
 export interface ActivitySummary {
@@ -61,6 +89,10 @@ export interface AgentActivity {
   duration_ms?: number
   exit_code?: number
   result?: string
+  subagent_name?: string
+  subagent_type?: string
+  subagent_model?: string
+  subagent_prompt?: string
 }
 
 // Raw API types
@@ -73,6 +105,7 @@ export interface ApiClaw {
   created_at: string
   tenant_id: string
   context_usage?: number
+  open_pr_count?: number
   tags?: string[]
   color?: string
   ssh_host?: string
@@ -81,16 +114,18 @@ export interface ApiClaw {
   bootstrap_status?: string
   github_issue_id?: string
   github_issue_url?: string
+  llm_limited_until?: string
 }
 
 export interface ApiMessage {
   id: string
   claw_id: string
   tenant_id: string
-  role: "user" | "claw" | "hub" | "activity" | "activity_summary"
+  role: "user" | "claw" | "hub" | "activity" | "activity_summary" | "state"
   content: string
   format?: string
   created_at: string
+  user_login?: string
 }
 
 export interface CreateClawRequest {
@@ -187,16 +222,16 @@ export interface GeneralStats {
 }
 
 export interface AnalyticsEffectiveness {
-  outcomesByDay: { date: string; clean: number; humanInTheLoop: number; warning: number; failed: number }[]
+  outcomesByDay: { date: string; clean: number; humanInTheLoop: number; warning: number; failed: number }[] | null
   funnel: { agentStarted: number; prOpened: number; prFinished: number }
-  costPerMergedPr: { weekly: { weekStart: string; costUsd: number; mergedPrs: number; costPerMergedPr: number }[]; average: number }
+  costPerMergedPr: { weekly: { weekStart: string; costUsd: number; mergedPrs: number; costPerMergedPr: number }[] | null; average: number }
   mergeRate: number
   successRate: number
   uniqueTickets: number
   ticketSuccessRate: number
-  ticketsByDay: { date: string; delivered: number; inProgress: number; failed: number }[]
-  runsPerTicket: { bucket: string; tickets: number }[]
-  topTicketsByCost: { issueId: string; issueTitle: string; costUsd: number; runs: number; outcome: string }[]
+  ticketsByDay: { date: string; delivered: number; inProgress: number; failed: number }[] | null
+  runsPerTicket: { bucket: string; tickets: number }[] | null
+  topTicketsByCost: { ticketKey: string; issueId: string; issueTitle: string; costUsd: number; runs: number; outcome: string }[] | null
   prior?: {
     successRate: number
     ticketSuccessRate: number
@@ -267,10 +302,84 @@ export interface TaskRunSummary {
   issueTitle?: string
 }
 
+export interface TaskRunStage {
+  stageId: string
+  label: string
+  enteredAt: number
+  exitedAt?: number
+  durationMs: number
+  source: string
+}
+
 export interface TaskRunsResponse {
   runs: TaskRunSummary[]
   nextCursor?: string
   limit: number
+}
+
+export interface AnalyticsTicketRunSummary {
+  runId: string
+  status: string
+  phase: string
+  model: string
+  attemptCount: number
+  cost: number
+  totalTokens: number
+  humanTouches: number
+  startedAt: number
+  lastActivity: number
+}
+
+export interface AnalyticsTicketPR extends TaskRunPR {
+  runId: string
+}
+
+export interface AnalyticsTicketStoryEntry {
+  id: string
+  eventType: string
+  label: string
+  actor: string
+  time: number
+  runId: string
+  kind: "good" | "bad" | "human" | "neutral"
+  count: number
+}
+
+export interface AnalyticsTicket {
+  ticketKey: string
+  issueId: string
+  issueTitle: string
+  status: "delivered" | "pr_open" | "in_progress" | "failed"
+  requester: string
+  team?: string
+  priority: string
+  ask: string
+  source: string
+  repo?: string
+  workflowName?: string
+  workspaceName?: string
+  reportedAt: number
+  runs: AnalyticsTicketRunSummary[]
+  runCount: number
+  attemptCount: number
+  failedRunCount: number
+  cost: number
+  totalTokens: number
+  humanTouches: number
+  prs: AnalyticsTicketPR[]
+  mergedPrCount: number
+  openPrCount: number
+  timeToFirstRun: number
+  leadTime: number
+  lastActivity: number
+  story: AnalyticsTicketStoryEntry[]
+}
+
+export interface AnalyticsTicketsResponse {
+  tickets: AnalyticsTicket[]
+  nextCursor?: string
+  limit: number
+  total: number
 }
 
 export interface TaskRunAttempt {
@@ -319,7 +428,20 @@ export interface TaskRunOutput {
   stdout: string
   stderr: string
   exitCode: number
+  spanId: string
+  spanKind: string
+  durationMs: number
+  status: 'OK' | 'ERROR'
+  records: TaskRunLogRecord[]
   createdAt: number
+}
+
+export interface TaskRunLogRecord {
+  ts: number
+  sev: 'TRACE' | 'DEBUG' | 'INFO' | 'WARN' | 'ERROR' | 'FATAL'
+  severityNumber: number
+  body: string
+  attrs: Record<string, unknown>
 }
 
 export interface TaskRunPR {
@@ -353,7 +475,7 @@ export interface TaskRunFilterOptions {
   failureTypes: string[]
 }
 
-export type DependencyStatusValue = "operational" | "degraded" | "downtime" | "unknown"
+export type DependencyStatusValue = "operational" | "degraded" | "downtime" | "limited" | "unknown"
 
 export enum DependencyKind {
   Model = "model",
@@ -368,12 +490,16 @@ export interface DependencyStatus {
   status: DependencyStatusValue
   message?: string
   source?: string
+  /** Set only when the downtime ends at a known time (a capped provider account). */
+  regainAt?: string
   checkedAt: string
 }
 
 export interface DependencyStatusResponse {
   dependencies: DependencyStatus[]
   downtimeCount: number
+  /** Accounts out of allowance — counted apart from outages, they are not the same problem. */
+  limitedCount: number
   checkedAt: string
 }
 
@@ -394,5 +520,42 @@ export interface WorkflowRun {
 
 export interface WorkflowRunsResponse {
   runs: WorkflowRun[]
+  count: number
+}
+
+export interface WorkflowV2RunAttempt {
+  id: string
+  run_id: string
+  claw_id: string
+  number: number
+  status: string
+  started_at: string
+  heartbeat_at?: string
+  finished_at?: string
+}
+
+export interface WorkflowV2Run {
+  run_id: string
+  attempt_id: string
+  attempt_number: number
+  tenant_id?: string
+  workspace_name: string
+  workflow_name: string
+  state: string
+  display_phase: string
+  run_status: string
+  attempt_status: string
+  waiting_reason?: string
+  trigger_type: string
+  claw_id?: string
+  created_at: string
+  started_at: string
+  updated_at: string
+  finished_at?: string
+  attempt_finished_at?: string
+}
+
+export interface WorkflowV2RunsResponse {
+  runs: WorkflowV2Run[]
   count: number
 }

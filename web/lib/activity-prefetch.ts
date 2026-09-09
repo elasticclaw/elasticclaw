@@ -5,6 +5,7 @@
 
 import { fetchActivityMessages } from "@/lib/api"
 import { mapApiMessage } from "@/lib/mappers"
+import { isPrunedActivitySummary } from "@/lib/messages"
 import type { Message } from "@/lib/types"
 
 export interface SummaryPick {
@@ -12,7 +13,15 @@ export interface SummaryPick {
   limit: number
 }
 
-/** Newest-first picks of unexpanded summaries, bounded by count and row budget. */
+/**
+ * Newest-first picks of unexpanded summaries, bounded by count and row budget.
+ *
+ * Client-side pruned markers are never picked: they stand for rows the live
+ * cache just evicted to stay under its cap, so expanding them re-inserts those
+ * rows, trips the cap again, and emits a fresh range-scoped marker id the
+ * caller has never seen — one hub fetch per activity event, forever. They stay
+ * collapsed (still counted, still honest) instead.
+ */
 export function selectTrailingSummaries(
   messages: Message[],
   opts: { maxSummaries: number; rowBudget: number }
@@ -22,6 +31,7 @@ export function selectTrailingSummaries(
   for (let i = messages.length - 1; i >= 0 && picks.length < opts.maxSummaries && budget > 0; i -= 1) {
     const message = messages[i]
     if (message.role !== "activity_summary" || !message.activitySummary) continue
+    if (isPrunedActivitySummary(message)) continue
     const count = message.activitySummary.count || 0
     if (count <= 0) continue
     const limit = Math.min(Math.max(1, count), budget)

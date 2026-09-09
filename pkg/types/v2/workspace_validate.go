@@ -125,7 +125,7 @@ func ValidateWorkspace(ws *Workspace) (*ResolvedWorkspace, error) {
 			if sc := strings.TrimSpace(conn.SourceControl); sc != "" && !ws.HasSourceControlConnection(sc) {
 				return nil, fmt.Errorf("ci.connections.%s.source_control %q: unknown source_control connection", name, sc)
 			}
-			if err := validateCapabilityRestrictions("ci.connections."+name, conn); err != nil {
+			if err := validateCapabilityRestrictions("ci.connections."+name, conn.Provider, conn.CapabilityRestrictions); err != nil {
 				return nil, err
 			}
 			resolvedCI[name] = ResolveCapabilities(conn.Provider, conn.CapabilityRestrictions)
@@ -156,7 +156,7 @@ func ValidateWorkspace(ws *Workspace) (*ResolvedWorkspace, error) {
 			if err := validateConnection("issue_trackers.connections", name, conn, ws); err != nil {
 				return nil, err
 			}
-			if err := validateCapabilityRestrictions("issue_trackers.connections."+name, conn); err != nil {
+			if err := validateCapabilityRestrictions("issue_trackers.connections."+name, conn.Provider, conn.CapabilityRestrictions); err != nil {
 				return nil, err
 			}
 			resolvedIT[name] = ResolveCapabilities(conn.Provider, conn.CapabilityRestrictions)
@@ -173,7 +173,7 @@ func ValidateWorkspace(ws *Workspace) (*ResolvedWorkspace, error) {
 			if sc := strings.TrimSpace(conn.SourceControl); sc != "" && !ws.HasSourceControlConnection(sc) {
 				return nil, fmt.Errorf("review_systems.connections.%s.source_control %q: unknown source_control connection", name, sc)
 			}
-			if err := validateCapabilityRestrictions("review_systems.connections."+name, conn); err != nil {
+			if err := validateCapabilityRestrictions("review_systems.connections."+name, conn.Provider, conn.CapabilityRestrictions); err != nil {
 				return nil, err
 			}
 			resolvedRS[name] = ResolveCapabilities(conn.Provider, conn.CapabilityRestrictions)
@@ -198,11 +198,24 @@ func ValidateWorkspace(ws *Workspace) (*ResolvedWorkspace, error) {
 	resolvedSC := map[string]map[ConnectionCapability]bool{}
 	if ws.SourceControl != nil {
 		for name, conn := range ws.SourceControl.Connections {
-			if err := validateCapabilityRestrictions("source_control.connections."+name, conn); err != nil {
+			if err := validateCapabilityRestrictions("source_control.connections."+name, conn.Provider, conn.CapabilityRestrictions); err != nil {
 				return nil, err
 			}
 			resolvedSC[name] = ResolveCapabilities(conn.Provider, conn.CapabilityRestrictions)
 		}
+	}
+
+	// Execution block capabilities.
+	resolvedExec := map[ConnectionCapability]bool{}
+	if ws.Execution != nil {
+		provider := strings.TrimSpace(ws.Execution.Provider)
+		if provider == "" {
+			return nil, fmt.Errorf("execution.provider is required")
+		}
+		if err := validateCapabilityRestrictions("execution", provider, ws.Execution.CapabilityRestrictions); err != nil {
+			return nil, err
+		}
+		resolvedExec = ResolveCapabilities(provider, ws.Execution.CapabilityRestrictions)
 	}
 
 	rev, err := RevisionOf(ws)
@@ -216,6 +229,7 @@ func ValidateWorkspace(ws *Workspace) (*ResolvedWorkspace, error) {
 		ResolvedSourceControl: resolvedSC,
 		ResolvedIssueTrackers: resolvedIT,
 		ResolvedReviewSystems: resolvedRS,
+		ResolvedExecCaps:      resolvedExec,
 	}, nil
 }
 
@@ -313,19 +327,19 @@ func validateConnection(path, name string, conn Connection, ws *Workspace) error
 	return nil
 }
 
-func validateCapabilityRestrictions(path string, conn Connection) error {
-	if len(conn.CapabilityRestrictions) == 0 {
+func validateCapabilityRestrictions(path, provider string, restrictions map[string]bool) error {
+	if len(restrictions) == 0 {
 		return nil
 	}
-	providerCaps := ProviderCapabilities(conn.Provider)
-	for capName, enabled := range conn.CapabilityRestrictions {
+	providerCaps := ProviderCapabilities(provider)
+	for capName, enabled := range restrictions {
 		if strings.TrimSpace(capName) == "" {
 			return fmt.Errorf("%s.capability_restrictions: empty capability name", path)
 		}
 		// Workspace may only narrow: setting true when provider lacks the cap invents a grant.
 		if enabled {
 			if !providerCaps[ConnectionCapability(capName)] {
-				return fmt.Errorf("%s.capability_restrictions.%s: cannot grant capability unsupported by provider %q", path, capName, conn.Provider)
+				return fmt.Errorf("%s.capability_restrictions.%s: cannot grant capability unsupported by provider %q", path, capName, provider)
 			}
 		}
 		// false is always a legal narrow (even for unknown names we still reject unknown?).

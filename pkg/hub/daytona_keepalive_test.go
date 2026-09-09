@@ -2,7 +2,9 @@ package hub
 
 import (
 	"context"
+	"database/sql"
 	"errors"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -52,5 +54,56 @@ func TestPetDaytonaSandboxDoesNotRetryPermanentFailure(t *testing.T) {
 	}
 	if executor.calls != 1 {
 		t.Fatalf("keepalive attempts = %d, want 1", executor.calls)
+	}
+}
+
+func TestSelectDaytonaKeepaliveClawsIncludesOffline(t *testing.T) {
+	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "hub.db")+"?_pragma=foreign_keys(on)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := migrate(db); err != nil {
+		t.Fatal(err)
+	}
+
+	// This fixture only needs claws rows; skip the tenant/task_run parents.
+	if _, err := db.Exec(`PRAGMA foreign_keys=OFF`); err != nil {
+		t.Fatal(err)
+	}
+
+	statuses := []string{"connected", "offline", "error", "deleted", "idle"}
+	for _, status := range statuses {
+		if _, err := db.Exec(
+			`INSERT INTO claws(id,tenant_id,name,template,status,provider,provider_id,created_at) VALUES(?,?,?,?,?,?,?,?)`,
+			"claw-"+status, "tenant", "claw-"+status, "base", status, "daytona", "sandbox-"+status, now(),
+		); err != nil {
+			t.Fatalf("seed %s: %v", status, err)
+		}
+	}
+	// A daytona claw without a sandbox id must never be petted.
+	if _, err := db.Exec(
+		`INSERT INTO claws(id,tenant_id,name,template,status,provider,provider_id,created_at) VALUES(?,?,?,?,?,?,?,?)`,
+		"claw-nosandbox", "tenant", "claw-nosandbox", "base", "connected", "daytona", "", now(),
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	claws, err := selectDaytonaKeepaliveClaws(db)
+	if err != nil {
+		t.Fatalf("selectDaytonaKeepaliveClaws: %v", err)
+	}
+	got := map[string]bool{}
+	for _, c := range claws {
+		got[c.providerID] = true
+	}
+	want := map[string]bool{"sandbox-connected": true, "sandbox-offline": true}
+	if len(got) != len(want) {
+		t.Fatalf("selected sandboxes = %v, want %v", got, want)
+	}
+	for id := range want {
+		if !got[id] {
+			t.Fatalf("selected sandboxes = %v, want %v", got, want)
+		}
 	}
 }

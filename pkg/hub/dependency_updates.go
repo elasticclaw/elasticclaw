@@ -280,8 +280,10 @@ func (s *Server) executeDependencyUpdatesAction(clawID, stageID string, action p
 	if err != nil {
 		return nil, err
 	}
+	started := time.Now()
 	result, err := s.executePipelineCommand(clawID, command, timeout)
 	if result != nil {
+		result.Command, result.StartedAt, result.DurationMs = command, started, time.Since(started).Milliseconds()
 		s.persistPipelineOutput(clawID, stageID, dependencyUpdatesOutputName(action), result)
 	}
 	return result, err

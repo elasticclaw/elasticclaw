@@ -63,7 +63,10 @@ func TestGitHubPRFactoryLabelsAndExcludeLabelsMatchBackingIssueLabels(t *testing
 	waitForGitHubPRClaw(t, db, "https://github.com/elastic/claw/pull/43")
 }
 
-func TestGitHubPRPollRecreatesClawAfterError(t *testing.T) {
+// A PR whose claw errored gets a replacement, but only after the trigger has
+// served its backoff — otherwise every poll tick recreates the claw the moment
+// the previous one dies.
+func TestGitHubPRPollRecreatesClawAfterErrorBackoff(t *testing.T) {
 	factory := &types.FactoryConfig{
 		Name:        "generic-pr",
 		Integration: "github",
@@ -93,7 +96,7 @@ func TestGitHubPRPollRecreatesClawAfterError(t *testing.T) {
 		t.Fatalf("mark claw errored: %v", err)
 	}
 
-	s.processGitHubPRPollItem(githubPRPollItem{
+	pollItem := githubPRPollItem{
 		Number:  46,
 		Title:   "Test PR",
 		HTMLURL: payload.PullRequest.HTMLURL,
@@ -107,14 +110,28 @@ func TestGitHubPRPollRecreatesClawAfterError(t *testing.T) {
 		Base: struct {
 			Ref string `json:"ref"`
 		}{Ref: "main"},
-	}, []*types.FactoryConfig{factory}, "elastic/claw", "")
+	}
 
+	s.processGitHubPRPollItem(pollItem, []*types.FactoryConfig{factory}, "elastic/claw", "")
 	var count int
 	if err := db.QueryRow(`SELECT COUNT(*) FROM claw_prs WHERE pr_url=?`, payload.PullRequest.HTMLURL).Scan(&count); err != nil {
 		t.Fatalf("count PR claws: %v", err)
 	}
+	if count != 1 {
+		t.Fatalf("expected the errored claw to cost a backoff, got %d claws", count)
+	}
+
+	triggerKey := factoryTriggerKey("github-pr", payload.PullRequest.HTMLURL)
+	if _, err := db.Exec(`UPDATE factory_triggers SET updated_at=? WHERE trigger_key=?`, now().Add(-61*time.Second), triggerKey); err != nil {
+		t.Fatalf("age trigger past backoff: %v", err)
+	}
+
+	s.processGitHubPRPollItem(pollItem, []*types.FactoryConfig{factory}, "elastic/claw", "")
+	if err := db.QueryRow(`SELECT COUNT(*) FROM claw_prs WHERE pr_url=?`, payload.PullRequest.HTMLURL).Scan(&count); err != nil {
+		t.Fatalf("count PR claws: %v", err)
+	}
 	if count != 2 {
-		t.Fatalf("expected a replacement PR claw after error, got %d claws", count)
+		t.Fatalf("expected a replacement PR claw after the backoff, got %d claws", count)
 	}
 }
 

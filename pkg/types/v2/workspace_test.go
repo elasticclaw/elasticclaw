@@ -278,6 +278,74 @@ review_systems:
 	}
 }
 
+func TestExecutionProviderDefaultsAllCapabilities(t *testing.T) {
+	yaml := `
+schema_version: 2
+name: exec-default
+repositories:
+  primary:
+    provider: github
+    repository: org/repo
+execution:
+  provider: daytona
+`
+	resolved, err := v2.ParseAndValidateWorkspace([]byte(yaml))
+	if err != nil {
+		t.Fatalf("error = %v", err)
+	}
+	caps := resolved.ResolvedExecCaps
+	if !caps[v2.CapExecuteCommand] {
+		t.Fatal("expected execute_command to be granted")
+	}
+	if !caps[v2.CapDependencyUpdate] {
+		t.Fatal("expected dependency_update to be granted")
+	}
+}
+
+func TestExecutionCapabilityRestrictionsNarrowGrants(t *testing.T) {
+	yaml := `
+schema_version: 2
+name: exec-restricted
+repositories:
+  primary:
+    provider: github
+    repository: org/repo
+execution:
+  provider: daytona
+  capability_restrictions:
+    execute_command: false
+`
+	resolved, err := v2.ParseAndValidateWorkspace([]byte(yaml))
+	if err != nil {
+		t.Fatalf("error = %v", err)
+	}
+	if resolved.ResolvedExecCaps[v2.CapExecuteCommand] {
+		t.Fatal("expected execute_command to be restricted")
+	}
+	if !resolved.ResolvedExecCaps[v2.CapDependencyUpdate] {
+		t.Fatal("expected dependency_update to remain granted")
+	}
+}
+
+func TestWorkspaceRejectsUnknownExecutionCapabilityRestriction(t *testing.T) {
+	yaml := `
+schema_version: 2
+name: exec-unknown-cap
+repositories:
+  primary:
+    provider: github
+    repository: org/repo
+execution:
+  provider: daytona
+  capability_restrictions:
+    launch_rockets: true
+`
+	_, err := v2.ParseAndValidateWorkspace([]byte(yaml))
+	if err == nil || !strings.Contains(err.Error(), "launch_rockets") {
+		t.Fatalf("error = %v, want unknown capability", err)
+	}
+}
+
 func TestWorkspaceRejectsNonV2(t *testing.T) {
 	yaml := `
 schema_version: v1

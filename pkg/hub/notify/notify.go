@@ -124,11 +124,11 @@ type Notifier interface {
 }
 
 // DestinationReporter is implemented by providers that can name their
-// configured default destination (Slack: the channel ID). Callers use it only
-// as opaque bookkeeping — e.g. thread roots recorded for one destination must
-// stop matching after the operator repoints the notifier elsewhere. Callers
-// must treat a provider without this interface (or an empty string) as an
-// unknown destination, never as a match-everything wildcard.
+// configured default destination (Slack: the channel ID). The value is opaque
+// bookkeeping — it identifies where a notifier currently points so a caller
+// can tell two notifier configurations apart. Callers must treat a provider
+// without this interface (or an empty string) as an unknown destination,
+// never as a match-everything wildcard.
 type DestinationReporter interface {
 	Destination() string
 }
@@ -237,6 +237,22 @@ func New(typ string, cfg map[string]any, secrets SecretResolver) (Notifier, erro
 		return nil, fmt.Errorf("unknown notifier type %q (supported: %s)", typ, supportedTypes())
 	}
 	return p.construct(cfg, secrets)
+}
+
+// ValidateConfig checks a notifier configuration the way New does, but without
+// resolving its secrets, so a writer (the settings PATCH) can reject a config
+// its own type would refuse to build — a missing token_secret, a #name where a
+// channel ID belongs, an unparseable min_send_interval — at write time instead
+// of silently delivering nothing on every later tick. Secret VALUES are
+// deliberately not checked: naming a secret that is created right afterwards is
+// a legitimate order of operations.
+func ValidateConfig(typ string, cfg map[string]any) error {
+	p, ok := registry[typ]
+	if !ok {
+		return fmt.Errorf("unknown notifier type %q (supported: %s)", typ, supportedTypes())
+	}
+	_, err := p.construct(cfg, func(string) (string, bool) { return "unchecked-secret-value", true })
+	return err
 }
 
 // SecretSettings returns the config keys of the given notifier type whose

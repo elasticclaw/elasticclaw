@@ -6,7 +6,7 @@ import type { HomeView } from "@/components/home-shell"
 
 /**
  * Fixed bottom tab bar for phones. Replaces the sidebar footer destinations:
- * Agents always, Analytics and Settings for admins. Sign out lives in the
+ * Agents and Analytics always, Settings for admins. Sign out lives in the
  * board header overflow menu, not here. Padded above the home indicator via
  * the safe-area inset (non-zero thanks to viewportFit: 'cover').
  */
@@ -30,21 +30,19 @@ export function MobileTabBar({
           active={view === "agents"}
           onClick={onSelectAgents}
         />
+        <TabItem
+          label="Analytics"
+          icon={BarChart3}
+          active={view === "analytics"}
+          onClick={onSelectAnalytics}
+        />
         {isAdmin && (
-          <>
-            <TabItem
-              label="Analytics"
-              icon={BarChart3}
-              active={view === "analytics"}
-              onClick={onSelectAnalytics}
-            />
-            <TabItem
-              label="Settings"
-              icon={Settings}
-              active={false}
-              onClick={() => { window.location.href = "/settings" }}
-            />
-          </>
+          <TabItem
+            label="Settings"
+            icon={Settings}
+            active={false}
+            onClick={() => { window.location.href = "/settings" }}
+          />
         )}
       </div>
     </nav>

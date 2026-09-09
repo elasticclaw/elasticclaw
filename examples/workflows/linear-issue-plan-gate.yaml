@@ -35,7 +35,8 @@ stages:
           steps          (array of strings)
           verification   (string)
 
-        Then say exactly: [PLAN_READY]
+        Then reply with `[PLAN_READY]` on the first line, that exact token and nothing before
+        it on that line. The hub reads the signal only when the token opens a line.
         Do not edit product code until the next stage injects proceed.
 
   - id: plan_validate
@@ -111,7 +112,8 @@ stages:
 
         Plan accepted (status {{ .Outputs.plan.status }}) — coding begins now.
         Do not wait for another proceed message. Do not emit [PLAN_READY] again.
-        Implement the issue. Narrate progress. When the PR is ready, say [DONE] with the PR URL.
+        Implement the issue. Narrate progress. When the PR is ready, reply with `[DONE]` on the
+        first line and put the PR URL after it.
 
   - id: fix_plan
     label: Fix plan
@@ -122,7 +124,7 @@ stages:
     on_enter:
       inject: |
         Plan incomplete: {{ .Outputs.plan.reason }}
-        Update .elasticclaw/plan.json, then say [PLAN_READY] again.
+        Update .elasticclaw/plan.json, then reply with `[PLAN_READY]` on the first line again.
 
   - id: pr_opened
     label: PR opened

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/elasticclaw/elasticclaw/pkg/config"
+	"github.com/elasticclaw/elasticclaw/pkg/hub/pipeline"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 	"github.com/google/uuid"
 	"nhooyr.io/websocket"
@@ -1312,6 +1313,13 @@ func buildLinearContext(payload linearWebhookPayload, requiresPR bool) string {
 // If no valid open PRs are found (and a GH App is configured), it injects an
 // error message back so the claw can retry.
 func (s *Server) handleClawDoneSignal(clawID, rawMessage string) {
+	// Re-decide the signal here instead of trusting the caller. This function
+	// terminates claws and moves tracker issues, and it used to run on whatever
+	// its caller thought was a [DONE] — which is how the same message could be
+	// refused by the pipeline and accepted here. One text, one verdict.
+	if !pipeline.MessageSignals(rawMessage, doneSignalToken) {
+		return
+	}
 	// Get the issue ID and tenant for this claw. Workflow claws may not have an
 	// issue, but [DONE] must still give those runs a terminal path.
 	var issueID, tenantID string
@@ -1644,6 +1652,11 @@ func (s *Server) completeNoPRDoneClaw(clawID, tenantID, issueID string) {
 // Unlike [DONE] which moves issues and keeps the claw in idle mode, [TERMINATE] immediately
 // soft-deletes the claw and terminates its associated VM while preserving run logs.
 func (s *Server) handleClawTerminateSignal(clawID, rawMessage string) {
+	// Same rule as handleClawDoneSignal: the teardown decision is re-made from
+	// the message here, not inherited from the caller's substring test.
+	if !pipeline.MessageSignals(rawMessage, terminateSignalToken) {
+		return
+	}
 	// Get the tenant ID and issue ID for this claw
 	var issueID, tenantID, factoryName string
 	if err := s.db.QueryRow(`SELECT COALESCE(NULLIF(linear_issue_id,''),NULLIF(github_issue_id,''),NULLIF(shortcut_story_id,''),NULLIF(jira_issue_id,'')), tenant_id, factory_name FROM claws WHERE id = ?`, clawID).Scan(&issueID, &tenantID, &factoryName); err != nil {
@@ -1755,10 +1768,27 @@ func (s *Server) handleClawTerminateSignal(clawID, rawMessage string) {
 //	https://github.com/org/repo/pull/1
 //
 // and those URLs must still register for merge/close monitoring.
+// indexFold is strings.Index with case-insensitive matching. The offset stays
+// byte-exact so it can slice the original line, which strings.ToUpper would not
+// guarantee for non-ASCII input.
+func indexFold(s, substr string) int {
+	n := len(substr)
+	for i := 0; i+n <= len(s); i++ {
+		if strings.EqualFold(s[i:i+n], substr) {
+			return i
+		}
+	}
+	return -1
+}
+
 func extractDonePRURLs(message string) []string {
 	lines := strings.Split(message, "\n")
 	for i, line := range lines {
-		idx := strings.Index(line, "[DONE]")
+		// Case-insensitive, matching pipeline.MessageSignals. The two must agree:
+		// if the signal is recognised but the URL scan is not, the stage advances
+		// with zero PRs registered and merge/close tracking is never armed — the
+		// same one-text-two-verdicts split the anchoring exists to remove.
+		idx := indexFold(line, doneSignalToken)
 		if idx < 0 {
 			continue
 		}
@@ -1773,7 +1803,7 @@ func extractDonePRURLs(message string) []string {
 				urls = append(urls, pr.url)
 			}
 		}
-		add(line[idx+len("[DONE]"):])
+		add(line[idx+len(doneSignalToken):])
 		for _, later := range lines[i+1:] {
 			add(later)
 		}
@@ -1800,7 +1830,7 @@ func (s *Server) registerDonePRURLs(clawID string, prURLs []string) string {
 
 	// Single URL: reuse the normal path (no multi-row partial-write risk).
 	if len(prs) == 1 {
-		if _, err := s.storePRMention(clawID, prs[0].repo, prs[0].number, prs[0].url); err != nil {
+		if _, err := s.storePRMention(clawID, prs[0].repo, prs[0].number, prs[0].url, false); err != nil {
 			log.Printf("[factory] failed to register PR %s for claw %s: %v", prs[0].url, shortID(clawID), err)
 			return prs[0].url
 		}
@@ -1809,7 +1839,7 @@ func (s *Server) registerDonePRURLs(clawID string, prURLs []string) string {
 
 	var toInsert []prMentionCandidate
 	for _, pr := range prs {
-		already, row, err := s.preparePRMention(clawID, pr.repo, pr.number, pr.url)
+		already, row, err := s.preparePRMention(clawID, pr.repo, pr.number, pr.url, false)
 		if err != nil {
 			log.Printf("[factory] failed to prepare PR %s for claw %s: %v", pr.url, shortID(clawID), err)
 			return pr.url
@@ -1819,7 +1849,7 @@ func (s *Server) registerDonePRURLs(clawID string, prURLs []string) string {
 		}
 		toInsert = append(toInsert, row)
 	}
-	if failURL := s.insertClawPRsAtomic(clawID, toInsert); failURL != "" {
+	if failURL := s.insertClawPRsAtomic(clawID, toInsert, false); failURL != "" {
 		log.Printf("[factory] failed to register PR set for claw %s (first failure %s)", shortID(clawID), failURL)
 		return failURL
 	}
@@ -2189,6 +2219,14 @@ type linearIssueDetails struct {
 	URL         string `json:"url"`
 	Description string `json:"description"`
 	CreatedAt   string `json:"createdAt"`
+	Creator     struct {
+		Name  string `json:"name"`
+		Email string `json:"email"`
+	} `json:"creator"`
+	Team struct {
+		Name string `json:"name"`
+	} `json:"team"`
+	PriorityLabel string `json:"priorityLabel"`
 }
 
 // fetchLinearIssueDetails looks up an issue by its Linear identifier (e.g. "CAN-61")
@@ -2213,7 +2251,7 @@ func (s *Server) fetchLinearIssueDetails(token, issueIdentifier string) (*linear
 	// Linear's issue(id:) actually accepts the display identifier like "CAN-61"
 	// directly (not just UUID). This is documented in Linear's GraphQL examples.
 	queryBody := map[string]interface{}{
-		"query": "query($id: String!) { issue(id: $id) { identifier title url description createdAt } }",
+		"query": "query($id: String!) { issue(id: $id) { identifier title url description createdAt creator { name email } team { name } priorityLabel } }",
 		"variables": map[string]string{
 			"id": issueIdentifier,
 		},
@@ -2256,7 +2294,12 @@ func (s *Server) fetchLinearIssueDetails(token, issueIdentifier string) (*linear
 		combined := strings.Join(errMsgs, "; ")
 		log.Printf("[linear] fetchLinearIssueDetails GraphQL errors for %s: %s", issueIdentifier, combined)
 		log.Printf("[linear] fetchLinearIssueDetails response body for %s: %s", issueIdentifier, string(bodyBytes))
-		return nil, fmt.Errorf("GraphQL error: %s", combined)
+		// GraphQL reports per-field failures (an unreadable creator email, say) alongside a
+		// usable issue. Dropping the whole response there would cost the caller the title,
+		// team and priority too, so keep the partial issue and only fail when it is missing.
+		if result.Data.Issue.Identifier == "" {
+			return nil, fmt.Errorf("GraphQL error: %s", combined)
+		}
 	}
 	if result.Data.Issue.Identifier == "" {
 		log.Printf("[linear] fetchLinearIssueDetails: empty issue returned for %s", issueIdentifier)

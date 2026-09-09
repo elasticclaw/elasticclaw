@@ -9,6 +9,9 @@ let sharedNow = Date.now()
 // Browser timer handle (window.setInterval returns a number, not a Node Timeout)
 let sharedTimer: number | null = null
 const listeners = new Set<() => void>()
+let sharedMinuteNow = 0
+let sharedMinuteTimer: number | null = null
+const minuteListeners = new Set<() => void>()
 
 /**
  * Returns Date.now() refreshed once per second while `active` is true.
@@ -17,12 +20,27 @@ const listeners = new Set<() => void>()
  * drift is corrected client-side (render times with suppressHydrationWarning).
  */
 export function useNowTick(active: boolean): number {
-  const [now, setNow] = useState(sharedNow)
+  return useNowTickUntil(active, 0)
+}
+
+/**
+ * Same clock, but it also keeps ticking until `untilMs` has passed — for a
+ * surface whose labels have one last scheduled change after the work it
+ * watches stops (a subagent that must age out of "running" once its claw
+ * dies). Ticking ends on its own at the deadline; pass 0 for no deadline.
+ */
+export function useNowTickUntil(active: boolean, untilMs: number): number {
+  // With no timer running, `sharedNow` is as old as the last active
+  // subscriber: mounting on it would compare fresh timestamps against a clock
+  // from hours ago, so an inactive subscriber reads the real time instead.
+  const [now, setNow] = useState(() => (sharedTimer ? sharedNow : Date.now()))
+  const ticking = active || now < untilMs
   useEffect(() => {
-    if (!active) return
+    if (!ticking) return
     const listener = () => setNow(sharedNow)
     listeners.add(listener)
     if (!sharedTimer) {
+      sharedNow = Date.now()
       sharedTimer = window.setInterval(() => {
         sharedNow = Date.now()
         listeners.forEach((notify) => notify())
@@ -34,6 +52,38 @@ export function useNowTick(active: boolean): number {
       if (listeners.size === 0 && sharedTimer) {
         window.clearInterval(sharedTimer)
         sharedTimer = null
+      }
+    }
+  }, [ticking])
+  // Past the deadline the derived *status* can no longer change, but the
+  // labels rendered from this clock are ages ("output 30s ago") that keep
+  // growing. Freezing here left a claw that died mid-Task reporting "30s"
+  // hours later, so fall back to the shared minute clock: cheap enough to run
+  // on an idle chat, accurate enough for a label counting in minutes.
+  const minuteNow = useNowMinuteTick(!ticking)
+  return ticking ? now : Math.max(now, minuteNow)
+}
+
+/** Returns a clock refreshed once per minute for age labels. */
+export function useNowMinuteTick(active: boolean): number {
+  const [now, setNow] = useState(() => sharedMinuteNow || Date.now())
+  useEffect(() => {
+    if (!active) return
+    const listener = () => setNow(sharedMinuteNow)
+    minuteListeners.add(listener)
+    if (!sharedMinuteTimer) {
+      sharedMinuteNow = Date.now()
+      sharedMinuteTimer = window.setInterval(() => {
+        sharedMinuteNow = Date.now()
+        minuteListeners.forEach((notify) => notify())
+      }, 60_000)
+    }
+    listener()
+    return () => {
+      minuteListeners.delete(listener)
+      if (minuteListeners.size === 0 && sharedMinuteTimer) {
+        window.clearInterval(sharedMinuteTimer)
+        sharedMinuteTimer = null
       }
     }
   }, [active])

@@ -3,10 +3,10 @@
 import { useEffect, useState, type ReactNode } from "react"
 import { useRouter } from "next/navigation"
 import { AlertCircle, BarChart3, Calendar, ExternalLink, History, Loader2 } from "lucide-react"
-import { ApiError, fetchCronWorkflowRuns, type Workflow } from "@/lib/api"
+import { ApiError, fetchCronWorkflowRuns, fetchV2WorkflowRuns, isV2Workflow, type Workflow } from "@/lib/api"
 import { WorkflowRunLogsDialog } from "@/components/workflow-run-logs-dialog"
 import { WorkflowName } from "@/components/workflow-name"
-import type { WorkflowRun } from "@/lib/types"
+import type { WorkflowRun, WorkflowV2Run } from "@/lib/types"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog"
@@ -16,7 +16,8 @@ import { cn } from "@/lib/utils"
 export function WorkflowRunsDialog({ workflow }: { workflow: Workflow }) {
   const router = useRouter()
   const [open, setOpen] = useState(false)
-  const [runs, setRuns] = useState<WorkflowRun[]>([])
+  const [v1Runs, setV1Runs] = useState<WorkflowRun[]>([])
+  const [v2Runs, setV2Runs] = useState<WorkflowV2Run[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -27,12 +28,18 @@ export function WorkflowRunsDialog({ workflow }: { workflow: Workflow }) {
       if (cancelled) return
       setLoading(true)
       setError(null)
-      setRuns([])
-      fetchCronWorkflowRuns(workflow.workspaceName, workflow.name)
-        .then((response) => {
-          if (cancelled) return
-          setRuns(response.runs || [])
-        })
+      setV1Runs([])
+      setV2Runs([])
+      const fetchRuns = isV2Workflow(workflow)
+        ? fetchV2WorkflowRuns(workflow.workspaceName, workflow.name).then((response) => {
+            if (cancelled) return
+            setV2Runs(response.runs || [])
+          })
+        : fetchCronWorkflowRuns(workflow.workspaceName, workflow.name).then((response) => {
+            if (cancelled) return
+            setV1Runs(response.runs || [])
+          })
+      fetchRuns
         .catch((err) => {
           if (cancelled) return
           if (err instanceof ApiError && err.status === 404) {
@@ -46,7 +53,9 @@ export function WorkflowRunsDialog({ workflow }: { workflow: Workflow }) {
         })
     })
     return () => { cancelled = true }
-  }, [open, workflow.workspaceName, workflow.name])
+  }, [open, workflow])
+
+  const runs = isV2Workflow(workflow) ? v2Runs : v1Runs
 
   return (
     <>
@@ -84,31 +93,57 @@ export function WorkflowRunsDialog({ workflow }: { workflow: Workflow }) {
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {runs.map((run) => (
-                      <TableRow key={run.id}>
-                        <TableCell>
-                          <StatusBadge status={run.status} />
-                        </TableCell>
-                        <TableCell className="text-xs capitalize">{run.trigger_type}</TableCell>
-                        <TableCell className="text-xs text-muted-foreground">
-                          {run.started_at ? formatTimestamp(run.started_at) : "—"}
-                        </TableCell>
-                        <TableCell className="text-xs text-muted-foreground">
-                          {run.finished_at ? formatTimestamp(run.finished_at) : "—"}
-                        </TableCell>
-                        <TableCell className="min-w-[20rem] max-w-lg align-top">
-                          <div className="max-w-full text-xs text-muted-foreground whitespace-pre-wrap break-words leading-relaxed">
-                            {run.result || "—"}
-                          </div>
-                        </TableCell>
-                        <TableCell className="text-xs font-mono text-muted-foreground">
-                          {run.claw_id ? shortId(run.claw_id) : "—"}
-                        </TableCell>
-                        <TableCell>
-                          <WorkflowRunLogsDialog run={run} />
-                        </TableCell>
-                      </TableRow>
-                    ))}
+                    {isV2Workflow(workflow)
+                      ? v2Runs.map((run) => (
+                          <TableRow key={run.attempt_id}>
+                            <TableCell>
+                              <StatusBadge status={run.attempt_status || run.run_status} />
+                            </TableCell>
+                            <TableCell className="text-xs capitalize">{run.trigger_type}</TableCell>
+                            <TableCell className="text-xs text-muted-foreground">
+                              {run.started_at ? formatTimestamp(run.started_at) : "—"}
+                            </TableCell>
+                            <TableCell className="text-xs text-muted-foreground">
+                              {run.finished_at ? formatTimestamp(run.finished_at) : "—"}
+                            </TableCell>
+                            <TableCell className="min-w-[20rem] max-w-lg align-top">
+                              <div className="max-w-full text-xs text-muted-foreground whitespace-pre-wrap break-words leading-relaxed">
+                                {run.display_phase || "—"}
+                              </div>
+                            </TableCell>
+                            <TableCell className="text-xs font-mono text-muted-foreground">
+                              {run.claw_id ? shortId(run.claw_id) : "—"}
+                            </TableCell>
+                            <TableCell>
+                              <WorkflowRunLogsDialog target={{ kind: "v2", run }} />
+                            </TableCell>
+                          </TableRow>
+                        ))
+                      : v1Runs.map((run) => (
+                          <TableRow key={run.id}>
+                            <TableCell>
+                              <StatusBadge status={run.status} />
+                            </TableCell>
+                            <TableCell className="text-xs capitalize">{run.trigger_type}</TableCell>
+                            <TableCell className="text-xs text-muted-foreground">
+                              {run.started_at ? formatTimestamp(run.started_at) : "—"}
+                            </TableCell>
+                            <TableCell className="text-xs text-muted-foreground">
+                              {run.finished_at ? formatTimestamp(run.finished_at) : "—"}
+                            </TableCell>
+                            <TableCell className="min-w-[20rem] max-w-lg align-top">
+                              <div className="max-w-full text-xs text-muted-foreground whitespace-pre-wrap break-words leading-relaxed">
+                                {run.result || "—"}
+                              </div>
+                            </TableCell>
+                            <TableCell className="text-xs font-mono text-muted-foreground">
+                              {run.claw_id ? shortId(run.claw_id) : "—"}
+                            </TableCell>
+                            <TableCell>
+                              <WorkflowRunLogsDialog target={{ kind: "v1", run }} />
+                            </TableCell>
+                          </TableRow>
+                        ))}
                   </TableBody>
                 </Table>
               </div>

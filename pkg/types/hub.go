@@ -14,6 +14,7 @@ type Claw struct {
 	LastSeen            time.Time      `json:"last_seen" db:"last_seen"`
 	CreatedAt           time.Time      `json:"created_at" db:"created_at"`
 	ContextUsage        int            `json:"context_usage"`
+	OpenPRCount         int            `json:"open_pr_count"`
 	BootstrapStatus     string         `json:"bootstrap_status,omitempty"`
 	BootstrapDiagnostic string         `json:"bootstrap_diagnostic,omitempty"`
 	GitHubIssueID       string         `json:"github_issue_id,omitempty"`
@@ -23,6 +24,12 @@ type Claw struct {
 	SSHHost             string         `json:"ssh_host,omitempty"`
 	SSHPort             int            `json:"ssh_port,omitempty"`
 	SSHUser             string         `json:"ssh_user,omitempty"`
+	// LLMLimitedUntil is set while this agent's model provider is out of
+	// allowance, and carries the instant access returns. The dashboard shows
+	// it on the agent itself: a fleet-wide badge tells an operator something
+	// is wrong somewhere, but the question they actually have is "why is THIS
+	// agent silent", and it has to be answerable without opening the chat.
+	LLMLimitedUntil *time.Time `json:"llm_limited_until,omitempty"`
 }
 
 // HubMessage is a message exchanged between a claw and a user.
@@ -33,6 +40,7 @@ type HubMessage struct {
 	Role      string    `json:"role" db:"role"` // "user" | "claw"
 	Content   string    `json:"content" db:"content"`
 	Format    string    `json:"format,omitempty" db:"format"` // "pre" = preserve whitespace
+	UserLogin *string   `json:"user_login,omitempty" db:"user_login"`
 	CreatedAt time.Time `json:"created_at" db:"created_at"`
 }
 

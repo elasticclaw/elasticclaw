@@ -3,6 +3,8 @@ import type {
   ApiMessage,
   AnalyticsCostDriver,
   AnalyticsEffectiveness,
+  AnalyticsTicket,
+  AnalyticsTicketsResponse,
   CostOverview,
   CreateClawRequest,
   DependencyStatusResponse,
@@ -14,9 +16,12 @@ import type {
   TaskRunFilterOptions,
   TaskRunOutput,
   TaskRunPR,
+  TaskRunStage,
   TaskRunsResponse,
   TaskRunSummary,
   WorkflowRunsResponse,
+  WorkflowV2RunAttempt,
+  WorkflowV2RunsResponse,
 } from "./types"
 import { getHubUrl, setHubUrl } from "./hub-url"
 import { getAuthToken, requestAuthToken, clearAuthTokens } from "./auth-storage"
@@ -266,7 +271,13 @@ export interface ClawPR {
   repo: string
   prNumber: number
   url: string
+  title: string
   createdAt: string
+  state: "open" | "merged" | "closed"
+  merged: boolean
+  mergedAt?: string
+  /** True for PR URLs the agent merely mentioned in a message; only delivered PRs (false) gate claw finalization. */
+  mentionOnly: boolean
 }
 
 export async function fetchClawPRs(clawId: string): Promise<ClawPR[]> {
@@ -304,6 +315,7 @@ export interface WorkspaceAccess {
 export interface Workflow {
   name: string
   workspaceName: string
+  schemaVersion?: string
   source: string
   integration: string
   integrationWorkspace?: string
@@ -368,6 +380,35 @@ export async function fetchCronWorkflowRuns(workspaceName: string, workflowName:
   return apiFetch<WorkflowRunsResponse>(
     `/api/workspaces/${encodeURIComponent(workspaceName)}/workflows/${encodeURIComponent(workflowName)}/cron/runs?limit=${limit}`
   )
+}
+
+export async function fetchV2WorkflowRuns(workspaceName: string, workflowName: string, limit = 50): Promise<WorkflowV2RunsResponse> {
+  return apiFetch<WorkflowV2RunsResponse>(
+    `/api/v2/workspaces/${encodeURIComponent(workspaceName)}/workflows/${encodeURIComponent(workflowName)}/runs?limit=${limit}`
+  )
+}
+
+export async function fetchV2WorkflowRunAttempts(runId: string): Promise<{ attempts: WorkflowV2RunAttempt[]; count: number }> {
+  return apiFetch<{ attempts: WorkflowV2RunAttempt[]; count: number }>(`/api/v2/workflow-runs/${encodeURIComponent(runId)}/attempts`)
+}
+
+export async function fetchV2WorkflowRunLogs(runId: string, before?: string): Promise<ApiMessage[]> {
+  const qs = new URLSearchParams({ limit: "100", order: "desc" })
+  if (before) qs.set("before", before)
+  return apiFetch<ApiMessage[]>(`/api/v2/workflow-runs/${encodeURIComponent(runId)}/logs?${qs.toString()}`)
+}
+
+export async function fetchV2WorkflowAttemptLogs(runId: string, attemptId: string, before?: string): Promise<ApiMessage[]> {
+  const qs = new URLSearchParams({ limit: "100", order: "desc" })
+  if (before) qs.set("before", before)
+  return apiFetch<ApiMessage[]>(
+    `/api/v2/workflow-runs/${encodeURIComponent(runId)}/attempts/${encodeURIComponent(attemptId)}/logs?${qs.toString()}`
+  )
+}
+
+export function isV2Workflow(workflow: Workflow): boolean {
+  const v = (workflow.schemaVersion || "").trim().toLowerCase()
+  return v === "2" || v === "v2"
 }
 
 function taskRunAnalyticsQuery(filters?: TaskRunAnalyticsFilters): string {
@@ -452,8 +493,17 @@ export async function fetchTaskRuns(filters?: TaskRunAnalyticsFilters, options?:
   return apiFetch<TaskRunsResponse>(`/api/analytics/runs${appendViewerTimezone(taskRunAnalyticsQuery(filters))}`, options)
 }
 
-export async function fetchTaskRun(runId: string): Promise<{ run: TaskRunSummary }> {
-  return apiFetch<{ run: TaskRunSummary }>(`/api/analytics/runs/${encodeURIComponent(runId)}${appendViewerTimezone("")}`)
+export async function fetchAnalyticsTickets(filters?: TaskRunAnalyticsFilters, options?: AnalyticsRequestOptions): Promise<AnalyticsTicketsResponse> {
+  return apiFetch<AnalyticsTicketsResponse>(`/api/analytics/tickets${appendViewerTimezone(taskRunAnalyticsQuery(filters))}`, options)
+}
+
+export async function fetchAnalyticsTicket(ticketKey: string, filters?: TaskRunAnalyticsFilters, options?: AnalyticsRequestOptions): Promise<{ ticket: AnalyticsTicket }> {
+  const query = appendViewerTimezone(taskRunAnalyticsQuery(filters))
+  return apiFetch<{ ticket: AnalyticsTicket }>(`/api/analytics/tickets${query}${query ? "&" : "?"}key=${encodeURIComponent(ticketKey)}`, options)
+}
+
+export async function fetchTaskRun(runId: string): Promise<{ run: TaskRunSummary; stages?: TaskRunStage[] }> {
+  return apiFetch<{ run: TaskRunSummary; stages?: TaskRunStage[] }>(`/api/analytics/runs/${encodeURIComponent(runId)}${appendViewerTimezone("")}`)
 }
 
 export async function fetchTaskRunAttempts(runId: string): Promise<{ attempts: TaskRunAttempt[] }> {
@@ -468,8 +518,8 @@ export async function fetchTaskRunPRs(runId: string): Promise<{ prs: TaskRunPR[]
   return apiFetch<{ prs: TaskRunPR[] }>(`/api/analytics/runs/${encodeURIComponent(runId)}/prs`)
 }
 
-export async function fetchTaskRunOutputs(runId: string): Promise<{ outputs: TaskRunOutput[] }> {
-  return apiFetch<{ outputs: TaskRunOutput[] }>(`/api/analytics/runs/${encodeURIComponent(runId)}/outputs`)
+export async function fetchTaskRunOutputs(runId: string): Promise<{ outputs: TaskRunOutput[]; traceId?: string }> {
+  return apiFetch<{ outputs: TaskRunOutput[]; traceId?: string }>(`/api/analytics/runs/${encodeURIComponent(runId)}/outputs`)
 }
 
 export async function fetchTaskRunFilterOptions(options?: AnalyticsRequestOptions): Promise<TaskRunFilterOptions> {

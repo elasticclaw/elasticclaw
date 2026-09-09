@@ -127,6 +127,7 @@ func (s *Server) runDoctorChecks(ctx context.Context) DoctorResponse {
 	// --- Notifications ---
 	checks = append(checks, s.checkNotifications(hubCfg)...)
 	checks = append(checks, s.checkNotifyActions(hubCfg)...)
+	checks = append(checks, s.checkInfraDeliveries(ctx)...)
 
 	// --- Hub Settings ---
 	checks = append(checks, s.checkHubSettings(hubCfg)...)
@@ -1223,16 +1224,35 @@ func (s *Server) checkNotifications(cfg *types.HubConfig) []DoctorCheck {
 		return nil
 	}
 	var checks []DoctorCheck
-	if err := types.ValidateNotificationsConfig(nCfg); err != nil {
+	// The two per-feature validators, not the composed one: each minute tick
+	// gates on the validity of its own feature's config only, so a defect
+	// confined to the lifecycle block pauses lifecycle alerts while scheduled
+	// reports keep delivering, and vice versa. One composed "no notifications
+	// will be delivered" row would be wrong in both directions; these two rows
+	// each describe exactly what its tick's gate actually pauses, mirroring
+	// the two tick log lines.
+	if err := types.ValidateLifecycleNotificationsConfig(nCfg); err != nil {
 		checks = append(checks, DoctorCheck{
 			Category:    "notifications",
 			Severity:    "critical",
-			Title:       "Notifications config invalid",
-			Description: "No notifications will be delivered until this is fixed in hub.yaml.",
+			Title:       "Lifecycle notifications config invalid",
+			Description: "No lifecycle notifications will be delivered until this is fixed in hub.yaml.",
 			OK:          false,
 			Error:       err.Error(),
 		})
-		return checks
+	}
+	if err := types.ValidateScheduledNotificationsConfig(nCfg); err != nil {
+		checks = append(checks, DoctorCheck{
+			Category:    "notifications",
+			Severity:    "critical",
+			Title:       "Scheduled reports config invalid",
+			Description: "No scheduled reports will be delivered until this is fixed in hub.yaml.",
+			OK:          false,
+			Error:       err.Error(),
+		})
+	}
+	if err := types.ValidateInfraNotificationsConfig(nCfg); err != nil {
+		checks = append(checks, DoctorCheck{Category: "notifications", Severity: "critical", Title: "Infrastructure notifications config invalid", Description: "No infrastructure notifications will be delivered until this is fixed in hub.yaml.", OK: false, Error: err.Error()})
 	}
 
 	secrets := func(name string) (string, bool) {
@@ -1277,7 +1297,236 @@ func (s *Server) checkNotifications(cfg *types.HubConfig) []DoctorCheck {
 			OK:          true,
 		})
 	}
+
+	// Lifecycle delivery only uses EffectiveRoutes. Check every one separately
+	// so a bad secondary route is visible even when another route is healthy.
+	// This intentionally complements (rather than replaces) the full config
+	// validation above: malformed configs still get their structural error.
+	// Gated on IsEnabled for the same reason ValidateNotificationsConfig is: a
+	// muted lifecycle block may legitimately point at a notifier the operator
+	// has since deleted ("an operator who mutes alerts and then deletes the
+	// notifier must not be left with a hub that refuses to load"), and nothing
+	// is delivered through those routes anyway.
+	if nCfg.Lifecycle.IsEnabled() {
+		for i, route := range nCfg.Lifecycle.EffectiveRoutes() {
+			via := strings.TrimSpace(route.Via)
+			label := fmt.Sprintf("Lifecycle route %d (%q)", i+1, via)
+			nc, ok := nCfg.Notifiers[via]
+			if via == "" || !ok {
+				checks = append(checks, DoctorCheck{
+					Category: "notifications", Severity: "critical", OK: false,
+					Title:       label + " names an unknown notifier",
+					Description: "This lifecycle route will not deliver messages until its via names a configured notifier.",
+				})
+				continue
+			}
+			channel, _ := s.notifierSettings(nc)["channel"].(string)
+			if strings.TrimSpace(channel) == "" {
+				checks = append(checks, DoctorCheck{
+					Category: "notifications", Severity: "critical", OK: false,
+					Title:       label + " has no channel",
+					Description: fmt.Sprintf("Notifier %q needs a channel for this lifecycle route.", via),
+				})
+				continue
+			}
+			if _, err := notify.New(nc.Type, s.notifierSettings(nc), secrets); err != nil {
+				checks = append(checks, DoctorCheck{
+					Category: "notifications", Severity: "critical", OK: false,
+					Title:       label + " is not constructible",
+					Description: fmt.Sprintf("Messages for this lifecycle route through notifier %q will not be delivered.", via),
+					Error:       err.Error(),
+				})
+				continue
+			}
+			checks = append(checks, DoctorCheck{
+				Category: "notifications", Severity: "info", OK: true,
+				Title:       label + " is configured",
+				Description: fmt.Sprintf("Notifier %q constructed successfully and has a channel.", via),
+			})
+		}
+	}
+
+	// Infrastructure routes are global hub alerts, so their secrets resolve in
+	// the hub scope just like lifecycle routes. Check each destination here:
+	// passing structural validation alone cannot prove a real outage can post.
+	if nCfg.Infra.IsEnabled() {
+		for i, route := range nCfg.Infra.Routes {
+			via := strings.TrimSpace(route.Via)
+			label := fmt.Sprintf("Infrastructure route %d (%q)", i+1, via)
+			nc, ok := nCfg.Notifiers[via]
+			if via == "" || !ok {
+				checks = append(checks, DoctorCheck{Category: "notifications", Severity: "critical", OK: false, Title: label + " names an unknown notifier", Description: "This infrastructure route will not deliver messages until its via names a configured notifier."})
+				continue
+			}
+			channel, _ := s.notifierSettings(nc)["channel"].(string)
+			if strings.TrimSpace(channel) == "" {
+				checks = append(checks, DoctorCheck{Category: "notifications", Severity: "critical", OK: false, Title: label + " has no channel", Description: fmt.Sprintf("Notifier %q needs a channel for this infrastructure route.", via)})
+				continue
+			}
+			if _, err := notify.New(nc.Type, s.notifierSettings(nc), secrets); err != nil {
+				checks = append(checks, DoctorCheck{Category: "notifications", Severity: "critical", OK: false, Title: label + " is not constructible", Description: fmt.Sprintf("Infrastructure alerts through notifier %q will not be delivered.", via), Error: err.Error()})
+				continue
+			}
+			checks = append(checks, DoctorCheck{Category: "notifications", Severity: "info", OK: true, Title: label + " is configured", Description: fmt.Sprintf("Notifier %q constructed successfully and has a channel.", via)})
+		}
+	}
+
+	// Provider caps used to page through the lifecycle agent_idle event. They
+	// are infrastructure events now, and a hub configured before that change
+	// routes agent_idle somewhere but provider caps nowhere: the claws park,
+	// the dashboard shows the badge, and nobody is paged. That is exactly the
+	// silence the old route existed to break, so it is said here rather than
+	// discovered during the next cap.
+	if lifecycleRoutesAgentIdle(nCfg.Lifecycle) && !infraRoutesProviderLimits(nCfg.Infra) {
+		checks = append(checks, DoctorCheck{
+			Category: "notifications", Severity: "critical", OK: false,
+			Title:       "Provider cap alerts have no route",
+			Description: "Lifecycle alerts route agent_idle, but a provider usage limit no longer fires it: caps are infrastructure events (provider_limit_opened, provider_limit_exhausted, provider_limit_released) and no infrastructure route receives them. A capped provider account parks its claws without paging anyone until notifications.infra has a route for those events.",
+		})
+	}
+
+	// Scheduled reports. A disabled schedule delivers nothing, so its report
+	// and destination checks are skipped: an operator who pauses a schedule
+	// before deleting the notifier (or before upgrading to a build that
+	// carries the report) must not be nagged about a slot that never fires.
+	// But the tick's whole-block gate (ValidateScheduledNotificationsConfig)
+	// judges EVERY entry regardless of Enabled, plus the cross-entry
+	// duplicate-id rule ValidateScheduledNotification excludes — so entry
+	// validity and id uniqueness are checked on disabled entries too (the very
+	// entry pausing every schedule must get its own critical row), and no
+	// entry may show a green row while the block is rejected and the tick
+	// delivers nothing.
+	scheduledBlockErr := types.ValidateScheduledNotificationsConfig(nCfg)
+	seenScheduledIDs := make(map[string]int, len(nCfg.Scheduled))
+	for i, scheduled := range nCfg.Scheduled {
+		label := fmt.Sprintf("Scheduled report %d (%q)", i+1, scheduled.ID)
+		duplicateOf, duplicate := seenScheduledIDs[scheduled.ID]
+		if !duplicate {
+			seenScheduledIDs[scheduled.ID] = i + 1
+		}
+		if scheduled.Enabled != nil && !*scheduled.Enabled {
+			if err := types.ValidateScheduledNotification(nCfg, i); err != nil {
+				checks = append(checks, DoctorCheck{
+					Category: "notifications", Severity: "critical", OK: false,
+					Title:       label + " is invalid",
+					Description: "The scheduled notifier pauses every schedule while any entry fails validation, even a disabled one; fix or remove this entry.",
+					Error:       err.Error(),
+				})
+			} else if duplicate {
+				checks = append(checks, scheduledDuplicateIDCheck(label, duplicateOf))
+			}
+			continue
+		}
+		if !ScheduledReportSupported(scheduled.Report) {
+			checks = append(checks, DoctorCheck{
+				Category: "notifications", Severity: "critical", OK: false,
+				Title: label + " names an unknown report",
+				Description: fmt.Sprintf("This hub has no report named %q, so nothing is ever sent for this schedule. Supported reports: %s.",
+					scheduled.Report, scheduledReportNamesText()),
+			})
+			continue
+		}
+		// Each destination gets the same per-destination checks a lifecycle
+		// route gets (channel presence, notifier constructibility): a runtime
+		// send through a channel-less notifier fails permanently and silently
+		// burns the slot, so doctor must not report the schedule green.
+		badVia := false
+		for _, via := range scheduled.Via {
+			nc, ok := nCfg.Notifiers[strings.TrimSpace(via)]
+			if !ok {
+				checks = append(checks, DoctorCheck{
+					Category: "notifications", Severity: "critical", OK: false,
+					Title:       label + " sends to an unknown notifier",
+					Description: fmt.Sprintf("Destination %q is not a configured notifier, so this schedule delivers nothing there.", via),
+				})
+				badVia = true
+				continue
+			}
+			channel, _ := s.notifierSettings(nc)["channel"].(string)
+			if strings.TrimSpace(channel) == "" {
+				checks = append(checks, DoctorCheck{
+					Category: "notifications", Severity: "critical", OK: false,
+					Title:       fmt.Sprintf("%s destination %q has no channel", label, via),
+					Description: fmt.Sprintf("Notifier %q needs a channel for this schedule's reports to be delivered.", via),
+				})
+				badVia = true
+				continue
+			}
+			if _, err := notify.New(nc.Type, s.notifierSettings(nc), secrets); err != nil {
+				checks = append(checks, DoctorCheck{
+					Category: "notifications", Severity: "critical", OK: false,
+					Title:       fmt.Sprintf("%s destination %q is not constructible", label, via),
+					Description: fmt.Sprintf("Reports for this schedule through notifier %q will not be delivered.", via),
+					Error:       err.Error(),
+				})
+				badVia = true
+			}
+		}
+		if badVia {
+			continue
+		}
+		// The slot fields (at/timezone/weekdays) the destination checks above
+		// never touch: an invalid one fails the scheduled tick's validity gate
+		// — pausing EVERY schedule, not just this one — so the very entry
+		// causing the pause must not get the green row below. Runs after the
+		// via checks so their more specific rows keep precedence.
+		if err := types.ValidateScheduledNotification(nCfg, i); err != nil {
+			checks = append(checks, DoctorCheck{
+				Category: "notifications", Severity: "critical", OK: false,
+				Title:       label + " is invalid",
+				Description: "The scheduled notifier pauses every schedule while any entry fails validation; fix or remove this one.",
+				Error:       err.Error(),
+			})
+			continue
+		}
+		if duplicate {
+			checks = append(checks, scheduledDuplicateIDCheck(label, duplicateOf))
+			continue
+		}
+		if scheduledBlockErr != nil {
+			// This entry is healthy, but the tick's gate rejects the whole
+			// block: a green "is configured" row would contradict the
+			// section-level critical row while nothing is delivered.
+			checks = append(checks, DoctorCheck{
+				Category: "notifications", Severity: "warning", OK: false,
+				Title:       label + " is paused while the scheduled block is invalid",
+				Description: "This entry is configured correctly, but the scheduled notifier pauses every schedule until the invalid entry flagged above is fixed.",
+			})
+			continue
+		}
+		checks = append(checks, DoctorCheck{
+			Category: "notifications", Severity: "info", OK: true,
+			Title: label + " is configured",
+			Description: fmt.Sprintf("Report %s is sent to %s at %s.",
+				scheduled.Report, strings.Join(scheduled.Via, ", "), scheduledSlotDescription(scheduled)),
+		})
+	}
 	return checks
+}
+
+// scheduledDuplicateIDCheck is the per-entry row for a schedule reusing an
+// earlier entry's id — the one rule ValidateScheduledNotification excludes
+// (it needs the whole list), yet one the tick's whole-block gate enforces.
+func scheduledDuplicateIDCheck(label string, duplicateOf int) DoctorCheck {
+	return DoctorCheck{
+		Category: "notifications", Severity: "critical", OK: false,
+		Title: label + " duplicates another schedule's id",
+		Description: fmt.Sprintf("Schedule ids key delivery state, and the scheduled notifier pauses every schedule while two entries share one (here with scheduled report %d). Give this entry a unique id.",
+			duplicateOf),
+	}
+}
+
+// scheduledSlotDescription renders a schedule's slot for doctor output.
+func scheduledSlotDescription(scheduled types.ScheduledNotificationConfig) string {
+	timezone := scheduled.Timezone
+	if timezone == "" {
+		timezone = "UTC"
+	}
+	days := "every day"
+	if len(scheduled.Weekdays) > 0 {
+		days = strings.Join(scheduled.Weekdays, ", ")
+	}
+	return fmt.Sprintf("%s %s, %s", scheduled.At, timezone, days)
 }
 
 // checkNotifyActions validates every pipeline notify action the way the
@@ -1447,4 +1696,46 @@ func (s *Server) checkHubSettings(cfg *types.HubConfig) []DoctorCheck {
 	}
 
 	return checks
+}
+
+// lifecycleRoutesAgentIdle reports whether an enabled lifecycle block would
+// deliver agent_idle: some route carries it (or receives everything) and the
+// per-event toggle has not muted it.
+func lifecycleRoutesAgentIdle(lc *types.LifecycleNotificationsConfig) bool {
+	if !lc.IsEnabled() {
+		return false
+	}
+	if lc.Events != nil && lc.Events.AgentIdle != nil && !*lc.Events.AgentIdle {
+		return false
+	}
+	for _, route := range lc.EffectiveRoutes() {
+		if len(route.Events) == 0 {
+			return true
+		}
+		for _, event := range route.Events {
+			if event == taskRunEventAgentIdle {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// infraRoutesProviderLimits reports whether an enabled infra block delivers
+// at least one provider_limit_* event somewhere.
+func infraRoutesProviderLimits(ic *types.InfraNotificationsConfig) bool {
+	if !ic.IsEnabled() {
+		return false
+	}
+	for _, route := range ic.Routes {
+		if len(route.Events) == 0 {
+			return true
+		}
+		for _, event := range route.Events {
+			if strings.HasPrefix(event, "provider_limit_") {
+				return true
+			}
+		}
+	}
+	return false
 }

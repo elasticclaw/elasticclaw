@@ -4,7 +4,7 @@ import { useParams, usePathname, useRouter } from "next/navigation"
 import React, { useEffect, useState, useCallback, useRef } from "react"
 import { getHubUrl } from "@/lib/hub-url"
 import { getAuthToken } from "@/lib/auth-storage"
-import { Cpu, Key, Github, ChevronLeft, Shield, Zap, Copy, Check, LayoutTemplate, Trash2, Lock, Sparkles, Send, RotateCcw, Eye, EyeOff, ExternalLink, AlertTriangle, X, CheckCircle2, Webhook, Stethoscope, ArrowRight, Wrench, GitBranch, ChevronDown } from "lucide-react"
+import { Cpu, Key, Github, ChevronLeft, Shield, Zap, Copy, Check, LayoutTemplate, Trash2, Lock, Sparkles, Send, RotateCcw, Eye, EyeOff, ExternalLink, AlertTriangle, X, CheckCircle2, Webhook, Stethoscope, ArrowRight, Wrench, GitBranch, ChevronDown, Bell, Clock } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Switch } from "@/components/ui/switch"
@@ -16,6 +16,7 @@ import { fetchWorkspaces, updateWorkflowControls, type RepositoryAccess, type Wo
 import { useBranding } from "@/hooks/use-branding"
 import { WorkflowName } from "@/components/workflow-name"
 import { WorkflowRunsDialog } from "@/components/workflow-runs-dialog"
+import { INFRA_EVENT_TYPES, type InfraEventType, type InfraNotificationsConfig, type InfraRoute } from "@/lib/types"
 
 function isValidSection(s: string): s is Section {
   return VALID_SECTIONS.includes(s as Section)
@@ -159,6 +160,9 @@ interface SettingsData {
     }
     disablePasswordAuth?: boolean
   }
+  notifications?: NotificationsView | null
+  lifecycleEventTypes?: string[]
+  infraEventTypes?: InfraEventType[]
   concurrencyGroups?: ConcurrencyGroup[]
   maxConcurrentClaws?: number
 }
@@ -167,6 +171,76 @@ interface ConcurrencyGroup {
   name: string
   limit: number
 }
+
+// Outbound notification config, as returned by GET /api/settings. Notifier
+// settings are provider-specific and inline next to the type, so they keep the
+// snake_case wire names the hub reads them under. The lifecycle block is the
+// redacted view, and every one of its fields round-trips under the same name
+// the PATCH payload (types.LifecycleNotificationsConfig) reads it under.
+interface NotifierView {
+  type: string
+  channel?: string
+  token_secret?: string
+  api_base?: string
+  min_send_interval?: string
+}
+
+interface LifecycleRouteView {
+  via: string
+  // An empty (or absent) event list is an allow-all: the channel receives
+  // every lifecycle alert type.
+  events?: string[]
+}
+
+interface LifecycleEventToggles {
+  agentStarted?: boolean
+  prOpened?: boolean
+  failures?: boolean
+  agentIdle?: boolean
+  stageStalled?: boolean
+}
+
+// One recurring report, as returned by GET /api/settings and read back by
+// PATCH. Every field round-trips under the name the hub decodes it under
+// (types.ScheduledNotificationConfig), and the hub resolves both defaults it
+// carries before sending it here: `enabled` is always a real boolean, and
+// `weekdays` is always an array — empty meaning every day.
+interface ScheduledNotificationView {
+  id: string
+  report: string
+  via: string[]
+  at: string
+  timezone?: string
+  weekdays: string[]
+  enabled: boolean
+}
+
+interface NotificationsView {
+  notifiers?: Record<string, NotifierView>
+  scheduled?: ScheduledNotificationView[]
+  lifecycle?: {
+    enabled: boolean
+    // Legacy single-channel field, superseded by routes. The hub clears it as
+    // soon as a patch carries routes.
+    via?: string
+    routes?: LifecycleRouteView[]
+    pollInterval?: string
+    idleAfter?: string
+    stageProgressAfter?: string
+    events?: LifecycleEventToggles
+  }
+  infra?: InfraNotificationsConfig
+}
+
+// The outcome of one save. `persisted` says whether the hub accepted the PATCH;
+// `message` is what to show, which is non-null both for a rejected PATCH and
+// for an accepted one whose follow-up re-read failed.
+type SaveOutcome = { persisted: boolean; message: string | null }
+
+// What every screen says once the loaded settings can no longer be trusted. A
+// reload is the only repair: the snapshot the patches are built from is stale,
+// and this page has no other way to re-read it than the one that just failed.
+const STALE_SETTINGS_MESSAGE = "Reload the page before editing again — until then every save is refused, because it would re-send the settings this screen last read and revert what the hub now holds."
 
 async function fetchSettings(): Promise<SettingsData> {
   const hubUrl = getHubUrl()
@@ -251,6 +325,13 @@ export default function SettingsSectionPage() {
 
   const [settings, setSettings] = useState<SettingsData | null>(null)
   const [saving, setSaving] = useState(false)
+  // Latched when a save landed but its follow-up re-read did not: `settings`
+  // then describes a hub that has already moved on, and every section builds
+  // its next patch from that snapshot — the next save would re-send the values
+  // this one replaced, recreating a channel the operator just deleted under a
+  // green "Saved". A ref, not state: the gate has to hold for a save started
+  // from the same render as the one that failed.
+  const staleSettings = useRef(false)
   const [error, setError] = useState("")
   const [success, setSuccess] = useState("")
   const [version, setVersion] = useState("")
@@ -260,14 +341,13 @@ export default function SettingsSectionPage() {
   const selectedWorkspaceLabel = selectedWorkspace || "No workspaces"
   const selectedWorkspaceInitial = selectedWorkspace ? selectedWorkspace.trim()[0].toUpperCase() : "-"
 
-  const load = useCallback(
-    () => fetchSettings()
-      .then((data) => setSettings(data))
-      .catch((e) => setError(e instanceof Error ? e.message : "Failed to load")),
-    [],
-  )
+  // Rejects on failure: the re-fetch that follows a save is part of the save,
+  // not bookkeeping after it (see runSave), so its caller has to see the error.
+  const load = useCallback(() => fetchSettings().then((data) => setSettings(data)), [])
 
-  useEffect(() => { load() }, [load])
+  useEffect(() => {
+    load().catch((e) => setError(e instanceof Error ? e.message : "Failed to load"))
+  }, [load])
 
   useEffect(() => {
     const hubUrl = getHubUrl()
@@ -309,22 +389,67 @@ export default function SettingsSectionPage() {
     }
   }, [firstPartIsPlaceholder, routeHasOverviewSlug, routeWorkspace, router, section, selectedWorkspace, workspaces])
 
-  async function save(patch: object): Promise<boolean> {
+  // runSave patches the settings and re-fetches them, returning null on success
+  // or the message to show. The re-fetch is not optional bookkeeping: every
+  // section builds its next patch from `settings`, so a swallowed reload
+  // failure leaves the screen editing a snapshot the hub has already moved
+  // past, and the next save re-sends those stale values — reverting whatever
+  // this one just persisted. Report it as a failed save so the dialog that
+  // triggered it stays open instead of closing on data it can no longer trust.
+  //
+  // `persisted` separates the two failures: the hub is unchanged only when the
+  // PATCH itself was rejected. A caller that records what the hub now holds —
+  // the notifier section's clamped-pause flag — has to write it either way, or
+  // a re-read that failed after an accepted PATCH loses the record of a value
+  // this screen wrote on its own initiative.
+  async function runSave(patch: object): Promise<SaveOutcome> {
+    if (staleSettings.current) {
+      // Reporting it again is all this can do: the snapshot every patch is
+      // built from is stale, so sending one would revert whatever the save
+      // whose re-read failed had persisted.
+      return { persisted: false, message: STALE_SETTINGS_MESSAGE }
+    }
     setSaving(true)
     setError("")
     setSuccess("")
     try {
-      await patchSettings(patch)
+      try {
+        await patchSettings(patch)
+      } catch (e) {
+        return { persisted: false, message: e instanceof Error ? e.message : "Save failed" }
+      }
+      try {
+        await load()
+      } catch (e) {
+        const reason = e instanceof Error ? e.message : "the settings could not be re-read"
+        staleSettings.current = true
+        return {
+          persisted: true,
+          message: `Saved, but reloading the settings failed (${reason}). ${STALE_SETTINGS_MESSAGE}`,
+        }
+      }
       setSuccess("Saved")
-      await load()
       setTimeout(() => setSuccess(""), 2000)
-      return true
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Save failed")
-      return false
+      return { persisted: true, message: null }
     } finally {
       setSaving(false)
     }
+  }
+
+  async function save(patch: object): Promise<boolean> {
+    const { message } = await runSave(patch)
+    if (message) setError(message)
+    return message === null
+  }
+
+  // save(), but handing the failure message back to the caller. The page-level
+  // banner lives inside <main>, which sits behind a modal overlay — a section
+  // that saves from its own dialog has to render the error there instead, or
+  // the button looks dead.
+  async function saveReportingError(patch: object): Promise<SaveOutcome> {
+    const outcome = await runSave(patch)
+    if (outcome.message) setError(outcome.message)
+    return outcome
   }
 
   // Silent save: patches without the global 'Saved' banner (used for toggle-style updates)
@@ -355,6 +480,7 @@ export default function SettingsSectionPage() {
         { id: "runtimes", label: "Sandboxes", icon: Cpu },
         { id: "models", label: "Models", icon: Key },
         { id: "authentication", label: "Authentication", icon: Shield },
+        { id: "notifier", label: "Notifier", icon: Bell },
         { id: "ai-config", label: "Configure with AI", icon: Sparkles },
       ],
     },
@@ -480,6 +606,9 @@ export default function SettingsSectionPage() {
           )}
           {settings && section === "mcp-servers" && (
             <MCPServersSection settings={settings} onSave={save} saving={saving} />
+          )}
+          {settings && section === "notifier" && (
+            <NotifierSection settings={settings} onSave={saveReportingError} saving={saving} />
           )}
           {section === "ai-config" && (
             <AIConfigSection />
@@ -3257,21 +3386,61 @@ function SecretsSection({ settings, workspace }: { settings: SettingsData | null
   const [newValue, setNewValue] = useState("")
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [loading, setLoading] = useState(true)
+  const [reloading, setReloading] = useState(true)
+  const [loadedPath, setLoadedPath] = useState("")
+
+  // Two stores live behind this screen and only one of them was reachable: the
+  // workspace file, and hub.yaml's top-level `secrets`. Hub secrets are what
+  // notifier token_secret references resolve against, so without this scope a
+  // hub with any workspace has no way at all to create the secret the Notifier
+  // screen requires.
+  //
+  // The default tracks the operator's CHOICE, not the `workspace` prop: the
+  // workspace list is fetched after the first render, so seeding state from the
+  // prop would latch "Hub" on every direct load of /settings/secrets and write
+  // hub.yaml secrets while the screen still said Workspace was available.
+  const [scopeChoice, setScopeChoice] = useState<"workspace" | "hub" | null>(null)
+  const scoped = Boolean(workspace) && scopeChoice !== "hub"
 
   const hubUrl = getHubUrl()
   const token = () => getAuthToken() || ""
-  const secretsPath = workspace ? `/api/workspaces/${encodeURIComponent(workspace)}/secrets` : "/api/secrets"
+  const secretsPath = scoped ? `/api/workspaces/${encodeURIComponent(workspace)}/secrets` : "/api/secrets"
+  // Switching scope must not leave the other store's names on screen while the
+  // new one loads. Derived from the path the list was last loaded for rather
+  // than set at the head of `refresh`, which the mount effect calls straight
+  // from its body — a synchronous setState there is what
+  // react-hooks/set-state-in-effect rejects.
+  const loading = reloading || loadedPath !== secretsPath
+
+  // The scope switch changes `secretsPath` within one mount, so two refreshes
+  // can be in flight at once and resolve out of order. The loser would render
+  // one store's names under the other store's heading — and Delete, which uses
+  // the render-time path, would then aim at the wrong endpoint.
+  const refreshGeneration = useRef(0)
 
   const refresh = useCallback(async () => {
+    const generation = ++refreshGeneration.current
     try {
       const res = await fetch(`${hubUrl}${secretsPath}`, { headers: { Authorization: `Bearer ${token()}` } })
       if (res.ok) {
         const data = await res.json()
+        if (generation !== refreshGeneration.current) return
         setSecrets(data.secrets || [])
+        setError(null)
+      } else {
+        const message = await res.text()
+        if (generation !== refreshGeneration.current) return
+        // Keeping the other store's names on screen is worse than an empty
+        // list: they read as this scope's secrets, and a workspace name picked
+        // as a notifier token_secret is one the hub can never resolve.
+        setError(message)
+        setSecrets([])
       }
     } finally {
-      setLoading(false)
+      if (generation === refreshGeneration.current) {
+        setLoadedPath(secretsPath)
+        setReloading(false)
+      }
     }
   }, [hubUrl, secretsPath])
 
@@ -3312,9 +3481,17 @@ function SecretsSection({ settings, workspace }: { settings: SettingsData | null
     <div className="space-y-6">
       <div>
         <h2 className="text-base font-semibold mb-1">Secrets</h2>
-        <p className="text-sm text-muted-foreground mb-6">
-          Named secrets for workspace <code className="bg-muted px-1 rounded text-xs">{workspace || "default"}</code>. Values are stored on the hub and referenced from workspace env or workflow secret refs.
+        <p className="text-sm text-muted-foreground mb-4">
+          {scoped
+            ? <>Named secrets for workspace <code className="bg-muted px-1 rounded text-xs">{workspace}</code>. Values are stored on the hub and referenced from workspace env or workflow secret refs.</>
+            : <>Hub-wide secrets, stored in the hub config. These are what hub-level references resolve against — notifier bot tokens (Settings → Notifier) among them.</>}
         </p>
+        {Boolean(workspace) && (
+          <div className="flex items-center gap-1 mb-6">
+            <Button size="sm" variant={scoped ? "secondary" : "ghost"} onClick={() => setScopeChoice("workspace")}>Workspace</Button>
+            <Button size="sm" variant={scoped ? "ghost" : "secondary"} onClick={() => setScopeChoice("hub")}>Hub</Button>
+          </div>
+        )}
       </div>
 
       <div className="border border-border rounded-lg divide-y divide-border">
@@ -4370,7 +4547,2834 @@ function MCPServersSection({ settings, onSave, saving }: { settings: SettingsDat
   )
 }
 
+// ── Notifier ─────────────────────────────────────────────────────────────────
+
+// Labels mirror the headlines the hub actually posts, so what an operator
+// checks here is what they will read in the channel. The list is deliberately
+// the hub's routable vocabulary (types.LifecycleEventTypes) and nothing more:
+// the concrete failure kinds ("Couldn't get a machine", "Agent ran out of
+// time", ...) are how ONE agent_stopped event is titled, never event types of
+// their own, so offering them as separate checkboxes built routes that could
+// never fire.
+const LIFECYCLE_EVENT_LABELS: Record<string, string> = {
+  agent_started: "Agent started",
+  pr_opened: "PR opened",
+  agent_idle: "Agent stalled",
+  stage_stalled: "Pipeline stage stalled",
+  agent_stopped: "Agent died or failed",
+  done_without_pr: "Agent finished without a PR",
+}
+
+type LifecycleCategory = keyof LifecycleEventToggles
+
+// Which global toggle mutes each event type. Anything the hub adds later that
+// is not listed here is treated as always-on rather than silently muted.
+const LIFECYCLE_EVENT_CATEGORY: Record<string, LifecycleCategory> = {
+  agent_started: "agentStarted",
+  pr_opened: "prOpened",
+  agent_idle: "agentIdle",
+  stage_stalled: "stageStalled",
+  agent_stopped: "failures",
+  done_without_pr: "failures",
+}
+
+const LIFECYCLE_CATEGORIES: { id: LifecycleCategory; label: string; description: string }[] = [
+  { id: "agentStarted", label: "Agent started", description: "An agent picked up a ticket and started working" },
+  { id: "prOpened", label: "PR opened", description: "An agent opened a pull request" },
+  { id: "failures", label: "Failures", description: "Crashes, timeouts, lost machines, finished without a PR" },
+  { id: "agentIdle", label: "Agent stalled", description: "An agent stopped making progress" },
+  { id: "stageStalled", label: "Pipeline stage stalled", description: "A pipeline stage stopped making meaningful progress" },
+]
+
+// Fallback only — the canonical list comes from settings.lifecycleEventTypes.
+const FALLBACK_LIFECYCLE_EVENT_TYPES = Object.keys(LIFECYCLE_EVENT_CATEGORY)
+
+// Slack conversation IDs: public channels (C…), private groups (G…), DMs (D…).
+const SLACK_CHANNEL_ID_RE = /^[CGD][A-Za-z0-9]+$/
+
+function lifecycleEventLabel(eventType: string): string {
+  return LIFECYCLE_EVENT_LABELS[eventType] || eventType.replace(/_/g, " ").replace(/^./, (c) => c.toUpperCase())
+}
+
+async function sendTestNotification(eventType: string, via: string): Promise<void> {
+  const hubUrl = getHubUrl()
+  const token = getAuthToken() || ""
+  const res = await fetch(`${hubUrl}/api/notifications/test`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    // via picks which configured notifier to probe; the hub falls back to the
+    // first effective route when it is omitted.
+    body: JSON.stringify({ event_type: eventType, dry_run: false, via }),
+  })
+  const raw = await res.text()
+  if (res.ok) return
+  let message = raw
+  try {
+    const parsed = JSON.parse(raw) as { error?: string }
+    if (parsed.error) message = parsed.error
+  } catch {
+    // Not JSON — surface the raw body.
+  }
+  throw new Error(message || `Test send failed (${res.status})`)
+}
+
+// The reports this hub can schedule. Kept as a const list rather than read
+// from the config: a schedule naming a report the hub does not carry is
+// rejected on save, so offering only what exists is what keeps the editor from
+// producing one.
+const SCHEDULED_REPORTS: { id: string; label: string; description: string }[] = [
+  {
+    id: "pending_prs",
+    label: "Pull requests waiting for review",
+    description: "Every open pull request an agent has left waiting, grouped by ticket.",
+  },
+]
+
+function scheduledReportLabel(report: string): string {
+  return SCHEDULED_REPORTS.find((r) => r.id === report)?.label || report
+}
+
+// The hub parses `at` with time.Parse("15:04"), which accepts an unpadded
+// "9:00", so a hand-written hub.yaml can carry one and the scheduler runs it
+// fine. <input type="time"> renders anything that is not HH:MM as blank, and
+// the save check below then rejects a time the operator never touched — so the
+// editor pads on the way in. Anything this cannot read is left alone: the
+// dialog's own error is a better answer than a silently rewritten value.
+function normalizeAt(at: string): string {
+  const match = /^\s*(\d{1,2}):([0-5]\d)\s*$/.exec(at)
+  if (!match) return at
+  const hour = Number(match[1])
+  if (hour > 23) return at
+  return `${String(hour).padStart(2, "0")}:${match[2]}`
+}
+
+// The name a schedule's `via` entry actually resolves to. Both the scheduler
+// (scheduled_notifier.go) and validation (types/validation.go) TrimSpace it
+// before looking the notifier up, so a hand-written via of " eng " names the
+// channel `eng`. Matching it untrimmed here would leave the entry dangling
+// when `eng` is deleted, and the save the screen then sends is rejected for
+// the very reference it believed it had dropped.
+function viaName(via: string): string {
+  return via.trim()
+}
+
+// How a schedule's per-row UI state — probe result, probe generation, save
+// failure — is addressed. The hub tolerates a stored duplicate schedule id, so
+// the actions (toggle, edit, remove) already address rows by position; keying
+// the state by id alone left the two cards of a duplicate sharing a probe
+// result, a "Last save failed" and a "Working…".
+function scheduleKey(index: number, id: string): string {
+  return `${index}-${id}`
+}
+
+// The position half of a scheduleKey. Only removeSchedule needs it: deleting a
+// row renumbers every row after it, so their state no longer addresses the
+// schedule it was recorded for.
+function scheduleKeyIndex(key: string): number {
+  return Number(key.slice(0, key.indexOf("-")))
+}
+
+// An empty weekday list is the hub's "every day", never "never".
+function weekdaysLabel(weekdays: string[]): string {
+  if (weekdays.length === 0) return "Every day"
+  const known = WEEKDAYS.filter((day) => weekdays.includes(day.id)).map((day) => day.label)
+  // A day this build does not know can only come from a hand-written hub.yaml.
+  // Filtering it out left the card showing an empty day field — or a shorter
+  // week than the schedule actually carries — for a value the operator then
+  // has to find in the editor to clear.
+  const flagged = unknownWeekdays(weekdays).map((weekday) => `${weekday} (invalid)`)
+  return [...known, ...flagged].join(", ")
+}
+
+// The days the hub does not accept. The editor flags them so they can be
+// cleared from here; leaving them invisible made every edit to the schedule
+// 400 on a control that was not on the screen.
+function unknownWeekdays(weekdays: string[]): string[] {
+  return weekdays.filter((weekday) => !WEEKDAYS.some((day) => day.id === weekday))
+}
+
+// Wire values are the three-letter names the hub validates against; the labels
+// are what the chips show.
+const WEEKDAYS: { id: string; label: string }[] = [
+  { id: "mon", label: "Mon" },
+  { id: "tue", label: "Tue" },
+  { id: "wed", label: "Wed" },
+  { id: "thu", label: "Thu" },
+  { id: "fri", label: "Fri" },
+  { id: "sat", label: "Sat" },
+  { id: "sun", label: "Sun" },
+]
+
+// Every IANA zone the browser knows. Intl.supportedValuesOf is recent enough
+// that a hub opened in an older browser must still get a usable list, so the
+// fallback carries the viewer's own zone and UTC — the two a schedule is
+// realistically written in.
+function timezoneOptions(): string[] {
+  try {
+    const supported = (Intl as { supportedValuesOf?: (key: string) => string[] }).supportedValuesOf
+    if (supported) return supported.call(Intl, "timeZone")
+  } catch {
+    // Fall through to the minimal list.
+  }
+  return [...new Set([browserTimezone(), "UTC"])]
+}
+
+function browserTimezone(): string {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC"
+  } catch {
+    return "UTC"
+  }
+}
+
+// The result of probing one scheduled report. `payload` is set only by a dry
+// run — the rendered message the hub would post, shown instead of sending it.
+// `mode` records WHICH probe this state belongs to: Preview and Send now share
+// one slot per schedule, so the busy label has to land on the button that was
+// actually clicked rather than on whichever one renders it.
+type ReportTestState = {
+  status: "sending" | "ok" | "error"
+  mode: "preview" | "send"
+  message: string
+  payload?: unknown
+}
+
+async function sendScheduledReportTest(
+  report: string,
+  via: string,
+  dryRun: boolean,
+): Promise<{ empty: boolean; payload?: unknown }> {
+  const hubUrl = getHubUrl()
+  const token = getAuthToken() || ""
+  const res = await fetch(`${hubUrl}/api/notifications/test`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ report, via, dry_run: dryRun }),
+  })
+  const raw = await res.text()
+  let parsed: { error?: string; empty?: boolean; payload?: unknown } = {}
+  try {
+    parsed = JSON.parse(raw)
+  } catch {
+    // Not JSON — the raw body is the only thing to report.
+  }
+  if (!res.ok) throw new Error(parsed.error || raw || `Test send failed (${res.status})`)
+  return { empty: Boolean(parsed.empty), payload: parsed.payload }
+}
+
+// Turns a Slack payload into the lines an operator reads, so a preview shows
+// the message rather than its wire encoding. Anything this cannot walk falls
+// back to the raw JSON, which is still the honest answer.
+function previewLines(payload: unknown): string[] {
+  const attachments = (payload as { attachments?: { blocks?: { text?: { text?: string } }[] }[] })?.attachments
+  const lines: string[] = []
+  for (const attachment of attachments || []) {
+    for (const block of attachment.blocks || []) {
+      const text = block.text?.text
+      if (text) lines.push(text)
+    }
+  }
+  if (lines.length > 0) return lines
+  return [JSON.stringify(payload, null, 2)]
+}
+
+type TestState = { status: "sending" | "ok" | "error"; message: string }
+
+// Records that the Notifier screen itself cleared `enabled` because the route
+// set went empty — the pause is ours, not the operator's, and the next save
+// that routes a channel must lift it. It lives in localStorage rather than in
+// component state because NotifierSection unmounts on every navigation inside
+// Settings (and on reload): a clamp forgotten there latches the `enabled:false`
+// this screen wrote on its own initiative, so re-routing a channel would no
+// longer restore alerts — exactly what the edit dialog promises it does.
+// localStorage rather than sessionStorage because the clamp outlives the
+// browsing context that wrote it: the repair is routinely finished in another
+// tab, or after a browser restart, and a per-tab clamp would be gone by then.
+// The stored value is the hub URL, so the clamp never leaks across hubs.
+const CLAMPED_PAUSE_STORAGE_KEY = "elasticclaw:notifier-clamped-pause"
+
+function readClampedPause(): boolean {
+  try {
+    return localStorage.getItem(CLAMPED_PAUSE_STORAGE_KEY) === getHubUrl()
+  } catch {
+    return false
+  }
+}
+
+function writeClampedPause(clamped: boolean): void {
+  try {
+    if (clamped) localStorage.setItem(CLAMPED_PAUSE_STORAGE_KEY, getHubUrl())
+    else localStorage.removeItem(CLAMPED_PAUSE_STORAGE_KEY)
+  } catch {
+    // Storage unavailable (private mode): the clamp degrades to not existing,
+    // which is what the screen did before it was persisted at all.
+  }
+}
+
+function NotifierSection({ settings, onSave, saving }: { settings: SettingsData; onSave: (p: object) => Promise<SaveOutcome>; saving: boolean }) {
+  const lifecycle = settings.notifications?.lifecycle
+  const infra = settings.notifications?.infra
+  const notifiers = settings.notifications?.notifiers || {}
+  const schedules = settings.notifications?.scheduled || []
+  const names = Object.keys(notifiers).sort((a, b) => a.localeCompare(b))
+  const eventTypes = settings.lifecycleEventTypes?.length ? settings.lifecycleEventTypes : FALLBACK_LIFECYCLE_EVENT_TYPES
+
+  const enabled = lifecycle?.enabled ?? false
+  const categoryEnabled: Record<LifecycleCategory, boolean> = {
+    agentStarted: lifecycle?.events?.agentStarted ?? true,
+    prOpened: lifecycle?.events?.prOpened ?? true,
+    failures: lifecycle?.events?.failures ?? true,
+    agentIdle: lifecycle?.events?.agentIdle ?? true,
+    stageStalled: lifecycle?.events?.stageStalled ?? true,
+  }
+  // A legacy single-channel `via` reads as one route over every event; saving
+  // any change migrates it to routes. `via` is trimmed exactly where the hub
+  // trims it (ValidateNotificationsConfig, lifecycleNotifierTick): a `via` with
+  // surrounding whitespace is valid on disk and delivers normally, so matching
+  // it raw here would render a working channel as an unroutable orphan whose
+  // only offered remedy — "Remove route" — silently pauses alerts hub-wide.
+  const routes: LifecycleRouteView[] = (
+    lifecycle?.routes?.length
+      ? lifecycle.routes
+      : lifecycle?.via
+        ? [{ via: lifecycle.via, events: [] }]
+        : []
+  ).map((route) => ({ ...route, via: (route.via || "").trim() }))
+  const routeFor = (name: string) => routes.find((r) => r.via === name)
+  // The types a route names that this hub actually supports, and the rest.
+  // ValidateNotificationsConfig checks routes[].events against
+  // IsLifecycleEventType only AFTER the disabled-lifecycle short-circuit, so a
+  // hand-written hub.yaml with alerts paused can legitimately hold names the
+  // hub no longer knows. The dialog can only ever render supported types, so
+  // counting the others would make the card badge disagree with the checkboxes
+  // and let a test send pick an event the hub rejects.
+  const knownEvents = (events?: string[]) => (events || []).filter((eventType) => eventTypes.includes(eventType))
+  const unknownEvents = (events?: string[]) => (events || []).filter((eventType) => !eventTypes.includes(eventType))
+  // The predicate saveChannel stores by: an allow-list naming every type is no
+  // filter at all. Shared by the card badge and the dialog so the same route
+  // cannot read as filtered on one and unfiltered on the other. Membership, not
+  // length: a hand-written list of five names the hub no longer knows is not
+  // "all alerts", and reading it as one would rewrite the route to receive-all
+  // on the next save instead of dropping just the stale entries.
+  const isAllAlerts = (events?: string[]) => !events?.length || eventTypes.every((eventType) => events.includes(eventType))
+  // A route whose notifier is gone. The hub deliberately accepts this on disk
+  // while alerts are paused ("an operator who mutes alerts and then deletes the
+  // notifier must not be left with a hub that refuses to load"), but it rejects
+  // the same block the moment alerts are enabled — so the screen has to render
+  // the route and offer a way to drop it. Silently dropping it in buildPatch
+  // would delete config the operator never saw.
+  // One entry per via: "Remove route" drops every route naming it, and a
+  // hand-written block can name the same missing notifier twice.
+  const orphanRoutes = routes.filter(
+    (route, i) => !notifiers[route.via] && routes.findIndex((other) => other.via === route.via) === i,
+  )
+  // A route whose allow-list names alert types this hub does not support. The
+  // hub accepts it on disk while alerts are paused — routes are only validated
+  // once enabled — and rejects the whole block the moment they are turned on,
+  // exactly like an orphan route, so the master switch has to be gated on it
+  // too rather than offering a save that is certain to fail.
+  const unsupportedRoutes = routes.filter((route) => unknownEvents(route.events).length > 0)
+  // A `via` routed twice, or an allow-list naming the same alert type twice.
+  // Both are rejected only once alerts are enabled, so a hand-written block can
+  // hold them while paused — and the screen renders one card per notifier
+  // showing only the FIRST matching route, so the hub's error names a routes[]
+  // index that is nowhere on the page. Gated like the orphan and unsupported
+  // cases; saveChannel collapses both so "open Edit and save" actually clears it.
+  const duplicatedVias = new Set(routes.map((route) => route.via).filter((via, i, all) => all.indexOf(via) !== i))
+  const hasDuplicateEvents = (events?: string[]) => new Set(events || []).size !== (events || []).length
+  const isDuplicated = (name: string) => duplicatedVias.has(name) || hasDuplicateEvents(routeFor(name)?.events)
+  const duplicateRoutes = routes.filter((route) => duplicatedVias.has(route.via) || hasDuplicateEvents(route.events))
+  // A hub that has never had a lifecycle block: routing its first channel turns
+  // alerts on. This is deliberately NOT inferred from (enabled=false, routes=[]),
+  // which an operator reaches by muting the master switch and then removing the
+  // last channel — see clampedPause.
+  const neverConfigured = !lifecycle
+  const secretNames = [...(settings.secrets || [])].sort((a, b) => a.localeCompare(b))
+  // A token_secret naming a hub secret that no longer exists. The <select> below
+  // would otherwise render blank while still holding the dangling name, so Save
+  // writes the broken reference back with nothing on screen saying why the
+  // channel never delivers.
+  const secretMissing = (name?: string) => Boolean(name) && !secretNames.includes(name as string)
+
+  const isEventMuted = (eventType: string) => {
+    const category = LIFECYCLE_EVENT_CATEGORY[eventType]
+    return category ? !categoryEnabled[category] : false
+  }
+
+  const [showModal, setShowModal] = useState(false)
+  const [modalMode, setModalMode] = useState<"add" | "edit">("add")
+  const [editName, setEditName] = useState<string | null>(null)
+  const [formName, setFormName] = useState("")
+  const [formChannel, setFormChannel] = useState("")
+  const [formTokenSecret, setFormTokenSecret] = useState("")
+  // The hub refuses to build a slack notifier whose min_send_interval it cannot
+  // parse, and re-checks it on every save that touches the channel. A hub.yaml
+  // written by hand can hold such a value, so the screen must offer a way to
+  // repair it: without this field the save can never be made to pass, and a
+  // notifier a pipeline notifies through cannot be removed either.
+  const [formMinSendInterval, setFormMinSendInterval] = useState("")
+  const [formRouted, setFormRouted] = useState(true)
+  const [formEvents, setFormEvents] = useState<string[]>([])
+  // Allow-list entries the edited route holds that this hub does not support.
+  // They are kept out of formEvents — no checkbox can ever represent them — so
+  // the dialog has to name them itself, or saving drops config the operator
+  // never saw and the master switch later 400s on a value the screen never
+  // showed.
+  const [formDroppedEvents, setFormDroppedEvents] = useState<string[]>([])
+  const [formError, setFormError] = useState("")
+  const [tests, setTests] = useState<Record<string, TestState>>({})
+  // Save failures the dialog can no longer show, keyed by the channel the save
+  // was for. A rejected PATCH whose dialog has meanwhile been replaced has
+  // nowhere else to land: the page-level banner lives under the Radix overlay,
+  // so dropping the message leaves the operator believing a save that failed
+  // went through.
+  const [saveErrors, setSaveErrors] = useState<Record<string, string>>({})
+  // The same failure for a channel that has no card to land on: a rejected Add
+  // created no notifier, so keying it into saveErrors above would render it
+  // nowhere at all. Painted both inside the dialog and above the channel list,
+  // since the operator may close the dialog that replaced the failed one.
+  const [detachedSaveError, setDetachedSaveError] = useState("")
+
+  // Reconcile the stored clamp against the config actually loaded: it records a
+  // pause this screen imposed for an empty route set, so a config that HAS
+  // routes has already been repaired — by this browser or any other — and the
+  // flag must go before it can lift an `enabled:false` the operator chose.
+  useEffect(() => {
+    if (routes.length > 0) writeClampedPause(false)
+  }, [routes.length])
+
+  const resetForm = () => {
+    setFormName(""); setFormChannel(""); setFormTokenSecret(""); setFormMinSendInterval("")
+    setFormRouted(true); setFormEvents([]); setFormDroppedEvents([]); setFormError(""); setEditName(null)
+  }
+
+  // Identifies the dialog a save was started from. An in-flight PATCH must not
+  // close, reset, or drop its error into a dialog the operator has meanwhile
+  // reopened on another channel — that discards unsaved form state and blames
+  // the wrong channel.
+  const saveGeneration = useRef(0)
+
+  // Invalidates in-flight test sends. A result that lands after the channel's
+  // destination or routing changed describes a message that went somewhere else
+  // — exactly the stale state every setTests() below clears.
+  //
+  // Saving ONE channel leaves every other channel's notifier and route
+  // byte-identical, so their in-flight results are still accurate: invalidating
+  // them would throw away a real failure ("channel_not_found") with nothing on
+  // the card to replace it. Per-channel bumps cover a single channel's save or
+  // removal; the hub-wide counter covers the master switch and the category
+  // toggles, which change what every channel receives.
+  const testGeneration = useRef<Record<string, number>>({})
+  const testGenerationAll = useRef(0)
+  const testStamp = (name: string) => `${testGenerationAll.current}:${testGeneration.current[name] ?? 0}`
+  const invalidateTest = (name: string) => {
+    testGeneration.current[name] = (testGeneration.current[name] ?? 0) + 1
+  }
+
+  const openAdd = () => { saveGeneration.current++; resetForm(); setModalMode("add"); setShowModal(true) }
+  const openEdit = (name: string) => {
+    saveGeneration.current++
+    const notifier = notifiers[name]
+    const route = routeFor(name)
+    setFormName(name)
+    setFormChannel(notifier.channel || "")
+    setFormTokenSecret(notifier.token_secret || "")
+    setFormMinSendInterval(notifier.min_send_interval || "")
+    setFormRouted(Boolean(route))
+    // Only supported types can be checked, so only those are seeded; the rest
+    // are surfaced separately rather than carried invisibly back out on save.
+    // De-duplicated because a checkbox can only be on or off: a type listed
+    // twice on disk would otherwise be counted twice in the dialog summary and
+    // re-sent verbatim by a save that changed nothing.
+    setFormEvents([...new Set(knownEvents(route?.events))])
+    setFormDroppedEvents(unknownEvents(route?.events))
+    setFormError("")
+    setEditName(name)
+    setModalMode("edit")
+    setShowModal(true)
+  }
+
+  // PATCH /api/settings replaces the whole notifications block, so every save
+  // rebuilds it from the current view plus the change being made. The clamp the
+  // patch implies is returned, never written here: see savePatch.
+  function buildPatch(next: {
+    notifiers?: Record<string, NotifierView>
+    enabled?: boolean
+    routes?: LifecycleRouteView[]
+    events?: Record<LifecycleCategory, boolean>
+    scheduled?: ScheduledNotificationView[]
+    infra?: InfraNotificationsConfig
+  }): { patch: object; clamp: boolean } {
+    const outNotifiers: Record<string, Record<string, string>> = {}
+    for (const [name, notifier] of Object.entries(next.notifiers ?? notifiers)) {
+      const out: Record<string, string> = { type: notifier.type || "slack" }
+      if (notifier.channel) out.channel = notifier.channel
+      if (notifier.token_secret) out.token_secret = notifier.token_secret
+      if (notifier.api_base) out.api_base = notifier.api_base
+      // An emptied interval is sent as "" rather than omitted when the stored
+      // notifier has one: the hub folds a patch over the settings already on
+      // disk, so omitting the key would keep the value the operator just
+      // cleared — and keep rejecting the save if that value is unparseable.
+      const interval = notifier.min_send_interval ?? ""
+      if (interval || notifiers[name]?.min_send_interval) out.min_send_interval = interval
+      outNotifiers[name] = out
+    }
+    // Always an array: sending routes is what clears the legacy `via`.
+    const outRoutes = (next.routes ?? routes).map((route) => ({
+      via: route.via,
+      events: route.events?.length ? route.events : [],
+    }))
+    // The hub rejects an enabled lifecycle block with no routes ("via is
+    // required when enabled") and this screen never exposes `via`, so losing the
+    // last route pauses alerts instead of failing the save with a message about
+    // a field that is not on the page. That pause is ours, not the operator's,
+    // and the clamp lifts it on the next save that routes a channel again.
+    // Without it the `false` we wrote latches — every later save re-sends the
+    // stale value read back from GET — and a plain channel swap silently mutes
+    // the hub forever, contradicting the dialog's "until another channel is
+    // routed". The flag is recorded here rather than inferred from the reloaded
+    // config so a deliberate master-switch OFF survives a channel swap.
+    // The clamp only carries meaning while the LOADED config still has no
+    // routes: once routing is restored anywhere else (hub.yaml, the CLI, a
+    // second operator, another device) the hub holds a pause the operator owns,
+    // and a stale flag here would flip alerts back on from the next unrelated
+    // save with nothing on screen announcing it.
+    const clampActive = routes.length === 0 && readClampedPause()
+    const wantEnabled = next.enabled ?? (enabled || clampActive || neverConfigured)
+    const outLifecycle: Record<string, unknown> = {
+      enabled: outRoutes.length > 0 && wantEnabled,
+      routes: outRoutes,
+      events: next.events ?? categoryEnabled,
+    }
+    if (lifecycle?.pollInterval) outLifecycle.pollInterval = lifecycle.pollInterval
+    if (lifecycle?.idleAfter) outLifecycle.idleAfter = lifecycle.idleAfter
+    if (lifecycle?.stageProgressAfter) outLifecycle.stageProgressAfter = lifecycle.stageProgressAfter
+    // Always sent, even by a save that only touches a channel: PATCH replaces
+    // the whole notifications block, so omitting it would delete every
+    // scheduled report the first time anyone edits a Slack channel.
+    const outScheduled = (next.scheduled ?? schedules).map((schedule) => ({
+      id: schedule.id,
+      report: schedule.report,
+      via: schedule.via,
+      at: schedule.at,
+      timezone: schedule.timezone || "",
+      weekdays: schedule.weekdays,
+      enabled: schedule.enabled,
+    }))
+    return {
+      patch: { notifications: { notifiers: outNotifiers, lifecycle: outLifecycle, scheduled: outScheduled, infra: next.infra ?? infra } },
+      // The never-configured hub is clamped too, and for the same reason: the
+      // block this save creates carries `enabled:false` only because it has no
+      // route to send to, which is this screen's own doing — the operator was
+      // adding a channel, not muting a hub that had nothing to mute. Without
+      // the flag, routing that channel later finds `enabled:false` in the
+      // loaded config, keeps it, and leaves the freshly routed channel paused
+      // until the master switch is found by hand.
+      clamp: outRoutes.length === 0 && wantEnabled,
+    }
+  }
+
+  // The clamp describes what the hub holds, so it is written only once the
+  // PATCH has actually landed. Recording it while building the body loses the
+  // flag on a save that fails — the hub keeps the `enabled:false` this screen
+  // wrote earlier, the retry no longer reads a clamp to lift it, and every
+  // later save re-sends that stale `false`, muting the hub for good.
+  // The flag describes what the HUB holds, so it follows the PATCH, not the
+  // re-read that comes after it: a save whose follow-up GET failed still left
+  // the hub with the `enabled:false` this screen wrote on its own initiative,
+  // and losing the clamp there latches that `false` for good.
+  async function savePatch(next: Parameters<typeof buildPatch>[0]): Promise<SaveOutcome> {
+    const { patch, clamp } = buildPatch(next)
+    const outcome = await onSave(patch)
+    if (outcome.persisted) writeClampedPause(clamp)
+    return outcome
+  }
+
+  async function saveChannel() {
+    const name = formName.trim()
+    const channel = formChannel.trim()
+    if (!name) { setFormError("Name is required."); return }
+    if (modalMode === "add" && notifiers[name]) { setFormError(`A channel named "${name}" already exists.`); return }
+    if (!channel) { setFormError("Channel ID is required."); return }
+    if (channel.startsWith("#") || !SLACK_CHANNEL_ID_RE.test(channel)) {
+      setFormError(
+        `"${channel}" is not a Slack channel ID. Use the ID (e.g. C0123ABCD), not the #name — you'll find it at the bottom of the channel's details dialog in Slack.`,
+      )
+      return
+    }
+    if (!formTokenSecret) { setFormError("Pick the hub secret holding the Slack bot token."); return }
+    setFormError("")
+
+    const existing = editName ? notifiers[editName] : undefined
+    const nextNotifiers: Record<string, NotifierView> = {
+      ...notifiers,
+      [name]: {
+        ...existing,
+        type: existing?.type || "slack",
+        channel,
+        token_secret: formTokenSecret,
+        min_send_interval: formMinSendInterval.trim(),
+      },
+    }
+    // Every type checked is the same thing as no filter; store it as one so a
+    // later-added alert type keeps reaching the channel. formEvents holds only
+    // supported types, so any unsupported entry the route arrived with is
+    // dropped here — the dialog says so before the operator saves.
+    // De-duplicated for the same reason the dialog seeds a Set: the hub rejects
+    // a repeated event once alerts are enabled, and the checkboxes have no way
+    // to express — or clear — a type listed twice.
+    const events = isAllAlerts(formEvents) ? [] : [...new Set(formEvents)]
+    // Route ORDER is meaningful — a test send without an explicit `via` uses the
+    // first effective route — so editing an already-routed channel updates it in
+    // place instead of removing and re-appending it. Every OTHER entry naming
+    // the same via collapses into that one: a hand-written block can route a
+    // via twice, and rewriting only the first match would leave behind the
+    // duplicate the hub rejects, with no way to reach it from this screen.
+    const routedIndex = routes.findIndex((route) => route.via === name)
+    const nextRoutes = formRouted && routedIndex >= 0
+      ? routes
+        .filter((route, i) => route.via !== name || i === routedIndex)
+        .map((route) => (route.via === name ? { via: name, events } : route))
+      : routes.filter((route) => route.via !== name)
+    if (formRouted && routedIndex < 0) nextRoutes.push({ via: name, events })
+
+    const generation = saveGeneration.current
+    const { persisted, message: failure } = await savePatch({ notifiers: nextNotifiers, routes: nextRoutes })
+    // THIS channel's destination or routing just changed, so any test result
+    // sitting on its card is about a message that went somewhere else. A
+    // rejected PATCH changed nothing, and every OTHER channel's notifier and
+    // route went out byte-identical, so neither is invalidated.
+    if (persisted) {
+      invalidateTest(name)
+      setTests((current) => { const { [name]: _stale, ...rest } = current; return rest })
+      // The pause notice is deliberately NOT cleared by re-adding the channel:
+      // the schedule it names is still disabled, and only the operator turning
+      // it back on makes it fire again. The notice rewords itself once the via
+      // resolves — see schedulePauseNotices.
+    }
+    setSaveErrors((current) => { const { [name]: _cleared, ...rest } = current; return rest })
+    setDetachedSaveError("")
+    if (generation !== saveGeneration.current) {
+      // The dialog this save was started from is gone, so the failure has to
+      // land somewhere else. A rejected edit leaves the channel in place and
+      // its card carries the reason; a rejected ADD created no notifier, so
+      // there is no card and keying it by name would render the message
+      // nowhere — the operator would read a silently failed add as a success.
+      if (failure) {
+        if (notifiers[name]) setSaveErrors((current) => ({ ...current, [name]: failure }))
+        else setDetachedSaveError(`Adding channel "${name}" failed: ${failure}`)
+      }
+      return
+    }
+    if (failure) { setFormError(failure); return }
+    setShowModal(false)
+  }
+
+  async function removeChannel(name: string) {
+    const nextNotifiers = { ...notifiers }
+    delete nextNotifiers[name]
+    // Scheduled reports name channels too, and the hub rejects an ENABLED
+    // schedule pointing at a notifier it does not have — so a delete that only
+    // filtered the lifecycle routes would 400 on the schedule and leave the
+    // channel undeletable from this screen. Dropping the channel from every
+    // schedule's `via` keeps the rest of its destinations running; a schedule
+    // left with no channel this hub actually has is PAUSED rather than emptied,
+    // because the hub also rejects an empty `via`. Pausing keeps the dangling
+    // name visible so the card's "no longer configured" warning still points
+    // at the repair.
+    const pausedIds: string[] = []
+    const touchedKeys: string[] = []
+    // Entries are matched on their resolved name: the hub trims before looking
+    // the notifier up, so a hand-written " eng " points at the channel being
+    // deleted just as `eng` does — and leaving it behind makes the delete
+    // unsaveable.
+    const nextScheduled = schedules.map((schedule, index) => {
+      if (!schedule.via.some((entry) => viaName(entry) === name)) return schedule
+      touchedKeys.push(scheduleKey(index, schedule.id))
+      const via = schedule.via.filter((entry) => viaName(entry) !== name)
+      // Paused when nothing LEFT resolves to a configured channel, not only
+      // when the list is emptied: the hub rejects an enabled schedule whose
+      // via names no notifier it has, so a schedule already carrying a
+      // dangling second name would 400 this delete on a channel the operator
+      // is not touching, with nothing on screen pointing at the repair.
+      if (!via.some((entry) => notifiers[viaName(entry)])) {
+        if (schedule.enabled) pausedIds.push(schedule.id)
+        // An empty `via` is rejected outright, so a schedule left with nothing
+        // keeps its list — paused, with the dangling name still on the card.
+        return { ...schedule, enabled: false, via: via.length > 0 ? via : schedule.via }
+      }
+      return { ...schedule, via }
+    })
+    const nextInfraRoutes = (infra?.routes || []).filter((route) => route.via.trim() !== name)
+    const nextInfra = infra && {
+      ...infra,
+      enabled: nextInfraRoutes.length > 0 && infra.enabled,
+      routes: nextInfraRoutes,
+    }
+    // The clamp above turns infrastructure alerts off when this channel was
+    // their last route. Recorded for the same reason pausedIds is: after the
+    // delete the infra section shows a neutral empty state that reads as
+    // never-configured, and a notice is the only record of why they are off.
+    const infraPausedByDelete = Boolean(infra?.enabled) && nextInfraRoutes.length === 0 && nextInfraRoutes.length < (infra?.routes || []).length
+    const generation = saveGeneration.current
+    const { persisted, message: failure } = await savePatch({
+      notifiers: nextNotifiers,
+      routes: routes.filter((route) => route.via !== name),
+      scheduled: nextScheduled,
+      infra: nextInfra,
+    })
+    if (persisted) {
+      invalidateTest(name)
+      setTests((current) => { const { [name]: _removed, ...rest } = current; return rest })
+      // Every schedule that posted here now posts somewhere else — or nowhere,
+      // paused — so a probe result on its card describes a delivery that can no
+      // longer happen: a green "Posted to eng, ops." above a card that reads
+      // "Posts to eng". saveSchedule/removeSchedule invalidate for the same
+      // reason; this is the third way a schedule's destinations change.
+      touchedKeys.forEach(invalidateReportTest)
+      // Merged into whatever is already on screen rather than replacing it: a
+      // notice about the reports the LAST removal paused is still the only
+      // record of why they are off, and this delete did not answer it. Only a
+      // second removal of the same channel name supersedes its own notice.
+      if (pausedIds.length > 0) {
+        setSchedulePauses((current) => [
+          ...current.filter((pause) => pause.channel !== name),
+          { ids: pausedIds, channel: name },
+        ])
+      }
+      if (infraPausedByDelete) setInfraPause({ channel: name })
+    }
+    setSaveErrors((current) => { const { [name]: _cleared, ...rest } = current; return rest })
+    if (generation !== saveGeneration.current) {
+      // The channel is still there — the remove was rejected — so its card can
+      // carry the reason.
+      if (failure) setSaveErrors((current) => ({ ...current, [name]: failure }))
+      return
+    }
+    if (failure) { setFormError(failure); return }
+    setShowModal(false)
+  }
+
+  // Dropping a route whose notifier is gone. It has no card of its own, so this
+  // is the only way back to a hub that can turn lifecycle alerts on again.
+  async function removeOrphanRoute(via: string) {
+    invalidateTest(via)
+    setTests((current) => { const { [via]: _removed, ...rest } = current; return rest })
+    // The page-level banner reports a failure here: this save is not made from
+    // the dialog, so nothing covers the banner.
+    await savePatch({ routes: routes.filter((route) => route.via !== via) })
+  }
+
+  // The event a test send uses: something this channel is routed for and that
+  // is not muted globally, preferring the friendliest one.
+  function testEventFor(name: string): string | null {
+    const route = routeFor(name)
+    if (!route) return null
+    const allowed = route.events?.length ? knownEvents(route.events) : eventTypes
+    const candidates = allowed.filter((eventType) => !isEventMuted(eventType))
+    if (candidates.length === 0) return null
+    return candidates.includes("agent_started") ? "agent_started" : candidates[0]
+  }
+
+  async function sendTest(name: string) {
+    const eventType = testEventFor(name)
+    if (!eventType) return
+    // The hub bounds a test send at 30s, plenty of time for the operator to edit
+    // the channel meanwhile. Landing the result afterwards would show a green
+    // "sent" under a destination the message never reached.
+    const generation = testStamp(name)
+    setTests((current) => ({ ...current, [name]: { status: "sending", message: "" } }))
+    const settle = (state: TestState) => {
+      setTests((current) => {
+        // A superseded result is dropped, not written — and it must leave the
+        // map alone: whatever sits under this name now belongs to the newer
+        // send that replaced this one (its "sending" indicator, or its real
+        // error), so deleting it would erase a live result.
+        if (generation !== testStamp(name)) return current
+        return { ...current, [name]: state }
+      })
+    }
+    try {
+      await sendTestNotification(eventType, name)
+      settle({ status: "ok", message: `Sent a "${lifecycleEventLabel(eventType)}" test alert.` })
+    } catch (e) {
+      settle({ status: "error", message: e instanceof Error ? e.message : "Test send failed" })
+    }
+  }
+
+  // ── Scheduled reports ──────────────────────────────────────────────────────
+
+  const [showSchedule, setShowSchedule] = useState(false)
+  const [scheduleMode, setScheduleMode] = useState<"add" | "edit">("add")
+  const [editScheduleId, setEditScheduleId] = useState<string | null>(null)
+  // Which ROW the editor is on. The hub tolerates a hand-written config that
+  // stores the same id twice, so an id is not an address: matching on it would
+  // edit, toggle or delete both rows at once — and a toggle that flips both is
+  // then rejected by the hub's own duplicate-id check, leaving the screen with
+  // no way to reach either row. Every card action carries its index instead;
+  // `editScheduleId` stays for the heading, which only has to name the report.
+  const [editScheduleIndex, setEditScheduleIndex] = useState<number | null>(null)
+  const [formScheduleId, setFormScheduleId] = useState("")
+  const [formReport, setFormReport] = useState(SCHEDULED_REPORTS[0].id)
+  const [formVia, setFormVia] = useState<string[]>([])
+  // The channels the schedule named that no longer exist, snapshotted when the
+  // dialog opens. Deriving the rows from formVia instead would delete the
+  // flagged checkbox the moment it is unticked, and the only way back would be
+  // Cancel — discarding every other edit made in the same session.
+  const [formDanglingVia, setFormDanglingVia] = useState<string[]>([])
+  const [formAt, setFormAt] = useState("09:00")
+  const [formTimezone, setFormTimezone] = useState("UTC")
+  const [formWeekdays, setFormWeekdays] = useState<string[]>([])
+  // The stored days this build does not know, snapshotted when the dialog
+  // opens — the same reason formDanglingVia is snapshotted: deriving the chips
+  // from formWeekdays would delete the flagged chip the moment it is unticked,
+  // and the only way back would be Cancel.
+  const [formUnknownWeekdays, setFormUnknownWeekdays] = useState<string[]>([])
+  const [formScheduleEnabled, setFormScheduleEnabled] = useState(true)
+  const [scheduleError, setScheduleError] = useState("")
+  // A save made from a schedule's CARD (the enable switch) has no dialog to
+  // report into — scheduleError renders inside the closed dialog — so its
+  // failure lands on the card itself, keyed by row — see scheduleKey.
+  const [scheduleSaveErrors, setScheduleSaveErrors] = useState<Record<string, string>>({})
+  // A rejected ADD created no schedule, so keying its failure by id would render
+  // it nowhere — the same reason detachedSaveError exists for channels.
+  const [detachedScheduleError, setDetachedScheduleError] = useState("")
+  // Removing a channel can pause the schedules that had nowhere else to post.
+  // That pause is ours, not the operator's, so it has to say so somewhere.
+  // The schedules it covers are recorded with it, and the wording is derived
+  // from the live config rather than frozen at removal time: an unrelated save
+  // must not erase a notice about reports that are still paused, and re-adding
+  // a channel by the same name answers only half the instruction — the report
+  // still has to be turned back on by hand.
+  // One entry PER REMOVED CHANNEL, because each notice names the channel that
+  // caused it: deleting `ops` while the notice about `eng` is still on screen
+  // has to add a second notice, not replace the only record of why the first
+  // batch of reports is off.
+  const [schedulePauses, setSchedulePauses] = useState<{ ids: string[]; channel: string }[]>([])
+  // The channel whose deletion paused infrastructure alerts (see
+  // deleteNotifier). One entry, not a list: infra has a single master switch,
+  // so a later pause by another delete supersedes rather than accumulates.
+  const [infraPause, setInfraPause] = useState<{ channel: string } | null>(null)
+  const [reportTests, setReportTests] = useState<Record<string, ReportTestState>>({})
+  // Invalidates an in-flight probe whose schedule has meanwhile been edited or
+  // deleted: its result describes a report that went somewhere else.
+  const reportTestGeneration = useRef<Record<string, number>>({})
+  // Filled when the editor first opens, never during the initial render: the
+  // zone list is derived from the browser, and reading it while Next is
+  // prerendering would make the server and client markup disagree.
+  const [zoneOptions, setZoneOptions] = useState<string[]>([])
+  const loadZones = () => setZoneOptions((current) => (current.length ? current : timezoneOptions()))
+
+  // A name the operator can leave as-is: derived from the report, and suffixed
+  // only when it would collide with a schedule that already exists.
+  function suggestScheduleId(report: string): string {
+    const base = report.replace(/_/g, "-")
+    if (!schedules.some((schedule) => schedule.id === base)) return base
+    for (let i = 2; ; i++) {
+      const candidate = `${base}-${i}`
+      if (!schedules.some((schedule) => schedule.id === candidate)) return candidate
+    }
+  }
+
+  // Both openers bump saveGeneration for the same reason openAdd/openEdit do:
+  // an in-flight PATCH must not close, or drop its error into, a dialog the
+  // operator has meanwhile reopened on another entry.
+  const openAddSchedule = () => {
+    loadZones()
+    saveGeneration.current++
+    const report = SCHEDULED_REPORTS[0].id
+    setScheduleMode("add")
+    setEditScheduleId(null)
+    setEditScheduleIndex(null)
+    setFormReport(report)
+    setFormScheduleId(suggestScheduleId(report))
+    // One channel is an unambiguous default; more than one is a choice.
+    setFormVia(names.length === 1 ? [names[0]] : [])
+    setFormDanglingVia([])
+    setFormAt("09:00")
+    setFormTimezone(browserTimezone())
+    setFormWeekdays([])
+    setFormUnknownWeekdays([])
+    setFormScheduleEnabled(true)
+    setScheduleError("")
+    setShowSchedule(true)
+  }
+
+  const openEditSchedule = (schedule: ScheduledNotificationView, index: number) => {
+    loadZones()
+    saveGeneration.current++
+    setScheduleMode("edit")
+    setEditScheduleId(schedule.id)
+    setEditScheduleIndex(index)
+    setFormScheduleId(schedule.id)
+    setFormReport(schedule.report)
+    // Seeded on the resolved names, the same ones the checkboxes are keyed by:
+    // a hand-written " eng " has to tick `eng`, not sit beside it as a second,
+    // flagged row for a channel that is configured.
+    setFormVia(schedule.via.map(viaName))
+    setFormDanglingVia(schedule.via.map(viaName).filter((via) => !notifiers[via]))
+    setFormAt(normalizeAt(schedule.at))
+    setFormTimezone(schedule.timezone || "UTC")
+    setFormWeekdays([...schedule.weekdays])
+    setFormUnknownWeekdays(unknownWeekdays(schedule.weekdays))
+    setFormScheduleEnabled(schedule.enabled)
+    setScheduleError("")
+    setShowSchedule(true)
+  }
+
+  const invalidateReportTest = (key: string) => {
+    reportTestGeneration.current[key] = (reportTestGeneration.current[key] ?? 0) + 1
+    setReportTests((current) => { const { [key]: _stale, ...rest } = current; return rest })
+  }
+
+  // Deleting a row renumbers every row after it, so their probe results and
+  // save failures now name a schedule they were never recorded for. Dropping
+  // them is the only honest option: a green "Posted to eng, ops." rendered
+  // against the wrong card describes a delivery that card never made.
+  const dropScheduleRowState = (from: number) => {
+    for (const key of Object.keys(reportTestGeneration.current)) {
+      if (scheduleKeyIndex(key) >= from) {
+        reportTestGeneration.current[key] = (reportTestGeneration.current[key] ?? 0) + 1
+      }
+    }
+    const keepBefore = (current: Record<string, unknown>) =>
+      Object.fromEntries(Object.entries(current).filter(([key]) => scheduleKeyIndex(key) < from))
+    setReportTests((current) => keepBefore(current) as Record<string, ReportTestState>)
+    setScheduleSaveErrors((current) => keepBefore(current) as Record<string, string>)
+  }
+
+  async function saveSchedule() {
+    const id = formScheduleId.trim()
+    if (!id) { setScheduleError("Name is required."); return }
+    if (scheduleMode === "add" && schedules.some((schedule) => schedule.id === id)) {
+      setScheduleError(`A report named "${id}" already exists.`)
+      return
+    }
+    if (formVia.length === 0) { setScheduleError("Pick at least one channel to post the report to."); return }
+    if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(formAt)) {
+      setScheduleError("Time must be a 24-hour HH:MM value, e.g. 09:30.")
+      return
+    }
+    setScheduleError("")
+
+    const entry: ScheduledNotificationView = {
+      id,
+      report: formReport,
+      via: formVia,
+      at: formAt,
+      timezone: formTimezone,
+      weekdays: formWeekdays,
+      enabled: formScheduleEnabled,
+    }
+    const next = editScheduleIndex !== null
+      ? schedules.map((schedule, i) => (i === editScheduleIndex ? entry : schedule))
+      : [...schedules, entry]
+    // An add lands at the end of the list, so that is the row its state is
+    // addressed by once the save is through.
+    const index = editScheduleIndex ?? schedules.length
+    const key = scheduleKey(index, id)
+    const generation = saveGeneration.current
+    const { persisted, message } = await savePatch({ scheduled: next })
+    // The schedule now posts something else, somewhere else, so any probe
+    // result on its card is about a message that no longer describes it. A
+    // rejected save changed nothing and keeps its result.
+    if (persisted) {
+      invalidateReportTest(key)
+      clearScheduleSaveError(key)
+      forgetSchedulePause(id, index)
+    }
+    setDetachedScheduleError("")
+    if (generation !== saveGeneration.current) {
+      // The dialog this save was started from is gone, so its failure has to
+      // land elsewhere. A rejected EDIT left the schedule in place and its card
+      // carries the reason; a rejected ADD created no schedule, so there is no
+      // card to key it by and it goes to the banner above the list.
+      // Keyed on `persisted`, not `message`, for the reason toggleSchedule
+      // spells out: a PATCH the hub accepted whose follow-up re-read failed
+      // saved the report, and calling that `Adding report "x" failed` invites a
+      // re-add that collides on the id. The reload failure goes to the banner
+      // verbatim instead of blaming the save.
+      if (persisted) { setDetachedScheduleError(message ?? ""); return }
+      if (message) {
+        if (editScheduleIndex !== null) {
+          setScheduleSaveErrors((current) => ({ ...current, [key]: message }))
+        } else {
+          setDetachedScheduleError(`Adding report "${id}" failed: ${message}`)
+        }
+      }
+      return
+    }
+    if (message) { setScheduleError(message); return }
+    setShowSchedule(false)
+  }
+
+  function clearScheduleSaveError(key: string) {
+    setScheduleSaveErrors((current) => { const { [key]: _cleared, ...rest } = current; return rest })
+  }
+
+  // Drops ONE schedule from the pause notices: re-enabling, editing or deleting
+  // it answers the pause for that report. Every other id stays — a save on an
+  // unrelated schedule is not an answer to theirs, and the notice is the only
+  // record that this screen turned them off. A notice left with no ids is gone.
+  //
+  // The notices name reports, not rows, so a stored duplicate id has to keep
+  // its name in the list while the OTHER row is still paused: answering row 1
+  // is not an answer for row 2, and dropping the id would erase the only
+  // record of why row 2 is off. schedulePauseNotices re-derives from the live
+  // config, so a name left behind cannot outlive the pause itself.
+  function forgetSchedulePause(id: string, index: number) {
+    if (schedules.some((schedule, i) => i !== index && schedule.id === id)) return
+    setSchedulePauses((current) =>
+      current
+        .map((pause) => ({ ...pause, ids: pause.ids.filter((other) => other !== id) }))
+        .filter((pause) => pause.ids.length > 0),
+    )
+  }
+
+  async function removeSchedule(id: string, index: number) {
+    // Snapshotted for the same reason saveSchedule and removeChannel do it: a
+    // rejected delete whose dialog has meanwhile been replaced has to report
+    // onto the surviving schedule's card, since scheduleError renders only
+    // inside the dialog that is no longer there.
+    const generation = saveGeneration.current
+    const { persisted, message } = await savePatch({ scheduled: schedules.filter((_, i) => i !== index) })
+    if (persisted) {
+      dropScheduleRowState(index)
+      forgetSchedulePause(id, index)
+    }
+    setDetachedScheduleError("")
+    if (generation !== saveGeneration.current) {
+      // A rejected delete left the schedule in place, so its card carries the
+      // reason; a successful one has no card and needs none — so a reload
+      // failure after a delete the hub accepted goes to the banner verbatim
+      // rather than writing "Last save failed" onto a card that is gone.
+      if (persisted) { setDetachedScheduleError(message ?? ""); return }
+      if (message) setScheduleSaveErrors((current) => ({ ...current, [scheduleKey(index, id)]: message }))
+      return
+    }
+    if (message) { setScheduleError(message); return }
+    setShowSchedule(false)
+  }
+
+  async function toggleSchedule(schedule: ScheduledNotificationView, index: number, value: boolean) {
+    const { persisted, message } = await savePatch({
+      scheduled: schedules.map((other, i) => (i === index ? { ...other, enabled: value } : other)),
+    })
+    // The cleanup follows `persisted`, not `message`, exactly as saveSchedule
+    // and removeSchedule do: a PATCH the hub accepted whose follow-up re-read
+    // failed still toggled the report, and calling that "Last save failed"
+    // under a switch snapped back to its old position tells the operator the
+    // opposite of what the hub holds. The reload failure is real, so it goes
+    // to the banner, which states it verbatim instead of blaming the save.
+    if (persisted) {
+      clearScheduleSaveError(scheduleKey(index, schedule.id))
+      // The operator has answered the pause note for THIS report by hand;
+      // leaving it named there would report a state that no longer exists.
+      forgetSchedulePause(schedule.id, index)
+      setDetachedScheduleError(message ?? "")
+      return
+    }
+    // A rejected toggle snaps the switch back with nothing else on screen —
+    // the dialog that carries scheduleError is closed — so the failure has to
+    // land on the schedule's own card.
+    if (message) setScheduleSaveErrors((current) => ({ ...current, [scheduleKey(index, schedule.id)]: message }))
+  }
+
+  // Probes one schedule. A dry run renders the message the next due slot would
+  // post without sending it; a real run posts to every channel the schedule
+  // names, which is the only way to prove the whole path works. Neither
+  // touches the scheduler's own state, so the real delivery still happens.
+  async function runReportTest(schedule: ScheduledNotificationView, index: number, dryRun: boolean) {
+    const targets = schedule.via.map(viaName).filter((via) => notifiers[via])
+    if (targets.length === 0) return
+    const key = scheduleKey(index, schedule.id)
+    const generation = reportTestGeneration.current[key] ?? 0
+    const mode = dryRun ? "preview" : "send"
+    const settle = (state: Omit<ReportTestState, "mode">) =>
+      setReportTests((current) => {
+        // A superseded result is dropped rather than written: whatever sits
+        // under this row now belongs to the probe that replaced this one.
+        if (generation !== (reportTestGeneration.current[key] ?? 0)) return current
+        return { ...current, [key]: { ...state, mode } }
+      })
+    setReportTests((current) => ({ ...current, [key]: { status: "sending", mode, message: "" } }))
+    if (dryRun) {
+      try {
+        const { empty, payload } = await sendScheduledReportTest(schedule.report, targets[0], true)
+        settle(empty
+          ? { status: "ok", message: "Nothing to report right now — a real run would post nothing." }
+          : { status: "ok", message: `This is what would be posted to ${targets[0]}.`, payload })
+      } catch (e) {
+        settle({ status: "error", message: e instanceof Error ? e.message : "Test send failed" })
+      }
+      return
+    }
+    // One POST per channel, each of which can fail on its own. Reporting only
+    // the first failure would hide that the channels before it already got the
+    // report — an operator reading "channel_not_found" must not re-run a send
+    // that has already posted somewhere.
+    const posted: string[] = []
+    const nothingToPost: string[] = []
+    const failures: string[] = []
+    for (const via of targets) {
+      try {
+        const { empty } = await sendScheduledReportTest(schedule.report, via, false)
+        if (empty) nothingToPost.push(via)
+        else posted.push(via)
+      } catch (e) {
+        failures.push(`${via} (${e instanceof Error ? e.message : "test send failed"})`)
+      }
+    }
+    if (posted.length === 0 && failures.length === 0) {
+      settle({ status: "ok", message: "Nothing to report right now — no message was posted." })
+      return
+    }
+    const parts: string[] = []
+    if (posted.length > 0) parts.push(`Posted to ${posted.join(", ")}.`)
+    if (nothingToPost.length > 0) parts.push(`Nothing to post to ${nothingToPost.join(", ")}.`)
+    if (failures.length > 0) parts.push(`Failed for ${failures.join(", ")}.`)
+    settle({ status: failures.length > 0 ? "error" : "ok", message: parts.join(" ") })
+  }
+
+  const routedCount = routes.filter((route) => notifiers[route.via]).length
+  // What the header badge counts: a channel is only receiving alerts if some
+  // event type can actually reach it. The global category switches mute before
+  // routing, so a channel routed for nothing but muted types receives nothing —
+  // exactly what its own card already says, type by type.
+  const receivingCount = routes.filter(
+    (route) =>
+      notifiers[route.via] &&
+      (route.events?.length ? knownEvents(route.events) : eventTypes).some((eventType) => !isEventMuted(eventType)),
+  ).length
+  // Same predicate saveChannel stores by: every type checked is persisted as
+  // the empty allow-list, so the summary must call it "all alerts" too — or it
+  // promises a filter the save is about to discard.
+  const formAllAlerts = isAllAlerts(formEvents)
+  // Routing this channel off (or removing it) pauses the hub when it is the
+  // last one left; buildPatch clears `enabled` rather than failing the save.
+  const otherRoutedCount = routes.filter((route) => route.via !== editName && notifiers[route.via]).length
+  // Deleting a channel rewrites the `via` of every schedule that posts to it
+  // and invalidates their probe results — including one that is still posting,
+  // whose loop would then be left mid-send with nothing recording what it had
+  // already delivered. Held until it settles, exactly as the schedule card's
+  // own Edit and switch are.
+  const probingRemoveTarget = schedules.some(
+    (schedule, index) =>
+      schedule.via.some((entry) => viaName(entry) === editName) &&
+      reportTests[scheduleKey(index, schedule.id)]?.status === "sending",
+  )
+
+  // The pause notices, derived from the config as it stands now. A report a
+  // notice named that is enabled again — or gone — has answered it, and a
+  // channel re-added under the same name resolves the via without un-pausing
+  // anything, so only the second half of the instruction still holds. A notice
+  // whose reports have all answered it renders nothing.
+  const schedulePauseNotices = schedulePauses
+    .map((pause) => ({
+      channel: pause.channel,
+      paused: schedules.filter((schedule) => !schedule.enabled && pause.ids.includes(schedule.id)),
+    }))
+    .filter((notice) => notice.paused.length > 0)
+    .map((notice) => ({
+      channel: notice.channel,
+      text: `Paused ${notice.paused.map((schedule) => schedule.id).join(", ")} — "${notice.channel}" was the only channel ${notice.paused.length === 1 ? "it posts" : "they post"} to. ${
+        notifiers[notice.channel]
+          ? "A channel by that name exists again: open Edit and turn the report back on."
+          : "Open Edit, pick another channel and turn the report back on."
+      }`,
+    }))
+
+  return (
+    <div className="space-y-6">
+      <div>
+        <h2 className="text-base font-semibold mb-1">Notifier</h2>
+        <p className="text-sm text-muted-foreground mb-4">
+          Send agent lifecycle alerts — starts, pull requests, stalls and failures — to Slack. Channels are hub-wide and shared by every workspace.
+        </p>
+        <div className="flex items-center gap-2 mb-6">
+          <span className="text-xs bg-muted text-muted-foreground px-2 py-1 rounded font-medium">
+            {names.length} channel{names.length !== 1 ? "s" : ""} configured
+          </span>
+          {enabled ? (
+            <span className="text-xs bg-green-500/10 text-green-400 border border-green-500/20 px-2 py-1 rounded font-medium">
+              {receivingCount} receiving alerts
+            </span>
+          ) : (
+            <span className="text-xs bg-amber-500/10 text-amber-400 border border-amber-500/20 px-2 py-1 rounded font-medium">
+              Alerts paused
+            </span>
+          )}
+        </div>
+      </div>
+
+      {/* Global switches: these mute an alert everywhere, before routing. */}
+      <div className="border border-border rounded-lg">
+        <div className="flex items-center justify-between gap-4 p-4">
+          <div>
+            <div className="text-sm font-medium">Lifecycle alerts</div>
+            <p className="text-xs text-muted-foreground mt-0.5">
+              {routedCount === 0
+                ? "Add a channel and route it before turning alerts on — there is nowhere to send them yet."
+                : orphanRoutes.length > 0
+                  ? "Remove the routes pointing at deleted channels below — the hub refuses to enable alerts while one is left."
+                  : unsupportedRoutes.length > 0
+                    ? "Open Edit on the channels flagged below and save — the hub refuses to enable alerts while a route lists an unsupported alert type."
+                    : duplicateRoutes.length > 0
+                      ? "Open Edit on the channels flagged below and save — the hub refuses to enable alerts while a channel or an alert type is routed twice."
+                      : "The master switch. Turn it off to mute every channel without losing your routing."}
+            </p>
+          </div>
+          <Switch
+            checked={enabled}
+            // Gated on every shape the hub rejects when a block is enabled: no
+            // routes, a route naming a notifier that no longer exists, a route
+            // whose allow-list carries an alert type this hub does not support,
+            // and the same `via` or the same event listed twice — all in the
+            // vocabulary of hub.yaml (`via`, `events`) rather than of this
+            // screen.
+            disabled={saving || routedCount === 0 || orphanRoutes.length > 0 || unsupportedRoutes.length > 0 || duplicateRoutes.length > 0}
+            title={
+              routedCount === 0
+                ? "Add a channel and route it to alerts first"
+                : orphanRoutes.length > 0
+                  ? "Remove the routes pointing at deleted channels first"
+                  : unsupportedRoutes.length > 0
+                    ? "Drop the unsupported alert types from the flagged channels first — open Edit and save"
+                    : duplicateRoutes.length > 0
+                      ? "Collapse the duplicated routing on the flagged channels first — open Edit and save"
+                      : undefined
+            }
+            // Invalidated only once the hub has taken the change, exactly as
+            // saveChannel/removeChannel do it: a rejected save leaves every
+            // card's result describing the configuration it was sent under, and
+            // wiping it here would destroy a real diagnosis (a
+            // channel_not_found banner) with nothing to replace it.
+            onCheckedChange={async (checked) => {
+              const { persisted } = await savePatch({ enabled: checked })
+              if (persisted) { testGenerationAll.current++; setTests({}) }
+            }}
+            aria-label="Enable lifecycle alerts"
+          />
+        </div>
+        <div className={cn("border-t border-border p-4 space-y-3 transition-opacity", !enabled && "opacity-50")}>
+          <p className="text-xs text-muted-foreground">
+            Alert types muted here never reach any channel, whatever the per-channel routing says.
+          </p>
+          <div className="grid gap-2 sm:grid-cols-2">
+            {LIFECYCLE_CATEGORIES.map((category) => (
+              <div key={category.id} className="flex items-start justify-between gap-3 rounded-md border border-border/60 bg-muted/20 px-3 py-2">
+                <div className="min-w-0">
+                  <div className="text-sm">{category.label}</div>
+                  <p className="text-xs text-muted-foreground">{category.description}</p>
+                </div>
+                <Switch
+                  className="mt-0.5"
+                  checked={categoryEnabled[category.id]}
+                  disabled={saving || !enabled}
+                  onCheckedChange={async (checked) => {
+                    // A muted category can change what (or whether) a channel
+                    // receives anything, so every test result on the page is
+                    // now about a configuration that no longer exists — but
+                    // only once the hub has actually taken the change. A
+                    // rejected save changed nothing, and clearing the results
+                    // anyway would erase a live failure diagnosis.
+                    const { persisted } = await savePatch({ events: { ...categoryEnabled, [category.id]: checked } })
+                    if (persisted) {
+                      testGenerationAll.current++
+                      setTests({})
+                    }
+                  }}
+                  aria-label={`Toggle ${category.label} alerts`}
+                />
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {/* Channels */}
+      <div className="space-y-2">
+        <h3 className="text-sm font-medium">Channels</h3>
+        {detachedSaveError && (
+          <div className="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+            <AlertTriangle className="size-3.5 mt-px shrink-0" />
+            <span className="break-words">{detachedSaveError}</span>
+          </div>
+        )}
+        {names.length === 0 ? (
+          <p className="text-sm text-muted-foreground px-4 py-6 text-center border border-border rounded-lg">
+            No channels configured. Add one to start receiving alerts in Slack.
+          </p>
+        ) : (
+          <div className="space-y-2">
+            {names.map((name) => {
+              const notifier = notifiers[name]
+              const route = routeFor(name)
+              const test = tests[name]
+              const routeUnknownEvents = unknownEvents(route?.events)
+              const routeDuplicated = isDuplicated(name)
+              const testEvent = testEventFor(name)
+              const canTest = enabled && Boolean(testEvent) && !saving
+              // Rendered as text, not as the disabled button's `title`: the
+              // Button base class sets `disabled:pointer-events-none`, so a
+              // native tooltip on it can never fire. The globally-muted case
+              // has no badge of its own, so this is the only place the screen
+              // says why nothing can reach this channel.
+              const testBlockedReason = !enabled
+                ? "Lifecycle alerts are turned off — this channel receives nothing."
+                : !route
+                  ? null // the "Not receiving alerts" badge above already says it
+                  : !testEvent
+                    ? "Every alert type routed here is muted by a switch above, so this channel receives nothing."
+                    : null
+              return (
+                <div key={name} className="border border-border rounded-lg p-4">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-2">
+                        <code className="text-sm font-mono font-medium">{name}</code>
+                        <span className="text-xs text-muted-foreground capitalize">{notifier.type}</span>
+                      </div>
+                      <p className="text-xs text-muted-foreground mt-1">
+                        <span className="font-mono">{notifier.channel || "no channel"}</span>
+                        {" · "}
+                        {notifier.token_secret
+                          ? (
+                            <>
+                              token: <span className={cn("font-mono", secretMissing(notifier.token_secret) && "text-amber-400")}>{notifier.token_secret}</span>
+                              {secretMissing(notifier.token_secret) && <span className="text-amber-400"> — secret not found</span>}
+                            </>
+                          )
+                          : <span className="text-amber-400">no token secret</span>}
+                      </p>
+                      <div className="mt-2">
+                        {!route ? (
+                          <span className="text-xs bg-muted text-muted-foreground px-2 py-1 rounded font-medium">
+                            Not receiving alerts
+                          </span>
+                        ) : isAllAlerts(route.events) ? (
+                          <span className="text-xs bg-blue-500/10 text-blue-400 border border-blue-500/20 px-2 py-1 rounded font-medium">
+                            All alerts
+                          </span>
+                        ) : (
+                          <span className="text-xs bg-muted text-muted-foreground px-2 py-1 rounded font-medium">
+                            {new Set(knownEvents(route.events)).size} of {eventTypes.length} alert types
+                          </span>
+                        )}
+                      </div>
+                      {routeUnknownEvents.length > 0 && (
+                        <p className="text-xs text-amber-400 mt-2">
+                          This route also lists {routeUnknownEvents.length === 1 ? "an alert type" : "alert types"} this hub does not support (
+                          <span className="font-mono">{routeUnknownEvents.join(", ")}</span>
+                          ). Lifecycle alerts cannot be turned on until {routeUnknownEvents.length === 1 ? "it is" : "they are"} gone — open Edit and save to drop {routeUnknownEvents.length === 1 ? "it" : "them"}.
+                        </p>
+                      )}
+                      {routeDuplicated && (
+                        <p className="text-xs text-amber-400 mt-2">
+                          {duplicatedVias.has(name)
+                            ? "This channel is routed more than once on disk — the card shows only the first entry."
+                            : "This route lists the same alert type more than once on disk."}{" "}
+                          Lifecycle alerts cannot be turned on until the duplicate is gone — open Edit and save to collapse it.
+                        </p>
+                      )}
+                      {testBlockedReason && (
+                        <p className="text-xs text-muted-foreground mt-2">{testBlockedReason}</p>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-2 shrink-0">
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        disabled={!canTest || test?.status === "sending"}
+                        title={testEvent ? `Posts a sample "${lifecycleEventLabel(testEvent)}" alert` : undefined}
+                        onClick={() => sendTest(name)}
+                        className="gap-1.5"
+                      >
+                        <Send className="size-3.5" />
+                        {test?.status === "sending" ? "Sending…" : "Send test"}
+                      </Button>
+                      {/* Held while a save is in flight for the reason the
+                          schedule cards' Edit is: the dialog seeds from the
+                          pre-save snapshot, so opening it mid-save would hand
+                          the next save a stale copy of the change still
+                          landing — and Remove inside it reaches the schedules. */}
+                      <Button size="sm" variant="ghost" disabled={saving} onClick={() => openEdit(name)}>Edit</Button>
+                    </div>
+                  </div>
+                  {test && test.status !== "sending" && (
+                    <div
+                      className={cn(
+                        "mt-3 flex items-start gap-2 rounded-md border px-3 py-2 text-xs",
+                        test.status === "ok"
+                          ? "border-green-500/20 bg-green-500/10 text-green-400"
+                          : "border-destructive/30 bg-destructive/10 text-destructive",
+                      )}
+                    >
+                      {test.status === "ok"
+                        ? <CheckCircle2 className="size-3.5 mt-px shrink-0" />
+                        : <AlertTriangle className="size-3.5 mt-px shrink-0" />}
+                      <span className="break-words">{test.message}</span>
+                    </div>
+                  )}
+                  {saveErrors[name] && (
+                    <div className="mt-3 flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+                      <AlertTriangle className="size-3.5 mt-px shrink-0" />
+                      <span className="break-words">Last save failed: {saveErrors[name]}</span>
+                    </div>
+                  )}
+                </div>
+              )
+            })}
+          </div>
+        )}
+      </div>
+
+      {orphanRoutes.length > 0 && (
+        <div className="space-y-2">
+          <h3 className="text-sm font-medium">Routes without a channel</h3>
+          <p className="text-xs text-muted-foreground">
+            These alerts are routed to channels that no longer exist. The hub refuses to enable lifecycle alerts until they are removed.
+          </p>
+          {orphanRoutes.map((route) => (
+            <div key={route.via} className="border border-amber-500/20 bg-amber-500/5 rounded-lg p-4 flex items-center justify-between gap-3">
+              <div className="min-w-0">
+                <code className="text-sm font-mono font-medium">{route.via}</code>
+                <p className="text-xs text-amber-400 mt-1">No channel named {route.via} is configured.</p>
+              </div>
+              <Button
+                size="sm"
+                variant="ghost"
+                className="text-destructive hover:text-destructive shrink-0"
+                disabled={saving}
+                onClick={() => removeOrphanRoute(route.via)}
+              >
+                <Trash2 className="size-3.5 mr-1" /> Remove route
+              </Button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <Button onClick={openAdd} className="gap-2">
+        <span className="text-sm">+</span> Add Channel
+      </Button>
+
+      {/* Scheduled reports — time-driven digests, independent of the lifecycle
+          alerts above: they are not routed by event type and the master switch
+          does not mute them. */}
+      <div className="space-y-2 border-t border-border pt-6">
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <h3 className="text-sm font-medium">Scheduled reports</h3>
+            <p className="text-xs text-muted-foreground mt-0.5">
+              Recurring digests posted at a fixed time. They run on their own schedule — the lifecycle switches above do not mute them.
+            </p>
+          </div>
+          <div className="flex flex-col items-end gap-1 shrink-0">
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={saving || names.length === 0}
+              onClick={openAddSchedule}
+            >
+              <span className="mr-1 text-sm">+</span> Add report
+            </Button>
+            {/* Rendered as text, not as the disabled button's `title`: the
+                Button base class sets `disabled:pointer-events-none`, so a
+                native tooltip on it can never fire — and once a report exists
+                the list replaces the empty state that carries the same hint,
+                leaving a greyed-out button with nothing explaining it. */}
+            {names.length === 0 && (
+              <p className="text-xs text-muted-foreground text-right">
+                Add a channel first — a report needs somewhere to post.
+              </p>
+            )}
+          </div>
+        </div>
+
+        {schedulePauseNotices.map((notice) => (
+          <div
+            key={notice.channel}
+            className="flex items-start gap-2 rounded-md border border-amber-500/20 bg-amber-500/10 px-3 py-2 text-xs text-amber-400"
+          >
+            <AlertTriangle className="size-3.5 mt-px shrink-0" />
+            <span className="break-words">{notice.text}</span>
+          </div>
+        ))}
+        {detachedScheduleError && (
+          <div className="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+            <AlertTriangle className="size-3.5 mt-px shrink-0" />
+            <span className="break-words">{detachedScheduleError}</span>
+          </div>
+        )}
+
+        {schedules.length === 0 ? (
+          <p className="text-sm text-muted-foreground px-4 py-6 text-center border border-border rounded-lg">
+            {names.length === 0
+              ? "No scheduled reports. Add a channel first, then schedule a report to post into it."
+              : "No scheduled reports. Add one to get a recurring digest in Slack."}
+          </p>
+        ) : (
+          <div className="space-y-2">
+            {/* Keyed by position, not id: the hub tolerates a stored duplicate
+                id, and two cards sharing a React key collapse into one. */}
+            {schedules.map((schedule, index) => {
+              const key = scheduleKey(index, schedule.id)
+              const test = reportTests[key]
+              // Resolved names, matching the hub: " eng " is delivered to the
+              // channel `eng`, so the card must not flag it as missing — and
+              // the trimmed name is what a probe has to be sent to.
+              const missingVia = schedule.via.map(viaName).filter((via) => !notifiers[via])
+              const targets = schedule.via.map(viaName).filter((via) => notifiers[via])
+              // A probe holds this row the way a save does. "Send now" POSTs to
+              // each channel in turn and settles only once the loop is done, so
+              // a save landing mid-loop would invalidate the probe and drop the
+              // aggregate result — leaving real Slack messages sent with
+              // nothing on screen recording them, and both probe buttons
+              // re-enabled to send them a second time.
+              const probing = test?.status === "sending"
+              const canTest = targets.length > 0 && !saving && !probing
+              // Which probe is in flight, so "Working…" replaces the label of
+              // the button that was clicked and not the other one's.
+              const running = probing ? test.mode : null
+              return (
+                <div key={key} className="border border-border rounded-lg p-4">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="text-sm font-medium">{scheduledReportLabel(schedule.report)}</span>
+                        <code className="text-xs text-muted-foreground font-mono">{schedule.id}</code>
+                        {!schedule.enabled && (
+                          <span className="text-xs bg-amber-500/10 text-amber-400 border border-amber-500/20 px-2 py-0.5 rounded font-medium">
+                            Paused
+                          </span>
+                        )}
+                      </div>
+                      <p className="text-xs text-muted-foreground mt-1 flex items-center gap-1.5">
+                        <Clock className="size-3 shrink-0" />
+                        <span className="font-mono">{schedule.at}</span>
+                        <span>{schedule.timezone || "UTC"}</span>
+                        <span>·</span>
+                        <span>{weekdaysLabel(schedule.weekdays)}</span>
+                      </p>
+                      <p className="text-xs text-muted-foreground mt-1">
+                        Posts to{" "}
+                        {schedule.via.map(viaName).map((via, i) => (
+                          <React.Fragment key={via}>
+                            {i > 0 && ", "}
+                            <span className={cn("font-mono", !notifiers[via] && "text-amber-400")}>{via}</span>
+                          </React.Fragment>
+                        ))}
+                      </p>
+                      {missingVia.length > 0 && (
+                        <p className="text-xs text-amber-400 mt-2">
+                          {missingVia.length === 1 ? "Channel" : "Channels"}{" "}
+                          <span className="font-mono">{missingVia.join(", ")}</span>{" "}
+                          {missingVia.length === 1 ? "is" : "are"} no longer configured, so nothing is delivered there — open Edit and pick another.
+                        </p>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-2 shrink-0">
+                      <Switch
+                        checked={schedule.enabled}
+                        disabled={saving || probing}
+                        onCheckedChange={(checked) => toggleSchedule(schedule, index, checked)}
+                        // The id alone is not a name when the hub carries a
+                        // stored duplicate of it: both switches would announce
+                        // themselves identically.
+                        aria-label={`Enable the ${schedule.id} report (${scheduledReportLabel(schedule.report)}, row ${index + 1})`}
+                      />
+                      {/* Disabled while a save is in flight for the same reason
+                          the dialog's own controls are: the editor seeds from
+                          the pre-save snapshot, so opening it mid-save would
+                          hand the next save a stale copy of the change that is
+                          still landing. A probe holds it too — see `probing`. */}
+                      <Button size="sm" variant="ghost" disabled={saving || probing} onClick={() => openEditSchedule(schedule, index)}>Edit</Button>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2 mt-3">
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="gap-1.5"
+                      disabled={!canTest}
+                      title="Renders the report without posting it"
+                      onClick={() => runReportTest(schedule, index, true)}
+                    >
+                      <Eye className="size-3.5" />
+                      {running === "preview" ? "Working…" : "Preview"}
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="gap-1.5"
+                      disabled={!canTest}
+                      title={targets.length > 0 ? `Posts the report now to ${targets.join(", ")}` : undefined}
+                      onClick={() => runReportTest(schedule, index, false)}
+                    >
+                      <Send className="size-3.5" />
+                      {running === "send" ? "Working…" : "Send now"}
+                    </Button>
+                    {targets.length === 0 && (
+                      <span className="text-xs text-muted-foreground">
+                        No configured channel to post to.
+                      </span>
+                    )}
+                  </div>
+                  {test && test.status !== "sending" && (
+                    <div
+                      className={cn(
+                        "mt-3 rounded-md border px-3 py-2 text-xs",
+                        test.status === "ok"
+                          ? "border-green-500/20 bg-green-500/10 text-green-400"
+                          : "border-destructive/30 bg-destructive/10 text-destructive",
+                      )}
+                    >
+                      <div className="flex items-start gap-2">
+                        {test.status === "ok"
+                          ? <CheckCircle2 className="size-3.5 mt-px shrink-0" />
+                          : <AlertTriangle className="size-3.5 mt-px shrink-0" />}
+                        <span className="break-words">{test.message}</span>
+                      </div>
+                      {test.payload !== undefined && (
+                        <pre className="mt-2 max-h-64 overflow-auto rounded bg-background/60 p-2 text-xs text-foreground whitespace-pre-wrap break-words">
+                          {previewLines(test.payload).join("\n\n")}
+                        </pre>
+                      )}
+                    </div>
+                  )}
+                  {scheduleSaveErrors[key] && (
+                    <div className="mt-3 flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+                      <AlertTriangle className="size-3.5 mt-px shrink-0" />
+                      <span className="break-words">Last save failed: {scheduleSaveErrors[key]}</span>
+                    </div>
+                  )}
+                </div>
+              )
+            })}
+          </div>
+        )}
+      </div>
+
+      <InfraNotificationsSection settings={settings} onSave={onSave} saving={saving} pause={infraPause} />
+
+      {/* Add / edit modal */}
+      {/* Closing only closes: DialogContent stays mounted for its 200ms exit
+          animation, so clearing the form here would let the operator watch the
+          heading turn into "Edit null" and every field blank out on the way
+          out. openAdd/openEdit re-seed the whole form, so nothing needs
+          clearing on close. */}
+      <Dialog open={showModal} onOpenChange={setShowModal}>
+        <DialogContent className="max-w-lg max-h-[90vh] overflow-y-auto p-0 gap-0">
+          <DialogTitle className="sr-only">{modalMode === "add" ? "Add Channel" : `Edit ${editName}`}</DialogTitle>
+          <div className="flex items-center justify-between px-5 py-4 border-b border-border">
+            <h3 className="font-medium">{modalMode === "add" ? "Add Channel" : `Edit ${editName}`}</h3>
+          </div>
+
+          <div className="p-5 space-y-4">
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="text-xs text-muted-foreground mb-1 block">Name</label>
+                <Input
+                  placeholder="e.g. eng-agents"
+                  value={formName}
+                  onChange={(e) => setFormName(e.target.value)}
+                  className="font-mono text-sm h-8"
+                  disabled={saving || modalMode === "edit"}
+                />
+              </div>
+              <div>
+                <label className="text-xs text-muted-foreground mb-1 block">Slack channel ID</label>
+                {/* Every control below is disabled while this dialog's own save
+                    is in flight: saveChannel snapshots the form at click time
+                    and closes the dialog on success, so an edit made during the
+                    round trip — seconds long, the re-read hits GitHub — would be
+                    discarded with nothing on screen saying so. */}
+                <Input
+                  placeholder="C0123ABCD"
+                  value={formChannel}
+                  onChange={(e) => setFormChannel(e.target.value)}
+                  className="font-mono text-sm h-8"
+                  disabled={saving}
+                />
+              </div>
+            </div>
+            <p className="text-xs text-muted-foreground -mt-2">
+              Use the channel ID, not the #name — names break when a channel is renamed. In Slack, open the channel details and copy the ID at the bottom.
+            </p>
+
+            <div>
+              <label className="text-xs text-muted-foreground mb-1 block">Bot token secret</label>
+              <select
+                value={formTokenSecret}
+                onChange={(e) => setFormTokenSecret(e.target.value)}
+                className="w-full h-8 text-sm rounded-md border border-input bg-background px-3"
+                disabled={saving}
+              >
+                <option value="">Select secret…</option>
+                {/* A dangling reference has no option of its own, so the
+                    controlled select would render blank while Save happily
+                    writes the broken name back. Give it one, flagged. */}
+                {secretMissing(formTokenSecret) && (
+                  <option value={formTokenSecret}>{formTokenSecret} (secret not found)</option>
+                )}
+                {secretNames.map((secret) => (
+                  <option key={secret} value={secret}>{secret}</option>
+                ))}
+              </select>
+              {secretMissing(formTokenSecret) ? (
+                <p className="text-xs text-amber-400 mt-1">
+                  No hub secret named <span className="font-mono">{formTokenSecret}</span> exists, so sends through this channel fail. Add it under Settings → Secrets → Hub, or pick another.
+                </p>
+              ) : (
+                <p className="text-xs text-muted-foreground mt-1">
+                  {/* Channels are hub-wide, so the token must be a HUB secret —
+                      a workspace secret of the same name is a different store
+                      and never resolves here. */}
+                  The <strong>hub</strong> secret holding the Slack bot token (<span className="font-mono">xoxb-…</span>). Add it under Settings → Secrets → Hub first — workspace secrets are a separate store and are never read here.
+                </p>
+              )}
+            </div>
+
+            {/* The hub rejects a channel whose interval it cannot parse, on
+                every save that touches it. Editable here so a value written by
+                hand can be repaired from the screen instead of hub.yaml. */}
+            <div>
+              <label className="text-xs text-muted-foreground mb-1 block">Minimum send interval</label>
+              <Input
+                placeholder="30s"
+                value={formMinSendInterval}
+                onChange={(e) => setFormMinSendInterval(e.target.value)}
+                className="font-mono text-sm h-8"
+                disabled={saving}
+              />
+              <p className="text-xs text-muted-foreground mt-1">
+                Optional. How long this channel waits between messages, as a duration (<span className="font-mono">30s</span>, <span className="font-mono">5m</span>). Leave empty for the default.
+              </p>
+            </div>
+
+            {/* Routing */}
+            <div className="space-y-3 border-t border-border pt-4">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <div className="text-sm font-medium">Alert routing</div>
+                  <p className="text-xs text-muted-foreground mt-0.5">Which lifecycle alerts land in this channel.</p>
+                </div>
+                <Switch
+                  className="mt-1"
+                  checked={formRouted}
+                  onCheckedChange={setFormRouted}
+                  disabled={saving}
+                  aria-label="Send lifecycle alerts to this channel"
+                />
+              </div>
+
+              {modalMode === "edit" && enabled && otherRoutedCount === 0 && (
+                <p className="text-xs text-amber-400 rounded-md border border-amber-500/20 bg-amber-500/10 px-3 py-2">
+                  This is the only channel receiving alerts. Removing it — or turning routing off — pauses lifecycle alerts for the whole hub until another channel is routed.
+                </p>
+              )}
+
+              {!formRouted ? (
+                <p className="text-xs text-muted-foreground rounded-md border border-border bg-muted/20 px-3 py-2">
+                  This channel stays configured but receives no lifecycle alerts.
+                </p>
+              ) : (
+                <>
+                  <div
+                    className={cn(
+                      "rounded-md border px-3 py-2",
+                      formAllAlerts
+                        ? "border-blue-500/30 bg-blue-500/10"
+                        : "border-border bg-muted/20",
+                    )}
+                  >
+                    <div className="flex items-start gap-2">
+                      <Bell className={cn("size-4 mt-px shrink-0", formAllAlerts ? "text-blue-400" : "text-muted-foreground")} />
+                      <div className="min-w-0">
+                        <div className={cn("text-sm font-medium", formAllAlerts ? "text-blue-400" : "")}>
+                          {formAllAlerts ? "All alerts" : `${formEvents.length} of ${eventTypes.length} alert types`}
+                        </div>
+                        <p className="text-xs text-muted-foreground">
+                          {formAllAlerts
+                            ? "Saved as receive-all: this channel gets every alert type, including any added later."
+                            : "Only the checked types reach this channel."}
+                        </p>
+                        {!formAllAlerts && (
+                          <button
+                            type="button"
+                            className="text-xs text-blue-400 hover:underline mt-1 disabled:opacity-50"
+                            disabled={saving}
+                            onClick={() => setFormEvents([])}
+                          >
+                            Clear selection to receive all alerts
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+
+                  {formDroppedEvents.length > 0 && (
+                    <p className="text-xs text-amber-400 rounded-md border border-amber-500/20 bg-amber-500/10 px-3 py-2">
+                      This route also lists {formDroppedEvents.length === 1 ? "an alert type" : "alert types"} this hub does not support (
+                      <span className="font-mono">{formDroppedEvents.join(", ")}</span>
+                      ), so {formDroppedEvents.length === 1 ? "it has" : "they have"} no checkbox below and nothing is ever delivered for {formDroppedEvents.length === 1 ? "it" : "them"}. Saving drops {formDroppedEvents.length === 1 ? "it" : "them"} — the hub refuses to enable lifecycle alerts until then.
+                    </p>
+                  )}
+
+                  <div className="space-y-1">
+                    {eventTypes.map((eventType) => {
+                      const checked = formEvents.includes(eventType)
+                      const muted = isEventMuted(eventType)
+                      return (
+                        <label
+                          key={eventType}
+                          className="flex items-center gap-2 text-sm cursor-pointer rounded px-2 py-1 hover:bg-muted/50"
+                        >
+                          <input
+                            type="checkbox"
+                            aria-label={`${lifecycleEventLabel(eventType)} (${eventType})`}
+                            checked={checked}
+                            disabled={saving}
+                            onChange={(e) =>
+                              setFormEvents(
+                                e.target.checked
+                                  ? [...formEvents, eventType]
+                                  : formEvents.filter((t) => t !== eventType),
+                              )
+                            }
+                          />
+                          <span className={cn(!checked && !formAllAlerts && "text-muted-foreground")}>
+                            {lifecycleEventLabel(eventType)}
+                          </span>
+                          <code className="text-xs text-muted-foreground font-mono">{eventType}</code>
+                          {muted && (
+                            <span className="text-xs text-amber-400 ml-auto shrink-0">muted globally</span>
+                          )}
+                        </label>
+                      )
+                    })}
+                  </div>
+                </>
+              )}
+            </div>
+
+          </div>
+
+          <div className="border-t border-border">
+            {/* The error sits with the buttons, never below the fold of a long
+                scrolling form. */}
+            {/* A failure from the save that THIS dialog replaced. The channel
+                list behind the overlay carries it too, but the operator is
+                looking at the dialog — and its message names the channel, so
+                it cannot be mistaken for a rejection of the form on screen. */}
+            {detachedSaveError && (
+              <div className="mx-5 mt-4 flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+                <AlertTriangle className="size-3.5 mt-px shrink-0" />
+                <span className="break-words">{detachedSaveError}</span>
+              </div>
+            )}
+            {/* A failed report ADD can be detached by opening THIS dialog —
+                the Edit buttons are not gated while a save is in flight — so
+                its banner ends up behind this overlay with nothing else naming
+                it. Its message names the report, so it cannot be read as a
+                rejection of the channel form on screen. */}
+            {detachedScheduleError && (
+              <div className="mx-5 mt-4 flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+                <AlertTriangle className="size-3.5 mt-px shrink-0" />
+                <span className="break-words">{detachedScheduleError}</span>
+              </div>
+            )}
+            {formError && (
+              <div className="mx-5 mt-4 flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+                <AlertTriangle className="size-3.5 mt-px shrink-0" />
+                <span className="break-words">{formError}</span>
+              </div>
+            )}
+            <div className="flex items-center justify-between px-5 py-4">
+              {modalMode === "edit" && editName && (
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="text-destructive hover:text-destructive"
+                  disabled={saving || probingRemoveTarget}
+                  title={probingRemoveTarget ? "A scheduled report is posting to this channel right now." : undefined}
+                  onClick={() => removeChannel(editName)}
+                >
+                  <Trash2 className="size-3.5 mr-1" /> Remove
+                </Button>
+              )}
+              <div className="flex items-center gap-2 ml-auto">
+                <Button size="sm" variant="outline" disabled={saving} onClick={() => setShowModal(false)}>Cancel</Button>
+                <Button size="sm" disabled={saving || !formName.trim() || !formChannel.trim() || !formTokenSecret} onClick={saveChannel}>
+                  {modalMode === "add" ? "Add Channel" : "Save changes"}
+                </Button>
+              </div>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* Add / edit scheduled report. Like the channel dialog, closing only
+          closes: openAddSchedule/openEditSchedule re-seed every field. */}
+      <Dialog open={showSchedule} onOpenChange={setShowSchedule}>
+        <DialogContent className="max-w-lg max-h-[90vh] overflow-y-auto p-0 gap-0">
+          <DialogTitle className="sr-only">
+            {scheduleMode === "add" ? "Add scheduled report" : `Edit ${editScheduleId}`}
+          </DialogTitle>
+          <div className="flex items-center justify-between px-5 py-4 border-b border-border">
+            <h3 className="font-medium">{scheduleMode === "add" ? "Add scheduled report" : `Edit ${editScheduleId}`}</h3>
+          </div>
+
+          <div className="p-5 space-y-4">
+            <div>
+              <label htmlFor="schedule-report" className="text-xs text-muted-foreground mb-1 block">Report</label>
+              <select
+                id="schedule-report"
+                value={formReport}
+                onChange={(e) => setFormReport(e.target.value)}
+                className="w-full h-8 text-sm rounded-md border border-input bg-background px-3"
+                disabled={saving}
+              >
+                {/* A report this build does not know can only come from a
+                    hand-written hub.yaml. It gets an option of its own, flagged,
+                    so the controlled select cannot render blank while Save
+                    writes the unknown name straight back. */}
+                {!SCHEDULED_REPORTS.some((report) => report.id === formReport) && (
+                  <option value={formReport}>{formReport} (not supported by this hub)</option>
+                )}
+                {SCHEDULED_REPORTS.map((report) => (
+                  <option key={report.id} value={report.id}>{report.label}</option>
+                ))}
+              </select>
+              <p className="text-xs text-muted-foreground mt-1">
+                {SCHEDULED_REPORTS.find((report) => report.id === formReport)?.description
+                  || "This hub does not carry this report, so the schedule delivers nothing."}
+              </p>
+            </div>
+
+            <div>
+              <label htmlFor="schedule-name" className="text-xs text-muted-foreground mb-1 block">Name</label>
+              <Input
+                id="schedule-name"
+                placeholder="e.g. pending-prs"
+                value={formScheduleId}
+                onChange={(e) => setFormScheduleId(e.target.value)}
+                className="font-mono text-sm h-8"
+                disabled={saving || scheduleMode === "edit"}
+              />
+              <p className="text-xs text-muted-foreground mt-1">
+                How this schedule is identified in <span className="font-mono">hub.yaml</span> and in the hub log. It cannot be changed later.
+              </p>
+            </div>
+
+            <div>
+              {/* A group heading, not a control label: each checkbox below
+                  carries its own aria-label, so the container is what the
+                  screen reader announces the set by. */}
+              <div className="text-xs text-muted-foreground mb-1">Channels</div>
+              {names.length === 0 && formDanglingVia.length === 0 ? (
+                <p className="text-xs text-amber-400">No channels are configured yet.</p>
+              ) : (
+                <div className="space-y-1" role="group" aria-label="Channels">
+                  {/* Deleted channels the schedule still names get a checkbox
+                      of their own, flagged: the hub refuses to save a schedule
+                      pointing at one, so unticking it has to be possible from
+                      here — otherwise the only repair is a hub.yaml edit. The
+                      list comes from the open-time snapshot, so unticking one
+                      leaves its row in place to be re-ticked. */}
+                  {[...names, ...formDanglingVia.filter((via) => !notifiers[via])].map((name) => {
+                    const missing = !notifiers[name]
+                    return (
+                      <label
+                        key={name}
+                        className="flex items-center gap-2 text-sm cursor-pointer rounded px-2 py-1 hover:bg-muted/50"
+                      >
+                        <input
+                          type="checkbox"
+                          // The flag is the only thing telling the operator
+                          // WHICH box the warning above means, and colour alone
+                          // does not reach a screen reader — so the accessible
+                          // name has to carry it too.
+                          aria-label={missing
+                            ? `Post the report to ${name} (channel no longer configured)`
+                            : `Post the report to ${name}`}
+                          checked={formVia.includes(name)}
+                          disabled={saving}
+                          onChange={(e) =>
+                            setFormVia(
+                              e.target.checked
+                                ? [...formVia, name]
+                                : formVia.filter((via) => via !== name),
+                            )
+                          }
+                        />
+                        <code className={cn("font-mono", missing && "text-amber-400")}>{name}</code>
+                        <span className={cn("text-xs", missing ? "text-amber-400" : "text-muted-foreground")}>
+                          {missing ? "channel no longer configured" : notifiers[name]?.channel}
+                        </span>
+                      </label>
+                    )
+                  })}
+                </div>
+              )}
+              {/* The hub only checks a schedule's channels while it is
+                  enabled, so the refusal is real for one and a warning about
+                  the future for the other. */}
+              {formVia.some((via) => !notifiers[via]) && (
+                <p className="text-xs text-amber-400 mt-1">
+                  {formScheduleEnabled
+                    ? "The hub refuses to save a report that posts to a channel it does not have. Untick the flagged one, or add the channel back first."
+                    : "A paused report may name a missing channel, but delivery there fails the moment it is enabled again — and the hub will refuse that save. Untick the flagged one, or add the channel back first."}
+                </p>
+              )}
+            </div>
+
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label htmlFor="schedule-at" className="text-xs text-muted-foreground mb-1 block">Time</label>
+                <Input
+                  id="schedule-at"
+                  type="time"
+                  value={formAt}
+                  onChange={(e) => setFormAt(e.target.value)}
+                  className="font-mono text-sm h-8"
+                  disabled={saving}
+                />
+              </div>
+              <div>
+                <label htmlFor="schedule-timezone" className="text-xs text-muted-foreground mb-1 block">Timezone</label>
+                <select
+                  id="schedule-timezone"
+                  value={formTimezone}
+                  onChange={(e) => setFormTimezone(e.target.value)}
+                  className="w-full h-8 text-sm rounded-md border border-input bg-background px-3"
+                  disabled={saving}
+                >
+                  {/* A zone this browser does not list — an older browser, or a
+                      name written by hand — still needs an option, or the
+                      select renders blank and Save rewrites it. */}
+                  {formTimezone && !zoneOptions.includes(formTimezone) && (
+                    <option value={formTimezone}>{formTimezone}</option>
+                  )}
+                  {zoneOptions.map((zone) => (
+                    <option key={zone} value={zone}>{zone}</option>
+                  ))}
+                </select>
+              </div>
+            </div>
+
+            <div>
+              <div className="text-xs text-muted-foreground mb-1">Days</div>
+              <div className="flex flex-wrap gap-1.5" role="group" aria-label="Days">
+                {WEEKDAYS.map((day) => {
+                  const selected = formWeekdays.includes(day.id)
+                  return (
+                    <button
+                      key={day.id}
+                      type="button"
+                      aria-pressed={selected}
+                      disabled={saving}
+                      onClick={() =>
+                        setFormWeekdays(
+                          selected
+                            ? formWeekdays.filter((weekday) => weekday !== day.id)
+                            : [...formWeekdays, day.id],
+                        )
+                      }
+                      className={cn(
+                        "px-2.5 py-1 text-xs rounded-md border transition-colors disabled:opacity-50",
+                        selected
+                          ? "border-blue-500/30 bg-blue-500/10 text-blue-400"
+                          : "border-border bg-muted/20 text-muted-foreground hover:bg-muted/50",
+                      )}
+                    >
+                      {day.label}
+                    </button>
+                  )
+                })}
+                {/* A stored day this hub does not accept gets a chip of its
+                    own, flagged: the hub rejects the schedule the moment any
+                    other field is edited, so unticking it has to be possible
+                    from here — otherwise the only repair is Remove and re-add.
+                    Like the dangling channels, the list is the open-time
+                    snapshot, so unticking one leaves its chip to be re-ticked. */}
+                {formUnknownWeekdays.map((weekday) => {
+                  const selected = formWeekdays.includes(weekday)
+                  return (
+                    <button
+                      key={weekday}
+                      type="button"
+                      aria-pressed={selected}
+                      aria-label={`${weekday} (not a day this hub accepts)`}
+                      disabled={saving}
+                      onClick={() =>
+                        setFormWeekdays(
+                          selected
+                            ? formWeekdays.filter((day) => day !== weekday)
+                            : [...formWeekdays, weekday],
+                        )
+                      }
+                      className={cn(
+                        "px-2.5 py-1 text-xs rounded-md border transition-colors disabled:opacity-50",
+                        selected
+                          ? "border-amber-500/30 bg-amber-500/10 text-amber-400"
+                          : "border-border bg-muted/20 text-muted-foreground hover:bg-muted/50",
+                      )}
+                    >
+                      {weekday}
+                    </button>
+                  )
+                })}
+              </div>
+              {unknownWeekdays(formWeekdays).length > 0 && (
+                <p className="text-xs text-amber-400 mt-1">
+                  The hub does not accept{" "}
+                  <span className="font-mono">{unknownWeekdays(formWeekdays).join(", ")}</span>{" "}
+                  as {unknownWeekdays(formWeekdays).length === 1 ? "a day" : "days"} — this report cannot be saved until the flagged{" "}
+                  {unknownWeekdays(formWeekdays).length === 1 ? "chip is" : "chips are"} unticked.
+                </p>
+              )}
+              <p className="text-xs text-muted-foreground mt-1">
+                {formWeekdays.length === 0
+                  ? "No days selected — runs every day."
+                  : `Runs on ${weekdaysLabel(formWeekdays)}.`}
+              </p>
+            </div>
+
+            <div className="flex items-start justify-between gap-3 border-t border-border pt-4">
+              <div>
+                <div className="text-sm font-medium">Enabled</div>
+                <p className="text-xs text-muted-foreground mt-0.5">
+                  Turn it off to keep the schedule without posting anything.
+                </p>
+              </div>
+              <Switch
+                className="mt-1"
+                checked={formScheduleEnabled}
+                onCheckedChange={setFormScheduleEnabled}
+                disabled={saving}
+                aria-label="Enable this scheduled report"
+              />
+            </div>
+          </div>
+
+          <div className="border-t border-border">
+            {/* The failure from the save THIS dialog replaced. The list behind
+                the overlay carries it too, but the operator is looking here —
+                and a detached add is otherwise indistinguishable from one that
+                went through. */}
+            {detachedScheduleError && (
+              <div className="mx-5 mt-4 flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+                <AlertTriangle className="size-3.5 mt-px shrink-0" />
+                <span className="break-words">{detachedScheduleError}</span>
+              </div>
+            )}
+            {scheduleError && (
+              <div className="mx-5 mt-4 flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+                <AlertTriangle className="size-3.5 mt-px shrink-0" />
+                <span className="break-words">{scheduleError}</span>
+              </div>
+            )}
+            <div className="flex items-center justify-between px-5 py-4">
+              {scheduleMode === "edit" && editScheduleId && editScheduleIndex !== null && (
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="text-destructive hover:text-destructive"
+                  disabled={saving}
+                  onClick={() => removeSchedule(editScheduleId, editScheduleIndex)}
+                >
+                  <Trash2 className="size-3.5 mr-1" /> Remove
+                </Button>
+              )}
+              <div className="flex items-center gap-2 ml-auto">
+                <Button size="sm" variant="outline" disabled={saving} onClick={() => setShowSchedule(false)}>Cancel</Button>
+                <Button
+                  size="sm"
+                  disabled={saving || !formScheduleId.trim() || formVia.length === 0 || !formAt}
+                  onClick={saveSchedule}
+                >
+                  {scheduleMode === "add" ? "Add report" : "Save changes"}
+                </Button>
+              </div>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+    </div>
+  )
+}
+
 // linkifyText converts URLs in text into clickable <a> elements.
+const INFRA_EVENT_LABELS: Record<InfraEventType, string> = {
+  dependency_down: "Dependency down",
+  dependency_degraded: "Dependency degraded",
+  dependency_recovered: "Dependency recovered",
+  provider_limit_opened: "Provider account capped",
+  provider_limit_exhausted: "Provider cap needs attention",
+  provider_limit_released: "Provider cap lifted",
+}
+
+function InfraNotificationsSection({ settings, onSave, saving, pause }: { settings: SettingsData; onSave: (p: object) => Promise<SaveOutcome>; saving: boolean; pause: { channel: string } | null }) {
+  const notifications = settings.notifications
+  const notifiers = notifications?.notifiers || {}
+  const names = Object.keys(notifiers).sort((a, b) => a.localeCompare(b))
+  const infra = notifications?.infra
+  const enabled = infra?.enabled ?? false
+  // `via` is trimmed exactly where the hub trims it before looking the notifier
+  // up, so a hand-written " eng " names the channel `eng` rather than reading
+  // as an orphan whose only offered remedy — Remove — silently pauses alerts.
+  const routes = (infra?.routes || []).map((route) => ({ ...route, via: viaName(route.via), events: route.events || [] }))
+  const eventTypes = settings.infraEventTypes?.length ? settings.infraEventTypes : INFRA_EVENT_TYPES
+  const [tests, setTests] = useState<Record<string, TestState>>({})
+  // The outcome of the last save, rendered in the section. The page-level
+  // banner is the only other place it goes, and this section sits at the
+  // bottom of a long page: a switch that snaps back with the reason scrolled a
+  // screen or more above it just looks dead. Kept as the whole SaveOutcome
+  // because a PATCH the hub ACCEPTED whose follow-up re-read failed still
+  // changed the config — calling that "Last save failed" would tell the
+  // operator the opposite of what the hub now holds.
+  const [saveOutcome, setSaveOutcome] = useState<SaveOutcome | null>(null)
+  // Routes whose notifier is gone. The hub keeps them on disk while alerts
+  // are off but rejects the whole notifications block the moment they are
+  // on — and PATCH replaces the whole block, so one dangling route under an
+  // enabled switch fails every save on this screen, the channel and report
+  // sections included, until it is removed. The master switch is gated on
+  // it the way the lifecycle switch is, and the banner below says why.
+  const orphanRoutes = routes.filter((route) => !names.includes(route.via))
+  const orphan = orphanRoutes.length > 0
+  // The channel whose route was the last one, recorded when removing it forced
+  // the clamp in removeRoute to turn the alerts off. Without this the switch
+  // moves on its own with nothing on screen saying so: the operator reshuffling
+  // their routing removes one route, adds another, and walks away believing
+  // infrastructure alerts are still on when the hub has them off. Held in this
+  // section rather than passed down like `pause`, because this section is the
+  // one that moved the switch.
+  const [removalPause, setRemovalPause] = useState<string | null>(null)
+  // Shown while a pause THIS SCREEN caused still stands; turning the alerts
+  // back on answers it either way. A removal supersedes a channel deletion —
+  // both leave the alerts off, and the last thing the operator did is the one
+  // that explains the switch they are looking at now.
+  const pauseNotice = enabled
+    ? null
+    : removalPause
+      ? { kind: "route" as const, channel: removalPause }
+      : pause
+        ? { kind: "channel" as const, channel: pause.channel }
+        : null
+
+  // ── The route editor ───────────────────────────────────────────────────────
+  // A dialog with its own draft, like the channel and schedule editors beside
+  // it. The section used to save on every keystroke — each checkbox was a
+  // PATCH of the whole notifications block — so a half-made change was already
+  // on disk and there was nothing for Cancel to discard. Nothing here reaches
+  // the hub until Save.
+  const [showDialog, setShowDialog] = useState(false)
+  const [dialogMode, setDialogMode] = useState<"add" | "edit">("add")
+  // The ROUTE being edited, addressed by the channel it posted to when the
+  // dialog opened — null while adding. Identity, not position: the hub allows
+  // exactly one infrastructure route per channel, so `via` is a key, whereas an
+  // index is only a key for as long as the list holds still. It does not have
+  // to hold still. Every save on this page re-fetches the whole config, and the
+  // routes that come back are whatever the hub now holds — reordered, or short
+  // one entry another writer dropped. An index captured before that round trip
+  // would then address a DIFFERENT route, and the save would quietly overwrite
+  // a route the operator never opened.
+  //
+  // It doubles as the name the heading shows, which is why it is frozen at open
+  // time rather than read from draftVia: reading the draft would rename the
+  // dialog under the operator the moment they picked another channel.
+  const [editKey, setEditKey] = useState<string | null>(null)
+  const [draftVia, setDraftVia] = useState("")
+  // The receive-all choice, made explicitly rather than inferred from an empty
+  // checkbox set. The hub reads `events: []` as "every alert type, including
+  // any added in a later version", so an operator who unticks their way down
+  // to nothing would silently get the firehose — the opposite of what the
+  // unticking meant. Splitting the two apart makes receive-all reachable ON
+  // PURPOSE (it is what keeps a route picking up alert types this hub does not
+  // have yet) and unreachable by accident: an empty "Only these" list is a
+  // save the dialog refuses, in text, rather than a save that quietly widens
+  // the route.
+  const [draftAll, setDraftAll] = useState(true)
+  const [draftEvents, setDraftEvents] = useState<InfraEventType[]>([])
+  const [draftError, setDraftError] = useState("")
+
+  const draftMissing = Boolean(draftVia) && !names.includes(draftVia)
+  // The hub rejects two routes through one notifier, so a name another route
+  // already uses is not on offer — the route being edited keeps its own.
+  const viaOptions = names.filter(
+    (name) => name === draftVia || name === editKey || !routes.some((route) => route.via === name),
+  )
+  const unroutedName = names.find((name) => !routes.some((route) => route.via === name))
+
+  const openAddRoute = () => {
+    setDialogMode("add")
+    setEditKey(null)
+    setDraftVia(unroutedName || "")
+    setDraftAll(true)
+    setDraftEvents([])
+    setDraftError("")
+    setShowDialog(true)
+  }
+
+  const openEditRoute = (route: InfraRoute) => {
+    setDialogMode("edit")
+    setEditKey(viaName(route.via))
+    setDraftVia(viaName(route.via))
+    setDraftAll((route.events || []).length === 0)
+    // De-duplicated because a checkbox can only be on or off: a type stored
+    // twice would otherwise be counted twice in the dialog and re-sent
+    // verbatim by a save that changed nothing.
+    setDraftEvents([...new Set(route.events || [])])
+    setDraftError("")
+    setShowDialog(true)
+  }
+
+  // PATCH replaces the whole notifications block, so every save carries the
+  // sibling sections through byte for byte: omitting `scheduled` here would
+  // delete every scheduled report the first time anyone touches infra routing.
+  const saveInfra = async (next: InfraNotificationsConfig): Promise<SaveOutcome> => {
+    const outcome = await onSave({
+      notifications: {
+        notifiers,
+        lifecycle: notifications?.lifecycle,
+        scheduled: notifications?.scheduled || [],
+        infra: next,
+      },
+    })
+    setSaveOutcome(outcome)
+    return outcome
+  }
+
+  async function saveRoute() {
+    const via = viaName(draftVia)
+    if (!via) { setDraftError("Pick the channel this route posts to."); return }
+    // Belt and braces over the filtered picker: a channel deleted in another
+    // tab between opening this dialog and saving it could still be sitting in
+    // the select, and the hub answers a duplicated via with a routes[n] index
+    // that names nothing on screen.
+    if (routes.some((route) => route.via === via && route.via !== editKey)) {
+      setDraftError(`"${via}" already carries an infrastructure route. A channel can only have one.`)
+      return
+    }
+    if (!draftAll && draftEvents.length === 0) {
+      setDraftError("Pick at least one alert type, or choose “All alert types”.")
+      return
+    }
+    setDraftError("")
+    // Receive-all is stored as the empty list — the shape the hub reads as
+    // "every type, including any added later". A narrowed route stores its own
+    // types, de-duplicated for the reason the dialog seeds a Set.
+    const entry: InfraRoute = { via, events: draftAll ? [] : [...new Set(draftEvents)] }
+    // The row this draft belongs to is located NOW, in the list the hub last
+    // handed back, rather than trusted from where it sat when the dialog
+    // opened. If it is gone, the edit is refused outright: writing the draft
+    // into whatever occupies that position instead would silently repoint a
+    // route the operator never looked at, and an operator told nothing would
+    // assume their edit landed.
+    let nextRoutes: InfraRoute[]
+    if (editKey === null) {
+      nextRoutes = [...routes, entry]
+    } else {
+      const at = routes.findIndex((route) => route.via === editKey)
+      if (at === -1) {
+        setDraftError(`The route through "${editKey}" is no longer there — it was removed while this was open. Close this and add it again.`)
+        return
+      }
+      nextRoutes = routes.map((route, i) => (i === at ? entry : route))
+    }
+    const { persisted, message } = await saveInfra({ ...infra, enabled, routes: nextRoutes })
+    // Closed on `persisted`, not on the absence of a message: a PATCH the hub
+    // took whose follow-up re-read failed already changed the routing, and
+    // holding the dialog open invites a second save of a change that landed.
+    // The re-read failure is real, so the section banner states it verbatim.
+    if (!persisted) { setDraftError(message || "The hub refused the change."); return }
+    setShowDialog(false)
+  }
+
+  async function removeRoute(key: string) {
+    // Removed by identity, for the reason saveRoute resolves one: "the row at
+    // index 1" and "the route through ops" stop meaning the same thing the
+    // moment anything else edits the list.
+    const at = routes.findIndex((route) => route.via === key)
+    if (at === -1) {
+      setDraftError(`The route through "${key}" is already gone.`)
+      return
+    }
+    // The hub rejects an enabled block with no routes ("via is required when
+    // enabled"), so dropping the last route pauses infrastructure alerts
+    // instead of failing the save — the same clamp deleteNotifier applies when
+    // it removes the channel a route pointed at.
+    const nextRoutes = routes.filter((_, i) => i !== at)
+    const clamped = enabled && nextRoutes.length === 0
+    const { persisted, message } = await saveInfra({ ...infra, enabled: nextRoutes.length > 0 && enabled, routes: nextRoutes })
+    // Recorded on `persisted` rather than on a clean save, and before the
+    // early return: a PATCH the hub took whose follow-up re-read failed still
+    // turned the alerts off, and this notice is the only record on the screen
+    // that the switch moved without the operator touching it. Losing it there
+    // is exactly the case that leaves someone believing their alerts are on.
+    if (persisted && clamped) setRemovalPause(key)
+    if (!persisted) { setDraftError(message || "The hub refused the change."); return }
+    setShowDialog(false)
+  }
+
+  const sendTest = async (route: InfraRoute, index: number) => {
+    const eventType = route.events?.[0] || eventTypes[0]
+    if (!eventType) return
+    // The via is part of the key on purpose: a route repointed at another
+    // channel gets a fresh slot rather than inheriting a green "Sent" that
+    // describes a message delivered somewhere else. Removing a row renumbers
+    // the ones after it, which re-keys them the same way — their results
+    // disappear instead of landing on a route that never made them.
+    const key = `${index}:${route.via}`
+    setTests((current) => ({ ...current, [key]: { status: "sending", message: "" } }))
+    try {
+      await sendTestNotification(eventType, route.via)
+      setTests((current) => ({ ...current, [key]: { status: "ok", message: `Sent a "${INFRA_EVENT_LABELS[eventType]}" test alert.` } }))
+    } catch (e) {
+      setTests((current) => ({ ...current, [key]: { status: "error", message: e instanceof Error ? e.message : "Test send failed" } }))
+    }
+  }
+
+  // What a card says the route receives, without opening anything. An empty
+  // list is receive-all, so it is named as such rather than rendered as "0
+  // alert types"; a long list is cut short because a card is a summary, and
+  // the badge beside it already carries the exact count. The strings continue
+  // the card's "Receives …" sentence, so this one starts lower case while the
+  // event labels, which are proper names of alert types, keep their capital.
+  const receivesLine = (events: InfraEventType[]): string => {
+    if (events.length === 0) return "every alert type, including any added in a later hub version."
+    const labels = [...new Set(events)].map((eventType) => INFRA_EVENT_LABELS[eventType])
+    if (labels.length <= 3) return `${labels.join(", ")}.`
+    return `${labels.slice(0, 3).join(", ")} and ${labels.length - 3} more.`
+  }
+
+  return (
+    <div className="space-y-3 border-t border-border pt-6">
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <h3 className="text-sm font-medium">Infrastructure alerts</h3>
+          <p className="text-xs text-muted-foreground mt-0.5">
+            {routes.length === 0
+              ? "Dependency outages and provider usage limits, routed independently from lifecycle alerts. Add a channel route before turning them on."
+              : orphan
+                ? "Remove the routes pointing at deleted channels below — the hub refuses to enable alerts while one is left."
+                : "Dependency outages and provider usage limits, routed independently from lifecycle alerts."}
+          </p>
+        </div>
+        <Switch
+          checked={enabled}
+          // Gated on the shapes the hub rejects once the block is enabled: no
+          // routes, and a route naming a notifier that no longer exists. The
+          // reason is in the paragraph on the left, not only in the tooltip: a
+          // disabled switch leaves the tab order, so a `title` on it reaches
+          // nobody.
+          disabled={saving || routes.length === 0 || orphan}
+          title={routes.length === 0 ? "Add a channel route first" : orphan ? "Remove the routes pointing at deleted channels first" : undefined}
+          onCheckedChange={async (next) => {
+            const outcome = await saveInfra({ ...infra, enabled: next, routes })
+            // The notice answers "why is this off?". Turning the alerts back on
+            // answers it for good, so it is retired here rather than merely
+            // hidden — otherwise the next deliberate turn-off, weeks later,
+            // would resurface a stale explanation blaming a route removal the
+            // operator has already dealt with.
+            if (next && outcome.persisted) setRemovalPause(null)
+          }}
+          aria-label="Enable infrastructure alerts"
+        />
+      </div>
+
+      {pauseNotice && (
+        <div className="flex items-start gap-2 rounded-md border border-amber-500/20 bg-amber-500/10 px-3 py-2 text-xs text-amber-400">
+          <AlertTriangle className="size-3.5 mt-px shrink-0" />
+          <span className="break-words">
+            {pauseNotice.kind === "channel" ? (
+              <>
+                Infrastructure alerts paused — &quot;{pauseNotice.channel}&quot; was the only channel they were routed to.{" "}
+                {notifiers[pauseNotice.channel]
+                  ? "A channel by that name exists again: add a route through it and turn the alerts back on."
+                  : "Add a route through another channel and turn them back on."}
+              </>
+            ) : (
+              <>
+                Infrastructure alerts paused — the route through &quot;{pauseNotice.channel}&quot; was the last one, and the hub
+                will not keep them on with nowhere to send them. Add another route and turn them back on.
+              </>
+            )}
+          </span>
+        </div>
+      )}
+      {orphan && (
+        <div className="flex items-start gap-2 rounded-md border border-amber-500/20 bg-amber-500/10 px-3 py-2 text-xs text-amber-400">
+          <AlertTriangle className="size-3.5 mt-px shrink-0" />
+          <span className="break-words">
+            {orphanRoutes.length === 1 ? "The route through " : "The routes through "}
+            {orphanRoutes.map((route, i) => (
+              <React.Fragment key={route.via}>
+                {i > 0 && ", "}
+                <span className="font-mono">{route.via}</span>
+              </React.Fragment>
+            ))}
+            {orphanRoutes.length === 1 ? " points at a channel that no longer exists. " : " point at channels that no longer exist. "}
+            {enabled
+              ? "While infrastructure alerts are on, the hub refuses every save on this screen — channels, scheduled reports and test sends included — until the route is removed or pointed at another channel."
+              : "The hub refuses to turn infrastructure alerts on until the route is removed or pointed at another channel."}
+          </span>
+        </div>
+      )}
+      {saveOutcome?.message && (
+        <div className="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+          <AlertTriangle className="size-3.5 mt-px shrink-0" />
+          {/* A message that came back with `persisted` describes the re-read,
+              not the save: the change is on disk, so it is stated verbatim
+              rather than blamed on a save that went through. */}
+          <span className="break-words">
+            {saveOutcome.persisted ? saveOutcome.message : `Last save failed: ${saveOutcome.message}`}
+          </span>
+        </div>
+      )}
+
+      {routes.length === 0 ? (
+        <p className="text-sm text-muted-foreground px-4 py-6 text-center border border-border rounded-lg">
+          {names.length === 0
+            ? "No infrastructure routes. Add a channel first, then route dependency and provider-limit alerts into it."
+            : "No infrastructure routes. Add one to get dependency outages and provider caps in Slack."}
+        </p>
+      ) : (
+        // Dimmed while the alerts are off, as the lifecycle categories are —
+        // but PER CARD, so a broken route can opt out below. Dimming the whole
+        // list would put the one line that names the remedy ("open Edit and
+        // pick another channel") at 50% while the amber banner repeating the
+        // problem sits above it at full strength: the screen would shout the
+        // symptom and mumble the cure.
+        <div className="space-y-2">
+          {routes.map((route, index) => {
+            const key = `${index}:${route.via}`
+            const test = tests[key]
+            // The hub reads an empty list as "every event type, including any
+            // added later" — the same receive-all semantics the lifecycle
+            // section spells out — so the card has to say so rather than
+            // render the route as receiving nothing.
+            const allEvents = route.events.length === 0
+            const missing = !names.includes(route.via)
+            // Rendered as text, not as the disabled button's `title`: the
+            // Button base class sets `disabled:pointer-events-none`, so a
+            // native tooltip on it can never fire. The orphan case has its own
+            // amber line below, which carries the same answer.
+            const testBlockedReason = !enabled
+              ? "Infrastructure alerts are turned off — this channel receives nothing."
+              : null
+            return (
+              <div
+                key={key}
+                className={cn(
+                  "rounded-lg border p-4",
+                  // A route pointing at a deleted channel gets the amber
+                  // framing the Channels section gives its own orphans, so the
+                  // two sections flag one condition one way. It is also the
+                  // card exempted from the dimming above: this is the route
+                  // that fails EVERY save on the screen while the alerts are
+                  // on, and greying out the only card that explains that hides
+                  // the way out of the state the operator is stuck in.
+                  missing ? "border-amber-500/20 bg-amber-500/5" : cn("border-border", !enabled && "opacity-50"),
+                )}
+              >
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <code className="text-sm font-mono font-medium">{route.via}</code>
+                      {/* Sized like the Channels badges above, not like the
+                          "Paused" pill on a report card, because these two
+                          carry the CHANNELS wording verbatim — "All alerts"
+                          and "N of 6 alert types" are the same strings that
+                          section uses. Two sizes for one sentence read as one
+                          component rendered twice by accident rather than as
+                          two sections agreeing, so the padding here follows
+                          the words. */}
+                      {allEvents ? (
+                        <span className="text-xs bg-blue-500/10 text-blue-400 border border-blue-500/20 px-2 py-1 rounded font-medium">
+                          All alerts
+                        </span>
+                      ) : (
+                        <span className="text-xs bg-muted text-muted-foreground px-2 py-1 rounded font-medium">
+                          {new Set(route.events).size} of {eventTypes.length} alert types
+                        </span>
+                      )}
+                    </div>
+                    <p className="text-xs text-muted-foreground mt-1">Receives {receivesLine(route.events)}</p>
+                    {!missing && (
+                      <p className="text-xs text-muted-foreground mt-1">
+                        Posts to <span className="font-mono">{notifiers[route.via]?.channel || "no channel"}</span> in Slack.
+                      </p>
+                    )}
+                    {missing && (
+                      <p className="text-xs text-amber-400 mt-2">
+                        No channel named <span className="font-mono">{route.via}</span> is configured, so this route delivers nothing — open Edit and pick another channel, or remove the route.
+                      </p>
+                    )}
+                    {testBlockedReason && <p className="text-xs text-muted-foreground mt-2">{testBlockedReason}</p>}
+                  </div>
+                  <div className="flex items-center gap-2 shrink-0">
+                    {/* Every card carries the same two controls, so each is
+                        named by its route: two buttons announcing "Edit" tell
+                        a screen reader nothing about which channel they open.
+                        Held while a save is in flight for the reason the
+                        channel and schedule cards' Edit is — the dialog seeds
+                        from the pre-save snapshot, so opening it mid-save
+                        would hand the next save a stale copy of the change
+                        still landing. */}
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      disabled={saving}
+                      aria-label={`Edit the ${route.via} route`}
+                      onClick={() => openEditRoute(route)}
+                    >
+                      Edit
+                    </Button>
+                  </div>
+                </div>
+                <div className="flex items-center gap-2 mt-3">
+                  {/* Kept on the row rather than inside the dialog: a test send
+                      is something you do to a route that already exists, and
+                      burying it behind Edit puts it a click away from every
+                      unsaved draft. Dead on an orphan route — a test through a
+                      notifier the hub does not have can only come back as the
+                      hub's routes[n] message, which names nothing on screen. */}
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="gap-1.5"
+                    disabled={saving || !enabled || missing || test?.status === "sending"}
+                    aria-label={`Send a test alert through ${route.via}`}
+                    onClick={() => sendTest(route, index)}
+                  >
+                    <Send className="size-3.5" />
+                    {test?.status === "sending" ? "Sending…" : "Send test"}
+                  </Button>
+                </div>
+                {test && test.status !== "sending" && (
+                  <div
+                    className={cn(
+                      "mt-3 flex items-start gap-2 rounded-md border px-3 py-2 text-xs",
+                      test.status === "ok"
+                        ? "border-green-500/20 bg-green-500/10 text-green-400"
+                        : "border-destructive/30 bg-destructive/10 text-destructive",
+                    )}
+                  >
+                    {test.status === "ok"
+                      ? <CheckCircle2 className="size-3.5 mt-px shrink-0" />
+                      : <AlertTriangle className="size-3.5 mt-px shrink-0" />}
+                    <span className="break-words">{test.message}</span>
+                  </div>
+                )}
+              </div>
+            )
+          })}
+        </div>
+      )}
+
+      <div className="flex flex-col items-start gap-1">
+        <Button
+          size="sm"
+          variant="outline"
+          disabled={saving || !unroutedName}
+          onClick={openAddRoute}
+        >
+          <span className="mr-1 text-sm">+</span> Add route
+        </Button>
+        {/* Text, not the disabled button's `title`: a disabled Button sets
+            `disabled:pointer-events-none`, so its tooltip never fires — and
+            once a route exists the empty state that carries the same hint is
+            gone, leaving a greyed-out button with nothing explaining it. */}
+        {!unroutedName && (
+          <p className="text-xs text-muted-foreground">
+            {names.length === 0
+              ? "Add a channel first — an infrastructure route needs somewhere to post."
+              : "Every channel already carries a route. The hub allows one infrastructure route per channel."}
+          </p>
+        )}
+      </div>
+
+      {/* Add / edit route. Like its siblings, closing only closes: the openers
+          re-seed every field, so nothing is cleared on the way out and the
+          heading does not blank during the dialog's 200ms exit animation. */}
+      <Dialog open={showDialog} onOpenChange={setShowDialog}>
+        <DialogContent className="max-w-lg max-h-[90vh] overflow-y-auto p-0 gap-0">
+          <DialogTitle className="sr-only">
+            {dialogMode === "add" ? "Add infrastructure route" : `Edit the ${editKey} route`}
+          </DialogTitle>
+          <div className="flex items-center justify-between px-5 py-4 border-b border-border">
+            <h3 className="font-medium">{dialogMode === "add" ? "Add infrastructure route" : `Edit the ${editKey} route`}</h3>
+          </div>
+
+          <div className="p-5 space-y-4">
+            <div>
+              <label htmlFor="infra-route-via" className="text-xs text-muted-foreground mb-1 block">Channel</label>
+              {/* Every control below is disabled while this dialog's own save
+                  is in flight: saveRoute snapshots the draft at click time and
+                  closes on success, so an edit made during the round trip
+                  would be discarded with nothing on screen saying so. */}
+              <select
+                id="infra-route-via"
+                value={draftVia}
+                disabled={saving}
+                onChange={(e) => setDraftVia(e.target.value)}
+                className="w-full h-8 text-sm rounded-md border border-input bg-background px-3"
+              >
+                {/* A channel that no longer exists has no option of its own, so
+                    the controlled select would render blank while Save writes
+                    the dangling name straight back. Give it one, flagged. */}
+                {draftMissing && <option value={draftVia}>{draftVia} (channel no longer configured)</option>}
+                {viaOptions.map((name) => <option key={name} value={name}>{name}</option>)}
+              </select>
+              {draftMissing ? (
+                <p className="text-xs text-amber-400 mt-1">
+                  No channel named <span className="font-mono">{draftVia}</span> is configured, so nothing is delivered here — and the hub refuses to turn infrastructure alerts on while this route is left. Pick another channel, or remove the route below.
+                </p>
+              ) : (
+                <p className="text-xs text-muted-foreground mt-1">
+                  Infrastructure alerts land in this channel. A channel carries one infrastructure route, so the ones already routed are not listed.
+                </p>
+              )}
+            </div>
+
+            <div className="space-y-3 border-t border-border pt-4">
+              <div>
+                <div className="text-sm font-medium">What lands here</div>
+                <p className="text-xs text-muted-foreground mt-0.5">
+                  Dependency outages and provider usage limits are checked on the hub&apos;s own poll — the lifecycle switches above do not mute them.
+                </p>
+              </div>
+
+              {/* Receive-all is a choice, not the shape you fall into by
+                  unticking. The hub stores it as an empty list and reads that
+                  as "every alert type, including any added in a later
+                  version", so this pair is what keeps a narrowed route from
+                  silently becoming the firehose — and keeps the firehose
+                  reachable on purpose for an operator who wants the route to
+                  pick up types this hub does not have yet. */}
+              <div className="space-y-1" role="radiogroup" aria-label="Which alerts this route receives">
+                <label className="flex items-start gap-2 text-sm cursor-pointer rounded px-2 py-1 hover:bg-muted/50">
+                  <input
+                    type="radio"
+                    name="infra-route-scope"
+                    className="mt-1"
+                    checked={draftAll}
+                    disabled={saving}
+                    onChange={() => setDraftAll(true)}
+                  />
+                  <span className="min-w-0">
+                    All alert types
+                    <span className="block text-xs text-muted-foreground">
+                      Including any this hub adds in a later version.
+                    </span>
+                  </span>
+                </label>
+                <label className="flex items-start gap-2 text-sm cursor-pointer rounded px-2 py-1 hover:bg-muted/50">
+                  <input
+                    type="radio"
+                    name="infra-route-scope"
+                    className="mt-1"
+                    checked={!draftAll}
+                    disabled={saving}
+                    onChange={() => setDraftAll(false)}
+                  />
+                  <span className="min-w-0">
+                    Only the types you pick
+                    <span className="block text-xs text-muted-foreground">
+                      Anything you add to this hub later stays out until you come back and tick it.
+                    </span>
+                  </span>
+                </label>
+              </div>
+
+              {!draftAll && (
+                <>
+                  <div className="space-y-1">
+                    {eventTypes.map((eventType) => {
+                      const checked = draftEvents.includes(eventType)
+                      return (
+                        <label
+                          key={eventType}
+                          className="flex items-center gap-2 text-sm cursor-pointer rounded px-2 py-1 hover:bg-muted/50"
+                        >
+                          <input
+                            type="checkbox"
+                            aria-label={`${INFRA_EVENT_LABELS[eventType]} (${eventType})`}
+                            checked={checked}
+                            disabled={saving}
+                            onChange={(e) =>
+                              setDraftEvents(
+                                e.target.checked
+                                  ? [...draftEvents, eventType]
+                                  : draftEvents.filter((type) => type !== eventType),
+                              )
+                            }
+                          />
+                          <span className={cn(!checked && "text-muted-foreground")}>{INFRA_EVENT_LABELS[eventType]}</span>
+                          <code className="text-xs text-muted-foreground font-mono">{eventType}</code>
+                        </label>
+                      )
+                    })}
+                  </div>
+                  {/* The empty selection is refused here rather than saved: an
+                      empty list is exactly how the hub stores receive-all, so
+                      saving one would widen the route the operator was
+                      narrowing. Said in text beside the Save button it
+                      disables, since a disabled button carries no tooltip. */}
+                  {draftEvents.length === 0 && (
+                    <p className="text-xs text-amber-400 rounded-md border border-amber-500/20 bg-amber-500/10 px-3 py-2">
+                      Tick at least one alert type. The hub reads a route with nothing ticked as every alert type — if that is what you want, choose &quot;All alert types&quot; above.
+                    </p>
+                  )}
+                </>
+              )}
+            </div>
+          </div>
+
+          <div className="border-t border-border">
+            {/* The error sits with the buttons, never below the fold of a long
+                scrolling form. */}
+            {draftError && (
+              <div className="mx-5 mt-4 flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+                <AlertTriangle className="size-3.5 mt-px shrink-0" />
+                <span className="break-words">{draftError}</span>
+              </div>
+            )}
+            <div className="flex items-center justify-between px-5 py-4">
+              {dialogMode === "edit" && editKey !== null && (
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="text-destructive hover:text-destructive"
+                  disabled={saving}
+                  onClick={() => removeRoute(editKey)}
+                >
+                  <Trash2 className="size-3.5 mr-1" /> Remove route
+                </Button>
+              )}
+              <div className="flex items-center gap-2 ml-auto">
+                {/* Cancel throws the draft away: nothing here has reached the
+                    hub yet. */}
+                <Button size="sm" variant="outline" disabled={saving} onClick={() => setShowDialog(false)}>Cancel</Button>
+                <Button
+                  size="sm"
+                  disabled={saving || !draftVia || (!draftAll && draftEvents.length === 0)}
+                  onClick={saveRoute}
+                >
+                  {dialogMode === "add" ? "Add route" : "Save changes"}
+                </Button>
+              </div>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+    </div>
+  )
+}
+
 function linkifyText(text: string): React.ReactNode {
   const urlRegex = /(https?:\/\/[^\s]+)/g
   const parts = text.split(urlRegex)

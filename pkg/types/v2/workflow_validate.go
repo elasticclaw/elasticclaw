@@ -16,6 +16,7 @@ var protectedNamespaces = []string{
 	"effects.",
 	"workflow.",
 	"operator.",
+	"exec.",
 }
 
 // Writable namespaces for workflow-authored facts.
@@ -25,17 +26,18 @@ var writableNamespaces = []string{
 }
 
 var knownWorkflowKeys = map[string]bool{
-	"schema_version": true,
-	"name":           true,
-	"enabled":        true,
-	"initial_state":  true,
-	"states":         true,
-	"transitions":    true,
-	"commands":       true,
-	"ci":             true,
-	"review":         true,
-	"delivery":       true,
-	"events":         true,
+	"schema_version":  true,
+	"name":            true,
+	"enabled":         true,
+	"manual_trigger":  true,
+	"initial_state":   true,
+	"states":          true,
+	"transitions":     true,
+	"commands":        true,
+	"ci":              true,
+	"review":          true,
+	"delivery":        true,
+	"events":          true,
 }
 
 // ParseWorkflow unmarshals workflow v2 YAML. It does not validate.
@@ -101,6 +103,9 @@ func ValidateWorkflow(wf *Workflow) (*ResolvedWorkflow, error) {
 			if err := validateEffectsShape(fmt.Sprintf("states.%s.on_enter.effects", name), st.OnEnter.Effects); err != nil {
 				return nil, fmt.Errorf("workflow %q: %w", wf.Name, err)
 			}
+			if st.Terminal && len(st.OnEnter.Effects) > 0 {
+				return nil, fmt.Errorf("workflow %q: states.%s.on_enter: terminal states cannot have effects", wf.Name, name)
+			}
 		}
 		if st.Phase != "" && !IsDisplayPhase(st.Phase) {
 			return nil, fmt.Errorf("workflow %q: states.%s.phase %q is unsupported", wf.Name, name, st.Phase)
@@ -136,6 +141,9 @@ func ValidateWorkflow(wf *Workflow) (*ResolvedWorkflow, error) {
 		}
 		if _, ok := wf.States[tr.To]; !ok {
 			return nil, fmt.Errorf("workflow %q: transitions.%s.to %q: unknown state", wf.Name, name, tr.To)
+		}
+		if wf.States[tr.To].Terminal && len(tr.Effects) > 0 {
+			return nil, fmt.Errorf("workflow %q: transitions.%s: transitions to terminal state %q cannot have effects", wf.Name, name, tr.To)
 		}
 		if isTranscriptEvent(tr.On) {
 			return nil, fmt.Errorf("workflow %q: transitions.%s.on %q: conversation/transcript events cannot control workflow v2", wf.Name, name, tr.On)
@@ -658,6 +666,38 @@ func validateEffectsAgainstWorkspace(path string, effects []map[string]interface
 						}
 						seen[fact] = true
 					}
+				}
+			case EffectExecRun:
+				command, _ := cfg["command"].(string)
+				if strings.TrimSpace(command) == "" {
+					return fmt.Errorf("%s: command is required", epath)
+				}
+				if ws.Execution == nil {
+					return fmt.Errorf("%s: workspace has no execution block", epath)
+				}
+				capNeeded, ok := CapabilityForEffect(op)
+				if !ok {
+					continue
+				}
+				if !rws.ResolvedExecCaps[capNeeded] {
+					return fmt.Errorf("%s: effect %q is unsupported by execution provider %q (lacks capability %s)",
+						epath, op, ws.Execution.Provider, capNeeded)
+				}
+			case EffectDependencyUpdate:
+				ecosystems, ok := cfg["ecosystems"].([]interface{})
+				if !ok || len(ecosystems) == 0 {
+					return fmt.Errorf("%s: ecosystems must be a non-empty list", epath)
+				}
+				if ws.Execution == nil {
+					return fmt.Errorf("%s: workspace has no execution block", epath)
+				}
+				capNeeded, ok := CapabilityForEffect(op)
+				if !ok {
+					continue
+				}
+				if !rws.ResolvedExecCaps[capNeeded] {
+					return fmt.Errorf("%s: effect %q is unsupported by execution provider %q (lacks capability %s)",
+						epath, op, ws.Execution.Provider, capNeeded)
 				}
 			default:
 				// Unknown effect ops: reject at pair validation so they fail closed.

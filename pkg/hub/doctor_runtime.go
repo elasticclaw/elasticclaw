@@ -91,3 +91,46 @@ func runtimeQueryErrorCheck(title string, err error) DoctorCheck {
 		OK:          false,
 	}
 }
+
+// infraDeliveryFailureWindow bounds how far back Doctor looks for discarded
+// infrastructure alerts. A week outlives any on-call rotation that could
+// have missed the outage, and older drops are no longer actionable.
+const infraDeliveryFailureWindow = 7 * 24 * time.Hour
+
+// checkInfraDeliveries surfaces infrastructure alerts a route gave up on. The
+// transient-failure cap discards an alert after infraMaxTransientFailures
+// consecutive send failures so one poisoned send cannot wedge the route, and
+// nothing else in the product shows that it happened: the channel simply
+// never hears about the outage. Doctor is where that gap becomes visible.
+func (s *Server) checkInfraDeliveries(ctx context.Context) []DoctorCheck {
+	if s.db == nil {
+		return nil
+	}
+	current := now()
+	if s.nowFunc != nil {
+		current = s.nowFunc()
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT notifier, COUNT(*), MAX(delivered_at) FROM infra_notification_deliveries
+		WHERE status=? AND delivered_at>=? GROUP BY notifier ORDER BY notifier`,
+		notificationDeliveryStatusFailed, epochMillis(current.Add(-infraDeliveryFailureWindow)))
+	if err != nil {
+		return []DoctorCheck{runtimeQueryErrorCheck("Dropped infrastructure alerts", err)}
+	}
+	defer rows.Close()
+	var checks []DoctorCheck
+	for rows.Next() {
+		var via string
+		var count int
+		var latest int64
+		if err := rows.Scan(&via, &count, &latest); err != nil {
+			return append(checks, runtimeQueryErrorCheck("Dropped infrastructure alerts", err))
+		}
+		checks = append(checks, DoctorCheck{
+			Category: "notifications", Severity: "warning", OK: false,
+			Title: fmt.Sprintf("Infrastructure route %q dropped %d alert(s) in the last 7 days", via, count),
+			Description: fmt.Sprintf("The hub gave up on each after %d consecutive failed send attempts, so the channel never received them; the latest was discarded at %s. Check the notifier and the hub log for [notify] errors.",
+				infraMaxTransientFailures, time.UnixMilli(latest).UTC().Format(time.RFC3339)),
+		})
+	}
+	return checks
+}

@@ -211,6 +211,88 @@ func insertWatcherTestPR(t *testing.T, db *sql.DB, clawID, prID string) {
 	}
 }
 
+func TestPRCommentWatermarkOnlyAdvances(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{}, "", "", "")
+	insertWatcherTestPR(t, db, "claw-watermark", "pr-watermark")
+
+	pr := clawPR{id: "pr-watermark", clawID: "claw-watermark", prNumber: 1, lastCommentID: 10}
+	s.updatePRCommentWatermark(pr, []interface{}{map[string]interface{}{
+		"id":         float64(20),
+		"created_at": "2026-01-01T00:00:00Z",
+	}})
+	var got int64
+	if err := db.QueryRow(`SELECT last_comment_id FROM claw_prs WHERE id=?`, pr.id).Scan(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got != 20 {
+		t.Fatalf("last_comment_id = %d, want 20", got)
+	}
+
+	if _, err := db.Exec(`UPDATE claw_prs SET last_comment_id=30 WHERE id=?`, pr.id); err != nil {
+		t.Fatal(err)
+	}
+	// pr retains a stale in-memory watermark, as can happen with concurrent polls.
+	s.updatePRCommentWatermark(pr, []interface{}{map[string]interface{}{"id": float64(25)}})
+	if err := db.QueryRow(`SELECT last_comment_id FROM claw_prs WHERE id=?`, pr.id).Scan(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got != 30 {
+		t.Fatalf("last_comment_id regressed to %d, want 30", got)
+	}
+}
+
+func TestReviewCommentWatermarkOnlyAdvances(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{}, "", "", "")
+	insertWatcherTestPR(t, db, "claw-review-watermark", "pr-review-watermark")
+
+	pr := clawPR{id: "pr-review-watermark", clawID: "claw-review-watermark", prNumber: 1, lastReviewCommentID: 10}
+	s.updateReviewCommentWatermark(pr, []interface{}{map[string]interface{}{"id": float64(20)}})
+	var got int64
+	if err := db.QueryRow(`SELECT last_review_comment_id FROM claw_prs WHERE id=?`, pr.id).Scan(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got != 20 {
+		t.Fatalf("last_review_comment_id = %d, want 20", got)
+	}
+
+	if _, err := db.Exec(`UPDATE claw_prs SET last_review_comment_id=30 WHERE id=?`, pr.id); err != nil {
+		t.Fatal(err)
+	}
+	s.updateReviewCommentWatermark(pr, []interface{}{map[string]interface{}{"id": float64(25)}})
+	if err := db.QueryRow(`SELECT last_review_comment_id FROM claw_prs WHERE id=?`, pr.id).Scan(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got != 30 {
+		t.Fatalf("last_review_comment_id regressed to %d, want 30", got)
+	}
+}
+
+func TestPRReviewWatermarkOnlyAdvances(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{}, "", "", "")
+	insertWatcherTestPR(t, db, "claw-review-watermark", "pr-review-watermark")
+
+	pr := clawPR{id: "pr-review-watermark", clawID: "claw-review-watermark", prNumber: 1, lastReviewID: 10}
+	s.updatePRReviewWatermark(pr, []interface{}{map[string]interface{}{"id": float64(20)}})
+	var got int64
+	if err := db.QueryRow(`SELECT last_review_id FROM claw_prs WHERE id=?`, pr.id).Scan(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got != 20 {
+		t.Fatalf("last_review_id = %d, want 20", got)
+	}
+
+	if _, err := db.Exec(`UPDATE claw_prs SET last_review_id=30 WHERE id=?`, pr.id); err != nil {
+		t.Fatal(err)
+	}
+	s.updatePRReviewWatermark(pr, []interface{}{map[string]interface{}{"id": float64(25)}})
+	if err := db.QueryRow(`SELECT last_review_id FROM claw_prs WHERE id=?`, pr.id).Scan(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got != 30 {
+		t.Fatalf("last_review_id regressed to %d, want 30", got)
+	}
+}
+
 func TestCheckPRMergedStopsAfterPermanentFailures(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"message":"Not Found"}`, http.StatusNotFound)
@@ -275,7 +357,7 @@ func TestCheckPRMergedResetsCounterBetweenPermanentFailures(t *testing.T) {
 	insertWatcherTestPR(t, db, "claw-mix", "pr-mix")
 	pr := clawPR{id: "pr-mix", clawID: "claw-mix", repo: "owner/repo", prNumber: 1, prURL: "https://github.com/owner/repo/pull/1"}
 	for i := 0; i < (prMergedPermanentFailureLimit+1)*2; i++ {
-		if s.checkPRMerged(pr, "token") {
+		if _, terminated := s.checkPRMerged(pr, "token"); terminated {
 			t.Fatalf("checkPRMerged terminated on non-consecutive failures")
 		}
 	}
@@ -429,7 +511,7 @@ func TestStorePRMentionConcurrentDuplicate(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			_, errs[i] = s.storePRMention("claw-dup", "owner/repo", 7, "https://github.com/owner/repo/pull/7")
+			_, errs[i] = s.storePRMention("claw-dup", "owner/repo", 7, "https://github.com/owner/repo/pull/7", true)
 		}(i)
 	}
 	wg.Wait()
@@ -536,6 +618,32 @@ func TestCheckCIStatusGreenWakesIdleClawOnce(t *testing.T) {
 	s.checkCIStatus(pr, "token")
 	if msgs := ciMessages(t, db, clawID); len(msgs) != 1 {
 		t.Fatalf("re-poll injected again: messages = %d (%v), want 1", len(msgs), msgs)
+	}
+}
+
+func TestCheckCIStatusAfterPRRowRemovalRecordsEventWithoutMessage(t *testing.T) {
+	s, db, pr := ciStatusFixture(t, "claw-ci-row-removed", "abcdef0123456789", `[{"name":"verify","status":"completed","conclusion":"success"}]`)
+	const runID = "run-ci-row-removed"
+	if _, err := db.Exec(`INSERT INTO task_runs(id,tenant_id,initial_attempt_id,run_kind,owner_type,claw_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)`,
+		runID, "test-tenant-id", "attempt-ci-row-removed", taskRunKindCodeTask, taskRunOwnerManual, pr.clawID, now().UnixMilli(), now().UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE claws SET task_run_id=? WHERE id=?`, runID, pr.clawID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`DELETE FROM claw_prs WHERE id=?`, pr.id); err != nil {
+		t.Fatal(err)
+	}
+	s.checkCIStatus(pr, "token")
+	if messages := ciMessages(t, db, pr.clawID); len(messages) != 0 {
+		t.Fatalf("messages = %v, want none after PR row removal", messages)
+	}
+	var events int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM task_run_events WHERE event_type=?`, taskRunEventCISucceeded).Scan(&events); err != nil {
+		t.Fatal(err)
+	}
+	if events != 1 {
+		t.Fatalf("ci events = %d, want 1", events)
 	}
 }
 
@@ -689,6 +797,119 @@ func TestCheckCIStatusNeutralAndSkippedAreGreen(t *testing.T) {
 	}
 }
 
+// mergeConflictFixture creates a server with a stub GitHub that reports a
+// configurable mergeable_state for PR #1. The returned atomic value can be
+// flipped mid-test.
+func mergeConflictFixture(t *testing.T, clawID, initialState string) (*Server, *sql.DB, clawPR, *atomic.Value) {
+	t.Helper()
+	state := &atomic.Value{}
+	state.Store(initialState)
+	gh := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/pulls/1") {
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"state":           "open",
+				"merged":          false,
+				"mergeable_state": state.Load(),
+				"head":            map[string]interface{}{"sha": "abc123"},
+				"created_at":      "2026-01-01T00:00:00Z",
+				"draft":           false,
+			})
+			return
+		}
+		http.Error(w, "not found", http.StatusNotFound)
+	}))
+	t.Cleanup(gh.Close)
+
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{}, gh.URL, "", "")
+	insertWatcherTestPR(t, db, clawID, "pr-"+clawID)
+	if _, err := db.Exec(`UPDATE claw_prs SET last_mergeable_state=? WHERE id=?`, initialState, "pr-"+clawID); err != nil {
+		t.Fatal(err)
+	}
+	pr := clawPR{id: "pr-" + clawID, clawID: clawID, repo: "owner/repo", prNumber: 1, prURL: "https://github.com/owner/repo/pull/1", lastMergeableState: initialState}
+	return s, db, pr, state
+}
+
+func TestCheckPRMergeConflictNotifiesOnTransition(t *testing.T) {
+	const clawID = "claw-conflict-transition"
+	s, db, pr, state := mergeConflictFixture(t, clawID, "clean")
+
+	state.Store("dirty")
+	s.checkPRMerged(pr, "token")
+
+	msgs := ciMessages(t, db, clawID)
+	if len(msgs) != 1 || !strings.Contains(msgs[0], "merge conflict") {
+		t.Fatalf("messages = %v, want one merge conflict message", msgs)
+	}
+	if !strings.Contains(msgs[0], "PR #1") {
+		t.Fatalf("message missing PR number: %q", msgs[0])
+	}
+
+	var got string
+	if err := db.QueryRow(`SELECT last_mergeable_state FROM claw_prs WHERE id=?`, pr.id).Scan(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got != "dirty" {
+		t.Fatalf("last_mergeable_state = %q, want dirty", got)
+	}
+}
+
+func TestCheckPRMergeConflictDoesNotDuplicate(t *testing.T) {
+	const clawID = "claw-conflict-dedupe"
+	s, db, pr, _ := mergeConflictFixture(t, clawID, "dirty")
+
+	// Poll twice with the same stale pr value; the DB watermark blocks the duplicate.
+	s.checkPRMerged(pr, "token")
+	s.checkPRMerged(pr, "token")
+
+	if msgs := ciMessages(t, db, clawID); len(msgs) != 0 {
+		t.Fatalf("messages = %v, want none when already dirty", msgs)
+	}
+}
+
+func TestCheckPRMergeConflictResetsWhenClean(t *testing.T) {
+	const clawID = "claw-conflict-reset"
+	s, db, pr, state := mergeConflictFixture(t, clawID, "dirty")
+
+	state.Store("clean")
+	s.checkPRMerged(pr, "token")
+
+	if msgs := ciMessages(t, db, clawID); len(msgs) != 0 {
+		t.Fatalf("messages = %v, want none when becoming clean", msgs)
+	}
+	var got string
+	if err := db.QueryRow(`SELECT last_mergeable_state FROM claw_prs WHERE id=?`, pr.id).Scan(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got != "clean" {
+		t.Fatalf("last_mergeable_state = %q, want clean", got)
+	}
+
+	state.Store("dirty")
+	// The in-memory pr is stale, but the DB was updated to clean above.
+	s.checkPRMerged(pr, "token")
+
+	msgs := ciMessages(t, db, clawID)
+	if len(msgs) != 1 || !strings.Contains(msgs[0], "merge conflict") {
+		t.Fatalf("messages = %v, want one merge conflict message after re-dirtying", msgs)
+	}
+}
+
+func TestCheckPRMergeConflictSkippedForMentionOnly(t *testing.T) {
+	const clawID = "claw-conflict-mention"
+	s, db, pr, state := mergeConflictFixture(t, clawID, "clean")
+	if _, err := db.Exec(`UPDATE claw_prs SET mention_only=1 WHERE id=?`, pr.id); err != nil {
+		t.Fatal(err)
+	}
+	pr.mentionOnly = true
+
+	state.Store("dirty")
+	s.checkPRMerged(pr, "token")
+
+	if msgs := ciMessages(t, db, clawID); len(msgs) != 0 {
+		t.Fatalf("messages = %v, want none for mention-only PR", msgs)
+	}
+}
+
 func TestInjectMessageSkipsIdenticalPendingRow(t *testing.T) {
 	s, db := NewTestServerWithConfig(t, &types.HubConfig{ClawToken: "claw-token"}, "", "", "")
 	const clawID = "inject-message-dedupe"
@@ -714,3 +935,121 @@ func TestInjectMessageSkipsIdenticalPendingRow(t *testing.T) {
 		t.Fatalf("same text rows=%d err=%v, want 2", pending, err)
 	}
 }
+
+// countingGitHubAppTransport is like githubAppTokenTransport but counts every
+// request reaching api.github.com so tests can assert a blocked gate mints
+// zero tokens.
+type countingGitHubAppTransport struct {
+	base     http.RoundTripper
+	requests *atomic.Int64
+}
+
+func (t countingGitHubAppTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	if r.URL.Host != "api.github.com" {
+		return t.base.RoundTrip(r)
+	}
+	t.requests.Add(1)
+	if r.Method == http.MethodGet && r.URL.Path == "/app/installations" {
+		return githubAppTokenResponse(http.StatusOK, `[{"id":1,"account":{"login":"owner"}}]`), nil
+	}
+	if r.Method == http.MethodPost && r.URL.Path == "/app/installations/1/access_tokens" {
+		return githubAppTokenResponse(http.StatusCreated, `{"token":"repo-token","expires_at":"2030-01-01T00:00:00Z"}`), nil
+	}
+	return githubAppTokenResponse(http.StatusNotFound, `{"message":"not found"}`), nil
+}
+
+// TestResolveGitHubTokenWithReposGatedDuringBlockMintsNothing verifies that
+// resolveGitHubTokenWithRepos refuses to mint (and reaches GitHub zero
+// times) while defaultGitHubClient is already rate-limit blocked.
+func TestResolveGitHubTokenWithReposGatedDuringBlockMintsNothing(t *testing.T) {
+	oldTransport := http.DefaultTransport
+	oldClient := defaultGitHubClient
+	var requests atomic.Int64
+	http.DefaultTransport = countingGitHubAppTransport{base: oldTransport, requests: &requests}
+	defaultGitHubClient = newGitHubClient()
+	t.Cleanup(func() {
+		http.DefaultTransport = oldTransport
+		defaultGitHubClient = oldClient
+	})
+
+	// Arm the shared client's rate-limit gate.
+	defaultGitHubClient.observe(http.StatusForbidden, http.Header{"Retry-After": []string{"60"}}, nil)
+	if _, blocked := defaultGitHubClient.blockedUntilTime(); !blocked {
+		t.Fatal("expected defaultGitHubClient to be blocked after observe(403, Retry-After)")
+	}
+
+	s, _ := NewTestServerWithConfig(t, &types.HubConfig{GitHubApps: []*types.GitHubAppConfig{{AppID: 1, PrivateKeyPEM: testGitHubAppPEM(t)}}}, "", "", "")
+
+	got := s.resolveGitHubTokenForRepo("org/uncached-repo")
+	if got != "" {
+		t.Fatalf("resolveGitHubTokenForRepo = %q, want empty while gate is blocked", got)
+	}
+	if n := requests.Load(); n != 0 {
+		t.Fatalf("GitHub requests during blocked gate = %d, want 0", n)
+	}
+}
+
+// TestPollAllPRsStopsMintingAfterMidPassRateLimit verifies that once one
+// repo's poll trips the shared rate-limit gate, later repos in the same
+// pollAllPRs pass make no further token-mint attempts.
+func TestPollAllPRsStopsMintingAfterMidPassRateLimit(t *testing.T) {
+	oldTransport := http.DefaultTransport
+	oldClient := defaultGitHubClient
+	var mintRequests atomic.Int64
+	rateLimitedOnce := &atomic.Bool{}
+
+	transport := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Host != "api.github.com" {
+			return oldTransport.RoundTrip(r)
+		}
+		if r.URL.Path == "/app/installations" {
+			return githubAppTokenResponse(http.StatusOK, `[{"id":1,"account":{"login":"owner"}}]`), nil
+		}
+		if r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/app/installations/") {
+			mintRequests.Add(1)
+			return githubAppTokenResponse(http.StatusCreated, `{"token":"repo-token","expires_at":"2030-01-01T00:00:00Z"}`), nil
+		}
+		if strings.HasSuffix(r.URL.Path, "/pulls/1") {
+			if r.URL.Path == "/repos/owner/repo-a/pulls/1" && rateLimitedOnce.CompareAndSwap(false, true) {
+				h := http.Header{}
+				h.Set("Retry-After", "60")
+				return &http.Response{StatusCode: http.StatusForbidden, Body: io.NopCloser(strings.NewReader(`{"message":"rate limit exceeded"}`)), Header: h}, nil
+			}
+			return githubAppTokenResponse(http.StatusOK, `{"state":"open"}`), nil
+		}
+		return githubAppTokenResponse(http.StatusOK, `{"state":"open"}`), nil
+	})
+	http.DefaultTransport = transport
+	defaultGitHubClient = newGitHubClient()
+	t.Cleanup(func() {
+		http.DefaultTransport = oldTransport
+		defaultGitHubClient = oldClient
+	})
+
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{GitHubApps: []*types.GitHubAppConfig{{AppID: 1, PrivateKeyPEM: testGitHubAppPEM(t)}}}, "https://api.github.com", "", "")
+
+	if _, err := db.Exec(`INSERT INTO claws(id,tenant_id,name,template,status,created_at) VALUES(?,?,?,?,?,?)`, "claw-aaaa", "test-tenant-id", "claw-aaaa", "elasticclaw", "connected", now()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO claws(id,tenant_id,name,template,status,created_at) VALUES(?,?,?,?,?,?)`, "claw-bbbb", "test-tenant-id", "claw-bbbb", "elasticclaw", "connected", now()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO claw_prs(id,claw_id,repo,pr_number,pr_url,created_at) VALUES(?,?,?,?,?,?)`, "pr-a", "claw-aaaa", "owner/repo-a", 1, "https://github.com/owner/repo-a/pull/1", now()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO claw_prs(id,claw_id,repo,pr_number,pr_url,created_at) VALUES(?,?,?,?,?,?)`, "pr-b", "claw-bbbb", "owner/repo-b", 1, "https://github.com/owner/repo-b/pull/1", now()); err != nil {
+		t.Fatal(err)
+	}
+
+	s.pollAllPRs()
+
+	// repo-a mints once, trips the gate on its pulls/1 call; repo-b must not
+	// mint at all in this same pass.
+	if n := mintRequests.Load(); n != 1 {
+		t.Fatalf("token mint requests in pass = %d, want 1 (repo-b must be gated)", n)
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }

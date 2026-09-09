@@ -46,7 +46,13 @@ func convertWorkflowV1ToV2(data []byte, opts Options) (Result, error) {
 			Terminal:    st.Terminal,
 		}
 		// Convert on_enter inject → agent.task effect; label mutations → warnings.
+		// Terminal states cannot have effects in v2 because the run is marked
+		// finished before the on_enter effects would be scheduled.
 		actions, onEnterWarns := convertStageOnEnter(id, st.OnEnter)
+		if st.Terminal && actions != nil && len(actions.Effects) > 0 {
+			appendWarning(&warnings, "states.%s.on_enter: terminal state effects are not supported in v2 and were dropped", id)
+			actions = nil
+		}
 		if actions != nil {
 			state.OnEnter = actions
 		}
@@ -222,10 +228,13 @@ func mapV1Trigger(path string, trig map[string]interface{}) (*mappedTrigger, []s
 	}
 	if _, ok := trig["pr_opened"]; ok {
 		return &mappedTrigger{
-			on:   "pull_request.verified_open",
+			// V2 learns the claw's dynamic PR set when the authenticated
+			// delivery manifest is verified. The GitHub opened webhook normally
+			// predates that registration and is therefore not a reliable edge.
+			on:   "delivery.verified",
 			slug: "pr_opened",
 			when: map[string]interface{}{
-				"pull_request": map[string]interface{}{"state": "open"},
+				"delivery": map[string]interface{}{"open": map[string]interface{}{"not_equals": 0}},
 			},
 		}, warnings
 	}
@@ -279,13 +288,16 @@ func convertStageOnEnter(stageID string, onEnter map[string]interface{}) (*v2.St
 		appendWarning(&warnings, "states.%s.on_enter.comment_issue: not auto-converted — express as an issue-tracker effect with an explicit connection after review", stageID)
 	}
 	if _, ok := onEnter["run"]; ok {
-		appendWarning(&warnings, "states.%s.on_enter.run: shell/CI run hooks are not auto-converted — model as CI pipeline effects or agent.task after review", stageID)
+		appendWarning(&warnings, "states.%s.on_enter.run: mapped to exec.run effect after review; command output becomes exec.last_run.* facts, not arbitrary trusted data", stageID)
+	}
+	if _, ok := onEnter["dependency_updates"]; ok {
+		appendWarning(&warnings, "states.%s.on_enter.dependency_updates: mapped to dependency.update effect after review; results become exec.dependency_update.* facts", stageID)
 	}
 
 	// Surface other keys.
 	for k := range onEnter {
 		switch k {
-		case "inject", "add_labels", "remove_labels", "comment_issue", "run":
+		case "inject", "add_labels", "remove_labels", "comment_issue", "run", "dependency_updates":
 			continue
 		default:
 			appendWarning(&warnings, "states.%s.on_enter.%s: not auto-converted", stageID, k)

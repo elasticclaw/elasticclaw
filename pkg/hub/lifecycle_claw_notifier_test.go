@@ -42,6 +42,15 @@ func insertSlackTestClawPR(t *testing.T, db *sql.DB, id, clawID, repo string, pr
 func setLifecycleClawBaseline(t *testing.T, s *Server) {
 	t.Helper()
 	s.setNotifierStateInt64(lifecycleStateClawBaselineKey, 1)
+	// Multi-route configs also carry a per-route baseline (a route added later
+	// must not replay the current claw list into its channel); mark the
+	// configured routes as already baselined so the helper keeps meaning
+	// "enabled with empty history".
+	if cfg := s.notificationsConfig(); cfg != nil && cfg.Lifecycle != nil {
+		for _, route := range cfg.Lifecycle.EffectiveRoutes() {
+			s.setNotifierStateInt64(lifecycleClawRouteBaselineKey(strings.TrimSpace(route.Via)), 1)
+		}
+	}
 }
 
 // oldEnough is safely past the ad-hoc grace period.
@@ -60,7 +69,7 @@ func insertSlackTestWorkflowRun(t *testing.T, db *sql.DB, id, clawID, status str
 	}
 }
 
-func TestLifecycleClawNotifierAdhocLifecycleThreadsUnderOneRoot(t *testing.T) {
+func TestLifecycleClawNotifierAdhocLifecyclePostsTopLevel(t *testing.T) {
 	fake := newFakeSlackServer(t)
 	s, db := newSlackNotifierTestServer(t, fake.server.URL, nil)
 	setSlackWatermark(t, s, 0)
@@ -75,7 +84,7 @@ func TestLifecycleClawNotifierAdhocLifecycleThreadsUnderOneRoot(t *testing.T) {
 	}
 	root := fake.request(0)
 	if root.ThreadTS != "" {
-		t.Fatalf("first claw message should be the thread root, got thread_ts %q", root.ThreadTS)
+		t.Fatalf("first claw message must be top-level, got thread_ts %q", root.ThreadTS)
 	}
 	if !strings.Contains(root.Fallback, "Agent started") || !strings.Contains(root.Fallback, "name-claw-adhoc") {
 		t.Fatalf("agent_started fallback = %q", root.Fallback)
@@ -125,13 +134,12 @@ func TestLifecycleClawNotifierAdhocLifecycleThreadsUnderOneRoot(t *testing.T) {
 		t.Fatal("failure message does not include bootstrap_diagnostic as the reason")
 	}
 
-	// All three thread under the same claw root.
-	var threadTS string
-	if err := db.QueryRow(`SELECT thread_ts FROM slack_run_threads WHERE run_id=?`, lifecycleClawThreadKey("claw-adhoc")).Scan(&threadTS); err != nil {
-		t.Fatalf("claw thread root row: %v", err)
+	if prMsg.ThreadTS != "" || failMsg.ThreadTS != "" {
+		t.Fatalf("claw lifecycle messages must be top-level: pr=%q fail=%q", prMsg.ThreadTS, failMsg.ThreadTS)
 	}
-	if prMsg.ThreadTS != threadTS || failMsg.ThreadTS != threadTS {
-		t.Fatalf("claw events not threaded under one root: pr=%q fail=%q root=%q", prMsg.ThreadTS, failMsg.ThreadTS, threadTS)
+	var threadRows int
+	if err := db.QueryRow(`SELECT COUNT(1) FROM slack_run_threads`).Scan(&threadRows); err != nil || threadRows != 0 {
+		t.Fatalf("claw lifecycle notifier wrote %d thread rows (err %v), want 0", threadRows, err)
 	}
 
 	// Deliveries recorded under the namespaced synthetic keys.
@@ -219,7 +227,9 @@ func TestLifecycleClawNotifierPreSendRecheckCedesToTaskRunPath(t *testing.T) {
 	setLifecycleClawBaseline(t, s)
 
 	insertSlackTestClaw(t, db, "claw-x", "connected", 1, "", oldEnough)
-	claws, err := s.selectLifecycleClawStateCandidates(lifecycleClawKindStarted)
+	d := testLifecycleDelivery(t, s)
+	route := d.effectiveRoutes()[0]
+	claws, err := s.selectLifecycleClawStateCandidates(lifecycleClawKindStarted, route.notifier)
 	if err != nil || len(claws) != 1 {
 		t.Fatalf("candidates = %d, err %v; want 1 candidate", len(claws), err)
 	}
@@ -229,9 +239,8 @@ func TestLifecycleClawNotifierPreSendRecheckCedesToTaskRunPath(t *testing.T) {
 		t.Fatalf("attach task run: %v", err)
 	}
 
-	d := testLifecycleDelivery(t, s)
 	ev, deliveryKey := lifecycleClawStateEvent(lifecycleClawKindStarted, claws[0])
-	if !s.deliverLifecycleClawEvent(d, claws[0], ev, lifecycleClawRunContext(claws[0]), deliveryKey) {
+	if !s.deliverLifecycleClawEvent(d, route, claws[0], ev, lifecycleClawRunContext(claws[0]), deliveryKey) {
 		t.Fatal("ceding to the task-run path must count as handled")
 	}
 	if fake.count() != 0 {
@@ -341,9 +350,9 @@ func TestLifecycleClawNotifierFailureToggleOff(t *testing.T) {
 	}
 }
 
-// A task-run thread and a claw thread must not interfere: each gets its own
-// root and its own replies.
-func TestLifecycleClawAndTaskRunThreadsAreIndependent(t *testing.T) {
+// Task-run and ad-hoc claw events must all remain independently visible at
+// the channel top level.
+func TestLifecycleClawAndTaskRunEventsAreTopLevel(t *testing.T) {
 	fake := newFakeSlackServer(t)
 	s, db := newSlackNotifierTestServer(t, fake.server.URL, nil)
 	setSlackWatermark(t, s, 0)
@@ -367,31 +376,15 @@ func TestLifecycleClawAndTaskRunThreadsAreIndependent(t *testing.T) {
 		t.Fatalf("sent %d messages, want 2 task-run + 2 claw", fake.count())
 	}
 
-	var runRoot, clawRoot string
-	if err := db.QueryRow(`SELECT thread_ts FROM slack_run_threads WHERE run_id='run-1'`).Scan(&runRoot); err != nil {
-		t.Fatalf("run thread root: %v", err)
-	}
-	if err := db.QueryRow(`SELECT thread_ts FROM slack_run_threads WHERE run_id=?`, lifecycleClawThreadKey("claw-adhoc")).Scan(&clawRoot); err != nil {
-		t.Fatalf("claw thread root: %v", err)
-	}
-	if runRoot == clawRoot {
-		t.Fatalf("task-run and claw threads share a root ts %q", runRoot)
-	}
 	for i := 0; i < fake.count(); i++ {
 		req := fake.request(i)
-		if req.ThreadTS == "" {
-			continue // a root
+		if req.ThreadTS != "" {
+			t.Fatalf("message %d posted in thread %q, want top-level", i, req.ThreadTS)
 		}
-		switch {
-		case strings.Contains(req.Fallback, "acme/app#7"):
-			if req.ThreadTS != runRoot {
-				t.Fatalf("task-run reply threaded under %q, want run root %q", req.ThreadTS, runRoot)
-			}
-		case strings.Contains(req.Fallback, "acme/tools#3"):
-			if req.ThreadTS != clawRoot {
-				t.Fatalf("claw reply threaded under %q, want claw root %q", req.ThreadTS, clawRoot)
-			}
-		}
+	}
+	var threadRows int
+	if err := db.QueryRow(`SELECT COUNT(1) FROM slack_run_threads`).Scan(&threadRows); err != nil || threadRows != 0 {
+		t.Fatalf("lifecycle notifier wrote %d thread rows (err %v), want 0", threadRows, err)
 	}
 }
 
@@ -605,5 +598,68 @@ func TestSlackTestEndpointRejectsRunIDAndClawIDTogether(t *testing.T) {
 	}
 	if !strings.Contains(rr.Body.String(), "mutually exclusive") {
 		t.Fatalf("unexpected body: %s", rr.Body.String())
+	}
+}
+
+// The idle candidate query's ownership filter: only a DELIVERED unresolved PR
+// (mention_only=0) counts as "PR out, awaiting humans" and suppresses the
+// agent_idle notification. A mention-only row is a polling target the agent
+// merely linked — suppressing on it would hide a hung claw the watcher will
+// also never finalize. Removing `AND p.mention_only = 0` from the NOT EXISTS
+// clause in selectLifecycleClawIdleCandidates fails the first assertion here.
+func TestLifecycleClawIdleCandidatesIgnoreMentionOnlyPRs(t *testing.T) {
+	s, db := newSlackNotifierTestServer(t, "", nil)
+	setLifecycleClawBaseline(t, s)
+
+	insertSlackTestClaw(t, db, "claw-idle-mention", "connected", 1, "", oldEnough)
+	if _, err := db.Exec(`UPDATE claws SET pipeline_stage='work', idle_since=? WHERE id='claw-idle-mention'`,
+		time.Now().Add(-lifecycleClawAdhocGrace-time.Minute).UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+	insertSlackTestClawPR(t, db, "pr-idle-mention", "claw-idle-mention", "acme/app", 7, "https://github.com/acme/app/pull/7")
+
+	// Unresolved mention-only row: NOT an ownership signal — the claw must
+	// still be an idle candidate.
+	if _, err := db.Exec(`UPDATE claw_prs SET mention_only=1 WHERE id='pr-idle-mention'`); err != nil {
+		t.Fatal(err)
+	}
+	claws, _, err := s.selectLifecycleClawIdleCandidates("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(claws) != 1 || claws[0].ID != "claw-idle-mention" {
+		t.Fatalf("idle candidates with an unresolved MENTION-ONLY PR = %v, want exactly claw-idle-mention (a linked PR must not suppress the idle alert)", claws)
+	}
+
+	// Same row flipped to delivered: "PR out, awaiting humans" — suppressed.
+	if _, err := db.Exec(`UPDATE claw_prs SET mention_only=0 WHERE id='pr-idle-mention'`); err != nil {
+		t.Fatal(err)
+	}
+	claws, _, err = s.selectLifecycleClawIdleCandidates("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(claws) != 0 {
+		t.Fatalf("idle candidates with an unresolved DELIVERED PR = %v, want none (an owned open PR suppresses the idle alert)", claws)
+	}
+}
+
+func TestLifecycleClawStageStalledCandidatesExcludeYoungClaws(t *testing.T) {
+	s, db := newSlackNotifierTestServer(t, "", nil)
+	setLifecycleClawBaseline(t, s)
+
+	insertSlackTestClaw(t, db, "claw-stage-stalled-old", "connected", 1, "", oldEnough)
+	insertSlackTestClaw(t, db, "claw-stage-stalled-young", "connected", 1, "", lifecycleClawAdhocGrace-time.Minute)
+	if _, err := db.Exec(`UPDATE claws SET pipeline_stage='work', stage_stalled_since=? WHERE id IN (?, ?)`,
+		time.Now().Add(-time.Minute).UnixMilli(), "claw-stage-stalled-old", "claw-stage-stalled-young"); err != nil {
+		t.Fatal(err)
+	}
+
+	claws, _, _, _, err := s.selectLifecycleClawStageStalledCandidates("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(claws) != 1 || claws[0].ID != "claw-stage-stalled-old" {
+		t.Fatalf("stage-stalled candidates = %v, want exactly claw-stage-stalled-old", claws)
 	}
 }

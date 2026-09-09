@@ -51,17 +51,22 @@ func NewTestServerWithConfig(t interface {
 	}
 
 	s := &Server{
-		db:               db,
-		hubCfg:           cfg,
-		artifacts:        artifacts,
-		claws:            make(map[string]*clawConn),
-		users:            make(map[string]*userConn),
-		dependencyStatus: newDependencyStatusService(cfg),
-		webhookDedup:     make(map[string]time.Time),
-		githubBaseURL:    githubBaseURL,
-		linearBaseURL:    linearBaseURL,
-		shortcutBaseURL:  shortcutBaseURL,
+		db:                       db,
+		hubCfg:                   cfg,
+		artifacts:                artifacts,
+		claws:                    make(map[string]*clawConn),
+		users:                    make(map[string]*userConn),
+		gatewayUnhealthyCounts:   make(map[string]int),
+		gatewayEscalatedAt:       make(map[string]time.Time),
+		dependencyStatus:         newDependencyStatusService(cfg),
+		webhookDedup:             make(map[string]time.Time),
+		githubBaseURL:            githubBaseURL,
+		linearBaseURL:            linearBaseURL,
+		shortcutBaseURL:          shortcutBaseURL,
+		ticketMetadataEnrichment: make(chan struct{}, 32),
+		ticketCursorKey:          randomTicketCursorKey(),
 	}
+	s.attachLLMUsageLimitsToDependencyStatus(s.dependencyStatus)
 	// Register routes (same as Run but without serving web UI or starting relay)
 	mux := http.NewServeMux()
 	s.registerRoutes(mux)

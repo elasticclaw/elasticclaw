@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/base64"
@@ -8,6 +9,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"log"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -668,8 +670,11 @@ func TestDockerGitHubCredentialHelperScriptDoesNotPersistClawToken(t *testing.T)
 	if !strings.Contains(script, `credential.helper "!$helper_path"`) {
 		t.Fatalf("helper script should register helper as an explicit shell command:\n%s", script)
 	}
-	if !strings.Contains(script, `helper_check="$("$helper_path" 2>&1)"`) {
-		t.Fatalf("helper script should execute helper directly for diagnostics:\n%s", script)
+	if !strings.Contains(script, `git config --global credential.useHttpPath true`) {
+		t.Fatalf("helper script should include repo path in credential cache key:\n%s", script)
+	}
+	if !strings.Contains(script, `printf 'protocol=https\nhost=github.com\n\n' | "$helper_path"`) {
+		t.Fatalf("helper script should execute helper with a minimal credential request for diagnostics:\n%s", script)
 	}
 	if !strings.Contains(script, `GitHub credential helper did not output 'username=x-access-token'`) {
 		t.Fatalf("helper script should diagnose missing helper username:\n%s", script)
@@ -688,6 +693,51 @@ func TestDockerGitHubCredentialHelperScriptDoesNotPersistClawToken(t *testing.T)
 	}
 	if !strings.Contains(script, `--data-urlencode "claw_token=$claw_token"`) {
 		t.Fatalf("helper script should URL-encode claw token at runtime:\n%s", script)
+	}
+	if !strings.Contains(script, `path=*`) {
+		t.Fatalf("helper script should parse the repo path from git credential input:\n%s", script)
+	}
+	if !strings.Contains(script, `${repo:+--data-urlencode "repo=$repo"}`) {
+		t.Fatalf("helper script should pass the repo to the hub when a path is provided:\n%s", script)
+	}
+}
+
+func TestDockerGitHubCredentialHelperBinaryPassesRepoFromPath(t *testing.T) {
+	var gotRepo, gotClawToken string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/github/token/claw-1" {
+			t.Errorf("path = %s, want /api/github/token/claw-1", r.URL.Path)
+		}
+		gotClawToken = r.URL.Query().Get("claw_token")
+		gotRepo = r.URL.Query().Get("repo")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"token":"ghs_example","expires_at":"2099-01-01T00:00:00Z"}`))
+	}))
+	defer srv.Close()
+
+	tmp := t.TempDir()
+	helperPath := filepath.Join(tmp, "elasticclaw-git-credentials")
+	if err := os.WriteFile(helperPath, []byte(dockerGitHubCredentialHelperBinary(srv.URL+"/api/github/token/claw-1")), 0700); err != nil {
+		t.Fatalf("write helper: %v", err)
+	}
+
+	cmd := exec.Command(helperPath)
+	cmd.Stdin = strings.NewReader("protocol=https\nhost=github.com\npath=example-org/example-repo.git\n\n")
+	cmd.Env = append(os.Environ(), "ELASTICCLAW_CLAW_TOKEN=secret-token")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("helper failed: %v\n%s", err, out)
+	}
+	if gotClawToken != "secret-token" {
+		t.Fatalf("claw_token = %q, want secret-token", gotClawToken)
+	}
+	if gotRepo != "example-org/example-repo" {
+		t.Fatalf("repo = %q, want example-org/example-repo", gotRepo)
+	}
+	wantOutput := "password=ghs_example"
+	if !strings.Contains(string(out), wantOutput) {
+		t.Fatalf("helper output missing password line:\n%s", out)
 	}
 }
 
@@ -924,6 +974,118 @@ func TestResolveToolActivityDetailUsesOpenClawMeta(t *testing.T) {
 			command, path, url, detail := resolveToolActivityDetail(tt.tool, "", "", "", tt.meta, nil)
 			if command != tt.wantCommand || path != tt.wantPath || url != tt.wantURL || detail != tt.wantDetail {
 				t.Fatalf("resolveToolActivityDetail() = (%q, %q, %q, %q), want (%q, %q, %q, %q)", command, path, url, detail, tt.wantCommand, tt.wantPath, tt.wantURL, tt.wantDetail)
+			}
+		})
+	}
+}
+
+func TestResolveSubagentFields(t *testing.T) {
+	longPrompt := strings.Repeat("x", 501)
+	tests := []struct {
+		name                                      string
+		tool                                      string
+		phase                                     string
+		data                                      map[string]interface{}
+		wantName, wantType, wantModel, wantPrompt string
+		cleanPrompt                               bool
+	}{
+		{
+			name: "task input fields",
+			tool: "Task",
+			data: map[string]interface{}{"input": map[string]interface{}{
+				"description": "research auth flow", "prompt": "Inspect the auth flow.", "subagent_type": "research", "model": "gpt-5",
+			}},
+			wantName: "research auth flow", wantType: "research", wantModel: "gpt-5", wantPrompt: "Inspect the auth flow.",
+		},
+		{
+			name: "task raw params fields",
+			tool: "task",
+			data: map[string]interface{}{"raw_params": map[string]interface{}{
+				"description": "write tests", "prompt": "Add bridge tests.", "subagent_type": "coder", "model_id": "gpt-5-mini",
+			}},
+			wantName: "write tests", wantType: "coder", wantModel: "gpt-5-mini", wantPrompt: "Add bridge tests.",
+		},
+		{
+			name:     "name equal to tool is never subagent name",
+			tool:     "task",
+			data:     map[string]interface{}{"name": "task", "description": "useful subagent"},
+			wantName: "useful subagent",
+		},
+		{
+			name:     "generic title falls through to nested description",
+			tool:     "Task",
+			phase:    "running",
+			data:     map[string]interface{}{"title": "Task", "input": map[string]interface{}{"description": "research auth flow", "prompt": "Inspect the auth flow."}},
+			wantName: "research auth flow", wantPrompt: "Inspect the auth flow.",
+		},
+		{
+			name:  "generic top-level message does not shadow nested prompt",
+			tool:  "Task",
+			phase: "running",
+			data: map[string]interface{}{
+				"message": "Running Task",
+				"input": map[string]interface{}{
+					"description": "research auth flow", "prompt": "Inspect the auth flow end to end.", "subagent_type": "research",
+				},
+			},
+			wantName: "research auth flow", wantType: "research", wantPrompt: "Inspect the auth flow end to end.",
+		},
+		{
+			name:  "generic task field equal to tool name is skipped as prompt",
+			tool:  "Task",
+			phase: "running",
+			data: map[string]interface{}{
+				"task":  "Task",
+				"input": map[string]interface{}{"prompt": "Real prompt."},
+			},
+			wantPrompt: "Real prompt.",
+		},
+		{
+			name: "non task tool is empty",
+			tool: "exec",
+			data: map[string]interface{}{"input": map[string]interface{}{
+				"description": "not a subagent", "prompt": "echo hi", "subagent_type": "coder", "model": "gpt-5",
+			}},
+		},
+		{
+			name: "task prompt truncates during cleaning",
+			tool: "task",
+			data: map[string]interface{}{"input": map[string]interface{}{
+				"prompt": longPrompt,
+			}},
+			wantPrompt:  longPrompt,
+			cleanPrompt: true,
+		},
+		{
+			name:  "terminal message is not the prompt",
+			tool:  "Task",
+			phase: "completed",
+			data:  map[string]interface{}{"message": "Task completed", "title": "Task completed"},
+		},
+		{
+			name:  "terminal explicit input fields still resolve",
+			tool:  "Task",
+			phase: "completed",
+			data: map[string]interface{}{
+				"message": "Task completed",
+				"input": map[string]interface{}{
+					"description": "research auth flow", "prompt": "Inspect the auth flow.", "subagent_type": "research", "model": "gpt-5",
+				},
+			},
+			wantName: "research auth flow", wantType: "research", wantModel: "gpt-5", wantPrompt: "Inspect the auth flow.",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			name, subType, model, prompt := resolveSubagentFields(tt.tool, tt.phase, tt.data)
+			if name != tt.wantName || subType != tt.wantType || model != tt.wantModel || prompt != tt.wantPrompt {
+				t.Fatalf("resolveSubagentFields() = (%q, %q, %q, %q), want (%q, %q, %q, %q)", name, subType, model, prompt, tt.wantName, tt.wantType, tt.wantModel, tt.wantPrompt)
+			}
+			if tt.cleanPrompt {
+				activity := cleanAgentActivity(agentActivity{SubagentPrompt: prompt})
+				if activity.SubagentPrompt != truncateResult(longPrompt, 500) {
+					t.Fatalf("SubagentPrompt = %q, want %q", activity.SubagentPrompt, truncateResult(longPrompt, 500))
+				}
 			}
 		})
 	}
@@ -1578,6 +1740,171 @@ func TestRunHubLoopDoesNotLeakKeepaliveGoroutinesAcrossReconnects(t *testing.T) 
 	}
 }
 
+// TestRunHubLoopReportsMidTurnLockConflictRecovery proves the live hub-message
+// path reports the recovery edge before closing the claw turn. Without that
+// edge, a preserved session has no hub-side continuation and can stall forever.
+// Coverage boundary: this exercises the LIVE turn call site only. The replay
+// path after a hub reconnect calls the same reportSessionRecovery helper with
+// the same arguments, but reaching it needs a different harness, so replacing
+// that one call with `if true` still passes. The risk is bounded because both
+// call sites now delegate to one helper rather than duplicating the block.
+func TestRunHubLoopReportsMidTurnLockConflictRecovery(t *testing.T) {
+	oldDelays := sessionLockConflictRetryDelays
+	sessionLockConflictRetryDelays = []time.Duration{time.Millisecond}
+	t.Cleanup(func() { sessionLockConflictRetryDelays = oldDelays })
+
+	const lockConflict = "error: session file changed while embedded prompt lock was released"
+	for _, tt := range []struct {
+		name      string
+		rotateKey bool
+		wantEdge  string
+	}{
+		{name: "preserved", wantEdge: "session_preserved"},
+		{name: "rotated", rotateKey: true, wantEdge: "session_rotated"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var gs *gatewaySession
+			gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				conn, err := websocket.Accept(w, r, nil)
+				if err != nil {
+					t.Errorf("accept gateway websocket: %v", err)
+					return
+				}
+				defer conn.CloseNow()
+				read := func(want string) (gwFrame, bool) {
+					var req gwFrame
+					if err := wsjson.Read(r.Context(), conn, &req); err != nil {
+						t.Errorf("read %s request: %v", want, err)
+						return req, false
+					}
+					if req.Method != want {
+						t.Errorf("gateway request method = %q, want %q", req.Method, want)
+						return req, false
+					}
+					return req, true
+				}
+				send, ok := read("sessions.send")
+				if !ok {
+					return
+				}
+				if err := wsjson.Write(r.Context(), conn, gwFrame{Type: "res", ID: send.ID, OK: true}); err != nil {
+					t.Errorf("accept sessions.send: %v", err)
+					return
+				}
+				if err := wsjson.Write(r.Context(), conn, gwFrame{Type: "event", Event: "agent", Payload: mustJSON(map[string]interface{}{
+					"stream": "lifecycle", "sessionKey": "session-1", "data": map[string]string{"phase": "error", "error": lockConflict},
+				})}); err != nil {
+					t.Errorf("write lifecycle error: %v", err)
+					return
+				}
+				abort, ok := read("sessions.abort")
+				if !ok {
+					return
+				}
+				if err := wsjson.Write(r.Context(), conn, gwFrame{Type: "res", ID: abort.ID, OK: true}); err != nil {
+					t.Errorf("accept sessions.abort: %v", err)
+					return
+				}
+				probe, ok := read("sessions.describe")
+				if !ok {
+					return
+				}
+				if tt.rotateKey {
+					gs.setSessionKey("session-2")
+				}
+				if err := wsjson.Write(r.Context(), conn, gwFrame{Type: "res", ID: probe.ID, OK: true}); err != nil {
+					t.Errorf("accept sessions.describe: %v", err)
+				}
+			}))
+			defer gateway.Close()
+
+			received := make(chan []hubMsg, 1)
+			hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				conn, err := websocket.Accept(w, r, nil)
+				if err != nil {
+					t.Errorf("accept hub websocket: %v", err)
+					return
+				}
+				defer conn.CloseNow()
+				var registration hubMsg
+				if err := wsjson.Read(r.Context(), conn, &registration); err != nil {
+					t.Errorf("read registration: %v", err)
+					return
+				}
+				if err := wsjson.Write(r.Context(), conn, hubMsg{Type: "registered"}); err != nil {
+					t.Errorf("write registration acknowledgement: %v", err)
+					return
+				}
+				if err := wsjson.Write(r.Context(), conn, hubMsg{Type: "message", Payload: mustJSON(map[string]interface{}{"id": "turn-1", "content": "continue the task"})}); err != nil {
+					t.Errorf("write hub turn: %v", err)
+					return
+				}
+				var messages []hubMsg
+				for {
+					var msg hubMsg
+					if err := wsjson.Read(r.Context(), conn, &msg); err != nil {
+						return
+					}
+					messages = append(messages, msg)
+					if msg.Type == "message" {
+						received <- messages
+						return
+					}
+				}
+			}))
+			defer hub.Close()
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			gatewayCtx, gatewayCancel := context.WithCancel(ctx)
+			defer gatewayCancel()
+			conn, _, err := websocket.Dial(gatewayCtx, "ws"+strings.TrimPrefix(gateway.URL, "http"), nil)
+			if err != nil {
+				t.Fatalf("dial gateway: %v", err)
+			}
+			defer conn.CloseNow()
+			gs = &gatewaySession{sessionKey: "session-1", ready: true, conn: conn, pending: make(map[string]chan gwFrame)}
+			go gs.readLoop(gatewayCtx)
+
+			loopDone := make(chan error, 1)
+			go func() {
+				loopDone <- runHubLoop(ctx, "ws"+strings.TrimPrefix(hub.URL, "http"), "claw-test", "test-claw", "test-template", "tok", "",
+					bridgeRegistration(false), nil, &gatewayClient{addr: "127.0.0.1:0"}, gs, newHTTPProxy(nil), &msgQueue{}, newMessageDeduper())
+			}()
+
+			select {
+			case messages := <-received:
+				var gotEdge string
+				for _, msg := range messages {
+					if msg.Type == "session_preserved" || msg.Type == "session_rotated" {
+						gotEdge = msg.Type
+					}
+					if msg.Type == "message" {
+						var payload map[string]string
+						if err := json.Unmarshal(msg.Payload, &payload); err != nil {
+							t.Fatalf("decode claw message: %v", err)
+						}
+						if payload["content"] != "" {
+							t.Fatalf("claw message content = %q, want empty", payload["content"])
+						}
+					}
+				}
+				if gotEdge != tt.wantEdge {
+					t.Fatalf("recovery edge = %q, want %q (messages: %#v)", gotEdge, tt.wantEdge, messages)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("hub did not receive recovery edge and empty claw reply")
+			}
+			cancel()
+			select {
+			case <-loopDone:
+			case <-time.After(time.Second):
+				t.Fatal("runHubLoop did not stop after cancellation")
+			}
+		})
+	}
+}
+
 func TestIsRecoverableSessionSendError(t *testing.T) {
 	tests := []struct {
 		name string
@@ -1635,7 +1962,7 @@ func TestIsSessionRotatedError(t *testing.T) {
 		want bool
 	}{
 		{name: "nil", err: nil, want: false},
-		{name: "session reset", err: errString("session file changed while embedded prompt lock was released; OpenClaw session reset so the next message can continue"), want: true},
+		{name: "session reset", err: errString("session file changed while embedded prompt lock was released; " + sessionRotatedErrorSuffix), want: true},
 		{name: "other error", err: errString("some other error"), want: false},
 		{name: "send error", err: &sessionSendRequestError{err: errString("session file changed while embedded prompt lock was released")}, want: false},
 	}
@@ -1645,6 +1972,129 @@ func TestIsSessionRotatedError(t *testing.T) {
 				t.Fatalf("isSessionRotatedError(%v) = %v, want %v", tt.err, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestSessionRecoverySentinelsAreMutuallyExclusive(t *testing.T) {
+	if strings.Contains(sessionPreservedErrorSuffix, sessionRotatedErrorSuffix) || strings.Contains(sessionRotatedErrorSuffix, sessionPreservedErrorSuffix) {
+		t.Fatalf("recovery sentinel strings must remain mutually exclusive")
+	}
+	rotated := errString("lock conflict; " + sessionRotatedErrorSuffix)
+	preserved := errString("lock conflict; " + sessionPreservedErrorSuffix)
+	if !isSessionRotatedError(rotated) || isSessionPreservedError(rotated) {
+		t.Fatalf("rotated error classification is not exclusive")
+	}
+	if !isSessionPreservedError(preserved) || isSessionRotatedError(preserved) {
+		t.Fatalf("preserved error classification is not exclusive")
+	}
+	both := errString(sessionRotatedErrorSuffix + "; " + sessionPreservedErrorSuffix)
+	if isSessionRotatedError(both) || isSessionPreservedError(both) {
+		t.Fatalf("an ambiguous error must not match either recovery protocol")
+	}
+}
+
+func TestSessionRecoveryOutcome(t *testing.T) {
+	preserved := &sessionPreservedError{err: errString("lock conflict"), key: "session-1"}
+	rotated := errString("lock conflict; " + sessionRotatedErrorSuffix)
+	tests := []struct {
+		name       string
+		err        error
+		currentKey string
+		want       string
+	}{
+		{name: "preserved matching key", err: preserved, currentKey: "session-1", want: "preserved"},
+		{name: "preserved replaced key", err: preserved, currentKey: "session-2", want: "rotated"},
+		{name: "rotated error", err: rotated, currentKey: "session-2", want: "rotated"},
+		{name: "ordinary error", err: errString("ordinary failure"), currentKey: "session-1", want: ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := sessionRecoveryOutcome(tt.err, tt.currentKey); got != tt.want {
+				t.Fatalf("sessionRecoveryOutcome(%v, %q) = %q, want %q", tt.err, tt.currentKey, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestReportSessionRecoveryEmitsHubEdgeAndClearsReply(t *testing.T) {
+	preserved := &sessionPreservedError{err: errString("lock conflict"), key: "session-1"}
+	for _, tt := range []struct {
+		name       string
+		currentKey string
+		wantType   string
+	}{
+		{name: "matching key preserves session", currentKey: "session-1", wantType: "session_preserved"},
+		{name: "divergent key rotates session", currentKey: "session-2", wantType: "session_rotated"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			gs := &gatewaySession{sessionKey: tt.currentKey}
+			queue := &msgQueue{}
+			reply := "partially completed reply"
+			var messages []hubMsg
+			handled := reportSessionRecovery(preserved, &reply, gs, func(agentActivity) {}, func(msg hubMsg) error {
+				messages = append(messages, msg)
+				return nil
+			}, queue)
+			if !handled {
+				t.Fatal("preserved recovery was not handled")
+			}
+			if reply != "" {
+				t.Fatalf("reply = %q, want empty after recovery", reply)
+			}
+			if len(messages) != 1 || messages[0].Type != tt.wantType {
+				t.Fatalf("hub messages = %#v, want one %q message", messages, tt.wantType)
+			}
+			// A successful live write is authoritative; replaying it would duplicate
+			// a continuation edge.
+			if len(queue.msgs) != 0 {
+				t.Fatalf("successful recovery edge was queued: %#v", queue.msgs)
+			}
+		})
+	}
+}
+
+func TestReportSessionRecoveryQueuesFailedEdgeForReplay(t *testing.T) {
+	for _, wantType := range []string{"session_preserved", "session_rotated"} {
+		t.Run(wantType, func(t *testing.T) {
+			queue := &msgQueue{}
+			gs := &gatewaySession{sessionKey: "session-1"}
+			err := error(&sessionPreservedError{err: errString("lock conflict"), key: "session-1"})
+			if wantType == "session_rotated" {
+				gs.sessionKey = "session-2"
+			}
+			reply := "partial"
+			if !reportSessionRecovery(err, &reply, gs, func(agentActivity) {}, func(hubMsg) error { return errString("hub disconnected") }, queue) {
+				t.Fatal("recovery was not handled")
+			}
+			if len(queue.msgs) != 1 || queue.msgs[0].kind != queuedControl || queue.msgs[0].control.Type != wantType {
+				t.Fatalf("queued recovery edge = %#v, want one %s control", queue.msgs, wantType)
+			}
+			var replayed []hubMsg
+			replayQueued(queue, func(string, string) error { return nil }, func(msg hubMsg) error {
+				replayed = append(replayed, msg)
+				return nil
+			}, func(string) { t.Fatal("replay must not rerun the user turn") })
+			if len(replayed) != 1 || replayed[0].Type != wantType {
+				t.Fatalf("replayed edges = %#v, want one %s edge", replayed, wantType)
+			}
+		})
+	}
+}
+
+func TestReplayQueuedDeliversRecoveryEdgeBeforeEmptyReply(t *testing.T) {
+	queue := &msgQueue{}
+	queue.pushControl(hubMsg{Type: "session_preserved"})
+	queue.pushReply("")
+	var deliveries []string
+	replayQueued(queue, func(_ string, content string) error {
+		deliveries = append(deliveries, "reply:"+content)
+		return nil
+	}, func(msg hubMsg) error {
+		deliveries = append(deliveries, "edge:"+msg.Type)
+		return nil
+	}, func(string) { t.Fatal("replay must not rerun the user turn") })
+	if got, want := strings.Join(deliveries, ","), "edge:session_preserved,reply:"; got != want {
+		t.Fatalf("replay order = %q, want %q", got, want)
 	}
 }
 
@@ -1777,6 +2227,9 @@ func TestGatewaySessionResetsAfterProviderFormatLifecycleError(t *testing.T) {
 
 func TestGatewaySessionResetsAfterSessionFileLockConflict(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
+	oldDelays := sessionLockConflictRetryDelays
+	sessionLockConflictRetryDelays = []time.Duration{time.Millisecond, time.Millisecond}
+	t.Cleanup(func() { sessionLockConflictRetryDelays = oldDelays })
 
 	const sessionErr = "error: session file changed while embedded prompt lock was released: /home/elasticclaw/.openclaw/agents/main/sessions/4fb88b9b-8233-4f78-819f-516fbe605e32.jsonl"
 	testDone := make(chan struct{})
@@ -1843,6 +2296,22 @@ func TestGatewaySessionResetsAfterSessionFileLockConflict(t *testing.T) {
 			return
 		}
 
+		// The accepted turn may have side effects, so recovery only probes the
+		// original session and never replays sessions.send.
+		for range sessionLockConflictRetryDelays {
+			probeReq, ok := readRequest("sessions.describe")
+			if !ok {
+				return
+			}
+			if err := wsjson.Write(r.Context(), conn, gwFrame{
+				Type: "res", ID: probeReq.ID, OK: false,
+				Error: &gwError{Code: "unavailable", Message: "session unavailable"},
+			}); err != nil {
+				t.Errorf("reject session probe: %v", err)
+				return
+			}
+		}
+
 		createReq, ok := readRequest("sessions.create")
 		if !ok {
 			return
@@ -1899,6 +2368,402 @@ func TestGatewaySessionResetsAfterSessionFileLockConflict(t *testing.T) {
 	}
 	if got := loadBridgeSession(); got != "session-2" {
 		t.Fatalf("persisted session key = %q, want session-2", got)
+	}
+}
+
+func TestGatewaySessionPreservesSessionAfterMidTurnLockConflictProbe(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	oldDelays := sessionLockConflictRetryDelays
+	sessionLockConflictRetryDelays = []time.Duration{time.Millisecond}
+	t.Cleanup(func() { sessionLockConflictRetryDelays = oldDelays })
+
+	const sessionErr = "error: session file changed while embedded prompt lock was released"
+	testDone := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			t.Errorf("accept websocket: %v", err)
+			return
+		}
+		defer conn.CloseNow()
+		readRequest := func(wantMethod string) (gwFrame, bool) {
+			var req gwFrame
+			if err := wsjson.Read(r.Context(), conn, &req); err != nil {
+				t.Errorf("read %s request: %v", wantMethod, err)
+				return gwFrame{}, false
+			}
+			if req.Method != wantMethod {
+				t.Errorf("request method = %q, want %q", req.Method, wantMethod)
+				return gwFrame{}, false
+			}
+			return req, true
+		}
+		sendReq, ok := readRequest("sessions.send")
+		if !ok {
+			return
+		}
+		if err := wsjson.Write(r.Context(), conn, gwFrame{Type: "res", ID: sendReq.ID, OK: true}); err != nil {
+			t.Errorf("accept sessions.send: %v", err)
+			return
+		}
+		if err := wsjson.Write(r.Context(), conn, gwFrame{Type: "event", Event: "agent", Payload: mustJSON(map[string]interface{}{
+			"stream": "lifecycle", "sessionKey": "session-1", "data": map[string]string{"phase": "error", "error": sessionErr},
+		})}); err != nil {
+			t.Errorf("write lifecycle error: %v", err)
+			return
+		}
+		abortReq, ok := readRequest("sessions.abort")
+		if !ok {
+			return
+		}
+		if err := wsjson.Write(r.Context(), conn, gwFrame{Type: "res", ID: abortReq.ID, OK: true}); err != nil {
+			t.Errorf("abort session: %v", err)
+			return
+		}
+		probeReq, ok := readRequest("sessions.describe")
+		if !ok {
+			return
+		}
+		if err := wsjson.Write(r.Context(), conn, gwFrame{Type: "res", ID: probeReq.ID, OK: true}); err != nil {
+			t.Errorf("accept session probe: %v", err)
+			return
+		}
+		// A successful probe must end the recovery: nothing else may reach the
+		// gateway. A rotation would send sessions.create and a replay would send
+		// a second sessions.send, and the accepted turn may already have run
+		// tool side effects. Without this read the test would still pass while
+		// silently blocking on an unanswered sessions.create.
+		idleCtx, idleCancel := context.WithTimeout(r.Context(), 2*time.Second)
+		defer idleCancel()
+		var extra gwFrame
+		if err := wsjson.Read(idleCtx, conn, &extra); err == nil {
+			t.Errorf("unexpected %q request after a successful probe; the session must be preserved", extra.Method)
+		}
+		<-testDone
+	}))
+	defer srv.Close()
+	defer close(testDone)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(srv.URL, "http"), nil)
+	if err != nil {
+		t.Fatalf("dial websocket: %v", err)
+	}
+	defer conn.CloseNow()
+	gs := &gatewaySession{sessionKey: "session-1", conn: conn, pending: make(map[string]chan gwFrame)}
+	go gs.readLoop(ctx)
+	_, err = gs.SendMessage(ctx, "continue the task", nil, nil)
+	if err == nil || !strings.Contains(err.Error(), sessionErr) {
+		t.Fatalf("SendMessage error = %v, want original lock conflict", err)
+	}
+	if !isSessionPreservedError(err) || isSessionRotatedError(err) {
+		t.Fatalf("preserved session error must not be recognized as a rotation: %v", err)
+	}
+	if got := gs.getSessionKey(); got != "session-1" {
+		t.Fatalf("session key = %q, want session-1", got)
+	}
+	if got := loadBridgeSession(); got != "" {
+		t.Fatalf("persisted session key = %q, want empty (no rotation)", got)
+	}
+}
+
+func TestGatewaySessionProbeRechecksConcurrentRotationAfterSuccess(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	oldDelays := sessionLockConflictRetryDelays
+	sessionLockConflictRetryDelays = []time.Duration{time.Millisecond}
+	t.Cleanup(func() { sessionLockConflictRetryDelays = oldDelays })
+
+	const sessionErr = "error: session file changed while embedded prompt lock was released"
+	var gs *gatewaySession
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			t.Errorf("accept websocket: %v", err)
+			return
+		}
+		defer conn.CloseNow()
+		read := func(want string) (gwFrame, bool) {
+			var req gwFrame
+			if err := wsjson.Read(r.Context(), conn, &req); err != nil {
+				t.Errorf("read %s: %v", want, err)
+				return req, false
+			}
+			if req.Method != want {
+				t.Errorf("method = %q, want %q", req.Method, want)
+				return req, false
+			}
+			return req, true
+		}
+		send, ok := read("sessions.send")
+		if !ok {
+			return
+		}
+		if err := wsjson.Write(r.Context(), conn, gwFrame{Type: "res", ID: send.ID, OK: true}); err != nil {
+			t.Error(err)
+			return
+		}
+		if err := wsjson.Write(r.Context(), conn, gwFrame{Type: "event", Event: "agent", Payload: mustJSON(map[string]interface{}{"stream": "lifecycle", "sessionKey": "session-1", "data": map[string]string{"phase": "error", "error": sessionErr}})}); err != nil {
+			t.Error(err)
+			return
+		}
+		abort, ok := read("sessions.abort")
+		if !ok {
+			return
+		}
+		if err := wsjson.Write(r.Context(), conn, gwFrame{Type: "res", ID: abort.ID, OK: true}); err != nil {
+			t.Error(err)
+			return
+		}
+		probe, ok := read("sessions.describe")
+		if !ok {
+			return
+		}
+		// Rotate after the read-only probe succeeds to exercise the defensive
+		// re-check immediately before reporting the session as preserved.
+		gs.setSessionKey("session-2")
+		if err := wsjson.Write(r.Context(), conn, gwFrame{Type: "res", ID: probe.ID, OK: true}); err != nil {
+			t.Error(err)
+		}
+	}))
+	defer srv.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(srv.URL, "http"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.CloseNow()
+	gs = &gatewaySession{sessionKey: "session-1", conn: conn, pending: make(map[string]chan gwFrame)}
+	go gs.readLoop(ctx)
+	_, err = gs.SendMessage(ctx, "continue the task", nil, nil)
+	if err == nil || !isSessionRotatedError(err) || isSessionPreservedError(err) {
+		t.Fatalf("SendMessage error = %v, want rotation only", err)
+	}
+}
+
+func TestGatewaySessionProbeDetectsConcurrentRotation(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	oldDelays := sessionLockConflictRetryDelays
+	sessionLockConflictRetryDelays = []time.Duration{time.Millisecond}
+	t.Cleanup(func() { sessionLockConflictRetryDelays = oldDelays })
+	const sessionErr = "error: session file changed while embedded prompt lock was released"
+	var gs *gatewaySession
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			t.Errorf("accept websocket: %v", err)
+			return
+		}
+		defer conn.CloseNow()
+		read := func(want string) (gwFrame, bool) {
+			var req gwFrame
+			if err := wsjson.Read(r.Context(), conn, &req); err != nil {
+				t.Errorf("read %s: %v", want, err)
+				return req, false
+			}
+			if req.Method != want {
+				t.Errorf("method = %q, want %q", req.Method, want)
+				return req, false
+			}
+			return req, true
+		}
+		send, ok := read("sessions.send")
+		if !ok {
+			return
+		}
+		if err := wsjson.Write(r.Context(), conn, gwFrame{Type: "res", ID: send.ID, OK: true}); err != nil {
+			t.Error(err)
+			return
+		}
+		if err := wsjson.Write(r.Context(), conn, gwFrame{Type: "event", Event: "agent", Payload: mustJSON(map[string]interface{}{"stream": "lifecycle", "sessionKey": "session-1", "data": map[string]string{"phase": "error", "error": sessionErr}})}); err != nil {
+			t.Error(err)
+			return
+		}
+		abort, ok := read("sessions.abort")
+		if !ok {
+			return
+		}
+		// The reconnect races recovery after it has chosen the turn key but
+		// before the gateway receives the abort frame.
+		gs.setSessionKey("session-2")
+		var abortParams map[string]string
+		if err := json.Unmarshal(abort.Params, &abortParams); err != nil {
+			t.Errorf("decode sessions.abort params: %v", err)
+			return
+		}
+		if abortParams["key"] != "session-1" {
+			t.Errorf("sessions.abort key = %q, want turn session-1", abortParams["key"])
+			return
+		}
+		if err := wsjson.Write(r.Context(), conn, gwFrame{Type: "res", ID: abort.ID, OK: true}); err != nil {
+			t.Error(err)
+			return
+		}
+		idleCtx, cancel := context.WithTimeout(r.Context(), 100*time.Millisecond)
+		defer cancel()
+		var extra gwFrame
+		if err := wsjson.Read(idleCtx, conn, &extra); err == nil {
+			t.Errorf("unexpected %q after concurrent rotation", extra.Method)
+		}
+	}))
+	defer srv.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(srv.URL, "http"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.CloseNow()
+	gs = &gatewaySession{sessionKey: "session-1", conn: conn, pending: make(map[string]chan gwFrame)}
+	go gs.readLoop(ctx)
+	_, err = gs.SendMessage(ctx, "continue the task", nil, nil)
+	if err == nil || !isSessionRotatedError(err) || isSessionPreservedError(err) {
+		t.Fatalf("SendMessage error = %v, want rotation only", err)
+	}
+}
+
+func TestGatewaySessionLockConflictAlreadyRotatedSkipsAbortAndProbe(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	const sessionErr = "error: session file changed while embedded prompt lock was released"
+	var gs *gatewaySession
+	// The mismatch-check window inside SendMessage's recovery path (right
+	// after the lifecycle error is delivered, right before it compares the
+	// turn's key to the current key) is too narrow to land a concurrent
+	// rotation into by timing alone. Use the sessionMismatchCheckHook test
+	// seam to rotate the key deterministically at that exact point, exactly
+	// as readLoop would do concurrently without holding sendMu.
+	oldHook := sessionMismatchCheckHook
+	t.Cleanup(func() { sessionMismatchCheckHook = oldHook })
+	sessionMismatchCheckHook = func() {
+		gs.sessionMu.Lock()
+		gs.sessionKey = "session-2"
+		gs.sessionMu.Unlock()
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		defer conn.CloseNow()
+		var send gwFrame
+		if err := wsjson.Read(r.Context(), conn, &send); err != nil || send.Method != "sessions.send" {
+			t.Fatalf("read sessions.send: method=%q err=%v", send.Method, err)
+			return
+		}
+		if err := wsjson.Write(r.Context(), conn, gwFrame{Type: "res", ID: send.ID, OK: true}); err != nil {
+			t.Error(err)
+			return
+		}
+		// Tag the event with the still-current key so readLoop's foreign-session
+		// filter dispatches it to the in-flight turn instead of dropping it.
+		if err := wsjson.Write(r.Context(), conn, gwFrame{Type: "event", Event: "agent", Payload: mustJSON(map[string]interface{}{"stream": "lifecycle", "sessionKey": "session-1", "data": map[string]string{"phase": "error", "error": sessionErr}})}); err != nil {
+			t.Error(err)
+			return
+		}
+		idleCtx, cancel := context.WithTimeout(r.Context(), 150*time.Millisecond)
+		defer cancel()
+		var extra gwFrame
+		if err := wsjson.Read(idleCtx, conn, &extra); err == nil {
+			t.Errorf("unexpected %q after concurrent rotation", extra.Method)
+		}
+	}))
+	defer srv.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(srv.URL, "http"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.CloseNow()
+	gs = &gatewaySession{sessionKey: "session-1", conn: conn, pending: make(map[string]chan gwFrame)}
+	go gs.readLoop(ctx)
+	_, err = gs.SendMessage(ctx, "continue the task", nil, nil)
+	if err == nil || !isSessionRotatedError(err) || isSessionPreservedError(err) {
+		t.Fatalf("SendMessage error = %v, want rotation only", err)
+	}
+}
+
+func TestGatewaySessionProbesAfterTurnContextExpires(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	oldDelays := sessionLockConflictRetryDelays
+	sessionLockConflictRetryDelays = []time.Duration{time.Millisecond}
+	t.Cleanup(func() { sessionLockConflictRetryDelays = oldDelays })
+	const sessionErr = "error: session file changed while embedded prompt lock was released"
+	turnCtx, turnCancel := context.WithCancel(context.Background())
+	defer turnCancel()
+	probed := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		defer conn.CloseNow()
+		read := func(want string) (gwFrame, bool) {
+			var req gwFrame
+			if err := wsjson.Read(r.Context(), conn, &req); err != nil {
+				t.Errorf("read %s: %v", want, err)
+				return req, false
+			}
+			if req.Method != want {
+				t.Errorf("method = %q, want %q", req.Method, want)
+				return req, false
+			}
+			return req, true
+		}
+		send, ok := read("sessions.send")
+		if !ok {
+			return
+		}
+		if err := wsjson.Write(r.Context(), conn, gwFrame{Type: "res", ID: send.ID, OK: true}); err != nil {
+			t.Error(err)
+			return
+		}
+		if err := wsjson.Write(r.Context(), conn, gwFrame{Type: "event", Event: "agent", Payload: mustJSON(map[string]interface{}{"stream": "lifecycle", "sessionKey": "session-1", "data": map[string]string{"phase": "error", "error": sessionErr}})}); err != nil {
+			t.Error(err)
+			return
+		}
+		abort, ok := read("sessions.abort")
+		if !ok {
+			return
+		}
+		if err := wsjson.Write(r.Context(), conn, gwFrame{Type: "res", ID: abort.ID, OK: true}); err != nil {
+			t.Error(err)
+			return
+		}
+		// The accepted turn's context has expired, but recovery must use its
+		// background probe context rather than abandon the decision here.
+		turnCancel()
+		probe, ok := read("sessions.describe")
+		if !ok {
+			return
+		}
+		close(probed)
+		if err := wsjson.Write(r.Context(), conn, gwFrame{Type: "res", ID: probe.ID, OK: true}); err != nil {
+			t.Error(err)
+		}
+	}))
+	defer srv.Close()
+	connCtx, connCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer connCancel()
+	conn, _, err := websocket.Dial(connCtx, "ws"+strings.TrimPrefix(srv.URL, "http"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.CloseNow()
+	gs := &gatewaySession{sessionKey: "session-1", conn: conn, pending: make(map[string]chan gwFrame)}
+	go gs.readLoop(connCtx)
+	_, err = gs.SendMessage(turnCtx, "continue the task", nil, nil)
+	select {
+	case <-probed:
+	default:
+		t.Fatal("SendMessage did not run a background probe after turn context expired")
+	}
+	if err == nil || (!isSessionPreservedError(err) && !isSessionRotatedError(err)) {
+		t.Fatalf("SendMessage error = %v, want recovery sentinel", err)
 	}
 }
 
@@ -2089,6 +2954,15 @@ func TestGatewaySessionRotatesAfterLockConflictRetriesExhausted(t *testing.T) {
 		}
 
 		// Retries exhausted: bridge rotates to a fresh session as a last resort.
+		abortReq, ok := readRequest("sessions.abort")
+		if !ok {
+			return
+		}
+		if err := wsjson.Write(r.Context(), conn, gwFrame{Type: "res", ID: abortReq.ID, OK: true}); err != nil {
+			t.Errorf("abort session before rotation: %v", err)
+			return
+		}
+
 		createReq, ok := readRequest("sessions.create")
 		if !ok {
 			return
@@ -2374,12 +3248,15 @@ func TestReconnectGatewayReportsStaleConnectionNoop(t *testing.T) {
 	stale := &websocket.Conn{}
 	gs := &gatewaySession{conn: current}
 
-	reconnected, err := gs.reconnectGateway(context.Background(), stale)
+	reconnected, replacedSession, err := gs.reconnectGateway(context.Background(), stale)
 	if err != nil {
 		t.Fatalf("reconnectGateway returned error: %v", err)
 	}
 	if reconnected {
 		t.Fatal("reconnectGateway reported reconnect for stale expected connection")
+	}
+	if replacedSession {
+		t.Fatal("reconnectGateway reported replacement for stale expected connection")
 	}
 	if got := gs.currentConn(); got != current {
 		t.Fatalf("current connection changed on stale reconnect: got %p, want %p", got, current)
@@ -2412,12 +3289,255 @@ func TestReconnectGatewayWithTimeoutWhenChallengeNeverArrives(t *testing.T) {
 		pending: make(map[string]chan gwFrame),
 	}
 	started := time.Now()
-	_, err = gs.reconnectGatewayWithTimeout(context.Background(), current, 100*time.Millisecond)
+	_, _, err = gs.reconnectGatewayWithTimeout(context.Background(), current, 100*time.Millisecond)
 	if err == nil {
 		t.Fatal("reconnectGatewayWithTimeout error = nil, want timeout")
 	}
 	if elapsed := time.Since(started); elapsed > time.Second {
 		t.Fatalf("reconnect returned after %s, want roughly the timeout", elapsed)
+	}
+}
+
+// TestReconnectGatewayReportsReplacementWhenSessionMissing covers the loss
+// path: the gateway forgot the session, so reconnectGateway must fall back
+// to sessions.create and report replacedSession=true so callers can announce
+// the loss to the hub. Without this signal, readLoop and SendMessage would
+// silently keep going on an empty transcript.
+func TestReconnectGatewayReportsReplacementWhenSessionMissing(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			t.Errorf("accept websocket: %v", err)
+			return
+		}
+		defer conn.CloseNow()
+		ctx := r.Context()
+
+		challengePayload, _ := json.Marshal(map[string]string{"nonce": "nonce"})
+		if err := wsjson.Write(ctx, conn, gwFrame{Type: "event", Event: "connect.challenge", Payload: challengePayload}); err != nil {
+			t.Errorf("write challenge: %v", err)
+			return
+		}
+		var connectReq gwFrame
+		if err := wsjson.Read(ctx, conn, &connectReq); err != nil {
+			t.Errorf("read connect request: %v", err)
+			return
+		}
+		if err := wsjson.Write(ctx, conn, gwFrame{Type: "res", ID: connectReq.ID, OK: true}); err != nil {
+			t.Errorf("write connect response: %v", err)
+			return
+		}
+
+		var subReq gwFrame
+		if err := wsjson.Read(ctx, conn, &subReq); err != nil {
+			t.Errorf("read subscribe request: %v", err)
+			return
+		}
+		if subReq.Method != "sessions.subscribe" {
+			t.Errorf("request method = %q, want sessions.subscribe", subReq.Method)
+			return
+		}
+		if err := wsjson.Write(ctx, conn, gwFrame{Type: "res", ID: subReq.ID, OK: false, Error: &gwError{Code: "not_found", Message: "session not found"}}); err != nil {
+			t.Errorf("write subscribe error: %v", err)
+			return
+		}
+
+		var createReq gwFrame
+		if err := wsjson.Read(ctx, conn, &createReq); err != nil {
+			t.Errorf("read create request: %v", err)
+			return
+		}
+		if createReq.Method != "sessions.create" {
+			t.Errorf("request method = %q, want sessions.create", createReq.Method)
+			return
+		}
+		createPayload, _ := json.Marshal(map[string]string{"key": "session-2"})
+		if err := wsjson.Write(ctx, conn, gwFrame{Type: "res", ID: createReq.ID, OK: true, Payload: createPayload}); err != nil {
+			t.Errorf("write create response: %v", err)
+			return
+		}
+
+		var resubReq gwFrame
+		if err := wsjson.Read(ctx, conn, &resubReq); err != nil {
+			t.Errorf("read resubscribe request: %v", err)
+			return
+		}
+		if resubReq.Method != "sessions.subscribe" {
+			t.Errorf("request method = %q, want sessions.subscribe", resubReq.Method)
+			return
+		}
+		if err := wsjson.Write(ctx, conn, gwFrame{Type: "res", ID: resubReq.ID, OK: true}); err != nil {
+			t.Errorf("write resubscribe response: %v", err)
+			return
+		}
+		<-ctx.Done()
+	}))
+	defer srv.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http")
+	client := &gatewayClient{
+		addr:  strings.TrimPrefix(wsURL, "ws://"),
+		token: "token",
+		device: &deviceIdentity{
+			DeviceID:      "device-1",
+			PublicKeyPem:  testPEM("PUBLIC KEY"),
+			PrivateKeyPem: testPEM("PRIVATE KEY"),
+		},
+		home: t.TempDir(),
+	}
+	gs := &gatewaySession{
+		client:     client,
+		sessionKey: "session-1",
+		pending:    make(map[string]chan gwFrame),
+	}
+
+	reconnected, replacedSession, err := gs.reconnectGateway(ctx, nil)
+	if err != nil {
+		t.Fatalf("reconnectGateway returned error: %v", err)
+	}
+	if !reconnected {
+		t.Fatal("reconnectGateway reported reconnected=false, want true")
+	}
+	if !replacedSession {
+		t.Fatal("reconnectGateway reported replacedSession=false, want true after a missing-session error")
+	}
+	if got := gs.getSessionKey(); got != "session-2" {
+		t.Fatalf("session key = %q, want session-2 (fresh session)", got)
+	}
+}
+
+// TestReadLoopAnnouncesSessionReplacementOnBackgroundReconnect covers the
+// readLoop call site specifically (as opposed to reconnectGateway directly):
+// a background reconnect after a dropped read must still fire
+// onSessionReplaced when the gateway had forgotten the session, or the hub
+// never learns the transcript was lost.
+func TestReadLoopAnnouncesSessionReplacementOnBackgroundReconnect(t *testing.T) {
+	var connections atomic.Int32
+	firstHandshakeDone := make(chan struct{})
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			t.Errorf("accept websocket: %v", err)
+			return
+		}
+		defer conn.CloseNow()
+		ctx := r.Context()
+
+		connID := connections.Add(1)
+		challengePayload, _ := json.Marshal(map[string]string{"nonce": "nonce"})
+		if err := wsjson.Write(ctx, conn, gwFrame{Type: "event", Event: "connect.challenge", Payload: challengePayload}); err != nil {
+			t.Errorf("write challenge: %v", err)
+			return
+		}
+		var connectReq gwFrame
+		if err := wsjson.Read(ctx, conn, &connectReq); err != nil {
+			t.Errorf("read connect request: %v", err)
+			return
+		}
+		if err := wsjson.Write(ctx, conn, gwFrame{Type: "res", ID: connectReq.ID, OK: true}); err != nil {
+			t.Errorf("write connect response: %v", err)
+			return
+		}
+
+		if connID == 1 {
+			// First connection: let readLoop start reading, then drop it so
+			// readLoop's background reconnect kicks in.
+			close(firstHandshakeDone)
+			conn.CloseNow()
+			return
+		}
+
+		var subReq gwFrame
+		if err := wsjson.Read(ctx, conn, &subReq); err != nil {
+			t.Errorf("read subscribe request: %v", err)
+			return
+		}
+		if subReq.Method != "sessions.subscribe" {
+			t.Errorf("request method = %q, want sessions.subscribe", subReq.Method)
+			return
+		}
+		if err := wsjson.Write(ctx, conn, gwFrame{Type: "res", ID: subReq.ID, OK: false, Error: &gwError{Code: "not_found", Message: "session not found"}}); err != nil {
+			t.Errorf("write subscribe error: %v", err)
+			return
+		}
+
+		var createReq gwFrame
+		if err := wsjson.Read(ctx, conn, &createReq); err != nil {
+			t.Errorf("read create request: %v", err)
+			return
+		}
+		if createReq.Method != "sessions.create" {
+			t.Errorf("request method = %q, want sessions.create", createReq.Method)
+			return
+		}
+		createPayload, _ := json.Marshal(map[string]string{"key": "session-2"})
+		if err := wsjson.Write(ctx, conn, gwFrame{Type: "res", ID: createReq.ID, OK: true, Payload: createPayload}); err != nil {
+			t.Errorf("write create response: %v", err)
+			return
+		}
+
+		var resubReq gwFrame
+		if err := wsjson.Read(ctx, conn, &resubReq); err != nil {
+			t.Errorf("read resubscribe request: %v", err)
+			return
+		}
+		if resubReq.Method != "sessions.subscribe" {
+			t.Errorf("request method = %q, want sessions.subscribe", resubReq.Method)
+			return
+		}
+		if err := wsjson.Write(ctx, conn, gwFrame{Type: "res", ID: resubReq.ID, OK: true}); err != nil {
+			t.Errorf("write resubscribe response: %v", err)
+			return
+		}
+		<-ctx.Done()
+	}))
+	defer srv.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http")
+	client := &gatewayClient{
+		addr:  strings.TrimPrefix(wsURL, "ws://"),
+		token: "token",
+		device: &deviceIdentity{
+			DeviceID:      "device-1",
+			PublicKeyPem:  testPEM("PUBLIC KEY"),
+			PrivateKeyPem: testPEM("PRIVATE KEY"),
+		},
+		home: t.TempDir(),
+	}
+	conn, err := client.connectToGateway(ctx)
+	if err != nil {
+		t.Fatalf("connect to gateway: %v", err)
+	}
+	select {
+	case <-firstHandshakeDone:
+	case <-time.After(time.Second):
+		t.Fatal("first gateway handshake did not complete")
+	}
+
+	gs := &gatewaySession{
+		client:     client,
+		sessionKey: "session-1",
+		conn:       conn,
+		pending:    make(map[string]chan gwFrame),
+	}
+	replaced := make(chan struct{}, 1)
+	gs.setOnSessionReplaced(func() { replaced <- struct{}{} })
+	go gs.readLoop(ctx)
+
+	select {
+	case <-replaced:
+	case <-time.After(3 * time.Second):
+		t.Fatal("readLoop's background reconnect did not announce a session replacement")
+	}
+	if got := gs.getSessionKey(); got != "session-2" {
+		t.Fatalf("session key = %q, want session-2 (fresh session)", got)
 	}
 }
 
@@ -2681,6 +3801,8 @@ func TestGatewaySessionRetriesSendAfterClosedGatewayWrite(t *testing.T) {
 		conn:       conn,
 		pending:    make(map[string]chan gwFrame),
 	}
+	replaced := make(chan struct{}, 1)
+	gs.setOnSessionReplaced(func() { replaced <- struct{}{} })
 	go gs.readLoop(ctx)
 
 	var chunks []string
@@ -2705,6 +3827,256 @@ func TestGatewaySessionRetriesSendAfterClosedGatewayWrite(t *testing.T) {
 	}
 	if got := connections.Load(); got != 2 {
 		t.Fatalf("connections = %d, want 2", got)
+	}
+	select {
+	case <-replaced:
+		t.Fatal("successful re-subscribe announced a session replacement")
+	default:
+	}
+}
+
+// TestSendMessageAnnouncesSessionReplacementOnReconnect covers the
+// SendMessage call site specifically: a retryable send-write failure forces
+// a reconnect, and when that reconnect finds the session gone it must still
+// announce the replacement even though the retried send itself succeeds.
+func TestSendMessageAnnouncesSessionReplacementOnReconnect(t *testing.T) {
+	var connections atomic.Int32
+	firstHandshakeDone := make(chan struct{})
+	resubscribeDone := make(chan struct{})
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			t.Errorf("accept websocket: %v", err)
+			return
+		}
+		defer conn.CloseNow()
+		ctx := r.Context()
+
+		connID := connections.Add(1)
+		challengePayload, _ := json.Marshal(map[string]string{"nonce": "nonce"})
+		if err := wsjson.Write(ctx, conn, gwFrame{Type: "event", Event: "connect.challenge", Payload: challengePayload}); err != nil {
+			t.Errorf("write challenge: %v", err)
+			return
+		}
+		var connectReq gwFrame
+		if err := wsjson.Read(ctx, conn, &connectReq); err != nil {
+			t.Errorf("read connect request: %v", err)
+			return
+		}
+		if err := wsjson.Write(ctx, conn, gwFrame{Type: "res", ID: connectReq.ID, OK: true}); err != nil {
+			t.Errorf("write connect response: %v", err)
+			return
+		}
+
+		if connID == 1 {
+			// First connection: handshake only, then get closed by the test
+			// so the first sessions.send write fails.
+			close(firstHandshakeDone)
+			<-ctx.Done()
+			return
+		}
+
+		var subReq gwFrame
+		if err := wsjson.Read(ctx, conn, &subReq); err != nil {
+			t.Errorf("read subscribe request: %v", err)
+			return
+		}
+		if subReq.Method != "sessions.subscribe" {
+			t.Errorf("request method = %q, want sessions.subscribe", subReq.Method)
+			return
+		}
+		if err := wsjson.Write(ctx, conn, gwFrame{Type: "res", ID: subReq.ID, OK: false, Error: &gwError{Code: "not_found", Message: "session not found"}}); err != nil {
+			t.Errorf("write subscribe error: %v", err)
+			return
+		}
+
+		var createReq gwFrame
+		if err := wsjson.Read(ctx, conn, &createReq); err != nil {
+			t.Errorf("read create request: %v", err)
+			return
+		}
+		if createReq.Method != "sessions.create" {
+			t.Errorf("request method = %q, want sessions.create", createReq.Method)
+			return
+		}
+		createPayload, _ := json.Marshal(map[string]string{"key": "session-2"})
+		if err := wsjson.Write(ctx, conn, gwFrame{Type: "res", ID: createReq.ID, OK: true, Payload: createPayload}); err != nil {
+			t.Errorf("write create response: %v", err)
+			return
+		}
+
+		var resubReq gwFrame
+		if err := wsjson.Read(ctx, conn, &resubReq); err != nil {
+			t.Errorf("read resubscribe request: %v", err)
+			return
+		}
+		if resubReq.Method != "sessions.subscribe" {
+			t.Errorf("request method = %q, want sessions.subscribe", resubReq.Method)
+			return
+		}
+		if err := wsjson.Write(ctx, conn, gwFrame{Type: "res", ID: resubReq.ID, OK: true}); err != nil {
+			t.Errorf("write resubscribe response: %v", err)
+			return
+		}
+		close(resubscribeDone)
+
+		// Creating a fresh session makes gatewaySession.setReady() kick off an
+		// unrelated background sessions.describe (context-usage refresh) on
+		// the same connection; it can arrive before or after the retried
+		// sessions.send, so answer whichever request shows up first.
+		var sendReq gwFrame
+		for {
+			var req gwFrame
+			if err := wsjson.Read(ctx, conn, &req); err != nil {
+				t.Errorf("read request after resubscribe: %v", err)
+				return
+			}
+			if req.Method == "sessions.describe" {
+				describePayload, _ := json.Marshal(map[string]interface{}{"session": map[string]interface{}{}})
+				if err := wsjson.Write(ctx, conn, gwFrame{Type: "res", ID: req.ID, OK: true, Payload: describePayload}); err != nil {
+					t.Errorf("write sessions.describe response: %v", err)
+					return
+				}
+				continue
+			}
+			sendReq = req
+			break
+		}
+		if sendReq.Method != "sessions.send" {
+			t.Errorf("retry request method = %q, want sessions.send", sendReq.Method)
+			return
+		}
+		if err := wsjson.Write(ctx, conn, gwFrame{Type: "res", ID: sendReq.ID, OK: true}); err != nil {
+			t.Errorf("write sessions.send response: %v", err)
+			return
+		}
+		assistantPayload, _ := json.Marshal(map[string]interface{}{
+			"stream":     "assistant",
+			"sessionKey": "session-2",
+			"data":       map[string]string{"delta": "hello"},
+		})
+		if err := wsjson.Write(ctx, conn, gwFrame{Type: "event", Event: "agent", Payload: assistantPayload}); err != nil {
+			t.Errorf("write assistant event: %v", err)
+			return
+		}
+		endPayload, _ := json.Marshal(map[string]interface{}{
+			"stream":     "lifecycle",
+			"sessionKey": "session-2",
+			"data":       map[string]string{"phase": "end"},
+		})
+		if err := wsjson.Write(ctx, conn, gwFrame{Type: "event", Event: "agent", Payload: endPayload}); err != nil {
+			t.Errorf("write lifecycle event: %v", err)
+			return
+		}
+		// Drain and answer any further requests (e.g. a still-pending
+		// context-usage sessions.describe) instead of leaving them unread,
+		// which would otherwise surface as a goroutine panic once the test
+		// itself has already returned.
+		for {
+			var req gwFrame
+			if err := wsjson.Read(ctx, conn, &req); err != nil {
+				return
+			}
+			if req.Method == "sessions.describe" {
+				describePayload, _ := json.Marshal(map[string]interface{}{"session": map[string]interface{}{}})
+				_ = wsjson.Write(ctx, conn, gwFrame{Type: "res", ID: req.ID, OK: true, Payload: describePayload})
+			}
+		}
+	}))
+	defer srv.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http")
+	client := &gatewayClient{
+		addr:  strings.TrimPrefix(wsURL, "ws://"),
+		token: "token",
+		device: &deviceIdentity{
+			DeviceID:      "device-1",
+			PublicKeyPem:  testPEM("PUBLIC KEY"),
+			PrivateKeyPem: testPEM("PRIVATE KEY"),
+		},
+		home: t.TempDir(),
+	}
+	conn, err := client.connectToGateway(ctx)
+	if err != nil {
+		t.Fatalf("connect to gateway: %v", err)
+	}
+	select {
+	case <-firstHandshakeDone:
+	case <-time.After(time.Second):
+		t.Fatal("first gateway handshake did not complete")
+	}
+	// Close from the client side so the first sessions.send write fails
+	// immediately, without relying on readLoop to notice the drop first.
+	conn.CloseNow()
+
+	gs := &gatewaySession{
+		client:     client,
+		sessionKey: "session-1",
+		conn:       conn,
+		pending:    make(map[string]chan gwFrame),
+	}
+	replaced := make(chan struct{}, 1)
+	gs.setOnSessionReplaced(func() { replaced <- struct{}{} })
+
+	// reconnectGateway (subscribe/create/resubscribe) reads its own responses
+	// synchronously. Only the retried sessions.send needs readLoop. Wait for
+	// the connection swap, rather than the re-subscribe response: the latter
+	// can arrive before reconnectGateway installs the new connection.
+	go func() {
+		select {
+		case <-resubscribeDone:
+		case <-ctx.Done():
+			return
+		}
+		ticker := time.NewTicker(time.Millisecond)
+		defer ticker.Stop()
+		for {
+			if gs.currentConn() != conn {
+				gs.readLoop(ctx)
+				return
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
+		}
+	}()
+
+	type sendResult struct {
+		reply string
+		err   error
+	}
+	resultCh := make(chan sendResult, 1)
+	go func() {
+		reply, err := gs.SendMessage(ctx, "hi", func(string) {}, nil)
+		resultCh <- sendResult{reply, err}
+	}()
+
+	select {
+	case <-replaced:
+	case <-time.After(2 * time.Second):
+		t.Fatal("SendMessage's reconnect did not announce a session replacement")
+	}
+
+	var result sendResult
+	select {
+	case result = <-resultCh:
+	case <-time.After(3 * time.Second):
+		t.Fatal("SendMessage did not return after reconnect")
+	}
+	if result.err != nil {
+		t.Fatalf("SendMessage returned error: %v", result.err)
+	}
+	if result.reply != "hello" {
+		t.Fatalf("reply = %q, want hello", result.reply)
+	}
+	if got := gs.getSessionKey(); got != "session-2" {
+		t.Fatalf("session key = %q, want session-2 (fresh session)", got)
 	}
 }
 
@@ -2809,7 +4181,7 @@ func TestReplayQueuedDeliversReplyWithoutRerun(t *testing.T) {
 		t.Fatalf("runTurn must not be called for a completed reply (content=%q)", content)
 	}
 
-	replayQueued(q, deliver, runTurn)
+	replayQueued(q, deliver, func(hubMsg) error { return nil }, runTurn)
 
 	if len(delivered) != 1 || delivered[0] != "finished reply" {
 		t.Fatalf("expected reply delivered exactly once, got %v", delivered)
@@ -2828,7 +4200,7 @@ func TestReplayQueuedRequeuesReplyOnDeliverFailure(t *testing.T) {
 		t.Fatalf("runTurn must not be called")
 	}
 
-	replayQueued(q, deliver, runTurn)
+	replayQueued(q, deliver, func(hubMsg) error { return nil }, runTurn)
 
 	if len(q.msgs) != 1 {
 		t.Fatalf("expected reply re-queued, got %d entries", len(q.msgs))
@@ -2855,12 +4227,218 @@ func TestReplayQueuedRunsTurnForInputs(t *testing.T) {
 		ran = append(ran, content)
 	}
 
-	replayQueued(q, deliver, runTurn)
+	replayQueued(q, deliver, func(hubMsg) error { return nil }, runTurn)
 
 	if deliverCalled {
 		t.Fatalf("deliver must not be called for a queued input")
 	}
 	if len(ran) != 1 || ran[0] != "do the work" {
 		t.Fatalf("expected runTurn invoked with the input, got %v", ran)
+	}
+}
+
+// countActiveSubagents feeds the heartbeat's subagents_active fields, which
+// suppress the hub's "Agent stalled" notification — so it must count only
+// spawned subagent sessions with a run actually in flight, and any payload it
+// cannot understand must be an error (fields omitted from the heartbeat),
+// never a fabricated zero.
+func TestCountActiveSubagents(t *testing.T) {
+	payload := []byte(`{"sessions":[
+		{"key":"agent:main:subagent:abc","hasActiveRun":true},
+		{"key":"agent:main:subagent:def","hasActiveRun":false},
+		{"key":"agent:main:subagent:ghi"},
+		{"key":"agent:main","hasActiveRun":true},
+		{"key":"other:subagent:jkl","hasActiveRun":true,"activeRunIds":[]}
+	]}`)
+	count, err := countActiveSubagents(payload)
+	if err != nil {
+		t.Fatalf("countActiveSubagents: %v", err)
+	}
+	// abc and jkl only: the main session's own run is not subagent work, a
+	// missing hasActiveRun is "no information" rather than active, and an
+	// empty activeRunIds must not override an explicit hasActiveRun=true.
+	if count != 2 {
+		t.Fatalf("count = %d, want 2", count)
+	}
+
+	// An empty index is a successful "nothing running".
+	count, err = countActiveSubagents([]byte(`{"sessions":[]}`))
+	if err != nil || count != 0 {
+		t.Fatalf("empty index: count=%d err=%v, want 0, nil", count, err)
+	}
+
+	// No sessions index at all: this shape carries no information, so it must
+	// surface as an error, not as zero.
+	if _, err := countActiveSubagents([]byte(`{}`)); err == nil {
+		t.Fatal("missing sessions index did not error")
+	}
+	if _, err := countActiveSubagents([]byte(`{"sessions":null}`)); err == nil {
+		t.Fatal("null sessions index did not error")
+	}
+	if _, err := countActiveSubagents([]byte(`not json`)); err == nil {
+		t.Fatal("malformed payload did not error")
+	}
+
+	// A non-empty index whose rows do not carry the key field under the name
+	// we expect (cross-version shape drift) must be an error: matching zero
+	// rows out of an index we could not read would be a fabricated "nothing
+	// running", and the hub treats that as positive evidence.
+	if _, err := countActiveSubagents([]byte(`{"sessions":[
+		{"sessionKey":"agent:main:subagent:abc","hasActiveRun":true},
+		{"sessionKey":"agent:main","hasActiveRun":true}
+	]}`)); err == nil {
+		t.Fatal("keyless rows did not error")
+	}
+}
+
+// subagentHeartbeatFields decides whether the heartbeat carries the
+// subagents_active fields at all. The hub reads an explicit false as positive
+// "nothing running" evidence and clears its suppression state, so the fields
+// must appear only when the sessions.list poll actually succeeded — never on
+// a poll error or a not-ready gateway.
+func TestSubagentHeartbeatFields(t *testing.T) {
+	var logBuf bytes.Buffer
+	prevOut := log.Writer()
+	log.SetOutput(&logBuf)
+	defer log.SetOutput(prevOut)
+
+	// Not-ready gateway: no fields, and the poll must not even run.
+	failLogged := false
+	fields, suffix := subagentHeartbeatFields(false, func() (int, error) {
+		t.Fatal("poll ran while the gateway session was not ready")
+		return 0, nil
+	}, &failLogged)
+	if fields != nil || suffix != "" || failLogged {
+		t.Fatalf("not-ready gateway: fields=%v suffix=%q failLogged=%v, want none", fields, suffix, failLogged)
+	}
+
+	// Successful poll: both fields, matching values.
+	fields, suffix = subagentHeartbeatFields(true, func() (int, error) { return 2, nil }, &failLogged)
+	if fields["subagents_active"] != true || fields["subagent_active_count"] != 2 || len(fields) != 2 {
+		t.Fatalf("successful poll fields = %v, want subagents_active=true subagent_active_count=2", fields)
+	}
+	if !strings.Contains(suffix, "subagents_active=true") {
+		t.Fatalf("log suffix %q does not surface the activity", suffix)
+	}
+	fields, _ = subagentHeartbeatFields(true, func() (int, error) { return 0, nil }, &failLogged)
+	if fields["subagents_active"] != false || fields["subagent_active_count"] != 0 {
+		t.Fatalf("zero-count poll fields = %v, want explicit false/0", fields)
+	}
+
+	// Failing poll (e.g. older gateway without sessions.list): both fields
+	// omitted, and the failure is logged exactly once across repeats.
+	pollErr := func() (int, error) { return 0, errors.New("method not found") }
+	for i := 0; i < 3; i++ {
+		if fields, suffix = subagentHeartbeatFields(true, pollErr, &failLogged); fields != nil || suffix != "" {
+			t.Fatalf("failing poll %d produced fields=%v suffix=%q, want none", i, fields, suffix)
+		}
+	}
+	if !failLogged {
+		t.Fatal("failing poll did not arm the logged-once flag")
+	}
+	if got := strings.Count(logBuf.String(), "subagent activity poll failed"); got != 1 {
+		t.Fatalf("failure logged %d times across 3 failing polls, want 1", got)
+	}
+
+	// A recovery re-arms the log for the next outage.
+	if _, _ = subagentHeartbeatFields(true, func() (int, error) { return 1, nil }, &failLogged); failLogged {
+		t.Fatal("successful poll did not re-arm the failure log")
+	}
+}
+
+func TestAddHeartbeatSessionKeysKeepsSnapshotAndLiveKeysSeparate(t *testing.T) {
+	payload := map[string]interface{}{}
+	addHeartbeatSessionKeys(payload, "stale-snapshot", "live-gateway-session")
+	if got := payload["session_key"]; got != "stale-snapshot" {
+		t.Fatalf("session_key = %v, want usage snapshot", got)
+	}
+	if got := payload["gateway_session_key"]; got != "live-gateway-session" {
+		t.Fatalf("gateway_session_key = %v, want live gateway key", got)
+	}
+
+	payload = map[string]interface{}{}
+	addHeartbeatSessionKeys(payload, "old-snapshot", "")
+	if _, ok := payload["gateway_session_key"]; ok {
+		t.Fatalf("gateway_session_key = %v, want omitted without a live key", payload["gateway_session_key"])
+	}
+}
+
+// A lifecycle error that is not a lock conflict skips the mismatch early
+// return, so it reaches abortSession while a concurrent readLoop rotation may
+// already have replaced the current key. The abort must still target the key
+// the turn actually ran on: aborting the new session leaves the orphaned turn
+// running and writing the old session file, which is the condition that
+// produces the next lock conflict.
+func TestGatewaySessionAbortsTurnKeyAfterConcurrentRotation(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	const lifecycleErr = "error: provider rejected the request schema or tool payload"
+	var gs *gatewaySession
+	oldHook := sessionMismatchCheckHook
+	t.Cleanup(func() { sessionMismatchCheckHook = oldHook })
+	sessionMismatchCheckHook = func() {
+		gs.sessionMu.Lock()
+		gs.sessionKey = "session-2"
+		gs.sessionMu.Unlock()
+	}
+	abortKey := make(chan string, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		defer conn.CloseNow()
+		var send gwFrame
+		if err := wsjson.Read(r.Context(), conn, &send); err != nil || send.Method != "sessions.send" {
+			t.Errorf("read sessions.send: method=%q err=%v", send.Method, err)
+			return
+		}
+		if err := wsjson.Write(r.Context(), conn, gwFrame{Type: "res", ID: send.ID, OK: true}); err != nil {
+			t.Error(err)
+			return
+		}
+		if err := wsjson.Write(r.Context(), conn, gwFrame{Type: "event", Event: "agent", Payload: mustJSON(map[string]interface{}{"stream": "lifecycle", "sessionKey": "session-1", "data": map[string]string{"phase": "error", "error": lifecycleErr}})}); err != nil {
+			t.Error(err)
+			return
+		}
+		var abort gwFrame
+		if err := wsjson.Read(r.Context(), conn, &abort); err != nil || abort.Method != "sessions.abort" {
+			t.Errorf("read sessions.abort: method=%q err=%v", abort.Method, err)
+			return
+		}
+		var params struct {
+			Key string `json:"key"`
+		}
+		_ = json.Unmarshal(abort.Params, &params)
+		abortKey <- params.Key
+		if err := wsjson.Write(r.Context(), conn, gwFrame{Type: "res", ID: abort.ID, OK: true}); err != nil {
+			t.Error(err)
+			return
+		}
+		// Answer the rotation's sessions.create so SendMessage can finish.
+		var create gwFrame
+		if err := wsjson.Read(r.Context(), conn, &create); err == nil && create.Method == "sessions.create" {
+			_ = wsjson.Write(r.Context(), conn, gwFrame{Type: "res", ID: create.ID, OK: true, Payload: mustJSON(map[string]string{"key": "session-3"})})
+		}
+		<-r.Context().Done()
+	}))
+	defer srv.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(srv.URL, "http"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.CloseNow()
+	gs = &gatewaySession{sessionKey: "session-1", conn: conn, pending: make(map[string]chan gwFrame)}
+	go gs.readLoop(ctx)
+	go func() { _, _ = gs.SendMessage(ctx, "continue the task", nil, nil) }()
+	select {
+	case got := <-abortKey:
+		if got != "session-1" {
+			t.Fatalf("sessions.abort key = %q, want session-1 (the turn's key, not the rotated one)", got)
+		}
+	case <-time.After(4 * time.Second):
+		t.Fatal("no sessions.abort observed")
 	}
 }

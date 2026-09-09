@@ -9,6 +9,7 @@ export const VALID_SECTIONS = [
   "secrets",
   "ai-config",
   "mcp-servers",
+  "notifier",
   "analytics",
   "doctor",
   "troubleshoot",

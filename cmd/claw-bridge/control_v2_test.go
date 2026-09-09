@@ -160,6 +160,13 @@ func TestBridgeRegistrationOnlyAdvertisesControlWhenDurableStoreIsAvailable(t *t
 	}
 }
 
+func TestTaskLifecyclePayloadUsesAgentOwnedNamespace(t *testing.T) {
+	payload := taskLifecyclePayload(map[string]interface{}{"gateway_turn_completed": true})
+	if payload["task"] == nil || payload["execution"] != nil || len(payload) != 1 {
+		t.Fatalf("task lifecycle payload = %#v", payload)
+	}
+}
+
 func TestOldTaskCleanupCannotRemoveReplacementCancellation(t *testing.T) {
 	supervisor := newControlSupervisor(context.Background(), "ws://invalid", "claw", "token",
 		bridgeRegistration(true), openTestBridgeControlStore(t))
@@ -215,7 +222,7 @@ func TestBridgeRejectsTaskAssignmentOlderThanAuthoritativeSnapshot(t *testing.T)
 	envelope := typesv2.ControlEnvelope{ProtocolVersion: typesv2.ControlProtocolVersion,
 		MessageID: "assign-stale", Kind: typesv2.MessageAgentTaskAssign, RunID: binding.RunID,
 		AttemptID: binding.AttemptID, TaskID: task.ID, ExpectedStateVersion: &version, Payload: payload}
-	if _, _, err := supervisor.acceptHubEnvelope(binding, envelope); err == nil || !strings.Contains(err.Error(), "older") {
+	if _, _, err := supervisor.acceptHubEnvelope(context.Background(), binding, envelope); err == nil || !strings.Contains(err.Error(), "older") {
 		t.Fatalf("stale assignment error = %v", err)
 	}
 	accepted, err := store.incomingByStatus(binding, "accepted")

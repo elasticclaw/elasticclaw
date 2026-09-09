@@ -2,6 +2,7 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http/httptest"
 	"strings"
@@ -112,6 +113,64 @@ func TestWatchdogUnhealthyHeartbeatsScheduleClawRetry(t *testing.T) {
 	}, "replacement attempt scheduled for unhealthy claw")
 }
 
+func TestWatchdogUnhealthyHeartbeatsCooldownPreventsOverlappingRetries(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{ClawToken: "claw-token"}, "", "", "")
+	const clawID = "watchdog-unhealthy-cooldown"
+	conn := watchdogClaw(t, s, clawID)
+	if _, err := db.Exec(`UPDATE claws SET status='error', bootstrap_ok=1 WHERE id=?`, clawID); err != nil {
+		t.Fatal(err)
+	}
+
+	writeUnhealthy := func() {
+		t.Helper()
+		if err := wsjson.Write(context.Background(), conn, types.WSMessage{Type: "heartbeat", Payload: map[string]any{"gateway_healthy": false}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	escalatedAt := func() time.Time {
+		s.mu.RLock()
+		defer s.mu.RUnlock()
+		return s.gatewayEscalatedAt[clawID]
+	}
+
+	// The first crossing must dispatch regardless of an empty cooldown record.
+	for i := 0; i < defaultGatewayUnhealthyMax; i++ {
+		writeUnhealthy()
+	}
+	eventuallyWatchdog(t, func() bool {
+		return s.gatewayUnhealthyCount(clawID) == defaultGatewayUnhealthyMax && !escalatedAt().IsZero()
+	}, "first unhealthy escalation dispatch")
+	firstEscalatedAt := escalatedAt()
+
+	// Match the interval after retry preparation: its successor is pending while
+	// the original claw remains unhealthy, but is no longer eligible to stop.
+	for i := 0; i < defaultGatewayUnhealthyMax; i++ {
+		writeUnhealthy()
+	}
+	eventuallyWatchdog(t, func() bool {
+		return s.gatewayUnhealthyCount(clawID) == 2*defaultGatewayUnhealthyMax
+	}, "second unhealthy threshold")
+	if got := escalatedAt(); !got.Equal(firstEscalatedAt) {
+		t.Fatalf("second threshold dispatched during cooldown: first=%v got=%v", firstEscalatedAt, got)
+	}
+
+	// Once the replacement has had time to settle, a continued unhealthy episode
+	// may be dispatched again.
+	cooldown := 2 * time.Duration(defaultGatewayUnhealthyMax) * bridgeHeartbeatInterval
+	if cooldown < 10*time.Minute {
+		cooldown = 10 * time.Minute
+	}
+	s.mu.Lock()
+	s.gatewayEscalatedAt[clawID] = now().Add(-cooldown)
+	s.mu.Unlock()
+	for i := 0; i < defaultGatewayUnhealthyMax; i++ {
+		writeUnhealthy()
+	}
+	eventuallyWatchdog(t, func() bool {
+		return s.gatewayUnhealthyCount(clawID) == 3*defaultGatewayUnhealthyMax && escalatedAt().After(firstEscalatedAt)
+	}, "post-cooldown unhealthy escalation dispatch")
+}
+
 func TestWatchdogHealthyHeartbeatResetsUnhealthyCounter(t *testing.T) {
 	s, _ := NewTestServerWithConfig(t, &types.HubConfig{ClawToken: "claw-token"}, "", "", "")
 	const clawID = "watchdog-heartbeat-reset"
@@ -128,8 +187,15 @@ func TestWatchdogHealthyHeartbeatResetsUnhealthyCounter(t *testing.T) {
 	eventuallyWatchdog(t, func() bool {
 		return s.gatewayUnhealthyCount(clawID) == defaultGatewayUnhealthyMax-1
 	}, "unhealthy heartbeat count")
+	s.mu.Lock()
+	s.gatewayEscalatedAt[clawID] = now()
+	s.mu.Unlock()
 	writeHeartbeat(true)
-	eventuallyWatchdog(t, func() bool { return s.gatewayUnhealthyCount(clawID) == 0 }, "healthy reset")
+	eventuallyWatchdog(t, func() bool {
+		s.mu.RLock()
+		defer s.mu.RUnlock()
+		return s.gatewayUnhealthyCounts[clawID] == 0 && s.gatewayEscalatedAt[clawID].IsZero()
+	}, "healthy reset")
 	for i := 0; i < defaultGatewayUnhealthyMax-1; i++ {
 		writeHeartbeat(false)
 	}
@@ -512,10 +578,13 @@ func TestSessionRotatedEnqueuesResume(t *testing.T) {
 	s, db := NewTestServerWithConfig(t, &types.HubConfig{ClawToken: "claw-token"}, "", "", "")
 	const clawID = "watchdog-session-rotated"
 	conn := watchdogClaw(t, s, clawID)
-	_ = watchdogClawConn(t, s, clawID)
+	cc := watchdogClawConn(t, s, clawID)
 	if _, err := db.Exec(`UPDATE claws SET status='connected', bootstrap_ok=1, issue_title='Fix session', github_issue_id='owner/repo#42' WHERE id=?`, clawID); err != nil {
 		t.Fatal(err)
 	}
+	cc.mu.Lock()
+	cc.streamingStartedAt = time.Now()
+	cc.mu.Unlock()
 	if err := wsjson.Write(context.Background(), conn, types.WSMessage{Type: "session_rotated"}); err != nil {
 		t.Fatalf("write session_rotated: %v", err)
 	}
@@ -527,14 +596,288 @@ func TestSessionRotatedEnqueuesResume(t *testing.T) {
 	eventuallyWatchdog(t, func() bool { return count() == 1 }, "session rotated resume")
 }
 
+// A lost transcript on an otherwise idle claw must not wake it: the next
+// real message will run in the new session regardless, and nothing beyond
+// the idle claw itself needs to know the transcript was lost.
+func TestSessionRotatedWhileIdleDoesNotEnqueueResume(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{ClawToken: "claw-token"}, "", "", "")
+	const clawID = "watchdog-idle-session-rotated"
+	conn := watchdogClaw(t, s, clawID)
+	cc := watchdogClawConn(t, s, clawID)
+	if _, err := db.Exec(`UPDATE claws SET status='connected', bootstrap_ok=1 WHERE id=?`, clawID); err != nil {
+		t.Fatal(err)
+	}
+	cc.mu.Lock()
+	cc.streamingStartedAt = time.Time{}
+	cc.awaitingResponse = false
+	cc.lastTurnFinishedAt = now().Add(-autoResumeRecentTurnWindow - time.Second)
+	cc.mu.Unlock()
+	if err := wsjson.Write(context.Background(), conn, types.WSMessage{Type: "session_rotated"}); err != nil {
+		t.Fatalf("write session_rotated: %v", err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	var n int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND role='hub' AND content LIKE ?`, clawID, sessionRotatedResumePrefix+"%").Scan(&n); err != nil || n != 0 {
+		t.Fatalf("resume rows=%d err=%v, want 0", n, err)
+	}
+}
+
+func TestHeartbeatUsesOnlyGatewaySessionKeyForSessionLoss(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{ClawToken: "claw-token"}, "", "", "")
+	const clawID = "watchdog-gateway-session-key"
+	conn := watchdogClaw(t, s, clawID)
+	cc := watchdogClawConn(t, s, clawID)
+	if _, err := db.Exec(`UPDATE claws SET status='connected', bootstrap_ok=1 WHERE id=?`, clawID); err != nil {
+		t.Fatal(err)
+	}
+	cc.mu.Lock()
+	cc.streamingStartedAt = time.Now()
+	cc.mu.Unlock()
+	beat := func(payload map[string]any) {
+		t.Helper()
+		payload["gateway_healthy"] = true
+		if err := wsjson.Write(context.Background(), conn, types.WSMessage{Type: "heartbeat", Payload: payload}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	count := func() int {
+		var n int
+		_ = db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND role='hub' AND content LIKE ?`, clawID, restartResumePrefix+"%").Scan(&n)
+		return n
+	}
+
+	beat(map[string]any{"restart_count": 0, "session_key": "snapshot-old", "gateway_session_key": "live-old"})
+	eventuallyWatchdog(t, func() bool {
+		cc.mu.RLock()
+		defer cc.mu.RUnlock()
+		return cc.gatewaySessionKeySeen && cc.gatewaySessionKey == "live-old"
+	}, "live gateway session baseline")
+	// A stale sessions.describe snapshot changes, but no live key is reported.
+	// It must not be interpreted as a lost session.
+	beat(map[string]any{"restart_count": 0, "session_key": "snapshot-stale"})
+	time.Sleep(100 * time.Millisecond)
+	if got := count(); got != 0 {
+		t.Fatalf("resume count after snapshot-only heartbeat = %d, want 0", got)
+	}
+	beat(map[string]any{"restart_count": 0, "session_key": "snapshot-stale", "gateway_session_key": "live-new"})
+	eventuallyWatchdog(t, func() bool { return count() == 1 }, "resume after live gateway key change")
+}
+
+func TestSessionLossDeduplicatesAllDetectionPathsByNewKey(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{ClawToken: "claw-token"}, "", "", "")
+	const clawID = "watchdog-session-loss-dedup"
+	_ = watchdogClaw(t, s, clawID)
+	cc := watchdogClawConn(t, s, clawID)
+	if _, err := db.Exec(`UPDATE claws SET status='connected', bootstrap_ok=1 WHERE id=?`, clawID); err != nil {
+		t.Fatal(err)
+	}
+	cc.mu.Lock()
+	cc.streamingStartedAt = time.Now()
+	cc.mu.Unlock()
+	// These calls represent restart_count, gateway_session_key, and the
+	// session_rotated bridge edge reporting the same replacement session.
+	s.noteSessionLoss(cc, clawID, "replacement-key", "restart_count")
+	s.noteSessionLoss(cc, clawID, "replacement-key", "gateway_session_key")
+	s.noteSessionLoss(cc, clawID, "replacement-key", "session_rotated")
+	var n int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND role='hub' AND (content LIKE ? OR content LIKE ?)`, clawID, restartResumePrefix+"%", sessionRotatedResumePrefix+"%").Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("resume count for one incident reported three ways = %d, want 1", n)
+	}
+}
+
+func TestSessionLossDifferentKeysAndMissingKeysDoNotDeduplicate(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{ClawToken: "claw-token"}, "", "", "")
+	const clawID = "watchdog-session-loss-distinct"
+	_ = watchdogClaw(t, s, clawID)
+	cc := watchdogClawConn(t, s, clawID)
+	if _, err := db.Exec(`UPDATE claws SET status='connected', bootstrap_ok=1 WHERE id=?`, clawID); err != nil {
+		t.Fatal(err)
+	}
+	cc.mu.Lock()
+	cc.streamingStartedAt = time.Now()
+	cc.mu.Unlock()
+	count := func() int {
+		var n int
+		_ = db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND role='hub' AND content LIKE ?`, clawID, restartResumePrefix+"%").Scan(&n)
+		return n
+	}
+	s.noteSessionLoss(cc, clawID, "replacement-one", "restart_count")
+	s.noteSessionLoss(cc, clawID, "replacement-two", "restart_count")
+	if got := count(); got != 2 {
+		t.Fatalf("resume count for two replacement keys = %d, want 2", got)
+	}
+	// Old bridges omit the key. Preserve the pre-key behavior: each report is
+	// an independent incident rather than being collapsed by an empty key.
+	s.noteSessionLoss(cc, clawID, "", "restart_count")
+	s.noteSessionLoss(cc, clawID, "", "restart_count")
+	if got := count(); got != 4 {
+		t.Fatalf("resume count after two keyless reports = %d, want 4", got)
+	}
+}
+
+func TestIdleSessionLossNoticePrefixesNextMessageAndKeepsFirstNotice(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{ClawToken: "claw-token"}, "", "", "")
+	const clawID = "watchdog-idle-session-loss-notice"
+	conn := watchdogClaw(t, s, clawID)
+	cc := watchdogClawConn(t, s, clawID)
+	if _, err := db.Exec(`UPDATE claws SET status='connected', bootstrap_ok=1 WHERE id=?`, clawID); err != nil {
+		t.Fatal(err)
+	}
+	cc.mu.Lock()
+	cc.streamingStartedAt = time.Time{}
+	cc.awaitingResponse = false
+	cc.lastTurnFinishedAt = now().Add(-autoResumeRecentTurnWindow - time.Second)
+	cc.mu.Unlock()
+	s.noteSessionLoss(cc, clawID, "idle-one", "gateway_session_key")
+	s.noteSessionLoss(cc, clawID, "idle-two", "restart_count")
+	var notice string
+	if err := db.QueryRow(`SELECT pending_session_loss_notice FROM claws WHERE id=?`, clawID).Scan(&notice); err != nil {
+		t.Fatal(err)
+	}
+	if notice != sessionLossPendingNotice {
+		t.Fatalf("pending notice = %q, want first session-loss notice", notice)
+	}
+	var resumes int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND role='hub' AND content LIKE ?`, clawID, restartResumePrefix+"%").Scan(&resumes); err != nil || resumes != 0 {
+		t.Fatalf("idle resume rows=%d err=%v, want 0", resumes, err)
+	}
+	if _, err := db.Exec(`INSERT INTO messages(id,claw_id,tenant_id,role,content,created_at) VALUES(?,?,?,?,?,?)`, uuid.NewString(), clawID, "test-tenant-id", "user", "continue the task", now()); err != nil {
+		t.Fatal(err)
+	}
+	s.sendNextQueuedMessage(cc)
+	readCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	// The connection may carry unrelated async frames (e.g. a checkpoint_create
+	// request) ahead of the queued message; skip those, matching the pattern
+	// used elsewhere in this file.
+	var delivered types.WSMessage
+	for {
+		if err := wsjson.Read(readCtx, conn, &delivered); err != nil {
+			t.Fatal(err)
+		}
+		if delivered.Type == "message" {
+			break
+		}
+	}
+	payload, err := json.Marshal(delivered.Payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var message types.HubMessage
+	if err := json.Unmarshal(payload, &message); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := message.Content, sessionLossPendingNotice+"continue the task"; got != want {
+		t.Fatalf("delivered content = %q, want %q", got, want)
+	}
+	if err := db.QueryRow(`SELECT pending_session_loss_notice FROM claws WHERE id=?`, clawID).Scan(&notice); err != nil {
+		t.Fatal(err)
+	}
+	if notice != "" {
+		t.Fatalf("pending notice after delivery = %q, want empty", notice)
+	}
+}
+
+// A session lost while the claw was idle never reaches enqueueSessionLostResume
+// — noteSessionLoss parks a notice instead, so as not to wake an idle claw —
+// and the amnesiac session only learns about itself when that notice rides the
+// next real prompt. That delivery is therefore the only place its idle
+// auto-resume budget can be re-armed; without it the new session starts on the
+// predecessor's spent count and has no idle recovery of its own.
+func TestIdleSessionLossNoticeDeliveryRearmsIdleResumeBudget(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{ClawToken: "claw-token"}, "", "", "")
+	const clawID = "watchdog-idle-session-loss-budget"
+	conn := watchdogClaw(t, s, clawID)
+	cc := watchdogClawConn(t, s, clawID)
+	const latch = int64(1_700_000_000_000)
+	if _, err := db.Exec(`UPDATE claws SET status='connected', bootstrap_ok=1, pipeline_stage='review_loop', idle_resume_at=?, idle_resume_count=? WHERE id=?`,
+		latch, agentIdleResumeMaxAttempts, clawID); err != nil {
+		t.Fatal(err)
+	}
+	cc.mu.Lock()
+	cc.streamingStartedAt = time.Time{}
+	cc.awaitingResponse = false
+	cc.lastTurnFinishedAt = now().Add(-autoResumeRecentTurnWindow - time.Second)
+	cc.mu.Unlock()
+
+	s.noteSessionLoss(cc, clawID, "idle-budget-one", "restart_count")
+
+	// The parking branch itself must not re-arm: no prompt went out, and the
+	// idle-claw policy says nothing wakes it here.
+	if at, count := clawIdleResumeState(t, db, clawID); count != agentIdleResumeMaxAttempts || at != latch {
+		t.Fatalf("parking the notice changed idle_resume state: at=%d count=%d, want %d/%d", at, count, latch, agentIdleResumeMaxAttempts)
+	}
+
+	if _, err := db.Exec(`INSERT INTO messages(id,claw_id,tenant_id,role,content,created_at) VALUES(?,?,?,?,?,?)`,
+		uuid.NewString(), clawID, "test-tenant-id", "user", "continue the task", now()); err != nil {
+		t.Fatal(err)
+	}
+	s.sendNextQueuedMessage(cc)
+	readCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	var delivered types.WSMessage
+	for {
+		if err := wsjson.Read(readCtx, conn, &delivered); err != nil {
+			t.Fatal(err)
+		}
+		if delivered.Type == "message" {
+			break
+		}
+	}
+
+	at, count := clawIdleResumeState(t, db, clawID)
+	if count != 0 {
+		t.Fatalf("notice delivery left idle_resume_count=%d, want 0", count)
+	}
+	// The latch stays. This path keeps the same connection, so there is no dead
+	// session's anchor to collide with — and the message carrying the notice is
+	// often the idle auto-resume prompt itself, so clearing the latch here would
+	// refund that attempt and let the next tick poke the same stretch again.
+	if at != latch {
+		t.Fatalf("notice delivery moved idle_resume_at to %d, want %d", at, latch)
+	}
+}
+
+func TestSessionPreservedEnqueuesContinuationAndResetsBridgeErrorStreak(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{ClawToken: "claw-token"}, "", "", "")
+	const clawID = "watchdog-session-preserved"
+	conn := watchdogClaw(t, s, clawID)
+	cc := watchdogClawConn(t, s, clawID)
+	if _, err := db.Exec(`UPDATE claws SET status='connected', bootstrap_ok=1 WHERE id=?`, clawID); err != nil {
+		t.Fatal(err)
+	}
+	cc.mu.Lock()
+	cc.bridgeErrorStreak = 1
+	cc.mu.Unlock()
+	if err := wsjson.Write(context.Background(), conn, types.WSMessage{Type: "session_preserved"}); err != nil {
+		t.Fatalf("write session_preserved: %v", err)
+	}
+	eventuallyWatchdog(t, func() bool {
+		var n int
+		_ = db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND role='hub' AND content LIKE ?`, clawID, sessionPreservedContinuationPrefix+"%").Scan(&n)
+		return n == 1
+	}, "session preserved continuation")
+	cc.mu.RLock()
+	defer cc.mu.RUnlock()
+	if cc.bridgeErrorStreak != 0 {
+		t.Fatalf("bridge error streak = %d, want 0 after session_preserved", cc.bridgeErrorStreak)
+	}
+}
+
 func TestSessionRotatedResumeThrottled(t *testing.T) {
 	s, db := NewTestServerWithConfig(t, &types.HubConfig{ClawToken: "claw-token"}, "", "", "")
 	const clawID = "watchdog-session-rotated-throttled"
 	conn := watchdogClaw(t, s, clawID)
-	_ = watchdogClawConn(t, s, clawID)
+	cc := watchdogClawConn(t, s, clawID)
 	if _, err := db.Exec(`UPDATE claws SET status='connected', bootstrap_ok=1, issue_title='Fix session' WHERE id=?`, clawID); err != nil {
 		t.Fatal(err)
 	}
+	cc.mu.Lock()
+	cc.streamingStartedAt = time.Now()
+	cc.mu.Unlock()
 	// A resume prompt already went out moments ago — a second rotation inside
 	// the throttle window must not enqueue another one.
 	if _, err := db.Exec(`INSERT INTO messages(id,claw_id,tenant_id,role,content,created_at) VALUES(?,?,?,?,?,?)`,
@@ -555,10 +898,13 @@ func TestSessionRotatedResumeThrottleWindowExpires(t *testing.T) {
 	s, db := NewTestServerWithConfig(t, &types.HubConfig{ClawToken: "claw-token"}, "", "", "")
 	const clawID = "watchdog-session-rotated-throttle-expired"
 	conn := watchdogClaw(t, s, clawID)
-	_ = watchdogClawConn(t, s, clawID)
+	cc := watchdogClawConn(t, s, clawID)
 	if _, err := db.Exec(`UPDATE claws SET status='connected', bootstrap_ok=1, issue_title='Fix session' WHERE id=?`, clawID); err != nil {
 		t.Fatal(err)
 	}
+	cc.mu.Lock()
+	cc.streamingStartedAt = time.Now()
+	cc.mu.Unlock()
 	// The previous resume is older than the throttle window, so a new
 	// rotation must enqueue a fresh resume prompt.
 	if _, err := db.Exec(`INSERT INTO messages(id,claw_id,tenant_id,role,content,created_at) VALUES(?,?,?,?,?,?)`,

@@ -30,11 +30,12 @@ const ROLE_ORDER: Record<Message["role"], number> = {
   activity: 3,
   activity_summary: 4,
   system: 5,
+  state: 6,
 }
 
 function conversationMessages(messages: Message[]): Message[] {
-  // Cursor pagination is keyed off real conversation rows, not activity chrome.
-  return messages.filter((message) => message.role !== "activity" && message.role !== "activity_summary")
+  // Cursor pagination is keyed off real conversation rows, not activity/state chrome.
+  return messages.filter((message) => message.role !== "activity" && message.role !== "activity_summary" && message.role !== "state")
 }
 
 function oldestConversationCursor(messages: Message[]): string | null {

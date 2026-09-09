@@ -16,6 +16,7 @@ type StepKey = typeof STEPS[number]["key"]
 
 function activeStep(status?: string): StepKey {
   const value = (status || "").toLowerCase()
+  if (value.includes("restoring checkpoint")) return "workspace"
   if (value.includes("connecting to hub") || value.includes("starting elasticclaw connector")) return "connect"
   if (value.includes("repo") || value.includes("workspace") || value.includes("sync")) return "workspace"
   if (value.includes("configuring openclaw") || value.includes("gateway")) return "openclaw"
@@ -33,6 +34,7 @@ function friendlyDetail(status?: string): string {
     case "openclaw":
       return "Starting OpenClaw"
     case "workspace":
+      if (value.toLowerCase().includes("restoring checkpoint")) return value
       if (value.toLowerCase().includes("sync")) return "Syncing repositories"
       if (value.toLowerCase().includes("access")) return "Preparing repository access"
       return "Preparing workspace"
