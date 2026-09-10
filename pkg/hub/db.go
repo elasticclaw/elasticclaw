@@ -2,8 +2,10 @@ package hub
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"log"
+	"os"
 	"strings"
 	"time"
 	"unicode"
@@ -1132,6 +1134,9 @@ func migrate(db *sql.DB) error {
 	if err := backfillTaskRunStagesV1(db); err != nil {
 		return err
 	}
+	if err := backfillCheckpointTelemetryV1(db); err != nil {
+		return err
+	}
 	if err := rebuildTaskRunSummariesTicketPageV3(db); err != nil {
 		return err
 	}
@@ -1995,3 +2000,132 @@ func pruneFactoryAnalytics(db *sql.DB) {
 }
 
 func now() time.Time { return time.Now().UTC() }
+
+// backfillCheckpointTelemetryV1 fills the checkpoint telemetry columns for rows
+// written before those columns existed.
+//
+// Those five values used to live only inside the manifest JSON. Retention now
+// deletes manifests — that is the whole point of compaction — so any row still
+// carrying them only in the manifest is one sweep away from losing its
+// analytics record permanently. Lifting them into columns first is what makes
+// compaction safe.
+//
+// Idempotency is enforced by the WHERE clause rather than by a hub_migrations
+// marker on purpose: a row restored from a backup, or one whose manifest only
+// becomes readable later, must still be picked up by a later boot. Once every
+// row is filled the query matches nothing and the pass costs one scan.
+//
+// A missing or unparseable manifest is counted and skipped, never fatal: those
+// rows are exactly the pre-existing damage this backfill exists to bound, and
+// failing here would make the hub unbootable over a file nobody can restore.
+func backfillCheckpointTelemetryV1(db *sql.DB) error {
+	rows, err := db.Query(`SELECT id, manifest_path, message_count FROM claw_checkpoints
+		 WHERE status = 'ready'
+		   AND COALESCE(manifest_path,'') <> ''
+		   AND COALESCE(pipeline_stage,'') = ''
+		   AND COALESCE(hub_version,'') = ''
+		   AND COALESCE(files_count,0) = 0
+		   AND COALESCE(files_bytes,0) = 0`)
+	if err != nil {
+		// The table may not exist yet on a database this old; nothing to fill.
+		return nil
+	}
+	type candidate struct {
+		id           string
+		manifestPath string
+		messageCount int64
+	}
+	var candidates []candidate
+	for rows.Next() {
+		var c candidate
+		if err := rows.Scan(&c.id, &c.manifestPath, &c.messageCount); err != nil {
+			rows.Close()
+			return fmt.Errorf("scan checkpoint telemetry backfill: %w", err)
+		}
+		candidates = append(candidates, c)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("list checkpoint telemetry backfill: %w", err)
+	}
+	if len(candidates) == 0 {
+		return nil
+	}
+
+	filled, missing := 0, 0
+	for _, c := range candidates {
+		data, err := os.ReadFile(c.manifestPath)
+		if err != nil {
+			missing++
+			continue
+		}
+		telemetry, err := parseCheckpointManifestTelemetry(data)
+		if err != nil {
+			missing++
+			continue
+		}
+		messageCount := c.messageCount
+		if messageCount == 0 {
+			messageCount = int64(telemetry.messageCount)
+		}
+		if _, err := db.Exec(`UPDATE claw_checkpoints
+			SET pipeline_stage=?, hub_version=?, message_count=?, files_count=?, files_bytes=?
+			WHERE id=?`,
+			telemetry.pipelineStage, telemetry.hubVersion, messageCount,
+			telemetry.filesCount, telemetry.filesBytes, c.id); err != nil {
+			return fmt.Errorf("apply checkpoint telemetry backfill: %w", err)
+		}
+		filled++
+	}
+	log.Printf("[migrate] checkpoint telemetry backfill: filled %d rows, %d manifests missing or unreadable", filled, missing)
+	return nil
+}
+
+type checkpointManifestTelemetry struct {
+	pipelineStage string
+	hubVersion    string
+	messageCount  int
+	filesCount    int
+	filesBytes    int64
+}
+
+// parseCheckpointManifestTelemetry reads the telemetry out of either manifest
+// schema. Schema 1 inlined the whole file list, so the aggregates have to be
+// computed from it; schema 2 replaced the list with the aggregates themselves.
+// Both shapes are decoded from the same document rather than branching on the
+// declared schema number, because a manifest written during the transition can
+// legitimately carry either set of fields.
+func parseCheckpointManifestTelemetry(data []byte) (checkpointManifestTelemetry, error) {
+	var doc struct {
+		Hub struct {
+			Version       string `json:"version"`
+			PipelineStage string `json:"pipeline_stage"`
+		} `json:"hub"`
+		Messages struct {
+			Count int `json:"count"`
+		} `json:"messages"`
+		FilesCount int   `json:"files_count"`
+		FilesBytes int64 `json:"files_bytes"`
+		Files      []struct {
+			Size int64 `json:"size"`
+		} `json:"files"`
+	}
+	if err := json.Unmarshal(data, &doc); err != nil {
+		return checkpointManifestTelemetry{}, err
+	}
+	out := checkpointManifestTelemetry{
+		pipelineStage: doc.Hub.PipelineStage,
+		hubVersion:    doc.Hub.Version,
+		messageCount:  doc.Messages.Count,
+		filesCount:    doc.FilesCount,
+		filesBytes:    doc.FilesBytes,
+	}
+	if len(doc.Files) > 0 {
+		out.filesCount = len(doc.Files)
+		out.filesBytes = 0
+		for _, f := range doc.Files {
+			out.filesBytes += f.Size
+		}
+	}
+	return out, nil
+}
