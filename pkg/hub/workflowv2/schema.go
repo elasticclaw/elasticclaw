@@ -43,7 +43,6 @@ func Migrate(db *sql.DB) error {
 	CREATE INDEX IF NOT EXISTS idx_workflow_v2_runs_tenant_updated ON workflow_v2_runs(tenant_id, updated_at DESC, id);
 	CREATE INDEX IF NOT EXISTS idx_workflow_v2_runs_workflow ON workflow_v2_runs(tenant_id, workspace_name, workflow_name, updated_at DESC);
 	CREATE INDEX IF NOT EXISTS idx_workflow_v2_runs_status ON workflow_v2_runs(tenant_id, status, updated_at DESC);
-	CREATE INDEX IF NOT EXISTS idx_workflow_v2_runs_timeout ON workflow_v2_runs(status, timeout_at, created_at);
 
 	CREATE TABLE IF NOT EXISTS workflow_v2_attempts (
 		id          TEXT PRIMARY KEY,
@@ -304,6 +303,9 @@ func Migrate(db *sql.DB) error {
 		return fmt.Errorf("workflow v2 migrate: %w", err)
 	}
 	if err := addColumnIfMissing(db, "workflow_v2_runs", "timeout_at", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return fmt.Errorf("workflow v2 migrate: %w", err)
+	}
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_workflow_v2_runs_timeout ON workflow_v2_runs(status, timeout_at, created_at)`); err != nil {
 		return fmt.Errorf("workflow v2 migrate: %w", err)
 	}
 	if err := addColumnIfMissing(db, "workflow_v2_runs", "cron_slot_released", "INTEGER NOT NULL DEFAULT 0"); err != nil {
