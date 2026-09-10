@@ -3,6 +3,7 @@ package hub
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"log"
 	"strings"
 	"time"
@@ -28,6 +29,10 @@ func (s *Server) maybeFinishWorkflowV2Parent(ctx context.Context, runID string) 
 	if run.Status != workflowv2.RunCompleted && run.Status != workflowv2.RunCancelled {
 		return
 	}
+	if s.cronSchedulerV2 != nil && run.TriggerType == "cron" {
+		s.cronSchedulerV2.finishRunByV2RunID(run.ID, run.Status)
+	}
+	s.releaseWorkflowV2CronSlot(ctx, run.ID)
 	if strings.TrimSpace(run.TaskRunID) == "" {
 		// No parent task run; nothing to finish.
 		return
@@ -93,4 +98,65 @@ func (s *Server) maybeFinishWorkflowV2Parent(ctx context.Context, runID string) 
 		delete(s.claws, clawID)
 	}
 	s.mu.Unlock()
+}
+
+// releaseWorkflowV2CronSlot releases the in-memory overlap slot for a terminal
+// v2 cron run exactly once. It does not update the cron history row; callers
+// that need to record a failure reason should finish that row separately. The
+// release is idempotent via cron_slot_released.
+func (s *Server) releaseWorkflowV2CronSlot(ctx context.Context, runID string) {
+	if s == nil || s.db == nil || s.cronSchedulerV2 == nil || runID == "" {
+		return
+	}
+	// Load and validate the run before consuming the idempotency marker. If the
+	// read fails, a retry can still finish the release because the marker has not
+	// been flipped.
+	run, err := workflowv2.NewStore(s.db).GetRun(ctx, runID)
+	if err != nil {
+		log.Printf("[workflow-v2] cannot load run %s for slot release: %v", runID, err)
+		return
+	}
+	if run.TriggerType != "cron" {
+		return
+	}
+	if run.Status != workflowv2.RunCompleted && run.Status != workflowv2.RunCancelled {
+		return
+	}
+	res, err := s.db.ExecContext(ctx, `UPDATE workflow_v2_runs SET cron_slot_released=1 WHERE id=? AND cron_slot_released=0`, runID)
+	if err != nil {
+		log.Printf("[workflow-v2] failed to mark cron slot released for run %s: %v", runID, err)
+		return
+	}
+	if changed, _ := res.RowsAffected(); changed != 1 {
+		return
+	}
+	s.cronSchedulerV2.decrementRunning(run.WorkspaceName + "/" + run.WorkflowName)
+}
+
+// cancelWorkflowV2RunForClaw cancels the active/suspended workflow v2 run bound
+// to the given claw, including all child effects/tasks so nothing remains
+// assigned to the dead claw. It is used when a claw fails before the v2 run
+// can reach a terminal state on its own (e.g. provisioning failed).
+func (s *Server) cancelWorkflowV2RunForClaw(ctx context.Context, clawID, reason string) {
+	if s == nil || s.db == nil {
+		return
+	}
+	var runID string
+	err := s.db.QueryRowContext(ctx, `
+		SELECT a.run_id FROM workflow_v2_attempts a
+		JOIN workflow_v2_runs r ON r.id=a.run_id
+		WHERE a.claw_id=? AND a.status='active' AND r.status IN ('active','suspended')
+		LIMIT 1`, clawID).Scan(&runID)
+	if err != nil {
+		if !errors.Is(err, sql.ErrNoRows) {
+			log.Printf("[workflow-v2] failed to find active run for claw %s: %v", clawID[:8], err)
+		}
+		return
+	}
+	if err := workflowv2.NewStore(s.db).CancelActivation(ctx, runID, reason); err != nil {
+		log.Printf("[workflow-v2] failed to cancel run %s for claw %s: %v", runID[:8], clawID[:8], err)
+		return
+	}
+	log.Printf("[workflow-v2] cancelled run %s because claw %s %s", runID[:8], clawID[:8], reason)
+	s.maybeFinishWorkflowV2Parent(ctx, runID)
 }

@@ -75,6 +75,7 @@ func (s *Server) triggerWorkflowV2Config(w http.ResponseWriter, r *http.Request,
 				ID: runID, TenantID: tenantID, InitialClawID: clawID, TaskRunID: taskRunID,
 				WorkspaceYAML: workspaceYAML, WorkflowYAML: workflowYAML, ActivationPending: true,
 				TriggerType: "manual",
+				Timeout:     workflowV2RunTimeout(workflow.RawConfig),
 			})
 			if err != nil {
 				return err
@@ -91,6 +92,10 @@ func (s *Server) triggerWorkflowV2Config(w http.ResponseWriter, r *http.Request,
 			if cleanupErr := store.CancelActivation(cleanupCtx, run.ID, err.Error()); cleanupErr != nil {
 				return errors.Join(err, fmt.Errorf("cancel failed workflow v2 activation: %w", cleanupErr))
 			}
+			// Release the cron overlap slot immediately for cron-triggered runs. The
+			// terminal cleanup hook will not run because cancelWorkflowV2RunForClaw
+			// only looks for active/suspended runs.
+			s.releaseWorkflowV2CronSlot(cleanupCtx, run.ID)
 			return err
 		},
 	})

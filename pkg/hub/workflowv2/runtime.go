@@ -78,6 +78,9 @@ type CreateRunRequest struct {
 	// TaskRunID links the v2 run to its parent v1 task run so the hub can
 	// finish the parent and disconnect the claw when the v2 run terminates.
 	TaskRunID string
+	// Timeout bounds how long a run may stay active/suspended before the hub
+	// reaper cancels it. Zero disables the run-level timeout.
+	Timeout time.Duration
 }
 
 type EventInput struct {
@@ -157,6 +160,10 @@ func (s *Store) CreateRun(ctx context.Context, req CreateRunRequest) (Run, error
 	status := RunActive
 	waitingReason := ""
 	finishedAt := int64(0)
+	timeoutAt := int64(0)
+	if req.Timeout > 0 {
+		timeoutAt = now.Add(req.Timeout).UnixMilli()
+	}
 	triggerType := strings.TrimSpace(req.TriggerType)
 	if triggerType == "" {
 		triggerType = "manual"
@@ -183,11 +190,11 @@ func (s *Store) CreateRun(ctx context.Context, req CreateRunRequest) (Run, error
 	}
 	_, err = tx.ExecContext(ctx, `INSERT INTO workflow_v2_runs(
 		id,tenant_id,workspace_name,workflow_name,workspace_revision,workflow_revision,
-		workspace_yaml,workflow_yaml,state,display_phase,state_version,status,waiting_reason,current_attempt_id,task_run_id,trigger_type,created_at,updated_at,finished_at
-	) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		workspace_yaml,workflow_yaml,state,display_phase,state_version,status,waiting_reason,current_attempt_id,task_run_id,trigger_type,timeout_at,created_at,updated_at,finished_at
+	) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		runID, req.TenantID, rws.Workspace.Name, rwf.Workflow.Name, string(rws.Revision), string(rwf.Revision),
 		string(req.WorkspaceYAML), string(req.WorkflowYAML), rwf.Workflow.InitialState, string(initial.Phase), 1, string(status), waitingReason, currentAttemptID,
-		strings.TrimSpace(req.TaskRunID), triggerType,
+		strings.TrimSpace(req.TaskRunID), triggerType, timeoutAt,
 		now.UnixMilli(), now.UnixMilli(), finishedAt)
 	if err != nil {
 		return Run{}, fmt.Errorf("create workflow v2 run: %w", err)

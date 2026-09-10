@@ -1,0 +1,57 @@
+# Example workflow v2 triggered on a cron schedule.
+# This requires a v2 workspace (elasticclaw-config.yaml) with an execution
+# provider that supports the `execute_command` capability, e.g. daytona or docker.
+
+schema_version: 2
+name: nightly-check
+enabled: true
+
+initial_state: run
+
+# Run at 09:00 every Monday, America/Chicago time. If a previous run is still
+# active, skip the new tick and record a skipped run, matching v1 cron behavior.
+# This workflow is also manually triggerable via the cron trigger endpoint without
+# needing `manual_trigger: true`.
+trigger:
+  cron:
+    schedule: "0 9 * * 1"
+    timezone: "America/Chicago"
+    overlap_policy: skip
+
+states:
+  run:
+    description: Run the nightly maintenance check.
+    phase: build
+    on_enter:
+      effects:
+        - exec.run:
+            command: "make nightly-check"
+            timeout: "10m"
+
+  done:
+    description: Nightly check finished.
+    phase: done
+    terminal: true
+
+transitions:
+  check_succeeded:
+    from: run
+    on: exec.run.completed
+    when:
+      exec.last_run.succeeded:
+        equals: true
+    to: done
+
+  check_failed:
+    from: run
+    on: exec.run.completed
+    when:
+      exec.last_run.succeeded:
+        equals: false
+    to: done
+
+commands:
+  cancel:
+    from: run
+    to: done
+    require_reason: true

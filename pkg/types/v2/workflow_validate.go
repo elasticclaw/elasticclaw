@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"fmt"
 	"strings"
+	"time"
 
+	"github.com/robfig/cron/v3"
 	"gopkg.in/yaml.v3"
 )
 
@@ -38,6 +40,7 @@ var knownWorkflowKeys = map[string]bool{
 	"review":          true,
 	"delivery":        true,
 	"events":          true,
+	"trigger":         true,
 }
 
 // ParseWorkflow unmarshals workflow v2 YAML. It does not validate.
@@ -251,6 +254,9 @@ func ValidateWorkflow(wf *Workflow) (*ResolvedWorkflow, error) {
 			}
 		}
 	}
+	if err := validateTrigger(wf); err != nil {
+		return nil, fmt.Errorf("workflow %q: %w", wf.Name, err)
+	}
 	if err := validateDelivery(wf); err != nil {
 		return nil, fmt.Errorf("workflow %q: %w", wf.Name, err)
 	}
@@ -366,6 +372,41 @@ func validateEvidencePolicyNode(path string, node interface{}, mode string, root
 		return fmt.Errorf("%s.approvals.minimum must be a non-negative integer", path)
 	}
 	return nil
+}
+
+func validateTrigger(wf *Workflow) error {
+	if wf == nil || wf.Trigger == nil {
+		return nil
+	}
+	if wf.Trigger.Cron == nil {
+		return fmt.Errorf("trigger: only cron is supported")
+	}
+	ct := wf.Trigger.Cron
+	if strings.TrimSpace(ct.Schedule) == "" {
+		return fmt.Errorf("trigger.cron.schedule is required")
+	}
+	if _, err := parseCronSchedule(ct.Schedule); err != nil {
+		return fmt.Errorf("trigger.cron.schedule %q is invalid: %w", ct.Schedule, err)
+	}
+	if ct.OverlapPolicy != "" && ct.OverlapPolicy != "skip" && ct.OverlapPolicy != "parallel" {
+		return fmt.Errorf("trigger.cron.overlap_policy %q is invalid (must be skip or parallel)", ct.OverlapPolicy)
+	}
+	if ct.Timezone != "" {
+		if _, err := time.LoadLocation(ct.Timezone); err != nil {
+			return fmt.Errorf("trigger.cron.timezone %q is invalid: %w", ct.Timezone, err)
+		}
+	}
+	if ct.Timeout != "" {
+		if _, err := time.ParseDuration(ct.Timeout); err != nil {
+			return fmt.Errorf("trigger.cron.timeout %q is invalid: %w", ct.Timeout, err)
+		}
+	}
+	return nil
+}
+
+func parseCronSchedule(schedule string) (cron.Schedule, error) {
+	parser := cron.NewParser(cron.SecondOptional | cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow | cron.Descriptor)
+	return parser.Parse(schedule)
 }
 
 func evidencePolicyMap(value interface{}) (map[string]interface{}, bool) {

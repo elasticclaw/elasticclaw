@@ -129,9 +129,6 @@ func convertWorkflowV1ToV2(data []byte, opts Options) (Result, error) {
 	if wf.Integration != "" {
 		appendWarning(&warnings, "integration %q: v2 workflows are event/state driven; re-bind trigger sources via workspace connections and runtime adapters (not embedded as v1 integration)", wf.Integration)
 	}
-	if wf.Trigger != nil {
-		appendWarning(&warnings, "trigger: v1 trigger block not copied into v2 — configure run creation / issue association outside the v2 state machine (hub trigger adapters)")
-	}
 	if len(wf.Inputs) > 0 {
 		appendWarning(&warnings, "inputs: %d v1 input(s) not represented in workflow v2 schema yet; preserve separately if still needed for manual trigger UX", len(wf.Inputs))
 	}
@@ -151,6 +148,24 @@ func convertWorkflowV1ToV2(data []byte, opts Options) (Result, error) {
 	}
 	if len(transitions) > 0 {
 		out.Transitions = transitions
+	}
+	if wf.Trigger != nil && wf.Trigger.Cron != nil {
+		ct := wf.Trigger.Cron
+		overlapPolicy := ct.OverlapPolicy
+		if strings.EqualFold(overlapPolicy, "queue") {
+			overlapPolicy = "skip"
+			appendWarning(&warnings, "trigger.cron.overlap_policy %q is not supported in workflow v2; converted to %q", ct.OverlapPolicy, overlapPolicy)
+		}
+		out.Trigger = &v2.WorkflowTrigger{
+			Cron: &v2.CronTrigger{
+				Schedule:      ct.Schedule,
+				Timezone:      ct.Timezone,
+				OverlapPolicy: overlapPolicy,
+				Timeout:       ct.Timeout,
+			},
+		}
+	} else if wf.Trigger != nil {
+		appendWarning(&warnings, "trigger: only v1 trigger.cron is copied into v2; other trigger kinds are not represented in workflow v2 schema yet")
 	}
 
 	// Validate structurally; pair-validate when workspace YAML provided.

@@ -4,10 +4,13 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/elasticclaw/elasticclaw/pkg/hub/workflowv2"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
+	v2types "github.com/elasticclaw/elasticclaw/pkg/types/v2"
 	"github.com/robfig/cron/v3"
 )
 
@@ -322,6 +325,376 @@ func mustLoadLocation(name string) *time.Location {
 		panic(err)
 	}
 	return loc
+}
+
+const cronWorkspaceV2YAML = `
+schema_version: 2
+name: engineering
+execution:
+  provider: noop
+`
+
+const cronWorkflowV2YAML = `
+schema_version: 2
+name: delivery
+enabled: true
+initial_state: s
+states:
+  s:
+    phase: build
+  done:
+    phase: done
+    terminal: true
+trigger:
+  cron:
+    schedule: "0 9 * * *"
+`
+
+const cronWorkflowV2SkipYAML = `
+schema_version: 2
+name: delivery
+enabled: true
+initial_state: s
+states:
+  s:
+    phase: build
+  done:
+    phase: done
+    terminal: true
+trigger:
+  cron:
+    schedule: "0 9 * * *"
+    overlap_policy: skip
+`
+
+const cronWorkflowV2ActivationFailureYAML = `
+schema_version: 2
+name: delivery
+enabled: true
+initial_state: start
+states:
+  start:
+    phase: build
+  bad:
+    phase: build
+    invariant:
+      impossible:
+        equals: true
+trigger:
+  cron:
+    schedule: "0 9 * * *"
+transitions:
+  ready:
+    from: [start]
+    on: context.bundle.ready
+    to: bad
+`
+
+func TestCronSchedulerV2StartLoadsWorkflow(t *testing.T) {
+	configDir := t.TempDir()
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", configDir+"/hub.yaml")
+	s, _ := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
+
+	SaveWorkspaceForTest(t, &types.WorkspaceConfig{
+		Name: "engineering",
+		Files: map[string]string{
+			"elasticclaw-config.yaml": cronWorkspaceV2YAML,
+		},
+	}, []*types.WorkflowConfig{{Name: "delivery", RawConfig: cronWorkflowV2YAML}})
+
+	s.cronSchedulerV2 = newCronSchedulerV2(s)
+	s.cronSchedulerV2.cron = cron.New(cron.WithSeconds())
+	if err := s.cronSchedulerV2.reloadWorkflows(); err != nil {
+		t.Fatalf("reload v2 workflows: %v", err)
+	}
+
+	next := s.cronSchedulerV2.getNextRuns()
+	if _, ok := next["engineering/delivery"]; !ok {
+		t.Fatalf("expected engineering/delivery scheduled, got %v", next)
+	}
+}
+
+func TestCronSchedulerV2ManualTriggerAndHistory(t *testing.T) {
+	configDir := t.TempDir()
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", configDir+"/hub.yaml")
+	t.Setenv("ELASTICCLAW_NOOP_PROVIDER", "1")
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{
+		Token: "test-token", ClawToken: "claw-token",
+		Providers: map[string]types.ProviderConfig{"noop": {Type: "noop"}},
+	}, "", "", "")
+
+	SaveWorkspaceForTest(t, &types.WorkspaceConfig{
+		Name: "engineering",
+		Files: map[string]string{
+			"elasticclaw-config.yaml": cronWorkspaceV2YAML,
+		},
+	}, []*types.WorkflowConfig{{Name: "delivery", RawConfig: cronWorkflowV2YAML}})
+
+	s.cronSchedulerV2 = newCronSchedulerV2(s)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/workspaces/engineering/workflows/delivery/cron/trigger", nil)
+	req.Header.Set("Authorization", "Bearer test-token")
+	rr := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("trigger status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+
+	var triggered map[string]string
+	if err := json.Unmarshal(rr.Body.Bytes(), &triggered); err != nil {
+		t.Fatalf("decode trigger: %v", err)
+	}
+	if triggered["workflow"] != "engineering/delivery" {
+		t.Fatalf("unexpected trigger response: %#v", triggered)
+	}
+
+	var cronStatus, v2RunID string
+	if err := db.QueryRow(`SELECT status, v2_run_id FROM workflow_v2_cron_runs WHERE workspace_name=? AND workflow_name=?`,
+		"engineering", "delivery").Scan(&cronStatus, &v2RunID); err != nil {
+		t.Fatalf("lookup cron history: %v", err)
+	}
+	if cronStatus != "running" {
+		t.Fatalf("cron history status = %q, want running", cronStatus)
+	}
+	if v2RunID == "" {
+		t.Fatalf("cron history missing v2_run_id")
+	}
+	var v2Count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM workflow_v2_runs WHERE id=?`, v2RunID).Scan(&v2Count); err != nil {
+		t.Fatalf("lookup v2 run: %v", err)
+	}
+	if v2Count != 1 {
+		t.Fatalf("expected one v2 run, got %d", v2Count)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/workspaces/engineering/workflows/delivery/cron/runs", nil)
+	req.Header.Set("Authorization", "Bearer test-token")
+	rr = httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("runs status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+	var history struct {
+		Runs  []types.WorkflowRun `json:"runs"`
+		Count int                 `json:"count"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &history); err != nil {
+		t.Fatalf("decode history: %v", err)
+	}
+	if history.Count != 1 || len(history.Runs) != 1 || history.Runs[0].ID == "" {
+		t.Fatalf("unexpected history: %#v", history)
+	}
+}
+
+func TestCronSchedulerV2SkipOverlap(t *testing.T) {
+	configDir := t.TempDir()
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", configDir+"/hub.yaml")
+	t.Setenv("ELASTICCLAW_NOOP_PROVIDER", "1")
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{
+		Token: "test-token", ClawToken: "claw-token",
+		Providers: map[string]types.ProviderConfig{"noop": {Type: "noop"}},
+	}, "", "", "")
+
+	SaveWorkspaceForTest(t, &types.WorkspaceConfig{
+		Name: "engineering",
+		Files: map[string]string{
+			"elasticclaw-config.yaml": cronWorkspaceV2YAML,
+		},
+	}, []*types.WorkflowConfig{{Name: "delivery", RawConfig: cronWorkflowV2SkipYAML}})
+
+	s.cronSchedulerV2 = newCronSchedulerV2(s)
+
+	// Seed an active v2 run for the same workflow so the next manual tick is skipped.
+	now := time.Now().UTC()
+	v2RunID := "run-active"
+	if _, err := db.Exec(`INSERT INTO workflow_v2_runs(
+			id,tenant_id,workspace_name,workflow_name,workspace_revision,workflow_revision,
+			workspace_yaml,workflow_yaml,state,display_phase,state_version,status,
+			waiting_reason,current_attempt_id,current_task_id,context_bundle_id,trigger_type,task_run_id,
+			created_at,updated_at,finished_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		v2RunID, "test-tenant-id", "engineering", "delivery", "rev-1", "rev-1",
+		"ws", "wf", "s", v2types.PhaseBuild, 1, string(workflowv2.RunActive),
+		"", "attempt-1", "", "", "cron", "",
+		now, now, 0); err != nil {
+		t.Fatalf("seed active run: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/workspaces/engineering/workflows/delivery/cron/trigger", nil)
+	req.Header.Set("Authorization", "Bearer test-token")
+	rr := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("expected 409 conflict, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var skipped int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM workflow_v2_cron_runs WHERE workspace_name=? AND workflow_name=? AND status='skipped'`,
+		"engineering", "delivery").Scan(&skipped); err != nil {
+		t.Fatalf("lookup skipped run: %v", err)
+	}
+	if skipped != 1 {
+		t.Fatalf("expected 1 skipped cron run, got %d", skipped)
+	}
+}
+
+func TestCronSchedulerV2ActivationFailureReleasesOverlapSlot(t *testing.T) {
+	configDir := t.TempDir()
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", configDir+"/hub.yaml")
+	t.Setenv("ELASTICCLAW_NOOP_PROVIDER", "1")
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{
+		Token: "test-token", ClawToken: "claw-token",
+		Providers: map[string]types.ProviderConfig{"noop": {Type: "noop"}},
+	}, "", "", "")
+
+	SaveWorkspaceForTest(t, &types.WorkspaceConfig{
+		Name: "engineering",
+		Files: map[string]string{
+			"elasticclaw-config.yaml": cronWorkspaceV2YAML,
+		},
+	}, []*types.WorkflowConfig{{Name: "delivery", RawConfig: cronWorkflowV2ActivationFailureYAML}})
+
+	s.cronSchedulerV2 = newCronSchedulerV2(s)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/workspaces/engineering/workflows/delivery/cron/trigger", nil)
+	req.Header.Set("Authorization", "Bearer test-token")
+	rr := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500 activation failure, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var v2RunID, cronStatus, cronRunContext string
+	if err := db.QueryRow(`SELECT v2_run_id, status, run_context FROM workflow_v2_cron_runs WHERE workspace_name=? AND workflow_name=?`,
+		"engineering", "delivery").Scan(&v2RunID, &cronStatus, &cronRunContext); err != nil {
+		t.Fatalf("lookup cron history: %v", err)
+	}
+	if cronStatus != "failed" {
+		t.Fatalf("cron history status = %q, want failed", cronStatus)
+	}
+	if !strings.Contains(cronRunContext, "failure_reason") {
+		t.Fatalf("cron history missing failure_reason in run_context: %s", cronRunContext)
+	}
+
+	var runStatus string
+	if err := db.QueryRow(`SELECT status FROM workflow_v2_runs WHERE id=?`, v2RunID).Scan(&runStatus); err != nil {
+		t.Fatalf("lookup v2 run: %v", err)
+	}
+	if runStatus != string(workflowv2.RunCancelled) {
+		t.Fatalf("v2 run status = %q, want cancelled", runStatus)
+	}
+
+	s.cronSchedulerV2.runningMu.Lock()
+	inMem := s.cronSchedulerV2.running["engineering/delivery"]
+	s.cronSchedulerV2.runningMu.Unlock()
+	if inMem != 0 {
+		t.Fatalf("overlap slot not released: running=%d", inMem)
+	}
+}
+
+func TestCronSchedulerV2TenantResolvedFromWorkspaceAssociation(t *testing.T) {
+	configDir := t.TempDir()
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", configDir+"/hub.yaml")
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{
+		Token: "test-token",
+	}, "", "", "")
+	if _, err := db.Exec(`INSERT INTO tenants(id,name,token,claw_token,created_at) VALUES('alpha','Alpha','alpha-token','alpha-claw',?)`, now()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO tenants(id,name,token,claw_token,created_at) VALUES('beta','Beta','beta-token','beta-claw',?)`, now()); err != nil {
+		t.Fatal(err)
+	}
+	// Simulate a manual trigger/workspace association for engineering under tenant beta.
+	if _, err := db.Exec(`INSERT INTO claws(id,tenant_id,name,template,provider,status,created_at) VALUES(?,?,?,?,?,?,?)`,
+		"claw-eng", "beta", "eng", "engineering", "noop", "deleted", now()); err != nil {
+		t.Fatal(err)
+	}
+
+	s.cronSchedulerV2 = newCronSchedulerV2(s)
+	got, err := s.cronSchedulerV2.tenantIDForWorkspace("engineering")
+	if err != nil {
+		t.Fatalf("tenantIDForWorkspace: %v", err)
+	}
+	if got != "beta" {
+		t.Fatalf("tenant = %q, want beta", got)
+	}
+}
+
+func TestCronSchedulerV2ReloadRefreshesJobWorkflowSnapshot(t *testing.T) {
+	configDir := t.TempDir()
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", configDir+"/hub.yaml")
+	s, _ := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
+
+	SaveWorkspaceForTest(t, &types.WorkspaceConfig{
+		Name: "engineering",
+		Files: map[string]string{
+			"elasticclaw-config.yaml": cronWorkspaceV2YAML,
+		},
+	}, []*types.WorkflowConfig{{Name: "delivery", RawConfig: cronWorkflowV2YAML}})
+
+	s.cronSchedulerV2 = newCronSchedulerV2(s)
+	s.cronSchedulerV2.cron = cron.New(cron.WithSeconds())
+	if err := s.cronSchedulerV2.reloadWorkflows(); err != nil {
+		t.Fatalf("reload v2 workflows: %v", err)
+	}
+
+	entryID, ok := s.cronSchedulerV2.entries["engineering/delivery"]
+	if !ok {
+		t.Fatal("engineering/delivery not scheduled")
+	}
+
+	updatedYAML := strings.ReplaceAll(cronWorkflowV2YAML, `schedule: "0 9 * * *"`, "schedule: \"0 9 * * *\"\n    timeout: \"30m\"")
+	SaveWorkspaceForTest(t, &types.WorkspaceConfig{
+		Name: "engineering",
+		Files: map[string]string{
+			"elasticclaw-config.yaml": cronWorkspaceV2YAML,
+		},
+	}, []*types.WorkflowConfig{{Name: "delivery", RawConfig: updatedYAML}})
+
+	if err := s.cronSchedulerV2.reloadWorkflows(); err != nil {
+		t.Fatalf("reload v2 workflows again: %v", err)
+	}
+
+	newEntryID, ok := s.cronSchedulerV2.entries["engineering/delivery"]
+	if !ok {
+		t.Fatal("engineering/delivery not scheduled after reload")
+	}
+	// The schedule/timezone are unchanged, so the entry must be preserved to
+	// avoid missing ticks or double-scheduling parallel runs.
+	if newEntryID != entryID {
+		t.Fatal("cron entry was replaced even though schedule/timezone are unchanged")
+	}
+	job, ok := s.cronSchedulerV2.cron.Entry(newEntryID).Job.(*cronJobV2)
+	if !ok {
+		t.Fatalf("scheduled job is not a cronJobV2: %T", s.cronSchedulerV2.cron.Entry(newEntryID).Job)
+	}
+	if job.workflowSnapshot().trigger.Timeout != "30m" {
+		t.Fatalf("cron job holds stale workflow snapshot: timeout=%q, want 30m", job.workflowSnapshot().trigger.Timeout)
+	}
+	if s.cronSchedulerV2.workflows["engineering/delivery"].trigger.Timeout != "30m" {
+		t.Fatalf("workflow map not refreshed: timeout=%q, want 30m", s.cronSchedulerV2.workflows["engineering/delivery"].trigger.Timeout)
+	}
+
+	// A schedule change should replace the entry.
+	updatedYAMLSchedule := strings.ReplaceAll(cronWorkflowV2YAML, `schedule: "0 9 * * *"`, "schedule: \"0 10 * * *\"")
+	SaveWorkspaceForTest(t, &types.WorkspaceConfig{
+		Name: "engineering",
+		Files: map[string]string{
+			"elasticclaw-config.yaml": cronWorkspaceV2YAML,
+		},
+	}, []*types.WorkflowConfig{{Name: "delivery", RawConfig: updatedYAMLSchedule}})
+
+	if err := s.cronSchedulerV2.reloadWorkflows(); err != nil {
+		t.Fatalf("reload v2 workflows with schedule change: %v", err)
+	}
+
+	scheduleChangedID, ok := s.cronSchedulerV2.entries["engineering/delivery"]
+	if !ok {
+		t.Fatal("engineering/delivery not scheduled after schedule change")
+	}
+	if scheduleChangedID == entryID {
+		t.Fatal("cron entry was not replaced after schedule change")
+	}
 }
 
 // Ensure cron.Schedule interface is satisfied

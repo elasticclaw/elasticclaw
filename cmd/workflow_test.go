@@ -400,7 +400,7 @@ func TestRunWorkflowRunsListsRunsAndShortAgentID(t *testing.T) {
 	t.Setenv("ELASTICCLAW_CLAW_TOKEN", "test-token")
 
 	out, err := captureStdout(func() error {
-		return runWorkflowRuns("default", "dependency-update", 10)
+		return runWorkflowRuns("default", "dependency-update", 10, false)
 	})
 	if err != nil {
 		t.Fatalf("runWorkflowRuns returned error: %v", err)
@@ -452,7 +452,7 @@ func TestRunWorkflowV2RunsListsAttempts(t *testing.T) {
 	t.Setenv("ELASTICCLAW_CLAW_TOKEN", "test-token")
 
 	out, err := captureStdout(func() error {
-		return runWorkflowRuns("default", "delivery", 10)
+		return runWorkflowRuns("default", "delivery", 10, false)
 	})
 	if err != nil {
 		t.Fatalf("runWorkflowRuns returned error: %v", err)
@@ -498,6 +498,86 @@ func TestRunWorkflowV2LogsFetchesAttemptLogs(t *testing.T) {
 		t.Fatalf("runWorkflowLogs returned error: %v", err)
 	}
 	for _, want := range []string{"Agent logs for run run-v2-1", "[bash]", "cmd: ls -la"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("output missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestRunWorkflowCronTriggerUsesCronEndpoint(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/workspaces/prod/workflows/nightly/cron/trigger" {
+			http.NotFound(w, r)
+			return
+		}
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": "triggered", "workflow": "prod/nightly"})
+	}))
+	defer server.Close()
+
+	t.Setenv("ELASTICCLAW_HUB_URL", server.URL)
+	t.Setenv("ELASTICCLAW_CLAW_TOKEN", "test-token")
+
+	out, err := captureStdout(func() error {
+		return runWorkflowTrigger("prod", "nightly", nil, true)
+	})
+	if err != nil {
+		t.Fatalf("runWorkflowTrigger returned error: %v", err)
+	}
+	for _, want := range []string{"Triggered cron workflow", "nightly", "prod", "triggered"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("output missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestRunWorkflowV2CronRunsUsesCronEndpoint(t *testing.T) {
+	started := time.Date(2026, 7, 24, 9, 0, 0, 0, time.UTC)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/workspaces/default/workflows/delivery":
+			_ = json.NewEncoder(w).Encode(workflowCLIView{
+				Name:          "delivery",
+				WorkspaceName: "default",
+				SchemaVersion: "2",
+			})
+		case "/api/workspaces/default/workflows/delivery/cron/runs":
+			if r.URL.Query().Get("limit") != "10" {
+				http.Error(w, "unexpected limit", http.StatusBadRequest)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"runs": []types.WorkflowRun{{
+					ID:            "cron-run-1",
+					WorkflowName:  "delivery",
+					WorkspaceName: "default",
+					TriggerType:   "cron",
+					Status:        "skipped",
+					ClawID:        "",
+					StartedAt:     &started,
+					CreatedAt:     started,
+				}},
+				"count": 1,
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	t.Setenv("ELASTICCLAW_HUB_URL", server.URL)
+	t.Setenv("ELASTICCLAW_CLAW_TOKEN", "test-token")
+
+	out, err := captureStdout(func() error {
+		return runWorkflowRuns("default", "delivery", 10, true)
+	})
+	if err != nil {
+		t.Fatalf("runWorkflowRuns returned error: %v", err)
+	}
+	for _, want := range []string{"RUN ID", "cron-run-1", "skipped", "cron", "Showing 1 run"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("output missing %q:\n%s", want, out)
 		}

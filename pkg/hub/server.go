@@ -174,6 +174,9 @@ type Server struct {
 	// cronScheduler manages scheduled workflow runs
 	cronScheduler *cronScheduler
 
+	// cronSchedulerV2 manages scheduled workflow v2 runs
+	cronSchedulerV2 *cronSchedulerV2
+
 	// Reaper state is deliberately in-memory: its conservative timers reset on
 	// a hub restart rather than treating an uncertain outage as an agent failure.
 	reaperMu            sync.Mutex
@@ -596,6 +599,10 @@ func NewServer(addr, dbPath, identityDir string, hubCfg *types.HubConfig) (*Serv
 	if err := srv.cronScheduler.start(); err != nil {
 		log.Printf("[cron] failed to start scheduler: %v", err)
 	}
+	srv.cronSchedulerV2 = newCronSchedulerV2(srv)
+	if err := srv.cronSchedulerV2.start(); err != nil {
+		log.Printf("[cron-v2] failed to start scheduler: %v", err)
+	}
 	srv.startIntegrationPoller()
 	srv.startLifecycleNotifier()
 	srv.startScheduledNotifier()
@@ -674,11 +681,17 @@ func (s *Server) run(ctx context.Context, opts ...RunOptions) error {
 		// ListenAndServe returns as soon as Shutdown starts. Wait for it to
 		// finish draining active requests before closing their database.
 		<-shutdownDone
-		// Stop the notifier loops and dependency watcher before the DB closes: a tick in flight
-		// could otherwise complete an external Slack send and then fail the
-		// delivery-row insert (or scheduled dedupe-state upsert) against the
-		// closed DB, re-sending the event after restart (the in-memory retry
-		// stash dies with the process).
+		// Stop the notifier loops, cron schedulers, and dependency watcher
+		// before the DB closes: a tick in flight could otherwise complete an
+		// external send and then fail the delivery-row insert (or scheduled
+		// dedupe-state upsert) against the closed DB, re-sending the event
+		// after restart (the in-memory retry stash dies with the process).
+		if s.cronScheduler != nil {
+			s.cronScheduler.stop()
+		}
+		if s.cronSchedulerV2 != nil {
+			s.cronSchedulerV2.stop()
+		}
 		s.stopLifecycleNotifier(10 * time.Second)
 		s.stopScheduledNotifier(10 * time.Second)
 		s.stopInfraNotifier(10 * time.Second)
