@@ -178,6 +178,9 @@ type Server struct {
 	// cronScheduler manages scheduled workflow runs
 	cronScheduler *cronScheduler
 
+	// cronSchedulerV2 manages scheduled workflow v2 runs
+	cronSchedulerV2 *cronSchedulerV2
+
 	// Reaper state is deliberately in-memory: its conservative timers reset on
 	// a hub restart rather than treating an uncertain outage as an agent failure.
 	reaperMu            sync.Mutex
@@ -672,6 +675,10 @@ func NewServer(addr, dbPath, identityDir string, hubCfg *types.HubConfig) (*Serv
 	if err := srv.cronScheduler.start(); err != nil {
 		log.Printf("[cron] failed to start scheduler: %v", err)
 	}
+	srv.cronSchedulerV2 = newCronSchedulerV2(srv)
+	if err := srv.cronSchedulerV2.start(); err != nil {
+		log.Printf("[cron-v2] failed to start scheduler: %v", err)
+	}
 	srv.startIntegrationPoller()
 	srv.startLifecycleNotifier()
 	srv.startScheduledNotifier()
@@ -750,11 +757,17 @@ func (s *Server) run(ctx context.Context, opts ...RunOptions) error {
 		// ListenAndServe returns as soon as Shutdown starts. Wait for it to
 		// finish draining active requests before closing their database.
 		<-shutdownDone
-		// Stop the notifier loops and dependency watcher before the DB closes: a tick in flight
-		// could otherwise complete an external Slack send and then fail the
-		// delivery-row insert (or scheduled dedupe-state upsert) against the
-		// closed DB, re-sending the event after restart (the in-memory retry
-		// stash dies with the process).
+		// Stop the notifier loops, cron schedulers, and dependency watcher
+		// before the DB closes: a tick in flight could otherwise complete an
+		// external send and then fail the delivery-row insert (or scheduled
+		// dedupe-state upsert) against the closed DB, re-sending the event
+		// after restart (the in-memory retry stash dies with the process).
+		if s.cronScheduler != nil {
+			s.cronScheduler.stop()
+		}
+		if s.cronSchedulerV2 != nil {
+			s.cronSchedulerV2.stop()
+		}
 		s.stopLifecycleNotifier(10 * time.Second)
 		s.stopScheduledNotifier(10 * time.Second)
 		s.stopInfraNotifier(10 * time.Second)
@@ -831,6 +844,10 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/analytics/tickets", s.withAnalyticsViewAuth(s.handleTaskRunAnalyticsTickets))
 	mux.HandleFunc("/api/dependencies/status", s.withAuth(s.handleDependencyStatus))
 	mux.HandleFunc("/api/v2/workflow-runs/{runId}", s.withAuth(s.handleWorkflowV2Run))
+	mux.HandleFunc("/api/v2/workspaces/{workspace}/workflows/{workflow}/runs", s.withAuth(s.handleWorkflowV2Runs))
+	mux.HandleFunc("/api/v2/workflow-runs/{runId}/logs", s.withAuth(s.handleWorkflowV2RunLogs))
+	mux.HandleFunc("/api/v2/workflow-runs/{runId}/attempts", s.withAuth(s.handleWorkflowV2RunAttempts))
+	mux.HandleFunc("/api/v2/workflow-runs/{runId}/attempts/{attemptId}/logs", s.withAuth(s.handleWorkflowV2AttemptLogs))
 	mux.HandleFunc("/api/workspaces", s.withAdminForMethods(s.handleWorkspacesCRUD, http.MethodPost, http.MethodDelete)) // workspace CRUD
 	mux.HandleFunc("/api/workspaces/{name}/workflows", s.withAdminForMethods(s.handleWorkspaceWorkflowsList, http.MethodPost))
 	mux.HandleFunc("/api/workspaces/{workspace}/workflows/{workflow}", s.withAdminForMethods(s.handleWorkspaceWorkflowDetail, http.MethodPatch, http.MethodDelete))
@@ -2394,7 +2411,13 @@ func (s *Server) handleMessageTimeline(w http.ResponseWriter, r *http.Request, t
 		return
 	}
 
-	if len(rows) == 0 {
+	stateMsgs, err := s.queryWorkflowV2TransitionsForClaw(r.Context(), tenantID, clawID)
+	if err != nil {
+		http.Error(w, "db error", http.StatusInternalServerError)
+		return
+	}
+
+	if len(rows) == 0 && len(stateMsgs) == 0 {
 		summary, err := s.activitySummary(clawID, tenantID, nil, parseTimeCursor(before), "", before)
 		if err != nil {
 			http.Error(w, "db error", http.StatusInternalServerError)
@@ -2408,8 +2431,35 @@ func (s *Server) handleMessageTimeline(w http.ResponseWriter, r *http.Request, t
 		return
 	}
 
-	timeline := make([]types.HubMessage, 0, len(rows)*2)
-	firstCreated := rows[0].CreatedAt
+	if len(rows) == 0 {
+		firstCreated := stateMsgs[0].CreatedAt
+		hasOlderConversation, err := s.hasConversationBefore(clawID, tenantID, firstCreated)
+		if err != nil {
+			http.Error(w, "db error", http.StatusInternalServerError)
+			return
+		}
+		if !hasOlderConversation {
+			firstCursor := firstCreated.Format(time.RFC3339Nano)
+			summary, err := s.activitySummary(clawID, tenantID, nil, &firstCreated, "", firstCursor)
+			if err != nil {
+				http.Error(w, "db error", http.StatusInternalServerError)
+				return
+			}
+			if summary != nil {
+				stateMsgs = append([]types.HubMessage{*summary}, stateMsgs...)
+			}
+		}
+		jsonOK(w, stateMsgs)
+		return
+	}
+
+	// Merge v2 state transitions into the conversation timeline so they appear
+	// in the main chat window alongside user/claw messages.
+	merged := append(rows, stateMsgs...)
+	sort.Slice(merged, func(i, j int) bool { return merged[i].CreatedAt.Before(merged[j].CreatedAt) })
+
+	timeline := make([]types.HubMessage, 0, len(merged)*2)
+	firstCreated := merged[0].CreatedAt
 	hasOlderConversation, err := s.hasConversationBefore(clawID, tenantID, firstCreated)
 	if err != nil {
 		http.Error(w, "db error", http.StatusInternalServerError)
@@ -2426,14 +2476,14 @@ func (s *Server) handleMessageTimeline(w http.ResponseWriter, r *http.Request, t
 			timeline = append(timeline, *summary)
 		}
 	}
-	for i, msg := range rows {
+	for i, msg := range merged {
 		timeline = append(timeline, msg)
 		lower := msg.CreatedAt
 		lowerCursor := lower.Format(time.RFC3339Nano)
 		var upper *time.Time
 		upperCursor := ""
-		if i+1 < len(rows) {
-			nextCreated := rows[i+1].CreatedAt
+		if i+1 < len(merged) {
+			nextCreated := merged[i+1].CreatedAt
 			upper = &nextCreated
 			upperCursor = nextCreated.Format(time.RFC3339Nano)
 		} else if before != "" {

@@ -5,6 +5,7 @@ package workflowv2
 import (
 	"database/sql"
 	"fmt"
+	"strings"
 )
 
 // Migrate adds v2 runtime storage without changing or reinterpreting any v1
@@ -31,7 +32,11 @@ func Migrate(db *sql.DB) error {
 		current_attempt_id TEXT NOT NULL DEFAULT '',
 		current_task_id    TEXT NOT NULL DEFAULT '',
 		context_bundle_id  TEXT NOT NULL DEFAULT '',
-		created_at         INTEGER NOT NULL,
+		trigger_type          TEXT NOT NULL DEFAULT 'manual',
+		task_run_id           TEXT NOT NULL DEFAULT '',
+		timeout_at            INTEGER NOT NULL DEFAULT 0,
+		cron_slot_released    INTEGER NOT NULL DEFAULT 0,
+		created_at            INTEGER NOT NULL,
 		updated_at         INTEGER NOT NULL,
 		finished_at        INTEGER NOT NULL DEFAULT 0
 	);
@@ -262,9 +267,66 @@ func Migrate(db *sql.DB) error {
 		acknowledged_at  INTEGER NOT NULL DEFAULT 0
 	);
 	CREATE INDEX IF NOT EXISTS idx_workflow_v2_control_ready ON workflow_v2_control_outbox(status, next_attempt_at);
+
+	CREATE TABLE IF NOT EXISTS workflow_v2_cron_runs (
+		id             TEXT PRIMARY KEY,
+		tenant_id      TEXT NOT NULL,
+		workspace_name TEXT NOT NULL,
+		workflow_name  TEXT NOT NULL,
+		trigger_type   TEXT NOT NULL DEFAULT 'cron',
+		status         TEXT NOT NULL DEFAULT 'pending',  -- 'pending','running','completed','failed','skipped','canceled'
+		result         TEXT NOT NULL DEFAULT '',           -- 'success','failure','skipped','canceled'
+		claw_id        TEXT NOT NULL DEFAULT '',
+		v2_run_id      TEXT NOT NULL DEFAULT '',
+		run_context    TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(run_context) AND json_type(run_context)='object'),
+		created_at     INTEGER NOT NULL,
+		updated_at     INTEGER NOT NULL DEFAULT 0,
+		finished_at    INTEGER NOT NULL DEFAULT 0
+	);
+	CREATE INDEX IF NOT EXISTS idx_workflow_v2_cron_runs_tenant ON workflow_v2_cron_runs(tenant_id, created_at);
+	CREATE INDEX IF NOT EXISTS idx_workflow_v2_cron_runs_workflow ON workflow_v2_cron_runs(tenant_id, workspace_name, workflow_name, created_at);
+	CREATE INDEX IF NOT EXISTS idx_workflow_v2_cron_runs_status ON workflow_v2_cron_runs(tenant_id, status, created_at);
+	CREATE INDEX IF NOT EXISTS idx_workflow_v2_cron_runs_claw ON workflow_v2_cron_runs(claw_id);
+	CREATE INDEX IF NOT EXISTS idx_workflow_v2_cron_runs_v2_run ON workflow_v2_cron_runs(v2_run_id);
+
 	`)
 	if err != nil {
 		return fmt.Errorf("workflow v2 migrate: %w", err)
+	}
+	if err := addColumnIfMissing(db, "workflow_v2_runs", "trigger_type", "TEXT NOT NULL DEFAULT 'manual'"); err != nil {
+		return fmt.Errorf("workflow v2 migrate: %w", err)
+	}
+	if err := addColumnIfMissing(db, "workflow_v2_cron_runs", "updated_at", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return fmt.Errorf("workflow v2 migrate: %w", err)
+	}
+	if err := addColumnIfMissing(db, "workflow_v2_runs", "task_run_id", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return fmt.Errorf("workflow v2 migrate: %w", err)
+	}
+	if err := addColumnIfMissing(db, "workflow_v2_runs", "timeout_at", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return fmt.Errorf("workflow v2 migrate: %w", err)
+	}
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_workflow_v2_runs_timeout ON workflow_v2_runs(status, timeout_at, created_at)`); err != nil {
+		return fmt.Errorf("workflow v2 migrate: %w", err)
+	}
+	if err := addColumnIfMissing(db, "workflow_v2_runs", "cron_slot_released", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return fmt.Errorf("workflow v2 migrate: %w", err)
+	}
+	return nil
+}
+
+func addColumnIfMissing(db *sql.DB, table, column, columnDef string) error {
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info(?) WHERE name = ?`, table, column).Scan(&count); err != nil {
+		return fmt.Errorf("inspect column %s.%s: %w", table, column, err)
+	}
+	if count > 0 {
+		return nil
+	}
+	if _, err := db.Exec(fmt.Sprintf(`ALTER TABLE %q ADD COLUMN %q %s`, table, column, columnDef)); err != nil {
+		msg := strings.ToLower(err.Error())
+		if !strings.Contains(msg, "duplicate column name") && !strings.Contains(msg, "no such table") {
+			return fmt.Errorf("add column %s.%s: %w", table, column, err)
+		}
 	}
 	return nil
 }

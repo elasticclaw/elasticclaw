@@ -10,6 +10,7 @@ type Workflow struct {
 	SchemaVersion interface{}                `yaml:"schema_version" json:"schema_version"`
 	Name          string                     `yaml:"name" json:"name"`
 	Enabled       bool                       `yaml:"enabled" json:"enabled"`
+	ManualTrigger bool                       `yaml:"manual_trigger,omitempty" json:"manual_trigger,omitempty"`
 	InitialState  string                     `yaml:"initial_state" json:"initial_state"`
 	States        map[string]State           `yaml:"states" json:"states"`
 	Transitions   map[string]Transition      `yaml:"transitions,omitempty" json:"transitions,omitempty"`
@@ -18,7 +19,22 @@ type Workflow struct {
 	Review        *WorkflowReview            `yaml:"review,omitempty" json:"review,omitempty"`
 	Delivery      *WorkflowDelivery          `yaml:"delivery,omitempty" json:"delivery,omitempty"`
 	Events        map[string]EventDefinition `yaml:"events,omitempty" json:"events,omitempty"`
+	Trigger       *WorkflowTrigger           `yaml:"trigger,omitempty" json:"trigger,omitempty"`
 	Raw           map[string]interface{}     `yaml:"-" json:"-"`
+}
+
+// WorkflowTrigger declares how the hub may create new runs outside the state
+// machine. Currently only cron schedules are supported, matching v1 behavior.
+type WorkflowTrigger struct {
+	Cron *CronTrigger `yaml:"cron,omitempty" json:"cron,omitempty"`
+}
+
+// CronTrigger is a v1-compatible cron schedule for workflow v2.
+type CronTrigger struct {
+	Schedule      string `yaml:"schedule" json:"schedule"`
+	Timezone      string `yaml:"timezone,omitempty" json:"timezone,omitempty"`
+	OverlapPolicy string `yaml:"overlap_policy,omitempty" json:"overlap_policy,omitempty"`
+	Timeout       string `yaml:"timeout,omitempty" json:"timeout,omitempty"`
 }
 
 // State is an explicit workflow state.

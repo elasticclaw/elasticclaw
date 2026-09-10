@@ -46,7 +46,13 @@ func convertWorkflowV1ToV2(data []byte, opts Options) (Result, error) {
 			Terminal:    st.Terminal,
 		}
 		// Convert on_enter inject → agent.task effect; label mutations → warnings.
+		// Terminal states cannot have effects in v2 because the run is marked
+		// finished before the on_enter effects would be scheduled.
 		actions, onEnterWarns := convertStageOnEnter(id, st.OnEnter)
+		if st.Terminal && actions != nil && len(actions.Effects) > 0 {
+			appendWarning(&warnings, "states.%s.on_enter: terminal state effects are not supported in v2 and were dropped", id)
+			actions = nil
+		}
 		if actions != nil {
 			state.OnEnter = actions
 		}
@@ -123,9 +129,6 @@ func convertWorkflowV1ToV2(data []byte, opts Options) (Result, error) {
 	if wf.Integration != "" {
 		appendWarning(&warnings, "integration %q: v2 workflows are event/state driven; re-bind trigger sources via workspace connections and runtime adapters (not embedded as v1 integration)", wf.Integration)
 	}
-	if wf.Trigger != nil {
-		appendWarning(&warnings, "trigger: v1 trigger block not copied into v2 — configure run creation / issue association outside the v2 state machine (hub trigger adapters)")
-	}
 	if len(wf.Inputs) > 0 {
 		appendWarning(&warnings, "inputs: %d v1 input(s) not represented in workflow v2 schema yet; preserve separately if still needed for manual trigger UX", len(wf.Inputs))
 	}
@@ -145,6 +148,24 @@ func convertWorkflowV1ToV2(data []byte, opts Options) (Result, error) {
 	}
 	if len(transitions) > 0 {
 		out.Transitions = transitions
+	}
+	if wf.Trigger != nil && wf.Trigger.Cron != nil {
+		ct := wf.Trigger.Cron
+		overlapPolicy := ct.OverlapPolicy
+		if strings.EqualFold(overlapPolicy, "queue") {
+			overlapPolicy = "skip"
+			appendWarning(&warnings, "trigger.cron.overlap_policy %q is not supported in workflow v2; converted to %q", ct.OverlapPolicy, overlapPolicy)
+		}
+		out.Trigger = &v2.WorkflowTrigger{
+			Cron: &v2.CronTrigger{
+				Schedule:      ct.Schedule,
+				Timezone:      ct.Timezone,
+				OverlapPolicy: overlapPolicy,
+				Timeout:       ct.Timeout,
+			},
+		}
+	} else if wf.Trigger != nil {
+		appendWarning(&warnings, "trigger: only v1 trigger.cron is copied into v2; other trigger kinds are not represented in workflow v2 schema yet")
 	}
 
 	// Validate structurally; pair-validate when workspace YAML provided.
@@ -278,14 +299,20 @@ func convertStageOnEnter(stageID string, onEnter map[string]interface{}) (*v2.St
 	if _, ok := onEnter["remove_labels"]; ok {
 		appendWarning(&warnings, "states.%s.on_enter.remove_labels: not auto-converted — express as an issue-tracker effect with an explicit connection after review", stageID)
 	}
+	if _, ok := onEnter["comment_issue"]; ok {
+		appendWarning(&warnings, "states.%s.on_enter.comment_issue: not auto-converted — express as an issue-tracker effect with an explicit connection after review", stageID)
+	}
 	if _, ok := onEnter["run"]; ok {
-		appendWarning(&warnings, "states.%s.on_enter.run: shell/CI run hooks are not auto-converted — model as CI pipeline effects or agent.task after review", stageID)
+		appendWarning(&warnings, "states.%s.on_enter.run: mapped to exec.run effect after review; command output becomes exec.last_run.* facts, not arbitrary trusted data", stageID)
+	}
+	if _, ok := onEnter["dependency_updates"]; ok {
+		appendWarning(&warnings, "states.%s.on_enter.dependency_updates: mapped to dependency.update effect after review; results become exec.dependency_update.* facts", stageID)
 	}
 
 	// Surface other keys.
 	for k := range onEnter {
 		switch k {
-		case "inject", "add_labels", "remove_labels", "run":
+		case "inject", "add_labels", "remove_labels", "comment_issue", "run", "dependency_updates":
 			continue
 		default:
 			appendWarning(&warnings, "states.%s.on_enter.%s: not auto-converted", stageID, k)

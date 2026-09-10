@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"net/http"
@@ -384,4 +385,168 @@ stages:
 			t.Fatalf("claw=%q run=%q, want connected/running (untouched within grace)", clawStatus, runStatus)
 		}
 	})
+}
+
+func TestReaperCancelsTimedOutWorkflowV2Run(t *testing.T) {
+	s, db := newReaperTestServer(t, &types.HubConfig{})
+	tm := time.Now().UTC()
+	s.nowFunc = func() time.Time { return tm }
+
+	insertWorkflowV2Run(t, db, "run-timeout", "att-timeout", tm.Add(-time.Hour), tm.Add(-time.Hour))
+
+	s.reapOnce()
+
+	var status, attemptStatus string
+	if err := db.QueryRow(`SELECT status FROM workflow_v2_runs WHERE id='run-timeout'`).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != "cancelled" {
+		t.Fatalf("run status = %q, want cancelled", status)
+	}
+	if err := db.QueryRow(`SELECT status FROM workflow_v2_attempts WHERE id='att-timeout'`).Scan(&attemptStatus); err != nil {
+		t.Fatal(err)
+	}
+	if attemptStatus != "cancelled" {
+		t.Fatalf("attempt status = %q, want cancelled", attemptStatus)
+	}
+}
+
+func TestReaperLeavesLegacyWorkflowV2RunWithoutTimeout(t *testing.T) {
+	s, db := newReaperTestServer(t, &types.HubConfig{})
+	tm := time.Now().UTC()
+	s.nowFunc = func() time.Time { return tm }
+
+	insertWorkflowV2Run(t, db, "run-legacy", "att-legacy", time.Time{}, tm.Add(-workflowV2DefaultRunTimeout-time.Hour))
+
+	s.reapOnce()
+
+	var status string
+	if err := db.QueryRow(`SELECT status FROM workflow_v2_runs WHERE id='run-legacy'`).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != "active" {
+		t.Fatalf("run status = %q, want active (legacy rows without timeout_at must not be auto-cancelled)", status)
+	}
+}
+
+func TestReaperLeavesWorkflowV2RunWithinTimeout(t *testing.T) {
+	s, db := newReaperTestServer(t, &types.HubConfig{})
+	tm := time.Now().UTC()
+	s.nowFunc = func() time.Time { return tm }
+
+	insertWorkflowV2Run(t, db, "run-fresh", "att-fresh", tm.Add(time.Hour), tm)
+
+	s.reapOnce()
+
+	var status string
+	if err := db.QueryRow(`SELECT status FROM workflow_v2_runs WHERE id='run-fresh'`).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != "active" {
+		t.Fatalf("run status = %q, want active", status)
+	}
+}
+
+func insertWorkflowV2Run(t *testing.T, db *sql.DB, runID, attemptID string, timeoutAt, createdAt time.Time) {
+	t.Helper()
+	timeoutMillis := int64(0)
+	if !timeoutAt.IsZero() {
+		timeoutMillis = timeoutAt.UnixMilli()
+	}
+	if _, err := db.Exec(`INSERT INTO workflow_v2_runs(
+		id,tenant_id,workspace_name,workflow_name,workspace_revision,workflow_revision,
+		workspace_yaml,workflow_yaml,state,display_phase,state_version,status,waiting_reason,
+		current_attempt_id,task_run_id,trigger_type,timeout_at,created_at,updated_at,finished_at
+	) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		runID, "tenant", "ws", "wf", "rev", "rev", "", "", "building", "build", 1, "active", "",
+		attemptID, "", "manual", timeoutMillis, createdAt.UnixMilli(), createdAt.UnixMilli(), 0); err != nil {
+		t.Fatalf("insert run: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO workflow_v2_attempts(id,run_id,claw_id,number,status,started_at,heartbeat_at)
+		VALUES(?,?,?,?,?,?,?)`,
+		attemptID, runID, "claw-"+runID, 1, "active", createdAt.UnixMilli(), createdAt.UnixMilli()); err != nil {
+		t.Fatalf("insert attempt: %v", err)
+	}
+}
+
+func TestCancelWorkflowV2RunForClawCancelsActiveRun(t *testing.T) {
+	s, db := newReaperTestServer(t, &types.HubConfig{})
+	now := time.Now().UTC()
+	if _, err := db.Exec(`INSERT INTO claws(id,tenant_id,name,template,provider,status,created_at) VALUES(?,?,?,?,?,?,?)`,
+		"claw-dead", "tenant", "dead", "ws", "replicated", "deleted", now); err != nil {
+		t.Fatal(err)
+	}
+	insertWorkflowV2Run(t, db, "run-dead", "att-dead", now.Add(time.Hour), now)
+	if _, err := db.Exec(`UPDATE workflow_v2_attempts SET claw_id=? WHERE id=?`, "claw-dead", "att-dead"); err != nil {
+		t.Fatal(err)
+	}
+
+	s.cancelWorkflowV2RunForClaw(context.Background(), "claw-dead", "claw deleted")
+
+	var status, attemptStatus string
+	if err := db.QueryRow(`SELECT status FROM workflow_v2_runs WHERE id='run-dead'`).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != "cancelled" {
+		t.Fatalf("run status = %q, want cancelled", status)
+	}
+	if err := db.QueryRow(`SELECT status FROM workflow_v2_attempts WHERE id='att-dead'`).Scan(&attemptStatus); err != nil {
+		t.Fatal(err)
+	}
+	if attemptStatus != "cancelled" {
+		t.Fatalf("attempt status = %q, want cancelled", attemptStatus)
+	}
+}
+
+func TestReleaseWorkflowV2CronSlotLoadsBeforeMarker(t *testing.T) {
+	s, db := newReaperTestServer(t, &types.HubConfig{})
+	s.cronSchedulerV2 = newCronSchedulerV2(s)
+	s.cronSchedulerV2.running["ws/wf"] = 1
+	now := time.Now().UTC()
+
+	if _, err := db.Exec(`INSERT INTO workflow_v2_runs(
+		id,tenant_id,workspace_name,workflow_name,workspace_revision,workflow_revision,
+		workspace_yaml,workflow_yaml,state,display_phase,state_version,status,waiting_reason,
+		current_attempt_id,task_run_id,trigger_type,timeout_at,created_at,updated_at,finished_at,
+		cron_slot_released
+	) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		"run-cron", "tenant", "ws", "wf", "rev", "rev", "", "", "done", "done", 1, "cancelled", "",
+		"att-cron", "", "cron", 0, now.UnixMilli(), now.UnixMilli(), now.UnixMilli(), 0); err != nil {
+		t.Fatal(err)
+	}
+
+	// A cancelled context should fail the run load before the marker is flipped,
+	// so the slot can still be released on retry.
+	cancelledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	s.releaseWorkflowV2CronSlot(cancelledCtx, "run-cron")
+
+	var marker int
+	if err := db.QueryRow(`SELECT cron_slot_released FROM workflow_v2_runs WHERE id='run-cron'`).Scan(&marker); err != nil {
+		t.Fatal(err)
+	}
+	if marker != 0 {
+		t.Fatalf("cron_slot_released = %d, want 0 (marker consumed before load succeeded)", marker)
+	}
+	if s.cronSchedulerV2.running["ws/wf"] != 1 {
+		t.Fatalf("running counter was decremented despite load failure")
+	}
+
+	// On a valid context the slot is released exactly once.
+	s.releaseWorkflowV2CronSlot(context.Background(), "run-cron")
+	if err := db.QueryRow(`SELECT cron_slot_released FROM workflow_v2_runs WHERE id='run-cron'`).Scan(&marker); err != nil {
+		t.Fatal(err)
+	}
+	if marker != 1 {
+		t.Fatalf("cron_slot_released = %d, want 1", marker)
+	}
+	if s.cronSchedulerV2.running["ws/wf"] != 0 {
+		t.Fatalf("running counter = %d, want 0", s.cronSchedulerV2.running["ws/wf"])
+	}
+
+	// Idempotent: a second call does not decrement below zero.
+	s.releaseWorkflowV2CronSlot(context.Background(), "run-cron")
+	if s.cronSchedulerV2.running["ws/wf"] != 0 {
+		t.Fatalf("running counter decremented twice, got %d", s.cronSchedulerV2.running["ws/wf"])
+	}
 }

@@ -3,10 +3,12 @@ package hub
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"sort"
 	"strings"
@@ -26,6 +28,10 @@ func (s *Server) triggerWorkflowV2Config(w http.ResponseWriter, r *http.Request,
 	workspace *types.WorkspaceConfig, workflow *types.WorkflowConfig) {
 	if workflow.Enabled == nil || !*workflow.Enabled {
 		jsonError(w, http.StatusForbidden, "workflow is disabled")
+		return
+	}
+	if !workflow.EnableManualTrigger {
+		jsonError(w, http.StatusForbidden, "workflow does not support manual triggers")
 		return
 	}
 	var req FactoryTriggerRequest
@@ -58,10 +64,18 @@ func (s *Server) triggerWorkflowV2Config(w http.ResponseWriter, r *http.Request,
 	clawID, _, err := s.createClawFromWorkflowWithOptions(workspace, workflow, workflowCreateOptions{
 		ctx: r.Context(), inputs: inputs, reason: "manual workflow v2 trigger",
 		beforeProvision: func(ctx context.Context, clawID, tenantID string) error {
+			// Link the v2 run to its parent v1 task run so the hub can finish
+			// the parent when the v2 run reaches a terminal state.
+			var taskRunID string
+			if err := s.db.QueryRow(`SELECT id FROM task_runs WHERE claw_id=? ORDER BY created_at DESC LIMIT 1`, clawID).Scan(&taskRunID); err != nil && !errors.Is(err, sql.ErrNoRows) {
+				return fmt.Errorf("lookup parent task run for claw %s: %w", clawID, err)
+			}
 			store := workflowv2.NewStore(s.db)
 			run, err := store.CreateRun(ctx, workflowv2.CreateRunRequest{
-				ID: runID, TenantID: tenantID, InitialClawID: clawID,
+				ID: runID, TenantID: tenantID, InitialClawID: clawID, TaskRunID: taskRunID,
 				WorkspaceYAML: workspaceYAML, WorkflowYAML: workflowYAML, ActivationPending: true,
+				TriggerType: "manual",
+				Timeout:     workflowV2RunTimeout(workflow.RawConfig),
 			})
 			if err != nil {
 				return err
@@ -78,6 +92,10 @@ func (s *Server) triggerWorkflowV2Config(w http.ResponseWriter, r *http.Request,
 			if cleanupErr := store.CancelActivation(cleanupCtx, run.ID, err.Error()); cleanupErr != nil {
 				return errors.Join(err, fmt.Errorf("cancel failed workflow v2 activation: %w", cleanupErr))
 			}
+			// Release the cron overlap slot immediately for cron-triggered runs. The
+			// terminal cleanup hook will not run because cancelWorkflowV2RunForClaw
+			// only looks for active/suspended runs.
+			s.releaseWorkflowV2CronSlot(cleanupCtx, run.ID)
 			return err
 		},
 	})
@@ -85,7 +103,45 @@ func (s *Server) triggerWorkflowV2Config(w http.ResponseWriter, r *http.Request,
 		jsonError(w, http.StatusInternalServerError, "failed to create workflow v2 run: "+err.Error())
 		return
 	}
+	if startCommand := v2WorkflowStartCommand(workflow.RawConfig); startCommand != "" {
+		store := workflowv2.NewStore(s.db)
+		if _, err := store.ApplyCommand(r.Context(), runID, startCommand, workflowv2.CommandInput{
+			ID:        uuid.NewString(),
+			MessageID: runID + "/manual-start",
+			Reason:    "manual workflow v2 trigger",
+			Provenance: typesv2.EvidenceProvenance{
+				Producer:   string(workflowv2.ProducerOperator),
+				ObservedAt: time.Now().UTC(),
+			},
+		}); err != nil {
+			log.Printf("[workflow-v2] manual trigger start command for run %s: %v", runID, err)
+		}
+		// The start command may have transitioned straight to a terminal state.
+		go s.maybeFinishWorkflowV2Parent(context.Background(), runID)
+	}
 	jsonOK(w, map[string]string{"run_id": runID, "claw_id": clawID, "status": "created"})
+}
+
+func v2WorkflowStartCommand(rawConfig string) string {
+	resolved, err := typesv2.ParseAndValidateWorkflow([]byte(rawConfig))
+	if err != nil {
+		return ""
+	}
+	wf := resolved.Workflow
+	cmd, ok := wf.Commands["start"]
+	if !ok {
+		return ""
+	}
+	fromStates, err := typesv2.FromStates(cmd.From)
+	if err != nil {
+		return ""
+	}
+	for _, state := range fromStates {
+		if state == wf.InitialState {
+			return "start"
+		}
+	}
+	return ""
 }
 
 func workspaceFileKnowledgeResolver(files map[string]string) workflowv2.KnowledgeResolver {

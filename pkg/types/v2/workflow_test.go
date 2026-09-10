@@ -552,6 +552,49 @@ states:
 	}
 }
 
+func TestWorkflowRejectsTerminalStateOnEnterEffects(t *testing.T) {
+	yaml := `
+schema_version: 2
+name: terminal-effects
+initial_state: s
+states:
+  s: {}
+  done:
+    terminal: true
+    on_enter:
+      effects:
+        - agent.task:
+            prompt: "done"
+`
+	_, err := v2.ParseAndValidateWorkflow([]byte(yaml))
+	if err == nil || !strings.Contains(err.Error(), "terminal states cannot have effects") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestWorkflowRejectsTransitionToTerminalWithEffects(t *testing.T) {
+	yaml := `
+schema_version: 2
+name: terminal-transition-effects
+initial_state: s
+states:
+  s: {}
+  done:
+    terminal: true
+transitions:
+  bad:
+    from: s
+    to: done
+    effects:
+      - agent.task:
+          prompt: "done"
+`
+	_, err := v2.ParseAndValidateWorkflow([]byte(yaml))
+	if err == nil || !strings.Contains(err.Error(), "transitions to terminal state") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
 func TestWorkflowRejectsTerminalOutgoingTransition(t *testing.T) {
 	yaml := `
 schema_version: 2
@@ -621,5 +664,221 @@ events:
 `
 	if _, err := v2.ParseAndValidateWorkflow([]byte(yaml)); err != nil {
 		t.Fatalf("disjoint clauses should validate: %v", err)
+	}
+}
+
+func TestWorkflowV2ExecRunEffectAccepted(t *testing.T) {
+	wf := `
+schema_version: 2
+name: exec-run
+enabled: true
+initial_state: build
+states:
+  build:
+    phase: build
+    on_enter:
+      effects:
+        - exec.run:
+            command: echo hello
+            timeout: 1m
+  done:
+    phase: done
+    terminal: true
+`
+	if _, _, err := v2.ParseAndValidateWorkflowPair([]byte(wf), []byte(validWorkspaceYAML)); err != nil {
+		t.Fatalf("valid exec.run effect should validate: %v", err)
+	}
+}
+
+func TestWorkflowV2DependencyUpdateEffectAccepted(t *testing.T) {
+	wf := `
+schema_version: 2
+name: dependency-update
+enabled: true
+initial_state: build
+states:
+  build:
+    phase: build
+    on_enter:
+      effects:
+        - dependency.update:
+            ecosystems: [go]
+            timeout: 1m
+  done:
+    phase: done
+    terminal: true
+`
+	if _, _, err := v2.ParseAndValidateWorkflowPair([]byte(wf), []byte(validWorkspaceYAML)); err != nil {
+		t.Fatalf("valid dependency.update effect should validate: %v", err)
+	}
+}
+
+func TestWorkflowV2ExecRunRejectsMissingCommand(t *testing.T) {
+	wf := `
+schema_version: 2
+name: bad-exec
+enabled: true
+initial_state: build
+states:
+  build:
+    phase: build
+    on_enter:
+      effects:
+        - exec.run:
+            timeout: 1m
+  done:
+    phase: done
+    terminal: true
+`
+	_, _, err := v2.ParseAndValidateWorkflowPair([]byte(wf), []byte(validWorkspaceYAML))
+	if err == nil || !strings.Contains(err.Error(), "command") {
+		t.Fatalf("error = %v, want command missing", err)
+	}
+}
+
+func TestWorkflowV2DependencyUpdateRejectsMissingEcosystems(t *testing.T) {
+	wf := `
+schema_version: 2
+name: bad-dep
+enabled: true
+initial_state: build
+states:
+  build:
+    phase: build
+    on_enter:
+      effects:
+        - dependency.update:
+            grouping: all
+  done:
+    phase: done
+    terminal: true
+`
+	_, _, err := v2.ParseAndValidateWorkflowPair([]byte(wf), []byte(validWorkspaceYAML))
+	if err == nil || !strings.Contains(err.Error(), "ecosystems") {
+		t.Fatalf("error = %v, want ecosystems missing", err)
+	}
+}
+
+func TestWorkflowV2CronTriggerValidation(t *testing.T) {
+	base := `
+schema_version: 2
+name: cron-wf
+enabled: true
+initial_state: s
+states:
+  s:
+    phase: build
+  done:
+    phase: done
+    terminal: true
+`
+	tests := []struct {
+		name    string
+		trigger string
+		wantErr string
+	}{
+		{
+			name: "valid skip",
+			trigger: `trigger:
+  cron:
+    schedule: "0 9 * * *"
+    timezone: "America/New_York"
+    overlap_policy: skip
+    timeout: 30m`,
+		},
+		{
+			name: "valid parallel without timezone",
+			trigger: `trigger:
+  cron:
+    schedule: "0 9 * * *"
+    overlap_policy: parallel`,
+		},
+		{
+			name: "missing schedule",
+			trigger: `trigger:
+  cron:
+    overlap_policy: skip`,
+			wantErr: "schedule is required",
+		},
+		{
+			name: "invalid schedule",
+			trigger: `trigger:
+  cron:
+    schedule: "not-a-cron"`,
+			wantErr: "schedule",
+		},
+		{
+			name: "invalid overlap policy",
+			trigger: `trigger:
+  cron:
+    schedule: "0 9 * * *"
+    overlap_policy: queue`,
+			wantErr: "overlap_policy",
+		},
+		{
+			name: "invalid timezone",
+			trigger: `trigger:
+  cron:
+    schedule: "0 9 * * *"
+    timezone: "Mars/Phobos"`,
+			wantErr: "timezone",
+		},
+		{
+			name: "invalid timeout",
+			trigger: `trigger:
+  cron:
+    schedule: "0 9 * * *"
+    timeout: "forever"`,
+			wantErr: "timeout",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := v2.ParseAndValidateWorkflow([]byte(base + "\n" + tt.trigger))
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("expected no error, got %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("error = %v, want %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestWorkflowV2ExecRunRejectsMissingCapability(t *testing.T) {
+	ws := `
+schema_version: 2
+name: restricted
+repositories:
+  primary:
+    provider: github
+    repository: org/repo
+execution:
+  provider: daytona
+  capability_restrictions:
+    execute_command: false
+`
+	wf := `
+schema_version: 2
+name: restricted-wf
+enabled: true
+initial_state: build
+states:
+  build:
+    phase: build
+    on_enter:
+      effects:
+        - exec.run:
+            command: echo hi
+  done:
+    phase: done
+    terminal: true
+`
+	_, _, err := v2.ParseAndValidateWorkflowPair([]byte(wf), []byte(ws))
+	if err == nil || !strings.Contains(err.Error(), "execute_command") {
+		t.Fatalf("error = %v, want execute_command capability missing", err)
 	}
 }

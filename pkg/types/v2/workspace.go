@@ -21,6 +21,7 @@ type Repository struct {
 	Repository    string    `yaml:"repository" json:"repository"`
 	SourceControl string    `yaml:"source_control,omitempty" json:"source_control,omitempty"`
 	Checkout      *Checkout `yaml:"checkout,omitempty" json:"checkout,omitempty"`
+	Permissions   string    `yaml:"permissions,omitempty" json:"permissions,omitempty"`
 }
 
 // Checkout configures clone depth/ref.
@@ -31,10 +32,11 @@ type Checkout struct {
 
 // Execution describes the agent execution environment.
 type Execution struct {
-	Provider string   `yaml:"provider,omitempty" json:"provider,omitempty"`
-	Nix      bool     `yaml:"nix,omitempty" json:"nix,omitempty"`
-	Docker   bool     `yaml:"docker,omitempty" json:"docker,omitempty"`
-	Tools    []string `yaml:"tools,omitempty" json:"tools,omitempty"`
+	Provider               string          `yaml:"provider,omitempty" json:"provider,omitempty"`
+	Nix                    bool            `yaml:"nix,omitempty" json:"nix,omitempty"`
+	Docker                 bool            `yaml:"docker,omitempty" json:"docker,omitempty"`
+	Tools                  []string        `yaml:"tools,omitempty" json:"tools,omitempty"`
+	CapabilityRestrictions map[string]bool `yaml:"capability_restrictions,omitempty" json:"capability_restrictions,omitempty"`
 }
 
 // Credential is a named secret reference (name only; never a secret value).
@@ -117,6 +119,7 @@ type ResolvedWorkspace struct {
 	ResolvedSourceControl map[string]map[ConnectionCapability]bool
 	ResolvedIssueTrackers map[string]map[ConnectionCapability]bool
 	ResolvedReviewSystems map[string]map[ConnectionCapability]bool
+	ResolvedExecCaps      map[ConnectionCapability]bool // execution-block capabilities
 }
 
 // HasCIConnection reports whether a CI connection name exists.

@@ -1,10 +1,12 @@
 package hub
 
 import (
+	"context"
 	"log"
 	"strings"
 	"time"
 
+	"github.com/elasticclaw/elasticclaw/pkg/hub/workflowv2"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 )
 
@@ -385,7 +387,51 @@ func (s *Server) reapOnce() {
 		}
 	}
 	s.reaperMu.Unlock()
+
+	s.reapWorkflowV2RunTimeouts(n, take)
+
 	if actions > 0 {
 		s.promotePendingClaws()
+	}
+}
+
+// reapWorkflowV2RunTimeouts cancels v2 workflow runs whose explicit timeout_at
+// has passed. Rows without a timeout_at are intentionally left alone so an
+// operator can recover legacy runs instead of having the reaper cancel them
+// automatically.
+func (s *Server) reapWorkflowV2RunTimeouts(n time.Time, take func() bool) {
+	rows, err := s.db.Query(`
+		SELECT r.id FROM workflow_v2_runs r
+		WHERE r.status IN ('active','suspended')
+		AND r.timeout_at > 0 AND r.timeout_at < ?
+		ORDER BY r.created_at`, n.UnixMilli())
+	if err != nil {
+		log.Printf("[reaper] workflow v2 timeout query: %v", err)
+		return
+	}
+	defer rows.Close()
+	type run struct{ id string }
+	var runs []run
+	for rows.Next() {
+		var r run
+		if err := rows.Scan(&r.id); err == nil {
+			runs = append(runs, r)
+		}
+	}
+	rows.Close()
+
+	for _, r := range runs {
+		if !take() {
+			return
+		}
+		// Use the existing activation-cancellation path so child effects,
+		// effect attempts, control messages, and agent tasks are all cancelled
+		// transactionally with the parent run.
+		if err := workflowv2.NewStore(s.db).CancelActivation(context.Background(), r.id, "run timed out"); err != nil {
+			log.Printf("[reaper] failed to cancel timed-out workflow v2 run %s: %v", r.id, err)
+			continue
+		}
+		log.Printf("[reaper] cancelled timed-out workflow v2 run %s", r.id)
+		s.maybeFinishWorkflowV2Parent(context.Background(), r.id)
 	}
 }
