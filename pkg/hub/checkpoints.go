@@ -63,18 +63,31 @@ type checkpointSummary struct {
 	CompletedAt     *time.Time `json:"completed_at,omitempty"`
 }
 
+// checkpointManifestSchema is the manifest format version.
+//
+// Schema 1 inlined the complete file list in Files. Nothing ever read it back
+// — restore resolves the file list from the root tree blob via filesForTree —
+// so the field was pure duplication of content-addressed data, at roughly
+// 700 KB per manifest. Schema 2 keeps only the aggregates.
+const checkpointManifestSchema = 2
+
 type checkpointManifest struct {
-	Schema       int                    `json:"schema"`
-	CheckpointID string                 `json:"checkpoint_id"`
-	ClawID       string                 `json:"claw_id"`
-	CreatedAt    time.Time              `json:"created_at"`
-	Reason       string                 `json:"reason"`
-	Hub          checkpointHubManifest  `json:"hub"`
-	Provider     checkpointProvider     `json:"provider"`
-	Messages     checkpointMessages     `json:"messages"`
-	Workspace    checkpointWorkspace    `json:"workspace"`
-	PRs          []checkpointPR         `json:"prs"`
-	Files        []types.CheckpointFile `json:"files"`
+	Schema       int                   `json:"schema"`
+	CheckpointID string                `json:"checkpoint_id"`
+	ClawID       string                `json:"claw_id"`
+	CreatedAt    time.Time             `json:"created_at"`
+	Reason       string                `json:"reason"`
+	Hub          checkpointHubManifest `json:"hub"`
+	Provider     checkpointProvider    `json:"provider"`
+	Messages     checkpointMessages    `json:"messages"`
+	Workspace    checkpointWorkspace   `json:"workspace"`
+	PRs          []checkpointPR        `json:"prs"`
+
+	// FilesCount and FilesBytes summarise the workspace captured by this
+	// checkpoint. The list itself lives in the root tree blob addressed by
+	// Workspace.TreeSHA256, deduplicated across every checkpoint sharing it.
+	FilesCount int   `json:"files_count"`
+	FilesBytes int64 `json:"files_bytes"`
 }
 
 type checkpointHubManifest struct {
@@ -177,7 +190,7 @@ func (s *Server) requestIdleCheckpoints() {
 
 func (s *Server) hasRecentCheckpoint(clawID string, minAge time.Duration) bool {
 	var completedAt time.Time
-	err := s.db.QueryRow(`SELECT completed_at FROM claw_checkpoints WHERE claw_id=? AND status='ready' ORDER BY completed_at DESC LIMIT 1`, clawID).Scan(&completedAt)
+	err := s.db.QueryRow(`SELECT completed_at FROM claw_checkpoints WHERE claw_id=? AND status IN ('ready','skipped') ORDER BY completed_at DESC LIMIT 1`, clawID).Scan(&completedAt)
 	return err == nil && time.Since(completedAt) < minAge
 }
 
@@ -185,6 +198,35 @@ func (s *Server) hasRecentCheckpointReason(clawID, reason string, minAge time.Du
 	var createdAt time.Time
 	err := s.db.QueryRow(`SELECT created_at FROM claw_checkpoints WHERE claw_id=? AND reason=? AND status IN ('creating','ready') ORDER BY created_at DESC LIMIT 1`, clawID, reason).Scan(&createdAt)
 	return err == nil && time.Since(createdAt) < minAge
+}
+
+// checkpointDuplicatesPrevious reports whether an idle checkpoint captured the
+// same workspace tree as the claw's last recorded checkpoint. Only idle-timer
+// checkpoints are eligible: a checkpoint taken at a lifecycle boundary is worth
+// keeping even when nothing changed on disk, because it marks the transition.
+func (s *Server) checkpointDuplicatesPrevious(checkpointID, clawID, rootSHA string) bool {
+	if rootSHA == "" {
+		return false
+	}
+	var reason string
+	if err := s.db.QueryRow(`SELECT reason FROM claw_checkpoints WHERE id=?`, checkpointID).Scan(&reason); err != nil || reason != "idle-timer" {
+		return false
+	}
+	var prev string
+	err := s.db.QueryRow(
+		`SELECT root_tree_sha256 FROM claw_checkpoints
+		  WHERE claw_id=? AND id<>? AND status IN ('ready','skipped') AND root_tree_sha256<>''
+		  ORDER BY created_at DESC LIMIT 1`, clawID, checkpointID).Scan(&prev)
+	return err == nil && prev == rootSHA
+}
+
+// markCheckpointSkipped records the checkpoint without a manifest. The row is
+// kept so the timeline still shows the claw was idle at that moment.
+func (s *Server) markCheckpointSkipped(checkpointID, rootSHA string) error {
+	_, err := s.db.Exec(
+		`UPDATE claw_checkpoints SET status='skipped', root_tree_sha256=?, workspace_tree_sha256=?, completed_at=? WHERE id=?`,
+		rootSHA, rootSHA, now(), checkpointID)
+	return err
 }
 
 func (s *Server) requestBootstrapCheckpoint(clawID string) {
@@ -807,6 +849,14 @@ func (s *Server) authenticateCheckpointClaw(w http.ResponseWriter, r *http.Reque
 }
 
 func (s *Server) finalizeCheckpoint(checkpointID, tenantID, clawID, rootSHA string) error {
+	// An idle checkpoint whose workspace tree is byte-identical to the previous
+	// one records that the agent did nothing. On the Faster hub 96% of
+	// idle-timer checkpoints were in that state. Recording them as 'ready' work
+	// buries the real checkpoints and inflates every count derived from them,
+	// so mark the duplicate and stop before writing a manifest.
+	if s.checkpointDuplicatesPrevious(checkpointID, clawID, rootSHA) {
+		return s.markCheckpointSkipped(checkpointID, rootSHA)
+	}
 	files, err := s.filesForTree(rootSHA)
 	if err != nil {
 		return err
@@ -819,7 +869,7 @@ func (s *Server) finalizeCheckpoint(checkpointID, tenantID, clawID, rootSHA stri
 	if err != nil {
 		return err
 	}
-	data, err := json.MarshalIndent(manifest, "", "  ")
+	data, err := json.Marshal(manifest)
 	if err != nil {
 		return err
 	}
@@ -831,8 +881,9 @@ func (s *Server) finalizeCheckpoint(checkpointID, tenantID, clawID, rootSHA stri
 	if err := os.WriteFile(path, data, 0o640); err != nil {
 		return err
 	}
-	_, err = s.db.Exec(`UPDATE claw_checkpoints SET status='ready', manifest_sha256=?, manifest_path=?, root_tree_sha256=?, message_tree_sha256=?, workspace_tree_sha256=?, message_count=?, pr_count=?, repo_count=?, completed_at=? WHERE id=?`,
-		manifestSHA, path, rootSHA, msgSHA, rootSHA, msgCount, len(manifest.PRs), checkpointRepoCount(manifest.PRs), now(), checkpointID)
+	_, err = s.db.Exec(`UPDATE claw_checkpoints SET status='ready', manifest_sha256=?, manifest_path=?, root_tree_sha256=?, message_tree_sha256=?, workspace_tree_sha256=?, message_count=?, pr_count=?, repo_count=?, pipeline_stage=?, hub_version=?, files_count=?, files_bytes=?, completed_at=? WHERE id=?`,
+		manifestSHA, path, rootSHA, msgSHA, rootSHA, msgCount, len(manifest.PRs), checkpointRepoCount(manifest.PRs),
+		manifest.Hub.PipelineStage, manifest.Hub.Version, manifest.FilesCount, manifest.FilesBytes, now(), checkpointID)
 	return err
 }
 
@@ -850,7 +901,7 @@ func (s *Server) completeMetadataOnlyCheckpoint(checkpointID, clawID, reason, de
 		return err
 	}
 	manifest.Workspace.TreeSHA256 = ""
-	data, _ := json.MarshalIndent(manifest, "", "  ")
+	data, _ := json.Marshal(manifest)
 	manifestSHA := shaBytes(data)
 	path := checkpointManifestPath(checkpointID)
 	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
@@ -859,8 +910,8 @@ func (s *Server) completeMetadataOnlyCheckpoint(checkpointID, clawID, reason, de
 	if err := os.WriteFile(path, data, 0o640); err != nil {
 		return err
 	}
-	_, err = s.db.Exec(`UPDATE claw_checkpoints SET status='ready', manifest_sha256=?, manifest_path=?, message_tree_sha256=?, message_count=?, error=?, completed_at=? WHERE id=?`,
-		manifestSHA, path, msgSHA, msgCount, detail, now(), checkpointID)
+	_, err = s.db.Exec(`UPDATE claw_checkpoints SET status='ready', manifest_sha256=?, manifest_path=?, message_tree_sha256=?, message_count=?, pipeline_stage=?, hub_version=?, error=?, completed_at=? WHERE id=?`,
+		manifestSHA, path, msgSHA, msgCount, manifest.Hub.PipelineStage, manifest.Hub.Version, detail, now(), checkpointID)
 	return err
 }
 
@@ -935,7 +986,7 @@ func (s *Server) buildCheckpointManifest(checkpointID, clawID, rootSHA, msgSHA s
 	_ = s.db.QueryRow(`SELECT reason, created_at FROM claw_checkpoints WHERE id=?`, checkpointID).Scan(&reason, &createdAt)
 	prs := s.checkpointPRs(clawID)
 	return &checkpointManifest{
-		Schema:       1,
+		Schema:       checkpointManifestSchema,
 		CheckpointID: checkpointID,
 		ClawID:       clawID,
 		CreatedAt:    createdAt,
@@ -955,12 +1006,23 @@ func (s *Server) buildCheckpointManifest(checkpointID, clawID, rootSHA, msgSHA s
 			ExternalTriggerID: row.ExternalTriggerID,
 			PipelineStage:     row.PipelineStage,
 		},
-		Provider:  checkpointProvider{Name: row.Provider, ProviderID: row.ProviderID},
-		Messages:  checkpointMessages{BlobSHA256: msgSHA, Count: msgCount, CutoffAt: cutoff},
-		Workspace: checkpointWorkspace{TreeSHA256: rootSHA},
-		PRs:       prs,
-		Files:     files,
+		Provider:   checkpointProvider{Name: row.Provider, ProviderID: row.ProviderID},
+		Messages:   checkpointMessages{BlobSHA256: msgSHA, Count: msgCount, CutoffAt: cutoff},
+		Workspace:  checkpointWorkspace{TreeSHA256: rootSHA},
+		PRs:        prs,
+		FilesCount: len(files),
+		FilesBytes: filesTotalBytes(files),
 	}, nil
+}
+
+// filesTotalBytes sums the captured size of a checkpoint's file list. Only the
+// total is kept in the manifest; the list itself is addressed by the root tree.
+func filesTotalBytes(files []types.CheckpointFile) int64 {
+	var total int64
+	for _, f := range files {
+		total += f.Size
+	}
+	return total
 }
 
 func (s *Server) checkpointPRs(clawID string) []checkpointPR {

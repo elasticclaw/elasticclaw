@@ -570,6 +570,9 @@ type HubConfig struct {
 	// infrastructure failures.
 	Liveness *LivenessConfig `yaml:"liveness,omitempty" json:"liveness,omitempty"`
 
+	// Retention configures reclamation of checkpoint and diagnostic storage.
+	Retention *RetentionConfig `yaml:"retention,omitempty" json:"retention,omitempty"`
+
 	// Notifications holds outbound notification configuration: named
 	// transports (notifiers) and the hub features that send through them.
 	Notifications *NotificationsConfig `yaml:"notifications,omitempty" json:"notifications,omitempty"`
@@ -760,8 +763,24 @@ type LivenessConfig struct {
 	ClaimTTL               string `yaml:"claim_ttl,omitempty" json:"claimTtl,omitempty"`
 	ReaperInterval         string `yaml:"reaper_interval,omitempty" json:"reaperInterval,omitempty"`
 	GatewayUnhealthyChecks *int   `yaml:"gateway_unhealthy_checks,omitempty" json:"gatewayUnhealthyChecks,omitempty"`
-	BusyTurnMax            string `yaml:"busy_turn_max,omitempty" json:"busyTurnMax,omitempty"`
-	SilentDeathMax         string `yaml:"silent_death_max,omitempty" json:"silentDeathMax,omitempty"`
+	// GatewayUnhealthyReconnectGrace is how long after a bridge registers its
+	// unhealthy heartbeats are ignored, so a gateway that is merely still
+	// starting does not spend the claw's escalation budget.
+	//
+	// The counter behind gateway_unhealthy_checks only resets on a heartbeat
+	// that reports the gateway healthy, and no heartbeat arrives at all while
+	// the bridge is disconnected. Without a grace, a claw that reconnects
+	// repeatedly accumulates checks across reconnects and is replaced without
+	// ever having been unhealthy for gateway_unhealthy_checks CONSECUTIVE
+	// heartbeats, which is what the threshold is calibrated for.
+	//
+	// The grace applies only while the counter is at zero, so it protects a
+	// normal startup without shielding a gateway that is already failing: one
+	// dying in a restart loop keeps a non-zero counter and escalates as before.
+	// Set to "0" to disable and restore the un-graced behaviour.
+	GatewayUnhealthyReconnectGrace string `yaml:"gateway_unhealthy_reconnect_grace,omitempty" json:"gatewayUnhealthyReconnectGrace,omitempty"`
+	BusyTurnMax                    string `yaml:"busy_turn_max,omitempty" json:"busyTurnMax,omitempty"`
+	SilentDeathMax                 string `yaml:"silent_death_max,omitempty" json:"silentDeathMax,omitempty"`
 	// PRConditionsMaxWait is the maximum time a PR may wait for pr_conditions before the run errors.
 	PRConditionsMaxWait string `yaml:"pr_conditions_max_wait,omitempty" json:"prConditionsMaxWait,omitempty"`
 	// IdleResume controls the idle auto-resume recovery (default on). It lives
@@ -787,6 +806,30 @@ type LivenessConfig struct {
 	// recovery budget — a threshold set too low can exhaust the budget on
 	// healthy waits and leave nothing for the stall it was added for.
 	IdleResumeAfter string `yaml:"idle_resume_after,omitempty" json:"idleResumeAfter,omitempty"`
+}
+
+// RetentionConfig controls reclamation of the storage the hub accumulates:
+// checkpoint manifests, content-addressed checkpoint blobs, captured gateway
+// diagnostics, delivered messages and task run events. Durations use Go
+// duration strings; empty values receive the defaults documented per field.
+//
+// Nothing here is reclaimed unless the sweeper runs, and the sweeper never
+// runs during startup — see retentionSweeper in pkg/hub/retention.go.
+type RetentionConfig struct {
+	// Enabled is the master switch (default true). Turning it off stops every
+	// reclamation phase: compaction, retention deletes and the blob sweep.
+	Enabled *bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	// Interval is how often a full reclamation cycle runs (default 1h).
+	Interval string `yaml:"interval,omitempty" json:"interval,omitempty"`
+	// MaxAge is the retention window (default 2160h = 90 days). It applies to
+	// all four retention targets: diagnostics logs, checkpoints, task run
+	// events and messages.
+	MaxAge string `yaml:"max_age,omitempty" json:"maxAge,omitempty"`
+	// CompactAfter is how long a claw must go unchanged before it counts as
+	// finalized and its superseded checkpoint manifests may be compacted
+	// (default 240h = 10 days). A claw with a merged PR is finalized
+	// immediately, regardless of this value.
+	CompactAfter string `yaml:"compact_after,omitempty" json:"compactAfter,omitempty"`
 }
 
 // IntegrationsConfig holds configs for external integrations.

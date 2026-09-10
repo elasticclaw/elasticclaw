@@ -53,7 +53,13 @@ func taskRunFailureTypeForAgentFailure(kind agentFailureKind) string {
 		return taskRunFailureProvisionFailed
 	case agentFailureSandboxTerminated, agentFailureProviderLost:
 		return taskRunFailureProviderLost
-	case agentFailureBootstrap, agentFailureRestore, agentFailureWorkspaceReadiness, agentFailureWorkspaceFiles:
+	case agentFailureWorkspaceReadiness:
+		// Readiness failures are the watchdog stopping a workspace that stopped
+		// responding, which happens while the agent is working -- not while it
+		// is starting. Folding them into bootstrap_failed made the two
+		// indistinguishable in analytics.
+		return taskRunFailureWorkspaceUnresponsive
+	case agentFailureBootstrap, agentFailureRestore, agentFailureWorkspaceFiles:
 		return taskRunFailureBootstrapFailed
 	case agentFailureGitHubCredentials:
 		return taskRunFailurePermissionOrAuth
@@ -78,11 +84,19 @@ func heartbeatShouldEscalate(unhealthyCount, gatewayUnhealthyMax int, status str
 	return unhealthyCount == gatewayUnhealthyMax && status == "connected" && bootstrapOK
 }
 
-func watchdogAction(nowAt time.Time, status string, bootstrapOK, gatewayReady bool, lastStatusAt, lastUserMessageAt, warnedAt time.Time, silentDeathMax time.Duration) watchdogHealthAction {
+func watchdogAction(nowAt time.Time, status string, bootstrapOK, gatewayReady bool, lastStatusAt, lastHeartbeatAt, lastUserMessageAt, warnedAt time.Time, silentDeathMax time.Duration) watchdogHealthAction {
 	if status != "connected" || !bootstrapOK || !gatewayReady {
 		return watchdogHealthNone
 	}
-	silentFor := nowAt.Sub(lastStatusAt)
+	// The most recent proof of life wins. lastStatusAt is fed by status_pong on
+	// a second WebSocket; lastHeartbeatAt by the bridge's 15-second heartbeat on
+	// the main one. Taking only the former let a lost status channel condemn a
+	// claw whose bridge was reporting in continuously.
+	liveAt := lastStatusAt
+	if lastHeartbeatAt.After(liveAt) {
+		liveAt = lastHeartbeatAt
+	}
+	silentFor := nowAt.Sub(liveAt)
 	if userSilentFor := nowAt.Sub(lastUserMessageAt); userSilentFor < silentFor {
 		silentFor = userSilentFor
 	}
@@ -527,6 +541,23 @@ func (s *Server) resetClawForRetry(tenantID, clawID, checkpointID, bootstrapStat
 		return false, err
 	}
 	rows, _ := res.RowsAffected()
+	if rows > 0 {
+		// The gateway health counters are keyed by claw ID, and a retry reuses
+		// the ID while replacing the sandbox behind it. They must be cleared for
+		// the same reason idle_resume_count is cleared above: the successor is a
+		// brand-new gateway whose health says nothing about the predecessor's,
+		// and handing it an already-spent budget means the first unhealthy
+		// heartbeat of its boot re-crosses the escalation threshold and replaces
+		// a sandbox that never had a chance to report healthy.
+		//
+		// Before this, the counters were only cleared on manual kill and on
+		// terminal pipeline teardown -- never on the retry path itself.
+		s.mu.Lock()
+		delete(s.gatewayUnhealthyCounts, clawID)
+		delete(s.gatewayEscalatedAt, clawID)
+		delete(s.gatewayGraceGrantedAt, clawID)
+		s.mu.Unlock()
+	}
 	return rows > 0, nil
 }
 
