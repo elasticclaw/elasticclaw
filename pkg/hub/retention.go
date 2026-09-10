@@ -174,16 +174,38 @@ func (s *Server) retentionSweepOnce() {
 //
 // The caller binds the cutoff (now - compact_after) twice. The alias `c` must
 // be the claws table.
+// blobSweepGrace is how recently a blob may have been written and still be
+// spared by the sweep. It must exceed the longest plausible gap between a blob
+// upload and the manifest that references it being written -- that is one
+// checkpoint's upload phase, not one checkpoint interval.
+const blobSweepGrace = time.Hour
+
 const finalizedClawPredicateSQL = `(
-	EXISTS (SELECT 1 FROM claw_prs p WHERE p.claw_id = c.id AND p.merged = 1)
-	OR EXISTS (
-		SELECT 1 FROM task_run_summaries s
-		 WHERE s.claw_id = c.id AND s.merged_pr_count > 0
-	)
-	OR EXISTS (
-		SELECT 1 FROM task_run_prs rp
-		  JOIN task_run_summaries rs ON rs.run_id = rp.run_id
-		 WHERE rs.claw_id = c.id AND rp.merged = 1
+	(
+		-- A merged PR only finalizes a claw that is no longer running. The PR
+		-- watcher deliberately keeps a claw alive while it still has other open
+		-- PRs, so "merged something" and "finished" are not the same claim.
+		-- Compacting a live claw is not merely premature: retryCheckpointID
+		-- walks BACK through older ready checkpoints when the newest is a
+		-- bootstrap capture of state zero, so collapsing to one checkpoint can
+		-- remove every usable recovery point and make a retry restart from
+		-- nothing.
+		c.status NOT IN ('connected', 'starting', 'provisioning')
+		AND NOT EXISTS (
+			SELECT 1 FROM claw_prs op WHERE op.claw_id = c.id AND op.merged = 0 AND op.state = 'open'
+		)
+		AND (
+			EXISTS (SELECT 1 FROM claw_prs p WHERE p.claw_id = c.id AND p.merged = 1)
+			OR EXISTS (
+				SELECT 1 FROM task_run_summaries s
+				 WHERE s.claw_id = c.id AND s.merged_pr_count > 0
+			)
+			OR EXISTS (
+				SELECT 1 FROM task_run_prs rp
+				  JOIN task_run_summaries rs ON rs.run_id = rp.run_id
+				 WHERE rs.claw_id = c.id AND rp.merged = 1
+			)
+		)
 	)
 	OR (
 		COALESCE(c.last_seen, c.created_at) < ?
@@ -598,6 +620,19 @@ func (s *Server) sweepCheckpointBlobs() (int, int64, error) {
 	if _, err := os.Stat(blobRoot); os.IsNotExist(err) {
 		return 0, 0, nil
 	}
+	// Everything written inside this window is off limits. Checkpoint creation
+	// is not serialised against the sweep: blobs are uploaded first and only
+	// become reachable once the manifest is written and the row marked ready.
+	// A blob uploaded seconds ago is therefore legitimately absent from the keep
+	// set, and deleting it leaves the checkpoint that is about to reference it
+	// unrestorable. The same window covers the *.tmp-<uuid> files an upload
+	// renames into place, which are excluded outright below since they are
+	// never named after a digest and so can never be in the keep set.
+	//
+	// A grace window rather than a lock: the alternative is holding a mutex
+	// across every blob upload and the whole sweep, which would stall uploads
+	// for the length of a full directory walk.
+	cutoff := time.Now().Add(-blobSweepGrace)
 	removed, freed := 0, int64(0)
 	err = filepath.Walk(blobRoot, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
@@ -606,7 +641,16 @@ func (s *Server) sweepCheckpointBlobs() (int, int64, error) {
 		if info.IsDir() {
 			return nil
 		}
+		if strings.Contains(info.Name(), ".tmp-") {
+			// An upload in progress. It has no digest name, so it would
+			// otherwise look like an orphan and be deleted out from under the
+			// os.Rename that is about to publish it.
+			return nil
+		}
 		if _, ok := keep[normalizeBlobDigest(info.Name())]; ok {
+			return nil
+		}
+		if info.ModTime().After(cutoff) {
 			return nil
 		}
 		size := info.Size()

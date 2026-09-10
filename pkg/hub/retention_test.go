@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -421,6 +422,14 @@ func TestCheckpointBlobKeepSetCoversRowsManifestsAndTrees(t *testing.T) {
 		t.Errorf("keep set retained an unreferenced blob")
 	}
 
+	// Age the orphan past the sweep's grace window. Blobs written moments ago
+	// are spared on purpose -- an upload lands before the manifest referencing
+	// it exists -- so a freshly written orphan is not yet eligible.
+	aged := time.Now().Add(-2 * blobSweepGrace)
+	if err := os.Chtimes(checkpointBlobPath(orphanSHA), aged, aged); err != nil {
+		t.Fatal(err)
+	}
+
 	removed, _, err := s.sweepCheckpointBlobs()
 	if err != nil {
 		t.Fatalf("sweepCheckpointBlobs: %v", err)
@@ -572,5 +581,94 @@ func TestRetentionSweepOnceRespectsMasterSwitch(t *testing.T) {
 	}
 	if count != 1 {
 		t.Fatalf("disabled sweeper deleted %d rows", 1-count)
+	}
+}
+
+// A blob written moments ago is legitimately absent from the keep set: the
+// upload lands before the manifest that references it. Deleting it leaves the
+// checkpoint about to be published unrestorable.
+func TestSweepCheckpointBlobsSparesRecentAndInFlightBlobs(t *testing.T) {
+	s := newRetentionTestServer(t)
+	blobDir := filepath.Join(checkpointsRoot(), "blobs", "sha256", "ab", "cd")
+	if err := os.MkdirAll(blobDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	orphanOld := filepath.Join(blobDir, strings.Repeat("a", 64))
+	orphanNew := filepath.Join(blobDir, strings.Repeat("b", 64))
+	inFlight := filepath.Join(blobDir, strings.Repeat("c", 64)+".tmp-1234")
+	for _, p := range []string{orphanOld, orphanNew, inFlight} {
+		if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Only the old orphan is eligible.
+	old := time.Now().Add(-2 * blobSweepGrace)
+	if err := os.Chtimes(orphanOld, old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, _, err := s.sweepCheckpointBlobs(); err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if _, err := os.Stat(orphanOld); !os.IsNotExist(err) {
+		t.Error("an orphan older than the grace window should have been swept")
+	}
+	if _, err := os.Stat(orphanNew); err != nil {
+		t.Error("a blob written inside the grace window must be spared: its manifest may not exist yet")
+	}
+	if _, err := os.Stat(inFlight); err != nil {
+		t.Error("an in-flight .tmp- upload must never be swept")
+	}
+}
+
+// A claw that merged one PR can still be running and still have other PRs open.
+// Compacting it can destroy the older checkpoints retryCheckpointID falls back to.
+func TestClawFinalizedIgnoresMergedPRWhileClawIsActive(t *testing.T) {
+	s := newRetentionTestServer(t)
+	cutoff := time.Now().Add(-240 * time.Hour)
+	// last_seen is recent on purpose: the staleness arm must stay inert so the
+	// merged-PR arm is the only thing that can finalize this claw, which is the
+	// behaviour under test.
+	insertRetentionClaw(t, s, "live", time.Now())
+	if _, err := s.db.Exec(`UPDATE claws SET status='connected' WHERE id='live'`); err != nil {
+		t.Fatal(err)
+	}
+	insertRetentionPR(t, s, "live", 1)
+
+	finalized, err := s.clawFinalized("live", cutoff)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if finalized {
+		t.Error("a connected claw must not be finalized by a merged PR alone")
+	}
+
+	// Same claw, now offline but still holding an open PR.
+	if _, err := s.db.Exec(`UPDATE claws SET status='offline' WHERE id='live'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(
+		`INSERT INTO claw_prs(id, claw_id, repo, pr_number, pr_url, state, merged, created_at)
+		 VALUES('live-pr2','live','owner/repo',2,'https://example.test/pr/2','open',0,?)`, now()); err != nil {
+		t.Fatal(err)
+	}
+	finalized, err = s.clawFinalized("live", cutoff)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if finalized {
+		t.Error("a claw with a still-open PR must not be finalized by the merged arm")
+	}
+
+	// Open PR resolved: now it is genuinely done.
+	if _, err := s.db.Exec(`UPDATE claw_prs SET state='closed' WHERE id='live-pr2'`); err != nil {
+		t.Fatal(err)
+	}
+	finalized, err = s.clawFinalized("live", cutoff)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !finalized {
+		t.Error("an offline claw with a merged PR and nothing open is finalized")
 	}
 }

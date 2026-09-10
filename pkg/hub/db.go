@@ -1253,6 +1253,22 @@ func widenFailureTypeCheckV1(db *sql.DB, table string) error {
 		return err
 	}
 
+	// rowid is carried across explicitly, exactly as rebuildTaskRunEventsAgentIdleV1
+	// does. pragma_table_info does not report the implicit rowid, so a copy built
+	// from it alone renumbers every row whenever the source has gaps from earlier
+	// deletes. task_run_events cannot survive that: the lifecycle notifier stores
+	// a rowid watermark (lifecycleStateWatermarkKey) and only ever selects events
+	// above it, so a renumbered table whose new maximum rowid falls below the
+	// stored cursor silently stops delivering notifications forever.
+	//
+	// Skipped for a WITHOUT ROWID table, which has no rowid to copy. An empty
+	// table still has one, so ErrNoRows is not a negative result.
+	withRowid := true
+	var rowidProbe int64
+	if err := db.QueryRow(fmt.Sprintf(`SELECT rowid FROM %q LIMIT 1`, table)).Scan(&rowidProbe); err != nil && err != sql.ErrNoRows {
+		withRowid = false
+	}
+
 	columns := []string{}
 	colRows, err := db.Query(fmt.Sprintf(`SELECT name FROM pragma_table_info(%q)`, table))
 	if err != nil {
@@ -1274,6 +1290,9 @@ func widenFailureTypeCheckV1(db *sql.DB, table string) error {
 		return fmt.Errorf("%s reported no columns", table)
 	}
 	colList := strings.Join(columns, ", ")
+	if withRowid {
+		colList = "rowid, " + colList
+	}
 
 	tmp := table + "_widen_tmp"
 	createTmp := strings.Replace(schema, oldCheck, newCheck, 1)

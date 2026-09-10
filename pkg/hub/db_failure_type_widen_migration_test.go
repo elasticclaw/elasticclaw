@@ -2,6 +2,7 @@ package hub
 
 import (
 	"database/sql"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -133,5 +134,71 @@ func TestWorkspaceReadinessIsNotBootstrapFailure(t *testing.T) {
 		if got := taskRunFailureTypeForAgentFailure(kind); got != taskRunFailureBootstrapFailed {
 			t.Errorf("kind %v maps to %q, want bootstrap_failed", kind, got)
 		}
+	}
+}
+
+// The lifecycle notifier stores a rowid watermark over task_run_events and only
+// selects rows above it. A rebuild that renumbers rowids — which a plain
+// INSERT..SELECT does whenever the source has gaps from earlier deletes — can
+// leave the table's maximum rowid below the stored cursor, silently stopping
+// every future notification.
+func TestWidenFailureTypeCheckPreservesRowids(t *testing.T) {
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := migrate(db); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	// Force the narrow CHECK back so the widen has work to do, and leave a gap.
+	if _, err := db.Exec(`DROP TABLE task_run_events`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TABLE task_run_events (
+		id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, run_id TEXT NOT NULL,
+		event_type TEXT NOT NULL, event_key TEXT NOT NULL DEFAULT '',
+		failure_type TEXT NOT NULL DEFAULT '' CHECK(failure_type IN ('','creation_failed','provision_failed','bootstrap_failed','agent_stopped','manual_stop_before_delivery','done_without_pr','no_pr','pr_closed_unmerged','timeout','provider_lost','permission_or_auth_failed','unknown')),
+		event_time INTEGER NOT NULL, created_at INTEGER NOT NULL
+	)`); err != nil {
+		t.Fatal(err)
+	}
+	for i := 1; i <= 5; i++ {
+		if _, err := db.Exec(`INSERT INTO task_run_events(id,tenant_id,run_id,event_type,event_time,created_at)
+			VALUES(?,?,?,?,?,?)`, fmt.Sprintf("e%d", i), "t", "r", "task_start", 1, 1); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Delete the middle rows so the surviving rowids are sparse: 1, 5.
+	if _, err := db.Exec(`DELETE FROM task_run_events WHERE id IN ('e2','e3','e4')`); err != nil {
+		t.Fatal(err)
+	}
+
+	var beforeMax int64
+	if err := db.QueryRow(`SELECT MAX(rowid) FROM task_run_events`).Scan(&beforeMax); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := widenFailureTypeCheckV1(db, "task_run_events"); err != nil {
+		t.Fatalf("widen: %v", err)
+	}
+
+	var afterMax int64
+	if err := db.QueryRow(`SELECT MAX(rowid) FROM task_run_events`).Scan(&afterMax); err != nil {
+		t.Fatal(err)
+	}
+	if afterMax != beforeMax {
+		t.Errorf("max rowid moved from %d to %d: a notifier watermark above %d would go deaf",
+			beforeMax, afterMax, afterMax)
+	}
+
+	// And the identity of each surviving row must be unchanged.
+	var firstID string
+	if err := db.QueryRow(`SELECT id FROM task_run_events WHERE rowid=1`).Scan(&firstID); err != nil {
+		t.Fatalf("row 1 lost its rowid: %v", err)
+	}
+	if firstID != "e1" {
+		t.Errorf("rowid 1 now holds %q, want e1", firstID)
 	}
 }
