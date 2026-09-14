@@ -111,9 +111,20 @@ func (s *Server) retentionSettings() retentionSettings {
 	// the two, a checkpoint would be deleted outright before it was ever
 	// eligible for the cheaper, reversible-in-spirit compaction step.
 	if cfg.compactAfter >= cfg.maxAge {
+		// Derive the replacement from max_age rather than reaching for the
+		// default, which is not guaranteed to satisfy the very rule being
+		// enforced: a max_age of 8d sits above the 7d floor yet below the 10d
+		// default, so falling back to the default would leave compact_after
+		// still >= max_age and the ordering still broken.
+		//
+		// Half of max_age always works. max_age has already been clamped to at
+		// least minRetentionMaxAge (7d), so half of it is at least 3.5d, which
+		// clears minRetentionCompactAfter (24h), and it is strictly below
+		// max_age by construction.
+		replacement := cfg.maxAge / 2
 		log.Printf("[retention] compact_after %s is not below max_age %s; using %s",
-			cfg.compactAfter, cfg.maxAge, defaultRetentionCompactAfter)
-		cfg.compactAfter = defaultRetentionCompactAfter
+			cfg.compactAfter, cfg.maxAge, replacement)
+		cfg.compactAfter = replacement
 	}
 	return cfg
 }

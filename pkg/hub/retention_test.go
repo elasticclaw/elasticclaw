@@ -554,8 +554,16 @@ func TestRetentionSettingsDefaultsAndOverrides(t *testing.T) {
 			// compact_after past max_age would delete a checkpoint before it was
 			// ever eligible for the cheaper compaction step.
 			name:    "compact_after beyond max_age falls back",
-			cfg:     &types.RetentionConfig{Enabled: boolPtr(true), MaxAge: "240h", CompactAfter: "480h"},
-			enabled: true, interval: defaultRetentionInterval, maxAge: 240 * time.Hour, compactAfter: defaultRetentionCompactAfter,
+			cfg:     &types.RetentionConfig{Enabled: boolPtr(true), MaxAge: "480h", CompactAfter: "960h"},
+			enabled: true, interval: defaultRetentionInterval, maxAge: 480 * time.Hour, compactAfter: 240 * time.Hour,
+		},
+		{
+			// The replacement must itself satisfy the ordering. max_age here is
+			// above the 7d floor but below the 10d default, so falling back to
+			// the default would leave compact_after >= max_age all the same.
+			name:    "the fallback respects the ordering it enforces",
+			cfg:     &types.RetentionConfig{Enabled: boolPtr(true), MaxAge: "192h", CompactAfter: "500h"},
+			enabled: true, interval: defaultRetentionInterval, maxAge: 192 * time.Hour, compactAfter: 96 * time.Hour,
 		},
 		{
 			name:    "garbage falls back per field",

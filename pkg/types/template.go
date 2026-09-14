@@ -816,8 +816,13 @@ type LivenessConfig struct {
 // Nothing here is reclaimed unless the sweeper runs, and the sweeper never
 // runs during startup — see retentionSweeper in pkg/hub/retention.go.
 type RetentionConfig struct {
-	// Enabled is the master switch (default true). Turning it off stops every
-	// reclamation phase: compaction, retention deletes and the blob sweep.
+	// Enabled is the master switch. It defaults to FALSE when omitted: every
+	// phase below deletes irreversibly, and an absent setting means the
+	// operator has not opted in -- most often because they have just upgraded.
+	// Set it explicitly to true once the archive step for this hub has run.
+	//
+	// Turning it off stops every reclamation phase: compaction, retention
+	// deletes and the blob sweep.
 	Enabled *bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
 	// Interval is how often a full reclamation cycle runs (default 1h).
 	Interval string `yaml:"interval,omitempty" json:"interval,omitempty"`
