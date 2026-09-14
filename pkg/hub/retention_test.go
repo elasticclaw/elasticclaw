@@ -44,9 +44,17 @@ func insertRetentionClaw(t *testing.T, s *Server, id string, lastSeen time.Time)
 
 func insertRetentionPR(t *testing.T, s *Server, clawID string, merged int) {
 	t.Helper()
+	// state must agree with merged. The predicate now uses the hub's canonical
+	// unresolved-PR rule, which keys on state, and a row with merged=1 left at
+	// state='open' is a shape the hub never writes -- db.go even carries a
+	// migration to reconcile the two. Seeding it would test a fiction.
+	state := "open"
+	if merged == 1 {
+		state = "merged"
+	}
 	if _, err := s.db.Exec(
-		`INSERT INTO claw_prs(id, claw_id, repo, pr_number, pr_url, merged, created_at) VALUES(?,?,?,?,?,?,?)`,
-		clawID+"-pr", clawID, "owner/repo", 1, "https://example.test/pr/1", merged, now()); err != nil {
+		`INSERT INTO claw_prs(id, claw_id, repo, pr_number, pr_url, state, merged, created_at) VALUES(?,?,?,?,?,?,?,?)`,
+		clawID+"-pr", clawID, "owner/repo", 1, "https://example.test/pr/1", state, merged, now()); err != nil {
 		t.Fatalf("insert pr for %s: %v", clawID, err)
 	}
 }
@@ -526,17 +534,32 @@ func TestRetentionSettingsDefaultsAndOverrides(t *testing.T) {
 		enabled                        bool
 	}{
 		{
-			name: "absent section uses defaults", cfg: nil, enabled: true,
+			// Absent section means the operator has said nothing, which must not
+			// be read as consent to delete.
+			name: "absent section is opt-out", cfg: nil, enabled: false,
 			interval: defaultRetentionInterval, maxAge: defaultRetentionMaxAge, compactAfter: defaultRetentionCompactAfter,
 		},
 		{
-			name:    "explicit values are honoured",
-			cfg:     &types.RetentionConfig{Interval: "15m", MaxAge: "48h", CompactAfter: "6h"},
-			enabled: true, interval: 15 * time.Minute, maxAge: 48 * time.Hour, compactAfter: 6 * time.Hour,
+			name:    "explicit values above the floors are honoured",
+			cfg:     &types.RetentionConfig{Enabled: boolPtr(true), Interval: "15m", MaxAge: "720h", CompactAfter: "48h"},
+			enabled: true, interval: 15 * time.Minute, maxAge: 720 * time.Hour, compactAfter: 48 * time.Hour,
+		},
+		{
+			// Every one of these parses cleanly and would still be a disaster.
+			name:    "dangerous values are clamped to the floors",
+			cfg:     &types.RetentionConfig{Enabled: boolPtr(true), Interval: "1s", MaxAge: "1s", CompactAfter: "1s"},
+			enabled: true, interval: minRetentionInterval, maxAge: minRetentionMaxAge, compactAfter: minRetentionCompactAfter,
+		},
+		{
+			// compact_after past max_age would delete a checkpoint before it was
+			// ever eligible for the cheaper compaction step.
+			name:    "compact_after beyond max_age falls back",
+			cfg:     &types.RetentionConfig{Enabled: boolPtr(true), MaxAge: "240h", CompactAfter: "480h"},
+			enabled: true, interval: defaultRetentionInterval, maxAge: 240 * time.Hour, compactAfter: defaultRetentionCompactAfter,
 		},
 		{
 			name:    "garbage falls back per field",
-			cfg:     &types.RetentionConfig{Interval: "banana", MaxAge: "-5h", CompactAfter: ""},
+			cfg:     &types.RetentionConfig{Enabled: boolPtr(true), Interval: "banana", MaxAge: "-5h", CompactAfter: ""},
 			enabled: true, interval: defaultRetentionInterval, maxAge: defaultRetentionMaxAge, compactAfter: defaultRetentionCompactAfter,
 		},
 		{
@@ -670,5 +693,68 @@ func TestClawFinalizedIgnoresMergedPRWhileClawIsActive(t *testing.T) {
 	}
 	if !finalized {
 		t.Error("an offline claw with a merged PR and nothing open is finalized")
+	}
+}
+
+// A mention_only row is a PR URL the message scanner noticed; it gates nothing
+// anywhere else in the hub, so it must not be able to hold compaction hostage.
+func TestClawFinalizedIgnoresMentionOnlyPRs(t *testing.T) {
+	s := newRetentionTestServer(t)
+	cutoff := time.Now().Add(-240 * time.Hour)
+	insertRetentionClaw(t, s, "claw", time.Now())
+	if _, err := s.db.Exec(`UPDATE claws SET status='offline' WHERE id='claw'`); err != nil {
+		t.Fatal(err)
+	}
+	insertRetentionPR(t, s, "claw", 1) // a genuinely merged PR
+
+	if _, err := s.db.Exec(
+		`INSERT INTO claw_prs(id, claw_id, repo, pr_number, pr_url, state, merged, mention_only, created_at)
+		 VALUES('claw-mention','claw','owner/repo',2,'https://example.test/pr/2','open',0,1,?)`, now()); err != nil {
+		t.Fatal(err)
+	}
+	finalized, err := s.clawFinalized("claw", cutoff)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !finalized {
+		t.Error("a mention-only row must not block finalization; it gates nothing elsewhere")
+	}
+
+	// A delivered row in a state that is neither merged nor closed does block.
+	if _, err := s.db.Exec(`UPDATE claw_prs SET mention_only=0 WHERE id='claw-mention'`); err != nil {
+		t.Fatal(err)
+	}
+	finalized, err = s.clawFinalized("claw", cutoff)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if finalized {
+		t.Error("a delivered unresolved PR must block finalization")
+	}
+}
+
+// A referenced tree that is missing leaves the keep set incomplete: under
+// schema 2 the per-file digests live only inside it. Sweeping anyway would
+// turn one lost object into the loss of everything the checkpoint still had.
+func TestSweepCheckpointBlobsAbortsOnMissingTreeBlob(t *testing.T) {
+	s := newRetentionTestServer(t)
+	reference := time.Now()
+	insertRetentionClaw(t, s, "claw", reference)
+
+	orphan := writeRetentionBlob(t, []byte("unreferenced"))
+	aged := time.Now().Add(-2 * blobSweepGrace)
+	if err := os.Chtimes(checkpointBlobPath(orphan), aged, aged); err != nil {
+		t.Fatal(err)
+	}
+	// A row referencing a tree digest whose blob was never written.
+	insertRetentionCheckpoint(t, s, retentionCheckpoint{
+		id: "cp", clawID: "claw", status: "ready", createdAt: reference,
+		rootTree: strings.Repeat("f", 64), writeManifest: true})
+
+	if _, _, err := s.sweepCheckpointBlobs(); err == nil {
+		t.Fatal("sweep must abort when a referenced tree blob is missing")
+	}
+	if _, err := os.Stat(checkpointBlobPath(orphan)); err != nil {
+		t.Error("an aborted sweep must not have deleted anything")
 	}
 }

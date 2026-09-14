@@ -31,6 +31,13 @@ const (
 	defaultRetentionInterval     = time.Hour
 	defaultRetentionMaxAge       = 90 * 24 * time.Hour
 	defaultRetentionCompactAfter = 10 * 24 * time.Hour
+
+	// Minimums. These are not tuning knobs -- they are the line below which a
+	// configured value stops describing a retention policy and starts
+	// describing an accident.
+	minRetentionInterval     = 10 * time.Minute
+	minRetentionMaxAge       = 7 * 24 * time.Hour
+	minRetentionCompactAfter = 24 * time.Hour
 )
 
 type retentionSettings struct {
@@ -51,7 +58,14 @@ func (s *Server) retentionEnabled() bool {
 	r := retentionConfig(s.hubCfg)
 	s.mu.RUnlock()
 	if r == nil || r.Enabled == nil {
-		return true
+		// Opt-in, not opt-out. Retention deletes irreversibly, and an absent
+		// config section means the operator has not yet said anything about it
+		// -- most often because they just upgraded. Defaulting to on would have
+		// an existing hub start deleting 90-day-old data one interval after a
+		// deploy that changed no configuration, and before any archive step had
+		// a chance to run. The cost of defaulting off is that disk keeps
+		// growing until someone opts in, which is the state the hub was already in.
+		return false
 	}
 	return *r.Enabled
 }
@@ -82,7 +96,38 @@ func (s *Server) retentionSettings() retentionSettings {
 	cfg.interval = parse(r.Interval, cfg.interval, "interval")
 	cfg.maxAge = parse(r.MaxAge, cfg.maxAge, "max_age")
 	cfg.compactAfter = parse(r.CompactAfter, cfg.compactAfter, "compact_after")
+
+	// Floors, mirroring what livenessSettings does for its own knobs. Every
+	// value here multiplies into irreversible deletion, so a typo must not be
+	// silently obeyed: max_age: 1s is a valid duration and would make the whole
+	// history eligible on the next tick, and a one-second interval would walk
+	// the entire blob tree continuously on a host whose disk was already the
+	// problem.
+	cfg.interval = floor(cfg.interval, minRetentionInterval, "interval")
+	cfg.maxAge = floor(cfg.maxAge, minRetentionMaxAge, "max_age")
+	cfg.compactAfter = floor(cfg.compactAfter, minRetentionCompactAfter, "compact_after")
+
+	// Compacting must not outlive expiry: if compact_after were the larger of
+	// the two, a checkpoint would be deleted outright before it was ever
+	// eligible for the cheaper, reversible-in-spirit compaction step.
+	if cfg.compactAfter >= cfg.maxAge {
+		log.Printf("[retention] compact_after %s is not below max_age %s; using %s",
+			cfg.compactAfter, cfg.maxAge, defaultRetentionCompactAfter)
+		cfg.compactAfter = defaultRetentionCompactAfter
+	}
 	return cfg
+}
+
+// floor clamps a configured duration up to a safe minimum, logging when it
+// does. Unlike parse, which rejects nonsense, this rejects the merely
+// dangerous: a value that parses fine and would still destroy history faster
+// than an operator could notice.
+func floor(value, min time.Duration, name string) time.Duration {
+	if value < min {
+		log.Printf("[retention] %s %s is below the minimum %s; using %s", name, value, min, min)
+		return min
+	}
+	return value
 }
 
 func (s *Server) retentionNow() time.Time {
@@ -192,7 +237,17 @@ const finalizedClawPredicateSQL = `(
 		-- nothing.
 		c.status NOT IN ('connected', 'starting', 'provisioning')
 		AND NOT EXISTS (
-			SELECT 1 FROM claw_prs op WHERE op.claw_id = c.id AND op.merged = 0 AND op.state = 'open'
+			-- The hub's canonical unresolved-PR test, copied from clawOpenPRCount
+			-- (pr_watcher.go) rather than restated. The earlier wording here,
+			-- merged = 0 AND state = 'open', was wrong in both directions: it
+			-- missed a delivered PR sitting in any state that is not literally
+			-- 'open', and it counted mention_only rows, which are PR URLs the
+			-- message scanner noticed and which gate nothing anywhere else --
+			-- one of those could block compaction for a finished claw forever.
+			SELECT 1 FROM claw_prs op
+			 WHERE op.claw_id = c.id
+			   AND op.state NOT IN ('merged', 'closed')
+			   AND op.mention_only = 0
 		)
 		AND (
 			EXISTS (SELECT 1 FROM claw_prs p WHERE p.claw_id = c.id AND p.merged = 1)
@@ -553,9 +608,18 @@ func (s *Server) checkpointBlobKeepSet() (map[string]struct{}, error) {
 		path := checkpointBlobPath(tree)
 		data, err := os.ReadFile(path)
 		if os.IsNotExist(err) {
-			// The tree blob is already gone; nothing it referenced can be
-			// resolved any more, and there is no keep set to lose.
-			continue
+			// A missing tree makes the keep set incomplete, exactly as an
+			// unparseable one does, so it aborts for the same reason.
+			//
+			// The previous reasoning -- "the tree is gone, so nothing it
+			// referenced is resolvable" -- confused the checkpoint being broken
+			// with its content being worthless. Under schema 2 the per-file
+			// digests exist ONLY inside that tree, so continuing here means the
+			// sweep cannot see those files, decides they are unreachable, and
+			// deletes them. One missing object would become the irreversible
+			// loss of everything the checkpoint still had, and would also
+			// destroy any chance of reconstructing the tree from its parts.
+			return nil, fmt.Errorf("tree blob %s referenced but missing", tree)
 		}
 		if err != nil {
 			return nil, fmt.Errorf("read tree blob %s: %w", tree, err)
