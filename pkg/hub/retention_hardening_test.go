@@ -123,10 +123,10 @@ func TestBlobSweepRespectsAClaimThatArrivesDuringTheWalk(t *testing.T) {
 				}
 				planRan = true
 				// The plan handler's exact sequence: claim durably, then answer.
-				if err := s.recordCheckpointPendingBlobs("cp", []types.CheckpointFile{
+				if err := s.recordCheckpointBlobRefs("cp", []types.CheckpointFile{
 					{Path: "workspace/a.txt", SHA256: target, Size: 39},
 				}); err != nil {
-					t.Errorf("recordCheckpointPendingBlobs: %v", err)
+					t.Errorf("recordCheckpointBlobRefs: %v", err)
 					return
 				}
 				planReportedMissing = s.planBlobMissing(target)
@@ -223,23 +223,16 @@ func newFileBackedRetentionServer(t *testing.T) (*Server, string) {
 		"tenant", "tenant", "token", "claw-token", now()); err != nil {
 		t.Fatalf("seed tenant: %v", err)
 	}
+	if err := markHubMigration(db, checkpointBlobRefsBackfillMigration); err != nil {
+		t.Fatalf("mark backfill migration: %v", err)
+	}
 	return &Server{db: db, hubCfg: &types.HubConfig{}, claws: map[string]*clawConn{}}, path
 }
 
-func pendingBlobCount(t *testing.T, s *Server, checkpointID string) int {
-	t.Helper()
-	var n int
-	if err := s.db.QueryRow(`SELECT COUNT(*) FROM claw_checkpoint_pending_blobs WHERE checkpoint_id=?`, checkpointID).Scan(&n); err != nil {
-		t.Fatalf("count pending blobs: %v", err)
-	}
-	return n
-}
-
-// failCheckpoint used to DELETE the claims unconditionally, whatever the UPDATE
-// did. Under ENOSPC or SQLITE_BUSY that leaves the row 'creating' -- carrying no
-// digests of its own -- with nothing keeping its blobs out of the next sweep:
-// the worst of both states. finalizeCheckpoint and markCheckpointSkipped both
-// already guarded on the UPDATE succeeding.
+// failCheckpoint used to DELETE the references unconditionally, whatever the
+// UPDATE did. Under ENOSPC or SQLITE_BUSY that leaves the row 'creating' -- still
+// expecting its blobs -- with nothing keeping them out of the next sweep: the
+// worst of both states. They now move in one transaction.
 func TestFailCheckpointKeepsItsClaimsWhenTheUpdateFails(t *testing.T) {
 	s, path := newFileBackedRetentionServer(t)
 	reference := time.Now()
@@ -247,10 +240,10 @@ func TestFailCheckpointKeepsItsClaimsWhenTheUpdateFails(t *testing.T) {
 	insertRetentionCheckpoint(t, s, retentionCheckpoint{
 		id: "cp", clawID: "claw", status: "creating", createdAt: reference})
 	sha := writeRetentionBlob(t, []byte("planned but never uploaded"))
-	if err := s.recordCheckpointPendingBlobs("cp", []types.CheckpointFile{
+	if err := s.recordCheckpointBlobRefs("cp", []types.CheckpointFile{
 		{Path: "workspace/a.txt", SHA256: sha, Size: 25},
 	}); err != nil {
-		t.Fatalf("recordCheckpointPendingBlobs: %v", err)
+		t.Fatalf("recordCheckpointBlobRefs: %v", err)
 	}
 
 	// A closed handle stands in for the write failure: every Exec on it fails,
@@ -268,7 +261,7 @@ func TestFailCheckpointKeepsItsClaimsWhenTheUpdateFails(t *testing.T) {
 	}
 	defer reopened.Close()
 	s.db = reopened
-	if got := pendingBlobCount(t, s, "cp"); got != 1 {
+	if got := checkpointBlobRefCount(t, s, "cp"); got != 1 {
 		t.Fatalf("pending claims after a failed UPDATE = %d, want 1 (the row is still 'creating' and unprotected otherwise)", got)
 	}
 	var status string
@@ -281,9 +274,9 @@ func TestFailCheckpointKeepsItsClaimsWhenTheUpdateFails(t *testing.T) {
 }
 
 // A delayed plan or a late 'complete' must not mutate a row that already went
-// terminal: the claim would protect nothing (the keep set joins on
-// status='creating'), and a resurrected 'ready' row would re-declare digests the
-// sweep had already stopped tracking.
+// terminal: a released row's edge set is settled, so an edge added under it
+// would pin blobs nothing will ever release, and a resurrected 'ready' row would
+// re-declare blobs its own release had already made collectable.
 func TestCheckpointTransitionsRequireTheRowToStillBeCreating(t *testing.T) {
 	cases := []struct {
 		name        string
@@ -296,7 +289,7 @@ func TestCheckpointTransitionsRequireTheRowToStillBeCreating(t *testing.T) {
 		{
 			name: "plan retried after the checkpoint failed", status: "failed",
 			apply: func(s *Server) error {
-				return s.recordCheckpointPendingBlobs("cp", []types.CheckpointFile{
+				return s.recordCheckpointBlobRefs("cp", []types.CheckpointFile{
 					{Path: "workspace/a.txt", SHA256: validTestSHA, Size: 1}})
 			},
 			wantErr: errCheckpointNotCreating, wantStatus: "failed",
@@ -305,7 +298,7 @@ func TestCheckpointTransitionsRequireTheRowToStillBeCreating(t *testing.T) {
 		{
 			name: "plan for a checkpoint that no longer exists", status: "",
 			apply: func(s *Server) error {
-				return s.recordCheckpointPendingBlobs("cp", []types.CheckpointFile{
+				return s.recordCheckpointBlobRefs("cp", []types.CheckpointFile{
 					{Path: "workspace/a.txt", SHA256: validTestSHA, Size: 1}})
 			},
 			wantErr: errCheckpointNotCreating, wantStatus: "",
@@ -376,10 +369,12 @@ func TestCheckpointTransitionsRequireTheRowToStillBeCreating(t *testing.T) {
 			if status != tc.wantStatus {
 				t.Fatalf("status = %q, want %q (%s)", status, tc.wantStatus, tc.explanation)
 			}
-			if tc.wantStatus != "creating" {
-				if got := pendingBlobCount(t, s, "cp"); got != 0 {
-					t.Fatalf("terminal row holds %d claims, want 0", got)
-				}
+			// A rejected transition must not have added references either: a
+			// plan answering for a row that already went terminal would tell the
+			// claw to skip uploads for a checkpoint whose edges nothing will ever
+			// release.
+			if got := checkpointBlobRefCount(t, s, "cp"); got != 0 {
+				t.Fatalf("row holds %d references, want 0 (%s)", got, tc.explanation)
 			}
 		})
 	}
@@ -421,8 +416,8 @@ func TestRetentionIndexesAreBuiltOutsideTheBootCriticalPath(t *testing.T) {
 			// The table the same schema Exec used to create AFTER the failing
 			// statement must still be there -- that collateral damage is half
 			// the finding.
-			if _, err := s.db.Exec(`SELECT COUNT(*) FROM claw_checkpoint_pending_blobs`); err != nil {
-				t.Fatalf("claw_checkpoint_pending_blobs is missing: %v", err)
+			if _, err := s.db.Exec(`SELECT COUNT(*) FROM checkpoint_blob_refs`); err != nil {
+				t.Fatalf("checkpoint_blob_refs is missing: %v", err)
 			}
 			// The delete still works without it, just more slowly.
 			if _, err := s.pruneRowsBatched("messages", "created_at", time.Now(), false, time.Time{}); err != nil {
@@ -504,18 +499,17 @@ func TestDryRunReportsTheSameBlobsTheRealCycleRemoves(t *testing.T) {
 		s := newRetentionTestServer(t)
 		seedDryRunParityFixture(t, s, reference)
 
-		var sim *retentionSimulation
-		if dryRun {
-			sim = newRetentionSimulation()
-		}
+		var released []string
 		compaction, err := s.compactFinalizedCheckpoints(reference.Add(-compactAge), dryRun)
 		if err != nil {
 			t.Fatalf("compactFinalizedCheckpoints: %v", err)
 		}
-		sim.addCompacted(compaction.ids)
 		_, expired := s.applyRetentionWindow(reference.Add(-cutoffAge), dryRun)
-		sim.addDeleted(expired)
-		removed, freed, _, err := s.sweepCheckpointBlobs(dryRun, sim)
+		if dryRun {
+			released = append(released, compaction.ids...)
+			released = append(released, expired...)
+		}
+		removed, freed, _, err := s.sweepCheckpointBlobs(dryRun, released)
 		if err != nil {
 			t.Fatalf("sweepCheckpointBlobs: %v", err)
 		}
@@ -715,12 +709,12 @@ func TestDiagnosticsPruneCountsLogsItCouldNotRemove(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Chmod(dir, 0o750) })
 
-	removed, itemErrors, err := pruneDiagnosticsLogs(hubDataDir(), time.Now(), false)
+	result, err := pruneDiagnosticsLogs(hubDataDir(), time.Now(), false)
 	if err != nil {
 		t.Fatalf("pruneDiagnosticsLogs: %v", err)
 	}
-	if removed != 0 || itemErrors != 1 {
-		t.Fatalf("removed=%d itemErrors=%d, want 0 and 1", removed, itemErrors)
+	if result.removed != 0 || result.itemErrors != 1 {
+		t.Fatalf("removed=%d itemErrors=%d, want 0 and 1", result.removed, result.itemErrors)
 	}
 }
 
@@ -836,9 +830,9 @@ func TestFailStuckCreatingCheckpointsReleasesTheirClaims(t *testing.T) {
 			insertRetentionCheckpoint(t, s, retentionCheckpoint{
 				id: "cp", clawID: "claw", status: "creating", createdAt: reference.Add(-tc.age)})
 			sha := writeRetentionBlob(t, []byte("planned by a claw that died"))
-			if err := s.recordCheckpointPendingBlobs("cp", []types.CheckpointFile{
+			if err := s.recordCheckpointBlobRefs("cp", []types.CheckpointFile{
 				{Path: "workspace/a.txt", SHA256: sha, Size: 27}}); err != nil {
-				t.Fatalf("recordCheckpointPendingBlobs: %v", err)
+				t.Fatalf("recordCheckpointBlobRefs: %v", err)
 			}
 
 			s.failStuckCreatingCheckpoints()
@@ -847,7 +841,7 @@ func TestFailStuckCreatingCheckpointsReleasesTheirClaims(t *testing.T) {
 			if status != tc.wantStatus {
 				t.Fatalf("status = %q, want %q (%s)", status, tc.wantStatus, tc.explanation)
 			}
-			if got := pendingBlobCount(t, s, "cp"); got != tc.wantClaims {
+			if got := checkpointBlobRefCount(t, s, "cp"); got != tc.wantClaims {
 				t.Fatalf("claims = %d, want %d (%s)", got, tc.wantClaims, tc.explanation)
 			}
 		})
@@ -868,9 +862,9 @@ func TestBootCheckpointReconciliationRunsIndependentlyOfLiveness(t *testing.T) {
 	insertRetentionCheckpoint(t, s, retentionCheckpoint{
 		id: "cp", clawID: "claw", status: "creating", createdAt: reference})
 	sha := writeRetentionBlob(t, []byte("interrupted upload"))
-	if err := s.recordCheckpointPendingBlobs("cp", []types.CheckpointFile{
+	if err := s.recordCheckpointBlobRefs("cp", []types.CheckpointFile{
 		{Path: "workspace/a.txt", SHA256: sha, Size: 18}}); err != nil {
-		t.Fatalf("recordCheckpointPendingBlobs: %v", err)
+		t.Fatalf("recordCheckpointBlobRefs: %v", err)
 	}
 
 	s.reconcileCheckpointsOnBoot()
@@ -879,7 +873,7 @@ func TestBootCheckpointReconciliationRunsIndependentlyOfLiveness(t *testing.T) {
 	if status != "failed" {
 		t.Fatalf("status = %q, want failed", status)
 	}
-	if got := pendingBlobCount(t, s, "cp"); got != 0 {
+	if got := checkpointBlobRefCount(t, s, "cp"); got != 0 {
 		t.Fatalf("claims = %d, want 0", got)
 	}
 }

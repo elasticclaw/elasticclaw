@@ -1,11 +1,14 @@
 package hub
 
 import (
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -18,14 +21,24 @@ import (
 // manifest per checkpoint, one content-addressed blob per distinct workspace
 // file, and a captured gateway/bridge log per terminated Daytona claw. On the
 // Faster hub that filled the disk, at which point every write path — including
-// the migrations — starts failing. A cycle reclaims in three phases:
+// the migrations — starts failing. A cycle reclaims in four phases:
 //
-//	compaction -> retention -> blob sweep
+//	reference backfill -> compaction -> retention -> blob sweep
 //
-// The order matters. Compaction and retention are what release manifests and
-// checkpoint rows; the blob sweep derives its keep set from whatever survived
-// them, so running it first would keep blobs for manifests that are about to
-// disappear and leave them orphaned until the next cycle.
+// The order matters. Compaction and retention are what release manifests,
+// checkpoint rows, and the blob references those rows held; the blob sweep asks
+// which blobs are left with no reference at all, so running it first would keep
+// blobs whose last reference is about to disappear and leave them for the next
+// cycle. The backfill comes first because the two release phases delete
+// references, and it must not re-derive references those phases have just
+// dropped.
+//
+// Blob reachability is REFERENCE COUNTED, not derived. checkpoint_blob_refs
+// holds one row per (checkpoint, blob); a blob is deletable when no row names
+// it. The sweeper does not parse manifests, follow tree blobs, or union digest
+// columns — three review loops found the same class of defect in that
+// reconstruction, every one of them "some state the derivation did not account
+// for". See the table comment in db.go for the edge lifecycle.
 
 const (
 	defaultRetentionInterval     = time.Hour
@@ -90,7 +103,14 @@ type retentionCounts struct {
 	taskRunEvents int64
 	messages      int64
 	blobs         int
-	blobBytes     int64
+	// Bytes reclaimed on the FILESYSTEM, broken out by what produced them. Only
+	// blobBytes used to be counted, which reported 0 for a cycle that removed
+	// nothing but manifests and diagnostics logs. Row deletes appear in none of
+	// these on purpose: deleting rows returns pages to SQLite's freelist and does
+	// not shrink the database file at all without a VACUUM.
+	blobBytes        int64
+	manifestBytes    int64
+	diagnosticsBytes int64
 	// errors counts PHASES that failed outright. itemErrors counts individual
 	// items a phase could not process -- one unremovable blob, one manifest
 	// whose unlink failed -- which every phase logs and steps over, returning
@@ -144,6 +164,14 @@ func (s *Server) retentionSettings() retentionSettings {
 		d, err := time.ParseDuration(value)
 		if err != nil || d <= 0 {
 			log.Printf("[retention] invalid %s %q; using %s", name, value, fallback)
+			// Recorded, not merely logged. A rejected value is exactly as much a
+			// difference between the configured policy and the running one as a
+			// clamped value is, and it is easier to write by accident: Go's
+			// ParseDuration has no day unit, so the obvious `max_age: 30d` is
+			// rejected and silently became the 90-day default -- under a startup
+			// line that said adjustments=[none].
+			cfg.adjustments = append(cfg.adjustments,
+				name+" "+strconv.Quote(value)+" is not a valid duration; using "+fallback.String())
 			return fallback
 		}
 		return d
@@ -288,42 +316,63 @@ func (s *Server) retentionSweepOnce() {
 	log.Printf("[retention] cycle start: dry_run=%v expire_before=%s compact_before=%s",
 		cfg.dryRun, expiryCutoff.Format(time.RFC3339), compactCutoff.Format(time.RFC3339))
 
-	// Retry whatever the boot-path attempt could not build. The indexes are what
-	// keep the batched deletes below off a full table scan, and a hub that
-	// booted with a full disk is precisely the hub that failed to build them.
-	ensureRetentionIndexes(s.db)
-
 	var counts retentionCounts
-	// A dry run mutates nothing, so the keep set would otherwise be built from
-	// rows and manifests a real cycle had already compacted or deleted by this
-	// point -- and would report far FEWER sweepable blobs than the real run
-	// removes, for the single most destructive phase there is. The simulation
-	// carries what the two phases above WOULD have removed so the keep set can
-	// exclude it and the dry run can mean what it claims.
-	var sim *retentionSimulation
-	if cfg.dryRun {
-		sim = newRetentionSimulation()
+
+	// First, and before anything releases a reference. A hub upgrading into
+	// reference counting has rows with no edges at all, and until they have some
+	// the edge table reads as "almost every blob is garbage". The sweep refuses
+	// to delete anything until this has completed once (see
+	// checkpointBlobRefsBackfilled), so a failure here costs a postponed sweep
+	// and nothing else.
+	//
+	// It runs in a dry run too. It only ADDS references -- it can never select
+	// more for deletion, only less -- and without it a dry run on an
+	// un-backfilled hub would report the sweep declining, which tells an operator
+	// nothing about the blast radius they are trying to measure.
+	if err := s.backfillCheckpointBlobRefs(); err != nil {
+		counts.errors++
+		log.Printf("[retention] blob reference backfill: %v", err)
 	}
+
+	// released names the checkpoints whose references a REAL cycle would have
+	// dropped by the time the sweep runs. In a real cycle it stays empty: the
+	// phases below have already deleted those rows from checkpoint_blob_refs, so
+	// the sweeper reads the truth. In a dry run nothing was deleted, so the
+	// sweeper has to be told which checkpoints to read past -- otherwise the dry
+	// run reports a fraction of what the real cycle removes, for the single most
+	// destructive phase there is.
+	//
+	// This is the whole of what a dry run simulates now: a list of checkpoint ids
+	// the phases themselves reported. It does not reconstruct manifests, trees or
+	// digest columns, which is what the previous simulation had to do.
+	var released []string
 
 	compaction, err := s.compactFinalizedCheckpoints(compactCutoff, cfg.dryRun)
 	counts.compacted = compaction.count
+	counts.manifestBytes += compaction.bytes
 	counts.itemErrors += compaction.itemErrors
 	if err != nil {
 		counts.errors++
 		log.Printf("[retention] compaction: %v", err)
 	}
-	sim.addCompacted(compaction.ids)
+	if cfg.dryRun {
+		released = append(released, compaction.ids...)
+	}
 
 	windowCounts, expired := s.applyRetentionWindow(expiryCutoff, cfg.dryRun)
 	counts.diagnostics = windowCounts.diagnostics
 	counts.checkpoints = windowCounts.checkpoints
 	counts.taskRunEvents = windowCounts.taskRunEvents
 	counts.messages = windowCounts.messages
+	counts.manifestBytes += windowCounts.manifestBytes
+	counts.diagnosticsBytes += windowCounts.diagnosticsBytes
 	counts.errors += windowCounts.errors
 	counts.itemErrors += windowCounts.itemErrors
-	sim.addDeleted(expired)
+	if cfg.dryRun {
+		released = append(released, expired...)
+	}
 
-	swept, bytes, blobItemErrors, err := s.sweepCheckpointBlobs(cfg.dryRun, sim)
+	swept, bytes, blobItemErrors, err := s.sweepCheckpointBlobs(cfg.dryRun, released)
 	counts.blobs, counts.blobBytes = swept, bytes
 	counts.itemErrors += blobItemErrors
 	if err != nil {
@@ -335,62 +384,57 @@ func (s *Server) retentionSweepOnce() {
 	if cfg.dryRun {
 		verb = "would remove"
 	}
-	log.Printf("[retention] cycle done in %s (dry_run=%v): %s compacted=%d diagnostics=%d checkpoints=%d task_run_events=%d messages=%d blobs=%d bytes_freed=%d phase_errors=%d item_errors=%d",
+	log.Printf("[retention] cycle done in %s (dry_run=%v): %s compacted=%d diagnostics=%d checkpoints=%d task_run_events=%d messages=%d blobs=%d bytes_freed=%d (blobs=%d manifests=%d diagnostics=%d; row deletes free SQLite pages but do not shrink the database file without a VACUUM) phase_errors=%d item_errors=%d",
 		time.Since(started).Round(time.Millisecond), cfg.dryRun, verb,
 		counts.compacted, counts.diagnostics, counts.checkpoints,
-		counts.taskRunEvents, counts.messages, counts.blobs, counts.blobBytes,
+		counts.taskRunEvents, counts.messages, counts.blobs,
+		counts.blobBytes+counts.manifestBytes+counts.diagnosticsBytes,
+		counts.blobBytes, counts.manifestBytes, counts.diagnosticsBytes,
 		counts.errors, counts.itemErrors)
+
+	// Deliberately last. These indexes only make the batched row deletes cheap,
+	// and building one needs free disk for the whole B-tree -- so running it at
+	// the TOP of the cycle, as this used to, meant a hub with a full disk spent
+	// its first act on a doomed full-table index build under the single write
+	// lock, before a single byte had been reclaimed. At the end, the cycle it
+	// accelerates is the NEXT one, and the space this cycle freed is what it gets
+	// to use.
+	ensureRetentionIndexes(s.db)
 }
 
-// retentionSimulation records what a dry run WOULD have removed, so later
-// phases can reason about the state a real cycle would have reached. A nil
-// simulation means a real cycle: every method is a no-op and every lookup
-// reports "not removed".
-type retentionSimulation struct {
-	compacted map[string]struct{}
-	deleted   map[string]struct{}
+// retentionSample collects a bounded number of examples alongside a total.
+//
+// The dry run used to log one line per blob, per checkpoint and per claw. The
+// documented example cycle selects ~43k items, and journald's default rate limit
+// is 10,000 messages per 30 seconds -- so the run that exists to be read drowned
+// itself, and the summary line that is the entire point was among the messages
+// dropped. A total plus a handful of examples is what an operator actually acts
+// on.
+type retentionSample struct {
+	items []string
+	total int
 }
 
-func newRetentionSimulation() *retentionSimulation {
-	return &retentionSimulation{compacted: map[string]struct{}{}, deleted: map[string]struct{}{}}
-}
+const retentionSampleMax = 5
 
-func (r *retentionSimulation) addCompacted(ids []string) {
-	if r == nil {
-		return
-	}
-	for _, id := range ids {
-		r.compacted[id] = struct{}{}
-	}
-}
-
-func (r *retentionSimulation) addDeleted(ids []string) {
-	if r == nil {
-		return
-	}
-	for _, id := range ids {
-		r.deleted[id] = struct{}{}
+func (r *retentionSample) add(v string) {
+	r.total++
+	if len(r.items) < retentionSampleMax {
+		r.items = append(r.items, v)
 	}
 }
 
-// wasDeleted reports whether the row itself would be gone: no digests, no
-// manifest, no pending claims.
-func (r *retentionSimulation) wasDeleted(id string) bool {
-	if r == nil {
-		return false
+// describe renders "N thing(s) (e.g. a, b, c, and 40 more)", or "" when nothing
+// was selected, so the caller can skip the line entirely.
+func (r *retentionSample) describe(noun string) string {
+	if r.total == 0 {
+		return ""
 	}
-	_, ok := r.deleted[id]
-	return ok
-}
-
-// wasCompacted reports whether the row would survive with its manifest unlinked
-// and its tree digests cleared.
-func (r *retentionSimulation) wasCompacted(id string) bool {
-	if r == nil {
-		return false
+	out := fmt.Sprintf("%d %s (e.g. %s", r.total, noun, strings.Join(r.items, ", "))
+	if r.total > len(r.items) {
+		out += fmt.Sprintf(", and %d more", r.total-len(r.items))
 	}
-	_, ok := r.compacted[id]
-	return ok
+	return out + ")"
 }
 
 // ---------------------------------------------------------------------------
@@ -520,22 +564,22 @@ func (s *Server) finalizedClawIDs(cutoff time.Time) ([]string, error) {
 // used to hold and what pruning manifests used to destroy. Compaction moves a
 // checkpoint from "restorable" to "counted", not to "forgotten".
 //
-// Blobs are untouched here. They are content-addressed and shared across every
-// checkpoint (and every claw) that captured the same file, so a per-claw pass
-// cannot tell whether dropping one is safe — only the mark-and-sweep at the end
-// of the cycle can.
+// Blobs are untouched here in the sense that no file is unlinked. What the
+// UPDATE below does do is drop the compacted checkpoint's reference edges, in
+// the same transaction — which is how compaction releases blobs by construction
+// rather than by clearing digest columns and hoping the sweeper's derivation
+// agrees. Whether any file actually goes is still a global question, answered
+// once at the end of the cycle: a blob is shared by every checkpoint that
+// captured the same bytes.
 func (s *Server) compactFinalizedCheckpoints(cutoff time.Time, dryRun bool) (compactionResult, error) {
 	var result compactionResult
+	result.sample = &retentionSample{}
 	ids, err := s.finalizedClawIDs(cutoff)
 	if err != nil {
 		return result, fmt.Errorf("list finalized claws: %w", err)
 	}
 	for i, clawID := range ids {
-		clawResult, err := s.compactClawCheckpoints(clawID, dryRun)
-		result.count += clawResult.count
-		result.itemErrors += clawResult.itemErrors
-		result.ids = append(result.ids, clawResult.ids...)
-		if err != nil {
+		if err := s.compactClawCheckpoints(clawID, dryRun, &result); err != nil {
 			// Say where in the phase the failure landed. The earlier wording
 			// claimed the phase "aborted after N of M claws" while the loop in
 			// fact continues to the next claw, which is the opposite of what an
@@ -546,65 +590,70 @@ func (s *Server) compactFinalizedCheckpoints(cutoff time.Time, dryRun bool) (com
 			continue
 		}
 	}
+	if dryRun {
+		if line := result.sample.describe("checkpoint(s)"); line != "" {
+			log.Printf("[retention] dry_run: would compact %s", line)
+		}
+	}
 	return result, nil
 }
 
 // compactionResult is what the compaction phase did: how many checkpoints it
-// compacted (or would have), which ones, and how many individual items it could
-// not process.
+// compacted (or would have), which ones, how many bytes of manifest that
+// reclaimed, and how many individual items it could not process.
 type compactionResult struct {
 	count      int
 	ids        []string
+	bytes      int64
 	itemErrors int
+	sample     *retentionSample
 }
 
-func (s *Server) compactClawCheckpoints(clawID string, dryRun bool) (compactionResult, error) {
-	var result compactionResult
+func (s *Server) compactClawCheckpoints(clawID string, dryRun bool, result *compactionResult) error {
 	// 'failed' checkpoints never wrote a manifest, so they are not candidates
 	// and are left exactly as they are. 'skipped' rows are handled separately
-	// below: they are not candidates either, but they DO carry tree digests.
+	// below: they are not candidates either, but they DO hold references.
 	rows, err := s.db.Query(
 		`SELECT id, COALESCE(manifest_path,''), COALESCE(root_tree_sha256,''), COALESCE(reason,'') FROM claw_checkpoints
 		  WHERE claw_id = ? AND status = 'ready'
 		  ORDER BY created_at DESC, id DESC`, clawID)
 	if err != nil {
-		return result, err
+		return err
 	}
 	var candidates []compactionCandidate
 	for rows.Next() {
 		var c compactionCandidate
 		if err := rows.Scan(&c.id, &c.manifestPath, &c.rootTree, &c.reason); err != nil {
 			rows.Close()
-			return result, err
+			return err
 		}
 		candidates = append(candidates, c)
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
-		return result, err
+		return err
 	}
-	// Before the early return below, not after it. A 'skipped' row names the
-	// tree of the ready checkpoint it duplicated, and that ready row may have
-	// been compacted by an EARLIER cycle -- in which case this claw is down to
-	// one ready candidate, takes the early return, and its skipped rows go on
-	// pinning a tree nothing can restore from, forever.
-	releasedSkipped, err := s.releaseSkippedCheckpointTrees(clawID, dryRun)
+	// Before the early return below, not after it. A 'skipped' row holds
+	// references to the tree of the ready checkpoint it duplicated, and that
+	// ready row may have been compacted by an EARLIER cycle -- in which case this
+	// claw is down to one ready candidate, takes the early return, and its
+	// skipped rows go on holding a workspace nothing can restore from, forever.
+	releasedSkipped, err := s.releaseSkippedCheckpointRefs(clawID, dryRun)
 	if err != nil {
 		result.itemErrors++
-		log.Printf("[retention] release skipped checkpoint trees for claw %s: %v", shortID(clawID), err)
+		log.Printf("[retention] release skipped checkpoint references for claw %s: %v", shortID(clawID), err)
 	}
-	// Reported alongside the compacted ids, not in the compacted COUNT: a
-	// skipped row losing its digests is not a checkpoint moving from
-	// "restorable" to "counted". The dry run still needs to know about it,
-	// because the keep set must not follow trees a real cycle would have
-	// released here either.
+	// Reported among the released ids, not in the compacted COUNT: a skipped row
+	// letting go of its blobs is not a checkpoint moving from "restorable" to
+	// "counted". The dry run still needs to know about it, because the sweep must
+	// read past those references too.
 	result.ids = append(result.ids, releasedSkipped...)
 	if len(candidates) <= 1 {
-		return result, nil
+		return nil
 	}
 	keep, err := s.survivingCheckpoint(clawID, candidates)
 	if err != nil {
-		return result, err
+		return err
 	}
 	for i, c := range candidates {
 		if i == keep {
@@ -614,92 +663,128 @@ func (s *Server) compactClawCheckpoints(clawID string, dryRun bool) (compactionR
 		if path == "" {
 			path = checkpointManifestPath(c.id)
 		}
+		var size int64
+		if info, err := os.Stat(path); err == nil {
+			size = info.Size()
+		}
 		if dryRun {
-			log.Printf("[retention] dry_run: would compact checkpoint %s of claw %s (manifest %s)",
-				shortID(c.id), shortID(clawID), path)
+			result.sample.add(shortID(c.id))
 			result.count++
+			result.bytes += size
 			result.ids = append(result.ids, c.id)
 			continue
 		}
-		// A manifest that is already gone is not an error — a previous cycle may
-		// have been interrupted between the unlink and the UPDATE — but the row
-		// still has to be marked so the sweep stops counting it as a reference.
+		// Mark the row FIRST, unlink second.
+		//
+		// The other order left a window where the manifest was gone and the row
+		// still said 'ready' with a manifest_path pointing at it: if the UPDATE
+		// then failed (ENOSPC, SQLITE_BUSY -- the conditions this sweeper runs
+		// under), the next cycle could pick that row as the claw's survivor and
+		// keep a checkpoint whose manifest does not exist. This order's failure
+		// mode is a manifest left on disk under a 'compacted' row, which is
+		// merely wasted bytes and which the retry below reclaims.
+		//
+		// The references go with the status, in one transaction: that is what
+		// makes the blobs of a compacted checkpoint collectable. Clearing only
+		// manifest_path/manifest_sha256 reclaimed a few hundred bytes of manifest
+		// and left the whole workspace behind it reachable.
+		//
+		// The telemetry columns are deliberately untouched — they are the
+		// analytics record, and losing them is what this design exists to avoid.
+		if err := s.markCheckpointCompacted(c.id); err != nil {
+			return err
+		}
+		// A manifest that is already gone is not an error: a previous cycle may
+		// have been interrupted between the UPDATE and the unlink.
 		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 			result.itemErrors++
 			log.Printf("[retention] remove manifest %s: %v", path, err)
-			continue
-		}
-		// The tree digests go with the manifest.
-		//
-		// Clearing only manifest_path/manifest_sha256 reclaimed the manifest and
-		// nothing else: the keep set reads digests off every row whatever its
-		// status, so the root/workspace/message trees of a compacted checkpoint
-		// stayed reachable and so did every file blob they list. Under schema 2 a
-		// manifest is a few hundred bytes and the trees are the whole workspace,
-		// which means compaction was reclaiming the small half and calling it
-		// done. The telemetry columns are deliberately untouched — they are the
-		// analytics record, and losing them is what this design exists to avoid.
-		if _, err := s.db.Exec(
-			`UPDATE claw_checkpoints
-			    SET status='compacted', manifest_path='', manifest_sha256='',
-			        root_tree_sha256='', workspace_tree_sha256='', message_tree_sha256=''
-			  WHERE id=?`,
-			c.id); err != nil {
-			return result, err
+		} else if err == nil {
+			result.bytes += size
 		}
 		result.count++
 		result.ids = append(result.ids, c.id)
 	}
-	return result, nil
+	return nil
 }
 
-// releaseSkippedCheckpointTrees clears the tree digests on a claw's 'skipped'
-// checkpoints.
+// markCheckpointCompacted moves one checkpoint from "restorable" to "counted"
+// and releases every blob it held, atomically.
+func (s *Server) markCheckpointCompacted(checkpointID string) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(
+		`UPDATE claw_checkpoints
+		    SET status='compacted', manifest_path='', manifest_sha256='',
+		        root_tree_sha256='', workspace_tree_sha256='', message_tree_sha256=''
+		  WHERE id=?`, checkpointID); err != nil {
+		return err
+	}
+	if err := deleteCheckpointBlobRefsTx(tx, checkpointID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// releaseSkippedCheckpointRefs drops the blob references and tree digests of a
+// finalized claw's 'skipped' checkpoints.
 //
-// markCheckpointSkipped records a skipped row with root_tree_sha256 and
-// workspace_tree_sha256 copied from the ready checkpoint it duplicated. The
-// keep set follows tree digests from rows of ANY status, while compaction only
-// ever touches 'ready' rows — so clearing the digests on the compacted row
-// released nothing at all while a sibling 'skipped' row still named the same
-// tree, and the entire workspace behind it stayed pinned.
+// markCheckpointSkipped records a skipped row holding the tree of the ready
+// checkpoint it duplicated, which is honest while the claw is live: two
+// checkpoints hold the same blobs and the blobs survive until both let go.
+// Compaction is where the second one lets go. Without this, compacting the ready
+// row released nothing at all, because a sibling skipped row still held the same
+// workspace.
 //
-// Clearing them is safe because a skipped row is never restorable in the first
-// place: restoreClawFromCheckpoint and restoreCheckpointFiles both require
+// It is safe because a skipped row is never restorable in the first place:
+// restoreClawFromCheckpoint and restoreCheckpointFiles both require
 // status='ready'. The telemetry columns are untouched, exactly as in compaction
 // — the row remains the record that the claw was idle at that moment.
-//
-// No skipped rows exist in production yet (markCheckpointSkipped ships in the
-// parent PR), so this is future-certain rather than currently observable.
-func (s *Server) releaseSkippedCheckpointTrees(clawID string, dryRun bool) ([]string, error) {
-	const pinned = `claw_id=? AND status='skipped'
-		    AND (root_tree_sha256 <> '' OR workspace_tree_sha256 <> '' OR message_tree_sha256 <> '')`
-	if dryRun {
-		rows, err := s.db.Query(`SELECT id FROM claw_checkpoints WHERE `+pinned, clawID)
-		if err != nil {
+func (s *Server) releaseSkippedCheckpointRefs(clawID string, dryRun bool) ([]string, error) {
+	rows, err := s.db.Query(
+		`SELECT id FROM claw_checkpoints WHERE claw_id=? AND status='skipped'
+		   AND (root_tree_sha256 <> '' OR workspace_tree_sha256 <> '' OR message_tree_sha256 <> ''
+		        OR EXISTS (SELECT 1 FROM checkpoint_blob_refs r WHERE r.checkpoint_id = claw_checkpoints.id))`,
+		clawID)
+	if err != nil {
+		return nil, err
+	}
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
 			return nil, err
 		}
-		defer rows.Close()
-		var ids []string
-		for rows.Next() {
-			var id string
-			if err := rows.Scan(&id); err != nil {
-				return nil, err
-			}
-			ids = append(ids, id)
-		}
-		if err := rows.Err(); err != nil {
-			return nil, err
-		}
-		if len(ids) > 0 {
-			log.Printf("[retention] dry_run: would release the tree digests of %d skipped checkpoint(s) of claw %s", len(ids), shortID(clawID))
-		}
+		ids = append(ids, id)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if dryRun || len(ids) == 0 {
 		return ids, nil
 	}
-	_, err := s.db.Exec(
-		`UPDATE claw_checkpoints
-		    SET root_tree_sha256='', workspace_tree_sha256='', message_tree_sha256=''
-		  WHERE `+pinned, clawID)
-	return nil, err
+	tx, err := s.db.Begin()
+	if err != nil {
+		return ids, err
+	}
+	defer tx.Rollback()
+	for _, id := range ids {
+		if _, err := tx.Exec(
+			`UPDATE claw_checkpoints
+			    SET root_tree_sha256='', workspace_tree_sha256='', message_tree_sha256=''
+			  WHERE id=?`, id); err != nil {
+			return ids, err
+		}
+		if err := deleteCheckpointBlobRefsTx(tx, id); err != nil {
+			return ids, err
+		}
+	}
+	return ids, tx.Commit()
 }
 
 type compactionCandidate struct{ id, manifestPath, rootTree, reason string }
@@ -732,11 +817,7 @@ func (s *Server) survivingCheckpoint(clawID string, candidates []compactionCandi
 	if i := retryEligibleCheckpoint(candidates, progressed, restored); i >= 0 {
 		return i, nil
 	}
-	roots := make([]string, len(candidates))
-	for i, c := range candidates {
-		roots[i] = c.rootTree
-	}
-	return newestRestorableCheckpoint(roots), nil
+	return newestRestorableCheckpoint(candidates, restored), nil
 }
 
 // retryEligibleCheckpoint returns the index of the newest candidate the retry
@@ -758,33 +839,38 @@ func retryEligibleCheckpoint(candidates []compactionCandidate, progressedPastBoo
 	return -1
 }
 
-// restoredCheckpointIDs lists every checkpoint this claw has already been
-// restored from. retryCheckpointIDWithCount refuses to reuse the id the
-// PREVIOUS attempt restored; compaction cannot know which attempt will run
-// next, so it treats every already-restored id as ineligible. That is the
-// conservative direction: it can only make compaction keep a different
-// checkpoint, never make it delete one a retry wanted.
+// restoredCheckpointIDs names the checkpoint the LATEST recorded attempt
+// restored from, or nothing when there is none.
+//
+// It mirrors retryCheckpointIDWithCount, which looks up exactly one id: the one
+// the immediately preceding attempt used. Treating every historically restored
+// id as ineligible, as this used to, is not the conservative direction it looks
+// like — retry will happily reuse a checkpoint two attempts ago, so excluding
+// them can only make compaction discard a checkpoint the next retry would have
+// taken, in exchange for keeping one it would skip.
+//
+// The latest attempt is read by attempt_number rather than by subtracting one
+// from a number compaction does not have: compaction runs at an arbitrary
+// moment, not at a retry boundary.
 func (s *Server) restoredCheckpointIDs(clawID string) (map[string]struct{}, error) {
-	rows, err := s.db.Query(
-		`SELECT DISTINCT COALESCE(restored_checkpoint_id,'') FROM task_run_attempts
-		  WHERE claw_id=? AND COALESCE(restored_checkpoint_id,'') <> ''`, clawID)
-	if err != nil {
+	var id string
+	err := s.db.QueryRow(
+		`SELECT COALESCE(restored_checkpoint_id,'') FROM task_run_attempts
+		  WHERE run_id=(SELECT task_run_id FROM claws WHERE id=?)
+		  ORDER BY attempt_number DESC LIMIT 1`, clawID).Scan(&id)
+	if err != nil && err != sql.ErrNoRows {
 		return nil, err
 	}
-	defer rows.Close()
 	out := map[string]struct{}{}
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return nil, err
-		}
+	if id != "" {
 		out[id] = struct{}{}
 	}
-	return out, rows.Err()
+	return out, nil
 }
 
 // newestRestorableCheckpoint picks the index of the checkpoint compaction must
-// keep, given each candidate's root tree digest in newest-first order.
+// keep when nothing is retry-eligible, given the candidates in newest-first
+// order.
 //
 // Recency alone is not enough. completeMetadataOnlyCheckpoint publishes a
 // 'ready' row with an EMPTY root_tree_sha256 whenever the bridge is
@@ -793,14 +879,34 @@ func (s *Server) restoredCheckpointIDs(clawID string) (map[string]struct{}, erro
 // checkpointBeforeTermination, so the kill capture can only ever be
 // metadata-only. Keeping it by timestamp meant compacting away every checkpoint
 // that actually had files while retaining one retryCheckpointIDWithCount
-// explicitly refuses (it skips rootTree == "") — the claw kept a checkpoint and
-// lost the ability to restore.
+// explicitly refuses — the claw kept a checkpoint and lost the ability to
+// restore.
 //
-// A claw whose ready checkpoints are ALL metadata-only still keeps its newest:
-// there is nothing better to keep, and the row is still the analytics record.
-func newestRestorableCheckpoint(rootTrees []string) int {
-	for i, root := range rootTrees {
-		if root != "" {
+// The fallback honours the SAME predicate as retryEligibleCheckpoint minus the
+// bootstrap rule: a root tree, a manifest, and not the id the latest attempt
+// already restored from. Honouring only the root tree meant that when the
+// eligible set was empty — which is precisely when this runs — the fallback
+// could keep a manifest-less row retry filters out with `manifest_path != ”`,
+// or the one row retry is guaranteed to skip. The bootstrap rule is the one
+// condition deliberately relaxed here: a claw that has progressed past bootstrap
+// can still be worth restoring to state zero if there is nothing else at all.
+//
+// A claw with no candidate satisfying any of it still keeps its newest: there is
+// nothing better to keep, and the row is still the analytics record.
+func newestRestorableCheckpoint(candidates []compactionCandidate, restored map[string]struct{}) int {
+	for i, c := range candidates {
+		if c.rootTree == "" || c.manifestPath == "" {
+			continue
+		}
+		if _, ok := restored[c.id]; ok {
+			continue
+		}
+		return i
+	}
+	// Second pass without the restored-id rule: keeping the checkpoint the last
+	// attempt used still beats keeping one that restores nothing.
+	for i, c := range candidates {
+		if c.rootTree != "" && c.manifestPath != "" {
 			return i
 		}
 	}
@@ -817,16 +923,17 @@ func newestRestorableCheckpoint(rootTrees []string) int {
 // reclaiming the disk space that is actually filling up.
 func (s *Server) applyRetentionWindow(cutoff time.Time, dryRun bool) (retentionCounts, []string) {
 	var counts retentionCounts
-	if n, itemErrors, err := pruneDiagnosticsLogs(hubDataDir(), cutoff, dryRun); err != nil {
+	diagnostics, err := pruneDiagnosticsLogs(hubDataDir(), cutoff, dryRun)
+	counts.diagnostics = diagnostics.removed
+	counts.diagnosticsBytes = diagnostics.bytes
+	counts.itemErrors += diagnostics.itemErrors
+	if err != nil {
 		counts.errors++
-		counts.itemErrors += itemErrors
 		log.Printf("[retention] diagnostics: %v", err)
-	} else {
-		counts.diagnostics = n
-		counts.itemErrors += itemErrors
 	}
-	expired, itemErrors, err := s.pruneExpiredCheckpoints(cutoff, dryRun)
+	expired, manifestBytes, itemErrors, err := s.pruneExpiredCheckpoints(cutoff, dryRun)
 	counts.checkpoints = len(expired)
+	counts.manifestBytes = manifestBytes
 	counts.itemErrors += itemErrors
 	if err != nil {
 		counts.errors++
@@ -911,22 +1018,30 @@ func (s *Server) pruneRowsBatched(table, column string, cutoff any, dryRun bool,
 	}
 }
 
+// diagnosticsPruneResult is what the diagnostics phase did.
+type diagnosticsPruneResult struct {
+	removed    int
+	bytes      int64
+	itemErrors int
+}
+
 // pruneDiagnosticsLogs removes captured gateway/bridge logs by file mtime.
 // These files have no database row, so the filesystem timestamp is the only
 // record of their age.
-func pruneDiagnosticsLogs(dataDir string, cutoff time.Time, dryRun bool) (int, int, error) {
+func pruneDiagnosticsLogs(dataDir string, cutoff time.Time, dryRun bool) (diagnosticsPruneResult, error) {
+	var result diagnosticsPruneResult
 	if dataDir == "" {
-		return 0, 0, nil
+		return result, nil
 	}
 	dir := filepath.Join(dataDir, "diagnostics")
 	entries, err := os.ReadDir(dir)
 	if os.IsNotExist(err) {
-		return 0, 0, nil
+		return result, nil
 	}
 	if err != nil {
-		return 0, 0, err
+		return result, err
 	}
-	removed, itemErrors := 0, 0
+	sample := &retentionSample{}
 	for _, entry := range entries {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".log") {
 			continue
@@ -936,31 +1051,40 @@ func pruneDiagnosticsLogs(dataDir string, cutoff time.Time, dryRun bool) (int, i
 			continue
 		}
 		if dryRun {
-			log.Printf("[retention] dry_run: would remove diagnostics log %s", entry.Name())
-			removed++
+			sample.add(entry.Name())
+			result.removed++
+			result.bytes += info.Size()
 			continue
 		}
 		if err := os.Remove(filepath.Join(dir, entry.Name())); err != nil && !os.IsNotExist(err) {
-			itemErrors++
+			result.itemErrors++
 			log.Printf("[retention] remove diagnostics log %s: %v", entry.Name(), err)
 			continue
 		}
-		removed++
+		result.removed++
+		result.bytes += info.Size()
 	}
-	return removed, itemErrors, nil
+	if dryRun {
+		if line := sample.describe("diagnostics log(s)"); line != "" {
+			log.Printf("[retention] dry_run: would remove %s", line)
+		}
+	}
+	return result, nil
 }
 
-// pruneExpiredCheckpoints deletes both the manifest and the row for
-// checkpoints past the retention window. Unlike compaction, this is the point
-// where the analytics record itself expires, so it applies to every status.
+// pruneExpiredCheckpoints deletes the row, its blob references and its manifest
+// for checkpoints past the retention window. Unlike compaction, this is the
+// point where the analytics record itself expires, so it applies to every
+// status.
+//
 // It returns the ids it removed -- or, in a dry run, the ids it WOULD have
-// removed, which is what lets the blob sweep build its keep set against the
-// state a real cycle would have reached.
-func (s *Server) pruneExpiredCheckpoints(cutoff time.Time, dryRun bool) ([]string, int, error) {
+// removed, which is what lets the blob sweep read past the references a real
+// cycle would already have dropped -- plus the manifest bytes reclaimed.
+func (s *Server) pruneExpiredCheckpoints(cutoff time.Time, dryRun bool) ([]string, int64, int, error) {
 	rows, err := s.db.Query(
 		`SELECT id, COALESCE(manifest_path,'') FROM claw_checkpoints WHERE created_at < ?`, cutoff)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, 0, err
 	}
 	type expired struct{ id, manifestPath string }
 	var victims []expired
@@ -968,269 +1092,313 @@ func (s *Server) pruneExpiredCheckpoints(cutoff time.Time, dryRun bool) ([]strin
 		var e expired
 		if err := rows.Scan(&e.id, &e.manifestPath); err != nil {
 			rows.Close()
-			return nil, 0, err
+			return nil, 0, 0, err
 		}
 		victims = append(victims, e)
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
-		return nil, 0, err
+		return nil, 0, 0, err
 	}
 	var removed []string
+	var bytes int64
 	itemErrors := 0
+	sample := &retentionSample{}
 	for _, v := range victims {
 		path := v.manifestPath
 		if path == "" {
 			path = checkpointManifestPath(v.id)
 		}
+		var size int64
+		if info, err := os.Stat(path); err == nil {
+			size = info.Size()
+		}
 		if dryRun {
-			log.Printf("[retention] dry_run: would delete expired checkpoint %s (manifest %s)", shortID(v.id), path)
+			sample.add(shortID(v.id))
 			removed = append(removed, v.id)
+			bytes += size
 			continue
 		}
 		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 			itemErrors++
 			log.Printf("[retention] remove expired manifest %s: %v", path, err)
 			continue
+		} else if err == nil {
+			bytes += size
 		}
-		if _, err := s.db.Exec(`DELETE FROM claw_checkpoints WHERE id=?`, v.id); err != nil {
-			return removed, itemErrors, fmt.Errorf("delete expired checkpoint (aborted after %d of %d): %w", len(removed), len(victims), err)
+		// The row and every blob it held go together. Nothing else would ever
+		// release those references once the row is gone: the reconciliation that
+		// collects edges without a row is a crash-recovery backstop, not a
+		// primary path.
+		if err := s.deleteExpiredCheckpoint(v.id); err != nil {
+			return removed, bytes, itemErrors, fmt.Errorf("delete expired checkpoint (aborted after %d of %d): %w", len(removed), len(victims), err)
 		}
-		// A checkpoint that expired while still 'creating' takes its blob claim
-		// with it; nothing else would ever release it once the row is gone.
-		s.clearCheckpointPendingBlobs(v.id)
 		removed = append(removed, v.id)
 	}
-	return removed, itemErrors, nil
+	if dryRun {
+		if line := sample.describe("expired checkpoint(s)"); line != "" {
+			log.Printf("[retention] dry_run: would delete %s", line)
+		}
+	}
+	return removed, bytes, itemErrors, nil
+}
+
+// deleteExpiredCheckpoint removes one checkpoint row and its blob references
+// atomically.
+func (s *Server) deleteExpiredCheckpoint(checkpointID string) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := deleteCheckpointBlobRefsTx(tx, checkpointID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM claw_checkpoints WHERE id=?`, checkpointID); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // ---------------------------------------------------------------------------
 // Blob sweep
 // ---------------------------------------------------------------------------
 
-// checkpointBlobKeepSet builds the set of blob digests that must survive.
-//
-// This is the dangerous part of the whole feature: a digest missing from the
-// keep set is a file deleted out from under a restore that may not be attempted
-// for weeks, and the loss is silent until then. So the set is built by union of
-// every path that can reach a blob, and any doubt aborts the sweep instead of
-// narrowing the set:
-//
-//  1. The tree/message/manifest digests recorded on every surviving
-//     claw_checkpoints row. The DB is authoritative even for a row whose
-//     manifest was compacted away.
-//  2. Every 64-hex digest appearing anywhere in every surviving manifest file.
-//     Scanning the decoded JSON generically rather than reading named fields
-//     covers schema 1 (which inlined files[]) and schema 2 alike, and keeps
-//     working if a future field adds another blob reference.
-//  3. Every digest a checkpoint still in 'creating' declared at plan time. The
-//     row itself carries no digests until it completes, so this durable claim
-//     is the only thing that distinguishes a blob about to be referenced from
-//     an orphan. It is not covered by the mtime grace window: the plan and the
-//     upload handler both deduplicate on os.Stat, so a reused blob keeps its
-//     original mtime, which can be arbitrarily old.
-//  4. The files listed inside each kept workspace tree blob. This is the step
-//     whose omission would be catastrophic: a tree is a JSON array of
-//     {path, sha256, size}, and the per-file blobs it points at appear nowhere
-//     in a schema-2 manifest or in the database. Without this closure the sweep
-//     would delete the entire workspace of every checkpoint it just kept.
-//
-// A manifest that cannot be read or parsed, or a tree blob that is present but
-// unparseable, returns an error: an incomplete keep set is worse than a full
-// disk, and the operator can fix the file and let the next cycle run.
-//
-// The one exception is an unparseable manifest that NO claw_checkpoints row
-// references. That file is already unreachable — nothing can restore from it —
-// so it cannot make the keep set incomplete, and treating it as fatal was
-// actively harmful: manifests used to be written with a bare os.WriteFile, so
-// the disk-full condition this feature exists to relieve is exactly what leaves
-// a truncated one behind, and one such file disabled the sweep permanently with
-// no way to self-heal. It is logged and skipped so retention can remove it.
-//
-// sim is non-nil only in a dry run, where compaction and expiry mutated
-// nothing: it names the rows those phases WOULD have removed, and the set is
-// built as if they had. Without it the dry run keeps every digest those rows
-// still name and reports a fraction of what the real cycle removes, which is
-// the opposite of the guarantee DryRun documents.
-func (s *Server) checkpointBlobKeepSet(sim *retentionSimulation) (map[string]struct{}, error) {
-	keep := make(map[string]struct{})
-	trees := make(map[string]struct{})
-	// Manifests a row still points at. A manifest outside this set is an orphan
-	// whatever its contents, and the id/path pair is collected because a legacy
-	// row may store a path that is not checkpointManifestPath(id).
-	referencedManifests := make(map[string]struct{})
-	// Manifests a real cycle would already have unlinked. They are still on
-	// disk during a dry run, so the manifest scan below has to be told to walk
-	// past them rather than harvest digests from them.
-	simRemovedManifests := make(map[string]struct{})
-	add := func(sha string, isTree bool) {
-		clean := normalizeBlobDigest(sha)
-		if clean == "" {
-			return
-		}
-		keep[clean] = struct{}{}
-		if isTree {
-			trees[clean] = struct{}{}
-		}
-	}
+// checkpointBlobRefsBackfillMigration names the one-time traversal that gives
+// pre-existing checkpoints the reference edges they were never asked for.
+const checkpointBlobRefsBackfillMigration = "checkpoint_blob_refs_backfill_v1"
 
-	rows, err := s.db.Query(`SELECT id, status, COALESCE(manifest_path,''), COALESCE(manifest_sha256,''), COALESCE(root_tree_sha256,''),
-		COALESCE(message_tree_sha256,''), COALESCE(workspace_tree_sha256,'') FROM claw_checkpoints`)
+// checkpointBlobRefsBackfilled reports whether that traversal has ever run to
+// completion.
+//
+// THIS IS THE GATE THE SWEEP MUST NOT DELETE WITHOUT. A half-populated edge
+// table is indistinguishable from "almost every blob is garbage": a hub that
+// upgraded ten minutes ago, or one that crashed mid-backfill, would have the
+// sweeper walk 13,000 blobs, find a reference for none of them, and reclaim the
+// entire checkpoint store in one cycle. The completion marker is the only thing
+// that separates "nothing references this" from "nothing has been asked yet".
+func (s *Server) checkpointBlobRefsBackfilled() (bool, error) {
+	return hubMigrationApplied(s.db, checkpointBlobRefsBackfillMigration)
+}
+
+// backfillCheckpointBlobRefs gives every pre-existing checkpoint the edges it
+// would have recorded had it been created under reference counting.
+//
+// This is the traversal the keep set used to perform on every single cycle --
+// parse each manifest, follow each tree blob, union the digest columns -- done
+// exactly once. It is:
+//
+//   - idempotent: every insert is INSERT OR IGNORE on the composite key, so a
+//     re-run over checkpoints already covered writes nothing.
+//   - non-fatal per item: a manifest that cannot be read or parsed is logged,
+//     counted, and skipped. On the disk-full hub this exists to relieve, hitting
+//     unreadable files is a certainty, and one of them must not be able to
+//     switch reclamation off for the length of the retention window -- that
+//     failure mode is what made disk-full self-sustaining the first time.
+//   - resumable: the completion marker is written only after the traversal
+//     reaches the end. A crash leaves no marker, the sweep declines, and the
+//     next cycle starts over into the same rows.
+//
+// Only 'ready' and 'skipped' rows are traversed, because they are the only
+// statuses that hold anything. A 'compacted' or 'failed' row released its blobs
+// by definition, and a 'creating' row's edges came from its plan (adopted from
+// the legacy claim table by adoptLegacyCheckpointBlobClaims).
+func (s *Server) backfillCheckpointBlobRefs() error {
+	done, err := s.checkpointBlobRefsBackfilled()
 	if err != nil {
-		return nil, fmt.Errorf("read checkpoint digests: %w", err)
+		return err
 	}
+	if done {
+		return nil
+	}
+	started := time.Now()
+	rows, err := s.db.Query(`SELECT id, status, COALESCE(manifest_path,''), COALESCE(manifest_sha256,''),
+		COALESCE(root_tree_sha256,''), COALESCE(message_tree_sha256,''), COALESCE(workspace_tree_sha256,'')
+		 FROM claw_checkpoints WHERE status IN ('ready','skipped')`)
+	if err != nil {
+		return fmt.Errorf("list checkpoints to backfill: %w", err)
+	}
+	type row struct{ id, status, manifestPath, manifestSHA, rootSHA, msgSHA, workspaceSHA string }
+	var pending []row
 	for rows.Next() {
-		var id, status, manifestPath, manifestSHA, rootSHA, msgSHA, workspaceSHA string
-		if err := rows.Scan(&id, &status, &manifestPath, &manifestSHA, &rootSHA, &msgSHA, &workspaceSHA); err != nil {
+		var r row
+		if err := rows.Scan(&r.id, &r.status, &r.manifestPath, &r.manifestSHA, &r.rootSHA, &r.msgSHA, &r.workspaceSHA); err != nil {
 			rows.Close()
-			return nil, err
+			return err
 		}
-		if sim.wasDeleted(id) || sim.wasCompacted(id) {
-			// Deleted: the row and its manifest are both gone. Compacted: the
-			// row survives with its manifest unlinked and every tree digest
-			// cleared. Either way it contributes no digest and references no
-			// manifest -- which is the whole point of both phases.
-			path := manifestPath
-			if path == "" {
-				path = checkpointManifestPath(id)
-			}
-			simRemovedManifests[path] = struct{}{}
-			continue
-		}
-		if manifestPath != "" {
-			referencedManifests[manifestPath] = struct{}{}
-		} else if status != "compacted" {
-			// A compacted row gave up its manifest deliberately, so a file left
-			// at its conventional path is debris from an interrupted unlink, not
-			// a reference. Every other status may legitimately own one even with
-			// the column unset (legacy rows, an interrupted finalize).
-			referencedManifests[checkpointManifestPath(id)] = struct{}{}
-		}
-		// manifest_sha256 is the digest of the manifest file, which is not
-		// stored as a blob — keeping it costs nothing and guards against a
-		// future change that does store it.
-		add(manifestSHA, false)
-		add(msgSHA, false)
-		add(rootSHA, true)
-		add(workspaceSHA, true)
+		pending = append(pending, r)
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
-		return nil, err
+		return err
 	}
 
-	// Checkpoints under construction. Their blobs are on disk (or already were,
-	// deduplicated from an earlier checkpoint) but no row names them yet.
-	pending, err := s.db.Query(`SELECT p.checkpoint_id, p.sha256 FROM claw_checkpoint_pending_blobs p
-		 JOIN claw_checkpoints c ON c.id = p.checkpoint_id
-		 WHERE c.status = 'creating'`)
-	if err != nil {
-		return nil, fmt.Errorf("read pending checkpoint blobs: %w", err)
+	var edges int
+	var badManifests, missingTrees, badTrees int
+	for _, r := range pending {
+		digests := map[string]struct{}{}
+		trees := map[string]struct{}{}
+		add := func(sha string, isTree bool) {
+			clean := normalizeBlobDigest(sha)
+			if clean == "" {
+				return
+			}
+			digests[clean] = struct{}{}
+			if isTree {
+				trees[clean] = struct{}{}
+			}
+		}
+		add(r.manifestSHA, false)
+		add(r.msgSHA, false)
+		add(r.rootSHA, true)
+		add(r.workspaceSHA, true)
+
+		// A row whose manifest_path is empty may still own a manifest at the
+		// conventional path (legacy rows, an interrupted finalize). A 'compacted'
+		// row may not: it gave its manifest up deliberately, so a file left there
+		// is debris from an interrupted unlink, not a reference. Compacted rows
+		// are not in this query at all, which keeps the rule from having to be
+		// restated here.
+		manifestPath := r.manifestPath
+		if manifestPath == "" {
+			manifestPath = checkpointManifestPath(r.id)
+		}
+		if data, err := os.ReadFile(manifestPath); err != nil {
+			if !os.IsNotExist(err) {
+				badManifests++
+				log.Printf("[retention] backfill: cannot read manifest %s of checkpoint %s; its row digests are still recorded: %v",
+					manifestPath, shortID(r.id), err)
+			}
+		} else {
+			// Decode generically as well as into the struct: schema 1 inlined the
+			// complete file list in the manifest, and a generic walk picks those
+			// up along with any field a future schema adds.
+			var decoded any
+			var manifest checkpointManifest
+			jsonErr := json.Unmarshal(data, &decoded)
+			structErr := json.Unmarshal(data, &manifest)
+			if jsonErr != nil || structErr != nil {
+				badManifests++
+				log.Printf("[retention] backfill: cannot parse manifest %s of checkpoint %s; its row digests are still recorded: %v",
+					manifestPath, shortID(r.id), errors.Join(jsonErr, structErr))
+			} else {
+				for _, sha := range collectDigests(decoded) {
+					add(sha, false)
+				}
+				add(manifest.Workspace.TreeSHA256, true)
+			}
+		}
+
+		// The one step whose omission would be catastrophic: under schema 2 the
+		// per-file digests exist ONLY inside the tree blob.
+		for tree := range trees {
+			data, err := os.ReadFile(checkpointBlobPath(tree))
+			if os.IsNotExist(err) {
+				missingTrees++
+				log.Printf("[retention] backfill: tree blob %s of checkpoint %s is missing; the files it listed cannot be recorded and will be swept",
+					tree, shortID(r.id))
+				continue
+			}
+			if err != nil {
+				badTrees++
+				log.Printf("[retention] backfill: cannot read tree blob %s of checkpoint %s: %v", tree, shortID(r.id), err)
+				continue
+			}
+			var files []types.CheckpointFile
+			if err := json.Unmarshal(data, &files); err != nil {
+				badTrees++
+				log.Printf("[retention] backfill: cannot parse tree blob %s of checkpoint %s: %v", tree, shortID(r.id), err)
+				continue
+			}
+			for _, f := range files {
+				add(f.SHA256, false)
+			}
+		}
+
+		if len(digests) == 0 {
+			continue
+		}
+		list := make([]string, 0, len(digests))
+		for d := range digests {
+			list = append(list, d)
+		}
+		// One transaction per checkpoint, not one for the whole backfill. SQLite
+		// has a single writer and this hub runs with a five-second busy_timeout;
+		// a transaction spanning thousands of checkpoints would hold the write
+		// lock long enough to fail every heartbeat and checkpoint row behind it.
+		// A database error here (as opposed to a file error above) aborts the
+		// backfill without a marker, so the next cycle retries the whole thing.
+		if err := s.insertCheckpointBlobRefs(r.id, list); err != nil {
+			return fmt.Errorf("backfill references for checkpoint %s: %w", shortID(r.id), err)
+		}
+		edges += len(list)
 	}
-	for pending.Next() {
+
+	if err := markHubMigration(s.db, checkpointBlobRefsBackfillMigration); err != nil {
+		return err
+	}
+	log.Printf("[retention] blob reference backfill complete in %s: %d checkpoint(s), %d reference(s); unreadable_manifests=%d missing_trees=%d unreadable_trees=%d (blobs listed only by a missing tree are now unreferenced and will be swept)",
+		time.Since(started).Round(time.Millisecond), len(pending), edges, badManifests, missingTrees, badTrees)
+	return nil
+}
+
+// insertCheckpointBlobRefs records edges for one checkpoint in its own
+// transaction.
+func (s *Server) insertCheckpointBlobRefs(checkpointID string, digests []string) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := addCheckpointBlobRefsTx(tx, checkpointID, digests); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// referencedBlobDigests reads the whole reference table into a set.
+//
+// One read, not one query per blob. The sweep visits ~13,000 files on the hub
+// this was written for, and probing the database per file is 13,000 round trips
+// against a database whose single write lock the rest of the hub is queueing on.
+// The table is two narrow columns and the read is a single sequential scan;
+// holding its distinct digests costs ~64 bytes each, which is a rounding error
+// next to the directory walk that follows.
+//
+// released names checkpoints whose edges a real cycle would already have
+// deleted. It is empty in a real cycle and carries the dry run's accounting;
+// see retentionSweepOnce.
+func (s *Server) referencedBlobDigests(released []string) (map[string]struct{}, error) {
+	skip := make(map[string]struct{}, len(released))
+	for _, id := range released {
+		skip[id] = struct{}{}
+	}
+	rows, err := s.db.Query(`SELECT checkpoint_id, sha256 FROM checkpoint_blob_refs`)
+	if err != nil {
+		return nil, fmt.Errorf("read checkpoint blob references: %w", err)
+	}
+	defer rows.Close()
+	referenced := make(map[string]struct{})
+	for rows.Next() {
 		var checkpointID, sha string
-		if err := pending.Scan(&checkpointID, &sha); err != nil {
-			pending.Close()
+		if err := rows.Scan(&checkpointID, &sha); err != nil {
 			return nil, err
 		}
-		// Expiry deletes rows of every status, 'creating' included, and takes
-		// their claims with them; a dry run has to account for that too.
-		if sim.wasDeleted(checkpointID) {
+		if _, dropped := skip[checkpointID]; dropped {
 			continue
 		}
-		add(sha, false)
-	}
-	pending.Close()
-	if err := pending.Err(); err != nil {
-		return nil, err
-	}
-
-	manifestDir := filepath.Join(checkpointsRoot(), "manifests")
-	entries, err := os.ReadDir(manifestDir)
-	if err != nil && !os.IsNotExist(err) {
-		return nil, fmt.Errorf("read manifests: %w", err)
-	}
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
-			continue
-		}
-		path := filepath.Join(manifestDir, entry.Name())
-		if _, removed := simRemovedManifests[path]; removed {
-			continue
-		}
-		_, referenced := referencedManifests[path]
-		// An unusable manifest only threatens the keep set when a row still
-		// points at it. Orphans are skipped so one truncated file cannot switch
-		// reclamation off for the length of the retention window.
-		unusable := func(err error) error {
-			if referenced {
-				return err
-			}
-			log.Printf("[retention] ignoring orphan manifest %s (no checkpoint row references it): %v", entry.Name(), err)
-			return nil
-		}
-		data, err := os.ReadFile(path)
-		if err != nil {
-			if skipErr := unusable(fmt.Errorf("read manifest %s: %w", entry.Name(), err)); skipErr != nil {
-				return nil, skipErr
-			}
-			continue
-		}
-		var decoded any
-		if err := json.Unmarshal(data, &decoded); err != nil {
-			if skipErr := unusable(fmt.Errorf("parse manifest %s: %w", entry.Name(), err)); skipErr != nil {
-				return nil, skipErr
-			}
-			continue
-		}
-		for _, sha := range collectDigests(decoded) {
-			add(sha, false)
-		}
-		// The workspace tree is the one manifest digest whose contents must be
-		// followed, so pick it out by name in addition to the generic scan.
-		var manifest checkpointManifest
-		if err := json.Unmarshal(data, &manifest); err != nil {
-			if skipErr := unusable(fmt.Errorf("parse manifest %s: %w", entry.Name(), err)); skipErr != nil {
-				return nil, skipErr
-			}
-			continue
-		}
-		add(manifest.Workspace.TreeSHA256, true)
-	}
-
-	for tree := range trees {
-		path := checkpointBlobPath(tree)
-		data, err := os.ReadFile(path)
-		if os.IsNotExist(err) {
-			// A missing tree makes the keep set incomplete, exactly as an
-			// unparseable one does, so it aborts for the same reason.
-			//
-			// The previous reasoning -- "the tree is gone, so nothing it
-			// referenced is resolvable" -- confused the checkpoint being broken
-			// with its content being worthless. Under schema 2 the per-file
-			// digests exist ONLY inside that tree, so continuing here means the
-			// sweep cannot see those files, decides they are unreachable, and
-			// deletes them. One missing object would become the irreversible
-			// loss of everything the checkpoint still had, and would also
-			// destroy any chance of reconstructing the tree from its parts.
-			return nil, fmt.Errorf("tree blob %s referenced but missing", tree)
-		}
-		if err != nil {
-			return nil, fmt.Errorf("read tree blob %s: %w", tree, err)
-		}
-		var files []types.CheckpointFile
-		if err := json.Unmarshal(data, &files); err != nil {
-			return nil, fmt.Errorf("parse tree blob %s: %w", tree, err)
-		}
-		for _, f := range files {
-			add(f.SHA256, false)
+		if clean := normalizeBlobDigest(sha); clean != "" {
+			referenced[clean] = struct{}{}
 		}
 	}
-	return keep, nil
+	return referenced, rows.Err()
 }
 
 // collectDigests walks decoded JSON and returns every string that looks like a
-// sha256 digest, with or without the "sha256:" prefix.
+// sha256 digest, with or without the "sha256:" prefix. Only the one-time
+// backfill uses it: reading a manifest generically is how a schema-1 manifest's
+// inlined file list is recovered, and the steady state never reads a manifest at
+// all.
 func collectDigests(node any) []string {
 	var out []string
 	switch v := node.(type) {
@@ -1278,43 +1446,73 @@ const blobSweepGrace = time.Hour
 // starts exercises the durable claim instead and never reaches it.
 var blobSweepFileHook func(name string)
 
-// sweepCheckpointBlobs deletes content-addressed blobs no surviving checkpoint
-// can reach, then prunes the fan-out directories it emptied. It runs once at
-// the end of a cycle, never per claw: a blob is shared by every checkpoint that
-// captured the same bytes, so reachability is only meaningful globally.
+// sweepCheckpointBlobs deletes content-addressed blobs no checkpoint references
+// any more, then prunes the fan-out directories it emptied. It runs once at the
+// end of a cycle, never per claw: a blob is shared by every checkpoint that
+// captured the same bytes, so the question is only meaningful globally.
+//
+// Two mechanisms protect a blob here, and they answer different questions.
+// Neither is redundant:
+//
+//   - The REFERENCE TABLE answers "should this blob exist?". It is the whole
+//     of the correctness argument: an edge exists for as long as a checkpoint
+//     holds the blob, so a digest with no edge is genuinely unreachable. No
+//     manifest is parsed and no tree is followed to establish that.
+//   - The INTERLOCK (blobClaimMu / blobClaimWindow) answers "is it safe to
+//     unlink right now?". The database and the filesystem do not share a
+//     transaction, so there is always a gap between reading the referenced set
+//     and calling os.Remove — and filepath.Walk runs for minutes across it. A
+//     plan arriving inside that gap commits its edges, stats the file, and tells
+//     the claw not to upload it, while the walker holds a snapshot taken before
+//     those edges existed. planBlobMissing records into the window before its
+//     stat and removeUnclaimedBlob re-checks it under the same mutex, so the
+//     two interleavings are the two safe ones.
+//
+// Do not delete one as redundant with the other. Refcounting makes the decision
+// correct; the interlock makes the deletion safe.
 //
 // One sweeper goroutine calls this, one cycle at a time, which is what lets the
-// claim window be a single shared map rather than one per sweep.
-func (s *Server) sweepCheckpointBlobs(dryRun bool, sim *retentionSimulation) (int, int64, int, error) {
-	// Arm the interlock BEFORE the keep set is read, and disarm it only after
-	// the walk. Every plan that commits its durable claim before this point is
-	// visible to the keep set query below; every plan that commits after it
-	// records into the in-memory window instead. There is no instant in between
-	// where a claim is invisible to both.
+// window be a single shared map rather than one per sweep.
+func (s *Server) sweepCheckpointBlobs(dryRun bool, released []string) (int, int64, int, error) {
+	// Arm the interlock BEFORE the referenced set is read, and disarm it only
+	// after the walk. Every plan that commits its edges before this point is
+	// visible to the query below; every plan that commits after it records into
+	// the in-memory window instead. There is no instant in between where a
+	// reference is invisible to both.
 	s.beginBlobClaimWindow()
 	defer s.endBlobClaimWindow()
 
-	keep, err := s.checkpointBlobKeepSet(sim)
+	// The gate. An edge table that has never been backfilled says "nothing
+	// references anything", which is the same sentence as "everything is
+	// garbage" and must never be acted on.
+	backfilled, err := s.checkpointBlobRefsBackfilled()
 	if err != nil {
-		return 0, 0, 0, fmt.Errorf("keep set incomplete, not sweeping: %w", err)
+		return 0, 0, 0, fmt.Errorf("check blob reference backfill: %w", err)
+	}
+	if !backfilled {
+		log.Printf("[retention] blob sweep DECLINED: the checkpoint blob reference backfill has not completed, so an absent reference does not yet mean an unreferenced blob. No blob will be deleted until it does; see the preceding backfill error, if any.")
+		return 0, 0, 0, nil
+	}
+
+	referenced, err := s.referencedBlobDigests(released)
+	if err != nil {
+		return 0, 0, 0, fmt.Errorf("not sweeping: %w", err)
 	}
 	blobRoot := filepath.Join(checkpointsRoot(), "blobs", "sha256")
 	if _, err := os.Stat(blobRoot); os.IsNotExist(err) {
 		return 0, 0, 0, nil
 	}
-	// Everything written inside this window is off limits. This is now a SECOND
-	// line of defence, not the primary one: the durable pending-blob claim
-	// recorded at plan time is what actually protects a checkpoint under
-	// construction, because it covers reused blobs whose mtime is old. The
-	// window still earns its place for anything the claim cannot cover — a blob
-	// written by a path that never planned it, or one whose claim was released
-	// by the row completing a moment before the walk reached the file.
+	// Everything written inside this window is off limits. This is a THIRD line
+	// of defence behind the reference table and the interlock, and it earns its
+	// place for what neither covers: a blob written by a path that never
+	// recorded an edge for it at all.
 	//
 	// A grace window rather than a lock: the alternative is holding a mutex
 	// across every blob upload and the whole sweep, which would stall uploads
 	// for the length of a full directory walk.
 	cutoff := time.Now().Add(-blobSweepGrace)
 	removed, freed, itemErrors := 0, int64(0), 0
+	sample := &retentionSample{}
 	err = filepath.Walk(blobRoot, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
@@ -1331,7 +1529,7 @@ func (s *Server) sweepCheckpointBlobs(dryRun bool, sim *retentionSimulation) (in
 		if blobSweepFileHook != nil {
 			blobSweepFileHook(info.Name())
 		}
-		if _, ok := keep[normalizeBlobDigest(info.Name())]; ok {
+		if _, ok := referenced[normalizeBlobDigest(info.Name())]; ok {
 			return nil
 		}
 		if info.ModTime().After(cutoff) {
@@ -1342,7 +1540,7 @@ func (s *Server) sweepCheckpointBlobs(dryRun bool, sim *retentionSimulation) (in
 			if s.blobClaimedDuringSweep(info.Name()) {
 				return nil
 			}
-			log.Printf("[retention] dry_run: would sweep blob %s (%d bytes)", info.Name(), size)
+			sample.add(shortID(info.Name()))
 			removed++
 			freed += size
 			return nil
@@ -1353,7 +1551,7 @@ func (s *Server) sweepCheckpointBlobs(dryRun bool, sim *retentionSimulation) (in
 		// yet stat'ed the file, in which case it will find it gone and ask the
 		// claw to upload it again. The one outcome the interlock forbids is the
 		// one that used to happen: the plan answers "already have it, skip the
-		// upload" and the walker, holding a keep set snapshotted minutes
+		// upload" and the walker, holding a referenced set snapshotted minutes
 		// earlier, unlinks it anyway.
 		if removedFile, err := s.removeUnclaimedBlob(path, info.Name()); err != nil {
 			itemErrors++
@@ -1369,7 +1567,11 @@ func (s *Server) sweepCheckpointBlobs(dryRun bool, sim *retentionSimulation) (in
 	if err != nil {
 		return removed, freed, itemErrors, fmt.Errorf("walk blobs (aborted after %d blobs, %d bytes): %w", removed, freed, err)
 	}
-	if !dryRun {
+	if dryRun {
+		if line := sample.describe("blob(s)"); line != "" {
+			log.Printf("[retention] dry_run: would sweep %s totalling %d bytes", line, freed)
+		}
+	} else {
 		pruneEmptyDirs(blobRoot)
 	}
 	return removed, freed, itemErrors, nil
@@ -1379,14 +1581,18 @@ func (s *Server) sweepCheckpointBlobs(dryRun bool, sim *retentionSimulation) (in
 // The claim/unlink interlock
 // ---------------------------------------------------------------------------
 //
-// checkpointBlobKeepSet reads the durable claims once and filepath.Walk then
-// runs for minutes. A plan arriving inside that window commits its claim, sees
-// the blob on disk via os.Stat, and tells the claw not to upload it -- while
-// the walker, holding a snapshot taken before that claim existed, unlinks it.
-// The checkpoint is then published 'ready' referencing a file that is gone, and
+// referencedBlobDigests reads the edge table once and filepath.Walk then runs
+// for minutes. A plan arriving inside that window commits its edges, sees the
+// blob on disk via os.Stat, and tells the claw not to upload it -- while the
+// walker, holding a snapshot taken before those edges existed, unlinks it. The
+// checkpoint is then published 'ready' referencing a file that is gone, and
 // nothing notices until a restore weeks later. Compaction earlier in the SAME
-// cycle manufactures these candidates by clearing tree digests, so the window
-// is not hypothetical.
+// cycle manufactures these candidates by releasing references, so the window is
+// not hypothetical.
+//
+// Reference counting does not close this. It makes the DECISION correct; the
+// gap it leaves is between the decision and the unlink, and no amount of
+// accounting inside the database can cover a filesystem operation outside it.
 //
 // The fix is to make "claim then stat" and "check then unlink" mutually
 // exclusive per digest. It is not a lock held across the sweep: each hold

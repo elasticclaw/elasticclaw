@@ -202,57 +202,88 @@ func (s *Server) checkpointScheduler() {
 // Generous on purpose: the legitimate upper bound is one claw's full upload
 // phase, which is minutes on a large workspace and can be much worse on a slow
 // link. Anything past this is a claw that died mid-upload, and until the row is
-// failed its pending-blob claim pins every digest it planned -- forever, on a
-// hub whose reaper is disabled, since before this the only runtime release was
-// finalize/skip/fail and the only other release was reconcileOnBoot.
+// failed it goes on holding every digest it planned -- forever, on a hub whose
+// reaper is disabled, since the only other release is reconcileOnBoot.
 const checkpointCreatingMaxAge = 6 * time.Hour
 
 // failStuckCreatingCheckpoints fails 'creating' rows older than the bound and
-// releases the blob claims they were holding.
+// releases the blobs they were holding.
+//
+// Both halves probe with a read before writing. This runs every minute, and
+// under _txlock=immediate even an UPDATE or DELETE that matches nothing takes
+// the hub's one write lock; the steady state for both is "nothing to do", so the
+// probes are what keep this off the write path entirely. The probe used to sit
+// after an unconditional UPDATE, which meant it never achieved the thing it was
+// written for.
 func (s *Server) failStuckCreatingCheckpoints() {
 	cutoff := now().Add(-checkpointCreatingMaxAge)
-	res, err := s.db.Exec(
-		`UPDATE claw_checkpoints SET status='failed', error='checkpoint abandoned while creating', completed_at=?
-		  WHERE status='creating' AND created_at < ?`, now(), cutoff)
-	if err != nil {
-		log.Printf("[checkpoint] fail stuck creating checkpoints: %v", err)
-		return
+	var stuck bool
+	if err := s.db.QueryRow(
+		`SELECT EXISTS(SELECT 1 FROM claw_checkpoints WHERE status='creating' AND created_at < ?)`, cutoff).
+		Scan(&stuck); err != nil {
+		log.Printf("[checkpoint] probe stuck creating checkpoints: %v", err)
+	} else if stuck {
+		if count, err := failStuckCreatingCheckpointsTx(s.db, cutoff); err != nil {
+			log.Printf("[checkpoint] fail stuck creating checkpoints: %v", err)
+		} else if count > 0 {
+			log.Printf("[checkpoint] failed %d checkpoint(s) stuck in 'creating' for over %s", count, checkpointCreatingMaxAge)
+		}
 	}
-	if count, _ := res.RowsAffected(); count > 0 {
-		log.Printf("[checkpoint] failed %d checkpoint(s) stuck in 'creating' for over %s", count, checkpointCreatingMaxAge)
-	}
-	// Probe with a read before reconciling. This runs every minute, and under
-	// _txlock=immediate even a DELETE that matches nothing takes the hub's one
-	// write lock; the steady state is "no orphans", so the probe is what keeps
-	// this off the write path entirely.
 	var orphaned bool
 	if err := s.db.QueryRow(`SELECT EXISTS(
-		SELECT 1 FROM claw_checkpoint_pending_blobs p
-		 WHERE NOT EXISTS (SELECT 1 FROM claw_checkpoints c WHERE c.id = p.checkpoint_id AND c.status='creating'))`).
+		SELECT 1 FROM checkpoint_blob_refs r
+		 WHERE NOT EXISTS (SELECT 1 FROM claw_checkpoints c WHERE c.id = r.checkpoint_id))`).
 		Scan(&orphaned); err != nil {
-		log.Printf("[checkpoint] probe orphaned pending blob claims: %v", err)
+		log.Printf("[checkpoint] probe orphaned checkpoint blob references: %v", err)
 		return
 	}
 	if !orphaned {
 		return
 	}
-	if count, err := releaseOrphanedPendingBlobClaims(s.db); err != nil {
-		log.Printf("[checkpoint] release orphaned pending blob claims: %v", err)
+	if count, err := releaseOrphanedCheckpointBlobRefs(s.db); err != nil {
+		log.Printf("[checkpoint] release orphaned checkpoint blob references: %v", err)
 	} else if count > 0 {
-		log.Printf("[checkpoint] released %d stale pending blob claim(s)", count)
+		log.Printf("[checkpoint] released %d orphaned checkpoint blob reference(s)", count)
 	}
 }
 
-// releaseOrphanedPendingBlobClaims drops every claim whose checkpoint is no
-// longer 'creating'.
+// failStuckCreatingCheckpointsTx fails the abandoned rows and drops their
+// references together, so a checkpoint is never recorded as failed while still
+// holding blobs (nor the reverse).
+func failStuckCreatingCheckpointsTx(db *sql.DB, cutoff time.Time) (int64, error) {
+	tx, err := db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`DELETE FROM checkpoint_blob_refs WHERE checkpoint_id IN (
+		SELECT id FROM claw_checkpoints WHERE status='creating' AND created_at < ?)`, cutoff); err != nil {
+		return 0, err
+	}
+	res, err := tx.Exec(
+		`UPDATE claw_checkpoints SET status='failed', error='checkpoint abandoned while creating', completed_at=?
+		  WHERE status='creating' AND created_at < ?`, now(), cutoff)
+	if err != nil {
+		return 0, err
+	}
+	count, _ := res.RowsAffected()
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return count, nil
+}
+
+// releaseOrphanedCheckpointBlobRefs drops every reference whose checkpoint row
+// no longer exists at all.
 //
-// Written as a general reconciliation rather than a companion DELETE to each
-// terminal transition: it also collects rows orphaned by a crash between the
-// transition and its own cleanup, which would otherwise pin those blobs for the
-// life of the database.
-func releaseOrphanedPendingBlobClaims(db *sql.DB) (int64, error) {
-	res, err := db.Exec(`DELETE FROM claw_checkpoint_pending_blobs
-		 WHERE checkpoint_id NOT IN (SELECT id FROM claw_checkpoints WHERE status='creating')`)
+// A reference outlives the plan by design now, so "the row is not 'creating'
+// any more" is no longer evidence of anything. The only shape that is still
+// certainly garbage is an edge pointing at a checkpoint that was deleted --
+// which a crash between the row delete and the edge delete can leave behind, and
+// which would otherwise pin those blobs for the life of the database.
+func releaseOrphanedCheckpointBlobRefs(db *sql.DB) (int64, error) {
+	res, err := db.Exec(`DELETE FROM checkpoint_blob_refs
+		 WHERE checkpoint_id NOT IN (SELECT id FROM claw_checkpoints)`)
 	if err != nil {
 		return 0, err
 	}
@@ -329,8 +360,19 @@ func (s *Server) checkpointDuplicatesPrevious(checkpointID, clawID, rootSHA stri
 
 // markCheckpointSkipped records the checkpoint without a manifest. The row is
 // kept so the timeline still shows the claw was idle at that moment.
+//
+// The plan-time reference edges are KEPT, and the root tree gets one of its own.
+// A skipped row names the tree of the ready checkpoint it duplicated, so it is a
+// genuine holder of those blobs for as long as it exists; the ready row holds
+// the same ones, and the blob only becomes collectable when BOTH have let go.
+// Compaction is what releases them, on a claw that is finished.
 func (s *Server) markCheckpointSkipped(checkpointID, rootSHA string) error {
-	res, err := s.db.Exec(
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	res, err := tx.Exec(
 		`UPDATE claw_checkpoints SET status='skipped', root_tree_sha256=?, workspace_tree_sha256=?, completed_at=? WHERE id=? AND status='creating'`,
 		rootSHA, rootSHA, now(), checkpointID)
 	if err != nil {
@@ -339,8 +381,10 @@ func (s *Server) markCheckpointSkipped(checkpointID, rootSHA string) error {
 	if rows, _ := res.RowsAffected(); rows == 0 {
 		return errCheckpointNotCreating
 	}
-	s.clearCheckpointPendingBlobs(checkpointID)
-	return nil
+	if err := addCheckpointBlobRefsTx(tx, checkpointID, []string{rootSHA}); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *Server) requestBootstrapCheckpoint(clawID string) {
@@ -804,22 +848,25 @@ func (s *Server) insertCheckpoint(id, tenantID, clawID, reason, createdBy, provi
 	return err
 }
 
-// recordCheckpointPendingBlobs durably claims every digest a checkpoint plans
-// to reference, before a single byte is uploaded.
+// recordCheckpointBlobRefs records one reference edge per digest the checkpoint
+// plans to hold, before a single byte is uploaded.
 //
-// This is what makes the plan's dedup answer safe. The handler tells the claw
-// to skip uploading a blob the hub already has, which means that blob's mtime
-// stays whatever it was when some other claw wrote it -- possibly months ago,
-// well outside any grace window -- while the only row that knows about it is
-// still 'creating' and carries no digests. Writing the claim here closes the
-// window for the whole upload phase, not just for the bytes that move.
+// These are not claims with an expiry: they are the reference. They are written
+// here because the plan is the first moment the hub knows which blobs this
+// checkpoint will hold, and they survive finalize -- from then on they are the
+// only thing that says the published checkpoint holds them. Nothing reconstructs
+// that from manifests or tree blobs any more.
 //
-// Every planned digest is recorded, not only the ones the claw must upload:
-// the reused ones are precisely the ones at risk.
-func (s *Server) recordCheckpointPendingBlobs(checkpointID string, files []types.CheckpointFile) error {
+// Recording before answering is what makes the plan's dedup answer safe. The
+// handler tells the claw to skip uploading a blob the hub already has, which
+// means that blob's mtime stays whatever it was when some other claw wrote it --
+// possibly months ago, well outside any grace window. Every planned digest is
+// recorded, not only the ones the claw must upload: the reused ones are
+// precisely the ones at risk.
+func (s *Server) recordCheckpointBlobRefs(checkpointID string, files []types.CheckpointFile) error {
 	if len(files) == 0 {
-		// Nothing to claim, so there is no reason to take the write lock -- but
-		// the status still has to be checked, because it is what the plan
+		// Nothing to reference, so there is no reason to take the write lock --
+		// but the status still has to be checked, because it is what the plan
 		// handler turns into its answer.
 		return s.requireCheckpointCreating(s.db.QueryRow(`SELECT status FROM claw_checkpoints WHERE id=?`, checkpointID))
 	}
@@ -828,29 +875,45 @@ func (s *Server) recordCheckpointPendingBlobs(checkpointID string, files []types
 		return err
 	}
 	defer tx.Rollback()
-	// The claim is only meaningful while the row is still under construction:
-	// checkpointBlobKeepSet reads claims by joining on status='creating', so a
-	// claim inserted after the row went terminal protects nothing at all while
-	// looking exactly like protection. A delayed or retried plan lands here, and
-	// answering it would tell the claw to skip uploads for blobs nothing keeps.
-	// Reject it instead, so the caller can fail the plan loudly.
+	// A plan may only add edges while the row is still under construction. Once
+	// the row has gone terminal its edge set is settled: a 'failed' or expired
+	// row released everything it held, and re-adding an edge under it would pin
+	// blobs nothing can ever reach. A delayed or retried plan lands here, and
+	// answering it would tell the claw to skip uploads for a checkpoint that no
+	// longer exists. Reject it instead, so the caller can fail the plan loudly.
 	if err := s.requireCheckpointCreating(tx.QueryRow(`SELECT status FROM claw_checkpoints WHERE id=?`, checkpointID)); err != nil {
 		return err
 	}
-	stmt, err := tx.Prepare(`INSERT OR IGNORE INTO claw_checkpoint_pending_blobs(checkpoint_id, sha256) VALUES(?,?)`)
+	digests := make([]string, 0, len(files))
+	for _, f := range files {
+		digests = append(digests, f.SHA256)
+	}
+	if err := addCheckpointBlobRefsTx(tx, checkpointID, digests); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// addCheckpointBlobRefsTx inserts reference edges inside a caller's transaction,
+// so publishing a checkpoint and recording what it holds cannot come apart.
+// Non-digest values are skipped: an empty root tree (a metadata-only capture)
+// and a malformed digest both reference nothing.
+func addCheckpointBlobRefsTx(tx *sql.Tx, checkpointID string, digests []string) error {
+	stmt, err := tx.Prepare(`INSERT OR IGNORE INTO checkpoint_blob_refs(checkpoint_id, sha256) VALUES(?,?)`)
 	if err != nil {
 		return err
 	}
 	defer stmt.Close()
-	for _, f := range files {
-		if !validSHA256(f.SHA256) {
+	for _, sha := range digests {
+		clean := normalizeBlobDigest(sha)
+		if clean == "" {
 			continue
 		}
-		if _, err := stmt.Exec(checkpointID, f.SHA256); err != nil {
+		if _, err := stmt.Exec(checkpointID, clean); err != nil {
 			return err
 		}
 	}
-	return tx.Commit()
+	return nil
 }
 
 // errCheckpointNotCreating reports a transition attempted against a checkpoint
@@ -876,14 +939,18 @@ func (s *Server) requireCheckpointCreating(row *sql.Row) error {
 	return nil
 }
 
-// clearCheckpointPendingBlobs releases the claim once the checkpoint has
-// reached a terminal status. From that point the row's own digest columns (or
-// its absence, for a failure) are the truth, and leaving the claim behind would
-// pin blobs no checkpoint can reach for as long as the row survives.
-func (s *Server) clearCheckpointPendingBlobs(checkpointID string) {
-	if _, err := s.db.Exec(`DELETE FROM claw_checkpoint_pending_blobs WHERE checkpoint_id=?`, checkpointID); err != nil {
-		log.Printf("[checkpoint] clear pending blobs for %s: %v", shortID(checkpointID), err)
-	}
+// deleteCheckpointBlobRefsTx releases every blob this checkpoint holds, inside
+// the caller's transaction.
+//
+// It belongs in the SAME transaction as the status change that justifies it --
+// fail, expiry, compaction. That is the whole point of the model: a compacted
+// row releases its blobs by construction rather than by some later pass
+// remembering to clear the right digest columns, and a release that commits
+// while the status change rolls back would leave a live checkpoint holding
+// nothing.
+func deleteCheckpointBlobRefsTx(tx *sql.Tx, checkpointID string) error {
+	_, err := tx.Exec(`DELETE FROM checkpoint_blob_refs WHERE checkpoint_id=?`, checkpointID)
+	return err
 }
 
 func (s *Server) handleCheckpointInternal(w http.ResponseWriter, r *http.Request) {
@@ -909,19 +976,19 @@ func (s *Server) handleCheckpointInternal(w http.ResponseWriter, r *http.Request
 			return
 		}
 		plan.CheckpointID = checkpointID
-		// Claim the digests BEFORE answering. The answer is what lets the claw
-		// skip re-uploading blobs the hub already holds, so from the moment it
-		// is sent the checkpoint depends on files nothing else keeps alive.
-		// Failing to record the claim must fail the plan rather than proceed
+		// Record the reference edges BEFORE answering. The answer is what lets
+		// the claw skip re-uploading blobs the hub already holds, so from the
+		// moment it is sent the checkpoint depends on files nothing else keeps
+		// alive. Failing to record them must fail the plan rather than proceed
 		// unprotected: a retried plan costs one round trip, an unrestorable
 		// checkpoint is found weeks later.
-		if err := s.recordCheckpointPendingBlobs(checkpointID, plan.Files); err != nil {
+		if err := s.recordCheckpointBlobRefs(checkpointID, plan.Files); err != nil {
 			if errors.Is(err, errCheckpointNotCreating) {
 				log.Printf("[checkpoint] rejecting stale plan for %s: checkpoint is no longer creating", shortID(checkpointID))
 				http.Error(w, "checkpoint is no longer creating", http.StatusConflict)
 				return
 			}
-			log.Printf("[checkpoint] record pending blobs for %s: %v", shortID(checkpointID), err)
+			log.Printf("[checkpoint] record blob references for %s: %v", shortID(checkpointID), err)
 			http.Error(w, "storage error", http.StatusInternalServerError)
 			return
 		}
@@ -1070,6 +1137,16 @@ func (s *Server) finalizeCheckpoint(checkpointID, tenantID, clawID, rootSHA stri
 	if s.checkpointDuplicatesPrevious(checkpointID, clawID, rootSHA) {
 		return s.markCheckpointSkipped(checkpointID, rootSHA)
 	}
+	// Check the guard before writing the manifest, not only after. The guarded
+	// UPDATE below is still the authority -- it is what makes the transition
+	// atomic against a concurrent one -- but on the common rejection (a late or
+	// retried 'complete' for a row that already went terminal) this read means no
+	// manifest is written at all, rather than one being written and then having
+	// to be cleaned up. The window between this read and the UPDATE is covered by
+	// the unlink on rejection further down.
+	if err := s.requireCheckpointCreating(s.db.QueryRow(`SELECT status FROM claw_checkpoints WHERE id=?`, checkpointID)); err != nil {
+		return err
+	}
 	files, err := s.filesForTree(rootSHA)
 	if err != nil {
 		return err
@@ -1094,29 +1171,63 @@ func (s *Server) finalizeCheckpoint(checkpointID, tenantID, clawID, rootSHA stri
 	if err := writeFileAtomic(path, data, 0o640); err != nil {
 		return err
 	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		_ = os.Remove(path)
+		return err
+	}
+	defer tx.Rollback()
 	// The status guard makes this transition apply only to a row still under
 	// construction. Without it a late or retried 'complete' could flip a row
-	// that had already gone terminal back to 'ready', re-declaring digests the
-	// keep set had stopped tracking and had possibly already swept.
-	res, err := s.db.Exec(`UPDATE claw_checkpoints SET status='ready', manifest_sha256=?, manifest_path=?, root_tree_sha256=?, message_tree_sha256=?, workspace_tree_sha256=?, message_count=?, pr_count=?, repo_count=?, pipeline_stage=?, hub_version=?, files_count=?, files_bytes=?, completed_at=? WHERE id=? AND status='creating'`,
+	// that had already gone terminal back to 'ready', re-declaring blobs its
+	// release had already made collectable.
+	res, err := tx.Exec(`UPDATE claw_checkpoints SET status='ready', manifest_sha256=?, manifest_path=?, root_tree_sha256=?, message_tree_sha256=?, workspace_tree_sha256=?, message_count=?, pr_count=?, repo_count=?, pipeline_stage=?, hub_version=?, files_count=?, files_bytes=?, completed_at=? WHERE id=? AND status='creating'`,
 		manifestSHA, path, rootSHA, msgSHA, rootSHA, msgCount, len(manifest.PRs), checkpointRepoCount(manifest.PRs),
 		manifest.Hub.PipelineStage, manifest.Hub.Version, manifest.FilesCount, manifest.FilesBytes, now(), checkpointID)
 	if err != nil {
 		return err
 	}
 	if rows, _ := res.RowsAffected(); rows == 0 {
+		// The guard rejected the transition after the manifest was already on
+		// disk, so unlink it. A manifest with no row that claims it is debris the
+		// hub has no other way to notice.
+		_ = os.Remove(path)
 		return errCheckpointNotCreating
 	}
-	// Only now: until this UPDATE lands the row still says 'creating' and
-	// carries no digests, so the pending claim is the only thing keeping the
-	// blobs this manifest just referenced out of the sweep.
-	s.clearCheckpointPendingBlobs(checkpointID)
+	// The plan-time edges are KEPT. They are the reference to every workspace
+	// file this checkpoint holds, and nothing else records them: under schema 2
+	// the per-file digests appear in neither the manifest nor the row. What is
+	// added here is everything the published checkpoint holds BEYOND the plan --
+	// the root tree blob and the message blob, which the claw never planned, plus
+	// the manifest digest for the benefit of any future change that stores the
+	// manifest as a blob (it is not one today, so the edge is inert).
+	//
+	// Same transaction as the UPDATE: a checkpoint that says 'ready' and a
+	// complete record of what it holds must land together or not at all.
+	refs := make([]string, 0, len(files)+3)
+	refs = append(refs, rootSHA, msgSHA, manifestSHA)
+	for _, f := range files {
+		refs = append(refs, f.SHA256)
+	}
+	if err := addCheckpointBlobRefsTx(tx, checkpointID, refs); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		// The row is still 'creating' and points at no manifest, so the file just
+		// written belongs to nobody.
+		_ = os.Remove(path)
+		return err
+	}
 	return nil
 }
 
 func (s *Server) completeMetadataOnlyCheckpoint(checkpointID, clawID, reason, detail string) error {
 	tenantID, _, _, err := s.clawCheckpointIdentity(clawID)
 	if err != nil {
+		return err
+	}
+	// Before writing anything, for the same reason as finalizeCheckpoint.
+	if err := s.requireCheckpointCreating(s.db.QueryRow(`SELECT status FROM claw_checkpoints WHERE id=?`, checkpointID)); err != nil {
 		return err
 	}
 	msgSHA, msgCount, cutoff, err := s.writeMessageCheckpointBlob(clawID, tenantID)
@@ -1137,15 +1248,31 @@ func (s *Server) completeMetadataOnlyCheckpoint(checkpointID, clawID, reason, de
 	if err := writeFileAtomic(path, data, 0o640); err != nil {
 		return err
 	}
-	res, err := s.db.Exec(`UPDATE claw_checkpoints SET status='ready', manifest_sha256=?, manifest_path=?, message_tree_sha256=?, message_count=?, pipeline_stage=?, hub_version=?, error=?, completed_at=? WHERE id=? AND status='creating'`,
+	tx, err := s.db.Begin()
+	if err != nil {
+		_ = os.Remove(path)
+		return err
+	}
+	defer tx.Rollback()
+	res, err := tx.Exec(`UPDATE claw_checkpoints SET status='ready', manifest_sha256=?, manifest_path=?, message_tree_sha256=?, message_count=?, pipeline_stage=?, hub_version=?, error=?, completed_at=? WHERE id=? AND status='creating'`,
 		manifestSHA, path, msgSHA, msgCount, manifest.Hub.PipelineStage, manifest.Hub.Version, detail, now(), checkpointID)
 	if err != nil {
 		return err
 	}
 	if rows, _ := res.RowsAffected(); rows == 0 {
+		_ = os.Remove(path)
 		return errCheckpointNotCreating
 	}
-	s.clearCheckpointPendingBlobs(checkpointID)
+	// A metadata-only capture holds no workspace: the bridge was unreachable, so
+	// there was no plan and there are no file blobs. It does hold the message
+	// blob it just wrote.
+	if err := addCheckpointBlobRefsTx(tx, checkpointID, []string{msgSHA, manifestSHA}); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		_ = os.Remove(path)
+		return err
+	}
 	return nil
 }
 
@@ -1532,19 +1659,23 @@ func checkpointShellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'"
 }
 
-// failCheckpoint marks a checkpoint failed and releases its blob claims.
+// failCheckpoint marks a checkpoint failed and releases every blob it held.
 //
-// The release is conditional on the UPDATE having landed, exactly as
-// finalizeCheckpoint and markCheckpointSkipped are. Unconditionally releasing
-// was the worst of both worlds under ENOSPC or SQLITE_BUSY: the UPDATE fails,
-// the DELETE succeeds, and the row is left 'creating' -- carrying no digests of
-// its own -- with nothing keeping its blobs out of the next sweep.
+// Both happen in one transaction. Releasing without the UPDATE landing was the
+// worst of both worlds under ENOSPC or SQLITE_BUSY: the UPDATE fails, the DELETE
+// succeeds, and the row is left 'creating' -- still expecting its blobs -- with
+// nothing keeping them out of the next sweep.
 //
 // The status guard makes the transition a no-op on a row that already reached a
-// terminal status, so a late 'complete' carrying an error cannot re-open the
-// accounting of a checkpoint that is already ready or failed.
+// terminal status, so a late 'complete' carrying an error cannot release the
+// blobs of a checkpoint that is already ready.
 func (s *Server) failCheckpoint(checkpointID, msg string) error {
-	res, err := s.db.Exec(`UPDATE claw_checkpoints SET status='failed', error=?, completed_at=? WHERE id=? AND status='creating'`, msg, now(), checkpointID)
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	res, err := tx.Exec(`UPDATE claw_checkpoints SET status='failed', error=?, completed_at=? WHERE id=? AND status='creating'`, msg, now(), checkpointID)
 	if err != nil {
 		return err
 	}
@@ -1552,8 +1683,10 @@ func (s *Server) failCheckpoint(checkpointID, msg string) error {
 		log.Printf("[checkpoint] fail for %s ignored: checkpoint is no longer creating", shortID(checkpointID))
 		return nil
 	}
-	s.clearCheckpointPendingBlobs(checkpointID)
-	return nil
+	if err := deleteCheckpointBlobRefsTx(tx, checkpointID); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *Server) notifyCheckpointWaiter(checkpointID string, err error) {

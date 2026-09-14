@@ -2,6 +2,7 @@ package hub
 
 import (
 	"context"
+	"database/sql"
 	"log"
 	"strings"
 	"time"
@@ -165,23 +166,48 @@ func (s *Server) reconcileOnBoot() {
 }
 
 // reconcileCheckpointsOnBoot fails checkpoints the previous process left
-// 'creating' and releases every blob claim no 'creating' row owns any more.
+// 'creating' and releases every blob reference no checkpoint row owns.
 //
 // It is deliberately separate from reconcileOnBoot and called unconditionally:
 // nothing here concerns claw liveness, and the sweeper it protects runs even
 // when the reaper is disabled.
 func (s *Server) reconcileCheckpointsOnBoot() {
 	n := s.reaperNow()
-	if res, err := s.db.Exec(`UPDATE claw_checkpoints SET status='failed', error='hub restarted while checkpoint was creating', completed_at=? WHERE status='creating'`, n); err != nil {
+	if count, err := failCreatingCheckpointsOnBoot(s.db, n); err != nil {
 		log.Printf("[reaper] boot checkpoint repair: %v", err)
-	} else if count, _ := res.RowsAffected(); count > 0 {
+	} else if count > 0 {
 		log.Printf("[reaper] boot failed %d creating checkpoints", count)
 	}
-	if count, err := releaseOrphanedPendingBlobClaims(s.db); err != nil {
-		log.Printf("[reaper] boot pending checkpoint blob repair: %v", err)
+	if count, err := releaseOrphanedCheckpointBlobRefs(s.db); err != nil {
+		log.Printf("[reaper] boot checkpoint blob reference repair: %v", err)
 	} else if count > 0 {
-		log.Printf("[reaper] boot released %d stale pending checkpoint blob claims", count)
+		log.Printf("[reaper] boot released %d orphaned checkpoint blob references", count)
 	}
+}
+
+// failCreatingCheckpointsOnBoot fails every row the previous process left under
+// construction and drops its references in the same transaction: the upload it
+// was waiting for is never arriving, and the row must not be recorded as failed
+// while still holding the blobs it planned.
+func failCreatingCheckpointsOnBoot(db *sql.DB, at time.Time) (int64, error) {
+	tx, err := db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`DELETE FROM checkpoint_blob_refs WHERE checkpoint_id IN (
+		SELECT id FROM claw_checkpoints WHERE status='creating')`); err != nil {
+		return 0, err
+	}
+	res, err := tx.Exec(`UPDATE claw_checkpoints SET status='failed', error='hub restarted while checkpoint was creating', completed_at=? WHERE status='creating'`, at)
+	if err != nil {
+		return 0, err
+	}
+	count, _ := res.RowsAffected()
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return count, nil
 }
 
 func (s *Server) runReaper() {

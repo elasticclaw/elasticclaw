@@ -970,31 +970,37 @@ func migrate(db *sql.DB) error {
 	CREATE INDEX IF NOT EXISTS idx_claw_checkpoints_claw ON claw_checkpoints(claw_id, created_at);
 	CREATE INDEX IF NOT EXISTS idx_claw_checkpoints_status ON claw_checkpoints(status, created_at);
 
-	-- The digests a checkpoint DECLARED it will reference, recorded at plan time
-	-- before the first blob is accepted.
+	-- One row per (checkpoint, blob) REFERENCE. This is the whole of the blob
+	-- reclamation model: a blob is deletable when no row here names it.
 	--
-	-- Without this the blob sweep had only an mtime grace window to protect a
-	-- checkpoint under construction, and that window is not a guarantee: both the
-	-- plan handler and the blob upload deduplicate on os.Stat and return without
-	-- touching the file, so a REUSED blob keeps whatever mtime it was written
-	-- with -- months ago, in the common case, since blobs are content-addressed
-	-- and shared across every claw that captured the same bytes. A 'creating' row
-	-- carries no digests of its own (insertCheckpoint writes none), so it
-	-- contributed nothing to the keep set either. The sweep could therefore
-	-- delete a blob the checkpoint was about to reference, and the checkpoint
-	-- would then publish as 'ready' and be silently unrestorable until a retry
-	-- needed it.
+	-- Its predecessor, claw_checkpoint_pending_blobs, held the same tuples but
+	-- only for the length of a checkpoint's upload window -- it was a claim, and
+	-- every terminal transition deleted it. From that point the sweeper had to
+	-- RECONSTRUCT reachability each cycle by parsing every manifest, following
+	-- every tree blob, unioning the digest columns of every row and subtracting a
+	-- simulation of the phases that had just run. Every defect that reconstruction
+	-- produced was of one kind: some state it did not account for. An edge that
+	-- simply outlives the plan removes the reconstruction entirely.
 	--
-	-- Rows are deleted when the checkpoint reaches any terminal status, and the
-	-- reaper's boot sweep clears whatever a crash left behind.
-	CREATE TABLE IF NOT EXISTS claw_checkpoint_pending_blobs (
+	-- Lifecycle (checkpoints.go and retention.go own these transitions):
+	--   plan                                  INSERT the edges
+	--   finalize / skip / metadata-only       KEEP them, and add whatever the
+	--                                         published checkpoint references
+	--                                         beyond the plan (root tree, message
+	--                                         blob, manifest digest)
+	--   fail / expiry / compaction            DELETE them, in the SAME
+	--                                         transaction as the status change
+	--
+	-- Deleting the last edge naming a digest is what makes that blob collectable.
+	CREATE TABLE IF NOT EXISTS checkpoint_blob_refs (
 		checkpoint_id TEXT NOT NULL,
 		sha256        TEXT NOT NULL,
 		PRIMARY KEY (checkpoint_id, sha256)
 	);
-	-- The primary key's leading column IS the checkpoint_id index the keep set
-	-- and the cleanup paths both seek on; a second index would only be a write
-	-- cost on the checkpoint hot path.
+	-- No second index. The primary key's leading column is the checkpoint_id
+	-- lookup every lifecycle transition needs, and the sweeper reads the table
+	-- whole (one scan of two narrow columns) rather than probing it per blob, so
+	-- an index on sha256 would be pure write cost on the checkpoint hot path.
 
 	CREATE TABLE IF NOT EXISTS ssh_known_hosts (
 		host          TEXT PRIMARY KEY,
@@ -1188,8 +1194,73 @@ func migrate(db *sql.DB) error {
 			return err
 		}
 	}
-	// Deliberately last, and deliberately not fatal. See ensureRetentionIndexes.
+	// Both deliberately last, and deliberately not fatal: neither is needed for
+	// the hub to serve, and the hub that cannot complete them is the disk-full
+	// hub that most needs to boot. See ensureRetentionIndexes.
+	adoptLegacyCheckpointBlobClaims(db)
 	ensureRetentionIndexes(db)
+	return nil
+}
+
+// adoptLegacyCheckpointBlobClaims carries the rows of the old
+// claw_checkpoint_pending_blobs table into checkpoint_blob_refs and drops it.
+//
+// The two tables hold the same tuple; only its lifetime changed. Copying is
+// idempotent (INSERT OR IGNORE on the composite key) and the drop makes the
+// adoption a one-time cost rather than something every boot repeats. A hub that
+// crashes between the copy and the drop re-copies into the same rows on the next
+// boot.
+//
+// Nothing here is fatal. These rows only protect checkpoints that were mid-upload
+// when the hub last stopped, and reconcileCheckpointsOnBoot fails those rows
+// anyway; losing them costs at worst one re-uploaded checkpoint, where refusing
+// to boot costs the hub.
+func adoptLegacyCheckpointBlobClaims(db *sql.DB) {
+	var legacy int
+	if err := db.QueryRow(
+		`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='claw_checkpoint_pending_blobs'`).
+		Scan(&legacy); err != nil {
+		log.Printf("[migrate] probe legacy checkpoint blob claims: %v", err)
+		return
+	}
+	if legacy == 0 {
+		return
+	}
+	res, err := db.Exec(`INSERT OR IGNORE INTO checkpoint_blob_refs(checkpoint_id, sha256)
+		SELECT checkpoint_id, sha256 FROM claw_checkpoint_pending_blobs`)
+	if err != nil {
+		log.Printf("[migrate] adopt legacy checkpoint blob claims: %v", err)
+		return
+	}
+	adopted, _ := res.RowsAffected()
+	if _, err := db.Exec(`DROP TABLE claw_checkpoint_pending_blobs`); err != nil {
+		log.Printf("[migrate] drop legacy checkpoint blob claims table: %v", err)
+		return
+	}
+	log.Printf("[migrate] adopted %d legacy checkpoint blob claim(s) into checkpoint_blob_refs", adopted)
+}
+
+// hubMigrationApplied reports whether a one-time migration has already run.
+// hub_migrations is created on demand so callers reached before the table exists
+// (the retention sweeper, which runs long after boot) do not have to care.
+func hubMigrationApplied(db *sql.DB, name string) (bool, error) {
+	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS hub_migrations (name TEXT PRIMARY KEY, applied_at INTEGER NOT NULL)`); err != nil {
+		return false, fmt.Errorf("create hub migrations: %w", err)
+	}
+	var applied int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM hub_migrations WHERE name=?`, name).Scan(&applied); err != nil {
+		return false, fmt.Errorf("check migration %s: %w", name, err)
+	}
+	return applied > 0, nil
+}
+
+// markHubMigration records a one-time migration as complete.
+func markHubMigration(db *sql.DB, name string) error {
+	if _, err := db.Exec(
+		`INSERT INTO hub_migrations(name, applied_at) VALUES(?, ?) ON CONFLICT(name) DO NOTHING`,
+		name, now().UnixMilli()); err != nil {
+		return fmt.Errorf("mark migration %s: %w", name, err)
+	}
 	return nil
 }
 
@@ -1508,19 +1579,21 @@ func rebuildTaskRunEventsAgentIdleV1(db *sql.DB) error {
 		FROM task_run_events`); err != nil {
 		return fmt.Errorf("copy task run events agent_idle v1: %w", err)
 	}
+	// idx_task_run_events_event_time is deliberately NOT in the list below.
+	// Building it needs free disk for the whole B-tree, and this statement runs
+	// inside a transaction whose failure is fatal to migrate() -- which is
+	// exactly the boot failure that moving the retention indexes out of migrate()
+	// existed to remove, reintroduced one level down. The rebuild drops the
+	// table, so the index does go away here; ensureRetentionIndexes rebuilds it
+	// at the end of this boot and at the end of every sweep cycle, where failing
+	// to build it costs a slower DELETE and nothing else.
 	if _, err := tx.Exec(`DROP TABLE task_run_events; ALTER TABLE task_run_events_new RENAME TO task_run_events;
 		CREATE UNIQUE INDEX idx_task_run_events_tenant_key ON task_run_events(tenant_id, run_id, event_key);
 		CREATE INDEX idx_task_run_events_run_time ON task_run_events(run_id, event_time, id);
 		CREATE INDEX idx_task_run_events_type_time ON task_run_events(event_type, event_time);
 		CREATE INDEX idx_task_run_events_tenant_run_time ON task_run_events(tenant_id, run_id, event_time, observed_at, event_key);
 		CREATE INDEX idx_task_run_events_source_event ON task_run_events(tenant_id, source, source_event_id);
-		CREATE INDEX idx_task_run_events_observed ON task_run_events(tenant_id, observed_at);
-		-- Retention's event_time index belongs in this pasted list like every
-		-- other: the rebuild drops the table, so an index missing here is an
-		-- index silently lost on exactly the databases old enough to need the
-		-- rebuild. ensureRetentionIndexes re-creates it after this runs, which
-		-- makes the omission survivable rather than harmless.
-		CREATE INDEX IF NOT EXISTS idx_task_run_events_event_time ON task_run_events(event_time)`); err != nil {
+		CREATE INDEX idx_task_run_events_observed ON task_run_events(tenant_id, observed_at)`); err != nil {
 		return fmt.Errorf("replace task run events agent_idle v1: %w", err)
 	}
 	return tx.Commit()
