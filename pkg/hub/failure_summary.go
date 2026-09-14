@@ -365,7 +365,7 @@ func summarizeFailureWithLLM(ctx context.Context, sanitizedReason string, llmKey
 	switch key.Provider {
 	case "anthropic":
 		return callAnthropicModel(ctx, key.APIKey, stripProviderPrefix(model), systemPrompt, msgs, 700)
-	case "openai", "codex", "grok", "fireworks", "groq", "deepseek", "ollama":
+	case "openai", "codex", "grok", "fireworks", "groq", "deepseek", "ollama", "camel-stream":
 		return callOpenAICompatible(ctx, openAICompatibleConfig(key.Provider), key.APIKey, stripProviderPrefix(model), systemPrompt, msgs)
 	default:
 		return "", fmt.Errorf("unsupported LLM provider %q", key.Provider)
@@ -399,7 +399,7 @@ func selectFailureSummaryModel(llmKeys types.LLMKeysList, defaultModel string) (
 
 func isFailureSummaryProvider(provider string) bool {
 	switch provider {
-	case "anthropic", "openai", "codex", "grok", "fireworks", "groq", "deepseek", "ollama":
+	case "anthropic", "openai", "codex", "grok", "fireworks", "groq", "deepseek", "ollama", "camel-stream":
 		return true
 	default:
 		return false
@@ -430,6 +430,8 @@ func modelForFailureSummary(key *types.LLMKeyConfig, defaultModel string) string
 		return "deepseek/deepseek-chat"
 	case "ollama":
 		return "ollama/qwen2.5-coder:1.5b"
+	case "camel-stream":
+		return "camel-stream/auto"
 	default:
 		return defaultModel
 	}
@@ -464,6 +466,8 @@ func openAICompatibleConfig(provider string) openAICompatibleProvider {
 			baseURL = "http://ollama:11434"
 		}
 		return openAICompatibleProvider{Name: "Ollama", BaseURL: strings.TrimRight(baseURL, "/") + "/v1"}
+	case "camel-stream":
+		return openAICompatibleProvider{Name: "camelStream", BaseURL: "https://stream.camelai.com/v1"}
 	default:
 		return openAICompatibleProvider{Name: "OpenAI", BaseURL: "https://api.openai.com/v1"}
 	}

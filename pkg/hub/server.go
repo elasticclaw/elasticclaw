@@ -7597,6 +7597,8 @@ func resolveDefaultModelForKey(hubCfg *types.HubConfig, key *types.LLMKeyConfig)
 		return "deepseek/deepseek-chat"
 	case "ollama":
 		return "ollama/qwen2.5-coder:1.5b"
+	case "camel-stream":
+		return "camel-stream/auto"
 	case "moonshot":
 		return "moonshot/moonshot-v1-8k"
 	default:

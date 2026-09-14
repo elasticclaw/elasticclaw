@@ -926,6 +926,58 @@ func TestBuildOpenClawProviderConfig_ConfiguresGrokProvider(t *testing.T) {
 	assertContains(t, snippet, "providers['grok']", "writes Grok provider config")
 }
 
+func TestBuildOpenClawProviderConfig_ConfiguresCamelStreamProvider(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not in PATH")
+	}
+	if _, err := exec.LookPath("python3"); err != nil {
+		t.Skip("python3 not in PATH")
+	}
+	keys := []*types.LLMKeyConfig{
+		{Name: "camel-main", Provider: "camel-stream", APIKey: "camel-test", Default: true},
+	}
+
+	snippet := buildOpenClawProviderConfig(keys, "camel-main")
+
+	assertContains(t, snippet, "if model.startswith('camel-stream/'):", "only configures camelStream when selected")
+	assertContains(t, snippet, "'baseUrl': 'https://stream.camelai.com/v1'", "uses camelStream base URL")
+	assertContains(t, snippet, "'api': 'openai-completions'", "uses OpenAI Chat Completions protocol")
+	assertContains(t, snippet, "'apiKey': '${CAMEL_API_KEY}'", "references the camelStream API key environment variable")
+	assertContains(t, snippet, "'contextWindow': 262144", "uses the documented context window")
+	assertContains(t, snippet, "providers['camel-stream']", "registers the camelStream provider")
+	if got := buildOnboardFlags(keys, "camel-main", "camel-stream/auto"); got != "--auth-choice skip" {
+		t.Fatalf("onboard flags = %q, want auth skipped for custom provider", got)
+	}
+	if got := keys[0].EnvVarName(); got != "CAMEL_API_KEY" {
+		t.Fatalf("environment variable = %q, want CAMEL_API_KEY", got)
+	}
+
+	home := t.TempDir()
+	cmd := exec.Command("bash", "-c", snippet)
+	cmd.Env = append(os.Environ(),
+		"HOME="+home,
+		"OPENCLAW_DEFAULT_MODEL=camel-stream/auto",
+		"CAMEL_API_KEY=camel-test",
+	)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("run config snippet: %v\n%s", err, out)
+	}
+	configData, err := os.ReadFile(filepath.Join(home, ".openclaw", "openclaw.json"))
+	if err != nil {
+		t.Fatalf("read patched config: %v", err)
+	}
+	var config map[string]any
+	if err := json.Unmarshal(configData, &config); err != nil {
+		t.Fatalf("parse patched config: %v", err)
+	}
+	models := config["models"].(map[string]any)
+	providers := models["providers"].(map[string]any)
+	camel := providers["camel-stream"].(map[string]any)
+	if camel["baseUrl"] != "https://stream.camelai.com/v1" || camel["api"] != "openai-completions" || camel["apiKey"] != "${CAMEL_API_KEY}" {
+		t.Fatalf("camelStream provider config = %#v", camel)
+	}
+}
+
 func TestBuildOpenClawProviderConfig_UsesNativeXAIForGrokOAuth(t *testing.T) {
 	if _, err := exec.LookPath("bash"); err != nil {
 		t.Skip("bash not in PATH")
