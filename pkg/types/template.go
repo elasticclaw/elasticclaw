@@ -570,6 +570,9 @@ type HubConfig struct {
 	// infrastructure failures.
 	Liveness *LivenessConfig `yaml:"liveness,omitempty" json:"liveness,omitempty"`
 
+	// Retention configures reclamation of checkpoint and diagnostic storage.
+	Retention *RetentionConfig `yaml:"retention,omitempty" json:"retention,omitempty"`
+
 	// Notifications holds outbound notification configuration: named
 	// transports (notifiers) and the hub features that send through them.
 	Notifications *NotificationsConfig `yaml:"notifications,omitempty" json:"notifications,omitempty"`
@@ -803,6 +806,30 @@ type LivenessConfig struct {
 	// recovery budget — a threshold set too low can exhaust the budget on
 	// healthy waits and leave nothing for the stall it was added for.
 	IdleResumeAfter string `yaml:"idle_resume_after,omitempty" json:"idleResumeAfter,omitempty"`
+}
+
+// RetentionConfig controls reclamation of the storage the hub accumulates:
+// checkpoint manifests, content-addressed checkpoint blobs, captured gateway
+// diagnostics, delivered messages and task run events. Durations use Go
+// duration strings; empty values receive the defaults documented per field.
+//
+// Nothing here is reclaimed unless the sweeper runs, and the sweeper never
+// runs during startup — see retentionSweeper in pkg/hub/retention.go.
+type RetentionConfig struct {
+	// Enabled is the master switch (default true). Turning it off stops every
+	// reclamation phase: compaction, retention deletes and the blob sweep.
+	Enabled *bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	// Interval is how often a full reclamation cycle runs (default 1h).
+	Interval string `yaml:"interval,omitempty" json:"interval,omitempty"`
+	// MaxAge is the retention window (default 2160h = 90 days). It applies to
+	// all four retention targets: diagnostics logs, checkpoints, task run
+	// events and messages.
+	MaxAge string `yaml:"max_age,omitempty" json:"maxAge,omitempty"`
+	// CompactAfter is how long a claw must go unchanged before it counts as
+	// finalized and its superseded checkpoint manifests may be compacted
+	// (default 240h = 10 days). A claw with a merged PR is finalized
+	// immediately, regardless of this value.
+	CompactAfter string `yaml:"compact_after,omitempty" json:"compactAfter,omitempty"`
 }
 
 // IntegrationsConfig holds configs for external integrations.
