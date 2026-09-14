@@ -2092,7 +2092,15 @@ func backfillCheckpointTelemetryV1(db *sql.DB) error {
 			WHERE id=?`,
 			telemetry.pipelineStage, telemetry.hubVersion, messageCount,
 			telemetry.filesCount, telemetry.filesBytes, c.id); err != nil {
-			return fmt.Errorf("apply checkpoint telemetry backfill: %w", err)
+			// Never fatal. This backfill is a convenience that restores
+			// analytics history; it is not required for the hub to serve. On a
+			// disk-full host -- the condition this whole branch exists to
+			// address -- these UPDATEs are exactly what fails first, and
+			// aborting migrate() there would leave the hub unable to boot at
+			// all. Idempotency is by WHERE clause, so whatever is skipped now
+			// is simply picked up on a later start.
+			log.Printf("[migrate] checkpoint telemetry backfill: stopping after %d rows: %v", filled, err)
+			return nil
 		}
 		filled++
 	}
