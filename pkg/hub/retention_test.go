@@ -1,9 +1,12 @@
 package hub
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -239,7 +242,7 @@ func TestCompactFinalizedCheckpointsKeepsNewestReady(t *testing.T) {
 	insertRetentionCheckpoint(t, s, retentionCheckpoint{
 		id: "cp-failed", clawID: "claw", status: "failed", createdAt: reference.Add(-time.Hour)})
 
-	compacted, err := s.compactFinalizedCheckpoints(reference.Add(-240 * time.Hour))
+	compacted, err := s.compactFinalizedCheckpoints(reference.Add(-240*time.Hour), false)
 	if err != nil {
 		t.Fatalf("compactFinalizedCheckpoints: %v", err)
 	}
@@ -297,7 +300,7 @@ func TestCompactFinalizedCheckpointsSkipsUnfinalizedClaw(t *testing.T) {
 	insertRetentionCheckpoint(t, s, retentionCheckpoint{
 		id: "cp-2", clawID: "claw", status: "ready", createdAt: reference.Add(-time.Hour), writeManifest: true})
 
-	compacted, err := s.compactFinalizedCheckpoints(reference.Add(-240 * time.Hour))
+	compacted, err := s.compactFinalizedCheckpoints(reference.Add(-240*time.Hour), false)
 	if err != nil {
 		t.Fatalf("compactFinalizedCheckpoints: %v", err)
 	}
@@ -363,7 +366,7 @@ func TestApplyRetentionWindowDeletesAllTargets(t *testing.T) {
 		}
 	}
 
-	s.applyRetentionWindow(cutoff)
+	s.applyRetentionWindow(cutoff, false)
 
 	if _, err := os.Stat(oldLog); !os.IsNotExist(err) {
 		t.Errorf("expired diagnostics log survived")
@@ -438,7 +441,7 @@ func TestCheckpointBlobKeepSetCoversRowsManifestsAndTrees(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	removed, _, err := s.sweepCheckpointBlobs()
+	removed, _, err := s.sweepCheckpointBlobs(false)
 	if err != nil {
 		t.Fatalf("sweepCheckpointBlobs: %v", err)
 	}
@@ -498,7 +501,7 @@ func TestSweepCheckpointBlobsAbortsOnUnparseableManifest(t *testing.T) {
 	if _, err := s.checkpointBlobKeepSet(); err == nil {
 		t.Fatal("checkpointBlobKeepSet accepted an unparseable manifest")
 	}
-	removed, _, err := s.sweepCheckpointBlobs()
+	removed, _, err := s.sweepCheckpointBlobs(false)
 	if err == nil {
 		t.Fatal("sweepCheckpointBlobs proceeded with an incomplete keep set")
 	}
@@ -521,7 +524,7 @@ func TestSweepCheckpointBlobsAbortsOnUnparseableTreeBlob(t *testing.T) {
 	insertRetentionCheckpoint(t, s, retentionCheckpoint{
 		id: "cp", clawID: "claw", status: "ready", createdAt: reference, rootTree: treeSHA})
 
-	if _, _, err := s.sweepCheckpointBlobs(); err == nil {
+	if _, _, err := s.sweepCheckpointBlobs(false); err == nil {
 		t.Fatal("sweepCheckpointBlobs proceeded past an unparseable tree blob")
 	}
 }
@@ -638,7 +641,7 @@ func TestSweepCheckpointBlobsSparesRecentAndInFlightBlobs(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, _, err := s.sweepCheckpointBlobs(); err != nil {
+	if _, _, err := s.sweepCheckpointBlobs(false); err != nil {
 		t.Fatalf("sweep: %v", err)
 	}
 	if _, err := os.Stat(orphanOld); !os.IsNotExist(err) {
@@ -759,10 +762,499 @@ func TestSweepCheckpointBlobsAbortsOnMissingTreeBlob(t *testing.T) {
 		id: "cp", clawID: "claw", status: "ready", createdAt: reference,
 		rootTree: strings.Repeat("f", 64), writeManifest: true})
 
-	if _, _, err := s.sweepCheckpointBlobs(); err == nil {
+	if _, _, err := s.sweepCheckpointBlobs(false); err == nil {
 		t.Fatal("sweep must abort when a referenced tree blob is missing")
 	}
 	if _, err := os.Stat(checkpointBlobPath(orphan)); err != nil {
 		t.Error("an aborted sweep must not have deleted anything")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// In-flight checkpoints (pending blob claims)
+// ---------------------------------------------------------------------------
+
+// A checkpoint under construction owns its blobs even though its row carries no
+// digests yet. The mtime grace window cannot carry that on its own: the plan
+// handler and the upload handler both deduplicate on os.Stat, so a REUSED blob
+// keeps an old mtime and would otherwise look exactly like an orphan.
+func TestCheckpointBlobKeepSetHonoursPendingClaims(t *testing.T) {
+	cases := []struct {
+		name          string
+		status        string
+		clearClaim    bool
+		wantKept      bool
+		wantExplained string
+	}{
+		{
+			name: "creating checkpoint keeps its planned blob", status: "creating",
+			wantKept:      true,
+			wantExplained: "the row has no digests yet; the claim is the only reference",
+		},
+		{
+			name: "completed checkpoint releases the claim", status: "ready", clearClaim: true,
+			wantKept:      false,
+			wantExplained: "the row's own digests took over, and this blob is in none of them",
+		},
+		{
+			name: "a claim whose checkpoint failed protects nothing", status: "failed", clearClaim: true,
+			wantKept:      false,
+			wantExplained: "a failed checkpoint will never reference it",
+		},
+		{
+			name: "a stale claim under a non-creating row is ignored", status: "ready",
+			wantKept:      false,
+			wantExplained: "the keep set joins on status='creating', so a leaked row cannot pin blobs forever",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newRetentionTestServer(t)
+			reference := time.Now()
+			insertRetentionClaw(t, s, "claw", reference)
+
+			// Written long ago and shared: exactly the deduplicated blob the
+			// grace window fails to protect.
+			plannedSHA := writeRetentionBlob(t, []byte("a blob an earlier claw already uploaded"))
+			aged := time.Now().Add(-2 * blobSweepGrace)
+			if err := os.Chtimes(checkpointBlobPath(plannedSHA), aged, aged); err != nil {
+				t.Fatal(err)
+			}
+
+			insertRetentionCheckpoint(t, s, retentionCheckpoint{
+				id: "cp", clawID: "claw", status: tc.status, createdAt: reference})
+			if err := s.recordCheckpointPendingBlobs("cp", []types.CheckpointFile{
+				{Path: "workspace/a.txt", SHA256: plannedSHA, Size: 39},
+			}); err != nil {
+				t.Fatalf("recordCheckpointPendingBlobs: %v", err)
+			}
+			if tc.clearClaim {
+				s.clearCheckpointPendingBlobs("cp")
+			}
+
+			keep, err := s.checkpointBlobKeepSet()
+			if err != nil {
+				t.Fatalf("checkpointBlobKeepSet: %v", err)
+			}
+			if _, ok := keep[plannedSHA]; ok != tc.wantKept {
+				t.Fatalf("keep set contains planned blob = %v, want %v (%s)", ok, tc.wantKept, tc.wantExplained)
+			}
+
+			if _, _, err := s.sweepCheckpointBlobs(false); err != nil {
+				t.Fatalf("sweepCheckpointBlobs: %v", err)
+			}
+			_, statErr := os.Stat(checkpointBlobPath(plannedSHA))
+			if survived := statErr == nil; survived != tc.wantKept {
+				t.Fatalf("blob survived the sweep = %v, want %v (%s)", survived, tc.wantKept, tc.wantExplained)
+			}
+		})
+	}
+}
+
+// The full lifecycle in one pass: a claim protects a reused blob across a sweep
+// while the checkpoint is creating, and stops protecting it once the checkpoint
+// has completed and the row's own digests are authoritative.
+func TestPendingClaimProtectsThenReleasesAcrossSweeps(t *testing.T) {
+	s := newRetentionTestServer(t)
+	reference := time.Now()
+	insertRetentionClaw(t, s, "claw", reference)
+
+	plannedSHA := writeRetentionBlob(t, []byte("deduplicated from a checkpoint taken months ago"))
+	aged := time.Now().Add(-2 * blobSweepGrace)
+	if err := os.Chtimes(checkpointBlobPath(plannedSHA), aged, aged); err != nil {
+		t.Fatal(err)
+	}
+	insertRetentionCheckpoint(t, s, retentionCheckpoint{
+		id: "cp", clawID: "claw", status: "creating", createdAt: reference})
+	if err := s.recordCheckpointPendingBlobs("cp", []types.CheckpointFile{
+		{Path: "workspace/a.txt", SHA256: plannedSHA, Size: 46},
+	}); err != nil {
+		t.Fatalf("recordCheckpointPendingBlobs: %v", err)
+	}
+
+	if removed, _, err := s.sweepCheckpointBlobs(false); err != nil || removed != 0 {
+		t.Fatalf("sweep removed %d blobs (err %v) while the checkpoint was creating", removed, err)
+	}
+	if _, err := os.Stat(checkpointBlobPath(plannedSHA)); err != nil {
+		t.Fatalf("a blob an in-flight checkpoint had planned was swept: %v", err)
+	}
+
+	// The checkpoint completes without that file (it captured nothing in the
+	// end), so the claim must be released and the blob become collectable.
+	if _, err := s.db.Exec(`UPDATE claw_checkpoints SET status='ready' WHERE id='cp'`); err != nil {
+		t.Fatal(err)
+	}
+	s.clearCheckpointPendingBlobs("cp")
+
+	if removed, _, err := s.sweepCheckpointBlobs(false); err != nil || removed != 1 {
+		t.Fatalf("sweep removed %d blobs (err %v) after the claim was released, want 1", removed, err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Unparseable manifests
+// ---------------------------------------------------------------------------
+
+// A truncated manifest is what a full disk leaves behind, and aborting on every
+// one of them made the disk-full condition self-sustaining: retention switched
+// itself off for the length of the window. An orphan cannot make the keep set
+// incomplete, so only a REFERENCED one may abort.
+func TestCheckpointBlobKeepSetAbortsOnlyOnReferencedBadManifests(t *testing.T) {
+	cases := []struct {
+		name       string
+		referenced bool
+		wantAbort  bool
+		because    string
+	}{
+		{
+			name: "orphan manifest is skipped", referenced: false, wantAbort: false,
+			because: "no row points at it, so nothing can restore from it and the keep set stays complete",
+		},
+		{
+			name: "referenced manifest aborts", referenced: true, wantAbort: true,
+			because: "a live checkpoint's blob list is unreadable, so the keep set really would be short",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newRetentionTestServer(t)
+			reference := time.Now()
+			insertRetentionClaw(t, s, "claw", reference)
+
+			orphanSHA := writeRetentionBlob(t, []byte("unreferenced blob"))
+			aged := time.Now().Add(-2 * blobSweepGrace)
+			if err := os.Chtimes(checkpointBlobPath(orphanSHA), aged, aged); err != nil {
+				t.Fatal(err)
+			}
+
+			if tc.referenced {
+				insertRetentionCheckpoint(t, s, retentionCheckpoint{
+					id: "cp", clawID: "claw", status: "ready", createdAt: reference,
+					writeManifest: true, manifestBody: []byte("{ truncated by ENOSP")})
+			} else {
+				// A manifest file with no row at all: the shape left behind when
+				// the row was deleted but the unlink did not happen.
+				path := checkpointManifestPath("no-such-checkpoint")
+				if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, []byte("{ truncated by ENOSP"), 0o640); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			_, err := s.checkpointBlobKeepSet()
+			if gotAbort := err != nil; gotAbort != tc.wantAbort {
+				t.Fatalf("keep set aborted = %v, want %v (%s): err=%v", gotAbort, tc.wantAbort, tc.because, err)
+			}
+
+			removed, _, err := s.sweepCheckpointBlobs(false)
+			if tc.wantAbort {
+				if err == nil || removed != 0 {
+					t.Fatalf("sweep proceeded (removed %d, err %v) on an incomplete keep set", removed, err)
+				}
+				if _, err := os.Stat(checkpointBlobPath(orphanSHA)); err != nil {
+					t.Fatalf("an aborted sweep still deleted a blob: %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("sweep aborted over an orphan manifest: %v", err)
+			}
+			if removed != 1 {
+				t.Fatalf("sweep removed %d blobs, want 1: an orphan manifest must not disable reclamation", removed)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Compaction: keeping something that can actually restore
+// ---------------------------------------------------------------------------
+
+// The newest ready checkpoint is not automatically the useful one. A
+// metadata-only capture (bridge unreachable) is 'ready' with an empty root
+// tree, and on the kill path it is ALWAYS the newest, because handleClawKill
+// drops the connection before asking for the checkpoint. Keeping it by
+// timestamp deletes every checkpoint that has files and leaves a row
+// retryCheckpointIDWithCount refuses to restore from.
+func TestCompactClawCheckpointsKeepsTheNewestRestorable(t *testing.T) {
+	cases := []struct {
+		name        string
+		roots       []string // newest first
+		wantKeptIdx int
+		because     string
+	}{
+		{
+			name: "newest has files", roots: []string{"tree-new", "tree-old"}, wantKeptIdx: 0,
+			because: "the newest is restorable, so recency wins as before",
+		},
+		{
+			name: "newest is metadata-only", roots: []string{"", "tree-old"}, wantKeptIdx: 1,
+			because: "the kill capture cannot restore anything; the one with files must survive",
+		},
+		{
+			name: "two metadata-only captures on top", roots: []string{"", "", "tree-old"}, wantKeptIdx: 2,
+			because: "walk back as far as needed to find a restorable checkpoint",
+		},
+		{
+			name: "all metadata-only", roots: []string{"", "", ""}, wantKeptIdx: 0,
+			because: "nothing better exists, so keep the newest; the row is still the analytics record",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newRetentionTestServer(t)
+			reference := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+			insertRetentionClaw(t, s, "claw", reference)
+			if _, err := s.db.Exec(`UPDATE claws SET status='offline' WHERE id='claw'`); err != nil {
+				t.Fatal(err)
+			}
+			insertRetentionPR(t, s, "claw", 1)
+
+			ids := make([]string, len(tc.roots))
+			for i, root := range tc.roots {
+				ids[i] = fmt.Sprintf("cp-%d", i)
+				rootSHA := ""
+				if root != "" {
+					rootSHA = writeRetentionBlob(t, []byte(root))
+				}
+				insertRetentionCheckpoint(t, s, retentionCheckpoint{
+					id: ids[i], clawID: "claw", status: "ready",
+					createdAt:     reference.Add(-time.Duration(i) * time.Hour),
+					rootTree:      rootSHA,
+					writeManifest: true})
+			}
+
+			compacted, err := s.compactFinalizedCheckpoints(reference.Add(-240*time.Hour), false)
+			if err != nil {
+				t.Fatalf("compactFinalizedCheckpoints: %v", err)
+			}
+			if want := len(tc.roots) - 1; compacted != want {
+				t.Fatalf("compacted %d, want %d", compacted, want)
+			}
+			for i, id := range ids {
+				status, _, _ := retentionCheckpointRow(t, s, id)
+				wantStatus := "compacted"
+				if i == tc.wantKeptIdx {
+					wantStatus = "ready"
+				}
+				if status != wantStatus {
+					t.Errorf("%s status = %q, want %q (%s)", id, status, wantStatus, tc.because)
+				}
+			}
+		})
+	}
+}
+
+// Compaction that leaves the tree digests on the row reclaims only the
+// manifest, which under schema 2 is the small half of the checkpoint. The
+// blobs are the point.
+func TestCompactionReleasesTheBlobsItNoLongerNeeds(t *testing.T) {
+	s := newRetentionTestServer(t)
+	reference := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	insertRetentionClaw(t, s, "claw", reference)
+	if _, err := s.db.Exec(`UPDATE claws SET status='offline' WHERE id='claw'`); err != nil {
+		t.Fatal(err)
+	}
+	insertRetentionPR(t, s, "claw", 1)
+
+	// Two checkpoints with entirely disjoint contents, so nothing the older one
+	// holds is kept alive by the newer.
+	makeCheckpoint := func(id, contents string, createdAt time.Time) (fileSHA, treeSHA, msgSHA string) {
+		fileSHA = writeRetentionBlob(t, []byte(contents+" file"))
+		tree, _ := json.Marshal([]types.CheckpointFile{{Path: "workspace/a.txt", SHA256: fileSHA, Size: 1}})
+		treeSHA = writeRetentionBlob(t, tree)
+		msgSHA = writeRetentionBlob(t, []byte(contents+" messages"))
+		insertRetentionCheckpoint(t, s, retentionCheckpoint{
+			id: id, clawID: "claw", status: "ready", createdAt: createdAt,
+			rootTree: treeSHA, messageTree: msgSHA, writeManifest: true})
+		return
+	}
+	oldFile, oldTree, oldMsg := makeCheckpoint("cp-old", "old", reference.Add(-48*time.Hour))
+	newFile, newTree, newMsg := makeCheckpoint("cp-new", "new", reference.Add(-24*time.Hour))
+
+	if _, err := s.compactFinalizedCheckpoints(reference.Add(-240*time.Hour), false); err != nil {
+		t.Fatalf("compactFinalizedCheckpoints: %v", err)
+	}
+
+	var root, workspace, message string
+	if err := s.db.QueryRow(
+		`SELECT root_tree_sha256, workspace_tree_sha256, message_tree_sha256 FROM claw_checkpoints WHERE id='cp-old'`).
+		Scan(&root, &workspace, &message); err != nil {
+		t.Fatal(err)
+	}
+	if root != "" || workspace != "" || message != "" {
+		t.Fatalf("compacted row kept tree digests root=%q workspace=%q message=%q; its blobs stay reachable forever",
+			root, workspace, message)
+	}
+
+	aged := time.Now().Add(-2 * blobSweepGrace)
+	for _, sha := range []string{oldFile, oldTree, oldMsg, newFile, newTree, newMsg} {
+		if err := os.Chtimes(checkpointBlobPath(sha), aged, aged); err != nil {
+			t.Fatal(err)
+		}
+	}
+	removed, freed, err := s.sweepCheckpointBlobs(false)
+	if err != nil {
+		t.Fatalf("sweepCheckpointBlobs: %v", err)
+	}
+	if removed != 3 {
+		t.Fatalf("swept %d blobs (%d bytes), want the compacted checkpoint's 3", removed, freed)
+	}
+	for _, sha := range []string{oldFile, oldTree, oldMsg} {
+		if _, err := os.Stat(checkpointBlobPath(sha)); !os.IsNotExist(err) {
+			t.Errorf("blob %s of the compacted checkpoint survived", sha)
+		}
+	}
+	for _, sha := range []string{newFile, newTree, newMsg} {
+		if _, err := os.Stat(checkpointBlobPath(sha)); err != nil {
+			t.Errorf("sweep deleted a blob of the kept checkpoint %s: %v", sha, err)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Batched deletes
+// ---------------------------------------------------------------------------
+
+// One unbounded DELETE over messages or task_run_events is a full scan holding
+// the only write lock the database has, and every concurrent writer waits out
+// busy_timeout behind it. The work must be split, with the lock released
+// between batches.
+func TestPruneRowsBatchedSpansMultipleBatches(t *testing.T) {
+	s := newRetentionTestServer(t)
+	reference := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	cutoff := reference.Add(-90 * 24 * time.Hour)
+	insertRetentionClaw(t, s, "claw", reference)
+
+	const expired, kept = 2*retentionDeleteBatch + 7, 3
+	tx, err := s.db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < expired+kept; i++ {
+		at := cutoff.Add(-time.Hour)
+		if i >= expired {
+			at = cutoff.Add(time.Hour)
+		}
+		if _, err := tx.Exec(`INSERT INTO messages(id, claw_id, tenant_id, role, content, created_at) VALUES(?,?,?,?,?,?)`,
+			fmt.Sprintf("msg-%d", i), "claw", "tenant", "user", "hello", at); err != nil {
+			t.Fatalf("seed message %d: %v", i, err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+
+	// A pause long enough to be measurable stands in for the lock being
+	// released: a single unbounded DELETE would never reach it.
+	previous := retentionBatchPause
+	retentionBatchPause = 20 * time.Millisecond
+	defer func() { retentionBatchPause = previous }()
+
+	started := time.Now()
+	deleted, err := s.pruneRowsBatched("messages", "created_at", cutoff, false)
+	elapsed := time.Since(started)
+	if err != nil {
+		t.Fatalf("pruneRowsBatched: %v", err)
+	}
+	if deleted != expired {
+		t.Fatalf("deleted %d rows, want %d", deleted, expired)
+	}
+	if elapsed < 2*retentionBatchPause {
+		t.Fatalf("finished in %s: the delete did not yield between batches, so it held one long write lock", elapsed)
+	}
+	var remaining int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM messages`).Scan(&remaining); err != nil {
+		t.Fatal(err)
+	}
+	if remaining != kept {
+		t.Fatalf("%d messages left, want %d", remaining, kept)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Auditability
+// ---------------------------------------------------------------------------
+
+// dry_run exists so an operator can see the blast radius before arming a policy
+// on a hub that has never run one. It must select exactly what a real cycle
+// would, report it, and touch nothing.
+func TestRetentionSweepOnceDryRunReportsWithoutDeleting(t *testing.T) {
+	for _, dryRun := range []bool{true, false} {
+		name := "dry run keeps everything"
+		if !dryRun {
+			name = "a real cycle deletes the same selection"
+		}
+		t.Run(name, func(t *testing.T) {
+			s := newRetentionTestServer(t)
+			reference := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+			s.nowFunc = func() time.Time { return reference }
+			s.hubCfg = &types.HubConfig{Retention: &types.RetentionConfig{
+				Enabled: boolPtr(true), DryRun: dryRun}}
+
+			expired := reference.Add(-defaultRetentionMaxAge - 24*time.Hour)
+			insertRetentionClaw(t, s, "claw", expired)
+			manifest := insertRetentionCheckpoint(t, s, retentionCheckpoint{
+				id: "cp", clawID: "claw", status: "ready", createdAt: expired, writeManifest: true})
+			if _, err := s.db.Exec(`INSERT INTO messages(id, claw_id, tenant_id, role, content, created_at) VALUES(?,?,?,?,?,?)`,
+				"msg-old", "claw", "tenant", "user", "hello", expired); err != nil {
+				t.Fatal(err)
+			}
+			orphanSHA := writeRetentionBlob(t, []byte("unreferenced"))
+			aged := time.Now().Add(-2 * blobSweepGrace)
+			if err := os.Chtimes(checkpointBlobPath(orphanSHA), aged, aged); err != nil {
+				t.Fatal(err)
+			}
+
+			var logs bytes.Buffer
+			previousOut, previousFlags := log.Writer(), log.Flags()
+			log.SetOutput(&logs)
+			log.SetFlags(0)
+			defer func() {
+				log.SetOutput(previousOut)
+				log.SetFlags(previousFlags)
+			}()
+
+			s.retentionSweepOnce()
+
+			var checkpoints, messages int
+			if err := s.db.QueryRow(`SELECT COUNT(*) FROM claw_checkpoints`).Scan(&checkpoints); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.db.QueryRow(`SELECT COUNT(*) FROM messages`).Scan(&messages); err != nil {
+				t.Fatal(err)
+			}
+			_, manifestErr := os.Stat(manifest)
+			_, blobErr := os.Stat(checkpointBlobPath(orphanSHA))
+
+			if dryRun {
+				if checkpoints != 1 || messages != 1 || manifestErr != nil || blobErr != nil {
+					t.Fatalf("dry run deleted something: checkpoints=%d messages=%d manifest=%v blob=%v",
+						checkpoints, messages, manifestErr, blobErr)
+				}
+			} else if checkpoints != 0 || messages != 0 || !os.IsNotExist(manifestErr) || !os.IsNotExist(blobErr) {
+				t.Fatalf("real cycle left data behind: checkpoints=%d messages=%d manifest=%v blob=%v",
+					checkpoints, messages, manifestErr, blobErr)
+			}
+
+			// Every cycle reports, so a clean one is distinguishable from a
+			// stuck one. The counts are the same either way: dry_run changes
+			// what is done, not what is selected.
+			out := logs.String()
+			for _, want := range []string{
+				"cycle start",
+				fmt.Sprintf("dry_run=%v", dryRun),
+				"checkpoints=1",
+				"messages=1",
+				"blobs=1",
+				"errors=0",
+			} {
+				if !strings.Contains(out, want) {
+					t.Errorf("cycle log is missing %q:\n%s", want, out)
+				}
+			}
+		})
 	}
 }

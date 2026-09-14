@@ -44,6 +44,32 @@ type retentionSettings struct {
 	interval     time.Duration
 	maxAge       time.Duration
 	compactAfter time.Duration
+	dryRun       bool
+}
+
+// retentionDeleteBatch bounds how many rows one retention DELETE may remove.
+//
+// SQLite has a single writer and this hub opens it with _txlock=immediate and a
+// five-second busy_timeout, so an unbounded DELETE over a large table holds the
+// write lock for the whole scan and every concurrent writer -- heartbeats,
+// usage accounting, checkpoint rows -- waits out the timeout and fails BUSY.
+// A batch is a lock hold an operator does not notice.
+const retentionDeleteBatch = 1000
+
+// retentionBatchPause is the gap between delete batches, during which the write
+// lock is free. It is a variable so tests do not pay for it.
+var retentionBatchPause = 2 * time.Millisecond
+
+// retentionCounts is what one cycle actually did, per phase.
+type retentionCounts struct {
+	compacted     int
+	diagnostics   int
+	checkpoints   int
+	taskRunEvents int64
+	messages      int64
+	blobs         int
+	blobBytes     int64
+	errors        int
 }
 
 func retentionConfig(cfg *types.HubConfig) *types.RetentionConfig {
@@ -93,6 +119,7 @@ func (s *Server) retentionSettings() retentionSettings {
 		}
 		return d
 	}
+	cfg.dryRun = r.DryRun
 	cfg.interval = parse(r.Interval, cfg.interval, "interval")
 	cfg.maxAge = parse(r.MaxAge, cfg.maxAge, "max_age")
 	cfg.compactAfter = parse(r.CompactAfter, cfg.compactAfter, "compact_after")
@@ -182,27 +209,52 @@ func (s *Server) retentionSweeper() {
 }
 
 // retentionSweepOnce runs one full reclamation cycle.
+//
+// Every cycle logs a start line and an end line, including the cycles that
+// reclaim nothing. A sweeper that has been silent for a day is otherwise
+// indistinguishable from one that is wedged, disabled, or crashing in a phase
+// that only logs on success, and telling those apart after the fact was not
+// possible at all.
 func (s *Server) retentionSweepOnce() {
 	if !s.retentionEnabled() {
 		return
 	}
 	cfg, n := s.retentionSettings(), s.retentionNow()
+	expiryCutoff, compactCutoff := n.Add(-cfg.maxAge), n.Add(-cfg.compactAfter)
+	started := time.Now()
+	log.Printf("[retention] cycle start: dry_run=%v expire_before=%s compact_before=%s",
+		cfg.dryRun, expiryCutoff.Format(time.RFC3339), compactCutoff.Format(time.RFC3339))
 
-	compacted, err := s.compactFinalizedCheckpoints(n.Add(-cfg.compactAfter))
+	var counts retentionCounts
+	compacted, err := s.compactFinalizedCheckpoints(compactCutoff, cfg.dryRun)
+	counts.compacted = compacted
 	if err != nil {
+		counts.errors++
 		log.Printf("[retention] compaction: %v", err)
-	} else if compacted > 0 {
-		log.Printf("[retention] compacted %d superseded checkpoint manifests", compacted)
 	}
 
-	s.applyRetentionWindow(n.Add(-cfg.maxAge))
+	windowCounts := s.applyRetentionWindow(expiryCutoff, cfg.dryRun)
+	counts.diagnostics = windowCounts.diagnostics
+	counts.checkpoints = windowCounts.checkpoints
+	counts.taskRunEvents = windowCounts.taskRunEvents
+	counts.messages = windowCounts.messages
+	counts.errors += windowCounts.errors
 
-	swept, bytes, err := s.sweepCheckpointBlobs()
+	swept, bytes, err := s.sweepCheckpointBlobs(cfg.dryRun)
+	counts.blobs, counts.blobBytes = swept, bytes
 	if err != nil {
-		log.Printf("[retention] blob sweep skipped: %v", err)
-	} else if swept > 0 {
-		log.Printf("[retention] swept %d unreferenced blobs (%d bytes)", swept, bytes)
+		counts.errors++
+		log.Printf("[retention] blob sweep: %v", err)
 	}
+
+	verb := "removed"
+	if cfg.dryRun {
+		verb = "would remove"
+	}
+	log.Printf("[retention] cycle done in %s (dry_run=%v): %s compacted=%d diagnostics=%d checkpoints=%d task_run_events=%d messages=%d blobs=%d bytes_freed=%d errors=%d",
+		time.Since(started).Round(time.Millisecond), cfg.dryRun, verb,
+		counts.compacted, counts.diagnostics, counts.checkpoints,
+		counts.taskRunEvents, counts.messages, counts.blobs, counts.blobBytes, counts.errors)
 }
 
 // ---------------------------------------------------------------------------
@@ -331,38 +383,42 @@ func (s *Server) finalizedClawIDs(cutoff time.Time) ([]string, error) {
 // checkpoint (and every claw) that captured the same file, so a per-claw pass
 // cannot tell whether dropping one is safe — only the mark-and-sweep at the end
 // of the cycle can.
-func (s *Server) compactFinalizedCheckpoints(cutoff time.Time) (int, error) {
+func (s *Server) compactFinalizedCheckpoints(cutoff time.Time, dryRun bool) (int, error) {
 	ids, err := s.finalizedClawIDs(cutoff)
 	if err != nil {
 		return 0, fmt.Errorf("list finalized claws: %w", err)
 	}
 	compacted := 0
-	for _, clawID := range ids {
-		n, err := s.compactClawCheckpoints(clawID)
+	for i, clawID := range ids {
+		n, err := s.compactClawCheckpoints(clawID, dryRun)
+		compacted += n
 		if err != nil {
-			log.Printf("[retention] compact claw %s: %v", shortID(clawID), err)
+			// Say how far the phase got. "compaction failed" alone cannot be
+			// told apart from "compaction did nothing", and the two call for
+			// opposite responses.
+			log.Printf("[retention] compact claw %s: %v (aborted after %d of %d claws)",
+				shortID(clawID), err, i, len(ids))
 			continue
 		}
-		compacted += n
 	}
 	return compacted, nil
 }
 
-func (s *Server) compactClawCheckpoints(clawID string) (int, error) {
+func (s *Server) compactClawCheckpoints(clawID string, dryRun bool) (int, error) {
 	// 'skipped' and 'failed' checkpoints never wrote a manifest, so they are
 	// not candidates and are left exactly as they are.
 	rows, err := s.db.Query(
-		`SELECT id, COALESCE(manifest_path,'') FROM claw_checkpoints
+		`SELECT id, COALESCE(manifest_path,''), COALESCE(root_tree_sha256,'') FROM claw_checkpoints
 		  WHERE claw_id = ? AND status = 'ready'
 		  ORDER BY created_at DESC, id DESC`, clawID)
 	if err != nil {
 		return 0, err
 	}
-	type candidate struct{ id, manifestPath string }
+	type candidate struct{ id, manifestPath, rootTree string }
 	var candidates []candidate
 	for rows.Next() {
 		var c candidate
-		if err := rows.Scan(&c.id, &c.manifestPath); err != nil {
+		if err := rows.Scan(&c.id, &c.manifestPath, &c.rootTree); err != nil {
 			rows.Close()
 			return 0, err
 		}
@@ -375,12 +431,25 @@ func (s *Server) compactClawCheckpoints(clawID string) (int, error) {
 	if len(candidates) <= 1 {
 		return 0, nil
 	}
+	roots := make([]string, len(candidates))
+	for i, c := range candidates {
+		roots[i] = c.rootTree
+	}
+	keep := newestRestorableCheckpoint(roots)
 	compacted := 0
-	// candidates[0] is the newest ready checkpoint: the one restore would pick.
-	for _, c := range candidates[1:] {
+	for i, c := range candidates {
+		if i == keep {
+			continue
+		}
 		path := c.manifestPath
 		if path == "" {
 			path = checkpointManifestPath(c.id)
+		}
+		if dryRun {
+			log.Printf("[retention] dry_run: would compact checkpoint %s of claw %s (manifest %s)",
+				shortID(c.id), shortID(clawID), path)
+			compacted++
+			continue
 		}
 		// A manifest that is already gone is not an error — a previous cycle may
 		// have been interrupted between the unlink and the UPDATE — but the row
@@ -389,14 +458,51 @@ func (s *Server) compactClawCheckpoints(clawID string) (int, error) {
 			log.Printf("[retention] remove manifest %s: %v", path, err)
 			continue
 		}
+		// The tree digests go with the manifest.
+		//
+		// Clearing only manifest_path/manifest_sha256 reclaimed the manifest and
+		// nothing else: the keep set reads digests off every row whatever its
+		// status, so the root/workspace/message trees of a compacted checkpoint
+		// stayed reachable and so did every file blob they list. Under schema 2 a
+		// manifest is a few hundred bytes and the trees are the whole workspace,
+		// which means compaction was reclaiming the small half and calling it
+		// done. The telemetry columns are deliberately untouched — they are the
+		// analytics record, and losing them is what this design exists to avoid.
 		if _, err := s.db.Exec(
-			`UPDATE claw_checkpoints SET status='compacted', manifest_path='', manifest_sha256='' WHERE id=?`,
+			`UPDATE claw_checkpoints
+			    SET status='compacted', manifest_path='', manifest_sha256='',
+			        root_tree_sha256='', workspace_tree_sha256='', message_tree_sha256=''
+			  WHERE id=?`,
 			c.id); err != nil {
 			return compacted, err
 		}
 		compacted++
 	}
 	return compacted, nil
+}
+
+// newestRestorableCheckpoint picks the index of the checkpoint compaction must
+// keep, given each candidate's root tree digest in newest-first order.
+//
+// Recency alone is not enough. completeMetadataOnlyCheckpoint publishes a
+// 'ready' row with an EMPTY root_tree_sha256 whenever the bridge is
+// unreachable, and on the common death paths that row is by construction the
+// newest one: handleClawKill removes the claw from s.claws before calling
+// checkpointBeforeTermination, so the kill capture can only ever be
+// metadata-only. Keeping it by timestamp meant compacting away every checkpoint
+// that actually had files while retaining one retryCheckpointIDWithCount
+// explicitly refuses (it skips rootTree == "") — the claw kept a checkpoint and
+// lost the ability to restore.
+//
+// A claw whose ready checkpoints are ALL metadata-only still keeps its newest:
+// there is nothing better to keep, and the row is still the analytics record.
+func newestRestorableCheckpoint(rootTrees []string) int {
+	for i, root := range rootTrees {
+		if root != "" {
+			return i
+		}
+	}
+	return 0
 }
 
 // ---------------------------------------------------------------------------
@@ -407,48 +513,92 @@ func (s *Server) compactClawCheckpoints(clawID string) (int, error) {
 // targets. Each target is independent: a failure in one is logged and the rest
 // still run, because a single broken table must not stop the hub from
 // reclaiming the disk space that is actually filling up.
-func (s *Server) applyRetentionWindow(cutoff time.Time) {
-	if n, err := pruneDiagnosticsLogs(hubDataDir(), cutoff); err != nil {
+func (s *Server) applyRetentionWindow(cutoff time.Time, dryRun bool) retentionCounts {
+	var counts retentionCounts
+	if n, err := pruneDiagnosticsLogs(hubDataDir(), cutoff, dryRun); err != nil {
+		counts.errors++
 		log.Printf("[retention] diagnostics: %v", err)
-	} else if n > 0 {
-		log.Printf("[retention] removed %d expired diagnostics logs", n)
+	} else {
+		counts.diagnostics = n
 	}
-	if n, err := s.pruneExpiredCheckpoints(cutoff); err != nil {
+	if n, err := s.pruneExpiredCheckpoints(cutoff, dryRun); err != nil {
+		counts.errors++
+		counts.checkpoints = n
 		log.Printf("[retention] checkpoints: %v", err)
-	} else if n > 0 {
-		log.Printf("[retention] removed %d expired checkpoints", n)
+	} else {
+		counts.checkpoints = n
 	}
 	// task_run_events is keyed on when the event happened, not when the hub
 	// happened to record it: a late-arriving webhook for an old run belongs to
 	// the old run's window.
-	if n, err := s.pruneRows(`DELETE FROM task_run_events WHERE event_time < ?`, cutoff.UnixMilli()); err != nil {
+	if n, err := s.pruneRowsBatched("task_run_events", "event_time", cutoff.UnixMilli(), dryRun); err != nil {
+		counts.errors++
+		counts.taskRunEvents = n
 		log.Printf("[retention] task run events: %v", err)
-	} else if n > 0 {
-		log.Printf("[retention] removed %d expired task run events", n)
+	} else {
+		counts.taskRunEvents = n
 	}
-	if n, err := s.pruneRows(`DELETE FROM messages WHERE created_at < ?`, cutoff); err != nil {
+	if n, err := s.pruneRowsBatched("messages", "created_at", cutoff, dryRun); err != nil {
+		counts.errors++
+		counts.messages = n
 		log.Printf("[retention] messages: %v", err)
-	} else if n > 0 {
-		log.Printf("[retention] removed %d expired messages", n)
+	} else {
+		counts.messages = n
 	}
+	return counts
 }
 
-func (s *Server) pruneRows(query string, args ...any) (int64, error) {
-	res, err := s.db.Exec(query, args...)
-	if err != nil {
-		return 0, err
+// pruneRowsBatched deletes rows older than cutoff in bounded batches, releasing
+// the write lock between them.
+//
+// One unbounded DELETE over messages or task_run_events is a full scan under
+// the only write lock the database has, and this hub sets busy_timeout to five
+// seconds: every heartbeat, usage update and checkpoint row written during that
+// scan waits out the timeout and then fails BUSY. The sweeper exists to relieve
+// a full disk, not to take the hub down while it does.
+//
+// table and column are compile-time constants from the caller, never operator
+// or request input, so interpolating them into the statement is safe; they
+// cannot be bound as parameters.
+func (s *Server) pruneRowsBatched(table, column string, cutoff any, dryRun bool) (int64, error) {
+	if dryRun {
+		var n int64
+		err := s.db.QueryRow(fmt.Sprintf(`SELECT COUNT(*) FROM %q WHERE %q < ?`, table, column), cutoff).Scan(&n)
+		if err != nil {
+			return 0, err
+		}
+		if n > 0 {
+			log.Printf("[retention] dry_run: would delete %d rows from %s", n, table)
+		}
+		return n, nil
 	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return 0, nil
+	query := fmt.Sprintf(
+		`DELETE FROM %q WHERE rowid IN (SELECT rowid FROM %q WHERE %q < ? LIMIT ?)`,
+		table, table, column)
+	var total int64
+	for {
+		res, err := s.db.Exec(query, cutoff, retentionDeleteBatch)
+		if err != nil {
+			return total, fmt.Errorf("delete from %s (aborted after %d rows): %w", table, total, err)
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			// The driver could not report a count, so the loop has no
+			// termination condition left. Stop rather than risk spinning.
+			return total, nil
+		}
+		total += n
+		if n < retentionDeleteBatch {
+			return total, nil
+		}
+		time.Sleep(retentionBatchPause)
 	}
-	return n, nil
 }
 
 // pruneDiagnosticsLogs removes captured gateway/bridge logs by file mtime.
 // These files have no database row, so the filesystem timestamp is the only
 // record of their age.
-func pruneDiagnosticsLogs(dataDir string, cutoff time.Time) (int, error) {
+func pruneDiagnosticsLogs(dataDir string, cutoff time.Time, dryRun bool) (int, error) {
 	if dataDir == "" {
 		return 0, nil
 	}
@@ -469,6 +619,11 @@ func pruneDiagnosticsLogs(dataDir string, cutoff time.Time) (int, error) {
 		if err != nil || !info.ModTime().Before(cutoff) {
 			continue
 		}
+		if dryRun {
+			log.Printf("[retention] dry_run: would remove diagnostics log %s", entry.Name())
+			removed++
+			continue
+		}
 		if err := os.Remove(filepath.Join(dir, entry.Name())); err != nil && !os.IsNotExist(err) {
 			log.Printf("[retention] remove diagnostics log %s: %v", entry.Name(), err)
 			continue
@@ -481,7 +636,7 @@ func pruneDiagnosticsLogs(dataDir string, cutoff time.Time) (int, error) {
 // pruneExpiredCheckpoints deletes both the manifest and the row for
 // checkpoints past the retention window. Unlike compaction, this is the point
 // where the analytics record itself expires, so it applies to every status.
-func (s *Server) pruneExpiredCheckpoints(cutoff time.Time) (int, error) {
+func (s *Server) pruneExpiredCheckpoints(cutoff time.Time, dryRun bool) (int, error) {
 	rows, err := s.db.Query(
 		`SELECT id, COALESCE(manifest_path,'') FROM claw_checkpoints WHERE created_at < ?`, cutoff)
 	if err != nil {
@@ -507,13 +662,21 @@ func (s *Server) pruneExpiredCheckpoints(cutoff time.Time) (int, error) {
 		if path == "" {
 			path = checkpointManifestPath(v.id)
 		}
+		if dryRun {
+			log.Printf("[retention] dry_run: would delete expired checkpoint %s (manifest %s)", shortID(v.id), path)
+			removed++
+			continue
+		}
 		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 			log.Printf("[retention] remove expired manifest %s: %v", path, err)
 			continue
 		}
 		if _, err := s.db.Exec(`DELETE FROM claw_checkpoints WHERE id=?`, v.id); err != nil {
-			return removed, err
+			return removed, fmt.Errorf("delete expired checkpoint (aborted after %d of %d): %w", removed, len(victims), err)
 		}
+		// A checkpoint that expired while still 'creating' takes its blob claim
+		// with it; nothing else would ever release it once the row is gone.
+		s.clearCheckpointPendingBlobs(v.id)
 		removed++
 	}
 	return removed, nil
@@ -538,7 +701,13 @@ func (s *Server) pruneExpiredCheckpoints(cutoff time.Time) (int, error) {
 //     Scanning the decoded JSON generically rather than reading named fields
 //     covers schema 1 (which inlined files[]) and schema 2 alike, and keeps
 //     working if a future field adds another blob reference.
-//  3. The files listed inside each kept workspace tree blob. This is the step
+//  3. Every digest a checkpoint still in 'creating' declared at plan time. The
+//     row itself carries no digests until it completes, so this durable claim
+//     is the only thing that distinguishes a blob about to be referenced from
+//     an orphan. It is not covered by the mtime grace window: the plan and the
+//     upload handler both deduplicate on os.Stat, so a reused blob keeps its
+//     original mtime, which can be arbitrarily old.
+//  4. The files listed inside each kept workspace tree blob. This is the step
 //     whose omission would be catastrophic: a tree is a JSON array of
 //     {path, sha256, size}, and the per-file blobs it points at appear nowhere
 //     in a schema-2 manifest or in the database. Without this closure the sweep
@@ -547,9 +716,21 @@ func (s *Server) pruneExpiredCheckpoints(cutoff time.Time) (int, error) {
 // A manifest that cannot be read or parsed, or a tree blob that is present but
 // unparseable, returns an error: an incomplete keep set is worse than a full
 // disk, and the operator can fix the file and let the next cycle run.
+//
+// The one exception is an unparseable manifest that NO claw_checkpoints row
+// references. That file is already unreachable — nothing can restore from it —
+// so it cannot make the keep set incomplete, and treating it as fatal was
+// actively harmful: manifests used to be written with a bare os.WriteFile, so
+// the disk-full condition this feature exists to relieve is exactly what leaves
+// a truncated one behind, and one such file disabled the sweep permanently with
+// no way to self-heal. It is logged and skipped so retention can remove it.
 func (s *Server) checkpointBlobKeepSet() (map[string]struct{}, error) {
 	keep := make(map[string]struct{})
 	trees := make(map[string]struct{})
+	// Manifests a row still points at. A manifest outside this set is an orphan
+	// whatever its contents, and the id/path pair is collected because a legacy
+	// row may store a path that is not checkpointManifestPath(id).
+	referencedManifests := make(map[string]struct{})
 	add := func(sha string, isTree bool) {
 		clean := normalizeBlobDigest(sha)
 		if clean == "" {
@@ -561,16 +742,25 @@ func (s *Server) checkpointBlobKeepSet() (map[string]struct{}, error) {
 		}
 	}
 
-	rows, err := s.db.Query(`SELECT COALESCE(manifest_sha256,''), COALESCE(root_tree_sha256,''),
+	rows, err := s.db.Query(`SELECT id, status, COALESCE(manifest_path,''), COALESCE(manifest_sha256,''), COALESCE(root_tree_sha256,''),
 		COALESCE(message_tree_sha256,''), COALESCE(workspace_tree_sha256,'') FROM claw_checkpoints`)
 	if err != nil {
 		return nil, fmt.Errorf("read checkpoint digests: %w", err)
 	}
 	for rows.Next() {
-		var manifestSHA, rootSHA, msgSHA, workspaceSHA string
-		if err := rows.Scan(&manifestSHA, &rootSHA, &msgSHA, &workspaceSHA); err != nil {
+		var id, status, manifestPath, manifestSHA, rootSHA, msgSHA, workspaceSHA string
+		if err := rows.Scan(&id, &status, &manifestPath, &manifestSHA, &rootSHA, &msgSHA, &workspaceSHA); err != nil {
 			rows.Close()
 			return nil, err
+		}
+		if manifestPath != "" {
+			referencedManifests[manifestPath] = struct{}{}
+		} else if status != "compacted" {
+			// A compacted row gave up its manifest deliberately, so a file left
+			// at its conventional path is debris from an interrupted unlink, not
+			// a reference. Every other status may legitimately own one even with
+			// the column unset (legacy rows, an interrupted finalize).
+			referencedManifests[checkpointManifestPath(id)] = struct{}{}
 		}
 		// manifest_sha256 is the digest of the manifest file, which is not
 		// stored as a blob — keeping it costs nothing and guards against a
@@ -585,6 +775,27 @@ func (s *Server) checkpointBlobKeepSet() (map[string]struct{}, error) {
 		return nil, err
 	}
 
+	// Checkpoints under construction. Their blobs are on disk (or already were,
+	// deduplicated from an earlier checkpoint) but no row names them yet.
+	pending, err := s.db.Query(`SELECT p.sha256 FROM claw_checkpoint_pending_blobs p
+		 JOIN claw_checkpoints c ON c.id = p.checkpoint_id
+		 WHERE c.status = 'creating'`)
+	if err != nil {
+		return nil, fmt.Errorf("read pending checkpoint blobs: %w", err)
+	}
+	for pending.Next() {
+		var sha string
+		if err := pending.Scan(&sha); err != nil {
+			pending.Close()
+			return nil, err
+		}
+		add(sha, false)
+	}
+	pending.Close()
+	if err := pending.Err(); err != nil {
+		return nil, err
+	}
+
 	manifestDir := filepath.Join(checkpointsRoot(), "manifests")
 	entries, err := os.ReadDir(manifestDir)
 	if err != nil && !os.IsNotExist(err) {
@@ -595,13 +806,30 @@ func (s *Server) checkpointBlobKeepSet() (map[string]struct{}, error) {
 			continue
 		}
 		path := filepath.Join(manifestDir, entry.Name())
+		_, referenced := referencedManifests[path]
+		// An unusable manifest only threatens the keep set when a row still
+		// points at it. Orphans are skipped so one truncated file cannot switch
+		// reclamation off for the length of the retention window.
+		unusable := func(err error) error {
+			if referenced {
+				return err
+			}
+			log.Printf("[retention] ignoring orphan manifest %s (no checkpoint row references it): %v", entry.Name(), err)
+			return nil
+		}
 		data, err := os.ReadFile(path)
 		if err != nil {
-			return nil, fmt.Errorf("read manifest %s: %w", entry.Name(), err)
+			if skipErr := unusable(fmt.Errorf("read manifest %s: %w", entry.Name(), err)); skipErr != nil {
+				return nil, skipErr
+			}
+			continue
 		}
 		var decoded any
 		if err := json.Unmarshal(data, &decoded); err != nil {
-			return nil, fmt.Errorf("parse manifest %s: %w", entry.Name(), err)
+			if skipErr := unusable(fmt.Errorf("parse manifest %s: %w", entry.Name(), err)); skipErr != nil {
+				return nil, skipErr
+			}
+			continue
 		}
 		for _, sha := range collectDigests(decoded) {
 			add(sha, false)
@@ -610,7 +838,10 @@ func (s *Server) checkpointBlobKeepSet() (map[string]struct{}, error) {
 		// followed, so pick it out by name in addition to the generic scan.
 		var manifest checkpointManifest
 		if err := json.Unmarshal(data, &manifest); err != nil {
-			return nil, fmt.Errorf("parse manifest %s: %w", entry.Name(), err)
+			if skipErr := unusable(fmt.Errorf("parse manifest %s: %w", entry.Name(), err)); skipErr != nil {
+				return nil, skipErr
+			}
+			continue
 		}
 		add(manifest.Workspace.TreeSHA256, true)
 	}
@@ -686,7 +917,7 @@ func normalizeBlobDigest(sha string) string {
 // can reach, then prunes the fan-out directories it emptied. It runs once at
 // the end of a cycle, never per claw: a blob is shared by every checkpoint that
 // captured the same bytes, so reachability is only meaningful globally.
-func (s *Server) sweepCheckpointBlobs() (int, int64, error) {
+func (s *Server) sweepCheckpointBlobs(dryRun bool) (int, int64, error) {
 	keep, err := s.checkpointBlobKeepSet()
 	if err != nil {
 		return 0, 0, fmt.Errorf("keep set incomplete, not sweeping: %w", err)
@@ -695,14 +926,13 @@ func (s *Server) sweepCheckpointBlobs() (int, int64, error) {
 	if _, err := os.Stat(blobRoot); os.IsNotExist(err) {
 		return 0, 0, nil
 	}
-	// Everything written inside this window is off limits. Checkpoint creation
-	// is not serialised against the sweep: blobs are uploaded first and only
-	// become reachable once the manifest is written and the row marked ready.
-	// A blob uploaded seconds ago is therefore legitimately absent from the keep
-	// set, and deleting it leaves the checkpoint that is about to reference it
-	// unrestorable. The same window covers the *.tmp-<uuid> files an upload
-	// renames into place, which are excluded outright below since they are
-	// never named after a digest and so can never be in the keep set.
+	// Everything written inside this window is off limits. This is now a SECOND
+	// line of defence, not the primary one: the durable pending-blob claim
+	// recorded at plan time is what actually protects a checkpoint under
+	// construction, because it covers reused blobs whose mtime is old. The
+	// window still earns its place for anything the claim cannot cover — a blob
+	// written by a path that never planned it, or one whose claim was released
+	// by the row completing a moment before the walk reached the file.
 	//
 	// A grace window rather than a lock: the alternative is holding a mutex
 	// across every blob upload and the whole sweep, which would stall uploads
@@ -729,6 +959,12 @@ func (s *Server) sweepCheckpointBlobs() (int, int64, error) {
 			return nil
 		}
 		size := info.Size()
+		if dryRun {
+			log.Printf("[retention] dry_run: would sweep blob %s (%d bytes)", info.Name(), size)
+			removed++
+			freed += size
+			return nil
+		}
 		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 			log.Printf("[retention] remove blob %s: %v", path, err)
 			return nil
@@ -738,9 +974,11 @@ func (s *Server) sweepCheckpointBlobs() (int, int64, error) {
 		return nil
 	})
 	if err != nil {
-		return removed, freed, fmt.Errorf("walk blobs: %w", err)
+		return removed, freed, fmt.Errorf("walk blobs (aborted after %d blobs, %d bytes): %w", removed, freed, err)
 	}
-	pruneEmptyDirs(blobRoot)
+	if !dryRun {
+		pruneEmptyDirs(blobRoot)
+	}
 	return removed, freed, nil
 }
 

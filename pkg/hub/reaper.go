@@ -166,6 +166,18 @@ func (s *Server) reconcileOnBoot() {
 	} else if count, _ := res.RowsAffected(); count > 0 {
 		log.Printf("[reaper] boot failed %d creating checkpoints", count)
 	}
+	// The line above is the only place an interrupted checkpoint ever leaves
+	// 'creating', so it is also the only place that can release the blob claims
+	// it left behind. Written as a general reconciliation rather than a
+	// companion DELETE to the UPDATE: it also collects rows orphaned by a crash
+	// between the row's completion and its own cleanup, which would otherwise
+	// pin those blobs for the life of the database.
+	if res, err := s.db.Exec(`DELETE FROM claw_checkpoint_pending_blobs
+		 WHERE checkpoint_id NOT IN (SELECT id FROM claw_checkpoints WHERE status='creating')`); err != nil {
+		log.Printf("[reaper] boot pending checkpoint blob repair: %v", err)
+	} else if count, _ := res.RowsAffected(); count > 0 {
+		log.Printf("[reaper] boot released %d stale pending checkpoint blob claims", count)
+	}
 	s.promotePendingClaws()
 }
 

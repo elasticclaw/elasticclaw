@@ -670,6 +670,11 @@ func migrate(db *sql.DB) error {
 
 	CREATE INDEX IF NOT EXISTS idx_messages_claw ON messages(claw_id, created_at);
 	CREATE INDEX IF NOT EXISTS idx_messages_pending ON messages(claw_id, created_at) WHERE delivered_at IS NULL;
+	-- Retention prunes messages by age alone. idx_messages_claw leads on claw_id,
+	-- so it cannot serve that predicate: without this index every prune batch is
+	-- a full table scan, and each scan holds the single SQLite write lock while
+	-- every heartbeat, usage and checkpoint write queues behind busy_timeout.
+	CREATE INDEX IF NOT EXISTS idx_messages_created_at ON messages(created_at);
 	CREATE INDEX IF NOT EXISTS idx_claws_tenant  ON claws(tenant_id);
 	CREATE INDEX IF NOT EXISTS idx_claws_stage_stalled ON claws(stage_stalled_since) WHERE stage_stalled_since > 0;
 
@@ -790,6 +795,11 @@ func migrate(db *sql.DB) error {
 	CREATE INDEX IF NOT EXISTS idx_task_run_events_tenant_run_time ON task_run_events(tenant_id, run_id, event_time, observed_at, event_key);
 	CREATE INDEX IF NOT EXISTS idx_task_run_events_source_event ON task_run_events(tenant_id, source, source_event_id);
 	CREATE INDEX IF NOT EXISTS idx_task_run_events_observed ON task_run_events(tenant_id, observed_at);
+	-- Same reason as idx_messages_created_at: every existing index on this table
+	-- leads on run_id, tenant_id or event_type, and retention prunes on
+	-- event_time alone. The table is the largest the sweeper touches, so a full
+	-- scan here is the longest write-lock hold in the whole cycle.
+	CREATE INDEX IF NOT EXISTS idx_task_run_events_event_time ON task_run_events(event_time);
 
 	CREATE TABLE IF NOT EXISTS task_run_stages (
 		tenant_id  TEXT NOT NULL,
@@ -967,6 +977,32 @@ func migrate(db *sql.DB) error {
 	);
 	CREATE INDEX IF NOT EXISTS idx_claw_checkpoints_claw ON claw_checkpoints(claw_id, created_at);
 	CREATE INDEX IF NOT EXISTS idx_claw_checkpoints_status ON claw_checkpoints(status, created_at);
+
+	-- The digests a checkpoint DECLARED it will reference, recorded at plan time
+	-- before the first blob is accepted.
+	--
+	-- Without this the blob sweep had only an mtime grace window to protect a
+	-- checkpoint under construction, and that window is not a guarantee: both the
+	-- plan handler and the blob upload deduplicate on os.Stat and return without
+	-- touching the file, so a REUSED blob keeps whatever mtime it was written
+	-- with -- months ago, in the common case, since blobs are content-addressed
+	-- and shared across every claw that captured the same bytes. A 'creating' row
+	-- carries no digests of its own (insertCheckpoint writes none), so it
+	-- contributed nothing to the keep set either. The sweep could therefore
+	-- delete a blob the checkpoint was about to reference, and the checkpoint
+	-- would then publish as 'ready' and be silently unrestorable until a retry
+	-- needed it.
+	--
+	-- Rows are deleted when the checkpoint reaches any terminal status, and the
+	-- reaper's boot sweep clears whatever a crash left behind.
+	CREATE TABLE IF NOT EXISTS claw_checkpoint_pending_blobs (
+		checkpoint_id TEXT NOT NULL,
+		sha256        TEXT NOT NULL,
+		PRIMARY KEY (checkpoint_id, sha256)
+	);
+	-- The primary key's leading column IS the checkpoint_id index the keep set
+	-- and the cleanup paths both seek on; a second index would only be a write
+	-- cost on the checkpoint hot path.
 
 	CREATE TABLE IF NOT EXISTS ssh_known_hosts (
 		host          TEXT PRIMARY KEY,

@@ -145,6 +145,49 @@ func checkpointManifestPath(id string) string {
 	return filepath.Join(checkpointsRoot(), "manifests", id+".json")
 }
 
+// writeFileAtomic writes via a temporary file and a rename, so a reader never
+// observes a partial file.
+//
+// A bare os.WriteFile leaves truncated content behind when the disk fills, and
+// a truncated manifest is not merely one broken checkpoint: the blob sweep
+// derives its keep set by parsing every manifest, so one unparseable file used
+// to switch reclamation off entirely. That made disk-full -- the exact
+// condition this feature exists to relieve -- self-sustaining. Blob uploads
+// already used tmp+rename; manifests and the message blob now match them.
+//
+// The temporary file carries the ".tmp-" marker the blob sweep already skips,
+// so a crash between create and rename leaves something the sweep ignores
+// rather than something it mistakes for an orphan.
+func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
+	tmp := path + ".tmp-" + uuid.New().String()
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_EXCL|os.O_WRONLY, perm)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		_ = os.Remove(tmp)
+		return err
+	}
+	// Sync before the rename: without it the rename can reach the disk ahead of
+	// the contents, and a power loss then publishes an empty file under a name
+	// that claims to be complete.
+	if err := f.Sync(); err != nil {
+		f.Close()
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return nil
+}
+
 func (s *Server) checkpointScheduler() {
 	ticker := time.NewTicker(time.Minute)
 	defer ticker.Stop()
@@ -226,6 +269,9 @@ func (s *Server) markCheckpointSkipped(checkpointID, rootSHA string) error {
 	_, err := s.db.Exec(
 		`UPDATE claw_checkpoints SET status='skipped', root_tree_sha256=?, workspace_tree_sha256=?, completed_at=? WHERE id=?`,
 		rootSHA, rootSHA, now(), checkpointID)
+	if err == nil {
+		s.clearCheckpointPendingBlobs(checkpointID)
+	}
 	return err
 }
 
@@ -690,6 +736,53 @@ func (s *Server) insertCheckpoint(id, tenantID, clawID, reason, createdBy, provi
 	return err
 }
 
+// recordCheckpointPendingBlobs durably claims every digest a checkpoint plans
+// to reference, before a single byte is uploaded.
+//
+// This is what makes the plan's dedup answer safe. The handler tells the claw
+// to skip uploading a blob the hub already has, which means that blob's mtime
+// stays whatever it was when some other claw wrote it -- possibly months ago,
+// well outside any grace window -- while the only row that knows about it is
+// still 'creating' and carries no digests. Writing the claim here closes the
+// window for the whole upload phase, not just for the bytes that move.
+//
+// Every planned digest is recorded, not only the ones the claw must upload:
+// the reused ones are precisely the ones at risk.
+func (s *Server) recordCheckpointPendingBlobs(checkpointID string, files []types.CheckpointFile) error {
+	if len(files) == 0 {
+		return nil
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	stmt, err := tx.Prepare(`INSERT OR IGNORE INTO claw_checkpoint_pending_blobs(checkpoint_id, sha256) VALUES(?,?)`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+	for _, f := range files {
+		if !validSHA256(f.SHA256) {
+			continue
+		}
+		if _, err := stmt.Exec(checkpointID, f.SHA256); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+// clearCheckpointPendingBlobs releases the claim once the checkpoint has
+// reached a terminal status. From that point the row's own digest columns (or
+// its absence, for a failure) are the truth, and leaving the claim behind would
+// pin blobs no checkpoint can reach for as long as the row survives.
+func (s *Server) clearCheckpointPendingBlobs(checkpointID string) {
+	if _, err := s.db.Exec(`DELETE FROM claw_checkpoint_pending_blobs WHERE checkpoint_id=?`, checkpointID); err != nil {
+		log.Printf("[checkpoint] clear pending blobs for %s: %v", shortID(checkpointID), err)
+	}
+}
+
 func (s *Server) handleCheckpointInternal(w http.ResponseWriter, r *http.Request) {
 	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/api/checkpoints/"), "/")
 	if len(parts) != 2 {
@@ -713,6 +806,17 @@ func (s *Server) handleCheckpointInternal(w http.ResponseWriter, r *http.Request
 			return
 		}
 		plan.CheckpointID = checkpointID
+		// Claim the digests BEFORE answering. The answer is what lets the claw
+		// skip re-uploading blobs the hub already holds, so from the moment it
+		// is sent the checkpoint depends on files nothing else keeps alive.
+		// Failing to record the claim must fail the plan rather than proceed
+		// unprotected: a retried plan costs one round trip, an unrestorable
+		// checkpoint is found weeks later.
+		if err := s.recordCheckpointPendingBlobs(checkpointID, plan.Files); err != nil {
+			log.Printf("[checkpoint] record pending blobs for %s: %v", shortID(checkpointID), err)
+			http.Error(w, "storage error", http.StatusInternalServerError)
+			return
+		}
 		missing := make([]string, 0)
 		for _, f := range plan.Files {
 			if f.SHA256 == "" {
@@ -779,6 +883,7 @@ func (s *Server) handleCheckpointBlobUpload(w http.ResponseWriter, r *http.Reque
 	r.Body = http.MaxBytesReader(w, r.Body, maxCheckpointBlobBytes)
 	path := checkpointBlobPath(sha)
 	if _, err := os.Stat(path); err == nil {
+		touchCheckpointBlob(path)
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
@@ -878,12 +983,18 @@ func (s *Server) finalizeCheckpoint(checkpointID, tenantID, clawID, rootSHA stri
 	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 		return err
 	}
-	if err := os.WriteFile(path, data, 0o640); err != nil {
+	if err := writeFileAtomic(path, data, 0o640); err != nil {
 		return err
 	}
 	_, err = s.db.Exec(`UPDATE claw_checkpoints SET status='ready', manifest_sha256=?, manifest_path=?, root_tree_sha256=?, message_tree_sha256=?, workspace_tree_sha256=?, message_count=?, pr_count=?, repo_count=?, pipeline_stage=?, hub_version=?, files_count=?, files_bytes=?, completed_at=? WHERE id=?`,
 		manifestSHA, path, rootSHA, msgSHA, rootSHA, msgCount, len(manifest.PRs), checkpointRepoCount(manifest.PRs),
 		manifest.Hub.PipelineStage, manifest.Hub.Version, manifest.FilesCount, manifest.FilesBytes, now(), checkpointID)
+	if err == nil {
+		// Only now: until this UPDATE lands the row still says 'creating' and
+		// carries no digests, so the pending claim is the only thing keeping the
+		// blobs this manifest just referenced out of the sweep.
+		s.clearCheckpointPendingBlobs(checkpointID)
+	}
 	return err
 }
 
@@ -907,11 +1018,14 @@ func (s *Server) completeMetadataOnlyCheckpoint(checkpointID, clawID, reason, de
 	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 		return err
 	}
-	if err := os.WriteFile(path, data, 0o640); err != nil {
+	if err := writeFileAtomic(path, data, 0o640); err != nil {
 		return err
 	}
 	_, err = s.db.Exec(`UPDATE claw_checkpoints SET status='ready', manifest_sha256=?, manifest_path=?, message_tree_sha256=?, message_count=?, pipeline_stage=?, hub_version=?, error=?, completed_at=? WHERE id=?`,
 		manifestSHA, path, msgSHA, msgCount, manifest.Hub.PipelineStage, manifest.Hub.Version, detail, now(), checkpointID)
+	if err == nil {
+		s.clearCheckpointPendingBlobs(checkpointID)
+	}
 	return err
 }
 
@@ -959,12 +1073,29 @@ func (s *Server) writeMessageCheckpointBlob(clawID, tenantID string) (string, in
 	sha := shaBytes(buf.Bytes())
 	path := checkpointBlobPath(sha)
 	if _, err := os.Stat(path); err == nil {
+		touchCheckpointBlob(path)
 		return sha, count, cutoff, nil
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 		return "", 0, time.Time{}, err
 	}
-	return sha, count, cutoff, os.WriteFile(path, buf.Bytes(), 0o640)
+	// Atomic for the same reason manifests are: a half-written blob under a
+	// name that asserts its own digest is a lie the restore path believes.
+	return sha, count, cutoff, writeFileAtomic(path, buf.Bytes(), 0o640)
+}
+
+// touchCheckpointBlob refreshes a reused blob's mtime so the sweep's grace
+// window means what it says.
+//
+// Deduplication is the common case -- blobs are content-addressed and shared
+// across claws -- and it returns without writing, so a blob referenced by a
+// checkpoint being created right now can carry an mtime from months ago. The
+// durable pending-blob claim is the real protection; this keeps the grace
+// window from being quietly useless as the second line of defence. A failure
+// is not worth failing a checkpoint over, so it is ignored.
+func touchCheckpointBlob(path string) {
+	at := time.Now()
+	_ = os.Chtimes(path, at, at)
 }
 
 func (s *Server) buildCheckpointManifest(checkpointID, clawID, rootSHA, msgSHA string, msgCount int, cutoff time.Time, files []types.CheckpointFile) (*checkpointManifest, error) {
@@ -1283,6 +1414,7 @@ func checkpointShellQuote(s string) string {
 
 func (s *Server) failCheckpoint(checkpointID, msg string) error {
 	_, err := s.db.Exec(`UPDATE claw_checkpoints SET status='failed', error=?, completed_at=? WHERE id=?`, msg, now(), checkpointID)
+	s.clearCheckpointPendingBlobs(checkpointID)
 	return err
 }
 

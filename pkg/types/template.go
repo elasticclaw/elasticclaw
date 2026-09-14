@@ -830,6 +830,17 @@ type RetentionConfig struct {
 	// all four retention targets: diagnostics logs, checkpoints, task run
 	// events and messages.
 	MaxAge string `yaml:"max_age,omitempty" json:"maxAge,omitempty"`
+	// DryRun runs the full selection of every phase and logs exactly what would
+	// be removed, without unlinking a file or deleting a row.
+	//
+	// It exists because the blast radius of this feature is not reviewable from
+	// the configuration alone: what a 90-day window actually removes depends on
+	// the shape of one hub's history, and the failures this code has had were
+	// all of the "deleted more than anyone expected" kind. An operator arming
+	// retention on a hub that has never run it should be able to see the counts
+	// first. Enabled must still be true: dry_run describes how a cycle behaves,
+	// not whether it runs.
+	DryRun bool `yaml:"dry_run,omitempty" json:"dryRun,omitempty"`
 	// CompactAfter is how long a claw must go unchanged before it counts as
 	// finalized and its superseded checkpoint manifests may be compacted
 	// (default 240h = 10 days). A claw with a merged PR is finalized
