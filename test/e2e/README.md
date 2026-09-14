@@ -7,6 +7,7 @@ The E2E paths run against real services:
 
 ```text
 Depot CI -> ngrok -> ElasticClaw Server -> GitHub Issues -> Daytona -> OpenClaw -> Fireworks Kimi
+Depot CI -> ngrok -> ElasticClaw Server -> GitHub Issues -> Daytona -> OpenClaw -> camelStream Auto
 Depot CI -> ngrok -> ElasticClaw Server -> Linear -> Daytona -> OpenClaw -> Fireworks Kimi
 Depot CI -> ngrok -> ElasticClaw Server -> Jira Cloud -> Daytona -> OpenClaw -> Fireworks Kimi
 Depot CI -> ngrok -> ElasticClaw Server -> GitHub Issues -> exe.dev -> OpenClaw -> Fireworks Kimi
@@ -47,6 +48,7 @@ Run one suite:
 
 ```sh
 make e2e-github
+make e2e-daytona-camel-stream
 make e2e-linear
 make e2e-jira
 make e2e-replicated-github

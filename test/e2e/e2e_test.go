@@ -49,6 +49,12 @@ func TestDaytonaGitHubIssuesWorkflowE2E(t *testing.T) {
 	runGitHubIssuesWorkflowE2E(t, "daytona")
 }
 
+func TestDaytonaCamelStreamGitHubIssuesWorkflowE2E(t *testing.T) {
+	t.Setenv("ELASTICCLAW_E2E_LLM_PROVIDER", "camel-stream")
+	t.Setenv("ELASTICCLAW_E2E_MODEL", "camel-stream/auto")
+	runGitHubIssuesWorkflowE2E(t, "daytona")
+}
+
 func TestReplicatedGitHubIssuesWorkflowE2E(t *testing.T) {
 	runGitHubIssuesWorkflowE2E(t, "replicated")
 }

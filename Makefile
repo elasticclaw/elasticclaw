@@ -1,4 +1,4 @@
-.PHONY: build build-bridge build-bridge-linux test test-bootstrap test-container e2e e2e-github e2e-linear e2e-jira e2e-replicated-github e2e-replicated-linear e2e-replicated-jira e2e-exedev-github e2e-docker e2e-camel-stream e2e-run clean install lint tidy clawpatch-init clawpatch-review clawpatch-report clawpatch-show clawpatch-triage clawpatch-pr dev dev-up dev-up-d dev-down dev-reset dev-logs dev-restart dev-sh-hub dev-sh-web dev-agent-build dev-claw _dev-config-check
+.PHONY: build build-bridge build-bridge-linux test test-bootstrap test-container e2e e2e-github e2e-daytona-camel-stream e2e-linear e2e-jira e2e-replicated-github e2e-replicated-linear e2e-replicated-jira e2e-exedev-github e2e-docker e2e-camel-stream e2e-run clean install lint tidy clawpatch-init clawpatch-review clawpatch-report clawpatch-show clawpatch-triage clawpatch-pr dev dev-up dev-up-d dev-down dev-reset dev-logs dev-restart dev-sh-hub dev-sh-web dev-agent-build dev-claw _dev-config-check
 
 
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
@@ -53,10 +53,13 @@ test-factory: ## Run factory integration tests
 test-parity: ## Run parity matrix integration tests (all trackers)
 	go test -v -tags integration -timeout 300s ./pkg/hub/... -run TestParity
 
-e2e: e2e-github e2e-linear e2e-jira e2e-replicated-github e2e-replicated-linear e2e-replicated-jira e2e-exedev-github e2e-docker e2e-camel-stream ## Run all real E2E suites sequentially
+e2e: e2e-github e2e-daytona-camel-stream e2e-linear e2e-jira e2e-replicated-github e2e-replicated-linear e2e-replicated-jira e2e-exedev-github e2e-docker e2e-camel-stream ## Run all real E2E suites sequentially
 
 e2e-github: ## Run the real Daytona + GitHub Issues E2E suite
 	$(MAKE) e2e-run E2E_TEST=TestDaytonaGitHubIssuesWorkflowE2E
+
+e2e-daytona-camel-stream: ## Run the real Daytona + GitHub Issues + camelStream E2E suite
+	$(MAKE) e2e-run E2E_TEST=TestDaytonaCamelStreamGitHubIssuesWorkflowE2E
 
 e2e-linear: ## Run the real Daytona + Linear E2E suite
 	$(MAKE) e2e-run E2E_TEST=TestDaytonaLinearWorkflowE2E

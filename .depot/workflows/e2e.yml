@@ -115,6 +115,13 @@ jobs:
             test: TestDaytonaGitHubIssuesWorkflowE2E
           - provider_name: Daytona
             provider_slug: daytona
+            tracker_name: GitHub Issues + camelStream
+            slug: github-camel-stream
+            test: TestDaytonaCamelStreamGitHubIssuesWorkflowE2E
+            llm_provider: camel-stream
+            llm_model: camel-stream/auto
+          - provider_name: Daytona
+            provider_slug: daytona
             tracker_name: Linear
             slug: linear
             test: TestDaytonaLinearWorkflowE2E

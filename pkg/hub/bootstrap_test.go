@@ -70,7 +70,7 @@ func TestBootstrapScript_ContainsBridgeURL(t *testing.T) {
 
 func TestDaytonaBridgeCommands_AreAsyncAndIdempotent(t *testing.T) {
 	prep := daytonaPrepareBridgeCommand()
-	cmd := daytonaAsyncBridgeCommand("https://hub.example.com", "claw-123", "token-123", "model-auth-123", "NEXT-156", "adversarylabs")
+	cmd := daytonaAsyncBridgeCommand("https://hub.example.com", "claw-123", "token-123", "model-auth-123", "NEXT-156", "adversarylabs", "")
 	running := daytonaBridgeRunningCommand()
 
 	assertContains(t, prep, "pgrep -x claw-bridge", "detects already running bridge from previous start behavior")
@@ -99,10 +99,38 @@ func TestDaytonaBridgeCommands_AreAsyncAndIdempotent(t *testing.T) {
 	assertContains(t, running, "if pgrep -x claw-bridge", "pidfile alone does not mask a crash-looping supervisor")
 }
 
+func TestDaytonaLongLivedProcessesInheritCamelStreamKey(t *testing.T) {
+	llmKeyEnv := "export CAMEL_API_KEY=\"camel-test\"\n"
+	gateway := withDaytonaLLMKeyEnv(llmKeyEnv, "setsid nohup openclaw gateway run")
+	bridge := daytonaAsyncBridgeCommand(
+		"https://hub.example.com", "claw-123", "token-123", "model-auth-123",
+		"NEXT-156", "adversarylabs", llmKeyEnv,
+	)
+
+	for name, command := range map[string]string{
+		"gateway": gateway,
+		"bridge":  bridge,
+	} {
+		t.Run(name, func(t *testing.T) {
+			exportAt := strings.Index(command, "export CAMEL_API_KEY=\"camel-test\"")
+			if exportAt < 0 {
+				t.Fatalf("%s command does not export CAMEL_API_KEY: %s", name, command)
+			}
+			processAt := strings.Index(command, map[string]string{
+				"gateway": "openclaw gateway run",
+				"bridge":  "/usr/local/bin/claw-bridge",
+			}[name])
+			if processAt < 0 || exportAt > processAt {
+				t.Fatalf("%s command does not export CAMEL_API_KEY before process launch", name)
+			}
+		})
+	}
+}
+
 func TestDaytonaAsyncBridgeCommandShellQuotesClawName(t *testing.T) {
 	clawName := `$(touch /tmp/elasticclaw-pwned)' "quoted"`
 	templateName := `$(touch /tmp/elasticclaw-template-pwned)' "quoted"`
-	cmd := daytonaAsyncBridgeCommand("https://hub.example.com", "claw-123", "token-123", "model-auth-123", clawName, templateName)
+	cmd := daytonaAsyncBridgeCommand("https://hub.example.com", "claw-123", "token-123", "model-auth-123", clawName, templateName, "")
 
 	assertContains(t, cmd, "ELASTICCLAW_CLAW_NAME="+shellQuote(clawName), "shell-quotes command-substitution payload")
 	assertNotContains(t, cmd, `ELASTICCLAW_CLAW_NAME="$(touch`, "must not place claw name in shell double quotes")
