@@ -650,8 +650,6 @@ func NewServer(addr, dbPath, identityDir string, hubCfg *types.HubConfig) (*Serv
 	go srv.statusWatchdog()
 	go srv.checkpointScheduler()
 	// Deliberately started, not run: the first reclamation cycle happens one
-	// retention interval from now, never during startup. See retentionSweeper.
-	go srv.retentionSweeper()
 	if srv.livenessEnabled() {
 		go srv.runReaper()
 	}
