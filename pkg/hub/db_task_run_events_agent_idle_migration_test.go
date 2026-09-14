@@ -199,9 +199,15 @@ func TestRebuildTaskRunEventsAgentIdleV1MigratesPopulatedDatabase(t *testing.T) 
 		t.Fatal("rebuilt schema accepts unknown event types")
 	}
 
+	// idx_task_run_events_event_time is in this list for the same reason as the
+	// rest: the rebuild drops the table, so an index the pasted DDL forgets is
+	// an index silently lost on exactly the databases old enough to need the
+	// rebuild — and this one is what keeps retention's event_time prune off a
+	// full table scan.
 	for _, name := range []string{
 		"idx_task_run_events_tenant_key", "idx_task_run_events_run_time", "idx_task_run_events_type_time",
 		"idx_task_run_events_tenant_run_time", "idx_task_run_events_source_event", "idx_task_run_events_observed",
+		"idx_task_run_events_event_time",
 	} {
 		var n int
 		if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name=?`, name).Scan(&n); err != nil {

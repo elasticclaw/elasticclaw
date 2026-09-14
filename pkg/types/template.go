@@ -823,8 +823,20 @@ type RetentionConfig struct {
 	//
 	// Turning it off stops every reclamation phase: compaction, retention
 	// deletes and the blob sweep.
+	//
+	// Whichever way it is set, the hub logs the effective policy once at
+	// startup — one line saying enabled or disabled, and for an enabled
+	// sweeper the interval, window, compact_after, whether any value was
+	// clamped, and when the first cycle runs. That line is the only signal a
+	// misconfiguration produces: a disabled sweeper is otherwise silent
+	// forever and looks exactly like one that is running and finding nothing.
 	Enabled *bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
 	// Interval is how often a full reclamation cycle runs (default 1h).
+	//
+	// Unlike every other knob here, a change to interval needs a hub restart:
+	// the ticker is created once when the sweeper starts, while max_age,
+	// compact_after and dry_run are re-read at the top of every cycle and take
+	// effect on the next tick.
 	Interval string `yaml:"interval,omitempty" json:"interval,omitempty"`
 	// MaxAge is the retention window (default 2160h = 90 days). It applies to
 	// all four retention targets: diagnostics logs, checkpoints, task run

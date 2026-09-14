@@ -36,11 +36,17 @@ func newRetentionTestServer(t *testing.T) *Server {
 	return &Server{db: db, hubCfg: &types.HubConfig{}, claws: map[string]*clawConn{}}
 }
 
+// insertRetentionClaw seeds a claw in a status the finalized predicate treats
+// as genuinely done. 'idle' used to be the default here, which quietly made
+// every fixture depend on idle counting as finished — it does not: an idle claw
+// is resumable by design, so the merged-PR arm now excludes it and only the
+// staleness arm can finalize it. Tests that want a live claw set the status
+// themselves.
 func insertRetentionClaw(t *testing.T, s *Server, id string, lastSeen time.Time) {
 	t.Helper()
 	if _, err := s.db.Exec(
 		`INSERT INTO claws(id, tenant_id, name, template, status, last_seen, created_at) VALUES(?,?,?,?,?,?,?)`,
-		id, "tenant", id, "template", "idle", lastSeen, lastSeen); err != nil {
+		id, "tenant", id, "template", "completed", lastSeen, lastSeen); err != nil {
 		t.Fatalf("insert claw %s: %v", id, err)
 	}
 }
@@ -246,8 +252,8 @@ func TestCompactFinalizedCheckpointsKeepsNewestReady(t *testing.T) {
 	if err != nil {
 		t.Fatalf("compactFinalizedCheckpoints: %v", err)
 	}
-	if compacted != 2 {
-		t.Fatalf("compacted %d checkpoints, want 2", compacted)
+	if compacted.count != 2 {
+		t.Fatalf("compacted %d checkpoints, want 2", compacted.count)
 	}
 
 	for _, id := range []string{"cp-old", "cp-mid"} {
@@ -304,8 +310,8 @@ func TestCompactFinalizedCheckpointsSkipsUnfinalizedClaw(t *testing.T) {
 	if err != nil {
 		t.Fatalf("compactFinalizedCheckpoints: %v", err)
 	}
-	if compacted != 0 {
-		t.Fatalf("compacted %d checkpoints of a live claw, want 0", compacted)
+	if compacted.count != 0 {
+		t.Fatalf("compacted %d checkpoints of a live claw, want 0", compacted.count)
 	}
 	if _, err := os.Stat(first); err != nil {
 		t.Fatalf("manifest of a live claw was removed: %v", err)
@@ -420,7 +426,7 @@ func TestCheckpointBlobKeepSetCoversRowsManifestsAndTrees(t *testing.T) {
 		id: "cp", clawID: "claw", status: "ready", createdAt: reference,
 		rootTree: treeSHA, messageTree: messageSHA, writeManifest: true})
 
-	keep, err := s.checkpointBlobKeepSet()
+	keep, err := s.checkpointBlobKeepSet(nil)
 	if err != nil {
 		t.Fatalf("checkpointBlobKeepSet: %v", err)
 	}
@@ -441,7 +447,7 @@ func TestCheckpointBlobKeepSetCoversRowsManifestsAndTrees(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	removed, _, err := s.sweepCheckpointBlobs(false)
+	removed, _, _, err := s.sweepCheckpointBlobs(false, nil)
 	if err != nil {
 		t.Fatalf("sweepCheckpointBlobs: %v", err)
 	}
@@ -474,7 +480,7 @@ func TestCheckpointBlobKeepSetIncludesDatabaseTreeShasWithoutManifest(t *testing
 		id: "cp", clawID: "claw", status: "compacted", createdAt: reference,
 		rootTree: treeSHA, messageTree: messageSHA})
 
-	keep, err := s.checkpointBlobKeepSet()
+	keep, err := s.checkpointBlobKeepSet(nil)
 	if err != nil {
 		t.Fatalf("checkpointBlobKeepSet: %v", err)
 	}
@@ -498,10 +504,10 @@ func TestSweepCheckpointBlobsAbortsOnUnparseableManifest(t *testing.T) {
 		id: "cp", clawID: "claw", status: "ready", createdAt: reference,
 		writeManifest: true, manifestBody: []byte("{ this is not json")})
 
-	if _, err := s.checkpointBlobKeepSet(); err == nil {
+	if _, err := s.checkpointBlobKeepSet(nil); err == nil {
 		t.Fatal("checkpointBlobKeepSet accepted an unparseable manifest")
 	}
-	removed, _, err := s.sweepCheckpointBlobs(false)
+	removed, _, _, err := s.sweepCheckpointBlobs(false, nil)
 	if err == nil {
 		t.Fatal("sweepCheckpointBlobs proceeded with an incomplete keep set")
 	}
@@ -524,7 +530,7 @@ func TestSweepCheckpointBlobsAbortsOnUnparseableTreeBlob(t *testing.T) {
 	insertRetentionCheckpoint(t, s, retentionCheckpoint{
 		id: "cp", clawID: "claw", status: "ready", createdAt: reference, rootTree: treeSHA})
 
-	if _, _, err := s.sweepCheckpointBlobs(false); err == nil {
+	if _, _, _, err := s.sweepCheckpointBlobs(false, nil); err == nil {
 		t.Fatal("sweepCheckpointBlobs proceeded past an unparseable tree blob")
 	}
 }
@@ -641,7 +647,7 @@ func TestSweepCheckpointBlobsSparesRecentAndInFlightBlobs(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, _, err := s.sweepCheckpointBlobs(false); err != nil {
+	if _, _, _, err := s.sweepCheckpointBlobs(false, nil); err != nil {
 		t.Fatalf("sweep: %v", err)
 	}
 	if _, err := os.Stat(orphanOld); !os.IsNotExist(err) {
@@ -677,7 +683,9 @@ func TestClawFinalizedIgnoresMergedPRWhileClawIsActive(t *testing.T) {
 		t.Error("a connected claw must not be finalized by a merged PR alone")
 	}
 
-	// Same claw, now offline but still holding an open PR.
+	// Same claw, now offline but still holding an open PR. 'offline' is itself
+	// a live status for this arm — a dropped WebSocket usually comes back — so
+	// this stays unfinalized for two independent reasons.
 	if _, err := s.db.Exec(`UPDATE claws SET status='offline' WHERE id='live'`); err != nil {
 		t.Fatal(err)
 	}
@@ -694,7 +702,9 @@ func TestClawFinalizedIgnoresMergedPRWhileClawIsActive(t *testing.T) {
 		t.Error("a claw with a still-open PR must not be finalized by the merged arm")
 	}
 
-	// Open PR resolved: now it is genuinely done.
+	// Open PR resolved, but the claw is still merely offline: it can reconnect,
+	// so the merged-PR arm still must not fire. See
+	// TestFinalizedPredicateTreatsOfflineAndIdleAsLive.
 	if _, err := s.db.Exec(`UPDATE claw_prs SET state='closed' WHERE id='live-pr2'`); err != nil {
 		t.Fatal(err)
 	}
@@ -702,8 +712,20 @@ func TestClawFinalizedIgnoresMergedPRWhileClawIsActive(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if finalized {
+		t.Error("an offline claw can still reconnect; a merged PR alone must not finalize it")
+	}
+
+	// Terminal status and nothing open: now it is genuinely done.
+	if _, err := s.db.Exec(`UPDATE claws SET status='completed' WHERE id='live'`); err != nil {
+		t.Fatal(err)
+	}
+	finalized, err = s.clawFinalized("live", cutoff)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !finalized {
-		t.Error("an offline claw with a merged PR and nothing open is finalized")
+		t.Error("a completed claw with a merged PR and nothing open is finalized")
 	}
 }
 
@@ -713,9 +735,6 @@ func TestClawFinalizedIgnoresMentionOnlyPRs(t *testing.T) {
 	s := newRetentionTestServer(t)
 	cutoff := time.Now().Add(-240 * time.Hour)
 	insertRetentionClaw(t, s, "claw", time.Now())
-	if _, err := s.db.Exec(`UPDATE claws SET status='offline' WHERE id='claw'`); err != nil {
-		t.Fatal(err)
-	}
 	insertRetentionPR(t, s, "claw", 1) // a genuinely merged PR
 
 	if _, err := s.db.Exec(
@@ -762,7 +781,7 @@ func TestSweepCheckpointBlobsAbortsOnMissingTreeBlob(t *testing.T) {
 		id: "cp", clawID: "claw", status: "ready", createdAt: reference,
 		rootTree: strings.Repeat("f", 64), writeManifest: true})
 
-	if _, _, err := s.sweepCheckpointBlobs(false); err == nil {
+	if _, _, _, err := s.sweepCheckpointBlobs(false, nil); err == nil {
 		t.Fatal("sweep must abort when a referenced tree blob is missing")
 	}
 	if _, err := os.Stat(checkpointBlobPath(orphan)); err != nil {
@@ -821,18 +840,27 @@ func TestCheckpointBlobKeepSetHonoursPendingClaims(t *testing.T) {
 				t.Fatal(err)
 			}
 
+			// The claim is always recorded while the row is 'creating' — that
+			// is the only state in which the plan handler can accept one — and
+			// the row is then moved to the status under test, exactly as a real
+			// checkpoint moves.
 			insertRetentionCheckpoint(t, s, retentionCheckpoint{
-				id: "cp", clawID: "claw", status: tc.status, createdAt: reference})
+				id: "cp", clawID: "claw", status: "creating", createdAt: reference})
 			if err := s.recordCheckpointPendingBlobs("cp", []types.CheckpointFile{
 				{Path: "workspace/a.txt", SHA256: plannedSHA, Size: 39},
 			}); err != nil {
 				t.Fatalf("recordCheckpointPendingBlobs: %v", err)
 			}
+			if tc.status != "creating" {
+				if _, err := s.db.Exec(`UPDATE claw_checkpoints SET status=? WHERE id='cp'`, tc.status); err != nil {
+					t.Fatal(err)
+				}
+			}
 			if tc.clearClaim {
 				s.clearCheckpointPendingBlobs("cp")
 			}
 
-			keep, err := s.checkpointBlobKeepSet()
+			keep, err := s.checkpointBlobKeepSet(nil)
 			if err != nil {
 				t.Fatalf("checkpointBlobKeepSet: %v", err)
 			}
@@ -840,7 +868,7 @@ func TestCheckpointBlobKeepSetHonoursPendingClaims(t *testing.T) {
 				t.Fatalf("keep set contains planned blob = %v, want %v (%s)", ok, tc.wantKept, tc.wantExplained)
 			}
 
-			if _, _, err := s.sweepCheckpointBlobs(false); err != nil {
+			if _, _, _, err := s.sweepCheckpointBlobs(false, nil); err != nil {
 				t.Fatalf("sweepCheckpointBlobs: %v", err)
 			}
 			_, statErr := os.Stat(checkpointBlobPath(plannedSHA))
@@ -872,7 +900,7 @@ func TestPendingClaimProtectsThenReleasesAcrossSweeps(t *testing.T) {
 		t.Fatalf("recordCheckpointPendingBlobs: %v", err)
 	}
 
-	if removed, _, err := s.sweepCheckpointBlobs(false); err != nil || removed != 0 {
+	if removed, _, _, err := s.sweepCheckpointBlobs(false, nil); err != nil || removed != 0 {
 		t.Fatalf("sweep removed %d blobs (err %v) while the checkpoint was creating", removed, err)
 	}
 	if _, err := os.Stat(checkpointBlobPath(plannedSHA)); err != nil {
@@ -886,7 +914,7 @@ func TestPendingClaimProtectsThenReleasesAcrossSweeps(t *testing.T) {
 	}
 	s.clearCheckpointPendingBlobs("cp")
 
-	if removed, _, err := s.sweepCheckpointBlobs(false); err != nil || removed != 1 {
+	if removed, _, _, err := s.sweepCheckpointBlobs(false, nil); err != nil || removed != 1 {
 		t.Fatalf("sweep removed %d blobs (err %v) after the claim was released, want 1", removed, err)
 	}
 }
@@ -943,12 +971,12 @@ func TestCheckpointBlobKeepSetAbortsOnlyOnReferencedBadManifests(t *testing.T) {
 				}
 			}
 
-			_, err := s.checkpointBlobKeepSet()
+			_, err := s.checkpointBlobKeepSet(nil)
 			if gotAbort := err != nil; gotAbort != tc.wantAbort {
 				t.Fatalf("keep set aborted = %v, want %v (%s): err=%v", gotAbort, tc.wantAbort, tc.because, err)
 			}
 
-			removed, _, err := s.sweepCheckpointBlobs(false)
+			removed, _, _, err := s.sweepCheckpointBlobs(false, nil)
 			if tc.wantAbort {
 				if err == nil || removed != 0 {
 					t.Fatalf("sweep proceeded (removed %d, err %v) on an incomplete keep set", removed, err)
@@ -1007,9 +1035,6 @@ func TestCompactClawCheckpointsKeepsTheNewestRestorable(t *testing.T) {
 			s := newRetentionTestServer(t)
 			reference := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
 			insertRetentionClaw(t, s, "claw", reference)
-			if _, err := s.db.Exec(`UPDATE claws SET status='offline' WHERE id='claw'`); err != nil {
-				t.Fatal(err)
-			}
 			insertRetentionPR(t, s, "claw", 1)
 
 			ids := make([]string, len(tc.roots))
@@ -1030,8 +1055,8 @@ func TestCompactClawCheckpointsKeepsTheNewestRestorable(t *testing.T) {
 			if err != nil {
 				t.Fatalf("compactFinalizedCheckpoints: %v", err)
 			}
-			if want := len(tc.roots) - 1; compacted != want {
-				t.Fatalf("compacted %d, want %d", compacted, want)
+			if want := len(tc.roots) - 1; compacted.count != want {
+				t.Fatalf("compacted %d, want %d", compacted.count, want)
 			}
 			for i, id := range ids {
 				status, _, _ := retentionCheckpointRow(t, s, id)
@@ -1054,9 +1079,6 @@ func TestCompactionReleasesTheBlobsItNoLongerNeeds(t *testing.T) {
 	s := newRetentionTestServer(t)
 	reference := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
 	insertRetentionClaw(t, s, "claw", reference)
-	if _, err := s.db.Exec(`UPDATE claws SET status='offline' WHERE id='claw'`); err != nil {
-		t.Fatal(err)
-	}
 	insertRetentionPR(t, s, "claw", 1)
 
 	// Two checkpoints with entirely disjoint contents, so nothing the older one
@@ -1095,7 +1117,7 @@ func TestCompactionReleasesTheBlobsItNoLongerNeeds(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	removed, freed, err := s.sweepCheckpointBlobs(false)
+	removed, freed, _, err := s.sweepCheckpointBlobs(false, nil)
 	if err != nil {
 		t.Fatalf("sweepCheckpointBlobs: %v", err)
 	}
@@ -1154,7 +1176,7 @@ func TestPruneRowsBatchedSpansMultipleBatches(t *testing.T) {
 	defer func() { retentionBatchPause = previous }()
 
 	started := time.Now()
-	deleted, err := s.pruneRowsBatched("messages", "created_at", cutoff, false)
+	deleted, err := s.pruneRowsBatched("messages", "created_at", cutoff, false, time.Time{})
 	elapsed := time.Since(started)
 	if err != nil {
 		t.Fatalf("pruneRowsBatched: %v", err)

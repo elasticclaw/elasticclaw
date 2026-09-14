@@ -670,11 +670,7 @@ func migrate(db *sql.DB) error {
 
 	CREATE INDEX IF NOT EXISTS idx_messages_claw ON messages(claw_id, created_at);
 	CREATE INDEX IF NOT EXISTS idx_messages_pending ON messages(claw_id, created_at) WHERE delivered_at IS NULL;
-	-- Retention prunes messages by age alone. idx_messages_claw leads on claw_id,
-	-- so it cannot serve that predicate: without this index every prune batch is
-	-- a full table scan, and each scan holds the single SQLite write lock while
-	-- every heartbeat, usage and checkpoint write queues behind busy_timeout.
-	CREATE INDEX IF NOT EXISTS idx_messages_created_at ON messages(created_at);
+	-- idx_messages_created_at is NOT created here; see ensureRetentionIndexes.
 	CREATE INDEX IF NOT EXISTS idx_claws_tenant  ON claws(tenant_id);
 	CREATE INDEX IF NOT EXISTS idx_claws_stage_stalled ON claws(stage_stalled_since) WHERE stage_stalled_since > 0;
 
@@ -795,11 +791,7 @@ func migrate(db *sql.DB) error {
 	CREATE INDEX IF NOT EXISTS idx_task_run_events_tenant_run_time ON task_run_events(tenant_id, run_id, event_time, observed_at, event_key);
 	CREATE INDEX IF NOT EXISTS idx_task_run_events_source_event ON task_run_events(tenant_id, source, source_event_id);
 	CREATE INDEX IF NOT EXISTS idx_task_run_events_observed ON task_run_events(tenant_id, observed_at);
-	-- Same reason as idx_messages_created_at: every existing index on this table
-	-- leads on run_id, tenant_id or event_type, and retention prunes on
-	-- event_time alone. The table is the largest the sweeper touches, so a full
-	-- scan here is the longest write-lock hold in the whole cycle.
-	CREATE INDEX IF NOT EXISTS idx_task_run_events_event_time ON task_run_events(event_time);
+	-- idx_task_run_events_event_time is NOT created here; see ensureRetentionIndexes.
 
 	CREATE TABLE IF NOT EXISTS task_run_stages (
 		tenant_id  TEXT NOT NULL,
@@ -1196,7 +1188,42 @@ func migrate(db *sql.DB) error {
 			return err
 		}
 	}
+	// Deliberately last, and deliberately not fatal. See ensureRetentionIndexes.
+	ensureRetentionIndexes(db)
 	return nil
+}
+
+// retentionIndexes are the indexes that exist purely to make the retention
+// sweeper's age-keyed DELETEs cheap. Every other index on these two tables
+// leads on claw_id / run_id / tenant_id / event_type, so a prune keyed on
+// created_at or event_time alone degrades to a full table scan under the
+// single SQLite write lock.
+var retentionIndexes = []struct{ name, stmt string }{
+	{"idx_messages_created_at", `CREATE INDEX IF NOT EXISTS idx_messages_created_at ON messages(created_at)`},
+	{"idx_task_run_events_event_time", `CREATE INDEX IF NOT EXISTS idx_task_run_events_event_time ON task_run_events(event_time)`},
+}
+
+// ensureRetentionIndexes builds the retention indexes outside the boot-critical
+// schema script, and never fails startup when it cannot.
+//
+// Building an index on the largest two tables in the database needs free disk
+// for the whole B-tree. On the disk-full hub this sweeper exists to relieve,
+// that allocation is exactly what fails with SQLITE_FULL — and inside migrate()'s
+// multi-statement schema Exec, one failing statement aborts the rest of the
+// script (including CREATE TABLE claw_checkpoint_pending_blobs, which follows it)
+// and then aborts migrate() itself, so the hub does not boot and the sweeper
+// that would free the space never runs. The index is a performance optimisation;
+// refusing to boot without it inverts the priority completely.
+//
+// pruneRowsBatched works without these indexes — more slowly, holding the write
+// lock for longer per batch, which is what the batch bound and the inter-batch
+// pause exist to survive. Every later boot retries, as does every sweep cycle.
+func ensureRetentionIndexes(db *sql.DB) {
+	for _, idx := range retentionIndexes {
+		if _, err := db.Exec(idx.stmt); err != nil {
+			log.Printf("[migrate] retention index %s not created (retrying on the next boot or sweep): %v", idx.name, err)
+		}
+	}
 }
 
 func migrateTicketMetadataKey(db *sql.DB) error {
@@ -1487,7 +1514,13 @@ func rebuildTaskRunEventsAgentIdleV1(db *sql.DB) error {
 		CREATE INDEX idx_task_run_events_type_time ON task_run_events(event_type, event_time);
 		CREATE INDEX idx_task_run_events_tenant_run_time ON task_run_events(tenant_id, run_id, event_time, observed_at, event_key);
 		CREATE INDEX idx_task_run_events_source_event ON task_run_events(tenant_id, source, source_event_id);
-		CREATE INDEX idx_task_run_events_observed ON task_run_events(tenant_id, observed_at)`); err != nil {
+		CREATE INDEX idx_task_run_events_observed ON task_run_events(tenant_id, observed_at);
+		-- Retention's event_time index belongs in this pasted list like every
+		-- other: the rebuild drops the table, so an index missing here is an
+		-- index silently lost on exactly the databases old enough to need the
+		-- rebuild. ensureRetentionIndexes re-creates it after this runs, which
+		-- makes the omission survivable rather than harmless.
+		CREATE INDEX IF NOT EXISTS idx_task_run_events_event_time ON task_run_events(event_time)`); err != nil {
 		return fmt.Errorf("replace task run events agent_idle v1: %w", err)
 	}
 	return tx.Commit()

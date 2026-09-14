@@ -53,6 +53,10 @@ func TestReconcileOnBootRepairsStrandedRecords(t *testing.T) {
 	}
 
 	s.reconcileOnBoot()
+	// Checkpoint reconciliation is deliberately its own entry point, called
+	// unconditionally at boot: nothing in it concerns claw liveness, and the
+	// blob sweeper it protects runs whether or not the reaper does.
+	s.reconcileCheckpointsOnBoot()
 	for _, tc := range []struct{ query, want string }{
 		{`SELECT status FROM claws WHERE id='daytona01'`, "error"},
 		{`SELECT status FROM claws WHERE id='replicated01'`, "provisioning"},

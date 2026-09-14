@@ -116,6 +116,19 @@ type Server struct {
 	checkpointMu      sync.Mutex
 	checkpointWaiters map[string]chan error // checkpoint_id -> waiter
 
+	// blobClaimMu guards blobClaimWindow, the in-memory set of blob digests
+	// claimed by a checkpoint plan since the current blob sweep began.
+	//
+	// It is the interlock between two operations that must not interleave:
+	// "claim the digest, then stat it" in the plan handler, and "check the
+	// digest, then unlink it" in the sweeper's walker. The durable
+	// claw_checkpoint_pending_blobs claim covers plans that committed BEFORE
+	// the sweep snapshotted its keep set; this covers the ones that commit
+	// during the walk, which can run for minutes. Non-nil only while a sweep
+	// is in flight, so it cannot grow between cycles.
+	blobClaimMu     sync.Mutex
+	blobClaimWindow map[string]struct{}
+
 	// agentIdleBaselineAt caches the persisted agent_idle baseline (see
 	// agentIdleBaseline in agent_idle.go); zero = not loaded or feature off.
 	agentIdleBaselineMu      sync.Mutex
@@ -640,6 +653,12 @@ func NewServer(addr, dbPath, identityDir string, hubCfg *types.HubConfig) (*Serv
 		_ = db.Close()
 		return nil, fmt.Errorf("ticket cursor key: %w", err)
 	}
+	// Unconditional, unlike reconcileOnBoot below. A checkpoint left 'creating'
+	// by the previous process pins its whole planned blob set against the
+	// sweeper, and the sweeper runs whether or not liveness does — so gating
+	// this on livenessEnabled() made "the reaper is off" silently mean "blob
+	// claims are never released".
+	srv.reconcileCheckpointsOnBoot()
 	if srv.livenessEnabled() {
 		srv.reconcileOnBoot()
 	}
