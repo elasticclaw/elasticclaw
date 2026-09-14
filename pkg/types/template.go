@@ -760,8 +760,24 @@ type LivenessConfig struct {
 	ClaimTTL               string `yaml:"claim_ttl,omitempty" json:"claimTtl,omitempty"`
 	ReaperInterval         string `yaml:"reaper_interval,omitempty" json:"reaperInterval,omitempty"`
 	GatewayUnhealthyChecks *int   `yaml:"gateway_unhealthy_checks,omitempty" json:"gatewayUnhealthyChecks,omitempty"`
-	BusyTurnMax            string `yaml:"busy_turn_max,omitempty" json:"busyTurnMax,omitempty"`
-	SilentDeathMax         string `yaml:"silent_death_max,omitempty" json:"silentDeathMax,omitempty"`
+	// GatewayUnhealthyReconnectGrace is how long after a bridge registers its
+	// unhealthy heartbeats are ignored, so a gateway that is merely still
+	// starting does not spend the claw's escalation budget.
+	//
+	// The counter behind gateway_unhealthy_checks only resets on a heartbeat
+	// that reports the gateway healthy, and no heartbeat arrives at all while
+	// the bridge is disconnected. Without a grace, a claw that reconnects
+	// repeatedly accumulates checks across reconnects and is replaced without
+	// ever having been unhealthy for gateway_unhealthy_checks CONSECUTIVE
+	// heartbeats, which is what the threshold is calibrated for.
+	//
+	// The grace applies only while the counter is at zero, so it protects a
+	// normal startup without shielding a gateway that is already failing: one
+	// dying in a restart loop keeps a non-zero counter and escalates as before.
+	// Set to "0" to disable and restore the un-graced behaviour.
+	GatewayUnhealthyReconnectGrace string `yaml:"gateway_unhealthy_reconnect_grace,omitempty" json:"gatewayUnhealthyReconnectGrace,omitempty"`
+	BusyTurnMax                    string `yaml:"busy_turn_max,omitempty" json:"busyTurnMax,omitempty"`
+	SilentDeathMax                 string `yaml:"silent_death_max,omitempty" json:"silentDeathMax,omitempty"`
 	// PRConditionsMaxWait is the maximum time a PR may wait for pr_conditions before the run errors.
 	PRConditionsMaxWait string `yaml:"pr_conditions_max_wait,omitempty" json:"prConditionsMaxWait,omitempty"`
 	// IdleResume controls the idle auto-resume recovery (default on). It lives

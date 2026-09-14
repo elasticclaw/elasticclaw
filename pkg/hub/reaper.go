@@ -3,6 +3,7 @@ package hub
 import (
 	"context"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/elasticclaw/elasticclaw/pkg/hub/workflowv2"
@@ -20,6 +21,7 @@ const terminalStageRecoveryGrace = 5 * time.Minute
 type livenessSettings struct {
 	offlineGrace, provisioningMaxAge, claimTTL, interval time.Duration
 	gatewayUnhealthyMax                                  int
+	gatewayUnhealthyReconnectGrace                       time.Duration
 	busyTurnMax, silentDeathMax                          time.Duration
 	prConditionsMaxWait                                  time.Duration
 	idleResumeEnabled                                    bool
@@ -43,11 +45,13 @@ func (s *Server) livenessSettings() livenessSettings {
 		claimTTL:            15 * time.Minute,
 		interval:            time.Minute,
 		gatewayUnhealthyMax: defaultGatewayUnhealthyMax,
-		busyTurnMax:         defaultBusyTurnMax,
-		silentDeathMax:      defaultSilentDeathMax,
-		prConditionsMaxWait: 2 * time.Hour,
-		idleResumeEnabled:   true,
-		idleResumeAfter:     defaultIdleResumeAfter,
+
+		gatewayUnhealthyReconnectGrace: defaultGatewayUnhealthyReconnectGrace,
+		busyTurnMax:                    defaultBusyTurnMax,
+		silentDeathMax:                 defaultSilentDeathMax,
+		prConditionsMaxWait:            2 * time.Hour,
+		idleResumeEnabled:              true,
+		idleResumeAfter:                defaultIdleResumeAfter,
 	}
 	s.mu.RLock()
 	l := livenessConfig(s.hubCfg)
@@ -92,6 +96,18 @@ func (s *Server) livenessSettings() livenessSettings {
 			log.Printf("[reaper] invalid gateway_unhealthy_checks %d; using %d", *l.GatewayUnhealthyChecks, cfg.gatewayUnhealthyMax)
 		} else {
 			cfg.gatewayUnhealthyMax = *l.GatewayUnhealthyChecks
+		}
+	}
+	// Parsed separately from the others: zero is a meaningful value here (it
+	// disables the grace and restores the un-graced behaviour), where the shared
+	// parse helper treats a non-positive duration as invalid.
+	if raw := strings.TrimSpace(l.GatewayUnhealthyReconnectGrace); raw != "" {
+		d, err := time.ParseDuration(raw)
+		switch {
+		case err != nil || d < 0:
+			log.Printf("[reaper] invalid gateway_unhealthy_reconnect_grace %q; using %s", raw, cfg.gatewayUnhealthyReconnectGrace)
+		default:
+			cfg.gatewayUnhealthyReconnectGrace = d
 		}
 	}
 	return cfg

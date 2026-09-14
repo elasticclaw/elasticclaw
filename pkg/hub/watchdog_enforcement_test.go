@@ -85,8 +85,20 @@ func watchdogClawConn(t *testing.T, s *Server, clawID string) *clawConn {
 	return cc
 }
 
+// watchdogConfigWithoutGrace disables the gateway reconnect grace. These tests
+// drive dozens of unhealthy heartbeats through a connection that registered
+// milliseconds earlier, which the grace exists to ignore; they are asserting on
+// the counter mechanics underneath it, so the grace is turned off rather than
+// worked around. The grace itself is covered in gateway_unhealthy_grace_test.go.
+func watchdogConfigWithoutGrace() *types.HubConfig {
+	return &types.HubConfig{
+		ClawToken: "claw-token",
+		Liveness:  &types.LivenessConfig{GatewayUnhealthyReconnectGrace: "0"},
+	}
+}
+
 func TestWatchdogUnhealthyHeartbeatsScheduleClawRetry(t *testing.T) {
-	s, db := NewTestServerWithConfig(t, &types.HubConfig{ClawToken: "claw-token"}, "", "", "")
+	s, db := NewTestServerWithConfig(t, watchdogConfigWithoutGrace(), "", "", "")
 	s.cronScheduler = newCronScheduler(s)
 	const clawID = "watchdog-unhealthy"
 	conn := watchdogClaw(t, s, clawID)
@@ -114,7 +126,7 @@ func TestWatchdogUnhealthyHeartbeatsScheduleClawRetry(t *testing.T) {
 }
 
 func TestWatchdogUnhealthyHeartbeatsCooldownPreventsOverlappingRetries(t *testing.T) {
-	s, db := NewTestServerWithConfig(t, &types.HubConfig{ClawToken: "claw-token"}, "", "", "")
+	s, db := NewTestServerWithConfig(t, watchdogConfigWithoutGrace(), "", "", "")
 	const clawID = "watchdog-unhealthy-cooldown"
 	conn := watchdogClaw(t, s, clawID)
 	if _, err := db.Exec(`UPDATE claws SET status='error', bootstrap_ok=1 WHERE id=?`, clawID); err != nil {
@@ -172,7 +184,7 @@ func TestWatchdogUnhealthyHeartbeatsCooldownPreventsOverlappingRetries(t *testin
 }
 
 func TestWatchdogHealthyHeartbeatResetsUnhealthyCounter(t *testing.T) {
-	s, _ := NewTestServerWithConfig(t, &types.HubConfig{ClawToken: "claw-token"}, "", "", "")
+	s, _ := NewTestServerWithConfig(t, watchdogConfigWithoutGrace(), "", "", "")
 	const clawID = "watchdog-heartbeat-reset"
 	conn := watchdogClaw(t, s, clawID)
 	writeHeartbeat := func(healthy bool) {
@@ -205,7 +217,7 @@ func TestWatchdogHealthyHeartbeatResetsUnhealthyCounter(t *testing.T) {
 }
 
 func TestWatchdogUnhealthyCounterSurvivesBridgeReconnect(t *testing.T) {
-	s, db := NewTestServerWithConfig(t, &types.HubConfig{ClawToken: "claw-token"}, "", "", "")
+	s, db := NewTestServerWithConfig(t, watchdogConfigWithoutGrace(), "", "", "")
 	s.cronScheduler = newCronScheduler(s)
 	const clawID = "watchdog-unhealthy-reconnect"
 	conn := watchdogClaw(t, s, clawID)

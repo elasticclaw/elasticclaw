@@ -514,13 +514,13 @@ func TestHealthEscalationThresholds(t *testing.T) {
 
 	nowAt := time.Now()
 	lastActivity := nowAt.Add(-11 * time.Minute)
-	if got := watchdogAction(nowAt, "connected", true, true, lastActivity, lastActivity, time.Time{}, defaultSilentDeathMax); got != watchdogHealthWarn {
+	if got := watchdogAction(nowAt, "connected", true, true, lastActivity, lastActivity, lastActivity, time.Time{}, defaultSilentDeathMax); got != watchdogHealthWarn {
 		t.Fatalf("initial watchdog action=%v, want warn", got)
 	}
-	if got := watchdogAction(nowAt, "connected", true, true, lastActivity, lastActivity, nowAt.Add(-5*time.Minute), defaultSilentDeathMax); got != watchdogHealthEscalate {
+	if got := watchdogAction(nowAt, "connected", true, true, lastActivity, lastActivity, lastActivity, nowAt.Add(-5*time.Minute), defaultSilentDeathMax); got != watchdogHealthEscalate {
 		t.Fatalf("continued watchdog action=%v, want escalate", got)
 	}
-	if got := watchdogAction(nowAt, "provisioning", true, true, lastActivity, lastActivity, nowAt.Add(-5*time.Minute), defaultSilentDeathMax); got != watchdogHealthNone {
+	if got := watchdogAction(nowAt, "provisioning", true, true, lastActivity, lastActivity, lastActivity, nowAt.Add(-5*time.Minute), defaultSilentDeathMax); got != watchdogHealthNone {
 		t.Fatalf("provisioning watchdog action=%v, want none", got)
 	}
 }
@@ -595,4 +595,29 @@ func TestResolveClawStopDisposition(t *testing.T) {
 			t.Fatalf("calls=%d slept=%v, want 1 evaluation and no sleeps", calls, slept)
 		}
 	})
+}
+
+// A bridge sending healthy heartbeats is alive, whatever the status channel is
+// doing. Before this, a lost status channel froze lastStatusAt and the watchdog
+// replaced claws whose bridge was reporting in every 15 seconds.
+func TestWatchdogActionTrustsHeartbeatOverStaleStatusChannel(t *testing.T) {
+	nowAt := time.Now()
+	staleStatus := nowAt.Add(-20 * time.Minute)
+	freshHeartbeat := nowAt.Add(-15 * time.Second)
+	warnedLongAgo := nowAt.Add(-10 * time.Minute)
+
+	if got := watchdogAction(nowAt, "connected", true, true, staleStatus, freshHeartbeat, staleStatus, warnedLongAgo, defaultSilentDeathMax); got != watchdogHealthNone {
+		t.Errorf("got %v, want none: a fresh heartbeat is proof of life even with a dead status channel", got)
+	}
+
+	// With both signals stale the claw really is silent and must still escalate.
+	if got := watchdogAction(nowAt, "connected", true, true, staleStatus, staleStatus, staleStatus, warnedLongAgo, defaultSilentDeathMax); got != watchdogHealthEscalate {
+		t.Errorf("got %v, want escalate: nothing has reported in for 20 minutes", got)
+	}
+
+	// A stale heartbeat must not rescue a claw whose status channel is fresher.
+	freshStatus := nowAt.Add(-30 * time.Second)
+	if got := watchdogAction(nowAt, "connected", true, true, freshStatus, staleStatus, freshStatus, warnedLongAgo, defaultSilentDeathMax); got != watchdogHealthNone {
+		t.Errorf("got %v, want none: the status channel is answering", got)
+	}
 }

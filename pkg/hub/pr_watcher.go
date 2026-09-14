@@ -228,15 +228,15 @@ func (s *Server) upgradeMentionOnlyPR(clawID, prURL string) error {
 
 // prMentionCandidate is a PR URL pending claw_prs registration.
 type prMentionCandidate struct {
-	repo             string
-	number           int
-	url              string
-	comment          int64
-	review           int64
-	commentAt        string
-	headSHA          string
-	title            string
-	mergeableState   string
+	repo           string
+	number         int
+	url            string
+	comment        int64
+	review         int64
+	commentAt      string
+	headSHA        string
+	title          string
+	mergeableState string
 }
 
 // preparePRMention loads GitHub watermarks for a PR insert. alreadyTracked is
