@@ -60,16 +60,16 @@ func TestGatewayUnhealthyInReconnectGrace(t *testing.T) {
 			why:  "the grace is a window on the connection, not a single heartbeat",
 		},
 		{
-			name: "flapping bridge cannot renew the grace", count: 0, connectedAt: connected,
-			lastGrantedAt: connected.Add(-time.Minute), grace: grace, now: connected.Add(time.Second),
-			want: false,
-			why:  "a gateway reconnecting faster than the renewal window would hold the counter at zero forever",
+			name: "a previous connection already spent this episode's grace", count: 0,
+			connectedAt: connected, lastGrantedAt: connected.Add(-time.Minute),
+			grace: grace, now: connected.Add(time.Second), want: false,
+			why: "one grace per unhealthy episode; a flapping bridge must not earn a second",
 		},
 		{
-			name: "grace renews once the window has passed", count: 0, connectedAt: connected,
-			lastGrantedAt: connected.Add(-(grace*gatewayGraceRenewalFactor + time.Minute)),
-			grace:         grace, now: connected.Add(time.Second), want: true,
-			why: "an isolated reconnect long after the last one is still protected",
+			name: "no elapsed time re-earns the grace", count: 0, connectedAt: connected,
+			lastGrantedAt: connected.Add(-24 * time.Hour), grace: grace,
+			now: connected.Add(time.Second), want: false,
+			why: "only a healthy heartbeat clears the stamp and starts a new episode; waiting does not",
 		},
 	}
 	for _, tc := range cases {

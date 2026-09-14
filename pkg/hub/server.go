@@ -300,12 +300,17 @@ func gatewayUnhealthyInReconnectGrace(count int, connectedAt, lastGrantedAt time
 	if !lastGrantedAt.Before(connectedAt) {
 		return true
 	}
-	// Otherwise the previous connection used it. Spacing successive grants at a
-	// multiple of the grace keeps an isolated reconnect protected while denying
-	// a gateway dying in a restart loop, which reconnects faster than that and
-	// would otherwise renew the grace forever and hold the counter at zero --
-	// the exact stall that making the counter survive reconnects fixed.
-	return now.Sub(lastGrantedAt) >= grace*gatewayGraceRenewalFactor
+	// A previous connection already spent the grace for this unhealthy episode,
+	// so there is no second one. Only a heartbeat that reports the gateway
+	// healthy clears gatewayGraceGrantedAt and starts a new episode.
+	//
+	// An earlier version spaced successive grants by a multiple of the grace
+	// instead. That merely moved the threshold: with a 2m grace and a factor of
+	// 4, a bridge reconnecting every 8 minutes was granted a fresh grace every
+	// time, held the unhealthy counter at zero forever, and never escalated --
+	// reopening, at a slower flap rate, the stall that making the counter
+	// survive reconnects had closed.
+	return false
 }
 
 // clearStatusConnIfOwned drops the claw's status channel only if it is still
@@ -441,10 +446,6 @@ const (
 	// that; two minutes clears a normal startup while leaving a genuinely dead
 	// gateway only one grace period per reconnect before it starts counting.
 	defaultGatewayUnhealthyReconnectGrace = 2 * time.Minute
-	// gatewayGraceRenewalFactor spaces successive graces at this multiple of the
-	// grace itself, so the protection covers an isolated reconnect but cannot be
-	// renewed by a bridge that keeps flapping.
-	gatewayGraceRenewalFactor = 4
 	// minBusyTurnMax is the floor for the busy-turn watchdog. The watchdog is a
 	// backstop for a lost terminal message, not a turn cap: the bridge owns the
 	// cap (agentTurnTimeout, 1h) and always ends a turn with a message. So this
