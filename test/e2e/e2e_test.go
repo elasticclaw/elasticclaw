@@ -895,14 +895,29 @@ func waitForAgentReply(ctx context.Context, t *testing.T, hub *hubProcess, agent
 	t.Helper()
 	deadline := time.Now().Add(8 * time.Minute)
 	for time.Now().Before(deadline) {
-		for _, msg := range hub.listMessages(ctx, t, agentID) {
-			if msg.Role == "claw" && strings.TrimSpace(msg.Content) != "" {
-				return
-			}
+		replied, bridgeErr := agentReplyResult(hub.listMessages(ctx, t, agentID))
+		if bridgeErr != "" {
+			t.Fatalf("agent %s returned a bridge error instead of a model reply: %s", agentID, bridgeErr)
+		}
+		if replied {
+			return
 		}
 		time.Sleep(5 * time.Second)
 	}
 	t.Fatalf("timed out waiting for agent %s to reply", agentID)
+}
+
+func agentReplyResult(messages []types.HubMessage) (replied bool, bridgeErr string) {
+	for _, msg := range messages {
+		if msg.Role != "claw" || strings.TrimSpace(msg.Content) == "" {
+			continue
+		}
+		if errText, ok := types.BridgeTransportError(msg.Content); ok {
+			return false, errText
+		}
+		return true, ""
+	}
+	return false, ""
 }
 
 func cleanupProvider(ctx context.Context, t *testing.T, env e2eEnv) {
