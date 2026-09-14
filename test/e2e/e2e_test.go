@@ -58,6 +58,16 @@ func TestExedevGitHubIssuesWorkflowE2E(t *testing.T) {
 }
 
 func TestDockerWorkflowE2E(t *testing.T) {
+	runDockerWorkflowE2E(t, false)
+}
+
+func TestDockerCamelStreamWorkflowE2E(t *testing.T) {
+	t.Setenv("ELASTICCLAW_E2E_LLM_PROVIDER", "camel-stream")
+	t.Setenv("ELASTICCLAW_E2E_MODEL", "camel-stream/auto")
+	runDockerWorkflowE2E(t, true)
+}
+
+func runDockerWorkflowE2E(t *testing.T, waitForInference bool) {
 	runID := e2eRunID()
 	env := newE2EEnv(t, runID, "docker")
 
@@ -128,6 +138,9 @@ func TestDockerWorkflowE2E(t *testing.T) {
 	if !foundRun {
 		t.Logf("messages seen for docker claw %s: %+v", agentID, lastMsgs)
 		t.Fatalf("docker run action + output capture + gate did not produce expected evidence (see #530)")
+	}
+	if waitForInference {
+		waitForAgentReply(ctx, t, hub, agentID)
 	}
 }
 
@@ -273,7 +286,8 @@ type e2eEnv struct {
 	ReplicatedTTL       string
 	DockerImage         string
 	ExedevSSHKeyPath    string
-	FireworksAPIKey     string
+	LLMProvider         string
+	LLMAPIKey           string
 	BridgeBinary        string
 	BridgeToken         string
 	ProviderPrefix      string
@@ -283,6 +297,18 @@ type e2eEnv struct {
 
 func newE2EEnv(t *testing.T, runID, sandboxProvider string) e2eEnv {
 	t.Helper()
+	llmProvider := envOrDefault("ELASTICCLAW_E2E_LLM_PROVIDER", "fireworks")
+	llmAPIKey := ""
+	defaultLLMModel := defaultModel
+	switch llmProvider {
+	case "fireworks":
+		llmAPIKey = requiredEnv(t, "FIREWORKS_API_KEY")
+	case "camel-stream":
+		llmAPIKey = requiredEnv(t, "CAMEL_API_KEY")
+		defaultLLMModel = "camel-stream/auto"
+	default:
+		t.Fatalf("unsupported E2E inference provider %q", llmProvider)
+	}
 	env := e2eEnv{
 		Bin:                 requiredEnv(t, "ELASTICCLAW_E2E_BIN"),
 		HubAddr:             envOrDefault("ELASTICCLAW_E2E_HUB_ADDR", "127.0.0.1:8080"),
@@ -302,10 +328,11 @@ func newE2EEnv(t *testing.T, runID, sandboxProvider string) e2eEnv {
 		JiraUsername:        os.Getenv("ELASTICCLAW_E2E_JIRA_USERNAME"),
 		JiraToken:           os.Getenv("ELASTICCLAW_E2E_JIRA_TOKEN"),
 		JiraProjectKey:      os.Getenv("ELASTICCLAW_E2E_JIRA_PROJECT_KEY"),
-		FireworksAPIKey:     requiredEnv(t, "FIREWORKS_API_KEY"),
+		LLMProvider:         llmProvider,
+		LLMAPIKey:           llmAPIKey,
 		BridgeBinary:        requiredEnv(t, "ELASTICCLAW_E2E_BRIDGE_BINARY"),
 		BridgeToken:         "bridge-" + runID,
-		Model:               envOrDefault("ELASTICCLAW_E2E_MODEL", defaultModel),
+		Model:               envOrDefault("ELASTICCLAW_E2E_MODEL", defaultLLMModel),
 		RunID:               runID,
 	}
 	if sandboxProvider != "docker" {
@@ -467,12 +494,12 @@ providers:
 %s
 default_model: %s
 llm_keys:
-  - name: fireworks
-    provider: fireworks
+  - name: %s
+    provider: %s
     api_key: %q
     default: true
     default_model: %s
-`, baseURL, env.PublicURL, userToken, agentToken, env.PublicURL+"/__elasticclaw_e2e/claw-bridge-linux-amd64?token="+url.QueryEscape(env.BridgeToken), providerConfig, env.Model, env.FireworksAPIKey, env.Model)
+`, baseURL, env.PublicURL, userToken, agentToken, env.PublicURL+"/__elasticclaw_e2e/claw-bridge-linux-amd64?token="+url.QueryEscape(env.BridgeToken), providerConfig, env.Model, env.LLMProvider, env.LLMProvider, env.LLMAPIKey, env.Model)
 	if err := os.WriteFile(configPath, []byte(config), 0600); err != nil {
 		t.Fatalf("write hub config: %v", err)
 	}
@@ -486,7 +513,8 @@ llm_keys:
 	cmd.Env = append(os.Environ(),
 		"ELASTICCLAW_HUB_CONFIG="+configPath,
 		"DAYTONA_API_KEY="+env.DaytonaAPIKey,
-		"FIREWORKS_API_KEY="+env.FireworksAPIKey,
+		"FIREWORKS_API_KEY="+providerAPIKey(env, "fireworks"),
+		"CAMEL_API_KEY="+providerAPIKey(env, "camel-stream"),
 		"ELASTICCLAW_E2E_BRIDGE_BINARY="+env.BridgeBinary,
 		"ELASTICCLAW_E2E_BRIDGE_TOKEN="+env.BridgeToken,
 		"ELASTICCLAW_PROVIDER_NAME_PREFIX="+env.ProviderPrefix,
@@ -510,6 +538,13 @@ llm_keys:
 	waitForHub(ctx, t, hub)
 	waitForPublicHub(ctx, t, env.PublicURL)
 	return hub
+}
+
+func providerAPIKey(env e2eEnv, provider string) string {
+	if env.LLMProvider == provider {
+		return env.LLMAPIKey
+	}
+	return ""
 }
 
 func waitForHub(ctx context.Context, t *testing.T, hub *hubProcess) {

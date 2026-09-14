@@ -500,6 +500,18 @@ func TestBuildLLMKeyEnvSkipsBlankExternalKeys(t *testing.T) {
 	assertNotContains(t, env, "OPENAI_API_KEY", "does not export blank OpenAI key")
 }
 
+func TestBuildLLMKeyEnvExportsCamelStreamKey(t *testing.T) {
+	keys := []*types.LLMKeyConfig{
+		{Name: "camel-stream-main", Provider: "camel-stream", APIKey: "camel-test", Default: true},
+	}
+
+	env := buildLLMKeyEnv(keys, "camel-stream-main")
+
+	if env != "export CAMEL_API_KEY=\"camel-test\"\n" {
+		t.Fatalf("camelStream environment = %q", env)
+	}
+}
+
 func TestBuildOpenClawAPIKeyAuthSyncShellUsesAnthropicPasteAPIKey(t *testing.T) {
 	shell := buildOpenClawAPIKeyAuthSyncShell(types.LLMKeysList{
 		{Name: "anthropic-main", Provider: "anthropic", APIKey: "sk-ant-test", Default: true},

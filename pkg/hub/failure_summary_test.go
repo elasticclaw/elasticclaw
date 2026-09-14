@@ -237,6 +237,23 @@ func TestSelectFailureSummaryModelSupportsOllama(t *testing.T) {
 	}
 }
 
+func TestSelectFailureSummaryModelSupportsCamelStream(t *testing.T) {
+	keys := types.LLMKeysList{
+		{Name: "camel-stream-main", Provider: "camel-stream", APIKey: "camel-test", Default: true},
+	}
+	key, model, err := selectFailureSummaryModel(keys, "")
+	if err != nil {
+		t.Fatalf("select model: %v", err)
+	}
+	if key.Provider != "camel-stream" || model != "camel-stream/auto" {
+		t.Fatalf("provider/model = %s/%s", key.Provider, model)
+	}
+	provider := openAICompatibleConfig("camel-stream")
+	if provider.Name != "camelStream" || provider.BaseURL != "https://stream.camelai.com/v1" {
+		t.Fatalf("camelStream provider config = %#v", provider)
+	}
+}
+
 func TestOpenAICompatibleConfigUsesOllamaBaseURLEnv(t *testing.T) {
 	t.Setenv("OLLAMA_BASE_URL", "http://localhost:11434/")
 

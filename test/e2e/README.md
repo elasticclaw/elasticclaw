@@ -10,6 +10,7 @@ Depot CI -> ngrok -> ElasticClaw Server -> GitHub Issues -> Daytona -> OpenClaw 
 Depot CI -> ngrok -> ElasticClaw Server -> Linear -> Daytona -> OpenClaw -> Fireworks Kimi
 Depot CI -> ngrok -> ElasticClaw Server -> Jira Cloud -> Daytona -> OpenClaw -> Fireworks Kimi
 Depot CI -> ngrok -> ElasticClaw Server -> GitHub Issues -> exe.dev -> OpenClaw -> Fireworks Kimi
+Depot CI -> ngrok -> ElasticClaw Server -> Docker -> OpenClaw -> camelStream Auto
 ```
 
 Each test creates a workspace and workflow with the ElasticClaw CLI, configures
@@ -52,6 +53,8 @@ make e2e-replicated-github
 make e2e-replicated-linear
 make e2e-replicated-jira
 make e2e-exedev-github
+make e2e-docker
+make e2e-camel-stream
 ```
 
 The make targets build `bin/elasticclaw` and `bin/claw-bridge-linux-amd64`,
@@ -93,6 +96,7 @@ ELASTICCLAW_E2E_JIRA_PROJECT_KEY
 DAYTONA_API_KEY
 REPLICATED_API_TOKEN
 FIREWORKS_API_KEY
+CAMEL_API_KEY
 NGROK_AUTHTOKEN
 NGROK_API_KEY
 ELASTICCLAW_E2E_EXEDEV_SSH_KEY
