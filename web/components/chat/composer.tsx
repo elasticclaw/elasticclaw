@@ -21,6 +21,7 @@ export function ComposerShell({
         "shadow-[0_12px_28px_-18px_rgb(0_0_0/40%)] dark:shadow-none",
         "after:pointer-events-none after:absolute after:inset-0 after:rounded-[inherit] after:border after:border-black/8 dark:after:border-white/5 dark:after:shadow-[inset_0_1px_rgb(255_255_255/3%)]",
         "transition-colors duration-200",
+        "has-[textarea:focus-visible]:ring-2 has-[textarea:focus-visible]:ring-focus-ring",
         dragOver && "bg-accent/45 ring-1 ring-primary/70",
         className
       )}
@@ -52,7 +53,7 @@ export function SendButton({ className, size = "md", ...props }: ComponentProps<
         "hover:scale-105 hover:bg-message-action-hover active:shadow-none",
         "enabled:inset-shadow-[0_1px_rgb(255_255_255/16%)]",
         "disabled:cursor-default disabled:opacity-30 disabled:shadow-none disabled:hover:scale-100",
-        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/70 focus-visible:ring-offset-2 focus-visible:ring-offset-background",
+        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background",
         size === "md" ? "size-9 sm:size-8" : "size-7",
         className
       )}

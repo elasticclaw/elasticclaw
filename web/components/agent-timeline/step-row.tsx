@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, type KeyboardEvent, type MouseEvent } from "react"
+import { useId, useState, type MouseEvent } from "react"
 import {
   Bot,
   Check,
@@ -37,7 +37,7 @@ export const CATEGORY_ICONS: Record<ToolCategory, typeof Wrench> = {
 
 /** Shared by step rows, group rows, the activity summary and the turn fold. */
 export const ROW_INTERACTIVE_CLASS =
-  "cursor-pointer hover:bg-accent/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70"
+  "cursor-pointer hover:bg-accent/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-focus-ring"
 
 /** Expanded tool output: one quiet box. A failed step only adds a 2px `border-error/40` left rule; its text keeps the same quiet secondary tone. */
 export const EXPANDED_BODY_CLASS = "mt-1 ms-7 cursor-default rounded-md bg-muted/40 px-3 py-2"
@@ -45,24 +45,22 @@ export const EXPANDED_PRE_CLASS =
   "overflow-auto whitespace-pre-wrap break-words font-mono leading-relaxed select-text cursor-text"
 
 function StepIcon({ step, className }: { step: Step; className: string }) {
-  if (step.tone !== "normal" && step.status !== "failed") return <CircleAlert className={className} aria-hidden />
-  if (step.kind === "info") {
-    return step.status === "failed" ? <CircleAlert className={className} aria-hidden /> : <Check className={className} aria-hidden />
-  }
+  if (step.status === "failed" || step.tone !== "normal") return <CircleAlert className={className} aria-hidden />
+  if (step.kind === "info") return <Check className={className} aria-hidden />
   const Icon = CATEGORY_ICONS[step.category] ?? Wrench
   return <Icon className={className} aria-hidden />
 }
 
 /**
- * Failures of ordinary tool calls stay quiet — the icon dims and the row keeps
- * its secondary text. Only session-level errors (info steps with an error
+ * Failures of ordinary tool calls stay quiet — the icon turns into a muted
+ * alert glyph and the row keeps its secondary text. Only session-level errors (info steps with an error
  * tone) and warnings get a colored heading.
  */
 function stepTones(step: Step): { icon: string; title: string } {
   const severe = step.kind === "info" && step.tone === "error"
   if (severe) return { icon: "text-destructive", title: "font-medium text-destructive" }
   if (step.tone === "warning") return { icon: "text-warning", title: "font-medium text-warning" }
-  if (step.status === "failed") return { icon: "text-tool-error-icon/40", title: "text-secondary-label" }
+  if (step.status === "failed") return { icon: "text-tool-error-icon/70", title: "text-secondary-label" }
   return { icon: "text-icon-muted", title: "text-secondary-label" }
 }
 
@@ -131,62 +129,48 @@ export function StepRow({
     statusText.length > 0 &&
     !(step.detail && statusText.toLowerCase().includes(step.detail.trim().toLowerCase()))
 
+  const bodyId = useId()
+  const Header = interactive ? "button" : "div"
+
   return (
-    <div
-      role={interactive ? "button" : undefined}
-      tabIndex={interactive ? 0 : undefined}
-      aria-expanded={hasBody && !opensSubagent ? expanded : undefined}
-      aria-label={opensSubagent ? `Open subagent ${step.detail || step.title}` : undefined}
-      onClick={activate ? (e) => activate(e.currentTarget as HTMLElement) : undefined}
-      onKeyDown={
-        activate
-          ? (e: KeyboardEvent<HTMLDivElement>) => {
-              if (e.key === "Enter" || e.key === " ") {
-                e.preventDefault()
-                activate(e.currentTarget as HTMLElement)
-              }
-            }
-          : undefined
-      }
-      className={cn(
-        "flex flex-col rounded-md px-0.5 py-0.5 transition-colors",
-        expanded && "mb-1",
-        interactive && ROW_INTERACTIVE_CLASS
-      )}
-    >
-      <div
+    <div className={cn("flex flex-col", expanded && "mb-1")}>
+      <Header
+        type={interactive ? "button" : undefined}
+        aria-expanded={hasBody && !opensSubagent ? expanded : undefined}
+        aria-controls={hasBody && !opensSubagent ? bodyId : undefined}
+        aria-label={opensSubagent ? `Open subagent ${step.detail || step.title}` : undefined}
+        onClick={activate ? (e) => activate(e.currentTarget) : undefined}
         className={cn(
-          "flex select-none items-center gap-1.5",
+          "flex w-full select-none items-center gap-1.5 rounded-md px-0.5 py-0.5 text-left transition-colors",
           isCard ? "min-h-5" : "min-h-6",
           // 44px tap target for expandable rows on touch screens
-          interactive && !isCard && "max-md:min-h-11"
+          interactive && "max-md:min-h-11",
+          interactive && ROW_INTERACTIVE_CLASS
         )}
       >
-        <span
-          className={cn("flex shrink-0 items-center justify-center", isCard ? "size-5" : "size-6", tones.icon)}
-          role={step.status === "failed" ? "img" : undefined}
-          aria-label={step.status === "failed" ? "Tool call failed" : undefined}
-        >
+        <span className={cn("flex shrink-0 items-center justify-center", isCard ? "size-5" : "size-6", tones.icon)}>
           <StepIcon step={step} className={cn("shrink-0 stroke-[1.8]", isCard ? "size-3.5" : "size-4")} />
         </span>
-        <p className={cn("flex min-w-0 flex-1 items-baseline gap-1.5 leading-relaxed", isCard ? "text-xs" : "text-sm")}>
+        <span className={cn("flex min-w-0 flex-1 items-baseline gap-1.5 leading-relaxed", isCard ? "text-xs" : "text-sm")}>
           {/* Title + detail share one span so a running row shimmers as a whole;
-              the shine clips a gradient to the text, so the inner spans carry
-              no color of their own while running. */}
+              live-tool-shine's `color: transparent !important` wins over the
+              tone classes, which stay on so reduced-motion keeps the quiet tone. */}
           <span
             className={cn(
               "flex min-w-0 flex-1 items-baseline gap-1.5 max-md:flex-wrap max-md:gap-y-0",
               running && "live-tool-shine"
             )}
           >
-            <span className={cn("shrink-0", !running && tones.title)}>{step.title}</span>
+            <span className={cn("shrink-0", tones.title)}>
+              {failed && <span className="sr-only">failed </span>}
+              {step.title}
+            </span>
             {step.detail && (
               <span
                 className={cn(
                   // Mobile: wrap to two lines with break-all so long paths never
                   // force horizontal overflow; desktop keeps the one-line truncate.
-                  "min-w-0 flex-1 truncate max-md:line-clamp-2 max-md:whitespace-normal max-md:break-all",
-                  !running && "text-secondary-label",
+                  "min-w-0 flex-1 truncate text-secondary-label max-md:line-clamp-2 max-md:whitespace-normal max-md:break-all",
                   step.detailKind !== "text" && (isCard ? "font-mono text-[11px]" : "font-mono text-[13px]")
                 )}
                 title={step.detail}
@@ -196,9 +180,9 @@ export function StepRow({
             )}
           </span>
           {showStatusText && (
-            <span className="min-w-0 truncate text-xs text-muted-foreground/70 max-md:hidden">{statusText}</span>
+            <span className="min-w-0 truncate text-xs text-muted-foreground max-md:hidden">{statusText}</span>
           )}
-        </p>
+        </span>
         {showExit && (
           <span className="shrink-0 rounded-sm border border-border/60 px-1 font-mono text-[.65rem] text-muted-foreground">
             exit {step.exitCode}
@@ -220,9 +204,10 @@ export function StepRow({
             )}
           />
         </span>
-      </div>
+      </Header>
       {expanded && (
         <div
+          id={bodyId}
           className={cn(EXPANDED_BODY_CLASS, "flex flex-col gap-2", failed && "border-l-2 border-error/40")}
           onClick={stopRowToggle}
         >
@@ -318,7 +303,8 @@ function StepGroupRow({
         }}
         className={cn(
           "flex w-full items-center gap-1.5 rounded-md px-0.5 py-0.5 text-left leading-relaxed transition-colors",
-          isCard ? "min-h-5 text-xs" : "min-h-6 text-sm max-md:min-h-11",
+          isCard ? "min-h-5 text-xs" : "min-h-6 text-sm",
+          "max-md:min-h-11",
           ROW_INTERACTIVE_CLASS
         )}
       >

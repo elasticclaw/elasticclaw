@@ -36,19 +36,18 @@ export function SeparatorRow({
 }) {
   return (
     <div
-      role="separator"
       className={cn(
         "flex items-center gap-3 py-1 text-muted-foreground pb-1.5",
         variant === "chat" ? "text-xs" : "text-[10px]"
       )}
     >
-      <span className="h-px flex-1 bg-border/70" />
+      <span aria-hidden className="h-px flex-1 bg-border/70" />
       <span className="flex items-center gap-1.5">
-        {Icon && <Icon className="size-3" />}
+        {Icon && <Icon className="size-3" aria-hidden />}
         <span>{label}</span>
-        {detail && <span className="text-foreground/70">{detail}</span>}
+        {detail && <span className="text-foreground/70">{" "}{detail}</span>}
       </span>
-      <span className="h-px flex-1 bg-border/70" />
+      <span aria-hidden className="h-px flex-1 bg-border/70" />
     </div>
   )
 }
@@ -112,55 +111,21 @@ function MessageCopyButton({ text, className }: { text: string; className?: stri
       aria-label={copied ? "Copied" : "Copy message"}
       title={copied ? "Copied" : "Copy message"}
       className={cn(
-        "flex size-6 items-center justify-center rounded-[var(--control-radius)] text-muted-foreground transition-colors hover:bg-accent/40 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/70",
+        "flex size-6 items-center justify-center rounded-[var(--control-radius)] text-muted-foreground transition-colors hover:bg-accent/40 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus-ring",
         className
       )}
     >
       {copied ? <Check className="size-3 text-primary" /> : <Copy className="size-3" />}
+      <span role="status" className="sr-only">{copied ? "Copied" : ""}</span>
     </button>
   )
 }
 
 // ─── user / teammate bubble ───────────────────────────────────────────────────
 
-const COLLAPSE_CHARS = 600
-const COLLAPSE_LINES = 8
-const COLLAPSED_FADE_MASK = "linear-gradient(to bottom, black calc(100% - 1.75rem), transparent)"
-
-function shouldCollapse(text: string): boolean {
-  return text.length > COLLAPSE_CHARS || text.split("\n").length > COLLAPSE_LINES
-}
-
-function CollapsibleBody({ text, variant }: { text: string; variant: RowVariant }) {
-  const [expanded, setExpanded] = useState(false)
-  const collapsible = variant === "chat" && shouldCollapse(text)
-  const collapsed = collapsible && !expanded
-  return (
-    <div>
-      <p
-        className={cn(
-          "whitespace-pre-wrap leading-relaxed",
-          variant === "chat" ? "text-sm" : "text-xs",
-          collapsed && "max-h-44 overflow-hidden"
-        )}
-        style={collapsed ? { WebkitMaskImage: COLLAPSED_FADE_MASK, maskImage: COLLAPSED_FADE_MASK } : undefined}
-      >
-        {text}
-      </p>
-      {collapsible && (
-        <div className="mt-1.5 flex justify-end">
-          <button
-            type="button"
-            aria-expanded={expanded}
-            onClick={(e) => { e.stopPropagation(); setExpanded((value) => !value) }}
-            className="-ml-1 h-6 rounded-md px-1.5 text-xs text-secondary-label transition-colors hover:bg-muted/55 hover:text-message-foreground"
-          >
-            {expanded ? "Show less" : "Show full message"}
-          </button>
-        </div>
-      )}
-    </div>
-  )
+function MessageBody({ text, variant }: { text: string; variant: RowVariant }) {
+  if (variant === "card") return <MarkdownContent content={text} className="text-xs" />
+  return <p className="whitespace-pre-wrap text-sm leading-relaxed">{text}</p>
 }
 
 function UserAttachments({
@@ -236,7 +201,7 @@ function UserRow({
       >
         <h3 className="sr-only">{self ? "You" : name}</h3>
         {attachments.length > 0 && <UserAttachments attachments={attachments} clawId={clawId} variant={variant} />}
-        {body.trim() && <CollapsibleBody text={body} variant={variant} />}
+        {body.trim() && <MessageBody text={body} variant={variant} />}
       </div>
       <div
         className={cn(

@@ -32,6 +32,7 @@
   --border: oklch(0.922 0 0);
   --input: oklch(0.922 0 0);
   --ring: oklch(0.708 0 0);
+  --focus-ring: oklch(0.488 0.217 264);
   /* Charts — categorical, drawn from the product's own semantic hues
      (blue, green, amber, red, slate) at a single lightness and a single
      chroma ceiling, per the design kit (tokens/colors.css). */
@@ -75,7 +76,7 @@
   --secondary-label: var(--muted-foreground);
   --icon-muted: var(--muted-foreground);
   --placeholder: var(--muted-foreground);
-  --message-surface: var(--accent);
+  --message-surface: oklch(0.955 0 0);
   --message-foreground: var(--foreground);
   --message-action: oklch(0.488 0.217 264);
   --message-action-foreground: #fff;
@@ -87,7 +88,7 @@
   --warning-foreground: #b45309;
   --warning-surface: color-mix(in srgb, var(--warning) 8%, transparent);
   --info-foreground: #1d4ed8;
-  --tool-error-icon: var(--error);
+  --tool-error-icon: var(--error-foreground);
   --diff-addition: var(--success);
   --diff-deletion: var(--destructive);
   --diff-addition-foreground: #059669;
@@ -124,6 +125,7 @@
   --border: #303030; /* was #262626 — hairlines were disappearing on --card */
   --input: #262626;
   --ring: #404040;
+  --focus-ring: #8ab4ff;
   --chart-1: oklch(0.70 0.115 250);
   --chart-2: oklch(0.70 0.115 155);
   --chart-3: oklch(0.70 0.115 75);
@@ -155,6 +157,7 @@
   --message-action: oklch(0.571 0.21 264);
   --error-foreground: #f87171;
   --tool-error-icon: #fca5a5;
+  --message-surface: #1f1f1f;
   --error-surface: color-mix(in srgb, var(--error) 16%, transparent);
   --warning-foreground: #fbbf24;
   --warning-surface: color-mix(in srgb, var(--warning) 16%, transparent);
@@ -191,6 +194,7 @@
   --color-border: var(--border);
   --color-input: var(--input);
   --color-ring: var(--ring);
+  --color-focus-ring: var(--focus-ring);
   --color-chart-1: var(--chart-1);
   --color-chart-2: var(--chart-2);
   --color-chart-3: var(--chart-3);
@@ -424,7 +428,7 @@
   background: var(--muted);
   padding: 0.1rem 0.35rem;
   color: var(--foreground);
-  font-size: 0.75rem;
+  font-size: 0.875em;
 }
 
 .chat-markdown blockquote {
@@ -470,7 +474,7 @@
   border-collapse: collapse;
   overflow-wrap: normal;
   word-break: normal;
-  font-size: 0.75rem;
+  font-size: 0.8125rem;
 }
 .chat-markdown th,
 .chat-markdown td {

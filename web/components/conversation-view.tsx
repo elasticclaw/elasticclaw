@@ -285,21 +285,30 @@ function StatusDot({ status, isStreaming, paused }: { status: ClawStatus; isStre
 
 function ContextProgressBar({ usage, size = "sm" }: { usage: number; size?: "sm" | "lg" }) {
   const getColor = (value: number) => {
-    if (value >= 90) return "bg-red-500"
-    if (value >= 70) return "bg-amber-500"
-    return "bg-green-500"
+    if (value >= 90) return "bg-[var(--status-error)]"
+    if (value >= 70) return "bg-[var(--status-idle)]"
+    return "bg-[var(--status-connected)]"
   }
 
   const getBgColor = (value: number) => {
-    if (value >= 90) return "bg-red-500/20"
-    if (value >= 70) return "bg-amber-500/20"
-    return "bg-green-500/20"
+    if (value >= 90) return "bg-[color-mix(in_srgb,var(--status-error)_20%,transparent)]"
+    if (value >= 70) return "bg-[color-mix(in_srgb,var(--status-idle)_20%,transparent)]"
+    return "bg-[color-mix(in_srgb,var(--status-connected)_20%,transparent)]"
   }
+
+  const progressProps = {
+    role: "progressbar",
+    "aria-valuenow": usage,
+    "aria-valuemin": 0,
+    "aria-valuemax": 100,
+    "aria-label": "Context usage",
+  } as const
 
   if (size === "lg") {
     return (
       <div className="group relative flex items-center">
-        <div 
+        <div
+          {...progressProps}
           className={cn(
             "h-0.5 group-hover:h-2 rounded-full transition-all duration-200 overflow-hidden",
             "w-24 group-hover:w-32",
@@ -311,7 +320,7 @@ function ContextProgressBar({ usage, size = "sm" }: { usage: number; size?: "sm"
             style={{ width: `${usage}%` }}
           />
         </div>
-        <span className="ml-2 text-xs text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity font-mono">
+        <span className="ml-2 text-xs text-muted-foreground opacity-0 group-hover:opacity-100 focus-within:opacity-100 pointer-coarse:opacity-100 transition-opacity font-mono">
           {usage}%
         </span>
       </div>
@@ -320,7 +329,8 @@ function ContextProgressBar({ usage, size = "sm" }: { usage: number; size?: "sm"
 
   return (
     <div className="group relative">
-      <div 
+      <div
+        {...progressProps}
         className={cn(
           "h-1 group-hover:h-2.5 rounded-full transition-all duration-200 overflow-hidden w-full",
           getBgColor(usage)
@@ -331,7 +341,7 @@ function ContextProgressBar({ usage, size = "sm" }: { usage: number; size?: "sm"
           style={{ width: `${usage}%` }}
         />
       </div>
-      <div className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity">
+      <div className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 focus-within:opacity-100 pointer-coarse:opacity-100 transition-opacity">
         <span className="text-[9px] font-mono font-medium text-foreground drop-shadow-sm">
           {usage}%
         </span>
@@ -835,7 +845,7 @@ const ClawBoardCard = memo(function ClawBoardCard({
                 event.stopPropagation()
                 scrollCardToLatest()
               }}
-              className="surface-glass absolute bottom-2 left-1/2 z-10 flex h-6 -translate-x-1/2 items-center gap-1 rounded-full border border-border/60 px-2.5 text-[10px] text-muted-foreground shadow-sm transition-colors hover:border-border hover:text-foreground"
+              className="surface-glass absolute bottom-2 left-1/2 z-10 flex h-6 -translate-x-1/2 items-center gap-1 rounded-full border border-border/60 px-2.5 text-[10px] text-muted-foreground shadow-sm transition-colors hover:border-border hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus-ring max-md:h-11"
               aria-label="Follow latest claw activity"
             >
               <ChevronDown className="size-3" />
@@ -919,7 +929,7 @@ const ClawBoardCard = memo(function ClawBoardCard({
                 }}
                 onPaste={onPaste}
                 placeholder={isPending ? (claw.status === "error" ? "Provisioning failed" : claw.status === "offline" ? "Agent offline" : "Starting up...") : "Send message..."}
-                className="block min-h-[36px] w-full resize-none overflow-hidden border-0 bg-transparent text-xs leading-relaxed text-foreground ring-0 placeholder:text-placeholder/75 focus:outline-none disabled:opacity-60"
+                className="block min-h-[36px] w-full resize-none overflow-hidden border-0 bg-transparent text-xs leading-relaxed text-foreground ring-0 placeholder:text-placeholder focus:outline-none disabled:opacity-60"
                 disabled={isPending}
                 ref={cardTextareaRef}
                 onClick={(e) => e.stopPropagation()}
@@ -1562,7 +1572,7 @@ function ClawChatView({
         {showScrollBtn && !openSubagent && (
           <button
             onClick={scrollToBottom}
-            className="surface-glass absolute left-1/2 z-30 flex h-7 -translate-x-1/2 items-center gap-1.5 rounded-full border border-border/60 px-3 text-xs text-muted-foreground shadow-sm transition-colors hover:border-border hover:text-foreground"
+            className="surface-glass absolute left-1/2 z-30 flex h-7 -translate-x-1/2 items-center gap-1.5 rounded-full border border-border/60 px-3 text-xs text-muted-foreground shadow-sm transition-colors hover:border-border hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus-ring max-md:h-11"
             style={{ bottom: composerHeight + 8 }}
           >
             <ChevronDown className="size-3.5" />
@@ -1630,7 +1640,7 @@ function ClawChatView({
               ref={panelTextareaRef}
               placeholder="Message agent, /stop, or attach files"
               rows={1}
-              className="block max-h-[200px] min-h-[52px] w-full resize-none sm:min-h-[70px] overflow-hidden border-0 bg-transparent text-sm leading-relaxed text-foreground ring-0 scrollbar-thin placeholder:text-placeholder/75 focus:outline-none"
+              className="block max-h-[200px] min-h-[52px] w-full resize-none sm:min-h-[70px] overflow-hidden border-0 bg-transparent text-sm leading-relaxed text-foreground ring-0 scrollbar-thin placeholder:text-placeholder focus:outline-none"
             />
           </div>
           <div className="flex items-center justify-between gap-2 px-3 pb-2 sm:px-4 sm:pb-4">
@@ -1644,7 +1654,7 @@ function ClawChatView({
                 <Paperclip className="size-4" />
                 <span className="sr-only">Attach files</span>
               </button>
-              <span className="hidden truncate text-xs text-muted-foreground/70 sm:inline">
+              <span className="hidden truncate text-xs text-muted-foreground sm:inline">
                 Enter to send · Shift+Enter newline
               </span>
             </div>

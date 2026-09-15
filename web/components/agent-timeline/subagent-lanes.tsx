@@ -40,7 +40,7 @@ function LaneCard({
         // card past its 220px basis instead of truncating inside it.
         "flex h-auto w-[220px] min-w-0 shrink-0 grow-0 basis-[220px] flex-col rounded-md",
         "bg-[var(--subagent-wash)] px-1 py-0.5 text-left transition-colors hover:bg-accent/20",
-        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70"
+        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-focus-ring"
       )}
     >
       <span className="flex min-h-6 min-w-0 items-center gap-1.5">

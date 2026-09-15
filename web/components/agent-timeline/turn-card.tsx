@@ -17,6 +17,10 @@ import { ActivitySummaryBlock } from "./activity-summary-block"
 import { useToggleAnchor } from "./anchor-context"
 import type { TimelineDensity } from "./timeline-toolbar"
 
+function formatClock(date: Date): string {
+  return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+}
+
 /** Filters + collapses step runs, memoized — this math should not re-run for
  *  every streaming frame of an unrelated part of the transcript. */
 const CollapsedStepList = memo(function CollapsedStepList({
@@ -99,7 +103,7 @@ export const TurnCard = memo(function TurnCard({
             anchor(e.currentTarget)
             onToggle(toggleKey, expanded)
           }}
-          className="flex min-w-0 max-w-full cursor-pointer select-none items-center gap-1 rounded-md px-1 text-left text-sm leading-relaxed text-muted-foreground tabular-nums transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70"
+          className="flex min-w-0 max-w-full cursor-pointer select-none items-center gap-1 rounded-md px-1 text-left max-md:min-h-11 text-sm leading-relaxed text-muted-foreground tabular-nums transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-focus-ring"
         >
           <span className="min-w-0 truncate">{label}</span>
           <span className="shrink-0 whitespace-nowrap">
@@ -122,6 +126,9 @@ export const TurnCard = memo(function TurnCard({
             {turn.failedCount > 0 && <span className="text-destructive"> · {turn.failedCount} failed</span>}
           </span>
           <Chevron className="size-3.5 shrink-0" aria-hidden />
+          <span className="ms-auto shrink-0 font-mono text-[.7rem] text-muted-foreground max-sm:hidden" suppressHydrationWarning>
+            {formatClock(turn.startedAt)}
+          </span>
         </button>
       </div>
 

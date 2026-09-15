@@ -5,6 +5,7 @@ import ReactMarkdown, { type Components } from "react-markdown"
 import remarkGfm from "remark-gfm"
 import { Check, Copy, WrapText } from "lucide-react"
 import { cn } from "@/lib/utils"
+import { copyTextToClipboard } from "@/lib/transcript"
 
 interface MarkdownContentProps {
   content: string
@@ -83,20 +84,20 @@ function useHighlightedHtml(code: string, lang: string | undefined): string | nu
 
 // ─── code block ───────────────────────────────────────────────────────────────
 
-const CodeBlock = memo(function CodeBlock({ code, lang }: { code: string; lang?: string }) {
+const CodeBlock = memo(function CodeBlock({ code, lang, streaming }: { code: string; lang?: string; streaming?: boolean }) {
   const [wrapped, setWrapped] = useState(false)
   const [copied, setCopied] = useState(false)
-  const html = useHighlightedHtml(code, lang)
+  // Highlighting every 125ms sample of a growing block is wasted work; paint
+  // plain while streaming and highlight once the message finalizes.
+  const html = useHighlightedHtml(code, streaming ? undefined : lang)
 
-  const copy = useCallback(() => {
-    if (typeof navigator === "undefined" || !navigator.clipboard) return
-    void navigator.clipboard.writeText(code).then(() => {
-      setCopied(true)
-      window.setTimeout(() => setCopied(false), 1200)
-    }).catch(() => {})
+  const copy = useCallback(async () => {
+    if (!(await copyTextToClipboard(code))) return
+    setCopied(true)
+    window.setTimeout(() => setCopied(false), 1200)
   }, [code])
 
-  const action = "flex size-5 items-center justify-center rounded-sm text-foreground/72 transition-colors hover:text-foreground aria-pressed:bg-foreground/8 aria-pressed:text-foreground"
+  const action = "flex size-6 items-center justify-center rounded-sm text-foreground/72 transition-colors hover:text-foreground aria-pressed:bg-foreground/8 aria-pressed:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus-ring max-md:size-11"
 
   return (
     <div
@@ -106,13 +107,13 @@ const CodeBlock = memo(function CodeBlock({ code, lang }: { code: string; lang?:
     >
       <div className="flex select-none items-center justify-between gap-2 pt-1.5 pr-1.5 pb-0 pl-3">
         <span className="min-w-0 truncate font-mono text-[0.6875rem] text-foreground/72">{lang ?? "text"}</span>
-        <span className="flex items-center gap-0.5" role="toolbar" aria-label="Code block actions">
+        <span className="flex items-center gap-0.5">
           <button
             type="button"
             className={action}
             aria-pressed={wrapped}
-            aria-label={wrapped ? "Disable line wrap" : "Wrap lines"}
-            title={wrapped ? "Disable line wrap" : "Wrap lines"}
+            aria-label="Wrap lines"
+            title="Wrap lines"
             onClick={() => setWrapped((value) => !value)}
           >
             <WrapText className="size-3" />
@@ -120,11 +121,12 @@ const CodeBlock = memo(function CodeBlock({ code, lang }: { code: string; lang?:
           <button
             type="button"
             className={action}
-            aria-label={copied ? "Copied" : "Copy code"}
+            aria-label="Copy code"
             title={copied ? "Copied" : "Copy code"}
             onClick={copy}
           >
             {copied ? <Check className="size-3" /> : <Copy className="size-3" />}
+            <span role="status" className="sr-only">{copied ? "Copied" : ""}</span>
           </button>
         </span>
       </div>
@@ -152,12 +154,12 @@ function nodeText(node: ReactNode): string {
 
 const remarkPlugins = [remarkGfm]
 
-const components: Components = {
+const buildComponents = (streaming: boolean): Components => ({
   pre: ({ children }) => {
     const child = isValidElement<{ className?: string; children?: ReactNode }>(children) ? children : null
     const lang = /language-([\w+#.-]+)/.exec(child?.props.className ?? "")?.[1]?.toLowerCase()
     const code = nodeText(child?.props.children ?? children).replace(/\n$/, "")
-    return <CodeBlock code={code} lang={lang} />
+    return <CodeBlock code={code} lang={lang} streaming={streaming} />
   },
   table: ({ children }) => (
     <div className="chat-markdown-table-container">
@@ -169,12 +171,15 @@ const components: Components = {
       {children}
     </a>
   ),
-}
+})
+
+const staticComponents = buildComponents(false)
+const streamingComponents = buildComponents(true)
 
 export const MarkdownContent = memo(function MarkdownContent({ content, className, streaming }: MarkdownContentProps) {
   return (
     <div className={cn("chat-markdown", className)} data-streaming={streaming ? "" : undefined}>
-      <ReactMarkdown remarkPlugins={remarkPlugins} components={components}>
+      <ReactMarkdown remarkPlugins={remarkPlugins} components={streaming ? streamingComponents : staticComponents}>
         {content}
       </ReactMarkdown>
     </div>

@@ -77,7 +77,8 @@ export function TimelineToolbar({
               aria-pressed={density === option.value}
               onClick={() => onDensityChange(option.value)}
               className={cn(
-                "h-6 whitespace-nowrap rounded-[calc(var(--control-radius)-2px)] px-1.5 text-[11px] transition-colors sm:px-2 sm:text-xs",
+                "h-6 whitespace-nowrap rounded-[calc(var(--control-radius)-2px)] px-1.5 text-[11px] transition-colors max-md:min-h-11 sm:px-2 sm:text-xs",
+                "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus-ring",
                 density === option.value
                   ? "bg-accent text-foreground"
                   : "text-secondary-label hover:text-foreground"

@@ -18,7 +18,7 @@ import {
 } from "./subagent-status"
 
 const RAIL_ROW_CLASS =
-  "block w-full min-w-0 rounded-md px-1 py-0.5 text-left transition-colors hover:bg-accent/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70"
+  "block w-full min-w-0 rounded-md px-1 py-0.5 text-left transition-colors hover:bg-accent/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-focus-ring"
 
 /**
  * One subagent row in the rail.
