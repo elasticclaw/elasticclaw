@@ -22,12 +22,15 @@ export function AgentConfigForm({
   const [error, setError] = useState("")
   const [attempt, setAttempt] = useState(0)
   const mainCredentialRef = useRef<HTMLSelectElement>(null)
+  const retryButtonRef = useRef<HTMLButtonElement>(null)
+  const restoreRetryFocus = useRef(false)
 
   useEffect(() => {
     let active = true
     fetchAgentOptions()
       .then(data => {
         if (active) {
+          restoreRetryFocus.current = document.activeElement === retryButtonRef.current
           setOptions(data)
           setError("")
         }
@@ -39,8 +42,11 @@ export function AgentConfigForm({
   }, [attempt])
 
   useEffect(() => {
-    if (options && attempt > 0) mainCredentialRef.current?.focus()
-  }, [options, attempt])
+    if (options && restoreRetryFocus.current) {
+      restoreRetryFocus.current = false
+      mainCredentialRef.current?.focus()
+    }
+  }, [options])
 
   const concurrencyError = validateAgentConfig(value)
   const credentials = options?.credentials ?? []
@@ -125,11 +131,13 @@ export function AgentConfigForm({
         <div className="text-sm text-destructive">
           {error && <p role="alert">{error}</p>}
           <Button
+            ref={retryButtonRef}
             type="button"
             variant="link"
             size="sm"
-            disabled={!error}
+            aria-disabled={!error}
             onClick={() => {
+              if (!error) return
               setError("")
               setAttempt(n => n + 1)
             }}
