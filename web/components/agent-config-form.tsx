@@ -10,10 +10,12 @@ export function AgentConfigForm({
   value,
   onChange,
   disabled = false,
+  context = "workflow",
 }: {
   value: AgentConfig
   onChange: (value: AgentConfig) => void
   disabled?: boolean
+  context?: "workflow" | "run"
 }) {
   const id = useId()
   const [options, setOptions] = useState<AgentOptions | null>(null)
@@ -39,7 +41,7 @@ export function AgentConfigForm({
   const inheritsSubagents = value.subagents === undefined
   const mainModelPlaceholder = value.llm_key
     ? credentials.find(c => c.name === value.llm_key)?.default_model || "Use credential default model"
-    : "Use inherited model"
+    : context === "run" ? "Use workflow model" : "Use inherited model"
   const usesMainCredential = !value.subagents?.llm_key || value.subagents.llm_key === value.llm_key
   const subagentModelPlaceholder = inheritsSubagents
     ? "Use inherited model"
@@ -64,13 +66,13 @@ export function AgentConfigForm({
     }
   }
 
-  function useInheritedSettings() {
+  function restoreInheritedSettings() {
     const inherited = { ...value }
     delete inherited.subagents
     onChange(inherited)
   }
 
-  function useMainAgent() {
+  function selectMainAgent() {
     const maxConcurrent = value.subagents?.max_concurrent
     onChange({
       ...value,
@@ -81,7 +83,7 @@ export function AgentConfigForm({
   function credentialField(role: "main" | "subagents") {
     const selected = role === "main" ? value.llm_key : value.subagents?.llm_key
     const defaultLabel = role === "main"
-      ? "Use inherited credential"
+      ? context === "run" ? "Use workflow credential" : "Use inherited credential"
       : inheritsSubagents ? "Use inherited settings" : "Use main agent credential"
 
     return (
@@ -145,58 +147,70 @@ export function AgentConfigForm({
         <div className="space-y-2">
           <p className="text-xs text-muted-foreground">
             {inheritsSubagents
-              ? "Uses inherited workflow or template settings, including the concurrency limit."
-              : "Overrides inherited subagent settings. Empty model and credential fields use the main agent."}
+              ? "Uses inherited workflow or template settings. Customizing replaces the entire inherited subagent configuration, starting with the main agent’s model and credential and the default concurrency limit."
+              : "These settings replace the inherited subagent configuration, including its concurrency limit."}
           </p>
           <div className="flex flex-wrap gap-2">
             <Button
               type="button"
               variant="outline"
               size="sm"
-              disabled={inheritsSubagents}
-              onClick={useInheritedSettings}
+              onClick={() => inheritsSubagents
+                ? onChange({ ...value, subagents: {} })
+                : restoreInheritedSettings()}
             >
-              Use inherited settings
+              {inheritsSubagents ? "Customize subagents" : "Use inherited settings"}
             </Button>
-            <Button type="button" variant="outline" size="sm" onClick={useMainAgent}>
-              Use main agent
-            </Button>
+            {!inheritsSubagents && (
+              <Button type="button" variant="outline" size="sm" onClick={selectMainAgent}>
+                Use main agent
+              </Button>
+            )}
           </div>
         </div>
-        {credentialField("subagents")}
-        <div className="space-y-1.5">
-          <label htmlFor={`${id}-subagents-model`} className="text-xs font-medium">Model</label>
-          <Input
-            id={`${id}-subagents-model`}
-            value={value.subagents?.model ?? ""}
-            onChange={e => onChange({
-              ...value,
-              subagents: { ...value.subagents, model: e.target.value || undefined },
-            })}
-            placeholder={subagentModelPlaceholder}
-          />
-        </div>
-        <div className="space-y-1.5">
-          <label htmlFor={`${id}-concurrency`} className="text-xs font-medium">
-            Maximum concurrent subagents
-          </label>
-          <Input
-            id={`${id}-concurrency`}
-            type="number"
-            min={1}
-            max={32}
-            step={1}
-            value={value.subagents?.max_concurrent ?? ""}
-            onChange={e => onChange({
-              ...value,
-              subagents: {
-                ...value.subagents,
-                max_concurrent: e.target.value === "" ? undefined : Number(e.target.value),
-              },
-            })}
-            placeholder="Use default limit"
-          />
-        </div>
+        {!inheritsSubagents && (
+          <div className="space-y-3">
+            {credentialField("subagents")}
+            <div className="space-y-1.5">
+              <label htmlFor={`${id}-subagents-model`} className="text-xs font-medium">Model</label>
+              <Input
+                id={`${id}-subagents-model`}
+                value={value.subagents?.model ?? ""}
+                onChange={e => onChange({
+                  ...value,
+                  subagents: { ...value.subagents, model: e.target.value || undefined },
+                })}
+                placeholder={subagentModelPlaceholder}
+                aria-describedby={`${id}-subagents-model-help`}
+              />
+              <p id={`${id}-subagents-model-help`} className="text-xs text-muted-foreground">
+                Leave the model empty to use the main agent’s model with the same credential,
+                or the credential’s default model with a different credential.
+              </p>
+            </div>
+            <div className="space-y-1.5">
+              <label htmlFor={`${id}-concurrency`} className="text-xs font-medium">
+                Maximum concurrent subagents
+              </label>
+              <Input
+                id={`${id}-concurrency`}
+                type="number"
+                min={1}
+                max={32}
+                step={1}
+                value={value.subagents?.max_concurrent ?? ""}
+                onChange={e => onChange({
+                  ...value,
+                  subagents: {
+                    ...value.subagents,
+                    max_concurrent: e.target.value === "" ? undefined : Number(e.target.value),
+                  },
+                })}
+                placeholder="Use default limit"
+              />
+            </div>
+          </div>
+        )}
       </fieldset>
     </div>
   )

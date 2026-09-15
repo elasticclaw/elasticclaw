@@ -147,7 +147,7 @@ export function ManualTriggerModal({ open, onOpenChange, workflow }: ManualTrigg
             Customize agents for this run
           </label>
           {overrideAgents ? (
-            <AgentConfigForm value={agents} onChange={setAgents} disabled={triggering} />
+            <AgentConfigForm value={agents} onChange={setAgents} disabled={triggering} context="run" />
           ) : (
             <p className="text-xs text-muted-foreground">Uses this workflow’s agent settings.</p>
           )}

@@ -5,6 +5,10 @@ credential and model, then the subagents' credential, model, and concurrency lim
 A different credential can select a different provider. Credentials are managed in
 Settings; this form stores their names, never their secrets.
 
+When subagents inherit settings, choose **Customize subagents** before editing.
+Customization replaces the entire inherited subagent block and starts from the
+principal's model and credential with the default concurrency limit.
+
 **Use inherited settings** removes the entire subagent override, including its
 concurrency limit, so the workflow/template defaults apply again. **Use main agent**
 explicitly selects the principal's model and credential while keeping any authored
@@ -56,7 +60,9 @@ The workflow PATCH endpoint accepts the same fields inside `agents`:
 
 PATCH replaces the workflow's authored agent settings. Manual trigger requests
 accept an optional `agents` override alongside `inputs`; omitted settings inherit
-the workflow/template. Workflow v2 agent edits preserve its states and transitions.
+the workflow/template. Sending a per-run `llm_key` without `default_model` resets
+the main model to that credential's default instead of retaining the workflow's
+model. Workflow v2 agent edits preserve its states and transitions.
 
 ## Runtime support
 
@@ -68,6 +74,13 @@ Mixed model/credential selections involving the Codex runtime are rejected until
 cross-runtime delegation is validated. Existing Codex inheritance is preserved.
 Two different credentials using the same provider environment variable are also
 rejected, because the runtime cannot bind them independently in this configuration.
+
+### Daytona restart compatibility
+
+Daytona now honors a persisted model that matches the selected credential's
+provider when restarting a claw. Previously, bootstrap selected the credential's
+default model again. A persisted model from a different provider still falls back
+to the selected credential's compatible default.
 
 ## Timeline
 
