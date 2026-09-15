@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
 	"regexp"
@@ -114,7 +115,7 @@ func resolveActiveProvider(keys []*types.LLMKeyConfig, selectedKeyName string) s
 // ~/.openclaw/openclaw.json with the agent default, gateway settings, and any
 // auth-profile compatibility writes needed after openclaw onboard.
 // selectedKeyName is used to pick the active key (falls back to default, then first).
-func buildOpenClawProviderConfig(keys []*types.LLMKeyConfig, selectedKeyName string) string {
+func buildOpenClawProviderConfig(keys []*types.LLMKeyConfig, selectedKeyName string, subagents ...*types.SubagentConfig) string {
 	// Determine active key
 	activeKey := resolveActiveKey(keys, selectedKeyName)
 	grokOAuth := activeKey != nil && activeKey.Provider == "grok" && activeKey.AuthProfile != "" && activeKey.APIKey == ""
@@ -171,6 +172,29 @@ if anthropic_key:
 `, anthropicEnvVar)
 	}
 
+	subagentPatch := ""
+	if len(subagents) > 0 && subagents[0] != nil {
+		sub := subagents[0]
+		key := resolveActiveKey(keys, sub.LLMKey)
+		model := sub.Model
+		if key != nil && key.Provider == "grok" && key.AuthProfile != "" && key.APIKey == "" {
+			model = strings.Replace(model, "grok/", "xai/", 1)
+		}
+		runtime := "openclaw"
+		if key != nil && key.Provider == "codex" {
+			model = strings.Replace(model, "codex/", "openai/", 1)
+			runtime = "codex"
+		}
+		modelJSON, _ := json.Marshal(model)
+		subagentPatch = "agent_defaults.setdefault('models', {}).setdefault(model, {})\n"
+		subagentPatch += fmt.Sprintf("agent_defaults['subagents'] = {'model': %s}\n", modelJSON)
+		if sub.MaxConcurrent > 0 {
+			subagentPatch += fmt.Sprintf("agent_defaults['subagents']['maxConcurrent'] = %d\n", sub.MaxConcurrent)
+		}
+		// Explicit native runtime avoids inheriting a stale per-model runtime.
+		subagentPatch += fmt.Sprintf("agent_defaults.setdefault('models', {}).setdefault(%s, {})['agentRuntime'] = {'id': '%s'}\n", modelJSON, runtime)
+	}
+
 	return fmt.Sprintf(`python3 << 'PYEOF'
 import json, os
 path = os.path.expanduser('~/.openclaw/openclaw.json')
@@ -219,46 +243,51 @@ if %s:
 models = config.get('models')
 if isinstance(models, dict) and any(k in models for k in ('providers', 'routers', 'mode')):
     config.pop('models', None)
-if model.startswith('ollama/'):
-    model_id = model.split('/', 1)[1]
-    agent_defaults.setdefault('experimental', {})['localModelLean'] = True
-    config.setdefault('models', {})['mode'] = 'merge'
-    providers = config['models'].setdefault('providers', {})
-    providers['ollama'] = {
-        'baseUrl': 'http://ollama:11434',
-        'api': 'ollama',
-        'apiKey': 'OLLAMA_API_KEY',
-        'models': [{
-            'id': model_id,
-            'name': model_id,
-            'reasoning': False,
-            'input': ['text'],
-            'cost': {'input': 0, 'output': 0, 'cacheRead': 0, 'cacheWrite': 0},
-            'contextWindow': 32768,
-            'maxTokens': 1024,
-            'params': {'num_ctx': 32768, 'thinking': False, 'keep_alive': '15m'},
-            'compat': {'supportsTools': True, 'supportsUsageInStreaming': True},
-        }],
-    }
-if model.startswith('grok/'):
-    model_id = model.split('/', 1)[1]
-    config.setdefault('models', {})['mode'] = 'merge'
-    providers = config['models'].setdefault('providers', {})
-    providers['grok'] = {
-        'baseUrl': 'https://api.x.ai/v1',
-        'api': 'openai',
-        'apiKey': 'XAI_API_KEY',
-        'models': [{
-            'id': model_id,
-            'name': model_id,
-            'reasoning': True,
-            'input': ['text', 'image'],
-            'cost': {'input': 0, 'output': 0, 'cacheRead': 0, 'cacheWrite': 0},
-            'contextWindow': 256000,
-            'maxTokens': 8192,
-            'compat': {'supportsTools': True, 'supportsUsageInStreaming': True},
-        }],
-    }
+%sfor catalog_model in [model] + ([agent_defaults['subagents']['model']] if 'subagents' in agent_defaults else []):
+    if catalog_model.startswith('ollama/'):
+        model_id = catalog_model.split('/', 1)[1]
+        agent_defaults.setdefault('experimental', {})['localModelLean'] = True
+        config.setdefault('models', {})['mode'] = 'merge'
+        providers = config['models'].setdefault('providers', {})
+        previous_models = providers.get('ollama', {}).get('models', [])
+        providers['ollama'] = {
+            'baseUrl': 'http://ollama:11434',
+            'api': 'ollama',
+            'apiKey': 'OLLAMA_API_KEY',
+            'models': [{
+                'id': model_id,
+                'name': model_id,
+                'reasoning': False,
+                'input': ['text'],
+                'cost': {'input': 0, 'output': 0, 'cacheRead': 0, 'cacheWrite': 0},
+                'contextWindow': 32768,
+                'maxTokens': 1024,
+                'params': {'num_ctx': 32768, 'thinking': False, 'keep_alive': '15m'},
+                'compat': {'supportsTools': True, 'supportsUsageInStreaming': True},
+            }],
+        }
+        providers['ollama']['models'] += [entry for entry in previous_models if entry.get('id') != model_id]
+    if catalog_model.startswith('grok/'):
+        model_id = catalog_model.split('/', 1)[1]
+        config.setdefault('models', {})['mode'] = 'merge'
+        providers = config['models'].setdefault('providers', {})
+        previous_models = providers.get('grok', {}).get('models', [])
+        providers['grok'] = {
+            'baseUrl': 'https://api.x.ai/v1',
+            'api': 'openai',
+            'apiKey': 'XAI_API_KEY',
+            'models': [{
+                'id': model_id,
+                'name': model_id,
+                'reasoning': True,
+                'input': ['text', 'image'],
+                'cost': {'input': 0, 'output': 0, 'cacheRead': 0, 'cacheWrite': 0},
+                'contextWindow': 256000,
+                'maxTokens': 8192,
+                'compat': {'supportsTools': True, 'supportsUsageInStreaming': True},
+            }],
+        }
+        providers['grok']['models'] += [entry for entry in previous_models if entry.get('id') != model_id]
 %sconfig.setdefault('gateway', {})['bind'] = 'loopback'
 config['gateway']['port'] = 18789
 gw_password = os.environ.get('ELASTICCLAW_GATEWAY_PASSWORD', '')
@@ -268,7 +297,7 @@ if gw_password:
 with open(path, 'w') as f:
     json.dump(config, f, indent=2)
 print('OpenClaw config patched')
-PYEOF`, grokOAuthLiteral, codexSelectedLiteral, codexSelectedLiteral, openAISelectedLiteral, anthropicPatch)
+PYEOF`, grokOAuthLiteral, codexSelectedLiteral, codexSelectedLiteral, openAISelectedLiteral, subagentPatch, anthropicPatch)
 }
 
 // buildOpenClawAPIKeyAuthSyncShell returns a shell snippet that persists

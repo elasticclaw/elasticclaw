@@ -4346,13 +4346,19 @@ docker --version`); err != nil {
 
 	// Step 2: Onboard (configure OpenClaw) with the correct auth provider
 	s.setBootstrapStatus(clawID, "Configuring OpenClaw")
-	var llmKeyNameDaytona string
-	_ = s.db.QueryRow(`SELECT COALESCE(llm_key,'') FROM claws WHERE id=?`, clawID).Scan(&llmKeyNameDaytona)
+	var llmKeyNameDaytona, storedModelDaytona string
+	if err := s.db.QueryRow(`SELECT COALESCE(llm_key,''), COALESCE(default_model,'') FROM claws WHERE id=?`, clawID).Scan(&llmKeyNameDaytona, &storedModelDaytona); err != nil {
+		return fmt.Errorf("load claw model config: %w", err)
+	}
 	activeKeyNameDaytona := ""
 	activeKeyProviderDaytona := ""
 	s.mu.RLock()
 	activeKeyDaytona := resolveActiveKey(s.hubCfg.LLMKeys, llmKeyNameDaytona)
-	defaultModelDaytona := resolveDefaultModelForKey(s.hubCfg, activeKeyDaytona)
+	defaultModelDaytona := storedModelDaytona
+	if defaultModelDaytona == "" {
+		defaultModelDaytona = resolveDefaultModelForKey(s.hubCfg, activeKeyDaytona)
+	}
+	hubCfgDaytona := s.hubCfg
 	llmKeyEnvDaytona := buildLLMKeyEnv(s.hubCfg.LLMKeys, llmKeyNameDaytona)
 	modelAuthEnvDaytona := buildModelAuthEnv(s.hubCfg, llmKeyNameDaytona)
 	apiKeyAuthSyncDaytona := buildOpenClawAPIKeyAuthSyncShell(s.hubCfg.LLMKeys, llmKeyNameDaytona)
@@ -4364,6 +4370,13 @@ docker --version`); err != nil {
 		activeKeyProviderDaytona = activeKeyDaytona.Provider
 	}
 	s.mu.RUnlock()
+	plan, err := s.clawAgentBootstrapPlan(clawID, hubCfgDaytona, llmKeyNameDaytona, defaultModelDaytona)
+	if err != nil {
+		return err
+	}
+	llmKeyEnvDaytona, modelAuthEnvDaytona = plan.LLMKeyEnv, plan.ModelAuthEnv
+	apiKeyAuthSyncDaytona, oauthAuthSyncDaytona = plan.APIKeyAuthSync, plan.OAuthAuthSync
+	providerConfigScript = plan.ProviderConfig
 	log.Printf("[daytona] OpenClaw model resolution claw=%s selected_llm_key=%q active_llm_key=%q provider=%q default_model=%q config_patch=%t",
 		clawID, llmKeyNameDaytona, activeKeyNameDaytona, activeKeyProviderDaytona, defaultModelDaytona, providerConfigScript != "")
 	gatewayPassword := randomHex(16)
@@ -5731,6 +5744,11 @@ func (s *Server) bootstrapExedev(ctx context.Context, clawID, vmName string, p *
 	gatewayPassword := randomHex(16)
 
 	// Build bootstrap script using same pattern as replicated
+	plan, err := s.clawAgentBootstrapPlan(clawID, hubCfg, llmKeyName, defaultModel)
+	if err != nil {
+		return err
+	}
+	llmKeyEnv, modelAuthEnv = plan.LLMKeyEnv, plan.ModelAuthEnv
 	script := GenerateReplicatedBootstrapScript(BootstrapParams{
 		ClawID:          clawID,
 		ClawName:        clawName,
@@ -5749,10 +5767,10 @@ func (s *Server) bootstrapExedev(ctx context.Context, clawID, vmName string, p *
 		GitHubRepos:     githubRepos,
 		LLMKeyEnv:       llmKeyEnv,
 		ModelAuthEnv:    modelAuthEnv,
-		APIKeyAuthSync:  buildOpenClawAPIKeyAuthSyncShell(hubCfg.LLMKeys, llmKeyName),
-		OAuthAuthSync:   buildOpenClawOAuthAuthSyncShell(hubCfg.LLMKeys, llmKeyName),
+		APIKeyAuthSync:  plan.APIKeyAuthSync,
+		OAuthAuthSync:   plan.OAuthAuthSync,
 		LinearEnv:       buildLinearEnv(linearToken),
-		ProviderConfig:  buildOpenClawProviderConfig(hubCfg.LLMKeys, llmKeyName),
+		ProviderConfig:  plan.ProviderConfig,
 		OnboardFlags:    buildOnboardFlags(hubCfg.LLMKeys, llmKeyName, defaultModel),
 		Env:             env,
 	})
@@ -5872,9 +5890,14 @@ func (s *Server) provisionDocker(ctx context.Context, clawID string, req types.C
 	}
 
 	gatewayPassword := randomHex(16)
-	providerConfig := buildOpenClawProviderConfig(hubCfg.LLMKeys, llmKeyName)
-	apiKeyAuthSync := buildOpenClawAPIKeyAuthSyncShell(hubCfg.LLMKeys, llmKeyName)
-	oauthAuthSync := buildOpenClawOAuthAuthSyncShell(hubCfg.LLMKeys, llmKeyName)
+	plan, err := s.clawAgentBootstrapPlan(clawID, hubCfg, llmKeyName, defaultModel)
+	if err != nil {
+		return err
+	}
+	llmKeyEnv, modelAuthEnv = plan.LLMKeyEnv, plan.ModelAuthEnv
+	providerConfig := plan.ProviderConfig
+	apiKeyAuthSync := plan.APIKeyAuthSync
+	oauthAuthSync := plan.OAuthAuthSync
 	onboardFlags := buildOnboardFlags(hubCfg.LLMKeys, llmKeyName, defaultModel)
 
 	// Build env map for the container — passed directly as -e flags (no shell escaping needed).
@@ -6114,9 +6137,14 @@ func (s *Server) provisionLambdaMicroVMs(ctx context.Context, clawID string, req
 	if defaultModel == "" {
 		defaultModel = hubCfg.DefaultModel
 	}
-	providerConfig := buildOpenClawProviderConfig(hubCfg.LLMKeys, llmKeyName)
-	apiKeyAuthSync := buildOpenClawAPIKeyAuthSyncShell(hubCfg.LLMKeys, llmKeyName)
-	oauthAuthSync := buildOpenClawOAuthAuthSyncShell(hubCfg.LLMKeys, llmKeyName)
+	plan, err := s.clawAgentBootstrapPlan(clawID, hubCfg, llmKeyName, defaultModel)
+	if err != nil {
+		return err
+	}
+	llmKeyEnv, modelAuthEnv = plan.LLMKeyEnv, plan.ModelAuthEnv
+	providerConfig := plan.ProviderConfig
+	apiKeyAuthSync := plan.APIKeyAuthSync
+	oauthAuthSync := plan.OAuthAuthSync
 	onboardFlags := buildOnboardFlags(hubCfg.LLMKeys, llmKeyName, defaultModel)
 	gatewayPassword := randomHex(16)
 
@@ -7233,6 +7261,12 @@ func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.Pr
 	hubCfg := s.hubCfg
 	s.mu.RUnlock()
 
+	plan, err := s.clawAgentBootstrapPlan(clawID, hubCfg, llmKeyName, defaultModel)
+	if err != nil {
+		s.stopAgentWithReason(clawID, fmt.Sprintf("Bootstrap failed: %s", sanitizeBootstrapError(err)), false)
+		return
+	}
+	llmKeyEnv, modelAuthEnv = plan.LLMKeyEnv, plan.ModelAuthEnv
 	script := GenerateReplicatedBootstrapScript(BootstrapParams{
 		ClawID:          clawID,
 		ClawName:        clawName,
@@ -7251,10 +7285,10 @@ func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.Pr
 		GitHubRepos:     githubRepos,
 		LLMKeyEnv:       llmKeyEnv,
 		ModelAuthEnv:    modelAuthEnv,
-		APIKeyAuthSync:  buildOpenClawAPIKeyAuthSyncShell(hubCfg.LLMKeys, llmKeyName),
-		OAuthAuthSync:   buildOpenClawOAuthAuthSyncShell(hubCfg.LLMKeys, llmKeyName),
+		APIKeyAuthSync:  plan.APIKeyAuthSync,
+		OAuthAuthSync:   plan.OAuthAuthSync,
 		LinearEnv:       buildLinearEnv(linearToken),
-		ProviderConfig:  buildOpenClawProviderConfig(hubCfg.LLMKeys, llmKeyName),
+		ProviderConfig:  plan.ProviderConfig,
 		OnboardFlags:    buildOnboardFlags(hubCfg.LLMKeys, llmKeyName, defaultModel),
 		Env:             env,
 	})

@@ -900,7 +900,7 @@ func TestBuildOpenClawProviderConfig_ConfiguresOllamaProviderBaseURL(t *testing.
 
 	snippet := buildOpenClawProviderConfig(keys, "ollama-main")
 
-	assertContains(t, snippet, "if model.startswith('ollama/'):", "only configures Ollama when selected model is Ollama")
+	assertContains(t, snippet, "if catalog_model.startswith('ollama/'):", "only configures Ollama when selected model is Ollama")
 	assertContains(t, snippet, "agent_defaults.setdefault('experimental', {})['localModelLean'] = True", "uses lean mode for weak local dev models")
 	assertContains(t, snippet, "'baseUrl': 'http://ollama:11434'", "uses Compose Ollama service URL")
 	assertContains(t, snippet, "'apiKey': 'OLLAMA_API_KEY'", "keeps Ollama API key env reference")
@@ -920,7 +920,7 @@ func TestBuildOpenClawProviderConfig_ConfiguresGrokProvider(t *testing.T) {
 
 	snippet := buildOpenClawProviderConfig(keys, "grok-main")
 
-	assertContains(t, snippet, "if model.startswith('grok/'):", "only configures Grok when selected model is Grok")
+	assertContains(t, snippet, "if catalog_model.startswith('grok/'):", "only configures Grok when selected model is Grok")
 	assertContains(t, snippet, "'baseUrl': 'https://api.x.ai/v1'", "uses xAI OpenAI-compatible base URL")
 	assertContains(t, snippet, "'apiKey': 'XAI_API_KEY'", "uses Grok API key env var")
 	assertContains(t, snippet, "providers['grok']", "writes Grok provider config")

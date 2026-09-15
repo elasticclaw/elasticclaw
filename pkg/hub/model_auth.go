@@ -229,6 +229,11 @@ func (s *Server) managedGrokCredential(ctx context.Context, clawID string) (*man
 		return nil, fmt.Errorf("claw does not belong to authenticated tenant")
 	}
 
+	sub, err := s.loadClawSubagentConfig(clawID)
+	if err != nil {
+		return nil, fmt.Errorf("load claw subagent configuration: %w", err)
+	}
+
 	// xAI refresh tokens rotate on every use. Serialize the complete read,
 	// refresh, and persistence sequence so concurrent claws never reuse one.
 	// A hub owns its SQLite database, config file, and listener as one process;
@@ -238,6 +243,13 @@ func (s *Server) managedGrokCredential(ctx context.Context, clawID string) (*man
 
 	s.mu.RLock()
 	activeKey := resolveActiveKey(s.hubCfg.LLMKeys, selectedKeyName)
+	if (activeKey == nil || activeKey.Provider != "grok" || activeKey.AuthProfile == "") && sub != nil {
+		childKey := resolveActiveKey(s.hubCfg.LLMKeys, sub.LLMKey)
+		if childKey != nil && childKey.Provider == "grok" && childKey.AuthProfile != "" {
+			activeKey = childKey
+		}
+	}
+
 	var profile types.ModelAuthProfileConfig
 	var pendingAuthState string
 	if activeKey != nil && activeKey.Provider == "grok" && activeKey.AuthProfile != "" {
