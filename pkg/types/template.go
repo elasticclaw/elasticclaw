@@ -76,8 +76,20 @@ func (k *LLMKeyConfig) EnvVarName() string {
 	case "grok":
 		return "XAI_API_KEY"
 	default:
-		// Generic: PROVIDER_API_KEY uppercased
-		return strings.ToUpper(k.Provider) + "_API_KEY"
+		provider := strings.Map(func(r rune) rune {
+			if (r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_' {
+				return r
+			}
+			return '_'
+		}, strings.TrimSpace(k.Provider))
+		provider = strings.ToUpper(provider)
+		if provider == "" {
+			provider = "_"
+		}
+		if provider[0] >= '0' && provider[0] <= '9' {
+			provider = "_" + provider
+		}
+		return provider + "_API_KEY"
 	}
 }
 
