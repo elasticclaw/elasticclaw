@@ -4418,7 +4418,7 @@ docker --version`); err != nil {
 		}
 	}
 
-	configPatch := fmt.Sprintf("export HOME=/home/daytona; export OPENCLAW_DEFAULT_MODEL=%q; export ELASTICCLAW_GATEWAY_PASSWORD=%q; ", defaultModelDaytona, gatewayPassword) + llmKeyEnvDaytona + providerConfigScript
+	configPatch := daytonaOpenClawConfigPatch(defaultModelDaytona, gatewayPassword, llmKeyEnvDaytona, providerConfigScript)
 	if err := exec("configure openclaw model", 30*time.Second, configPatch); err != nil {
 		return err
 	}
