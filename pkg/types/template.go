@@ -871,7 +871,6 @@ type ConcurrencyGroup struct {
 
 // FactoryConfig defines an automation rule that creates claws based on integration events.
 type FactoryConfig struct {
-	Subagents *SubagentConfig `yaml:"subagents,omitempty" json:"subagents,omitempty"`
 	// SchemaVersion is the schema version of this config file.
 	// Defaults to "v1" if not specified for backward compatibility.
 	SchemaVersion    string   `yaml:"schema_version,omitempty" json:"schemaVersion,omitempty"`

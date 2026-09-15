@@ -154,3 +154,21 @@ func TestWorkflowAgentPatchAndSnapshot(t *testing.T) {
 		})
 	}
 }
+
+func TestAgentConfigSameCredentialInheritsPrincipalModel(t *testing.T) {
+	for _, provider := range []string{"anthropic", "codex"} {
+		for _, name := range []string{"", "main"} {
+			t.Run(provider+"/"+name, func(t *testing.T) {
+				cfg := &types.HubConfig{LLMKeys: types.LLMKeysList{{Name: "main", Provider: provider, APIKey: "fixture", Default: true, DefaultModel: "default"}}}
+				model := normalizeModelForProvider(provider, "custom")
+				got, err := resolveAgentConfig(cfg, types.AgentConfig{DefaultModel: model, LLMKey: "main", Subagents: &types.SubagentConfig{LLMKey: name}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got.Subagents.Model != model || got.Subagents.LLMKey != "main" {
+					t.Fatalf("child did not inherit principal: %+v", got.Subagents)
+				}
+			})
+		}
+	}
+}

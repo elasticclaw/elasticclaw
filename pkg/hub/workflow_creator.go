@@ -198,6 +198,11 @@ func (s *Server) createClawFromWorkflowWithOptions(workspace *types.WorkspaceCon
 	if agents.Subagents != nil || workflow.DefaultModel != "" || workflow.LLMKey != "" {
 		agents, err = resolveAgentConfig(s.hubCfg, agents)
 	} else {
+		// Before authored agent settings existed, the hub model preceded the
+		// selected credential's default. Preserve that legacy workflow behavior.
+		if agents.DefaultModel == "" {
+			agents.DefaultModel = s.hubCfg.DefaultModel
+		}
 		agents.DefaultModel, agents.LLMKey = resolveModelAndLLMKey(s.hubCfg, agents.LLMKey, agents.DefaultModel)
 	}
 	s.mu.RUnlock()

@@ -82,9 +82,9 @@ func resolveAgentConfig(cfg *types.HubConfig, requested types.AgentConfig) (type
 	}
 	if child.LLMKey == "" {
 		child.LLMKey = name
-		if child.Model == "" {
-			child.Model = model
-		}
+	}
+	if child.Model == "" && child.LLMKey == name {
+		child.Model = model
 	}
 	childName, childModel, mainChildKey, err := resolve(child.LLMKey, child.Model)
 	child.LLMKey, child.Model = childName, childModel
