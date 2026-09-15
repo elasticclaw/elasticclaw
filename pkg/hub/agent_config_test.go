@@ -1,7 +1,9 @@
 package hub
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -202,11 +204,75 @@ func TestAgentOverridesRequireAdmin(t *testing.T) {
 			t.Fatalf("admin override %d: %s", rr.Code, rr.Body.String())
 		}
 	}
+	// Direct claw creation keeps accepting top-level llm_key/default_model;
+	// only its subagents block is an administrator action.
+	createClaw := func(name, token, extra string) *httptest.ResponseRecorder {
+		return request(http.MethodPost, "/api/claws", `{"name":"`+name+`","provider":"noop",`+extra+`}`, token)
+	}
+	if rr := createClaw("direct-sub", session("bob"), `"subagents":{"llm_key":"worker"}`); rr.Code != http.StatusForbidden || !strings.Contains(rr.Body.String(), "administrator") {
+		t.Fatalf("non-admin create with subagents %d: %s", rr.Code, rr.Body.String())
+	}
+	if rr := createClaw("direct-key", session("bob"), `"llm_key":"worker","default_model":"openai/worker-model"`); rr.Code != http.StatusAccepted {
+		t.Fatalf("non-admin create with llm_key %d: %s", rr.Code, rr.Body.String())
+	}
+	for i, token := range []string{session("alice"), "test-token"} {
+		if rr := createClaw(fmt.Sprintf("direct-admin-%d", i), token, `"subagents":{"llm_key":"worker"}`); rr.Code != http.StatusAccepted {
+			t.Fatalf("admin create with subagents %d: %s", rr.Code, rr.Body.String())
+		}
+	}
 	if rr := request(http.MethodGet, "/api/agent-options", "", session("bob")); rr.Code != http.StatusForbidden {
 		t.Fatalf("non-admin options %d: %s", rr.Code, rr.Body.String())
 	}
 	if rr := request(http.MethodGet, "/api/agent-options", "", session("alice")); rr.Code != http.StatusOK {
 		t.Fatalf("admin options %d: %s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestWorkflowPushValidatesAgents(t *testing.T) {
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
+	t.Setenv("ELASTICCLAW_NOOP_PROVIDER", "1")
+	s, _ := NewTestServerWithConfig(t, agentTestConfig(), "", "", "")
+	SaveWorkspaceForTest(t, &types.WorkspaceConfig{Name: "legacy", Files: map[string]string{"elasticclaw-config.yaml": "schema_version: v1\nname: legacy\nprovider: noop\n"}}, nil)
+	SaveWorkspaceForTest(t, &types.WorkspaceConfig{Name: "engineering", Files: map[string]string{"elasticclaw-config.yaml": testWorkspaceV2YAML + "\nexecution:\n  provider: noop\n"}}, nil)
+	push := func(workspace string, workflow *types.WorkflowConfig) *httptest.ResponseRecorder {
+		body, err := json.Marshal(WorkflowPushRequest{Workflows: []*types.WorkflowConfig{workflow}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		req := httptest.NewRequest(http.MethodPost, "/api/workspaces/"+workspace+"/workflows", bytes.NewReader(body))
+		req.Header.Set("Authorization", "Bearer test-token")
+		rr := httptest.NewRecorder()
+		s.Handler().ServeHTTP(rr, req)
+		return rr
+	}
+	v1 := func(agents types.AgentConfig) *types.WorkflowConfig {
+		return &types.WorkflowConfig{Name: "delivery", Integration: "github", EnableManualTrigger: true, DefaultModel: agents.DefaultModel, LLMKey: agents.LLMKey, Subagents: agents.Subagents}
+	}
+	v2 := func(agentsYAML string) *types.WorkflowConfig {
+		return &types.WorkflowConfig{Name: "delivery", SchemaVersion: "2", RawConfig: testWorkflowV2YAML + agentsYAML}
+	}
+	for _, tc := range []struct {
+		name      string
+		workspace string
+		workflow  *types.WorkflowConfig
+		wantCode  int
+		wantBody  string
+	}{
+		{"v1 max_concurrent", "legacy", v1(types.AgentConfig{Subagents: &types.SubagentConfig{MaxConcurrent: 64}}), http.StatusBadRequest, "max_concurrent"},
+		{"v1 unknown key", "legacy", v1(types.AgentConfig{LLMKey: "missing"}), http.StatusBadRequest, "unknown LLM credential"},
+		{"v1 valid", "legacy", v1(types.AgentConfig{LLMKey: "main", Subagents: &types.SubagentConfig{LLMKey: "worker", MaxConcurrent: 3}}), http.StatusOK, ""},
+		{"v2 max_concurrent", "engineering", v2("subagents:\n  max_concurrent: 64\n"), http.StatusBadRequest, "max_concurrent"},
+		{"v2 unknown key", "engineering", v2("llm_key: missing\n"), http.StatusBadRequest, "unknown LLM credential"},
+		{"v2 valid", "engineering", v2("llm_key: main\nsubagents:\n  llm_key: worker\n  max_concurrent: 3\n"), http.StatusOK, ""},
+	} {
+		rr := push(tc.workspace, tc.workflow)
+		if rr.Code != tc.wantCode || !strings.Contains(rr.Body.String(), tc.wantBody) {
+			t.Fatalf("%s: %d: %s", tc.name, rr.Code, rr.Body.String())
+		}
+	}
+	_, workflow, ok, err := s.resolveWorkflowConfig("engineering", "delivery")
+	if err != nil || !ok || workflow.Subagents == nil || workflow.Subagents.MaxConcurrent != 3 {
+		t.Fatalf("stored v2 agents: %#v %v", workflow, err)
 	}
 }
 

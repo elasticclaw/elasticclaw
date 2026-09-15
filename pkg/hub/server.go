@@ -1701,6 +1701,12 @@ func (s *Server) handleCreateClaw(w http.ResponseWriter, r *http.Request, tenant
 		http.Error(w, "name and provider are required", http.StatusBadRequest)
 		return
 	}
+	// Top-level llm_key/default_model predate agent settings and stay open;
+	// selecting subagent credentials is an administrator action.
+	if req.Subagents != nil && !s.agentOverridesAllowed(r) {
+		http.Error(w, "subagent settings require an administrator", http.StatusForbidden)
+		return
+	}
 
 	// Check provider is configured
 	s.mu.RLock()
