@@ -21,9 +21,11 @@ interface ManualTriggerModalProps {
   open: boolean
   onOpenChange: (open: boolean) => void
   workflow?: Workflow | null
+  // Per-run agent overrides and agent options are admin-only in the hub.
+  isAdmin?: boolean
 }
 
-export function ManualTriggerModal({ open, onOpenChange, workflow }: ManualTriggerModalProps) {
+export function ManualTriggerModal({ open, onOpenChange, workflow, isAdmin = false }: ManualTriggerModalProps) {
   const [inputValues, setInputValues] = useState<Record<string, string>>({})
   const [triggering, setTriggering] = useState(false)
   const [triggerError, setTriggerError] = useState<string | null>(null)
@@ -60,6 +62,8 @@ export function ManualTriggerModal({ open, onOpenChange, workflow }: ManualTrigg
     }
   }
 
+  const applyAgentOverrides = isAdmin && overrideAgents
+
   const handleTrigger = useCallback(async () => {
     if (!workflow) return
     setTriggering(true)
@@ -92,11 +96,11 @@ export function ManualTriggerModal({ open, onOpenChange, workflow }: ManualTrigg
           }
         }
       }
-      if (overrideAgents) {
+      if (applyAgentOverrides) {
         const validation = validateAgentConfig(agents)
         if (validation) throw new Error(validation)
       }
-      await triggerWorkflow(workflow, inputs, overrideAgents ? agents : undefined)
+      await triggerWorkflow(workflow, inputs, applyAgentOverrides ? agents : undefined)
       setTriggering(false)
       onOpenChange(false)
     } catch (e) {
@@ -104,7 +108,7 @@ export function ManualTriggerModal({ open, onOpenChange, workflow }: ManualTrigg
       // Keep modal open so user sees the backend validation error
       setTriggerError(e instanceof Error ? e.message : String(e))
     }
-  }, [workflow, inputValues, onOpenChange, overrideAgents, agents])
+  }, [workflow, inputValues, onOpenChange, applyAgentOverrides, agents])
 
   if (!workflow) return null
 
@@ -136,22 +140,24 @@ export function ManualTriggerModal({ open, onOpenChange, workflow }: ManualTrigg
           </div>
         )}
 
-        <div className="space-y-4 border-t border-border pt-4">
-          <label className="flex items-center gap-2 text-sm font-medium">
-            <input
-              type="checkbox"
-              checked={overrideAgents}
-              disabled={triggering}
-              onChange={e => setOverrideAgents(e.target.checked)}
-            />
-            Override agents for this run
-          </label>
-          {overrideAgents ? (
-            <AgentConfigForm value={agents} onChange={setAgents} disabled={triggering} context="run" />
-          ) : (
-            <p className="text-xs text-muted-foreground">Uses this workflow’s agent settings.</p>
-          )}
-        </div>
+        {isAdmin && (
+          <div className="space-y-4 border-t border-border pt-4">
+            <label className="flex items-center gap-2 text-sm font-medium">
+              <input
+                type="checkbox"
+                checked={overrideAgents}
+                disabled={triggering}
+                onChange={e => setOverrideAgents(e.target.checked)}
+              />
+              Override agents for this run
+            </label>
+            {overrideAgents ? (
+              <AgentConfigForm value={agents} onChange={setAgents} disabled={triggering} context="run" />
+            ) : (
+              <p className="text-xs text-muted-foreground">Uses this workflow’s agent settings.</p>
+            )}
+          </div>
+        )}
 
         {triggerError && (
           <div role="alert" className="flex items-center gap-1.5 text-sm text-red-500 bg-red-50 p-2 rounded">
