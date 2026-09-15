@@ -1531,7 +1531,7 @@ function ClawChatView({
                   // way out of the drill-down: give it the same 44px tap target
                   // the timeline's own rows carry.
                   "max-md:min-h-11 max-md:pr-3",
-                  "transition-colors hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-ring"
+                  "transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus-ring"
                 )}
               >
                 <ChevronLeft className="size-3.5 shrink-0" />

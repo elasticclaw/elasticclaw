@@ -137,14 +137,14 @@ export function StepRow({
       <Header
         type={interactive ? "button" : undefined}
         aria-expanded={hasBody && !opensSubagent ? expanded : undefined}
-        aria-controls={hasBody && !opensSubagent ? bodyId : undefined}
+        aria-controls={expanded && hasBody && !opensSubagent ? bodyId : undefined}
         aria-label={opensSubagent ? `Open subagent ${step.detail || step.title}` : undefined}
         onClick={activate ? (e) => activate(e.currentTarget) : undefined}
         className={cn(
           "flex w-full select-none items-center gap-1.5 rounded-md px-0.5 py-0.5 text-left transition-colors",
           isCard ? "min-h-5" : "min-h-6",
           // 44px tap target for expandable rows on touch screens
-          interactive && "max-md:min-h-11",
+          interactive && (isCard ? "max-md:min-h-9" : "max-md:min-h-11"),
           interactive && ROW_INTERACTIVE_CLASS
         )}
       >
@@ -304,7 +304,7 @@ function StepGroupRow({
         className={cn(
           "flex w-full items-center gap-1.5 rounded-md px-0.5 py-0.5 text-left leading-relaxed transition-colors",
           isCard ? "min-h-5 text-xs" : "min-h-6 text-sm",
-          "max-md:min-h-11",
+          isCard ? "max-md:min-h-9" : "max-md:min-h-11",
           ROW_INTERACTIVE_CLASS
         )}
       >

@@ -103,7 +103,7 @@ export const TurnCard = memo(function TurnCard({
             anchor(e.currentTarget)
             onToggle(toggleKey, expanded)
           }}
-          className="flex min-w-0 max-w-full cursor-pointer select-none items-center gap-1 rounded-md px-1 text-left max-md:min-h-11 text-sm leading-relaxed text-muted-foreground tabular-nums transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-focus-ring"
+          className="flex w-full min-w-0 max-w-full cursor-pointer select-none items-center gap-1 rounded-md px-1 text-left max-md:min-h-11 text-sm leading-relaxed text-muted-foreground tabular-nums transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-focus-ring"
         >
           <span className="min-w-0 truncate">{label}</span>
           <span className="shrink-0 whitespace-nowrap">

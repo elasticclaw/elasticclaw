@@ -108,10 +108,10 @@ function MessageCopyButton({ text, className }: { text: string; className?: stri
     <button
       type="button"
       onClick={copy}
-      aria-label={copied ? "Copied" : "Copy message"}
+      aria-label="Copy message"
       title={copied ? "Copied" : "Copy message"}
       className={cn(
-        "flex size-6 items-center justify-center rounded-[var(--control-radius)] text-muted-foreground transition-colors hover:bg-accent/40 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus-ring",
+        "flex size-6 max-md:size-11 items-center justify-center rounded-[var(--control-radius)] text-muted-foreground transition-colors hover:bg-accent/40 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus-ring",
         className
       )}
     >

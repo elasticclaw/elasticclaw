@@ -76,7 +76,7 @@
   --secondary-label: var(--muted-foreground);
   --icon-muted: var(--muted-foreground);
   --placeholder: var(--muted-foreground);
-  --message-surface: oklch(0.955 0 0);
+  --message-surface: oklch(0.93 0 0);
   --message-foreground: var(--foreground);
   --message-action: oklch(0.488 0.217 264);
   --message-action-foreground: #fff;
@@ -157,7 +157,7 @@
   --message-action: oklch(0.571 0.21 264);
   --error-foreground: #f87171;
   --tool-error-icon: #fca5a5;
-  --message-surface: #1f1f1f;
+  --message-surface: #262626;
   --error-surface: color-mix(in srgb, var(--error) 16%, transparent);
   --warning-foreground: #fbbf24;
   --warning-surface: color-mix(in srgb, var(--warning) 16%, transparent);

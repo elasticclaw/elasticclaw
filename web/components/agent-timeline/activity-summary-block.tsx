@@ -42,7 +42,7 @@ function SummaryRow({
       className={cn(
         "flex w-full items-center gap-1.5 rounded-md px-0.5 py-0.5 text-left leading-relaxed transition-colors",
         isCard ? "min-h-5 text-xs" : "min-h-6 text-sm",
-        "max-md:min-h-11",
+        isCard ? "max-md:min-h-9" : "max-md:min-h-11",
         ROW_INTERACTIVE_CLASS
       )}
     >
