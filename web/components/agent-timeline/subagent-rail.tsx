@@ -155,7 +155,8 @@ export function SubagentRail({
         <SubagentSectionLabel>Subagents</SubagentSectionLabel>
         <span className="ml-auto truncate font-mono text-[9.5px] text-muted-foreground">
           {counts.running + counts.quiet} running · {counts.done + counts.failed} finished
-          {launched.length > 0 && ` · ${launched.length} awaiting result`}
+          {counts.launched > 0 && ` · ${counts.launched} launched`}
+          {counts.unknown > 0 && ` · ${counts.unknown} unconfirmed`}
         </span>
       </div>
 

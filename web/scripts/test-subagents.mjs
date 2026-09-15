@@ -16,7 +16,9 @@ try {
       compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
     }).outputText)
   }
-  const { default: { currentTurnSubagents, subagentCounts, subagentSummaryLine } } = await import(pathToFileURL(path.join(directory, "subagents.js")).href)
+  const { default: subagentModule } = await import(pathToFileURL(path.join(directory, "subagents.js")).href)
+  const { currentTurnSubagents, collectSubagents, latestOpenSubagentOutputMs, subagentCounts, subagentSummaryLine } = subagentModule
+  const { default: { pairActivitySteps } } = await import(pathToFileURL(path.join(directory, "turns.js")).href)
   const now = Date.now()
   const user = { id: "user", role: "user", content: "Delegate work", timestamp: new Date(now - 2000) }
   const event = (id, phase, extra = {}) => ({
@@ -24,7 +26,26 @@ try {
     activity: { kind: "tool", tool: "sessions_spawn", phase, call_id: "spawn-1", ...extra },
   })
   const start = event("start", "start", { subagent_requested_model: "openai/worker", subagent_prompt: "Inspect API" })
+  for (const age of [0, 60_000]) {
+    const observedAt = now + age
+    const turns = [{ index: 0, steps: pairActivitySteps([start]) }]
+    for (const subs of [
+      currentTurnSubagents([user, start], observedAt),
+      collectSubagents(turns, observedAt),
+    ]) {
+      assert.equal(subs.length, 1)
+      assert.equal(subs[0].status, "unknown", "a launch request alone cannot establish child activity")
+      const counts = subagentCounts(subs)
+      assert.equal(counts.running + counts.quiet + counts.done, 0)
+      assert.match(subagentSummaryLine(subs), /unconfirmed/)
+      assert.doesNotMatch(subagentSummaryLine(subs), /running|done/)
+    }
+    assert.equal(latestOpenSubagentOutputMs(turns), 0, "unconfirmed async requests do not need a liveness clock")
+  }
   const accepted = event("receipt", "result", { subagent_spawn_status: "accepted", subagent_child_session: "child", subagent_child_run: "run", result: '{"status":"accepted"}' })
+  const collected = collectSubagents([{ index: 0, steps: pairActivitySteps([start, accepted]) }], now)
+  assert.equal(collected.length, 1)
+  assert.equal(collected[0].status, "launched")
   const launched = currentTurnSubagents([user, start, accepted], now)
   assert.equal(launched.length, 1, "start and receipt must represent one child")
   assert.equal(launched[0].status, "launched")

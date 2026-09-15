@@ -75,7 +75,7 @@ function lastOutputAtMs(step: Step): number {
  */
 function statusForStep(step: Step, outputAtMs: number, nowMs: number): SubagentStatus {
   if (step.status === "failed" || firstActivityValue(step, "subagent_spawn_status") === "failed") return "failed"
-  if (isAsyncSpawnStep(step) && step.endedAt !== undefined) {
+  if (isAsyncSpawnStep(step)) {
     return firstActivityValue(step, "subagent_spawn_status") === "accepted" ? "launched" : "unknown"
   }
   if (step.endedAt !== undefined) return "done"
@@ -207,7 +207,7 @@ export function latestOpenSubagentOutputMs(turns: Turn[]): number {
   let latest = 0
   for (const turn of turns) {
     for (const step of turn.steps) {
-      if (!isSubagentStep(step) || step.endedAt !== undefined || step.status === "failed") continue
+      if (!isSubagentStep(step) || isAsyncSpawnStep(step) || step.endedAt !== undefined || step.status === "failed") continue
       latest = Math.max(latest, lastOutputAtMs(step))
     }
   }
