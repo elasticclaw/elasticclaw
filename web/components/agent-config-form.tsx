@@ -65,10 +65,16 @@ export function AgentConfigForm({
 
   function changeCredential(role: "main" | "subagents", name: string) {
     if (role === "main") {
+      // Subagents without their own credential follow the main one, so their
+      // model belongs to the old provider and must be cleared too.
+      const subagents = value.subagents && !value.subagents.llm_key
+        ? { ...value.subagents, model: undefined }
+        : value.subagents
       onChange({
         ...value,
         llm_key: name || undefined,
         default_model: undefined,
+        subagents,
       })
     } else {
       onChange({
