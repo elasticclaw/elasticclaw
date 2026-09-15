@@ -115,6 +115,13 @@ jobs:
             test: TestDaytonaGitHubIssuesWorkflowE2E
           - provider_name: Daytona
             provider_slug: daytona
+            tracker_name: GitHub Issues + camelStream
+            slug: github-camel-stream
+            test: TestDaytonaCamelStreamGitHubIssuesWorkflowE2E
+            llm_provider: camel-stream
+            llm_model: camel-stream/auto
+          - provider_name: Daytona
+            provider_slug: daytona
             tracker_name: Linear
             slug: linear
             test: TestDaytonaLinearWorkflowE2E
@@ -143,6 +150,13 @@ jobs:
             tracker_name: Workflow
             slug: workflow
             test: TestDockerWorkflowE2E
+          - provider_name: Docker
+            provider_slug: docker
+            tracker_name: camelStream
+            slug: camel-stream
+            test: TestDockerCamelStreamWorkflowE2E
+            llm_provider: camel-stream
+            llm_model: camel-stream/auto
           - provider_name: exe.dev
             provider_slug: exedev
             tracker_name: GitHub Issues
@@ -171,11 +185,13 @@ jobs:
       ELASTICCLAW_E2E_JIRA_PROJECT_KEY: ${{ secrets.ELASTICCLAW_E2E_JIRA_PROJECT_KEY }}
       ELASTICCLAW_E2E_JIRA_MANUAL_WEBHOOK: "true"
       ELASTICCLAW_E2E_EXEDEV_SSH_KEY: ${{ secrets.ELASTICCLAW_E2E_EXEDEV_SSH_KEY }}
-      ELASTICCLAW_E2E_MODEL: fireworks/accounts/fireworks/models/kimi-k2p6
+      ELASTICCLAW_E2E_LLM_PROVIDER: ${{ matrix.llm_provider || 'fireworks' }}
+      ELASTICCLAW_E2E_MODEL: ${{ matrix.llm_model || 'fireworks/accounts/fireworks/models/kimi-k2p6' }}
       ELASTICCLAW_E2E_RUN_ID: pr-${{ github.event.pull_request.number || github.run_number }}-${{ github.run_attempt }}-${{ matrix.provider_slug }}-${{ matrix.slug }}-${{ github.sha }}
       DAYTONA_API_KEY: ${{ secrets.DAYTONA_API_KEY }}
       REPLICATED_API_TOKEN: ${{ secrets.REPLICATED_API_TOKEN }}
       FIREWORKS_API_KEY: ${{ secrets.FIREWORKS_API_KEY }}
+      CAMEL_API_KEY: ${{ secrets.CAMEL_API_KEY }}
       NGROK_AUTHTOKEN: ${{ secrets.NGROK_AUTHTOKEN }}
       NGROK_API_KEY: ${{ secrets.NGROK_API_KEY }}
     steps:
