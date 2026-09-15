@@ -196,6 +196,11 @@ func (s *Server) createClawFromWorkflowWithOptions(workspace *types.WorkspaceCon
 	agents = mergeAgentConfig(agents, workflowAgentConfig(workflow))
 	s.mu.RLock()
 	if agents.Subagents != nil || workflow.DefaultModel != "" || workflow.LLMKey != "" {
+		// A principal not authored on the workflow keeps the legacy hub-model
+		// precedence; an authored llm_key resets to that credential's default.
+		if agents.DefaultModel == "" && workflow.LLMKey == "" {
+			agents.DefaultModel = compatibleFallbackModel(s.hubCfg, agents.LLMKey, s.hubCfg.DefaultModel)
+		}
 		agents, err = resolveAgentConfig(s.hubCfg, agents)
 	} else {
 		// Before authored agent settings existed, the hub model preceded the

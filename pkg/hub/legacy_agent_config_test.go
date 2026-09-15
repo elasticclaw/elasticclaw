@@ -40,6 +40,20 @@ func TestTemplateAgentSnapshotPreservesUnconfiguredLegacy(t *testing.T) {
 	}
 }
 
+func TestTemplateAgentSnapshotDropsIncompatibleHubModel(t *testing.T) {
+	s := &Server{hubCfg: &types.HubConfig{DefaultModel: "openai/hub-model", LLMKeys: types.LLMKeysList{
+		{Name: "primary", Provider: "anthropic", APIKey: "fixture", Default: true, DefaultModel: "main"},
+	}}}
+	tmpl := &types.TemplateConfig{Subagents: &types.SubagentConfig{}}
+	model, key, _, err := s.resolveTemplateAgentSnapshot(tmpl, s.hubCfg.DefaultModel, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if model != "anthropic/main" || key != "primary" {
+		t.Fatalf("principal = %s/%s, want credential default", key, model)
+	}
+}
+
 func TestTemplateAgentSnapshotRejectsUnavailableChild(t *testing.T) {
 	s := &Server{hubCfg: &types.HubConfig{LLMKeys: types.LLMKeysList{
 		{Name: "primary", Provider: "anthropic", APIKey: "fixture"},

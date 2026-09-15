@@ -28,6 +28,20 @@ func agentCredentialAvailable(cfg *types.HubConfig, key *types.LLMKeyConfig) boo
 	return llmKeyHasRequiredAPIKey(key)
 }
 
+// compatibleFallbackModel keeps a hub-level fallback model only when the
+// credential resolveAgentConfig will select can serve it; otherwise it returns
+// "" so that credential's own default applies instead of a provider mismatch.
+func compatibleFallbackModel(cfg *types.HubConfig, keyName, model string) string {
+	if cfg == nil || !strings.Contains(model, "/") {
+		return model
+	}
+	key := resolveActiveKey(cfg.LLMKeys, keyName)
+	if key == nil || modelMatchesProvider(key.Provider, model) {
+		return model
+	}
+	return ""
+}
+
 // resolveAgentConfig pins model and credential names before provisioning.
 func resolveAgentConfig(cfg *types.HubConfig, requested types.AgentConfig) (types.AgentConfig, error) {
 	if cfg == nil {

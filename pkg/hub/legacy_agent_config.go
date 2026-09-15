@@ -14,6 +14,11 @@ func (s *Server) resolveTemplateAgentSnapshot(tmpl *types.TemplateConfig, model,
 		return model, key, "null", nil
 	}
 	s.mu.RLock()
+	if tmpl.DefaultModel == "" {
+		// Callers pass the hub default unconditionally; drop it when the
+		// selected credential's provider cannot serve it.
+		model = compatibleFallbackModel(s.hubCfg, key, model)
+	}
 	resolved, err := resolveAgentConfig(s.hubCfg, types.AgentConfig{DefaultModel: model, LLMKey: key, Subagents: tmpl.Subagents})
 	s.mu.RUnlock()
 	if err != nil {
