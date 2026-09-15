@@ -223,9 +223,6 @@ func newFileBackedRetentionServer(t *testing.T) (*Server, string) {
 		"tenant", "tenant", "token", "claw-token", now()); err != nil {
 		t.Fatalf("seed tenant: %v", err)
 	}
-	if err := markHubMigration(db, checkpointBlobRefsBackfillMigration); err != nil {
-		t.Fatalf("mark backfill migration: %v", err)
-	}
 	return &Server{db: db, hubCfg: &types.HubConfig{}, claws: map[string]*clawConn{}}, path
 }
 
@@ -233,43 +230,60 @@ func newFileBackedRetentionServer(t *testing.T) (*Server, string) {
 // UPDATE did. Under ENOSPC or SQLITE_BUSY that leaves the row 'creating' -- still
 // expecting its blobs -- with nothing keeping them out of the next sweep: the
 // worst of both states. They now move in one transaction.
+//
+// The fault is injected on ONE statement at a time, on a live handle. A closed
+// handle fails every statement, which any implementation survives -- including
+// two bare Execs in either order. What has to hold is that the two writes are
+// one unit: when the UPDATE fails the DELETE must not have happened, and when
+// the DELETE fails the UPDATE must not have stuck.
 func TestFailCheckpointKeepsItsClaimsWhenTheUpdateFails(t *testing.T) {
-	s, path := newFileBackedRetentionServer(t)
-	reference := time.Now()
-	insertRetentionClaw(t, s, "claw", reference)
-	insertRetentionCheckpoint(t, s, retentionCheckpoint{
-		id: "cp", clawID: "claw", status: "creating", createdAt: reference})
-	sha := writeRetentionBlob(t, []byte("planned but never uploaded"))
-	if err := s.recordCheckpointBlobRefs("cp", testTreeSHA, []types.CheckpointFile{
-		{Path: "workspace/a.txt", SHA256: sha, Size: 25},
-	}); err != nil {
-		t.Fatalf("recordCheckpointBlobRefs: %v", err)
+	cases := []struct {
+		name    string
+		trigger string
+		why     string
+	}{
+		{
+			name:    "the UPDATE fails",
+			trigger: `CREATE TRIGGER fail_update BEFORE UPDATE ON claw_checkpoints BEGIN SELECT RAISE(ABORT, 'simulated write failure'); END`,
+			why:     "the row stays 'creating' and must keep the claims that protect its upload",
+		},
+		{
+			name:    "the DELETE fails",
+			trigger: `CREATE TRIGGER fail_delete BEFORE DELETE ON checkpoint_blob_refs BEGIN SELECT RAISE(ABORT, 'simulated write failure'); END`,
+			why:     "a row recorded as 'failed' while still holding its claims would pin the blobs forever",
+		},
 	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newRetentionTestServer(t)
+			reference := time.Now()
+			insertRetentionClaw(t, s, "claw", reference)
+			insertRetentionCheckpoint(t, s, retentionCheckpoint{
+				id: "cp", clawID: "claw", status: "creating", createdAt: reference})
+			sha := writeRetentionBlob(t, []byte("planned but never uploaded"))
+			if err := s.recordCheckpointBlobRefs("cp", testTreeSHA, []types.CheckpointFile{
+				{Path: "workspace/a.txt", SHA256: sha, Size: 25},
+			}); err != nil {
+				t.Fatalf("recordCheckpointBlobRefs: %v", err)
+			}
+			if _, err := s.db.Exec(tc.trigger); err != nil {
+				t.Fatal(err)
+			}
 
-	// A closed handle stands in for the write failure: every Exec on it fails,
-	// exactly as every Exec does once the filesystem is full.
-	if err := s.db.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.failCheckpoint("cp", "disk full"); err == nil {
-		t.Fatal("failCheckpoint reported success while its UPDATE could not run")
-	}
-
-	reopened, err := openDB(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer reopened.Close()
-	s.db = reopened
-	if got := checkpointBlobRefCount(t, s, "cp"); got != 1 {
-		t.Fatalf("pending claims after a failed UPDATE = %d, want 1 (the row is still 'creating' and unprotected otherwise)", got)
-	}
-	var status string
-	if err := s.db.QueryRow(`SELECT status FROM claw_checkpoints WHERE id='cp'`).Scan(&status); err != nil {
-		t.Fatal(err)
-	}
-	if status != "creating" {
-		t.Fatalf("status = %q, want creating", status)
+			if err := s.failCheckpoint("cp", "disk full"); err == nil {
+				t.Fatalf("failCheckpoint reported success while %s", tc.name)
+			}
+			if got := checkpointBlobRefCount(t, s, "cp"); got != 1 {
+				t.Fatalf("claims after %s = %d, want 1 (%s)", tc.name, got, tc.why)
+			}
+			var status string
+			if err := s.db.QueryRow(`SELECT status FROM claw_checkpoints WHERE id='cp'`).Scan(&status); err != nil {
+				t.Fatal(err)
+			}
+			if status != "creating" {
+				t.Fatalf("status = %q after %s, want creating (%s)", status, tc.name, tc.why)
+			}
+		})
 	}
 }
 
@@ -342,9 +356,23 @@ func TestCheckpointTransitionsRequireTheRowToStillBeCreating(t *testing.T) {
 			s := newRetentionTestServer(t)
 			reference := time.Now()
 			insertRetentionClaw(t, s, "claw", reference)
+			// A 'ready' row holds a real workspace: root tree, message blob and
+			// manifest edges plus the tree's expansion, exactly as finalize left
+			// them. Seeding empty digests instead would make "the edge count is
+			// unchanged" and "the edges were deleted" the same number.
+			rootSHA, _, _ := planTreeFixture(t, 2)
+			msgSHA := writeRetentionBlob(t, []byte(`{"id":"m1"}`))
 			if tc.status != "" {
-				insertRetentionCheckpoint(t, s, retentionCheckpoint{
-					id: "cp", clawID: "claw", status: tc.status, createdAt: reference})
+				cp := retentionCheckpoint{id: "cp", clawID: "claw", status: tc.status, createdAt: reference}
+				if tc.status == "ready" {
+					cp.rootTree, cp.messageTree, cp.writeManifest = rootSHA, msgSHA, true
+				}
+				insertRetentionCheckpoint(t, s, cp)
+			}
+			edgesBefore := checkpointBlobRefCount(t, s, "cp")
+			expansionBefore := treeBlobRefCount(t, s, rootSHA)
+			if tc.status == "ready" && (edgesBefore != 3 || expansionBefore != 2) {
+				t.Fatalf("fixture seeded %d edges and %d expansion rows, want 3 and 2", edgesBefore, expansionBefore)
 			}
 
 			err := tc.apply(s)
@@ -369,12 +397,20 @@ func TestCheckpointTransitionsRequireTheRowToStillBeCreating(t *testing.T) {
 			if status != tc.wantStatus {
 				t.Fatalf("status = %q, want %q (%s)", status, tc.wantStatus, tc.explanation)
 			}
-			// A rejected transition must not have added references either: a
-			// plan answering for a row that already went terminal would tell the
-			// claw to skip uploads for a checkpoint whose edges nothing will ever
-			// release.
-			if got := checkpointBlobRefCount(t, s, "cp"); got != 0 {
-				t.Fatalf("row holds %d references, want 0 (%s)", got, tc.explanation)
+			// A rejected transition must not have touched the references either:
+			// a plan answering for a row that already went terminal would tell
+			// the claw to skip uploads for a checkpoint whose edges nothing will
+			// ever release, and a late fail against a 'ready' row must not
+			// release what a published checkpoint holds.
+			wantEdges := edgesBefore
+			if tc.wantStatus == "failed" {
+				wantEdges = 0
+			}
+			if got := checkpointBlobRefCount(t, s, "cp"); got != wantEdges {
+				t.Fatalf("row holds %d references, want %d (%s)", got, wantEdges, tc.explanation)
+			}
+			if got := treeBlobRefCount(t, s, rootSHA); got != expansionBefore {
+				t.Fatalf("tree expansion has %d rows, want %d (%s)", got, expansionBefore, tc.explanation)
 			}
 		})
 	}
@@ -728,24 +764,31 @@ func TestDiagnosticsPruneCountsLogsItCouldNotRemove(t *testing.T) {
 // 'skipped' rows pinning released trees (finding 8)
 // ---------------------------------------------------------------------------
 
-// markCheckpointSkipped copies the tree digests of the ready checkpoint it
-// duplicated. Compaction only touches 'ready' rows while the keep set follows
-// digests from rows of ANY status, so clearing the compacted row released
-// nothing while a sibling 'skipped' row still named the same tree.
+// markCheckpointSkipped records a skipped row holding the tree of the ready
+// checkpoint it duplicated. Compaction only touches 'ready' rows, so without a
+// release of its own a sibling 'skipped' row went on naming the same tree.
+//
+// The keep set reads ONLY the edge tables, so the assertion that matters is on
+// the edges and on the blobs: a release that cleared the digest columns and
+// left the edge behind would pass a column check and still pin the workspace.
 func TestCompactionReleasesTheTreesSkippedRowsWerePinning(t *testing.T) {
 	cases := []struct {
-		name         string
-		readyCount   int
-		wantReleased bool
-		why          string
+		name          string
+		readyCount    int
+		wantBlobsGone bool
+		why           string
 	}{
 		{
-			name: "a claw with superseded checkpoints", readyCount: 2, wantReleased: true,
-			why: "the normal compaction path",
+			name: "a claw with superseded checkpoints", readyCount: 2, wantBlobsGone: false,
+			why: "the normal compaction path; the survivor still names the tree",
 		},
 		{
-			name: "a claw already down to one ready checkpoint", readyCount: 1, wantReleased: true,
-			why: "an earlier cycle compacted the row the skipped one duplicated; the early return must not skip the release",
+			name: "a claw already down to one ready checkpoint", readyCount: 1, wantBlobsGone: false,
+			why: "an earlier cycle compacted the row the skipped one duplicated; the early return must not skip the release, and the survivor still names the tree",
+		},
+		{
+			name: "a claw whose only holder is the skipped row", readyCount: 0, wantBlobsGone: true,
+			why: "the skipped row was the last thing naming the tree; releasing it is what lets the sweep reclaim the workspace",
 		},
 	}
 	for _, tc := range cases {
@@ -771,9 +814,15 @@ func TestCompactionReleasesTheTreesSkippedRowsWerePinning(t *testing.T) {
 			insertRetentionCheckpoint(t, s, retentionCheckpoint{
 				id: "skipped", clawID: "claw", status: "skipped", rootTree: treeSHA,
 				createdAt: reference.Add(-15 * 24 * time.Hour)})
+			if got := checkpointBlobRefCount(t, s, "skipped"); got == 0 {
+				t.Fatal("the fixture seeded no edge for the skipped row; the test would prove nothing")
+			}
 
 			if _, err := s.compactFinalizedCheckpoints(reference.Add(-10*24*time.Hour), false); err != nil {
 				t.Fatalf("compactFinalizedCheckpoints: %v", err)
+			}
+			if got := checkpointBlobRefCount(t, s, "skipped"); got != 0 {
+				t.Fatalf("skipped row still holds %d edge(s) after compaction, want 0 (%s)", got, tc.why)
 			}
 			var root, workspace string
 			if err := s.db.QueryRow(
@@ -781,9 +830,8 @@ func TestCompactionReleasesTheTreesSkippedRowsWerePinning(t *testing.T) {
 				Scan(&root, &workspace); err != nil {
 				t.Fatal(err)
 			}
-			released := root == "" && workspace == ""
-			if released != tc.wantReleased {
-				t.Fatalf("skipped row released its trees = %v, want %v (%s)", released, tc.wantReleased, tc.why)
+			if root != "" || workspace != "" {
+				t.Fatalf("skipped row still names %q/%q; compaction must clear the columns with the edges", root, workspace)
 			}
 			// The row itself survives: it is the record that the claw was idle.
 			var n int
@@ -792,6 +840,17 @@ func TestCompactionReleasesTheTreesSkippedRowsWerePinning(t *testing.T) {
 			}
 			if n != 1 {
 				t.Fatal("the skipped row was deleted; only its digests may go")
+			}
+
+			// The proof: the sweep, which reads only the edge tables.
+			if _, _, _, err := s.sweepCheckpointBlobs(false, nil); err != nil {
+				t.Fatalf("sweepCheckpointBlobs: %v", err)
+			}
+			for _, sha := range []string{fileSHA, treeSHA} {
+				_, err := os.Stat(checkpointBlobPath(sha))
+				if gone := os.IsNotExist(err); gone != tc.wantBlobsGone {
+					t.Fatalf("blob %s gone after the sweep = %v, want %v (%s)", shortID(sha), gone, tc.wantBlobsGone, tc.why)
+				}
 			}
 		})
 	}

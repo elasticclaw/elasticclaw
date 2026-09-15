@@ -3,7 +3,6 @@ package hub
 import (
 	"database/sql"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -107,10 +106,10 @@ type retentionCounts struct {
 	taskRunEvents int64
 	messages      int64
 	blobs         int
-	// blobSweepDeclined is set when the sweep refused to run because the
-	// reference backfill has not completed. Without it a permanently failing
-	// backfill reads as blobs=0 in the cycle summary, which is byte-identical to
-	// a cycle where every blob was referenced.
+	// blobSweepDeclined is set when the sweep refused to run because some
+	// checkpoint that holds blobs has no reference edge yet. Without it a
+	// permanently failing backfill reads as blobs=0 in the cycle summary, which
+	// is byte-identical to a cycle where every blob was referenced.
 	blobSweepDeclined bool
 	treeRefs          int64
 	// Bytes reclaimed on the FILESYSTEM, broken out by what produced them. Only
@@ -328,11 +327,12 @@ func (s *Server) retentionSweepOnce() {
 
 	var counts retentionCounts
 
-	// First, and before anything releases a reference. A hub upgrading into
-	// reference counting has rows with no edges at all, and until they have some
-	// the edge table reads as "almost every blob is garbage". The sweep refuses
-	// to delete anything until this has completed once (see
-	// checkpointBlobRefsBackfilled), so a failure here costs a postponed sweep
+	// First, every cycle, and before anything releases a reference. A hub
+	// upgrading into reference counting -- or one that ran a build without it
+	// for a while and came back -- has 'ready' rows with no edges at all, and
+	// until they have some the edge table reads as "almost every blob is
+	// garbage". The sweep refuses to delete anything while any such row exists
+	// (see unreferencedCheckpoints), so a failure here costs a postponed sweep
 	// and nothing else.
 	//
 	// It runs in a dry run too. It only ADDS references -- it can never select
@@ -411,7 +411,7 @@ func (s *Server) retentionSweepOnce() {
 	}
 	blobs := strconv.Itoa(counts.blobs)
 	if counts.blobSweepDeclined {
-		blobs = "DECLINED(reference backfill incomplete)"
+		blobs = fmt.Sprintf("DECLINED(%d checkpoint(s) without references)", sweep.unreferenced)
 	}
 	log.Printf("[retention] cycle done in %s (dry_run=%v): %s compacted=%d diagnostics=%d checkpoints=%d task_run_events=%d messages=%d blobs=%s tree_refs=%d bytes_freed=%d (blobs=%d manifests=%d diagnostics=%d; row deletes free SQLite pages but do not shrink the database file without a VACUUM) phase_errors=%d item_errors=%d",
 		time.Since(started).Round(time.Millisecond), cfg.dryRun, verb,
@@ -1187,18 +1187,12 @@ func (s *Server) pruneExpiredCheckpoints(cutoff time.Time, dryRun bool) ([]strin
 		// This order's failure mode is a manifest left on disk with no row,
 		// which is wasted bytes, and is counted below rather than hidden.
 		//
-		// The row and every blob it held go together. Nothing else would ever
-		// release those references once the row is gone: the reconciliation that
-		// collects edges without a row is a crash-recovery backstop, not a
-		// primary path.
+		// The row and every blob it held go together, in one transaction. A
+		// delete that fails rolls both back, so it can leave neither a row
+		// without edges nor an edge without a row; the boot-time release of
+		// edges whose row is gone (releaseOrphanedCheckpointBlobRefs) covers a
+		// crash, not this.
 		if err := s.deleteExpiredCheckpoint(v.id); err != nil {
-			// The one runtime path that can leave an edge without a row is a
-			// delete that failed part-way, so this is where the backstop runs.
-			if n, orphanErr := releaseOrphanedCheckpointBlobRefs(s.db); orphanErr != nil {
-				log.Printf("[retention] release orphaned checkpoint blob references: %v", orphanErr)
-			} else if n > 0 {
-				log.Printf("[retention] released %d orphaned checkpoint blob reference(s)", n)
-			}
 			return removed, bytes, itemErrors, fmt.Errorf("delete expired checkpoint (aborted after %d of %d): %w", len(removed), len(victims), err)
 		}
 		removed = append(removed, v.id)
@@ -1238,78 +1232,118 @@ func (s *Server) deleteExpiredCheckpoint(checkpointID string) error {
 // Blob sweep
 // ---------------------------------------------------------------------------
 
-// checkpointBlobRefsBackfillMigration names the one-time traversal that gives
-// pre-existing checkpoints the reference edges they were never asked for.
-const checkpointBlobRefsBackfillMigration = "checkpoint_blob_refs_backfill_v1"
-
-// checkpointBlobRefsBackfilled reports whether that traversal has ever run to
-// completion.
+// unreferencedCheckpointsWhere selects the checkpoint rows that hold blobs --
+// they are 'ready' or 'skipped' and their digest columns name something -- but
+// have no reference edge at all.
 //
-// THIS IS THE GATE THE SWEEP MUST NOT DELETE WITHOUT. A half-populated edge
-// table is indistinguishable from "almost every blob is garbage": a hub that
-// upgraded ten minutes ago, or one that crashed mid-backfill, would have the
-// sweeper walk 13,000 blobs, find a reference for none of them, and reclaim the
-// entire checkpoint store in one cycle. The completion marker is the only thing
-// that separates "nothing references this" from "nothing has been asked yet".
-func (s *Server) checkpointBlobRefsBackfilled() (bool, error) {
-	return hubMigrationApplied(s.db, checkpointBlobRefsBackfillMigration)
+// This predicate is both the backfill's work list and the sweep's gate, and it
+// is evaluated EVERY cycle rather than once. The one-time version of the
+// backfill, keyed on a completion marker, had a hole exactly the size of a
+// rollback: deploy this build (marker written), roll back to a build that
+// records no edges, run for a day, roll forward. Every checkpoint of that day
+// is 'ready' with a valid manifest and zero edges, the marker says the backfill
+// is done, the keep set omits them, and their blobs are older than the grace
+// window by the time the sweep runs. The rows stay 'ready', so the loss
+// surfaces only when a retry tries to restore from one.
+//
+// A row that names no digest holds nothing and is not selected: a 'skipped'
+// row compaction has released has its columns cleared and its edges deleted in
+// the same transaction, and would otherwise be re-selected forever. A 'ready'
+// row always carries its manifest digest. The NOT EXISTS is one probe of the
+// (checkpoint_id, sha256) primary key per row, so on a hub where every row
+// already has edges the whole evaluation is one indexed pass over the rows
+// that hold blobs.
+const unreferencedCheckpointsWhere = `status IN ('ready','skipped')
+	   AND (COALESCE(manifest_sha256,'') <> '' OR COALESCE(root_tree_sha256,'') <> ''
+	        OR COALESCE(message_tree_sha256,'') <> '' OR COALESCE(workspace_tree_sha256,'') <> '')
+	   AND NOT EXISTS (SELECT 1 FROM checkpoint_blob_refs r WHERE r.checkpoint_id = claw_checkpoints.id)`
+
+// unreferencedCheckpoints counts the rows that hold blobs without an edge, and
+// returns a few of their ids for the log line.
+//
+// THIS IS THE GATE THE SWEEP MUST NOT DELETE THROUGH. A row that holds blobs
+// and has no edge reads, to the keep set, as "nothing references these blobs",
+// which is the same sentence as "these blobs are garbage" and must never be
+// acted on. The count is non-zero on a hub that upgraded ten minutes ago, on
+// one that crashed mid-backfill, and on one that came back from a rollback --
+// and in all three cases the answer is the same: give those rows their edges
+// first (backfillCheckpointBlobRefs), and sweep only when none are left.
+func (s *Server) unreferencedCheckpoints() (count int64, sample []string, err error) {
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM claw_checkpoints WHERE ` + unreferencedCheckpointsWhere).Scan(&count); err != nil {
+		return 0, nil, fmt.Errorf("count checkpoints without blob references: %w", err)
+	}
+	if count == 0 {
+		return 0, nil, nil
+	}
+	rows, err := s.db.Query(`SELECT id FROM claw_checkpoints WHERE `+unreferencedCheckpointsWhere+` ORDER BY created_at DESC LIMIT ?`, retentionSampleMax)
+	if err != nil {
+		return count, nil, fmt.Errorf("sample checkpoints without blob references: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return count, nil, err
+		}
+		sample = append(sample, shortID(id))
+	}
+	return count, sample, rows.Err()
 }
 
-// backfillCheckpointBlobRefs gives every pre-existing checkpoint the edges it
-// would have recorded had it been created under reference counting.
+// backfillCheckpointBlobRefs gives every checkpoint that holds blobs without an
+// edge the edges it would have recorded had it been created under reference
+// counting. It runs at the top of every cycle; on a hub where nothing needs it,
+// it costs the one indexed query in unreferencedCheckpointsWhere.
 //
-// This is the traversal the keep set used to perform on every single cycle --
-// parse each manifest, follow each tree blob, union the digest columns -- done
-// exactly once. It follows the same rule as the live writes: per checkpoint,
-// the root / manifest / message edges; per DISTINCT tree, the expansion into
-// its files, once. On the production hub that is ~15k checkpoint edges plus
-// ~1M expansion rows for 331 distinct trees, where one edge per file per
-// checkpoint was 16.2M rows -- the difference between a backfill that
-// completes on a full disk and one that hits SQLITE_FULL and never does.
+// It follows the same rule as the live writes: per checkpoint, the root /
+// manifest / message edges; per DISTINCT tree, the expansion into its files,
+// once. On the production hub that is ~15k checkpoint edges plus ~1M expansion
+// rows for 331 distinct trees, where one edge per file per checkpoint was 16.2M
+// rows -- the difference between a backfill that completes on a full disk and
+// one that hits SQLITE_FULL and never does.
+//
+// A schema-1 manifest inlines the complete file list, and it ALSO names the
+// tree: the base hub wrote Workspace.TreeSHA256 and Files together, and the
+// row carries root_tree_sha256 besides. The tree is what gets expanded, once,
+// exactly as for schema 2. The inlined list is used only as a fallback, as one
+// edge per file under the checkpoint, when no tree of the checkpoint could be
+// expanded -- none named, or the tree blob missing or unparseable. Recording
+// the inlined list unconditionally would have written the 16.2M rows this
+// design exists to avoid, on exactly the hub it targets: most of its 5,211
+// manifests predate schema 2.
 //
 // It is:
 //
-//   - idempotent: every insert is INSERT OR IGNORE on the composite key, so a
-//     re-run over checkpoints already covered writes nothing, and a tree whose
-//     expansion is already present is skipped by one indexed probe.
-//   - resumable: the completion marker is written only after the traversal
-//     reaches the end. A crash leaves no marker, the sweep declines, and the
-//     next cycle starts over into the same rows.
+//   - idempotent: every insert is INSERT OR IGNORE on the composite key, and a
+//     row with any edge is not selected in the first place.
 //   - honest about what it could not read. A manifest or tree that is MISSING
 //     (ENOENT, with the checkpoint store present) is permanent: the blobs it
 //     listed cannot be recovered by retrying, and they are counted and logged.
 //     A manifest or tree that could not be READ for any other reason -- EMFILE,
-//     EIO, a store that is not mounted -- is transient, and the marker is NOT
-//     written: recording a checkpoint with no edges because of a transient
-//     error would have the next sweep unlink its blobs, permanently, over a
-//     failure the cycle after would not have had. The next cycle retries for
-//     free. An unparseable file is permanent too (retrying cannot mend it), and
-//     is treated like a missing one.
+//     EIO, a store that is not mounted -- is transient, and that checkpoint is
+//     given NO edges this cycle: recording a partial set would take it off the
+//     work list with its tree unexpanded, and the next sweep would unlink the
+//     files. Left edge-less, it keeps the gate closed and is retried for free
+//     next cycle. An unparseable file is permanent too (retrying cannot mend
+//     it), and is treated like a missing one.
 //
 // Only 'ready' and 'skipped' rows are traversed, because they are the only
 // statuses that hold anything. A 'compacted' or 'failed' row released its blobs
-// by definition, and a 'creating' row's edges came from its plan (adopted from
-// the legacy claim table by adoptLegacyCheckpointBlobClaims).
+// by definition, and a 'creating' row's edges come from its plan, with the
+// sweep's grace window covering the upload in between.
 func (s *Server) backfillCheckpointBlobRefs() error {
-	done, err := s.checkpointBlobRefsBackfilled()
-	if err != nil {
-		return err
-	}
-	if done {
-		return nil
-	}
 	started := time.Now()
-	rows, err := s.db.Query(`SELECT id, status, COALESCE(manifest_path,''), COALESCE(manifest_sha256,''),
+	rows, err := s.db.Query(`SELECT id, COALESCE(manifest_path,''), COALESCE(manifest_sha256,''),
 		COALESCE(root_tree_sha256,''), COALESCE(message_tree_sha256,''), COALESCE(workspace_tree_sha256,'')
-		 FROM claw_checkpoints WHERE status IN ('ready','skipped')`)
+		 FROM claw_checkpoints WHERE ` + unreferencedCheckpointsWhere)
 	if err != nil {
 		return fmt.Errorf("list checkpoints to backfill: %w", err)
 	}
-	type row struct{ id, status, manifestPath, manifestSHA, rootSHA, msgSHA, workspaceSHA string }
+	type row struct{ id, manifestPath, manifestSHA, rootSHA, msgSHA, workspaceSHA string }
 	var pending []row
 	for rows.Next() {
 		var r row
-		if err := rows.Scan(&r.id, &r.status, &r.manifestPath, &r.manifestSHA, &r.rootSHA, &r.msgSHA, &r.workspaceSHA); err != nil {
+		if err := rows.Scan(&r.id, &r.manifestPath, &r.manifestSHA, &r.rootSHA, &r.msgSHA, &r.workspaceSHA); err != nil {
 			rows.Close()
 			return err
 		}
@@ -1319,24 +1353,25 @@ func (s *Server) backfillCheckpointBlobRefs() error {
 	if err := rows.Err(); err != nil {
 		return err
 	}
-
-	// A checkpoint store that is not there at all is not "every blob is
-	// missing": it is a blob root that is not mounted, and marking the backfill
-	// complete against it would record every checkpoint as holding nothing.
-	// Only a hub with nothing to backfill may complete without one.
-	blobRoot := filepath.Join(checkpointsRoot(), "blobs", "sha256")
-	if len(pending) > 0 {
-		if _, err := os.Stat(blobRoot); err != nil {
-			return fmt.Errorf("blob store %s is not readable; not marking the backfill complete: %w", blobRoot, err)
-		}
+	if len(pending) == 0 {
+		return nil
 	}
 
-	var edges, expansions, treeRows int
+	// A checkpoint store that is not there at all is not "every blob is
+	// missing": it is a blob root that is not mounted, and recording edges
+	// against it would take these rows off the work list with their trees
+	// unexpanded.
+	blobRoot := filepath.Join(checkpointsRoot(), "blobs", "sha256")
+	if _, err := os.Stat(blobRoot); err != nil {
+		return fmt.Errorf("blob store %s is not readable; %d checkpoint(s) left without references: %w", blobRoot, len(pending), err)
+	}
+
+	var recorded, edges, expansions, treeRows, fallbacks int
 	var badManifests, missingTrees, badTrees, unreadable int
-	expanded := map[string]struct{}{}
+	trees := map[string]treeOutcome{}
 	for _, r := range pending {
 		digests := map[string]struct{}{}
-		trees := map[string]struct{}{}
+		rowTrees := map[string]struct{}{}
 		add := func(sha string, isTree bool) {
 			clean := normalizeBlobDigest(sha)
 			if clean == "" {
@@ -1344,7 +1379,7 @@ func (s *Server) backfillCheckpointBlobRefs() error {
 			}
 			digests[clean] = struct{}{}
 			if isTree {
-				trees[clean] = struct{}{}
+				rowTrees[clean] = struct{}{}
 			}
 		}
 		add(r.manifestSHA, false)
@@ -1362,99 +1397,142 @@ func (s *Server) backfillCheckpointBlobRefs() error {
 		if manifestPath == "" {
 			manifestPath = checkpointManifestPath(r.id)
 		}
+		var inlined []string
 		if data, err := os.ReadFile(manifestPath); err != nil {
 			if !os.IsNotExist(err) {
 				unreadable++
-				log.Printf("[retention] backfill: cannot read manifest %s of checkpoint %s (will retry next cycle): %v",
+				log.Printf("[retention] backfill: cannot read manifest %s of checkpoint %s (left without references; will retry next cycle): %v",
 					manifestPath, shortID(r.id), err)
+				continue
 			}
 		} else {
-			// Decode generically as well as into the struct: schema 1 inlined the
-			// complete file list in the manifest, and a generic walk picks those
-			// up along with any field a future schema adds. Those digests become
-			// checkpoint edges: a schema-1 manifest has no tree to hang them on.
-			var decoded any
-			var manifest checkpointManifest
-			jsonErr := json.Unmarshal(data, &decoded)
-			structErr := json.Unmarshal(data, &manifest)
-			if jsonErr != nil || structErr != nil {
+			var manifest struct {
+				checkpointManifest
+				Files []types.CheckpointFile `json:"files"`
+			}
+			if err := json.Unmarshal(data, &manifest); err != nil {
 				badManifests++
 				log.Printf("[retention] backfill: cannot parse manifest %s of checkpoint %s; its row digests are still recorded: %v",
-					manifestPath, shortID(r.id), errors.Join(jsonErr, structErr))
+					manifestPath, shortID(r.id), err)
 			} else {
-				for _, sha := range collectDigests(decoded) {
-					add(sha, false)
-				}
 				add(manifest.Workspace.TreeSHA256, true)
+				add(manifest.Messages.BlobSHA256, false)
+				for _, f := range manifest.Files {
+					if clean := normalizeBlobDigest(f.SHA256); clean != "" {
+						inlined = append(inlined, clean)
+					}
+				}
 			}
 		}
 
 		// The one step whose omission would be catastrophic: under schema 2 the
 		// per-file digests exist ONLY inside the tree blob. Each distinct tree
-		// is expanded once for the whole backfill; the probe inside
-		// insertTreeBlobRefs makes a re-run over a tree already expanded free.
-		for tree := range trees {
-			if _, done := expanded[tree]; done {
-				continue
+		// is expanded once for the whole pass; the probe inside insertTreeBlobRefs
+		// makes a tree already expanded by an earlier cycle free.
+		expandedAny, transient := false, false
+		for tree := range rowTrees {
+			outcome, seen := trees[tree]
+			if !seen {
+				outcome = s.expandTreeForBackfill(tree, r.id)
+				trees[tree] = outcome
+				switch outcome.state {
+				case treeExpanded:
+					expansions++
+					treeRows += outcome.rows
+				case treeMissing:
+					missingTrees++
+				case treeUnparseable:
+					badTrees++
+				}
 			}
-			data, err := os.ReadFile(checkpointBlobPath(tree))
-			if os.IsNotExist(err) {
-				missingTrees++
-				log.Printf("[retention] backfill: tree blob %s of checkpoint %s is missing; the files it listed cannot be recorded and will be swept",
-					tree, shortID(r.id))
-				continue
+			switch outcome.state {
+			case treeExpanded, treeKnown:
+				expandedAny = true
+			case treeUnreadable:
+				transient = true
 			}
-			if err != nil {
-				unreadable++
-				log.Printf("[retention] backfill: cannot read tree blob %s of checkpoint %s (will retry next cycle): %v", tree, shortID(r.id), err)
-				continue
-			}
-			var files []types.CheckpointFile
-			if err := json.Unmarshal(data, &files); err != nil {
-				badTrees++
-				log.Printf("[retention] backfill: cannot parse tree blob %s of checkpoint %s: %v", tree, shortID(r.id), err)
-				continue
-			}
-			n, err := s.insertTreeBlobRefs(tree, files)
-			if err != nil {
-				return fmt.Errorf("backfill expansion of tree %s: %w", tree, err)
-			}
-			expanded[tree] = struct{}{}
-			if n > 0 {
-				expansions++
-				treeRows += n
+		}
+		if transient {
+			unreadable++
+			continue
+		}
+		if !expandedAny && len(inlined) > 0 {
+			// Nothing else records these files: fall back to the schema-1 list,
+			// as edges of the checkpoint itself.
+			fallbacks++
+			for _, sha := range inlined {
+				digests[sha] = struct{}{}
 			}
 		}
 
-		if len(digests) == 0 {
-			continue
-		}
 		list := make([]string, 0, len(digests))
 		for d := range digests {
 			list = append(list, d)
 		}
-		// One transaction per checkpoint, not one for the whole backfill. SQLite
+		// One transaction per checkpoint, not one for the whole pass. SQLite
 		// has a single writer and this hub runs with a five-second busy_timeout;
 		// a transaction spanning thousands of checkpoints would hold the write
 		// lock long enough to fail every heartbeat and checkpoint row behind it.
 		// A database error here (as opposed to a file error above) aborts the
-		// backfill without a marker, so the next cycle retries the whole thing.
+		// pass; the rows not reached are still edge-less and the next cycle
+		// resumes with them.
 		if err := s.insertCheckpointBlobRefs(r.id, list); err != nil {
-			return fmt.Errorf("backfill references for checkpoint %s: %w", shortID(r.id), err)
+			return fmt.Errorf("backfill references for checkpoint %s (%d of %d recorded): %w", shortID(r.id), recorded, len(pending), err)
 		}
+		recorded++
 		edges += len(list)
 	}
 
+	log.Printf("[retention] blob reference backfill in %s: %d of %d checkpoint(s) given references, %d reference(s), %d tree expansion(s) (%d rows), %d schema-1 fallback(s); unparseable_manifests=%d missing_trees=%d unparseable_trees=%d (blobs listed only by a missing or unparseable tree are unreferenced and will be swept)",
+		time.Since(started).Round(time.Millisecond), recorded, len(pending), edges, expansions, treeRows, fallbacks, badManifests, missingTrees, badTrees)
 	if unreadable > 0 {
-		return fmt.Errorf("backfill left incomplete: %d manifest(s)/tree(s) could not be read for a reason other than being absent; not marking it complete, the next cycle retries (%d checkpoint(s), %d reference(s) and %d tree expansion(s) recorded so far)",
-			unreadable, len(pending), edges, expansions)
+		return fmt.Errorf("backfill left %d checkpoint(s) without references: a manifest or tree could not be read for a reason other than being absent; the sweep declines until the next cycle records them", unreadable)
 	}
-	if err := markHubMigration(s.db, checkpointBlobRefsBackfillMigration); err != nil {
-		return err
-	}
-	log.Printf("[retention] blob reference backfill complete in %s: %d checkpoint(s), %d reference(s), %d new tree expansion(s) (%d rows); unparseable_manifests=%d missing_trees=%d unparseable_trees=%d (blobs listed only by a missing or unparseable tree are now unreferenced and will be swept)",
-		time.Since(started).Round(time.Millisecond), len(pending), edges, expansions, treeRows, badManifests, missingTrees, badTrees)
 	return nil
+}
+
+// treeExpansion is what the backfill found when it tried to expand one tree.
+type treeExpansion int
+
+const (
+	treeKnown       treeExpansion = iota // already expanded by an earlier plan or cycle
+	treeExpanded                         // expanded by this pass
+	treeMissing                          // the tree blob is gone: permanent
+	treeUnparseable                      // the tree blob is corrupt: permanent
+	treeUnreadable                       // could not be read or recorded: transient, retry next cycle
+)
+
+type treeOutcome struct {
+	state treeExpansion
+	rows  int // expansion rows written, for treeExpanded
+}
+
+// expandTreeForBackfill reads one tree blob and records its expansion.
+func (s *Server) expandTreeForBackfill(tree, checkpointID string) treeOutcome {
+	data, err := os.ReadFile(checkpointBlobPath(tree))
+	if os.IsNotExist(err) {
+		log.Printf("[retention] backfill: tree blob %s of checkpoint %s is missing; the files it listed cannot be recorded and will be swept",
+			tree, shortID(checkpointID))
+		return treeOutcome{state: treeMissing}
+	}
+	if err != nil {
+		log.Printf("[retention] backfill: cannot read tree blob %s of checkpoint %s (will retry next cycle): %v", tree, shortID(checkpointID), err)
+		return treeOutcome{state: treeUnreadable}
+	}
+	var files []types.CheckpointFile
+	if err := json.Unmarshal(data, &files); err != nil {
+		log.Printf("[retention] backfill: cannot parse tree blob %s of checkpoint %s: %v", tree, shortID(checkpointID), err)
+		return treeOutcome{state: treeUnparseable}
+	}
+	n, err := s.insertTreeBlobRefs(tree, files)
+	if err != nil {
+		log.Printf("[retention] backfill: record expansion of tree %s (will retry next cycle): %v", tree, err)
+		return treeOutcome{state: treeUnreadable}
+	}
+	if n == 0 {
+		return treeOutcome{state: treeKnown}
+	}
+	return treeOutcome{state: treeExpanded, rows: n}
 }
 
 // insertCheckpointBlobRefs records edges for one checkpoint in its own
@@ -1492,22 +1570,23 @@ func (s *Server) insertTreeBlobRefs(treeSHA string, files []types.CheckpointFile
 	return after - before, tx.Commit()
 }
 
-// pendingBackfillEstimate says how many edges the backfill still has to write,
-// for the sweep's DECLINED line: checkpoints × their row digests, plus the
-// files_count of every distinct root tree not yet expanded. It is an estimate
-// -- files_count is the row's own summary, and a schema-1 manifest's inlined
-// list is not counted -- but it is the number an operator needs to tell "still
-// working through it" from "will never finish on this disk".
+// pendingBackfillEstimate says how many edges the backfill still has to write
+// for the checkpoints that hold blobs without an edge, for the sweep's DECLINED
+// line: those checkpoints × their row digests, plus the files_count of every
+// distinct root tree among them not yet expanded. It is an estimate --
+// files_count is the row's own summary -- but it is the number an operator
+// needs to tell "still working through it" from "will never finish on this
+// disk".
 func (s *Server) pendingBackfillEstimate() (checkpoints, trees, edges int64, err error) {
 	if err = s.db.QueryRow(
-		`SELECT COUNT(*) FROM claw_checkpoints WHERE status IN ('ready','skipped')`).Scan(&checkpoints); err != nil {
+		`SELECT COUNT(*) FROM claw_checkpoints WHERE ` + unreferencedCheckpointsWhere).Scan(&checkpoints); err != nil {
 		return 0, 0, 0, err
 	}
 	var files int64
 	if err = s.db.QueryRow(
 		`SELECT COUNT(*), COALESCE(SUM(files_count),0) FROM (
 		   SELECT root_tree_sha256, MAX(files_count) AS files_count FROM claw_checkpoints
-		    WHERE status IN ('ready','skipped') AND root_tree_sha256 <> ''
+		    WHERE `+unreferencedCheckpointsWhere+` AND root_tree_sha256 <> ''
 		      AND root_tree_sha256 NOT IN (SELECT tree_sha256 FROM tree_blob_refs)
 		    GROUP BY root_tree_sha256)`).Scan(&trees, &files); err != nil {
 		return 0, 0, 0, err
@@ -1664,30 +1743,6 @@ func (s *Server) referencedBlobDigests(released []string) (map[string]struct{}, 
 	return referenced, nil
 }
 
-// collectDigests walks decoded JSON and returns every string that looks like a
-// sha256 digest, with or without the "sha256:" prefix. Only the one-time
-// backfill uses it: reading a manifest generically is how a schema-1 manifest's
-// inlined file list is recovered, and the steady state never reads a manifest at
-// all.
-func collectDigests(node any) []string {
-	var out []string
-	switch v := node.(type) {
-	case map[string]any:
-		for _, child := range v {
-			out = append(out, collectDigests(child)...)
-		}
-	case []any:
-		for _, child := range v {
-			out = append(out, collectDigests(child)...)
-		}
-	case string:
-		if normalizeBlobDigest(v) != "" {
-			out = append(out, v)
-		}
-	}
-	return out
-}
-
 // normalizeBlobDigest returns the bare hex digest, or "" when the value is not
 // one. checkpointBlobPath strips the same prefix when laying blobs out.
 func normalizeBlobDigest(sha string) string {
@@ -1750,10 +1805,11 @@ func (s *Server) sweepCheckpointBlobs(dryRun bool, released []string) (int, int6
 
 // blobSweepResult is what one sweep did, or -- declined -- why it did nothing.
 type blobSweepResult struct {
-	removed    int
-	bytes      int64
-	itemErrors int
-	declined   bool
+	removed      int
+	bytes        int64
+	itemErrors   int
+	declined     bool
+	unreferenced int64 // checkpoints holding blobs without an edge, when declined
 }
 
 func (s *Server) sweepCheckpointBlobsResult(dryRun bool, released []string) (blobSweepResult, error) {
@@ -1766,23 +1822,26 @@ func (s *Server) sweepCheckpointBlobsResult(dryRun bool, released []string) (blo
 	s.beginBlobClaimWindow()
 	defer s.endBlobClaimWindow()
 
-	// The gate. An edge table that has never been backfilled says "nothing
-	// references anything", which is the same sentence as "everything is
-	// garbage" and must never be acted on.
-	backfilled, err := s.checkpointBlobRefsBackfilled()
+	// The gate. A checkpoint that holds blobs and has no edge says "nothing
+	// references these", which is the same sentence as "these are garbage" and
+	// must never be acted on -- whether the row predates reference counting,
+	// the backfill crashed before reaching it, or it was written by a build
+	// rolled back to in between. See unreferencedCheckpoints.
+	unreferenced, unreferencedIDs, err := s.unreferencedCheckpoints()
 	if err != nil {
-		return result, fmt.Errorf("check blob reference backfill: %w", err)
+		return result, fmt.Errorf("check for checkpoints without blob references: %w", err)
 	}
-	if !backfilled {
+	if unreferenced > 0 {
 		result.declined = true
+		result.unreferenced = unreferenced
 		// Say how much is outstanding, not only that something is. The line
 		// that reads the same on the first cycle after an upgrade and on the
 		// hundredth cycle of a backfill that will never fit on this disk is a
 		// line nobody can act on.
 		if checkpoints, trees, edges, err := s.pendingBackfillEstimate(); err != nil {
-			log.Printf("[retention] blob sweep DECLINED: the checkpoint blob reference backfill has not completed, so an absent reference does not yet mean an unreferenced blob. No blob will be deleted until it does; see the preceding backfill error, if any. (estimating the outstanding work failed: %v)", err)
+			log.Printf("[retention] blob sweep DECLINED: %d checkpoint(s) hold blobs without a reference edge (e.g. %s), so an absent reference does not yet mean an unreferenced blob. No blob will be deleted until the backfill has given them edges; see the preceding backfill error, if any. (estimating the outstanding work failed: %v)", unreferenced, strings.Join(unreferencedIDs, ", "), err)
 		} else {
-			log.Printf("[retention] blob sweep DECLINED: the checkpoint blob reference backfill has not completed, so an absent reference does not yet mean an unreferenced blob. No blob will be deleted until it does; see the preceding backfill error, if any. Outstanding: %d checkpoint(s), %d unexpanded tree(s), ~%d edge(s) to write.", checkpoints, trees, edges)
+			log.Printf("[retention] blob sweep DECLINED: %d checkpoint(s) hold blobs without a reference edge (e.g. %s), so an absent reference does not yet mean an unreferenced blob. No blob will be deleted until the backfill has given them edges; see the preceding backfill error, if any. Outstanding: %d checkpoint(s), %d unexpanded tree(s), ~%d edge(s) to write.", unreferenced, strings.Join(unreferencedIDs, ", "), checkpoints, trees, edges)
 		}
 		return result, nil
 	}

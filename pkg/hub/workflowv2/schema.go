@@ -5,11 +5,24 @@ package workflowv2
 import (
 	"database/sql"
 	"fmt"
+	"log"
 	"strings"
 )
 
 // Migrate adds v2 runtime storage without changing or reinterpreting any v1
 // workflow, claw, transcript, or analytics table.
+//
+// Only the base script is fatal. On a shipped database every statement in it
+// is an IF NOT EXISTS no-op that allocates nothing, so it cannot be what fails
+// on a full disk; on a fresh database the runtime has nothing without it.
+// Everything added after that script shipped -- a table, an index, a column --
+// DOES allocate on the database production runs, and on the disk-full hub
+// that allocation is what fails with SQLITE_FULL. Those live in
+// migrateAdditions, which logs and lets the next boot retry: the hub served
+// without them before they existed, and a hub that refuses to boot over them
+// can never free the disk. pkg/hub's TestBootSurvivesAFullDiskFromTheShippedSchema
+// boots the current binary against the shipped schema with the database
+// forbidden to grow, so a new statement added to the base script fails there.
 func Migrate(db *sql.DB) error {
 	if db == nil {
 		return fmt.Errorf("workflow v2 migrate: database is nil")
@@ -267,7 +280,28 @@ func Migrate(db *sql.DB) error {
 		acknowledged_at  INTEGER NOT NULL DEFAULT 0
 	);
 	CREATE INDEX IF NOT EXISTS idx_workflow_v2_control_ready ON workflow_v2_control_outbox(status, next_attempt_at);
+	`)
+	if err != nil {
+		return fmt.Errorf("workflow v2 migrate: %w", err)
+	}
+	if err := addColumnIfMissing(db, "workflow_v2_runs", "trigger_type", "TEXT NOT NULL DEFAULT 'manual'"); err != nil {
+		return fmt.Errorf("workflow v2 migrate: %w", err)
+	}
+	if err := addColumnIfMissing(db, "workflow_v2_runs", "task_run_id", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return fmt.Errorf("workflow v2 migrate: %w", err)
+	}
+	migrateAdditions(db)
+	return nil
+}
 
+// migrateAdditions applies everything the base script did not have when it
+// shipped: cron run history, run timeouts and the cron slot release flag. None
+// of it is fatal -- see Migrate. Each statement is idempotent, so a boot that
+// could not apply one leaves it for the next.
+func migrateAdditions(db *sql.DB) {
+	// The table and its indexes in one script: if the table cannot be created
+	// there is nothing to index, and one log line says so instead of six.
+	if _, err := db.Exec(`
 	CREATE TABLE IF NOT EXISTS workflow_v2_cron_runs (
 		id             TEXT PRIMARY KEY,
 		tenant_id      TEXT NOT NULL,
@@ -288,30 +322,24 @@ func Migrate(db *sql.DB) error {
 	CREATE INDEX IF NOT EXISTS idx_workflow_v2_cron_runs_status ON workflow_v2_cron_runs(tenant_id, status, created_at);
 	CREATE INDEX IF NOT EXISTS idx_workflow_v2_cron_runs_claw ON workflow_v2_cron_runs(claw_id);
 	CREATE INDEX IF NOT EXISTS idx_workflow_v2_cron_runs_v2_run ON workflow_v2_cron_runs(v2_run_id);
-
-	`)
-	if err != nil {
-		return fmt.Errorf("workflow v2 migrate: %w", err)
+	`); err != nil {
+		log.Printf("[workflow-v2] migrate: workflow_v2_cron_runs not created (retrying on the next boot): %v", err)
 	}
-	if err := addColumnIfMissing(db, "workflow_v2_runs", "trigger_type", "TEXT NOT NULL DEFAULT 'manual'"); err != nil {
-		return fmt.Errorf("workflow v2 migrate: %w", err)
+	columns := []struct{ table, column, def string }{
+		{"workflow_v2_cron_runs", "updated_at", "INTEGER NOT NULL DEFAULT 0"},
+		{"workflow_v2_runs", "timeout_at", "INTEGER NOT NULL DEFAULT 0"},
+		{"workflow_v2_runs", "cron_slot_released", "INTEGER NOT NULL DEFAULT 0"},
 	}
-	if err := addColumnIfMissing(db, "workflow_v2_cron_runs", "updated_at", "INTEGER NOT NULL DEFAULT 0"); err != nil {
-		return fmt.Errorf("workflow v2 migrate: %w", err)
+	for _, c := range columns {
+		if err := addColumnIfMissing(db, c.table, c.column, c.def); err != nil {
+			log.Printf("[workflow-v2] migrate: %s.%s not added (retrying on the next boot): %v", c.table, c.column, err)
+		}
 	}
-	if err := addColumnIfMissing(db, "workflow_v2_runs", "task_run_id", "TEXT NOT NULL DEFAULT ''"); err != nil {
-		return fmt.Errorf("workflow v2 migrate: %w", err)
-	}
-	if err := addColumnIfMissing(db, "workflow_v2_runs", "timeout_at", "INTEGER NOT NULL DEFAULT 0"); err != nil {
-		return fmt.Errorf("workflow v2 migrate: %w", err)
-	}
+	// After timeout_at: an index on a column the ADD COLUMN above may not have
+	// managed to add would fail for the wrong reason.
 	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_workflow_v2_runs_timeout ON workflow_v2_runs(status, timeout_at, created_at)`); err != nil {
-		return fmt.Errorf("workflow v2 migrate: %w", err)
+		log.Printf("[workflow-v2] migrate: idx_workflow_v2_runs_timeout not created (retrying on the next boot): %v", err)
 	}
-	if err := addColumnIfMissing(db, "workflow_v2_runs", "cron_slot_released", "INTEGER NOT NULL DEFAULT 0"); err != nil {
-		return fmt.Errorf("workflow v2 migrate: %w", err)
-	}
-	return nil
 }
 
 func addColumnIfMissing(db *sql.DB, table, column, columnDef string) error {

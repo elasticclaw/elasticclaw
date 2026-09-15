@@ -230,9 +230,6 @@ func TestBackfillDoesNotCompleteOverTransientReadFailures(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			s := newRetentionTestServer(t)
-			if _, err := s.db.Exec(`DELETE FROM hub_migrations WHERE name=?`, checkpointBlobRefsBackfillMigration); err != nil {
-				t.Fatal(err)
-			}
 			reference := time.Now()
 			insertRetentionClaw(t, s, "claw", reference)
 			rootSHA, _, _ := planTreeFixture(t, 1)
@@ -244,12 +241,12 @@ func TestBackfillDoesNotCompleteOverTransientReadFailures(t *testing.T) {
 			if err := s.backfillCheckpointBlobRefs(); err == nil {
 				t.Fatalf("the backfill reported success over a read failure (%s)", tc.why)
 			}
-			done, err := s.checkpointBlobRefsBackfilled()
+			unreferenced, _, err := s.unreferencedCheckpoints()
 			if err != nil {
 				t.Fatal(err)
 			}
-			if done {
-				t.Fatalf("the completion marker was written over a read failure (%s)", tc.why)
+			if unreferenced == 0 {
+				t.Fatalf("the checkpoint was given references over a read failure, so the gate opened (%s)", tc.why)
 			}
 		})
 	}
@@ -259,9 +256,6 @@ func TestBackfillDoesNotCompleteOverTransientReadFailures(t *testing.T) {
 // records everything else, and completes.
 func TestBackfillCompletesOverAGenuinelyMissingTree(t *testing.T) {
 	s := newRetentionTestServer(t)
-	if _, err := s.db.Exec(`DELETE FROM hub_migrations WHERE name=?`, checkpointBlobRefsBackfillMigration); err != nil {
-		t.Fatal(err)
-	}
 	reference := time.Now()
 	insertRetentionClaw(t, s, "claw", reference)
 	rootSHA, _, _ := planTreeFixture(t, 1)
@@ -279,7 +273,7 @@ func TestBackfillCompletesOverAGenuinelyMissingTree(t *testing.T) {
 	if !strings.Contains(out, "missing_trees=1") {
 		t.Fatalf("the missing tree was not reported; log:\n%s", out)
 	}
-	if done, _ := s.checkpointBlobRefsBackfilled(); !done {
+	if unreferenced, _, _ := s.unreferencedCheckpoints(); unreferenced != 0 {
 		t.Fatal("a permanent omission must not hold the sweep off forever")
 	}
 }
@@ -289,9 +283,6 @@ func TestBackfillCompletesOverAGenuinelyMissingTree(t *testing.T) {
 // quiet cycle with blobs=0.
 func TestCycleSummaryShowsADeclinedSweep(t *testing.T) {
 	s := newRetentionTestServer(t)
-	if _, err := s.db.Exec(`DELETE FROM hub_migrations WHERE name=?`, checkpointBlobRefsBackfillMigration); err != nil {
-		t.Fatal(err)
-	}
 	reference := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
 	s.nowFunc = func() time.Time { return reference }
 	s.hubCfg = &types.HubConfig{Retention: &types.RetentionConfig{Enabled: boolPtr(true)}}

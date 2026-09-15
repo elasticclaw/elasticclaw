@@ -269,12 +269,12 @@ func failStuckCreatingCheckpointsTx(db *sql.DB, cutoff time.Time) (int64, error)
 // which a crash between the row delete and the edge delete can leave behind, and
 // which would otherwise pin those blobs for the life of the database.
 //
-// It runs only after the paths that can actually produce that shape: boot
-// (reconcileCheckpointsOnBoot, covering a crash in the previous process) and a
-// failed expiry delete (pruneExpiredCheckpoints). It used to run on every
-// scheduler tick, where its NOT-EXISTS probe was a full scan of the edge table
-// once a minute, in a steady state that could never have produced an orphan --
-// every path that deletes a row deletes its edges in the same transaction.
+// It runs only on boot (reconcileCheckpointsOnBoot), the one place that can
+// follow such a crash. It used to run on every scheduler tick, where its
+// NOT-EXISTS probe was a full scan of the edge table once a minute, and after a
+// failed expiry delete -- but every path that deletes a row deletes its edges
+// in the same transaction, and a failed delete rolls both back, so neither
+// place could ever have found anything.
 func releaseOrphanedCheckpointBlobRefs(db *sql.DB) (int64, error) {
 	var orphaned bool
 	if err := db.QueryRow(`SELECT EXISTS(

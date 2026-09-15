@@ -22,10 +22,6 @@ import (
 // once, and must say so loudly rather than silently reporting a quiet cycle.
 func TestBlobSweepDeclinesUntilTheBackfillHasCompleted(t *testing.T) {
 	s := newRetentionTestServer(t)
-	// Undo the fixture's marker: this test is about the un-backfilled state.
-	if _, err := s.db.Exec(`DELETE FROM hub_migrations WHERE name=?`, checkpointBlobRefsBackfillMigration); err != nil {
-		t.Fatal(err)
-	}
 	reference := time.Now()
 	insertRetentionClaw(t, s, "claw", reference)
 
@@ -99,9 +95,6 @@ func TestBlobReferenceBackfillIsIdempotentAndSurvivesUnreadableFiles(t *testing.
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			s := newRetentionTestServer(t)
-			if _, err := s.db.Exec(`DELETE FROM hub_migrations WHERE name=?`, checkpointBlobRefsBackfillMigration); err != nil {
-				t.Fatal(err)
-			}
 			reference := time.Now()
 			insertRetentionClaw(t, s, "claw", reference)
 
@@ -131,20 +124,24 @@ func TestBlobReferenceBackfillIsIdempotentAndSurvivesUnreadableFiles(t *testing.
 				}
 			}
 
-			// A second run must write nothing and must not fail. The completion
-			// marker short-circuits it; forcing the traversal again proves the
-			// INSERT OR IGNORE underneath is what makes that safe.
+			// A second run must write nothing and must not fail: a row with an
+			// edge is not on the work list. A row that has LOST its edges is,
+			// and gets the same set back -- which is the rollback case, and
+			// proves the INSERT OR IGNORE underneath is what makes a re-run safe.
 			if err := s.backfillCheckpointBlobRefs(); err != nil {
 				t.Fatalf("second backfill: %v", err)
 			}
-			if _, err := s.db.Exec(`DELETE FROM hub_migrations WHERE name=?`, checkpointBlobRefsBackfillMigration); err != nil {
+			if got := checkpointBlobRefCount(t, s, "cp"); got != first {
+				t.Fatalf("a second backfill changed the reference count from %d to %d", first, got)
+			}
+			if _, err := s.db.Exec(`DELETE FROM checkpoint_blob_refs WHERE checkpoint_id='cp'`); err != nil {
 				t.Fatal(err)
 			}
 			if err := s.backfillCheckpointBlobRefs(); err != nil {
 				t.Fatalf("re-run backfill: %v", err)
 			}
 			if got := checkpointBlobRefCount(t, s, "cp"); got != first {
-				t.Fatalf("re-running the backfill changed the reference count from %d to %d; it must be idempotent", first, got)
+				t.Fatalf("re-running the backfill over an edge-less row gave it %d references, want %d; it must be idempotent", got, first)
 			}
 		})
 	}
@@ -155,9 +152,6 @@ func TestBlobReferenceBackfillIsIdempotentAndSurvivesUnreadableFiles(t *testing.
 // not have been written and the sweep must still decline.
 func TestInterruptedBackfillLeavesTheGateClosed(t *testing.T) {
 	s := newRetentionTestServer(t)
-	if _, err := s.db.Exec(`DELETE FROM hub_migrations WHERE name=?`, checkpointBlobRefsBackfillMigration); err != nil {
-		t.Fatal(err)
-	}
 	reference := time.Now()
 	insertRetentionClaw(t, s, "claw", reference)
 	covered := writeRetentionBlob(t, []byte("a checkpoint the backfill reached"))
@@ -170,7 +164,7 @@ func TestInterruptedBackfillLeavesTheGateClosed(t *testing.T) {
 	insertRetentionCheckpoint(t, s, retentionCheckpoint{
 		id: "cp-uncovered", clawID: "claw", status: "ready", createdAt: reference,
 		rootTree: uncovered, noBlobRefs: true})
-	// The crash: the first checkpoint's edges landed, the marker never did.
+	// The crash: the first checkpoint's edges landed, the second's never did.
 	if err := s.insertCheckpointBlobRefs("cp-covered", []string{covered}); err != nil {
 		t.Fatal(err)
 	}
@@ -298,6 +292,12 @@ func TestCompactionMarksTheRowBeforeUnlinkingTheManifest(t *testing.T) {
 // A 'complete' that arrives after the row went terminal is rejected. It used to
 // write the manifest first and reject afterwards, leaving a file no row claims
 // and nothing ever removes.
+//
+// The manifest alone cannot tell the pre-check apart from the cleanup after the
+// guarded UPDATE: both leave no manifest. What only the pre-check prevents is
+// everything written BEFORE the manifest -- the message blob goes into the blob
+// store and stays there, and the manifests directory is created -- so those are
+// what the test looks at.
 func TestRejectedPublishLeavesNoOrphanManifest(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -321,6 +321,11 @@ func TestRejectedPublishLeavesNoOrphanManifest(t *testing.T) {
 			insertRetentionClaw(t, s, "claw", reference)
 			insertRetentionCheckpoint(t, s, retentionCheckpoint{
 				id: "cp", clawID: "claw", status: "failed", createdAt: reference})
+			if _, err := s.db.Exec(`INSERT INTO messages(id, claw_id, tenant_id, role, content, created_at) VALUES(?,?,?,?,?,?)`,
+				"m1", "claw", "tenant", "user", "a message the blob would capture", reference); err != nil {
+				t.Fatal(err)
+			}
+			before := checkpointStoreFiles(t)
 
 			if err := tc.apply(s); err == nil {
 				t.Fatal("publishing succeeded against a row that had already gone terminal")
@@ -328,8 +333,34 @@ func TestRejectedPublishLeavesNoOrphanManifest(t *testing.T) {
 			if _, err := os.Stat(checkpointManifestPath("cp")); !os.IsNotExist(err) {
 				t.Fatalf("a rejected publish left a manifest behind: %v", err)
 			}
+			if after := checkpointStoreFiles(t); after != before {
+				t.Fatalf("a rejected publish wrote into the checkpoint store before checking the row; the pre-check is gone.\nbefore:\n%s\nafter:\n%s", before, after)
+			}
 		})
 	}
+}
+
+// checkpointStoreFiles lists every file under the checkpoint store, so a test
+// can assert a rejected operation wrote nothing at all.
+func checkpointStoreFiles(t *testing.T) string {
+	t.Helper()
+	var files []string
+	err := filepath.Walk(checkpointsRoot(), func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			if os.IsNotExist(err) {
+				return nil
+			}
+			return err
+		}
+		if !info.IsDir() {
+			files = append(files, strings.TrimPrefix(path, checkpointsRoot()))
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.Join(files, "\n")
 }
 
 // ---------------------------------------------------------------------------

@@ -33,13 +33,11 @@ func newRetentionTestServer(t *testing.T) *Server {
 		"tenant", "tenant", "token", "claw-token", now()); err != nil {
 		t.Fatalf("seed tenant: %v", err)
 	}
-	// The database is empty, so the one-time reference backfill has nothing to
-	// do and is complete by definition. Marking it here is what lets a test call
-	// the sweep directly; the gate itself is covered by
+	// The sweep's gate is derived from the rows: it declines while any 'ready'
+	// or 'skipped' row holds blobs without an edge. insertRetentionCheckpoint
+	// seeds the edges a real checkpoint would have, so a test can call the
+	// sweep directly; the gate itself is covered by
 	// TestBlobSweepDeclinesUntilTheBackfillHasCompleted.
-	if err := markHubMigration(db, checkpointBlobRefsBackfillMigration); err != nil {
-		t.Fatalf("mark backfill migration: %v", err)
-	}
 	return &Server{db: db, hubCfg: &types.HubConfig{}, claws: map[string]*clawConn{}}
 }
 

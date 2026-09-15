@@ -16,7 +16,7 @@ import (
 )
 
 func openDB(path string) (*sql.DB, error) {
-	db, err := sql.Open("sqlite", path+"?_time_format=sqlite&_txlock=immediate&_pragma=journal_mode(WAL)&_pragma=foreign_keys(on)&_pragma=busy_timeout(5000)")
+	db, err := sql.Open("sqlite", sqliteDSN(path))
 	if err != nil {
 		return nil, fmt.Errorf("open db: %w", err)
 	}
@@ -24,6 +24,14 @@ func openDB(path string) (*sql.DB, error) {
 		return nil, fmt.Errorf("migrate: %w", err)
 	}
 	return db, nil
+}
+
+// sqliteDSN is the connection string every hub database is opened with. It is
+// a function so a test can open a database with the production settings but
+// WITHOUT running migrate() on it -- the boot-path tests need a database in the
+// shape a shipped hub has before the current binary touches it.
+func sqliteDSN(path string) string {
+	return path + "?_time_format=sqlite&_txlock=immediate&_pragma=journal_mode(WAL)&_pragma=foreign_keys(on)&_pragma=busy_timeout(5000)"
 }
 
 // addColumn applies an additive `ALTER TABLE ... ADD COLUMN` migration.
@@ -363,10 +371,15 @@ func migrate(db *sql.DB) error {
 	_, _ = db.Exec(`ALTER TABLE task_run_prs ADD COLUMN ready_at INTEGER NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE task_run_summaries ADD COLUMN ready_at INTEGER NOT NULL DEFAULT 0`)
 
-	// Checkpoint telemetry: these three describe what the claw was doing when
-	// the checkpoint was taken and lived only inside the manifest JSON, so
-	// pruning manifests used to destroy the record. As columns they cost ~40
-	// bytes a row and survive any retention policy.
+	// Checkpoint telemetry: these describe what the claw was doing when the
+	// checkpoint was taken and lived only inside the manifest JSON, so pruning
+	// manifests used to destroy the record. As columns they cost ~40 bytes a
+	// row and survive any retention policy.
+	//
+	// Not fatal, like the neighbouring ADD COLUMNs. The hub served without
+	// these columns before they existed: a boot that cannot add them loses
+	// checkpoint telemetry until the next boot succeeds, where refusing to boot
+	// over them loses the hub. See migrateAfterSchema for the rule.
 	for _, col := range []struct{ name, def string }{
 		{"pipeline_stage", `TEXT NOT NULL DEFAULT ''`},
 		{"hub_version", `TEXT NOT NULL DEFAULT ''`},
@@ -374,7 +387,7 @@ func migrate(db *sql.DB) error {
 		{"files_bytes", `INTEGER NOT NULL DEFAULT 0`},
 	} {
 		if err := addColumn(db, "claw_checkpoints", col.name, col.def); err != nil {
-			return err
+			log.Printf("[migrate] claw_checkpoints.%s not added (retrying on the next boot): %v", col.name, err)
 		}
 	}
 	_, _ = db.Exec(`CREATE TABLE IF NOT EXISTS claw_checkpoints (
@@ -515,6 +528,11 @@ func migrate(db *sql.DB) error {
 // without -- retention indexes, the blob reference tables -- belongs in a
 // non-fatal helper (ensureRetentionIndexes, ensureCheckpointBlobRefTables)
 // that logs and retries on the next boot or sweep.
+//
+// The enumeration is a cheap first line. The fifth instance was a table copy
+// expressed in Go (widenFailureTypeCheckV1), which no scan of this constant
+// can see; TestBootSurvivesAFullDiskFromTheShippedSchema is what covers the
+// boot path as a whole, and migrateAfterSchema states the rule.
 const fatalBootSchemaSQL = `
 	CREATE TABLE IF NOT EXISTS tenants (
 		id        TEXT PRIMARY KEY,
@@ -1116,53 +1134,126 @@ const fatalBootSchemaSQL = `
 	);
 `
 
-// migrateAfterSchema is the remainder of migrate(): the one-time backfills and
-// rebuilds that run once the schema script has been applied.
+// migrateAfterSchema is the remainder of migrate(): the rebuilds, backfills
+// and seeds that run once the schema script has been applied.
+//
+// THE RULE. A step here is fatal -- refuses to boot the hub -- only if the hub
+// cannot serve without it. Everything else runs through runOptionalMigration,
+// which logs the failure and lets the next boot retry. The reason is the
+// disk-full hub: every one of these steps allocates pages (a table copy, an
+// index, a new table), that allocation is exactly what fails with SQLITE_FULL,
+// and a hub that refuses to boot over it can never run the retention sweeper
+// that would free the disk. Five times now a fatal step has been added for
+// something the hub was already serving without: two retention indexes, the
+// blob reference tables, a claim table, and a CHECK-constraint widen that
+// copies task_run_events -- millions of rows -- in one transaction.
+//
+// Classification of every fatal step reachable from migrate():
+//
+//	fatal, kept:
+//	  fatalBootSchemaSQL              the base schema; a fresh database has
+//	                                  nothing without it, and on a shipped
+//	                                  database every statement is an
+//	                                  IF NOT EXISTS no-op that allocates nothing
+//	  workflowv2.Migrate (base)       same argument, same shape; its additions
+//	                                  are non-fatal (see workflowv2.Migrate)
+//	  addColumn claws.*, claw_prs.*,  columns the request and retry hot paths
+//	  ticket_metadata.*, messages.*,  reference; a hub without them 500s or,
+//	  pipeline_outputs.*              for rebrief_pending, loses every retried
+//	                                  claw. In-place sqlite_master rewrites
+//	  messages.delivered_at backfill  the column's presence is the marker, so a
+//	                                  failed backfill that boots replays all
+//	                                  history as pending on the next start
+//	  claw_prs state backfill v1/v2,  small in-place writes on tables the hub
+//	  ticket_metadata key migration   serves from; pre-existing and applied
+//	                                  everywhere
+//	non-fatal, via runOptionalMigration:
+//	  rebuildTaskRunSummariesStatusV3  analytics rebuilds; a hub without them
+//	  rebuildTaskRunEventsAgentIdleV1  records fewer event kinds, no more
+//	  widenFailureTypeCheckV1 x3       copies task_run_events whole; exists so
+//	                                   workspace_unresponsive can be recorded
+//	  task_run_usage.usage_day,        analytics backfills; marker-gated and
+//	  backfillTaskRunAnalytics*,       idempotent, so a retry resumes
+//	  backfillTaskRunAgentStartedAt,
+//	  backfillTaskRunReadyAt,
+//	  backfillTaskRunStages,
+//	  rebuildTaskRunSummariesTicketPage
+//	  backfillCheckpointTelemetryV1    analytics; already non-fatal inside
+//	  model price seed                 the cost estimate; in-place upsert
+//	  claw_checkpoints telemetry cols  (in migrate) the ADD COLUMNs above
+//	  ensureCheckpointBlobRefTables,   retention; already non-fatal
+//	  adoptLegacyCheckpointBlobClaims,
+//	  ensureRetentionIndexes
+//
+// TestBootSurvivesAFullDiskFromTheShippedSchema pins this: it boots the current
+// binary against the schema production runs with the database forbidden to
+// grow, and every fatal step that needs a page fails it. A new fatal step
+// therefore has to argue its way past that test, not past a code reviewer
+// reading a diff in the middle of a 600-line function.
 func migrateAfterSchema(db *sql.DB) error {
-	var err error
 	if err := workflowv2.Migrate(db); err != nil {
 		return err
 	}
-	if err := rebuildTaskRunSummariesStatusV3(db); err != nil {
-		return err
-	}
-	if err := rebuildTaskRunEventsAgentIdleV1(db); err != nil {
-		return err
+	steps := []migrationStep{
+		{"rebuild task_run_summaries status v3", rebuildTaskRunSummariesStatusV3},
+		{"rebuild task_run_events agent_idle v1", rebuildTaskRunEventsAgentIdleV1},
 	}
 	// Widen the failure_type CHECK so workspace_unresponsive can be recorded.
 	// Runs after the rebuilds above, which recreate two of these tables from
 	// their own pasted DDL and would otherwise reinstate the narrow CHECK.
 	for _, table := range []string{"task_run_attempts", "task_run_summaries", "task_run_events"} {
-		if err := widenFailureTypeCheckV1(db, table); err != nil {
+		table := table
+		steps = append(steps, migrationStep{"widen " + table + " failure_type CHECK",
+			func(db *sql.DB) error { return widenFailureTypeCheckV1(db, table) }})
+	}
+	steps = append(steps,
+		// Backfill rows that predate the usage_day column so cost corrections
+		// land on the day the run's usage was last applied, not on the
+		// correction's day.
+		migrationStep{"backfill task_run_usage.usage_day", func(db *sql.DB) error {
+			_, err := db.Exec(`UPDATE task_run_usage SET usage_day = strftime('%Y-%m-%d', updated_at/1000, 'unixepoch') WHERE usage_day = '' AND updated_at > 0`)
 			return err
-		}
+		}},
+		migrationStep{"backfill task run analytics status v2", backfillTaskRunAnalyticsStatusV2},
+		migrationStep{"backfill task run analytics status v3", backfillTaskRunAnalyticsStatusV3},
+		migrationStep{"backfill task run agent_started_at v1", backfillTaskRunAgentStartedAtV1},
+		migrationStep{"backfill task run ready_at v1", backfillTaskRunReadyAtV1},
+		migrationStep{"backfill task run stages v1", backfillTaskRunStagesV1},
+		migrationStep{"backfill checkpoint telemetry v1", backfillCheckpointTelemetryV1},
+		migrationStep{"rebuild task_run_summaries ticket page v3", rebuildTaskRunSummariesTicketPageV3},
+		migrationStep{"seed model prices", seedModelPrices},
+	)
+	for _, step := range steps {
+		runOptionalMigration(db, step.name, step.run)
 	}
-	// Backfill rows that predate the usage_day column so cost corrections land
-	// on the day the run's usage was last applied, not on the correction's day.
-	if _, err := db.Exec(`UPDATE task_run_usage SET usage_day = strftime('%Y-%m-%d', updated_at/1000, 'unixepoch') WHERE usage_day = '' AND updated_at > 0`); err != nil {
-		return fmt.Errorf("backfill task_run_usage.usage_day: %w", err)
+	// Deliberately last: neither is needed for the hub to serve, and the hub
+	// that cannot complete them is the disk-full hub that most needs to boot.
+	// See ensureRetentionIndexes.
+	ensureCheckpointBlobRefTables(db)
+	adoptLegacyCheckpointBlobClaims(db)
+	ensureRetentionIndexes(db)
+	return nil
+}
+
+// migrationStep is one non-fatal step of migrateAfterSchema.
+type migrationStep struct {
+	name string
+	run  func(*sql.DB) error
+}
+
+// runOptionalMigration runs one step the hub can serve without, and turns its
+// failure into a log line instead of a refused boot. Every step it runs is
+// idempotent -- guarded by a schema probe, a marker row or a WHERE clause -- so
+// the next boot simply tries again.
+func runOptionalMigration(db *sql.DB, name string, run func(*sql.DB) error) {
+	if err := run(db); err != nil {
+		log.Printf("[migrate] %s: not applied (retrying on the next boot): %v", name, err)
 	}
-	if err := backfillTaskRunAnalyticsStatusV2(db); err != nil {
-		return err
-	}
-	if err := backfillTaskRunAnalyticsStatusV3(db); err != nil {
-		return err
-	}
-	if err := backfillTaskRunAgentStartedAtV1(db); err != nil {
-		return err
-	}
-	if err := backfillTaskRunReadyAtV1(db); err != nil {
-		return err
-	}
-	if err := backfillTaskRunStagesV1(db); err != nil {
-		return err
-	}
-	if err := backfillCheckpointTelemetryV1(db); err != nil {
-		return err
-	}
-	if err := rebuildTaskRunSummariesTicketPageV3(db); err != nil {
-		return err
-	}
+}
+
+// seedModelPrices upserts the static price list so price corrections reach
+// existing databases; rows from other sources are left untouched.
+func seedModelPrices(db *sql.DB) error {
 	for _, p := range []struct {
 		model                          string
 		in, out, cacheRead, cacheWrite float64
@@ -1175,20 +1266,12 @@ func migrateAfterSchema(db *sql.DB) error {
 		{"grok/grok-build-0.1", 1, 2, .2, .2},
 		{"grok/grok-4.5", 2, 6, .3, .3},
 	} {
-		// Upsert so price corrections in the static seed reach existing
-		// databases; rows from other sources are left untouched.
-		_, err = db.Exec(`INSERT INTO model_prices(model,input_cost_per_token,output_cost_per_token,cache_read_cost_per_token,cache_write_cost_per_token,source,updated_at) VALUES(?,?,?,?,?,?,?)
-			ON CONFLICT(model) DO UPDATE SET input_cost_per_token=excluded.input_cost_per_token,output_cost_per_token=excluded.output_cost_per_token,cache_read_cost_per_token=excluded.cache_read_cost_per_token,cache_write_cost_per_token=excluded.cache_write_cost_per_token,updated_at=excluded.updated_at WHERE model_prices.source='static'`, p.model, p.in/1e6, p.out/1e6, p.cacheRead/1e6, p.cacheWrite/1e6, "static", now().UnixMilli())
-		if err != nil {
-			return err
+		if _, err := db.Exec(`INSERT INTO model_prices(model,input_cost_per_token,output_cost_per_token,cache_read_cost_per_token,cache_write_cost_per_token,source,updated_at) VALUES(?,?,?,?,?,?,?)
+			ON CONFLICT(model) DO UPDATE SET input_cost_per_token=excluded.input_cost_per_token,output_cost_per_token=excluded.output_cost_per_token,cache_read_cost_per_token=excluded.cache_read_cost_per_token,cache_write_cost_per_token=excluded.cache_write_cost_per_token,updated_at=excluded.updated_at WHERE model_prices.source='static'`,
+			p.model, p.in/1e6, p.out/1e6, p.cacheRead/1e6, p.cacheWrite/1e6, "static", now().UnixMilli()); err != nil {
+			return fmt.Errorf("seed price for %s: %w", p.model, err)
 		}
 	}
-	// Both deliberately last, and deliberately not fatal: neither is needed for
-	// the hub to serve, and the hub that cannot complete them is the disk-full
-	// hub that most needs to boot. See ensureRetentionIndexes.
-	ensureCheckpointBlobRefTables(db)
-	adoptLegacyCheckpointBlobClaims(db)
-	ensureRetentionIndexes(db)
 	return nil
 }
 
@@ -1365,30 +1448,6 @@ func adoptLegacyCheckpointBlobClaims(db *sql.DB) {
 		return
 	}
 	log.Printf("[migrate] adopted %d legacy checkpoint blob claim(s) into checkpoint_blob_refs", adopted)
-}
-
-// hubMigrationApplied reports whether a one-time migration has already run.
-// hub_migrations is created on demand so callers reached before the table exists
-// (the retention sweeper, which runs long after boot) do not have to care.
-func hubMigrationApplied(db *sql.DB, name string) (bool, error) {
-	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS hub_migrations (name TEXT PRIMARY KEY, applied_at INTEGER NOT NULL)`); err != nil {
-		return false, fmt.Errorf("create hub migrations: %w", err)
-	}
-	var applied int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM hub_migrations WHERE name=?`, name).Scan(&applied); err != nil {
-		return false, fmt.Errorf("check migration %s: %w", name, err)
-	}
-	return applied > 0, nil
-}
-
-// markHubMigration records a one-time migration as complete.
-func markHubMigration(db *sql.DB, name string) error {
-	if _, err := db.Exec(
-		`INSERT INTO hub_migrations(name, applied_at) VALUES(?, ?) ON CONFLICT(name) DO NOTHING`,
-		name, now().UnixMilli()); err != nil {
-		return fmt.Errorf("mark migration %s: %w", name, err)
-	}
-	return nil
 }
 
 // retentionIndexes are the indexes that exist purely to make the retention

@@ -199,11 +199,21 @@ order:
    or a row. `enabled: true` is still required: `dry_run` describes how a cycle
    behaves, not whether it runs.
 
-   A dry run does write one thing: the one-time `checkpoint_blob_refs` backfill,
-   which records which blobs each existing checkpoint holds. It only ever adds
-   protection, and the blob sweep — dry or real — refuses to delete anything
-   until it has completed once, so running it is what makes the dry run's blob
-   numbers mean anything.
+   A dry run does write one thing: the `checkpoint_blob_refs` backfill, which
+   records which blobs each checkpoint holds. It runs at the top of every cycle
+   and only ever adds protection: it selects the `ready` and `skipped` rows that
+   have no reference edge and gives them edges, and the blob sweep — dry or
+   real — refuses to delete anything while any such row exists. Running it is
+   what makes the dry run's blob numbers mean anything.
+
+   **Rolling back.** A build without reference counting records no edges, so
+   every checkpoint created while it runs is `ready` with a valid manifest and
+   nothing in `checkpoint_blob_refs`. That is safe only because the backfill is
+   continuous: on the roll-forward, the first cycle finds those rows, declines
+   the sweep (`blobs=DECLINED(N checkpoint(s) without references)` in the cycle
+   line), gives them edges, and the following cycle sweeps normally. Two things
+   defeat it: deleting rows from `checkpoint_blob_refs` by hand, and a build in
+   which the backfill is gated on a one-time marker. Do neither.
 
    ```yaml
    retention:
@@ -230,7 +240,7 @@ order:
 
    ```
    [retention] enabled: dry_run=true interval=1h0m0s max_age=2160h0m0s compact_after=240h0m0s adjustments=[none] first_cycle_at=...
-   [retention] blob reference backfill complete in 18.2s: 1204 checkpoint(s), 402118 reference(s); unreadable_manifests=3 missing_trees=0 unreadable_trees=0 ...
+   [retention] blob reference backfill in 18.2s: 1204 of 1204 checkpoint(s) given references, 3598 reference(s), 331 tree expansion(s) (1002114 rows), 0 schema-1 fallback(s); unparseable_manifests=3 missing_trees=0 unparseable_trees=0 ...
    [retention] dry_run: would sweep 41029 blob(s) (e.g. 0a1b2c3d, ..., and 41024 more) totalling 93112884213 bytes
    [retention] cycle done in 4.1s (dry_run=true): would remove compacted=812 diagnostics=39 checkpoints=1204 task_run_events=2911430 messages=88214 blobs=41029 bytes_freed=93112884213 (blobs=93110... manifests=1... diagnostics=...; row deletes free SQLite pages but do not shrink the database file without a VACUUM) phase_errors=0 item_errors=0
    ```
@@ -249,11 +259,20 @@ order:
    thousands of lines per cycle, which journald rate-limits — dropping the
    summary line that is the whole point.
 
-   `unreadable_manifests` in the backfill line is expected on a hub that hit
+   `unparseable_manifests` in the backfill line is expected on a hub that hit
    ENOSPC and is not an error: the row's own digests are still recorded.
    `missing_trees` is worth attention — a checkpoint whose tree blob is already
    gone cannot have its per-file blobs recorded, and those files will be swept.
-   That checkpoint was already unrestorable.
+   That checkpoint was already unrestorable. A `schema-1 fallback` is a
+   checkpoint whose tree could not be expanded at all and whose old-style
+   manifest still listed its files; those files are recorded under the
+   checkpoint itself, one edge each.
+
+   A cycle that says `blobs=DECLINED(...)` swept nothing because some `ready`
+   or `skipped` checkpoint still has no reference edge — the line before it
+   names a few — and the backfill error above it says why they could not be
+   given one. Until the count reaches zero no blob is deleted; that is the
+   design, not a fault.
 
 3. **Archive anything you want to keep.** The counts from step 2 are the last
    warning you get.
