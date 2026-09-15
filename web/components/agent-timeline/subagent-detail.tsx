@@ -7,12 +7,16 @@ import {
   formatDurationMs,
   type Subagent,
 } from "@/lib/subagents"
+import { EXPANDED_PRE_CLASS } from "./step-row"
 import {
+  SubagentChip,
   SubagentDot,
   SubagentSectionLabel,
   SubagentStatusLabel,
   subagentActivity,
 } from "./subagent-status"
+
+const OUTPUT_BOX_CLASS = "mt-1 rounded-md bg-muted/40 px-3 py-2"
 
 /**
  * The drill-down for one subagent: the task it was given, the facts about the
@@ -38,8 +42,6 @@ export function SubagentDetail({
   const staleMs = Math.max(0, now - sub.lastOutputAtMs)
 
   const meta: string[] = []
-  if (sub.type) meta.push(sub.type)
-  if (sub.model) meta.push(sub.model)
   meta.push(`started ${formatAge(sub.startedAt.getTime(), now)}`)
   // No call count: `step.messages` holds the parent's own events for this one
   // Task call (start, forwarded progress pulses, terminal), not the calls the
@@ -53,25 +55,25 @@ export function SubagentDetail({
   }
 
   return (
-    <div className={cn("space-y-3", className)}>
+    <div className={cn("flex flex-col gap-3", className)}>
       <div className="flex min-w-0 items-center gap-2">
         <SubagentDot status={sub.status} />
-        <h2 className="min-w-0 flex-1 truncate font-mono text-sm text-foreground" title={sub.name}>
+        <h2 className="min-w-0 flex-1 truncate text-sm text-foreground" title={sub.name}>
           {sub.name}
         </h2>
+        {sub.type && <SubagentChip title={sub.type}>{sub.type}</SubagentChip>}
+        {sub.model && <SubagentChip title={sub.model}>{sub.model}</SubagentChip>}
         <SubagentStatusLabel status={sub.status} />
       </div>
 
-      <section className="rounded-lg border border-border bg-card">
-        <div className="px-3 pt-2.5">
-          <SubagentSectionLabel>Task given by the parent</SubagentSectionLabel>
-          <p className="mt-1.5 whitespace-pre-wrap break-words text-[12px] leading-5 text-foreground/90">
-            {sub.task || "The parent recorded no task prompt for this subagent."}
-          </p>
-        </div>
-        <div className="mt-2.5 flex flex-wrap items-center gap-x-2 gap-y-1 border-t border-border px-3 py-1.5">
+      <section className="rounded-lg border border-border/70 bg-card/70 p-3">
+        <SubagentSectionLabel>Task given by the parent</SubagentSectionLabel>
+        <p className="mt-1.5 whitespace-pre-wrap break-words text-sm leading-relaxed text-foreground/80">
+          {sub.task || "The parent recorded no task prompt for this subagent."}
+        </p>
+        <div className="mt-2.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs tabular-nums text-muted-foreground">
           {meta.map((item, index) => (
-            <span key={item} className="flex items-center gap-2 font-mono text-[10px] text-muted-foreground">
+            <span key={item} className="flex items-center gap-2">
               {index > 0 && <span className="text-border">·</span>}
               <span suppressHydrationWarning>{item}</span>
             </span>
@@ -80,14 +82,7 @@ export function SubagentDetail({
       </section>
 
       {sub.status === "quiet" && (
-        <p
-          className="rounded-lg border px-3 py-2 text-[11.5px] leading-5"
-          style={{
-            borderColor: "color-mix(in srgb, var(--status-idle) 40%, transparent)",
-            backgroundColor: "color-mix(in srgb, var(--status-idle) 7%, transparent)",
-            color: "var(--text-warning)",
-          }}
-        >
+        <p className="rounded-md bg-warning-surface px-3 py-2 text-xs leading-5 text-warning-foreground">
           <span suppressHydrationWarning>
             No output for {formatDurationMs(staleMs)}
           </span>
@@ -99,9 +94,11 @@ export function SubagentDetail({
       )}
 
       {activity && (
-        <div className="flex min-w-0 items-center gap-1.5">
-          <activity.Icon className="size-3 shrink-0 text-muted-foreground" />
-          <span className="min-w-0 truncate font-mono text-[11px] text-foreground/80" title={activity.text}>
+        <div className="flex min-h-6 min-w-0 items-center gap-1.5 px-0.5">
+          <span className="flex size-6 shrink-0 items-center justify-center text-icon-muted">
+            <activity.Icon className="size-4 shrink-0 stroke-[1.8]" aria-hidden />
+          </span>
+          <span className="min-w-0 truncate font-mono text-[13px] live-tool-shine" title={activity.text}>
             {activity.text}
           </span>
         </div>
@@ -110,23 +107,23 @@ export function SubagentDetail({
       {sub.error && (
         <div>
           <SubagentSectionLabel>Error</SubagentSectionLabel>
-          <pre className="mt-1 max-h-[50vh] overflow-auto whitespace-pre-wrap break-words rounded-lg border border-red-500/20 bg-red-500/5 p-2.5 font-mono text-[11px] text-red-400">
-            {sub.error}
-          </pre>
+          <div className={OUTPUT_BOX_CLASS}>
+            <pre className={cn(EXPANDED_PRE_CLASS, "max-h-[50vh] text-[11px] text-error-foreground/80")}>{sub.error}</pre>
+          </div>
         </div>
       )}
 
       {sub.result && (
         <div>
           <SubagentSectionLabel>Result</SubagentSectionLabel>
-          <pre className="mt-1 max-h-[50vh] overflow-auto whitespace-pre-wrap break-words rounded-lg border border-border/50 bg-muted/40 p-2.5 font-mono text-[11px] text-muted-foreground">
-            {sub.result}
-          </pre>
+          <div className={OUTPUT_BOX_CLASS}>
+            <pre className={cn(EXPANDED_PRE_CLASS, "max-h-[50vh] text-[11px] text-secondary-label")}>{sub.result}</pre>
+          </div>
         </div>
       )}
 
       {!sub.result && !sub.error && !live && (
-        <p className="text-[11.5px] text-muted-foreground">
+        <p className="text-xs text-muted-foreground">
           This subagent finished without returning any output.
         </p>
       )}

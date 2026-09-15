@@ -1,17 +1,16 @@
 "use client"
 
-import { useState } from "react"
+import { useState, type KeyboardEvent, type MouseEvent } from "react"
 import {
-  AlertCircle,
   Bot,
+  Check,
   ChevronRight,
-  FileText,
+  CircleAlert,
+  Eye,
   Globe,
-  Info,
-  Loader2,
   Search,
   SquarePen,
-  SquareTerminal,
+  Terminal,
   Wrench,
 } from "lucide-react"
 import { cn } from "@/lib/utils"
@@ -26,40 +25,54 @@ import { useToggleAnchor } from "./anchor-context"
 
 export type StepDensity = "full" | "card"
 
-const CATEGORY_ICONS: Record<ToolCategory, typeof Wrench> = {
-  read: FileText,
+export const CATEGORY_ICONS: Record<ToolCategory, typeof Wrench> = {
+  read: Eye,
   edit: SquarePen,
-  run: SquareTerminal,
+  run: Terminal,
   search: Search,
   web: Globe,
   task: Bot,
   other: Wrench,
 }
 
+/** Shared by step rows, group rows, the activity summary and the turn fold. */
+export const ROW_INTERACTIVE_CLASS =
+  "cursor-pointer hover:bg-accent/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70"
+
+/** Expanded tool output: one quiet box. A failed step only adds a 2px `border-error/40` left rule; its text keeps the same quiet secondary tone. */
+export const EXPANDED_BODY_CLASS = "mt-1 ms-7 cursor-default rounded-md bg-muted/40 px-3 py-2"
+export const EXPANDED_PRE_CLASS =
+  "overflow-auto whitespace-pre-wrap break-words font-mono leading-relaxed select-text cursor-text"
+
 function StepIcon({ step, className }: { step: Step; className: string }) {
-  if (step.status === "running") return <Loader2 className={cn(className, "animate-spin")} />
-  if (step.status === "failed" || step.tone !== "normal") return <AlertCircle className={className} />
-  if (step.kind === "info") return <Info className={className} />
+  if (step.tone !== "normal" && step.status !== "failed") return <CircleAlert className={className} aria-hidden />
+  if (step.kind === "info") {
+    return step.status === "failed" ? <CircleAlert className={className} aria-hidden /> : <Check className={className} aria-hidden />
+  }
   const Icon = CATEGORY_ICONS[step.category] ?? Wrench
-  return <Icon className={className} />
-}
-
-function stepAccent(step: Step): string {
-  if (step.status === "running") return "border-l-blue-500"
-  if (step.status === "failed") return "border-l-red-500"
-  if (step.tone === "warning") return "border-l-amber-500/70"
-  return "border-l-transparent"
-}
-
-function stepTextTone(step: Step): string {
-  if (step.status === "failed" || step.tone === "error") return "text-red-400"
-  if (step.tone === "warning") return "text-amber-400"
-  return "text-foreground/80"
+  return <Icon className={className} aria-hidden />
 }
 
 /**
- * One row per tool call: category icon / body / duration on a 3-column grid.
- * Click expands the result/error inline; failed steps start expanded.
+ * Failures of ordinary tool calls stay quiet — the icon dims and the row keeps
+ * its secondary text. Only session-level errors (info steps with an error
+ * tone) and warnings get a colored heading.
+ */
+function stepTones(step: Step): { icon: string; title: string } {
+  const severe = step.kind === "info" && step.tone === "error"
+  if (severe) return { icon: "text-destructive", title: "font-medium text-destructive" }
+  if (step.tone === "warning") return { icon: "text-warning", title: "font-medium text-warning" }
+  if (step.status === "failed") return { icon: "text-tool-error-icon/40", title: "text-secondary-label" }
+  return { icon: "text-icon-muted", title: "text-secondary-label" }
+}
+
+function stopRowToggle(e: MouseEvent) {
+  e.stopPropagation()
+}
+
+/**
+ * One tool call as a quiet 24px row: category icon, title + detail, duration,
+ * chevron. Click expands the result/error inline; failed steps start expanded.
  */
 export function StepRow({
   step,
@@ -81,7 +94,7 @@ export function StepRow({
 }) {
   // Failed steps auto-expand until the user explicitly toggles them — full
   // density only: a board card cannot afford an error dump eating its height,
-  // the red row + exit code already mark the failure there.
+  // the dimmed icon + exit code already mark the failure there.
   const [userToggled, setUserToggled] = useState<boolean | null>(null)
   const anchor = useToggleAnchor()
   const hasBody = Boolean(step.result || step.error)
@@ -96,6 +109,7 @@ export function StepRow({
   const running = step.status === "running"
   const liveElapsed = running && now ? Math.max(0, now - step.startedAt.getTime()) : null
   const duration = liveElapsed ?? step.durationMs
+  const showDuration = duration !== undefined && duration >= (running ? 0 : 50)
   const showExit = typeof step.exitCode === "number" && step.exitCode !== 0
 
   const activate: ((el: HTMLElement) => void) | null = opensSubagent
@@ -107,98 +121,130 @@ export function StepRow({
         }
       : null
   const interactive = opensSubagent || hasBody
+  const tones = stepTones(step)
+  const failed = step.status === "failed"
+  // The status text often restates the detail ("waiting for <model>" next to
+  // the model name); only show it when it adds something.
+  const statusText = step.statusText?.trim() ?? ""
+  const showStatusText =
+    !isCard &&
+    statusText.length > 0 &&
+    !(step.detail && statusText.toLowerCase().includes(step.detail.trim().toLowerCase()))
 
   return (
-    <div className={cn("border-l-2 pl-2", stepAccent(step))}>
-      <div
-        role={interactive ? "button" : undefined}
-        tabIndex={interactive ? 0 : undefined}
-        aria-label={opensSubagent ? `Open subagent ${step.detail || step.title}` : undefined}
-        onClick={
-          activate
-            ? (e) => activate(e.currentTarget as HTMLElement)
-            : undefined
-        }
-        onKeyDown={
-          activate
-            ? (e) => {
-                if (e.key === "Enter" || e.key === " ") {
-                  e.preventDefault()
-                  activate(e.currentTarget as HTMLElement)
-                }
+    <div
+      role={interactive ? "button" : undefined}
+      tabIndex={interactive ? 0 : undefined}
+      aria-expanded={hasBody && !opensSubagent ? expanded : undefined}
+      aria-label={opensSubagent ? `Open subagent ${step.detail || step.title}` : undefined}
+      onClick={activate ? (e) => activate(e.currentTarget as HTMLElement) : undefined}
+      onKeyDown={
+        activate
+          ? (e: KeyboardEvent<HTMLDivElement>) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault()
+                activate(e.currentTarget as HTMLElement)
               }
-            : undefined
-        }
+            }
+          : undefined
+      }
+      className={cn(
+        "flex flex-col rounded-md px-0.5 py-0.5 transition-colors",
+        expanded && "mb-1",
+        interactive && ROW_INTERACTIVE_CLASS
+      )}
+    >
+      <div
         className={cn(
-          "grid grid-cols-[auto_1fr_auto] items-baseline gap-x-2",
-          isCard ? "py-0.5" : "py-1",
+          "flex select-none items-center gap-1.5",
+          isCard ? "min-h-5" : "min-h-6",
           // 44px tap target for expandable rows on touch screens
-          interactive && "cursor-pointer rounded-sm hover:bg-muted/30 max-md:min-h-11 max-md:items-center",
-          opensSubagent && "focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-ring"
+          interactive && !isCard && "max-md:min-h-11"
         )}
       >
-        <span className="self-center">
-          <StepIcon step={step} className={cn(isCard ? "size-2.5" : "size-3", "shrink-0", stepTextTone(step))} />
+        <span
+          className={cn("flex shrink-0 items-center justify-center", isCard ? "size-5" : "size-6", tones.icon)}
+          role={step.status === "failed" ? "img" : undefined}
+          aria-label={step.status === "failed" ? "Tool call failed" : undefined}
+        >
+          <StepIcon step={step} className={cn("shrink-0 stroke-[1.8]", isCard ? "size-3.5" : "size-4")} />
         </span>
-        <span className="flex min-w-0 items-baseline gap-1.5 max-md:flex-wrap max-md:gap-y-0">
-          {running && (
-            <span className="relative flex size-1.5 self-center">
-              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-blue-400 opacity-75" />
-              <span className="relative inline-flex size-1.5 rounded-full bg-blue-500" />
-            </span>
-          )}
-          <span className={cn("shrink-0 font-medium", isCard ? "text-[10px]" : "text-xs", stepTextTone(step))}>
-            {step.title}
+        <p className={cn("flex min-w-0 flex-1 items-baseline gap-1.5 leading-relaxed", isCard ? "text-xs" : "text-sm")}>
+          {/* Title + detail share one span so a running row shimmers as a whole;
+              the shine clips a gradient to the text, so the inner spans carry
+              no color of their own while running. */}
+          <span
+            className={cn(
+              "flex min-w-0 flex-1 items-baseline gap-1.5 max-md:flex-wrap max-md:gap-y-0",
+              running && "live-tool-shine"
+            )}
+          >
+            <span className={cn("shrink-0", !running && tones.title)}>{step.title}</span>
+            {step.detail && (
+              <span
+                className={cn(
+                  // Mobile: wrap to two lines with break-all so long paths never
+                  // force horizontal overflow; desktop keeps the one-line truncate.
+                  "min-w-0 flex-1 truncate max-md:line-clamp-2 max-md:whitespace-normal max-md:break-all",
+                  !running && "text-secondary-label",
+                  step.detailKind !== "text" && (isCard ? "font-mono text-[11px]" : "font-mono text-[13px]")
+                )}
+                title={step.detail}
+              >
+                {step.detail}
+              </span>
+            )}
           </span>
-          {step.detail && (
-            <span
-              className={cn(
-                // Mobile: wrap to two lines with break-all so long paths never
-                // force horizontal overflow; desktop keeps the one-line truncate.
-                "min-w-0 truncate max-md:line-clamp-2 max-md:whitespace-normal max-md:break-all text-muted-foreground",
-                step.detailKind !== "text" && "font-mono",
-                isCard ? "text-[10px]" : "text-xs"
-              )}
-              title={step.detail}
-            >
-              {step.detail}
-            </span>
+          {showStatusText && (
+            <span className="min-w-0 truncate text-xs text-muted-foreground/70 max-md:hidden">{statusText}</span>
           )}
-          {step.statusText && !isCard && (
-            <span className="min-w-0 truncate text-xs text-muted-foreground/50">{step.statusText}</span>
-          )}
-          {showExit && (
-            <span className={cn("shrink-0 rounded bg-red-500/10 px-1 font-mono text-red-400", isCard ? "text-[9px]" : "text-[10px]")}>
-              exit {step.exitCode}
-            </span>
-          )}
-        </span>
-        <span className="flex items-center gap-1 self-center">
-          {duration !== undefined && duration >= (running ? 0 : 50) && (
-            <span className="font-mono text-[10.5px] text-muted-foreground" suppressHydrationWarning={running || undefined}>
-              {formatDurationMs(duration)}
-            </span>
-          )}
-          {interactive && (
-            <ChevronRight className={cn("size-3 text-muted-foreground/50 transition-transform", expanded && "rotate-90")} />
-          )}
+        </p>
+        {showExit && (
+          <span className="shrink-0 rounded-sm border border-border/60 px-1 font-mono text-[.65rem] text-muted-foreground">
+            exit {step.exitCode}
+          </span>
+        )}
+        {showDuration && (
+          <span
+            className="shrink-0 font-mono text-[.7rem] tabular-nums text-muted-foreground"
+            suppressHydrationWarning={running || undefined}
+          >
+            {formatDurationMs(duration)}
+          </span>
+        )}
+        <span className={cn("flex size-4 shrink-0 items-center justify-center", !interactive && "invisible")} aria-hidden>
+          <ChevronRight
+            className={cn(
+              "size-3 shrink-0 text-icon-muted opacity-70 transition-transform duration-200",
+              expanded && "rotate-90"
+            )}
+          />
         </span>
       </div>
       {expanded && (
-        <div className={cn("mb-1 space-y-1", isCard ? "pr-1" : "pr-2")}>
+        <div
+          className={cn(EXPANDED_BODY_CLASS, "flex flex-col gap-2", failed && "border-l-2 border-error/40")}
+          onClick={stopRowToggle}
+        >
           {step.error && (
-            <pre className={cn(
-              "overflow-y-auto whitespace-pre-wrap break-words rounded border border-red-500/20 bg-red-500/5 p-2 font-mono text-red-400",
-              isCard ? "max-h-32 text-[10px]" : "max-h-64 text-[11px]"
-            )}>
+            <pre
+              className={cn(
+                EXPANDED_PRE_CLASS,
+                "text-secondary-label",
+                isCard ? "max-h-32 text-[10px]" : "max-h-64 text-[11px]"
+              )}
+            >
               {step.error}
             </pre>
           )}
           {step.result && (
-            <pre className={cn(
-              "overflow-y-auto whitespace-pre-wrap break-words rounded border border-border/50 bg-muted/40 p-2 font-mono text-muted-foreground",
-              isCard ? "max-h-32 text-[10px]" : "max-h-64 text-[11px]"
-            )}>
+            <pre
+              className={cn(
+                EXPANDED_PRE_CLASS,
+                "text-secondary-label",
+                isCard ? "max-h-32 text-[10px]" : "max-h-64 text-[11px]"
+              )}
+            >
               {step.result}
             </pre>
           )}
@@ -225,7 +271,7 @@ export function StepList({
   onOpenSubagent?: (stepId: string) => void
 }) {
   return (
-    <div className={cn(density === "card" ? "space-y-0" : "space-y-0.5")}>
+    <div className="flex flex-col">
       {items.map((item) =>
         item.type === "step" ? (
           <StepRow key={item.step.id} step={item.step} density={density} now={now} onOpenSubagent={onOpenSubagent} />
@@ -236,6 +282,9 @@ export function StepList({
     </div>
   )
 }
+
+/** Past this many rows the expanded group scrolls, so it gets the edge fade. */
+const GROUP_SCROLL_THRESHOLD = 10
 
 function StepGroupRow({
   id,
@@ -259,31 +308,43 @@ function StepGroupRow({
   const Icon = CATEGORY_ICONS[steps[0].category] ?? Wrench
 
   return (
-    <div key={id} className="border-l-2 border-l-transparent pl-2">
+    <div key={id} className="flex flex-col">
       <button
         type="button"
+        aria-expanded={expanded}
         onClick={(e) => {
           anchor(e.currentTarget)
           setExpanded((v) => !v)
         }}
         className={cn(
-          "grid w-full grid-cols-[auto_1fr_auto] items-center gap-x-2 rounded-sm text-left hover:bg-muted/30 max-md:min-h-11",
-          isCard ? "py-0.5" : "py-1"
+          "flex w-full items-center gap-1.5 rounded-md px-0.5 py-0.5 text-left leading-relaxed transition-colors",
+          isCard ? "min-h-5 text-xs" : "min-h-6 text-sm max-md:min-h-11",
+          ROW_INTERACTIVE_CLASS
         )}
       >
-        <Icon className={cn(isCard ? "size-2.5" : "size-3", "shrink-0 text-muted-foreground")} />
-        <span className={cn("min-w-0 truncate font-medium text-muted-foreground", isCard ? "text-[10px]" : "text-xs")}>
-          {label}
+        <span className={cn("flex shrink-0 items-center justify-center text-icon-muted", isCard ? "size-5" : "size-6")}>
+          <Icon className={cn("shrink-0 stroke-[1.8]", isCard ? "size-3.5" : "size-4")} aria-hidden />
         </span>
-        <span className="flex items-center gap-1">
-          {totalMs > 0 && (
-            <span className="font-mono text-[10.5px] text-muted-foreground">{formatDurationMs(totalMs)}</span>
-          )}
-          <ChevronRight className={cn("size-3 text-muted-foreground/50 transition-transform", expanded && "rotate-90")} />
+        <span className="min-w-0 flex-1 truncate text-secondary-label">{label}</span>
+        {totalMs > 0 && (
+          <span className="shrink-0 font-mono text-[.7rem] tabular-nums text-muted-foreground">{formatDurationMs(totalMs)}</span>
+        )}
+        <span className="flex size-4 shrink-0 items-center justify-center" aria-hidden>
+          <ChevronRight
+            className={cn("size-3 shrink-0 text-icon-muted opacity-70 transition-transform duration-200", expanded && "rotate-90")}
+          />
         </span>
       </button>
       {expanded && (
-        <div className={cn(density === "card" ? "space-y-0" : "space-y-0.5")}>
+        <div
+          className={cn(
+            "flex flex-col rounded-md",
+            !isCard && "max-h-[min(18rem,50dvh)] overflow-y-auto scrollbar-thin",
+            !isCard &&
+              steps.length > GROUP_SCROLL_THRESHOLD &&
+              "[mask-image:linear-gradient(to_bottom,transparent,black_1.5rem,black_calc(100%-1.5rem),transparent)]"
+          )}
+        >
           {steps.map((step) => (
             <StepRow key={step.id} step={step} density={density} now={now} onOpenSubagent={onOpenSubagent} />
           ))}

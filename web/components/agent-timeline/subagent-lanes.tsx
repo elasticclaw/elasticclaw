@@ -3,6 +3,7 @@
 import { cn } from "@/lib/utils"
 import { formatAge, formatDurationMs, type Subagent } from "@/lib/subagents"
 import {
+  SubagentChip,
   SubagentDot,
   SubagentStatusLabel,
   subagentActivity,
@@ -10,7 +11,7 @@ import {
   subagentOutcome,
 } from "./subagent-status"
 
-/** Condensed lane card: name + status / icon + activity / one duration line. */
+/** Condensed lane row: name + status / activity or task / one duration line. */
 function LaneCard({
   sub,
   now,
@@ -36,37 +37,39 @@ function LaneCard({
       className={cn(
         // min-w-0 is required, not decorative: a flex item defaults to
         // min-width:auto, so an unbreakable mono agent name would widen the
-        // card past its 200px basis instead of truncating inside it.
-        "flex h-[62px] w-[200px] min-w-0 shrink-0 grow-0 basis-[200px] flex-col justify-center gap-0.5 rounded-[10px] border-l-2",
-        "bg-[var(--subagent-wash)] px-2 py-1.5 text-left transition-colors hover:bg-muted/40",
-        "focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-ring"
+        // card past its 220px basis instead of truncating inside it.
+        "flex h-auto w-[220px] min-w-0 shrink-0 grow-0 basis-[220px] flex-col rounded-md",
+        "bg-[var(--subagent-wash)] px-1 py-0.5 text-left transition-colors hover:bg-accent/20",
+        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70"
       )}
     >
-      <span className="flex min-w-0 items-center gap-1.5">
+      <span className="flex min-h-6 min-w-0 items-center gap-1.5">
         <SubagentDot status={sub.status} />
-        <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-foreground" title={sub.name}>
+        <span className="min-w-0 flex-1 truncate text-sm text-foreground/80" title={sub.name}>
           {sub.name}
         </span>
-        <SubagentStatusLabel status={sub.status} />
+        {sub.model && (
+          <SubagentChip title={sub.model} className="max-w-24 text-[.6rem]">
+            {sub.model}
+          </SubagentChip>
+        )}
+        <SubagentStatusLabel status={sub.status} className="text-[.6rem]" />
       </span>
-      <span className="flex min-w-0 items-center gap-1">
+      <span className="flex min-w-0 items-center gap-1 text-xs text-muted-foreground">
         {activity ? (
           <>
-            <activity.Icon className="size-2.5 shrink-0 text-muted-foreground" />
-            <span
-              className="min-w-0 flex-1 truncate font-mono text-[10px] text-foreground/80"
-              title={activity.text}
-            >
+            <activity.Icon className="size-3 shrink-0 stroke-[1.8]" aria-hidden />
+            <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-secondary-label" title={activity.text}>
               {activity.text}
             </span>
           </>
         ) : (
-          <span className="min-w-0 flex-1 truncate text-[10px] text-muted-foreground" title={sub.task}>
-            {sub.task || " "}
+          <span className="min-w-0 flex-1 truncate" title={sub.task}>
+            {sub.task || " "}
           </span>
         )}
       </span>
-      <span className="truncate font-mono text-[9.5px] text-muted-foreground" suppressHydrationWarning>
+      <span className="truncate font-mono text-[.65rem] tabular-nums text-muted-foreground" suppressHydrationWarning>
         {line}
       </span>
     </button>
@@ -98,8 +101,8 @@ export function SubagentLanes({
     <div
       aria-label="Subagents"
       className={cn(
-        "flex w-full min-w-0 gap-2 overflow-x-auto scrollbar-thin",
-        "border-b border-border px-3 py-2 md:px-6",
+        "flex w-full min-w-0 gap-1 overflow-x-auto scrollbar-thin",
+        "border-b border-border/60 px-3 py-1.5 sm:px-5",
         className
       )}
     >
