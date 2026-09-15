@@ -562,6 +562,16 @@ export function useHub(selectedClawId: string | null): HubState {
             subagent_name: payload.subagent_name,
             subagent_type: payload.subagent_type,
             subagent_model: payload.subagent_model,
+            subagent_requested_model: payload.subagent_requested_model,
+            subagent_requested_provider: payload.subagent_requested_provider,
+            subagent_resolved_model: payload.subagent_resolved_model,
+            subagent_resolved_provider: payload.subagent_resolved_provider,
+            subagent_parent_session: payload.subagent_parent_session,
+            subagent_parent_run: payload.subagent_parent_run,
+            subagent_child_session: payload.subagent_child_session,
+            subagent_child_run: payload.subagent_child_run,
+            subagent_spawn_status: payload.subagent_spawn_status,
+
             subagent_prompt: payload.subagent_prompt,
           }
           if (isUnhelpfulActivity(activity)) return
