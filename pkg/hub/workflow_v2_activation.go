@@ -39,6 +39,23 @@ func (s *Server) triggerWorkflowV2Config(w http.ResponseWriter, r *http.Request,
 		jsonError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
 		return
 	}
+	if req.Agents != nil {
+		copied := *workflow
+		applyWorkflowAgents(&copied, mergeAgentConfig(workflowAgentConfig(workflow), *req.Agents))
+		workflow = &copied
+		s.mu.RLock()
+		_, err := resolveAgentConfig(s.hubCfg, effectiveWorkflowAgents(workspace, workflow))
+		s.mu.RUnlock()
+		if err != nil {
+			jsonError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		agents := workflowAgentConfig(workflow)
+		if err := patchWorkflowYAML(workflow, map[string]interface{}{"default_model": agents.DefaultModel, "llm_key": agents.LLMKey, "subagents": agents.Subagents}); err != nil {
+			jsonError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
 	inputs := make(map[string]string, len(req.Inputs))
 	for name, value := range req.Inputs {
 		name = strings.TrimSpace(name)

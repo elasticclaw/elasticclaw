@@ -125,7 +125,7 @@ func (s *Server) createClawFromWorkflowWithOptions(workspace *types.WorkspaceCon
 	}
 
 	s.mu.RLock()
-	defaultModel := s.hubCfg.DefaultModel
+	defaultModel := ""
 	provCfg, ok := s.hubCfg.Providers[provider]
 	s.mu.RUnlock()
 	if !ok {
@@ -189,9 +189,23 @@ func (s *Server) createClawFromWorkflowWithOptions(workspace *types.WorkspaceCon
 			dockerEnabled = 1
 		}
 	}
+	agents := types.AgentConfig{DefaultModel: defaultModel, LLMKey: llmKey}
+	if tmplCfg != nil {
+		agents.Subagents = tmplCfg.Subagents
+	}
+	agents = mergeAgentConfig(agents, workflowAgentConfig(workflow))
 	s.mu.RLock()
-	defaultModel, llmKey = resolveModelAndLLMKey(s.hubCfg, llmKey, defaultModel)
+	if agents.Subagents != nil || workflow.DefaultModel != "" || workflow.LLMKey != "" {
+		agents, err = resolveAgentConfig(s.hubCfg, agents)
+	} else {
+		agents.DefaultModel, agents.LLMKey = resolveModelAndLLMKey(s.hubCfg, agents.LLMKey, agents.DefaultModel)
+	}
 	s.mu.RUnlock()
+	if err != nil {
+		return "", false, fmt.Errorf("resolve agents: %w", err)
+	}
+	defaultModel, llmKey = agents.DefaultModel, agents.LLMKey
+	subagentsJSON, _ := json.Marshal(agents.Subagents)
 
 	tags := mergeTags(workspace.Name, workflow.Tags, nil)
 	tags = append(tags, "workspace:"+workspace.Name, "workflow:"+workflow.Name)
@@ -222,11 +236,11 @@ func (s *Server) createClawFromWorkflowWithOptions(workspace *types.WorkspaceCon
 	filesJSON, _ := json.Marshal(templateFiles)
 	now := time.Now().UTC()
 	_, err = s.db.Exec(`
-		INSERT INTO claws(id, tenant_id, name, template, provider, default_model, template_files, github_repos, linear_workspace, nix, docker, tags, color, llm_key, status, created_at, factory_name, concurrency_group, workflow_volumes)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		INSERT INTO claws(id, tenant_id, name, template, provider, default_model, template_files, github_repos, linear_workspace, nix, docker, tags, color, llm_key, status, created_at, factory_name, concurrency_group, workflow_volumes, subagents_config)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		clawID, tenantID, clawName, workspace.Name, provider, defaultModel, string(filesJSON),
 		string(repositoriesJSON), linearWorkspace, nixEnabled, dockerEnabled, string(tagsJSON), workflow.Color, llmKey,
-		initialStatus, now, "", groupName, string(workflowVolumesJSON),
+		initialStatus, now, "", groupName, string(workflowVolumesJSON), string(subagentsJSON),
 	)
 	s.promoteMu.Unlock()
 	if err != nil {
@@ -311,6 +325,7 @@ func (s *Server) createClawFromWorkflowWithOptions(workspace *types.WorkspaceCon
 		Provider:     provider,
 		DefaultModel: defaultModel,
 		LLMKey:       llmKey,
+		Subagents:    agents.Subagents,
 		Files:        providerTemplateFiles,
 		Env:          env,
 		InstanceType: instanceType,

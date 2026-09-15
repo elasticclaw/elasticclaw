@@ -53,6 +53,7 @@ type WorkspaceAccess struct {
 
 // WorkflowView is a workflow-shaped projection of a legacy factory.
 type WorkflowView struct {
+	Agents               types.AgentConfig      `json:"agents"`
 	Name                 string                 `json:"name"`
 	SchemaVersion        string                 `json:"schemaVersion,omitempty"`
 	WorkspaceName        string                 `json:"workspaceName"`
@@ -297,9 +298,10 @@ func (s *Server) handleWorkspaceWorkflowDetail(w http.ResponseWriter, r *http.Re
 }
 
 type WorkflowPatchRequest struct {
-	Enabled                  *bool `json:"enabled"`
-	EnableManualTrigger      *bool `json:"enableManualTrigger"`
-	EnableManualTriggerSnake *bool `json:"enable_manual_trigger"`
+	Agents                   *types.AgentConfig `json:"agents"`
+	Enabled                  *bool              `json:"enabled"`
+	EnableManualTrigger      *bool              `json:"enableManualTrigger"`
+	EnableManualTriggerSnake *bool              `json:"enable_manual_trigger"`
 }
 
 func (s *Server) handleWorkspaceWorkflowPatch(w http.ResponseWriter, r *http.Request) {
@@ -314,7 +316,7 @@ func (s *Server) handleWorkspaceWorkflowPatch(w http.ResponseWriter, r *http.Req
 		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	if req.Enabled == nil && req.EnableManualTrigger == nil && req.EnableManualTriggerSnake == nil {
+	if req.Agents == nil && req.Enabled == nil && req.EnableManualTrigger == nil && req.EnableManualTriggerSnake == nil {
 		http.Error(w, "no workflow fields provided", http.StatusBadRequest)
 		return
 	}
@@ -332,7 +334,7 @@ func (s *Server) handleWorkspaceWorkflowPatch(w http.ResponseWriter, r *http.Req
 		http.Error(w, "workflow not found", http.StatusNotFound)
 		return
 	}
-	if isWorkflowV2(workflow) {
+	if isWorkflowV2(workflow) && (req.Enabled != nil || req.EnableManualTrigger != nil || req.EnableManualTriggerSnake != nil) {
 		http.Error(w, "workflow v2 activation is managed by the v2 runtime and cannot be changed through the v1 workflow patch API", http.StatusConflict)
 		return
 	}
@@ -345,7 +347,30 @@ func (s *Server) handleWorkspaceWorkflowPatch(w http.ResponseWriter, r *http.Req
 	if req.EnableManualTriggerSnake != nil {
 		workflow.EnableManualTrigger = *req.EnableManualTriggerSnake
 	}
-	workflow.RawConfig = ""
+	fields := map[string]interface{}{}
+	if req.Agents != nil {
+		s.mu.RLock()
+		candidate := *workflow
+		applyWorkflowAgents(&candidate, *req.Agents)
+		_, err := resolveAgentConfig(s.hubCfg, effectiveWorkflowAgents(workspace, &candidate))
+		s.mu.RUnlock()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		applyWorkflowAgents(workflow, *req.Agents)
+		fields["default_model"], fields["llm_key"], fields["subagents"] = req.Agents.DefaultModel, req.Agents.LLMKey, req.Agents.Subagents
+	}
+	if req.Enabled != nil {
+		fields["enabled"] = *req.Enabled
+	}
+	if req.EnableManualTrigger != nil || req.EnableManualTriggerSnake != nil {
+		fields["enable_manual_trigger"] = workflow.EnableManualTrigger
+	}
+	if err := patchWorkflowYAML(workflow, fields); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	// Deliberately no validateWorkflowNotifyVias here: a patch only toggles
 	// flags on an already-persisted pipeline without changing its content, and
 	// disabling a workflow stranded by a later hub.yaml notifier delete/rename
@@ -439,6 +464,18 @@ func (s *Server) triggerWorkflowConfig(w http.ResponseWriter, r *http.Request, w
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		jsonError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
 		return
+	}
+	if req.Agents != nil {
+		copied := *workflow
+		applyWorkflowAgents(&copied, mergeAgentConfig(workflowAgentConfig(workflow), *req.Agents))
+		workflow = &copied
+		s.mu.RLock()
+		_, err := resolveAgentConfig(s.hubCfg, effectiveWorkflowAgents(workspace, workflow))
+		s.mu.RUnlock()
+		if err != nil {
+			jsonError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 	}
 	validatedInputs, err := validateFactoryInputs(workflow.Inputs, req.Inputs)
 	if err != nil {
@@ -633,6 +670,7 @@ func workflowToView(workspaceName string, workflow *types.WorkflowConfig) Workfl
 		projects = append([]string(nil), linearWorkflowProjects(workflow)...)
 	}
 	return WorkflowView{
+		Agents:               workflowAgentConfig(workflow),
 		Name:                 workflow.Name,
 		SchemaVersion:        workflow.SchemaVersion,
 		WorkspaceName:        workspaceName,

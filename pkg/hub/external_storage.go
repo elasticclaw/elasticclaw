@@ -452,10 +452,12 @@ func loadExternalWorkflowDocument(fileName string, data []byte) (*types.Workflow
 		name := strings.TrimSuffix(fileName, ".yaml")
 		enabled := false // missing/invalid v2 documents are always fail-closed
 		manualTrigger := false
+		var agents types.AgentConfig
 		if resolved, err := v2.ParseAndValidateWorkflow(data); err == nil && resolved.Workflow.Name != "" {
 			name = resolved.Workflow.Name
 			enabled = resolved.Workflow.Enabled
 			manualTrigger = resolved.Workflow.ManualTrigger
+			agents = types.AgentConfig{DefaultModel: resolved.Workflow.DefaultModel, LLMKey: resolved.Workflow.LLMKey, Subagents: resolved.Workflow.Subagents}
 		} else {
 			var probe struct {
 				Name string `yaml:"name"`
@@ -469,6 +471,7 @@ func loadExternalWorkflowDocument(fileName string, data []byte) (*types.Workflow
 			}
 		}
 		return &types.WorkflowConfig{
+			DefaultModel: agents.DefaultModel, LLMKey: agents.LLMKey, Subagents: agents.Subagents,
 			SchemaVersion:       "2",
 			Name:                name,
 			Enabled:             &enabled,

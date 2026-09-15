@@ -14,6 +14,7 @@ import (
 
 // FactoryTriggerRequest is the payload for POST /api/factories/{name}/trigger.
 type FactoryTriggerRequest struct {
+	Agents *types.AgentConfig     `json:"agents,omitempty"`
 	Inputs map[string]interface{} `json:"inputs"`
 }
 

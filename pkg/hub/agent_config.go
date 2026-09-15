@@ -10,6 +10,24 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+func agentCredentialAvailable(cfg *types.HubConfig, key *types.LLMKeyConfig) bool {
+	if key == nil {
+		return false
+	}
+	if key.APIKey != "" {
+		return true
+	}
+	if key.AuthProfile != "" {
+		for _, profile := range cfg.ModelAuthProfiles {
+			if profile != nil && profile.Name == key.AuthProfile && profile.Provider == key.Provider && strings.TrimSpace(profile.AuthState) != "" {
+				return true
+			}
+		}
+		return false
+	}
+	return llmKeyHasRequiredAPIKey(key)
+}
+
 // resolveAgentConfig pins model and credential names before provisioning.
 func resolveAgentConfig(cfg *types.HubConfig, requested types.AgentConfig) (types.AgentConfig, error) {
 	if cfg == nil {
@@ -27,13 +45,16 @@ func resolveAgentConfig(cfg *types.HubConfig, requested types.AgentConfig) (type
 			if key == nil {
 				return "", "", nil, fmt.Errorf("unknown LLM credential %q", name)
 			}
-			if !llmKeyHasRequiredAPIKey(key) {
+			if !agentCredentialAvailable(cfg, key) {
 				return "", "", nil, fmt.Errorf("LLM credential %q is unavailable", name)
 			}
 		} else {
 			key = resolveActiveKey(cfg.LLMKeys, "")
 		}
 		if key != nil {
+			if !agentCredentialAvailable(cfg, key) {
+				return "", "", nil, fmt.Errorf("LLM credential %q is unavailable", key.Name)
+			}
 			name = key.Name
 			if model == "" {
 				model = resolveDefaultModelForKey(cfg, key)
@@ -42,8 +63,8 @@ func resolveAgentConfig(cfg *types.HubConfig, requested types.AgentConfig) (type
 				return "", "", nil, fmt.Errorf("model %q does not match credential provider %q", model, key.Provider)
 			}
 			model = normalizeModelForProvider(key.Provider, model)
-		} else if model == "" {
-			model = cfg.DefaultModel
+		} else {
+			return "", "", nil, fmt.Errorf("no available LLM credential configured")
 		}
 		return name, model, key, nil
 	}
@@ -112,7 +133,7 @@ func (s *Server) handleAgentOptions(w http.ResponseWriter, r *http.Request) {
 		defaultModel = s.hubCfg.DefaultModel
 		for _, key := range s.hubCfg.LLMKeys {
 			if key != nil {
-				options = append(options, credential{key.Name, key.Provider, resolveDefaultModelForKey(s.hubCfg, key), llmKeyHasRequiredAPIKey(key)})
+				options = append(options, credential{key.Name, key.Provider, resolveDefaultModelForKey(s.hubCfg, key), agentCredentialAvailable(s.hubCfg, key)})
 			}
 		}
 	}
@@ -185,4 +206,13 @@ func patchWorkflowYAML(workflow *types.WorkflowConfig, fields map[string]interfa
 	}
 	workflow.RawConfig = string(data)
 	return nil
+}
+
+// effectiveWorkflowAgents applies workspace defaults before workflow overrides.
+func effectiveWorkflowAgents(workspace *types.WorkspaceConfig, workflow *types.WorkflowConfig) types.AgentConfig {
+	var base types.AgentConfig
+	if workspace != nil && !isWorkflowV2(workflow) {
+		_ = yaml.Unmarshal([]byte(workspace.Files["elasticclaw-config.yaml"]), &base)
+	}
+	return mergeAgentConfig(base, workflowAgentConfig(workflow))
 }

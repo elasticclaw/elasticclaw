@@ -847,6 +847,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v2/workflow-runs/{runId}/logs", s.withAuth(s.handleWorkflowV2RunLogs))
 	mux.HandleFunc("/api/v2/workflow-runs/{runId}/attempts", s.withAuth(s.handleWorkflowV2RunAttempts))
 	mux.HandleFunc("/api/v2/workflow-runs/{runId}/attempts/{attemptId}/logs", s.withAuth(s.handleWorkflowV2AttemptLogs))
+	mux.HandleFunc("/api/agent-options", s.withAuth(s.handleAgentOptions))
 	mux.HandleFunc("/api/workspaces", s.withAdminForMethods(s.handleWorkspacesCRUD, http.MethodPost, http.MethodDelete)) // workspace CRUD
 	mux.HandleFunc("/api/workspaces/{name}/workflows", s.withAdminForMethods(s.handleWorkspaceWorkflowsList, http.MethodPost))
 	mux.HandleFunc("/api/workspaces/{workspace}/workflows/{workflow}", s.withAdminForMethods(s.handleWorkspaceWorkflowDetail, http.MethodPatch, http.MethodDelete))
@@ -1773,43 +1774,30 @@ func (s *Server) handleCreateClaw(w http.ResponseWriter, r *http.Request, tenant
 	}
 	log.Printf("[create] claw %s: nix=%d docker=%d", req.Name, nixEnabled, dockerEnabled)
 
-	// Resolve default model: explicit > llm_key lookup > default key > hub default
-	defaultModel := req.DefaultModel
-	if defaultModel == "" {
-		s.mu.RLock()
-		var activeKey *types.LLMKeyConfig
-		for _, k := range s.hubCfg.LLMKeys {
-			if k.Name == req.LLMKey {
-				activeKey = k
-				break
-			}
-		}
-		// If no explicit key selected, fall back to the default key
-		if activeKey == nil {
-			for _, k := range s.hubCfg.LLMKeys {
-				if k.Default {
-					activeKey = k
-					break
-				}
-			}
-		}
-		if activeKey != nil {
-			defaultModel = resolveDefaultModelForKey(s.hubCfg, activeKey)
-		} else {
-			defaultModel = s.hubCfg.DefaultModel
-		}
-		s.mu.RUnlock()
+	s.mu.RLock()
+	agents := types.AgentConfig{DefaultModel: req.DefaultModel, LLMKey: req.LLMKey, Subagents: req.Subagents}
+	var agentErr error
+	if req.Subagents != nil {
+		agents, agentErr = resolveAgentConfig(s.hubCfg, agents)
+	} else {
+		agents.DefaultModel, agents.LLMKey = resolveModelAndLLMKey(s.hubCfg, req.LLMKey, req.DefaultModel)
 	}
-	req.DefaultModel = defaultModel
+	s.mu.RUnlock()
+	if agentErr != nil {
+		http.Error(w, agentErr.Error(), http.StatusBadRequest)
+		return
+	}
+	req.DefaultModel, req.LLMKey, req.Subagents = agents.DefaultModel, agents.LLMKey, agents.Subagents
+	subagentsJSON, _ := json.Marshal(agents.Subagents)
 
 	tags := mergeTags(req.TemplateName, req.Tags, nil) // CLI tags already merged client-side
 	tagsJSON, _ := json.Marshal(tags)
 	color := resolveColor(req.Color, req.Name)
 
 	_, err := s.db.Exec(
-		`INSERT INTO claws(id, tenant_id, name, template, provider, default_model, template_files, github_repos, linear_workspace, nix, docker, tags, color, llm_key, status, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		`INSERT INTO claws(id, tenant_id, name, template, provider, default_model, template_files, github_repos, linear_workspace, nix, docker, tags, color, llm_key, subagents_config, status, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		clawID, tenantID, req.Name, req.TemplateName, req.Provider, req.DefaultModel, string(filesJSON),
-		githubReposJSON, linearWorkspace, nixEnabled, dockerEnabled, string(tagsJSON), color, req.LLMKey, "provisioning", now(),
+		githubReposJSON, linearWorkspace, nixEnabled, dockerEnabled, string(tagsJSON), color, req.LLMKey, string(subagentsJSON), "provisioning", now(),
 	)
 	if err != nil {
 		http.Error(w, "db error", http.StatusInternalServerError)
