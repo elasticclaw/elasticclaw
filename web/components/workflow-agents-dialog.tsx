@@ -1,6 +1,6 @@
 "use client"
 
-import { useState } from "react"
+import { useRef, useState } from "react"
 import { Users } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import {
@@ -24,10 +24,11 @@ export function WorkflowAgentsDialog({
   disabled?: boolean
 }) {
   const [open, setOpen] = useState(false)
+  const openerRef = useRef<HTMLButtonElement>(null)
 
   return (
     <>
-      <Button variant="ghost" size="sm" disabled={disabled} onClick={() => setOpen(true)}>
+      <Button ref={openerRef} variant="ghost" size="sm" disabled={disabled} onClick={() => setOpen(true)}>
         <Users className="size-3.5" />
         Agents
       </Button>
@@ -36,6 +37,7 @@ export function WorkflowAgentsDialog({
           key={`${workflow.workspaceName}/${workflow.name}`}
           workflow={workflow}
           onClose={() => setOpen(false)}
+          onRestoreFocus={() => openerRef.current?.focus()}
           onSaved={onSaved}
         />
       )}
@@ -46,10 +48,12 @@ export function WorkflowAgentsDialog({
 function WorkflowAgentsEditor({
   workflow,
   onClose,
+  onRestoreFocus,
   onSaved,
 }: {
   workflow: Workflow
   onClose: () => void
+  onRestoreFocus: () => void
   onSaved: (workflow: Workflow) => void
 }) {
   const [value, setValue] = useState<AgentConfig>(() => structuredClone(workflow.agents ?? {}))
@@ -77,7 +81,13 @@ function WorkflowAgentsEditor({
 
   return (
     <Dialog open onOpenChange={open => { if (!open && !saving) onClose() }}>
-      <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-lg">
+      <DialogContent
+        className="max-h-[85vh] overflow-y-auto sm:max-w-lg"
+        onCloseAutoFocus={event => {
+          event.preventDefault()
+          onRestoreFocus()
+        }}
+      >
         <DialogHeader>
           <DialogTitle>Agents · {workflow.name}</DialogTitle>
           <DialogDescription>

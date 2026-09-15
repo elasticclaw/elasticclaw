@@ -5,6 +5,12 @@ credential and model, then the subagents' credential, model, and concurrency lim
 A different credential can select a different provider. Credentials are managed in
 Settings; this form stores their names, never their secrets.
 
+**Use inherited settings** removes the entire subagent override, including its
+concurrency limit, so the workflow/template defaults apply again. **Use main agent**
+explicitly selects the principal's model and credential while keeping any authored
+concurrency limit. These are separate choices; clearing fields does not remove an
+authored subagent override.
+
 The manual run dialog also offers **Override agents for this run**. Changes there
 apply only to that run. Saving workflow settings affects future runs; existing
 claws retain their resolved model and credential references when queued, restarted,
@@ -31,6 +37,8 @@ it does not make a paid inference request to verify a model ID.
 - `subagents: {}` explicitly selects inheritance from the principal, replacing a
   template's child configuration when set on a workflow.
 - If the child credential is omitted, it inherits the principal's credential.
+- Naming the same credential as the principal is equivalent to omitting the child
+  credential: an omitted child model inherits the principal's resolved model.
 - If a different child credential is selected and the child model is omitted,
   the hub uses that credential's default model.
 - `max_concurrent` accepts 1–32. Omit it to use OpenClaw's existing/default limit.

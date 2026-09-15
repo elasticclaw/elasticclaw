@@ -37,13 +37,17 @@ export function AgentConfigForm({
 
   const credentials = options?.credentials ?? []
   const inheritsSubagents = value.subagents === undefined
-  const mainModelPlaceholder = credentials.find(c => c.name === value.llm_key)?.default_model
-    || options?.default_model
-    || "Use default model"
+  const mainModelPlaceholder = value.llm_key
+    ? credentials.find(c => c.name === value.llm_key)?.default_model || "Use credential default model"
+    : "Use inherited model"
+  const usesMainCredential = !value.subagents?.llm_key || value.subagents.llm_key === value.llm_key
   const subagentModelPlaceholder = inheritsSubagents
-    ? "Use inherited settings"
-    : credentials.find(c => c.name === value.subagents?.llm_key)?.default_model
-      || (value.subagents?.llm_key ? "Use credential default model" : "Use main agent model")
+    ? "Use inherited model"
+    : usesMainCredential
+      ? "Use main agent model"
+      : value.llm_key
+        ? credentials.find(c => c.name === value.subagents?.llm_key)?.default_model || "Use credential default model"
+        : "Use resolved default model"
 
   function changeCredential(role: "main" | "subagents", name: string) {
     if (role === "main") {
@@ -60,6 +64,12 @@ export function AgentConfigForm({
     }
   }
 
+  function useInheritedSettings() {
+    const inherited = { ...value }
+    delete inherited.subagents
+    onChange(inherited)
+  }
+
   function useMainAgent() {
     const maxConcurrent = value.subagents?.max_concurrent
     onChange({
@@ -71,7 +81,7 @@ export function AgentConfigForm({
   function credentialField(role: "main" | "subagents") {
     const selected = role === "main" ? value.llm_key : value.subagents?.llm_key
     const defaultLabel = role === "main"
-      ? "Use workflow or hub default"
+      ? "Use inherited credential"
       : inheritsSubagents ? "Use inherited settings" : "Use main agent credential"
 
     return (
@@ -88,7 +98,7 @@ export function AgentConfigForm({
         >
           <option value="">{defaultLabel}</option>
           {selected && !credentials.some(c => c.name === selected) && (
-            <option value={selected}>{selected} (not listed)</option>
+            <option value={selected}>{selected}{options ? " (not listed)" : ""}</option>
           )}
           {credentials.map(credential => (
             <option key={credential.name} value={credential.name} disabled={!credential.available}>
@@ -132,15 +142,26 @@ export function AgentConfigForm({
 
       <fieldset disabled={disabled} className="space-y-3 border-t border-border pt-4">
         <legend className="text-sm font-medium">Subagents</legend>
-        <div className="flex items-start justify-between gap-3">
+        <div className="space-y-2">
           <p className="text-xs text-muted-foreground">
             {inheritsSubagents
-              ? "Uses inherited workflow or template settings. Choose Use main agent to override them."
+              ? "Uses inherited workflow or template settings, including the concurrency limit."
               : "Overrides inherited subagent settings. Empty model and credential fields use the main agent."}
           </p>
-          <Button type="button" variant="outline" size="sm" onClick={useMainAgent}>
-            Use main agent
-          </Button>
+          <div className="flex flex-wrap gap-2">
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              disabled={inheritsSubagents}
+              onClick={useInheritedSettings}
+            >
+              Use inherited settings
+            </Button>
+            <Button type="button" variant="outline" size="sm" onClick={useMainAgent}>
+              Use main agent
+            </Button>
+          </div>
         </div>
         {credentialField("subagents")}
         <div className="space-y-1.5">
