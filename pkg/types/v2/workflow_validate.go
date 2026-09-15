@@ -97,6 +97,9 @@ func ValidateWorkflow(wf *Workflow) (*ResolvedWorkflow, error) {
 	if _, ok := wf.States[wf.InitialState]; !ok {
 		return nil, fmt.Errorf("workflow %q: initial_state %q is not defined in states", wf.Name, wf.InitialState)
 	}
+	if err := wf.Subagents.Validate(); err != nil {
+		return nil, fmt.Errorf("workflow %q: %w", wf.Name, err)
+	}
 
 	for name, st := range wf.States {
 		if err := validateResourceName("states", name); err != nil {

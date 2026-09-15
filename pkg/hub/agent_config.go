@@ -95,8 +95,8 @@ func resolveAgentConfig(cfg *types.HubConfig, requested types.AgentConfig) (type
 		return result, nil
 	}
 	child := *requested.Subagents
-	if child.MaxConcurrent < 0 || child.MaxConcurrent > 32 {
-		return result, fmt.Errorf("subagent max_concurrent must be between 1 and 32, or omitted")
+	if err := child.Validate(); err != nil {
+		return result, err
 	}
 	if child.LLMKey == "" {
 		child.LLMKey = name

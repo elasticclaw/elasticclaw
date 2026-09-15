@@ -219,6 +219,13 @@ func (s *Server) handleWorkspaceWorkflowsPush(w http.ResponseWriter, r *http.Req
 		http.Error(w, "no workflows provided", http.StatusBadRequest)
 		return
 	}
+	// Only the workspace config feeds agent defaults: a push must repair a
+	// stale sibling workflow, and a missing workspace is reported by
+	// saveExternalWorkflows with the push hint.
+	var workspace *types.WorkspaceConfig
+	if data, err := readExternalWorkspaceYAML(name); err == nil {
+		workspace = &types.WorkspaceConfig{Name: name, Files: map[string]string{"elasticclaw-config.yaml": string(data)}}
+	}
 	for _, workflow := range req.Workflows {
 		if workflow == nil {
 			http.Error(w, "workflow cannot be nil", http.StatusBadRequest)
@@ -227,6 +234,15 @@ func (s *Server) handleWorkspaceWorkflowsPush(w http.ResponseWriter, r *http.Req
 		workflow.Name = strings.TrimSpace(workflow.Name)
 		// V2 workflows use a separate schema; do not run v1 normalize/validate on them.
 		if isWorkflowV2(workflow) {
+			// V2 push payloads carry the document in RawConfig; structural
+			// errors are reported by the store-time v2 validation.
+			if parsed, err := v2.ParseWorkflow([]byte(workflow.RawConfig)); err == nil {
+				workflow.DefaultModel, workflow.LLMKey, workflow.Subagents = parsed.DefaultModel, parsed.LLMKey, parsed.Subagents
+			}
+			if err := s.validateWorkflowAgents(workspace, workflow); err != nil {
+				http.Error(w, "invalid workflow: "+err.Error(), http.StatusBadRequest)
+				return
+			}
 			continue
 		}
 		if err := types.NormalizeWorkflowConfig(workflow); err != nil {
@@ -238,6 +254,10 @@ func (s *Server) handleWorkspaceWorkflowsPush(w http.ResponseWriter, r *http.Req
 			return
 		}
 		if err := s.validateWorkflowNotifyVias(workflow); err != nil {
+			http.Error(w, "invalid workflow: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		if err := s.validateWorkflowAgents(workspace, workflow); err != nil {
 			http.Error(w, "invalid workflow: "+err.Error(), http.StatusBadRequest)
 			return
 		}
