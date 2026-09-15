@@ -5530,7 +5530,7 @@ func isBusyAgentActivity(activity map[string]interface{}) bool {
 	case "tool":
 		phase, _ := activity["phase"].(string)
 		switch strings.ToLower(strings.TrimSpace(phase)) {
-		case "completed", "complete", "done", "failed", "error", "cancelled", "canceled":
+		case "result", "completed", "complete", "done", "failed", "error", "cancelled", "canceled":
 			return false
 		default:
 			return true

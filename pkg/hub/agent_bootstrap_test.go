@@ -305,3 +305,36 @@ func TestResolveDaytonaBootstrapModelCompatibility(t *testing.T) {
 		}
 	}
 }
+
+func TestOllamaChildDoesNotEnablePrincipalLeanMode(t *testing.T) {
+	for _, principal := range []string{"anthropic", "ollama"} {
+		t.Run(principal, func(t *testing.T) {
+			keys := types.LLMKeysList{{Name: "main", Provider: principal, APIKey: "fixture"}}
+			childKey := "main"
+			if principal != "ollama" {
+				keys = append(keys, &types.LLMKeyConfig{Name: "child", Provider: "ollama", APIKey: "local"})
+				childKey = "child"
+			}
+			plan, err := buildAgentBootstrapPlan(&types.HubConfig{LLMKeys: keys}, "main", principal+"/principal", &types.SubagentConfig{LLMKey: childKey, Model: "ollama/worker"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			config := executeAgentConfigPatch(t, plan.ProviderConfig, principal+"/principal", `{}`)
+			defaults := config["agents"].(map[string]any)["defaults"].(map[string]any)
+			experimental, _ := defaults["experimental"].(map[string]any)
+			if enabled, _ := experimental["localModelLean"].(bool); enabled != (principal == "ollama") {
+				t.Fatalf("principal %s lean mode changed: %v", principal, experimental)
+			}
+			catalog := config["models"].(map[string]any)["providers"].(map[string]any)["ollama"].(map[string]any)["models"].([]any)
+			workerRegistered := false
+			for _, model := range catalog {
+				if model.(map[string]any)["id"] == "worker" {
+					workerRegistered = true
+				}
+			}
+			if !workerRegistered {
+				t.Fatal("child model missing from catalog")
+			}
+		})
+	}
+}

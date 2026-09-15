@@ -258,7 +258,8 @@ if isinstance(child_model, str) and child_model.strip():
 for catalog_model in catalog_models:
     if catalog_model.startswith('ollama/'):
         model_id = catalog_model.split('/', 1)[1]
-        agent_defaults.setdefault('experimental', {})['localModelLean'] = True
+        if model.startswith('ollama/'):
+            agent_defaults.setdefault('experimental', {})['localModelLean'] = True
         config.setdefault('models', {})['mode'] = 'merge'
         providers = config['models'].setdefault('providers', {})
         previous_models = providers.get('ollama', {}).get('models', [])
