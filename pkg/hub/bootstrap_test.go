@@ -70,7 +70,7 @@ func TestBootstrapScript_ContainsBridgeURL(t *testing.T) {
 
 func TestDaytonaBridgeCommands_AreAsyncAndIdempotent(t *testing.T) {
 	prep := daytonaPrepareBridgeCommand()
-	cmd := daytonaAsyncBridgeCommand("https://hub.example.com", "claw-123", "token-123", "model-auth-123", "NEXT-156", "adversarylabs")
+	cmd := daytonaAsyncBridgeCommand("https://hub.example.com", "claw-123", "token-123", "model-auth-123", "NEXT-156", "adversarylabs", "")
 	running := daytonaBridgeRunningCommand()
 
 	assertContains(t, prep, "pgrep -x claw-bridge", "detects already running bridge from previous start behavior")
@@ -99,10 +99,38 @@ func TestDaytonaBridgeCommands_AreAsyncAndIdempotent(t *testing.T) {
 	assertContains(t, running, "if pgrep -x claw-bridge", "pidfile alone does not mask a crash-looping supervisor")
 }
 
+func TestDaytonaLongLivedProcessesInheritCamelStreamKey(t *testing.T) {
+	llmKeyEnv := "export CAMEL_API_KEY=\"camel-test\"\n"
+	gateway := withDaytonaLLMKeyEnv(llmKeyEnv, "setsid nohup openclaw gateway run")
+	bridge := daytonaAsyncBridgeCommand(
+		"https://hub.example.com", "claw-123", "token-123", "model-auth-123",
+		"NEXT-156", "adversarylabs", llmKeyEnv,
+	)
+
+	for name, command := range map[string]string{
+		"gateway": gateway,
+		"bridge":  bridge,
+	} {
+		t.Run(name, func(t *testing.T) {
+			exportAt := strings.Index(command, "export CAMEL_API_KEY=\"camel-test\"")
+			if exportAt < 0 {
+				t.Fatalf("%s command does not export CAMEL_API_KEY: %s", name, command)
+			}
+			processAt := strings.Index(command, map[string]string{
+				"gateway": "openclaw gateway run",
+				"bridge":  "/usr/local/bin/claw-bridge",
+			}[name])
+			if processAt < 0 || exportAt > processAt {
+				t.Fatalf("%s command does not export CAMEL_API_KEY before process launch", name)
+			}
+		})
+	}
+}
+
 func TestDaytonaAsyncBridgeCommandShellQuotesClawName(t *testing.T) {
 	clawName := `$(touch /tmp/elasticclaw-pwned)' "quoted"`
 	templateName := `$(touch /tmp/elasticclaw-template-pwned)' "quoted"`
-	cmd := daytonaAsyncBridgeCommand("https://hub.example.com", "claw-123", "token-123", "model-auth-123", clawName, templateName)
+	cmd := daytonaAsyncBridgeCommand("https://hub.example.com", "claw-123", "token-123", "model-auth-123", clawName, templateName, "")
 
 	assertContains(t, cmd, "ELASTICCLAW_CLAW_NAME="+shellQuote(clawName), "shell-quotes command-substitution payload")
 	assertNotContains(t, cmd, `ELASTICCLAW_CLAW_NAME="$(touch`, "must not place claw name in shell double quotes")
@@ -498,6 +526,18 @@ func TestBuildLLMKeyEnvSkipsBlankExternalKeys(t *testing.T) {
 	assertContains(t, env, "ANTHROPIC_API_KEY", "exports usable external key")
 	assertContains(t, env, "OLLAMA_API_KEY", "exports blank Ollama key because Ollama auth does not require an API key")
 	assertNotContains(t, env, "OPENAI_API_KEY", "does not export blank OpenAI key")
+}
+
+func TestBuildLLMKeyEnvExportsCamelStreamKey(t *testing.T) {
+	keys := []*types.LLMKeyConfig{
+		{Name: "camel-stream-main", Provider: "camel-stream", APIKey: "camel-test", Default: true},
+	}
+
+	env := buildLLMKeyEnv(keys, "camel-stream-main")
+
+	if env != "export CAMEL_API_KEY=\"camel-test\"\n" {
+		t.Fatalf("camelStream environment = %q", env)
+	}
 }
 
 func TestBuildOpenClawAPIKeyAuthSyncShellUsesAnthropicPasteAPIKey(t *testing.T) {
@@ -924,6 +964,58 @@ func TestBuildOpenClawProviderConfig_ConfiguresGrokProvider(t *testing.T) {
 	assertContains(t, snippet, "'baseUrl': 'https://api.x.ai/v1'", "uses xAI OpenAI-compatible base URL")
 	assertContains(t, snippet, "'apiKey': 'XAI_API_KEY'", "uses Grok API key env var")
 	assertContains(t, snippet, "providers['grok']", "writes Grok provider config")
+}
+
+func TestBuildOpenClawProviderConfig_ConfiguresCamelStreamProvider(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not in PATH")
+	}
+	if _, err := exec.LookPath("python3"); err != nil {
+		t.Skip("python3 not in PATH")
+	}
+	keys := []*types.LLMKeyConfig{
+		{Name: "camel-main", Provider: "camel-stream", APIKey: "camel-test", Default: true},
+	}
+
+	snippet := buildOpenClawProviderConfig(keys, "camel-main")
+
+	assertContains(t, snippet, "if catalog_model.startswith('camel-stream/'):", "configures selected camelStream models")
+	assertContains(t, snippet, "'baseUrl': 'https://stream.camelai.com/v1'", "uses camelStream base URL")
+	assertContains(t, snippet, "'api': 'openai-completions'", "uses OpenAI Chat Completions protocol")
+	assertContains(t, snippet, "'apiKey': '${CAMEL_API_KEY}'", "references the camelStream API key environment variable")
+	assertContains(t, snippet, "'contextWindow': 262144", "uses the documented context window")
+	assertContains(t, snippet, "providers['camel-stream']", "registers the camelStream provider")
+	if got := buildOnboardFlags(keys, "camel-main", "camel-stream/auto"); got != "--auth-choice skip" {
+		t.Fatalf("onboard flags = %q, want auth skipped for custom provider", got)
+	}
+	if got := keys[0].EnvVarName(); got != "CAMEL_API_KEY" {
+		t.Fatalf("environment variable = %q, want CAMEL_API_KEY", got)
+	}
+
+	home := t.TempDir()
+	cmd := exec.Command("bash", "-c", snippet)
+	cmd.Env = append(os.Environ(),
+		"HOME="+home,
+		"OPENCLAW_DEFAULT_MODEL=camel-stream/auto",
+		"CAMEL_API_KEY=camel-test",
+	)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("run config snippet: %v\n%s", err, out)
+	}
+	configData, err := os.ReadFile(filepath.Join(home, ".openclaw", "openclaw.json"))
+	if err != nil {
+		t.Fatalf("read patched config: %v", err)
+	}
+	var config map[string]any
+	if err := json.Unmarshal(configData, &config); err != nil {
+		t.Fatalf("parse patched config: %v", err)
+	}
+	models := config["models"].(map[string]any)
+	providers := models["providers"].(map[string]any)
+	camel := providers["camel-stream"].(map[string]any)
+	if camel["baseUrl"] != "https://stream.camelai.com/v1" || camel["api"] != "openai-completions" || camel["apiKey"] != "${CAMEL_API_KEY}" {
+		t.Fatalf("camelStream provider config = %#v", camel)
+	}
 }
 
 func TestBuildOpenClawProviderConfig_UsesNativeXAIForGrokOAuth(t *testing.T) {

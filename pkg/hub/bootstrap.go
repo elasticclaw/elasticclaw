@@ -301,6 +301,22 @@ for catalog_model in catalog_models:
             }],
         }
         providers['grok']['models'] += [entry for entry in previous_models if entry.get('id') != model_id]
+    if catalog_model.startswith('camel-stream/'):
+        model_id = catalog_model.split('/', 1)[1]
+        config.setdefault('models', {})['mode'] = 'merge'
+        providers = config['models'].setdefault('providers', {})
+        previous_models = providers.get('camel-stream', {}).get('models', [])
+        providers['camel-stream'] = {
+            'baseUrl': 'https://stream.camelai.com/v1',
+            'api': 'openai-completions',
+            'apiKey': '${CAMEL_API_KEY}',
+            'models': [{
+                'id': model_id,
+                'name': 'Auto',
+                'contextWindow': 262144,
+            }],
+        }
+        providers['camel-stream']['models'] += [entry for entry in previous_models if entry.get('id') != model_id]
 %sconfig.setdefault('gateway', {})['bind'] = 'loopback'
 config['gateway']['port'] = 18789
 gw_password = os.environ.get('ELASTICCLAW_GATEWAY_PASSWORD', '')
@@ -735,6 +751,9 @@ func buildOnboardFlags(keys []*types.LLMKeyConfig, selectedKeyName, defaultModel
 			model = "ollama/qwen2.5-coder:1.5b"
 		}
 		return fmt.Sprintf(`--auth-choice ollama --custom-base-url "http://ollama:11434" --custom-model-id %s`, shellQuote(stripProviderPrefix(model)))
+	case "camel-stream":
+		// The config patch registers this custom provider after onboarding.
+		return `--auth-choice skip`
 	default:
 		return `--auth-choice anthropic-api-key --anthropic-api-key "${ANTHROPIC_API_KEY:-placeholder}"`
 	}

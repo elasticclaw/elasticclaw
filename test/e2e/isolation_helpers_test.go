@@ -5,7 +5,34 @@ package e2e
 import (
 	"testing"
 	"time"
+
+	"github.com/elasticclaw/elasticclaw/pkg/types"
 )
+
+func TestAgentReplyResultRequiresSuccessfulInference(t *testing.T) {
+	tests := []struct {
+		name       string
+		messages   []types.HubMessage
+		wantReply  bool
+		wantErrMsg string
+	}{
+		{name: "successful model reply", messages: []types.HubMessage{{Role: "claw", Content: "Here is a dad joke."}}, wantReply: true},
+		{name: "live bridge error", messages: []types.HubMessage{{Role: "claw", Content: types.BridgeErrorPrefix + " unauthorized"}}, wantErrMsg: "unauthorized"},
+		{name: "replay bridge error", messages: []types.HubMessage{{Role: "claw", Content: types.BridgeReplayErrorPrefix + " request failed"}}, wantErrMsg: "request failed"},
+		{name: "empty claw reply", messages: []types.HubMessage{{Role: "claw", Content: "  "}}},
+		{name: "user message", messages: []types.HubMessage{{Role: "user", Content: "hello"}}},
+		{name: "quoted bridge error is normal model text", messages: []types.HubMessage{{Role: "claw", Content: "The log said " + types.BridgeErrorPrefix + " timeout"}}, wantReply: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotReply, gotErr := agentReplyResult(tt.messages)
+			if gotReply != tt.wantReply || gotErr != tt.wantErrMsg {
+				t.Fatalf("agentReplyResult() = (%v, %q), want (%v, %q)", gotReply, gotErr, tt.wantReply, tt.wantErrMsg)
+			}
+		})
+	}
+}
 
 func TestE2EProviderPrefixIsRunScoped(t *testing.T) {
 	got := e2eProviderPrefix(daytonaPrefix, "run-123")

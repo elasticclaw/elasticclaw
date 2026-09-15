@@ -10,6 +10,13 @@ import (
 
 func testBoolPtr(b bool) *bool { return &b }
 
+func TestLLMKeyConfigEnvVarNameCamelStream(t *testing.T) {
+	key := LLMKeyConfig{Provider: "camel-stream"}
+	if got := key.EnvVarName(); got != "CAMEL_API_KEY" {
+		t.Fatalf("EnvVarName() = %q, want CAMEL_API_KEY", got)
+	}
+}
+
 func TestRepositoryAccessListUnmarshalJSONHonorsClone(t *testing.T) {
 	data := []byte(`[
 		{"repo":"owner/clone-me","permissions":"write"},

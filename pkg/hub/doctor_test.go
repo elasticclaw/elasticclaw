@@ -26,6 +26,24 @@ func TestCheckLLMKeysRecognizesOllama(t *testing.T) {
 	}
 }
 
+func TestCheckLLMKeysRecognizesCamelStream(t *testing.T) {
+	s := &Server{}
+	checks := s.checkLLMKeys(&types.HubConfig{
+		LLMKeys: types.LLMKeysList{
+			{Name: "camel-stream-main", Provider: "camel-stream", APIKey: "camel-test", Default: true},
+		},
+	})
+
+	for _, check := range checks {
+		if strings.Contains(check.Title, "Unknown LLM provider") {
+			t.Fatalf("camelStream was reported as unknown: %#v", check)
+		}
+	}
+	if len(checks) != 1 || !checks[0].OK {
+		t.Fatalf("expected one passing LLM key check, got %#v", checks)
+	}
+}
+
 func TestCheckLLMKeysAllowsBlankOllamaAPIKey(t *testing.T) {
 	s := &Server{}
 	checks := s.checkLLMKeys(&types.HubConfig{

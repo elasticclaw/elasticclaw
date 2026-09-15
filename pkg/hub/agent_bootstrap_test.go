@@ -19,6 +19,7 @@ func TestAgentBootstrapConfigExecutesBothProviderModels(t *testing.T) {
 		{"api", "openai", "openai/worker"},
 		{"custom", "grok", "grok/worker"},
 		{"local", "ollama", "ollama/worker"},
+		{"camel", "camel-stream", "camel-stream/auto"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := &types.HubConfig{LLMKeys: types.LLMKeysList{
@@ -55,7 +56,7 @@ func TestAgentBootstrapConfigExecutesBothProviderModels(t *testing.T) {
 			if child["model"] != tc.model || child["maxConcurrent"] != float64(3) {
 				t.Fatalf("child config: %v", child)
 			}
-			if tc.provider == "grok" || tc.provider == "ollama" {
+			if tc.provider == "grok" || tc.provider == "ollama" || tc.provider == "camel-stream" {
 				providers := config["models"].(map[string]any)["providers"].(map[string]any)
 				if providers[tc.provider] == nil {
 					t.Fatalf("missing child provider catalog")
@@ -336,5 +337,49 @@ func TestOllamaChildDoesNotEnablePrincipalLeanMode(t *testing.T) {
 				t.Fatal("child model missing from catalog")
 			}
 		})
+	}
+}
+
+func TestAgentBootstrapKeepsPrincipalAndChildCamelModels(t *testing.T) {
+	cfg := &types.HubConfig{LLMKeys: types.LLMKeysList{{Name: "camel", Provider: "camel-stream", APIKey: "fixture", Default: true}}}
+	resolved, err := resolveAgentConfig(cfg, types.AgentConfig{Subagents: &types.SubagentConfig{Model: "camel-stream/worker"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved.DefaultModel != "camel-stream/auto" || resolved.LLMKey != "camel" {
+		t.Fatalf("camel defaults = %+v", resolved)
+	}
+	plan, err := buildAgentBootstrapPlan(cfg, resolved.LLMKey, resolved.DefaultModel, resolved.Subagents)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(plan.LLMKeyEnv, "CAMEL_API_KEY=") {
+		t.Fatal("camel API environment missing")
+	}
+	home := t.TempDir()
+	cmd := exec.Command("bash", "-c", plan.ProviderConfig)
+	cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + home, "OPENCLAW_DEFAULT_MODEL=" + resolved.DefaultModel}
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("provider config: %v %s", err, output)
+	}
+	raw, err := os.ReadFile(filepath.Join(home, ".openclaw/openclaw.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var config struct {
+		Models struct {
+			Providers map[string]struct {
+				Models []struct {
+					ID string `json:"id"`
+				} `json:"models"`
+			} `json:"providers"`
+		} `json:"models"`
+	}
+	if err := json.Unmarshal(raw, &config); err != nil {
+		t.Fatal(err)
+	}
+	models := config.Models.Providers["camel-stream"].Models
+	if len(models) != 2 || models[0].ID != "worker" || models[1].ID != "auto" {
+		t.Fatalf("principal or child catalog missing: %+v", models)
 	}
 }
