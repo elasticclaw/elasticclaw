@@ -64,8 +64,14 @@ export function AgentConfigForm({
   function changeCredential(role: "main" | "subagents", name: string) {
     if (role === "main") {
       // Subagents without their own credential follow the main one, so their
-      // model belongs to the old provider and must be cleared too.
-      const subagents = value.subagents && !value.subagents.llm_key
+      // model must be cleared when the main provider changes. Picking the
+      // inherited (empty) credential keeps it: in a run that means the
+      // workflow credential, and dropping the model would silently fall back
+      // to the principal model.
+      const providerOf = (key?: string) => credentials.find(c => c.name === key)?.provider
+      const previousProvider = providerOf(value.llm_key)
+      const providerChanged = Boolean(name) && (!previousProvider || providerOf(name) !== previousProvider)
+      const subagents = providerChanged && value.subagents && !value.subagents.llm_key
         ? { ...value.subagents, model: undefined }
         : value.subagents
       onChange({
