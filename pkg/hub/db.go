@@ -95,6 +95,7 @@ func migrate(db *sql.DB) error {
 	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN jira_issue_id TEXT NOT NULL DEFAULT ''`)
 	// Migrate existing Shortcut story IDs from linear_issue_id to shortcut_story_id
 	_, _ = db.Exec(`UPDATE claws SET shortcut_story_id = linear_issue_id WHERE linear_issue_id LIKE 'sc-%' AND shortcut_story_id = ''`)
+	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN subagents_config TEXT NOT NULL DEFAULT 'null'`)
 	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN llm_key TEXT NOT NULL DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN pipeline_stage TEXT NOT NULL DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE claws ADD COLUMN bootstrap_ok INTEGER NOT NULL DEFAULT 0`)
