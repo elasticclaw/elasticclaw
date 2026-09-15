@@ -20,6 +20,10 @@ apply only to that run. Saving workflow settings affects future runs; existing
 claws retain their resolved model and credential references when queued, restarted,
 or restored. Credential secrets can still be refreshed or rotated by the hub.
 
+Selecting hub credentials is an administrator action: saving agent settings,
+per-run overrides, and the credential options list (`/api/agent-options`) all
+require an access administrator (or the hub token).
+
 ## YAML and API
 
 Templates and workflows (v1 and v2 workflows) accept these top-level fields:
@@ -37,6 +41,11 @@ Replace the example model IDs with IDs supported by your provider and installed
 OpenClaw version. The hub checks credential availability and provider compatibility;
 it does not make a paid inference request to verify a model ID.
 
+- With no principal `default_model` or `llm_key` authored on the workflow, the
+  hub `default_model` still applies when the selected credential's provider can
+  serve it; otherwise the credential's own default model is used.
+- A credential with no resolvable default model (none on the credential, and no
+  compatible hub default) is rejected instead of pinning an empty model.
 - No `subagents` block preserves existing inheritance behavior.
 - `subagents: {}` explicitly selects inheritance from the principal, replacing a
   template's child configuration when set on a workflow.
