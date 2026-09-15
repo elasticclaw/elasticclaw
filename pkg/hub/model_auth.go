@@ -220,6 +220,11 @@ func logModelAuthRefreshError(clawID string, err error) {
 	log.Printf("[model-auth] managed Grok credential for claw %s: %v", shortID, err)
 }
 
+// API credentials take precedence over retained OAuth profile references.
+func usesManagedGrokOAuth(key *types.LLMKeyConfig) bool {
+	return key != nil && key.Provider == "grok" && key.APIKey == "" && key.AuthProfile != ""
+}
+
 func (s *Server) managedGrokCredential(ctx context.Context, clawID string) (*managedModelAuthCredential, error) {
 	var selectedKeyName, tenantID string
 	if err := s.db.QueryRowContext(ctx, `SELECT COALESCE(llm_key,''), tenant_id FROM claws WHERE id=?`, clawID).Scan(&selectedKeyName, &tenantID); err != nil {
@@ -242,17 +247,36 @@ func (s *Server) managedGrokCredential(ctx context.Context, clawID string) (*man
 	defer s.modelAuthRefreshMu.Unlock()
 
 	s.mu.RLock()
+	// Legacy claws without a child snapshot retain their default-key fallback.
+	// Configured claws pin both names, so refresh must never select another key.
 	activeKey := resolveActiveKey(s.hubCfg.LLMKeys, selectedKeyName)
-	if (activeKey == nil || activeKey.Provider != "grok" || activeKey.AuthProfile == "") && sub != nil {
-		childKey := resolveActiveKey(s.hubCfg.LLMKeys, sub.LLMKey)
-		if childKey != nil && childKey.Provider == "grok" && childKey.AuthProfile != "" {
+	if sub != nil {
+		findKey := func(name string) *types.LLMKeyConfig {
+			for _, key := range s.hubCfg.LLMKeys {
+				if key != nil && key.Name == name {
+					return key
+				}
+			}
+			return nil
+		}
+		activeKey = findKey(selectedKeyName)
+		childName := sub.LLMKey
+		if childName == "" {
+			childName = selectedKeyName
+		}
+		childKey := findKey(childName)
+		if activeKey == nil || childKey == nil {
+			s.mu.RUnlock()
+			return nil, fmt.Errorf("pinned agent credential is unavailable")
+		}
+		if !usesManagedGrokOAuth(activeKey) && usesManagedGrokOAuth(childKey) {
 			activeKey = childKey
 		}
 	}
 
 	var profile types.ModelAuthProfileConfig
 	var pendingAuthState string
-	if activeKey != nil && activeKey.Provider == "grok" && activeKey.AuthProfile != "" {
+	if usesManagedGrokOAuth(activeKey) {
 		for _, candidate := range s.hubCfg.ModelAuthProfiles {
 			if candidate != nil && candidate.Name == activeKey.AuthProfile && candidate.Provider == "grok" {
 				profile = *candidate
@@ -262,7 +286,7 @@ func (s *Server) managedGrokCredential(ctx context.Context, clawID string) (*man
 		}
 	}
 	s.mu.RUnlock()
-	if activeKey == nil || activeKey.Provider != "grok" || activeKey.AuthProfile == "" {
+	if !usesManagedGrokOAuth(activeKey) {
 		return nil, errManagedGrokNotConfigured
 	}
 	if profile.Name == "" || profile.AuthState == "" {
