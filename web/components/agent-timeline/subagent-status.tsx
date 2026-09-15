@@ -1,14 +1,15 @@
 "use client"
 
-import { Bot, FileText, Globe, Search, SquarePen, SquareTerminal, Wrench } from "lucide-react"
+import { Wrench } from "lucide-react"
 import { cn } from "@/lib/utils"
-import { activityDetail, activityTitle, toolCategory, type ToolCategory } from "@/lib/turns"
+import { activityDetail, activityTitle, toolCategory } from "@/lib/turns"
 import type { Subagent, SubagentStatus } from "@/lib/subagents"
+import { CATEGORY_ICONS } from "./step-row"
 
 // The rail, the lane strip and the drill-down must speak one status language —
 // three copies of this vocabulary would drift the moment one of them changes.
-// Colors are token expressions rather than Tailwind palette classes so the
-// left rail, the dot and the label always agree on the same hue.
+// Dot colors are token expressions rather than Tailwind palette classes so the
+// dot always agrees with the rest of the hub's status hues.
 
 const STATUS_COLOR: Record<SubagentStatus, string> = {
   running: "var(--step-running)",
@@ -17,23 +18,19 @@ const STATUS_COLOR: Record<SubagentStatus, string> = {
   done: "var(--step-done)",
 }
 
-/**
- * Text colors for the status word. Only "done" differs from STATUS_COLOR:
- * --step-done is the neutral *border* accent of a finished card (#525252 in
- * dark), ≈2.5:1 as 9.5px text on --card. The status word is the only state
- * indicator a finished card renders, so it uses the meta-text token that was
- * raised precisely to clear 4.5:1 at this size.
- */
-const STATUS_TEXT_COLOR: Record<SubagentStatus, string> = {
-  ...STATUS_COLOR,
-  done: "var(--muted-foreground)",
+const STATUS_LABEL: Record<SubagentStatus, string> = {
+  running: "Working",
+  quiet: "Quiet",
+  failed: "Failed",
+  done: "Completed",
 }
 
-const STATUS_LABEL: Record<SubagentStatus, string> = {
-  running: "running",
-  quiet: "quiet",
-  failed: "failed",
-  done: "done",
+/** The status word only colors the two states that need attention. */
+const STATUS_TEXT_CLASS: Record<SubagentStatus, string> = {
+  running: "text-muted-foreground",
+  quiet: "text-warning-foreground",
+  failed: "text-destructive",
+  done: "text-muted-foreground",
 }
 
 export function subagentColor(status: SubagentStatus): string {
@@ -41,22 +38,22 @@ export function subagentColor(status: SubagentStatus): string {
 }
 
 /**
- * Left-border + surface wash for a card. Only "quiet" earns a tinted body.
+ * Surface wash for a card. Only a running subagent earns a tint, and a faint
+ * one — the rail is a list, not a dashboard.
  *
  * The wash is published as `--subagent-wash` rather than as an inline
- * `backgroundColor`: an inline declaration outranks every class, so it also beat
- * the card's `hover:bg-muted/40` and left quiet cards — the ones a user is most
- * likely to click — as the only cards in the rail and lanes with no hover
- * feedback. Cards paint their background from this variable
+ * `backgroundColor`: an inline declaration outranks every class, so it would
+ * also beat the card's hover utility and leave running cards — the ones a
+ * user is most likely to click — as the only rows with no hover feedback.
+ * Cards paint their background from this variable
  * (`bg-[var(--subagent-wash)]`), which the hover utility can override normally.
  */
 export function subagentCardStyle(status: SubagentStatus): React.CSSProperties {
   return {
-    borderLeftColor: STATUS_COLOR[status],
     "--subagent-wash":
-      status === "quiet"
-        ? "color-mix(in srgb, var(--status-idle) 7%, transparent)"
-        : "color-mix(in srgb, var(--card) 60%, transparent)",
+      status === "running"
+        ? "color-mix(in srgb, var(--step-running) 6%, transparent)"
+        : "transparent",
   } as React.CSSProperties
 }
 
@@ -75,19 +72,16 @@ export function SubagentDot({ status, className }: { status: SubagentStatus; cla
   )
 }
 
-/** Uppercase micro status word, colored by status. */
-export function SubagentStatusLabel({ status }: { status: SubagentStatus }) {
+/** Sentence-case mono status word. */
+export function SubagentStatusLabel({ status, className }: { status: SubagentStatus; className?: string }) {
   return (
-    <span
-      className="shrink-0 font-mono text-[9.5px] uppercase tracking-[0.06em]"
-      style={{ color: STATUS_TEXT_COLOR[status] }}
-    >
+    <span className={cn("shrink-0 font-mono text-[.7rem] tabular-nums", STATUS_TEXT_CLASS[status], className)}>
       {STATUS_LABEL[status]}
     </span>
   )
 }
 
-/** Uppercase micro section label — the mock's one recurring typographic anchor. */
+/** Quiet section label. */
 export function SubagentSectionLabel({
   children,
   className,
@@ -95,26 +89,30 @@ export function SubagentSectionLabel({
   children: React.ReactNode
   className?: string
 }) {
+  return <span className={cn("text-xs text-muted-foreground", className)}>{children}</span>
+}
+
+/** Role/model chip shared by the rail, the lanes and the drill-down. */
+export function SubagentChip({
+  children,
+  title,
+  className,
+}: {
+  children: React.ReactNode
+  title?: string
+  className?: string
+}) {
   return (
     <span
       className={cn(
-        "text-[9.5px] uppercase tracking-[0.06em] text-muted-foreground",
+        "max-w-28 shrink-0 truncate rounded-sm border border-border/60 px-1 font-mono text-[.65rem] text-muted-foreground",
         className
       )}
+      title={title}
     >
       {children}
     </span>
   )
-}
-
-const CATEGORY_ICONS: Record<ToolCategory, typeof Wrench> = {
-  read: FileText,
-  edit: SquarePen,
-  run: SquareTerminal,
-  search: Search,
-  web: Globe,
-  task: Bot,
-  other: Wrench,
 }
 
 export interface SubagentActivity {

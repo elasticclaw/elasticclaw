@@ -1,6 +1,8 @@
 "use client"
 
 import { useMemo, useState } from "react"
+import { ChevronRight, History } from "lucide-react"
+import { cn } from "@/lib/utils"
 import { fetchActivityMessages } from "@/lib/api"
 import { mapApiMessage } from "@/lib/mappers"
 import type { ActivitySummary as ActivitySummaryMeta, Message } from "@/lib/types"
@@ -9,7 +11,7 @@ import {
   demoteStaleRunning,
   pairActivitySteps,
 } from "@/lib/turns"
-import { StepList, StepRow, type StepDensity } from "./step-row"
+import { ROW_INTERACTIVE_CLASS, StepList, StepRow, type StepDensity } from "./step-row"
 import { useToggleAnchor } from "./anchor-context"
 
 function summaryLabel(count: number): string {
@@ -19,8 +21,47 @@ function summaryLabel(count: number): string {
 /** Board cards always show the last few steps as real rows; the rest collapse. */
 const CARD_TRAILING_STEPS = 4
 
+/** The "N earlier tool calls" affordance, in the same 24px row anatomy as a step. */
+function SummaryRow({
+  label,
+  expanded,
+  density,
+  onToggle,
+}: {
+  label: string
+  expanded: boolean
+  density: StepDensity
+  onToggle: (el: HTMLElement) => void
+}) {
+  const isCard = density === "card"
+  return (
+    <button
+      type="button"
+      aria-expanded={expanded}
+      onClick={(e) => onToggle(e.currentTarget)}
+      className={cn(
+        "flex w-full items-center gap-1.5 rounded-md px-0.5 py-0.5 text-left leading-relaxed transition-colors",
+        isCard ? "min-h-5 text-xs" : "min-h-6 text-sm max-md:min-h-11",
+        ROW_INTERACTIVE_CLASS
+      )}
+    >
+      <span className={cn("flex shrink-0 items-center justify-center text-icon-muted", isCard ? "size-5" : "size-6")}>
+        <History className={cn("shrink-0 stroke-[1.8]", isCard ? "size-3.5" : "size-4")} aria-hidden />
+      </span>
+      <span className="min-w-0 flex-1 truncate text-secondary-label">
+        {expanded ? "Hide" : "Show"} {label}
+      </span>
+      <span className="flex size-4 shrink-0 items-center justify-center" aria-hidden>
+        <ChevronRight
+          className={cn("size-3 shrink-0 text-icon-muted opacity-70 transition-transform duration-200", expanded && "rotate-90")}
+        />
+      </span>
+    </button>
+  )
+}
+
 /**
- * Historical tool calls. At full density: a lazy divider — timeline
+ * Historical tool calls. At full density: a lazy row — timeline
  * `activity_summary` rows fetch their messages via fetchActivityMessages on
  * first expand; runs of live activity rows pass `messages` directly.
  *
@@ -95,6 +136,8 @@ export function ActivitySummaryBlock({
   // show or fetch — they only exist so timeline re-merges stay deduplicated.
   if (stepCount === 0 && !(countOverride && countOverride > 0)) return null
 
+  const noteClass = cn("ms-7 py-0.5 text-muted-foreground", density === "card" ? "text-[10px]" : "text-xs")
+
   if (density === "card") {
     const trailing = expanded ? [] : steps.slice(-CARD_TRAILING_STEPS)
     // Older calls: loaded steps above the trailing window, plus whatever is
@@ -105,21 +148,13 @@ export function ActivitySummaryBlock({
     const earlierCount = Math.max(0, stepCount - CARD_TRAILING_STEPS) + remoteCount
     const showEarlier = expanded || earlierCount > 0
     return (
-      <div className="space-y-0.5">
+      <div className="flex flex-col">
         {showEarlier && (
-          <button
-            type="button"
-            onClick={(e) => handleToggle(e.currentTarget)}
-            className="w-full rounded border border-border/50 bg-muted/20 px-1.5 py-0.5 text-left text-[10px] text-muted-foreground hover:bg-muted/35"
-          >
-            {expanded ? "Hide" : "Show"} {summaryLabel(earlierCount)}
-          </button>
+          <SummaryRow label={summaryLabel(earlierCount)} expanded={expanded} density="card" onToggle={handleToggle} />
         )}
-        {expanded && loading && (
-          <div className="px-1.5 text-[10px] text-muted-foreground">Loading tool calls...</div>
-        )}
+        {expanded && loading && <div className={noteClass}>Loading tool calls...</div>}
         {expanded && isPartial && (
-          <div className="px-1.5 text-[10px] text-muted-foreground">
+          <div className={noteClass}>
             Showing latest {loadedCount} of {countOverride} tool calls
           </div>
         )}
@@ -135,23 +170,11 @@ export function ActivitySummaryBlock({
   }
 
   return (
-    <div className="space-y-1">
-      <div className="flex items-center gap-2 py-1">
-        <div className="h-px flex-1 bg-border/50" />
-        <button
-          type="button"
-          onClick={(e) => handleToggle(e.currentTarget)}
-          className="rounded border border-border/60 bg-muted/25 px-2.5 py-1 text-xs text-muted-foreground hover:bg-muted/40 hover:text-foreground"
-        >
-          {expanded ? "Hide" : "Show"} {label}
-        </button>
-        <div className="h-px flex-1 bg-border/50" />
-      </div>
-      {expanded && loading && (
-        <div className="text-center text-xs text-muted-foreground">Loading tool calls...</div>
-      )}
+    <div className="flex flex-col pb-1">
+      <SummaryRow label={label} expanded={expanded} density="full" onToggle={handleToggle} />
+      {expanded && loading && <div className={noteClass}>Loading tool calls...</div>}
       {expanded && isPartial && (
-        <div className="text-center text-xs text-muted-foreground">
+        <div className={noteClass}>
           Showing latest {loadedCount} of {countOverride} tool calls
         </div>
       )}

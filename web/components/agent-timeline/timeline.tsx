@@ -91,16 +91,18 @@ function UnloadedActivityNotice({
   onLoad: () => void
 }) {
   return (
-    <div className="flex flex-wrap items-center justify-center gap-x-2 gap-y-1 py-4 text-center text-sm text-muted-foreground">
-      <span>{message}</span>
-      <button
-        type="button"
-        onClick={onLoad}
-        disabled={loading}
-        className="rounded border border-border bg-muted/30 px-2.5 py-0.5 text-xs text-foreground hover:bg-muted/50 disabled:opacity-60"
-      >
-        {loading ? "Loading..." : "Load them"}
-      </button>
+    <div className="border-b border-border/60 pb-2 pt-1">
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1 px-1 text-sm leading-relaxed text-muted-foreground tabular-nums">
+        <span className="min-w-0">{message}</span>
+        <button
+          type="button"
+          onClick={onLoad}
+          disabled={loading}
+          className="h-6 rounded-control px-2 text-xs text-secondary-label transition-colors hover:bg-accent/40 hover:text-foreground disabled:opacity-60"
+        >
+          {loading ? "Loading..." : "Load them"}
+        </button>
+      </div>
     </div>
   )
 }
@@ -199,7 +201,7 @@ export function AgentTimeline({
       )
     }
     return (
-      <p className="py-12 text-center text-sm text-muted-foreground">
+      <p className="py-8 text-center text-sm text-muted-foreground">
         No failures in this transcript.
       </p>
     )
@@ -207,7 +209,7 @@ export function AgentTimeline({
 
   return (
     <ToggleAnchorContext.Provider value={anchor}>
-      <div className="space-y-3">
+      <div className="flex flex-col">
         {visibleTurns.map((turn) => {
           const isLast = turn === turns[turns.length - 1]
           const toggleKey = `${density}:${turn.id}`
