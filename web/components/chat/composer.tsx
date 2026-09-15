@@ -54,7 +54,7 @@ export function SendButton({ className, size = "md", ...props }: ComponentProps<
         "enabled:inset-shadow-[0_1px_rgb(255_255_255/16%)]",
         "disabled:cursor-default disabled:opacity-30 disabled:shadow-none disabled:hover:scale-100",
         "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background",
-        size === "md" ? "size-11 sm:size-8" : "size-7",
+        size === "md" ? "size-11 md:size-8" : "size-7",
         className
       )}
       {...props}

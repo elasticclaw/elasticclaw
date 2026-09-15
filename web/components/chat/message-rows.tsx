@@ -111,7 +111,7 @@ function MessageCopyButton({ text, className }: { text: string; className?: stri
       aria-label="Copy message"
       title={copied ? "Copied" : "Copy message"}
       className={cn(
-        "flex size-6 max-md:size-11 items-center justify-center rounded-[var(--control-radius)] text-muted-foreground transition-colors hover:bg-accent/40 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus-ring",
+        "flex size-6 items-center justify-center rounded-[var(--control-radius)] text-muted-foreground transition-colors hover:bg-accent/40 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus-ring",
         className
       )}
     >
@@ -211,7 +211,7 @@ function UserRow({
         )}
       >
         <span suppressHydrationWarning>{formatTimestamp(message.timestamp)}</span>
-        {body.trim() && <MessageCopyButton text={body} />}
+        {body.trim() && <MessageCopyButton text={body} className={variant === "chat" ? "max-md:size-11" : "max-md:size-9"} />}
       </div>
     </div>
   )
@@ -246,7 +246,7 @@ function AssistantRow({
           variant === "chat" ? "text-xs" : "text-[10px]"
         )}
       >
-        {!streaming && <MessageCopyButton text={text} />}
+        {!streaming && <MessageCopyButton text={text} className={variant === "chat" ? "max-md:size-11" : "max-md:size-9"} />}
         <span suppressHydrationWarning>{formatTimestamp(timestamp)}</span>
       </div>
     </div>
