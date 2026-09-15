@@ -45,8 +45,8 @@ func buildAgentBootstrapPlan(cfg *types.HubConfig, mainKey, mainModel string, su
 			seen[key.Name] = true
 		}
 	}
-	// The existing exporter takes the first eligible key for each provider.
-	plan.LLMKeyEnv = buildLLMKeyEnv(selected, resolved.LLMKey)
+	// Keep unrelated providers available while prioritizing both selected credentials.
+	plan.LLMKeyEnv = buildLLMKeyEnv(cfg.LLMKeys, resolved.LLMKey, sub.LLMKey)
 	plan.APIKeyAuthSync = ""
 	plan.OAuthAuthSync = ""
 	files := map[string]string{}
@@ -96,7 +96,7 @@ func buildAgentBootstrapPlan(cfg *types.HubConfig, mainKey, mainModel string, su
 		raw, _ := json.Marshal(map[string]any{"files": files})
 		plan.ModelAuthEnv = fmt.Sprintf("export ELASTICCLAW_MODEL_AUTH_PROVIDER=%q\nexport ELASTICCLAW_MODEL_AUTH_STATE=%q\n", authProvider, base64.StdEncoding.EncodeToString(raw))
 	}
-	plan.ProviderConfig = buildOpenClawProviderConfig(selected, resolved.LLMKey, sub)
+	plan.ProviderConfig = buildOpenClawProviderConfig(cfg.LLMKeys, resolved.LLMKey, sub)
 	return plan, nil
 }
 
@@ -112,4 +112,22 @@ func (s *Server) clawAgentBootstrapPlan(clawID string, cfg *types.HubConfig, mai
 		return agentBootstrapPlan{}, fmt.Errorf("resolve agent bootstrap: %w", err)
 	}
 	return plan, nil
+}
+
+// resolveDaytonaBootstrapModel preserves pinned models, while retaining the
+// legacy Daytona correction for stored models belonging to another provider.
+func resolveDaytonaBootstrapModel(cfg *types.HubConfig, key *types.LLMKeyConfig, stored string) (model string, legacyMismatch bool) {
+	if stored == "" {
+		return resolveDefaultModelForKey(cfg, key), false
+	}
+	if key == nil {
+		return stored, false
+	}
+	if !strings.Contains(stored, "/") {
+		return normalizeModelForProvider(key.Provider, stored), false
+	}
+	if !modelMatchesProvider(key.Provider, stored) {
+		return resolveDefaultModelForKey(cfg, key), true
+	}
+	return stored, false
 }

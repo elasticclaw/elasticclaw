@@ -186,13 +186,20 @@ if anthropic_key:
 			runtime = "codex"
 		}
 		modelJSON, _ := json.Marshal(model)
-		subagentPatch = "agent_defaults.setdefault('models', {}).setdefault(model, {})\n"
-		subagentPatch += fmt.Sprintf("agent_defaults.setdefault('subagents', {})['model'] = %s\n", modelJSON)
+		subagentPatch = fmt.Sprintf("agent_defaults.setdefault('subagents', {})['model'] = %s\n", modelJSON)
 		if sub.MaxConcurrent > 0 {
 			subagentPatch += fmt.Sprintf("agent_defaults['subagents']['maxConcurrent'] = %d\n", sub.MaxConcurrent)
 		}
-		// Explicit native runtime avoids inheriting a stale per-model runtime.
-		subagentPatch += fmt.Sprintf("agent_defaults.setdefault('models', {}).setdefault(%s, {})['agentRuntime'] = {'id': '%s'}\n", modelJSON, runtime)
+		// On the pinned July 2026 runtime, creating this map also creates a
+		// model allowlist. Leave native providers unrestricted unless a map
+		// already exists or an OpenAI/Codex runtime override is required.
+		if key != nil && (key.Provider == "openai" || key.Provider == "codex") {
+			subagentPatch += "agent_defaults.setdefault('models', {})\n"
+		}
+		subagentPatch += fmt.Sprintf(`if isinstance(agent_defaults.get('models'), dict):
+    agent_defaults['models'].setdefault(model, {})
+    agent_defaults['models'].setdefault(%s, {})['agentRuntime'] = {'id': '%s'}
+`, modelJSON, runtime)
 	}
 
 	return fmt.Sprintf(`python3 << 'PYEOF'
@@ -243,7 +250,12 @@ if %s:
 models = config.get('models')
 if isinstance(models, dict) and any(k in models for k in ('providers', 'routers', 'mode')):
     config.pop('models', None)
-%sfor catalog_model in [model] + ([agent_defaults['subagents']['model']] if 'subagents' in agent_defaults else []):
+%schild_config = agent_defaults.get('subagents')
+child_model = child_config.get('model') if isinstance(child_config, dict) else None
+catalog_models = [model]
+if isinstance(child_model, str) and child_model.strip():
+    catalog_models.append(child_model)
+for catalog_model in catalog_models:
     if catalog_model.startswith('ollama/'):
         model_id = catalog_model.split('/', 1)[1]
         agent_defaults.setdefault('experimental', {})['localModelLean'] = True

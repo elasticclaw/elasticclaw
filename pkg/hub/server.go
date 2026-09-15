@@ -4342,9 +4342,9 @@ docker --version`); err != nil {
 	activeKeyProviderDaytona := ""
 	s.mu.RLock()
 	activeKeyDaytona := resolveActiveKey(s.hubCfg.LLMKeys, llmKeyNameDaytona)
-	defaultModelDaytona := storedModelDaytona
-	if defaultModelDaytona == "" {
-		defaultModelDaytona = resolveDefaultModelForKey(s.hubCfg, activeKeyDaytona)
+	defaultModelDaytona, legacyModelMismatch := resolveDaytonaBootstrapModel(s.hubCfg, activeKeyDaytona, storedModelDaytona)
+	if legacyModelMismatch {
+		log.Printf("[daytona] claw %s stored model %q does not match selected provider %q; using provider-compatible model %q", clawID, storedModelDaytona, activeKeyDaytona.Provider, defaultModelDaytona)
 	}
 	hubCfgDaytona := s.hubCfg
 	llmKeyEnvDaytona := buildLLMKeyEnv(s.hubCfg.LLMKeys, llmKeyNameDaytona)
@@ -7536,20 +7536,26 @@ func buildLinearEnv(token string) string {
 }
 
 // buildLLMKeyEnv converts llm_keys slice to shell env var export lines.
-// If selectedKeyName is non-empty, the selected key is prioritized over default keys.
-// All keys are exported so each claw has access to whichever provider it needs.
-func buildLLMKeyEnv(keys []*types.LLMKeyConfig, selectedKeyName string) string {
+// The selected key and additional preferred keys take priority over defaults.
+// All providers are exported so each claw has access to whichever provider it needs.
+func buildLLMKeyEnv(keys []*types.LLMKeyConfig, selectedKeyName string, preferredKeyNames ...string) string {
 	if len(keys) == 0 {
 		return ""
 	}
 	var b strings.Builder
 	seen := map[string]bool{}
 
-	// First pass: export the selected key if specified
-	if selectedKeyName != "" {
+	// First pass: selected principal and child keys win over provider defaults.
+	for _, preferred := range append([]string{selectedKeyName}, preferredKeyNames...) {
+		if preferred == "" {
+			continue
+		}
 		for _, k := range keys {
-			if k.Name == selectedKeyName && llmKeyHasRequiredAPIKey(k) {
+			if k.Name == preferred && llmKeyHasRequiredAPIKey(k) {
 				envVar := k.EnvVarName()
+				if seen[envVar] {
+					break
+				}
 				seen[envVar] = true
 				fmt.Fprintf(&b, "export %s=%q\n", envVar, k.APIKey)
 				break

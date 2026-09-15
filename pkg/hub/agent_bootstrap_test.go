@@ -3,6 +3,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -143,9 +144,8 @@ func TestAgentBootstrapKeepsBothCustomProviderModels(t *testing.T) {
 		t.Fatalf("unrelated child settings changed: %v", child)
 	}
 
-	allowed := defaults["models"].(map[string]any)
-	if allowed["grok/principal"] == nil || allowed["grok/worker"] == nil {
-		t.Fatalf("principal and worker must both be allowed: %v", allowed)
+	if _, restricted := defaults["models"]; restricted {
+		t.Fatal("native Grok models must remain unrestricted")
 	}
 	if _, ok := defaults["subagents"].(map[string]any)["maxConcurrent"]; ok {
 		t.Fatal("omitted concurrency should preserve runtime default")
@@ -169,5 +169,139 @@ func TestManagedGrokCredentialUsesWorkerProfile(t *testing.T) {
 	}
 	if credential == nil {
 		t.Fatal("expected managed worker credential")
+	}
+}
+
+func executeAgentConfigPatch(t *testing.T, script, model, existing string) map[string]any {
+	t.Helper()
+	home := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(home, ".openclaw"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".openclaw/openclaw.json"), []byte(existing), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("bash", "-c", script)
+	cmd.Env = append(os.Environ(), "HOME="+home, "OPENCLAW_DEFAULT_MODEL="+model)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("config patch: %v: %s", err, out)
+	}
+	raw, err := os.ReadFile(filepath.Join(home, ".openclaw/openclaw.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var config map[string]any
+	if err := json.Unmarshal(raw, &config); err != nil {
+		t.Fatal(err)
+	}
+	return config
+}
+
+func TestAgentBootstrapLegacyChildSettingsDoNotRequireModel(t *testing.T) {
+	cfg := &types.HubConfig{LLMKeys: types.LLMKeysList{{Name: "main", Provider: "anthropic", APIKey: "key"}}}
+	plan, err := buildAgentBootstrapPlan(cfg, "main", "anthropic/principal", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, child := range []string{`{"maxConcurrent":3}`, `{"model":{"primary":"grok/worker"}}`, `{"model":42}`, `null`, `"legacy"`, `{"model":""}`} {
+		t.Run(child, func(t *testing.T) {
+			config := executeAgentConfigPatch(t, plan.ProviderConfig, "anthropic/principal", `{"agents":{"defaults":{"subagents":`+child+`}}}`)
+			defaults := config["agents"].(map[string]any)["defaults"].(map[string]any)
+			got, _ := json.Marshal(defaults["subagents"])
+			if string(got) != child {
+				t.Fatalf("legacy settings changed: %s", got)
+			}
+		})
+	}
+}
+
+func TestAgentBootstrapKeepsUnrelatedProviderCredentials(t *testing.T) {
+	cfg := &types.HubConfig{LLMKeys: types.LLMKeysList{
+		{Name: "main", Provider: "openai", APIKey: "principal-key"},
+		{Name: "worker-default", Provider: "grok", APIKey: "wrong-worker-key", Default: true},
+		{Name: "worker", Provider: "grok", APIKey: "selected-worker-key"},
+		{Name: "other", Provider: "anthropic", APIKey: "unrelated-key"},
+	}}
+	before, _ := json.Marshal(cfg)
+	plan, err := buildAgentBootstrapPlan(cfg, "main", "openai/principal", &types.SubagentConfig{LLMKey: "worker", Model: "grok/worker"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Execute exports to check actual values, rather than matching script text.
+	cmd := exec.Command("bash", "-c", plan.LLMKeyEnv+`python3 -c 'import os,json; print(json.dumps([os.getenv("OPENAI_API_KEY"),os.getenv("XAI_API_KEY"),os.getenv("ANTHROPIC_API_KEY")]))'`)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("env: %v: %s", err, out)
+	}
+	var values []string
+	if err := json.Unmarshal(out, &values); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(values, ",") != "principal-key,selected-worker-key,unrelated-key" {
+		t.Fatalf("credential precedence: %v", values)
+	}
+	if !strings.Contains(plan.ProviderConfig, "anthropic:default") {
+		t.Fatal("unrelated Anthropic compatibility auth patch missing")
+	}
+	after, _ := json.Marshal(cfg)
+	if string(before) != string(after) {
+		t.Fatal("configuration mutated")
+	}
+}
+
+func TestAgentBootstrapPreservesNativeModelAccess(t *testing.T) {
+	for _, provider := range []string{"anthropic", "grok", "ollama", "openai"} {
+		for _, existingMap := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/existing=%v", provider, existingMap), func(t *testing.T) {
+				cfg := &types.HubConfig{LLMKeys: types.LLMKeysList{{Name: "main", Provider: "anthropic", APIKey: "key"}, {Name: "worker", Provider: provider, APIKey: "worker-key"}}}
+				// Same provider must use the same credential by contract.
+				childKey := "worker"
+				if provider == "anthropic" {
+					childKey = "main"
+				}
+				plan, err := buildAgentBootstrapPlan(cfg, "main", "anthropic/principal", &types.SubagentConfig{LLMKey: childKey, Model: provider + "/worker"})
+				if err != nil {
+					t.Fatal(err)
+				}
+				existing := `{}`
+				if existingMap {
+					existing = `{"agents":{"defaults":{"models":{"anthropic/other":{}}}}}`
+				}
+				config := executeAgentConfigPatch(t, plan.ProviderConfig, "anthropic/principal", existing)
+				defaults := config["agents"].(map[string]any)["defaults"].(map[string]any)
+				models, hasMap := defaults["models"].(map[string]any)
+				if !existingMap && provider != "openai" {
+					if hasMap {
+						t.Fatal("native models unexpectedly restricted")
+					}
+					return
+				}
+				if !hasMap || models["anthropic/principal"] == nil || models[provider+"/worker"] == nil {
+					t.Fatalf("required model entries missing: %v", models)
+				}
+				if existingMap && models["anthropic/other"] == nil {
+					t.Fatal("existing allowed model removed")
+				}
+			})
+		}
+	}
+}
+
+func TestResolveDaytonaBootstrapModelCompatibility(t *testing.T) {
+	cfg := &types.HubConfig{DefaultModel: "openai/hub"}
+	key := &types.LLMKeyConfig{Provider: "anthropic", DefaultModel: "anthropic/key-default"}
+	for _, tc := range []struct {
+		stored, want string
+		mismatch     bool
+	}{
+		{"anthropic/pinned", "anthropic/pinned", false},
+		{"openai/legacy", "anthropic/key-default", true},
+		{"", "anthropic/key-default", false},
+		{"unpinned-prefix", "anthropic/unpinned-prefix", false},
+	} {
+		model, mismatch := resolveDaytonaBootstrapModel(cfg, key, tc.stored)
+		if model != tc.want || mismatch != tc.mismatch {
+			t.Fatalf("stored %q: got %q mismatch=%v", tc.stored, model, mismatch)
+		}
 	}
 }
