@@ -204,7 +204,16 @@ order:
    and only ever adds protection: it selects the `ready` and `skipped` rows that
    have no reference edge and gives them edges, and the blob sweep — dry or
    real — refuses to delete anything while any such row exists. Running it is
-   what makes the dry run's blob numbers mean anything.
+   what makes the dry run's blob numbers mean anything. Nothing else is
+   written: in particular a dry run does not build the two retention indexes
+   (a real cycle builds them at its end, from the space it just freed), so it
+   is safe on a hub with no free space at all.
+
+   The backfill, like every other phase, is bounded by the per-cycle budget.
+   On a hub with years of checkpoints the first cycle may stop it partway and
+   say so (`stopped at the cycle budget`); the sweep then reports
+   `blobs=DECLINED(...)` for that cycle and the next cycle continues. That is
+   the budget working, not a fault.
 
    **Rolling back.** A build without reference counting records no edges, so
    every checkpoint created while it runs is `ready` with a valid manifest and
@@ -225,9 +234,15 @@ order:
    ```
 
    **Every knob here needs a hub restart to take effect, including
-   `enabled` and `dry_run`.** `hub.yaml` is read once at boot and the retention
-   section is never reloaded, so changing a value in the file and waiting for the
-   next cycle changes nothing at all.
+   `enabled` and `dry_run`.** The retention section is read once at boot and
+   never reloaded — not from an edit to `hub.yaml`, and not from the settings
+   or AI-config pages, which rewrite `hub.yaml` and hot-reload everything
+   else. Changing a value and waiting for the next cycle changes nothing; the
+   sweeper keeps running the policy it booted with and logs, once per change,
+   `configuration changed since boot: configured [...], running [...]` so the
+   drift is visible. This is deliberate: the first cycle always runs one
+   `interval` after boot, and that window is the only grace an irreversible
+   `dry_run: false` gets.
 
    Durations are Go durations: `h`, `m`, `s` — **there is no `d`**. `max_age: 30d`
    does not parse, and the hub falls back to the 90-day default. It says so in
@@ -247,7 +262,14 @@ order:
 
    `phase_errors` counts phases that failed outright; `item_errors` counts
    individual files or rows a phase could not process and stepped over. A cycle
-   with `item_errors` in the thousands is not a cycle that found nothing.
+   with `item_errors` in the thousands is not a cycle that found nothing. Each
+   phase logs its first five item errors with the error text, then one line
+   saying how many more there were and repeating the first — so a filesystem
+   that refuses every unlink produces six lines, not forty thousand, and the
+   `cycle done` line survives journald's rate limit.
+
+   A disabled sweeper logs `cycle skipped: retention disabled` on every tick.
+   Silence is what a wedged sweeper looks like; a disabled one says so.
 
    `bytes_freed` is filesystem bytes only — blobs, manifests and diagnostics
    logs. Deleting `messages` and `task_run_events` rows returns pages to
@@ -281,9 +303,12 @@ order:
    after the restart — never during startup — so there is always a window to
    turn it back off.
 
-The first sweep on a hub that has never run retention has a large backlog. Row
-deletes are batched and bounded by a per-cycle time budget, so the backlog is
-spread over several cycles rather than holding the single SQLite write lock for
+The first sweep on a hub that has never run retention has a large backlog.
+Every phase that writes in bulk — the backfill, compaction, checkpoint expiry,
+the row deletes and the tree reference gc — is batched, releases the SQLite
+write lock between batches, and stops at a per-cycle time budget with a
+`stopping after N item(s), cycle budget ... reached` line, so the backlog is
+spread over several cycles rather than holding the single write lock for
 hours; this is expected and needs no intervention.
 
 ### Commit style

@@ -264,7 +264,7 @@ func TestExpiryDeletesTheRowBeforeUnlinkingTheManifest(t *testing.T) {
 	}
 	s.db = readOnly
 
-	removed, _, _, err := s.pruneExpiredCheckpoints(reference.Add(-90*24*time.Hour), false)
+	removed, _, _, err := s.pruneExpiredCheckpoints(reference.Add(-90*24*time.Hour), false, newRetentionPacer("checkpoints", time.Time{}))
 	if err == nil {
 		t.Fatal("the failed DELETE was not reported; the fixture did not exercise the failure")
 	}

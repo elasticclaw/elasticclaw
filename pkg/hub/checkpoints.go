@@ -160,7 +160,7 @@ func checkpointManifestPath(id string) string {
 // rather than something it mistakes for an orphan.
 func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 	tmp := path + ".tmp-" + uuid.New().String()
-	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_EXCL|os.O_WRONLY, perm)
+	f, err := createExclusiveRecreatingDir(tmp, perm)
 	if err != nil {
 		return err
 	}
@@ -186,6 +186,29 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 		return err
 	}
 	return nil
+}
+
+// createExclusiveRecreatingDir opens tmp for exclusive writing, recreating its
+// parent directory once if it has just disappeared.
+//
+// The retention sweep's pruneEmptyDirs removes a blob fan-out directory it
+// observed empty, outside any interlock -- and a writer that has returned from
+// its os.MkdirAll but not yet created its temp file finds the directory gone.
+// For a blob upload that made handleCheckpointBlobUpload answer 500 and the
+// claw's checkpoint attempt fail; the sweeper was manufacturing checkpoint
+// failures on the hot path. The reverse interleaving is already safe (Remove
+// on a directory that just gained a file fails ENOTEMPTY), so one retry after
+// re-running MkdirAll closes the window: the sweep prunes a directory at most
+// once per cycle.
+func createExclusiveRecreatingDir(tmp string, perm os.FileMode) (*os.File, error) {
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_EXCL|os.O_WRONLY, perm)
+	if !os.IsNotExist(err) {
+		return f, err
+	}
+	if err := os.MkdirAll(filepath.Dir(tmp), 0o750); err != nil {
+		return nil, err
+	}
+	return os.OpenFile(tmp, os.O_CREATE|os.O_EXCL|os.O_WRONLY, perm)
 }
 
 func (s *Server) checkpointScheduler() {
@@ -1143,7 +1166,7 @@ func (s *Server) handleCheckpointBlobUpload(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	tmp := path + ".tmp-" + uuid.New().String()
-	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o640)
+	f, err := createExclusiveRecreatingDir(tmp, 0o640)
 	if err != nil {
 		http.Error(w, "storage error", http.StatusInternalServerError)
 		return

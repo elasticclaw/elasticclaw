@@ -96,7 +96,7 @@ func TestTreeExpansionIsWrittenOncePerDistinctTree(t *testing.T) {
 	if removed, _, _, err := s.sweepCheckpointBlobs(false, nil); err != nil || removed != 0 {
 		t.Fatalf("sweep removed %d blobs (err %v) with one checkpoint still on the tree", removed, err)
 	}
-	if _, err := s.pruneUnreferencedTreeBlobRefs(time.Time{}); err != nil {
+	if _, err := s.pruneUnreferencedTreeBlobRefs(newRetentionPacer("tree reference gc", time.Time{})); err != nil {
 		t.Fatal(err)
 	}
 	if got := treeBlobRefCount(t, s, rootSHA); got != len(fileSHAs) {
@@ -111,7 +111,7 @@ func TestTreeExpansionIsWrittenOncePerDistinctTree(t *testing.T) {
 		t.Fatalf("sweep removed %d blobs (err %v) after the last holder released, want %d files plus the tree", removed, err, len(fileSHAs)+1)
 	}
 	assertFiles(false, "nothing references the tree any more")
-	if n, err := s.pruneUnreferencedTreeBlobRefs(time.Time{}); err != nil || n != int64(len(fileSHAs)) {
+	if n, err := s.pruneUnreferencedTreeBlobRefs(newRetentionPacer("tree reference gc", time.Time{})); err != nil || n != int64(len(fileSHAs)) {
 		t.Fatalf("tree gc removed %d rows (err %v), want %d", n, err, len(fileSHAs))
 	}
 	if got := treeBlobRefCount(t, s, rootSHA); got != 0 {

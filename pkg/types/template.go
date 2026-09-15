@@ -815,6 +815,15 @@ type LivenessConfig struct {
 //
 // Nothing here is reclaimed unless the sweeper runs, and the sweeper never
 // runs during startup — see retentionSweeper in pkg/hub/retention.go.
+//
+// Every field here is read ONCE, when the hub starts, and applied until the
+// next restart. That includes a change made through the settings or AI-config
+// pages, which rewrite hub.yaml: the sweeper keeps the policy it booted with
+// and logs, once per change, that the configuration has diverged from it. The
+// rule is deliberate. Every phase deletes irreversibly, and the first cycle
+// always runs one interval after boot, so a restart is what gives an operator
+// the window to notice a wrong value; a knob that took effect on the next tick
+// would skip that window.
 type RetentionConfig struct {
 	// Enabled is the master switch. It defaults to FALSE when omitted: every
 	// phase below deletes irreversibly, and an absent setting means the
@@ -827,16 +836,11 @@ type RetentionConfig struct {
 	// Whichever way it is set, the hub logs the effective policy once at
 	// startup — one line saying enabled or disabled, and for an enabled
 	// sweeper the interval, window, compact_after, whether any value was
-	// clamped, and when the first cycle runs. That line is the only signal a
-	// misconfiguration produces: a disabled sweeper is otherwise silent
-	// forever and looks exactly like one that is running and finding nothing.
+	// clamped, and when the first cycle runs. A disabled sweeper then logs
+	// "cycle skipped: retention disabled" on every tick, so it never looks
+	// like one that is running and finding nothing.
 	Enabled *bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
 	// Interval is how often a full reclamation cycle runs (default 1h).
-	//
-	// Unlike every other knob here, a change to interval needs a hub restart:
-	// the ticker is created once when the sweeper starts, while max_age,
-	// compact_after and dry_run are re-read at the top of every cycle and take
-	// effect on the next tick.
 	Interval string `yaml:"interval,omitempty" json:"interval,omitempty"`
 	// MaxAge is the retention window (default 2160h = 90 days). It applies to
 	// all four retention targets: diagnostics logs, checkpoints, task run
@@ -852,6 +856,10 @@ type RetentionConfig struct {
 	// retention on a hub that has never run it should be able to see the counts
 	// first. Enabled must still be true: dry_run describes how a cycle behaves,
 	// not whether it runs.
+	//
+	// A dry run writes exactly one thing: the checkpoint_blob_refs backfill,
+	// which only ever adds protection. It does not build the retention indexes
+	// — those need free space, which a dry run has not yet reclaimed.
 	DryRun bool `yaml:"dry_run,omitempty" json:"dryRun,omitempty"`
 	// CompactAfter is how long a claw must go unchanged before it counts as
 	// finalized and its superseded checkpoint manifests may be compacted

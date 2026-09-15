@@ -3,6 +3,7 @@ package hub
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -97,6 +98,117 @@ var retentionBatchPause = 50 * time.Millisecond
 // wall clock on the backlog and nothing on the steady state, where a cycle
 // removes one interval's worth of rows and never comes near the budget.
 var retentionRowBudget = 2 * time.Minute
+
+// retentionBudgetDeadline is when a phase that starts now must stop.
+func retentionBudgetDeadline() time.Time {
+	return time.Now().Add(retentionRowBudget)
+}
+
+// retentionCheckpointBatch is how many checkpoint rows one transaction covers
+// in the loops keyed by checkpoint id: compaction, the release of skipped
+// rows, expiry and the reference backfill. Each row costs one UPDATE or DELETE
+// plus at most a handful of edge rows, so a quarter of the row batch keeps the
+// lock hold in the same range as one batch of pruneRowsBatched.
+const retentionCheckpointBatch = retentionDeleteBatch / 4
+
+// retentionSleep is how a pacer releases the write lock between batches. It is
+// a variable so the pacing test can count the pauses instead of paying for them.
+var retentionSleep = time.Sleep
+
+// errRetentionBudget is what a pacer returns once the cycle budget is spent.
+// A phase stops on it and returns what it has done so far WITHOUT a phase
+// error: the items left behind still match the predicate that selected them,
+// and the next cycle picks them up. The pacer has already logged where the
+// phase stopped.
+var errRetentionBudget = errors.New("cycle budget reached")
+
+// retentionPacer is the one discipline every bulk loop in this file follows,
+// and the one TestEveryBulkWriteLoopIsPaced enforces on any loop that begins
+// write transactions: group items into one transaction, call yield after
+// every commit, stop when yield says the budget is spent.
+//
+// Three loops used to be exempt -- expiry, compaction and the backfill each
+// issued one transaction per row, thousands of them back to back. A commit
+// holds the write lock for a WAL fsync and the next BEGIN IMMEDIATE re-took it
+// before any waiter sleeping on the busy-handler ladder woke up, so the lock
+// was released on paper and held ~90% of wall time in practice. The 15-second
+// heartbeat UPDATE discards its error, so a BUSY heartbeat silently left
+// last_seen stale -- and last_seen is what this sweeper's own staleness arm
+// and the offline logic read.
+type retentionPacer struct {
+	phase string
+	// deadline is when the phase must stop. Zero means unbounded, which only
+	// direct callers in tests use.
+	deadline time.Time
+	done     int64
+	stopped  bool
+}
+
+func newRetentionPacer(phase string, deadline time.Time) *retentionPacer {
+	return &retentionPacer{phase: phase, deadline: deadline}
+}
+
+// yield is called after each committed write-lock hold with the number of
+// items it covered. It pauses for retentionBatchPause so a waiter deep in the
+// busy-handler ladder actually gets a turn, and returns errRetentionBudget
+// once the deadline has passed -- checked before the pause, so a phase never
+// sleeps on its way out. The stop is logged once: a phase that commits what it
+// had in hand after being told to stop (the backfill's last batch) is not a
+// second stop.
+func (p *retentionPacer) yield(items int) error {
+	p.done += int64(items)
+	if p.stopped {
+		return errRetentionBudget
+	}
+	if !p.deadline.IsZero() && !time.Now().Before(p.deadline) {
+		p.stopped = true
+		log.Printf("[retention] %s: stopping after %d item(s), cycle budget %s reached; the rest goes to the next cycle",
+			p.phase, p.done, retentionRowBudget)
+		return errRetentionBudget
+	}
+	retentionSleep(retentionBatchPause)
+	return nil
+}
+
+// retentionErrorLog bounds the per-item ERROR lines one phase may emit.
+//
+// retentionSample already bounds the dry run's selection lines, for the reason
+// its comment gives: journald drops a burst above 10,000 lines per 30 seconds,
+// and the cycle summary goes with it. The real path had the same shape on its
+// error side. A cycle walks ~41k blobs, and when unlinks fail systemically -- a
+// filesystem remounted read-only after ENOSPC I/O errors, a blob store restored
+// with the wrong ownership, an immutable attribute -- that is ~41k error lines
+// in seconds: the run that exists to be read destroys its own output. So each
+// phase logs its first few failures with the error text, and flush emits one
+// line saying how many more there were and what the first one was. The counts
+// the summary line reports are tracked separately, in the phases' itemErrors.
+type retentionErrorLog struct {
+	phase string
+	count int
+	first string
+}
+
+const retentionErrorLogMax = 5
+
+func (l *retentionErrorLog) add(format string, args ...any) {
+	msg := fmt.Sprintf(format, args...)
+	l.count++
+	if l.count == 1 {
+		l.first = msg
+	}
+	if l.count <= retentionErrorLogMax {
+		log.Printf("[retention] %s", msg)
+	}
+}
+
+// flush emits the one line that stands in for everything add swallowed. It is
+// called once, when the phase is done.
+func (l *retentionErrorLog) flush() {
+	if l.count > retentionErrorLogMax {
+		log.Printf("[retention] %s: %d more item error(s) not logged; the first was: %s",
+			l.phase, l.count-retentionErrorLogMax, l.first)
+	}
+}
 
 // retentionCounts is what one cycle actually did, per phase.
 type retentionCounts struct {
@@ -250,7 +362,33 @@ func (s *Server) retentionNow() time.Time {
 	return now()
 }
 
-// retentionSweeper runs a reclamation cycle on every tick.
+// retentionPolicy is the whole of what a cycle needs to know: whether it runs
+// at all, and with which knobs.
+type retentionPolicy struct {
+	enabled bool
+	retentionSettings
+}
+
+// retentionPolicy reads the policy the configuration currently describes.
+func (s *Server) retentionPolicy() retentionPolicy {
+	return retentionPolicy{enabled: s.retentionEnabled(), retentionSettings: s.retentionSettings()}
+}
+
+// same reports whether two policies would run the same cycle. adjustments is
+// left out on purpose: it explains how the values were derived, and two
+// derivations that land on the same values are the same policy.
+func (p retentionPolicy) same(o retentionPolicy) bool {
+	return p.enabled == o.enabled && p.dryRun == o.dryRun && p.interval == o.interval &&
+		p.maxAge == o.maxAge && p.compactAfter == o.compactAfter
+}
+
+func (p retentionPolicy) String() string {
+	return fmt.Sprintf("enabled=%v dry_run=%v interval=%s max_age=%s compact_after=%s",
+		p.enabled, p.dryRun, p.interval, p.maxAge, p.compactAfter)
+}
+
+// retentionSweeper runs a reclamation cycle on every tick, under the policy
+// the hub booted with.
 //
 // It deliberately does NOT run at boot. Deleting is irreversible and the
 // window an operator has to notice a misconfigured retention policy is the
@@ -259,8 +397,10 @@ func (s *Server) retentionNow() time.Time {
 // export data or turn the sweeper off before anything is removed. Restarting
 // the hub therefore never sweeps immediately, which also stops a crash loop
 // from turning into a delete loop.
+//
+// The policy is READ ONCE, here, and never reloaded. See startRetentionRun.
 func (s *Server) retentionSweeper() {
-	s.logRetentionPolicy()
+	run := s.startRetentionRun()
 	for {
 		func() {
 			defer func() {
@@ -268,7 +408,7 @@ func (s *Server) retentionSweeper() {
 					log.Printf("[retention] loop panic, restarting: %v", r)
 				}
 			}()
-			ticker := time.NewTicker(s.retentionSettings().interval)
+			ticker := time.NewTicker(run.policy.interval)
 			defer ticker.Stop()
 			for range ticker.C {
 				func() {
@@ -277,14 +417,69 @@ func (s *Server) retentionSweeper() {
 							log.Printf("[retention] cycle panic: %v", r)
 						}
 					}()
-					s.retentionSweepOnce()
+					run.cycle()
 				}()
 			}
 		}()
 	}
 }
 
-// logRetentionPolicy states the effective policy exactly once, at startup.
+// retentionRun is one sweeper's lifetime: the policy it booted with, and the
+// last configured policy it compared that against.
+//
+// The retention section of hub.yaml takes effect at boot and NOT before the
+// next restart, `enabled` and `dry_run` included. That is the contract the
+// operator documentation states, and it is chosen over hot reload on purpose.
+// The settings and AI-config apply paths replace s.hubCfg wholesale from a
+// proposed YAML and rewrite hub.yaml with it; a sweeper reading s.hubCfg every
+// tick therefore had two failure modes neither document mentioned. A proposal
+// that merely omitted the `retention:` section dropped it from memory and from
+// disk, after which the tick returned before its start line and the sweeper
+// went silent with no log at all; and a proposal flipping dry_run to false armed
+// irreversible deletion on the next tick, with no policy line and none of the
+// grace a restart gives (the first cycle is always one interval after boot).
+// A restart is cheap, is already how interval was applied, and puts every knob
+// behind the same rule and the same startup line.
+//
+// What the sweeper does do is SAY when the configuration has diverged from the
+// policy it is running: once per change, on the next tick, so an operator who
+// edited the file and is waiting for the next cycle learns why nothing changed.
+type retentionRun struct {
+	s          *Server
+	policy     retentionPolicy
+	configured retentionPolicy
+}
+
+// startRetentionRun snapshots the configured policy and states it.
+func (s *Server) startRetentionRun() *retentionRun {
+	policy := s.retentionPolicy()
+	logRetentionPolicyLine(policy, s.retentionNow())
+	return &retentionRun{s: s, policy: policy, configured: policy}
+}
+
+// cycle runs one reclamation cycle under the boot policy, after reporting a
+// configuration that no longer matches it.
+func (r *retentionRun) cycle() {
+	configured := r.s.retentionPolicy()
+	if !configured.same(r.configured) {
+		r.configured = configured
+		if configured.same(r.policy) {
+			log.Printf("[retention] configuration matches the running policy again [%s]", r.policy)
+		} else {
+			log.Printf("[retention] configuration changed since boot: configured [%s], running [%s]; retention settings are read once at boot, so the running policy stays in force until the hub restarts",
+				configured, r.policy)
+		}
+	}
+	r.s.retentionSweepCycle(r.policy)
+}
+
+// logRetentionPolicy states the policy the configuration currently describes.
+// The sweeper states the one it booted with, through startRetentionRun.
+func (s *Server) logRetentionPolicy() {
+	logRetentionPolicyLine(s.retentionPolicy(), s.retentionNow())
+}
+
+// logRetentionPolicyLine states the effective policy exactly once, at startup.
 //
 // Nothing else does. A disabled sweeper is silent forever, so a misspelt or
 // misplaced `enabled` key -- or a hub deployed before anyone opted in --
@@ -293,33 +488,41 @@ func (s *Server) retentionSweeper() {
 // enabled one only spoke an hour later, after its first cycle, and never said
 // which values it was actually using: the floors and the compact_after/max_age
 // ordering rule can both silently replace a configured value.
-func (s *Server) logRetentionPolicy() {
-	cfg := s.retentionSettings()
-	if !s.retentionEnabled() {
-		log.Printf("[retention] disabled: no reclamation cycle will run (set retention.enabled: true to arm it, ideally with dry_run first)")
+func logRetentionPolicyLine(policy retentionPolicy, now time.Time) {
+	if !policy.enabled {
+		log.Printf("[retention] disabled: no reclamation cycle will run (set retention.enabled: true and restart the hub to arm it, ideally with dry_run first)")
 		return
 	}
 	adjusted := "none"
-	if len(cfg.adjustments) > 0 {
-		adjusted = strings.Join(cfg.adjustments, "; ")
+	if len(policy.adjustments) > 0 {
+		adjusted = strings.Join(policy.adjustments, "; ")
 	}
 	log.Printf("[retention] enabled: dry_run=%v interval=%s max_age=%s compact_after=%s adjustments=[%s] first_cycle_at=%s",
-		cfg.dryRun, cfg.interval, cfg.maxAge, cfg.compactAfter, adjusted,
-		s.retentionNow().Add(cfg.interval).Format(time.RFC3339))
+		policy.dryRun, policy.interval, policy.maxAge, policy.compactAfter, adjusted,
+		now.Add(policy.interval).Format(time.RFC3339))
 }
 
-// retentionSweepOnce runs one full reclamation cycle.
+// retentionSweepOnce runs one full reclamation cycle under the policy the
+// configuration currently describes. The sweeper does not use it -- it runs
+// its boot snapshot through retentionSweepCycle -- so this is the entry point
+// for a caller that wants "one cycle, now, as configured".
+func (s *Server) retentionSweepOnce() {
+	s.retentionSweepCycle(s.retentionPolicy())
+}
+
+// retentionSweepCycle runs one full reclamation cycle under the given policy.
 //
 // Every cycle logs a start line and an end line, including the cycles that
-// reclaim nothing. A sweeper that has been silent for a day is otherwise
-// indistinguishable from one that is wedged, disabled, or crashing in a phase
-// that only logs on success, and telling those apart after the fact was not
-// possible at all.
-func (s *Server) retentionSweepOnce() {
-	if !s.retentionEnabled() {
+// reclaim nothing -- and a disabled policy logs that it skipped. A sweeper that
+// has been silent for a day is otherwise indistinguishable from one that is
+// wedged, disabled, or crashing in a phase that only logs on success, and
+// telling those apart after the fact was not possible at all.
+func (s *Server) retentionSweepCycle(policy retentionPolicy) {
+	if !policy.enabled {
+		log.Printf("[retention] cycle skipped: retention disabled (set retention.enabled: true and restart the hub to arm it)")
 		return
 	}
-	cfg, n := s.retentionSettings(), s.retentionNow()
+	cfg, n := policy.retentionSettings, s.retentionNow()
 	expiryCutoff, compactCutoff := n.Add(-cfg.maxAge), n.Add(-cfg.compactAfter)
 	started := time.Now()
 	log.Printf("[retention] cycle start: dry_run=%v expire_before=%s compact_before=%s",
@@ -396,7 +599,7 @@ func (s *Server) retentionSweepOnce() {
 	// REFERENCED trees -- so leaving it behind costs rows, not blobs, and a
 	// failure here must not be allowed to block the cycle that reclaims disk.
 	if !cfg.dryRun {
-		if n, err := s.pruneUnreferencedTreeBlobRefs(time.Now().Add(retentionRowBudget)); err != nil {
+		if n, err := s.pruneUnreferencedTreeBlobRefs(newRetentionPacer("tree reference gc", retentionBudgetDeadline())); err != nil {
 			counts.errors++
 			counts.treeRefs = n
 			log.Printf("[retention] tree reference gc: %v", err)
@@ -421,14 +624,26 @@ func (s *Server) retentionSweepOnce() {
 		counts.blobBytes, counts.manifestBytes, counts.diagnosticsBytes,
 		counts.errors, counts.itemErrors)
 
-	// Deliberately last. These indexes only make the batched row deletes cheap,
-	// and building one needs free disk for the whole B-tree -- so running it at
-	// the TOP of the cycle, as this used to, meant a hub with a full disk spent
-	// its first act on a doomed full-table index build under the single write
-	// lock, before a single byte had been reclaimed. At the end, the cycle it
-	// accelerates is the NEXT one, and the space this cycle freed is what it gets
-	// to use.
-	ensureRetentionIndexes(s.db)
+	// Deliberately last, and never in a dry run. These indexes only make the
+	// batched row deletes cheap, and building one needs free disk for the whole
+	// B-tree -- so running it at the TOP of the cycle, as this used to, meant a
+	// hub with a full disk spent its first act on a doomed full-table index
+	// build under the single write lock, before a single byte had been
+	// reclaimed. At the end, the cycle it accelerates is the NEXT one, and the
+	// space this cycle freed is what it gets to use.
+	//
+	// A dry run frees nothing, so it has no such space to offer -- and it is
+	// the step the documentation tells an operator to run FIRST, on a hub that
+	// is by hypothesis nearly full. Building two indexes over the two largest
+	// tables there could consume the last free space before anything had been
+	// reclaimed, and on a 100%-full hub it failed every cycle with two
+	// `[migrate]` lines the documentation never mentioned. The documentation's
+	// claim that a dry run writes only the reference backfill is true only with
+	// this guard; the boot-time build in openDB still covers a hub that has the
+	// space.
+	if !cfg.dryRun {
+		ensureRetentionIndexes(s.db)
+	}
 }
 
 // retentionSample collects a bounded number of examples alongside a total.
@@ -603,18 +818,25 @@ func (s *Server) finalizedClawIDs(cutoff time.Time) ([]string, error) {
 func (s *Server) compactFinalizedCheckpoints(cutoff time.Time, dryRun bool) (compactionResult, error) {
 	var result compactionResult
 	result.sample = &retentionSample{}
+	result.errLog = &retentionErrorLog{phase: "compaction"}
+	defer result.errLog.flush()
+	result.pacer = newRetentionPacer("compaction", retentionBudgetDeadline())
 	ids, err := s.finalizedClawIDs(cutoff)
 	if err != nil {
 		return result, fmt.Errorf("list finalized claws: %w", err)
 	}
 	for i, clawID := range ids {
-		if err := s.compactClawCheckpoints(clawID, dryRun, &result); err != nil {
+		err := s.compactClawCheckpoints(clawID, dryRun, &result)
+		if errors.Is(err, errRetentionBudget) {
+			break
+		}
+		if err != nil {
 			// Say where in the phase the failure landed. The earlier wording
 			// claimed the phase "aborted after N of M claws" while the loop in
 			// fact continues to the next claw, which is the opposite of what an
 			// operator reading it would do next.
 			result.itemErrors++
-			log.Printf("[retention] compact claw %s (%d of %d): %v (continuing with the remaining claws)",
+			result.errLog.add("compact claw %s (%d of %d): %v (continuing with the remaining claws)",
 				shortID(clawID), i+1, len(ids), err)
 			continue
 		}
@@ -636,6 +858,11 @@ type compactionResult struct {
 	bytes      int64
 	itemErrors int
 	sample     *retentionSample
+	errLog     *retentionErrorLog
+	// pacer is shared by every claw of the phase: the budget bounds the phase,
+	// not one claw, and a claw with a single candidate would otherwise never
+	// pause at all.
+	pacer *retentionPacer
 }
 
 func (s *Server) compactClawCheckpoints(clawID string, dryRun bool, result *compactionResult) error {
@@ -667,16 +894,19 @@ func (s *Server) compactClawCheckpoints(clawID string, dryRun bool, result *comp
 	// ready row may have been compacted by an EARLIER cycle -- in which case this
 	// claw is down to one ready candidate, takes the early return, and its
 	// skipped rows go on holding a workspace nothing can restore from, forever.
-	releasedSkipped, err := s.releaseSkippedCheckpointRefs(clawID, dryRun)
-	if err != nil {
-		result.itemErrors++
-		log.Printf("[retention] release skipped checkpoint references for claw %s: %v", shortID(clawID), err)
-	}
+	releasedSkipped, err := s.releaseSkippedCheckpointRefs(clawID, dryRun, result.pacer)
 	// Reported among the released ids, not in the compacted COUNT: a skipped row
 	// letting go of its blobs is not a checkpoint moving from "restorable" to
 	// "counted". The dry run still needs to know about it, because the sweep must
 	// read past those references too.
 	result.ids = append(result.ids, releasedSkipped...)
+	if errors.Is(err, errRetentionBudget) {
+		return err
+	}
+	if err != nil {
+		result.itemErrors++
+		result.errLog.add("release skipped checkpoint references for claw %s: %v", shortID(clawID), err)
+	}
 	if len(candidates) <= 1 {
 		return nil
 	}
@@ -684,6 +914,11 @@ func (s *Server) compactClawCheckpoints(clawID string, dryRun bool, result *comp
 	if err != nil {
 		return err
 	}
+	type victim struct {
+		id, path string
+		size     int64
+	}
+	var victims []victim
 	for i, c := range candidates {
 		if i == keep {
 			continue
@@ -703,36 +938,49 @@ func (s *Server) compactClawCheckpoints(clawID string, dryRun bool, result *comp
 			result.ids = append(result.ids, c.id)
 			continue
 		}
-		// Mark the row FIRST, unlink second.
-		//
-		// The other order left a window where the manifest was gone and the row
-		// still said 'ready' with a manifest_path pointing at it: if the UPDATE
-		// then failed (ENOSPC, SQLITE_BUSY -- the conditions this sweeper runs
-		// under), the next cycle could pick that row as the claw's survivor and
-		// keep a checkpoint whose manifest does not exist. This order's failure
-		// mode is a manifest left on disk under a 'compacted' row, which is
-		// merely wasted bytes and which the retry below reclaims.
-		//
-		// The references go with the status, in one transaction: that is what
-		// makes the blobs of a compacted checkpoint collectable. Clearing only
-		// manifest_path/manifest_sha256 reclaimed a few hundred bytes of manifest
-		// and left the whole workspace behind it reachable.
-		//
-		// The telemetry columns are deliberately untouched — they are the
-		// analytics record, and losing them is what this design exists to avoid.
-		if err := s.markCheckpointCompacted(c.id); err != nil {
+		victims = append(victims, victim{id: c.id, path: path, size: size})
+	}
+	// Mark the rows FIRST, unlink second, one batch at a time.
+	//
+	// The other order left a window where the manifest was gone and the row
+	// still said 'ready' with a manifest_path pointing at it: if the UPDATE
+	// then failed (ENOSPC, SQLITE_BUSY -- the conditions this sweeper runs
+	// under), the next cycle could pick that row as the claw's survivor and
+	// keep a checkpoint whose manifest does not exist. This order's failure
+	// mode is a manifest left on disk under a 'compacted' row, which is
+	// merely wasted bytes and which the retry below reclaims.
+	//
+	// The references go with the status, in one transaction: that is what
+	// makes the blobs of a compacted checkpoint collectable. Clearing only
+	// manifest_path/manifest_sha256 reclaimed a few hundred bytes of manifest
+	// and left the whole workspace behind it reachable.
+	//
+	// The telemetry columns are deliberately untouched — they are the
+	// analytics record, and losing them is what this design exists to avoid.
+	for start := 0; start < len(victims); start += retentionCheckpointBatch {
+		batch := victims[start:min(start+retentionCheckpointBatch, len(victims))]
+		ids := make([]string, 0, len(batch))
+		for _, v := range batch {
+			ids = append(ids, v.id)
+		}
+		if err := s.markCheckpointsCompacted(ids); err != nil {
 			return err
 		}
-		// A manifest that is already gone is not an error: a previous cycle may
-		// have been interrupted between the UPDATE and the unlink.
-		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-			result.itemErrors++
-			log.Printf("[retention] remove manifest %s: %v", path, err)
-		} else if err == nil {
-			result.bytes += size
+		for _, v := range batch {
+			// A manifest that is already gone is not an error: a previous cycle
+			// may have been interrupted between the UPDATE and the unlink.
+			if err := os.Remove(v.path); err != nil && !os.IsNotExist(err) {
+				result.itemErrors++
+				result.errLog.add("remove manifest %s: %v", v.path, err)
+			} else if err == nil {
+				result.bytes += v.size
+			}
+			result.count++
+			result.ids = append(result.ids, v.id)
 		}
-		result.count++
-		result.ids = append(result.ids, c.id)
+		if err := result.pacer.yield(len(batch)); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -740,20 +988,29 @@ func (s *Server) compactClawCheckpoints(clawID string, dryRun bool, result *comp
 // markCheckpointCompacted moves one checkpoint from "restorable" to "counted"
 // and releases every blob it held, atomically.
 func (s *Server) markCheckpointCompacted(checkpointID string) error {
+	return s.markCheckpointsCompacted([]string{checkpointID})
+}
+
+// markCheckpointsCompacted does the same for one batch of checkpoints, in one
+// transaction: either every row in the batch is compacted with its references
+// gone, or none is.
+func (s *Server) markCheckpointsCompacted(checkpointIDs []string) error {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-	if _, err := tx.Exec(
-		`UPDATE claw_checkpoints
-		    SET status='compacted', manifest_path='', manifest_sha256='',
-		        root_tree_sha256='', workspace_tree_sha256='', message_tree_sha256=''
-		  WHERE id=?`, checkpointID); err != nil {
-		return err
-	}
-	if err := deleteCheckpointBlobRefsTx(tx, checkpointID); err != nil {
-		return err
+	for _, checkpointID := range checkpointIDs {
+		if _, err := tx.Exec(
+			`UPDATE claw_checkpoints
+			    SET status='compacted', manifest_path='', manifest_sha256='',
+			        root_tree_sha256='', workspace_tree_sha256='', message_tree_sha256=''
+			  WHERE id=?`, checkpointID); err != nil {
+			return err
+		}
+		if err := deleteCheckpointBlobRefsTx(tx, checkpointID); err != nil {
+			return err
+		}
 	}
 	return tx.Commit()
 }
@@ -772,7 +1029,7 @@ func (s *Server) markCheckpointCompacted(checkpointID string) error {
 // restoreClawFromCheckpoint and restoreCheckpointFiles both require
 // status='ready'. The telemetry columns are untouched, exactly as in compaction
 // — the row remains the record that the claw was idle at that moment.
-func (s *Server) releaseSkippedCheckpointRefs(clawID string, dryRun bool) ([]string, error) {
+func (s *Server) releaseSkippedCheckpointRefs(clawID string, dryRun bool, pacer *retentionPacer) ([]string, error) {
 	rows, err := s.db.Query(
 		`SELECT id FROM claw_checkpoints WHERE claw_id=? AND status='skipped'
 		   AND (root_tree_sha256 <> '' OR workspace_tree_sha256 <> '' OR message_tree_sha256 <> ''
@@ -804,27 +1061,18 @@ func (s *Server) releaseSkippedCheckpointRefs(clawID string, dryRun bool) ([]str
 	// with. Only the ids actually released are reported, so a batch that fails
 	// leaves the dry-run accounting honest about the rest.
 	var released []string
-	for start := 0; start < len(ids); start += skippedReleaseBatch {
-		end := start + skippedReleaseBatch
-		if end > len(ids) {
-			end = len(ids)
-		}
-		if err := s.releaseSkippedCheckpointRefsBatch(ids[start:end]); err != nil {
+	for start := 0; start < len(ids); start += retentionCheckpointBatch {
+		batch := ids[start:min(start+retentionCheckpointBatch, len(ids))]
+		if err := s.releaseSkippedCheckpointRefsBatch(batch); err != nil {
 			return released, err
 		}
-		released = append(released, ids[start:end]...)
-		if end < len(ids) {
-			time.Sleep(retentionBatchPause)
+		released = append(released, batch...)
+		if err := pacer.yield(len(batch)); err != nil {
+			return released, err
 		}
 	}
 	return released, nil
 }
-
-// skippedReleaseBatch is how many skipped checkpoints one release transaction
-// covers. Each costs an UPDATE plus a DELETE of at most three edges, so a
-// quarter of the row batch keeps the lock hold in the same range as one batch
-// of pruneRowsBatched.
-const skippedReleaseBatch = retentionDeleteBatch / 4
 
 func (s *Server) releaseSkippedCheckpointRefsBatch(ids []string) error {
 	tx, err := s.db.Begin()
@@ -990,7 +1238,11 @@ func (s *Server) applyRetentionWindow(cutoff time.Time, dryRun bool) (retentionC
 		counts.errors++
 		log.Printf("[retention] diagnostics: %v", err)
 	}
-	expired, manifestBytes, itemErrors, err := s.pruneExpiredCheckpoints(cutoff, dryRun)
+	// One budget for the three batched targets, not one each: they contend for
+	// the same single write lock, so the thing worth bounding is the total time
+	// this cycle spends holding it.
+	deadline := retentionBudgetDeadline()
+	expired, manifestBytes, itemErrors, err := s.pruneExpiredCheckpoints(cutoff, dryRun, newRetentionPacer("checkpoints", deadline))
 	counts.checkpoints = len(expired)
 	counts.manifestBytes = manifestBytes
 	counts.itemErrors += itemErrors
@@ -998,21 +1250,17 @@ func (s *Server) applyRetentionWindow(cutoff time.Time, dryRun bool) (retentionC
 		counts.errors++
 		log.Printf("[retention] checkpoints: %v", err)
 	}
-	// One budget for both batched tables, not one each: they contend for the
-	// same single write lock, so the thing worth bounding is the total time
-	// this cycle spends holding it.
-	deadline := time.Now().Add(retentionRowBudget)
 	// task_run_events is keyed on when the event happened, not when the hub
 	// happened to record it: a late-arriving webhook for an old run belongs to
 	// the old run's window.
-	if n, err := s.pruneRowsBatched("task_run_events", "event_time", cutoff.UnixMilli(), dryRun, deadline); err != nil {
+	if n, err := s.pruneRowsBatched("task_run_events", "event_time", cutoff.UnixMilli(), dryRun, newRetentionPacer("task_run_events", deadline)); err != nil {
 		counts.errors++
 		counts.taskRunEvents = n
 		log.Printf("[retention] task run events: %v", err)
 	} else {
 		counts.taskRunEvents = n
 	}
-	if n, err := s.pruneRowsBatched("messages", "created_at", cutoff, dryRun, deadline); err != nil {
+	if n, err := s.pruneRowsBatched("messages", "created_at", cutoff, dryRun, newRetentionPacer("messages", deadline)); err != nil {
 		counts.errors++
 		counts.messages = n
 		log.Printf("[retention] messages: %v", err)
@@ -1034,7 +1282,7 @@ func (s *Server) applyRetentionWindow(cutoff time.Time, dryRun bool) (retentionC
 // table and column are compile-time constants from the caller, never operator
 // or request input, so interpolating them into the statement is safe; they
 // cannot be bound as parameters.
-func (s *Server) pruneRowsBatched(table, column string, cutoff any, dryRun bool, deadline time.Time) (int64, error) {
+func (s *Server) pruneRowsBatched(table, column string, cutoff any, dryRun bool, pacer *retentionPacer) (int64, error) {
 	if dryRun {
 		var n int64
 		err := s.db.QueryRow(fmt.Sprintf(`SELECT COUNT(*) FROM %q WHERE %q < ?`, table, column), cutoff).Scan(&n)
@@ -1068,12 +1316,9 @@ func (s *Server) pruneRowsBatched(table, column string, cutoff any, dryRun bool,
 		// Stop at the budget rather than grinding through a multi-million-row
 		// backlog in one cycle. The next cycle picks up exactly where this one
 		// stopped: the predicate is age, and the rows left behind still match it.
-		if !deadline.IsZero() && !time.Now().Before(deadline) {
-			log.Printf("[retention] %s: stopping after %d rows, cycle budget %s reached; the rest goes to the next cycle",
-				table, total, retentionRowBudget)
+		if err := pacer.yield(int(n)); err != nil {
 			return total, nil
 		}
-		time.Sleep(retentionBatchPause)
 	}
 }
 
@@ -1101,6 +1346,8 @@ func pruneDiagnosticsLogs(dataDir string, cutoff time.Time, dryRun bool) (diagno
 		return result, err
 	}
 	sample := &retentionSample{}
+	errLog := &retentionErrorLog{phase: "diagnostics"}
+	defer errLog.flush()
 	for _, entry := range entries {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".log") {
 			continue
@@ -1117,7 +1364,7 @@ func pruneDiagnosticsLogs(dataDir string, cutoff time.Time, dryRun bool) (diagno
 		}
 		if err := os.Remove(filepath.Join(dir, entry.Name())); err != nil && !os.IsNotExist(err) {
 			result.itemErrors++
-			log.Printf("[retention] remove diagnostics log %s: %v", entry.Name(), err)
+			errLog.add("remove diagnostics log %s: %v", entry.Name(), err)
 			continue
 		}
 		result.removed++
@@ -1139,7 +1386,7 @@ func pruneDiagnosticsLogs(dataDir string, cutoff time.Time, dryRun bool) (diagno
 // It returns the ids it removed -- or, in a dry run, the ids it WOULD have
 // removed, which is what lets the blob sweep read past the references a real
 // cycle would already have dropped -- plus the manifest bytes reclaimed.
-func (s *Server) pruneExpiredCheckpoints(cutoff time.Time, dryRun bool) ([]string, int64, int, error) {
+func (s *Server) pruneExpiredCheckpoints(cutoff time.Time, dryRun bool, pacer *retentionPacer) ([]string, int64, int, error) {
 	rows, err := s.db.Query(
 		`SELECT id, COALESCE(manifest_path,'') FROM claw_checkpoints WHERE created_at < ?`, cutoff)
 	if err != nil {
@@ -1163,6 +1410,13 @@ func (s *Server) pruneExpiredCheckpoints(cutoff time.Time, dryRun bool) ([]strin
 	var bytes int64
 	itemErrors := 0
 	sample := &retentionSample{}
+	errLog := &retentionErrorLog{phase: "checkpoints"}
+	defer errLog.flush()
+	type victim struct {
+		id, path string
+		size     int64
+	}
+	var pending []victim
 	for _, v := range victims {
 		path := v.manifestPath
 		if path == "" {
@@ -1178,29 +1432,42 @@ func (s *Server) pruneExpiredCheckpoints(cutoff time.Time, dryRun bool) ([]strin
 			bytes += size
 			continue
 		}
-		// Delete the row FIRST, unlink second -- the same order compaction uses,
-		// for the same reason. Unlinking first left a window where the manifest
-		// was gone and the row still said 'ready' with a manifest_path pointing
-		// at it; if the DELETE then failed (ENOSPC, SQLITE_BUSY -- the conditions
-		// this sweeper runs under), the next cycle's compaction could pick that
-		// row as a claw's survivor and keep a checkpoint that cannot be restored.
-		// This order's failure mode is a manifest left on disk with no row,
-		// which is wasted bytes, and is counted below rather than hidden.
-		//
-		// The row and every blob it held go together, in one transaction. A
-		// delete that fails rolls both back, so it can leave neither a row
-		// without edges nor an edge without a row; the boot-time release of
-		// edges whose row is gone (releaseOrphanedCheckpointBlobRefs) covers a
-		// crash, not this.
-		if err := s.deleteExpiredCheckpoint(v.id); err != nil {
-			return removed, bytes, itemErrors, fmt.Errorf("delete expired checkpoint (aborted after %d of %d): %w", len(removed), len(victims), err)
+		pending = append(pending, victim{id: v.id, path: path, size: size})
+	}
+	// Delete the rows FIRST, unlink second, one batch at a time -- the same
+	// order compaction uses, for the same reason. Unlinking first left a window
+	// where the manifest was gone and the row still said 'ready' with a
+	// manifest_path pointing at it; if the DELETE then failed (ENOSPC,
+	// SQLITE_BUSY -- the conditions this sweeper runs under), the next cycle's
+	// compaction could pick that row as a claw's survivor and keep a checkpoint
+	// that cannot be restored. This order's failure mode is a manifest left on
+	// disk with no row, which is wasted bytes, and is counted below rather than
+	// hidden.
+	//
+	// The rows and every blob they held go together, in one transaction. A
+	// delete that fails rolls both back, so it can leave neither a row without
+	// edges nor an edge without a row; the boot-time release of edges whose row
+	// is gone (releaseOrphanedCheckpointBlobRefs) covers a crash, not this.
+	for start := 0; start < len(pending); start += retentionCheckpointBatch {
+		batch := pending[start:min(start+retentionCheckpointBatch, len(pending))]
+		ids := make([]string, 0, len(batch))
+		for _, v := range batch {
+			ids = append(ids, v.id)
 		}
-		removed = append(removed, v.id)
-		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-			itemErrors++
-			log.Printf("[retention] remove expired manifest %s: %v", path, err)
-		} else if err == nil {
-			bytes += size
+		if err := s.deleteExpiredCheckpoints(ids); err != nil {
+			return removed, bytes, itemErrors, fmt.Errorf("delete expired checkpoints (aborted after %d of %d): %w", len(removed), len(pending), err)
+		}
+		for _, v := range batch {
+			removed = append(removed, v.id)
+			if err := os.Remove(v.path); err != nil && !os.IsNotExist(err) {
+				itemErrors++
+				errLog.add("remove expired manifest %s: %v", v.path, err)
+			} else if err == nil {
+				bytes += v.size
+			}
+		}
+		if err := pacer.yield(len(batch)); err != nil {
+			break
 		}
 	}
 	if dryRun {
@@ -1214,16 +1481,23 @@ func (s *Server) pruneExpiredCheckpoints(cutoff time.Time, dryRun bool) ([]strin
 // deleteExpiredCheckpoint removes one checkpoint row and its blob references
 // atomically.
 func (s *Server) deleteExpiredCheckpoint(checkpointID string) error {
+	return s.deleteExpiredCheckpoints([]string{checkpointID})
+}
+
+// deleteExpiredCheckpoints does the same for one batch, in one transaction.
+func (s *Server) deleteExpiredCheckpoints(checkpointIDs []string) error {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-	if err := deleteCheckpointBlobRefsTx(tx, checkpointID); err != nil {
-		return err
-	}
-	if _, err := tx.Exec(`DELETE FROM claw_checkpoints WHERE id=?`, checkpointID); err != nil {
-		return err
+	for _, checkpointID := range checkpointIDs {
+		if err := deleteCheckpointBlobRefsTx(tx, checkpointID); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`DELETE FROM claw_checkpoints WHERE id=?`, checkpointID); err != nil {
+			return err
+		}
 	}
 	return tx.Commit()
 }
@@ -1369,7 +1643,42 @@ func (s *Server) backfillCheckpointBlobRefs() error {
 	var recorded, edges, expansions, treeRows, fallbacks int
 	var badManifests, missingTrees, badTrees, unreadable int
 	trees := map[string]treeOutcome{}
+	errLog := &retentionErrorLog{phase: "blob reference backfill"}
+	defer errLog.flush()
+
+	// Paced like every other bulk loop in this file, in two places. Checkpoint
+	// edges are grouped retentionCheckpointBatch rows to a transaction -- or
+	// fewer, when schema-1 fallbacks make the batch heavy -- with the pacer's
+	// pause after each commit; and a tree expansion, which is one transaction
+	// of up to a workspace's worth of rows, is followed by a pause of its own.
+	// A tree is always committed before the checkpoints that name it: an edge
+	// to a tree with no expansion would let the sweep unlink that tree's files.
+	//
+	// The budget spreads a first backfill across cycles. The sweep declines
+	// while any row is still edge-less (see unreferencedCheckpoints) and says
+	// how much is outstanding, so a backfill that stops here costs a postponed
+	// sweep and nothing else.
+	pacer := newRetentionPacer("blob reference backfill", retentionBudgetDeadline())
+	var batch []checkpointEdges
+	batchRows := 0
+	flush := func() error {
+		if len(batch) == 0 {
+			return nil
+		}
+		if err := s.insertCheckpointBlobRefsBatch(batch); err != nil {
+			return fmt.Errorf("backfill references (%d of %d recorded): %w", recorded, len(pending), err)
+		}
+		recorded += len(batch)
+		edges += batchRows
+		n := len(batch)
+		batch, batchRows = batch[:0], 0
+		return pacer.yield(n)
+	}
+	stopped := false
 	for _, r := range pending {
+		if stopped {
+			break
+		}
 		digests := map[string]struct{}{}
 		rowTrees := map[string]struct{}{}
 		add := func(sha string, isTree bool) {
@@ -1401,7 +1710,7 @@ func (s *Server) backfillCheckpointBlobRefs() error {
 		if data, err := os.ReadFile(manifestPath); err != nil {
 			if !os.IsNotExist(err) {
 				unreadable++
-				log.Printf("[retention] backfill: cannot read manifest %s of checkpoint %s (left without references; will retry next cycle): %v",
+				errLog.add("backfill: cannot read manifest %s of checkpoint %s (left without references; will retry next cycle): %v",
 					manifestPath, shortID(r.id), err)
 				continue
 			}
@@ -1412,7 +1721,7 @@ func (s *Server) backfillCheckpointBlobRefs() error {
 			}
 			if err := json.Unmarshal(data, &manifest); err != nil {
 				badManifests++
-				log.Printf("[retention] backfill: cannot parse manifest %s of checkpoint %s; its row digests are still recorded: %v",
+				errLog.add("backfill: cannot parse manifest %s of checkpoint %s; its row digests are still recorded: %v",
 					manifestPath, shortID(r.id), err)
 			} else {
 				add(manifest.Workspace.TreeSHA256, true)
@@ -1433,12 +1742,15 @@ func (s *Server) backfillCheckpointBlobRefs() error {
 		for tree := range rowTrees {
 			outcome, seen := trees[tree]
 			if !seen {
-				outcome = s.expandTreeForBackfill(tree, r.id)
+				outcome = s.expandTreeForBackfill(tree, r.id, errLog)
 				trees[tree] = outcome
 				switch outcome.state {
 				case treeExpanded:
 					expansions++
 					treeRows += outcome.rows
+					if pacer.yield(0) != nil {
+						stopped = true
+					}
 				case treeMissing:
 					missingTrees++
 				case treeUnparseable:
@@ -1451,6 +1763,15 @@ func (s *Server) backfillCheckpointBlobRefs() error {
 			case treeUnreadable:
 				transient = true
 			}
+			if stopped {
+				break
+			}
+		}
+		if stopped {
+			// This row's remaining trees were not expanded, so it gets no edges
+			// this cycle; it stays on the work list. The rows before it that
+			// are still in the batch are complete and are flushed below.
+			break
 		}
 		if transient {
 			unreadable++
@@ -1469,22 +1790,31 @@ func (s *Server) backfillCheckpointBlobRefs() error {
 		for d := range digests {
 			list = append(list, d)
 		}
-		// One transaction per checkpoint, not one for the whole pass. SQLite
-		// has a single writer and this hub runs with a five-second busy_timeout;
-		// a transaction spanning thousands of checkpoints would hold the write
-		// lock long enough to fail every heartbeat and checkpoint row behind it.
+		batch = append(batch, checkpointEdges{id: r.id, digests: list})
+		batchRows += len(list)
 		// A database error here (as opposed to a file error above) aborts the
 		// pass; the rows not reached are still edge-less and the next cycle
 		// resumes with them.
-		if err := s.insertCheckpointBlobRefs(r.id, list); err != nil {
-			return fmt.Errorf("backfill references for checkpoint %s (%d of %d recorded): %w", shortID(r.id), recorded, len(pending), err)
+		if len(batch) >= retentionCheckpointBatch || batchRows >= retentionDeleteBatch {
+			if err := flush(); err != nil {
+				if errors.Is(err, errRetentionBudget) {
+					stopped = true
+					break
+				}
+				return err
+			}
 		}
-		recorded++
-		edges += len(list)
+	}
+	if err := flush(); err != nil && !errors.Is(err, errRetentionBudget) {
+		return err
 	}
 
-	log.Printf("[retention] blob reference backfill in %s: %d of %d checkpoint(s) given references, %d reference(s), %d tree expansion(s) (%d rows), %d schema-1 fallback(s); unparseable_manifests=%d missing_trees=%d unparseable_trees=%d (blobs listed only by a missing or unparseable tree are unreferenced and will be swept)",
-		time.Since(started).Round(time.Millisecond), recorded, len(pending), edges, expansions, treeRows, fallbacks, badManifests, missingTrees, badTrees)
+	budget := ""
+	if stopped {
+		budget = "; stopped at the cycle budget, the rest goes to the next cycle"
+	}
+	log.Printf("[retention] blob reference backfill in %s: %d of %d checkpoint(s) given references, %d reference(s), %d tree expansion(s) (%d rows), %d schema-1 fallback(s); unparseable_manifests=%d missing_trees=%d unparseable_trees=%d (blobs listed only by a missing or unparseable tree are unreferenced and will be swept)%s",
+		time.Since(started).Round(time.Millisecond), recorded, len(pending), edges, expansions, treeRows, fallbacks, badManifests, missingTrees, badTrees, budget)
 	if unreadable > 0 {
 		return fmt.Errorf("backfill left %d checkpoint(s) without references: a manifest or tree could not be read for a reason other than being absent; the sweep declines until the next cycle records them", unreadable)
 	}
@@ -1508,25 +1838,25 @@ type treeOutcome struct {
 }
 
 // expandTreeForBackfill reads one tree blob and records its expansion.
-func (s *Server) expandTreeForBackfill(tree, checkpointID string) treeOutcome {
+func (s *Server) expandTreeForBackfill(tree, checkpointID string, errLog *retentionErrorLog) treeOutcome {
 	data, err := os.ReadFile(checkpointBlobPath(tree))
 	if os.IsNotExist(err) {
-		log.Printf("[retention] backfill: tree blob %s of checkpoint %s is missing; the files it listed cannot be recorded and will be swept",
+		errLog.add("backfill: tree blob %s of checkpoint %s is missing; the files it listed cannot be recorded and will be swept",
 			tree, shortID(checkpointID))
 		return treeOutcome{state: treeMissing}
 	}
 	if err != nil {
-		log.Printf("[retention] backfill: cannot read tree blob %s of checkpoint %s (will retry next cycle): %v", tree, shortID(checkpointID), err)
+		errLog.add("backfill: cannot read tree blob %s of checkpoint %s (will retry next cycle): %v", tree, shortID(checkpointID), err)
 		return treeOutcome{state: treeUnreadable}
 	}
 	var files []types.CheckpointFile
 	if err := json.Unmarshal(data, &files); err != nil {
-		log.Printf("[retention] backfill: cannot parse tree blob %s of checkpoint %s: %v", tree, shortID(checkpointID), err)
+		errLog.add("backfill: cannot parse tree blob %s of checkpoint %s: %v", tree, shortID(checkpointID), err)
 		return treeOutcome{state: treeUnparseable}
 	}
 	n, err := s.insertTreeBlobRefs(tree, files)
 	if err != nil {
-		log.Printf("[retention] backfill: record expansion of tree %s (will retry next cycle): %v", tree, err)
+		errLog.add("backfill: record expansion of tree %s (will retry next cycle): %v", tree, err)
 		return treeOutcome{state: treeUnreadable}
 	}
 	if n == 0 {
@@ -1538,13 +1868,27 @@ func (s *Server) expandTreeForBackfill(tree, checkpointID string) treeOutcome {
 // insertCheckpointBlobRefs records edges for one checkpoint in its own
 // transaction.
 func (s *Server) insertCheckpointBlobRefs(checkpointID string, digests []string) error {
+	return s.insertCheckpointBlobRefsBatch([]checkpointEdges{{id: checkpointID, digests: digests}})
+}
+
+// checkpointEdges is the reference edges one checkpoint holds.
+type checkpointEdges struct {
+	id      string
+	digests []string
+}
+
+// insertCheckpointBlobRefsBatch records the edges of one batch of checkpoints
+// in one transaction.
+func (s *Server) insertCheckpointBlobRefsBatch(batch []checkpointEdges) error {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-	if err := addCheckpointBlobRefsTx(tx, checkpointID, digests); err != nil {
-		return err
+	for _, cp := range batch {
+		if err := addCheckpointBlobRefsTx(tx, cp.id, cp.digests); err != nil {
+			return err
+		}
 	}
 	return tx.Commit()
 }
@@ -1611,7 +1955,7 @@ func (s *Server) pendingBackfillEstimate() (checkpoints, trees, edges int64, err
 // The write lock is released between trees, and the deadline stops the pass
 // rather than letting a first cycle over years of dead trees run unbounded;
 // the rest goes to the next cycle.
-func (s *Server) pruneUnreferencedTreeBlobRefs(deadline time.Time) (int64, error) {
+func (s *Server) pruneUnreferencedTreeBlobRefs(pacer *retentionPacer) (int64, error) {
 	var total int64
 	for {
 		rows, err := s.db.Query(
@@ -1646,11 +1990,9 @@ func (s *Server) pruneUnreferencedTreeBlobRefs(deadline time.Time) (int64, error
 			}
 			n, _ := res.RowsAffected()
 			total += n
-			if !deadline.IsZero() && !time.Now().Before(deadline) {
-				log.Printf("[retention] tree reference gc: stopping after %d rows, cycle budget reached; the rest goes to the next cycle", total)
+			if err := pacer.yield(int(n)); err != nil {
 				return total, nil
 			}
-			time.Sleep(retentionBatchPause)
 		}
 		if len(trees) < retentionDeleteBatch {
 			return total, nil
@@ -1865,6 +2207,8 @@ func (s *Server) sweepCheckpointBlobsResult(dryRun bool, released []string) (blo
 	cutoff := time.Now().Add(-blobSweepGrace)
 	removed, freed, itemErrors := 0, int64(0), 0
 	sample := &retentionSample{}
+	errLog := &retentionErrorLog{phase: "blob sweep"}
+	defer errLog.flush()
 	err = filepath.Walk(blobRoot, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
@@ -1907,7 +2251,7 @@ func (s *Server) sweepCheckpointBlobsResult(dryRun bool, released []string) (blo
 		// earlier, unlinks it anyway.
 		if removedFile, err := s.removeUnclaimedBlob(path, info.Name()); err != nil {
 			itemErrors++
-			log.Printf("[retention] remove blob %s: %v", path, err)
+			errLog.add("remove blob %s: %v", path, err)
 			return nil
 		} else if !removedFile {
 			return nil

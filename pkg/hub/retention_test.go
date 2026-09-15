@@ -1190,7 +1190,7 @@ func TestPruneRowsBatchedSpansMultipleBatches(t *testing.T) {
 	defer func() { retentionBatchPause = previous }()
 
 	started := time.Now()
-	deleted, err := s.pruneRowsBatched("messages", "created_at", cutoff, false, time.Time{})
+	deleted, err := s.pruneRowsBatched("messages", "created_at", cutoff, false, newRetentionPacer("messages", time.Time{}))
 	elapsed := time.Since(started)
 	if err != nil {
 		t.Fatalf("pruneRowsBatched: %v", err)

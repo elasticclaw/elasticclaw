@@ -462,7 +462,7 @@ func TestRetentionIndexesAreBuiltOutsideTheBootCriticalPath(t *testing.T) {
 				t.Fatalf("checkpoint_blob_refs is missing: %v", err)
 			}
 			// The delete still works without it, just more slowly.
-			if _, err := s.pruneRowsBatched("messages", "created_at", time.Now(), false, time.Time{}); err != nil {
+			if _, err := s.pruneRowsBatched("messages", "created_at", time.Now(), false, newRetentionPacer("messages", time.Time{})); err != nil {
 				t.Fatalf("pruneRowsBatched needs the index to work: %v", err)
 			}
 			ensureRetentionIndexes(s.db)
@@ -999,7 +999,7 @@ func TestPruneRowsBatchedStopsAtTheCycleBudget(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			deleted, err := s.pruneRowsBatched("messages", "created_at", time.Now(), false, tc.deadline())
+			deleted, err := s.pruneRowsBatched("messages", "created_at", time.Now(), false, newRetentionPacer("messages", tc.deadline()))
 			if err != nil {
 				t.Fatalf("pruneRowsBatched: %v", err)
 			}
