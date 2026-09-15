@@ -1,7 +1,7 @@
 "use client"
 
-import { useState, useRef, useEffect, useCallback, useMemo, memo } from "react"
-import { Send, Terminal, TerminalSquare, ChevronLeft, ChevronRight, ChevronDown, Loader2, LayoutGrid, Info, Trash2, AlertCircle, Wrench, GripVertical, Settings2, Paperclip, File as FileIcon, X, Menu, MoreVertical, LogOut, ClipboardCopy, CheckCircle2, GitPullRequest, Bot } from "lucide-react"
+import { useState, useRef, useEffect, useLayoutEffect, useCallback, useMemo, memo } from "react"
+import { Terminal, TerminalSquare, ChevronLeft, ChevronRight, ChevronDown, Loader2, LayoutGrid, Info, Trash2, AlertCircle, GripVertical, Paperclip, Menu, MoreVertical, LogOut, ClipboardCopy, CheckCircle2, GitPullRequest } from "lucide-react"
 import {
   compactActivityRuns,
   demoteStaleRunning,
@@ -43,14 +43,23 @@ import {
   arrayMove,
 } from "@dnd-kit/sortable"
 import { CSS } from "@dnd-kit/utilities"
-import { MarkdownContent } from "@/components/markdown-content"
+import {
+  ConversationMessage,
+  HubNoticeRow,
+  MessageBubble,
+  SeparatorRow,
+  StreamingMessage,
+  ThinkingRow,
+  ToolGapRow,
+} from "@/components/chat/message-rows"
+import { ComposerBanner, ComposerShell, SendButton } from "@/components/chat/composer"
+import { GHOST_CONTROL } from "@/components/chat/controls"
 import { COLOR_CLASSES, CLAW_COLORS } from "@/lib/mappers"
 import { TagEditor } from "@/components/tag-editor"
 import { useWindowedMessages } from "@/hooks/use-windowed-messages"
 import { useProgrammaticScrollFlag, usePinnedAutoScroll } from "@/hooks/use-pinned-scroll"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
-import { Badge } from "@/components/ui/badge"
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog"
@@ -66,7 +75,7 @@ import { copyTextToClipboard, formatChatTranscript } from "@/lib/transcript"
 import { cn } from "@/lib/utils"
 import type { Claw, DependencyStatus, Message, ClawStatus } from "@/lib/types"
 import { getTerminalWsUrl, fetchClawPRs, patchClaw, type ClawPR } from "@/lib/api"
-import { buildAttachmentsFooter, splitAttachmentsFooter, formatBytes, type ParsedAttachment } from "@/lib/attachments"
+import { buildAttachmentsFooter, formatBytes } from "@/lib/attachments"
 import { useAttachments } from "@/hooks/use-attachments"
 import { AttachmentChip } from "@/components/attachment-chip"
 import dynamic from "next/dynamic"
@@ -81,7 +90,6 @@ import { LLMLimitChip } from "@/components/llm-limit-chip"
 import { ApiLimitBanner } from "@/components/api-limit-banner"
 import type { TypewriterState } from "@/hooks/use-typewriter"
 import { extractQuestion, isWaitingOnYou } from "@/lib/waiting-on-you"
-import { messageAuthor } from "@/lib/message-author"
 import { toast } from "@/hooks/use-toast"
 
 const XTerminal = dynamic(
@@ -157,106 +165,6 @@ function useClawPRs(clawId: string, enabled: boolean) {
   }, [clawId, enabled])
 
   return { prs, hasLoaded }
-}
-
-// The typewriter reveals text every animation frame, but re-parsing markdown that
-// often is what made the board expensive. Sample the buffer instead: the reveal
-// still looks continuous at 8Hz, and the parse rate stays bounded.
-const STREAM_MARKDOWN_INTERVAL_MS = 125
-
-function useThrottledText(text: string): string {
-  const [sampled, setSampled] = useState(text)
-  const latest = useRef(text)
-
-  useEffect(() => {
-    latest.current = text
-  }, [text])
-
-  useEffect(() => {
-    const timer = window.setInterval(() => {
-      setSampled((prev) => (prev === latest.current ? prev : latest.current))
-    }, STREAM_MARKDOWN_INTERVAL_MS)
-    return () => window.clearInterval(timer)
-  }, [])
-
-  // Never lag behind a shrinking buffer (split/clear resets it to "").
-  return text.length < sampled.length ? text : sampled
-}
-
-// Renders the live typewriter buffer for one claw. Kept as its own component so the
-// rAF tick only re-renders this subtree instead of the whole card/chat message list.
-// Styling mirrors the card message row ("card") and MessageBubble ("chat") so the
-// hand-off to the finalized message is invisible.
-function StreamingMessage({
-  state,
-  variant,
-  clawName,
-  clawColor,
-}: {
-  state: TypewriterState
-  variant: "card" | "chat"
-  clawName: string
-  clawColor?: string
-}) {
-  // Streaming messages have no server timestamp yet; freeze the start time so the
-  // header does not change while the typewriter drains.
-  const [startedAt] = useState(() => new Date())
-  const text = useThrottledText(state.text)
-
-  if (!state.hadChunks) {
-    return variant === "card" ? (
-      <div className="flex gap-1 py-2 pl-2">
-        <span className="size-1.5 rounded-full bg-muted-foreground/50 animate-bounce [animation-delay:0ms]" />
-        <span className="size-1.5 rounded-full bg-muted-foreground/50 animate-bounce [animation-delay:150ms]" />
-        <span className="size-1.5 rounded-full bg-muted-foreground/50 animate-bounce [animation-delay:300ms]" />
-      </div>
-    ) : (
-      <div className="flex justify-start">
-        <div className="bg-secondary rounded-lg px-4 py-3">
-          <div className="flex items-center gap-1.5">
-            <span className="size-1.5 rounded-full bg-muted-foreground/60 animate-bounce [animation-delay:0ms]" />
-            <span className="size-1.5 rounded-full bg-muted-foreground/60 animate-bounce [animation-delay:150ms]" />
-            <span className="size-1.5 rounded-full bg-muted-foreground/60 animate-bounce [animation-delay:300ms]" />
-          </div>
-        </div>
-      </div>
-    )
-  }
-
-  if (!state.text) return null
-
-  if (variant === "card") {
-    return (
-      <div className="text-xs p-2 rounded bg-secondary mr-4">
-        <div className="flex items-center gap-1 mb-0.5">
-          <span className="font-medium text-foreground/70">{clawName}</span>
-          <span className="text-muted-foreground" suppressHydrationWarning>
-            {formatTimestamp(startedAt)}
-          </span>
-        </div>
-        <MarkdownContent content={text} className="text-xs text-foreground" />
-      </div>
-    )
-  }
-
-  return (
-    <div className="flex w-full justify-start">
-      <div
-        className={cn(
-          "w-fit max-w-[88%] md:w-[70%] md:max-w-none min-w-0 rounded-lg px-4 py-3",
-          (clawColor && COLOR_CLASSES[clawColor]?.bubble) || "bg-secondary"
-        )}
-      >
-        <div className="flex items-center gap-2 mb-1">
-          <span className="text-xs font-medium text-foreground">{clawName}</span>
-          <span className="text-xs text-muted-foreground" suppressHydrationWarning>
-            {formatTimestamp(startedAt)}
-          </span>
-        </div>
-        <MarkdownContent content={text} className="text-sm text-foreground" />
-      </div>
-    </div>
-  )
 }
 
 function firstMeaningfulLine(text: string): string {
@@ -357,13 +265,10 @@ function StatusBadge({ status, paused, className }: { status: ClawStatus; paused
   const label = paused ? "paused" : status
   const color = paused ? "var(--status-idle)" : status === "connected" ? "var(--status-connected)" : status === "idle" ? "var(--status-idle)" : status === "provisioning" ? "var(--status-provisioning)" : status === "error" ? "var(--status-error)" : "var(--status-offline)"
   return (
-    <Badge
-      variant="outline"
-      className={cn("text-xs font-medium", className)}
-      style={{ color, borderColor: `color-mix(in srgb, ${color} 50%, transparent)` }}
-    >
+    <span className={cn("inline-flex items-center gap-1.5 text-xs text-muted-foreground", className)}>
+      <span aria-hidden className="size-1.5 shrink-0 rounded-full" style={{ backgroundColor: color }} />
       {label}
-    </Badge>
+    </span>
   )
 }
 
@@ -396,7 +301,7 @@ function ContextProgressBar({ usage, size = "sm" }: { usage: number; size?: "sm"
       <div className="group relative flex items-center">
         <div 
           className={cn(
-            "h-1.5 group-hover:h-3 rounded-full transition-all duration-200 overflow-hidden",
+            "h-0.5 group-hover:h-2 rounded-full transition-all duration-200 overflow-hidden",
             "w-24 group-hover:w-32",
             getBgColor(usage)
           )}
@@ -777,7 +682,7 @@ const ClawBoardCard = memo(function ClawBoardCard({
           onDrop={isPending ? undefined : onDrop}
         >
           {dragHover && !isPending && (
-            <div className="pointer-events-none absolute inset-0 z-30 flex items-center justify-center rounded-lg border-2 border-dashed border-ring bg-background/80">
+            <div className="pointer-events-none absolute inset-0 z-30 flex items-center justify-center rounded-lg border border-dashed border-primary/60 bg-background/70 backdrop-blur-sm">
               <div className="text-xs font-medium text-foreground">Drop files</div>
             </div>
           )}
@@ -863,14 +768,14 @@ const ClawBoardCard = memo(function ClawBoardCard({
             ref={msgScrollRef}
             onScroll={handleCardScroll}
             className={cn(
-              "overflow-y-auto scrollbar-thin p-3",
+              "overflow-y-auto scrollbar-thin overscroll-y-contain px-2 py-2",
               // vh cap so mobile cards are content-sized with an internal
               // scroll; desktop fills the fixed-height card as before.
               isMobile ? "max-h-[40vh]" : "h-full"
             )}
           >
             {/* Content wrapper — the ResizeObserver in usePinnedAutoScroll watches it. */}
-            <div ref={cardContentRef} className="space-y-2">
+            <div ref={cardContentRef} className="flex flex-col">
             {messages.length === 0 && !streamingBuffer ? (
               <p className="text-xs text-muted-foreground text-center py-4">
                 No messages yet
@@ -893,91 +798,28 @@ const ClawBoardCard = memo(function ClawBoardCard({
                   )
                 }
                 const { message } = item
-                if (message.content === "__THINKING__") {
-                  return (
-                    <div key={message.id} className="flex gap-1 py-2 pl-2">
-                      <span className="size-1.5 rounded-full bg-muted-foreground/50 animate-bounce [animation-delay:0ms]" />
-                      <span className="size-1.5 rounded-full bg-muted-foreground/50 animate-bounce [animation-delay:150ms]" />
-                      <span className="size-1.5 rounded-full bg-muted-foreground/50 animate-bounce [animation-delay:300ms]" />
-                    </div>
-                  )
-                }
+                if (message.content === "__THINKING__") return <ThinkingRow key={message.id} variant="card" />
                 if (message.role === "system") {
-                  return (
-                    <div key={message.id} className="flex items-center gap-2 py-1">
-                      <div className="flex-1 h-px bg-border/50" />
-                      <span className="text-[9px] text-muted-foreground/50 uppercase tracking-[0.08em]">
-                        {message.content === "__TOOL_GAP__" ? "tool" : message.content}
-                      </span>
-                      <div className="flex-1 h-px bg-border/50" />
-                    </div>
-                  )
+                  return message.content === "__TOOL_GAP__"
+                    ? <ToolGapRow key={message.id} variant="card" />
+                    : <SeparatorRow key={message.id} label={message.content} variant="card" />
                 }
-                if (message.role === "hub") {
-                  return (
-                    <div key={message.id} className="flex items-start gap-1.5 py-0.5">
-                      <Settings2 className="size-2.5 shrink-0 text-muted-foreground/40 mt-0.5" />
-                      <span className={cn(
-                        "text-[10px] italic text-muted-foreground/60 leading-tight",
-                        message.format === "pre" && "whitespace-pre-wrap"
-                      )}>{message.content}</span>
-                    </div>
-                  )
-                }
+                if (message.role === "hub") return <HubNoticeRow key={message.id} message={message} variant="card" />
                 if (message.role === "activity") {
                   const step = demoteStaleRunning(pairActivitySteps([message]), false)[0]
                   return step ? <StepRow key={message.id} step={step} density="card" /> : null
                 }
-                if (message.role === "state") {
-                  return (
-                    <div key={message.id} className="flex items-center gap-2 py-1">
-                      <div className="flex-1 h-px bg-border/50" />
-                      <span className="text-[9px] text-muted-foreground/50 uppercase tracking-[0.08em]">state</span>
-                      <span className="text-[9px] text-muted-foreground">{message.content}</span>
-                      <div className="flex-1 h-px bg-border/50" />
-                    </div>
-                  )
-                }
-                const author = messageAuthor(message, currentUserLogin, currentUserResolved)
-                const { body: cardBody, attachments: cardAttachments } = author.kind === "self" || author.kind === "teammate" || author.kind === "unknown"
-                  ? splitAttachmentsFooter(message.content)
-                  : { body: message.content, attachments: [] as ParsedAttachment[] }
+                if (message.role === "state") return <SeparatorRow key={message.id} label="State" detail={message.content} variant="card" />
                 return (
-                  <div key={message.id} className={cn("flex w-full", author.kind === "self" ? "justify-end" : "justify-start")}>
-                    <div className={cn(
-                      "text-xs p-2 rounded",
-                      author.kind === "self"
-                        ? "bg-blue-600/[0.28] border border-blue-500/45"
-                        : author.kind === "teammate" || author.kind === "unknown" ? "bg-secondary" : (claw.color && COLOR_CLASSES[claw.color]?.bubble) || "bg-secondary"
-                    )}>
-                    <div className="flex items-center gap-1 mb-0.5">
-                      {author.kind === "agent" ? <Bot className="size-3 text-muted-foreground" /> : author.kind === "teammate" ? <span className="flex size-4 items-center justify-center rounded-full text-[8px] font-semibold text-background" style={{ backgroundColor: author.color }}>{author.initials}</span> : null}
-                      <span className="font-medium text-foreground/70" style={author.kind === "teammate" ? { color: author.color } : undefined}>{author.kind === "self" ? "You" : author.kind === "teammate" ? author.name : author.kind === "unknown" ? "Teammate" : claw.name}</span>
-                      {(author.kind === "teammate" || author.kind === "unknown") && <span className="text-[9px] text-muted-foreground">teammate</span>}
-                      <span className="text-muted-foreground" suppressHydrationWarning>
-                        {formatTimestamp(message.timestamp)}
-                      </span>
-                    </div>
-                    {cardBody.trim() && (
-                      <MarkdownContent content={cardBody} className="text-xs text-foreground" />
-                    )}
-                    {cardAttachments.length > 0 && (
-                      <div className={cn("flex flex-wrap gap-1", cardBody.trim() && "mt-1")}>
-                        {cardAttachments.map((a, i) => (
-                          <AttachmentChip
-                            key={`${a.path}-${i}`}
-                            name={a.name}
-                            sizeLabel={a.sizeLabel}
-                            mimetype={a.mimetype}
-                            source={{ kind: "history", clawId: claw.id, path: a.path }}
-                            size="sm"
-                            path={a.path}
-                          />
-                        ))}
-                      </div>
-                    )}
-                    </div>
-                  </div>
+                  <ConversationMessage
+                    key={message.id}
+                    message={message}
+                    clawId={claw.id}
+                    clawName={claw.name}
+                    variant="card"
+                    currentUserLogin={currentUserLogin}
+                    currentUserResolved={currentUserResolved}
+                  />
                 )
               })
             )}
@@ -993,7 +835,7 @@ const ClawBoardCard = memo(function ClawBoardCard({
                 event.stopPropagation()
                 scrollCardToLatest()
               }}
-              className="absolute bottom-2 left-1/2 -translate-x-1/2 z-10 flex items-center gap-1 px-2.5 py-1 rounded-full bg-background/95 backdrop-blur-sm border border-border text-[10px] font-medium text-muted-foreground hover:text-foreground hover:bg-accent transition-colors shadow-md"
+              className="surface-glass absolute bottom-2 left-1/2 z-10 flex h-6 -translate-x-1/2 items-center gap-1 rounded-full border border-border/60 px-2.5 text-[10px] text-muted-foreground shadow-sm transition-colors hover:border-border hover:text-foreground"
               aria-label="Follow latest claw activity"
             >
               <ChevronDown className="size-3" />
@@ -1003,12 +845,12 @@ const ClawBoardCard = memo(function ClawBoardCard({
           </div>
 
           {/* Footer stat line */}
-          <div className="flex items-center gap-3 border-t border-border px-3 py-1 font-mono text-[10px] text-muted-foreground">
+          <div className="flex items-center gap-3 border-t border-border/60 px-3 py-1 font-mono text-[10px] tabular-nums text-muted-foreground">
             <span>
               {cardStats.toolCalls} step{cardStats.toolCalls === 1 ? "" : "s"}
             </span>
             {cardStats.failures > 0 && (
-              <span className="text-[var(--text-error)]">
+              <span className="text-destructive">
                 {cardStats.failures} failed
               </span>
             )}
@@ -1016,26 +858,33 @@ const ClawBoardCard = memo(function ClawBoardCard({
           </div>
 
           {/* Input area */}
-          <form onSubmit={isPending ? (e) => e.preventDefault() : handleSubmit} className="p-2 border-t border-border flex flex-col gap-1.5">
-            {attachments.length > 0 && (
-              <div className="flex flex-wrap gap-1">
-                {attachments.map((a) => (
-                  <AttachmentChip
-                    key={a.localId}
-                    name={a.name}
-                    sizeLabel={formatBytes(a.size)}
-                    mimetype={a.mimetype}
-                    source={a.previewUrl ? { kind: "preview", url: a.previewUrl } : undefined}
-                    size="sm"
-                    status={a.status}
-                    error={a.error}
-                    path={a.path}
-                    onRemove={() => removeAttachment(a.localId)}
-                  />
-                ))}
-              </div>
-            )}
-            <div className="flex gap-1.5">
+          <div className="px-2 pb-2 pt-1">
+          <ComposerShell
+            onSubmit={isPending ? (e) => e.preventDefault() : handleSubmit}
+            dragOver={dragHover && !isPending}
+            // The card is already the composer's own color, so the hairline
+            // has to carry the edge on its own.
+            className="rounded-2xl after:border-border/60 dark:after:border-border/60"
+          >
+            <div className="rounded-[14px] px-2.5 pt-2">
+              {attachments.length > 0 && (
+                <div className="mb-2 flex flex-wrap gap-1.5">
+                  {attachments.map((a) => (
+                    <AttachmentChip
+                      key={a.localId}
+                      name={a.name}
+                      sizeLabel={formatBytes(a.size)}
+                      mimetype={a.mimetype}
+                      source={a.previewUrl ? { kind: "preview", url: a.previewUrl } : undefined}
+                      size="sm"
+                      status={a.status}
+                      error={a.error}
+                      path={a.path}
+                      onRemove={() => removeAttachment(a.localId)}
+                    />
+                  ))}
+                </div>
+              )}
               <input
                 ref={cardFileInputRef}
                 type="file"
@@ -1046,18 +895,6 @@ const ClawBoardCard = memo(function ClawBoardCard({
                   e.target.value = ""
                 }}
               />
-              <Button
-                type="button"
-                size="icon"
-                variant="ghost"
-                className="size-8 max-md:size-11 shrink-0"
-                disabled={isPending}
-                onClick={(e) => { e.stopPropagation(); cardFileInputRef.current?.click() }}
-                title="Attach files"
-              >
-                <Paperclip className="size-3" />
-                <span className="sr-only">Attach files</span>
-              </Button>
               <textarea
                 value={input}
                 rows={1}
@@ -1082,22 +919,27 @@ const ClawBoardCard = memo(function ClawBoardCard({
                 }}
                 onPaste={onPaste}
                 placeholder={isPending ? (claw.status === "error" ? "Provisioning failed" : claw.status === "offline" ? "Agent offline" : "Starting up...") : "Send message..."}
-                className="flex-1 resize-none overflow-hidden rounded-md border border-input bg-background px-2 py-1.5 text-xs ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 min-h-[32px]"
+                className="block min-h-[36px] w-full resize-none overflow-hidden border-0 bg-transparent text-xs leading-relaxed text-foreground ring-0 placeholder:text-placeholder/75 focus:outline-none disabled:opacity-60"
                 disabled={isPending}
                 ref={cardTextareaRef}
                 onClick={(e) => e.stopPropagation()}
               />
-              <Button
-                type="submit"
-                size="icon"
-                className="size-8 max-md:size-11 shrink-0"
-                disabled={!canSubmitCard}
-                onClick={(e) => e.stopPropagation()}
-              >
-                <Send className="size-3" />
-              </Button>
             </div>
-          </form>
+            <div className="flex items-center justify-between gap-2 px-1.5 pb-1.5">
+              <button
+                type="button"
+                className={cn(GHOST_CONTROL, "size-7 max-md:size-11")}
+                disabled={isPending}
+                onClick={(e) => { e.stopPropagation(); cardFileInputRef.current?.click() }}
+                title="Attach files"
+              >
+                <Paperclip className="size-3.5" />
+                <span className="sr-only">Attach files</span>
+              </button>
+              <SendButton size="sm" className="max-md:size-11" disabled={!canSubmitCard} onClick={(e) => e.stopPropagation()} />
+            </div>
+          </ComposerShell>
+          </div>
         </div>
 
       </div>
@@ -1205,150 +1047,6 @@ function BoardSection({
   )
 }
 
-function formatTimestamp(date: Date): string {
-  return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
-}
-
-const MessageBubble = memo(function MessageBubble({
-  message,
-  clawId,
-  clawName,
-  clawColor,
-  currentUserLogin,
-  currentUserResolved,
-}: {
-  message: Message
-  clawId: string
-  clawName: string
-  clawColor?: string
-  currentUserLogin?: string | null
-  currentUserResolved: boolean
-}) {
-  if (message.role === "system") {
-    if (message.content === "__TOOL_GAP__") {
-      return (
-        <div className="flex items-center gap-2 py-2">
-          <div className="flex-1 h-px bg-border/50" />
-          <div className="flex items-center gap-1.5 text-muted-foreground/50">
-            <Wrench className="size-3" />
-            <span className="text-[10px] uppercase tracking-[0.08em]">tool call</span>
-          </div>
-          <div className="flex-1 h-px bg-border/50" />
-        </div>
-      )
-    }
-    return (
-      <div className="flex items-center gap-3 py-4">
-        <div className="flex-1 h-px bg-border" />
-        <span className="text-xs text-muted-foreground uppercase tracking-[0.08em] font-medium">
-          {message.content}
-        </span>
-        <div className="flex-1 h-px bg-border" />
-      </div>
-    )
-  }
-
-  if (message.role === "activity") {
-    // Activities normally render inside turn cards; this is a defensive
-    // fallback for stray rows reaching the bubble path.
-    const step = demoteStaleRunning(pairActivitySteps([message]), false)[0]
-    return step ? <StepRow step={step} /> : null
-  }
-
-  if (message.role === "state") {
-    return (
-      <div className="flex items-center gap-2 py-2">
-        <div className="flex-1 h-px bg-border/50" />
-        <div className="flex items-center gap-1.5 text-muted-foreground/50">
-          <span className="text-[10px] uppercase tracking-[0.08em]">state</span>
-          <span className="text-[10px] text-muted-foreground">{message.content}</span>
-        </div>
-        <div className="flex-1 h-px bg-border/50" />
-      </div>
-    )
-  }
-
-  // Thinking indicator
-  if (message.content === "__THINKING__") {
-    return (
-      <div className="flex justify-start">
-        <div className="bg-secondary rounded-lg px-4 py-3">
-          <div className="flex items-center gap-1.5">
-            <span className="size-1.5 rounded-full bg-muted-foreground/60 animate-bounce [animation-delay:0ms]" />
-            <span className="size-1.5 rounded-full bg-muted-foreground/60 animate-bounce [animation-delay:150ms]" />
-            <span className="size-1.5 rounded-full bg-muted-foreground/60 animate-bounce [animation-delay:300ms]" />
-          </div>
-        </div>
-      </div>
-    )
-  }
-
-  const author = messageAuthor(message, currentUserLogin, currentUserResolved)
-  const isUser = author.kind === "self" || author.kind === "teammate" || author.kind === "unknown"
-  const isHub = message.role === "hub"
-
-  if (isHub) {
-    return (
-      <div className="flex items-start gap-2 py-1">
-        <div className={cn(
-          "flex items-start gap-1.5 text-muted-foreground/60 text-xs italic bg-muted/40 border border-border/40 rounded px-3 py-1.5 max-w-[85%]",
-          message.format === "pre" && "whitespace-pre-wrap"
-        )}>
-          <Settings2 className="size-3 shrink-0 text-muted-foreground/50 mt-0.5" />
-          <span className="text-muted-foreground/80">{message.content}</span>
-        </div>
-      </div>
-    )
-  }
-
-  const { body, attachments: parsedAttachments } = isUser
-    ? splitAttachmentsFooter(message.content)
-    : { body: message.content, attachments: [] as ParsedAttachment[] }
-
-  return (
-    <div className={cn("flex w-full", author.kind === "self" ? "justify-end" : "justify-start")}>
-      <div
-        className={cn(
-          "w-fit max-w-[88%] md:w-[70%] md:max-w-none min-w-0 rounded-lg px-4 py-3",
-          author.kind === "self"
-            ? "bg-blue-600/[0.28] border border-blue-500/45"
-            : author.kind === "teammate" || author.kind === "unknown" ? "bg-secondary" : (clawColor && COLOR_CLASSES[clawColor]?.bubble) || "bg-secondary"
-        )}
-      >
-        <div className="flex items-center gap-2 mb-1">
-          {author.kind === "agent" ? <Bot className="size-4 text-muted-foreground" /> : author.kind === "teammate" ? <span className="flex size-5 items-center justify-center rounded-full text-[9px] font-semibold text-background" style={{ backgroundColor: author.color }}>{author.initials}</span> : null}
-          <span className={cn("text-xs font-medium", author.kind === "self" ? "text-muted-foreground" : "text-foreground")} style={author.kind === "teammate" ? { color: author.color } : undefined}>{author.kind === "self" ? "You" : author.kind === "teammate" ? author.name : author.kind === "unknown" ? "Teammate" : clawName}</span>
-          {(author.kind === "teammate" || author.kind === "unknown") && <span className="text-[10px] text-muted-foreground">teammate</span>}
-          <span className="text-xs text-muted-foreground" suppressHydrationWarning>
-            {formatTimestamp(message.timestamp)}
-          </span>
-        </div>
-        {body.trim() && (
-          isUser ? (
-            <p className="text-sm whitespace-pre-wrap text-foreground">{body}</p>
-          ) : (
-            <MarkdownContent content={body} className="text-sm" />
-          )
-        )}
-        {parsedAttachments.length > 0 && (
-          <div className={cn("flex flex-wrap gap-2", body.trim() && "mt-2")}>
-            {parsedAttachments.map((a, i) => (
-              <AttachmentChip
-                key={`${a.path}-${i}`}
-                name={a.name}
-                sizeLabel={a.sizeLabel}
-                mimetype={a.mimetype}
-                source={{ kind: "history", clawId, path: a.path }}
-                size="md"
-                path={a.path}
-              />
-            ))}
-          </div>
-        )}
-      </div>
-    </div>
-  )})
-
 /**
  * Panel / Lanes segmented pair. "off" is reachable by clicking the active
  * segment again — the pair reads as two choices, but a user who wants the
@@ -1369,7 +1067,7 @@ function SubagentViewToggle({
     <div
       role="group"
       aria-label="Subagent view"
-      className="flex items-center gap-0.5 rounded-md border border-border bg-muted/30 p-0.5"
+      className="inline-flex items-center gap-0.5 rounded-[var(--control-radius)] border border-border/60 p-0.5"
     >
       {options.map((option) => {
         const active = view === option.value
@@ -1381,10 +1079,10 @@ function SubagentViewToggle({
             onClick={() => onChange(active ? "off" : option.value)}
             title={active ? `Hide the subagent ${option.label.toLowerCase()}` : `Show subagents as ${option.label.toLowerCase()}`}
             className={cn(
-              "rounded px-2 py-0.5 text-[10.5px] transition-colors",
+              "h-6 rounded-[calc(var(--control-radius)-2px)] px-2 text-xs transition-colors",
               active
-                ? "bg-accent font-medium text-accent-foreground"
-                : "text-muted-foreground hover:text-foreground"
+                ? "bg-accent text-foreground"
+                : "text-secondary-label hover:text-foreground"
             )}
           >
             {option.label}
@@ -1523,6 +1221,20 @@ function ClawChatView({
   // Track whether user has scrolled away from the bottom
   const pinnedToBottom = useRef(true)
   const contentRef = useRef<HTMLDivElement>(null)
+  // The composer floats over the scroller, so the scroller pads its bottom by
+  // the composer's measured height; growing drafts and toasts keep the last
+  // row visible and the bottom pin landing on real content.
+  const composerOverlayRef = useRef<HTMLDivElement>(null)
+  const [composerHeight, setComposerHeight] = useState(0)
+  useLayoutEffect(() => {
+    const el = composerOverlayRef.current
+    if (!el) return
+    const update = () => setComposerHeight(el.getBoundingClientRect().height)
+    update()
+    const observer = new ResizeObserver(update)
+    observer.observe(el)
+    return () => observer.disconnect()
+  }, [])
 
   const scrollToBottom = useCallback(() => {
     const el = scrollRef.current
@@ -1591,12 +1303,14 @@ function ClawChatView({
 
   // Follow new rows and late content settling (markdown, images, streaming
   // growth) while pinned; never touch the scroll position otherwise.
+  // The composer pads the scroller's bottom, so a taller composer must re-pin too.
+  const bottomAnchor = useMemo(() => [messages, composerHeight] as const, [messages, composerHeight])
   usePinnedAutoScroll({
     scrollRef,
     contentRef,
     pinnedRef: pinnedToBottom,
     markProgrammaticScroll,
-    bottomAnchor: messages,
+    bottomAnchor,
   })
 
   const isSlashCommand = (value: string, command: string) =>
@@ -1613,12 +1327,11 @@ function ClawChatView({
         message={message}
         clawId={claw.id}
         clawName={claw.name}
-        clawColor={claw.color}
         currentUserLogin={currentUserLogin}
         currentUserResolved={currentUserResolved}
       />
     ),
-    [claw.id, claw.name, claw.color, currentUserLogin, currentUserResolved]
+    [claw.id, claw.name, currentUserLogin, currentUserResolved]
   )
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -1656,17 +1369,17 @@ function ClawChatView({
       onDrop={onDrop}
     >
       {dragHover && (
-        <div className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center bg-background/70 border-2 border-dashed border-ring rounded-sm">
-          <div className="text-sm text-foreground font-medium">Drop files to attach</div>
+        <div className="pointer-events-none absolute inset-3 z-20 flex items-center justify-center rounded-[22px] border border-dashed border-primary/60 bg-background/70 backdrop-blur-sm">
+          <div className="text-sm font-medium text-foreground">Drop files to attach</div>
         </div>
       )}
-      <header className="border-b border-border">
-        <div className="px-4 md:px-6 pt-2">
+      <header className="border-b border-border/60">
+        <div className="px-3 pt-1.5 sm:px-5">
           <ContextProgressBar usage={claw.contextUsage} size="lg" />
         </div>
         {isMobile ? (
           /* Full-screen detail: back chevron, truncated name, actions in ⋯ */
-          <div className="flex items-center gap-1 px-2 py-1.5">
+          <div className="flex h-13 items-center gap-1 px-2">
             <Button variant="ghost" size="icon" onClick={onDeselectClaw} title="Back to dashboard" className="size-11 shrink-0">
               <ChevronLeft className="size-5" />
             </Button>
@@ -1675,7 +1388,7 @@ function ClawChatView({
                 name={claw.name}
                 githubIssueId={claw.githubIssueId}
                 githubIssueUrl={claw.githubIssueUrl}
-                className="block font-mono text-base font-semibold text-foreground"
+                className="block font-mono text-sm text-foreground"
               />
             </div>
             {/* Uptime is intentionally dropped here: at 320-375px it does not
@@ -1715,22 +1428,23 @@ function ClawChatView({
             </DropdownMenu>
           </div>
         ) : (
-          <div className="flex items-center justify-between px-6 py-3">
-            <div className="flex min-w-0 items-center gap-4">
-              <Button variant="ghost" size="icon" onClick={onDeselectClaw} title="Back to dashboard" className="size-8">
+          <div className="flex h-13 items-center justify-between gap-3 px-3 sm:px-5">
+            <div className="flex min-w-0 items-center gap-3">
+              <button type="button" onClick={onDeselectClaw} title="Back to dashboard" className={cn(GHOST_CONTROL, "size-7")}>
                 <LayoutGrid className="size-4" />
-              </Button>
+                <span className="sr-only">Back to dashboard</span>
+              </button>
               <ClawTitle
                 name={claw.name}
                 githubIssueId={claw.githubIssueId}
                 githubIssueUrl={claw.githubIssueUrl}
-                className="flex-1 font-mono text-xl font-semibold text-foreground"
+                className="min-w-0 font-mono text-sm font-medium text-foreground"
               />
               <StatusBadge status={claw.status} paused={Boolean(claw.llm_limited_until)} />
               <LLMLimitChip limitedUntil={claw.llm_limited_until} compact />
-              <span className="text-sm text-muted-foreground font-mono">{formatUptime(claw.uptime)}</span>
+              <span className="text-xs tabular-nums text-muted-foreground">{formatUptime(claw.uptime)}</span>
             </div>
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-1">
               {/* Only offered when there is something to show — an agent that
                   never spawned a subagent looks exactly as it did before. */}
               {subagents.length > 0 && (
@@ -1743,12 +1457,18 @@ function ClawChatView({
                 size="sm"
               />
               {claw.ssh_host && (
-                <Button variant="outline" size="sm" onClick={() => setTerminalOpen(true)}>
-                  <TerminalSquare className="size-3.5 mr-1.5" />
+                <button type="button" onClick={() => setTerminalOpen(true)} className={cn(GHOST_CONTROL, "h-7 px-2 text-xs")}>
+                  <TerminalSquare className="size-3.5" />
                   Terminal
-                </Button>
+                </button>
               )}
-              <Button variant="destructive" size="sm" onClick={() => setConfirmKill(true)}>Kill</Button>
+              <button
+                type="button"
+                onClick={() => setConfirmKill(true)}
+                className={cn(GHOST_CONTROL, "h-7 px-2 text-xs text-destructive hover:bg-error-surface hover:text-destructive")}
+              >
+                Kill
+              </button>
             </div>
           </div>
         )}
@@ -1766,19 +1486,28 @@ function ClawChatView({
       {/* The row wrapper owns the remaining height; scrollRef stays the one
           scrolling element so the pin/anchor machinery is untouched. */}
       <div className="flex min-h-0 flex-1">
-      <div ref={scrollRef} onScroll={handleScroll} className="min-w-0 flex-1 overflow-y-auto scrollbar-thin p-4 md:p-6 relative">
-        <div ref={contentRef} className="space-y-4 max-w-3xl mx-auto">
+      {/* Transcript column: the composer floats over its bottom edge, and the
+          scroller reserves that height so the last row never hides under it. */}
+      <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
+      <div
+        ref={scrollRef}
+        onScroll={handleScroll}
+        className="min-h-0 flex-1 overflow-y-auto overscroll-y-contain px-3 scrollbar-thin sm:px-5"
+        style={{ paddingBottom: composerHeight }}
+      >
+        <div ref={contentRef} className="mx-auto flex w-full max-w-3xl flex-col">
+          <div className="h-3 sm:h-4" />
           {/* History chrome belongs to the transcript, not to the drill-down:
               "Loading older messages..." above a subagent result reads as the
               subagent loading something. */}
           {!subagentOpen && loadingOlder && (
-            <div className="flex justify-center py-2">
-              <span className="text-xs text-muted-foreground animate-pulse">Loading older messages...</span>
+            <div className="flex justify-center py-1 pb-1.5">
+              <span className="animate-pulse text-xs text-muted-foreground">Loading older messages...</span>
             </div>
           )}
           {!subagentOpen && hasOlder && !loadingOlder && (
-            <div className="flex justify-center py-1">
-              <div className="h-px w-full bg-border" />
+            <div className="py-1 pb-1.5">
+              <div className="h-px w-full bg-border/70" />
             </div>
           )}
           {openSubagent ? (
@@ -1787,7 +1516,7 @@ function ClawChatView({
                 type="button"
                 onClick={handleCloseSubagent}
                 className={cn(
-                  "flex items-center gap-1 rounded-sm py-0.5 pr-2 text-[11px] text-muted-foreground",
+                  "flex items-center gap-1 rounded-[var(--control-radius)] py-0.5 pr-2 text-xs text-muted-foreground",
                   // On mobile the rail and lanes are hidden, so this is the only
                   // way out of the drill-down: give it the same 44px tap target
                   // the timeline's own rows carry.
@@ -1801,7 +1530,7 @@ function ClawChatView({
               <SubagentDetail subagent={openSubagent} now={subagentNow} />
             </>
           ) : messages.length === 0 && !streamingBuffer ? (
-            <p className="text-center text-muted-foreground py-12">No messages yet. Start the conversation below.</p>
+            <p className="py-12 text-center text-sm text-muted-foreground">No messages yet. Start the conversation below.</p>
           ) : (
             <AgentTimeline
               clawId={claw.id}
@@ -1815,7 +1544,6 @@ function ClawChatView({
                     state={streamingBuffer}
                     variant="chat"
                     clawName={claw.name}
-                    clawColor={claw.color}
                   />
                 ) : undefined
               }
@@ -1830,51 +1558,43 @@ function ClawChatView({
           )}
           <div ref={bottomRef} className="h-4" />
         </div>
+      </div>
         {showScrollBtn && !openSubagent && (
           <button
             onClick={scrollToBottom}
-            className="absolute bottom-4 left-1/2 -translate-x-1/2 z-10 flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-secondary border border-border text-xs text-muted-foreground hover:text-foreground hover:bg-accent transition-colors shadow-md"
+            className="surface-glass absolute left-1/2 z-30 flex h-7 -translate-x-1/2 items-center gap-1.5 rounded-full border border-border/60 px-3 text-xs text-muted-foreground shadow-sm transition-colors hover:border-border hover:text-foreground"
+            style={{ bottom: composerHeight + 8 }}
           >
             <ChevronDown className="size-3.5" />
-            <span>Scroll to bottom</span>
+            <span>Scroll to end</span>
           </button>
         )}
-      </div>
-        {effectiveSubagentView === "rail" && subagents.length > 0 && (
-          <SubagentRail subagents={subagents} now={subagentNow} onOpen={handleOpenSubagent} />
-        )}
-      </div>
 
-      {/* Composer — padded above the home indicator on notched phones */}
-      <div className="p-4 border-t border-border pb-[calc(1rem+env(safe-area-inset-bottom))] md:pb-4">
-        {cmdToast && (
-          <div className="mb-2 max-w-3xl mx-auto text-xs text-amber-400 bg-amber-500/10 border border-amber-500/20 rounded-md px-3 py-2">
-            {cmdToast}
-          </div>
-        )}
-        <form
-          onSubmit={handleSubmit}
-          className="flex flex-col gap-2 max-w-3xl mx-auto rounded-md"
-        >
-          {attachments.length > 0 && (
-            <div className="flex flex-wrap gap-2">
-              {attachments.map((a) => (
-                <AttachmentChip
-                  key={a.localId}
-                  name={a.name}
-                  sizeLabel={formatBytes(a.size)}
-                  mimetype={a.mimetype}
-                  source={a.previewUrl ? { kind: "preview", url: a.previewUrl } : undefined}
-                  size="md"
-                  status={a.status}
-                  error={a.error}
-                  path={a.path}
-                  onRemove={() => removeAttachment(a.localId)}
-                />
-              ))}
-            </div>
-          )}
-          <div className="flex gap-2 items-end">
+      {/* Composer overlay — padded above the home indicator on notched phones */}
+      <div ref={composerOverlayRef} className="pointer-events-none absolute inset-x-0 bottom-0 z-20 pt-2">
+        <div aria-hidden className="pointer-events-none absolute inset-x-0 -top-6 h-8 bg-gradient-to-t from-background to-transparent" />
+        <div className="pointer-events-auto relative px-3 pb-[calc(0.75rem+env(safe-area-inset-bottom))] sm:px-5">
+        {cmdToast && <ComposerBanner>{cmdToast}</ComposerBanner>}
+        <ComposerShell onSubmit={handleSubmit} dragOver={dragHover}>
+          <div className="rounded-[20px] px-3 pb-1 pt-3 sm:px-4 sm:pb-2 sm:pt-4">
+            {attachments.length > 0 && (
+              <div className="mb-3 flex flex-wrap gap-2">
+                {attachments.map((a) => (
+                  <AttachmentChip
+                    key={a.localId}
+                    name={a.name}
+                    sizeLabel={formatBytes(a.size)}
+                    mimetype={a.mimetype}
+                    source={a.previewUrl ? { kind: "preview", url: a.previewUrl } : undefined}
+                    size="md"
+                    status={a.status}
+                    error={a.error}
+                    path={a.path}
+                    onRemove={() => removeAttachment(a.localId)}
+                  />
+                ))}
+              </div>
+            )}
             <input
               ref={fileInputRef}
               type="file"
@@ -1885,17 +1605,6 @@ function ClawChatView({
                 e.target.value = ""
               }}
             />
-            <Button
-              type="button"
-              size="icon"
-              variant="ghost"
-              onClick={() => fileInputRef.current?.click()}
-              className="shrink-0 max-md:size-11"
-              title="Attach files"
-            >
-              <Paperclip className="size-4" />
-              <span className="sr-only">Attach files</span>
-            </Button>
             <textarea
               value={input}
               onChange={(e) => {
@@ -1921,14 +1630,33 @@ function ClawChatView({
               ref={panelTextareaRef}
               placeholder="Message agent, /stop, or attach files"
               rows={1}
-              className="flex-1 resize-none overflow-hidden rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 min-h-[40px]"
+              className="block max-h-[200px] min-h-[52px] w-full resize-none sm:min-h-[70px] overflow-hidden border-0 bg-transparent text-sm leading-relaxed text-foreground ring-0 scrollbar-thin placeholder:text-placeholder/75 focus:outline-none"
             />
-            <Button type="submit" size="icon" disabled={!canSubmit} className="shrink-0 max-md:size-11">
-              <Send className="size-4" />
-              <span className="sr-only">Send message</span>
-            </Button>
           </div>
-        </form>
+          <div className="flex items-center justify-between gap-2 px-3 pb-2 sm:px-4 sm:pb-4">
+            <div className="flex min-w-0 items-center gap-1">
+              <button
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                className={cn(GHOST_CONTROL, "h-7 px-2.5 max-md:size-11 max-md:px-0")}
+                title="Attach files"
+              >
+                <Paperclip className="size-4" />
+                <span className="sr-only">Attach files</span>
+              </button>
+              <span className="hidden truncate text-xs text-muted-foreground/70 sm:inline">
+                Enter to send · Shift+Enter newline
+              </span>
+            </div>
+            <SendButton disabled={!canSubmit} />
+          </div>
+        </ComposerShell>
+        </div>
+      </div>
+      </div>
+        {effectiveSubagentView === "rail" && subagents.length > 0 && (
+          <SubagentRail subagents={subagents} now={subagentNow} onOpen={handleOpenSubagent} />
+        )}
       </div>
 
       <KillConfirmDialog clawName={claw.name} open={confirmKill} onConfirm={() => { setConfirmKill(false); onKill() }} onCancel={() => setConfirmKill(false)} />
