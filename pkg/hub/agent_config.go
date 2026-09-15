@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"reflect"
 	"strings"
 
 	"github.com/elasticclaw/elasticclaw/pkg/types"
@@ -201,19 +202,28 @@ func patchWorkflowYAML(workflow *types.WorkflowConfig, fields map[string]interfa
 	}
 	root := document.Content[0]
 	for key, value := range fields {
+		index := -1
+		for i := 0; i < len(root.Content); i += 2 {
+			if root.Content[i].Value == key {
+				index = i
+				break
+			}
+		}
+		// Empty values drop the key: older hubs reject unknown v2 keys, so an
+		// authored `llm_key: ""` or `subagents: null` must not survive a rollback.
+		if emptyPatchValue(value) {
+			if index >= 0 {
+				root.Content = append(root.Content[:index], root.Content[index+2:]...)
+			}
+			continue
+		}
 		var node yaml.Node
 		if err := node.Encode(value); err != nil {
 			return err
 		}
-		found := false
-		for i := 0; i < len(root.Content); i += 2 {
-			if root.Content[i].Value == key {
-				root.Content[i+1] = &node
-				found = true
-				break
-			}
-		}
-		if !found {
+		if index >= 0 {
+			root.Content[index+1] = &node
+		} else {
 			root.Content = append(root.Content, &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: key}, &node)
 		}
 	}
@@ -223,6 +233,21 @@ func patchWorkflowYAML(workflow *types.WorkflowConfig, fields map[string]interfa
 	}
 	workflow.RawConfig = string(data)
 	return nil
+}
+
+// emptyPatchValue reports values patchWorkflowYAML removes instead of encoding:
+// empty strings and nil pointers. Booleans such as enabled=false are kept.
+func emptyPatchValue(value interface{}) bool {
+	if value == nil {
+		return true
+	}
+	switch v := reflect.ValueOf(value); v.Kind() {
+	case reflect.String:
+		return v.Len() == 0
+	case reflect.Ptr, reflect.Map, reflect.Slice:
+		return v.IsNil()
+	}
+	return false
 }
 
 // effectiveWorkflowAgents applies workspace defaults before workflow overrides.

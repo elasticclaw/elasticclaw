@@ -168,6 +168,47 @@ func TestWorkflowAgentPatchAndSnapshot(t *testing.T) {
 	}
 }
 
+func TestWorkflowAgentPatchOmitsEmptyKeys(t *testing.T) {
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
+	t.Setenv("ELASTICCLAW_NOOP_PROVIDER", "1")
+	s, _ := NewTestServerWithConfig(t, agentTestConfig(), "", "", "")
+	SaveWorkspaceForTest(t, &types.WorkspaceConfig{Name: "engineering", Files: map[string]string{"elasticclaw-config.yaml": testWorkspaceV2YAML + "\nexecution:\n  provider: noop\n"}}, []*types.WorkflowConfig{{Name: "delivery", RawConfig: testWorkflowV2YAML}})
+	patch := func(body string) string {
+		req := httptest.NewRequest(http.MethodPatch, "/api/workspaces/engineering/workflows/delivery", strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer test-token")
+		rr := httptest.NewRecorder()
+		s.Handler().ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("patch %s %d: %s", body, rr.Code, rr.Body.String())
+		}
+		_, workflow, ok, err := s.resolveWorkflowConfig("engineering", "delivery")
+		if err != nil || !ok {
+			t.Fatalf("load: %v", err)
+		}
+		return workflow.RawConfig
+	}
+	agentKeys := []string{"default_model", "llm_key", "subagents"}
+	raw := patch(`{"agents":{}}`)
+	for _, key := range agentKeys {
+		if strings.Contains(raw, key+":") {
+			t.Fatalf("empty patch wrote %s:\n%s", key, raw)
+		}
+	}
+	raw = patch(`{"agents":{"llm_key":"main","subagents":{"max_concurrent":2}}}`)
+	if !strings.Contains(raw, "llm_key: main") || !strings.Contains(raw, "max_concurrent: 2") {
+		t.Fatalf("authored settings missing:\n%s", raw)
+	}
+	raw = patch(`{"agents":{}}`)
+	for _, key := range agentKeys {
+		if strings.Contains(raw, key+":") {
+			t.Fatalf("clearing left %s:\n%s", key, raw)
+		}
+	}
+	if !strings.Contains(raw, "initial_state: implementing") {
+		t.Fatalf("v2 body lost:\n%s", raw)
+	}
+}
+
 func TestAgentConfigSameCredentialInheritsPrincipalModel(t *testing.T) {
 	for _, provider := range []string{"anthropic", "codex"} {
 		for _, name := range []string{"", "main"} {
