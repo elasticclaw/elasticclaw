@@ -40,6 +40,10 @@ func (s *Server) triggerWorkflowV2Config(w http.ResponseWriter, r *http.Request,
 		return
 	}
 	if req.Agents != nil {
+		if !s.agentOverridesAllowed(r) {
+			jsonError(w, http.StatusForbidden, "agent overrides require an administrator")
+			return
+		}
 		copied := *workflow
 		applyWorkflowAgents(&copied, mergeAgentConfig(workflowAgentConfig(workflow), *req.Agents))
 		workflow = &copied

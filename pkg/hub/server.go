@@ -847,7 +847,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v2/workflow-runs/{runId}/logs", s.withAuth(s.handleWorkflowV2RunLogs))
 	mux.HandleFunc("/api/v2/workflow-runs/{runId}/attempts", s.withAuth(s.handleWorkflowV2RunAttempts))
 	mux.HandleFunc("/api/v2/workflow-runs/{runId}/attempts/{attemptId}/logs", s.withAuth(s.handleWorkflowV2AttemptLogs))
-	mux.HandleFunc("/api/agent-options", s.withAuth(s.handleAgentOptions))
+	mux.HandleFunc("/api/agent-options", s.withWebAdminAuth(s.handleAgentOptions))
 	mux.HandleFunc("/api/workspaces", s.withAdminForMethods(s.handleWorkspacesCRUD, http.MethodPost, http.MethodDelete)) // workspace CRUD
 	mux.HandleFunc("/api/workspaces/{name}/workflows", s.withAdminForMethods(s.handleWorkspaceWorkflowsList, http.MethodPost))
 	mux.HandleFunc("/api/workspaces/{workspace}/workflows/{workflow}", s.withAdminForMethods(s.handleWorkspaceWorkflowDetail, http.MethodPatch, http.MethodDelete))

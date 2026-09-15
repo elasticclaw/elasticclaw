@@ -272,3 +272,19 @@ func (s *Server) validateWorkflowAgents(workspace *types.WorkspaceConfig, workfl
 	_, err := resolveAgentConfig(s.hubCfg, agents)
 	return err
 }
+
+// agentOverridesAllowed mirrors withStrictAdminAuth for per-run agent overrides:
+// GitHub-session callers must be access admins to select hub credentials, while
+// legacy tenant tokens (no login) keep full access.
+func (s *Server) agentOverridesAllowed(r *http.Request) bool {
+	login := githubLoginFromContext(r.Context())
+	if login == "" {
+		return true
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.hubCfg == nil || s.hubCfg.Auth == nil {
+		return false
+	}
+	return isAccessAdmin(s.hubCfg.Auth.Access, login)
+}

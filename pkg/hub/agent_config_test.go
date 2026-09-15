@@ -168,6 +168,48 @@ func TestWorkflowAgentPatchAndSnapshot(t *testing.T) {
 	}
 }
 
+func TestAgentOverridesRequireAdmin(t *testing.T) {
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
+	t.Setenv("ELASTICCLAW_NOOP_PROVIDER", "1")
+	cfg := agentTestConfig()
+	cfg.Auth = &types.AuthConfig{SessionSecret: "agent-auth-secret", Access: &types.AccessConfig{Admins: []string{"alice"}}}
+	s, _ := NewTestServerWithConfig(t, cfg, "", "", "")
+	SaveWorkspaceForTest(t, &types.WorkspaceConfig{Name: "engineering", Files: map[string]string{"elasticclaw-config.yaml": "schema_version: v1\nname: engineering\nprovider: noop\n"}}, []*types.WorkflowConfig{{Name: "delivery", EnableManualTrigger: true}})
+	session := func(login string) string {
+		token, err := signGitHubSession("agent-auth-secret", login, "", "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return token
+	}
+	request := func(method, path, body, token string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, path, strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+token)
+		rr := httptest.NewRecorder()
+		s.Handler().ServeHTTP(rr, req)
+		return rr
+	}
+	trigger := "/api/workspaces/engineering/workflows/delivery/trigger"
+	override := `{"inputs":{},"agents":{"llm_key":"worker"}}`
+	if rr := request(http.MethodPost, trigger, override, session("bob")); rr.Code != http.StatusForbidden || !strings.Contains(rr.Body.String(), "administrator") {
+		t.Fatalf("non-admin override %d: %s", rr.Code, rr.Body.String())
+	}
+	if rr := request(http.MethodPost, trigger, `{"inputs":{}}`, session("bob")); rr.Code != http.StatusOK {
+		t.Fatalf("non-admin trigger %d: %s", rr.Code, rr.Body.String())
+	}
+	for _, token := range []string{session("alice"), "test-token"} {
+		if rr := request(http.MethodPost, trigger, override, token); rr.Code != http.StatusOK {
+			t.Fatalf("admin override %d: %s", rr.Code, rr.Body.String())
+		}
+	}
+	if rr := request(http.MethodGet, "/api/agent-options", "", session("bob")); rr.Code != http.StatusForbidden {
+		t.Fatalf("non-admin options %d: %s", rr.Code, rr.Body.String())
+	}
+	if rr := request(http.MethodGet, "/api/agent-options", "", session("alice")); rr.Code != http.StatusOK {
+		t.Fatalf("admin options %d: %s", rr.Code, rr.Body.String())
+	}
+}
+
 func TestWorkflowAgentPatchOmitsEmptyKeys(t *testing.T) {
 	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
 	t.Setenv("ELASTICCLAW_NOOP_PROVIDER", "1")
