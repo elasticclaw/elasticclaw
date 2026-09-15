@@ -5,6 +5,7 @@ import { Brain, Check, Copy, Settings2, Wrench, type LucideIcon } from "lucide-r
 import { MarkdownContent } from "@/components/markdown-content"
 import { AttachmentChip } from "@/components/attachment-chip"
 import { StepRow } from "@/components/agent-timeline/step-row"
+import { useToggleAnchor } from "@/components/agent-timeline/anchor-context"
 import { demoteStaleRunning, pairActivitySteps } from "@/lib/turns"
 import { splitAttachmentsFooter, type ParsedAttachment } from "@/lib/attachments"
 import { messageAuthor, type MessageAuthor } from "@/lib/message-author"
@@ -123,9 +124,53 @@ function MessageCopyButton({ text, className }: { text: string; className?: stri
 
 // ─── user / teammate bubble ───────────────────────────────────────────────────
 
+const COLLAPSE_CHARS = 600
+const COLLAPSE_LINES = 8
+const COLLAPSED_FADE_MASK = "linear-gradient(to bottom, black calc(100% - 1.75rem), transparent)"
+
+function shouldCollapse(text: string): boolean {
+  return text.length > COLLAPSE_CHARS || text.split("\n").length > COLLAPSE_LINES
+}
+
 function MessageBody({ text, variant }: { text: string; variant: RowVariant }) {
   if (variant === "card") return <MarkdownContent content={text} className="text-xs" />
-  return <p className="whitespace-pre-wrap text-sm leading-relaxed">{text}</p>
+  return <ClampedText text={text} />
+}
+
+/**
+ * Long chat messages start clamped with a fade; the text stays mounted so
+ * find-in-page still matches it. Toggling goes through the timeline anchor so
+ * the reading position does not jump.
+ */
+function ClampedText({ text }: { text: string }) {
+  const [expanded, setExpanded] = useState(false)
+  const anchor = useToggleAnchor()
+  const collapsible = shouldCollapse(text)
+  const collapsed = collapsible && !expanded
+  return (
+    <div>
+      <p
+        className={cn("whitespace-pre-wrap text-sm leading-relaxed", collapsed && "max-h-44 overflow-hidden")}
+        style={collapsed ? { WebkitMaskImage: COLLAPSED_FADE_MASK, maskImage: COLLAPSED_FADE_MASK } : undefined}
+      >
+        {text}
+      </p>
+      {collapsible && (
+        <button
+          type="button"
+          aria-expanded={expanded}
+          onClick={(e) => {
+            e.stopPropagation()
+            anchor(e.currentTarget)
+            setExpanded((value) => !value)
+          }}
+          className="-ml-1 mt-1 h-6 rounded-control px-1.5 text-xs text-secondary-label transition-colors hover:bg-muted/55 hover:text-message-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus-ring max-md:min-h-11"
+        >
+          {expanded ? "Show less" : "Show full message"}
+        </button>
+      )}
+    </div>
+  )
 }
 
 function UserAttachments({
