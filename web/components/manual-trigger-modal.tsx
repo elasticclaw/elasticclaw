@@ -144,7 +144,7 @@ export function ManualTriggerModal({ open, onOpenChange, workflow }: ManualTrigg
               disabled={triggering}
               onChange={e => setOverrideAgents(e.target.checked)}
             />
-            Customize agents for this run
+            Override agents for this run
           </label>
           {overrideAgents ? (
             <AgentConfigForm value={agents} onChange={setAgents} disabled={triggering} context="run" />
