@@ -31,7 +31,58 @@ func openDB(path string) (*sql.DB, error) {
 // WITHOUT running migrate() on it -- the boot-path tests need a database in the
 // shape a shipped hub has before the current binary touches it.
 func sqliteDSN(path string) string {
-	return path + "?_time_format=sqlite&_txlock=immediate&_pragma=journal_mode(WAL)&_pragma=foreign_keys(on)&_pragma=busy_timeout(5000)"
+	return fmt.Sprintf("%s?_time_format=sqlite&_txlock=immediate&_pragma=journal_mode(WAL)&_pragma=foreign_keys(on)&_pragma=busy_timeout(5000)&_pragma=journal_size_limit(%d)", path, walSizeLimitBytes)
+}
+
+// walSizeLimitBytes is the journal_size_limit every hub connection sets: the
+// size the -wal file is truncated back to after the next checkpoint that
+// resets it.
+//
+// Without it the WAL never shrinks. SQLite reuses a checkpointed WAL from its
+// start but leaves the file at the largest size it ever reached, so one big
+// transaction pins that much disk for the life of the process -- and a big
+// transaction that FAILED pins it too: the frames it spilled are rolled back,
+// but the file keeps its grown size (TestFailedMigrationStepReleasesTheWALItGrew
+// shows the shape). On the disk-full hub the boot-time table copies and index
+// builds are exactly such transactions, and each one that fails with
+// SQLITE_FULL used to leave the hub serving with zero bytes free until it was
+// restarted.
+//
+// 64 MiB is sixteen times the automatic checkpoint threshold (1000 pages of
+// 4 KiB), so steady-state traffic -- batched retention deletes, a checkpoint
+// plan's few thousand edge rows -- never reaches it and never pays for the
+// truncate-and-regrow. It only bounds what an unusually large transaction
+// leaves behind, and even that is a limit on the NEXT checkpoint's clean-up:
+// the failed steps that matter release their space immediately through
+// truncateWALAfterFailure, which does not wait for a checkpoint to come round.
+const walSizeLimitBytes = 64 << 20
+
+// truncateWALAfterFailure releases the disk a failed allocation pinned.
+//
+// A transaction that failed part-way -- SQLITE_FULL in the middle of a table
+// copy or an index build -- has already written its frames to the -wal file,
+// and rolling it back does not shrink the file. On the hub that hit
+// SQLITE_FULL that file is now the size of what was left of the disk, and it
+// stays that size until the process closes the database. A TRUNCATE
+// checkpoint writes the committed frames (there are none from the failed
+// transaction) into the database and truncates the WAL to zero bytes, which
+// gives the space back at once. Boot runs it after every non-fatal step that
+// fails, before the hub starts serving, and the sweeper after an index build
+// that fails at the end of a cycle.
+//
+// The checkpoint needs a moment with no reader on the WAL; at boot there is
+// none, and the busy handler waits for one in the sweeper. A failure here is
+// logged and nothing more: the next successful checkpoint that resets the WAL
+// truncates it to walSizeLimitBytes anyway.
+func truncateWALAfterFailure(db *sql.DB, what string) {
+	var busy, walFrames, checkpointed int
+	if err := db.QueryRow(`PRAGMA wal_checkpoint(TRUNCATE)`).Scan(&busy, &walFrames, &checkpointed); err != nil {
+		log.Printf("[migrate] release the WAL after %s failed: %v", what, err)
+		return
+	}
+	if busy != 0 {
+		log.Printf("[migrate] release the WAL after %s failed: a reader held it (the next checkpoint that resets the WAL truncates it to %d bytes)", what, walSizeLimitBytes)
+	}
 }
 
 // addColumn applies an additive `ALTER TABLE ... ADD COLUMN` migration.
@@ -1302,9 +1353,14 @@ type migrationStep struct {
 // failure into a log line instead of a refused boot. Every step it runs is
 // idempotent -- guarded by a schema probe, a marker row or a WHERE clause -- so
 // the next boot simply tries again.
+//
+// A step that fails has usually failed allocating -- that is what non-fatal
+// means here -- and a failed allocation leaves its frames in the WAL, so the
+// WAL is truncated after every failure. See truncateWALAfterFailure.
 func runOptionalMigration(db *sql.DB, name string, run func(*sql.DB) error) {
 	if err := run(db); err != nil {
 		log.Printf("[migrate] %s: not applied (retrying on the next boot): %v", name, err)
+		truncateWALAfterFailure(db, name)
 	}
 }
 
@@ -1422,6 +1478,7 @@ func ensureCheckpointBlobRefTables(db *sql.DB) {
 	for _, table := range checkpointBlobRefTables {
 		if _, err := db.Exec(table.stmt); err != nil {
 			log.Printf("[migrate] table %s not created (retrying on the next boot): %v", table.name, err)
+			truncateWALAfterFailure(db, "creating "+table.name)
 		}
 	}
 	rebuildCheckpointBlobRefsWithoutRowid(db)
@@ -1441,6 +1498,10 @@ func rebuildCheckpointBlobRefsWithoutRowid(db *sql.DB) {
 	var ddl string
 	err := db.QueryRow(`SELECT sql FROM sqlite_master WHERE type='table' AND name='checkpoint_blob_refs'`).Scan(&ddl)
 	if err != nil || strings.Contains(strings.ToUpper(ddl), "WITHOUT ROWID") {
+		return
+	}
+	if err := tableCopyFitsOnDisk(db, "checkpoint_blob_refs"); err != nil {
+		log.Printf("[migrate] rebuild checkpoint_blob_refs without rowid (retrying on the next boot): %v", err)
 		return
 	}
 	tx, err := db.Begin()
@@ -1463,11 +1524,14 @@ func rebuildCheckpointBlobRefsWithoutRowid(db *sql.DB) {
 	} {
 		if _, err := tx.Exec(stmt); err != nil {
 			log.Printf("[migrate] rebuild checkpoint_blob_refs without rowid (retrying on the next boot): %v", err)
+			_ = tx.Rollback()
+			truncateWALAfterFailure(db, "rebuilding checkpoint_blob_refs")
 			return
 		}
 	}
 	if err := tx.Commit(); err != nil {
 		log.Printf("[migrate] rebuild checkpoint_blob_refs without rowid: %v", err)
+		truncateWALAfterFailure(db, "rebuilding checkpoint_blob_refs")
 		return
 	}
 	log.Printf("[migrate] rebuilt checkpoint_blob_refs as WITHOUT ROWID")
@@ -1516,9 +1580,9 @@ func adoptLegacyCheckpointBlobClaims(db *sql.DB) {
 // leads on claw_id / run_id / tenant_id / event_type, so a prune keyed on
 // created_at or event_time alone degrades to a full table scan under the
 // single SQLite write lock.
-var retentionIndexes = []struct{ name, stmt string }{
-	{"idx_messages_created_at", `CREATE INDEX IF NOT EXISTS idx_messages_created_at ON messages(created_at)`},
-	{"idx_task_run_events_event_time", `CREATE INDEX IF NOT EXISTS idx_task_run_events_event_time ON task_run_events(event_time)`},
+var retentionIndexes = []struct{ name, table, stmt string }{
+	{"idx_messages_created_at", "messages", `CREATE INDEX IF NOT EXISTS idx_messages_created_at ON messages(created_at)`},
+	{"idx_task_run_events_event_time", "task_run_events", `CREATE INDEX IF NOT EXISTS idx_task_run_events_event_time ON task_run_events(event_time)`},
 }
 
 // ensureRetentionIndexes builds the retention indexes outside the boot-critical
@@ -1538,12 +1602,29 @@ var retentionIndexes = []struct{ name, stmt string }{
 // pause exist to survive. Every later boot retries, and the sweeper retries
 // after a cycle that reclaimed disk (buildRetentionIndexesAfterCycle). It
 // reports whether every index exists on return.
+//
+// A missing index is not attempted when the filesystem visibly lacks the room
+// (indexBuildFitsOnDisk): the attempt is a scan of the table under the write
+// lock that allocates the whole B-tree before failing at the last page, and
+// on the hub this sweeper exists to relieve it failed every boot and every
+// reclaiming cycle. When an attempt does fail, the space it pinned in the WAL
+// is released at once (truncateWALAfterFailure).
 func ensureRetentionIndexes(db *sql.DB) bool {
 	ok := true
 	for _, idx := range retentionIndexes {
+		var exists int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name=?`, idx.name).Scan(&exists); err == nil && exists > 0 {
+			continue
+		}
+		if err := indexBuildFitsOnDisk(db, idx.table); err != nil {
+			ok = false
+			log.Printf("[migrate] retention index %s not created (retrying on the next boot, or after a sweep that reclaims disk): %v", idx.name, err)
+			continue
+		}
 		if _, err := db.Exec(idx.stmt); err != nil {
 			ok = false
 			log.Printf("[migrate] retention index %s not created (retrying on the next boot, or after a sweep that reclaims disk): %v", idx.name, err)
+			truncateWALAfterFailure(db, "building "+idx.name)
 		}
 	}
 	return ok
@@ -1679,6 +1760,9 @@ func widenFailureTypeCheckV1(db *sql.DB, table string) error {
 	if withRowid {
 		colList = "rowid, " + colList
 	}
+	if err := tableCopyFitsOnDisk(db, table); err != nil {
+		return err
+	}
 
 	tmp := table + "_widen_tmp"
 	createTmp := strings.Replace(schema, oldCheck, newCheck, 1)
@@ -1716,6 +1800,9 @@ func rebuildTaskRunSummariesStatusV3(db *sql.DB) error {
 	}
 	if !strings.Contains(schema, "clean_success") {
 		return nil
+	}
+	if err := tableCopyFitsOnDisk(db, "task_run_summaries"); err != nil {
+		return err
 	}
 	tx, err := db.Begin()
 	if err != nil {
@@ -1769,6 +1856,9 @@ func rebuildTaskRunEventsAgentIdleV1(db *sql.DB) error {
 	}
 	if strings.Contains(schema, "'stage_stalled'") {
 		return nil
+	}
+	if err := tableCopyFitsOnDisk(db, "task_run_events"); err != nil {
+		return err
 	}
 	tx, err := db.Begin()
 	if err != nil {

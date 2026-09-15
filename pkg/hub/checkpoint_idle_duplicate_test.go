@@ -1,6 +1,9 @@
 package hub
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func insertTestCheckpoint(t *testing.T, s *Server, id, reason string) {
 	t.Helper()
@@ -105,5 +108,64 @@ func TestFirstCheckpointIsNeverADuplicate(t *testing.T) {
 	}
 	if s.checkpointDuplicatesPrevious("only", "claw", "") {
 		t.Fatal("an empty tree must not be treated as a duplicate")
+	}
+}
+
+// Revert verified against: checkpointDuplicatesPrevious with BOTH its
+// `rootSHA == ""` early return and the non-empty root_tree_sha256 filter of its
+// previous-checkpoint query removed. Either alone still answers false here,
+// so this test holds the pair, not each: with the filter in place the guard
+// is unreachable by behaviour (an empty previous tree is never selected), and
+// with the guard in place the filter's only observable effect is the one
+// TestDuplicateCheckLooksPastACheckpointWithoutATree covers.
+//
+// A bridge that reports no workspace tree -- an older build, or a capture
+// whose tree hashing failed -- leaves root_tree_sha256 empty on a 'ready' row.
+// Two such captures in a row have not been shown to be the same workspace;
+// "unknown" equals "unknown" only as strings.
+func TestEmptyTreeNeverDuplicatesAPreviousEmptyTree(t *testing.T) {
+	s := newCheckpointCompletionTestServer(t)
+	insertTestCheckpoint(t, s, "first", "idle-timer")
+	if _, err := s.db.Exec(`UPDATE claw_checkpoints SET status='ready', root_tree_sha256='' WHERE id='first'`); err != nil {
+		t.Fatal(err)
+	}
+	insertTestCheckpoint(t, s, "second", "idle-timer")
+	if s.checkpointDuplicatesPrevious("second", "claw", "") {
+		t.Fatal("an idle checkpoint without a tree was treated as a duplicate of a previous checkpoint without a tree")
+	}
+}
+
+// Revert verified against: the non-empty root_tree_sha256 filter of the
+// previous-checkpoint query removed.
+//
+// A previous row without a tree says nothing about the workspace; the
+// comparison is against the last checkpoint whose tree is known.
+func TestDuplicateCheckLooksPastACheckpointWithoutATree(t *testing.T) {
+	s := newCheckpointCompletionTestServer(t)
+	const tree = "ab12cd34"
+	insertTestCheckpoint(t, s, "known", "idle-timer")
+	if err := s.markCheckpointSkipped("known", tree); err != nil {
+		t.Fatal(err)
+	}
+	insertTestCheckpoint(t, s, "treeless", "idle-timer")
+	// Later than "known" by the same clock the rows were inserted with: the
+	// column is a time.Time, and arithmetic on it in SQL would silently turn
+	// the value into an integer that sorts BEFORE every text timestamp.
+	if _, err := s.db.Exec(`UPDATE claw_checkpoints SET status='ready', root_tree_sha256='', created_at=? WHERE id='treeless'`, now().Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	insertTestCheckpoint(t, s, "third", "idle-timer")
+	if _, err := s.db.Exec(`UPDATE claw_checkpoints SET created_at=? WHERE id='third'`, now().Add(2*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	var newest string
+	if err := s.db.QueryRow(`SELECT id FROM claw_checkpoints WHERE claw_id='claw' AND id<>'third' ORDER BY created_at DESC LIMIT 1`).Scan(&newest); err != nil {
+		t.Fatal(err)
+	}
+	if newest != "treeless" {
+		t.Fatalf("fixture: the newest previous row is %q, not the treeless one; the filter would not be what decides", newest)
+	}
+	if !s.checkpointDuplicatesPrevious("third", "claw", tree) {
+		t.Fatal("the same tree as the last checkpoint that had one was not treated as a duplicate")
 	}
 }

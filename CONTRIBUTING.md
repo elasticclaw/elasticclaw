@@ -205,13 +205,27 @@ order:
    have no reference edge and gives them edges, and the blob sweep — dry or
    real — refuses to delete anything while any such row exists. Running it is
    what makes the dry run's blob numbers mean anything. Nothing else is
-   written: in particular a dry run does not build the two retention indexes,
-   so it is safe on a hub with no free space at all. A real cycle builds them
-   at its end, and only after a cycle that actually freed bytes on disk: a
-   missing index is reported once (`the build waits for a cycle that reclaims
-   disk space`), a build that fails sits out an increasing number of
-   reclaiming cycles before trying again, and a hub whose boot managed to
-   build them never pays for the check.
+   written: in particular a dry run does not build the two retention indexes.
+   A real cycle builds them at its end, and only after a cycle that actually
+   freed bytes on disk: a missing index is reported once (`the build waits for
+   a cycle that reclaims disk space`), a build that fails sits out an
+   increasing number of reclaiming cycles before trying again, and a hub whose
+   boot managed to build them never pays for the check.
+
+   The cycle itself is not what decides whether a hub with no free space is
+   safe; the boot before it is. The first boot of a build on an old schema
+   runs table copies and index builds outside the boot-critical path, and on
+   a full disk each of those used to fail after growing the SQLite WAL to
+   whatever was left, then leave the WAL that size until the next restart --
+   so the hub served with zero bytes free through the whole dry-run period,
+   and manifest writes, blob uploads and diagnostics captures failed with
+   ENOSPC. Now a copy or a build is skipped when the filesystem visibly lacks
+   the room for it (`skipped: a copy of task_run_events needs about N bytes
+   of free disk`), the WAL is truncated after any such step that fails anyway
+   (`PRAGMA wal_checkpoint(TRUNCATE)`), and every connection carries a
+   `journal_size_limit` so a large transaction never keeps its WAL for the
+   life of the process. What a full hub still cannot do is write: the dry run
+   removes nothing, and the space comes back only with the first real cycle.
 
    The backfill, like every other phase, is bounded by the per-cycle budget.
    On a hub with years of checkpoints the first cycle may stop it partway and

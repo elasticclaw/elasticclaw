@@ -502,6 +502,16 @@ func TestEveryBulkWriteLoopIsPaced(t *testing.T) {
 // The dry run is the step the documentation says to run first, on a hub that
 // is by hypothesis nearly full. Building an index there needs free space for
 // the whole B-tree before anything has been reclaimed.
+//
+// Revert verified against: the `if !cfg.dryRun` guard on
+// buildRetentionIndexesAfterCycle removed.
+//
+// The orphan blob is seeded BEFORE the dry run, deliberately. The build sits
+// behind a second gate -- a cycle that reclaimed nothing never reaches it --
+// and a dry run over an empty store reclaims nothing, so a fixture without
+// the orphan never reached the guard this test names: the dry run counts the
+// bytes it WOULD free, and only with something to count does the guard decide
+// anything.
 func TestDryRunDoesNotBuildRetentionIndexes(t *testing.T) {
 	s := newRetentionTestServer(t)
 	for _, idx := range retentionIndexes {
@@ -509,18 +519,21 @@ func TestDryRunDoesNotBuildRetentionIndexes(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	orphan := writeRetentionBlob(t, []byte("unreferenced"))
+	ageBlob(t, orphan)
 	policy := retentionPolicy{enabled: true, retentionSettings: retentionSettings{
 		interval: time.Hour, maxAge: defaultRetentionMaxAge, compactAfter: defaultRetentionCompactAfter, dryRun: true}}
-	s.retentionSweepCycle(policy)
+	out := captureRetentionLog(t, func() { s.retentionSweepCycle(policy) })
+	if !containsString(out, "would sweep 1 blob(s)") {
+		t.Fatalf("fixture: the dry run did not select the orphan, so it reclaimed nothing on paper and the build gate was never reached:\n%s", out)
+	}
 	for _, idx := range retentionIndexes {
 		if retentionIndexExists(t, s, idx.name) {
-			t.Fatalf("a dry run built %s", idx.name)
+			t.Fatalf("a dry run built %s:\n%s", idx.name, out)
 		}
 	}
 	// A real cycle builds them once it has reclaimed something to build from
-	// (buildRetentionIndexesAfterCycle): give it one aged orphan blob.
-	orphan := writeRetentionBlob(t, []byte("unreferenced"))
-	ageBlob(t, orphan)
+	// (buildRetentionIndexesAfterCycle): the same orphan, now actually removed.
 	policy.dryRun = false
 	s.retentionSweepCycle(policy)
 	for _, idx := range retentionIndexes {

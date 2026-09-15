@@ -4,6 +4,9 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"log"
 	"os"
 	"path/filepath"
@@ -913,9 +916,14 @@ func TestFailStuckCreatingCheckpointsReleasesTheirClaims(t *testing.T) {
 	}
 }
 
-// The boot reconciliation must not depend on the reaper: a claim left behind by
-// a crash pins blobs against a sweeper that runs whether liveness does or not.
-func TestBootCheckpointReconciliationRunsIndependentlyOfLiveness(t *testing.T) {
+// reconcileCheckpointsOnBoot itself never consults liveness: with the reaper
+// disabled it still fails the rows the previous process left creating and
+// releases their claims. Whether the BOOT calls it without consulting liveness
+// is a different property, held by
+// TestNewServerReconcilesCheckpointsWithoutConsultingLiveness below: this
+// test calls the function directly, so re-gating the call site would not
+// fail it.
+func TestReconcileCheckpointsOnBootDoesNotConsultLiveness(t *testing.T) {
 	s := newRetentionTestServer(t)
 	disabled := false
 	s.hubCfg = &types.HubConfig{Liveness: &types.LivenessConfig{Enabled: &disabled}}
@@ -941,6 +949,79 @@ func TestBootCheckpointReconciliationRunsIndependentlyOfLiveness(t *testing.T) {
 	if got := checkpointBlobRefCount(t, s, "cp"); got != 0 {
 		t.Fatalf("claims = %d, want 0", got)
 	}
+}
+
+// The boot reconciliation must not depend on the reaper: a claim left behind by
+// a crash pins blobs against a sweeper that runs whether liveness does or not.
+// NewServer starts every background loop and touches the network, so the call
+// site is held at the source: reconcileCheckpointsOnBoot must be a statement
+// of NewServer's own body, not nested under the `if srv.livenessEnabled()`
+// that guards reconcileOnBoot.
+//
+// Revert verified against: the call moved inside `if srv.livenessEnabled()`.
+func TestNewServerReconcilesCheckpointsWithoutConsultingLiveness(t *testing.T) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "server.go", nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var newServer *ast.FuncDecl
+	for _, decl := range file.Decls {
+		if fn, ok := decl.(*ast.FuncDecl); ok && fn.Name.Name == "NewServer" && fn.Recv == nil {
+			newServer = fn
+		}
+	}
+	if newServer == nil {
+		t.Fatal("NewServer not found in server.go")
+	}
+	// The statements of the function body itself, not of any block nested in it.
+	topLevel := map[string]bool{}
+	for _, stmt := range newServer.Body.List {
+		if name, ok := methodCallOnSrv(stmt); ok {
+			topLevel[name] = true
+		}
+	}
+	// Every call anywhere in the body, so a call that moved into an `if` is
+	// distinguished from one that was deleted.
+	anywhere := map[string]bool{}
+	ast.Inspect(newServer.Body, func(n ast.Node) bool {
+		if stmt, ok := n.(ast.Stmt); ok {
+			if name, ok := methodCallOnSrv(stmt); ok {
+				anywhere[name] = true
+			}
+		}
+		return true
+	})
+	if !anywhere["reconcileCheckpointsOnBoot"] {
+		t.Fatal("NewServer no longer calls reconcileCheckpointsOnBoot at all")
+	}
+	if !topLevel["reconcileCheckpointsOnBoot"] {
+		t.Fatal("NewServer calls reconcileCheckpointsOnBoot inside a nested block; it must run whether or not liveness is enabled")
+	}
+	// The discriminator is real: reconcileOnBoot IS gated, and reads as such.
+	if !anywhere["reconcileOnBoot"] || topLevel["reconcileOnBoot"] {
+		t.Fatal("reconcileOnBoot is expected under `if srv.livenessEnabled()`; the test's notion of nesting no longer matches server.go")
+	}
+}
+
+// methodCallOnSrv reports the method name when stmt is `srv.<method>(...)`.
+func methodCallOnSrv(stmt ast.Stmt) (string, bool) {
+	expr, ok := stmt.(*ast.ExprStmt)
+	if !ok {
+		return "", false
+	}
+	call, ok := expr.X.(*ast.CallExpr)
+	if !ok {
+		return "", false
+	}
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok {
+		return "", false
+	}
+	if recv, ok := sel.X.(*ast.Ident); !ok || recv.Name != "srv" {
+		return "", false
+	}
+	return sel.Sel.Name, true
 }
 
 // ---------------------------------------------------------------------------

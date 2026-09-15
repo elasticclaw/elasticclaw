@@ -961,7 +961,7 @@ func (s *Server) compactFinalizedCheckpoints(cutoff time.Time, dryRun bool) (com
 		return result, fmt.Errorf("list finalized claws: %w", err)
 	}
 	for i, clawID := range ids {
-		err := s.compactClawCheckpoints(clawID, dryRun, &result)
+		err := s.compactClawCheckpoints(clawID, cutoff, dryRun, &result)
 		if errors.Is(err, errRetentionBudget) {
 			break
 		}
@@ -1000,7 +1000,21 @@ type compactionResult struct {
 	pacer *retentionPacer
 }
 
-func (s *Server) compactClawCheckpoints(clawID string, dryRun bool, result *compactionResult) error {
+func (s *Server) compactClawCheckpoints(clawID string, cutoff time.Time, dryRun bool, result *compactionResult) error {
+	// The list this claw came from was built once, at the top of the phase,
+	// and the phase then runs for up to its budget with a pause after every
+	// claw. A claw that resumed in the meantime -- reconnected, or entered a
+	// retry that will restore from one of the rows below -- is no longer
+	// finalized, and compacting it would collapse the recovery points of a
+	// claw about to use them. Re-evaluate the predicate now, for this claw
+	// alone. The write below re-checks the restore arm once more, under the
+	// write lock, for the restore that begins between this read and that
+	// UPDATE.
+	if finalized, err := s.clawFinalized(clawID, cutoff); err != nil {
+		return err
+	} else if !finalized {
+		return nil
+	}
 	// 'failed' checkpoints never wrote a manifest, so they are not candidates
 	// and are left exactly as they are. 'skipped' rows are handled separately
 	// below: they are not candidates either, but they DO hold references.
@@ -1098,10 +1112,18 @@ func (s *Server) compactClawCheckpoints(clawID string, dryRun bool, result *comp
 		for _, v := range batch {
 			ids = append(ids, v.id)
 		}
-		if err := s.markCheckpointsCompacted(ids); err != nil {
+		compacted, err := s.markCheckpointsCompacted(ids)
+		if err != nil {
 			return err
 		}
 		for _, v := range batch {
+			if _, ok := compacted[v.id]; !ok {
+				// The UPDATE left this row alone: a restore of this claw began
+				// after the candidates were listed. Its manifest stays, and so
+				// does every other row of the claw -- the restore may be reading
+				// any of them.
+				continue
+			}
 			// A manifest that is already gone is not an error: a previous cycle
 			// may have been interrupted between the UPDATE and the unlink.
 			if err := os.Remove(v.path); err != nil && !os.IsNotExist(err) {
@@ -1113,6 +1135,9 @@ func (s *Server) compactClawCheckpoints(clawID string, dryRun bool, result *comp
 			result.count++
 			result.ids = append(result.ids, v.id)
 		}
+		if len(compacted) < len(batch) {
+			return nil
+		}
 		if err := result.pacer.yield(len(batch)); err != nil {
 			return err
 		}
@@ -1123,31 +1148,55 @@ func (s *Server) compactClawCheckpoints(clawID string, dryRun bool, result *comp
 // markCheckpointCompacted moves one checkpoint from "restorable" to "counted"
 // and releases every blob it held, atomically.
 func (s *Server) markCheckpointCompacted(checkpointID string) error {
-	return s.markCheckpointsCompacted([]string{checkpointID})
+	_, err := s.markCheckpointsCompacted([]string{checkpointID})
+	return err
 }
 
 // markCheckpointsCompacted does the same for one batch of checkpoints, in one
 // transaction: either every row in the batch is compacted with its references
-// gone, or none is.
-func (s *Server) markCheckpointsCompacted(checkpointIDs []string) error {
+// gone, or none is. It returns the ids it actually compacted.
+//
+// The restore guard is re-evaluated INSIDE the UPDATE, under the write lock.
+// The candidate list was read outside any transaction, and a restore that
+// starts after that read -- an operator's restoreClawFromCheckpoint, or the
+// retry path, which waits out its backoff and a termination checkpoint before
+// it sets restore_checkpoint_id -- would otherwise have its source row marked
+// compacted, its manifest unlinked, its edges dropped, and its file blobs
+// swept by the same cycle while restoreCheckpointFilesTo is reading them. A
+// row the guard excludes is reported as not compacted, and keeps its edges:
+// dropping them is what makes its blobs collectable.
+func (s *Server) markCheckpointsCompacted(checkpointIDs []string) (map[string]struct{}, error) {
 	tx, err := s.db.Begin()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer tx.Rollback()
+	compacted := make(map[string]struct{}, len(checkpointIDs))
 	for _, checkpointID := range checkpointIDs {
-		if _, err := tx.Exec(
+		res, err := tx.Exec(
 			`UPDATE claw_checkpoints
 			    SET status='compacted', manifest_path='', manifest_sha256='',
 			        root_tree_sha256='', workspace_tree_sha256='', message_tree_sha256=''
-			  WHERE id=?`, checkpointID); err != nil {
-			return err
+			  WHERE id=?
+			    AND NOT EXISTS (
+			        SELECT 1 FROM claws c
+			         WHERE c.id = claw_checkpoints.claw_id
+			           AND COALESCE(c.restore_checkpoint_id, '') <> '')`, checkpointID)
+		if err != nil {
+			return nil, err
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			continue
 		}
 		if err := deleteCheckpointBlobRefsTx(tx, checkpointID); err != nil {
-			return err
+			return nil, err
 		}
+		compacted[checkpointID] = struct{}{}
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return compacted, nil
 }
 
 // releaseSkippedCheckpointRefs drops the blob references and tree digests of a
@@ -1590,10 +1639,18 @@ func (s *Server) pruneExpiredCheckpoints(cutoff time.Time, dryRun bool, pacer *r
 		for _, v := range batch {
 			ids = append(ids, v.id)
 		}
-		if err := s.deleteExpiredCheckpoints(ids); err != nil {
+		deleted, err := s.deleteExpiredCheckpoints(ids)
+		if err != nil {
 			return removed, bytes, itemErrors, fmt.Errorf("delete expired checkpoints (aborted after %d of %d): %w", len(removed), len(pending), err)
 		}
 		for _, v := range batch {
+			if _, ok := deleted[v.id]; !ok {
+				// A restore from this row began after the victims were listed;
+				// the DELETE left it alone, and so must the unlink. It is not in
+				// removed either: that list tells the sweep which references to
+				// read past, and this row's references still stand.
+				continue
+			}
 			removed = append(removed, v.id)
 			if err := os.Remove(v.path); err != nil && !os.IsNotExist(err) {
 				itemErrors++
@@ -1617,25 +1674,43 @@ func (s *Server) pruneExpiredCheckpoints(cutoff time.Time, dryRun bool, pacer *r
 // deleteExpiredCheckpoint removes one checkpoint row and its blob references
 // atomically.
 func (s *Server) deleteExpiredCheckpoint(checkpointID string) error {
-	return s.deleteExpiredCheckpoints([]string{checkpointID})
+	_, err := s.deleteExpiredCheckpoints([]string{checkpointID})
+	return err
 }
 
-// deleteExpiredCheckpoints does the same for one batch, in one transaction.
-func (s *Server) deleteExpiredCheckpoints(checkpointIDs []string) error {
+// deleteExpiredCheckpoints does the same for one batch, in one transaction,
+// and returns the ids it actually deleted.
+//
+// The restore guard of the victim list (restoreSourceCheckpointsSQL) is
+// re-evaluated inside the DELETE, for the same reason markCheckpointsCompacted
+// re-evaluates its own: the list is minutes old by the time the last batch is
+// written, and a row some claw started restoring from in between must keep
+// its row, its edges and its manifest. The row goes first and the edges only
+// when it went, so a guarded row keeps the edges that protect its blobs.
+func (s *Server) deleteExpiredCheckpoints(checkpointIDs []string) (map[string]struct{}, error) {
 	tx, err := s.db.Begin()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer tx.Rollback()
+	deleted := make(map[string]struct{}, len(checkpointIDs))
 	for _, checkpointID := range checkpointIDs {
+		res, err := tx.Exec(`DELETE FROM claw_checkpoints WHERE id=? AND id NOT IN (`+restoreSourceCheckpointsSQL+`)`, checkpointID)
+		if err != nil {
+			return nil, err
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			continue
+		}
 		if err := deleteCheckpointBlobRefsTx(tx, checkpointID); err != nil {
-			return err
+			return nil, err
 		}
-		if _, err := tx.Exec(`DELETE FROM claw_checkpoints WHERE id=?`, checkpointID); err != nil {
-			return err
-		}
+		deleted[checkpointID] = struct{}{}
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return deleted, nil
 }
 
 // ---------------------------------------------------------------------------
