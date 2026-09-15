@@ -222,28 +222,15 @@ func (s *Server) failStuckCreatingCheckpoints() {
 		`SELECT EXISTS(SELECT 1 FROM claw_checkpoints WHERE status='creating' AND created_at < ?)`, cutoff).
 		Scan(&stuck); err != nil {
 		log.Printf("[checkpoint] probe stuck creating checkpoints: %v", err)
-	} else if stuck {
-		if count, err := failStuckCreatingCheckpointsTx(s.db, cutoff); err != nil {
-			log.Printf("[checkpoint] fail stuck creating checkpoints: %v", err)
-		} else if count > 0 {
-			log.Printf("[checkpoint] failed %d checkpoint(s) stuck in 'creating' for over %s", count, checkpointCreatingMaxAge)
-		}
-	}
-	var orphaned bool
-	if err := s.db.QueryRow(`SELECT EXISTS(
-		SELECT 1 FROM checkpoint_blob_refs r
-		 WHERE NOT EXISTS (SELECT 1 FROM claw_checkpoints c WHERE c.id = r.checkpoint_id))`).
-		Scan(&orphaned); err != nil {
-		log.Printf("[checkpoint] probe orphaned checkpoint blob references: %v", err)
 		return
 	}
-	if !orphaned {
+	if !stuck {
 		return
 	}
-	if count, err := releaseOrphanedCheckpointBlobRefs(s.db); err != nil {
-		log.Printf("[checkpoint] release orphaned checkpoint blob references: %v", err)
+	if count, err := failStuckCreatingCheckpointsTx(s.db, cutoff); err != nil {
+		log.Printf("[checkpoint] fail stuck creating checkpoints: %v", err)
 	} else if count > 0 {
-		log.Printf("[checkpoint] released %d orphaned checkpoint blob reference(s)", count)
+		log.Printf("[checkpoint] failed %d checkpoint(s) stuck in 'creating' for over %s", count, checkpointCreatingMaxAge)
 	}
 }
 
@@ -281,7 +268,24 @@ func failStuckCreatingCheckpointsTx(db *sql.DB, cutoff time.Time) (int64, error)
 // certainly garbage is an edge pointing at a checkpoint that was deleted --
 // which a crash between the row delete and the edge delete can leave behind, and
 // which would otherwise pin those blobs for the life of the database.
+//
+// It runs only after the paths that can actually produce that shape: boot
+// (reconcileCheckpointsOnBoot, covering a crash in the previous process) and a
+// failed expiry delete (pruneExpiredCheckpoints). It used to run on every
+// scheduler tick, where its NOT-EXISTS probe was a full scan of the edge table
+// once a minute, in a steady state that could never have produced an orphan --
+// every path that deletes a row deletes its edges in the same transaction.
 func releaseOrphanedCheckpointBlobRefs(db *sql.DB) (int64, error) {
+	var orphaned bool
+	if err := db.QueryRow(`SELECT EXISTS(
+		SELECT 1 FROM checkpoint_blob_refs r
+		 WHERE NOT EXISTS (SELECT 1 FROM claw_checkpoints c WHERE c.id = r.checkpoint_id))`).
+		Scan(&orphaned); err != nil {
+		return 0, err
+	}
+	if !orphaned {
+		return 0, nil
+	}
 	res, err := db.Exec(`DELETE FROM checkpoint_blob_refs
 		 WHERE checkpoint_id NOT IN (SELECT id FROM claw_checkpoints)`)
 	if err != nil {
@@ -848,8 +852,10 @@ func (s *Server) insertCheckpoint(id, tenantID, clawID, reason, createdBy, provi
 	return err
 }
 
-// recordCheckpointBlobRefs records one reference edge per digest the checkpoint
-// plans to hold, before a single byte is uploaded.
+// recordCheckpointBlobRefs records what the checkpoint plans to hold, before a
+// single byte is uploaded: one edge from the checkpoint to its root tree, plus
+// -- when the hub has never seen that tree -- the expansion of the tree into
+// the file digests it lists.
 //
 // These are not claims with an expiry: they are the reference. They are written
 // here because the plan is the first moment the hub knows which blobs this
@@ -857,14 +863,31 @@ func (s *Server) insertCheckpoint(id, tenantID, clawID, reason, createdBy, provi
 // only thing that says the published checkpoint holds them. Nothing reconstructs
 // that from manifests or tree blobs any more.
 //
+// The expansion is committed HERE, in the same transaction as the root edge,
+// and not when the tree blob is uploaded. The bridge sends the complete file
+// list and the tree digest in the plan, so the hub has everything it needs. If
+// the expansion were written later, every file blob uploaded between the plan
+// and the tree upload would sit with no edge covering it, protected only by
+// the sweeper's mtime grace -- which is exactly the mark-and-sweep reasoning the
+// reference model exists to remove. Writing it at plan time is what lets the
+// plan/sweep interlock (planBlobMissing / removeUnclaimedBlob) carry over
+// unchanged: every digest the plan answers for is referenced before the answer
+// is sent.
+//
 // Recording before answering is what makes the plan's dedup answer safe. The
 // handler tells the claw to skip uploading a blob the hub already has, which
 // means that blob's mtime stays whatever it was when some other claw wrote it --
 // possibly months ago, well outside any grace window. Every planned digest is
 // recorded, not only the ones the claw must upload: the reused ones are
 // precisely the ones at risk.
-func (s *Server) recordCheckpointBlobRefs(checkpointID string, files []types.CheckpointFile) error {
-	if len(files) == 0 {
+//
+// A plan without a usable root digest falls back to one edge per file under
+// the checkpoint itself. The bridge always sends the root, so this is a rule
+// for a caller the hub does not have yet, not a path it expects to take -- but
+// the safety property must not depend on what the bridge sends.
+func (s *Server) recordCheckpointBlobRefs(checkpointID, rootSHA string, files []types.CheckpointFile) error {
+	root := normalizeBlobDigest(rootSHA)
+	if len(files) == 0 && root == "" {
 		// Nothing to reference, so there is no reason to take the write lock --
 		// but the status still has to be checked, because it is what the plan
 		// handler turns into its answer.
@@ -884,11 +907,20 @@ func (s *Server) recordCheckpointBlobRefs(checkpointID string, files []types.Che
 	if err := s.requireCheckpointCreating(tx.QueryRow(`SELECT status FROM claw_checkpoints WHERE id=?`, checkpointID)); err != nil {
 		return err
 	}
-	digests := make([]string, 0, len(files))
-	for _, f := range files {
-		digests = append(digests, f.SHA256)
+	if root == "" {
+		digests := make([]string, 0, len(files))
+		for _, f := range files {
+			digests = append(digests, f.SHA256)
+		}
+		if err := addCheckpointBlobRefsTx(tx, checkpointID, digests); err != nil {
+			return err
+		}
+		return tx.Commit()
 	}
-	if err := addCheckpointBlobRefsTx(tx, checkpointID, digests); err != nil {
+	if err := addCheckpointBlobRefsTx(tx, checkpointID, []string{root}); err != nil {
+		return err
+	}
+	if err := addTreeBlobRefsTx(tx, root, files); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -910,6 +942,48 @@ func addCheckpointBlobRefsTx(tx *sql.Tx, checkpointID string, digests []string) 
 			continue
 		}
 		if _, err := stmt.Exec(checkpointID, clean); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// addTreeBlobRefsTx records the expansion of one workspace tree into the file
+// digests it lists, once per distinct tree, inside the caller's transaction.
+//
+// The probe first. On the production hub 96% of idle checkpoints capture a tree
+// the hub has already seen, and for those the whole cost of this call is one
+// indexed EXISTS on the tree digest; only a genuinely new tree pays one insert
+// per file. The probe is safe to trust because an expansion is written in one
+// transaction and garbage-collected one whole tree per statement
+// (pruneUnreferencedTreeBlobRefs), so a tree with any row has all its rows.
+//
+// The tree's own digest is not listed under itself: the bridge puts the tree
+// blob in the plan's file list, and a self-edge is noise the keep set does not
+// need -- the checkpoint edge already names the tree.
+func addTreeBlobRefsTx(tx *sql.Tx, treeSHA string, files []types.CheckpointFile) error {
+	tree := normalizeBlobDigest(treeSHA)
+	if tree == "" || len(files) == 0 {
+		return nil
+	}
+	var known bool
+	if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM tree_blob_refs WHERE tree_sha256=?)`, tree).Scan(&known); err != nil {
+		return err
+	}
+	if known {
+		return nil
+	}
+	stmt, err := tx.Prepare(`INSERT OR IGNORE INTO tree_blob_refs(tree_sha256, sha256) VALUES(?,?)`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+	for _, f := range files {
+		clean := normalizeBlobDigest(f.SHA256)
+		if clean == "" || clean == tree {
+			continue
+		}
+		if _, err := stmt.Exec(tree, clean); err != nil {
 			return err
 		}
 	}
@@ -982,7 +1056,7 @@ func (s *Server) handleCheckpointInternal(w http.ResponseWriter, r *http.Request
 		// alive. Failing to record them must fail the plan rather than proceed
 		// unprotected: a retried plan costs one round trip, an unrestorable
 		// checkpoint is found weeks later.
-		if err := s.recordCheckpointBlobRefs(checkpointID, plan.Files); err != nil {
+		if err := s.recordCheckpointBlobRefs(checkpointID, plan.RootSHA256, plan.Files); err != nil {
 			if errors.Is(err, errCheckpointNotCreating) {
 				log.Printf("[checkpoint] rejecting stale plan for %s: checkpoint is no longer creating", shortID(checkpointID))
 				http.Error(w, "checkpoint is no longer creating", http.StatusConflict)
@@ -1057,8 +1131,10 @@ func (s *Server) handleCheckpointBlobUpload(w http.ResponseWriter, r *http.Reque
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxCheckpointBlobBytes)
 	path := checkpointBlobPath(sha)
-	if _, err := os.Stat(path); err == nil {
-		touchCheckpointBlob(path)
+	// Claim, then stat -- never a bare stat. A bare stat here answered "already
+	// have it" for a blob the sweeper's walker was about to unlink, and this was
+	// the one dedup path outside the interlock. See claimBlobPresent.
+	if s.claimBlobPresent(sha) {
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
@@ -1194,22 +1270,27 @@ func (s *Server) finalizeCheckpoint(checkpointID, tenantID, clawID, rootSHA stri
 		_ = os.Remove(path)
 		return errCheckpointNotCreating
 	}
-	// The plan-time edges are KEPT. They are the reference to every workspace
-	// file this checkpoint holds, and nothing else records them: under schema 2
-	// the per-file digests appear in neither the manifest nor the row. What is
-	// added here is everything the published checkpoint holds BEYOND the plan --
-	// the root tree blob and the message blob, which the claw never planned, plus
-	// the manifest digest for the benefit of any future change that stores the
-	// manifest as a blob (it is not one today, so the edge is inert).
+	// The plan-time edges are KEPT. The root-tree edge and the tree's expansion
+	// are the reference to every workspace file this checkpoint holds, and
+	// nothing else records them: under schema 2 the per-file digests appear in
+	// neither the manifest nor the row. What is added here is what the published
+	// checkpoint holds BEYOND the plan -- the message blob, which the claw never
+	// planned, plus the manifest digest for the benefit of any future change
+	// that stores the manifest as a blob (it is not one today, so the edge is
+	// inert). The root edge is re-added defensively; it is already there.
+	//
+	// The per-file digests are NOT re-inserted here. The plan wrote the
+	// expansion, and re-probing ~12k keys under the write lock on every finalize
+	// is pure cost. The one probe addTreeBlobRefsTx does run covers the case the
+	// plan cannot: a 'complete' naming a root the plan never mentioned, whose
+	// tree would otherwise be referenced with no expansion behind it.
 	//
 	// Same transaction as the UPDATE: a checkpoint that says 'ready' and a
 	// complete record of what it holds must land together or not at all.
-	refs := make([]string, 0, len(files)+3)
-	refs = append(refs, rootSHA, msgSHA, manifestSHA)
-	for _, f := range files {
-		refs = append(refs, f.SHA256)
+	if err := addCheckpointBlobRefsTx(tx, checkpointID, []string{rootSHA, msgSHA, manifestSHA}); err != nil {
+		return err
 	}
-	if err := addCheckpointBlobRefsTx(tx, checkpointID, refs); err != nil {
+	if err := addTreeBlobRefsTx(tx, rootSHA, files); err != nil {
 		return err
 	}
 	if err := tx.Commit(); err != nil {
@@ -1319,8 +1400,12 @@ func (s *Server) writeMessageCheckpointBlob(clawID, tenantID string) (string, in
 	}
 	sha := shaBytes(buf.Bytes())
 	path := checkpointBlobPath(sha)
-	if _, err := os.Stat(path); err == nil {
-		touchCheckpointBlob(path)
+	// Claim, then stat, under the interlock -- the same discipline as the plan
+	// handler. The message blob is the one referenced digest the plan never
+	// names, so a bare stat here was the one dedup outside the interlock: a
+	// sweep that had snapshotted its keep set before this checkpoint's finalize
+	// committed could unlink the blob between this stat and that commit.
+	if s.claimBlobPresent(sha) {
 		return sha, count, cutoff, nil
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {

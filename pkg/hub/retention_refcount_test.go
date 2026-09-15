@@ -240,36 +240,54 @@ func TestCompactionReleasesEdgesAndTheBlobGoesInTheSameCycle(t *testing.T) {
 // Compaction marks the row BEFORE unlinking the manifest. The other order left
 // a window where a failed UPDATE produced a 'ready' row pointing at a file that
 // no longer exists -- which the next cycle can pick as the claw's survivor.
+//
+// A successful pass ends in the same state under either order, so the only way
+// to see the difference is to make the UPDATE fail: a read-only handle lets
+// every SELECT succeed and every write fail, exactly as the disk-full hub does.
+// Mark-then-unlink leaves the manifest on disk and the row 'ready'; unlink-
+// then-mark leaves a 'ready' row whose manifest is gone.
 func TestCompactionMarksTheRowBeforeUnlinkingTheManifest(t *testing.T) {
-	s := newRetentionTestServer(t)
+	s, path := newFileBackedRetentionServer(t)
 	reference := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
 	insertRetentionClaw(t, s, "claw", reference)
 	insertRetentionPR(t, s, "claw", 1)
-	insertRetentionCheckpoint(t, s, retentionCheckpoint{
+	oldManifest := insertRetentionCheckpoint(t, s, retentionCheckpoint{
 		id: "cp-old", clawID: "claw", status: "ready",
 		createdAt: reference.Add(-48 * time.Hour), writeManifest: true})
 	insertRetentionCheckpoint(t, s, retentionCheckpoint{
 		id: "cp-new", clawID: "claw", status: "ready",
 		createdAt: reference.Add(-24 * time.Hour), writeManifest: true})
 
-	if _, err := s.compactFinalizedCheckpoints(reference.Add(-240*time.Hour), false); err != nil {
-		t.Fatalf("compactFinalizedCheckpoints: %v", err)
-	}
-	// After a successful pass there must be no 'ready' row whose manifest is
-	// missing -- the shape the old order could leave behind.
-	rows, err := s.db.Query(`SELECT id, manifest_path FROM claw_checkpoints WHERE status='ready' AND manifest_path <> ''`)
+	readOnly, err := openDB(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer rows.Close()
-	for rows.Next() {
-		var id, path string
-		if err := rows.Scan(&id, &path); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := os.Stat(path); err != nil {
-			t.Fatalf("ready checkpoint %s points at a manifest that does not exist: %v", id, err)
-		}
+	defer readOnly.Close()
+	readOnly.SetMaxOpenConns(1)
+	if _, err := readOnly.Exec(`PRAGMA query_only = 1`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readOnly.Exec(`UPDATE claw_checkpoints SET error='x' WHERE id='cp-old'`); err == nil {
+		t.Fatal("the fixture is not read-only, so it cannot make the UPDATE fail")
+	}
+	s.db = readOnly
+
+	result, err := s.compactFinalizedCheckpoints(reference.Add(-240*time.Hour), false)
+	if err != nil {
+		t.Fatalf("compactFinalizedCheckpoints: %v", err)
+	}
+	if result.itemErrors == 0 {
+		t.Fatal("the failed UPDATE was not reported; the fixture did not exercise the failure")
+	}
+	if result.count != 0 {
+		t.Fatalf("compacted=%d after a failed UPDATE, want 0", result.count)
+	}
+	if _, err := os.Stat(oldManifest); err != nil {
+		t.Fatalf("the manifest was unlinked before the row was marked; a failed UPDATE now leaves a 'ready' row pointing at nothing: %v", err)
+	}
+	status, manifestPath, _ := retentionCheckpointRow(t, s, "cp-old")
+	if status != "ready" || manifestPath != oldManifest {
+		t.Fatalf("row = %q %q after a failed UPDATE, want ready %q", status, manifestPath, oldManifest)
 	}
 }
 

@@ -497,7 +497,25 @@ func migrate(db *sql.DB) error {
 	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_volume_leases_volume_active ON volume_leases(volume_id, released_at, expires_at)`)
 	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_volume_leases_claw ON volume_leases(claw_id, released_at)`)
 
-	_, err = db.Exec(`
+	if _, err := db.Exec(fatalBootSchemaSQL); err != nil {
+		return err
+	}
+	return migrateAfterSchema(db)
+}
+
+// fatalBootSchemaSQL is the one multi-statement schema script whose failure
+// aborts migrate() and therefore refuses to boot the hub.
+//
+// Everything in it must be something the hub cannot serve without. It is a
+// package-level constant, not a literal inside migrate(), so that
+// TestFatalBootPathCreatesOnlyTheKnownObjects can enumerate what it creates:
+// four times now a statement that only the retention sweeper needs has been
+// added here, where SQLITE_FULL on the disk-full hub the sweeper exists to
+// relieve turns it into a hub that does not boot. Anything the hub can run
+// without -- retention indexes, the blob reference tables -- belongs in a
+// non-fatal helper (ensureRetentionIndexes, ensureCheckpointBlobRefTables)
+// that logs and retries on the next boot or sweep.
+const fatalBootSchemaSQL = `
 	CREATE TABLE IF NOT EXISTS tenants (
 		id        TEXT PRIMARY KEY,
 		name      TEXT NOT NULL,
@@ -970,37 +988,6 @@ func migrate(db *sql.DB) error {
 	CREATE INDEX IF NOT EXISTS idx_claw_checkpoints_claw ON claw_checkpoints(claw_id, created_at);
 	CREATE INDEX IF NOT EXISTS idx_claw_checkpoints_status ON claw_checkpoints(status, created_at);
 
-	-- One row per (checkpoint, blob) REFERENCE. This is the whole of the blob
-	-- reclamation model: a blob is deletable when no row here names it.
-	--
-	-- Its predecessor, claw_checkpoint_pending_blobs, held the same tuples but
-	-- only for the length of a checkpoint's upload window -- it was a claim, and
-	-- every terminal transition deleted it. From that point the sweeper had to
-	-- RECONSTRUCT reachability each cycle by parsing every manifest, following
-	-- every tree blob, unioning the digest columns of every row and subtracting a
-	-- simulation of the phases that had just run. Every defect that reconstruction
-	-- produced was of one kind: some state it did not account for. An edge that
-	-- simply outlives the plan removes the reconstruction entirely.
-	--
-	-- Lifecycle (checkpoints.go and retention.go own these transitions):
-	--   plan                                  INSERT the edges
-	--   finalize / skip / metadata-only       KEEP them, and add whatever the
-	--                                         published checkpoint references
-	--                                         beyond the plan (root tree, message
-	--                                         blob, manifest digest)
-	--   fail / expiry / compaction            DELETE them, in the SAME
-	--                                         transaction as the status change
-	--
-	-- Deleting the last edge naming a digest is what makes that blob collectable.
-	CREATE TABLE IF NOT EXISTS checkpoint_blob_refs (
-		checkpoint_id TEXT NOT NULL,
-		sha256        TEXT NOT NULL,
-		PRIMARY KEY (checkpoint_id, sha256)
-	);
-	-- No second index. The primary key's leading column is the checkpoint_id
-	-- lookup every lifecycle transition needs, and the sweeper reads the table
-	-- whole (one scan of two narrow columns) rather than probing it per blob, so
-	-- an index on sha256 would be pure write cost on the checkpoint hot path.
 
 	CREATE TABLE IF NOT EXISTS ssh_known_hosts (
 		host          TEXT PRIMARY KEY,
@@ -1127,10 +1114,12 @@ func migrate(db *sql.DB) error {
 		key   TEXT PRIMARY KEY,
 		value TEXT NOT NULL
 	);
-	`)
-	if err != nil {
-		return err
-	}
+`
+
+// migrateAfterSchema is the remainder of migrate(): the one-time backfills and
+// rebuilds that run once the schema script has been applied.
+func migrateAfterSchema(db *sql.DB) error {
+	var err error
 	if err := workflowv2.Migrate(db); err != nil {
 		return err
 	}
@@ -1197,9 +1186,147 @@ func migrate(db *sql.DB) error {
 	// Both deliberately last, and deliberately not fatal: neither is needed for
 	// the hub to serve, and the hub that cannot complete them is the disk-full
 	// hub that most needs to boot. See ensureRetentionIndexes.
+	ensureCheckpointBlobRefTables(db)
 	adoptLegacyCheckpointBlobClaims(db)
 	ensureRetentionIndexes(db)
 	return nil
+}
+
+// checkpointBlobRefTables are the two tables of the blob reference model. See
+// the comment on ensureCheckpointBlobRefTables for why they are created here
+// rather than in fatalBootSchemaSQL.
+//
+// checkpoint_blob_refs holds, per checkpoint, ONLY the digests the checkpoint
+// row itself names: the root tree, the message blob, the manifest digest. At
+// most three rows per checkpoint. This is the whole of the blob reclamation
+// model: a blob is deletable when no row here names it, directly or through the
+// tree expansion below.
+//
+// Its predecessor, claw_checkpoint_pending_blobs, held the same tuple but only
+// for the length of a checkpoint's upload window -- it was a claim, and every
+// terminal transition deleted it. From that point the sweeper had to RECONSTRUCT
+// reachability each cycle by parsing every manifest, following every tree blob,
+// unioning the digest columns of every row and subtracting a simulation of the
+// phases that had just run. Every defect that reconstruction produced was of one
+// kind: some state it did not account for. An edge that simply outlives the plan
+// removes the reconstruction entirely.
+//
+// The first refcounted version held one edge per FILE per checkpoint. Measured
+// on the production hub that is 16,193,935 edges for 5,211 checkpoints -- but
+// only 331 distinct workspace trees, because 96% of idle checkpoints capture a
+// tree byte-identical to the previous one. Per-file edges cost 3-4 GB of new
+// pages on a 190 MB database before a single blob could be deleted, on a disk
+// that was already full; the backfill hit SQLITE_FULL and the sweep declined
+// forever. So the expansion of a tree into its files is stored ONCE per distinct
+// tree, in tree_blob_refs, and a checkpoint references the tree.
+//
+// Lifecycle (checkpoints.go and retention.go own these transitions):
+//
+//	plan                                  INSERT the root-tree edge, plus the
+//	                                      tree's expansion when the tree is new
+//	finalize / skip / metadata-only       KEEP it, and add the message blob and
+//	                                      manifest digest
+//	fail / expiry / compaction            DELETE the checkpoint's edges, in the
+//	                                      SAME transaction as the status change
+//	tree_blob_refs                        garbage-collected by the sweep once no
+//	                                      checkpoint edge names the tree
+//
+// The keep set the sweeper uses is
+//
+//	SELECT sha256 FROM checkpoint_blob_refs
+//	UNION
+//	SELECT t.sha256 FROM tree_blob_refs t
+//	 WHERE t.tree_sha256 IN (SELECT sha256 FROM checkpoint_blob_refs)
+//
+// The IN-subquery is over ALL checkpoint edges rather than a root-tree column,
+// so that the edge table stays the single authority: it is what gets deleted
+// transactionally with the status change. Non-tree digests match no
+// tree_sha256 key. A stale expansion (its tree no longer referenced) therefore
+// pins nothing, which is what makes its garbage collection hygiene rather than
+// correctness.
+//
+// Both tables are WITHOUT ROWID: the payload is two digests, and the rowid
+// B-tree plus the primary-key index would store every row twice. No second
+// index on sha256: the sweeper reads checkpoint_blob_refs whole and probes
+// tree_blob_refs by its leading key, so an index on the file digest would be
+// pure write cost on the checkpoint hot path.
+var checkpointBlobRefTables = []struct{ name, stmt string }{
+	{"checkpoint_blob_refs", `CREATE TABLE IF NOT EXISTS checkpoint_blob_refs (
+		checkpoint_id TEXT NOT NULL,
+		sha256        TEXT NOT NULL,
+		PRIMARY KEY (checkpoint_id, sha256)
+	) WITHOUT ROWID`},
+	{"tree_blob_refs", `CREATE TABLE IF NOT EXISTS tree_blob_refs (
+		tree_sha256 TEXT NOT NULL,
+		sha256      TEXT NOT NULL,
+		PRIMARY KEY (tree_sha256, sha256)
+	) WITHOUT ROWID`},
+}
+
+// ensureCheckpointBlobRefTables creates the blob reference tables outside the
+// boot-critical schema script, and never fails startup when it cannot.
+//
+// This is the same rule as ensureRetentionIndexes, and for the same reason:
+// creating a table allocates pages, the hub that cannot allocate pages is the
+// disk-full hub, and a CREATE that fails inside fatalBootSchemaSQL aborts the
+// whole script and then the boot. Nothing the hub serves needs these tables --
+// without them a checkpoint plan fails with a storage error and the blob sweep
+// refuses to run (referencedBlobDigests returns an error, and the sweep deletes
+// nothing on an error), both of which are the correct behaviour on a hub that
+// cannot write. Every later boot retries.
+func ensureCheckpointBlobRefTables(db *sql.DB) {
+	for _, table := range checkpointBlobRefTables {
+		if _, err := db.Exec(table.stmt); err != nil {
+			log.Printf("[migrate] table %s not created (retrying on the next boot): %v", table.name, err)
+		}
+	}
+	rebuildCheckpointBlobRefsWithoutRowid(db)
+}
+
+// rebuildCheckpointBlobRefsWithoutRowid converts a checkpoint_blob_refs table
+// created by the per-file version of this model, which had a rowid, into the
+// WITHOUT ROWID shape. CREATE TABLE IF NOT EXISTS leaves an existing table as
+// it is, and SQLite cannot alter a table's rowid-ness in place, so the rows are
+// copied into a fresh table which then takes the name.
+//
+// Non-fatal, like everything around it: the copy needs free pages, and a hub
+// that cannot spare them keeps working on the rowid table -- the shape costs
+// storage, not correctness. The whole rebuild is one transaction, so a failure
+// leaves the original table untouched.
+func rebuildCheckpointBlobRefsWithoutRowid(db *sql.DB) {
+	var ddl string
+	err := db.QueryRow(`SELECT sql FROM sqlite_master WHERE type='table' AND name='checkpoint_blob_refs'`).Scan(&ddl)
+	if err != nil || strings.Contains(strings.ToUpper(ddl), "WITHOUT ROWID") {
+		return
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		log.Printf("[migrate] rebuild checkpoint_blob_refs without rowid: %v", err)
+		return
+	}
+	defer tx.Rollback()
+	for _, stmt := range []string{
+		`DROP TABLE IF EXISTS checkpoint_blob_refs_rebuild`,
+		`CREATE TABLE checkpoint_blob_refs_rebuild (
+			checkpoint_id TEXT NOT NULL,
+			sha256        TEXT NOT NULL,
+			PRIMARY KEY (checkpoint_id, sha256)
+		) WITHOUT ROWID`,
+		`INSERT OR IGNORE INTO checkpoint_blob_refs_rebuild(checkpoint_id, sha256)
+		 SELECT checkpoint_id, sha256 FROM checkpoint_blob_refs`,
+		`DROP TABLE checkpoint_blob_refs`,
+		`ALTER TABLE checkpoint_blob_refs_rebuild RENAME TO checkpoint_blob_refs`,
+	} {
+		if _, err := tx.Exec(stmt); err != nil {
+			log.Printf("[migrate] rebuild checkpoint_blob_refs without rowid (retrying on the next boot): %v", err)
+			return
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		log.Printf("[migrate] rebuild checkpoint_blob_refs without rowid: %v", err)
+		return
+	}
+	log.Printf("[migrate] rebuilt checkpoint_blob_refs as WITHOUT ROWID")
 }
 
 // adoptLegacyCheckpointBlobClaims carries the rows of the old

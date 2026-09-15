@@ -129,26 +129,40 @@ func insertRetentionCheckpoint(t *testing.T, s *Server, cp retentionCheckpoint) 
 }
 
 // seedCheckpointBlobRefs records the reference edges a published checkpoint
-// holds: the root tree, the message blob, the manifest digest, and every file
-// the tree lists. It mirrors finalizeCheckpoint, which is where those edges come
-// from in production; a fixture that inserts a row without them is describing a
-// checkpoint the hub could not have created.
+// holds: the root tree, the message blob and the manifest digest under the
+// checkpoint, and the tree's expansion into its files under the tree. It
+// mirrors plan + finalize, which is where those edges come from in production;
+// a fixture that inserts a row without them is describing a checkpoint the hub
+// could not have created.
 func seedCheckpointBlobRefs(t *testing.T, s *Server, checkpointID, rootTree, messageTree, manifestSHA string) {
 	t.Helper()
-	refs := []string{rootTree, messageTree, manifestSHA}
-	if rootTree != "" {
-		if data, err := os.ReadFile(checkpointBlobPath(rootTree)); err == nil {
-			var files []types.CheckpointFile
-			if json.Unmarshal(data, &files) == nil {
-				for _, f := range files {
-					refs = append(refs, f.SHA256)
-				}
-			}
-		}
-	}
-	if err := s.insertCheckpointBlobRefs(checkpointID, refs); err != nil {
+	if err := s.insertCheckpointBlobRefs(checkpointID, []string{rootTree, messageTree, manifestSHA}); err != nil {
 		t.Fatalf("seed blob references for %s: %v", checkpointID, err)
 	}
+	if rootTree == "" {
+		return
+	}
+	data, err := os.ReadFile(checkpointBlobPath(rootTree))
+	if err != nil {
+		return
+	}
+	var files []types.CheckpointFile
+	if json.Unmarshal(data, &files) != nil {
+		return
+	}
+	if _, err := s.insertTreeBlobRefs(rootTree, files); err != nil {
+		t.Fatalf("seed tree expansion for %s: %v", checkpointID, err)
+	}
+}
+
+// treeBlobRefCount counts the expansion rows one tree holds.
+func treeBlobRefCount(t *testing.T, s *Server, treeSHA string) int {
+	t.Helper()
+	var n int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM tree_blob_refs WHERE tree_sha256=?`, treeSHA).Scan(&n); err != nil {
+		t.Fatalf("count tree references: %v", err)
+	}
+	return n
 }
 
 // checkpointBlobRefCount counts the edges one checkpoint holds.
@@ -808,6 +822,10 @@ func TestClawFinalizedIgnoresMentionOnlyPRs(t *testing.T) {
 // rewrite. Deleting it there is what forced the sweeper to rebuild reachability
 // from manifests and tree blobs every cycle, and every defect three review loops
 // found lived in that rebuild.
+//
+// The plan names one digest the tree blob does NOT list. That is what lets the
+// finalize case tell "kept the plan's references" from "deleted them and
+// re-derived the same set from the tree": only the first keeps the extra one.
 func TestBlobReferenceSurvivesEveryPublishingTransition(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -847,19 +865,19 @@ func TestBlobReferenceSurvivesEveryPublishingTransition(t *testing.T) {
 			insertRetentionClaw(t, s, "claw", reference)
 
 			fileSHA := writeRetentionBlob(t, []byte("a blob an earlier claw already uploaded"))
+			planOnlySHA := writeRetentionBlob(t, []byte("planned, but absent from the tree blob"))
 			tree, _ := json.Marshal([]types.CheckpointFile{{Path: "workspace/a.txt", SHA256: fileSHA, Size: 39}})
 			rootSHA := writeRetentionBlob(t, tree)
-			for _, sha := range []string{fileSHA, rootSHA} {
-				aged := time.Now().Add(-2 * blobSweepGrace)
-				if err := os.Chtimes(checkpointBlobPath(sha), aged, aged); err != nil {
-					t.Fatal(err)
-				}
+			for _, sha := range []string{fileSHA, planOnlySHA, rootSHA} {
+				ageBlob(t, sha)
 			}
 
 			insertRetentionCheckpoint(t, s, retentionCheckpoint{
 				id: "cp", clawID: "claw", status: "creating", createdAt: reference, noBlobRefs: true})
-			if err := s.recordCheckpointBlobRefs("cp", []types.CheckpointFile{
+			if err := s.recordCheckpointBlobRefs("cp", rootSHA, []types.CheckpointFile{
 				{Path: "workspace/a.txt", SHA256: fileSHA, Size: 39},
+				{Path: "workspace/b.txt", SHA256: planOnlySHA, Size: 38},
+				{Path: ".checkpoint/tree.json", SHA256: rootSHA, Size: int64(len(tree))},
 			}); err != nil {
 				t.Fatalf("recordCheckpointBlobRefs: %v", err)
 			}
@@ -871,15 +889,27 @@ func TestBlobReferenceSurvivesEveryPublishingTransition(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if _, ok := referenced[fileSHA]; ok != tc.wantKept {
-				t.Fatalf("reference to the planned blob kept = %v, want %v (%s)", ok, tc.wantKept, tc.why)
+			for _, sha := range []string{fileSHA, planOnlySHA} {
+				if _, ok := referenced[sha]; ok != tc.wantKept {
+					t.Fatalf("reference to planned blob %s kept = %v, want %v (%s)", shortID(sha), ok, tc.wantKept, tc.why)
+				}
 			}
 			if _, _, _, err := s.sweepCheckpointBlobs(false, nil); err != nil {
 				t.Fatalf("sweepCheckpointBlobs: %v", err)
 			}
-			_, statErr := os.Stat(checkpointBlobPath(fileSHA))
-			if survived := statErr == nil; survived != tc.wantKept {
-				t.Fatalf("blob survived the sweep = %v, want %v (%s)", survived, tc.wantKept, tc.why)
+			for _, sha := range []string{fileSHA, planOnlySHA} {
+				_, statErr := os.Stat(checkpointBlobPath(sha))
+				if survived := statErr == nil; survived != tc.wantKept {
+					t.Fatalf("blob %s survived the sweep = %v, want %v (%s)", shortID(sha), survived, tc.wantKept, tc.why)
+				}
+			}
+			if tc.wantKept {
+				// The checkpoint's own edges are the root tree plus whatever the
+				// transition added (message blob and manifest for finalize):
+				// never the files. Those live under the tree, once.
+				if got := checkpointBlobRefCount(t, s, "cp"); got > 3 {
+					t.Fatalf("checkpoint holds %d edges of its own, want at most 3 (root, message, manifest); the files belong to the tree", got)
+				}
 			}
 		})
 	}
@@ -888,28 +918,43 @@ func TestBlobReferenceSurvivesEveryPublishingTransition(t *testing.T) {
 // A blob is content-addressed and shared. It goes when the LAST holder lets go,
 // never when the first one does -- which is the property a per-claw pass cannot
 // establish and a reference count gets for free.
+//
+// Every step is a production transition: two claws plan and publish a
+// checkpoint of the same workspace, one is compacted, the other expires. No
+// edge is seeded or deleted by hand, so the test proves the paths that release
+// references release the right ones.
 func TestSharedBlobSurvivesUntilEveryHolderReleasesIt(t *testing.T) {
 	s := newRetentionTestServer(t)
 	reference := time.Now()
-	insertRetentionClaw(t, s, "claw-a", reference)
-	insertRetentionClaw(t, s, "claw-b", reference)
 
 	shared := writeRetentionBlob(t, []byte("the same bytes captured by two claws"))
-	aged := time.Now().Add(-2 * blobSweepGrace)
-	if err := os.Chtimes(checkpointBlobPath(shared), aged, aged); err != nil {
-		t.Fatal(err)
-	}
-	for _, id := range []string{"cp-a", "cp-b"} {
-		if err := s.insertCheckpointBlobRefs(id, []string{shared}); err != nil {
-			t.Fatalf("seed references for %s: %v", id, err)
+	tree, _ := json.Marshal([]types.CheckpointFile{{Path: "workspace/a.txt", SHA256: shared, Size: 36}})
+	rootSHA := writeRetentionBlob(t, tree)
+	ageBlob(t, shared)
+	ageBlob(t, rootSHA)
+
+	for _, claw := range []string{"claw-a", "claw-b"} {
+		insertRetentionClaw(t, s, claw, reference)
+		id := "cp-" + claw
+		insertRetentionCheckpoint(t, s, retentionCheckpoint{
+			id: id, clawID: claw, status: "creating", createdAt: reference, noBlobRefs: true})
+		if err := s.recordCheckpointBlobRefs(id, rootSHA, []types.CheckpointFile{
+			{Path: "workspace/a.txt", SHA256: shared, Size: 36},
+			{Path: ".checkpoint/tree.json", SHA256: rootSHA, Size: int64(len(tree))},
+		}); err != nil {
+			t.Fatalf("plan %s: %v", id, err)
+		}
+		if err := s.finalizeCheckpoint(id, "tenant", claw, rootSHA); err != nil {
+			t.Fatalf("finalize %s: %v", id, err)
 		}
 	}
 
 	if removed, _, _, err := s.sweepCheckpointBlobs(false, nil); err != nil || removed != 0 {
 		t.Fatalf("sweep removed %d blobs (err %v) while two checkpoints held it", removed, err)
 	}
-	if _, err := s.db.Exec(`DELETE FROM checkpoint_blob_refs WHERE checkpoint_id='cp-a'`); err != nil {
-		t.Fatal(err)
+	// The first holder is compacted.
+	if err := s.markCheckpointCompacted("cp-claw-a"); err != nil {
+		t.Fatalf("markCheckpointCompacted: %v", err)
 	}
 	if removed, _, _, err := s.sweepCheckpointBlobs(false, nil); err != nil || removed != 0 {
 		t.Fatalf("sweep removed %d blobs (err %v) while one checkpoint still held it", removed, err)
@@ -917,11 +962,17 @@ func TestSharedBlobSurvivesUntilEveryHolderReleasesIt(t *testing.T) {
 	if _, err := os.Stat(checkpointBlobPath(shared)); err != nil {
 		t.Fatalf("the surviving holder's blob was swept: %v", err)
 	}
-	if _, err := s.db.Exec(`DELETE FROM checkpoint_blob_refs WHERE checkpoint_id='cp-b'`); err != nil {
-		t.Fatal(err)
+	// The second expires.
+	if err := s.deleteExpiredCheckpoint("cp-claw-b"); err != nil {
+		t.Fatalf("deleteExpiredCheckpoint: %v", err)
 	}
-	if removed, _, _, err := s.sweepCheckpointBlobs(false, nil); err != nil || removed != 1 {
-		t.Fatalf("sweep removed %d blobs (err %v) after the last holder released it, want 1", removed, err)
+	if _, _, _, err := s.sweepCheckpointBlobs(false, nil); err != nil {
+		t.Fatalf("sweepCheckpointBlobs: %v", err)
+	}
+	for _, sha := range []string{shared, rootSHA} {
+		if _, err := os.Stat(checkpointBlobPath(sha)); !os.IsNotExist(err) {
+			t.Fatalf("blob %s survived after its last holder released it: %v", shortID(sha), err)
+		}
 	}
 }
 
@@ -940,7 +991,7 @@ func TestBlobReferenceProtectsThenReleasesAcrossSweeps(t *testing.T) {
 	}
 	insertRetentionCheckpoint(t, s, retentionCheckpoint{
 		id: "cp", clawID: "claw", status: "creating", createdAt: reference, noBlobRefs: true})
-	if err := s.recordCheckpointBlobRefs("cp", []types.CheckpointFile{
+	if err := s.recordCheckpointBlobRefs("cp", testTreeSHA, []types.CheckpointFile{
 		{Path: "workspace/a.txt", SHA256: plannedSHA, Size: 46},
 	}); err != nil {
 		t.Fatalf("recordCheckpointBlobRefs: %v", err)

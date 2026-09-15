@@ -123,7 +123,7 @@ func TestBlobSweepRespectsAClaimThatArrivesDuringTheWalk(t *testing.T) {
 				}
 				planRan = true
 				// The plan handler's exact sequence: claim durably, then answer.
-				if err := s.recordCheckpointBlobRefs("cp", []types.CheckpointFile{
+				if err := s.recordCheckpointBlobRefs("cp", testTreeSHA, []types.CheckpointFile{
 					{Path: "workspace/a.txt", SHA256: target, Size: 39},
 				}); err != nil {
 					t.Errorf("recordCheckpointBlobRefs: %v", err)
@@ -240,7 +240,7 @@ func TestFailCheckpointKeepsItsClaimsWhenTheUpdateFails(t *testing.T) {
 	insertRetentionCheckpoint(t, s, retentionCheckpoint{
 		id: "cp", clawID: "claw", status: "creating", createdAt: reference})
 	sha := writeRetentionBlob(t, []byte("planned but never uploaded"))
-	if err := s.recordCheckpointBlobRefs("cp", []types.CheckpointFile{
+	if err := s.recordCheckpointBlobRefs("cp", testTreeSHA, []types.CheckpointFile{
 		{Path: "workspace/a.txt", SHA256: sha, Size: 25},
 	}); err != nil {
 		t.Fatalf("recordCheckpointBlobRefs: %v", err)
@@ -289,7 +289,7 @@ func TestCheckpointTransitionsRequireTheRowToStillBeCreating(t *testing.T) {
 		{
 			name: "plan retried after the checkpoint failed", status: "failed",
 			apply: func(s *Server) error {
-				return s.recordCheckpointBlobRefs("cp", []types.CheckpointFile{
+				return s.recordCheckpointBlobRefs("cp", testTreeSHA, []types.CheckpointFile{
 					{Path: "workspace/a.txt", SHA256: validTestSHA, Size: 1}})
 			},
 			wantErr: errCheckpointNotCreating, wantStatus: "failed",
@@ -298,7 +298,7 @@ func TestCheckpointTransitionsRequireTheRowToStillBeCreating(t *testing.T) {
 		{
 			name: "plan for a checkpoint that no longer exists", status: "",
 			apply: func(s *Server) error {
-				return s.recordCheckpointBlobRefs("cp", []types.CheckpointFile{
+				return s.recordCheckpointBlobRefs("cp", testTreeSHA, []types.CheckpointFile{
 					{Path: "workspace/a.txt", SHA256: validTestSHA, Size: 1}})
 			},
 			wantErr: errCheckpointNotCreating, wantStatus: "",
@@ -381,6 +381,12 @@ func TestCheckpointTransitionsRequireTheRowToStillBeCreating(t *testing.T) {
 }
 
 const validTestSHA = "1111111111111111111111111111111111111111111111111111111111111111"
+
+// testTreeSHA stands in for the root tree digest a bridge sends with its plan.
+// The tree blob itself is not on disk at plan time -- it is uploaded with the
+// rest -- so a plan only ever needs the digest, and a fixture only needs one
+// that is well-formed.
+const testTreeSHA = "2222222222222222222222222222222222222222222222222222222222222222"
 
 // ---------------------------------------------------------------------------
 // Retention indexes off the boot path (findings 4 and 12)
@@ -830,7 +836,7 @@ func TestFailStuckCreatingCheckpointsReleasesTheirClaims(t *testing.T) {
 			insertRetentionCheckpoint(t, s, retentionCheckpoint{
 				id: "cp", clawID: "claw", status: "creating", createdAt: reference.Add(-tc.age)})
 			sha := writeRetentionBlob(t, []byte("planned by a claw that died"))
-			if err := s.recordCheckpointBlobRefs("cp", []types.CheckpointFile{
+			if err := s.recordCheckpointBlobRefs("cp", testTreeSHA, []types.CheckpointFile{
 				{Path: "workspace/a.txt", SHA256: sha, Size: 27}}); err != nil {
 				t.Fatalf("recordCheckpointBlobRefs: %v", err)
 			}
@@ -862,7 +868,7 @@ func TestBootCheckpointReconciliationRunsIndependentlyOfLiveness(t *testing.T) {
 	insertRetentionCheckpoint(t, s, retentionCheckpoint{
 		id: "cp", clawID: "claw", status: "creating", createdAt: reference})
 	sha := writeRetentionBlob(t, []byte("interrupted upload"))
-	if err := s.recordCheckpointBlobRefs("cp", []types.CheckpointFile{
+	if err := s.recordCheckpointBlobRefs("cp", testTreeSHA, []types.CheckpointFile{
 		{Path: "workspace/a.txt", SHA256: sha, Size: 18}}); err != nil {
 		t.Fatalf("recordCheckpointBlobRefs: %v", err)
 	}
