@@ -15,8 +15,8 @@ export interface AgentOptions {
 
 export function validateAgentConfig(config: AgentConfig): string | null {
   const count = config.subagents?.max_concurrent
-  if (count !== undefined && (!Number.isInteger(count) || count < 1)) {
-    return "Concurrent subagents must be a whole number of at least 1."
+  if (count !== undefined && (!Number.isInteger(count) || count < 1 || count > 32)) {
+    return "Concurrent subagents must be a whole number between 1 and 32."
   }
   return null
 }

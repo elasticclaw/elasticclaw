@@ -96,7 +96,7 @@ export function ManualTriggerModal({ open, onOpenChange, workflow }: ManualTrigg
         const validation = validateAgentConfig(agents)
         if (validation) throw new Error(validation)
       }
-      await triggerWorkflow(workflow, inputs, overrideAgents ? { ...agents, subagents: agents.subagents ?? {} } : undefined)
+      await triggerWorkflow(workflow, inputs, overrideAgents ? agents : undefined)
       setTriggering(false)
       onOpenChange(false)
     } catch (e) {
@@ -138,10 +138,19 @@ export function ManualTriggerModal({ open, onOpenChange, workflow }: ManualTrigg
 
         <div className="space-y-4 border-t border-border pt-4">
           <label className="flex items-center gap-2 text-sm font-medium">
-            <input type="checkbox" checked={overrideAgents} disabled={triggering} onChange={e => setOverrideAgents(e.target.checked)} />
+            <input
+              type="checkbox"
+              checked={overrideAgents}
+              disabled={triggering}
+              onChange={e => setOverrideAgents(e.target.checked)}
+            />
             Customize agents for this run
           </label>
-          {overrideAgents ? <AgentConfigForm value={agents} onChange={setAgents} disabled={triggering} /> : <p className="text-xs text-muted-foreground">Uses this workflow’s agent settings.</p>}
+          {overrideAgents ? (
+            <AgentConfigForm value={agents} onChange={setAgents} disabled={triggering} />
+          ) : (
+            <p className="text-xs text-muted-foreground">Uses this workflow’s agent settings.</p>
+          )}
         </div>
 
         {triggerError && (
