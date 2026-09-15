@@ -1,10 +1,10 @@
 "use client"
 
-import { useEffect, useId, useState } from "react"
+import { useEffect, useId, useRef, useState } from "react"
 import { Input } from "@/components/ui/input"
 import { Button } from "@/components/ui/button"
 import { fetchAgentOptions } from "@/lib/api"
-import type { AgentConfig, AgentOptions } from "@/lib/agent-config"
+import { validateAgentConfig, type AgentConfig, type AgentOptions } from "@/lib/agent-config"
 
 export function AgentConfigForm({
   value,
@@ -21,6 +21,7 @@ export function AgentConfigForm({
   const [options, setOptions] = useState<AgentOptions | null>(null)
   const [error, setError] = useState("")
   const [attempt, setAttempt] = useState(0)
+  const mainCredentialRef = useRef<HTMLSelectElement>(null)
 
   useEffect(() => {
     let active = true
@@ -37,6 +38,11 @@ export function AgentConfigForm({
     return () => { active = false }
   }, [attempt])
 
+  useEffect(() => {
+    if (options && attempt > 0) mainCredentialRef.current?.focus()
+  }, [options, attempt])
+
+  const concurrencyError = validateAgentConfig(value)
   const credentials = options?.credentials ?? []
   const inheritsSubagents = value.subagents === undefined
   const mainModelPlaceholder = value.llm_key
@@ -56,7 +62,7 @@ export function AgentConfigForm({
       onChange({
         ...value,
         llm_key: name || undefined,
-        default_model: credentials.find(c => c.name === name)?.default_model || undefined,
+        default_model: undefined,
       })
     } else {
       onChange({
@@ -92,6 +98,7 @@ export function AgentConfigForm({
           Credential
         </label>
         <select
+          ref={role === "main" ? mainCredentialRef : undefined}
           id={`${id}-${role}-credential`}
           className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm"
           value={selected ?? ""}
@@ -114,14 +121,24 @@ export function AgentConfigForm({
 
   return (
     <div className="space-y-5">
-      {error ? (
-        <div role="alert" className="text-sm text-destructive">
-          {error}
-          <Button type="button" variant="link" size="sm" onClick={() => setAttempt(n => n + 1)}>
+      {(error || (!options && attempt > 0)) && (
+        <div className="text-sm text-destructive">
+          {error && <p role="alert">{error}</p>}
+          <Button
+            type="button"
+            variant="link"
+            size="sm"
+            disabled={!error}
+            onClick={() => {
+              setError("")
+              setAttempt(n => n + 1)
+            }}
+          >
             Retry
           </Button>
         </div>
-      ) : !options && (
+      )}
+      {!options && !error && (
         <p role="status" className="text-xs text-muted-foreground">Loading credentials…</p>
       )}
 
@@ -155,6 +172,8 @@ export function AgentConfigForm({
               type="button"
               variant="outline"
               size="sm"
+              aria-expanded={!inheritsSubagents}
+              aria-controls={`${id}-subagent-fields`}
               onClick={() => inheritsSubagents
                 ? onChange({ ...value, subagents: {} })
                 : restoreInheritedSettings()}
@@ -168,49 +187,58 @@ export function AgentConfigForm({
             )}
           </div>
         </div>
-        {!inheritsSubagents && (
-          <div className="space-y-3">
-            {credentialField("subagents")}
-            <div className="space-y-1.5">
-              <label htmlFor={`${id}-subagents-model`} className="text-xs font-medium">Model</label>
-              <Input
-                id={`${id}-subagents-model`}
-                value={value.subagents?.model ?? ""}
-                onChange={e => onChange({
-                  ...value,
-                  subagents: { ...value.subagents, model: e.target.value || undefined },
-                })}
-                placeholder={subagentModelPlaceholder}
-                aria-describedby={`${id}-subagents-model-help`}
-              />
-              <p id={`${id}-subagents-model-help`} className="text-xs text-muted-foreground">
-                Leave the model empty to use the main agent’s model with the same credential,
-                or the credential’s default model with a different credential.
-              </p>
+        <div id={`${id}-subagent-fields`} hidden={inheritsSubagents}>
+          {!inheritsSubagents && (
+            <div className="space-y-3">
+              {credentialField("subagents")}
+              <div className="space-y-1.5">
+                <label htmlFor={`${id}-subagents-model`} className="text-xs font-medium">Model</label>
+                <Input
+                  id={`${id}-subagents-model`}
+                  value={value.subagents?.model ?? ""}
+                  onChange={e => onChange({
+                    ...value,
+                    subagents: { ...value.subagents, model: e.target.value || undefined },
+                  })}
+                  placeholder={subagentModelPlaceholder}
+                  aria-describedby={`${id}-subagents-model-help`}
+                />
+                <p id={`${id}-subagents-model-help`} className="text-xs text-muted-foreground">
+                  Leave the model empty to use the main agent’s model with the same credential,
+                  or the credential’s default model with a different credential.
+                </p>
+              </div>
+              <div className="space-y-1.5">
+                <label htmlFor={`${id}-concurrency`} className="text-xs font-medium">
+                  Maximum concurrent subagents
+                </label>
+                <Input
+                  id={`${id}-concurrency`}
+                  type="number"
+                  min={1}
+                  max={32}
+                  step={1}
+                  value={value.subagents?.max_concurrent ?? ""}
+                  onChange={e => onChange({
+                    ...value,
+                    subagents: {
+                      ...value.subagents,
+                      max_concurrent: e.target.value === "" ? undefined : Number(e.target.value),
+                    },
+                  })}
+                  aria-invalid={concurrencyError ? true : undefined}
+                  aria-describedby={concurrencyError ? `${id}-concurrency-error` : undefined}
+                  placeholder="Use default limit"
+                />
+                {concurrencyError && (
+                  <p id={`${id}-concurrency-error`} className="text-xs text-destructive">
+                    {concurrencyError}
+                  </p>
+                )}
+              </div>
             </div>
-            <div className="space-y-1.5">
-              <label htmlFor={`${id}-concurrency`} className="text-xs font-medium">
-                Maximum concurrent subagents
-              </label>
-              <Input
-                id={`${id}-concurrency`}
-                type="number"
-                min={1}
-                max={32}
-                step={1}
-                value={value.subagents?.max_concurrent ?? ""}
-                onChange={e => onChange({
-                  ...value,
-                  subagents: {
-                    ...value.subagents,
-                    max_concurrent: e.target.value === "" ? undefined : Number(e.target.value),
-                  },
-                })}
-                placeholder="Use default limit"
-              />
-            </div>
-          </div>
-        )}
+          )}
+        </div>
       </fieldset>
     </div>
   )

@@ -154,7 +154,7 @@ export function ManualTriggerModal({ open, onOpenChange, workflow }: ManualTrigg
         </div>
 
         {triggerError && (
-          <div className="flex items-center gap-1.5 text-sm text-red-500 bg-red-50 p-2 rounded">
+          <div role="alert" className="flex items-center gap-1.5 text-sm text-red-500 bg-red-50 p-2 rounded">
             <AlertCircle className="size-4" />
             <span>{triggerError}</span>
           </div>
