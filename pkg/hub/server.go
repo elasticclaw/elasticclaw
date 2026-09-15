@@ -129,6 +129,11 @@ type Server struct {
 	blobClaimMu     sync.Mutex
 	blobClaimWindow map[string]struct{}
 
+	// retentionIndexes is the sweeper's record of its attempts to build the
+	// retention indexes after a cycle (buildRetentionIndexesAfterCycle). Only
+	// the sweeper goroutine touches it.
+	retentionIndexes retentionIndexBuild
+
 	// agentIdleBaselineAt caches the persisted agent_idle baseline (see
 	// agentIdleBaseline in agent_idle.go); zero = not loaded or feature off.
 	agentIdleBaselineMu      sync.Mutex

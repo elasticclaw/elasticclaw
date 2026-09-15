@@ -411,6 +411,11 @@ func (s *Server) markCheckpointSkipped(checkpointID, rootSHA string) error {
 	if err := addCheckpointBlobRefsTx(tx, checkpointID, []string{rootSHA}); err != nil {
 		return err
 	}
+	// A skip whose root differs from the planned one would otherwise keep the
+	// plan's root edge too and pin a second workspace; see finalizeCheckpoint.
+	if err := pruneCheckpointBlobRefsTx(tx, checkpointID, rootSHA, []string{rootSHA}); err != nil {
+		return err
+	}
 	return tx.Commit()
 }
 
@@ -1316,6 +1321,18 @@ func (s *Server) finalizeCheckpoint(checkpointID, tenantID, clawID, rootSHA stri
 	if err := addTreeBlobRefsTx(tx, rootSHA, files); err != nil {
 		return err
 	}
+	// And nothing else. When the 'complete' names a root the plan did not,
+	// the plan's root edge would otherwise stay: the published checkpoint then
+	// pins TWO workspaces -- the one it holds and the one it planned -- until
+	// it is compacted or expires. That is a leak, never a loss, but on a hub
+	// where every idle checkpoint re-plans a 12k-file tree it is a leak worth
+	// closing in the same transaction. The prune is skipped when the root is
+	// not a usable digest, because then the plan's edges (one per file, from
+	// the rootless fallback in recordCheckpointBlobRefs) are the only
+	// reference to the files this checkpoint holds.
+	if err := pruneCheckpointBlobRefsTx(tx, checkpointID, rootSHA, []string{rootSHA, msgSHA, manifestSHA}); err != nil {
+		return err
+	}
 	if err := tx.Commit(); err != nil {
 		// The row is still 'creating' and points at no manifest, so the file just
 		// written belongs to nobody.
@@ -1323,6 +1340,28 @@ func (s *Server) finalizeCheckpoint(checkpointID, tenantID, clawID, rootSHA stri
 		return err
 	}
 	return nil
+}
+
+// pruneCheckpointBlobRefsTx drops every edge of the checkpoint outside keep,
+// once its published reference set is complete. It is a no-op unless root is
+// a usable digest: a checkpoint published without one holds its files through
+// the plan's per-file edges, which are precisely what this would delete. The
+// expansion of a tree the checkpoint no longer names is left to the tree
+// reference gc, which removes it once no edge names it.
+func pruneCheckpointBlobRefsTx(tx *sql.Tx, checkpointID, root string, keep []string) error {
+	if normalizeBlobDigest(root) == "" {
+		return nil
+	}
+	args := []any{checkpointID}
+	placeholders := make([]string, 0, len(keep))
+	for _, sha := range keep {
+		if clean := normalizeBlobDigest(sha); clean != "" {
+			args = append(args, clean)
+			placeholders = append(placeholders, "?")
+		}
+	}
+	_, err := tx.Exec(`DELETE FROM checkpoint_blob_refs WHERE checkpoint_id=? AND sha256 NOT IN (`+strings.Join(placeholders, ",")+`)`, args...)
+	return err
 }
 
 func (s *Server) completeMetadataOnlyCheckpoint(checkpointID, clawID, reason, detail string) error {
@@ -1439,18 +1478,30 @@ func (s *Server) writeMessageCheckpointBlob(clawID, tenantID string) (string, in
 	return sha, count, cutoff, writeFileAtomic(path, buf.Bytes(), 0o640)
 }
 
+// blobTouchHook runs before every touch. It is nil in production and exists so
+// a test can observe the state the touch runs in -- specifically, that
+// claimBlobPresent still holds blobClaimMu, which is what makes the touch and a
+// sweep's window arm mutually exclusive.
+var blobTouchHook func(path string)
+
 // touchCheckpointBlob refreshes a reused blob's mtime so the sweep's grace
 // window means what it says.
 //
 // Deduplication is the common case -- blobs are content-addressed and shared
 // across claws -- and it returns without writing, so a blob referenced by a
 // checkpoint being created right now can carry an mtime from months ago. The
-// durable pending-blob claim is the real protection; this keeps the grace
-// window from being quietly useless as the second line of defence. A failure
-// is not worth failing a checkpoint over, so it is ignored.
-func touchCheckpointBlob(path string) {
+// reference edge is the real protection once it is committed; this keeps the
+// grace window from being quietly useless as the second line of defence, and
+// for the message blob it is the only defence between the claim and the
+// finalize commit. A failure is not worth failing a checkpoint over, but it is
+// reported (reportBlobTouchFailure) rather than swallowed: a store the hub
+// cannot Chtimes is a store where that defence does not exist.
+func touchCheckpointBlob(path string) error {
+	if blobTouchHook != nil {
+		blobTouchHook(path)
+	}
 	at := time.Now()
-	_ = os.Chtimes(path, at, at)
+	return os.Chtimes(path, at, at)
 }
 
 func (s *Server) buildCheckpointManifest(checkpointID, clawID, rootSHA, msgSHA string, msgCount int, cutoff time.Time, files []types.CheckpointFile) (*checkpointManifest, error) {

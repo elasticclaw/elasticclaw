@@ -20,9 +20,16 @@ import (
 // returns the plan a bridge would send for that workspace.
 func planTreeFixture(t *testing.T, n int) (rootSHA string, fileSHAs []string, plan []types.CheckpointFile) {
 	t.Helper()
+	return planTreeFixtureSeeded(t, n, "")
+}
+
+// planTreeFixtureSeeded is planTreeFixture with distinct file contents per
+// seed, for a test that needs two trees sharing no file.
+func planTreeFixtureSeeded(t *testing.T, n int, seed string) (rootSHA string, fileSHAs []string, plan []types.CheckpointFile) {
+	t.Helper()
 	var entries []types.CheckpointFile
 	for i := 0; i < n; i++ {
-		sha := writeRetentionBlob(t, []byte(fmt.Sprintf("workspace file %d", i)))
+		sha := writeRetentionBlob(t, []byte(fmt.Sprintf("workspace file %s%d", seed, i)))
 		ageBlob(t, sha)
 		fileSHAs = append(fileSHAs, sha)
 		entries = append(entries, types.CheckpointFile{Path: fmt.Sprintf("workspace/%d.txt", i), SHA256: sha, Size: 16})
@@ -58,19 +65,23 @@ func TestTreeExpansionIsWrittenOncePerDistinctTree(t *testing.T) {
 		t.Fatalf("checkpoint holds %d edges after its plan, want 1 (the root tree)", got)
 	}
 
-	var rowsBefore int
-	if err := s.db.QueryRow(`SELECT COUNT(*) FROM tree_blob_refs`).Scan(&rowsBefore); err != nil {
+	// "Wrote zero rows" is not observable from the row count: INSERT OR
+	// IGNORE over an existing expansion also leaves the count unchanged, so
+	// that assertion holds with the EXISTS probe removed. The probe is a
+	// performance property -- one indexed EXISTS instead of one ignored insert
+	// per file, on the 96% of checkpoints that capture a known tree -- and it
+	// is asserted by forbidding the insert path outright: a trigger that
+	// aborts any INSERT on tree_blob_refs, which a plan that probes first never
+	// reaches. Revert verified against addTreeBlobRefsTx without the probe.
+	if _, err := s.db.Exec(`CREATE TRIGGER tree_blob_refs_no_reinsert BEFORE INSERT ON tree_blob_refs
+		BEGIN SELECT RAISE(ABORT, 'a known tree was re-inserted instead of probed'); END`); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.recordCheckpointBlobRefs("cp-second", rootSHA, plan); err != nil {
-		t.Fatalf("plan cp-second: %v", err)
+		t.Fatalf("plan cp-second on a known tree: %v", err)
 	}
-	var rowsAfter int
-	if err := s.db.QueryRow(`SELECT COUNT(*) FROM tree_blob_refs`).Scan(&rowsAfter); err != nil {
+	if _, err := s.db.Exec(`DROP TRIGGER tree_blob_refs_no_reinsert`); err != nil {
 		t.Fatal(err)
-	}
-	if rowsAfter != rowsBefore {
-		t.Fatalf("a second checkpoint of a known tree wrote %d expansion rows, want 0", rowsAfter-rowsBefore)
 	}
 	if got := checkpointBlobRefCount(t, s, "cp-second"); got != 1 {
 		t.Fatalf("second checkpoint holds %d edges, want 1", got)

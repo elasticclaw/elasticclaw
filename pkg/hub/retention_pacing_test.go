@@ -52,6 +52,9 @@ func countRetentionRows(t *testing.T, s *Server, query string, args ...any) int 
 
 func pacedRetentionPhases() []pacedRetentionPhase {
 	const checkpoints = 2*retentionCheckpointBatch + 3
+	// perClaw is more than one hold covers, so a budget spent on the first claw
+	// leaves the second untouched only if the pacer is shared.
+	const perClaw = retentionCheckpointBatch + 2
 	const rows = 2*retentionDeleteBatch + 7
 	tree := strings.Repeat("ab", 32)
 	return []pacedRetentionPhase{
@@ -74,15 +77,25 @@ func pacedRetentionPhases() []pacedRetentionPhase {
 			},
 		},
 		{
+			// TWO finalized claws, each with more victims than one hold covers.
+			// The budget bounds the PHASE: a spent budget must stop after one
+			// hold on the first claw and never reach the second. Note what this
+			// row cannot see: a pacer built per claw with an already-spent
+			// budget also stops on the first claw, because the phase loop
+			// breaks on errRetentionBudget. The property that a fresh pacer per
+			// claw actually violates -- the budget's deadline restarting with
+			// every claw -- needs a clock, and is TestCompactionBudgetSpansClaws.
 			name: "compaction", pacerBuiltIn: "compactFinalizedCheckpoints",
-			total: checkpoints, firstHold: retentionCheckpointBatch,
+			total: perClaw * 2, firstHold: retentionCheckpointBatch,
 			seed: func(t *testing.T, s *Server, now time.Time) {
-				insertRetentionClaw(t, s, "claw", now.Add(-400*24*time.Hour))
-				// One more than total: the survivor is kept.
-				for i := 0; i <= checkpoints; i++ {
-					insertRetentionCheckpoint(t, s, retentionCheckpoint{
-						id: fmt.Sprintf("cp-%d", i), clawID: "claw", status: "ready",
-						createdAt: now.Add(-30 * 24 * time.Hour), rootTree: tree, writeManifest: true})
+				for _, claw := range []string{"claw-a", "claw-b"} {
+					insertRetentionClaw(t, s, claw, now.Add(-400*24*time.Hour))
+					// One more than perClaw: the survivor is kept.
+					for i := 0; i <= perClaw; i++ {
+						insertRetentionCheckpoint(t, s, retentionCheckpoint{
+							id: fmt.Sprintf("%s-cp-%d", claw, i), clawID: claw, status: "ready",
+							createdAt: now.Add(-30 * 24 * time.Hour), rootTree: tree, writeManifest: true})
+					}
 				}
 			},
 			done: func(t *testing.T, s *Server) int {
@@ -91,14 +104,17 @@ func pacedRetentionPhases() []pacedRetentionPhase {
 		},
 		{
 			name: "compaction", pacerBuiltIn: "compactFinalizedCheckpoints",
-			total: checkpoints, firstHold: retentionCheckpointBatch,
+			total: perClaw * 2, firstHold: retentionCheckpointBatch,
 			seed: func(t *testing.T, s *Server, now time.Time) {
-				// The skipped-row release shares compaction's pacer and budget.
-				insertRetentionClaw(t, s, "claw", now.Add(-400*24*time.Hour))
-				for i := 0; i < checkpoints; i++ {
-					insertRetentionCheckpoint(t, s, retentionCheckpoint{
-						id: fmt.Sprintf("cp-%d", i), clawID: "claw", status: "skipped",
-						createdAt: now.Add(-30 * 24 * time.Hour), rootTree: tree})
+				// The skipped-row release shares compaction's pacer and budget,
+				// across claws.
+				for _, claw := range []string{"claw-a", "claw-b"} {
+					insertRetentionClaw(t, s, claw, now.Add(-400*24*time.Hour))
+					for i := 0; i < perClaw; i++ {
+						insertRetentionCheckpoint(t, s, retentionCheckpoint{
+							id: fmt.Sprintf("%s-cp-%d", claw, i), clawID: claw, status: "skipped",
+							createdAt: now.Add(-30 * 24 * time.Hour), rootTree: tree})
+					}
 				}
 			},
 			done: func(t *testing.T, s *Server) int {
@@ -411,6 +427,72 @@ func TestEveryBulkWriteLoopIsPaced(t *testing.T) {
 	if len(missing) > 0 {
 		t.Errorf("functions that build a retentionPacer without a row in pacedRetentionPhases: %s", strings.Join(missing, ", "))
 	}
+
+	// One budget per PHASE. A pacer is constructed only at a phase's entry
+	// point: never inside a loop body, and never in a function that a loop
+	// body in this file reaches. Moving newRetentionPacer into the per-claw
+	// path handed every claw a fresh budget, passed the loop check above and
+	// both behavioural subtests on a one-claw fixture, and left the phase
+	// unbounded again. The two-claw compaction rows in pacedRetentionPhases
+	// catch that behaviourally; this catches it structurally, for every phase.
+	//
+	// The sweeper's tick loop is the one loop that legitimately reaches a
+	// constructor: it runs one whole cycle per tick.
+	const tickLoop = "retentionSweeper"
+	reachable := map[string]bool{}
+	for name, fds := range decls {
+		if name == tickLoop {
+			continue
+		}
+		for _, fd := range fds {
+			ast.Inspect(fd.Body, func(n ast.Node) bool {
+				var body *ast.BlockStmt
+				switch loop := n.(type) {
+				case *ast.ForStmt:
+					body = loop.Body
+				case *ast.RangeStmt:
+					body = loop.Body
+				default:
+					return true
+				}
+				ast.Inspect(body, func(m ast.Node) bool {
+					if call, ok := m.(*ast.CallExpr); ok {
+						if callee := calleeName(call); callee != "" {
+							reachable[callee] = true
+						}
+					}
+					return true
+				})
+				return true
+			})
+		}
+	}
+	for changed := true; changed; {
+		changed = false
+		for name := range reachable {
+			for _, fd := range decls[name] {
+				ast.Inspect(fd.Body, func(n ast.Node) bool {
+					if call, ok := n.(*ast.CallExpr); ok {
+						if callee := calleeName(call); callee != "" && !reachable[callee] {
+							reachable[callee] = true
+							changed = true
+						}
+					}
+					return true
+				})
+			}
+		}
+	}
+	if reachable["newRetentionPacer"] {
+		var via []string
+		for name := range constructors {
+			if reachable[name] {
+				via = append(via, name)
+			}
+		}
+		sort.Strings(via)
+		t.Errorf("newRetentionPacer is reachable from a loop body (through %s): a pacer built per item gives every item a fresh budget and leaves the phase unbounded; construct it once at the phase entry and pass it down", strings.Join(via, ", "))
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -435,11 +517,15 @@ func TestDryRunDoesNotBuildRetentionIndexes(t *testing.T) {
 			t.Fatalf("a dry run built %s", idx.name)
 		}
 	}
+	// A real cycle builds them once it has reclaimed something to build from
+	// (buildRetentionIndexesAfterCycle): give it one aged orphan blob.
+	orphan := writeRetentionBlob(t, []byte("unreferenced"))
+	ageBlob(t, orphan)
 	policy.dryRun = false
 	s.retentionSweepCycle(policy)
 	for _, idx := range retentionIndexes {
 		if !retentionIndexExists(t, s, idx.name) {
-			t.Fatalf("a real cycle did not build %s", idx.name)
+			t.Fatalf("a real cycle that reclaimed bytes did not build %s", idx.name)
 		}
 	}
 }

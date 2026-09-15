@@ -205,9 +205,13 @@ order:
    have no reference edge and gives them edges, and the blob sweep — dry or
    real — refuses to delete anything while any such row exists. Running it is
    what makes the dry run's blob numbers mean anything. Nothing else is
-   written: in particular a dry run does not build the two retention indexes
-   (a real cycle builds them at its end, from the space it just freed), so it
-   is safe on a hub with no free space at all.
+   written: in particular a dry run does not build the two retention indexes,
+   so it is safe on a hub with no free space at all. A real cycle builds them
+   at its end, and only after a cycle that actually freed bytes on disk: a
+   missing index is reported once (`the build waits for a cycle that reclaims
+   disk space`), a build that fails sits out an increasing number of
+   reclaiming cycles before trying again, and a hub whose boot managed to
+   build them never pays for the check.
 
    The backfill, like every other phase, is bounded by the per-cycle budget.
    On a hub with years of checkpoints the first cycle may stop it partway and
@@ -309,7 +313,15 @@ the row deletes and the tree reference gc — is batched, releases the SQLite
 write lock between batches, and stops at a per-cycle time budget with a
 `stopping after N item(s), cycle budget ... reached` line, so the backlog is
 spread over several cycles rather than holding the single write lock for
-hours; this is expected and needs no intervention.
+hours; this is expected and needs no intervention. The tree reference gc
+(`tree_refs=` in the cycle line) runs only in a cycle whose blob sweep ran:
+while the sweep is `DECLINED`, the expansions the backfill is still writing
+are exactly what the gc would select, so it waits.
+
+A checkpoint a claw is currently restoring from (`claws.restore_checkpoint_id`
+is set from the restore request until every file has been written) is never
+expired or compacted, whatever its age, and its claw is not finalized for
+compaction while the restore is in flight.
 
 ### Commit style
 

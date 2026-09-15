@@ -376,10 +376,20 @@ func migrate(db *sql.DB) error {
 	// manifests used to destroy the record. As columns they cost ~40 bytes a
 	// row and survive any retention policy.
 	//
-	// Not fatal, like the neighbouring ADD COLUMNs. The hub served without
-	// these columns before they existed: a boot that cannot add them loses
-	// checkpoint telemetry until the next boot succeeds, where refusing to boot
-	// over them loses the hub. See migrateAfterSchema for the rule.
+	// FATAL, like rebrief_pending above, and for the same reason: a serving
+	// path names them unconditionally. finalizeCheckpoint and
+	// completeMetadataOnlyCheckpoint both UPDATE `pipeline_stage, hub_version,
+	// files_count, files_bytes` on every publish, so on a hub where this ADD
+	// COLUMN had failed and the boot went on, EVERY checkpoint failed at its
+	// last step with "no such column" -- after the claw had uploaded the whole
+	// workspace -- and the boot log had said only that telemetry would be
+	// "lost until the next boot". That was false; what was lost was every
+	// checkpoint. An ADD COLUMN is an in-place rewrite of the table's row in
+	// sqlite_master, not a B-tree allocation, so it does not fail for lack of
+	// pages on a full disk any more than a heartbeat does; making it fatal
+	// costs nothing on the disk-full hub and hides nothing on any other. See
+	// migrateAfterSchema for the rule, and
+	// TestServingPathsNameOnlyWhatFatalMigrationsCreate for the coverage.
 	for _, col := range []struct{ name, def string }{
 		{"pipeline_stage", `TEXT NOT NULL DEFAULT ''`},
 		{"hub_version", `TEXT NOT NULL DEFAULT ''`},
@@ -387,7 +397,7 @@ func migrate(db *sql.DB) error {
 		{"files_bytes", `INTEGER NOT NULL DEFAULT 0`},
 	} {
 		if err := addColumn(db, "claw_checkpoints", col.name, col.def); err != nil {
-			log.Printf("[migrate] claw_checkpoints.%s not added (retrying on the next boot): %v", col.name, err)
+			return err
 		}
 	}
 	_, _ = db.Exec(`CREATE TABLE IF NOT EXISTS claw_checkpoints (
@@ -1137,58 +1147,105 @@ const fatalBootSchemaSQL = `
 // migrateAfterSchema is the remainder of migrate(): the rebuilds, backfills
 // and seeds that run once the schema script has been applied.
 //
-// THE RULE. A step here is fatal -- refuses to boot the hub -- only if the hub
-// cannot serve without it. Everything else runs through runOptionalMigration,
-// which logs the failure and lets the next boot retry. The reason is the
-// disk-full hub: every one of these steps allocates pages (a table copy, an
-// index, a new table), that allocation is exactly what fails with SQLITE_FULL,
-// and a hub that refuses to boot over it can never run the retention sweeper
-// that would free the disk. Five times now a fatal step has been added for
-// something the hub was already serving without: two retention indexes, the
-// blob reference tables, a claim table, and a CHECK-constraint widen that
-// copies task_run_events -- millions of rows -- in one transaction.
+// THE RULE. A migration step may be non-fatal -- log and let the next boot
+// retry -- ONLY IF THE RUNNING BINARY TOLERATES ITS ABSENCE. That is a question
+// about code dependency, decided by reading the serving paths, not about
+// whether the step feels like "analytics" or "telemetry": a step is depended
+// on when some path the hub serves names what it creates unconditionally, and
+// that path is not one that fails at its first step, loudly, before any side
+// effect. Everything a serving path depends on is fatal, whatever it costs on
+// a full disk, because a hub that boots without it is a hub that fails those
+// requests one by one -- after the work -- under a log line that said the
+// boot was fine.
 //
-// Classification of every fatal step reachable from migrate():
+// The reason anything is non-fatal at all is the disk-full hub: a step that
+// allocates pages (a table copy, an index, a new table) is exactly what fails
+// with SQLITE_FULL, and a hub that refuses to boot over a step nothing depends
+// on can never run the retention sweeper that would free the disk. Five times
+// a fatal step was added for something the hub served without; then, in the
+// other direction, four ADD COLUMNs the checkpoint and workflow hot paths
+// name were made non-fatal under a comment that called them telemetry. Both
+// are the same mistake read from opposite ends. An ADD COLUMN is an in-place
+// rewrite of one sqlite_master row and does not fail for lack of pages any
+// more than a heartbeat does, so a depended-on column is fatal at no cost.
 //
-//	fatal, kept:
-//	  fatalBootSchemaSQL              the base schema; a fresh database has
-//	                                  nothing without it, and on a shipped
-//	                                  database every statement is an
-//	                                  IF NOT EXISTS no-op that allocates nothing
-//	  workflowv2.Migrate (base)       same argument, same shape; its additions
-//	                                  are non-fatal (see workflowv2.Migrate)
-//	  addColumn claws.*, claw_prs.*,  columns the request and retry hot paths
-//	  ticket_metadata.*, messages.*,  reference; a hub without them 500s or,
-//	  pipeline_outputs.*              for rebrief_pending, loses every retried
-//	                                  claw. In-place sqlite_master rewrites
-//	  messages.delivered_at backfill  the column's presence is the marker, so a
-//	                                  failed backfill that boots replays all
-//	                                  history as pending on the next start
-//	  claw_prs state backfill v1/v2,  small in-place writes on tables the hub
-//	  ticket_metadata key migration   serves from; pre-existing and applied
-//	                                  everywhere
-//	non-fatal, via runOptionalMigration:
-//	  rebuildTaskRunSummariesStatusV3  analytics rebuilds; a hub without them
-//	  rebuildTaskRunEventsAgentIdleV1  records fewer event kinds, no more
-//	  widenFailureTypeCheckV1 x3       copies task_run_events whole; exists so
-//	                                   workspace_unresponsive can be recorded
+// Classification of every step reachable from migrate(), with the dependency
+// that decides it:
+//
+//	FATAL -- a serving path names it:
+//	  fatalBootSchemaSQL               the base schema; a fresh database has
+//	                                   nothing without it, and on a shipped
+//	                                   database every statement is an
+//	                                   IF NOT EXISTS no-op that allocates nothing
+//	  workflowv2.Migrate (base)        same argument, same shape
+//	  workflow_v2_runs.timeout_at      CreateRun's INSERT (workflowv2/runtime.go)
+//	                                   and the reaper's timeout query name it
+//	  workflow_v2_runs.cron_slot_released
+//	                                   releaseWorkflowV2CronSlot's UPDATE
+//	  workflow_v2_cron_runs.updated_at UpdateCronRunForV2Run, mid-run, after
+//	                                   the claw exists (see migrateAdditions)
+//	  addColumn claws.*, claw_prs.*,   columns the request and retry hot paths
+//	  ticket_metadata.*, messages.*,   name; a hub without them 500s or, for
+//	  pipeline_outputs.*               rebrief_pending, loses every retried claw
+//	  claw_checkpoints.pipeline_stage, finalizeCheckpoint and
+//	  hub_version, files_count,        completeMetadataOnlyCheckpoint UPDATE all
+//	  files_bytes (in migrate)         four on every publish, after the upload
+//	  messages.delivered_at backfill   the column's presence is the marker, so a
+//	                                   failed backfill that boots replays all
+//	                                   history as pending on the next start
+//	  claw_prs state backfill v1/v2,   small in-place writes on tables the hub
+//	  ticket_metadata key migration    serves from; pre-existing and applied
+//	                                   everywhere
+//
+//	NON-FATAL -- nothing names it, or the dependent fails at its first step:
+//	  rebuildTaskRunSummariesStatusV3  widen CHECKs by copying the table. The
+//	  rebuildTaskRunEventsAgentIdleV1  writers that need the wider CHECK are
+//	  widenFailureTypeCheckV1 x3       recordTaskRunEventForClaw and
+//	                                   materializeTaskRun, and every caller of
+//	                                   both logs the error and carries on (see
+//	                                   agent_idle.go, analytics.go,
+//	                                   bridge_error.go, claw_retry.go): the hub
+//	                                   records fewer event kinds and statuses
+//	                                   until the rebuild lands, and no request
+//	                                   fails
 //	  task_run_usage.usage_day,        analytics backfills; marker-gated and
-//	  backfillTaskRunAnalytics*,       idempotent, so a retry resumes
-//	  backfillTaskRunAgentStartedAt,
-//	  backfillTaskRunReadyAt,
+//	  backfillTaskRunAnalytics*,       idempotent, nothing reads the marker or
+//	  backfillTaskRunAgentStartedAt,   depends on the filled values being
+//	  backfillTaskRunReadyAt,          present
 //	  backfillTaskRunStages,
-//	  rebuildTaskRunSummariesTicketPage
-//	  backfillCheckpointTelemetryV1    analytics; already non-fatal inside
-//	  model price seed                 the cost estimate; in-place upsert
-//	  claw_checkpoints telemetry cols  (in migrate) the ADD COLUMNs above
-//	  ensureCheckpointBlobRefTables,   retention; already non-fatal
-//	  adoptLegacyCheckpointBlobClaims,
-//	  ensureRetentionIndexes
+//	  rebuildTaskRunSummariesTicketPage  an index; no statement names an index
+//	  backfillCheckpointTelemetryV1    fills columns migrate() has already made
+//	                                   fatal; nothing depends on the fill
+//	  model price seed                 the cost estimate reads model_prices and
+//	                                   estimates 0 for a model with no row
+//	  workflow_v2_cron_runs (+indexes) the v2 cron scheduler fails the cron run
+//	                                   at RecordCronRunStarted -- its FIRST
+//	                                   step, before any claw is created -- with
+//	                                   a log line; the history API errors; every
+//	                                   other v2 path is untouched
+//	  idx_workflow_v2_runs_timeout     an index
+//	  ensureCheckpointBlobRefTables    the checkpoint plan fails at its first
+//	                                   step (500 "storage error", before any
+//	                                   upload), a hub-side capture fails its
+//	                                   own transaction, the sweep phases that
+//	                                   touch edges fail as phase errors while
+//	                                   the row and diagnostics pruning still
+//	                                   run; nothing is lost or half-written,
+//	                                   and the next boot with two free pages
+//	                                   creates them. A checkpoint cannot be
+//	                                   uploaded to a full disk anyway.
+//	  rebuildCheckpointBlobRefsWithoutRowid  a shape; the rowid table works
+//	  adoptLegacyCheckpointBlobClaims  nothing names the legacy table
+//	  ensureRetentionIndexes           indexes
 //
-// TestBootSurvivesAFullDiskFromTheShippedSchema pins this: it boots the current
-// binary against the schema production runs with the database forbidden to
-// grow, and every fatal step that needs a page fails it. A new fatal step
-// therefore has to argue its way past that test, not past a code reviewer
+// TestBootSurvivesAFullDiskFromTheShippedSchema pins the allocation side: it
+// boots the current binary against the schema production runs with the
+// database forbidden to grow, and every fatal step that needs a page fails it.
+// TestServingPathsNameOnlyWhatFatalMigrationsCreate pins the dependency side:
+// it drops what every non-fatal step creates and drives the serving paths
+// above, so a new dependency on a non-fatal object fails the suite, and it
+// drops what the fatal column steps create to show the dependency is real. A
+// step therefore has to argue its way past both tests, not past a reviewer
 // reading a diff in the middle of a 600-line function.
 func migrateAfterSchema(db *sql.DB) error {
 	if err := workflowv2.Migrate(db); err != nil {
@@ -1352,11 +1409,15 @@ var checkpointBlobRefTables = []struct{ name, stmt string }{
 // This is the same rule as ensureRetentionIndexes, and for the same reason:
 // creating a table allocates pages, the hub that cannot allocate pages is the
 // disk-full hub, and a CREATE that fails inside fatalBootSchemaSQL aborts the
-// whole script and then the boot. Nothing the hub serves needs these tables --
-// without them a checkpoint plan fails with a storage error and the blob sweep
-// refuses to run (referencedBlobDigests returns an error, and the sweep deletes
-// nothing on an error), both of which are the correct behaviour on a hub that
-// cannot write. Every later boot retries.
+// whole script and then the boot. The checkpoint paths DO name these tables,
+// so this is non-fatal under the "fails at its first step" clause of the rule
+// on migrateAfterSchema, not under "nothing depends on it": without them a
+// checkpoint plan fails with a storage error before any upload, a hub-side
+// capture fails its own transaction, and the blob sweep refuses to run
+// (referencedBlobDigests returns an error, and the sweep deletes nothing on
+// an error) -- all loud, none half-done, and all the correct behaviour on a
+// hub that cannot write. Every later boot retries, and the two tables cost
+// two pages.
 func ensureCheckpointBlobRefTables(db *sql.DB) {
 	for _, table := range checkpointBlobRefTables {
 		if _, err := db.Exec(table.stmt); err != nil {
@@ -1474,13 +1535,18 @@ var retentionIndexes = []struct{ name, stmt string }{
 //
 // pruneRowsBatched works without these indexes — more slowly, holding the write
 // lock for longer per batch, which is what the batch bound and the inter-batch
-// pause exist to survive. Every later boot retries, as does every sweep cycle.
-func ensureRetentionIndexes(db *sql.DB) {
+// pause exist to survive. Every later boot retries, and the sweeper retries
+// after a cycle that reclaimed disk (buildRetentionIndexesAfterCycle). It
+// reports whether every index exists on return.
+func ensureRetentionIndexes(db *sql.DB) bool {
+	ok := true
 	for _, idx := range retentionIndexes {
 		if _, err := db.Exec(idx.stmt); err != nil {
-			log.Printf("[migrate] retention index %s not created (retrying on the next boot or sweep): %v", idx.name, err)
+			ok = false
+			log.Printf("[migrate] retention index %s not created (retrying on the next boot, or after a sweep that reclaims disk): %v", idx.name, err)
 		}
 	}
+	return ok
 }
 
 func migrateTicketMetadataKey(db *sql.DB) error {

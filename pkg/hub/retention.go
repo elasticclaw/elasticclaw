@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/elasticclaw/elasticclaw/pkg/types"
@@ -99,9 +100,16 @@ var retentionBatchPause = 50 * time.Millisecond
 // removes one interval's worth of rows and never comes near the budget.
 var retentionRowBudget = 2 * time.Minute
 
+// retentionClock is the clock the budget is measured on. It is a variable so
+// a test can advance it deterministically and observe that ONE budget spans a
+// whole phase (TestCompactionBudgetSpansClaws): with the real clock, a pacer
+// built per item and one built per phase are indistinguishable in a test that
+// runs in milliseconds.
+var retentionClock = time.Now
+
 // retentionBudgetDeadline is when a phase that starts now must stop.
 func retentionBudgetDeadline() time.Time {
-	return time.Now().Add(retentionRowBudget)
+	return retentionClock().Add(retentionRowBudget)
 }
 
 // retentionCheckpointBatch is how many checkpoint rows one transaction covers
@@ -160,7 +168,7 @@ func (p *retentionPacer) yield(items int) error {
 	if p.stopped {
 		return errRetentionBudget
 	}
-	if !p.deadline.IsZero() && !time.Now().Before(p.deadline) {
+	if !p.deadline.IsZero() && !retentionClock().Before(p.deadline) {
 		p.stopped = true
 		log.Printf("[retention] %s: stopping after %d item(s), cycle budget %s reached; the rest goes to the next cycle",
 			p.phase, p.done, retentionRowBudget)
@@ -249,10 +257,22 @@ func retentionConfig(cfg *types.HubConfig) *types.RetentionConfig {
 	return cfg.Retention
 }
 
-func (s *Server) retentionEnabled() bool {
+// retentionConfigSnapshot reads the retention section under ONE hold of the
+// config lock. Everything derived from the configuration -- whether the sweeper
+// runs and with which knobs -- must come from the same read: the settings and
+// AI-config apply paths swap s.hubCfg wholesale, and two separate reads could
+// pair `enabled` from one configuration with the knobs of another.
+func (s *Server) retentionConfigSnapshot() *types.RetentionConfig {
 	s.mu.RLock()
-	r := retentionConfig(s.hubCfg)
-	s.mu.RUnlock()
+	defer s.mu.RUnlock()
+	return retentionConfig(s.hubCfg)
+}
+
+func (s *Server) retentionEnabled() bool {
+	return retentionEnabledFrom(s.retentionConfigSnapshot())
+}
+
+func retentionEnabledFrom(r *types.RetentionConfig) bool {
 	if r == nil || r.Enabled == nil {
 		// Opt-in, not opt-out. Retention deletes irreversibly, and an absent
 		// config section means the operator has not yet said anything about it
@@ -267,14 +287,15 @@ func (s *Server) retentionEnabled() bool {
 }
 
 func (s *Server) retentionSettings() retentionSettings {
+	return retentionSettingsFrom(s.retentionConfigSnapshot())
+}
+
+func retentionSettingsFrom(r *types.RetentionConfig) retentionSettings {
 	cfg := retentionSettings{
 		interval:     defaultRetentionInterval,
 		maxAge:       defaultRetentionMaxAge,
 		compactAfter: defaultRetentionCompactAfter,
 	}
-	s.mu.RLock()
-	r := retentionConfig(s.hubCfg)
-	s.mu.RUnlock()
 	if r == nil {
 		return cfg
 	}
@@ -369,9 +390,13 @@ type retentionPolicy struct {
 	retentionSettings
 }
 
-// retentionPolicy reads the policy the configuration currently describes.
+// retentionPolicy reads the policy the configuration currently describes, from
+// ONE snapshot of the configuration. `enabled` and the knobs used to be read
+// under two separate lock holds, and a settings apply between them produced a
+// policy that no configuration ever described.
 func (s *Server) retentionPolicy() retentionPolicy {
-	return retentionPolicy{enabled: s.retentionEnabled(), retentionSettings: s.retentionSettings()}
+	r := s.retentionConfigSnapshot()
+	return retentionPolicy{enabled: retentionEnabledFrom(r), retentionSettings: retentionSettingsFrom(r)}
 }
 
 // same reports whether two policies would run the same cycle. adjustments is
@@ -589,6 +614,7 @@ func (s *Server) retentionSweepCycle(policy retentionPolicy) {
 	counts.blobs, counts.blobBytes = sweep.removed, sweep.bytes
 	counts.itemErrors += sweep.itemErrors
 	counts.blobSweepDeclined = sweep.declined
+	sweepRan := err == nil && !sweep.declined
 	if err != nil {
 		counts.errors++
 		log.Printf("[retention] blob sweep: %v", err)
@@ -598,7 +624,21 @@ func (s *Server) retentionSweepCycle(policy retentionPolicy) {
 	// checkpoint edge names any more pins nothing -- the keep set only expands
 	// REFERENCED trees -- so leaving it behind costs rows, not blobs, and a
 	// failure here must not be allowed to block the cycle that reclaims disk.
-	if !cfg.dryRun {
+	//
+	// Only in a cycle whose sweep RAN, which is the same thing as "every row
+	// that holds blobs has its edges". The backfill commits a tree's expansion
+	// in its own transaction, before the edge of the checkpoint that names it;
+	// a row it did not finish this cycle -- the budget fired on the yield right
+	// after the expansion, a second tree of the row could not be read, the
+	// batch's commit failed -- has no edge yet, and its freshly written
+	// expansion is exactly what this gc selects: up to a workspace's worth of
+	// rows written and deleted in the same cycle, then written again in the
+	// next, on the disk-full hub. While any such row exists the sweep has
+	// declined, so there is nothing for the gc to make collectable anyway; it
+	// waits for the cycle that clears the gate. Gating on the sweep rather than
+	// on a "backfill stopped" flag covers every way a row can be left behind,
+	// not only the budget.
+	if !cfg.dryRun && sweepRan {
 		if n, err := s.pruneUnreferencedTreeBlobRefs(newRetentionPacer("tree reference gc", retentionBudgetDeadline())); err != nil {
 			counts.errors++
 			counts.treeRefs = n
@@ -642,8 +682,82 @@ func (s *Server) retentionSweepCycle(policy retentionPolicy) {
 	// this guard; the boot-time build in openDB still covers a hub that has the
 	// space.
 	if !cfg.dryRun {
-		ensureRetentionIndexes(s.db)
+		s.buildRetentionIndexesAfterCycle(counts.blobBytes + counts.manifestBytes + counts.diagnosticsBytes)
 	}
+}
+
+// retentionIndexBuild is the sweeper's memory of its attempts to build the
+// retention indexes after a cycle. One sweeper goroutine touches it, one cycle
+// at a time.
+type retentionIndexBuild struct {
+	failures   int  // consecutive failed attempts
+	skip       int  // reclaiming cycles still to let pass before the next attempt
+	waitLogged bool // the "waiting for a cycle that reclaims" line was said
+}
+
+// retentionIndexBackoffMax caps how many reclaiming cycles a failed build sits
+// out before trying again: eight is a working day at the default interval.
+const retentionIndexBackoffMax = 8
+
+// buildRetentionIndexesAfterCycle is the one write-lock hold in a cycle that no
+// pacer bounds, so it is gated instead: the indexes are built only when one is
+// actually missing, only after a cycle that reclaimed bytes on the filesystem,
+// and with a backoff after a failed attempt.
+//
+// CREATE INDEX IF NOT EXISTS is free once the index exists, but on the hub
+// whose boot could not build it -- the disk-full hub -- it is a scan of the two
+// largest tables under the write lock that allocates the whole B-tree and then
+// fails at the last page, and it used to run at the end of EVERY cycle. The
+// 15-second heartbeat discards its BUSY error, so each doomed attempt could
+// silently lose a heartbeat. A cycle that freed nothing has nothing to offer
+// the build; a cycle that freed bytes is the only thing that can change the
+// outcome, and even then an attempt that fails sits out an increasing number
+// of such cycles, because on a hub reclaiming a little every hour the freed
+// space is rarely the size of an index.
+func (s *Server) buildRetentionIndexesAfterCycle(bytesFreed int64) {
+	missing, err := missingRetentionIndexes(s.db)
+	if err != nil {
+		log.Printf("[retention] probe retention indexes: %v", err)
+		return
+	}
+	if len(missing) == 0 {
+		s.retentionIndexes = retentionIndexBuild{}
+		return
+	}
+	state := &s.retentionIndexes
+	if bytesFreed <= 0 {
+		if !state.waitLogged {
+			state.waitLogged = true
+			log.Printf("[retention] retention index(es) %s missing; the build waits for a cycle that reclaims disk space, and this one freed nothing", strings.Join(missing, ", "))
+		}
+		return
+	}
+	if state.skip > 0 {
+		state.skip--
+		log.Printf("[retention] retention index(es) %s still missing after %d failed build(s); sitting out this cycle (%d more to go)", strings.Join(missing, ", "), state.failures, state.skip)
+		return
+	}
+	if ensureRetentionIndexes(s.db) {
+		*state = retentionIndexBuild{}
+		return
+	}
+	state.failures++
+	state.skip = min(1<<state.failures-1, retentionIndexBackoffMax)
+}
+
+// missingRetentionIndexes names the retention indexes that do not exist.
+func missingRetentionIndexes(db *sql.DB) ([]string, error) {
+	var missing []string
+	for _, idx := range retentionIndexes {
+		var n int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name=?`, idx.name).Scan(&n); err != nil {
+			return nil, err
+		}
+		if n == 0 {
+			missing = append(missing, idx.name)
+		}
+	}
+	return missing, nil
 }
 
 // retentionSample collects a bounded number of examples alongside a total.
@@ -704,9 +818,21 @@ func (r *retentionSample) describe(noun string) string {
 // staleness arm. task_run_summaries and task_run_prs outlive the claw and carry
 // the history, so they are what make the arm mean anything.
 //
+// A claw with a restore in flight is not finalized whatever else is true of it.
+// restoreClawFromCheckpoint and the retry path set restore_checkpoint_id before
+// reprovisioning and markRestoreApplied clears it once every file has been
+// written; in between, restoreCheckpointFilesTo reads the source checkpoint's
+// tree and file blobs by path for minutes, with nothing else pinning the row.
+// Compacting that claw could pick another row as the survivor and drop the
+// source's manifest and edges mid-stream, after which the same cycle's sweep
+// unlinks its files. A restore that failed leaves the id in place, and that is
+// right too: the row is what the operator retries from.
+//
 // The caller binds the cutoff (now - compact_after) twice. The alias `c` must
 // be the claws table.
 const finalizedClawPredicateSQL = `(
+	COALESCE(c.restore_checkpoint_id, '') = ''
+	AND (
 	(
 		-- A merged PR only finalizes a claw that is no longer running. The PR
 		-- watcher deliberately keeps a claw alive while it still has other open
@@ -760,7 +886,16 @@ const finalizedClawPredicateSQL = `(
 			SELECT 1 FROM claw_checkpoints cp WHERE cp.claw_id = c.id AND cp.created_at >= ?
 		)
 	)
+	)
 )`
+
+// restoreSourceCheckpointsSQL names every checkpoint some claw is restoring
+// from right now. Expiry keeps its hands off these rows for the reason given
+// on finalizedClawPredicateSQL: the restore reads their blobs by path for
+// minutes, and deleting the row drops the edges that keep those blobs out of
+// the same cycle's sweep. The row is deleted normally once the restore has
+// applied (markRestoreApplied clears the id) or the claw is gone.
+const restoreSourceCheckpointsSQL = `SELECT restore_checkpoint_id FROM claws WHERE COALESCE(restore_checkpoint_id, '') <> ''`
 
 // clawFinalized evaluates the canonical predicate for one claw. A claw that no
 // longer exists is not finalized: there is nothing left to compact.
@@ -1388,7 +1523,8 @@ func pruneDiagnosticsLogs(dataDir string, cutoff time.Time, dryRun bool) (diagno
 // cycle would already have dropped -- plus the manifest bytes reclaimed.
 func (s *Server) pruneExpiredCheckpoints(cutoff time.Time, dryRun bool, pacer *retentionPacer) ([]string, int64, int, error) {
 	rows, err := s.db.Query(
-		`SELECT id, COALESCE(manifest_path,'') FROM claw_checkpoints WHERE created_at < ?`, cutoff)
+		`SELECT id, COALESCE(manifest_path,'') FROM claw_checkpoints
+		  WHERE created_at < ? AND id NOT IN (`+restoreSourceCheckpointsSQL+`)`, cutoff)
 	if err != nil {
 		return nil, 0, 0, err
 	}
@@ -1527,10 +1663,28 @@ func (s *Server) deleteExpiredCheckpoints(checkpointIDs []string) error {
 // (checkpoint_id, sha256) primary key per row, so on a hub where every row
 // already has edges the whole evaluation is one indexed pass over the rows
 // that hold blobs.
-const unreferencedCheckpointsWhere = `status IN ('ready','skipped')
-	   AND (COALESCE(manifest_sha256,'') <> '' OR COALESCE(root_tree_sha256,'') <> ''
-	        OR COALESCE(message_tree_sha256,'') <> '' OR COALESCE(workspace_tree_sha256,'') <> '')
+//
+// "Names a digest" means exactly what the writer accepts. The backfill records
+// only values normalizeBlobDigest accepts, so the gate must select only rows
+// with at least one such value: a row whose only non-empty column held
+// something else -- an upper-case digest, a truncated one, a bridge's
+// placeholder -- was selected by a `<> ”` test, yielded no edge, stayed on the
+// work list, and held the sweep DECLINED forever while the backfill line
+// counted it as processed. blobDigestSQL is that acceptance test in SQL, and
+// TestGatePredicateMatchesTheWriter holds the two to each other.
+var unreferencedCheckpointsWhere = `status IN ('ready','skipped')
+	   AND (` + blobDigestSQL("manifest_sha256") + ` OR ` + blobDigestSQL("root_tree_sha256") + `
+	        OR ` + blobDigestSQL("message_tree_sha256") + ` OR ` + blobDigestSQL("workspace_tree_sha256") + `)
 	   AND NOT EXISTS (SELECT 1 FROM checkpoint_blob_refs r WHERE r.checkpoint_id = claw_checkpoints.id)`
+
+// blobDigestSQL is normalizeBlobDigest(col) <> "" as a SQL predicate: after
+// trimming whitespace and an optional "sha256:" prefix, exactly 64 characters
+// and every one of them a lower-case hex digit. NULL is not a digest.
+func blobDigestSQL(col string) string {
+	trimmed := fmt.Sprintf(`trim(%s, ' ' || char(9,10,11,12,13))`, col)
+	bare := fmt.Sprintf(`(CASE WHEN substr(%s,1,7)='sha256:' THEN substr(%s,8) ELSE %s END)`, trimmed, trimmed, trimmed)
+	return fmt.Sprintf(`(length(%s) = 64 AND %s NOT GLOB '*[^0-9a-f]*')`, bare, bare)
+}
 
 // unreferencedCheckpoints counts the rows that hold blobs without an edge, and
 // returns a few of their ids for the log line.
@@ -1641,7 +1795,7 @@ func (s *Server) backfillCheckpointBlobRefs() error {
 	}
 
 	var recorded, edges, expansions, treeRows, fallbacks int
-	var badManifests, missingTrees, badTrees, unreadable int
+	var badManifests, missingTrees, badTrees, unreadable, unrecordable int
 	trees := map[string]treeOutcome{}
 	errLog := &retentionErrorLog{phase: "blob reference backfill"}
 	defer errLog.flush()
@@ -1790,6 +1944,17 @@ func (s *Server) backfillCheckpointBlobRefs() error {
 		for d := range digests {
 			list = append(list, d)
 		}
+		if len(list) == 0 {
+			// Unreachable while the gate selects exactly what the writer
+			// accepts (unreferencedCheckpointsWhere); kept so that a drift
+			// between the two is a named, counted phase error rather than a
+			// row that is "processed" every cycle and never leaves the work
+			// list. Such a row is not counted as recorded.
+			unrecordable++
+			errLog.add("backfill: checkpoint %s names no recordable digest (manifest=%q root=%q message=%q workspace=%q); it stays on the work list and the gate/writer disagreement must be fixed in code",
+				shortID(r.id), r.manifestSHA, r.rootSHA, r.msgSHA, r.workspaceSHA)
+			continue
+		}
 		batch = append(batch, checkpointEdges{id: r.id, digests: list})
 		batchRows += len(list)
 		// A database error here (as opposed to a file error above) aborts the
@@ -1813,8 +1978,11 @@ func (s *Server) backfillCheckpointBlobRefs() error {
 	if stopped {
 		budget = "; stopped at the cycle budget, the rest goes to the next cycle"
 	}
-	log.Printf("[retention] blob reference backfill in %s: %d of %d checkpoint(s) given references, %d reference(s), %d tree expansion(s) (%d rows), %d schema-1 fallback(s); unparseable_manifests=%d missing_trees=%d unparseable_trees=%d (blobs listed only by a missing or unparseable tree are unreferenced and will be swept)%s",
-		time.Since(started).Round(time.Millisecond), recorded, len(pending), edges, expansions, treeRows, fallbacks, badManifests, missingTrees, badTrees, budget)
+	log.Printf("[retention] blob reference backfill in %s: %d of %d checkpoint(s) given references, %d reference(s), %d tree expansion(s) (%d rows), %d schema-1 fallback(s); unparseable_manifests=%d missing_trees=%d unparseable_trees=%d unrecordable=%d (blobs listed only by a missing or unparseable tree are unreferenced and will be swept)%s",
+		time.Since(started).Round(time.Millisecond), recorded, len(pending), edges, expansions, treeRows, fallbacks, badManifests, missingTrees, badTrees, unrecordable, budget)
+	if unrecordable > 0 {
+		return fmt.Errorf("backfill could not record %d checkpoint(s) that the gate selected: they name no digest the writer accepts, so the sweep declines on them every cycle; the gate predicate and normalizeBlobDigest have diverged", unrecordable)
+	}
 	if unreadable > 0 {
 		return fmt.Errorf("backfill left %d checkpoint(s) without references: a manifest or tree could not be read for a reason other than being absent; the sweep declines until the next cycle records them", unreadable)
 	}
@@ -1955,6 +2123,12 @@ func (s *Server) pendingBackfillEstimate() (checkpoints, trees, edges int64, err
 // The write lock is released between trees, and the deadline stops the pass
 // rather than letting a first cycle over years of dead trees run unbounded;
 // the rest goes to the next cycle.
+// treeGCHook runs once per tree between the gc's SELECT and its DELETE. It is
+// nil in production and exists solely so a test can commit a plan on that tree
+// at exactly that point -- the interleaving the DELETE's NOT EXISTS re-check
+// exists for, which no test that plans before or after the gc can reach.
+var treeGCHook func(tree string)
+
 func (s *Server) pruneUnreferencedTreeBlobRefs(pacer *retentionPacer) (int64, error) {
 	var total int64
 	for {
@@ -1982,6 +2156,19 @@ func (s *Server) pruneUnreferencedTreeBlobRefs(pacer *retentionPacer) (int64, er
 			return total, nil
 		}
 		for _, tree := range trees {
+			if treeGCHook != nil {
+				treeGCHook(tree)
+			}
+			// The NOT EXISTS here is not a repetition of the SELECT above: it
+			// is the whole safety argument. The list was read outside any
+			// transaction, and a plan may commit an edge to this tree between
+			// that read and this DELETE. The plan's addTreeBlobRefsTx probed
+			// "any row means all rows" and wrote nothing, so a DELETE that
+			// trusted the stale list would leave a referenced tree with no
+			// expansion, and the next sweep would unlink that workspace.
+			// Re-evaluated under the write lock, the predicate sees the edge
+			// and deletes nothing. TestTreeGCReChecksTheEdgeUnderTheWriteLock
+			// plans a checkpoint at exactly this point.
 			res, err := s.db.Exec(
 				`DELETE FROM tree_blob_refs WHERE tree_sha256=?
 				    AND NOT EXISTS (SELECT 1 FROM checkpoint_blob_refs r WHERE r.sha256=?)`, tree, tree)
@@ -2357,8 +2544,8 @@ func (s *Server) planBlobMissing(sha string) bool {
 }
 
 // claimBlobPresent is the claim half of the interlock as a primitive: record
-// the digest into the window, then stat, under one hold of the lock, and
-// refresh the mtime of a blob that is there. It reports whether the blob is on
+// the digest into the window, then stat, then refresh the mtime of a blob that
+// is there -- all under ONE hold of the lock. It reports whether the blob is on
 // disk.
 //
 // Every path that answers "the hub already has this blob, do not write it"
@@ -2367,20 +2554,54 @@ func (s *Server) planBlobMissing(sha string) bool {
 // the interlock is a bare stat racing the walker's unlink. The message blob was
 // the last one: it is the one referenced digest a plan never names, so its
 // finalize could commit an edge to a file the sweep had just removed.
+//
+// The touch is inside the hold, not after it, for the message blob. The plan
+// and upload paths have their edges committed before they get here, so for
+// them the mtime is a second line of defence behind the edge; the message
+// blob's edge is committed later, in the finalize transaction, so between this
+// claim and that commit the fresh mtime is the ONLY thing protecting it from a
+// sweep that armed its window after the claim. With the touch outside the
+// lock, beginBlobClaimWindow could run between the Unlock and the Chtimes:
+// that sweep records no claim, reads a keep set without the edge, and can
+// lstat the file with its months-old mtime. Inside the lock, a sweep's arm
+// serialises strictly before the claim (and sees it in the window) or strictly
+// after the touch (and sees the fresh mtime). Chtimes is one syscall.
 func (s *Server) claimBlobPresent(sha string) bool {
 	path := checkpointBlobPath(sha)
 	s.blobClaimMu.Lock()
+	defer s.blobClaimMu.Unlock()
 	if s.blobClaimWindow != nil {
 		if digest := normalizeBlobDigest(sha); digest != "" {
 			s.blobClaimWindow[digest] = struct{}{}
 		}
 	}
-	_, err := os.Stat(path)
-	s.blobClaimMu.Unlock()
-	if err == nil {
-		touchCheckpointBlob(path)
+	if _, err := os.Stat(path); err != nil {
+		return false
 	}
-	return err == nil
+	if err := touchCheckpointBlob(path); err != nil {
+		reportBlobTouchFailure(path, err)
+	}
+	return true
+}
+
+// blobTouchFailureOnce bounds the touch-failure log to one line per process.
+// A store the hub cannot Chtimes -- restored under another owner, mounted with
+// the wrong options -- fails the touch for every blob of every plan, and the
+// plan handler is called with ~12k digests per checkpoint; one line that
+// names the condition is what an operator can act on, twelve thousand an
+// hour is what journald drops.
+var blobTouchFailureOnce sync.Once
+
+// reportBlobTouchFailure makes a failed touch visible. The failure is not
+// worth failing a checkpoint over -- the edge, once committed, protects the
+// blob regardless -- but it must not be invisible either: on a store where
+// every touch fails, a deduplicated blob keeps a months-old mtime, and for
+// the message blob that mtime is the only protection between its claim and
+// its finalize.
+func reportBlobTouchFailure(path string, err error) {
+	blobTouchFailureOnce.Do(func() {
+		log.Printf("[checkpoint] cannot refresh the mtime of reused blob %s: %v (the sweep's grace window does not protect reused blobs on this store; further failures are not logged)", path, err)
+	})
 }
 
 // pruneEmptyDirs removes the two-level fan-out directories the sweep emptied,
