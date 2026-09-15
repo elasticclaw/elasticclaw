@@ -15,8 +15,9 @@ func (s *Server) resolveTemplateAgentSnapshot(tmpl *types.TemplateConfig, model,
 	}
 	s.mu.RLock()
 	if tmpl.DefaultModel == "" {
-		// Callers pass the hub default unconditionally; drop it when the
-		// selected credential's provider cannot serve it.
+		// Factory creators pass the named credential's default when the
+		// template names llm_key and the hub default otherwise; drop the
+		// latter when the selected credential's provider cannot serve it.
 		model = compatibleFallbackModel(s.hubCfg, key, model)
 	}
 	resolved, err := resolveAgentConfig(s.hubCfg, types.AgentConfig{DefaultModel: model, LLMKey: key, Subagents: tmpl.Subagents})
