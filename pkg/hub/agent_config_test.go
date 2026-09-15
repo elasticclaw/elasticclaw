@@ -63,6 +63,19 @@ func TestAgentConfigResolution(t *testing.T) {
 	}
 }
 
+func TestAgentConfigRejectsCredentialWithoutDefaultModel(t *testing.T) {
+	cfg := &types.HubConfig{LLMKeys: types.LLMKeysList{{Name: "custom", Provider: "custom-provider", APIKey: "fixture", Default: true}}}
+	_, err := resolveAgentConfig(cfg, types.AgentConfig{LLMKey: "custom"})
+	if err == nil || !strings.Contains(err.Error(), "no default model configured for credential") {
+		t.Fatalf("error = %v; want missing default model", err)
+	}
+	cfg.DefaultModel = "custom-provider/hub-model"
+	resolved, err := resolveAgentConfig(cfg, types.AgentConfig{LLMKey: "custom"})
+	if err != nil || resolved.DefaultModel != "custom-provider/hub-model" {
+		t.Fatalf("resolved = %#v, %v", resolved, err)
+	}
+}
+
 func TestAgentOptionsDoesNotExposeSecrets(t *testing.T) {
 	s, _ := NewTestServerWithConfig(t, agentTestConfig(), "", "", "")
 	req := httptest.NewRequest(http.MethodGet, "/api/agent-options", nil)

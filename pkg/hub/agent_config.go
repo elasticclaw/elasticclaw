@@ -73,6 +73,9 @@ func resolveAgentConfig(cfg *types.HubConfig, requested types.AgentConfig) (type
 			if model == "" {
 				model = resolveDefaultModelForKey(cfg, key)
 			}
+			if model == "" {
+				return "", "", nil, fmt.Errorf("no default model configured for credential %q; set default_model on the credential or the hub", name)
+			}
 			if strings.Contains(model, "/") && !modelMatchesProvider(key.Provider, model) {
 				return "", "", nil, fmt.Errorf("model %q does not match credential provider %q", model, key.Provider)
 			}
