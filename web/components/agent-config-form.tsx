@@ -59,9 +59,7 @@ export function AgentConfigForm({
     ? "Use inherited model"
     : usesMainCredential
       ? "Use main agent model"
-      : value.llm_key
-        ? credentials.find(c => c.name === value.subagents?.llm_key)?.default_model || "Use credential default model"
-        : "Use default model"
+      : credentials.find(c => c.name === value.subagents?.llm_key)?.default_model || "Use credential default model"
 
   function changeCredential(role: "main" | "subagents", name: string) {
     if (role === "main") {
