@@ -249,6 +249,11 @@ func (s *Server) triggerFactoryConfig(w http.ResponseWriter, r *http.Request, fa
 		return
 	}
 
+	if req.Agents != nil {
+		jsonError(w, http.StatusBadRequest, "agent overrides are supported only by workflow triggers")
+		return
+	}
+
 	// Validate inputs against factory schema
 	validatedInputs, err := validateFactoryInputs(factory.Inputs, req.Inputs)
 	if err != nil {

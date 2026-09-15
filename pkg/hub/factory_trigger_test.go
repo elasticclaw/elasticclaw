@@ -1,6 +1,8 @@
 package hub
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -124,3 +126,17 @@ func TestValidateFactoryInputs_MinMax(t *testing.T) {
 }
 
 // (uses strings.Contains from the standard library)
+
+func TestLegacyFactoryTriggerRejectsAgentOverrides(t *testing.T) {
+	for _, body := range []string{`{"inputs":{},"agents":{}}`, `{"inputs":{},"agents":{"subagents":{"llm_key":"workers"}}}`} {
+		t.Run(body, func(t *testing.T) {
+			server := &Server{}
+			request := httptest.NewRequest(http.MethodPost, "/api/factories/legacy/trigger", strings.NewReader(body))
+			response := httptest.NewRecorder()
+			server.triggerFactoryConfig(response, request, &types.FactoryConfig{Name: "legacy", EnableManualTrigger: true})
+			if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), "only by workflow triggers") {
+				t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+			}
+		})
+	}
+}
