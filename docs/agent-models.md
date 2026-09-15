@@ -1,7 +1,8 @@
 # Configure principal and subagent models
 
-In **Settings → Workspaces**, open **Agents** for a workflow. Choose the principal's
-credential and model, then the subagents' credential, model, and concurrency limit.
+In **Settings → Workflows**, select a workspace and open **Agents** for one of its
+workflows. Choose the principal's credential and model, then the subagents'
+credential, model, and concurrency limit.
 A different credential can select a different provider. Credentials are managed in
 Settings; this form stores their names, never their secrets.
 
@@ -22,7 +23,9 @@ or restored. Credential secrets can still be refreshed or rotated by the hub.
 
 Selecting hub credentials is an administrator action: saving agent settings,
 per-run overrides, and the credential options list (`/api/agent-options`) all
-require an access administrator (or the hub token).
+require an access administrator (or the hub token). Direct claw creation
+(`POST /api/claws`) keeps accepting top-level `llm_key` and `default_model` as
+before; only its `subagents` block requires an administrator.
 
 ## YAML and API
 
@@ -41,9 +44,10 @@ Replace the example model IDs with IDs supported by your provider and installed
 OpenClaw version. The hub checks credential availability and provider compatibility;
 it does not make a paid inference request to verify a model ID.
 
-- With no principal `default_model` or `llm_key` authored on the workflow, the
+- With no principal `default_model` or `llm_key` authored on a workflow, the
   hub `default_model` still applies when the selected credential's provider can
-  serve it; otherwise the credential's own default model is used.
+  serve it; otherwise the credential's own default model is used. Legacy
+  factories whose template names `llm_key` keep that credential's default model.
 - A credential with no resolvable default model (none on the credential, and no
   compatible hub default) is rejected instead of pinning an empty model.
 - No `subagents` block preserves existing inheritance behavior.
@@ -72,6 +76,14 @@ accept an optional `agents` override alongside `inputs`; omitted settings inheri
 the workflow/template. Sending a per-run `llm_key` without `default_model` resets
 the main model to that credential's default instead of retaining the workflow's
 model. Workflow v2 agent edits preserve its states and transitions.
+
+## Compatibility
+
+Hubs before this release reject these keys: templates are decoded strictly and
+workflow v2 validation refuses unknown keys. Before downgrading, remove
+`default_model`, `llm_key`, and `subagents` from v2 workflows and templates that
+author them; otherwise those v2 workflows are disabled and the templates fail
+to parse.
 
 ## Runtime support
 
