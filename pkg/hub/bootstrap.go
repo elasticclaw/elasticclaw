@@ -187,7 +187,7 @@ if anthropic_key:
 		}
 		modelJSON, _ := json.Marshal(model)
 		subagentPatch = "agent_defaults.setdefault('models', {}).setdefault(model, {})\n"
-		subagentPatch += fmt.Sprintf("agent_defaults['subagents'] = {'model': %s}\n", modelJSON)
+		subagentPatch += fmt.Sprintf("agent_defaults.setdefault('subagents', {})['model'] = %s\n", modelJSON)
 		if sub.MaxConcurrent > 0 {
 			subagentPatch += fmt.Sprintf("agent_defaults['subagents']['maxConcurrent'] = %d\n", sub.MaxConcurrent)
 		}

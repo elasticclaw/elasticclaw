@@ -1,7 +1,7 @@
 package hub
 
 import (
-	"encoding/base64"
+	"context"
 	"encoding/json"
 	"os"
 	"os/exec"
@@ -87,7 +87,7 @@ func TestAgentBootstrapRestoresWorkerOAuthWithPrincipalAPI(t *testing.T) {
 	if !strings.Contains(plan.APIKeyAuthSync, "--provider anthropic") || !strings.Contains(plan.OAuthAuthSync, "--provider xai") {
 		t.Fatal("both auth sync paths are required")
 	}
-	if !strings.Contains(plan.ProviderConfig, `'model': "xai/worker"`) {
+	if !strings.Contains(plan.ProviderConfig, `['model'] = "xai/worker"`) {
 		t.Fatal("OAuth child should select native xAI")
 	}
 	if strings.Contains(plan.ProviderConfig, "'maxConcurrent': 0") {
@@ -95,21 +95,14 @@ func TestAgentBootstrapRestoresWorkerOAuthWithPrincipalAPI(t *testing.T) {
 	}
 }
 
-func TestAgentBootstrapRejectsConflictingOAuthFiles(t *testing.T) {
-	bundle := func(value string) string {
-		raw, _ := json.Marshal(map[string]any{"files": map[string]string{"same": value}})
-		return base64.StdEncoding.EncodeToString(raw)
+func TestAgentBootstrapPrefersAPIKeyOverStaleOAuthProfile(t *testing.T) {
+	cfg := &types.HubConfig{LLMKeys: types.LLMKeysList{{Name: "main", Provider: "anthropic", APIKey: "key", AuthProfile: "missing-profile"}}}
+	plan, err := buildAgentBootstrapPlan(cfg, "main", "anthropic/principal", &types.SubagentConfig{})
+	if err != nil {
+		t.Fatal(err)
 	}
-	cfg := &types.HubConfig{LLMKeys: types.LLMKeysList{
-		{Name: "main", Provider: "anthropic", APIKey: "key", AuthProfile: "main-auth"},
-		{Name: "worker", Provider: "grok", AuthProfile: "worker-auth"},
-	}, ModelAuthProfiles: []*types.ModelAuthProfileConfig{
-		{Name: "main-auth", Provider: "anthropic", AuthState: bundle("one")},
-		{Name: "worker-auth", Provider: "grok", AuthState: bundle("two")},
-	}}
-	_, err := buildAgentBootstrapPlan(cfg, "main", "anthropic/principal", &types.SubagentConfig{Model: "grok/worker", LLMKey: "worker"})
-	if err == nil || !strings.Contains(err.Error(), "conflicting file") {
-		t.Fatalf("expected conflict error, got %v", err)
+	if plan.ModelAuthEnv != "" {
+		t.Fatal("API key selection must not restore OAuth credentials")
 	}
 }
 
@@ -120,6 +113,13 @@ func TestAgentBootstrapKeepsBothCustomProviderModels(t *testing.T) {
 		t.Fatal(err)
 	}
 	home := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(home, ".openclaw"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".openclaw/openclaw.json"), []byte(`{"agents":{"defaults":{"subagents":{"runTimeoutSeconds":120,"maxSpawnDepth":2}}}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+
 	cmd := exec.Command("bash", "-c", plan.ProviderConfig)
 	cmd.Env = append(os.Environ(), "HOME="+home, "OPENCLAW_DEFAULT_MODEL=grok/principal")
 	if out, err := cmd.CombinedOutput(); err != nil {
@@ -138,11 +138,36 @@ func TestAgentBootstrapKeepsBothCustomProviderModels(t *testing.T) {
 		t.Fatalf("expected both custom model definitions, got %v", models)
 	}
 	defaults := config["agents"].(map[string]any)["defaults"].(map[string]any)
+	child := defaults["subagents"].(map[string]any)
+	if child["runTimeoutSeconds"] != float64(120) || child["maxSpawnDepth"] != float64(2) {
+		t.Fatalf("unrelated child settings changed: %v", child)
+	}
+
 	allowed := defaults["models"].(map[string]any)
 	if allowed["grok/principal"] == nil || allowed["grok/worker"] == nil {
 		t.Fatalf("principal and worker must both be allowed: %v", allowed)
 	}
 	if _, ok := defaults["subagents"].(map[string]any)["maxConcurrent"]; ok {
 		t.Fatal("omitted concurrency should preserve runtime default")
+	}
+}
+
+func TestManagedGrokCredentialUsesWorkerProfile(t *testing.T) {
+	cfg := &types.HubConfig{LLMKeys: types.LLMKeysList{
+		{Name: "main", Provider: "anthropic", APIKey: "key"},
+		{Name: "worker", Provider: "grok", AuthProfile: "worker-oauth"},
+	}, ModelAuthProfiles: []*types.ModelAuthProfileConfig{
+		{Name: "worker-oauth", Provider: "grok", AuthState: testGrokAuthState(t, "worker-access", "worker-refresh", time.Now().Add(time.Hour))},
+	}}
+	s, db := NewTestServerWithConfig(t, cfg, "", "", "")
+	if _, err := db.Exec(`INSERT INTO claws(id,tenant_id,name,llm_key,subagents_config,status,created_at) VALUES(?,?,?,?,?,?,datetime('now'))`, "worker-oauth-claw", "test-tenant-id", "worker oauth", "main", `{"model":"grok/worker","llm_key":"worker"}`, "connected"); err != nil {
+		t.Fatal(err)
+	}
+	credential, err := s.managedGrokCredential(context.Background(), "worker-oauth-claw")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if credential == nil {
+		t.Fatal("expected managed worker credential")
 	}
 }

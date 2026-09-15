@@ -58,7 +58,7 @@ func buildAgentBootstrapPlan(cfg *types.HubConfig, mainKey, mainModel string, su
 		if script := buildOpenClawOAuthAuthSyncShell(selected, key.Name); script != "" {
 			plan.OAuthAuthSync += script + "\n"
 		}
-		if key.AuthProfile == "" {
+		if key.AuthProfile == "" || key.APIKey != "" {
 			continue
 		}
 		foundProfile := false
@@ -105,7 +105,9 @@ func (s *Server) clawAgentBootstrapPlan(clawID string, cfg *types.HubConfig, mai
 	if err != nil {
 		return agentBootstrapPlan{}, fmt.Errorf("load subagent configuration: %w", err)
 	}
+	s.mu.RLock()
 	plan, err := buildAgentBootstrapPlan(cfg, strings.TrimSpace(mainKey), mainModel, sub)
+	s.mu.RUnlock()
 	if err != nil {
 		return agentBootstrapPlan{}, fmt.Errorf("resolve agent bootstrap: %w", err)
 	}
