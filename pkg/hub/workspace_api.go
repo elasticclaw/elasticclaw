@@ -349,12 +349,9 @@ func (s *Server) handleWorkspaceWorkflowPatch(w http.ResponseWriter, r *http.Req
 	}
 	fields := map[string]interface{}{}
 	if req.Agents != nil {
-		s.mu.RLock()
 		candidate := *workflow
 		applyWorkflowAgents(&candidate, *req.Agents)
-		_, err := resolveAgentConfig(s.hubCfg, effectiveWorkflowAgents(workspace, &candidate))
-		s.mu.RUnlock()
-		if err != nil {
+		if err := s.validateWorkflowAgents(workspace, &candidate); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
@@ -469,10 +466,7 @@ func (s *Server) triggerWorkflowConfig(w http.ResponseWriter, r *http.Request, w
 		copied := *workflow
 		applyWorkflowAgents(&copied, mergeAgentConfig(workflowAgentConfig(workflow), *req.Agents))
 		workflow = &copied
-		s.mu.RLock()
-		_, err := resolveAgentConfig(s.hubCfg, effectiveWorkflowAgents(workspace, workflow))
-		s.mu.RUnlock()
-		if err != nil {
+		if err := s.validateWorkflowAgents(workspace, workflow); err != nil {
 			jsonError(w, http.StatusBadRequest, err.Error())
 			return
 		}

@@ -258,3 +258,17 @@ func effectiveWorkflowAgents(workspace *types.WorkspaceConfig, workflow *types.W
 	}
 	return mergeAgentConfig(base, workflowAgentConfig(workflow))
 }
+
+// validateWorkflowAgents resolves authored agent settings the way claw creation
+// will. Workflows without authored settings keep the legacy path, which runs on
+// hubs without llm_keys, so they are not validated here.
+func (s *Server) validateWorkflowAgents(workspace *types.WorkspaceConfig, workflow *types.WorkflowConfig) error {
+	agents := effectiveWorkflowAgents(workspace, workflow)
+	if workflow.DefaultModel == "" && workflow.LLMKey == "" && agents.Subagents == nil {
+		return nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	_, err := resolveAgentConfig(s.hubCfg, agents)
+	return err
+}

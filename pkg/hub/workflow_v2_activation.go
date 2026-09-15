@@ -43,10 +43,7 @@ func (s *Server) triggerWorkflowV2Config(w http.ResponseWriter, r *http.Request,
 		copied := *workflow
 		applyWorkflowAgents(&copied, mergeAgentConfig(workflowAgentConfig(workflow), *req.Agents))
 		workflow = &copied
-		s.mu.RLock()
-		_, err := resolveAgentConfig(s.hubCfg, effectiveWorkflowAgents(workspace, workflow))
-		s.mu.RUnlock()
-		if err != nil {
+		if err := s.validateWorkflowAgents(workspace, workflow); err != nil {
 			jsonError(w, http.StatusBadRequest, err.Error())
 			return
 		}

@@ -209,6 +209,22 @@ func TestWorkflowAgentPatchOmitsEmptyKeys(t *testing.T) {
 	}
 }
 
+func TestWorkflowAgentPatchWithoutCredentials(t *testing.T) {
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
+	t.Setenv("ELASTICCLAW_NOOP_PROVIDER", "1")
+	s, _ := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token", Providers: map[string]types.ProviderConfig{"noop": {Type: "noop"}}}, "", "", "")
+	SaveWorkspaceForTest(t, &types.WorkspaceConfig{Name: "engineering", Files: map[string]string{"elasticclaw-config.yaml": "schema_version: v1\nname: engineering\nprovider: noop\n"}}, []*types.WorkflowConfig{{Name: "delivery"}})
+	for body, want := range map[string]int{`{"agents":{}}`: http.StatusOK, `{"agents":{"llm_key":"main"}}`: http.StatusBadRequest} {
+		req := httptest.NewRequest(http.MethodPatch, "/api/workspaces/engineering/workflows/delivery", strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer test-token")
+		rr := httptest.NewRecorder()
+		s.Handler().ServeHTTP(rr, req)
+		if rr.Code != want {
+			t.Fatalf("patch %s %d, want %d: %s", body, rr.Code, want, rr.Body.String())
+		}
+	}
+}
+
 func TestAgentConfigSameCredentialInheritsPrincipalModel(t *testing.T) {
 	for _, provider := range []string{"anthropic", "codex"} {
 		for _, name := range []string{"", "main"} {
