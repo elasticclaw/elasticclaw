@@ -116,15 +116,14 @@ func (s *Server) clawAgentBootstrapPlan(clawID string, cfg *types.HubConfig, mai
 
 // resolveDaytonaBootstrapModel preserves pinned models, while retaining the
 // legacy Daytona correction for stored models belonging to another provider.
+// New claws store provider-prefixed models; an unprefixed value comes from a
+// legacy claw, whose restarts always used the credential's default model.
 func resolveDaytonaBootstrapModel(cfg *types.HubConfig, key *types.LLMKeyConfig, stored string) (model string, legacyMismatch bool) {
-	if stored == "" {
+	if stored == "" || !strings.Contains(stored, "/") {
 		return resolveDefaultModelForKey(cfg, key), false
 	}
 	if key == nil {
 		return stored, false
-	}
-	if !strings.Contains(stored, "/") {
-		return normalizeModelForProvider(key.Provider, stored), false
 	}
 	if !modelMatchesProvider(key.Provider, stored) {
 		return resolveDefaultModelForKey(cfg, key), true

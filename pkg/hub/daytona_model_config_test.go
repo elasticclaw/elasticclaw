@@ -60,6 +60,22 @@ func TestDaytonaModelConfigKeepsShellMetacharactersLiteral(t *testing.T) {
 	}
 }
 
+func TestDaytonaRestartUnprefixedStoredModelUsesCredentialDefault(t *testing.T) {
+	// Legacy claws stored bare model IDs, and their Daytona restarts always
+	// used the credential's default; a bare value must not be re-prefixed onto
+	// a provider that never served it.
+	cfg := &types.HubConfig{DefaultModel: "openai/hub-default"}
+	key := &types.LLMKeyConfig{Name: "main", Provider: "anthropic", DefaultModel: "anthropic/key-default"}
+	model, mismatch := resolveDaytonaBootstrapModel(cfg, key, "gpt-5.5")
+	if model != "anthropic/key-default" || mismatch {
+		t.Fatalf("unprefixed stored model: got %q mismatch=%v", model, mismatch)
+	}
+	model, mismatch = resolveDaytonaBootstrapModel(cfg, nil, "gpt-5.5")
+	if model != "openai/hub-default" || mismatch {
+		t.Fatalf("unprefixed stored model without key: got %q mismatch=%v", model, mismatch)
+	}
+}
+
 func TestStoredModelOnboardAndCLIInputsRemainData(t *testing.T) {
 	home := t.TempDir()
 	marker := filepath.Join(home, "unexpected-substitution")

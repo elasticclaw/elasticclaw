@@ -298,7 +298,7 @@ func TestResolveDaytonaBootstrapModelCompatibility(t *testing.T) {
 		{"anthropic/pinned", "anthropic/pinned", false},
 		{"openai/legacy", "anthropic/key-default", true},
 		{"", "anthropic/key-default", false},
-		{"unpinned-prefix", "anthropic/unpinned-prefix", false},
+		{"unpinned-legacy", "anthropic/key-default", false},
 	} {
 		model, mismatch := resolveDaytonaBootstrapModel(cfg, key, tc.stored)
 		if model != tc.want || mismatch != tc.mismatch {
