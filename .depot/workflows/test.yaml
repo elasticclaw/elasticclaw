@@ -131,7 +131,7 @@ jobs:
     runs-on: depot-ubuntu-24.04
     permissions:
       contents: read
-      issues: write
+      pull-requests: write
     needs:
       - unit
       - build
