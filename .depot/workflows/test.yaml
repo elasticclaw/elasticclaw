@@ -32,12 +32,12 @@ jobs:
       - name: Run public adversaries
         uses: adversarylabs/actions/run@v1
         env:
-          ADVERSARY_MODEL: ${{ secrets.ADVERSARY_MODEL }}
           CAMEL_API_KEY: ${{ secrets.CAMEL_API_KEY }}
         with:
           adversaries: auto
           path: .
           data-dir: /mnt/adversary
+          model: auto
           auth-mode: oidc
           registry-namespace: elasticclaw
           include-summary: false
