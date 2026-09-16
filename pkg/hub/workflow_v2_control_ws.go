@@ -169,7 +169,10 @@ func (s *Server) sendWorkflowV2ControlOutbox(ctx context.Context, store *workflo
 	defer writer.conn.CloseNow()
 	ticker := time.NewTicker(250 * time.Millisecond)
 	defer ticker.Stop()
-	held := false
+	// heldTicks counts consecutive held cycles; the hold is re-logged every
+	// 120 ticks (~30s) so a run waiting on a slow or stuck workspace bootstrap
+	// stays visible in hub logs instead of looking like a dead socket.
+	heldTicks := 0
 	for {
 		if err := store.AuthorizeControlAttempt(ctx, registration.RunID, registration.AttemptID, registration.ClawID, tenantID); err != nil {
 			result <- err
@@ -188,8 +191,8 @@ func (s *Server) sendWorkflowV2ControlOutbox(ctx context.Context, store *workflo
 			return
 		}
 		if !ready {
-			if !held {
-				held = true
+			heldTicks++
+			if heldTicks == 1 || heldTicks%120 == 0 {
 				log.Printf("[workflow-v2 control] holding outbox for claw %s until workspace bootstrap completes", shortID(registration.ClawID))
 			}
 			select {
@@ -200,7 +203,7 @@ func (s *Server) sendWorkflowV2ControlOutbox(ctx context.Context, store *workflo
 			}
 			continue
 		}
-		held = false
+		heldTicks = 0
 		envelopes, err := store.ReadyControl(ctx, registration.RunID, registration.AttemptID, 100)
 		if err != nil {
 			result <- err

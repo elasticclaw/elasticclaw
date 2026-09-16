@@ -498,6 +498,53 @@ func TestCancelWorkflowV2RunForClawCancelsActiveRun(t *testing.T) {
 	}
 }
 
+// TestFinishClawTerminalTxCancelsBoundWorkflowV2Run guards the #691 follow-up:
+// terminal claw transitions (bootstrap failure, watchdog stop, reaper delete)
+// must cancel an active workflow v2 run bound to the claw. Before the fix only
+// the workflow-creator provisioning paths cancelled, so a bootstrap failure in
+// the VM sync loop left the run active with a dead claw, holding task delivery
+// until the 24h run reaper.
+func TestFinishClawTerminalTxCancelsBoundWorkflowV2Run(t *testing.T) {
+	s, db := newReaperTestServer(t, &types.HubConfig{})
+	now := time.Now().UTC()
+	if _, err := db.Exec(`INSERT INTO claws(id,tenant_id,name,template,provider,status,created_at) VALUES(?,?,?,?,?,?,?)`,
+		"claw-bootstrap-dead", "tenant", "dead", "ws", "replicated", "connected", now); err != nil {
+		t.Fatal(err)
+	}
+	insertWorkflowV2Run(t, db, "run-terminal-cancel", "att-terminal-cancel", now.Add(time.Hour), now)
+	if _, err := db.Exec(`UPDATE workflow_v2_attempts SET claw_id=? WHERE id=?`,
+		"claw-bootstrap-dead", "att-terminal-cancel"); err != nil {
+		t.Fatal(err)
+	}
+
+	applied, err := s.finishClawTerminalTx("claw-bootstrap-dead", "error",
+		"Bootstrap failed: could not configure GitHub credentials", "failed",
+		"Bootstrap failed: could not configure GitHub credentials", terminalTxOpts{})
+	if err != nil || !applied {
+		t.Fatalf("finishClawTerminalTx = applied:%v err:%v", applied, err)
+	}
+
+	var runStatus, attemptStatus, clawStatus string
+	if err := db.QueryRow(`SELECT status FROM workflow_v2_runs WHERE id='run-terminal-cancel'`).Scan(&runStatus); err != nil {
+		t.Fatal(err)
+	}
+	if runStatus != "cancelled" {
+		t.Fatalf("run status = %q, want cancelled", runStatus)
+	}
+	if err := db.QueryRow(`SELECT status FROM workflow_v2_attempts WHERE id='att-terminal-cancel'`).Scan(&attemptStatus); err != nil {
+		t.Fatal(err)
+	}
+	if attemptStatus != "cancelled" {
+		t.Fatalf("attempt status = %q, want cancelled", attemptStatus)
+	}
+	if err := db.QueryRow(`SELECT status FROM claws WHERE id='claw-bootstrap-dead'`).Scan(&clawStatus); err != nil {
+		t.Fatal(err)
+	}
+	if clawStatus != "error" {
+		t.Fatalf("claw status = %q, want error", clawStatus)
+	}
+}
+
 func TestReleaseWorkflowV2CronSlotLoadsBeforeMarker(t *testing.T) {
 	s, db := newReaperTestServer(t, &types.HubConfig{})
 	s.cronSchedulerV2 = newCronSchedulerV2(s)
