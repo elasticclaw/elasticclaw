@@ -14,6 +14,7 @@ jobs:
     runs-on: depot-ubuntu-24.04
     permissions:
       contents: read
+      id-token: write
       pull-requests: write
 
     steps:
@@ -34,8 +35,7 @@ jobs:
           adversaries: auto
           path: .
           data-dir: /mnt/adversary
-          auth-mode: token
-          token: ${{ secrets.ADVERSARY_LABS_SERVICE_ACCOUNT_TOKEN }}
+          auth-mode: oidc
           registry-namespace: elasticclaw
           include-summary: false
           fail-on-findings: false
