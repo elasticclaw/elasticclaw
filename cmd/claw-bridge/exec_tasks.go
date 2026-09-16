@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -19,6 +21,23 @@ const (
 	defaultDependencyUpdateTimeout = 30 * time.Minute
 	maxExecOutputBytes             = 8000
 )
+
+// bridgeWorkspaceCommand mirrors the hub's v1 run-action contract
+// (buildWorkspaceRunCommand): deterministic commands execute inside the live
+// OpenClaw workspace so relative paths such as scripts/foo.sh resolve (#691),
+// and workspaces with a flake.nix run inside devShells.default via flake-run
+// so declared toolchains are available (the #526 contract).
+func bridgeWorkspaceCommand(command string) string {
+	inner := `cd "$HOME/.openclaw/workspace" && ` + command
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return inner
+	}
+	if _, err := os.Stat(filepath.Join(home, ".openclaw", "workspace", "flake.nix")); err == nil {
+		return `~/.elasticclaw/flake-run bash -lc ` + shellQuote(inner)
+	}
+	return inner
+}
 
 // startCommandTask launches a deterministic exec.run or dependency.update task
 // on the bridge. It records the incoming assignment as running, executes the
@@ -89,7 +108,7 @@ func (s *controlSupervisor) runExecCommand(ctx context.Context, binding workflow
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "sh", "-c", cfg.Command)
+	cmd := exec.CommandContext(ctx, "sh", "-c", bridgeWorkspaceCommand(cfg.Command))
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -148,7 +167,7 @@ func (s *controlSupervisor) runDependencyUpdateCommand(ctx context.Context, bind
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "sh", "-c", command)
+	cmd := exec.CommandContext(ctx, "sh", "-c", bridgeWorkspaceCommand(command))
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr

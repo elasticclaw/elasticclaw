@@ -3,6 +3,7 @@ package hub
 import (
 	"context"
 	"crypto/hmac"
+	"database/sql"
 	"errors"
 	"log"
 	"net/http"
@@ -168,11 +169,38 @@ func (s *Server) sendWorkflowV2ControlOutbox(ctx context.Context, store *workflo
 	defer writer.conn.CloseNow()
 	ticker := time.NewTicker(250 * time.Millisecond)
 	defer ticker.Stop()
+	held := false
 	for {
 		if err := store.AuthorizeControlAttempt(ctx, registration.RunID, registration.AttemptID, registration.ClawID, tenantID); err != nil {
 			result <- err
 			return
 		}
+		// Hold task delivery until the claw's workspace bootstrap completed.
+		// Replicated and exedev bridges start — and register here — while the
+		// hub is still writing workspace files and cloning repositories; only
+		// bootstrap_ok=1 marks that staging complete. Without this gate the
+		// first exec.run executes against a sandbox that only contains the
+		// early-staged flake files (#691). Providers that stage the workspace
+		// before the bridge starts are ready immediately.
+		ready, err := s.workflowV2ClawDispatchReady(ctx, registration.ClawID)
+		if err != nil {
+			result <- err
+			return
+		}
+		if !ready {
+			if !held {
+				held = true
+				log.Printf("[workflow-v2 control] holding outbox for claw %s until workspace bootstrap completes", shortID(registration.ClawID))
+			}
+			select {
+			case <-ctx.Done():
+				result <- ctx.Err()
+				return
+			case <-ticker.C:
+			}
+			continue
+		}
+		held = false
 		envelopes, err := store.ReadyControl(ctx, registration.RunID, registration.AttemptID, 100)
 		if err != nil {
 			result <- err
@@ -196,4 +224,25 @@ func (s *Server) sendWorkflowV2ControlOutbox(ctx context.Context, store *workflo
 		case <-ticker.C:
 		}
 	}
+}
+
+// workflowV2ClawDispatchReady reports whether the attempt's claw has finished
+// workspace bootstrap staging and may receive workflow v2 task assignments.
+// VM providers that stage the workspace after the bridge is already running
+// (daytona, replicated, exedev) gate on bootstrap_ok; providers that stage
+// before the bridge starts (docker, lambda-microvms, noop) are always ready.
+// A missing claw row holds delivery — the row exists before provisioning, so
+// absence means the claw was deleted and the run cleanup will close this socket.
+func (s *Server) workflowV2ClawDispatchReady(ctx context.Context, clawID string) (bool, error) {
+	var provider string
+	var bootstrapOK int
+	err := s.db.QueryRowContext(ctx, `SELECT COALESCE(provider,''), COALESCE(bootstrap_ok,0) FROM claws WHERE id=?`, clawID).
+		Scan(&provider, &bootstrapOK)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return allowWakeBeforeBootstrap(provider, bootstrapOK), nil
 }
