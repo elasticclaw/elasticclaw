@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
+	"strings"
 )
 
 // MatchPredicate evaluates the restricted predicate language against facts.
@@ -56,6 +57,16 @@ func matchPredicateMap(predicate, facts map[string]interface{}) (bool, error) {
 			}
 		default:
 			actual, exists := facts[key]
+			if !exists && strings.Contains(key, ".") {
+				// Fact keys are canonically dotted (for example
+				// exec.last_run.succeeded) and are loaded as nested maps.
+				// A predicate key containing dots therefore addresses a
+				// path into the nested fact tree when no literal fact
+				// carries the dotted name. Without this, a guard written
+				// as `exec.last_run: {succeeded: {equals: true}}` can never
+				// match and the run silently parks in its current state.
+				actual, exists = lookupDottedPath(facts, key)
+			}
 			matched, err := matchConstraint(expected, actual, exists)
 			if err != nil || !matched {
 				return matched, err
@@ -63,6 +74,24 @@ func matchPredicateMap(predicate, facts map[string]interface{}) (bool, error) {
 		}
 	}
 	return true, nil
+}
+
+// lookupDottedPath resolves a dotted predicate key against nested facts. It
+// returns the value at the path and whether every component existed.
+func lookupDottedPath(facts map[string]interface{}, key string) (interface{}, bool) {
+	parts := strings.Split(key, ".")
+	var current interface{} = facts
+	for _, part := range parts {
+		container, ok := current.(map[string]interface{})
+		if !ok {
+			return nil, false
+		}
+		current, ok = container[part]
+		if !ok {
+			return nil, false
+		}
+	}
+	return current, true
 }
 
 func matchConstraint(expected, actual interface{}, exists bool) (bool, error) {

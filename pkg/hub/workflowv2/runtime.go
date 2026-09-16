@@ -469,7 +469,7 @@ func (s *Store) ApplyEvent(ctx context.Context, runID string, input EventInput) 
 		matchFacts = deepMerge(cloneMap(facts), input.Payload)
 	}
 
-	name, transitionDef, matchCount, err := matchingTransition(workflow.Workflow, input.Kind, stored.State, matchFacts)
+	name, transitionDef, matchCount, listenerCount, err := matchingTransition(workflow.Workflow, input.Kind, stored.State, matchFacts)
 	if err != nil {
 		return EventResult{}, err
 	}
@@ -486,6 +486,14 @@ func (s *Store) ApplyEvent(ctx context.Context, runID string, input EventInput) 
 			reason = fmt.Sprintf("state invariant no longer holds for %s and no transition matched %s", stored.State, input.Kind)
 			return s.rejectAndSuspend(ctx, tx, stored, input, reason, now)
 		}
+		// Transitions listened on this event but every guard evaluated false.
+		// That is almost always a guard/fact mismatch in the workflow document
+		// (for example a dotted fact key that never resolves), so surface it in
+		// the receipt instead of silently parking the run in its current state.
+		if listenerCount > 0 {
+			reason = fmt.Sprintf("accepted without transition: %d transition(s) for %s in state %s listened but evaluated false",
+				listenerCount, input.Kind, stored.State)
+		}
 		if err := writeFacts(ctx, tx, runID, input.ID, ProducerEngine, input.Provenance, clauseWrites, now); err != nil {
 			return EventResult{}, err
 		}
@@ -498,14 +506,14 @@ func (s *Store) ApplyEvent(ctx context.Context, runID string, input EventInput) 
 		if err := updateBoundTask(ctx, tx, runID, input, now); err != nil {
 			return EventResult{}, err
 		}
-		if err := insertEventReceipt(ctx, tx, runID, input.ID, input.MessageID, typesv2.DispositionAccepted, stored.StateVersion, "", now); err != nil {
+		if err := insertEventReceipt(ctx, tx, runID, input.ID, input.MessageID, typesv2.DispositionAccepted, stored.StateVersion, reason, now); err != nil {
 			return EventResult{}, err
 		}
 		if err := tx.Commit(); err != nil {
 			return EventResult{}, err
 		}
 		updated, err := s.GetRun(ctx, runID)
-		return EventResult{EventID: input.ID, Disposition: typesv2.DispositionAccepted, Run: updated}, err
+		return EventResult{EventID: input.ID, Disposition: typesv2.DispositionAccepted, Reason: reason, Run: updated}, err
 	}
 
 	return s.applyTransition(ctx, tx, runID, stored, workflow.Workflow, input, name, transitionDef, clause, clauseName, clauseWrites, facts, now)
@@ -612,7 +620,7 @@ type CommandInput struct {
 	ID                   string
 	MessageID            string
 	Reason               string
-	ExpectedStateVersion  *uint64
+	ExpectedStateVersion *uint64
 	Provenance           typesv2.EvidenceProvenance
 }
 
@@ -830,23 +838,30 @@ func producerOwnsFact(producer Producer, key string) bool {
 	}
 }
 
-func matchingTransition(workflow *typesv2.Workflow, kind, state string, facts map[string]interface{}) (string, *typesv2.Transition, int, error) {
+// matchingTransition finds the single transition listening on kind from state
+// whose guard matches facts. listenerCount reports how many transitions listen
+// on (from, kind) regardless of guard outcome, so callers can distinguish "no
+// transition listens" from "transitions listened but every guard evaluated
+// false" — the latter is almost always an authoring error worth surfacing.
+func matchingTransition(workflow *typesv2.Workflow, kind, state string, facts map[string]interface{}) (string, *typesv2.Transition, int, int, error) {
 	names := sortedKeys(workflow.Transitions)
 	var matchedName string
 	var matched *typesv2.Transition
 	count := 0
+	listeners := 0
 	for _, name := range names {
 		definition := workflow.Transitions[name]
 		from, err := typesv2.FromStates(definition.From)
 		if err != nil {
-			return "", nil, 0, err
+			return "", nil, 0, 0, err
 		}
 		if !contains(from, state) || definition.On != kind {
 			continue
 		}
+		listeners++
 		ok, err := typesv2.MatchPredicate(definition.When, facts)
 		if err != nil {
-			return "", nil, 0, fmt.Errorf("evaluate transition %s: %w", name, err)
+			return "", nil, 0, 0, fmt.Errorf("evaluate transition %s: %w", name, err)
 		}
 		if ok {
 			copy := definition
@@ -854,7 +869,7 @@ func matchingTransition(workflow *typesv2.Workflow, kind, state string, facts ma
 			count++
 		}
 	}
-	return matchedName, matched, count, nil
+	return matchedName, matched, count, listeners, nil
 }
 
 func matchingEventClause(workflow *typesv2.Workflow, kind, state string, facts map[string]interface{}) (string, *typesv2.EventClause, int, error) {

@@ -149,14 +149,14 @@ func (s *Server) cancelWorkflowV2RunForClaw(ctx context.Context, clawID, reason 
 		LIMIT 1`, clawID).Scan(&runID)
 	if err != nil {
 		if !errors.Is(err, sql.ErrNoRows) {
-			log.Printf("[workflow-v2] failed to find active run for claw %s: %v", clawID[:8], err)
+			log.Printf("[workflow-v2] failed to find active run for claw %s: %v", shortID(clawID), err)
 		}
 		return
 	}
 	if err := workflowv2.NewStore(s.db).CancelActivation(ctx, runID, reason); err != nil {
-		log.Printf("[workflow-v2] failed to cancel run %s for claw %s: %v", runID[:8], clawID[:8], err)
+		log.Printf("[workflow-v2] failed to cancel run %s for claw %s: %v", shortID(runID), shortID(clawID), err)
 		return
 	}
-	log.Printf("[workflow-v2] cancelled run %s because claw %s %s", runID[:8], clawID[:8], reason)
+	log.Printf("[workflow-v2] cancelled run %s because claw %s %s", shortID(runID), shortID(clawID), reason)
 	s.maybeFinishWorkflowV2Parent(ctx, runID)
 }

@@ -45,3 +45,58 @@ func TestMatchPredicateRestrictedLanguage(t *testing.T) {
 		})
 	}
 }
+
+func TestMatchPredicateDottedKeysResolveNestedFacts(t *testing.T) {
+	// Facts load from flat dotted keys (exec.last_run.succeeded) into nested
+	// maps. Guards written with dotted predicate keys must resolve as paths.
+	facts := map[string]interface{}{
+		"exec": map[string]interface{}{
+			"last_run": map[string]interface{}{
+				"succeeded": true,
+				"exit_code": float64(0),
+			},
+			"dependency_update": map[string]interface{}{
+				"succeeded": true,
+			},
+		},
+	}
+	tests := []struct {
+		name      string
+		predicate map[string]interface{}
+		want      bool
+	}{
+		{"dotted key with nested operator map", map[string]interface{}{
+			"exec.last_run": map[string]interface{}{
+				"succeeded": map[string]interface{}{"equals": true},
+			}}, true},
+		{"fully dotted key with operator", map[string]interface{}{
+			"exec.last_run.succeeded": map[string]interface{}{"equals": true}}, true},
+		{"fully dotted key wrong value", map[string]interface{}{
+			"exec.last_run.exit_code": map[string]interface{}{"equals": float64(1)}}, false},
+		{"dotted key mismatching object value", map[string]interface{}{
+			"exec.last_run": map[string]interface{}{
+				"succeeded": map[string]interface{}{"equals": false},
+			}}, false},
+		{"nested form still matches", map[string]interface{}{
+			"exec": map[string]interface{}{
+				"last_run": map[string]interface{}{
+					"succeeded": map[string]interface{}{"equals": true},
+				},
+			}}, true},
+		{"missing dotted path", map[string]interface{}{
+			"exec.last_run.error": map[string]interface{}{"exists": true}}, false},
+		{"dotted path stops at scalar", map[string]interface{}{
+			"exec.last_run.succeeded.deeper": map[string]interface{}{"exists": true}}, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := v2.MatchPredicate(tc.predicate, facts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != tc.want {
+				t.Fatalf("matched = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
