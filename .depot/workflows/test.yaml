@@ -9,6 +9,37 @@ permissions:
   pull-requests: write
 
 jobs:
+  adversary-review:
+    name: Adversary Labs review
+    runs-on: depot-ubuntu-24.04
+    permissions:
+      contents: read
+      pull-requests: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Mount adversary cache
+        uses: depot/cache-mount@v1
+        with:
+          name: adversary-${{ github.event.repository.id }}-public-v1
+          path: /mnt/adversary
+
+      - name: Run public adversaries
+        uses: adversarylabs/actions/run@v1
+        with:
+          adversaries: auto
+          path: .
+          data-dir: /mnt/adversary
+          auth-mode: token
+          token: ${{ secrets.ADVERSARY_LABS_SERVICE_ACCOUNT_TOKEN }}
+          registry-namespace: elasticclaw
+          include-summary: false
+          fail-on-findings: false
+
   unit:
     name: Unit tests
     runs-on: depot-ubuntu-24.04
