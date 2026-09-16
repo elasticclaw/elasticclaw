@@ -114,6 +114,7 @@ func (c *Client) CreateClaw(ctx context.Context, name, templateName string, tmpl
 		TTL:          tmplCfg.TTL,
 		DefaultModel: tmplCfg.DefaultModel,
 		LLMKey:       tmplCfg.LLMKey,
+		Subagents:    tmplCfg.Subagents,
 		Files:        files,
 		Env:          env,
 		SecretRefs:   tmplCfg.SecretRefs,

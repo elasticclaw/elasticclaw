@@ -12,6 +12,7 @@ import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog"
 import { cn } from "@/lib/utils"
 import Link from "next/link"
 import { VALID_SECTIONS, type Section } from "./sections"
+import { WorkflowAgentsDialog } from "@/components/workflow-agents-dialog"
 import { fetchWorkspaces, updateWorkflowControls, type RepositoryAccess, type Workspace, type Workflow } from "@/lib/api"
 import { useBranding } from "@/hooks/use-branding"
 import { WorkflowName } from "@/components/workflow-name"
@@ -3280,6 +3281,13 @@ function WorkflowsSection({ selectedWorkspace }: { selectedWorkspace: string }) 
               workflow={workflow}
               saving={savingWorkflow === `${workflow.workspaceName}/${workflow.name}`}
               onPatch={patchWorkflow}
+              onAgentsSaved={updated => setWorkspaces(current => current.map(workspace =>
+                workspace.name !== updated.workspaceName ? workspace : {
+                  ...workspace,
+                  workflows: workspace.workflows.map(item => item.name === updated.name
+                    ? { ...item, ...updated, agents: updated.agents } : item),
+                }
+              ))}
             />
           ))}
         </div>
@@ -3292,9 +3300,11 @@ function WorkflowSummaryRow({
   workflow,
   saving,
   onPatch,
+  onAgentsSaved,
 }: {
   workflow: Workflow
   saving: boolean
+  onAgentsSaved: (workflow: Workflow) => void
   onPatch: (workflow: Workflow, patch: { enabled?: boolean; enableManualTrigger?: boolean }) => void
 }) {
   return (
@@ -3329,6 +3339,7 @@ function WorkflowSummaryRow({
             />
             <span>Manual trigger</span>
           </label>
+          <WorkflowAgentsDialog workflow={workflow} onSaved={onAgentsSaved} disabled={saving} />
           <WorkflowRunsDialog workflow={workflow} />
           <span className={cn(
             "text-xs px-2 py-0.5 rounded",

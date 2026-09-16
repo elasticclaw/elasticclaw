@@ -615,6 +615,32 @@ func TestFactoryInputValidate(t *testing.T) {
 	}
 }
 
+func TestWorkflowConfigValidateSubagents(t *testing.T) {
+	for _, tc := range []struct {
+		maxConcurrent int
+		wantErr       bool
+	}{
+		{0, false},
+		{1, false},
+		{32, false},
+		{-1, true},
+		{33, true},
+		{64, true},
+	} {
+		workflow := &WorkflowConfig{Name: "delivery", Subagents: &SubagentConfig{MaxConcurrent: tc.maxConcurrent}}
+		err := workflow.Validate()
+		if tc.wantErr && (err == nil || !strings.Contains(err.Error(), "max_concurrent must be between 1 and 32")) {
+			t.Fatalf("max_concurrent %d: error = %v, want range error", tc.maxConcurrent, err)
+		}
+		if !tc.wantErr && err != nil {
+			t.Fatalf("max_concurrent %d: unexpected error %v", tc.maxConcurrent, err)
+		}
+	}
+	if err := (&WorkflowConfig{Name: "delivery"}).Validate(); err != nil {
+		t.Fatalf("nil subagents: %v", err)
+	}
+}
+
 func TestTemplateConfigValidate(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -657,6 +683,23 @@ func TestTemplateConfigValidate(t *testing.T) {
 			},
 			wantErr: true,
 			errMsg:  "invalid provider",
+		},
+		{
+			name: "subagent max_concurrent out of range",
+			template: &TemplateConfig{
+				Provider:  "daytona",
+				Subagents: &SubagentConfig{MaxConcurrent: 64},
+			},
+			wantErr: true,
+			errMsg:  "max_concurrent must be between 1 and 32",
+		},
+		{
+			name: "subagent max_concurrent in range",
+			template: &TemplateConfig{
+				Provider:  "daytona",
+				Subagents: &SubagentConfig{MaxConcurrent: 32},
+			},
+			wantErr: false,
 		},
 		{
 			name: "invalid color",

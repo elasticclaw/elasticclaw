@@ -39,6 +39,24 @@ func (s *Server) triggerWorkflowV2Config(w http.ResponseWriter, r *http.Request,
 		jsonError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
 		return
 	}
+	if req.Agents != nil {
+		if !s.agentOverridesAllowed(r) {
+			jsonError(w, http.StatusForbidden, "agent overrides require an administrator")
+			return
+		}
+		copied := *workflow
+		applyWorkflowAgents(&copied, mergeAgentConfig(workflowAgentConfig(workflow), *req.Agents))
+		workflow = &copied
+		if err := s.validateWorkflowAgents(workspace, workflow); err != nil {
+			jsonError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		agents := workflowAgentConfig(workflow)
+		if err := patchWorkflowYAML(workflow, map[string]interface{}{"default_model": agents.DefaultModel, "llm_key": agents.LLMKey, "subagents": agents.Subagents}); err != nil {
+			jsonError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
 	inputs := make(map[string]string, len(req.Inputs))
 	for name, value := range req.Inputs {
 		name = strings.TrimSpace(name)

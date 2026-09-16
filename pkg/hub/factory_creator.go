@@ -295,7 +295,13 @@ func (s *Server) createClawFromFactory(factory *types.FactoryConfig, issueID str
 		s.mu.RUnlock()
 	}
 
-	// Build tags
+	// Resolve the immutable agent configuration before creating the claw.
+	resolvedModel, resolvedKey, subagentsJSON, agentErr := s.resolveTemplateAgentSnapshot(tmplCfg, defaultModel, llmKey)
+	if agentErr != nil {
+		return "", false, agentErr
+	}
+	defaultModel, llmKey = resolvedModel, resolvedKey
+
 	tags := mergeTags(factory.Template, factory.Tags, nil)
 	hasfactory := false
 	for _, t := range tags {
@@ -360,11 +366,11 @@ func (s *Server) createClawFromFactory(factory *types.FactoryConfig, issueID str
 	}
 
 	_, err = s.db.Exec(`
-		INSERT INTO claws(id, tenant_id, name, template, provider, default_model, template_files, github_repos, linear_workspace, nix, docker, tags, color, llm_key, linear_issue_id, github_issue_id, shortcut_story_id, jira_issue_id, status, created_at, factory_name, concurrency_group)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		INSERT INTO claws(id, tenant_id, name, template, provider, default_model, template_files, github_repos, linear_workspace, nix, docker, tags, color, llm_key, linear_issue_id, github_issue_id, shortcut_story_id, jira_issue_id, status, created_at, factory_name, concurrency_group, subagents_config)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		clawID, tenantID, clawName, factory.Template, provider, defaultModel, string(filesJSON),
 		string(githubReposJSON), linearWorkspace, nixEnabled, dockerEnabled, string(tagsJSON), clawColor, llmKey,
-		linearIssueID, githubIssueID, shortcutStoryID, jiraIssueID, initialStatus, now, factory.Name, groupName,
+		linearIssueID, githubIssueID, shortcutStoryID, jiraIssueID, initialStatus, now, factory.Name, groupName, subagentsJSON,
 	)
 
 	s.promoteMu.Unlock()

@@ -139,6 +139,7 @@ export function SubagentRail({
   // collectSubagents already sorts running → quiet → finished, but the split
   // is by status, not by position: never assume the sort to slice the list.
   const active = subagents.filter((s) => s.status === "running" || s.status === "quiet")
+  const launched = subagents.filter(s => s.status === "launched" || s.status === "unknown")
   const finished = subagents.filter((s) => s.status === "done" || s.status === "failed")
 
   return (
@@ -154,6 +155,8 @@ export function SubagentRail({
         <SubagentSectionLabel>Subagents</SubagentSectionLabel>
         <span className="ml-auto truncate font-mono text-[9.5px] text-muted-foreground">
           {counts.running + counts.quiet} running · {counts.done + counts.failed} finished
+          {counts.launched > 0 && ` · ${counts.launched} launched`}
+          {counts.unknown > 0 && ` · ${counts.unknown} unconfirmed`}
         </span>
       </div>
 
@@ -166,6 +169,10 @@ export function SubagentRail({
         {active.map((sub) => (
           <RailCard key={sub.id} sub={sub} now={now} onOpen={onOpen} />
         ))}
+        {launched.length > 0 && <>
+          <SubagentSectionLabel className="px-1 pt-0.5">Completion not reported</SubagentSectionLabel>
+          {launched.map(sub => <FinishedCard key={sub.id} sub={sub} onOpen={onOpen} />)}
+        </>}
         {finished.length > 0 && (
           <>
             {active.length > 0 && <div className="mt-1 h-px bg-border" />}

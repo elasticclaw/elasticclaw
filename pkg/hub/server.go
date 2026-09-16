@@ -847,6 +847,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v2/workflow-runs/{runId}/logs", s.withAuth(s.handleWorkflowV2RunLogs))
 	mux.HandleFunc("/api/v2/workflow-runs/{runId}/attempts", s.withAuth(s.handleWorkflowV2RunAttempts))
 	mux.HandleFunc("/api/v2/workflow-runs/{runId}/attempts/{attemptId}/logs", s.withAuth(s.handleWorkflowV2AttemptLogs))
+	mux.HandleFunc("/api/agent-options", s.withWebAdminAuth(s.handleAgentOptions))
 	mux.HandleFunc("/api/workspaces", s.withAdminForMethods(s.handleWorkspacesCRUD, http.MethodPost, http.MethodDelete)) // workspace CRUD
 	mux.HandleFunc("/api/workspaces/{name}/workflows", s.withAdminForMethods(s.handleWorkspaceWorkflowsList, http.MethodPost))
 	mux.HandleFunc("/api/workspaces/{workspace}/workflows/{workflow}", s.withAdminForMethods(s.handleWorkspaceWorkflowDetail, http.MethodPatch, http.MethodDelete))
@@ -1700,6 +1701,12 @@ func (s *Server) handleCreateClaw(w http.ResponseWriter, r *http.Request, tenant
 		http.Error(w, "name and provider are required", http.StatusBadRequest)
 		return
 	}
+	// Top-level llm_key/default_model predate agent settings and stay open;
+	// selecting subagent credentials is an administrator action.
+	if req.Subagents != nil && !s.agentOverridesAllowed(r) {
+		http.Error(w, "subagent settings require an administrator", http.StatusForbidden)
+		return
+	}
 
 	// Check provider is configured
 	s.mu.RLock()
@@ -1773,43 +1780,30 @@ func (s *Server) handleCreateClaw(w http.ResponseWriter, r *http.Request, tenant
 	}
 	log.Printf("[create] claw %s: nix=%d docker=%d", req.Name, nixEnabled, dockerEnabled)
 
-	// Resolve default model: explicit > llm_key lookup > default key > hub default
-	defaultModel := req.DefaultModel
-	if defaultModel == "" {
-		s.mu.RLock()
-		var activeKey *types.LLMKeyConfig
-		for _, k := range s.hubCfg.LLMKeys {
-			if k.Name == req.LLMKey {
-				activeKey = k
-				break
-			}
-		}
-		// If no explicit key selected, fall back to the default key
-		if activeKey == nil {
-			for _, k := range s.hubCfg.LLMKeys {
-				if k.Default {
-					activeKey = k
-					break
-				}
-			}
-		}
-		if activeKey != nil {
-			defaultModel = resolveDefaultModelForKey(s.hubCfg, activeKey)
-		} else {
-			defaultModel = s.hubCfg.DefaultModel
-		}
-		s.mu.RUnlock()
+	s.mu.RLock()
+	agents := types.AgentConfig{DefaultModel: req.DefaultModel, LLMKey: req.LLMKey, Subagents: req.Subagents}
+	var agentErr error
+	if req.Subagents != nil {
+		agents, agentErr = resolveAgentConfig(s.hubCfg, agents)
+	} else {
+		agents.DefaultModel, agents.LLMKey = resolveModelAndLLMKey(s.hubCfg, req.LLMKey, req.DefaultModel)
 	}
-	req.DefaultModel = defaultModel
+	s.mu.RUnlock()
+	if agentErr != nil {
+		http.Error(w, agentErr.Error(), http.StatusBadRequest)
+		return
+	}
+	req.DefaultModel, req.LLMKey, req.Subagents = agents.DefaultModel, agents.LLMKey, agents.Subagents
+	subagentsJSON, _ := json.Marshal(agents.Subagents)
 
 	tags := mergeTags(req.TemplateName, req.Tags, nil) // CLI tags already merged client-side
 	tagsJSON, _ := json.Marshal(tags)
 	color := resolveColor(req.Color, req.Name)
 
 	_, err := s.db.Exec(
-		`INSERT INTO claws(id, tenant_id, name, template, provider, default_model, template_files, github_repos, linear_workspace, nix, docker, tags, color, llm_key, status, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		`INSERT INTO claws(id, tenant_id, name, template, provider, default_model, template_files, github_repos, linear_workspace, nix, docker, tags, color, llm_key, subagents_config, status, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		clawID, tenantID, req.Name, req.TemplateName, req.Provider, req.DefaultModel, string(filesJSON),
-		githubReposJSON, linearWorkspace, nixEnabled, dockerEnabled, string(tagsJSON), color, req.LLMKey, "provisioning", now(),
+		githubReposJSON, linearWorkspace, nixEnabled, dockerEnabled, string(tagsJSON), color, req.LLMKey, string(subagentsJSON), "provisioning", now(),
 	)
 	if err != nil {
 		http.Error(w, "db error", http.StatusInternalServerError)
@@ -4346,13 +4340,19 @@ docker --version`); err != nil {
 
 	// Step 2: Onboard (configure OpenClaw) with the correct auth provider
 	s.setBootstrapStatus(clawID, "Configuring OpenClaw")
-	var llmKeyNameDaytona string
-	_ = s.db.QueryRow(`SELECT COALESCE(llm_key,'') FROM claws WHERE id=?`, clawID).Scan(&llmKeyNameDaytona)
+	var llmKeyNameDaytona, storedModelDaytona string
+	if err := s.db.QueryRow(`SELECT COALESCE(llm_key,''), COALESCE(default_model,'') FROM claws WHERE id=?`, clawID).Scan(&llmKeyNameDaytona, &storedModelDaytona); err != nil {
+		return fmt.Errorf("load claw model config: %w", err)
+	}
 	activeKeyNameDaytona := ""
 	activeKeyProviderDaytona := ""
 	s.mu.RLock()
 	activeKeyDaytona := resolveActiveKey(s.hubCfg.LLMKeys, llmKeyNameDaytona)
-	defaultModelDaytona := resolveDefaultModelForKey(s.hubCfg, activeKeyDaytona)
+	defaultModelDaytona, legacyModelMismatch := resolveDaytonaBootstrapModel(s.hubCfg, activeKeyDaytona, storedModelDaytona)
+	if legacyModelMismatch {
+		log.Printf("[daytona] claw %s stored model %q does not match selected provider %q; using provider-compatible model %q", clawID, storedModelDaytona, activeKeyDaytona.Provider, defaultModelDaytona)
+	}
+	hubCfgDaytona := s.hubCfg
 	llmKeyEnvDaytona := buildLLMKeyEnv(s.hubCfg.LLMKeys, llmKeyNameDaytona)
 	modelAuthEnvDaytona := buildModelAuthEnv(s.hubCfg, llmKeyNameDaytona)
 	apiKeyAuthSyncDaytona := buildOpenClawAPIKeyAuthSyncShell(s.hubCfg.LLMKeys, llmKeyNameDaytona)
@@ -4364,6 +4364,13 @@ docker --version`); err != nil {
 		activeKeyProviderDaytona = activeKeyDaytona.Provider
 	}
 	s.mu.RUnlock()
+	plan, err := s.clawAgentBootstrapPlan(clawID, hubCfgDaytona, llmKeyNameDaytona, defaultModelDaytona)
+	if err != nil {
+		return err
+	}
+	llmKeyEnvDaytona, modelAuthEnvDaytona = plan.LLMKeyEnv, plan.ModelAuthEnv
+	apiKeyAuthSyncDaytona, oauthAuthSyncDaytona = plan.APIKeyAuthSync, plan.OAuthAuthSync
+	providerConfigScript = plan.ProviderConfig
 	log.Printf("[daytona] OpenClaw model resolution claw=%s selected_llm_key=%q active_llm_key=%q provider=%q default_model=%q config_patch=%t",
 		clawID, llmKeyNameDaytona, activeKeyNameDaytona, activeKeyProviderDaytona, defaultModelDaytona, providerConfigScript != "")
 	gatewayPassword := randomHex(16)
@@ -4417,7 +4424,7 @@ docker --version`); err != nil {
 		}
 	}
 
-	configPatch := fmt.Sprintf("export HOME=/home/daytona; export OPENCLAW_DEFAULT_MODEL=%q; export ELASTICCLAW_GATEWAY_PASSWORD=%q; ", defaultModelDaytona, gatewayPassword) + llmKeyEnvDaytona + providerConfigScript
+	configPatch := daytonaOpenClawConfigPatch(defaultModelDaytona, gatewayPassword, llmKeyEnvDaytona, providerConfigScript)
 	if err := exec("configure openclaw model", 30*time.Second, configPatch); err != nil {
 		return err
 	}
@@ -5537,7 +5544,7 @@ func isBusyAgentActivity(activity map[string]interface{}) bool {
 	case "tool":
 		phase, _ := activity["phase"].(string)
 		switch strings.ToLower(strings.TrimSpace(phase)) {
-		case "completed", "complete", "done", "failed", "error", "cancelled", "canceled":
+		case "result", "completed", "complete", "done", "failed", "error", "cancelled", "canceled":
 			return false
 		default:
 			return true
@@ -5739,6 +5746,11 @@ func (s *Server) bootstrapExedev(ctx context.Context, clawID, vmName string, p *
 	gatewayPassword := randomHex(16)
 
 	// Build bootstrap script using same pattern as replicated
+	plan, err := s.clawAgentBootstrapPlan(clawID, hubCfg, llmKeyName, defaultModel)
+	if err != nil {
+		return err
+	}
+	llmKeyEnv, modelAuthEnv = plan.LLMKeyEnv, plan.ModelAuthEnv
 	script := GenerateReplicatedBootstrapScript(BootstrapParams{
 		ClawID:          clawID,
 		ClawName:        clawName,
@@ -5757,10 +5769,10 @@ func (s *Server) bootstrapExedev(ctx context.Context, clawID, vmName string, p *
 		GitHubRepos:     githubRepos,
 		LLMKeyEnv:       llmKeyEnv,
 		ModelAuthEnv:    modelAuthEnv,
-		APIKeyAuthSync:  buildOpenClawAPIKeyAuthSyncShell(hubCfg.LLMKeys, llmKeyName),
-		OAuthAuthSync:   buildOpenClawOAuthAuthSyncShell(hubCfg.LLMKeys, llmKeyName),
+		APIKeyAuthSync:  plan.APIKeyAuthSync,
+		OAuthAuthSync:   plan.OAuthAuthSync,
 		LinearEnv:       buildLinearEnv(linearToken),
-		ProviderConfig:  buildOpenClawProviderConfig(hubCfg.LLMKeys, llmKeyName),
+		ProviderConfig:  plan.ProviderConfig,
 		OnboardFlags:    buildOnboardFlags(hubCfg.LLMKeys, llmKeyName, defaultModel),
 		Env:             env,
 	})
@@ -5880,9 +5892,14 @@ func (s *Server) provisionDocker(ctx context.Context, clawID string, req types.C
 	}
 
 	gatewayPassword := randomHex(16)
-	providerConfig := buildOpenClawProviderConfig(hubCfg.LLMKeys, llmKeyName)
-	apiKeyAuthSync := buildOpenClawAPIKeyAuthSyncShell(hubCfg.LLMKeys, llmKeyName)
-	oauthAuthSync := buildOpenClawOAuthAuthSyncShell(hubCfg.LLMKeys, llmKeyName)
+	plan, err := s.clawAgentBootstrapPlan(clawID, hubCfg, llmKeyName, defaultModel)
+	if err != nil {
+		return err
+	}
+	llmKeyEnv, modelAuthEnv = plan.LLMKeyEnv, plan.ModelAuthEnv
+	providerConfig := plan.ProviderConfig
+	apiKeyAuthSync := plan.APIKeyAuthSync
+	oauthAuthSync := plan.OAuthAuthSync
 	onboardFlags := buildOnboardFlags(hubCfg.LLMKeys, llmKeyName, defaultModel)
 
 	// Build env map for the container — passed directly as -e flags (no shell escaping needed).
@@ -6122,9 +6139,14 @@ func (s *Server) provisionLambdaMicroVMs(ctx context.Context, clawID string, req
 	if defaultModel == "" {
 		defaultModel = hubCfg.DefaultModel
 	}
-	providerConfig := buildOpenClawProviderConfig(hubCfg.LLMKeys, llmKeyName)
-	apiKeyAuthSync := buildOpenClawAPIKeyAuthSyncShell(hubCfg.LLMKeys, llmKeyName)
-	oauthAuthSync := buildOpenClawOAuthAuthSyncShell(hubCfg.LLMKeys, llmKeyName)
+	plan, err := s.clawAgentBootstrapPlan(clawID, hubCfg, llmKeyName, defaultModel)
+	if err != nil {
+		return err
+	}
+	llmKeyEnv, modelAuthEnv = plan.LLMKeyEnv, plan.ModelAuthEnv
+	providerConfig := plan.ProviderConfig
+	apiKeyAuthSync := plan.APIKeyAuthSync
+	oauthAuthSync := plan.OAuthAuthSync
 	onboardFlags := buildOnboardFlags(hubCfg.LLMKeys, llmKeyName, defaultModel)
 	gatewayPassword := randomHex(16)
 
@@ -7241,6 +7263,12 @@ func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.Pr
 	hubCfg := s.hubCfg
 	s.mu.RUnlock()
 
+	plan, err := s.clawAgentBootstrapPlan(clawID, hubCfg, llmKeyName, defaultModel)
+	if err != nil {
+		s.stopAgentWithReason(clawID, fmt.Sprintf("Bootstrap failed: %s", sanitizeBootstrapError(err)), false)
+		return
+	}
+	llmKeyEnv, modelAuthEnv = plan.LLMKeyEnv, plan.ModelAuthEnv
 	script := GenerateReplicatedBootstrapScript(BootstrapParams{
 		ClawID:          clawID,
 		ClawName:        clawName,
@@ -7259,10 +7287,10 @@ func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.Pr
 		GitHubRepos:     githubRepos,
 		LLMKeyEnv:       llmKeyEnv,
 		ModelAuthEnv:    modelAuthEnv,
-		APIKeyAuthSync:  buildOpenClawAPIKeyAuthSyncShell(hubCfg.LLMKeys, llmKeyName),
-		OAuthAuthSync:   buildOpenClawOAuthAuthSyncShell(hubCfg.LLMKeys, llmKeyName),
+		APIKeyAuthSync:  plan.APIKeyAuthSync,
+		OAuthAuthSync:   plan.OAuthAuthSync,
 		LinearEnv:       buildLinearEnv(linearToken),
-		ProviderConfig:  buildOpenClawProviderConfig(hubCfg.LLMKeys, llmKeyName),
+		ProviderConfig:  plan.ProviderConfig,
 		OnboardFlags:    buildOnboardFlags(hubCfg.LLMKeys, llmKeyName, defaultModel),
 		Env:             env,
 	})
@@ -7522,20 +7550,26 @@ func buildLinearEnv(token string) string {
 }
 
 // buildLLMKeyEnv converts llm_keys slice to shell env var export lines.
-// If selectedKeyName is non-empty, the selected key is prioritized over default keys.
-// All keys are exported so each claw has access to whichever provider it needs.
-func buildLLMKeyEnv(keys []*types.LLMKeyConfig, selectedKeyName string) string {
+// The selected key and additional preferred keys take priority over defaults.
+// All providers are exported so each claw has access to whichever provider it needs.
+func buildLLMKeyEnv(keys []*types.LLMKeyConfig, selectedKeyName string, preferredKeyNames ...string) string {
 	if len(keys) == 0 {
 		return ""
 	}
 	var b strings.Builder
 	seen := map[string]bool{}
 
-	// First pass: export the selected key if specified
-	if selectedKeyName != "" {
+	// First pass: selected principal and child keys win over provider defaults.
+	for _, preferred := range append([]string{selectedKeyName}, preferredKeyNames...) {
+		if preferred == "" {
+			continue
+		}
 		for _, k := range keys {
-			if k.Name == selectedKeyName && llmKeyHasRequiredAPIKey(k) {
+			if k.Name == preferred && llmKeyHasRequiredAPIKey(k) {
 				envVar := k.EnvVarName()
+				if seen[envVar] {
+					break
+				}
 				seen[envVar] = true
 				fmt.Fprintf(&b, "export %s=%q\n", envVar, k.APIKey)
 				break

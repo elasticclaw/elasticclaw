@@ -11,7 +11,7 @@ import type { ActivitySummary as ActivitySummaryMeta, Message } from "@/lib/type
 // (cmd/claw-bridge/main.go) — older bridges forward gateway phases verbatim,
 // so the web must accept the full set or start/terminal events stop pairing.
 const START_PHASES = ["running", "start", "started", "in_progress"]
-const TERMINAL_PHASES = ["completed", "complete", "done", "failed", "error", "cancelled", "canceled"]
+const TERMINAL_PHASES = ["completed", "complete", "done", "result", "failed", "error", "cancelled", "canceled"]
 
 export function isPhaseMessage(value?: string): boolean {
   if (!value) return false
@@ -136,7 +136,7 @@ const EDIT_TOOLS = /edit|write|patch|apply|create|multiedit/
 const RUN_TOOLS = /bash|shell|exec|terminal|command|run/
 const SEARCH_TOOLS = /grep|glob|search|find|ls|list/
 const WEB_TOOLS = /web|fetch|http|browser|url|navigate/
-const TASK_TOOLS = /task|agent|skill|workflow|dispatch/
+const TASK_TOOLS = /task|agent|skill|workflow|dispatch|sessions_spawn/
 
 export function toolCategory(message: Message): ToolCategory {
   const activity = message.activity

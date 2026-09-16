@@ -2625,6 +2625,11 @@ func TestBusyAgentActivitySignals(t *testing.T) {
 			want:     true,
 		},
 		{
+			name:     "tool result",
+			activity: map[string]interface{}{"kind": "tool", "phase": "result"},
+			want:     false,
+		},
+		{
 			name:     "tool completed",
 			activity: map[string]interface{}{"kind": "tool", "phase": "completed"},
 			want:     false,

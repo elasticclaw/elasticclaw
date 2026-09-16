@@ -167,6 +167,30 @@ func TestParseAndValidateWorkflowValidRFCShape(t *testing.T) {
 	}
 }
 
+func TestWorkflowRejectsSubagentMaxConcurrentOutOfRange(t *testing.T) {
+	yaml := `
+schema_version: 2
+name: too-many-children
+initial_state: s
+subagents:
+  max_concurrent: 64
+states:
+  s:
+    phase: build
+  done:
+    phase: done
+    terminal: true
+`
+	_, err := v2.ParseAndValidateWorkflow([]byte(yaml))
+	if err == nil || !strings.Contains(err.Error(), "max_concurrent must be between 1 and 32") {
+		t.Fatalf("error = %v, want max_concurrent range error", err)
+	}
+	valid := strings.Replace(yaml, "max_concurrent: 64", "max_concurrent: 32", 1)
+	if _, err := v2.ParseAndValidateWorkflow([]byte(valid)); err != nil {
+		t.Fatalf("max_concurrent 32: %v", err)
+	}
+}
+
 func TestWorkflowRejectsUnknownDisplayPhase(t *testing.T) {
 	yaml := `
 schema_version: 2

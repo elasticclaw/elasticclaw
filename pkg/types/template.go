@@ -85,6 +85,7 @@ func (k *LLMKeyConfig) EnvVarName() string {
 
 // TemplateConfig is the elasticclaw-config.yaml inside a template directory.
 type TemplateConfig struct {
+	Subagents *SubagentConfig `yaml:"subagents,omitempty" json:"subagents,omitempty"`
 	// SchemaVersion is the schema version of this config file.
 	// Defaults to "v1" if not specified for backward compatibility.
 	SchemaVersion  string               `yaml:"schema_version,omitempty"`
@@ -1040,6 +1041,7 @@ type MCPConfig struct {
 
 // CreateClawRequest is POSTed by the CLI to the hub to provision a new claw.
 type CreateClawRequest struct {
+	Subagents    *SubagentConfig   `json:"subagents,omitempty"`
 	Name         string            `json:"name"`
 	TemplateName string            `json:"template_name"`
 	Provider     string            `json:"provider"`

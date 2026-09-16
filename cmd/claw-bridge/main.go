@@ -826,6 +826,16 @@ type agentResult struct {
 }
 
 type agentActivity struct {
+	SubagentRequestedModel    string `json:"subagent_requested_model,omitempty"`
+	SubagentRequestedProvider string `json:"subagent_requested_provider,omitempty"`
+	SubagentResolvedModel     string `json:"subagent_resolved_model,omitempty"`
+	SubagentResolvedProvider  string `json:"subagent_resolved_provider,omitempty"`
+	SubagentParentSession     string `json:"subagent_parent_session,omitempty"`
+	SubagentParentRun         string `json:"subagent_parent_run,omitempty"`
+	SubagentChildSession      string `json:"subagent_child_session,omitempty"`
+	SubagentChildRun          string `json:"subagent_child_run,omitempty"`
+	SubagentSpawnStatus       string `json:"subagent_spawn_status,omitempty"`
+
 	Kind           string `json:"kind"`
 	Stream         string `json:"stream,omitempty"`
 	Phase          string `json:"phase,omitempty"`
@@ -894,7 +904,7 @@ func (inf *inFlightState) noteActivity(a agentActivity) {
 		inf.activeTool = &copy
 		inf.modelWaitStartedAt = time.Time{}
 		inf.lastModelPulseAt = time.Time{}
-	case "completed", "complete", "done", "failed", "error", "cancelled", "canceled":
+	case "completed", "complete", "done", "result", "failed", "error", "cancelled", "canceled":
 		inf.activeTool = nil
 		inf.activeToolStartedAt = time.Time{}
 		inf.lastToolPulseAt = time.Time{}
@@ -913,7 +923,7 @@ func isToolStartPhase(phase string) bool {
 
 func isToolTerminalPhase(phase string) bool {
 	switch strings.ToLower(strings.TrimSpace(phase)) {
-	case "completed", "complete", "done", "failed", "error", "cancelled", "canceled":
+	case "completed", "complete", "done", "result", "failed", "error", "cancelled", "canceled":
 		return true
 	}
 	return false
@@ -1036,6 +1046,16 @@ func cleanAgentActivity(a agentActivity) agentActivity {
 	a.SubagentName = sanitizeActivityText(a.SubagentName)
 	a.SubagentType = sanitizeActivityText(a.SubagentType)
 	a.SubagentModel = sanitizeActivityText(a.SubagentModel)
+	a.SubagentRequestedModel = sanitizeActivityText(a.SubagentRequestedModel)
+	a.SubagentRequestedProvider = sanitizeActivityText(a.SubagentRequestedProvider)
+	a.SubagentResolvedModel = sanitizeActivityText(a.SubagentResolvedModel)
+	a.SubagentResolvedProvider = sanitizeActivityText(a.SubagentResolvedProvider)
+	a.SubagentParentSession = sanitizeActivityText(a.SubagentParentSession)
+	a.SubagentParentRun = sanitizeActivityText(a.SubagentParentRun)
+	a.SubagentChildSession = sanitizeActivityText(a.SubagentChildSession)
+	a.SubagentChildRun = sanitizeActivityText(a.SubagentChildRun)
+	a.SubagentSpawnStatus = sanitizeActivityText(a.SubagentSpawnStatus)
+
 	a.SubagentPrompt = sanitizeActivityTextLimit(truncateResult(a.SubagentPrompt, 500), 0)
 	// Truncate before redacting: results can be megabytes of tool output, and
 	// the redaction scan lowercases the remaining string once per replacer. A
@@ -1584,6 +1604,7 @@ func (gs *gatewaySession) readLoop(ctx context.Context) {
 			var agentPayload struct {
 				Stream     string `json:"stream"`
 				SessionKey string `json:"sessionKey"`
+				RunID      string `json:"runId"`
 				Data       struct {
 					Delta   string `json:"delta"`
 					Phase   string `json:"phase"`
@@ -1681,9 +1702,13 @@ func (gs *gatewaySession) readLoop(ctx context.Context) {
 				// from start events would surface tool *inputs* (e.g. a Write's
 				// file content under data.input.content) as the call's result.
 				if isToolTerminalPhase(activity.Phase) {
+					if failed, _ := rawAgentPayload.Data["isError"].(bool); failed {
+						activity.Error = firstNonEmpty(activity.Error, "Tool failed")
+					}
 					activity.ExitCode = nestedExitCode(rawAgentPayload.Data, "exit_code", "exitCode", "status_code")
 					activity.Result = nestedString(rawAgentPayload.Data, "result", "output", "stdout", "content", "text")
 				}
+				enrichSpawnActivity(&activity, rawAgentPayload.Data, agentPayload.SessionKey, agentPayload.RunID)
 				inf.resolveToolCall(&activity, time.Now())
 				activity = cleanAgentActivity(activity)
 				if kind == "tool" && activity.Command == "" && activity.Path == "" && activity.URL == "" && activity.Detail == "" {
@@ -1743,7 +1768,7 @@ func takeDiagnosticSlot(counter *atomic.Int64) bool {
 
 func isSubagentTool(tool string) bool {
 	switch strings.ToLower(strings.TrimSpace(tool)) {
-	case "task", "agent", "subagent":
+	case "task", "agent", "subagent", "sessions_spawn":
 		return true
 	}
 	return false

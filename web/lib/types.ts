@@ -92,6 +92,16 @@ export interface AgentActivity {
   subagent_name?: string
   subagent_type?: string
   subagent_model?: string
+  subagent_requested_model?: string
+  subagent_requested_provider?: string
+  subagent_resolved_model?: string
+  subagent_resolved_provider?: string
+  subagent_parent_session?: string
+  subagent_parent_run?: string
+  subagent_child_session?: string
+  subagent_child_run?: string
+  subagent_spawn_status?: string
+
   subagent_prompt?: string
 }
 

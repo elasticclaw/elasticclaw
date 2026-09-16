@@ -224,6 +224,9 @@ func (w *WorkflowConfig) Validate() error {
 	if w.Provider != "" && !validProviders[w.Provider] {
 		return fmt.Errorf("workflow %q: invalid provider %q (must be one of: %s)", w.Name, w.Provider, validProviderList)
 	}
+	if err := w.Subagents.Validate(); err != nil {
+		return fmt.Errorf("workflow %q: %w", w.Name, err)
+	}
 	if w.Trigger != nil {
 		if err := validateWorkflowTrigger(w.Name, w.Trigger); err != nil {
 			return err
@@ -667,6 +670,10 @@ func (t *TemplateConfig) Validate() error {
 		if err := validateRepositoryAccessList("github.repos", t.GitHub.Repos, false); err != nil {
 			return err
 		}
+	}
+
+	if err := t.Subagents.Validate(); err != nil {
+		return err
 	}
 
 	// Validate MCPs if provided
