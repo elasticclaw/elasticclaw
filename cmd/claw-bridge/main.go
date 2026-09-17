@@ -424,40 +424,11 @@ func loadGatewayClient(addr string) (*gatewayClient, error) {
 		return nil, fmt.Errorf("parse openclaw.json: %w", err)
 	}
 
-	devPath := filepath.Join(home, ".openclaw", "identity", "device.json")
-	devData, err := os.ReadFile(devPath)
-	var dev deviceIdentity
-	if os.IsNotExist(err) {
-		// device.json doesn't exist yet — the OpenClaw gateway creates it on first start.
-		// Wait up to 30s for it to appear rather than generating a mismatched identity.
-		// device.json should have been pre-generated during bootstrap.
-		// Wait up to 120s as a fallback in case gateway creates it asynchronously.
-		log.Printf("[gateway] device.json not found — waiting (up to 120s)...")
-		var waitErr error
-		var parseErr error
-		for i := 0; i < 120; i++ {
-			time.Sleep(time.Second)
-			devData, waitErr = os.ReadFile(devPath)
-			if waitErr != nil {
-				continue
-			}
-			parseErr = json.Unmarshal(devData, &dev)
-			if parseErr == nil {
-				log.Printf("[gateway] device.json appeared after %ds", i+1)
-				break
-			}
-		}
-		if waitErr != nil {
-			return nil, fmt.Errorf("device.json not found after 120s: %w", waitErr)
-		}
-		if parseErr != nil {
-			return nil, fmt.Errorf("parse device.json: %w", parseErr)
-		}
-	} else if err != nil {
-		return nil, fmt.Errorf("read device.json: %w", err)
-	} else if err := json.Unmarshal(devData, &dev); err != nil {
-		return nil, fmt.Errorf("parse device.json: %w", err)
+	dev, err := loadOrCreateDeviceIdentity()
+	if err != nil {
+		return nil, fmt.Errorf("device identity: %w", err)
 	}
+	log.Printf("[gateway] device identity %s", dev.DeviceID)
 
 	// Determine auth based on the gateway's configured mode.
 	// ELASTICCLAW_GATEWAY_PASSWORD is only used when mode is password (or unset).
@@ -499,115 +470,9 @@ func loadGatewayClient(addr string) (*gatewayClient, error) {
 		addr:     addr,
 		token:    token,
 		password: password,
-		device:   &dev,
+		device:   dev,
 		home:     home,
 	}, nil
-}
-
-func hasAllScopes(current, required []string) bool {
-	have := make(map[string]bool, len(current))
-	for _, scope := range current {
-		have[scope] = true
-	}
-	for _, scope := range required {
-		if !have[scope] {
-			return false
-		}
-	}
-	return true
-}
-
-func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
-	dir := filepath.Dir(path)
-	tmp, err := os.CreateTemp(dir, filepath.Base(path)+".tmp-*")
-	if err != nil {
-		return fmt.Errorf("create temp file: %w", err)
-	}
-	tmpPath := tmp.Name()
-	cleanup := true
-	defer func() {
-		if cleanup {
-			_ = os.Remove(tmpPath)
-		}
-	}()
-
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("write temp file: %w", err)
-	}
-	if err := tmp.Chmod(perm); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("chmod temp file: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("close temp file: %w", err)
-	}
-	if err := os.Rename(tmpPath, path); err != nil {
-		return fmt.Errorf("rename temp file: %w", err)
-	}
-	cleanup = false
-	return nil
-}
-
-func promoteInsufficientGatewayPairing(home, deviceID string, requiredScopes []string) (bool, error) {
-	if deviceID == "" {
-		return false, nil
-	}
-	path := filepath.Join(home, ".openclaw", "devices", "paired.json")
-	data, err := os.ReadFile(path)
-	if os.IsNotExist(err) {
-		return false, nil
-	}
-	if err != nil {
-		return false, fmt.Errorf("read paired devices: %w", err)
-	}
-
-	records := map[string]interface{}{}
-	if err := json.Unmarshal(data, &records); err != nil {
-		return false, fmt.Errorf("parse paired devices: %w", err)
-	}
-	rawRecord, ok := records[deviceID]
-	if !ok {
-		return false, nil
-	}
-
-	recordData, err := json.Marshal(rawRecord)
-	if err != nil {
-		return false, fmt.Errorf("encode paired device %s: %w", deviceID, err)
-	}
-	var record struct {
-		Scopes         []string `json:"scopes"`
-		ApprovedScopes []string `json:"approvedScopes"`
-	}
-	if err := json.Unmarshal(recordData, &record); err != nil {
-		return false, fmt.Errorf("parse paired device %s: %w", deviceID, err)
-	}
-	scopes := record.ApprovedScopes
-	if len(scopes) == 0 {
-		scopes = record.Scopes
-	}
-	if hasAllScopes(scopes, requiredScopes) {
-		return false, nil
-	}
-
-	recordMap, ok := rawRecord.(map[string]interface{})
-	if !ok {
-		return false, fmt.Errorf("paired device %s has unexpected shape", deviceID)
-	}
-	recordMap["scopes"] = requiredScopes
-	recordMap["approvedScopes"] = requiredScopes
-	recordMap["role"] = gwRole
-	recordMap["roles"] = []string{gwRole}
-	records[deviceID] = recordMap
-	updated, err := json.MarshalIndent(records, "", "  ")
-	if err != nil {
-		return false, fmt.Errorf("encode paired devices: %w", err)
-	}
-	updated = append(updated, '\n')
-	if err := writeFileAtomic(path, updated, 0600); err != nil {
-		return false, fmt.Errorf("write paired devices: %w", err)
-	}
-	return true, nil
 }
 
 // randomID generates a UUID-like random ID.
@@ -690,18 +555,6 @@ var defaultScopes = []string{
 // connectToGateway opens a WebSocket to the gateway, performs the auth
 // handshake, and returns the live connection.
 func (gc *gatewayClient) connectToGateway(ctx context.Context) (*websocket.Conn, error) {
-	// OpenClaw CLI commands can pair the shared sandbox device with read-only
-	// scopes before claw-bridge connects. Password auth is our bootstrap-time
-	// authority to use the gateway, so promote only this device's existing
-	// record before requesting the bridge scopes.
-	if gc.password != "" {
-		if promoted, err := promoteInsufficientGatewayPairing(gc.home, gc.device.DeviceID, defaultScopes); err != nil {
-			log.Printf("[gateway] warning: could not promote insufficient pairing for device %.16s: %v", gc.device.DeviceID, err)
-		} else if promoted {
-			log.Printf("[gateway] promoted pairing for device %.16s before requesting bridge scopes", gc.device.DeviceID)
-		}
-	}
-
 	gwURL := fmt.Sprintf("ws://%s", gc.addr)
 	conn, _, err := websocket.Dial(ctx, gwURL, &websocket.DialOptions{
 		HTTPHeader: http.Header{"User-Agent": {"claw-bridge/1.0"}},
@@ -724,13 +577,19 @@ func (gc *gatewayClient) connectToGateway(ctx context.Context) (*websocket.Conn,
 
 	var chalPayload struct {
 		Nonce string `json:"nonce"`
+		TS    int64  `json:"ts"`
 	}
 	if err := json.Unmarshal(challenge.Payload, &chalPayload); err != nil {
 		conn.CloseNow()
 		return nil, fmt.Errorf("parse challenge payload: %w", err)
 	}
 	nonce := chalPayload.Nonce
-	signedAtMs := time.Now().UnixMilli()
+	// The gateway rejects device proofs whose signedAt drifts more than 2
+	// minutes; anchor to the challenge timestamp like the upstream client.
+	signedAtMs := chalPayload.TS
+	if signedAtMs <= 0 {
+		signedAtMs = time.Now().UnixMilli()
+	}
 	instanceID := randomID()
 
 	// Build device signature
@@ -2472,10 +2331,13 @@ func isRecoverableSessionLifecycleError(err error) bool {
 	return errors.Is(err, context.DeadlineExceeded) || isProviderRequestFormatError(err) || isSessionFileLockConflictError(err)
 }
 
-// isSessionFileLockConflictError detects OpenClaw's "session file changed while
-// embedded prompt lock was released" error. That error indicates the on-disk
-// session transcript was modified unexpectedly. A read-only probe determines
-// whether the persistent session survived before recovery discards it.
+// isSessionFileLockConflictError detects OpenClaw 2026.7.x's "session file
+// changed while embedded prompt lock was released" error. That error indicates
+// the on-disk session transcript was modified unexpectedly. A read-only probe
+// determines whether the persistent session survived before recovery discards
+// it. OpenClaw 2026.9.x removed this error class (sends queue behind active
+// work instead), so this matcher is inert there — kept for the pinned-fallback
+// path and older state dirs.
 func isSessionFileLockConflictError(err error) bool {
 	if err == nil {
 		return false
@@ -2484,14 +2346,47 @@ func isSessionFileLockConflictError(err error) bool {
 	return strings.Contains(msg, "session file changed") && strings.Contains(msg, "embedded prompt lock")
 }
 
+// isSessionAdmissionConflictError detects OpenClaw 2026.9.x's retryable
+// session-admission rejections from chat.send: the request was never accepted
+// (no tool side effects), so replaying the same message on the same session is
+// safe. Texts mirror the gateway's typed errors ("goal-session-busy",
+// `Session "<key>" changed while starting work. Retry.`, reasons
+// session-routing-changed / active-leaf-changed / session-settings-changed).
+// Do NOT match "session file changed since it was read" (session_file_conflict
+// file-edit error) here — it is unrelated to send admission.
+func isSessionAdmissionConflictError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(msg, "goal-session-busy"):
+		return true
+	case strings.Contains(msg, "changed while starting work"):
+		return true
+	case strings.Contains(msg, "session routing changed"):
+		return true
+	case strings.Contains(msg, "active branch changed"):
+		return true
+	case strings.Contains(msg, "session settings changed before send"):
+		return true
+	}
+	return false
+}
+
+// isSessionSendRetryableConflict reports whether a sessions.send request
+// rejection can be retried on the same session without side effects.
+func isSessionSendRetryableConflict(err error) bool {
+	return isSessionFileLockConflictError(err) || isSessionAdmissionConflictError(err)
+}
+
 // sessionLockConflictRetryDelays backs off between same-session retries when
-// sessions.send is rejected with the "session file changed while embedded
-// prompt lock was released" error. A rejected send means the turn was never
-// accepted (no tool side effects), and the conflict is usually the previous
-// turn still flushing its session file after the lifecycle end event — the
-// window is routinely longer than any hub-side inter-turn pause on slow
-// sandbox disks. Retrying preserves the transcript that a session rotation
-// would discard. A variable so tests can shorten it.
+// sessions.send is rejected without the turn being accepted (no tool side
+// effects): the 2026.7.x embedded-prompt-lock conflict, and 2026.9.x
+// retryable session-admission rejections (goal-session-busy, session changed
+// while starting work, routing/leaf/settings changes). Retrying preserves the
+// transcript that a session rotation would discard. A variable so tests can
+// shorten it.
 var sessionLockConflictRetryDelays = []time.Duration{500 * time.Millisecond, time.Second, 2 * time.Second, 4 * time.Second}
 
 // sessionMismatchCheckHook is a test seam invoked right before SendMessage
@@ -2647,10 +2542,10 @@ func (gs *gatewaySession) SendMessage(ctx context.Context, message string, onChu
 		// with read-only probes only: those turns may already have side effects
 		// and must not be retried.
 		var sendReqErr *sessionSendRequestError
-		if errors.As(err, &sendReqErr) && isSessionFileLockConflictError(err) && lockConflictRetries < len(sessionLockConflictRetryDelays) {
+		if errors.As(err, &sendReqErr) && isSessionSendRetryableConflict(err) && lockConflictRetries < len(sessionLockConflictRetryDelays) {
 			delay := sessionLockConflictRetryDelays[lockConflictRetries]
 			lockConflictRetries++
-			log.Printf("[gateway] session file lock conflict on sessions.send (attempt %d/%d) — retrying same session in %s: %v", lockConflictRetries, len(sessionLockConflictRetryDelays), delay, err)
+			log.Printf("[gateway] session send admission conflict (attempt %d/%d) — retrying same session in %s: %v", lockConflictRetries, len(sessionLockConflictRetryDelays), delay, err)
 			select {
 			case <-time.After(delay):
 			case <-ctx.Done():
@@ -2718,7 +2613,7 @@ func (gs *gatewaySession) SendMessage(ctx context.Context, message string, onChu
 		// Same-session retries exhausted: rotate as a last resort and surface
 		// the reset error instead of silently replaying, so the hub injects a
 		// resume prompt with task context into the fresh session.
-		if errors.As(err, &sendReqErr) && isSessionFileLockConflictError(err) {
+		if errors.As(err, &sendReqErr) && isSessionSendRetryableConflict(err) {
 			abortCtx, abortCancel := context.WithTimeout(context.Background(), 5*time.Second)
 			abortErr := gs.abortSession(abortCtx, turnKey)
 			abortCancel()
@@ -3157,11 +3052,13 @@ func startGatewayWithFlake(useFlake bool) (*exec.Cmd, error) {
 // installNodeGit installs Node.js 24 and git via apt.
 func installNodeGit() error {
 	log.Printf("[bootstrap] installing Node.js 24 + git...")
+	// OpenClaw 2026.9.x engines: node ">=24.16.0 <25 || >=26.1.0"; the npm
+	// preinstall check aborts the install on anything else.
 	script := `
 set -euo pipefail
 node_compatible() {
   command -v node >/dev/null 2>&1 &&
-    node -e 'const [major, minor] = process.versions.node.split(".").map(Number); process.exit(major === 24 && minor >= 15 ? 0 : 1)'
+    node -e 'const [major, minor] = process.versions.node.split(".").map(Number); process.exit((major === 24 && minor >= 16) || (major === 26 && minor >= 1) ? 0 : 1)'
 }
 if command -v git >/dev/null 2>&1 && command -v npm >/dev/null 2>&1 && node_compatible; then
   echo "Node: $(node --version)"
@@ -4247,19 +4144,24 @@ func superviseGateway(gateway *exec.Cmd, hasFlake bool) {
 	)
 }
 
-// waitForDeviceJSON waits up to 120s for ~/.openclaw/identity/device.json.
-func waitForDeviceJSON() error {
-	home, _ := os.UserHomeDir()
-	devPath := filepath.Join(home, ".openclaw", "identity", "device.json")
-	log.Printf("[bootstrap] waiting for device.json...")
+// waitForGatewayStateDB waits up to 120s for the shared state database the
+// gateway initializes at startup. OpenClaw 2026.9.x no longer writes
+// ~/.openclaw/identity/device.json; the bridge creates the device identity row
+// itself on first connect, so database presence is the readiness signal.
+func waitForGatewayStateDB() error {
+	dbPath, err := openClawStateDBPath()
+	if err != nil {
+		return err
+	}
+	log.Printf("[bootstrap] waiting for gateway state db...")
 	for i := 0; i < 120; i++ {
-		if _, err := os.Stat(devPath); err == nil {
-			log.Printf("[bootstrap] device.json ready after %ds", i)
+		if _, err := os.Stat(dbPath); err == nil {
+			log.Printf("[bootstrap] gateway state db ready after %ds", i)
 			return nil
 		}
 		time.Sleep(time.Second)
 	}
-	log.Printf("[bootstrap] WARNING: device.json not found after 120s — bridge will poll internally")
+	log.Printf("[bootstrap] WARNING: gateway state db not found after 120s — bridge will retry on connect")
 	return nil
 }
 
@@ -4443,8 +4345,8 @@ func runBootstrap() error {
 	}
 	go superviseGateway(gateway, hasFlake)
 
-	// Step 9: Wait for device.json
-	if err := waitForDeviceJSON(); err != nil {
+	// Step 9: Wait for the gateway state database (device identity readiness)
+	if err := waitForGatewayStateDB(); err != nil {
 		return fmt.Errorf("waitForDeviceJSON: %w", err)
 	}
 

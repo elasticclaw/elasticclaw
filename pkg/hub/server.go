@@ -9184,15 +9184,10 @@ func (s *Server) enqueueSessionLostResume(clawID, prefix, marker string) {
 }
 
 // Queue streaming watchdog nudges for delivery after the active turn. Do not
-// reintroduce mid-turn status-channel injection: pinned OpenClaw
-// (cliversion.OpenClawVersion) treats it as session takeover and aborts the
-// in-flight turn with EmbeddedAttemptSessionTakeoverError without upstream
-// support.
-// Queue streaming watchdog nudges for delivery after the active turn. Do not
-// reintroduce mid-turn status-channel injection: pinned OpenClaw
-// (cliversion.OpenClawVersion) treats it as session takeover and aborts the
-// in-flight turn with EmbeddedAttemptSessionTakeoverError without upstream
-// support.
+// reintroduce mid-turn status-channel injection: on pinned OpenClaw
+// (cliversion.OpenClawVersion) a mid-turn send is admitted as a queued
+// follow-up turn rather than an error, but that changes nudge timing and turn
+// ordering mid-flight, so after-turn delivery remains the deliberate contract.
 func (s *Server) sendStreamingNudge(cc *clawConn, text string) {
 	if s.workflowV2OwnsExecution(cc) {
 		return
