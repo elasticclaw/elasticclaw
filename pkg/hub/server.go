@@ -4947,7 +4947,7 @@ export PATH="$PREFIX/bin:$NVM_DIR/current/bin:/usr/local/bin:$PATH"
 LOG=/tmp/openclaw-install.log
 STATUS=/tmp/openclaw-install.status
 echo "npm=$NPM prefix=$PREFIX"
-if sudo env PATH="$PREFIX/bin:$NVM_DIR/current/bin:/usr/local/bin:$PATH" "$NPM" install -g openclaw@%s --prefix "$PREFIX" --ignore-scripts 2>&1; then
+if sudo env PATH="$PREFIX/bin:$NVM_DIR/current/bin:/usr/local/bin:$PATH" "$NPM" install -g openclaw@%s --prefix "$PREFIX" 2>&1; then
   hash -r
   echo ok > "$STATUS"
   echo "install done"
