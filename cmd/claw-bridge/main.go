@@ -1260,20 +1260,32 @@ func (gs *gatewaySession) initSession(ctx context.Context) error {
 
 // subscribe registers for events on the current session key.
 func (gs *gatewaySession) subscribe(ctx context.Context) error {
-	_, err := gs.sendReq(ctx, "sessions.subscribe", map[string]string{"sessionKey": gs.getSessionKey()})
-	if err != nil {
-		return fmt.Errorf("sessions.subscribe: %w", err)
+	if err := subscribeSessionEvents(ctx, gs.sendReq); err != nil {
+		return err
 	}
 	log.Printf("[session] subscribed to session events")
 	return nil
 }
 
 func (gs *gatewaySession) subscribeOnConn(ctx context.Context, conn *websocket.Conn) error {
-	_, err := sendReqOnConn(ctx, conn, "sessions.subscribe", map[string]string{"sessionKey": gs.getSessionKey()})
-	if err != nil {
-		return fmt.Errorf("sessions.subscribe: %w", err)
+	if err := subscribeSessionEvents(ctx, func(callCtx context.Context, method string, params interface{}) (gwFrame, error) {
+		return sendReqOnConn(callCtx, conn, method, params)
+	}); err != nil {
+		return err
 	}
 	log.Printf("[session] subscribed to session events")
+	return nil
+}
+
+// subscribeSessionEvents subscribes the connection to session events.
+// OpenClaw 2026.9.x validates sessions.subscribe params against the
+// sessions.list schema (a closed object with no sessionKey property) and
+// subscribes the whole connection; empty params subscribe without requesting a
+// list snapshot. Foreign-session events are filtered by key in the read loop.
+func subscribeSessionEvents(ctx context.Context, sendReq func(context.Context, string, interface{}) (gwFrame, error)) error {
+	if _, err := sendReq(ctx, "sessions.subscribe", map[string]string{}); err != nil {
+		return fmt.Errorf("sessions.subscribe: %w", err)
+	}
 	return nil
 }
 
@@ -3118,15 +3130,26 @@ func ensureUserNPMBinOnPath() (string, error) {
 	return prefix, nil
 }
 
-func installUserNPMPackage(spec string) error {
+func installUserNPMPackage(spec string, opts ...string) error {
 	prefix, err := ensureUserNPMBinOnPath()
 	if err != nil {
 		return err
 	}
+	// Base flags. OpenClaw installs must NOT pass --ignore-scripts: since
+	// 2026.9.x the package ships a lifecycle-pending marker that its pre/post
+	// install scripts clear, and the launcher refuses to run ("package
+	// lifecycle is incomplete") when it cannot write the lifecycle lock inside
+	// the install dir — which is exactly what happens for an unprivileged
+	// runtime user after a scripts-disabled install.
+	flags := ""
+	for _, opt := range opts {
+		flags += " " + opt
+	}
 	return runShell(fmt.Sprintf(
-		"npm install -g --prefix %s %s --ignore-scripts",
+		"npm install -g --prefix %s %s%s",
 		shellQuote(prefix),
 		shellQuote(spec),
+		flags,
 	))
 }
 
@@ -3176,7 +3199,7 @@ func installNPMCLI(packageName, version, binaryName string) error {
 	}
 	spec := packageName + "@" + version
 	log.Printf("[bootstrap] installing %s...", spec)
-	if err := installUserNPMPackage(spec); err != nil {
+	if err := installUserNPMPackage(spec, "--ignore-scripts"); err != nil {
 		return fmt.Errorf("npm install %s: %w", spec, err)
 	}
 	out, err := exec.Command(binaryName, "--version").CombinedOutput()
