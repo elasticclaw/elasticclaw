@@ -1255,8 +1255,40 @@ func TestBuildOpenClawProviderConfig_RemovesInvalidModelsCatalogAndStaleK2P5Alia
 	if err := json.Unmarshal(configData, &patched); err != nil {
 		t.Fatalf("parse patched config: %v", err)
 	}
-	if _, ok := patched["models"]; ok {
-		t.Fatalf("legacy top-level models catalog was not removed: %#v", patched["models"])
+	// The legacy top-level catalog (routers, stale provider entries) is
+	// removed and, because the default model is fireworks, replaced with the
+	// OpenClaw 2026.9.x-compatible custom provider entry.
+	models, hasModels := patched["models"].(map[string]interface{})
+	if !hasModels {
+		t.Fatalf("fireworks custom provider catalog missing: %#v", patched["models"])
+	}
+	if models["mode"] != "merge" {
+		t.Fatalf("models.mode = %#v, want merge", models["mode"])
+	}
+	if _, ok := models["routers"]; ok {
+		t.Fatalf("legacy routers catalog was not removed: %#v", models["routers"])
+	}
+	providers, ok := models["providers"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("models.providers missing or wrong type: %#v", models["providers"])
+	}
+	fireworks, ok := providers["fireworks"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("fireworks custom provider missing: %#v", providers)
+	}
+	if fireworks["baseUrl"] != "https://api.fireworks.ai/inference/v1" ||
+		fireworks["api"] != "openai-completions" ||
+		fireworks["apiKey"] != "${FIREWORKS_API_KEY}" {
+		t.Fatalf("fireworks provider config = %#v", fireworks)
+	}
+	providerModels, ok := fireworks["models"].([]interface{})
+	if !ok || len(providerModels) != 1 {
+		t.Fatalf("fireworks provider models = %#v", fireworks["models"])
+	}
+	entry, _ := providerModels[0].(map[string]interface{})
+	if entry["id"] != strings.TrimPrefix(defaultFireworksModel, "fireworks/") {
+		t.Fatalf("fireworks provider model id = %#v, want %s", entry["id"],
+			strings.TrimPrefix(defaultFireworksModel, "fireworks/"))
 	}
 	agents, ok := patched["agents"].(map[string]interface{})
 	if !ok {
