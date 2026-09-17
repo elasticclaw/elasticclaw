@@ -273,6 +273,29 @@ if model.startswith('camel-stream/'):
             'contextWindow': 262144,
         }],
     }
+if model.startswith('fireworks/'):
+    # OpenClaw 2026.9.x dropped the built-in Fireworks catalog (full-path
+    # accounts/fireworks/models/* ids); register it as a custom provider so
+    # the pinned model still resolves. The suffix is the native Fireworks
+    # API model name.
+    model_id = model.split('/', 1)[1]
+    config.setdefault('models', {})['mode'] = 'merge'
+    providers = config['models'].setdefault('providers', {})
+    providers['fireworks'] = {
+        'baseUrl': 'https://api.fireworks.ai/inference/v1',
+        'api': 'openai-completions',
+        'apiKey': '${FIREWORKS_API_KEY}',
+        'models': [{
+            'id': model_id,
+            'name': model_id,
+            'reasoning': True,
+            'input': ['text'],
+            'cost': {'input': 0, 'output': 0, 'cacheRead': 0, 'cacheWrite': 0},
+            'contextWindow': 256000,
+            'maxTokens': 8192,
+            'compat': {'supportsTools': True, 'supportsUsageInStreaming': True},
+        }],
+    }
 %sconfig.setdefault('gateway', {})['bind'] = 'loopback'
 config['gateway']['port'] = 18789
 gw_password = os.environ.get('ELASTICCLAW_GATEWAY_PASSWORD', '')
