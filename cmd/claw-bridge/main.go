@@ -408,7 +408,7 @@ type gatewayClient struct {
 	home     string
 }
 
-func loadGatewayClient(addr string) (*gatewayClient, error) {
+func loadGatewayClient(ctx context.Context, addr string) (*gatewayClient, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return nil, fmt.Errorf("user home: %w", err)
@@ -424,7 +424,7 @@ func loadGatewayClient(addr string) (*gatewayClient, error) {
 		return nil, fmt.Errorf("parse openclaw.json: %w", err)
 	}
 
-	dev, err := loadOrCreateDeviceIdentity()
+	dev, err := loadOrCreateDeviceIdentity(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("device identity: %w", err)
 	}
@@ -3061,16 +3061,22 @@ func startGatewayWithFlake(useFlake bool) (*exec.Cmd, error) {
 	return cmd, nil
 }
 
+// nodeCompatibleExpr mirrors OpenClaw 2026.9.x's engines clause
+// ">=24.16.0 <25 || >=26.1.0" — Node 24 from 24.16, anything 26.1 or newer
+// (the clause is unbounded above 26.1, so Node 27+ is supported), and never
+// 25.x or early 24.x. One expression shared by the bootstrap script and its
+// test so the two cannot drift.
+const nodeCompatibleExpr = "(major === 24 && minor >= 16) || major > 26 || (major === 26 && minor >= 1)"
+
 // installNodeGit installs Node.js 24 and git via apt.
 func installNodeGit() error {
 	log.Printf("[bootstrap] installing Node.js 24 + git...")
-	// OpenClaw 2026.9.x engines: node ">=24.16.0 <25 || >=26.1.0"; the npm
-	// preinstall check aborts the install on anything else.
-	script := `
+	// The OpenClaw npm preinstall aborts the install on anything else.
+	script := fmt.Sprintf(`
 set -euo pipefail
 node_compatible() {
   command -v node >/dev/null 2>&1 &&
-    node -e 'const [major, minor] = process.versions.node.split(".").map(Number); process.exit((major === 24 && minor >= 16) || (major === 26 && minor >= 1) ? 0 : 1)'
+    node -e 'const [major, minor] = process.versions.node.split(".").map(Number); process.exit(%s ? 0 : 1)'
 }
 if command -v git >/dev/null 2>&1 && command -v npm >/dev/null 2>&1 && node_compatible; then
   echo "Node: $(node --version)"
@@ -3094,7 +3100,7 @@ if ! command -v npm >/dev/null 2>&1 || ! node_compatible; then
 fi
 echo "Node: $(node --version)"
 echo "Git: $(git --version)"
-`
+`, nodeCompatibleExpr)
 	return runShell(script)
 }
 
@@ -4579,8 +4585,11 @@ func main() {
 	log.Printf("  Claw ID: %s", clawID)
 	log.Printf("  Gateway: %s", gatewayAddr)
 
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
 	// Load gateway client config
-	gwClient, err := loadGatewayClient(gatewayAddr)
+	gwClient, err := loadGatewayClient(ctx, gatewayAddr)
 	if err != nil {
 		log.Fatalf("Failed to load gateway config: %v", err)
 	}
@@ -4591,9 +4600,6 @@ func main() {
 	} else {
 		log.Printf("  ⚠️  gateway not responding at %s (will retry)", gatewayAddr)
 	}
-
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
 
 	// Start local HTTP proxy so tools in the sandbox can reach hub APIs
 	// via http://localhost:18790 without needing a public hub URL.

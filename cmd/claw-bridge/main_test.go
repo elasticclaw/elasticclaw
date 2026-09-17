@@ -405,7 +405,7 @@ func TestLoadGatewayClientUsesRemotePasswordFallback(t *testing.T) {
   }
 }`)
 
-	client, err := loadGatewayClient("localhost:18789")
+	client, err := loadGatewayClient(t.Context(), "localhost:18789")
 	if err != nil {
 		t.Fatalf("load gateway client: %v", err)
 	}
@@ -432,7 +432,7 @@ func TestLoadGatewayClientConfigTakesPriorityOverEnvVar(t *testing.T) {
   }
 }`)
 
-	client, err := loadGatewayClient("localhost:18789")
+	client, err := loadGatewayClient(t.Context(), "localhost:18789")
 	if err != nil {
 		t.Fatalf("load gateway client: %v", err)
 	}
@@ -454,7 +454,7 @@ func TestLoadGatewayClientEnvVarFallbackWhenNoConfigPassword(t *testing.T) {
   }
 }`)
 
-	client, err := loadGatewayClient("localhost:18789")
+	client, err := loadGatewayClient(t.Context(), "localhost:18789")
 	if err != nil {
 		t.Fatalf("load gateway client: %v", err)
 	}
