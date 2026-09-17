@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
@@ -56,7 +57,7 @@ func openClawStateDBPath() (string, error) {
 // races safely with the gateway doing the same: ON CONFLICT DO NOTHING, then
 // the authoritative row is re-read (mirrors upstream's
 // insertStoredDeviceIdentityIfAbsent).
-func loadOrCreateDeviceIdentity() (*deviceIdentity, error) {
+func loadOrCreateDeviceIdentity(ctx context.Context) (*deviceIdentity, error) {
 	dbPath, err := openClawStateDBPath()
 	if err != nil {
 		return nil, err
@@ -77,13 +78,13 @@ func loadOrCreateDeviceIdentity() (*deviceIdentity, error) {
 		return nil, fmt.Errorf("open state db: %w", err)
 	}
 	defer db.Close()
-	if _, err := db.Exec(deviceIdentitySchema); err != nil {
+	if _, err := db.ExecContext(ctx, deviceIdentitySchema); err != nil {
 		return nil, fmt.Errorf("ensure device_identities schema: %w", err)
 	}
 
 	read := func() (*deviceIdentity, error) {
 		var dev deviceIdentity
-		err := db.QueryRow(`SELECT device_id, public_key_pem, private_key_pem
+		err := db.QueryRowContext(ctx, `SELECT device_id, public_key_pem, private_key_pem
 			FROM device_identities WHERE identity_key=?`, primaryDeviceIdentityKey).
 			Scan(&dev.DeviceID, &dev.PublicKeyPem, &dev.PrivateKeyPem)
 		if errors.Is(err, sql.ErrNoRows) {
@@ -108,7 +109,7 @@ func loadOrCreateDeviceIdentity() (*deviceIdentity, error) {
 		return nil, err
 	}
 	now := time.Now().UTC().UnixMilli()
-	if _, err := db.Exec(`INSERT INTO device_identities
+	if _, err := db.ExecContext(ctx, `INSERT INTO device_identities
 		(identity_key, device_id, public_key_pem, private_key_pem, created_at_ms, updated_at_ms)
 		VALUES(?,?,?,?,?,?) ON CONFLICT(identity_key) DO NOTHING`,
 		primaryDeviceIdentityKey, generated.DeviceID, generated.PublicKeyPem,
