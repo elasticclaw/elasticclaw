@@ -48,6 +48,10 @@ jobs:
           registry-namespace: elasticclaw
           include-summary: false
           fail-on-findings: false
+          # The action's own wall-clock deadline defaults to 10 minutes and
+          # has been expiring (exit 124) mid-review on full-PR diffs; the
+          # review legitimately needs ~10+ minutes.
+          timeout-minutes: "30"
 
   unit:
     name: Unit tests
