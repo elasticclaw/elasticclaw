@@ -1,6 +1,7 @@
 package v2
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -29,7 +30,7 @@ type Repository struct {
 	Repository    string                `yaml:"repository" json:"repository"`
 	SourceControl string                `yaml:"source_control,omitempty" json:"source_control,omitempty"`
 	Checkout      *Checkout             `yaml:"checkout,omitempty" json:"checkout,omitempty"`
-	Permissions   RepositoryPermissions `yaml:"permissions,omitempty" json:"permissions,omitempty"`
+	Permissions   RepositoryPermissions `yaml:"permissions,omitempty" json:"permissions,omitzero"`
 }
 
 // RepositoryPermissions declares the GitHub App repository permissions a
@@ -85,6 +86,28 @@ func (p RepositoryPermissions) IsZero() bool {
 	return p.level == "" && len(p.granular) == 0
 }
 
+// PermissionsFromLevel returns the scalar form ("read" or "write"). It is the
+// programmatic construction path for callers that previously assigned a plain
+// string to Repository.Permissions.
+func PermissionsFromLevel(level string) RepositoryPermissions {
+	return RepositoryPermissions{level: strings.ToLower(strings.TrimSpace(level))}
+}
+
+// PermissionsFromMap returns the granular form from a permission name -> level
+// map. Keys are trimmed, lowercased, and canonicalized (aliases resolved);
+// values are trimmed and lowercased. Use ValidateWorkspace to reject unknown
+// names, invalid levels, and duplicates.
+func PermissionsFromMap(granular map[string]string) RepositoryPermissions {
+	if len(granular) == 0 {
+		return RepositoryPermissions{}
+	}
+	out := make(map[string]string, len(granular))
+	for name, level := range granular {
+		out[CanonicalGitHubPermissionName(name)] = strings.ToLower(strings.TrimSpace(level))
+	}
+	return RepositoryPermissions{granular: out}
+}
+
 // UnmarshalYAML accepts the scalar ("read"/"write") and granular
 // (permission name -> level) forms.
 func (p *RepositoryPermissions) UnmarshalYAML(value *yaml.Node) error {
@@ -131,7 +154,10 @@ func (p RepositoryPermissions) MarshalYAML() (interface{}, error) {
 	return p.level, nil
 }
 
-// UnmarshalJSON accepts the same forms from JSON payloads.
+// UnmarshalJSON accepts the same forms from JSON payloads. The granular form
+// is decoded in authored key order so duplicate keys (exact or differing only
+// in case) are rejected instead of being silently collapsed by a plain map
+// unmarshal.
 func (p *RepositoryPermissions) UnmarshalJSON(data []byte) error {
 	var scalar string
 	if err := json.Unmarshal(data, &scalar); err == nil {
@@ -139,23 +165,46 @@ func (p *RepositoryPermissions) UnmarshalJSON(data []byte) error {
 		p.granular = nil
 		return nil
 	}
-	var granular map[string]string
-	if err := json.Unmarshal(data, &granular); err != nil {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	openTok, err := dec.Token()
+	if err != nil {
 		return fmt.Errorf("permissions: must be read, write, or a map of GitHub App permissions")
+	}
+	if delim, ok := openTok.(json.Delim); !ok || delim != '{' {
+		return fmt.Errorf("permissions: must be read, write, or a map of GitHub App permissions")
+	}
+	granular := make(map[string]string)
+	for dec.More() {
+		keyTok, err := dec.Token()
+		if err != nil {
+			return fmt.Errorf("permissions: %v", err)
+		}
+		name, ok := keyTok.(string)
+		if !ok {
+			return fmt.Errorf("permissions: object keys must be strings")
+		}
+		levelTok, err := dec.Token()
+		if err != nil {
+			return fmt.Errorf("permissions.%s: %v", name, err)
+		}
+		level, ok := levelTok.(string)
+		if !ok {
+			return fmt.Errorf("permissions.%s: must be a permission level (read or write)", name)
+		}
+		key := strings.ToLower(strings.TrimSpace(name))
+		if _, dup := granular[key]; dup {
+			return fmt.Errorf("permissions.%s: duplicate declaration", key)
+		}
+		granular[key] = strings.ToLower(strings.TrimSpace(level))
+	}
+	if _, err := dec.Token(); err != nil { // closing '}'
+		return fmt.Errorf("permissions: %v", err)
 	}
 	if len(granular) == 0 {
 		return fmt.Errorf("permissions: granular form must declare at least one permission")
 	}
-	normalized := make(map[string]string, len(granular))
-	for name, level := range granular {
-		key := strings.ToLower(strings.TrimSpace(name))
-		if _, dup := normalized[key]; dup {
-			return fmt.Errorf("permissions.%s: duplicate declaration", key)
-		}
-		normalized[key] = strings.ToLower(strings.TrimSpace(level))
-	}
 	p.level = ""
-	p.granular = normalized
+	p.granular = granular
 	return nil
 }
 

@@ -96,6 +96,11 @@ func validateRepositoryPermissions(repoName string, perms RepositoryPermissions)
 		if CanonicalGitHubPermissionLevel(level) == "" {
 			return fmt.Errorf("repositories.%s.permissions.%s: invalid level %q (must be read or write)", repoName, name, level)
 		}
+		if canonical == "metadata" && level == "write" {
+			// metadata is always read and cannot be widened; reject instead of
+			// silently dropping the requested level at mint time.
+			return fmt.Errorf("repositories.%s.permissions.metadata: metadata is always read and cannot be set to write", repoName)
+		}
 	}
 	return nil
 }

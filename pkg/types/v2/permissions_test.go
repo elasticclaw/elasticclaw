@@ -1,6 +1,7 @@
 package v2_test
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -193,6 +194,94 @@ repositories:
 `))
 	if err == nil || !strings.Contains(err.Error(), "duplicate declaration of vulnerability_alerts") {
 		t.Fatalf("error = %v, want duplicate declaration of vulnerability_alerts", err)
+	}
+}
+
+func TestWorkspaceRejectsMetadataWrite(t *testing.T) {
+	// metadata is always read and cannot be widened; reject instead of
+	// silently dropping the requested level at mint time.
+	_, err := v2.ParseAndValidateWorkspace([]byte(`
+schema_version: 2
+name: x
+repositories:
+  primary:
+    provider: github
+    repository: org/repo
+    permissions:
+      metadata: write
+`))
+	if err == nil || !strings.Contains(err.Error(), "metadata is always read") {
+		t.Fatalf("error = %v, want metadata is always read", err)
+	}
+}
+
+func TestRepositoryPermissionsJSONRejectsDuplicateKeys(t *testing.T) {
+	// Exact duplicates are collapsed by a plain map unmarshal; the decoder
+	// must walk authored key order and reject them instead.
+	cases := []struct {
+		name string
+		data string
+	}{
+		{"exact duplicate", `{"contents":"read","contents":"write"}`},
+		{"case variant", `{"Contents":"read","contents":"write"}`},
+	}
+	for _, tc := range cases {
+		var perms v2.RepositoryPermissions
+		if err := json.Unmarshal([]byte(tc.data), &perms); err == nil || !strings.Contains(err.Error(), "duplicate declaration") {
+			t.Fatalf("%s: error = %v, want duplicate declaration", tc.name, err)
+		}
+	}
+}
+
+func TestRepositoryPermissionsJSONRoundTripOmitsZero(t *testing.T) {
+	// A repository without permissions must not serialize an explicit
+	// permissions field (no "permissions": null).
+	type doc struct {
+		Repo v2.Repository `json:"repo"`
+	}
+	out, err := json.Marshal(doc{Repo: v2.Repository{Provider: "github", Repository: "org/repo"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(out), "permissions") {
+		t.Fatalf("zero permissions must be omitted, got %s", out)
+	}
+
+	out, err = json.Marshal(doc{Repo: v2.Repository{Provider: "github", Repository: "org/repo", Permissions: v2.PermissionsFromLevel("write")}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), `"permissions":"write"`) {
+		t.Fatalf("scalar form must serialize as a string, got %s", out)
+	}
+
+	out, err = json.Marshal(doc{Repo: v2.Repository{Provider: "github", Repository: "org/repo", Permissions: v2.PermissionsFromMap(map[string]string{"vulnerability_alerts": "read"})}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), `"vulnerability_alerts":"read"`) {
+		t.Fatalf("granular form must serialize as a map, got %s", out)
+	}
+}
+
+func TestRepositoryPermissionsConstructors(t *testing.T) {
+	scalar := v2.PermissionsFromLevel(" Write ")
+	if scalar.Level() != "write" || scalar.Granular() != nil {
+		t.Fatalf("PermissionsFromLevel = level %q granular %v", scalar.Level(), scalar.Granular())
+	}
+	granular := v2.PermissionsFromMap(map[string]string{
+		"Dependabot_Alerts": "read",
+		"security_events":   " Read ",
+	})
+	got := granular.Granular()
+	if got["vulnerability_alerts"] != "read" || got["security_events"] != "read" {
+		t.Fatalf("PermissionsFromMap canonicalization = %v", got)
+	}
+	if _, ok := got["dependabot_alerts"]; ok {
+		t.Fatalf("PermissionsFromMap must canonicalize keys, got %v", got)
+	}
+	if v2.PermissionsFromMap(nil).IsZero() != true {
+		t.Fatal("PermissionsFromMap(nil) must be zero")
 	}
 }
 
