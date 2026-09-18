@@ -44,6 +44,7 @@ jobs:
           registry-namespace: elasticclaw
           include-summary: false
           fail-on-findings: false
+          timeout-minutes: "30"
 
   unit:
     name: Unit tests
