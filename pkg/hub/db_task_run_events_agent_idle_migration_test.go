@@ -199,17 +199,35 @@ func TestRebuildTaskRunEventsAgentIdleV1MigratesPopulatedDatabase(t *testing.T) 
 		t.Fatal("rebuilt schema accepts unknown event types")
 	}
 
-	for _, name := range []string{
-		"idx_task_run_events_tenant_key", "idx_task_run_events_run_time", "idx_task_run_events_type_time",
-		"idx_task_run_events_tenant_run_time", "idx_task_run_events_source_event", "idx_task_run_events_observed",
-	} {
+	indexCount := func(name string) int {
+		t.Helper()
 		var n int
 		if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name=?`, name).Scan(&n); err != nil {
 			t.Fatal(err)
 		}
-		if n != 1 {
+		return n
+	}
+	for _, name := range []string{
+		"idx_task_run_events_tenant_key", "idx_task_run_events_run_time", "idx_task_run_events_type_time",
+		"idx_task_run_events_tenant_run_time", "idx_task_run_events_source_event", "idx_task_run_events_observed",
+	} {
+		if indexCount(name) != 1 {
 			t.Fatalf("index %s missing after rebuild", name)
 		}
+	}
+
+	// idx_task_run_events_event_time is deliberately NOT rebuilt here. Building
+	// it needs free disk for the whole B-tree, and this rebuild runs inside a
+	// transaction whose failure aborts migrate() and therefore the hub's boot —
+	// which is exactly the failure that moving the retention indexes out of
+	// migrate() existed to remove. ensureRetentionIndexes owns it, tries again on
+	// every boot and every sweep cycle, and never fails anything.
+	if indexCount("idx_task_run_events_event_time") != 0 {
+		t.Fatal("the rebuild recreated the retention index inside its fatal transaction, reintroducing the disk-full boot failure")
+	}
+	ensureRetentionIndexes(db)
+	if indexCount("idx_task_run_events_event_time") != 1 {
+		t.Fatal("ensureRetentionIndexes did not restore the index the rebuild dropped")
 	}
 }
 

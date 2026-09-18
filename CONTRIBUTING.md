@@ -183,6 +183,90 @@ CI runs on Depot (not GitHub Actions). Workflows in `.depot/workflows/`:
 - `release.yaml` — runs on tag push (Go binaries → GitHub Releases)
 - `release-web.yaml` — runs on tag push (Docker image, now deprecated)
 
+### Retention
+
+The hub accumulates checkpoint manifests, content-addressed blobs, captured
+diagnostics logs, messages and task run events, and nothing removed any of it
+until the retention sweeper. It is **opt-in**: with no `retention` section the
+hub reclaims nothing, which is the state every existing hub is already in.
+
+Every phase deletes irreversibly, and what a 90-day window actually removes
+depends on the shape of one hub's history — not on the config. Arm it in this
+order:
+
+1. **Enable with `dry_run: true`.** A dry run selects exactly what a real cycle
+   would remove, including the blob sweep, and logs it without removing a file
+   or a row. `enabled: true` is still required: `dry_run` describes how a cycle
+   behaves, not whether it runs.
+
+   A dry run does write one thing: the one-time `checkpoint_blob_refs` backfill,
+   which records which blobs each existing checkpoint holds. It only ever adds
+   protection, and the blob sweep — dry or real — refuses to delete anything
+   until it has completed once, so running it is what makes the dry run's blob
+   numbers mean anything.
+
+   ```yaml
+   retention:
+     enabled: true
+     dry_run: true
+     interval: 1h        # minimum 10m
+     max_age: 2160h      # 90d; floor 168h
+     compact_after: 240h # 10d; floor 24h, and always kept below max_age
+   ```
+
+   **Every knob here needs a hub restart to take effect, including
+   `enabled` and `dry_run`.** `hub.yaml` is read once at boot and the retention
+   section is never reloaded, so changing a value in the file and waiting for the
+   next cycle changes nothing at all.
+
+   Durations are Go durations: `h`, `m`, `s` — **there is no `d`**. `max_age: 30d`
+   does not parse, and the hub falls back to the 90-day default. It says so in
+   the startup line's `adjustments=[...]`, which is worth reading before walking
+   away.
+
+2. **Read the cycle log.** The sweeper logs its effective policy once at startup
+   (including any value it clamped and when the first cycle runs), then a start
+   and a done line per cycle:
+
+   ```
+   [retention] enabled: dry_run=true interval=1h0m0s max_age=2160h0m0s compact_after=240h0m0s adjustments=[none] first_cycle_at=...
+   [retention] blob reference backfill complete in 18.2s: 1204 checkpoint(s), 402118 reference(s); unreadable_manifests=3 missing_trees=0 unreadable_trees=0 ...
+   [retention] dry_run: would sweep 41029 blob(s) (e.g. 0a1b2c3d, ..., and 41024 more) totalling 93112884213 bytes
+   [retention] cycle done in 4.1s (dry_run=true): would remove compacted=812 diagnostics=39 checkpoints=1204 task_run_events=2911430 messages=88214 blobs=41029 bytes_freed=93112884213 (blobs=93110... manifests=1... diagnostics=...; row deletes free SQLite pages but do not shrink the database file without a VACUUM) phase_errors=0 item_errors=0
+   ```
+
+   `phase_errors` counts phases that failed outright; `item_errors` counts
+   individual files or rows a phase could not process and stepped over. A cycle
+   with `item_errors` in the thousands is not a cycle that found nothing.
+
+   `bytes_freed` is filesystem bytes only — blobs, manifests and diagnostics
+   logs. Deleting `messages` and `task_run_events` rows returns pages to
+   SQLite's freelist for reuse; **the `hub.db` file does not get smaller without
+   a `VACUUM`**, which is a separate, offline decision.
+
+   A dry run aggregates: one line per phase with a total and a handful of
+   examples, not one line per item. The earlier per-item logging produced tens of
+   thousands of lines per cycle, which journald rate-limits — dropping the
+   summary line that is the whole point.
+
+   `unreadable_manifests` in the backfill line is expected on a hub that hit
+   ENOSPC and is not an error: the row's own digests are still recorded.
+   `missing_trees` is worth attention — a checkpoint whose tree blob is already
+   gone cannot have its per-file blobs recorded, and those files will be swept.
+   That checkpoint was already unrestorable.
+
+3. **Archive anything you want to keep.** The counts from step 2 are the last
+   warning you get.
+
+4. **Arm it**: set `dry_run: false`. The first real cycle runs one `interval`
+   after the restart — never during startup — so there is always a window to
+   turn it back off.
+
+The first sweep on a hub that has never run retention has a large backlog. Row
+deletes are batched and bounded by a per-cycle time budget, so the backlog is
+spread over several cycles rather than holding the single SQLite write lock for
+hours; this is expected and needs no intervention.
+
 ### Commit style
 
 Conventional commits: `feat:`, `fix:`, `chore:`, `docs:`, `test:`

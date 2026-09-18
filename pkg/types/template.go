@@ -572,6 +572,9 @@ type HubConfig struct {
 	// infrastructure failures.
 	Liveness *LivenessConfig `yaml:"liveness,omitempty" json:"liveness,omitempty"`
 
+	// Retention configures reclamation of checkpoint and diagnostic storage.
+	Retention *RetentionConfig `yaml:"retention,omitempty" json:"retention,omitempty"`
+
 	// Notifications holds outbound notification configuration: named
 	// transports (notifiers) and the hub features that send through them.
 	Notifications *NotificationsConfig `yaml:"notifications,omitempty" json:"notifications,omitempty"`
@@ -805,6 +808,58 @@ type LivenessConfig struct {
 	// recovery budget — a threshold set too low can exhaust the budget on
 	// healthy waits and leave nothing for the stall it was added for.
 	IdleResumeAfter string `yaml:"idle_resume_after,omitempty" json:"idleResumeAfter,omitempty"`
+}
+
+// RetentionConfig controls reclamation of the storage the hub accumulates:
+// checkpoint manifests, content-addressed checkpoint blobs, captured gateway
+// diagnostics, delivered messages and task run events. Durations use Go
+// duration strings; empty values receive the defaults documented per field.
+//
+// Nothing here is reclaimed unless the sweeper runs, and the sweeper never
+// runs during startup — see retentionSweeper in pkg/hub/retention.go.
+type RetentionConfig struct {
+	// Enabled is the master switch. It defaults to FALSE when omitted: every
+	// phase below deletes irreversibly, and an absent setting means the
+	// operator has not opted in -- most often because they have just upgraded.
+	// Set it explicitly to true once the archive step for this hub has run.
+	//
+	// Turning it off stops every reclamation phase: compaction, retention
+	// deletes and the blob sweep.
+	//
+	// Whichever way it is set, the hub logs the effective policy once at
+	// startup — one line saying enabled or disabled, and for an enabled
+	// sweeper the interval, window, compact_after, whether any value was
+	// clamped, and when the first cycle runs. That line is the only signal a
+	// misconfiguration produces: a disabled sweeper is otherwise silent
+	// forever and looks exactly like one that is running and finding nothing.
+	Enabled *bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	// Interval is how often a full reclamation cycle runs (default 1h).
+	//
+	// Unlike every other knob here, a change to interval needs a hub restart:
+	// the ticker is created once when the sweeper starts, while max_age,
+	// compact_after and dry_run are re-read at the top of every cycle and take
+	// effect on the next tick.
+	Interval string `yaml:"interval,omitempty" json:"interval,omitempty"`
+	// MaxAge is the retention window (default 2160h = 90 days). It applies to
+	// all four retention targets: diagnostics logs, checkpoints, task run
+	// events and messages.
+	MaxAge string `yaml:"max_age,omitempty" json:"maxAge,omitempty"`
+	// DryRun runs the full selection of every phase and logs exactly what would
+	// be removed, without unlinking a file or deleting a row.
+	//
+	// It exists because the blast radius of this feature is not reviewable from
+	// the configuration alone: what a 90-day window actually removes depends on
+	// the shape of one hub's history, and the failures this code has had were
+	// all of the "deleted more than anyone expected" kind. An operator arming
+	// retention on a hub that has never run it should be able to see the counts
+	// first. Enabled must still be true: dry_run describes how a cycle behaves,
+	// not whether it runs.
+	DryRun bool `yaml:"dry_run,omitempty" json:"dryRun,omitempty"`
+	// CompactAfter is how long a claw must go unchanged before it counts as
+	// finalized and its superseded checkpoint manifests may be compacted
+	// (default 240h = 10 days). A claw with a merged PR is finalized
+	// immediately, regardless of this value.
+	CompactAfter string `yaml:"compact_after,omitempty" json:"compactAfter,omitempty"`
 }
 
 // IntegrationsConfig holds configs for external integrations.
