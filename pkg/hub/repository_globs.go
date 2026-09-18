@@ -100,25 +100,30 @@ func repoAccessMatchesSelector(repo string, selector RepoAccess) bool {
 }
 
 // effectiveRepoAccess returns the highest-permission RepoAccess that matches
-// the requested repository, or nil if none of the selectors match.
+// the requested repository, or nil if none of the selectors match. Granular
+// extra permissions from all matching selectors are merged (write wins).
 func effectiveRepoAccess(repo string, selectors []RepoAccess) *RepoAccess {
-	var result *RepoAccess
+	matched := false
+	perm := ""
+	var extras map[string]string
 	for _, sel := range selectors {
 		if !repoAccessMatchesSelector(repo, sel) {
 			continue
 		}
-		perm := sel.Permissions
-		if perm == "" {
-			perm = "read"
+		selPerm := sel.Permissions
+		if selPerm == "" {
+			selPerm = "read"
 		}
-		if result == nil || perm == "write" {
-			result = &RepoAccess{Repo: repo, Permissions: perm}
+		if !matched || selPerm == "write" {
+			perm = selPerm
 		}
-		if result.Permissions == "write" {
-			break
-		}
+		matched = true
+		extras = mergeRepoExtraPermissions(extras, sel.ExtraPermissions)
 	}
-	return result
+	if !matched {
+		return nil
+	}
+	return &RepoAccess{Repo: repo, Permissions: perm, ExtraPermissions: extras}
 }
 
 func hasRepositoryPattern(repos []RepoAccess) bool {
@@ -137,6 +142,7 @@ func expandRepositoryAccess(selectors []types.GitHubRepoAccess, available []gith
 	type selectedRepository struct {
 		name       string
 		permission string
+		extras     map[string]string
 	}
 	selected := make(map[string]selectedRepository)
 
@@ -175,9 +181,12 @@ func expandRepositoryAccess(selectors []types.GitHubRepoAccess, available []gith
 			if permission == "" {
 				permission = "read"
 			}
-			_, exists := selected[key]
+			existing, exists := selected[key]
+			extras := mergeRepoExtraPermissions(existing.extras, selector.ExtraPermissions)
 			if !exists || permission == "write" {
-				selected[key] = selectedRepository{name: repository.FullName, permission: permission}
+				selected[key] = selectedRepository{name: repository.FullName, permission: permission, extras: extras}
+			} else if len(extras) > len(existing.extras) {
+				selected[key] = selectedRepository{name: existing.name, permission: existing.permission, extras: extras}
 			}
 		}
 		if !matched {
@@ -198,8 +207,9 @@ func expandRepositoryAccess(selectors []types.GitHubRepoAccess, available []gith
 	for _, key := range keys {
 		repository := selected[key]
 		expanded = append(expanded, types.GitHubRepoAccess{
-			Repo:        repository.name,
-			Permissions: repository.permission,
+			Repo:             repository.name,
+			Permissions:      repository.permission,
+			ExtraPermissions: repository.extras,
 		})
 	}
 	return expanded, nil

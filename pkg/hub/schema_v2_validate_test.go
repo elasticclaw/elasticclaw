@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/elasticclaw/elasticclaw/pkg/types"
+	v2 "github.com/elasticclaw/elasticclaw/pkg/types/v2"
 )
 
 const testWorkspaceV2YAML = `
@@ -43,6 +44,50 @@ ci:
       repository: primary
       workflow: ci.yml
 `
+
+func TestProjectV2RepositoriesForAccessCarriesGranularPermissions(t *testing.T) {
+	resolved, err := v2.ParseAndValidateWorkspace([]byte(`
+schema_version: 2
+name: security
+repositories:
+  primary:
+    provider: github
+    repository: org/repo
+    permissions:
+      vulnerability_alerts: read
+      security_events: read
+  secondary:
+    provider: github
+    repository: org/other
+    permissions: write
+`))
+	if err != nil {
+		t.Fatalf("ParseAndValidateWorkspace: %v", err)
+	}
+
+	projected := projectV2RepositoriesForAccess(resolved.Workspace)
+	if len(projected) != 2 {
+		t.Fatalf("projected = %#v", projected)
+	}
+	byRepo := make(map[string]types.GitHubRepoAccess, len(projected))
+	for _, r := range projected {
+		byRepo[r.Repo] = r
+	}
+	primary := byRepo["org/repo"]
+	if primary.Permissions != "read" {
+		t.Fatalf("primary permissions = %q, want read (granular without contents keeps default)", primary.Permissions)
+	}
+	if primary.ExtraPermissions["vulnerability_alerts"] != "read" || primary.ExtraPermissions["security_events"] != "read" {
+		t.Fatalf("primary extra permissions = %#v", primary.ExtraPermissions)
+	}
+	secondary := byRepo["org/other"]
+	if secondary.Permissions != "write" {
+		t.Fatalf("secondary permissions = %q, want write", secondary.Permissions)
+	}
+	if secondary.ExtraPermissions != nil {
+		t.Fatalf("secondary extra permissions = %#v, want nil for scalar form", secondary.ExtraPermissions)
+	}
+}
 
 const testWorkflowV2YAML = `
 schema_version: 2

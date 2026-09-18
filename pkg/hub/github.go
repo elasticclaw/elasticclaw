@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -222,6 +223,38 @@ func (p *GitHubTokenProvider) ListInstallationRepositories(ctx context.Context, 
 type RepoAccess struct {
 	Repo        string // "owner/repo"
 	Permissions string // "read" or "write"
+	// ExtraPermissions are granular GitHub App permissions declared by the
+	// workspace (issue #697). They are added on top of the default permission
+	// set and capped at what the installation actually grants.
+	ExtraPermissions map[string]string
+}
+
+// mergeRepoExtraPermissions merges src into dst with "write" winning over
+// "read" for duplicate keys. Returns the merged map (dst when src is empty).
+func mergeRepoExtraPermissions(dst, src map[string]string) map[string]string {
+	if len(src) == 0 {
+		return dst
+	}
+	if dst == nil {
+		dst = make(map[string]string, len(src))
+	}
+	for name, level := range src {
+		if dst[name] != "write" {
+			dst[name] = level
+		}
+	}
+	return dst
+}
+
+// collectRepoExtraPermissions merges the granular permissions declared across
+// all repos into a single map, mirroring how the scalar level escalates to
+// the workspace maximum.
+func collectRepoExtraPermissions(repos []RepoAccess) map[string]string {
+	var merged map[string]string
+	for _, r := range repos {
+		merged = mergeRepoExtraPermissions(merged, r.ExtraPermissions)
+	}
+	return merged
 }
 
 // maxScopedInstallationRepos is GitHub's documented limit for the
@@ -306,6 +339,39 @@ func (p *GitHubTokenProvider) InstallationToken(ctx context.Context, installatio
 		}
 		if level := installationPermissionLevel(instPerms, "issues"); level != "" {
 			perms["issues"] = level
+		}
+
+		// Granular workspace-declared permissions (issue #697): a workspace
+		// v2 repository may declare extra GitHub App permissions (e.g.
+		// vulnerability_alerts / security_events read so workflows can read
+		// Dependabot and code-scanning alerts). Defaults above are unchanged;
+		// declared entries only add or override. Each entry is included only
+		// when the installation actually grants that permission, and is capped
+		// at the installation's level, so installations without the grant keep
+		// minting successfully (same safety net as workflows/issues).
+		if extras := collectRepoExtraPermissions(repos); len(extras) > 0 {
+			names := make([]string, 0, len(extras))
+			for name := range extras {
+				names = append(names, name)
+			}
+			sort.Strings(names)
+			for _, name := range names {
+				if name == "metadata" {
+					continue // metadata is always read; never widened
+				}
+				requested := extras[name]
+				granted := installationPermissionLevel(instPerms, name)
+				if granted == "" {
+					continue // installation lacks this permission; requesting it would fail the mint
+				}
+				if requested == "write" && granted != "write" && granted != "admin" {
+					requested = "read" // cap at installation level
+				}
+				if perms[name] == "write" {
+					continue // never narrow an existing write grant
+				}
+				perms[name] = requested
+			}
 		}
 		body := map[string]interface{}{
 			"permissions": perms,

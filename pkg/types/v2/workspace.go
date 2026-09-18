@@ -1,5 +1,13 @@
 package v2
 
+import (
+	"encoding/json"
+	"fmt"
+	"strings"
+
+	"gopkg.in/yaml.v3"
+)
+
 // Workspace is the authored workspace v2 document (issue #544).
 type Workspace struct {
 	SchemaVersion interface{}            `yaml:"schema_version" json:"schema_version"`
@@ -17,11 +25,141 @@ type Workspace struct {
 
 // Repository is a named checkout target.
 type Repository struct {
-	Provider      string    `yaml:"provider" json:"provider"`
-	Repository    string    `yaml:"repository" json:"repository"`
-	SourceControl string    `yaml:"source_control,omitempty" json:"source_control,omitempty"`
-	Checkout      *Checkout `yaml:"checkout,omitempty" json:"checkout,omitempty"`
-	Permissions   string    `yaml:"permissions,omitempty" json:"permissions,omitempty"`
+	Provider      string                `yaml:"provider" json:"provider"`
+	Repository    string                `yaml:"repository" json:"repository"`
+	SourceControl string                `yaml:"source_control,omitempty" json:"source_control,omitempty"`
+	Checkout      *Checkout             `yaml:"checkout,omitempty" json:"checkout,omitempty"`
+	Permissions   RepositoryPermissions `yaml:"permissions,omitempty" json:"permissions,omitempty"`
+}
+
+// RepositoryPermissions declares the GitHub App repository permissions a
+// workspace repository needs. It accepts two authored forms:
+//
+//	permissions: write                        # scalar: "read" (default) or "write"
+//	permissions:                              # granular: GitHub App permission names
+//	  contents: write
+//	  vulnerability_alerts: read              # Dependabot alerts
+//	  security_events: read                   # code-scanning alerts
+//
+// The scalar form reproduces the historical default permission request:
+// contents/pull_requests at the declared level, plus metadata/checks/statuses
+// read, and the conditional workflows/issues scopes. The granular form keeps
+// those defaults for every undeclared permission and only adds or overrides
+// the named entries, so existing behavior is unchanged unless extras are
+// declared.
+type RepositoryPermissions struct {
+	level    string
+	granular map[string]string
+}
+
+// Level returns the base access level for the repository: "read" or "write".
+// For the granular form it is derived from the declared contents level
+// (defaulting to read) since contents drives clone/push access. Scalar values
+// other than "write" normalize to "read", matching the historical projection
+// behavior for existing configs.
+func (p RepositoryPermissions) Level() string {
+	if p.level == "write" {
+		return "write"
+	}
+	if CanonicalGitHubPermissionLevel(p.granular["contents"]) == "write" {
+		return "write"
+	}
+	return "read"
+}
+
+// Granular returns the canonicalized GitHub App permission map declared for
+// this repository, or nil for the scalar form.
+func (p RepositoryPermissions) Granular() map[string]string {
+	if len(p.granular) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(p.granular))
+	for name, level := range p.granular {
+		out[CanonicalGitHubPermissionName(name)] = level
+	}
+	return out
+}
+
+// IsZero reports whether no permissions were declared.
+func (p RepositoryPermissions) IsZero() bool {
+	return p.level == "" && len(p.granular) == 0
+}
+
+// UnmarshalYAML accepts the scalar ("read"/"write") and granular
+// (permission name -> level) forms.
+func (p *RepositoryPermissions) UnmarshalYAML(value *yaml.Node) error {
+	switch value.Kind {
+	case yaml.ScalarNode:
+		if value.Tag == "!!null" {
+			return nil
+		}
+		p.level = strings.ToLower(strings.TrimSpace(value.Value))
+		p.granular = nil
+		return nil
+	case yaml.MappingNode:
+		granular := make(map[string]string, len(value.Content)/2)
+		for i := 0; i+1 < len(value.Content); i += 2 {
+			key, val := value.Content[i], value.Content[i+1]
+			if val.Kind != yaml.ScalarNode {
+				return fmt.Errorf("permissions.%s: must be a permission level (read or write)", key.Value)
+			}
+			granular[strings.ToLower(strings.TrimSpace(key.Value))] = strings.ToLower(strings.TrimSpace(val.Value))
+		}
+		if len(granular) == 0 {
+			return fmt.Errorf("permissions: granular form must declare at least one permission")
+		}
+		p.level = ""
+		p.granular = granular
+		return nil
+	default:
+		return fmt.Errorf("permissions: must be read, write, or a map of GitHub App permissions")
+	}
+}
+
+// MarshalYAML round-trips the authored form.
+func (p RepositoryPermissions) MarshalYAML() (interface{}, error) {
+	if len(p.granular) > 0 {
+		return p.granular, nil
+	}
+	if p.level == "" {
+		return nil, nil
+	}
+	return p.level, nil
+}
+
+// UnmarshalJSON accepts the same forms from JSON payloads.
+func (p *RepositoryPermissions) UnmarshalJSON(data []byte) error {
+	var scalar string
+	if err := json.Unmarshal(data, &scalar); err == nil {
+		p.level = strings.ToLower(strings.TrimSpace(scalar))
+		p.granular = nil
+		return nil
+	}
+	var granular map[string]string
+	if err := json.Unmarshal(data, &granular); err != nil {
+		return fmt.Errorf("permissions: must be read, write, or a map of GitHub App permissions")
+	}
+	if len(granular) == 0 {
+		return fmt.Errorf("permissions: granular form must declare at least one permission")
+	}
+	normalized := make(map[string]string, len(granular))
+	for name, level := range granular {
+		normalized[strings.ToLower(strings.TrimSpace(name))] = strings.ToLower(strings.TrimSpace(level))
+	}
+	p.level = ""
+	p.granular = normalized
+	return nil
+}
+
+// MarshalJSON round-trips the authored form.
+func (p RepositoryPermissions) MarshalJSON() ([]byte, error) {
+	if len(p.granular) > 0 {
+		return json.Marshal(p.granular)
+	}
+	if p.level == "" {
+		return []byte("null"), nil
+	}
+	return json.Marshal(p.level)
 }
 
 // Checkout configures clone depth/ref.

@@ -128,6 +128,33 @@ func TestEffectiveRepoAccess(t *testing.T) {
 	}
 }
 
+func TestEffectiveRepoAccessMergesGranularPermissions(t *testing.T) {
+	selectors := []RepoAccess{
+		{Repo: "example-org/example-repo", Permissions: "write"},
+		{Repo: "example-org/*", Permissions: "read", ExtraPermissions: map[string]string{
+			"vulnerability_alerts": "read",
+			"security_events":      "read",
+		}},
+		{Repo: "example-org/example-*", Permissions: "read", ExtraPermissions: map[string]string{
+			"security_events": "write", // write wins over the glob's read
+		}},
+	}
+
+	got := effectiveRepoAccess("example-org/example-repo", selectors)
+	if got == nil {
+		t.Fatal("expected a match")
+	}
+	if got.Permissions != "write" {
+		t.Fatalf("permissions = %q, want write", got.Permissions)
+	}
+	if got.ExtraPermissions["vulnerability_alerts"] != "read" {
+		t.Fatalf("vulnerability_alerts = %q, want read", got.ExtraPermissions["vulnerability_alerts"])
+	}
+	if got.ExtraPermissions["security_events"] != "write" {
+		t.Fatalf("security_events = %q, want write (write beats read across selectors)", got.ExtraPermissions["security_events"])
+	}
+}
+
 func TestListInstallationRepositoriesPaginates(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
