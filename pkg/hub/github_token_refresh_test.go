@@ -518,9 +518,11 @@ func TestInstallationTokenCanonicalizesGarbageGranularLevels(t *testing.T) {
 func TestInstallationTokenCanonicalizesAliasNames(t *testing.T) {
 	// Legacy/github_repos rows may carry the friendly alias; the mint must
 	// request the canonical GitHub permission name or the installation grant
-	// lookup would never match and the permission would be dropped.
+	// lookup would never match and the permission would be dropped. The
+	// requested level must be read under the ORIGINAL (alias) key — looking
+	// it up under the canonical name would silently downgrade write to read.
 	var sawBody string
-	srv := githubInstallationTokenTestServer(t, `{"contents":"read","vulnerability_alerts":"read"}`, func(body string) {
+	srv := githubInstallationTokenTestServer(t, `{"contents":"read","vulnerability_alerts":"write","security_events":"read"}`, func(body string) {
 		sawBody = body
 	})
 
@@ -535,17 +537,21 @@ func TestInstallationTokenCanonicalizesAliasNames(t *testing.T) {
 		Repo:        "org/a",
 		Permissions: "read",
 		ExtraPermissions: map[string]string{
-			"dependabot_alerts": "read", // alias for vulnerability_alerts
+			"dependabot_alerts":    "write", // alias for vulnerability_alerts
+			"code_scanning_alerts": "read",  // alias for security_events
 		},
 	}}
 	if _, _, err := provider.InstallationToken(context.Background(), 99, repos); err != nil {
 		t.Fatalf("InstallationToken: %v", err)
 	}
-	if !strings.Contains(sawBody, `"vulnerability_alerts":"read"`) {
-		t.Fatalf("expected canonical vulnerability_alerts requested, body=%s", sawBody)
+	if !strings.Contains(sawBody, `"vulnerability_alerts":"write"`) {
+		t.Fatalf("expected canonical vulnerability_alerts at requested write level, body=%s", sawBody)
 	}
-	if strings.Contains(sawBody, `"dependabot_alerts"`) {
-		t.Fatalf("alias name must not reach the request, body=%s", sawBody)
+	if !strings.Contains(sawBody, `"security_events":"read"`) {
+		t.Fatalf("expected canonical security_events read, body=%s", sawBody)
+	}
+	if strings.Contains(sawBody, `"dependabot_alerts"`) || strings.Contains(sawBody, `"code_scanning_alerts"`) {
+		t.Fatalf("alias names must not reach the request, body=%s", sawBody)
 	}
 }
 

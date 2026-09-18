@@ -95,16 +95,17 @@ func PermissionsFromLevel(level string) RepositoryPermissions {
 }
 
 // PermissionsFromMap returns the granular form from a permission name -> level
-// map. Keys are trimmed, lowercased, and canonicalized (aliases resolved);
-// values are trimmed and lowercased. Use ValidateWorkspace to reject unknown
-// names, invalid levels, and duplicates.
+// map. Keys and values are trimmed and lowercased but NOT canonicalized, so
+// alias/canonical duplicate pairs survive for ValidateWorkspace to reject
+// (matching the behavior of the YAML and JSON decoders). Canonicalization
+// happens on read via Granular().
 func PermissionsFromMap(granular map[string]string) RepositoryPermissions {
 	if len(granular) == 0 {
 		return RepositoryPermissions{}
 	}
 	out := make(map[string]string, len(granular))
 	for name, level := range granular {
-		out[CanonicalGitHubPermissionName(name)] = strings.ToLower(strings.TrimSpace(level))
+		out[strings.ToLower(strings.TrimSpace(name))] = strings.ToLower(strings.TrimSpace(level))
 	}
 	return RepositoryPermissions{granular: out}
 }

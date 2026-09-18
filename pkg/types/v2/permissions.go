@@ -28,6 +28,7 @@ var gitHubRepositoryPermissions = map[string]bool{
 	"packages":                     true,
 	"pages":                        true,
 	"pull_requests":                true,
+	"repository_advisories":        true,
 	"repository_custom_properties": true,
 	"repository_hooks":             true,
 	"repository_projects":          true,

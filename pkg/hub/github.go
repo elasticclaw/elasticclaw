@@ -374,15 +374,18 @@ func (p *GitHubTokenProvider) InstallationToken(ctx context.Context, installatio
 				names = append(names, name)
 			}
 			sort.Strings(names)
-			for _, name := range names {
+			for _, rawName := range names {
 				// Canonicalize aliases (e.g. dependabot_alerts ->
 				// vulnerability_alerts) so legacy/github_repos rows using the
 				// friendly name still match the installation's granted names.
-				name = v2.CanonicalGitHubPermissionName(name)
+				// The value is read under the ORIGINAL key — the merged map is
+				// keyed by authored name, and canonicalization happens only for
+				// the emitted permission and the installation grant lookup.
+				name := v2.CanonicalGitHubPermissionName(rawName)
 				if name == "metadata" {
 					continue // metadata is always read; never widened
 				}
-				requested := strings.ToLower(strings.TrimSpace(extras[name]))
+				requested := strings.ToLower(strings.TrimSpace(extras[rawName]))
 				if requested != "write" {
 					requested = "read"
 				}

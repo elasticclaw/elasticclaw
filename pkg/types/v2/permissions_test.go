@@ -197,6 +197,46 @@ repositories:
 	}
 }
 
+func TestWorkspaceAcceptsRepositoryAdvisories(t *testing.T) {
+	perms := parseRepositoryPermissions(t, `
+schema_version: 2
+name: x
+repositories:
+  primary:
+    provider: github
+    repository: org/repo
+    permissions:
+      repository_advisories: write
+`)
+	if got := perms.Granular(); got["repository_advisories"] != "write" {
+		t.Fatalf("repository_advisories = %q, want write", got["repository_advisories"])
+	}
+}
+
+func TestPermissionsFromMapKeepsAliasPairsForValidation(t *testing.T) {
+	// The constructor must not canonicalize keys: an alias/canonical pair
+	// must survive so ValidateWorkspace can reject it, matching the YAML and
+	// JSON decoders.
+	ws := &v2.Workspace{
+		SchemaVersion: 2,
+		Name:          "x",
+		Repositories: map[string]v2.Repository{
+			"primary": {
+				Provider:   "github",
+				Repository: "org/repo",
+				Permissions: v2.PermissionsFromMap(map[string]string{
+					"dependabot_alerts":    "read",
+					"vulnerability_alerts": "read",
+				}),
+			},
+		},
+	}
+	_, err := v2.ValidateWorkspace(ws)
+	if err == nil || !strings.Contains(err.Error(), "duplicate declaration of vulnerability_alerts") {
+		t.Fatalf("error = %v, want duplicate declaration of vulnerability_alerts", err)
+	}
+}
+
 func TestWorkspaceRejectsMetadataWrite(t *testing.T) {
 	// metadata is always read and cannot be widened; reject instead of
 	// silently dropping the requested level at mint time.
