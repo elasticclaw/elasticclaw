@@ -387,6 +387,265 @@ func TestInstallationTokenOmitsWorkflowsWhenInstallLookupFails(t *testing.T) {
 	}
 }
 
+func TestInstallationTokenIncludesGranularPermissionsWhenGranted(t *testing.T) {
+	// Workspace-declared granular permissions (issue #697) must be requested
+	// when the installation grants them, and omitted when it does not.
+	var sawBody string
+	srv := githubInstallationTokenTestServer(t, `{"contents":"read","vulnerability_alerts":"read","security_events":"write"}`, func(body string) {
+		sawBody = body
+	})
+
+	provider, err := NewGitHubTokenProvider(&types.GitHubAppConfig{AppID: 1, PrivateKeyPEM: testGitHubAppPEM(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider.apiBaseURL = srv.URL
+	provider.httpClient = srv.Client()
+
+	repos := []RepoAccess{{
+		Repo:        "org/a",
+		Permissions: "read",
+		ExtraPermissions: map[string]string{
+			"vulnerability_alerts":   "read", // granted read -> requested read
+			"security_events":        "read", // granted write -> requested read
+			"secret_scanning_alerts": "read", // not granted -> omitted
+		},
+	}}
+	if _, _, err := provider.InstallationToken(context.Background(), 99, repos); err != nil {
+		t.Fatalf("InstallationToken: %v", err)
+	}
+	if !strings.Contains(sawBody, `"vulnerability_alerts":"read"`) {
+		t.Fatalf("expected vulnerability_alerts read, body=%s", sawBody)
+	}
+	if !strings.Contains(sawBody, `"security_events":"read"`) {
+		t.Fatalf("expected security_events read, body=%s", sawBody)
+	}
+	if strings.Contains(sawBody, `"secret_scanning_alerts"`) {
+		t.Fatalf("must omit secret_scanning_alerts when installation lacks it, body=%s", sawBody)
+	}
+	// Base defaults are unchanged.
+	if !strings.Contains(sawBody, `"contents":"read"`) || !strings.Contains(sawBody, `"pull_requests":"read"`) {
+		t.Fatalf("expected default base permissions, body=%s", sawBody)
+	}
+}
+
+func TestInstallationTokenUnscopedSendsNoPermissionsBody(t *testing.T) {
+	// The unscoped path (repos=nil, glob workspaces without ?repo=) must keep
+	// sending no permissions body: per GitHub's REST docs, a token minted
+	// without one receives every permission the installation was granted — a
+	// superset of any ExtraPermissions declared on the selectors — so nothing
+	// is lost, and narrowing to an explicit map would reduce what glob
+	// workspaces receive today.
+	var sawBody string
+	srv := githubInstallationTokenTestServer(t, `{"contents":"read","issues":"read","vulnerability_alerts":"read"}`, func(body string) {
+		sawBody = body
+	})
+
+	provider, err := NewGitHubTokenProvider(&types.GitHubAppConfig{AppID: 1, PrivateKeyPEM: testGitHubAppPEM(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider.apiBaseURL = srv.URL
+	provider.httpClient = srv.Client()
+
+	if _, _, err := provider.InstallationToken(context.Background(), 99, nil); err != nil {
+		t.Fatalf("InstallationToken: %v", err)
+	}
+	if sawBody != "" {
+		t.Fatalf("unscoped mint must send no permissions body (GitHub grants the full installation permission set), got %q", sawBody)
+	}
+}
+
+func TestInstallationTokenCapsGranularWriteAtInstallationLevel(t *testing.T) {
+	var sawBody string
+	srv := githubInstallationTokenTestServer(t, `{"contents":"read","security_events":"read"}`, func(body string) {
+		sawBody = body
+	})
+
+	provider, err := NewGitHubTokenProvider(&types.GitHubAppConfig{AppID: 1, PrivateKeyPEM: testGitHubAppPEM(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider.apiBaseURL = srv.URL
+	provider.httpClient = srv.Client()
+
+	repos := []RepoAccess{{
+		Repo:        "org/a",
+		Permissions: "read",
+		ExtraPermissions: map[string]string{
+			"security_events": "write", // installation only grants read -> capped
+		},
+	}}
+	if _, _, err := provider.InstallationToken(context.Background(), 99, repos); err != nil {
+		t.Fatalf("InstallationToken: %v", err)
+	}
+	if !strings.Contains(sawBody, `"security_events":"read"`) {
+		t.Fatalf("expected security_events capped to read, body=%s", sawBody)
+	}
+}
+
+func TestInstallationTokenCanonicalizesGarbageGranularLevels(t *testing.T) {
+	// Garbage levels persisted in github_repos (legacy rows, manual DB edits)
+	// must not produce an invalid permissions object that fails the mint for
+	// the whole claw: anything other than write normalizes to read.
+	var sawBody string
+	srv := githubInstallationTokenTestServer(t, `{"contents":"read","security_events":"read"}`, func(body string) {
+		sawBody = body
+	})
+
+	provider, err := NewGitHubTokenProvider(&types.GitHubAppConfig{AppID: 1, PrivateKeyPEM: testGitHubAppPEM(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider.apiBaseURL = srv.URL
+	provider.httpClient = srv.Client()
+
+	repos := []RepoAccess{{
+		Repo:        "org/a",
+		Permissions: "read",
+		ExtraPermissions: map[string]string{
+			"security_events": "bogus",
+		},
+	}}
+	if _, _, err := provider.InstallationToken(context.Background(), 99, repos); err != nil {
+		t.Fatalf("InstallationToken: %v", err)
+	}
+	if !strings.Contains(sawBody, `"security_events":"read"`) {
+		t.Fatalf("expected security_events normalized to read, body=%s", sawBody)
+	}
+}
+
+func TestInstallationTokenCanonicalizesAliasNames(t *testing.T) {
+	// Legacy/github_repos rows may carry the friendly alias; the mint must
+	// request the canonical GitHub permission name or the installation grant
+	// lookup would never match and the permission would be dropped. The
+	// requested level must be read under the ORIGINAL (alias) key — looking
+	// it up under the canonical name would silently downgrade write to read.
+	var sawBody string
+	srv := githubInstallationTokenTestServer(t, `{"contents":"read","vulnerability_alerts":"write","security_events":"read"}`, func(body string) {
+		sawBody = body
+	})
+
+	provider, err := NewGitHubTokenProvider(&types.GitHubAppConfig{AppID: 1, PrivateKeyPEM: testGitHubAppPEM(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider.apiBaseURL = srv.URL
+	provider.httpClient = srv.Client()
+
+	repos := []RepoAccess{{
+		Repo:        "org/a",
+		Permissions: "read",
+		ExtraPermissions: map[string]string{
+			"dependabot_alerts":    "write", // alias for vulnerability_alerts
+			"code_scanning_alerts": "read",  // alias for security_events
+		},
+	}}
+	if _, _, err := provider.InstallationToken(context.Background(), 99, repos); err != nil {
+		t.Fatalf("InstallationToken: %v", err)
+	}
+	if !strings.Contains(sawBody, `"vulnerability_alerts":"write"`) {
+		t.Fatalf("expected canonical vulnerability_alerts at requested write level, body=%s", sawBody)
+	}
+	if !strings.Contains(sawBody, `"security_events":"read"`) {
+		t.Fatalf("expected canonical security_events read, body=%s", sawBody)
+	}
+	if strings.Contains(sawBody, `"dependabot_alerts"`) || strings.Contains(sawBody, `"code_scanning_alerts"`) {
+		t.Fatalf("alias names must not reach the request, body=%s", sawBody)
+	}
+}
+
+func TestMergeRepoExtraPermissionsNormalizesLevels(t *testing.T) {
+	got := mergeRepoExtraPermissions(nil, map[string]string{"security_events": " WRITE "})
+	if got["security_events"] != "write" {
+		t.Fatalf("un-normalized write should still win, got %v", got)
+	}
+	got = mergeRepoExtraPermissions(got, map[string]string{"security_events": "read"})
+	if got["security_events"] != "write" {
+		t.Fatalf("later read must not downgrade write, got %v", got)
+	}
+}
+
+func TestInstallationTokenGranularDoesNotNarrowBaseWrite(t *testing.T) {
+	var sawBody string
+	srv := githubInstallationTokenTestServer(t, `{"contents":"write","issues":"read"}`, func(body string) {
+		sawBody = body
+	})
+
+	provider, err := NewGitHubTokenProvider(&types.GitHubAppConfig{AppID: 1, PrivateKeyPEM: testGitHubAppPEM(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider.apiBaseURL = srv.URL
+	provider.httpClient = srv.Client()
+
+	repos := []RepoAccess{{
+		Repo:        "org/a",
+		Permissions: "write",
+		ExtraPermissions: map[string]string{
+			"contents": "read", // scalar write must win; never narrow
+		},
+	}}
+	if _, _, err := provider.InstallationToken(context.Background(), 99, repos); err != nil {
+		t.Fatalf("InstallationToken: %v", err)
+	}
+	if !strings.Contains(sawBody, `"contents":"write"`) {
+		t.Fatalf("expected contents write despite granular read, body=%s", sawBody)
+	}
+}
+
+func TestGitHubTokenEndpointPassesGranularPermissions(t *testing.T) {
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
+
+	var sawAccessTokenBody string
+	github := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/app/installations":
+			_, _ = w.Write([]byte(`[{"id":99,"account":{"login":"example-org"}}]`))
+		case r.Method == http.MethodGet && r.URL.Path == "/app/installations/99":
+			_, _ = w.Write([]byte(`{"id":99,"account":{"login":"example-org"},"permissions":{"contents":"read","issues":"read","vulnerability_alerts":"read","security_events":"read"}}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/example-org/example-repo/installation":
+			_, _ = w.Write([]byte(`{"id":99,"account":{"login":"example-org"}}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/app/installations/99/access_tokens":
+			body, _ := io.ReadAll(r.Body)
+			sawAccessTokenBody = string(body)
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"token":"tok","expires_at":"2099-01-01T00:00:00Z"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer github.Close()
+
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{
+		Token:     "hub-token",
+		ClawToken: "claw-token",
+		GitHubApps: []*types.GitHubAppConfig{{
+			AppID:         123,
+			PrivateKeyPEM: testGitHubAppPEM(t),
+		}},
+	}, github.URL, "", "")
+
+	reposJSON := `[{"repo":"example-org/example-repo","permissions":"read","extra_permissions":{"vulnerability_alerts":"read","security_events":"read"}}]`
+	if _, err := db.Exec(`INSERT INTO claws(id, tenant_id, name, template, provider, default_model, template_files, github_repos, linear_workspace, nix, docker, llm_key, tags, status, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,datetime('now'))`,
+		"granular-claw", "test-tenant-id", "granular claw", "granular-ws", "noop", "", "{}", reposJSON, "", 0, 0, "", `[]`, "provisioning"); err != nil {
+		t.Fatalf("insert claw: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/github/token/granular-claw?claw_token=claw-token&repo=example-org/example-repo", nil)
+	rec := httptest.NewRecorder()
+	s.mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("token endpoint returned %d: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(sawAccessTokenBody, `"vulnerability_alerts":"read"`) {
+		t.Fatalf("expected vulnerability_alerts in access token request, got %s", sawAccessTokenBody)
+	}
+	if !strings.Contains(sawAccessTokenBody, `"security_events":"read"`) {
+		t.Fatalf("expected security_events in access token request, got %s", sawAccessTokenBody)
+	}
+}
+
 func TestGitHubTokenEndpointMatchesRepositoryPatterns(t *testing.T) {
 	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
 

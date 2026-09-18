@@ -7271,10 +7271,23 @@ func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.Pr
 	hasGitHubApps2 := len(s.hubCfg.GitHubApps) > 0
 	s.mu.RUnlock()
 	if hasGitHubApps2 && len(githubRepos) > 0 {
-		repoLines := ""
+		var repoLinesBuilder strings.Builder
 		for _, r := range githubRepos {
-			repoLines += fmt.Sprintf("- `%s` (%s)\n", r.Repo, r.Permissions)
+			fmt.Fprintf(&repoLinesBuilder, "- `%s` (%s)\n", r.Repo, r.Permissions)
+			if len(r.ExtraPermissions) > 0 {
+				names := make([]string, 0, len(r.ExtraPermissions))
+				for name := range r.ExtraPermissions {
+					names = append(names, name)
+				}
+				sort.Strings(names)
+				extras := make([]string, 0, len(names))
+				for _, name := range names {
+					extras = append(extras, name+": "+r.ExtraPermissions[name])
+				}
+				fmt.Fprintf(&repoLinesBuilder, "  - extra permissions: %s\n", strings.Join(extras, ", "))
+			}
 		}
+		repoLines := repoLinesBuilder.String()
 		githubSection := fmt.Sprintf(`
 ## GitHub Access
 
@@ -8688,12 +8701,13 @@ func (s *Server) handleGitHubToken(w http.ResponseWriter, r *http.Request) {
 	if reposJSON != "" && reposJSON != "[]" {
 		// Support both old (capitalized) and new (lowercase) JSON key formats.
 		// Old format: [{"Repo":"owner/repo","Permissions":"write"}]
-		// New format: [{"repo":"owner/repo","permissions":"write"}]
+		// New format: [{"repo":"owner/repo","permissions":"write","extra_permissions":{"issues":"read"}}]
 		var rawRepos []struct {
-			Repo        string `json:"repo"`        // new format
-			RepoOld     string `json:"Repo"`        // old format (no json tags)
-			Permissions string `json:"permissions"` // new format
-			PermsOld    string `json:"Permissions"` // old format
+			Repo             string            `json:"repo"`              // new format
+			RepoOld          string            `json:"Repo"`              // old format (no json tags)
+			Permissions      string            `json:"permissions"`       // new format
+			PermsOld         string            `json:"Permissions"`       // old format
+			ExtraPermissions map[string]string `json:"extra_permissions"` // granular permissions (issue #697)
 		}
 		if err := json.Unmarshal([]byte(reposJSON), &rawRepos); err == nil {
 			for _, r := range rawRepos {
@@ -8709,7 +8723,7 @@ func (s *Server) handleGitHubToken(w http.ResponseWriter, r *http.Request) {
 					perm = "read"
 				}
 				if repo != "" {
-					repos = append(repos, RepoAccess{Repo: repo, Permissions: perm})
+					repos = append(repos, RepoAccess{Repo: repo, Permissions: perm, ExtraPermissions: r.ExtraPermissions})
 				}
 			}
 		}
@@ -8742,6 +8756,15 @@ func (s *Server) handleGitHubToken(w http.ResponseWriter, r *http.Request) {
 		// The gh wrapper requests a token without a target repo, so it must be
 		// usable for any repo matching a pattern. Request an unscoped
 		// installation token (default permissions) by passing an empty repo list.
+		//
+		// Note on granular permissions (issue #697): an unscoped mint sends no
+		// permissions body, and per GitHub's REST docs a token minted without
+		// one "will have all of the permissions that were granted to the app" —
+		// a superset of any declared ExtraPermissions, which GitHub would cap
+		// at the installation level anyway. Deliberately NOT narrowed to an
+		// explicit default+extras map here: that would reduce the permissions
+		// glob-configured workspaces receive today. ?repo= scoped mints carry
+		// the merged extras via effectiveRepoAccess above.
 		repos = nil
 	} else if len(allRepos) > maxScopedInstallationRepos {
 		// Multi-repo mint without ?repo=: GitHub cannot name-scope >50 repos.
