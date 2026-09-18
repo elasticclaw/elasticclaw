@@ -354,6 +354,12 @@ func (p *GitHubTokenProvider) InstallationToken(ctx context.Context, installatio
 		// when the installation actually grants that permission, and is capped
 		// at the installation's level, so installations without the grant keep
 		// minting successfully (same safety net as workflows/issues).
+		//
+		// Levels are canonicalized here (anything other than "write" becomes
+		// "read") so garbage persisted in github_repos cannot produce an
+		// invalid permissions object and fail the mint for the whole claw.
+		// Unknown permission names are gated out by the installation lookup,
+		// which only reports names GitHub actually grants.
 		if extras := collectRepoExtraPermissions(repos); len(extras) > 0 {
 			names := make([]string, 0, len(extras))
 			for name := range extras {
@@ -364,7 +370,10 @@ func (p *GitHubTokenProvider) InstallationToken(ctx context.Context, installatio
 				if name == "metadata" {
 					continue // metadata is always read; never widened
 				}
-				requested := extras[name]
+				requested := strings.ToLower(strings.TrimSpace(extras[name]))
+				if requested != "write" {
+					requested = "read"
+				}
 				granted := installationPermissionLevel(instPerms, name)
 				if granted == "" {
 					continue // installation lacks this permission; requesting it would fail the mint

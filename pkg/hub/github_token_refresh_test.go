@@ -484,6 +484,37 @@ func TestInstallationTokenCapsGranularWriteAtInstallationLevel(t *testing.T) {
 	}
 }
 
+func TestInstallationTokenCanonicalizesGarbageGranularLevels(t *testing.T) {
+	// Garbage levels persisted in github_repos (legacy rows, manual DB edits)
+	// must not produce an invalid permissions object that fails the mint for
+	// the whole claw: anything other than write normalizes to read.
+	var sawBody string
+	srv := githubInstallationTokenTestServer(t, `{"contents":"read","security_events":"read"}`, func(body string) {
+		sawBody = body
+	})
+
+	provider, err := NewGitHubTokenProvider(&types.GitHubAppConfig{AppID: 1, PrivateKeyPEM: testGitHubAppPEM(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider.apiBaseURL = srv.URL
+	provider.httpClient = srv.Client()
+
+	repos := []RepoAccess{{
+		Repo:        "org/a",
+		Permissions: "read",
+		ExtraPermissions: map[string]string{
+			"security_events": "bogus",
+		},
+	}}
+	if _, _, err := provider.InstallationToken(context.Background(), 99, repos); err != nil {
+		t.Fatalf("InstallationToken: %v", err)
+	}
+	if !strings.Contains(sawBody, `"security_events":"read"`) {
+		t.Fatalf("expected security_events normalized to read, body=%s", sawBody)
+	}
+}
+
 func TestInstallationTokenGranularDoesNotNarrowBaseWrite(t *testing.T) {
 	var sawBody string
 	srv := githubInstallationTokenTestServer(t, `{"contents":"write","issues":"read"}`, func(body string) {

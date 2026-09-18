@@ -93,10 +93,13 @@ func validateRepositoryPermissions(repoName string, perms RepositoryPermissions)
 			return fmt.Errorf("repositories.%s.permissions.%s: duplicate declaration of %s", repoName, name, canonical)
 		}
 		seen[canonical] = true
-		if CanonicalGitHubPermissionLevel(level) == "" {
+		// Normalize the level once (case/whitespace variants) so the checks
+		// below cannot be bypassed by e.g. "WRITE" or " write ".
+		normalized := CanonicalGitHubPermissionLevel(level)
+		if normalized == "" {
 			return fmt.Errorf("repositories.%s.permissions.%s: invalid level %q (must be read or write)", repoName, name, level)
 		}
-		if canonical == "metadata" && level == "write" {
+		if canonical == "metadata" && normalized == "write" {
 			// metadata is always read and cannot be widened; reject instead of
 			// silently dropping the requested level at mint time.
 			return fmt.Errorf("repositories.%s.permissions.metadata: metadata is always read and cannot be set to write", repoName)

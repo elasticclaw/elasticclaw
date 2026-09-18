@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -121,15 +122,18 @@ func (p *RepositoryPermissions) UnmarshalYAML(value *yaml.Node) error {
 		return nil
 	case yaml.MappingNode:
 		granular := make(map[string]string, len(value.Content)/2)
+		seenCanonical := make(map[string]bool, len(value.Content)/2)
 		for i := 0; i+1 < len(value.Content); i += 2 {
 			key, val := value.Content[i], value.Content[i+1]
 			if val.Kind != yaml.ScalarNode {
 				return fmt.Errorf("permissions.%s: must be a permission level (read or write)", key.Value)
 			}
 			name := strings.ToLower(strings.TrimSpace(key.Value))
-			if _, dup := granular[name]; dup {
-				return fmt.Errorf("permissions.%s: duplicate declaration", name)
+			canonical := CanonicalGitHubPermissionName(name)
+			if seenCanonical[canonical] {
+				return fmt.Errorf("permissions.%s: duplicate declaration of %s", name, canonical)
 			}
+			seenCanonical[canonical] = true
 			granular[name] = strings.ToLower(strings.TrimSpace(val.Value))
 		}
 		if len(granular) == 0 {
@@ -155,9 +159,9 @@ func (p RepositoryPermissions) MarshalYAML() (interface{}, error) {
 }
 
 // UnmarshalJSON accepts the same forms from JSON payloads. The granular form
-// is decoded in authored key order so duplicate keys (exact or differing only
-// in case) are rejected instead of being silently collapsed by a plain map
-// unmarshal.
+// is decoded in authored key order so duplicate keys (exact, case-variant, or
+// alias/canonical pairs) are rejected instead of being silently collapsed by
+// a plain map unmarshal.
 func (p *RepositoryPermissions) UnmarshalJSON(data []byte) error {
 	var scalar string
 	if err := json.Unmarshal(data, &scalar); err == nil {
@@ -174,6 +178,7 @@ func (p *RepositoryPermissions) UnmarshalJSON(data []byte) error {
 		return fmt.Errorf("permissions: must be read, write, or a map of GitHub App permissions")
 	}
 	granular := make(map[string]string)
+	seenCanonical := make(map[string]bool)
 	for dec.More() {
 		keyTok, err := dec.Token()
 		if err != nil {
@@ -192,13 +197,22 @@ func (p *RepositoryPermissions) UnmarshalJSON(data []byte) error {
 			return fmt.Errorf("permissions.%s: must be a permission level (read or write)", name)
 		}
 		key := strings.ToLower(strings.TrimSpace(name))
-		if _, dup := granular[key]; dup {
-			return fmt.Errorf("permissions.%s: duplicate declaration", key)
+		canonical := CanonicalGitHubPermissionName(key)
+		if seenCanonical[canonical] {
+			return fmt.Errorf("permissions.%s: duplicate declaration of %s", key, canonical)
 		}
+		seenCanonical[canonical] = true
 		granular[key] = strings.ToLower(strings.TrimSpace(level))
 	}
-	if _, err := dec.Token(); err != nil { // closing '}'
-		return fmt.Errorf("permissions: %v", err)
+	closeTok, err := dec.Token() // closing '}'
+	if err != nil {
+		return fmt.Errorf("permissions: unexpected trailing data: %v", err)
+	}
+	if delim, ok := closeTok.(json.Delim); !ok || delim != '}' {
+		return fmt.Errorf("permissions: malformed object")
+	}
+	if _, err := dec.Token(); err != io.EOF {
+		return fmt.Errorf("permissions: unexpected trailing data")
 	}
 	if len(granular) == 0 {
 		return fmt.Errorf("permissions: granular form must declare at least one permission")

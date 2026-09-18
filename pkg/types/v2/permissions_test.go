@@ -213,6 +213,21 @@ repositories:
 	if err == nil || !strings.Contains(err.Error(), "metadata is always read") {
 		t.Fatalf("error = %v, want metadata is always read", err)
 	}
+
+	// Case variants normalize to the same level and must be rejected too.
+	_, err = v2.ParseAndValidateWorkspace([]byte(`
+schema_version: 2
+name: x
+repositories:
+  primary:
+    provider: github
+    repository: org/repo
+    permissions:
+      metadata: WRITE
+`))
+	if err == nil || !strings.Contains(err.Error(), "metadata is always read") {
+		t.Fatalf("uppercase variant: error = %v, want metadata is always read", err)
+	}
 }
 
 func TestRepositoryPermissionsJSONRejectsDuplicateKeys(t *testing.T) {
@@ -224,12 +239,24 @@ func TestRepositoryPermissionsJSONRejectsDuplicateKeys(t *testing.T) {
 	}{
 		{"exact duplicate", `{"contents":"read","contents":"write"}`},
 		{"case variant", `{"Contents":"read","contents":"write"}`},
+		{"alias pair", `{"dependabot_alerts":"read","vulnerability_alerts":"read"}`},
 	}
 	for _, tc := range cases {
 		var perms v2.RepositoryPermissions
 		if err := json.Unmarshal([]byte(tc.data), &perms); err == nil || !strings.Contains(err.Error(), "duplicate declaration") {
 			t.Fatalf("%s: error = %v, want duplicate declaration", tc.name, err)
 		}
+	}
+}
+
+func TestRepositoryPermissionsJSONRejectsTrailingData(t *testing.T) {
+	// encoding/json's scanner rejects trailing data at the top level before
+	// the custom unmarshaler runs ("invalid character ... after top-level
+	// value"); the unmarshaler additionally guards its own token stream.
+	var perms v2.RepositoryPermissions
+	err := json.Unmarshal([]byte(`{"contents":"read"} trailing`), &perms)
+	if err == nil {
+		t.Fatal("expected trailing data to be rejected")
 	}
 }
 
