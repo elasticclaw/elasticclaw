@@ -60,12 +60,6 @@ func CanonicalGitHubPermissionName(name string) string {
 	return name
 }
 
-// IsKnownGitHubPermissionName reports whether name (already canonicalized)
-// is a repository-scoped GitHub App permission.
-func IsKnownGitHubPermissionName(name string) bool {
-	return gitHubRepositoryPermissions[CanonicalGitHubPermissionName(name)]
-}
-
 // CanonicalGitHubPermissionLevel normalizes a declared permission level to
 // "read", "write", or "" when invalid or empty.
 func CanonicalGitHubPermissionLevel(level string) string {
