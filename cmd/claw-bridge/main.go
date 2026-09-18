@@ -4362,7 +4362,6 @@ func runBootstrap() error {
 	if err := installOpenClaw(); err != nil {
 		return fmt.Errorf("installOpenClaw: %w", err)
 	}
-
 	// Step 3b: Install pinned CLI-backed model providers when selected.
 	if err := installSelectedCodingModelCLI(); err != nil {
 		return fmt.Errorf("installSelectedCodingModelCLI: %w", err)
