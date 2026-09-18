@@ -1,7 +1,7 @@
 "use client"
 
 import { memo, useMemo } from "react"
-import { ChevronRight } from "lucide-react"
+import { ChevronDown, ChevronRight } from "lucide-react"
 import { cn } from "@/lib/utils"
 import {
   collapseStepRuns,
@@ -19,27 +19,6 @@ import type { TimelineDensity } from "./timeline-toolbar"
 
 function formatClock(date: Date): string {
   return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
-}
-
-function StatusPill({ status }: { status: TurnStatus }) {
-  return (
-    <span
-      className={cn(
-        "inline-flex items-center gap-1 rounded-full border px-1.5 py-px text-[10px] font-medium",
-        status === "running" && "border-blue-500/40 text-blue-400",
-        status === "failed" && "border-red-500/40 text-red-400",
-        status === "ok" && "border-border text-muted-foreground"
-      )}
-    >
-      {status === "running" && (
-        <span className="relative flex size-1.5">
-          <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-blue-400 opacity-75" />
-          <span className="relative inline-flex size-1.5 rounded-full bg-blue-500" />
-        </span>
-      )}
-      {status === "running" ? "running" : status === "failed" ? "failed" : "done"}
-    </span>
-  )
 }
 
 /** Filters + collapses step runs, memoized — this math should not re-run for
@@ -64,13 +43,14 @@ const CollapsedStepList = memo(function CollapsedStepList({
 })
 
 /**
- * The step-work portion of a turn: header with generated label, status pill,
- * step count and duration; body with the step rows. Conversation bubbles are
- * deliberately rendered by AgentTimeline so they remain chronologically
- * independent from the work card.
+ * The step-work portion of a turn: a hairline "fold" header ("Edited hub ·
+ * Worked for 2m 14s · 12 tool calls") with the step rows beneath it. No card:
+ * the fold's bottom hairline is the only separation between turns.
+ * Conversation bubbles are deliberately rendered by AgentTimeline so they
+ * remain chronologically independent from the work.
  *
  * Memoized: during streaming the owner re-renders per frame, but only the
- * last turn's props actually change — older cards must not recompute labels
+ * last turn's props actually change — older folds must not recompute labels
  * and step grouping 60 times a second.
  */
 export const TurnCard = memo(function TurnCard({
@@ -88,7 +68,7 @@ export const TurnCard = memo(function TurnCard({
   density: TimelineDensity
   /** Whether the step rows are expanded (the turn chevron state). */
   expanded: boolean
-  /** Identity of this card's expansion state in the owner's override map. */
+  /** Identity of this fold's expansion state in the owner's override map. */
   toggleKey: string
   onToggle: (key: string, expanded: boolean) => void
   clawId: string
@@ -103,41 +83,57 @@ export const TurnCard = memo(function TurnCard({
   const problemsOnly = density === "problems"
   const status: TurnStatus = turn.status === "ok" && forceRunning ? "running" : turn.status
   const label = useMemo(() => turnLabel(turn), [turn])
-  const clock = useMemo(() => formatClock(turn.startedAt), [turn.startedAt])
-  const stepNoun = `${turn.toolCallCount} step${turn.toolCallCount === 1 ? "" : "s"}`
-  const duration = turn.durationMs >= 1000 ? formatDurationMs(turn.durationMs) : null
+  const stepNoun = `${turn.toolCallCount} tool call${turn.toolCallCount === 1 ? "" : "s"}`
+  const running = status === "running"
+  const elapsedMs = running && now ? Math.max(0, now - turn.startedAt.getTime()) : turn.durationMs
+  const duration = elapsedMs >= 1000 ? formatDurationMs(elapsedMs) : null
+  const Chevron = expanded ? ChevronDown : ChevronRight
 
   const renderSteps = (id: string, steps: Step[]) => (
     <CollapsedStepList key={id} steps={steps} problemsOnly={problemsOnly} now={now} onOpenSubagent={onOpenSubagent} />
   )
 
   return (
-    <section className="overflow-hidden rounded-xl border border-border bg-card">
-      <button
-        type="button"
-        onClick={(e) => {
-          anchor(e.currentTarget)
-          onToggle(toggleKey, expanded)
-        }}
-        className="flex w-full items-center gap-2 bg-muted/30 px-3 py-2 text-left hover:bg-muted/50"
-      >
-        <ChevronRight
-          className={cn("size-3.5 shrink-0 text-muted-foreground transition-transform", expanded && "rotate-90")}
-        />
-        <span className="min-w-0 truncate text-sm font-medium text-foreground">{label}</span>
-        <StatusPill status={status} />
-        <span className="ml-auto flex shrink-0 items-center gap-2 text-[10.5px] text-muted-foreground">
-          {turn.failedCount > 0 && (
-            <span className="text-red-400">{turn.failedCount} failed</span>
-          )}
-          <span>{stepNoun}</span>
-          {duration && <span className="font-mono">{duration}</span>}
-          <span className="font-mono" suppressHydrationWarning>{clock}</span>
-        </span>
-      </button>
+    <section className="flex flex-col pb-1.5">
+      <div className="border-b border-border/60 pb-2 pt-1">
+        <button
+          type="button"
+          aria-expanded={expanded}
+          onClick={(e) => {
+            anchor(e.currentTarget)
+            onToggle(toggleKey, expanded)
+          }}
+          className="flex w-full min-w-0 max-w-full cursor-pointer select-none items-center gap-1 rounded-md px-1 text-left max-md:min-h-11 text-sm leading-relaxed text-muted-foreground tabular-nums transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-focus-ring"
+        >
+          <span className="min-w-0 truncate">{label}</span>
+          <span className="shrink-0 whitespace-nowrap">
+            {duration && (
+              <>
+                {" · "}
+                <span className={cn(running && "live-tool-shine")} suppressHydrationWarning={running || undefined}>
+                  {running ? "Working for " : "Worked for "}
+                  {duration}
+                </span>
+              </>
+            )}
+            {!duration && running && (
+              <>
+                {" · "}
+                <span className="live-tool-shine">Working</span>
+              </>
+            )}
+            {turn.toolCallCount > 0 && <span> · {stepNoun}</span>}
+            {turn.failedCount > 0 && <span className="text-destructive"> · {turn.failedCount} failed</span>}
+          </span>
+          <Chevron className="size-3.5 shrink-0" aria-hidden />
+          <span className="ms-auto shrink-0 font-mono text-[.7rem] text-muted-foreground max-sm:hidden" suppressHydrationWarning>
+            {formatClock(turn.startedAt)}
+          </span>
+        </button>
+      </div>
 
       {expanded && (
-        <div className="space-y-3 px-3 py-3">
+        <div className="flex flex-col pt-1">
           {turn.items.map((item) => {
             if (item.type === "steps") {
               return expanded ? renderSteps(item.id, item.steps) : null

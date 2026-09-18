@@ -56,7 +56,7 @@ export function useTimelineDensity(): [TimelineDensity, (d: TimelineDensity) => 
   return [density, writeDensity]
 }
 
-/** Slim toolbar: density segmented control plus a turns/tools/failures chip. */
+/** Slim toolbar: density segmented control plus plain turns/tools/failures stats. */
 export function TimelineToolbar({
   density,
   onDensityChange,
@@ -67,35 +67,39 @@ export function TimelineToolbar({
   stats: TimelineStats
 }) {
   return (
-    <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 border-b border-border px-3 md:px-6 py-1.5">
-      <div className="flex items-center gap-0.5 rounded-md border border-border bg-muted/30 p-0.5">
-        {DENSITY_OPTIONS.map((option) => (
-          <button
-            key={option.value}
-            type="button"
-            onClick={() => onDensityChange(option.value)}
-            className={cn(
-              "rounded px-2 py-0.5 text-xs transition-colors",
-              density === option.value
-                ? "bg-secondary font-medium text-foreground"
-                : "text-muted-foreground hover:text-foreground"
-            )}
-          >
-            {option.label}
-          </button>
-        ))}
+    <div className="px-3 sm:px-5">
+      <div className="mx-auto flex w-full max-w-3xl flex-nowrap items-center justify-between gap-2 py-1.5 sm:gap-3">
+        <div className="inline-flex shrink-0 items-center gap-0.5 rounded-control border border-border/60 p-0.5">
+          {DENSITY_OPTIONS.map((option) => (
+            <button
+              key={option.value}
+              type="button"
+              aria-pressed={density === option.value}
+              onClick={() => onDensityChange(option.value)}
+              className={cn(
+                "h-6 whitespace-nowrap rounded-[calc(var(--control-radius)-2px)] px-1.5 text-[11px] transition-colors max-md:min-h-11 sm:px-2 sm:text-xs",
+                "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus-ring",
+                density === option.value
+                  ? "bg-accent text-foreground"
+                  : "text-secondary-label hover:text-foreground"
+              )}
+            >
+              {option.label}
+            </button>
+          ))}
+        </div>
+        <span className="flex shrink-0 items-center gap-1 text-[11px] tabular-nums text-muted-foreground sm:gap-1.5 sm:text-xs">
+          <span className="max-sm:hidden">{stats.turns} turn{stats.turns === 1 ? "" : "s"}</span>
+          <span className="text-border max-sm:hidden">·</span>
+          <span>{stats.toolCalls} tool call{stats.toolCalls === 1 ? "" : "s"}</span>
+          {stats.failures > 0 && (
+            <>
+              <span className="text-border">·</span>
+              <span className="text-destructive">{stats.failures} failed</span>
+            </>
+          )}
+        </span>
       </div>
-      <span className="flex shrink-0 items-center gap-1.5 rounded-full border border-border bg-muted/20 px-2.5 py-0.5 text-[10.5px] text-muted-foreground">
-        <span>{stats.turns} turn{stats.turns === 1 ? "" : "s"}</span>
-        <span className="text-border">·</span>
-        <span>{stats.toolCalls} tool call{stats.toolCalls === 1 ? "" : "s"}</span>
-        {stats.failures > 0 && (
-          <>
-            <span className="text-border">·</span>
-            <span className="font-medium text-red-400">{stats.failures} failed</span>
-          </>
-        )}
-      </span>
     </div>
   )
 }

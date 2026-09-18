@@ -95,11 +95,11 @@ export function LLMLimitChip({ limitedUntil, className, compact = false }: LLMLi
         <span
           aria-label={`Agent paused: no model provider allowance until ${deadline}`}
           className={cn(
-            "inline-flex h-6 max-w-full items-center gap-1.5 whitespace-nowrap rounded-md border border-amber-500/40 bg-amber-500/10 px-2 text-[11px] font-medium text-amber-500",
+            "inline-flex h-5 max-w-full items-center gap-1 whitespace-nowrap rounded-sm border border-border/60 px-1 font-mono text-[.65rem] text-muted-foreground",
             className
           )}
         >
-          <CircleSlash className="size-3 shrink-0" />
+          <CircleSlash className="size-3 shrink-0 text-warning-foreground" />
           <span className="truncate">{label}</span>
         </span>
       </TooltipTrigger>

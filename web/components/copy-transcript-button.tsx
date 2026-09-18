@@ -2,7 +2,7 @@
 
 import { useCallback, useState } from "react"
 import { Check, ClipboardCopy } from "lucide-react"
-import { Button } from "@/components/ui/button"
+import { GHOST_CONTROL } from "@/components/chat/controls"
 import { cn } from "@/lib/utils"
 import type { Message } from "@/lib/types"
 import {
@@ -70,36 +70,31 @@ export function CopyTranscriptButton({
         onClick={handleCopy}
         disabled={disabled}
         title={title}
-        className={cn(
-          "p-1 rounded hover:bg-accent transition-colors disabled:opacity-40 disabled:pointer-events-none",
-          className
-        )}
+        className={cn(GHOST_CONTROL, "size-6", className)}
       >
         {copied ? (
-          <Check className="size-3.5 text-green-500" />
+          <Check className="size-3.5 text-primary" />
         ) : (
-          <ClipboardCopy className="size-3.5 text-muted-foreground" />
+          <ClipboardCopy className="size-3.5" />
         )}
       </button>
     )
   }
 
   return (
-    <Button
+    <button
       type="button"
-      variant="outline"
-      size="sm"
       onClick={handleCopy}
       disabled={disabled}
       title={title}
-      className={className}
+      className={cn(GHOST_CONTROL, "h-7 px-2 text-xs", className)}
     >
       {copied ? (
-        <Check className="size-3.5 mr-1.5 text-green-500" />
+        <Check className="size-3.5 text-primary" />
       ) : (
-        <ClipboardCopy className="size-3.5 mr-1.5" />
+        <ClipboardCopy className="size-3.5" />
       )}
       {copied ? "Copied" : "Copy transcript"}
-    </Button>
+    </button>
   )
 }

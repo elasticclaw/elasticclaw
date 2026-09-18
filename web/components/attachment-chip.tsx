@@ -29,6 +29,10 @@ interface Props {
 // AttachmentChip is the single chip render for the attachments feature.
 // Handles three modes: pre-submit (status set, remove button), post-submit
 // history (no status, may have onError fallback), and thumbnail-vs-text variants.
+//
+// Visually: pre-submit chips are fixed-size thumbs/pills inside the composer
+// strip; history images fill a 4:3 frame in the message's attachment grid and
+// history files are plain rows inside the bubble.
 export function AttachmentChip({
   name,
   sizeLabel,
@@ -42,6 +46,7 @@ export function AttachmentChip({
 }: Props) {
   const [broken, setBroken] = useState(false)
   const isImage = mimetype.startsWith("image/") && !broken && !!source
+  const interactive = !!onRemove
 
   const imgSrc =
     source?.kind === "preview"
@@ -50,15 +55,30 @@ export function AttachmentChip({
         ? getFileViewUrl(source.clawId, source.path)
         : undefined
 
-  const thumbCls = size === "sm"
-    ? "max-h-16 max-w-[6rem]"
-    : "max-h-24 max-w-[8rem]"
+  const removeButton = onRemove && (
+    <button
+      type="button"
+      onClick={(e) => { e.stopPropagation(); e.preventDefault(); onRemove() }}
+      className={cn(
+        "flex items-center justify-center rounded-full text-muted-foreground transition-colors hover:text-foreground",
+        isImage ? "absolute right-1 top-1 size-5 bg-background/80 backdrop-blur-sm" : "size-5 shrink-0 hover:bg-accent/40"
+      )}
+      aria-label={`Remove ${name}`}
+    >
+      <X className="size-3" />
+    </button>
+  )
 
   if (isImage && imgSrc) {
     const Wrap = source?.kind === "history" ? "a" : "div"
+    const frame = cn(
+      "relative block overflow-hidden rounded-lg border bg-background/70",
+      status === "error" ? "border-destructive/50 opacity-60" : "border-border/80",
+      interactive ? (size === "sm" ? "h-12 w-12" : "h-16 w-16") : "aspect-[4/3] w-full"
+    )
     const wrapProps = source?.kind === "history"
-      ? { href: imgSrc, target: "_blank", rel: "noreferrer", className: "relative block" }
-      : { className: "relative" }
+      ? { href: imgSrc, target: "_blank", rel: "noreferrer", className: frame }
+      : { className: frame }
     return (
       <Wrap {...wrapProps as object} title={`${name} (${sizeLabel})`}>
         <img
@@ -66,73 +86,41 @@ export function AttachmentChip({
           alt={name}
           onError={() => setBroken(true)}
           loading="lazy"
-          className={cn(
-            thumbCls,
-            "rounded-md border",
-            source?.kind === "history" ? "object-contain bg-background/40" : "object-cover",
-            status === "error" ? "border-destructive/50 opacity-60" : "border-border"
-          )}
+          className={cn("block size-full", source?.kind === "history" ? "object-contain" : "object-cover")}
         />
         {status === "uploading" && (
-          <div className="absolute inset-0 flex items-center justify-center rounded-md bg-background/60">
+          <div className="absolute inset-0 flex items-center justify-center bg-background/60">
             <Loader2 className={size === "sm" ? "size-3 animate-spin" : "size-4 animate-spin"} />
           </div>
         )}
-        {onRemove && (
-          <button
-            type="button"
-            onClick={(e) => { e.stopPropagation(); e.preventDefault(); onRemove() }}
-            className={cn(
-              "absolute rounded-full bg-background border border-border text-muted-foreground hover:text-foreground shadow-sm",
-              size === "sm" ? "-top-1 -right-1 p-0.5" : "-top-1.5 -right-1.5 p-0.5"
-            )}
-            aria-label={`Remove ${name}`}
-          >
-            <X className={size === "sm" ? "size-2.5" : "size-3"} />
-          </button>
-        )}
+        {removeButton}
       </Wrap>
     )
   }
 
   // Text chip (non-image, broken image, or history without source).
-  const iconSize = size === "sm" ? "size-2.5" : "size-3"
-  const textSize = size === "sm" ? "text-[10px]" : "text-xs"
-  const pad = size === "sm" ? "px-1.5 py-0.5" : "px-2 py-0.5"
-  const nameMax = size === "sm" ? "max-w-[7rem]" : "max-w-[14rem]"
-
   const StatusIcon =
     status === "uploading" ? Loader2 : status === "error" ? AlertCircle : FileIcon
-  const statusIconCls = status === "uploading" ? `${iconSize} animate-spin` : iconSize
+  const iconCls = cn("shrink-0", size === "sm" ? "size-3" : "size-3.5", status === "uploading" && "animate-spin")
 
-  const interactive = !!onRemove
   return (
     <div
       className={cn(
-        "flex items-center gap-1.5 rounded-md border",
-        pad,
-        textSize,
+        "flex min-w-0 items-center gap-2",
+        size === "sm" ? "text-xs" : "text-sm",
+        interactive && "rounded-lg border px-2.5 py-1",
         status === "error"
-          ? "border-destructive/50 bg-destructive/10 text-destructive"
+          ? "border-destructive/50 bg-error-surface text-error-foreground"
           : interactive
-            ? "border-border bg-secondary text-foreground"
-            : "border-border/60 bg-background/40 text-muted-foreground"
+            ? "border-border/80 bg-background/70 text-foreground"
+            : "py-1 text-foreground/80"
       )}
       title={error || path || `${name}${mimetype ? ` (${mimetype})` : ""}`}
     >
-      <StatusIcon className={statusIconCls} />
-      <span className={cn("truncate", nameMax)}>{name}</span>
-      <span className={interactive ? "text-muted-foreground" : undefined}>{sizeLabel}</span>
-      {onRemove && (
-        <button
-          type="button"
-          onClick={(e) => { e.stopPropagation(); onRemove() }}
-          className="ml-0.5 text-muted-foreground hover:text-foreground"
-          aria-label={`Remove ${name}`}
-        >
-          <X className={iconSize} />
-        </button>
-      )}
+      <StatusIcon className={iconCls} />
+      <span className={cn("truncate", size === "sm" ? "max-w-[7rem]" : "max-w-[14rem]")}>{name}</span>
+      <span className="shrink-0 text-xs tabular-nums text-muted-foreground">{sizeLabel}</span>
+      {removeButton}
     </div>
   )
 }
