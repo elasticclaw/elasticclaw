@@ -110,8 +110,10 @@ func PermissionsFromMap(granular map[string]string) RepositoryPermissions {
 }
 
 // UnmarshalYAML accepts the scalar ("read"/"write") and granular
-// (permission name -> level) forms.
+// (permission name -> level) forms. The receiver is reset first so a reused
+// value never leaks state from a previous decode.
 func (p *RepositoryPermissions) UnmarshalYAML(value *yaml.Node) error {
+	*p = RepositoryPermissions{}
 	switch value.Kind {
 	case yaml.ScalarNode:
 		if value.Tag == "!!null" {
@@ -163,6 +165,7 @@ func (p RepositoryPermissions) MarshalYAML() (interface{}, error) {
 // alias/canonical pairs) are rejected instead of being silently collapsed by
 // a plain map unmarshal.
 func (p *RepositoryPermissions) UnmarshalJSON(data []byte) error {
+	*p = RepositoryPermissions{}
 	var scalar string
 	if err := json.Unmarshal(data, &scalar); err == nil {
 		p.level = strings.ToLower(strings.TrimSpace(scalar))
@@ -222,10 +225,12 @@ func (p *RepositoryPermissions) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// MarshalJSON round-trips the authored form.
+// MarshalJSON round-trips the authored form. Granular keys are canonicalized
+// (aliases resolved) so machine-facing JSON always carries the GitHub App
+// permission names.
 func (p RepositoryPermissions) MarshalJSON() ([]byte, error) {
 	if len(p.granular) > 0 {
-		return json.Marshal(p.granular)
+		return json.Marshal(p.Granular())
 	}
 	if p.level == "" {
 		return []byte("null"), nil

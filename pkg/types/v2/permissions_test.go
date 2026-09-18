@@ -274,6 +274,15 @@ func TestRepositoryPermissionsJSONRoundTripOmitsZero(t *testing.T) {
 		t.Fatalf("zero permissions must be omitted, got %s", out)
 	}
 
+	// ...and an explicit null must decode back to the zero value.
+	var perms v2.RepositoryPermissions
+	if err := json.Unmarshal([]byte(`null`), &perms); err != nil {
+		t.Fatalf("null must decode to zero value: %v", err)
+	}
+	if !perms.IsZero() {
+		t.Fatalf("null decode must be zero, got level %q granular %v", perms.Level(), perms.Granular())
+	}
+
 	out, err = json.Marshal(doc{Repo: v2.Repository{Provider: "github", Repository: "org/repo", Permissions: v2.PermissionsFromLevel("write")}})
 	if err != nil {
 		t.Fatal(err)
@@ -288,6 +297,25 @@ func TestRepositoryPermissionsJSONRoundTripOmitsZero(t *testing.T) {
 	}
 	if !strings.Contains(string(out), `"vulnerability_alerts":"read"`) {
 		t.Fatalf("granular form must serialize as a map, got %s", out)
+	}
+}
+
+func TestRepositoryPermissionsJSONMarshalCanonicalizesAliases(t *testing.T) {
+	// Authored aliases must serialize under the canonical GitHub App
+	// permission name in machine-facing JSON.
+	var perms v2.RepositoryPermissions
+	if err := perms.UnmarshalJSON([]byte(`{"dependabot_alerts":"read"}`)); err != nil {
+		t.Fatal(err)
+	}
+	out, err := json.Marshal(perms)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), `"vulnerability_alerts":"read"`) {
+		t.Fatalf("expected canonical name in JSON, got %s", out)
+	}
+	if strings.Contains(string(out), "dependabot_alerts") {
+		t.Fatalf("alias must not appear in JSON, got %s", out)
 	}
 }
 

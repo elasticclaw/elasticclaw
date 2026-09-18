@@ -515,6 +515,51 @@ func TestInstallationTokenCanonicalizesGarbageGranularLevels(t *testing.T) {
 	}
 }
 
+func TestInstallationTokenCanonicalizesAliasNames(t *testing.T) {
+	// Legacy/github_repos rows may carry the friendly alias; the mint must
+	// request the canonical GitHub permission name or the installation grant
+	// lookup would never match and the permission would be dropped.
+	var sawBody string
+	srv := githubInstallationTokenTestServer(t, `{"contents":"read","vulnerability_alerts":"read"}`, func(body string) {
+		sawBody = body
+	})
+
+	provider, err := NewGitHubTokenProvider(&types.GitHubAppConfig{AppID: 1, PrivateKeyPEM: testGitHubAppPEM(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider.apiBaseURL = srv.URL
+	provider.httpClient = srv.Client()
+
+	repos := []RepoAccess{{
+		Repo:        "org/a",
+		Permissions: "read",
+		ExtraPermissions: map[string]string{
+			"dependabot_alerts": "read", // alias for vulnerability_alerts
+		},
+	}}
+	if _, _, err := provider.InstallationToken(context.Background(), 99, repos); err != nil {
+		t.Fatalf("InstallationToken: %v", err)
+	}
+	if !strings.Contains(sawBody, `"vulnerability_alerts":"read"`) {
+		t.Fatalf("expected canonical vulnerability_alerts requested, body=%s", sawBody)
+	}
+	if strings.Contains(sawBody, `"dependabot_alerts"`) {
+		t.Fatalf("alias name must not reach the request, body=%s", sawBody)
+	}
+}
+
+func TestMergeRepoExtraPermissionsNormalizesLevels(t *testing.T) {
+	got := mergeRepoExtraPermissions(nil, map[string]string{"security_events": " WRITE "})
+	if got["security_events"] != "write" {
+		t.Fatalf("un-normalized write should still win, got %v", got)
+	}
+	got = mergeRepoExtraPermissions(got, map[string]string{"security_events": "read"})
+	if got["security_events"] != "write" {
+		t.Fatalf("later read must not downgrade write, got %v", got)
+	}
+}
+
 func TestInstallationTokenGranularDoesNotNarrowBaseWrite(t *testing.T) {
 	var sawBody string
 	srv := githubInstallationTokenTestServer(t, `{"contents":"write","issues":"read"}`, func(body string) {

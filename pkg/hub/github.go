@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/elasticclaw/elasticclaw/pkg/types"
+	v2 "github.com/elasticclaw/elasticclaw/pkg/types/v2"
 	"github.com/golang-jwt/jwt/v5"
 )
 
@@ -230,7 +231,9 @@ type RepoAccess struct {
 }
 
 // mergeRepoExtraPermissions merges src into dst with "write" winning over
-// "read" for duplicate keys. Returns the merged map (dst when src is empty).
+// "read" for duplicate keys. Names and levels are normalized (trimmed and
+// lowercased) so case/whitespace variants cannot outrank or shadow the real
+// declaration. Returns the merged map (dst when src is empty).
 func mergeRepoExtraPermissions(dst, src map[string]string) map[string]string {
 	if len(src) == 0 {
 		return dst
@@ -239,6 +242,11 @@ func mergeRepoExtraPermissions(dst, src map[string]string) map[string]string {
 		dst = make(map[string]string, len(src))
 	}
 	for name, level := range src {
+		name = strings.ToLower(strings.TrimSpace(name))
+		level = strings.ToLower(strings.TrimSpace(level))
+		if name == "" {
+			continue
+		}
 		if dst[name] != "write" {
 			dst[name] = level
 		}
@@ -367,6 +375,10 @@ func (p *GitHubTokenProvider) InstallationToken(ctx context.Context, installatio
 			}
 			sort.Strings(names)
 			for _, name := range names {
+				// Canonicalize aliases (e.g. dependabot_alerts ->
+				// vulnerability_alerts) so legacy/github_repos rows using the
+				// friendly name still match the installation's granted names.
+				name = v2.CanonicalGitHubPermissionName(name)
 				if name == "metadata" {
 					continue // metadata is always read; never widened
 				}
