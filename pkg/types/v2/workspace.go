@@ -103,7 +103,11 @@ func (p *RepositoryPermissions) UnmarshalYAML(value *yaml.Node) error {
 			if val.Kind != yaml.ScalarNode {
 				return fmt.Errorf("permissions.%s: must be a permission level (read or write)", key.Value)
 			}
-			granular[strings.ToLower(strings.TrimSpace(key.Value))] = strings.ToLower(strings.TrimSpace(val.Value))
+			name := strings.ToLower(strings.TrimSpace(key.Value))
+			if _, dup := granular[name]; dup {
+				return fmt.Errorf("permissions.%s: duplicate declaration", name)
+			}
+			granular[name] = strings.ToLower(strings.TrimSpace(val.Value))
 		}
 		if len(granular) == 0 {
 			return fmt.Errorf("permissions: granular form must declare at least one permission")
@@ -144,7 +148,11 @@ func (p *RepositoryPermissions) UnmarshalJSON(data []byte) error {
 	}
 	normalized := make(map[string]string, len(granular))
 	for name, level := range granular {
-		normalized[strings.ToLower(strings.TrimSpace(name))] = strings.ToLower(strings.TrimSpace(level))
+		key := strings.ToLower(strings.TrimSpace(name))
+		if _, dup := normalized[key]; dup {
+			return fmt.Errorf("permissions.%s: duplicate declaration", key)
+		}
+		normalized[key] = strings.ToLower(strings.TrimSpace(level))
 	}
 	p.level = ""
 	p.granular = normalized

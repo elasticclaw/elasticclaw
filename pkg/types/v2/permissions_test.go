@@ -158,6 +158,44 @@ repositories:
 	}
 }
 
+func TestWorkspaceRejectsCaseVariantDuplicatePermissions(t *testing.T) {
+	// Case-only variants (Contents vs contents) normalize to the same key at
+	// decode time and must be rejected instead of silently overwriting.
+	_, err := v2.ParseAndValidateWorkspace([]byte(`
+schema_version: 2
+name: x
+repositories:
+  primary:
+    provider: github
+    repository: org/repo
+    permissions:
+      Contents: write
+      contents: read
+`))
+	if err == nil || !strings.Contains(err.Error(), "duplicate declaration") {
+		t.Fatalf("error = %v, want duplicate declaration", err)
+	}
+}
+
+func TestWorkspaceRejectsAliasDuplicatePermissions(t *testing.T) {
+	// dependabot_alerts and vulnerability_alerts are distinct authored keys
+	// that canonicalize to the same permission; validation must reject them.
+	_, err := v2.ParseAndValidateWorkspace([]byte(`
+schema_version: 2
+name: x
+repositories:
+  primary:
+    provider: github
+    repository: org/repo
+    permissions:
+      dependabot_alerts: read
+      vulnerability_alerts: read
+`))
+	if err == nil || !strings.Contains(err.Error(), "duplicate declaration of vulnerability_alerts") {
+		t.Fatalf("error = %v, want duplicate declaration of vulnerability_alerts", err)
+	}
+}
+
 func TestWorkspaceScalarPermissionsStayLenient(t *testing.T) {
 	// Historical behavior: scalar values other than read/write are normalized
 	// to read at projection and must not start failing validation (issue #697

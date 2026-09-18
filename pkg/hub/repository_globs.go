@@ -185,7 +185,9 @@ func expandRepositoryAccess(selectors []types.GitHubRepoAccess, available []gith
 			extras := mergeRepoExtraPermissions(existing.extras, selector.ExtraPermissions)
 			if !exists || permission == "write" {
 				selected[key] = selectedRepository{name: repository.FullName, permission: permission, extras: extras}
-			} else if len(extras) > len(existing.extras) {
+			} else if len(selector.ExtraPermissions) > 0 {
+				// Persist the merged extras even when the map length is
+				// unchanged: a later selector may upgrade a level read->write.
 				selected[key] = selectedRepository{name: existing.name, permission: existing.permission, extras: extras}
 			}
 		}

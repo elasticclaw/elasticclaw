@@ -155,6 +155,29 @@ func TestEffectiveRepoAccessMergesGranularPermissions(t *testing.T) {
 	}
 }
 
+func TestExpandRepositoryAccessKeepsGranularUpgrade(t *testing.T) {
+	// A later matching selector can upgrade an extra permission read->write
+	// without changing the map length; the upgrade must survive.
+	available := []githubRepository{{Name: "api", FullName: "acme/api"}}
+	expanded, err := expandRepositoryAccess([]types.GitHubRepoAccess{
+		{Repo: "acme/*", Permissions: "read", ExtraPermissions: map[string]string{
+			"security_events": "read",
+		}},
+		{Repo: "acme/api", Permissions: "read", ExtraPermissions: map[string]string{
+			"security_events": "write",
+		}},
+	}, available)
+	if err != nil {
+		t.Fatalf("expandRepositoryAccess: %v", err)
+	}
+	if len(expanded) != 1 {
+		t.Fatalf("expanded = %#v", expanded)
+	}
+	if expanded[0].ExtraPermissions["security_events"] != "write" {
+		t.Fatalf("security_events = %q, want write (later selector upgrade must not be dropped)", expanded[0].ExtraPermissions["security_events"])
+	}
+}
+
 func TestListInstallationRepositoriesPaginates(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {

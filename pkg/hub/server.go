@@ -7271,9 +7271,9 @@ func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.Pr
 	hasGitHubApps2 := len(s.hubCfg.GitHubApps) > 0
 	s.mu.RUnlock()
 	if hasGitHubApps2 && len(githubRepos) > 0 {
-		repoLines := ""
+		var repoLinesBuilder strings.Builder
 		for _, r := range githubRepos {
-			repoLines += fmt.Sprintf("- `%s` (%s)\n", r.Repo, r.Permissions)
+			fmt.Fprintf(&repoLinesBuilder, "- `%s` (%s)\n", r.Repo, r.Permissions)
 			if len(r.ExtraPermissions) > 0 {
 				names := make([]string, 0, len(r.ExtraPermissions))
 				for name := range r.ExtraPermissions {
@@ -7284,9 +7284,10 @@ func (s *Server) bootstrapReplicated(clawID, clawName, vmID string, cfg types.Pr
 				for _, name := range names {
 					extras = append(extras, name+": "+r.ExtraPermissions[name])
 				}
-				repoLines += fmt.Sprintf("  - extra permissions: %s\n", strings.Join(extras, ", "))
+				fmt.Fprintf(&repoLinesBuilder, "  - extra permissions: %s\n", strings.Join(extras, ", "))
 			}
 		}
+		repoLines := repoLinesBuilder.String()
 		githubSection := fmt.Sprintf(`
 ## GitHub Access
 
