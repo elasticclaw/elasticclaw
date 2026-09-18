@@ -268,7 +268,12 @@ const maxScopedInstallationRepos = 50
 // installationID is looked up automatically if not provided (0).
 //
 // When repos is empty, GitHub grants the installation's default access to all
-// repositories the installation can see.
+// repositories the installation can see — and because no permissions body is
+// sent, the token carries *every* permission the installation was granted
+// (a superset of any ExtraPermissions the caller's selectors declared).
+// Granular permissions therefore only need the explicit merge below for
+// non-empty repo lists; see handleGitHubToken's glob branch before narrowing
+// this.
 //
 // When 1 ≤ len(repos) ≤ maxScopedInstallationRepos, the token is restricted to
 // that explicit name allowlist.

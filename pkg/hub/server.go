@@ -8756,6 +8756,15 @@ func (s *Server) handleGitHubToken(w http.ResponseWriter, r *http.Request) {
 		// The gh wrapper requests a token without a target repo, so it must be
 		// usable for any repo matching a pattern. Request an unscoped
 		// installation token (default permissions) by passing an empty repo list.
+		//
+		// Note on granular permissions (issue #697): an unscoped mint sends no
+		// permissions body, and per GitHub's REST docs a token minted without
+		// one "will have all of the permissions that were granted to the app" —
+		// a superset of any declared ExtraPermissions, which GitHub would cap
+		// at the installation level anyway. Deliberately NOT narrowed to an
+		// explicit default+extras map here: that would reduce the permissions
+		// glob-configured workspaces receive today. ?repo= scoped mints carry
+		// the merged extras via effectiveRepoAccess above.
 		repos = nil
 	} else if len(allRepos) > maxScopedInstallationRepos {
 		// Multi-repo mint without ?repo=: GitHub cannot name-scope >50 repos.

@@ -429,6 +429,33 @@ func TestInstallationTokenIncludesGranularPermissionsWhenGranted(t *testing.T) {
 	}
 }
 
+func TestInstallationTokenUnscopedSendsNoPermissionsBody(t *testing.T) {
+	// The unscoped path (repos=nil, glob workspaces without ?repo=) must keep
+	// sending no permissions body: per GitHub's REST docs, a token minted
+	// without one receives every permission the installation was granted — a
+	// superset of any ExtraPermissions declared on the selectors — so nothing
+	// is lost, and narrowing to an explicit map would reduce what glob
+	// workspaces receive today.
+	var sawBody string
+	srv := githubInstallationTokenTestServer(t, `{"contents":"read","issues":"read","vulnerability_alerts":"read"}`, func(body string) {
+		sawBody = body
+	})
+
+	provider, err := NewGitHubTokenProvider(&types.GitHubAppConfig{AppID: 1, PrivateKeyPEM: testGitHubAppPEM(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider.apiBaseURL = srv.URL
+	provider.httpClient = srv.Client()
+
+	if _, _, err := provider.InstallationToken(context.Background(), 99, nil); err != nil {
+		t.Fatalf("InstallationToken: %v", err)
+	}
+	if sawBody != "" {
+		t.Fatalf("unscoped mint must send no permissions body (GitHub grants the full installation permission set), got %q", sawBody)
+	}
+}
+
 func TestInstallationTokenCapsGranularWriteAtInstallationLevel(t *testing.T) {
 	var sawBody string
 	srv := githubInstallationTokenTestServer(t, `{"contents":"read","security_events":"read"}`, func(body string) {
