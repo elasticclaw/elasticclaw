@@ -60,24 +60,27 @@ type RepositoryPermissions struct {
 // other than "write" normalize to "read", matching the historical projection
 // behavior for existing configs.
 func (p RepositoryPermissions) Level() string {
-	if p.level == "write" {
+	if strings.EqualFold(strings.TrimSpace(p.level), "write") {
 		return "write"
 	}
-	if CanonicalGitHubPermissionLevel(p.granular["contents"]) == "write" {
-		return "write"
+	for name, level := range p.granular {
+		if CanonicalGitHubPermissionName(name) == "contents" && CanonicalGitHubPermissionLevel(level) == "write" {
+			return "write"
+		}
 	}
 	return "read"
 }
 
 // Granular returns the canonicalized GitHub App permission map declared for
-// this repository, or nil for the scalar form.
+// this repository, or nil for the scalar form. Keys are canonicalized
+// (aliases resolved) and levels are trimmed and lowercased.
 func (p RepositoryPermissions) Granular() map[string]string {
 	if len(p.granular) == 0 {
 		return nil
 	}
 	out := make(map[string]string, len(p.granular))
 	for name, level := range p.granular {
-		out[CanonicalGitHubPermissionName(name)] = level
+		out[CanonicalGitHubPermissionName(name)] = strings.ToLower(strings.TrimSpace(level))
 	}
 	return out
 }
@@ -95,17 +98,17 @@ func PermissionsFromLevel(level string) RepositoryPermissions {
 }
 
 // PermissionsFromMap returns the granular form from a permission name -> level
-// map. Keys and values are trimmed and lowercased but NOT canonicalized, so
-// alias/canonical duplicate pairs survive for ValidateWorkspace to reject
-// (matching the behavior of the YAML and JSON decoders). Canonicalization
-// happens on read via Granular().
+// map. Keys and values are stored verbatim so that case variants and
+// alias/canonical duplicate pairs survive for ValidateWorkspace to reject,
+// matching the behavior of the YAML and JSON decoders. Normalization and
+// canonicalization happen on read via Level() and Granular().
 func PermissionsFromMap(granular map[string]string) RepositoryPermissions {
 	if len(granular) == 0 {
 		return RepositoryPermissions{}
 	}
 	out := make(map[string]string, len(granular))
 	for name, level := range granular {
-		out[strings.ToLower(strings.TrimSpace(name))] = strings.ToLower(strings.TrimSpace(level))
+		out[name] = level
 	}
 	return RepositoryPermissions{granular: out}
 }

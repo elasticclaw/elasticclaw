@@ -237,6 +237,29 @@ func TestPermissionsFromMapKeepsAliasPairsForValidation(t *testing.T) {
 	}
 }
 
+func TestPermissionsFromMapKeepsCaseVariantsForValidation(t *testing.T) {
+	// Case variants like Contents + contents must not collapse in the
+	// constructor before ValidateWorkspace can reject the duplicate.
+	ws := &v2.Workspace{
+		SchemaVersion: 2,
+		Name:          "x",
+		Repositories: map[string]v2.Repository{
+			"primary": {
+				Provider:   "github",
+				Repository: "org/repo",
+				Permissions: v2.PermissionsFromMap(map[string]string{
+					"Contents": "read",
+					"contents": "write",
+				}),
+			},
+		},
+	}
+	_, err := v2.ValidateWorkspace(ws)
+	if err == nil || !strings.Contains(err.Error(), "duplicate declaration of contents") {
+		t.Fatalf("error = %v, want duplicate declaration of contents", err)
+	}
+}
+
 func TestWorkspaceRejectsMetadataWrite(t *testing.T) {
 	// metadata is always read and cannot be widened; reject instead of
 	// silently dropping the requested level at mint time.
