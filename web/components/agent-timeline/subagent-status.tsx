@@ -29,7 +29,7 @@ const STATUS_LABEL: Record<SubagentStatus, string> = {
 const STATUS_TEXT_CLASS: Record<SubagentStatus, string> = {
   running: "text-muted-foreground",
   quiet: "text-warning-foreground",
-  failed: "text-destructive",
+  failed: "text-error-foreground",
   done: "text-muted-foreground",
 }
 

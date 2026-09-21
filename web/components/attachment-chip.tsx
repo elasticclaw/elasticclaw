@@ -61,7 +61,10 @@ export function AttachmentChip({
       onClick={(e) => { e.stopPropagation(); e.preventDefault(); onRemove() }}
       className={cn(
         "flex items-center justify-center rounded-full text-muted-foreground transition-colors hover:text-foreground",
-        isImage ? "absolute right-1 top-1 size-5 bg-background/80 backdrop-blur-sm" : "size-5 shrink-0 hover:bg-accent/40"
+        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus-ring",
+        // 44px touch target on mobile without growing the 20px visual.
+        "max-md:before:absolute max-md:before:-inset-3 max-md:before:content-['']",
+        isImage ? "absolute right-1 top-1 size-5 bg-background/80 backdrop-blur-sm" : "relative size-5 shrink-0 hover:bg-accent/40"
       )}
       aria-label={`Remove ${name}`}
     >

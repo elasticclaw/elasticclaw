@@ -123,7 +123,7 @@ export const TurnCard = memo(function TurnCard({
               </>
             )}
             {turn.toolCallCount > 0 && <span> · {stepNoun}</span>}
-            {turn.failedCount > 0 && <span className="text-destructive"> · {turn.failedCount} failed</span>}
+            {turn.failedCount > 0 && <span className="text-error-foreground"> · {turn.failedCount} failed</span>}
           </span>
           <Chevron className="size-3.5 shrink-0" aria-hidden />
           <span className="ms-auto shrink-0 font-mono text-[.7rem] text-muted-foreground max-sm:hidden" suppressHydrationWarning>

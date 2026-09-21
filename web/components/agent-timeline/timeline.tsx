@@ -5,7 +5,7 @@ import type { Message } from "@/lib/types"
 import type { Turn } from "@/lib/turns"
 import { useNowTick } from "@/hooks/use-now"
 import { TurnCard } from "./turn-card"
-import { ToggleAnchorContext } from "./anchor-context"
+import { ToggleAnchorContext, type ToggleAnchor } from "./anchor-context"
 import type { TimelineDensity } from "./timeline-toolbar"
 
 function turnDefaultExpanded(turn: Turn, isLast: boolean, density: TimelineDensity): boolean {
@@ -160,16 +160,23 @@ export function AgentTimeline({
   // here would run *before* the toggle commits and always measure delta 0. A
   // rAF runs after the commit but before paint, so the compensation is never
   // visible as a jump.
-  const anchor = useCallback(
-    (el: HTMLElement) => {
+  const anchor = useCallback<ToggleAnchor>(
+    (el, options) => {
       const scroller = scrollRef.current
-      if (!scroller || pinnedRef?.current) return
+      if (!scroller) return
+      const unpinned = Boolean(pinnedRef?.current && options?.unpin)
+      if (pinnedRef?.current && !unpinned) return
+      if (pinnedRef && unpinned) pinnedRef.current = false
       const top = el.getBoundingClientRect().top
       requestAnimationFrame(() => {
         const delta = el.getBoundingClientRect().top - top
         if (delta !== 0) {
           markProgrammaticScroll?.()
           scroller.scrollTop += delta
+        } else if (unpinned) {
+          // Nothing moved, so no scroll event fires: let the scroller's owner
+          // re-derive its pin state (jump-to-latest button) from the new height.
+          scroller.dispatchEvent(new Event("scroll"))
         }
       })
     },

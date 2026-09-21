@@ -50,7 +50,7 @@ export function SendButton({ className, size = "md", ...props }: ComponentProps<
       type="submit"
       className={cn(
         "flex shrink-0 cursor-pointer items-center justify-center rounded-full bg-message-action text-message-action-foreground shadow-xs transition-all duration-150",
-        "hover:scale-105 hover:bg-message-action-hover active:shadow-none",
+        "motion-safe:hover:scale-105 hover:bg-message-action-hover active:shadow-none",
         "enabled:inset-shadow-[0_1px_rgb(255_255_255/16%)]",
         "disabled:cursor-default disabled:opacity-30 disabled:shadow-none disabled:hover:scale-100",
         "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background",

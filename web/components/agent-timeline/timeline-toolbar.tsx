@@ -68,7 +68,7 @@ export function TimelineToolbar({
 }) {
   return (
     <div className="px-3 sm:px-5">
-      <div className="mx-auto flex w-full max-w-3xl flex-nowrap items-center justify-between gap-2 py-1.5 sm:gap-3">
+      <div className="mx-auto flex w-full max-w-3xl flex-wrap items-center gap-x-2 gap-y-1 py-1.5 sm:gap-x-3">
         <div className="inline-flex shrink-0 items-center gap-0.5 rounded-control border border-border/60 p-0.5">
           {DENSITY_OPTIONS.map((option) => (
             <button
@@ -88,14 +88,14 @@ export function TimelineToolbar({
             </button>
           ))}
         </div>
-        <span className="flex shrink-0 items-center gap-1 text-[11px] tabular-nums text-muted-foreground sm:gap-1.5 sm:text-xs">
+        <span className="ms-auto flex shrink-0 items-center gap-1 text-[11px] tabular-nums text-muted-foreground sm:gap-1.5 sm:text-xs">
           <span className="max-sm:hidden">{stats.turns} turn{stats.turns === 1 ? "" : "s"}</span>
           <span className="text-border max-sm:hidden">·</span>
           <span>{stats.toolCalls} tool call{stats.toolCalls === 1 ? "" : "s"}</span>
           {stats.failures > 0 && (
             <>
               <span className="text-border">·</span>
-              <span className="text-destructive">{stats.failures} failed</span>
+              <span className="text-error-foreground">{stats.failures} failed</span>
             </>
           )}
         </span>

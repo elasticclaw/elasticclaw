@@ -860,7 +860,7 @@ const ClawBoardCard = memo(function ClawBoardCard({
               {cardStats.toolCalls} step{cardStats.toolCalls === 1 ? "" : "s"}
             </span>
             {cardStats.failures > 0 && (
-              <span className="text-destructive">
+              <span className="text-error-foreground">
                 {cardStats.failures} failed
               </span>
             )}
@@ -1475,7 +1475,7 @@ function ClawChatView({
               <button
                 type="button"
                 onClick={() => setConfirmKill(true)}
-                className={cn(GHOST_CONTROL, "h-7 px-2 text-xs text-destructive hover:bg-error-surface hover:text-destructive")}
+                className={cn(GHOST_CONTROL, "h-7 px-2 text-xs text-error-foreground hover:bg-error-surface hover:text-error-foreground")}
               >
                 Kill
               </button>
@@ -1503,7 +1503,7 @@ function ClawChatView({
         ref={scrollRef}
         onScroll={handleScroll}
         className="min-h-0 flex-1 overflow-y-auto overscroll-y-contain px-3 scrollbar-thin sm:px-5"
-        style={{ paddingBottom: composerHeight }}
+        style={{ paddingBottom: composerHeight, scrollPaddingBottom: composerHeight }}
       >
         <div ref={contentRef} className="mx-auto flex w-full max-w-3xl flex-col">
           <div className="h-3 sm:h-4" />

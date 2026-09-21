@@ -58,7 +58,7 @@ function StepIcon({ step, className }: { step: Step; className: string }) {
  */
 function stepTones(step: Step): { icon: string; title: string } {
   const severe = step.kind === "info" && step.tone === "error"
-  if (severe) return { icon: "text-destructive", title: "font-medium text-destructive" }
+  if (severe) return { icon: "text-error-foreground", title: "font-medium text-error-foreground" }
   if (step.tone === "warning") return { icon: "text-warning", title: "font-medium text-warning" }
   if (step.status === "failed") return { icon: "text-tool-error-icon/70", title: "text-secondary-label" }
   return { icon: "text-icon-muted", title: "text-secondary-label" }
@@ -271,6 +271,19 @@ export function StepList({
 /** Past this many rows the expanded group scrolls, so it gets the edge fade. */
 const GROUP_SCROLL_THRESHOLD = 10
 
+/** Each edge fades only while rows are hidden past it, so the first and last rows read fully opaque. */
+const GROUP_EDGE_FADE = cn(
+  "[--fade-top:black] [--fade-bottom:black]",
+  "data-[fade-top=true]:[--fade-top:transparent] data-[fade-bottom=true]:[--fade-bottom:transparent]",
+  "[mask-image:linear-gradient(to_bottom,var(--fade-top),black_1.5rem,black_calc(100%-1.5rem),var(--fade-bottom))]"
+)
+
+function syncEdgeFade(el: HTMLElement | null) {
+  if (!el) return
+  el.dataset.fadeTop = String(el.scrollTop > 0)
+  el.dataset.fadeBottom = String(el.scrollHeight - el.scrollTop - el.clientHeight > 1)
+}
+
 function StepGroupRow({
   id,
   label,
@@ -323,12 +336,13 @@ function StepGroupRow({
       </button>
       {expanded && (
         <div
+          // Inline ref: re-syncs on every render, so rows streaming in update the bottom fade.
+          ref={(el) => syncEdgeFade(el)}
+          onScroll={(e) => syncEdgeFade(e.currentTarget)}
           className={cn(
             "flex flex-col rounded-md",
             !isCard && "max-h-[min(18rem,50dvh)] overflow-y-auto scrollbar-thin",
-            !isCard &&
-              steps.length > GROUP_SCROLL_THRESHOLD &&
-              "[mask-image:linear-gradient(to_bottom,transparent,black_1.5rem,black_calc(100%-1.5rem),transparent)]"
+            !isCard && steps.length > GROUP_SCROLL_THRESHOLD && GROUP_EDGE_FADE
           )}
         >
           {steps.map((step) => (

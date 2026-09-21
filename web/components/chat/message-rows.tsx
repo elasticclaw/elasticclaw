@@ -1,6 +1,6 @@
 "use client"
 
-import { memo, useCallback, useEffect, useRef, useState } from "react"
+import { memo, useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from "react"
 import { Brain, Check, Copy, Settings2, Wrench, type LucideIcon } from "lucide-react"
 import { MarkdownContent } from "@/components/markdown-content"
 import { AttachmentChip } from "@/components/attachment-chip"
@@ -126,32 +126,58 @@ function MessageCopyButton({ text, className }: { text: string; className?: stri
 
 const COLLAPSE_CHARS = 600
 const COLLAPSE_LINES = 8
+// COLLAPSE_LINES lines of text-sm (0.875rem) at leading-relaxed (1.625), so the
+// clamp always lands on a line boundary.
+const CLAMP_CLASS = "max-h-[calc(8*1.625*0.875rem)] overflow-hidden"
 const COLLAPSED_FADE_MASK = "linear-gradient(to bottom, black calc(100% - 1.75rem), transparent)"
 
+/** Server-safe first guess; the measured overflow replaces it after mount. */
 function shouldCollapse(text: string): boolean {
   return text.length > COLLAPSE_CHARS || text.split("\n").length > COLLAPSE_LINES
 }
 
-function MessageBody({ text, variant }: { text: string; variant: RowVariant }) {
+function MessageBody({ text, variant, self, name }: { text: string; variant: RowVariant; self: boolean; name: string }) {
   if (variant === "card") return <MarkdownContent content={text} className="text-xs" />
-  return <ClampedText text={text} />
+  return <ClampedText text={text} self={self} name={name} />
 }
 
 /**
  * Long chat messages start clamped with a fade; the text stays mounted so
- * find-in-page still matches it. Toggling goes through the timeline anchor so
- * the reading position does not jump.
+ * find-in-page still matches it. Expanding anchors the text itself (it grows
+ * downward, even when pinned to the bottom); collapsing anchors the button.
  */
-function ClampedText({ text }: { text: string }) {
+function ClampedText({ text, self, name }: { text: string; self: boolean; name: string }) {
+  const textId = useId()
+  const textRef = useRef<HTMLParagraphElement>(null)
   const [expanded, setExpanded] = useState(false)
+  const [collapsible, setCollapsible] = useState(() => shouldCollapse(text))
   const anchor = useToggleAnchor()
-  const collapsible = shouldCollapse(text)
   const collapsed = collapsible && !expanded
+
+  // scrollHeight is the full text height whether or not the clamp is applied.
+  useLayoutEffect(() => {
+    const el = textRef.current
+    if (!el) return
+    const measure = () => {
+      const clampHeight = COLLAPSE_LINES * parseFloat(getComputedStyle(el).lineHeight)
+      setCollapsible(el.scrollHeight > Math.ceil(clampHeight))
+    }
+    measure()
+    const observer = new ResizeObserver(measure)
+    observer.observe(el)
+    return () => observer.disconnect()
+  }, [text])
+
+  const label = expanded ? "Show less" : "Show full message"
   return (
-    <div>
+    <div className="flex flex-col">
       <p
-        className={cn("whitespace-pre-wrap text-sm leading-relaxed", collapsed && "max-h-44 overflow-hidden")}
+        ref={textRef}
+        id={textId}
+        className={cn("whitespace-pre-wrap text-sm leading-relaxed", collapsed && CLAMP_CLASS)}
         style={collapsed ? { WebkitMaskImage: COLLAPSED_FADE_MASK, maskImage: COLLAPSED_FADE_MASK } : undefined}
+        // Find-in-page can scroll the clamped box, which the user cannot scroll back.
+        onScroll={collapsed ? (e) => { e.currentTarget.scrollTop = 0 } : undefined}
       >
         {text}
       </p>
@@ -159,14 +185,20 @@ function ClampedText({ text }: { text: string }) {
         <button
           type="button"
           aria-expanded={expanded}
+          aria-controls={textId}
+          aria-label={`${label} from ${self ? "you" : name}`}
           onClick={(e) => {
             e.stopPropagation()
-            anchor(e.currentTarget)
+            if (expanded || !textRef.current) anchor(e.currentTarget)
+            else anchor(textRef.current, { unpin: true })
             setExpanded((value) => !value)
           }}
-          className="-ml-1 mt-1 h-6 rounded-control px-1.5 text-xs text-secondary-label transition-colors hover:bg-muted/55 hover:text-message-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus-ring max-md:min-h-11"
+          className={cn(
+            "mt-1 h-6 rounded-control px-1.5 text-xs text-message-foreground/70 transition-colors hover:bg-muted/55 hover:text-message-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus-ring max-md:min-h-11",
+            self ? "-mr-1 ml-0 self-end" : "-ml-1 self-start"
+          )}
         >
-          {expanded ? "Show less" : "Show full message"}
+          {label}
         </button>
       )}
     </div>
@@ -246,7 +278,7 @@ function UserRow({
       >
         <h3 className="sr-only">{self ? "You" : name}</h3>
         {attachments.length > 0 && <UserAttachments attachments={attachments} clawId={clawId} variant={variant} />}
-        {body.trim() && <MessageBody text={body} variant={variant} />}
+        {body.trim() && <MessageBody text={body} variant={variant} self={self} name={name} />}
       </div>
       <div
         className={cn(

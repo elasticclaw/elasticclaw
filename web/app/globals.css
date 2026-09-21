@@ -334,6 +334,7 @@
 }
 @media (prefers-reduced-motion: reduce) {
   .animate-subagent-pulse { animation: none; }
+  .animate-pulse { animation: none; }
 }
 
 /* Chat markdown rendering. Scoped to .chat-markdown so

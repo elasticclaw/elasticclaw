@@ -94,9 +94,12 @@ function FinishedCard({ sub, onOpen }: { sub: Subagent; onOpen: (id: string) => 
           {sub.name}
         </span>
         {sub.durationMs !== undefined ? (
-          <span className="shrink-0 font-mono text-[.7rem] tabular-nums text-muted-foreground">
-            {formatDurationMs(sub.durationMs)}
-          </span>
+          <>
+            <SubagentStatusLabel status={sub.status} className="sr-only" />
+            <span className="shrink-0 font-mono text-[.7rem] tabular-nums text-muted-foreground">
+              {formatDurationMs(sub.durationMs)}
+            </span>
+          </>
         ) : (
           <SubagentStatusLabel status={sub.status} />
         )}

@@ -10,9 +10,15 @@ import { createContext, useContext } from "react"
  * update synchronously, and compensates scrollTop in a microtask so the
  * reading position does not move. The default is a no-op (board cards pin to
  * bottom and do not need it).
+ *
+ * `unpin` is for content that grows *below* its anchor (a clamped message
+ * expanding): it releases the bottom pin first, so the auto-scroll does not
+ * drag the reader to the end of what they just opened.
  */
-export const ToggleAnchorContext = createContext<(el: HTMLElement) => void>(() => {})
+export type ToggleAnchor = (el: HTMLElement, options?: { unpin?: boolean }) => void
 
-export function useToggleAnchor(): (el: HTMLElement) => void {
+export const ToggleAnchorContext = createContext<ToggleAnchor>(() => {})
+
+export function useToggleAnchor(): ToggleAnchor {
   return useContext(ToggleAnchorContext)
 }
