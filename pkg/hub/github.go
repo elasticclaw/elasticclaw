@@ -9,10 +9,12 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/elasticclaw/elasticclaw/pkg/types"
+	v2 "github.com/elasticclaw/elasticclaw/pkg/types/v2"
 	"github.com/golang-jwt/jwt/v5"
 )
 
@@ -222,6 +224,45 @@ func (p *GitHubTokenProvider) ListInstallationRepositories(ctx context.Context, 
 type RepoAccess struct {
 	Repo        string // "owner/repo"
 	Permissions string // "read" or "write"
+	// ExtraPermissions are granular GitHub App permissions declared by the
+	// workspace (issue #697). They are added on top of the default permission
+	// set and capped at what the installation actually grants.
+	ExtraPermissions map[string]string
+}
+
+// mergeRepoExtraPermissions merges src into dst with "write" winning over
+// "read" for duplicate keys. Names and levels are normalized (trimmed and
+// lowercased) so case/whitespace variants cannot outrank or shadow the real
+// declaration. Returns the merged map (dst when src is empty).
+func mergeRepoExtraPermissions(dst, src map[string]string) map[string]string {
+	if len(src) == 0 {
+		return dst
+	}
+	if dst == nil {
+		dst = make(map[string]string, len(src))
+	}
+	for name, level := range src {
+		name = strings.ToLower(strings.TrimSpace(name))
+		level = strings.ToLower(strings.TrimSpace(level))
+		if name == "" {
+			continue
+		}
+		if dst[name] != "write" {
+			dst[name] = level
+		}
+	}
+	return dst
+}
+
+// collectRepoExtraPermissions merges the granular permissions declared across
+// all repos into a single map, mirroring how the scalar level escalates to
+// the workspace maximum.
+func collectRepoExtraPermissions(repos []RepoAccess) map[string]string {
+	var merged map[string]string
+	for _, r := range repos {
+		merged = mergeRepoExtraPermissions(merged, r.ExtraPermissions)
+	}
+	return merged
 }
 
 // maxScopedInstallationRepos is GitHub's documented limit for the
@@ -235,7 +276,12 @@ const maxScopedInstallationRepos = 50
 // installationID is looked up automatically if not provided (0).
 //
 // When repos is empty, GitHub grants the installation's default access to all
-// repositories the installation can see.
+// repositories the installation can see — and because no permissions body is
+// sent, the token carries *every* permission the installation was granted
+// (a superset of any ExtraPermissions the caller's selectors declared).
+// Granular permissions therefore only need the explicit merge below for
+// non-empty repo lists; see handleGitHubToken's glob branch before narrowing
+// this.
 //
 // When 1 ≤ len(repos) ≤ maxScopedInstallationRepos, the token is restricted to
 // that explicit name allowlist.
@@ -306,6 +352,55 @@ func (p *GitHubTokenProvider) InstallationToken(ctx context.Context, installatio
 		}
 		if level := installationPermissionLevel(instPerms, "issues"); level != "" {
 			perms["issues"] = level
+		}
+
+		// Granular workspace-declared permissions (issue #697): a workspace
+		// v2 repository may declare extra GitHub App permissions (e.g.
+		// vulnerability_alerts / security_events read so workflows can read
+		// Dependabot and code-scanning alerts). Defaults above are unchanged;
+		// declared entries only add or override. Each entry is included only
+		// when the installation actually grants that permission, and is capped
+		// at the installation's level, so installations without the grant keep
+		// minting successfully (same safety net as workflows/issues).
+		//
+		// Levels are canonicalized here (anything other than "write" becomes
+		// "read") so garbage persisted in github_repos cannot produce an
+		// invalid permissions object and fail the mint for the whole claw.
+		// Unknown permission names are gated out by the installation lookup,
+		// which only reports names GitHub actually grants.
+		if extras := collectRepoExtraPermissions(repos); len(extras) > 0 {
+			names := make([]string, 0, len(extras))
+			for name := range extras {
+				names = append(names, name)
+			}
+			sort.Strings(names)
+			for _, rawName := range names {
+				// Canonicalize aliases (e.g. dependabot_alerts ->
+				// vulnerability_alerts) so legacy/github_repos rows using the
+				// friendly name still match the installation's granted names.
+				// The value is read under the ORIGINAL key — the merged map is
+				// keyed by authored name, and canonicalization happens only for
+				// the emitted permission and the installation grant lookup.
+				name := v2.CanonicalGitHubPermissionName(rawName)
+				if name == "metadata" {
+					continue // metadata is always read; never widened
+				}
+				requested := strings.ToLower(strings.TrimSpace(extras[rawName]))
+				if requested != "write" {
+					requested = "read"
+				}
+				granted := installationPermissionLevel(instPerms, name)
+				if granted == "" {
+					continue // installation lacks this permission; requesting it would fail the mint
+				}
+				if requested == "write" && granted != "write" && granted != "admin" {
+					requested = "read" // cap at installation level
+				}
+				if perms[name] == "write" {
+					continue // never narrow an existing write grant
+				}
+				perms[name] = requested
+			}
 		}
 		body := map[string]interface{}{
 			"permissions": perms,
