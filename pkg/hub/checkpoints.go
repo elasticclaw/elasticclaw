@@ -1275,9 +1275,27 @@ func (s *Server) finalizeCheckpoint(checkpointID, tenantID, clawID, rootSHA stri
 	if err := writeFileAtomic(path, data, 0o640); err != nil {
 		return err
 	}
+	// From here on the manifest is on disk and nothing claims it until the
+	// transaction below commits. Every exit before that -- a Begin or Exec
+	// failure, the guard rejecting the row, a failed Commit -- must unlink it,
+	// because a manifest with no row that names it is debris the hub has no
+	// other way to notice. One guard keyed on the commit covers all of them,
+	// where a cleanup per exit covered only the two that were remembered.
+	//
+	// The message blob is deliberately NOT unlinked here. It is content
+	// addressed and may be shared: a claw whose messages did not change between
+	// two checkpoints produces the same blob twice, and writeMessageCheckpointBlob
+	// may have found it already on disk under another checkpoint's edge. With
+	// this row still 'creating' and its edge rolled back, an unshared blob is
+	// simply unreferenced, which is exactly what the sweep collects.
+	published := false
+	defer func() {
+		if !published {
+			_ = os.Remove(path)
+		}
+	}()
 	tx, err := s.db.Begin()
 	if err != nil {
-		_ = os.Remove(path)
 		return err
 	}
 	defer tx.Rollback()
@@ -1292,10 +1310,6 @@ func (s *Server) finalizeCheckpoint(checkpointID, tenantID, clawID, rootSHA stri
 		return err
 	}
 	if rows, _ := res.RowsAffected(); rows == 0 {
-		// The guard rejected the transition after the manifest was already on
-		// disk, so unlink it. A manifest with no row that claims it is debris the
-		// hub has no other way to notice.
-		_ = os.Remove(path)
 		return errCheckpointNotCreating
 	}
 	// The plan-time edges are KEPT. The root-tree edge and the tree's expansion
@@ -1334,11 +1348,9 @@ func (s *Server) finalizeCheckpoint(checkpointID, tenantID, clawID, rootSHA stri
 		return err
 	}
 	if err := tx.Commit(); err != nil {
-		// The row is still 'creating' and points at no manifest, so the file just
-		// written belongs to nobody.
-		_ = os.Remove(path)
 		return err
 	}
+	published = true
 	return nil
 }
 
@@ -1391,9 +1403,17 @@ func (s *Server) completeMetadataOnlyCheckpoint(checkpointID, clawID, reason, de
 	if err := writeFileAtomic(path, data, 0o640); err != nil {
 		return err
 	}
+	// Same guard as finalizeCheckpoint, for the same reason: the manifest
+	// belongs to nobody until the commit, and the message blob is left to the
+	// sweep because it may be shared.
+	published := false
+	defer func() {
+		if !published {
+			_ = os.Remove(path)
+		}
+	}()
 	tx, err := s.db.Begin()
 	if err != nil {
-		_ = os.Remove(path)
 		return err
 	}
 	defer tx.Rollback()
@@ -1403,7 +1423,6 @@ func (s *Server) completeMetadataOnlyCheckpoint(checkpointID, clawID, reason, de
 		return err
 	}
 	if rows, _ := res.RowsAffected(); rows == 0 {
-		_ = os.Remove(path)
 		return errCheckpointNotCreating
 	}
 	// A metadata-only capture holds no workspace: the bridge was unreachable, so
@@ -1413,9 +1432,9 @@ func (s *Server) completeMetadataOnlyCheckpoint(checkpointID, clawID, reason, de
 		return err
 	}
 	if err := tx.Commit(); err != nil {
-		_ = os.Remove(path)
 		return err
 	}
+	published = true
 	return nil
 }
 

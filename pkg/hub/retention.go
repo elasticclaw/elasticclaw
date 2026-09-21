@@ -1025,16 +1025,15 @@ func (s *Server) compactClawCheckpoints(clawID string, cutoff time.Time, dryRun 
 	if err != nil {
 		return err
 	}
+	defer rows.Close()
 	var candidates []compactionCandidate
 	for rows.Next() {
 		var c compactionCandidate
 		if err := rows.Scan(&c.id, &c.manifestPath, &c.rootTree, &c.reason); err != nil {
-			rows.Close()
 			return err
 		}
 		candidates = append(candidates, c)
 	}
-	rows.Close()
 	if err := rows.Err(); err != nil {
 		return err
 	}
@@ -1222,16 +1221,15 @@ func (s *Server) releaseSkippedCheckpointRefs(clawID string, dryRun bool, pacer 
 	if err != nil {
 		return nil, err
 	}
+	defer rows.Close()
 	var ids []string
 	for rows.Next() {
 		var id string
 		if err := rows.Scan(&id); err != nil {
-			rows.Close()
 			return nil, err
 		}
 		ids = append(ids, id)
 	}
-	rows.Close()
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
@@ -1577,17 +1575,16 @@ func (s *Server) pruneExpiredCheckpoints(cutoff time.Time, dryRun bool, pacer *r
 	if err != nil {
 		return nil, 0, 0, err
 	}
+	defer rows.Close()
 	type expired struct{ id, manifestPath string }
 	var victims []expired
 	for rows.Next() {
 		var e expired
 		if err := rows.Scan(&e.id, &e.manifestPath); err != nil {
-			rows.Close()
 			return nil, 0, 0, err
 		}
 		victims = append(victims, e)
 	}
-	rows.Close()
 	if err := rows.Err(); err != nil {
 		return nil, 0, 0, err
 	}
@@ -1842,17 +1839,16 @@ func (s *Server) backfillCheckpointBlobRefs() error {
 	if err != nil {
 		return fmt.Errorf("list checkpoints to backfill: %w", err)
 	}
+	defer rows.Close()
 	type row struct{ id, manifestPath, manifestSHA, rootSHA, msgSHA, workspaceSHA string }
 	var pending []row
 	for rows.Next() {
 		var r row
 		if err := rows.Scan(&r.id, &r.manifestPath, &r.manifestSHA, &r.rootSHA, &r.msgSHA, &r.workspaceSHA); err != nil {
-			rows.Close()
 			return err
 		}
 		pending = append(pending, r)
 	}
-	rows.Close()
 	if err := rows.Err(); err != nil {
 		return err
 	}
@@ -2207,24 +2203,8 @@ var treeGCHook func(tree string)
 func (s *Server) pruneUnreferencedTreeBlobRefs(pacer *retentionPacer) (int64, error) {
 	var total int64
 	for {
-		rows, err := s.db.Query(
-			`SELECT DISTINCT tree_sha256 FROM tree_blob_refs
-			  WHERE tree_sha256 NOT IN (SELECT sha256 FROM checkpoint_blob_refs)
-			  LIMIT ?`, retentionDeleteBatch)
+		trees, err := s.unreferencedTrees()
 		if err != nil {
-			return total, fmt.Errorf("list unreferenced trees: %w", err)
-		}
-		var trees []string
-		for rows.Next() {
-			var tree string
-			if err := rows.Scan(&tree); err != nil {
-				rows.Close()
-				return total, err
-			}
-			trees = append(trees, tree)
-		}
-		rows.Close()
-		if err := rows.Err(); err != nil {
 			return total, err
 		}
 		if len(trees) == 0 {
@@ -2262,6 +2242,29 @@ func (s *Server) pruneUnreferencedTreeBlobRefs(pacer *retentionPacer) (int64, er
 	}
 }
 
+// unreferencedTrees lists one batch of trees whose expansion no checkpoint
+// edge names. Its own function so the cursor is closed by a defer rather than
+// by hand on each exit of the gc's loop.
+func (s *Server) unreferencedTrees() ([]string, error) {
+	rows, err := s.db.Query(
+		`SELECT DISTINCT tree_sha256 FROM tree_blob_refs
+		  WHERE tree_sha256 NOT IN (SELECT sha256 FROM checkpoint_blob_refs)
+		  LIMIT ?`, retentionDeleteBatch)
+	if err != nil {
+		return nil, fmt.Errorf("list unreferenced trees: %w", err)
+	}
+	defer rows.Close()
+	var trees []string
+	for rows.Next() {
+		var tree string
+		if err := rows.Scan(&tree); err != nil {
+			return nil, err
+		}
+		trees = append(trees, tree)
+	}
+	return trees, rows.Err()
+}
+
 // referencedBlobDigests builds the keep set:
 //
 //	SELECT sha256 FROM checkpoint_blob_refs
@@ -2296,11 +2299,11 @@ func (s *Server) referencedBlobDigests(released []string) (map[string]struct{}, 
 	if err != nil {
 		return nil, fmt.Errorf("read checkpoint blob references: %w", err)
 	}
+	defer rows.Close()
 	referenced := make(map[string]struct{})
 	for rows.Next() {
 		var checkpointID, sha string
 		if err := rows.Scan(&checkpointID, &sha); err != nil {
-			rows.Close()
 			return nil, err
 		}
 		if _, dropped := skip[checkpointID]; dropped {
@@ -2310,7 +2313,6 @@ func (s *Server) referencedBlobDigests(released []string) (map[string]struct{}, 
 			referenced[clean] = struct{}{}
 		}
 	}
-	rows.Close()
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}

@@ -340,6 +340,94 @@ func TestRejectedPublishLeavesNoOrphanManifest(t *testing.T) {
 	}
 }
 
+// A failure INSIDE the publish transaction -- after the manifest is on disk and
+// before the commit -- used to return without unlinking it. The cleanup covered
+// the guard's rejection and a failed Commit, and nothing in between: an Exec
+// error on the guarded UPDATE, on recording the edges, on expanding the tree or
+// on pruning the planned root all left a manifest no row names, which the hub
+// has no way to notice afterwards. Every exit now goes through one guard.
+//
+// The fault is a trigger on ONE statement, on a live handle: a closed handle
+// fails the first statement, which any cleanup order survives.
+//
+// The message blob is asserted to SURVIVE. It is content-addressed and may be
+// shared with another checkpoint of the same claw (idle captures with no new
+// messages produce the same blob every time), so a failed publish must leave
+// it to the sweep rather than unlink it.
+func TestFailedPublishTransactionLeavesNoOrphanManifest(t *testing.T) {
+	const (
+		updateFails = `CREATE TRIGGER fail_update BEFORE UPDATE ON claw_checkpoints BEGIN SELECT RAISE(ABORT, 'simulated write failure'); END`
+		edgeFails   = `CREATE TRIGGER fail_edge BEFORE INSERT ON checkpoint_blob_refs BEGIN SELECT RAISE(ABORT, 'simulated write failure'); END`
+		treeFails   = `CREATE TRIGGER fail_tree BEFORE INSERT ON tree_blob_refs BEGIN SELECT RAISE(ABORT, 'simulated write failure'); END`
+		pruneFails  = `CREATE TRIGGER fail_prune BEFORE DELETE ON checkpoint_blob_refs BEGIN SELECT RAISE(ABORT, 'simulated write failure'); END`
+	)
+	cases := []struct {
+		name    string
+		trigger string
+		apply   func(s *Server, root string) error
+	}{
+		{"finalize: the guarded UPDATE fails", updateFails, finalizePublish},
+		{"finalize: recording the edges fails", edgeFails, finalizePublish},
+		{"finalize: expanding the completed root fails", treeFails, finalizePublish},
+		{"finalize: pruning the planned root fails", pruneFails, finalizePublish},
+		{"metadata-only: the guarded UPDATE fails", updateFails, metadataOnlyPublish},
+		{"metadata-only: recording the edges fails", edgeFails, metadataOnlyPublish},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newRetentionTestServer(t)
+			reference := time.Now()
+			insertRetentionClaw(t, s, "claw", reference)
+			// The plan names one root and the 'complete' another, so finalize
+			// has a fresh tree to expand and a stale root edge to prune: the
+			// two statements the tree and prune triggers must reach.
+			plannedRoot, _, plan := planTreeFixture(t, 2)
+			completedRoot, _, _ := planTreeFixtureSeeded(t, 2, "completed")
+			insertRetentionCheckpoint(t, s, retentionCheckpoint{
+				id: "cp", clawID: "claw", status: "creating", createdAt: reference, noBlobRefs: true})
+			if err := s.recordCheckpointBlobRefs("cp", plannedRoot, plan); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.db.Exec(`INSERT INTO messages(id, claw_id, tenant_id, role, content, created_at) VALUES(?,?,?,?,?,?)`,
+				"m1", "claw", "tenant", "user", "a message the blob captures", reference); err != nil {
+				t.Fatal(err)
+			}
+			msgSHA, _, _, err := s.writeMessageCheckpointBlob("claw", "tenant")
+			if err != nil {
+				t.Fatal(err)
+			}
+			edgesBefore := checkpointBlobRefCount(t, s, "cp")
+			if _, err := s.db.Exec(tc.trigger); err != nil {
+				t.Fatal(err)
+			}
+
+			if err := tc.apply(s, completedRoot); err == nil {
+				t.Fatal("publish reported success while a statement of its transaction failed")
+			}
+			if _, err := os.Stat(checkpointManifestPath("cp")); !os.IsNotExist(err) {
+				t.Fatalf("the failed publish left a manifest behind: %v", err)
+			}
+			if status, _, _ := retentionCheckpointRow(t, s, "cp"); status != "creating" {
+				t.Fatalf("status = %q after the failed publish, want creating", status)
+			}
+			if got := checkpointBlobRefCount(t, s, "cp"); got != edgesBefore {
+				t.Fatalf("edges = %d after the failed publish, want the %d the plan recorded (the transaction did not roll back)", got, edgesBefore)
+			}
+			if _, err := os.Stat(checkpointBlobPath(msgSHA)); err != nil {
+				t.Fatalf("the failed publish unlinked the message blob, which may be shared with another checkpoint: %v", err)
+			}
+		})
+	}
+}
+
+func finalizePublish(s *Server, root string) error {
+	return s.finalizeCheckpoint("cp", "tenant", "claw", root)
+}
+
+func metadataOnlyPublish(s *Server, _ string) error {
+	return s.completeMetadataOnlyCheckpoint("cp", "claw", "termination:kill", "bridge unreachable")
+}
+
 // checkpointStoreFiles lists every file under the checkpoint store, so a test
 // can assert a rejected operation wrote nothing at all.
 func checkpointStoreFiles(t *testing.T) string {
