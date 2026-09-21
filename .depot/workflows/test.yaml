@@ -26,13 +26,13 @@ jobs:
           persist-credentials: false
 
       - name: Mount adversary cache
-        uses: depot/cache-mount@38d61fd25163e9ef3a3eff8a61676994d306e549 # v1
+        uses: depot/cache-mount@c4ccf77f90f7fa7df6a002813c0b13f6a5943063 # v1
         with:
           name: adversary-${{ github.event.repository.id }}-public-v1
           path: /mnt/adversary
 
       - name: Run public adversaries
-        uses: adversarylabs/actions/run@56af137bfbe2bf56b018ac5753a24a472f7998e6 # v1.5.2
+        uses: doomerlabs/actions/run@v1
         env:
           CAMEL_API_KEY: ${{ secrets.CAMEL_API_KEY }}
         with:
@@ -41,6 +41,7 @@ jobs:
           data-dir: /mnt/adversary
           model: auto
           auth-mode: oidc
+          registry-host: registry.doomer.ai
           registry-namespace: elasticclaw
           include-summary: false
           fail-on-findings: false
