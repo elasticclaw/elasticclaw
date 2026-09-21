@@ -482,6 +482,10 @@ func (s *Server) handleClawCheckpoints(w http.ResponseWriter, r *http.Request, c
 			}
 			out = append(out, c)
 		}
+		if err := rows.Err(); err != nil {
+			http.Error(w, "db error", http.StatusInternalServerError)
+			return
+		}
 		if out == nil {
 			out = []checkpointSummary{}
 		}
@@ -1487,11 +1491,21 @@ func (s *Server) writeMessageCheckpointBlob(clawID, tenantID string) (string, in
 			CreatedAt time.Time `json:"created_at"`
 		}
 		if err := rows.Scan(&row.ID, &row.Role, &row.Content, &row.Format, &row.CreatedAt); err != nil {
-			continue
+			return "", 0, time.Time{}, fmt.Errorf("scan message: %w", err)
 		}
 		cutoff = row.CreatedAt
 		count++
 		_ = enc.Encode(row)
+	}
+	// Next returns false for a read error exactly as it does for the end of the
+	// result set. Without this check a failure part-way through hashed and
+	// published a PREFIX of the conversation under a digest that vouched for
+	// it, and the checkpoint referenced that blob as the whole transcript.
+	// Same for a row that fails to Scan: skipping it drops a message from the
+	// middle of the transcript, which is the same lie with a shorter gap.
+	// Nothing is hashed or written until every row has been read.
+	if err := rows.Err(); err != nil {
+		return "", 0, time.Time{}, fmt.Errorf("read messages: %w", err)
 	}
 	sha := shaBytes(buf.Bytes())
 	path := checkpointBlobPath(sha)
@@ -1554,7 +1568,10 @@ func (s *Server) buildCheckpointManifest(checkpointID, clawID, rootSHA, msgSHA s
 	reason := ""
 	var createdAt time.Time
 	_ = s.db.QueryRow(`SELECT reason, created_at FROM claw_checkpoints WHERE id=?`, checkpointID).Scan(&reason, &createdAt)
-	prs := s.checkpointPRs(clawID)
+	prs, err := s.checkpointPRs(clawID)
+	if err != nil {
+		return nil, err
+	}
 	return &checkpointManifest{
 		Schema:       checkpointManifestSchema,
 		CheckpointID: checkpointID,
@@ -1595,23 +1612,30 @@ func filesTotalBytes(files []types.CheckpointFile) int64 {
 	return total
 }
 
-func (s *Server) checkpointPRs(clawID string) []checkpointPR {
+// checkpointPRs lists the PRs a checkpoint of the claw records as tracked
+// work. It fails rather than returning a shorter list: the list is written
+// into the manifest, and a restore trusts it as the complete set.
+func (s *Server) checkpointPRs(clawID string) ([]checkpointPR, error) {
 	// Resolved rows (merged/closed) survive in claw_prs until the claw is
 	// finalized, but a checkpoint lists tracked WORK — restoring one taken
 	// after a partial merge must not present already-merged PRs as open.
 	rows, err := s.db.Query(`SELECT repo, pr_number, pr_url, last_ci_sha FROM claw_prs WHERE claw_id=? AND state NOT IN ('merged','closed') ORDER BY created_at ASC`, clawID)
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("list checkpoint prs: %w", err)
 	}
 	defer rows.Close()
 	var prs []checkpointPR
 	for rows.Next() {
 		var pr checkpointPR
-		if err := rows.Scan(&pr.Repo, &pr.Number, &pr.URL, &pr.LastCISHA); err == nil {
-			prs = append(prs, pr)
+		if err := rows.Scan(&pr.Repo, &pr.Number, &pr.URL, &pr.LastCISHA); err != nil {
+			return nil, fmt.Errorf("scan checkpoint pr: %w", err)
 		}
+		prs = append(prs, pr)
 	}
-	return prs
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list checkpoint prs: %w", err)
+	}
+	return prs, nil
 }
 
 func (s *Server) pendingRestoreCheckpoint(clawID string) string {

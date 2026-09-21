@@ -68,7 +68,14 @@ func (s *Server) rebriefAfterRestoreIfNeeded(cc *clawConn, clawID string) bool {
 	if stage.OnEnter.Inject != "" {
 		b.WriteString("\n\n" + s.renderStageInject(clawID, *stage, ctx))
 	}
-	for _, pr := range s.checkpointPRs(clawID) {
+	// A partial list would tell the agent the wrong set of PRs is open; better
+	// to say nothing and let the re-brief's own instruction to inspect the
+	// workspace and PR stand.
+	prs, err := s.checkpointPRs(clawID)
+	if err != nil {
+		log.Printf("[pipeline] re-brief claw %s: %v", shortID(clawID), err)
+	}
+	for _, pr := range prs {
 		b.WriteString(fmt.Sprintf("\nOpen PR: %s (%s, #%d)", pr.URL, pr.Repo, pr.Number))
 	}
 
