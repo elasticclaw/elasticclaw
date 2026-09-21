@@ -5,18 +5,55 @@ on:
 
 permissions:
   contents: read
-  issues: write
-  pull-requests: write
+
+concurrency:
+  group: test-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
 
 jobs:
+  adversary-review:
+    name: Adversary Labs review
+    runs-on: depot-ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write
+      pull-requests: write
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Mount adversary cache
+        uses: depot/cache-mount@38d61fd25163e9ef3a3eff8a61676994d306e549 # v1
+        with:
+          name: adversary-${{ github.event.repository.id }}-public-v1
+          path: /mnt/adversary
+
+      - name: Run public adversaries
+        uses: adversarylabs/actions/run@56af137bfbe2bf56b018ac5753a24a472f7998e6 # v1.5.2
+        env:
+          CAMEL_API_KEY: ${{ secrets.CAMEL_API_KEY }}
+        with:
+          adversaries: auto
+          path: .
+          data-dir: /mnt/adversary
+          model: auto
+          auth-mode: oidc
+          registry-namespace: elasticclaw
+          include-summary: false
+          fail-on-findings: false
+          timeout-minutes: "30"
+
   unit:
     name: Unit tests
     runs-on: depot-ubuntu-24.04
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version: "1.25.4"
           cache: true
@@ -47,9 +84,9 @@ jobs:
     runs-on: depot-ubuntu-24.04
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version: "1.25.4"
           cache: true
@@ -65,9 +102,9 @@ jobs:
     runs-on: depot-ubuntu-24.04
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22"
 
@@ -93,6 +130,9 @@ jobs:
   preview:
     name: Preview build
     runs-on: depot-ubuntu-24.04
+    permissions:
+      contents: read
+      pull-requests: write
     needs:
       - unit
       - build
@@ -121,16 +161,16 @@ jobs:
             echo "enabled=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         if: ${{ steps.preview_config.outputs.enabled == 'true' }}
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         if: ${{ steps.preview_config.outputs.enabled == 'true' }}
         with:
           go-version-file: go.mod
           cache: true
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         if: ${{ steps.preview_config.outputs.enabled == 'true' }}
         with:
           node-version: '22'

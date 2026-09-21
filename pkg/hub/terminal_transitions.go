@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"context"
 	"database/sql"
 	"log"
 	"strings"
@@ -88,6 +89,20 @@ func (s *Server) finishClawTerminalTx(clawID, clawStatus, diagnostic, runStatus,
 		}
 		if err == nil {
 			s.forgetReplicatedBootstrapEnv(clawID)
+			// Cancel any workflow v2 run still bound to this claw. Only the
+			// workflow-creator provisioning paths cancelled runs before;
+			// terminal stops from the VM sync loop (bootstrap failures),
+			// watchdog, reaper, and manual deletes left active runs holding a
+			// dead claw. With the control-plane dispatch gate (#691) those
+			// runs sat without action until the 24h run-reaper timeout.
+			// No-op when no active/suspended v2 run is bound; the nested
+			// maybeFinishWorkflowV2Parent → finishClawTerminalTx call
+			// terminates at the status guard above once the run is cancelled.
+			reason := "claw " + clawStatus
+			if strings.TrimSpace(diagnostic) != "" {
+				reason += ": " + diagnostic
+			}
+			s.cancelWorkflowV2RunForClaw(context.Background(), clawID, reason)
 			return true, nil
 		}
 		last = err

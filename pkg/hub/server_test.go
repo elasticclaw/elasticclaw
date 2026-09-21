@@ -621,6 +621,16 @@ func TestResolveDefaultModelForKey(t *testing.T) {
 			},
 			expectedModel: "ollama/qwen2.5-coder:1.5b",
 		},
+		{
+			name: "camel stream provider",
+			hubCfg: &types.HubConfig{
+				DefaultModel: "",
+			},
+			key: &types.LLMKeyConfig{
+				Provider: "camel-stream",
+			},
+			expectedModel: "camel-stream/auto",
+		},
 	}
 
 	for _, tt := range tests {

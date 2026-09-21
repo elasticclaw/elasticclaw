@@ -75,6 +75,8 @@ func (k *LLMKeyConfig) EnvVarName() string {
 		return "CODEX_API_KEY"
 	case "grok":
 		return "XAI_API_KEY"
+	case "camel-stream":
+		return "CAMEL_API_KEY"
 	default:
 		// Generic: PROVIDER_API_KEY uppercased
 		return strings.ToUpper(k.Provider) + "_API_KEY"

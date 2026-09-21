@@ -1258,6 +1258,7 @@ const PROVIDER_OPTIONS = [
   { value: "openai",     label: "OpenAI",     placeholder: "sk-proj-..." },
   { value: "codex",      label: "Codex",      placeholder: "sk-proj-..." },
   { value: "grok",       label: "Grok Build", placeholder: "xai-..." },
+  { value: "camel-stream", label: "camelStream", placeholder: "Your Stream API key" },
   { value: "ollama",     label: "Ollama",     placeholder: "ollama-local" },
   { value: "other",      label: "Other",      placeholder: "" },
 ]
@@ -1311,6 +1312,9 @@ const PROVIDER_MODELS: Record<string, LLMModelOption[]> = {
     { id: "grok/grok-4.5",       name: "Grok 4.5" },
     { id: "grok/grok-4.3",       name: "Grok 4.3" },
     { id: "__custom",            name: "Custom Grok model" },
+  ],
+  "camel-stream": [
+    { id: "camel-stream/auto", name: "Auto" },
   ],
   ollama: [
     { id: "ollama/qwen2.5-coder:1.5b", name: "Qwen2.5 Coder 1.5B" },

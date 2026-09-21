@@ -4506,6 +4506,7 @@ fi
 echo 'gateway not ready'
 tail -n 100 ~/.openclaw/gateway.log 2>/dev/null || true
 exit 1`
+	gatewaySetup = withDaytonaLLMKeyEnv(llmKeyEnvDaytona, gatewaySetup)
 	if err := exec("start openclaw gateway", 2*time.Minute, gatewaySetup); err != nil {
 		return err
 	}
@@ -4848,7 +4849,7 @@ gh auth status`
 	if err := s.db.QueryRow(`SELECT COALESCE(template,'') FROM claws WHERE id=?`, clawID).Scan(&templateName); err != nil {
 		return fmt.Errorf("load claw template: %w", err)
 	}
-	if err := s.startDaytonaBridge(ctx, instanceID, p, s.clawHubURL(), clawID, clawToken, s.modelAuthTokenForClaw(clawID), clawName, templateName); err != nil {
+	if err := s.startDaytonaBridge(ctx, instanceID, p, s.clawHubURL(), clawID, clawToken, s.modelAuthTokenForClaw(clawID), clawName, templateName, llmKeyEnvDaytona); err != nil {
 		return err
 	}
 
@@ -4890,7 +4891,7 @@ func recordE2EProviderID(label, envName, id string) {
 	}
 }
 
-func (s *Server) startDaytonaBridge(ctx context.Context, instanceID string, p *daytona.Provider, hubURL, clawID, clawToken, modelAuthToken, clawName, templateName string) error {
+func (s *Server) startDaytonaBridge(ctx context.Context, instanceID string, p *daytona.Provider, hubURL, clawID, clawToken, modelAuthToken, clawName, templateName, llmKeyEnv string) error {
 	prepCmd := daytonaPrepareBridgeCommand()
 	result, err := p.ExecWithTimeout(ctx, instanceID, []string{prepCmd}, 15*time.Second)
 	if err != nil {
@@ -4908,7 +4909,7 @@ func (s *Server) startDaytonaBridge(ctx context.Context, instanceID string, p *d
 	if err := p.EnsureSession(ctx, instanceID, sessionID); err != nil {
 		return fmt.Errorf("start claw-bridge session: %w", err)
 	}
-	cmdID, err := p.ExecSessionAsync(ctx, instanceID, sessionID, daytonaAsyncBridgeCommand(hubURL, clawID, clawToken, modelAuthToken, clawName, templateName))
+	cmdID, err := p.ExecSessionAsync(ctx, instanceID, sessionID, daytonaAsyncBridgeCommand(hubURL, clawID, clawToken, modelAuthToken, clawName, templateName, llmKeyEnv))
 	if err != nil {
 		return fmt.Errorf("start claw-bridge async: %w", err)
 	}
@@ -5130,8 +5131,8 @@ test -x /usr/local/bin/claw-bridge || { echo "claw-bridge installed at /usr/loca
 rm -f "$PIDFILE"`
 }
 
-func daytonaAsyncBridgeCommand(hubURL, clawID, clawToken, modelAuthToken, clawName, templateName string) string {
-	return fmt.Sprintf(`export HOME=/home/daytona
+func daytonaAsyncBridgeCommand(hubURL, clawID, clawToken, modelAuthToken, clawName, templateName, llmKeyEnv string) string {
+	return withDaytonaLLMKeyEnv(llmKeyEnv, fmt.Sprintf(`export HOME=/home/daytona
 mkdir -p /home/daytona/.openclaw/workspace /home/daytona/.openclaw/run /home/daytona/workspace
 cd /home/daytona/.openclaw/workspace
 PIDFILE=/home/daytona/.openclaw/run/claw-bridge.pid
@@ -5190,7 +5191,14 @@ done
 		shellQuote(modelAuthToken),
 		shellQuote(clawName),
 		shellQuote(templateName),
-	)
+	))
+}
+
+// withDaytonaLLMKeyEnv ensures long-lived processes inherit provider API keys.
+// Daytona executes bootstrap steps in separate shells, so exports performed
+// during onboarding are not visible to the gateway or bridge automatically.
+func withDaytonaLLMKeyEnv(llmKeyEnv, command string) string {
+	return llmKeyEnv + command
 }
 
 func (s *Server) downloadDaytonaConnector(ctx context.Context, clawID, instanceID string, p *daytona.Provider, downloadCmd string) error {
@@ -7623,6 +7631,8 @@ func resolveDefaultModelForKey(hubCfg *types.HubConfig, key *types.LLMKeyConfig)
 		return "deepseek/deepseek-chat"
 	case "ollama":
 		return "ollama/qwen2.5-coder:1.5b"
+	case "camel-stream":
+		return "camel-stream/auto"
 	case "moonshot":
 		return "moonshot/moonshot-v1-8k"
 	default:

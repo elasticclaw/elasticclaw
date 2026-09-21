@@ -19,6 +19,13 @@ import (
 func createWorkflowV2ControlServer(t *testing.T) (*Server, *workflowv2.Store, workflowv2.Attempt, *httptest.Server) {
 	t.Helper()
 	s, db := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token", ClawToken: "claw-token"}, "", "", "")
+	// Docker claws stage workspace files before the bridge starts, so their
+	// outbox dispatch is not gated on bootstrap_ok.
+	if _, err := db.Exec(`INSERT INTO claws(id,tenant_id,name,template,provider,status,bootstrap_ok,created_at)
+		VALUES(?,?,?,?,?,'connected',0,datetime('now'))`,
+		"claw-control-ws", "test-tenant-id", "claw-control-ws", "elasticclaw", "docker"); err != nil {
+		t.Fatal(err)
+	}
 	store := workflowv2.NewStore(db)
 	if _, err := store.CreateRun(context.Background(), workflowv2.CreateRunRequest{
 		ID: "run-control-ws", TenantID: "test-tenant-id",
@@ -147,6 +154,89 @@ func TestWorkflowV2ControlWebSocketAuthenticatesBindsSnapshotsAndDeduplicates(t 
 			t.Fatalf("acknowledged outbox remained ready: %#v", ready)
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestWorkflowV2ControlOutboxHeldUntilClawBootstrapCompletes(t *testing.T) {
+	// Regression for #691: replicated/exedev bridges register the control
+	// socket while the hub is still writing workspace files and cloning
+	// repositories. Task envelopes must be held until bootstrap_ok=1.
+	const clawID = "claw-replicated-bootstrap"
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token", ClawToken: "claw-token"}, "", "", "")
+	if _, err := db.Exec(`INSERT INTO claws(id,tenant_id,name,template,provider,status,bootstrap_ok,created_at)
+		VALUES(?,?,?,?,?,'starting',0,datetime('now'))`,
+		clawID, "test-tenant-id", clawID, "elasticclaw", "replicated"); err != nil {
+		t.Fatal(err)
+	}
+	store := workflowv2.NewStore(db)
+	if _, err := store.CreateRun(context.Background(), workflowv2.CreateRunRequest{
+		ID: "run-bootstrap-gate", TenantID: "test-tenant-id", InitialClawID: clawID,
+		WorkspaceYAML: []byte(workflowV2APIWorkspace), WorkflowYAML: []byte(workflowV2APIWorkflow),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	attempt, err := store.StartAttempt(context.Background(), "run-bootstrap-gate", clawID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := store.EnqueueControl(ctx, typesv2.ControlEnvelope{ProtocolVersion: typesv2.ControlProtocolVersion,
+		MessageID: "gate-task-1", Kind: typesv2.MessageWorkflowSync, RunID: "run-bootstrap-gate", AttemptID: attempt.ID}); err != nil {
+		t.Fatal(err)
+	}
+
+	server := httptest.NewServer(s.Handler())
+	t.Cleanup(server.Close)
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/claw/control/ws"
+	conn, _, err := websocket.Dial(ctx, wsURL, &websocket.DialOptions{HTTPHeader: http.Header{
+		clawControlTokenHeader: {"claw-token"},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.CloseNow()
+	registration := typesv2.ControlRegistration{Token: "claw-token", ClawID: clawID,
+		RunID: "run-bootstrap-gate", AttemptID: attempt.ID,
+		Bridge: typesv2.BridgeRegistration{BridgeVersion: "test", Protocols: []string{typesv2.ProtocolControlV2}}}
+	if err := wsjson.Write(ctx, conn, typesv2.ControlFrame{Type: typesv2.ControlFrameRegister, Registration: &registration}); err != nil {
+		t.Fatal(err)
+	}
+	var registered typesv2.ControlFrame
+	if err := wsjson.Read(ctx, conn, &registered); err != nil {
+		t.Fatal(err)
+	}
+	if registered.Type != typesv2.ControlFrameRegistered || registered.Snapshot == nil {
+		t.Fatalf("registered frame = %#v", registered)
+	}
+
+	// While bootstrap_ok=0 the envelope must not be delivered: MarkControlSent
+	// only runs after a successful write, so the outbox row stays pending. The
+	// sender ticks at 250ms; one second proves several held cycles.
+	deadline := time.Now().Add(1 * time.Second)
+	for {
+		var status string
+		if err := db.QueryRow(`SELECT status FROM workflow_v2_control_outbox WHERE message_id='gate-task-1'`).Scan(&status); err != nil {
+			t.Fatal(err)
+		}
+		if status != "pending" {
+			t.Fatalf("outbox delivered before bootstrap completed: status=%q", status)
+		}
+		if time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+
+	if _, err := db.Exec(`UPDATE claws SET bootstrap_ok=1 WHERE id=?`, clawID); err != nil {
+		t.Fatal(err)
+	}
+	var delivered typesv2.ControlFrame
+	if err := wsjson.Read(ctx, conn, &delivered); err != nil {
+		t.Fatal(err)
+	}
+	if delivered.Type != typesv2.ControlFrameEnvelope || delivered.Envelope == nil || delivered.Envelope.MessageID != "gate-task-1" {
+		t.Fatalf("delivered frame = %#v", delivered)
 	}
 }
 

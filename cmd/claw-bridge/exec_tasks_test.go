@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -11,7 +13,20 @@ import (
 	typesv2 "github.com/elasticclaw/elasticclaw/pkg/types/v2"
 )
 
+// setBridgeTestWorkspaceHome points HOME at a temp dir with a live
+// ~/.openclaw/workspace so wrapped exec commands can cd into it.
+func setBridgeTestWorkspaceHome(t *testing.T) string {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if err := os.MkdirAll(filepath.Join(home, ".openclaw", "workspace"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	return home
+}
+
 func TestBridgeExecRunCommandEmitsCompleted(t *testing.T) {
+	setBridgeTestWorkspaceHome(t)
 	store := openTestBridgeControlStore(t)
 	binding := workflowControlBinding{RunID: "run-exec", AttemptID: "attempt-exec"}
 	supervisor := newControlSupervisor(context.Background(), "ws://invalid", "claw", "token", bridgeRegistration(true), store)
@@ -74,6 +89,7 @@ func TestBridgeExecRunCommandEmitsCompleted(t *testing.T) {
 }
 
 func TestBridgeExecRunFailureEmitsFailed(t *testing.T) {
+	setBridgeTestWorkspaceHome(t)
 	store := openTestBridgeControlStore(t)
 	binding := workflowControlBinding{RunID: "run-exec-fail", AttemptID: "attempt-exec-fail"}
 	supervisor := newControlSupervisor(context.Background(), "ws://invalid", "claw", "token", bridgeRegistration(true), store)
@@ -120,6 +136,7 @@ func TestBridgeExecRunFailureEmitsFailed(t *testing.T) {
 }
 
 func TestBridgeExecRunTimeoutReportsExitCode124(t *testing.T) {
+	setBridgeTestWorkspaceHome(t)
 	store := openTestBridgeControlStore(t)
 	binding := workflowControlBinding{RunID: "run-exec-timeout", AttemptID: "attempt-exec-timeout"}
 	supervisor := newControlSupervisor(context.Background(), "ws://invalid", "claw", "token", bridgeRegistration(true), store)
@@ -172,6 +189,7 @@ func TestBridgeExecRunTimeoutReportsExitCode124(t *testing.T) {
 }
 
 func TestBridgeExecRunDuplicateAssignmentIsRejected(t *testing.T) {
+	setBridgeTestWorkspaceHome(t)
 	store := openTestBridgeControlStore(t)
 	binding := workflowControlBinding{RunID: "run-exec-dup", AttemptID: "attempt-exec-dup"}
 	supervisor := newControlSupervisor(context.Background(), "ws://invalid", "claw", "token", bridgeRegistration(true), store)
@@ -206,5 +224,63 @@ func TestTruncateOutputPreservesUTF8(t *testing.T) {
 	}
 	if utf8.RuneCountInString(out) >= utf8.RuneCountInString(value) {
 		t.Fatalf("truncated output should be shorter than original")
+	}
+}
+
+func TestBridgeWorkspaceCommandRunsInLiveWorkspace(t *testing.T) {
+	setBridgeTestWorkspaceHome(t)
+
+	got := bridgeWorkspaceCommand(`bash scripts/prepare-deps-branch.sh`)
+	want := `cd "$HOME/.openclaw/workspace" && bash scripts/prepare-deps-branch.sh`
+	if got != want {
+		t.Fatalf("command without flake = %q, want %q", got, want)
+	}
+	if strings.Contains(got, "flake-run") {
+		t.Fatalf("non-flake workspace must not wrap in flake-run: %q", got)
+	}
+}
+
+func TestBridgeWorkspaceCommandWrapsFlakeWorkspaces(t *testing.T) {
+	home := setBridgeTestWorkspaceHome(t)
+	if err := os.WriteFile(filepath.Join(home, ".openclaw", "workspace", "flake.nix"), []byte("{}\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	got := bridgeWorkspaceCommand("go test ./...")
+	if !strings.HasPrefix(got, `~/.elasticclaw/flake-run bash -lc '`) {
+		t.Fatalf("flake workspace command = %q, want flake-run wrapper", got)
+	}
+	if !strings.Contains(got, `cd "$HOME/.openclaw/workspace" && go test ./...`) {
+		t.Fatalf("flake workspace command = %q, want cd into live workspace", got)
+	}
+}
+
+// TestRunExecCommandResolvesWorkspaceRelativePaths is the bridge-side
+// regression for #691: exec.run commands like "bash scripts/foo.sh" must
+// execute in ~/.openclaw/workspace, not the bridge process working directory.
+func TestRunExecCommandResolvesWorkspaceRelativePaths(t *testing.T) {
+	home := setBridgeTestWorkspaceHome(t)
+	scripts := filepath.Join(home, ".openclaw", "workspace", "scripts")
+	if err := os.MkdirAll(scripts, 0700); err != nil {
+		t.Fatal(err)
+	}
+	script := filepath.Join(scripts, "prepare-deps-branch.sh")
+	if err := os.WriteFile(script, []byte("#!/bin/bash\necho staged-ok\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+
+	s := &controlSupervisor{}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	receipt, kind := s.runExecCommand(ctx, workflowControlBinding{}, "task-691",
+		typesv2.ExecRunConfig{Command: "bash scripts/prepare-deps-branch.sh"})
+	if kind != typesv2.MessageExecRunCompleted {
+		t.Fatalf("kind = %v receipt = %#v", kind, receipt)
+	}
+	if code, _ := receipt["exit_code"].(int); code != 0 {
+		t.Fatalf("exit_code = %d receipt = %#v (workspace-relative script not found)", code, receipt)
+	}
+	if out, _ := receipt["stdout"].(string); strings.TrimSpace(out) != "staged-ok" {
+		t.Fatalf("stdout = %q receipt = %#v", out, receipt)
 	}
 }
