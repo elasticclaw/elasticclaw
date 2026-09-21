@@ -32,7 +32,7 @@ jobs:
           path: /mnt/adversary
 
       - name: Run public adversaries
-        uses: adversarylabs/actions/run@56af137bfbe2bf56b018ac5753a24a472f7998e6 # v1.5.2
+        uses: doomerlabs/actions/run@56af137bfbe2bf56b018ac5753a24a472f7998e6 # v1.5.2
         env:
           CAMEL_API_KEY: ${{ secrets.CAMEL_API_KEY }}
         with:
