@@ -196,7 +196,13 @@ func (s *Server) handleLLMUsageLimit(cc *clawConn, clawID string, limit types.LL
 // IDs. Callers must hold s.llmLimitMu: the record write and this walk are one
 // unit, or a concurrent release can unpark a claw the caller is still parking.
 func (s *Server) latchClawsForLLMLimitLocked(keyID string, record llmUsageLimitRecord) []string {
-	clawIDs := s.clawsForLLMKey(keyID)
+	clawIDs, err := s.clawsForLLMKey(keyID)
+	if err != nil {
+		// The record is written; a claw left unparked hits the provider
+		// again and re-latches on its own next turn.
+		log.Printf("[llm-limit] latch: %v", err)
+		return nil
+	}
 	if len(clawIDs) == 0 {
 		return nil
 	}
@@ -256,7 +262,15 @@ func (s *Server) releaseLLMUsageLimit(keyID, reason string, announce bool) {
 		log.Printf("[llm-limit] release claws for key %q: %v", keyID, err)
 		return
 	}
-	clawIDs := s.clawsForLLMKey(keyID)
+	// Before released_at is written, on purpose: the record stays active, so
+	// the scheduler retries the release on its next tick rather than leaving
+	// claws whose latch is already cleared with no wake.
+	clawIDs, err := s.clawsForLLMKey(keyID)
+	if err != nil {
+		s.llmLimitMu.Unlock()
+		log.Printf("[llm-limit] release: %v", err)
+		return
+	}
 	for _, clawID := range clawIDs {
 		s.setClawLLMLimitMirror(clawID, time.Time{})
 	}
@@ -307,7 +321,12 @@ func (s *Server) confirmLLMLimitLift(keyID string) {
 	if !had || record.Active() {
 		return
 	}
-	s.recordLLMLimitEvent(record, len(s.clawsForLLMKey(keyID)), "provider_limit_released", nil)
+	clawIDs, err := s.clawsForLLMKey(keyID)
+	if err != nil {
+		// The count is informational; the event itself must still be recorded.
+		log.Printf("[llm-limit] confirm lift: %v", err)
+	}
+	s.recordLLMLimitEvent(record, len(clawIDs), "provider_limit_released", nil)
 }
 
 // observeAuthoredTurnForLLMLimit is the proof a scheduled release waits for:
@@ -380,7 +399,12 @@ const llmLimitResumeWake = "[hub] The model provider's allowance is back. Contin
 // state answers the question on its own — a released record whose released
 // event has not been recorded is exactly a pending probe.
 func (s *Server) seedLLMLimitProbes() {
-	for _, record := range s.llmUsageLimitRecords() {
+	records, err := s.llmUsageLimitRecords()
+	if err != nil {
+		log.Printf("[llm-limit] seed probes: %v", err)
+		return
+	}
+	for _, record := range records {
 		if record.Active() {
 			continue
 		}
@@ -425,7 +449,12 @@ func (s *Server) startLLMUsageLimitScheduler() {
 
 func (s *Server) releaseDueLLMUsageLimits() {
 	nowAt := now()
-	for _, record := range s.llmUsageLimitRecords() {
+	records, err := s.llmUsageLimitRecords()
+	if err != nil {
+		log.Printf("[llm-limit] release due limits: %v", err)
+		return
+	}
+	for _, record := range records {
 		if !record.Active() {
 			s.pruneReleasedLLMUsageLimit(record, nowAt)
 			continue
@@ -472,8 +501,13 @@ func (s *Server) pruneReleasedLLMUsageLimit(record llmUsageLimitRecord, nowAt ti
 // claw that misses that path is parked forever — a permanently silent agent
 // whose UI still promises it resumes on its own.
 func (s *Server) reconcileLLMUsageLimitLatches() {
+	records, err := s.llmUsageLimitRecords()
+	if err != nil {
+		log.Printf("[llm-limit] reconcile: %v", err)
+		return
+	}
 	active := map[string]bool{}
-	for _, record := range s.llmUsageLimitRecords() {
+	for _, record := range records {
 		if record.Active() {
 			active[record.KeyID] = true
 		}
@@ -494,7 +528,13 @@ func (s *Server) reconcileLLMUsageLimitLatches() {
 			orphans = append(orphans, row)
 		}
 	}
+	err = rows.Err()
 	rows.Close()
+	if err != nil {
+		// Unparking the orphans read so far would be correct; the next tick
+		// picks up the rest. Logged so a persistent read failure is visible.
+		log.Printf("[llm-limit] reconcile query: %v", err)
+	}
 
 	for _, orphan := range orphans {
 		s.llmLimitMu.Lock()
@@ -590,23 +630,29 @@ func (s *Server) noticeLLMLimitToUser(clawID string) bool {
 }
 
 // llmUsageLimitRecords returns every limit, released ones included.
-func (s *Server) llmUsageLimitRecords() []llmUsageLimitRecord {
+//
+// It fails rather than returning a shorter list. The callers act on absence
+// -- reconcileLLMUsageLimitLatches unparks every claw whose key is missing
+// from this list -- so a list cut short by a read error would release claws
+// whose provider is still capped.
+func (s *Server) llmUsageLimitRecords() ([]llmUsageLimitRecord, error) {
 	rows, err := s.db.Query(`SELECT key_id, provider, reason, message, regain_at, retry_at, retries, detected_at, detected_claw_id, released_at FROM llm_usage_limits`)
 	if err != nil {
-		log.Printf("[llm-limit] list limits: %v", err)
-		return nil
+		return nil, fmt.Errorf("list limits: %w", err)
 	}
 	defer rows.Close()
 	var out []llmUsageLimitRecord
 	for rows.Next() {
 		record, err := scanLLMUsageLimit(rows)
 		if err != nil {
-			log.Printf("[llm-limit] scan limit: %v", err)
-			continue
+			return nil, fmt.Errorf("scan limit: %w", err)
 		}
 		out = append(out, record)
 	}
-	return out
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list limits: %w", err)
+	}
+	return out, nil
 }
 
 func (s *Server) loadLLMUsageLimit(keyID string) (llmUsageLimitRecord, bool) {
@@ -665,22 +711,28 @@ func timeFromEpochMillis(ms int64) time.Time {
 // claw_retry revives one on the same row, and skipping it at release left the
 // revived claw parked against a deadline that had already passed, with nothing
 // left to clear it.
-func (s *Server) clawsForLLMKey(keyID string) []string {
+//
+// It fails rather than returning a shorter list: a release wakes exactly the
+// claws listed here, and one left out stays parked with its DB latch already
+// cleared, which nothing else revisits.
+func (s *Server) clawsForLLMKey(keyID string) ([]string, error) {
 	rows, err := s.db.Query(`SELECT id FROM claws WHERE COALESCE(llm_key,'')=? AND status<>'deleted'`, keyID)
 	if err != nil {
-		log.Printf("[llm-limit] list claws for key %q: %v", keyID, err)
-		return nil
+		return nil, fmt.Errorf("list claws for key %q: %w", keyID, err)
 	}
 	defer rows.Close()
 	var out []string
 	for rows.Next() {
 		var id string
 		if err := rows.Scan(&id); err != nil {
-			continue
+			return nil, fmt.Errorf("scan claw for key %q: %w", keyID, err)
 		}
 		out = append(out, id)
 	}
-	return out
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list claws for key %q: %w", keyID, err)
+	}
+	return out, nil
 }
 
 // resolveClawLLMKey maps a claw to the key it spends and that key's provider.

@@ -83,6 +83,10 @@ func (s *Server) listTemplates(w http.ResponseWriter, r *http.Request) {
 				names = append(names, name)
 			}
 		}
+		if err := rows.Err(); err != nil {
+			http.Error(w, "db error: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
 	}
 
 	type entry struct {

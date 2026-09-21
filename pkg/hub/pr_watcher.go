@@ -2139,6 +2139,10 @@ func (s *Server) handleClawPRs(w http.ResponseWriter, r *http.Request, clawID st
 		}
 		prs = append(prs, p)
 	}
+	if err := rows.Err(); err != nil {
+		http.Error(w, "db error", http.StatusInternalServerError)
+		return
+	}
 	if prs == nil {
 		prs = []PR{}
 	}

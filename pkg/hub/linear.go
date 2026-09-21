@@ -2206,6 +2206,10 @@ func (s *Server) handleFactoryEvents(w http.ResponseWriter, r *http.Request) {
 		}
 		events = append(events, e)
 	}
+	if err := rows.Err(); err != nil {
+		http.Error(w, "db error", http.StatusInternalServerError)
+		return
+	}
 	if events == nil {
 		events = []FactoryEvent{}
 	}
