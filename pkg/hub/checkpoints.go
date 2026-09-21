@@ -789,7 +789,7 @@ func (s *Server) dispatchCheckpoint(ctx context.Context, cc *clawConn, clawID, c
 	}
 	if err := wsjson.Write(ctx, cc.conn, types.WSMessage{Type: "checkpoint_create", Payload: payload}); err != nil {
 		s.finishCheckpointRequest(clawID, checkpointID)
-		_ = s.failCheckpoint(checkpointID, err.Error())
+		_ = s.recordCheckpointFailure(checkpointID, clawID, err.Error())
 		s.notifyCheckpointWaiter(checkpointID, err)
 		return checkpointID, err
 	}
@@ -1114,20 +1114,34 @@ func (s *Server) handleCheckpointInternal(w http.ResponseWriter, r *http.Request
 			http.Error(w, "invalid complete", http.StatusBadRequest)
 			return
 		}
+		// Both failure branches below release the waiter and the claw's queue
+		// whether or not the 'failed' transition lands: the failure itself is
+		// real, and a waiter left hanging on a row that cannot be updated would
+		// turn a bounded inconsistency into a stuck claw. What changes when the
+		// transition does not land is the answer -- the bridge is told the
+		// failure was not recorded rather than that the checkpoint is settled.
 		if complete.Error != "" {
-			_ = s.failCheckpoint(checkpointID, complete.Error)
+			recordErr := s.recordCheckpointFailure(checkpointID, clawID, complete.Error)
 			s.notifyCheckpointWaiter(checkpointID, fmt.Errorf("%s", complete.Error))
 			s.finishCheckpointRequest(clawID, checkpointID)
 			s.drainPendingCheckpoint(clawID)
+			if recordErr != nil {
+				http.Error(w, "checkpoint failure not recorded: "+recordErr.Error(), http.StatusInternalServerError)
+				return
+			}
 			jsonOK(w, map[string]string{"status": "failed"})
 			return
 		}
 		if err := s.finalizeCheckpoint(checkpointID, tenantID, clawID, complete.RootSHA256); err != nil {
-			_ = s.failCheckpoint(checkpointID, err.Error())
+			recordErr := s.recordCheckpointFailure(checkpointID, clawID, err.Error())
 			s.notifyCheckpointWaiter(checkpointID, err)
 			s.finishCheckpointRequest(clawID, checkpointID)
 			s.drainPendingCheckpoint(clawID)
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			msg := err.Error()
+			if recordErr != nil {
+				msg += " (checkpoint failure not recorded: " + recordErr.Error() + ")"
+			}
+			http.Error(w, msg, http.StatusInternalServerError)
 			return
 		}
 		s.notifyCheckpointWaiter(checkpointID, nil)
@@ -1865,6 +1879,20 @@ func (s *Server) failCheckpoint(checkpointID, msg string) error {
 		return err
 	}
 	return tx.Commit()
+}
+
+// recordCheckpointFailure is failCheckpoint for callers that cannot do anything
+// about a persistence error except say so. It logs what was left behind: the
+// row is still 'creating' with its blob references intact, and the stuck-
+// creating sweep (or boot reconciliation) will fail it later. Callers still get
+// the error, so an answer to the bridge can be honest about it.
+func (s *Server) recordCheckpointFailure(checkpointID, clawID, msg string) error {
+	err := s.failCheckpoint(checkpointID, msg)
+	if err != nil {
+		log.Printf("[checkpoint] record failure of %s for %s: %v; row stays 'creating' with its blob references until the stuck-creating sweep fails it after %s (original failure: %s)",
+			shortID(checkpointID), shortID(clawID), err, checkpointCreatingMaxAge, msg)
+	}
+	return err
 }
 
 func (s *Server) notifyCheckpointWaiter(checkpointID string, err error) {

@@ -104,12 +104,10 @@ func TestCheckpointFinalizeErrorDrainsPendingCheckpoint(t *testing.T) {
 	assertPendingCheckpointDrained(t, s)
 }
 
-func TestDispatchCheckpointWriteFailureRemovesWaiter(t *testing.T) {
-	s := newCheckpointCompletionTestServer(t)
-	if err := s.insertCheckpoint("write-fail", "tenant", "claw", "manual", "hub", "local", "provider-id"); err != nil {
-		t.Fatalf("insert checkpoint: %v", err)
-	}
-
+// closedClawWebsocket returns a websocket that is already closed, so the next
+// write on it fails the way a bridge that went away mid-dispatch does.
+func closedClawWebsocket(t *testing.T) *websocket.Conn {
+	t.Helper()
 	wsServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := websocket.Accept(w, r, nil)
 		if err != nil {
@@ -125,11 +123,19 @@ func TestDispatchCheckpointWriteFailureRemovesWaiter(t *testing.T) {
 		t.Fatalf("dial websocket: %v", err)
 	}
 	_ = conn.Close(websocket.StatusNormalClosure, "closed before dispatch")
+	return conn
+}
+
+func TestDispatchCheckpointWriteFailureRemovesWaiter(t *testing.T) {
+	s := newCheckpointCompletionTestServer(t)
+	if err := s.insertCheckpoint("write-fail", "tenant", "claw", "manual", "hub", "local", "provider-id"); err != nil {
+		t.Fatalf("insert checkpoint: %v", err)
+	}
 
 	cc := &clawConn{
 		id:                   "claw",
 		tenantID:             "tenant",
-		conn:                 conn,
+		conn:                 closedClawWebsocket(t),
 		checkpointInProgress: true,
 	}
 	s.claws["claw"] = cc
@@ -328,5 +334,165 @@ func assertPendingCheckpointDrained(t *testing.T, s *Server) {
 	}
 	if cc.pendingCheckpointID != "" {
 		t.Fatalf("expected pending checkpoint to be drained, got %q", cc.pendingCheckpointID)
+	}
+}
+
+// checkpointUpdateFails makes every UPDATE on claw_checkpoints fail on the live
+// handle, so failCheckpoint cannot persist the 'failed' transition while every
+// other statement keeps working.
+const checkpointUpdateFails = `CREATE TRIGGER fail_update BEFORE UPDATE ON claw_checkpoints BEGIN SELECT RAISE(ABORT, 'simulated write failure'); END`
+
+// assertCheckpointStillCreatingWithEdges is what an unrecordable failure must
+// leave behind: the row untouched, still holding the references that protect
+// its blobs until the stuck-creating sweep fails it properly.
+func assertCheckpointStillCreatingWithEdges(t *testing.T, s *Server, checkpointID string, edges int) {
+	t.Helper()
+	var status string
+	if err := s.db.QueryRow(`SELECT status FROM claw_checkpoints WHERE id=?`, checkpointID).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != "creating" {
+		t.Fatalf("status = %q, want creating: the failed transition must not have half-landed", status)
+	}
+	if got := checkpointBlobRefCount(t, s, checkpointID); got != edges {
+		t.Fatalf("blob references = %d, want %d: a row left 'creating' must keep its claims", got, edges)
+	}
+}
+
+// assertUnrecordedFailureLogged checks the log line the operator needs: which
+// checkpoint, which claw, what was left behind and who cleans it up.
+func assertUnrecordedFailureLogged(t *testing.T, out string) {
+	t.Helper()
+	for _, want := range []string{
+		"record failure of current for claw",
+		"simulated write failure",
+		"stays 'creating'",
+		"stuck-creating sweep",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("log output lacks %q; the persistence failure went silent:\n%s", want, out)
+		}
+	}
+}
+
+// When the bridge's 'complete' arrives and the 'failed' transition itself
+// cannot be persisted (ENOSPC, SQLITE_BUSY), the failure used to be discarded:
+// the bridge was answered as if the checkpoint were settled, nothing was logged,
+// and the row stayed 'creating' with its edges until the stuck-creating sweep
+// found it six hours later.
+//
+// The waiter and the claw's queue are still released -- the failure is real and
+// a claw parked on a row nobody can update would be a hang, not a bounded
+// inconsistency -- but the answer no longer claims a clean outcome, the log
+// names what was left behind, and the row keeps its claims.
+func TestUnrecordableCheckpointFailureIsReportedAndStillReleasesWaiter(t *testing.T) {
+	cases := []struct {
+		name       string
+		body       string
+		waiterErr  string
+		wantInBody []string
+	}{
+		{
+			name:       "bridge reported an error",
+			body:       `{"error":"bridge failed"}`,
+			waiterErr:  "bridge failed",
+			wantInBody: []string{"checkpoint failure not recorded", "simulated write failure"},
+		},
+		{
+			name: "finalize failed",
+			body: `{"root_sha256":"` + strings.Repeat("a", 64) + `"}`,
+			// finalize's own error leads; the persistence failure follows it.
+			wantInBody: []string{"checkpoint failure not recorded", "simulated write failure"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			s := newCheckpointCompletionTestServer(t)
+			seedCheckpointCompletionState(t, s)
+			if err := s.recordCheckpointBlobRefs("current", "", []types.CheckpointFile{
+				{Path: "workspace/a.txt", SHA256: strings.Repeat("b", 64), Size: 1},
+			}); err != nil {
+				t.Fatalf("recordCheckpointBlobRefs: %v", err)
+			}
+			waiter := make(chan error, 1)
+			s.checkpointWaiters["current"] = waiter
+			if _, err := s.db.Exec(checkpointUpdateFails); err != nil {
+				t.Fatal(err)
+			}
+
+			var rr *httptest.ResponseRecorder
+			out := captureRetentionLog(t, func() { rr = completeCheckpoint(t, s, tc.body) })
+
+			if rr.Code != http.StatusInternalServerError {
+				t.Fatalf("status = %d, want 500: the bridge was told the checkpoint is settled while the row is still 'creating':\n%s", rr.Code, rr.Body.String())
+			}
+			for _, want := range tc.wantInBody {
+				if !strings.Contains(rr.Body.String(), want) {
+					t.Fatalf("response %q lacks %q", rr.Body.String(), want)
+				}
+			}
+			assertUnrecordedFailureLogged(t, out)
+
+			select {
+			case err := <-waiter:
+				if err == nil {
+					t.Fatal("waiter was told the checkpoint succeeded")
+				}
+				if tc.waiterErr != "" && err.Error() != tc.waiterErr {
+					t.Fatalf("waiter error = %q, want %q", err, tc.waiterErr)
+				}
+			default:
+				t.Fatal("waiter was never notified: an unrecordable failure must not become a hang")
+			}
+			s.checkpointMu.Lock()
+			_, stillRegistered := s.checkpointWaiters["current"]
+			s.checkpointMu.Unlock()
+			if stillRegistered {
+				t.Fatal("waiter is still registered after being notified")
+			}
+			assertPendingCheckpointDrained(t, s)
+			assertCheckpointStillCreatingWithEdges(t, s, "current", 1)
+		})
+	}
+}
+
+// The hub-side dispatch path has the same shape: the WebSocket write fails, the
+// row is failed, and if THAT fails the caller already holds the write error and
+// nothing else said a word.
+func TestUnrecordableDispatchFailureIsLogged(t *testing.T) {
+	s := newCheckpointCompletionTestServer(t)
+	if err := s.insertCheckpoint("current", "tenant", "claw", "manual", "hub", "local", "provider-id"); err != nil {
+		t.Fatalf("insert checkpoint: %v", err)
+	}
+	if err := s.recordCheckpointBlobRefs("current", "", []types.CheckpointFile{
+		{Path: "workspace/a.txt", SHA256: strings.Repeat("b", 64), Size: 1},
+	}); err != nil {
+		t.Fatalf("recordCheckpointBlobRefs: %v", err)
+	}
+	cc := &clawConn{
+		id:                   "claw",
+		tenantID:             "tenant",
+		conn:                 closedClawWebsocket(t),
+		checkpointInProgress: true,
+	}
+	s.claws["claw"] = cc
+	if _, err := s.db.Exec(checkpointUpdateFails); err != nil {
+		t.Fatal(err)
+	}
+
+	var dispatchErr error
+	out := captureRetentionLog(t, func() {
+		_, dispatchErr = s.dispatchCheckpoint(context.Background(), cc, "claw", "current", "manual", false, checkpointRequestTimeout)
+	})
+	if dispatchErr == nil {
+		t.Fatal("expected dispatch write failure")
+	}
+	assertUnrecordedFailureLogged(t, out)
+	assertCheckpointStillCreatingWithEdges(t, s, "current", 1)
+	cc.mu.RLock()
+	defer cc.mu.RUnlock()
+	if cc.checkpointInProgress {
+		t.Fatal("expected failed dispatch to clear checkpoint in progress")
 	}
 }
