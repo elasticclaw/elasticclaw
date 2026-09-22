@@ -18,6 +18,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/elasticclaw/elasticclaw/pkg/config"
 	daytonaProvider "github.com/elasticclaw/elasticclaw/pkg/provider/daytona"
@@ -525,19 +526,32 @@ func (s *Server) handleClawCheckpoints(w http.ResponseWriter, r *http.Request, c
 	http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 }
 
+// restoreReservedHook runs once the restore has reserved its source checkpoint
+// and before anything destructive. It is nil in production and exists so a
+// test can run retention at exactly that point -- the window in which the
+// source used to be unprotected.
+var restoreReservedHook func(clawID, checkpointID string)
+
 func (s *Server) restoreClawFromCheckpoint(ctx context.Context, tenantID, clawID, checkpointID string) error {
-	var status, manifestPath string
-	if err := s.db.QueryRow(`SELECT status, manifest_path FROM claw_checkpoints WHERE id=? AND tenant_id=? AND claw_id=?`, checkpointID, tenantID, clawID).Scan(&status, &manifestPath); err != nil {
-		if err == sql.ErrNoRows {
-			return fmt.Errorf("checkpoint not found")
-		}
+	// Validate and reserve in ONE transaction, before anything destructive.
+	// restore_checkpoint_id is what compaction and expiry honour (see
+	// finalizedClawPredicateSQL and restoreSourceCheckpointsSQL), and it used
+	// to be written last -- after a termination checkpoint of up to 90 seconds
+	// and after the VM was already being torn down. Compaction or expiry in
+	// that window marked the source 'compacted' or deleted it, dropped its
+	// edges and manifest, and the same cycle's sweep unlinked its blobs; the
+	// restore then provisioned against a checkpoint that no longer existed,
+	// with the sandbox it could have carried on in already gone. Both
+	// retention writes re-check the guard inside their own write transaction,
+	// so once this one commits the source cannot be released under the
+	// restore; and if retention won the race instead, the validation here sees
+	// the row is no longer 'ready' and nothing has been destroyed yet.
+	previous, err := s.reserveRestoreSource(tenantID, clawID, checkpointID)
+	if err != nil {
 		return err
 	}
-	if status != "ready" {
-		return fmt.Errorf("checkpoint is not ready")
-	}
-	if manifestPath == "" {
-		return fmt.Errorf("checkpoint has no manifest")
+	if restoreReservedHook != nil {
+		restoreReservedHook(clawID, checkpointID)
 	}
 
 	// Preserve the current state if the bridge is still reachable.
@@ -545,6 +559,13 @@ func (s *Server) restoreClawFromCheckpoint(ctx context.Context, tenantID, clawID
 
 	var provider, providerID string
 	if err := s.db.QueryRow(`SELECT COALESCE(provider,''), COALESCE(provider_id,'') FROM claws WHERE id=? AND tenant_id=?`, clawID, tenantID).Scan(&provider, &providerID); err != nil {
+		// Nothing has been destroyed yet: the claw carries on as it was, so the
+		// reservation goes back to what it was too. Past this point the sandbox
+		// is torn down and the reservation stays whatever else fails -- exactly
+		// as a failed provision leaves it (see provisionStoredClaw): the source
+		// stays protected until a retry applies it or the claw is deleted, and
+		// the row is what the operator retries from.
+		s.releaseRestoreReservation(clawID, checkpointID, previous)
 		return err
 	}
 	s.mu.Lock()
@@ -557,7 +578,7 @@ func (s *Server) restoreClawFromCheckpoint(ctx context.Context, tenantID, clawID
 		go s.terminateVM(provider, providerID)
 	}
 
-	_, err := s.db.Exec(`UPDATE claws SET status='provisioning', bootstrap_ok=0, bootstrap_status='Restoring checkpoint', provider_id='', restore_checkpoint_id=?, restored_from_checkpoint_id=? WHERE id=? AND tenant_id=?`,
+	_, err = s.db.Exec(`UPDATE claws SET status='provisioning', bootstrap_ok=0, bootstrap_status='Restoring checkpoint', provider_id='', restore_checkpoint_id=?, restored_from_checkpoint_id=? WHERE id=? AND tenant_id=?`,
 		checkpointID, checkpointID, clawID, tenantID)
 	if err != nil {
 		return err
@@ -568,6 +589,57 @@ func (s *Server) restoreClawFromCheckpoint(ctx context.Context, tenantID, clawID
 	})
 	go s.provisionStoredClaw(clawID)
 	return nil
+}
+
+// reserveRestoreSource validates that the checkpoint can be restored from and,
+// in the same transaction, records it as the claw's restore source. It returns
+// the restore_checkpoint_id the claw carried before, for
+// releaseRestoreReservation. The transaction is immediate (see sqliteDSN), so
+// the validation and the reservation are one atomic step against the retention
+// writes, which take the same lock to re-check the guard.
+//
+// A claw already carrying a restore id is overwritten, which is what the
+// restore always did: that id is either a failed restore's, which this one
+// supersedes as the operator's retry, or an in-flight one this restore is
+// about to tear down with the sandbox.
+func (s *Server) reserveRestoreSource(tenantID, clawID, checkpointID string) (previous string, err error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return "", err
+	}
+	defer tx.Rollback()
+	var status, manifestPath string
+	if err := tx.QueryRow(`SELECT status, manifest_path FROM claw_checkpoints WHERE id=? AND tenant_id=? AND claw_id=?`, checkpointID, tenantID, clawID).Scan(&status, &manifestPath); err != nil {
+		if err == sql.ErrNoRows {
+			return "", fmt.Errorf("checkpoint not found")
+		}
+		return "", err
+	}
+	if status != "ready" {
+		return "", fmt.Errorf("checkpoint is not ready")
+	}
+	if manifestPath == "" {
+		return "", fmt.Errorf("checkpoint has no manifest")
+	}
+	if err := tx.QueryRow(`SELECT COALESCE(restore_checkpoint_id,'') FROM claws WHERE id=? AND tenant_id=?`, clawID, tenantID).Scan(&previous); err != nil {
+		if err == sql.ErrNoRows {
+			return "", fmt.Errorf("claw not found")
+		}
+		return "", err
+	}
+	if _, err := tx.Exec(`UPDATE claws SET restore_checkpoint_id=? WHERE id=? AND tenant_id=?`, checkpointID, clawID, tenantID); err != nil {
+		return "", err
+	}
+	return previous, tx.Commit()
+}
+
+// releaseRestoreReservation puts the claw's restore id back to previous, but
+// only while it is still the one this restore reserved: a restore that began
+// after ours and reserved its own source must keep it.
+func (s *Server) releaseRestoreReservation(clawID, checkpointID, previous string) {
+	if _, err := s.db.Exec(`UPDATE claws SET restore_checkpoint_id=? WHERE id=? AND restore_checkpoint_id=?`, previous, clawID, checkpointID); err != nil {
+		log.Printf("[restore] release reservation of %s for %s: %v (the source stays protected from retention until a restore applies it)", shortID(checkpointID), shortID(clawID), err)
+	}
 }
 
 type storedClawProvision struct {
@@ -916,7 +988,8 @@ func (s *Server) insertCheckpoint(id, tenantID, clawID, reason, createdBy, provi
 // reference model exists to remove. Writing it at plan time is what lets the
 // plan/sweep interlock (planBlobMissing / removeUnclaimedBlob) carry over
 // unchanged: every digest the plan answers for is referenced before the answer
-// is sent.
+// is sent. The one exception is a plan whose list the hub could not verify
+// against the root; see recordCheckpointPlan and planTreeUnverifiable.
 //
 // Recording before answering is what makes the plan's dedup answer safe. The
 // handler tells the claw to skip uploading a blob the hub already has, which
@@ -930,6 +1003,18 @@ func (s *Server) insertCheckpoint(id, tenantID, clawID, reason, createdBy, provi
 // for a caller the hub does not have yet, not a path it expects to take -- but
 // the safety property must not depend on what the bridge sends.
 func (s *Server) recordCheckpointBlobRefs(checkpointID, rootSHA string, files []types.CheckpointFile) error {
+	return s.recordCheckpointPlan(checkpointID, rootSHA, files, true)
+}
+
+// recordCheckpointPlan is recordCheckpointBlobRefs with the expansion made
+// conditional. expandTree is false for a plan verifyCheckpointPlanTree could
+// not verify: the checkpoint's edge to its root is recorded as usual, so the
+// tree blob and everything an EXISTING expansion of the tree lists are
+// referenced, but the plan's own list is not written as the expansion of a
+// tree it could not prove it is. finalizeCheckpoint establishes the expansion
+// from the uploaded tree blob; see planTreeUnverifiable for what that leaves
+// exposed in between and how the finalize closes it.
+func (s *Server) recordCheckpointPlan(checkpointID, rootSHA string, files []types.CheckpointFile, expandTree bool) error {
 	root := normalizeBlobDigest(rootSHA)
 	if len(files) == 0 && root == "" {
 		// Nothing to reference, so there is no reason to take the write lock --
@@ -964,8 +1049,10 @@ func (s *Server) recordCheckpointBlobRefs(checkpointID, rootSHA string, files []
 	if err := addCheckpointBlobRefsTx(tx, checkpointID, []string{root}); err != nil {
 		return err
 	}
-	if err := addTreeBlobRefsTx(tx, root, files); err != nil {
-		return err
+	if expandTree {
+		if err := addTreeBlobRefsTx(tx, root, files); err != nil {
+			return err
+		}
 	}
 	return tx.Commit()
 }
@@ -1149,11 +1236,17 @@ func (s *Server) handleCheckpointInternal(w http.ResponseWriter, r *http.Request
 			return
 		}
 		// And the file list must BE the tree the root names, before anything
-		// is recorded from it. See verifyCheckpointPlanTree.
-		if err := verifyCheckpointPlanTree(plan); err != nil {
+		// is recorded from it. See verifyCheckpointPlanTree: a list the hub
+		// cannot verify is not rejected, but it is not recorded as the tree's
+		// expansion either.
+		verdict, err := verifyCheckpointPlanTree(plan)
+		if err != nil {
 			log.Printf("[checkpoint] rejecting plan for %s: %v", shortID(checkpointID), err)
 			http.Error(w, "plan files do not hash to the root tree", http.StatusBadRequest)
 			return
+		}
+		if verdict == planTreeUnverifiable {
+			log.Printf("[checkpoint] plan for %s lists a path that did not survive the wire (invalid UTF-8 on the claw, or a genuine U+FFFD); the tree's expansion is deferred to its uploaded blob", shortID(checkpointID))
 		}
 		// Record the reference edges BEFORE answering. The answer is what lets
 		// the claw skip re-uploading blobs the hub already holds, so from the
@@ -1161,7 +1254,7 @@ func (s *Server) handleCheckpointInternal(w http.ResponseWriter, r *http.Request
 		// alive. Failing to record them must fail the plan rather than proceed
 		// unprotected: a retried plan costs one round trip, an unrestorable
 		// checkpoint is found weeks later.
-		if err := s.recordCheckpointBlobRefs(checkpointID, plan.RootSHA256, plan.Files); err != nil {
+		if err := s.recordCheckpointPlan(checkpointID, plan.RootSHA256, plan.Files, verdict == planTreeVerified); err != nil {
 			if errors.Is(err, errCheckpointNotCreating) {
 				log.Printf("[checkpoint] rejecting stale plan for %s: checkpoint is no longer creating", shortID(checkpointID))
 				http.Error(w, "checkpoint is no longer creating", http.StatusConflict)
@@ -1367,13 +1460,25 @@ func (s *Server) finalizeCheckpoint(checkpointID, tenantID, clawID, rootSHA stri
 	if err != nil {
 		return err
 	}
-	if unplanned {
+	// A root whose tree has no expansion yet is in the same position as an
+	// unplanned one, with a different history: its plan was unverifiable
+	// (planTreeUnverifiable), so the files it lists have had no edge since
+	// the plan. Their only protection so far was their mtime, and the hub does
+	// not bound how long ago the plan was. Claim each one now, under the
+	// interlock, and fail the complete on one the sweep already took; the
+	// commit below then writes the expansion from this blob, which is the
+	// content-addressed tree itself and not the claw's word for it.
+	unexpanded, err := s.treeUnexpanded(rootSHA)
+	if err != nil {
+		return err
+	}
+	if unplanned || unexpanded {
 		for _, f := range files {
 			if f.SHA256 == "" {
 				continue
 			}
 			if !s.claimBlobPresent(f.SHA256) {
-				return fmt.Errorf("blob %s of unplanned root %s is not in the blob store", f.SHA256, rootSHA)
+				return fmt.Errorf("blob %s of root %s is not in the blob store", f.SHA256, rootSHA)
 			}
 		}
 	}
@@ -1453,9 +1558,12 @@ func (s *Server) finalizeCheckpoint(checkpointID, tenantID, clawID, rootSHA stri
 	//
 	// The per-file digests are NOT re-inserted here. The plan wrote the
 	// expansion, and re-probing ~12k keys under the write lock on every finalize
-	// is pure cost. The one probe addTreeBlobRefsTx does run covers the case the
-	// plan cannot: a 'complete' naming a root the plan never mentioned, whose
-	// tree would otherwise be referenced with no expansion behind it.
+	// is pure cost. The one probe addTreeBlobRefsTx does run covers the two
+	// cases the plan cannot: a 'complete' naming a root the plan never
+	// mentioned, and a plan whose list the hub could not verify
+	// (planTreeUnverifiable). In both the tree would otherwise be referenced
+	// with no expansion behind it, and in both the expansion written here comes
+	// from the tree blob on disk, which is content-addressed under rootSHA.
 	//
 	// Same transaction as the UPDATE: a checkpoint that says 'ready' and a
 	// complete record of what it holds must land together or not at all.
@@ -1579,6 +1687,22 @@ func (s *Server) checkpointRootUnplanned(checkpointID, rootSHA string) (bool, er
 		return false, err
 	}
 	return !planned, nil
+}
+
+// treeUnexpanded reports whether the tree has no expansion recorded. An empty
+// root is not a tree and is never unexpanded. It is the probe addTreeBlobRefsTx
+// makes, outside a transaction, so finalize can decide whether the files the
+// tree lists have been referenced since the plan.
+func (s *Server) treeUnexpanded(rootSHA string) (bool, error) {
+	root := normalizeBlobDigest(rootSHA)
+	if root == "" {
+		return false, nil
+	}
+	var known bool
+	if err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM tree_blob_refs WHERE tree_sha256=?)`, root).Scan(&known); err != nil {
+		return false, err
+	}
+	return !known, nil
 }
 
 // pruneCheckpointBlobRefsTx drops every edge of the checkpoint outside keep,
@@ -2194,45 +2318,104 @@ func firstNonDigestPlanEntry(plan types.CheckpointPlan) string {
 // (types.EncodeCheckpointTree), over the plan's entries minus the tree's own
 // entry, which the bridge appends after hashing. The entries are hashed as
 // received -- digests are not normalized, sizes and modes are not touched --
-// because the bridge hashed exactly what it sent. The one thing a decoded plan
-// cannot reproduce is a path that was not valid UTF-8 on the claw: the
-// bridge's encoder wrote each such byte as `\ufffd`, and the hub decoded that
-// to the rune U+FFFD, which the same encoder writes raw. For that case the
-// digest is recomputed once more with every U+FFFD written back as `\ufffd`,
-// which is byte-for-byte what the bridge produced when all of them came from
-// invalid bytes. A workspace mixing genuine U+FFFD file names with invalid
-// ones is still rejected; the hub cannot tell the two apart from the plan.
+// because the bridge hashed exactly what it sent.
+//
+// A mismatch is only evidence of tampering when the hub can reproduce what the
+// bridge hashed, and there is exactly one input it cannot: a path that was not
+// valid UTF-8 on the claw. Linux file names are byte strings, and invalid
+// UTF-8 in them is legal and occurs. The bridge's encoder wrote each such byte
+// as `\ufffd`; the hub decoded that to the rune U+FFFD, which the same encoder
+// writes raw (three bytes) -- and, worse, SORTS differently: the bridge
+// ordered the entries by their raw bytes, so a name with a 0x80 byte sorted
+// before "\u00e9" (0xc3 0xa9) on the claw and sorts after it once decoded. The
+// order is gone with the bytes, and no re-encoding on the hub can put it back.
+// Re-escaping U+FFFD is tried first, because when it matches it IS a proof
+// (that is byte-for-byte the bridge's output), but when it does not match the
+// hub has proved nothing either way.
+//
+// So the verdict has three values. Every path round-trips faithfully -- no
+// decoded path contains U+FFFD, which is the only rune the wire can
+// manufacture (every other escape the encoder emits decodes and re-encodes to
+// the same bytes) -- and the digest matches: verified. Faithful and it does
+// not match: a mismatch the producer earned; rejected. Some path carries
+// U+FFFD and neither encoding matches: unverifiable, and NOT rejected. The hub
+// cannot tell an invalid byte from a genuine U+FFFD name, so a genuine one is
+// unverifiable too; the cost of that is deferral, not rejection. Rejecting an
+// unverifiable plan would refuse every checkpoint that claw ever takes, for
+// as long as one such file exists in its workspace -- and checkpointing is how
+// agent work survives a restart, which is worse than the hole this closes.
+// What the verdict protects is the other property: a list the hub could not
+// verify never becomes a tree's expansion. See planTreeUnverifiable.
 //
 // A plan without a root is not a tree and is not verified: it takes the
 // rootless fallback in recordCheckpointBlobRefs, which records one edge per
 // file under the checkpoint itself and expands nothing.
-func verifyCheckpointPlanTree(plan types.CheckpointPlan) error {
+func verifyCheckpointPlanTree(plan types.CheckpointPlan) (planTreeVerdict, error) {
 	root := normalizeBlobDigest(plan.RootSHA256)
 	if root == "" {
-		return nil
+		return planTreeVerified, nil
 	}
 	entries := make([]types.CheckpointFile, 0, len(plan.Files))
+	faithful := true
 	for _, f := range plan.Files {
 		if f.Path == types.CheckpointTreePath && normalizeBlobDigest(f.SHA256) == root {
 			continue
+		}
+		if strings.ContainsRune(f.Path, utf8.RuneError) {
+			faithful = false
 		}
 		entries = append(entries, f)
 	}
 	tree, got, err := types.EncodeCheckpointTree(entries)
 	if err != nil {
-		return fmt.Errorf("encode plan tree: %w", err)
+		return planTreeVerified, fmt.Errorf("encode plan tree: %w", err)
 	}
 	if got == root {
-		return nil
+		return planTreeVerified, nil
 	}
-	if bytes.Contains(tree, []byte("\uFFFD")) {
-		escaped := bytes.ReplaceAll(tree, []byte("\uFFFD"), []byte(`\ufffd`))
-		if shaBytes(escaped) == root {
-			return nil
-		}
+	if faithful {
+		return planTreeVerified, fmt.Errorf("plan files hash to tree %s, not the root %s the plan claims (%d entries)", got, root, len(entries))
 	}
-	return fmt.Errorf("plan files hash to tree %s, not the root %s the plan claims (%d entries)", got, root, len(entries))
+	escaped := bytes.ReplaceAll(tree, []byte("\ufffd"), []byte(`\ufffd`))
+	if shaBytes(escaped) == root {
+		return planTreeVerified, nil
+	}
+	return planTreeUnverifiable, nil
 }
+
+// planTreeVerdict is what verifyCheckpointPlanTree could establish about a
+// plan's file list.
+type planTreeVerdict int
+
+const (
+	// planTreeVerified: the list hashes to the root; it is the tree, and the
+	// plan records its expansion.
+	planTreeVerified planTreeVerdict = iota
+	// planTreeUnverifiable: a path did not survive the wire, so the hub cannot
+	// reconstruct what the bridge hashed and can prove nothing about the list.
+	// The plan records the checkpoint's edge to the root but NOT the
+	// expansion; that is established at finalize from the uploaded tree blob,
+	// which is content-addressed under the root and therefore self-verifying
+	// (finalizeCheckpoint reads it with filesForTree and commits its expansion
+	// in the publish transaction).
+	//
+	// What that defers, and what it costs. The expansion is normally written at
+	// plan time so that no file blob is ever left with no edge covering it. For
+	// an unverifiable plan the files the tree lists have no edge between the
+	// plan and the finalize; in that window each is protected only by its mtime
+	// -- fresh for a blob the claw uploads, refreshed by claimBlobPresent for a
+	// blob the plan found already present -- against a sweep whose grace is
+	// blobSweepGrace, and by the claim window against a sweep already walking.
+	// That window is not bounded by the hub: the request wait times out but the
+	// row stays 'creating', so a slow upload can outlive the grace. The tree
+	// blob's arrival is what closes it, and it closes it with a proof rather
+	// than a hope: finalize treats a root whose tree is not yet expanded the way
+	// it treats an unplanned root -- every file the blob lists is claimed under
+	// the interlock, and a file the sweep already took fails the complete. No
+	// 'ready' checkpoint is ever published over a swept blob; the worst case for
+	// an unverifiable plan is a checkpoint that fails and is retaken.
+	planTreeUnverifiable
+)
 
 // stagedManifestMarker is what stageCheckpointManifest puts between a
 // manifest's final name and the attempt id.

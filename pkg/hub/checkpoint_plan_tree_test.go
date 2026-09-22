@@ -410,3 +410,169 @@ func TestRenameFailureNeverPublishesTheRow(t *testing.T) {
 		t.Fatalf("the occupied final path was disturbed: %v", err)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// A list the hub cannot verify is deferred, not rejected
+// ---------------------------------------------------------------------------
+
+// unverifiableEntries is a workspace the hub cannot verify from the plan
+// alone: a name with a byte that is not UTF-8 (0x80) and a name with "é"
+// (0xc3 0xa9). The bridge sorts the raw bytes, so 0x80 comes first; the wire
+// turns 0x80 into U+FFFD (0xef 0xbf 0xbd), which sorts AFTER "é". No
+// re-encoding on the hub restores the order the bridge hashed, so neither
+// the raw nor the re-escaped digest matches the root.
+func unverifiableEntries(t *testing.T, seed string) []types.CheckpointFile {
+	t.Helper()
+	e := workspaceEntries(t, 2, seed)
+	e[0].Path = "workspace/\x80.txt"
+	e[1].Path = "workspace/é.txt"
+	return e
+}
+
+func assertTreeExpandedTo(t *testing.T, s *Server, root string, entries []types.CheckpointFile, when string) {
+	t.Helper()
+	if n := treeBlobRefCount(t, s, root); n != len(entries) {
+		t.Fatalf("expansion has %d row(s) %s, want one per file (%d)", n, when, len(entries))
+	}
+	for _, e := range entries {
+		var present bool
+		if err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM tree_blob_refs WHERE tree_sha256=? AND sha256=?)`, root, e.SHA256).Scan(&present); err != nil {
+			t.Fatal(err)
+		}
+		if !present {
+			t.Fatalf("file %s is missing from the tree's expansion %s", shortID(e.SHA256), when)
+		}
+	}
+}
+
+// One file whose name is not valid UTF-8 must not cost a claw every checkpoint
+// it will ever take. The plan is accepted; what the hub declines to do is
+// believe its list -- the expansion is written at finalize, from the tree
+// blob the bridge uploads, which is content-addressed under the root.
+func TestUnverifiablePlanIsAcceptedAndExpandedFromItsTreeBlob(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	s := newCheckpointCompletionTestServer(t)
+	insertTestCheckpoint(t, s, "cp", "manual")
+	entries := unverifiableEntries(t, "")
+	plan, tree := bridgePlan(t, entries)
+
+	rr := postPlan(t, s, "cp", plan)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("the bridge's plan for a workspace with an invalid-UTF-8 name was answered %d %q; every checkpoint of that claw would be refused", rr.Code, rr.Body.String())
+	}
+	if n := checkpointBlobRefCount(t, s, "cp"); n != 1 {
+		t.Fatalf("checkpoint holds %d edge(s) after its plan, want 1 (the root)", n)
+	}
+	if n := treeBlobRefCount(t, s, plan.RootSHA256); n != 0 {
+		t.Fatalf("the plan's list was recorded as the tree's expansion (%d row(s)) although the hub could not verify it", n)
+	}
+	var ack types.CheckpointPlanAck
+	if err := json.Unmarshal(rr.Body.Bytes(), &ack); err != nil {
+		t.Fatal(err)
+	}
+	if len(ack.Upload) != 1 || ack.Upload[0] != plan.RootSHA256 {
+		t.Fatalf("upload list = %v, want just the tree %s", ack.Upload, plan.RootSHA256)
+	}
+
+	// The bridge uploads the tree it hashed and completes.
+	if sha := writeRetentionBlob(t, tree); sha != plan.RootSHA256 {
+		t.Fatalf("fixture: tree blob hashes to %s, plan root is %s", sha, plan.RootSHA256)
+	}
+	if err := s.finalizeCheckpoint("cp", "tenant", "claw", plan.RootSHA256); err != nil {
+		t.Fatalf("finalize: %v", err)
+	}
+	if got := checkpointStatus(t, s, "cp"); got != "ready" {
+		t.Fatalf("status = %q after finalize, want ready", got)
+	}
+	assertTreeExpandedTo(t, s, plan.RootSHA256, entries, "after the tree blob was uploaded and the checkpoint finalized")
+}
+
+// The security property survives the deferral: a truncated list the hub
+// cannot verify must not become the tree's expansion any more than a
+// truncated list it can. The honest plan that follows still finds the tree
+// unknown and records it whole.
+func TestUnverifiableTruncatedPlanCannotPoisonTheTree(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	s := newCheckpointCompletionTestServer(t)
+	insertTestCheckpoint(t, s, "poisoner", "manual")
+	insertTestCheckpoint(t, s, "honest", "manual")
+	entries := unverifiableEntries(t, "")
+	entries = append(entries, workspaceEntries(t, 2, "more")...)
+	honest, _ := bridgePlan(t, entries)
+
+	// Drop a file with a plain name; the U+FFFD name stays, so the hub cannot
+	// tell this list from one the wire mangled.
+	truncated := honest
+	truncated.Files = nil
+	for _, f := range honest.Files {
+		if f.Path == "workspace/1.txt" {
+			continue
+		}
+		truncated.Files = append(truncated.Files, f)
+	}
+	rr := postPlan(t, s, "poisoner", truncated)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("the unverifiable plan was answered %d %q, want 200: the hub cannot prove it wrong", rr.Code, rr.Body.String())
+	}
+	if n := treeBlobRefCount(t, s, honest.RootSHA256); n != 0 {
+		t.Fatalf("the truncated list was recorded as the tree's expansion (%d row(s))", n)
+	}
+
+	if rr := postPlan(t, s, "honest", honest); rr.Code != http.StatusOK {
+		t.Fatalf("honest plan answered %d %q", rr.Code, rr.Body.String())
+	}
+	if n := treeBlobRefCount(t, s, honest.RootSHA256); n != 0 {
+		t.Fatalf("an honest but equally unverifiable plan recorded %d expansion row(s) at plan time", n)
+	}
+}
+
+// Between an unverifiable plan and its finalize the files have no edge, and
+// the hub does not bound how long that takes. The finalize must therefore
+// prove every file the tree lists is still on disk before publishing, and
+// refuse to publish over one the sweep took -- rather than record a 'ready'
+// checkpoint that cannot be restored.
+func TestFinalizeOfAnUnverifiablePlanFailsOnAFileTheSweepTook(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	s := newCheckpointCompletionTestServer(t)
+	insertTestCheckpoint(t, s, "cp", "manual")
+	entries := unverifiableEntries(t, "")
+	plan, tree := bridgePlan(t, entries)
+	if rr := postPlan(t, s, "cp", plan); rr.Code != http.StatusOK {
+		t.Fatalf("plan answered %d %q", rr.Code, rr.Body.String())
+	}
+	writeRetentionBlob(t, tree)
+	if err := os.Remove(checkpointBlobPath(entries[1].SHA256)); err != nil {
+		t.Fatal(err)
+	}
+
+	err := s.finalizeCheckpoint("cp", "tenant", "claw", plan.RootSHA256)
+	if err == nil {
+		t.Fatal("finalize published a checkpoint over a file blob that is gone")
+	}
+	if !strings.Contains(err.Error(), entries[1].SHA256) {
+		t.Fatalf("finalize failed with %q, want the missing blob named", err)
+	}
+	if got := checkpointStatus(t, s, "cp"); got != "creating" {
+		t.Fatalf("status = %q, want creating", got)
+	}
+	if n := treeBlobRefCount(t, s, plan.RootSHA256); n != 0 {
+		t.Fatalf("the failed finalize recorded %d expansion row(s)", n)
+	}
+}
+
+// A list with every path intact that does not hash to its root is a mismatch
+// the producer earned: the deferral above is only for lists the hub cannot
+// reproduce, never a way past the check. (TestPlanFilesMustHashToTheRootTree
+// covers each way of tampering; this holds the boundary between the two
+// verdicts on the same workspace.)
+func TestTamperedPlanWithFaithfulPathsIsStillRejected(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	s := newCheckpointCompletionTestServer(t)
+	insertTestCheckpoint(t, s, "cp", "manual")
+	entries := workspaceEntries(t, 3, "")
+	entries[0].Path = "workspace/café.txt" // valid UTF-8, escaped by nothing
+	plan, _ := bridgePlan(t, entries)
+	plan.Files = plan.Files[1:] // drop one file, keep the tree entry
+	rr := postPlan(t, s, "cp", plan)
+	assertPlanRejectedWithoutSideEffects(t, s, "cp", plan.RootSHA256, rr)
+}
