@@ -129,6 +129,11 @@ type Server struct {
 	blobClaimMu     sync.Mutex
 	blobClaimWindow map[string]struct{}
 
+	// manifestPublishMu serialises the rename of a staged checkpoint manifest
+	// into its final path with the commit that names it, and the unlink that
+	// undoes the rename when that commit fails. See publishCheckpointManifest.
+	manifestPublishMu sync.Mutex
+
 	// retentionIndexes is the sweeper's record of its attempts to build the
 	// retention indexes after a cycle (buildRetentionIndexesAfterCycle). Only
 	// the sweeper goroutine touches it.

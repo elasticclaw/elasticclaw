@@ -1744,18 +1744,38 @@ func (s *Server) deleteExpiredCheckpoints(checkpointIDs []string) (map[string]st
 // work list, and held the sweep DECLINED forever while the backfill line
 // counted it as processed. blobDigestSQL is that acceptance test in SQL, and
 // TestGatePredicateMatchesTheWriter holds the two to each other.
+//
+// The test is PER COLUMN: a row is unreferenced when any one of its digest
+// columns names a digest that has no edge under the row. "Does the row have
+// any edge at all" was the previous test, and it let a row with a root edge
+// but no edge for its message blob off the work list -- the sweep then read
+// that message blob as garbage. Four indexed probes on the (checkpoint_id,
+// sha256) primary key, instead of one, on the rows that hold blobs.
 var unreferencedCheckpointsWhere = `status IN ('ready','skipped')
-	   AND (` + blobDigestSQL("manifest_sha256") + ` OR ` + blobDigestSQL("root_tree_sha256") + `
-	        OR ` + blobDigestSQL("message_tree_sha256") + ` OR ` + blobDigestSQL("workspace_tree_sha256") + `)
-	   AND NOT EXISTS (SELECT 1 FROM checkpoint_blob_refs r WHERE r.checkpoint_id = claw_checkpoints.id)`
+	   AND (` + unreferencedDigestSQL("manifest_sha256") + ` OR ` + unreferencedDigestSQL("root_tree_sha256") + `
+	        OR ` + unreferencedDigestSQL("message_tree_sha256") + ` OR ` + unreferencedDigestSQL("workspace_tree_sha256") + `)`
+
+// unreferencedDigestSQL is "col names a digest and the row has no edge for
+// it" as a SQL predicate. The edge is probed by the bare digest, which is what
+// the writer records.
+func unreferencedDigestSQL(col string) string {
+	return fmt.Sprintf(`(%s AND NOT EXISTS (SELECT 1 FROM checkpoint_blob_refs r WHERE r.checkpoint_id = claw_checkpoints.id AND r.sha256 = %s))`,
+		blobDigestSQL(col), blobDigestBareSQL(col))
+}
 
 // blobDigestSQL is normalizeBlobDigest(col) <> "" as a SQL predicate: after
 // trimming whitespace and an optional "sha256:" prefix, exactly 64 characters
 // and every one of them a lower-case hex digit. NULL is not a digest.
 func blobDigestSQL(col string) string {
-	trimmed := fmt.Sprintf(`trim(%s, ' ' || char(9,10,11,12,13))`, col)
-	bare := fmt.Sprintf(`(CASE WHEN substr(%s,1,7)='sha256:' THEN substr(%s,8) ELSE %s END)`, trimmed, trimmed, trimmed)
+	bare := blobDigestBareSQL(col)
 	return fmt.Sprintf(`(length(%s) = 64 AND %s NOT GLOB '*[^0-9a-f]*')`, bare, bare)
+}
+
+// blobDigestBareSQL is the value normalizeBlobDigest would return for col,
+// before the length and character checks: trimmed, prefix removed.
+func blobDigestBareSQL(col string) string {
+	trimmed := fmt.Sprintf(`trim(%s, ' ' || char(9,10,11,12,13))`, col)
+	return fmt.Sprintf(`(CASE WHEN substr(%s,1,7)='sha256:' THEN substr(%s,8) ELSE %s END)`, trimmed, trimmed, trimmed)
 }
 
 // unreferencedCheckpoints counts the rows that hold blobs without an edge, and
@@ -2645,6 +2665,11 @@ func (s *Server) planBlobMissing(sha string) bool {
 // after the touch (and sees the fresh mtime). Chtimes is one syscall.
 func (s *Server) claimBlobPresent(sha string) bool {
 	path := checkpointBlobPath(sha)
+	if path == "" {
+		// Not a digest, so nothing under the blob root can correspond to it,
+		// and nothing outside the blob root may be stat-ed or touched for it.
+		return false
+	}
 	s.blobClaimMu.Lock()
 	defer s.blobClaimMu.Unlock()
 	if s.blobClaimWindow != nil {

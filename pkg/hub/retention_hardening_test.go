@@ -534,31 +534,25 @@ func seedDryRunParityFixture(t *testing.T, s *Server, reference time.Time) {
 // compaction and expiry mutate nothing in a dry run, so the keep set was built
 // from rows and manifests a real cycle would already have removed, and the dry
 // run reported a fraction of the blobs the real run deletes.
+//
+// The test drives the whole cycle (retentionSweepOnce) in both modes and
+// compares the "cycle done" lines, because the wiring is the thing under test:
+// the cycle assembles the released ids from what compaction and expiry report
+// and hands them to the sweep, and the runbook's first step -- a dry run -- is
+// exactly as accurate as that hand-off. An earlier version of this test
+// re-assembled the list by hand and called the sweep directly, and passed with
+// the cycle passing nil.
 func TestDryRunReportsTheSameBlobsTheRealCycleRemoves(t *testing.T) {
 	reference := time.Now()
-	cutoffAge := 90 * 24 * time.Hour
-	compactAge := 10 * 24 * time.Hour
 
-	run := func(t *testing.T, dryRun bool) (int, int64) {
+	run := func(t *testing.T, dryRun bool) (blobs int, bytes int64) {
 		t.Helper()
 		s := newRetentionTestServer(t)
+		s.nowFunc = func() time.Time { return reference }
+		s.hubCfg = &types.HubConfig{Retention: &types.RetentionConfig{Enabled: boolPtr(true), DryRun: dryRun}}
 		seedDryRunParityFixture(t, s, reference)
-
-		var released []string
-		compaction, err := s.compactFinalizedCheckpoints(reference.Add(-compactAge), dryRun)
-		if err != nil {
-			t.Fatalf("compactFinalizedCheckpoints: %v", err)
-		}
-		_, expired := s.applyRetentionWindow(reference.Add(-cutoffAge), dryRun)
-		if dryRun {
-			released = append(released, compaction.ids...)
-			released = append(released, expired...)
-		}
-		removed, freed, _, err := s.sweepCheckpointBlobs(dryRun, released)
-		if err != nil {
-			t.Fatalf("sweepCheckpointBlobs: %v", err)
-		}
-		return removed, freed
+		out := captureRetentionLog(t, s.retentionSweepOnce)
+		return parseCycleDoneBlobs(t, out)
 	}
 
 	wantRemoved, wantFreed := run(t, false)
@@ -570,6 +564,33 @@ func TestDryRunReportsTheSameBlobsTheRealCycleRemoves(t *testing.T) {
 		t.Fatalf("dry run reports %d blobs / %d bytes, the real cycle removes %d / %d; dry_run must not understate the most destructive phase",
 			gotRemoved, gotFreed, wantRemoved, wantFreed)
 	}
+}
+
+// parseCycleDoneBlobs reads the blob count and blob bytes out of a cycle's
+// "cycle done" line. A declined sweep is a fixture error, not a parity result.
+func parseCycleDoneBlobs(t *testing.T, out string) (int, int64) {
+	t.Helper()
+	line := ""
+	for _, l := range strings.Split(out, "\n") {
+		if strings.Contains(l, "[retention] cycle done") {
+			line = l
+		}
+	}
+	if line == "" {
+		t.Fatalf("no cycle done line; log was:\n%s", out)
+	}
+	if strings.Contains(line, "DECLINED") {
+		t.Fatalf("the sweep declined; the fixture is not fully referenced:\n%s", out)
+	}
+	var blobs int
+	var blobBytes int64
+	if _, err := fmt.Sscanf(line[strings.Index(line, " blobs="):], " blobs=%d", &blobs); err != nil {
+		t.Fatalf("parse blobs from %q: %v", line, err)
+	}
+	if _, err := fmt.Sscanf(line[strings.Index(line, "(blobs="):], "(blobs=%d", &blobBytes); err != nil {
+		t.Fatalf("parse blob bytes from %q: %v", line, err)
+	}
+	return blobs, blobBytes
 }
 
 // ---------------------------------------------------------------------------

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -23,7 +24,9 @@ func checkpointRestoreTestFiles(t *testing.T, contents []string) []types.Checkpo
 	t.Setenv("HOME", t.TempDir())
 	files := make([]types.CheckpointFile, 0, len(contents))
 	for i, content := range contents {
-		sha := strings.Repeat(string(rune('a'+i)), 64)
+		// A real digest: checkpointBlobPath refuses anything that is not
+		// 64 lower-case hex characters, as the hub does on the wire.
+		sha := strings.Repeat(fmt.Sprintf("%02x", i), 32)
 		path := checkpointBlobPath(sha)
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 			t.Fatalf("make blob directory: %v", err)

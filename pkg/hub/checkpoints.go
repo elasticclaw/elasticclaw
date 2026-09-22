@@ -133,10 +133,22 @@ func checkpointsRoot() string {
 	return filepath.Join(hubDataDir(), "checkpoints")
 }
 
+// checkpointBlobPath is the ONLY way a digest becomes a path under the blob
+// root, and it refuses anything that is not a digest: it returns "" unless
+// normalizeBlobDigest accepts the value.
+//
+// The rule lives here rather than at the call sites because the digests that
+// reach it come off the wire -- a checkpoint plan, a blob upload, a tree blob a
+// claw uploaded and the hub later reads back -- and a call site that forgot to
+// validate would hand "../../../etc/foo" to a join that used to accept it. Every
+// caller that goes on to stat, touch, read or write MUST treat "" as "no such
+// blob" (os.Stat and os.ReadFile of "" fail on their own; writers check). The
+// claim primitive, the plan and upload handlers, the tree reader, the restore
+// reader and the backfill's tree expansion all sit behind this one function.
 func checkpointBlobPath(sha string) string {
-	clean := strings.TrimPrefix(sha, "sha256:")
-	if len(clean) < 4 {
-		return filepath.Join(checkpointsRoot(), "blobs", "sha256", clean)
+	clean := normalizeBlobDigest(sha)
+	if clean == "" {
+		return ""
 	}
 	return filepath.Join(checkpointsRoot(), "blobs", "sha256", clean[:2], clean[2:4], clean)
 }
@@ -266,7 +278,7 @@ func failStuckCreatingCheckpointsTx(db *sql.DB, cutoff time.Time) (int64, error)
 		return 0, err
 	}
 	defer tx.Rollback()
-	if _, err := tx.Exec(`DELETE FROM checkpoint_blob_refs WHERE checkpoint_id IN (
+	if err := releaseBlobRefsTx(tx, `DELETE FROM checkpoint_blob_refs WHERE checkpoint_id IN (
 		SELECT id FROM claw_checkpoints WHERE status='creating' AND created_at < ?)`, cutoff); err != nil {
 		return 0, err
 	}
@@ -1055,8 +1067,49 @@ func (s *Server) requireCheckpointCreating(row *sql.Row) error {
 // while the status change rolls back would leave a live checkpoint holding
 // nothing.
 func deleteCheckpointBlobRefsTx(tx *sql.Tx, checkpointID string) error {
-	_, err := tx.Exec(`DELETE FROM checkpoint_blob_refs WHERE checkpoint_id=?`, checkpointID)
+	return releaseBlobRefsTx(tx, `DELETE FROM checkpoint_blob_refs WHERE checkpoint_id=?`, checkpointID)
+}
+
+// releaseBlobRefsTx runs an edge delete inside the caller's transaction and
+// tolerates exactly one failure: the edge table not existing.
+//
+// checkpoint_blob_refs is created off the fatal boot path on purpose (see
+// ensureCheckpointBlobRefTables), so a hub that could not allocate the two
+// pages it costs -- the disk-full hub this model exists for -- serves without
+// it. On that hub every plan is rejected with a storage error, and every
+// rejected plan leaves a 'creating' row that only failCheckpoint, the
+// stuck-creating sweep or boot reconciliation can fail. Each of those releases
+// the row's edges in the same transaction as the status change, which is the
+// right coupling when the table exists and a rollback of the status change
+// when it does not: "no such table" failed the DELETE, the transaction was
+// abandoned, and the row stayed 'creating' -- forever, on the one hub where
+// the row cannot even have edges. A table that does not exist holds no edge
+// to release, so the delete is a no-op there and the status change proceeds.
+// Any other error is still the transaction's.
+func releaseBlobRefsTx(tx *sql.Tx, query string, args ...any) error {
+	_, err := tx.Exec(query, args...)
+	if err != nil && isMissingBlobRefTableErr(err) {
+		blobRefTableMissingOnce.Do(func() {
+			log.Printf("[checkpoint] blob reference table is missing; releasing references is a no-op until a boot creates it (%v; further occurrences are not logged)", err)
+		})
+		return nil
+	}
 	return err
+}
+
+// blobRefTableMissingOnce bounds the missing-table log to one line per process:
+// on the hub where the table is missing every failure of every checkpoint
+// would otherwise repeat it.
+var blobRefTableMissingOnce sync.Once
+
+// isMissingBlobRefTableErr reports whether err is SQLite saying one of the blob
+// reference tables does not exist. modernc.org/sqlite reports it under the
+// generic SQLITE_ERROR code, so the message is the only discriminator (the same
+// situation isBenignAddColumnErr is in).
+func isMissingBlobRefTableErr(err error) bool {
+	msg := err.Error()
+	return strings.Contains(msg, "no such table") &&
+		(strings.Contains(msg, "checkpoint_blob_refs") || strings.Contains(msg, "tree_blob_refs"))
 }
 
 func (s *Server) handleCheckpointInternal(w http.ResponseWriter, r *http.Request) {
@@ -1082,6 +1135,19 @@ func (s *Server) handleCheckpointInternal(w http.ResponseWriter, r *http.Request
 			return
 		}
 		plan.CheckpointID = checkpointID
+		// Every digest in the plan is validated before anything acts on it. A
+		// plan entry is the one value that reaches the claim primitive straight
+		// off the wire, and the claim stats and touches the path it names; an
+		// entry that is not a digest cannot name a blob, so answering "upload
+		// it" would only make the bridge fail its PUT later, and recording it
+		// would record nothing (addTreeBlobRefsTx skips it). Reject the plan
+		// instead: the bridge computes digests with hex.EncodeToString, so a
+		// plan carrying anything else is a client the hub should not humour.
+		if bad := firstNonDigestPlanEntry(plan); bad != "" {
+			log.Printf("[checkpoint] rejecting plan for %s: %q is not a blob digest", shortID(checkpointID), bad)
+			http.Error(w, "plan names a value that is not a blob digest", http.StatusBadRequest)
+			return
+		}
 		// Record the reference edges BEFORE answering. The answer is what lets
 		// the claw skip re-uploading blobs the hub already holds, so from the
 		// moment it is sent the checkpoint depends on files nothing else keeps
@@ -1162,8 +1228,12 @@ func (s *Server) handleCheckpointBlobUpload(w http.ResponseWriter, r *http.Reque
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	sha := strings.TrimPrefix(r.URL.Path, "/api/checkpoints/blob/")
-	if !validSHA256(sha) {
+	// The same acceptance test as checkpointBlobPath, so the digest that is
+	// hashed against, claimed and laid out below is the one the path names.
+	// hex.DecodeString used to be the check here, and it accepts upper-case
+	// hex, which the blob layout does not.
+	sha := normalizeBlobDigest(strings.TrimPrefix(r.URL.Path, "/api/checkpoints/blob/"))
+	if sha == "" {
 		http.Error(w, "bad sha", http.StatusBadRequest)
 		return
 	}
@@ -1269,9 +1339,36 @@ func (s *Server) finalizeCheckpoint(checkpointID, tenantID, clawID, rootSHA stri
 	if err := s.requireCheckpointCreating(s.db.QueryRow(`SELECT status FROM claw_checkpoints WHERE id=?`, checkpointID)); err != nil {
 		return err
 	}
+	// A 'complete' may name a root the plan never did. The shipped bridge
+	// never does (it completes with the root it planned), but the plan is
+	// where every digest of the workspace goes through the claim half of the
+	// plan/sweep interlock, and a root that skipped the plan skipped that: its
+	// tree and every file the tree lists would be referenced by the commit
+	// below without ever having been claimed or found on disk, and a sweep
+	// armed between now and that commit could unlink them. Claim them here,
+	// and fail the complete on a blob the store does not hold -- a checkpoint
+	// that cannot be restored is not one to record as 'ready'. On the planned
+	// root this costs one indexed probe.
+	unplanned, err := s.checkpointRootUnplanned(checkpointID, rootSHA)
+	if err != nil {
+		return err
+	}
+	if unplanned && !s.claimBlobPresent(rootSHA) {
+		return fmt.Errorf("unplanned root %s is not in the blob store", rootSHA)
+	}
 	files, err := s.filesForTree(rootSHA)
 	if err != nil {
 		return err
+	}
+	if unplanned {
+		for _, f := range files {
+			if f.SHA256 == "" {
+				continue
+			}
+			if !s.claimBlobPresent(f.SHA256) {
+				return fmt.Errorf("blob %s of unplanned root %s is not in the blob store", f.SHA256, rootSHA)
+			}
+		}
 	}
 	msgSHA, msgCount, cutoff, err := s.writeMessageCheckpointBlob(clawID, tenantID)
 	if err != nil {
@@ -1287,18 +1384,19 @@ func (s *Server) finalizeCheckpoint(checkpointID, tenantID, clawID, rootSHA stri
 	}
 	manifestSHA := shaBytes(data)
 	path := checkpointManifestPath(checkpointID)
-	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
-		return err
-	}
-	if err := writeFileAtomic(path, data, 0o640); err != nil {
-		return err
-	}
-	// From here on the manifest is on disk and nothing claims it until the
-	// transaction below commits. Every exit before that -- a Begin or Exec
-	// failure, the guard rejecting the row, a failed Commit -- must unlink it,
-	// because a manifest with no row that names it is debris the hub has no
-	// other way to notice. One guard keyed on the commit covers all of them,
-	// where a cleanup per exit covered only the two that were remembered.
+	// The manifest is STAGED under a name that belongs to this attempt alone,
+	// and renamed to its final path only inside the transaction that wins the
+	// guarded UPDATE below (publishCheckpointManifest). Two 'complete' requests
+	// for the same checkpoint used to write the same final path: both passed
+	// the pre-check, the loser's RowsAffected()==0 exit then unlinked the file
+	// the winner had just published, and the loser's own write could already
+	// have replaced the winner's bytes under the winner's manifest_sha256.
+	// Staging makes the final path something only a winner ever touches.
+	//
+	// Every exit before the publish -- a Begin or Exec failure, the guard
+	// rejecting the row, a failed rename -- unlinks the staged file, because a
+	// manifest with no row that names it is debris the hub has no other way to
+	// notice. One guard keyed on the publish covers all of them.
 	//
 	// The message blob is deliberately NOT unlinked here. It is content
 	// addressed and may be shared: a claw whose messages did not change between
@@ -1306,12 +1404,19 @@ func (s *Server) finalizeCheckpoint(checkpointID, tenantID, clawID, rootSHA stri
 	// may have found it already on disk under another checkpoint's edge. With
 	// this row still 'creating' and its edge rolled back, an unshared blob is
 	// simply unreferenced, which is exactly what the sweep collects.
+	staged, err := stageCheckpointManifest(path, data)
+	if err != nil {
+		return err
+	}
 	published := false
 	defer func() {
 		if !published {
-			_ = os.Remove(path)
+			_ = os.Remove(staged)
 		}
 	}()
+	if checkpointManifestStagedHook != nil {
+		checkpointManifestStagedHook(checkpointID)
+	}
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
@@ -1365,11 +1470,89 @@ func (s *Server) finalizeCheckpoint(checkpointID, tenantID, clawID, rootSHA stri
 	if err := pruneCheckpointBlobRefsTx(tx, checkpointID, rootSHA, []string{rootSHA, msgSHA, manifestSHA}); err != nil {
 		return err
 	}
-	if err := tx.Commit(); err != nil {
+	if err := s.publishCheckpointManifest(tx, staged, path); err != nil {
 		return err
 	}
 	published = true
 	return nil
+}
+
+// checkpointManifestStagedHook runs once the manifest of a completing
+// checkpoint is staged and before its transaction begins. It is nil in
+// production and exists so a test can hold two completes of the same
+// checkpoint at exactly the point where both have passed the pre-check and
+// neither has committed.
+var checkpointManifestStagedHook func(checkpointID string)
+
+// stageCheckpointManifest writes the manifest under a name unique to this
+// attempt, next to its final path, and returns that name. The staged file is
+// not a manifest yet: nothing names it, and its author removes it unless
+// publishCheckpointManifest renames it into place.
+func stageCheckpointManifest(final string, data []byte) (string, error) {
+	if err := os.MkdirAll(filepath.Dir(final), 0o750); err != nil {
+		return "", err
+	}
+	staged := final + ".attempt-" + uuid.New().String()
+	f, err := os.OpenFile(staged, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o640)
+	if err != nil {
+		return "", err
+	}
+	if _, err := f.Write(data); err != nil {
+		_ = f.Close()
+		_ = os.Remove(staged)
+		return "", err
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(staged)
+		return "", err
+	}
+	return staged, nil
+}
+
+// publishCheckpointManifest renames the staged manifest into its final path
+// and commits the transaction that names it, as one step no other attempt can
+// interleave with.
+//
+// It is called only after the guarded UPDATE affected the row, so the caller
+// holds the database's write lock: no other complete for this checkpoint can
+// be past its own UPDATE, and none can reach its own rename. The mutex covers
+// the remaining case, a commit that fails AFTER the rename. That failure ends
+// this transaction, so a competing complete may now win the row -- and it
+// must not find its freshly renamed manifest removed by this attempt's undo.
+// Under the mutex the competitor's rename waits until this undo is done, so
+// the file removed here is always this attempt's own. Rename and commit are
+// each one syscall, so the hold is as short as the write lock it shadows.
+//
+// A commit that fails after the rename leaves a 'creating' row and a file at
+// the final path; the unlink is what keeps that from being debris a later
+// failure of the row would then strand forever.
+func (s *Server) publishCheckpointManifest(tx *sql.Tx, staged, final string) error {
+	s.manifestPublishMu.Lock()
+	defer s.manifestPublishMu.Unlock()
+	if err := os.Rename(staged, final); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		_ = os.Remove(final)
+		return err
+	}
+	return nil
+}
+
+// checkpointRootUnplanned reports whether the root a 'complete' names has no
+// edge under the checkpoint, i.e. the plan never mentioned it. An empty root
+// is not a tree and is never unplanned.
+func (s *Server) checkpointRootUnplanned(checkpointID, rootSHA string) (bool, error) {
+	root := normalizeBlobDigest(rootSHA)
+	if root == "" {
+		return false, nil
+	}
+	var planned bool
+	if err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM checkpoint_blob_refs WHERE checkpoint_id=? AND sha256=?)`,
+		checkpointID, root).Scan(&planned); err != nil {
+		return false, err
+	}
+	return !planned, nil
 }
 
 // pruneCheckpointBlobRefsTx drops every edge of the checkpoint outside keep,
@@ -1415,21 +1598,22 @@ func (s *Server) completeMetadataOnlyCheckpoint(checkpointID, clawID, reason, de
 	data, _ := json.Marshal(manifest)
 	manifestSHA := shaBytes(data)
 	path := checkpointManifestPath(checkpointID)
-	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+	// Staged and published exactly as in finalizeCheckpoint, for the same
+	// reason: the final path is touched only by the attempt that wins the row,
+	// and the message blob is left to the sweep because it may be shared.
+	staged, err := stageCheckpointManifest(path, data)
+	if err != nil {
 		return err
 	}
-	if err := writeFileAtomic(path, data, 0o640); err != nil {
-		return err
-	}
-	// Same guard as finalizeCheckpoint, for the same reason: the manifest
-	// belongs to nobody until the commit, and the message blob is left to the
-	// sweep because it may be shared.
 	published := false
 	defer func() {
 		if !published {
-			_ = os.Remove(path)
+			_ = os.Remove(staged)
 		}
 	}()
+	if checkpointManifestStagedHook != nil {
+		checkpointManifestStagedHook(checkpointID)
+	}
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
@@ -1449,7 +1633,7 @@ func (s *Server) completeMetadataOnlyCheckpoint(checkpointID, clawID, reason, de
 	if err := addCheckpointBlobRefsTx(tx, checkpointID, []string{msgSHA, manifestSHA}); err != nil {
 		return err
 	}
-	if err := tx.Commit(); err != nil {
+	if err := s.publishCheckpointManifest(tx, staged, path); err != nil {
 		return err
 	}
 	published = true
@@ -1461,6 +1645,9 @@ func (s *Server) filesForTree(rootSHA string) ([]types.CheckpointFile, error) {
 		return nil, nil
 	}
 	path := checkpointBlobPath(rootSHA)
+	if path == "" {
+		return nil, fmt.Errorf("checkpoint root %q is not a blob digest", rootSHA)
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read checkpoint tree: %w", err)
@@ -1710,7 +1897,13 @@ func (s *Server) restoreCheckpointFilesTo(ctx context.Context, clawID, checkpoin
 			if err := groupCtx.Err(); err != nil {
 				return err
 			}
-			data, err := os.ReadFile(checkpointBlobPath(f.SHA256))
+			// The tree blob was uploaded by a claw, so the digests it lists
+			// are wire input too: a value that is not a digest names no blob.
+			path := checkpointBlobPath(f.SHA256)
+			if path == "" {
+				return fmt.Errorf("restore %s: %q is not a blob digest", f.Path, f.SHA256)
+			}
+			data, err := os.ReadFile(path)
 			if err != nil {
 				return fmt.Errorf("read checkpoint blob %s: %w", f.SHA256, err)
 			}
@@ -1943,12 +2136,20 @@ func (s *Server) finishCheckpointRequest(clawID, checkpointID string) {
 	}
 }
 
-func validSHA256(v string) bool {
-	if len(v) != 64 {
-		return false
+// firstNonDigestPlanEntry returns the first value in the plan that names a
+// blob without being a digest, or "" when every entry is one. An empty file
+// digest is allowed (the handler skips it); an empty root is allowed (the
+// rootless fallback in recordCheckpointBlobRefs covers it).
+func firstNonDigestPlanEntry(plan types.CheckpointPlan) string {
+	if plan.RootSHA256 != "" && normalizeBlobDigest(plan.RootSHA256) == "" {
+		return plan.RootSHA256
 	}
-	_, err := hex.DecodeString(v)
-	return err == nil
+	for _, f := range plan.Files {
+		if f.SHA256 != "" && normalizeBlobDigest(f.SHA256) == "" {
+			return f.SHA256
+		}
+	}
+	return ""
 }
 
 func shaBytes(data []byte) string {

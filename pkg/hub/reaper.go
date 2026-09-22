@@ -195,7 +195,7 @@ func failCreatingCheckpointsOnBoot(db *sql.DB, at time.Time) (int64, error) {
 		return 0, err
 	}
 	defer tx.Rollback()
-	if _, err := tx.Exec(`DELETE FROM checkpoint_blob_refs WHERE checkpoint_id IN (
+	if err := releaseBlobRefsTx(tx, `DELETE FROM checkpoint_blob_refs WHERE checkpoint_id IN (
 		SELECT id FROM claw_checkpoints WHERE status='creating')`); err != nil {
 		return 0, err
 	}
