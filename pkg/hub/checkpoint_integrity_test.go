@@ -413,6 +413,27 @@ func TestCompleteWithUnplannedRootClaimsItsExpansion(t *testing.T) {
 			}
 		}
 	})
+	t.Run("a root the plan did not name is claimed even when the plan named another", func(t *testing.T) {
+		// The row already holds an edge (its planned root A), so a probe for
+		// "any edge under this checkpoint" would call B planned. B has its
+		// own edge or it does not.
+		t.Setenv("HOME", t.TempDir())
+		s := newCheckpointCompletionTestServer(t)
+		insertTestCheckpoint(t, s, "cp", "manual")
+		seedPlannedWorkspace(t, s, "cp")
+		fileSHA := writeRetentionBlob(t, []byte("completed, never planned"))
+		rootSHA := writeRetentionBlob(t, []byte(fmt.Sprintf(`[{"path":"workspace/b.txt","sha256":%q,"size":24}]`, fileSHA)))
+		s.beginBlobClaimWindow()
+		defer s.endBlobClaimWindow()
+		if err := s.finalizeCheckpoint("cp", "tenant", "claw", rootSHA); err != nil {
+			t.Fatalf("finalize: %v", err)
+		}
+		for _, sha := range []string{rootSHA, fileSHA} {
+			if !claimedDuringSweep(s, sha) {
+				t.Fatalf("%s was referenced by the complete without being claimed: the planned root's edge passed for this one", sha)
+			}
+		}
+	})
 	t.Run("a planned root is not re-claimed", func(t *testing.T) {
 		t.Setenv("HOME", t.TempDir())
 		s := newCheckpointCompletionTestServer(t)

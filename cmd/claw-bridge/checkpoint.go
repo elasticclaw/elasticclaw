@@ -13,7 +13,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 
@@ -58,23 +57,17 @@ func createCheckpoint(ctx context.Context, req types.CheckpointCreatePayload) er
 		entries = append(entries, f.entry)
 		bySHA[f.entry.SHA256] = f.abs
 	}
-	sort.Slice(entries, func(i, j int) bool { return entries[i].Path < entries[j].Path })
-	treeData, err := json.Marshal(entries)
+	// The tree serialization is shared with the hub, which recomputes the
+	// digest from the plan's file list and rejects a plan that does not hash
+	// to the root it claims. Do not serialize the tree here by hand.
+	treeData, rootSHA, err := types.EncodeCheckpointTree(entries)
 	if err != nil {
 		return err
 	}
-	rootSHA := shaBytesLocal(treeData)
-	planFiles := append([]types.CheckpointFile{}, entries...)
-	planFiles = append(planFiles, types.CheckpointFile{
-		Path:   ".checkpoint/tree.json",
-		SHA256: rootSHA,
-		Size:   int64(len(treeData)),
-		Mode:   0o640,
-	})
 	plan := types.CheckpointPlan{
 		CheckpointID: req.CheckpointID,
 		RootSHA256:   rootSHA,
-		Files:        planFiles,
+		Files:        types.CheckpointPlanFiles(entries, treeData, rootSHA),
 	}
 	ack, err := postCheckpointPlan(ctx, req, plan)
 	if err != nil {
@@ -299,9 +292,4 @@ func putCheckpointBlob(ctx context.Context, req types.CheckpointCreatePayload, s
 		return fmt.Errorf("upload blob %s: HTTP %d: %s", sha, resp.StatusCode, string(data))
 	}
 	return nil
-}
-
-func shaBytesLocal(data []byte) string {
-	sum := sha256.Sum256(data)
-	return hex.EncodeToString(sum[:])
 }

@@ -183,6 +183,13 @@ func (s *Server) reconcileCheckpointsOnBoot() {
 	} else if count > 0 {
 		log.Printf("[reaper] boot released %d orphaned checkpoint blob references", count)
 	}
+	// Runs before the hub serves, so every staged manifest on disk belongs to
+	// a publish the previous process never finished.
+	if count, err := pruneStaleStagedManifests(time.Now()); err != nil {
+		log.Printf("[reaper] boot staged manifest cleanup: %v (removed %d)", err, count)
+	} else if count > 0 {
+		log.Printf("[reaper] boot removed %d staged manifest(s) left by an interrupted publish", count)
+	}
 }
 
 // failCreatingCheckpointsOnBoot fails every row the previous process left under

@@ -407,6 +407,13 @@ func TestFailedPublishTransactionLeavesNoOrphanManifest(t *testing.T) {
 			if _, err := os.Stat(checkpointManifestPath("cp")); !os.IsNotExist(err) {
 				t.Fatalf("the failed publish left a manifest behind: %v", err)
 			}
+			// Every injected failure here happens before the rename, so the
+			// final path is clean whether or not the STAGED file is: assert
+			// the staging directory too, or dropping the staged-file cleanup
+			// passes all of these.
+			if staged := stagedManifests(t); len(staged) != 0 {
+				t.Fatalf("the failed publish left its staged manifest behind: %v", staged)
+			}
 			if status, _, _ := retentionCheckpointRow(t, s, "cp"); status != "creating" {
 				t.Fatalf("status = %q after the failed publish, want creating", status)
 			}

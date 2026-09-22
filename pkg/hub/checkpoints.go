@@ -1148,6 +1148,13 @@ func (s *Server) handleCheckpointInternal(w http.ResponseWriter, r *http.Request
 			http.Error(w, "plan names a value that is not a blob digest", http.StatusBadRequest)
 			return
 		}
+		// And the file list must BE the tree the root names, before anything
+		// is recorded from it. See verifyCheckpointPlanTree.
+		if err := verifyCheckpointPlanTree(plan); err != nil {
+			log.Printf("[checkpoint] rejecting plan for %s: %v", shortID(checkpointID), err)
+			http.Error(w, "plan files do not hash to the root tree", http.StatusBadRequest)
+			return
+		}
 		// Record the reference edges BEFORE answering. The answer is what lets
 		// the claw skip re-uploading blobs the hub already holds, so from the
 		// moment it is sent the checkpoint depends on files nothing else keeps
@@ -1492,12 +1499,22 @@ func stageCheckpointManifest(final string, data []byte) (string, error) {
 	if err := os.MkdirAll(filepath.Dir(final), 0o750); err != nil {
 		return "", err
 	}
-	staged := final + ".attempt-" + uuid.New().String()
+	staged := final + stagedManifestMarker + uuid.New().String()
 	f, err := os.OpenFile(staged, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o640)
 	if err != nil {
 		return "", err
 	}
 	if _, err := f.Write(data); err != nil {
+		_ = f.Close()
+		_ = os.Remove(staged)
+		return "", err
+	}
+	// Sync before the rename that publishes it, for the reason writeFileAtomic
+	// gives: the rename can reach the disk ahead of the bytes, and a power loss
+	// after the commit then leaves a 'ready' row whose manifest is an empty
+	// file. The edges still pin its blobs, so nothing is lost -- but nothing
+	// can restore it either.
+	if err := f.Sync(); err != nil {
 		_ = f.Close()
 		_ = os.Remove(staged)
 		return "", err
@@ -1529,6 +1546,9 @@ func stageCheckpointManifest(final string, data []byte) (string, error) {
 func (s *Server) publishCheckpointManifest(tx *sql.Tx, staged, final string) error {
 	s.manifestPublishMu.Lock()
 	defer s.manifestPublishMu.Unlock()
+	if checkpointManifestPublishHook != nil {
+		checkpointManifestPublishHook(tx, final)
+	}
 	if err := os.Rename(staged, final); err != nil {
 		return err
 	}
@@ -1538,6 +1558,12 @@ func (s *Server) publishCheckpointManifest(tx *sql.Tx, staged, final string) err
 	}
 	return nil
 }
+
+// checkpointManifestPublishHook runs under the publish mutex with the
+// transaction that is about to commit, before the rename. It is nil in
+// production and exists so a test can make that commit fail, or make the
+// final path un-renamable, at exactly the point where both are possible.
+var checkpointManifestPublishHook func(tx *sql.Tx, final string)
 
 // checkpointRootUnplanned reports whether the root a 'complete' names has no
 // edge under the checkpoint, i.e. the plan never mentioned it. An empty root
@@ -2150,6 +2176,111 @@ func firstNonDigestPlanEntry(plan types.CheckpointPlan) string {
 		}
 	}
 	return ""
+}
+
+// verifyCheckpointPlanTree recomputes the tree digest from the plan's file
+// list and rejects the plan unless it equals the root the plan claims.
+//
+// Without this the hub believed the list. recordCheckpointBlobRefs writes it
+// as the root's expansion, and addTreeBlobRefsTx trusts an existing expansion
+// wholesale ("a tree with any row has all its rows") -- so a plan carrying a
+// real root digest and a TRUNCATED list poisons that tree for every later
+// checkpoint that captures it, in every tenant, since tree_blob_refs has no
+// tenant column. The files the list omits are then referenced by nothing, and
+// the sweep unlinks them out from under other tenants' 'ready' checkpoints.
+// That is permanent blob loss reachable from a claw token.
+//
+// The digest is recomputed with the bridge's own encoder
+// (types.EncodeCheckpointTree), over the plan's entries minus the tree's own
+// entry, which the bridge appends after hashing. The entries are hashed as
+// received -- digests are not normalized, sizes and modes are not touched --
+// because the bridge hashed exactly what it sent. The one thing a decoded plan
+// cannot reproduce is a path that was not valid UTF-8 on the claw: the
+// bridge's encoder wrote each such byte as `\ufffd`, and the hub decoded that
+// to the rune U+FFFD, which the same encoder writes raw. For that case the
+// digest is recomputed once more with every U+FFFD written back as `\ufffd`,
+// which is byte-for-byte what the bridge produced when all of them came from
+// invalid bytes. A workspace mixing genuine U+FFFD file names with invalid
+// ones is still rejected; the hub cannot tell the two apart from the plan.
+//
+// A plan without a root is not a tree and is not verified: it takes the
+// rootless fallback in recordCheckpointBlobRefs, which records one edge per
+// file under the checkpoint itself and expands nothing.
+func verifyCheckpointPlanTree(plan types.CheckpointPlan) error {
+	root := normalizeBlobDigest(plan.RootSHA256)
+	if root == "" {
+		return nil
+	}
+	entries := make([]types.CheckpointFile, 0, len(plan.Files))
+	for _, f := range plan.Files {
+		if f.Path == types.CheckpointTreePath && normalizeBlobDigest(f.SHA256) == root {
+			continue
+		}
+		entries = append(entries, f)
+	}
+	tree, got, err := types.EncodeCheckpointTree(entries)
+	if err != nil {
+		return fmt.Errorf("encode plan tree: %w", err)
+	}
+	if got == root {
+		return nil
+	}
+	if bytes.Contains(tree, []byte("\uFFFD")) {
+		escaped := bytes.ReplaceAll(tree, []byte("\uFFFD"), []byte(`\ufffd`))
+		if shaBytes(escaped) == root {
+			return nil
+		}
+	}
+	return fmt.Errorf("plan files hash to tree %s, not the root %s the plan claims (%d entries)", got, root, len(entries))
+}
+
+// stagedManifestMarker is what stageCheckpointManifest puts between a
+// manifest's final name and the attempt id.
+const stagedManifestMarker = ".attempt-"
+
+// pruneStaleStagedManifests removes staged manifests older than cutoff from
+// the manifests directory and reports how many it removed.
+//
+// A staged file is owned by one in-flight publish, which removes it on every
+// exit -- except the process dying between the stage and the rename. Nothing
+// else looks under manifests/ for them: the blob sweep walks only the blob
+// root, so a crash left them for the life of the installation, under the very
+// feature that exists to reclaim disk. It runs at boot (reconcileCheckpointsOnBoot),
+// because process death is the only way one is left behind and a boot is the
+// one event that always follows it; the cutoff is the boot instant, and every
+// staged file older than it belonged to a process that no longer exists. The
+// hub is not serving yet when it runs, so no publish of this process can own
+// one.
+func pruneStaleStagedManifests(cutoff time.Time) (int, error) {
+	entries, err := os.ReadDir(filepath.Join(checkpointsRoot(), "manifests"))
+	if os.IsNotExist(err) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	removed := 0
+	var firstErr error
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.Contains(entry.Name(), stagedManifestMarker) {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		if !info.ModTime().Before(cutoff) {
+			continue
+		}
+		if err := os.Remove(filepath.Join(checkpointsRoot(), "manifests", entry.Name())); err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		removed++
+	}
+	return removed, firstErr
 }
 
 func shaBytes(data []byte) string {
