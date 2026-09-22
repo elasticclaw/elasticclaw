@@ -67,6 +67,7 @@ type ConcurrencyGroupView struct {
 // SettingsView is the redacted view of hub config for the settings page.
 // Secrets are masked — never returned in full.
 type SettingsView struct {
+	Retention            *types.RetentionConfig      `json:"retention,omitempty"`
 	DefaultOpenClawImage string                      `json:"defaultOpenClawImage"`
 	LLMKeys              []LLMKeyView                `json:"llmKeys"`
 	ModelOptions         map[string][]LLMModelOption `json:"modelOptions,omitempty"`
@@ -309,6 +310,7 @@ type ConcurrencyGroupPatch struct {
 }
 
 type SettingsPatch struct {
+	Retention         *types.RetentionConfig   `json:"retention,omitempty"`
 	LLMKeys           []LLMKeyPatch            `json:"llmKeys,omitempty"`
 	ModelAuthProfiles []ModelAuthProfilePatch  `json:"modelAuthProfiles,omitempty"`
 	Providers         map[string]ProviderPatch `json:"providers,omitempty"`
@@ -543,6 +545,7 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 	view.LifecycleEventTypes = append([]string(nil), types.LifecycleEventTypes...)
 	view.InfraEventTypes = append([]string(nil), types.InfraEventTypes...)
 	view.Notifications = buildNotificationsView(s.hubCfg.Notifications)
+	view.Retention = s.hubCfg.Retention
 	for _, profile := range s.hubCfg.ModelAuthProfiles {
 		if profile == nil {
 			continue
@@ -1232,6 +1235,9 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) {
 
 	// Shallow copy of config struct; maps and slices are deep-copied only when modified below
 	updatedCfg := *s.hubCfg
+	if patch.Retention != nil {
+		updatedCfg.Retention = patch.Retention
+	}
 
 	if patch.Notifications != nil {
 		// A settings patch is the migration point from legacy lifecycle.via

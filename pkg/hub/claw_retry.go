@@ -428,6 +428,10 @@ func (s *Server) retryCheckpointIDWithCount(tenantID, clawID string, attempt int
 		  FROM task_run_attempts
 		 WHERE run_id=(SELECT task_run_id FROM claws WHERE id=?) AND attempt_number=?`, clawID, attempt-1).Scan(&previousCheckpointID)
 
+	return s.selectRetryCheckpoint(tenantID, clawID, previousCheckpointID)
+}
+
+func (s *Server) selectRetryCheckpoint(tenantID, clawID, previousCheckpointID string) (string, int, error) {
 	rows, err := s.db.Query(`
 		SELECT id, COALESCE(reason,''), COALESCE(root_tree_sha256,'') FROM claw_checkpoints
 		 WHERE tenant_id=? AND claw_id=? AND status='ready' AND manifest_path != ''

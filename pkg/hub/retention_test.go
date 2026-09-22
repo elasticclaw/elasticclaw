@@ -1,0 +1,577 @@
+package hub
+
+import (
+	"bytes"
+	"crypto/sha256"
+	"database/sql"
+	"encoding/json"
+	"fmt"
+	"log"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/elasticclaw/elasticclaw/pkg/types"
+)
+
+func retentionServer(t *testing.T) *Server {
+	t.Helper()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", "/nonexistent/hub.yaml")
+	return newCheckpointCompletionTestServer(t)
+}
+
+func retentionExec(t *testing.T, s *Server, query string, args ...any) {
+	t.Helper()
+	if _, err := s.db.Exec(query, args...); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func retentionCount(t *testing.T, s *Server, query string, args ...any) int {
+	t.Helper()
+	var n int
+	if err := s.db.QueryRow(query, args...).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
+func retentionBlob(t *testing.T, content string) string {
+	t.Helper()
+	sha := fmt.Sprintf("%x", sha256.Sum256([]byte(content)))
+	retentionFile(t, checkpointBlobPath(sha), content, time.Now())
+	return sha
+}
+
+func retentionFile(t *testing.T, path, content string, at time.Time) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(path, at, at); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func retentionExists(t *testing.T, path string, want bool) {
+	t.Helper()
+	_, err := os.Stat(path)
+	if want && err != nil {
+		t.Fatalf("expected %s: %v", path, err)
+	}
+	if !want && !os.IsNotExist(err) {
+		t.Fatalf("expected missing %s, got %v", path, err)
+	}
+}
+
+func retentionCheckpoint(t *testing.T, s *Server, id, claw, status, reason, root string, at time.Time) string {
+	t.Helper()
+	path := filepath.Join(hubDataDir(), "checkpoints", "manifests", id+".json")
+	retentionFile(t, path, "{}", at)
+	retentionExec(t, s, `INSERT INTO claw_checkpoints
+ (id,tenant_id,claw_id,status,reason,root_tree_sha256,workspace_tree_sha256,manifest_path,created_at,pipeline_stage,hub_version,files_count,files_bytes)
+ VALUES(?,'tenant',?,?,?,?,?,?,?,'work','version',7,123)`, id, claw, status, reason, root, root, path, at)
+	return path
+}
+
+func retentionRecord(t *testing.T, s *Server, id, tree string, files ...string) {
+	t.Helper()
+	entries := make([]types.CheckpointFile, 0, len(files))
+	for _, sha := range files {
+		entries = append(entries, types.CheckpointFile{SHA256: sha})
+	}
+	if err := recordCheckpointTree(s.db, id, tree, entries); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func retentionRun(t *testing.T, s *Server) {
+	t.Helper()
+	retentionExec(t, s, `INSERT INTO task_runs(id,tenant_id,initial_attempt_id,run_kind,owner_type,created_at,updated_at) VALUES('run','tenant','attempt','code_task','manual',0,0)`)
+	retentionExec(t, s, `INSERT INTO task_run_attempts(id,tenant_id,run_id,attempt_id,attempt_number,started_at,created_at,updated_at) VALUES('attempt','tenant','run','attempt',1,0,0,0)`)
+}
+
+func TestRetentionPlanRecordsExpansion(t *testing.T) {
+	s := retentionServer(t)
+	tree := retentionBlob(t, "tree")
+	file := retentionBlob(t, "file")
+	for _, id := range []string{"first", "second"} {
+		insertTestCheckpoint(t, s, id, "manual")
+		plan := types.CheckpointPlan{RootSHA256: tree, Files: []types.CheckpointFile{{SHA256: tree, Path: ".checkpoint/tree.json"}, {SHA256: file}, {SHA256: file}, {SHA256: ""}}}
+		body, err := json.Marshal(plan)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req := httptest.NewRequest(http.MethodPost, "/api/checkpoints/"+id+"/plan", bytes.NewReader(body))
+		req.Header.Set("X-Claw-Token", "claw-token")
+		rr := httptest.NewRecorder()
+		s.handleCheckpointInternal(rr, req)
+		if rr.Code != 200 {
+			t.Fatalf("plan: %d %s", rr.Code, rr.Body.String())
+		}
+		if got := retentionCount(t, s, `SELECT COUNT(*) FROM claw_checkpoints WHERE id=? AND status='creating' AND root_tree_sha256=?`, id, tree); got != 1 {
+			t.Fatal("plan did not protect creating root")
+		}
+	}
+	if got := retentionCount(t, s, `SELECT COUNT(*) FROM checkpoint_trees`); got != 1 {
+		t.Fatalf("trees=%d", got)
+	}
+	if got := retentionCount(t, s, `SELECT COUNT(*) FROM checkpoint_tree_files WHERE tree_sha256=? AND file_sha256=?`, tree, file); got != 1 {
+		t.Fatalf("files=%d", got)
+	}
+	if got := retentionCount(t, s, `SELECT COUNT(*) FROM checkpoint_tree_files`); got != 1 {
+		t.Fatalf("extra expansion entries: %d", got)
+	}
+}
+
+func TestRetentionCompactionPreservesRetryAndRestorePointers(t *testing.T) {
+	s := retentionServer(t)
+	at := time.Now().UTC()
+	old := at.Add(-3 * time.Hour)
+	retentionExec(t, s, `UPDATE claws SET status='error' WHERE id='claw'`)
+	retentionExec(t, s, `INSERT INTO claws(id,tenant_id,name,template,status,created_at) VALUES('other','tenant','other','','connected',?)`, at)
+	retentionRun(t, s)
+	for i, id := range []string{"restore", "restored", "attempt-pointer", "discard", "pick", "bootstrap"} {
+		reason := "manual"
+		if id == "bootstrap" {
+			reason = "bootstrap"
+		}
+		retentionCheckpoint(t, s, id, "claw", "ready", reason, id+"-tree", old.Add(time.Duration(i)*time.Minute))
+	}
+	retentionExec(t, s, `UPDATE claws SET restore_checkpoint_id='restore',restored_from_checkpoint_id='restored' WHERE id='other'`)
+	retentionExec(t, s, `UPDATE task_run_attempts SET restored_checkpoint_id='attempt-pointer' WHERE id='attempt'`)
+	for _, status := range []string{"skipped", "failed", "creating"} {
+		retentionCheckpoint(t, s, status, "claw", status, "manual", status+"-tree", old)
+	}
+	retentionExec(t, s, `UPDATE claw_checkpoints SET message_tree_sha256='keep-for-collector' WHERE id='discard'`)
+	for _, claw := range []string{"recent", "live", "empty", "recent-compacted"} {
+		status := "deleted"
+		if claw == "live" {
+			status = "connected"
+		}
+		retentionExec(t, s, `INSERT INTO claws(id,tenant_id,name,template,status,created_at) VALUES(?,'tenant',?,'',?,?)`, claw, claw, status, old)
+	}
+	retentionCheckpoint(t, s, "recent-old", "recent", "failed", "manual", "recent-tree", old)
+	retentionCheckpoint(t, s, "recent-new", "recent", "creating", "manual", "recent-tree", at.Add(-30*time.Minute))
+	retentionCheckpoint(t, s, "live-old", "live", "failed", "manual", "live-tree", old)
+	retentionCheckpoint(t, s, "empty-failed", "empty", "failed", "manual", "empty-tree", old)
+	retentionCheckpoint(t, s, "old-with-recent-compacted", "recent-compacted", "failed", "manual", "old-tree", old)
+	retentionCheckpoint(t, s, "recent-compacted-row", "recent-compacted", "compacted", "manual", "", at)
+	n, err := s.compactCheckpoints(at, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 6 {
+		t.Fatalf("compacted=%d, want 6", n)
+	}
+	for _, id := range []string{"restore", "restored", "attempt-pointer", "pick"} {
+		if got := checkpointStatus(t, s, id); got != "ready" {
+			t.Fatalf("%s=%s", id, got)
+		}
+		retentionExists(t, filepath.Join(hubDataDir(), "checkpoints", "manifests", id+".json"), true)
+	}
+	for _, id := range []string{"discard", "bootstrap", "skipped", "failed", "creating", "empty-failed"} {
+		if got := retentionCount(t, s, `SELECT COUNT(*) FROM claw_checkpoints WHERE id=? AND status='compacted' AND manifest_path='' AND root_tree_sha256='' AND workspace_tree_sha256='' AND pipeline_stage='work' AND hub_version='version' AND files_count=7 AND files_bytes=123`, id); got != 1 {
+			t.Fatalf("bad compacted row %s", id)
+		}
+		retentionExists(t, filepath.Join(hubDataDir(), "checkpoints", "manifests", id+".json"), false)
+	}
+	if got := retentionCount(t, s, `SELECT COUNT(*) FROM claw_checkpoints WHERE id='discard' AND message_tree_sha256='keep-for-collector'`); got != 1 {
+		t.Fatal("message pointer lost")
+	}
+	for _, id := range []string{"recent-old", "live-old", "old-with-recent-compacted"} {
+		if got := checkpointStatus(t, s, id); got != "failed" {
+			t.Fatalf("protected %s=%s", id, got)
+		}
+	}
+	if n, err = s.compactCheckpoints(at, false); err != nil || n != 0 {
+		t.Fatalf("second compaction=%d,%v", n, err)
+	}
+}
+
+func TestRetentionCollectorSharedFilesAndMessages(t *testing.T) {
+	s := retentionServer(t)
+	at := time.Now().UTC()
+	shared := retentionBlob(t, "shared")
+	unique := retentionBlob(t, "unique")
+	a := retentionBlob(t, "tree-a")
+	b := retentionBlob(t, "tree-b")
+	message := retentionBlob(t, "messages")
+	retentionCheckpoint(t, s, "a", "claw", "compacted", "manual", "", at)
+	retentionCheckpoint(t, s, "b", "claw", "creating", "manual", b, at)
+	retentionRecord(t, s, "", a, shared, unique)
+	retentionRecord(t, s, "b", b, shared)
+	retentionExec(t, s, `UPDATE claw_checkpoints SET message_tree_sha256=?`, message)
+	counts, err := s.collectCheckpointBlobs(at, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if counts.trees != 1 || counts.blobs != 2 || counts.bytes != int64(len("unique")+len("tree-a")) {
+		t.Fatalf("collection=%+v", counts)
+	}
+	for _, sha := range []string{unique, a} {
+		retentionExists(t, checkpointBlobPath(sha), false)
+	}
+	for _, sha := range []string{shared, b, message} {
+		retentionExists(t, checkpointBlobPath(sha), true)
+	}
+	retentionExec(t, s, `UPDATE claw_checkpoints SET status='compacted',root_tree_sha256='' WHERE id='b'`)
+	counts, err = s.collectCheckpointBlobs(at, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if counts.trees != 1 || counts.blobs != 3 {
+		t.Fatalf("second collection=%+v", counts)
+	}
+	for _, sha := range []string{shared, b, message} {
+		retentionExists(t, checkpointBlobPath(sha), false)
+	}
+	if n := retentionCount(t, s, `SELECT COUNT(*) FROM checkpoint_tree_files`); n != 0 {
+		t.Fatalf("file refs=%d", n)
+	}
+	if n := retentionCount(t, s, `SELECT COUNT(*) FROM claw_checkpoints WHERE message_tree_sha256!=''`); n != 0 {
+		t.Fatalf("message refs=%d", n)
+	}
+}
+
+func TestRetentionCollectorBatchesAndTemporaryFiles(t *testing.T) {
+	s := retentionServer(t)
+	at := time.Now().UTC()
+	tree := retentionBlob(t, "large-tree")
+	files := make([]string, 501)
+	for i := range files {
+		files[i] = retentionBlob(t, fmt.Sprintf("file-%d", i))
+	}
+	retentionRecord(t, s, "", tree, files...)
+	old := checkpointBlobPath(tree) + ".tmp-old"
+	recent := checkpointBlobPath(tree) + ".tmp-new"
+	retentionFile(t, old, "old", at.Add(-25*time.Hour))
+	retentionFile(t, recent, "new", at)
+	counts, err := s.collectCheckpointBlobs(at, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if counts.trees != 1 || counts.blobs != 503 {
+		t.Fatalf("collection=%+v", counts)
+	}
+	for _, sha := range files {
+		retentionExists(t, checkpointBlobPath(sha), false)
+	}
+	retentionExists(t, old, false)
+	retentionExists(t, recent, true)
+}
+
+func TestRetentionBackfillAndCollectionGate(t *testing.T) {
+	s := retentionServer(t)
+	at := time.Now().UTC()
+	file := retentionBlob(t, "legacy-file")
+	data, err := json.Marshal([]types.CheckpointFile{{Path: "file", SHA256: file}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tree := retentionBlob(t, string(data))
+	retentionCheckpoint(t, s, "legacy", "claw", "ready", "manual", tree, at)
+	for i := 0; i < 50; i++ {
+		retentionCheckpoint(t, s, fmt.Sprintf("missing-%d", i), "claw", "skipped", "manual", fmt.Sprintf("%064x", i+1), at)
+	}
+	dead := retentionBlob(t, "dead-tree")
+	retentionRecord(t, s, "", dead)
+	counts, err := s.collectCheckpointBlobs(at, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if counts.trees != 0 || counts.blobs != 0 || counts.unexpanded != 51 {
+		t.Fatalf("ungated collection=%+v", counts)
+	}
+	retentionExists(t, checkpointBlobPath(dead), true)
+	remaining, err := s.backfillCheckpointTrees(false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if remaining != 1 {
+		t.Fatalf("remaining=%d, want 1", remaining)
+	}
+	counts, err = s.collectCheckpointBlobs(at, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if counts.blobs != 0 || counts.unexpanded != 1 {
+		t.Fatalf("incomplete gate=%+v", counts)
+	}
+	remaining, err = s.backfillCheckpointTrees(false)
+	if err != nil || remaining != 0 {
+		t.Fatalf("backfill=%d,%v", remaining, err)
+	}
+	if n := retentionCount(t, s, `SELECT COUNT(*) FROM checkpoint_trees`); n != 52 {
+		t.Fatalf("tree count=%d", n)
+	}
+	if n := retentionCount(t, s, `SELECT COUNT(*) FROM checkpoint_tree_files WHERE tree_sha256=? AND file_sha256=?`, tree, file); n != 1 {
+		t.Fatal("legacy expansion missing")
+	}
+	if n := retentionCount(t, s, `SELECT COUNT(*) FROM checkpoint_tree_files`); n != 1 {
+		t.Fatalf("missing trees expanded with files: %d", n)
+	}
+	counts, err = s.collectCheckpointBlobs(at, false)
+	if err != nil || counts.trees != 1 {
+		t.Fatalf("collection=%+v,%v", counts, err)
+	}
+	retentionExists(t, checkpointBlobPath(dead), false)
+	retentionExists(t, checkpointBlobPath(file), true)
+}
+
+func TestRetentionExpiry(t *testing.T) {
+	s := retentionServer(t)
+	at := time.Now().UTC()
+	cutoff := at.Add(-90 * 24 * time.Hour)
+	old := cutoff.Add(-time.Hour)
+	retentionRun(t, s)
+	for _, id := range []string{"expired", "restore", "restored", "attempt-pointer", "already-compacted", "unknown-status"} {
+		retentionCheckpoint(t, s, id, "claw", "ready", "manual", id+"-tree", old)
+	}
+	retentionExec(t, s, `UPDATE claw_checkpoints SET status='compacted' WHERE id='already-compacted'`)
+	retentionExec(t, s, `UPDATE claw_checkpoints SET status='unknown' WHERE id='unknown-status'`)
+	retentionCheckpoint(t, s, "new", "claw", "ready", "manual", "new-tree", at)
+	retentionCheckpoint(t, s, "boundary", "claw", "ready", "manual", "boundary-tree", cutoff)
+	retentionExec(t, s, `UPDATE claws SET restore_checkpoint_id='restore',restored_from_checkpoint_id='restored' WHERE id='claw'`)
+	retentionExec(t, s, `UPDATE task_run_attempts SET restored_checkpoint_id='attempt-pointer' WHERE id='attempt'`)
+	n, err := s.expireCheckpoints(cutoff, false)
+	if err != nil || n != 3 {
+		t.Fatalf("expired=%d,%v", n, err)
+	}
+	for _, id := range []string{"expired", "already-compacted", "unknown-status"} {
+		if got := retentionCount(t, s, `SELECT COUNT(*) FROM claw_checkpoints WHERE id=? AND status='compacted' AND root_tree_sha256='' AND workspace_tree_sha256='' AND manifest_path=''`, id); got != 1 {
+			t.Fatalf("not expired: %s", id)
+		}
+		retentionExists(t, filepath.Join(hubDataDir(), "checkpoints", "manifests", id+".json"), false)
+	}
+	for _, id := range []string{"restore", "restored", "attempt-pointer", "new", "boundary"} {
+		if got := checkpointStatus(t, s, id); got != "ready" {
+			t.Fatalf("protected %s=%s", id, got)
+		}
+	}
+	dir := filepath.Join(hubDataDir(), "diagnostics")
+	for _, name := range []string{"old.log", "new.log", "nested/old.log"} {
+		mtime := old
+		if name == "new.log" {
+			mtime = at
+		}
+		retentionFile(t, filepath.Join(dir, name), "log", mtime)
+	}
+	n, err = s.expireDiagnostics(cutoff, false)
+	if err != nil || n != 1 {
+		t.Fatalf("diagnostics=%d,%v", n, err)
+	}
+	retentionExists(t, filepath.Join(dir, "old.log"), false)
+	retentionExists(t, filepath.Join(dir, "new.log"), true)
+	retentionExists(t, filepath.Join(dir, "nested", "old.log"), true)
+	retentionExec(t, s, `WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM seq WHERE n<5001)
+ INSERT INTO messages(id,claw_id,tenant_id,role,content,created_at) SELECT 'old-'||n,'claw','tenant','user','old',? FROM seq`, old)
+	retentionExec(t, s, `WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM seq WHERE n<5001)
+ INSERT INTO task_run_events(id,tenant_id,run_id,event_key,event_type,event_time,observed_at,created_at) SELECT 'old-'||n,'tenant','run','old-'||n,'task_start',?,0,0 FROM seq`, old.UnixMilli())
+	retentionExec(t, s, `INSERT INTO messages(id,claw_id,tenant_id,role,content,created_at) VALUES('boundary','claw','tenant','user','boundary',?)`, cutoff)
+	retentionExec(t, s, `INSERT INTO task_run_events(id,tenant_id,run_id,event_key,event_type,event_time,observed_at,created_at) VALUES('boundary','tenant','run','boundary','task_start',?,0,0)`, cutoff.UnixMilli())
+	n, err = s.expireRetentionRows(cutoff, false)
+	if err != nil || n != 10002 {
+		t.Fatalf("rows=%d,%v", n, err)
+	}
+	for _, table := range []string{"messages", "task_run_events"} {
+		if n := retentionCount(t, s, "SELECT COUNT(*) FROM "+table); n != 1 {
+			t.Fatalf("%s remaining=%d", table, n)
+		}
+	}
+}
+
+func TestRetentionDryRun(t *testing.T) {
+	s := retentionServer(t)
+	at := time.Now().UTC()
+	old := at.Add(-100 * 24 * time.Hour)
+	retentionExec(t, s, `UPDATE claws SET status='error' WHERE id='claw'`)
+	tree := retentionBlob(t, "dry-tree")
+	file := retentionBlob(t, "dry-file")
+	message := retentionBlob(t, "dry-message")
+	retentionRecord(t, s, "", tree, file)
+	manifest := retentionCheckpoint(t, s, "old", "claw", "failed", "manual", tree, old)
+	retentionExec(t, s, `UPDATE claw_checkpoints SET message_tree_sha256=?`, message)
+	n, err := s.compactCheckpoints(at, true)
+	if err != nil || n != 1 {
+		t.Fatalf("compaction=%d,%v", n, err)
+	}
+	n, err = s.expireCheckpoints(at.Add(-90*24*time.Hour), true)
+	if err != nil || n != 1 {
+		t.Fatalf("expiry=%d,%v", n, err)
+	}
+	counts, err := s.collectCheckpointBlobs(at, true)
+	if err != nil || counts.trees != 1 || counts.blobs != 3 {
+		t.Fatalf("collection=%+v,%v", counts, err)
+	}
+	diagnostic := filepath.Join(hubDataDir(), "diagnostics", "old.log")
+	retentionFile(t, diagnostic, "log", old)
+	n, err = s.expireDiagnostics(at, true)
+	if err != nil || n != 1 {
+		t.Fatalf("diagnostics=%d,%v", n, err)
+	}
+	retentionRun(t, s)
+	retentionExec(t, s, `INSERT INTO messages(id,claw_id,tenant_id,role,content,created_at) VALUES('old','claw','tenant','user','old',?)`, old)
+	retentionExec(t, s, `INSERT INTO task_run_events(id,tenant_id,run_id,event_key,event_type,event_time,observed_at,created_at) VALUES('old','tenant','run','old','task_start',?,0,0)`, old.UnixMilli())
+	n, err = s.expireRetentionRows(at, true)
+	if err != nil || n != 2 {
+		t.Fatalf("rows=%d,%v", n, err)
+	}
+	for _, path := range []string{manifest, diagnostic, checkpointBlobPath(tree), checkpointBlobPath(file), checkpointBlobPath(message)} {
+		retentionExists(t, path, true)
+	}
+	if got := checkpointStatus(t, s, "old"); got != "failed" {
+		t.Fatalf("dry status=%s", got)
+	}
+	for _, table := range []string{"checkpoint_trees", "checkpoint_tree_files", "messages", "task_run_events"} {
+		if n := retentionCount(t, s, "SELECT COUNT(*) FROM "+table); n != 1 {
+			t.Fatalf("dry %s=%d", table, n)
+		}
+	}
+	if n := retentionCount(t, s, `SELECT COUNT(*) FROM claw_checkpoints WHERE root_tree_sha256=? AND message_tree_sha256=? AND manifest_path=?`, tree, message, manifest); n != 1 {
+		t.Fatal("dry run changed checkpoint")
+	}
+	legacy := retentionBlob(t, "[]")
+	retentionCheckpoint(t, s, "legacy", "claw", "ready", "manual", legacy, old)
+	remaining, err := s.backfillCheckpointTrees(true)
+	if err != nil || remaining != 1 {
+		t.Fatalf("dry backfill=%d,%v", remaining, err)
+	}
+	if n := retentionCount(t, s, `SELECT COUNT(*) FROM checkpoint_trees WHERE sha256=?`, legacy); n != 0 {
+		t.Fatal("dry backfill inserted tree")
+	}
+}
+
+func TestRetentionSettings(t *testing.T) {
+	s := retentionServer(t)
+	for _, cfg := range []*types.HubConfig{nil, {}} {
+		s.hubCfg = cfg
+		settings := s.retentionSettings()
+		if settings.enabled || settings.interval != time.Hour || settings.maxAge != 2160*time.Hour {
+			t.Fatalf("defaults=%+v", settings)
+		}
+	}
+	s.hubCfg = &types.HubConfig{Retention: &types.RetentionConfig{Enabled: true, DryRun: true, Interval: "5m", MaxAge: "24h"}}
+	settings := s.retentionSettings()
+	if !settings.enabled || !settings.dryRun || settings.interval != 5*time.Minute || settings.maxAge != 24*time.Hour {
+		t.Fatalf("settings=%+v", settings)
+	}
+	var output bytes.Buffer
+	previous := log.Writer()
+	log.SetOutput(&output)
+	defer log.SetOutput(previous)
+	s.hubCfg.Retention = &types.RetentionConfig{Enabled: true, Interval: "bad-retention-interval", MaxAge: "23h59m"}
+	for i := 0; i < 2; i++ {
+		settings = s.retentionSettings()
+		if settings.interval != time.Hour || settings.maxAge != 2160*time.Hour {
+			t.Fatalf("fallback=%+v", settings)
+		}
+	}
+	if strings.Count(output.String(), "bad-retention-interval") != 1 || strings.Count(output.String(), "23h59m") != 1 {
+		t.Fatalf("warnings should log once: %s", output.String())
+	}
+	s.hubCfg.Retention = &types.RetentionConfig{Interval: "4m59s", MaxAge: "invalid-retention-age"}
+	settings = s.retentionSettings()
+	if settings.enabled || settings.interval != time.Hour || settings.maxAge != 2160*time.Hour {
+		t.Fatalf("floors=%+v", settings)
+	}
+}
+
+func TestRetentionMigration(t *testing.T) {
+	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "legacy.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err = db.Exec(`CREATE TABLE tenants(id TEXT PRIMARY KEY,name TEXT NOT NULL,token TEXT NOT NULL UNIQUE,claw_token TEXT NOT NULL UNIQUE,created_at DATETIME NOT NULL); INSERT INTO tenants VALUES('legacy','Legacy','token','claw-token',CURRENT_TIMESTAMP)`); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		if err = migrate(db); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var n int
+	if err = db.QueryRow(`SELECT COUNT(*) FROM tenants WHERE id='legacy'`).Scan(&n); err != nil || n != 1 {
+		t.Fatalf("legacy row=%d,%v", n, err)
+	}
+	if _, err = db.Exec(`INSERT INTO checkpoint_trees VALUES('tree',CURRENT_TIMESTAMP); INSERT INTO checkpoint_tree_files VALUES('tree','file')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(`INSERT INTO checkpoint_tree_files VALUES('tree','file')`); err == nil {
+		t.Fatal("duplicate tree-file accepted")
+	}
+	var schema string
+	if err = db.QueryRow(`SELECT sql FROM sqlite_master WHERE name='checkpoint_tree_files'`).Scan(&schema); err != nil || !strings.Contains(strings.ToUpper(schema), "WITHOUT ROWID") {
+		t.Fatalf("schema=%s,%v", schema, err)
+	}
+	if err = db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_checkpoint_tree_files_file'`).Scan(&n); err != nil || n != 1 {
+		t.Fatalf("file index=%d,%v", n, err)
+	}
+}
+
+func TestRetentionSettingsPatchTakesEffectAndPreservesSection(t *testing.T) {
+	s := retentionServer(t)
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", filepath.Join(t.TempDir(), "hub.yaml"))
+	for _, body := range []string{`{"retention":{"enabled":true,"interval":"5m","maxAge":"24h","dryRun":true}}`, `{"uiPassword":"test-password"}`} {
+		rr := httptest.NewRecorder()
+		s.patchSettings(rr, httptest.NewRequest(http.MethodPatch, "/api/settings", strings.NewReader(body)))
+		if rr.Code != http.StatusOK {
+			t.Fatalf("patch=%d %s", rr.Code, rr.Body.String())
+		}
+		got := s.retentionSettings()
+		if !got.enabled || !got.dryRun || got.interval != 5*time.Minute || got.maxAge != 24*time.Hour {
+			t.Fatalf("updated settings=%+v", got)
+		}
+	}
+	rr := httptest.NewRecorder()
+	s.getSettings(rr, httptest.NewRequest(http.MethodGet, "/api/settings", nil))
+	var view struct {
+		Retention *types.RetentionConfig `json:"retention"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &view); err != nil {
+		t.Fatal(err)
+	}
+	if view.Retention == nil || !view.Retention.Enabled {
+		t.Fatalf("settings view=%s", rr.Body.String())
+	}
+}
+
+func TestRetentionCycleBackfillsBeforeCompactingAndCollecting(t *testing.T) {
+	s := retentionServer(t)
+	at := time.Now().UTC()
+	old := at.Add(-100 * 24 * time.Hour)
+	retentionExec(t, s, `UPDATE claws SET status='deleted' WHERE id='claw'`)
+	file := retentionBlob(t, "cycle-file")
+	data, err := json.Marshal([]types.CheckpointFile{{SHA256: file}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tree := retentionBlob(t, string(data))
+	manifest := retentionCheckpoint(t, s, "legacy", "claw", "skipped", "manual", tree, old)
+	var output bytes.Buffer
+	previous := log.Writer()
+	log.SetOutput(&output)
+	defer log.SetOutput(previous)
+	s.retainOnce(at, retentionSettings{enabled: true, maxAge: 90 * 24 * time.Hour})
+	if got := checkpointStatus(t, s, "legacy"); got != "compacted" {
+		t.Fatalf("cycle status=%s", got)
+	}
+	for _, path := range []string{manifest, checkpointBlobPath(tree), checkpointBlobPath(file)} {
+		retentionExists(t, path, false)
+	}
+	if n := retentionCount(t, s, `SELECT COUNT(*) FROM checkpoint_trees`); n != 0 {
+		t.Fatalf("trees=%d", n)
+	}
+	if !strings.Contains(output.String(), "retention: compacted=1 expired=0 diagnostics=0 rows=0 trees=1 blobs=2 freed=0MB dry_run=false unexpanded=0") {
+		t.Fatalf("cycle log=%s", output.String())
+	}
+}

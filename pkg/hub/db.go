@@ -377,6 +377,16 @@ func migrate(db *sql.DB) error {
 			return err
 		}
 	}
+	_, _ = db.Exec(`CREATE TABLE IF NOT EXISTS checkpoint_trees (
+		sha256     TEXT PRIMARY KEY,
+		created_at DATETIME NOT NULL
+	);
+	CREATE TABLE IF NOT EXISTS checkpoint_tree_files (
+		tree_sha256 TEXT NOT NULL,
+		file_sha256 TEXT NOT NULL,
+		PRIMARY KEY (tree_sha256, file_sha256)
+	) WITHOUT ROWID;
+	CREATE INDEX IF NOT EXISTS idx_checkpoint_tree_files_file ON checkpoint_tree_files(file_sha256);`)
 	_, _ = db.Exec(`CREATE TABLE IF NOT EXISTS claw_checkpoints (
 		id                    TEXT PRIMARY KEY,
 		tenant_id             TEXT NOT NULL,
@@ -939,6 +949,17 @@ func migrate(db *sql.DB) error {
 		created_at    DATETIME NOT NULL,
 		PRIMARY KEY(claw_id, feedback_type, github_id)
 	);
+
+	CREATE TABLE IF NOT EXISTS checkpoint_trees (
+		sha256     TEXT PRIMARY KEY,
+		created_at DATETIME NOT NULL
+	);
+	CREATE TABLE IF NOT EXISTS checkpoint_tree_files (
+		tree_sha256 TEXT NOT NULL,
+		file_sha256 TEXT NOT NULL,
+		PRIMARY KEY (tree_sha256, file_sha256)
+	) WITHOUT ROWID;
+	CREATE INDEX IF NOT EXISTS idx_checkpoint_tree_files_file ON checkpoint_tree_files(file_sha256);
 
 	CREATE TABLE IF NOT EXISTS claw_checkpoints (
 		id                    TEXT PRIMARY KEY,

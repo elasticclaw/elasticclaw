@@ -713,6 +713,11 @@ func (s *Server) handleCheckpointInternal(w http.ResponseWriter, r *http.Request
 			return
 		}
 		plan.CheckpointID = checkpointID
+		// Reference uploads before reporting existing blobs, including while creating.
+		if err := recordCheckpointTree(s.db, checkpointID, plan.RootSHA256, plan.Files); err != nil {
+			http.Error(w, "record checkpoint tree", http.StatusInternalServerError)
+			return
+		}
 		missing := make([]string, 0)
 		for _, f := range plan.Files {
 			if f.SHA256 == "" {
