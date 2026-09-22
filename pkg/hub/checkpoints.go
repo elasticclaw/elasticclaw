@@ -560,14 +560,39 @@ func (s *Server) restoreClawFromCheckpoint(ctx context.Context, tenantID, clawID
 	var provider, providerID string
 	if err := s.db.QueryRow(`SELECT COALESCE(provider,''), COALESCE(provider_id,'') FROM claws WHERE id=? AND tenant_id=?`, clawID, tenantID).Scan(&provider, &providerID); err != nil {
 		// Nothing has been destroyed yet: the claw carries on as it was, so the
-		// reservation goes back to what it was too. Past this point the sandbox
-		// is torn down and the reservation stays whatever else fails -- exactly
-		// as a failed provision leaves it (see provisionStoredClaw): the source
-		// stays protected until a retry applies it or the claw is deleted, and
-		// the row is what the operator retries from.
+		// reservation goes back to what it was too.
 		s.releaseRestoreReservation(clawID, checkpointID, previous)
 		return err
 	}
+
+	// Commit to the restore -- but only while this restore still owns the
+	// reservation. A restore that began after this one and reserved its own
+	// source during the termination checkpoint above owns the claw now; this
+	// one must neither overwrite that reservation (the other restore reads
+	// its source for minutes with nothing else pinning it) nor tear the
+	// sandbox down and provision from a checkpoint nobody protects. The
+	// ownership test is the write itself, so there is no window between
+	// them, and the teardown follows the commit rather than preceding it: a
+	// superseded restore has destroyed nothing when it stops. The bridge's
+	// own status writes are all guarded on the status they replace, so the
+	// row cannot revert between this commit and the disconnect below.
+	res, err := s.db.Exec(`UPDATE claws SET status='provisioning', bootstrap_ok=0, bootstrap_status='Restoring checkpoint', provider_id='', restore_checkpoint_id=?, restored_from_checkpoint_id=? WHERE id=? AND tenant_id=? AND restore_checkpoint_id=?`,
+		checkpointID, checkpointID, clawID, tenantID, checkpointID)
+	if err != nil {
+		// Nothing has been destroyed yet, so the reservation goes back like an
+		// aborted lookup's does. Should that fail too, the release logs the
+		// reservation it left behind: a claw whose status never changed but
+		// which finalizedClawPredicateSQL now treats as mid-restore.
+		s.releaseRestoreReservation(clawID, checkpointID, previous)
+		return err
+	}
+	if rows, _ := res.RowsAffected(); rows == 0 {
+		return fmt.Errorf("restore superseded: claw %s is being restored from %s", shortID(clawID), shortID(s.pendingRestoreCheckpoint(clawID)))
+	}
+	// Past this point the sandbox is torn down and the reservation stays
+	// whatever else fails -- exactly as a failed provision leaves it (see
+	// provisionStoredClaw): the source stays protected until a restore applies
+	// it or the claw is deleted, and the row is what the operator retries from.
 	s.mu.Lock()
 	if cc, ok := s.claws[clawID]; ok {
 		cc.conn.Close(1000, "restoring checkpoint")
@@ -578,11 +603,6 @@ func (s *Server) restoreClawFromCheckpoint(ctx context.Context, tenantID, clawID
 		go s.terminateVM(provider, providerID)
 	}
 
-	_, err = s.db.Exec(`UPDATE claws SET status='provisioning', bootstrap_ok=0, bootstrap_status='Restoring checkpoint', provider_id='', restore_checkpoint_id=?, restored_from_checkpoint_id=? WHERE id=? AND tenant_id=?`,
-		checkpointID, checkpointID, clawID, tenantID)
-	if err != nil {
-		return err
-	}
 	s.broadcastToUsers(tenantID, types.WSMessage{
 		Type:    "claw_status",
 		Payload: map[string]string{"claw_id": clawID, "status": "provisioning", "bootstrap_status": "Restoring checkpoint"},
@@ -598,10 +618,15 @@ func (s *Server) restoreClawFromCheckpoint(ctx context.Context, tenantID, clawID
 // the validation and the reservation are one atomic step against the retention
 // writes, which take the same lock to re-check the guard.
 //
-// A claw already carrying a restore id is overwritten, which is what the
-// restore always did: that id is either a failed restore's, which this one
-// supersedes as the operator's retry, or an in-flight one this restore is
-// about to tear down with the sandbox.
+// A claw already carrying a restore id is overwritten: that id is either a
+// failed restore's, which this one supersedes as the operator's retry, or an
+// in-flight one, which this reservation supersedes too. The reservation is
+// owned by the restore that wrote it last. Every later write against it --
+// the release on abort, the status commit before the teardown, the clear
+// once the files are applied -- is guarded on the id still being the one that
+// restore reserved, so a superseded restore stops rather than overwriting
+// the newer one's protection (see restoreClawFromCheckpoint and
+// markRestoreApplied).
 func (s *Server) reserveRestoreSource(tenantID, clawID, checkpointID string) (previous string, err error) {
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -636,9 +661,14 @@ func (s *Server) reserveRestoreSource(tenantID, clawID, checkpointID string) (pr
 // releaseRestoreReservation puts the claw's restore id back to previous, but
 // only while it is still the one this restore reserved: a restore that began
 // after ours and reserved its own source must keep it.
+//
+// The release is the last thing an aborted restore does, so a failure here
+// is a leak the operator must be able to find: the claw's status never
+// changed, yet it carries a restore_checkpoint_id, which keeps it out of
+// finalizedClawPredicateSQL's staleness arm for as long as the id stands.
 func (s *Server) releaseRestoreReservation(clawID, checkpointID, previous string) {
 	if _, err := s.db.Exec(`UPDATE claws SET restore_checkpoint_id=? WHERE id=? AND restore_checkpoint_id=?`, previous, clawID, checkpointID); err != nil {
-		log.Printf("[restore] release reservation of %s for %s: %v (the source stays protected from retention until a restore applies it)", shortID(checkpointID), shortID(clawID), err)
+		log.Printf("[restore] leaked reservation: claw %s still carries restore_checkpoint_id=%s after its restore aborted without changing the claw's status (release failed: %v); the source stays protected from retention, and the claw is not finalized, until a restore applies it or the claw is deleted", clawID, checkpointID, err)
 	}
 }
 
@@ -1981,11 +2011,23 @@ func (s *Server) pendingRestoreCheckpoint(clawID string) string {
 	return checkpointID
 }
 
+// markRestoreApplied clears the reservation once every file of checkpointID
+// has been written -- but only while it is still the claw's reservation. A
+// restore that began while these files were being written reserved its own
+// source and owns the claw now; clearing that would leave the checkpoint it is
+// reading unprotected from retention (see finalizedClawPredicateSQL).
 func (s *Server) markRestoreApplied(clawID, checkpointID string) {
 	if checkpointID == "" {
 		return
 	}
-	_, _ = s.db.Exec(`UPDATE claws SET restore_checkpoint_id='', restored_from_checkpoint_id=? WHERE id=?`, checkpointID, clawID)
+	res, err := s.db.Exec(`UPDATE claws SET restore_checkpoint_id='', restored_from_checkpoint_id=? WHERE id=? AND restore_checkpoint_id=?`, checkpointID, clawID, checkpointID)
+	if err != nil {
+		log.Printf("[restore] mark %s applied for claw %s: %v", shortID(checkpointID), shortID(clawID), err)
+		return
+	}
+	if rows, _ := res.RowsAffected(); rows == 0 {
+		log.Printf("[restore] claw %s: applied %s, but a newer restore owns the claw's reservation; left it in place", shortID(clawID), shortID(checkpointID))
+	}
 }
 
 func (s *Server) restoreCheckpointFiles(checkpointID string) ([]types.CheckpointFile, error) {
@@ -2406,10 +2448,14 @@ const (
 	// -- fresh for a blob the claw uploads, refreshed by claimBlobPresent for a
 	// blob the plan found already present -- against a sweep whose grace is
 	// blobSweepGrace, and by the claim window against a sweep already walking.
-	// That window is not bounded by the hub: the request wait times out but the
-	// row stays 'creating', so a slow upload can outlive the grace. The tree
-	// blob's arrival is what closes it, and it closes it with a proof rather
-	// than a hope: finalize treats a root whose tree is not yet expanded the way
+	// The request wait times out but the row stays 'creating', so a slow upload
+	// can outlive the grace; what bounds the window is
+	// failStuckCreatingCheckpointsTx, which fails a row still 'creating' after
+	// checkpointCreatingMaxAge and drops its edges with it, the root edge
+	// included -- an unverifiable plan's root cannot linger. Within that bound
+	// the tree blob's arrival is what closes the window, and it closes it with
+	// a proof rather than a hope: finalize treats a root whose tree is not yet
+	// expanded the way
 	// it treats an unplanned root -- every file the blob lists is claimed under
 	// the interlock, and a file the sweep already took fails the complete. No
 	// 'ready' checkpoint is ever published over a swept blob; the worst case for

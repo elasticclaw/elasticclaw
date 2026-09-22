@@ -3,6 +3,7 @@ package hub
 import (
 	"context"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
@@ -191,5 +192,228 @@ func TestAbortedRestoreReleasesItsReservation(t *testing.T) {
 	}
 	if _, err := os.Stat(checkpointManifestPath("cp")); err != nil {
 		t.Fatalf("the aborted restore's source lost its manifest: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// The reservation is owned by the restore that wrote it last
+// ---------------------------------------------------------------------------
+//
+// Two restores of one claw overlap whenever an operator restores again while
+// the first is still in its termination checkpoint (up to 90 seconds) or its
+// provisioning (minutes). The later reservation supersedes the earlier one;
+// what must not happen is the earlier restore writing its own id back over
+// it, tearing the sandbox down, and provisioning from a checkpoint that
+// retention is now free to release under it.
+
+// seedClawWithTwoRestorableCheckpoints seeds a live claw on a VM with two
+// 'ready' checkpoints, cp-a and cp-b, to restore from.
+func seedClawWithTwoRestorableCheckpoints(t *testing.T, s *Server) {
+	t.Helper()
+	reference := time.Now()
+	insertRetentionClaw(t, s, "claw-owned", reference)
+	if _, err := s.db.Exec(`UPDATE claws SET status='running', provider='daytona', provider_id='vm-1' WHERE id='claw-owned'`); err != nil {
+		t.Fatal(err)
+	}
+	root, _, _ := planTreeFixtureSeeded(t, 1, "owned ")
+	for _, id := range []string{"cp-a", "cp-b"} {
+		insertRetentionCheckpoint(t, s, retentionCheckpoint{
+			id: id, clawID: "claw-owned", status: "ready", createdAt: reference, rootTree: root, writeManifest: true})
+	}
+}
+
+func clawRestoreColumns(t *testing.T, s *Server, clawID string) (status, reserved, restoredFrom, providerID string) {
+	t.Helper()
+	if err := s.db.QueryRow(`SELECT status, COALESCE(restore_checkpoint_id,''), COALESCE(restored_from_checkpoint_id,''), COALESCE(provider_id,'') FROM claws WHERE id=?`, clawID).
+		Scan(&status, &reserved, &restoredFrom, &providerID); err != nil {
+		t.Fatal(err)
+	}
+	return
+}
+
+// Revert verified against: the status UPDATE in restoreClawFromCheckpoint
+// without its AND restore_checkpoint_id=? guard (as before).
+//
+// R1 restores from cp-a. While R1 is between its reservation and its commit,
+// R2 restores from cp-b and reserves it, then parks. R1 runs on and must stop:
+// no teardown, no reservation overwritten, no provision. R2 then completes as
+// the owner. Both restores really run; the interleaving is held by channels.
+func TestSupersededRestoreStopsAndKeepsTheNewerReservation(t *testing.T) {
+	s := newRetentionTestServer(t)
+	seedClawWithTwoRestorableCheckpoints(t, s)
+	var (
+		terminated   []string
+		terminatedMu sync.Mutex
+	)
+	s.terminateVMOverride = func(_, id string) error {
+		terminatedMu.Lock()
+		defer terminatedMu.Unlock()
+		terminated = append(terminated, id)
+		return nil
+	}
+
+	r2Reserved := make(chan struct{})
+	r1Done := make(chan struct{})
+	r2Err := make(chan error, 1)
+	restoreReservedHook = func(clawID, checkpointID string) {
+		switch checkpointID {
+		case "cp-a":
+			// R1 is past its reservation and has destroyed nothing: start R2
+			// and wait until it has reserved cp-b.
+			go func() { r2Err <- s.restoreClawFromCheckpoint(context.Background(), "tenant", "claw-owned", "cp-b") }()
+			<-r2Reserved
+		case "cp-b":
+			close(r2Reserved)
+			<-r1Done
+		}
+	}
+	t.Cleanup(func() { restoreReservedHook = nil })
+
+	r1Err := s.restoreClawFromCheckpoint(context.Background(), "tenant", "claw-owned", "cp-a")
+	if r1Err == nil {
+		t.Fatal("R1 went on to provision although R2 had reserved the claw under it")
+	}
+	if !containsString(r1Err.Error(), "superseded") {
+		t.Fatalf("R1 returned %v, want a superseded error", r1Err)
+	}
+	status, reserved, restoredFrom, providerID := clawRestoreColumns(t, s, "claw-owned")
+	if reserved != "cp-b" {
+		t.Fatalf("restore_checkpoint_id = %q after R1 stopped, want R2's cp-b", reserved)
+	}
+	if status != "running" || providerID != "vm-1" || restoredFrom != "" {
+		t.Fatalf("R1 changed the claw it no longer owned: status %q, provider_id %q, restored_from %q", status, providerID, restoredFrom)
+	}
+	terminatedMu.Lock()
+	n := len(terminated)
+	terminatedMu.Unlock()
+	if n != 0 {
+		t.Fatalf("R1 terminated %v although R2 owned the claw", terminated)
+	}
+
+	close(r1Done)
+	if err := <-r2Err; err != nil {
+		t.Fatalf("R2, the owner, failed: %v", err)
+	}
+	status, reserved, restoredFrom, providerID = clawRestoreColumns(t, s, "claw-owned")
+	if reserved != "cp-b" || restoredFrom != "cp-b" {
+		t.Fatalf("after R2 committed: restore_checkpoint_id %q, restored_from %q, want cp-b for both", reserved, restoredFrom)
+	}
+	if status != "provisioning" && status != "error" {
+		t.Fatalf("after R2 committed the claw is %q, want provisioning (or error once its provisioning failed)", status)
+	}
+	if providerID != "" {
+		t.Fatalf("R2 left provider_id %q on the claw it tore down", providerID)
+	}
+	terminatedMu.Lock()
+	got := append([]string(nil), terminated...)
+	terminatedMu.Unlock()
+	if len(got) != 1 || got[0] != "vm-1" {
+		t.Fatalf("terminated VMs = %v, want exactly R2's teardown of vm-1", got)
+	}
+	// R2's provisioning runs in a goroutine and fails on this server (no
+	// provider configured); let it settle before the store closes.
+	waitForClawToLeave(t, s, "claw-owned", "provisioning")
+}
+
+// Revert verified against: releaseRestoreReservation without its
+// AND restore_checkpoint_id=? guard.
+//
+// R1 reserves cp-a; R2 restores from cp-b to completion while R1 is still in
+// its window; R1 then aborts at its provider lookup, before its teardown. The
+// release R1 does on that abort must not touch R2's reservation.
+func TestAbortedRestoreDoesNotReleaseTheNewerRestoresReservation(t *testing.T) {
+	s := newRetentionTestServer(t)
+	seedClawWithTwoRestorableCheckpoints(t, s)
+	s.terminateVMOverride = func(_, _ string) error { return nil }
+
+	restoreReservedHook = func(clawID, checkpointID string) {
+		if checkpointID != "cp-a" {
+			return
+		}
+		if err := s.restoreClawFromCheckpoint(context.Background(), "tenant", "claw-owned", "cp-b"); err != nil {
+			t.Fatalf("R2: %v", err)
+		}
+		// Make R1's provider lookup fail by taking the row away from the
+		// tenant it is acting for: the last exit before its teardown.
+		if _, err := s.db.Exec(`INSERT INTO tenants(id,name,token,claw_token,created_at) VALUES('elsewhere','elsewhere','t2','c2',?)`, now()); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.db.Exec(`UPDATE claws SET tenant_id='elsewhere' WHERE id='claw-owned'`); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Cleanup(func() { restoreReservedHook = nil })
+
+	if err := s.restoreClawFromCheckpoint(context.Background(), "tenant", "claw-owned", "cp-a"); err == nil {
+		t.Fatal("R1 succeeded although its provider lookup could not find the claw")
+	}
+	_, reserved, _, _ := clawRestoreColumns(t, s, "claw-owned")
+	if reserved != "cp-b" {
+		t.Fatalf("restore_checkpoint_id = %q after R1 aborted, want R2's cp-b untouched", reserved)
+	}
+	waitForClawToLeave(t, s, "claw-owned", "provisioning")
+}
+
+// Revert verified against: markRestoreApplied without its
+// AND restore_checkpoint_id=? guard.
+//
+// The provisioning that applies cp-a reads the reservation once
+// (pendingRestoreCheckpoint) and writes files for minutes. A restore from cp-b
+// that reserves in the meantime owns the claw; the first provisioning's
+// completion must not clear that reservation while the second reads cp-b.
+func TestCompletingRestoreClearsOnlyItsOwnReservation(t *testing.T) {
+	s := newRetentionTestServer(t)
+	seedClawWithTwoRestorableCheckpoints(t, s)
+	if _, err := s.reserveRestoreSource("tenant", "claw-owned", "cp-a"); err != nil {
+		t.Fatal(err)
+	}
+	applying := s.pendingRestoreCheckpoint("claw-owned")
+	if applying != "cp-a" {
+		t.Fatalf("fixture: provisioning read %q, want cp-a", applying)
+	}
+	if previous, err := s.reserveRestoreSource("tenant", "claw-owned", "cp-b"); err != nil || previous != "cp-a" {
+		t.Fatalf("second reservation: previous %q, err %v", previous, err)
+	}
+
+	s.markRestoreApplied("claw-owned", applying)
+	_, reserved, restoredFrom, _ := clawRestoreColumns(t, s, "claw-owned")
+	if reserved != "cp-b" {
+		t.Fatalf("restore_checkpoint_id = %q after the first restore applied, want the second's cp-b", reserved)
+	}
+	if restoredFrom == "cp-a" {
+		t.Fatal("the claw records cp-a as what it was restored from while cp-b is being restored")
+	}
+
+	// The owner's completion clears it.
+	s.markRestoreApplied("claw-owned", "cp-b")
+	_, reserved, restoredFrom, _ = clawRestoreColumns(t, s, "claw-owned")
+	if reserved != "" || restoredFrom != "cp-b" {
+		t.Fatalf("after the owner applied: restore_checkpoint_id %q, restored_from %q, want none and cp-b", reserved, restoredFrom)
+	}
+}
+
+// Revert verified against: releaseRestoreReservation without its log line.
+//
+// An aborted restore whose release also fails leaves a reservation on a claw
+// whose status never changed; finalizedClawPredicateSQL then never finalizes
+// it. The operator must be able to find that claw in the log.
+func TestLeakedReservationIsNamedInTheLog(t *testing.T) {
+	s := newRetentionTestServer(t)
+	seedClawWithTwoRestorableCheckpoints(t, s)
+	restoreReservedHook = func(clawID, checkpointID string) {
+		// Every write after the reservation now fails, the release included.
+		s.db.Close()
+	}
+	t.Cleanup(func() { restoreReservedHook = nil })
+
+	var err error
+	out := captureRetentionLog(t, func() {
+		err = s.restoreClawFromCheckpoint(context.Background(), "tenant", "claw-owned", "cp-a")
+	})
+	if err == nil {
+		t.Fatal("the restore succeeded against a closed store")
+	}
+	if !containsString(out, "leaked reservation") || !containsString(out, "claw-owned") || !containsString(out, "cp-a") {
+		t.Fatalf("the log does not name the leaked reservation of cp-a on claw-owned:\n%s", out)
 	}
 }
