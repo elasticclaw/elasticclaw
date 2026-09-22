@@ -456,7 +456,10 @@ func (s *Server) collectCheckpointTree(tree string, dry bool, counts *retentionC
 }
 
 func (s *Server) collectCheckpointTreeBatch(tree string, dry bool, counts *retentionCollection) (bool, error) {
-	// openDB uses BEGIN IMMEDIATE: plans cannot publish references during unlink.
+	// openDB uses BEGIN IMMEDIATE, so unlinking inside the transaction keeps a
+	// concurrent plan from publishing a reference to a blob mid-removal. A
+	// rollback after an unlink is harmless: the tree is dead, the rows come
+	// back, and the next cycle retries the same batch (ENOENT is skipped).
 	tx, err := s.db.Begin()
 	if err != nil {
 		return true, err

@@ -320,8 +320,16 @@ func (s *Server) handleClawCheckpoints(w http.ResponseWriter, r *http.Request, c
 }
 
 func (s *Server) restoreClawFromCheckpoint(ctx context.Context, tenantID, clawID, checkpointID string) error {
+	// Validate and claim in one transaction: retention skips checkpoints named
+	// by restore_checkpoint_id, and the pre-reset checkpoint below can take a
+	// while, so the claim must exist before the wait, not after it.
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
 	var status, manifestPath string
-	if err := s.db.QueryRow(`SELECT status, manifest_path FROM claw_checkpoints WHERE id=? AND tenant_id=? AND claw_id=?`, checkpointID, tenantID, clawID).Scan(&status, &manifestPath); err != nil {
+	if err := tx.QueryRow(`SELECT status, manifest_path FROM claw_checkpoints WHERE id=? AND tenant_id=? AND claw_id=?`, checkpointID, tenantID, clawID).Scan(&status, &manifestPath); err != nil {
 		if err == sql.ErrNoRows {
 			return fmt.Errorf("checkpoint not found")
 		}
@@ -332,6 +340,12 @@ func (s *Server) restoreClawFromCheckpoint(ctx context.Context, tenantID, clawID
 	}
 	if manifestPath == "" {
 		return fmt.Errorf("checkpoint has no manifest")
+	}
+	if _, err := tx.Exec(`UPDATE claws SET restore_checkpoint_id=? WHERE id=? AND tenant_id=?`, checkpointID, clawID, tenantID); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
 	}
 
 	// Preserve the current state if the bridge is still reachable.
@@ -351,9 +365,8 @@ func (s *Server) restoreClawFromCheckpoint(ctx context.Context, tenantID, clawID
 		go s.terminateVM(provider, providerID)
 	}
 
-	_, err := s.db.Exec(`UPDATE claws SET status='provisioning', bootstrap_ok=0, bootstrap_status='Restoring checkpoint', provider_id='', restore_checkpoint_id=?, restored_from_checkpoint_id=? WHERE id=? AND tenant_id=?`,
-		checkpointID, checkpointID, clawID, tenantID)
-	if err != nil {
+	if _, err := s.db.Exec(`UPDATE claws SET status='provisioning', bootstrap_ok=0, bootstrap_status='Restoring checkpoint', provider_id='', restore_checkpoint_id=?, restored_from_checkpoint_id=? WHERE id=? AND tenant_id=?`,
+		checkpointID, checkpointID, clawID, tenantID); err != nil {
 		return err
 	}
 	s.broadcastToUsers(tenantID, types.WSMessage{
