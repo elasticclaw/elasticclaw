@@ -2361,9 +2361,16 @@ func isSessionFileLockConflictError(err error) bool {
 // isSessionAdmissionConflictError detects OpenClaw 2026.9.x's retryable
 // session-admission rejections from chat.send: the request was never accepted
 // (no tool side effects), so replaying the same message on the same session is
-// safe. Texts mirror the gateway's typed errors ("goal-session-busy",
-// `Session "<key>" changed while starting work. Retry.`, reasons
-// session-routing-changed / active-leaf-changed / session-settings-changed).
+// safe. The gateway's typed responders put PROSE in the wire error message and
+// the hyphenated reason only in error.details.reason ("goal-session-busy" →
+// "This session still has active or queued work. Wait for it to finish, then
+// retry the Goal.", session-routing-changed → "session routing changed; review
+// and retry", active-leaf-changed → "active branch changed; review and retry",
+// session-settings-changed → "Session settings changed before send. Retry."),
+// and this bridge surfaces only the message, so the prose forms are the ones
+// that hit production. The reason-code forms are matched too: admission
+// errors that bypass the typed responders surface via formatForLog with the
+// bare internal message, which is the reason code itself.
 // Do NOT match "session file changed since it was read" (session_file_conflict
 // file-edit error) here — it is unrelated to send admission.
 func isSessionAdmissionConflictError(err error) bool {
@@ -2372,15 +2379,19 @@ func isSessionAdmissionConflictError(err error) bool {
 	}
 	msg := strings.ToLower(err.Error())
 	switch {
-	case strings.Contains(msg, "goal-session-busy"):
+	case strings.Contains(msg, "goal-session-busy"),
+		strings.Contains(msg, "active or queued work"):
 		return true
 	case strings.Contains(msg, "changed while starting work"):
 		return true
-	case strings.Contains(msg, "session routing changed"):
+	case strings.Contains(msg, "session routing changed"),
+		strings.Contains(msg, "session-routing-changed"):
 		return true
-	case strings.Contains(msg, "active branch changed"):
+	case strings.Contains(msg, "active branch changed"),
+		strings.Contains(msg, "active-leaf-changed"):
 		return true
-	case strings.Contains(msg, "session settings changed before send"):
+	case strings.Contains(msg, "session settings changed before send"),
+		strings.Contains(msg, "session-settings-changed"):
 		return true
 	}
 	return false

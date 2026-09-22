@@ -38,16 +38,28 @@ CREATE INDEX IF NOT EXISTS idx_device_identities_device
 
 const primaryDeviceIdentityKey = "primary"
 
+// openClawStateRoot returns the effective OpenClaw state root, honoring
+// OPENCLAW_STATE_DIR like OpenClaw's resolveStateDir. Both the shared state
+// database and the retired 2026.7.x identity/device.json resolve from this
+// root: upstream's resolveLegacyDeviceIdentityPath derives the legacy path
+// from the same state dir as the database, not from $HOME.
+func openClawStateRoot() (string, error) {
+	if root := os.Getenv("OPENCLAW_STATE_DIR"); root != "" {
+		return root, nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("user home: %w", err)
+	}
+	return filepath.Join(home, ".openclaw"), nil
+}
+
 // openClawStateDBPath returns the shared state database path, honoring
 // OPENCLAW_STATE_DIR like OpenClaw's resolveStateDir.
 func openClawStateDBPath() (string, error) {
-	root := os.Getenv("OPENCLAW_STATE_DIR")
-	if root == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return "", fmt.Errorf("user home: %w", err)
-		}
-		root = filepath.Join(home, ".openclaw")
+	root, err := openClawStateRoot()
+	if err != nil {
+		return "", err
 	}
 	return filepath.Join(root, "state", "openclaw.sqlite"), nil
 }
@@ -58,17 +70,21 @@ func openClawStateDBPath() (string, error) {
 // the authoritative row is re-read (mirrors upstream's
 // insertStoredDeviceIdentityIfAbsent).
 func loadOrCreateDeviceIdentity(ctx context.Context) (*deviceIdentity, error) {
-	dbPath, err := openClawStateDBPath()
+	root, err := openClawStateRoot()
 	if err != nil {
 		return nil, err
 	}
+	dbPath := filepath.Join(root, "state", "openclaw.sqlite")
 	// A retired 2026.7.x identity file makes upstream clients refuse to start;
-	// match that behavior instead of silently forking identities.
-	home, _ := os.UserHomeDir()
-	if legacy := filepath.Join(home, ".openclaw", "identity", "device.json"); home != "" {
-		if _, err := os.Stat(legacy); err == nil {
-			return nil, fmt.Errorf("legacy device identity exists at %s; run `openclaw doctor --fix` before connecting", legacy)
-		}
+	// match that behavior instead of silently forking identities. Upstream's
+	// assertNoPendingLegacyIdentity resolves identity/device.json from the SAME
+	// state root as the database and is fail-closed: only a definite missing
+	// file (ENOENT) counts as absent, so stat failures refuse too.
+	legacy := filepath.Join(root, "identity", "device.json")
+	if _, err := os.Lstat(legacy); err == nil {
+		return nil, fmt.Errorf("legacy device identity exists at %s; run `openclaw doctor --fix` before connecting", legacy)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("cannot check for legacy device identity at %s: %w", legacy, err)
 	}
 	if err := os.MkdirAll(filepath.Dir(dbPath), 0700); err != nil {
 		return nil, fmt.Errorf("create state dir: %w", err)

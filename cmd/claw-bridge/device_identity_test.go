@@ -8,7 +8,6 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
-	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"os"
@@ -159,27 +158,106 @@ func TestLoadOrCreateDeviceIdentityRefusesLegacyJSON(t *testing.T) {
 }
 
 func TestIsSessionAdmissionConflictError(t *testing.T) {
-	cases := map[string]bool{
-		`{"error":{"message":"This session still has active or queued work. Wait for it to finish, then retry the Goal.","code":"goal-session-busy"}}`: true,
-		`Session "agent:main:dashboard:x" changed while starting work. Retry.`:                                                                         true,
-		`{"reason":"session-routing-changed","message":"session routing changed; review and retry"}`:                                                   true,
-		`{"reason":"active-leaf-changed","message":"active branch changed; review and retry"}`:                                                         true,
-		`Session settings changed before send. Retry.`:                                                                                                 true,
+	// Fixtures mirror the exact wire shapes production sees: sendReq surfaces
+	// only the gateway error's message field, so typed admission rejections
+	// arrive as "sessions.send failed: <prose>" (the hyphenated reason codes
+	// live in error.details.reason and never reach the error text). The
+	// reason-code forms below cover admission errors that bypass the typed
+	// responders, which surface via formatForLog with the bare reason code.
+	cases := []struct {
+		msg  string
+		want bool
+	}{
+		// Typed responder prose — the production shapes on 2026.9.4.
+		{"sessions.send failed: This session still has active or queued work. Wait for it to finish, then retry the Goal.", true},
+		{"sessions.send failed: session routing changed; review and retry", true},
+		{"sessions.send failed: active branch changed; review and retry", true},
+		{"sessions.send failed: Session settings changed before send. Retry.", true},
+		{`sessions.send failed: Session "agent:main:dashboard:x" changed while starting work. Retry.`, true},
+		// Reason-code-only forms (untyped / formatForLog path).
+		{"sessions.send failed: goal-session-busy", true},
+		{"sessions.send failed: session-routing-changed", true},
+		{"sessions.send failed: active-leaf-changed", true},
+		{"sessions.send failed: session-settings-changed", true},
 		// Unrelated file-edit conflict must not be treated as admission retry.
-		`session file changed since it was read (session_file_conflict)`: false,
-		`some other gateway error`:                                       false,
+		{"sessions.send failed: session file changed since it was read (session_file_conflict)", false},
+		{"sessions.send failed: session not found: agent:main:dashboard:x", false},
+		{"sessions.send failed: some other gateway error", false},
 	}
-	for msg, want := range cases {
-		var err error
-		if !want {
-			// still exercise the matcher on the text
-			err = errors.New(msg)
-		} else {
-			err = errors.New(msg)
+	for _, tc := range cases {
+		if got := isSessionAdmissionConflictError(errors.New(tc.msg)); got != tc.want {
+			t.Fatalf("isSessionAdmissionConflictError(%q) = %v, want %v", tc.msg, got, tc.want)
 		}
-		if got := isSessionAdmissionConflictError(err); got != want {
-			t.Fatalf("isSessionAdmissionConflictError(%q) = %v, want %v", msg, got, want)
-		}
+	}
+}
+
+// TestLoadOrCreateDeviceIdentityLegacyCheckHonorsStateDir mirrors upstream's
+// resolveLegacyDeviceIdentityPath: the retired identity/device.json resolves
+// from the EFFECTIVE state root (honoring OPENCLAW_STATE_DIR), so a legacy
+// file under an overridden root refuses, while a stale file under $HOME must
+// not block a bridge configured with a separate state dir.
+func TestLoadOrCreateDeviceIdentityLegacyCheckHonorsStateDir(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	stateRoot := t.TempDir()
+	t.Setenv("OPENCLAW_STATE_DIR", stateRoot)
+
+	legacy := filepath.Join(stateRoot, "identity", "device.json")
+	if err := os.MkdirAll(filepath.Dir(legacy), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(legacy, []byte(`{"deviceId":"old"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadOrCreateDeviceIdentity(t.Context()); err == nil || !strings.Contains(err.Error(), "doctor --fix") {
+		t.Fatalf("error = %v, want legacy identity refusal pointing at doctor --fix", err)
+	}
+
+	// The same file under $HOME is not part of the overridden state root and
+	// must not block identity creation there.
+	if err := os.Remove(legacy); err != nil {
+		t.Fatal(err)
+	}
+	homeLegacy := filepath.Join(home, ".openclaw", "identity", "device.json")
+	if err := os.MkdirAll(filepath.Dir(homeLegacy), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(homeLegacy, []byte(`{"deviceId":"old"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	dev, err := loadOrCreateDeviceIdentity(t.Context())
+	if err != nil {
+		t.Fatalf("load identity with unrelated legacy file under $HOME: %v", err)
+	}
+	assertDeviceIdentityPair(t, dev)
+}
+
+// TestLoadOrCreateDeviceIdentityLegacyCheckFailsClosed mirrors upstream's
+// pathMayExistSync ("only a definite missing leaf permits callers to treat a
+// path as absent"): an lstat failure other than not-exist must refuse instead
+// of silently proceeding as if no legacy identity existed.
+func TestLoadOrCreateDeviceIdentityLegacyCheckFailsClosed(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: permission-based stat failure is not reproducible")
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	stateRoot := t.TempDir()
+	t.Setenv("OPENCLAW_STATE_DIR", stateRoot)
+
+	identityDir := filepath.Join(stateRoot, "identity")
+	if err := os.MkdirAll(identityDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	// Removing search permission makes lstat of identity/device.json fail
+	// with EACCES rather than ENOENT.
+	if err := os.Chmod(identityDir, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(identityDir, 0700) })
+
+	if _, err := loadOrCreateDeviceIdentity(t.Context()); err == nil || !strings.Contains(err.Error(), "cannot check for legacy device identity") {
+		t.Fatalf("error = %v, want fail-closed refusal on unstatable legacy path", err)
 	}
 }
 
@@ -213,8 +291,6 @@ func TestOpenClawStateDBPathHonorsStateDir(t *testing.T) {
 		t.Fatalf("path = %q", path)
 	}
 }
-
-var _ = json.Marshal // retain json import if cases change
 
 // TestNodeCompatibleExprMatchesOpenClawEngines exercises the exact JS
 // expression the bootstrap script embeds, with injected Node versions,
