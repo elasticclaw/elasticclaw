@@ -2,6 +2,7 @@ package hub
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"io/fs"
 	"log"
@@ -81,21 +82,26 @@ func (s *Server) runRetention() {
 }
 
 func (s *Server) retainOnce(at time.Time, cfg retentionSettings) {
-	unexpanded, err := s.backfillCheckpointTrees(cfg.dryRun)
+	unexpanded, err := s.backfillCheckpointTrees()
 	if err != nil {
 		log.Printf("retention: backfill: %v", err)
 		return
 	}
-	compacted, err := s.compactCheckpoints(at, cfg.dryRun)
-	if err != nil {
-		log.Printf("retention: compaction: %v", err)
-		return
-	}
+	// Compaction and expiry clear root_tree_sha256; a tree released before its
+	// expansion was recorded would never be seen by the collector.
+	var compacted, expired int
 	cutoff := at.Add(-cfg.maxAge)
-	expired, err := s.expireCheckpoints(cutoff, cfg.dryRun)
-	if err != nil {
-		log.Printf("retention: checkpoint expiry: %v", err)
-		return
+	if unexpanded > 0 {
+		log.Printf("retention: compaction and expiry skipped; unexpanded=%d", unexpanded)
+	} else {
+		if compacted, err = s.compactCheckpoints(at, cfg.dryRun); err != nil {
+			log.Printf("retention: compaction: %v", err)
+			return
+		}
+		if expired, err = s.expireCheckpoints(cutoff, cfg.dryRun); err != nil {
+			log.Printf("retention: checkpoint expiry: %v", err)
+			return
+		}
 	}
 	diagnostics, err := s.expireDiagnostics(cutoff, cfg.dryRun)
 	if err != nil {
@@ -126,27 +132,23 @@ func recordCheckpointTree(db *sql.DB, checkpointID, rootSHA string, files []type
 		return err
 	}
 	defer tx.Rollback()
-	result, err := tx.Exec(`INSERT OR IGNORE INTO checkpoint_trees(sha256,created_at) VALUES(?,?)`, rootSHA, now())
+	if _, err := tx.Exec(`INSERT OR IGNORE INTO checkpoint_trees(sha256,created_at) VALUES(?,?)`, rootSHA, now()); err != nil {
+		return err
+	}
+	// Always re-insert the expansion: a plan may revive a tree the collector
+	// is partway through unlinking, and its remaining file rows must be
+	// completed again so those files are referenced.
+	stmt, err := tx.Prepare(`INSERT OR IGNORE INTO checkpoint_tree_files(tree_sha256,file_sha256) VALUES(?,?)`)
 	if err != nil {
 		return err
 	}
-	inserted, err := result.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if inserted > 0 {
-		stmt, err := tx.Prepare(`INSERT OR IGNORE INTO checkpoint_tree_files(tree_sha256,file_sha256) VALUES(?,?)`)
-		if err != nil {
-			return err
+	defer stmt.Close()
+	for _, file := range files {
+		if file.SHA256 == "" || file.SHA256 == rootSHA {
+			continue
 		}
-		defer stmt.Close()
-		for _, file := range files {
-			if file.SHA256 == "" || file.SHA256 == rootSHA {
-				continue
-			}
-			if _, err := stmt.Exec(rootSHA, file.SHA256); err != nil {
-				return err
-			}
+		if _, err := stmt.Exec(rootSHA, file.SHA256); err != nil {
+			return err
 		}
 	}
 	if checkpointID != "" {
@@ -157,7 +159,9 @@ func recordCheckpointTree(db *sql.DB, checkpointID, rootSHA string, files []type
 	return tx.Commit()
 }
 
-func (s *Server) backfillCheckpointTrees(dry bool) (int, error) {
+// backfillCheckpointTrees runs in dry mode too: the expansion is bookkeeping,
+// and without it every later phase stays gated.
+func (s *Server) backfillCheckpointTrees() (int, error) {
 	trees, err := retentionStrings(s.db, `SELECT DISTINCT root_tree_sha256 FROM claw_checkpoints
   WHERE root_tree_sha256!='' AND status IN `+retentionLive+`
   AND root_tree_sha256 NOT IN (SELECT sha256 FROM checkpoint_trees) LIMIT 50`)
@@ -166,11 +170,13 @@ func (s *Server) backfillCheckpointTrees(dry bool) (int, error) {
 	}
 	for _, tree := range trees {
 		files, err := s.filesForTree(tree)
-		if err != nil {
-			log.Printf("retention: unreadable tree %s: %v", tree, err)
+		if errors.Is(err, fs.ErrNotExist) {
+			log.Printf("retention: missing tree %s; recording empty expansion", tree)
 			files = nil
-		}
-		if dry {
+		} else if err != nil {
+			// Transient read errors must not leave a restorable tree with an
+			// empty expansion; the gate keeps everything off until it is read.
+			log.Printf("retention: unreadable tree %s: %v", tree, err)
 			continue
 		}
 		if err := recordCheckpointTree(s.db, "", tree, files); err != nil {
@@ -213,7 +219,12 @@ func (s *Server) compactCheckpoints(at time.Time, dry bool) (int, error) {
 	}
 	count := 0
 	for _, c := range claws {
-		keep, _, err := s.selectRetryCheckpoint(c.tenant, c.id, "")
+		// Same lookup as retryCheckpointIDWithCount: the next retry skips the
+		// checkpoint the latest attempt restored from.
+		var previous string
+		_ = s.db.QueryRow(`SELECT COALESCE(restored_checkpoint_id,'') FROM task_run_attempts
+  WHERE run_id=(SELECT task_run_id FROM claws WHERE id=?) ORDER BY attempt_number DESC LIMIT 1`, c.id).Scan(&previous)
+		keep, _, err := s.selectRetryCheckpoint(c.tenant, c.id, previous)
 		if err != nil {
 			return count, err
 		}
@@ -262,7 +273,7 @@ func (s *Server) compactCheckpointRows(where string, dry bool, args ...any) (int
 			continue
 		}
 		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-			return int(count), err
+			log.Printf("retention: remove manifest %s: %v", path, err)
 		}
 	}
 	return int(count), nil
@@ -294,7 +305,7 @@ func (s *Server) expireDiagnostics(cutoff time.Time, dry bool) (int, error) {
 			continue
 		}
 		if err := os.Remove(filepath.Join(dir, file.Name())); err != nil && !os.IsNotExist(err) {
-			return count, err
+			log.Printf("retention: remove diagnostic %s: %v", file.Name(), err)
 		}
 	}
 	return count, nil
@@ -395,9 +406,11 @@ func (s *Server) collectCheckpointBlobs(at time.Time, dry bool) (retentionCollec
 	if err != nil {
 		return counts, err
 	}
+	// A failing tree rolls back its own batch and is retried next cycle; it
+	// must not stall every other tree behind it.
 	for _, tree := range trees {
 		if err := s.collectCheckpointTree(tree, dry, &counts); err != nil {
-			return counts, err
+			log.Printf("retention: collect tree %s: %v", tree, err)
 		}
 	}
 	messages, err := retentionStrings(s.db, `SELECT DISTINCT message_tree_sha256 FROM claw_checkpoints
@@ -408,7 +421,7 @@ func (s *Server) collectCheckpointBlobs(at time.Time, dry bool) (retentionCollec
 	}
 	for _, sha := range messages {
 		if err := s.collectCheckpointMessage(sha, dry, &counts); err != nil {
-			return counts, err
+			log.Printf("retention: collect message %s: %v", sha, err)
 		}
 	}
 	err = filepath.WalkDir(filepath.Join(checkpointsRoot(), "blobs"), func(path string, entry fs.DirEntry, err error) error {
@@ -456,8 +469,11 @@ func (s *Server) collectCheckpointTreeBatch(tree string, dry bool, counts *reten
 	if live {
 		return true, nil
 	}
+	// Blobs are content-addressed across roles: a file digest may also be a
+	// live tree or message blob, so every role is checked before unlinking.
 	query := `SELECT file_sha256 FROM checkpoint_tree_files f WHERE tree_sha256=? AND NOT EXISTS
-  (SELECT 1 FROM checkpoint_tree_files other WHERE other.file_sha256=f.file_sha256 AND other.tree_sha256!=?)`
+  (SELECT 1 FROM checkpoint_tree_files other WHERE other.file_sha256=f.file_sha256 AND other.tree_sha256!=?)
+  AND NOT EXISTS (SELECT 1 FROM claw_checkpoints c WHERE (c.root_tree_sha256=f.file_sha256 OR c.message_tree_sha256=f.file_sha256) AND c.status IN ` + retentionLive + `)`
 	if !dry {
 		query += ` LIMIT 500`
 	}
@@ -465,34 +481,36 @@ func (s *Server) collectCheckpointTreeBatch(tree string, dry bool, counts *reten
 	if err != nil {
 		return true, err
 	}
-	if dry {
-		for _, sha := range files {
-			if err := retentionUnlink(checkpointBlobPath(sha), true, counts); err != nil {
+	for _, sha := range files {
+		if !dry {
+			if _, err := tx.Exec(`DELETE FROM checkpoint_tree_files WHERE tree_sha256=? AND file_sha256=?`, tree, sha); err != nil {
 				return true, err
 			}
 		}
-		if err := retentionUnlink(checkpointBlobPath(tree), true, counts); err != nil {
-			return true, err
-		}
-		counts.trees++
-		return true, nil
-	}
-	for _, sha := range files {
-		if _, err := tx.Exec(`DELETE FROM checkpoint_tree_files WHERE tree_sha256=? AND file_sha256=?`, tree, sha); err != nil {
-			return true, err
-		}
-		if err := retentionUnlink(checkpointBlobPath(sha), false, counts); err != nil {
+		if err := retentionUnlink(checkpointBlobPath(sha), dry, counts); err != nil {
 			return true, err
 		}
 	}
-	if len(files) > 0 {
+	if len(files) > 0 && !dry {
 		return false, tx.Commit()
 	}
-	if _, err := tx.Exec(`DELETE FROM checkpoint_tree_files WHERE tree_sha256=?`, tree); err != nil {
+	if !dry {
+		if _, err := tx.Exec(`DELETE FROM checkpoint_tree_files WHERE tree_sha256=?`, tree); err != nil {
+			return true, err
+		}
+	}
+	referenced, err := retentionReferenced(tx, tree)
+	if err != nil {
 		return true, err
 	}
-	if err := retentionUnlink(checkpointBlobPath(tree), false, counts); err != nil {
-		return true, err
+	if !referenced {
+		if err := retentionUnlink(checkpointBlobPath(tree), dry, counts); err != nil {
+			return true, err
+		}
+	}
+	if dry {
+		counts.trees++
+		return true, nil
 	}
 	if _, err := tx.Exec(`DELETE FROM checkpoint_trees WHERE sha256=?`, tree); err != nil {
 		return true, err
@@ -504,26 +522,34 @@ func (s *Server) collectCheckpointTreeBatch(tree string, dry bool, counts *reten
 	return true, nil
 }
 
+// retentionReferenced reports whether any tree expansion or live checkpoint
+// still names the digest in any role.
+func retentionReferenced(tx *sql.Tx, sha string) (bool, error) {
+	var referenced bool
+	err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM checkpoint_tree_files WHERE file_sha256=?)
+  OR EXISTS(SELECT 1 FROM claw_checkpoints WHERE (root_tree_sha256=? OR message_tree_sha256=?) AND status IN `+retentionLive+`)`, sha, sha, sha).Scan(&referenced)
+	return referenced, err
+}
+
 func (s *Server) collectCheckpointMessage(sha string, dry bool, counts *retentionCollection) error {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-	var referenced bool
-	if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM claw_checkpoints WHERE message_tree_sha256=? AND status IN `+retentionLive+`)`, sha).Scan(&referenced); err != nil {
+	referenced, err := retentionReferenced(tx, sha)
+	if err != nil {
 		return err
 	}
-	if referenced {
-		return nil
-	}
-	if err := retentionUnlink(checkpointBlobPath(sha), dry, counts); err != nil {
-		return fmt.Errorf("unlink message: %w", err)
+	if !referenced {
+		if err := retentionUnlink(checkpointBlobPath(sha), dry, counts); err != nil {
+			return fmt.Errorf("unlink message: %w", err)
+		}
 	}
 	if dry {
 		return nil
 	}
-	if _, err := tx.Exec(`UPDATE claw_checkpoints SET message_tree_sha256='' WHERE message_tree_sha256=?`, sha); err != nil {
+	if _, err := tx.Exec(`UPDATE claw_checkpoints SET message_tree_sha256='' WHERE message_tree_sha256=? AND status NOT IN `+retentionLive, sha); err != nil {
 		return err
 	}
 	return tx.Commit()

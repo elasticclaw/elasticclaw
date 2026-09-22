@@ -759,7 +759,9 @@ type RetentionConfig struct {
 	Enabled  bool   `yaml:"enabled" json:"enabled"`
 	Interval string `yaml:"interval,omitempty" json:"interval,omitempty"` // default 1h, min 5m
 	MaxAge   string `yaml:"max_age,omitempty" json:"maxAge,omitempty"`    // default 2160h (90d), min 24h
-	DryRun   bool   `yaml:"dry_run,omitempty" json:"dryRun,omitempty"`
+	// DryRun logs what each cycle would compact, expire, and unlink without
+	// doing it. Tree expansions are still recorded so the counts are real.
+	DryRun bool `yaml:"dry_run,omitempty" json:"dryRun,omitempty"`
 }
 
 // LivenessConfig controls boot reconciliation and the periodic safety-net reaper.
