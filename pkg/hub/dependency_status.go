@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"sort"
 	"strings"
@@ -439,7 +440,15 @@ func (s *Server) attachLLMUsageLimitsToDependencyStatus(service *dependencyStatu
 		return
 	}
 	service.mu.Lock()
-	service.limitProvider = s.llmUsageLimitRecords
+	service.limitProvider = func() []llmUsageLimitRecord {
+		// The badge is display: a read failure costs one refresh, and the
+		// cache TTL retries it. Logged so it is not silent.
+		records, err := s.llmUsageLimitRecords()
+		if err != nil {
+			log.Printf("[dependency-status] %v", err)
+		}
+		return records
+	}
 	service.mu.Unlock()
 }
 

@@ -132,5 +132,8 @@ func (s *Server) checkInfraDeliveries(ctx context.Context) []DoctorCheck {
 				infraMaxTransientFailures, time.UnixMilli(latest).UTC().Format(time.RFC3339)),
 		})
 	}
+	if err := rows.Err(); err != nil {
+		return append(checks, runtimeQueryErrorCheck("Dropped infrastructure alerts", err))
+	}
 	return checks
 }

@@ -1652,6 +1652,11 @@ func (s *Server) handleClaws(w http.ResponseWriter, r *http.Request) {
 		}
 		out = append(out, c)
 	}
+	if err := rows.Err(); err != nil {
+		log.Printf("handleClaws rows error: %v", err)
+		http.Error(w, fmt.Sprintf("db error: %v", err), http.StatusInternalServerError)
+		return
+	}
 	if out == nil {
 		out = []types.Claw{}
 	}
@@ -2367,6 +2372,10 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		msgs = append(msgs, m)
+	}
+	if err := rows.Err(); err != nil {
+		http.Error(w, "db error", http.StatusInternalServerError)
+		return
 	}
 	// Reverse DESC results to get ASC order
 	if before != "" || (before == "" && after == "") {
