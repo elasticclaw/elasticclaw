@@ -760,6 +760,69 @@ func TestRetentionPlanExpandsStoredTreeFromDisk(t *testing.T) {
 	}
 }
 
+func retentionPlan(t *testing.T, s *Server, id string, plan types.CheckpointPlan) {
+	t.Helper()
+	body, err := json.Marshal(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/checkpoints/"+id+"/plan", bytes.NewReader(body))
+	req.Header.Set("X-Claw-Token", "claw-token")
+	rr := httptest.NewRecorder()
+	s.handleCheckpointInternal(rr, req)
+	if rr.Code != 200 {
+		t.Fatalf("plan: %d %s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestFinalizeRecordsExpansionFromTreeBlob(t *testing.T) {
+	s := retentionServer(t)
+	file := retentionBlob(t, "planned-file")
+	data, err := json.Marshal([]types.CheckpointFile{{SHA256: file}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tree := fmt.Sprintf("%x", sha256.Sum256(data))
+	insertTestCheckpoint(t, s, "cp", "manual")
+	// The plan names no files for a root the hub has never stored; the blob
+	// uploaded afterwards is the authoritative expansion.
+	retentionPlan(t, s, "cp", types.CheckpointPlan{RootSHA256: tree, Files: []types.CheckpointFile{}})
+	if n := retentionCount(t, s, `SELECT COUNT(*) FROM checkpoint_tree_files WHERE tree_sha256=?`, tree); n != 0 {
+		t.Fatalf("empty plan recorded %d files", n)
+	}
+	retentionFile(t, checkpointBlobPath(tree), string(data), time.Now())
+	if err := s.finalizeCheckpoint("cp", "tenant", "claw", tree); err != nil {
+		t.Fatalf("finalize: %v", err)
+	}
+	if got := checkpointStatus(t, s, "cp"); got != "ready" {
+		t.Fatalf("status=%s", got)
+	}
+	if n := retentionCount(t, s, `SELECT COUNT(*) FROM checkpoint_tree_files WHERE tree_sha256=? AND file_sha256=?`, tree, file); n != 1 {
+		t.Fatal("finalize left the tree blob's file unreferenced")
+	}
+}
+
+func TestFinalizeKeepsMatchingExpansion(t *testing.T) {
+	s := retentionServer(t)
+	file := retentionBlob(t, "honest-file")
+	data, err := json.Marshal([]types.CheckpointFile{{SHA256: file}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tree := retentionBlob(t, string(data))
+	insertTestCheckpoint(t, s, "cp", "manual")
+	retentionPlan(t, s, "cp", types.CheckpointPlan{RootSHA256: tree, Files: []types.CheckpointFile{{SHA256: file}}})
+	if err := s.finalizeCheckpoint("cp", "tenant", "claw", tree); err != nil {
+		t.Fatalf("finalize: %v", err)
+	}
+	if got := checkpointStatus(t, s, "cp"); got != "ready" {
+		t.Fatalf("status=%s", got)
+	}
+	if n := retentionCount(t, s, `SELECT COUNT(*) FROM checkpoint_tree_files WHERE tree_sha256=?`, tree); n != 1 {
+		t.Fatalf("expansion rows=%d", n)
+	}
+}
+
 func TestRetentionIgnoresLegacyNonHexRoot(t *testing.T) {
 	s := retentionServer(t)
 	at := time.Now().UTC()

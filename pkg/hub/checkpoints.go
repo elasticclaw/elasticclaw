@@ -936,6 +936,9 @@ func (s *Server) finalizeCheckpoint(checkpointID, tenantID, clawID, rootSHA stri
 	if err != nil {
 		return err
 	}
+	if err := s.verifyCheckpointTreeExpansion(checkpointID, rootSHA, files); err != nil {
+		return err
+	}
 	msgSHA, msgCount, cutoff, err := s.writeMessageCheckpointBlob(checkpointID, clawID, tenantID)
 	if err != nil {
 		return err
@@ -988,6 +991,39 @@ func (s *Server) completeMetadataOnlyCheckpoint(checkpointID, clawID, reason, de
 	result, err := s.db.Exec(`UPDATE claw_checkpoints SET status='ready', manifest_sha256=?, manifest_path=?, message_tree_sha256=?, message_count=?, pipeline_stage=?, hub_version=?, error=?, completed_at=? WHERE id=? AND status='creating'`,
 		manifestSHA, path, msgSHA, msgCount, manifest.Hub.PipelineStage, manifest.Hub.Version, detail, now(), checkpointID)
 	return checkpointStillCreating(result, err, checkpointID)
+}
+
+// verifyCheckpointTreeExpansion reconciles the recorded expansion with the
+// tree blob. The plan's file list is only trusted until the tree blob exists;
+// the blob is authoritative, and a checkpoint may not go ready while a file it
+// names is unreferenced, since the collector would unlink that blob. The
+// honest path costs one COUNT.
+func (s *Server) verifyCheckpointTreeExpansion(checkpointID, rootSHA string, files []types.CheckpointFile) error {
+	want := map[string]struct{}{}
+	for _, f := range files {
+		if f.SHA256 != rootSHA && validSHA256(f.SHA256) {
+			want[f.SHA256] = struct{}{}
+		}
+	}
+	recorded := func() (int, error) {
+		var n int
+		err := s.db.QueryRow(`SELECT COUNT(*) FROM checkpoint_tree_files WHERE tree_sha256=?`, rootSHA).Scan(&n)
+		return n, err
+	}
+	n, err := recorded()
+	if err != nil || n == len(want) {
+		return err
+	}
+	if err := recordCheckpointTree(s.db, checkpointID, rootSHA, files); err != nil {
+		return err
+	}
+	if n, err = recorded(); err != nil {
+		return err
+	}
+	if n != len(want) {
+		return fmt.Errorf("tree expansion mismatch for %s: recorded %d files, tree names %d", rootSHA, n, len(want))
+	}
+	return nil
 }
 
 func (s *Server) filesForTree(rootSHA string) ([]types.CheckpointFile, error) {
