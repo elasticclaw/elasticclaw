@@ -760,6 +760,40 @@ func TestRetentionPlanExpandsStoredTreeFromDisk(t *testing.T) {
 	}
 }
 
+func TestRetentionIgnoresLegacyNonHexRoot(t *testing.T) {
+	s := retentionServer(t)
+	at := time.Now().UTC()
+	old := at.Add(-100 * 24 * time.Hour)
+	retentionCheckpoint(t, s, "bad", "claw", "ready", "manual", "../x", at)
+	diagnostic := filepath.Join(hubDataDir(), "diagnostics", "old.log")
+	retentionFile(t, diagnostic, "log", old)
+	retentionExec(t, s, `INSERT INTO messages(id,tenant_id,claw_id,role,content,created_at) VALUES('old','tenant','claw','user','hi',?)`, old)
+	unexpanded, err := s.backfillCheckpointTrees()
+	if err != nil || unexpanded != 0 {
+		t.Fatalf("backfill=%d,%v", unexpanded, err)
+	}
+	s.retainOnce(at, retentionSettings{enabled: true, maxAge: 90 * 24 * time.Hour})
+	retentionExists(t, diagnostic, false)
+	if n := retentionCount(t, s, `SELECT COUNT(*) FROM messages`); n != 0 {
+		t.Fatalf("row expiry gated by non-hex root: %d", n)
+	}
+	if n := retentionCount(t, s, `SELECT COUNT(*) FROM checkpoint_trees`); n != 0 {
+		t.Fatalf("non-hex root registered: %d", n)
+	}
+}
+
+func TestFinalizeRejectsNonHexRoot(t *testing.T) {
+	s := retentionServer(t)
+	insertTestCheckpoint(t, s, "cp", "manual")
+	if err := s.finalizeCheckpoint("cp", "tenant", "claw", "../x"); err == nil {
+		t.Fatal("finalized a non-hex root")
+	}
+	retentionExists(t, checkpointManifestPath("cp"), false)
+	if n := retentionCount(t, s, `SELECT COUNT(*) FROM claw_checkpoints WHERE id='cp' AND status='creating' AND root_tree_sha256='' AND manifest_path=''`); n != 1 {
+		t.Fatal("non-hex root reached the row")
+	}
+}
+
 func TestRetentionBackfillLeavesUnreadableTreeUnexpanded(t *testing.T) {
 	s := retentionServer(t)
 	unreadable := fmt.Sprintf("%064x", 1)

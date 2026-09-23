@@ -16,6 +16,10 @@ import (
 )
 
 const retentionLive = `('creating','ready','skipped')`
+
+// retentionHexRoot excludes rows written before digest validation existed; a
+// legacy non-hex root can never be expanded and must not hold the gate closed.
+const retentionHexRoot = `root_tree_sha256!='' AND length(root_tree_sha256)=64 AND root_tree_sha256 NOT GLOB '*[^0-9a-f]*'`
 const retentionUnprotected = `NOT EXISTS (SELECT 1 FROM claws p WHERE p.restore_checkpoint_id=c.id OR p.restored_from_checkpoint_id=c.id)
  AND NOT EXISTS (SELECT 1 FROM task_run_attempts a WHERE a.restored_checkpoint_id=c.id)`
 
@@ -168,12 +172,16 @@ func recordCheckpointTree(db *sql.DB, checkpointID, rootSHA string, files []type
 // and without it every later phase stays gated.
 func (s *Server) backfillCheckpointTrees() (int, error) {
 	trees, err := retentionStrings(s.db, `SELECT DISTINCT root_tree_sha256 FROM claw_checkpoints
-  WHERE root_tree_sha256!='' AND status IN `+retentionLive+`
+  WHERE `+retentionHexRoot+` AND status IN `+retentionLive+`
   AND root_tree_sha256 NOT IN (SELECT sha256 FROM checkpoint_trees) LIMIT 50`)
 	if err != nil {
 		return 0, err
 	}
 	for _, tree := range trees {
+		if !validSHA256(tree) {
+			log.Printf("retention: skipping non-hex tree %q", tree)
+			continue
+		}
 		files, err := s.filesForTree(tree)
 		if errors.Is(err, fs.ErrNotExist) {
 			log.Printf("retention: missing tree %s; recording empty expansion", tree)
@@ -194,7 +202,7 @@ func (s *Server) backfillCheckpointTrees() (int, error) {
 func (s *Server) unexpandedCheckpointTrees() (int, error) {
 	var count int
 	err := s.db.QueryRow(`SELECT COUNT(DISTINCT root_tree_sha256) FROM claw_checkpoints
-  WHERE root_tree_sha256!='' AND status IN ` + retentionLive + `
+  WHERE ` + retentionHexRoot + ` AND status IN ` + retentionLive + `
   AND root_tree_sha256 NOT IN (SELECT sha256 FROM checkpoint_trees)`).Scan(&count)
 	return count, err
 }

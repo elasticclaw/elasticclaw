@@ -924,6 +924,11 @@ func (s *Server) finalizeCheckpoint(checkpointID, tenantID, clawID, rootSHA stri
 	if status != "creating" {
 		return fmt.Errorf("checkpoint %s is no longer creating", checkpointID)
 	}
+	// The root is stored on the row and later turned into a blob path by the
+	// collector, so a non-hex digest must never reach ready or skipped.
+	if !validSHA256(rootSHA) {
+		return fmt.Errorf("invalid root tree digest %q", rootSHA)
+	}
 	if s.checkpointDuplicatesPrevious(checkpointID, clawID, rootSHA) {
 		return s.markCheckpointSkipped(checkpointID, rootSHA)
 	}
