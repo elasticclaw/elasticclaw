@@ -801,6 +801,10 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/hub-config", s.withWebAdminAuth(s.handleHubConfig))
 	mux.HandleFunc("/api/settings", s.withWebAdminAuth(s.handleSettings))
 	mux.HandleFunc("/api/settings/status", s.withWebAdminAuth(s.handleSettingsStatus))
+	mux.HandleFunc("/api/settings/feature-flags", s.withWebAdminAuth(s.handleFeatureFlags))
+	mux.HandleFunc("/api/settings/feature-flags/{key}", s.withWebAdminAuth(s.handleFeatureFlag))
+	mux.HandleFunc("/api/settings/beta-testers", s.withWebAdminAuth(s.handleBetaTesters))
+	mux.HandleFunc("/api/settings/beta-testers/{login}", s.withWebAdminAuth(s.handleBetaTester))
 	mux.HandleFunc("/api/settings/github/test", s.withWebAdminAuth(s.handleGitHubAppTest))
 	mux.HandleFunc("/api/settings/model-auth/login", s.withWebAdminAuth(s.handleModelAuthLogin))
 	mux.HandleFunc("/api/settings/model-auth/login/{id}", s.withWebAdminAuth(s.handleModelAuthLoginStatus))
@@ -1339,16 +1343,24 @@ func (s *Server) handleWebMe(w http.ResponseWriter, r *http.Request) {
 			accessCfg = s.hubCfg.Auth.Access
 		}
 		s.mu.RUnlock()
+		features := s.enabledFeaturesForLogin(r.Context(), payload.Login)
 		jsonOK(w, map[string]interface{}{
-			"login":       payload.Login,
-			"name":        payload.Name,
-			"avatar_url":  payload.AvatarURL,
-			"auth_method": "github",
-			"is_admin":    isAccessAdmin(accessCfg, payload.Login),
+			"login":          payload.Login,
+			"name":           payload.Name,
+			"avatar_url":     payload.AvatarURL,
+			"auth_method":    "github",
+			"is_admin":       isAccessAdmin(accessCfg, payload.Login),
+			"is_beta_tester": s.isBetaTester(r.Context(), payload.Login),
+			"features":       features,
 		})
 		return
 	}
-	jsonOK(w, map[string]interface{}{"auth_method": "password", "is_admin": true})
+	jsonOK(w, map[string]interface{}{
+		"auth_method":    "password",
+		"is_admin":       true,
+		"is_beta_tester": false,
+		"features":       s.enabledFeaturesForLogin(r.Context(), ""),
+	})
 }
 
 // handleAuthConfig returns public auth config (no auth required).

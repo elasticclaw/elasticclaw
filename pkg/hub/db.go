@@ -919,6 +919,19 @@ func migrate(db *sql.DB) error {
 		updated_at DATETIME NOT NULL
 	);
 
+	CREATE TABLE IF NOT EXISTS hub_feature_flags (
+		key        TEXT PRIMARY KEY,
+		stage      TEXT NOT NULL,
+		updated_at INTEGER NOT NULL,
+		updated_by TEXT NOT NULL DEFAULT ''
+	);
+
+	CREATE TABLE IF NOT EXISTS hub_beta_testers (
+		login    TEXT PRIMARY KEY,
+		added_at INTEGER NOT NULL,
+		added_by TEXT NOT NULL DEFAULT ''
+	);
+
 	CREATE TABLE IF NOT EXISTS claw_prs (
 		id          TEXT PRIMARY KEY,
 		claw_id     TEXT NOT NULL REFERENCES claws(id),
