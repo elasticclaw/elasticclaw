@@ -577,7 +577,9 @@ func loadExternalWorkspaceConfigV2(name string, data []byte, configPath string) 
 }
 
 // projectV2RepositoriesForAccess maps named v2 repositories into the legacy
-// access list used by WorkspaceView / settings UI.
+// access list used by WorkspaceView / settings UI. Granular permissions
+// (issue #697) ride along as ExtraPermissions; the scalar Permissions level
+// keeps its historical read/write meaning.
 func projectV2RepositoriesForAccess(ws *v2.Workspace) types.RepositoryAccessList {
 	if ws == nil || len(ws.Repositories) == 0 {
 		return nil
@@ -590,13 +592,10 @@ func projectV2RepositoriesForAccess(ws *v2.Workspace) types.RepositoryAccessList
 	out := make(types.RepositoryAccessList, 0, len(names))
 	for _, name := range names {
 		repo := ws.Repositories[name]
-		perm := strings.TrimSpace(strings.ToLower(repo.Permissions))
-		if perm != "read" && perm != "write" {
-			perm = "read"
-		}
 		out = append(out, types.GitHubRepoAccess{
-			Repo:        strings.TrimSpace(repo.Repository),
-			Permissions: perm,
+			Repo:             strings.TrimSpace(repo.Repository),
+			Permissions:      repo.Permissions.Level(),
+			ExtraPermissions: repo.Permissions.Granular(),
 		})
 	}
 	return out

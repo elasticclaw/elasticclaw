@@ -113,6 +113,9 @@ func ValidateWorkspace(ws *Workspace) (*ResolvedWorkspace, error) {
 				return nil, fmt.Errorf("repositories.%s.source_control %q: unknown source_control connection", name, sc)
 			}
 		}
+		if err := validateRepositoryPermissions(name, repo.Permissions); err != nil {
+			return nil, err
+		}
 	}
 
 	// CI connections and pipelines.

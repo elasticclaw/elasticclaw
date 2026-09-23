@@ -1097,7 +1097,20 @@ func githubTokenCacheKey(repoAccess []RepoAccess) string {
 	}
 	parts := make([]string, 0, len(repoAccess))
 	for _, r := range repoAccess {
-		parts = append(parts, r.Repo+":"+r.Permissions)
+		part := r.Repo + ":" + r.Permissions
+		if len(r.ExtraPermissions) > 0 {
+			names := make([]string, 0, len(r.ExtraPermissions))
+			for name := range r.ExtraPermissions {
+				names = append(names, name)
+			}
+			sort.Strings(names)
+			extras := make([]string, 0, len(names))
+			for _, name := range names {
+				extras = append(extras, name+"="+r.ExtraPermissions[name])
+			}
+			part += ";" + strings.Join(extras, ",")
+		}
+		parts = append(parts, part)
 	}
 	sort.Strings(parts)
 	return strings.Join(parts, ",")

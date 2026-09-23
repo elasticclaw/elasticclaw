@@ -286,9 +286,10 @@ type GitHubAppConfig struct {
 // GitHubRepoAccess specifies a repo and the permissions needed. Workspace
 // repository lists may also use glob patterns.
 type GitHubRepoAccess struct {
-	Repo        string `yaml:"repo"        json:"repo"`            // e.g. "owner/repo", "*-infra-*", or "owner/*"
-	Permissions string `yaml:"permissions" json:"permissions"`     // "read" or "write" (default: "read")
-	Clone       *bool  `yaml:"clone"       json:"clone,omitempty"` // whether to clone the repo; nil/true means clone
+	Repo             string            `yaml:"repo"        json:"repo"`                                        // e.g. "owner/repo", "*-infra-*", or "owner/*"
+	Permissions      string            `yaml:"permissions" json:"permissions"`                                 // "read" or "write" (default: "read")
+	ExtraPermissions map[string]string `yaml:"extra_permissions,omitempty" json:"extra_permissions,omitempty"` // granular GitHub App permissions (issue #697); added on top of the defaults, capped by the installation
+	Clone            *bool             `yaml:"clone"       json:"clone,omitempty"`                             // whether to clone the repo; nil/true means clone
 }
 
 // RepositoryAccessList accepts the current object form:
@@ -348,6 +349,9 @@ func (l *RepositoryAccessList) UnmarshalJSON(data []byte) error {
 				permissions = "read"
 			}
 			entry := GitHubRepoAccess{Repo: strings.TrimSpace(repo), Permissions: permissions}
+			if extras, ok := v["extra_permissions"].(map[string]interface{}); ok {
+				entry.ExtraPermissions = parsePermissionMap(extras)
+			}
 			if cloneVal, ok := v["clone"]; ok {
 				clone := parseBoolish(cloneVal)
 				entry.Clone = &clone
@@ -373,6 +377,22 @@ func parseBoolish(v interface{}) bool {
 	default:
 		return false
 	}
+}
+
+// parsePermissionMap converts a decoded JSON object of GitHub App permission
+// names to levels, skipping non-string values so legacy or malformed entries
+// do not break parsing.
+func parsePermissionMap(v map[string]interface{}) map[string]string {
+	out := make(map[string]string, len(v))
+	for name, level := range v {
+		if levelStr, ok := level.(string); ok {
+			out[strings.ToLower(strings.TrimSpace(name))] = strings.ToLower(strings.TrimSpace(levelStr))
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // WorkspaceEnv maps environment variable names to either inline values or hub
