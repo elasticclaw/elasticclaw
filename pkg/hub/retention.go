@@ -19,7 +19,8 @@ const retentionLive = `('creating','ready','skipped')`
 
 // retentionHexRoot excludes rows written before digest validation existed; a
 // legacy non-hex root can never be expanded and must not hold the gate closed.
-const retentionHexRoot = `root_tree_sha256!='' AND length(root_tree_sha256)=64 AND root_tree_sha256 NOT GLOB '*[^0-9a-f]*'`
+// Case-insensitive to match validSHA256, so an uppercase root is still gated.
+const retentionHexRoot = `root_tree_sha256!='' AND length(root_tree_sha256)=64 AND root_tree_sha256 NOT GLOB '*[^0-9a-fA-F]*'`
 const retentionUnprotected = `NOT EXISTS (SELECT 1 FROM claws p WHERE p.restore_checkpoint_id=c.id OR p.restored_from_checkpoint_id=c.id)
  AND NOT EXISTS (SELECT 1 FROM task_run_attempts a WHERE a.restored_checkpoint_id=c.id)`
 

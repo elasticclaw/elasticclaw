@@ -868,6 +868,23 @@ func TestRetentionIgnoresLegacyNonHexRoot(t *testing.T) {
 	}
 }
 
+func TestRetentionGatesUppercaseHexRoot(t *testing.T) {
+	s := retentionServer(t)
+	at := time.Now().UTC()
+	tree := strings.ToUpper(retentionBlob(t, "[]"))
+	retentionCheckpoint(t, s, "upper", "claw", "ready", "manual", tree, at)
+	if n, err := s.unexpandedCheckpointTrees(); err != nil || n != 1 {
+		t.Fatalf("uppercase root not gated: unexpanded=%d err=%v", n, err)
+	}
+	unexpanded, err := s.backfillCheckpointTrees()
+	if err != nil || unexpanded != 0 {
+		t.Fatalf("backfill=%d,%v", unexpanded, err)
+	}
+	if n := retentionCount(t, s, `SELECT COUNT(*) FROM checkpoint_trees WHERE sha256=?`, tree); n != 1 {
+		t.Fatal("uppercase root not backfilled")
+	}
+}
+
 func TestFinalizeRejectsNonHexRoot(t *testing.T) {
 	s := retentionServer(t)
 	insertTestCheckpoint(t, s, "cp", "manual")
