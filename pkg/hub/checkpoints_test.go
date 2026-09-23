@@ -92,6 +92,27 @@ func TestCheckpointCompleteErrorDrainsPendingCheckpoint(t *testing.T) {
 	assertPendingCheckpointDrained(t, s)
 }
 
+func TestCheckpointCompleteErrorLeavesReadyCheckpointIntact(t *testing.T) {
+	s := newCheckpointCompletionTestServer(t)
+	seedCheckpointCompletionState(t, s)
+	if _, err := s.db.Exec(`UPDATE claw_checkpoints SET status='ready', manifest_path='/manifests/current.json' WHERE id='current'`); err != nil {
+		t.Fatal(err)
+	}
+
+	rr := completeCheckpoint(t, s, `{"error":"lost response"}`)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var status, manifestPath string
+	if err := s.db.QueryRow(`SELECT status, manifest_path FROM claw_checkpoints WHERE id='current'`).Scan(&status, &manifestPath); err != nil {
+		t.Fatal(err)
+	}
+	if status != "ready" || manifestPath != "/manifests/current.json" {
+		t.Fatalf("ready checkpoint changed: status=%s manifest_path=%q", status, manifestPath)
+	}
+}
+
 func TestCheckpointFinalizeErrorDrainsPendingCheckpoint(t *testing.T) {
 	s := newCheckpointCompletionTestServer(t)
 	seedCheckpointCompletionState(t, s)

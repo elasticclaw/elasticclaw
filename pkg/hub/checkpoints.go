@@ -1329,8 +1329,11 @@ func checkpointShellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'"
 }
 
+// failCheckpoint only fails a 'creating' row: a late error for a checkpoint
+// that already completed must not strip a ready row of its manifest. Matching
+// no row is not an error; callers ignore it anyway.
 func (s *Server) failCheckpoint(checkpointID, msg string) error {
-	_, err := s.db.Exec(`UPDATE claw_checkpoints SET status='failed', error=?, completed_at=? WHERE id=?`, msg, now(), checkpointID)
+	_, err := s.db.Exec(`UPDATE claw_checkpoints SET status='failed', error=?, completed_at=? WHERE id=? AND status='creating'`, msg, now(), checkpointID)
 	return err
 }
 
