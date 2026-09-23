@@ -246,10 +246,21 @@ export function saveConfig(_hubUrl: string, _token: string) {
   // No-op — config is server-side
 }
 
+const authClearedListeners = new Set<() => void>()
+
+/** Runs `listener` whenever the session is cleared (sign-out, sign-in, expiry). */
+export function onAuthCleared(listener: () => void): () => void {
+  authClearedListeners.add(listener)
+  return () => {
+    authClearedListeners.delete(listener)
+  }
+}
+
 export function clearConfig() {
   _token = null
   _tokenPromise = null
   clearAuthTokens()
+  authClearedListeners.forEach((listener) => listener())
 }
 
 export function getConfig() {

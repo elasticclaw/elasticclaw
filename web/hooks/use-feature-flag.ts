@@ -1,7 +1,7 @@
 "use client"
 
 import { useSyncExternalStore } from "react"
-import { fetchCurrentUser } from "@/lib/api"
+import { fetchCurrentUser, onAuthCleared } from "@/lib/api"
 
 // The enabled feature keys for the signed-in user, loaded once from
 // /api/auth/me and shared by every useFeatureFlag caller on the page.
@@ -19,6 +19,9 @@ function load() {
   const started = generation
   inflight = fetchCurrentUser()
     .then((user) => {
+      // A newer request is coming (refresh or session change); this answer
+      // may be stale or belong to the previous user.
+      if (started !== generation) return
       features = Array.isArray(user.features) ? user.features : []
       listeners.forEach((listener) => listener())
     })
@@ -37,6 +40,22 @@ function load() {
       if (started !== generation) load()
     })
 }
+
+// The cache belongs to one session: drop it when the session changes so the
+// next user never sees the previous user's features.
+onAuthCleared(() => {
+  generation++
+  features = null
+  if (retryTimer !== null) {
+    clearTimeout(retryTimer)
+    retryTimer = null
+  }
+  listeners.forEach((listener) => listener())
+  // Sign-in sets the new token synchronously after clearing the old one.
+  queueMicrotask(() => {
+    if (listeners.size > 0) load()
+  })
+})
 
 function subscribe(listener: () => void) {
   listeners.add(listener)
