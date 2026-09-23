@@ -223,10 +223,27 @@ func (s *Server) checkpointDuplicatesPrevious(checkpointID, clawID, rootSHA stri
 // markCheckpointSkipped records the checkpoint without a manifest. The row is
 // kept so the timeline still shows the claw was idle at that moment.
 func (s *Server) markCheckpointSkipped(checkpointID, rootSHA string) error {
-	_, err := s.db.Exec(
-		`UPDATE claw_checkpoints SET status='skipped', root_tree_sha256=?, workspace_tree_sha256=?, completed_at=? WHERE id=?`,
+	result, err := s.db.Exec(
+		`UPDATE claw_checkpoints SET status='skipped', root_tree_sha256=?, workspace_tree_sha256=?, completed_at=? WHERE id=? AND status='creating'`,
 		rootSHA, rootSHA, now(), checkpointID)
-	return err
+	return checkpointStillCreating(result, err, checkpointID)
+}
+
+// checkpointStillCreating turns a completion UPDATE that matched no row into
+// an error. Only a 'creating' row may complete: one the boot reaper already
+// failed has had its blobs released to the collector and must stay failed.
+func checkpointStillCreating(result sql.Result, err error, checkpointID string) error {
+	if err != nil {
+		return err
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return fmt.Errorf("checkpoint %s is no longer creating", checkpointID)
+	}
+	return nil
 }
 
 func (s *Server) requestBootstrapCheckpoint(clawID string) {
@@ -320,8 +337,16 @@ func (s *Server) handleClawCheckpoints(w http.ResponseWriter, r *http.Request, c
 }
 
 func (s *Server) restoreClawFromCheckpoint(ctx context.Context, tenantID, clawID, checkpointID string) error {
+	// Validate and claim in one transaction: retention skips checkpoints named
+	// by restore_checkpoint_id, and the pre-reset checkpoint below can take a
+	// while, so the claim must exist before the wait, not after it.
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
 	var status, manifestPath string
-	if err := s.db.QueryRow(`SELECT status, manifest_path FROM claw_checkpoints WHERE id=? AND tenant_id=? AND claw_id=?`, checkpointID, tenantID, clawID).Scan(&status, &manifestPath); err != nil {
+	if err := tx.QueryRow(`SELECT status, manifest_path FROM claw_checkpoints WHERE id=? AND tenant_id=? AND claw_id=?`, checkpointID, tenantID, clawID).Scan(&status, &manifestPath); err != nil {
 		if err == sql.ErrNoRows {
 			return fmt.Errorf("checkpoint not found")
 		}
@@ -332,6 +357,12 @@ func (s *Server) restoreClawFromCheckpoint(ctx context.Context, tenantID, clawID
 	}
 	if manifestPath == "" {
 		return fmt.Errorf("checkpoint has no manifest")
+	}
+	if _, err := tx.Exec(`UPDATE claws SET restore_checkpoint_id=? WHERE id=? AND tenant_id=?`, checkpointID, clawID, tenantID); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
 	}
 
 	// Preserve the current state if the bridge is still reachable.
@@ -351,9 +382,7 @@ func (s *Server) restoreClawFromCheckpoint(ctx context.Context, tenantID, clawID
 		go s.terminateVM(provider, providerID)
 	}
 
-	_, err := s.db.Exec(`UPDATE claws SET status='provisioning', bootstrap_ok=0, bootstrap_status='Restoring checkpoint', provider_id='', restore_checkpoint_id=?, restored_from_checkpoint_id=? WHERE id=? AND tenant_id=?`,
-		checkpointID, checkpointID, clawID, tenantID)
-	if err != nil {
+	if err := s.beginRestoreProvision(tenantID, clawID, checkpointID); err != nil {
 		return err
 	}
 	s.broadcastToUsers(tenantID, types.WSMessage{
@@ -362,6 +391,41 @@ func (s *Server) restoreClawFromCheckpoint(ctx context.Context, tenantID, clawID
 	})
 	go s.provisionStoredClaw(clawID)
 	return nil
+}
+
+// beginRestoreProvision flips the claw to provisioning, but only while the
+// claim is still ours and the checkpoint is still restorable: a concurrent
+// restore can overwrite the claim during the pre-reset wait, and the
+// checkpoint may have been compacted or expired in between.
+func (s *Server) beginRestoreProvision(tenantID, clawID, checkpointID string) error {
+	result, err := s.db.Exec(`UPDATE claws SET status='provisioning', bootstrap_ok=0, bootstrap_status='Restoring checkpoint', provider_id='', restored_from_checkpoint_id=? WHERE id=? AND tenant_id=? AND restore_checkpoint_id=?
+  AND EXISTS (SELECT 1 FROM claw_checkpoints WHERE id=? AND status='ready' AND manifest_path!='')`,
+		checkpointID, clawID, tenantID, checkpointID, checkpointID)
+	if err != nil {
+		return err
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n > 0 {
+		return nil
+	}
+	// The VM is already terminated on this path, so a claim that is still
+	// ours must surface as a failed claw. A claim owned by another restore is
+	// that restore's to resolve and is left alone.
+	result, err = s.db.Exec(`UPDATE claws SET status='error', bootstrap_status='Restore aborted: checkpoint no longer ready', restore_checkpoint_id='' WHERE id=? AND tenant_id=? AND restore_checkpoint_id=?`,
+		clawID, tenantID, checkpointID)
+	if err != nil {
+		return err
+	}
+	if n, err = result.RowsAffected(); err != nil {
+		return err
+	}
+	if n == 0 {
+		return fmt.Errorf("restore claim lost to a concurrent restore")
+	}
+	return fmt.Errorf("checkpoint is no longer ready")
 }
 
 type storedClawProvision struct {
@@ -713,6 +777,19 @@ func (s *Server) handleCheckpointInternal(w http.ResponseWriter, r *http.Request
 			return
 		}
 		plan.CheckpointID = checkpointID
+		// The tree blob is the authoritative expansion; a plan's list is only
+		// trusted for a tree the hub has never stored.
+		files := plan.Files
+		if validSHA256(plan.RootSHA256) {
+			if stored, err := s.filesForTree(plan.RootSHA256); err == nil {
+				files = stored
+			}
+		}
+		// Reference uploads before reporting existing blobs, including while creating.
+		if err := recordCheckpointTree(s.db, checkpointID, plan.RootSHA256, files); err != nil {
+			http.Error(w, "record checkpoint tree", http.StatusInternalServerError)
+			return
+		}
 		missing := make([]string, 0)
 		for _, f := range plan.Files {
 			if f.SHA256 == "" {
@@ -854,6 +931,18 @@ func (s *Server) finalizeCheckpoint(checkpointID, tenantID, clawID, rootSHA stri
 	// idle-timer checkpoints were in that state. Recording them as 'ready' work
 	// buries the real checkpoints and inflates every count derived from them,
 	// so mark the duplicate and stop before writing a manifest.
+	var status string
+	if err := s.db.QueryRow(`SELECT status FROM claw_checkpoints WHERE id=?`, checkpointID).Scan(&status); err != nil {
+		return err
+	}
+	if status != "creating" {
+		return fmt.Errorf("checkpoint %s is no longer creating", checkpointID)
+	}
+	// The root is stored on the row and later turned into a blob path by the
+	// collector, so a non-hex digest must never reach ready or skipped.
+	if !validSHA256(rootSHA) {
+		return fmt.Errorf("invalid root tree digest %q", rootSHA)
+	}
 	if s.checkpointDuplicatesPrevious(checkpointID, clawID, rootSHA) {
 		return s.markCheckpointSkipped(checkpointID, rootSHA)
 	}
@@ -861,7 +950,10 @@ func (s *Server) finalizeCheckpoint(checkpointID, tenantID, clawID, rootSHA stri
 	if err != nil {
 		return err
 	}
-	msgSHA, msgCount, cutoff, err := s.writeMessageCheckpointBlob(clawID, tenantID)
+	if err := s.verifyCheckpointTreeExpansion(checkpointID, rootSHA, files); err != nil {
+		return err
+	}
+	msgSHA, msgCount, cutoff, err := s.writeMessageCheckpointBlob(checkpointID, clawID, tenantID)
 	if err != nil {
 		return err
 	}
@@ -881,10 +973,19 @@ func (s *Server) finalizeCheckpoint(checkpointID, tenantID, clawID, rootSHA stri
 	if err := os.WriteFile(path, data, 0o640); err != nil {
 		return err
 	}
-	_, err = s.db.Exec(`UPDATE claw_checkpoints SET status='ready', manifest_sha256=?, manifest_path=?, root_tree_sha256=?, message_tree_sha256=?, workspace_tree_sha256=?, message_count=?, pr_count=?, repo_count=?, pipeline_stage=?, hub_version=?, files_count=?, files_bytes=?, completed_at=? WHERE id=?`,
-		manifestSHA, path, rootSHA, msgSHA, rootSHA, msgCount, len(manifest.PRs), checkpointRepoCount(manifest.PRs),
-		manifest.Hub.PipelineStage, manifest.Hub.Version, manifest.FilesCount, manifest.FilesBytes, now(), checkpointID)
-	return err
+	return s.markCheckpointReady(checkpointID, msgSHA,
+		`manifest_sha256=?, manifest_path=?, root_tree_sha256=?, workspace_tree_sha256=?, message_count=?, pr_count=?, repo_count=?, pipeline_stage=?, hub_version=?, files_count=?, files_bytes=?, completed_at=?`,
+		manifestSHA, path, rootSHA, rootSHA, msgCount, len(manifest.PRs), checkpointRepoCount(manifest.PRs),
+		manifest.Hub.PipelineStage, manifest.Hub.Version, manifest.FilesCount, manifest.FilesBytes, now())
+}
+
+// markCheckpointReady publishes a completion. The row must still name the
+// message blob this call wrote: of two concurrent completes only the one whose
+// digest is on the row may go ready.
+func (s *Server) markCheckpointReady(checkpointID, msgSHA, assignments string, args ...any) error {
+	result, err := s.db.Exec(`UPDATE claw_checkpoints SET status='ready', `+assignments+` WHERE id=? AND status='creating' AND message_tree_sha256=?`,
+		append(args, checkpointID, msgSHA)...)
+	return checkpointStillCreating(result, err, checkpointID)
 }
 
 func (s *Server) completeMetadataOnlyCheckpoint(checkpointID, clawID, reason, detail string) error {
@@ -892,7 +993,7 @@ func (s *Server) completeMetadataOnlyCheckpoint(checkpointID, clawID, reason, de
 	if err != nil {
 		return err
 	}
-	msgSHA, msgCount, cutoff, err := s.writeMessageCheckpointBlob(clawID, tenantID)
+	msgSHA, msgCount, cutoff, err := s.writeMessageCheckpointBlob(checkpointID, clawID, tenantID)
 	if err != nil {
 		return err
 	}
@@ -910,9 +1011,34 @@ func (s *Server) completeMetadataOnlyCheckpoint(checkpointID, clawID, reason, de
 	if err := os.WriteFile(path, data, 0o640); err != nil {
 		return err
 	}
-	_, err = s.db.Exec(`UPDATE claw_checkpoints SET status='ready', manifest_sha256=?, manifest_path=?, message_tree_sha256=?, message_count=?, pipeline_stage=?, hub_version=?, error=?, completed_at=? WHERE id=?`,
-		manifestSHA, path, msgSHA, msgCount, manifest.Hub.PipelineStage, manifest.Hub.Version, detail, now(), checkpointID)
-	return err
+	return s.markCheckpointReady(checkpointID, msgSHA,
+		`manifest_sha256=?, manifest_path=?, message_count=?, pipeline_stage=?, hub_version=?, error=?, completed_at=?`,
+		manifestSHA, path, msgCount, manifest.Hub.PipelineStage, manifest.Hub.Version, detail, now())
+}
+
+// verifyCheckpointTreeExpansion reconciles the recorded expansion with the
+// tree blob. The plan's file list is only trusted until the tree blob exists;
+// the blob is authoritative, and a checkpoint may not go ready while a file it
+// names is unreferenced, since the collector would unlink that blob. The
+// honest path costs one COUNT.
+func (s *Server) verifyCheckpointTreeExpansion(checkpointID, rootSHA string, files []types.CheckpointFile) error {
+	// Two paths with the same content share one digest and one row.
+	want := map[string]struct{}{}
+	for _, f := range files {
+		if f.SHA256 != rootSHA && validSHA256(f.SHA256) {
+			want[f.SHA256] = struct{}{}
+		}
+	}
+	var n int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM checkpoint_tree_files WHERE tree_sha256=?`, rootSHA).Scan(&n); err != nil {
+		return err
+	}
+	// An honest plan records every file the blob names, so the recorded set
+	// is a superset of the blob's and an equal count means an equal set.
+	if n == len(want) {
+		return nil
+	}
+	return reconcileCheckpointTree(s.db, checkpointID, rootSHA, files)
 }
 
 func (s *Server) filesForTree(rootSHA string) ([]types.CheckpointFile, error) {
@@ -931,7 +1057,7 @@ func (s *Server) filesForTree(rootSHA string) ([]types.CheckpointFile, error) {
 	return files, nil
 }
 
-func (s *Server) writeMessageCheckpointBlob(clawID, tenantID string) (string, int, time.Time, error) {
+func (s *Server) writeMessageCheckpointBlob(checkpointID, clawID, tenantID string) (string, int, time.Time, error) {
 	rows, err := s.db.Query(`SELECT id, role, content, format, created_at FROM messages WHERE claw_id=? AND tenant_id=? ORDER BY created_at ASC`, clawID, tenantID)
 	if err != nil {
 		return "", 0, time.Time{}, err
@@ -957,6 +1083,12 @@ func (s *Server) writeMessageCheckpointBlob(clawID, tenantID string) (string, in
 		_ = enc.Encode(row)
 	}
 	sha := shaBytes(buf.Bytes())
+	// The collector only frees a message blob no live row names, so the row
+	// must name it before we rely on the copy already on disk.
+	result, err := s.db.Exec(`UPDATE claw_checkpoints SET message_tree_sha256=? WHERE id=? AND status='creating'`, sha, checkpointID)
+	if err := checkpointStillCreating(result, err, checkpointID); err != nil {
+		return "", 0, time.Time{}, err
+	}
 	path := checkpointBlobPath(sha)
 	if _, err := os.Stat(path); err == nil {
 		return sha, count, cutoff, nil
@@ -1281,8 +1413,11 @@ func checkpointShellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'"
 }
 
+// failCheckpoint only fails a 'creating' row: a late error for a checkpoint
+// that already completed must not strip a ready row of its manifest. Matching
+// no row is not an error; callers ignore it anyway.
 func (s *Server) failCheckpoint(checkpointID, msg string) error {
-	_, err := s.db.Exec(`UPDATE claw_checkpoints SET status='failed', error=?, completed_at=? WHERE id=?`, msg, now(), checkpointID)
+	_, err := s.db.Exec(`UPDATE claw_checkpoints SET status='failed', error=?, completed_at=? WHERE id=? AND status='creating'`, msg, now(), checkpointID)
 	return err
 }
 

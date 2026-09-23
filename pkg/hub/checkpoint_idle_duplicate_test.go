@@ -1,6 +1,9 @@
 package hub
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func insertTestCheckpoint(t *testing.T, s *Server, id, reason string) {
 	t.Helper()
@@ -22,7 +25,7 @@ func checkpointStatus(t *testing.T, s *Server, id string) string {
 // records an agent that did nothing. It must not be finalized as ready work.
 func TestFinalizeSkipsIdleCheckpointWithUnchangedWorkspace(t *testing.T) {
 	s := newCheckpointCompletionTestServer(t)
-	const tree = "ab12cd34"
+	tree := strings.Repeat("ab12cd34", 8)
 
 	insertTestCheckpoint(t, s, "first", "idle-timer")
 	if err := s.markCheckpointSkipped("first", tree); err != nil {

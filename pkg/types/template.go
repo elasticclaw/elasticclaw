@@ -570,7 +570,8 @@ type HubConfig struct {
 
 	// Liveness configures recovery of claws and runs stranded by hub or
 	// infrastructure failures.
-	Liveness *LivenessConfig `yaml:"liveness,omitempty" json:"liveness,omitempty"`
+	Liveness  *LivenessConfig  `yaml:"liveness,omitempty" json:"liveness,omitempty"`
+	Retention *RetentionConfig `yaml:"retention,omitempty" json:"retention,omitempty"`
 
 	// Notifications holds outbound notification configuration: named
 	// transports (notifiers) and the hub features that send through them.
@@ -751,6 +752,16 @@ type LifecycleEventToggles struct {
 	Failures     *bool `yaml:"failures,omitempty" json:"failures,omitempty"`
 	AgentIdle    *bool `yaml:"agent_idle,omitempty" json:"agentIdle,omitempty"`
 	StageStalled *bool `yaml:"stage_stalled,omitempty" json:"stageStalled,omitempty"`
+}
+
+// RetentionConfig bounds hub-side storage. Absent or disabled means nothing is ever deleted.
+type RetentionConfig struct {
+	Enabled  bool   `yaml:"enabled" json:"enabled"`
+	Interval string `yaml:"interval,omitempty" json:"interval,omitempty"` // default 1h, min 5m
+	MaxAge   string `yaml:"max_age,omitempty" json:"maxAge,omitempty"`    // default 2160h (90d), min 24h
+	// DryRun logs what each cycle would compact, expire, and unlink without
+	// doing it. Tree expansions are still recorded so the counts are real.
+	DryRun bool `yaml:"dry_run,omitempty" json:"dryRun,omitempty"`
 }
 
 // LivenessConfig controls boot reconciliation and the periodic safety-net reaper.
