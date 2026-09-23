@@ -2,6 +2,7 @@ package hub
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
@@ -197,6 +198,30 @@ func TestFinalizeRefusesCheckpointNoLongerCreating(t *testing.T) {
 	retentionExists(t, checkpointManifestPath("finalize"), false)
 	if n := retentionCount(t, s, `SELECT COUNT(*) FROM claw_checkpoints WHERE manifest_path!='' OR message_tree_sha256!=''`); n != 0 {
 		t.Fatalf("failed rows gained references: %d", n)
+	}
+}
+
+func TestRestoreRevalidatesCheckpointBeforeReinstallingPointer(t *testing.T) {
+	s := retentionServer(t)
+	at := time.Now().UTC()
+	retentionCheckpoint(t, s, "cp", "claw", "ready", "manual", retentionBlob(t, "[]"), at)
+	if err := s.beginRestoreProvision("tenant", "claw", "cp"); err != nil {
+		t.Fatalf("ready checkpoint refused: %v", err)
+	}
+	if n := retentionCount(t, s, `SELECT COUNT(*) FROM claws WHERE id='claw' AND status='provisioning' AND restore_checkpoint_id='cp' AND restored_from_checkpoint_id='cp'`); n != 1 {
+		t.Fatal("restore pointer not installed")
+	}
+	// The checkpoint expires between the claim and the reinstall.
+	retentionExec(t, s, `UPDATE claws SET status='connected', restore_checkpoint_id='', restored_from_checkpoint_id='' WHERE id='claw'`)
+	retentionExec(t, s, `UPDATE claw_checkpoints SET status='compacted', manifest_path='' WHERE id='cp'`)
+	if err := s.beginRestoreProvision("tenant", "claw", "cp"); err == nil || !strings.Contains(err.Error(), "no longer ready") {
+		t.Fatalf("compacted checkpoint accepted: %v", err)
+	}
+	if n := retentionCount(t, s, `SELECT COUNT(*) FROM claws WHERE id='claw' AND status='connected' AND restore_checkpoint_id=''`); n != 1 {
+		t.Fatal("claw changed for a compacted checkpoint")
+	}
+	if err := s.restoreClawFromCheckpoint(context.Background(), "tenant", "claw", "cp"); err == nil || !strings.Contains(err.Error(), "not ready") {
+		t.Fatalf("restore of compacted checkpoint: %v", err)
 	}
 }
 

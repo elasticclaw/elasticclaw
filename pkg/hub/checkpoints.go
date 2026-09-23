@@ -382,8 +382,7 @@ func (s *Server) restoreClawFromCheckpoint(ctx context.Context, tenantID, clawID
 		go s.terminateVM(provider, providerID)
 	}
 
-	if _, err := s.db.Exec(`UPDATE claws SET status='provisioning', bootstrap_ok=0, bootstrap_status='Restoring checkpoint', provider_id='', restore_checkpoint_id=?, restored_from_checkpoint_id=? WHERE id=? AND tenant_id=?`,
-		checkpointID, checkpointID, clawID, tenantID); err != nil {
+	if err := s.beginRestoreProvision(tenantID, clawID, checkpointID); err != nil {
 		return err
 	}
 	s.broadcastToUsers(tenantID, types.WSMessage{
@@ -391,6 +390,27 @@ func (s *Server) restoreClawFromCheckpoint(ctx context.Context, tenantID, clawID
 		Payload: map[string]string{"claw_id": clawID, "status": "provisioning", "bootstrap_status": "Restoring checkpoint"},
 	})
 	go s.provisionStoredClaw(clawID)
+	return nil
+}
+
+// beginRestoreProvision reinstalls the restore pointer and flips the claw to
+// provisioning, but only while the checkpoint is still restorable: a
+// concurrent restore can overwrite the claim during the pre-reset wait, so the
+// checkpoint may have been compacted or expired in between.
+func (s *Server) beginRestoreProvision(tenantID, clawID, checkpointID string) error {
+	result, err := s.db.Exec(`UPDATE claws SET status='provisioning', bootstrap_ok=0, bootstrap_status='Restoring checkpoint', provider_id='', restore_checkpoint_id=?, restored_from_checkpoint_id=? WHERE id=? AND tenant_id=?
+  AND EXISTS (SELECT 1 FROM claw_checkpoints WHERE id=? AND status='ready' AND manifest_path!='')`,
+		checkpointID, checkpointID, clawID, tenantID, checkpointID)
+	if err != nil {
+		return err
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return fmt.Errorf("checkpoint is no longer ready")
+	}
 	return nil
 }
 
