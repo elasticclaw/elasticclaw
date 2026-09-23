@@ -1,3 +1,4 @@
+import type { AgentConfig, AgentOptions } from "./agent-config"
 import type {
   ApiClaw,
   ApiMessage,
@@ -313,6 +314,7 @@ export interface WorkspaceAccess {
 }
 
 export interface Workflow {
+  agents?: AgentConfig
   name: string
   workspaceName: string
   schemaVersion?: string
@@ -355,7 +357,7 @@ export async function fetchWorkflow(workspaceName: string, workflowName: string)
 
 export async function updateWorkflowControls(
   workflow: Workflow,
-  patch: { enabled?: boolean; enableManualTrigger?: boolean }
+  patch: { enabled?: boolean; enableManualTrigger?: boolean; agents?: AgentConfig }
 ): Promise<Workflow> {
   return apiFetch<Workflow>(
     `/api/workspaces/${encodeURIComponent(workflow.workspaceName)}/workflows/${encodeURIComponent(workflow.name)}`,
@@ -366,12 +368,12 @@ export async function updateWorkflowControls(
   )
 }
 
-export async function triggerWorkflow(workflow: Workflow, inputs?: Record<string, unknown>): Promise<{ claw_id: string; status: string }> {
+export async function triggerWorkflow(workflow: Workflow, inputs?: Record<string, unknown>, agents?: AgentConfig): Promise<{ claw_id: string; status: string }> {
   return apiFetch<{ claw_id: string; status: string }>(
     `/api/workspaces/${encodeURIComponent(workflow.workspaceName)}/workflows/${encodeURIComponent(workflow.name)}/trigger`,
     {
       method: "POST",
-      body: JSON.stringify({ inputs: inputs || {} }),
+      body: JSON.stringify({ inputs: inputs || {}, ...(agents ? { agents } : {}) }),
     }
   )
 }
@@ -524,4 +526,8 @@ export async function fetchTaskRunOutputs(runId: string): Promise<{ outputs: Tas
 
 export async function fetchTaskRunFilterOptions(options?: AnalyticsRequestOptions): Promise<TaskRunFilterOptions> {
   return apiFetch<TaskRunFilterOptions>("/api/analytics/filter-options", options)
+}
+
+export async function fetchAgentOptions(): Promise<AgentOptions> {
+  return apiFetch<AgentOptions>("/api/agent-options")
 }

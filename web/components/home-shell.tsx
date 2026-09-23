@@ -500,6 +500,7 @@ export function HomeShell() {
         open={!!selectedWorkflow}
         onOpenChange={(open) => { if (!open) setSelectedWorkflow(null) }}
         workflow={selectedWorkflow}
+        isAdmin={isAdmin}
       />
     </div>
   )

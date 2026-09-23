@@ -39,7 +39,7 @@ export function SubagentDetail({
 
   const meta: string[] = []
   if (sub.type) meta.push(sub.type)
-  if (sub.model) meta.push(sub.model)
+  if (!sub.isAsyncSpawn && sub.model) meta.push(sub.model)
   meta.push(`started ${formatAge(sub.startedAt.getTime(), now)}`)
   // No call count: `step.messages` holds the parent's own events for this one
   // Task call (start, forwarded progress pulses, terminal), not the calls the
@@ -79,7 +79,23 @@ export function SubagentDetail({
         </div>
       </section>
 
-      {sub.status === "quiet" && (
+      {sub.isAsyncSpawn && (
+        <div className="space-y-2 rounded-lg border border-border p-3 text-xs text-muted-foreground">
+          <p>{sub.status === "failed" ? "The subagent could not be launched." : "This records the launch request. The child’s completion and output are not reported in this thread."}</p>
+          <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 break-all">
+            <dt>Requested model</dt><dd>{sub.requestedModel || "Inherited default"}</dd>
+            {sub.requestedProvider && <><dt>Requested provider</dt><dd>{sub.requestedProvider}</dd></>}
+            <dt>Resolved model</dt><dd>{sub.resolvedModel || "Not reported"}</dd>
+            {sub.resolvedProvider && <><dt>Resolved provider</dt><dd>{sub.resolvedProvider}</dd></>}
+            {sub.parentSession && <><dt>Parent session</dt><dd>{sub.parentSession}</dd></>}
+            {sub.parentRun && <><dt>Parent run</dt><dd>{sub.parentRun}</dd></>}
+            {sub.childSession && <><dt>Child session</dt><dd>{sub.childSession}</dd></>}
+            {sub.childRun && <><dt>Child run</dt><dd>{sub.childRun}</dd></>}
+          </dl>
+        </div>
+      )}
+
+      {sub.status === "quiet" && !sub.isAsyncSpawn && (
         <p
           className="rounded-lg border px-3 py-2 text-[11.5px] leading-5"
           style={{
@@ -118,14 +134,14 @@ export function SubagentDetail({
 
       {sub.result && (
         <div>
-          <SubagentSectionLabel>Result</SubagentSectionLabel>
+          <SubagentSectionLabel>{sub.isAsyncSpawn ? "Launch receipt" : "Result"}</SubagentSectionLabel>
           <pre className="mt-1 max-h-[50vh] overflow-auto whitespace-pre-wrap break-words rounded-lg border border-border/50 bg-muted/40 p-2.5 font-mono text-[11px] text-muted-foreground">
             {sub.result}
           </pre>
         </div>
       )}
 
-      {!sub.result && !sub.error && !live && (
+      {!sub.result && !sub.error && !live && !sub.isAsyncSpawn && (
         <p className="text-[11.5px] text-muted-foreground">
           This subagent finished without returning any output.
         </p>

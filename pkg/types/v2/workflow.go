@@ -2,11 +2,15 @@ package v2
 
 import (
 	"fmt"
+	"github.com/elasticclaw/elasticclaw/pkg/types"
 	"strings"
 )
 
 // Workflow is the authored workflow v2 document (issue #544).
 type Workflow struct {
+	DefaultModel  string                     `yaml:"default_model,omitempty" json:"default_model,omitempty"`
+	LLMKey        string                     `yaml:"llm_key,omitempty" json:"llm_key,omitempty"`
+	Subagents     *types.SubagentConfig      `yaml:"subagents,omitempty" json:"subagents,omitempty"`
 	SchemaVersion interface{}                `yaml:"schema_version" json:"schema_version"`
 	Name          string                     `yaml:"name" json:"name"`
 	Enabled       bool                       `yaml:"enabled" json:"enabled"`

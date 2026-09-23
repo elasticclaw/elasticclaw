@@ -431,3 +431,53 @@ func testJWT(claims map[string]any) string {
 	payload, _ := json.Marshal(claims)
 	return base64.RawURLEncoding.EncodeToString(header) + "." + base64.RawURLEncoding.EncodeToString(payload) + ".sig"
 }
+
+func TestManagedGrokCredentialHonorsPinnedRoles(t *testing.T) {
+	for _, tc := range []struct {
+		name, mainProvider, mainAPI, mainProfile, childAPI, childProfile, pinnedMain, pinnedChild, wantToken string
+		legacy                                                                                               bool
+		wantErr                                                                                              bool
+	}{
+		{name: "removed child cannot select default", mainProvider: "anthropic", mainAPI: "api", childProfile: "child", pinnedMain: "main", pinnedChild: "removed", wantErr: true},
+		{name: "removed main cannot select default", mainProvider: "anthropic", mainAPI: "api", childProfile: "child", pinnedMain: "removed", pinnedChild: "child", wantErr: true},
+		{name: "API child does not restore stale OAuth", mainProvider: "anthropic", mainAPI: "api", childAPI: "api", childProfile: "child", pinnedMain: "main", pinnedChild: "child", wantErr: true},
+		{name: "API child tolerates missing OAuth profile", mainProvider: "anthropic", mainAPI: "api", childAPI: "api", childProfile: "missing", pinnedMain: "main", pinnedChild: "child", wantErr: true},
+		{name: "API main with OAuth child", mainProvider: "anthropic", mainAPI: "api", childProfile: "child", pinnedMain: "main", pinnedChild: "child", wantToken: "child-token"},
+		{name: "API Grok main with OAuth child", mainProvider: "grok", mainAPI: "api", mainProfile: "main", childProfile: "child", pinnedMain: "main", pinnedChild: "child", wantToken: "child-token"},
+		{name: "legacy API main does not restore OAuth", mainProvider: "grok", mainAPI: "api", mainProfile: "main", pinnedMain: "main", legacy: true, wantErr: true},
+		{name: "legacy default fallback remains", mainProvider: "anthropic", mainAPI: "api", pinnedMain: "removed", legacy: true, wantToken: "unrelated-token"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &types.HubConfig{LLMKeys: types.LLMKeysList{
+				{Name: "main", Provider: tc.mainProvider, APIKey: tc.mainAPI, AuthProfile: tc.mainProfile},
+				{Name: "child", Provider: "grok", APIKey: tc.childAPI, AuthProfile: tc.childProfile},
+				{Name: "unrelated", Provider: "grok", AuthProfile: "unrelated", Default: true},
+			}}
+			for _, name := range []string{"main", "child", "unrelated"} {
+				cfg.ModelAuthProfiles = append(cfg.ModelAuthProfiles, &types.ModelAuthProfileConfig{Name: name, Provider: "grok", AuthState: testGrokAuthState(t, name+"-token", "fixture-refresh", time.Now().Add(time.Hour))})
+			}
+			s, db := NewTestServerWithConfig(t, cfg, "", "", "")
+			raw := "null"
+			if !tc.legacy {
+				encoded, _ := json.Marshal(types.SubagentConfig{LLMKey: tc.pinnedChild, Model: "grok/model"})
+				raw = string(encoded)
+			}
+			if _, err := db.Exec(`INSERT INTO claws(id,tenant_id,name,llm_key,subagents_config,created_at) VALUES('roles','test-tenant-id','roles',?,?,datetime('now'))`, tc.pinnedMain, raw); err != nil {
+				t.Fatal(err)
+			}
+			got, err := s.managedGrokCredential(context.Background(), "roles")
+			if tc.wantErr {
+				if err == nil || got != nil {
+					t.Fatalf("expected no credential, got %+v / %v", got, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Access != tc.wantToken {
+				t.Fatalf("wrong role selected: %+v", got)
+			}
+		})
+	}
+}

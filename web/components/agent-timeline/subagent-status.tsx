@@ -12,6 +12,8 @@ import type { Subagent, SubagentStatus } from "@/lib/subagents"
 
 const STATUS_COLOR: Record<SubagentStatus, string> = {
   running: "var(--step-running)",
+  launched: "var(--muted-foreground)",
+  unknown: "var(--status-idle)",
   quiet: "var(--status-idle)",
   failed: "var(--status-error)",
   done: "var(--step-done)",
@@ -31,6 +33,8 @@ const STATUS_TEXT_COLOR: Record<SubagentStatus, string> = {
 
 const STATUS_LABEL: Record<SubagentStatus, string> = {
   running: "running",
+  launched: "launched",
+  unknown: "unconfirmed",
   quiet: "quiet",
   failed: "failed",
   done: "done",
@@ -141,6 +145,8 @@ export function subagentActivity(sub: Subagent): SubagentActivity | null {
 
 /** One-line outcome for a finished subagent (result head, or the error). */
 export function subagentOutcome(sub: Subagent): string {
+  if (sub.status === "launched") return "Launch accepted · completion not reported"
+  if (sub.status === "unknown") return "Launch outcome not reported"
   const raw = sub.error || sub.result || ""
   const firstLine = raw.split("\n").find((line) => line.trim()) || ""
   return firstLine.trim() || (sub.status === "failed" ? "failed with no output" : "no output")

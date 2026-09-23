@@ -14,6 +14,7 @@ import (
 
 // FactoryTriggerRequest is the payload for POST /api/factories/{name}/trigger.
 type FactoryTriggerRequest struct {
+	Agents *types.AgentConfig     `json:"agents,omitempty"`
 	Inputs map[string]interface{} `json:"inputs"`
 }
 
@@ -245,6 +246,11 @@ func (s *Server) triggerFactoryConfig(w http.ResponseWriter, r *http.Request, fa
 	var req FactoryTriggerRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		jsonError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+		return
+	}
+
+	if req.Agents != nil {
+		jsonError(w, http.StatusBadRequest, "agent overrides are supported only by workflow triggers")
 		return
 	}
 

@@ -7,7 +7,8 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint .",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test:subagents": "node scripts/test-subagents.mjs"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",

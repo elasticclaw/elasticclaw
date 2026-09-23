@@ -53,6 +53,7 @@ type WorkspaceAccess struct {
 
 // WorkflowView is a workflow-shaped projection of a legacy factory.
 type WorkflowView struct {
+	Agents               types.AgentConfig      `json:"agents"`
 	Name                 string                 `json:"name"`
 	SchemaVersion        string                 `json:"schemaVersion,omitempty"`
 	WorkspaceName        string                 `json:"workspaceName"`
@@ -218,6 +219,13 @@ func (s *Server) handleWorkspaceWorkflowsPush(w http.ResponseWriter, r *http.Req
 		http.Error(w, "no workflows provided", http.StatusBadRequest)
 		return
 	}
+	// Only the workspace config feeds agent defaults: a push must repair a
+	// stale sibling workflow, and a missing workspace is reported by
+	// saveExternalWorkflows with the push hint.
+	var workspace *types.WorkspaceConfig
+	if data, err := readExternalWorkspaceYAML(name); err == nil {
+		workspace = &types.WorkspaceConfig{Name: name, Files: map[string]string{"elasticclaw-config.yaml": string(data)}}
+	}
 	for _, workflow := range req.Workflows {
 		if workflow == nil {
 			http.Error(w, "workflow cannot be nil", http.StatusBadRequest)
@@ -226,6 +234,15 @@ func (s *Server) handleWorkspaceWorkflowsPush(w http.ResponseWriter, r *http.Req
 		workflow.Name = strings.TrimSpace(workflow.Name)
 		// V2 workflows use a separate schema; do not run v1 normalize/validate on them.
 		if isWorkflowV2(workflow) {
+			// V2 push payloads carry the document in RawConfig; structural
+			// errors are reported by the store-time v2 validation.
+			if parsed, err := v2.ParseWorkflow([]byte(workflow.RawConfig)); err == nil {
+				workflow.DefaultModel, workflow.LLMKey, workflow.Subagents = parsed.DefaultModel, parsed.LLMKey, parsed.Subagents
+			}
+			if err := s.validateWorkflowAgents(workspace, workflow); err != nil {
+				http.Error(w, "invalid workflow: "+err.Error(), http.StatusBadRequest)
+				return
+			}
 			continue
 		}
 		if err := types.NormalizeWorkflowConfig(workflow); err != nil {
@@ -237,6 +254,10 @@ func (s *Server) handleWorkspaceWorkflowsPush(w http.ResponseWriter, r *http.Req
 			return
 		}
 		if err := s.validateWorkflowNotifyVias(workflow); err != nil {
+			http.Error(w, "invalid workflow: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		if err := s.validateWorkflowAgents(workspace, workflow); err != nil {
 			http.Error(w, "invalid workflow: "+err.Error(), http.StatusBadRequest)
 			return
 		}
@@ -297,9 +318,10 @@ func (s *Server) handleWorkspaceWorkflowDetail(w http.ResponseWriter, r *http.Re
 }
 
 type WorkflowPatchRequest struct {
-	Enabled                  *bool `json:"enabled"`
-	EnableManualTrigger      *bool `json:"enableManualTrigger"`
-	EnableManualTriggerSnake *bool `json:"enable_manual_trigger"`
+	Agents                   *types.AgentConfig `json:"agents"`
+	Enabled                  *bool              `json:"enabled"`
+	EnableManualTrigger      *bool              `json:"enableManualTrigger"`
+	EnableManualTriggerSnake *bool              `json:"enable_manual_trigger"`
 }
 
 func (s *Server) handleWorkspaceWorkflowPatch(w http.ResponseWriter, r *http.Request) {
@@ -314,7 +336,7 @@ func (s *Server) handleWorkspaceWorkflowPatch(w http.ResponseWriter, r *http.Req
 		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	if req.Enabled == nil && req.EnableManualTrigger == nil && req.EnableManualTriggerSnake == nil {
+	if req.Agents == nil && req.Enabled == nil && req.EnableManualTrigger == nil && req.EnableManualTriggerSnake == nil {
 		http.Error(w, "no workflow fields provided", http.StatusBadRequest)
 		return
 	}
@@ -332,7 +354,7 @@ func (s *Server) handleWorkspaceWorkflowPatch(w http.ResponseWriter, r *http.Req
 		http.Error(w, "workflow not found", http.StatusNotFound)
 		return
 	}
-	if isWorkflowV2(workflow) {
+	if isWorkflowV2(workflow) && (req.Enabled != nil || req.EnableManualTrigger != nil || req.EnableManualTriggerSnake != nil) {
 		http.Error(w, "workflow v2 activation is managed by the v2 runtime and cannot be changed through the v1 workflow patch API", http.StatusConflict)
 		return
 	}
@@ -345,7 +367,27 @@ func (s *Server) handleWorkspaceWorkflowPatch(w http.ResponseWriter, r *http.Req
 	if req.EnableManualTriggerSnake != nil {
 		workflow.EnableManualTrigger = *req.EnableManualTriggerSnake
 	}
-	workflow.RawConfig = ""
+	fields := map[string]interface{}{}
+	if req.Agents != nil {
+		candidate := *workflow
+		applyWorkflowAgents(&candidate, *req.Agents)
+		if err := s.validateWorkflowAgents(workspace, &candidate); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		applyWorkflowAgents(workflow, *req.Agents)
+		fields["default_model"], fields["llm_key"], fields["subagents"] = req.Agents.DefaultModel, req.Agents.LLMKey, req.Agents.Subagents
+	}
+	if req.Enabled != nil {
+		fields["enabled"] = *req.Enabled
+	}
+	if req.EnableManualTrigger != nil || req.EnableManualTriggerSnake != nil {
+		fields["enable_manual_trigger"] = workflow.EnableManualTrigger
+	}
+	if err := patchWorkflowYAML(workflow, fields); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	// Deliberately no validateWorkflowNotifyVias here: a patch only toggles
 	// flags on an already-persisted pipeline without changing its content, and
 	// disabling a workflow stranded by a later hub.yaml notifier delete/rename
@@ -439,6 +481,19 @@ func (s *Server) triggerWorkflowConfig(w http.ResponseWriter, r *http.Request, w
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		jsonError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
 		return
+	}
+	if req.Agents != nil {
+		if !s.agentOverridesAllowed(r) {
+			jsonError(w, http.StatusForbidden, "agent overrides require an administrator")
+			return
+		}
+		copied := *workflow
+		applyWorkflowAgents(&copied, mergeAgentConfig(workflowAgentConfig(workflow), *req.Agents))
+		workflow = &copied
+		if err := s.validateWorkflowAgents(workspace, workflow); err != nil {
+			jsonError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 	}
 	validatedInputs, err := validateFactoryInputs(workflow.Inputs, req.Inputs)
 	if err != nil {
@@ -633,6 +688,7 @@ func workflowToView(workspaceName string, workflow *types.WorkflowConfig) Workfl
 		projects = append([]string(nil), linearWorkflowProjects(workflow)...)
 	}
 	return WorkflowView{
+		Agents:               workflowAgentConfig(workflow),
 		Name:                 workflow.Name,
 		SchemaVersion:        workflow.SchemaVersion,
 		WorkspaceName:        workspaceName,

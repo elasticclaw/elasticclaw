@@ -1,7 +1,6 @@
 "use client"
 
 import { useState, useCallback } from "react"
-import { useRouter } from "next/navigation"
 import { Zap, Play, AlertCircle } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -14,25 +13,34 @@ import {
   DialogDescription,
 } from "@/components/ui/dialog"
 import { triggerWorkflow, type WorkflowInput, type Workflow } from "@/lib/api"
+import { AgentConfigForm } from "@/components/agent-config-form"
+import { validateAgentConfig, type AgentConfig } from "@/lib/agent-config"
 import { WorkflowName } from "@/components/workflow-name"
 
 interface ManualTriggerModalProps {
   open: boolean
   onOpenChange: (open: boolean) => void
   workflow?: Workflow | null
+  // Per-run agent overrides and agent options are admin-only in the hub.
+  isAdmin?: boolean
 }
 
-export function ManualTriggerModal({ open, onOpenChange, workflow }: ManualTriggerModalProps) {
+export function ManualTriggerModal({ open, onOpenChange, workflow, isAdmin = false }: ManualTriggerModalProps) {
   const [inputValues, setInputValues] = useState<Record<string, string>>({})
   const [triggering, setTriggering] = useState(false)
   const [triggerError, setTriggerError] = useState<string | null>(null)
   const [seededWorkflow, setSeededWorkflow] = useState<Workflow | null | undefined>(undefined)
-  const router = useRouter()
+  const [seededOpen, setSeededOpen] = useState(false)
+  const [overrideAgents, setOverrideAgents] = useState(false)
+  const [agents, setAgents] = useState<AgentConfig>({})
 
   // Seed defaults when workflow changes. Done during render with a guarded
   // comparison (React's "adjusting state when props change" pattern) instead
   // of a setState-in-effect, so no stale-values render is committed.
-  if (workflow !== seededWorkflow) {
+  if (workflow !== seededWorkflow || open !== seededOpen) {
+    setSeededOpen(open)
+    setOverrideAgents(false)
+    setAgents(structuredClone(workflow?.agents ?? {}))
     setSeededWorkflow(workflow)
     // Clear on every workflow change, not just the has-inputs branch —
     // otherwise an error from the previous workflow survives the switch.
@@ -53,6 +61,8 @@ export function ManualTriggerModal({ open, onOpenChange, workflow }: ManualTrigg
       setInputValues(defaults)
     }
   }
+
+  const applyAgentOverrides = isAdmin && overrideAgents
 
   const handleTrigger = useCallback(async () => {
     if (!workflow) return
@@ -86,7 +96,11 @@ export function ManualTriggerModal({ open, onOpenChange, workflow }: ManualTrigg
           }
         }
       }
-      await triggerWorkflow(workflow, inputs)
+      if (applyAgentOverrides) {
+        const validation = validateAgentConfig(agents)
+        if (validation) throw new Error(validation)
+      }
+      await triggerWorkflow(workflow, inputs, applyAgentOverrides ? agents : undefined)
       setTriggering(false)
       onOpenChange(false)
     } catch (e) {
@@ -94,13 +108,13 @@ export function ManualTriggerModal({ open, onOpenChange, workflow }: ManualTrigg
       // Keep modal open so user sees the backend validation error
       setTriggerError(e instanceof Error ? e.message : String(e))
     }
-  }, [workflow, inputValues, onOpenChange])
+  }, [workflow, inputValues, onOpenChange, applyAgentOverrides, agents])
 
   if (!workflow) return null
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-md">
+      <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-lg">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <Zap className="size-4 text-amber-500" />
@@ -126,8 +140,27 @@ export function ManualTriggerModal({ open, onOpenChange, workflow }: ManualTrigg
           </div>
         )}
 
+        {isAdmin && (
+          <div className="space-y-4 border-t border-border pt-4">
+            <label className="flex items-center gap-2 text-sm font-medium">
+              <input
+                type="checkbox"
+                checked={overrideAgents}
+                disabled={triggering}
+                onChange={e => setOverrideAgents(e.target.checked)}
+              />
+              Override agents for this run
+            </label>
+            {overrideAgents ? (
+              <AgentConfigForm value={agents} onChange={setAgents} disabled={triggering} context="run" />
+            ) : (
+              <p className="text-xs text-muted-foreground">Uses this workflow’s agent settings.</p>
+            )}
+          </div>
+        )}
+
         {triggerError && (
-          <div className="flex items-center gap-1.5 text-sm text-red-500 bg-red-50 p-2 rounded">
+          <div role="alert" className="flex items-center gap-1.5 text-sm text-red-500 bg-red-50 p-2 rounded">
             <AlertCircle className="size-4" />
             <span>{triggerError}</span>
           </div>

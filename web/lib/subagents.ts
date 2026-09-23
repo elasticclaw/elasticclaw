@@ -10,7 +10,7 @@ export { formatAge, formatDurationMs } from "./turns"
 
 export const SUBAGENT_STALE_MS = 30_000
 
-export type SubagentStatus = "running" | "quiet" | "done" | "failed"
+export type SubagentStatus = "running" | "quiet" | "done" | "failed" | "launched" | "unknown"
 
 export interface Subagent {
   id: string
@@ -18,6 +18,15 @@ export interface Subagent {
   task: string
   type?: string
   model?: string
+  requestedModel?: string
+  requestedProvider?: string
+  resolvedModel?: string
+  resolvedProvider?: string
+  parentSession?: string
+  parentRun?: string
+  childSession?: string
+  childRun?: string
+  isAsyncSpawn?: boolean
   status: SubagentStatus
   startedAt: Date
   endedAt?: Date
@@ -36,7 +45,7 @@ export interface Subagent {
   stepIds: string[]
 }
 
-function firstActivityValue(step: Step, field: "subagent_name" | "subagent_type" | "subagent_model" | "subagent_prompt"): string | undefined {
+function firstActivityValue(step: Step, field: "subagent_name" | "subagent_type" | "subagent_model" | "subagent_prompt" | "subagent_requested_model" | "subagent_requested_provider" | "subagent_resolved_model" | "subagent_resolved_provider" | "subagent_parent_session" | "subagent_parent_run" | "subagent_child_session" | "subagent_child_run" | "subagent_spawn_status"): string | undefined {
   for (const message of step.messages) {
     const value = message.activity?.[field]
     if (value?.trim()) return value
@@ -65,7 +74,10 @@ function lastOutputAtMs(step: Step): number {
  * rather than being declared finished on its behalf.
  */
 function statusForStep(step: Step, outputAtMs: number, nowMs: number): SubagentStatus {
-  if (step.status === "failed") return "failed"
+  if (step.status === "failed" || firstActivityValue(step, "subagent_spawn_status") === "failed") return "failed"
+  if (isAsyncSpawnStep(step)) {
+    return firstActivityValue(step, "subagent_spawn_status") === "accepted" ? "launched" : "unknown"
+  }
   if (step.endedAt !== undefined) return "done"
   return nowMs - outputAtMs > SUBAGENT_STALE_MS ? "quiet" : "running"
 }
@@ -73,7 +85,8 @@ function statusForStep(step: Step, outputAtMs: number, nowMs: number): SubagentS
 function statusGroup(status: SubagentStatus): number {
   if (status === "running") return 0
   if (status === "quiet") return 1
-  return 2
+  if (status === "launched" || status === "unknown") return 2
+  return 3
 }
 
 function subagentFromStep(step: Step, turnIndex: number, nowMs: number, stepIds?: string[]): Subagent {
@@ -83,11 +96,20 @@ function subagentFromStep(step: Step, turnIndex: number, nowMs: number, stepIds?
     name: firstActivityValue(step, "subagent_name") || step.detail || "subagent",
     task: firstActivityValue(step, "subagent_prompt") || "",
     type: firstActivityValue(step, "subagent_type"),
-    model: firstActivityValue(step, "subagent_model"),
+    model: firstActivityValue(step, "subagent_resolved_model") || firstActivityValue(step, "subagent_requested_model") || firstActivityValue(step, "subagent_model"),
+    requestedModel: firstActivityValue(step, "subagent_requested_model") || firstActivityValue(step, "subagent_model"),
+    requestedProvider: firstActivityValue(step, "subagent_requested_provider"),
+    resolvedModel: firstActivityValue(step, "subagent_resolved_model"),
+    resolvedProvider: firstActivityValue(step, "subagent_resolved_provider"),
+    parentSession: firstActivityValue(step, "subagent_parent_session"),
+    parentRun: firstActivityValue(step, "subagent_parent_run"),
+    childSession: firstActivityValue(step, "subagent_child_session"),
+    childRun: firstActivityValue(step, "subagent_child_run"),
+    isAsyncSpawn: isAsyncSpawnStep(step),
     status: statusForStep(step, outputAtMs, nowMs),
     startedAt: step.startedAt,
-    endedAt: step.endedAt,
-    durationMs: step.durationMs,
+    endedAt: isAsyncSpawnStep(step) ? undefined : step.endedAt,
+    durationMs: isAsyncSpawnStep(step) ? undefined : step.durationMs,
     lastOutputAtMs: outputAtMs,
     result: step.result,
     error: step.error,
@@ -107,7 +129,11 @@ function subagentFromStep(step: Step, turnIndex: number, nowMs: number, stepIds?
  * rail, counted in every header, and turned into drill-down rows whose result
  * no longer expands inline.
  */
-const SUBAGENT_TOOLS = new Set(["task", "agent", "subagent"])
+const SUBAGENT_TOOLS = new Set(["task", "agent", "subagent", "sessions_spawn"])
+
+function isAsyncSpawnStep(step: Step): boolean {
+  return step.messages.some(message => message.activity?.tool?.trim().toLowerCase() === "sessions_spawn")
+}
 
 export function isSubagentStep(step: Step): boolean {
   if (step.kind !== "tool" || step.category !== "task") return false
@@ -181,7 +207,7 @@ export function latestOpenSubagentOutputMs(turns: Turn[]): number {
   let latest = 0
   for (const turn of turns) {
     for (const step of turn.steps) {
-      if (!isSubagentStep(step) || step.endedAt !== undefined || step.status === "failed") continue
+      if (!isSubagentStep(step) || isAsyncSpawnStep(step) || step.endedAt !== undefined || step.status === "failed") continue
       latest = Math.max(latest, lastOutputAtMs(step))
     }
   }
@@ -265,15 +291,25 @@ export function collectSubagents(turns: Turn[], nowMs: number): Subagent[] {
     .map(({ sub }) => sub)
 }
 
-export function subagentCounts(subs: Subagent[]): { running: number; quiet: number; done: number; failed: number } {
-  const counts = { running: 0, quiet: 0, done: 0, failed: 0 }
+export function subagentCounts(subs: Subagent[]): Record<SubagentStatus, number> {
+  const counts = { running: 0, quiet: 0, done: 0, failed: 0, launched: 0, unknown: 0 }
   for (const sub of subs) counts[sub.status] += 1
   return counts
 }
 
 export function subagentSummaryLine(subs: Subagent[]): string | null {
   if (subs.length === 0) return null
-  const { running, quiet, failed } = subagentCounts(subs)
+  const { running, quiet, failed, launched, unknown } = subagentCounts(subs)
+  if (launched || unknown) {
+    const parts = []
+    if (running + quiet) parts.push(`${running + quiet} running`)
+    if (launched) parts.push(`${launched} launched`)
+    if (unknown) parts.push(`${unknown} unconfirmed`)
+    const done = subs.length - running - quiet - failed - launched - unknown
+    if (done) parts.push(`${done} done`)
+    if (failed) parts.push(`${failed} failed`)
+    return `Subagents: ${parts.join(" · ")}`
+  }
   const noun = subs.length === 1 ? "subagent" : "subagents"
   const active = running + quiet
   // A failure is the one state a user scanning the board most needs to see, so

@@ -146,3 +146,57 @@ func TestLoadStoredClawProvisionRejectsMalformedTemplateFiles(t *testing.T) {
 		})
 	}
 }
+
+func TestWorkflowAgentConfigPreservesLegacyModelPrecedence(t *testing.T) {
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
+	t.Setenv("ELASTICCLAW_NOOP_PROVIDER", "1")
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{DefaultModel: "anthropic/hub-model", Providers: map[string]types.ProviderConfig{"noop": {Type: "noop"}}, LLMKeys: types.LLMKeysList{{Name: "main", Provider: "anthropic", APIKey: "fixture", Default: true, DefaultModel: "anthropic/key-model"}}}, "", "", "")
+	for _, tc := range []struct {
+		name, templateExtra string
+		agents              types.AgentConfig
+		want                string
+	}{
+		{name: "legacy workspace", want: "anthropic/hub-model"},
+		{name: "legacy named key", templateExtra: "llm_key: main\n", want: "anthropic/hub-model"},
+		{name: "legacy template model", templateExtra: "default_model: anthropic/template-model\n", want: "anthropic/template-model"},
+		{name: "authored credential", agents: types.AgentConfig{LLMKey: "main"}, want: "anthropic/key-model"},
+		{name: "authored inheritance", agents: types.AgentConfig{Subagents: &types.SubagentConfig{}}, want: "anthropic/hub-model"},
+		{name: "authored concurrency", agents: types.AgentConfig{Subagents: &types.SubagentConfig{MaxConcurrent: 3}}, want: "anthropic/hub-model"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			workspace := &types.WorkspaceConfig{Name: "engineering", Files: map[string]string{"elasticclaw-config.yaml": "name: engineering\nprovider: noop\n" + tc.templateExtra}}
+			workflow := &types.WorkflowConfig{Name: "fixture", Provider: "noop"}
+			applyWorkflowAgents(workflow, tc.agents)
+			id, _, err := s.createClawFromWorkflow(workspace, workflow, nil, "model precedence test")
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got string
+			if err := db.QueryRow(`SELECT default_model FROM claws WHERE id=?`, id).Scan(&got); err != nil {
+				t.Fatal(err)
+			}
+			if got != tc.want {
+				t.Fatalf("model=%q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestWorkflowAgentConfigDropsIncompatibleHubModel(t *testing.T) {
+	t.Setenv("ELASTICCLAW_HUB_CONFIG", t.TempDir()+"/hub.yaml")
+	t.Setenv("ELASTICCLAW_NOOP_PROVIDER", "1")
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{DefaultModel: "openai/hub-model", Providers: map[string]types.ProviderConfig{"noop": {Type: "noop"}}, LLMKeys: types.LLMKeysList{{Name: "main", Provider: "anthropic", APIKey: "fixture", Default: true, DefaultModel: "anthropic/key-model"}}}, "", "", "")
+	workspace := &types.WorkspaceConfig{Name: "engineering", Files: map[string]string{"elasticclaw-config.yaml": "name: engineering\nprovider: noop\n"}}
+	workflow := &types.WorkflowConfig{Name: "fixture", Provider: "noop", Subagents: &types.SubagentConfig{}}
+	id, _, err := s.createClawFromWorkflow(workspace, workflow, nil, "incompatible hub model test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got string
+	if err := db.QueryRow(`SELECT default_model FROM claws WHERE id=?`, id).Scan(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got != "anthropic/key-model" {
+		t.Fatalf("model=%q, want credential default", got)
+	}
+}

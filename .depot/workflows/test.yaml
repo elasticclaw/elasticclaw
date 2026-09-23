@@ -113,6 +113,10 @@ jobs:
         run: npm install
         working-directory: web
 
+      - name: Subagent timeline tests
+        run: npm run test:subagents
+        working-directory: web
+
       - name: Lint (smoke check — tolerates rule violations, still fails on tool/config errors)
         run: |
           set +e

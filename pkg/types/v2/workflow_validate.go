@@ -28,19 +28,22 @@ var writableNamespaces = []string{
 }
 
 var knownWorkflowKeys = map[string]bool{
-	"schema_version":  true,
-	"name":            true,
-	"enabled":         true,
-	"manual_trigger":  true,
-	"initial_state":   true,
-	"states":          true,
-	"transitions":     true,
-	"commands":        true,
-	"ci":              true,
-	"review":          true,
-	"delivery":        true,
-	"events":          true,
-	"trigger":         true,
+	"schema_version": true,
+	"name":           true,
+	"enabled":        true,
+	"manual_trigger": true,
+	"default_model":  true,
+	"llm_key":        true,
+	"subagents":      true,
+	"initial_state":  true,
+	"states":         true,
+	"transitions":    true,
+	"commands":       true,
+	"ci":             true,
+	"review":         true,
+	"delivery":       true,
+	"events":         true,
+	"trigger":        true,
 }
 
 // ParseWorkflow unmarshals workflow v2 YAML. It does not validate.
@@ -93,6 +96,9 @@ func ValidateWorkflow(wf *Workflow) (*ResolvedWorkflow, error) {
 	}
 	if _, ok := wf.States[wf.InitialState]; !ok {
 		return nil, fmt.Errorf("workflow %q: initial_state %q is not defined in states", wf.Name, wf.InitialState)
+	}
+	if err := wf.Subagents.Validate(); err != nil {
+		return nil, fmt.Errorf("workflow %q: %w", wf.Name, err)
 	}
 
 	for name, st := range wf.States {
