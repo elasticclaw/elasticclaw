@@ -903,7 +903,7 @@ func (s *Server) finalizeCheckpoint(checkpointID, tenantID, clawID, rootSHA stri
 	if err != nil {
 		return err
 	}
-	msgSHA, msgCount, cutoff, err := s.writeMessageCheckpointBlob(clawID, tenantID)
+	msgSHA, msgCount, cutoff, err := s.writeMessageCheckpointBlob(checkpointID, clawID, tenantID)
 	if err != nil {
 		return err
 	}
@@ -934,7 +934,7 @@ func (s *Server) completeMetadataOnlyCheckpoint(checkpointID, clawID, reason, de
 	if err != nil {
 		return err
 	}
-	msgSHA, msgCount, cutoff, err := s.writeMessageCheckpointBlob(clawID, tenantID)
+	msgSHA, msgCount, cutoff, err := s.writeMessageCheckpointBlob(checkpointID, clawID, tenantID)
 	if err != nil {
 		return err
 	}
@@ -973,7 +973,7 @@ func (s *Server) filesForTree(rootSHA string) ([]types.CheckpointFile, error) {
 	return files, nil
 }
 
-func (s *Server) writeMessageCheckpointBlob(clawID, tenantID string) (string, int, time.Time, error) {
+func (s *Server) writeMessageCheckpointBlob(checkpointID, clawID, tenantID string) (string, int, time.Time, error) {
 	rows, err := s.db.Query(`SELECT id, role, content, format, created_at FROM messages WHERE claw_id=? AND tenant_id=? ORDER BY created_at ASC`, clawID, tenantID)
 	if err != nil {
 		return "", 0, time.Time{}, err
@@ -999,6 +999,12 @@ func (s *Server) writeMessageCheckpointBlob(clawID, tenantID string) (string, in
 		_ = enc.Encode(row)
 	}
 	sha := shaBytes(buf.Bytes())
+	// The collector only frees a message blob no live row names, so the row
+	// must name it before we rely on the copy already on disk.
+	result, err := s.db.Exec(`UPDATE claw_checkpoints SET message_tree_sha256=? WHERE id=? AND status='creating'`, sha, checkpointID)
+	if err := checkpointStillCreating(result, err, checkpointID); err != nil {
+		return "", 0, time.Time{}, err
+	}
 	path := checkpointBlobPath(sha)
 	if _, err := os.Stat(path); err == nil {
 		return sha, count, cutoff, nil

@@ -200,6 +200,31 @@ func TestFinalizeRefusesCheckpointNoLongerCreating(t *testing.T) {
 	}
 }
 
+func TestMessageBlobIsReferencedBeforeReuse(t *testing.T) {
+	s := retentionServer(t)
+	at := time.Now().UTC()
+	// No messages: the digest is that of an empty JSONL, already on disk.
+	message := retentionBlob(t, "")
+	retentionCheckpoint(t, s, "dead", "claw", "compacted", "manual", "", at)
+	retentionExec(t, s, `UPDATE claw_checkpoints SET message_tree_sha256=? WHERE id='dead'`, message)
+	insertTestCheckpoint(t, s, "live", "manual")
+	sha, count, _, err := s.writeMessageCheckpointBlob("live", "claw", "tenant")
+	if err != nil || sha != message || count != 0 {
+		t.Fatalf("blob=%s count=%d err=%v", sha, count, err)
+	}
+	if n := retentionCount(t, s, `SELECT COUNT(*) FROM claw_checkpoints WHERE id='live' AND status='creating' AND message_tree_sha256=?`, message); n != 1 {
+		t.Fatal("creating row does not name the reused message blob")
+	}
+	counts, err := s.collectCheckpointBlobs(at, false)
+	if err != nil || counts.blobs != 0 {
+		t.Fatalf("collection=%+v,%v", counts, err)
+	}
+	retentionExists(t, checkpointBlobPath(message), true)
+	if _, _, _, err := s.writeMessageCheckpointBlob("dead", "claw", "tenant"); err == nil {
+		t.Fatal("named a message blob from a compacted row")
+	}
+}
+
 func TestRetentionCompactionPreservesRetryAndRestorePointers(t *testing.T) {
 	s := retentionServer(t)
 	at := time.Now().UTC()
