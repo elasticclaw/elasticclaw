@@ -5,10 +5,12 @@ import { fetchCurrentUser } from "@/lib/api"
 
 // The enabled feature keys for the signed-in user, loaded once from
 // /api/auth/me and shared by every useFeatureFlag caller on the page.
-// null until the first load succeeds; a failed load is retried on the next
-// subscribe instead of being cached as "no features".
+// null until the first load succeeds; a failed load is retried after a delay
+// while anything is subscribed, instead of being cached as "no features".
 let features: readonly string[] | null = null
 let inflight: Promise<void> | null = null
+let retryTimer: ReturnType<typeof setTimeout> | null = null
+const RETRY_DELAY_MS = 5000
 let generation = 0
 const listeners = new Set<() => void>()
 
@@ -20,7 +22,14 @@ function load() {
       features = Array.isArray(user.features) ? user.features : []
       listeners.forEach((listener) => listener())
     })
-    .catch(() => {})
+    .catch(() => {
+      if (listeners.size > 0 && retryTimer === null) {
+        retryTimer = setTimeout(() => {
+          retryTimer = null
+          if (listeners.size > 0) load()
+        }, RETRY_DELAY_MS)
+      }
+    })
     .finally(() => {
       inflight = null
       // A refresh landed while this request was in flight, so its answer may
