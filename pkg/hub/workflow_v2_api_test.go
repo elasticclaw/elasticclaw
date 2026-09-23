@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -301,8 +302,11 @@ func insertTestClaw(t *testing.T, db *sql.DB, clawID string) {
 
 func insertTestActivityMessage(t *testing.T, db *sql.DB, clawID, content string) {
 	t.Helper()
-	if _, err := db.Exec(`INSERT INTO messages(id,claw_id,tenant_id,role,content,created_at) VALUES(?,?,?,?,?,datetime('now'))`,
-		"msg-"+clawID+"-"+content, clawID, "test-tenant-id", "activity", content); err != nil {
+	// Bind a time.Time like production message writes do. datetime('now')
+	// would truncate to whole seconds, and second-resolution timestamps sort
+	// before a sub-second attempt started_at bound under the window predicates.
+	if _, err := db.Exec(`INSERT INTO messages(id,claw_id,tenant_id,role,content,created_at) VALUES(?,?,?,?,?,?)`,
+		"msg-"+clawID+"-"+content, clawID, "test-tenant-id", "activity", content, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -616,6 +620,193 @@ func TestWorkflowV2AttemptLogsAreScopedToTheAttemptSession(t *testing.T) {
 	}
 	if got := roleCount(runLogs, "state"); got != 2 {
 		t.Fatalf("run-level state transitions = %d, want 2 (complete record)", got)
+	}
+}
+
+func TestWorkflowV2AttemptLogsScopeActivityForReusedClaw(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
+	store := workflowv2.NewStore(db)
+	base := time.Date(2026, 9, 23, 12, 0, 0, 0, time.UTC)
+	current := base
+	store.SetClock(func() time.Time { return current })
+
+	run, err := store.CreateRun(context.Background(), workflowv2.CreateRunRequest{
+		ID:            "run-reused-claw",
+		TenantID:      "test-tenant-id",
+		WorkspaceYAML: []byte(workflowV2ExecAPIWorkspace),
+		WorkflowYAML:  []byte(workflowV2ExecAPIWorkflow),
+		InitialClawID: "claw-reused",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	insertTestClaw(t, db, "claw-reused")
+	insertActivityAt := func(id, content string, at time.Time) {
+		t.Helper()
+		if _, err := db.Exec(`INSERT INTO messages(id,claw_id,tenant_id,role,content,created_at) VALUES(?,?,?,?,?,?)`,
+			id, "claw-reused", "test-tenant-id", "activity", content, at); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Attempt 1 activity lands inside its session.
+	insertActivityAt("msg-reuse-1", "first-era activity", base.Add(time.Minute))
+
+	// Attempt 1 fails and a retry reuses the same claw.
+	current = base.Add(2 * time.Minute)
+	if _, err := db.Exec(`UPDATE workflow_v2_attempts SET status='failed', finished_at=? WHERE id=?`,
+		current.UnixMilli(), run.CurrentAttemptID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO workflow_v2_attempts(
+		id,run_id,claw_id,number,status,started_at,heartbeat_at,finished_at,reason)
+		VALUES(?,?,?,2,'active',?,?,0,'retry')`,
+		"attempt-2-reuse", run.ID, "claw-reused", current.UnixMilli(), current.UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+	insertActivityAt("msg-reuse-2", "retry-era activity", base.Add(3*time.Minute))
+
+	fetchLogs := func(path string) []types.HubMessage {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		req.Header.Set("Authorization", "Bearer test-token")
+		rr := httptest.NewRecorder()
+		s.mux.ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("GET %s status = %d, body = %s", path, rr.Code, rr.Body.String())
+		}
+		var messages []types.HubMessage
+		if err := json.NewDecoder(rr.Body).Decode(&messages); err != nil {
+			t.Fatal(err)
+		}
+		return messages
+	}
+	activityContents := func(messages []types.HubMessage) []string {
+		var contents []string
+		for _, m := range messages {
+			if m.Role == "activity" {
+				contents = append(contents, m.Content)
+			}
+		}
+		return contents
+	}
+
+	attempt2 := fetchLogs("/api/v2/workflow-runs/run-reused-claw/attempts/attempt-2-reuse/logs")
+	if contents := activityContents(attempt2); len(contents) != 1 || contents[0] != "retry-era activity" {
+		t.Fatalf("attempt 2 activity = %v, want only retry-era activity", contents)
+	}
+	attempt1 := fetchLogs("/api/v2/workflow-runs/run-reused-claw/attempts/" + run.CurrentAttemptID + "/logs")
+	if contents := activityContents(attempt1); len(contents) != 1 || contents[0] != "first-era activity" {
+		t.Fatalf("attempt 1 activity = %v, want only first-era activity", contents)
+	}
+}
+
+func TestWorkflowV2RunLogsPaginateLifecycleLinesWithCursor(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
+	store := workflowv2.NewStore(db)
+	base := time.Date(2026, 9, 23, 12, 0, 0, 0, time.UTC)
+	current := base
+	store.SetClock(func() time.Time { return current })
+
+	run, err := store.CreateRun(context.Background(), workflowv2.CreateRunRequest{
+		ID:            "run-lifecycle-cursor",
+		TenantID:      "test-tenant-id",
+		WorkspaceYAML: []byte(workflowV2ExecAPIWorkspace),
+		WorkflowYAML:  []byte(workflowV2ExecAPIWorkflow),
+		InitialClawID: "claw-lifecycle-cursor",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	insertTestClaw(t, db, "claw-lifecycle-cursor")
+
+	// Lifecycle records (initial transition at T0, effect + failed exec
+	// outcome at T1 — a failed receipt fires no transition).
+	current = base.Add(time.Minute)
+	claim, err := store.ClaimEffect(context.Background(), "cursor-worker", 5*time.Minute)
+	if err != nil || claim == nil {
+		t.Fatalf("claim = %#v, %v", claim, err)
+	}
+	assign, err := store.MaterializeCommandTask(context.Background(), claim.Effect.ID, claim.AttemptID, "cursor-worker")
+	if err != nil {
+		t.Fatalf("materialize: %v", err)
+	}
+	receipt, err := json.Marshal(map[string]interface{}{
+		"exit_code": 1, "succeeded": false, "stdout": "boom", "stderr": "make: *** error",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	version := run.StateVersion
+	if _, err := store.ApplyCommandReceipt(context.Background(), typesv2.ControlEnvelope{
+		ProtocolVersion:      typesv2.ControlProtocolVersion,
+		MessageID:            "receipt-lifecycle-cursor",
+		Kind:                 typesv2.MessageExecRunFailed,
+		RunID:                run.ID,
+		AttemptID:            run.CurrentAttemptID,
+		TaskID:               assign.TaskID,
+		ExpectedStateVersion: &version,
+		Payload:              receipt,
+	}); err != nil {
+		t.Fatalf("apply receipt: %v", err)
+	}
+
+	// Activity rows newer than every lifecycle record.
+	for i := 2; i <= 5; i++ {
+		if _, err := db.Exec(`INSERT INTO messages(id,claw_id,tenant_id,role,content,created_at) VALUES(?,?,?,?,?,?)`,
+			fmt.Sprintf("msg-cursor-%d", i), "claw-lifecycle-cursor", "test-tenant-id", "activity",
+			fmt.Sprintf("activity %d", i), base.Add(time.Duration(i)*time.Minute)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	fetchLogs := func(path string) []types.HubMessage {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		req.Header.Set("Authorization", "Bearer test-token")
+		rr := httptest.NewRecorder()
+		s.mux.ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("GET %s status = %d, body = %s", path, rr.Code, rr.Body.String())
+		}
+		var messages []types.HubMessage
+		if err := json.NewDecoder(rr.Body).Decode(&messages); err != nil {
+			t.Fatal(err)
+		}
+		return messages
+	}
+	countRoles := func(messages []types.HubMessage) (activity, effect, state int) {
+		for _, m := range messages {
+			switch m.Role {
+			case "activity":
+				activity++
+			case "effect":
+				effect++
+			case "state":
+				state++
+			}
+		}
+		return
+	}
+
+	// Page 1 (newest first): a full activity page must not crowd out or repeat
+	// lifecycle records — they are simply older, so they belong to page 2.
+	page1 := fetchLogs("/api/v2/workflow-runs/run-lifecycle-cursor/logs?limit=3&order=desc")
+	if activity, effect, state := countRoles(page1); len(page1) != 3 || activity != 3 || effect != 0 || state != 0 {
+		t.Fatalf("page 1 = %d rows (activity %d, effect %d, state %d), want 3 activity only", len(page1), activity, effect, state)
+	}
+
+	// Page 2 continues from the oldest row of page 1 and must include the
+	// lifecycle records exactly once, on the page that covers their timestamps.
+	before := base.Add(3 * time.Minute).UTC().Format(time.RFC3339Nano)
+	page2 := fetchLogs("/api/v2/workflow-runs/run-lifecycle-cursor/logs?limit=3&order=desc&before=" + before)
+	if activity, effect, state := countRoles(page2); len(page2) != 3 || activity != 1 || effect != 2 || state != 0 {
+		t.Fatalf("page 2 = %d rows (activity %d, effect %d, state %d), want activity 1 + effect 2", len(page2), activity, effect, state)
+	}
+	for _, m := range page2 {
+		if m.Role == "activity" && m.Content != "activity 2" {
+			t.Fatalf("page 2 activity = %q, want only the row older than the cursor", m.Content)
+		}
 	}
 }
 
