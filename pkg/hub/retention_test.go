@@ -170,6 +170,36 @@ func TestRetentionRejectsNonHexDigests(t *testing.T) {
 	}
 }
 
+func TestFinalizeRefusesCheckpointNoLongerCreating(t *testing.T) {
+	s := retentionServer(t)
+	tree := retentionBlob(t, "[]")
+	for _, id := range []string{"finalize", "skip", "metadata"} {
+		insertTestCheckpoint(t, s, id, "manual")
+	}
+	if err := s.failCheckpoint("finalize", "hub restarted"); err != nil {
+		t.Fatal(err)
+	}
+	retentionExec(t, s, `UPDATE claw_checkpoints SET status='failed' WHERE id IN ('skip','metadata')`)
+	if err := s.finalizeCheckpoint("finalize", "tenant", "claw", tree); err == nil {
+		t.Fatal("finalized a failed checkpoint")
+	}
+	if err := s.markCheckpointSkipped("skip", tree); err == nil {
+		t.Fatal("skipped a failed checkpoint")
+	}
+	if err := s.completeMetadataOnlyCheckpoint("metadata", "claw", "manual", "bridge unreachable"); err == nil {
+		t.Fatal("completed a failed checkpoint")
+	}
+	for _, id := range []string{"finalize", "skip", "metadata"} {
+		if got := checkpointStatus(t, s, id); got != "failed" {
+			t.Fatalf("%s=%s", id, got)
+		}
+	}
+	retentionExists(t, checkpointManifestPath("finalize"), false)
+	if n := retentionCount(t, s, `SELECT COUNT(*) FROM claw_checkpoints WHERE manifest_path!='' OR message_tree_sha256!=''`); n != 0 {
+		t.Fatalf("failed rows gained references: %d", n)
+	}
+}
+
 func TestRetentionCompactionPreservesRetryAndRestorePointers(t *testing.T) {
 	s := retentionServer(t)
 	at := time.Now().UTC()

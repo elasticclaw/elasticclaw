@@ -223,10 +223,27 @@ func (s *Server) checkpointDuplicatesPrevious(checkpointID, clawID, rootSHA stri
 // markCheckpointSkipped records the checkpoint without a manifest. The row is
 // kept so the timeline still shows the claw was idle at that moment.
 func (s *Server) markCheckpointSkipped(checkpointID, rootSHA string) error {
-	_, err := s.db.Exec(
-		`UPDATE claw_checkpoints SET status='skipped', root_tree_sha256=?, workspace_tree_sha256=?, completed_at=? WHERE id=?`,
+	result, err := s.db.Exec(
+		`UPDATE claw_checkpoints SET status='skipped', root_tree_sha256=?, workspace_tree_sha256=?, completed_at=? WHERE id=? AND status='creating'`,
 		rootSHA, rootSHA, now(), checkpointID)
-	return err
+	return checkpointStillCreating(result, err, checkpointID)
+}
+
+// checkpointStillCreating turns a completion UPDATE that matched no row into
+// an error. Only a 'creating' row may complete: one the boot reaper already
+// failed has had its blobs released to the collector and must stay failed.
+func checkpointStillCreating(result sql.Result, err error, checkpointID string) error {
+	if err != nil {
+		return err
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return fmt.Errorf("checkpoint %s is no longer creating", checkpointID)
+	}
+	return nil
 }
 
 func (s *Server) requestBootstrapCheckpoint(clawID string) {
@@ -872,6 +889,13 @@ func (s *Server) finalizeCheckpoint(checkpointID, tenantID, clawID, rootSHA stri
 	// idle-timer checkpoints were in that state. Recording them as 'ready' work
 	// buries the real checkpoints and inflates every count derived from them,
 	// so mark the duplicate and stop before writing a manifest.
+	var status string
+	if err := s.db.QueryRow(`SELECT status FROM claw_checkpoints WHERE id=?`, checkpointID).Scan(&status); err != nil {
+		return err
+	}
+	if status != "creating" {
+		return fmt.Errorf("checkpoint %s is no longer creating", checkpointID)
+	}
 	if s.checkpointDuplicatesPrevious(checkpointID, clawID, rootSHA) {
 		return s.markCheckpointSkipped(checkpointID, rootSHA)
 	}
@@ -899,10 +923,10 @@ func (s *Server) finalizeCheckpoint(checkpointID, tenantID, clawID, rootSHA stri
 	if err := os.WriteFile(path, data, 0o640); err != nil {
 		return err
 	}
-	_, err = s.db.Exec(`UPDATE claw_checkpoints SET status='ready', manifest_sha256=?, manifest_path=?, root_tree_sha256=?, message_tree_sha256=?, workspace_tree_sha256=?, message_count=?, pr_count=?, repo_count=?, pipeline_stage=?, hub_version=?, files_count=?, files_bytes=?, completed_at=? WHERE id=?`,
+	result, err := s.db.Exec(`UPDATE claw_checkpoints SET status='ready', manifest_sha256=?, manifest_path=?, root_tree_sha256=?, message_tree_sha256=?, workspace_tree_sha256=?, message_count=?, pr_count=?, repo_count=?, pipeline_stage=?, hub_version=?, files_count=?, files_bytes=?, completed_at=? WHERE id=? AND status='creating'`,
 		manifestSHA, path, rootSHA, msgSHA, rootSHA, msgCount, len(manifest.PRs), checkpointRepoCount(manifest.PRs),
 		manifest.Hub.PipelineStage, manifest.Hub.Version, manifest.FilesCount, manifest.FilesBytes, now(), checkpointID)
-	return err
+	return checkpointStillCreating(result, err, checkpointID)
 }
 
 func (s *Server) completeMetadataOnlyCheckpoint(checkpointID, clawID, reason, detail string) error {
@@ -928,9 +952,9 @@ func (s *Server) completeMetadataOnlyCheckpoint(checkpointID, clawID, reason, de
 	if err := os.WriteFile(path, data, 0o640); err != nil {
 		return err
 	}
-	_, err = s.db.Exec(`UPDATE claw_checkpoints SET status='ready', manifest_sha256=?, manifest_path=?, message_tree_sha256=?, message_count=?, pipeline_stage=?, hub_version=?, error=?, completed_at=? WHERE id=?`,
+	result, err := s.db.Exec(`UPDATE claw_checkpoints SET status='ready', manifest_sha256=?, manifest_path=?, message_tree_sha256=?, message_count=?, pipeline_stage=?, hub_version=?, error=?, completed_at=? WHERE id=? AND status='creating'`,
 		manifestSHA, path, msgSHA, msgCount, manifest.Hub.PipelineStage, manifest.Hub.Version, detail, now(), checkpointID)
-	return err
+	return checkpointStillCreating(result, err, checkpointID)
 }
 
 func (s *Server) filesForTree(rootSHA string) ([]types.CheckpointFile, error) {
