@@ -344,7 +344,7 @@ func (s *Server) queryWorkflowRunLogs(w http.ResponseWriter, r *http.Request, ru
 	}
 	args = append(args, limit)
 
-	rows, err := s.db.Query(query, args...)
+	rows, err := s.db.QueryContext(r.Context(), query, args...)
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, "fetch activity logs")
 		return
@@ -360,7 +360,7 @@ func (s *Server) queryWorkflowRunLogs(w http.ResponseWriter, r *http.Request, ru
 	}
 
 	// Merge in state transition markers so the UI can show when each state was entered.
-	transRows, err := s.db.Query(`
+	transRows, err := s.db.QueryContext(r.Context(), `
 		SELECT id, from_state, to_state, created_at
 		FROM workflow_v2_transitions
 		WHERE run_id = ?
@@ -396,17 +396,17 @@ func (s *Server) queryWorkflowRunLogs(w http.ResponseWriter, r *http.Request, ru
 	// stdout/stderr receipts) so the log timeline explains what the workflow
 	// did, not just which states it passed through.
 	tenantID := tenantFromCtx(r)
-	msgs, err = s.appendWorkflowV2EffectLogs(msgs, runID, clawID, tenantID)
+	msgs, err = s.appendWorkflowV2EffectLogs(r.Context(), msgs, runID, clawID, tenantID)
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, "fetch effect lifecycle")
 		return
 	}
-	msgs, err = s.appendWorkflowV2AgentTaskLogs(msgs, runID, clawID, tenantID)
+	msgs, err = s.appendWorkflowV2AgentTaskLogs(r.Context(), msgs, runID, clawID, tenantID)
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, "fetch agent task lifecycle")
 		return
 	}
-	msgs, err = s.appendWorkflowV2ExecOutcomeLogs(msgs, runID, clawID, tenantID)
+	msgs, err = s.appendWorkflowV2ExecOutcomeLogs(r.Context(), msgs, runID, clawID, tenantID)
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, "fetch exec outcomes")
 		return
@@ -443,8 +443,8 @@ func requireTimeCursor(w http.ResponseWriter, raw string) (*time.Time, bool) {
 // planned effects that were never claimed, each attempt start, and each attempt
 // finish with its receipt (exec.run stdout/stderr, exit code, dependency update
 // results) embedded as a structured WorkflowEffectEvent.
-func (s *Server) appendWorkflowV2EffectLogs(msgs []types.HubMessage, runID, clawID, tenantID string) ([]types.HubMessage, error) {
-	rows, err := s.db.Query(`
+func (s *Server) appendWorkflowV2EffectLogs(ctx context.Context, msgs []types.HubMessage, runID, clawID, tenantID string) ([]types.HubMessage, error) {
+	rows, err := s.db.QueryContext(ctx, `
 		SELECT e.id, e.kind, e.definition_path, e.payload_json, e.status, e.attempt_count, e.created_at,
 			a.number, a.status, a.started_at, a.finished_at, a.receipt_json, a.error
 		FROM workflow_v2_effects e
@@ -518,8 +518,8 @@ func (s *Server) appendWorkflowV2EffectLogs(msgs []types.HubMessage, runID, claw
 // exec.last_run.* / exec.dependency_update.* event facts carry the receipt
 // (stdout/stderr/exit code), so each execution's output appears in the
 // timeline even though effect receipts only record the assignment.
-func (s *Server) appendWorkflowV2ExecOutcomeLogs(msgs []types.HubMessage, runID, clawID, tenantID string) ([]types.HubMessage, error) {
-	rows, err := s.db.Query(`
+func (s *Server) appendWorkflowV2ExecOutcomeLogs(ctx context.Context, msgs []types.HubMessage, runID, clawID, tenantID string) ([]types.HubMessage, error) {
+	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, kind, facts_json, received_at FROM workflow_v2_events
 		WHERE run_id=? AND disposition='accepted' AND kind IN (
 			'exec.run.completed','exec.run.failed','dependency.update.completed','dependency.update.failed')
@@ -597,8 +597,8 @@ func execOutcomeEvent(kind, factsJSON string) (types.WorkflowEffectEvent, string
 // appendWorkflowV2AgentTaskLogs merges agent-task lifecycle lines: the task
 // assignment (with the instructions the workflow gave the agent) and the
 // terminal outcome with its reason.
-func (s *Server) appendWorkflowV2AgentTaskLogs(msgs []types.HubMessage, runID, clawID, tenantID string) ([]types.HubMessage, error) {
-	rows, err := s.db.Query(`
+func (s *Server) appendWorkflowV2AgentTaskLogs(ctx context.Context, msgs []types.HubMessage, runID, clawID, tenantID string) ([]types.HubMessage, error) {
+	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, status, instructions, terminal_reason, created_at, finished_at
 		FROM workflow_v2_agent_tasks WHERE run_id=? ORDER BY created_at, id`, runID)
 	if err != nil {
