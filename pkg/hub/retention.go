@@ -461,82 +461,87 @@ func (s *Server) collectCheckpointBlobs(at time.Time, dry bool) (retentionCollec
 }
 
 func (s *Server) collectCheckpointTree(tree string, dry bool, counts *retentionCollection) error {
+	after := ""
 	for {
-		done, err := s.collectCheckpointTreeBatch(tree, dry, counts)
-		if err != nil || done {
+		next, err := s.collectCheckpointTreeBatch(tree, dry, after, counts)
+		if err != nil || next == "" {
 			return err
 		}
+		after = next
 	}
 }
 
-func (s *Server) collectCheckpointTreeBatch(tree string, dry bool, counts *retentionCollection) (bool, error) {
+// collectCheckpointTreeBatch handles up to 500 file rows after the given
+// digest and returns the last one handled, or "" once the tree is finished.
+// Dry mode deletes nothing, so the cursor is what keeps its batches moving.
+func (s *Server) collectCheckpointTreeBatch(tree string, dry bool, after string, counts *retentionCollection) (string, error) {
 	// openDB uses BEGIN IMMEDIATE, so unlinking inside the transaction keeps a
 	// concurrent plan from publishing a reference to a blob mid-removal. A
 	// rollback after an unlink is harmless: the tree is dead, the rows come
 	// back, and the next cycle retries the same batch (ENOENT is skipped).
 	tx, err := s.db.Begin()
 	if err != nil {
-		return true, err
+		return "", err
 	}
 	defer tx.Rollback()
 	var live bool
 	if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM claw_checkpoints WHERE root_tree_sha256=? AND status IN `+retentionLive+`)`, tree).Scan(&live); err != nil {
-		return true, err
+		return "", err
 	}
 	if live {
-		return true, nil
+		return "", nil
 	}
 	// Blobs are content-addressed across roles: a file digest may also be a
 	// live tree or message blob, so every role is checked before unlinking.
-	query := `SELECT file_sha256 FROM checkpoint_tree_files f WHERE tree_sha256=? AND NOT EXISTS
+	files, err := retentionStrings(tx, `SELECT file_sha256 FROM checkpoint_tree_files f WHERE tree_sha256=? AND file_sha256>? AND NOT EXISTS
   (SELECT 1 FROM checkpoint_tree_files other WHERE other.file_sha256=f.file_sha256 AND other.tree_sha256!=?)
-  AND NOT EXISTS (SELECT 1 FROM claw_checkpoints c WHERE (c.root_tree_sha256=f.file_sha256 OR c.message_tree_sha256=f.file_sha256) AND c.status IN ` + retentionLive + `)`
-	if !dry {
-		query += ` LIMIT 500`
-	}
-	files, err := retentionStrings(tx, query, tree, tree)
+  AND NOT EXISTS (SELECT 1 FROM claw_checkpoints c WHERE (c.root_tree_sha256=f.file_sha256 OR c.message_tree_sha256=f.file_sha256) AND c.status IN `+retentionLive+`)
+  ORDER BY file_sha256 LIMIT 500`, tree, after, tree)
 	if err != nil {
-		return true, err
+		return "", err
 	}
 	for _, sha := range files {
 		if !dry {
 			if _, err := tx.Exec(`DELETE FROM checkpoint_tree_files WHERE tree_sha256=? AND file_sha256=?`, tree, sha); err != nil {
-				return true, err
+				return "", err
 			}
 		}
 		if err := retentionUnlinkBlob(sha, dry, counts); err != nil {
-			return true, err
+			return "", err
 		}
 	}
-	if len(files) > 0 && !dry {
-		return false, tx.Commit()
+	if len(files) > 0 {
+		if !dry {
+			return files[len(files)-1], tx.Commit()
+		}
+		return files[len(files)-1], nil
 	}
 	if !dry {
 		if _, err := tx.Exec(`DELETE FROM checkpoint_tree_files WHERE tree_sha256=?`, tree); err != nil {
-			return true, err
+			return "", err
 		}
 	}
 	referenced, err := retentionReferenced(tx, tree)
 	if err != nil {
-		return true, err
+		return "", err
 	}
 	if !referenced {
 		if err := retentionUnlinkBlob(tree, dry, counts); err != nil {
-			return true, err
+			return "", err
 		}
 	}
 	if dry {
 		counts.trees++
-		return true, nil
+		return "", nil
 	}
 	if _, err := tx.Exec(`DELETE FROM checkpoint_trees WHERE sha256=?`, tree); err != nil {
-		return true, err
+		return "", err
 	}
 	if err := tx.Commit(); err != nil {
-		return true, err
+		return "", err
 	}
 	counts.trees++
-	return true, nil
+	return "", nil
 }
 
 // retentionReferenced reports whether any tree expansion or live checkpoint

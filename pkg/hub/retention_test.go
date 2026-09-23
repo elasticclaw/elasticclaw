@@ -348,10 +348,21 @@ func TestRetentionCollectorBatchesAndTemporaryFiles(t *testing.T) {
 	recent := checkpointBlobPath(tree) + ".tmp-new"
 	retentionFile(t, old, "old", at.Add(-25*time.Hour))
 	retentionFile(t, recent, "new", at)
+	var dry retentionCollection
+	next, err := s.collectCheckpointTreeBatch(tree, true, "", &dry)
+	if err != nil || next == "" || dry.blobs != 500 {
+		t.Fatalf("dry batch next=%q blobs=%d err=%v", next, dry.blobs, err)
+	}
+	if err := s.collectCheckpointTree(tree, true, &dry); err != nil || dry.trees != 1 || dry.blobs != 502+500 {
+		t.Fatalf("dry tree=%+v err=%v", dry, err)
+	}
+	if n := retentionCount(t, s, `SELECT COUNT(*) FROM checkpoint_tree_files`); n != 501 {
+		t.Fatalf("rows after dry run=%d", n)
+	}
 	var batch retentionCollection
-	done, err := s.collectCheckpointTreeBatch(tree, false, &batch)
-	if err != nil || done || batch.blobs != 500 {
-		t.Fatalf("first batch done=%t blobs=%d err=%v", done, batch.blobs, err)
+	next, err = s.collectCheckpointTreeBatch(tree, false, "", &batch)
+	if err != nil || next == "" || batch.blobs != 500 {
+		t.Fatalf("first batch next=%q blobs=%d err=%v", next, batch.blobs, err)
 	}
 	if n := retentionCount(t, s, `SELECT COUNT(*) FROM checkpoint_tree_files`); n != 1 {
 		t.Fatalf("rows after first batch=%d", n)
@@ -619,8 +630,10 @@ func TestRetentionMigration(t *testing.T) {
 	if err = db.QueryRow(`SELECT sql FROM sqlite_master WHERE name='checkpoint_tree_files'`).Scan(&schema); err != nil || !strings.Contains(strings.ToUpper(schema), "WITHOUT ROWID") {
 		t.Fatalf("schema=%s,%v", schema, err)
 	}
-	if err = db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_checkpoint_tree_files_file'`).Scan(&n); err != nil || n != 1 {
-		t.Fatalf("file index=%d,%v", n, err)
+	for _, name := range []string{"idx_checkpoint_tree_files_file", "idx_claw_checkpoints_root_tree", "idx_claw_checkpoints_message_tree"} {
+		if err = db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name=?`, name).Scan(&n); err != nil || n != 1 {
+			t.Fatalf("%s=%d,%v", name, n, err)
+		}
 	}
 }
 
