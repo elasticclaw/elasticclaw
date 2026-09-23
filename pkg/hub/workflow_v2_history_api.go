@@ -335,11 +335,22 @@ func (s *Server) queryWorkflowRunLogs(w http.ResponseWriter, r *http.Request, ru
 	if !ok {
 		return
 	}
+	cursor := logCursor{from: fromParsed, to: toParsed, before: beforeParsed}
 
 	query := `SELECT id, claw_id, tenant_id, role, content, COALESCE(format,''), COALESCE(user_login,''), created_at
 		FROM messages
 		WHERE claw_id = ? AND tenant_id = ? AND role = 'activity'`
 	args := []interface{}{clawID, tenantFromCtx(r)}
+	if window != nil {
+		// A retried attempt may reuse the same claw, so the activity stream is
+		// scoped to the attempt's lifetime as well, not just the claw.
+		query += ` AND created_at >= ?`
+		args = append(args, time.UnixMilli(window.start).UTC())
+		if window.end > 0 {
+			query += ` AND created_at <= ?`
+			args = append(args, time.UnixMilli(window.end).UTC())
+		}
+	}
 	if fromParsed != nil {
 		query += ` AND created_at > ?`
 		args = append(args, *fromParsed)
@@ -392,7 +403,7 @@ func (s *Server) queryWorkflowRunLogs(w http.ResponseWriter, r *http.Request, ru
 			jsonError(w, http.StatusInternalServerError, "fetch state transitions")
 			return
 		}
-		if window != nil && !window.contains(createdAtMs) {
+		if !lifecycleVisible(window, cursor, time.UnixMilli(createdAtMs).UTC()) {
 			continue
 		}
 		msgs = append(msgs, types.HubMessage{
@@ -412,19 +423,21 @@ func (s *Server) queryWorkflowRunLogs(w http.ResponseWriter, r *http.Request, ru
 
 	// Merge effect and agent-task lifecycle lines (including exec.run
 	// stdout/stderr receipts) so the log timeline explains what the workflow
-	// did, not just which states it passed through.
+	// did, not just which states it passed through. Lifecycle lines honor the
+	// same cursor predicates as the activity rows so the merged page is a
+	// stable slice of one timeline.
 	tenantID := tenantFromCtx(r)
-	msgs, err = s.appendWorkflowV2EffectLogs(r.Context(), msgs, runID, clawID, tenantID, window)
+	msgs, err = s.appendWorkflowV2EffectLogs(r.Context(), msgs, runID, clawID, tenantID, window, cursor)
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, "fetch effect lifecycle")
 		return
 	}
-	msgs, err = s.appendWorkflowV2AgentTaskLogs(r.Context(), msgs, runID, clawID, tenantID, attemptID)
+	msgs, err = s.appendWorkflowV2AgentTaskLogs(r.Context(), msgs, runID, clawID, tenantID, attemptID, cursor)
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, "fetch agent task lifecycle")
 		return
 	}
-	msgs, err = s.appendWorkflowV2ExecOutcomeLogs(r.Context(), msgs, runID, clawID, tenantID, window)
+	msgs, err = s.appendWorkflowV2ExecOutcomeLogs(r.Context(), msgs, runID, clawID, tenantID, window, cursor)
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, "fetch exec outcomes")
 		return
@@ -474,6 +487,38 @@ func (w attemptWindow) contains(ts int64) bool {
 	return w.end == 0 || ts <= w.end
 }
 
+// logCursor mirrors the activity query's from/to/before predicates so merged
+// lifecycle records paginate on the same timeline as activity rows instead of
+// repeating on every page. The comparisons match the SQL semantics exactly:
+// from is exclusive-lower, to and before are exclusive-upper.
+type logCursor struct {
+	from   *time.Time
+	to     *time.Time
+	before *time.Time
+}
+
+func (c logCursor) excludes(ts time.Time) bool {
+	if c.from != nil && !ts.After(*c.from) {
+		return true
+	}
+	if c.to != nil && !ts.Before(*c.to) {
+		return true
+	}
+	if c.before != nil && !ts.Before(*c.before) {
+		return true
+	}
+	return false
+}
+
+// lifecycleVisible reports whether a merged lifecycle line at ts falls inside
+// the attempt window and the pagination cursor.
+func lifecycleVisible(window *attemptWindow, cursor logCursor, ts time.Time) bool {
+	if window != nil && !window.contains(ts.UnixMilli()) {
+		return false
+	}
+	return !cursor.excludes(ts)
+}
+
 // lookupV2AttemptWindow returns the [started_at, finished_at] lifetime of a
 // v2 run attempt. finished_at is zero while the attempt is still active.
 func (s *Server) lookupV2AttemptWindow(ctx context.Context, runID, attemptID string) (attemptWindow, error) {
@@ -490,9 +535,10 @@ func (s *Server) lookupV2AttemptWindow(ctx context.Context, runID, attemptID str
 // planned effects that were never claimed, each attempt start, and each attempt
 // finish with its receipt (exec.run stdout/stderr, exit code, dependency update
 // results) embedded as a structured WorkflowEffectEvent. When window is
-// non-nil only lifecycle points inside that run-attempt's session are merged.
+// non-nil only lifecycle points inside that run-attempt's session are merged;
+// lines outside the pagination cursor are skipped.
 func (s *Server) appendWorkflowV2EffectLogs(ctx context.Context, msgs []types.HubMessage,
-	runID, clawID, tenantID string, window *attemptWindow) ([]types.HubMessage, error) {
+	runID, clawID, tenantID string, window *attemptWindow, cursor logCursor) ([]types.HubMessage, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT e.id, e.kind, e.definition_path, e.payload_json, e.status, e.attempt_count, e.created_at,
 			a.number, a.status, a.started_at, a.finished_at, a.receipt_json, a.error
@@ -516,7 +562,7 @@ func (s *Server) appendWorkflowV2EffectLogs(ctx context.Context, msgs []types.Hu
 		}
 		command := effectCommand(payloadJSON)
 		if !attemptNumber.Valid {
-			if attemptCount == 0 && (window == nil || window.contains(effectCreated)) {
+			if attemptCount == 0 && lifecycleVisible(window, cursor, time.UnixMilli(effectCreated).UTC()) {
 				msgs, err = appendWorkflowEffectLogMessage(msgs, "effect-"+effectID, clawID, tenantID,
 					fmt.Sprintf("%s effect planned (waiting for worker)", kind),
 					types.WorkflowEffectEvent{Kind: kind, Phase: "planned", Status: effectStatus, DefinitionPath: definitionPath, Command: command},
@@ -528,7 +574,7 @@ func (s *Server) appendWorkflowV2EffectLogs(ctx context.Context, msgs []types.Hu
 			continue
 		}
 		attempt := int(attemptNumber.Int64)
-		if window == nil || window.contains(attemptStarted.Int64) {
+		if lifecycleVisible(window, cursor, time.UnixMilli(attemptStarted.Int64).UTC()) {
 			msgs, err = appendWorkflowEffectLogMessage(msgs, fmt.Sprintf("effect-%s-attempt-%d-start", effectID, attempt), clawID, tenantID,
 				fmt.Sprintf("%s effect started (attempt %d)", kind, attempt),
 				types.WorkflowEffectEvent{Kind: kind, Phase: "started", Status: "running", Attempt: attempt,
@@ -541,7 +587,7 @@ func (s *Server) appendWorkflowV2EffectLogs(ctx context.Context, msgs []types.Hu
 		if attemptFinished.Int64 <= 0 {
 			continue
 		}
-		if window != nil && !window.contains(attemptFinished.Int64) {
+		if !lifecycleVisible(window, cursor, time.UnixMilli(attemptFinished.Int64).UTC()) {
 			continue
 		}
 		event := types.WorkflowEffectEvent{Kind: kind, Phase: "finished", Status: attemptStatus.String, Attempt: attempt,
@@ -573,9 +619,9 @@ func (s *Server) appendWorkflowV2EffectLogs(ctx context.Context, msgs []types.Hu
 // (stdout/stderr/exit code), so each execution's output appears in the
 // timeline even though effect receipts only record the assignment. When
 // window is non-nil only outcomes received inside that run-attempt's session
-// are merged.
+// are merged; lines outside the pagination cursor are skipped.
 func (s *Server) appendWorkflowV2ExecOutcomeLogs(ctx context.Context, msgs []types.HubMessage,
-	runID, clawID, tenantID string, window *attemptWindow) ([]types.HubMessage, error) {
+	runID, clawID, tenantID string, window *attemptWindow, cursor logCursor) ([]types.HubMessage, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, kind, facts_json, received_at FROM workflow_v2_events
 		WHERE run_id=? AND disposition='accepted' AND kind IN (
@@ -591,7 +637,7 @@ func (s *Server) appendWorkflowV2ExecOutcomeLogs(ctx context.Context, msgs []typ
 		if err := rows.Scan(&eventID, &kind, &factsJSON, &received); err != nil {
 			return nil, err
 		}
-		if window != nil && !window.contains(received) {
+		if !lifecycleVisible(window, cursor, time.UnixMilli(received).UTC()) {
 			continue
 		}
 		event, content, ok := execOutcomeEvent(kind, factsJSON)
@@ -657,9 +703,10 @@ func execOutcomeEvent(kind, factsJSON string) (types.WorkflowEffectEvent, string
 // appendWorkflowV2AgentTaskLogs merges agent-task lifecycle lines: the task
 // assignment (with the instructions the workflow gave the agent) and the
 // terminal outcome with its reason. Agent tasks carry an attempt_id, so when
-// attemptID is non-empty the lines are scoped to that exact attempt.
+// attemptID is non-empty the lines are scoped to that exact attempt; lines
+// outside the pagination cursor are skipped.
 func (s *Server) appendWorkflowV2AgentTaskLogs(ctx context.Context, msgs []types.HubMessage,
-	runID, clawID, tenantID, attemptID string) ([]types.HubMessage, error) {
+	runID, clawID, tenantID, attemptID string, cursor logCursor) ([]types.HubMessage, error) {
 	query := `
 		SELECT id, status, instructions, terminal_reason, created_at, finished_at
 		FROM workflow_v2_agent_tasks WHERE run_id=?`
@@ -680,14 +727,19 @@ func (s *Server) appendWorkflowV2AgentTaskLogs(ctx context.Context, msgs []types
 		if err := rows.Scan(&taskID, &status, &instructions, &terminalReason, &created, &finished); err != nil {
 			return nil, err
 		}
-		msgs, err = appendWorkflowEffectLogMessage(msgs, "agent-task-"+taskID+"-assigned", clawID, tenantID,
-			"agent task assigned",
-			types.WorkflowEffectEvent{Kind: "agent.task", Phase: "assigned", Status: status, Instructions: instructions},
-			time.UnixMilli(created))
-		if err != nil {
-			return nil, err
+		if !cursor.excludes(time.UnixMilli(created).UTC()) {
+			msgs, err = appendWorkflowEffectLogMessage(msgs, "agent-task-"+taskID+"-assigned", clawID, tenantID,
+				"agent task assigned",
+				types.WorkflowEffectEvent{Kind: "agent.task", Phase: "assigned", Status: status, Instructions: instructions},
+				time.UnixMilli(created))
+			if err != nil {
+				return nil, err
+			}
 		}
 		if finished <= 0 {
+			continue
+		}
+		if cursor.excludes(time.UnixMilli(finished).UTC()) {
 			continue
 		}
 		content := "agent task " + status
