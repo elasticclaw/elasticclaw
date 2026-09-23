@@ -525,3 +525,61 @@ export async function fetchTaskRunOutputs(runId: string): Promise<{ outputs: Tas
 export async function fetchTaskRunFilterOptions(options?: AnalyticsRequestOptions): Promise<TaskRunFilterOptions> {
   return apiFetch<TaskRunFilterOptions>("/api/analytics/filter-options", options)
 }
+
+export interface CurrentUser {
+  auth_method: "github" | "password"
+  login?: string
+  name?: string
+  avatar_url?: string
+  is_admin: boolean
+  is_beta_tester: boolean
+  /** Keys of the feature flags enabled for this user. */
+  features: string[]
+}
+
+export async function fetchCurrentUser(): Promise<CurrentUser> {
+  return apiFetch<CurrentUser>("/api/auth/me")
+}
+
+export type FeatureStage = "off" | "beta" | "on"
+
+export interface FeatureFlag {
+  key: string
+  name: string
+  description: string
+  stage: FeatureStage
+  default_stage: FeatureStage
+}
+
+export interface BetaTester {
+  login: string
+  added_at: number
+  added_by: string
+}
+
+export interface FeatureFlagsResponse {
+  flags: FeatureFlag[]
+  beta_testers: BetaTester[]
+}
+
+export async function getFeatureFlags(): Promise<FeatureFlagsResponse> {
+  return apiFetch<FeatureFlagsResponse>("/api/settings/feature-flags")
+}
+
+export async function updateFeatureFlagStage(key: string, stage: FeatureStage): Promise<FeatureFlag> {
+  return apiFetch<FeatureFlag>(`/api/settings/feature-flags/${encodeURIComponent(key)}`, {
+    method: "PUT",
+    body: JSON.stringify({ stage }),
+  })
+}
+
+export async function addBetaTester(login: string): Promise<BetaTester> {
+  return apiFetch<BetaTester>("/api/settings/beta-testers", {
+    method: "POST",
+    body: JSON.stringify({ login }),
+  })
+}
+
+export async function removeBetaTester(login: string): Promise<void> {
+  return apiFetch<void>(`/api/settings/beta-testers/${encodeURIComponent(login)}`, { method: "DELETE" })
+}
