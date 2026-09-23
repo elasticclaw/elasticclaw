@@ -1,11 +1,12 @@
 "use client"
 
 import { useEffect, useMemo, useState, type ReactNode } from "react"
-import { AlertCircle, Loader2 } from "lucide-react"
+import { AlertCircle, ChevronDown, Loader2 } from "lucide-react"
 import { ApiError, fetchActivityMessages } from "@/lib/api"
-import type { AgentActivity, ApiMessage } from "@/lib/types"
+import type { AgentActivity, ApiMessage, WorkflowEffectEvent } from "@/lib/types"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
 import { cn } from "@/lib/utils"
 
 const activityPageSize = 100
@@ -97,6 +98,8 @@ export function ClawActivityLog({ clawId, fetcher }: { clawId?: string; fetcher?
 }
 
 function ActivityLine({ message }: { message: ApiMessage }) {
+  const effectEvent = parseWorkflowEffectEvent(message)
+  if (effectEvent) return <WorkflowEffectLine message={message} event={effectEvent} />
   const activity = parseActivity(message)
   const isState = message.role === "state"
   const label = activity?.tool || activity?.kind || (isState ? "state" : "activity")
@@ -139,10 +142,68 @@ function isSafeHttpUrl(value: string) {
   }
 }
 
+// WorkflowEffectLine renders a workflow v2 effect or agent-task lifecycle log
+// line: status, the command that ran, and collapsible stdout/stderr (or the
+// instructions given to the agent) so run logs explain what the workflow did.
+function WorkflowEffectLine({ message, event }: { message: ApiMessage; event: WorkflowEffectEvent }) {
+  const failed = event.succeeded === false ||
+    ["permanent_failed", "retryable_failed", "failed", "timed_out", "unknown"].includes(event.status ?? "")
+  return (
+    <div className="grid gap-2 px-3 py-3 text-sm sm:grid-cols-[8rem_10rem_minmax(0,1fr)]">
+      <time className="text-xs text-muted-foreground">{formatTimestamp(message.created_at)}</time>
+      <div className="flex min-w-0 items-start gap-2">
+        <span className="truncate font-medium text-primary">{event.kind}</span>
+        <Badge variant="outline" className="shrink-0 text-[10px]">effect</Badge>
+      </div>
+      <div className="min-w-0 space-y-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <Badge variant={failed ? "destructive" : "secondary"}>{event.status || event.phase}</Badge>
+          {event.attempt ? <span className="text-xs text-muted-foreground">attempt {event.attempt}</span> : null}
+          <span className="text-xs text-muted-foreground">{message.content}</span>
+        </div>
+        {event.command && <div className="break-all rounded bg-muted px-2 py-1 font-mono text-xs text-foreground">{event.command}</div>}
+        {event.exit_code !== undefined && <div className="text-xs text-muted-foreground">exit code {event.exit_code}</div>}
+        {event.error && <div className="break-words text-destructive">{event.error}</div>}
+        {event.terminal_reason && <div className="break-words text-destructive">{event.terminal_reason}</div>}
+        <OutputBlock label="stdout" value={event.stdout} />
+        <OutputBlock label="stderr" value={event.stderr} />
+        <OutputBlock label="instructions" value={event.instructions} />
+      </div>
+    </div>
+  )
+}
+
+function OutputBlock({ label, value }: { label: string; value?: string }) {
+  if (!value) return null
+  const lineCount = value.trim().length === 0 ? 0 : value.trim().split("\n").length
+  return (
+    <Collapsible>
+      <CollapsibleTrigger asChild>
+        <Button variant="ghost" size="sm" className="h-7 gap-1 px-2 text-xs text-muted-foreground">
+          <ChevronDown className="size-3" />
+          {label} ({lineCount} line{lineCount === 1 ? "" : "s"})
+        </Button>
+      </CollapsibleTrigger>
+      <CollapsibleContent>
+        <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words rounded bg-muted p-2 font-mono text-xs">{value}</pre>
+      </CollapsibleContent>
+    </Collapsible>
+  )
+}
+
 function parseActivity(message: ApiMessage): AgentActivity | null {
   if (!message.format?.startsWith("activity:")) return null
   try {
     return JSON.parse(message.format.slice("activity:".length)) as AgentActivity
+  } catch {
+    return null
+  }
+}
+
+function parseWorkflowEffectEvent(message: ApiMessage): WorkflowEffectEvent | null {
+  if (!message.format?.startsWith("workflow:effect:")) return null
+  try {
+    return JSON.parse(message.format.slice("workflow:effect:".length)) as WorkflowEffectEvent
   } catch {
     return null
   }

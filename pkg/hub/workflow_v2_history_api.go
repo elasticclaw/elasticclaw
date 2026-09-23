@@ -3,6 +3,7 @@ package hub
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -391,6 +392,26 @@ func (s *Server) queryWorkflowRunLogs(w http.ResponseWriter, r *http.Request, ru
 		return
 	}
 
+	// Merge effect and agent-task lifecycle lines (including exec.run
+	// stdout/stderr receipts) so the log timeline explains what the workflow
+	// did, not just which states it passed through.
+	tenantID := tenantFromCtx(r)
+	msgs, err = s.appendWorkflowV2EffectLogs(msgs, runID, clawID, tenantID)
+	if err != nil {
+		jsonError(w, http.StatusInternalServerError, "fetch effect lifecycle")
+		return
+	}
+	msgs, err = s.appendWorkflowV2AgentTaskLogs(msgs, runID, clawID, tenantID)
+	if err != nil {
+		jsonError(w, http.StatusInternalServerError, "fetch agent task lifecycle")
+		return
+	}
+	msgs, err = s.appendWorkflowV2ExecOutcomeLogs(msgs, runID, clawID, tenantID)
+	if err != nil {
+		jsonError(w, http.StatusInternalServerError, "fetch exec outcomes")
+		return
+	}
+
 	if order == "desc" {
 		sort.Slice(msgs, func(i, j int) bool { return msgs[i].CreatedAt.After(msgs[j].CreatedAt) })
 	} else {
@@ -416,4 +437,249 @@ func requireTimeCursor(w http.ResponseWriter, raw string) (*time.Time, bool) {
 		return nil, false
 	}
 	return parsed, true
+}
+
+// appendWorkflowV2EffectLogs merges one log line per effect lifecycle point:
+// planned effects that were never claimed, each attempt start, and each attempt
+// finish with its receipt (exec.run stdout/stderr, exit code, dependency update
+// results) embedded as a structured WorkflowEffectEvent.
+func (s *Server) appendWorkflowV2EffectLogs(msgs []types.HubMessage, runID, clawID, tenantID string) ([]types.HubMessage, error) {
+	rows, err := s.db.Query(`
+		SELECT e.id, e.kind, e.definition_path, e.payload_json, e.status, e.attempt_count, e.created_at,
+			a.number, a.status, a.started_at, a.finished_at, a.receipt_json, a.error
+		FROM workflow_v2_effects e
+		LEFT JOIN workflow_v2_effect_attempts a ON a.effect_id=e.id
+		WHERE e.run_id=? ORDER BY e.created_at, e.id, a.number`, runID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var effectID, kind, definitionPath, payloadJSON, effectStatus string
+		var attemptCount, effectCreated int64
+		var attemptNumber sql.NullInt64
+		var attemptStatus sql.NullString
+		var attemptStarted, attemptFinished sql.NullInt64
+		var receiptJSON, attemptError sql.NullString
+		if err := rows.Scan(&effectID, &kind, &definitionPath, &payloadJSON, &effectStatus, &attemptCount, &effectCreated,
+			&attemptNumber, &attemptStatus, &attemptStarted, &attemptFinished, &receiptJSON, &attemptError); err != nil {
+			return nil, err
+		}
+		command := effectCommand(payloadJSON)
+		if !attemptNumber.Valid {
+			if attemptCount == 0 {
+				msgs, err = appendWorkflowEffectLogMessage(msgs, "effect-"+effectID, clawID, tenantID,
+					fmt.Sprintf("%s effect planned (waiting for worker)", kind),
+					types.WorkflowEffectEvent{Kind: kind, Phase: "planned", Status: effectStatus, DefinitionPath: definitionPath, Command: command},
+					time.UnixMilli(effectCreated))
+				if err != nil {
+					return nil, err
+				}
+			}
+			continue
+		}
+		attempt := int(attemptNumber.Int64)
+		msgs, err = appendWorkflowEffectLogMessage(msgs, fmt.Sprintf("effect-%s-attempt-%d-start", effectID, attempt), clawID, tenantID,
+			fmt.Sprintf("%s effect started (attempt %d)", kind, attempt),
+			types.WorkflowEffectEvent{Kind: kind, Phase: "started", Status: "running", Attempt: attempt,
+				DefinitionPath: definitionPath, Command: command},
+			time.UnixMilli(attemptStarted.Int64))
+		if err != nil {
+			return nil, err
+		}
+		if attemptFinished.Int64 <= 0 {
+			continue
+		}
+		event := types.WorkflowEffectEvent{Kind: kind, Phase: "finished", Status: attemptStatus.String, Attempt: attempt,
+			DefinitionPath: definitionPath, Command: command}
+		content := fmt.Sprintf("%s effect %s (attempt %d)", kind, attemptStatus.String, attempt)
+		receiptError := applyReceiptToEffectEvent(receiptJSON.String, &event)
+		if event.Succeeded != nil && *event.Succeeded {
+			content = fmt.Sprintf("%s effect succeeded (attempt %d)", kind, attempt)
+			if event.ExitCode != nil {
+				content = fmt.Sprintf("%s effect succeeded (attempt %d, exit code %d)", kind, attempt, *event.ExitCode)
+			}
+		} else if receiptError != "" {
+			content += ": " + receiptError
+		} else if attemptError.String != "" {
+			content += ": " + attemptError.String
+		}
+		msgs, err = appendWorkflowEffectLogMessage(msgs, fmt.Sprintf("effect-%s-attempt-%d-finish", effectID, attempt), clawID, tenantID,
+			content, event, time.UnixMilli(attemptFinished.Int64))
+		if err != nil {
+			return nil, err
+		}
+	}
+	return msgs, rows.Err()
+}
+
+// appendWorkflowV2ExecOutcomeLogs merges command-outcome lines from accepted
+// exec.run/dependency.update completion events. The projected
+// exec.last_run.* / exec.dependency_update.* event facts carry the receipt
+// (stdout/stderr/exit code), so each execution's output appears in the
+// timeline even though effect receipts only record the assignment.
+func (s *Server) appendWorkflowV2ExecOutcomeLogs(msgs []types.HubMessage, runID, clawID, tenantID string) ([]types.HubMessage, error) {
+	rows, err := s.db.Query(`
+		SELECT id, kind, facts_json, received_at FROM workflow_v2_events
+		WHERE run_id=? AND disposition='accepted' AND kind IN (
+			'exec.run.completed','exec.run.failed','dependency.update.completed','dependency.update.failed')
+		ORDER BY received_at, id`, runID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var eventID, kind, factsJSON string
+		var received int64
+		if err := rows.Scan(&eventID, &kind, &factsJSON, &received); err != nil {
+			return nil, err
+		}
+		event, content, ok := execOutcomeEvent(kind, factsJSON)
+		if !ok {
+			continue
+		}
+		msgs, err = appendWorkflowEffectLogMessage(msgs, "event-"+eventID, clawID, tenantID, content, event, time.UnixMilli(received))
+		if err != nil {
+			return nil, err
+		}
+	}
+	return msgs, rows.Err()
+}
+
+// execOutcomeEvent builds the structured log event for a command completion
+// event from its projected exec.* facts.
+func execOutcomeEvent(kind, factsJSON string) (types.WorkflowEffectEvent, string, bool) {
+	var facts map[string]interface{}
+	if err := json.Unmarshal([]byte(factsJSON), &facts); err != nil {
+		return types.WorkflowEffectEvent{}, "", false
+	}
+	effectKind := "exec.run"
+	factPrefix := "exec.last_run."
+	if strings.HasPrefix(kind, "dependency.update.") {
+		effectKind = "dependency.update"
+		factPrefix = "exec.dependency_update."
+	}
+	factString := func(key string) string {
+		value, _ := facts[factPrefix+key].(string)
+		return value
+	}
+	event := types.WorkflowEffectEvent{Kind: effectKind, Phase: "finished"}
+	if succeeded, ok := facts[factPrefix+"succeeded"].(bool); ok {
+		event.Succeeded = &succeeded
+	}
+	exitCode := -1
+	hasExitCode := false
+	if value, ok := facts[factPrefix+"exit_code"].(float64); ok {
+		exitCode, hasExitCode = int(value), true
+		event.ExitCode = &exitCode
+	}
+	event.Stdout = factString("stdout")
+	event.Stderr = factString("stderr")
+	event.Error = factString("error")
+
+	failed := event.Succeeded == nil || !*event.Succeeded
+	status := "succeeded"
+	content := effectKind + " completed"
+	if failed {
+		status = "failed"
+		content = effectKind + " failed"
+	}
+	if hasExitCode {
+		content = fmt.Sprintf("%s (exit code %d)", content, exitCode)
+	}
+	if failed && event.Error != "" {
+		content += ": " + event.Error
+	}
+	event.Status = status
+	return event, content, true
+}
+
+// appendWorkflowV2AgentTaskLogs merges agent-task lifecycle lines: the task
+// assignment (with the instructions the workflow gave the agent) and the
+// terminal outcome with its reason.
+func (s *Server) appendWorkflowV2AgentTaskLogs(msgs []types.HubMessage, runID, clawID, tenantID string) ([]types.HubMessage, error) {
+	rows, err := s.db.Query(`
+		SELECT id, status, instructions, terminal_reason, created_at, finished_at
+		FROM workflow_v2_agent_tasks WHERE run_id=? ORDER BY created_at, id`, runID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var taskID, status, instructions, terminalReason string
+		var created, finished int64
+		if err := rows.Scan(&taskID, &status, &instructions, &terminalReason, &created, &finished); err != nil {
+			return nil, err
+		}
+		msgs, err = appendWorkflowEffectLogMessage(msgs, "agent-task-"+taskID+"-assigned", clawID, tenantID,
+			"agent task assigned",
+			types.WorkflowEffectEvent{Kind: "agent.task", Phase: "assigned", Status: status, Instructions: instructions},
+			time.UnixMilli(created))
+		if err != nil {
+			return nil, err
+		}
+		if finished <= 0 {
+			continue
+		}
+		content := "agent task " + status
+		if terminalReason != "" {
+			content += ": " + terminalReason
+		}
+		msgs, err = appendWorkflowEffectLogMessage(msgs, "agent-task-"+taskID+"-finish", clawID, tenantID,
+			content,
+			types.WorkflowEffectEvent{Kind: "agent.task", Phase: "finished", Status: status, TerminalReason: terminalReason},
+			time.UnixMilli(finished))
+		if err != nil {
+			return nil, err
+		}
+	}
+	return msgs, rows.Err()
+}
+
+func appendWorkflowEffectLogMessage(msgs []types.HubMessage, id, clawID, tenantID, content string,
+	event types.WorkflowEffectEvent, at time.Time) ([]types.HubMessage, error) {
+	payload, err := json.Marshal(event)
+	if err != nil {
+		return nil, err
+	}
+	return append(msgs, types.HubMessage{
+		ID: id, ClawID: clawID, TenantID: tenantID, Role: "effect",
+		Content: content, Format: types.WorkflowEffectFormatPrefix + string(payload), CreatedAt: at.UTC(),
+	}), nil
+}
+
+// effectCommand extracts the shell command from an exec.run effect payload so
+// log consumers can see exactly what ran.
+func effectCommand(payloadJSON string) string {
+	var payload map[string]interface{}
+	if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil {
+		return ""
+	}
+	command, _ := payload["command"].(string)
+	return command
+}
+
+// applyReceiptToEffectEvent copies known receipt fields (exec.run and
+// dependency.update receipts) onto the structured log event and returns the
+// receipt's human-readable error, if any.
+func applyReceiptToEffectEvent(receiptJSON string, event *types.WorkflowEffectEvent) string {
+	var receipt map[string]interface{}
+	if err := json.Unmarshal([]byte(receiptJSON), &receipt); err != nil {
+		return ""
+	}
+	if value, ok := receipt["stdout"].(string); ok {
+		event.Stdout = value
+	}
+	if value, ok := receipt["stderr"].(string); ok {
+		event.Stderr = value
+	}
+	if value, ok := receipt["succeeded"].(bool); ok {
+		event.Succeeded = &value
+	}
+	if value, ok := receipt["exit_code"].(float64); ok {
+		exitCode := int(value)
+		event.ExitCode = &exitCode
+	}
+	errorMsg, _ := receipt["error"].(string)
+	return errorMsg
 }
