@@ -250,6 +250,29 @@ func TestMessageBlobIsReferencedBeforeReuse(t *testing.T) {
 	}
 }
 
+func TestMarkReadyRequiresPublishedMessageDigest(t *testing.T) {
+	s := retentionServer(t)
+	insertTestCheckpoint(t, s, "cp", "manual")
+	sha, _, _, err := s.writeMessageCheckpointBlob("cp", "claw", "tenant")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A concurrent complete published its own digest after ours.
+	retentionExec(t, s, `UPDATE claw_checkpoints SET message_tree_sha256=? WHERE id='cp'`, strings.Repeat("f", 64))
+	if err := s.markCheckpointReady("cp", sha, `completed_at=?`, now()); err == nil || !strings.Contains(err.Error(), "no longer creating") {
+		t.Fatalf("stale digest went ready: %v", err)
+	}
+	if got := checkpointStatus(t, s, "cp"); got != "creating" {
+		t.Fatalf("status=%s", got)
+	}
+	if err := s.markCheckpointReady("cp", strings.Repeat("f", 64), `completed_at=?`, now()); err != nil {
+		t.Fatalf("current digest refused: %v", err)
+	}
+	if got := checkpointStatus(t, s, "cp"); got != "ready" {
+		t.Fatalf("status=%s", got)
+	}
+}
+
 func TestRetentionCompactionPreservesRetryAndRestorePointers(t *testing.T) {
 	s := retentionServer(t)
 	at := time.Now().UTC()
