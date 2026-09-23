@@ -2,6 +2,7 @@
 
 import { useSyncExternalStore } from "react"
 import { fetchCurrentUser, onAuthCleared } from "@/lib/api"
+import { getAuthToken } from "@/lib/auth-storage"
 
 // The enabled feature keys for the signed-in user, loaded once from
 // /api/auth/me and shared by every useFeatureFlag caller on the page.
@@ -13,6 +14,13 @@ let retryTimer: ReturnType<typeof setTimeout> | null = null
 const RETRY_DELAY_MS = 5000
 let generation = 0
 const listeners = new Set<() => void>()
+
+// Automatic reloads (retry, post-refresh, post-sign-in) only make sense with a
+// session: without one /api/auth/me answers 401, which clears the session
+// again and would re-trigger the reload in a tight loop.
+function hasSession() {
+  return getAuthToken() !== null
+}
 
 function load() {
   if (inflight) return
@@ -26,7 +34,7 @@ function load() {
       listeners.forEach((listener) => listener())
     })
     .catch(() => {
-      if (listeners.size > 0 && retryTimer === null) {
+      if (listeners.size > 0 && retryTimer === null && hasSession()) {
         retryTimer = setTimeout(() => {
           retryTimer = null
           if (listeners.size > 0) load()
@@ -37,7 +45,7 @@ function load() {
       inflight = null
       // A refresh landed while this request was in flight, so its answer may
       // predate the change: ask again.
-      if (started !== generation) load()
+      if (started !== generation && hasSession()) load()
     })
 }
 
@@ -53,7 +61,7 @@ onAuthCleared(() => {
   listeners.forEach((listener) => listener())
   // Sign-in sets the new token synchronously after clearing the old one.
   queueMicrotask(() => {
-    if (listeners.size > 0) load()
+    if (listeners.size > 0 && hasSession()) load()
   })
 })
 
