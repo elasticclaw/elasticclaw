@@ -118,6 +118,7 @@ var reservedWorkspaceNames = map[string]bool{
 	"ai-config":           true,
 	"mcp-servers":         true,
 	"notifier":            true,
+	"beta-features":       true,
 	"analytics":           true,
 	"doctor":              true,
 	"troubleshoot":        true,

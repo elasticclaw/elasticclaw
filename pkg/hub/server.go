@@ -1519,6 +1519,7 @@ func settingsStaticSection(section string) bool {
 		"mcp-servers",
 		"analytics",
 		"notifier",
+		"beta-features",
 		"doctor",
 		"troubleshoot":
 		return true
