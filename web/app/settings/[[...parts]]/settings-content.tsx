@@ -4,7 +4,7 @@ import { useParams, usePathname, useRouter } from "next/navigation"
 import React, { useEffect, useState, useCallback, useRef } from "react"
 import { getHubUrl } from "@/lib/hub-url"
 import { getAuthToken } from "@/lib/auth-storage"
-import { Cpu, Key, Github, ChevronLeft, Shield, Zap, Copy, Check, LayoutTemplate, Trash2, Lock, Sparkles, Send, RotateCcw, Eye, EyeOff, ExternalLink, AlertTriangle, X, CheckCircle2, Webhook, Stethoscope, ArrowRight, Wrench, GitBranch, ChevronDown, Bell, Clock } from "lucide-react"
+import { Cpu, Key, Github, ChevronLeft, Shield, Zap, Copy, Check, LayoutTemplate, Trash2, Lock, Sparkles, Send, RotateCcw, Eye, EyeOff, ExternalLink, AlertTriangle, X, CheckCircle2, Webhook, Stethoscope, ArrowRight, Wrench, GitBranch, ChevronDown, Bell, Clock, FlaskConical } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Switch } from "@/components/ui/switch"
@@ -16,6 +16,7 @@ import { fetchWorkspaces, updateWorkflowControls, type RepositoryAccess, type Wo
 import { useBranding } from "@/hooks/use-branding"
 import { WorkflowName } from "@/components/workflow-name"
 import { WorkflowRunsDialog } from "@/components/workflow-runs-dialog"
+import { BetaFeaturesSettings } from "@/components/settings/beta-features-settings"
 import { INFRA_EVENT_TYPES, type InfraEventType, type InfraNotificationsConfig, type InfraRoute } from "@/lib/types"
 
 function isValidSection(s: string): s is Section {
@@ -481,6 +482,7 @@ export default function SettingsSectionPage() {
         { id: "models", label: "Models", icon: Key },
         { id: "authentication", label: "Authentication", icon: Shield },
         { id: "notifier", label: "Notifier", icon: Bell },
+        { id: "beta-features", label: "Beta features", icon: FlaskConical },
         { id: "ai-config", label: "Configure with AI", icon: Sparkles },
       ],
     },
@@ -609,6 +611,9 @@ export default function SettingsSectionPage() {
           )}
           {settings && section === "notifier" && (
             <NotifierSection settings={settings} onSave={saveReportingError} saving={saving} />
+          )}
+          {section === "beta-features" && (
+            <BetaFeaturesSettings />
           )}
           {section === "ai-config" && (
             <AIConfigSection />
