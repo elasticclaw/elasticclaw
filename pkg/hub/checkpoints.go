@@ -393,14 +393,14 @@ func (s *Server) restoreClawFromCheckpoint(ctx context.Context, tenantID, clawID
 	return nil
 }
 
-// beginRestoreProvision reinstalls the restore pointer and flips the claw to
-// provisioning, but only while the checkpoint is still restorable: a
-// concurrent restore can overwrite the claim during the pre-reset wait, so the
+// beginRestoreProvision flips the claw to provisioning, but only while the
+// claim is still ours and the checkpoint is still restorable: a concurrent
+// restore can overwrite the claim during the pre-reset wait, and the
 // checkpoint may have been compacted or expired in between.
 func (s *Server) beginRestoreProvision(tenantID, clawID, checkpointID string) error {
-	result, err := s.db.Exec(`UPDATE claws SET status='provisioning', bootstrap_ok=0, bootstrap_status='Restoring checkpoint', provider_id='', restore_checkpoint_id=?, restored_from_checkpoint_id=? WHERE id=? AND tenant_id=?
+	result, err := s.db.Exec(`UPDATE claws SET status='provisioning', bootstrap_ok=0, bootstrap_status='Restoring checkpoint', provider_id='', restored_from_checkpoint_id=? WHERE id=? AND tenant_id=? AND restore_checkpoint_id=?
   AND EXISTS (SELECT 1 FROM claw_checkpoints WHERE id=? AND status='ready' AND manifest_path!='')`,
-		checkpointID, checkpointID, clawID, tenantID, checkpointID)
+		checkpointID, clawID, tenantID, checkpointID, checkpointID)
 	if err != nil {
 		return err
 	}
@@ -408,10 +408,24 @@ func (s *Server) beginRestoreProvision(tenantID, clawID, checkpointID string) er
 	if err != nil {
 		return err
 	}
-	if n == 0 {
-		return fmt.Errorf("checkpoint is no longer ready")
+	if n > 0 {
+		return nil
 	}
-	return nil
+	// The VM is already terminated on this path, so a claim that is still
+	// ours must surface as a failed claw. A claim owned by another restore is
+	// that restore's to resolve and is left alone.
+	result, err = s.db.Exec(`UPDATE claws SET status='error', bootstrap_status='Restore aborted: checkpoint no longer ready', restore_checkpoint_id='' WHERE id=? AND tenant_id=? AND restore_checkpoint_id=?`,
+		clawID, tenantID, checkpointID)
+	if err != nil {
+		return err
+	}
+	if n, err = result.RowsAffected(); err != nil {
+		return err
+	}
+	if n == 0 {
+		return fmt.Errorf("restore claim lost to a concurrent restore")
+	}
+	return fmt.Errorf("checkpoint is no longer ready")
 }
 
 type storedClawProvision struct {

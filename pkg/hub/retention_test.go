@@ -205,23 +205,41 @@ func TestRestoreRevalidatesCheckpointBeforeReinstallingPointer(t *testing.T) {
 	s := retentionServer(t)
 	at := time.Now().UTC()
 	retentionCheckpoint(t, s, "cp", "claw", "ready", "manual", retentionBlob(t, "[]"), at)
+	retentionExec(t, s, `UPDATE claws SET restore_checkpoint_id='cp' WHERE id='claw'`)
 	if err := s.beginRestoreProvision("tenant", "claw", "cp"); err != nil {
 		t.Fatalf("ready checkpoint refused: %v", err)
 	}
 	if n := retentionCount(t, s, `SELECT COUNT(*) FROM claws WHERE id='claw' AND status='provisioning' AND restore_checkpoint_id='cp' AND restored_from_checkpoint_id='cp'`); n != 1 {
 		t.Fatal("restore pointer not installed")
 	}
-	// The checkpoint expires between the claim and the reinstall.
-	retentionExec(t, s, `UPDATE claws SET status='connected', restore_checkpoint_id='', restored_from_checkpoint_id='' WHERE id='claw'`)
+	// The checkpoint expires between the claim and the reinstall; the VM is
+	// already gone, so the claw must show the failure and drop the claim.
+	retentionExec(t, s, `UPDATE claws SET status='connected', restored_from_checkpoint_id='' WHERE id='claw'`)
 	retentionExec(t, s, `UPDATE claw_checkpoints SET status='compacted', manifest_path='' WHERE id='cp'`)
 	if err := s.beginRestoreProvision("tenant", "claw", "cp"); err == nil || !strings.Contains(err.Error(), "no longer ready") {
 		t.Fatalf("compacted checkpoint accepted: %v", err)
 	}
-	if n := retentionCount(t, s, `SELECT COUNT(*) FROM claws WHERE id='claw' AND status='connected' AND restore_checkpoint_id=''`); n != 1 {
-		t.Fatal("claw changed for a compacted checkpoint")
+	if n := retentionCount(t, s, `SELECT COUNT(*) FROM claws WHERE id='claw' AND status='error' AND bootstrap_status='Restore aborted: checkpoint no longer ready' AND restore_checkpoint_id='' AND restored_from_checkpoint_id=''`); n != 1 {
+		t.Fatal("aborted restore did not fail the claw and clear the claim")
 	}
 	if err := s.restoreClawFromCheckpoint(context.Background(), "tenant", "claw", "cp"); err == nil || !strings.Contains(err.Error(), "not ready") {
 		t.Fatalf("restore of compacted checkpoint: %v", err)
+	}
+}
+
+func TestRestoreAbortsWhenClaimOverwrittenByConcurrentRestore(t *testing.T) {
+	s := retentionServer(t)
+	at := time.Now().UTC()
+	tree := retentionBlob(t, "[]")
+	retentionCheckpoint(t, s, "ours", "claw", "ready", "manual", tree, at)
+	retentionCheckpoint(t, s, "theirs", "claw", "ready", "manual", tree, at)
+	// Another restore claimed the claw during our pre-reset wait.
+	retentionExec(t, s, `UPDATE claws SET restore_checkpoint_id='theirs' WHERE id='claw'`)
+	if err := s.beginRestoreProvision("tenant", "claw", "ours"); err == nil {
+		t.Fatal("stale claim reinstalled over a concurrent restore")
+	}
+	if n := retentionCount(t, s, `SELECT COUNT(*) FROM claws WHERE id='claw' AND status='connected' AND restore_checkpoint_id='theirs' AND restored_from_checkpoint_id=''`); n != 1 {
+		t.Fatal("claw touched while another restore owns the claim")
 	}
 }
 
