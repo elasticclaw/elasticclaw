@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	workflowv2 "github.com/elasticclaw/elasticclaw/pkg/hub/workflowv2"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
 )
 
@@ -578,6 +579,110 @@ func TestRunWorkflowV2CronRunsUsesCronEndpoint(t *testing.T) {
 		t.Fatalf("runWorkflowRuns returned error: %v", err)
 	}
 	for _, want := range []string{"RUN ID", "cron-run-1", "skipped", "cron", "Showing 1 run"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("output missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestPrintCollapsedActivityMessagesRendersWorkflowEffectEvents(t *testing.T) {
+	started := time.Date(2026, 9, 23, 9, 0, 0, 0, time.UTC)
+	exitCode := 2
+	succeeded := false
+	messages := []types.HubMessage{
+		{
+			Content:   "exec.run failed (attempt 1): exit code 2",
+			Format:    types.WorkflowEffectFormatPrefix + mustJSON(t, types.WorkflowEffectEvent{Kind: "exec.run", Phase: "finished", Status: "failed", Attempt: 1, Command: "make test", ExitCode: &exitCode, Succeeded: &succeeded, Stdout: "compiling main.go\nbuild failed", Stderr: "make: *** No rule", Error: "exit code 2"}),
+			CreatedAt: started,
+		},
+		{
+			Content:   "agent task assigned",
+			Format:    types.WorkflowEffectFormatPrefix + mustJSON(t, types.WorkflowEffectEvent{Kind: "agent.task", Phase: "assigned", Status: "assigned", Instructions: "Fix the build"}),
+			CreatedAt: started.Add(time.Second),
+		},
+	}
+
+	out, err := captureStdout(func() error {
+		printCollapsedActivityMessages(messages)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("captureStdout failed: %v", err)
+	}
+	for _, want := range []string{
+		"[exec.run] failed (attempt 1)",
+		"cmd: make test",
+		"exit code: 2",
+		"error: exit code 2",
+		"stdout:",
+		"compiling main.go",
+		"build failed",
+		"stderr:",
+		"make: *** No rule",
+		"[agent.task] assigned",
+		"instructions:",
+		"Fix the build",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("output missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestPrintWorkflowInspectionPrintsEffectsTasksFactsAndEvents(t *testing.T) {
+	received := time.Date(2026, 9, 23, 9, 0, 1, 0, time.UTC)
+	inspection := workflowv2.Inspection{
+		Run: workflowv2.Run{ID: "run-1", WorkspaceName: "engineering", WorkflowName: "delivery",
+			State: "detect", DisplayPhase: "setup", StateVersion: 2, Status: "active"},
+		Effects: []workflowv2.EffectSummary{{
+			ID: "effect-1", Kind: "exec.run", Status: "succeeded", DefinitionPath: "states.detect.on_enter.effects[0]",
+			AttemptCount: 1,
+			Payload: map[string]interface{}{"command": "make test", "timeout": "1m"},
+			Receipt: map[string]interface{}{"task_id": "task-9", "exit_code": float64(2), "succeeded": false,
+				"stdout": "build failed", "stderr": "make: *** No rule", "error": "exit code 2"},
+		}},
+		AgentTasks: []workflowv2.AgentTaskSummary{{
+			ID: "task-9", Status: "failed", State: "detect",
+			Instructions:    "Fix the build. Consider reading the makefile first before re-running.",
+			TerminalReason:  "gateway is not ready",
+		}},
+		Facts: map[string]interface{}{
+			"exec": map[string]interface{}{
+				"last_run": map[string]interface{}{"succeeded": false, "exit_code": float64(2), "stdout": "build failed"},
+			},
+		},
+		RecentEvents: []workflowv2.EventRecord{{
+			ID: "event-1", Kind: "exec.run.failed", Producer: workflowv2.ProducerEngine,
+			Disposition: "accepted", ObservedStateVersion: 2, ReceivedAt: received,
+			Facts: json.RawMessage(`{"exec.last_run.succeeded":false,"exec.last_run.stdout":"build failed"}`),
+		}},
+	}
+
+	out, err := captureStdout(func() error {
+		printWorkflowInspection(inspection)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("captureStdout failed: %v", err)
+	}
+	for _, want := range []string{
+		"Run: run-1",
+		"Effects:",
+		"exec.run succeeded (states.detect.on_enter.effects[0]), attempt 1",
+		"command: make test",
+		"exit code: 2",
+		"stdout:",
+		"build failed",
+		"Agent tasks:",
+		"task-9 failed (state detect)",
+		"instructions: Fix the build.",
+		"reason: gateway is not ready",
+		"Facts:",
+		"exec.last_run.stdout = build failed",
+		"exec.last_run.exit_code = 2",
+		"Recent events:",
+		"exec.run.failed (accepted) 2026-09-23 09:00:01",
+	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("output missing %q:\n%s", want, out)
 		}

@@ -8,9 +8,11 @@ import (
 	"net/http/httptest"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/elasticclaw/elasticclaw/pkg/hub/workflowv2"
 	"github.com/elasticclaw/elasticclaw/pkg/types"
+	typesv2 "github.com/elasticclaw/elasticclaw/pkg/types/v2"
 )
 
 func TestWorkflowV2RunInspectionAPIIsTenantScoped(t *testing.T) {
@@ -334,6 +336,235 @@ transitions:
     on: agent.task.completed
     to: done
 `
+
+const workflowV2ExecAPIWorkspace = `
+schema_version: 2
+name: engineering
+repositories:
+  primary:
+    provider: github
+    repository: org/repo
+execution:
+  provider: daytona
+`
+
+const workflowV2ExecAPIWorkflow = `
+schema_version: 2
+name: delivery
+enabled: true
+initial_state: detect
+states:
+  detect:
+    phase: setup
+    on_enter:
+      effects:
+        - exec.run:
+            command: make test
+            timeout: 1m
+  done:
+    phase: done
+    terminal: true
+transitions:
+  detected:
+    from: detect
+    on: exec.run.completed
+    to: done
+`
+
+// seedWorkflowV2ExecRun creates a run whose exec.run effect went through the
+// production lifecycle: claimed, materialized as a command task, and completed
+// with a failed receipt carrying stdout/stderr. It also records a finished
+// agent task so inspection covers every enriched section.
+func seedWorkflowV2ExecRun(t *testing.T, s *Server, db *sql.DB, runID, clawID string) workflowv2.Run {
+	t.Helper()
+	store := workflowv2.NewStore(db)
+	run, err := store.CreateRun(context.Background(), workflowv2.CreateRunRequest{
+		ID:            runID,
+		TenantID:      "test-tenant-id",
+		WorkspaceYAML: []byte(workflowV2ExecAPIWorkspace),
+		WorkflowYAML:  []byte(workflowV2ExecAPIWorkflow),
+		InitialClawID: clawID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	insertTestClaw(t, db, clawID)
+
+	claim, err := store.ClaimEffect(context.Background(), "log-worker", time.Minute)
+	if err != nil || claim == nil {
+		t.Fatalf("claim = %#v, %v", claim, err)
+	}
+	assign, err := store.MaterializeCommandTask(context.Background(), claim.Effect.ID, claim.AttemptID, "log-worker")
+	if err != nil {
+		t.Fatalf("materialize: %v", err)
+	}
+
+	receipt, err := json.Marshal(map[string]interface{}{
+		"exit_code": 2,
+		"succeeded": false,
+		"stdout":    "compiling main.go\nbuild failed",
+		"stderr":    "make: *** No rule to make target 'test'",
+		"error":     "exit code 2",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	version := run.StateVersion
+	if _, err := store.ApplyCommandReceipt(context.Background(), typesv2.ControlEnvelope{
+		ProtocolVersion:      typesv2.ControlProtocolVersion,
+		MessageID:            "receipt-" + runID,
+		Kind:                 typesv2.MessageExecRunFailed,
+		RunID:                run.ID,
+		AttemptID:            run.CurrentAttemptID,
+		TaskID:               assign.TaskID,
+		ExpectedStateVersion: &version,
+		Payload:              receipt,
+	}); err != nil {
+		t.Fatalf("apply receipt: %v", err)
+	}
+
+	now := time.Now().UTC().UnixMilli()
+	if _, err := db.Exec(`INSERT INTO workflow_v2_agent_tasks(
+		id,run_id,effect_id,attempt_id,state,state_version,status,instructions,allowed_actions,required_artifacts,
+		heartbeat_deadline,deadline,terminal_reason,created_at,updated_at,finished_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		"task-"+runID, runID, "", "", run.State, run.StateVersion, "failed", "Fix the build", "[]", "[]",
+		now, now, "gateway is not ready", now, now, now); err != nil {
+		t.Fatal(err)
+	}
+	return run
+}
+
+func TestWorkflowV2RunLogsIncludeEffectTaskAndExecOutcomeLines(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
+	seedWorkflowV2ExecRun(t, s, db, "run-logs-effects", "claw-logs-effects")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v2/workflow-runs/run-logs-effects/logs", nil)
+	req.Header.Set("Authorization", "Bearer test-token")
+	rr := httptest.NewRecorder()
+	s.mux.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+	var messages []types.HubMessage
+	if err := json.NewDecoder(rr.Body).Decode(&messages); err != nil {
+		t.Fatal(err)
+	}
+
+	var effectStarts, effectFinishes, execOutcomes, taskAssigned, taskFinished int
+	var outcome types.WorkflowEffectEvent
+	var assigned, finishedTask types.WorkflowEffectEvent
+	for _, m := range messages {
+		if m.Role != "effect" {
+			continue
+		}
+		event, ok := types.ParseWorkflowEffectFormat(m.Format)
+		if !ok {
+			t.Fatalf("unparseable effect format %q", m.Format)
+		}
+		switch {
+		case event.Kind == "exec.run" && event.Phase == "started":
+			effectStarts++
+			if event.Command != "make test" {
+				t.Fatalf("start command = %q", event.Command)
+			}
+		case event.Kind == "exec.run" && event.Phase == "finished" && event.Stdout != "":
+			execOutcomes++
+			outcome = event
+		case event.Kind == "exec.run" && event.Phase == "finished":
+			effectFinishes++
+		case event.Kind == "agent.task" && event.Phase == "assigned":
+			taskAssigned++
+			assigned = event
+		case event.Kind == "agent.task" && event.Phase == "finished":
+			taskFinished++
+			finishedTask = event
+		}
+	}
+	if effectStarts != 1 || effectFinishes != 1 {
+		t.Fatalf("effect starts = %d, assignment finishes = %d (want 1 each)", effectStarts, effectFinishes)
+	}
+	if execOutcomes != 1 {
+		t.Fatalf("exec outcome lines = %d, want 1", execOutcomes)
+	}
+	if outcome.Stdout != "compiling main.go\nbuild failed" || outcome.Stderr != "make: *** No rule to make target 'test'" {
+		t.Fatalf("outcome stdout/stderr = %q/%q", outcome.Stdout, outcome.Stderr)
+	}
+	if outcome.ExitCode == nil || *outcome.ExitCode != 2 || outcome.Succeeded == nil || *outcome.Succeeded {
+		t.Fatalf("outcome exit/succeeded = %v/%v", outcome.ExitCode, outcome.Succeeded)
+	}
+	if taskAssigned != 1 || assigned.Instructions != "Fix the build" {
+		t.Fatalf("task assigned = %d, instructions = %q", taskAssigned, assigned.Instructions)
+	}
+	if taskFinished != 1 || finishedTask.TerminalReason != "gateway is not ready" {
+		t.Fatalf("task finished = %d, reason = %q", taskFinished, finishedTask.TerminalReason)
+	}
+}
+
+func TestWorkflowV2RunInspectionIncludesPayloadsReceiptsAndInstructions(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
+	seedWorkflowV2ExecRun(t, s, db, "run-inspect-effects", "claw-inspect-effects")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v2/workflow-runs/run-inspect-effects", nil)
+	req.Header.Set("Authorization", "Bearer test-token")
+	rr := httptest.NewRecorder()
+	s.mux.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+	var inspection workflowv2.Inspection
+	if err := json.NewDecoder(rr.Body).Decode(&inspection); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(inspection.Effects) == 0 {
+		t.Fatal("expected effects in inspection")
+	}
+	effect := inspection.Effects[0]
+	if command, _ := effect.Payload["command"].(string); command != "make test" {
+		t.Fatalf("effect payload command = %q", command)
+	}
+	if taskID, _ := effect.Receipt["task_id"].(string); taskID == "" {
+		t.Fatalf("effect receipt task_id missing: %#v", effect.Receipt)
+	}
+
+	if len(inspection.AgentTasks) == 0 || inspection.AgentTasks[0].Instructions != "Fix the build" {
+		t.Fatalf("agent task instructions missing: %#v", inspection.AgentTasks)
+	}
+
+	if len(inspection.RecentEvents) == 0 {
+		t.Fatal("expected recent events in inspection")
+	}
+	var receiptEvent *workflowv2.EventRecord
+	for i := range inspection.RecentEvents {
+		if inspection.RecentEvents[i].Kind == "exec.run.failed" {
+			receiptEvent = &inspection.RecentEvents[i]
+			break
+		}
+	}
+	if receiptEvent == nil {
+		t.Fatalf("exec.run.failed event missing: %#v", inspection.RecentEvents)
+	}
+	if !json.Valid(receiptEvent.Facts) {
+		t.Fatalf("event facts not valid JSON: %s", receiptEvent.Facts)
+	}
+	var eventFacts map[string]interface{}
+	if err := json.Unmarshal(receiptEvent.Facts, &eventFacts); err != nil {
+		t.Fatal(err)
+	}
+	if stdout, _ := eventFacts["exec.last_run.stdout"].(string); stdout != "compiling main.go\nbuild failed" {
+		t.Fatalf("event facts stdout = %q", stdout)
+	}
+
+	execFacts, _ := inspection.Facts["exec"].(map[string]interface{})
+	lastRun, _ := execFacts["last_run"].(map[string]interface{})
+	if stdout, _ := lastRun["stdout"].(string); stdout != "compiling main.go\nbuild failed" {
+		t.Fatalf("run facts stdout = %q", stdout)
+	}
+	if exitCode, _ := lastRun["exit_code"].(float64); exitCode != 2 {
+		t.Fatalf("run facts exit_code = %v", exitCode)
+	}
+}
 
 func TestMessageTimelineIncludesV2WorkflowStateTransitions(t *testing.T) {
 	s, db := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")

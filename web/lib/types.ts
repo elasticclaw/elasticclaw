@@ -55,7 +55,7 @@ export interface Claw {
 
 export interface Message {
   id: string
-  role: "user" | "claw" | "system" | "hub" | "activity" | "activity_summary" | "state"
+  role: "user" | "claw" | "system" | "hub" | "activity" | "activity_summary" | "state" | "effect"
   content: string
   format?: string // "pre" = preserve whitespace
   timestamp: Date
@@ -95,6 +95,23 @@ export interface AgentActivity {
   subagent_prompt?: string
 }
 
+/** Structured payload behind "workflow:effect:<json>" run-log messages (workflow v2). */
+export interface WorkflowEffectEvent {
+  kind: string
+  phase: "planned" | "started" | "finished" | "assigned"
+  status?: string
+  attempt?: number
+  definition_path?: string
+  command?: string
+  exit_code?: number
+  succeeded?: boolean
+  stdout?: string
+  stderr?: string
+  error?: string
+  instructions?: string
+  terminal_reason?: string
+}
+
 // Raw API types
 export interface ApiClaw {
   id: string
@@ -121,7 +138,7 @@ export interface ApiMessage {
   id: string
   claw_id: string
   tenant_id: string
-  role: "user" | "claw" | "hub" | "activity" | "activity_summary" | "state"
+  role: "user" | "claw" | "hub" | "activity" | "activity_summary" | "state" | "effect"
   content: string
   format?: string
   created_at: string
