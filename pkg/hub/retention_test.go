@@ -803,12 +803,17 @@ func TestRetentionPlanExpandsStoredTreeFromDisk(t *testing.T) {
 
 func retentionPlan(t *testing.T, s *Server, id string, plan types.CheckpointPlan) {
 	t.Helper()
+	retentionPlanAs(t, s, "claw-token", id, plan)
+}
+
+func retentionPlanAs(t *testing.T, s *Server, token, id string, plan types.CheckpointPlan) {
+	t.Helper()
 	body, err := json.Marshal(plan)
 	if err != nil {
 		t.Fatal(err)
 	}
 	req := httptest.NewRequest(http.MethodPost, "/api/checkpoints/"+id+"/plan", bytes.NewReader(body))
-	req.Header.Set("X-Claw-Token", "claw-token")
+	req.Header.Set("X-Claw-Token", token)
 	rr := httptest.NewRecorder()
 	s.handleCheckpointInternal(rr, req)
 	if rr.Code != 200 {
@@ -861,6 +866,41 @@ func TestFinalizeKeepsMatchingExpansion(t *testing.T) {
 	}
 	if n := retentionCount(t, s, `SELECT COUNT(*) FROM checkpoint_tree_files WHERE tree_sha256=?`, tree); n != 1 {
 		t.Fatalf("expansion rows=%d", n)
+	}
+}
+
+// checkpoint_tree_files is global, so a claw that plans a tree it never
+// uploads with an invented file list must not be able to block every other
+// tenant's checkpoint of that tree.
+func TestFinalizeReconcilesExpansionPlannedByAnotherTenant(t *testing.T) {
+	s := retentionServer(t)
+	retentionExec(t, s, `INSERT INTO tenants(id,name,token,claw_token,created_at) VALUES('tenant-b','tenant-b','token-b','claw-token-b',?)`, now())
+	retentionExec(t, s, `INSERT INTO claws(id,tenant_id,name,template,status,created_at) VALUES('claw-b','tenant-b','claw-b','template','connected',?)`, now())
+	file := retentionBlob(t, "shared-file")
+	invented := retentionBlob(t, "invented-file")
+	data, err := json.Marshal([]types.CheckpointFile{{SHA256: file}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tree := fmt.Sprintf("%x", sha256.Sum256(data))
+	insertTestCheckpoint(t, s, "a", "manual")
+	retentionPlan(t, s, "a", types.CheckpointPlan{RootSHA256: tree, Files: []types.CheckpointFile{{SHA256: file}, {SHA256: invented}}})
+	if err := s.insertCheckpoint("b", "tenant-b", "claw-b", "manual", "hub", "local", "provider-id"); err != nil {
+		t.Fatal(err)
+	}
+	retentionPlanAs(t, s, "claw-token-b", "b", types.CheckpointPlan{RootSHA256: tree, Files: []types.CheckpointFile{{SHA256: file}}})
+	retentionFile(t, checkpointBlobPath(tree), string(data), time.Now())
+	if err := s.finalizeCheckpoint("b", "tenant-b", "claw-b", tree); err != nil {
+		t.Fatalf("finalize: %v", err)
+	}
+	if got := checkpointStatus(t, s, "b"); got != "ready" {
+		t.Fatalf("status=%s", got)
+	}
+	if n := retentionCount(t, s, `SELECT COUNT(*) FROM checkpoint_tree_files WHERE tree_sha256=? AND file_sha256=?`, tree, invented); n != 0 {
+		t.Fatal("invented file still recorded for the tree")
+	}
+	if n := retentionCount(t, s, `SELECT COUNT(*) FROM checkpoint_tree_files WHERE tree_sha256=? AND file_sha256=?`, tree, file); n != 1 {
+		t.Fatal("tree blob's file not recorded")
 	}
 }
 

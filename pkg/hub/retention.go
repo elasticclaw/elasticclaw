@@ -129,6 +129,18 @@ func (s *Server) retainOnce(at time.Time, cfg retentionSettings) {
 }
 
 func recordCheckpointTree(db *sql.DB, checkpointID, rootSHA string, files []types.CheckpointFile) error {
+	return writeCheckpointTree(db, checkpointID, rootSHA, files, false)
+}
+
+// reconcileCheckpointTree makes the recorded expansion of rootSHA exactly the
+// given set. checkpoint_tree_files is keyed by tree, not tenant, so a plan that
+// named files for a tree it never uploaded must not pin that tree's expansion
+// for every later checkpoint of it; the blob decides.
+func reconcileCheckpointTree(db *sql.DB, checkpointID, rootSHA string, files []types.CheckpointFile) error {
+	return writeCheckpointTree(db, checkpointID, rootSHA, files, true)
+}
+
+func writeCheckpointTree(db *sql.DB, checkpointID, rootSHA string, files []types.CheckpointFile, prune bool) error {
 	if rootSHA == "" {
 		return nil
 	}
@@ -153,12 +165,28 @@ func recordCheckpointTree(db *sql.DB, checkpointID, rootSHA string, files []type
 		return err
 	}
 	defer stmt.Close()
+	want := map[string]struct{}{}
 	for _, file := range files {
 		if file.SHA256 == rootSHA || !validSHA256(file.SHA256) {
 			continue
 		}
+		want[file.SHA256] = struct{}{}
 		if _, err := stmt.Exec(rootSHA, file.SHA256); err != nil {
 			return err
+		}
+	}
+	if prune {
+		recorded, err := retentionStrings(tx, `SELECT file_sha256 FROM checkpoint_tree_files WHERE tree_sha256=?`, rootSHA)
+		if err != nil {
+			return err
+		}
+		for _, sha := range recorded {
+			if _, ok := want[sha]; ok {
+				continue
+			}
+			if _, err := tx.Exec(`DELETE FROM checkpoint_tree_files WHERE tree_sha256=? AND file_sha256=?`, rootSHA, sha); err != nil {
+				return err
+			}
 		}
 	}
 	if checkpointID != "" {
