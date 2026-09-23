@@ -760,14 +760,22 @@ func TestRetentionCompactionSkipsPreviouslyRestoredLikeRetry(t *testing.T) {
 	old := at.Add(-3 * time.Hour)
 	retentionExec(t, s, `UPDATE claws SET status='error',task_run_id='run' WHERE id='claw'`)
 	retentionRun(t, s)
-	retentionCheckpoint(t, s, "older", "claw", "ready", "manual", "older-tree", old)
-	retentionCheckpoint(t, s, "newest", "claw", "ready", "manual", "newest-tree", old.Add(time.Minute))
+	retentionCheckpoint(t, s, "oldest", "claw", "ready", "manual", "oldest-tree", old)
+	retentionCheckpoint(t, s, "older", "claw", "ready", "manual", "older-tree", old.Add(time.Minute))
+	retentionCheckpoint(t, s, "newest", "claw", "ready", "manual", "newest-tree", old.Add(2*time.Minute))
 	retentionExec(t, s, `UPDATE task_run_attempts SET restored_checkpoint_id='newest' WHERE id='attempt'`)
-	if n, err := s.compactCheckpoints(at, false); err != nil || n != 0 {
+	// The pending retry's attempt row already exists, without a pointer.
+	retentionExec(t, s, `INSERT INTO task_run_attempts(id,tenant_id,run_id,attempt_id,attempt_number,started_at,created_at,updated_at) VALUES('pending','tenant','run','pending',2,0,0,0)`)
+	if n, err := s.compactCheckpoints(at, false); err != nil || n != 1 {
 		t.Fatalf("compacted=%d,%v", n, err)
 	}
-	if got := checkpointStatus(t, s, "older"); got != "ready" {
-		t.Fatalf("retry fallback compacted: %s", got)
+	for _, id := range []string{"newest", "older"} {
+		if got := checkpointStatus(t, s, id); got != "ready" {
+			t.Fatalf("retry candidate %s compacted: %s", id, got)
+		}
+	}
+	if got := checkpointStatus(t, s, "oldest"); got != "compacted" {
+		t.Fatalf("oldest=%s", got)
 	}
 }
 

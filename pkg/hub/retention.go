@@ -224,18 +224,26 @@ func (s *Server) compactCheckpoints(at time.Time, dry bool) (int, error) {
 	}
 	count := 0
 	for _, c := range claws {
-		// Same lookup as retryCheckpointIDWithCount: the next retry skips the
-		// checkpoint the latest attempt restored from.
+		// retryCheckpointIDWithCount skips the checkpoint the previous attempt
+		// restored from. The attempt row for a pending retry exists before the
+		// backoff with no pointer yet, so which candidate the retry will skip
+		// depends on timing; keeping the newest and the one after the latest
+		// restore costs one extra checkpoint per terminal claw.
 		var previous string
-		_ = s.db.QueryRow(`SELECT COALESCE(restored_checkpoint_id,'') FROM task_run_attempts
-  WHERE run_id=(SELECT task_run_id FROM claws WHERE id=?) ORDER BY attempt_number DESC LIMIT 1`, c.id).Scan(&previous)
-		keep, _, err := s.selectRetryCheckpoint(c.tenant, c.id, previous)
+		_ = s.db.QueryRow(`SELECT restored_checkpoint_id FROM task_run_attempts
+  WHERE run_id=(SELECT task_run_id FROM claws WHERE id=?) AND COALESCE(restored_checkpoint_id,'')!=''
+  ORDER BY attempt_number DESC LIMIT 1`, c.id).Scan(&previous)
+		newest, _, err := s.selectRetryCheckpoint(c.tenant, c.id, "")
 		if err != nil {
 			return count, err
 		}
-		n, err := s.compactCheckpointRows(`c.claw_id=? AND c.id!=? AND c.status IN ('ready','skipped','failed','creating')
+		fallback, _, err := s.selectRetryCheckpoint(c.tenant, c.id, previous)
+		if err != nil {
+			return count, err
+		}
+		n, err := s.compactCheckpointRows(`c.claw_id=? AND c.id NOT IN (?,?) AND c.status IN ('ready','skipped','failed','creating')
    AND EXISTS (SELECT 1 FROM claws l WHERE l.id=c.claw_id AND l.status IN ('error','deleted'))
-   AND NOT EXISTS (SELECT 1 FROM claw_checkpoints recent WHERE recent.claw_id=c.claw_id AND recent.created_at>=?)`, dry, c.id, keep, at.Add(-time.Hour))
+   AND NOT EXISTS (SELECT 1 FROM claw_checkpoints recent WHERE recent.claw_id=c.claw_id AND recent.created_at>=?)`, dry, c.id, newest, fallback, at.Add(-time.Hour))
 		count += n
 		if err != nil {
 			return count, err
