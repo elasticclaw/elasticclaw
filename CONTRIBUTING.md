@@ -83,6 +83,13 @@ No need to rebuild the web UI for Go changes.
 
 Just save files. Next.js hot reloads automatically. No ElasticClaw Server restart needed.
 
+### Feature flags
+
+- Declare each flag in `featureFlagRegistry` in `pkg/hub/feature_flags.go` with a stable key, display name, description, and default stage.
+- Gate backend behavior with `s.featureEnabled(r, "flag-key")`. Gate UI behavior with the separately implemented `useFeatureFlag("flag-key")` hook.
+- Move flags through `off` → `beta` → `on`. The `beta` stage enables the flag only for GitHub users on the global beta-tester list; password sessions are never beta testers.
+- After a feature ships, remove its gates and its registry entry instead of leaving a permanent flag behind.
+
 ### Building a release binary (with embedded web UI)
 
 ```bash
