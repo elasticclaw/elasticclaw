@@ -732,6 +732,34 @@ func TestRetentionPlanReexpandsRegisteredTree(t *testing.T) {
 	}
 }
 
+func TestRetentionPlanExpandsStoredTreeFromDisk(t *testing.T) {
+	s := retentionServer(t)
+	a := retentionBlob(t, "stored-a")
+	b := retentionBlob(t, "stored-b")
+	data, err := json.Marshal([]types.CheckpointFile{{SHA256: a}, {SHA256: b}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tree := retentionBlob(t, string(data))
+	insertTestCheckpoint(t, s, "cp", "manual")
+	body, err := json.Marshal(types.CheckpointPlan{RootSHA256: tree})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/checkpoints/cp/plan", bytes.NewReader(body))
+	req.Header.Set("X-Claw-Token", "claw-token")
+	rr := httptest.NewRecorder()
+	s.handleCheckpointInternal(rr, req)
+	if rr.Code != 200 {
+		t.Fatalf("plan: %d %s", rr.Code, rr.Body.String())
+	}
+	for _, file := range []string{a, b} {
+		if n := retentionCount(t, s, `SELECT COUNT(*) FROM checkpoint_tree_files WHERE tree_sha256=? AND file_sha256=?`, tree, file); n != 1 {
+			t.Fatalf("stored tree file %s not expanded from disk", file)
+		}
+	}
+}
+
 func TestRetentionBackfillLeavesUnreadableTreeUnexpanded(t *testing.T) {
 	s := retentionServer(t)
 	unreadable := fmt.Sprintf("%064x", 1)

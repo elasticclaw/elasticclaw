@@ -763,8 +763,16 @@ func (s *Server) handleCheckpointInternal(w http.ResponseWriter, r *http.Request
 			return
 		}
 		plan.CheckpointID = checkpointID
+		// The tree blob is the authoritative expansion; a plan's list is only
+		// trusted for a tree the hub has never stored.
+		files := plan.Files
+		if validSHA256(plan.RootSHA256) {
+			if stored, err := s.filesForTree(plan.RootSHA256); err == nil {
+				files = stored
+			}
+		}
 		// Reference uploads before reporting existing blobs, including while creating.
-		if err := recordCheckpointTree(s.db, checkpointID, plan.RootSHA256, plan.Files); err != nil {
+		if err := recordCheckpointTree(s.db, checkpointID, plan.RootSHA256, files); err != nil {
 			http.Error(w, "record checkpoint tree", http.StatusInternalServerError)
 			return
 		}
