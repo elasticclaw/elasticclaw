@@ -1022,10 +1022,11 @@ func (s *Server) completeMetadataOnlyCheckpoint(checkpointID, clawID, reason, de
 // names is unreferenced, since the collector would unlink that blob. The
 // honest path costs one COUNT.
 func (s *Server) verifyCheckpointTreeExpansion(checkpointID, rootSHA string, files []types.CheckpointFile) error {
-	want := 0
+	// Two paths with the same content share one digest and one row.
+	want := map[string]struct{}{}
 	for _, f := range files {
 		if f.SHA256 != rootSHA && validSHA256(f.SHA256) {
-			want++
+			want[f.SHA256] = struct{}{}
 		}
 	}
 	var n int
@@ -1034,7 +1035,7 @@ func (s *Server) verifyCheckpointTreeExpansion(checkpointID, rootSHA string, fil
 	}
 	// An honest plan records every file the blob names, so the recorded set
 	// is a superset of the blob's and an equal count means an equal set.
-	if n == want {
+	if n == len(want) {
 		return nil
 	}
 	return reconcileCheckpointTree(s.db, checkpointID, rootSHA, files)

@@ -1058,3 +1058,26 @@ func TestRetentionCollectorKeepsDigestsSharedAcrossRoles(t *testing.T) {
 		t.Fatal("dead message pointer kept")
 	}
 }
+
+// Two paths with identical content share one digest and one expansion row;
+// that must not push an honest finalize onto the reconcile path.
+func TestFinalizeDeduplicatesDigestsOnFastPath(t *testing.T) {
+	s := retentionServer(t)
+	file := retentionBlob(t, "same-content")
+	files := []types.CheckpointFile{{Path: "a", SHA256: file}, {Path: "b", SHA256: file}}
+	data, err := json.Marshal(files)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tree := retentionBlob(t, string(data))
+	insertTestCheckpoint(t, s, "cp", "manual")
+	retentionPlan(t, s, "cp", types.CheckpointPlan{RootSHA256: tree, Files: files})
+	// Reconcile writes checkpoint_trees; without the table only the COUNT fast path can succeed.
+	retentionExec(t, s, `DROP TABLE checkpoint_trees`)
+	if err := s.finalizeCheckpoint("cp", "tenant", "claw", tree); err != nil {
+		t.Fatalf("finalize took the reconcile path: %v", err)
+	}
+	if got := checkpointStatus(t, s, "cp"); got != "ready" {
+		t.Fatalf("status=%s", got)
+	}
+}
