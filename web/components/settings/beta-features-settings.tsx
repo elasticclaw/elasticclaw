@@ -39,9 +39,7 @@ function withItem(set: ReadonlySet<string>, item: string, present: boolean): Rea
 
 function formatAddedAt(addedAt: number): string {
   if (!addedAt) return ""
-  // Unix seconds or milliseconds — both render the same date.
-  const date = new Date(addedAt < 1e12 ? addedAt * 1000 : addedAt)
-  return date.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" })
+  return new Date(addedAt).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" })
 }
 
 export function BetaFeaturesSettings() {
