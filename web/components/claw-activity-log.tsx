@@ -193,20 +193,79 @@ function OutputBlock({ label, value }: { label: string; value?: string }) {
 
 function parseActivity(message: ApiMessage): AgentActivity | null {
   if (!message.format?.startsWith("activity:")) return null
+  let parsed: unknown
   try {
-    return JSON.parse(message.format.slice("activity:".length)) as AgentActivity
+    parsed = JSON.parse(message.format.slice("activity:".length))
   } catch {
     return null
+  }
+  if (!isRecord(parsed) || typeof parsed.kind !== "string") return null
+  return {
+    kind: parsed.kind,
+    stream: optionalString(parsed, "stream"),
+    phase: optionalString(parsed, "phase"),
+    tool: optionalString(parsed, "tool"),
+    detail: optionalString(parsed, "detail"),
+    command: optionalString(parsed, "command"),
+    path: optionalString(parsed, "path"),
+    url: optionalString(parsed, "url"),
+    message: optionalString(parsed, "message"),
+    error: optionalString(parsed, "error"),
+    call_id: optionalString(parsed, "call_id"),
+    duration_ms: optionalNumber(parsed, "duration_ms"),
+    exit_code: optionalNumber(parsed, "exit_code"),
+    result: optionalString(parsed, "result"),
+    subagent_name: optionalString(parsed, "subagent_name"),
+    subagent_type: optionalString(parsed, "subagent_type"),
+    subagent_model: optionalString(parsed, "subagent_model"),
+    subagent_prompt: optionalString(parsed, "subagent_prompt"),
   }
 }
 
+const WORKFLOW_EFFECT_PHASES: ReadonlySet<string> = new Set(["planned", "started", "finished", "assigned"])
+
+// parseWorkflowEffectEvent decodes the hub-authored "workflow:effect:<json>"
+// format. The payload is validated field by field so a malformed row degrades
+// to a plain-text line instead of crashing the log view.
 function parseWorkflowEffectEvent(message: ApiMessage): WorkflowEffectEvent | null {
   if (!message.format?.startsWith("workflow:effect:")) return null
+  let parsed: unknown
   try {
-    return JSON.parse(message.format.slice("workflow:effect:".length)) as WorkflowEffectEvent
+    parsed = JSON.parse(message.format.slice("workflow:effect:".length))
   } catch {
     return null
   }
+  if (!isRecord(parsed) || typeof parsed.kind !== "string" ||
+    typeof parsed.phase !== "string" || !WORKFLOW_EFFECT_PHASES.has(parsed.phase)) {
+    return null
+  }
+  return {
+    kind: parsed.kind,
+    phase: parsed.phase as WorkflowEffectEvent["phase"],
+    status: optionalString(parsed, "status"),
+    attempt: optionalNumber(parsed, "attempt"),
+    definition_path: optionalString(parsed, "definition_path"),
+    command: optionalString(parsed, "command"),
+    exit_code: optionalNumber(parsed, "exit_code"),
+    succeeded: typeof parsed.succeeded === "boolean" ? parsed.succeeded : undefined,
+    stdout: optionalString(parsed, "stdout"),
+    stderr: optionalString(parsed, "stderr"),
+    error: optionalString(parsed, "error"),
+    instructions: optionalString(parsed, "instructions"),
+    terminal_reason: optionalString(parsed, "terminal_reason"),
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null
+}
+
+function optionalString(record: Record<string, unknown>, key: string): string | undefined {
+  return typeof record[key] === "string" ? (record[key] as string) : undefined
+}
+
+function optionalNumber(record: Record<string, unknown>, key: string): number | undefined {
+  return typeof record[key] === "number" ? (record[key] as number) : undefined
 }
 
 export function LoadingState({ label }: { label: string }) {
