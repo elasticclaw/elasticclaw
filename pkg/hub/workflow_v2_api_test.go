@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -433,6 +434,189 @@ func seedWorkflowV2ExecRun(t *testing.T, s *Server, db *sql.DB, runID, clawID st
 		t.Fatal(err)
 	}
 	return run
+}
+
+func TestWorkflowV2AttemptLogsAreScopedToTheAttemptSession(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
+	store := workflowv2.NewStore(db)
+	base := time.Date(2026, 9, 23, 10, 0, 0, 0, time.UTC)
+	current := base
+	store.SetClock(func() time.Time { return current })
+
+	run, err := store.CreateRun(context.Background(), workflowv2.CreateRunRequest{
+		ID:            "run-attempt-scope",
+		TenantID:      "test-tenant-id",
+		WorkspaceYAML: []byte(workflowV2ExecAPIWorkspace),
+		WorkflowYAML:  []byte(workflowV2ExecAPIWorkflow),
+		InitialClawID: "claw-attempt-1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	insertTestClaw(t, db, "claw-attempt-1")
+	insertTestClaw(t, db, "claw-attempt-2")
+
+	// Attempt 1's session: the exec effect is claimed, materialized, and
+	// completes successfully at T1, which also fires the detected transition.
+	current = base.Add(time.Minute)
+	claim, err := store.ClaimEffect(context.Background(), "scope-worker", 5*time.Minute)
+	if err != nil || claim == nil {
+		t.Fatalf("claim = %#v, %v", claim, err)
+	}
+	assign, err := store.MaterializeCommandTask(context.Background(), claim.Effect.ID, claim.AttemptID, "scope-worker")
+	if err != nil {
+		t.Fatalf("materialize: %v", err)
+	}
+	receipt, err := json.Marshal(map[string]interface{}{
+		"exit_code": 0, "succeeded": true, "stdout": "tests passed", "stderr": "",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	version := run.StateVersion
+	if _, err := store.ApplyCommandReceipt(context.Background(), typesv2.ControlEnvelope{
+		ProtocolVersion:      typesv2.ControlProtocolVersion,
+		MessageID:            "receipt-attempt-scope",
+		Kind:                 typesv2.MessageExecRunCompleted,
+		RunID:                run.ID,
+		AttemptID:            run.CurrentAttemptID,
+		TaskID:               assign.TaskID,
+		ExpectedStateVersion: &version,
+		Payload:              receipt,
+	}); err != nil {
+		t.Fatalf("apply receipt: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO workflow_v2_agent_tasks(
+		id,run_id,effect_id,attempt_id,state,state_version,status,instructions,allowed_actions,required_artifacts,
+		heartbeat_deadline,deadline,terminal_reason,created_at,updated_at,finished_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		"task-attempt-1", run.ID, "", run.CurrentAttemptID, run.State, run.StateVersion, "completed",
+		"Fix the build", "[]", "[]", current.UnixMilli(), current.UnixMilli(), "", current.UnixMilli(), current.UnixMilli(), current.UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+
+	// Attempt 1 ends and attempt 2 takes over at T2.
+	current = base.Add(2 * time.Minute)
+	if _, err := db.Exec(`UPDATE workflow_v2_attempts SET status='failed', finished_at=? WHERE id=?`,
+		current.UnixMilli(), run.CurrentAttemptID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO workflow_v2_attempts(
+		id,run_id,claw_id,number,status,started_at,heartbeat_at,finished_at,reason)
+		VALUES(?,?,?,2,'active',?,?,0,'')`,
+		"attempt-2-scope", run.ID, "claw-attempt-2", current.UnixMilli(), current.UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+
+	// Attempt 2's session gets its own agent task at T3.
+	current = base.Add(3 * time.Minute)
+	if _, err := db.Exec(`INSERT INTO workflow_v2_agent_tasks(
+		id,run_id,effect_id,attempt_id,state,state_version,status,instructions,allowed_actions,required_artifacts,
+		heartbeat_deadline,deadline,terminal_reason,created_at,updated_at,finished_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,0,?,?,0)`,
+		"task-attempt-2", run.ID, "", "attempt-2-scope", run.State, run.StateVersion, "assigned",
+		"Retry the build", "[]", "[]", current.UnixMilli(), current.UnixMilli(), current.UnixMilli(), current.UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+
+	fetchLogs := func(path string) []types.HubMessage {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		req.Header.Set("Authorization", "Bearer test-token")
+		rr := httptest.NewRecorder()
+		s.mux.ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("GET %s status = %d, body = %s", path, rr.Code, rr.Body.String())
+		}
+		var messages []types.HubMessage
+		if err := json.NewDecoder(rr.Body).Decode(&messages); err != nil {
+			t.Fatal(err)
+		}
+		return messages
+	}
+	effectLines := func(messages []types.HubMessage, kind, phase string) int {
+		count := 0
+		for _, m := range messages {
+			if m.Role != "effect" {
+				continue
+			}
+			if event, ok := types.ParseWorkflowEffectFormat(m.Format); ok && event.Kind == kind && event.Phase == phase {
+				count++
+			}
+		}
+		return count
+	}
+	roleCount := func(messages []types.HubMessage, role string) int {
+		count := 0
+		for _, m := range messages {
+			if m.Role == role {
+				count++
+			}
+		}
+		return count
+	}
+	containsInstructions := func(messages []types.HubMessage, want string) bool {
+		for _, m := range messages {
+			if m.Role != "effect" {
+				continue
+			}
+			if event, ok := types.ParseWorkflowEffectFormat(m.Format); ok && strings.Contains(event.Instructions, want) {
+				return true
+			}
+		}
+		return false
+	}
+
+	attempt1 := fetchLogs("/api/v2/workflow-runs/run-attempt-scope/attempts/" + run.CurrentAttemptID + "/logs")
+	if got := effectLines(attempt1, "exec.run", "started"); got != 1 {
+		t.Fatalf("attempt 1 exec.run starts = %d, want 1", got)
+	}
+	if got := effectLines(attempt1, "exec.run", "finished"); got != 2 {
+		t.Fatalf("attempt 1 exec.run finishes = %d, want 2 (assignment + outcome)", got)
+	}
+	if got := effectLines(attempt1, "agent.task", "assigned"); got != 1 {
+		t.Fatalf("attempt 1 agent.task assigned = %d, want 1", got)
+	}
+	if got := effectLines(attempt1, "agent.task", "finished"); got != 1 {
+		t.Fatalf("attempt 1 agent.task finished = %d, want 1", got)
+	}
+	if containsInstructions(attempt1, "Retry the build") {
+		t.Fatal("attempt 1 logs include attempt 2's agent task instructions")
+	}
+	if got := roleCount(attempt1, "state"); got != 2 {
+		t.Fatalf("attempt 1 state transitions = %d, want 2 (initial + detected)", got)
+	}
+
+	attempt2 := fetchLogs("/api/v2/workflow-runs/run-attempt-scope/attempts/attempt-2-scope/logs")
+	if got := effectLines(attempt2, "agent.task", "assigned"); got != 1 {
+		t.Fatalf("attempt 2 agent.task assigned = %d, want 1", got)
+	}
+	if !containsInstructions(attempt2, "Retry the build") {
+		t.Fatal("attempt 2 logs missing its own agent task instructions")
+	}
+	if got := effectLines(attempt2, "exec.run", "started"); got != 0 {
+		t.Fatalf("attempt 2 exec.run starts = %d, want 0 (attempt 1 session)", got)
+	}
+	if got := effectLines(attempt2, "exec.run", "finished"); got != 0 {
+		t.Fatalf("attempt 2 exec.run finishes = %d, want 0 (attempt 1 session)", got)
+	}
+	if got := effectLines(attempt2, "agent.task", "finished"); got != 0 {
+		t.Fatalf("attempt 2 agent.task finished = %d, want 0 (attempt 1 session)", got)
+	}
+	if got := roleCount(attempt2, "state"); got != 0 {
+		t.Fatalf("attempt 2 state transitions = %d, want 0 (both predate attempt 2)", got)
+	}
+
+	runLogs := fetchLogs("/api/v2/workflow-runs/run-attempt-scope/logs")
+	if got := effectLines(runLogs, "agent.task", "assigned"); got != 2 {
+		t.Fatalf("run-level agent.task assigned = %d, want 2 (complete record)", got)
+	}
+	if got := effectLines(runLogs, "exec.run", "finished"); got != 2 {
+		t.Fatalf("run-level exec.run finishes = %d, want 2 (complete record)", got)
+	}
+	if got := roleCount(runLogs, "state"); got != 2 {
+		t.Fatalf("run-level state transitions = %d, want 2 (complete record)", got)
+	}
 }
 
 func TestWorkflowV2RunLogsIncludeEffectTaskAndExecOutcomeLines(t *testing.T) {
