@@ -127,6 +127,11 @@ func recordCheckpointTree(db *sql.DB, checkpointID, rootSHA string, files []type
 	if rootSHA == "" {
 		return nil
 	}
+	// Digests become blob paths the collector unlinks, so nothing that is not
+	// a hex sha256 may be recorded.
+	if !validSHA256(rootSHA) {
+		return fmt.Errorf("invalid root tree digest %q", rootSHA)
+	}
 	tx, err := db.Begin()
 	if err != nil {
 		return err
@@ -144,7 +149,7 @@ func recordCheckpointTree(db *sql.DB, checkpointID, rootSHA string, files []type
 	}
 	defer stmt.Close()
 	for _, file := range files {
-		if file.SHA256 == "" || file.SHA256 == rootSHA {
+		if file.SHA256 == rootSHA || !validSHA256(file.SHA256) {
 			continue
 		}
 		if _, err := stmt.Exec(rootSHA, file.SHA256); err != nil {
@@ -366,6 +371,15 @@ func retentionStrings(db retentionQuerier, query string, args ...any) ([]string,
 	return values, rows.Err()
 }
 
+// retentionUnlinkBlob removes the blob for sha. A digest that is not a hex
+// sha256 (a row written before validation existed) is never turned into a path.
+func retentionUnlinkBlob(sha string, dry bool, counts *retentionCollection) error {
+	if !validSHA256(sha) {
+		return nil
+	}
+	return retentionUnlink(checkpointBlobPath(sha), dry, counts)
+}
+
 func retentionUnlink(path string, dry bool, counts *retentionCollection) error {
 	info, err := os.Stat(path)
 	if os.IsNotExist(err) {
@@ -490,7 +504,7 @@ func (s *Server) collectCheckpointTreeBatch(tree string, dry bool, counts *reten
 				return true, err
 			}
 		}
-		if err := retentionUnlink(checkpointBlobPath(sha), dry, counts); err != nil {
+		if err := retentionUnlinkBlob(sha, dry, counts); err != nil {
 			return true, err
 		}
 	}
@@ -507,7 +521,7 @@ func (s *Server) collectCheckpointTreeBatch(tree string, dry bool, counts *reten
 		return true, err
 	}
 	if !referenced {
-		if err := retentionUnlink(checkpointBlobPath(tree), dry, counts); err != nil {
+		if err := retentionUnlinkBlob(tree, dry, counts); err != nil {
 			return true, err
 		}
 	}
@@ -545,7 +559,7 @@ func (s *Server) collectCheckpointMessage(sha string, dry bool, counts *retentio
 		return err
 	}
 	if !referenced {
-		if err := retentionUnlink(checkpointBlobPath(sha), dry, counts); err != nil {
+		if err := retentionUnlinkBlob(sha, dry, counts); err != nil {
 			return fmt.Errorf("unlink message: %w", err)
 		}
 	}

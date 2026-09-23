@@ -132,6 +132,44 @@ func TestRetentionPlanRecordsExpansion(t *testing.T) {
 	}
 }
 
+func TestRetentionRejectsNonHexDigests(t *testing.T) {
+	s := retentionServer(t)
+	at := time.Now().UTC()
+	tree := retentionBlob(t, "escape-tree")
+	config := filepath.Join(hubDataDir(), "hub.yaml")
+	retentionFile(t, config, "secret", at)
+	if err := recordCheckpointTree(s.db, "", "../../hub.yaml", nil); err == nil {
+		t.Fatal("non-hex root recorded")
+	}
+	insertTestCheckpoint(t, s, "cp", "manual")
+	body, err := json.Marshal(types.CheckpointPlan{RootSHA256: tree, Files: []types.CheckpointFile{{SHA256: "../../hub.yaml"}, {SHA256: ""}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/checkpoints/cp/plan", bytes.NewReader(body))
+	req.Header.Set("X-Claw-Token", "claw-token")
+	rr := httptest.NewRecorder()
+	s.handleCheckpointInternal(rr, req)
+	if rr.Code != 200 {
+		t.Fatalf("plan: %d %s", rr.Code, rr.Body.String())
+	}
+	if n := retentionCount(t, s, `SELECT COUNT(*) FROM checkpoint_tree_files`); n != 0 {
+		t.Fatalf("non-hex file recorded: %d", n)
+	}
+	// Rows written before validation existed must be dropped without unlinking.
+	retentionExec(t, s, `INSERT INTO checkpoint_tree_files VALUES(?,'../../hub.yaml')`, tree)
+	retentionExec(t, s, `UPDATE claw_checkpoints SET status='compacted',root_tree_sha256='',message_tree_sha256='../../hub.yaml' WHERE id='cp'`)
+	counts, err := s.collectCheckpointBlobs(at, false)
+	if err != nil || counts.trees != 1 || counts.blobs != 1 {
+		t.Fatalf("collection=%+v,%v", counts, err)
+	}
+	retentionExists(t, config, true)
+	retentionExists(t, checkpointBlobPath(tree), false)
+	if n := retentionCount(t, s, `SELECT COUNT(*) FROM checkpoint_tree_files`); n != 0 {
+		t.Fatalf("non-hex rows kept: %d", n)
+	}
+}
+
 func TestRetentionCompactionPreservesRetryAndRestorePointers(t *testing.T) {
 	s := retentionServer(t)
 	at := time.Now().UTC()
