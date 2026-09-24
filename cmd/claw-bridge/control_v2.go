@@ -684,6 +684,15 @@ func (s *controlSupervisor) recoverInterrupted(ctx context.Context, binding work
 		if err := json.Unmarshal(envelope.Payload, &task); err != nil {
 			continue
 		}
+		if current, ok := s.resumableTask(binding, task.ID); ok {
+			log.Printf("[control-v2] resuming task %s after bridge restart", task.ID)
+			if _, err := s.store.setIncomingStatus(envelope.MessageID, "running", "accepted"); err != nil {
+				log.Printf("[control-v2] reset interrupted task %s: %v", task.ID, err)
+				continue
+			}
+			s.startTask(ctx, binding, envelope.MessageID, *current)
+			continue
+		}
 		s.finishTask(binding, envelope.MessageID, task, typesv2.MessageAgentTaskFailed,
 			"bridge restarted while task execution outcome was unknown")
 	}
@@ -700,6 +709,27 @@ func (s *controlSupervisor) recoverInterrupted(ctx context.Context, binding work
 			s.startTask(ctx, binding, envelope.MessageID, task)
 		}
 	}
+}
+
+// resumableTask returns the authoritative task from the registration snapshot
+// when the hub still considers it the current non-terminal task. A restarted
+// bridge resumes such tasks instead of failing them; a task the hub has
+// already completed, cancelled, expired, or replaced is not resumable.
+func (s *controlSupervisor) resumableTask(binding workflowControlBinding, taskID string) (*typesv2.AgentTask, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.binding == nil || !s.binding.equal(binding) || s.snapshot == nil || s.snapshot.CurrentTask == nil {
+		return nil, false
+	}
+	task := s.snapshot.CurrentTask
+	if task.ID != taskID || task.Status.Terminal() {
+		return nil, false
+	}
+	if !task.Deadline.IsZero() && time.Now().UTC().After(task.Deadline) {
+		return nil, false
+	}
+	copyTask := *task
+	return &copyTask, true
 }
 
 func (s *controlSupervisor) claimRecovery(binding workflowControlBinding) bool {
