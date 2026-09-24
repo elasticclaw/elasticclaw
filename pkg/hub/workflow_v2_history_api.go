@@ -335,7 +335,8 @@ func (s *Server) queryWorkflowRunLogs(w http.ResponseWriter, r *http.Request, ru
 	if !ok {
 		return
 	}
-	cursor := logCursor{from: fromParsed, to: toParsed, before: beforeParsed}
+	beforeID := strings.TrimSpace(r.URL.Query().Get("before_id"))
+	cursor := logCursor{from: fromParsed, to: toParsed, before: beforeParsed, beforeID: beforeID}
 
 	query := `SELECT id, claw_id, tenant_id, role, content, COALESCE(format,''), COALESCE(user_login,''), created_at
 		FROM messages
@@ -360,13 +361,21 @@ func (s *Server) queryWorkflowRunLogs(w http.ResponseWriter, r *http.Request, ru
 		args = append(args, *toParsed)
 	}
 	if beforeParsed != nil {
-		query += ` AND created_at < ?`
-		args = append(args, *beforeParsed)
+		if beforeID != "" {
+			// Compound cursor: (created_at, id) is a total order, so a page
+			// boundary that lands inside a same-millisecond group does not
+			// skip the group's remaining rows on the next page.
+			query += ` AND (created_at < ? OR (created_at = ? AND id < ?))`
+			args = append(args, *beforeParsed, *beforeParsed, beforeID)
+		} else {
+			query += ` AND created_at < ?`
+			args = append(args, *beforeParsed)
+		}
 	}
 	if order == "desc" {
-		query += ` ORDER BY created_at DESC LIMIT ?`
+		query += ` ORDER BY created_at DESC, id DESC LIMIT ?`
 	} else {
-		query += ` ORDER BY created_at ASC LIMIT ?`
+		query += ` ORDER BY created_at ASC, id ASC LIMIT ?`
 	}
 	args = append(args, limit)
 
@@ -403,7 +412,8 @@ func (s *Server) queryWorkflowRunLogs(w http.ResponseWriter, r *http.Request, ru
 			jsonError(w, http.StatusInternalServerError, "fetch state transitions")
 			return
 		}
-		if !lifecycleVisible(window, cursor, time.UnixMilli(createdAtMs).UTC()) {
+		createdAt := time.UnixMilli(createdAtMs).UTC()
+		if !lifecycleVisible(window, cursor, createdAt, "transition-"+id) {
 			continue
 		}
 		msgs = append(msgs, types.HubMessage{
@@ -413,7 +423,7 @@ func (s *Server) queryWorkflowRunLogs(w http.ResponseWriter, r *http.Request, ru
 			Role:      "state",
 			Content:   fmt.Sprintf("Entered state: %s (from %s)", toState, fromState),
 			Format:    "workflow:state",
-			CreatedAt: time.UnixMilli(createdAtMs).UTC(),
+			CreatedAt: createdAt,
 		})
 	}
 	if err := transRows.Err(); err != nil {
@@ -444,9 +454,15 @@ func (s *Server) queryWorkflowRunLogs(w http.ResponseWriter, r *http.Request, ru
 	}
 
 	if order == "desc" {
-		sort.Slice(msgs, func(i, j int) bool { return msgs[i].CreatedAt.After(msgs[j].CreatedAt) })
+		sort.Slice(msgs, func(i, j int) bool {
+			return msgs[i].CreatedAt.After(msgs[j].CreatedAt) ||
+				(msgs[i].CreatedAt.Equal(msgs[j].CreatedAt) && msgs[i].ID > msgs[j].ID)
+		})
 	} else {
-		sort.Slice(msgs, func(i, j int) bool { return msgs[i].CreatedAt.Before(msgs[j].CreatedAt) })
+		sort.Slice(msgs, func(i, j int) bool {
+			return msgs[i].CreatedAt.Before(msgs[j].CreatedAt) ||
+				(msgs[i].CreatedAt.Equal(msgs[j].CreatedAt) && msgs[i].ID < msgs[j].ID)
+		})
 	}
 	if len(msgs) > limit {
 		msgs = msgs[:limit]
@@ -489,15 +505,22 @@ func (w attemptWindow) contains(ts int64) bool {
 
 // logCursor mirrors the activity query's from/to/before predicates so merged
 // lifecycle records paginate on the same timeline as activity rows instead of
-// repeating on every page. The comparisons match the SQL semantics exactly:
-// from is exclusive-lower, to and before are exclusive-upper.
+// repeating on every page. from and to are exclusive window bounds; before is
+// the page cursor: a strict upper bound on created_at, optionally compound
+// with beforeID so a page boundary inside a same-millisecond group cannot
+// skip the group's remaining rows.
 type logCursor struct {
-	from   *time.Time
-	to     *time.Time
-	before *time.Time
+	from     *time.Time
+	to       *time.Time
+	before   *time.Time
+	beforeID string
 }
 
-func (c logCursor) excludes(ts time.Time) bool {
+// excludes reports whether a merged row (ts, id) falls outside the cursor.
+// For the compound before cursor, "strictly older than the cursor row" is
+// ts < before OR (ts == before AND id < beforeID) in the (created_at, id)
+// total order — matching the SQL predicate exactly.
+func (c logCursor) excludes(ts time.Time, id string) bool {
 	if c.from != nil && !ts.After(*c.from) {
 		return true
 	}
@@ -505,18 +528,21 @@ func (c logCursor) excludes(ts time.Time) bool {
 		return true
 	}
 	if c.before != nil && !ts.Before(*c.before) {
-		return true
+		if c.beforeID == "" || !ts.Equal(*c.before) {
+			return true
+		}
+		return id >= c.beforeID
 	}
 	return false
 }
 
-// lifecycleVisible reports whether a merged lifecycle line at ts falls inside
-// the attempt window and the pagination cursor.
-func lifecycleVisible(window *attemptWindow, cursor logCursor, ts time.Time) bool {
+// lifecycleVisible reports whether a merged lifecycle line (ts, id) falls
+// inside the attempt window and the pagination cursor.
+func lifecycleVisible(window *attemptWindow, cursor logCursor, ts time.Time, id string) bool {
 	if window != nil && !window.contains(ts.UnixMilli()) {
 		return false
 	}
-	return !cursor.excludes(ts)
+	return !cursor.excludes(ts, id)
 }
 
 // lookupV2AttemptWindow returns the [started_at, finished_at] lifetime of a
@@ -562,7 +588,7 @@ func (s *Server) appendWorkflowV2EffectLogs(ctx context.Context, msgs []types.Hu
 		}
 		command := effectCommand(payloadJSON)
 		if !attemptNumber.Valid {
-			if attemptCount == 0 && lifecycleVisible(window, cursor, time.UnixMilli(effectCreated).UTC()) {
+			if attemptCount == 0 && lifecycleVisible(window, cursor, time.UnixMilli(effectCreated).UTC(), "effect-"+effectID) {
 				msgs, err = appendWorkflowEffectLogMessage(msgs, "effect-"+effectID, clawID, tenantID,
 					fmt.Sprintf("%s effect planned (waiting for worker)", kind),
 					types.WorkflowEffectEvent{Kind: kind, Phase: "planned", Status: effectStatus, DefinitionPath: definitionPath, Command: command},
@@ -574,8 +600,9 @@ func (s *Server) appendWorkflowV2EffectLogs(ctx context.Context, msgs []types.Hu
 			continue
 		}
 		attempt := int(attemptNumber.Int64)
-		if lifecycleVisible(window, cursor, time.UnixMilli(attemptStarted.Int64).UTC()) {
-			msgs, err = appendWorkflowEffectLogMessage(msgs, fmt.Sprintf("effect-%s-attempt-%d-start", effectID, attempt), clawID, tenantID,
+		startID := fmt.Sprintf("effect-%s-attempt-%d-start", effectID, attempt)
+		if lifecycleVisible(window, cursor, time.UnixMilli(attemptStarted.Int64).UTC(), startID) {
+			msgs, err = appendWorkflowEffectLogMessage(msgs, startID, clawID, tenantID,
 				fmt.Sprintf("%s effect started (attempt %d)", kind, attempt),
 				types.WorkflowEffectEvent{Kind: kind, Phase: "started", Status: "running", Attempt: attempt,
 					DefinitionPath: definitionPath, Command: command},
@@ -587,7 +614,8 @@ func (s *Server) appendWorkflowV2EffectLogs(ctx context.Context, msgs []types.Hu
 		if attemptFinished.Int64 <= 0 {
 			continue
 		}
-		if !lifecycleVisible(window, cursor, time.UnixMilli(attemptFinished.Int64).UTC()) {
+		finishID := fmt.Sprintf("effect-%s-attempt-%d-finish", effectID, attempt)
+		if !lifecycleVisible(window, cursor, time.UnixMilli(attemptFinished.Int64).UTC(), finishID) {
 			continue
 		}
 		event := types.WorkflowEffectEvent{Kind: kind, Phase: "finished", Status: attemptStatus.String, Attempt: attempt,
@@ -637,7 +665,7 @@ func (s *Server) appendWorkflowV2ExecOutcomeLogs(ctx context.Context, msgs []typ
 		if err := rows.Scan(&eventID, &kind, &factsJSON, &received); err != nil {
 			return nil, err
 		}
-		if !lifecycleVisible(window, cursor, time.UnixMilli(received).UTC()) {
+		if !lifecycleVisible(window, cursor, time.UnixMilli(received).UTC(), "event-"+eventID) {
 			continue
 		}
 		event, content, ok := execOutcomeEvent(kind, factsJSON)
@@ -727,8 +755,9 @@ func (s *Server) appendWorkflowV2AgentTaskLogs(ctx context.Context, msgs []types
 		if err := rows.Scan(&taskID, &status, &instructions, &terminalReason, &created, &finished); err != nil {
 			return nil, err
 		}
-		if !cursor.excludes(time.UnixMilli(created).UTC()) {
-			msgs, err = appendWorkflowEffectLogMessage(msgs, "agent-task-"+taskID+"-assigned", clawID, tenantID,
+		assignedID := "agent-task-" + taskID + "-assigned"
+		if !cursor.excludes(time.UnixMilli(created).UTC(), assignedID) {
+			msgs, err = appendWorkflowEffectLogMessage(msgs, assignedID, clawID, tenantID,
 				"agent task assigned",
 				types.WorkflowEffectEvent{Kind: "agent.task", Phase: "assigned", Status: status, Instructions: instructions},
 				time.UnixMilli(created))
@@ -739,14 +768,15 @@ func (s *Server) appendWorkflowV2AgentTaskLogs(ctx context.Context, msgs []types
 		if finished <= 0 {
 			continue
 		}
-		if cursor.excludes(time.UnixMilli(finished).UTC()) {
+		finishID := "agent-task-" + taskID + "-finish"
+		if cursor.excludes(time.UnixMilli(finished).UTC(), finishID) {
 			continue
 		}
 		content := "agent task " + status
 		if terminalReason != "" {
 			content += ": " + terminalReason
 		}
-		msgs, err = appendWorkflowEffectLogMessage(msgs, "agent-task-"+taskID+"-finish", clawID, tenantID,
+		msgs, err = appendWorkflowEffectLogMessage(msgs, finishID, clawID, tenantID,
 			content,
 			types.WorkflowEffectEvent{Kind: "agent.task", Phase: "finished", Status: status, TerminalReason: terminalReason},
 			time.UnixMilli(finished))
