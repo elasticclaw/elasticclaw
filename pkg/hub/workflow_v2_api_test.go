@@ -810,6 +810,122 @@ func TestWorkflowV2RunLogsPaginateLifecycleLinesWithCursor(t *testing.T) {
 	}
 }
 
+func TestWorkflowV2RunLogsCompoundCursorSurvivesTieGroups(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
+	store := workflowv2.NewStore(db)
+	base := time.Date(2026, 9, 24, 9, 0, 0, 0, time.UTC)
+	current := base
+	store.SetClock(func() time.Time { return current })
+
+	run, err := store.CreateRun(context.Background(), workflowv2.CreateRunRequest{
+		ID:            "run-tie-groups",
+		TenantID:      "test-tenant-id",
+		WorkspaceYAML: []byte(workflowV2ExecAPIWorkspace),
+		WorkflowYAML:  []byte(workflowV2ExecAPIWorkflow),
+		InitialClawID: "claw-tie-groups",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	insertTestClaw(t, db, "claw-tie-groups")
+
+	// Three lifecycle records share the T1 millisecond: effect start, effect
+	// finish, and the failed exec outcome (which fires no transition).
+	current = base.Add(time.Minute)
+	claim, err := store.ClaimEffect(context.Background(), "tie-worker", 5*time.Minute)
+	if err != nil || claim == nil {
+		t.Fatalf("claim = %#v, %v", claim, err)
+	}
+	assign, err := store.MaterializeCommandTask(context.Background(), claim.Effect.ID, claim.AttemptID, "tie-worker")
+	if err != nil {
+		t.Fatalf("materialize: %v", err)
+	}
+	receipt, err := json.Marshal(map[string]interface{}{
+		"exit_code": 1, "succeeded": false, "stdout": "boom", "stderr": "",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	version := run.StateVersion
+	if _, err := store.ApplyCommandReceipt(context.Background(), typesv2.ControlEnvelope{
+		ProtocolVersion:      typesv2.ControlProtocolVersion,
+		MessageID:            "receipt-tie-groups",
+		Kind:                 typesv2.MessageExecRunFailed,
+		RunID:                run.ID,
+		AttemptID:            run.CurrentAttemptID,
+		TaskID:               assign.TaskID,
+		ExpectedStateVersion: &version,
+		Payload:              receipt,
+	}); err != nil {
+		t.Fatalf("apply receipt: %v", err)
+	}
+
+	// Four activity rows newer than every lifecycle record, plus the initial
+	// transition at T0: eight rows total, with a three-row tie group at T1.
+	for i := 2; i <= 5; i++ {
+		if _, err := db.Exec(`INSERT INTO messages(id,claw_id,tenant_id,role,content,created_at) VALUES(?,?,?,?,?,?)`,
+			fmt.Sprintf("msg-tie-%d", i), "claw-tie-groups", "test-tenant-id", "activity",
+			fmt.Sprintf("activity %d", i), base.Add(time.Duration(i)*time.Minute)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	fetchPage := func(before, beforeID string) []types.HubMessage {
+		t.Helper()
+		path := "/api/v2/workflow-runs/run-tie-groups/logs?limit=3&order=desc"
+		if before != "" {
+			path += "&before=" + before + "&before_id=" + beforeID
+		}
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		req.Header.Set("Authorization", "Bearer test-token")
+		rr := httptest.NewRecorder()
+		s.mux.ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("GET %s status = %d, body = %s", path, rr.Code, rr.Body.String())
+		}
+		var messages []types.HubMessage
+		if err := json.NewDecoder(rr.Body).Decode(&messages); err != nil {
+			t.Fatal(err)
+		}
+		return messages
+	}
+
+	// Walk pages exactly like the client does: the compound cursor is the
+	// oldest row (created_at, id) of the previous page.
+	var seen []types.HubMessage
+	before, beforeID := "", ""
+	for page := 1; page <= 4; page++ {
+		messages := fetchPage(before, beforeID)
+		seen = append(seen, messages...)
+		if len(messages) < 3 {
+			break
+		}
+		oldest := messages[len(messages)-1]
+		before = oldest.CreatedAt.Format(time.RFC3339Nano)
+		beforeID = oldest.ID
+	}
+
+	ids := map[string]bool{}
+	activity, effect, state := 0, 0, 0
+	for _, m := range seen {
+		if ids[m.ID] {
+			t.Fatalf("row %s returned on multiple pages", m.ID)
+		}
+		ids[m.ID] = true
+		switch m.Role {
+		case "activity":
+			activity++
+		case "effect":
+			effect++
+		case "state":
+			state++
+		}
+	}
+	if len(seen) != 8 || activity != 4 || effect != 3 || state != 1 {
+		t.Fatalf("pages returned %d rows (activity %d, effect %d, state %d), want 8 (4/3/1) — tie-group rows were skipped", len(seen), activity, effect, state)
+	}
+}
+
 func TestWorkflowV2RunLogsIncludeEffectTaskAndExecOutcomeLines(t *testing.T) {
 	s, db := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
 	seedWorkflowV2ExecRun(t, s, db, "run-logs-effects", "claw-logs-effects")

@@ -31,7 +31,7 @@ export function WorkflowRunLogsDialog({ target }: { target: WorkflowRunLogTarget
     const attemptId = target.run.attempt_id
     return {
       fetchInitial: () => fetchV2WorkflowAttemptLogs(runId, attemptId),
-      fetchOlder: (before: string) => fetchV2WorkflowAttemptLogs(runId, attemptId, before),
+      fetchOlder: (before: string, beforeId?: string) => fetchV2WorkflowAttemptLogs(runId, attemptId, before, beforeId),
     }
   }, [target])
 
