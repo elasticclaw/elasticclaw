@@ -315,3 +315,27 @@ func TestConvertWorkflowV1ToV2WarnsAboutSessionResume(t *testing.T) {
 		})
 	}
 }
+
+func TestConvertWorkspaceV1ToV2WarnsAboutSessionResume(t *testing.T) {
+	for _, configured := range []bool{false, true} {
+		name := "omitted"
+		data := sampleWorkspaceV1
+		if configured {
+			name = "configured"
+			data += "\nsession_resume:\n  read_files: [NOTES.md]\n  state_check: Read the latest notes\n"
+		}
+		t.Run(name, func(t *testing.T) {
+			res, err := convert.Convert(convert.KindWorkspace, []byte(data), convert.Options{To: "2"})
+			if err != nil {
+				t.Fatalf("convert: %v", err)
+			}
+			warning := "session_resume: not represented in workspace v2 schema yet"
+			if got := strings.Contains(strings.Join(res.Warnings, "\n"), warning); got != configured {
+				t.Fatalf("session_resume warning = %v, want %v; warnings: %v", got, configured, res.Warnings)
+			}
+			if _, err := v2.ParseAndValidateWorkspace(res.Output); err != nil {
+				t.Fatalf("converted workspace invalid: %v", err)
+			}
+		})
+	}
+}

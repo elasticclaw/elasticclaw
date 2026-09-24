@@ -71,6 +71,9 @@ func convertWorkspaceV1ToV2(data []byte, opts Options) (Result, error) {
 	if err := yaml.Unmarshal(data, &raw); err != nil {
 		return Result{}, fmt.Errorf("parse workspace: %w", err)
 	}
+	if probe["session_resume"] != nil {
+		appendWarning(&warnings, "session_resume: not represented in workspace v2 schema yet")
+	}
 	// Re-parse repositories from probe for shorthand strings.
 	repos, repoWarns := parseV1Repositories(probe["repositories"])
 	warnings = append(warnings, repoWarns...)
