@@ -788,6 +788,10 @@ type RetentionConfig struct {
 // LivenessConfig controls boot reconciliation and the periodic safety-net reaper.
 // Durations use Go duration strings. Empty values receive conservative defaults.
 type LivenessConfig struct {
+	// SessionLossMaxConsecutive pauses after this many session recoveries in the
+	// same stage without progress (default 3; 0 disables). Only unthrottled
+	// recoveries count: the existing 10-minute recovery throttles mean repeated
+	// losses take more than 20 minutes to reach the default pause threshold.
 	SessionLossMaxConsecutive *int   `yaml:"session_loss_max_consecutive,omitempty" json:"sessionLossMaxConsecutive,omitempty"`
 	Enabled                   *bool  `yaml:"enabled,omitempty" json:"enabled,omitempty"`
 	OfflineGrace              string `yaml:"offline_grace,omitempty" json:"offlineGrace,omitempty"`
