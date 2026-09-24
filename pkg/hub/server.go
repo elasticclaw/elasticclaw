@@ -9316,6 +9316,9 @@ func (s *Server) lastInstructionBeforeLoss(clawID string) (role, content string,
 			return
 		}
 	}
+	if err := rows.Err(); err != nil {
+		log.Printf("[watchdog] read last instruction for %s: %v", shortID(clawID), err)
+	}
 	return "", "", time.Time{}
 }
 
@@ -9497,6 +9500,9 @@ func (s *Server) lastSubstantiveClawMessages(clawID string, limit int) []clawPro
 		if content != "" && !strings.HasPrefix(content, types.BridgeErrorPrefix) && !strings.HasPrefix(content, types.BridgeReplayErrorPrefix) {
 			result = append(result, clawProgress{content, at})
 		}
+	}
+	if err := rows.Err(); err != nil {
+		log.Printf("[watchdog] read recent claw messages for %s: %v", shortID(clawID), err)
 	}
 	return result
 }
