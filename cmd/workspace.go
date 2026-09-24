@@ -25,6 +25,7 @@ func WorkspaceCmd() *cobra.Command {
 	}
 	cmd.AddCommand(workspaceCreateCmd())
 	cmd.AddCommand(workspacePushCmd())
+	cmd.AddCommand(workspaceValidateCmd())
 	cmd.AddCommand(workspaceListCmd())
 	cmd.AddCommand(workspaceShowCmd())
 	cmd.AddCommand(workspaceRmCmd())
@@ -194,6 +195,45 @@ Use --path to push a workspace from a specific directory instead of the default 
 	return cmd
 }
 
+func workspaceValidateCmd() *cobra.Command {
+	var path string
+	cmd := &cobra.Command{
+		Use:   "validate [name]",
+		Short: "Validate workspace definitions without pushing",
+		Long: `Validate workspace definitions without pushing them to the hub.
+
+By default, searches factory-workspaces/ (preferred) and .elasticclaw/workspaces/
+and validates all valid workspaces.
+Pass a name to validate only the matching workspace.
+Use --path to validate a workspace from a specific directory instead of the default locations.`,
+		Args: cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			name := ""
+			if len(args) > 0 {
+				name = args[0]
+			}
+			return runWorkspaceValidate(name, path)
+		},
+	}
+	cmd.Flags().StringVar(&path, "path", "", "path to a specific workspace directory to validate (instead of factory-workspaces/)")
+	return cmd
+}
+
+func runWorkspaceValidate(filterName string, path string) error {
+	workspaces, err := collectAndValidateWorkspaces(filterName, path)
+	if err != nil {
+		return err
+	}
+	if len(workspaces) == 0 {
+		return fmt.Errorf("no workspaces matched")
+	}
+	fmt.Printf("Validated %d workspace(s):\n", len(workspaces))
+	for _, workspace := range workspaces {
+		fmt.Printf("  ✓ %s\n", workspace.Name)
+	}
+	return nil
+}
+
 func workspaceRmCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "rm <name>",
@@ -226,7 +266,7 @@ func runWorkspaceRm(name string) error {
 }
 
 func runWorkspacePush(filterName string, path string) error {
-	workspaces, err := collectWorkspacesForPush(filterName, path)
+	workspaces, err := collectAndValidateWorkspaces(filterName, path)
 	if err != nil {
 		return err
 	}
@@ -236,11 +276,11 @@ func runWorkspacePush(filterName string, path string) error {
 	return pushWorkspacesToHub(workspaces)
 }
 
-// collectWorkspacesForPush resolves the workspace directories to push.
-// If path is set, it pushes only that directory. Otherwise it scans
-// factory-workspaces/* then .elasticclaw/workspaces/*. The filterName
+// collectAndValidateWorkspaces resolves the workspace directories to load and
+// validates each one. If path is set, it loads only that directory. Otherwise it
+// scans factory-workspaces/* then .elasticclaw/workspaces/*. The filterName
 // optionally restricts results to a single workspace name.
-func collectWorkspacesForPush(filterName string, path string) ([]*types.WorkspaceConfig, error) {
+func collectAndValidateWorkspaces(filterName string, path string) ([]*types.WorkspaceConfig, error) {
 	var workspaces []*types.WorkspaceConfig
 
 	if path != "" {
