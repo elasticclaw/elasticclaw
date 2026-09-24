@@ -274,17 +274,37 @@ func (s *Server) queryWorkflowRunLogs(w http.ResponseWriter, r *http.Request, ru
 
 	query := `SELECT id, claw_id, tenant_id, role, content, COALESCE(format,''), COALESCE(user_login,''), created_at
 		FROM messages
-		WHERE claw_id = ? AND tenant_id = ? AND role = 'activity'`
-	args := []interface{}{clawID, tenantFromCtx(r)}
-	if window != nil {
-		// A retried attempt may reuse the same claw, so the activity stream is
-		// scoped to the attempt's lifetime as well, not just the claw.
+		WHERE tenant_id = ? AND role = 'activity'`
+	args := []interface{}{tenantFromCtx(r)}
+	if attemptID != "" {
+		// Attempt views scope activity to the attempt's claw; a retried attempt
+		// may reuse the same claw, so the stream is scoped to the attempt's
+		// lifetime as well.
+		query += ` AND claw_id = ?`
+		args = append(args, clawID)
 		query += ` AND created_at >= ?`
 		args = append(args, time.UnixMilli(window.start).UTC())
 		if window.end > 0 {
 			query += ` AND created_at <= ?`
 			args = append(args, time.UnixMilli(window.end).UTC())
 		}
+	} else {
+		// Run-level views aggregate activity across every attempt's claw so a
+		// retry with a fresh claw does not drop earlier sessions' activity.
+		claws, err := s.runAttemptClaws(r.Context(), runID)
+		if err != nil {
+			jsonError(w, http.StatusInternalServerError, "lookup workflow attempt claws")
+			return
+		}
+		if len(claws) == 0 {
+			claws = []string{clawID}
+		}
+		placeholders := make([]string, len(claws))
+		for i, claw := range claws {
+			placeholders[i] = "?"
+			args = append(args, claw)
+		}
+		query += ` AND claw_id IN (` + strings.Join(placeholders, ",") + `)`
 	}
 	if fromParsed != nil {
 		query += ` AND created_at > ?`
@@ -369,9 +389,11 @@ func (s *Server) queryWorkflowRunLogs(w http.ResponseWriter, r *http.Request, ru
 	// stdout/stderr receipts) so the log timeline explains what the workflow
 	// did, not just which states it passed through. Lifecycle lines honor the
 	// same cursor predicates as the activity rows so the merged page is a
-	// stable slice of one timeline.
+	// stable slice of one timeline. Attempt views keep only records exactly
+	// attributable to the attempt (persisted attempt_id); unattributable
+	// records stay visible in the run-level view.
 	tenantID := tenantFromCtx(r)
-	msgs, err = s.appendWorkflowV2EffectLogs(r.Context(), msgs, runID, clawID, tenantID, window, cursor)
+	msgs, err = s.appendWorkflowV2EffectLogs(r.Context(), msgs, runID, clawID, tenantID, attemptID, cursor)
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, "fetch effect lifecycle")
 		return
@@ -381,7 +403,7 @@ func (s *Server) queryWorkflowRunLogs(w http.ResponseWriter, r *http.Request, ru
 		jsonError(w, http.StatusInternalServerError, "fetch agent task lifecycle")
 		return
 	}
-	msgs, err = s.appendWorkflowV2ExecOutcomeLogs(r.Context(), msgs, runID, clawID, tenantID, window, cursor)
+	msgs, err = s.appendWorkflowV2ExecOutcomeLogs(r.Context(), msgs, runID, clawID, tenantID, attemptID, cursor)
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, "fetch exec outcomes")
 		return
@@ -491,17 +513,39 @@ func (s *Server) lookupV2AttemptWindow(ctx context.Context, runID, attemptID str
 	return window, nil
 }
 
+// runAttemptClaws returns the distinct claws that served any attempt of a run,
+// used to aggregate activity across retries in run-level log views.
+func (s *Server) runAttemptClaws(ctx context.Context, runID string) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT DISTINCT claw_id FROM workflow_v2_attempts WHERE run_id=? AND claw_id != '' ORDER BY claw_id`, runID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var claws []string
+	for rows.Next() {
+		var clawID string
+		if err := rows.Scan(&clawID); err != nil {
+			return nil, err
+		}
+		claws = append(claws, clawID)
+	}
+	return claws, rows.Err()
+}
+
 // appendWorkflowV2EffectLogs merges one log line per effect lifecycle point:
 // planned effects that were never claimed, each attempt start, and each attempt
 // finish with its receipt (exec.run stdout/stderr, exit code, dependency update
-// results) embedded as a structured WorkflowEffectEvent. When window is
-// non-nil only lifecycle points inside that run-attempt's session are merged;
-// lines outside the pagination cursor are skipped.
+// results) embedded as a structured WorkflowEffectEvent. Attempt views (non-
+// empty attemptID) keep only lines from effect attempts exactly attributed to
+// that run attempt; unattributable lines (planned effects, claimed but never
+// materialized attempts) stay visible in the run-level view. Lines outside the
+// pagination cursor are skipped.
 func (s *Server) appendWorkflowV2EffectLogs(ctx context.Context, msgs []types.HubMessage,
-	runID, clawID, tenantID string, window *attemptWindow, cursor logCursor) ([]types.HubMessage, error) {
+	runID, clawID, tenantID, attemptID string, cursor logCursor) ([]types.HubMessage, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT e.id, e.kind, e.definition_path, e.payload_json, e.status, e.attempt_count, e.created_at,
-			a.number, a.status, a.started_at, a.finished_at, a.receipt_json, a.error
+			a.number, a.attempt_id, a.status, a.started_at, a.finished_at, a.receipt_json, a.error
 		FROM workflow_v2_effects e
 		LEFT JOIN workflow_v2_effect_attempts a ON a.effect_id=e.id
 		WHERE e.run_id=? ORDER BY e.created_at, e.id, a.number`, runID)
@@ -513,16 +557,16 @@ func (s *Server) appendWorkflowV2EffectLogs(ctx context.Context, msgs []types.Hu
 		var effectID, kind, definitionPath, payloadJSON, effectStatus string
 		var attemptCount, effectCreated int64
 		var attemptNumber sql.NullInt64
-		var attemptStatus sql.NullString
+		var effectAttemptID, attemptStatus sql.NullString
 		var attemptStarted, attemptFinished sql.NullInt64
 		var receiptJSON, attemptError sql.NullString
 		if err := rows.Scan(&effectID, &kind, &definitionPath, &payloadJSON, &effectStatus, &attemptCount, &effectCreated,
-			&attemptNumber, &attemptStatus, &attemptStarted, &attemptFinished, &receiptJSON, &attemptError); err != nil {
+			&attemptNumber, &effectAttemptID, &attemptStatus, &attemptStarted, &attemptFinished, &receiptJSON, &attemptError); err != nil {
 			return nil, err
 		}
 		command := effectCommand(payloadJSON)
 		if !attemptNumber.Valid {
-			if attemptCount == 0 && lifecycleVisible(window, cursor, time.UnixMilli(effectCreated).UTC(), "effect-"+effectID) {
+			if attemptID == "" && attemptCount == 0 && !cursor.excludes(time.UnixMilli(effectCreated).UTC(), "effect-"+effectID) {
 				msgs, err = appendWorkflowEffectLogMessage(msgs, "effect-"+effectID, clawID, tenantID,
 					fmt.Sprintf("%s effect planned (waiting for worker)", kind),
 					types.WorkflowEffectEvent{Kind: kind, Phase: types.WorkflowEffectPhasePlanned, Status: effectStatus, DefinitionPath: definitionPath, Command: command},
@@ -533,9 +577,12 @@ func (s *Server) appendWorkflowV2EffectLogs(ctx context.Context, msgs []types.Hu
 			}
 			continue
 		}
+		if attemptID != "" && effectAttemptID.String != attemptID {
+			continue
+		}
 		attempt := int(attemptNumber.Int64)
 		startID := fmt.Sprintf("effect-%s-attempt-%d-start", effectID, attempt)
-		if lifecycleVisible(window, cursor, time.UnixMilli(attemptStarted.Int64).UTC(), startID) {
+		if !cursor.excludes(time.UnixMilli(attemptStarted.Int64).UTC(), startID) {
 			msgs, err = appendWorkflowEffectLogMessage(msgs, startID, clawID, tenantID,
 				fmt.Sprintf("%s effect started (attempt %d)", kind, attempt),
 				types.WorkflowEffectEvent{Kind: kind, Phase: types.WorkflowEffectPhaseStarted, Status: "running", Attempt: attempt,
@@ -549,7 +596,7 @@ func (s *Server) appendWorkflowV2EffectLogs(ctx context.Context, msgs []types.Hu
 			continue
 		}
 		finishID := fmt.Sprintf("effect-%s-attempt-%d-finish", effectID, attempt)
-		if !lifecycleVisible(window, cursor, time.UnixMilli(attemptFinished.Int64).UTC(), finishID) {
+		if cursor.excludes(time.UnixMilli(attemptFinished.Int64).UTC(), finishID) {
 			continue
 		}
 		if dispatchedEffectKinds[kind] && attemptStatus.String == string(workflowv2.EffectSucceeded) {
@@ -595,16 +642,23 @@ func (s *Server) appendWorkflowV2EffectLogs(ctx context.Context, msgs []types.Hu
 // exec.run/dependency.update completion events. The projected
 // exec.last_run.* / exec.dependency_update.* event facts carry the receipt
 // (stdout/stderr/exit code), so each execution's output appears in the
-// timeline even though effect receipts only record the assignment. When
-// window is non-nil only outcomes received inside that run-attempt's session
-// are merged; lines outside the pagination cursor are skipped.
+// timeline even though effect receipts only record the assignment. Attempt
+// views keep only outcomes whose producing attempt is persisted on the event
+// (attempt_id); outcomes recorded before that column existed stay visible in
+// the run-level view. Lines outside the pagination cursor are skipped.
 func (s *Server) appendWorkflowV2ExecOutcomeLogs(ctx context.Context, msgs []types.HubMessage,
-	runID, clawID, tenantID string, window *attemptWindow, cursor logCursor) ([]types.HubMessage, error) {
-	rows, err := s.db.QueryContext(ctx, `
+	runID, clawID, tenantID, attemptID string, cursor logCursor) ([]types.HubMessage, error) {
+	query := `
 		SELECT id, kind, facts_json, received_at FROM workflow_v2_events
 		WHERE run_id=? AND disposition='accepted' AND kind IN (
-			'exec.run.completed','exec.run.failed','dependency.update.completed','dependency.update.failed')
-		ORDER BY received_at, id`, runID)
+			'exec.run.completed','exec.run.failed','dependency.update.completed','dependency.update.failed')`
+	args := []interface{}{runID}
+	if attemptID != "" {
+		query += ` AND attempt_id=?`
+		args = append(args, attemptID)
+	}
+	query += ` ORDER BY received_at, id`
+	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -615,7 +669,7 @@ func (s *Server) appendWorkflowV2ExecOutcomeLogs(ctx context.Context, msgs []typ
 		if err := rows.Scan(&eventID, &kind, &factsJSON, &received); err != nil {
 			return nil, err
 		}
-		if !lifecycleVisible(window, cursor, time.UnixMilli(received).UTC(), "event-"+eventID) {
+		if cursor.excludes(time.UnixMilli(received).UTC(), "event-"+eventID) {
 			continue
 		}
 		event, content, ok := execOutcomeEvent(kind, factsJSON)

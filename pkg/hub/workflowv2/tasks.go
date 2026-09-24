@@ -161,8 +161,8 @@ func (s *Store) MaterializeAgentTask(ctx context.Context, effectID, effectAttemp
 		return typesv2.AgentTask{}, err
 	}
 	receiptJSON, _ := json.Marshal(map[string]interface{}{"task_id": task.ID, "message_id": envelope.MessageID})
-	if _, err := tx.ExecContext(ctx, `UPDATE workflow_v2_effect_attempts SET status='succeeded',receipt_json=?,finished_at=?
-		WHERE id=? AND effect_id=? AND status='running'`, string(receiptJSON), now.UnixMilli(), effectAttemptID, effectID); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE workflow_v2_effect_attempts SET status='succeeded',attempt_id=?,receipt_json=?,finished_at=?
+		WHERE id=? AND effect_id=? AND status='running'`, runAttemptID, string(receiptJSON), now.UnixMilli(), effectAttemptID, effectID); err != nil {
 		return typesv2.AgentTask{}, err
 	}
 	result, err = tx.ExecContext(ctx, `UPDATE workflow_v2_effects SET status='succeeded',lease_owner='',lease_expires_at=0,
