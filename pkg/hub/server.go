@@ -9414,7 +9414,7 @@ func (s *Server) lastInstructionBeforeLoss(clawID string) (role, content string,
 			"[hub] Automatic continuation paused", "[hub] The gateway has been unresponsive",
 			"[hub] Your previous session was lost", "[hub] GitHub API temporarily unavailable", "[hub] ▶",
 		} {
-			if strings.HasPrefix(content, prefix) {
+			if role == "hub" && strings.HasPrefix(content, prefix) {
 				bookkeeping = true
 				break
 			}

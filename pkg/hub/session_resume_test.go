@@ -400,3 +400,19 @@ func TestBoundResumeClawMessagesStopsAtExhaustedBudget(t *testing.T) {
 		t.Fatalf("exhausted budget retained empty entries: %#v", got)
 	}
 }
+
+func TestLastInstructionKeepsHumanMessageWithPendingResumeNotice(t *testing.T) {
+	for _, prefix := range []string{restartResumePrefix, sessionRotatedResumePrefix, sessionPreservedContinuationPrefix} {
+		t.Run(prefix, func(t *testing.T) {
+			s, db, id := newSessionResumeTestServer(t)
+			seedSessionResumeMessage(t, db, id, "user", "Old instruction", now().Add(-time.Hour))
+			human := prefix + " Recovery context.\n\nPlease fix the flaky test."
+			seedSessionResumeMessage(t, db, id, "user", human, now().Add(-time.Minute))
+			seedSessionResumeMessage(t, db, id, "hub", prefix+" Bookkeeping.", now())
+			role, content, _ := s.lastInstructionBeforeLoss(id)
+			if role != "user" || content != human {
+				t.Fatalf("last instruction = %s %q", role, content)
+			}
+		})
+	}
+}
