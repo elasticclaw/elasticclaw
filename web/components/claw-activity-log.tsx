@@ -167,6 +167,7 @@ function WorkflowEffectLine({ message, event }: { message: ApiMessage; event: Wo
           <span className="text-xs text-muted-foreground">{message.content}</span>
         </div>
         {event.command && <div className="break-all rounded bg-muted px-2 py-1 font-mono text-xs text-foreground">{event.command}</div>}
+        {event.task_id && <div className="text-xs text-muted-foreground">task {event.task_id}</div>}
         {event.exit_code !== undefined && <div className="text-xs text-muted-foreground">exit code {event.exit_code}</div>}
         {event.error && <div className="break-words text-destructive">{event.error}</div>}
         {event.terminal_reason && <div className="break-words text-destructive">{event.terminal_reason}</div>}
