@@ -1416,6 +1416,15 @@ func TestRestoreCLIModelAuthMigratesGrokOAuthToOpenClaw(t *testing.T) {
 }
 
 func TestSanitizeActivityTextRedactsRepeatedSecretPrefixes(t *testing.T) {
+	for _, input := range []string{`GH_TOKEN="secret"`, `GH_TOKEN='secret'`, `Bearer "abc"`, `GH_TOKEN="secret`} {
+		t.Run(input, func(t *testing.T) {
+			got := sanitizeActivityText(input)
+			if strings.Contains(got, "secret") || strings.Contains(got, "abc") || !strings.HasSuffix(got, "[redacted]") {
+				t.Fatalf("quoted secret leaked: %q", got)
+			}
+		})
+	}
+
 	input := `curl "https://api.example.com?access_token=abc&access_token=xyz" -H "Authorization: Bearer tok1" -H "X-Alt: Bearer tok2"`
 	got := sanitizeActivityText(input)
 	if strings.Contains(got, "abc") || strings.Contains(got, "xyz") || strings.Contains(got, "tok1") || strings.Contains(got, "tok2") {

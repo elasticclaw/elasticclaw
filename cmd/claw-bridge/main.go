@@ -1267,8 +1267,19 @@ func redactActivityPrefix(value, prefix, replacement string) string {
 		}
 		start := offset + idx
 		end := start + len(prefix)
-		for end < len(value) && value[end] != ' ' && value[end] != '&' && value[end] != '"' && value[end] != '\'' {
+		if end < len(value) && (value[end] == '"' || value[end] == '\'') {
+			q := value[end]
 			end++
+			for end < len(value) && value[end] != q {
+				end++
+			}
+			if end < len(value) {
+				end++
+			}
+		} else {
+			for end < len(value) && value[end] != ' ' && value[end] != '&' && value[end] != '"' && value[end] != '\'' {
+				end++
+			}
 		}
 		value = value[:start] + replacement + value[end:]
 		offset = start + len(replacement)
