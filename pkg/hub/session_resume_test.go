@@ -402,16 +402,68 @@ func TestBoundResumeClawMessagesStopsAtExhaustedBudget(t *testing.T) {
 }
 
 func TestLastInstructionKeepsHumanMessageWithPendingResumeNotice(t *testing.T) {
-	for _, prefix := range []string{restartResumePrefix, sessionRotatedResumePrefix, sessionPreservedContinuationPrefix} {
+	for _, prefix := range []string{restartResumePrefix, sessionRotatedResumePrefix, sessionPreservedContinuationPrefix, "[hub] Your previous session was lost"} {
 		t.Run(prefix, func(t *testing.T) {
 			s, db, id := newSessionResumeTestServer(t)
 			seedSessionResumeMessage(t, db, id, "user", "Old instruction", now().Add(-time.Hour))
-			human := prefix + " Recovery context.\n\nPlease fix the flaky test."
-			seedSessionResumeMessage(t, db, id, "user", human, now().Add(-time.Minute))
+			human := "Please fix the flaky test."
+			seedSessionResumeMessage(t, db, id, "user", prefix+" Recovery context.\n\n"+human, now().Add(-time.Minute))
 			seedSessionResumeMessage(t, db, id, "hub", prefix+" Bookkeeping.", now())
 			role, content, _ := s.lastInstructionBeforeLoss(id)
 			if role != "user" || content != human {
 				t.Fatalf("last instruction = %s %q", role, content)
+			}
+		})
+	}
+}
+
+func TestLastInstructionStripsGeneratedPendingResumeNoticeBeforeTruncation(t *testing.T) {
+	for _, recovery := range []struct{ prefix, marker string }{
+		{restartResumePrefix, "restart:test"},
+		{sessionRotatedResumePrefix, "session_rotated:test"},
+	} {
+		t.Run(recovery.marker, func(t *testing.T) {
+			s, db, id := newSessionResumeTestServer(t)
+			if _, err := db.Exec(`UPDATE claws SET no_progress_paused=1 WHERE id=?`, id); err != nil {
+				t.Fatal(err)
+			}
+			edge := types.SessionRecoveryEdge{Digest: &types.SessionDigest{AssistantMessages: []string{strings.Repeat("Previous work. ", 200)}}}
+			s.enqueueSessionLostResume(id, recovery.prefix, recovery.marker, edge, "")
+			var notice string
+			if err := db.QueryRow(`SELECT pending_session_loss_notice FROM claws WHERE id=?`, id).Scan(&notice); err != nil {
+				t.Fatal(err)
+			}
+			if len([]rune(notice)) <= resumeInstructionRunes || !strings.Contains(notice, "<<<PREVIOUS_AGENT_OUTPUT") || !strings.HasSuffix(notice, "<!-- "+recovery.marker+" -->\n\n") {
+				t.Fatalf("missing long generated notice: %q", notice)
+			}
+			human := "Please fix the flaky test.\n\nKeep the existing API."
+			seedSessionResumeMessage(t, db, id, "user", notice+human, now().Add(-time.Minute))
+			role, content, _ := s.lastInstructionBeforeLoss(id)
+			if role != "user" || content != human {
+				t.Fatalf("last instruction = %s %q", role, content)
+			}
+			if _, err := db.Exec(`UPDATE claws SET no_progress_paused=0 WHERE id=?`, id); err != nil {
+				t.Fatal(err)
+			}
+			s.enqueueSessionLostResume(id, recovery.prefix, recovery.marker+"-next", types.SessionRecoveryEdge{}, "")
+			prompt := sessionResumePrompt(t, db, id, recovery.prefix)
+			if !strings.Contains(prompt, "<<<LAST_INSTRUCTION\n"+human+"\nLAST_INSTRUCTION>>>") {
+				t.Fatalf("human instruction truncated by notice: %s", prompt)
+			}
+		})
+	}
+}
+
+func TestStripPendingSessionLossNotice(t *testing.T) {
+	for _, tc := range []struct{ name, content, want string }{
+		{"ordinary human", "Please fix this.\n\nKeep this paragraph.", "Please fix this.\n\nKeep this paragraph."},
+		{"incomplete notice", restartResumePrefix + " Context.", restartResumePrefix + " Context."},
+		{"nested marker", restartResumePrefix + " Context.\n\n<!-- restart:old -->\n\nPrevious output.\n\n<!-- restart:new -->\n\nPlease continue.", "Please continue."},
+		{"preserved marker", sessionPreservedContinuationPrefix + " Context.\n\nStage instructions.\n\n<!-- session_preserved:test -->\n\nPlease continue.", "Please continue."},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := stripPendingSessionLossNotice(tc.content); got != tc.want {
+				t.Fatalf("got %q, want %q", got, tc.want)
 			}
 		})
 	}

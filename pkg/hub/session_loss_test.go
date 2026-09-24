@@ -873,3 +873,123 @@ func TestSessionLossGraceExpiryWhileDisconnectedKeepsIncident(t *testing.T) {
 		t.Fatalf("replayed incident lost or duplicated: streak=%d paused=%v", streak, paused)
 	}
 }
+
+func TestSessionLossDelayedEdgeDoesNotInterruptNextTurn(t *testing.T) {
+	s, db, id := newSessionResumeTestServer(t)
+	cc := &clawConn{id: id, tenantID: "test-tenant-id", awaitingResponse: true, turnInputMessageID: "T1", deliveryInFlight: true}
+	s.claws[id] = cc
+	before := s.sessionLossProgressMark(id)
+	// T1's disconnect reply ends the turn, then a queued T2 is delivered.
+	s.recordSessionLossCompletedTurn(id, types.BridgeErrorPrefix+" gateway disconnected")
+	cc.finishTurnLocked()
+	cc.awaitingResponse = true
+	cc.turnInputMessageID = "T2"
+	cc.streamingStartedAt = time.Now()
+	cc.streamingMsgID = "T2-output"
+	s.noteSessionLoss(cc, id, "B", "session_rotated", types.SessionRecoveryEdge{
+		SessionKey: "B", PreviousSessionKey: "A", InterruptedMessageID: "T1",
+	}, "")
+	if cc.sessionLossInterrupted != 0 {
+		t.Fatal("T1's delayed loss interrupted T2")
+	}
+	// Match the terminal-response path: only non-interrupted replies count.
+	completedNormally := cc.sessionLossInterrupted != cc.sessionLossTurnSequence+1
+	cc.finishTurnLocked()
+	if completedNormally {
+		s.recordSessionLossCompletedTurn(id, "Completed T2 successfully")
+	}
+	if s.sessionLossProgressMark(id) == before {
+		t.Fatal("T2's healthy reply did not count as progress")
+	}
+	f := sessionLossFixture{s: s, db: db, cc: cc, clawID: id}
+	f.expireThrottle(t)
+	s.enqueueSessionRotatedResume(id, types.SessionRecoveryEdge{}, "")
+	if streak, _, paused := f.state(t); streak != 1 || paused {
+		t.Fatalf("T2 did not reset loss streak: streak=%d paused=%v", streak, paused)
+	}
+}
+
+func TestInterruptSessionLossTurnUsesIdentityAndLegacyObservation(t *testing.T) {
+	observed := time.Now()
+	for _, tc := range []struct {
+		name, messageID string
+		started         time.Time
+		busy, want      bool
+	}{
+		{"matching input", "T2", observed.Add(time.Second), true, true},
+		{"earlier input", "T1", observed.Add(-time.Second), true, false},
+		{"legacy already open", "", observed.Add(-time.Second), true, true},
+		{"legacy later turn", "", observed.Add(time.Second), true, false},
+		{"idle", "T2", time.Time{}, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cc := &clawConn{turnInputMessageID: "T2", awaitingResponse: tc.busy, streamingStartedAt: tc.started}
+			cc.interruptSessionLossTurnLocked(tc.messageID, observed)
+			if got := cc.sessionLossInterrupted != 0; got != tc.want {
+				t.Fatalf("interrupted=%v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestSessionLossLateEdgeClaimsConsumedOldKey(t *testing.T) {
+	s, db, id := newSessionResumeTestServer(t)
+	max := 2
+	s.hubCfg.Liveness = &types.LivenessConfig{SessionLossMaxConsecutive: &max}
+	cc := &clawConn{id: id, tenantID: "test-tenant-id", awaitingResponse: true, deliveryInFlight: true}
+	s.claws[id] = cc
+	f := sessionLossFixture{s: s, db: db, cc: cc, clawID: id}
+	s.noteSessionLoss(cc, id, "A", "restart_count", types.SessionRecoveryEdge{}, "")
+	expireHeartbeatSessionLoss(t, s, cc, id)
+	s.noteSessionLoss(cc, id, "B", "session_rotated", types.SessionRecoveryEdge{SessionKey: "B", PreviousSessionKey: "A", TranscriptPath: "/tmp/late.jsonl"}, "")
+	if streak, _, paused := f.state(t); streak != 1 || paused || f.count(t, restartResumePrefix) != 1 || f.count(t, sessionRotatedResumePrefix) != 0 {
+		t.Fatalf("late edge counted or enriched consumed incident: streak=%d paused=%v", streak, paused)
+	}
+	// A duplicate heartbeat must not turn the replacement into an old-key alias.
+	s.noteSessionLoss(cc, id, "B", "gateway_session_key", types.SessionRecoveryEdge{}, "")
+	// A further B -> C rotation really is a second incident.
+	s.noteSessionLoss(cc, id, "C", "session_rotated", types.SessionRecoveryEdge{SessionKey: "C", PreviousSessionKey: "B"}, "")
+	if streak, _, paused := f.state(t); streak != 2 || !paused {
+		t.Fatalf("distinct subsequent loss was swallowed: streak=%d paused=%v", streak, paused)
+	}
+}
+
+func TestSessionLossOldKeyExpiryAfterRegistrationWaitsForReplay(t *testing.T) {
+	s, db, id := newSessionResumeTestServer(t)
+	cc := &clawConn{id: id, tenantID: "test-tenant-id", awaitingResponse: true, deliveryInFlight: true}
+	s.claws[id] = cc
+	s.noteSessionLoss(cc, id, "A", "restart_count", types.SessionRecoveryEdge{}, "")
+	pending := s.sessionLosses[id].pending["A"]
+	pending.timer.Stop()
+	t.Cleanup(func() { pending.timer.Stop() })
+	// The old socket is replaced before its metadata timer fires.
+	fresh := &clawConn{id: id, tenantID: "test-tenant-id", connectedAt: time.Now(), deliveryInFlight: true}
+	s.claws[id] = fresh
+	s.finishHeartbeatSessionLoss(cc, id, pending)
+	f := sessionLossFixture{s: s, db: db, cc: fresh, clawID: id}
+	if s.sessionLosses[id].pending["A"] != pending || f.count(t, restartResumePrefix) != 0 {
+		t.Fatal("fresh registration consumed the old-key incident before replay")
+	}
+	s.noteSessionLoss(fresh, id, "B", "session_rotated", types.SessionRecoveryEdge{SessionKey: "B", PreviousSessionKey: "A", TranscriptPath: "/tmp/replayed.jsonl"}, "")
+	s.finishHeartbeatSessionLoss(cc, id, pending)
+	if streak, _, paused := f.state(t); streak != 1 || paused || f.count(t, sessionRotatedResumePrefix) != 1 {
+		t.Fatalf("replayed incident lost or duplicated: streak=%d paused=%v", streak, paused)
+	}
+	if !strings.Contains(sessionResumePrompt(t, db, id, sessionRotatedResumePrefix), "/tmp/replayed.jsonl") {
+		t.Fatal("replayed context lost")
+	}
+}
+
+func TestSessionLossRepeatedPreviousKeyIsOneIncident(t *testing.T) {
+	s, db, id := newSessionResumeTestServer(t)
+	cc := &clawConn{id: id, tenantID: "test-tenant-id", awaitingResponse: true, deliveryInFlight: true}
+	s.claws[id] = cc
+	f := sessionLossFixture{s: s, db: db, cc: cc, clawID: id}
+	s.noteSessionLoss(cc, id, "B", "session_rotated", types.SessionRecoveryEdge{PreviousSessionKey: "A"}, "")
+	f.expireThrottle(t)
+	// The reconnect notification can observe a newer key at emit time.
+	s.noteSessionLoss(cc, id, "C", "session_rotated", types.SessionRecoveryEdge{PreviousSessionKey: "A"}, "")
+	if streak, _, paused := f.state(t); streak != 1 || paused || f.count(t, sessionRotatedResumePrefix) != 1 {
+		t.Fatalf("same previous key counted again: streak=%d paused=%v", streak, paused)
+	}
+}
