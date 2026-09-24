@@ -61,6 +61,20 @@ func TestSessionTranscriptLogBounds(t *testing.T) {
 }
 
 func TestSessionTranscriptLogRedactsAndTruncates(t *testing.T) {
+	for _, input := range []string{`GH_TOKEN="secret"`, `GH_TOKEN='secret'`, `Bearer "abc"`, `GH_TOKEN="secret`} {
+		t.Run(input, func(t *testing.T) {
+			var log sessionTranscriptLog
+			log.noteAssistant(input)
+			log.noteTool(agentActivity{Kind: "tool", Phase: "running", Tool: "exec", Command: input})
+			digest := log.snapshot()
+			for _, got := range []string{digest.AssistantMessages[0], digest.ToolCalls[0].Args} {
+				if strings.Contains(got, "secret") || strings.Contains(got, "abc") || !strings.HasSuffix(got, "[redacted]") {
+					t.Fatalf("digest leaked quoted secret: %q", got)
+				}
+			}
+		})
+	}
+
 	var log sessionTranscriptLog
 	secret := "Bearer abc GITHUB_TOKEN=x "
 	log.noteAssistant(secret + strings.Repeat("界", 700))

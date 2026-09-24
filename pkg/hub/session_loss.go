@@ -19,16 +19,16 @@ type sessionLossQuerier interface {
 // sessionLossProgressMark uses stage and authored output, independent of the
 // workspace's tools. Row identity distinguishes messages with equal timestamps.
 func (s *Server) sessionLossProgressMark(clawID string) string {
-	mark, _, _ := readSessionLossProgressMark(s.db, clawID)
+	mark, _, _ := readSessionLossProgressMark(s.db, clawID, "")
 	return mark
 }
 
-func readSessionLossProgressMark(q sessionLossQuerier, clawID string) (mark, stage string, err error) {
+func readSessionLossProgressMark(q sessionLossQuerier, clawID, interruptedMsgID string) (mark, stage string, err error) {
 	if err = q.QueryRow(`SELECT pipeline_stage FROM claws WHERE id=?`, clawID).Scan(&stage); err != nil {
 		return
 	}
 	mark = stage + "|"
-	rows, err := q.Query(`SELECT content, created_at, rowid FROM messages WHERE claw_id=? AND role='claw' ORDER BY created_at DESC, rowid DESC LIMIT 50`, clawID)
+	rows, err := q.Query(`SELECT content, created_at, rowid FROM messages WHERE claw_id=? AND role='claw' AND id <> ? ORDER BY created_at DESC, rowid DESC LIMIT 50`, clawID, interruptedMsgID)
 	if err != nil {
 		return
 	}
@@ -52,7 +52,7 @@ func readSessionLossProgressMark(q sessionLossQuerier, clawID string) (mark, sta
 
 // sessionLossLoopGuard counts only eligible, unthrottled recoveries. Progress
 // resets the streak; reaching the limit pauses delivery until human input.
-func (s *Server) sessionLossLoopGuard(clawID, reason string) bool {
+func (s *Server) sessionLossLoopGuard(clawID, reason, interruptedMsgID string) bool {
 	max := s.livenessSettings().sessionLossMax
 	if max <= 0 {
 		return false
@@ -64,20 +64,27 @@ func (s *Server) sessionLossLoopGuard(clawID, reason string) bool {
 	defer s.noProgressMu.Unlock()
 	tx, err := s.db.Begin()
 	if err != nil {
-		log.Printf("[watchdog] begin session-loss guard for %s: %v", shortID(clawID), err)
-		return true
+		log.Printf("[watchdog] session-loss guard for %s: %v", shortID(clawID), err)
+		return false
 	}
 	defer tx.Rollback()
 	var streak int
 	var previous string
 	var paused bool
-	if err := tx.QueryRow(`SELECT session_loss_streak, session_loss_progress_mark, no_progress_paused != 0 FROM claws WHERE id=?`, clawID).Scan(&streak, &previous, &paused); err != nil || paused {
+	if err := tx.QueryRow(`SELECT session_loss_streak, session_loss_progress_mark, no_progress_paused != 0 FROM claws WHERE id=?`, clawID).Scan(&streak, &previous, &paused); err != nil {
+		log.Printf("[watchdog] session-loss guard for %s: %v", shortID(clawID), err)
+		return false
+	}
+	if paused {
+		// Release the transaction before resolving hints and storing the notice.
+		_ = tx.Rollback()
+		s.recordPausedSessionLossNotice(clawID, "session-loss resume")
 		return true
 	}
-	mark, stage, err := readSessionLossProgressMark(tx, clawID)
+	mark, stage, err := readSessionLossProgressMark(tx, clawID, interruptedMsgID)
 	if err != nil {
-		log.Printf("[watchdog] read session-loss progress for %s: %v", shortID(clawID), err)
-		return true
+		log.Printf("[watchdog] session-loss guard for %s: %v", shortID(clawID), err)
+		return false
 	}
 	if mark != previous {
 		streak = 1
@@ -87,11 +94,12 @@ func (s *Server) sessionLossLoopGuard(clawID, reason string) bool {
 	// Latch the pause in the same transaction as the progress check, so a
 	// stage change or authored message cannot land between checking and pausing.
 	if _, err := tx.Exec(`UPDATE claws SET session_loss_streak=?, session_loss_progress_mark=?, no_progress_paused=? WHERE id=?`, streak, mark, boolInt(streak >= max), clawID); err != nil {
-		return true
+		log.Printf("[watchdog] session-loss guard for %s: %v", shortID(clawID), err)
+		return false
 	}
 	if err := tx.Commit(); err != nil {
-		log.Printf("[watchdog] commit session-loss guard for %s: %v", shortID(clawID), err)
-		return true
+		log.Printf("[watchdog] session-loss guard for %s: %v", shortID(clawID), err)
+		return false
 	}
 	if streak < max {
 		return false

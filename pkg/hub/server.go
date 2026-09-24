@@ -3295,7 +3295,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 				}
 				s.heartbeatWorkflowVolumeLeases(clawID)
 				if shouldNoteSessionLoss {
-					go s.noteSessionLoss(cc, clawID, sessionLossKey, sessionLossSource, types.SessionRecoveryEdge{})
+					go s.noteSessionLoss(cc, clawID, sessionLossKey, sessionLossSource, types.SessionRecoveryEdge{}, "")
 				}
 				if shouldEscalateGateway {
 					// Re-read the claw state before escalating: idle/completed claws
@@ -3643,20 +3643,24 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		} else if msg.Type == "session_rotated" {
+			cc.mu.RLock()
+			interruptedMsgID := cc.streamingMsgID
+			cc.mu.RUnlock()
 			var edge types.SessionRecoveryEdge
 			raw, _ := json.Marshal(msg.Payload)
 			_ = json.Unmarshal(raw, &edge)
-			go s.noteSessionLoss(cc, clawID, edge.SessionKey, "session_rotated", edge)
+			go s.noteSessionLoss(cc, clawID, edge.SessionKey, "session_rotated", edge, interruptedMsgID)
 		} else if msg.Type == "session_preserved" {
 			// A preserved turn positively proves the transport reached the agent,
 			// even though it has no reply body to reach observeTurnOutcome.
 			cc.mu.Lock()
 			cc.bridgeErrorStreak = 0
+			interruptedMsgID := cc.streamingMsgID
 			cc.mu.Unlock()
 			var edge types.SessionRecoveryEdge
 			raw, _ := json.Marshal(msg.Payload)
 			_ = json.Unmarshal(raw, &edge)
-			go s.enqueueSessionPreservedContinuation(clawID, edge)
+			go s.enqueueSessionPreservedContinuation(clawID, edge, interruptedMsgID)
 		} else if msg.Type == "model_auth_sync" {
 			if !modelAuthAuthorized {
 				continue
@@ -9002,8 +9006,19 @@ const (
 	restartResumePrefix                = "[hub] Agent process restart detected."
 	sessionRotatedResumePrefix         = "[hub] OpenClaw session reset detected."
 	sessionPreservedContinuationPrefix = "[hub] OpenClaw session preserved after lock conflict."
-	sessionLossPendingNotice           = "[hub] Your previous session was lost, so you have no memory of the earlier conversation. Your workspace on disk is intact. Before continuing, recover the current state from the workspace (including git status); do not start over from scratch.\n\n"
 )
+
+func (s *Server) sessionLossPendingNoticeFor(clawID string) string {
+	return "[hub] Your previous session was lost, so you have no memory of the earlier conversation. Your workspace on disk is intact. " + renderSessionResumeRecovery(s.sessionResumeHintsForClaw(clawID)) + "\n\n"
+}
+
+func (s *Server) recordPausedSessionLossNotice(clawID, source string) {
+	if _, err := s.db.Exec(`UPDATE claws SET pending_session_loss_notice=? WHERE id=? AND pending_session_loss_notice=''`, s.sessionLossPendingNoticeFor(clawID), clawID); err != nil {
+		log.Printf("[watchdog] persist session-loss notice for %s: %v", shortID(clawID), err)
+		return
+	}
+	log.Printf("[watchdog] skipping %s for %s: paused; recorded pending session-loss notice", source, shortID(clawID))
+}
 
 // noteSessionLoss records one session-loss incident, identified by the key of
 // the session that replaced the lost one. The same incident is detected up to
@@ -9011,11 +9026,7 @@ const (
 // keying on the new session key collapses them into one prompt without
 // collapsing two genuinely separate losses, which a time-based throttle could
 // not distinguish.
-func (s *Server) noteSessionLoss(cc *clawConn, clawID, newKey, source string, edges ...types.SessionRecoveryEdge) {
-	var edge types.SessionRecoveryEdge
-	if len(edges) > 0 {
-		edge = edges[0]
-	}
+func (s *Server) noteSessionLoss(cc *clawConn, clawID, newKey, source string, edge types.SessionRecoveryEdge, interruptedMsgID string) {
 	if edge.Reason == "" {
 		edge.Reason = types.SessionLossReasonUnknown
 	}
@@ -9036,7 +9047,7 @@ func (s *Server) noteSessionLoss(cc *clawConn, clawID, newKey, source string, ed
 		// real prompt needs this context so it does not mistake a lost transcript
 		// for an empty workspace. Keep the first notice: more losses add no useful
 		// instruction and would make the eventual prompt noisy.
-		if res, err := s.db.Exec(`UPDATE claws SET pending_session_loss_notice=? WHERE id=? AND pending_session_loss_notice=''`, sessionLossPendingNotice, clawID); err != nil {
+		if res, err := s.db.Exec(`UPDATE claws SET pending_session_loss_notice=? WHERE id=? AND pending_session_loss_notice=''`, s.sessionLossPendingNoticeFor(clawID), clawID); err != nil {
 			log.Printf("[watchdog] persist session-loss notice for %s: %v", shortID(clawID), err)
 		} else if n, _ := res.RowsAffected(); n > 0 {
 			log.Printf("[watchdog] recorded session-loss notice for idle claw %s (source=%s)", shortID(clawID), source)
@@ -9044,7 +9055,7 @@ func (s *Server) noteSessionLoss(cc *clawConn, clawID, newKey, source string, ed
 		return
 	}
 	if source == "session_rotated" {
-		s.enqueueSessionRotatedResume(clawID, edge)
+		s.enqueueSessionRotatedResume(clawID, edge, interruptedMsgID)
 		return
 	}
 	// A live session key makes the marker stable across all reports of this
@@ -9055,7 +9066,7 @@ func (s *Server) noteSessionLoss(cc *clawConn, clawID, newKey, source string, ed
 	if newKey == "" {
 		marker = "restart:" + uuid.NewString()
 	}
-	s.enqueueSessionLostResume(clawID, restartResumePrefix, marker, edge)
+	s.enqueueSessionLostResume(clawID, restartResumePrefix, marker, edge, interruptedMsgID)
 }
 
 // sessionRotatedResumeThrottle bounds the rotation → resume → rotation loop:
@@ -9082,11 +9093,7 @@ const sessionRotatedResumeThrottle = 10 * time.Minute
 // deleting genuine progress. Tracked in elasticclaw/elasticclaw#667.
 const sessionPreservedContinuationThrottle = 10 * time.Minute
 
-func (s *Server) enqueueSessionRotatedResume(clawID string, edges ...types.SessionRecoveryEdge) {
-	var edge types.SessionRecoveryEdge
-	if len(edges) > 0 {
-		edge = edges[0]
-	}
+func (s *Server) enqueueSessionRotatedResume(clawID string, edge types.SessionRecoveryEdge, interruptedMsgID string) {
 	if edge.Reason == "" {
 		edge.Reason = types.SessionLossReasonUnknown
 	}
@@ -9103,14 +9110,10 @@ func (s *Server) enqueueSessionRotatedResume(clawID string, edges ...types.Sessi
 		log.Printf("[watchdog] skipping session-rotated resume for %s: already resumed within %s", shortID(clawID), sessionRotatedResumeThrottle)
 		return
 	}
-	s.enqueueSessionLostResume(clawID, sessionRotatedResumePrefix, fmt.Sprintf("session_rotated:%s", uuid.NewString()), edge)
+	s.enqueueSessionLostResume(clawID, sessionRotatedResumePrefix, fmt.Sprintf("session_rotated:%s", uuid.NewString()), edge, interruptedMsgID)
 }
 
-func (s *Server) enqueueSessionPreservedContinuation(clawID string, edges ...types.SessionRecoveryEdge) {
-	var edge types.SessionRecoveryEdge
-	if len(edges) > 0 {
-		edge = edges[0]
-	}
+func (s *Server) enqueueSessionPreservedContinuation(clawID string, edge types.SessionRecoveryEdge, interruptedMsgID string) {
 	if edge.Reason == "" {
 		edge.Reason = types.SessionLossReasonUnknown
 	}
@@ -9123,10 +9126,14 @@ func (s *Server) enqueueSessionPreservedContinuation(clawID string, edges ...typ
 	}
 	var status string
 	var bootstrapOK, paused int
-	if err := s.db.QueryRow(`SELECT status, COALESCE(bootstrap_ok,0), no_progress_paused FROM claws WHERE id=?`, clawID).Scan(&status, &bootstrapOK, &paused); err != nil || status != "connected" || bootstrapOK == 0 || paused != 0 {
+	if err := s.db.QueryRow(`SELECT status, COALESCE(bootstrap_ok,0), no_progress_paused FROM claws WHERE id=?`, clawID).Scan(&status, &bootstrapOK, &paused); err != nil || status != "connected" || bootstrapOK == 0 {
 		if err == nil {
 			log.Printf("[watchdog] skipping session-preserved continuation for %s: status=%s bootstrap_ok=%d", shortID(clawID), status, bootstrapOK)
 		}
+		return
+	}
+	if paused != 0 {
+		s.recordPausedSessionLossNotice(clawID, "session-preserved continuation")
 		return
 	}
 	marker := fmt.Sprintf("session_preserved:%s", uuid.NewString())
@@ -9140,7 +9147,7 @@ func (s *Server) enqueueSessionPreservedContinuation(clawID string, edges ...typ
 		stateCheck = "git status"
 	}
 	prompt := sessionPreservedContinuationPrefix + " " + reason + " The turn may have partially completed before it was aborted; check the workspace (" + stateCheck + ") before repeating anything. Continue from where you stopped."
-	prompt += renderResumeStageContext(s.stageContextForResume(clawID))
+	prompt += renderResumeStageContext(s.stageContextForResume(clawID, false))
 	if len(cfg.ReadFiles) > 0 {
 		prompt += "\n\nRead these files first: " + strings.Join(cfg.ReadFiles, ", ") + "."
 	}
@@ -9149,7 +9156,7 @@ func (s *Server) enqueueSessionPreservedContinuation(clawID string, edges ...typ
 	}
 	prompt += "\n\n<!-- " + marker + " -->"
 	log.Printf("[watchdog] enqueueing %s continuation for %s reason=%s", marker, shortID(clawID), edge.Reason)
-	if s.sessionLossLoopGuard(clawID, edge.Reason) {
+	if s.sessionLossLoopGuard(clawID, edge.Reason, interruptedMsgID) {
 		return
 	}
 
@@ -9165,11 +9172,7 @@ func (s *Server) lastSubstantiveClawProgress(clawID string) (string, time.Time) 
 	return messages[0].content, messages[0].at
 }
 
-func (s *Server) enqueueSessionLostResume(clawID, prefix, marker string, edges ...types.SessionRecoveryEdge) {
-	var edge types.SessionRecoveryEdge
-	if len(edges) > 0 {
-		edge = edges[0]
-	}
+func (s *Server) enqueueSessionLostResume(clawID, prefix, marker string, edge types.SessionRecoveryEdge, interruptedMsgID string) {
 	if edge.Reason == "" {
 		edge.Reason = types.SessionLossReasonUnknown
 	}
@@ -9179,8 +9182,12 @@ func (s *Server) enqueueSessionLostResume(clawID, prefix, marker string, edges .
 	if err != nil {
 		return
 	}
-	if status != "connected" || bootstrapOK == 0 || paused != 0 {
+	if status != "connected" || bootstrapOK == 0 {
 		log.Printf("[watchdog] skipping auto-resume for %s: status=%s bootstrap_ok=%d", shortID(clawID), status, bootstrapOK)
+		return
+	}
+	if paused != 0 {
+		s.recordPausedSessionLossNotice(clawID, "auto-resume")
 		return
 	}
 	var issueRef string
@@ -9217,7 +9224,7 @@ func (s *Server) enqueueSessionLostResume(clawID, prefix, marker string, edges .
 		}
 		b.WriteString(".")
 	}
-	b.WriteString(renderResumeStageContext(s.stageContextForResume(clawID)))
+	b.WriteString(renderResumeStageContext(s.stageContextForResume(clawID, false)))
 	if role, content, at := s.lastInstructionBeforeLoss(clawID); content != "" {
 		content = strings.ReplaceAll(truncateRunes(content, resumeInstructionRunes), "LAST_INSTRUCTION>>>", "LAST_INSTRUCTION\\>\\>\\>")
 		b.WriteString(fmt.Sprintf("\n\nThe instruction you were acting on when the session was lost (%s, %s):\n<<<LAST_INSTRUCTION\n%s\nLAST_INSTRUCTION>>>", role, relativeAge(at), content))
@@ -9267,7 +9274,7 @@ func (s *Server) enqueueSessionLostResume(clawID, prefix, marker string, edges .
 	if _, err := s.db.Exec(`UPDATE claws SET idle_resume_count=0, idle_resume_at=0 WHERE id=?`, clawID); err != nil {
 		log.Printf("[watchdog] re-arm idle resume budget for %s: %v", shortID(clawID), err)
 	}
-	if s.sessionLossLoopGuard(clawID, edge.Reason) {
+	if s.sessionLossLoopGuard(clawID, edge.Reason, interruptedMsgID) {
 		return
 	}
 	s.injectHubMessageByID(clawID, b.String())
@@ -9284,8 +9291,32 @@ const (
 
 // lastInstructionBeforeLoss excludes watchdog bookkeeping and display-only rows.
 func (s *Server) lastInstructionBeforeLoss(clawID string) (role, content string, at time.Time) {
-	_ = s.db.QueryRow(`SELECT role, content, created_at FROM messages WHERE claw_id=? AND role IN ('user','hub') AND delivered_at IS NOT NULL AND content NOT LIKE '[hub]%' AND COALESCE(format,'') <> 'workflow_v2_display_only' ORDER BY created_at DESC, rowid DESC LIMIT 1`, clawID).Scan(&role, &content, &at)
-	return
+	rows, err := s.db.Query(`SELECT role, content, created_at FROM messages WHERE claw_id=? AND role IN ('user','hub') AND delivered_at IS NOT NULL AND COALESCE(format,'') <> 'workflow_v2_display_only' ORDER BY created_at DESC, rowid DESC LIMIT 50`, clawID)
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+	for rows.Next() {
+		if err := rows.Scan(&role, &content, &at); err != nil {
+			break
+		}
+		bookkeeping := false
+		for _, prefix := range []string{
+			restartResumePrefix, sessionRotatedResumePrefix, sessionPreservedContinuationPrefix,
+			agentIdleResumePrefix, streamingTimeoutNudge, contextNearlyFullNudge,
+			"[hub] Automatic continuation paused", "[hub] The gateway has been unresponsive",
+			"[hub] Your previous session was lost", "[hub] GitHub API temporarily unavailable", "[hub] ▶",
+		} {
+			if strings.HasPrefix(content, prefix) {
+				bookkeeping = true
+				break
+			}
+		}
+		if !bookkeeping {
+			return
+		}
+	}
+	return "", "", time.Time{}
 }
 
 func relativeAge(at time.Time) string {
@@ -9395,7 +9426,7 @@ func renderSessionResumeRecovery(cfg types.SessionResumeConfig) string {
 }
 
 // stageContextForResume re-renders only the current inject, without on_enter side effects.
-func (s *Server) stageContextForResume(clawID string) (stageID, label, instructions string) {
+func (s *Server) stageContextForResume(clawID string, fallbackToEntry bool) (stageID, label, instructions string) {
 	ctx, ok := s.findPipelineContextForClaw(clawID)
 	if !ok {
 		return
@@ -9409,9 +9440,15 @@ func (s *Server) stageContextForResume(clawID string) (stageID, label, instructi
 		return
 	}
 	stage := pl.StageByID(stageID)
+	if stage == nil && fallbackToEntry {
+		// The workflow may have been edited since the claw last ran; re-brief
+		// from its entry stage when the recorded stage no longer exists.
+		stage = pl.EntryStage()
+	}
 	if stage == nil {
 		return
 	}
+	stageID = stage.ID
 	label = stage.Label
 	if stage.OnEnter.Inject != "" {
 		instructions = truncateRunes(strings.ReplaceAll(s.renderStageInject(clawID, *stage, ctx), "STAGE_INSTRUCTIONS>>>", "STAGE_INSTRUCTIONS\\>\\>\\>"), resumeStageInstructionRunes)

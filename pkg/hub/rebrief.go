@@ -38,8 +38,8 @@ func (s *Server) rebriefAfterRestoreIfNeeded(cc *clawConn, clawID string) bool {
 	}
 
 	// If there is no recorded stage, leave the normal wake path in charge.
-	// A removed stage retains its ID without falling back to entry instructions.
-	stageID, label, instructions := s.stageContextForResume(clawID)
+	// If the workflow was edited, fall back to the entry stage for task context.
+	stageID, label, instructions := s.stageContextForResume(clawID, true)
 	if stageID == "" {
 		return false
 	}

@@ -118,10 +118,13 @@ func (s *Server) resumeNoProgressAfterUserInput(clawID string) {
 	s.noProgressMu.Lock()
 	defer s.noProgressMu.Unlock()
 
-	res, err := s.db.Exec(`UPDATE claws SET no_progress_paused=0, session_loss_streak=0, session_loss_progress_mark='' WHERE id=?`, clawID)
+	res, err := s.db.Exec(`UPDATE claws SET no_progress_paused=0 WHERE id=? AND no_progress_paused!=0`, clawID)
 	if err != nil {
 		log.Printf("[no-progress] resume claw %s: %v", shortID(clawID), err)
 		return
+	}
+	if _, err := s.db.Exec(`UPDATE claws SET session_loss_streak=0, session_loss_progress_mark='' WHERE id=? AND (session_loss_streak<>0 OR session_loss_progress_mark<>'')`, clawID); err != nil {
+		log.Printf("[no-progress] reset session-loss streak for %s: %v", shortID(clawID), err)
 	}
 	_, _ = s.db.Exec(`DELETE FROM claw_turn_observations WHERE claw_id=?`, clawID)
 	s.mu.RLock()
