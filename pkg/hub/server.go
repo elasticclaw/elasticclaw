@@ -847,6 +847,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/analytics/tickets", s.withAnalyticsViewAuth(s.handleTaskRunAnalyticsTickets))
 	mux.HandleFunc("/api/dependencies/status", s.withAuth(s.handleDependencyStatus))
 	mux.HandleFunc("/api/v2/workflow-runs/{runId}", s.withAuth(s.handleWorkflowV2Run))
+	mux.HandleFunc("/api/v2/workflow-runs/{runId}/cancel", s.withAuth(s.handleWorkflowV2RunCancel))
 	mux.HandleFunc("/api/v2/workspaces/{workspace}/workflows/{workflow}/runs", s.withAuth(s.handleWorkflowV2Runs))
 	mux.HandleFunc("/api/v2/workflow-runs/{runId}/logs", s.withAuth(s.handleWorkflowV2RunLogs))
 	mux.HandleFunc("/api/v2/workflow-runs/{runId}/attempts", s.withAuth(s.handleWorkflowV2RunAttempts))

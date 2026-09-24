@@ -2,7 +2,9 @@ package hub
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"strings"
 
@@ -42,6 +44,57 @@ func (s *Server) handleWorkflowV2Run(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil {
 		jsonError(w, http.StatusInternalServerError, "inspect workflow run")
+		return
+	}
+	jsonOK(w, inspection)
+}
+
+type workflowV2CancelRequest struct {
+	Reason string `json:"reason"`
+}
+
+func (s *Server) handleWorkflowV2RunCancel(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		jsonError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	runID := strings.TrimSpace(r.PathValue("runId"))
+	if runID == "" {
+		jsonError(w, http.StatusBadRequest, "run id is required")
+		return
+	}
+	var request workflowV2CancelRequest
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil && !errors.Is(err, io.EOF) {
+		jsonError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+		return
+	}
+	var tenantID, status string
+	if err := s.db.QueryRowContext(r.Context(),
+		`SELECT tenant_id,status FROM workflow_v2_runs WHERE id=?`, runID).Scan(&tenantID, &status); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			jsonError(w, http.StatusNotFound, "workflow run not found")
+			return
+		}
+		jsonError(w, http.StatusInternalServerError, "lookup workflow run")
+		return
+	}
+	if tenantID != tenantFromCtx(r) {
+		jsonError(w, http.StatusNotFound, "workflow run not found")
+		return
+	}
+	if status != string(workflowv2.RunActive) && status != string(workflowv2.RunSuspended) {
+		jsonError(w, http.StatusConflict, "workflow run is already terminal")
+		return
+	}
+	if err := workflowv2.NewStore(s.db).CancelActivation(r.Context(), runID, request.Reason); err != nil {
+		jsonError(w, http.StatusInternalServerError, "cancel workflow run")
+		return
+	}
+	s.maybeFinishWorkflowV2Parent(r.Context(), runID)
+	inspection, err := workflowv2.NewStore(s.db).InspectRun(r.Context(), runID)
+	if err != nil {
+		jsonError(w, http.StatusInternalServerError, "inspect cancelled workflow run")
 		return
 	}
 	jsonOK(w, inspection)
