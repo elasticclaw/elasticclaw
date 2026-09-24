@@ -1119,6 +1119,9 @@ func printWorkflowEffectEvent(ts string, event types.WorkflowEffectEvent) {
 	if event.Command != "" {
 		fmt.Printf("    cmd: %s\n", event.Command)
 	}
+	if event.TaskID != "" {
+		fmt.Printf("    task: %s\n", event.TaskID)
+	}
 	if event.ExitCode != nil {
 		fmt.Printf("    exit code: %d\n", *event.ExitCode)
 	}

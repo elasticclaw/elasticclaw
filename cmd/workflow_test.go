@@ -596,6 +596,11 @@ func TestPrintCollapsedActivityMessagesRendersWorkflowEffectEvents(t *testing.T)
 			CreatedAt: started,
 		},
 		{
+			Content:   "exec.run effect dispatched (attempt 1)",
+			Format:    types.WorkflowEffectFormatPrefix + mustJSON(t, types.WorkflowEffectEvent{Kind: "exec.run", Phase: "dispatched", Status: "dispatched", Attempt: 1, TaskID: "task-9f2c"}),
+			CreatedAt: started.Add(500 * time.Millisecond),
+		},
+		{
 			Content:   "agent task assigned",
 			Format:    types.WorkflowEffectFormatPrefix + mustJSON(t, types.WorkflowEffectEvent{Kind: "agent.task", Phase: "assigned", Status: "assigned", Instructions: "Fix the build"}),
 			CreatedAt: started.Add(time.Second),
@@ -619,6 +624,8 @@ func TestPrintCollapsedActivityMessagesRendersWorkflowEffectEvents(t *testing.T)
 		"build failed",
 		"stderr:",
 		"make: *** No rule",
+		"[exec.run] dispatched (attempt 1)",
+		"task: task-9f2c",
 		"[agent.task] assigned",
 		"instructions:",
 		"Fix the build",
