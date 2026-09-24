@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/elasticclaw/elasticclaw/pkg/hub/workflowv2"
@@ -62,6 +63,51 @@ func TestWorkflowV2RunInspectionAPIRejectsOtherMethods(t *testing.T) {
 	s.mux.ServeHTTP(rr, req)
 	if rr.Code != http.StatusMethodNotAllowed || rr.Header().Get("Allow") != http.MethodGet {
 		t.Fatalf("status/allow = %d/%q", rr.Code, rr.Header().Get("Allow"))
+	}
+}
+
+func TestWorkflowV2RunCancelAPIHandlesOrphanedRun(t *testing.T) {
+	s, db := NewTestServerWithConfig(t, &types.HubConfig{Token: "test-token"}, "", "", "")
+	store := workflowv2.NewStore(db)
+	run, err := store.CreateRun(context.Background(), workflowv2.CreateRunRequest{
+		ID:            "run-orphan-cancel-api",
+		TenantID:      "test-tenant-id",
+		WorkspaceYAML: []byte(workflowV2APIWorkspace),
+		WorkflowYAML:  []byte(workflowV2APIWorkflow),
+		InitialClawID: "claw-that-no-longer-exists",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v2/workflow-runs/"+run.ID+"/cancel", strings.NewReader(`{"reason":"orphaned claw"}{"unexpected":true}`))
+	req.Header.Set("Authorization", "Bearer test-token")
+	rr := httptest.NewRecorder()
+	s.mux.ServeHTTP(rr, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("trailing JSON status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/api/v2/workflow-runs/"+run.ID+"/cancel", strings.NewReader(`{"reason":"orphaned claw"}`))
+	req.Header.Set("Authorization", "Bearer test-token")
+	rr = httptest.NewRecorder()
+	s.mux.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+	var inspection workflowv2.Inspection
+	if err := json.NewDecoder(rr.Body).Decode(&inspection); err != nil {
+		t.Fatal(err)
+	}
+	if inspection.Run.Status != workflowv2.RunCancelled {
+		t.Fatalf("run status = %q, want cancelled", inspection.Run.Status)
+	}
+	var attemptStatus string
+	if err := db.QueryRow(`SELECT status FROM workflow_v2_attempts WHERE run_id=?`, run.ID).Scan(&attemptStatus); err != nil {
+		t.Fatal(err)
+	}
+	if attemptStatus != "cancelled" {
+		t.Fatalf("attempt status = %q, want cancelled", attemptStatus)
 	}
 }
 
