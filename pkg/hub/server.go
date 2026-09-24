@@ -63,6 +63,8 @@ type Server struct {
 	mu    sync.RWMutex
 	claws map[string]*clawConn // claw_id -> conn
 	users map[string]*userConn // tenant_id -> []conn (broadcast)
+	// sessionLosses retains pending and announced incidents across WebSocket reconnects; guarded by mu.
+	sessionLosses map[string]*clawSessionLosses
 	// gatewayRestartCounts retains the heartbeat counter across WebSocket reconnects.
 	gatewayRestartCounts map[string]int
 	// gatewayUnhealthyCounts survives WebSocket reconnects so flapping gateways still escalate.
@@ -351,8 +353,8 @@ type clawConn struct {
 	gatewayRestartCount     int             // cumulative bridge restarts reported by heartbeats
 	gatewaySessionKey       string          // last live gateway session key reported by heartbeat
 	gatewaySessionKeySeen   bool            // distinguishes the first live-key heartbeat from a loss
-	announcedSessionLossKey string          // newest loss identity already announced; guarded by mu
-	sessionLossInterrupted  bool            // current turn cannot count as completed progress
+	sessionLossTurnSequence uint64          // advances at each turn boundary
+	sessionLossInterrupted  uint64          // interrupted sessionLossTurnSequence + 1; zero means none
 	forcedFinishCount       int             // consecutive watchdog-forced streaming turn finishes
 	workflowStartPending    bool            // true while initial volume attach / wake is in flight
 	workflowStartDone       bool            // true once initial volume attach / wake has completed
@@ -373,8 +375,6 @@ type clawConn struct {
 	turnBoundarySeen        bool            // a turn actually ended on THIS connection, so turn tracking is known live (see agentIdleResumeBlindGrace)
 	subagentsActiveAt       time.Time       // when the last heartbeat that REPORTED active spawned subagent sessions arrived (zero = none known; see applySubagentHeartbeatLocked)
 	subagentActiveCount     int             // subagent sessions with a run in flight per that heartbeat
-
-	pendingHeartbeatLosses map[string]*pendingHeartbeatSessionLoss // awaiting enriched bridge edges; guarded by mu
 
 	deliveryInFlight bool // serializes DB-backed delivery writes
 
@@ -511,6 +511,14 @@ func (cc *clawConn) applySubagentHeartbeatLocked(active *bool, count *int) {
 	}
 }
 
+// interruptSessionLossTurnLocked marks only the turn open at observation time.
+// A loss while idle must never affect the next delivered recovery turn.
+func (cc *clawConn) interruptSessionLossTurnLocked() {
+	if cc.isBusyLocked() {
+		cc.sessionLossInterrupted = cc.sessionLossTurnSequence + 1
+	}
+}
+
 // finishTurnLocked ends a turn that actually ran (or was force-finished):
 // the in-flight state clears and the idle clock restarts now.
 func (cc *clawConn) finishTurnLocked() {
@@ -539,7 +547,8 @@ func (cc *clawConn) abortTurnLocked() {
 
 func (cc *clawConn) resetTurnStateLocked() {
 	cc.awaitingResponse = false
-	cc.sessionLossInterrupted = false
+	cc.sessionLossTurnSequence++
+	cc.sessionLossInterrupted = 0
 	cc.streamingMsgID = ""
 	cc.streamingBuf.Reset()
 	cc.streamingSplit = false
@@ -2991,13 +3000,8 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 		s.mu.Lock()
 		var partialContent string
 		var partialMsgID string
-		var pendingLosses []*pendingHeartbeatSessionLoss
 		// Flush any partial streaming buffer as an interrupted message
 		cc.mu.Lock()
-		for _, pending := range cc.pendingHeartbeatLosses {
-			pending.timer.Stop()
-			pendingLosses = append(pendingLosses, pending)
-		}
 		if cc.streamingBuf.Len() > 0 {
 			partialContent = cc.streamingBuf.String() + " [interrupted]"
 			partialMsgID = cc.streamingMsgID
@@ -3025,11 +3029,8 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 				Content: partialContent, CreatedAt: interruptedAt,
 			}})
 		}
-		// This connection can no longer supply an enriched edge. Persist its
-		// pending recovery before marking it offline, without holding s.mu.
-		for _, pending := range pendingLosses {
-			s.finishHeartbeatSessionLoss(cc, clawID, pending)
-		}
+		// Pending loss grace survives this socket: the bridge can replay its
+		// enriched edge on the replacement connection before the timer expires.
 		if current {
 			// Clear typing indicator so the UI doesn't show a stuck "typing" state
 			// if the claw disconnects mid-response.
@@ -3179,8 +3180,11 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 						activeCC.gatewaySessionKey = *hb.GatewaySessionKey
 						activeCC.gatewaySessionKeySeen = true
 					}
-					if shouldNoteSessionLoss && (sessionLossKey == "" || sessionLossKey != activeCC.announcedSessionLossKey) {
-						activeCC.sessionLossInterrupted = true
+					if shouldNoteSessionLoss {
+						losses := s.sessionLosses[clawID]
+						if losses == nil || (!losses.announced[sessionLossKey] && len(losses.pending) == 0) {
+							activeCC.interruptSessionLossTurnLocked()
+						}
 					}
 					activeCC.gatewayRestartCount = s.gatewayRestartCounts[clawID]
 					// nil means field absent (old bridge) — treat as ready. The
@@ -3440,7 +3444,7 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 				hm.ID = uuid.New().String()
 				skipPersist = cc.streamingSplit
 			}
-			completedNormally := !cc.sessionLossInterrupted
+			completedNormally := cc.sessionLossInterrupted != cc.sessionLossTurnSequence+1
 			cc.finishTurnLocked()
 			cc.forcedFinishCount = 0
 			cc.mu.Unlock()
@@ -3664,20 +3668,17 @@ func (s *Server) handleClawWS(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		} else if msg.Type == "session_rotated" {
-			cc.mu.Lock()
-			cc.sessionLossInterrupted = true
-			interruptedMsgID := cc.streamingMsgID
-			cc.mu.Unlock()
 			var edge types.SessionRecoveryEdge
 			raw, _ := json.Marshal(msg.Payload)
 			_ = json.Unmarshal(raw, &edge)
-			go s.noteSessionLoss(cc, clawID, edge.SessionKey, "session_rotated", edge, interruptedMsgID)
+			// Claim the incident before reading a terminal response or later heartbeat.
+			s.noteSessionLoss(cc, clawID, edge.SessionKey, "session_rotated", edge, "")
 		} else if msg.Type == "session_preserved" {
 			// A preserved turn positively proves the transport reached the agent,
 			// even though it has no reply body to reach observeTurnOutcome.
 			cc.mu.Lock()
 			cc.bridgeErrorStreak = 0
-			cc.sessionLossInterrupted = true
+			cc.interruptSessionLossTurnLocked()
 			interruptedMsgID := cc.streamingMsgID
 			cc.mu.Unlock()
 			var edge types.SessionRecoveryEdge
@@ -9049,15 +9050,18 @@ const sessionLossEdgeGrace = 20 * time.Second
 
 type pendingHeartbeatSessionLoss struct {
 	key, source, interruptedMsgID string
+	turnOpenOrRecent              bool
 	timer                         *time.Timer
 }
 
-// noteSessionLoss records one session-loss incident, identified by the key of
-// the session that replaced the lost one. The same incident is detected up to
-// three ways (the bridge edge, the live-key change, the restart-count change);
-// keying on the new session key collapses them into one prompt without
-// collapsing two genuinely separate losses, which a time-based throttle could
-// not distinguish.
+type clawSessionLosses struct {
+	announced map[string]bool
+	pending   map[string]*pendingHeartbeatSessionLoss
+}
+
+// noteSessionLoss coalesces heartbeat observations until the enriched edge (or
+// grace expiry) claims them. A restart heartbeat may still report the OLD key,
+// so all pending keys belong to that incident, not just the edge's new key.
 func (s *Server) noteSessionLoss(cc *clawConn, clawID, newKey, source string, edge types.SessionRecoveryEdge, interruptedMsgID string) {
 	s.noteSessionLossWithPending(cc, clawID, newKey, source, edge, interruptedMsgID, nil)
 }
@@ -9066,46 +9070,73 @@ func (s *Server) noteSessionLossWithPending(cc *clawConn, clawID, newKey, source
 	if edge.Reason == "" {
 		edge.Reason = types.SessionLossReasonUnknown
 	}
-	cc.mu.Lock()
-	if expired != nil {
-		if cc.pendingHeartbeatLosses[newKey] != expired {
-			cc.mu.Unlock()
-			return // An enriched edge already claimed this incident.
-		}
-		delete(cc.pendingHeartbeatLosses, newKey)
+	s.mu.Lock()
+	if s.sessionLosses == nil {
+		s.sessionLosses = make(map[string]*clawSessionLosses)
 	}
-	if newKey != "" && newKey == cc.announcedSessionLossKey {
-		cc.mu.Unlock()
-		log.Printf("[watchdog] skipping duplicate session loss for %s: session=%s source=%s", shortID(clawID), shortID(newKey), source)
+	losses := s.sessionLosses[clawID]
+	if losses == nil {
+		losses = &clawSessionLosses{announced: make(map[string]bool), pending: make(map[string]*pendingHeartbeatSessionLoss)}
+		s.sessionLosses[clawID] = losses
+	}
+	if expired != nil && losses.pending[newKey] != expired {
+		s.mu.Unlock()
+		return // An enriched edge or another timer already claimed this incident.
+	}
+	if expired != nil && s.claws[clawID] == nil {
+		// Offline claws are ineligible for automatic resumes. Keep the incident
+		// pending so expiry cannot consume the edge replayed after reconnect.
+		expired.timer = time.AfterFunc(sessionLossEdgeGrace, func() {
+			s.finishHeartbeatSessionLoss(cc, clawID, expired)
+		})
+		s.mu.Unlock()
 		return
 	}
-	if source == "session_rotated" {
-		for key, pending := range cc.pendingHeartbeatLosses {
-			if key == newKey || key == "" {
-				pending.timer.Stop()
-				delete(cc.pendingHeartbeatLosses, key)
+	duplicate := newKey != "" && losses.announced[newKey]
+	cc.mu.Lock()
+	turnOpenOrRecent := cc.isBusyLocked() ||
+		(!cc.lastTurnFinishedAt.IsZero() && time.Since(cc.lastTurnFinishedAt) < autoResumeRecentTurnWindow)
+	if !duplicate && source == "session_rotated" && len(losses.pending) == 0 {
+		cc.interruptSessionLossTurnLocked()
+	}
+	if interruptedMsgID == "" {
+		interruptedMsgID = cc.streamingMsgID
+	}
+	cc.mu.Unlock()
+	if source == "session_rotated" || expired != nil {
+		if expired != nil {
+			// Eligibility was captured when the loss was observed, not when
+			// this callback runs (possibly after reconnect or a new turn).
+			turnOpenOrRecent = false
+		}
+		for key, pending := range losses.pending {
+			pending.timer.Stop()
+			delete(losses.pending, key)
+			if key != "" {
+				losses.announced[key] = true
 			}
+			turnOpenOrRecent = turnOpenOrRecent || pending.turnOpenOrRecent
 		}
-	} else if expired == nil && (cc.isBusyLocked() || cc.pendingHeartbeatLosses[newKey] != nil) && (source == "gateway_session_key" || source == "restart_count") {
-		if cc.pendingHeartbeatLosses == nil {
-			cc.pendingHeartbeatLosses = make(map[string]*pendingHeartbeatSessionLoss)
-		}
-		if cc.pendingHeartbeatLosses[newKey] == nil {
-			pending := &pendingHeartbeatSessionLoss{key: newKey, source: source, interruptedMsgID: interruptedMsgID}
-			cc.pendingHeartbeatLosses[newKey] = pending
+	} else if !duplicate && (turnOpenOrRecent || len(losses.pending) > 0) {
+		// Allow metadata grace even after the interrupted terminal response.
+		if losses.pending[newKey] == nil {
+			pending := &pendingHeartbeatSessionLoss{key: newKey, source: source, interruptedMsgID: interruptedMsgID, turnOpenOrRecent: turnOpenOrRecent}
+			losses.pending[newKey] = pending
 			pending.timer = time.AfterFunc(sessionLossEdgeGrace, func() {
 				s.finishHeartbeatSessionLoss(cc, clawID, pending)
 			})
 		}
-		cc.mu.Unlock()
+		s.mu.Unlock()
 		return
 	}
 	if newKey != "" {
-		cc.announcedSessionLossKey = newKey
+		losses.announced[newKey] = true
 	}
-	turnOpenOrRecent := expired != nil || !cc.streamingStartedAt.IsZero() || cc.awaitingResponse ||
-		(!cc.lastTurnFinishedAt.IsZero() && time.Since(cc.lastTurnFinishedAt) < autoResumeRecentTurnWindow)
-	cc.mu.Unlock()
+	s.mu.Unlock()
+	if duplicate {
+		log.Printf("[watchdog] skipping duplicate session loss for %s: session=%s source=%s", shortID(clawID), shortID(newKey), source)
+		return
+	}
 	if !turnOpenOrRecent {
 		// An idle claw must not be awakened into autonomous work, but the next
 		// real prompt needs this context so it does not mistake a lost transcript

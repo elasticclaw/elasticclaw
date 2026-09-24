@@ -478,9 +478,12 @@ func expireHeartbeatSessionLoss(t *testing.T, s *Server, cc *clawConn, clawID st
 	t.Helper()
 	var pending *pendingHeartbeatSessionLoss
 	eventuallyWatchdog(t, func() bool {
-		cc.mu.RLock()
-		defer cc.mu.RUnlock()
-		for _, loss := range cc.pendingHeartbeatLosses {
+		s.mu.RLock()
+		defer s.mu.RUnlock()
+		if s.sessionLosses[clawID] == nil {
+			return false
+		}
+		for _, loss := range s.sessionLosses[clawID].pending {
 			pending = loss
 			return true
 		}
@@ -502,9 +505,9 @@ func TestSessionLossHeartbeatEdgeOrdering(t *testing.T) {
 				var pending *pendingHeartbeatSessionLoss
 				if order != "edge first" {
 					s.noteSessionLoss(cc, id, edge.SessionKey, source, types.SessionRecoveryEdge{}, "")
-					cc.mu.RLock()
-					pending = cc.pendingHeartbeatLosses[edge.SessionKey]
-					cc.mu.RUnlock()
+					s.mu.RLock()
+					pending = s.sessionLosses[id].pending[edge.SessionKey]
+					s.mu.RUnlock()
 					if pending == nil || f.count(t, restartResumePrefix) != 0 {
 						t.Fatal("heartbeat did not wait for edge metadata")
 					}
@@ -676,5 +679,197 @@ func TestSessionLossGuardPauseRetainsTriggeringRecoveryContext(t *testing.T) {
 				t.Fatal("third loss did not pause without injecting")
 			}
 		})
+	}
+}
+
+func TestSessionLossOnlyInterruptsObservedTurn(t *testing.T) {
+	for _, scenario := range []string{"idle heartbeat", "error ended then edge", "interrupted"} {
+		t.Run(scenario, func(t *testing.T) {
+			f := newSessionLossFixture(t, nil)
+			f.cc.mu.Lock()
+			f.cc.resetTurnStateLocked()
+			f.cc.lastTurnFinishedAt = time.Time{}
+			f.cc.deliveryInFlight = true // Keep recovery prompts queued for this test.
+			f.cc.mu.Unlock()
+			send := func(kind string, payload any) {
+				t.Helper()
+				if err := wsjson.Write(context.Background(), f.conn, types.WSMessage{Type: kind, Payload: payload}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if scenario == "error ended then edge" {
+				f.cc.mu.Lock()
+				f.cc.awaitingResponse = true
+				f.cc.mu.Unlock()
+				send("message", types.HubMessage{Content: types.BridgeErrorPrefix + " gateway disconnected"})
+				eventuallyWatchdog(t, func() bool {
+					f.cc.mu.RLock()
+					defer f.cc.mu.RUnlock()
+					return !f.cc.awaitingResponse
+				}, "error turn ended")
+			}
+			if scenario == "interrupted" {
+				f.cc.mu.Lock()
+				f.cc.awaitingResponse = true
+				f.cc.mu.Unlock()
+			}
+			if scenario == "idle heartbeat" {
+				send("heartbeat", map[string]any{"gateway_healthy": true, "restart_count": 0, "gateway_session_key": "old"})
+				send("heartbeat", map[string]any{"gateway_healthy": true, "restart_count": 1, "gateway_session_key": "loss"})
+			} else {
+				send("session_rotated", types.SessionRecoveryEdge{SessionKey: "loss"})
+			}
+			eventuallyWatchdog(t, func() bool {
+				f.s.mu.RLock()
+				defer f.s.mu.RUnlock()
+				losses := f.s.sessionLosses[f.clawID]
+				return losses != nil && losses.announced["loss"]
+			}, "loss observed")
+			before := f.s.sessionLossProgressMark(f.clawID)
+			f.cc.mu.Lock()
+			f.cc.awaitingResponse = true
+			f.cc.mu.Unlock()
+			reply := "Completed the recovery work"
+			send("message", types.HubMessage{Content: reply})
+			eventuallyWatchdog(t, func() bool {
+				var n int
+				return f.db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND content=?`, f.clawID, reply).Scan(&n) == nil && n == 1
+			}, "reply processed")
+			if changed := f.s.sessionLossProgressMark(f.clawID) != before; changed != (scenario != "interrupted") {
+				t.Fatalf("progress changed=%v for %s", changed, scenario)
+			}
+		})
+	}
+}
+
+func TestSessionLossEdgeClaimsAllPendingKeys(t *testing.T) {
+	for _, scenario := range []string{"restart reports old key", "second rotation", "heartbeat after terminal"} {
+		t.Run(scenario, func(t *testing.T) {
+			s, db, id := newSessionResumeTestServer(t)
+			cc := &clawConn{id: id, tenantID: "test-tenant-id", awaitingResponse: true, deliveryInFlight: true}
+			s.claws[id] = cc
+			f := sessionLossFixture{s: s, db: db, cc: cc, clawID: id}
+			if scenario == "heartbeat after terminal" {
+				cc.finishTurnLocked()
+			}
+			s.noteSessionLoss(cc, id, "A", "restart_count", types.SessionRecoveryEdge{}, "")
+			s.noteSessionLoss(cc, id, "B", "gateway_session_key", types.SessionRecoveryEdge{}, "")
+			s.mu.RLock()
+			var pending []*pendingHeartbeatSessionLoss
+			for _, loss := range s.sessionLosses[id].pending {
+				pending = append(pending, loss)
+			}
+			s.mu.RUnlock()
+			if len(pending) != 2 || f.count(t, restartResumePrefix) != 0 {
+				t.Fatal("heartbeat did not wait for enriched edge")
+			}
+			key := "B"
+			if scenario == "second rotation" {
+				key = "C"
+			}
+			edge := types.SessionRecoveryEdge{SessionKey: key, Reason: types.SessionLossReasonTurnTimeout, TranscriptPath: "/tmp/lost.jsonl"}
+			s.noteSessionLoss(cc, id, key, "session_rotated", edge, "")
+			f.expireThrottle(t) // A duplicate must be rejected without relying on throttling.
+			for _, loss := range pending {
+				s.finishHeartbeatSessionLoss(cc, id, loss)
+				s.noteSessionLoss(cc, id, loss.key, loss.source, types.SessionRecoveryEdge{}, "")
+			}
+			if streak, _, paused := f.state(t); streak != 1 || paused || f.count(t, restartResumePrefix)+f.count(t, sessionRotatedResumePrefix) != 1 {
+				t.Fatalf("incident counted more than once: streak=%d paused=%v", streak, paused)
+			}
+			if prompt := sessionResumePrompt(t, db, id, sessionRotatedResumePrefix); !strings.Contains(prompt, "/tmp/lost.jsonl") {
+				t.Fatal("enriched context lost")
+			}
+		})
+	}
+}
+
+func TestSessionLossGraceSurvivesWebSocketReconnect(t *testing.T) {
+	for _, expired := range []bool{false, true} {
+		t.Run(fmt.Sprintf("expired=%v", expired), func(t *testing.T) {
+			f := newSessionLossFixture(t, nil)
+			f.cc.mu.Lock()
+			f.cc.awaitingResponse = true
+			f.cc.deliveryInFlight = true
+			f.cc.mu.Unlock()
+			f.s.noteSessionLoss(f.cc, f.clawID, "replacement", "gateway_session_key", types.SessionRecoveryEdge{}, "")
+			f.s.mu.RLock()
+			pending := f.s.sessionLosses[f.clawID].pending["replacement"]
+			f.s.mu.RUnlock()
+			t.Cleanup(func() { pending.timer.Stop() })
+			if expired {
+				expireHeartbeatSessionLoss(t, f.s, f.cc, f.clawID)
+			}
+			_ = f.conn.Close(websocket.StatusNormalClosure, "reconnect")
+			eventuallyWatchdog(t, func() bool {
+				f.s.mu.RLock()
+				removed := f.s.claws[f.clawID] == nil
+				f.s.mu.RUnlock()
+				var status string
+				return removed && f.db.QueryRow(`SELECT status FROM claws WHERE id=?`, f.clawID).Scan(&status) == nil && status == "offline"
+			}, "old socket removed")
+			if !expired && f.count(t, restartResumePrefix) != 0 {
+				t.Fatal("socket close prematurely flushed metadata grace")
+			}
+			conn := watchdogClaw(t, f.s, f.clawID)
+			f.expireThrottle(t)
+			edge := types.SessionRecoveryEdge{SessionKey: "replacement", Reason: types.SessionLossReasonTurnTimeout, TranscriptPath: "/tmp/reconnect.jsonl"}
+			if err := wsjson.Write(context.Background(), conn, types.WSMessage{Type: "session_rotated", Payload: edge}); err != nil {
+				t.Fatal(err)
+			}
+			// A later chunk proves the replayed edge was fully processed.
+			if err := wsjson.Write(context.Background(), conn, types.WSMessage{Type: "chunk", Payload: map[string]string{"content": "Replay sentinel"}}); err != nil {
+				t.Fatal(err)
+			}
+			eventuallyWatchdog(t, func() bool {
+				var n int
+				return f.db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND content='Replay sentinel'`, f.clawID).Scan(&n) == nil && n == 1
+			}, "replayed edge processed")
+			f.s.finishHeartbeatSessionLoss(f.cc, f.clawID, pending)
+			if streak, _, paused := f.state(t); streak != 1 || paused || f.count(t, restartResumePrefix)+f.count(t, sessionRotatedResumePrefix) != 1 {
+				t.Fatalf("reconnect duplicated incident: streak=%d paused=%v", streak, paused)
+			}
+			if !expired {
+				if prompt := sessionResumePrompt(t, f.db, f.clawID, sessionRotatedResumePrefix); !strings.Contains(prompt, "/tmp/reconnect.jsonl") {
+					t.Fatal("reconnect dropped enriched context")
+				}
+			}
+		})
+	}
+}
+
+func TestSessionLossGraceExpiryWhileDisconnectedKeepsIncident(t *testing.T) {
+	s, db, id := newSessionResumeTestServer(t)
+	cc := &clawConn{id: id, tenantID: "test-tenant-id", awaitingResponse: true, deliveryInFlight: true}
+	s.claws[id] = cc
+	f := sessionLossFixture{s: s, db: db, cc: cc, clawID: id}
+	s.noteSessionLoss(cc, id, "replacement", "gateway_session_key", types.SessionRecoveryEdge{}, "")
+	s.mu.Lock()
+	pending := s.sessionLosses[id].pending["replacement"]
+	delete(s.claws, id)
+	s.mu.Unlock()
+	pending.timer.Stop()
+	if _, err := db.Exec(`UPDATE claws SET status='offline' WHERE id=?`, id); err != nil {
+		t.Fatal(err)
+	}
+	s.finishHeartbeatSessionLoss(cc, id, pending)
+	s.mu.RLock()
+	retained := s.sessionLosses[id].pending["replacement"] == pending && !s.sessionLosses[id].announced["replacement"]
+	s.mu.RUnlock()
+	if !retained || f.count(t, restartResumePrefix) != 0 {
+		t.Fatal("offline expiry consumed the incident")
+	}
+	t.Cleanup(func() { pending.timer.Stop() })
+	cc = &clawConn{id: id, tenantID: "test-tenant-id", deliveryInFlight: true}
+	s.mu.Lock()
+	s.claws[id] = cc
+	s.mu.Unlock()
+	if _, err := db.Exec(`UPDATE claws SET status='connected' WHERE id=?`, id); err != nil {
+		t.Fatal(err)
+	}
+	s.noteSessionLoss(cc, id, "replacement", "session_rotated", types.SessionRecoveryEdge{}, "")
+	s.finishHeartbeatSessionLoss(cc, id, pending)
+	if streak, _, paused := f.state(t); streak != 1 || paused || f.count(t, sessionRotatedResumePrefix) != 1 {
+		t.Fatalf("replayed incident lost or duplicated: streak=%d paused=%v", streak, paused)
 	}
 }
