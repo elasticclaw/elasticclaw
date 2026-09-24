@@ -1004,8 +1004,32 @@ func TestWorkflowV2RunLogsIncludeEffectTaskAndExecOutcomeLines(t *testing.T) {
 	if taskAssigned != 1 || assigned.Instructions != "Fix the build" {
 		t.Fatalf("task assigned = %d, instructions = %q", taskAssigned, assigned.Instructions)
 	}
+	if assigned.Status != "assigned" {
+		t.Fatalf("assigned line status = %q, want assignment phase, not the task's terminal status", assigned.Status)
+	}
 	if taskFinished != 1 || finishedTask.TerminalReason != "gateway is not ready" {
 		t.Fatalf("task finished = %d, reason = %q", taskFinished, finishedTask.TerminalReason)
+	}
+}
+
+func TestExecOutcomeEventKindIsAuthoritativeWithoutSucceededFact(t *testing.T) {
+	cases := []struct {
+		kind, factsJSON, wantStatus, wantContent string
+	}{
+		{"exec.run.completed", `{"exec.last_run.exit_code":0}`, "succeeded", "exec.run completed (exit code 0)"},
+		{"exec.run.failed", `{"exec.last_run.exit_code":2}`, "failed", "exec.run failed (exit code 2)"},
+		// Contradictory input: the projected fact overrides the kind.
+		{"exec.run.completed", `{"exec.last_run.succeeded":false}`, "failed", "exec.run failed"},
+		{"exec.run.failed", `{"exec.last_run.succeeded":true}`, "succeeded", "exec.run completed"},
+	}
+	for _, c := range cases {
+		event, content, ok := execOutcomeEvent(c.kind, c.factsJSON)
+		if !ok {
+			t.Fatalf("%s: not ok", c.kind)
+		}
+		if event.Status != c.wantStatus || content != c.wantContent {
+			t.Fatalf("%s: status/content = %q/%q, want %q/%q", c.kind, event.Status, content, c.wantStatus, c.wantContent)
+		}
 	}
 }
 
