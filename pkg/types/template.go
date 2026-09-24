@@ -91,6 +91,7 @@ type TemplateConfig struct {
 	Name           string               `yaml:"name,omitempty"`
 	Repositories   RepositoryAccessList `yaml:"repositories,omitempty"`
 	Env            WorkspaceEnv         `yaml:"env,omitempty"`
+	SessionResume  *SessionResumeConfig `yaml:"session_resume,omitempty"`
 	WebhookSecrets []string             `yaml:"webhook_secrets,omitempty"`
 	Provider       string               `yaml:"provider"`
 	Resources      TemplateResources    `yaml:"resources,omitempty"`

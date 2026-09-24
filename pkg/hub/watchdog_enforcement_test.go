@@ -445,8 +445,10 @@ func TestRestartMidTurnEnqueuesExactlyOneResume(t *testing.T) {
 		_ = db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND role='hub' AND content LIKE ?`, clawID, restartResumePrefix+"%").Scan(&n)
 		return n
 	}
+	expireHeartbeatSessionLoss(t, s, cc, clawID)
 	eventuallyWatchdog(t, func() bool { return count() == 1 }, "one restart resume")
 	beat(2)
+	expireHeartbeatSessionLoss(t, s, cc, clawID)
 	eventuallyWatchdog(t, func() bool { return count() == 2 }, "second restart resume")
 }
 
@@ -478,6 +480,7 @@ func TestRestartCountResetMidTurnEnqueuesResume(t *testing.T) {
 	// bridge reports a reset counter mid-turn.
 	beat(5)
 	beat(0)
+	expireHeartbeatSessionLoss(t, s, cc, clawID)
 	eventuallyWatchdog(t, func() bool { return count() == 1 }, "resume after restart_count reset")
 	beat(0)
 	beat(0)
@@ -558,6 +561,7 @@ func TestFirstHeartbeatAfterHubBootDoesNotAutoResume(t *testing.T) {
 	}
 	// A genuine restart after the baseline still triggers auto-resume.
 	beat(4)
+	expireHeartbeatSessionLoss(t, s, cc, clawID)
 	eventuallyWatchdog(t, func() bool { return count() == 1 }, "resume after genuine restart")
 }
 
@@ -672,6 +676,7 @@ func TestHeartbeatUsesOnlyGatewaySessionKeyForSessionLoss(t *testing.T) {
 		t.Fatalf("resume count after snapshot-only heartbeat = %d, want 0", got)
 	}
 	beat(map[string]any{"restart_count": 0, "session_key": "snapshot-stale", "gateway_session_key": "live-new"})
+	expireHeartbeatSessionLoss(t, s, cc, clawID)
 	eventuallyWatchdog(t, func() bool { return count() == 1 }, "resume after live gateway key change")
 }
 
@@ -720,13 +725,16 @@ func TestSessionLossDifferentKeysAndMissingKeysDoNotDeduplicate(t *testing.T) {
 	// loop guard separately covers repeated losses without new output.
 	progress := func() {
 		t.Helper()
+		s.recordSessionLossCompletedTurn(clawID, "Completed another bounded step")
 		if _, err := db.Exec(`INSERT INTO messages(id,claw_id,tenant_id,role,content,created_at) VALUES(?,?,?,?,?,?)`, uuid.NewString(), clawID, "test-tenant-id", "claw", "Completed another bounded step", now()); err != nil {
 			t.Fatal(err)
 		}
 	}
 	s.noteSessionLoss(cc, clawID, "replacement-one", "restart_count", types.SessionRecoveryEdge{}, "")
+	expireHeartbeatSessionLoss(t, s, cc, clawID)
 	progress()
 	s.noteSessionLoss(cc, clawID, "replacement-two", "restart_count", types.SessionRecoveryEdge{}, "")
+	expireHeartbeatSessionLoss(t, s, cc, clawID)
 	if got := count(); got != 2 {
 		t.Fatalf("resume count for two replacement keys = %d, want 2", got)
 	}
@@ -734,8 +742,10 @@ func TestSessionLossDifferentKeysAndMissingKeysDoNotDeduplicate(t *testing.T) {
 	// an independent incident rather than being collapsed by an empty key.
 	progress()
 	s.noteSessionLoss(cc, clawID, "", "restart_count", types.SessionRecoveryEdge{}, "")
+	expireHeartbeatSessionLoss(t, s, cc, clawID)
 	progress()
 	s.noteSessionLoss(cc, clawID, "", "restart_count", types.SessionRecoveryEdge{}, "")
+	expireHeartbeatSessionLoss(t, s, cc, clawID)
 	if got := count(); got != 4 {
 		t.Fatalf("resume count after two keyless reports = %d, want 4", got)
 	}
@@ -795,7 +805,7 @@ func testSessionLossPendingNoticeDelivery(t *testing.T, paused bool) {
 	if err := db.QueryRow(`SELECT pending_session_loss_notice FROM claws WHERE id=?`, clawID).Scan(&notice); err != nil {
 		t.Fatal(err)
 	}
-	if notice != s.sessionLossPendingNoticeFor(clawID) || !strings.Contains(notice, "Run make status") || !strings.Contains(notice, "NOTES.md") || strings.Contains(notice, "git status") {
+	if (!paused && notice != s.sessionLossPendingNoticeFor(clawID)) || (paused && !strings.HasPrefix(notice, sessionRotatedResumePrefix)) || !strings.Contains(notice, "Run make status") || !strings.Contains(notice, "NOTES.md") || strings.Contains(notice, "git status") {
 		t.Fatalf("pending notice = %q, want first session-loss notice", notice)
 	}
 	var resumes int
@@ -829,7 +839,7 @@ func testSessionLossPendingNoticeDelivery(t *testing.T, paused bool) {
 	if err := json.Unmarshal(payload, &message); err != nil {
 		t.Fatal(err)
 	}
-	if got, want := message.Content, s.sessionLossPendingNoticeFor(clawID)+"continue the task"; got != want {
+	if got, want := message.Content, notice+"continue the task"; got != want {
 		t.Fatalf("delivered content = %q, want %q", got, want)
 	}
 	if err := db.QueryRow(`SELECT pending_session_loss_notice FROM claws WHERE id=?`, clawID).Scan(&notice); err != nil {
