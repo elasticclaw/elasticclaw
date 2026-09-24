@@ -829,6 +829,9 @@ func marshalWorkspaceElasticClawConfig(workspace *types.WorkspaceConfig, existin
 	} else if _, ok := values["schema_version"]; !ok {
 		values["schema_version"] = "v1"
 	}
+	if workspace.SessionResume != nil {
+		values["session_resume"] = workspace.SessionResume
+	}
 	values["repositories"] = workspace.Repositories
 	if len(workspace.Env) > 0 {
 		values["env"] = workspace.Env

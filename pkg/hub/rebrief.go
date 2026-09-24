@@ -37,42 +37,21 @@ func (s *Server) rebriefAfterRestoreIfNeeded(cc *clawConn, clawID string) bool {
 		return false
 	}
 
-	// If the pipeline context or stage cannot be resolved anymore the flag
-	// stays consumed — there is no task context to re-brief with, and the
-	// normal wake path can take over on the next branch.
-	ctx, ok := s.findPipelineContextForClaw(clawID)
-	if !ok {
-		return false
-	}
-	pl := parsePipelineForContext(ctx)
-	if pl == nil {
-		return false
-	}
-	stage := pl.StageByID(s.getPipelineStage(clawID))
-	if stage == nil {
-		// The recorded stage no longer exists in the pipeline definition
-		// (e.g. the workflow was edited); the entry stage's context is still
-		// better than briefing with nothing.
-		stage = pl.EntryStage()
-	}
-	if stage == nil {
+	// If there is no recorded stage, leave the normal wake path in charge.
+	// A removed stage retains its ID without falling back to entry instructions.
+	stageID, label, instructions := s.stageContextForResume(clawID)
+	if stageID == "" {
 		return false
 	}
 
 	var b strings.Builder
 	b.WriteString("[hub] Your sandbox was replaced after an infrastructure failure and this is a fresh session — your previous conversation is gone. Re-read the task context below and continue from the current state of the workspace and PR; do not start over and do not ask which ticket this is.")
-	b.WriteString(fmt.Sprintf("\n\nCurrent workflow stage: %s", stage.ID))
-	if stage.Label != "" {
-		b.WriteString(fmt.Sprintf(" (%s)", stage.Label))
-	}
-	if stage.OnEnter.Inject != "" {
-		b.WriteString("\n\n" + s.renderStageInject(clawID, *stage, ctx))
-	}
+	b.WriteString(renderResumeStageContext(stageID, label, instructions))
 	for _, pr := range s.checkpointPRs(clawID) {
 		b.WriteString(fmt.Sprintf("\nOpen PR: %s (%s, #%d)", pr.URL, pr.Repo, pr.Number))
 	}
 
 	s.injectHubMessageByID(clawID, b.String())
-	log.Printf("[pipeline] re-briefed claw %s after restore (stage %q)", shortID(clawID), stage.ID)
+	log.Printf("[pipeline] re-briefed claw %s after restore (stage %q)", shortID(clawID), stageID)
 	return true
 }

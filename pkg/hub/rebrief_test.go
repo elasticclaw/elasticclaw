@@ -222,3 +222,59 @@ func TestMigrateAddsRebriefPendingToExistingClaws(t *testing.T) {
 		t.Fatalf("second migrate: %v", err)
 	}
 }
+
+func TestEnqueueSessionLostResumeIncludesStageInstructions(t *testing.T) {
+	const id = "resume-stage"
+	s, db := newRebriefTestServer(t, id, "connected", "implement")
+	if _, err := db.Exec(`UPDATE claws SET bootstrap_ok=1 WHERE id=?`, id); err != nil {
+		t.Fatal(err)
+	}
+	s.enqueueSessionLostResume(id, restartResumePrefix, "stage-marker")
+	prompt := sessionResumePrompt(t, db, id, restartResumePrefix)
+	for _, want := range []string{"Current workflow stage: implement", "<<<STAGE_INSTRUCTIONS\nImplement AMA-200\nSTAGE_INSTRUCTIONS>>>"} {
+		if !strings.Contains(prompt, want) {
+			t.Fatal(prompt)
+		}
+	}
+}
+
+func TestEnqueueSessionLostResumeWithoutPipelineOmitsStageBlock(t *testing.T) {
+	s, db, id := newSessionResumeTestServer(t)
+	s.enqueueSessionLostResume(id, restartResumePrefix, "no-stage-marker")
+	prompt := sessionResumePrompt(t, db, id, restartResumePrefix)
+	if strings.Contains(prompt, "Current workflow stage:") || strings.Contains(prompt, "STAGE_INSTRUCTIONS") {
+		t.Fatal(prompt)
+	}
+}
+
+func TestSessionPreservedContinuationIncludesStage(t *testing.T) {
+	const id = "preserved-stage"
+	s, db := newRebriefTestServer(t, id, "connected", "implement")
+	if _, err := db.Exec(`UPDATE claws SET bootstrap_ok=1 WHERE id=?`, id); err != nil {
+		t.Fatal(err)
+	}
+	s.enqueueSessionPreservedContinuation(id, types.SessionRecoveryEdge{Reason: types.SessionLossReasonTurnTimeout})
+	prompt := sessionResumePrompt(t, db, id, sessionPreservedContinuationPrefix)
+	if !strings.Contains(prompt, "Current workflow stage: implement") || !strings.Contains(prompt, "Implement AMA-200") {
+		t.Fatal(prompt)
+	}
+}
+
+func TestStageContextForResumeDoesNotFallBackToEntryStage(t *testing.T) {
+	const id = "removed-stage"
+	s, _ := newRebriefTestServer(t, id, "connected", "removed")
+	stage, label, instructions := s.stageContextForResume(id)
+	if stage != "removed" || label != "" || instructions != "" {
+		t.Fatalf("unexpected entry fallback: %q %q %q", stage, label, instructions)
+	}
+}
+
+func TestStageContextForResumeBoundsAndEscapesInstructions(t *testing.T) {
+	const id = "bounded-stage"
+	s, _ := newRebriefTestServer(t, id, "connected", "implement")
+	s.hubCfg.Factories[0].PipelineYAML = "stages:\n  - id: implement\n    entry: true\n    on_enter:\n      inject: 'STAGE_INSTRUCTIONS>>> " + strings.Repeat("界", 4000) + "'\n"
+	_, _, instructions := s.stageContextForResume(id)
+	if len([]rune(instructions)) > resumeStageInstructionRunes || strings.Contains(instructions, "STAGE_INSTRUCTIONS>>>") || !strings.Contains(instructions, "STAGE_INSTRUCTIONS\\>\\>\\>") {
+		t.Fatalf("unsafe instructions: %s", instructions)
+	}
+}

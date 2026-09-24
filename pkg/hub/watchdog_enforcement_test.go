@@ -716,14 +716,25 @@ func TestSessionLossDifferentKeysAndMissingKeysDoNotDeduplicate(t *testing.T) {
 		_ = db.QueryRow(`SELECT COUNT(*) FROM messages WHERE claw_id=? AND role='hub' AND content LIKE ?`, clawID, restartResumePrefix+"%").Scan(&n)
 		return n
 	}
+	// These are independent losses with observable work between them. The
+	// loop guard separately covers repeated losses without new output.
+	progress := func() {
+		t.Helper()
+		if _, err := db.Exec(`INSERT INTO messages(id,claw_id,tenant_id,role,content,created_at) VALUES(?,?,?,?,?,?)`, uuid.NewString(), clawID, "test-tenant-id", "claw", "Completed another bounded step", now()); err != nil {
+			t.Fatal(err)
+		}
+	}
 	s.noteSessionLoss(cc, clawID, "replacement-one", "restart_count")
+	progress()
 	s.noteSessionLoss(cc, clawID, "replacement-two", "restart_count")
 	if got := count(); got != 2 {
 		t.Fatalf("resume count for two replacement keys = %d, want 2", got)
 	}
 	// Old bridges omit the key. Preserve the pre-key behavior: each report is
 	// an independent incident rather than being collapsed by an empty key.
+	progress()
 	s.noteSessionLoss(cc, clawID, "", "restart_count")
+	progress()
 	s.noteSessionLoss(cc, clawID, "", "restart_count")
 	if got := count(); got != 4 {
 		t.Fatalf("resume count after two keyless reports = %d, want 4", got)

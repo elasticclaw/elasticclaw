@@ -198,7 +198,7 @@ func TestEnqueueSessionLostResumeSkipsWhitespaceAndFencesProgress(t *testing.T) 
 	}
 }
 
-func TestEnqueueSessionLostResumeTruncatesProgressAt2000Runes(t *testing.T) {
+func TestEnqueueSessionLostResumeTruncatesProgressAt1200Runes(t *testing.T) {
 	s, db := NewTestServerWithConfig(t, nil, "", "", "")
 	const clawID = "claw-resume-truncate"
 	if _, err := db.Exec(`INSERT INTO claws(id, tenant_id, name, status, bootstrap_ok, created_at) VALUES(?,?,?,?,?,datetime('now'))`, clawID, "test-tenant-id", "resume truncate", "connected", 1); err != nil {
@@ -212,8 +212,8 @@ func TestEnqueueSessionLostResumeTruncatesProgressAt2000Runes(t *testing.T) {
 	if err := db.QueryRow(`SELECT content FROM messages WHERE claw_id=? AND role='hub'`, clawID).Scan(&prompt); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(prompt, strings.Repeat("界", 2000)+"…(truncated)") || strings.Contains(prompt, strings.Repeat("界", 2001)) {
-		t.Fatalf("progress was not truncated at 2000 runes")
+	if !strings.Contains(prompt, strings.Repeat("界", 1200)) || strings.Contains(prompt, strings.Repeat("界", 1201)) {
+		t.Fatalf("progress was not truncated at 1200 runes")
 	}
 }
 

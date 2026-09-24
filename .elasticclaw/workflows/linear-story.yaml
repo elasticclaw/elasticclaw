@@ -8,6 +8,10 @@ trigger:
       - Todo
 
 concurrency_group: global
+# Optional: what the hub tells the agent to do first when its session is lost.
+# session_resume:
+#   read_files: [NOTES.md]
+#   state_check: "Run `make status` and read the last section of NOTES.md"
 
 stages:
   - id: working

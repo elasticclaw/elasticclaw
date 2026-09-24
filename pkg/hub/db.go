@@ -154,6 +154,12 @@ func migrate(db *sql.DB) error {
 	if err := addColumn(db, "claws", "idle_resume_count", `INTEGER NOT NULL DEFAULT 0`); err != nil {
 		return err
 	}
+	if err := addColumn(db, "claws", "session_loss_streak", `INTEGER NOT NULL DEFAULT 0`); err != nil {
+		return err
+	}
+	if err := addColumn(db, "claws", "session_loss_progress_mark", `TEXT NOT NULL DEFAULT ''`); err != nil {
+		return err
+	}
 	// llm_limited_until (epoch millis, 0 = not limited) parks a claw whose
 	// provider account is out of allowance. It is deliberately NOT the
 	// no_progress_paused latch: that one is lifted by any user message, and a
@@ -566,6 +572,8 @@ func migrate(db *sql.DB) error {
 		stage_stalled_since INTEGER NOT NULL DEFAULT 0,
 		idle_resume_at INTEGER NOT NULL DEFAULT 0,
 		idle_resume_count INTEGER NOT NULL DEFAULT 0,
+		session_loss_streak INTEGER NOT NULL DEFAULT 0,
+		session_loss_progress_mark TEXT NOT NULL DEFAULT '',
 		llm_limited_until INTEGER NOT NULL DEFAULT 0,
 		llm_limit_noticed_until INTEGER NOT NULL DEFAULT 0,
 		pending_session_loss_notice TEXT NOT NULL DEFAULT ''

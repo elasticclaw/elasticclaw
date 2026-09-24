@@ -273,3 +273,56 @@ func assertClawTriggerActorJSONIsValid(t *testing.T, db *sql.DB, clawID string) 
 		t.Fatalf("expected trigger_actor_json default to be valid JSON, got %q: %v", raw, err)
 	}
 }
+
+func TestSessionLossColumnsMigration(t *testing.T) {
+	for _, legacy := range []bool{false, true} {
+		name := "fresh"
+		if legacy {
+			name = "existing"
+		}
+		t.Run(name, func(t *testing.T) {
+			db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "hub.db")+"?_time_format=sqlite")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			if legacy {
+				if _, err := db.Exec(`CREATE TABLE claws (id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, name TEXT NOT NULL, template TEXT NOT NULL DEFAULT '', provider TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'offline', created_at DATETIME NOT NULL)`); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := db.Exec(`INSERT INTO claws(id,tenant_id,name,created_at) VALUES('existing','tenant','Existing claw',?)`, time.Now()); err != nil {
+					t.Fatal(err)
+				}
+			}
+			// Migration must be additive and idempotent.
+			for i := 0; i < 2; i++ {
+				if err := migrate(db); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for _, column := range []struct{ name, kind, def string }{
+				{"session_loss_streak", "INTEGER", "0"},
+				{"session_loss_progress_mark", "TEXT", "''"},
+			} {
+				var kind, def string
+				var required int
+				if err := db.QueryRow(`SELECT type,"notnull",dflt_value FROM pragma_table_info('claws') WHERE name=?`, column.name).Scan(&kind, &required, &def); err != nil {
+					t.Fatal(err)
+				}
+				if kind != column.kind || required != 1 || def != column.def {
+					t.Fatalf("%s: type=%s required=%d default=%s", column.name, kind, required, def)
+				}
+			}
+			if legacy {
+				var streak int
+				var mark, name string
+				if err := db.QueryRow(`SELECT session_loss_streak,session_loss_progress_mark,name FROM claws WHERE id='existing'`).Scan(&streak, &mark, &name); err != nil {
+					t.Fatal(err)
+				}
+				if streak != 0 || mark != "" || name != "Existing claw" {
+					t.Fatalf("legacy row changed: streak=%d mark=%q name=%q", streak, mark, name)
+				}
+			}
+		})
+	}
+}

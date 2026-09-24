@@ -118,7 +118,7 @@ func (s *Server) resumeNoProgressAfterUserInput(clawID string) {
 	s.noProgressMu.Lock()
 	defer s.noProgressMu.Unlock()
 
-	res, err := s.db.Exec(`UPDATE claws SET no_progress_paused=0 WHERE id=? AND no_progress_paused!=0`, clawID)
+	res, err := s.db.Exec(`UPDATE claws SET no_progress_paused=0, session_loss_streak=0, session_loss_progress_mark='' WHERE id=?`, clawID)
 	if err != nil {
 		log.Printf("[no-progress] resume claw %s: %v", shortID(clawID), err)
 		return
@@ -316,6 +316,14 @@ func (s *Server) pauseAutomaticContinuation(clawID, notice string) bool {
 	if changed == 0 {
 		return false
 	}
+	s.publishAutomaticContinuationPause(clawID, notice)
+	return true
+}
+
+// publishAutomaticContinuationPause mirrors a committed pause to the active
+// connection and dashboard. Callers hold noProgressMu through publication so
+// human input cannot clear the latch before its connection state is updated.
+func (s *Server) publishAutomaticContinuationPause(clawID, notice string) {
 	s.mu.RLock()
 	cc := s.claws[clawID]
 	s.mu.RUnlock()
@@ -327,5 +335,4 @@ func (s *Server) pauseAutomaticContinuation(clawID, notice string) bool {
 	if notice != "" {
 		s.publishHubNotice(clawID, notice)
 	}
-	return true
 }
