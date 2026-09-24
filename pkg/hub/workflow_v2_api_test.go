@@ -80,9 +80,17 @@ func TestWorkflowV2RunCancelAPIHandlesOrphanedRun(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	req := httptest.NewRequest(http.MethodPost, "/api/v2/workflow-runs/"+run.ID+"/cancel", strings.NewReader(`{"reason":"orphaned claw"}`))
+	req := httptest.NewRequest(http.MethodPost, "/api/v2/workflow-runs/"+run.ID+"/cancel", strings.NewReader(`{"reason":"orphaned claw"}{"unexpected":true}`))
 	req.Header.Set("Authorization", "Bearer test-token")
 	rr := httptest.NewRecorder()
+	s.mux.ServeHTTP(rr, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("trailing JSON status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/api/v2/workflow-runs/"+run.ID+"/cancel", strings.NewReader(`{"reason":"orphaned claw"}`))
+	req.Header.Set("Authorization", "Bearer test-token")
+	rr = httptest.NewRecorder()
 	s.mux.ServeHTTP(rr, req)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", rr.Code, rr.Body.String())

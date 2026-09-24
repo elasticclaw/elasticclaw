@@ -64,9 +64,19 @@ func (s *Server) handleWorkflowV2RunCancel(w http.ResponseWriter, r *http.Reques
 		jsonError(w, http.StatusBadRequest, "run id is required")
 		return
 	}
+	decoder := json.NewDecoder(r.Body)
 	var request workflowV2CancelRequest
-	if err := json.NewDecoder(r.Body).Decode(&request); err != nil && !errors.Is(err, io.EOF) {
+	if err := decoder.Decode(&request); err != nil && !errors.Is(err, io.EOF) {
 		jsonError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+		return
+	}
+	var trailing interface{}
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		if err == nil {
+			jsonError(w, http.StatusBadRequest, "invalid JSON: multiple values")
+		} else {
+			jsonError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+		}
 		return
 	}
 	var tenantID, status string
