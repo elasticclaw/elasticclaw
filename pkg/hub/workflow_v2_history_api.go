@@ -100,7 +100,9 @@ func (s *Server) handleWorkflowV2RunAttempts(w http.ResponseWriter, r *http.Requ
 }
 
 // handleWorkflowV2RunLogs handles GET /api/v2/workflow-runs/{runId}/logs
-// and returns agent activity logs for the run's current attempt.
+// and returns the run's complete record: the current attempt's activity
+// messages merged with the run's lifecycle records (transitions, effects,
+// agent tasks, exec outcomes).
 func (s *Server) handleWorkflowV2RunLogs(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		w.Header().Set("Allow", http.MethodGet)
@@ -659,7 +661,13 @@ func execOutcomeEvent(kind, factsJSON string) (types.WorkflowEffectEvent, string
 	event.Stderr = factString("stderr")
 	event.Error = factString("error")
 
-	failed := event.Succeeded == nil || !*event.Succeeded
+	// The event kind is authoritative: the bridge emits .completed or .failed
+	// based on the outcome. The projected succeeded fact, when present,
+	// overrides for emitters that set one but not the other.
+	failed := strings.HasSuffix(kind, ".failed")
+	if event.Succeeded != nil {
+		failed = !*event.Succeeded
+	}
 	status := "succeeded"
 	content := effectKind + " completed"
 	if failed {
@@ -705,9 +713,12 @@ func (s *Server) appendWorkflowV2AgentTaskLogs(ctx context.Context, msgs []types
 		}
 		assignedID := "agent-task-" + taskID + "-assigned"
 		if !cursor.excludes(time.UnixMilli(created).UTC(), assignedID) {
+			// The assigned line carries the assignment-phase status; the task's
+			// terminal status belongs to the finish line, so one failed task
+			// never renders as two identical red "failed" lines.
 			msgs, err = appendWorkflowEffectLogMessage(msgs, assignedID, clawID, tenantID,
 				"agent task assigned",
-				types.WorkflowEffectEvent{Kind: "agent.task", Phase: types.WorkflowEffectPhaseAssigned, Status: status, Instructions: instructions},
+				types.WorkflowEffectEvent{Kind: "agent.task", Phase: types.WorkflowEffectPhaseAssigned, Status: types.WorkflowEffectPhaseAssigned, Instructions: instructions},
 				time.UnixMilli(created))
 			if err != nil {
 				return nil, err
