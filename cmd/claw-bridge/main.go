@@ -39,6 +39,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -1219,27 +1220,66 @@ func sanitizeActivityTextLimit(value string, max int) string {
 	if value == "" {
 		return ""
 	}
-	replacers := []struct {
-		prefix string
-		value  string
-	}{
-		{"Bearer ", "Bearer [redacted]"},
-		{"token=", "token=[redacted]"},
-		{"access_token=", "access_token=[redacted]"},
-		{"api_key=", "api_key=[redacted]"},
-		{"OPENAI_API_KEY=", "OPENAI_API_KEY=[redacted]"},
-		{"ANTHROPIC_API_KEY=", "ANTHROPIC_API_KEY=[redacted]"},
-		{"FIREWORKS_API_KEY=", "FIREWORKS_API_KEY=[redacted]"},
-		{"GITHUB_TOKEN=", "GITHUB_TOKEN=[redacted]"},
-		{"GH_TOKEN=", "GH_TOKEN=[redacted]"},
-	}
-	for _, r := range replacers {
-		value = redactActivityPrefix(value, r.prefix, r.value)
-	}
+	value = redactActivitySecretAssignments(value)
+	value = redactActivityPrefix(value, "Bearer ", "Bearer [redacted]")
 	if max > 0 && len(value) > max {
 		value = truncateUTF8Prefix(value, max-3) + "..."
 	}
 	return value
+}
+
+// Match complete assignment keys, including JSON keys and HTTP headers. The
+// boundary excludes path components so ordinary paths are not treated as keys.
+var activitySecretAssignment = regexp.MustCompile(`(?i)(^|[^a-z0-9_./-])(["']?[a-z0-9_.-]*(?:token|secret|password|passwd|api_key|apikey|api-key|access_key|private_key|credential|auth)[a-z0-9_.-]*["']?[ \t]*[:=][ \t]*)`)
+
+func redactActivitySecretAssignments(value string) string {
+	var out strings.Builder
+	offset := 0
+	for _, match := range activitySecretAssignment.FindAllStringSubmatchIndex(value, -1) {
+		start := match[1]
+		if start < offset {
+			continue // An assignment inside a previously redacted quoted value.
+		}
+		out.WriteString(value[offset:start])
+		// Keep the scheme in Authorization headers, but redact its credential.
+		for _, scheme := range []string{"Bearer", "Basic"} {
+			if len(value)-start > len(scheme) && strings.EqualFold(value[start:start+len(scheme)], scheme) && strings.ContainsRune(" \t", rune(value[start+len(scheme)])) {
+				out.WriteString(scheme + " ")
+				start += len(scheme)
+				for start < len(value) && (value[start] == ' ' || value[start] == '\t') {
+					start++
+				}
+				break
+			}
+		}
+		out.WriteString("[redacted]")
+		offset = activitySecretValueEnd(value, start)
+	}
+	out.WriteString(value[offset:])
+	return out.String()
+}
+
+func activitySecretValueEnd(value string, start int) int {
+	end := start
+	if end < len(value) && (value[end] == '"' || value[end] == '\'') {
+		quote := value[end]
+		end++
+		for end < len(value) {
+			if value[end] == '\\' && end+1 < len(value) {
+				end += 2
+				continue
+			}
+			end++
+			if value[end-1] == quote {
+				break
+			}
+		}
+		return end
+	}
+	for end < len(value) && !strings.ContainsRune(" \t\r\n&;,}\"'", rune(value[end])) {
+		end++
+	}
+	return end
 }
 
 func truncateResult(value string, max int) string {
@@ -1266,21 +1306,7 @@ func redactActivityPrefix(value, prefix, replacement string) string {
 			break
 		}
 		start := offset + idx
-		end := start + len(prefix)
-		if end < len(value) && (value[end] == '"' || value[end] == '\'') {
-			q := value[end]
-			end++
-			for end < len(value) && value[end] != q {
-				end++
-			}
-			if end < len(value) {
-				end++
-			}
-		} else {
-			for end < len(value) && value[end] != ' ' && value[end] != '&' && value[end] != '"' && value[end] != '\'' {
-				end++
-			}
-		}
+		end := activitySecretValueEnd(value, start+len(prefix))
 		value = value[:start] + replacement + value[end:]
 		offset = start + len(replacement)
 	}
@@ -1402,17 +1428,29 @@ func (gs *gatewaySession) getSessionKey() string {
 }
 
 func (gs *gatewaySession) setSessionKey(key string) {
-	gs.sessionMu.Lock()
-	oldKey := gs.sessionKey
-	if oldKey != "" && oldKey != key {
-		gs.previousDigest = gs.transcript.snapshot()
-		gs.previousTranscriptPath = resolveSessionTranscriptPath(oldKey)
+	var oldKey string
+	for {
+		oldKey = gs.getSessionKey()
+		previousPath := ""
+		if oldKey != "" && oldKey != key {
+			previousPath = resolveSessionTranscriptPath(oldKey)
+		}
+		gs.sessionMu.Lock()
+		if gs.sessionKey != oldKey {
+			gs.sessionMu.Unlock()
+			continue // Resolve again if another rotation won during the file I/O.
+		}
+		if oldKey != "" && oldKey != key {
+			gs.previousDigest = gs.transcript.snapshot()
+			gs.previousTranscriptPath = previousPath
+		}
+		if oldKey != key {
+			gs.transcript.reset(key)
+		}
+		gs.sessionKey = key
+		gs.sessionMu.Unlock()
+		break
 	}
-	if oldKey != key {
-		gs.transcript.reset(key)
-	}
-	gs.sessionKey = key
-	gs.sessionMu.Unlock()
 
 	if oldKey == "" || oldKey == key {
 		return
@@ -2769,10 +2807,8 @@ func sessionRecoveryOutcome(agentErr error, currentKey string) string {
 func buildSessionRecoveryEdge(gs *gatewaySession, agentErr error, outcome string) types.SessionRecoveryEdge {
 	edge := types.SessionRecoveryEdge{Reason: sessionLossReason(agentErr)}
 	gs.sessionMu.RLock()
-	defer gs.sessionMu.RUnlock()
 	if outcome == "preserved" {
 		edge.PreviousSessionKey = gs.sessionKey
-		edge.TranscriptPath = resolveSessionTranscriptPath(gs.sessionKey)
 	} else {
 		edge.SessionKey = gs.sessionKey
 		edge.PreviousSessionKey = previousSessionKey(agentErr)
@@ -2781,6 +2817,10 @@ func buildSessionRecoveryEdge(gs *gatewaySession, agentErr error, outcome string
 		}
 		edge.Digest = gs.previousDigest
 		edge.TranscriptPath = gs.previousTranscriptPath
+	}
+	gs.sessionMu.RUnlock()
+	if outcome == "preserved" {
+		edge.TranscriptPath = resolveSessionTranscriptPath(edge.PreviousSessionKey)
 	}
 	return edge
 }

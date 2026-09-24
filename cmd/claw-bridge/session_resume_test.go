@@ -172,3 +172,79 @@ func TestResolveSessionTranscriptPath(t *testing.T) {
 		t.Fatalf("missing index = %q", got)
 	}
 }
+
+func TestSessionTranscriptLogRedactsSecretAssignments(t *testing.T) {
+	keys := []string{"token", "client_SECRET", "password", "db_passwd", "api_key", "apikey", "x-api-key", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "private_key", "credential", "Authorization"}
+	forms := []string{`%s=SENSITIVE_VALUE`, `%s: SENSITIVE_VALUE`, `"%s":"SENSITIVE_VALUE"`, `'%s': 'SENSITIVE_VALUE'`, `%s="SENSITIVE_VALUE"`, `%s='SENSITIVE_VALUE'`, `"%s":SENSITIVE_VALUE`, `'%s': SENSITIVE_VALUE`, `%s: "SENSITIVE_VALUE"`, `%s: 'SENSITIVE_VALUE'`}
+	for _, key := range keys {
+		for _, form := range forms {
+			input := fmt.Sprintf(form, key)
+			t.Run(input, func(t *testing.T) {
+				var log sessionTranscriptLog
+				log.noteAssistant(input)
+				log.noteTool(agentActivity{Kind: "tool", Phase: "start", Tool: "exec", Command: input})
+				digest := log.snapshot()
+				for _, got := range []string{sanitizeActivityText(input), digest.AssistantMessages[0], digest.ToolCalls[0].Args} {
+					if strings.Contains(got, "SENSITIVE_VALUE") || !strings.Contains(got, "[redacted]") || !strings.Contains(got, key) {
+						t.Fatalf("secret assignment not redacted: %q", got)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestSanitizeActivityTextSecretAssignmentBoundaries(t *testing.T) {
+	for _, tt := range []struct{ input, want string }{
+		{`{"api_key":"SENSITIVE_VALUE","path":"/workspace/main.go"}`, `{"api_key":[redacted],"path":"/workspace/main.go"}`},
+		{"x-api-key: SENSITIVE_VALUE\nContent-Type: application/json", "x-api-key: [redacted]\nContent-Type: application/json"},
+		{"Authorization: Basic SENSITIVE_VALUE", "Authorization: Basic [redacted]"},
+		{"Authorization:\tBasic\tSENSITIVE_VALUE", "Authorization:\tBasic [redacted]"},
+		{"authorization: bAsIc   SENSITIVE_VALUE", "authorization: Basic [redacted]"},
+		{`curl -H "Authorization: Basic SENSITIVE_VALUE" /workspace/main.go`, `curl -H "Authorization: Basic [redacted]" /workspace/main.go`},
+		{`api_key="first\"SENSITIVE_VALUE" path=main.go`, `api_key=[redacted] path=main.go`},
+		{`api_key='first\'SENSITIVE_VALUE' path=main.go`, `api_key=[redacted] path=main.go`},
+		{"token=SENSITIVE_VALUE,password=OTHER_VALUE", "token=[redacted],password=[redacted]"},
+		{"token=SENSITIVE_VALUE;path=main.go", "token=[redacted];path=main.go"},
+		{"path=/workspace/auth/token.go sha=0d9a1ad94add8a83839cc3bb3da0f1ff56f98152", "path=/workspace/auth/token.go sha=0d9a1ad94add8a83839cc3bb3da0f1ff56f98152"},
+		{"/workspace/auth: normal path output", "/workspace/auth: normal path output"},
+		{"https://example.com/api/token README.md", "https://example.com/api/token README.md"},
+		{`{"path":"/workspace/main.go","sha":"abc123"}`, `{"path":"/workspace/main.go","sha":"abc123"}`},
+	} {
+		t.Run(tt.input, func(t *testing.T) {
+			if got := sanitizeActivityText(tt.input); got != tt.want {
+				t.Fatalf("sanitized = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestSessionTranscriptResolutionDoesNotHoldSessionMutex(t *testing.T) {
+	for _, operation := range []string{"rotate", "preserved"} {
+		t.Run(operation, func(t *testing.T) {
+			gs := &gatewaySession{sessionKey: "old-session"}
+			oldPath := sessionIndexPath
+			calls := 0
+			sessionIndexPath = func() string {
+				calls++
+				if !gs.sessionMu.TryLock() {
+					t.Fatal("sessionMu held while resolving transcript path")
+				}
+				gs.sessionMu.Unlock()
+				return filepath.Join(t.TempDir(), "missing.json")
+			}
+			t.Cleanup(func() { sessionIndexPath = oldPath })
+			if operation == "rotate" {
+				gs.setSessionKey("new-session")
+			} else {
+				edge := buildSessionRecoveryEdge(gs, &sessionPreservedError{}, "preserved")
+				if edge.PreviousSessionKey != "old-session" {
+					t.Fatalf("previous session = %q", edge.PreviousSessionKey)
+				}
+			}
+			if calls == 0 {
+				t.Fatal("transcript resolution was not attempted")
+			}
+		})
+	}
+}
